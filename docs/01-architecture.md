@@ -1,168 +1,238 @@
-# 01. Архитектура (база)
+# 01. Архитектура: нода как серверный стек
 
-Статус: **черновик для согласования**. Решения, помеченные «предлагается», ждут подтверждения;
-открытые вопросы собраны в [04-roadmap.md](04-roadmap.md#открытые-вопросы).
+Статус: **черновик для согласования**. Решения, помеченные «предлагается», ждут ответов из
+[07-questions.md](07-questions.md).
 
 ## Цели
 
-1. Набор CLI-инструментов и API, через который ими можно управлять из будущего клиента.
-2. Многоуровневая защита: port-knocking (первый эшелон) → SPA → собственная аутентификация каждого сервиса.
-3. Zero trust между компонентами: у каждого свои учётные данные, свой системный пользователь, минимальные права,
-   доступ только к тому, что ему нужно.
-4. Несколько протоколов как подключаемые модули (engines), а не жёстко прошитый набор.
-5. Установка, обновление, бэкап и удаление — повторяемые и безопасные операции.
+1. **Нода — самодостаточный серверный стек.** Одна установка на хосте работает сама по себе, без центрального
+   сервера. Внутри — набор микросервисов, у каждого своя часть инфраструктуры.
+2. **Агрегация.** Ядра, протоколы, транспорты и способы маскировки («реальности») описываются одной моделью,
+   управляются одним API и отдаются клиенту одним списком профилей подключения.
+3. **Расширяемость.** Добавить новый движок, в том числе своё ядро, — значит написать адаптер по общему контракту,
+   а не переделывать ноду.
+4. **Многоуровневая защита и zero trust** (подробно в [02-security-model.md](02-security-model.md)).
+5. **CLI и API** для будущего кроссплатформенного клиента в режимах пользователя и администратора
+   (требования к клиенту — [06-client-requirements.md](06-client-requirements.md)).
 
-## Не цели (на первом этапе)
+## Не цели этой фазы
 
-- Веб-панель. Её роль выполняет API; интерфейс появится как клиент этого API.
-- Несколько серверов под одним контроллером. Архитектура оставляет под это место
-  (граница «контроллер ↔ узел»), но реализуется один узел.
-- Cloudflare и другие CDN как обязательная часть деплоя.
+- Реализация клиента: в этой фазе только требования к нему.
+- Центральный контроллер нескольких нод. У ноды есть собственная идентичность и API, поэтому контроллер
+  можно добавить позже, не меняя ноду (см. [07-questions.md](07-questions.md), раздел B).
+- Веб-панель: её роль играет режим администратора в клиенте.
 
-## Компоненты
+## Основные понятия
+
+| Понятие | Что это |
+|---|---|
+| **Нода** | Установка серверного стека на одном хосте. Имеет свою идентичность (ключевую пару), своё состояние и API. |
+| **Сервис** | Один микросервис ноды: процесс под systemd со своим системным пользователем и своим срезом инфраструктуры. |
+| **Срез инфраструктуры** | Всё, чем владеет сервис: порты и сокеты, наборы nftables, TUN-интерфейс и подсеть, сертификаты, каталог данных, учётные данные третьих сторон, правила исходящего трафика. |
+| **Движок (engine)** | Программа, которая реализует протокол или транспорт (Xray, Hysteria, dnstt, olcRTC…). Один движок может работать несколькими сервисами-инстансами. |
+| **Адаптер** | Код, который переводит модель ноды в конфиг конкретного движка и обратно (пользователи, статистика, ссылки). |
+| **Манифест движка** | Декларация возможностей движка: классы входа и выхода, нужные ресурсы, модель пользователей. |
+| **Профиль подключения** | То, что видит клиент: «как подключиться к этой ноде этим способом». Собирается из сервиса, учётных данных пользователя и параметров клиента. |
+
+## Единая модель трафика
+
+Любой способ подключения раскладывается на одинаковые слои. Движок закрывает часть слоёв; манифест говорит, какие:
 
 ```
-                       ┌───────────────────────────── хост ─────────────────────────────────┐
-  клиент / устройство  │                                                                    │
-  ─────────────────────┼─▶ [nftables: table inet raycontrol]  ◀── управляет ── rayspa         │
-   1. knock            │        │ knock-стадии, SPA-гейт, allow-наборы по сервисам           │
-   2. SPA-пакет ───────┼────────┘ (NFLOG) ──────────────────────────────▶ rayspa (проверка)  │
-   3. подключение      │        │                                             │ unix socket  │
-                       │        ▼                                             ▼              │
-                       │  ┌──────────┐ ┌────────────┐ ┌────────────┐   ┌──────────────┐     │
-                       │  │  xray    │ │ hy2-obfs   │ │ hy2-masq   │   │    rayd      │     │
-                       │  │ REALITY  │ │ salamander │ │ свой SNI   │   │ control plane│     │
-                       │  └────┬─────┘ └─────┬──────┘ └─────┬──────┘   │ SQLite, API  │     │
-                       │       │ fallback    │ auth (http)  │ auth     └──────┬───────┘     │
-                       │       ▼             └──────────────┴──────────▶      │ unix socket │
-                       │  ┌──────────┐                                         ▼             │
-                       │  │  caddy   │ сайт-приманка (self-steal), ACME   rayctl (CLI)      │
-                       │  └──────────┘                                                      │
-                       └────────────────────────────────────────────────────────────────────┘
+ Вход        → Носитель            → Маскировка           → Сессия/протокол  → Аутентификация → Маршрут  → Выход
+ (ingress)     (carrier)             («реальность»)          (session)          (auth)           (route)    (exit)
+ direct        TCP, TLS, QUIC        REALITY, self-steal,    VLESS, Hy2, WG,    per-user,        политика   L4 / L3
+ relayed       DTLS, WebRTC,         masquerade, salamander, smux, KCP,       общий ключ,      ноды       цепочка на
+ rendezvous    DNS, HTTP-документы,  RTP/Opus, SFU-звонок,   QUIC streams       нет                         другую ноду,
+ dns           S3-объекты            документ, бакет                                                        WARP
+```
+
+Примеры:
+
+| Сервис | Вход | Носитель | Маскировка | Сессия | Аутентификация | Выход |
+|---|---|---|---|---|---|---|
+| xray-reality | direct TCP 443 | TLS 1.3 | REALITY, self-steal | VLESS + Vision | UUID на пользователя | L4 |
+| hy2-masq | direct UDP 443 | QUIC | masquerade своего сайта | Hysteria2 | пароль на пользователя | L4 |
+| hy2-obfs | direct UDP | QUIC | salamander | Hysteria2 | пароль на пользователя | L4 |
+| qwdtt | relayed | DTLS | RTP/Opus через TURN VK | WireGuard | пароль, устройство | L3 |
+| olcrtc | rendezvous | WebRTC | звонок Jitsi/Телемост | smux | общий PSK → внутренняя ступень | L4 |
+| masterdns | dns UDP 53 | DNS | DNS-запросы | своя ARQ | общий ключ → внутренняя ступень | L4 |
+
+Благодаря единой модели API, CLI и клиент описывают любой способ подключения одними и теми же полями.
+
+## Компоненты ноды
+
+```
+                                      ┌──────────────────────── нода ──────────────────────────┐
+ интернет / сторонние платформы       │                                                        │
+ ───────────────────────────────────▶ │  rayspa ── nftables (inet raycontrol): периметр,      │
+   direct: knock → SPA → сервис       │            allow-наборы, исходящие фильтры, NAT для L3 │
+                                      │                                                        │
+   direct / relayed / dns ──────────▶ │  edge-сервисы (по одному процессу на инстанс):         │
+   rendezvous ◀─── исходящие ──────── │   xray-reality │ hy2-masq │ hy2-obfs │ qwdtt │ olcrtc… │
+                                      │        │ L4-выход        │ L3 (TUN)  │ без пользователей │
+                                      │        ▼                 ▼           ▼                   │
+                                      │   [ray-core: внутренняя ступень — аутентификация,      │
+                                      │    учёт, маршрутизация, политика выхода]  (см. ниже)    │
+                                      │        │                                               │
+                                      │        ▼  egress → интернет / WARP / другая нода        │
+                                      │                                                        │
+                                      │  rayd ── состояние (SQLite), адаптеры, аллокатор,      │
+                                      │          API (unix socket + удалённый за SPA и mTLS)   │
+                                      │  vault ── учётные данные третьих сторон (S3, VK, …)     │
+                                      │  caddy ── сайт-приманка, ACME                          │
+                                      └────────────────────────────────────────────────────────┘
 ```
 
 | Компонент | Роль | Права |
 |---|---|---|
-| `rayd` | Control plane: состояние (SQLite), генерация конфигов, синхронизация пользователей с движками, API (локальный и удалённый), колбэки авторизации, статистика. | Свой пользователь `rayd`. Без capabilities. Пишет только в `/var/lib/raycontrol` и `/etc/raycontrol/rendered`. |
-| `rayctl` | CLI администратора. Тонкий клиент к API `rayd` через unix socket. | Запускается от root или группы `raycontrol`. Не читает базу напрямую. |
-| `rayspa` | Периметр: управляет таблицей `inet raycontrol`, принимает knock и SPA, выдаёт временные доступы. | Свой пользователь, только `CAP_NET_ADMIN`. Без доступа к базе: ключи устройств получает от `rayd`. |
-| `rayknock` | Клиентская утилита и Go-библиотека: knock + SPA. Ляжет в основу будущего клиента. | Запускается у клиента. |
-| Engines | Процессы протоколов: `xray`, `hysteria@obfs`, `hysteria@masq`, далее по [03-protocols.md](03-protocols.md). | У каждого инстанса свой пользователь и только свои учётные данные. |
-| `caddy` | Сайт-приманка для self-steal (цель REALITY, masquerade Hysteria), ACME. | Свой пользователь, `CAP_NET_BIND_SERVICE`. |
+| `rayd` | Control plane ноды: состояние, адаптеры, аллокатор ресурсов, генерация конфигов, управление юнитами, API. | Свой пользователь, без capabilities. Управляет только юнитами `raycontrol-*` (правило polkit). |
+| `rayctl` | CLI администратора; тонкий клиент к API `rayd` через unix socket. | root или группа `raycontrol`. |
+| `rayspa` | Периметр: таблица `inet raycontrol`, knock, SPA, allow-наборы, исходящие фильтры, NAT для L3-сервисов. | Единственный компонент с `CAP_NET_ADMIN`; к базе доступа нет. |
+| Edge-сервисы | Инстансы движков: принимают трафик своего класса входа. | Свой пользователь и срез инфраструктуры на каждый инстанс. |
+| `ray-core` | Внутренняя ступень: аутентификация для движков без пользователей, единый учёт и политика выхода. | Свой пользователь; слушает только unix-сокеты. |
+| `vault` | Хранилище учётных данных третьих сторон; выдаёт каждому сервису только его секреты. | Свой пользователь; выдача через `LoadCredential=` или unix socket с проверкой UID. |
+| `caddy` | Сайт-приманка для self-steal и masquerade, ACME. | Свой пользователь, `CAP_NET_BIND_SERVICE`. |
+| `rayknock` | Клиентская утилита и Go-библиотека для knock + SPA. | У клиента. |
 
-Почему `rayspa` отдельно от `rayd`: это единственный компонент с `CAP_NET_ADMIN`, и он смотрит в сеть до
-любой аутентификации. Его компрометация не должна давать доступ к базе пользователей, а компрометация `rayd`
-не должна давать управление файрволом напрямую.
+Нужен ли `vault` отдельным процессом или достаточно модуля `rayd` с выдачей через `LoadCredential=` —
+вопрос C-6 в [07-questions.md](07-questions.md).
+
+## Внутренняя ступень (ray-core)
+
+Зачем она:
+
+- У части движков нет пользователей, только общий ключ (olcRTC, dnstt, MasterDnsVPN). Если пустить их выход
+  прямо в интернет, любой, кто знает ключ, получит выход без учёта и без возможности отозвать доступ.
+- У движков разные политики выхода и разная статистика. Единая точка выхода даёт одинаковый запрет приватных сетей,
+  одинаковый учёт трафика и маршрутизацию (WARP, цепочка на другую ноду) для всех.
+
+Как работает:
+
+- Edge-сервис отдаёт трафик в `ray-core` через свой unix socket. Сокет определяет, от какого сервиса пришёл трафик.
+- Для движков без пользователей клиент проходит аутентификацию уже внутри туннеля: например, внутри
+  olcRTC-туннеля клиент говорит с `ray-core` по VLESS или SOCKS5 с паролем на пользователя.
+- Движки со своими пользователями (Xray, Hysteria) могут выходить напрямую или через `ray-core`. Через `ray-core` —
+  единая политика ценой лишнего перехода; выбор — вопрос C-3.
+- L3-сервисы (WireGuard в qWDTT) идут мимо `ray-core`: политика и учёт для них — правила nftables на TUN-интерфейсе
+  и счётчики по адресу клиента.
+
+Реализация (предлагается): на первом этапе `ray-core` — отдельный инстанс Xray или sing-box
+с inbound-ами на unix-сокетах и пользователями на каждый сервис. Контракт `ray-core` фиксируется так,
+чтобы позже заменить его **своим ядром** без изменений в остальных сервисах.
+
+## Адаптеры и манифест движка
+
+Манифест (черновик):
+
+```yaml
+engine: masterdnsvpn
+version: "pinned-version"
+ingress: [dns]                  # direct | relayed | rendezvous | dns
+exit: l4                        # l4 | l3
+users: shared-key               # per-user | shared-key | none
+needs:
+  ports: [{proto: udp, port: 53, public: true}]
+  domain: ns-delegation         # none | own-domain | ns-delegation
+  certificate: none
+  tun: false
+  capabilities: [CAP_NET_BIND_SERVICE]
+  third_party: []               # например [vk-account], [s3-bucket], [jitsi-room]
+features:
+  hot_user_sync: false
+  stats: none                   # per-user | per-instance | none
+  kick: false
+client:
+  link_format: "masterdns://…"
+  platforms: [windows, macos, linux, android]
+license: MIT
+```
+
+Контракт адаптера:
+
+```go
+type Engine interface {
+    Manifest() Manifest
+    Render(inst Instance, users []UserCred, res Resources) (Files, error)
+    Validate(files Files) error
+    SyncUsers(ctx context.Context, inst Instance, diff UserDiff) error // на лету или reload
+    Stats(ctx context.Context, inst Instance) ([]Traffic, error)
+    Kick(ctx context.Context, inst Instance, userID string) error
+    Health(ctx context.Context, inst Instance) (HealthStatus, error)
+    ClientProfile(inst Instance, cred UserCred) (Profile, error)  // ссылка, QR, фрагмент подписки
+}
+```
+
+Два вида адаптеров:
+
+- **Встроенные** (Go, внутри `rayd`): для движков из основного набора.
+- **Внешние плагины**: отдельный процесс, который реализует тот же контракт как gRPC-сервис через unix socket.
+  Плагин можно написать на любом языке — так подключается и **своё ядро**. Плагин запускается под своим пользователем
+  и получает только описание своего инстанса.
+
+## Аллокатор ресурсов
+
+`rayd` раздаёт сервисам ресурсы и следит, чтобы они не пересекались:
+
+- порты и протоколы (TCP 443 и UDP 443 — разные ресурсы);
+- системные пользователи с фиксированными UID из диапазона raycontrol (на них опираются правила nftables);
+- TUN-интерфейсы и подсети для L3-сервисов;
+- имена наборов nftables и юнитов systemd;
+- каталоги данных и сокеты;
+- домены и поддомены (сайт, NS-делегирование для DNS-класса).
+
+## Модель данных (черновик)
+
+```
+node            id, name, public_key, created_at                      — идентичность ноды
+users           id, name, enabled, expires_at, traffic_limit_bytes, note, created_at
+devices         id, user_id, name, role(user|admin), spa_pubkey, api_cert_fingerprint, scopes, last_seen, revoked_at
+services        id, engine, name, ingress, exit, profile(public|gated), enabled, settings_json
+resources       service_id, kind, value                               — выданные аллокатором ресурсы
+credentials     id, user_id, service_id, kind, secret, created_at, revoked_at
+third_party     id, service_id, kind, secret_ref, status, last_checked — аккаунты платформ, S3-ключи
+grants          id, device_id, src_ip, scope, expires_at              — журнал SPA-доступов
+traffic         user_id, service_id, period, up, down
+api_tokens      id, subject, scopes, created_at, expires_at, revoked_at
+audit_log       ts, actor, action, target, result
+settings        key, value
+```
+
+Принципы те же: единственный источник правды — база `rayd`; у пользователя отдельные учётные данные
+на каждый сервис; миграции версионируются.
 
 ## Язык и инструменты (предлагается)
 
-**Go** для всех своих компонентов:
-
-- тот же стек, что у Xray, Hysteria, sing-box, Caddy: можно использовать их API-клиенты и библиотеки;
-- статические бинарники под amd64 и arm64, без зависимостей на хосте;
-- библиотеки для периметра: `github.com/google/nftables` (netlink, без вызова `nft`),
-  `github.com/florianl/go-nflog` (приём SPA-пакетов через NFLOG);
-- `modernc.org/sqlite` (без CGO) для хранилища.
-
-API (предлагается): описание в protobuf, сервер на **ConnectRPC**. Одно описание обслуживает gRPC,
-gRPC-Web и обычный JSON поверх HTTP, поэтому будущий клиент на любом языке и платформе сможет работать
-без отдельного REST-слоя. Клиентский код генерируется через `buf`.
+- **Go** для своих компонентов: тот же стек, что у большинства движков (Xray, Hysteria, sing-box, Caddy,
+  olcRTC, OpenFlux, MasterDnsVPN, dnstt), статические бинарники под amd64 и arm64.
+- Периметр: `github.com/google/nftables`, `github.com/florianl/go-nflog`.
+- Хранилище: `modernc.org/sqlite` (без CGO).
+- API: protobuf + **ConnectRPC** (gRPC, gRPC-Web и JSON из одного описания), генерация через `buf`.
+- Управление юнитами: systemd через D-Bus.
 
 ## Структура репозитория (предлагается)
 
 ```
 cmd/
-  rayd/          control plane
-  rayctl/        CLI администратора
-  rayspa/        периметр (knock + SPA + nftables)
-  rayknock/      клиентская утилита knock + SPA
-api/proto/       protobuf-описание API (ConnectRPC)
+  rayd/  rayctl/  rayspa/  rayknock/  ray-core/ (позже, когда появится своё ядро)
+api/proto/            API ноды и контракт плагинов
 internal/
-  store/         SQLite, миграции
-  model/         пользователи, устройства, учётные данные, инстансы
-  engine/        интерфейс Engine + адаптеры: xray, hysteria, (naive, tuic, trusttunnel, dnstt)
-  render/        шаблоны конфигов, валидация (xray run -test и т.п.)
-  perimeter/     правила nftables, формат SPA-пакета, криптография
-  authz/         роли, области доступа, проверка вызовов API
-  pki/           внутренний CA для mTLS API
-  system/        systemd-юниты, системные пользователи, sysctl
-deploy/
-  systemd/       юниты с hardening
-  caddy/         Caddyfile сайта-приманки
-install/
-  bootstrap.sh   тонкий установщик: проверка ОС → скачать бинарник → `rayctl install`
+  store/ model/ authz/ pki/ alloc/ vault/
+  engine/             контракт, манифесты, встроенные адаптеры
+  render/             шаблоны и проверка конфигов
+  perimeter/          nftables, SPA
+  system/             systemd, пользователи, sysctl
+plugins/              примеры и SDK внешних адаптеров
+deploy/               юниты, Caddyfile, манифест версий движков
+install/bootstrap.sh
 docs/
-legacy/          v0 (ray.sh, uninstall.sh) до завершения миграции
+legacy/               v0 до завершения миграции
 ```
 
-## Модель данных (черновик)
+## Развёртывание
 
-```
-users          id, name, enabled, expires_at, traffic_limit_bytes, note, created_at
-credentials    id, user_id, instance_id, kind, secret, created_at, revoked_at
-               — у пользователя отдельные учётные данные на каждый инстанс
-devices        id, user_id, name, spa_pubkey, api_cert_fingerprint, scopes, last_seen, revoked_at
-instances      id, engine, name, profile(public|gated), listen, settings_json, enabled
-grants         id, device_id, src_ip, scope, expires_at        — журнал выданных SPA-доступов
-traffic        user_id, instance_id, period, up, down
-api_tokens     id, subject, scopes, created_at, expires_at, revoked_at  — для enrollment и автоматизации
-audit_log      ts, actor, action, target, result
-settings       key, value
-```
-
-Принципы:
-
-- **Единственный источник правды — база `rayd`.** Конфиги движков генерируются из неё и не правятся руками.
-- **Отдельные учётные данные на каждый инстанс.** Утечка пароля от `hy2-obfs` не даёт доступа к VLESS.
-  Отзыв выполняется точечно.
-- **Секреты в базе**, файл `0600`, владелец `rayd`. Шифрование на диске (age или ключ из systemd credentials)
-  остаётся открытым вопросом.
-- **Миграции схемы** версионируются и применяются при запуске `rayd`.
-
-## Интерфейс Engine
-
-Каждый протокол — адаптер с одинаковым контрактом:
-
-```go
-type Engine interface {
-    Name() string
-    Render(inst Instance, users []UserCred) (Files, error) // конфиги для systemd-инстанса
-    Validate(files Files) error                            // xray run -test, проверка YAML и т.п.
-    SyncUsers(ctx, inst, diff UserDiff) error               // на лету, если движок умеет, иначе reload
-    Stats(ctx, inst) ([]UserTraffic, error)
-    Kick(ctx, inst, userID) error
-    ClientLink(inst, cred) (URI, error)                     // ссылка или фрагмент подписки
-}
-```
-
-Как пользователи доходят до движков:
-
-| Движок | Способ | Перезапуск при изменении |
-|---|---|---|
-| Xray | gRPC API (`HandlerService` AddUser/RemoveUser, `StatsService`) | нет |
-| Hysteria2 | `auth: http`: `rayd` отвечает на колбэк. Статистика и отключение через Traffic Stats API. | нет |
-| Остальные | По возможностям движка; иначе перегенерация + reload | зависит от движка |
-
-## Потоки
-
-**Добавление пользователя:** `rayctl user add` → API `rayd` → запись в базу + учётные данные на каждый
-включённый инстанс → `SyncUsers` для Xray (gRPC); Hysteria подхватит при следующей авторизации →
-ответ: ссылки и QR.
-
-**Подключение клиента в режиме gated:** knock → SPA-пакет → `rayspa` проверяет подпись и окно времени →
-IP добавляется в allow-набор нужного сервиса на TTL → клиент подключается → сервис проверяет свои учётные данные.
-
-**Будущий клиент:** то же, плюс удалённый API `rayd` за SPA и mTLS: получить конфиг или подписку,
-ротировать свои учётные данные, зарегистрировать ключ устройства.
-
-## Развёртывание и операции (направления, подробнее в roadmap)
-
-- `install/bootstrap.sh` только проверяет ОС и архитектуру, скачивает подписанный релиз и запускает
-  `rayctl install`. Вся логика установки — в Go, повторный запуск безопасен.
-- Systemd-юниты с hardening: отдельные пользователи, `ProtectSystem=strict`, `NoNewPrivileges`,
-  минимальные `CapabilityBoundingSet`, `RestrictAddressFamilies`, `SocketBindAllow`/`IPAddressDeny` где возможно;
-  TLS-ключи через `LoadCredential=`.
-- Версии движков закреплены в манифесте релиза, проверка SHA-256; `rayctl update`.
-- `rayctl backup`/`restore`: зашифрованный архив (база + конфиги + ключи), проверка на чистом хосте.
-- `rayctl uninstall` по журналу установки: удаляется только то, что поставил raycontrol.
+- `install/bootstrap.sh` проверяет ОС и архитектуру, скачивает подписанный релиз и запускает `rayctl install`.
+- Нода ставится с минимальным набором сервисов; остальные включаются командой `rayctl service add <engine>`.
+  Движок скачивается по манифесту версий с проверкой SHA-256.
+- Повторный запуск установки и любых операций безопасен.
 - Целевые ОС: Debian 12/13, Ubuntu 24.04 LTS; amd64 и arm64.

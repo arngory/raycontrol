@@ -14,8 +14,14 @@
 | NaiveProxy | Caddy + forwardproxy@naive | кандидат, PoC в M5 | public (за fallback REALITY) |
 | TrustTunnel | TrustTunnel endpoint (Rust) | кандидат, PoC в M5 | решается в PoC |
 | TUIC v5 | sing-box или форк Itsusinn/tuic | отложен | — |
-| dnstt | dnstt-server | крайний случай, M5 | public, UDP 53 |
+| DNS-класс: MasterDnsVPN, dnstt, Slipstream | соответствующие серверы | PoC в M6, выбор основного | public, UDP 53 |
+| relayed: qWDTT | wdtt-server | PoC в M6 | public для реле |
+| rendezvous: olcRTC, OpenFlux, S3 Bypass | соответствующие серверы | PoC в M6 | входящих портов нет |
+| CSQTT | — | наблюдаем (архивирован, лицензия noncommercial) | — |
 | Trojan, VMess | — | **не переносим** | — |
+
+Транспорты для режима белых списков (relayed, rendezvous, dns) разобраны отдельно в
+[05-transports-research.md](05-transports-research.md); раздел про dnstt ниже — краткая выжимка.
 
 ## Общая схема: self-steal
 
@@ -112,8 +118,10 @@ Xray тоже умеет Hysteria2 как inbound, но в документац�
 
 - DNS-туннель (Noise поверх DNS через DoH/DoT/UDP-резолверы) для ситуации, когда остальное заблокировано.
 - Требует делегирования NS-записи поддомена на сервер и публичного UDP 53; скорость низкая.
-- Своей пользовательской аутентификации нет (только ключ сервера), поэтому за dnstt ставится
-  сервис с аутентификацией (например, VLESS-инбаунд на loopback), а не открытый SOCKS.
+- Своей пользовательской аутентификации нет (только ключ сервера), поэтому выход dnstt ведёт во внутреннюю
+  ступень `ray-core`, а не в открытый SOCKS.
+- Кандидаты того же класса — MasterDnsVPN (быстрее по заявлению автора, активно развивается) и Slipstream;
+  выбор основного DNS-движка — по итогам PoC.
 
 ## Прочие кандидаты (только для справки)
 
