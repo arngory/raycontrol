@@ -60,6 +60,13 @@ func NewVerifier(p Params, defaultTTL, maxTTL time.Duration, maxSeen int) *Verif
 	}
 }
 
+// SetClock replaces the time source (tests, and callers that share one clock).
+func (v *Verifier) SetClock(now func() time.Time) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.now = now
+}
+
 // SetDevices replaces the device list, e.g. after enrollment or revocation.
 func (v *Verifier) SetDevices(devices []Device) {
 	v.mu.Lock()

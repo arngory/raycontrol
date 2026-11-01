@@ -113,3 +113,19 @@
 6. **Китай.** Выбранные транспорты белых списков работают через российские платформы (Телемост, Яндекс Документы,
    WB Stream); для Китая нужны свои платформы — отдельное исследование после v1. Hysteria2/QUIC в Китае часто
    ограничивают — основной там REALITY.
+
+## Решения R1 (по ответам сессии Niko)
+
+Источник: [`docs/server/RAYCONTROL.md`](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/RAYCONTROL.md),
+[`CONFIG.md`](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/CONFIG.md),
+[`IPC.md`](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/IPC.md) в `arngory/niko`.
+
+| № | Решение |
+|---|---|
+| R1-1 | **SPA v2 по TCP — принят** как второй носитель на тех же портах слотов ([`spec/spa-v2.md`](spec/spa-v2.md) §10). Реализация на ноде — обычный слушающий сокет в `rayspa`, а не `synproxy` + NFLOG: сокет собирает пакет из любого числа сегментов (клиент режет записи против DPI), NFLOG видит только первый. Снаружи разницы нет: порт слота отвечает на SYN, пока слот активен. Включён по умолчанию (`rayd serve -spa-tcp`). |
+| R1-2 | **`inner` — на Xray** (`arngory/xray-core`), пока в форке sing-box нет серверной части VLESS encryption. |
+| R1-3 | **Постквант Yggdrasil**: линк TLS 1.3 только с `X25519MLKEM768`; сквозное шифрование Yggdrasil классическое, полезный трафик идёт в `inner`. Публичные пиры — флагом, по умолчанию выключены (P-14). |
+| R1-4 | **Ссылки и подписка** — предложение Niko принято как основа: параметры `niko-node`, `niko-svc`, `niko-pin`, `niko-dns`, `niko-dnskey`, `niko-inner`; подписка — JSON-конверт с двумя подписями (Ed25519 и ML-DSA-65, обе обязательны), `seq` против отката, `next` для ротации. Дополнительно в payload — поле `time` (время сервера) для проверки часов клиента. Ключи ноды — необязательное поле `node_keys` пакета `rcdev1` (§8 спецификации SPA). Формат замораживается вместе с эндпоинтом подписки в R1. |
+| R1-5 | **CONFIG.md и IPC.md (схема 1, IPC 1)** приняты как основа; замечания — в [`handoff/niko-r1-reply.md`](handoff/niko-r1-reply.md). raycontrol генерирует конфиги по ним. |
+| R1-6 | **UID процессов ноды** — фиксированный диапазон 9100–9199: `niko-front` 9100, бэкенды и Xray 9110–9179, `rayd` 9190, `rayspa` 9191. Таблицу ведёт аллокатор `rayd`; niko-server получает UID только из конфигов. |
+| R1-7 | **Периметр закрыт при сбое**: таблица nftables остаётся, если `rayspa` остановлен. Восстановление с консоли — `rayspa teardown`. |

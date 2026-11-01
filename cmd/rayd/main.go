@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"os/user"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -84,6 +86,10 @@ func cmdServe(args []string) error {
 	db := fs.String("db", defaultDB, "database path")
 	socket := fs.String("socket", defaultSocket, "API socket path")
 	group := fs.String("group", "raycontrol", "group whose members may use the API besides root")
+	rayspaUser := fs.String("rayspa-user", "rayspa", "system user of rayspa, the only one besides root that receives the perimeter feed")
+	spaTTL := fs.Duration("spa-ttl", 10*time.Minute, "access granted by SPA when the packet asks for the default")
+	spaMaxTTL := fs.Duration("spa-max-ttl", time.Hour, "longest access a SPA packet may ask for")
+	spaTCP := fs.Bool("spa-tcp", true, "also accept SPA v2 over TCP on the slot ports")
 	fs.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -105,8 +111,14 @@ func cmdServe(args []string) error {
 
 	go pruneAudit(ctx, st, log)
 	srv := &api.Server{Store: st, Params: params, Version: version}
+	per := &api.PerimeterServer{Server: srv, RayspaUID: -1, DefaultTTL: *spaTTL, MaxTTL: *spaMaxTTL, TCPCarrier: *spaTCP, Refresh: time.Minute}
+	if u, err := user.Lookup(*rayspaUser); err == nil {
+		per.RayspaUID, _ = strconv.Atoi(u.Uid)
+	} else {
+		log.Warn("rayspa user not found; only root receives the perimeter feed", "user", *rayspaUser)
+	}
 	log.Info("serving", "socket", *socket, "node", fmt.Sprintf("%x", params.NodeID))
-	return srv.ServeUnix(ctx, *socket, api.PeerPolicy{Group: *group})
+	return srv.ServeUnix(ctx, *socket, api.PeerPolicy{Group: *group}, per.Handler)
 }
 
 func pruneAudit(ctx context.Context, st *store.Store, log *slog.Logger) {

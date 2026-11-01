@@ -181,3 +181,33 @@ func TestSettingsAndAudit(t *testing.T) {
 		t.Fatalf("after prune: %+v", entries)
 	}
 }
+
+func TestKindsHavePorts(t *testing.T) {
+	if len(kindPorts) != len(ServiceKinds) {
+		t.Fatalf("%d kinds with ports, %d kinds", len(kindPorts), len(ServiceKinds))
+	}
+	for _, k := range ServiceKinds {
+		if _, ok := kindPorts[k]; !ok {
+			t.Errorf("kind %s has no port entry", k)
+		}
+	}
+}
+
+func TestServicePorts(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	ssh, err := s.CreateService(ctx, Service{Kind: "ssh", Name: "ssh", Settings: `{"ports":["tcp/2222"]}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := ssh.Ports(); len(p) != 1 || p[0] != (Port{"tcp", 2222}) {
+		t.Fatalf("ssh ports = %v", p)
+	}
+	if _, err := s.CreateService(ctx, Service{Kind: "ssh", Name: "bad", Settings: `{"ports":["sctp/1"]}`}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("bad port accepted: %v", err)
+	}
+	dns := Service{Kind: "dnstt", Settings: "{}"}
+	if p, _ := dns.Ports(); !dns.Public() || len(p) != 1 || p[0].String() != "udp/53" {
+		t.Fatalf("dnstt = %v public=%v", p, dns.Public())
+	}
+}

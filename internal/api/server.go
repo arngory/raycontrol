@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -28,9 +29,36 @@ type Server struct {
 	Store   *store.Store
 	Params  spa.Params
 	Version string
-	// OnChange runs after any change that can affect SPA access, so the
-	// perimeter can reload devices. Nil in R0.
+	// OnChange, if set, runs after every successful change (tests).
 	OnChange func()
+
+	mu   sync.Mutex
+	rev  uint64
+	wake chan struct{} // closed on the next change
+}
+
+// notify records a change and wakes the perimeter watchers.
+func (s *Server) notify() {
+	s.mu.Lock()
+	s.rev++
+	if s.wake != nil {
+		close(s.wake)
+		s.wake = nil
+	}
+	s.mu.Unlock()
+	if s.OnChange != nil {
+		s.OnChange()
+	}
+}
+
+// changes returns the current revision and a channel closed at the next change.
+func (s *Server) changes() (uint64, <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wake == nil {
+		s.wake = make(chan struct{})
+	}
+	return s.rev, s.wake
 }
 
 var _ nodev1connect.NodeServiceHandler = (*Server)(nil)
@@ -43,7 +71,9 @@ func (s *Server) Handler(policy PeerPolicy) (string, http.Handler) {
 // ServeUnix serves the API on a unix socket until ctx ends. The socket and
 // its directory are group-accessible and, when running as root, owned by
 // root:group, so that group members can use rayctl.
-func (s *Server) ServeUnix(ctx context.Context, path string, policy PeerPolicy) error {
+// Extra handlers (e.g. the perimeter feed) are mounted next to NodeService
+// and do their own caller checks.
+func (s *Server) ServeUnix(ctx context.Context, path string, policy PeerPolicy, extra ...func() (string, http.Handler)) error {
 	gid := -1
 	if os.Getuid() == 0 && policy.Group != "" {
 		if g, err := user.LookupGroup(policy.Group); err == nil {
@@ -81,6 +111,9 @@ func (s *Server) ServeUnix(ctx context.Context, path string, policy PeerPolicy) 
 
 	mux := http.NewServeMux()
 	mux.Handle(s.Handler(policy))
+	for _, h := range extra {
+		mux.Handle(h())
+	}
 	srv := &http.Server{Handler: mux, ConnContext: connContext, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
@@ -120,8 +153,8 @@ func (s *Server) done(ctx context.Context, action, target string, err error) err
 	if aerr := s.Store.Audit(ctx, actorFrom(ctx), action, target, result); aerr != nil && err == nil {
 		err = aerr
 	}
-	if err == nil && s.OnChange != nil {
-		s.OnChange()
+	if err == nil {
+		s.notify()
 	}
 	return toConnect(err)
 }

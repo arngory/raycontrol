@@ -185,6 +185,9 @@ func (s *Store) CreateService(ctx context.Context, svc Service) (Service, error)
 	if svc.Settings == "" {
 		svc.Settings = "{}"
 	}
+	if _, err := svc.Ports(); err != nil {
+		return svc, err
+	}
 	svc.CreatedAt = s.now().Truncate(time.Second)
 	res, err := s.db.ExecContext(ctx, `INSERT INTO services (kind, name, enabled, settings_json, created_at) VALUES (?, ?, ?, ?, ?)`,
 		svc.Kind, svc.Name, svc.Enabled, svc.Settings, svc.CreatedAt.Unix())

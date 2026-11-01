@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+// Perimeter feed from rayd to rayspa. Only the rayspa system user may call
+// it: the snapshot carries device keys.
+package raycontrol.perimeter.v1;
+
+option go_package = "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1;perimeterv1";
+
+service PerimeterService {
+  // WatchPerimeter sends the current snapshot at once and a new one after
+  // every change that affects SPA access.
+  rpc WatchPerimeter(WatchPerimeterRequest) returns (stream WatchPerimeterResponse);
+}
+
+message WatchPerimeterRequest {}
+
+message WatchPerimeterResponse {
+  Snapshot snapshot = 1;
+}
+
+message Snapshot {
+  uint64 revision = 1;
+  SPAParams spa = 2;
+  repeated Device devices = 3;
+  repeated Service services = 4;
+  // Ports open to everyone, e.g. udp/53 for DNS tunnels.
+  repeated Port public_ports = 5;
+}
+
+message SPAParams {
+  bytes node_id = 1;
+  uint32 epoch_len_s = 2;
+  uint32 slot_len_s = 3;
+  bytes port_key = 4;
+  uint32 port_base = 5;
+  uint32 port_range = 6;
+  uint32 len_min = 7;
+  uint32 len_max = 8;
+  uint32 default_ttl_s = 9;
+  uint32 max_ttl_s = 10;
+  bool tcp_carrier = 11; // accept SPA v2 over TCP on the slot ports too
+}
+
+message Device {
+  string id = 1;
+  bytes key = 2;
+  repeated uint32 allowed = 3; // service IDs
+}
+
+message Service {
+  uint32 id = 1;
+  repeated Port ports = 2;
+}
+
+message Port {
+  string proto = 1; // tcp | udp
+  uint32 port = 2;
+}

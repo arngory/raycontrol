@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -14,12 +15,19 @@ import (
 	"golang.org/x/sys/unix"
 
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
+	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
 func startServer(t *testing.T) (*Server, string, *atomic.Int32) {
+	t.Helper()
+	return startServerWith(t, nil)
+}
+
+func startServerWith(t *testing.T, extra func(*Server) []func() (string, http.Handler)) (*Server, string, *atomic.Int32) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	dir := t.TempDir()
@@ -35,7 +43,11 @@ func startServer(t *testing.T) (*Server, string, *atomic.Int32) {
 	srv := &Server{Store: st, Params: params, Version: "test", OnChange: func() { changes.Add(1) }}
 	sock := filepath.Join(dir, "rayd.sock")
 	done := make(chan error, 1)
-	go func() { done <- srv.ServeUnix(ctx, sock, PeerPolicy{}) }()
+	var handlers []func() (string, http.Handler)
+	if extra != nil {
+		handlers = extra(srv)
+	}
+	go func() { done <- srv.ServeUnix(ctx, sock, PeerPolicy{}, handlers...) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -165,5 +177,55 @@ func TestPeerPolicy(t *testing.T) {
 	}
 	if _, err := (PeerPolicy{}).actor(context.Background()); err == nil {
 		t.Fatal("call without credentials allowed")
+	}
+}
+
+func TestPerimeterFeed(t *testing.T) {
+	srv, sock, _ := startServerWith(t, func(s *Server) []func() (string, http.Handler) {
+		per := &PerimeterServer{Server: s, RayspaUID: os.Getuid(), DefaultTTL: 10 * time.Minute, MaxTTL: time.Hour, TCPCarrier: true, Refresh: time.Minute}
+		return []func() (string, http.Handler){per.Handler}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c := NewUnixClient(sock)
+	feed := perimeterv1connect.NewPerimeterServiceClient(UnixHTTPClient(sock), BaseURL)
+
+	c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "reality"}))
+	c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "dnstt", Name: "dns"}))
+	c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "ssh", Name: "ssh", SettingsJson: `{"ports":["tcp/2222"]}`}))
+	c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"reality", "ssh"}}))
+
+	stream, err := feed.WatchPerimeter(ctx, connect.NewRequest(&perimeterv1.WatchPerimeterRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	first := stream.Msg().Snapshot
+	if len(first.Devices) != 0 || len(first.Services) != 2 || len(first.PublicPorts) != 1 ||
+		first.PublicPorts[0].Port != 53 || !first.Spa.TcpCarrier || first.Spa.LenMax != uint32(srv.Params.LenMax) {
+		t.Fatalf("first snapshot: %v", first)
+	}
+
+	if _, err := c.CreateDevice(ctx, connect.NewRequest(&nodev1.CreateDeviceRequest{User: "alice", Name: "phone"})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	second := stream.Msg().Snapshot
+	if second.Revision <= first.Revision || len(second.Devices) != 1 || len(second.Devices[0].Allowed) != 2 {
+		t.Fatalf("second snapshot: %v", second)
+	}
+}
+
+func TestPerimeterFeedDenied(t *testing.T) {
+	per := &PerimeterServer{Server: &Server{}, RayspaUID: 4242}
+	ctx := context.WithValue(context.Background(), peerKey{}, &unix.Ucred{Uid: uint32(os.Getuid() + 777)})
+	err := per.WatchPerimeter(ctx, nil, nil)
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("foreign uid: %v", err)
 	}
 }
