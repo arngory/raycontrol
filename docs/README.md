@@ -14,6 +14,7 @@ port-knocking → SPA → аутентификация в каждом серв�
 | [04-roadmap.md](04-roadmap.md) | Направления работ с привязкой к находкам аудита и этапы M0–M6. |
 | [05-transports-research.md](05-transports-research.md) | Транспорты для белых списков: qWDTT, CSQTT, olcRTC, OpenFlux, dnstt, Slipstream, MasterDnsVPN, S3 Bypass. |
 | [06-client-requirements.md](06-client-requirements.md) | Требования к клиенту для следующей фазы. |
-| [07-questions.md](07-questions.md) | Полный список вопросов перед реализацией. |
+| [07-questions.md](07-questions.md) | Вопросы перед реализацией (редакция 2, с учётом спецификации niko-server). |
 
-Статус: черновик для согласования. Код v0 (`ray.sh`, `uninstall.sh`) пока остаётся на месте.
+Статус: черновик для согласования. Документы 01–04 будут пересмотрены после ответов на вопросы P-1…P-3
+(связка с [niko-server](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/SPEC.md)). Код v0 (`ray.sh`, `uninstall.sh`) пока остаётся на месте.
