@@ -196,6 +196,47 @@ func TestNetns(t *testing.T) {
 			t.Fatal("service closed after TCP SPA")
 		}
 	})
+	t.Run("admin prefix reaches SSH without SPA", func(t *testing.T) {
+		ssh, err := net.Listen("tcp", "127.0.0.1:18022")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ssh.Close()
+		go func() {
+			for {
+				c, err := ssh.Accept()
+				if err != nil {
+					return
+				}
+				c.Close()
+			}
+		}()
+		dial := func() bool {
+			c, err := net.DialTimeout("tcp", "127.0.0.1:18022", 700*time.Millisecond)
+			if err == nil {
+				c.Close()
+			}
+			return err == nil
+		}
+		if dial() {
+			t.Fatal("ssh open before admin access")
+		}
+		snap.AdminPrefixes = []string{"127.0.0.0/8"}
+		snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 18022}}
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		if !dial() {
+			t.Fatal("admin prefix cannot reach ssh")
+		}
+		snap.AdminPrefixes = []string{"198.51.100.0/24"}
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		if dial() {
+			t.Fatal("ssh open for a foreign admin prefix")
+		}
+	})
 	t.Run("garbage on the slot port", func(t *testing.T) {
 		sendUDP(make([]byte, 120))
 		waitResult(spa.ErrAuth)

@@ -1,0 +1,308 @@
+// Package provision creates what a node and its services need beyond the
+// database rows: node signing keys, the subscription endpoint, tunnel keys
+// and zones.
+package provision
+
+import (
+	"context"
+	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
+
+	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/spa"
+	"github.com/arngory/raycontrol/internal/store"
+)
+
+const (
+	settingDomain  = "domain"
+	settingEd25519 = "node_ed25519_seed"
+	settingMLDSA   = "node_mldsa65_seed"
+
+	// MasterDnsVPN method 5 is AES-256-GCM. Method 2 (its default) is a bare
+	// ChaCha20 stream without authentication; the node allows AEAD only.
+	masterdnsMethod = 5
+)
+
+// Secret names, shared with the renderer (names, not secrets).
+const (
+	SecretNoisePrivate  = "noise_private"  // dnstt, X25519
+	SecretMasterDNSKey  = "encryption_key" // MasterDnsVPN, hex text
+	SecretMLKEMSeed     = "mlkem768_seed"  //nolint:gosec // G101: a name; inner, VLESS encryption
+	SecretTLSKey        = "tls_key"        // subscription, PKCS#8 DER
+	SecretTLSCert       = "tls_cert"       // subscription, DER
+	SubscriptionService = "subscription"
+)
+
+// Options are the node-wide settings given at init.
+type Options struct {
+	Host   string // address clients use
+	Domain string // base domain for service subdomains; may be empty
+}
+
+// NodeKeys are the node's signing keys (subscription signatures).
+type NodeKeys struct {
+	Ed25519 ed25519.PrivateKey
+	MLDSA65 *mldsa65.PrivateKey
+}
+
+// PublicJSON is the node_keys field of the device bundle.
+func (k NodeKeys) PublicJSON() map[string]string {
+	pub, _ := k.MLDSA65.Public().(*mldsa65.PublicKey).MarshalBinary()
+	return map[string]string{
+		"ed25519": hex.EncodeToString(k.Ed25519.Public().(ed25519.PublicKey)),
+		"mldsa65": base64.RawURLEncoding.EncodeToString(pub),
+	}
+}
+
+// Init prepares a node: SPA parameters, signing keys, the subscription
+// service. Repeating it keeps everything already created.
+func Init(ctx context.Context, st *store.Store, o Options) (spa.Params, error) {
+	params, err := node.Init(ctx, st, o.Host)
+	if err != nil {
+		return params, err
+	}
+	if o.Domain != "" {
+		if err := st.SetSetting(ctx, settingDomain, []byte(strings.ToLower(o.Domain))); err != nil {
+			return params, err
+		}
+	}
+	for _, name := range []string{settingEd25519, settingMLDSA} {
+		if _, err := st.GetSetting(ctx, name); errors.Is(err, store.ErrNotFound) {
+			seed := make([]byte, 32)
+			if _, err := rand.Read(seed); err != nil {
+				return params, err
+			}
+			if err := st.SetSetting(ctx, name, seed); err != nil {
+				return params, err
+			}
+		} else if err != nil {
+			return params, err
+		}
+	}
+	if _, err := st.ServiceByName(ctx, SubscriptionService); errors.Is(err, store.ErrNotFound) {
+		host, err := node.Host(ctx, st)
+		if err != nil {
+			return params, err
+		}
+		svc, err := subscriptionService(params, host)
+		if err != nil {
+			return params, err
+		}
+		if _, err := st.CreateService(ctx, svc); err != nil {
+			return params, err
+		}
+	} else if err != nil {
+		return params, err
+	}
+	return params, nil
+}
+
+// LoadNodeKeys returns the signing keys created by Init.
+func LoadNodeKeys(ctx context.Context, st *store.Store) (NodeKeys, error) {
+	ed, err := st.GetSetting(ctx, settingEd25519)
+	if err != nil {
+		return NodeKeys{}, err
+	}
+	ml, err := st.GetSetting(ctx, settingMLDSA)
+	if err != nil {
+		return NodeKeys{}, err
+	}
+	var seed [mldsa65.SeedSize]byte
+	copy(seed[:], ml)
+	_, sk := mldsa65.NewKeyFromSeed(&seed)
+	return NodeKeys{Ed25519: ed25519.NewKeyFromSeed(ed), MLDSA65: sk}, nil
+}
+
+// Domain returns the base domain or "" if none was set.
+func Domain(ctx context.Context, st *store.Store) (string, error) {
+	b, err := st.GetSetting(ctx, settingDomain)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", nil
+	}
+	return string(b), err
+}
+
+func randInt(lo, hi int) (int, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(hi-lo+1)))
+	if err != nil {
+		return 0, err
+	}
+	return lo + int(n.Int64()), nil
+}
+
+// subscriptionService picks a random port outside the SPA range and a
+// self-signed certificate; clients pin its key (spec/subscription-v1.md).
+func subscriptionService(p spa.Params, host string) (store.Service, error) {
+	var port int
+	for {
+		n, err := randInt(20000, 60999)
+		if err != nil {
+			return store.Service{}, err
+		}
+		if n < int(p.PortBase) || n >= int(p.PortBase)+int(p.PortRange) {
+			port = n
+			break
+		}
+	}
+	key, cert, err := selfSigned(host)
+	if err != nil {
+		return store.Service{}, err
+	}
+	settings, _ := json.Marshal(map[string][]string{"ports": {fmt.Sprintf("tcp/%d", port)}})
+	return store.Service{
+		Kind: "subscription", Name: SubscriptionService, Enabled: true, Settings: string(settings),
+		Secrets: map[string][]byte{SecretTLSKey: key, SecretTLSCert: cert},
+	}, nil
+}
+
+func selfSigned(host string) (keyDER, certDER []byte, err error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
+	if err != nil {
+		return nil, nil, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: host},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().AddDate(10, 0, 0),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	if certDER, err = x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key); err != nil {
+		return nil, nil, err
+	}
+	keyDER, err = x509.MarshalPKCS8PrivateKey(key)
+	return keyDER, certDER, err
+}
+
+// SPKIPin returns base64url(SHA-256(SubjectPublicKeyInfo)) of a DER certificate.
+func SPKIPin(certDER []byte) (string, error) {
+	c, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(c.RawSubjectPublicKeyInfo)
+	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
+}
+
+// kindsNeedingInner send their traffic to the inner stage.
+var kindsNeedingInner = []string{"dnstt", "masterdns", "olcrtc", "openflux", "yggdrasil"}
+
+// NeedsInner reports whether a kind exits through the inner stage.
+func NeedsInner(kind string) bool { return slices.Contains(kindsNeedingInner, kind) }
+
+// CreateService fills in defaults and secrets, stores the service and, if
+// it needs the inner stage and there is none yet, creates "inner" too.
+func CreateService(ctx context.Context, st *store.Store, svc store.Service) (store.Service, error) {
+	all, err := st.ListServices(ctx)
+	if err != nil {
+		return svc, err
+	}
+	if svc.Settings == "" {
+		svc.Settings = "{}"
+	}
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
+		return svc, fmt.Errorf("%w settings: %w", store.ErrInvalid, err)
+	}
+	svc.Secrets = map[string][]byte{}
+
+	switch svc.Kind {
+	case "dnstt", "masterdns":
+		if _, ok := settings["zone"]; !ok {
+			zone, err := newZone(ctx, st, all)
+			if err != nil {
+				return svc, err
+			}
+			settings["zone"] = zone
+		}
+		if svc.Kind == "dnstt" {
+			key, err := ecdh.X25519().GenerateKey(rand.Reader)
+			if err != nil {
+				return svc, err
+			}
+			svc.Secrets[SecretNoisePrivate] = key.Bytes()
+		} else {
+			settings["encryption_method"] = masterdnsMethod
+			raw := make([]byte, 16)
+			if _, err := rand.Read(raw); err != nil {
+				return svc, err
+			}
+			svc.Secrets[SecretMasterDNSKey] = []byte(hex.EncodeToString(raw)) // 32 hex chars, as MasterDnsVPN expects
+		}
+	case "inner":
+		seed := make([]byte, 64)
+		if _, err := rand.Read(seed); err != nil {
+			return svc, err
+		}
+		svc.Secrets[SecretMLKEMSeed] = seed
+	}
+
+	b, err := json.Marshal(settings)
+	if err != nil {
+		return svc, err
+	}
+	svc.Settings = string(b)
+	if NeedsInner(svc.Kind) && !slices.ContainsFunc(all, func(s store.Service) bool { return s.Kind == "inner" }) {
+		if _, err := CreateService(ctx, st, store.Service{Kind: "inner", Name: "inner", Enabled: true}); err != nil {
+			return svc, fmt.Errorf("creating inner: %w", err)
+		}
+	}
+	return st.CreateService(ctx, svc)
+}
+
+// newZone returns "<label>.<domain>" with a random label not used yet.
+func newZone(ctx context.Context, st *store.Store, all []store.Service) (string, error) {
+	domain, err := Domain(ctx, st)
+	if err != nil {
+		return "", err
+	}
+	if domain == "" {
+		return "", fmt.Errorf("%w: DNS tunnels need the node domain (rayd init -domain)", store.ErrInvalid)
+	}
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	for {
+		label := make([]byte, 3)
+		for i := range label {
+			n, err := randInt(0, len(alphabet)-1)
+			if err != nil {
+				return "", err
+			}
+			label[i] = alphabet[n]
+		}
+		zone := string(label) + "." + domain
+		if !slices.ContainsFunc(all, func(s store.Service) bool { return strings.Contains(s.Settings, `"`+zone+`"`) }) {
+			return zone, nil
+		}
+	}
+}
+
+// Zone returns the "zone" setting of a DNS tunnel service.
+func Zone(svc store.Service) string {
+	var s struct {
+		Zone string `json:"zone"`
+	}
+	_ = json.Unmarshal([]byte(svc.Settings), &s)
+	return s.Zone
+}

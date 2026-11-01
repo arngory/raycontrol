@@ -13,6 +13,7 @@ import (
 
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
+	"github.com/arngory/raycontrol/internal/node"
 )
 
 // PerimeterServer feeds rayspa. Its snapshots carry device keys, so only the
@@ -124,6 +125,21 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 			ps.Ports = append(ps.Ports, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
 		}
 		snap.Services = append(snap.Services, ps)
+	}
+	admin, err := node.AdminAccess(ctx, p.Store)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range admin {
+		snap.AdminPrefixes = append(snap.AdminPrefixes, a.String())
+	}
+	for _, svc := range services {
+		if svc.Enabled && svc.Kind == "ssh" {
+			ports, _ := svc.Ports()
+			for _, port := range ports {
+				snap.AdminPorts = append(snap.AdminPorts, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
+			}
+		}
 	}
 	return snap, nil
 }

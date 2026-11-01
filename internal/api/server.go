@@ -5,10 +5,10 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,9 +17,12 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -29,6 +32,9 @@ type Server struct {
 	Store   *store.Store
 	Params  spa.Params
 	Version string
+	// Paths and Binaries describe the installed node for GetDeployment.
+	Paths    render.Paths
+	Binaries deploy.Binaries
 	// OnChange, if set, runs after every successful change (tests).
 	OnChange func()
 
@@ -51,6 +57,12 @@ func (s *Server) notify() {
 	}
 }
 
+// Changes returns a channel closed at the next change.
+func (s *Server) Changes() <-chan struct{} {
+	_, c := s.changes()
+	return c
+}
+
 // changes returns the current revision and a channel closed at the next change.
 func (s *Server) changes() (uint64, <-chan struct{}) {
 	s.mu.Lock()
@@ -68,26 +80,13 @@ func (s *Server) Handler(policy PeerPolicy) (string, http.Handler) {
 	return nodev1connect.NewNodeServiceHandler(s, connect.WithInterceptors(policy.interceptor()))
 }
 
-// ServeUnix serves the API on a unix socket until ctx ends. The socket and
-// its directory are group-accessible and, when running as root, owned by
-// root:group, so that group members can use rayctl.
+// ServeUnix serves the API on a unix socket until ctx ends. Every local user
+// may connect; PeerPolicy (peer credentials) decides who may call what.
 // Extra handlers (e.g. the perimeter feed) are mounted next to NodeService
 // and do their own caller checks.
 func (s *Server) ServeUnix(ctx context.Context, path string, policy PeerPolicy, extra ...func() (string, http.Handler)) error {
-	gid := -1
-	if os.Getuid() == 0 && policy.Group != "" {
-		if g, err := user.LookupGroup(policy.Group); err == nil {
-			gid, _ = strconv.Atoi(g.Gid)
-		}
-	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // G301: peers are checked by credentials
 		return err
-	}
-	if gid >= 0 {
-		if err := os.Chown(dir, 0, gid); err != nil {
-			return err
-		}
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -97,16 +96,10 @@ func (s *Server) ServeUnix(ctx context.Context, path string, policy PeerPolicy, 
 		return err
 	}
 	defer os.Remove(path)
-	//nolint:gosec // G302: members of the API group must be able to connect.
-	if err := os.Chmod(path, 0o660); err != nil {
+	//nolint:gosec // G302: access is decided by peer credentials, not by the file mode.
+	if err := os.Chmod(path, 0o666); err != nil {
 		ln.Close()
 		return err
-	}
-	if gid >= 0 {
-		if err := os.Chown(path, 0, gid); err != nil {
-			ln.Close()
-			return err
-		}
 	}
 
 	mux := http.NewServeMux()
@@ -305,7 +298,7 @@ func (s *Server) DeleteUser(ctx context.Context, req *connect.Request[nodev1.Del
 
 func servicePB(svc store.Service) *nodev1.Service {
 	return &nodev1.Service{Id: uint32(svc.ID), Kind: svc.Kind, Name: svc.Name, Enabled: svc.Enabled,
-		SettingsJson: svc.Settings, CreatedAt: svc.CreatedAt.Unix()}
+		SettingsJson: svc.Settings, CreatedAt: svc.CreatedAt.Unix(), Uid: uint32(svc.UID)}
 }
 
 func (s *Server) ListServices(ctx context.Context, _ *connect.Request[nodev1.ListServicesRequest]) (*connect.Response[nodev1.ListServicesResponse], error) {
@@ -321,7 +314,7 @@ func (s *Server) ListServices(ctx context.Context, _ *connect.Request[nodev1.Lis
 }
 
 func (s *Server) CreateService(ctx context.Context, req *connect.Request[nodev1.CreateServiceRequest]) (*connect.Response[nodev1.CreateServiceResponse], error) {
-	svc, err := s.Store.CreateService(ctx, store.Service{Kind: req.Msg.Kind, Name: req.Msg.Name, Enabled: true, Settings: req.Msg.SettingsJson})
+	svc, err := provision.CreateService(ctx, s.Store, store.Service{Kind: req.Msg.Kind, Name: req.Msg.Name, Enabled: true, Settings: req.Msg.SettingsJson})
 	if err := s.done(ctx, "service.create:"+req.Msg.Kind, req.Msg.Name, err); err != nil {
 		return nil, err
 	}
@@ -394,12 +387,33 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 	}
 	b := node.Bundle{Version: 1, Host: host, SPA: node.FromParams(s.Params), DeviceID: d.ID, DeviceKey: hex.EncodeToString(key[:])}
 	for _, svc := range services {
+		if svc.Kind == "subscription" && svc.Enabled {
+			ports, err := svc.Ports()
+			if err != nil || len(ports) == 0 {
+				return "", fmt.Errorf("subscription service has no port: %w", err)
+			}
+			secrets, err := s.Store.ServiceSecrets(ctx, svc.ID)
+			if err != nil {
+				return "", err
+			}
+			pin, err := provision.SPKIPin(secrets[provision.SecretTLSCert])
+			if err != nil {
+				return "", err
+			}
+			b.Sub = &node.BundleSub{Port: ports[0].Num, Pin: pin}
+			continue
+		}
 		for _, id := range u.Services {
 			if svc.ID == id {
 				b.Services = append(b.Services, node.BundleService{ID: uint16(svc.ID), Kind: svc.Kind, Name: svc.Name})
 			}
 		}
 	}
+	keys, err := provision.LoadNodeKeys(ctx, s.Store)
+	if err != nil {
+		return "", err
+	}
+	b.NodeKeys = keys.PublicJSON()
 	return b.Encode()
 }
 
@@ -423,6 +437,49 @@ func (s *Server) ListAudit(ctx context.Context, req *connect.Request[nodev1.List
 	resp := &nodev1.ListAuditResponse{}
 	for _, e := range entries {
 		resp.Entries = append(resp.Entries, &nodev1.AuditEntry{Time: e.Time.Unix(), Actor: e.Actor, Action: e.Action, Target: e.Target, Result: e.Result})
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *Server) GetAdminAccess(ctx context.Context, _ *connect.Request[nodev1.GetAdminAccessRequest]) (*connect.Response[nodev1.GetAdminAccessResponse], error) {
+	ps, err := node.AdminAccess(ctx, s.Store)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	resp := &nodev1.GetAdminAccessResponse{}
+	for _, p := range ps {
+		resp.Cidrs = append(resp.Cidrs, p.String())
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *Server) SetAdminAccess(ctx context.Context, req *connect.Request[nodev1.SetAdminAccessRequest]) (*connect.Response[nodev1.SetAdminAccessResponse], error) {
+	_, err := node.SetAdminAccess(ctx, s.Store, req.Msg.Cidrs)
+	if err := s.done(ctx, "admin.access", strings.Join(req.Msg.Cidrs, ","), err); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&nodev1.SetAdminAccessResponse{}), nil
+}
+
+func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.GetDeploymentRequest]) (*connect.Response[nodev1.GetDeploymentResponse], error) {
+	m, err := render.Collect(ctx, s.Store)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	files, skipped, err := render.Render(m, s.Paths)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
+	plan := deploy.Build(m, files, s.Paths, s.Binaries)
+	resp := &nodev1.GetDeploymentResponse{Units: plan.Units, Warnings: plan.Warnings}
+	for _, name := range skipped {
+		resp.Warnings = append(resp.Warnings, "not rendered by this version: "+name)
+	}
+	for _, u := range plan.Users {
+		resp.Users = append(resp.Users, &nodev1.SystemUser{Name: u.Name, Uid: uint32(u.UID), ExtraGroups: u.ExtraGroups})
+	}
+	for _, f := range plan.Files {
+		resp.Files = append(resp.Files, &nodev1.DeployFile{Path: f.Path, Mode: f.Mode, Content: f.Content})
 	}
 	return connect.NewResponse(resp), nil
 }

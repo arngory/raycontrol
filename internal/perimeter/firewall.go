@@ -28,6 +28,9 @@ type Firewall interface {
 	Setup() error
 	SetSPAPorts(udp, tcp []uint16) error
 	SetPublic(ports []Port) error
+	// SetAdmin opens ports (SSH) to the given prefixes without SPA:
+	// emergency access when SPA itself fails.
+	SetAdmin(prefixes []netip.Prefix, ports []Port) error
 	Allow(addr netip.Addr, ports []Port, ttl time.Duration) error
 	Deny(addr netip.Addr, ports []Port) error
 	Teardown() error
@@ -87,6 +90,9 @@ table inet %[1]s {
 	set public { type inet_proto . inet_service; }
 	set allow4 { type ipv4_addr . inet_proto . inet_service; flags timeout; size 65536; }
 	set allow6 { type ipv6_addr . inet_proto . inet_service; flags timeout; size 65536; }
+	set admin4 { type ipv4_addr; flags interval; }
+	set admin6 { type ipv6_addr; flags interval; }
+	set admin_ports { type inet_proto . inet_service; }
 	set rate4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set rate6 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 
@@ -106,6 +112,8 @@ table inet %[1]s {
 		tcp dport @spa_tcp accept
 
 		meta l4proto . th dport @public accept
+		ip saddr @admin4 meta l4proto . th dport @admin_ports accept
+		ip6 saddr @admin6 meta l4proto . th dport @admin_ports accept
 		ip saddr . meta l4proto . th dport @allow4 accept
 		ip6 saddr . meta l4proto . th dport @allow6 accept
 	}
@@ -156,13 +164,40 @@ func (n *NFT) SetPublic(ports []Port) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "flush set inet %s public\n", Table)
 	if len(ports) > 0 {
-		elems := make([]string, len(ports))
-		for i, p := range ports {
-			elems[i] = fmt.Sprintf("%s . %d", p.Proto, p.Num)
-		}
-		fmt.Fprintf(&b, "add element inet %s public { %s }\n", Table, strings.Join(elems, ", "))
+		fmt.Fprintf(&b, "add element inet %s public { %s }\n", Table, strings.Join(portElems(ports), ", "))
 	}
 	return n.run(b.String())
+}
+
+// SetAdmin replaces the admin prefixes and ports in one transaction.
+func (n *NFT) SetAdmin(prefixes []netip.Prefix, ports []Port) error {
+	var v4, v6 []string
+	for _, p := range prefixes {
+		if p.Addr().Is4() {
+			v4 = append(v4, p.String())
+		} else {
+			v6 = append(v6, p.String())
+		}
+	}
+	var b strings.Builder
+	for _, set := range []struct {
+		name  string
+		elems []string
+	}{{"admin4", v4}, {"admin6", v6}, {"admin_ports", portElems(ports)}} {
+		fmt.Fprintf(&b, "flush set inet %s %s\n", Table, set.name)
+		if len(set.elems) > 0 {
+			fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set.name, strings.Join(set.elems, ", "))
+		}
+	}
+	return n.run(b.String())
+}
+
+func portElems(ports []Port) []string {
+	out := make([]string, len(ports))
+	for i, p := range ports {
+		out[i] = fmt.Sprintf("%s . %d", p.Proto, p.Num)
+	}
+	return out
 }
 
 func elements(addr netip.Addr, ports []Port, ttl time.Duration) (set, elems string) {

@@ -17,8 +17,10 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [07-questions.md](07-questions.md) | Вопросы перед реализацией (история; все закрыты). |
 | [08-decisions.md](08-decisions.md) | **Принятые решения** — главнее остальных документов при расхождении. |
 | [spec/spa-v2.md](spec/spa-v2.md) | Формат SPA v2 и пакета регистрации устройства (заморожен). |
+| [spec/subscription-v1.md](spec/subscription-v1.md) | Подписка: запрос, подписи, ссылки с параметрами `niko-*`. |
+| [RELEASE.md](RELEASE.md) | Ключ подписи и выпуск релизов. |
 | [handoff/niko-session.md](handoff/niko-session.md) | Что передать в сессию Niko: правки SPEC, контракт niko-server, доработки клиента. |
 | [handoff/niko-r1-reply.md](handoff/niko-r1-reply.md) | Ответ на документы R1 сессии Niko: TCP-носитель SPA, замечания к CONFIG и IPC. |
 
 Статус: решения приняты (08), документы 01–04 переписаны под них. Data plane — [niko-server](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/SPEC.md), control plane — raycontrol.
-Код v0 перенесён в `legacy/`. Этап R0 реализован: `rayd`, `rayctl`, хранилище, SPA v2. R1 в работе: периметр `rayspa` готов.
+Код v0 перенесён в `legacy/`. Этапы R0 и R1 реализованы; R1 ждёт бинарник niko-server и ключ подписи релизов (04-roadmap).

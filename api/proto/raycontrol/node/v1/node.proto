@@ -28,6 +28,41 @@ service NodeService {
   rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
 
   rpc ListAudit(ListAuditRequest) returns (ListAuditResponse);
+
+  // Admin access: addresses (CIDR) that reach SSH without SPA (emergency
+  // access, docs/08-decisions.md D-6).
+  rpc GetAdminAccess(GetAdminAccessRequest) returns (GetAdminAccessResponse);
+  rpc SetAdminAccess(SetAdminAccessRequest) returns (SetAdminAccessResponse);
+
+  // GetDeployment returns what root must install for the current services:
+  // system users, unit files and other files. rayctl apply writes them.
+  rpc GetDeployment(GetDeploymentRequest) returns (GetDeploymentResponse);
+}
+
+message GetAdminAccessRequest {}
+message GetAdminAccessResponse { repeated string cidrs = 1; }
+
+message SetAdminAccessRequest { repeated string cidrs = 1; }
+message SetAdminAccessResponse {}
+
+message GetDeploymentRequest {}
+message GetDeploymentResponse {
+  repeated SystemUser users = 1;
+  repeated DeployFile files = 2;
+  repeated string units = 3;     // units to enable and keep running
+  repeated string warnings = 4;
+}
+
+message SystemUser {
+  string name = 1;
+  uint32 uid = 2;
+  repeated string extra_groups = 3; // groups the user joins
+}
+
+message DeployFile {
+  string path = 1;
+  uint32 mode = 2;
+  bytes content = 3;
 }
 
 message GetStatusRequest {}
@@ -87,6 +122,7 @@ message Service {
   bool enabled = 4;
   string settings_json = 5;
   int64 created_at = 6;
+  uint32 uid = 7; // system user of the service's process, 0 if none
 }
 
 message ListServicesRequest {}

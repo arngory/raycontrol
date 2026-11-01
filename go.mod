@@ -4,6 +4,8 @@ go 1.26.0
 
 require (
 	connectrpc.com/connect v1.18.1
+	github.com/cloudflare/circl v1.6.5
+	github.com/florianl/go-nflog/v2 v2.3.0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/sys v0.49.0
 	google.golang.org/protobuf v1.36.6
@@ -12,7 +14,6 @@ require (
 
 require (
 	github.com/dustin/go-humanize v1.1.0 // indirect
-	github.com/florianl/go-nflog/v2 v2.3.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect

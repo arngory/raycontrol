@@ -39,9 +39,12 @@ func connContext(ctx context.Context, c net.Conn) context.Context {
 }
 
 // PeerPolicy decides which local users may call the API: root, the daemon's
-// own user, and members of Group.
+// own user, and members of Group, except the UIDs in Deny (rayspa: it only
+// reads the perimeter feed). The socket itself is open to all local users;
+// this check is the gate.
 type PeerPolicy struct {
 	Group string
+	Deny  []int
 }
 
 func (p PeerPolicy) actor(ctx context.Context) (string, error) {
@@ -53,6 +56,9 @@ func (p PeerPolicy) actor(ctx context.Context) (string, error) {
 	u, err := user.LookupId(name)
 	if err == nil {
 		name = u.Username
+	}
+	if slices.Contains(p.Deny, int(cred.Uid)) {
+		return "", fmt.Errorf("uid %d may not use the node API", cred.Uid)
 	}
 	if cred.Uid == 0 || int(cred.Uid) == os.Getuid() {
 		return name, nil

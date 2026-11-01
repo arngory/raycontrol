@@ -37,6 +37,8 @@ type Gate struct {
 	services   map[uint16][]Port
 	allowed    map[string][]uint16 // device -> service IDs
 	public     []Port
+	admin      []netip.Prefix
+	adminPorts []Port
 	// holders tracks which devices opened an address and port and until
 	// when, so that a revocation closes only what nobody else still holds.
 	holders  map[grantKey]map[string]time.Time
@@ -100,6 +102,15 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		services[uint16(s.Id)] = portsOf(s.Ports)
 	}
 	public := portsOf(snap.PublicPorts)
+	var admin []netip.Prefix
+	for _, s := range snap.AdminPrefixes {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return fmt.Errorf("perimeter: admin prefix %q: %w", s, err)
+		}
+		admin = append(admin, p)
+	}
+	adminPorts := portsOf(snap.AdminPorts)
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -121,6 +132,12 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 			return err
 		}
 		g.public = public
+	}
+	if !slices.Equal(admin, g.admin) || !slices.Equal(adminPorts, g.adminPorts) {
+		if err := g.fw.SetAdmin(admin, adminPorts); err != nil {
+			return err
+		}
+		g.admin, g.adminPorts = admin, adminPorts
 	}
 	g.revokeLocked()
 	return g.slotsLocked()

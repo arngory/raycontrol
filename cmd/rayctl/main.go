@@ -36,6 +36,10 @@ const usageText = `usage: rayctl [-socket PATH] [-json] <command>
   device add USER NAME [-role user|admin]   prints the enrollment bundle once
   device revoke ID
   audit [-n 50]
+  admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA
+
+  install -host ADDR [-domain D] [-admin A]   set the node up on this host (root)
+  apply                                       install what the current services need (root)
 `
 
 type cli struct {
@@ -55,7 +59,7 @@ func main() {
 	}
 
 	c := &cli{c: api.NewUnixClient(*socket), json: *asJSON}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	if err := c.run(ctx, fs.Args()); err != nil {
 		fmt.Fprintln(os.Stderr, "rayctl:", err)
@@ -93,6 +97,12 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.device(ctx, sub, rest)
 	case "audit":
 		return c.audit(ctx, args[1:])
+	case "admin":
+		return c.adminAccess(ctx, args[1:])
+	case "install":
+		return c.install(ctx, args[1:])
+	case "apply":
+		return c.apply(ctx, args[1:])
 	}
 	return errUsage
 }

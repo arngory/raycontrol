@@ -16,8 +16,13 @@ import (
 	"time"
 
 	"github.com/arngory/raycontrol/internal/api"
+	"github.com/arngory/raycontrol/internal/deploy"
+	"github.com/arngory/raycontrol/internal/live"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/store"
+	"github.com/arngory/raycontrol/internal/sub"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -65,6 +70,7 @@ func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	db := fs.String("db", defaultDB, "database path")
 	host := fs.String("host", "", "public address clients use (IP or domain)")
+	domain := fs.String("domain", "", "base domain for service subdomains and DNS tunnel zones")
 	fs.Parse(args)
 
 	ctx := context.Background()
@@ -73,7 +79,7 @@ func cmdInit(args []string) error {
 		return err
 	}
 	defer st.Close()
-	p, err := node.Init(ctx, st, *host)
+	p, err := provision.Init(ctx, st, provision.Options{Host: *host, Domain: *domain})
 	if err != nil {
 		return err
 	}
@@ -90,6 +96,8 @@ func cmdServe(args []string) error {
 	spaTTL := fs.Duration("spa-ttl", 10*time.Minute, "access granted by SPA when the packet asks for the default")
 	spaMaxTTL := fs.Duration("spa-max-ttl", time.Hour, "longest access a SPA packet may ask for")
 	spaTCP := fs.Bool("spa-tcp", true, "also accept SPA v2 over TCP on the slot ports")
+	rendered := fs.String("rendered", render.DefaultPaths.Rendered, "directory for rendered data-plane files")
+	liveApply := fs.Bool("live", true, "render and apply data-plane files while serving")
 	fs.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -110,15 +118,65 @@ func cmdServe(args []string) error {
 	}
 
 	go pruneAudit(ctx, st, log)
-	srv := &api.Server{Store: st, Params: params, Version: version}
+	paths := render.DefaultPaths
+	paths.Rendered = *rendered
+	srv := &api.Server{Store: st, Params: params, Version: version, Paths: paths, Binaries: deploy.DefaultBinaries}
 	per := &api.PerimeterServer{Server: srv, RayspaUID: -1, DefaultTTL: *spaTTL, MaxTTL: *spaMaxTTL, TCPCarrier: *spaTCP, Refresh: time.Minute}
+	policy := api.PeerPolicy{Group: *group}
 	if u, err := user.Lookup(*rayspaUser); err == nil {
 		per.RayspaUID, _ = strconv.Atoi(u.Uid)
+		policy.Deny = []int{per.RayspaUID}
 	} else {
 		log.Warn("rayspa user not found; only root receives the perimeter feed", "user", *rayspaUser)
 	}
+
+	if *liveApply {
+		applier := &live.Applier{Store: st, Paths: paths, Log: log}
+		go applier.Run(ctx, srv.Changes)
+	}
+	if err := startSubscription(ctx, st, log); err != nil {
+		log.Error("subscription endpoint not started", "err", err)
+	}
 	log.Info("serving", "socket", *socket, "node", fmt.Sprintf("%x", params.NodeID))
-	return srv.ServeUnix(ctx, *socket, api.PeerPolicy{Group: *group}, per.Handler)
+	return srv.ServeUnix(ctx, *socket, policy, per.Handler)
+}
+
+// startSubscription serves the subscription endpoint on the port of the
+// subscription service, if it is enabled.
+func startSubscription(ctx context.Context, st *store.Store, log *slog.Logger) error {
+	svc, err := st.ServiceByName(ctx, provision.SubscriptionService)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && !svc.Enabled) {
+		log.Info("subscription service disabled")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	ports, err := svc.Ports()
+	if err != nil || len(ports) == 0 {
+		return fmt.Errorf("subscription service has no port: %w", err)
+	}
+	secrets, err := st.ServiceSecrets(ctx, svc.ID)
+	if err != nil {
+		return err
+	}
+	tlsCfg, err := sub.TLSConfig(secrets[provision.SecretTLSCert], secrets[provision.SecretTLSKey])
+	if err != nil {
+		return err
+	}
+	keys, err := provision.LoadNodeKeys(ctx, st)
+	if err != nil {
+		return err
+	}
+	s := &sub.Server{Store: st, Keys: keys, Log: log}
+	addr := ":" + strconv.Itoa(int(ports[0].Num))
+	go func() {
+		if err := s.Serve(ctx, addr, tlsCfg); err != nil {
+			log.Error("subscription endpoint", "err", err)
+		}
+	}()
+	log.Info("subscription endpoint", "addr", addr)
+	return nil
 }
 
 func pruneAudit(ctx context.Context, st *store.Store, log *slog.Logger) {

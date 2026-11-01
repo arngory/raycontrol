@@ -5,8 +5,25 @@ Control plane for a self-contained proxy node. The data plane is
 (a sing-box fork); raycontrol keeps users and keys, renders configs, runs the
 SPA-gated firewall, rotates keys and serves the subscription and API.
 
-Status: **R0** — node state, `rayd`, `rayctl` and the SPA v2 format. Nothing is
-deployed to a host yet; see [docs/04-roadmap.md](docs/04-roadmap.md).
+Status: **R1** — perimeter (SPA v2 over UDP and TCP), DNS tunnels with the
+inner stage on Xray, signed subscriptions, installer. The niko-server binary
+(front and backends) is not released yet; see [docs/04-roadmap.md](docs/04-roadmap.md).
+
+## Install
+
+On Debian 12/13 or Ubuntu 24.04, as root, from an SSH session (its address
+becomes the emergency SSH access):
+
+```
+curl -fsSL https://raw.githubusercontent.com/arngory/raycontrol/main/install/bootstrap.sh -o bootstrap.sh
+less bootstrap.sh
+bash bootstrap.sh -host <public address> -domain <domain>
+```
+
+The bootstrap verifies the release signature (minisign), installs `rayd`,
+`rayspa` and `rayctl` and runs `rayctl install`. Every port is closed
+afterwards except SPA, DNS tunnels and SSH from the admin address. Recovery
+from the provider console: `rayspa teardown`. Releases: [docs/RELEASE.md](docs/RELEASE.md).
 
 [Русская версия ниже](#raycontrol-ru)
 
@@ -55,7 +72,14 @@ Control plane самодостаточной прокси-ноды. Data plane �
 raycontrol хранит пользователей и ключи, генерирует конфиги, ведёт файрвол со SPA,
 ротирует ключи, отдаёт подписку и API.
 
-- **Статус:** этап R0 — состояние ноды, `rayd`, `rayctl` и формат SPA v2. На хост пока ничего не ставится.
+- **Статус:** этап R1 — периметр (SPA v2 по UDP и TCP), DNS-туннели с внутренней ступенью на Xray, подписанные
+  подписки, установщик. Бинарник niko-server ещё не выпущен.
+- **Установка:** Debian 12/13 или Ubuntu 24.04, root, из SSH-сессии: `bash bootstrap.sh -host <адрес> -domain <домен>`
+  (скрипт `install/bootstrap.sh` проверяет подпись релиза). Восстановление с консоли: `rayspa teardown`.
 - **Сборка:** Go 1.26, `go build ./cmd/...`, `go test ./...`; API генерируется `scripts/gen.sh`.
 - **Документы:** [docs/](docs/README.md); формат SPA v2 заморожен в [docs/spec/spa-v2.md](docs/spec/spa-v2.md).
 - **v0:** bash-установщик перенесён в [legacy/](legacy/); для новых установок не использовать.
+
+## License
+
+GPL-3.0, see [LICENSE](LICENSE). / Лицензия GPL-3.0, см. [LICENSE](LICENSE).

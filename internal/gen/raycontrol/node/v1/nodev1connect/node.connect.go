@@ -72,6 +72,15 @@ const (
 	NodeServiceRevokeDeviceProcedure = "/raycontrol.node.v1.NodeService/RevokeDevice"
 	// NodeServiceListAuditProcedure is the fully-qualified name of the NodeService's ListAudit RPC.
 	NodeServiceListAuditProcedure = "/raycontrol.node.v1.NodeService/ListAudit"
+	// NodeServiceGetAdminAccessProcedure is the fully-qualified name of the NodeService's
+	// GetAdminAccess RPC.
+	NodeServiceGetAdminAccessProcedure = "/raycontrol.node.v1.NodeService/GetAdminAccess"
+	// NodeServiceSetAdminAccessProcedure is the fully-qualified name of the NodeService's
+	// SetAdminAccess RPC.
+	NodeServiceSetAdminAccessProcedure = "/raycontrol.node.v1.NodeService/SetAdminAccess"
+	// NodeServiceGetDeploymentProcedure is the fully-qualified name of the NodeService's GetDeployment
+	// RPC.
+	NodeServiceGetDeploymentProcedure = "/raycontrol.node.v1.NodeService/GetDeployment"
 )
 
 // NodeServiceClient is a client for the raycontrol.node.v1.NodeService service.
@@ -92,6 +101,13 @@ type NodeServiceClient interface {
 	CreateDevice(context.Context, *connect.Request[v1.CreateDeviceRequest]) (*connect.Response[v1.CreateDeviceResponse], error)
 	RevokeDevice(context.Context, *connect.Request[v1.RevokeDeviceRequest]) (*connect.Response[v1.RevokeDeviceResponse], error)
 	ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error)
+	// Admin access: addresses (CIDR) that reach SSH without SPA (emergency
+	// access, docs/08-decisions.md D-6).
+	GetAdminAccess(context.Context, *connect.Request[v1.GetAdminAccessRequest]) (*connect.Response[v1.GetAdminAccessResponse], error)
+	SetAdminAccess(context.Context, *connect.Request[v1.SetAdminAccessRequest]) (*connect.Response[v1.SetAdminAccessResponse], error)
+	// GetDeployment returns what root must install for the current services:
+	// system users, unit files and other files. rayctl apply writes them.
+	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
 }
 
 // NewNodeServiceClient constructs a client for the raycontrol.node.v1.NodeService service. By
@@ -189,6 +205,24 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("ListAudit")),
 			connect.WithClientOptions(opts...),
 		),
+		getAdminAccess: connect.NewClient[v1.GetAdminAccessRequest, v1.GetAdminAccessResponse](
+			httpClient,
+			baseURL+NodeServiceGetAdminAccessProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetAdminAccess")),
+			connect.WithClientOptions(opts...),
+		),
+		setAdminAccess: connect.NewClient[v1.SetAdminAccessRequest, v1.SetAdminAccessResponse](
+			httpClient,
+			baseURL+NodeServiceSetAdminAccessProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetAdminAccess")),
+			connect.WithClientOptions(opts...),
+		),
+		getDeployment: connect.NewClient[v1.GetDeploymentRequest, v1.GetDeploymentResponse](
+			httpClient,
+			baseURL+NodeServiceGetDeploymentProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetDeployment")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -208,6 +242,9 @@ type nodeServiceClient struct {
 	createDevice      *connect.Client[v1.CreateDeviceRequest, v1.CreateDeviceResponse]
 	revokeDevice      *connect.Client[v1.RevokeDeviceRequest, v1.RevokeDeviceResponse]
 	listAudit         *connect.Client[v1.ListAuditRequest, v1.ListAuditResponse]
+	getAdminAccess    *connect.Client[v1.GetAdminAccessRequest, v1.GetAdminAccessResponse]
+	setAdminAccess    *connect.Client[v1.SetAdminAccessRequest, v1.SetAdminAccessResponse]
+	getDeployment     *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
 }
 
 // GetStatus calls raycontrol.node.v1.NodeService.GetStatus.
@@ -280,6 +317,21 @@ func (c *nodeServiceClient) ListAudit(ctx context.Context, req *connect.Request[
 	return c.listAudit.CallUnary(ctx, req)
 }
 
+// GetAdminAccess calls raycontrol.node.v1.NodeService.GetAdminAccess.
+func (c *nodeServiceClient) GetAdminAccess(ctx context.Context, req *connect.Request[v1.GetAdminAccessRequest]) (*connect.Response[v1.GetAdminAccessResponse], error) {
+	return c.getAdminAccess.CallUnary(ctx, req)
+}
+
+// SetAdminAccess calls raycontrol.node.v1.NodeService.SetAdminAccess.
+func (c *nodeServiceClient) SetAdminAccess(ctx context.Context, req *connect.Request[v1.SetAdminAccessRequest]) (*connect.Response[v1.SetAdminAccessResponse], error) {
+	return c.setAdminAccess.CallUnary(ctx, req)
+}
+
+// GetDeployment calls raycontrol.node.v1.NodeService.GetDeployment.
+func (c *nodeServiceClient) GetDeployment(ctx context.Context, req *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {
+	return c.getDeployment.CallUnary(ctx, req)
+}
+
 // NodeServiceHandler is an implementation of the raycontrol.node.v1.NodeService service.
 type NodeServiceHandler interface {
 	GetStatus(context.Context, *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error)
@@ -298,6 +350,13 @@ type NodeServiceHandler interface {
 	CreateDevice(context.Context, *connect.Request[v1.CreateDeviceRequest]) (*connect.Response[v1.CreateDeviceResponse], error)
 	RevokeDevice(context.Context, *connect.Request[v1.RevokeDeviceRequest]) (*connect.Response[v1.RevokeDeviceResponse], error)
 	ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error)
+	// Admin access: addresses (CIDR) that reach SSH without SPA (emergency
+	// access, docs/08-decisions.md D-6).
+	GetAdminAccess(context.Context, *connect.Request[v1.GetAdminAccessRequest]) (*connect.Response[v1.GetAdminAccessResponse], error)
+	SetAdminAccess(context.Context, *connect.Request[v1.SetAdminAccessRequest]) (*connect.Response[v1.SetAdminAccessResponse], error)
+	// GetDeployment returns what root must install for the current services:
+	// system users, unit files and other files. rayctl apply writes them.
+	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
 }
 
 // NewNodeServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -391,6 +450,24 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("ListAudit")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceGetAdminAccessHandler := connect.NewUnaryHandler(
+		NodeServiceGetAdminAccessProcedure,
+		svc.GetAdminAccess,
+		connect.WithSchema(nodeServiceMethods.ByName("GetAdminAccess")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceSetAdminAccessHandler := connect.NewUnaryHandler(
+		NodeServiceSetAdminAccessProcedure,
+		svc.SetAdminAccess,
+		connect.WithSchema(nodeServiceMethods.ByName("SetAdminAccess")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceGetDeploymentHandler := connect.NewUnaryHandler(
+		NodeServiceGetDeploymentProcedure,
+		svc.GetDeployment,
+		connect.WithSchema(nodeServiceMethods.ByName("GetDeployment")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/raycontrol.node.v1.NodeService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case NodeServiceGetStatusProcedure:
@@ -421,6 +498,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceRevokeDeviceHandler.ServeHTTP(w, r)
 		case NodeServiceListAuditProcedure:
 			nodeServiceListAuditHandler.ServeHTTP(w, r)
+		case NodeServiceGetAdminAccessProcedure:
+			nodeServiceGetAdminAccessHandler.ServeHTTP(w, r)
+		case NodeServiceSetAdminAccessProcedure:
+			nodeServiceSetAdminAccessHandler.ServeHTTP(w, r)
+		case NodeServiceGetDeploymentProcedure:
+			nodeServiceGetDeploymentHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -484,4 +567,16 @@ func (UnimplementedNodeServiceHandler) RevokeDevice(context.Context, *connect.Re
 
 func (UnimplementedNodeServiceHandler) ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.ListAudit is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetAdminAccess(context.Context, *connect.Request[v1.GetAdminAccessRequest]) (*connect.Response[v1.GetAdminAccessResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetAdminAccess is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetAdminAccess(context.Context, *connect.Request[v1.SetAdminAccessRequest]) (*connect.Response[v1.SetAdminAccessResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetAdminAccess is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetDeployment is not implemented"))
 }

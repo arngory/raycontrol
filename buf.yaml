@@ -1,9 +1,14 @@
 version: v2
 modules:
   - path: api/proto
-lint:
-  use:
-    - STANDARD
-breaking:
-  use:
-    - FILE
+    lint:
+      use:
+        - STANDARD
+    breaking:
+      use:
+        - FILE
+  # Xray's own definitions: names follow Xray, not our lint rules.
+  - path: api/xray
+    lint:
+      use:
+        - MINIMAL

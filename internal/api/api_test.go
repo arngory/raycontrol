@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -35,7 +37,7 @@ func startServerWith(t *testing.T, extra func(*Server) []func() (string, http.Ha
 	if err != nil {
 		t.Fatal(err)
 	}
-	params, err := node.Init(ctx, st, "n.example.com")
+	params, err := provision.Init(ctx, st, provision.Options{Host: "n.example.com", Domain: "example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +90,9 @@ func TestEnrollAndPassSPA(t *testing.T) {
 	}
 	if b.Host != "n.example.com" || b.DeviceID != dev.Msg.Device.Id || len(b.Services) != 2 {
 		t.Fatalf("bundle = %+v", b)
+	}
+	if b.Sub == nil || b.Sub.Port == 0 || len(b.Sub.Pin) != 43 || len(b.NodeKeys["ed25519"]) != 64 || b.NodeKeys["mldsa65"] == "" {
+		t.Fatalf("bundle subscription/keys = %+v %v", b.Sub, b.NodeKeys)
 	}
 	params, err := b.SPA.Params()
 	if err != nil || params != srv.Params {
@@ -204,8 +209,15 @@ func TestPerimeterFeed(t *testing.T) {
 		t.Fatal(stream.Err())
 	}
 	first := stream.Msg().Snapshot
-	if len(first.Devices) != 0 || len(first.Services) != 2 || len(first.PublicPorts) != 1 ||
-		first.PublicPorts[0].Port != 53 || !first.Spa.TcpCarrier || first.Spa.LenMax != uint32(srv.Params.LenMax) {
+	ports := map[string]bool{}
+	for _, s := range first.Services {
+		for _, p := range s.Ports {
+			ports[p.Proto+"/"+strconv.Itoa(int(p.Port))] = true
+		}
+	}
+	if len(first.Devices) != 0 || !ports["tcp/443"] || !ports["tcp/2222"] || len(ports) != 3 || len(first.PublicPorts) != 1 ||
+		first.PublicPorts[0].Port != 53 || !first.Spa.TcpCarrier || first.Spa.LenMax != uint32(srv.Params.LenMax) ||
+		len(first.AdminPorts) != 1 || first.AdminPorts[0].Port != 2222 {
 		t.Fatalf("first snapshot: %v", first)
 	}
 
@@ -216,8 +228,30 @@ func TestPerimeterFeed(t *testing.T) {
 		t.Fatal(stream.Err())
 	}
 	second := stream.Msg().Snapshot
-	if second.Revision <= first.Revision || len(second.Devices) != 1 || len(second.Devices[0].Allowed) != 2 {
+	// reality, ssh and the subscription every device may reach.
+	if second.Revision <= first.Revision || len(second.Devices) != 1 || len(second.Devices[0].Allowed) != 3 {
 		t.Fatalf("second snapshot: %v", second)
+	}
+
+	if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{"198.51.100.7", "2001:db8::/48"}})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	if a := stream.Msg().Snapshot.AdminPrefixes; len(a) != 2 || a[0] != "198.51.100.7/32" {
+		t.Fatalf("admin prefixes %v", a)
+	}
+	if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{"nonsense"}})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("bad cidr: %v", err)
+	}
+
+	dep, err := c.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dep.Msg.Units) != 5 || len(dep.Msg.Warnings) == 0 {
+		t.Fatalf("deployment units %v warnings %v", dep.Msg.Units, dep.Msg.Warnings)
 	}
 }
 

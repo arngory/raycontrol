@@ -27,25 +27,36 @@ func ParsePort(s string) (Port, error) {
 
 // kindPorts are the ports each kind uses on the node (docs/03-protocols.md).
 // Public kinds are reachable without SPA; all others only after SPA.
+// Kinds with a process run as their own system user with a fixed UID.
 var kindPorts = map[string]struct {
-	ports  []Port
-	public bool
+	ports   []Port
+	public  bool
+	process bool
 }{
-	"reality":      {ports: []Port{{"tcp", 443}}},
-	"naive":        {ports: []Port{{"tcp", 443}, {"udp", 443}}},
-	"doh":          {ports: []Port{{"tcp", 443}, {"udp", 443}}},
-	"yggdrasil":    {ports: []Port{{"tcp", 443}}},
-	"hy2-masq":     {ports: []Port{{"udp", 443}}},
-	"hy2-obfs":     {ports: []Port{{"udp", 443}}},
-	"dnstt":        {ports: []Port{{"udp", 53}}, public: true},
-	"masterdns":    {ports: []Port{{"udp", 53}}, public: true},
+	"reality":      {ports: []Port{{"tcp", 443}}, process: true},
+	"naive":        {ports: []Port{{"tcp", 443}, {"udp", 443}}, process: true},
+	"doh":          {ports: []Port{{"tcp", 443}, {"udp", 443}}, process: true},
+	"yggdrasil":    {ports: []Port{{"tcp", 443}}, process: true},
+	"hy2-masq":     {ports: []Port{{"udp", 443}}, process: true},
+	"hy2-obfs":     {ports: []Port{{"udp", 443}}, process: true},
+	"dnstt":        {ports: []Port{{"udp", 53}}, public: true, process: true},
+	"masterdns":    {ports: []Port{{"udp", 53}}, public: true, process: true},
 	"ssh":          {ports: []Port{{"tcp", 22}}},
-	"subscription": {}, // port chosen at install, in settings
+	"subscription": {}, // served by rayd; port chosen at install, in settings
 	"api":          {},
-	"olcrtc":       {}, // outbound only
-	"openflux":     {},
-	"inner":        {}, // unix socket only
+	"olcrtc":       {process: true}, // outbound only
+	"openflux":     {process: true},
+	"inner":        {process: true}, // unix socket only
 }
+
+// UID range of data-plane service processes (docs/08-decisions.md, R1-6).
+const (
+	FirstServiceUID = 9110
+	LastServiceUID  = 9179
+)
+
+// HasProcess reports whether services of the kind run their own process.
+func HasProcess(kind string) bool { return kindPorts[kind].process }
 
 // Ports returns the ports of a service: settings {"ports": ["tcp/2222"]}
 // override the kind's defaults.

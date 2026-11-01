@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -17,8 +18,9 @@ import (
 )
 
 const (
-	settingSPA  = "spa_params"
-	settingHost = "public_host"
+	settingSPA   = "spa_params"
+	settingHost  = "public_host"
+	settingAdmin = "admin_access"
 
 	// BundlePrefix marks an encoded device bundle.
 	BundlePrefix = "rcdev1:"
@@ -142,6 +144,17 @@ type Bundle struct {
 	DeviceID  string          `json:"device_id"`
 	DeviceKey string          `json:"device_key"`
 	Services  []BundleService `json:"services"`
+	// NodeKeys verify subscription signatures: "ed25519" (hex) and
+	// "mldsa65" (base64url).
+	NodeKeys map[string]string `json:"node_keys,omitempty"`
+	Sub      *BundleSub        `json:"sub,omitempty"`
+}
+
+// BundleSub locates the subscription endpoint: https://<host>:<port>/sub/v1,
+// certificate pinned by SPKI SHA-256 (base64url).
+type BundleSub struct {
+	Port uint16 `json:"port"`
+	Pin  string `json:"pin"`
 }
 
 // Encode returns the bundle as "rcdev1:" + base64url(JSON), without padding.
@@ -171,4 +184,55 @@ func DecodeBundle(s string) (Bundle, error) {
 		return b, fmt.Errorf("unsupported bundle version %d", b.Version)
 	}
 	return b, nil
+}
+
+// AdminAccess returns the prefixes that reach SSH without SPA.
+func AdminAccess(ctx context.Context, st *store.Store) ([]netip.Prefix, error) {
+	b, err := st.GetSetting(ctx, settingAdmin)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var list []string
+	if err := json.Unmarshal(b, &list); err != nil {
+		return nil, err
+	}
+	return ParsePrefixes(list)
+}
+
+// SetAdminAccess replaces the admin prefixes. Single addresses are accepted
+// and stored as /32 or /128.
+func SetAdminAccess(ctx context.Context, st *store.Store, list []string) ([]netip.Prefix, error) {
+	ps, err := ParsePrefixes(list)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, len(ps))
+	for i, p := range ps {
+		out[i] = p.String()
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, err
+	}
+	return ps, st.SetSetting(ctx, settingAdmin, b)
+}
+
+// ParsePrefixes parses CIDRs or bare addresses.
+func ParsePrefixes(list []string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, s := range list {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			a, aerr := netip.ParseAddr(s)
+			if aerr != nil {
+				return nil, fmt.Errorf("%w admin address %q: use an IP or CIDR", store.ErrInvalid, s)
+			}
+			p = netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen())
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
 }

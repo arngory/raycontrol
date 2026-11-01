@@ -25,6 +25,9 @@ message Snapshot {
   repeated Service services = 4;
   // Ports open to everyone, e.g. udp/53 for DNS tunnels.
   repeated Port public_ports = 5;
+  // Emergency access: these prefixes reach admin_ports (SSH) without SPA.
+  repeated string admin_prefixes = 6;
+  repeated Port admin_ports = 7;
 }
 
 message SPAParams {

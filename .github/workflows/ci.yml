@@ -21,7 +21,7 @@ jobs:
           ./scripts/gen.sh
           git diff --exit-code -- internal/gen
       - name: Shell scripts
-        run: shellcheck scripts/*.sh
+        run: shellcheck scripts/*.sh install/*.sh
       - run: go vet ./...
       - run: go test -race -count=1 ./...
       # Built from source with the module's Go: prebuilt binaries made with an
@@ -42,6 +42,29 @@ jobs:
       - run: sudo apt-get install -y nftables
       - run: go test -c -o perimeter.test ./internal/perimeter
       - run: sudo RAYCONTROL_NETNS_TEST=1 unshare -n ./perimeter.test -test.run TestNetns -test.v
+
+  xray:
+    # The rendered inner stage on a real Xray from the pinned fork: config
+    # check, users through the API, traffic through VLESS with ML-KEM-768.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch Xray
+        run: |
+          . deploy/versions.env
+          git clone --filter=blob:none "$XRAY_REPOSITORY" xray
+          git -C xray checkout -q "$XRAY_COMMIT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: xray/go.mod
+          cache: false
+      - name: Build Xray
+        working-directory: xray
+        run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/xray" ./main
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: XRAY_BIN="$RUNNER_TEMP/xray" go test -count=1 -run TestInnerWithXray -v ./internal/xrayapi
 
   build:
     runs-on: ubuntu-24.04

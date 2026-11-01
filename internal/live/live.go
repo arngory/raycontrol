@@ -1,0 +1,217 @@
+// Package live keeps the data plane in step with the node state while rayd
+// runs: it rewrites rendered files, syncs inner users through the Xray API
+// and restarts processes whose configs changed.
+package live
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
+	"os/user"
+	"path/filepath"
+	"strconv"
+	"time"
+
+	"github.com/arngory/raycontrol/internal/render"
+	"github.com/arngory/raycontrol/internal/store"
+	"github.com/arngory/raycontrol/internal/xrayapi"
+)
+
+// InnerAPI is the part of the Xray API live needs.
+type InnerAPI interface {
+	SyncVLESS(ctx context.Context, tag string, want map[string]string) (added, removed int, err error)
+}
+
+// Applier renders and applies.
+type Applier struct {
+	Store *store.Store
+	Paths render.Paths
+	Log   *slog.Logger
+	// Restart restarts a unit if it runs; nil uses systemctl (allowed for the
+	// rayd user by the raycontrol polkit rule).
+	Restart func(ctx context.Context, unit string) error
+	// Inner returns an API client for an inner API socket; nil dials Xray.
+	Inner func(socket string) InnerAPI
+}
+
+func (a *Applier) restart(ctx context.Context, unit string) error {
+	if a.Restart != nil {
+		return a.Restart(ctx, unit)
+	}
+	out, err := exec.CommandContext(ctx, "systemctl", "try-restart", unit).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("systemctl try-restart %s: %w: %s", unit, err, bytes.TrimSpace(out))
+	}
+	return nil
+}
+
+func (a *Applier) inner(socket string) InnerAPI {
+	if a.Inner != nil {
+		return a.Inner(socket)
+	}
+	return xrayapi.Dial(socket)
+}
+
+// Apply renders everything once. Errors of single services are logged and
+// do not stop the others.
+func (a *Applier) Apply(ctx context.Context) error {
+	m, err := render.Collect(ctx, a.Store)
+	if err != nil {
+		return err
+	}
+	files, skipped, err := render.Render(m, a.Paths)
+	if err != nil {
+		return err
+	}
+	for _, s := range skipped {
+		a.Log.Debug("not rendered by this version", "service", s)
+	}
+
+	// Service users traverse this directory to their own subdirectory.
+	if err := os.MkdirAll(a.Paths.Rendered, 0o711); err != nil { //nolint:gosec // G301: traversal only, the subdirectories are 0750
+		return err
+	}
+	if err := os.Chmod(a.Paths.Rendered, 0o711); err != nil { //nolint:gosec // G302: as above
+		return err
+	}
+
+	type change struct{ old, new []byte }
+	changed := map[string][]change{} // service -> changed files
+	for _, f := range files {
+		old, err := os.ReadFile(f.Path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err == nil && bytes.Equal(old, f.Content) {
+			continue
+		}
+		if err := writeFile(f); err != nil {
+			return fmt.Errorf("writing %s: %w", f.Path, err)
+		}
+		changed[f.Service] = append(changed[f.Service], change{old, f.Content})
+	}
+
+	for service, cs := range changed {
+		unit := render.UnitName(service)
+		if service != "front" && isInner(m, service) && len(cs) == 1 && cs[0].old != nil && sameExceptClients(cs[0].old, cs[0].new) {
+			want := map[string]string{}
+			for id, uuid := range m.Inner {
+				want[render.InnerEmail(id)] = uuid
+			}
+			added, removed, err := a.inner(a.Paths.InnerAPISocket(service)).SyncVLESS(ctx, render.InnerTag, want)
+			if err == nil {
+				a.Log.Info("inner users synced", "service", service, "added", added, "removed", removed)
+				continue
+			}
+			a.Log.Warn("inner API sync failed, restarting", "service", service, "err", err)
+		}
+		if err := a.restart(ctx, unit); err != nil {
+			a.Log.Warn("restart failed (is the node deployed? run rayctl apply)", "unit", unit, "err", err)
+		} else {
+			a.Log.Info("restarted after config change", "unit", unit)
+		}
+	}
+	return nil
+}
+
+func isInner(m render.Model, service string) bool {
+	for _, s := range m.Services {
+		if s.Name == service {
+			return s.Kind == "inner"
+		}
+	}
+	return false
+}
+
+// sameExceptClients reports whether two inner Xray configs differ only in
+// the users of the inner inbound.
+func sameExceptClients(a, b []byte) bool {
+	strip := func(raw []byte) ([]byte, bool) {
+		var cfg map[string]any
+		if json.Unmarshal(raw, &cfg) != nil {
+			return nil, false
+		}
+		ins, _ := cfg["inbounds"].([]any)
+		for _, in := range ins {
+			if m, ok := in.(map[string]any); ok {
+				if s, ok := m["settings"].(map[string]any); ok {
+					delete(s, "clients")
+				}
+			}
+		}
+		out, err := json.Marshal(cfg)
+		return out, err == nil
+	}
+	x, ok1 := strip(a)
+	y, ok2 := strip(b)
+	return ok1 && ok2 && bytes.Equal(x, y)
+}
+
+// writeFile writes atomically with the file's mode and group. The group is
+// set only if it exists (it does once the node is deployed).
+func writeFile(f render.File) error {
+	dir := filepath.Dir(f.Path)
+	gid := -1
+	if f.Group != "" {
+		if g, err := user.LookupGroup(f.Group); err == nil {
+			gid, _ = strconv.Atoi(g.Gid)
+		}
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	if gid >= 0 {
+		// The directory must let the group in; the files decide the rest.
+		if err := os.Chown(dir, -1, gid); err != nil {
+			return err
+		}
+	}
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(f.Content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if gid >= 0 {
+		if err := os.Chown(tmp.Name(), -1, gid); err != nil {
+			return err
+		}
+	}
+	if err := os.Chmod(tmp.Name(), os.FileMode(f.Mode)); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), f.Path)
+}
+
+// Run applies at start, after every change signalled on changes, and every
+// minute (users expire without a change).
+func (a *Applier) Run(ctx context.Context, changes func() <-chan struct{}) {
+	for {
+		if err := a.Apply(ctx); err != nil && ctx.Err() == nil {
+			a.Log.Error("apply", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-changes():
+			// Let a burst of changes settle.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
+		case <-time.After(time.Minute):
+		}
+	}
+}

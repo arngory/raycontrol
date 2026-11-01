@@ -21,10 +21,12 @@ import (
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 type fakeFW struct {
-	mu       sync.Mutex
-	udp, tcp []uint16
-	public   []Port
-	open     map[string]time.Duration // "addr port" -> ttl
+	mu         sync.Mutex
+	udp, tcp   []uint16
+	public     []Port
+	admin      []netip.Prefix
+	adminPorts []Port
+	open       map[string]time.Duration // "addr port" -> ttl
 }
 
 func (f *fakeFW) Setup() error    { return nil }
@@ -36,6 +38,10 @@ func (f *fakeFW) SetSPAPorts(udp, tcp []uint16) error {
 	return nil
 }
 func (f *fakeFW) SetPublic(p []Port) error { f.public = p; return nil }
+func (f *fakeFW) SetAdmin(p []netip.Prefix, ports []Port) error {
+	f.admin, f.adminPorts = p, ports
+	return nil
+}
 func (f *fakeFW) Allow(a netip.Addr, ports []Port, ttl time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

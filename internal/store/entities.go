@@ -170,8 +170,15 @@ type Service struct {
 	Name      string
 	Enabled   bool
 	Settings  string // JSON
+	UID       int    // system user of its process, 0 if it has none
 	CreatedAt time.Time
+	// Secrets are stored with a new service; they are not loaded back by
+	// ListServices (use ServiceSecrets).
+	Secrets map[string][]byte
 }
+
+// processNameRE keeps "niko-<name>" a valid system user name (32 chars).
+var processNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,26}$`)
 
 // CreateService inserts svc. IDs are never reused: clients refer to them
 // in SPA scopes, so a deleted ID must not start meaning another service.
@@ -188,19 +195,114 @@ func (s *Store) CreateService(ctx context.Context, svc Service) (Service, error)
 	if _, err := svc.Ports(); err != nil {
 		return svc, err
 	}
-	svc.CreatedAt = s.now().Truncate(time.Second)
-	res, err := s.db.ExecContext(ctx, `INSERT INTO services (kind, name, enabled, settings_json, created_at) VALUES (?, ?, ?, ?, ?)`,
-		svc.Kind, svc.Name, svc.Enabled, svc.Settings, svc.CreatedAt.Unix())
-	if err != nil {
-		return svc, err
+	if HasProcess(svc.Kind) && !processNameRE.MatchString(svc.Name) {
+		return svc, fmt.Errorf("%w service name %q: services with a process need 1-27 of a-z 0-9 -", ErrInvalid, svc.Name)
 	}
-	svc.ID, err = res.LastInsertId()
+	svc.CreatedAt = s.now().Truncate(time.Second)
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		var uid any
+		if HasProcess(svc.Kind) {
+			if err := tx.QueryRowContext(ctx, `
+				WITH RECURSIVE r(u) AS (SELECT ? UNION ALL SELECT u + 1 FROM r WHERE u < ?)
+				SELECT min(u) FROM r WHERE u NOT IN (SELECT uid FROM services WHERE uid IS NOT NULL)`,
+				FirstServiceUID, LastServiceUID).Scan(&uid); err != nil {
+				return err
+			}
+			if uid == nil {
+				return fmt.Errorf("%w: no free service UID in %d-%d", ErrInvalid, FirstServiceUID, LastServiceUID)
+			}
+			svc.UID = int(uid.(int64))
+		}
+		res, err := tx.ExecContext(ctx, `INSERT INTO services (kind, name, enabled, settings_json, uid, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			svc.Kind, svc.Name, svc.Enabled, svc.Settings, uid, svc.CreatedAt.Unix())
+		if err != nil {
+			return err
+		}
+		if svc.ID, err = res.LastInsertId(); err != nil {
+			return err
+		}
+		for name, value := range svc.Secrets {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO service_secrets (service_id, name, value) VALUES (?, ?, ?)`, svc.ID, name, value); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	svc.Secrets = nil
 	return svc, err
+}
+
+// ServiceSecrets returns the secrets of a service.
+func (s *Store) ServiceSecrets(ctx context.Context, serviceID int64) (map[string][]byte, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name, value FROM service_secrets WHERE service_id = ?`, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]byte{}
+	for rows.Next() {
+		var name string
+		var value []byte
+		if err := rows.Scan(&name, &value); err != nil {
+			return nil, err
+		}
+		out[name] = value
+	}
+	return out, rows.Err()
+}
+
+// SetServiceSecret stores or replaces one secret of a service.
+func (s *Store) SetServiceSecret(ctx context.Context, serviceID int64, name string, value []byte) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO service_secrets (service_id, name, value) VALUES (?, ?, ?)
+		ON CONFLICT(service_id, name) DO UPDATE SET value = excluded.value`, serviceID, name, value)
+	return err
+}
+
+// Credentials returns the credential of every user for a service, creating
+// missing ones with gen for the given users. Credentials of users not in
+// userIDs are returned as they are.
+func (s *Store) Credentials(ctx context.Context, serviceID int64, userIDs []int64, gen func() (string, error)) (map[int64]string, error) {
+	out := map[int64]string{}
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `SELECT user_id, secret FROM credentials WHERE service_id = ?`, serviceID)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id int64
+			var secret string
+			if err := rows.Scan(&id, &secret); err != nil {
+				rows.Close()
+				return err
+			}
+			out[id] = secret
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, id := range userIDs {
+			if _, ok := out[id]; ok {
+				continue
+			}
+			secret, err := gen()
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO credentials (user_id, service_id, secret, created_at) VALUES (?, ?, ?, ?)`,
+				id, serviceID, secret, s.now().Unix()); err != nil {
+				return err
+			}
+			out[id] = secret
+		}
+		return nil
+	})
+	return out, err
 }
 
 // ListServices returns all services ordered by ID.
 func (s *Store) ListServices(ctx context.Context) ([]Service, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, kind, name, enabled, settings_json, created_at FROM services ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, kind, name, enabled, settings_json, coalesce(uid, 0), created_at FROM services ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +311,7 @@ func (s *Store) ListServices(ctx context.Context) ([]Service, error) {
 	for rows.Next() {
 		var svc Service
 		var created int64
-		if err := rows.Scan(&svc.ID, &svc.Kind, &svc.Name, &svc.Enabled, &svc.Settings, &created); err != nil {
+		if err := rows.Scan(&svc.ID, &svc.Kind, &svc.Name, &svc.Enabled, &svc.Settings, &svc.UID, &created); err != nil {
 			return nil, err
 		}
 		svc.CreatedAt = time.Unix(created, 0)
@@ -302,23 +404,46 @@ func (s *Store) ListDevices(ctx context.Context, userName string) ([]Device, err
 	return out, rows.Err()
 }
 
+// ActiveDevice returns a device and its SPA key if the device may connect
+// now: not revoked, with an enabled and unexpired user.
+func (s *Store) ActiveDevice(ctx context.Context, id string) (Device, [spa.KeySize]byte, error) {
+	var d Device
+	var key [spa.KeySize]byte
+	var raw []byte
+	var created int64
+	err := s.db.QueryRowContext(ctx, `SELECT d.id, u.name, d.name, d.role, d.spa_key, d.created_at
+		FROM devices d JOIN users u ON u.id = d.user_id
+		WHERE d.id = ? AND d.revoked_at IS NULL AND u.enabled = 1 AND (u.expires_at IS NULL OR u.expires_at > ?)`,
+		id, s.now().Unix()).Scan(&d.ID, &d.UserName, &d.Name, &d.Role, &raw, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return d, key, fmt.Errorf("device %q: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return d, key, err
+	}
+	copy(key[:], raw)
+	d.CreatedAt = time.Unix(created, 0)
+	return d, key, nil
+}
+
 // RevokeDevice marks a device revoked. Revocation is permanent.
 func (s *Store) RevokeDevice(ctx context.Context, id string) error {
 	return s.affectOne(ctx, "device", id, `UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, s.now().Unix(), id)
 }
 
 // SPADevices returns the devices that may currently pass SPA: not revoked,
-// owned by an enabled and unexpired user, with that user's enabled services.
+// owned by an enabled and unexpired user, with that user's enabled services
+// plus the subscription service, which every device may reach.
 func (s *Store) SPADevices(ctx context.Context) ([]spa.Device, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT d.id, d.spa_key, us.service_id
+		SELECT d.id, d.spa_key, sv.id
 		FROM devices d
 		JOIN users u ON u.id = d.user_id
-		JOIN user_services us ON us.user_id = u.id
-		JOIN services sv ON sv.id = us.service_id
-		WHERE d.revoked_at IS NULL AND u.enabled = 1 AND sv.enabled = 1
+		JOIN services sv ON sv.enabled = 1 AND (sv.kind = 'subscription'
+			OR sv.id IN (SELECT service_id FROM user_services WHERE user_id = u.id))
+		WHERE d.revoked_at IS NULL AND u.enabled = 1
 		  AND (u.expires_at IS NULL OR u.expires_at > ?)
-		ORDER BY d.id, us.service_id`, s.now().Unix())
+		ORDER BY d.id, sv.id`, s.now().Unix())
 	if err != nil {
 		return nil, err
 	}

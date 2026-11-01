@@ -63,3 +63,31 @@
 
 Для интеграционного теста R1 «клиент Niko ↔ нода» нужны бинарники `niko-server front` и `backend` (dnstt, masterdns)
 из вашего релиза. Сообщите тег, когда будет.
+
+## 5. Уточнения после реализации R1
+
+raycontrol уже генерирует конфиги по CONFIG.md схемы 1 — код в `internal/render`, примеры в его тестах. Что мы
+сделали и что из этого нужно учесть на вашей стороне:
+
+1. **Пути credentials.** systemd кладёт их в `/run/credentials/<unit>/<name>`, где `<unit>` — полное имя юнита
+   с `.service`: например `/run/credentials/niko-dns.service/noise.key`. В примерах CONFIG.md написано без `.service` —
+   поправьте пример.
+2. **Секции фронта необязательны.** Если маршрутов TCP или UDP нет (в R1 есть только DNS-туннели), raycontrol не пишет
+   секции `tcp` и `udp`, и фронт не должен слушать 443. Просьба прямо записать это в CONFIG.md.
+3. **MasterDnsVPN — `encryption_method: 5`** (AES-256-GCM). Метод 2 в MasterDnsVPN — ChaCha20 без аутентификации,
+   а нода разрешает только AEAD (решение R1-8). В SPEC §3.3 у вас по умолчанию 2 — поменяйте на 5. Ключ — файл
+   с 32 hex-символами (как генерирует сам MasterDnsVPN).
+4. **Ключ dnstt** — файл с hex закрытого ключа X25519 (64 символа и перевод строки), как `dnstt-server -gen-key`.
+   Публичный ключ клиент получает в ссылке (`niko-dns`).
+5. **Имена.** Бэкенд, сокет и юнит называются по имени сервиса в raycontrol, а не по виду: сервис `dns` вида
+   `dnstt` → `/run/niko/dns/packet.sock`, юнит `niko-dns.service`, пользователь `niko-dns`. Вид — поле `kind`.
+6. **Каталоги.** `RuntimeDirectory=niko/<имя>` (0710, группа сервиса) создаёт systemd; сокет внутри создаёт процесс
+   с правами 0660 (`UMask=0007` в юните). DNS-бэкенды запускаются с `PrivateNetwork=yes` и только `AF_UNIX`:
+   им нужны лишь сокеты фронта и `inner`.
+7. **`inner`.** Xray слушает `/run/niko/<inner>/vless.sock` (0660), API — в отдельном каталоге
+   `/run/niko/<inner>-api/` (доступ только у `rayd`). Поле `inner` бэкенда — путь `vless.sock`. Проверено
+   на Xray из `arngory/xray-core` a4a3dff: конфиг, пользователи через API, трафик через VLESS с ML-KEM-768.
+8. **Ссылки DNS-туннелей** для клиента — [`spec/subscription-v1.md`](../spec/subscription-v1.md) §4: VLESS к `inner`
+   с `encryption` ML-KEM-768 и параметром `niko-dns`.
+9. **Порядок запуска.** Юниты: `niko-inner` → бэкенды → `niko-front`; фронт должен переживать отсутствие бэкенда
+   при старте (переподключение, §3 п. 7 выше).
