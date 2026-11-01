@@ -1,5 +1,8 @@
 # 07. Вопросы перед реализацией
 
+> **Все вопросы закрыты.** Ответы и принятые рекомендации — в [08-decisions.md](08-decisions.md).
+> Документ сохранён как история вопросов.
+
 Редакция 2: список пересмотрен с учётом спецификации сервера Niko —
 [`arngory/niko`, ветка `claude/intelligent-allen-0oa8na`, `docs/server/SPEC.md`](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/SPEC.md)
 (далее SPEC; ссылки вида «SPEC §3.5» указывают на её разделы).

@@ -1,238 +1,160 @@
-# 01. Архитектура: нода как серверный стек
+# 01. Архитектура ноды
 
-Статус: **черновик для согласования**. Решения, помеченные «предлагается», ждут ответов из
-[07-questions.md](07-questions.md).
+Статус: **принята** (редакция 2, по решениям из [08-decisions.md](08-decisions.md)).
+Data plane описан в спецификации niko-server
+([`arngory/niko`, `docs/server/SPEC.md`](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/SPEC.md)),
+изменения к ней — в 08, «Следствие 3».
 
-## Цели
+## Разделение ролей
 
-1. **Нода — самодостаточный серверный стек.** Одна установка на хосте работает сама по себе, без центрального
-   сервера. Внутри — набор микросервисов, у каждого своя часть инфраструктуры.
-2. **Агрегация.** Ядра, протоколы, транспорты и способы маскировки («реальности») описываются одной моделью,
-   управляются одним API и отдаются клиенту одним списком профилей подключения.
-3. **Расширяемость.** Добавить новый движок, в том числе своё ядро, — значит написать адаптер по общему контракту,
-   а не переделывать ноду.
-4. **Многоуровневая защита и zero trust** (подробно в [02-security-model.md](02-security-model.md)).
-5. **CLI и API** для будущего кроссплатформенного клиента в режимах пользователя и администратора
-   (требования к клиенту — [06-client-requirements.md](06-client-requirements.md)).
+| Слой | Что | Где код |
+|---|---|---|
+| **Data plane** | niko-server (форк sing-box): фронт-мультиплексоры и бэкенды протоколов; Xray (форк) для REALITY; движки белых списков (olcRTC, OpenFlux). | `arngory/sing-box` (`cmd/niko-server`), `arngory/xray-core`, форки движков |
+| **Control plane** | raycontrol: состояние, генерация конфигов, ротация, SPA и файрвол, подписка, API, установка, обновления, бэкапы. | этот репозиторий |
 
-## Не цели этой фазы
+Нода — самодостаточная установка на одном хосте. Центрального сервера нет; у ноды своя ключевая пара,
+которой она подписывает подписки и идентифицирует себя в API.
 
-- Реализация клиента: в этой фазе только требования к нему.
-- Центральный контроллер нескольких нод. У ноды есть собственная идентичность и API, поэтому контроллер
-  можно добавить позже, не меняя ноду (см. [07-questions.md](07-questions.md), раздел B).
-- Веб-панель: её роль играет режим администратора в клиенте.
+## Процессы
 
-## Основные понятия
+```
+                         ┌──────────────────────────────── нода ────────────────────────────────────┐
+ интернет                │                                                                          │
+ ──▶ nftables (policy drop) ◀── rayspa: SPA v2 (NFLOG, ротируемый порт), allow-наборы,            │
+       │  открыто для всех: только UDP 53; TCP 443 — на время ACME                                  │
+       │  после SPA: адрес клиента → разрешённые ему порты, на TTL                                  │
+       ▼                                                                                          │
+   niko-front ── tcpmux (TCP 443) ──┬─▶ xray (REALITY + Vision, ML-DSA-65) ──▶ site (self-steal) │
+   (фронт, без ключей               ├─▶ naive-h2 · doh · yggdrasil · acme (rayd)                  │
+    пользователей)                  │                                                             │
+              udpmux (UDP 443) ─────┼─▶ hy2-masq · hy2-obfs · naive-quic · doh3                  │
+              dnsmux (UDP 53) ──────┴─▶ dnstt · masterdns ──▶ inner (VLESS + ML-KEM) ──▶ выход   │
+                                                                                                  │
+   olcrtc · openflux (только исходящие к платформам) ──────────▶ inner ──▶ выход                  │
+                                                                                                  │
+   rayd ── SQLite · генерация конфигов · ротация · подписка · API · ACME · хранилище секретов     │
+   rayctl (CLI) ── unix socket ──▶ rayd                                                           │
+                         └──────────────────────────────────────────────────────────────────────────┘
+```
 
-| Понятие | Что это |
-|---|---|
-| **Нода** | Установка серверного стека на одном хосте. Имеет свою идентичность (ключевую пару), своё состояние и API. |
-| **Сервис** | Один микросервис ноды: процесс под systemd со своим системным пользователем и своим срезом инфраструктуры. |
-| **Срез инфраструктуры** | Всё, чем владеет сервис: порты и сокеты, наборы nftables, TUN-интерфейс и подсеть, сертификаты, каталог данных, учётные данные третьих сторон, правила исходящего трафика. |
-| **Движок (engine)** | Программа, которая реализует протокол или транспорт (Xray, Hysteria, dnstt, olcRTC…). Один движок может работать несколькими сервисами-инстансами. |
-| **Адаптер** | Код, который переводит модель ноды в конфиг конкретного движка и обратно (пользователи, статистика, ссылки). |
-| **Манифест движка** | Декларация возможностей движка: классы входа и выхода, нужные ресурсы, модель пользователей. |
-| **Профиль подключения** | То, что видит клиент: «как подключиться к этой ноде этим способом». Собирается из сервиса, учётных данных пользователя и параметров клиента. |
+| Процесс | Роль | Права |
+|---|---|---|
+| `niko-front` | tcpmux, udpmux, dnsmux: классифицирует соединения и пакеты (SNI, ALPN, QUIC Initial, salamander, DNS-зона) и передаёт их бэкендам. Ключей пользователей не знает. | `CAP_NET_BIND_SERVICE`; знает только таблицу маршрутов и пароль salamander (для классификации). |
+| Бэкенды niko-server | По одному процессу на протокол (`hy2-masq`, `hy2-obfs`, `naive`, `doh`, `dnstt`, `masterdns`, `yggdrasil`, `inner`, `site`). | Свой пользователь; без capabilities; слушают только свой unix-сокет. |
+| `xray` | REALITY + Vision с ML-DSA-65; цель — бэкенд `site`. | Свой пользователь; принимает соединения через unix-сокет с PROXY v2. |
+| `olcrtc`, `openflux` | Движки белых списков; входящих портов нет, выход — в `inner`. | Свой пользователь; исходящие разрешены только к адресам своей платформы. |
+| `rayd` | Control plane. | Свой пользователь; управляет только юнитами raycontrol (polkit). |
+| `rayspa` | nftables: политика drop, SPA v2, allow-наборы, окно ACME, исходящие фильтры. | Единственный с `CAP_NET_ADMIN`; к базе доступа нет, ключи SPA получает от `rayd`. |
+| `rayctl` | CLI администратора. | root или группа `raycontrol`. |
+
+### Связь фронта с бэкендами
+
+- **TCP:** фронт передаёт принятый сокет бэкенду через unix-сокет (`SCM_RIGHTS`) вместе с метаданными:
+  адрес клиента, уже прочитанные байты ClientHello, выбранный маршрут. Для Xray — поток через unix-сокет
+  с заголовком PROXY v2 (`acceptProxyProtocol`).
+- **UDP:** фронт пересылает датаграммы в unix-сокет бэкенда (`SOCK_DGRAM`) с заголовком «адрес клиента»;
+  бэкенд видит виртуальный `net.PacketConn`. Ответы идут обратно тем же путём и уходят с общего сокета фронта.
+- Права на сокет бэкенда — только у UID фронта; бэкенд принимает соединения только от UID фронта (`SO_PEERCRED`).
+
+Цена разделения — лишняя копия UDP-датаграмм через фронт. Её проверяет нагрузочный тест (SPEC §6.4);
+если она окажется заметной, для UDP рассматривается передача через `SO_REUSEPORT` + eBPF.
+
+## Внутренняя ступень (`inner`)
+
+Транспорты без своих пользователей и без постквантового шифрования (dnstt, MasterDnsVPN, olcRTC, OpenFlux) не выходят
+в интернет сами. Их выход ведёт в бэкенд `inner`: VLESS с `decryption` ML-KEM-768 и пользователями на каждого.
+Клиент внутри туннеля поднимает VLESS-соединение к `inner`. Так получаются учёт по пользователю, отзыв доступа
+и постквантовое шифрование поверх любого носителя.
 
 ## Единая модель трафика
 
-Любой способ подключения раскладывается на одинаковые слои. Движок закрывает часть слоёв; манифест говорит, какие:
+Любой способ подключения описывается слоями: вход → носитель → маскировка → сессия → аутентификация → маршрут → выход.
 
-```
- Вход        → Носитель            → Маскировка           → Сессия/протокол  → Аутентификация → Маршрут  → Выход
- (ingress)     (carrier)             («реальность»)          (session)          (auth)           (route)    (exit)
- direct        TCP, TLS, QUIC        REALITY, self-steal,    VLESS, Hy2, WG,    per-user,        политика   L4 / L3
- relayed       DTLS, WebRTC,         masquerade, salamander, smux, KCP,       общий ключ,      ноды       цепочка на
- rendezvous    DNS, HTTP-документы,  RTP/Opus, SFU-звонок,   QUIC streams       нет                         другую ноду,
- dns           S3-объекты            документ, бакет                                                        WARP
-```
-
-Примеры:
-
-| Сервис | Вход | Носитель | Маскировка | Сессия | Аутентификация | Выход |
+| Сервис | Вход | Носитель | Маскировка | Сессия | Аутентификация | PQ |
 |---|---|---|---|---|---|---|
-| xray-reality | direct TCP 443 | TLS 1.3 | REALITY, self-steal | VLESS + Vision | UUID на пользователя | L4 |
-| hy2-masq | direct UDP 443 | QUIC | masquerade своего сайта | Hysteria2 | пароль на пользователя | L4 |
-| hy2-obfs | direct UDP | QUIC | salamander | Hysteria2 | пароль на пользователя | L4 |
-| qwdtt | relayed | DTLS | RTP/Opus через TURN VK | WireGuard | пароль, устройство | L3 |
-| olcrtc | rendezvous | WebRTC | звонок Jitsi/Телемост | smux | общий PSK → внутренняя ступень | L4 |
-| masterdns | dns UDP 53 | DNS | DNS-запросы | своя ARQ | общий ключ → внутренняя ступень | L4 |
+| REALITY | direct, TCP 443 за SPA | TLS 1.3 | REALITY self-steal | VLESS + Vision | UUID | X25519MLKEM768 + ML-DSA-65 |
+| hy2-masq | direct, UDP 443 за SPA | QUIC | masquerade | Hysteria2 | пароль | X25519MLKEM768 |
+| hy2-obfs | direct, UDP 443 за SPA | QUIC | salamander | Hysteria2 | пароль | X25519MLKEM768 |
+| naive | direct, TCP/UDP 443 за SPA | h2 / QUIC | сайт | HTTP CONNECT | логин и пароль | X25519MLKEM768 |
+| dnstt, masterdns | dns, UDP 53 открыт | DNS | DNS-запросы | KCP/smux, ARQ | ключ туннеля → `inner` | через `inner` |
+| olcrtc | rendezvous | WebRTC | видеозвонок | smux | PSK → `inner` | через `inner` |
+| openflux | rendezvous | документы | правки документов | своя | ключ → `inner` | через `inner` |
+| yggdrasil | direct, TCP 443 за SPA | TLS | — | Yggdrasil | ключ узла | — (нужно проверить) |
 
-Благодаря единой модели API, CLI и клиент описывают любой способ подключения одними и теми же полями.
+## Control plane
 
-## Компоненты ноды
-
-```
-                                      ┌──────────────────────── нода ──────────────────────────┐
- интернет / сторонние платформы       │                                                        │
- ───────────────────────────────────▶ │  rayspa ── nftables (inet raycontrol): периметр,      │
-   direct: knock → SPA → сервис       │            allow-наборы, исходящие фильтры, NAT для L3 │
-                                      │                                                        │
-   direct / relayed / dns ──────────▶ │  edge-сервисы (по одному процессу на инстанс):         │
-   rendezvous ◀─── исходящие ──────── │   xray-reality │ hy2-masq │ hy2-obfs │ qwdtt │ olcrtc… │
-                                      │        │ L4-выход        │ L3 (TUN)  │ без пользователей │
-                                      │        ▼                 ▼           ▼                   │
-                                      │   [ray-core: внутренняя ступень — аутентификация,      │
-                                      │    учёт, маршрутизация, политика выхода]  (см. ниже)    │
-                                      │        │                                               │
-                                      │        ▼  egress → интернет / WARP / другая нода        │
-                                      │                                                        │
-                                      │  rayd ── состояние (SQLite), адаптеры, аллокатор,      │
-                                      │          API (unix socket + удалённый за SPA и mTLS)   │
-                                      │  vault ── учётные данные третьих сторон (S3, VK, …)     │
-                                      │  caddy ── сайт-приманка, ACME                          │
-                                      └────────────────────────────────────────────────────────┘
-```
-
-| Компонент | Роль | Права |
-|---|---|---|
-| `rayd` | Control plane ноды: состояние, адаптеры, аллокатор ресурсов, генерация конфигов, управление юнитами, API. | Свой пользователь, без capabilities. Управляет только юнитами `raycontrol-*` (правило polkit). |
-| `rayctl` | CLI администратора; тонкий клиент к API `rayd` через unix socket. | root или группа `raycontrol`. |
-| `rayspa` | Периметр: таблица `inet raycontrol`, knock, SPA, allow-наборы, исходящие фильтры, NAT для L3-сервисов. | Единственный компонент с `CAP_NET_ADMIN`; к базе доступа нет. |
-| Edge-сервисы | Инстансы движков: принимают трафик своего класса входа. | Свой пользователь и срез инфраструктуры на каждый инстанс. |
-| `ray-core` | Внутренняя ступень: аутентификация для движков без пользователей, единый учёт и политика выхода. | Свой пользователь; слушает только unix-сокеты. |
-| `vault` | Хранилище учётных данных третьих сторон; выдаёт каждому сервису только его секреты. | Свой пользователь; выдача через `LoadCredential=` или unix socket с проверкой UID. |
-| `caddy` | Сайт-приманка для self-steal и masquerade, ACME. | Свой пользователь, `CAP_NET_BIND_SERVICE`. |
-| `rayknock` | Клиентская утилита и Go-библиотека для knock + SPA. | У клиента. |
-
-Нужен ли `vault` отдельным процессом или достаточно модуля `rayd` с выдачей через `LoadCredential=` —
-вопрос C-6 в [07-questions.md](07-questions.md).
-
-## Внутренняя ступень (ray-core)
-
-Зачем она:
-
-- У части движков нет пользователей, только общий ключ (olcRTC, dnstt, MasterDnsVPN). Если пустить их выход
-  прямо в интернет, любой, кто знает ключ, получит выход без учёта и без возможности отозвать доступ.
-- У движков разные политики выхода и разная статистика. Единая точка выхода даёт одинаковый запрет приватных сетей,
-  одинаковый учёт трафика и маршрутизацию (WARP, цепочка на другую ноду) для всех.
-
-Как работает:
-
-- Edge-сервис отдаёт трафик в `ray-core` через свой unix socket. Сокет определяет, от какого сервиса пришёл трафик.
-- Для движков без пользователей клиент проходит аутентификацию уже внутри туннеля: например, внутри
-  olcRTC-туннеля клиент говорит с `ray-core` по VLESS или SOCKS5 с паролем на пользователя.
-- Движки со своими пользователями (Xray, Hysteria) могут выходить напрямую или через `ray-core`. Через `ray-core` —
-  единая политика ценой лишнего перехода; выбор — вопрос C-3.
-- L3-сервисы (WireGuard в qWDTT) идут мимо `ray-core`: политика и учёт для них — правила nftables на TUN-интерфейсе
-  и счётчики по адресу клиента.
-
-Реализация (предлагается): на первом этапе `ray-core` — отдельный инстанс Xray или sing-box
-с inbound-ами на unix-сокетах и пользователями на каждый сервис. Контракт `ray-core` фиксируется так,
-чтобы позже заменить его **своим ядром** без изменений в остальных сервисах.
-
-## Адаптеры и манифест движка
-
-Манифест (черновик):
-
-```yaml
-engine: masterdnsvpn
-version: "pinned-version"
-ingress: [dns]                  # direct | relayed | rendezvous | dns
-exit: l4                        # l4 | l3
-users: shared-key               # per-user | shared-key | none
-needs:
-  ports: [{proto: udp, port: 53, public: true}]
-  domain: ns-delegation         # none | own-domain | ns-delegation
-  certificate: none
-  tun: false
-  capabilities: [CAP_NET_BIND_SERVICE]
-  third_party: []               # например [vk-account], [s3-bucket], [jitsi-room]
-features:
-  hot_user_sync: false
-  stats: none                   # per-user | per-instance | none
-  kick: false
-client:
-  link_format: "masterdns://…"
-  platforms: [windows, macos, linux, android]
-license: MIT
-```
-
-Контракт адаптера:
-
-```go
-type Engine interface {
-    Manifest() Manifest
-    Render(inst Instance, users []UserCred, res Resources) (Files, error)
-    Validate(files Files) error
-    SyncUsers(ctx context.Context, inst Instance, diff UserDiff) error // на лету или reload
-    Stats(ctx context.Context, inst Instance) ([]Traffic, error)
-    Kick(ctx context.Context, inst Instance, userID string) error
-    Health(ctx context.Context, inst Instance) (HealthStatus, error)
-    ClientProfile(inst Instance, cred UserCred) (Profile, error)  // ссылка, QR, фрагмент подписки
-}
-```
-
-Два вида адаптеров:
-
-- **Встроенные** (Go, внутри `rayd`): для движков из основного набора.
-- **Внешние плагины**: отдельный процесс, который реализует тот же контракт как gRPC-сервис через unix socket.
-  Плагин можно написать на любом языке — так подключается и **своё ядро**. Плагин запускается под своим пользователем
-  и получает только описание своего инстанса.
-
-## Аллокатор ресурсов
-
-`rayd` раздаёт сервисам ресурсы и следит, чтобы они не пересекались:
-
-- порты и протоколы (TCP 443 и UDP 443 — разные ресурсы);
-- системные пользователи с фиксированными UID из диапазона raycontrol (на них опираются правила nftables);
-- TUN-интерфейсы и подсети для L3-сервисов;
-- имена наборов nftables и юнитов systemd;
-- каталоги данных и сокеты;
-- домены и поддомены (сайт, NS-делегирование для DNS-класса).
-
-## Модель данных (черновик)
+### Данные (SQLite)
 
 ```
-node            id, name, public_key, created_at                      — идентичность ноды
+node            id, name, public_key, created_at
 users           id, name, enabled, expires_at, traffic_limit_bytes, note, created_at
-devices         id, user_id, name, role(user|admin), spa_pubkey, api_cert_fingerprint, scopes, last_seen, revoked_at
-services        id, engine, name, ingress, exit, profile(public|gated), enabled, settings_json
-resources       service_id, kind, value                               — выданные аллокатором ресурсы
-credentials     id, user_id, service_id, kind, secret, created_at, revoked_at
-third_party     id, service_id, kind, secret_ref, status, last_checked — аккаунты платформ, S3-ключи
-grants          id, device_id, src_ip, scope, expires_at              — журнал SPA-доступов
+devices         id, user_id, name, role(user|admin), spa_key_ref, api_cert_fingerprint, scopes, last_seen, revoked_at
+services        id, kind, enabled, settings_json                     — бэкенды и движки
+credentials     id, user_id, service_id, secret_ref, valid_from, valid_to, revoked_at  — с перекрытием при ротации
+rotations       id, kind, scope, current_ref, next_ref, switch_at, retire_at   — расписание ротации
+platform_accts  id, service_id, mode(node|client), secret_ref, status, last_checked
+grants          id, device_id, src_ip, scope, expires_at             — журнал SPA-доступов
 traffic         user_id, service_id, period, up, down
-api_tokens      id, subject, scopes, created_at, expires_at, revoked_at
 audit_log       ts, actor, action, target, result
-settings        key, value
+settings        key, value                                           — включая случайные параметры установки
 ```
 
-Принципы те же: единственный источник правды — база `rayd`; у пользователя отдельные учётные данные
-на каждый сервис; миграции версионируются.
+Секреты (`*_ref`) лежат в хранилище секретов `rayd`, на диске — через systemd credentials.
 
-## Язык и инструменты (предлагается)
+### Генерация конфигов
 
-- **Go** для своих компонентов: тот же стек, что у большинства движков (Xray, Hysteria, sing-box, Caddy,
-  olcRTC, OpenFlux, MasterDnsVPN, dnstt), статические бинарники под amd64 и arm64.
-- Периметр: `github.com/google/nftables`, `github.com/florianl/go-nflog`.
-- Хранилище: `modernc.org/sqlite` (без CGO).
-- API: protobuf + **ConnectRPC** (gRPC, gRPC-Web и JSON из одного описания), генерация через `buf`.
-- Управление юнитами: systemd через D-Bus.
+`rayd` собирает из базы конфиги: фронта (таблица маршрутов), каждого бэкенда, Xray, движков белых списков,
+правила для `rayspa`. Перед применением — проверка (`niko-server check`, `xray run -test`).
+Применение: `SIGHUP` бэкенду или gRPC API Xray; перезапуск — только при смене портов и доменов.
 
-## Структура репозитория (предлагается)
+### Ротация
+
+Планировщик в `rayd`:
+
+| Что | Как | Как узнаёт клиент |
+|---|---|---|
+| Ключи SPA | эпохи: ключ эпохи выводится из ключа устройства; сервер принимает текущую и соседнюю эпоху | выводит сам, обновлять нечего |
+| Порт SPA | вычисляется из секрета ноды и номера слота; `rayspa` держит открытыми текущий и соседний слоты | вычисляет сам |
+| Учётные данные пользователей | новые выпускаются заранее, старые действуют до конца окна перекрытия | подписка |
+| Ключи REALITY, shortId | новые добавляются заранее, старые снимаются после окна | подписка |
+| SNI (поддомены) | см. 08, «Следствие 1» | подписка |
+
+### Случайные параметры установки
+
+Чтобы у проекта не было общего отпечатка, при установке случайно выбираются: диапазон портов SPA и длина слота,
+диапазон длины SPA-пакетов, поддомены, тайминги ротации, параметры padding. Значения по умолчанию в коде — только
+границы диапазонов.
+
+### API
+
+- Локальный: unix socket, `SO_PEERCRED` — для `rayctl`.
+- **Подписка** (с первого этапа): HTTPS за SPA, ответ подписан ключом ноды; через неё клиент получает
+  ротируемые учётные данные.
+- Полный API (этап M3): protobuf + ConnectRPC, отдельный порт за SPA + mTLS, роли user и admin, регистрация
+  устройства по одноразовой ссылке или QR. TLS — с `X25519MLKEM768`.
+
+## Структура репозитория raycontrol
 
 ```
-cmd/
-  rayd/  rayctl/  rayspa/  rayknock/  ray-core/ (позже, когда появится своё ядро)
-api/proto/            API ноды и контракт плагинов
+cmd/       rayd/  rayctl/  rayspa/
+api/proto/ API ноды
 internal/
-  store/ model/ authz/ pki/ alloc/ vault/
-  engine/             контракт, манифесты, встроенные адаптеры
-  render/             шаблоны и проверка конфигов
-  perimeter/          nftables, SPA
-  system/             systemd, пользователи, sysctl
-plugins/              примеры и SDK внешних адаптеров
-deploy/               юниты, Caddyfile, манифест версий движков
+  store/ model/ authz/ pki/ secrets/
+  render/       генерация конфигов фронта, бэкендов, Xray, движков
+  rotation/     планировщик ротации
+  spa/          формат SPA v2 (общий с клиентом: тестовые векторы)
+  perimeter/    nftables
+  acme/         выпуск сертификатов в коротком окне или через DNS-01
+  system/       systemd, пользователи, sysctl
+deploy/        юниты, манифест версий (data plane и движки)
 install/bootstrap.sh
 docs/
-legacy/               v0 до завершения миграции
+legacy/        v0
 ```
 
 ## Развёртывание
 
-- `install/bootstrap.sh` проверяет ОС и архитектуру, скачивает подписанный релиз и запускает `rayctl install`.
-- Нода ставится с минимальным набором сервисов; остальные включаются командой `rayctl service add <engine>`.
-  Движок скачивается по манифесту версий с проверкой SHA-256.
-- Повторный запуск установки и любых операций безопасен.
-- Целевые ОС: Debian 12/13, Ubuntu 24.04 LTS; amd64 и arm64.
+- `install/bootstrap.sh` проверяет ОС и архитектуру, скачивает подписанный релиз (minisign + `SHA256SUMS`)
+  и запускает `rayctl install`.
+- Все бинарники — из своих форков и своих релизов, версии закреплены в `deploy/` (правила P-17).
+- Debian 12/13, Ubuntu 24.04 LTS; amd64 и arm64. systemd-resolved stub выключается (нужен UDP 53).

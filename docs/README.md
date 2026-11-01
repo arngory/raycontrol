@@ -1,20 +1,21 @@
 # raycontrol v2: проектная документация
 
-Нода raycontrol — самодостаточный серверный стек: набор изолированных микросервисов, каждый со своим срезом
-инфраструктуры. Нода сводит разные ядра, протоколы, транспорты и способы маскировки в одну модель с единым API
-для CLI и будущего кроссплатформенного клиента (режимы пользователя и администратора). Защита многоуровневая:
-port-knocking → SPA → аутентификация в каждом сервисе, между компонентами — zero trust.
+Нода — самодостаточный серверный стек на одном хосте. Data plane — niko-server (форк sing-box): фронт-мультиплексоры
+и отдельные процессы-бэкенды протоколов. Control plane — raycontrol: состояние, конфиги, ротация, SPA и файрвол, подписка,
+API для CLI и клиента Niko. Все порты закрыты до SPA v2, постквант обязателен везде, где его поддерживает протокол,
+ключи и доступы ротируются, у каждой установки свои случайные параметры, между компонентами — zero trust.
 
 | Документ | О чём |
 |---|---|
 | [00-legacy-audit.md](00-legacy-audit.md) | Аудит текущей версии v0: находки с ID `L-xx`. |
-| [01-architecture.md](01-architecture.md) | Нода и сервисы, единая модель трафика, внутренняя ступень `ray-core`, манифесты и плагины движков, данные. |
-| [02-security-model.md](02-security-model.md) | Угрозы, эшелоны защиты, knock + SPA, периметр по классам входа, zero trust, учётные данные третьих сторон. |
-| [03-protocols.md](03-protocols.md) | Direct-протоколы и движки, self-steal, карта портов. |
-| [04-roadmap.md](04-roadmap.md) | Направления работ с привязкой к находкам аудита и этапы M0–M6. |
+| [01-architecture.md](01-architecture.md) | Нода: niko-server (фронт + бэкенды) и raycontrol, внутренняя ступень `inner`, данные, ротация, API. |
+| [02-security-model.md](02-security-model.md) | Угрозы, полное закрытие портов, SPA v2, постквант, ротация, zero trust, аккаунты платформ. |
+| [03-protocols.md](03-protocols.md) | Состав протоколов v1, домены, порты, отличия от SPEC. |
+| [04-roadmap.md](04-roadmap.md) | Направления работ и этапы R0–R5, синхронизированные с SPEC niko-server. |
 | [05-transports-research.md](05-transports-research.md) | Транспорты для белых списков: qWDTT, CSQTT, olcRTC, OpenFlux, dnstt, Slipstream, MasterDnsVPN, S3 Bypass. |
 | [06-client-requirements.md](06-client-requirements.md) | Требования к клиенту для следующей фазы. |
-| [07-questions.md](07-questions.md) | Вопросы перед реализацией (редакция 2, с учётом спецификации niko-server). |
+| [07-questions.md](07-questions.md) | Вопросы перед реализацией (история; все закрыты). |
+| [08-decisions.md](08-decisions.md) | **Принятые решения** — главнее остальных документов при расхождении. |
 
-Статус: черновик для согласования. Документы 01–04 будут пересмотрены после ответов на вопросы P-1…P-3
-(связка с [niko-server](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/SPEC.md)). Код v0 (`ray.sh`, `uninstall.sh`) пока остаётся на месте.
+Статус: решения приняты (08), документы 01–04 переписаны под них. Data plane — [niko-server](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/SPEC.md), control plane — raycontrol.
+Код v0 (`ray.sh`, `uninstall.sh`) пока остаётся на месте.
