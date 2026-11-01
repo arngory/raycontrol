@@ -1,0 +1,148 @@
+syntax = "proto3";
+
+// Node API of raycontrol. In R0 it is served on the local unix socket only
+// (rayctl); the remote listener behind SPA and mTLS comes in R3.
+// Compatibility follows protobuf rules; breaking changes go to node.v2.
+package raycontrol.node.v1;
+
+option go_package = "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1;nodev1";
+
+service NodeService {
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  rpc SetUserEnabled(SetUserEnabledRequest) returns (SetUserEnabledResponse);
+  rpc SetUserServices(SetUserServicesRequest) returns (SetUserServicesResponse);
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+
+  rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
+  rpc CreateService(CreateServiceRequest) returns (CreateServiceResponse);
+  rpc SetServiceEnabled(SetServiceEnabledRequest) returns (SetServiceEnabledResponse);
+  rpc DeleteService(DeleteServiceRequest) returns (DeleteServiceResponse);
+
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+  // CreateDevice returns the device bundle with the device key. The key is
+  // not stored anywhere it can be read back through the API.
+  rpc CreateDevice(CreateDeviceRequest) returns (CreateDeviceResponse);
+  rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
+
+  rpc ListAudit(ListAuditRequest) returns (ListAuditResponse);
+}
+
+message GetStatusRequest {}
+message GetStatusResponse {
+  string version = 1;
+  string node_id = 2;
+  string host = 3;
+  uint32 users = 4;
+  uint32 services = 5;
+  uint32 active_devices = 6;
+  // SPA ports open right now (previous, current and next slot).
+  repeated uint32 spa_ports = 7;
+}
+
+message User {
+  int64 id = 1;
+  string name = 2;
+  bool enabled = 3;
+  int64 expires_at = 4;          // unix seconds, 0 = never
+  int64 traffic_limit_bytes = 5; // 0 = unlimited
+  string note = 6;
+  int64 created_at = 7;
+  repeated string services = 8;  // service names
+}
+
+message ListUsersRequest {}
+message ListUsersResponse { repeated User users = 1; }
+
+message CreateUserRequest {
+  string name = 1;
+  int64 expires_at = 2;
+  int64 traffic_limit_bytes = 3;
+  string note = 4;
+  repeated string services = 5;
+}
+message CreateUserResponse { User user = 1; }
+
+message SetUserEnabledRequest {
+  string name = 1;
+  bool enabled = 2;
+}
+message SetUserEnabledResponse {}
+
+message SetUserServicesRequest {
+  string name = 1;
+  repeated string services = 2;
+}
+message SetUserServicesResponse {}
+
+message DeleteUserRequest { string name = 1; }
+message DeleteUserResponse {}
+
+message Service {
+  uint32 id = 1; // also the SPA scope ID
+  string kind = 2;
+  string name = 3;
+  bool enabled = 4;
+  string settings_json = 5;
+  int64 created_at = 6;
+}
+
+message ListServicesRequest {}
+message ListServicesResponse {
+  repeated Service services = 1;
+  repeated string kinds = 2; // kinds this node can run
+}
+
+message CreateServiceRequest {
+  string kind = 1;
+  string name = 2;
+  string settings_json = 3;
+}
+message CreateServiceResponse { Service service = 1; }
+
+message SetServiceEnabledRequest {
+  string name = 1;
+  bool enabled = 2;
+}
+message SetServiceEnabledResponse {}
+
+message DeleteServiceRequest { string name = 1; }
+message DeleteServiceResponse {}
+
+message Device {
+  string id = 1;
+  string user = 2;
+  string name = 3;
+  string role = 4; // user | admin
+  int64 created_at = 5;
+  int64 revoked_at = 6; // 0 = active
+}
+
+message ListDevicesRequest { string user = 1; }
+message ListDevicesResponse { repeated Device devices = 1; }
+
+message CreateDeviceRequest {
+  string user = 1;
+  string name = 2;
+  string role = 3;
+}
+message CreateDeviceResponse {
+  Device device = 1;
+  string bundle = 2; // "rcdev1:..." (docs/spec/spa-v2.md)
+}
+
+message RevokeDeviceRequest { string id = 1; }
+message RevokeDeviceResponse {}
+
+message AuditEntry {
+  int64 time = 1;
+  string actor = 2;
+  string action = 3;
+  string target = 4;
+  string result = 5;
+}
+
+message ListAuditRequest { uint32 limit = 1; }
+message ListAuditResponse { repeated AuditEntry entries = 1; }

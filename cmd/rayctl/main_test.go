@@ -1,0 +1,59 @@
+package main
+
+import (
+	"testing"
+	"time"
+)
+
+func TestParseExpiry(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	tests := []struct {
+		in      string
+		want    int64
+		wantErr bool
+	}{
+		{"", 0, false},
+		{"2026-12-31", time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC).Unix(), false},
+		{"30d", now.Add(30 * 24 * time.Hour).Unix(), false},
+		{"12h", now.Add(12 * time.Hour).Unix(), false},
+		{"0d", 0, true},
+		{"-5h", 0, true},
+		{"soon", 0, true},
+	}
+	for _, tt := range tests {
+		got, err := parseExpiry(tt.in, now)
+		if (err != nil) != tt.wantErr || got != tt.want {
+			t.Errorf("parseExpiry(%q) = %d, %v", tt.in, got, err)
+		}
+	}
+}
+
+func TestBytes(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    int64
+		wantErr bool
+	}{
+		{"", 0, false},
+		{"1024", 1024, false},
+		{"50G", 50 << 30, false},
+		{"500m", 500 << 20, false},
+		{"2T", 2 << 40, false},
+		{"0", 0, true},
+		{"-1G", 0, true},
+		{"lots", 0, true},
+		{"99999999999T", 0, true},
+	}
+	for _, tt := range tests {
+		got, err := parseBytes(tt.in)
+		if (err != nil) != tt.wantErr || got != tt.want {
+			t.Errorf("parseBytes(%q) = %d, %v", tt.in, got, err)
+		}
+	}
+	for _, n := range []int64{50 << 30, 500 << 20, 1500} {
+		back, _ := parseBytes(formatBytes(n))
+		if back != n {
+			t.Errorf("formatBytes(%d) = %s does not round-trip", n, formatBytes(n))
+		}
+	}
+}
