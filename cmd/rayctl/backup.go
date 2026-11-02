@@ -197,8 +197,9 @@ func (c *cli) metrics(ctx context.Context, args []string) error {
 		return err
 	}
 	text := resp.Msg.Text
-	// The early chain's counters (R4-9): what the kernel was spared.
-	if os.Geteuid() == 0 {
+	// The early chain's counters (R4-9): what the kernel was spared. Only
+	// on the node itself, not through -remote.
+	if os.Geteuid() == 0 && c.identity == nil {
 		if drops, err := (&perimeter.NFT{}).EarlyDrops(); err == nil {
 			var m api.Metrics
 			for _, reason := range slices.Sorted(maps.Keys(drops)) {

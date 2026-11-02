@@ -10,7 +10,8 @@ the inner stage on Xray, signed subscriptions, installer. **R2** — VLESS +
 REALITY + Vision on Xray (post-quantum key exchange and signature) with
 self-steal on the node's own decoy site, certificates through ACME. **R3** —
 Hysteria2 twice (masquerade on UDP 443, salamander) and DNS over HTTPS behind
-REALITY, interim on Xray and rayd until the niko-server front. **R4** —
+REALITY, interim on Xray and rayd until the niko-server front; the remote API
+behind SPA with mTLS and one-time invites. **R4** —
 rotation of user credentials and REALITY keys and names, Cloudflare for DNS
 records and wildcard certificates, uninstall back to the host's snapshot,
 redacted reports, a kernel-side early drop, encrypted backups, local metrics. Data plane: niko-server-v0.1.1
@@ -84,6 +85,9 @@ rayctl report -o report.txt                           # redacted report for an i
 rayctl backup -o node.rcbak                           # every key of the node under a passphrase
 rayctl restore -i node.rcbak [-host NEW_IP]           # back here, or onto a new host after install
 rayctl metrics                                        # counts and times for Prometheus, no names
+rayctl device invite alice phone                      # one-time rcinv1: invite, the client registers itself
+rayctl remote enroll -o laptop.rcdev rcinv1:...       # elsewhere: an admin device from an invite
+rayctl -remote laptop.rcdev status                    # any admin command through the remote API
 rayctl uninstall                                      # take everything back
 ```
 

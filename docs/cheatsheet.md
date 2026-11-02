@@ -49,7 +49,18 @@
 | `rayctl user enable\|disable\|del NAME` | включить, отключить, удалить |
 | `rayctl device add USER NAME [-role admin] [-o F]` | пакет устройства `rcdev1:…` — один раз, на экран или в файл 0600 |
 | `rayctl device list [USER]` | устройства |
-| `rayctl device revoke ID` | отозвать: SPA и подписка для него закрываются |
+| `rayctl device revoke ID` | отозвать: SPA, подписка и API для него закрываются; неиспользованное приглашение — отозвать |
+| `rayctl device invite USER NAME [-role admin] [-ttl 24h] [-o F]` | одноразовое приглашение `rcinv1:…`: клиент сам регистрирует устройство через API (нужен сервис `api`) |
+
+## Удалённое администрирование (R3)
+
+| Команда | Что делает |
+|---|---|
+| `rayctl service add api api` → `rayctl apply` | включить удалённый API: свой порт за SPA, mTLS |
+| `rayctl device invite admin laptop -role admin` | на ноде: приглашение для устройства администратора |
+| `rayctl remote enroll -o laptop.rcdev rcinv1:…` | на своей машине: новый ключ, SPA, регистрация; файл устройства 0600 |
+| `rayctl -remote laptop.rcdev status` | любая команда `status`, `user`, `service`, `device`, `audit`, `admin`, `dns`, `metrics` через API |
+| `rayctl -remote laptop.rcdev remote rotate` | новый клиентский ключ, старый перестаёт работать |
 
 ## Сервисы
 
@@ -59,6 +70,7 @@
 | `rayctl service add hy2-masq hy2-masq` · `rayctl service add hy2-obfs hy2-obfs` | Hysteria2: UDP 443 с маскировкой и salamander на своём порту |
 | `rayctl service add doh doh` | DoH для клиентов на TCP 443 (после REALITY) |
 | `rayctl service add dnstt dns` · `rayctl service add masterdns mdns` | DNS-туннели (резервный канал) |
+| `rayctl service add api api` | удалённый API для устройств-администраторов и регистрации по приглашениям |
 | `rayctl service enable\|disable\|del NAME` | включить, выключить, удалить |
 | `rayctl service set site answer=404\|403\|silent\|pages` | что сайт отвечает тем, кого отклонил REALITY; потом `rayctl apply` |
 | `rayctl service set reality rotate_sni=false` | не менять имя REALITY при ротации |

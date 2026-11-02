@@ -228,7 +228,27 @@ rayctl restore -i node.rcbak -host NEW_IP
 rayctl uninstall -keep-dns     # на старом сервере
 ```
 
-## 10. Дальше
+## 10. Администрирование со своей машины
+
+На ноде включите удалённый API и сделайте приглашение для своего устройства:
+
+```bash
+rayctl service add api api && rayctl apply
+rayctl device invite <ваш-пользователь> laptop -role admin
+```
+
+На своей машине (тот же `rayctl`, Linux или macOS) — регистрация по приглашению и дальше любые команды через API:
+
+```bash
+rayctl remote enroll -o laptop.rcdev 'rcinv1:…'
+rayctl -remote laptop.rcdev status
+rayctl -remote laptop.rcdev device invite alice phone      # приглашение для телефона alice — уже без SSH
+```
+
+Файл `laptop.rcdev` — ключ устройства: права 0600, храните как SSH-ключ. Приглашение одноразовое и живёт сутки
+(`-ttl`). `apply`, `update`, `backup`, `uninstall` по-прежнему только на ноде.
+
+## 11. Дальше
 
 - `rayctl update -check` — есть ли новый релиз; `rayctl update` — поставить его: подпись проверяется, при сбое прежняя
   версия возвращается сама; `rayctl update -rollback` — вернуть её вручную.

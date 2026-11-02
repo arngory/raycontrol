@@ -119,7 +119,8 @@ func probe(ctx context.Context, args []string) error {
 
 // readArg reads the bundle from the argument, a file (@FILE) or stdin
 // (-); in a file or on stdin the rcdev1 token is found in whatever text
-// surrounds it (the output of rayctl device add, a message).
+// surrounds it (the output of rayctl device add, a message); an rcinv1
+// invite is found the same way.
 func readArg(s string) (string, error) {
 	var text string
 	switch {
@@ -139,7 +140,7 @@ func readArg(s string) (string, error) {
 		return s, nil
 	}
 	for _, f := range strings.Fields(text) {
-		if strings.HasPrefix(f, "rcdev1:") {
+		if strings.HasPrefix(f, node.BundlePrefix) || strings.HasPrefix(f, node.InvitePrefix) {
 			return f, nil
 		}
 	}

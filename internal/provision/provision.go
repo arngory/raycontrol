@@ -338,6 +338,30 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		if _, ok := settings["ports"]; !ok {
 			settings["ports"] = []string{"tcp/443"} // DoH3 waits for a udpmux
 		}
+	case "api":
+		// The remote API (R3-3): one per node, its own random TCP port behind
+		// SPA, a self-signed certificate clients pin like the subscription's.
+		for _, s := range all {
+			if s.Kind == "api" {
+				return svc, fmt.Errorf("%w the node has its API already: %s", store.ErrInvalid, s.Name)
+			}
+		}
+		host, err := node.Host(ctx, st)
+		if err != nil {
+			return svc, err
+		}
+		key, cert, err := selfSigned(host)
+		if err != nil {
+			return svc, err
+		}
+		svc.Secrets[SecretTLSKey], svc.Secrets[SecretTLSCert] = key, cert
+		if _, ok := settings["ports"]; !ok {
+			port, err := freePort(ctx, st, all)
+			if err != nil {
+				return svc, err
+			}
+			settings["ports"] = []string{fmt.Sprintf("tcp/%d", port)}
+		}
 	case "hy2-obfs":
 		// Hysteria2 inside salamander (R3-1): nothing of it shows outside,
 		// so its certificate is its own, self-signed, pinned by clients

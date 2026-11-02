@@ -202,6 +202,26 @@ if out="$(client "$phone")"; then
 fi
 client -carrier tcp "$laptop" || fail "probe over the TCP carrier"
 
+log "$distro: remote API"
+x rayctl service add api api >/dev/null
+x rayctl apply >/dev/null || fail "rayctl apply for the API"
+invite="$(x rayctl device invite alice console -role admin | grep -o 'rcinv1:[A-Za-z0-9_-]*')" || fail "no invite"
+# From the client's container: register a device from the invite, then
+# administer the node through the API with it, and give it a new key.
+# shellcheck disable=SC2016 # expands in the client container
+docker run --rm --network "$net" -v "$bin:/opt/rc:ro" "$image" sh -ec '
+	/opt/rc/rayctl remote enroll -o /root/console.rcdev "$1"
+	/opt/rc/rayctl -remote /root/console.rcdev status
+	/opt/rc/rayctl -remote /root/console.rcdev user add carol
+	/opt/rc/rayctl -remote /root/console.rcdev remote rotate
+	/opt/rc/rayctl -remote /root/console.rcdev remote whoami
+	if /opt/rc/rayctl -remote /root/console.rcdev backup; then exit 1; fi
+	if /opt/rc/rayctl remote enroll -o /root/again.rcdev "$1"; then echo "an invite worked twice"; exit 1; fi
+' _ "$invite" | sed -E 's/rc(dev|inv)1:[A-Za-z0-9_-]+/rc\11:<redacted>/g' || fail "remote API from the client"
+[[ $(x rayctl user list) == *carol* ]] || fail "the user made through the remote API is missing"
+[[ $(x rayctl audit) == *"alice/console (remote)"* ]] || fail "the remote admin is not in the audit log"
+[[ $(x rayctl device list alice) == *registered* ]] || fail "the remote device is not listed as registered"
+
 log "$distro: host firewall reloads and flush ruleset"
 case $distro in
 debian*) x systemctl restart nftables.service && wait_table "nftables restart" ;;
@@ -226,7 +246,7 @@ report="$(x cat /root/report.txt)"
 for section in "== versions" "== system" "== node" "== units" "checks"; do
 	[[ $report == *"$section"* ]] || fail "report lacks $section"
 done
-for leak in "$ip" example.test rcdev1: "$phone_id"; do
+for leak in "$ip" example.test rcdev1: rcinv1: "$phone_id"; do
 	if [[ $report == *"$leak"* ]]; then
 		fail "report leaks $leak"
 	fi
@@ -265,9 +285,9 @@ users="$(x rayctl user list)"
 [[ $users == *alice* && $users != *bob* ]] || fail "restore did not bring back the state of the backup: $users"
 wait_active rayd.service rayspa.service "${dataplane[@]}"
 client -addr "$ip" "$laptop" >/dev/null || fail "probe after restore"
-# Two users: alice and the operator's own from the install.
+# Three users: alice, carol from the remote API, the operator's own.
 metrics="$(x /usr/local/bin/rayctl metrics)" || fail "rayctl metrics"
-for m in 'raycontrol_users{state="active"} 2' 'raycontrol_services{kind="dnstt",enabled="true"} 1' \
+for m in 'raycontrol_users{state="active"} 3' 'raycontrol_services{kind="dnstt",enabled="true"} 1' \
 	'raycontrol_early_drops_packets_total{reason="ipv4-fragment"}'; do
 	[[ $metrics == *"$m"* ]] || fail "metrics lack $m: $metrics"
 done

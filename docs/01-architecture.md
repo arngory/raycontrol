@@ -130,8 +130,9 @@ settings        key, value                                           — вкл�
 - Локальный: unix socket, `SO_PEERCRED` — для `rayctl`.
 - **Подписка** (с первого этапа): HTTPS за SPA, ответ подписан ключом ноды; через неё клиент получает
   ротируемые учётные данные.
-- Полный API (этап M3): protobuf + ConnectRPC, отдельный порт за SPA + mTLS, роли user и admin, регистрация
-  устройства по одноразовой ссылке или QR. TLS — с `X25519MLKEM768`.
+- Удалённый API (R3, [spec/api-v1.md](spec/api-v1.md)): protobuf + ConnectRPC, отдельный порт за SPA + mTLS по ключу
+  устройства, роли user и admin, регистрация устройства по одноразовому приглашению `rcinv1:` (строка или QR).
+  TLS — только с `X25519MLKEM768`.
 
 ## Структура репозитория raycontrol
 

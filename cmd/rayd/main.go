@@ -188,6 +188,7 @@ func cmdServe(args []string) error {
 	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, log)
 	go syncDNS(ctx, st, srv.Changes, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
+	go serveRemote(ctx, &api.Remote{Server: srv, Log: log}, srv.Changes)
 	if err := startSubscription(ctx, st, log); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
@@ -320,6 +321,75 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 		for name := range running {
 			if !want[name] {
 				stop(name)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+		case <-time.After(10 * time.Minute):
+		}
+	}
+}
+
+// serveRemote keeps the remote API (R3-3) on the port of the enabled api
+// service; a new port or certificate restarts it.
+func serveRemote(ctx context.Context, r *api.Remote, changes func() <-chan struct{}) {
+	st, log := r.Server.Store, r.Log
+	var stop func()
+	var running [32]byte
+	defer func() {
+		if stop != nil {
+			stop()
+		}
+	}()
+	for {
+		wake := changes()
+		var want [32]byte
+		var cfg *tls.Config
+		var addr string
+		services, err := st.ListServices(ctx)
+		if err != nil {
+			log.Error("remote api", "err", err)
+		}
+		for _, svc := range services {
+			if svc.Kind != "api" || !svc.Enabled {
+				continue
+			}
+			ports, err := svc.Ports()
+			secrets, serr := st.ServiceSecrets(ctx, svc.ID)
+			if err != nil || serr != nil || len(ports) == 0 {
+				log.Error("remote api", "service", svc.Name, "err", errors.Join(err, serr))
+				break
+			}
+			if cfg, err = api.RemoteTLSConfig(secrets[provision.SecretTLSCert], secrets[provision.SecretTLSKey]); err != nil {
+				log.Error("remote api", "service", svc.Name, "err", err)
+				break
+			}
+			addr = ":" + strconv.Itoa(int(ports[0].Num))
+			want = sha256.Sum256(append([]byte(addr), secrets[provision.SecretTLSCert]...))
+		}
+		if want != running {
+			if stop != nil {
+				stop()
+				stop = nil
+			}
+			running = [32]byte{}
+			if cfg != nil {
+				ln, err := net.Listen("tcp", addr)
+				if err != nil {
+					log.Error("remote api", "addr", addr, "err", err)
+				} else {
+					sctx, cancel := context.WithCancel(ctx)
+					stop = cancel
+					go func() {
+						if err := r.Serve(sctx, ln, cfg); err != nil {
+							log.Error("remote api", "err", err)
+						}
+					}()
+					running = want
+					log.Info("remote api", "addr", addr)
+				}
 			}
 		}
 		select {
@@ -484,6 +554,10 @@ func pruneAudit(ctx context.Context, st *store.Store, log *slog.Logger) {
 	for {
 		if err := st.PruneAudit(ctx, time.Now().Add(-auditKeep)); err != nil && ctx.Err() == nil {
 			log.Warn("audit prune failed", "err", err)
+		}
+		// Invites used or expired a week ago: their key opens nothing anymore.
+		if err := st.PruneInvites(ctx, time.Now().Add(-7*24*time.Hour)); err != nil && ctx.Err() == nil {
+			log.Warn("invite prune failed", "err", err)
 		}
 		select {
 		case <-ctx.Done():

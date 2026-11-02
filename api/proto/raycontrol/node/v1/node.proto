@@ -1,7 +1,8 @@
 syntax = "proto3";
 
-// Node API of raycontrol. In R0 it is served on the local unix socket only
-// (rayctl); the remote listener behind SPA and mTLS comes in R3.
+// Node API of raycontrol: on the local unix socket for rayctl, and on the
+// remote API behind SPA and mTLS for admin devices (R3-3,
+// docs/spec/api-v1.md).
 // Compatibility follows protobuf rules; breaking changes go to node.v2.
 package raycontrol.node.v1;
 
@@ -32,7 +33,11 @@ service NodeService {
   // CreateDevice returns the device bundle with the device key. The key is
   // not stored anywhere it can be read back through the API.
   rpc CreateDevice(CreateDeviceRequest) returns (CreateDeviceResponse);
+  // RevokeDevice revokes a device, or withdraws an unused invite.
   rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
+  // CreateInvite returns a one-time invite ("rcinv1:..."): the client
+  // registers the device itself through the remote API (R3-3).
+  rpc CreateInvite(CreateInviteRequest) returns (CreateInviteResponse);
 
   rpc ListAudit(ListAuditRequest) returns (ListAuditResponse);
 
@@ -246,10 +251,24 @@ message Device {
   string role = 4; // user | admin
   int64 created_at = 5;
   int64 revoked_at = 6; // 0 = active
+  bool registered = 7; // through the remote API, with a client certificate
+}
+
+// Invite is an invite not yet used.
+message Invite {
+  string id = 1;
+  string user = 2;
+  string name = 3; // of the device it becomes
+  string role = 4;
+  int64 created_at = 5;
+  int64 expires_at = 6;
 }
 
 message ListDevicesRequest { string user = 1; }
-message ListDevicesResponse { repeated Device devices = 1; }
+message ListDevicesResponse {
+  repeated Device devices = 1;
+  repeated Invite invites = 2;
+}
 
 message CreateDeviceRequest {
   string user = 1;
@@ -263,6 +282,17 @@ message CreateDeviceResponse {
 
 message RevokeDeviceRequest { string id = 1; }
 message RevokeDeviceResponse {}
+
+message CreateInviteRequest {
+  string user = 1;
+  string name = 2; // of the device
+  string role = 3; // user | admin
+  int64 ttl_seconds = 4; // 0: a day; at most a week
+}
+message CreateInviteResponse {
+  Invite invite = 1;
+  string invite_code = 2; // "rcinv1:..." (docs/spec/api-v1.md)
+}
 
 message AuditEntry {
   int64 time = 1;
