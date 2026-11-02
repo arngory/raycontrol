@@ -513,3 +513,54 @@ func TestJournalTwoInstances(t *testing.T) {
 		t.Fatalf("journal %+v", c.Changes)
 	}
 }
+
+// ufw comes back the way the host loads it at boot: ufw.service restarted,
+// not ufw reload, which adds rate-limit rules the boot does not.
+func TestUninstallUFW(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "/etc/ufw"), 0o755)
+	os.WriteFile(filepath.Join(root, "/etc/ufw/user.rules"), []byte("*filter\nCOMMIT\n"), 0o640)
+	j, _ := deploy.OpenJournal(root)
+	if err := j.RecordFile("/etc/ufw/user.rules"); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(root, "/etc/ufw/user.rules"), []byte("*filter\n-A ufw-user-input -j ACCEPT\nCOMMIT\n"), 0o644)
+	var cmds []string
+	active := true
+	h := &deploy.Host{Root: root, Out: &bytes.Buffer{},
+		Run: func(name string, args ...string) ([]byte, error) {
+			c := name + " " + strings.Join(args, " ")
+			cmds = append(cmds, c)
+			if c == "systemctl is-active --quiet ufw.service" && !active {
+				return nil, errors.New("exit status 3")
+			}
+			if c == "ufw status" {
+				return []byte("Status: active\n"), nil
+			}
+			return nil, nil
+		},
+		LookupUser:  func(string) (int, error) { return 0, errors.New("unknown") },
+		LookupGroup: func(string) (int, error) { return 0, errors.New("unknown") },
+	}
+	if err := h.Uninstall(j, deploy.UninstallOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(root, "/etc/ufw/user.rules"))
+	st, _ := os.Stat(filepath.Join(root, "/etc/ufw/user.rules"))
+	all := strings.Join(cmds, "\n")
+	if string(b) != "*filter\nCOMMIT\n" || st.Mode().Perm() != 0o640 || !strings.Contains(all, "systemctl restart ufw.service") ||
+		strings.Contains(all, "ufw reload") {
+		t.Fatalf("file %q %v, commands:\n%s", b, st.Mode(), all)
+	}
+
+	// Without the unit (ufw run some other way): ufw reload.
+	j, _ = deploy.OpenJournal(root)
+	j.RecordFile("/etc/ufw/user.rules")
+	cmds, active = nil, false
+	if err := h.Uninstall(j, deploy.UninstallOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if all = strings.Join(cmds, "\n"); !strings.Contains(all, "ufw reload") {
+		t.Fatalf("no ufw reload:\n%s", all)
+	}
+}

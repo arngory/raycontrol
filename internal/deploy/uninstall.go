@@ -131,7 +131,12 @@ func (h *Host) Uninstall(j *Journal, opts UninstallOptions) error {
 		}
 	}
 	if ufw {
-		if out, _ := h.Run("ufw", "status"); bytes.Contains(out, []byte("Status: active")) {
+		// Loaded the way the host loads ufw at boot (ufw-init), so its chains
+		// come back exactly as they were: ufw reload adds runtime rules of its
+		// own (the rate-limit chains) that the boot does not.
+		if _, err := h.Run("systemctl", "is-active", "--quiet", "ufw.service"); err == nil {
+			note(h.run("systemctl", "restart", "ufw.service"))
+		} else if out, _ := h.Run("ufw", "status"); bytes.Contains(out, []byte("Status: active")) {
 			note(h.run("ufw", "reload"))
 		}
 	}
