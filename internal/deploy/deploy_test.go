@@ -73,7 +73,7 @@ func TestBuild(t *testing.T) {
 	// REALITY binds TCP 443 itself until the front has tcpmux (R2-7).
 	reality := file(p, "/etc/systemd/system/niko-reality.service")
 	for _, want := range []string{"User=niko-reality", "AmbientCapabilities=CAP_NET_BIND_SERVICE\n", "CapabilityBoundingSet=CAP_NET_BIND_SERVICE\n",
-		"ExecStart=/usr/local/bin/xray run -c /var/lib/raycontrol/rendered/reality/xray.json", "ReadWritePaths=/run/niko/reality-api"} {
+		"ExecStart=/usr/local/libexec/raycontrol/xray run -c /var/lib/raycontrol/rendered/reality/xray.json", "ReadWritePaths=/run/niko/reality-api"} {
 		if !strings.Contains(reality, want) {
 			t.Errorf("reality unit lacks %q", want)
 		}
@@ -86,7 +86,7 @@ func TestBuild(t *testing.T) {
 	for _, want := range []string{
 		"User=niko-dns", "SupplementaryGroups=niko-inner", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX\n",
 		"ExecStartPre=+install -m 0400 -o niko-dns -g niko-dns /var/lib/raycontrol/rendered/dns/noise.key /run/niko/dns/noise.key\n", "RuntimeDirectory=niko/dns", "CapabilityBoundingSet=\n",
-		"ExecStart=/usr/local/bin/niko-server backend -c /var/lib/raycontrol/rendered/dns/backend.json",
+		"ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c /var/lib/raycontrol/rendered/dns/backend.json",
 	} {
 		if !strings.Contains(dns, want) {
 			t.Errorf("dns unit lacks %q", want)

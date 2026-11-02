@@ -25,13 +25,18 @@ type Binaries struct {
 	Xray       string
 }
 
-// DefaultBinaries are the install locations.
+// DefaultBinaries are the install locations. The data plane has a
+// directory of its own: an Xray or a niko-server the host already has in
+// /usr/local/bin, for other software, is never replaced.
 var DefaultBinaries = Binaries{
 	Rayd:       "/usr/local/bin/rayd",
 	Rayspa:     "/usr/local/bin/rayspa",
-	NikoServer: "/usr/local/bin/niko-server",
-	Xray:       "/usr/local/bin/xray",
+	NikoServer: DataPlaneDir + "/niko-server",
+	Xray:       DataPlaneDir + "/xray",
 }
+
+// DataPlaneDir holds the data-plane binaries raycontrol installs.
+const DataPlaneDir = "/usr/local/libexec/raycontrol"
 
 // Paths of the control plane on an installed node.
 const (

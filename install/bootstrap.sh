@@ -2,6 +2,10 @@
 # raycontrol bootstrap: downloads a release, verifies its minisign signature
 # and checksum, installs rayd, rayspa and rayctl, then runs "rayctl install"
 # with the arguments given here (e.g. -host 203.0.113.7 -domain example.com).
+# The release carries the data plane too (Xray built from the pinned fork,
+# niko-server checked against pinned hashes) under the same signature;
+# rayctl install puts it in /usr/local/libexec/raycontrol and sets the
+# services up (REALITY by default when a domain is given).
 #
 #   curl -fsSL https://raw.githubusercontent.com/arngory/raycontrol/main/install/bootstrap.sh -o bootstrap.sh
 #   less bootstrap.sh
@@ -149,6 +153,9 @@ main() {
 	if [[ -n ${RAYCONTROL_LOCAL_DIR:-} ]]; then
 		log "installing from $RAYCONTROL_LOCAL_DIR without verification (test mode)"
 		cp "$RAYCONTROL_LOCAL_DIR"/{rayd,rayspa,rayctl} "$tmp/"
+		for f in xray niko-server; do
+			if [[ -f $RAYCONTROL_LOCAL_DIR/$f ]]; then cp "$RAYCONTROL_LOCAL_DIR/$f" "$tmp/"; fi
+		done
 	else
 		local base tarball f
 		if [[ $VERSION == latest ]]; then
@@ -169,7 +176,14 @@ main() {
 	if command -v restorecon >/dev/null; then
 		restorecon /usr/local/bin/rayd /usr/local/bin/rayspa /usr/local/bin/rayctl || true
 	fi
-	/usr/local/bin/rayctl install ${INSTALLED_PKGS:+-packages "$INSTALLED_PKGS"} "$@"
+	# The data plane from the same verified release, staged for rayctl.
+	local dataplane=()
+	if [[ -f $tmp/xray || -f $tmp/niko-server ]]; then
+		dataplane=(-dataplane "$tmp")
+	else
+		log "the release has no data plane (xray, niko-server): install them later"
+	fi
+	/usr/local/bin/rayctl install ${INSTALLED_PKGS:+-packages "$INSTALLED_PKGS"} "${dataplane[@]}" "$@"
 }
 
 # Sourcing the file (tests) only defines the functions.

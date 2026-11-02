@@ -143,6 +143,20 @@ func (h *Host) WriteFile(f File) (bool, error) {
 	return true, os.Rename(tmp, p)
 }
 
+// InstallBinary puts an executable in place like any file: journaled, so a
+// file that was there comes back at uninstall, and labelled for SELinux.
+func (h *Host) InstallBinary(src, dst string) (bool, error) {
+	b, err := os.ReadFile(src) //nolint:gosec // G304: a binary the bootstrap verified
+	if err != nil {
+		return false, err
+	}
+	changed, err := h.WriteFile(File{Path: dst, Mode: 0o755, Content: b})
+	if changed {
+		h.relabel(dst)
+	}
+	return changed, err
+}
+
 // stubResolv is the systemd-resolved stub that stops working once its
 // listener is off; resolvConf is the file with the real upstream servers.
 const (

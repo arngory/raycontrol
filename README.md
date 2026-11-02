@@ -28,8 +28,15 @@ Debian 12/13, Ubuntu 24.04 and Rocky Linux 9/10. As root, from an SSH session
 ```
 curl -fsSL https://raw.githubusercontent.com/arngory/raycontrol/main/install/bootstrap.sh -o bootstrap.sh
 less bootstrap.sh
-bash bootstrap.sh -host <public address> -domain <domain> -cloudflare-token-file /root/cf.token
+bash bootstrap.sh -host <public address> -domain <domain> -cloudflare-token-file /root/cf.token -services reality,dnstt,masterdns
 ```
+
+The release carries the data plane under the same signature: Xray built from
+the pinned commit of our fork and niko-server checked against pinned hashes
+(`deploy/versions.env`). `rayctl install` puts both in
+`/usr/local/libexec/raycontrol` (an Xray the host has for other software is
+left alone) and sets the services up: REALITY by default when a domain is
+given, DNS tunnels on request.
 
 With a Cloudflare API token (Zone.DNS:Edit and Zone.Zone:Read on the domain's
 zone) the node keeps its own DNS records (a wildcard to its address, the NS
@@ -69,6 +76,7 @@ rayctl apply                                          # install what new service
 rayctl service rotate reality                         # new REALITY keys and name ahead of schedule
 rayctl service set site answer=silent                 # decoy site: 404 (default), 403, silent or pages
 rayctl dns                                            # DNS provider, records the node needs, conflicts
+rayctl update                                         # newest verified release in place, rolls back on failure
 rayctl admin 198.51.100.7                             # addresses that reach SSH without SPA
 rayctl report -o report.txt                           # redacted report for an issue
 rayctl uninstall                                      # take everything back
