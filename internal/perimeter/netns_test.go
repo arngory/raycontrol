@@ -290,6 +290,53 @@ func TestNetns(t *testing.T) {
 			t.Fatal("rotated port silent after SPA")
 		}
 	})
+	t.Run("ACME window redirects TCP 80 and closes", func(t *testing.T) {
+		acme, err := net.Listen("tcp", "127.0.0.1:18089")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer acme.Close()
+		go func() {
+			for {
+				c, err := acme.Accept()
+				if err != nil {
+					return
+				}
+				c.Write([]byte("acme"))
+				c.Close()
+			}
+		}()
+		hello := func() string {
+			c, err := net.DialTimeout("tcp", "127.0.0.1:80", 700*time.Millisecond)
+			if err != nil {
+				return ""
+			}
+			defer c.Close()
+			c.SetReadDeadline(time.Now().Add(time.Second))
+			buf := make([]byte, 8)
+			n, _ := c.Read(buf)
+			return string(buf[:n])
+		}
+		if got := hello(); got != "" {
+			t.Fatalf("port 80 answers before the window: %q", got)
+		}
+		snap.Acme = &perimeterv1.AcmeWindow{Port: 18089, Until: time.Now().Add(2 * time.Second).Unix()}
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		if got := hello(); got != "acme" {
+			t.Fatalf("window open, port 80 got %q", got)
+		}
+		// Expires by itself, without rayspa.
+		time.Sleep(3 * time.Second)
+		if got := hello(); got != "" {
+			t.Fatalf("port 80 answers after the window: %q", got)
+		}
+		snap.Acme = nil
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("table restored after flush ruleset", func(t *testing.T) {
 		allow4 := func() string {
 			out, err := exec.Command("nft", "list", "set", "inet", Table, "allow4").CombinedOutput()

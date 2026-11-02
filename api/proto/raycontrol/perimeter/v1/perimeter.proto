@@ -28,6 +28,14 @@ message Snapshot {
   // Emergency access: these prefixes reach admin_ports (SSH) without SPA.
   repeated string admin_prefixes = 6;
   repeated Port admin_ports = 7;
+  // ACME window: while open, TCP 80 from any address goes to acme.port,
+  // where rayd answers HTTP-01 challenges. Absent or past: closed.
+  AcmeWindow acme = 8;
+}
+
+message AcmeWindow {
+  uint32 port = 1;  // rayd's HTTP-01 responder
+  int64 until = 2;  // unix seconds; nftables expires the window by itself
 }
 
 message SPAParams {

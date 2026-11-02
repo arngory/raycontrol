@@ -30,6 +30,15 @@ type fakeFW struct {
 	open       map[string]time.Duration // "addr port" -> ttl
 	gone       bool                     // table removed behind the gate's back
 	setups     int
+	acmePort   uint16
+	acmeTTL    time.Duration
+}
+
+func (f *fakeFW) SetACME(port uint16, ttl time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.acmePort, f.acmeTTL = port, ttl
+	return nil
 }
 
 func (f *fakeFW) Setup() error {
@@ -51,6 +60,7 @@ func (f *fakeFW) flush() {
 	defer f.mu.Unlock()
 	f.gone = true
 	f.udp, f.tcp, f.public, f.admin, f.adminPorts, f.rot, f.open = nil, nil, nil, nil, nil, nil, nil
+	f.acmePort, f.acmeTTL = 0, 0
 }
 func (f *fakeFW) Teardown() error { return nil }
 func (f *fakeFW) SetSPAPorts(udp, tcp []uint16) error {
@@ -249,6 +259,42 @@ func TestGateRestoresTable(t *testing.T) {
 	// Nothing to restore while the table is there.
 	if _, err := g.Tick(); err != nil || fw.setups != 1 {
 		t.Fatalf("setups=%d err=%v", fw.setups, err)
+	}
+}
+
+func TestGateACME(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	fw := &fakeFW{}
+	g := NewGate(fw, quiet)
+	g.now = func() time.Time { return now }
+	snap := testSnapshot()
+	snap.Acme = &perimeterv1.AcmeWindow{Port: 18080, Until: now.Add(90 * time.Second).Unix()}
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
+	}
+	if fw.acmePort != 18080 || fw.acmeTTL != 90*time.Second {
+		t.Fatalf("window %d %v", fw.acmePort, fw.acmeTTL)
+	}
+	// Restored with the table, with the time it has left.
+	fw.flush()
+	now = now.Add(30 * time.Second)
+	if _, err := g.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if fw.acmePort != 18080 || fw.acmeTTL != 60*time.Second {
+		t.Fatalf("restored window %d %v", fw.acmePort, fw.acmeTTL)
+	}
+	snap.Acme = nil
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
+	}
+	if fw.acmePort != 0 {
+		t.Fatalf("window still open: %d", fw.acmePort)
+	}
+	// A window that already ended is not opened.
+	snap.Acme = &perimeterv1.AcmeWindow{Port: 18080, Until: now.Add(-time.Second).Unix()}
+	if err := g.Update(snap); err != nil || fw.acmePort != 0 {
+		t.Fatalf("past window: %d %v", fw.acmePort, err)
 	}
 }
 

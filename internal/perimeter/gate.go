@@ -54,6 +54,9 @@ type Gate struct {
 	holders  map[grantKey]map[string]time.Time
 	udpPorts []uint16
 	tcpPorts []uint16
+	// ACME window as last applied.
+	acmePort  uint16
+	acmeUntil time.Time
 }
 
 // NewGate returns a gate that drives fw.
@@ -160,7 +163,32 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		g.admin, g.adminPorts = admin, adminPorts
 	}
 	g.revokeLocked()
+	if err := g.acmeLocked(snap.GetAcme()); err != nil {
+		return err
+	}
 	return g.slotsLocked()
+}
+
+// acmeLocked opens, moves or closes the ACME window.
+func (g *Gate) acmeLocked(w *perimeterv1.AcmeWindow) error {
+	var port uint16
+	var until time.Time
+	if w != nil && w.Port != 0 && w.Until > g.now().Unix() {
+		port, until = uint16(w.Port), time.Unix(w.Until, 0)
+	}
+	if port == g.acmePort && until.Equal(g.acmeUntil) {
+		return nil
+	}
+	if err := g.fw.SetACME(port, until.Sub(g.now())); err != nil {
+		return err
+	}
+	if port != 0 {
+		g.log.Info("acme window open", "port", port, "until", until)
+	} else if g.acmePort != 0 {
+		g.log.Info("acme window closed")
+	}
+	g.acmePort, g.acmeUntil = port, until
+	return nil
 }
 
 // portsFor returns the ports of the given services.
@@ -276,6 +304,11 @@ func (g *Gate) restoreLocked() error {
 	}
 	g.rotMap, g.udpPorts, g.tcpPorts = nil, nil, nil
 	now := g.now()
+	if g.acmePort != 0 && g.acmeUntil.After(now) {
+		if err := g.fw.SetACME(g.acmePort, g.acmeUntil.Sub(now)); err != nil {
+			return err
+		}
+	}
 	grants := 0
 	for key, devs := range g.holders {
 		var until time.Time

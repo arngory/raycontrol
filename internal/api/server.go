@@ -44,6 +44,24 @@ type Server struct {
 	mu   sync.Mutex
 	rev  uint64
 	wake chan struct{} // closed on the next change
+	// ACME window (certs.Issuer): rayspa points TCP 80 to acmePort.
+	acmePort  uint16
+	acmeUntil time.Time
+}
+
+// SetACMEWindow opens the perimeter window for an ACME order to port until
+// the given time, or closes it when until is zero.
+func (s *Server) SetACMEWindow(port uint16, until time.Time) {
+	s.mu.Lock()
+	s.acmePort, s.acmeUntil = port, until
+	s.mu.Unlock()
+	s.notify()
+}
+
+func (s *Server) acmeWindow() (uint16, time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.acmePort, s.acmeUntil
 }
 
 // notify records a change and wakes the perimeter watchers.

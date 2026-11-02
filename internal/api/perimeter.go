@@ -139,6 +139,9 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 		}
 		snap.Services = append(snap.Services, ps)
 	}
+	if port, until := p.acmeWindow(); port != 0 && until.After(time.Now()) {
+		snap.Acme = &perimeterv1.AcmeWindow{Port: uint32(port), Until: until.Unix()}
+	}
 	admin, err := node.AdminAccess(ctx, p.Store)
 	if err != nil {
 		return nil, err

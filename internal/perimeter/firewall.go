@@ -38,6 +38,9 @@ type Firewall interface {
 	// SetRotation replaces the UDP slot ports redirected to service ports
 	// (spa-v2.md §11): slot port -> service port.
 	SetRotation(udp map[uint16]uint16) error
+	// SetACME opens the ACME window: TCP 80 from anyone to port, for ttl.
+	// The elements expire by themselves; ttl 0 closes the window now.
+	SetACME(port uint16, ttl time.Duration) error
 	Allow(addr netip.Addr, ports []Port, ttl time.Duration) error
 	Deny(addr netip.Addr, ports []Port) error
 	Teardown() error
@@ -91,7 +94,8 @@ func (n *NFT) Ruleset() string {
 	loNAT := ""
 	if n.FilterLoopback {
 		lo = "# loopback filtered (test)"
-		loNAT = "chain output_nat { type nat hook output priority -100; policy accept; udp dport @rot_udp redirect to : udp dport map @rot_udp; }"
+		loNAT = "chain output_nat { type nat hook output priority -100; policy accept; udp dport @rot_udp redirect to : udp dport map @rot_udp; " +
+			"tcp dport @acme_redirect redirect to : tcp dport map @acme_redirect; }"
 	}
 	return fmt.Sprintf(`table inet %[1]s {}
 delete table inet %[1]s
@@ -105,6 +109,8 @@ table inet %[1]s {
 	set admin6 { type ipv6_addr; flags interval; }
 	set admin_ports { type inet_proto . inet_service; }
 	map rot_udp { type inet_service : inet_service; }
+	map acme_redirect { type inet_service : inet_service; flags timeout; }
+	set acme_in { type inet_service; flags timeout; }
 	set rate4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set rate6 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 
@@ -113,6 +119,7 @@ table inet %[1]s {
 	chain prerouting {
 		type nat hook prerouting priority dstnat; policy accept;
 		udp dport @rot_udp redirect to : udp dport map @rot_udp
+		tcp dport @acme_redirect redirect to : tcp dport map @acme_redirect
 	}
 	%[5]s
 
@@ -131,6 +138,7 @@ table inet %[1]s {
 		tcp dport @spa_tcp tcp flags syn update @rate6 { ip6 saddr %[2]s } drop
 		tcp dport @spa_tcp accept
 
+		tcp dport @acme_in accept
 		meta l4proto . th dport @public accept
 		ip saddr @admin4 meta l4proto . th dport @admin_ports accept
 		ip6 saddr @admin6 meta l4proto . th dport @admin_ports accept
@@ -245,6 +253,18 @@ func (n *NFT) SetRotation(udp map[uint16]uint16) error {
 			elems[i] = fmt.Sprintf("%d : %d", k, udp[uint16(k)])
 		}
 		fmt.Fprintf(&b, "add element inet %s rot_udp { %s }\n", Table, strings.Join(elems, ", "))
+	}
+	return n.run(b.String())
+}
+
+// SetACME replaces the ACME window in one transaction.
+func (n *NFT) SetACME(port uint16, ttl time.Duration) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "flush map inet %s acme_redirect\nflush set inet %s acme_in\n", Table, Table)
+	if port != 0 && ttl > 0 {
+		secs := int((ttl + time.Second - 1) / time.Second)
+		fmt.Fprintf(&b, "add element inet %s acme_redirect { 80 timeout %ds : %d }\n", Table, secs, port)
+		fmt.Fprintf(&b, "add element inet %s acme_in { %d timeout %ds }\n", Table, port, secs)
 	}
 	return n.run(b.String())
 }
