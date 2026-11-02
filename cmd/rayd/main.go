@@ -108,7 +108,13 @@ func cmdServe(args []string) error {
 	credPeriod := fs.Duration("cred-period", 30*24*time.Hour, "how long a user credential stays current (0: no rotation)")
 	credLead := fs.Duration("cred-lead", 3*24*time.Hour, "the next credential is in the subscription this long before the switch")
 	credGrace := fs.Duration("cred-grace", 2*24*time.Hour, "the previous credential is accepted this long after the switch")
+	realityPeriod := fs.Duration("reality-period", 90*24*time.Hour, "how long REALITY keys stay current; their next set is published -cred-lead ahead (0: no rotation)")
+	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new REALITY server name may wait for its certificate")
 	fs.Parse(args)
+	epoch := provision.RealityEpoch{Period: *realityPeriod, Lead: *credLead, Prepare: *realityPrepare}
+	if err := epoch.Check(); err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -130,8 +136,15 @@ func cmdServe(args []string) error {
 	go pruneAudit(ctx, st, log)
 	paths := render.DefaultPaths
 	paths.Rendered = *rendered
+	rotateNow := make(chan struct{}, 1)
 	srv := &api.Server{Store: st, Params: params, Version: version, Paths: paths, Binaries: deploy.DefaultBinaries,
-		CheckRealityTarget: provision.CheckRealityTarget}
+		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead,
+		Rotate: func() {
+			select {
+			case rotateNow <- struct{}{}:
+			default:
+			}
+		}}
 	per := &api.PerimeterServer{Server: srv, RayspaUID: -1, DefaultTTL: *spaTTL, MaxTTL: *spaMaxTTL, TCPCarrier: *spaTCP, Refresh: time.Minute}
 	policy := api.PeerPolicy{Group: *group}
 	if u, err := user.Lookup(*rayspaUser); err == nil {
@@ -157,11 +170,14 @@ func cmdServe(args []string) error {
 		r := store.Rotation{Period: *credPeriod, Lead: *credLead, Grace: *credGrace}
 		go rotateCredentials(ctx, st, r, func() { srv.Notify() }, log)
 	}
+	var cm *certs.Manager
+	var is *certs.Issuer
 	if *acmeDir != "" {
-		if err := startCertificates(ctx, st, srv, *acmeDir, log); err != nil {
+		if cm, is, err = startCertificates(ctx, st, srv, *acmeDir, log); err != nil {
 			log.Error("certificates not managed", "err", err)
 		}
 	}
+	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, log)
 	if err := startSubscription(ctx, st, log); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
@@ -171,24 +187,53 @@ func cmdServe(args []string) error {
 
 // startCertificates issues and renews the sites' certificates through ACME
 // HTTP-01, opening the perimeter window for each order (R2-11).
-func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, directory string, log *slog.Logger) error {
+func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, directory string, log *slog.Logger) (*certs.Manager, *certs.Issuer, error) {
 	key, err := certs.AccountKey(ctx, st)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	host, err := node.Host(ctx, st)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	port, err := provision.ACMEPort(ctx, st)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	is := &certs.Issuer{Directory: directory, AccountKey: key, Window: srv.SetACMEWindow, NodeHost: host, Log: log,
 		Listen: ":" + strconv.Itoa(int(port))}
 	m := &certs.Manager{Store: st, Issue: is.Issue, Notify: srv.Notify, Log: log}
 	go m.Run(ctx)
-	return nil
+	return m, is, nil
+}
+
+// rotateReality advances the REALITY key rotation every minute (R4-7), so
+// the switch lands within a minute of the time clients have, and at once
+// on an operator request. A new server name needs a certificate first: the
+// manager is woken for it. Without certificate management the names stay.
+func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoch, is *certs.Issuer, cm *certs.Manager,
+	now <-chan struct{}, notify func(), log *slog.Logger) {
+	var resolves func(context.Context, string) error
+	if is != nil && cm != nil {
+		resolves = func(ctx context.Context, name string) error { return is.CheckDNS(ctx, []string{name}) }
+	}
+	for {
+		n, err := provision.RotateReality(ctx, st, time.Now(), e, resolves, log)
+		if err != nil {
+			log.Error("REALITY rotation", "err", err)
+		} else if n > 0 {
+			notify()
+			if cm != nil {
+				cm.Wake()
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-now:
+		case <-time.After(time.Minute):
+		}
+	}
 }
 
 // startSubscription serves the subscription endpoint on the port of the

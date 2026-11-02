@@ -575,6 +575,38 @@ func RealityKeys(s Service) (pbk, pqv string, err error) {
 	return enc.EncodeToString(priv.PublicKey().Bytes()), enc.EncodeToString(raw), nil
 }
 
+// NextReality returns a REALITY service as it will be after its published
+// switch (R4-7): the next keys, shortIds and server name. ok is false when
+// no switch is published.
+func NextReality(s Service) (next Service, from time.Time, ok bool) {
+	state := provision.ParseRealityState(s.Service)
+	if state.NextFrom == 0 {
+		return s, time.Time{}, false
+	}
+	next = s
+	next.Secrets = maps.Clone(s.Secrets)
+	for _, name := range provision.RealitySecrets {
+		v, ok := s.Secrets[provision.NextSecret(name)]
+		if !ok {
+			return s, time.Time{}, false
+		}
+		next.Secrets[name] = v
+	}
+	if state.SNINext != "" {
+		var settings map[string]any
+		if err := json.Unmarshal([]byte(s.Settings), &settings); err != nil {
+			return s, time.Time{}, false
+		}
+		settings["sni"] = state.SNINext
+		b, err := json.Marshal(settings)
+		if err != nil {
+			return s, time.Time{}, false
+		}
+		next.Settings = string(b)
+	}
+	return next, time.Unix(state.NextFrom, 0), true
+}
+
 // ShortIDs returns the shortIds of a REALITY service.
 func ShortIDs(s Service) []string {
 	return strings.Split(string(s.Secrets[provision.SecretShortIDs]), ",")

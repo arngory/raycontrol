@@ -36,6 +36,8 @@ const usageText = `usage: rayctl [-socket PATH] [-json] <command>
   service list
   service add KIND NAME [-settings JSON]
   service enable|disable|del NAME
+  service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
+                                            schedule: after the lead time, or at once with -now
   device list [USER]
   device add USER NAME [-role user|admin]   prints the enrollment bundle once
   device revoke ID
@@ -240,9 +242,9 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 			return err
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
-			fmt.Fprintln(w, "ID\tNAME\tKIND\tENABLED")
+			fmt.Fprintln(w, "ID\tNAME\tKIND\tENABLED\tKEYS")
 			for _, s := range r.Msg.Services {
-				fmt.Fprintf(w, "%d\t%s\t%s\t%v\n", s.Id, s.Name, s.Kind, s.Enabled)
+				fmt.Fprintf(w, "%d\t%s\t%s\t%v\t%s\n", s.Id, s.Name, s.Kind, s.Enabled, keyState(s))
 			}
 			fmt.Fprintf(w, "\nkinds: %s\n", strings.Join(r.Msg.Kinds, " "))
 		})
@@ -280,8 +282,54 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 		}
 		_, err := c.c.DeleteService(ctx, connect.NewRequest(&nodev1.DeleteServiceRequest{Name: args[0]}))
 		return err
+	case "rotate":
+		fs := flag.NewFlagSet("service rotate", flag.ContinueOnError)
+		now := fs.Bool("now", false, "switch at once; clients that have not fetched their subscription since lose this profile until they do")
+		if err := need(args, 1); err != nil {
+			return err
+		}
+		if err := fs.Parse(args[1:]); err != nil {
+			return errUsage
+		}
+		r, err := c.c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: args[0], Now: *now}))
+		if err != nil {
+			return err
+		}
+		return c.print(r.Msg, func(w *tabwriter.Writer) {
+			fmt.Fprintf(w, "%s switches to new keys at %s (later if a new server name waits for its certificate)\n",
+				args[0], time.Unix(r.Msg.SwitchAt, 0).UTC().Format(time.RFC3339))
+		})
 	}
 	return errUsage
+}
+
+// keyState says when a REALITY service last switched keys and when the
+// published next switch is (R4-7).
+func keyState(s *nodev1.Service) string {
+	if s.Kind != "reality" {
+		return ""
+	}
+	var st struct {
+		RotatedAt int64  `json:"rotated_at"`
+		NextFrom  int64  `json:"next_from"`
+		SNINext   string `json:"sni_next"`
+	}
+	_ = json.Unmarshal([]byte(s.SettingsJson), &st)
+	day := func(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04") }
+	out := "since creation"
+	if st.RotatedAt != 0 {
+		out = "since " + day(st.RotatedAt)
+	}
+	switch {
+	case st.NextFrom != 0:
+		out += ", switch " + day(st.NextFrom)
+	case st.SNINext != "":
+		out += ", next name waits for its certificate"
+	}
+	if st.NextFrom != 0 && st.SNINext != "" {
+		out += " with a new name"
+	}
+	return out
 }
 
 func (c *cli) device(ctx context.Context, sub string, args []string) error {

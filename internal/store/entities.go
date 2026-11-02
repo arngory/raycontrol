@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"time"
@@ -256,6 +257,47 @@ func (s *Store) SetServiceSecret(ctx context.Context, serviceID int64, name stri
 	_, err := s.db.ExecContext(ctx, `INSERT INTO service_secrets (service_id, name, value) VALUES (?, ?, ?)
 		ON CONFLICT(service_id, name) DO UPDATE SET value = excluded.value`, serviceID, name, value)
 	return err
+}
+
+// ServiceUpdate changes a service in one transaction: its settings (unless
+// empty) and secrets, set and deleted, so that a key and what goes with it
+// (a certificate and its chain, a set of REALITY keys) never mix.
+type ServiceUpdate struct {
+	Settings string
+	Set      map[string][]byte
+	Delete   []string
+}
+
+// UpdateService applies u to the service with this ID.
+func (s *Store) UpdateService(ctx context.Context, id int64, u ServiceUpdate) error {
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		if u.Settings != "" {
+			var kind string
+			if err := tx.QueryRowContext(ctx, `SELECT kind FROM services WHERE id = ?`, id).Scan(&kind); errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("service %d: %w", id, ErrNotFound)
+			} else if err != nil {
+				return err
+			}
+			if _, err := (Service{Kind: kind, Settings: u.Settings}).Ports(); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE services SET settings_json = ? WHERE id = ?`, u.Settings, id); err != nil {
+				return err
+			}
+		}
+		for _, name := range slices.Sorted(maps.Keys(u.Set)) {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO service_secrets (service_id, name, value) VALUES (?, ?, ?)
+				ON CONFLICT(service_id, name) DO UPDATE SET value = excluded.value`, id, name, u.Set[name]); err != nil {
+				return err
+			}
+		}
+		for _, name := range u.Delete {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM service_secrets WHERE service_id = ? AND name = ?`, id, name); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // Credentials returns the credential of every user for a service, creating

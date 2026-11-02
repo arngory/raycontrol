@@ -351,3 +351,59 @@ func TestRotationInSubscription(t *testing.T) {
 		t.Fatalf("next after the switch: %+v", profiles[0].Next)
 	}
 }
+
+func TestRealityKeysInSubscription(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7"})
+	svc, _ := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true, Settings: `{"target":"www.example.org:443"}`})
+	u, _ := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+	st.SetUserServices(ctx, "alice", []int64{svc.ID})
+	day := 24 * time.Hour
+	now := time.Now()
+	epoch := provision.RealityEpoch{Period: 90 * day, Lead: 3 * day, Prepare: day}
+
+	render.Collect(ctx, st) // creates the credentials
+	// A credential switch on day 30, published on day 28.
+	r := store.Rotation{Period: 30 * day, Lead: 3 * day, Grace: 2 * day}
+	if n, err := st.RotateCredentials(ctx, now.Add(28*day), r, render.NewUUID); err != nil || n != 1 {
+		t.Fatalf("credentials: %d %v", n, err)
+	}
+	m, _ := render.Collect(ctx, st)
+	set := m.Sets[svc.ID][u.ID]
+	profiles, _ := sub.Profiles(m, m.Users[0])
+	if p := profiles[0].Next; p == nil || p.From != set.NextFrom.Unix() {
+		t.Fatalf("credential next: %+v", p)
+	}
+
+	// New keys requested for day 29: they come first, with the next UUID,
+	// which the server already accepts.
+	if err := provision.RequestRealityRotation(ctx, st, "r", now.Add(26*day), epoch.Lead, false); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := provision.RotateReality(ctx, st, now.Add(26*day), epoch, nil, nil); err != nil || n != 1 {
+		t.Fatalf("keys: %d %v", n, err)
+	}
+	m, _ = render.Collect(ctx, st)
+	profiles, _ = sub.Profiles(m, m.Users[0])
+	p := profiles[0]
+	cur, _ := url.Parse(p.Link)
+	if p.Next == nil || p.Next.From != now.Add(29*day).Unix() {
+		t.Fatalf("next %+v", p.Next)
+	}
+	next, _ := url.Parse(p.Next.Link)
+	if next.User.Username() != set.Next || next.Query().Get("pbk") == cur.Query().Get("pbk") ||
+		next.Query().Get("pqv") == cur.Query().Get("pqv") || next.Query().Get("encryption") == cur.Query().Get("encryption") ||
+		next.Query().Get("sni") != "www.example.org" {
+		t.Fatalf("next link %s\ncurrent %s", p.Next.Link, p.Link)
+	}
+	// The server keeps its keys until the switch.
+	svcNow := m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })]
+	if pbk, _, _ := render.RealityKeys(svcNow); pbk != cur.Query().Get("pbk") {
+		t.Fatal("server keys changed before the switch")
+	}
+}

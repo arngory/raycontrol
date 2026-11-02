@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -320,6 +321,14 @@ func TestRealityWithXray(t *testing.T) {
 // the link's UUID if set) and fetches page through it.
 func fetchThroughLink(t *testing.T, bin, link, id, page string) {
 	t.Helper()
+	if err := tryThroughLink(t, bin, link, id, page, 30); err != nil {
+		t.Fatalf("no response through REALITY: %v", err)
+	}
+}
+
+// tryThroughLink is fetchThroughLink returning the last error after tries.
+func tryThroughLink(t *testing.T, bin, link, id, page string, tries int) error {
+	t.Helper()
 	u, err := url.Parse(link)
 	if err != nil {
 		t.Fatal(err)
@@ -349,34 +358,38 @@ func fetchThroughLink(t *testing.T, bin, link, id, page string) {
 			},
 		}},
 	})
-	runXray(t, bin, client)
+	stop := runXray(t, bin, client)
+	defer stop()
 	proxy, _ := url.Parse("socks5://127.0.0.1:" + strconv.Itoa(socksPort))
 	hc := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: 5 * time.Second}
 	var lastErr error
-	for i := 0; i < 30; i++ {
+	for i := 0; i < tries; i++ {
 		resp, err := hc.Get(page)
 		if err == nil {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if string(body) != "through reality" {
-				t.Fatalf("body %q", body)
+				return fmt.Errorf("body %q", body)
 			}
-			return
+			return nil
 		}
 		lastErr = err
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Fatalf("no response through REALITY: %v", lastErr)
+	return lastErr
 }
 
-func runXray(t *testing.T, bin, cfg string) {
+func runXray(t *testing.T, bin, cfg string) (stop func()) {
 	t.Helper()
 	cmd := exec.Command(bin, "run", "-c", cfg)
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	var once sync.Once
+	stop = func() { once.Do(func() { cmd.Process.Kill(); cmd.Wait() }) }
+	t.Cleanup(stop)
+	return stop
 }
 
 func waitFile(t *testing.T, path string) {
@@ -441,6 +454,18 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 	name := provision.SiteName(siteSvc)
 
+	// Key rotation (R4-7), prepared before the certificate so that it covers
+	// the next name too, as the manager does it: new keys and a new name of
+	// the node's own domain.
+	day := 24 * time.Hour
+	epoch := provision.RealityEpoch{Period: 90 * day, Lead: 3 * day, Prepare: day}
+	resolves := func(context.Context, string) error { return nil }
+	if n, err := provision.RotateReality(ctx, st, svc.CreatedAt.Add(86*day), epoch, resolves, nil); err != nil || n != 1 {
+		t.Fatalf("prepare: %d %v", n, err)
+	}
+	prepared, _ := st.ServiceByName(ctx, "reality")
+	nextName := provision.ParseRealityState(prepared).SNINext
+
 	// The certificate the manager would get: a chain long enough for REALITY.
 	rootKey, _ := rsa.GenerateKey(rand.Reader, 4096)
 	interKey, _ := rsa.GenerateKey(rand.Reader, 4096)
@@ -463,7 +488,7 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 	root := mk("Test Root", true, nil, &rootKey.PublicKey, nil, rootKey)
 	inter := mk("Test Intermediate", true, nil, &interKey.PublicKey, root, rootKey)
-	leaf := mk(name, false, []string{name}, &leafKey.PublicKey, inter, interKey)
+	leaf := mk(name, false, []string{name, nextName}, &leafKey.PublicKey, inter, interKey)
 	var chainPEM bytes.Buffer
 	for _, c := range []*x509.Certificate{leaf, inter, root} {
 		pem.Encode(&chainPEM, &pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
@@ -471,6 +496,9 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	keyDER, _ := x509.MarshalPKCS8PrivateKey(leafKey)
 	st.SetServiceSecret(ctx, siteSvc.ID, provision.SecretTLSKey, keyDER)
 	st.SetServiceSecret(ctx, siteSvc.ID, provision.SecretTLSChain, chainPEM.Bytes())
+	if n, err := provision.RotateReality(ctx, st, svc.CreatedAt.Add(86*day+time.Minute), epoch, resolves, nil); err != nil || n != 1 {
+		t.Fatalf("publish: %d %v", n, err)
+	}
 
 	user, _ := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
 	st.SetUserServices(ctx, "alice", []int64{svc.ID})
@@ -519,7 +547,7 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	if out, err := exec.Command(bin, "run", "-test", "-c", server).CombinedOutput(); err != nil {
 		t.Fatalf("xray -test: %v\n%s", err, out)
 	}
-	runXray(t, bin, server)
+	stopServer := runXray(t, bin, server)
 
 	link, err := sub.RealityLink(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.Kind == "reality" })], user.ID)
 	if err != nil {
@@ -530,20 +558,68 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	fetchThroughLink(t, bin, link, "", page.URL)
 
 	// A probe without credentials: the site's certificate and its pages.
-	hc := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
-		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return tls.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port), &tls.Config{ServerName: name, RootCAs: roots, NextProtos: []string{"h2"}})
-		},
-		ForceAttemptHTTP2: true,
-	}}
-	resp, err := hc.Get("https://" + name + "/about.html")
+	probe := func(name string) {
+		t.Helper()
+		hc := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
+			DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return tls.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port), &tls.Config{ServerName: name, RootCAs: roots, NextProtos: []string{"h2"}})
+			},
+			ForceAttemptHTTP2: true,
+		}}
+		resp, err := hc.Get("https://" + name + "/about.html")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 || resp.ProtoMajor != 2 || !strings.Contains(string(body), "studio@"+name) ||
+			!bytes.Equal(resp.TLS.PeerCertificates[0].Raw, leaf.Raw) {
+			t.Fatalf("probe %s: %s %s\n%s", name, resp.Status, resp.Proto, body)
+		}
+	}
+	probe(name)
+
+	// The switch: the subscription had the next link; the node renders the
+	// next keys and name, the site follows the name.
+	profiles, err := sub.Profiles(m, m.Users[0])
+	if err != nil || profiles[0].Next == nil {
+		t.Fatalf("no next in the subscription: %v", err)
+	}
+	if n, err := provision.RotateReality(ctx, st, svc.CreatedAt.Add(90*day), epoch, resolves, nil); err != nil || n != 1 {
+		t.Fatalf("switch: %d %v", n, err)
+	}
+	m, err = render.Collect(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != 200 || resp.ProtoMajor != 2 || !strings.Contains(string(body), "studio@"+name) ||
-		!bytes.Equal(resp.TLS.PeerCertificates[0].Raw, leaf.Raw) {
-		t.Fatalf("probe: %s %s\n%s", resp.Status, resp.Proto, body)
+	if files, skipped, err = render.Render(m, paths); err != nil || len(skipped) != 0 {
+		t.Fatalf("render: %v, skipped %v", err, skipped)
 	}
+	serverCfg = nil
+	for _, f := range files {
+		os.WriteFile(f.Path, f.Content, 0o644)
+		if f.Service == "reality" {
+			json.Unmarshal(f.Content, &serverCfg)
+		}
+	}
+	stopServer()
+	os.Remove(paths.APISocket("reality"))
+	delete(serverCfg, "dns")
+	delete(serverCfg, "routing")
+	serverCfg["outbounds"] = []map[string]any{{"protocol": "freedom", "settings": map[string]any{
+		"finalRules": []map[string]any{{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}}}
+	runXray(t, bin, writeJSON(t, serverCfg))
+
+	newLink, err := sub.RealityLink(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.Kind == "reality" })], user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newLink != profiles[0].Next.Link || !strings.Contains(newLink, "sni="+nextName) {
+		t.Fatalf("after the switch:\n%s\nnext was\n%s", newLink, profiles[0].Next.Link)
+	}
+	fetchThroughLink(t, bin, newLink, "", page.URL)
+	if err := tryThroughLink(t, bin, link, "", page.URL, 3); err == nil {
+		t.Fatal("the previous keys still work after the switch")
+	}
+	probe(nextName)
 }

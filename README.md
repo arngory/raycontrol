@@ -52,6 +52,7 @@ rayctl user add -services reality,dns -expires 30d    # opaque name such as u-k3
 rayctl device add u-k3f9-x2qa phone                   # enrollment bundle, shown once
 rayctl service add reality reality                    # self-steal on the node's decoy site
 rayctl apply                                          # install what new services need
+rayctl service rotate reality                         # new REALITY keys and name ahead of schedule
 rayctl admin 198.51.100.7                             # addresses that reach SSH without SPA
 rayctl report -o report.txt                           # redacted report for an issue
 rayctl uninstall                                      # take everything back

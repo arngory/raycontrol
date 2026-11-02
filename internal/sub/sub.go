@@ -229,12 +229,28 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 			}
 			if link != "" {
 				p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: link}
-				if set := m.Sets[s.ID][u.ID]; set.Next != "" {
+				// One next per profile: the earliest switch, the user's
+				// credential (R4-1) or the service's keys (R4-7).
+				set := m.Sets[s.ID][u.ID]
+				if set.Next != "" {
 					next, err := realityLink(m, s, set.Next, u.ID)
 					if err != nil {
 						return nil, err
 					}
 					p.Next = &Next{Link: next, From: set.NextFrom.Unix()}
+				}
+				if ns, from, ok := render.NextReality(s); ok && (p.Next == nil || from.Unix() <= p.Next.From) {
+					// The next credential is accepted from its publication on,
+					// so it goes with the next keys when there is one.
+					uuid := m.Creds[s.ID][u.ID]
+					if set.Next != "" {
+						uuid = set.Next
+					}
+					next, err := realityLink(m, ns, uuid, u.ID)
+					if err != nil {
+						return nil, err
+					}
+					p.Next = &Next{Link: next, From: from.Unix()}
 				}
 				out = append(out, p)
 			}

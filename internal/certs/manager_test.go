@@ -94,3 +94,57 @@ func TestAccountKey(t *testing.T) {
 		t.Fatal("account key not kept")
 	}
 }
+
+// A REALITY service moving to a new name (R4-7): the certificate covers
+// both; when the new name fails, the name in use still gets one.
+func TestManagerNextName(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	r, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, _ := st.ServiceByName(ctx, "site")
+	name := provision.SiteName(site)
+	epoch := provision.RealityEpoch{Period: 90 * 24 * time.Hour, Lead: 3 * 24 * time.Hour, Prepare: 24 * time.Hour}
+	ok := func(context.Context, string) error { return nil }
+	if n, err := provision.RotateReality(ctx, st, r.CreatedAt.Add(86*24*time.Hour), epoch, ok, nil); err != nil || n != 1 {
+		t.Fatalf("prepare: %d %v", n, err)
+	}
+	r, _ = st.ServiceByName(ctx, "r")
+	next := provision.ParseRealityState(r).SNINext
+
+	now := time.Now()
+	var issued [][]string
+	failNew := true
+	m := &Manager{Store: st, Issue: func(_ context.Context, names []string, key crypto.Signer) ([][]byte, error) {
+		if failNew && len(names) > 1 {
+			return nil, errors.New("no DNS record for the new name")
+		}
+		issued = append(issued, names)
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: names, NotBefore: now, NotAfter: now.Add(90 * 24 * time.Hour)}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
+		return [][]byte{der}, err
+	}}
+	if n := m.Once(ctx, now); n != 1 || len(issued) != 1 || len(issued[0]) != 1 || issued[0][0] != name {
+		t.Fatalf("fallback to the name in use: %d %v", n, issued)
+	}
+	failNew = false
+	m.next = nil
+	m.fails = nil
+	if n := m.Once(ctx, now); n != 1 || len(issued) != 2 || len(issued[1]) != 2 || issued[1][0] != name || issued[1][1] != next {
+		t.Fatalf("both names: %d %v", n, issued)
+	}
+	all, _ := st.ListServices(ctx)
+	if !provision.SiteCovers(ctx, st, all, "site", next) {
+		t.Fatal("site does not cover the next name")
+	}
+	if n := m.Once(ctx, now.Add(time.Hour)); n != 0 {
+		t.Fatal("issued again")
+	}
+}

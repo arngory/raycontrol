@@ -13,6 +13,7 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/provision"
@@ -60,8 +61,24 @@ type Manager struct {
 	// Every is the check interval; failures back off from it up to a day.
 	Every time.Duration
 
+	once  sync.Once
 	fails map[string]int
 	next  map[string]time.Time
+	wake  chan struct{}
+}
+
+// Wake makes Run check now, as when a site needs a new name; failures keep
+// their back-off.
+func (m *Manager) Wake() {
+	select {
+	case m.wakeCh() <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) wakeCh() chan struct{} {
+	m.once.Do(func() { m.wake = make(chan struct{}, 1) })
+	return m.wake
 }
 
 func (m *Manager) log() *slog.Logger {
@@ -82,6 +99,7 @@ func (m *Manager) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-m.wakeCh():
 		case <-time.After(every):
 		}
 	}
@@ -102,20 +120,29 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 		if svc.Kind != "site" || !svc.Enabled || now.Before(m.next[svc.Name]) {
 			continue
 		}
-		name := provision.SiteName(svc)
+		// The names in use and those REALITY moves to at its next switch
+		// (R4-7); when the new ones fail, the names in use still renew.
+		names, next := provision.SiteNames(svc, services)
 		secrets, err := m.Store.ServiceSecrets(ctx, svc.ID)
 		if err != nil {
 			m.log().Error("certificates", "service", svc.Name, "err", err)
 			continue
 		}
-		if !due(secrets[provision.SecretTLSChain], name, now) {
+		chain := secrets[provision.SecretTLSChain]
+		want := append(slices.Clone(names), next...)
+		if !due(chain, want, now) {
 			continue
 		}
-		if err := m.issue(ctx, svc, name); err != nil {
+		err = m.issue(ctx, svc, want)
+		if err != nil && len(next) > 0 && due(chain, names, now) {
+			m.log().Warn("certificate with the next name not issued, renewing without it", "service", svc.Name, "err", err)
+			err = m.issue(ctx, svc, names)
+		}
+		if err != nil {
 			m.fails[svc.Name]++
 			wait := min(time.Hour<<min(m.fails[svc.Name]-1, 5), 24*time.Hour)
 			m.next[svc.Name] = now.Add(wait)
-			m.log().Warn("certificate not issued, retrying later", "service", svc.Name, "name", name, "in", wait, "err", err)
+			m.log().Warn("certificate not issued, retrying later", "service", svc.Name, "in", wait, "err", err)
 			continue
 		}
 		delete(m.fails, svc.Name)
@@ -128,27 +155,32 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 	return stored
 }
 
-// due reports whether a chain is missing, for another name, or up for
-// renewal.
-func due(chainPEM []byte, name string, now time.Time) bool {
+// due reports whether a chain is missing, lacks one of the names, or is
+// up for renewal.
+func due(chainPEM []byte, names []string, now time.Time) bool {
 	block, _ := pem.Decode(chainPEM)
 	if block == nil {
 		return true
 	}
 	leaf, err := x509.ParseCertificate(block.Bytes)
-	if err != nil || !slices.Contains(leaf.DNSNames, name) {
+	if err != nil {
 		return true
+	}
+	for _, n := range names {
+		if !slices.Contains(leaf.DNSNames, n) {
+			return true
+		}
 	}
 	return !now.Before(RenewAt(leaf))
 }
 
-func (m *Manager) issue(ctx context.Context, svc store.Service, name string) error {
+func (m *Manager) issue(ctx context.Context, svc store.Service, names []string) error {
 	// RSA: its longer chain fits REALITY with ML-DSA-65 (R2-8, R2-12).
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return err
 	}
-	chain, err := m.Issue(ctx, []string{name}, key)
+	chain, err := m.Issue(ctx, names, key)
 	if err != nil {
 		return err
 	}
@@ -162,13 +194,12 @@ func (m *Manager) issue(ctx context.Context, svc store.Service, name string) err
 	if err != nil {
 		return err
 	}
-	// Key first: a chain without its key is never rendered.
-	if err := m.Store.SetServiceSecret(ctx, svc.ID, provision.SecretTLSKey, keyDER); err != nil {
+	// Together: a render between the two would pair a key with another chain.
+	if err := m.Store.UpdateService(ctx, svc.ID, store.ServiceUpdate{Set: map[string][]byte{
+		provision.SecretTLSKey: keyDER, provision.SecretTLSChain: pemChain.Bytes(),
+	}}); err != nil {
 		return err
 	}
-	if err := m.Store.SetServiceSecret(ctx, svc.ID, provision.SecretTLSChain, pemChain.Bytes()); err != nil {
-		return err
-	}
-	m.log().Info("certificate stored", "service", svc.Name, "name", name)
+	m.log().Info("certificate stored", "service", svc.Name, "names", len(names))
 	return nil
 }

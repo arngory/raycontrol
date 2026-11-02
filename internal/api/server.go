@@ -41,6 +41,10 @@ type Server struct {
 	// CheckRealityTarget, if set, vets the target of a new REALITY service
 	// (provision.CheckRealityTarget; tests leave it nil).
 	CheckRealityTarget func(ctx context.Context, target, sni string) error
+	// RealityLead is how long before a requested REALITY switch the next
+	// keys are published; Rotate, if set, runs the rotation at once.
+	RealityLead time.Duration
+	Rotate      func()
 
 	mu   sync.Mutex
 	rev  uint64
@@ -370,6 +374,22 @@ func (s *Server) DeleteService(ctx context.Context, req *connect.Request[nodev1.
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.DeleteServiceResponse{}), nil
+}
+
+func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.RotateServiceRequest]) (*connect.Response[nodev1.RotateServiceResponse], error) {
+	now := time.Now()
+	at := now.Add(s.RealityLead)
+	if req.Msg.Now {
+		at = now
+	}
+	err := provision.RequestRealityRotation(ctx, s.Store, req.Msg.Name, now, s.RealityLead, req.Msg.Now)
+	if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
+		return nil, err
+	}
+	if s.Rotate != nil {
+		s.Rotate()
+	}
+	return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: at.Unix()}), nil
 }
 
 func devicePB(d store.Device) *nodev1.Device {

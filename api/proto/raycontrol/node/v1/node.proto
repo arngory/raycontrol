@@ -20,6 +20,10 @@ service NodeService {
   rpc CreateService(CreateServiceRequest) returns (CreateServiceResponse);
   rpc SetServiceEnabled(SetServiceEnabledRequest) returns (SetServiceEnabledResponse);
   rpc DeleteService(DeleteServiceRequest) returns (DeleteServiceResponse);
+  // RotateService asks for the next key switch of a REALITY service
+  // (docs/08-decisions.md, R4-7): a lead time away, so that clients get the
+  // next keys first, or at once (leaked keys, a blocked name).
+  rpc RotateService(RotateServiceRequest) returns (RotateServiceResponse);
 
   rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
   // CreateDevice returns the device bundle with the device key. The key is
@@ -154,6 +158,14 @@ message SetServiceEnabledResponse {}
 
 message DeleteServiceRequest { string name = 1; }
 message DeleteServiceResponse {}
+
+message RotateServiceRequest {
+  string name = 1;
+  bool now = 2;
+}
+message RotateServiceResponse {
+  int64 switch_at = 1; // unix seconds; later if a new server name waits for its certificate
+}
 
 message Device {
   string id = 1;

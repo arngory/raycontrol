@@ -285,3 +285,30 @@ func TestPerimeterFeedDenied(t *testing.T) {
 		t.Fatalf("foreign uid: %v", err)
 	}
 }
+
+func TestRotateService(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	srv.RealityLead = 72 * time.Hour
+	rotated := 0
+	srv.Rotate = func() { rotated++ }
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	if _, err := c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "nothing"})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("missing service: %v", err)
+	}
+	if _, err := c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: provision.SubscriptionService})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("not REALITY: %v", err)
+	}
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "r",
+		SettingsJson: `{"target":"www.example.org:443"}`})); err != nil {
+		t.Fatal(err)
+	}
+	r, err := c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "r", Now: true}))
+	if err != nil || rotated != 1 || r.Msg.SwitchAt > time.Now().Unix() {
+		t.Fatalf("rotate: %v %d %v", r, rotated, err)
+	}
+	svc, _ := srv.Store.ServiceByName(ctx, "r")
+	if provision.ParseRealityState(svc).RotateAt == 0 {
+		t.Fatalf("no request stored: %s", svc.Settings)
+	}
+}
