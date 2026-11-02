@@ -30,8 +30,9 @@
      ветку (обычно `main`) и ввести тег `vX.Y.Z`. Workflow сам создаст тег на этом коммите вместе с релизом;
      существующий тег он не перезаписывает;
    - **тегом**: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. Workflow собирает `raycontrol-linux-{amd64,arm64}.tar.gz` (`rayd`, `rayspa`, `rayctl`), считает `SHA256SUMS`,
-   подписывает его и публикует релиз с этими файлами и `SHA256SUMS.minisig`.
+3. Workflow собирает `raycontrol-linux-{amd64,arm64}.tar.gz` (`rayd`, `rayspa`, `rayctl`, `xray`, `niko-server`,
+   `VERSIONS`), считает `SHA256SUMS`, подписывает его (trusted comment `raycontrol vX.Y.Z` — по нему `rayctl update`
+   узнаёт версию) и публикует релиз с этими файлами и `SHA256SUMS.minisig`.
 
 `install/bootstrap.sh` берёт последний релиз (или `RAYCONTROL_VERSION`), а сам скрипт по README скачивается из `main`:
 пока код не слит в `main`, скачивайте `bootstrap.sh` из рабочей ветки.
