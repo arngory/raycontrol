@@ -40,7 +40,8 @@ const usageText = `usage: rayctl [-socket PATH] [-json] <command>
   service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
                                             schedule: after the lead time, or at once with -now
   device list [USER]
-  device add USER NAME [-role user|admin]   prints the enrollment bundle once
+  device add USER NAME [-role user|admin] [-o FILE]
+                                            the enrollment bundle, once: on the screen or alone in FILE
   device revoke ID
   audit [-n 50]
   admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA
@@ -379,6 +380,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 	case "add":
 		fs := flag.NewFlagSet("device add", flag.ContinueOnError)
 		role := fs.String("role", "user", "user or admin")
+		out := fs.String("o", "", "write the bundle alone to this file (mode 0600) instead of the screen")
 		if err := need(args, 2); err != nil {
 			return err
 		}
@@ -388,6 +390,14 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		r, err := c.c.CreateDevice(ctx, connect.NewRequest(&nodev1.CreateDeviceRequest{User: args[0], Name: args[1], Role: *role}))
 		if err != nil {
 			return err
+		}
+		if *out != "" {
+			if err := os.WriteFile(*out, []byte(r.Msg.Bundle+"\n"), 0o600); err != nil {
+				return fmt.Errorf("device %s enrolled, but the bundle was not written (revoke it): %w", r.Msg.Device.Id, err)
+			}
+			fmt.Printf("device %s (%s/%s) enrolled; bundle in %s: pass it over a trusted channel, then delete it\n",
+				r.Msg.Device.Id, r.Msg.Device.User, r.Msg.Device.Name, *out)
+			return nil
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
 			fmt.Fprintf(w, "device %s (%s/%s) enrolled. Bundle, shown once — pass it to the client over a trusted channel:\n\n%s\n",

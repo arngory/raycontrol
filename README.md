@@ -6,11 +6,18 @@ Control plane for a self-contained proxy node. The data plane is
 SPA-gated firewall, rotates keys and serves the subscription and API.
 
 Status: **R1** done — perimeter (SPA v2 over UDP and TCP), DNS tunnels with
-the inner stage on Xray, signed subscriptions, installer. **R2** under way —
-VLESS + REALITY + Vision on Xray (post-quantum key exchange and signature),
-a decoy site per install as the self-steal target, certificates through ACME.
-Data plane: niko-server-v0.1.1 (DNS front, dnstt and MasterDnsVPN backends);
-see [docs/04-roadmap.md](docs/04-roadmap.md).
+the inner stage on Xray, signed subscriptions, installer. **R2** — VLESS +
+REALITY + Vision on Xray (post-quantum key exchange and signature) with
+self-steal on the node's own decoy site, certificates through ACME. **R4** —
+rotation of user credentials and REALITY keys and names, Cloudflare for DNS
+records and wildcard certificates, uninstall back to the host's snapshot,
+redacted reports, a kernel-side early drop. Data plane: niko-server-v0.1.1
+(DNS front, dnstt and MasterDnsVPN backends); see
+[docs/04-roadmap.md](docs/04-roadmap.md).
+
+From a bare Debian 13 server to a bundle for the client, step by step:
+[docs/10-quickstart-debian13.md](docs/10-quickstart-debian13.md) (Russian).
+All commands on one page: [docs/cheatsheet.md](docs/cheatsheet.md).
 
 ## Install
 
@@ -21,8 +28,15 @@ Debian 12/13, Ubuntu 24.04 and Rocky Linux 9/10. As root, from an SSH session
 ```
 curl -fsSL https://raw.githubusercontent.com/arngory/raycontrol/main/install/bootstrap.sh -o bootstrap.sh
 less bootstrap.sh
-bash bootstrap.sh -host <public address> -domain <domain>
+bash bootstrap.sh -host <public address> -domain <domain> -cloudflare-token-file /root/cf.token
 ```
+
+With a Cloudflare API token (Zone.DNS:Edit and Zone.Zone:Read on the domain's
+zone) the node keeps its own DNS records (a wildcard to its address, the NS
+delegation of DNS tunnel zones; DNS only, marked "raycontrol", nothing else
+touched) and gets one wildcard certificate through DNS-01, so no port opens
+for ACME. Without it, `rayctl dns` lists the records to make by hand and
+certificates go through HTTP-01 in a short window.
 
 The bootstrap installs what is missing (curl, openssl, nftables, polkit) with
 apt, dnf, zypper or pacman, verifies the release signature (minisign format,
@@ -49,10 +63,12 @@ member of the `raycontrol` group):
 ```
 rayctl status
 rayctl user add -services reality,dns -expires 30d    # opaque name such as u-k3f9-x2qa
-rayctl device add u-k3f9-x2qa phone                   # enrollment bundle, shown once
+rayctl device add u-k3f9-x2qa phone -o phone.bundle   # enrollment bundle, once (file 0600)
 rayctl service add reality reality                    # self-steal on the node's decoy site
 rayctl apply                                          # install what new services need
 rayctl service rotate reality                         # new REALITY keys and name ahead of schedule
+rayctl service set site answer=silent                 # decoy site: 404 (default), 403, silent or pages
+rayctl dns                                            # DNS provider, records the node needs, conflicts
 rayctl admin 198.51.100.7                             # addresses that reach SSH without SPA
 rayctl report -o report.txt                           # redacted report for an issue
 rayctl uninstall                                      # take everything back
@@ -113,10 +129,13 @@ raycontrol хранит пользователей и ключи, генерир
 ротирует ключи, отдаёт подписку и API.
 
 - **Статус:** R1 готов — периметр (SPA v2 по UDP и TCP), DNS-туннели с внутренней ступенью на Xray, подписанные
-  подписки, установщик. Идёт R2 — REALITY на Xray с постквантом, сайт-приманка для self-steal, сертификаты через ACME.
-  Data plane — niko-server-v0.1.1.
+  подписки, установщик. R2 — REALITY на Xray с постквантом и self-steal на своём сайте-приманке, сертификаты через
+  ACME. R4 — ротация UUID и ключей/имён REALITY, Cloudflare для DNS-записей и wildcard-сертификата, удаление до снимка
+  системы, очищенные отчёты, ранний отброс пакетов до стека ядра. Data plane — niko-server-v0.1.1.
+- **С нуля на Debian 13:** [docs/10-quickstart-debian13.md](docs/10-quickstart-debian13.md); все команды —
+  [docs/cheatsheet.md](docs/cheatsheet.md).
 - **Установка:** любой современный Linux с systemd; полная установка проверяется в CI на Debian 12/13, Ubuntu 24.04,
-  Rocky Linux 9/10. Root, из SSH-сессии: `bash bootstrap.sh -host <адрес> -domain <домен>` (скрипт
+  Rocky Linux 9/10. Root, из SSH-сессии: `bash bootstrap.sh -host <адрес> -domain <домен> -cloudflare-token-file <файл>` (скрипт
   `install/bootstrap.sh` ставит зависимости через apt/dnf/zypper/pacman и проверяет подпись релиза). firewalld и ufw
   настраиваются сами. На RHEL-семействе `sudo` не видит `/usr/local/bin` — `sudo -i` или полный путь.
   Восстановление с консоли: `rayspa teardown`. Проверка ноды снаружи, как клиент: `rayctl probe rcdev1:...`.

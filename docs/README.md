@@ -17,11 +17,14 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [07-questions.md](07-questions.md) | Вопросы перед реализацией (история; все закрыты). |
 | [08-decisions.md](08-decisions.md) | **Принятые решения** — главнее остальных документов при расхождении. |
 | [09-observability.md](09-observability.md) | Логи, телеметрия (её нет), отчёт для issue, QA, обезличенные идентификаторы. |
+| [10-quickstart-debian13.md](10-quickstart-debian13.md) | Нода с нуля на Debian 13 с Cloudflare и выдача подписки клиенту. |
+| [cheatsheet.md](cheatsheet.md) | Все команды `rayctl` на одной странице. |
 | [spec/spa-v2.md](spec/spa-v2.md) | Формат SPA v2 и пакета регистрации устройства (заморожен). |
 | [spec/subscription-v1.md](spec/subscription-v1.md) | Подписка: запрос, подписи, ссылки с параметрами `niko-*` (заморожена). |
 | [RELEASE.md](RELEASE.md) | Ключ подписи и выпуск релизов. |
 | [handoff/niko-session.md](handoff/niko-session.md) | Что передать в сессию Niko: правки SPEC, контракт niko-server, доработки клиента. |
 | [handoff/niko-r1-reply.md](handoff/niko-r1-reply.md) | Ответ на документы R1 сессии Niko: TCP-носитель SPA, замечания к CONFIG и IPC. |
+| [handoff/niko-r4-note.md](handoff/niko-r4-note.md) | Что изменилось на сервере в R4 и что нужно от клиента: `next`, импорт пакета, требования к пакетам. |
 
 Статус: решения приняты (08), документы 01–04 переписаны под них. Data plane — [niko-server](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/SPEC.md), control plane — raycontrol.
 Код v0 перенесён в `legacy/`. Этапы R0 и R1 реализованы, установка проверяется в CI на Debian 12/13, Ubuntu 24.04 и

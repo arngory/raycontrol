@@ -154,8 +154,9 @@ x sh -c 'if systemctl is-enabled -q firewalld 2>/dev/null; then for i in $(seq 6
 sed -n '/^const sysctl = `/,/^`/p' "$here/../../internal/deploy/deploy.go" | grep -o '^net\.[a-z0-9_.]*' |
 	docker exec -i "$node" sh -c 'cat > /root/sysctl.keys'
 snapshot /root/before.snap
-x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -host "$ip" -domain example.test -admin 192.0.2.1 ||
-	fail "bootstrap"
+# The emergency bundle bootstrap prints stays out of the (public) CI log.
+x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -host "$ip" -domain example.test -admin 192.0.2.1 |
+	sed -E 's/rcdev1:[A-Za-z0-9_-]+/rcdev1:<redacted>/g' || fail "bootstrap"
 wait_active rayd.service rayspa.service
 wait_table "rayspa start"
 [[ $(x nft list chain inet raycontrol input) == *"policy drop;"* ]] || fail "input chain is not policy drop"

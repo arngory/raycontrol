@@ -224,6 +224,18 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 		}}
 	srv.DNSChanged = m.Wake
 	go m.Run(ctx)
+	// A new site (rayctl service add reality) gets its certificate now, not
+	// at the next hourly check; failures keep their back-off.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-srv.Changes():
+				m.Wake()
+			}
+		}
+	}()
 	return m, is, nil
 }
 

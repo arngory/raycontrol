@@ -117,16 +117,33 @@ func probe(ctx context.Context, args []string) error {
 	return fmt.Errorf("node not reachable: %w", lastErr)
 }
 
+// readArg reads the bundle from the argument, a file (@FILE) or stdin
+// (-); in a file or on stdin the rcdev1 token is found in whatever text
+// surrounds it (the output of rayctl device add, a message).
 func readArg(s string) (string, error) {
+	var text string
 	switch {
 	case s == "-":
 		b, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
-		return string(b), err
+		if err != nil {
+			return "", err
+		}
+		text = string(b)
 	case strings.HasPrefix(s, "@"):
 		b, err := os.ReadFile(s[1:])
-		return string(b), err
+		if err != nil {
+			return "", err
+		}
+		text = string(b)
+	default:
+		return s, nil
 	}
-	return s, nil
+	for _, f := range strings.Fields(text) {
+		if strings.HasPrefix(f, "rcdev1:") {
+			return f, nil
+		}
+	}
+	return strings.TrimSpace(text), nil
 }
 
 func resolve(ctx context.Context, host string) (netip.Addr, error) {
