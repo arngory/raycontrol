@@ -23,6 +23,7 @@ import (
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 	"golang.org/x/sys/unix"
 
+	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/site"
@@ -212,6 +213,9 @@ type File struct {
 	// Service is the service whose process reads the file ("front" for the
 	// front); a change restarts that process.
 	Service string
+	// Reload: the process reads the file again by itself when it changes
+	// (users of naive), so a change needs no restart.
+	Reload bool
 }
 
 // UnitName is the systemd unit of a service's process.
@@ -243,7 +247,7 @@ var XrayKinds = []string{"inner", "reality", "hy2-masq", "hy2-obfs"}
 // secret of their own there, with rotation (R4-1): a UUID for REALITY, a
 // password for Hysteria2 (a UUID too: 122 random bits).
 func UserCredentials(kind string) bool {
-	return kind == "reality" || kind == "doh" || IsHysteria(kind)
+	return kind == "reality" || kind == "doh" || kind == "naive" || IsHysteria(kind)
 }
 
 // IsHysteria reports whether the kind is Hysteria2.
@@ -262,6 +266,8 @@ func XrayUsers(m Model, s Service) (tag string, users map[string]string) {
 		creds, tag = m.Creds[s.ID], RealityTag
 	case IsHysteria(s.Kind):
 		creds, tag = m.Creds[s.ID], HysteriaTag
+	case s.Kind == "naive":
+		creds, tag = m.Creds[s.ID], "" // not Xray: the same users, hashed into a file
 	}
 	now := m.Now
 	if now.IsZero() {
@@ -394,6 +400,15 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			files = append(files, fs...)
 		case "doh":
 			// Served by rayd behind the site (R3-2); the site's routes say so.
+		case "naive":
+			fs, err := naiveFiles(s, m, p)
+			if err != nil {
+				return nil, nil, err
+			}
+			if fs == nil {
+				skipped = append(skipped, s.Name+" (waits for its site's certificate)")
+			}
+			files = append(files, fs...)
 		case "ssh", "subscription", "api":
 			// Not data-plane processes.
 		default:
@@ -814,6 +829,52 @@ const (
 // DoHSocket is where rayd serves a DoH service for the site to pass it on.
 func (p Paths) DoHSocket(service string) string { return p.socket(service, "doh") }
 
+// NaiveSocket is where a naive process takes the connections the site
+// passes on; the directory belongs to the naive user and the site's group.
+func (p Paths) NaiveSocket(service string) string {
+	return path.Join(p.Run, service+"-in", "naive.sock")
+}
+
+// Files of a naive service (R2-14).
+const (
+	NaiveUsers = "users.json"
+	NaiveChain = "chain.pem"
+	NaiveKey   = "key.pem"
+)
+
+// naiveFiles are the site's certificate (naive answers for a name under
+// it) and the hashes of the users' passwords, which the process reads again
+// when they rotate.
+func naiveFiles(s Service, m Model, p Paths) ([]File, error) {
+	site := provision.SiteOf(s.Service)
+	if !m.hasCert(site) {
+		return nil, nil
+	}
+	var chain, keyDER []byte
+	for _, x := range m.Services {
+		if x.Kind == "site" && x.Name == site {
+			chain, keyDER = x.Secrets[provision.SecretTLSChain], x.Secrets[provision.SecretTLSKey]
+		}
+	}
+	_, users := XrayUsers(m, s)
+	hashes := make([]string, 0, len(users))
+	for _, email := range slices.Sorted(maps.Keys(users)) {
+		hashes = append(hashes, naive.HashPassword(users[email]))
+	}
+	slices.Sort(hashes)
+	u, err := jsonFile(hashes)
+	if err != nil {
+		return nil, err
+	}
+	dir := path.Join(p.Rendered, s.Name)
+	key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	return []File{
+		{Path: path.Join(dir, NaiveUsers), Mode: 0o640, Group: GroupName(s.Name), Content: u, Service: s.Name, Reload: true},
+		{Path: path.Join(dir, NaiveChain), Mode: 0o640, Group: GroupName(s.Name), Content: chain, Service: s.Name},
+		{Path: path.Join(dir, NaiveKey), Mode: 0o600, Content: key, Service: s.Name},
+	}, nil
+}
+
 // hasCert reports whether the site service has its certificate yet.
 func (m Model) hasCert(site string) bool {
 	for _, s := range m.Services {
@@ -847,15 +908,20 @@ func siteFiles(s Service, m Model, p Paths) ([]File, error) {
 		}
 	}
 	key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: s.Secrets[provision.SecretTLSKey]})
-	// Names the site passes on, still encrypted (R2-13): DoH to rayd.
+	// Names the site passes on, still encrypted (R2-13): DoH to rayd, naive
+	// to its process.
 	routes := map[string]string{}
 	for _, x := range m.Services {
-		if x.Kind == "doh" && provision.SiteOf(x.Service) == s.Name {
+		if (x.Kind == "doh" || x.Kind == "naive") && provision.SiteOf(x.Service) == s.Name {
 			var st struct {
 				SNI string `json:"sni"`
 			}
 			_ = json.Unmarshal([]byte(x.Settings), &st)
-			routes[strings.ToLower(st.SNI)] = p.DoHSocket(x.Name)
+			sock := p.DoHSocket(x.Name)
+			if x.Kind == "naive" {
+				sock = p.NaiveSocket(x.Name)
+			}
+			routes[strings.ToLower(st.SNI)] = sock
 		}
 	}
 	r, err := jsonFile(routes)

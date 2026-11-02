@@ -28,6 +28,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/doh"
 	"github.com/arngory/raycontrol/internal/live"
+	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -52,6 +53,7 @@ commands:
   init     create the node state and its random parameters (safe to repeat)
   serve    serve the node API on the local socket
   site     serve the decoy site on a unix socket (run by its own unit)
+  naive    serve NaiveProxy (HTTP/2) on a unix socket behind the site (its own unit)
   version  print the version
 `)
 	os.Exit(2)
@@ -69,6 +71,8 @@ func main() {
 		err = cmdServe(os.Args[2:])
 	case "site":
 		err = cmdSite(os.Args[2:])
+	case "naive":
+		err = cmdNaive(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:
@@ -614,4 +618,58 @@ func cmdSite(args []string) error {
 	}
 	log.Info("serving the site", "socket", *socket, "chain", len(cert.Certificate), "answer", *answer, "routes", len(routes))
 	return site.Serve(ctx, site.Routed(ln, routes, log), handler, cert, log)
+}
+
+// cmdNaive serves NaiveProxy (R2-14): TLS 1.3 with X25519MLKEM768 only and
+// HTTP/2 on a unix socket the site passes the service's name on to.
+func cmdNaive(args []string) error {
+	fs := flag.NewFlagSet("naive", flag.ExitOnError)
+	answer := fs.String("answer", site.Answer404, "what other requests get: 404, 403 or silent")
+	users := fs.String("users", "", "JSON list of SHA-256 hashes of the passwords, read again when it changes")
+	chain := fs.String("chain", "", "certificate chain (PEM, leaf first)")
+	key := fs.String("key", "", "private key (PEM)")
+	socket := fs.String("socket", "", "unix socket to listen on")
+	fs.Parse(args)
+	if *users == "" || *chain == "" || *key == "" || *socket == "" {
+		return errors.New("naive needs -users, -chain, -key and -socket")
+	}
+	if *answer == site.AnswerPages {
+		return errors.New("naive answers 404, 403 or silent: the pages are the site's")
+	}
+	handler, err := site.Responder(*answer, "")
+	if err != nil {
+		return err
+	}
+	cert, err := tls.LoadX509KeyPair(*chain, *key)
+	if err != nil {
+		return err
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	_ = os.Remove(*socket)
+	ln, err := net.Listen("unix", *socket)
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(*socket, 0o660); err != nil { //nolint:gosec // G302: the site passes connections on through the group
+		return err
+	}
+	srv := &http.Server{
+		Handler:           &naive.Server{Users: &naive.Users{Path: *users}, Answer: handler, Log: log},
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       5 * time.Minute,
+		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelDebug),
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+			Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}},
+	}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+	log.Info("serving naive", "socket", *socket, "answer", *answer)
+	if err := srv.ServeTLS(ln, "", ""); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }

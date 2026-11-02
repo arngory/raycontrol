@@ -85,7 +85,10 @@ func (a *Applier) Apply(ctx context.Context) error {
 		return err
 	}
 
-	type change struct{ old, new []byte }
+	type change struct {
+		old, new []byte
+		reload   bool // the process reads it again by itself
+	}
 	changed := map[string][]change{} // service -> changed files
 	failed := map[string]bool{}
 	var errs []error
@@ -103,7 +106,7 @@ func (a *Applier) Apply(ctx context.Context) error {
 				failed[f.Service] = true
 				errs = append(errs, fmt.Errorf("service %s: %s: %w", f.Service, f.Path, err))
 			} else if fixed {
-				changed[f.Service] = append(changed[f.Service], change{nil, f.Content})
+				changed[f.Service] = append(changed[f.Service], change{nil, f.Content, false})
 			}
 			continue
 		}
@@ -117,7 +120,7 @@ func (a *Applier) Apply(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("service %s: %s: %w", f.Service, f.Path, err))
 			continue
 		}
-		changed[f.Service] = append(changed[f.Service], change{old, f.Content})
+		changed[f.Service] = append(changed[f.Service], change{old, f.Content, f.Reload && old != nil})
 	}
 
 	for service, cs := range changed {
@@ -125,6 +128,10 @@ func (a *Applier) Apply(ctx context.Context) error {
 			continue
 		}
 		unit := render.UnitName(service)
+		if !slices.ContainsFunc(cs, func(c change) bool { return !c.reload }) {
+			a.Log.Info("reloaded without a restart", "service", service)
+			continue
+		}
 		if svc, ok := xrayService(m, service); ok && len(cs) == 1 && cs[0].old != nil && sameExceptClients(cs[0].old, cs[0].new) {
 			tag, want := render.XrayUsers(m, svc)
 			api := a.inner(a.Paths.APISocket(service))

@@ -25,7 +25,7 @@ func plan(t *testing.T) (deploy.Plan, render.Model) {
 	}
 	t.Cleanup(func() { st.Close() })
 	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
-	for _, s := range [][3]string{{"dnstt", "dns", ""}, {"reality", "reality", `{"target":"www.example.org:443"}`}, {"naive", "naive", ""}} {
+	for _, s := range [][3]string{{"dnstt", "dns", ""}, {"reality", "reality", `{"target":"www.example.org:443"}`}, {"yggdrasil", "ygg", ""}} {
 		if _, err := provision.CreateService(ctx, st, store.Service{Kind: s[0], Name: s[1], Enabled: true, Settings: s[2]}); err != nil {
 			t.Fatal(err)
 		}
@@ -67,7 +67,7 @@ func TestBuild(t *testing.T) {
 	if !slices.Equal(p.Units, []string{"rayd.service", "rayspa.service", "niko-inner.service", "niko-reality.service", "niko-dns.service", "niko-front.service"}) {
 		t.Fatalf("units %v", p.Units)
 	}
-	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "naive") {
+	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "ygg") {
 		t.Fatalf("warnings %v", p.Warnings)
 	}
 	// REALITY binds TCP 443 itself until the front has tcpmux (R2-7).
@@ -600,5 +600,45 @@ func TestBuildHysteria(t *testing.T) {
 	}
 	if !strings.Contains(masq, "AmbientCapabilities=CAP_NET_BIND_SERVICE") || strings.Contains(obfs, "AmbientCapabilities=CAP_NET_BIND_SERVICE") {
 		t.Error("the bind capability belongs to UDP 443 only")
+	}
+}
+
+func TestBuildNaive(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	for _, k := range []string{"reality", "naive"} {
+		if _, err := provision.CreateService(ctx, st, store.Service{Kind: k, Name: k, Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _, err := render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	u := file(p, "/etc/systemd/system/niko-naive.service")
+	for _, want := range []string{
+		"ExecStart=/usr/local/bin/rayd naive -answer 404 -users /var/lib/raycontrol/rendered/naive/users.json",
+		"-socket /run/niko/naive-in/naive.sock", "ExecStartPre=+install -m 0400 -o niko-naive",
+		"IPAddressDeny=localhost link-local multicast 10.0.0.0/8", "CapabilityBoundingSet=\n",
+	} {
+		if !strings.Contains(u, want) {
+			t.Errorf("naive unit lacks %q:\n%s", want, u)
+		}
+	}
+	if !strings.Contains(file(p, "/etc/tmpfiles.d/raycontrol.conf"), "d /run/niko/naive-in 2750 niko-naive niko-site -") {
+		t.Errorf("no socket directory for the site:\n%s", file(p, "/etc/tmpfiles.d/raycontrol.conf"))
+	}
+	if len(p.Warnings) != 0 {
+		t.Errorf("warnings %v", p.Warnings)
 	}
 }

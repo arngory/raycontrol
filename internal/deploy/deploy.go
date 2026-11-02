@@ -134,7 +134,7 @@ func groups(gs []string) string {
 func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Plan {
 	var plan Plan
 	var inner *render.Service
-	var dns, reality, sites, hysteria []render.Service
+	var dns, reality, sites, hysteria, naives []render.Service
 	for i, s := range m.Services {
 		switch {
 		case s.Kind == "inner":
@@ -147,6 +147,8 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			reality = append(reality, s)
 		case render.IsHysteria(s.Kind):
 			hysteria = append(hysteria, s)
+		case s.Kind == "naive":
+			naives = append(naives, s)
 		case s.UID != 0:
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("service %s (%s) is not deployed by this version", s.Name, s.Kind))
 		}
@@ -251,6 +253,42 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			g, g, path.Join(p.Rendered, s.Name, render.HysteriaKey), p.Credential(s.Name, render.HysteriaKey)))
 		units = append(units, u)
 		xrays = append(xrays, s)
+	}
+
+	// naive (R2-14): rayd naive behind the site, which passes its name on.
+	// It exits to the internet and nowhere else: not the node itself, not
+	// local networks (also checked in the process, address by address).
+	for _, s := range naives {
+		g := render.GroupName(s.Name)
+		raydGroups = append(raydGroups, g)
+		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID})
+		dir := path.Join(p.Rendered, s.Name)
+		key := p.Credential(s.Name, render.NaiveKey)
+		answer := site.Answer404
+		for _, x := range m.Services {
+			// The site's answer, except pages: their files are the site's own.
+			if x.Kind == "site" && x.Name == provision.SiteOf(s.Service) && provision.SiteAnswer(x.Service) != site.AnswerPages {
+				answer = provision.SiteAnswer(x.Service)
+			}
+		}
+		units = append(units, unit{
+			name:        render.UnitName(s.Name),
+			description: "raycontrol naive " + s.Name + " (HTTP/2, X25519MLKEM768)",
+			needs:       path.Join(dir, render.NaiveChain),
+			service: []string{
+				"User=" + g, "Group=" + g,
+				fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s", g, g, path.Join(dir, render.NaiveKey), key),
+				"ExecStart=" + bin.Rayd + " naive -answer " + answer + " -users " + path.Join(dir, render.NaiveUsers) +
+					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name),
+				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
+				"RuntimeDirectoryMode=0710",
+				"ReadWritePaths=" + path.Dir(p.NaiveSocket(s.Name)),
+				"UMask=0007",
+				"CapabilityBoundingSet=",
+				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+				"IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7",
+			},
+		})
 	}
 
 	for _, s := range dns {
@@ -375,6 +413,9 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	for _, s := range m.Services {
 		if s.Kind == "doh" {
 			tmp += fmt.Sprintf("d %s 2750 rayd %s -\n", path.Dir(p.DoHSocket(s.Name)), render.GroupName(provision.SiteOf(s.Service)))
+		}
+		if s.Kind == "naive" {
+			tmp += fmt.Sprintf("d %s 2750 %s %s -\n", path.Dir(p.NaiveSocket(s.Name)), render.GroupName(s.Name), render.GroupName(provision.SiteOf(s.Service)))
 		}
 	}
 	plan.Files = append(plan.Files,

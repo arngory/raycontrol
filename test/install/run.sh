@@ -204,7 +204,13 @@ client -carrier tcp "$laptop" || fail "probe over the TCP carrier"
 
 log "$distro: remote API"
 x rayctl service add api api >/dev/null
-x rayctl apply >/dev/null || fail "rayctl apply for the API"
+# REALITY with its site and naive behind it: units, users and the naive
+# socket directory are installed (no certificate on this network, so the
+# processes wait for one) and go away with the uninstall.
+x rayctl service add reality reality >/dev/null
+x rayctl service add naive naive >/dev/null
+x rayctl apply >/dev/null || fail "rayctl apply for the API, REALITY and naive"
+[[ $(x stat -c '%a %U %G' /run/niko/naive-in) == "2750 niko-naive niko-site" ]] || fail "no socket directory for naive"
 invite="$(x rayctl device invite alice console -role admin | grep -o 'rcinv1:[A-Za-z0-9_-]*')" || fail "no invite"
 # From the client's container: register a device from the invite, then
 # administer the node through the API with it, and give it a new key.

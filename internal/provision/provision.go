@@ -314,10 +314,11 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			}
 			settings["sni"] = name
 		}
-	case "doh":
-		// DoH (R3-2) rides on REALITY's TCP 443: REALITY hands the site
-		// whatever is not its own client, and the site passes the DoH name
-		// on to rayd. So it needs REALITY stealing from the node's site.
+	case "doh", "naive":
+		// DoH (R3-2) and naive (R2-14) ride on REALITY's TCP 443: REALITY
+		// hands the site whatever is not its own client, and the site passes
+		// their names on to their sockets. So they need REALITY stealing from
+		// the node's site.
 		site := ""
 		for _, s := range all {
 			if s.Kind == "reality" && s.Enabled && siteOf(s) != "" {
@@ -325,7 +326,7 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			}
 		}
 		if site == "" {
-			return svc, fmt.Errorf("%w doh rides on REALITY's TCP 443 with the node's own site: add reality first (rayctl service add reality reality)", store.ErrInvalid)
+			return svc, fmt.Errorf("%w %s rides on REALITY's TCP 443 with the node's own site: add reality first (rayctl service add reality reality)", store.ErrInvalid, svc.Kind)
 		}
 		settings["site"] = site
 		if _, ok := settings["sni"]; !ok {
@@ -336,7 +337,7 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			settings["sni"] = name
 		}
 		if _, ok := settings["ports"]; !ok {
-			settings["ports"] = []string{"tcp/443"} // DoH3 waits for a udpmux
+			settings["ports"] = []string{"tcp/443"} // DoH3 and naive-quic wait for a udpmux
 		}
 	case "api":
 		// The remote API (R3-3): one per node, its own random TCP port behind

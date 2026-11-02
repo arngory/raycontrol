@@ -232,6 +232,16 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 				p.Next = &Next{Link: DoHLink(m, s, set.Next), From: set.NextFrom.Unix()}
 			}
 			out = append(out, p)
+		case "naive":
+			password := m.Creds[s.ID][u.ID]
+			if password == "" {
+				continue
+			}
+			p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: NaiveLink(m, s, password)}
+			if set := m.Sets[s.ID][u.ID]; set.Next != "" {
+				p.Next = &Next{Link: NaiveLink(m, s, set.Next), From: set.NextFrom.Unix()}
+			}
+			out = append(out, p)
 		case "hy2-masq", "hy2-obfs":
 			password := m.Creds[s.ID][u.ID]
 			if password == "" {
@@ -291,6 +301,20 @@ func DoHLink(m render.Model, s render.Service, token string) string {
 	q.Set("niko-node", m.NodeID)
 	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
 	return "https://" + st.SNI + "/dns-query/" + url.PathEscape(token) + "?" + q.Encode() + "#" + url.PathEscape(s.Name)
+}
+
+// NaiveLink is the naive endpoint of a user (spec/subscription-v1.md §4):
+// naive+https://niko:<password>@<name>:443 with the Niko parameters. The
+// server checks the password only.
+func NaiveLink(m render.Model, s render.Service, password string) string {
+	var st struct {
+		SNI string `json:"sni"`
+	}
+	_ = json.Unmarshal([]byte(s.Settings), &st)
+	q := url.Values{}
+	q.Set("niko-node", m.NodeID)
+	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
+	return "naive+https://" + url.UserPassword("niko", password).String() + "@" + st.SNI + ":443?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
 
 // HysteriaLink is the share link of a Hysteria2 service with a user's

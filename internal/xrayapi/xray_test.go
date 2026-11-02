@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/arngory/raycontrol/internal/doh"
+	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/site"
@@ -457,6 +458,13 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 	var dohName struct{ SNI string }
 	json.Unmarshal([]byte(dohSvc.Settings), &dohName)
+	// naive the same way (R2-14).
+	naiveSvc, err := provision.CreateService(ctx, st, store.Service{Kind: "naive", Name: "naive", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var naiveName struct{ SNI string }
+	json.Unmarshal([]byte(naiveSvc.Settings), &naiveName)
 	siteSvc, err := st.ServiceByName(ctx, "site")
 	if err != nil {
 		t.Fatal(err)
@@ -497,7 +505,7 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 	root := mk("Test Root", true, nil, &rootKey.PublicKey, nil, rootKey)
 	inter := mk("Test Intermediate", true, nil, &interKey.PublicKey, root, rootKey)
-	leaf := mk(name, false, []string{name, nextName, dohName.SNI}, &leafKey.PublicKey, inter, interKey)
+	leaf := mk(name, false, []string{name, nextName, dohName.SNI, naiveName.SNI}, &leafKey.PublicKey, inter, interKey)
 	var chainPEM bytes.Buffer
 	for _, c := range []*x509.Certificate{leaf, inter, root} {
 		pem.Encode(&chainPEM, &pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
@@ -510,7 +518,7 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 
 	user, _ := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
-	st.SetUserServices(ctx, "alice", []int64{svc.ID, dohSvc.ID})
+	st.SetUserServices(ctx, "alice", []int64{svc.ID, dohSvc.ID, naiveSvc.ID})
 	m, err := render.Collect(ctx, st)
 	if err != nil {
 		t.Fatal(err)
@@ -552,7 +560,7 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 		t.Fatal(err)
 	}
 	routes, err := site.LoadRoutes(filepath.Join(siteDir, render.SiteRoutes))
-	if err != nil || len(routes) != 1 {
+	if err != nil || len(routes) != 2 {
 		t.Fatalf("site routes %v %v", routes, err)
 	}
 	go site.Serve(ctx, site.Routed(ln, routes, slog.New(slog.NewTextHandler(io.Discard, nil))), handler, cert, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -631,6 +639,48 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 || !bytes.Equal(body, answer) || resp.ProtoMajor != 2 {
 		t.Fatalf("DoH through REALITY: %s %s %q", resp.Status, resp.Proto, body)
+	}
+
+	// naive through REALITY's port: the site passes the name on to the naive
+	// process, which takes an authenticated CONNECT with padding.
+	os.MkdirAll(filepath.Dir(paths.NaiveSocket("naive")), 0o755)
+	nl, err := net.Listen("unix", paths.NaiveSocket("naive"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var direct net.Dialer // the test's page is on loopback, which the node refuses
+	naiveSrv := &http.Server{Handler: &naive.Server{Users: &naive.Users{Path: filepath.Join(paths.Rendered, "naive", render.NaiveUsers)},
+		Answer: handler, Dial: direct.DialContext, Log: slog.New(slog.DiscardHandler)},
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+			Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2"}}}
+	go naiveSrv.ServeTLS(nl, "", "")
+	defer naiveSrv.Close()
+	naiveLink, _ := url.Parse(sub.NaiveLink(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == naiveSvc.ID })], m.Creds[naiveSvc.ID][user.ID]))
+	password, _ := naiveLink.User.Password()
+	if naiveLink.Scheme != "naive+https" || naiveLink.Hostname() != naiveName.SNI || password == "" {
+		t.Fatalf("naive link %s", naiveLink.Redacted())
+	}
+	nt := &http.Transport{ForceAttemptHTTP2: true, DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return tls.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port), &tls.Config{ServerName: naiveName.SNI, RootCAs: roots, NextProtos: []string{"h2"},
+			CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}})
+	}}
+	defer nt.CloseIdleConnections()
+	pr, pw := io.Pipe()
+	req, _ := http.NewRequest(http.MethodConnect, "https://"+naiveName.SNI, pr)
+	req.Host = page.Listener.Addr().String()
+	req.Header.Set("Padding", naive.PaddingHeader())
+	req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(naiveLink.User.String())))
+	resp, err = nt.RoundTrip(req)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("naive CONNECT through REALITY: %v %v", resp, err)
+	}
+	tunnel := naive.ClientStream(resp.Body, pw)
+	fmt.Fprintf(tunnel, "GET / HTTP/1.1\r\nHost: page\r\nConnection: close\r\n\r\n")
+	got, _ := io.ReadAll(io.LimitReader(tunnel, 4096))
+	pw.Close()
+	resp.Body.Close()
+	if !bytes.Contains(got, []byte("through reality")) {
+		t.Fatalf("naive through REALITY: %q", got)
 	}
 
 	// The switch: the subscription had the next link; the node renders the

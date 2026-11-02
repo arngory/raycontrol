@@ -26,6 +26,7 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [handoff/niko-session.md](handoff/niko-session.md) | Что передать в сессию Niko: правки SPEC, контракт niko-server, доработки клиента. |
 | [handoff/niko-r1-reply.md](handoff/niko-r1-reply.md) | Ответ на документы R1 сессии Niko: TCP-носитель SPA, замечания к CONFIG и IPC. |
 | [handoff/niko-r4-note.md](handoff/niko-r4-note.md) | Что изменилось на сервере в R4 и что нужно от клиента: `next`, импорт пакета, требования к пакетам. |
+| [handoff/niko-r3-note.md](handoff/niko-r3-note.md) | Серверная часть R2/R3: профили Hysteria2, DoH, naive, регистрация по приглашению `rcinv1:`, что проверить в CI Niko. |
 
 Статус: решения приняты (08), документы 01–04 переписаны под них. Data plane — [niko-server](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/SPEC.md), control plane — raycontrol.
 Код v0 перенесён в `legacy/`. Этапы R0 и R1 реализованы, установка проверяется в CI на Debian 12/13, Ubuntu 24.04 и
