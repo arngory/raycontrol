@@ -156,7 +156,7 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 	m.Creds = map[int64]map[int64]string{}
 	m.Sets = map[int64]map[int64]store.Credential{}
 	for _, svc := range m.Services {
-		if svc.Kind != "reality" {
+		if !UserCredentials(svc.Kind) {
 			continue
 		}
 		var ids []int64
@@ -237,7 +237,17 @@ func (p Paths) APISocket(service string) string {
 }
 
 // XrayKinds run on Xray and get their users through its API.
-var XrayKinds = []string{"inner", "reality"}
+var XrayKinds = []string{"inner", "reality", "hy2-masq", "hy2-obfs"}
+
+// UserCredentials reports whether every user of a service kind has a
+// secret of their own there, with rotation (R4-1): a UUID for REALITY, a
+// password for Hysteria2 (a UUID too: 122 random bits).
+func UserCredentials(kind string) bool {
+	return kind == "reality" || IsHysteria(kind)
+}
+
+// IsHysteria reports whether the kind is Hysteria2.
+func IsHysteria(kind string) bool { return kind == "hy2-masq" || kind == "hy2-obfs" }
 
 // IsXray reports whether the service runs on Xray.
 func IsXray(kind string) bool { return slices.Contains(XrayKinds, kind) }
@@ -247,8 +257,11 @@ func IsXray(kind string) bool { return slices.Contains(XrayKinds, kind) }
 func XrayUsers(m Model, s Service) (tag string, users map[string]string) {
 	creds := m.Inner
 	tag = InnerTag
-	if s.Kind == "reality" {
+	switch {
+	case s.Kind == "reality":
 		creds, tag = m.Creds[s.ID], RealityTag
+	case IsHysteria(s.Kind):
+		creds, tag = m.Creds[s.ID], HysteriaTag
 	}
 	now := m.Now
 	if now.IsZero() {
@@ -360,6 +373,16 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				_ = json.Unmarshal([]byte(s.Settings), &rs)
 				tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{rs.SNI}, Backend: s.Name})
 			}
+		case "hy2-masq", "hy2-obfs":
+			if site := provision.SiteOf(s.Service); s.Kind == "hy2-masq" && !m.hasCert(site) {
+				skipped = append(skipped, s.Name+" (waits for the certificate of "+site+")")
+				continue
+			}
+			fs, err := hysteriaFiles(s, m, p)
+			if err != nil {
+				return nil, nil, err
+			}
+			files = append(files, fs...)
 		case "site":
 			fs, err := siteFiles(s, m, p)
 			if err != nil {
@@ -681,6 +704,97 @@ func tcpPort(s Service) (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("service %s has no TCP port", s.Name)
+}
+
+// HysteriaTag is the inbound tag of a Hysteria2 service (Xray API target).
+const HysteriaTag = "hysteria"
+
+// Hysteria2 files: the TLS chain and key of the service's site certificate
+// next to the Xray config, so that a renewal restarts the service too.
+const (
+	HysteriaChain = "chain.pem"
+	HysteriaKey   = "key.pem"
+)
+
+// hysteriaFiles renders a Hysteria2 service on Xray (R3-1, until a udpmux):
+// TLS 1.3 with X25519MLKEM768 only; hy2-masq under its own name with the
+// site's certificate and an empty 404 without a password, like the site;
+// hy2-obfs with a self-signed certificate clients pin, inside salamander.
+func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
+	// hy2-masq: the site's certificate; hy2-obfs: its own, self-signed.
+	chain, keyDER := s.Secrets[provision.SecretTLSChain], s.Secrets[provision.SecretTLSKey]
+	if s.Kind == "hy2-obfs" {
+		chain = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.Secrets[provision.SecretTLSCert]})
+	} else {
+		for _, x := range m.Services {
+			if x.Kind == "site" && x.Name == provision.SiteOf(s.Service) {
+				chain, keyDER = x.Secrets[provision.SecretTLSChain], x.Secrets[provision.SecretTLSKey]
+			}
+		}
+	}
+	port := 0
+	ports, err := s.Ports()
+	if err != nil {
+		return nil, err
+	}
+	for _, pt := range ports {
+		if pt.Proto == "udp" {
+			port = int(pt.Num)
+		}
+	}
+	if port == 0 {
+		return nil, fmt.Errorf("service %s has no UDP port", s.Name)
+	}
+	dir := path.Join(p.Rendered, s.Name)
+	stream := map[string]any{
+		"network":  "hysteria",
+		"security": "tls",
+		"tlsSettings": map[string]any{
+			"minVersion":       "1.3",
+			"alpn":             []string{"h3"},
+			"curvePreferences": []string{"X25519MLKEM768"},
+			"certificates": []map[string]string{{
+				"certificateFile": path.Join(dir, HysteriaChain),
+				"keyFile":         p.Credential(s.Name, HysteriaKey),
+			}},
+		},
+		"hysteriaSettings": map[string]any{
+			"version":    2,
+			"masquerade": map[string]any{"type": "string", "statusCode": 404, "content": ""},
+		},
+	}
+	if s.Kind == "hy2-obfs" {
+		stream["finalmask"] = map[string]any{"udp": []map[string]any{{
+			"type": "salamander", "settings": map[string]string{"password": string(s.Secrets[provision.SecretObfsPassword])},
+		}}}
+	}
+	_, users := XrayUsers(m, s)
+	clients := make([]map[string]string, 0, len(users))
+	for _, email := range slices.Sorted(maps.Keys(users)) {
+		clients = append(clients, map[string]string{"auth": users[email], "email": email})
+	}
+	listen := "0.0.0.0"
+	if m.IPv6 {
+		listen = "::"
+	}
+	cfg, err := xrayFile(s, p, map[string]any{
+		"tag":            HysteriaTag,
+		"listen":         listen,
+		"port":           port,
+		"protocol":       "hysteria",
+		"settings":       map[string]any{"version": 2, "clients": clients},
+		"streamSettings": stream,
+		"sniffing":       sniffing,
+	})
+	if err != nil {
+		return nil, err
+	}
+	key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	return []File{
+		cfg,
+		{Path: path.Join(dir, HysteriaChain), Mode: 0o640, Group: GroupName(s.Name), Content: chain, Service: s.Name},
+		{Path: path.Join(dir, HysteriaKey), Mode: 0o600, Content: key, Service: s.Name},
+	}, nil
 }
 
 // SiteSocket is the TLS socket of the decoy site, the self-steal target.

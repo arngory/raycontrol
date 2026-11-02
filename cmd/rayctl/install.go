@@ -215,7 +215,7 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	packages := fs.String("packages", "", "packages the bootstrap installed, as manager:name,name (recorded for uninstall)")
 	cfToken := fs.String("cloudflare-token-file", "", "Cloudflare API token file: DNS records and wildcard certificates (needs -domain)")
 	dataplane := fs.String("dataplane", "", "directory with the xray and niko-server the bootstrap verified, installed to "+deploy.DataPlaneDir)
-	services := fs.String("services", "", "services to set up now: reality, dnstt, masterdns (default with -domain: reality; \"none\" for none)")
+	services := fs.String("services", "", "services to set up now: reality, hy2-masq, hy2-obfs, dnstt, masterdns (default with -domain: reality; \"none\" for none)")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
@@ -423,7 +423,7 @@ func installServices(list, domain string, fs *flag.FlagSet) ([]serviceKind, erro
 		}
 		list = "reality"
 	}
-	names := map[string]string{"reality": "reality", "dnstt": "dns", "masterdns": "mdns"}
+	names := map[string]string{"reality": "reality", "dnstt": "dns", "masterdns": "mdns", "hy2-masq": "hy2-masq", "hy2-obfs": "hy2-obfs"}
 	var out []serviceKind
 	for _, k := range splitList(list) {
 		if k == "none" {
@@ -431,7 +431,7 @@ func installServices(list, domain string, fs *flag.FlagSet) ([]serviceKind, erro
 		}
 		name, ok := names[k]
 		if !ok {
-			return nil, fmt.Errorf("-services: %q is not one of reality, dnstt, masterdns", k)
+			return nil, fmt.Errorf("-services: %q is not one of reality, hy2-masq, hy2-obfs, dnstt, masterdns", k)
 		}
 		if domain == "" {
 			return nil, fmt.Errorf("-services %s needs -domain", k)

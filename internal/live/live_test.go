@@ -25,6 +25,11 @@ func (f *fakeInner) SyncVLESS(_ context.Context, _, _ string, want map[string]st
 	return len(want), 0, nil
 }
 
+func (f *fakeInner) SyncHysteria(_ context.Context, _ string, want map[string]string) (int, int, error) {
+	f.calls = append(f.calls, want)
+	return len(want), 0, nil
+}
+
 func TestApply(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

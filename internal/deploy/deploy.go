@@ -15,6 +15,7 @@ import (
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/site"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 // Binaries are the executables the units start.
@@ -133,7 +134,7 @@ func groups(gs []string) string {
 func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Plan {
 	var plan Plan
 	var inner *render.Service
-	var dns, reality, sites []render.Service
+	var dns, reality, sites, hysteria []render.Service
 	for i, s := range m.Services {
 		switch {
 		case s.Kind == "inner":
@@ -144,6 +145,8 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			dns = append(dns, s)
 		case s.Kind == "reality":
 			reality = append(reality, s)
+		case render.IsHysteria(s.Kind):
+			hysteria = append(hysteria, s)
 		case s.UID != 0:
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("service %s (%s) is not deployed by this version", s.Name, s.Kind))
 		}
@@ -231,6 +234,22 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			caps = "AmbientCapabilities=CAP_NET_BIND_SERVICE" // binds TCP 443 itself (R2-7)
 		}
 		units = append(units, xrayUnit(s, "raycontrol REALITY "+s.Name+" (Xray, VLESS + REALITY + Vision, ML-KEM-768)", caps))
+		xrays = append(xrays, s)
+	}
+
+	// Hysteria2 on Xray (R3-1): its own UDP port, the key copied in by root.
+	for _, s := range hysteria {
+		g := render.GroupName(s.Name)
+		raydGroups = append(raydGroups, g)
+		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID})
+		caps := ""
+		if ports, _ := s.Ports(); slices.ContainsFunc(ports, func(pt store.Port) bool { return pt.Num < 1024 }) {
+			caps = "AmbientCapabilities=CAP_NET_BIND_SERVICE" // UDP 443 until niko-server's udpmux
+		}
+		u := xrayUnit(s, "raycontrol Hysteria2 "+s.Name+" (Xray, "+s.Kind+", ML-KEM-768)", caps)
+		u.service = append(u.service, fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
+			g, g, path.Join(p.Rendered, s.Name, render.HysteriaKey), p.Credential(s.Name, render.HysteriaKey)))
+		units = append(units, u)
 		xrays = append(xrays, s)
 	}
 

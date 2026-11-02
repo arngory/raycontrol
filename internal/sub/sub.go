@@ -222,6 +222,16 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 				p.Next = &Next{Link: link(set.Next), From: set.NextFrom.Unix()}
 			}
 			out = append(out, p)
+		case "hy2-masq", "hy2-obfs":
+			password := m.Creds[s.ID][u.ID]
+			if password == "" {
+				continue
+			}
+			p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: HysteriaLink(m, s, password)}
+			if set := m.Sets[s.ID][u.ID]; set.Next != "" {
+				p.Next = &Next{Link: HysteriaLink(m, s, set.Next), From: set.NextFrom.Unix()}
+			}
+			out = append(out, p)
 		case "reality":
 			link, err := RealityLink(m, s, u.ID)
 			if err != nil {
@@ -257,6 +267,43 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 		}
 	}
 	return out, nil
+}
+
+// HysteriaLink is the share link of a Hysteria2 service with a user's
+// password (spec/subscription-v1.md §4): the standard hysteria2:// form,
+// salamander for hy2-obfs, and the Niko parameters.
+func HysteriaLink(m render.Model, s render.Service, password string) string {
+	var st struct {
+		SNI string `json:"sni"`
+	}
+	_ = json.Unmarshal([]byte(s.Settings), &st)
+	port := 443
+	if ports, err := s.Ports(); err == nil {
+		for _, p := range ports {
+			if p.Proto == "udp" {
+				port = int(p.Num)
+			}
+		}
+	}
+	q := url.Values{}
+	q.Set("sni", st.SNI)
+	q.Set("insecure", "0")
+	if s.Kind == "hy2-obfs" {
+		q.Set("obfs", "salamander")
+		q.Set("obfs-password", string(s.Secrets[provision.SecretObfsPassword]))
+		// A self-signed certificate: Niko pins its key (niko-pin), other
+		// clients its hash (pinSHA256).
+		cert := s.Secrets[provision.SecretTLSCert]
+		if pin, err := provision.SPKIPin(cert); err == nil {
+			q.Set("niko-pin", pin)
+		}
+		sum := sha256.Sum256(cert)
+		q.Set("pinSHA256", hex.EncodeToString(sum[:]))
+	}
+	q.Set("niko-node", m.NodeID)
+	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
+	host := net.JoinHostPort(m.Host, strconv.Itoa(port))
+	return "hysteria2://" + url.PathEscape(password) + "@" + host + "/?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
 
 // RealityLink is the share link of a REALITY service for a user, "" if the

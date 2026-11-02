@@ -46,6 +46,7 @@
 | Команда | Что делает |
 |---|---|
 | `rayctl service add reality reality` | REALITY с self-steal на своём сайте-приманке |
+| `rayctl service add hy2-masq hy2-masq` · `rayctl service add hy2-obfs hy2-obfs` | Hysteria2: UDP 443 с маскировкой и salamander на своём порту |
 | `rayctl service add dnstt dns` · `rayctl service add masterdns mdns` | DNS-туннели (резервный канал) |
 | `rayctl service enable\|disable\|del NAME` | включить, выключить, удалить |
 | `rayctl service set site answer=404\|403\|silent\|pages` | что сайт отвечает тем, кого отклонил REALITY; потом `rayctl apply` |

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -268,8 +269,11 @@ func RequestRealityRotation(ctx context.Context, st *store.Store, name string, n
 	return st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: settings})
 }
 
-// siteOf returns the node's site a REALITY service steals from, "" for a
-// foreign target.
+// SiteOf returns the node's site a service relies on: the one REALITY
+// steals from ("" for a foreign target), the one whose certificate
+// Hysteria2 uses.
+func SiteOf(svc store.Service) string { return siteOf(svc) }
+
 func siteOf(svc store.Service) string {
 	var s struct {
 		Site string `json:"site"`
@@ -289,8 +293,9 @@ func SiteNames(site store.Service, all []store.Service) (names, next []string) {
 		return list
 	}
 	names = add(names, SiteName(site))
+	// REALITY and Hysteria2 services under this site's certificate.
 	for _, s := range all {
-		if s.Kind == "reality" && s.Enabled && siteOf(s) == site.Name {
+		if (s.Kind == "reality" || strings.HasPrefix(s.Kind, "hy2-")) && s.Enabled && siteOf(s) == site.Name {
 			var cur struct {
 				SNI string `json:"sni"`
 			}

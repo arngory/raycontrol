@@ -565,3 +565,40 @@ func TestUninstallUFW(t *testing.T) {
 		t.Fatalf("no ufw reload:\n%s", all)
 	}
 }
+
+// Hysteria2 on Xray (R3-1): the key copied in by root, the bind capability
+// only for UDP 443.
+func TestBuildHysteria(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	for _, k := range []string{"hy2-masq", "hy2-obfs"} {
+		if _, err := provision.CreateService(ctx, st, store.Service{Kind: k, Name: k, Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _, err := render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	masq, obfs := file(p, "/etc/systemd/system/niko-hy2-masq.service"), file(p, "/etc/systemd/system/niko-hy2-obfs.service")
+	for name, u := range map[string]string{"masq": masq, "obfs": obfs} {
+		for _, want := range []string{"ExecStart=/usr/local/libexec/raycontrol/xray run -c /var/lib/raycontrol/rendered/hy2-", "ExecStartPre=+install -m 0400 -o niko-hy2-"} {
+			if !strings.Contains(u, want) {
+				t.Errorf("%s unit lacks %q:\n%s", name, want, u)
+			}
+		}
+	}
+	if !strings.Contains(masq, "AmbientCapabilities=CAP_NET_BIND_SERVICE") || strings.Contains(obfs, "AmbientCapabilities=CAP_NET_BIND_SERVICE") {
+		t.Error("the bind capability belongs to UDP 443 only")
+	}
+}

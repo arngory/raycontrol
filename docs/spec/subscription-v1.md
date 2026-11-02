@@ -111,6 +111,22 @@ vless://<uuid>@<host>:443?type=raw&security=reality&flow=xtls-rprx-vision&encryp
 - Порт — 443 (или порт сервиса из настроек, пока REALITY слушает сам, без фронта: решение R2-7).
 - Пользователи добавляются и удаляются через API Xray без перезапуска, как у `inner`.
 
+### Профиль Hysteria2 (R3)
+
+Стандартная ссылка Hysteria2 с параметрами Niko:
+
+```
+hysteria2://<пароль>@<host>:<порт>/?sni=<имя>&insecure=0&niko-node=<node_id>&niko-svc=<id>#hy2-masq
+hysteria2://<пароль>@<host>:<порт>/?sni=<имя>&insecure=0&obfs=salamander&obfs-password=<пароль salamander>
+  &niko-pin=<SPKI SHA-256, base64url>&pinSHA256=<SHA-256 сертификата, hex>&niko-node=<node_id>&niko-svc=<id>#hy2-obfs
+```
+
+- `hy2-masq`: UDP 443, сертификат от CA на `sni` (поддомен ноды); проверка обычная.
+- `hy2-obfs`: свой UDP-порт, salamander, самоподписанный сертификат на `sni` (имя вне DNS). Niko пинит ключ по
+  `niko-pin`; `pinSHA256` — для сторонних клиентов.
+- TLS 1.3, только `X25519MLKEM768`. Пароль — учётные данные пользователя с ротацией: новый приходит в `next`.
+- У обоих сервисов ротация UDP-портов: `services[].port_key` в пакете регистрации, как у остальных сервисов на UDP.
+
 ## 5. Проверки в клиенте (порядок)
 
 1. TLS: `X25519MLKEM768`, пин SPKI.

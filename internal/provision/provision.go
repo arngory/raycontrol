@@ -56,6 +56,7 @@ const (
 	SecretShortIDs      = "short_ids"            // REALITY, comma-separated hex
 	SecretSiteSeed      = "site_seed"            // decoy site content
 	SecretTLSChain      = "tls_chain"            // ACME certificate chain, PEM
+	SecretObfsPassword  = "obfs_password"        //nolint:gosec // G101: a name; hy2-obfs, salamander
 	SubscriptionService = "subscription"
 )
 
@@ -185,6 +186,9 @@ func subscriptionService(p spa.Params, host string) (store.Service, error) {
 	}, nil
 }
 
+// SelfSigned makes a self-signed ECDSA P-256 certificate for host.
+func SelfSigned(host string) (keyDER, certDER []byte, err error) { return selfSigned(host) }
+
 func selfSigned(host string) (keyDER, certDER []byte, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -197,6 +201,7 @@ func selfSigned(host string) (keyDER, certDER []byte, err error) {
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: host},
+		DNSNames:     []string{host},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().AddDate(10, 0, 0),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -291,6 +296,55 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			return svc, err
 		}
 		svc.Secrets[SecretSiteSeed] = seed
+	case "hy2-masq":
+		// Hysteria2 with masquerade (R3-1): a random name of the node's
+		// domain under the certificate of its site.
+		site, err := siteFor(ctx, st, all)
+		if err != nil {
+			return svc, err
+		}
+		if all, err = st.ListServices(ctx); err != nil {
+			return svc, err
+		}
+		settings["site"] = site.Name
+		if _, ok := settings["sni"]; !ok {
+			name, err := newZone(ctx, st, all)
+			if err != nil {
+				return svc, err
+			}
+			settings["sni"] = name
+		}
+	case "hy2-obfs":
+		// Hysteria2 inside salamander (R3-1): nothing of it shows outside,
+		// so its certificate is its own, self-signed, pinned by clients
+		// (niko-pin) and never in DNS or CT logs.
+		if _, ok := settings["sni"]; !ok {
+			label := make([]byte, 6)
+			if _, err := rand.Read(label); err != nil {
+				return svc, err
+			}
+			settings["sni"] = hex.EncodeToString(label) + ".invalid"
+		}
+		sni, _ := settings["sni"].(string)
+		key, cert, err := selfSigned(sni)
+		if err != nil {
+			return svc, err
+		}
+		svc.Secrets[SecretTLSKey], svc.Secrets[SecretTLSCert] = key, cert
+		pw := make([]byte, 24)
+		if _, err := rand.Read(pw); err != nil {
+			return svc, err
+		}
+		svc.Secrets[SecretObfsPassword] = []byte(base64.RawURLEncoding.EncodeToString(pw))
+		// UDP 443 belongs to hy2-masq until a udpmux tells them apart;
+		// salamander needs no well-known port anyway.
+		if _, ok := settings["ports"]; !ok {
+			port, err := freePort(ctx, st, all)
+			if err != nil {
+				return svc, err
+			}
+			settings["ports"] = []string{fmt.Sprintf("udp/%d", port)}
+		}
 	case "reality":
 		if _, ok := settings["target"]; !ok {
 			// Self-steal: the node's own decoy site answers non-clients.
@@ -311,7 +365,12 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 
 	if rotates(svc.Kind) {
 		if _, ok := settings["udp_rotation"]; !ok {
-			rot, key, err := newRotation(ctx, st, all)
+			// This service's own ports count as taken too.
+			b, err := json.Marshal(settings)
+			if err != nil {
+				return svc, err
+			}
+			rot, key, err := newRotation(ctx, st, append(slices.Clone(all), store.Service{Kind: svc.Kind, Settings: string(b)}))
 			if err != nil {
 				return svc, err
 			}
@@ -598,6 +657,37 @@ func ServiceRotation(svc store.Service) (Rotation, bool) {
 		return Rotation{}, false
 	}
 	return *s.Rot, true
+}
+
+// freePort picks a random port that no SPA range, rotation range, service
+// port or the ACME responder uses.
+func freePort(ctx context.Context, st *store.Store, all []store.Service) (int, error) {
+	params, err := node.LoadParams(ctx, st)
+	if err != nil {
+		return 0, err
+	}
+	acme := -1
+	if b, err := st.GetSetting(ctx, settingACMEPort); err == nil {
+		acme, _ = strconv.Atoi(string(b))
+	}
+	for range 1000 {
+		p, err := randInt(20000, 60999)
+		if err != nil {
+			return 0, err
+		}
+		taken := p == acme || (p >= int(params.PortBase) && p < int(params.PortBase)+int(params.PortRange))
+		for _, s := range all {
+			if r, ok := ServiceRotation(s); ok && p >= int(r.Base) && p < int(r.Base)+int(r.Range) {
+				taken = true
+			}
+			ports, _ := s.Ports()
+			taken = taken || slices.ContainsFunc(ports, func(x store.Port) bool { return int(x.Num) == p })
+		}
+		if !taken {
+			return p, nil
+		}
+	}
+	return 0, errors.New("no free port")
 }
 
 // newRotation picks a port range that overlaps neither the SPA range, nor

@@ -27,6 +27,7 @@ import (
 // InnerAPI is the part of the Xray API live needs.
 type InnerAPI interface {
 	SyncVLESS(ctx context.Context, tag, flow string, want map[string]string) (added, removed int, err error)
+	SyncHysteria(ctx context.Context, tag string, want map[string]string) (added, removed int, err error)
 }
 
 // Applier renders and applies.
@@ -126,11 +127,17 @@ func (a *Applier) Apply(ctx context.Context) error {
 		unit := render.UnitName(service)
 		if svc, ok := xrayService(m, service); ok && len(cs) == 1 && cs[0].old != nil && sameExceptClients(cs[0].old, cs[0].new) {
 			tag, want := render.XrayUsers(m, svc)
-			flow := ""
-			if svc.Kind == "reality" {
-				flow = render.RealityFlow
+			api := a.inner(a.Paths.APISocket(service))
+			var added, removed int
+			var err error
+			switch {
+			case render.IsHysteria(svc.Kind):
+				added, removed, err = api.SyncHysteria(ctx, tag, want)
+			case svc.Kind == "reality":
+				added, removed, err = api.SyncVLESS(ctx, tag, render.RealityFlow, want)
+			default:
+				added, removed, err = api.SyncVLESS(ctx, tag, "", want)
 			}
-			added, removed, err := a.inner(a.Paths.APISocket(service)).SyncVLESS(ctx, tag, flow, want)
 			if err == nil {
 				a.Log.Info("xray users synced", "service", service, "added", added, "removed", removed)
 				continue

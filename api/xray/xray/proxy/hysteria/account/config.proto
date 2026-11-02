@@ -1,0 +1,13 @@
+// Subset of Xray-core API definitions (github.com/XTLS/Xray-core, MPL-2.0),
+// pinned fork arngory/xray-core a4a3dff (v26.10.31). Package names and field
+// numbers must stay identical to Xray: they define the wire format. Only
+// what raycontrol calls is declared.
+syntax = "proto3";
+
+package xray.proxy.hysteria.account;
+
+option go_package = "github.com/arngory/raycontrol/internal/gen/xray/proxy/hysteria/account;account";
+
+message Account {
+  string auth = 1;
+}

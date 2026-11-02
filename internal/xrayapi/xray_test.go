@@ -629,3 +629,186 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 	probe(nextName)
 }
+
+// TestHysteriaWithXray: both Hysteria2 services as rendered (R3-1) on the
+// pinned Xray, with the site's certificate under their own names; a client
+// built from the subscription link gets through, also after the Xray API
+// adds a user; a wrong password does not.
+func TestHysteriaWithXray(t *testing.T) {
+	bin := os.Getenv("XRAY_BIN")
+	if bin == "" {
+		t.Skip("set XRAY_BIN to an Xray built from arngory/xray-core")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := provision.Init(ctx, st, provision.Options{Host: "127.0.0.1", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	masqPort, obfsPort := freeUDP(t), freeUDP(t)
+	masq, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-masq", Name: "hy2", Enabled: true,
+		Settings: fmt.Sprintf(`{"ports":["udp/%d"]}`, masqPort)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obfs, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-obfs", Name: "hy2o", Enabled: true,
+		Settings: fmt.Sprintf(`{"ports":["udp/%d"]}`, obfsPort)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The site's certificate: a wildcard of the node's domain, as DNS-01 gets.
+	rootKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	rootTmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Test Root"}, IsCA: true,
+		BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	rootDER, _ := x509.CreateCertificate(rand.Reader, rootTmpl, rootTmpl, &rootKey.PublicKey, rootKey)
+	root, _ := x509.ParseCertificate(rootDER)
+	leafDER, _ := x509.CreateCertificate(rand.Reader, &x509.Certificate{SerialNumber: big.NewInt(2), DNSNames: []string{"*.example.com"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}, root, &leafKey.PublicKey, rootKey)
+	keyDER, _ := x509.MarshalPKCS8PrivateKey(leafKey)
+	site, _ := st.ServiceByName(ctx, "site")
+	st.UpdateService(ctx, site.ID, store.ServiceUpdate{Set: map[string][]byte{
+		provision.SecretTLSChain: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER}), provision.SecretTLSKey: keyDER}})
+	rootFile := filepath.Join(dir, "root.pem")
+	os.WriteFile(rootFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER}), 0o644)
+
+	st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+	st.SetUserServices(ctx, "alice", []int64{masq.ID, obfs.ID})
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run")}
+	files, _, err := render.Render(m, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "through reality") }))
+	defer page.Close()
+	profiles, err := sub.Profiles(m, m.Users[0])
+	if err != nil || len(profiles) != 2 {
+		t.Fatalf("profiles %v %v", profiles, err)
+	}
+	for _, svc := range []store.Service{masq, obfs} {
+		var serverCfg map[string]any
+		for _, f := range files {
+			if f.Service != svc.Name {
+				continue
+			}
+			os.MkdirAll(filepath.Dir(f.Path), 0o755)
+			os.WriteFile(f.Path, f.Content, 0o644)
+			if filepath.Base(f.Path) == render.HysteriaKey {
+				// What the unit's ExecStartPre does: the key in the runtime directory.
+				os.MkdirAll(filepath.Dir(paths.Credential(svc.Name, render.HysteriaKey)), 0o755)
+				os.WriteFile(paths.Credential(svc.Name, render.HysteriaKey), f.Content, 0o600)
+			}
+			if filepath.Base(f.Path) == "xray.json" {
+				json.Unmarshal(f.Content, &serverCfg)
+			}
+		}
+		os.MkdirAll(filepath.Dir(paths.APISocket(svc.Name)), 0o755)
+		delete(serverCfg, "dns")
+		delete(serverCfg, "routing")
+		serverCfg["outbounds"] = []map[string]any{{"protocol": "freedom", "settings": map[string]any{
+			"finalRules": []map[string]any{{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}}}
+		server := writeJSON(t, serverCfg)
+		if out, err := exec.Command(bin, "run", "-test", "-c", server).CombinedOutput(); err != nil {
+			t.Fatalf("%s: xray -test: %v\n%s", svc.Name, err, out)
+		}
+		runXray(t, bin, server)
+
+		link := profiles[slices.IndexFunc(profiles, func(p sub.Profile) bool { return p.Name == svc.Name })].Link
+		if err := tryHysteria(t, bin, link, "", rootFile, page.URL, 30); err != nil {
+			t.Fatalf("%s: no response through Hysteria2: %v", svc.Name, err)
+		}
+		// A user added through the API.
+		api := paths.APISocket(svc.Name)
+		waitFile(t, api)
+		_, want := render.XrayUsers(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })])
+		want["u9"] = "a-password-for-u9"
+		if added, _, err := xrayapi.Dial(api).SyncHysteria(ctx, render.HysteriaTag, want); err != nil || added != 1 {
+			t.Fatalf("%s: sync: +%d %v", svc.Name, added, err)
+		}
+		if err := tryHysteria(t, bin, link, "a-password-for-u9", rootFile, page.URL, 30); err != nil {
+			t.Fatalf("%s: added user: %v", svc.Name, err)
+		}
+		if err := tryHysteria(t, bin, link, "wrong", rootFile, page.URL, 3); err == nil {
+			t.Fatalf("%s: a wrong password got through", svc.Name)
+		}
+	}
+}
+
+func freeUDP(t *testing.T) int {
+	t.Helper()
+	c, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	return c.LocalAddr().(*net.UDPAddr).Port
+}
+
+// tryHysteria runs an Xray client from a hysteria2:// link (auth replaces
+// the link's password if set), trusting root, and fetches page through it.
+func tryHysteria(t *testing.T, bin, link, auth, root, page string, tries int) error {
+	t.Helper()
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	if auth == "" {
+		auth = u.User.Username()
+	}
+	port, _ := strconv.Atoi(u.Port())
+	tlsSettings := map[string]any{"serverName": q.Get("sni"), "alpn": []string{"h3"}, "curvePreferences": []string{"X25519MLKEM768"},
+		"disableSystemRoot": true, "certificates": []map[string]string{{"certificateFile": root, "usage": "verify"}}}
+	if pin := q.Get("pinSHA256"); pin != "" {
+		// hy2-obfs: a self-signed certificate, pinned.
+		tlsSettings = map[string]any{"serverName": q.Get("sni"), "alpn": []string{"h3"}, "curvePreferences": []string{"X25519MLKEM768"},
+			"pinnedPeerCertSha256": pin}
+	}
+	stream := map[string]any{
+		"network":          "hysteria",
+		"security":         "tls",
+		"tlsSettings":      tlsSettings,
+		"hysteriaSettings": map[string]any{"version": 2, "auth": auth},
+	}
+	if q.Get("obfs") == "salamander" {
+		stream["finalmask"] = map[string]any{"udp": []map[string]any{{"type": "salamander", "settings": map[string]string{"password": q.Get("obfs-password")}}}}
+	}
+	socksPort := freePort(t)
+	client := writeJSON(t, map[string]any{
+		"log":      map[string]string{"loglevel": "warning"},
+		"inbounds": []map[string]any{{"listen": "127.0.0.1", "port": socksPort, "protocol": "socks", "settings": map[string]any{"udp": false}}},
+		"outbounds": []map[string]any{{
+			"protocol":       "hysteria",
+			"settings":       map[string]any{"version": 2, "address": u.Hostname(), "port": port},
+			"streamSettings": stream,
+		}},
+	})
+	stop := runXray(t, bin, client)
+	defer stop()
+	proxy, _ := url.Parse("socks5://127.0.0.1:" + strconv.Itoa(socksPort))
+	hc := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: 5 * time.Second}
+	var lastErr error
+	for i := 0; i < tries; i++ {
+		resp, err := hc.Get(page)
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if string(body) != "through reality" {
+				return fmt.Errorf("body %q", body)
+			}
+			return nil
+		}
+		lastErr = err
+		time.Sleep(200 * time.Millisecond)
+	}
+	return lastErr
+}

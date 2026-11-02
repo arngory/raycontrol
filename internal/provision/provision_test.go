@@ -2,9 +2,11 @@ package provision
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -181,5 +183,58 @@ func TestSiteAnswer(t *testing.T) {
 	}
 	if r, err = SetServiceOption(ctx, st, "r", "rotate_sni", "true"); err != nil || !*ParseRealityState(r).RotateSNI {
 		t.Fatalf("rotate_sni back on: %v %s", err, r.Settings)
+	}
+}
+
+func TestHysteriaServices(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p, _ := Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"})
+	masq, err := CreateService(ctx, st, store.Service{Kind: "hy2-masq", Name: "hy2-masq", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obfs, err := CreateService(ctx, st, store.Service{Kind: "hy2-obfs", Name: "hy2-obfs", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := st.ServiceByName(ctx, "site")
+	if err != nil {
+		t.Fatal("no site created for Hysteria2's certificate")
+	}
+	mp, _ := masq.Ports()
+	op, _ := obfs.Ports()
+	if len(mp) != 1 || mp[0] != (store.Port{Proto: "udp", Num: 443}) || len(op) != 1 || op[0].Proto != "udp" || op[0].Num == 443 ||
+		(op[0].Num >= p.PortBase && op[0].Num < p.PortBase+p.PortRange) {
+		t.Fatalf("ports: masq %v, obfs %v", mp, op)
+	}
+	for _, s := range []store.Service{masq, obfs} {
+		r, ok := ServiceRotation(s)
+		if !ok || (op[0].Num >= r.Base && op[0].Num < r.Base+r.Range) {
+			t.Fatalf("%s: rotation %+v overlaps the obfs port %d", s.Name, r, op[0].Num)
+		}
+	}
+	// hy2-masq: under the site's certificate. hy2-obfs: its own, self-signed,
+	// with a name that is in no DNS.
+	all, _ := st.ListServices(ctx)
+	names, _ := SiteNames(site, all)
+	var sni struct{ SNI string }
+	json.Unmarshal([]byte(masq.Settings), &sni)
+	if SiteOf(masq) != "site" || !strings.HasSuffix(sni.SNI, ".example.com") || !slices.Contains(names, sni.SNI) {
+		t.Fatalf("masq: name %q, site certificate %v", sni.SNI, names)
+	}
+	json.Unmarshal([]byte(obfs.Settings), &sni)
+	secrets, _ := st.ServiceSecrets(ctx, obfs.ID)
+	cert, err := x509.ParseCertificate(secrets[SecretTLSCert])
+	if SiteOf(obfs) != "" || !strings.HasSuffix(sni.SNI, ".invalid") || slices.Contains(names, sni.SNI) || err != nil ||
+		cert.VerifyHostname(sni.SNI) != nil || len(secrets[SecretTLSKey]) == 0 {
+		t.Fatalf("obfs: name %q, certificate %v", sni.SNI, err)
+	}
+	if len(secrets[SecretObfsPassword]) < 32 {
+		t.Fatalf("salamander password %q", secrets[SecretObfsPassword])
 	}
 }
