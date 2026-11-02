@@ -72,7 +72,7 @@ naive+https://niko:<пароль>@<имя>:443?niko-node=…&niko-svc=…#naive
    [`cmd/rayctl/remote.go`](../../cmd/rayctl/remote.go); на сервере его прогоняет установочный тест на пяти
    системах.
 3. **Режим администратора** (если он нужен в Niko): устройству с ролью `admin` доступен весь `NodeService` по mTLS
-   (`api/proto/raycontrol/node/v1/node.proto`), кроме `Backup`. Порт API и его пин — в поле `api` пакета.
+   (`api/proto/raycontrol/node/v1/node.proto`), кроме `Backup` и `GetDeployment`. Порт API и его пин — в поле `api` пакета.
 4. **Смена клиентского ключа**: `DeviceService.RotateCertificate` раз в 90 дней (§6 спецификации).
 
 ## 4. Что проверить в CI Niko

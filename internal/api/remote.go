@@ -134,6 +134,13 @@ func (r *Remote) device(ctx context.Context) (store.Device, error) {
 	return d, nil
 }
 
+// nodeOnly are the calls for root on the node itself: what they return
+// holds every private key (the rendered files, the database).
+var nodeOnly = map[string]bool{
+	nodev1connect.NodeServiceGetDeploymentProcedure: true,
+	nodev1connect.NodeServiceBackupProcedure:        true,
+}
+
 // adminOnly lets admin devices call NodeService; the audit log names them.
 func (r *Remote) adminOnly() connect.UnaryInterceptorFunc {
 	return func(next connect.UnaryFunc) connect.UnaryFunc {
@@ -144,6 +151,9 @@ func (r *Remote) adminOnly() connect.UnaryInterceptorFunc {
 			}
 			if d.Role != "admin" {
 				return nil, connect.NewError(connect.CodePermissionDenied, errors.New("admin devices only"))
+			}
+			if nodeOnly[req.Spec().Procedure] {
+				return nil, connect.NewError(connect.CodePermissionDenied, errors.New("on the node only (rayctl as root)"))
 			}
 			return next(context.WithValue(ctx, actorKey{}, d.UserName+"/"+d.Name+" (remote)"), req)
 		}

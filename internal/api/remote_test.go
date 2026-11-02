@@ -199,6 +199,9 @@ func TestRemoteAPI(t *testing.T) {
 	if _, err := admin.node.Backup(ctx, connect.NewRequest(&nodev1.BackupRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("a remote backup: %v", err)
 	}
+	if _, err := admin.node.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("the rendered keys through the remote API: %v", err)
+	}
 	audit, err := c.ListAudit(ctx, connect.NewRequest(&nodev1.ListAuditRequest{Limit: 5}))
 	if err != nil {
 		t.Fatal(err)
