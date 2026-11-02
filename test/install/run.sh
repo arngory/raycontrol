@@ -141,7 +141,9 @@ esac
 
 log "$distro: bootstrap"
 x install -m 0755 /opt/rc/niko-server /opt/rc/xray /usr/local/bin/
-# The host as it is before raycontrol: wait for the firewall to be up.
+# The host as it is before raycontrol: wait for the boot to finish (ufw
+# loads its rules from a oneshot unit) and for firewalld to answer.
+x timeout 120 systemctl is-system-running --wait >/dev/null || true
 # shellcheck disable=SC2016 # expands in the container
 x sh -c 'if systemctl is-enabled -q firewalld 2>/dev/null; then for i in $(seq 60); do firewall-cmd --state >/dev/null 2>&1 && break; sleep 1; done; fi'
 snapshot /root/before.snap
