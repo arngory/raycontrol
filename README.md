@@ -5,10 +5,12 @@ Control plane for a self-contained proxy node. The data plane is
 (a sing-box fork); raycontrol keeps users and keys, renders configs, runs the
 SPA-gated firewall, rotates keys and serves the subscription and API.
 
-Status: **R1** — perimeter (SPA v2 over UDP and TCP), DNS tunnels with the
-inner stage on Xray, signed subscriptions, installer. Data plane:
-niko-server-v0.1.1 (DNS front, dnstt and MasterDnsVPN backends); see
-[docs/04-roadmap.md](docs/04-roadmap.md).
+Status: **R1** done — perimeter (SPA v2 over UDP and TCP), DNS tunnels with
+the inner stage on Xray, signed subscriptions, installer. **R2** under way —
+VLESS + REALITY + Vision on Xray (post-quantum key exchange and signature),
+a decoy site per install as the self-steal target, certificates through ACME.
+Data plane: niko-server-v0.1.1 (DNS front, dnstt and MasterDnsVPN backends);
+see [docs/04-roadmap.md](docs/04-roadmap.md).
 
 ## Install
 
@@ -86,8 +88,9 @@ Control plane самодостаточной прокси-ноды. Data plane �
 raycontrol хранит пользователей и ключи, генерирует конфиги, ведёт файрвол со SPA,
 ротирует ключи, отдаёт подписку и API.
 
-- **Статус:** этап R1 — периметр (SPA v2 по UDP и TCP), DNS-туннели с внутренней ступенью на Xray, подписанные
-  подписки, установщик. Data plane — niko-server-v0.1.1.
+- **Статус:** R1 готов — периметр (SPA v2 по UDP и TCP), DNS-туннели с внутренней ступенью на Xray, подписанные
+  подписки, установщик. Идёт R2 — REALITY на Xray с постквантом, сайт-приманка для self-steal, сертификаты через ACME.
+  Data plane — niko-server-v0.1.1.
 - **Установка:** любой современный Linux с systemd; полная установка проверяется в CI на Debian 12/13, Ubuntu 24.04,
   Rocky Linux 9/10. Root, из SSH-сессии: `bash bootstrap.sh -host <адрес> -domain <домен>` (скрипт
   `install/bootstrap.sh` ставит зависимости через apt/dnf/zypper/pacman и проверяет подпись релиза). firewalld и ufw

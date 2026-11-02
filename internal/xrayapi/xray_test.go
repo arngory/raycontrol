@@ -6,13 +6,16 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -23,11 +26,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
+	"github.com/arngory/raycontrol/internal/site"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
 	"github.com/arngory/raycontrol/internal/xrayapi"
@@ -402,4 +407,143 @@ func selfSignedCert(t *testing.T, name string) tls.Certificate {
 		t.Fatal(err)
 	}
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+// TestRealitySelfStealWithXray: REALITY with the node's own decoy site as
+// target, as rendered for a node with a domain. The site runs on its unix
+// socket with a chain long enough for ML-DSA-65; a client from the link gets
+// through, a probe without credentials gets the site.
+func TestRealitySelfStealWithXray(t *testing.T) {
+	bin := os.Getenv("XRAY_BIN")
+	if bin == "" {
+		t.Skip("set XRAY_BIN to an Xray built from arngory/xray-core")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := provision.Init(ctx, st, provision.Options{Host: "127.0.0.1", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	port := freePort(t)
+	svc, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "reality", Enabled: true,
+		Settings: fmt.Sprintf(`{"ports":["tcp/%d"]}`, port)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	siteSvc, err := st.ServiceByName(ctx, "site")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := provision.SiteName(siteSvc)
+
+	// The certificate the manager would get: a chain long enough for REALITY.
+	rootKey, _ := rsa.GenerateKey(rand.Reader, 4096)
+	interKey, _ := rsa.GenerateKey(rand.Reader, 4096)
+	leafKey, _ := rsa.GenerateKey(rand.Reader, 4096)
+	mk := func(cn string, isCA bool, dns []string, pub any, parent *x509.Certificate, signer any) *x509.Certificate {
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: cn}, DNSNames: dns,
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: isCA, BasicConstraintsValid: true}
+		if isCA {
+			tmpl.KeyUsage = x509.KeyUsageCertSign
+		}
+		if parent == nil {
+			parent = tmpl
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, pub, signer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, _ := x509.ParseCertificate(der)
+		return c
+	}
+	root := mk("Test Root", true, nil, &rootKey.PublicKey, nil, rootKey)
+	inter := mk("Test Intermediate", true, nil, &interKey.PublicKey, root, rootKey)
+	leaf := mk(name, false, []string{name}, &leafKey.PublicKey, inter, interKey)
+	var chainPEM bytes.Buffer
+	for _, c := range []*x509.Certificate{leaf, inter, root} {
+		pem.Encode(&chainPEM, &pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
+	}
+	keyDER, _ := x509.MarshalPKCS8PrivateKey(leafKey)
+	st.SetServiceSecret(ctx, siteSvc.ID, provision.SecretTLSKey, keyDER)
+	st.SetServiceSecret(ctx, siteSvc.ID, provision.SecretTLSChain, chainPEM.Bytes())
+
+	user, _ := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+	st.SetUserServices(ctx, "alice", []int64{svc.ID})
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run")}
+	for _, d := range []string{filepath.Dir(paths.APISocket("reality")), filepath.Dir(paths.SiteSocket("site"))} {
+		os.MkdirAll(d, 0o755)
+	}
+	files, skipped, err := render.Render(m, paths)
+	if err != nil || len(skipped) != 0 {
+		t.Fatalf("render: %v, skipped %v", err, skipped)
+	}
+	var serverCfg map[string]any
+	for _, f := range files {
+		os.MkdirAll(filepath.Dir(f.Path), 0o755)
+		os.WriteFile(f.Path, f.Content, 0o644)
+		if f.Service == "reality" {
+			json.Unmarshal(f.Content, &serverCfg)
+		}
+	}
+
+	// The site, as rayd site runs it.
+	siteDir := filepath.Join(paths.Rendered, "site")
+	chain, _ := os.ReadFile(filepath.Join(siteDir, render.SiteChain))
+	key, _ := os.ReadFile(filepath.Join(siteDir, render.SiteKey))
+	roots := x509.NewCertPool()
+	roots.AddCert(root)
+	cert, err := site.LoadCertificate(chain, key, provision.RealityChainMin(), roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", paths.SiteSocket("site"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go site.Serve(ctx, ln, filepath.Join(siteDir, render.SiteRoot), cert, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	delete(serverCfg, "dns")
+	delete(serverCfg, "routing")
+	serverCfg["outbounds"] = []map[string]any{{"protocol": "freedom", "settings": map[string]any{
+		"finalRules": []map[string]any{{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}}}
+	server := writeJSON(t, serverCfg)
+	if out, err := exec.Command(bin, "run", "-test", "-c", server).CombinedOutput(); err != nil {
+		t.Fatalf("xray -test: %v\n%s", err, out)
+	}
+	runXray(t, bin, server)
+
+	link, err := sub.RealityLink(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.Kind == "reality" })], user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "through reality") }))
+	defer page.Close()
+	fetchThroughLink(t, bin, link, "", page.URL)
+
+	// A probe without credentials: the site's certificate and its pages.
+	hc := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
+		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return tls.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port), &tls.Config{ServerName: name, RootCAs: roots, NextProtos: []string{"h2"}})
+		},
+		ForceAttemptHTTP2: true,
+	}}
+	resp, err := hc.Get("https://" + name + "/about.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || resp.ProtoMajor != 2 || !strings.Contains(string(body), "studio@"+name) ||
+		!bytes.Equal(resp.TLS.PeerCertificates[0].Raw, leaf.Raw) {
+		t.Fatalf("probe: %s %s\n%s", resp.Status, resp.Proto, body)
+	}
 }

@@ -281,3 +281,49 @@ func TestHostFirewalls(t *testing.T) {
 		t.Errorf("own table or the front reported:\n%s", log)
 	}
 }
+
+func TestBuildSelfSteal(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, skipped, err := render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No certificate yet: site and REALITY wait; their units exist but are
+	// skipped by their conditions until rayd renders the files.
+	if len(skipped) != 2 {
+		t.Fatalf("skipped %v", skipped)
+	}
+	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	site := file(p, "/etc/systemd/system/niko-site.service")
+	for _, want := range []string{
+		"ConditionPathExists=/var/lib/raycontrol/rendered/site/chain.pem\n",
+		"ExecStartPre=+install -m 0400 -o niko-site -g niko-site /var/lib/raycontrol/rendered/site/key.pem /run/niko/site/key.pem\n",
+		"ExecStart=/usr/local/bin/rayd site -root /var/lib/raycontrol/rendered/site/www -chain /var/lib/raycontrol/rendered/site/chain.pem -key /run/niko/site/key.pem -socket /run/niko/site/tls.sock\n",
+		"PrivateNetwork=yes\n", "RestrictAddressFamilies=AF_UNIX\n",
+	} {
+		if !strings.Contains(site, want) {
+			t.Errorf("site unit lacks %q:\n%s", want, site)
+		}
+	}
+	if !strings.Contains(file(p, "/etc/systemd/system/niko-r.service"), "ConditionPathExists=/var/lib/raycontrol/rendered/r/xray.json\n") {
+		t.Error("REALITY unit without its condition")
+	}
+	for _, u := range p.Users {
+		if u.Name == "niko-r" && !slices.Equal(u.ExtraGroups, []string{"niko-site"}) {
+			t.Errorf("REALITY user groups %v: it must reach the site socket", u.ExtraGroups)
+		}
+	}
+}

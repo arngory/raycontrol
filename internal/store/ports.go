@@ -47,6 +47,7 @@ var kindPorts = map[string]struct {
 	"olcrtc":       {process: true}, // outbound only
 	"openflux":     {process: true},
 	"inner":        {process: true}, // unix socket only
+	"site":         {process: true}, // decoy site, unix socket for REALITY
 }
 
 // UID range of data-plane service processes (docs/08-decisions.md, R1-6).

@@ -52,6 +52,8 @@ const (
 	SecretRealityKey    = "reality_x25519"       //nolint:gosec // G101: a name; REALITY, X25519 private key
 	SecretRealityMLDSA  = "reality_mldsa65_seed" //nolint:gosec // G101: a name; REALITY, ML-DSA-65 seed
 	SecretShortIDs      = "short_ids"            // REALITY, comma-separated hex
+	SecretSiteSeed      = "site_seed"            // decoy site content
+	SecretTLSChain      = "tls_chain"            // ACME certificate chain, PEM
 	SubscriptionService = "subscription"
 )
 
@@ -266,7 +268,29 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			return svc, err
 		}
 		svc.Secrets[SecretMLKEMSeed] = seed
+	case "site":
+		if _, ok := settings["sni"]; !ok {
+			name, err := newZone(ctx, st, all)
+			if err != nil {
+				return svc, err
+			}
+			settings["sni"] = name
+		}
+		seed := make([]byte, 32)
+		if _, err := rand.Read(seed); err != nil {
+			return svc, err
+		}
+		svc.Secrets[SecretSiteSeed] = seed
 	case "reality":
+		if _, ok := settings["target"]; !ok {
+			// Self-steal: the node's own decoy site answers non-clients.
+			site, err := siteFor(ctx, st, all)
+			if err != nil {
+				return svc, err
+			}
+			settings["site"] = site.Name
+			settings["sni"] = SiteName(site)
+		}
 		if err := realitySettings(settings); err != nil {
 			return svc, err
 		}
@@ -299,15 +323,19 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 	return st.CreateService(ctx, svc)
 }
 
-// RealityTarget returns the target and server name of REALITY settings,
-// the name defaulting to the target's host. The target answers everyone who
-// is not a client (probes included), so it must be a TLS 1.3 site the name
-// belongs to (CheckRealityTarget). Self-steal on the node's own decoy site
-// needs a certificate (R2b); until then the target is given explicitly.
+// RealityTarget returns the target and server name of REALITY settings.
+// The target answers everyone who is not a client (probes included):
+// "site:<name>" is the node's own decoy site (self-steal, the default with
+// a domain); otherwise a foreign TLS 1.3 site the name belongs to
+// (CheckRealityTarget), the name defaulting to the target's host.
 func RealityTarget(settings map[string]any) (target, sni string, err error) {
+	if site, _ := settings["site"].(string); site != "" {
+		sni, _ = settings["sni"].(string)
+		return "site:" + site, sni, nil
+	}
 	target, _ = settings["target"].(string)
 	if target == "" {
-		return "", "", fmt.Errorf("%w reality needs a target until the decoy site exists (R2b): "+
+		return "", "", fmt.Errorf("%w reality needs a target or the node's decoy site: "+
 			`-settings '{"target":"www.example.org:443"}'`, store.ErrInvalid)
 	}
 	host := ""
@@ -374,6 +402,34 @@ func realitySecrets(secrets map[string][]byte) error {
 	return nil
 }
 
+// siteFor returns the decoy site, creating it with the first REALITY
+// service in self-steal mode.
+func siteFor(ctx context.Context, st *store.Store, all []store.Service) (store.Service, error) {
+	for _, s := range all {
+		if s.Kind == "site" {
+			return s, nil
+		}
+	}
+	domain, err := Domain(ctx, st)
+	if err != nil {
+		return store.Service{}, err
+	}
+	if domain == "" {
+		return store.Service{}, fmt.Errorf("%w reality: without a node domain give a foreign target: "+
+			`-settings '{"target":"www.example.org:443"}'`, store.ErrInvalid)
+	}
+	return CreateService(ctx, st, store.Service{Kind: "site", Name: "site", Enabled: true})
+}
+
+// SiteName returns the server name of a decoy site.
+func SiteName(svc store.Service) string {
+	var s struct {
+		SNI string `json:"sni"`
+	}
+	_ = json.Unmarshal([]byte(svc.Settings), &s)
+	return s.SNI
+}
+
 // newZone returns "<label>.<domain>" with a random label not used yet.
 func newZone(ctx context.Context, st *store.Store, all []store.Service) (string, error) {
 	domain, err := Domain(ctx, st)
@@ -381,7 +437,7 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service) (string,
 		return "", err
 	}
 	if domain == "" {
-		return "", fmt.Errorf("%w: DNS tunnels need the node domain (rayd init -domain)", store.ErrInvalid)
+		return "", fmt.Errorf("%w: this service needs the node domain (rayd init -domain)", store.ErrInvalid)
 	}
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 	for {

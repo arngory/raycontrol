@@ -65,6 +65,9 @@ func (s *Server) acmeWindow() (uint16, time.Time) {
 }
 
 // notify records a change and wakes the perimeter watchers.
+// Notify records a change made outside the API (a stored certificate).
+func (s *Server) Notify() { s.notify() }
+
 func (s *Server) notify() {
 	s.mu.Lock()
 	s.rev++
@@ -335,7 +338,8 @@ func (s *Server) ListServices(ctx context.Context, _ *connect.Request[nodev1.Lis
 }
 
 func (s *Server) CreateService(ctx context.Context, req *connect.Request[nodev1.CreateServiceRequest]) (*connect.Response[nodev1.CreateServiceResponse], error) {
-	if req.Msg.Kind == "reality" && s.CheckRealityTarget != nil {
+	if req.Msg.Kind == "reality" && s.CheckRealityTarget != nil && strings.Contains(req.Msg.SettingsJson, `"target"`) {
+		// A foreign target is checked from the node; the own site is not up yet.
 		target, sni, err := provision.RealityTargetFromJSON(req.Msg.SettingsJson)
 		if err == nil {
 			err = s.CheckRealityTarget(ctx, target, sni)

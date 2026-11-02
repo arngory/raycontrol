@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"os/user"
@@ -16,11 +17,13 @@ import (
 	"time"
 
 	"github.com/arngory/raycontrol/internal/api"
+	"github.com/arngory/raycontrol/internal/certs"
 	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/live"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
+	"github.com/arngory/raycontrol/internal/site"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
 )
@@ -40,6 +43,7 @@ func usage() {
 commands:
   init     create the node state and its random parameters (safe to repeat)
   serve    serve the node API on the local socket
+  site     serve the decoy site on a unix socket (run by its own unit)
   version  print the version
 `)
 	os.Exit(2)
@@ -55,6 +59,8 @@ func main() {
 		err = cmdInit(os.Args[2:])
 	case "serve":
 		err = cmdServe(os.Args[2:])
+	case "site":
+		err = cmdSite(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:
@@ -98,6 +104,7 @@ func cmdServe(args []string) error {
 	spaTCP := fs.Bool("spa-tcp", true, "also accept SPA v2 over TCP on the slot ports")
 	rendered := fs.String("rendered", render.DefaultPaths.Rendered, "directory for rendered data-plane files")
 	liveApply := fs.Bool("live", true, "render and apply data-plane files while serving")
+	acmeDir := fs.String("acme-directory", certs.LetsEncrypt, "ACME directory for the sites' certificates (empty: none)")
 	fs.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -140,11 +147,33 @@ func cmdServe(args []string) error {
 		}
 		go applier.Run(ctx, srv.Changes)
 	}
+	if *acmeDir != "" {
+		if err := startCertificates(ctx, st, srv, *acmeDir, log); err != nil {
+			log.Error("certificates not managed", "err", err)
+		}
+	}
 	if err := startSubscription(ctx, st, log); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
 	log.Info("serving", "socket", *socket, "node", fmt.Sprintf("%x", params.NodeID))
 	return srv.ServeUnix(ctx, *socket, policy, per.Handler)
+}
+
+// startCertificates issues and renews the sites' certificates through ACME
+// HTTP-01, opening the perimeter window for each order (R2-11).
+func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, directory string, log *slog.Logger) error {
+	key, err := certs.AccountKey(ctx, st)
+	if err != nil {
+		return err
+	}
+	host, err := node.Host(ctx, st)
+	if err != nil {
+		return err
+	}
+	is := &certs.Issuer{Directory: directory, AccountKey: key, Window: srv.SetACMEWindow, NodeHost: host, Log: log}
+	m := &certs.Manager{Store: st, Issue: is.Issue, Notify: srv.Notify, Log: log}
+	go m.Run(ctx)
+	return nil
 }
 
 // startSubscription serves the subscription endpoint on the port of the
@@ -198,4 +227,43 @@ func pruneAudit(ctx context.Context, st *store.Store, log *slog.Logger) {
 		case <-t.C:
 		}
 	}
+}
+
+// cmdSite serves the decoy site: TLS 1.3 with h2 on a unix socket, the
+// self-steal target of REALITY (docs/08-decisions.md, R2-12).
+func cmdSite(args []string) error {
+	fs := flag.NewFlagSet("site", flag.ExitOnError)
+	root := fs.String("root", "", "site content directory")
+	chain := fs.String("chain", "", "certificate chain (PEM, leaf first)")
+	key := fs.String("key", "", "private key (PEM)")
+	socket := fs.String("socket", "", "unix socket to listen on")
+	fs.Parse(args)
+	if *root == "" || *chain == "" || *key == "" || *socket == "" {
+		return errors.New("site needs -root, -chain, -key and -socket")
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	chainPEM, err := os.ReadFile(*chain)
+	if err != nil {
+		return err
+	}
+	keyPEM, err := os.ReadFile(*key)
+	if err != nil {
+		return err
+	}
+	cert, err := site.LoadCertificate(chainPEM, keyPEM, provision.RealityChainMin(), nil)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	_ = os.Remove(*socket)
+	ln, err := net.Listen("unix", *socket)
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(*socket, 0o660); err != nil { //nolint:gosec // G302: the REALITY process connects through the group
+		return err
+	}
+	log.Info("serving the site", "socket", *socket, "chain", len(cert.Certificate))
+	return site.Serve(ctx, ln, *root, cert, log)
 }

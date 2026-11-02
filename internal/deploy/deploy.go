@@ -5,6 +5,7 @@
 package deploy
 
 import (
+	"encoding/json"
 	"fmt"
 	"path"
 	"slices"
@@ -90,6 +91,9 @@ type unit struct {
 	description string
 	after       []string
 	service     []string // lines of [Service] before the hardening block
+	// needs is the file the process reads: until rayd has rendered it, the
+	// unit is skipped instead of failing (rayd starts it then).
+	needs string
 }
 
 func (u unit) file() File {
@@ -98,7 +102,11 @@ func (u unit) file() File {
 	after := append([]string{"network-online.target"}, u.after...)
 	// No start rate limit: Restart= keeps trying every RestartSec, e.g. until
 	// rayd has rendered a file the process needs.
-	fmt.Fprintf(&b, "Wants=network-online.target\nAfter=%s\nStartLimitIntervalSec=0\n\n[Service]\n", strings.Join(after, " "))
+	fmt.Fprintf(&b, "Wants=network-online.target\nAfter=%s\nStartLimitIntervalSec=0\n", strings.Join(after, " "))
+	if u.needs != "" {
+		fmt.Fprintf(&b, "ConditionPathExists=%s\n", u.needs)
+	}
+	b.WriteString("\n[Service]\n")
 	for _, l := range u.service {
 		b.WriteString(l + "\n")
 	}
@@ -118,11 +126,13 @@ func groups(gs []string) string {
 func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Plan {
 	var plan Plan
 	var inner *render.Service
-	var dns, reality []render.Service
+	var dns, reality, sites []render.Service
 	for i, s := range m.Services {
 		switch {
 		case s.Kind == "inner":
 			inner = &m.Services[i]
+		case s.Kind == "site":
+			sites = append(sites, s)
 		case s.Kind == "dnstt" || s.Kind == "masterdns":
 			dns = append(dns, s)
 		case s.Kind == "reality":
@@ -143,6 +153,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		return unit{
 			name:        render.UnitName(s.Name),
 			description: description,
+			needs:       path.Join(p.Rendered, s.Name, "xray.json"),
 			service: []string{
 				"User=" + g, "Group=" + g,
 				"ExecStart=" + bin.Xray + " run -c " + path.Join(p.Rendered, s.Name, "xray.json"),
@@ -164,10 +175,43 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		units = append(units, xrayUnit(*inner, "raycontrol inner stage "+inner.Name+" (Xray, VLESS with ML-KEM-768)", ""))
 		xrays = append(xrays, *inner)
 	}
-	for _, s := range reality {
+	// The decoy site (interim, until niko-server has its site backend): rayd
+	// site on a unix socket, the self-steal target of REALITY.
+	for _, s := range sites {
 		g := render.GroupName(s.Name)
 		raydGroups = append(raydGroups, g)
 		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID})
+		dir := path.Join(p.Rendered, s.Name)
+		key := p.Credential(s.Name, render.SiteKey)
+		units = append(units, unit{
+			name:        render.UnitName(s.Name),
+			description: "raycontrol decoy site " + s.Name,
+			needs:       path.Join(dir, render.SiteChain),
+			service: []string{
+				"User=" + g, "Group=" + g,
+				fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s", g, g, path.Join(dir, render.SiteKey), key),
+				"ExecStart=" + bin.Rayd + " site -root " + path.Join(dir, render.SiteRoot) + " -chain " + path.Join(dir, render.SiteChain) +
+					" -key " + key + " -socket " + p.SiteSocket(s.Name),
+				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
+				"RuntimeDirectoryMode=0710",
+				"UMask=0007",
+				"CapabilityBoundingSet=",
+				// A unix socket only: REALITY brings the connections.
+				"PrivateNetwork=yes",
+				"RestrictAddressFamilies=AF_UNIX",
+			},
+		})
+	}
+	for _, s := range reality {
+		g := render.GroupName(s.Name)
+		raydGroups = append(raydGroups, g)
+		var rs render.RealitySettings
+		_ = json.Unmarshal([]byte(s.Settings), &rs)
+		var extra []string
+		if rs.Site != "" {
+			extra = []string{render.GroupName(rs.Site)} // reaches the site socket
+		}
+		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID, ExtraGroups: extra})
 		caps := ""
 		if m.FrontTCP {
 			frontGroups = append(frontGroups, g) // the front connects to reality.sock
@@ -205,6 +249,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		units = append(units, unit{
 			name:        render.UnitName(s.Name),
 			description: "niko-server backend " + s.Name + " (" + s.Kind + ")",
+			needs:       path.Join(p.Rendered, s.Name, "backend.json"),
 			after:       after,
 			service: append([]string{
 				"User=" + g, "Group=" + g, groups(extra),
@@ -236,6 +281,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		units = append(units, unit{
 			name:        render.UnitName("front"),
 			description: "niko-server front (multiplexers)",
+			needs:       path.Join(p.Rendered, "front", "front.json"),
 			after:       after,
 			service: []string{
 				"User=niko-front", "Group=niko-front", groups(frontGroups),

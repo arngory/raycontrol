@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"syscall"
 	"time"
@@ -33,20 +34,21 @@ type Applier struct {
 	Store *store.Store
 	Paths render.Paths
 	Log   *slog.Logger
-	// Restart restarts a unit if it runs; nil uses systemctl (allowed for the
-	// rayd user by the raycontrol polkit rule).
-	Restart func(ctx context.Context, unit string) error
+	// Restart runs systemctl verb ("try-restart" or "restart") on a unit;
+	// nil uses systemctl (allowed for the rayd user by the raycontrol polkit
+	// rule).
+	Restart func(ctx context.Context, verb, unit string) error
 	// Inner returns an API client for an inner API socket; nil dials Xray.
 	Inner func(socket string) InnerAPI
 }
 
-func (a *Applier) restart(ctx context.Context, unit string) error {
+func (a *Applier) restart(ctx context.Context, verb, unit string) error {
 	if a.Restart != nil {
-		return a.Restart(ctx, unit)
+		return a.Restart(ctx, verb, unit)
 	}
-	out, err := exec.CommandContext(ctx, "systemctl", "try-restart", unit).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "systemctl", verb, unit).CombinedOutput() //nolint:gosec // G204: verb is one of two constants
 	if err != nil {
-		return fmt.Errorf("systemctl try-restart %s: %w: %s", unit, err, bytes.TrimSpace(out))
+		return fmt.Errorf("systemctl %s %s: %w: %s", verb, unit, err, bytes.TrimSpace(out))
 	}
 	return nil
 }
@@ -135,7 +137,14 @@ func (a *Applier) Apply(ctx context.Context) error {
 			}
 			a.Log.Warn("xray API sync failed, restarting", "service", service, "err", err)
 		}
-		if err := a.restart(ctx, unit); err != nil {
+		// Files that were not there before: the unit waited for them
+		// (ConditionPathExists) and starts now. Otherwise only a running
+		// process restarts, so a unit stopped on purpose stays stopped.
+		verb := "try-restart"
+		if slices.ContainsFunc(cs, func(c change) bool { return c.old == nil }) {
+			verb = "restart"
+		}
+		if err := a.restart(ctx, verb, unit); err != nil {
 			a.Log.Warn("restart failed (is the node deployed? run rayctl apply)", "unit", unit, "err", err)
 		} else {
 			a.Log.Info("restarted after config change", "unit", unit)

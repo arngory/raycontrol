@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -240,6 +241,12 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
 			fmt.Fprintf(w, "service %s created with id %d\n", r.Msg.Service.Name, r.Msg.Service.Id)
+			var rs struct{ Site, SNI string }
+			if r.Msg.Service.Kind == "reality" && json.Unmarshal([]byte(r.Msg.Service.SettingsJson), &rs) == nil && rs.Site != "" {
+				fmt.Fprintf(w, "\nSelf-steal on the decoy site %s: it must resolve to this node (a wildcard record *.<domain>).\n"+
+					"rayd gets its certificate (ACME HTTP-01, a short window on TCP 80) and starts the site and REALITY;\n"+
+					"run rayctl apply now to install their units.\n", rs.SNI)
+			}
 		})
 	case "enable", "disable":
 		if err := need(args, 1); err != nil {

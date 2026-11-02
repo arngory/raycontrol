@@ -113,3 +113,19 @@ func TestIssueWithPebble(t *testing.T) {
 		t.Fatalf("window calls %v: want open on the responder port, then closed", windows)
 	}
 }
+
+func TestCheckDNSNodeHost(t *testing.T) {
+	is := &Issuer{NodeHost: "n.example.com", Resolve: func(_ context.Context, name string) ([]netip.Addr, error) {
+		switch name {
+		case "n.example.com", "s.example.com":
+			return []netip.Addr{netip.MustParseAddr("203.0.113.7")}, nil
+		}
+		return []netip.Addr{netip.MustParseAddr("198.51.100.1")}, nil
+	}}
+	if err := is.CheckDNS(context.Background(), []string{"s.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := is.CheckDNS(context.Background(), []string{"x.example.com"}); err == nil {
+		t.Fatal("a name elsewhere accepted")
+	}
+}

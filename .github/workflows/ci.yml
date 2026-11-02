@@ -64,7 +64,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: XRAY_BIN="$RUNNER_TEMP/xray" go test -count=1 -run 'TestInnerWithXray|TestRealityWithXray' -v ./internal/xrayapi
+      - run: XRAY_BIN="$RUNNER_TEMP/xray" go test -count=1 -run 'WithXray' -v ./internal/xrayapi
       - uses: actions/upload-artifact@v4
         with:
           name: xray

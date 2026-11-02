@@ -43,10 +43,12 @@ type Issuer struct {
 	// closes it when until is zero.
 	Window func(port uint16, until time.Time)
 	// Expect are the node's addresses; every name must resolve to one of
-	// them before an order is placed. Empty skips the check.
-	Expect  []netip.Addr
-	Resolve func(ctx context.Context, name string) ([]netip.Addr, error)
-	Log     *slog.Logger
+	// them before an order is placed. NodeHost, if Expect is empty, gives
+	// them: an address or a name to resolve. Both empty skip the check.
+	Expect   []netip.Addr
+	NodeHost string
+	Resolve  func(ctx context.Context, name string) ([]netip.Addr, error)
+	Log      *slog.Logger
 }
 
 func (is *Issuer) log() *slog.Logger {
@@ -58,14 +60,28 @@ func (is *Issuer) log() *slog.Logger {
 
 // CheckDNS reports a name that does not resolve to the node.
 func (is *Issuer) CheckDNS(ctx context.Context, names []string) error {
-	if len(is.Expect) == 0 {
-		return nil
-	}
 	resolve := is.Resolve
 	if resolve == nil {
 		resolve = func(ctx context.Context, name string) ([]netip.Addr, error) {
 			return net.DefaultResolver.LookupNetIP(ctx, "ip", name)
 		}
+	}
+	expect := is.Expect
+	if len(expect) == 0 && is.NodeHost != "" {
+		if a, err := netip.ParseAddr(is.NodeHost); err == nil {
+			expect = []netip.Addr{a.Unmap()}
+		} else {
+			addrs, err := resolve(ctx, is.NodeHost)
+			if err != nil {
+				return fmt.Errorf("node host %s: %w", is.NodeHost, err)
+			}
+			for _, a := range addrs {
+				expect = append(expect, a.Unmap())
+			}
+		}
+	}
+	if len(expect) == 0 {
+		return nil
 	}
 	for _, name := range names {
 		addrs, err := resolve(ctx, name)
@@ -74,10 +90,10 @@ func (is *Issuer) CheckDNS(ctx context.Context, names []string) error {
 		}
 		ok := false
 		for _, a := range addrs {
-			ok = ok || slices.Contains(is.Expect, a.Unmap())
+			ok = ok || slices.Contains(expect, a.Unmap())
 		}
 		if !ok {
-			return fmt.Errorf("%s resolves to %v, not to the node (%v)", name, addrs, is.Expect)
+			return fmt.Errorf("%s resolves to %v, not to the node (%v)", name, addrs, expect)
 		}
 	}
 	return nil

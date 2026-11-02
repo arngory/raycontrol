@@ -33,6 +33,11 @@ var realityCertLen = sync.OnceValue(func() int {
 	return len(der)
 })
 
+// RealityChainMin is the shortest certificate chain (bytes, with the
+// per-certificate overhead) a REALITY target may send: REALITY pads its own
+// certificate with the ML-DSA-65 signature to it.
+func RealityChainMin() int { return realityCertLen() + 16 }
+
 // realityRoots verify the target's certificate; nil is the system pool.
 var realityRoots *x509.CertPool
 
@@ -71,7 +76,7 @@ func CheckRealityTarget(ctx context.Context, target, sni string) error {
 	for _, c := range st.PeerCertificates {
 		chain += len(c.Raw) + 5 // certificate entry: length and extensions
 	}
-	if need := realityCertLen() + 16; chain < need {
+	if need := RealityChainMin(); chain < need {
 		return fmt.Errorf("reality target %s: certificate chain of %d bytes, REALITY with ML-DSA-65 needs at least %d; pick a site with a longer chain (RSA, more intermediates)", target, chain, need)
 	}
 	return nil

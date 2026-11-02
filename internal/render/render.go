@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"maps"
 	"path"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/site"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -77,6 +79,8 @@ type Model struct {
 	// Creds maps service ID and user ID to the user's UUID for services
 	// whose users are Xray clients (REALITY).
 	Creds map[int64]map[int64]string
+	// Now dates the generated site; zero is the time of rendering.
+	Now time.Time
 	// FrontTCP puts TCP services behind the niko-server front (tcpmux,
 	// CONFIG.md). niko-server v0.1.1 has no TCP front yet, so REALITY binds
 	// its TCP port itself until then (docs/08-decisions.md, R2-7).
@@ -302,6 +306,12 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			}
 			files = append(files, f)
 		case "reality":
+			var rs RealitySettings
+			_ = json.Unmarshal([]byte(s.Settings), &rs)
+			if rs.Site != "" && !m.hasCert(rs.Site) {
+				skipped = append(skipped, s.Name+" (waits for the certificate of "+rs.Site+")")
+				continue
+			}
 			f, err := realityConfig(s, m, p)
 			if err != nil {
 				return nil, nil, err
@@ -313,6 +323,15 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				_ = json.Unmarshal([]byte(s.Settings), &rs)
 				tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{rs.SNI}, Backend: s.Name})
 			}
+		case "site":
+			fs, err := siteFiles(s, m, p)
+			if err != nil {
+				return nil, nil, err
+			}
+			if fs == nil {
+				skipped = append(skipped, s.Name+" (waits for its certificate)")
+			}
+			files = append(files, fs...)
 		case "ssh", "subscription", "api":
 			// Not data-plane processes.
 		default:
@@ -497,6 +516,7 @@ const RealityFlow = "xtls-rprx-vision"
 
 // RealitySettings are the settings of a REALITY service.
 type RealitySettings struct {
+	Site        string `json:"site"`        // the node's decoy site (self-steal), or
 	Target      string `json:"target"`      // host:port or unix socket: who answers non-clients
 	SNI         string `json:"sni"`         // server name clients send
 	Fingerprint string `json:"fingerprint"` // uTLS fingerprint of clients
@@ -539,8 +559,11 @@ func ShortID(s Service, userID int64) string {
 
 func realityConfig(s Service, m Model, p Paths) (File, error) {
 	var rs RealitySettings
-	if err := json.Unmarshal([]byte(s.Settings), &rs); err != nil || rs.Target == "" || rs.SNI == "" {
-		return File{}, fmt.Errorf("reality %s: settings need target and sni", s.Name)
+	if err := json.Unmarshal([]byte(s.Settings), &rs); err != nil || (rs.Target == "" && rs.Site == "") || rs.SNI == "" {
+		return File{}, fmt.Errorf("reality %s: settings need a target or site, and sni", s.Name)
+	}
+	if rs.Site != "" {
+		rs.Target = p.SiteSocket(rs.Site)
 	}
 	decryption, _, err := VLESSEncryption(s.Secrets[provision.SecretMLKEMSeed])
 	if err != nil {
@@ -602,4 +625,51 @@ func tcpPort(s Service) (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("service %s has no TCP port", s.Name)
+}
+
+// SiteSocket is the TLS socket of the decoy site, the self-steal target.
+func (p Paths) SiteSocket(site string) string { return p.socket(site, "tls") }
+
+// Site files: content under www/, the certificate chain and the key, which
+// systemd copies for the site process (Paths.Credential).
+const (
+	SiteChain = "chain.pem"
+	SiteKey   = "key.pem"
+	SiteRoot  = "www"
+)
+
+// hasCert reports whether the site service has its certificate yet.
+func (m Model) hasCert(site string) bool {
+	for _, s := range m.Services {
+		if s.Name == site && s.Kind == "site" {
+			return len(s.Secrets[provision.SecretTLSChain]) > 0 && len(s.Secrets[provision.SecretTLSKey]) > 0
+		}
+	}
+	return false
+}
+
+// siteFiles renders the decoy site; nil until it has a certificate.
+func siteFiles(s Service, m Model, p Paths) ([]File, error) {
+	if !m.hasCert(s.Name) {
+		return nil, nil
+	}
+	now := m.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	content, err := site.Generate(s.Secrets[provision.SecretSiteSeed], provision.SiteName(s.Service), now)
+	if err != nil {
+		return nil, err
+	}
+	dir := path.Join(p.Rendered, s.Name)
+	var files []File
+	for _, name := range slices.Sorted(maps.Keys(content)) {
+		files = append(files, File{Path: path.Join(dir, SiteRoot, name), Mode: 0o640, Group: GroupName(s.Name), Content: content[name], Service: s.Name})
+	}
+	key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: s.Secrets[provision.SecretTLSKey]})
+	files = append(files,
+		File{Path: path.Join(dir, SiteChain), Mode: 0o640, Group: GroupName(s.Name), Content: s.Secrets[provision.SecretTLSChain], Service: s.Name},
+		File{Path: path.Join(dir, SiteKey), Mode: 0o600, Content: key, Service: s.Name},
+	)
+	return files, nil
 }

@@ -44,14 +44,17 @@ func TestApply(t *testing.T) {
 	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: "/run/niko"}
 	a := &Applier{
 		Store: st, Paths: paths, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Restart: func(_ context.Context, unit string) error { restarted = append(restarted, unit); return nil },
-		Inner:   func(string) InnerAPI { return inner },
+		Restart: func(_ context.Context, verb, unit string) error {
+			restarted = append(restarted, verb+" "+unit)
+			return nil
+		},
+		Inner: func(string) InnerAPI { return inner },
 	}
 	if err := a.Apply(ctx); err != nil {
 		t.Fatal(err)
 	}
 	slices.Sort(restarted)
-	if !slices.Equal(restarted, []string{"niko-dns.service", "niko-front.service", "niko-inner.service"}) {
+	if !slices.Equal(restarted, []string{"restart niko-dns.service", "restart niko-front.service", "restart niko-inner.service"}) {
 		t.Fatalf("first apply restarted %v", restarted)
 	}
 	if fi, err := os.Stat(paths.Rendered); err != nil || fi.Mode().Perm() != 0o711 {
