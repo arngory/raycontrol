@@ -105,6 +105,43 @@ func TestNaive(t *testing.T) {
 	pw.Close()
 	resp.Body.Close()
 
+	// The client closes its side first: what the destination still sends
+	// arrives. The destination answers after it read everything.
+	late, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer late.Close()
+	go func() {
+		c, err := late.Accept()
+		if err != nil {
+			return
+		}
+		got, _ := io.ReadAll(c)
+		time.Sleep(50 * time.Millisecond)
+		_, _ = c.Write(append([]byte("got "), got...))
+		c.Close()
+	}()
+	pr2, pw2 := io.Pipe()
+	req, _ := http.NewRequest(http.MethodConnect, srv.URL, pr2)
+	req.Host = late.Addr().String()
+	req.Header.Set("Padding", paddingHeader())
+	req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("niko:secret-one")))
+	resp2, err := tr.RoundTrip(req)
+	if err != nil || resp2.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT: %v %v", resp2, err)
+	}
+	half := &paddedStream{r: resp2.Body, w: pw2}
+	if _, err := half.Write([]byte("request")); err != nil {
+		t.Fatal(err)
+	}
+	pw2.Close()
+	answer2, _ := io.ReadAll(half)
+	resp2.Body.Close()
+	if string(answer2) != "got request" {
+		t.Fatalf("after a half-close: %q", answer2)
+	}
+
 	// Whatever is not an authenticated naive CONNECT gets the site: an
 	// empty 404, never 407.
 	for name, c := range map[string]struct {

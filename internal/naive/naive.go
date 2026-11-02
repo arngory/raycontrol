@@ -68,21 +68,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer out.Close()
 
 	in := &paddedStream{r: r.Body, w: w, f: flusher}
-	done := make(chan struct{}, 2)
+	// The client's end of the upload only half-closes the destination; the
+	// tunnel lasts until the destination is done sending, or the stream
+	// ends. Nothing writes to w once this returns.
 	go func() {
 		_, _ = io.Copy(out, in)
 		if cw, ok := out.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
-		done <- struct{}{}
 	}()
+	down := make(chan struct{})
 	go func() {
 		_, _ = io.Copy(in, out)
-		done <- struct{}{}
+		close(down)
 	}()
 	select {
-	case <-done:
+	case <-down:
 	case <-r.Context().Done():
+		_ = out.Close()
+		<-down
 	}
 }
 
