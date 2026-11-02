@@ -122,8 +122,11 @@ wait_table "rayspa start"
 # Some sandboxes cannot mount systemd credentials; the backends need them.
 # CI sets TEST_STRICT=1 so that this never passes as a skip there.
 dataplane=(niko-inner.service niko-dns.service niko-mdns.service niko-front.service)
+x sh -c 'echo raycontrol > /run/credential-probe'
 # shellcheck disable=SC2016 # expands in the unit
-if ! x systemd-run --wait --quiet -p LoadCredential=probe:/etc/hostname sh -c 'test -s "$CREDENTIALS_DIRECTORY/probe"'; then
+if ! x systemd-run --wait --quiet --unit credential-probe -p LoadCredential=probe:/run/credential-probe \
+	sh -c 'test -s "$CREDENTIALS_DIRECTORY/probe"'; then
+	x journalctl --no-pager -n 40 >&2 || true
 	[[ -z ${TEST_STRICT:-} ]] || fail "systemd credentials do not work here"
 	echo "SKIP: systemd credentials do not work in this environment; data-plane units are not checked" >&2
 	dataplane=(niko-inner.service)
