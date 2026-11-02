@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"math"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -293,9 +292,9 @@ func SiteNames(site store.Service, all []store.Service) (names, next []string) {
 		return list
 	}
 	names = add(names, SiteName(site))
-	// REALITY and Hysteria2 services under this site's certificate.
+	// Every service under this site's certificate: REALITY, hy2-masq, DoH.
 	for _, s := range all {
-		if (s.Kind == "reality" || strings.HasPrefix(s.Kind, "hy2-")) && s.Enabled && siteOf(s) == site.Name {
+		if s.Kind != "site" && s.Enabled && siteOf(s) == site.Name {
 			var cur struct {
 				SNI string `json:"sni"`
 			}

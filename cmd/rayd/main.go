@@ -4,14 +4,19 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"os/user"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,6 +26,7 @@ import (
 	"github.com/arngory/raycontrol/internal/certs"
 	"github.com/arngory/raycontrol/internal/cloudflare"
 	"github.com/arngory/raycontrol/internal/deploy"
+	"github.com/arngory/raycontrol/internal/doh"
 	"github.com/arngory/raycontrol/internal/live"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
@@ -181,6 +187,7 @@ func cmdServe(args []string) error {
 	}
 	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, log)
 	go syncDNS(ctx, st, srv.Changes, log)
+	go serveDoH(ctx, st, paths, srv.Changes, log)
 	if err := startSubscription(ctx, st, log); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
@@ -237,6 +244,117 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 		}
 	}()
 	return m, is, nil
+}
+
+// dohListener is a running DoH endpoint and the certificate it serves.
+type dohListener struct {
+	srv  *http.Server
+	cert [32]byte
+}
+
+// serveDoH keeps rayd's TLS listener on the socket of every enabled DoH
+// service whose site has a certificate (R3-2); the site passes the DoH name
+// on to it. A new certificate restarts the listener.
+func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func() <-chan struct{}, log *slog.Logger) {
+	running := map[string]*dohListener{}
+	stop := func(name string) {
+		if l := running[name]; l != nil {
+			_ = l.srv.Close()
+			delete(running, name)
+		}
+	}
+	defer func() {
+		for name := range running {
+			stop(name)
+		}
+	}()
+	for {
+		wake := changes()
+		services, err := st.ListServices(ctx)
+		if err != nil {
+			log.Error("doh", "err", err)
+		}
+		want := map[string]bool{}
+		for _, svc := range services {
+			if svc.Kind != "doh" || !svc.Enabled {
+				continue
+			}
+			site, err := st.ServiceByName(ctx, provision.SiteOf(svc))
+			if err != nil {
+				continue
+			}
+			secrets, err := st.ServiceSecrets(ctx, site.ID)
+			if err != nil || len(secrets[provision.SecretTLSChain]) == 0 {
+				continue
+			}
+			want[svc.Name] = true
+			sum := sha256.Sum256(append(slices.Clone(secrets[provision.SecretTLSChain]), secrets[provision.SecretTLSKey]...))
+			if l := running[svc.Name]; l != nil && l.cert == sum {
+				continue
+			}
+			stop(svc.Name)
+			keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: secrets[provision.SecretTLSKey]})
+			cert, err := tls.X509KeyPair(secrets[provision.SecretTLSChain], keyPEM)
+			if err != nil {
+				log.Error("doh certificate", "service", svc.Name, "err", err)
+				continue
+			}
+			sock := p.DoHSocket(svc.Name)
+			_ = os.Remove(sock)
+			ln, err := net.Listen("unix", sock)
+			if err != nil {
+				log.Error("doh socket", "service", svc.Name, "err", err)
+				continue
+			}
+			_ = os.Chmod(sock, 0o660) //nolint:gosec // G302: the site's group passes connections on
+			id := svc.ID
+			h := &doh.Handler{Tokens: func(ctx context.Context) (map[string]bool, error) { return dohTokens(ctx, st, id) }}
+			srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute,
+				ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelDebug),
+				TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+					Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}}}
+			go func() { _ = srv.ServeTLS(ln, "", "") }()
+			running[svc.Name] = &dohListener{srv: srv, cert: sum}
+			log.Info("doh serving", "service", svc.Name)
+		}
+		for name := range running {
+			if !want[name] {
+				stop(name)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+		case <-time.After(10 * time.Minute):
+		}
+	}
+}
+
+// dohTokens are the credentials DoH accepts now: those of enabled users
+// with access to the service, with their rotation (R4-1).
+func dohTokens(ctx context.Context, st *store.Store, service int64) (map[string]bool, error) {
+	users, err := st.ListUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sets, err := st.CredentialSets(ctx, service, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	out := map[string]bool{}
+	for _, u := range users {
+		if !u.Enabled || (u.ExpiresAt != nil && !u.ExpiresAt.After(now)) || !slices.Contains(u.Services, service) {
+			continue
+		}
+		for _, t := range sets[u.ID].Accepted(now) {
+			if t != "" {
+				out[t] = true
+			}
+		}
+	}
+	return out, nil
 }
 
 // syncDNS keeps the node's records in its DNS provider's zone: when the
@@ -381,6 +499,7 @@ func cmdSite(args []string) error {
 	fs := flag.NewFlagSet("site", flag.ExitOnError)
 	answer := fs.String("answer", site.Answer404, "what requests get: "+strings.Join(site.Answers, ", "))
 	root := fs.String("root", "", "site content directory (answer pages)")
+	routesFile := fs.String("routes", "", "JSON: server names passed on, still encrypted, to a unix socket (DoH)")
 	chain := fs.String("chain", "", "certificate chain (PEM, leaf first)")
 	key := fs.String("key", "", "private key (PEM)")
 	socket := fs.String("socket", "", "unix socket to listen on")
@@ -415,6 +534,10 @@ func cmdSite(args []string) error {
 	if err := os.Chmod(*socket, 0o660); err != nil { //nolint:gosec // G302: the REALITY process connects through the group
 		return err
 	}
-	log.Info("serving the site", "socket", *socket, "chain", len(cert.Certificate), "answer", *answer)
-	return site.Serve(ctx, ln, handler, cert, log)
+	routes, err := site.LoadRoutes(*routesFile)
+	if err != nil {
+		return err
+	}
+	log.Info("serving the site", "socket", *socket, "chain", len(cert.Certificate), "answer", *answer, "routes", len(routes))
+	return site.Serve(ctx, site.Routed(ln, routes, log), handler, cert, log)
 }

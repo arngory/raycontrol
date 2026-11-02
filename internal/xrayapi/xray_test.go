@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/doh"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/site"
@@ -448,6 +450,13 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// DoH behind REALITY's port, passed on by the site (R3-2).
+	dohSvc, err := provision.CreateService(ctx, st, store.Service{Kind: "doh", Name: "doh", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dohName struct{ SNI string }
+	json.Unmarshal([]byte(dohSvc.Settings), &dohName)
 	siteSvc, err := st.ServiceByName(ctx, "site")
 	if err != nil {
 		t.Fatal(err)
@@ -488,7 +497,7 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 	root := mk("Test Root", true, nil, &rootKey.PublicKey, nil, rootKey)
 	inter := mk("Test Intermediate", true, nil, &interKey.PublicKey, root, rootKey)
-	leaf := mk(name, false, []string{name, nextName}, &leafKey.PublicKey, inter, interKey)
+	leaf := mk(name, false, []string{name, nextName, dohName.SNI}, &leafKey.PublicKey, inter, interKey)
 	var chainPEM bytes.Buffer
 	for _, c := range []*x509.Certificate{leaf, inter, root} {
 		pem.Encode(&chainPEM, &pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
@@ -501,7 +510,7 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 
 	user, _ := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
-	st.SetUserServices(ctx, "alice", []int64{svc.ID})
+	st.SetUserServices(ctx, "alice", []int64{svc.ID, dohSvc.ID})
 	m, err := render.Collect(ctx, st)
 	if err != nil {
 		t.Fatal(err)
@@ -542,7 +551,11 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go site.Serve(ctx, ln, handler, cert, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	routes, err := site.LoadRoutes(filepath.Join(siteDir, render.SiteRoutes))
+	if err != nil || len(routes) != 1 {
+		t.Fatalf("site routes %v %v", routes, err)
+	}
+	go site.Serve(ctx, site.Routed(ln, routes, slog.New(slog.NewTextHandler(io.Discard, nil))), handler, cert, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	delete(serverCfg, "dns")
 	delete(serverCfg, "routing")
@@ -584,6 +597,41 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 		}
 	}
 	probe(name)
+
+	// DoH through REALITY's port: REALITY hands the site what is not its
+	// own, the site passes the DoH name on to rayd's endpoint.
+	answer := bytes.Repeat([]byte{7}, 40)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write(answer) }))
+	defer upstream.Close()
+	token := m.Creds[dohSvc.ID][user.ID]
+	os.MkdirAll(filepath.Dir(paths.DoHSocket("doh")), 0o755)
+	dl, err := net.Listen("unix", paths.DoHSocket("doh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dohSrv := &http.Server{Handler: &doh.Handler{Upstreams: []string{upstream.URL},
+		Tokens: func(context.Context) (map[string]bool, error) { return map[string]bool{token: true}, nil }},
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+			Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2"}}}
+	go dohSrv.ServeTLS(dl, "", "")
+	defer dohSrv.Close()
+	dc := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
+		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return tls.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port), &tls.Config{ServerName: dohName.SNI, RootCAs: roots, NextProtos: []string{"h2"}})
+		},
+		ForceAttemptHTTP2: true,
+	}}
+	dohLink := sub.DoHLink(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == dohSvc.ID })], token)
+	u, _ := url.Parse(dohLink)
+	resp, err := dc.Get("https://" + u.Host + u.Path + "?dns=" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 20)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !bytes.Equal(body, answer) || resp.ProtoMajor != 2 {
+		t.Fatalf("DoH through REALITY: %s %s %q", resp.Status, resp.Proto, body)
+	}
 
 	// The switch: the subscription had the next link; the node renders the
 	// next keys and name, the site follows the name.

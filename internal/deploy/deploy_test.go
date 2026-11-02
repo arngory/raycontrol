@@ -312,7 +312,7 @@ func TestBuildSelfSteal(t *testing.T) {
 		"ConditionPathExists=/var/lib/raycontrol/rendered/site/chain.pem\n",
 		"ExecStartPre=+install -m 0400 -o niko-site -g niko-site /var/lib/raycontrol/rendered/site/key.pem /run/niko/site/key.pem\n",
 		// The default answer: 404 to everything, no content directory (R4-8).
-		"ExecStart=/usr/local/bin/rayd site -answer 404 -chain /var/lib/raycontrol/rendered/site/chain.pem -key /run/niko/site/key.pem -socket /run/niko/site/tls.sock\n",
+		"ExecStart=/usr/local/bin/rayd site -answer 404 -routes /var/lib/raycontrol/rendered/site/routes.json -chain /var/lib/raycontrol/rendered/site/chain.pem -key /run/niko/site/key.pem -socket /run/niko/site/tls.sock\n",
 		"PrivateNetwork=yes\n", "RestrictAddressFamilies=AF_UNIX\n",
 	} {
 		if !strings.Contains(site, want) {

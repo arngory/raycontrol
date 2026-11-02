@@ -238,3 +238,33 @@ func TestHysteriaServices(t *testing.T) {
 		t.Fatalf("salamander password %q", secrets[SecretObfsPassword])
 	}
 }
+
+// DoH rides on REALITY's TCP 443 through the node's site (R3-2).
+func TestDoHService(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"})
+	if _, err := CreateService(ctx, st, store.Service{Kind: "doh", Name: "doh", Enabled: true}); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("DoH without REALITY: %v", err)
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "reality", Name: "reality", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := CreateService(ctx, st, store.Service{Kind: "doh", Name: "doh", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ports, _ := d.Ports()
+	site, _ := st.ServiceByName(ctx, "site")
+	all, _ := st.ListServices(ctx)
+	names, _ := SiteNames(site, all)
+	var sni struct{ SNI string }
+	json.Unmarshal([]byte(d.Settings), &sni)
+	if SiteOf(d) != "site" || len(ports) != 1 || ports[0] != (store.Port{Proto: "tcp", Num: 443}) || !slices.Contains(names, sni.SNI) {
+		t.Fatalf("doh: %s, ports %v, site names %v", d.Settings, ports, names)
+	}
+}

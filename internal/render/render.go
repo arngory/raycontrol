@@ -243,7 +243,7 @@ var XrayKinds = []string{"inner", "reality", "hy2-masq", "hy2-obfs"}
 // secret of their own there, with rotation (R4-1): a UUID for REALITY, a
 // password for Hysteria2 (a UUID too: 122 random bits).
 func UserCredentials(kind string) bool {
-	return kind == "reality" || IsHysteria(kind)
+	return kind == "reality" || kind == "doh" || IsHysteria(kind)
 }
 
 // IsHysteria reports whether the kind is Hysteria2.
@@ -392,6 +392,8 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				skipped = append(skipped, s.Name+" (waits for its certificate)")
 			}
 			files = append(files, fs...)
+		case "doh":
+			// Served by rayd behind the site (R3-2); the site's routes say so.
 		case "ssh", "subscription", "api":
 			// Not data-plane processes.
 		default:
@@ -803,10 +805,14 @@ func (p Paths) SiteSocket(site string) string { return p.socket(site, "tls") }
 // Site files: content under www/, the certificate chain and the key, which
 // systemd copies for the site process (Paths.Credential).
 const (
-	SiteChain = "chain.pem"
-	SiteKey   = "key.pem"
-	SiteRoot  = "www"
+	SiteChain  = "chain.pem"
+	SiteKey    = "key.pem"
+	SiteRoot   = "www"
+	SiteRoutes = "routes.json"
 )
+
+// DoHSocket is where rayd serves a DoH service for the site to pass it on.
+func (p Paths) DoHSocket(service string) string { return p.socket(service, "doh") }
 
 // hasCert reports whether the site service has its certificate yet.
 func (m Model) hasCert(site string) bool {
@@ -841,7 +847,23 @@ func siteFiles(s Service, m Model, p Paths) ([]File, error) {
 		}
 	}
 	key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: s.Secrets[provision.SecretTLSKey]})
+	// Names the site passes on, still encrypted (R2-13): DoH to rayd.
+	routes := map[string]string{}
+	for _, x := range m.Services {
+		if x.Kind == "doh" && provision.SiteOf(x.Service) == s.Name {
+			var st struct {
+				SNI string `json:"sni"`
+			}
+			_ = json.Unmarshal([]byte(x.Settings), &st)
+			routes[strings.ToLower(st.SNI)] = p.DoHSocket(x.Name)
+		}
+	}
+	r, err := jsonFile(routes)
+	if err != nil {
+		return nil, err
+	}
 	files = append(files,
+		File{Path: path.Join(dir, SiteRoutes), Mode: 0o640, Group: GroupName(s.Name), Content: r, Service: s.Name},
 		File{Path: path.Join(dir, SiteChain), Mode: 0o640, Group: GroupName(s.Name), Content: s.Secrets[provision.SecretTLSChain], Service: s.Name},
 		File{Path: path.Join(dir, SiteKey), Mode: 0o600, Content: key, Service: s.Name},
 	)

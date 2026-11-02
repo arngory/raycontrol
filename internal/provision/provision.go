@@ -314,6 +314,30 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			}
 			settings["sni"] = name
 		}
+	case "doh":
+		// DoH (R3-2) rides on REALITY's TCP 443: REALITY hands the site
+		// whatever is not its own client, and the site passes the DoH name
+		// on to rayd. So it needs REALITY stealing from the node's site.
+		site := ""
+		for _, s := range all {
+			if s.Kind == "reality" && s.Enabled && siteOf(s) != "" {
+				site = siteOf(s)
+			}
+		}
+		if site == "" {
+			return svc, fmt.Errorf("%w doh rides on REALITY's TCP 443 with the node's own site: add reality first (rayctl service add reality reality)", store.ErrInvalid)
+		}
+		settings["site"] = site
+		if _, ok := settings["sni"]; !ok {
+			name, err := newZone(ctx, st, all)
+			if err != nil {
+				return svc, err
+			}
+			settings["sni"] = name
+		}
+		if _, ok := settings["ports"]; !ok {
+			settings["ports"] = []string{"tcp/443"} // DoH3 waits for a udpmux
+		}
 	case "hy2-obfs":
 		// Hysteria2 inside salamander (R3-1): nothing of it shows outside,
 		// so its certificate is its own, self-signed, pinned by clients

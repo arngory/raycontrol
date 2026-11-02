@@ -222,6 +222,16 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 				p.Next = &Next{Link: link(set.Next), From: set.NextFrom.Unix()}
 			}
 			out = append(out, p)
+		case "doh":
+			token := m.Creds[s.ID][u.ID]
+			if token == "" {
+				continue
+			}
+			p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: DoHLink(m, s, token)}
+			if set := m.Sets[s.ID][u.ID]; set.Next != "" {
+				p.Next = &Next{Link: DoHLink(m, s, set.Next), From: set.NextFrom.Unix()}
+			}
+			out = append(out, p)
 		case "hy2-masq", "hy2-obfs":
 			password := m.Creds[s.ID][u.ID]
 			if password == "" {
@@ -267,6 +277,20 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 		}
 	}
 	return out, nil
+}
+
+// DoHLink is the DoH endpoint of a user (spec/subscription-v1.md §4): the
+// standard https://<name>/dns-query/<token> with the Niko parameters, which
+// the client drops before it asks.
+func DoHLink(m render.Model, s render.Service, token string) string {
+	var st struct {
+		SNI string `json:"sni"`
+	}
+	_ = json.Unmarshal([]byte(s.Settings), &st)
+	q := url.Values{}
+	q.Set("niko-node", m.NodeID)
+	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
+	return "https://" + st.SNI + "/dns-query/" + url.PathEscape(token) + "?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
 
 // HysteriaLink is the share link of a Hysteria2 service with a user's

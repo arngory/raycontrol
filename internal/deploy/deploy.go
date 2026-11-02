@@ -194,7 +194,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		dir := path.Join(p.Rendered, s.Name)
 		key := p.Credential(s.Name, render.SiteKey)
 		answer := provision.SiteAnswer(s.Service)
-		args := " site -answer " + answer
+		args := " site -answer " + answer + " -routes " + path.Join(dir, render.SiteRoutes)
 		if answer == site.AnswerPages {
 			args += " -root " + path.Join(dir, render.SiteRoot)
 		}
@@ -370,6 +370,12 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	for _, s := range xrays {
 		// setgid: the API socket Xray creates inherits the rayd group.
 		tmp += fmt.Sprintf("d %s 2750 %s rayd -\n", path.Dir(p.APISocket(s.Name)), render.GroupName(s.Name))
+	}
+	// DoH: rayd's socket, reached by the site that passes the name on.
+	for _, s := range m.Services {
+		if s.Kind == "doh" {
+			tmp += fmt.Sprintf("d %s 2750 rayd %s -\n", path.Dir(p.DoHSocket(s.Name)), render.GroupName(provision.SiteOf(s.Service)))
+		}
 	}
 	plan.Files = append(plan.Files,
 		File{Path: "/etc/tmpfiles.d/raycontrol.conf", Mode: 0o644, Content: []byte(tmp)},
