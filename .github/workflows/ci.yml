@@ -129,12 +129,7 @@ jobs:
           path: bin
       - name: niko-server release
         run: |
-          . deploy/versions.env
-          base="$NIKO_SERVER_RELEASES/download/$NIKO_SERVER_TAG"
-          curl -fsSL -o bin/niko-server-linux-amd64 "$base/niko-server-linux-amd64"
-          curl -fsSL -o SHA256SUMS.niko "$base/SHA256SUMS"
-          (cd bin && grep ' niko-server-linux-amd64$' ../SHA256SUMS.niko | sha256sum -c -)
-          mv bin/niko-server-linux-amd64 bin/niko-server
+          scripts/niko-server.sh amd64 bin/niko-server
           chmod +x bin/*
       - name: Bootstrap dependencies on the bare image
         run: test/install/deps.sh ${{ matrix.distro }}
@@ -144,6 +139,9 @@ jobs:
         run: test/install/run.sh ${{ matrix.distro }} bin
 
   build:
+    # The release archive as the Release workflow makes it, without the
+    # signature: raycontrol, niko-server checked against the pinned hashes,
+    # Xray from the pinned fork, VERSIONS.
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -159,3 +157,33 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
         run: go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::12}" -o dist/ ./cmd/...
+      - name: niko-server
+        run: scripts/niko-server.sh ${{ matrix.goarch }} dist/niko-server
+      - name: Fetch Xray
+        run: |
+          . deploy/versions.env
+          git clone --filter=blob:none "$XRAY_REPOSITORY" xray
+          git -C xray checkout -q "$XRAY_COMMIT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: xray/go.mod
+      - name: Build Xray
+        working-directory: xray
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -ldflags "-s -w -buildid=" -o ../dist/xray ./main
+      - name: Archive
+        env:
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          . deploy/versions.env
+          {
+            echo "raycontrol ${GITHUB_SHA}"
+            echo "xray ${XRAY_REPOSITORY} ${XRAY_COMMIT}"
+            echo "niko-server ${NIKO_SERVER_TAG} ${NIKO_SERVER_REPOSITORY} ${NIKO_SERVER_COMMIT}"
+          } > dist/VERSIONS
+          tar -czf "raycontrol-linux-${GOARCH}.tar.gz" -C dist rayd rayspa rayctl xray niko-server VERSIONS
+          tar -tzvf "raycontrol-linux-${GOARCH}.tar.gz"
+          file dist/xray dist/niko-server dist/rayd

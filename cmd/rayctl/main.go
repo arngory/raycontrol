@@ -51,8 +51,8 @@ const usageText = `usage: rayctl [-socket PATH] [-json] <command>
   dns sync                                  bring the zone in line now
   dns remove [-keep-records]                delete raycontrol's records and forget the provider
 
-  install -host ADDR [-domain D] [-admin A] [-cloudflare-token-file F]
-                                              set the node up on this host (root)
+  install -host ADDR [-domain D] [-admin A] [-cloudflare-token-file F] [-services reality,dnstt,masterdns|none]
+          [-dataplane DIR]                    set the node up on this host (root); with -domain REALITY by default
   apply                                       install what the current services need (root)
   uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]
                                               take back everything install and apply changed (root)

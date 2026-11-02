@@ -8,8 +8,8 @@
 
 | Команда | Что делает |
 |---|---|
-| `bash bootstrap.sh -host IP -domain D -cloudflare-token-file F` | поставить ноду: зависимости, подписанный релиз, `rayctl install` |
-| `rayctl install -host IP [-domain D] [-admin A] [-cloudflare-token-file F]` | то же без bootstrap (бинарники уже в `/usr/local/bin`) |
+| `bash bootstrap.sh -host IP -domain D -cloudflare-token-file F [-services reality,dnstt,masterdns]` | поставить ноду: зависимости, подписанный релиз с data plane, `rayctl install`, сервисы |
+| `rayctl install -host IP [-domain D] [-admin A] [-cloudflare-token-file F] [-services …\|none] [-dataplane DIR]` | то же без bootstrap; `-dataplane` — каталог с проверенными `xray` и `niko-server` |
 | `rayctl apply` | поставить то, что нужно новым сервисам: пользователи, юниты, файлы |
 | `rayctl uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]` | убрать всё по журналу установки, записи в Cloudflare тоже |
 | `rayspa teardown` | с консоли провайдера: снять периметр, если SPA и SSH недоступны |

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -213,6 +214,8 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	admin := fs.String("admin", sshClient(), "addresses that reach SSH without SPA (comma-separated; default: this SSH session)")
 	packages := fs.String("packages", "", "packages the bootstrap installed, as manager:name,name (recorded for uninstall)")
 	cfToken := fs.String("cloudflare-token-file", "", "Cloudflare API token file: DNS records and wildcard certificates (needs -domain)")
+	dataplane := fs.String("dataplane", "", "directory with the xray and niko-server the bootstrap verified, installed to "+deploy.DataPlaneDir)
+	services := fs.String("services", "", "services to set up now: reality, dnstt, masterdns (default with -domain: reality; \"none\" for none)")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
@@ -231,6 +234,10 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	}
 	if *admin == "" {
 		return errors.New("no admin address: pass -admin, or install from an SSH session")
+	}
+	kinds, err := installServices(*services, *domain, fs)
+	if err != nil {
+		return err
 	}
 	// Read before anything changes: a wrong path fails the install early.
 	token := ""
@@ -272,6 +279,21 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	}
 	if err := h.EnsureGroup(deploy.AdminGroup, 0); err != nil {
 		return err
+	}
+	// The data plane the bootstrap downloaded and verified with the release
+	// (one signature for all of it), in a directory of its own.
+	if *dataplane != "" {
+		for _, b := range []struct{ name, dst string }{{"xray", deploy.DefaultBinaries.Xray}, {"niko-server", deploy.DefaultBinaries.NikoServer}} {
+			src := filepath.Join(*dataplane, b.name)
+			if _, err := os.Stat(src); err != nil {
+				fmt.Printf("warning: %s is not in %s: its services stay off until it is installed\n", b.name, *dataplane)
+				continue
+			}
+			if _, err := h.InstallBinary(src, b.dst); err != nil {
+				return fmt.Errorf("installing %s: %w", b.name, err)
+			}
+			fmt.Println("installed", b.dst)
+		}
 	}
 	// Control plane only: rayd and rayspa units, tmpfiles, polkit, sysctl.
 	base := deploy.Build(render.Model{}, nil, render.DefaultPaths, deploy.DefaultBinaries)
@@ -336,18 +358,14 @@ func (c *cli) install(ctx context.Context, args []string) error {
 		return err
 	}
 
-	if err := c.deploy(ctx, h, "rayspa.service"); err != nil {
-		return err
-	}
-	if err := h.EnableNow("rayspa.service"); err != nil {
-		return err
-	}
+	// The DNS provider before the services: their certificate then goes
+	// through DNS-01 from the start.
 	if token != "" {
 		r, err := c.c.SetDNSProvider(ctx, connect.NewRequest(&nodev1.SetDNSProviderRequest{Provider: "cloudflare", Token: token}))
 		if err != nil {
 			fmt.Println("warning: Cloudflare not set up (rayctl dns cloudflare later):", err)
 		} else {
-			fmt.Printf("\nCloudflare zone %s: records kept by rayd, certificates through DNS-01.\n", r.Msg.Status.Zone)
+			fmt.Printf("Cloudflare zone %s: records kept by rayd, certificates through DNS-01.\n", r.Msg.Status.Zone)
 			for _, ch := range r.Msg.Status.Changes {
 				fmt.Println(" ", ch)
 			}
@@ -355,6 +373,31 @@ func (c *cli) install(ctx context.Context, args []string) error {
 				fmt.Println("  problem:", p)
 			}
 		}
+	}
+	var created []string
+	for _, k := range kinds {
+		_, err := c.c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: k.kind, Name: k.name}))
+		switch {
+		case err == nil:
+			created = append(created, k.name)
+		case connect.CodeOf(err) == connect.CodeAlreadyExists:
+		default:
+			fmt.Printf("warning: service %s not created (rayctl service add %s %s later): %v\n", k.name, k.kind, k.name, err)
+		}
+	}
+
+	if err := c.deploy(ctx, h, "rayspa.service"); err != nil {
+		return err
+	}
+	if err := h.EnableNow("rayspa.service"); err != nil {
+		return err
+	}
+	if len(created) > 0 {
+		fmt.Printf("\nServices: %s.", strings.Join(created, ", "))
+		if slices.Contains(created, "reality") {
+			fmt.Print(" REALITY starts once its certificate is stored (journalctl -u rayd -f).")
+		}
+		fmt.Println()
 	}
 
 	fmt.Printf("\nraycontrol is installed. The perimeter is up: every port is closed except\n"+
@@ -364,6 +407,38 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	}
 	fmt.Println("\nRecovery from the provider console: rayspa teardown")
 	return nil
+}
+
+type serviceKind struct{ kind, name string }
+
+// installServices turns -services into the services install creates, by
+// kind with their usual names. Without the flag a node with a domain gets
+// REALITY (self-steal on its own site); "none" creates none.
+func installServices(list, domain string, fs *flag.FlagSet) ([]serviceKind, error) {
+	set := false
+	fs.Visit(func(f *flag.Flag) { set = set || f.Name == "services" })
+	if !set {
+		if domain == "" {
+			return nil, nil
+		}
+		list = "reality"
+	}
+	names := map[string]string{"reality": "reality", "dnstt": "dns", "masterdns": "mdns"}
+	var out []serviceKind
+	for _, k := range splitList(list) {
+		if k == "none" {
+			return nil, nil
+		}
+		name, ok := names[k]
+		if !ok {
+			return nil, fmt.Errorf("-services: %q is not one of reality, dnstt, masterdns", k)
+		}
+		if domain == "" {
+			return nil, fmt.Errorf("-services %s needs -domain", k)
+		}
+		out = append(out, serviceKind{k, name})
+	}
+	return out, nil
 }
 
 // journaledHost acts on this machine and records every change.

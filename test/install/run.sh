@@ -112,6 +112,7 @@ snapshot() {
 		echo "== ufw"; if command -v ufw >/dev/null; then ufw status verbose; fi
 		echo "== var/lib"; ls /var/lib
 		echo "== bin"; ls /usr/local/bin
+		echo "== libexec"; ls /usr/local/libexec 2>&1
 	} > "$1" 2>&1' snapshot "$1"
 }
 
@@ -143,7 +144,6 @@ ubuntu*) x ufw --force enable >/dev/null && x systemctl restart ufw.service ;;
 esac
 
 log "$distro: bootstrap"
-x install -m 0755 /opt/rc/niko-server /opt/rc/xray /usr/local/bin/
 # The host as it is before raycontrol: wait for the boot to finish (ufw
 # loads its rules from a oneshot unit) and for firewalld to answer.
 x timeout 120 systemctl is-system-running --wait >/dev/null || true
@@ -155,8 +155,13 @@ sed -n '/^const sysctl = `/,/^`/p' "$here/../../internal/deploy/deploy.go" | gre
 	docker exec -i "$node" sh -c 'cat > /root/sysctl.keys'
 snapshot /root/before.snap
 # The emergency bundle bootstrap prints stays out of the (public) CI log.
-x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -host "$ip" -domain example.test -admin 192.0.2.1 |
+# The data plane (xray, niko-server) comes from /opt/rc like a release's;
+# one DNS tunnel is set up by the install itself, the other one below.
+x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -host "$ip" -domain example.test -admin 192.0.2.1 -services dnstt |
 	sed -E 's/rcdev1:[A-Za-z0-9_-]+/rcdev1:<redacted>/g' || fail "bootstrap"
+for b in xray niko-server; do
+	[[ $(x stat -c '%a %U' "/usr/local/libexec/raycontrol/$b") == "755 root" ]] || fail "$b not installed by bootstrap"
+done
 wait_active rayd.service rayspa.service
 wait_table "rayspa start"
 [[ $(x nft list chain inet raycontrol input) == *"policy drop;"* ]] || fail "input chain is not policy drop"
@@ -168,7 +173,6 @@ fi
 dataplane=(niko-inner.service niko-dns.service niko-mdns.service niko-front.service)
 
 log "$distro: DNS tunnels"
-x rayctl service add dnstt dns >/dev/null
 x rayctl service add masterdns mdns >/dev/null
 x rayctl apply || fail "rayctl apply"
 wait_active "${dataplane[@]}"
@@ -233,7 +237,7 @@ snapshot /root/after.snap
 if ! diff -u <(x cat /root/before.snap) <(x cat /root/after.snap) >&2; then
 	fail "the host after uninstall differs from before the install (diff above)"
 fi
-for p in /usr/local/bin/rayd /usr/local/bin/rayctl /var/lib/raycontrol /var/lib/raycontrol-install /etc/systemd/system/rayd.service; do
+for p in /usr/local/bin/rayd /usr/local/bin/rayctl /usr/local/libexec/raycontrol /var/lib/raycontrol /var/lib/raycontrol-install /etc/systemd/system/rayd.service; do
 	if x test -e "$p"; then
 		fail "$p is still there after uninstall"
 	fi

@@ -39,38 +39,13 @@ cat /etc/apt/apt.conf.d/20auto-upgrades
 reboot
 ```
 
-## 2. Data plane: niko-server и Xray
+## 2. Data plane
 
-niko-server берётся из подписанного релиза (версии — в `deploy/versions.env`):
-
-```bash
-cd /root && base=https://github.com/arngory/niko/releases/download/niko-server-v0.1.1
-```
-
-```bash
-curl -fsSLO "$base/niko-server-linux-amd64" && curl -fsSLO "$base/SHA256SUMS"
-```
-
-```bash
-grep ' niko-server-linux-amd64$' SHA256SUMS | sha256sum -c - && install -m 0755 niko-server-linux-amd64 /usr/local/bin/niko-server
-```
-
-Xray собирается из закреплённого коммита форка на любой машине с Go той версии, что в `go.mod` форка (сейчас 1.27,
-https://go.dev/dl/). На рабочей машине:
-
-```bash
-git clone https://github.com/arngory/xray-core.git && cd xray-core && git checkout a4a3dff5b20c2faae567b742c172c7b95e75c083
-```
-
-```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o xray ./main
-```
-
-```bash
-scp xray root@203.0.113.7:/usr/local/bin/xray
-```
-
-Без этих бинарников нода ставится, но `rayctl apply` не включает их юниты и говорит об этом.
+Ничего ставить не нужно. Релиз raycontrol несёт Xray, собранный из закреплённого коммита нашего форка, и
+niko-server, сверенный с хешами из `deploy/versions.env`. Всё это под одной подписью с `rayd`, `rayspa` и `rayctl`.
+Bootstrap проверяет подпись, а `rayctl install` кладёт оба бинарника в `/usr/local/libexec/raycontrol/`. Чужие Xray и
+niko-server в `/usr/local/bin` (если они есть для другого софта) не трогаются. Состав конкретного релиза — файл
+`VERSIONS` в архиве.
 
 ## 3. Токен Cloudflare в файл
 
@@ -91,12 +66,16 @@ less bootstrap.sh
 ```
 
 ```bash
-bash bootstrap.sh -host 203.0.113.7 -domain example.com -cloudflare-token-file /root/cf.token
+bash bootstrap.sh -host 203.0.113.7 -domain example.com -cloudflare-token-file /root/cf.token -services reality,dnstt,masterdns
 ```
 
+`-services` — что поднять сразу: `reality` (с доменом он ставится и без флага), `dnstt` и `masterdns` (DNS-туннели,
+резервный канал), `none` — ничего.
+
 Bootstrap ставит недостающее (curl, openssl, nftables, polkit), проверяет подпись релиза и запускает `rayctl install`.
-Тот проверяет хост и предупреждает о неперезагруженном ядре и выключенных автообновлениях. Затем он поднимает
-периметр, сохраняет токен в базе ноды и создаёт в зоне запись `*.example.com A 203.0.113.7`. В конце печатается
+Тот проверяет хост и предупреждает о неперезагруженном ядре и выключенных автообновлениях. Затем он раскладывает
+data plane, поднимает периметр, сохраняет токен в базе ноды и создаёт в зоне `*.example.com A 203.0.113.7`
+и NS-делегирование туннелей. После этого заводит сервисы и запускает их. В конце печатается
 **аварийный пакет устройства** (только SSH): сохраните его офлайн, второй раз он не покажется. Файл токена больше
 не нужен:
 
@@ -117,23 +96,17 @@ rayctl dns
 `rayctl dns` показывает провайдера, нужные записи и проблемы. Проблема — это, например, чужая запись под тем же
 именем или включённое проксирование: такие имена нода не трогает, исправьте их в панели Cloudflare.
 
-> До выхода релиза v0.2.0 (в нём Cloudflare, ротация REALITY и всё из R4) bootstrap ставит предыдущий релиз. Чтобы
-> проверить ветку раньше, соберите `rayd`, `rayspa`, `rayctl` (`go build ./cmd/...`), положите их в каталог на сервере
-> и запустите bootstrap с `RAYCONTROL_LOCAL_DIR=<каталог>`. Подпись в этом режиме не проверяется: это только для
-> проверки, не для рабочей ноды.
+> До выхода релиза v0.2.0 (в нём data plane, Cloudflare, ротация REALITY и всё из R4) bootstrap ставит предыдущий
+> релиз. Чтобы проверить ветку раньше, положите в один каталог на сервере `rayd`, `rayspa`, `rayctl`
+> (`go build ./cmd/...`), `niko-server` (`scripts/niko-server.sh amd64 <каталог>/niko-server`) и `xray` (сборка из
+> коммита в `deploy/versions.env`: `CGO_ENABLED=0 go build -trimpath -o xray ./main` в клоне форка). Затем запустите
+> bootstrap с `RAYCONTROL_LOCAL_DIR=<каталог>`. Подпись в этом режиме не проверяется: это только для проверки, не
+> для рабочей ноды.
 
 ## 5. REALITY
 
-```bash
-rayctl service add reality reality
-```
-
-```bash
-rayctl apply
-```
-
-REALITY ворует TLS у собственного сайта-приманки ноды на случайном поддомене (self-steal). Сертификат
-`*.example.com` выпускается через DNS-01 в течение минуты:
+Установка уже создала его. REALITY ворует TLS у собственного сайта-приманки ноды на случайном поддомене (self-steal).
+Сертификат `*.example.com` выпускается через DNS-01 примерно за минуту:
 
 ```bash
 journalctl -u rayd -f
@@ -145,29 +118,36 @@ journalctl -u rayd -f
 systemctl status niko-site niko-reality
 ```
 
-Сайт отвечает на всё пустым `404` (решение R4-8). Порт 443 закрыт SPA: без доступа извне его не видно вовсе.
-
-## 6. DNS-туннели (по желанию)
-
-Резервный канал через DNS-резолверы, когда закрыто всё остальное:
+Сайт отвечает на всё пустым `404` (решение R4-8). Порт 443 закрыт SPA: без доступа извне его не видно вовсе. Если
+REALITY при установке не создавался (`-services none`):
 
 ```bash
-rayctl service add dnstt dns
-```
-
-```bash
-rayctl service add masterdns mdns
+rayctl service add reality reality
 ```
 
 ```bash
 rayctl apply
 ```
 
+## 6. DNS-туннели
+
+Резервный канал через DNS-резолверы, когда закрыто всё остальное. С `-services …,dnstt,masterdns` они уже подняты;
+проверка:
+
 ```bash
 rayctl dns
 ```
 
 Нода сама заводит имя NS-сервера и NS-делегирование зон туннелей. UDP 53 открыт всем: резолверы не умеют SPA.
+Добавить позже:
+
+```bash
+rayctl service add dnstt dns
+```
+
+```bash
+rayctl apply
+```
 
 ## 7. Пользователь, устройство и подписка для клиента
 

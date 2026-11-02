@@ -28,8 +28,15 @@ Debian 12/13, Ubuntu 24.04 and Rocky Linux 9/10. As root, from an SSH session
 ```
 curl -fsSL https://raw.githubusercontent.com/arngory/raycontrol/main/install/bootstrap.sh -o bootstrap.sh
 less bootstrap.sh
-bash bootstrap.sh -host <public address> -domain <domain> -cloudflare-token-file /root/cf.token
+bash bootstrap.sh -host <public address> -domain <domain> -cloudflare-token-file /root/cf.token -services reality,dnstt,masterdns
 ```
+
+The release carries the data plane under the same signature: Xray built from
+the pinned commit of our fork and niko-server checked against pinned hashes
+(`deploy/versions.env`). `rayctl install` puts both in
+`/usr/local/libexec/raycontrol` (an Xray the host has for other software is
+left alone) and sets the services up: REALITY by default when a domain is
+given, DNS tunnels on request.
 
 With a Cloudflare API token (Zone.DNS:Edit and Zone.Zone:Read on the domain's
 zone) the node keeps its own DNS records (a wildcard to its address, the NS

@@ -1,7 +1,10 @@
 name: Release
 
 # Builds the binaries, signs SHA256SUMS with minisign and publishes a GitHub
-# release with the notes from .github/release-notes/<tag>.md. Runs on a pushed
+# release with the notes from .github/release-notes/<tag>.md. Each archive
+# carries the data plane as well: Xray built from the pinned commit of our
+# fork and niko-server checked against the hashes pinned in
+# deploy/versions.env, so one signature covers everything bootstrap installs. Runs on a pushed
 # tag v*, or by hand (Actions -> Release -> Run workflow) with the tag as input:
 # the release then creates the tag on the commit it was run from.
 # Needs the repository secret MINISIGN_SECRET_KEY (docs/RELEASE.md).
@@ -42,9 +45,35 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o dist/ ./cmd/...
+      - name: niko-server
+        run: scripts/niko-server.sh ${{ matrix.goarch }} dist/niko-server
+      - name: Fetch Xray
         run: |
-          go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o dist/ ./cmd/...
-          tar -czf "raycontrol-linux-${GOARCH}.tar.gz" -C dist rayd rayspa rayctl
+          . deploy/versions.env
+          git clone --filter=blob:none "$XRAY_REPOSITORY" xray
+          git -C xray checkout -q "$XRAY_COMMIT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: xray/go.mod
+      - name: Build Xray
+        working-directory: xray
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -ldflags "-s -w -buildid=" -o ../dist/xray ./main
+      - name: Archive
+        env:
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          . deploy/versions.env
+          {
+            echo "raycontrol ${TAG} ${GITHUB_SHA}"
+            echo "xray ${XRAY_REPOSITORY} ${XRAY_COMMIT}"
+            echo "niko-server ${NIKO_SERVER_TAG} ${NIKO_SERVER_REPOSITORY} ${NIKO_SERVER_COMMIT}"
+          } > dist/VERSIONS
+          tar -czf "raycontrol-linux-${GOARCH}.tar.gz" -C dist rayd rayspa rayctl xray niko-server VERSIONS
       - uses: actions/upload-artifact@v4
         with:
           name: raycontrol-${{ matrix.goarch }}

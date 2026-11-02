@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,5 +78,42 @@ func TestUpdateWarnings(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "/usr/bin/unattended-upgrade"), nil, 0o755)
 	if w := updateWarnings(root, "6.1.0-28-amd64"); len(w) != 0 {
 		t.Fatalf("up to date: %v", w)
+	}
+}
+
+func TestInstallServices(t *testing.T) {
+	parse := func(args ...string) ([]serviceKind, error) {
+		fs := flag.NewFlagSet("install", flag.ContinueOnError)
+		services := fs.String("services", "", "")
+		domain := fs.String("domain", "", "")
+		if err := fs.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		return installServices(*services, *domain, fs)
+	}
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{nil, ""},
+		{[]string{"-domain", "example.com"}, "reality:reality"},
+		{[]string{"-domain", "example.com", "-services", "none"}, ""},
+		{[]string{"-domain", "example.com", "-services", ""}, ""},
+		{[]string{"-domain", "example.com", "-services", "reality,dnstt,masterdns"}, "reality:reality dnstt:dns masterdns:mdns"},
+	} {
+		got, err := parse(c.args...)
+		var s []string
+		for _, k := range got {
+			s = append(s, k.kind+":"+k.name)
+		}
+		if err != nil || strings.Join(s, " ") != c.want {
+			t.Errorf("%v: %v %v", c.args, s, err)
+		}
+	}
+	if _, err := parse("-services", "reality"); err == nil {
+		t.Error("REALITY without a domain")
+	}
+	if _, err := parse("-domain", "example.com", "-services", "vmess"); err == nil {
+		t.Error("unknown kind")
 	}
 }

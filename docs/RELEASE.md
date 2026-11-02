@@ -45,7 +45,9 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 ## Data plane
 
-niko-server — подписанные релизы `niko-server-vX.Y.Z` в `arngory/niko` (сейчас `niko-server-v0.1.1`), Xray собирается из
-закреплённого коммита форка; версии — в `deploy/versions.env`. Оба ставятся в `/usr/local/bin`.
-`rayctl apply` не включает юниты, чьих бинарников нет на хосте, и пишет об этом. Автоматическая загрузка data plane —
-этап R4 (`rayctl update`).
+Релиз raycontrol несёт data plane в том же архиве и под той же подписью: Xray, собранный из закреплённого коммита
+форка, и niko-server из релиза `niko-server-vX.Y.Z` в `arngory/niko` (сейчас `niko-server-v0.1.1`). niko-server
+сверяется с SHA-256, закреплёнными в `deploy/versions.env` (`scripts/niko-server.sh`). Версии и коммиты компонентов —
+в файле `VERSIONS` архива. `rayctl install -dataplane` кладёт их в `/usr/local/libexec/raycontrol/` через журнал
+установки. Обновление версий — отдельный коммит в `deploy/versions.env` (новые хеши) и новый релиз. Обновление на
+установленной ноде (`rayctl update`) — следующий шаг.
