@@ -123,9 +123,11 @@ wait_table "rayspa start"
 # CI sets TEST_STRICT=1 so that this never passes as a skip there.
 dataplane=(niko-inner.service niko-dns.service niko-mdns.service niko-front.service)
 x sh -c 'echo raycontrol > /run/credential-probe'
-# shellcheck disable=SC2016 # expands in the unit
-if ! x systemd-run --wait --quiet --unit credential-probe -p LoadCredential=probe:/run/credential-probe \
-	sh -c 'test -s "$CREDENTIALS_DIRECTORY/probe"'; then
+# systemd-creds reads $CREDENTIALS_DIRECTORY itself: systemd-run passes "$"
+# literally, so a shell test of the variable would not see it.
+got="$(x systemd-run --wait --quiet --pipe --unit credential-probe -p LoadCredential=probe:/run/credential-probe \
+	systemd-creds cat probe 2>/dev/null || true)"
+if [[ $got != raycontrol* ]]; then
 	x journalctl --no-pager -n 40 >&2 || true
 	[[ -z ${TEST_STRICT:-} ]] || fail "systemd credentials do not work here"
 	echo "SKIP: systemd credentials do not work in this environment; data-plane units are not checked" >&2
