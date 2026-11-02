@@ -71,6 +71,66 @@ func TLSConfig(cert tls.Certificate) *tls.Config {
 	}
 }
 
+// What the site answers to whoever REALITY hands it: a TLS handshake with
+// a real certificate always (REALITY needs it), then by default nothing a
+// prober can use (docs/08-decisions.md, R4-8).
+const (
+	Answer404    = "404"    // every request: 404, no body (the default)
+	Answer403    = "403"    // every request: 403, no body
+	AnswerSilent = "silent" // no answer at all: held, then the connection drops
+	AnswerPages  = "pages"  // the generated site, served from root
+)
+
+// Answers lists the modes.
+var Answers = []string{Answer404, Answer403, AnswerSilent, AnswerPages}
+
+// SilentHold is how long a silent site holds a request before it drops the
+// connection, about what an idle proxy or load balancer waits.
+var SilentHold = 60 * time.Second
+
+// silentMax bounds the requests held at once; beyond it they drop at once.
+const silentMax = 256
+
+// Responder returns the handler of a mode. Only "pages" reads files; the
+// others parse nothing past the request line and headers.
+func Responder(mode, root string) (http.Handler, error) {
+	switch mode {
+	case "", Answer404, Answer403:
+		code := http.StatusNotFound
+		if mode == Answer403 {
+			code = http.StatusForbidden
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(code)
+		}), nil
+	case AnswerSilent:
+		held := make(chan struct{}, silentMax)
+		return http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			select {
+			case held <- struct{}{}:
+				defer func() { <-held }()
+				t := time.NewTimer(SilentHold)
+				defer t.Stop()
+				select {
+				case <-r.Context().Done():
+				case <-t.C:
+				}
+			default:
+			}
+			// Closes the connection (HTTP/1) or resets the stream (h2)
+			// without a response.
+			panic(http.ErrAbortHandler)
+		}), nil
+	case AnswerPages:
+		if root == "" {
+			return nil, errors.New("site pages need a content directory")
+		}
+		return Handler(root), nil
+	}
+	return nil, fmt.Errorf("site answer %q: want one of %s", mode, strings.Join(Answers, ", "))
+}
+
 // Handler serves the site's files: no directory listings, its own 404 page
 // and the headers a static site usually sends.
 func Handler(root string) http.Handler {
@@ -111,9 +171,9 @@ func Handler(root string) http.Handler {
 }
 
 // Serve serves the site with TLS on ln until ctx ends.
-func Serve(ctx context.Context, ln net.Listener, root string, cert tls.Certificate, log *slog.Logger) error {
+func Serve(ctx context.Context, ln net.Listener, h http.Handler, cert tls.Certificate, log *slog.Logger) error {
 	srv := &http.Server{
-		Handler:           Handler(root),
+		Handler:           h,
 		TLSConfig:         TLSConfig(cert),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,

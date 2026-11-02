@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,7 +128,8 @@ func TestServe(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go Serve(ctx, ln, filepath.Join(dir, "www"), cert, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	pages, _ := Responder(AnswerPages, filepath.Join(dir, "www"))
+	go Serve(ctx, ln, pages, cert, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	pool := x509.NewCertPool()
 	pool.AddCert(root.cert)
@@ -181,7 +183,7 @@ func TestServeTLS12(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go Serve(ctx, ln, t.TempDir(), cert, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	go Serve(ctx, ln, Handler(t.TempDir()), cert, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	// A probe that speaks only TLS 1.2 gets a handshake, like at most sites.
 	c, err := tls.Dial("unix", sock, &tls.Config{ServerName: "k3f.example.com", InsecureSkipVerify: true, MaxVersion: tls.VersionTLS12}) //nolint:gosec // looking at the version
 	if err != nil {
@@ -190,5 +192,50 @@ func TestServeTLS12(t *testing.T) {
 	defer c.Close()
 	if v := c.ConnectionState().Version; v != tls.VersionTLS12 {
 		t.Fatalf("version %x", v)
+	}
+}
+
+// Whoever REALITY hands the site gets nothing usable by default: an empty
+// 404 or 403, or no answer at all (R4-8).
+func TestResponder(t *testing.T) {
+	for mode, code := range map[string]int{"": 404, Answer404: 404, Answer403: 403} {
+		h, err := Responder(mode, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewServer(h)
+		resp, err := http.Post(srv.URL+"/wp-login.php?x=1", "text/plain", strings.NewReader("probe"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		srv.Close()
+		if resp.StatusCode != code || len(body) != 0 || resp.Header.Get("Server") != "" || resp.Header.Get("Content-Type") != "" {
+			t.Errorf("%q: %d %q %v", mode, resp.StatusCode, body, resp.Header)
+		}
+	}
+
+	old := SilentHold
+	SilentHold = 200 * time.Millisecond
+	defer func() { SilentHold = old }()
+	h, _ := Responder(AnswerSilent, "")
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	start := time.Now()
+	resp, err := http.Get(srv.URL + "/")
+	if err == nil {
+		resp.Body.Close()
+		t.Fatalf("silent site answered %s", resp.Status)
+	}
+	if time.Since(start) < SilentHold {
+		t.Fatalf("dropped after %v, before the hold", time.Since(start))
+	}
+
+	if _, err := Responder(AnswerPages, ""); err == nil {
+		t.Error("pages without a directory")
+	}
+	if _, err := Responder("teapot", ""); err == nil {
+		t.Error("unknown answer accepted")
 	}
 }

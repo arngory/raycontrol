@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -82,11 +84,71 @@ func preflight() (warnings []string, err error) {
 		warnings = append(warnings, fmt.Sprintf("%s %s is not among the tested systems (Debian 12/13, Ubuntu 24.04, Rocky Linux 9/10); "+
 			"the checks passed, so the install goes on", id, ver))
 	}
+	running, _ := os.ReadFile("/proc/sys/kernel/osrelease")
+	warnings = append(warnings, updateWarnings("", strings.TrimSpace(string(running)))...)
 	if len(problems) > 0 {
 		return warnings, errors.New("this host cannot run a node:\n  - " + strings.Join(problems, "\n  - "))
 	}
 	return warnings, nil
 }
+
+// updateWarnings says when the host runs behind its own fixes: a newer
+// kernel installed but not booted, a reboot asked for, no automatic
+// security updates. Remote bugs in the network stack are fixed in the
+// kernel; the perimeter limits what reaches it, it does not replace the
+// fix (docs/08-decisions.md, R4-9). root is a test seam.
+func updateWarnings(root, running string) []string {
+	var out []string
+	if entries, err := os.ReadDir(filepath.Join(root, "/lib/modules")); err == nil && running != "" {
+		newest := running
+		for _, e := range entries {
+			if e.IsDir() && versionLess(newest, e.Name()) {
+				newest = e.Name()
+			}
+		}
+		if newest != running {
+			out = append(out, fmt.Sprintf("kernel %s is installed but %s is running: reboot to run the fixes", newest, running))
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "/var/run/reboot-required")); err == nil {
+		out = append(out, "the system asks for a reboot (/var/run/reboot-required)")
+	}
+	auto := false
+	if b, err := os.ReadFile(filepath.Join(root, "/etc/apt/apt.conf.d/20auto-upgrades")); err == nil { //nolint:gosec // G304: a fixed path (root is a test seam)
+		_, err := os.Stat(filepath.Join(root, "/usr/bin/unattended-upgrade"))
+		auto = err == nil && strings.Contains(string(b), `Unattended-Upgrade "1"`)
+	}
+	for _, timer := range []string{"dnf-automatic-install.timer", "dnf-automatic.timer"} {
+		if _, err := os.Stat(filepath.Join(root, "/etc/systemd/system/timers.target.wants", timer)); err == nil {
+			auto = true
+		}
+	}
+	if !auto {
+		out = append(out, "security updates are not installed automatically "+
+			"(apt install unattended-upgrades; or dnf install dnf-automatic && systemctl enable --now dnf-automatic-install.timer)")
+	}
+	return out
+}
+
+// versionLess compares kernel versions (6.1.0-28-amd64, 5.14.0-427.el9):
+// runs of digits as numbers, the rest as text.
+func versionLess(a, b string) bool {
+	pa, pb := versionParts.FindAllString(a, -1), versionParts.FindAllString(b, -1)
+	for i := 0; i < len(pa) && i < len(pb); i++ {
+		if pa[i] == pb[i] {
+			continue
+		}
+		na, ea := strconv.Atoi(pa[i])
+		nb, eb := strconv.Atoi(pb[i])
+		if ea == nil && eb == nil {
+			return na < nb
+		}
+		return pa[i] < pb[i]
+	}
+	return len(pa) < len(pb)
+}
+
+var versionParts = regexp.MustCompile(`\d+|\D+`)
 
 func osRelease() (id, version string) {
 	f, err := os.Open("/etc/os-release")

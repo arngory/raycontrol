@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -130,6 +132,16 @@ func (c *cli) report(ctx context.Context, args []string) error {
 			firstLine("systemctl", "show", "-P", "NRestarts", u))
 	}
 	p("perimeter table\t%s\n", map[bool]string{true: "present", false: "missing"}[exec.Command("nft", "list", "table", "inet", "raycontrol").Run() == nil])
+	// Packets dropped before reassembly and conntrack (R4-9): fragments,
+	// IP options, IPv6 extension headers, impossible TCP flags.
+	if out, err := exec.Command("nft", "list", "chain", "inet", "raycontrol", "early").Output(); err == nil {
+		total := 0
+		for _, m := range regexp.MustCompile(`counter packets (\d+)`).FindAllSubmatch(out, -1) {
+			n, _ := strconv.Atoi(string(m[1]))
+			total += n
+		}
+		p("early drops\t%d\n", total)
+	}
 
 	if j, err := deploy.OpenJournal(""); err == nil && j.Exists() {
 		counts := map[string]int{}

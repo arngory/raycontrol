@@ -537,7 +537,12 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go site.Serve(ctx, ln, filepath.Join(siteDir, render.SiteRoot), cert, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// As rayd site runs it: the default answer, 404 to everything.
+	handler, err := site.Responder(provision.SiteAnswer(siteSvc), filepath.Join(siteDir, render.SiteRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go site.Serve(ctx, ln, handler, cert, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	delete(serverCfg, "dns")
 	delete(serverCfg, "routing")
@@ -572,7 +577,8 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode != 200 || resp.ProtoMajor != 2 || !strings.Contains(string(body), "studio@"+name) ||
+		// A real certificate for the name, and nothing else: 404, no body.
+		if resp.StatusCode != 404 || resp.ProtoMajor != 2 || len(body) != 0 ||
 			!bytes.Equal(resp.TLS.PeerCertificates[0].Raw, leaf.Raw) {
 			t.Fatalf("probe %s: %s %s\n%s", name, resp.Status, resp.Proto, body)
 		}

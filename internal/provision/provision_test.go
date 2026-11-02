@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/arngory/raycontrol/internal/store"
@@ -142,5 +143,43 @@ func TestACMEPort(t *testing.T) {
 	}
 	if r, ok := ServiceRotation(svc); ok && a >= r.Base && int(a) < int(r.Base)+int(r.Range) {
 		t.Fatalf("rotation %d+%d covers the acme port %d", r.Base, r.Range, a)
+	}
+}
+
+func TestSiteAnswer(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"})
+	if _, err := CreateService(ctx, st, store.Service{Kind: "site", Name: "bad", Enabled: true, Settings: `{"answer":"teapot"}`}); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("unknown answer: %v", err)
+	}
+	svc, err := CreateService(ctx, st, store.Service{Kind: "site", Name: "site", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if SiteAnswer(svc) != "404" || !strings.Contains(svc.Settings, `"answer":"404"`) {
+		t.Fatalf("default answer: %s", svc.Settings)
+	}
+	if svc, err = SetServiceOption(ctx, st, "site", "answer", "silent"); err != nil || SiteAnswer(svc) != "silent" {
+		t.Fatalf("set answer: %v %s", err, svc.Settings)
+	}
+	for _, kv := range [][2]string{{"answer", "teapot"}, {"sni", "x.example.com"}, {"rotate_sni", "false"}} {
+		if _, err := SetServiceOption(ctx, st, "site", kv[0], kv[1]); !errors.Is(err, store.ErrInvalid) {
+			t.Errorf("site %s=%s: %v", kv[0], kv[1], err)
+		}
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := SetServiceOption(ctx, st, "r", "rotate_sni", "false")
+	if err != nil || ParseRealityState(r).RotateSNI == nil || *ParseRealityState(r).RotateSNI {
+		t.Fatalf("rotate_sni: %v %s", err, r.Settings)
+	}
+	if r, err = SetServiceOption(ctx, st, "r", "rotate_sni", "true"); err != nil || !*ParseRealityState(r).RotateSNI {
+		t.Fatalf("rotate_sni back on: %v %s", err, r.Settings)
 	}
 }

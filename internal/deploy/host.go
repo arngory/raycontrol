@@ -269,7 +269,9 @@ func (h *Host) ApplySysctl(files []File) {
 	h.recordSysctl(files)
 	for _, f := range files {
 		if strings.HasPrefix(f.Path, "/etc/sysctl.d/") {
-			if err := h.run("sysctl", "-q", "-p", f.Path); err != nil {
+			// -e: keys this host does not have (net.ipv6.* with IPv6 off)
+			// are skipped, not errors.
+			if err := h.run("sysctl", "-q", "-e", "-p", f.Path); err != nil {
 				fmt.Fprintln(h.Out, "warning:", err)
 			}
 		}
@@ -314,7 +316,8 @@ func (h *Host) checkSysctl(files []File) {
 			}
 			out, err := h.Run("sysctl", "-n", key)
 			if got := strings.Join(strings.Fields(string(out)), " "); err == nil && got != want {
-				fmt.Fprintf(h.Out, "warning: %s is %s, not %s: another sysctl setting overrides %s\n", key, got, want, f.Path)
+				fmt.Fprintf(h.Out, "warning: %s is %s, not %s: another sysctl file overrides %s, or the host does not let it change (a container)\n",
+					key, got, want, f.Path)
 			}
 		}
 	}

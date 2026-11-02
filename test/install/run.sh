@@ -107,7 +107,7 @@ snapshot() {
 		# Without counters and without the rules of Docker'"'"'s DNS (127.0.0.11),
 		# whose ports change with every container start.
 		echo "== nft"; nft list ruleset | sed -E "s/counter packets [0-9]+ bytes [0-9]+/counter/" | grep -v 127.0.0.11
-		echo "== sysctl"; sysctl net.core.default_qdisc net.ipv4.tcp_congestion_control net.core.rmem_max net.core.wmem_max
+		echo "== sysctl"; xargs sysctl < /root/sysctl.keys 2>&1
 		echo "== firewalld"; if systemctl is-active --quiet firewalld; then firewall-cmd --list-all-zones; fi
 		echo "== ufw"; if command -v ufw >/dev/null; then ufw status verbose; fi
 		echo "== var/lib"; ls /var/lib
@@ -149,6 +149,10 @@ x install -m 0755 /opt/rc/niko-server /opt/rc/xray /usr/local/bin/
 x timeout 120 systemctl is-system-running --wait >/dev/null || true
 # shellcheck disable=SC2016 # expands in the container
 x sh -c 'if systemctl is-enabled -q firewalld 2>/dev/null; then for i in $(seq 60); do firewall-cmd --state >/dev/null 2>&1 && break; sleep 1; done; fi'
+# The sysctl keys raycontrol sets, from its source, for the snapshots.
+# shellcheck disable=SC2016 # backticks of the Go source, not a command
+sed -n '/^const sysctl = `/,/^`/p' "$here/../../internal/deploy/deploy.go" | grep -o '^net\.[a-z0-9_.]*' |
+	docker exec -i "$node" sh -c 'cat > /root/sysctl.keys'
 snapshot /root/before.snap
 x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -host "$ip" -domain example.test -admin 192.0.2.1 ||
 	fail "bootstrap"

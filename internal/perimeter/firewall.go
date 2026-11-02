@@ -114,6 +114,28 @@ table inet %[1]s {
 	set rate4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set rate6 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 
+	# Before defragmentation and conntrack (priority -400 and -200): what the
+	# kernel never has to parse for anyone, packets to the node itself only
+	# (docs/08-decisions.md, R4-9). Fragments, IPv4 options and IPv6
+	# extension headers are where remote bugs of IP stacks keep turning up;
+	# clients need none of them (SPA packets are small, QUIC sets DF, TCP
+	# does path MTU discovery). ICMP errors, packet-too-big included, pass.
+	chain early {
+		type filter hook prerouting priority -450; policy accept;
+		%[6]s
+		fib daddr type != local accept
+		ip frag-off & 0x3fff != 0 counter drop
+		ip hdrlength != 5 counter drop
+		meta nfproto ipv6 exthdr frag exists counter drop
+		meta nfproto ipv6 exthdr rt exists counter drop
+		meta nfproto ipv6 exthdr dst exists counter drop
+		meta nfproto ipv6 exthdr hbh exists ip6 saddr != fe80::/10 counter drop
+		tcp flags & (fin | syn) == fin | syn counter drop
+		tcp flags & (syn | rst) == syn | rst counter drop
+		tcp flags & (fin | syn | rst | psh | ack | urg) == 0x0 counter drop
+		tcp flags & (fin | syn | rst | psh | ack | urg) == fin | psh | urg counter drop
+	}
+
 	# Rotated UDP slot ports land on the service port; the input chain then
 	# applies the SPA grants of that port as usual.
 	chain prerouting {
@@ -146,7 +168,7 @@ table inet %[1]s {
 		ip6 saddr . meta l4proto . th dport @allow6 accept
 	}
 }
-`, Table, limit, n.NflogGroup, lo, loNAT)
+`, Table, limit, n.NflogGroup, lo, loNAT, lo)
 }
 
 // Setup installs the table and detects whether "destroy element" works.

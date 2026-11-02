@@ -24,6 +24,9 @@ service NodeService {
   // (docs/08-decisions.md, R4-7): a lead time away, so that clients get the
   // next keys first, or at once (leaked keys, a blocked name).
   rpc RotateService(RotateServiceRequest) returns (RotateServiceResponse);
+  // SetServiceOption changes one of the few settings that may change after
+  // creation: a site's answer, whether REALITY moves its server name.
+  rpc SetServiceOption(SetServiceOptionRequest) returns (SetServiceOptionResponse);
 
   rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
   // CreateDevice returns the device bundle with the device key. The key is
@@ -158,6 +161,15 @@ message SetServiceEnabledResponse {}
 
 message DeleteServiceRequest { string name = 1; }
 message DeleteServiceResponse {}
+
+message SetServiceOptionRequest {
+  string name = 1;
+  string key = 2;
+  string value = 3;
+}
+message SetServiceOptionResponse {
+  Service service = 1;
+}
 
 message RotateServiceRequest {
   string name = 1;

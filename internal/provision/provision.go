@@ -28,6 +28,7 @@ import (
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/site"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -270,6 +271,14 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		}
 		svc.Secrets[SecretMLKEMSeed] = seed
 	case "site":
+		answer, _ := settings["answer"].(string)
+		if answer == "" {
+			answer = site.Answer404
+		}
+		if !slices.Contains(site.Answers, answer) {
+			return svc, fmt.Errorf("%w site answer %q: want one of %s", store.ErrInvalid, answer, strings.Join(site.Answers, ", "))
+		}
+		settings["answer"] = answer
 		if _, ok := settings["sni"]; !ok {
 			name, err := newZone(ctx, st, all)
 			if err != nil {
@@ -420,6 +429,58 @@ func siteFor(ctx context.Context, st *store.Store, all []store.Service) (store.S
 			`-settings '{"target":"www.example.org:443"}'`, store.ErrInvalid)
 	}
 	return CreateService(ctx, st, store.Service{Kind: "site", Name: "site", Enabled: true})
+}
+
+// SetServiceOption changes a setting that may change after creation: the
+// answer of a site, whether REALITY moves its server name (R4-7, R4-8).
+func SetServiceOption(ctx context.Context, st *store.Store, name, key, value string) (store.Service, error) {
+	svc, err := st.ServiceByName(ctx, name)
+	if err != nil {
+		return svc, err
+	}
+	var v any
+	switch {
+	case svc.Kind == "site" && key == "answer":
+		if !slices.Contains(site.Answers, value) {
+			return svc, fmt.Errorf("%w site answer %q: want one of %s", store.ErrInvalid, value, strings.Join(site.Answers, ", "))
+		}
+		v = value
+	case svc.Kind == "reality" && key == "rotate_sni":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return svc, fmt.Errorf("%w rotate_sni: true or false", store.ErrInvalid)
+		}
+		v = b
+	default:
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni)", store.ErrInvalid, name, key)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
+		return svc, err
+	}
+	settings[key] = v
+	b, err := json.Marshal(settings)
+	if err != nil {
+		return svc, err
+	}
+	if err := st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: string(b)}); err != nil {
+		return svc, err
+	}
+	svc.Settings = string(b)
+	return svc, nil
+}
+
+// SiteAnswer returns what a decoy site answers (site.Answer404 when unset,
+// as for sites created before the setting).
+func SiteAnswer(svc store.Service) string {
+	var s struct {
+		Answer string `json:"answer"`
+	}
+	_ = json.Unmarshal([]byte(svc.Settings), &s)
+	if s.Answer == "" {
+		return site.Answer404
+	}
+	return s.Answer
 }
 
 // SiteName returns the server name of a decoy site.

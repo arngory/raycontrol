@@ -709,18 +709,22 @@ func siteFiles(s Service, m Model, p Paths) ([]File, error) {
 	if !m.hasCert(s.Name) {
 		return nil, nil
 	}
-	now := m.Now
-	if now.IsZero() {
-		now = time.Now()
-	}
-	content, err := site.Generate(s.Secrets[provision.SecretSiteSeed], provision.SiteName(s.Service), now)
-	if err != nil {
-		return nil, err
-	}
 	dir := path.Join(p.Rendered, s.Name)
 	var files []File
-	for _, name := range slices.Sorted(maps.Keys(content)) {
-		files = append(files, File{Path: path.Join(dir, SiteRoot, name), Mode: 0o640, Group: GroupName(s.Name), Content: content[name], Service: s.Name})
+	// Content only for a site that serves pages; by default it answers
+	// every request with 404 and has none (R4-8).
+	if provision.SiteAnswer(s.Service) == site.AnswerPages {
+		now := m.Now
+		if now.IsZero() {
+			now = time.Now()
+		}
+		content, err := site.Generate(s.Secrets[provision.SecretSiteSeed], provision.SiteName(s.Service), now)
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range slices.Sorted(maps.Keys(content)) {
+			files = append(files, File{Path: path.Join(dir, SiteRoot, name), Mode: 0o640, Group: GroupName(s.Name), Content: content[name], Service: s.Name})
+		}
 	}
 	key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: s.Secrets[provision.SecretTLSKey]})
 	files = append(files,

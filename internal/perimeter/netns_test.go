@@ -2,11 +2,13 @@ package perimeter
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"net/netip"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -151,6 +153,62 @@ func TestNetns(t *testing.T) {
 		buf := make([]byte, 8)
 		if n, err := c.Read(buf); err != nil || string(buf[:n]) != "ping" {
 			t.Fatalf("public udp: %q %v", buf[:n], err)
+		}
+	})
+
+	t.Run("IP options and fragments dropped before reassembly", func(t *testing.T) {
+		rx, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rx.Close()
+		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_RAW)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(fd)
+		src := uint16(rx.LocalAddr().(*net.UDPAddr).Port)
+		// send writes a UDP datagram to the public echo port by hand: IPv4
+		// options and the fragment field as given.
+		send := func(options []byte, frag uint16) {
+			udp := []byte{0, 0, 0x3b, 0xf9, 0, 12, 0, 0, 'p', 'i', 'n', 'g'} // to 15353, no checksum
+			binary.BigEndian.PutUint16(udp, src)
+			ip := make([]byte, 20+len(options))
+			ip[0], ip[8], ip[9] = 0x40|byte(len(ip)/4), 64, unix.IPPROTO_UDP
+			binary.BigEndian.PutUint16(ip[2:], uint16(len(ip)+len(udp)))
+			binary.BigEndian.PutUint16(ip[6:], frag)
+			copy(ip[12:], []byte{127, 0, 0, 1, 127, 0, 0, 1})
+			copy(ip[20:], options)
+			if err := unix.Sendto(fd, append(ip, udp...), 0, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		answered := func() bool {
+			buf := make([]byte, 16)
+			rx.SetReadDeadline(time.Now().Add(time.Second))
+			n, _, err := rx.ReadFrom(buf)
+			return err == nil && string(buf[:n]) == "ping"
+		}
+		send(nil, 0)
+		if !answered() {
+			t.Fatal("a plain datagram got no answer")
+		}
+		send([]byte{1, 1, 1, 0}, 0) // NOP NOP NOP, end of options
+		if answered() {
+			t.Fatal("a datagram with IPv4 options got through")
+		}
+		send(nil, 0x2000) // more fragments: the first of two
+		answered()
+		out, err := exec.Command("nft", "list", "chain", "inet", Table, "early").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// nft versions print the fragment test as "!= 0" or "!= 0x0".
+		for _, rule := range []string{`ip hdrlength != 5`, `ip frag-off & 0x3fff != 0(x0)?`} {
+			m := regexp.MustCompile(rule + ` counter packets (\d+)`).FindSubmatch(out)
+			if m == nil || string(m[1]) == "0" {
+				t.Errorf("%q dropped nothing:\n%s", rule, out)
+			}
 		}
 	})
 

@@ -12,7 +12,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
+	"github.com/arngory/raycontrol/internal/site"
 )
 
 // Binaries are the executables the units start.
@@ -183,6 +185,11 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID})
 		dir := path.Join(p.Rendered, s.Name)
 		key := p.Credential(s.Name, render.SiteKey)
+		answer := provision.SiteAnswer(s.Service)
+		args := " site -answer " + answer
+		if answer == site.AnswerPages {
+			args += " -root " + path.Join(dir, render.SiteRoot)
+		}
 		units = append(units, unit{
 			name:        render.UnitName(s.Name),
 			description: "raycontrol decoy site " + s.Name,
@@ -190,7 +197,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			service: []string{
 				"User=" + g, "Group=" + g,
 				fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s", g, g, path.Join(dir, render.SiteKey), key),
-				"ExecStart=" + bin.Rayd + " site -root " + path.Join(dir, render.SiteRoot) + " -chain " + path.Join(dir, render.SiteChain) +
+				"ExecStart=" + bin.Rayd + args + " -chain " + path.Join(dir, render.SiteChain) +
 					" -key " + key + " -socket " + p.SiteSocket(s.Name),
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
@@ -374,4 +381,21 @@ net.ipv4.tcp_congestion_control = bbr
 # QUIC (Hysteria2, naive-quic) wants large UDP buffers.
 net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
+# Less for strangers to steer (docs/08-decisions.md, R4-9): no source
+# routes, no redirects, SYN cookies under a flood, no bogus ICMP errors.
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv6.conf.default.accept_source_route = 0
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+net.ipv4.conf.all.secure_redirects = 0
+net.ipv4.conf.default.secure_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_rfc1337 = 1
+net.ipv4.icmp_ignore_bogus_error_responses = 1
 `

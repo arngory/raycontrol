@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"os/user"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -313,13 +314,18 @@ func pruneAudit(ctx context.Context, st *store.Store, log *slog.Logger) {
 // self-steal target of REALITY (docs/08-decisions.md, R2-12).
 func cmdSite(args []string) error {
 	fs := flag.NewFlagSet("site", flag.ExitOnError)
-	root := fs.String("root", "", "site content directory")
+	answer := fs.String("answer", site.Answer404, "what requests get: "+strings.Join(site.Answers, ", "))
+	root := fs.String("root", "", "site content directory (answer pages)")
 	chain := fs.String("chain", "", "certificate chain (PEM, leaf first)")
 	key := fs.String("key", "", "private key (PEM)")
 	socket := fs.String("socket", "", "unix socket to listen on")
 	fs.Parse(args)
-	if *root == "" || *chain == "" || *key == "" || *socket == "" {
-		return errors.New("site needs -root, -chain, -key and -socket")
+	if *chain == "" || *key == "" || *socket == "" {
+		return errors.New("site needs -chain, -key and -socket")
+	}
+	handler, err := site.Responder(*answer, *root)
+	if err != nil {
+		return err
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	chainPEM, err := os.ReadFile(*chain)
@@ -344,6 +350,6 @@ func cmdSite(args []string) error {
 	if err := os.Chmod(*socket, 0o660); err != nil { //nolint:gosec // G302: the REALITY process connects through the group
 		return err
 	}
-	log.Info("serving the site", "socket", *socket, "chain", len(cert.Certificate))
-	return site.Serve(ctx, ln, *root, cert, log)
+	log.Info("serving the site", "socket", *socket, "chain", len(cert.Certificate), "answer", *answer)
+	return site.Serve(ctx, ln, handler, cert, log)
 }

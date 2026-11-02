@@ -65,6 +65,9 @@ const (
 	// NodeServiceRotateServiceProcedure is the fully-qualified name of the NodeService's RotateService
 	// RPC.
 	NodeServiceRotateServiceProcedure = "/raycontrol.node.v1.NodeService/RotateService"
+	// NodeServiceSetServiceOptionProcedure is the fully-qualified name of the NodeService's
+	// SetServiceOption RPC.
+	NodeServiceSetServiceOptionProcedure = "/raycontrol.node.v1.NodeService/SetServiceOption"
 	// NodeServiceListDevicesProcedure is the fully-qualified name of the NodeService's ListDevices RPC.
 	NodeServiceListDevicesProcedure = "/raycontrol.node.v1.NodeService/ListDevices"
 	// NodeServiceCreateDeviceProcedure is the fully-qualified name of the NodeService's CreateDevice
@@ -102,6 +105,9 @@ type NodeServiceClient interface {
 	// (docs/08-decisions.md, R4-7): a lead time away, so that clients get the
 	// next keys first, or at once (leaked keys, a blocked name).
 	RotateService(context.Context, *connect.Request[v1.RotateServiceRequest]) (*connect.Response[v1.RotateServiceResponse], error)
+	// SetServiceOption changes one of the few settings that may change after
+	// creation: a site's answer, whether REALITY moves its server name.
+	SetServiceOption(context.Context, *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error)
 	ListDevices(context.Context, *connect.Request[v1.ListDevicesRequest]) (*connect.Response[v1.ListDevicesResponse], error)
 	// CreateDevice returns the device bundle with the device key. The key is
 	// not stored anywhere it can be read back through the API.
@@ -194,6 +200,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("RotateService")),
 			connect.WithClientOptions(opts...),
 		),
+		setServiceOption: connect.NewClient[v1.SetServiceOptionRequest, v1.SetServiceOptionResponse](
+			httpClient,
+			baseURL+NodeServiceSetServiceOptionProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetServiceOption")),
+			connect.WithClientOptions(opts...),
+		),
 		listDevices: connect.NewClient[v1.ListDevicesRequest, v1.ListDevicesResponse](
 			httpClient,
 			baseURL+NodeServiceListDevicesProcedure,
@@ -252,6 +264,7 @@ type nodeServiceClient struct {
 	setServiceEnabled *connect.Client[v1.SetServiceEnabledRequest, v1.SetServiceEnabledResponse]
 	deleteService     *connect.Client[v1.DeleteServiceRequest, v1.DeleteServiceResponse]
 	rotateService     *connect.Client[v1.RotateServiceRequest, v1.RotateServiceResponse]
+	setServiceOption  *connect.Client[v1.SetServiceOptionRequest, v1.SetServiceOptionResponse]
 	listDevices       *connect.Client[v1.ListDevicesRequest, v1.ListDevicesResponse]
 	createDevice      *connect.Client[v1.CreateDeviceRequest, v1.CreateDeviceResponse]
 	revokeDevice      *connect.Client[v1.RevokeDeviceRequest, v1.RevokeDeviceResponse]
@@ -316,6 +329,11 @@ func (c *nodeServiceClient) RotateService(ctx context.Context, req *connect.Requ
 	return c.rotateService.CallUnary(ctx, req)
 }
 
+// SetServiceOption calls raycontrol.node.v1.NodeService.SetServiceOption.
+func (c *nodeServiceClient) SetServiceOption(ctx context.Context, req *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error) {
+	return c.setServiceOption.CallUnary(ctx, req)
+}
+
 // ListDevices calls raycontrol.node.v1.NodeService.ListDevices.
 func (c *nodeServiceClient) ListDevices(ctx context.Context, req *connect.Request[v1.ListDevicesRequest]) (*connect.Response[v1.ListDevicesResponse], error) {
 	return c.listDevices.CallUnary(ctx, req)
@@ -367,6 +385,9 @@ type NodeServiceHandler interface {
 	// (docs/08-decisions.md, R4-7): a lead time away, so that clients get the
 	// next keys first, or at once (leaked keys, a blocked name).
 	RotateService(context.Context, *connect.Request[v1.RotateServiceRequest]) (*connect.Response[v1.RotateServiceResponse], error)
+	// SetServiceOption changes one of the few settings that may change after
+	// creation: a site's answer, whether REALITY moves its server name.
+	SetServiceOption(context.Context, *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error)
 	ListDevices(context.Context, *connect.Request[v1.ListDevicesRequest]) (*connect.Response[v1.ListDevicesResponse], error)
 	// CreateDevice returns the device bundle with the device key. The key is
 	// not stored anywhere it can be read back through the API.
@@ -455,6 +476,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("RotateService")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceSetServiceOptionHandler := connect.NewUnaryHandler(
+		NodeServiceSetServiceOptionProcedure,
+		svc.SetServiceOption,
+		connect.WithSchema(nodeServiceMethods.ByName("SetServiceOption")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceListDevicesHandler := connect.NewUnaryHandler(
 		NodeServiceListDevicesProcedure,
 		svc.ListDevices,
@@ -521,6 +548,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceDeleteServiceHandler.ServeHTTP(w, r)
 		case NodeServiceRotateServiceProcedure:
 			nodeServiceRotateServiceHandler.ServeHTTP(w, r)
+		case NodeServiceSetServiceOptionProcedure:
+			nodeServiceSetServiceOptionHandler.ServeHTTP(w, r)
 		case NodeServiceListDevicesProcedure:
 			nodeServiceListDevicesHandler.ServeHTTP(w, r)
 		case NodeServiceCreateDeviceProcedure:
@@ -586,6 +615,10 @@ func (UnimplementedNodeServiceHandler) DeleteService(context.Context, *connect.R
 
 func (UnimplementedNodeServiceHandler) RotateService(context.Context, *connect.Request[v1.RotateServiceRequest]) (*connect.Response[v1.RotateServiceResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.RotateService is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetServiceOption(context.Context, *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetServiceOption is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) ListDevices(context.Context, *connect.Request[v1.ListDevicesRequest]) (*connect.Response[v1.ListDevicesResponse], error) {

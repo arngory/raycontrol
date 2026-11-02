@@ -36,6 +36,7 @@ const usageText = `usage: rayctl [-socket PATH] [-json] <command>
   service list
   service add KIND NAME [-settings JSON]
   service enable|disable|del NAME
+  service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false
   service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
                                             schedule: after the lead time, or at once with -now
   device list [USER]
@@ -282,6 +283,24 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 		}
 		_, err := c.c.DeleteService(ctx, connect.NewRequest(&nodev1.DeleteServiceRequest{Name: args[0]}))
 		return err
+	case "set":
+		if err := need(args, 2); err != nil {
+			return err
+		}
+		key, value, ok := strings.Cut(args[1], "=")
+		if !ok {
+			return errUsage
+		}
+		r, err := c.c.SetServiceOption(ctx, connect.NewRequest(&nodev1.SetServiceOptionRequest{Name: args[0], Key: key, Value: value}))
+		if err != nil {
+			return err
+		}
+		return c.print(r.Msg, func(w *tabwriter.Writer) {
+			fmt.Fprintf(w, "%s: %s\n", r.Msg.Service.Name, r.Msg.Service.SettingsJson)
+			if r.Msg.Service.Kind == "site" {
+				fmt.Fprintln(w, "run rayctl apply to restart the site with it")
+			}
+		})
 	case "rotate":
 		fs := flag.NewFlagSet("service rotate", flag.ContinueOnError)
 		now := fs.Bool("now", false, "switch at once; clients that have not fetched their subscription since lose this profile until they do")

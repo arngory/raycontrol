@@ -311,7 +311,8 @@ func TestBuildSelfSteal(t *testing.T) {
 	for _, want := range []string{
 		"ConditionPathExists=/var/lib/raycontrol/rendered/site/chain.pem\n",
 		"ExecStartPre=+install -m 0400 -o niko-site -g niko-site /var/lib/raycontrol/rendered/site/key.pem /run/niko/site/key.pem\n",
-		"ExecStart=/usr/local/bin/rayd site -root /var/lib/raycontrol/rendered/site/www -chain /var/lib/raycontrol/rendered/site/chain.pem -key /run/niko/site/key.pem -socket /run/niko/site/tls.sock\n",
+		// The default answer: 404 to everything, no content directory (R4-8).
+		"ExecStart=/usr/local/bin/rayd site -answer 404 -chain /var/lib/raycontrol/rendered/site/chain.pem -key /run/niko/site/key.pem -socket /run/niko/site/tls.sock\n",
 		"PrivateNetwork=yes\n", "RestrictAddressFamilies=AF_UNIX\n",
 	} {
 		if !strings.Contains(site, want) {
@@ -362,7 +363,7 @@ func TestJournalAndUninstall(t *testing.T) {
 				return []byte(congestion + "\n"), nil
 			case c == "sysctl -n net.core.rmem_max":
 				return []byte("4194304\n"), nil // a global key a container cannot set
-			case strings.HasPrefix(c, "sysctl -q -p "):
+			case strings.HasPrefix(c, "sysctl -q -e -p "):
 				congestion = "bbr"
 			case strings.HasPrefix(c, "sysctl -q -w net.ipv4.tcp_congestion_control="):
 				congestion = strings.TrimPrefix(c, "sysctl -q -w net.ipv4.tcp_congestion_control=")

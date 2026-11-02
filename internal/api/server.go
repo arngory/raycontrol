@@ -376,6 +376,14 @@ func (s *Server) DeleteService(ctx context.Context, req *connect.Request[nodev1.
 	return connect.NewResponse(&nodev1.DeleteServiceResponse{}), nil
 }
 
+func (s *Server) SetServiceOption(ctx context.Context, req *connect.Request[nodev1.SetServiceOptionRequest]) (*connect.Response[nodev1.SetServiceOptionResponse], error) {
+	svc, err := provision.SetServiceOption(ctx, s.Store, req.Msg.Name, req.Msg.Key, req.Msg.Value)
+	if err := s.done(ctx, "service.set "+req.Msg.Key+"="+req.Msg.Value, req.Msg.Name, err); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&nodev1.SetServiceOptionResponse{Service: servicePB(svc)}), nil
+}
+
 func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.RotateServiceRequest]) (*connect.Response[nodev1.RotateServiceResponse], error) {
 	now := time.Now()
 	at := now.Add(s.RealityLead)

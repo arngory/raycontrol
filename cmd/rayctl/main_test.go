@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -55,5 +58,24 @@ func TestBytes(t *testing.T) {
 		if back != n {
 			t.Errorf("formatBytes(%d) = %s does not round-trip", n, formatBytes(n))
 		}
+	}
+}
+
+func TestUpdateWarnings(t *testing.T) {
+	if !versionLess("6.1.0-27-amd64", "6.1.0-28-amd64") || versionLess("6.12.9", "6.2.1") || !versionLess("5.14.0-427.el9", "5.14.0-503.el9") {
+		t.Fatal("versionLess")
+	}
+	root := t.TempDir()
+	for _, d := range []string{"/lib/modules/6.1.0-27-amd64", "/lib/modules/6.1.0-28-amd64", "/etc/apt/apt.conf.d", "/usr/bin"} {
+		os.MkdirAll(filepath.Join(root, d), 0o755)
+	}
+	w := strings.Join(updateWarnings(root, "6.1.0-27-amd64"), "\n")
+	if !strings.Contains(w, "kernel 6.1.0-28-amd64 is installed but 6.1.0-27-amd64 is running") || !strings.Contains(w, "not installed automatically") {
+		t.Fatalf("warnings:\n%s", w)
+	}
+	os.WriteFile(filepath.Join(root, "/etc/apt/apt.conf.d/20auto-upgrades"), []byte("APT::Periodic::Unattended-Upgrade \"1\";\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "/usr/bin/unattended-upgrade"), nil, 0o755)
+	if w := updateWarnings(root, "6.1.0-28-amd64"); len(w) != 0 {
+		t.Fatalf("up to date: %v", w)
 	}
 }
