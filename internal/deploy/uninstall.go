@@ -77,10 +77,16 @@ func (h *Host) Uninstall(j *Journal, opts UninstallOptions) error {
 	}
 	_, _ = h.Run("nft", "delete", "table", "inet", rayspaTable)
 
+	// Only values that differ now: a container may not let raycontrol set
+	// global keys (net.core.*) in the first place, nor set them back.
 	for _, c := range of(ChangeSysctl) {
-		if c.Value != "" {
-			note(h.run("sysctl", "-q", "-w", c.Name+"="+c.Value))
+		if c.Value == "" {
+			continue
 		}
+		if out, err := h.Run("sysctl", "-n", c.Name); err == nil && strings.Join(strings.Fields(string(out)), " ") == strings.Join(strings.Fields(c.Value), " ") {
+			continue
+		}
+		note(h.run("sysctl", "-q", "-w", c.Name+"="+c.Value))
 	}
 
 	var resolved, firewalld, ufw bool

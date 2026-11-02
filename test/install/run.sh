@@ -150,6 +150,10 @@ x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -host "$ip" -d
 wait_active rayd.service rayspa.service
 wait_table "rayspa start"
 [[ $(x nft list chain inet raycontrol input) == *"policy drop;"* ]] || fail "input chain is not policy drop"
+# The sysctl settings work from the install on, not from the next boot.
+if x grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then
+	[[ $(x sysctl -n net.ipv4.tcp_congestion_control) == bbr ]] || fail "sysctl not applied at install"
+fi
 
 dataplane=(niko-inner.service niko-dns.service niko-mdns.service niko-front.service)
 

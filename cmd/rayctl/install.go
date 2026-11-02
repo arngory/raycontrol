@@ -205,11 +205,18 @@ func (c *cli) install(ctx context.Context, args []string) error {
 			return err
 		}
 	}
+	var sysctl []deploy.File
 	for _, f := range base.Files {
-		if _, err := h.WriteFile(f); err != nil {
+		changed, err := h.WriteFile(f)
+		if err != nil {
 			return err
 		}
+		if changed && strings.HasPrefix(f.Path, "/etc/sysctl.d/") {
+			sysctl = append(sysctl, f)
+		}
 	}
+	// Now, not at the next boot; the journal keeps the values it replaces.
+	h.ApplySysctl(sysctl)
 	if err := os.MkdirAll(deploy.StateDir, 0o711); err != nil { //nolint:gosec // G301: services traverse to their rendered files
 		return err
 	}

@@ -204,11 +204,7 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 		}
 	}
 	if sysctlChanged {
-		h.recordSysctl(plan)
-		if err := h.run("sysctl", "-q", "-p", "/etc/sysctl.d/90-raycontrol.conf"); err != nil {
-			fmt.Fprintln(h.Out, "warning:", err)
-		}
-		h.checkSysctl(plan)
+		h.ApplySysctl(plan.Files)
 	}
 	if resolvedChanged {
 		if err := h.freePort53(); err != nil {
@@ -267,12 +263,26 @@ func (h *Host) EnableNow(unit string) error {
 	return h.run("systemctl", "enable", "--now", unit)
 }
 
-// recordSysctl notes the values the sysctl file is about to change.
-func (h *Host) recordSysctl(plan Plan) {
+// ApplySysctl loads the sysctl files among files now, not at the next
+// boot, noting first the values they change (for uninstall).
+func (h *Host) ApplySysctl(files []File) {
+	h.recordSysctl(files)
+	for _, f := range files {
+		if strings.HasPrefix(f.Path, "/etc/sysctl.d/") {
+			if err := h.run("sysctl", "-q", "-p", f.Path); err != nil {
+				fmt.Fprintln(h.Out, "warning:", err)
+			}
+		}
+	}
+	h.checkSysctl(files)
+}
+
+// recordSysctl notes the values the sysctl files are about to change.
+func (h *Host) recordSysctl(files []File) {
 	if h.Journal == nil {
 		return
 	}
-	for _, f := range plan.Files {
+	for _, f := range files {
 		if !strings.HasPrefix(f.Path, "/etc/sysctl.d/") {
 			continue
 		}
@@ -291,8 +301,8 @@ func (h *Host) recordSysctl(plan Plan) {
 
 // checkSysctl warns about values another file sets differently: at boot
 // files sort by name, and a provider's 99-*.conf comes after raycontrol's.
-func (h *Host) checkSysctl(plan Plan) {
-	for _, f := range plan.Files {
+func (h *Host) checkSysctl(files []File) {
+	for _, f := range files {
 		if !strings.HasPrefix(f.Path, "/etc/sysctl.d/") {
 			continue
 		}

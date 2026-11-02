@@ -346,6 +346,7 @@ func TestJournalAndUninstall(t *testing.T) {
 
 	users := map[string]int{}
 	var cmds []string
+	congestion := "cubic"
 	h := &deploy.Host{
 		Root: root,
 		Out:  &bytes.Buffer{},
@@ -358,7 +359,13 @@ func TestJournalAndUninstall(t *testing.T) {
 			case name == "userdel" || name == "groupdel":
 				delete(users, name[:1]+args[len(args)-1])
 			case c == "sysctl -n net.ipv4.tcp_congestion_control":
-				return []byte("cubic\n"), nil
+				return []byte(congestion + "\n"), nil
+			case c == "sysctl -n net.core.rmem_max":
+				return []byte("4194304\n"), nil // a global key a container cannot set
+			case strings.HasPrefix(c, "sysctl -q -p "):
+				congestion = "bbr"
+			case strings.HasPrefix(c, "sysctl -q -w net.ipv4.tcp_congestion_control="):
+				congestion = strings.TrimPrefix(c, "sysctl -q -w net.ipv4.tcp_congestion_control=")
 			case c == "firewall-cmd --get-default-zone":
 				return []byte("public\n"), nil
 			case strings.Contains(c, "--query-service"):
@@ -437,6 +444,9 @@ func TestJournalAndUninstall(t *testing.T) {
 	}
 	if strings.Index(all, "disable --now rayspa.service") > strings.Index(all, "disable --now rayd.service") {
 		t.Error("rayspa must stop before rayd")
+	}
+	if strings.Contains(all, "-w net.core.rmem_max") {
+		t.Error("set back a value that never changed")
 	}
 }
 
