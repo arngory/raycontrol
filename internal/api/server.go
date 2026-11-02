@@ -37,6 +37,9 @@ type Server struct {
 	Binaries deploy.Binaries
 	// OnChange, if set, runs after every successful change (tests).
 	OnChange func()
+	// CheckRealityTarget, if set, vets the target of a new REALITY service
+	// (provision.CheckRealityTarget; tests leave it nil).
+	CheckRealityTarget func(ctx context.Context, target, sni string) error
 
 	mu   sync.Mutex
 	rev  uint64
@@ -314,6 +317,15 @@ func (s *Server) ListServices(ctx context.Context, _ *connect.Request[nodev1.Lis
 }
 
 func (s *Server) CreateService(ctx context.Context, req *connect.Request[nodev1.CreateServiceRequest]) (*connect.Response[nodev1.CreateServiceResponse], error) {
+	if req.Msg.Kind == "reality" && s.CheckRealityTarget != nil {
+		target, sni, err := provision.RealityTargetFromJSON(req.Msg.SettingsJson)
+		if err == nil {
+			err = s.CheckRealityTarget(ctx, target, sni)
+		}
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+	}
 	svc, err := provision.CreateService(ctx, s.Store, store.Service{Kind: req.Msg.Kind, Name: req.Msg.Name, Enabled: true, Settings: req.Msg.SettingsJson})
 	if err := s.done(ctx, "service.create:"+req.Msg.Kind, req.Msg.Name, err); err != nil {
 		return nil, err

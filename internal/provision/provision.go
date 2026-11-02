@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"slices"
 	"strings"
 	"time"
@@ -42,14 +43,21 @@ const (
 
 // Secret names, shared with the renderer (names, not secrets).
 const (
-	SecretNoisePrivate  = "noise_private"  // dnstt, X25519
-	SecretMasterDNSKey  = "encryption_key" // MasterDnsVPN, hex text
-	SecretMLKEMSeed     = "mlkem768_seed"  //nolint:gosec // G101: a name; inner, VLESS encryption
-	SecretTLSKey        = "tls_key"        // subscription, PKCS#8 DER
-	SecretTLSCert       = "tls_cert"       // subscription, DER
-	SecretPortKey       = "port_key"       // UDP port rotation schedule
+	SecretNoisePrivate  = "noise_private"        // dnstt, X25519
+	SecretMasterDNSKey  = "encryption_key"       // MasterDnsVPN, hex text
+	SecretMLKEMSeed     = "mlkem768_seed"        //nolint:gosec // G101: a name; inner, VLESS encryption
+	SecretTLSKey        = "tls_key"              // subscription, PKCS#8 DER
+	SecretTLSCert       = "tls_cert"             // subscription, DER
+	SecretPortKey       = "port_key"             // UDP port rotation schedule
+	SecretRealityKey    = "reality_x25519"       //nolint:gosec // G101: a name; REALITY, X25519 private key
+	SecretRealityMLDSA  = "reality_mldsa65_seed" //nolint:gosec // G101: a name; REALITY, ML-DSA-65 seed
+	SecretShortIDs      = "short_ids"            // REALITY, comma-separated hex
 	SubscriptionService = "subscription"
 )
+
+// RealityShortIDs is how many shortIds a REALITY service gets; clients use
+// one each (render.ShortID), so users do not all send the same one.
+const RealityShortIDs = 4
 
 // Options are the node-wide settings given at init.
 type Options struct {
@@ -258,6 +266,13 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			return svc, err
 		}
 		svc.Secrets[SecretMLKEMSeed] = seed
+	case "reality":
+		if err := realitySettings(settings); err != nil {
+			return svc, err
+		}
+		if err := realitySecrets(svc.Secrets); err != nil {
+			return svc, err
+		}
 	}
 
 	if rotates(svc.Kind) {
@@ -282,6 +297,81 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		}
 	}
 	return st.CreateService(ctx, svc)
+}
+
+// RealityTarget returns the target and server name of REALITY settings,
+// the name defaulting to the target's host. The target answers everyone who
+// is not a client (probes included), so it must be a TLS 1.3 site the name
+// belongs to (CheckRealityTarget). Self-steal on the node's own decoy site
+// needs a certificate (R2b); until then the target is given explicitly.
+func RealityTarget(settings map[string]any) (target, sni string, err error) {
+	target, _ = settings["target"].(string)
+	if target == "" {
+		return "", "", fmt.Errorf("%w reality needs a target until the decoy site exists (R2b): "+
+			`-settings '{"target":"www.example.org:443"}'`, store.ErrInvalid)
+	}
+	host := ""
+	if !strings.HasPrefix(target, "/") {
+		h, port, err := net.SplitHostPort(target)
+		if err != nil || h == "" || port == "" {
+			return "", "", fmt.Errorf("%w reality target %q: use host:port or a unix socket path", store.ErrInvalid, target)
+		}
+		host = h
+	}
+	sni, _ = settings["sni"].(string)
+	if sni == "" {
+		if host == "" || net.ParseIP(host) != nil {
+			return "", "", fmt.Errorf("%w reality: set sni, the name the target has a certificate for", store.ErrInvalid)
+		}
+		sni = host
+	}
+	return target, sni, nil
+}
+
+// realitySettings checks the target and fills the server name and the
+// client fingerprint.
+func realitySettings(settings map[string]any) error {
+	_, sni, err := RealityTarget(settings)
+	if err != nil {
+		return err
+	}
+	settings["sni"] = sni
+	if fp, _ := settings["fingerprint"].(string); fp == "" {
+		settings["fingerprint"] = "chrome"
+	}
+	return nil
+}
+
+// realitySecrets makes the REALITY keys (X25519, ML-DSA-65 seed), the
+// shortIds (random lengths, so that installs differ) and the seed of the
+// second layer, VLESS encryption with ML-KEM-768.
+func realitySecrets(secrets map[string][]byte) error {
+	key, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+	secrets[SecretRealityKey] = key.Bytes()
+	for name, n := range map[string]int{SecretRealityMLDSA: 32, SecretMLKEMSeed: 64} {
+		b := make([]byte, n)
+		if _, err := rand.Read(b); err != nil {
+			return err
+		}
+		secrets[name] = b
+	}
+	ids := make([]string, RealityShortIDs)
+	for i := range ids {
+		n, err := randInt(2, 8) // bytes: 4 to 16 hex characters
+		if err != nil {
+			return err
+		}
+		b := make([]byte, n)
+		if _, err := rand.Read(b); err != nil {
+			return err
+		}
+		ids[i] = hex.EncodeToString(b)
+	}
+	secrets[SecretShortIDs] = []byte(strings.Join(ids, ","))
+	return nil
 }
 
 // newZone returns "<label>.<domain>" with a random label not used yet.

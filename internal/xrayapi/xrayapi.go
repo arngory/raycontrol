@@ -54,9 +54,10 @@ func (c *Client) alter(ctx context.Context, tag string, op proto.Message) error 
 	return err
 }
 
-// AddVLESS adds a VLESS user to the inbound.
-func (c *Client) AddVLESS(ctx context.Context, tag, email, id string) error {
-	acc, err := typed(&vless.Account{Id: id})
+// AddVLESS adds a VLESS user to the inbound; flow is "" or the inbound's
+// flow (xtls-rprx-vision for REALITY).
+func (c *Client) AddVLESS(ctx context.Context, tag, flow, email, id string) error {
+	acc, err := typed(&vless.Account{Id: id, Flow: flow})
 	if err != nil {
 		return err
 	}
@@ -87,9 +88,9 @@ func (c *Client) VLESSUsers(ctx context.Context, tag string) (map[string]string,
 	return out, nil
 }
 
-// SyncVLESS makes the inbound's users exactly want (email -> UUID) and
-// reports how many were added and removed.
-func (c *Client) SyncVLESS(ctx context.Context, tag string, want map[string]string) (added, removed int, err error) {
+// SyncVLESS makes the inbound's users exactly want (email -> UUID), added
+// with the given flow, and reports how many were added and removed.
+func (c *Client) SyncVLESS(ctx context.Context, tag, flow string, want map[string]string) (added, removed int, err error) {
 	have, err := c.VLESSUsers(ctx, tag)
 	if err != nil {
 		return 0, 0, err
@@ -104,7 +105,7 @@ func (c *Client) SyncVLESS(ctx context.Context, tag string, want map[string]stri
 	}
 	for email, id := range want {
 		if have[email] != id {
-			if err := c.AddVLESS(ctx, tag, email, id); err != nil {
+			if err := c.AddVLESS(ctx, tag, flow, email, id); err != nil {
 				return added, removed, fmt.Errorf("add %s: %w", email, err)
 			}
 			added++

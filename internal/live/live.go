@@ -15,6 +15,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/render"
@@ -24,7 +25,7 @@ import (
 
 // InnerAPI is the part of the Xray API live needs.
 type InnerAPI interface {
-	SyncVLESS(ctx context.Context, tag string, want map[string]string) (added, removed int, err error)
+	SyncVLESS(ctx context.Context, tag, flow string, want map[string]string) (added, removed int, err error)
 }
 
 // Applier renders and applies.
@@ -91,6 +92,16 @@ func (a *Applier) Apply(ctx context.Context) error {
 		}
 		old, err := os.ReadFile(f.Path)
 		if err == nil && bytes.Equal(old, f.Content) {
+			// Same content, but the group may have appeared since the file was
+			// written (rayctl apply creates it): fix group and mode, and
+			// restart the process that could not read the file.
+			fixed, err := fixMeta(f)
+			if err != nil {
+				failed[f.Service] = true
+				errs = append(errs, fmt.Errorf("service %s: %s: %w", f.Service, f.Path, err))
+			} else if fixed {
+				changed[f.Service] = append(changed[f.Service], change{nil, f.Content})
+			}
 			continue
 		}
 		if err == nil || errors.Is(err, os.ErrNotExist) {
@@ -111,17 +122,18 @@ func (a *Applier) Apply(ctx context.Context) error {
 			continue
 		}
 		unit := render.UnitName(service)
-		if service != "front" && isInner(m, service) && len(cs) == 1 && cs[0].old != nil && sameExceptClients(cs[0].old, cs[0].new) {
-			want := map[string]string{}
-			for id, uuid := range m.Inner {
-				want[render.InnerEmail(id)] = uuid
+		if svc, ok := xrayService(m, service); ok && len(cs) == 1 && cs[0].old != nil && sameExceptClients(cs[0].old, cs[0].new) {
+			tag, want := render.XrayUsers(m, svc)
+			flow := ""
+			if svc.Kind == "reality" {
+				flow = render.RealityFlow
 			}
-			added, removed, err := a.inner(a.Paths.InnerAPISocket(service)).SyncVLESS(ctx, render.InnerTag, want)
+			added, removed, err := a.inner(a.Paths.APISocket(service)).SyncVLESS(ctx, tag, flow, want)
 			if err == nil {
-				a.Log.Info("inner users synced", "service", service, "added", added, "removed", removed)
+				a.Log.Info("xray users synced", "service", service, "added", added, "removed", removed)
 				continue
 			}
-			a.Log.Warn("inner API sync failed, restarting", "service", service, "err", err)
+			a.Log.Warn("xray API sync failed, restarting", "service", service, "err", err)
 		}
 		if err := a.restart(ctx, unit); err != nil {
 			a.Log.Warn("restart failed (is the node deployed? run rayctl apply)", "unit", unit, "err", err)
@@ -132,17 +144,18 @@ func (a *Applier) Apply(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func isInner(m render.Model, service string) bool {
+// xrayService finds the Xray service (inner, REALITY) of that name.
+func xrayService(m render.Model, service string) (render.Service, bool) {
 	for _, s := range m.Services {
-		if s.Name == service {
-			return s.Kind == "inner"
+		if s.Name == service && render.IsXray(s.Kind) {
+			return s, true
 		}
 	}
-	return false
+	return render.Service{}, false
 }
 
-// sameExceptClients reports whether two inner Xray configs differ only in
-// the users of the inner inbound.
+// sameExceptClients reports whether two Xray configs differ only in the
+// users of the inbound.
 func sameExceptClients(a, b []byte) bool {
 	strip := func(raw []byte) ([]byte, bool) {
 		var cfg map[string]any
@@ -163,6 +176,42 @@ func sameExceptClients(a, b []byte) bool {
 	x, ok1 := strip(a)
 	y, ok2 := strip(b)
 	return ok1 && ok2 && bytes.Equal(x, y)
+}
+
+// fixMeta gives an existing file and its directory the group (once it
+// exists) and the file its mode, and reports whether it changed anything.
+func fixMeta(f render.File) (bool, error) {
+	fixed := false
+	if f.Group != "" {
+		g, err := user.LookupGroup(f.Group)
+		if err != nil {
+			return false, nil // not deployed yet
+		}
+		gid, _ := strconv.Atoi(g.Gid)
+		for _, p := range []string{filepath.Dir(f.Path), f.Path} {
+			st, err := os.Stat(p)
+			if err != nil {
+				return fixed, err
+			}
+			if sys, ok := st.Sys().(*syscall.Stat_t); ok && int(sys.Gid) != gid {
+				if err := os.Chown(p, -1, gid); err != nil {
+					return fixed, err
+				}
+				fixed = true
+			}
+		}
+	}
+	st, err := os.Stat(f.Path)
+	if err != nil {
+		return fixed, err
+	}
+	if st.Mode().Perm() != os.FileMode(f.Mode).Perm() {
+		if err := os.Chmod(f.Path, os.FileMode(f.Mode)); err != nil {
+			return fixed, err
+		}
+		fixed = true
+	}
+	return fixed, nil
 }
 
 // writeFile writes atomically with the file's mode and group. The group is

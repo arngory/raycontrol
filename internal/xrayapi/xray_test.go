@@ -1,10 +1,19 @@
 package xrayapi_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/json"
+	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -19,6 +29,7 @@ import (
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/store"
+	"github.com/arngory/raycontrol/internal/sub"
 	"github.com/arngory/raycontrol/internal/xrayapi"
 )
 
@@ -30,7 +41,7 @@ func TestInnerWithXray(t *testing.T) {
 		t.Skip("set XRAY_BIN to an Xray built from arngory/xray-core")
 	}
 	dir := t.TempDir()
-	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run"), Credentials: filepath.Join(dir, "cred")}
+	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run")}
 	for _, d := range []string{"inner", "inner-api"} {
 		if err := os.MkdirAll(filepath.Join(paths.Run, d), 0o755); err != nil {
 			t.Fatal(err)
@@ -64,7 +75,7 @@ func TestInnerWithXray(t *testing.T) {
 	}
 	defer func() { cmd.Process.Kill(); cmd.Wait() }()
 
-	api := paths.InnerAPISocket("inner")
+	api := paths.APISocket("inner")
 	for i := 0; i < 50; i++ {
 		if _, err := os.Stat(api); err == nil {
 			break
@@ -87,7 +98,7 @@ func TestInnerWithXray(t *testing.T) {
 		"u7": "6f1c2a3b-0000-4000-8000-000000000077", // rotated
 		"u8": "6f1c2a3b-0000-4000-8000-000000000008", // new
 	}
-	added, removed, err := c.SyncVLESS(ctx, render.InnerTag, want)
+	added, removed, err := c.SyncVLESS(ctx, render.InnerTag, "", want)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +114,7 @@ func TestInnerWithXray(t *testing.T) {
 	if string(got) != string(exp) {
 		t.Fatalf("after sync %s, want %s", got, exp)
 	}
-	if added, removed, err = c.SyncVLESS(ctx, render.InnerTag, want); err != nil || added+removed != 0 {
+	if added, removed, err = c.SyncVLESS(ctx, render.InnerTag, "", want); err != nil || added+removed != 0 {
 		t.Fatalf("second sync: +%d -%d %v", added, removed, err)
 	}
 
@@ -192,4 +203,203 @@ func writeJSON(t *testing.T, v any) string {
 		t.Fatal(err)
 	}
 	return f
+}
+
+// TestRealityWithXray runs a rendered REALITY service on a real Xray: a
+// client built from the subscription link gets through VLESS + REALITY +
+// Vision with the ML-KEM-768 layer, a user added through the API with the
+// Vision flow too, and a TLS client without credentials sees the target's
+// certificate. Set XRAY_BIN.
+func TestRealityWithXray(t *testing.T) {
+	bin := os.Getenv("XRAY_BIN")
+	if bin == "" {
+		t.Skip("set XRAY_BIN to an Xray built from arngory/xray-core")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	dir := t.TempDir()
+
+	// The target answers everyone who is not a client: a TLS 1.3 site.
+	targetCert := selfSignedCert(t, "target.test")
+	target, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{targetCert}, NextProtos: []string{"h2", "http/1.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	go http.Serve(target, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "decoy") }))
+
+	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := provision.Init(ctx, st, provision.Options{Host: "127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	port := freePort(t)
+	settings := fmt.Sprintf(`{"target":%q,"sni":"target.test","ports":["tcp/%d"]}`, target.Addr().String(), port)
+	svc, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "reality", Enabled: true, Settings: settings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetUserServices(ctx, "alice", []int64{svc.ID}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run")}
+	if err := os.MkdirAll(filepath.Dir(paths.APISocket("reality")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files, _, err := render.Render(m, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var serverCfg map[string]any
+	if err := json.Unmarshal(files[0].Content, &serverCfg); err != nil {
+		t.Fatal(err)
+	}
+	// Loopback page: Xray's freedom refuses private targets by default.
+	delete(serverCfg, "dns")
+	delete(serverCfg, "routing")
+	serverCfg["outbounds"] = []map[string]any{{"protocol": "freedom", "settings": map[string]any{
+		"finalRules": []map[string]any{{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}}}
+	if os.Getenv("XRAY_DEBUG") != "" {
+		serverCfg["log"] = map[string]string{"loglevel": "debug"}
+		in := serverCfg["inbounds"].([]any)[0].(map[string]any)
+		in["streamSettings"].(map[string]any)["realitySettings"].(map[string]any)["show"] = true
+	}
+	server := writeJSON(t, serverCfg)
+	if out, err := exec.Command(bin, "run", "-test", "-c", server).CombinedOutput(); err != nil {
+		t.Fatalf("xray -test: %v\n%s", err, out)
+	}
+	runXray(t, bin, server)
+
+	link, err := sub.RealityLink(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.Kind == "reality" })], user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "through reality") }))
+	defer page.Close()
+	fetchThroughLink(t, bin, link, "", page.URL)
+
+	// A user added through the API, with the Vision flow.
+	api := paths.APISocket("reality")
+	waitFile(t, api)
+	newID := "6f1c2a3b-0000-4000-8000-000000000009"
+	want := map[string]string{render.InnerEmail(user.ID): m.Creds[svc.ID][user.ID], "u9": newID}
+	if added, removed, err := xrayapi.Dial(api).SyncVLESS(ctx, render.RealityTag, render.RealityFlow, want); err != nil || added != 1 || removed != 0 {
+		t.Fatalf("sync: +%d -%d %v", added, removed, err)
+	}
+	fetchThroughLink(t, bin, link, newID, page.URL)
+
+	// No credentials: the REALITY port shows the target's certificate.
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", "127.0.0.1:"+strconv.Itoa(port),
+		&tls.Config{ServerName: "target.test", InsecureSkipVerify: true}) //nolint:gosec // looking at the certificate
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if got := conn.ConnectionState().PeerCertificates[0].Raw; !bytes.Equal(got, targetCert.Certificate[0]) {
+		t.Fatal("a probe without credentials does not get the target's certificate")
+	}
+}
+
+// fetchThroughLink runs an Xray client built from a share link (id replaces
+// the link's UUID if set) and fetches page through it.
+func fetchThroughLink(t *testing.T, bin, link, id, page string) {
+	t.Helper()
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	port, _ := strconv.Atoi(u.Port())
+	if id == "" {
+		id = u.User.Username()
+	}
+	socksPort := freePort(t)
+	level := "warning"
+	if os.Getenv("XRAY_DEBUG") != "" {
+		level = "debug"
+	}
+	client := writeJSON(t, map[string]any{
+		"log":      map[string]string{"loglevel": level},
+		"inbounds": []map[string]any{{"listen": "127.0.0.1", "port": socksPort, "protocol": "socks", "settings": map[string]any{"udp": false}}},
+		"outbounds": []map[string]any{{
+			"protocol": "vless",
+			"settings": map[string]any{"vnext": []map[string]any{{"address": u.Hostname(), "port": port,
+				"users": []map[string]string{{"id": id, "encryption": q.Get("encryption"), "flow": q.Get("flow")}}}}},
+			"streamSettings": map[string]any{
+				"network": q.Get("type"), "security": q.Get("security"),
+				"realitySettings": map[string]any{"serverName": q.Get("sni"), "fingerprint": q.Get("fp"),
+					"publicKey": q.Get("pbk"), "shortId": q.Get("sid"), "mldsa65Verify": q.Get("pqv"),
+					"show": os.Getenv("XRAY_DEBUG") != ""},
+			},
+		}},
+	})
+	runXray(t, bin, client)
+	proxy, _ := url.Parse("socks5://127.0.0.1:" + strconv.Itoa(socksPort))
+	hc := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: 5 * time.Second}
+	var lastErr error
+	for i := 0; i < 30; i++ {
+		resp, err := hc.Get(page)
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if string(body) != "through reality" {
+				t.Fatalf("body %q", body)
+			}
+			return
+		}
+		lastErr = err
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("no response through REALITY: %v", lastErr)
+}
+
+func runXray(t *testing.T, bin, cfg string) {
+	t.Helper()
+	cmd := exec.Command(bin, "run", "-c", cfg)
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+}
+
+func waitFile(t *testing.T, path string) {
+	t.Helper()
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("%s did not appear", path)
+}
+
+func selfSignedCert(t *testing.T, name string) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// REALITY pads its own certificate (with the ML-DSA-65 signature, about
+	// 3.5 KB) to the length of the target's: real sites send chains of a few
+	// KB, so the test target gets a padded certificate of that size.
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: name}, DNSNames: []string{name},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		ExtraExtensions: []pkix.Extension{{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 32473, 1}, Value: make([]byte, 4096)}}}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }

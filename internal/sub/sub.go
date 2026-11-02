@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -215,7 +216,62 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 			}
 			link := "vless://" + m.Inner[u.ID] + "@inner:1?" + q.Encode() + "#" + url.PathEscape(s.Name)
 			out = append(out, Profile{Svc: uint16(s.ID), Name: s.Name, Link: link})
+		case "reality":
+			link, err := RealityLink(m, s, u.ID)
+			if err != nil {
+				return nil, err
+			}
+			if link != "" {
+				out = append(out, Profile{Svc: uint16(s.ID), Name: s.Name, Link: link})
+			}
 		}
 	}
 	return out, nil
+}
+
+// RealityLink is the share link of a REALITY service for a user, "" if the
+// user has no credential there (spec/subscription-v1.md §4).
+func RealityLink(m render.Model, s render.Service, userID int64) (string, error) {
+	uuid := m.Creds[s.ID][userID]
+	if uuid == "" {
+		return "", nil
+	}
+	var rs render.RealitySettings
+	if err := json.Unmarshal([]byte(s.Settings), &rs); err != nil {
+		return "", err
+	}
+	pbk, pqv, err := render.RealityKeys(s)
+	if err != nil {
+		return "", err
+	}
+	_, encryption, err := render.VLESSEncryption(s.Secrets[provision.SecretMLKEMSeed])
+	if err != nil {
+		return "", err
+	}
+	port := 443
+	if !m.FrontTCP {
+		ports, err := s.Ports()
+		if err != nil {
+			return "", err
+		}
+		for _, p := range ports {
+			if p.Proto == "tcp" {
+				port = int(p.Num)
+			}
+		}
+	}
+	q := url.Values{}
+	q.Set("type", "raw")
+	q.Set("security", "reality")
+	q.Set("encryption", encryption)
+	q.Set("flow", render.RealityFlow)
+	q.Set("sni", rs.SNI)
+	q.Set("fp", rs.Fingerprint)
+	q.Set("pbk", pbk)
+	q.Set("sid", render.ShortID(s, userID))
+	q.Set("pqv", pqv)
+	q.Set("niko-node", m.NodeID)
+	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
+	host := net.JoinHostPort(m.Host, strconv.Itoa(port))
+	return "vless://" + uuid + "@" + host + "?" + q.Encode() + "#" + url.PathEscape(s.Name), nil
 }

@@ -25,8 +25,8 @@ func plan(t *testing.T) (deploy.Plan, render.Model) {
 	}
 	t.Cleanup(func() { st.Close() })
 	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
-	for _, s := range [][2]string{{"dnstt", "dns"}, {"reality", "reality"}} {
-		if _, err := provision.CreateService(ctx, st, store.Service{Kind: s[0], Name: s[1], Enabled: true}); err != nil {
+	for _, s := range [][3]string{{"dnstt", "dns", ""}, {"reality", "reality", `{"target":"www.example.org:443"}`}, {"naive", "naive", ""}} {
+		if _, err := provision.CreateService(ctx, st, store.Service{Kind: s[0], Name: s[1], Enabled: true, Settings: s[2]}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -61,20 +61,31 @@ func TestBuild(t *testing.T) {
 	}
 	if !slices.Equal(users["niko-front"].ExtraGroups, []string{"niko-dns"}) ||
 		!slices.Equal(users["niko-dns"].ExtraGroups, []string{"niko-inner"}) ||
-		!slices.Equal(users["rayd"].ExtraGroups, []string{"niko-dns", "niko-front", "niko-inner"}) {
+		!slices.Equal(users["rayd"].ExtraGroups, []string{"niko-dns", "niko-front", "niko-inner", "niko-reality"}) {
 		t.Fatalf("groups: %+v", users)
 	}
-	if !slices.Equal(p.Units, []string{"rayd.service", "rayspa.service", "niko-inner.service", "niko-dns.service", "niko-front.service"}) {
+	if !slices.Equal(p.Units, []string{"rayd.service", "rayspa.service", "niko-inner.service", "niko-reality.service", "niko-dns.service", "niko-front.service"}) {
 		t.Fatalf("units %v", p.Units)
 	}
-	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "reality") {
+	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "naive") {
 		t.Fatalf("warnings %v", p.Warnings)
+	}
+	// REALITY binds TCP 443 itself until the front has tcpmux (R2-7).
+	reality := file(p, "/etc/systemd/system/niko-reality.service")
+	for _, want := range []string{"User=niko-reality", "AmbientCapabilities=CAP_NET_BIND_SERVICE\n", "CapabilityBoundingSet=CAP_NET_BIND_SERVICE\n",
+		"ExecStart=/usr/local/bin/xray run -c /var/lib/raycontrol/rendered/reality/xray.json", "ReadWritePaths=/run/niko/reality-api"} {
+		if !strings.Contains(reality, want) {
+			t.Errorf("reality unit lacks %q", want)
+		}
+	}
+	if !strings.Contains(file(p, "/etc/tmpfiles.d/raycontrol.conf"), "d /run/niko/reality-api 2750 niko-reality rayd") {
+		t.Error("REALITY API directory not restricted to rayd")
 	}
 
 	dns := file(p, "/etc/systemd/system/niko-dns.service")
 	for _, want := range []string{
 		"User=niko-dns", "SupplementaryGroups=niko-inner", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX\n",
-		"LoadCredential=noise.key:/var/lib/raycontrol/rendered/dns/noise.key", "RuntimeDirectory=niko/dns", "CapabilityBoundingSet=\n",
+		"ExecStartPre=+install -m 0400 -o niko-dns -g niko-dns /var/lib/raycontrol/rendered/dns/noise.key /run/niko/dns/noise.key\n", "RuntimeDirectory=niko/dns", "CapabilityBoundingSet=\n",
 		"ExecStart=/usr/local/bin/niko-server backend -c /var/lib/raycontrol/rendered/dns/backend.json",
 	} {
 		if !strings.Contains(dns, want) {

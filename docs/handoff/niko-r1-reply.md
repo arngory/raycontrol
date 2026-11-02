@@ -69,9 +69,10 @@
 raycontrol уже генерирует конфиги по CONFIG.md схемы 1 — код в `internal/render`, примеры в его тестах. Что мы
 сделали и что из этого нужно учесть на вашей стороне:
 
-1. **Пути credentials.** systemd кладёт их в `/run/credentials/<unit>/<name>`, где `<unit>` — полное имя юнита
-   с `.service`: например `/run/credentials/niko-dns.service/noise.key`. В примерах CONFIG.md написано без `.service` —
-   поправьте пример.
+1. **Пути ключей** (изменено после теста установки, решение R2-9). Ключи бэкендов лежат не в
+   `/run/credentials/<unit>/`, а в каталоге сервиса: `/run/niko/<сервис>/<файл>`, например `/run/niko/dns/noise.key`
+   (`0400`, владелец — пользователь сервиса; копирует systemd перед стартом). Путь задаётся в конфиге бэкенда, niko-server
+   менять не нужно; в примерах CONFIG.md стоит показать этот вариант: `LoadCredential=` не работает в контейнерах.
 2. **Секции фронта необязательны.** Если маршрутов TCP или UDP нет (в R1 есть только DNS-туннели), raycontrol не пишет
    секции `tcp` и `udp`, и фронт не должен слушать 443. Просьба прямо записать это в CONFIG.md.
 3. **MasterDnsVPN — `encryption_method: 5`** (AES-256-GCM). Метод 2 в MasterDnsVPN — ChaCha20 без аутентификации,
@@ -115,3 +116,11 @@ raycontrol теперь ставится в CI через `bootstrap.sh` на De
    запустить бэкенд до появления файла credentials). Требование к фронту из §3 п. 7 (переподключение к бэкенду) остаётся.
 3. **Файрволы хоста** (firewalld, ufw, `flush ruleset` при перезапуске nftables) — целиком на стороне raycontrol,
    niko-server ничего менять не нужно.
+4. **REALITY (R2a) уже в подписке** — формат ссылки: [`spec/subscription-v1.md`](../spec/subscription-v1.md) §4,
+   «Профиль REALITY». Клиенту нужны: VLESS + REALITY + Vision, `pqv` (проверка ML-DSA-65 обязательна), второй слой
+   VLESS encryption (`encryption`), только `X25519MLKEM768`. Пока у фронта нет tcpmux, Xray с REALITY слушает 443 сам
+   (решение R2-7); когда tcpmux появится, raycontrol переведёт его на `proxy-v2`-сокет по CONFIG.md, ссылки не меняются.
+   Цель REALITY должна отдавать цепочку сертификатов не короче ~3,5 КБ (решение R2-8) — учтите в своих тестах interop.
+5. **Ключи бэкендов** — см. §5 п. 1 (R2-9): `/run/niko/<сервис>/<файл>` вместо `/run/credentials/...`. Тест установки
+   в CI теперь поднимает весь data plane (Xray `inner`, dnstt, MasterDnsVPN, фронт) на каждой системе из `niko-server-v0.1.1`.
+

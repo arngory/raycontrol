@@ -120,7 +120,8 @@ func cmdServe(args []string) error {
 	go pruneAudit(ctx, st, log)
 	paths := render.DefaultPaths
 	paths.Rendered = *rendered
-	srv := &api.Server{Store: st, Params: params, Version: version, Paths: paths, Binaries: deploy.DefaultBinaries}
+	srv := &api.Server{Store: st, Params: params, Version: version, Paths: paths, Binaries: deploy.DefaultBinaries,
+		CheckRealityTarget: provision.CheckRealityTarget}
 	per := &api.PerimeterServer{Server: srv, RayspaUID: -1, DefaultTTL: *spaTTL, MaxTTL: *spaMaxTTL, TCPCarrier: *spaTCP, Refresh: time.Minute}
 	policy := api.PeerPolicy{Group: *group}
 	if u, err := user.Lookup(*rayspaUser); err == nil {

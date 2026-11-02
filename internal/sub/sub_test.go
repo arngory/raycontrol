@@ -14,11 +14,13 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
@@ -260,5 +262,42 @@ func TestClient(t *testing.T) {
 	bad.NodeID = "00"
 	if _, err := bad.Fetch(ctx, time.Now()); err == nil || !strings.Contains(err.Error(), "node") {
 		t.Fatalf("wrong node: %v", err)
+	}
+}
+
+func TestRealityLink(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "2001:db8::7"})
+	svc, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true, Settings: `{"target":"www.example.org:443"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+	st.SetUserServices(ctx, "alice", []int64{svc.ID})
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := sub.Profiles(m, m.Users[0])
+	if err != nil || len(profiles) != 1 {
+		t.Fatalf("profiles %v %v", profiles, err)
+	}
+	link, err := url.Parse(profiles[0].Link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := link.Query()
+	pbk, _ := base64.RawURLEncoding.DecodeString(q.Get("pbk"))
+	pqv, _ := base64.RawURLEncoding.DecodeString(q.Get("pqv"))
+	if link.Scheme != "vless" || link.Host != "[2001:db8::7]:443" || link.User.Username() != m.Creds[svc.ID][u.ID] ||
+		q.Get("security") != "reality" || q.Get("flow") != "xtls-rprx-vision" || q.Get("sni") != "www.example.org" ||
+		q.Get("fp") != "chrome" || len(pbk) != 32 || len(pqv) != 1952 || q.Get("niko-svc") != strconv.FormatInt(svc.ID, 10) ||
+		!strings.HasPrefix(q.Get("encryption"), "mlkem768x25519plus.native.0rtt.") || q.Get("sid") == "" {
+		t.Fatalf("link %s", profiles[0].Link)
 	}
 }

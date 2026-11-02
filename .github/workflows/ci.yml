@@ -64,7 +64,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: XRAY_BIN="$RUNNER_TEMP/xray" go test -count=1 -run TestInnerWithXray -v ./internal/xrayapi
+      - run: XRAY_BIN="$RUNNER_TEMP/xray" go test -count=1 -run 'TestInnerWithXray|TestRealityWithXray' -v ./internal/xrayapi
       - uses: actions/upload-artifact@v4
         with:
           name: xray
@@ -118,7 +118,7 @@ jobs:
       - name: Prepare the systemd image
         run: test/install/prepare.sh ${{ matrix.distro }}
       - name: Install and probe
-        run: TEST_STRICT=1 test/install/run.sh ${{ matrix.distro }} bin
+        run: test/install/run.sh ${{ matrix.distro }} bin
 
   build:
     runs-on: ubuntu-24.04

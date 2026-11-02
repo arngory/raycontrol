@@ -119,29 +119,16 @@ wait_active rayd.service rayspa.service
 wait_table "rayspa start"
 [[ $(x nft list chain inet raycontrol input) == *"policy drop;"* ]] || fail "input chain is not policy drop"
 
-# Some sandboxes cannot mount systemd credentials; the backends need them.
-# CI sets TEST_STRICT=1 so that this never passes as a skip there.
 dataplane=(niko-inner.service niko-dns.service niko-mdns.service niko-front.service)
-x sh -c 'echo raycontrol > /run/credential-probe'
-# systemd-creds reads $CREDENTIALS_DIRECTORY itself: systemd-run passes "$"
-# literally, so a shell test of the variable would not see it.
-got="$(x systemd-run --wait --quiet --pipe --unit credential-probe -p LoadCredential=probe:/run/credential-probe \
-	systemd-creds cat probe 2>/dev/null || true)"
-if [[ $got != raycontrol* ]]; then
-	x journalctl --no-pager -n 40 >&2 || true
-	[[ -z ${TEST_STRICT:-} ]] || fail "systemd credentials do not work here"
-	echo "SKIP: systemd credentials do not work in this environment; data-plane units are not checked" >&2
-	dataplane=(niko-inner.service)
-fi
 
 log "$distro: DNS tunnels"
 x rayctl service add dnstt dns >/dev/null
 x rayctl service add masterdns mdns >/dev/null
 x rayctl apply || fail "rayctl apply"
 wait_active "${dataplane[@]}"
-if [[ ${#dataplane[@]} -gt 1 ]]; then
-	[[ $(x ss -Hulpn 'sport = :53') == *niko-server* ]] || fail "the front does not listen on UDP 53"
-fi
+[[ $(x ss -Hulpn 'sport = :53') == *niko-server* ]] || fail "the front does not listen on UDP 53"
+# The backend's key: a copy in its runtime directory, for its user only.
+[[ $(x stat -c '%a %U' /run/niko/dns/noise.key) == "400 niko-dns" ]] || fail "dnstt key copy is not 0400 niko-dns"
 again="$(x rayctl apply)"
 if grep -E '^(wrote|restarting)' <<<"$again"; then
 	fail "a second apply changed things"

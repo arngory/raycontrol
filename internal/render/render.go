@@ -1,6 +1,6 @@
 // Package render turns the node state into the files the data plane reads:
 // niko-server configs (CONFIG.md schema 1 in arngory/niko), the Xray config
-// of the inner stage and secret files for LoadCredential=.
+// of the inner stage and the secret files systemd copies to the services.
 package render
 
 import (
@@ -12,11 +12,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"path"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 	"golang.org/x/sys/unix"
 
 	"github.com/arngory/raycontrol/internal/node"
@@ -36,16 +39,14 @@ const Schema = 1
 
 // Paths are the directories the renderer refers to.
 type Paths struct {
-	Rendered    string // written by rayd
-	Run         string // runtime directories of the data plane
-	Credentials string // systemd credentials root
+	Rendered string // written by rayd
+	Run      string // runtime directories of the data plane
 }
 
 // DefaultPaths are the paths on an installed node.
 var DefaultPaths = Paths{
-	Rendered:    "/var/lib/raycontrol/rendered",
-	Run:         "/run/niko",
-	Credentials: "/run/credentials",
+	Rendered: "/var/lib/raycontrol/rendered",
+	Run:      "/run/niko",
 }
 
 // Service is a service with its secrets.
@@ -73,6 +74,13 @@ type Model struct {
 	// IPv6 is false on hosts without IPv6 sockets (ipv6.disable=1): the
 	// front must not ask for [::] there, or it does not start at all.
 	IPv6 bool
+	// Creds maps service ID and user ID to the user's UUID for services
+	// whose users are Xray clients (REALITY).
+	Creds map[int64]map[int64]string
+	// FrontTCP puts TCP services behind the niko-server front (tcpmux,
+	// CONFIG.md). niko-server v0.1.1 has no TCP front yet, so REALITY binds
+	// its TCP port itself until then (docs/08-decisions.md, R2-7).
+	FrontTCP bool
 }
 
 // HostIPv6 reports whether this host can open IPv6 sockets.
@@ -138,6 +146,26 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 			needInner = append(needInner, u.ID)
 		}
 	}
+	m.Creds = map[int64]map[int64]string{}
+	for _, svc := range m.Services {
+		if svc.Kind != "reality" {
+			continue
+		}
+		var ids []int64
+		for _, u := range m.Users {
+			if slices.Contains(u.Services, svc.ID) {
+				ids = append(ids, u.ID)
+			}
+		}
+		all, err := st.Credentials(ctx, svc.ID, ids, newUUID)
+		if err != nil {
+			return m, err
+		}
+		m.Creds[svc.ID] = map[int64]string{}
+		for _, id := range ids {
+			m.Creds[svc.ID][id] = all[id]
+		}
+	}
 	if inner != nil {
 		all, err := st.Credentials(ctx, inner.ID, needInner, newUUID)
 		if err != nil {
@@ -181,16 +209,39 @@ func GroupName(service string) string { return "niko-" + service }
 
 func (p Paths) socket(service, kind string) string { return path.Join(p.Run, service, kind+".sock") }
 
-// Credential is where a process finds a credential passed with LoadCredential=.
+// Credential is where a process finds a secret: systemd (root) copies it
+// from the rendered file into the service's runtime directory before the
+// start, readable by the service user only (docs/08-decisions.md, R2-9).
 func (p Paths) Credential(service, name string) string {
-	return path.Join(p.Credentials, UnitName(service), name)
+	return path.Join(p.Run, service, name)
 }
 
-// InnerAPISocket is the gRPC API socket of the inner stage. Its directory
-// belongs to the inner user and the rayd group only: the tunnels that reach
-// the inner VLESS socket must not reach the API.
-func (p Paths) InnerAPISocket(inner string) string {
-	return path.Join(p.Run, inner+"-api", "api.sock")
+// APISocket is the gRPC API socket of an Xray process (inner, REALITY). Its
+// directory belongs to the service user and the rayd group only: the
+// tunnels that reach the inner VLESS socket must not reach the API.
+func (p Paths) APISocket(service string) string {
+	return path.Join(p.Run, service+"-api", "api.sock")
+}
+
+// XrayKinds run on Xray and get their users through its API.
+var XrayKinds = []string{"inner", "reality"}
+
+// IsXray reports whether the service runs on Xray.
+func IsXray(kind string) bool { return slices.Contains(XrayKinds, kind) }
+
+// XrayUsers returns the inbound tag and the users (email -> UUID) of an Xray
+// service, as rayd syncs them through the API.
+func XrayUsers(m Model, s Service) (tag string, users map[string]string) {
+	creds := m.Inner
+	tag = InnerTag
+	if s.Kind == "reality" {
+		creds, tag = m.Creds[s.ID], RealityTag
+	}
+	users = make(map[string]string, len(creds))
+	for id, uuid := range creds {
+		users[InnerEmail(id)] = uuid
+	}
+	return tag, users
 }
 
 // InnerSocket is the VLESS socket of the inner stage.
@@ -222,7 +273,12 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		Mode   string `json:"mode"`
 		UID    int    `json:"uid"`
 	}
+	type tcpRoute struct {
+		SNI     []string `json:"sni"`
+		Backend string   `json:"backend"`
+	}
 	var zones []route
+	var tcpRoutes []tcpRoute
 	backends := map[string]backendRef{}
 
 	for _, s := range m.Services {
@@ -245,6 +301,18 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				return nil, nil, err
 			}
 			files = append(files, f)
+		case "reality":
+			f, err := realityConfig(s, m, p)
+			if err != nil {
+				return nil, nil, err
+			}
+			files = append(files, f)
+			if m.FrontTCP {
+				backends[s.Name] = backendRef{Socket: p.socket(s.Name, "reality"), Mode: "proxy-v2", UID: s.UID}
+				var rs RealitySettings
+				_ = json.Unmarshal([]byte(s.Settings), &rs)
+				tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{rs.SNI}, Backend: s.Name})
+			}
 		case "ssh", "subscription", "api":
 			// Not data-plane processes.
 		default:
@@ -266,6 +334,15 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				listen = append(listen, "[::]:53")
 			}
 			front["dns"] = map[string]any{"listen": listen, "zones": zones}
+		}
+		if len(tcpRoutes) > 0 {
+			listen := []string{"0.0.0.0:443"}
+			if m.IPv6 {
+				listen = append(listen, "[::]:443")
+			}
+			// Unknown SNI goes to the first REALITY service: its target
+			// answers like the site it stands for.
+			front["tcp"] = map[string]any{"listen": listen, "sniff_timeout": "5s", "routes": tcpRoutes, "default": tcpRoutes[0].Backend}
 		}
 		b, err := jsonFile(front)
 		if err != nil {
@@ -313,8 +390,8 @@ func dnsBackend(s Service, zone, inner string, p Paths) (cfg, secret File, err e
 	}
 	dir := path.Join(p.Rendered, s.Name)
 	cfg = File{Path: path.Join(dir, "backend.json"), Mode: 0o640, Group: GroupName(s.Name), Content: b, Service: s.Name}
-	// Secrets are read by systemd (root) for LoadCredential=; the process
-	// itself gets a private copy, so the file needs no group access.
+	// Secrets are read by systemd (root), which gives the process its own
+	// copy (Paths.Credential), so the file needs no group access.
 	secret = File{Path: path.Join(dir, secretName), Mode: 0o600, Content: secretValue, Service: s.Name}
 	return cfg, secret, nil
 }
@@ -368,23 +445,32 @@ func innerConfig(s Service, m Model, p Paths) (File, error) {
 	for _, id := range ids {
 		clients = append(clients, map[string]string{"id": m.Inner[id], "email": InnerEmail(id)})
 	}
+	return xrayFile(s, p, map[string]any{
+		"tag":      InnerTag,
+		"listen":   p.InnerSocket(s.Name) + ",0660",
+		"protocol": "vless",
+		"settings": map[string]any{"clients": clients, "decryption": decryption},
+		// Sniffing only for routing: the BitTorrent rule needs it.
+		"sniffing": sniffing,
+	})
+}
+
+var sniffing = map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}, "routeOnly": true}
+
+// xrayFile is the config of an Xray exit: one inbound, the API on its own
+// unix socket, DoH, and routing that keeps private networks and BitTorrent
+// out.
+func xrayFile(s Service, p Paths, inbound map[string]any) (File, error) {
 	b, err := jsonFile(map[string]any{
 		"log": map[string]string{"loglevel": "warning", "access": "none"},
-		"api": map[string]any{"tag": "api", "listen": p.InnerAPISocket(s.Name), "services": []string{"HandlerService"}},
+		"api": map[string]any{"tag": "api", "listen": p.APISocket(s.Name), "services": []string{"HandlerService"}},
 		"dns": map[string]any{
 			// DoH to public resolvers: the host resolver may sit in a private
 			// range that the routing below blocks.
 			"servers":       []string{"https+local://1.1.1.1/dns-query", "https+local://9.9.9.9/dns-query"},
 			"queryStrategy": "UseIP",
 		},
-		"inbounds": []map[string]any{{
-			"tag":      InnerTag,
-			"listen":   p.InnerSocket(s.Name) + ",0660",
-			"protocol": "vless",
-			"settings": map[string]any{"clients": clients, "decryption": decryption},
-			// Sniffing only for routing: the BitTorrent rule needs it.
-			"sniffing": map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}, "routeOnly": true},
-		}},
+		"inbounds": []map[string]any{inbound},
 		"outbounds": []map[string]any{
 			{"tag": "direct", "protocol": "freedom", "streamSettings": map[string]any{"sockopt": map[string]string{"domainStrategy": "UseIP"}}},
 			{"tag": "block", "protocol": "blackhole"},
@@ -401,4 +487,119 @@ func innerConfig(s Service, m Model, p Paths) (File, error) {
 		return File{}, err
 	}
 	return File{Path: path.Join(p.Rendered, s.Name, "xray.json"), Mode: 0o640, Group: GroupName(s.Name), Content: b, Service: s.Name}, nil
+}
+
+// RealityTag is the inbound tag of a REALITY service (Xray API target).
+const RealityTag = "reality"
+
+// RealityFlow is the VLESS flow of REALITY clients.
+const RealityFlow = "xtls-rprx-vision"
+
+// RealitySettings are the settings of a REALITY service.
+type RealitySettings struct {
+	Target      string `json:"target"`      // host:port or unix socket: who answers non-clients
+	SNI         string `json:"sni"`         // server name clients send
+	Fingerprint string `json:"fingerprint"` // uTLS fingerprint of clients
+}
+
+// RealityMaxTimeDiff bounds the client clock in the REALITY session ID; SPA
+// already needs the clock within seconds.
+const RealityMaxTimeDiff = 120 * time.Second
+
+// RealityKeys returns what clients need: the X25519 public key and the
+// ML-DSA-65 public key ("pbk" and "pqv" of share links), base64url.
+func RealityKeys(s Service) (pbk, pqv string, err error) {
+	priv, err := ecdh.X25519().NewPrivateKey(s.Secrets[provision.SecretRealityKey])
+	if err != nil {
+		return "", "", err
+	}
+	seed := s.Secrets[provision.SecretRealityMLDSA]
+	if len(seed) != mldsa65.SeedSize {
+		return "", "", fmt.Errorf("reality %s: bad ML-DSA-65 seed", s.Name)
+	}
+	pub, _ := mldsa65.NewKeyFromSeed((*[mldsa65.SeedSize]byte)(seed))
+	raw, err := pub.MarshalBinary()
+	if err != nil {
+		return "", "", err
+	}
+	enc := base64.RawURLEncoding
+	return enc.EncodeToString(priv.PublicKey().Bytes()), enc.EncodeToString(raw), nil
+}
+
+// ShortIDs returns the shortIds of a REALITY service.
+func ShortIDs(s Service) []string {
+	return strings.Split(string(s.Secrets[provision.SecretShortIDs]), ",")
+}
+
+// ShortID is the shortId a user's clients send.
+func ShortID(s Service, userID int64) string {
+	ids := ShortIDs(s)
+	return ids[int(userID)%len(ids)]
+}
+
+func realityConfig(s Service, m Model, p Paths) (File, error) {
+	var rs RealitySettings
+	if err := json.Unmarshal([]byte(s.Settings), &rs); err != nil || rs.Target == "" || rs.SNI == "" {
+		return File{}, fmt.Errorf("reality %s: settings need target and sni", s.Name)
+	}
+	decryption, _, err := VLESSEncryption(s.Secrets[provision.SecretMLKEMSeed])
+	if err != nil {
+		return File{}, fmt.Errorf("reality %s: %w", s.Name, err)
+	}
+	enc := base64.RawURLEncoding
+	creds := m.Creds[s.ID]
+	ids := slices.Sorted(maps.Keys(creds))
+	clients := make([]map[string]string, 0, len(ids))
+	for _, id := range ids {
+		clients = append(clients, map[string]string{"id": creds[id], "email": InnerEmail(id), "flow": RealityFlow})
+	}
+	stream := map[string]any{
+		"network":  "raw",
+		"security": "reality",
+		"realitySettings": map[string]any{
+			"target":      rs.Target,
+			"xver":        0,
+			"serverNames": []string{rs.SNI},
+			"privateKey":  enc.EncodeToString(s.Secrets[provision.SecretRealityKey]),
+			"mldsa65Seed": enc.EncodeToString(s.Secrets[provision.SecretRealityMLDSA]),
+			"shortIds":    ShortIDs(s),
+			"maxTimeDiff": RealityMaxTimeDiff.Milliseconds(),
+		},
+	}
+	inbound := map[string]any{
+		"tag":      RealityTag,
+		"protocol": "vless",
+		"settings": map[string]any{"clients": clients, "decryption": decryption},
+		"sniffing": sniffing,
+	}
+	if m.FrontTCP {
+		// The front passes the stream with a PROXY v2 header (CONFIG.md).
+		inbound["listen"] = p.socket(s.Name, "reality") + ",0660"
+		stream["sockopt"] = map[string]any{"acceptProxyProtocol": true}
+	} else {
+		port, err := tcpPort(s)
+		if err != nil {
+			return File{}, err
+		}
+		inbound["listen"], inbound["port"] = "0.0.0.0", port
+		if m.IPv6 {
+			inbound["listen"] = "::"
+		}
+	}
+	inbound["streamSettings"] = stream
+	return xrayFile(s, p, inbound)
+}
+
+// tcpPort is the TCP port of a service (443 unless its settings say else).
+func tcpPort(s Service) (int, error) {
+	ports, err := s.Ports()
+	if err != nil {
+		return 0, err
+	}
+	for _, pt := range ports {
+		if pt.Proto == "tcp" {
+			return int(pt.Num), nil
+		}
+	}
+	return 0, fmt.Errorf("service %s has no TCP port", s.Name)
 }

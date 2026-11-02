@@ -5,8 +5,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/user"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/arngory/raycontrol/internal/provision"
@@ -18,7 +20,7 @@ type fakeInner struct {
 	calls []map[string]string
 }
 
-func (f *fakeInner) SyncVLESS(_ context.Context, _ string, want map[string]string) (int, int, error) {
+func (f *fakeInner) SyncVLESS(_ context.Context, _, _ string, want map[string]string) (int, int, error) {
 	f.calls = append(f.calls, want)
 	return len(want), 0, nil
 }
@@ -39,7 +41,7 @@ func TestApply(t *testing.T) {
 
 	var restarted []string
 	inner := &fakeInner{}
-	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: "/run/niko", Credentials: "/run/credentials"}
+	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: "/run/niko"}
 	a := &Applier{
 		Store: st, Paths: paths, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Restart: func(_ context.Context, unit string) error { restarted = append(restarted, unit); return nil },
@@ -87,5 +89,30 @@ func TestSameExceptClients(t *testing.T) {
 	c := []byte(`{"inbounds":[{"tag":"inner","settings":{"clients":[{"id":"2"}],"decryption":"y"}}],"log":{}}`)
 	if !sameExceptClients(a, b) || sameExceptClients(a, c) || sameExceptClients(a, []byte("{")) {
 		t.Fatal("client-only diff misdetected")
+	}
+}
+
+func TestFixMeta(t *testing.T) {
+	g, err := user.LookupGroupId(strconv.Itoa(os.Getgid()))
+	if err != nil {
+		t.Skip("no name for the current group")
+	}
+	p := filepath.Join(t.TempDir(), "front", "front.json")
+	os.MkdirAll(filepath.Dir(p), 0o750)
+	os.WriteFile(p, []byte("{}"), 0o600)
+	f := render.File{Path: p, Mode: 0o640, Group: g.Name, Content: []byte("{}")}
+	if fixed, err := fixMeta(f); err != nil || !fixed {
+		t.Fatalf("first fix: %v %v", fixed, err)
+	}
+	if st, _ := os.Stat(p); st.Mode().Perm() != 0o640 {
+		t.Fatalf("mode %v", st.Mode())
+	}
+	if fixed, err := fixMeta(f); err != nil || fixed {
+		t.Fatalf("second fix: %v %v", fixed, err)
+	}
+	// A group that does not exist yet is left for later.
+	f.Group = "raycontrol-no-such-group"
+	if fixed, err := fixMeta(f); err != nil || fixed {
+		t.Fatalf("missing group: %v %v", fixed, err)
 	}
 }

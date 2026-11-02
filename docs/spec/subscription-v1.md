@@ -92,6 +92,23 @@ vless://<uuid>@inner:1?type=raw&encryption=mlkem768x25519plus.native.0rtt.<кл�
 - Для MasterDnsVPN метод — `5` (AES-256-GCM): нода разрешает только AEAD.
 - Ключ устройства в ссылках не передаётся.
 
+### Профиль REALITY (R2)
+
+Стандартная ссылка VLESS + REALITY + Vision (как в Xray) с вторым слоем VLESS encryption и параметрами Niko:
+
+```
+vless://<uuid>@<host>:443?type=raw&security=reality&flow=xtls-rprx-vision&encryption=mlkem768x25519plus.native.0rtt.<ключ>
+  &sni=<имя>&fp=chrome&pbk=<X25519, base64url>&sid=<shortId>&pqv=<ML-DSA-65, base64url>&niko-node=<node_id>&niko-svc=<id>#reality
+```
+
+- `pqv` — открытый ключ ML-DSA-65 (`mldsa65Verify` в Xray, 2603 символа): клиент обязан проверять им подпись
+  сертификата REALITY. Без `pqv` профиль не считается постквантовым и клиент его не принимает.
+- Ключ обмена — только `X25519MLKEM768` (отпечаток `fp` его предлагает).
+- `encryption` — второй слой, VLESS encryption с ML-KEM-768, как у `inner`; `flow` — `xtls-rprx-vision`.
+- `sid` у разных пользователей разный (у сервиса несколько shortId), `sni` и цель задаются при создании сервиса.
+- Порт — 443 (или порт сервиса из настроек, пока REALITY слушает сам, без фронта: решение R2-7).
+- Пользователи добавляются и удаляются через API Xray без перезапуска, как у `inner`.
+
 ## 5. Проверки в клиенте (порядок)
 
 1. TLS: `X25519MLKEM768`, пин SPKI.

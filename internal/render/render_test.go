@@ -118,7 +118,7 @@ func TestRender(t *testing.T) {
 	json.Unmarshal(byPath["/var/lib/raycontrol/rendered/dns/backend.json"].Content, &dnstt)
 	opts := dnstt["options"].(map[string]any)
 	if dnstt["front_uid"].(float64) != 9100 || dnstt["inner"] != "/run/niko/inner/vless.sock" ||
-		opts["private_key_file"] != "/run/credentials/niko-dns.service/noise.key" {
+		opts["private_key_file"] != "/run/niko/dns/noise.key" {
 		t.Fatalf("dnstt backend = %v", dnstt)
 	}
 	key := byPath["/var/lib/raycontrol/rendered/dns/noise.key"]
@@ -170,5 +170,109 @@ func TestVLESSEncryption(t *testing.T) {
 	}
 	if _, _, err := render.VLESSEncryption(make([]byte, 10)); err == nil {
 		t.Fatal("short seed accepted")
+	}
+}
+
+func TestReality(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	svc, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true, Settings: `{"target":"www.example.org:443"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice, _ := st.UserByName(ctx, "alice")
+	bob, _ := st.UserByName(ctx, "bob")
+	st.SetUserServices(ctx, "bob", []int64{svc.ID})
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Creds[svc.ID]) != 1 || m.Creds[svc.ID][bob.ID] == "" || m.Creds[svc.ID][alice.ID] != "" {
+		t.Fatalf("REALITY credentials %v: bob only", m.Creds)
+	}
+	tag, users := render.XrayUsers(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })])
+	if tag != render.RealityTag || len(users) != 1 {
+		t.Fatalf("xray users %s %v", tag, users)
+	}
+
+	type cfg struct {
+		Inbounds []struct {
+			Listen   string `json:"listen"`
+			Port     int    `json:"port"`
+			Settings struct {
+				Clients    []struct{ ID, Email, Flow string } `json:"clients"`
+				Decryption string                             `json:"decryption"`
+			} `json:"settings"`
+			Stream struct {
+				Security string `json:"security"`
+				Sockopt  struct {
+					AcceptProxyProtocol bool `json:"acceptProxyProtocol"`
+				} `json:"sockopt"`
+				Reality struct {
+					Target      string   `json:"target"`
+					ServerNames []string `json:"serverNames"`
+					PrivateKey  string   `json:"privateKey"`
+					Mldsa65Seed string   `json:"mldsa65Seed"`
+					ShortIDs    []string `json:"shortIds"`
+				} `json:"realitySettings"`
+			} `json:"streamSettings"`
+		} `json:"inbounds"`
+	}
+	read := func(m render.Model) (cfg, map[string]any) {
+		files, _, err := render.Render(m, render.DefaultPaths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var c cfg
+		var front map[string]any
+		for _, f := range files {
+			switch f.Path {
+			case "/var/lib/raycontrol/rendered/r/xray.json":
+				if err := json.Unmarshal(f.Content, &c); err != nil {
+					t.Fatal(err)
+				}
+				if f.Group != "niko-r" || f.Mode != 0o640 {
+					t.Errorf("xray.json group %s mode %o", f.Group, f.Mode)
+				}
+			case "/var/lib/raycontrol/rendered/front/front.json":
+				json.Unmarshal(f.Content, &front)
+			}
+		}
+		return c, front
+	}
+
+	// Direct (R2-7): Xray binds the service port itself.
+	m.IPv6 = false
+	c, front := read(m)
+	in := c.Inbounds[0]
+	r := in.Stream.Reality
+	if in.Listen != "0.0.0.0" || in.Port != 443 || in.Stream.Security != "reality" || in.Stream.Sockopt.AcceptProxyProtocol ||
+		r.Target != "www.example.org:443" || !slices.Equal(r.ServerNames, []string{"www.example.org"}) ||
+		len(r.PrivateKey) != 43 || len(r.Mldsa65Seed) != 43 || len(r.ShortIDs) != provision.RealityShortIDs ||
+		!strings.HasPrefix(in.Settings.Decryption, "mlkem768x25519plus.") ||
+		len(in.Settings.Clients) != 1 || in.Settings.Clients[0].Flow != render.RealityFlow {
+		t.Fatalf("direct inbound %+v", in)
+	}
+	for _, id := range r.ShortIDs {
+		if len(id) < 4 || len(id) > 16 || len(id)%2 != 0 {
+			t.Errorf("shortId %q", id)
+		}
+	}
+	if front["tcp"] != nil {
+		t.Fatal("front has a TCP section though niko-server has no tcpmux yet")
+	}
+
+	// Behind the front: unix socket with PROXY v2 and an SNI route.
+	m.FrontTCP = true
+	c, front = read(m)
+	in = c.Inbounds[0]
+	if in.Listen != "/run/niko/r/reality.sock,0660" || in.Port != 0 || !in.Stream.Sockopt.AcceptProxyProtocol {
+		t.Fatalf("inbound behind the front %+v", in)
+	}
+	tcp, _ := json.Marshal(front["tcp"])
+	backends, _ := json.Marshal(front["backends"])
+	if !strings.Contains(string(tcp), `{"backend":"r","sni":["www.example.org"]}`) || !strings.Contains(string(tcp), `"default":"r"`) ||
+		!strings.Contains(string(backends), `"r":{"mode":"proxy-v2","socket":"/run/niko/r/reality.sock"`) {
+		t.Fatalf("front tcp %s backends %s", tcp, backends)
 	}
 }

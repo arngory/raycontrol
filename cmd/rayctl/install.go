@@ -35,8 +35,9 @@ func isTested(id, version string) bool {
 	return false
 }
 
-// minSystemd is the first systemd with LoadCredential=.
-const minSystemd = 247
+// minSystemd is the first systemd with every hardening directive the units
+// use (ProtectClock=).
+const minSystemd = 245
 
 // preflight checks what the node needs from the host, whatever the
 // distribution: systemd, the commands raycontrol runs, polkit, and an nft

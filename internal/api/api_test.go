@@ -71,8 +71,8 @@ func TestEnrollAndPassSPA(t *testing.T) {
 	ctx := context.Background()
 	c := NewUnixClient(sock)
 
-	for _, svc := range [][2]string{{"reality", "reality"}, {"dnstt", "dns"}, {"ssh", "ssh"}, {"hy2-masq", "hy2"}} {
-		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: svc[0], Name: svc[1]})); err != nil {
+	for _, svc := range [][3]string{{"reality", "reality", `{"target":"www.example.org:443"}`}, {"dnstt", "dns", ""}, {"ssh", "ssh", ""}, {"hy2-masq", "hy2", ""}} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: svc[0], Name: svc[1], SettingsJson: svc[2]})); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -201,7 +201,7 @@ func TestPerimeterFeed(t *testing.T) {
 	c := NewUnixClient(sock)
 	feed := perimeterv1connect.NewPerimeterServiceClient(UnixHTTPClient(sock), BaseURL)
 
-	c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "reality"}))
+	c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "reality", SettingsJson: `{"target":"www.example.org:443"}`}))
 	c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "dnstt", Name: "dns"}))
 	c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "ssh", Name: "ssh", SettingsJson: `{"ports":["tcp/2222"]}`}))
 	c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"reality", "ssh"}}))
@@ -256,8 +256,8 @@ func TestPerimeterFeed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dep.Msg.Units) != 5 || len(dep.Msg.Warnings) == 0 {
-		t.Fatalf("deployment units %v warnings %v", dep.Msg.Units, dep.Msg.Warnings)
+	if len(dep.Msg.Units) != 6 || len(dep.Msg.Warnings) != 0 || len(dep.Msg.HostPorts) == 0 {
+		t.Fatalf("deployment units %v warnings %v host ports %v", dep.Msg.Units, dep.Msg.Warnings, dep.Msg.HostPorts)
 	}
 }
 
