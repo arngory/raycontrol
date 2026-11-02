@@ -105,6 +105,9 @@ func cmdServe(args []string) error {
 	rendered := fs.String("rendered", render.DefaultPaths.Rendered, "directory for rendered data-plane files")
 	liveApply := fs.Bool("live", true, "render and apply data-plane files while serving")
 	acmeDir := fs.String("acme-directory", certs.LetsEncrypt, "ACME directory for the sites' certificates (empty: none)")
+	credPeriod := fs.Duration("cred-period", 30*24*time.Hour, "how long a user credential stays current (0: no rotation)")
+	credLead := fs.Duration("cred-lead", 3*24*time.Hour, "the next credential is in the subscription this long before the switch")
+	credGrace := fs.Duration("cred-grace", 2*24*time.Hour, "the previous credential is accepted this long after the switch")
 	fs.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -146,6 +149,13 @@ func cmdServe(args []string) error {
 			log.Error("apply", "err", err)
 		}
 		go applier.Run(ctx, srv.Changes)
+	}
+	if *credPeriod > 0 {
+		if *credLead >= *credPeriod {
+			return errors.New("-cred-lead must be shorter than -cred-period")
+		}
+		r := store.Rotation{Period: *credPeriod, Lead: *credLead, Grace: *credGrace}
+		go rotateCredentials(ctx, st, r, func() { srv.Notify() }, log)
 	}
 	if *acmeDir != "" {
 		if err := startCertificates(ctx, st, srv, *acmeDir, log); err != nil {
@@ -217,6 +227,26 @@ func startSubscription(ctx context.Context, st *store.Store, log *slog.Logger) e
 	}()
 	log.Info("subscription endpoint", "addr", addr)
 	return nil
+}
+
+// rotateCredentials advances the rotation of user credentials every ten
+// minutes (R4-1); a change re-renders, which adds and removes UUIDs through
+// the Xray API without a restart.
+func rotateCredentials(ctx context.Context, st *store.Store, r store.Rotation, notify func(), log *slog.Logger) {
+	for {
+		n, err := st.RotateCredentials(ctx, time.Now(), r, render.NewUUID)
+		if err != nil {
+			log.Error("credential rotation", "err", err)
+		} else if n > 0 {
+			log.Info("credentials rotated", "changed", n)
+			notify()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Minute):
+		}
+	}
 }
 
 func pruneAudit(ctx context.Context, st *store.Store, log *slog.Logger) {

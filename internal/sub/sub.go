@@ -214,15 +214,29 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 				q.Set("niko-dns", "masterdns;;"+zone+";"+strconv.Itoa(settings.Method))
 				q.Set("niko-dnskey", string(s.Secrets[provision.SecretMasterDNSKey]))
 			}
-			link := "vless://" + m.Inner[u.ID] + "@inner:1?" + q.Encode() + "#" + url.PathEscape(s.Name)
-			out = append(out, Profile{Svc: uint16(s.ID), Name: s.Name, Link: link})
+			link := func(uuid string) string {
+				return "vless://" + uuid + "@inner:1?" + q.Encode() + "#" + url.PathEscape(s.Name)
+			}
+			p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: link(m.Inner[u.ID])}
+			if set := m.Sets[inner.ID][u.ID]; set.Next != "" {
+				p.Next = &Next{Link: link(set.Next), From: set.NextFrom.Unix()}
+			}
+			out = append(out, p)
 		case "reality":
 			link, err := RealityLink(m, s, u.ID)
 			if err != nil {
 				return nil, err
 			}
 			if link != "" {
-				out = append(out, Profile{Svc: uint16(s.ID), Name: s.Name, Link: link})
+				p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: link}
+				if set := m.Sets[s.ID][u.ID]; set.Next != "" {
+					next, err := realityLink(m, s, set.Next, u.ID)
+					if err != nil {
+						return nil, err
+					}
+					p.Next = &Next{Link: next, From: set.NextFrom.Unix()}
+				}
+				out = append(out, p)
 			}
 		}
 	}
@@ -236,6 +250,10 @@ func RealityLink(m render.Model, s render.Service, userID int64) (string, error)
 	if uuid == "" {
 		return "", nil
 	}
+	return realityLink(m, s, uuid, userID)
+}
+
+func realityLink(m render.Model, s render.Service, uuid string, userID int64) (string, error) {
 	var rs render.RealitySettings
 	if err := json.Unmarshal([]byte(s.Settings), &rs); err != nil {
 		return "", err

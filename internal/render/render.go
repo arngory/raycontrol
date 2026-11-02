@@ -76,9 +76,12 @@ type Model struct {
 	// IPv6 is false on hosts without IPv6 sockets (ipv6.disable=1): the
 	// front must not ask for [::] there, or it does not start at all.
 	IPv6 bool
-	// Creds maps service ID and user ID to the user's UUID for services
-	// whose users are Xray clients (REALITY).
+	// Creds maps service ID and user ID to the user's current UUID for
+	// services whose users are Xray clients (REALITY).
 	Creds map[int64]map[int64]string
+	// Sets are the same credentials (inner included) with their rotation:
+	// the next UUID and the previous one in its grace period (R4-1).
+	Sets map[int64]map[int64]store.Credential
 	// Now dates the generated site; zero is the time of rendering.
 	Now time.Time
 	// FrontTCP puts TCP services behind the niko-server front (tcpmux,
@@ -151,6 +154,7 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 		}
 	}
 	m.Creds = map[int64]map[int64]string{}
+	m.Sets = map[int64]map[int64]store.Credential{}
 	for _, svc := range m.Services {
 		if svc.Kind != "reality" {
 			continue
@@ -161,29 +165,34 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 				ids = append(ids, u.ID)
 			}
 		}
-		all, err := st.Credentials(ctx, svc.ID, ids, newUUID)
+		all, err := st.CredentialSets(ctx, svc.ID, ids, NewUUID)
 		if err != nil {
 			return m, err
 		}
 		m.Creds[svc.ID] = map[int64]string{}
+		m.Sets[svc.ID] = map[int64]store.Credential{}
 		for _, id := range ids {
-			m.Creds[svc.ID][id] = all[id]
+			m.Creds[svc.ID][id] = all[id].Current
+			m.Sets[svc.ID][id] = all[id]
 		}
 	}
 	if inner != nil {
-		all, err := st.Credentials(ctx, inner.ID, needInner, newUUID)
+		all, err := st.CredentialSets(ctx, inner.ID, needInner, NewUUID)
 		if err != nil {
 			return m, err
 		}
 		m.Inner = map[int64]string{}
+		m.Sets[inner.ID] = map[int64]store.Credential{}
 		for _, id := range needInner {
-			m.Inner[id] = all[id]
+			m.Inner[id] = all[id].Current
+			m.Sets[inner.ID][id] = all[id]
 		}
 	}
 	return m, nil
 }
 
-func newUUID() (string, error) {
+// NewUUID makes a random (version 4) UUID, the VLESS credential.
+func NewUUID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
@@ -241,11 +250,39 @@ func XrayUsers(m Model, s Service) (tag string, users map[string]string) {
 	if s.Kind == "reality" {
 		creds, tag = m.Creds[s.ID], RealityTag
 	}
+	now := m.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
 	users = make(map[string]string, len(creds))
 	for id, uuid := range creds {
 		users[InnerEmail(id)] = uuid
+		// While a credential rotates, the next UUID (and for a grace period
+		// the previous one) gets in too.
+		if set, ok := m.Sets[s.ID][id]; ok {
+			if set.Next != "" {
+				users[InnerEmail(id)+"-n"] = set.Next
+			}
+			if set.Prev != "" && now.Before(set.PrevUntil) {
+				users[InnerEmail(id)+"-p"] = set.Prev
+			}
+		}
 	}
 	return tag, users
+}
+
+// xrayClients are the inbound's clients, in a stable order.
+func xrayClients(m Model, s Service, flow string) []map[string]string {
+	_, users := XrayUsers(m, s)
+	clients := make([]map[string]string, 0, len(users))
+	for _, email := range slices.Sorted(maps.Keys(users)) {
+		c := map[string]string{"id": users[email], "email": email}
+		if flow != "" {
+			c["flow"] = flow
+		}
+		clients = append(clients, c)
+	}
+	return clients
 }
 
 // InnerSocket is the VLESS socket of the inner stage.
@@ -455,15 +492,7 @@ func innerConfig(s Service, m Model, p Paths) (File, error) {
 	if err != nil {
 		return File{}, fmt.Errorf("inner %s: %w", s.Name, err)
 	}
-	ids := make([]int64, 0, len(m.Inner))
-	for id := range m.Inner {
-		ids = append(ids, id)
-	}
-	slices.Sort(ids)
-	clients := make([]map[string]string, 0, len(ids))
-	for _, id := range ids {
-		clients = append(clients, map[string]string{"id": m.Inner[id], "email": InnerEmail(id)})
-	}
+	clients := xrayClients(m, s, "")
 	return xrayFile(s, p, map[string]any{
 		"tag":      InnerTag,
 		"listen":   p.InnerSocket(s.Name) + ",0660",
@@ -570,12 +599,7 @@ func realityConfig(s Service, m Model, p Paths) (File, error) {
 		return File{}, fmt.Errorf("reality %s: %w", s.Name, err)
 	}
 	enc := base64.RawURLEncoding
-	creds := m.Creds[s.ID]
-	ids := slices.Sorted(maps.Keys(creds))
-	clients := make([]map[string]string, 0, len(ids))
-	for _, id := range ids {
-		clients = append(clients, map[string]string{"id": creds[id], "email": InnerEmail(id), "flow": RealityFlow})
-	}
+	clients := xrayClients(m, s, RealityFlow)
 	stream := map[string]any{
 		"network":  "raw",
 		"security": "reality",

@@ -289,8 +289,8 @@ func (s *Store) Credentials(ctx context.Context, serviceID int64, userIDs []int6
 			if err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO credentials (user_id, service_id, secret, created_at) VALUES (?, ?, ?, ?)`,
-				id, serviceID, secret, s.now().Unix()); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO credentials (user_id, service_id, secret, created_at, rotated_at) VALUES (?, ?, ?, ?, ?)`,
+				id, serviceID, secret, s.now().Unix(), s.now().Unix()); err != nil {
 				return err
 			}
 			out[id] = secret
@@ -298,6 +298,127 @@ func (s *Store) Credentials(ctx context.Context, serviceID int64, userIDs []int6
 		return nil
 	})
 	return out, err
+}
+
+// Credential is a user's secret for a service with its rotation state: the
+// next secret is accepted from when it is published and becomes current at
+// NextFrom; the previous one is accepted until PrevUntil.
+type Credential struct {
+	Current   string
+	Next      string
+	NextFrom  time.Time
+	Prev      string
+	PrevUntil time.Time
+}
+
+// Accepted returns the secrets a server takes now, current first.
+func (c Credential) Accepted(now time.Time) []string {
+	out := []string{c.Current}
+	if c.Next != "" {
+		out = append(out, c.Next)
+	}
+	if c.Prev != "" && now.Before(c.PrevUntil) {
+		out = append(out, c.Prev)
+	}
+	return out
+}
+
+// CredentialSets is Credentials with the rotation state.
+func (s *Store) CredentialSets(ctx context.Context, serviceID int64, userIDs []int64, gen func() (string, error)) (map[int64]Credential, error) {
+	if _, err := s.Credentials(ctx, serviceID, userIDs, gen); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT user_id, secret, coalesce(next_secret, ''), coalesce(next_from, 0),
+		coalesce(prev_secret, ''), coalesce(prev_until, 0) FROM credentials WHERE service_id = ?`, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]Credential{}
+	for rows.Next() {
+		var id, nextFrom, prevUntil int64
+		var c Credential
+		if err := rows.Scan(&id, &c.Current, &c.Next, &nextFrom, &c.Prev, &prevUntil); err != nil {
+			return nil, err
+		}
+		if nextFrom != 0 {
+			c.NextFrom = time.Unix(nextFrom, 0)
+		}
+		if prevUntil != 0 {
+			c.PrevUntil = time.Unix(prevUntil, 0)
+		}
+		out[id] = c
+	}
+	return out, rows.Err()
+}
+
+// Rotation is the schedule of credential rotation.
+type Rotation struct {
+	Period time.Duration // a secret is current this long
+	Lead   time.Duration // the next one is published this long before the switch
+	Grace  time.Duration // the previous one is accepted this long after it
+}
+
+// RotateCredentials advances every credential's rotation at now: publishes
+// next secrets that are due, switches to them at their time and drops
+// previous secrets past their grace. It returns how many rows changed.
+func (s *Store) RotateCredentials(ctx context.Context, now time.Time, r Rotation, gen func() (string, error)) (int, error) {
+	changed := 0
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		t := now.Unix()
+		res, err := tx.ExecContext(ctx, `UPDATE credentials SET prev_secret = secret, prev_until = ?,
+			secret = next_secret, next_secret = NULL, next_from = NULL, rotated_at = next_from
+			WHERE next_secret IS NOT NULL AND next_from <= ?`, now.Add(r.Grace).Unix(), t)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		changed += int(n)
+		res, err = tx.ExecContext(ctx, `UPDATE credentials SET prev_secret = NULL, prev_until = NULL
+			WHERE prev_secret IS NOT NULL AND prev_until <= ?`, t)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		changed += int(n)
+
+		rows, err := tx.QueryContext(ctx, `SELECT user_id, service_id, coalesce(rotated_at, created_at) FROM credentials
+			WHERE next_secret IS NULL AND coalesce(rotated_at, created_at) + ? <= ?`,
+			int64((r.Period-r.Lead)/time.Second), t)
+		if err != nil {
+			return err
+		}
+		type due struct{ user, service, rotated int64 }
+		var dues []due
+		for rows.Next() {
+			var d due
+			if err := rows.Scan(&d.user, &d.service, &d.rotated); err != nil {
+				rows.Close()
+				return err
+			}
+			dues = append(dues, d)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, d := range dues {
+			secret, err := gen()
+			if err != nil {
+				return err
+			}
+			// The switch is a full lead away at least, so clients see the
+			// next secret in time even after a long pause of the node.
+			from := max(d.rotated+int64(r.Period/time.Second), t+int64(r.Lead/time.Second))
+			if _, err := tx.ExecContext(ctx, `UPDATE credentials SET next_secret = ?, next_from = ? WHERE user_id = ? AND service_id = ?`,
+				secret, from, d.user, d.service); err != nil {
+				return err
+			}
+			changed++
+		}
+		return nil
+	})
+	return changed, err
 }
 
 // ListServices returns all services ordered by ID.

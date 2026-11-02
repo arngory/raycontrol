@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -209,5 +210,78 @@ func TestServicePorts(t *testing.T) {
 	dns := Service{Kind: "dnstt", Settings: "{}"}
 	if p, _ := dns.Ports(); !dns.Public() || len(p) != 1 || p[0].String() != "udp/53" {
 		t.Fatalf("dnstt = %v public=%v", p, dns.Public())
+	}
+}
+
+func TestRotateCredentials(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	now := time.Unix(1767225600, 0)
+	s.now = func() time.Time { return now }
+	u, _ := s.CreateUser(ctx, User{Name: "alice", Enabled: true})
+	svc, err := s.CreateService(ctx, Service{Kind: "reality", Name: "r", Enabled: true, Settings: "{}"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	gen := func() (string, error) { n++; return fmt.Sprintf("secret-%d", n), nil }
+	r := Rotation{Period: 30 * 24 * time.Hour, Lead: 3 * 24 * time.Hour, Grace: 2 * 24 * time.Hour}
+	day := 24 * time.Hour
+	get := func() Credential {
+		t.Helper()
+		sets, err := s.CredentialSets(ctx, svc.ID, []int64{u.ID}, gen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sets[u.ID]
+	}
+	if c := get(); c.Current != "secret-1" || c.Next != "" {
+		t.Fatalf("new credential %+v", c)
+	}
+	// Nothing due at 26 days; the next one is published at 27, for day 30.
+	if k, _ := s.RotateCredentials(ctx, now.Add(26*day), r, gen); k != 0 {
+		t.Fatalf("rotated early: %d", k)
+	}
+	if k, _ := s.RotateCredentials(ctx, now.Add(27*day), r, gen); k != 1 {
+		t.Fatalf("not published: %d", k)
+	}
+	c := get()
+	if c.Next != "secret-2" || !c.NextFrom.Equal(now.Add(30*day)) || len(c.Accepted(now.Add(27*day))) != 2 {
+		t.Fatalf("published %+v", c)
+	}
+	// The switch at day 30: the old one stays accepted for the grace.
+	if k, _ := s.RotateCredentials(ctx, now.Add(30*day), r, gen); k != 1 {
+		t.Fatalf("no switch: %d", k)
+	}
+	c = get()
+	if c.Current != "secret-2" || c.Next != "" || c.Prev != "secret-1" || !c.PrevUntil.Equal(now.Add(32*day)) {
+		t.Fatalf("switched %+v", c)
+	}
+	if acc := c.Accepted(now.Add(31 * day)); len(acc) != 2 || acc[0] != "secret-2" {
+		t.Fatalf("accepted %v", acc)
+	}
+	if k, _ := s.RotateCredentials(ctx, now.Add(32*day), r, gen); k != 1 {
+		t.Fatalf("previous kept: %d", k)
+	}
+	if c = get(); c.Prev != "" {
+		t.Fatalf("after grace %+v", c)
+	}
+	// The next round counts from the switch, not from creation.
+	if k, _ := s.RotateCredentials(ctx, now.Add(56*day), r, gen); k != 0 {
+		t.Fatalf("second round early: %d", k)
+	}
+	if k, _ := s.RotateCredentials(ctx, now.Add(57*day), r, gen); k != 1 {
+		t.Fatalf("second round: %d", k)
+	}
+	// A node that was off: the switch is a full lead after publication.
+	s2 := openTest(t)
+	s2.now = func() time.Time { return now }
+	u2, _ := s2.CreateUser(ctx, User{Name: "bob", Enabled: true})
+	svc2, _ := s2.CreateService(ctx, Service{Kind: "reality", Name: "r", Enabled: true, Settings: "{}"})
+	s2.Credentials(ctx, svc2.ID, []int64{u2.ID}, gen)
+	s2.RotateCredentials(ctx, now.Add(100*day), r, gen)
+	sets, _ := s2.CredentialSets(ctx, svc2.ID, nil, gen)
+	if !sets[u2.ID].NextFrom.Equal(now.Add(103 * day)) {
+		t.Fatalf("switch after a pause at %v", sets[u2.ID].NextFrom)
 	}
 }

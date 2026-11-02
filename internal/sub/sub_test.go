@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -299,5 +300,54 @@ func TestRealityLink(t *testing.T) {
 		q.Get("fp") != "chrome" || len(pbk) != 32 || len(pqv) != 1952 || q.Get("niko-svc") != strconv.FormatInt(svc.ID, 10) ||
 		!strings.HasPrefix(q.Get("encryption"), "mlkem768x25519plus.native.0rtt.") || q.Get("sid") == "" {
 		t.Fatalf("link %s", profiles[0].Link)
+	}
+}
+
+func TestRotationInSubscription(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7"})
+	svc, _ := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true, Settings: `{"target":"www.example.org:443"}`})
+	u, _ := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+	st.SetUserServices(ctx, "alice", []int64{svc.ID})
+	m, _ := render.Collect(ctx, st)
+	first := m.Creds[svc.ID][u.ID]
+
+	r := store.Rotation{Period: 30 * 24 * time.Hour, Lead: 3 * 24 * time.Hour, Grace: 2 * 24 * time.Hour}
+	day := 24 * time.Hour
+	if n, err := st.RotateCredentials(ctx, time.Now().Add(28*day), r, render.NewUUID); err != nil || n != 1 {
+		t.Fatalf("publish: %d %v", n, err)
+	}
+	m, _ = render.Collect(ctx, st)
+	profiles, err := sub.Profiles(m, m.Users[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := m.Sets[svc.ID][u.ID].Next
+	p := profiles[0]
+	if p.Next == nil || !strings.Contains(p.Next.Link, next) || !strings.Contains(p.Link, first) ||
+		p.Next.From != m.Sets[svc.ID][u.ID].NextFrom.Unix() {
+		t.Fatalf("profile %+v", p)
+	}
+	_, users := render.XrayUsers(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })])
+	if len(users) != 2 || users["u"+strconv.FormatInt(u.ID, 10)+"-n"] != next {
+		t.Fatalf("server accepts %v while rotating", users)
+	}
+
+	// After the switch the old UUID stays accepted for the grace period.
+	if _, err := st.RotateCredentials(ctx, time.Now().Add(31*day), r, render.NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	m, _ = render.Collect(ctx, st)
+	_, users = render.XrayUsers(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })])
+	if m.Creds[svc.ID][u.ID] != next || users["u"+strconv.FormatInt(u.ID, 10)+"-p"] != first {
+		t.Fatalf("after the switch: current %s, users %v", m.Creds[svc.ID][u.ID], users)
+	}
+	if profiles, _ = sub.Profiles(m, m.Users[0]); profiles[0].Next != nil {
+		t.Fatalf("next after the switch: %+v", profiles[0].Next)
 	}
 }
