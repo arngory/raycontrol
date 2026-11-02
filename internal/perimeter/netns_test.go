@@ -237,6 +237,57 @@ func TestNetns(t *testing.T) {
 			t.Fatal("ssh open for a foreign admin prefix")
 		}
 	})
+	t.Run("rotated UDP port reaches the service after SPA", func(t *testing.T) {
+		// A UDP service on 18443 with its own port schedule (spa-v2.md §11).
+		echo, err := net.ListenPacket("udp", "127.0.0.1:18443")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer echo.Close()
+		go func() {
+			buf := make([]byte, 64)
+			for {
+				n, a, err := echo.ReadFrom(buf)
+				if err != nil {
+					return
+				}
+				echo.WriteTo(buf[:n], a)
+			}
+		}()
+		rotKey := key(0x77)
+		snap.Services = []*perimeterv1.Service{{Id: 1,
+			Ports:    []*perimeterv1.Port{{Proto: "udp", Port: 18443}},
+			Rotation: &perimeterv1.Rotation{PortKey: rotKey, PortBase: 50000, PortRange: 1000, TargetPort: 18443}}}
+		snap.Devices = []*perimeterv1.Device{alice}
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		sched := params
+		copy(sched.PortKey[:], rotKey)
+		sched.PortBase, sched.PortRange = 50000, 1000
+		svcPort := strconv.Itoa(int(sched.Port(sched.Slot(time.Now()))))
+		ask := func() bool {
+			c, err := net.Dial("udp", "127.0.0.1:"+svcPort)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			c.Write([]byte("hi"))
+			c.SetReadDeadline(time.Now().Add(700 * time.Millisecond))
+			buf := make([]byte, 8)
+			n, err := c.Read(buf)
+			return err == nil && string(buf[:n]) == "hi"
+		}
+		// The address still holds a grant for tcp/18443 only.
+		if ask() {
+			t.Fatal("rotated port answered without a UDP grant")
+		}
+		sendUDP(sealNow())
+		waitResult(nil)
+		if !ask() {
+			t.Fatal("rotated port silent after SPA")
+		}
+	})
 	t.Run("garbage on the slot port", func(t *testing.T) {
 		sendUDP(make([]byte, 120))
 		waitResult(spa.ErrAuth)

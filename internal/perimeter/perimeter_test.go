@@ -26,6 +26,7 @@ type fakeFW struct {
 	public     []Port
 	admin      []netip.Prefix
 	adminPorts []Port
+	rot        map[uint16]uint16
 	open       map[string]time.Duration // "addr port" -> ttl
 }
 
@@ -38,6 +39,12 @@ func (f *fakeFW) SetSPAPorts(udp, tcp []uint16) error {
 	return nil
 }
 func (f *fakeFW) SetPublic(p []Port) error { f.public = p; return nil }
+func (f *fakeFW) SetRotation(udp map[uint16]uint16) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rot = udp
+	return nil
+}
 func (f *fakeFW) SetAdmin(p []netip.Prefix, ports []Port) error {
 	f.admin, f.adminPorts = p, ports
 	return nil

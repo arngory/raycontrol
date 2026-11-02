@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,9 @@ type Firewall interface {
 	// SetAdmin opens ports (SSH) to the given prefixes without SPA:
 	// emergency access when SPA itself fails.
 	SetAdmin(prefixes []netip.Prefix, ports []Port) error
+	// SetRotation replaces the UDP slot ports redirected to service ports
+	// (spa-v2.md §11): slot port -> service port.
+	SetRotation(udp map[uint16]uint16) error
 	Allow(addr netip.Addr, ports []Port, ttl time.Duration) error
 	Deny(addr netip.Addr, ports []Port) error
 	Teardown() error
@@ -79,8 +83,12 @@ func (n *NFT) Ruleset() string {
 	}
 	limit := fmt.Sprintf("limit rate over %d/second burst %d packets", rate, 2*rate)
 	lo := `iif "lo" accept`
+	// Local traffic skips prerouting; tests in a namespace need the same
+	// redirect on output.
+	loNAT := ""
 	if n.FilterLoopback {
 		lo = "# loopback filtered (test)"
+		loNAT = "chain output_nat { type nat hook output priority -100; policy accept; udp dport @rot_udp redirect to : udp dport map @rot_udp; }"
 	}
 	return fmt.Sprintf(`table inet %[1]s {}
 delete table inet %[1]s
@@ -93,8 +101,17 @@ table inet %[1]s {
 	set admin4 { type ipv4_addr; flags interval; }
 	set admin6 { type ipv6_addr; flags interval; }
 	set admin_ports { type inet_proto . inet_service; }
+	map rot_udp { type inet_service : inet_service; }
 	set rate4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set rate6 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
+
+	# Rotated UDP slot ports land on the service port; the input chain then
+	# applies the SPA grants of that port as usual.
+	chain prerouting {
+		type nat hook prerouting priority dstnat; policy accept;
+		udp dport @rot_udp redirect to : udp dport map @rot_udp
+	}
+	%[5]s
 
 	chain input {
 		type filter hook input priority -10; policy drop;
@@ -118,7 +135,7 @@ table inet %[1]s {
 		ip6 saddr . meta l4proto . th dport @allow6 accept
 	}
 }
-`, Table, limit, n.NflogGroup, lo)
+`, Table, limit, n.NflogGroup, lo, loNAT)
 }
 
 // Setup installs the table and detects whether "destroy element" works.
@@ -188,6 +205,25 @@ func (n *NFT) SetAdmin(prefixes []netip.Prefix, ports []Port) error {
 		if len(set.elems) > 0 {
 			fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set.name, strings.Join(set.elems, ", "))
 		}
+	}
+	return n.run(b.String())
+}
+
+// SetRotation replaces the rotation map in one transaction.
+func (n *NFT) SetRotation(udp map[uint16]uint16) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "flush map inet %s rot_udp\n", Table)
+	if len(udp) > 0 {
+		keys := make([]int, 0, len(udp))
+		for k := range udp {
+			keys = append(keys, int(k))
+		}
+		sort.Ints(keys)
+		elems := make([]string, len(keys))
+		for i, k := range keys {
+			elems[i] = fmt.Sprintf("%d : %d", k, udp[uint16(k)])
+		}
+		fmt.Fprintf(&b, "add element inet %s rot_udp { %s }\n", Table, strings.Join(elems, ", "))
 	}
 	return n.run(b.String())
 }

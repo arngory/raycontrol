@@ -383,9 +383,12 @@ func (x *Device) GetAllowed() []uint32 {
 }
 
 type Service struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            uint32                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
-	Ports         []*Port                `protobuf:"bytes,2,rep,name=ports,proto3" json:"ports,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    uint32                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	Ports []*Port                `protobuf:"bytes,2,rep,name=ports,proto3" json:"ports,omitempty"`
+	// UDP port rotation (spa-v2.md §11): the slot ports of this schedule are
+	// redirected to target_port.
+	Rotation      *Rotation `protobuf:"bytes,3,opt,name=rotation,proto3" json:"rotation,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -434,6 +437,81 @@ func (x *Service) GetPorts() []*Port {
 	return nil
 }
 
+func (x *Service) GetRotation() *Rotation {
+	if x != nil {
+		return x.Rotation
+	}
+	return nil
+}
+
+type Rotation struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PortKey       []byte                 `protobuf:"bytes,1,opt,name=port_key,json=portKey,proto3" json:"port_key,omitempty"`
+	PortBase      uint32                 `protobuf:"varint,2,opt,name=port_base,json=portBase,proto3" json:"port_base,omitempty"`
+	PortRange     uint32                 `protobuf:"varint,3,opt,name=port_range,json=portRange,proto3" json:"port_range,omitempty"`
+	TargetPort    uint32                 `protobuf:"varint,4,opt,name=target_port,json=targetPort,proto3" json:"target_port,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Rotation) Reset() {
+	*x = Rotation{}
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Rotation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Rotation) ProtoMessage() {}
+
+func (x *Rotation) ProtoReflect() protoreflect.Message {
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Rotation.ProtoReflect.Descriptor instead.
+func (*Rotation) Descriptor() ([]byte, []int) {
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *Rotation) GetPortKey() []byte {
+	if x != nil {
+		return x.PortKey
+	}
+	return nil
+}
+
+func (x *Rotation) GetPortBase() uint32 {
+	if x != nil {
+		return x.PortBase
+	}
+	return 0
+}
+
+func (x *Rotation) GetPortRange() uint32 {
+	if x != nil {
+		return x.PortRange
+	}
+	return 0
+}
+
+func (x *Rotation) GetTargetPort() uint32 {
+	if x != nil {
+		return x.TargetPort
+	}
+	return 0
+}
+
 type Port struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Proto         string                 `protobuf:"bytes,1,opt,name=proto,proto3" json:"proto,omitempty"` // tcp | udp
@@ -444,7 +522,7 @@ type Port struct {
 
 func (x *Port) Reset() {
 	*x = Port{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[6]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -456,7 +534,7 @@ func (x *Port) String() string {
 func (*Port) ProtoMessage() {}
 
 func (x *Port) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[6]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -469,7 +547,7 @@ func (x *Port) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Port.ProtoReflect.Descriptor instead.
 func (*Port) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{6}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Port) GetProto() string {
@@ -522,10 +600,18 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"\x06Device\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\fR\x03key\x12\x18\n" +
-	"\aallowed\x18\x03 \x03(\rR\aallowed\"N\n" +
+	"\aallowed\x18\x03 \x03(\rR\aallowed\"\x8d\x01\n" +
 	"\aService\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\rR\x02id\x123\n" +
-	"\x05ports\x18\x02 \x03(\v2\x1d.raycontrol.perimeter.v1.PortR\x05ports\"0\n" +
+	"\x05ports\x18\x02 \x03(\v2\x1d.raycontrol.perimeter.v1.PortR\x05ports\x12=\n" +
+	"\brotation\x18\x03 \x01(\v2!.raycontrol.perimeter.v1.RotationR\brotation\"\x82\x01\n" +
+	"\bRotation\x12\x19\n" +
+	"\bport_key\x18\x01 \x01(\fR\aportKey\x12\x1b\n" +
+	"\tport_base\x18\x02 \x01(\rR\bportBase\x12\x1d\n" +
+	"\n" +
+	"port_range\x18\x03 \x01(\rR\tportRange\x12\x1f\n" +
+	"\vtarget_port\x18\x04 \x01(\rR\n" +
+	"targetPort\"0\n" +
 	"\x04Port\x12\x14\n" +
 	"\x05proto\x18\x01 \x01(\tR\x05proto\x12\x12\n" +
 	"\x04port\x18\x02 \x01(\rR\x04port2\x87\x01\n" +
@@ -544,7 +630,7 @@ func file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP() []byte {
 	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescData
 }
 
-var file_raycontrol_perimeter_v1_perimeter_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_raycontrol_perimeter_v1_perimeter_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_raycontrol_perimeter_v1_perimeter_proto_goTypes = []any{
 	(*WatchPerimeterRequest)(nil),  // 0: raycontrol.perimeter.v1.WatchPerimeterRequest
 	(*WatchPerimeterResponse)(nil), // 1: raycontrol.perimeter.v1.WatchPerimeterResponse
@@ -552,23 +638,25 @@ var file_raycontrol_perimeter_v1_perimeter_proto_goTypes = []any{
 	(*SPAParams)(nil),              // 3: raycontrol.perimeter.v1.SPAParams
 	(*Device)(nil),                 // 4: raycontrol.perimeter.v1.Device
 	(*Service)(nil),                // 5: raycontrol.perimeter.v1.Service
-	(*Port)(nil),                   // 6: raycontrol.perimeter.v1.Port
+	(*Rotation)(nil),               // 6: raycontrol.perimeter.v1.Rotation
+	(*Port)(nil),                   // 7: raycontrol.perimeter.v1.Port
 }
 var file_raycontrol_perimeter_v1_perimeter_proto_depIdxs = []int32{
 	2, // 0: raycontrol.perimeter.v1.WatchPerimeterResponse.snapshot:type_name -> raycontrol.perimeter.v1.Snapshot
 	3, // 1: raycontrol.perimeter.v1.Snapshot.spa:type_name -> raycontrol.perimeter.v1.SPAParams
 	4, // 2: raycontrol.perimeter.v1.Snapshot.devices:type_name -> raycontrol.perimeter.v1.Device
 	5, // 3: raycontrol.perimeter.v1.Snapshot.services:type_name -> raycontrol.perimeter.v1.Service
-	6, // 4: raycontrol.perimeter.v1.Snapshot.public_ports:type_name -> raycontrol.perimeter.v1.Port
-	6, // 5: raycontrol.perimeter.v1.Snapshot.admin_ports:type_name -> raycontrol.perimeter.v1.Port
-	6, // 6: raycontrol.perimeter.v1.Service.ports:type_name -> raycontrol.perimeter.v1.Port
-	0, // 7: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:input_type -> raycontrol.perimeter.v1.WatchPerimeterRequest
-	1, // 8: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:output_type -> raycontrol.perimeter.v1.WatchPerimeterResponse
-	8, // [8:9] is the sub-list for method output_type
-	7, // [7:8] is the sub-list for method input_type
-	7, // [7:7] is the sub-list for extension type_name
-	7, // [7:7] is the sub-list for extension extendee
-	0, // [0:7] is the sub-list for field type_name
+	7, // 4: raycontrol.perimeter.v1.Snapshot.public_ports:type_name -> raycontrol.perimeter.v1.Port
+	7, // 5: raycontrol.perimeter.v1.Snapshot.admin_ports:type_name -> raycontrol.perimeter.v1.Port
+	7, // 6: raycontrol.perimeter.v1.Service.ports:type_name -> raycontrol.perimeter.v1.Port
+	6, // 7: raycontrol.perimeter.v1.Service.rotation:type_name -> raycontrol.perimeter.v1.Rotation
+	0, // 8: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:input_type -> raycontrol.perimeter.v1.WatchPerimeterRequest
+	1, // 9: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:output_type -> raycontrol.perimeter.v1.WatchPerimeterResponse
+	9, // [9:10] is the sub-list for method output_type
+	8, // [8:9] is the sub-list for method input_type
+	8, // [8:8] is the sub-list for extension type_name
+	8, // [8:8] is the sub-list for extension extendee
+	0, // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_raycontrol_perimeter_v1_perimeter_proto_init() }
@@ -582,7 +670,7 @@ func file_raycontrol_perimeter_v1_perimeter_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_raycontrol_perimeter_v1_perimeter_proto_rawDesc), len(file_raycontrol_perimeter_v1_perimeter_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

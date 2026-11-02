@@ -14,6 +14,7 @@ import (
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/provision"
 )
 
 // PerimeterServer feeds rayspa. Its snapshots carry device keys, so only the
@@ -121,8 +122,20 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 			continue
 		}
 		ps := &perimeterv1.Service{Id: uint32(svc.ID)}
+		var udp uint16
 		for _, port := range ports {
 			ps.Ports = append(ps.Ports, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
+			if port.Proto == "udp" && udp == 0 {
+				udp = port.Num
+			}
+		}
+		if rot, ok := provision.ServiceRotation(svc); ok && udp != 0 {
+			secrets, err := p.Store.ServiceSecrets(ctx, svc.ID)
+			if err != nil {
+				return nil, err
+			}
+			ps.Rotation = &perimeterv1.Rotation{PortKey: secrets[provision.SecretPortKey],
+				PortBase: uint32(rot.Base), PortRange: uint32(rot.Range), TargetPort: uint32(udp)}
 		}
 		snap.Services = append(snap.Services, ps)
 	}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/netip"
 	"slices"
 	"sync"
@@ -15,6 +16,13 @@ import (
 
 // ErrNotReady is returned before the first snapshot arrives.
 var ErrNotReady = errors.New("perimeter: no snapshot yet")
+
+// rotation is a UDP port schedule: spa.Params reused with the service's key
+// and range (spa-v2.md §11).
+type rotation struct {
+	sched  spa.Params
+	target uint16
+}
 
 type grantKey struct {
 	addr netip.Addr
@@ -35,6 +43,8 @@ type Gate struct {
 	maxTTL     time.Duration
 	verifier   *spa.Verifier
 	services   map[uint16][]Port
+	rotations  []rotation
+	rotMap     map[uint16]uint16
 	allowed    map[string][]uint16 // device -> service IDs
 	public     []Port
 	admin      []netip.Prefix
@@ -98,8 +108,18 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		allowed[d.Id] = sd.Allowed
 	}
 	services := make(map[uint16][]Port, len(snap.Services))
+	var rotations []rotation
 	for _, s := range snap.Services {
 		services[uint16(s.Id)] = portsOf(s.Ports)
+		if r := s.Rotation; r != nil {
+			if len(r.PortKey) != spa.KeySize || r.PortRange == 0 || r.PortBase+r.PortRange > 65536 {
+				return fmt.Errorf("perimeter: bad rotation of service %d", s.Id)
+			}
+			sched := params
+			copy(sched.PortKey[:], r.PortKey)
+			sched.PortBase, sched.PortRange = uint16(r.PortBase), uint16(r.PortRange)
+			rotations = append(rotations, rotation{sched: sched, target: uint16(r.TargetPort)})
+		}
 	}
 	public := portsOf(snap.PublicPorts)
 	var admin []netip.Prefix
@@ -125,7 +145,7 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 	g.verifier.SetDevices(devices)
 	g.params, g.tcpCarrier = params, sp.TcpCarrier
 	g.defaultTTL, g.maxTTL = defTTL, maxTTL
-	g.services, g.allowed = services, allowed
+	g.services, g.allowed, g.rotations = services, allowed, rotations
 
 	if !slices.Equal(public, g.public) {
 		if err := g.fw.SetPublic(public); err != nil {
@@ -227,7 +247,21 @@ func (g *Gate) Tick() ([]uint16, error) {
 }
 
 func (g *Gate) slotsLocked() error {
-	udp := g.params.ActivePorts(g.now())
+	now := g.now()
+	rot := map[uint16]uint16{}
+	for _, r := range g.rotations {
+		for _, p := range r.sched.ActivePorts(now) {
+			rot[p] = r.target
+		}
+	}
+	if !maps.Equal(rot, g.rotMap) {
+		if err := g.fw.SetRotation(rot); err != nil {
+			return err
+		}
+		g.rotMap = rot
+	}
+
+	udp := g.params.ActivePorts(now)
 	slices.Sort(udp)
 	var tcp []uint16
 	if g.tcpCarrier {

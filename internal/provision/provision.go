@@ -47,6 +47,7 @@ const (
 	SecretMLKEMSeed     = "mlkem768_seed"  //nolint:gosec // G101: a name; inner, VLESS encryption
 	SecretTLSKey        = "tls_key"        // subscription, PKCS#8 DER
 	SecretTLSCert       = "tls_cert"       // subscription, DER
+	SecretPortKey       = "port_key"       // UDP port rotation schedule
 	SubscriptionService = "subscription"
 )
 
@@ -259,6 +260,17 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		svc.Secrets[SecretMLKEMSeed] = seed
 	}
 
+	if rotates(svc.Kind) {
+		if _, ok := settings["udp_rotation"]; !ok {
+			rot, key, err := newRotation(ctx, st, all)
+			if err != nil {
+				return svc, err
+			}
+			settings["udp_rotation"] = rot
+			svc.Secrets[SecretPortKey] = key
+		}
+	}
+
 	b, err := json.Marshal(settings)
 	if err != nil {
 		return svc, err
@@ -305,4 +317,65 @@ func Zone(svc store.Service) string {
 	}
 	_ = json.Unmarshal([]byte(svc.Settings), &s)
 	return s.Zone
+}
+
+// Rotation is the UDP port schedule of a service (spa-v2.md §11).
+type Rotation struct {
+	Base  uint16 `json:"base"`
+	Range uint16 `json:"range"`
+}
+
+// rotates lists the kinds whose UDP port follows a schedule: everything the
+// front serves on UDP 443.
+func rotates(kind string) bool {
+	return slices.Contains([]string{"hy2-masq", "hy2-obfs", "naive", "doh"}, kind)
+}
+
+// ServiceRotation returns the schedule of a service, if it has one.
+func ServiceRotation(svc store.Service) (Rotation, bool) {
+	var s struct {
+		Rot *Rotation `json:"udp_rotation"`
+	}
+	if json.Unmarshal([]byte(svc.Settings), &s) != nil || s.Rot == nil || s.Rot.Range == 0 {
+		return Rotation{}, false
+	}
+	return *s.Rot, true
+}
+
+// newRotation picks a port range that overlaps neither the SPA range, nor
+// other schedules, nor any fixed service port, and a fresh key.
+func newRotation(ctx context.Context, st *store.Store, all []store.Service) (Rotation, []byte, error) {
+	params, err := node.LoadParams(ctx, st)
+	if err != nil {
+		return Rotation{}, nil, err
+	}
+	type span struct{ lo, hi int } // [lo, hi)
+	taken := []span{{int(params.PortBase), int(params.PortBase) + int(params.PortRange)}}
+	for _, s := range all {
+		if r, ok := ServiceRotation(s); ok {
+			taken = append(taken, span{int(r.Base), int(r.Base) + int(r.Range)})
+		}
+		ports, _ := s.Ports()
+		for _, p := range ports {
+			taken = append(taken, span{int(p.Num), int(p.Num) + 1})
+		}
+	}
+	for range 1000 {
+		rng, err := randInt(1024, 4096)
+		if err != nil {
+			return Rotation{}, nil, err
+		}
+		base, err := randInt(20000, 60999-rng)
+		if err != nil {
+			return Rotation{}, nil, err
+		}
+		if !slices.ContainsFunc(taken, func(t span) bool { return base < t.hi && t.lo < base+rng }) {
+			key := make([]byte, 32)
+			if _, err := rand.Read(key); err != nil {
+				return Rotation{}, nil, err
+			}
+			return Rotation{Base: uint16(base), Range: uint16(rng)}, key, nil
+		}
+	}
+	return Rotation{}, nil, errors.New("no free port range for UDP rotation")
 }

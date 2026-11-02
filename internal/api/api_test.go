@@ -71,12 +71,12 @@ func TestEnrollAndPassSPA(t *testing.T) {
 	ctx := context.Background()
 	c := NewUnixClient(sock)
 
-	for _, svc := range [][2]string{{"reality", "reality"}, {"dnstt", "dns"}, {"ssh", "ssh"}} {
+	for _, svc := range [][2]string{{"reality", "reality"}, {"dnstt", "dns"}, {"ssh", "ssh"}, {"hy2-masq", "hy2"}} {
 		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: svc[0], Name: svc[1]})); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"reality", "dns"}})); err != nil {
+	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"reality", "dns", "hy2"}})); err != nil {
 		t.Fatal(err)
 	}
 	dev, err := c.CreateDevice(ctx, connect.NewRequest(&nodev1.CreateDeviceRequest{User: "alice", Name: "phone"}))
@@ -88,8 +88,14 @@ func TestEnrollAndPassSPA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.Host != "n.example.com" || b.DeviceID != dev.Msg.Device.Id || len(b.Services) != 2 {
+	if b.Host != "n.example.com" || b.DeviceID != dev.Msg.Device.Id || len(b.Services) != 3 {
 		t.Fatalf("bundle = %+v", b)
+	}
+	for _, s := range b.Services {
+		rotates := len(s.PortKey) == 64 && s.PortRange >= 1024
+		if rotates != (s.Kind == "hy2-masq") {
+			t.Fatalf("rotation of %s: %+v", s.Kind, s)
+		}
 	}
 	if b.Sub == nil || b.Sub.Port == 0 || len(b.Sub.Pin) != 43 || len(b.NodeKeys["ed25519"]) != 64 || b.NodeKeys["mldsa65"] == "" {
 		t.Fatalf("bundle subscription/keys = %+v %v", b.Sub, b.NodeKeys)
@@ -134,11 +140,11 @@ func TestEnrollAndPassSPA(t *testing.T) {
 		t.Fatalf("revoked device: %v", err)
 	}
 
-	if n := changes.Load(); n != 6 {
-		t.Fatalf("OnChange ran %d times, want 6", n)
+	if n := changes.Load(); n != 7 {
+		t.Fatalf("OnChange ran %d times, want 7", n)
 	}
 	audit, err := c.ListAudit(ctx, connect.NewRequest(&nodev1.ListAuditRequest{}))
-	if err != nil || len(audit.Msg.Entries) != 6 || audit.Msg.Entries[0].Action != "device.revoke" {
+	if err != nil || len(audit.Msg.Entries) != 7 || audit.Msg.Entries[0].Action != "device.revoke" {
 		t.Fatalf("audit = %v, %v", audit.Msg.GetEntries(), err)
 	}
 }

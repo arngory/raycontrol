@@ -24,10 +24,17 @@
 
 ## Выпуск
 
-1. Файл `.github/release-notes/<тег>.md` (например `v0.2.0.md`) — уже в ветке, которая идёт в релиз.
-2. Тег на коммите `main`: `git tag v0.2.0 && git push origin v0.2.0`.
-3. Workflow `Release` собирает `raycontrol-linux-{amd64,arm64}.tar.gz` (`rayd`, `rayspa`, `rayctl`), считает `SHA256SUMS`,
+1. Файл `.github/release-notes/<тег>.md` (например `v0.2.0.md`) — уже в ветке, из которой выпускается релиз.
+2. Запуск, один из двух:
+   - **из GitHub** (основной способ; из сессий Claude пушить теги нельзя): Actions → Release → Run workflow → выбрать
+     ветку (обычно `main`) и ввести тег `vX.Y.Z`. Workflow сам создаст тег на этом коммите вместе с релизом;
+     существующий тег он не перезаписывает;
+   - **тегом**: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. Workflow собирает `raycontrol-linux-{amd64,arm64}.tar.gz` (`rayd`, `rayspa`, `rayctl`), считает `SHA256SUMS`,
    подписывает его и публикует релиз с этими файлами и `SHA256SUMS.minisig`.
+
+`install/bootstrap.sh` берёт последний релиз (или `RAYCONTROL_VERSION`), а сам скрипт по README скачивается из `main`:
+пока код не слит в `main`, скачивайте `bootstrap.sh` из рабочей ветки.
 
 ## Проверка вручную
 
@@ -38,6 +45,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 ## Data plane
 
-niko-server и Xray собираются из закреплённых коммитов (`deploy/versions.env`) и ставятся в `/usr/local/bin`.
+niko-server — подписанные релизы `niko-server-vX.Y.Z` в `arngory/niko` (сейчас `niko-server-v0.1.1`), Xray собирается из
+закреплённого коммита форка; версии — в `deploy/versions.env`. Оба ставятся в `/usr/local/bin`.
 `rayctl apply` не включает юниты, чьих бинарников нет на хосте, и пишет об этом. Автоматическая загрузка data plane —
 этап R4 (`rayctl update`).

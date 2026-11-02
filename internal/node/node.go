@@ -133,6 +133,10 @@ type BundleService struct {
 	ID   uint16 `json:"id"`
 	Kind string `json:"kind"`
 	Name string `json:"name"`
+	// UDP port schedule of the service (spa-v2.md §11), if it rotates.
+	PortKey   string `json:"port_key,omitempty"`
+	PortBase  uint16 `json:"port_base,omitempty"`
+	PortRange uint16 `json:"port_range,omitempty"`
 }
 
 // Bundle is everything a client needs to pass SPA for one device. It holds

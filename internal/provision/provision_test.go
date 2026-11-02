@@ -88,4 +88,30 @@ func TestInit(t *testing.T) {
 	if a.UID == b.UID || a.UID < store.FirstServiceUID {
 		t.Fatalf("uids %d %d", a.UID, b.UID)
 	}
+
+	// UDP services get non-overlapping port schedules outside the SPA range.
+	var spans [][2]int
+	for _, name := range []string{"hy2a", "hy2b", "hy2c"} {
+		s, err := CreateService(ctx, st, store.Service{Kind: "hy2-masq", Name: name, Enabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rot, ok := ServiceRotation(s)
+		sec, _ := st.ServiceSecrets(ctx, s.ID)
+		if !ok || len(sec[SecretPortKey]) != 32 || rot.Range < 1024 {
+			t.Fatalf("%s rotation %+v key %d", name, rot, len(sec[SecretPortKey]))
+		}
+		spans = append(spans, [2]int{int(rot.Base), int(rot.Base) + int(rot.Range)})
+	}
+	spans = append(spans, [2]int{int(p.PortBase), int(p.PortBase) + int(p.PortRange)})
+	for i := range spans {
+		for j := range spans {
+			if i != j && spans[i][0] < spans[j][1] && spans[j][0] < spans[i][1] {
+				t.Fatalf("ranges overlap: %v", spans)
+			}
+		}
+	}
+	if _, ok := ServiceRotation(a); ok {
+		t.Fatal("dnstt must not rotate")
+	}
 }

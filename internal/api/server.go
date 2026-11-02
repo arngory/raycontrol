@@ -404,9 +404,19 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 			continue
 		}
 		for _, id := range u.Services {
-			if svc.ID == id {
-				b.Services = append(b.Services, node.BundleService{ID: uint16(svc.ID), Kind: svc.Kind, Name: svc.Name})
+			if svc.ID != id {
+				continue
 			}
+			bs := node.BundleService{ID: uint16(svc.ID), Kind: svc.Kind, Name: svc.Name}
+			if rot, ok := provision.ServiceRotation(svc); ok {
+				secrets, err := s.Store.ServiceSecrets(ctx, svc.ID)
+				if err != nil {
+					return "", err
+				}
+				bs.PortKey = hex.EncodeToString(secrets[provision.SecretPortKey])
+				bs.PortBase, bs.PortRange = rot.Base, rot.Range
+			}
+			b.Services = append(b.Services, bs)
 		}
 	}
 	keys, err := provision.LoadNodeKeys(ctx, s.Store)

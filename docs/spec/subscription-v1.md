@@ -1,6 +1,6 @@
 # raycontrol: подписка v1
 
-Статус: **R1**. Эталонная реализация — [`internal/sub`](../../internal/sub). Основа — предложение сессии Niko
+Статус: **заморожен** (R1, вместе с эндпоинтом `/sub/v1`). Несовместимые изменения — только как подписка v2 с новым путём. Эталонная реализация — [`internal/sub`](../../internal/sub). Основа — предложение сессии Niko
 ([`RAYCONTROL.md`](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/RAYCONTROL.md) §6),
 решение R1-4 в [`08-decisions.md`](../08-decisions.md).
 
