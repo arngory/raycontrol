@@ -170,7 +170,8 @@ func (is *Issuer) Issue(ctx context.Context, names []string, key crypto.Signer) 
 	if err != nil {
 		return nil, err
 	}
-	chain, _, err := client.CreateOrderCert(ctx, order.FinalizeURL, csr, true)
+	// With the order's own URI: a CA need not send Location on finalize.
+	chain, _, err := client.CreateCertFromOrder(ctx, order, csr, true)
 	if err != nil {
 		return nil, fmt.Errorf("acme certificate: %w", err)
 	}
