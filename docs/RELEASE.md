@@ -18,6 +18,10 @@
    До этого bootstrap отказывается работать.
 4. `raycontrol.key` — в офлайн-хранилище. Потеря ключа = новый ключ и новый `bootstrap.sh`.
 
+Текущий ключ: ID `A9C7802E23B87A01`, публичная часть
+`RWQBergjLoDHqeme5vyIuIRXJLjTj1EF3jR1nlWBVJO3rWxgy9SZj4bD` (уже в `install/bootstrap.sh`). Строка
+`untrusted comment` из `.pub` — только подпись к файлу: в `bootstrap.sh` и в `minisign -P` она не нужна.
+
 ## Выпуск
 
 1. Файл `.github/release-notes/<тег>.md` (например `v0.2.0.md`) — уже в ветке, которая идёт в релиз.

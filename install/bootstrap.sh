@@ -12,8 +12,10 @@ set -euo pipefail
 
 REPO="arngory/raycontrol"
 VERSION="${RAYCONTROL_VERSION:-latest}"
-# minisign public key of raycontrol releases (docs/RELEASE.md).
-PUBKEY="RWQ_REPLACE_WITH_THE_RELEASE_PUBLIC_KEY"
+# minisign public key of raycontrol releases, key ID A9C7802E23B87A01
+# (docs/RELEASE.md). Only this base64 line matters; the "untrusted comment"
+# line of the .pub file is not part of the key.
+PUBKEY="RWQBergjLoDHqeme5vyIuIRXJLjTj1EF3jR1nlWBVJO3rWxgy9SZj4bD"
 
 die() {
 	echo "bootstrap: $*" >&2
