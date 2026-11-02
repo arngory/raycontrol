@@ -13,6 +13,7 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,6 +61,10 @@ type Manager struct {
 	Log    *slog.Logger
 	// Every is the check interval; failures back off from it up to a day.
 	Every time.Duration
+	// Wildcard returns the node's domain when certificates can be wildcards
+	// (DNS-01): one *.domain then covers every name of a site, those REALITY
+	// moves to included, and no name of the node shows in CT logs (R4-10).
+	Wildcard func(ctx context.Context) string
 
 	once  sync.Once
 	fails map[string]int
@@ -133,8 +138,14 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 		if !due(chain, want, now) {
 			continue
 		}
-		err = m.issue(ctx, svc, want)
-		if err != nil && len(next) > 0 && due(chain, names, now) {
+		order := want
+		if m.Wildcard != nil {
+			if d := m.Wildcard(ctx); d != "" && underWildcard(want, d) {
+				order = []string{"*." + d}
+			}
+		}
+		err = m.issue(ctx, svc, order)
+		if err != nil && len(next) > 0 && len(order) == len(want) && due(chain, names, now) {
 			m.log().Warn("certificate with the next name not issued, renewing without it", "service", svc.Name, "err", err)
 			err = m.issue(ctx, svc, names)
 		}
@@ -167,11 +178,23 @@ func due(chainPEM []byte, names []string, now time.Time) bool {
 		return true
 	}
 	for _, n := range names {
-		if !slices.Contains(leaf.DNSNames, n) {
+		if leaf.VerifyHostname(n) != nil {
 			return true
 		}
 	}
 	return !now.Before(RenewAt(leaf))
+}
+
+// underWildcard reports whether *.domain covers every name: each one label
+// below the domain.
+func underWildcard(names []string, domain string) bool {
+	for _, n := range names {
+		label, ok := strings.CutSuffix(n, "."+domain)
+		if !ok || label == "" || strings.Contains(label, ".") {
+			return false
+		}
+	}
+	return len(names) > 0
 }
 
 func (m *Manager) issue(ctx context.Context, svc store.Service, names []string) error {

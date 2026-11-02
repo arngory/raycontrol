@@ -549,6 +549,8 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service) (string,
 	if domain == "" {
 		return "", fmt.Errorf("%w: this service needs the node domain (rayd init -domain)", store.ErrInvalid)
 	}
+	// Nor the name DNS tunnel zones are delegated to.
+	ns, _ := st.GetSetting(ctx, settingNSName)
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 	for {
 		label := make([]byte, 3)
@@ -560,7 +562,7 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service) (string,
 			label[i] = alphabet[n]
 		}
 		zone := string(label) + "." + domain
-		if !slices.ContainsFunc(all, func(s store.Service) bool { return strings.Contains(s.Settings, `"`+zone+`"`) }) {
+		if zone != string(ns) && !slices.ContainsFunc(all, func(s store.Service) bool { return strings.Contains(s.Settings, `"`+zone+`"`) }) {
 			return zone, nil
 		}
 	}

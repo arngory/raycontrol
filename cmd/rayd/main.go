@@ -19,6 +19,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/api"
 	"github.com/arngory/raycontrol/internal/certs"
+	"github.com/arngory/raycontrol/internal/cloudflare"
 	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/live"
 	"github.com/arngory/raycontrol/internal/node"
@@ -179,6 +180,7 @@ func cmdServe(args []string) error {
 		}
 	}
 	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, log)
+	go syncDNS(ctx, st, srv.Changes, log)
 	if err := startSubscription(ctx, st, log); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
@@ -203,9 +205,60 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 	}
 	is := &certs.Issuer{Directory: directory, AccountKey: key, Window: srv.SetACMEWindow, NodeHost: host, Log: log,
 		Listen: ":" + strconv.Itoa(int(port))}
-	m := &certs.Manager{Store: st, Issue: is.Issue, Notify: srv.Notify, Log: log}
+	// With Cloudflare: DNS-01 and one wildcard certificate, no window on
+	// TCP 80 (R4-10).
+	is.DNS = func(ctx context.Context) (certs.DNSSolver, error) {
+		c, zone, err := provision.Cloudflare(ctx, st)
+		if err != nil || c == nil {
+			return nil, err
+		}
+		return &cloudflare.Solver{Client: c, Zone: zone}, nil
+	}
+	m := &certs.Manager{Store: st, Issue: is.Issue, Notify: srv.Notify, Log: log,
+		Wildcard: func(ctx context.Context) string {
+			if c, _, err := provision.Cloudflare(ctx, st); err != nil || c == nil {
+				return ""
+			}
+			d, _ := provision.Domain(ctx, st)
+			return d
+		}}
+	srv.DNSChanged = m.Wake
 	go m.Run(ctx)
 	return m, is, nil
+}
+
+// syncDNS keeps the node's records in its DNS provider's zone: when the
+// records it needs change (a DNS tunnel added or removed) and every hour
+// against drift (R4-10).
+func syncDNS(ctx context.Context, st *store.Store, changes func() <-chan struct{}, log *slog.Logger) {
+	last := ""
+	next := time.Time{}
+	for {
+		wake := changes()
+		records, _, err := provision.DNSRecords(ctx, st)
+		key := fmt.Sprint(records)
+		if c, _, perr := provision.Cloudflare(ctx, st); err == nil && perr == nil && c != nil && (key != last || time.Now().After(next)) {
+			done, problems, err := provision.SyncDNS(ctx, st)
+			switch {
+			case err != nil:
+				log.Warn("DNS records not synced", "err", err)
+			default:
+				last, next = key, time.Now().Add(time.Hour)
+				if len(done) > 0 {
+					log.Info("DNS records synced", "changes", len(done))
+				}
+				for _, p := range problems {
+					log.Warn("DNS record", "problem", p)
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+		case <-time.After(10 * time.Minute):
+		}
+	}
 }
 
 // rotateReality advances the REALITY key rotation every minute (R4-7), so

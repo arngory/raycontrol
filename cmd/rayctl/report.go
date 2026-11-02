@@ -123,6 +123,14 @@ func (c *cli) report(ctx context.Context, args []string) error {
 		p("kinds\t%s\n", strings.Join(list, " "))
 	}
 
+	if d, err := c.c.GetDNS(ctx, connect.NewRequest(&nodev1.GetDNSRequest{})); err == nil {
+		provider := d.Msg.Status.Provider
+		if provider == "" {
+			provider = "none"
+		}
+		p("dns provider\t%s, %d records needed, %d problems\n", provider, len(d.Msg.Status.Records), len(d.Msg.Status.Problems))
+	}
+
 	p("\n== units\n")
 	units, _ := filepath.Glob("/etc/systemd/system/niko-*.service")
 	units = append([]string{"rayd.service", "rayspa.service"}, units...)

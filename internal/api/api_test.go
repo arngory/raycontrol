@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"connectrpc.com/connect"
 	"golang.org/x/sys/unix"
 
+	"github.com/arngory/raycontrol/internal/cloudflare/cftest"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
@@ -310,5 +312,43 @@ func TestRotateService(t *testing.T) {
 	svc, _ := srv.Store.ServiceByName(ctx, "r")
 	if provision.ParseRealityState(svc).RotateAt == 0 {
 		t.Fatalf("no request stored: %s", svc.Settings)
+	}
+}
+
+func TestDNSProvider(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	api, cf := cftest.New(t)
+	old := provision.CloudflareAPI
+	provision.CloudflareAPI = cf.BaseURL
+	defer func() { provision.CloudflareAPI = old }()
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+
+	if _, err := c.SetDNSProvider(ctx, connect.NewRequest(&nodev1.SetDNSProviderRequest{Provider: "route53", Token: "x"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("other provider: %v", err)
+	}
+	if _, err := c.SetDNSProvider(ctx, connect.NewRequest(&nodev1.SetDNSProviderRequest{Provider: "cloudflare", Token: "wrong"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("bad token: %v", err)
+	}
+	r, err := c.SetDNSProvider(ctx, connect.NewRequest(&nodev1.SetDNSProviderRequest{Provider: "cloudflare", Token: "good"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The test node's host is a name: nothing can point to it.
+	st := r.Msg.Status
+	if st.Provider != "cloudflare" || st.Zone != "example.com" || len(st.Problems) != 1 || len(api.List()) != 0 {
+		t.Fatalf("status %v, records %v", st, api.List())
+	}
+	entries, _ := srv.Store.ListAudit(ctx, 20)
+	for _, e := range entries {
+		if strings.Contains(e.Action+e.Target+e.Result, "good") {
+			t.Fatalf("token in the audit log: %+v", e)
+		}
+	}
+	if _, err := c.RemoveDNS(ctx, connect.NewRequest(&nodev1.RemoveDNSRequest{})); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := c.GetDNS(ctx, connect.NewRequest(&nodev1.GetDNSRequest{})); g.Msg.Status.Provider != "" {
+		t.Fatal("provider kept")
 	}
 }

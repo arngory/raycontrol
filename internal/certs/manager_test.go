@@ -10,6 +10,7 @@ import (
 	"errors"
 	"math/big"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -146,5 +147,43 @@ func TestManagerNextName(t *testing.T) {
 	}
 	if n := m.Once(ctx, now.Add(time.Hour)); n != 0 {
 		t.Fatal("issued again")
+	}
+}
+
+// With DNS-01 one wildcard covers the site's name and every name REALITY
+// moves to: a rotation needs no new certificate (R4-10).
+func TestManagerWildcard(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	r, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	var issued [][]string
+	m := &Manager{Store: st, Wildcard: func(context.Context) string { return "example.com" },
+		Issue: func(_ context.Context, names []string, key crypto.Signer) ([][]byte, error) {
+			issued = append(issued, names)
+			tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: names, NotBefore: now, NotAfter: now.Add(90 * 24 * time.Hour)}
+			der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
+			return [][]byte{der}, err
+		}}
+	if n := m.Once(ctx, now); n != 1 || len(issued) != 1 || !slices.Equal(issued[0], []string{"*.example.com"}) {
+		t.Fatalf("first: %d %v", n, issued)
+	}
+	epoch := provision.RealityEpoch{Period: 90 * 24 * time.Hour, Lead: 3 * 24 * time.Hour, Prepare: 24 * time.Hour}
+	ok := func(context.Context, string) error { return nil }
+	provision.RotateReality(ctx, st, r.CreatedAt.Add(86*24*time.Hour), epoch, ok, nil)
+	if n := m.Once(ctx, now.Add(time.Hour)); n != 0 {
+		t.Fatalf("issued again for the next name: %v", issued)
+	}
+	// Published at once: the wildcard covers the next name already.
+	if n, _ := provision.RotateReality(ctx, st, r.CreatedAt.Add(86*24*time.Hour+time.Minute), epoch, ok, nil); n != 1 {
+		t.Fatal("rotation waits for a certificate it has")
 	}
 }

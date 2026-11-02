@@ -84,6 +84,15 @@ const (
 	// NodeServiceSetAdminAccessProcedure is the fully-qualified name of the NodeService's
 	// SetAdminAccess RPC.
 	NodeServiceSetAdminAccessProcedure = "/raycontrol.node.v1.NodeService/SetAdminAccess"
+	// NodeServiceSetDNSProviderProcedure is the fully-qualified name of the NodeService's
+	// SetDNSProvider RPC.
+	NodeServiceSetDNSProviderProcedure = "/raycontrol.node.v1.NodeService/SetDNSProvider"
+	// NodeServiceGetDNSProcedure is the fully-qualified name of the NodeService's GetDNS RPC.
+	NodeServiceGetDNSProcedure = "/raycontrol.node.v1.NodeService/GetDNS"
+	// NodeServiceSyncDNSProcedure is the fully-qualified name of the NodeService's SyncDNS RPC.
+	NodeServiceSyncDNSProcedure = "/raycontrol.node.v1.NodeService/SyncDNS"
+	// NodeServiceRemoveDNSProcedure is the fully-qualified name of the NodeService's RemoveDNS RPC.
+	NodeServiceRemoveDNSProcedure = "/raycontrol.node.v1.NodeService/RemoveDNS"
 	// NodeServiceGetDeploymentProcedure is the fully-qualified name of the NodeService's GetDeployment
 	// RPC.
 	NodeServiceGetDeploymentProcedure = "/raycontrol.node.v1.NodeService/GetDeployment"
@@ -118,6 +127,13 @@ type NodeServiceClient interface {
 	// access, docs/08-decisions.md D-6).
 	GetAdminAccess(context.Context, *connect.Request[v1.GetAdminAccessRequest]) (*connect.Response[v1.GetAdminAccessResponse], error)
 	SetAdminAccess(context.Context, *connect.Request[v1.SetAdminAccessRequest]) (*connect.Response[v1.SetAdminAccessResponse], error)
+	// The DNS provider (Cloudflare): the node's records in its zone and
+	// certificates through DNS-01 with a wildcard name (R4-10). The token is
+	// stored by rayd and never returned.
+	SetDNSProvider(context.Context, *connect.Request[v1.SetDNSProviderRequest]) (*connect.Response[v1.SetDNSProviderResponse], error)
+	GetDNS(context.Context, *connect.Request[v1.GetDNSRequest]) (*connect.Response[v1.GetDNSResponse], error)
+	SyncDNS(context.Context, *connect.Request[v1.SyncDNSRequest]) (*connect.Response[v1.SyncDNSResponse], error)
+	RemoveDNS(context.Context, *connect.Request[v1.RemoveDNSRequest]) (*connect.Response[v1.RemoveDNSResponse], error)
 	// GetDeployment returns what root must install for the current services:
 	// system users, unit files and other files. rayctl apply writes them.
 	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
@@ -242,6 +258,30 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("SetAdminAccess")),
 			connect.WithClientOptions(opts...),
 		),
+		setDNSProvider: connect.NewClient[v1.SetDNSProviderRequest, v1.SetDNSProviderResponse](
+			httpClient,
+			baseURL+NodeServiceSetDNSProviderProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetDNSProvider")),
+			connect.WithClientOptions(opts...),
+		),
+		getDNS: connect.NewClient[v1.GetDNSRequest, v1.GetDNSResponse](
+			httpClient,
+			baseURL+NodeServiceGetDNSProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetDNS")),
+			connect.WithClientOptions(opts...),
+		),
+		syncDNS: connect.NewClient[v1.SyncDNSRequest, v1.SyncDNSResponse](
+			httpClient,
+			baseURL+NodeServiceSyncDNSProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SyncDNS")),
+			connect.WithClientOptions(opts...),
+		),
+		removeDNS: connect.NewClient[v1.RemoveDNSRequest, v1.RemoveDNSResponse](
+			httpClient,
+			baseURL+NodeServiceRemoveDNSProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("RemoveDNS")),
+			connect.WithClientOptions(opts...),
+		),
 		getDeployment: connect.NewClient[v1.GetDeploymentRequest, v1.GetDeploymentResponse](
 			httpClient,
 			baseURL+NodeServiceGetDeploymentProcedure,
@@ -271,6 +311,10 @@ type nodeServiceClient struct {
 	listAudit         *connect.Client[v1.ListAuditRequest, v1.ListAuditResponse]
 	getAdminAccess    *connect.Client[v1.GetAdminAccessRequest, v1.GetAdminAccessResponse]
 	setAdminAccess    *connect.Client[v1.SetAdminAccessRequest, v1.SetAdminAccessResponse]
+	setDNSProvider    *connect.Client[v1.SetDNSProviderRequest, v1.SetDNSProviderResponse]
+	getDNS            *connect.Client[v1.GetDNSRequest, v1.GetDNSResponse]
+	syncDNS           *connect.Client[v1.SyncDNSRequest, v1.SyncDNSResponse]
+	removeDNS         *connect.Client[v1.RemoveDNSRequest, v1.RemoveDNSResponse]
 	getDeployment     *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
 }
 
@@ -364,6 +408,26 @@ func (c *nodeServiceClient) SetAdminAccess(ctx context.Context, req *connect.Req
 	return c.setAdminAccess.CallUnary(ctx, req)
 }
 
+// SetDNSProvider calls raycontrol.node.v1.NodeService.SetDNSProvider.
+func (c *nodeServiceClient) SetDNSProvider(ctx context.Context, req *connect.Request[v1.SetDNSProviderRequest]) (*connect.Response[v1.SetDNSProviderResponse], error) {
+	return c.setDNSProvider.CallUnary(ctx, req)
+}
+
+// GetDNS calls raycontrol.node.v1.NodeService.GetDNS.
+func (c *nodeServiceClient) GetDNS(ctx context.Context, req *connect.Request[v1.GetDNSRequest]) (*connect.Response[v1.GetDNSResponse], error) {
+	return c.getDNS.CallUnary(ctx, req)
+}
+
+// SyncDNS calls raycontrol.node.v1.NodeService.SyncDNS.
+func (c *nodeServiceClient) SyncDNS(ctx context.Context, req *connect.Request[v1.SyncDNSRequest]) (*connect.Response[v1.SyncDNSResponse], error) {
+	return c.syncDNS.CallUnary(ctx, req)
+}
+
+// RemoveDNS calls raycontrol.node.v1.NodeService.RemoveDNS.
+func (c *nodeServiceClient) RemoveDNS(ctx context.Context, req *connect.Request[v1.RemoveDNSRequest]) (*connect.Response[v1.RemoveDNSResponse], error) {
+	return c.removeDNS.CallUnary(ctx, req)
+}
+
 // GetDeployment calls raycontrol.node.v1.NodeService.GetDeployment.
 func (c *nodeServiceClient) GetDeployment(ctx context.Context, req *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {
 	return c.getDeployment.CallUnary(ctx, req)
@@ -398,6 +462,13 @@ type NodeServiceHandler interface {
 	// access, docs/08-decisions.md D-6).
 	GetAdminAccess(context.Context, *connect.Request[v1.GetAdminAccessRequest]) (*connect.Response[v1.GetAdminAccessResponse], error)
 	SetAdminAccess(context.Context, *connect.Request[v1.SetAdminAccessRequest]) (*connect.Response[v1.SetAdminAccessResponse], error)
+	// The DNS provider (Cloudflare): the node's records in its zone and
+	// certificates through DNS-01 with a wildcard name (R4-10). The token is
+	// stored by rayd and never returned.
+	SetDNSProvider(context.Context, *connect.Request[v1.SetDNSProviderRequest]) (*connect.Response[v1.SetDNSProviderResponse], error)
+	GetDNS(context.Context, *connect.Request[v1.GetDNSRequest]) (*connect.Response[v1.GetDNSResponse], error)
+	SyncDNS(context.Context, *connect.Request[v1.SyncDNSRequest]) (*connect.Response[v1.SyncDNSResponse], error)
+	RemoveDNS(context.Context, *connect.Request[v1.RemoveDNSRequest]) (*connect.Response[v1.RemoveDNSResponse], error)
 	// GetDeployment returns what root must install for the current services:
 	// system users, unit files and other files. rayctl apply writes them.
 	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
@@ -518,6 +589,30 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("SetAdminAccess")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceSetDNSProviderHandler := connect.NewUnaryHandler(
+		NodeServiceSetDNSProviderProcedure,
+		svc.SetDNSProvider,
+		connect.WithSchema(nodeServiceMethods.ByName("SetDNSProvider")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceGetDNSHandler := connect.NewUnaryHandler(
+		NodeServiceGetDNSProcedure,
+		svc.GetDNS,
+		connect.WithSchema(nodeServiceMethods.ByName("GetDNS")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceSyncDNSHandler := connect.NewUnaryHandler(
+		NodeServiceSyncDNSProcedure,
+		svc.SyncDNS,
+		connect.WithSchema(nodeServiceMethods.ByName("SyncDNS")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceRemoveDNSHandler := connect.NewUnaryHandler(
+		NodeServiceRemoveDNSProcedure,
+		svc.RemoveDNS,
+		connect.WithSchema(nodeServiceMethods.ByName("RemoveDNS")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceGetDeploymentHandler := connect.NewUnaryHandler(
 		NodeServiceGetDeploymentProcedure,
 		svc.GetDeployment,
@@ -562,6 +657,14 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceGetAdminAccessHandler.ServeHTTP(w, r)
 		case NodeServiceSetAdminAccessProcedure:
 			nodeServiceSetAdminAccessHandler.ServeHTTP(w, r)
+		case NodeServiceSetDNSProviderProcedure:
+			nodeServiceSetDNSProviderHandler.ServeHTTP(w, r)
+		case NodeServiceGetDNSProcedure:
+			nodeServiceGetDNSHandler.ServeHTTP(w, r)
+		case NodeServiceSyncDNSProcedure:
+			nodeServiceSyncDNSHandler.ServeHTTP(w, r)
+		case NodeServiceRemoveDNSProcedure:
+			nodeServiceRemoveDNSHandler.ServeHTTP(w, r)
 		case NodeServiceGetDeploymentProcedure:
 			nodeServiceGetDeploymentHandler.ServeHTTP(w, r)
 		default:
@@ -643,6 +746,22 @@ func (UnimplementedNodeServiceHandler) GetAdminAccess(context.Context, *connect.
 
 func (UnimplementedNodeServiceHandler) SetAdminAccess(context.Context, *connect.Request[v1.SetAdminAccessRequest]) (*connect.Response[v1.SetAdminAccessResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetAdminAccess is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetDNSProvider(context.Context, *connect.Request[v1.SetDNSProviderRequest]) (*connect.Response[v1.SetDNSProviderResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetDNSProvider is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetDNS(context.Context, *connect.Request[v1.GetDNSRequest]) (*connect.Response[v1.GetDNSResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetDNS is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SyncDNS(context.Context, *connect.Request[v1.SyncDNSRequest]) (*connect.Response[v1.SyncDNSResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SyncDNS is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) RemoveDNS(context.Context, *connect.Request[v1.RemoveDNSRequest]) (*connect.Response[v1.RemoveDNSResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.RemoveDNS is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {

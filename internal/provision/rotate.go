@@ -321,14 +321,15 @@ func SiteCovers(ctx context.Context, st *store.Store, all []store.Service, site,
 	return false
 }
 
-// ChainCovers reports whether the leaf of a PEM chain is for name.
+// ChainCovers reports whether the leaf of a PEM chain is for name, by one
+// of its names or a wildcard.
 func ChainCovers(chainPEM []byte, name string) bool {
 	block, _ := pem.Decode(chainPEM)
 	if block == nil {
 		return false
 	}
 	leaf, err := x509.ParseCertificate(block.Bytes)
-	return err == nil && slices.Contains(leaf.DNSNames, name)
+	return err == nil && leaf.VerifyHostname(name) == nil
 }
 
 // setFields sets fields of a settings object, deleting those set to nil

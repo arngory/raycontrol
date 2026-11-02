@@ -212,6 +212,7 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	domain := fs.String("domain", "", "base domain (needed for DNS tunnels)")
 	admin := fs.String("admin", sshClient(), "addresses that reach SSH without SPA (comma-separated; default: this SSH session)")
 	packages := fs.String("packages", "", "packages the bootstrap installed, as manager:name,name (recorded for uninstall)")
+	cfToken := fs.String("cloudflare-token-file", "", "Cloudflare API token file: DNS records and wildcard certificates (needs -domain)")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
@@ -230,6 +231,18 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	}
 	if *admin == "" {
 		return errors.New("no admin address: pass -admin, or install from an SSH session")
+	}
+	// Read before anything changes: a wrong path fails the install early.
+	token := ""
+	if *cfToken != "" {
+		if *domain == "" {
+			return errors.New("-cloudflare-token-file needs -domain, the zone's domain")
+		}
+		t, err := readToken(*cfToken)
+		if err != nil {
+			return err
+		}
+		token = t
 	}
 
 	h, err := journaledHost()
@@ -329,6 +342,20 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	if err := h.EnableNow("rayspa.service"); err != nil {
 		return err
 	}
+	if token != "" {
+		r, err := c.c.SetDNSProvider(ctx, connect.NewRequest(&nodev1.SetDNSProviderRequest{Provider: "cloudflare", Token: token}))
+		if err != nil {
+			fmt.Println("warning: Cloudflare not set up (rayctl dns cloudflare later):", err)
+		} else {
+			fmt.Printf("\nCloudflare zone %s: records kept by rayd, certificates through DNS-01.\n", r.Msg.Status.Zone)
+			for _, ch := range r.Msg.Status.Changes {
+				fmt.Println(" ", ch)
+			}
+			for _, p := range r.Msg.Status.Problems {
+				fmt.Println("  problem:", p)
+			}
+		}
+	}
 
 	fmt.Printf("\nraycontrol is installed. The perimeter is up: every port is closed except\n"+
 		"SPA, public services and SSH (tcp/%d) from %s.\n", port, *admin)
@@ -350,11 +377,13 @@ func journaledHost() (*deploy.Host, error) {
 	return h, nil
 }
 
-// uninstall takes back everything rayctl install and apply changed.
-func uninstall(args []string) error {
+// uninstall takes back everything rayctl install and apply changed, and
+// the node's records in its DNS provider's zone.
+func (c *cli) uninstall(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	yes := fs.Bool("yes", false, "do not ask")
 	keep := fs.Bool("keep-state", false, "keep "+deploy.StateDir+" (users, keys, certificates) for a later install")
+	keepDNS := fs.Bool("keep-dns", false, "leave raycontrol's records in the DNS provider's zone")
 	purge := fs.Bool("purge-packages", false, "also remove the packages the bootstrap installed")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
@@ -371,6 +400,19 @@ func uninstall(args []string) error {
 		answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 		if strings.TrimSpace(answer) != "yes" {
 			return errors.New("not confirmed")
+		}
+	}
+	// While rayd still runs: its DNS records go first (it holds the token).
+	if !*keepDNS && !*keep {
+		if _, err := os.Stat(deploy.Socket); err == nil {
+			r, err := c.c.RemoveDNS(ctx, connect.NewRequest(&nodev1.RemoveDNSRequest{}))
+			if err != nil {
+				fmt.Println("warning: DNS records not removed (rayctl dns remove before uninstall, or by hand):", err)
+			} else {
+				for _, rec := range r.Msg.Removed {
+					fmt.Println("removed DNS record", rec)
+				}
+			}
 		}
 	}
 	h, err := journaledHost()

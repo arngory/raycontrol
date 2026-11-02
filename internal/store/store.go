@@ -130,6 +130,12 @@ func (s *Store) SetSetting(ctx context.Context, key string, value []byte) error 
 	return err
 }
 
+// DeleteSetting removes a setting; a missing one is not an error.
+func (s *Store) DeleteSetting(ctx context.Context, key string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, key)
+	return err
+}
+
 // Audit appends an entry to the audit log.
 func (s *Store) Audit(ctx context.Context, actor, action, target, result string) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_log (ts, actor, action, target, result) VALUES (?, ?, ?, ?, ?)`,

@@ -45,6 +45,8 @@ type Server struct {
 	// keys are published; Rotate, if set, runs the rotation at once.
 	RealityLead time.Duration
 	Rotate      func()
+	// DNSChanged runs after the DNS provider changed (certificates check).
+	DNSChanged func()
 
 	mu   sync.Mutex
 	rev  uint64
@@ -599,4 +601,85 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 		resp.Files = append(resp.Files, &nodev1.DeployFile{Path: f.Path, Mode: f.Mode, Content: f.Content})
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// dnsStatus describes the node's DNS provider and the records it needs.
+func (s *Server) dnsStatus(ctx context.Context, changes, problems []string) (*nodev1.DNSStatus, error) {
+	st := &nodev1.DNSStatus{Changes: changes, Problems: problems}
+	c, zone, err := provision.Cloudflare(ctx, s.Store)
+	if err != nil {
+		return nil, err
+	}
+	if c != nil {
+		st.Provider, st.Zone = "cloudflare", zone.Name
+	}
+	records, warnings, err := provision.DNSRecords(ctx, s.Store)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range records {
+		st.Records = append(st.Records, &nodev1.DNSRecord{Type: r.Type, Name: r.Name, Content: r.Content})
+	}
+	for _, w := range warnings {
+		if !slices.Contains(st.Problems, w) {
+			st.Problems = append(st.Problems, w)
+		}
+	}
+	return st, nil
+}
+
+func (s *Server) SetDNSProvider(ctx context.Context, req *connect.Request[nodev1.SetDNSProviderRequest]) (*connect.Response[nodev1.SetDNSProviderResponse], error) {
+	var err error
+	if req.Msg.Provider != "cloudflare" {
+		err = fmt.Errorf("%w: DNS provider %q: only cloudflare", store.ErrInvalid, req.Msg.Provider)
+	} else {
+		_, err = provision.SetCloudflare(ctx, s.Store, req.Msg.Token)
+	}
+	// The token never goes into the audit log.
+	if err := s.done(ctx, "dns.provider", req.Msg.Provider, err); err != nil {
+		return nil, err
+	}
+	changes, problems, err := provision.SyncDNS(ctx, s.Store)
+	if err != nil {
+		problems = append(problems, "sync: "+err.Error())
+	}
+	if s.DNSChanged != nil {
+		s.DNSChanged()
+	}
+	status, err := s.dnsStatus(ctx, changes, problems)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	return connect.NewResponse(&nodev1.SetDNSProviderResponse{Status: status}), nil
+}
+
+func (s *Server) GetDNS(ctx context.Context, _ *connect.Request[nodev1.GetDNSRequest]) (*connect.Response[nodev1.GetDNSResponse], error) {
+	status, err := s.dnsStatus(ctx, nil, nil)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	return connect.NewResponse(&nodev1.GetDNSResponse{Status: status}), nil
+}
+
+func (s *Server) SyncDNS(ctx context.Context, _ *connect.Request[nodev1.SyncDNSRequest]) (*connect.Response[nodev1.SyncDNSResponse], error) {
+	changes, problems, err := provision.SyncDNS(ctx, s.Store)
+	if err := s.done(ctx, "dns.sync", "", err); err != nil {
+		return nil, err
+	}
+	status, err := s.dnsStatus(ctx, changes, problems)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	return connect.NewResponse(&nodev1.SyncDNSResponse{Status: status}), nil
+}
+
+func (s *Server) RemoveDNS(ctx context.Context, req *connect.Request[nodev1.RemoveDNSRequest]) (*connect.Response[nodev1.RemoveDNSResponse], error) {
+	removed, err := provision.RemoveDNS(ctx, s.Store, req.Msg.KeepRecords)
+	if err := s.done(ctx, "dns.remove", "", err); err != nil {
+		return nil, err
+	}
+	if s.DNSChanged != nil {
+		s.DNSChanged()
+	}
+	return connect.NewResponse(&nodev1.RemoveDNSResponse{Removed: removed}), nil
 }

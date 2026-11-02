@@ -1,8 +1,9 @@
 // Package certs gets certificates for the node's names from an ACME CA
-// (Let's Encrypt by default) with HTTP-01. All ports are closed, so every
-// order opens a short window in the perimeter: TCP 80 from any address goes
-// to a responder that answers only the order's challenges
-// (docs/08-decisions.md, R2-11).
+// (Let's Encrypt by default). With a DNS provider (Cloudflare) it uses
+// DNS-01 and a wildcard name, and no port opens (R4-10). Without one it uses
+// HTTP-01: all ports are closed, so every order opens a short window in the
+// perimeter, TCP 80 from any address to a responder that answers only the
+// order's challenges (docs/08-decisions.md, R2-11).
 package certs
 
 import (
@@ -31,6 +32,16 @@ const LetsEncrypt = "https://acme-v02.api.letsencrypt.org/directory"
 // in nftables if rayd dies in between.
 const WindowLen = 3 * time.Minute
 
+// DNSOrderLen bounds a DNS-01 order: TXT records take a while to show.
+const DNSOrderLen = 8 * time.Minute
+
+// DNSSolver publishes the TXT record of a DNS-01 challenge, returning once
+// it is visible, and removes it afterwards (cloudflare.Solver).
+type DNSSolver interface {
+	Present(ctx context.Context, fqdn, value string) error
+	CleanUp(ctx context.Context, fqdn, value string) error
+}
+
 // Issuer runs ACME orders.
 type Issuer struct {
 	Directory  string        // ACME directory URL
@@ -48,7 +59,11 @@ type Issuer struct {
 	Expect   []netip.Addr
 	NodeHost string
 	Resolve  func(ctx context.Context, name string) ([]netip.Addr, error)
-	Log      *slog.Logger
+	// DNS returns the DNS-01 solver when the node has a DNS provider (nil
+	// solver otherwise): orders then need no perimeter window, and
+	// wildcard names become possible (R4-10).
+	DNS func(ctx context.Context) (DNSSolver, error)
+	Log *slog.Logger
 }
 
 func (is *Issuer) log() *slog.Logger {
@@ -100,36 +115,87 @@ func (is *Issuer) CheckDNS(ctx context.Context, names []string) error {
 }
 
 // Issue gets a certificate for names with key and returns the chain (DER,
-// leaf first).
+// leaf first): through DNS-01 when the node has a DNS provider, otherwise
+// through HTTP-01 in a perimeter window.
 func (is *Issuer) Issue(ctx context.Context, names []string, key crypto.Signer) ([][]byte, error) {
-	if err := is.CheckDNS(ctx, names); err != nil {
-		return nil, err
+	var solver DNSSolver
+	if is.DNS != nil {
+		s, err := is.DNS(ctx)
+		if err != nil {
+			return nil, err
+		}
+		solver = s
 	}
-	ctx, cancel := context.WithTimeout(ctx, WindowLen)
+	var answer func(ctx context.Context, client *acme.Client, z *acme.Authorization) error
+	timeout := WindowLen
+	if solver != nil {
+		timeout = DNSOrderLen
+		answer = func(ctx context.Context, client *acme.Client, z *acme.Authorization) error {
+			chal := challenge(z, "dns-01")
+			if chal == nil {
+				return fmt.Errorf("acme: no dns-01 challenge for %s", z.Identifier.Value)
+			}
+			value, err := client.DNS01ChallengeRecord(chal.Token)
+			if err != nil {
+				return err
+			}
+			fqdn := "_acme-challenge." + strings.TrimPrefix(z.Identifier.Value, "*.")
+			if err := solver.Present(ctx, fqdn, value); err != nil {
+				return fmt.Errorf("dns-01 %s: %w", fqdn, err)
+			}
+			defer func() {
+				if err := solver.CleanUp(context.WithoutCancel(ctx), fqdn, value); err != nil {
+					is.log().Warn("dns-01 record not removed", "err", err)
+				}
+			}()
+			return accept(ctx, client, chal, z)
+		}
+	} else {
+		for _, n := range names {
+			if strings.HasPrefix(n, "*.") {
+				return nil, fmt.Errorf("%s: a wildcard name needs DNS-01, a DNS provider (rayctl dns cloudflare)", n)
+			}
+		}
+		if err := is.CheckDNS(ctx, names); err != nil {
+			return nil, err
+		}
+		resp := &responder{tokens: map[string]string{}}
+		listen := is.Listen
+		if listen == "" {
+			listen = ":0"
+		}
+		ln, err := net.Listen("tcp", listen)
+		if err != nil {
+			return nil, err
+		}
+		srv := &http.Server{Handler: resp, ReadHeaderTimeout: 5 * time.Second}
+		go func() { _ = srv.Serve(ln) }()
+		defer func() { _ = srv.Close() }()
+		if is.Window != nil {
+			port := uint16(ln.Addr().(*net.TCPAddr).Port)
+			is.Window(port, time.Now().Add(WindowLen))
+			defer is.Window(0, time.Time{})
+		}
+		answer = func(ctx context.Context, client *acme.Client, z *acme.Authorization) error {
+			chal := challenge(z, "http-01")
+			if chal == nil {
+				return fmt.Errorf("acme: no http-01 challenge for %s", z.Identifier.Value)
+			}
+			ka, err := client.HTTP01ChallengeResponse(chal.Token)
+			if err != nil {
+				return err
+			}
+			resp.set(chal.Token, ka)
+			return accept(ctx, client, chal, z)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	client := &acme.Client{Key: is.AccountKey, DirectoryURL: is.Directory, HTTPClient: is.HTTPClient, UserAgent: "raycontrol"}
 	if _, err := client.Register(ctx, &acme.Account{}, acme.AcceptTOS); err != nil && !errors.Is(err, acme.ErrAccountAlreadyExists) {
 		return nil, fmt.Errorf("acme account: %w", err)
 	}
-
-	resp := &responder{tokens: map[string]string{}}
-	listen := is.Listen
-	if listen == "" {
-		listen = ":0"
-	}
-	ln, err := net.Listen("tcp", listen)
-	if err != nil {
-		return nil, err
-	}
-	srv := &http.Server{Handler: resp, ReadHeaderTimeout: 5 * time.Second}
-	go func() { _ = srv.Serve(ln) }()
-	defer func() { _ = srv.Close() }()
-	if is.Window != nil {
-		port := uint16(ln.Addr().(*net.TCPAddr).Port)
-		is.Window(port, time.Now().Add(WindowLen))
-		defer is.Window(0, time.Time{})
-	}
-
 	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(names...))
 	if err != nil {
 		return nil, fmt.Errorf("acme order: %w", err)
@@ -142,25 +208,8 @@ func (is *Issuer) Issue(ctx context.Context, names []string, key crypto.Signer) 
 		if z.Status == acme.StatusValid {
 			continue
 		}
-		var chal *acme.Challenge
-		for _, c := range z.Challenges {
-			if c.Type == "http-01" {
-				chal = c
-			}
-		}
-		if chal == nil {
-			return nil, fmt.Errorf("acme: no http-01 challenge for %s", z.Identifier.Value)
-		}
-		ka, err := client.HTTP01ChallengeResponse(chal.Token)
-		if err != nil {
+		if err := answer(ctx, client, z); err != nil {
 			return nil, err
-		}
-		resp.set(chal.Token, ka)
-		if _, err := client.Accept(ctx, chal); err != nil {
-			return nil, fmt.Errorf("acme accept %s: %w", z.Identifier.Value, err)
-		}
-		if _, err := client.WaitAuthorization(ctx, z.URI); err != nil {
-			return nil, fmt.Errorf("acme validation of %s: %w", z.Identifier.Value, err)
 		}
 	}
 	if order, err = client.WaitOrder(ctx, order.URI); err != nil {
@@ -175,8 +224,31 @@ func (is *Issuer) Issue(ctx context.Context, names []string, key crypto.Signer) 
 	if err != nil {
 		return nil, fmt.Errorf("acme certificate: %w", err)
 	}
-	is.log().Info("certificate issued", "names", strings.Join(names, ","))
+	method := "http-01"
+	if solver != nil {
+		method = "dns-01"
+	}
+	is.log().Info("certificate issued", "names", len(names), "challenge", method)
 	return chain, nil
+}
+
+func challenge(z *acme.Authorization, typ string) *acme.Challenge {
+	for _, c := range z.Challenges {
+		if c.Type == typ {
+			return c
+		}
+	}
+	return nil
+}
+
+func accept(ctx context.Context, client *acme.Client, chal *acme.Challenge, z *acme.Authorization) error {
+	if _, err := client.Accept(ctx, chal); err != nil {
+		return fmt.Errorf("acme accept %s: %w", z.Identifier.Value, err)
+	}
+	if _, err := client.WaitAuthorization(ctx, z.URI); err != nil {
+		return fmt.Errorf("acme validation of %s: %w", z.Identifier.Value, err)
+	}
+	return nil
 }
 
 // responder answers HTTP-01 challenges and nothing else.

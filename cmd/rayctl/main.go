@@ -44,10 +44,16 @@ const usageText = `usage: rayctl [-socket PATH] [-json] <command>
   device revoke ID
   audit [-n 50]
   admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA
+  dns [status]                              the DNS provider and the records the node needs
+  dns cloudflare [-token-file F]            records and wildcard certificates through Cloudflare
+                                            (token asked for without echo when no file is given)
+  dns sync                                  bring the zone in line now
+  dns remove [-keep-records]                delete raycontrol's records and forget the provider
 
-  install -host ADDR [-domain D] [-admin A]   set the node up on this host (root)
+  install -host ADDR [-domain D] [-admin A] [-cloudflare-token-file F]
+                                              set the node up on this host (root)
   apply                                       install what the current services need (root)
-  uninstall [-yes] [-keep-state] [-purge-packages]
+  uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]
                                               take back everything install and apply changed (root)
 
   report [-o FILE] [-logs warning|info|none] [-since 24h] [-id ID]
@@ -126,8 +132,10 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return probe(ctx, args[1:])
 	case "report":
 		return c.report(ctx, args[1:])
+	case "dns":
+		return c.dns(ctx, sub, rest)
 	case "uninstall":
-		return uninstall(args[1:])
+		return c.uninstall(ctx, args[1:])
 	}
 	return errUsage
 }
