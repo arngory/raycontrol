@@ -135,8 +135,11 @@ ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}
 # shellcheck disable=SC2016 # expands in the container
 x sh -c '. /etc/os-release; echo "$PRETTY_NAME, $(systemctl --version | head -1), $(nft --version)"'
 
+# ufw enable writes its rate-limit rules into user6.rules without loading
+# them; restarting the unit loads the host's ufw files as a boot does, so
+# the snapshot below is a state the host itself would come back to.
 case $distro in
-ubuntu*) x ufw --force enable ;;
+ubuntu*) x ufw --force enable >/dev/null && x systemctl restart ufw.service ;;
 esac
 
 log "$distro: bootstrap"
