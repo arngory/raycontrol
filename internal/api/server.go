@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -517,6 +518,14 @@ func (s *Server) hostPorts(ctx context.Context) ([]deploy.PortRange, error) {
 	services, err := s.Store.ListServices(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if slices.ContainsFunc(services, func(svc store.Service) bool { return svc.Enabled && svc.Kind == "site" }) {
+		// The ACME window redirects TCP 80 here; host firewalls must pass it.
+		port, err := provision.ACMEPort(ctx, s.Store)
+		if err != nil {
+			return nil, err
+		}
+		ports = append(ports, deploy.PortRange{Proto: "tcp", From: port, To: port})
 	}
 	for _, svc := range services {
 		if !svc.Enabled {

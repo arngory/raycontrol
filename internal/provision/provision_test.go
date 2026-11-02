@@ -115,3 +115,32 @@ func TestInit(t *testing.T) {
 		t.Fatal("dnstt must not rotate")
 	}
 }
+
+func TestACMEPort(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p, err := Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := ACMEPort(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := ACMEPort(ctx, st)
+	if a != b || a < 20000 || (a >= p.PortBase && int(a) < int(p.PortBase)+int(p.PortRange)) {
+		t.Fatalf("acme port %d then %d, SPA %d+%d", a, b, p.PortBase, p.PortRange)
+	}
+	// Rotation ranges keep clear of it.
+	svc, err := CreateService(ctx, st, store.Service{Kind: "hy2-masq", Name: "hy2", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, ok := ServiceRotation(svc); ok && a >= r.Base && int(a) < int(r.Base)+int(r.Range) {
+		t.Fatalf("rotation %d+%d covers the acme port %d", r.Base, r.Range, a)
+	}
+}

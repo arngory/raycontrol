@@ -21,6 +21,7 @@ import (
 	"math/big"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -430,6 +431,54 @@ func SiteName(svc store.Service) string {
 	return s.SNI
 }
 
+const settingACMEPort = "acme_port"
+
+// ACMEPort is the port of rayd's HTTP-01 responder: random per install,
+// outside the SPA range, the rotation ranges and the service ports, so
+// host firewalls can let it through for good (the perimeter opens it only
+// during an order).
+func ACMEPort(ctx context.Context, st *store.Store) (uint16, error) {
+	if b, err := st.GetSetting(ctx, settingACMEPort); err == nil {
+		p, err := strconv.Atoi(string(b))
+		return uint16(p), err
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return 0, err
+	}
+	params, err := node.LoadParams(ctx, st)
+	if err != nil {
+		return 0, err
+	}
+	all, err := st.ListServices(ctx)
+	if err != nil {
+		return 0, err
+	}
+	free := func(p int) bool {
+		if p >= int(params.PortBase) && p < int(params.PortBase)+int(params.PortRange) {
+			return false
+		}
+		for _, s := range all {
+			if r, ok := ServiceRotation(s); ok && p >= int(r.Base) && p < int(r.Base)+int(r.Range) {
+				return false
+			}
+			ports, _ := s.Ports()
+			if slices.ContainsFunc(ports, func(sp store.Port) bool { return int(sp.Num) == p }) {
+				return false
+			}
+		}
+		return true
+	}
+	for range 1000 {
+		p, err := randInt(20000, 60999)
+		if err != nil {
+			return 0, err
+		}
+		if free(p) {
+			return uint16(p), st.SetSetting(ctx, settingACMEPort, []byte(strconv.Itoa(p)))
+		}
+	}
+	return 0, errors.New("no free port for the ACME responder")
+}
+
 // newZone returns "<label>.<domain>" with a random label not used yet.
 func newZone(ctx context.Context, st *store.Store, all []store.Service) (string, error) {
 	domain, err := Domain(ctx, st)
@@ -497,6 +546,11 @@ func newRotation(ctx context.Context, st *store.Store, all []store.Service) (Rot
 	}
 	type span struct{ lo, hi int } // [lo, hi)
 	taken := []span{{int(params.PortBase), int(params.PortBase) + int(params.PortRange)}}
+	if b, err := st.GetSetting(ctx, settingACMEPort); err == nil {
+		if p, err := strconv.Atoi(string(b)); err == nil {
+			taken = append(taken, span{p, p + 1})
+		}
+	}
 	for _, s := range all {
 		if r, ok := ServiceRotation(s); ok {
 			taken = append(taken, span{int(r.Base), int(r.Base) + int(r.Range)})

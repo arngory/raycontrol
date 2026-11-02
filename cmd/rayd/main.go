@@ -170,7 +170,12 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 	if err != nil {
 		return err
 	}
-	is := &certs.Issuer{Directory: directory, AccountKey: key, Window: srv.SetACMEWindow, NodeHost: host, Log: log}
+	port, err := provision.ACMEPort(ctx, st)
+	if err != nil {
+		return err
+	}
+	is := &certs.Issuer{Directory: directory, AccountKey: key, Window: srv.SetACMEWindow, NodeHost: host, Log: log,
+		Listen: ":" + strconv.Itoa(int(port))}
 	m := &certs.Manager{Store: st, Issue: is.Issue, Notify: srv.Notify, Log: log}
 	go m.Run(ctx)
 	return nil
