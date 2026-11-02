@@ -165,3 +165,30 @@ func TestServe(t *testing.T) {
 		}
 	}
 }
+
+func TestServeTLS12(t *testing.T) {
+	root := newCert(t, nil, "Test Root", true)
+	leaf := newCert(t, root, "k3f.example.com", false)
+	keyDER, _ := x509.MarshalPKCS8PrivateKey(leaf.key)
+	cert, err := LoadCertificate(pemOf(leaf), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(t.TempDir(), "tls.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Serve(ctx, ln, t.TempDir(), cert, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// A probe that speaks only TLS 1.2 gets a handshake, like at most sites.
+	c, err := tls.Dial("unix", sock, &tls.Config{ServerName: "k3f.example.com", InsecureSkipVerify: true, MaxVersion: tls.VersionTLS12}) //nolint:gosec // looking at the version
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if v := c.ConnectionState().Version; v != tls.VersionTLS12 {
+		t.Fatalf("version %x", v)
+	}
+}

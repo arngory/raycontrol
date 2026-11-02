@@ -31,6 +31,9 @@ type Host struct {
 	// its file changed) and before the next one starts: rayd must render
 	// the files the data-plane units read.
 	Ready func(unit string) error
+	// Journal, if set, gets every change before it is made (rayctl
+	// uninstall reverts them).
+	Journal *Journal
 }
 
 // NewHost returns a host that acts on this machine.
@@ -80,6 +83,9 @@ func (h *Host) EnsureGroup(name string, gid int) error {
 	if gid > 0 {
 		args = append(args, "--gid", strconv.Itoa(gid))
 	}
+	if err := h.Journal.Record(Change{Kind: ChangeGroup, Name: name}); err != nil {
+		return err
+	}
 	return h.run("groupadd", append(args, name)...)
 }
 
@@ -95,6 +101,9 @@ func (h *Host) EnsureUser(u SystemUser) error {
 			return fmt.Errorf("user %s exists with uid %d, want %d", u.Name, got, u.UID)
 		}
 		return nil
+	}
+	if err := h.Journal.Record(Change{Kind: ChangeUser, Name: u.Name}); err != nil {
+		return err
 	}
 	return h.run("useradd", "--system", "--uid", strconv.Itoa(u.UID), "--gid", u.Name,
 		"--no-create-home", "--home-dir", "/nonexistent", "--shell", h.nologin(), u.Name)
@@ -117,6 +126,9 @@ func (h *Host) WriteFile(f File) (bool, error) {
 	old, err := os.ReadFile(p) //nolint:gosec // G304: paths come from the deployment plan
 	if err == nil && bytes.Equal(old, f.Content) {
 		return false, nil
+	}
+	if err := h.Journal.RecordFile(f.Path); err != nil {
+		return false, err
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { //nolint:gosec // G301: system directories
 		return false, err
@@ -192,9 +204,11 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 		}
 	}
 	if sysctlChanged {
+		h.recordSysctl(plan)
 		if err := h.run("sysctl", "-q", "-p", "/etc/sysctl.d/90-raycontrol.conf"); err != nil {
 			fmt.Fprintln(h.Out, "warning:", err)
 		}
+		h.checkSysctl(plan)
 	}
 	if resolvedChanged {
 		if err := h.freePort53(); err != nil {
@@ -225,7 +239,7 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 				continue
 			}
 		}
-		if err := h.run("systemctl", "enable", "--now", unit); err != nil {
+		if err := h.EnableNow(unit); err != nil {
 			return err
 		}
 		if changedUnits[unit] {
@@ -243,6 +257,57 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 		fmt.Fprintln(h.Out, "warning:", w)
 	}
 	return nil
+}
+
+// EnableNow enables and starts a unit, noting it for uninstall.
+func (h *Host) EnableNow(unit string) error {
+	if err := h.Journal.Record(Change{Kind: ChangeUnit, Name: unit}); err != nil {
+		return err
+	}
+	return h.run("systemctl", "enable", "--now", unit)
+}
+
+// recordSysctl notes the values the sysctl file is about to change.
+func (h *Host) recordSysctl(plan Plan) {
+	if h.Journal == nil {
+		return
+	}
+	for _, f := range plan.Files {
+		if !strings.HasPrefix(f.Path, "/etc/sysctl.d/") {
+			continue
+		}
+		for _, line := range strings.Split(string(f.Content), "\n") {
+			key, _, ok := strings.Cut(line, "=")
+			key = strings.TrimSpace(key)
+			if !ok || key == "" || strings.HasPrefix(key, "#") || h.Journal.Has(ChangeSysctl, "", key) {
+				continue
+			}
+			if out, err := h.Run("sysctl", "-n", key); err == nil && len(bytes.TrimSpace(out)) > 0 {
+				_ = h.Journal.Record(Change{Kind: ChangeSysctl, Name: key, Value: strings.TrimSpace(string(out))})
+			}
+		}
+	}
+}
+
+// checkSysctl warns about values another file sets differently: at boot
+// files sort by name, and a provider's 99-*.conf comes after raycontrol's.
+func (h *Host) checkSysctl(plan Plan) {
+	for _, f := range plan.Files {
+		if !strings.HasPrefix(f.Path, "/etc/sysctl.d/") {
+			continue
+		}
+		for _, line := range strings.Split(string(f.Content), "\n") {
+			key, want, ok := strings.Cut(line, "=")
+			key, want = strings.TrimSpace(key), strings.TrimSpace(want)
+			if !ok || key == "" || strings.HasPrefix(key, "#") {
+				continue
+			}
+			out, err := h.Run("sysctl", "-n", key)
+			if got := strings.Join(strings.Fields(string(out)), " "); err == nil && got != want {
+				fmt.Fprintf(h.Out, "warning: %s is %s, not %s: another sysctl setting overrides %s\n", key, got, want, f.Path)
+			}
+		}
+	}
 }
 
 // relabel restores the SELinux labels of written files (RHEL family), so
@@ -300,6 +365,9 @@ func (h *Host) removeStale(plan Plan) error {
 func (h *Host) freePort53() error {
 	rc := h.path("/etc/resolv.conf")
 	if target, err := os.Readlink(rc); err == nil && strings.HasSuffix(target, "stub-resolv.conf") {
+		if err := h.Journal.Record(Change{Kind: ChangeSymlink, Path: "/etc/resolv.conf", Target: target}); err != nil {
+			return err
+		}
 		if err := os.Remove(rc); err != nil {
 			return err
 		}

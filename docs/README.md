@@ -16,6 +16,7 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [06-client-requirements.md](06-client-requirements.md) | Требования к клиенту для следующей фазы. |
 | [07-questions.md](07-questions.md) | Вопросы перед реализацией (история; все закрыты). |
 | [08-decisions.md](08-decisions.md) | **Принятые решения** — главнее остальных документов при расхождении. |
+| [09-observability.md](09-observability.md) | Логи, телеметрия (её нет), отчёт для issue, QA, обезличенные идентификаторы. |
 | [spec/spa-v2.md](spec/spa-v2.md) | Формат SPA v2 и пакета регистрации устройства (заморожен). |
 | [spec/subscription-v1.md](spec/subscription-v1.md) | Подписка: запрос, подписи, ссылки с параметрами `niko-*` (заморожена). |
 | [RELEASE.md](RELEASE.md) | Ключ подписи и выпуск релизов. |

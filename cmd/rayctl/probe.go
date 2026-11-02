@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/redact"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/sub"
 )
@@ -27,6 +28,7 @@ func probe(ctx context.Context, args []string) error {
 	carrier := fs.String("carrier", "auto", "SPA carrier: udp, tcp or auto (UDP, then TCP)")
 	addr := fs.String("addr", "", "node address to use instead of the bundle's host")
 	links := fs.Bool("links", false, "print the profile links (they carry credentials)")
+	redacted := fs.Bool("redact", false, "hide the node's address and names, IDs and keys, to share the output in an issue")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
 		return errUsage
 	}
@@ -69,7 +71,13 @@ func probe(ctx context.Context, args []string) error {
 		Addr: net.JoinHostPort(ip.String(), strconv.Itoa(int(b.Sub.Port))), Pin: b.Sub.Pin,
 		DeviceID: b.DeviceID, DeviceKey: key, NodeKeys: b.NodeKeys, NodeID: b.SPA.NodeID,
 	}
-	fmt.Printf("node %s (%s), device %s\n", host, ip, b.DeviceID)
+	printf := func(format string, a ...any) { fmt.Printf(format, a...) }
+	if *redacted {
+		red := redact.New(host, domainOf(host))
+		printf = func(format string, a ...any) { fmt.Print(red.String(fmt.Sprintf(format, a...))) }
+		*links = false
+	}
+	printf("node %s (%s), device %s\n", host, ip, b.DeviceID)
 
 	var lastErr error
 	for _, c := range carriers {
@@ -80,7 +88,7 @@ func probe(ctx context.Context, args []string) error {
 			return err
 		}
 		if err := sendSPA(c, netip.AddrPortFrom(ip, port), pkt); err != nil {
-			fmt.Printf("SPA over %s to port %d: %v\n", c, port, err)
+			printf("SPA over %s to port %d: %v\n", c, port, err)
 			lastErr = err
 			continue
 		}
@@ -90,18 +98,18 @@ func probe(ctx context.Context, args []string) error {
 		p, err := client.Fetch(fctx, time.Now())
 		cancel()
 		if err != nil {
-			fmt.Printf("SPA over %s to port %d, then subscription: %v\n", c, port, err)
+			printf("SPA over %s to port %d, then subscription: %v\n", c, port, err)
 			lastErr = err
 			continue
 		}
-		fmt.Printf("SPA over %s to port %d, subscription in %v: both signatures valid\n",
+		printf("SPA over %s to port %d, subscription in %v: both signatures valid\n",
 			c, port, time.Since(start).Round(time.Millisecond))
-		fmt.Printf("seq %d, expires %s, %d profiles\n", p.Seq, time.Unix(p.Expires, 0).UTC().Format(time.RFC3339), len(p.Profiles))
+		printf("seq %d, expires %s, %d profiles\n", p.Seq, time.Unix(p.Expires, 0).UTC().Format(time.RFC3339), len(p.Profiles))
 		for _, pr := range p.Profiles {
 			if *links {
-				fmt.Printf("  %s (service %d): %s\n", pr.Name, pr.Svc, pr.Link)
+				printf("  %s (service %d): %s\n", pr.Name, pr.Svc, pr.Link)
 			} else {
-				fmt.Printf("  %s (service %d)\n", pr.Name, pr.Svc)
+				printf("  %s (service %d)\n", pr.Name, pr.Svc)
 			}
 		}
 		return nil

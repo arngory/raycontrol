@@ -147,6 +147,11 @@ func (h *Host) firewalld(changed bool) error {
 		if _, err := h.Run("firewall-offline-cmd", "--query-service="+firewallName); err == nil {
 			return nil
 		}
+		if out, err := h.Run("firewall-offline-cmd", "--get-default-zone"); err == nil {
+			if err := h.recordZone(strings.TrimSpace(string(out))); err != nil {
+				return err
+			}
+		}
 		fmt.Fprintln(h.Out, "firewalld (stopped): adding service", firewallName, "to the default zone")
 		return h.run("firewall-offline-cmd", "--add-service="+firewallName)
 	}
@@ -182,6 +187,9 @@ func (h *Host) firewalld(changed bool) error {
 		if _, err := h.Run("firewall-cmd", "--permanent", "--zone="+z, "--query-service="+firewallName); err == nil {
 			continue
 		}
+		if err := h.recordZone(z); err != nil {
+			return err
+		}
 		if err := h.run("firewall-cmd", "--permanent", "--zone="+z, "--add-service="+firewallName); err != nil {
 			return err
 		}
@@ -194,11 +202,31 @@ func (h *Host) firewalld(changed bool) error {
 	return nil
 }
 
+// recordZone notes the zone's files before firewalld rewrites them: the
+// zone file in /etc and the backup firewalld keeps next to it.
+func (h *Host) recordZone(zone string) error {
+	if zone == "" || strings.ContainsAny(zone, "/.") {
+		return nil
+	}
+	for _, f := range []string{"/etc/firewalld/zones/" + zone + ".xml", "/etc/firewalld/zones/" + zone + ".xml.old"} {
+		if err := h.Journal.RecordFile(f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ufw allows the raycontrol application profile. Rules can be added while
 // ufw is inactive, so the ports are there whenever it is enabled.
 func (h *Host) ufw(changed bool) (active bool, err error) {
 	out, _ := h.Run("ufw", "status")
 	active = bytes.Contains(out, []byte("Status: active"))
+	// ufw keeps its rules in these files; uninstall puts them back.
+	for _, f := range []string{"/etc/ufw/user.rules", "/etc/ufw/user6.rules"} {
+		if err := h.Journal.RecordFile(f); err != nil {
+			return active, err
+		}
+	}
 	if changed {
 		// Refreshes an existing rule from the profile; harmless without one.
 		_, _ = h.Run("ufw", "app", "update", firewallName)

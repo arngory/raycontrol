@@ -41,6 +41,29 @@ To check a node from outside the way a client does (SPA, then the signed
 subscription), give a device bundle to `rayctl probe rcdev1:...` on any
 machine.
 
+## Administration
+
+Everything the client API does, `rayctl` does on the node (as root, or as a
+member of the `raycontrol` group):
+
+```
+rayctl status
+rayctl user add -services reality,dns -expires 30d    # opaque name such as u-k3f9-x2qa
+rayctl device add u-k3f9-x2qa phone                   # enrollment bundle, shown once
+rayctl service add reality reality                    # self-steal on the node's decoy site
+rayctl apply                                          # install what new services need
+rayctl admin 198.51.100.7                             # addresses that reach SSH without SPA
+rayctl report -o report.txt                           # redacted report for an issue
+rayctl uninstall                                      # take everything back
+```
+
+`rayctl uninstall` reverts every change the install made, from a journal kept
+since the first step: files, users, units, sysctl, resolv.conf, firewalld and
+ufw rules; the test suite checks that the host matches its snapshot from
+before the install. `-keep-state` keeps the database for a later install.
+Nothing is ever sent anywhere by the node; see
+[docs/09-observability.md](docs/09-observability.md).
+
 [Русская версия ниже](#raycontrol-ru)
 
 ## Build
@@ -96,6 +119,9 @@ raycontrol хранит пользователей и ключи, генерир
   `install/bootstrap.sh` ставит зависимости через apt/dnf/zypper/pacman и проверяет подпись релиза). firewalld и ufw
   настраиваются сами. На RHEL-семействе `sudo` не видит `/usr/local/bin` — `sudo -i` или полный путь.
   Восстановление с консоли: `rayspa teardown`. Проверка ноды снаружи, как клиент: `rayctl probe rcdev1:...`.
+- **Администрирование:** всё, что умеет API для клиента, на ноде умеет `rayctl` (пользователи, устройства, сервисы,
+  `apply`, адреса администратора, `report` — очищенный отчёт для issue, `uninstall` — полный откат установки по журналу,
+  проверенный сравнением со снимком системы). Нода ничего не отправляет наружу сама.
 - **Сборка:** Go 1.26, `go build ./cmd/...`, `go test ./...`; API генерируется `scripts/gen.sh`.
 - **Документы:** [docs/](docs/README.md); формат SPA v2 заморожен в [docs/spec/spa-v2.md](docs/spec/spa-v2.md).
 - **v0:** bash-установщик перенесён в [legacy/](legacy/); для новых установок не использовать.

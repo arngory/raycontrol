@@ -216,9 +216,9 @@ func (g *Gate) revokeLocked() {
 		if len(devs) == 0 {
 			delete(g.holders, key)
 			if err := g.fw.Deny(key.addr, []Port{key.port}); err != nil {
-				g.log.Warn("closing revoked grant failed", "addr", key.addr, "port", key.port, "err", err)
+				g.log.Warn("closing a revoked grant failed", "port", key.port, "err", err)
 			} else {
-				g.log.Info("revoked", "addr", key.addr, "port", key.port)
+				g.log.Debug("revoked", "addr", key.addr, "port", key.port)
 			}
 		}
 	}

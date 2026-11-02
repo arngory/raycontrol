@@ -87,6 +87,34 @@ wait_table() {
 	fail "rayspa did not restore its table after: $1"
 }
 
+# snapshot records what an install may touch, to compare before and after
+# rayctl uninstall: users, groups, every file and link under /etc, enabled
+# units, the nftables ruleset (without counters), the sysctl values raycontrol
+# sets, host firewalls, /var/lib and /usr/local/bin. Files Docker manages and
+# the shadow-utils backups (passwd-) are left out.
+snapshot() {
+	# shellcheck disable=SC2016 # expands in the container
+	x sh -c '
+	{
+		echo "== users"; getent passwd | sort
+		echo "== groups"; getent group | sort
+		echo "== files"
+		find /etc -xdev \( -path /etc/hostname -o -path /etc/hosts -o -path /etc/resolv.conf -o -path /etc/machine-id \
+			-o -path /etc/ld.so.cache -o -name "*-" \) -prune -o -type f -print0 | sort -z | xargs -0 sha256sum
+		echo "== links"
+		find /etc -xdev -type l -printf "%p -> %l\n" | sort
+		echo "== units"; systemctl list-unit-files --state=enabled --no-legend | sort
+		# Without counters and without the rules of Docker'"'"'s DNS (127.0.0.11),
+		# whose ports change with every container start.
+		echo "== nft"; nft list ruleset | sed -E "s/counter packets [0-9]+ bytes [0-9]+/counter/" | grep -v 127.0.0.11
+		echo "== sysctl"; sysctl net.core.default_qdisc net.ipv4.tcp_congestion_control net.core.rmem_max net.core.wmem_max
+		echo "== firewalld"; if systemctl is-active --quiet firewalld; then firewall-cmd --list-all-zones; fi
+		echo "== ufw"; if command -v ufw >/dev/null; then ufw status verbose; fi
+		echo "== var/lib"; ls /var/lib
+		echo "== bin"; ls /usr/local/bin
+	} > "$1" 2>&1' snapshot "$1"
+}
+
 # client runs rayctl probe from another container on the same network.
 client() {
 	docker run --rm --network "$net" -v "$bin:/opt/rc:ro" "$image" /opt/rc/rayctl probe "$@"
@@ -113,6 +141,10 @@ esac
 
 log "$distro: bootstrap"
 x install -m 0755 /opt/rc/niko-server /opt/rc/xray /usr/local/bin/
+# The host as it is before raycontrol: wait for the firewall to be up.
+# shellcheck disable=SC2016 # expands in the container
+x sh -c 'if systemctl is-enabled -q firewalld 2>/dev/null; then for i in $(seq 60); do firewall-cmd --state >/dev/null 2>&1 && break; sleep 1; done; fi'
+snapshot /root/before.snap
 x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -host "$ip" -domain example.test -admin 192.0.2.1 ||
 	fail "bootstrap"
 wait_active rayd.service rayspa.service
@@ -167,5 +199,30 @@ boot
 wait_active rayd.service rayspa.service "${dataplane[@]}"
 ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$node")"
 client -addr "$ip" "$laptop" >/dev/null || fail "probe after reboot"
+
+log "$distro: report"
+x /usr/local/bin/rayctl report -logs info -o /root/report.txt > /dev/null || fail "rayctl report"
+report="$(x cat /root/report.txt)"
+for section in "== versions" "== system" "== node" "== units" "checks"; do
+	[[ $report == *"$section"* ]] || fail "report lacks $section"
+done
+for leak in "$ip" example.test rcdev1: "$phone_id"; do
+	if [[ $report == *"$leak"* ]]; then
+		fail "report leaks $leak"
+	fi
+done
+
+log "$distro: uninstall"
+x /usr/local/bin/rayctl uninstall -yes || fail "rayctl uninstall"
+snapshot /root/after.snap
+# Compared here: minimal images (Rocky 9) have no diff.
+if ! diff -u <(x cat /root/before.snap) <(x cat /root/after.snap) >&2; then
+	fail "the host after uninstall differs from before the install (diff above)"
+fi
+for p in /usr/local/bin/rayd /usr/local/bin/rayctl /var/lib/raycontrol /var/lib/raycontrol-install /etc/systemd/system/rayd.service; do
+	if x test -e "$p"; then
+		fail "$p is still there after uninstall"
+	fi
+done
 
 log "$distro: PASS"

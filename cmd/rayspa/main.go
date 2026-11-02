@@ -87,7 +87,9 @@ func run(args []string) error {
 			log.Debug("spa rejected", "src", src, "err", err)
 			return
 		}
-		log.Info("spa granted", "src", src, "device", g.DeviceID, "scope", g.Scope, "ttl", g.TTL)
+		// Who connected from where is user activity: not in the journal at
+		// the default level (docs/09-observability.md, R4-3).
+		log.Debug("spa granted", "src", src, "device", g.DeviceID, "scope", g.Scope, "ttl", g.TTL)
 	}
 	carrier := &perimeter.TCPCarrier{Handler: handle, LenMax: gate.LenMax, Log: log}
 	defer carrier.Close()

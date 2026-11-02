@@ -12,6 +12,9 @@
 # rest). The signature is checked with openssl, so minisign is not needed.
 #
 # RAYCONTROL_VERSION=v0.2.0 pins a release; default is the latest one.
+# RAYCONTROL_MIRRORS="https://mirror.example/ ..." are URL prefixes tried when
+# github.com does not answer (RU, CN); the signature check makes any mirror
+# safe to use. The defaults are public GitHub proxies.
 # RAYCONTROL_LOCAL_DIR=<dir> installs rayd, rayspa and rayctl from <dir>
 # without downloading or verifying anything: for tests only.
 set -euo pipefail
@@ -29,6 +32,23 @@ die() {
 }
 
 log() { echo "bootstrap: $*"; }
+
+MIRRORS="${RAYCONTROL_MIRRORS-https://ghfast.top/ https://gh-proxy.com/}"
+
+# fetch URL FILE downloads with timeouts and retries: GitHub first, over
+# IPv4 too (broken IPv6 is common on VPS), then through the mirrors.
+fetch() {
+	local url=$1 out=$2 prefix
+	local opts=(-fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --retry 2 --retry-delay 2
+		--speed-limit 1024 --speed-time 60 -o "$out")
+	curl "${opts[@]}" "$url" && return 0
+	curl -4 "${opts[@]}" "$url" && return 0
+	for prefix in $MIRRORS; do
+		log "github.com did not answer, trying ${prefix} (the signature still protects the files)"
+		curl "${opts[@]}" "${prefix}${url}" && return 0
+	done
+	return 1
+}
 
 # verify_minisig FILE SIGFILE PUBKEY checks a minisign signature with openssl:
 # Ed25519 over BLAKE2b-512(FILE) ("ED", minisign's default) or over FILE
@@ -76,7 +96,9 @@ _verify_minisig() {
 }
 
 # install_deps installs what is missing: curl, openssl, nft and polkit (rayd
-# restarts data-plane units through polkit).
+# restarts data-plane units through polkit). INSTALLED_PKGS records them as
+# manager:name,name for rayctl uninstall -purge-packages.
+INSTALLED_PKGS=""
 install_deps() {
 	local missing=()
 	command -v curl >/dev/null || missing+=(curl)
@@ -91,14 +113,20 @@ install_deps() {
 	if command -v apt-get >/dev/null; then
 		for p in "${missing[@]}"; do [[ $p == polkit ]] && pkgs+=(polkitd) || pkgs+=("$p"); done
 		export DEBIAN_FRONTEND=noninteractive
-		apt-get update -q
-		apt-get install -y -q ca-certificates "${pkgs[@]}"
+		# A fresh VPS often runs unattended-upgrades first: wait for its lock.
+		local lock=(-o DPkg::Lock::Timeout=300)
+		apt-get "${lock[@]}" update -q
+		apt-get "${lock[@]}" install -y -q ca-certificates "${pkgs[@]}"
+		INSTALLED_PKGS="apt:$(IFS=,; echo "${pkgs[*]}")"
 	elif command -v dnf >/dev/null; then
 		dnf install -y -q ca-certificates "${missing[@]}"
+		INSTALLED_PKGS="dnf:$(IFS=,; echo "${missing[*]}")"
 	elif command -v zypper >/dev/null; then
 		zypper --non-interactive install ca-certificates "${missing[@]}"
+		INSTALLED_PKGS="zypper:$(IFS=,; echo "${missing[*]}")"
 	elif command -v pacman >/dev/null; then
 		pacman -Sy --noconfirm --needed ca-certificates "${missing[@]}"
+		INSTALLED_PKGS="pacman:$(IFS=,; echo "${missing[*]}")"
 	else
 		die "install ${missing[*]} with your package manager and run again"
 	fi
@@ -130,7 +158,7 @@ main() {
 		fi
 		tarball="raycontrol-linux-${ARCH}.tar.gz"
 		for f in "$tarball" SHA256SUMS SHA256SUMS.minisig; do
-			curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/$f" "$base/$f"
+			fetch "$base/$f" "$tmp/$f" || die "cannot download $f"
 		done
 		verify_minisig "$tmp/SHA256SUMS" "$tmp/SHA256SUMS.minisig" "$PUBKEY" || die "release signature does not verify"
 		(cd "$tmp" && grep " ${tarball}\$" SHA256SUMS | sha256sum -c -) || die "checksum mismatch"
@@ -141,7 +169,7 @@ main() {
 	if command -v restorecon >/dev/null; then
 		restorecon /usr/local/bin/rayd /usr/local/bin/rayspa /usr/local/bin/rayctl || true
 	fi
-	/usr/local/bin/rayctl install "$@"
+	/usr/local/bin/rayctl install ${INSTALLED_PKGS:+-packages "$INSTALLED_PKGS"} "$@"
 }
 
 # Sourcing the file (tests) only defines the functions.

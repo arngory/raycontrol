@@ -59,11 +59,13 @@ func chainLen(chain [][]byte) int {
 	return n
 }
 
-// TLSConfig is what the site offers: TLS 1.3 only (X25519MLKEM768 first,
-// Go's default) and HTTP/2, as REALITY needs from its target.
+// TLSConfig is what the site offers: TLS 1.3 with X25519MLKEM768 first
+// (Go's default) and HTTP/2, as REALITY needs from its target, and TLS 1.2
+// with modern suites for the rest: a probe that REALITY hands to the site
+// meets a server like most others, not one that refuses TLS 1.2.
 func TLSConfig(cert tls.Certificate) *tls.Config {
 	return &tls.Config{
-		MinVersion:   tls.VersionTLS13,
+		MinVersion:   tls.VersionTLS12,
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   []string{"h2", "http/1.1"},
 	}

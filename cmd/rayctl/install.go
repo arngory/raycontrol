@@ -149,6 +149,7 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	host := fs.String("host", "", "public address clients use (required)")
 	domain := fs.String("domain", "", "base domain (needed for DNS tunnels)")
 	admin := fs.String("admin", sshClient(), "addresses that reach SSH without SPA (comma-separated; default: this SSH session)")
+	packages := fs.String("packages", "", "packages the bootstrap installed, as manager:name,name (recorded for uninstall)")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
@@ -169,7 +170,31 @@ func (c *cli) install(ctx context.Context, args []string) error {
 		return errors.New("no admin address: pass -admin, or install from an SSH session")
 	}
 
-	h := deploy.NewHost(os.Stdout)
+	h, err := journaledHost()
+	if err != nil {
+		return err
+	}
+	// Recorded before anything else changes: rayctl uninstall takes all of
+	// it back (docs/08-decisions.md, R4-2).
+	for _, b := range []string{deploy.DefaultBinaries.Rayd, deploy.DefaultBinaries.Rayspa, "/usr/local/bin/rayctl"} {
+		if _, err := os.Stat(b); err == nil {
+			if err := h.Journal.Record(deploy.Change{Kind: deploy.ChangeBinary, Path: b}); err != nil {
+				return err
+			}
+		}
+	}
+	if manager, names, ok := strings.Cut(*packages, ":"); ok {
+		for _, name := range splitList(names) {
+			if err := h.Journal.Record(deploy.Change{Kind: deploy.ChangePackage, Name: name, Value: manager}); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := os.Stat(deploy.StateDir); err != nil {
+		if err := h.Journal.Record(deploy.Change{Kind: deploy.ChangeState, Path: deploy.StateDir}); err != nil {
+			return err
+		}
+	}
 	if err := h.EnsureGroup(deploy.AdminGroup, 0); err != nil {
 		return err
 	}
@@ -198,10 +223,11 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	if err := run("runuser", initArgs...); err != nil {
 		return err
 	}
-	for _, cmd := range [][]string{{"daemon-reload"}, {"enable", "--now", "rayd.service"}} {
-		if err := run("systemctl", cmd...); err != nil {
-			return err
-		}
+	if err := run("systemctl", "daemon-reload"); err != nil {
+		return err
+	}
+	if err := h.EnableNow("rayd.service"); err != nil {
+		return err
 	}
 	if err := waitSocket(deploy.Socket); err != nil {
 		return err
@@ -228,10 +254,10 @@ func (c *cli) install(ctx context.Context, args []string) error {
 		return err
 	}
 
-	if err := c.deploy(ctx, "rayspa.service"); err != nil {
+	if err := c.deploy(ctx, h, "rayspa.service"); err != nil {
 		return err
 	}
-	if err := run("systemctl", "enable", "--now", "rayspa.service"); err != nil {
+	if err := h.EnableNow("rayspa.service"); err != nil {
 		return err
 	}
 
@@ -241,6 +267,51 @@ func (c *cli) install(ctx context.Context, args []string) error {
 		fmt.Printf("\nEmergency device (SSH only). Store it offline, it is shown once:\n\n%s\n", bundle)
 	}
 	fmt.Println("\nRecovery from the provider console: rayspa teardown")
+	return nil
+}
+
+// journaledHost acts on this machine and records every change.
+func journaledHost() (*deploy.Host, error) {
+	j, err := deploy.OpenJournal("")
+	if err != nil {
+		return nil, err
+	}
+	h := deploy.NewHost(os.Stdout)
+	h.Journal = j
+	return h, nil
+}
+
+// uninstall takes back everything rayctl install and apply changed.
+func uninstall(args []string) error {
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	yes := fs.Bool("yes", false, "do not ask")
+	keep := fs.Bool("keep-state", false, "keep "+deploy.StateDir+" (users, keys, certificates) for a later install")
+	purge := fs.Bool("purge-packages", false, "also remove the packages the bootstrap installed")
+	if err := fs.Parse(args); err != nil {
+		return errUsage
+	}
+	if err := needRoot(); err != nil {
+		return err
+	}
+	if !*yes {
+		fmt.Print("This stops the node, opens the perimeter and removes raycontrol with its users, keys and data")
+		if *keep {
+			fmt.Print(" (state kept)")
+		}
+		fmt.Print(". Type yes to go on: ")
+		answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		if strings.TrimSpace(answer) != "yes" {
+			return errors.New("not confirmed")
+		}
+	}
+	h, err := journaledHost()
+	if err != nil {
+		return err
+	}
+	if err := h.Uninstall(h.Journal, deploy.UninstallOptions{KeepState: *keep, PurgePackages: *purge}); err != nil {
+		return fmt.Errorf("uninstall finished with errors: %w", err)
+	}
+	fmt.Println("raycontrol is removed.")
 	return nil
 }
 
@@ -264,16 +335,20 @@ func waitSocket(path string) error {
 
 // apply installs what the current services need.
 func (c *cli) apply(ctx context.Context, _ []string) error {
-	return c.deploy(ctx)
+	if err := needRoot(); err != nil {
+		return err
+	}
+	h, err := journaledHost()
+	if err != nil {
+		return err
+	}
+	return c.deploy(ctx, h)
 }
 
 // deploy applies the deployment from rayd, leaving the units in keep alone.
 // rayd comes first: when its unit changed (new service groups) it restarts
 // and renders the files of the new services before their units start.
-func (c *cli) deploy(ctx context.Context, keep ...string) error {
-	if err := needRoot(); err != nil {
-		return err
-	}
+func (c *cli) deploy(ctx context.Context, h *deploy.Host, keep ...string) error {
 	resp, err := c.c.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{}))
 	if err != nil {
 		return err
@@ -288,7 +363,6 @@ func (c *cli) deploy(ctx context.Context, keep ...string) error {
 	for _, f := range resp.Msg.Files {
 		plan.Files = append(plan.Files, deploy.File{Path: f.Path, Mode: f.Mode, Content: f.Content})
 	}
-	h := deploy.NewHost(os.Stdout)
 	h.Ready = func(unit string) error {
 		if unit == "rayd.service" {
 			// rayd opens its socket after the first render.

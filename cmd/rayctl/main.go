@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -27,7 +29,8 @@ const usageText = `usage: rayctl [-socket PATH] [-json] <command>
 
   status
   user list
-  user add NAME [-services a,b] [-expires 2026-12-31|30d] [-limit 50G] [-note TEXT]
+  user add [NAME] [-services a,b] [-expires 2026-12-31|30d] [-limit 50G] [-note TEXT]
+                                            without NAME: an opaque handle such as u-k3f9-x2qa
   user enable|disable|del NAME
   user services NAME a,b
   service list
@@ -41,11 +44,19 @@ const usageText = `usage: rayctl [-socket PATH] [-json] <command>
 
   install -host ADDR [-domain D] [-admin A]   set the node up on this host (root)
   apply                                       install what the current services need (root)
+  uninstall [-yes] [-keep-state] [-purge-packages]
+                                              take back everything install and apply changed (root)
 
-  probe [-carrier udp|tcp|auto] [-addr A] [-links] BUNDLE|@FILE|-
+  report [-o FILE] [-logs warning|info|none] [-since 24h] [-id ID]
+      a redacted report for an issue: versions, system, checks, units,
+      counts and warnings; nothing is sent anywhere
+  probe [-carrier udp|tcp|auto] [-addr A] [-links] [-redact] BUNDLE|@FILE|-
       check a node from outside like a client: SPA, then the subscription
       (pin, both signatures). Needs only the device bundle.
 `
+
+// version is set at release build time (-X main.version).
+var version = "dev"
 
 type cli struct {
 	c    nodev1connect.NodeServiceClient
@@ -110,6 +121,10 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.apply(ctx, args[1:])
 	case "probe":
 		return probe(ctx, args[1:])
+	case "report":
+		return c.report(ctx, args[1:])
+	case "uninstall":
+		return uninstall(args[1:])
 	}
 	return errUsage
 }
@@ -171,13 +186,18 @@ func (c *cli) user(ctx context.Context, sub string, args []string) error {
 		expires := fs.String("expires", "", "expiry date (2006-01-02) or duration (30d, 12h)")
 		limit := fs.String("limit", "", "traffic limit (e.g. 50G)")
 		note := fs.String("note", "", "free text")
-		if err := need(args, 1); err != nil {
-			return err
+		// Without a name the user gets an opaque handle: nothing personal
+		// on the node, in its logs or reports (docs/09-observability.md).
+		name := ""
+		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+			name, args = args[0], args[1:]
+		} else {
+			name = userHandle()
 		}
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := fs.Parse(args); err != nil {
 			return errUsage
 		}
-		req := &nodev1.CreateUserRequest{Name: args[0], Note: *note, Services: splitList(*services)}
+		req := &nodev1.CreateUserRequest{Name: name, Note: *note, Services: splitList(*services)}
 		var err error
 		if req.ExpiresAt, err = parseExpiry(*expires, time.Now()); err != nil {
 			return err
@@ -392,4 +412,13 @@ func formatBytes(n int64) string {
 		}
 	}
 	return strconv.FormatInt(n, 10)
+}
+
+// userHandle is an opaque user name: "u-" and two groups of four base32
+// characters, like an account number.
+func userHandle() string {
+	b := make([]byte, 5)
+	_, _ = rand.Read(b)
+	h := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
+	return "u-" + h[:4] + "-" + h[4:]
 }
