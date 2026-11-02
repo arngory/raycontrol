@@ -57,8 +57,9 @@ func (a *Applier) inner(socket string) InnerAPI {
 	return xrayapi.Dial(socket)
 }
 
-// Apply renders everything once. Errors of single services are logged and
-// do not stop the others.
+// Apply renders everything once. A service whose files cannot be written
+// is skipped (and not restarted); the others go on, and the errors come back
+// joined.
 func (a *Applier) Apply(ctx context.Context) error {
 	m, err := render.Collect(ctx, a.Store)
 	if err != nil {
@@ -82,21 +83,33 @@ func (a *Applier) Apply(ctx context.Context) error {
 
 	type change struct{ old, new []byte }
 	changed := map[string][]change{} // service -> changed files
+	failed := map[string]bool{}
+	var errs []error
 	for _, f := range files {
-		old, err := os.ReadFile(f.Path)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		if failed[f.Service] {
+			continue
 		}
+		old, err := os.ReadFile(f.Path)
 		if err == nil && bytes.Equal(old, f.Content) {
 			continue
 		}
-		if err := writeFile(f); err != nil {
-			return fmt.Errorf("writing %s: %w", f.Path, err)
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			err = writeFile(f)
+		}
+		if err != nil {
+			// E.g. the service group exists but rayd is not in it yet: rayctl
+			// apply restarts rayd with its new groups.
+			failed[f.Service] = true
+			errs = append(errs, fmt.Errorf("service %s: %s: %w", f.Service, f.Path, err))
+			continue
 		}
 		changed[f.Service] = append(changed[f.Service], change{old, f.Content})
 	}
 
 	for service, cs := range changed {
+		if failed[service] {
+			continue
+		}
 		unit := render.UnitName(service)
 		if service != "front" && isInner(m, service) && len(cs) == 1 && cs[0].old != nil && sameExceptClients(cs[0].old, cs[0].new) {
 			want := map[string]string{}
@@ -116,7 +129,7 @@ func (a *Applier) Apply(ctx context.Context) error {
 			a.Log.Info("restarted after config change", "unit", unit)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func isInner(m render.Model, service string) bool {
@@ -194,17 +207,19 @@ func writeFile(f render.File) error {
 	return os.Rename(tmp.Name(), f.Path)
 }
 
-// Run applies at start, after every change signalled on changes, and every
-// minute (users expire without a change).
+// Run applies now, after every change signalled on changes and every minute
+// (users expire without a change).
 func (a *Applier) Run(ctx context.Context, changes func() <-chan struct{}) {
 	for {
+		// Taken before Apply: a change during Apply wakes the next round.
+		wake := changes()
 		if err := a.Apply(ctx); err != nil && ctx.Err() == nil {
 			a.Log.Error("apply", "err", err)
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-changes():
+		case <-wake:
 			// Let a burst of changes settle.
 			select {
 			case <-ctx.Done():

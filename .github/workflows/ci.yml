@@ -21,7 +21,7 @@ jobs:
           ./scripts/gen.sh
           git diff --exit-code -- internal/gen
       - name: Shell scripts
-        run: shellcheck scripts/*.sh install/*.sh
+        run: shellcheck -x scripts/*.sh install/*.sh test/install/*.sh
       - run: go vet ./...
       - run: go test -race -count=1 ./...
       # Built from source with the module's Go: prebuilt binaries made with an
@@ -65,6 +65,60 @@ jobs:
         with:
           go-version-file: go.mod
       - run: XRAY_BIN="$RUNNER_TEMP/xray" go test -count=1 -run TestInnerWithXray -v ./internal/xrayapi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xray
+          path: ${{ runner.temp }}/xray
+          retention-days: 3
+
+  bootstrap:
+    # The openssl-based signature check of install/bootstrap.sh against
+    # signatures made by minisign itself.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y minisign
+      - run: test/install/minisig.sh
+
+  install:
+    # A whole install through bootstrap.sh in a systemd container per system
+    # (docs/08-decisions.md, R2-1), with each family's usual host firewall,
+    # checked from a second container like a client: SPA over UDP and TCP,
+    # the subscription, revocation, firewall reloads, flush ruleset, reboot.
+    needs: xray
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian12, debian13, ubuntu2404, rocky9, rocky10]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build raycontrol
+        run: |
+          for c in rayd rayspa rayctl; do CGO_ENABLED=0 go build -trimpath -o bin/$c ./cmd/$c; done
+      - uses: actions/download-artifact@v4
+        with:
+          name: xray
+          path: bin
+      - name: niko-server release
+        run: |
+          . deploy/versions.env
+          base="$NIKO_SERVER_RELEASES/download/$NIKO_SERVER_TAG"
+          curl -fsSL -o bin/niko-server-linux-amd64 "$base/niko-server-linux-amd64"
+          curl -fsSL -o SHA256SUMS.niko "$base/SHA256SUMS"
+          (cd bin && grep ' niko-server-linux-amd64$' ../SHA256SUMS.niko | sha256sum -c -)
+          mv bin/niko-server-linux-amd64 bin/niko-server
+          chmod +x bin/*
+      - name: Bootstrap dependencies on the bare image
+        run: test/install/deps.sh ${{ matrix.distro }}
+      - name: Prepare the systemd image
+        run: test/install/prepare.sh ${{ matrix.distro }}
+      - name: Install and probe
+        run: TEST_STRICT=1 test/install/run.sh ${{ matrix.distro }} bin
 
   build:
     runs-on: ubuntu-24.04

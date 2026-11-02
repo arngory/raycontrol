@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -74,7 +75,8 @@ func TestRender(t *testing.T) {
 		Schema int    `json:"schema"`
 		Role   string `json:"role"`
 		DNS    struct {
-			Zones []struct{ Zone, Backend string } `json:"zones"`
+			Listen []string                         `json:"listen"`
+			Zones  []struct{ Zone, Backend string } `json:"zones"`
 		} `json:"dns"`
 		Backends map[string]struct {
 			Socket, Mode string
@@ -87,6 +89,20 @@ func TestRender(t *testing.T) {
 	}
 	if front.Schema != 1 || front.Role != "front" || len(front.DNS.Zones) != 2 || f.Group != "niko-front" {
 		t.Fatalf("front = %+v", front)
+	}
+	if want := m.IPv6; slices.Contains(front.DNS.Listen, "[::]:53") != want || !slices.Contains(front.DNS.Listen, "0.0.0.0:53") {
+		t.Fatalf("listen %v with IPv6 %v", front.DNS.Listen, want)
+	}
+	// Without IPv6 sockets (ipv6.disable=1) the front must not ask for [::].
+	m.IPv6 = false
+	noV6, _, err := render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range noV6 {
+		if f.Service == "front" && strings.Contains(string(f.Content), "[::]") {
+			t.Fatalf("front listens on [::] without IPv6:\n%s", f.Content)
+		}
 	}
 	b := front.Backends["dns"]
 	if b.Mode != "packet" || b.Socket != "/run/niko/dns/packet.sock" || b.UID < 9110 || b.UID > 9179 {

@@ -6,13 +6,15 @@ Control plane for a self-contained proxy node. The data plane is
 SPA-gated firewall, rotates keys and serves the subscription and API.
 
 Status: **R1** — perimeter (SPA v2 over UDP and TCP), DNS tunnels with the
-inner stage on Xray, signed subscriptions, installer. The niko-server binary
-(front and backends) is not released yet; see [docs/04-roadmap.md](docs/04-roadmap.md).
+inner stage on Xray, signed subscriptions, installer. Data plane:
+niko-server-v0.1.1 (DNS front, dnstt and MasterDnsVPN backends); see
+[docs/04-roadmap.md](docs/04-roadmap.md).
 
 ## Install
 
-On Debian 12/13 or Ubuntu 24.04, as root, from an SSH session (its address
-becomes the emergency SSH access):
+Any current Linux with systemd; tested on every push by a full install on
+Debian 12/13, Ubuntu 24.04 and Rocky Linux 9/10. As root, from an SSH session
+(its address becomes the emergency SSH access):
 
 ```
 curl -fsSL https://raw.githubusercontent.com/arngory/raycontrol/main/install/bootstrap.sh -o bootstrap.sh
@@ -20,10 +22,22 @@ less bootstrap.sh
 bash bootstrap.sh -host <public address> -domain <domain>
 ```
 
-The bootstrap verifies the release signature (minisign), installs `rayd`,
-`rayspa` and `rayctl` and runs `rayctl install`. Every port is closed
-afterwards except SPA, DNS tunnels and SSH from the admin address. Recovery
-from the provider console: `rayspa teardown`. Releases: [docs/RELEASE.md](docs/RELEASE.md).
+The bootstrap installs what is missing (curl, openssl, nftables, polkit) with
+apt, dnf, zypper or pacman, verifies the release signature (minisign format,
+checked with openssl), installs `rayd`, `rayspa` and `rayctl` to
+`/usr/local/bin` and runs `rayctl install`, which checks the host first
+(systemd, D-Bus, polkit, an nft and kernel that load the perimeter table).
+Every port is closed afterwards except SPA, DNS tunnels and SSH from the admin
+address. firewalld and ufw get the node's ports opened for them; rayspa still
+decides who reaches which port. Recovery from the provider console:
+`rayspa teardown`. Releases: [docs/RELEASE.md](docs/RELEASE.md).
+
+On RHEL-family systems `sudo` drops `/usr/local/bin` from `PATH`: use
+`sudo -i` or the full path `/usr/local/bin/rayctl`.
+
+To check a node from outside the way a client does (SPA, then the signed
+subscription), give a device bundle to `rayctl probe rcdev1:...` on any
+machine.
 
 [Русская версия ниже](#raycontrol-ru)
 
@@ -73,9 +87,12 @@ raycontrol хранит пользователей и ключи, генерир
 ротирует ключи, отдаёт подписку и API.
 
 - **Статус:** этап R1 — периметр (SPA v2 по UDP и TCP), DNS-туннели с внутренней ступенью на Xray, подписанные
-  подписки, установщик. Бинарник niko-server ещё не выпущен.
-- **Установка:** Debian 12/13 или Ubuntu 24.04, root, из SSH-сессии: `bash bootstrap.sh -host <адрес> -domain <домен>`
-  (скрипт `install/bootstrap.sh` проверяет подпись релиза). Восстановление с консоли: `rayspa teardown`.
+  подписки, установщик. Data plane — niko-server-v0.1.1.
+- **Установка:** любой современный Linux с systemd; полная установка проверяется в CI на Debian 12/13, Ubuntu 24.04,
+  Rocky Linux 9/10. Root, из SSH-сессии: `bash bootstrap.sh -host <адрес> -domain <домен>` (скрипт
+  `install/bootstrap.sh` ставит зависимости через apt/dnf/zypper/pacman и проверяет подпись релиза). firewalld и ufw
+  настраиваются сами. На RHEL-семействе `sudo` не видит `/usr/local/bin` — `sudo -i` или полный путь.
+  Восстановление с консоли: `rayspa teardown`. Проверка ноды снаружи, как клиент: `rayctl probe rcdev1:...`.
 - **Сборка:** Go 1.26, `go build ./cmd/...`, `go test ./...`; API генерируется `scripts/gen.sh`.
 - **Документы:** [docs/](docs/README.md); формат SPA v2 заморожен в [docs/spec/spa-v2.md](docs/spec/spa-v2.md).
 - **v0:** bash-установщик перенесён в [legacy/](legacy/); для новых установок не использовать.

@@ -6,7 +6,9 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -287,6 +289,36 @@ func TestNetns(t *testing.T) {
 		if !ask() {
 			t.Fatal("rotated port silent after SPA")
 		}
+	})
+	t.Run("table restored after flush ruleset", func(t *testing.T) {
+		allow4 := func() string {
+			out, err := exec.Command("nft", "list", "set", "inet", Table, "allow4").CombinedOutput()
+			if err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			return string(out)
+		}
+		if !strings.Contains(allow4(), "127.0.0.1") {
+			t.Fatal("no grant to restore")
+		}
+		if out, err := exec.Command("nft", "flush", "ruleset").CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		if ok, err := fw.Present(); ok || err != nil {
+			t.Fatalf("present after flush: %v %v", ok, err)
+		}
+		if _, err := gate.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := fw.Present(); !ok || err != nil {
+			t.Fatalf("present after tick: %v %v", ok, err)
+		}
+		if !strings.Contains(allow4(), "127.0.0.1") {
+			t.Fatal("grant lost")
+		}
+		// The slot ports log to rayspa again.
+		sendUDP(make([]byte, 120))
+		waitResult(spa.ErrAuth)
 	})
 	t.Run("garbage on the slot port", func(t *testing.T) {
 		sendUDP(make([]byte, 120))

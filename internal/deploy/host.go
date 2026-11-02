@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/arngory/raycontrol/internal/render"
 )
 
 // Host applies a plan to the machine. Root and Run are seams for tests:
@@ -23,6 +25,12 @@ type Host struct {
 	// LookupUser and LookupGroup default to os/user.
 	LookupUser  func(name string) (uid int, err error)
 	LookupGroup func(name string) (gid int, err error)
+	// LookPath finds a command; nil means none is installed.
+	LookPath func(name string) (string, error)
+	// Ready, if set, is called after each unit is enabled (and restarted if
+	// its file changed) and before the next one starts: rayd must render
+	// the files the data-plane units read.
+	Ready func(unit string) error
 }
 
 // NewHost returns a host that acts on this machine.
@@ -31,7 +39,8 @@ func NewHost(out io.Writer) *Host {
 		Run: func(name string, args ...string) ([]byte, error) {
 			return exec.Command(name, args...).CombinedOutput()
 		},
-		Out: out,
+		Out:      out,
+		LookPath: exec.LookPath,
 		LookupUser: func(name string) (int, error) {
 			u, err := user.Lookup(name)
 			if err != nil {
@@ -88,7 +97,18 @@ func (h *Host) EnsureUser(u SystemUser) error {
 		return nil
 	}
 	return h.run("useradd", "--system", "--uid", strconv.Itoa(u.UID), "--gid", u.Name,
-		"--no-create-home", "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", u.Name)
+		"--no-create-home", "--home-dir", "/nonexistent", "--shell", h.nologin(), u.Name)
+}
+
+// nologin finds the no-login shell: /usr/sbin on Debian and RHEL, /usr/bin
+// on Arch; /bin/false where neither exists.
+func (h *Host) nologin() string {
+	for _, p := range []string{"/usr/sbin/nologin", "/sbin/nologin", "/usr/bin/nologin"} {
+		if _, err := os.Stat(h.path(p)); err == nil {
+			return p
+		}
+	}
+	return "/bin/false"
 }
 
 // WriteFile writes a file if its content differs and reports whether it did.
@@ -119,9 +139,8 @@ const (
 )
 
 // Apply installs the plan: users, files, units. It enables the units whose
-// executables exist and restarts those whose files changed. Units listed in
-// keep are left alone even if their files changed (the caller restarts them
-// last, e.g. rayd that serves this very request).
+// executables exist, in plan order, and restarts those whose files changed.
+// Units listed in keep are left alone (rayctl install starts rayspa last).
 func (h *Host) Apply(plan Plan, keep ...string) error {
 	for _, u := range plan.Users {
 		if err := h.EnsureUser(u); err != nil {
@@ -137,8 +156,13 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 	}
 
 	changedUnits := map[string]bool{}
+	changedFiles := map[string]bool{}
+	var written []string
 	var resolvedChanged, sysctlChanged, tmpfilesChanged bool
 	for _, f := range plan.Files {
+		if h.skipFile(f.Path) {
+			continue
+		}
 		changed, err := h.WriteFile(f)
 		if err != nil {
 			return fmt.Errorf("writing %s: %w", f.Path, err)
@@ -147,6 +171,8 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 			continue
 		}
 		fmt.Fprintln(h.Out, "wrote", f.Path)
+		changedFiles[f.Path] = true
+		written = append(written, f.Path)
 		switch {
 		case strings.HasPrefix(f.Path, "/etc/systemd/system/"):
 			changedUnits[filepath.Base(f.Path)] = true
@@ -159,6 +185,7 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 		}
 	}
 
+	h.relabel(written...)
 	if tmpfilesChanged {
 		if err := h.run("systemd-tmpfiles", "--create", "/etc/tmpfiles.d/raycontrol.conf"); err != nil {
 			return err
@@ -176,6 +203,12 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 	}
 	if err := h.run("systemctl", "daemon-reload"); err != nil {
 		return err
+	}
+	if err := h.hostFirewalls(plan, changedFiles); err != nil {
+		return err
+	}
+	if slices.Contains(plan.Units, "niko-front.service") {
+		h.warnPort53(render.FrontUID)
 	}
 
 	if err := h.removeStale(plan); err != nil {
@@ -200,11 +233,30 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 				return err
 			}
 		}
+		if h.Ready != nil {
+			if err := h.Ready(unit); err != nil {
+				return err
+			}
+		}
 	}
 	for _, w := range plan.Warnings {
 		fmt.Fprintln(h.Out, "warning:", w)
 	}
 	return nil
+}
+
+// relabel restores the SELinux labels of written files (RHEL family), so
+// that systemd and polkit may read them whatever created them.
+func (h *Host) relabel(paths ...string) {
+	if len(paths) == 0 || !h.lookPath("restorecon") {
+		return
+	}
+	if _, err := os.Stat(h.path("/sys/fs/selinux/enforce")); err != nil {
+		return
+	}
+	if out, err := h.Run("restorecon", paths...); err != nil {
+		fmt.Fprintf(h.Out, "warning: restorecon: %v: %s\n", err, bytes.TrimSpace(out))
+	}
 }
 
 // execOf returns the executable of a unit in the plan.
@@ -255,6 +307,10 @@ func (h *Host) freePort53() error {
 			return err
 		}
 		fmt.Fprintln(h.Out, "/etc/resolv.conf now points to", resolvConf, "instead of", stubResolv)
+	}
+	// Debian and RHEL servers often run without systemd-resolved: nothing to free.
+	if out, _ := h.Run("systemctl", "show", "-P", "LoadState", "systemd-resolved.service"); strings.TrimSpace(string(out)) == "not-found" {
+		return nil
 	}
 	if err := h.run("systemctl", "try-restart", "systemd-resolved.service"); err != nil {
 		var ee *exec.ExitError

@@ -222,12 +222,22 @@ func (g *Gate) Handle(src netip.Addr, pkt []byte) (spa.Grant, error) {
 	return grant, nil
 }
 
-// Tick moves the SPA ports to the current slots and forgets expired
-// holders (the firewall expires the elements itself). It returns the TCP
-// carrier ports that should be listening.
+// Tick restores the table if something removed it, moves the SPA ports to
+// the current slots and forgets expired holders (the firewall expires the
+// elements itself). It returns the TCP carrier ports that should be
+// listening.
 func (g *Gate) Tick() ([]uint16, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	present, err := g.fw.Present()
+	if err != nil {
+		return nil, err
+	}
+	if !present {
+		if err := g.restoreLocked(); err != nil {
+			return nil, err
+		}
+	}
 	if g.verifier == nil {
 		return nil, ErrNotReady
 	}
@@ -242,8 +252,50 @@ func (g *Gate) Tick() ([]uint16, error) {
 			delete(g.holders, key)
 		}
 	}
-	err := g.slotsLocked()
+	err = g.slotsLocked()
 	return slices.Clone(g.tcpPorts), err
+}
+
+// restoreLocked re-creates the table with everything the gate had put in
+// it, grants included with the time they have left. Until then the node
+// was as open as the rest of the ruleset let it be, so this runs on every
+// tick.
+func (g *Gate) restoreLocked() error {
+	if err := g.fw.Setup(); err != nil {
+		return err
+	}
+	if len(g.public) > 0 {
+		if err := g.fw.SetPublic(g.public); err != nil {
+			return err
+		}
+	}
+	if len(g.admin) > 0 || len(g.adminPorts) > 0 {
+		if err := g.fw.SetAdmin(g.admin, g.adminPorts); err != nil {
+			return err
+		}
+	}
+	g.rotMap, g.udpPorts, g.tcpPorts = nil, nil, nil
+	now := g.now()
+	grants := 0
+	for key, devs := range g.holders {
+		var until time.Time
+		for _, u := range devs {
+			if u.After(until) {
+				until = u
+			}
+		}
+		if ttl := until.Sub(now); ttl > 0 {
+			if err := g.fw.Allow(key.addr, []Port{key.port}, ttl); err != nil {
+				return err
+			}
+			grants++
+		}
+	}
+	g.log.Warn("nftables table was removed (flush ruleset? nftables or firewalld reload?), restored", "table", Table, "grants", grants)
+	if g.verifier == nil {
+		return nil
+	}
+	return g.slotsLocked()
 }
 
 func (g *Gate) slotsLocked() error {

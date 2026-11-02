@@ -23,4 +23,5 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [handoff/niko-r1-reply.md](handoff/niko-r1-reply.md) | Ответ на документы R1 сессии Niko: TCP-носитель SPA, замечания к CONFIG и IPC. |
 
 Статус: решения приняты (08), документы 01–04 переписаны под них. Data plane — [niko-server](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/SPEC.md), control plane — raycontrol.
-Код v0 перенесён в `legacy/`. Этапы R0 и R1 реализованы; niko-server-v0.1.1 выпущен, следующий шаг — релиз raycontrol v0.2.0 (RELEASE.md).
+Код v0 перенесён в `legacy/`. Этапы R0 и R1 реализованы, установка проверяется в CI на Debian 12/13, Ubuntu 24.04 и
+Rocky Linux 9/10 (решение R2-1); niko-server-v0.1.1 выпущен, следующий шаг — релиз raycontrol v0.2.0 (RELEASE.md).

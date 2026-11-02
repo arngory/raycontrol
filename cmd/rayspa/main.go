@@ -100,7 +100,9 @@ func run(args []string) error {
 		}
 	}()
 
-	tick := time.NewTicker(5 * time.Second)
+	// Every second: the slots move, and if a "flush ruleset" (nftables or
+	// firewalld reload) removed the table, it is back within a second.
+	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	log.Info("perimeter up", "table", perimeter.Table, "version", version)
 	for {

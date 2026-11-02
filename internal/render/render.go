@@ -17,6 +17,8 @@ import (
 	"sort"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/store"
@@ -68,12 +70,25 @@ type Model struct {
 	Users    []User    // enabled and not expired
 	// Inner maps user ID to the VLESS UUID at the inner stage.
 	Inner map[int64]string
+	// IPv6 is false on hosts without IPv6 sockets (ipv6.disable=1): the
+	// front must not ask for [::] there, or it does not start at all.
+	IPv6 bool
+}
+
+// HostIPv6 reports whether this host can open IPv6 sockets.
+func HostIPv6() bool {
+	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return false
+	}
+	_ = unix.Close(fd)
+	return true
 }
 
 // Collect reads the model from the store and creates missing inner
 // credentials for users who reach a service behind the inner stage.
 func Collect(ctx context.Context, st *store.Store) (Model, error) {
-	var m Model
+	m := Model{IPv6: HostIPv6()}
 	params, err := node.LoadParams(ctx, st)
 	if err != nil {
 		return m, err
@@ -246,7 +261,11 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			"backends": backends,
 		}
 		if len(zones) > 0 {
-			front["dns"] = map[string]any{"listen": []string{"0.0.0.0:53", "[::]:53"}, "zones": zones}
+			listen := []string{"0.0.0.0:53"}
+			if m.IPv6 {
+				listen = append(listen, "[::]:53")
+			}
+			front["dns"] = map[string]any{"listen": listen, "zones": zones}
 		}
 		b, err := jsonFile(front)
 		if err != nil {

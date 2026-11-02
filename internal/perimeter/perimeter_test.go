@@ -28,9 +28,30 @@ type fakeFW struct {
 	adminPorts []Port
 	rot        map[uint16]uint16
 	open       map[string]time.Duration // "addr port" -> ttl
+	gone       bool                     // table removed behind the gate's back
+	setups     int
 }
 
-func (f *fakeFW) Setup() error    { return nil }
+func (f *fakeFW) Setup() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setups++
+	f.gone = false
+	return nil
+}
+func (f *fakeFW) Present() (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.gone, nil
+}
+
+// flush mimics "nft flush ruleset".
+func (f *fakeFW) flush() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gone = true
+	f.udp, f.tcp, f.public, f.admin, f.adminPorts, f.rot, f.open = nil, nil, nil, nil, nil, nil, nil
+}
 func (f *fakeFW) Teardown() error { return nil }
 func (f *fakeFW) SetSPAPorts(udp, tcp []uint16) error {
 	f.mu.Lock()
@@ -190,6 +211,44 @@ func TestGateForgetsExpired(t *testing.T) {
 	}
 	if len(g.holders) != 0 {
 		t.Fatalf("expired holders kept: %v", g.holders)
+	}
+}
+
+func TestGateRestoresTable(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	fw := &fakeFW{}
+	g := NewGate(fw, quiet)
+	g.now = func() time.Time { return now }
+	alice := &perimeterv1.Device{Id: "alice", Key: key(0x11), Allowed: []uint32{2}}
+	snap := testSnapshot(alice)
+	snap.AdminPrefixes = []string{"198.51.100.0/24"}
+	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 22}}
+	snap.Services[1].Rotation = &perimeterv1.Rotation{PortKey: key(0x55), PortBase: 20000, PortRange: 1000, TargetPort: 443}
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), seal(t, snap, 0x11, now)); err != nil {
+		t.Fatal(err)
+	}
+
+	fw.flush()
+	now = now.Add(2 * time.Minute)
+	if _, err := g.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if fw.setups != 1 || len(fw.public) != 1 || len(fw.admin) != 1 || len(fw.adminPorts) != 1 {
+		t.Fatalf("setups=%d public=%v admin=%v %v", fw.setups, fw.public, fw.admin, fw.adminPorts)
+	}
+	if len(fw.udp) == 0 || len(fw.tcp) == 0 || len(fw.rot) == 0 {
+		t.Fatalf("slots not restored: udp=%v tcp=%v rot=%v", fw.udp, fw.tcp, fw.rot)
+	}
+	if ttl, ok := fw.open["203.0.113.9 udp/443"]; !ok || ttl != 8*time.Minute {
+		t.Fatalf("grant not restored with its remaining time: %v", fw.open)
+	}
+
+	// Nothing to restore while the table is there.
+	if _, err := g.Tick(); err != nil || fw.setups != 1 {
+		t.Fatalf("setups=%d err=%v", fw.setups, err)
 	}
 }
 

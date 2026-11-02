@@ -40,6 +40,10 @@ const usageText = `usage: rayctl [-socket PATH] [-json] <command>
 
   install -host ADDR [-domain D] [-admin A]   set the node up on this host (root)
   apply                                       install what the current services need (root)
+
+  probe [-carrier udp|tcp|auto] [-addr A] [-links] BUNDLE|@FILE|-
+      check a node from outside like a client: SPA, then the subscription
+      (pin, both signatures). Needs only the device bundle.
 `
 
 type cli struct {
@@ -103,6 +107,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.install(ctx, args[1:])
 	case "apply":
 		return c.apply(ctx, args[1:])
+	case "probe":
+		return probe(ctx, args[1:])
 	}
 	return errUsage
 }

@@ -222,11 +222,13 @@ func (*GetDeploymentRequest) Descriptor() ([]byte, []int) {
 }
 
 type GetDeploymentResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Users         []*SystemUser          `protobuf:"bytes,1,rep,name=users,proto3" json:"users,omitempty"`
-	Files         []*DeployFile          `protobuf:"bytes,2,rep,name=files,proto3" json:"files,omitempty"`
-	Units         []string               `protobuf:"bytes,3,rep,name=units,proto3" json:"units,omitempty"` // units to enable and keep running
-	Warnings      []string               `protobuf:"bytes,4,rep,name=warnings,proto3" json:"warnings,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Users    []*SystemUser          `protobuf:"bytes,1,rep,name=users,proto3" json:"users,omitempty"`
+	Files    []*DeployFile          `protobuf:"bytes,2,rep,name=files,proto3" json:"files,omitempty"`
+	Units    []string               `protobuf:"bytes,3,rep,name=units,proto3" json:"units,omitempty"` // units to enable and keep running
+	Warnings []string               `protobuf:"bytes,4,rep,name=warnings,proto3" json:"warnings,omitempty"`
+	// Ports clients reach; host firewalls (firewalld, ufw) must let them through.
+	HostPorts     []*PortRange `protobuf:"bytes,5,rep,name=host_ports,json=hostPorts,proto3" json:"host_ports,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -289,6 +291,73 @@ func (x *GetDeploymentResponse) GetWarnings() []string {
 	return nil
 }
 
+func (x *GetDeploymentResponse) GetHostPorts() []*PortRange {
+	if x != nil {
+		return x.HostPorts
+	}
+	return nil
+}
+
+type PortRange struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Proto         string                 `protobuf:"bytes,1,opt,name=proto,proto3" json:"proto,omitempty"` // tcp | udp
+	From          uint32                 `protobuf:"varint,2,opt,name=from,proto3" json:"from,omitempty"`
+	To            uint32                 `protobuf:"varint,3,opt,name=to,proto3" json:"to,omitempty"` // inclusive
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PortRange) Reset() {
+	*x = PortRange{}
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PortRange) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PortRange) ProtoMessage() {}
+
+func (x *PortRange) ProtoReflect() protoreflect.Message {
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PortRange.ProtoReflect.Descriptor instead.
+func (*PortRange) Descriptor() ([]byte, []int) {
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *PortRange) GetProto() string {
+	if x != nil {
+		return x.Proto
+	}
+	return ""
+}
+
+func (x *PortRange) GetFrom() uint32 {
+	if x != nil {
+		return x.From
+	}
+	return 0
+}
+
+func (x *PortRange) GetTo() uint32 {
+	if x != nil {
+		return x.To
+	}
+	return 0
+}
+
 type SystemUser struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -300,7 +369,7 @@ type SystemUser struct {
 
 func (x *SystemUser) Reset() {
 	*x = SystemUser{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[6]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -312,7 +381,7 @@ func (x *SystemUser) String() string {
 func (*SystemUser) ProtoMessage() {}
 
 func (x *SystemUser) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[6]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -325,7 +394,7 @@ func (x *SystemUser) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SystemUser.ProtoReflect.Descriptor instead.
 func (*SystemUser) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{6}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *SystemUser) GetName() string {
@@ -360,7 +429,7 @@ type DeployFile struct {
 
 func (x *DeployFile) Reset() {
 	*x = DeployFile{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[7]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -372,7 +441,7 @@ func (x *DeployFile) String() string {
 func (*DeployFile) ProtoMessage() {}
 
 func (x *DeployFile) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[7]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -385,7 +454,7 @@ func (x *DeployFile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeployFile.ProtoReflect.Descriptor instead.
 func (*DeployFile) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{7}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *DeployFile) GetPath() string {
@@ -417,7 +486,7 @@ type GetStatusRequest struct {
 
 func (x *GetStatusRequest) Reset() {
 	*x = GetStatusRequest{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[8]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -429,7 +498,7 @@ func (x *GetStatusRequest) String() string {
 func (*GetStatusRequest) ProtoMessage() {}
 
 func (x *GetStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[8]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -442,7 +511,7 @@ func (x *GetStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetStatusRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{8}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{9}
 }
 
 type GetStatusResponse struct {
@@ -461,7 +530,7 @@ type GetStatusResponse struct {
 
 func (x *GetStatusResponse) Reset() {
 	*x = GetStatusResponse{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[9]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -473,7 +542,7 @@ func (x *GetStatusResponse) String() string {
 func (*GetStatusResponse) ProtoMessage() {}
 
 func (x *GetStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[9]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -486,7 +555,7 @@ func (x *GetStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetStatusResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{9}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GetStatusResponse) GetVersion() string {
@@ -554,7 +623,7 @@ type User struct {
 
 func (x *User) Reset() {
 	*x = User{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[10]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -566,7 +635,7 @@ func (x *User) String() string {
 func (*User) ProtoMessage() {}
 
 func (x *User) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[10]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -579,7 +648,7 @@ func (x *User) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use User.ProtoReflect.Descriptor instead.
 func (*User) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{10}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *User) GetId() int64 {
@@ -646,7 +715,7 @@ type ListUsersRequest struct {
 
 func (x *ListUsersRequest) Reset() {
 	*x = ListUsersRequest{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[11]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -658,7 +727,7 @@ func (x *ListUsersRequest) String() string {
 func (*ListUsersRequest) ProtoMessage() {}
 
 func (x *ListUsersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[11]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -671,7 +740,7 @@ func (x *ListUsersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListUsersRequest.ProtoReflect.Descriptor instead.
 func (*ListUsersRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{11}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{12}
 }
 
 type ListUsersResponse struct {
@@ -683,7 +752,7 @@ type ListUsersResponse struct {
 
 func (x *ListUsersResponse) Reset() {
 	*x = ListUsersResponse{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[12]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -695,7 +764,7 @@ func (x *ListUsersResponse) String() string {
 func (*ListUsersResponse) ProtoMessage() {}
 
 func (x *ListUsersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[12]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -708,7 +777,7 @@ func (x *ListUsersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListUsersResponse.ProtoReflect.Descriptor instead.
 func (*ListUsersResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{12}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ListUsersResponse) GetUsers() []*User {
@@ -731,7 +800,7 @@ type CreateUserRequest struct {
 
 func (x *CreateUserRequest) Reset() {
 	*x = CreateUserRequest{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[13]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -743,7 +812,7 @@ func (x *CreateUserRequest) String() string {
 func (*CreateUserRequest) ProtoMessage() {}
 
 func (x *CreateUserRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[13]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -756,7 +825,7 @@ func (x *CreateUserRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateUserRequest.ProtoReflect.Descriptor instead.
 func (*CreateUserRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{13}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *CreateUserRequest) GetName() string {
@@ -803,7 +872,7 @@ type CreateUserResponse struct {
 
 func (x *CreateUserResponse) Reset() {
 	*x = CreateUserResponse{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[14]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -815,7 +884,7 @@ func (x *CreateUserResponse) String() string {
 func (*CreateUserResponse) ProtoMessage() {}
 
 func (x *CreateUserResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[14]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -828,7 +897,7 @@ func (x *CreateUserResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateUserResponse.ProtoReflect.Descriptor instead.
 func (*CreateUserResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{14}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *CreateUserResponse) GetUser() *User {
@@ -848,7 +917,7 @@ type SetUserEnabledRequest struct {
 
 func (x *SetUserEnabledRequest) Reset() {
 	*x = SetUserEnabledRequest{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[15]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -860,7 +929,7 @@ func (x *SetUserEnabledRequest) String() string {
 func (*SetUserEnabledRequest) ProtoMessage() {}
 
 func (x *SetUserEnabledRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[15]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -873,7 +942,7 @@ func (x *SetUserEnabledRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetUserEnabledRequest.ProtoReflect.Descriptor instead.
 func (*SetUserEnabledRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{15}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SetUserEnabledRequest) GetName() string {
@@ -898,7 +967,7 @@ type SetUserEnabledResponse struct {
 
 func (x *SetUserEnabledResponse) Reset() {
 	*x = SetUserEnabledResponse{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[16]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -910,7 +979,7 @@ func (x *SetUserEnabledResponse) String() string {
 func (*SetUserEnabledResponse) ProtoMessage() {}
 
 func (x *SetUserEnabledResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[16]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -923,7 +992,7 @@ func (x *SetUserEnabledResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetUserEnabledResponse.ProtoReflect.Descriptor instead.
 func (*SetUserEnabledResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{16}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{17}
 }
 
 type SetUserServicesRequest struct {
@@ -936,7 +1005,7 @@ type SetUserServicesRequest struct {
 
 func (x *SetUserServicesRequest) Reset() {
 	*x = SetUserServicesRequest{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[17]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -948,7 +1017,7 @@ func (x *SetUserServicesRequest) String() string {
 func (*SetUserServicesRequest) ProtoMessage() {}
 
 func (x *SetUserServicesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[17]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -961,7 +1030,7 @@ func (x *SetUserServicesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetUserServicesRequest.ProtoReflect.Descriptor instead.
 func (*SetUserServicesRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{17}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *SetUserServicesRequest) GetName() string {
@@ -986,7 +1055,7 @@ type SetUserServicesResponse struct {
 
 func (x *SetUserServicesResponse) Reset() {
 	*x = SetUserServicesResponse{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[18]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -998,7 +1067,7 @@ func (x *SetUserServicesResponse) String() string {
 func (*SetUserServicesResponse) ProtoMessage() {}
 
 func (x *SetUserServicesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[18]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1011,7 +1080,7 @@ func (x *SetUserServicesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetUserServicesResponse.ProtoReflect.Descriptor instead.
 func (*SetUserServicesResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{18}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{19}
 }
 
 type DeleteUserRequest struct {
@@ -1023,7 +1092,7 @@ type DeleteUserRequest struct {
 
 func (x *DeleteUserRequest) Reset() {
 	*x = DeleteUserRequest{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[19]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1035,7 +1104,7 @@ func (x *DeleteUserRequest) String() string {
 func (*DeleteUserRequest) ProtoMessage() {}
 
 func (x *DeleteUserRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[19]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1048,7 +1117,7 @@ func (x *DeleteUserRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteUserRequest.ProtoReflect.Descriptor instead.
 func (*DeleteUserRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{19}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *DeleteUserRequest) GetName() string {
@@ -1066,7 +1135,7 @@ type DeleteUserResponse struct {
 
 func (x *DeleteUserResponse) Reset() {
 	*x = DeleteUserResponse{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[20]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1078,7 +1147,7 @@ func (x *DeleteUserResponse) String() string {
 func (*DeleteUserResponse) ProtoMessage() {}
 
 func (x *DeleteUserResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[20]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1091,7 +1160,7 @@ func (x *DeleteUserResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteUserResponse.ProtoReflect.Descriptor instead.
 func (*DeleteUserResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{20}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{21}
 }
 
 type Service struct {
@@ -1109,7 +1178,7 @@ type Service struct {
 
 func (x *Service) Reset() {
 	*x = Service{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[21]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1121,7 +1190,7 @@ func (x *Service) String() string {
 func (*Service) ProtoMessage() {}
 
 func (x *Service) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[21]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1134,7 +1203,7 @@ func (x *Service) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Service.ProtoReflect.Descriptor instead.
 func (*Service) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{21}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Service) GetId() uint32 {
@@ -1194,7 +1263,7 @@ type ListServicesRequest struct {
 
 func (x *ListServicesRequest) Reset() {
 	*x = ListServicesRequest{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[22]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1206,7 +1275,7 @@ func (x *ListServicesRequest) String() string {
 func (*ListServicesRequest) ProtoMessage() {}
 
 func (x *ListServicesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[22]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1219,7 +1288,7 @@ func (x *ListServicesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListServicesRequest.ProtoReflect.Descriptor instead.
 func (*ListServicesRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{22}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{23}
 }
 
 type ListServicesResponse struct {
@@ -1232,7 +1301,7 @@ type ListServicesResponse struct {
 
 func (x *ListServicesResponse) Reset() {
 	*x = ListServicesResponse{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[23]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1244,7 +1313,7 @@ func (x *ListServicesResponse) String() string {
 func (*ListServicesResponse) ProtoMessage() {}
 
 func (x *ListServicesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[23]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1257,7 +1326,7 @@ func (x *ListServicesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListServicesResponse.ProtoReflect.Descriptor instead.
 func (*ListServicesResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{23}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ListServicesResponse) GetServices() []*Service {
@@ -1285,7 +1354,7 @@ type CreateServiceRequest struct {
 
 func (x *CreateServiceRequest) Reset() {
 	*x = CreateServiceRequest{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[24]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1297,7 +1366,7 @@ func (x *CreateServiceRequest) String() string {
 func (*CreateServiceRequest) ProtoMessage() {}
 
 func (x *CreateServiceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[24]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1310,7 +1379,7 @@ func (x *CreateServiceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateServiceRequest.ProtoReflect.Descriptor instead.
 func (*CreateServiceRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{24}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *CreateServiceRequest) GetKind() string {
@@ -1343,7 +1412,7 @@ type CreateServiceResponse struct {
 
 func (x *CreateServiceResponse) Reset() {
 	*x = CreateServiceResponse{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[25]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1355,7 +1424,7 @@ func (x *CreateServiceResponse) String() string {
 func (*CreateServiceResponse) ProtoMessage() {}
 
 func (x *CreateServiceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[25]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1368,7 +1437,7 @@ func (x *CreateServiceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateServiceResponse.ProtoReflect.Descriptor instead.
 func (*CreateServiceResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{25}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *CreateServiceResponse) GetService() *Service {
@@ -1388,7 +1457,7 @@ type SetServiceEnabledRequest struct {
 
 func (x *SetServiceEnabledRequest) Reset() {
 	*x = SetServiceEnabledRequest{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[26]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1400,7 +1469,7 @@ func (x *SetServiceEnabledRequest) String() string {
 func (*SetServiceEnabledRequest) ProtoMessage() {}
 
 func (x *SetServiceEnabledRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[26]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1413,7 +1482,7 @@ func (x *SetServiceEnabledRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetServiceEnabledRequest.ProtoReflect.Descriptor instead.
 func (*SetServiceEnabledRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{26}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *SetServiceEnabledRequest) GetName() string {
@@ -1438,7 +1507,7 @@ type SetServiceEnabledResponse struct {
 
 func (x *SetServiceEnabledResponse) Reset() {
 	*x = SetServiceEnabledResponse{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[27]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1450,7 +1519,7 @@ func (x *SetServiceEnabledResponse) String() string {
 func (*SetServiceEnabledResponse) ProtoMessage() {}
 
 func (x *SetServiceEnabledResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[27]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1463,7 +1532,7 @@ func (x *SetServiceEnabledResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetServiceEnabledResponse.ProtoReflect.Descriptor instead.
 func (*SetServiceEnabledResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{27}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{28}
 }
 
 type DeleteServiceRequest struct {
@@ -1475,7 +1544,7 @@ type DeleteServiceRequest struct {
 
 func (x *DeleteServiceRequest) Reset() {
 	*x = DeleteServiceRequest{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[28]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1487,7 +1556,7 @@ func (x *DeleteServiceRequest) String() string {
 func (*DeleteServiceRequest) ProtoMessage() {}
 
 func (x *DeleteServiceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[28]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1500,7 +1569,7 @@ func (x *DeleteServiceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteServiceRequest.ProtoReflect.Descriptor instead.
 func (*DeleteServiceRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{28}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *DeleteServiceRequest) GetName() string {
@@ -1518,7 +1587,7 @@ type DeleteServiceResponse struct {
 
 func (x *DeleteServiceResponse) Reset() {
 	*x = DeleteServiceResponse{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[29]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1530,7 +1599,7 @@ func (x *DeleteServiceResponse) String() string {
 func (*DeleteServiceResponse) ProtoMessage() {}
 
 func (x *DeleteServiceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[29]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1543,7 +1612,7 @@ func (x *DeleteServiceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteServiceResponse.ProtoReflect.Descriptor instead.
 func (*DeleteServiceResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{29}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{30}
 }
 
 type Device struct {
@@ -1560,7 +1629,7 @@ type Device struct {
 
 func (x *Device) Reset() {
 	*x = Device{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[30]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1572,7 +1641,7 @@ func (x *Device) String() string {
 func (*Device) ProtoMessage() {}
 
 func (x *Device) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[30]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1585,7 +1654,7 @@ func (x *Device) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Device.ProtoReflect.Descriptor instead.
 func (*Device) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{30}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *Device) GetId() string {
@@ -1639,7 +1708,7 @@ type ListDevicesRequest struct {
 
 func (x *ListDevicesRequest) Reset() {
 	*x = ListDevicesRequest{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[31]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1651,7 +1720,7 @@ func (x *ListDevicesRequest) String() string {
 func (*ListDevicesRequest) ProtoMessage() {}
 
 func (x *ListDevicesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[31]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1664,7 +1733,7 @@ func (x *ListDevicesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDevicesRequest.ProtoReflect.Descriptor instead.
 func (*ListDevicesRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{31}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ListDevicesRequest) GetUser() string {
@@ -1683,7 +1752,7 @@ type ListDevicesResponse struct {
 
 func (x *ListDevicesResponse) Reset() {
 	*x = ListDevicesResponse{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[32]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1695,7 +1764,7 @@ func (x *ListDevicesResponse) String() string {
 func (*ListDevicesResponse) ProtoMessage() {}
 
 func (x *ListDevicesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[32]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1708,7 +1777,7 @@ func (x *ListDevicesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListDevicesResponse.ProtoReflect.Descriptor instead.
 func (*ListDevicesResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{32}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ListDevicesResponse) GetDevices() []*Device {
@@ -1729,7 +1798,7 @@ type CreateDeviceRequest struct {
 
 func (x *CreateDeviceRequest) Reset() {
 	*x = CreateDeviceRequest{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[33]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1741,7 +1810,7 @@ func (x *CreateDeviceRequest) String() string {
 func (*CreateDeviceRequest) ProtoMessage() {}
 
 func (x *CreateDeviceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[33]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1754,7 +1823,7 @@ func (x *CreateDeviceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateDeviceRequest.ProtoReflect.Descriptor instead.
 func (*CreateDeviceRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{33}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *CreateDeviceRequest) GetUser() string {
@@ -1788,7 +1857,7 @@ type CreateDeviceResponse struct {
 
 func (x *CreateDeviceResponse) Reset() {
 	*x = CreateDeviceResponse{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[34]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1800,7 +1869,7 @@ func (x *CreateDeviceResponse) String() string {
 func (*CreateDeviceResponse) ProtoMessage() {}
 
 func (x *CreateDeviceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[34]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1813,7 +1882,7 @@ func (x *CreateDeviceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateDeviceResponse.ProtoReflect.Descriptor instead.
 func (*CreateDeviceResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{34}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *CreateDeviceResponse) GetDevice() *Device {
@@ -1839,7 +1908,7 @@ type RevokeDeviceRequest struct {
 
 func (x *RevokeDeviceRequest) Reset() {
 	*x = RevokeDeviceRequest{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[35]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1851,7 +1920,7 @@ func (x *RevokeDeviceRequest) String() string {
 func (*RevokeDeviceRequest) ProtoMessage() {}
 
 func (x *RevokeDeviceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[35]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1864,7 +1933,7 @@ func (x *RevokeDeviceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeDeviceRequest.ProtoReflect.Descriptor instead.
 func (*RevokeDeviceRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{35}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *RevokeDeviceRequest) GetId() string {
@@ -1882,7 +1951,7 @@ type RevokeDeviceResponse struct {
 
 func (x *RevokeDeviceResponse) Reset() {
 	*x = RevokeDeviceResponse{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[36]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1894,7 +1963,7 @@ func (x *RevokeDeviceResponse) String() string {
 func (*RevokeDeviceResponse) ProtoMessage() {}
 
 func (x *RevokeDeviceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[36]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1907,7 +1976,7 @@ func (x *RevokeDeviceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeDeviceResponse.ProtoReflect.Descriptor instead.
 func (*RevokeDeviceResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{36}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{37}
 }
 
 type AuditEntry struct {
@@ -1923,7 +1992,7 @@ type AuditEntry struct {
 
 func (x *AuditEntry) Reset() {
 	*x = AuditEntry{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[37]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1935,7 +2004,7 @@ func (x *AuditEntry) String() string {
 func (*AuditEntry) ProtoMessage() {}
 
 func (x *AuditEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[37]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1948,7 +2017,7 @@ func (x *AuditEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuditEntry.ProtoReflect.Descriptor instead.
 func (*AuditEntry) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{37}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *AuditEntry) GetTime() int64 {
@@ -1995,7 +2064,7 @@ type ListAuditRequest struct {
 
 func (x *ListAuditRequest) Reset() {
 	*x = ListAuditRequest{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[38]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2007,7 +2076,7 @@ func (x *ListAuditRequest) String() string {
 func (*ListAuditRequest) ProtoMessage() {}
 
 func (x *ListAuditRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[38]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2020,7 +2089,7 @@ func (x *ListAuditRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAuditRequest.ProtoReflect.Descriptor instead.
 func (*ListAuditRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{38}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ListAuditRequest) GetLimit() uint32 {
@@ -2039,7 +2108,7 @@ type ListAuditResponse struct {
 
 func (x *ListAuditResponse) Reset() {
 	*x = ListAuditResponse{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[39]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2051,7 +2120,7 @@ func (x *ListAuditResponse) String() string {
 func (*ListAuditResponse) ProtoMessage() {}
 
 func (x *ListAuditResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[39]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2064,7 +2133,7 @@ func (x *ListAuditResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAuditResponse.ProtoReflect.Descriptor instead.
 func (*ListAuditResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{39}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ListAuditResponse) GetEntries() []*AuditEntry {
@@ -2085,12 +2154,18 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x15SetAdminAccessRequest\x12\x14\n" +
 	"\x05cidrs\x18\x01 \x03(\tR\x05cidrs\"\x18\n" +
 	"\x16SetAdminAccessResponse\"\x16\n" +
-	"\x14GetDeploymentRequest\"\xb5\x01\n" +
+	"\x14GetDeploymentRequest\"\xf3\x01\n" +
 	"\x15GetDeploymentResponse\x124\n" +
 	"\x05users\x18\x01 \x03(\v2\x1e.raycontrol.node.v1.SystemUserR\x05users\x124\n" +
 	"\x05files\x18\x02 \x03(\v2\x1e.raycontrol.node.v1.DeployFileR\x05files\x12\x14\n" +
 	"\x05units\x18\x03 \x03(\tR\x05units\x12\x1a\n" +
-	"\bwarnings\x18\x04 \x03(\tR\bwarnings\"U\n" +
+	"\bwarnings\x18\x04 \x03(\tR\bwarnings\x12<\n" +
+	"\n" +
+	"host_ports\x18\x05 \x03(\v2\x1d.raycontrol.node.v1.PortRangeR\thostPorts\"E\n" +
+	"\tPortRange\x12\x14\n" +
+	"\x05proto\x18\x01 \x01(\tR\x05proto\x12\x12\n" +
+	"\x04from\x18\x02 \x01(\rR\x04from\x12\x0e\n" +
+	"\x02to\x18\x03 \x01(\rR\x02to\"U\n" +
 	"\n" +
 	"SystemUser\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
@@ -2237,7 +2312,7 @@ func file_raycontrol_node_v1_node_proto_rawDescGZIP() []byte {
 	return file_raycontrol_node_v1_node_proto_rawDescData
 }
 
-var file_raycontrol_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 40)
+var file_raycontrol_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 41)
 var file_raycontrol_node_v1_node_proto_goTypes = []any{
 	(*GetAdminAccessRequest)(nil),     // 0: raycontrol.node.v1.GetAdminAccessRequest
 	(*GetAdminAccessResponse)(nil),    // 1: raycontrol.node.v1.GetAdminAccessResponse
@@ -2245,90 +2320,92 @@ var file_raycontrol_node_v1_node_proto_goTypes = []any{
 	(*SetAdminAccessResponse)(nil),    // 3: raycontrol.node.v1.SetAdminAccessResponse
 	(*GetDeploymentRequest)(nil),      // 4: raycontrol.node.v1.GetDeploymentRequest
 	(*GetDeploymentResponse)(nil),     // 5: raycontrol.node.v1.GetDeploymentResponse
-	(*SystemUser)(nil),                // 6: raycontrol.node.v1.SystemUser
-	(*DeployFile)(nil),                // 7: raycontrol.node.v1.DeployFile
-	(*GetStatusRequest)(nil),          // 8: raycontrol.node.v1.GetStatusRequest
-	(*GetStatusResponse)(nil),         // 9: raycontrol.node.v1.GetStatusResponse
-	(*User)(nil),                      // 10: raycontrol.node.v1.User
-	(*ListUsersRequest)(nil),          // 11: raycontrol.node.v1.ListUsersRequest
-	(*ListUsersResponse)(nil),         // 12: raycontrol.node.v1.ListUsersResponse
-	(*CreateUserRequest)(nil),         // 13: raycontrol.node.v1.CreateUserRequest
-	(*CreateUserResponse)(nil),        // 14: raycontrol.node.v1.CreateUserResponse
-	(*SetUserEnabledRequest)(nil),     // 15: raycontrol.node.v1.SetUserEnabledRequest
-	(*SetUserEnabledResponse)(nil),    // 16: raycontrol.node.v1.SetUserEnabledResponse
-	(*SetUserServicesRequest)(nil),    // 17: raycontrol.node.v1.SetUserServicesRequest
-	(*SetUserServicesResponse)(nil),   // 18: raycontrol.node.v1.SetUserServicesResponse
-	(*DeleteUserRequest)(nil),         // 19: raycontrol.node.v1.DeleteUserRequest
-	(*DeleteUserResponse)(nil),        // 20: raycontrol.node.v1.DeleteUserResponse
-	(*Service)(nil),                   // 21: raycontrol.node.v1.Service
-	(*ListServicesRequest)(nil),       // 22: raycontrol.node.v1.ListServicesRequest
-	(*ListServicesResponse)(nil),      // 23: raycontrol.node.v1.ListServicesResponse
-	(*CreateServiceRequest)(nil),      // 24: raycontrol.node.v1.CreateServiceRequest
-	(*CreateServiceResponse)(nil),     // 25: raycontrol.node.v1.CreateServiceResponse
-	(*SetServiceEnabledRequest)(nil),  // 26: raycontrol.node.v1.SetServiceEnabledRequest
-	(*SetServiceEnabledResponse)(nil), // 27: raycontrol.node.v1.SetServiceEnabledResponse
-	(*DeleteServiceRequest)(nil),      // 28: raycontrol.node.v1.DeleteServiceRequest
-	(*DeleteServiceResponse)(nil),     // 29: raycontrol.node.v1.DeleteServiceResponse
-	(*Device)(nil),                    // 30: raycontrol.node.v1.Device
-	(*ListDevicesRequest)(nil),        // 31: raycontrol.node.v1.ListDevicesRequest
-	(*ListDevicesResponse)(nil),       // 32: raycontrol.node.v1.ListDevicesResponse
-	(*CreateDeviceRequest)(nil),       // 33: raycontrol.node.v1.CreateDeviceRequest
-	(*CreateDeviceResponse)(nil),      // 34: raycontrol.node.v1.CreateDeviceResponse
-	(*RevokeDeviceRequest)(nil),       // 35: raycontrol.node.v1.RevokeDeviceRequest
-	(*RevokeDeviceResponse)(nil),      // 36: raycontrol.node.v1.RevokeDeviceResponse
-	(*AuditEntry)(nil),                // 37: raycontrol.node.v1.AuditEntry
-	(*ListAuditRequest)(nil),          // 38: raycontrol.node.v1.ListAuditRequest
-	(*ListAuditResponse)(nil),         // 39: raycontrol.node.v1.ListAuditResponse
+	(*PortRange)(nil),                 // 6: raycontrol.node.v1.PortRange
+	(*SystemUser)(nil),                // 7: raycontrol.node.v1.SystemUser
+	(*DeployFile)(nil),                // 8: raycontrol.node.v1.DeployFile
+	(*GetStatusRequest)(nil),          // 9: raycontrol.node.v1.GetStatusRequest
+	(*GetStatusResponse)(nil),         // 10: raycontrol.node.v1.GetStatusResponse
+	(*User)(nil),                      // 11: raycontrol.node.v1.User
+	(*ListUsersRequest)(nil),          // 12: raycontrol.node.v1.ListUsersRequest
+	(*ListUsersResponse)(nil),         // 13: raycontrol.node.v1.ListUsersResponse
+	(*CreateUserRequest)(nil),         // 14: raycontrol.node.v1.CreateUserRequest
+	(*CreateUserResponse)(nil),        // 15: raycontrol.node.v1.CreateUserResponse
+	(*SetUserEnabledRequest)(nil),     // 16: raycontrol.node.v1.SetUserEnabledRequest
+	(*SetUserEnabledResponse)(nil),    // 17: raycontrol.node.v1.SetUserEnabledResponse
+	(*SetUserServicesRequest)(nil),    // 18: raycontrol.node.v1.SetUserServicesRequest
+	(*SetUserServicesResponse)(nil),   // 19: raycontrol.node.v1.SetUserServicesResponse
+	(*DeleteUserRequest)(nil),         // 20: raycontrol.node.v1.DeleteUserRequest
+	(*DeleteUserResponse)(nil),        // 21: raycontrol.node.v1.DeleteUserResponse
+	(*Service)(nil),                   // 22: raycontrol.node.v1.Service
+	(*ListServicesRequest)(nil),       // 23: raycontrol.node.v1.ListServicesRequest
+	(*ListServicesResponse)(nil),      // 24: raycontrol.node.v1.ListServicesResponse
+	(*CreateServiceRequest)(nil),      // 25: raycontrol.node.v1.CreateServiceRequest
+	(*CreateServiceResponse)(nil),     // 26: raycontrol.node.v1.CreateServiceResponse
+	(*SetServiceEnabledRequest)(nil),  // 27: raycontrol.node.v1.SetServiceEnabledRequest
+	(*SetServiceEnabledResponse)(nil), // 28: raycontrol.node.v1.SetServiceEnabledResponse
+	(*DeleteServiceRequest)(nil),      // 29: raycontrol.node.v1.DeleteServiceRequest
+	(*DeleteServiceResponse)(nil),     // 30: raycontrol.node.v1.DeleteServiceResponse
+	(*Device)(nil),                    // 31: raycontrol.node.v1.Device
+	(*ListDevicesRequest)(nil),        // 32: raycontrol.node.v1.ListDevicesRequest
+	(*ListDevicesResponse)(nil),       // 33: raycontrol.node.v1.ListDevicesResponse
+	(*CreateDeviceRequest)(nil),       // 34: raycontrol.node.v1.CreateDeviceRequest
+	(*CreateDeviceResponse)(nil),      // 35: raycontrol.node.v1.CreateDeviceResponse
+	(*RevokeDeviceRequest)(nil),       // 36: raycontrol.node.v1.RevokeDeviceRequest
+	(*RevokeDeviceResponse)(nil),      // 37: raycontrol.node.v1.RevokeDeviceResponse
+	(*AuditEntry)(nil),                // 38: raycontrol.node.v1.AuditEntry
+	(*ListAuditRequest)(nil),          // 39: raycontrol.node.v1.ListAuditRequest
+	(*ListAuditResponse)(nil),         // 40: raycontrol.node.v1.ListAuditResponse
 }
 var file_raycontrol_node_v1_node_proto_depIdxs = []int32{
-	6,  // 0: raycontrol.node.v1.GetDeploymentResponse.users:type_name -> raycontrol.node.v1.SystemUser
-	7,  // 1: raycontrol.node.v1.GetDeploymentResponse.files:type_name -> raycontrol.node.v1.DeployFile
-	10, // 2: raycontrol.node.v1.ListUsersResponse.users:type_name -> raycontrol.node.v1.User
-	10, // 3: raycontrol.node.v1.CreateUserResponse.user:type_name -> raycontrol.node.v1.User
-	21, // 4: raycontrol.node.v1.ListServicesResponse.services:type_name -> raycontrol.node.v1.Service
-	21, // 5: raycontrol.node.v1.CreateServiceResponse.service:type_name -> raycontrol.node.v1.Service
-	30, // 6: raycontrol.node.v1.ListDevicesResponse.devices:type_name -> raycontrol.node.v1.Device
-	30, // 7: raycontrol.node.v1.CreateDeviceResponse.device:type_name -> raycontrol.node.v1.Device
-	37, // 8: raycontrol.node.v1.ListAuditResponse.entries:type_name -> raycontrol.node.v1.AuditEntry
-	8,  // 9: raycontrol.node.v1.NodeService.GetStatus:input_type -> raycontrol.node.v1.GetStatusRequest
-	11, // 10: raycontrol.node.v1.NodeService.ListUsers:input_type -> raycontrol.node.v1.ListUsersRequest
-	13, // 11: raycontrol.node.v1.NodeService.CreateUser:input_type -> raycontrol.node.v1.CreateUserRequest
-	15, // 12: raycontrol.node.v1.NodeService.SetUserEnabled:input_type -> raycontrol.node.v1.SetUserEnabledRequest
-	17, // 13: raycontrol.node.v1.NodeService.SetUserServices:input_type -> raycontrol.node.v1.SetUserServicesRequest
-	19, // 14: raycontrol.node.v1.NodeService.DeleteUser:input_type -> raycontrol.node.v1.DeleteUserRequest
-	22, // 15: raycontrol.node.v1.NodeService.ListServices:input_type -> raycontrol.node.v1.ListServicesRequest
-	24, // 16: raycontrol.node.v1.NodeService.CreateService:input_type -> raycontrol.node.v1.CreateServiceRequest
-	26, // 17: raycontrol.node.v1.NodeService.SetServiceEnabled:input_type -> raycontrol.node.v1.SetServiceEnabledRequest
-	28, // 18: raycontrol.node.v1.NodeService.DeleteService:input_type -> raycontrol.node.v1.DeleteServiceRequest
-	31, // 19: raycontrol.node.v1.NodeService.ListDevices:input_type -> raycontrol.node.v1.ListDevicesRequest
-	33, // 20: raycontrol.node.v1.NodeService.CreateDevice:input_type -> raycontrol.node.v1.CreateDeviceRequest
-	35, // 21: raycontrol.node.v1.NodeService.RevokeDevice:input_type -> raycontrol.node.v1.RevokeDeviceRequest
-	38, // 22: raycontrol.node.v1.NodeService.ListAudit:input_type -> raycontrol.node.v1.ListAuditRequest
-	0,  // 23: raycontrol.node.v1.NodeService.GetAdminAccess:input_type -> raycontrol.node.v1.GetAdminAccessRequest
-	2,  // 24: raycontrol.node.v1.NodeService.SetAdminAccess:input_type -> raycontrol.node.v1.SetAdminAccessRequest
-	4,  // 25: raycontrol.node.v1.NodeService.GetDeployment:input_type -> raycontrol.node.v1.GetDeploymentRequest
-	9,  // 26: raycontrol.node.v1.NodeService.GetStatus:output_type -> raycontrol.node.v1.GetStatusResponse
-	12, // 27: raycontrol.node.v1.NodeService.ListUsers:output_type -> raycontrol.node.v1.ListUsersResponse
-	14, // 28: raycontrol.node.v1.NodeService.CreateUser:output_type -> raycontrol.node.v1.CreateUserResponse
-	16, // 29: raycontrol.node.v1.NodeService.SetUserEnabled:output_type -> raycontrol.node.v1.SetUserEnabledResponse
-	18, // 30: raycontrol.node.v1.NodeService.SetUserServices:output_type -> raycontrol.node.v1.SetUserServicesResponse
-	20, // 31: raycontrol.node.v1.NodeService.DeleteUser:output_type -> raycontrol.node.v1.DeleteUserResponse
-	23, // 32: raycontrol.node.v1.NodeService.ListServices:output_type -> raycontrol.node.v1.ListServicesResponse
-	25, // 33: raycontrol.node.v1.NodeService.CreateService:output_type -> raycontrol.node.v1.CreateServiceResponse
-	27, // 34: raycontrol.node.v1.NodeService.SetServiceEnabled:output_type -> raycontrol.node.v1.SetServiceEnabledResponse
-	29, // 35: raycontrol.node.v1.NodeService.DeleteService:output_type -> raycontrol.node.v1.DeleteServiceResponse
-	32, // 36: raycontrol.node.v1.NodeService.ListDevices:output_type -> raycontrol.node.v1.ListDevicesResponse
-	34, // 37: raycontrol.node.v1.NodeService.CreateDevice:output_type -> raycontrol.node.v1.CreateDeviceResponse
-	36, // 38: raycontrol.node.v1.NodeService.RevokeDevice:output_type -> raycontrol.node.v1.RevokeDeviceResponse
-	39, // 39: raycontrol.node.v1.NodeService.ListAudit:output_type -> raycontrol.node.v1.ListAuditResponse
-	1,  // 40: raycontrol.node.v1.NodeService.GetAdminAccess:output_type -> raycontrol.node.v1.GetAdminAccessResponse
-	3,  // 41: raycontrol.node.v1.NodeService.SetAdminAccess:output_type -> raycontrol.node.v1.SetAdminAccessResponse
-	5,  // 42: raycontrol.node.v1.NodeService.GetDeployment:output_type -> raycontrol.node.v1.GetDeploymentResponse
-	26, // [26:43] is the sub-list for method output_type
-	9,  // [9:26] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	7,  // 0: raycontrol.node.v1.GetDeploymentResponse.users:type_name -> raycontrol.node.v1.SystemUser
+	8,  // 1: raycontrol.node.v1.GetDeploymentResponse.files:type_name -> raycontrol.node.v1.DeployFile
+	6,  // 2: raycontrol.node.v1.GetDeploymentResponse.host_ports:type_name -> raycontrol.node.v1.PortRange
+	11, // 3: raycontrol.node.v1.ListUsersResponse.users:type_name -> raycontrol.node.v1.User
+	11, // 4: raycontrol.node.v1.CreateUserResponse.user:type_name -> raycontrol.node.v1.User
+	22, // 5: raycontrol.node.v1.ListServicesResponse.services:type_name -> raycontrol.node.v1.Service
+	22, // 6: raycontrol.node.v1.CreateServiceResponse.service:type_name -> raycontrol.node.v1.Service
+	31, // 7: raycontrol.node.v1.ListDevicesResponse.devices:type_name -> raycontrol.node.v1.Device
+	31, // 8: raycontrol.node.v1.CreateDeviceResponse.device:type_name -> raycontrol.node.v1.Device
+	38, // 9: raycontrol.node.v1.ListAuditResponse.entries:type_name -> raycontrol.node.v1.AuditEntry
+	9,  // 10: raycontrol.node.v1.NodeService.GetStatus:input_type -> raycontrol.node.v1.GetStatusRequest
+	12, // 11: raycontrol.node.v1.NodeService.ListUsers:input_type -> raycontrol.node.v1.ListUsersRequest
+	14, // 12: raycontrol.node.v1.NodeService.CreateUser:input_type -> raycontrol.node.v1.CreateUserRequest
+	16, // 13: raycontrol.node.v1.NodeService.SetUserEnabled:input_type -> raycontrol.node.v1.SetUserEnabledRequest
+	18, // 14: raycontrol.node.v1.NodeService.SetUserServices:input_type -> raycontrol.node.v1.SetUserServicesRequest
+	20, // 15: raycontrol.node.v1.NodeService.DeleteUser:input_type -> raycontrol.node.v1.DeleteUserRequest
+	23, // 16: raycontrol.node.v1.NodeService.ListServices:input_type -> raycontrol.node.v1.ListServicesRequest
+	25, // 17: raycontrol.node.v1.NodeService.CreateService:input_type -> raycontrol.node.v1.CreateServiceRequest
+	27, // 18: raycontrol.node.v1.NodeService.SetServiceEnabled:input_type -> raycontrol.node.v1.SetServiceEnabledRequest
+	29, // 19: raycontrol.node.v1.NodeService.DeleteService:input_type -> raycontrol.node.v1.DeleteServiceRequest
+	32, // 20: raycontrol.node.v1.NodeService.ListDevices:input_type -> raycontrol.node.v1.ListDevicesRequest
+	34, // 21: raycontrol.node.v1.NodeService.CreateDevice:input_type -> raycontrol.node.v1.CreateDeviceRequest
+	36, // 22: raycontrol.node.v1.NodeService.RevokeDevice:input_type -> raycontrol.node.v1.RevokeDeviceRequest
+	39, // 23: raycontrol.node.v1.NodeService.ListAudit:input_type -> raycontrol.node.v1.ListAuditRequest
+	0,  // 24: raycontrol.node.v1.NodeService.GetAdminAccess:input_type -> raycontrol.node.v1.GetAdminAccessRequest
+	2,  // 25: raycontrol.node.v1.NodeService.SetAdminAccess:input_type -> raycontrol.node.v1.SetAdminAccessRequest
+	4,  // 26: raycontrol.node.v1.NodeService.GetDeployment:input_type -> raycontrol.node.v1.GetDeploymentRequest
+	10, // 27: raycontrol.node.v1.NodeService.GetStatus:output_type -> raycontrol.node.v1.GetStatusResponse
+	13, // 28: raycontrol.node.v1.NodeService.ListUsers:output_type -> raycontrol.node.v1.ListUsersResponse
+	15, // 29: raycontrol.node.v1.NodeService.CreateUser:output_type -> raycontrol.node.v1.CreateUserResponse
+	17, // 30: raycontrol.node.v1.NodeService.SetUserEnabled:output_type -> raycontrol.node.v1.SetUserEnabledResponse
+	19, // 31: raycontrol.node.v1.NodeService.SetUserServices:output_type -> raycontrol.node.v1.SetUserServicesResponse
+	21, // 32: raycontrol.node.v1.NodeService.DeleteUser:output_type -> raycontrol.node.v1.DeleteUserResponse
+	24, // 33: raycontrol.node.v1.NodeService.ListServices:output_type -> raycontrol.node.v1.ListServicesResponse
+	26, // 34: raycontrol.node.v1.NodeService.CreateService:output_type -> raycontrol.node.v1.CreateServiceResponse
+	28, // 35: raycontrol.node.v1.NodeService.SetServiceEnabled:output_type -> raycontrol.node.v1.SetServiceEnabledResponse
+	30, // 36: raycontrol.node.v1.NodeService.DeleteService:output_type -> raycontrol.node.v1.DeleteServiceResponse
+	33, // 37: raycontrol.node.v1.NodeService.ListDevices:output_type -> raycontrol.node.v1.ListDevicesResponse
+	35, // 38: raycontrol.node.v1.NodeService.CreateDevice:output_type -> raycontrol.node.v1.CreateDeviceResponse
+	37, // 39: raycontrol.node.v1.NodeService.RevokeDevice:output_type -> raycontrol.node.v1.RevokeDeviceResponse
+	40, // 40: raycontrol.node.v1.NodeService.ListAudit:output_type -> raycontrol.node.v1.ListAuditResponse
+	1,  // 41: raycontrol.node.v1.NodeService.GetAdminAccess:output_type -> raycontrol.node.v1.GetAdminAccessResponse
+	3,  // 42: raycontrol.node.v1.NodeService.SetAdminAccess:output_type -> raycontrol.node.v1.SetAdminAccessResponse
+	5,  // 43: raycontrol.node.v1.NodeService.GetDeployment:output_type -> raycontrol.node.v1.GetDeploymentResponse
+	27, // [27:44] is the sub-list for method output_type
+	10, // [10:27] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_raycontrol_node_v1_node_proto_init() }
@@ -2342,7 +2419,7 @@ func file_raycontrol_node_v1_node_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_raycontrol_node_v1_node_proto_rawDesc), len(file_raycontrol_node_v1_node_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   40,
+			NumMessages:   41,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

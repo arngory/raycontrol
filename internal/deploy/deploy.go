@@ -58,6 +58,8 @@ type Plan struct {
 	Files    []File
 	Units    []string // enabled and kept running, in start order
 	Warnings []string
+	// HostPorts are the ports clients reach (firewalld, ufw).
+	HostPorts []PortRange
 }
 
 // hardening applies to every unit.
@@ -235,7 +237,8 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		{
 			name:        "rayspa.service",
 			description: "raycontrol perimeter (nftables, SPA v2)",
-			after:       []string{"rayd.service"},
+			// After the host firewalls: their start may flush the ruleset.
+			after: []string{"rayd.service", "nftables.service", "firewalld.service", "ufw.service"},
 			service: []string{
 				"User=rayspa", "Group=rayspa",
 				"ExecStart=" + bin.Rayspa + " run -socket " + Socket,

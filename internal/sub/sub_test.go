@@ -221,3 +221,44 @@ func TestEndpoint(t *testing.T) {
 }
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+func TestClient(t *testing.T) {
+	f := setup(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	go srv.Serve(ctx, addr, f.tlsCfg)
+	time.Sleep(200 * time.Millisecond)
+
+	pin, _ := provision.SPKIPin(f.cert)
+	c := sub.Client{Addr: addr, Pin: pin, DeviceID: f.device.ID, DeviceKey: f.key, NodeKeys: f.keys.PublicJSON()}
+	p, err := c.Fetch(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Profiles) != 1 {
+		t.Fatalf("profiles %+v", p.Profiles)
+	}
+
+	bad := c
+	bad.Pin = strings.Repeat("A", 43)
+	if _, err := bad.Fetch(ctx, time.Now()); err == nil || !strings.Contains(err.Error(), "pin") {
+		t.Fatalf("wrong pin: %v", err)
+	}
+	bad = c
+	bad.DeviceKey[0] ^= 1
+	if _, err := bad.Fetch(ctx, time.Now()); !errors.Is(err, sub.ErrRefused) {
+		t.Fatalf("wrong key: %v", err)
+	}
+	bad = c
+	bad.NodeID = "00"
+	if _, err := bad.Fetch(ctx, time.Now()); err == nil || !strings.Contains(err.Error(), "node") {
+		t.Fatalf("wrong node: %v", err)
+	}
+}

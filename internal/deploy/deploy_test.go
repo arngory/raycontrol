@@ -177,3 +177,96 @@ func TestUIDConflict(t *testing.T) {
 		t.Fatal("existing user with another uid accepted")
 	}
 }
+
+func TestMergePorts(t *testing.T) {
+	got := deploy.MergePorts([]deploy.PortRange{
+		{"udp", 40000, 44095}, {"tcp", 443, 443}, {"udp", 53, 53}, {"tcp", 22, 22},
+		{"udp", 443, 443}, {"tcp", 443, 443}, {"udp", 44096, 44096}, {"tcp", 40000, 44095},
+	})
+	var s []string
+	for _, r := range got {
+		s = append(s, r.String())
+	}
+	if want := "tcp/22 tcp/443 tcp/40000-44095 udp/53 udp/443 udp/40000-44096"; strings.Join(s, " ") != want {
+		t.Fatalf("merged %v", s)
+	}
+}
+
+func TestHostFirewalls(t *testing.T) {
+	p, _ := plan(t)
+	p.HostPorts = []deploy.PortRange{{"tcp", 22, 22}, {"tcp", 40000, 44095}, {"udp", 53, 53}}
+	p.Files = append(p.Files, deploy.FirewallFiles(p.HostPorts)...)
+	if xml := file(p, deploy.FirewalldService); !strings.Contains(xml, `<port protocol="tcp" port="40000-44095"/>`) {
+		t.Fatalf("firewalld service:\n%s", xml)
+	}
+	if prof := file(p, deploy.UFWProfile); !strings.Contains(prof, "ports=22/tcp|40000:44095/tcp|53/udp\n") {
+		t.Fatalf("ufw profile:\n%s", prof)
+	}
+
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "/etc/firewalld"), 0o755)
+	os.MkdirAll(filepath.Join(root, "/proc/net"), 0o755)
+	// 127.0.0.53:53 held by uid 101 (a resolver), 0.0.0.0:53 by the front.
+	os.WriteFile(filepath.Join(root, "/proc/net/udp"), []byte(
+		"  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"+
+			"  1: 3500007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   101        0 1 2 0 0\n"+
+			"  2: 00000000:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000  9100        0 1 2 0 0\n"), 0o644)
+	var cmds []string
+	out := &bytes.Buffer{}
+	h := &deploy.Host{
+		Root: root,
+		Out:  out,
+		Run: func(name string, args ...string) ([]byte, error) {
+			c := name + " " + strings.Join(args, " ")
+			cmds = append(cmds, c)
+			switch {
+			case c == "firewall-cmd --get-default-zone":
+				return []byte("public\n"), nil
+			case c == "firewall-cmd --get-active-zones":
+				return []byte("public\n  interfaces: eth0\ninternal\n  sources: 10.0.0.0/8\n"), nil
+			case strings.Contains(c, "--query-service"):
+				return nil, errors.New("exit status 1")
+			case c == "nft -j list chains":
+				return []byte(`{"nftables":[{"metainfo":{}},` +
+					`{"chain":{"family":"inet","table":"raycontrol","name":"input","hook":"input","policy":"drop"}},` +
+					`{"chain":{"family":"inet","table":"filter","name":"input","hook":"input","policy":"drop"}},` +
+					`{"chain":{"family":"inet","table":"filter","name":"output","hook":"output","policy":"drop"}}]}`), nil
+			}
+			return nil, nil
+		},
+		LookPath:    func(name string) (string, error) { return "/usr/bin/" + name, nil },
+		LookupUser:  func(string) (int, error) { return 0, errors.New("unknown") },
+		LookupGroup: func(string) (int, error) { return 0, errors.New("unknown") },
+	}
+	if err := h.Apply(p, "rayd.service"); err != nil {
+		t.Fatal(err)
+	}
+	all := strings.Join(cmds, "\n")
+	for _, want := range []string{
+		"firewall-cmd --permanent --zone=internal --add-service=raycontrol",
+		"firewall-cmd --permanent --zone=public --add-service=raycontrol",
+		"firewall-cmd --reload",
+	} {
+		if !strings.Contains(all, want) {
+			t.Errorf("missing %q in:\n%s", want, all)
+		}
+	}
+	if strings.Contains(all, "ufw") {
+		t.Error("ufw configured though /etc/ufw does not exist")
+	}
+	if _, err := os.Stat(filepath.Join(root, deploy.UFWProfile)); !os.IsNotExist(err) {
+		t.Error("ufw profile written without ufw")
+	}
+	log := out.String()
+	for _, want := range []string{
+		"warning: nftables chain inet filter input drops incoming packets by default; it must accept tcp/22 tcp/40000-44095 udp/53",
+		"warning: UDP port 53 (127.0.0.53) is taken by user ",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("missing %q in:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "raycontrol input drops") || strings.Contains(log, "0.0.0.0") {
+		t.Errorf("own table or the front reported:\n%s", log)
+	}
+}

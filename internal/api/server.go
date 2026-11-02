@@ -471,6 +471,34 @@ func (s *Server) SetAdminAccess(ctx context.Context, req *connect.Request[nodev1
 	return connect.NewResponse(&nodev1.SetAdminAccessResponse{}), nil
 }
 
+// hostPorts lists the ports clients reach: the SPA range (UDP and the TCP
+// carrier) and the ports of enabled services. Rotated UDP slot ports need no
+// entry: they are redirected to the service port before any input chain.
+func (s *Server) hostPorts(ctx context.Context) ([]deploy.PortRange, error) {
+	last := uint16(int(s.Params.PortBase) + int(s.Params.PortRange) - 1)
+	ports := []deploy.PortRange{
+		{Proto: "udp", From: s.Params.PortBase, To: last},
+		{Proto: "tcp", From: s.Params.PortBase, To: last},
+	}
+	services, err := s.Store.ListServices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, svc := range services {
+		if !svc.Enabled {
+			continue
+		}
+		ps, err := svc.Ports()
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range ps {
+			ports = append(ports, deploy.PortRange{Proto: p.Proto, From: p.Num, To: p.Num})
+		}
+	}
+	return deploy.MergePorts(ports), nil
+}
+
 func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.GetDeploymentRequest]) (*connect.Response[nodev1.GetDeploymentResponse], error) {
 	m, err := render.Collect(ctx, s.Store)
 	if err != nil {
@@ -481,7 +509,15 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	}
 	plan := deploy.Build(m, files, s.Paths, s.Binaries)
+	plan.HostPorts, err = s.hostPorts(ctx)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	plan.Files = append(plan.Files, deploy.FirewallFiles(plan.HostPorts)...)
 	resp := &nodev1.GetDeploymentResponse{Units: plan.Units, Warnings: plan.Warnings}
+	for _, r := range plan.HostPorts {
+		resp.HostPorts = append(resp.HostPorts, &nodev1.PortRange{Proto: r.Proto, From: uint32(r.From), To: uint32(r.To)})
+	}
 	for _, name := range skipped {
 		resp.Warnings = append(resp.Warnings, "not rendered by this version: "+name)
 	}

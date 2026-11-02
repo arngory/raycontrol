@@ -27,6 +27,9 @@ type Firewall interface {
 	// Setup (re)creates the table. Existing grants are lost; established
 	// connections survive through conntrack.
 	Setup() error
+	// Present reports whether the table is still there: "flush ruleset"
+	// (an nftables.service restart on Debian) removes it with everything else.
+	Present() (bool, error)
 	SetSPAPorts(udp, tcp []uint16) error
 	SetPublic(ports []Port) error
 	// SetAdmin opens ports (SSH) to the given prefixes without SPA:
@@ -148,6 +151,24 @@ func (n *NFT) Setup() error {
 	return nil
 }
 
+// Present looks the table up in "nft list tables".
+func (n *NFT) Present() (bool, error) {
+	bin := n.Bin
+	if bin == "" {
+		bin = "nft"
+	}
+	out, err := exec.Command(bin, "list", "tables").Output() //nolint:gosec // G204: see run
+	if err != nil {
+		return false, fmt.Errorf("nft list tables: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == "table inet "+Table {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // Teardown removes the table.
 func (n *NFT) Teardown() error {
 	return n.run(fmt.Sprintf("table inet %[1]s {}\ndelete table inet %[1]s\n", Table))
@@ -246,7 +267,8 @@ func elements(addr netip.Addr, ports []Port, ttl time.Duration) (set, elems stri
 	for i, p := range ports {
 		parts[i] = fmt.Sprintf("%s . %s . %d", addr, p.Proto, p.Num)
 		if ttl > 0 {
-			parts[i] += fmt.Sprintf(" timeout %ds", int(ttl/time.Second))
+			// Whole seconds, rounded up: "timeout 0s" would never expire.
+			parts[i] += fmt.Sprintf(" timeout %ds", int((ttl+time.Second-1)/time.Second))
 		}
 	}
 	return set, strings.Join(parts, ", ")

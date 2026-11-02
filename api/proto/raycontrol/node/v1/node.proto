@@ -51,6 +51,14 @@ message GetDeploymentResponse {
   repeated DeployFile files = 2;
   repeated string units = 3;     // units to enable and keep running
   repeated string warnings = 4;
+  // Ports clients reach; host firewalls (firewalld, ufw) must let them through.
+  repeated PortRange host_ports = 5;
+}
+
+message PortRange {
+  string proto = 1; // tcp | udp
+  uint32 from = 2;
+  uint32 to = 3;    // inclusive
 }
 
 message SystemUser {

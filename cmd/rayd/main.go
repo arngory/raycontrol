@@ -132,6 +132,11 @@ func cmdServe(args []string) error {
 
 	if *liveApply {
 		applier := &live.Applier{Store: st, Paths: paths, Log: log}
+		// The socket opens after the first render: rayctl apply waits for it
+		// before it starts the data-plane units that read these files.
+		if err := applier.Apply(ctx); err != nil {
+			log.Error("apply", "err", err)
+		}
 		go applier.Run(ctx, srv.Changes)
 	}
 	if err := startSubscription(ctx, st, log); err != nil {
