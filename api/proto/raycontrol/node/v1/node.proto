@@ -1,0 +1,255 @@
+syntax = "proto3";
+
+// Node API of raycontrol. In R0 it is served on the local unix socket only
+// (rayctl); the remote listener behind SPA and mTLS comes in R3.
+// Compatibility follows protobuf rules; breaking changes go to node.v2.
+package raycontrol.node.v1;
+
+option go_package = "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1;nodev1";
+
+service NodeService {
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  rpc SetUserEnabled(SetUserEnabledRequest) returns (SetUserEnabledResponse);
+  rpc SetUserServices(SetUserServicesRequest) returns (SetUserServicesResponse);
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+
+  rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
+  rpc CreateService(CreateServiceRequest) returns (CreateServiceResponse);
+  rpc SetServiceEnabled(SetServiceEnabledRequest) returns (SetServiceEnabledResponse);
+  rpc DeleteService(DeleteServiceRequest) returns (DeleteServiceResponse);
+  // RotateService asks for the next key switch of a REALITY service
+  // (docs/08-decisions.md, R4-7): a lead time away, so that clients get the
+  // next keys first, or at once (leaked keys, a blocked name).
+  rpc RotateService(RotateServiceRequest) returns (RotateServiceResponse);
+  // SetServiceOption changes one of the few settings that may change after
+  // creation: a site's answer, whether REALITY moves its server name.
+  rpc SetServiceOption(SetServiceOptionRequest) returns (SetServiceOptionResponse);
+
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+  // CreateDevice returns the device bundle with the device key. The key is
+  // not stored anywhere it can be read back through the API.
+  rpc CreateDevice(CreateDeviceRequest) returns (CreateDeviceResponse);
+  rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
+
+  rpc ListAudit(ListAuditRequest) returns (ListAuditResponse);
+
+  // Admin access: addresses (CIDR) that reach SSH without SPA (emergency
+  // access, docs/08-decisions.md D-6).
+  rpc GetAdminAccess(GetAdminAccessRequest) returns (GetAdminAccessResponse);
+  rpc SetAdminAccess(SetAdminAccessRequest) returns (SetAdminAccessResponse);
+
+  // The DNS provider (Cloudflare): the node's records in its zone and
+  // certificates through DNS-01 with a wildcard name (R4-10). The token is
+  // stored by rayd and never returned.
+  rpc SetDNSProvider(SetDNSProviderRequest) returns (SetDNSProviderResponse);
+  rpc GetDNS(GetDNSRequest) returns (GetDNSResponse);
+  rpc SyncDNS(SyncDNSRequest) returns (SyncDNSResponse);
+  rpc RemoveDNS(RemoveDNSRequest) returns (RemoveDNSResponse);
+
+  // GetDeployment returns what root must install for the current services:
+  // system users, unit files and other files. rayctl apply writes them.
+  rpc GetDeployment(GetDeploymentRequest) returns (GetDeploymentResponse);
+}
+
+message SetDNSProviderRequest {
+  string provider = 1; // cloudflare
+  string token = 2;    // API token: Zone.DNS:Edit and Zone.Zone:Read on the node's zone
+}
+message SetDNSProviderResponse { DNSStatus status = 1; }
+
+message GetDNSRequest {}
+message GetDNSResponse { DNSStatus status = 1; }
+
+message SyncDNSRequest {}
+message SyncDNSResponse { DNSStatus status = 1; }
+
+message RemoveDNSRequest {
+  bool keep_records = 1; // forget the provider but leave the records in the zone
+}
+message RemoveDNSResponse { repeated string removed = 1; }
+
+message DNSStatus {
+  string provider = 1; // "" when the node has none
+  string zone = 2;
+  repeated DNSRecord records = 3; // what the node needs in the zone
+  repeated string changes = 4;    // what a sync changed
+  repeated string problems = 5;   // conflicts, records that cannot be made
+}
+
+message DNSRecord {
+  string type = 1;
+  string name = 2;
+  string content = 3;
+}
+
+message GetAdminAccessRequest {}
+message GetAdminAccessResponse { repeated string cidrs = 1; }
+
+message SetAdminAccessRequest { repeated string cidrs = 1; }
+message SetAdminAccessResponse {}
+
+message GetDeploymentRequest {}
+message GetDeploymentResponse {
+  repeated SystemUser users = 1;
+  repeated DeployFile files = 2;
+  repeated string units = 3;     // units to enable and keep running
+  repeated string warnings = 4;
+  // Ports clients reach; host firewalls (firewalld, ufw) must let them through.
+  repeated PortRange host_ports = 5;
+}
+
+message PortRange {
+  string proto = 1; // tcp | udp
+  uint32 from = 2;
+  uint32 to = 3;    // inclusive
+}
+
+message SystemUser {
+  string name = 1;
+  uint32 uid = 2;
+  repeated string extra_groups = 3; // groups the user joins
+}
+
+message DeployFile {
+  string path = 1;
+  uint32 mode = 2;
+  bytes content = 3;
+}
+
+message GetStatusRequest {}
+message GetStatusResponse {
+  string version = 1;
+  string node_id = 2;
+  string host = 3;
+  uint32 users = 4;
+  uint32 services = 5;
+  uint32 active_devices = 6;
+  // SPA ports open right now (previous, current and next slot).
+  repeated uint32 spa_ports = 7;
+}
+
+message User {
+  int64 id = 1;
+  string name = 2;
+  bool enabled = 3;
+  int64 expires_at = 4;          // unix seconds, 0 = never
+  int64 traffic_limit_bytes = 5; // 0 = unlimited
+  string note = 6;
+  int64 created_at = 7;
+  repeated string services = 8;  // service names
+}
+
+message ListUsersRequest {}
+message ListUsersResponse { repeated User users = 1; }
+
+message CreateUserRequest {
+  string name = 1;
+  int64 expires_at = 2;
+  int64 traffic_limit_bytes = 3;
+  string note = 4;
+  repeated string services = 5;
+}
+message CreateUserResponse { User user = 1; }
+
+message SetUserEnabledRequest {
+  string name = 1;
+  bool enabled = 2;
+}
+message SetUserEnabledResponse {}
+
+message SetUserServicesRequest {
+  string name = 1;
+  repeated string services = 2;
+}
+message SetUserServicesResponse {}
+
+message DeleteUserRequest { string name = 1; }
+message DeleteUserResponse {}
+
+message Service {
+  uint32 id = 1; // also the SPA scope ID
+  string kind = 2;
+  string name = 3;
+  bool enabled = 4;
+  string settings_json = 5;
+  int64 created_at = 6;
+  uint32 uid = 7; // system user of the service's process, 0 if none
+}
+
+message ListServicesRequest {}
+message ListServicesResponse {
+  repeated Service services = 1;
+  repeated string kinds = 2; // kinds this node can run
+}
+
+message CreateServiceRequest {
+  string kind = 1;
+  string name = 2;
+  string settings_json = 3;
+}
+message CreateServiceResponse { Service service = 1; }
+
+message SetServiceEnabledRequest {
+  string name = 1;
+  bool enabled = 2;
+}
+message SetServiceEnabledResponse {}
+
+message DeleteServiceRequest { string name = 1; }
+message DeleteServiceResponse {}
+
+message SetServiceOptionRequest {
+  string name = 1;
+  string key = 2;
+  string value = 3;
+}
+message SetServiceOptionResponse {
+  Service service = 1;
+}
+
+message RotateServiceRequest {
+  string name = 1;
+  bool now = 2;
+}
+message RotateServiceResponse {
+  int64 switch_at = 1; // unix seconds; later if a new server name waits for its certificate
+}
+
+message Device {
+  string id = 1;
+  string user = 2;
+  string name = 3;
+  string role = 4; // user | admin
+  int64 created_at = 5;
+  int64 revoked_at = 6; // 0 = active
+}
+
+message ListDevicesRequest { string user = 1; }
+message ListDevicesResponse { repeated Device devices = 1; }
+
+message CreateDeviceRequest {
+  string user = 1;
+  string name = 2;
+  string role = 3;
+}
+message CreateDeviceResponse {
+  Device device = 1;
+  string bundle = 2; // "rcdev1:..." (docs/spec/spa-v2.md)
+}
+
+message RevokeDeviceRequest { string id = 1; }
+message RevokeDeviceResponse {}
+
+message AuditEntry {
+  int64 time = 1;
+  string actor = 2;
+  string action = 3;
+  string target = 4;
+  string result = 5;
+}
+
+message ListAuditRequest { uint32 limit = 1; }
+message ListAuditResponse { repeated AuditEntry entries = 1; }

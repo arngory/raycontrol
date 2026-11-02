@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Generated code is up to date
+        run: |
+          ./scripts/gen.sh
+          git diff --exit-code -- internal/gen
+      - name: Shell scripts
+        run: shellcheck -x scripts/*.sh install/*.sh test/install/*.sh
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      # Built from source with the module's Go: prebuilt binaries made with an
+      # older Go refuse to lint a go 1.26 module.
+      - name: golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
+          "$(go env GOPATH)/bin/golangci-lint" run ./...
+
+  perimeter:
+    # Real nftables, NFLOG and TCP in a fresh network namespace.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get install -y nftables
+      - run: go test -c -o perimeter.test ./internal/perimeter
+      - run: sudo RAYCONTROL_NETNS_TEST=1 unshare -n ./perimeter.test -test.run TestNetns -test.v
+
+  xray:
+    # The rendered inner stage on a real Xray from the pinned fork: config
+    # check, users through the API, traffic through VLESS with ML-KEM-768.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch Xray
+        run: |
+          . deploy/versions.env
+          git clone --filter=blob:none "$XRAY_REPOSITORY" xray
+          git -C xray checkout -q "$XRAY_COMMIT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: xray/go.mod
+          cache: false
+      - name: Build Xray
+        working-directory: xray
+        run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/xray" ./main
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: XRAY_BIN="$RUNNER_TEMP/xray" go test -count=1 -run 'WithXray' -v ./internal/xrayapi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xray
+          path: ${{ runner.temp }}/xray
+          retention-days: 3
+
+  acme:
+    # Certificates from Pebble, Let's Encrypt's test CA: through HTTP-01, and
+    # a wildcard through DNS-01; pebble-challtestsrv resolves every name to
+    # 127.0.0.1 and serves the TXT records.
+    runs-on: ubuntu-24.04
+    env:
+      PEBBLE: github.com/letsencrypt/pebble/v2@v2.10.1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Start Pebble
+        run: |
+          go install "${PEBBLE%@*}/cmd/pebble@${PEBBLE#*@}" "${PEBBLE%@*}/cmd/pebble-challtestsrv@${PEBBLE#*@}"
+          bin="$(go env GOPATH)/bin"
+          dir="$(cd /tmp && go mod download -json "$PEBBLE" | jq -r .Dir)"
+          "$bin/pebble-challtestsrv" -defaultIPv6 "" -http01 "" -https01 "" -tlsalpn01 "" -doh "" &
+          (cd "$dir" && PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 "$bin/pebble" -dnsserver 127.0.0.1:8053 &)
+          for i in $(seq 30); do curl -skf https://127.0.0.1:14000/dir > /dev/null && exit 0; sleep 1; done
+          exit 1
+      - run: PEBBLE_DIRECTORY=https://127.0.0.1:14000/dir go test -count=1 -run 'TestIssue.*WithPebble' -v ./internal/certs
+
+  bootstrap:
+    # The openssl-based signature check of install/bootstrap.sh against
+    # signatures made by minisign itself.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y minisign
+      - run: test/install/minisig.sh
+
+  install:
+    # A whole install through bootstrap.sh in a systemd container per system
+    # (docs/08-decisions.md, R2-1), with each family's usual host firewall,
+    # checked from a second container like a client: SPA over UDP and TCP,
+    # the subscription, revocation, firewall reloads, flush ruleset, reboot.
+    needs: xray
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian12, debian13, ubuntu2404, rocky9, rocky10]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build raycontrol
+        run: |
+          for c in rayd rayspa rayctl; do CGO_ENABLED=0 go build -trimpath -o bin/$c ./cmd/$c; done
+      - uses: actions/download-artifact@v4
+        with:
+          name: xray
+          path: bin
+      - name: niko-server release
+        run: |
+          . deploy/versions.env
+          base="$NIKO_SERVER_RELEASES/download/$NIKO_SERVER_TAG"
+          curl -fsSL -o bin/niko-server-linux-amd64 "$base/niko-server-linux-amd64"
+          curl -fsSL -o SHA256SUMS.niko "$base/SHA256SUMS"
+          (cd bin && grep ' niko-server-linux-amd64$' ../SHA256SUMS.niko | sha256sum -c -)
+          mv bin/niko-server-linux-amd64 bin/niko-server
+          chmod +x bin/*
+      - name: Bootstrap dependencies on the bare image
+        run: test/install/deps.sh ${{ matrix.distro }}
+      - name: Prepare the systemd image
+        run: test/install/prepare.sh ${{ matrix.distro }}
+      - name: Install and probe
+        run: test/install/run.sh ${{ matrix.distro }} bin
+
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::12}" -o dist/ ./cmd/...

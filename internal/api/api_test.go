@@ -1,0 +1,354 @@
+package api
+
+import (
+	"context"
+	"encoding/hex"
+	"errors"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"connectrpc.com/connect"
+	"golang.org/x/sys/unix"
+
+	"github.com/arngory/raycontrol/internal/cloudflare/cftest"
+	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
+	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
+	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/spa"
+	"github.com/arngory/raycontrol/internal/store"
+)
+
+func startServer(t *testing.T) (*Server, string, *atomic.Int32) {
+	t.Helper()
+	return startServerWith(t, nil)
+}
+
+func startServerWith(t *testing.T, extra func(*Server) []func() (string, http.Handler)) (*Server, string, *atomic.Int32) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	params, err := provision.Init(ctx, st, provision.Options{Host: "n.example.com", Domain: "example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changes atomic.Int32
+	srv := &Server{Store: st, Params: params, Version: "test", OnChange: func() { changes.Add(1) }}
+	sock := filepath.Join(dir, "rayd.sock")
+	done := make(chan error, 1)
+	var handlers []func() (string, http.Handler)
+	if extra != nil {
+		handlers = extra(srv)
+	}
+	go func() { done <- srv.ServeUnix(ctx, sock, PeerPolicy{}, handlers...) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+		st.Close()
+	})
+	for range 100 {
+		if _, err := os.Stat(sock); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return srv, sock, &changes
+}
+
+func TestEnrollAndPassSPA(t *testing.T) {
+	srv, sock, changes := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+
+	for _, svc := range [][3]string{{"reality", "reality", `{"target":"www.example.org:443"}`}, {"dnstt", "dns", ""}, {"ssh", "ssh", ""}, {"hy2-masq", "hy2", ""}} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: svc[0], Name: svc[1], SettingsJson: svc[2]})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"reality", "dns", "hy2"}})); err != nil {
+		t.Fatal(err)
+	}
+	dev, err := c.CreateDevice(ctx, connect.NewRequest(&nodev1.CreateDeviceRequest{User: "alice", Name: "phone"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := node.DecodeBundle(dev.Msg.Bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Host != "n.example.com" || b.DeviceID != dev.Msg.Device.Id || len(b.Services) != 3 {
+		t.Fatalf("bundle = %+v", b)
+	}
+	for _, s := range b.Services {
+		rotates := len(s.PortKey) == 64 && s.PortRange >= 1024
+		if rotates != (s.Kind == "hy2-masq") {
+			t.Fatalf("rotation of %s: %+v", s.Kind, s)
+		}
+	}
+	if b.Sub == nil || b.Sub.Port == 0 || len(b.Sub.Pin) != 43 || len(b.NodeKeys["ed25519"]) != 64 || b.NodeKeys["mldsa65"] == "" {
+		t.Fatalf("bundle subscription/keys = %+v %v", b.Sub, b.NodeKeys)
+	}
+	params, err := b.SPA.Params()
+	if err != nil || params != srv.Params {
+		t.Fatalf("bundle params differ: %v", err)
+	}
+
+	// The client side: seal with what the bundle carries.
+	var key [spa.KeySize]byte
+	kb, _ := hex.DecodeString(b.DeviceKey)
+	copy(key[:], kb)
+	pkt, err := spa.SealRandom(params, key, spa.Request{Time: time.Now(), Scope: []uint16{b.Services[0].ID, 3}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The server side: the verifier sees the devices the store allows.
+	devices, err := srv.Store.SPADevices(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := spa.NewVerifier(srv.Params, 10*time.Minute, time.Hour, 1000)
+	v.SetDevices(devices)
+	g, err := v.Verify(pkt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ssh (ID 3) was requested but is not allowed for alice.
+	if g.DeviceID != b.DeviceID || len(g.Scope) != 1 || g.Scope[0] != b.Services[0].ID {
+		t.Fatalf("grant = %+v", g)
+	}
+
+	if _, err := c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: b.DeviceID})); err != nil {
+		t.Fatal(err)
+	}
+	devices, _ = srv.Store.SPADevices(ctx)
+	v.SetDevices(devices)
+	pkt, _ = spa.SealRandom(params, key, spa.Request{Time: time.Now()})
+	if _, err := v.Verify(pkt); !errors.Is(err, spa.ErrAuth) {
+		t.Fatalf("revoked device: %v", err)
+	}
+
+	if n := changes.Load(); n != 7 {
+		t.Fatalf("OnChange ran %d times, want 7", n)
+	}
+	audit, err := c.ListAudit(ctx, connect.NewRequest(&nodev1.ListAuditRequest{}))
+	if err != nil || len(audit.Msg.Entries) != 7 || audit.Msg.Entries[0].Action != "device.revoke" {
+		t.Fatalf("audit = %v, %v", audit.Msg.GetEntries(), err)
+	}
+}
+
+func TestErrorCodes(t *testing.T) {
+	_, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+
+	_, err := c.DeleteUser(ctx, connect.NewRequest(&nodev1.DeleteUserRequest{Name: "nobody"}))
+	if connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("missing user: %v", err)
+	}
+	_, err = c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "vmess", Name: "x"}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("bad kind: %v", err)
+	}
+	c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "bob"}))
+	_, err = c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "bob"}))
+	if connect.CodeOf(err) != connect.CodeAlreadyExists {
+		t.Fatalf("duplicate: %v", err)
+	}
+	st, err := c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
+	if err != nil || st.Msg.Users != 1 || len(st.Msg.SpaPorts) == 0 {
+		t.Fatalf("status = %v, %v", st.Msg, err)
+	}
+}
+
+func TestPeerPolicy(t *testing.T) {
+	ctx := context.WithValue(context.Background(), peerKey{}, &unix.Ucred{Uid: 0})
+	if _, err := (PeerPolicy{}).actor(ctx); err != nil {
+		t.Fatalf("root refused: %v", err)
+	}
+	other := uint32(os.Getuid() + 12345)
+	ctx = context.WithValue(context.Background(), peerKey{}, &unix.Ucred{Uid: other})
+	if _, err := (PeerPolicy{}).actor(ctx); err == nil {
+		t.Fatal("foreign uid allowed without a group")
+	}
+	if _, err := (PeerPolicy{Group: "no-such-group-raycontrol"}).actor(ctx); err == nil {
+		t.Fatal("foreign uid allowed with a missing group")
+	}
+	if _, err := (PeerPolicy{}).actor(context.Background()); err == nil {
+		t.Fatal("call without credentials allowed")
+	}
+}
+
+func TestPerimeterFeed(t *testing.T) {
+	srv, sock, _ := startServerWith(t, func(s *Server) []func() (string, http.Handler) {
+		per := &PerimeterServer{Server: s, RayspaUID: os.Getuid(), DefaultTTL: 10 * time.Minute, MaxTTL: time.Hour, TCPCarrier: true, Refresh: time.Minute}
+		return []func() (string, http.Handler){per.Handler}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c := NewUnixClient(sock)
+	feed := perimeterv1connect.NewPerimeterServiceClient(UnixHTTPClient(sock), BaseURL)
+
+	c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "reality", SettingsJson: `{"target":"www.example.org:443"}`}))
+	c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "dnstt", Name: "dns"}))
+	c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "ssh", Name: "ssh", SettingsJson: `{"ports":["tcp/2222"]}`}))
+	c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"reality", "ssh"}}))
+
+	stream, err := feed.WatchPerimeter(ctx, connect.NewRequest(&perimeterv1.WatchPerimeterRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	first := stream.Msg().Snapshot
+	ports := map[string]bool{}
+	for _, s := range first.Services {
+		for _, p := range s.Ports {
+			ports[p.Proto+"/"+strconv.Itoa(int(p.Port))] = true
+		}
+	}
+	if len(first.Devices) != 0 || !ports["tcp/443"] || !ports["tcp/2222"] || len(ports) != 3 || len(first.PublicPorts) != 1 ||
+		first.PublicPorts[0].Port != 53 || !first.Spa.TcpCarrier || first.Spa.LenMax != uint32(srv.Params.LenMax) ||
+		len(first.AdminPorts) != 1 || first.AdminPorts[0].Port != 2222 {
+		t.Fatalf("first snapshot: %v", first)
+	}
+
+	if _, err := c.CreateDevice(ctx, connect.NewRequest(&nodev1.CreateDeviceRequest{User: "alice", Name: "phone"})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	second := stream.Msg().Snapshot
+	// reality, ssh and the subscription every device may reach.
+	if second.Revision <= first.Revision || len(second.Devices) != 1 || len(second.Devices[0].Allowed) != 3 {
+		t.Fatalf("second snapshot: %v", second)
+	}
+
+	if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{"198.51.100.7", "2001:db8::/48"}})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	if a := stream.Msg().Snapshot.AdminPrefixes; len(a) != 2 || a[0] != "198.51.100.7/32" {
+		t.Fatalf("admin prefixes %v", a)
+	}
+	if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{"nonsense"}})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("bad cidr: %v", err)
+	}
+
+	// An ACME order opens the window in the feed, its end closes it.
+	srv.SetACMEWindow(18080, time.Now().Add(time.Minute))
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	if w := stream.Msg().Snapshot.Acme; w.GetPort() != 18080 || w.GetUntil() <= time.Now().Unix() {
+		t.Fatalf("acme window %v", w)
+	}
+	srv.SetACMEWindow(0, time.Time{})
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	if w := stream.Msg().Snapshot.Acme; w != nil {
+		t.Fatalf("acme window still open: %v", w)
+	}
+
+	dep, err := c.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dep.Msg.Units) != 6 || len(dep.Msg.Warnings) != 0 || len(dep.Msg.HostPorts) == 0 {
+		t.Fatalf("deployment units %v warnings %v host ports %v", dep.Msg.Units, dep.Msg.Warnings, dep.Msg.HostPorts)
+	}
+}
+
+func TestPerimeterFeedDenied(t *testing.T) {
+	per := &PerimeterServer{Server: &Server{}, RayspaUID: 4242}
+	ctx := context.WithValue(context.Background(), peerKey{}, &unix.Ucred{Uid: uint32(os.Getuid() + 777)})
+	err := per.WatchPerimeter(ctx, nil, nil)
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("foreign uid: %v", err)
+	}
+}
+
+func TestRotateService(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	srv.RealityLead = 72 * time.Hour
+	rotated := 0
+	srv.Rotate = func() { rotated++ }
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	if _, err := c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "nothing"})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("missing service: %v", err)
+	}
+	if _, err := c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: provision.SubscriptionService})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("not REALITY: %v", err)
+	}
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "r",
+		SettingsJson: `{"target":"www.example.org:443"}`})); err != nil {
+		t.Fatal(err)
+	}
+	r, err := c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "r", Now: true}))
+	if err != nil || rotated != 1 || r.Msg.SwitchAt > time.Now().Unix() {
+		t.Fatalf("rotate: %v %d %v", r, rotated, err)
+	}
+	svc, _ := srv.Store.ServiceByName(ctx, "r")
+	if provision.ParseRealityState(svc).RotateAt == 0 {
+		t.Fatalf("no request stored: %s", svc.Settings)
+	}
+}
+
+func TestDNSProvider(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	api, cf := cftest.New(t)
+	old := provision.CloudflareAPI
+	provision.CloudflareAPI = cf.BaseURL
+	defer func() { provision.CloudflareAPI = old }()
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+
+	if _, err := c.SetDNSProvider(ctx, connect.NewRequest(&nodev1.SetDNSProviderRequest{Provider: "route53", Token: "x"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("other provider: %v", err)
+	}
+	if _, err := c.SetDNSProvider(ctx, connect.NewRequest(&nodev1.SetDNSProviderRequest{Provider: "cloudflare", Token: "wrong"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("bad token: %v", err)
+	}
+	r, err := c.SetDNSProvider(ctx, connect.NewRequest(&nodev1.SetDNSProviderRequest{Provider: "cloudflare", Token: "good"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The test node's host is a name: nothing can point to it.
+	st := r.Msg.Status
+	if st.Provider != "cloudflare" || st.Zone != "example.com" || len(st.Problems) != 1 || len(api.List()) != 0 {
+		t.Fatalf("status %v, records %v", st, api.List())
+	}
+	entries, _ := srv.Store.ListAudit(ctx, 20)
+	for _, e := range entries {
+		if strings.Contains(e.Action+e.Target+e.Result, "good") {
+			t.Fatalf("token in the audit log: %+v", e)
+		}
+	}
+	if _, err := c.RemoveDNS(ctx, connect.NewRequest(&nodev1.RemoveDNSRequest{})); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := c.GetDNS(ctx, connect.NewRequest(&nodev1.GetDNSRequest{})); g.Msg.Status.Provider != "" {
+		t.Fatal("provider kept")
+	}
+}

@@ -1,0 +1,155 @@
+package sub
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net"
+	"net/http"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/render"
+	"github.com/arngory/raycontrol/internal/store"
+)
+
+// Path is the endpoint path; DeviceHeader names the device.
+const (
+	Path         = "/sub/v1"
+	DeviceHeader = "X-Raycontrol-Device"
+	settingSeq   = "sub_seq"
+)
+
+// Server serves subscriptions over TLS 1.3 with X25519MLKEM768 only. Any
+// request that does not authenticate gets a plain 404.
+type Server struct {
+	Store *store.Store
+	Keys  provision.NodeKeys
+	Log   *slog.Logger
+	now   func() time.Time
+
+	mu sync.Mutex // serialises seq
+}
+
+func (s *Server) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// TLSConfig returns the server TLS settings for the subscription service.
+func TLSConfig(certDER, keyDER []byte) (*tls.Config, error) {
+	key, err := x509.ParsePKCS8PrivateKey(keyDER)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		MinVersion:       tls.VersionTLS13,
+		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+		Certificates:     []tls.Certificate{{Certificate: [][]byte{certDER}, PrivateKey: key}},
+		NextProtos:       []string{"h2", "http/1.1"},
+	}, nil
+}
+
+// Serve listens on addr until ctx ends.
+func (s *Server) Serve(ctx context.Context, addr string, tlsCfg *tls.Config) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	mux := http.NewServeMux()
+	mux.Handle(Path, s)
+	srv := &http.Server{
+		Handler:           mux,
+		TLSConfig:         tlsCfg,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      20 * time.Second,
+		ErrorLog:          slog.NewLogLogger(s.Log.Handler(), slog.LevelDebug),
+	}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+	if err := srv.ServeTLS(ln, "", ""); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	env, err := s.handle(r)
+	if err != nil {
+		s.Log.Debug("subscription refused", "remote", r.RemoteAddr, "err", err)
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(env)
+}
+
+func (s *Server) handle(r *http.Request) (Envelope, error) {
+	if r.Method != http.MethodGet {
+		return Envelope{}, errors.New("method")
+	}
+	ctx := r.Context()
+	dev, key, err := s.Store.ActiveDevice(ctx, r.Header.Get(DeviceHeader))
+	if err != nil {
+		return Envelope{}, err
+	}
+	now := s.clock()
+	if !CheckAuth(r.Header.Get("Authorization"), key, now) {
+		return Envelope{}, errors.New("auth")
+	}
+	return s.Build(ctx, dev.UserName, now)
+}
+
+// Build returns the signed subscription of a user.
+func (s *Server) Build(ctx context.Context, userName string, now time.Time) (Envelope, error) {
+	m, err := render.Collect(ctx, s.Store)
+	if err != nil {
+		return Envelope{}, err
+	}
+	var user *render.User
+	for i := range m.Users {
+		if m.Users[i].Name == userName {
+			user = &m.Users[i]
+		}
+	}
+	if user == nil {
+		return Envelope{}, errors.New("user not active")
+	}
+	profiles, err := Profiles(m, *user)
+	if err != nil {
+		return Envelope{}, err
+	}
+	seq, err := s.nextSeq(ctx)
+	if err != nil {
+		return Envelope{}, err
+	}
+	return Sign(Payload{
+		V: 1, NodeID: m.NodeID, Seq: seq, Time: now.Unix(), Issued: now.Unix(),
+		Expires: now.Add(Lifetime).Unix(), Profiles: profiles,
+	}, s.Keys)
+}
+
+// nextSeq returns a counter that grows with every response, across restarts.
+func (s *Server) nextSeq(ctx context.Context) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var seq uint64
+	if b, err := s.Store.GetSetting(ctx, settingSeq); err == nil {
+		seq, _ = strconv.ParseUint(string(b), 10, 64)
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return 0, err
+	}
+	seq++
+	return seq, s.Store.SetSetting(ctx, settingSeq, []byte(strconv.FormatUint(seq, 10)))
+}

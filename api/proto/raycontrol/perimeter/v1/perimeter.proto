@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+// Perimeter feed from rayd to rayspa. Only the rayspa system user may call
+// it: the snapshot carries device keys.
+package raycontrol.perimeter.v1;
+
+option go_package = "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1;perimeterv1";
+
+service PerimeterService {
+  // WatchPerimeter sends the current snapshot at once and a new one after
+  // every change that affects SPA access.
+  rpc WatchPerimeter(WatchPerimeterRequest) returns (stream WatchPerimeterResponse);
+}
+
+message WatchPerimeterRequest {}
+
+message WatchPerimeterResponse {
+  Snapshot snapshot = 1;
+}
+
+message Snapshot {
+  uint64 revision = 1;
+  SPAParams spa = 2;
+  repeated Device devices = 3;
+  repeated Service services = 4;
+  // Ports open to everyone, e.g. udp/53 for DNS tunnels.
+  repeated Port public_ports = 5;
+  // Emergency access: these prefixes reach admin_ports (SSH) without SPA.
+  repeated string admin_prefixes = 6;
+  repeated Port admin_ports = 7;
+  // ACME window: while open, TCP 80 from any address goes to acme.port,
+  // where rayd answers HTTP-01 challenges. Absent or past: closed.
+  AcmeWindow acme = 8;
+}
+
+message AcmeWindow {
+  uint32 port = 1;  // rayd's HTTP-01 responder
+  int64 until = 2;  // unix seconds; nftables expires the window by itself
+}
+
+message SPAParams {
+  bytes node_id = 1;
+  uint32 epoch_len_s = 2;
+  uint32 slot_len_s = 3;
+  bytes port_key = 4;
+  uint32 port_base = 5;
+  uint32 port_range = 6;
+  uint32 len_min = 7;
+  uint32 len_max = 8;
+  uint32 default_ttl_s = 9;
+  uint32 max_ttl_s = 10;
+  bool tcp_carrier = 11; // accept SPA v2 over TCP on the slot ports too
+}
+
+message Device {
+  string id = 1;
+  bytes key = 2;
+  repeated uint32 allowed = 3; // service IDs
+}
+
+message Service {
+  uint32 id = 1;
+  repeated Port ports = 2;
+  // UDP port rotation (spa-v2.md §11): the slot ports of this schedule are
+  // redirected to target_port.
+  Rotation rotation = 3;
+}
+
+message Rotation {
+  bytes port_key = 1;
+  uint32 port_base = 2;
+  uint32 port_range = 3;
+  uint32 target_port = 4;
+}
+
+message Port {
+  string proto = 1; // tcp | udp
+  uint32 port = 2;
+}

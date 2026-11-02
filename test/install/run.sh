@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+# Installs a node in a systemd container of DISTRO (raycontrol-test:DISTRO
+# from prepare.sh) through install/bootstrap.sh and checks it from a second
+# container the way a client would. Both sit on an internal Docker network:
+# rayspa's table lives in the node container's own network namespace.
+#
+#   test/install/run.sh debian13 BIN_DIR
+#
+# BIN_DIR holds rayd, rayspa, rayctl, niko-server and xray (linux/amd64).
+# On a cgroup v1 host, TEST_CGROUP_ROOT names a writable cgroup2 mount for
+# the container's systemd (systemd 256+ needs cgroup v2).
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=test/install/lib.sh
+. "$here/lib.sh"
+
+distro=${1:?usage: run.sh DISTRO BIN_DIR}
+bin="$(cd "${2:?usage: run.sh DISTRO BIN_DIR}" && pwd)"
+image="raycontrol-test:$distro"
+net="rc-test-$distro"
+node="rc-node-$distro"
+for f in rayd rayspa rayctl niko-server xray; do
+	[[ -x $bin/$f ]] || die "$bin/$f is missing"
+done
+
+x() { docker exec "$node" "$@"; }
+
+dump() {
+	echo "--- journal" >&2
+	x journalctl --no-pager -n 300 -u rayd -u rayspa -u 'niko-*' >&2 || true
+	echo "--- failed units" >&2
+	x systemctl --failed --no-pager >&2 || true
+	# shellcheck disable=SC2016 # expands in the container
+	x sh -c 'for u in $(systemctl list-units --failed --plain --no-legend "niko-*" "ray*" | cut -d" " -f1); do systemctl status --no-pager -n 30 "$u"; done' >&2 || true
+	echo "--- ruleset" >&2
+	x nft list ruleset >&2 || true
+}
+
+fail() {
+	echo "FAIL ($distro): $*" >&2
+	dump
+	exit 1
+}
+
+cleanup() {
+	docker rm -f "$node" >/dev/null 2>&1 || true
+	docker network rm "$net" >/dev/null 2>&1 || true
+}
+cleanup
+# TEST_KEEP=1 leaves the node running for a look inside (docker exec).
+if [[ -z ${TEST_KEEP:-} ]]; then
+	trap cleanup EXIT
+fi
+
+boot() {
+	local state=""
+	for _ in $(seq 90); do
+		state="$(x systemctl is-system-running 2>/dev/null || true)"
+		if [[ $state == running || $state == degraded ]]; then
+			return 0
+		fi
+		sleep 1
+	done
+	fail "systemd did not come up: ${state:-no answer}"
+}
+
+wait_active() {
+	local u
+	for u in "$@"; do
+		for _ in $(seq 30); do
+			if x systemctl is-active --quiet "$u"; then
+				continue 2
+			fi
+			sleep 1
+		done
+		fail "$u is not active"
+	done
+}
+
+wait_table() {
+	for _ in $(seq 10); do
+		if x nft list table inet raycontrol >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 0.5
+	done
+	fail "rayspa did not restore its table after: $1"
+}
+
+# snapshot records what an install may touch, to compare before and after
+# rayctl uninstall: users, groups, every file and link under /etc, enabled
+# units, the nftables ruleset (without counters), the sysctl values raycontrol
+# sets, host firewalls, /var/lib and /usr/local/bin. Files Docker manages and
+# the shadow-utils backups (passwd-) are left out.
+snapshot() {
+	# shellcheck disable=SC2016 # expands in the container
+	x sh -c '
+	{
+		echo "== users"; getent passwd | sort
+		echo "== groups"; getent group | sort
+		echo "== files"
+		find /etc -xdev \( -path /etc/hostname -o -path /etc/hosts -o -path /etc/resolv.conf -o -path /etc/machine-id \
+			-o -path /etc/ld.so.cache -o -name "*-" \) -prune -o -type f -print0 | sort -z | xargs -0 sha256sum
+		echo "== links"
+		find /etc -xdev -type l -printf "%p -> %l\n" | sort
+		echo "== units"; systemctl list-unit-files --state=enabled --no-legend | sort
+		# Without counters and without the rules of Docker'"'"'s DNS (127.0.0.11),
+		# whose ports change with every container start.
+		echo "== nft"; nft list ruleset | sed -E "s/counter packets [0-9]+ bytes [0-9]+/counter/" | grep -v 127.0.0.11
+		echo "== sysctl"; xargs sysctl < /root/sysctl.keys 2>&1
+		echo "== firewalld"; if systemctl is-active --quiet firewalld; then firewall-cmd --list-all-zones; fi
+		echo "== ufw"; if command -v ufw >/dev/null; then ufw status verbose; fi
+		echo "== var/lib"; ls /var/lib
+		echo "== bin"; ls /usr/local/bin
+	} > "$1" 2>&1' snapshot "$1"
+}
+
+# client runs rayctl probe from another container on the same network.
+client() {
+	docker run --rm --network "$net" -v "$bin:/opt/rc:ro" "$image" /opt/rc/rayctl probe "$@"
+}
+
+docker network create --internal "$net" >/dev/null
+cgroup=()
+if [[ -n ${TEST_CGROUP_ROOT:-} ]]; then
+	mkdir -p "$TEST_CGROUP_ROOT/$node"
+	cgroup=(-v "$TEST_CGROUP_ROOT/$node:/sys/fs/cgroup:rw")
+fi
+log "$distro: booting the node"
+docker run -d --name "$node" --hostname node --privileged --cgroupns=private --network "$net" \
+	--tmpfs /run --tmpfs /run/lock "${cgroup[@]}" \
+	-v "$bin:/opt/rc:ro" -v "$here/../../install:/opt/install:ro" "$image" /sbin/init >/dev/null
+boot
+ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$node")"
+# shellcheck disable=SC2016 # expands in the container
+x sh -c '. /etc/os-release; echo "$PRETTY_NAME, $(systemctl --version | head -1), $(nft --version)"'
+
+# ufw enable writes its rate-limit rules into user6.rules without loading
+# them; restarting the unit loads the host's ufw files as a boot does, so
+# the snapshot below is a state the host itself would come back to.
+case $distro in
+ubuntu*) x ufw --force enable >/dev/null && x systemctl restart ufw.service ;;
+esac
+
+log "$distro: bootstrap"
+x install -m 0755 /opt/rc/niko-server /opt/rc/xray /usr/local/bin/
+# The host as it is before raycontrol: wait for the boot to finish (ufw
+# loads its rules from a oneshot unit) and for firewalld to answer.
+x timeout 120 systemctl is-system-running --wait >/dev/null || true
+# shellcheck disable=SC2016 # expands in the container
+x sh -c 'if systemctl is-enabled -q firewalld 2>/dev/null; then for i in $(seq 60); do firewall-cmd --state >/dev/null 2>&1 && break; sleep 1; done; fi'
+# The sysctl keys raycontrol sets, from its source, for the snapshots.
+# shellcheck disable=SC2016 # backticks of the Go source, not a command
+sed -n '/^const sysctl = `/,/^`/p' "$here/../../internal/deploy/deploy.go" | grep -o '^net\.[a-z0-9_.]*' |
+	docker exec -i "$node" sh -c 'cat > /root/sysctl.keys'
+snapshot /root/before.snap
+# The emergency bundle bootstrap prints stays out of the (public) CI log.
+x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -host "$ip" -domain example.test -admin 192.0.2.1 |
+	sed -E 's/rcdev1:[A-Za-z0-9_-]+/rcdev1:<redacted>/g' || fail "bootstrap"
+wait_active rayd.service rayspa.service
+wait_table "rayspa start"
+[[ $(x nft list chain inet raycontrol input) == *"policy drop;"* ]] || fail "input chain is not policy drop"
+# The sysctl settings work from the install on, not from the next boot.
+if x grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then
+	[[ $(x sysctl -n net.ipv4.tcp_congestion_control) == bbr ]] || fail "sysctl not applied at install"
+fi
+
+dataplane=(niko-inner.service niko-dns.service niko-mdns.service niko-front.service)
+
+log "$distro: DNS tunnels"
+x rayctl service add dnstt dns >/dev/null
+x rayctl service add masterdns mdns >/dev/null
+x rayctl apply || fail "rayctl apply"
+wait_active "${dataplane[@]}"
+[[ $(x ss -Hulpn 'sport = :53') == *niko-server* ]] || fail "the front does not listen on UDP 53"
+# The backend's key: a copy in its runtime directory, for its user only.
+[[ $(x stat -c '%a %U' /run/niko/dns/noise.key) == "400 niko-dns" ]] || fail "dnstt key copy is not 0400 niko-dns"
+again="$(x rayctl apply)"
+if grep -E '^(wrote|restarting)' <<<"$again"; then
+	fail "a second apply changed things"
+fi
+
+x rayctl user add alice -services dns,mdns >/dev/null
+device() { x rayctl device add alice "$1" | awk '/enrolled/ {id=$2} /^rcdev1:/ {print id, $0}'; }
+read -r phone_id phone < <(device phone)
+read -r _ laptop < <(device laptop)
+[[ $phone == rcdev1:* && $laptop == rcdev1:* ]] || fail "no bundles"
+
+log "$distro: probe from outside"
+out="$(client "$phone")" || fail "probe over UDP: $out"
+echo "$out"
+grep -q '  dns (service' <<<"$out" || fail "no dns profile in the subscription"
+x rayctl device revoke "$phone_id"
+if out="$(client "$phone")"; then
+	fail "revoked device still reaches the node: $out"
+fi
+client -carrier tcp "$laptop" || fail "probe over the TCP carrier"
+
+log "$distro: host firewall reloads and flush ruleset"
+case $distro in
+debian*) x systemctl restart nftables.service && wait_table "nftables restart" ;;
+ubuntu*) x ufw reload && wait_table "ufw reload" ;;
+rocky*) x firewall-cmd --reload && wait_table "firewalld reload" ;;
+esac
+client "$laptop" >/dev/null || fail "probe after the firewall reload"
+x nft flush ruleset
+wait_table "nft flush ruleset"
+client "$laptop" >/dev/null || fail "probe after flush ruleset"
+
+log "$distro: reboot"
+docker restart "$node" >/dev/null
+boot
+wait_active rayd.service rayspa.service "${dataplane[@]}"
+ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$node")"
+client -addr "$ip" "$laptop" >/dev/null || fail "probe after reboot"
+
+log "$distro: report"
+x /usr/local/bin/rayctl report -logs info -o /root/report.txt > /dev/null || fail "rayctl report"
+report="$(x cat /root/report.txt)"
+for section in "== versions" "== system" "== node" "== units" "checks"; do
+	[[ $report == *"$section"* ]] || fail "report lacks $section"
+done
+for leak in "$ip" example.test rcdev1: "$phone_id"; do
+	if [[ $report == *"$leak"* ]]; then
+		fail "report leaks $leak"
+	fi
+done
+
+log "$distro: uninstall"
+x /usr/local/bin/rayctl uninstall -yes || fail "rayctl uninstall"
+snapshot /root/after.snap
+# Compared here: minimal images (Rocky 9) have no diff.
+if ! diff -u <(x cat /root/before.snap) <(x cat /root/after.snap) >&2; then
+	fail "the host after uninstall differs from before the install (diff above)"
+fi
+for p in /usr/local/bin/rayd /usr/local/bin/rayctl /var/lib/raycontrol /var/lib/raycontrol-install /etc/systemd/system/rayd.service; do
+	if x test -e "$p"; then
+		fail "$p is still there after uninstall"
+	fi
+done
+
+log "$distro: PASS"
