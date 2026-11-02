@@ -87,34 +87,61 @@ func (c *cli) printDNS(msg proto.Message, st *nodev1.DNSStatus) error {
 	})
 }
 
-// readToken reads a secret from a file, or from the terminal without echo,
-// never from the command line (shell history, ps).
+// readToken reads the Cloudflare token (readSecret).
 func readToken(file string) (string, error) {
+	t, err := readSecret("Cloudflare API token (Zone.DNS:Edit and Zone.Zone:Read on the node's zone): ", file, false)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(t), nil
+}
+
+// readSecret reads a secret from a file, or from the terminal without echo
+// (twice with confirm), never from the command line (shell history, ps).
+// Only the line end is cut off.
+func readSecret(prompt, file string, confirm bool) (string, error) {
 	if file != "" {
 		b, err := os.ReadFile(file) //nolint:gosec // G304: the operator's file
 		if err != nil {
 			return "", err
 		}
-		return strings.TrimSpace(string(b)), nil
+		return strings.TrimRight(string(b), "\r\n"), nil
 	}
+	in := bufio.NewReader(os.Stdin)
 	fd := int(os.Stdin.Fd())
-	if old, err := unix.IoctlGetTermios(fd, unix.TCGETS); err == nil {
-		fmt.Fprint(os.Stderr, "Cloudflare API token (Zone.DNS:Edit and Zone.Zone:Read on the node's zone): ")
-		quiet := *old
-		quiet.Lflag &^= unix.ECHO
-		if err := unix.IoctlSetTermios(fd, unix.TCSETS, &quiet); err == nil {
-			defer func() {
-				_ = unix.IoctlSetTermios(fd, unix.TCSETS, old)
-				fmt.Fprintln(os.Stderr)
-			}()
+	old, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	terminal := err == nil
+	ask := func(prompt string) (string, error) {
+		if terminal {
+			fmt.Fprint(os.Stderr, prompt)
+			quiet := *old
+			quiet.Lflag &^= unix.ECHO
+			if err := unix.IoctlSetTermios(fd, unix.TCSETS, &quiet); err == nil {
+				defer func() {
+					_ = unix.IoctlSetTermios(fd, unix.TCSETS, old)
+					fmt.Fprintln(os.Stderr)
+				}()
+			}
 		}
+		line, err := in.ReadString('\n')
+		if err != nil && line == "" {
+			return "", err
+		}
+		if line = strings.TrimRight(line, "\r\n"); line == "" {
+			return "", errors.New("nothing entered")
+		}
+		return line, nil
 	}
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil && line == "" {
+	secret, err := ask(prompt)
+	if err != nil || !confirm || !terminal {
+		return secret, err
+	}
+	again, err := ask("Again: ")
+	if err != nil {
 		return "", err
 	}
-	if line = strings.TrimSpace(line); line == "" {
-		return "", errors.New("no token")
+	if again != secret {
+		return "", errors.New("the two entries differ")
 	}
-	return line, nil
+	return secret, nil
 }

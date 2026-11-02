@@ -59,6 +59,13 @@ const usageText = `usage: rayctl [-socket PATH] [-json] <command>
                                               previous binaries if the node does not come back (root)
   uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]
                                               take back everything install and apply changed (root)
+  backup [-o FILE] [-passphrase-file F]       the node's state sealed with a passphrase (root):
+                                              users, keys, services, certificates
+  restore -i FILE [-passphrase-file F] [-host ADDR] [-yes]
+                                              put a backup in place and bring the node up on it,
+                                              here or on a new host after install (root)
+  metrics [-o FILE]                           counts and times in the Prometheus text format; with
+                                              -o for a collector's textfile directory
 
   report [-o FILE] [-logs warning|info|none] [-since 24h] [-id ID]
       a redacted report for an issue: versions, system, checks, units,
@@ -138,6 +145,12 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.report(ctx, args[1:])
 	case "dns":
 		return c.dns(ctx, sub, rest)
+	case "backup":
+		return c.backup(ctx, args[1:])
+	case "restore":
+		return c.restore(ctx, args[1:])
+	case "metrics":
+		return c.metrics(ctx, args[1:])
 	case "update":
 		return c.update(ctx, args[1:])
 	case "uninstall":

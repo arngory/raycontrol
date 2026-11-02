@@ -1,6 +1,7 @@
 # Шпаргалка
 
-Все команды — на ноде, от root или от члена группы `raycontrol`; `install`, `apply` и `uninstall` — только root.
+Все команды — на ноде, от root или от члена группы `raycontrol`; `install`, `apply`, `update`, `uninstall`,
+`backup` и `restore` — только root.
 `-json` перед командой даёт машинный вывод (`rayctl -json status`). Пошаговая установка —
 [10-quickstart-debian13.md](10-quickstart-debian13.md).
 
@@ -16,6 +17,14 @@
 | `rayctl uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]` | убрать всё по журналу установки, записи в Cloudflare тоже |
 | `rayspa teardown` | с консоли провайдера: снять периметр, если SPA и SSH недоступны |
 
+## Резервная копия
+
+| Команда | Что делает |
+|---|---|
+| `rayctl backup [-o F] [-passphrase-file P]` | вся нода (ключи, пользователи, сервисы, сертификаты, токен DNS) одним файлом 0600 под фразой; хранить вне ноды |
+| `rayctl restore -i F [-passphrase-file P] [-yes]` | вернуть копию на этой ноде; прежняя база остаётся в `/var/lib/raycontrol/rayd.db.before-restore` |
+| `rayctl install -host NEW …` → `rayctl restore -i F -host NEW` | перенести ноду на новый хост; записи DNS обновятся, устройствам — новые бандлы |
+
 ## Состояние и диагностика
 
 | Команда | Что делает |
@@ -28,6 +37,7 @@
 | `journalctl -u rayd -u rayspa -u 'niko-*' -f` | журналы ноды |
 | `systemctl status rayd rayspa 'niko-*'` | состояние юнитов |
 | `nft list table inet raycontrol` | периметр; цепочка `early` — отброшенное до сборки фрагментов |
+| `rayctl metrics [-o /var/lib/node_exporter/textfile/raycontrol.prom]` | счётчики в формате Prometheus: только числа, без имён и адресов |
 
 ## Пользователи и устройства
 

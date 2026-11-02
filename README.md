@@ -8,10 +8,12 @@ SPA-gated firewall, rotates keys and serves the subscription and API.
 Status: **R1** done — perimeter (SPA v2 over UDP and TCP), DNS tunnels with
 the inner stage on Xray, signed subscriptions, installer. **R2** — VLESS +
 REALITY + Vision on Xray (post-quantum key exchange and signature) with
-self-steal on the node's own decoy site, certificates through ACME. **R4** —
+self-steal on the node's own decoy site, certificates through ACME. **R3** —
+Hysteria2 twice (masquerade on UDP 443, salamander) and DNS over HTTPS behind
+REALITY, interim on Xray and rayd until the niko-server front. **R4** —
 rotation of user credentials and REALITY keys and names, Cloudflare for DNS
 records and wildcard certificates, uninstall back to the host's snapshot,
-redacted reports, a kernel-side early drop. Data plane: niko-server-v0.1.1
+redacted reports, a kernel-side early drop, encrypted backups, local metrics. Data plane: niko-server-v0.1.1
 (DNS front, dnstt and MasterDnsVPN backends); see
 [docs/04-roadmap.md](docs/04-roadmap.md).
 
@@ -79,6 +81,9 @@ rayctl dns                                            # DNS provider, records th
 rayctl update                                         # newest verified release in place, rolls back on failure
 rayctl admin 198.51.100.7                             # addresses that reach SSH without SPA
 rayctl report -o report.txt                           # redacted report for an issue
+rayctl backup -o node.rcbak                           # every key of the node under a passphrase
+rayctl restore -i node.rcbak [-host NEW_IP]           # back here, or onto a new host after install
+rayctl metrics                                        # counts and times for Prometheus, no names
 rayctl uninstall                                      # take everything back
 ```
 
@@ -148,8 +153,9 @@ raycontrol хранит пользователей и ключи, генерир
   настраиваются сами. На RHEL-семействе `sudo` не видит `/usr/local/bin` — `sudo -i` или полный путь.
   Восстановление с консоли: `rayspa teardown`. Проверка ноды снаружи, как клиент: `rayctl probe rcdev1:...`.
 - **Администрирование:** всё, что умеет API для клиента, на ноде умеет `rayctl` (пользователи, устройства, сервисы,
-  `apply`, адреса администратора, `report` — очищенный отчёт для issue, `uninstall` — полный откат установки по журналу,
-  проверенный сравнением со снимком системы). Нода ничего не отправляет наружу сама.
+  `apply`, адреса администратора, `report` — очищенный отчёт для issue, `backup`/`restore` — копия ноды под парольной
+  фразой, `metrics` — счётчики без имён, `uninstall` — полный откат установки по журналу, проверенный сравнением со
+  снимком системы). Нода ничего не отправляет наружу сама.
 - **Сборка:** Go 1.26, `go build ./cmd/...`, `go test ./...`; API генерируется `scripts/gen.sh`.
 - **Документы:** [docs/](docs/README.md); формат SPA v2 заморожен в [docs/spec/spa-v2.md](docs/spec/spa-v2.md).
 - **v0:** bash-установщик перенесён в [legacy/](legacy/); для новых установок не использовать.

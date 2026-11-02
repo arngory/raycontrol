@@ -27,8 +27,9 @@ var ErrNotFound = errors.New("store: not found")
 
 // Store is the node database.
 type Store struct {
-	db  *sql.DB
-	now func() time.Time
+	db   *sql.DB
+	now  func() time.Time
+	path string
 }
 
 // Open opens (creating if needed) the database at path and applies pending
@@ -52,7 +53,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	}
 	// One writer keeps SQLite simple; reads are cheap at this scale.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, now: time.Now}
+	s := &Store{db: db, now: time.Now, path: path}
 	if err := s.migrate(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -128,6 +129,17 @@ func (s *Store) GetSetting(ctx context.Context, key string) ([]byte, error) {
 func (s *Store) SetSetting(ctx context.Context, key string, value []byte) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
 	return err
+}
+
+// Snapshot returns a consistent copy of the database (VACUUM INTO a file
+// next to it, read back and removed): the input of a backup.
+func (s *Store) Snapshot(ctx context.Context) ([]byte, error) {
+	tmp := fmt.Sprintf("%s.snapshot-%d", s.path, time.Now().UnixNano())
+	defer os.Remove(tmp)
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, tmp); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(tmp) //nolint:gosec // G304: our own file
 }
 
 // DeleteSetting removes a setting; a missing one is not an error.

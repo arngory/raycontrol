@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -283,5 +284,32 @@ func TestRotateCredentials(t *testing.T) {
 	sets, _ := s2.CredentialSets(ctx, svc2.ID, nil, gen)
 	if !sets[u2.ID].NextFrom.Equal(now.Add(103 * day)) {
 		t.Fatalf("switch after a pause at %v", sets[u2.ID].NextFrom)
+	}
+}
+
+func TestSnapshot(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetSetting(ctx, "k", []byte("v"))
+	b, err := st.Snapshot(ctx)
+	st.Close()
+	if err != nil || !bytes.HasPrefix(b, []byte("SQLite format 3\x00")) {
+		t.Fatalf("snapshot: %d bytes, %v", len(b), err)
+	}
+	os.WriteFile(filepath.Join(dir, "copy.db"), b, 0o600)
+	cp, err := Open(ctx, filepath.Join(dir, "copy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cp.Close()
+	if v, err := cp.GetSetting(ctx, "k"); err != nil || string(v) != "v" {
+		t.Fatalf("restored setting %q %v", v, err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "rayd.db.snapshot-*")); len(left) != 0 {
+		t.Fatalf("snapshot files left: %v", left)
 	}
 }

@@ -49,6 +49,14 @@ service NodeService {
   rpc SyncDNS(SyncDNSRequest) returns (SyncDNSResponse);
   rpc RemoveDNS(RemoveDNSRequest) returns (RemoveDNSResponse);
 
+  // Backup returns a consistent copy of the node's database. Root only: it
+  // holds every key (R4-13); rayctl encrypts it with the operator's
+  // passphrase, which never reaches rayd.
+  rpc Backup(BackupRequest) returns (BackupResponse);
+  // GetMetrics returns aggregate metrics in the Prometheus text format, no
+  // names of users, devices or services (R4-14).
+  rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
+
   // GetDeployment returns what root must install for the current services:
   // system users, unit files and other files. rayctl apply writes them.
   rpc GetDeployment(GetDeploymentRequest) returns (GetDeploymentResponse);
@@ -83,6 +91,19 @@ message DNSRecord {
   string type = 1;
   string name = 2;
   string content = 3;
+}
+
+message BackupRequest {}
+message BackupResponse {
+  bytes database = 1;
+  string node_id = 2;
+  string version = 3;
+  int64 created_at = 4;
+}
+
+message GetMetricsRequest {}
+message GetMetricsResponse {
+  string text = 1;
 }
 
 message GetAdminAccessRequest {}

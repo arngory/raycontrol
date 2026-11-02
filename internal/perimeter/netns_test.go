@@ -167,6 +167,12 @@ func TestNetns(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer unix.Close(fd)
+		// Locally sent fragments would wait in the output defragmenter (NAT
+		// in the test loads conntrack); a remote one meets the early chain
+		// first, which this makes the test see too.
+		if err := unix.SetsockoptInt(fd, unix.IPPROTO_IP, unix.IP_NODEFRAG, 1); err != nil {
+			t.Fatal(err)
+		}
 		src := uint16(rx.LocalAddr().(*net.UDPAddr).Port)
 		// send writes a UDP datagram to the public echo port by hand: IPv4
 		// options and the fragment field as given.
@@ -204,10 +210,19 @@ func TestNetns(t *testing.T) {
 			t.Fatal(err)
 		}
 		// nft versions print the fragment test as "!= 0" or "!= 0x0".
-		for _, rule := range []string{`ip hdrlength != 5`, `ip frag-off & 0x3fff != 0(x0)?`} {
+		for _, rule := range []string{`ip hdrlength != 5`, `ip frag-off & 0x3fff != 0(?:x0)?`} {
 			m := regexp.MustCompile(rule + ` counter packets (\d+)`).FindSubmatch(out)
 			if m == nil || string(m[1]) == "0" {
 				t.Errorf("%q dropped nothing:\n%s", rule, out)
+			}
+		}
+		drops, err := fw.EarlyDrops()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, reason := range []string{"ipv4-options", "ipv4-fragment"} {
+			if drops[reason].Packets == 0 || drops[reason].Bytes == 0 {
+				t.Errorf("EarlyDrops: %s = %+v (%v)", reason, drops[reason], drops)
 			}
 		}
 	})

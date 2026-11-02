@@ -93,6 +93,10 @@ const (
 	NodeServiceSyncDNSProcedure = "/raycontrol.node.v1.NodeService/SyncDNS"
 	// NodeServiceRemoveDNSProcedure is the fully-qualified name of the NodeService's RemoveDNS RPC.
 	NodeServiceRemoveDNSProcedure = "/raycontrol.node.v1.NodeService/RemoveDNS"
+	// NodeServiceBackupProcedure is the fully-qualified name of the NodeService's Backup RPC.
+	NodeServiceBackupProcedure = "/raycontrol.node.v1.NodeService/Backup"
+	// NodeServiceGetMetricsProcedure is the fully-qualified name of the NodeService's GetMetrics RPC.
+	NodeServiceGetMetricsProcedure = "/raycontrol.node.v1.NodeService/GetMetrics"
 	// NodeServiceGetDeploymentProcedure is the fully-qualified name of the NodeService's GetDeployment
 	// RPC.
 	NodeServiceGetDeploymentProcedure = "/raycontrol.node.v1.NodeService/GetDeployment"
@@ -134,6 +138,13 @@ type NodeServiceClient interface {
 	GetDNS(context.Context, *connect.Request[v1.GetDNSRequest]) (*connect.Response[v1.GetDNSResponse], error)
 	SyncDNS(context.Context, *connect.Request[v1.SyncDNSRequest]) (*connect.Response[v1.SyncDNSResponse], error)
 	RemoveDNS(context.Context, *connect.Request[v1.RemoveDNSRequest]) (*connect.Response[v1.RemoveDNSResponse], error)
+	// Backup returns a consistent copy of the node's database. Root only: it
+	// holds every key (R4-13); rayctl encrypts it with the operator's
+	// passphrase, which never reaches rayd.
+	Backup(context.Context, *connect.Request[v1.BackupRequest]) (*connect.Response[v1.BackupResponse], error)
+	// GetMetrics returns aggregate metrics in the Prometheus text format, no
+	// names of users, devices or services (R4-14).
+	GetMetrics(context.Context, *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error)
 	// GetDeployment returns what root must install for the current services:
 	// system users, unit files and other files. rayctl apply writes them.
 	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
@@ -282,6 +293,18 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("RemoveDNS")),
 			connect.WithClientOptions(opts...),
 		),
+		backup: connect.NewClient[v1.BackupRequest, v1.BackupResponse](
+			httpClient,
+			baseURL+NodeServiceBackupProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("Backup")),
+			connect.WithClientOptions(opts...),
+		),
+		getMetrics: connect.NewClient[v1.GetMetricsRequest, v1.GetMetricsResponse](
+			httpClient,
+			baseURL+NodeServiceGetMetricsProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetMetrics")),
+			connect.WithClientOptions(opts...),
+		),
 		getDeployment: connect.NewClient[v1.GetDeploymentRequest, v1.GetDeploymentResponse](
 			httpClient,
 			baseURL+NodeServiceGetDeploymentProcedure,
@@ -315,6 +338,8 @@ type nodeServiceClient struct {
 	getDNS            *connect.Client[v1.GetDNSRequest, v1.GetDNSResponse]
 	syncDNS           *connect.Client[v1.SyncDNSRequest, v1.SyncDNSResponse]
 	removeDNS         *connect.Client[v1.RemoveDNSRequest, v1.RemoveDNSResponse]
+	backup            *connect.Client[v1.BackupRequest, v1.BackupResponse]
+	getMetrics        *connect.Client[v1.GetMetricsRequest, v1.GetMetricsResponse]
 	getDeployment     *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
 }
 
@@ -428,6 +453,16 @@ func (c *nodeServiceClient) RemoveDNS(ctx context.Context, req *connect.Request[
 	return c.removeDNS.CallUnary(ctx, req)
 }
 
+// Backup calls raycontrol.node.v1.NodeService.Backup.
+func (c *nodeServiceClient) Backup(ctx context.Context, req *connect.Request[v1.BackupRequest]) (*connect.Response[v1.BackupResponse], error) {
+	return c.backup.CallUnary(ctx, req)
+}
+
+// GetMetrics calls raycontrol.node.v1.NodeService.GetMetrics.
+func (c *nodeServiceClient) GetMetrics(ctx context.Context, req *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error) {
+	return c.getMetrics.CallUnary(ctx, req)
+}
+
 // GetDeployment calls raycontrol.node.v1.NodeService.GetDeployment.
 func (c *nodeServiceClient) GetDeployment(ctx context.Context, req *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {
 	return c.getDeployment.CallUnary(ctx, req)
@@ -469,6 +504,13 @@ type NodeServiceHandler interface {
 	GetDNS(context.Context, *connect.Request[v1.GetDNSRequest]) (*connect.Response[v1.GetDNSResponse], error)
 	SyncDNS(context.Context, *connect.Request[v1.SyncDNSRequest]) (*connect.Response[v1.SyncDNSResponse], error)
 	RemoveDNS(context.Context, *connect.Request[v1.RemoveDNSRequest]) (*connect.Response[v1.RemoveDNSResponse], error)
+	// Backup returns a consistent copy of the node's database. Root only: it
+	// holds every key (R4-13); rayctl encrypts it with the operator's
+	// passphrase, which never reaches rayd.
+	Backup(context.Context, *connect.Request[v1.BackupRequest]) (*connect.Response[v1.BackupResponse], error)
+	// GetMetrics returns aggregate metrics in the Prometheus text format, no
+	// names of users, devices or services (R4-14).
+	GetMetrics(context.Context, *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error)
 	// GetDeployment returns what root must install for the current services:
 	// system users, unit files and other files. rayctl apply writes them.
 	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
@@ -613,6 +655,18 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("RemoveDNS")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceBackupHandler := connect.NewUnaryHandler(
+		NodeServiceBackupProcedure,
+		svc.Backup,
+		connect.WithSchema(nodeServiceMethods.ByName("Backup")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceGetMetricsHandler := connect.NewUnaryHandler(
+		NodeServiceGetMetricsProcedure,
+		svc.GetMetrics,
+		connect.WithSchema(nodeServiceMethods.ByName("GetMetrics")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceGetDeploymentHandler := connect.NewUnaryHandler(
 		NodeServiceGetDeploymentProcedure,
 		svc.GetDeployment,
@@ -665,6 +719,10 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceSyncDNSHandler.ServeHTTP(w, r)
 		case NodeServiceRemoveDNSProcedure:
 			nodeServiceRemoveDNSHandler.ServeHTTP(w, r)
+		case NodeServiceBackupProcedure:
+			nodeServiceBackupHandler.ServeHTTP(w, r)
+		case NodeServiceGetMetricsProcedure:
+			nodeServiceGetMetricsHandler.ServeHTTP(w, r)
 		case NodeServiceGetDeploymentProcedure:
 			nodeServiceGetDeploymentHandler.ServeHTTP(w, r)
 		default:
@@ -762,6 +820,14 @@ func (UnimplementedNodeServiceHandler) SyncDNS(context.Context, *connect.Request
 
 func (UnimplementedNodeServiceHandler) RemoveDNS(context.Context, *connect.Request[v1.RemoveDNSRequest]) (*connect.Response[v1.RemoveDNSResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.RemoveDNS is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) Backup(context.Context, *connect.Request[v1.BackupRequest]) (*connect.Response[v1.BackupResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.Backup is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetMetrics(context.Context, *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetMetrics is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {

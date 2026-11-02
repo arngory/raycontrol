@@ -471,7 +471,7 @@ func (c *cli) uninstall(ctx context.Context, args []string) error {
 		if *keep {
 			fmt.Print(" (state kept)")
 		}
-		fmt.Print(". Type yes to go on: ")
+		fmt.Print(" (rayctl backup first keeps a way back). Type yes to go on: ")
 		answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 		if strings.TrimSpace(answer) != "yes" {
 			return errors.New("not confirmed")

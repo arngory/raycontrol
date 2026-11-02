@@ -252,6 +252,27 @@ wait_active rayd.service rayspa.service "${dataplane[@]}"
 client -addr "$ip" "$laptop" >/dev/null || fail "probe after the automatic rollback"
 x rm -rf /root/broken
 
+log "$distro: backup, restore and metrics"
+x sh -c 'umask 077 && echo "a test passphrase" > /root/pass'
+x /usr/local/bin/rayctl backup -o /root/node.rcbak -passphrase-file /root/pass || fail "rayctl backup"
+[[ $(x stat -c %a /root/node.rcbak) == 600 ]] || fail "the backup is not 0600"
+if x grep -qa -e SQLite -e alice /root/node.rcbak; then
+	fail "the backup is readable without the passphrase"
+fi
+x rayctl user add bob >/dev/null
+x /usr/local/bin/rayctl restore -i /root/node.rcbak -passphrase-file /root/pass -yes || fail "rayctl restore"
+users="$(x rayctl user list)"
+[[ $users == *alice* && $users != *bob* ]] || fail "restore did not bring back the state of the backup: $users"
+wait_active rayd.service rayspa.service "${dataplane[@]}"
+client -addr "$ip" "$laptop" >/dev/null || fail "probe after restore"
+# Two users: alice and the operator's own from the install.
+metrics="$(x /usr/local/bin/rayctl metrics)" || fail "rayctl metrics"
+for m in 'raycontrol_users{state="active"} 2' 'raycontrol_services{kind="dnstt",enabled="true"} 1' \
+	'raycontrol_early_drops_packets_total{reason="ipv4-fragment"}'; do
+	[[ $metrics == *"$m"* ]] || fail "metrics lack $m: $metrics"
+done
+x rm -f /root/node.rcbak /root/pass
+
 log "$distro: uninstall"
 x /usr/local/bin/rayctl uninstall -yes || fail "rayctl uninstall"
 snapshot /root/after.snap

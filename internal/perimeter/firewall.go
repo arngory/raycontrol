@@ -5,6 +5,7 @@ package perimeter
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"os/exec"
@@ -124,16 +125,16 @@ table inet %[1]s {
 		type filter hook prerouting priority -450; policy accept;
 		%[6]s
 		fib daddr type != local accept
-		ip frag-off & 0x3fff != 0 counter drop
-		ip hdrlength != 5 counter drop
-		meta nfproto ipv6 exthdr frag exists counter drop
-		meta nfproto ipv6 exthdr rt exists counter drop
-		meta nfproto ipv6 exthdr dst exists counter drop
-		meta nfproto ipv6 exthdr hbh exists ip6 saddr != fe80::/10 counter drop
-		tcp flags & (fin | syn) == fin | syn counter drop
-		tcp flags & (syn | rst) == syn | rst counter drop
-		tcp flags & (fin | syn | rst | psh | ack | urg) == 0x0 counter drop
-		tcp flags & (fin | syn | rst | psh | ack | urg) == fin | psh | urg counter drop
+		ip frag-off & 0x3fff != 0 counter drop comment "ipv4-fragment"
+		ip hdrlength != 5 counter drop comment "ipv4-options"
+		meta nfproto ipv6 exthdr frag exists counter drop comment "ipv6-fragment"
+		meta nfproto ipv6 exthdr rt exists counter drop comment "ipv6-routing"
+		meta nfproto ipv6 exthdr dst exists counter drop comment "ipv6-dstopts"
+		meta nfproto ipv6 exthdr hbh exists ip6 saddr != fe80::/10 counter drop comment "ipv6-hopopts"
+		tcp flags & (fin | syn) == fin | syn counter drop comment "tcp-syn-fin"
+		tcp flags & (syn | rst) == syn | rst counter drop comment "tcp-syn-rst"
+		tcp flags & (fin | syn | rst | psh | ack | urg) == 0x0 counter drop comment "tcp-null"
+		tcp flags & (fin | syn | rst | psh | ack | urg) == fin | psh | urg counter drop comment "tcp-xmas"
 	}
 
 	# Rotated UDP slot ports land on the service port; the input chain then
@@ -350,4 +351,52 @@ func (n *NFT) Deny(addr netip.Addr, ports []Port) error {
 		}
 	}
 	return firstErr
+}
+
+// Drops counts what one rule of the early chain dropped.
+type Drops struct {
+	Packets uint64 `json:"packets"`
+	Bytes   uint64 `json:"bytes"`
+}
+
+// EarlyDrops reads the counters of the early chain by reason (the rule's
+// comment) for local metrics.
+func (n *NFT) EarlyDrops() (map[string]Drops, error) {
+	bin := n.Bin
+	if bin == "" {
+		bin = "nft"
+	}
+	out, err := exec.Command(bin, "-j", "list", "chain", "inet", Table, "early").Output() //nolint:gosec // G204: see run
+	if err != nil {
+		return nil, fmt.Errorf("nft list chain early: %w", err)
+	}
+	var doc struct {
+		Nftables []struct {
+			Rule *struct {
+				Comment string            `json:"comment"`
+				Expr    []json.RawMessage `json:"expr"`
+			} `json:"rule"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		return nil, fmt.Errorf("nft list chain early: %w", err)
+	}
+	drops := map[string]Drops{}
+	for _, o := range doc.Nftables {
+		if o.Rule == nil || o.Rule.Comment == "" {
+			continue
+		}
+		for _, e := range o.Rule.Expr {
+			var c struct {
+				Counter *Drops `json:"counter"`
+			}
+			if json.Unmarshal(e, &c) == nil && c.Counter != nil {
+				d := drops[o.Rule.Comment]
+				d.Packets += c.Counter.Packets
+				d.Bytes += c.Counter.Bytes
+				drops[o.Rule.Comment] = d
+			}
+		}
+	}
+	return drops, nil
 }
