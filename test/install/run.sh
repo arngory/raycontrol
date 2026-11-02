@@ -112,7 +112,9 @@ snapshot() {
 		echo "== ufw"; if command -v ufw >/dev/null; then ufw status verbose; fi
 		echo "== var/lib"; ls /var/lib
 		echo "== bin"; ls /usr/local/bin
-		echo "== libexec"; ls /usr/local/libexec 2>&1
+		# Missing on some systems before the install: recorded, not fatal
+		# (the status of the last command is the status of the snapshot).
+		echo "== libexec"; ls /usr/local/libexec 2>&1 || true
 	} > "$1" 2>&1' snapshot "$1"
 }
 
