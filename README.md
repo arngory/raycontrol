@@ -76,6 +76,7 @@ rayctl apply                                          # install what new service
 rayctl service rotate reality                         # new REALITY keys and name ahead of schedule
 rayctl service set site answer=silent                 # decoy site: 404 (default), 403, silent or pages
 rayctl dns                                            # DNS provider, records the node needs, conflicts
+rayctl update                                         # newest verified release in place, rolls back on failure
 rayctl admin 198.51.100.7                             # addresses that reach SSH without SPA
 rayctl report -o report.txt                           # redacted report for an issue
 rayctl uninstall                                      # take everything back

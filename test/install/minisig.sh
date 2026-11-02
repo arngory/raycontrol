@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Checks the bootstrap's openssl-based minisign verification against real
 # minisign signatures: prehashed and legacy pass; a changed file, trusted
-# comment or key and a garbage signature fail. Needs minisign and openssl.
+# comment or key and a garbage signature fail. Needs minisign and openssl;
+# with Go, rayctl update's verification is checked on the same files.
 #
 #   test/install/minisig.sh
 set -euo pipefail
@@ -60,3 +61,9 @@ expect fail "empty signature file" SHA256SUMS /dev/null "$key"
 
 [[ $failures -eq 0 ]] || die "$failures checks failed"
 echo "minisign verification: all checks passed"
+
+# The same signatures through rayctl update's verification (Go).
+if command -v go >/dev/null; then
+	(cd "$here/../.." && MINISIGN_TEST_DIR="$dir" go test -count=1 -run TestVerifyMinisign ./internal/release) ||
+		die "Go verification of minisign signatures failed"
+fi

@@ -205,6 +205,8 @@ rayctl probe @phone.bundle
 
 ## 9. Дальше
 
+- `rayctl update -check` — есть ли новый релиз; `rayctl update` — поставить его: подпись проверяется, при сбое прежняя
+  версия возвращается сама; `rayctl update -rollback` — вернуть её вручную.
 - `rayctl report -o report.txt` — очищенный отчёт для issue; перед отправкой прочитайте
   ([09-observability.md](09-observability.md)).
 - `rayctl service rotate reality` — новые ключи и имя REALITY раньше срока; с `-now` — сразу.

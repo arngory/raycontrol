@@ -49,5 +49,12 @@ sha256sum -c SHA256SUMS --ignore-missing
 форка, и niko-server из релиза `niko-server-vX.Y.Z` в `arngory/niko` (сейчас `niko-server-v0.1.1`). niko-server
 сверяется с SHA-256, закреплёнными в `deploy/versions.env` (`scripts/niko-server.sh`). Версии и коммиты компонентов —
 в файле `VERSIONS` архива. `rayctl install -dataplane` кладёт их в `/usr/local/libexec/raycontrol/` через журнал
-установки. Обновление версий — отдельный коммит в `deploy/versions.env` (новые хеши) и новый релиз. Обновление на
-установленной ноде (`rayctl update`) — следующий шаг.
+установки. Обновление версий — отдельный коммит в `deploy/versions.env` (новые хеши) и новый релиз.
+
+## Обновление ноды
+
+`rayctl update` берёт последний релиз (`-version vX.Y.Z` — конкретный) и проверяет подпись тем же ключом, что
+bootstrap. Версию он читает из подписанного комментария (`raycontrol vX.Y.Z` — его ставит Release-workflow), и
+на более старую `latest` не откатывает. Текущие бинарники сохраняются для отката; если нода после обновления не
+отвечает, они возвращаются сами (решение R4-12). Без доступа к GitHub и зеркалам: скачайте `SHA256SUMS`,
+`SHA256SUMS.minisig` и архив своей архитектуры в каталог и выполните `rayctl update -from <каталог>`.

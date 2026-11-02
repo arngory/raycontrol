@@ -54,6 +54,9 @@ const usageText = `usage: rayctl [-socket PATH] [-json] <command>
   install -host ADDR [-domain D] [-admin A] [-cloudflare-token-file F] [-services reality,dnstt,masterdns|none]
           [-dataplane DIR]                    set the node up on this host (root); with -domain REALITY by default
   apply                                       install what the current services need (root)
+  update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-rollback]
+                                              the newest verified release in place, back to the
+                                              previous binaries if the node does not come back (root)
   uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]
                                               take back everything install and apply changed (root)
 
@@ -135,6 +138,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.report(ctx, args[1:])
 	case "dns":
 		return c.dns(ctx, sub, rest)
+	case "update":
+		return c.update(ctx, args[1:])
 	case "uninstall":
 		return c.uninstall(ctx, args[1:])
 	}

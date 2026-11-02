@@ -95,11 +95,14 @@ jobs:
       - run: PEBBLE_DIRECTORY=https://127.0.0.1:14000/dir go test -count=1 -run 'TestIssue.*WithPebble' -v ./internal/certs
 
   bootstrap:
-    # The openssl-based signature check of install/bootstrap.sh against
-    # signatures made by minisign itself.
+    # The signature checks of install/bootstrap.sh (openssl) and of rayctl
+    # update (Go) against signatures made by minisign itself.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - run: sudo apt-get install -y minisign
       - run: test/install/minisig.sh
 

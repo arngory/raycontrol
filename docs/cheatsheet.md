@@ -11,6 +11,8 @@
 | `bash bootstrap.sh -host IP -domain D -cloudflare-token-file F [-services reality,dnstt,masterdns]` | поставить ноду: зависимости, подписанный релиз с data plane, `rayctl install`, сервисы |
 | `rayctl install -host IP [-domain D] [-admin A] [-cloudflare-token-file F] [-services …\|none] [-dataplane DIR]` | то же без bootstrap; `-dataplane` — каталог с проверенными `xray` и `niko-server` |
 | `rayctl apply` | поставить то, что нужно новым сервисам: пользователи, юниты, файлы |
+| `rayctl update [-check] [-version vX.Y.Z] [-from DIR] [-yes]` | обновить ноду до проверенного релиза; при сбое — сам откат |
+| `rayctl update -rollback` | вернуть бинарники, которые заменило последнее обновление |
 | `rayctl uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]` | убрать всё по журналу установки, записи в Cloudflare тоже |
 | `rayspa teardown` | с консоли провайдера: снять периметр, если SPA и SSH недоступны |
 

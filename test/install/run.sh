@@ -232,6 +232,26 @@ for leak in "$ip" example.test rcdev1: "$phone_id"; do
 	fi
 done
 
+log "$distro: update and rollback"
+# The same binaries as a release would bring them (test mode, no
+# signature): replaced, restarted, applied, checked; then put back.
+x /usr/local/bin/rayctl update -local /opt/rc -yes || fail "rayctl update"
+x test -s /var/lib/raycontrol-install/previous/rayd || fail "update kept no previous binaries"
+wait_active rayd.service rayspa.service "${dataplane[@]}"
+client -addr "$ip" "$laptop" >/dev/null || fail "probe after update"
+x /usr/local/bin/rayctl update -rollback || fail "rayctl update -rollback"
+wait_active rayd.service rayspa.service "${dataplane[@]}"
+client -addr "$ip" "$laptop" >/dev/null || fail "probe after rollback"
+# A release whose rayd does not start: the update puts the previous
+# binaries back by itself.
+x sh -c 'mkdir -p /root/broken && cp /opt/rc/* /root/broken/ && printf "#!/bin/sh\nexit 1\n" > /root/broken/rayd && chmod 755 /root/broken/rayd'
+if x /usr/local/bin/rayctl update -local /root/broken -yes; then
+	fail "an update with a broken rayd succeeded"
+fi
+wait_active rayd.service rayspa.service "${dataplane[@]}"
+client -addr "$ip" "$laptop" >/dev/null || fail "probe after the automatic rollback"
+x rm -rf /root/broken
+
 log "$distro: uninstall"
 x /usr/local/bin/rayctl uninstall -yes || fail "rayctl uninstall"
 snapshot /root/after.snap
