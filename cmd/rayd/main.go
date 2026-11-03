@@ -105,6 +105,9 @@ func cmdInit(args []string) error {
 	return nil
 }
 
+// minCredGrace is the shortest overlap after a credential switch.
+const minCredGrace = 12 * time.Hour
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	db := fs.String("db", defaultDB, "database path")
@@ -119,7 +122,7 @@ func cmdServe(args []string) error {
 	acmeDir := fs.String("acme-directory", certs.LetsEncrypt, "ACME directory for the sites' certificates (empty: none)")
 	credPeriod := fs.Duration("cred-period", 30*24*time.Hour, "how long a user credential stays current (0: no rotation)")
 	credLead := fs.Duration("cred-lead", 3*24*time.Hour, "the next credential is in the subscription this long before the switch")
-	credGrace := fs.Duration("cred-grace", 2*24*time.Hour, "the previous credential is accepted this long after the switch")
+	credGrace := fs.Duration("cred-grace", 2*24*time.Hour, "the previous credential is accepted this long after the switch (12h at least)")
 	realityPeriod := fs.Duration("reality-period", 90*24*time.Hour, "how long REALITY keys stay current; their next set is published -cred-lead ahead (0: no rotation)")
 	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new REALITY server name may wait for its certificate")
 	fs.Parse(args)
@@ -178,6 +181,11 @@ func cmdServe(args []string) error {
 	if *credPeriod > 0 {
 		if *credLead >= *credPeriod {
 			return errors.New("-cred-lead must be shorter than -cred-period")
+		}
+		// Niko moves to a new credential up to 12 h after the switch
+		// (RAYCONTROL.md §11): the previous one must outlive that.
+		if *credGrace < minCredGrace {
+			return fmt.Errorf("-cred-grace must be at least %v: clients move to the new credential up to 12 h after the switch", minCredGrace)
 		}
 		r := store.Rotation{Period: *credPeriod, Lead: *credLead, Grace: *credGrace}
 		go rotateCredentials(ctx, st, r, func() { srv.Notify() }, log)
