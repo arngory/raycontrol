@@ -241,8 +241,9 @@ func TestReality(t *testing.T) {
 		return c, front
 	}
 
-	// Direct (R2-7): Xray binds the service port itself.
+	// Direct (R2-7): Xray binds the service port itself (without the front).
 	m.IPv6 = false
+	m.FrontTCP = false
 	c, front := read(m)
 	in := c.Inbounds[0]
 	r := in.Stream.Reality

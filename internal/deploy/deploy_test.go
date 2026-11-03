@@ -59,7 +59,8 @@ func TestBuild(t *testing.T) {
 	if users["niko-front"].UID != 9100 || users["rayd"].UID != 9190 || users["rayspa"].UID != 9191 {
 		t.Fatalf("fixed uids: %+v", users)
 	}
-	if !slices.Equal(users["niko-front"].ExtraGroups, []string{"niko-dns"}) ||
+	// The front reaches REALITY's socket (tcpmux, R2-15) and the DNS backends.
+	if !slices.Equal(users["niko-front"].ExtraGroups, []string{"niko-reality", "niko-dns"}) ||
 		!slices.Equal(users["niko-dns"].ExtraGroups, []string{"niko-inner"}) ||
 		!slices.Equal(users["rayd"].ExtraGroups, []string{"niko-dns", "niko-front", "niko-inner", "niko-reality"}) {
 		t.Fatalf("groups: %+v", users)
@@ -70,13 +71,16 @@ func TestBuild(t *testing.T) {
 	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "ygg") {
 		t.Fatalf("warnings %v", p.Warnings)
 	}
-	// REALITY binds TCP 443 itself until the front has tcpmux (R2-7).
+	// REALITY behind the front: a unix socket, no capability (R2-15).
 	reality := file(p, "/etc/systemd/system/niko-reality.service")
-	for _, want := range []string{"User=niko-reality", "AmbientCapabilities=CAP_NET_BIND_SERVICE\n", "CapabilityBoundingSet=CAP_NET_BIND_SERVICE\n",
+	for _, want := range []string{"User=niko-reality", "CapabilityBoundingSet=\n",
 		"ExecStart=/usr/local/libexec/raycontrol/xray run -c /var/lib/raycontrol/rendered/reality/xray.json", "ReadWritePaths=/run/niko/reality-api"} {
 		if !strings.Contains(reality, want) {
 			t.Errorf("reality unit lacks %q", want)
 		}
+	}
+	if strings.Contains(reality, "CAP_NET_BIND_SERVICE") {
+		t.Error("REALITY binds a port itself behind the front")
 	}
 	if !strings.Contains(file(p, "/etc/tmpfiles.d/raycontrol.conf"), "d /run/niko/reality-api 2750 niko-reality rayd") {
 		t.Error("REALITY API directory not restricted to rayd")
@@ -93,7 +97,8 @@ func TestBuild(t *testing.T) {
 		}
 	}
 	front := file(p, "/etc/systemd/system/niko-front.service")
-	if !strings.Contains(front, "AmbientCapabilities=CAP_NET_BIND_SERVICE") || !strings.Contains(front, "SupplementaryGroups=niko-dns") {
+	if !strings.Contains(front, "AmbientCapabilities=CAP_NET_BIND_SERVICE") || !strings.Contains(front, "SupplementaryGroups=niko-reality niko-dns") ||
+		!strings.Contains(front, "After=network-online.target niko-dns.service niko-reality.service") {
 		t.Errorf("front unit:\n%s", front)
 	}
 	if !strings.Contains(file(p, "/etc/systemd/system/rayspa.service"), "AmbientCapabilities=CAP_NET_ADMIN") {
@@ -148,7 +153,7 @@ func TestHostApply(t *testing.T) {
 	all := strings.Join(cmds, "\n")
 	for _, want := range []string{
 		"useradd --system --uid 9100 --gid niko-front", "groupadd --system --gid 9100 niko-front",
-		"usermod --append --groups niko-dns niko-front",
+		"usermod --append --groups niko-reality,niko-dns niko-front",
 		"systemctl enable --now niko-inner.service", "systemctl disable --now niko-old.service",
 		"systemd-tmpfiles --create", "systemctl try-restart systemd-resolved.service",
 	} {
@@ -312,7 +317,7 @@ func TestBuildSelfSteal(t *testing.T) {
 		"ConditionPathExists=/var/lib/raycontrol/rendered/site/chain.pem\n",
 		"ExecStartPre=+install -m 0400 -o niko-site -g niko-site /var/lib/raycontrol/rendered/site/key.pem /run/niko/site/key.pem\n",
 		// The default answer: 404 to everything, no content directory (R4-8).
-		"ExecStart=/usr/local/bin/rayd site -answer 404 -routes /var/lib/raycontrol/rendered/site/routes.json -chain /var/lib/raycontrol/rendered/site/chain.pem -key /run/niko/site/key.pem -socket /run/niko/site/tls.sock\n",
+		"ExecStart=/usr/local/bin/rayd site -answer 404 -chain /var/lib/raycontrol/rendered/site/chain.pem -key /run/niko/site/key.pem -socket /run/niko/site/tls.sock\n",
 		"PrivateNetwork=yes\n", "RestrictAddressFamilies=AF_UNIX\n",
 	} {
 		if !strings.Contains(site, want) {
@@ -635,7 +640,7 @@ func TestBuildNaive(t *testing.T) {
 			t.Errorf("naive unit lacks %q:\n%s", want, u)
 		}
 	}
-	if !strings.Contains(file(p, "/etc/tmpfiles.d/raycontrol.conf"), "d /run/niko/naive-in 2750 niko-naive niko-site -") {
+	if !strings.Contains(file(p, "/etc/tmpfiles.d/raycontrol.conf"), "d /run/niko/naive-in 2750 niko-naive niko-front -") {
 		t.Errorf("no socket directory for the site:\n%s", file(p, "/etc/tmpfiles.d/raycontrol.conf"))
 	}
 	if len(p.Warnings) != 0 {

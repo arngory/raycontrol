@@ -29,6 +29,7 @@ import (
 	"github.com/arngory/raycontrol/internal/doh"
 	"github.com/arngory/raycontrol/internal/live"
 	"github.com/arngory/raycontrol/internal/naive"
+	"github.com/arngory/raycontrol/internal/nikoipc"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -53,7 +54,7 @@ commands:
   init     create the node state and its random parameters (safe to repeat)
   serve    serve the node API on the local socket
   site     serve the decoy site on a unix socket (run by its own unit)
-  naive    serve NaiveProxy (HTTP/2) on a unix socket behind the site (its own unit)
+  naive    serve NaiveProxy (HTTP/2) behind the niko-server front (its own unit)
   version  print the version
 `)
 	os.Exit(2)
@@ -266,8 +267,9 @@ type dohListener struct {
 }
 
 // serveDoH keeps rayd's TLS listener on the socket of every enabled DoH
-// service whose site has a certificate (R3-2); the site passes the DoH name
-// on to it. A new certificate restarts the listener.
+// service whose site has a certificate (R3-2); the front passes the
+// connections for the DoH name to it (R2-15). A new certificate restarts the
+// listener.
 func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func() <-chan struct{}, log *slog.Logger) {
 	running := map[string]*dohListener{}
 	stop := func(name string) {
@@ -312,14 +314,12 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 				log.Error("doh certificate", "service", svc.Name, "err", err)
 				continue
 			}
-			sock := p.DoHSocket(svc.Name)
-			_ = os.Remove(sock)
-			ln, err := net.Listen("unix", sock)
+			// The front passes the sockets of the DoH name here (R2-15).
+			ln, err := nikoipc.ListenFD(p.DoHSocket(svc.Name), render.FrontUID, log)
 			if err != nil {
 				log.Error("doh socket", "service", svc.Name, "err", err)
 				continue
 			}
-			_ = os.Chmod(sock, 0o660) //nolint:gosec // G302: the site's group passes connections on
 			id := svc.ID
 			h := &doh.Handler{Tokens: func(ctx context.Context) (map[string]bool, error) { return dohTokens(ctx, st, id) }}
 			srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute,
@@ -585,7 +585,6 @@ func cmdSite(args []string) error {
 	fs := flag.NewFlagSet("site", flag.ExitOnError)
 	answer := fs.String("answer", site.Answer404, "what requests get: "+strings.Join(site.Answers, ", "))
 	root := fs.String("root", "", "site content directory (answer pages)")
-	routesFile := fs.String("routes", "", "JSON: server names passed on, still encrypted, to a unix socket (DoH)")
 	chain := fs.String("chain", "", "certificate chain (PEM, leaf first)")
 	key := fs.String("key", "", "private key (PEM)")
 	socket := fs.String("socket", "", "unix socket to listen on")
@@ -620,23 +619,20 @@ func cmdSite(args []string) error {
 	if err := os.Chmod(*socket, 0o660); err != nil { //nolint:gosec // G302: the REALITY process connects through the group
 		return err
 	}
-	routes, err := site.LoadRoutes(*routesFile)
-	if err != nil {
-		return err
-	}
-	log.Info("serving the site", "socket", *socket, "chain", len(cert.Certificate), "answer", *answer, "routes", len(routes))
-	return site.Serve(ctx, site.Routed(ln, routes, log), handler, cert, log)
+	log.Info("serving the site", "socket", *socket, "chain", len(cert.Certificate), "answer", *answer)
+	return site.Serve(ctx, ln, handler, cert, log)
 }
 
 // cmdNaive serves NaiveProxy (R2-14): TLS 1.3 with X25519MLKEM768 only and
-// HTTP/2 on a unix socket the site passes the service's name on to.
+// HTTP/2 on the connections the front passes for the service's name (R2-15).
 func cmdNaive(args []string) error {
 	fs := flag.NewFlagSet("naive", flag.ExitOnError)
 	answer := fs.String("answer", site.Answer404, "what other requests get: 404, 403 or silent")
 	users := fs.String("users", "", "JSON list of SHA-256 hashes of the passwords, read again when it changes")
 	chain := fs.String("chain", "", "certificate chain (PEM, leaf first)")
 	key := fs.String("key", "", "private key (PEM)")
-	socket := fs.String("socket", "", "unix socket to listen on")
+	socket := fs.String("socket", "", "SOCK_SEQPACKET socket the front passes connections to (niko-server IPC, mode fd)")
+	frontUID := fs.Int("front-uid", render.FrontUID, "UID of the niko-server front, the only peer accepted")
 	fs.Parse(args)
 	if *users == "" || *chain == "" || *key == "" || *socket == "" {
 		return errors.New("naive needs -users, -chain, -key and -socket")
@@ -655,12 +651,8 @@ func cmdNaive(args []string) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	_ = os.Remove(*socket)
-	ln, err := net.Listen("unix", *socket)
+	ln, err := nikoipc.ListenFD(*socket, *frontUID, log)
 	if err != nil {
-		return err
-	}
-	if err := os.Chmod(*socket, 0o660); err != nil { //nolint:gosec // G302: the site passes connections on through the group
 		return err
 	}
 	srv := &http.Server{

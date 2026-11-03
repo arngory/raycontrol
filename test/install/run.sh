@@ -210,7 +210,7 @@ x rayctl service add api api >/dev/null
 x rayctl service add reality reality >/dev/null
 x rayctl service add naive naive >/dev/null
 x rayctl apply >/dev/null || fail "rayctl apply for the API, REALITY and naive"
-[[ $(x stat -c '%a %U %G' /run/niko/naive-in) == "2750 niko-naive niko-site" ]] || fail "no socket directory for naive"
+[[ $(x stat -c '%a %U %G' /run/niko/naive-in) == "2750 niko-naive niko-front" ]] || fail "no socket directory for naive (the front passes connections there)"
 invite="$(x rayctl device invite alice console -role admin | grep -o 'rcinv1:[A-Za-z0-9_-]*')" || fail "no invite"
 # From the client's container: register a device from the invite, then
 # administer the node through the API with it, and give it a new key.

@@ -85,9 +85,10 @@ type Model struct {
 	Sets map[int64]map[int64]store.Credential
 	// Now dates the generated site; zero is the time of rendering.
 	Now time.Time
-	// FrontTCP puts TCP services behind the niko-server front (tcpmux,
-	// CONFIG.md). niko-server v0.1.1 has no TCP front yet, so REALITY binds
-	// its TCP port itself until then (docs/08-decisions.md, R2-7).
+	// FrontTCP puts TCP 443 behind the niko-server front (tcpmux, v0.2,
+	// docs/08-decisions.md R2-15): REALITY on a unix socket with PROXY v2,
+	// DoH and naive as passed sockets. Collect sets it; without it REALITY
+	// binds its TCP port itself (R2-7), and DoH and naive are not served.
 	FrontTCP bool
 }
 
@@ -104,7 +105,7 @@ func HostIPv6() bool {
 // Collect reads the model from the store and creates missing inner
 // credentials for users who reach a service behind the inner stage.
 func Collect(ctx context.Context, st *store.Store) (Model, error) {
-	m := Model{IPv6: HostIPv6()}
+	m := Model{IPv6: HostIPv6(), FrontTCP: true}
 	params, err := node.LoadParams(ctx, st)
 	if err != nil {
 		return m, err
@@ -339,6 +340,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 	}
 	var zones []route
 	var tcpRoutes []tcpRoute
+	tcpDefault := "" // the first REALITY service: its target answers like the site
 	backends := map[string]backendRef{}
 
 	for _, s := range m.Services {
@@ -378,6 +380,9 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				var rs RealitySettings
 				_ = json.Unmarshal([]byte(s.Settings), &rs)
 				tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{rs.SNI}, Backend: s.Name})
+				if tcpDefault == "" {
+					tcpDefault = s.Name
+				}
 			}
 		case "hy2-masq", "hy2-obfs":
 			if site := provision.SiteOf(s.Service); s.Kind == "hy2-masq" && !m.hasCert(site) {
@@ -398,17 +403,32 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				skipped = append(skipped, s.Name+" (waits for its certificate)")
 			}
 			files = append(files, fs...)
-		case "doh":
-			// Served by rayd behind the site (R3-2); the site's routes say so.
-		case "naive":
-			fs, err := naiveFiles(s, m, p)
-			if err != nil {
-				return nil, nil, err
+		case "doh", "naive":
+			// Behind the front only (R2-15): rayd (DoH) and rayd naive take the
+			// sockets it passes.
+			if !m.FrontTCP {
+				skipped = append(skipped, s.Name+" (needs the front on TCP 443)")
+				continue
 			}
-			if fs == nil {
-				skipped = append(skipped, s.Name+" (waits for its site's certificate)")
+			var st struct {
+				SNI string `json:"sni"`
 			}
-			files = append(files, fs...)
+			_ = json.Unmarshal([]byte(s.Settings), &st)
+			ref := backendRef{Socket: p.DoHSocket(s.Name), Mode: "fd", UID: RaydUID}
+			if s.Kind == "naive" {
+				fs, err := naiveFiles(s, m, p)
+				if err != nil {
+					return nil, nil, err
+				}
+				if fs == nil {
+					skipped = append(skipped, s.Name+" (waits for its site's certificate)")
+					continue
+				}
+				files = append(files, fs...)
+				ref = backendRef{Socket: p.NaiveSocket(s.Name), Mode: "fd", UID: s.UID}
+			}
+			backends[s.Name] = ref
+			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: s.Name})
 		case "ssh", "subscription", "api":
 			// Not data-plane processes.
 		default:
@@ -438,7 +458,11 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			}
 			// Unknown SNI goes to the first REALITY service: its target
 			// answers like the site it stands for.
-			front["tcp"] = map[string]any{"listen": listen, "sniff_timeout": "5s", "routes": tcpRoutes, "default": tcpRoutes[0].Backend}
+			tcp := map[string]any{"listen": listen, "sniff_timeout": "5s", "routes": tcpRoutes}
+			if tcpDefault != "" {
+				tcp["default"] = tcpDefault
+			}
+			front["tcp"] = tcp
 		}
 		b, err := jsonFile(front)
 		if err != nil {
@@ -820,10 +844,9 @@ func (p Paths) SiteSocket(site string) string { return p.socket(site, "tls") }
 // Site files: content under www/, the certificate chain and the key, which
 // systemd copies for the site process (Paths.Credential).
 const (
-	SiteChain  = "chain.pem"
-	SiteKey    = "key.pem"
-	SiteRoot   = "www"
-	SiteRoutes = "routes.json"
+	SiteChain = "chain.pem"
+	SiteKey   = "key.pem"
+	SiteRoot  = "www"
 )
 
 // DoHSocket is where rayd serves a DoH service for the site to pass it on.
@@ -908,28 +931,7 @@ func siteFiles(s Service, m Model, p Paths) ([]File, error) {
 		}
 	}
 	key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: s.Secrets[provision.SecretTLSKey]})
-	// Names the site passes on, still encrypted (R2-13): DoH to rayd, naive
-	// to its process.
-	routes := map[string]string{}
-	for _, x := range m.Services {
-		if (x.Kind == "doh" || x.Kind == "naive") && provision.SiteOf(x.Service) == s.Name {
-			var st struct {
-				SNI string `json:"sni"`
-			}
-			_ = json.Unmarshal([]byte(x.Settings), &st)
-			sock := p.DoHSocket(x.Name)
-			if x.Kind == "naive" {
-				sock = p.NaiveSocket(x.Name)
-			}
-			routes[strings.ToLower(st.SNI)] = sock
-		}
-	}
-	r, err := jsonFile(routes)
-	if err != nil {
-		return nil, err
-	}
 	files = append(files,
-		File{Path: path.Join(dir, SiteRoutes), Mode: 0o640, Group: GroupName(s.Name), Content: r, Service: s.Name},
 		File{Path: path.Join(dir, SiteChain), Mode: 0o640, Group: GroupName(s.Name), Content: s.Secrets[provision.SecretTLSChain], Service: s.Name},
 		File{Path: path.Join(dir, SiteKey), Mode: 0o600, Content: key, Service: s.Name},
 	)

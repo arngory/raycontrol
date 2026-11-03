@@ -196,7 +196,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		dir := path.Join(p.Rendered, s.Name)
 		key := p.Credential(s.Name, render.SiteKey)
 		answer := provision.SiteAnswer(s.Service)
-		args := " site -answer " + answer + " -routes " + path.Join(dir, render.SiteRoutes)
+		args := " site -answer " + answer
 		if answer == site.AnswerPages {
 			args += " -root " + path.Join(dir, render.SiteRoot)
 		}
@@ -409,13 +409,14 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		// setgid: the API socket Xray creates inherits the rayd group.
 		tmp += fmt.Sprintf("d %s 2750 %s rayd -\n", path.Dir(p.APISocket(s.Name)), render.GroupName(s.Name))
 	}
-	// DoH: rayd's socket, reached by the site that passes the name on.
+	// DoH (rayd) and naive: sockets the front passes connections to (R2-15),
+	// reached through the front's group only.
 	for _, s := range m.Services {
 		if s.Kind == "doh" {
-			tmp += fmt.Sprintf("d %s 2750 rayd %s -\n", path.Dir(p.DoHSocket(s.Name)), render.GroupName(provision.SiteOf(s.Service)))
+			tmp += fmt.Sprintf("d %s 2750 rayd %s -\n", path.Dir(p.DoHSocket(s.Name)), render.GroupName("front"))
 		}
 		if s.Kind == "naive" {
-			tmp += fmt.Sprintf("d %s 2750 %s %s -\n", path.Dir(p.NaiveSocket(s.Name)), render.GroupName(s.Name), render.GroupName(provision.SiteOf(s.Service)))
+			tmp += fmt.Sprintf("d %s 2750 %s %s -\n", path.Dir(p.NaiveSocket(s.Name)), render.GroupName(s.Name), render.GroupName("front"))
 		}
 	}
 	plan.Files = append(plan.Files,

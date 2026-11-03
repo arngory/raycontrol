@@ -34,6 +34,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/doh"
 	"github.com/arngory/raycontrol/internal/naive"
+	"github.com/arngory/raycontrol/internal/nikoipc"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/site"
@@ -262,6 +263,7 @@ func TestRealityWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	m.FrontTCP = false // Xray on its own TCP port (R2-7)
 	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run")}
 	if err := os.MkdirAll(filepath.Dir(paths.APISocket("reality")), 0o755); err != nil {
 		t.Fatal(err)
@@ -434,6 +436,11 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	if bin == "" {
 		t.Skip("set XRAY_BIN to an Xray built from arngory/xray-core")
 	}
+	// TCP 443 goes through the niko-server front (tcpmux, R2-15).
+	niko := os.Getenv("NIKO_SERVER_BIN")
+	if niko == "" {
+		t.Skip("set NIKO_SERVER_BIN to niko-server v0.2 or later (tcpmux)")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	dir := t.TempDir()
@@ -524,7 +531,8 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run")}
-	for _, d := range []string{filepath.Dir(paths.APISocket("reality")), filepath.Dir(paths.SiteSocket("site"))} {
+	for _, d := range []string{filepath.Dir(paths.APISocket("reality")), filepath.Dir(paths.SiteSocket("site")),
+		filepath.Join(paths.Run, "reality"), filepath.Dir(paths.DoHSocket("doh")), filepath.Dir(paths.NaiveSocket("naive"))} {
 		os.MkdirAll(d, 0o755)
 	}
 	files, skipped, err := render.Render(m, paths)
@@ -559,11 +567,22 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	routes, err := site.LoadRoutes(filepath.Join(siteDir, render.SiteRoutes))
-	if err != nil || len(routes) != 2 {
-		t.Fatalf("site routes %v %v", routes, err)
+	go site.Serve(ctx, ln, handler, cert, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// The sockets the front passes DoH and naive connections to, before the
+	// front, as on a node (rayd and the naive unit come first).
+	quiet := slog.New(slog.DiscardHandler)
+	dl, err := nikoipc.ListenFD(paths.DoHSocket("doh"), os.Getuid(), quiet)
+	if err != nil {
+		t.Fatal(err)
 	}
-	go site.Serve(ctx, site.Routed(ln, routes, slog.New(slog.NewTextHandler(io.Discard, nil))), handler, cert, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	nl, err := nikoipc.ListenFD(paths.NaiveSocket("naive"), os.Getuid(), quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The front as rendered, on the test's port and with the test's UID for
+	// every backend.
+	stopFront := runFront(t, niko, filepath.Join(paths.Rendered, "front", "front.json"), port)
 
 	delete(serverCfg, "dns")
 	delete(serverCfg, "routing")
@@ -579,6 +598,9 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Links say TCP 443; the test's front is on another port.
+	onPort := func(link string) string { return strings.Replace(link, ":443?", ":"+strconv.Itoa(port)+"?", 1) }
+	link = onPort(link)
 	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "through reality") }))
 	defer page.Close()
 	fetchThroughLink(t, bin, link, "", page.URL)
@@ -612,11 +634,6 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write(answer) }))
 	defer upstream.Close()
 	token := m.Creds[dohSvc.ID][user.ID]
-	os.MkdirAll(filepath.Dir(paths.DoHSocket("doh")), 0o755)
-	dl, err := net.Listen("unix", paths.DoHSocket("doh"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	dohSrv := &http.Server{Handler: &doh.Handler{Upstreams: []string{upstream.URL},
 		Tokens: func(context.Context) (map[string]bool, error) { return map[string]bool{token: true}, nil }},
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
@@ -641,13 +658,8 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 		t.Fatalf("DoH through REALITY: %s %s %q", resp.Status, resp.Proto, body)
 	}
 
-	// naive through REALITY's port: the site passes the name on to the naive
-	// process, which takes an authenticated CONNECT with padding.
-	os.MkdirAll(filepath.Dir(paths.NaiveSocket("naive")), 0o755)
-	nl, err := net.Listen("unix", paths.NaiveSocket("naive"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// naive on the same port: the front passes the name's sockets to the
+	// naive process, which takes an authenticated CONNECT with padding.
 	var direct net.Dialer // the test's page is on loopback, which the node refuses
 	naiveSrv := &http.Server{Handler: &naive.Server{Users: &naive.Users{Path: filepath.Join(paths.Rendered, "naive", render.NaiveUsers)},
 		Answer: handler, Dial: direct.DialContext, Log: slog.New(slog.DiscardHandler)},
@@ -708,6 +720,10 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 	stopServer()
 	os.Remove(paths.APISocket("reality"))
+	os.Remove(filepath.Join(paths.Run, "reality", "reality.sock"))
+	// The front's route follows the new name: it restarts, as on a node.
+	stopFront()
+	runFront(t, niko, filepath.Join(paths.Rendered, "front", "front.json"), port)
 	delete(serverCfg, "dns")
 	delete(serverCfg, "routing")
 	serverCfg["outbounds"] = []map[string]any{{"protocol": "freedom", "settings": map[string]any{
@@ -721,11 +737,67 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	if newLink != profiles[0].Next.Link || !strings.Contains(newLink, "sni="+nextName) {
 		t.Fatalf("after the switch:\n%s\nnext was\n%s", newLink, profiles[0].Next.Link)
 	}
+	newLink = onPort(newLink)
 	fetchThroughLink(t, bin, newLink, "", page.URL)
 	if err := tryThroughLink(t, bin, link, "", page.URL, 3); err == nil {
 		t.Fatal("the previous keys still work after the switch")
 	}
 	probe(nextName)
+}
+
+// runFront starts the niko-server front from a rendered config, listening
+// on the test's TCP port, every backend expected under the test's UID.
+func runFront(t *testing.T, niko, rendered string, port int) (stop func()) {
+	t.Helper()
+	var cfg map[string]any
+	b, err := os.ReadFile(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	tcp, _ := cfg["tcp"].(map[string]any)
+	if tcp == nil {
+		t.Fatalf("no tcp section in the front config:\n%s", b)
+	}
+	tcp["listen"] = []string{"127.0.0.1:" + strconv.Itoa(port)}
+	for _, ref := range cfg["backends"].(map[string]any) {
+		ref.(map[string]any)["uid"] = os.Getuid()
+	}
+	delete(cfg, "dns")
+	path := writeJSON(t, cfg)
+	if out, err := exec.Command(niko, "check", "-c", path).CombinedOutput(); err != nil {
+		t.Fatalf("niko-server check: %v\n%s", err, out)
+	}
+	cmd := exec.Command(niko, "front", "-c", path)
+	var logs bytes.Buffer
+	cmd.Stderr = &logs
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; ; i++ {
+		if c, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port)); err == nil {
+			c.Close()
+			break
+		}
+		if i == 100 {
+			t.Fatalf("the front does not listen:\n%s", logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Let the fd links come up before the first connection.
+	time.Sleep(300 * time.Millisecond)
+	stopped := false
+	stop = func() {
+		if !stopped {
+			stopped = true
+			cmd.Process.Kill()
+			cmd.Wait()
+		}
+	}
+	t.Cleanup(stop)
+	return stop
 }
 
 // TestHysteriaWithXray: both Hysteria2 services as rendered (R3-1) on the
