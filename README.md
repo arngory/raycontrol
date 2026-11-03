@@ -150,7 +150,7 @@ raycontrol хранит пользователей и ключи, генерир
 - **Статус:** R1 готов — периметр (SPA v2 по UDP и TCP), DNS-туннели с внутренней ступенью на Xray, подписанные
   подписки, установщик. R2 — REALITY на Xray с постквантом и self-steal на своём сайте-приманке, сертификаты через
   ACME. R4 — ротация UUID и ключей/имён REALITY, Cloudflare для DNS-записей и wildcard-сертификата, удаление до снимка
-  системы, очищенные отчёты, ранний отброс пакетов до стека ядра. Data plane — niko-server v0.3.0 ([`arngory/niko-server`](https://github.com/arngory/niko-server)).
+  системы, очищенные отчёты, ранний отброс пакетов до стека ядра, Yggdrasil (прямые TLS-линки за фронтом, в `inner`). Data plane — niko-server v0.4.0 ([`arngory/niko-server`](https://github.com/arngory/niko-server)).
 - **С нуля на Debian 13:** [docs/10-quickstart-debian13.md](docs/10-quickstart-debian13.md); все команды —
   [docs/cheatsheet.md](docs/cheatsheet.md).
 - **Установка:** любой современный Linux с systemd; полная установка проверяется в CI на Debian 12/13, Ubuntu 24.04,
