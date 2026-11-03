@@ -878,6 +878,11 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 	if ceil.Down > 0 {
 		options["down_mbps"] = ceil.Down
 	}
+	// Channel probes through the tunnel (R4-16): the probe name leads to the
+	// subscription endpoint on loopback (niko-server v0.5).
+	if port := m.SubscriptionPort(); port != 0 {
+		options["probe"] = map[string]any{"name": ProbeName, "address": fmt.Sprintf("127.0.0.1:%d", port)}
+	}
 	cfg := map[string]any{
 		"schema": Schema, "role": "backend", "kind": s.Kind, "log": map[string]string{"level": "warn"},
 		"socket": p.socket(s.Name, "packet"), "front_uid": FrontUID,

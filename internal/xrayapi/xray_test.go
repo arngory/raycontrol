@@ -38,6 +38,7 @@ import (
 	"github.com/arngory/raycontrol/internal/doh"
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/nikoipc"
+	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/site"
@@ -973,6 +974,10 @@ func TestHysteriaWithXray(t *testing.T) {
 		}
 	}
 
+	// Channel probes through Hysteria2 (R4-16, niko-server v0.5): the probe
+	// name leads to the subscription endpoint on loopback.
+	probeThroughHysteria(t, ctx, st, m, bin, strings.Replace(profiles[0].Link, ":443/", ":"+strconv.Itoa(port)+"/", 1), rootFile)
+
 	// A new user: rayd rewrites users.json; the backend reads it again
 	// by itself (no restart: the file is marked Reload).
 	bob, _ := st.CreateUser(ctx, store.User{Name: "bob", Enabled: true})
@@ -1046,6 +1051,30 @@ func freeUDP(t *testing.T) int {
 // the link's password if set), trusting root, and fetches page through it.
 func tryHysteria(t *testing.T, bin, link, auth, root, page string, tries int) error {
 	t.Helper()
+	socksPort, stop := hysteriaSocks(t, bin, link, auth, root)
+	defer stop()
+	proxy, _ := url.Parse("socks5://127.0.0.1:" + strconv.Itoa(socksPort))
+	hc := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: 5 * time.Second}
+	var lastErr error
+	for i := 0; i < tries; i++ {
+		resp, err := hc.Get(page)
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if string(body) != "through reality" {
+				return fmt.Errorf("body %q", body)
+			}
+			return nil
+		}
+		lastErr = err
+		time.Sleep(200 * time.Millisecond)
+	}
+	return lastErr
+}
+
+// hysteriaSocks runs an Xray client of a Hysteria2 link behind a SOCKS port.
+func hysteriaSocks(t *testing.T, bin, link, auth, root string) (int, func()) {
+	t.Helper()
 	u, err := url.Parse(link)
 	if err != nil {
 		t.Fatal(err)
@@ -1081,23 +1110,45 @@ func tryHysteria(t *testing.T, bin, link, auth, root, page string, tries int) er
 			"streamSettings": stream,
 		}},
 	})
-	stop := runXray(t, bin, client)
+	return socksPort, runXray(t, bin, client)
+}
+
+// probeThroughHysteria runs the subscription endpoint with probes where the
+// rendered config sends the probe name, then a TCP probe through Hysteria2.
+func probeThroughHysteria(t *testing.T, ctx context.Context, st *store.Store, m render.Model, bin, link, root string) {
+	t.Helper()
+	svc, _ := st.ServiceByName(ctx, provision.SubscriptionService)
+	secrets, _ := st.ServiceSecrets(ctx, svc.ID)
+	tlsCfg, err := sub.TLSConfig(secrets[provision.SecretTLSCert], secrets[provision.SecretTLSKey])
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := provision.LoadNodeKeys(ctx, st)
+	srv := &sub.Server{Store: st, Keys: keys, Log: slog.New(slog.DiscardHandler)}
+	srv.Probe = &probe.Server{Auth: srv.Device, Log: srv.Log}
+	sctx, stop := context.WithCancel(ctx)
 	defer stop()
-	proxy, _ := url.Parse("socks5://127.0.0.1:" + strconv.Itoa(socksPort))
-	hc := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: 5 * time.Second}
-	var lastErr error
-	for i := 0; i < tries; i++ {
-		resp, err := hc.Get(page)
-		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if string(body) != "through reality" {
-				return fmt.Errorf("body %q", body)
-			}
-			return nil
+	go srv.Serve(sctx, "127.0.0.1:"+strconv.Itoa(m.SubscriptionPort()), tlsCfg)
+	dev, key, err := st.CreateDevice(ctx, m.Users[0].Name, "probe", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	socksPort, stopClient := hysteriaSocks(t, bin, link, "", root)
+	defer stopClient()
+	sc := sub.Client{Addr: net.JoinHostPort(render.ProbeName, "443"), Pin: mustPin(t, secrets[provision.SecretTLSCert]),
+		DeviceID: dev.ID, DeviceKey: key}
+	hc := sc.HTTP()
+	proxy, _ := url.Parse("socks5h://127.0.0.1:" + strconv.Itoa(socksPort))
+	hc.Transport.(*http.Transport).Proxy = http.ProxyURL(proxy)
+	c := probe.Client{HTTP: hc, Base: "https://" + sc.Addr, Authorize: sc.Authorize}
+	var down probe.Transfer
+	for range 30 {
+		if down, err = c.Down(ctx, 1<<20); err == nil {
+			break
 		}
-		lastErr = err
 		time.Sleep(200 * time.Millisecond)
 	}
-	return lastErr
+	if err != nil || down.Server.Bytes != 1<<20 {
+		t.Fatalf("probe through Hysteria2: %+v %v", down, err)
+	}
 }

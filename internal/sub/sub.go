@@ -73,9 +73,9 @@ type ProbeHint struct {
 }
 
 // ProbeTunnels are the kinds whose exits send the probe name to the
-// endpoint: Xray (inner behind the DNS tunnels and Yggdrasil, REALITY) and
-// rayd naive.
-var ProbeTunnels = []string{"dnstt", "masterdns", "yggdrasil", "reality", "naive"}
+// endpoint: Xray (inner behind the DNS tunnels and Yggdrasil, REALITY),
+// rayd naive and the Hysteria2 backends (niko-server v0.5).
+var ProbeTunnels = []string{"dnstt", "masterdns", "yggdrasil", "reality", "naive", "hy2-masq", "hy2-obfs"}
 
 // Envelope is what the endpoint returns.
 type Envelope struct {

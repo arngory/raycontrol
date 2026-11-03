@@ -3,7 +3,7 @@
 Ответ на §13 [`RAYCONTROL.md`](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/RAYCONTROL.md)
 (с правкой п. 5 из `e89b910`). Решение — R4-16, формат — [`probe-v1.md`](../spec/probe-v1.md).
 
-## 1. Сервис замера (п. 1) — сделано напрямую и через туннели Xray и naive
+## 1. Сервис замера (п. 1) — сделано напрямую и через туннели всех профилей
 
 Замер клиент делает на **эндпоинте подписки**: адрес, порт, пин и авторизация (`X-Raycontrol-Device`,
 `RC1`) — те же, что у `/sub/v1`. Признак в payload подписки — `"probe": {"v": 1, "udp": true}`.
@@ -34,7 +34,7 @@
 - **Xray** (`inner` — DNS-туннели и Yggdrasil — и REALITY) ведёт TCP и UDP. Эхо UDP через туннель шлите на порт из
   ответа сессии, не на 443: REALITY с Vision не пропускает UDP на 443.
 - **`rayd naive`** ведёт только TCP.
-- **Hysteria2** — после доработки niko-server; до неё его сервисов в `tunnel_svc` нет.
+- **Hysteria2** (niko-server v0.5) ведёт TCP и UDP; ответы на датаграммы приходят от имени.
 
 ## 2. Метрики сервера (п. 2) — частично
 

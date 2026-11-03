@@ -240,6 +240,15 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		xrays = append(xrays, s)
 	}
 
+	// Channel probes through naive and Hysteria2 (R4-16): the probe name
+	// leads to the subscription endpoint on loopback, its port only (checked
+	// in the process; systemd lets loopback through for it).
+	probeArg, probeAllow := "", ""
+	if port := m.SubscriptionPort(); port != 0 {
+		probeArg = fmt.Sprintf(" -probe 127.0.0.1:%d", port)
+		probeAllow = "IPAddressAllow=127.0.0.1"
+	}
+
 	// Hysteria2 behind udpmux (R3-4): niko-server backends on the front's
 	// datagrams; they go out to public addresses only.
 	for _, s := range hysteria {
@@ -267,6 +276,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 				"CapabilityBoundingSet=",
 				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
 				"IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7",
+				probeAllow, // the probe name's address (R4-16); the process checks the rest
 			}, creds...),
 		})
 	}
@@ -274,14 +284,6 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	// naive (R2-14): rayd naive behind the site, which passes its name on.
 	// It exits to the internet and nowhere else: not the node itself, not
 	// local networks (also checked in the process, address by address).
-	// Channel probes through naive (R4-16): the probe name leads to the
-	// subscription endpoint on loopback, its port only (checked in rayd
-	// naive; systemd lets loopback through for it).
-	probeArg, probeAllow := "", ""
-	if port := m.SubscriptionPort(); port != 0 {
-		probeArg = fmt.Sprintf(" -probe 127.0.0.1:%d", port)
-		probeAllow = "IPAddressAllow=127.0.0.1"
-	}
 	for _, s := range naives {
 		g := render.GroupName(s.Name)
 		raydGroups = append(raydGroups, g)
