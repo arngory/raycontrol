@@ -552,7 +552,21 @@ func startSubscription(ctx context.Context, st *store.Store, log *slog.Logger, p
 	addr := ":" + strconv.Itoa(port)
 	// Channel probes (R4-16) on the same endpoint, and their UDP echo on
 	// the same port number, which SPA opens with the TCP one.
-	s.Probe = &probe.Server{Auth: s.Device, Daily: int64(probeDailyMiB) << 20, Log: log}
+	s.Probe = &probe.Server{Auth: s.Device, Daily: int64(probeDailyMiB) << 20, Log: log,
+		// The session stats of the Hysteria2 backends, for link (R4-16).
+		Hysteria: func() map[string]string {
+			out := map[string]string{}
+			services, err := st.ListServices(ctx)
+			if err != nil {
+				return out
+			}
+			for _, svc := range services {
+				if svc.Enabled && render.IsHysteria(svc.Kind) {
+					out[strconv.FormatInt(svc.ID, 10)] = render.DefaultPaths.StatsSocket(svc.Name)
+				}
+			}
+			return out
+		}}
 	if err := provision.SubscriptionUDP(ctx, st); err != nil {
 		log.Warn("probe: the subscription service has no UDP port", "err", err)
 	} else if pc, err := net.ListenPacket("udp", addr); err != nil {

@@ -47,7 +47,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 ## Data plane
 
 Релиз raycontrol несёт data plane в том же архиве и под той же подписью: Xray, собранный из закреплённого коммита
-форка, и niko-server из релиза `vX.Y.Z` в [`arngory/niko-server`](https://github.com/arngory/niko-server/releases) (сейчас `v0.5.0`). niko-server
+форка, и niko-server из релиза `vX.Y.Z` в [`arngory/niko-server`](https://github.com/arngory/niko-server/releases) (сейчас `v0.6.0`). niko-server
 сверяется с SHA-256, закреплёнными в `deploy/versions.env` (`scripts/niko-server.sh`). Версии и коммиты компонентов —
 в файле `VERSIONS` архива. `rayctl install -dataplane` кладёт их в `/usr/local/libexec/raycontrol/` через журнал
 установки. Обновление версий — отдельный коммит в `deploy/versions.env` (новые хеши) и новый релиз.

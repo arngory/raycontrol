@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -8,12 +9,14 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -317,5 +320,33 @@ func TestLink(t *testing.T) {
 	}
 	if resp := get(t, c, "GET", url+PathLink, "phone", nil); resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("link twice in 5 s: %d", resp.StatusCode)
+	}
+}
+
+// A Hysteria2 backend's stats socket: the address in, its JSON out.
+func TestHysteriaStats(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stats.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		line, _ := bufio.NewReader(c).ReadString('\n')
+		fmt.Fprintf(c, `{"connections":1,"asked":%q}`+"\n", strings.TrimSpace(line))
+	}()
+	raw, err := hysteriaStats(path, netip.MustParseAddr("198.51.100.7"))
+	var got struct {
+		Connections int
+		Asked       string
+	}
+	json.Unmarshal(raw, &got)
+	if err != nil || got.Connections != 1 || got.Asked != "198.51.100.7" {
+		t.Fatalf("stats %s %v", raw, err)
 	}
 }

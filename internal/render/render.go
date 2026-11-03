@@ -886,7 +886,9 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 	cfg := map[string]any{
 		"schema": Schema, "role": "backend", "kind": s.Kind, "log": map[string]string{"level": "warn"},
 		"socket": p.socket(s.Name, "packet"), "front_uid": FrontUID,
-		"users_file": path.Join(dir, HysteriaUsers),
+		// Session stats for the channel probes' link (R4-16, niko-server v0.6).
+		"stats_socket": p.StatsSocket(s.Name),
+		"users_file":   path.Join(dir, HysteriaUsers),
 		"tls": map[string]any{
 			"certificate_file": path.Join(dir, HysteriaChain),
 			"key_file":         p.Credential(s.Name, HysteriaKey),
@@ -941,6 +943,10 @@ const (
 	SiteKey   = "key.pem"
 	SiteRoot  = "www"
 )
+
+// StatsSocket is where a Hysteria2 backend answers for the sessions of a
+// client address; the directory lets the service's group (rayd) in.
+func (p Paths) StatsSocket(service string) string { return p.socket(service, "stats") }
 
 // DoHSocket is where rayd serves a DoH service for the site to pass it on.
 func (p Paths) DoHSocket(service string) string { return p.socket(service, "doh") }

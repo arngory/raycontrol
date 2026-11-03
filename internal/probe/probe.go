@@ -109,8 +109,11 @@ type Server struct {
 	// LinkPorts are the node's ports whose connections link reports: the
 	// tunnels' TCP 443 when empty.
 	LinkPorts []uint16
-	Log       *slog.Logger
-	now       func() time.Time
+	// Hysteria lists the Hysteria2 services' stats sockets by service ID,
+	// for link; nil leaves Hysteria2 out.
+	Hysteria func() map[string]string
+	Log      *slog.Logger
+	now      func() time.Time
 
 	mu       sync.Mutex
 	day      int64

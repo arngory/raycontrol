@@ -34,4 +34,4 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 
 Статус: решения приняты (08), документы 01–04 переписаны под них. Data plane — [niko-server](https://github.com/arngory/niko-server) ([SPEC](https://github.com/arngory/niko-server/blob/main/docs/SPEC.md)), control plane — raycontrol; обе ведёт эта сессия.
 Код v0 перенесён в `legacy/`. Этапы R0 и R1 реализованы, установка проверяется в CI на Debian 12/13, Ubuntu 24.04 и
-Rocky Linux 9/10 (решение R2-1); niko-server живёт в [`arngory/niko-server`](https://github.com/arngory/niko-server) (релиз v0.5.0), raycontrol v0.2.0 выпущен.
+Rocky Linux 9/10 (решение R2-1); niko-server живёт в [`arngory/niko-server`](https://github.com/arngory/niko-server) (релиз v0.6.0), raycontrol v0.2.0 выпущен.

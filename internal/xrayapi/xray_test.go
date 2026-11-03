@@ -976,7 +976,9 @@ func TestHysteriaWithXray(t *testing.T) {
 
 	// Channel probes through Hysteria2 (R4-16, niko-server v0.5): the probe
 	// name leads to the subscription endpoint on loopback.
-	probeThroughHysteria(t, ctx, st, m, bin, strings.Replace(profiles[0].Link, ":443/", ":"+strconv.Itoa(port)+"/", 1), rootFile)
+	masqLink := profiles[slices.IndexFunc(profiles, func(p sub.Profile) bool { return p.Name == masq.Name })].Link
+	probeThroughHysteria(t, ctx, st, m, bin, strings.Replace(masqLink, ":443/", ":"+strconv.Itoa(port)+"/", 1), rootFile,
+		paths.StatsSocket(masq.Name))
 
 	// A new user: rayd rewrites users.json; the backend reads it again
 	// by itself (no restart: the file is marked Reload).
@@ -1115,7 +1117,7 @@ func hysteriaSocks(t *testing.T, bin, link, auth, root string) (int, func()) {
 
 // probeThroughHysteria runs the subscription endpoint with probes where the
 // rendered config sends the probe name, then a TCP probe through Hysteria2.
-func probeThroughHysteria(t *testing.T, ctx context.Context, st *store.Store, m render.Model, bin, link, root string) {
+func probeThroughHysteria(t *testing.T, ctx context.Context, st *store.Store, m render.Model, bin, link, root, statsSocket string) {
 	t.Helper()
 	svc, _ := st.ServiceByName(ctx, provision.SubscriptionService)
 	secrets, _ := st.ServiceSecrets(ctx, svc.ID)
@@ -1150,5 +1152,23 @@ func probeThroughHysteria(t *testing.T, ctx context.Context, st *store.Store, m 
 	}
 	if err != nil || down.Server.Bytes != 1<<20 {
 		t.Fatalf("probe through Hysteria2: %+v %v", down, err)
+	}
+	// The backend's session stats for this address (niko-server v0.6):
+	// the client above is one of its sessions.
+	for _, svc := range m.Services {
+		if svc.Kind != "hy2-masq" {
+			continue
+		}
+		c, err := net.Dial("unix", statsSocket)
+		if err != nil {
+			t.Fatalf("stats socket of %s: %v", svc.Name, err)
+		}
+		fmt.Fprintln(c, "127.0.0.1")
+		var st struct{ Connections int }
+		err = json.NewDecoder(c).Decode(&st)
+		c.Close()
+		if err != nil || st.Connections < 1 {
+			t.Fatalf("session stats of %s: %+v %v", svc.Name, st, err)
+		}
 	}
 }

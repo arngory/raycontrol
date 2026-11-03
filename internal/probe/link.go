@@ -3,6 +3,8 @@ package probe
 import (
 	"encoding/binary"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"slices"
@@ -27,6 +29,9 @@ type LinkStats struct {
 	SegsOut     uint64  `json:"segs_out"` // segments sent, all connections
 	RetransRate float64 `json:"retrans_rate"`
 	DeliveryBps Spread  `json:"delivery_bps"`
+	// Hysteria2: the sessions of the address on each Hysteria2 service, by
+	// service ID (niko-server's session stats).
+	Hysteria2 map[string]json.RawMessage `json:"hysteria2,omitempty"`
 }
 
 // Spread is the minimum, median and maximum over the connections.
@@ -83,8 +88,37 @@ func (s *Server) link(w http.ResponseWriter, r *http.Request, device string) {
 		return
 	}
 	st := aggregate(conns, addr, ports)
+	if s.Hysteria != nil {
+		for id, path := range s.Hysteria() {
+			if raw, err := hysteriaStats(path, addr); err == nil {
+				if st.Hysteria2 == nil {
+					st.Hysteria2 = map[string]json.RawMessage{}
+				}
+				st.Hysteria2[id] = raw
+			} else {
+				s.Log.Debug("probe: hysteria2 stats", "service", id, "err", err)
+			}
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(st)
+}
+
+// hysteriaStats asks a Hysteria2 backend for the sessions of addr: the
+// address on a line in, its JSON out.
+func hysteriaStats(path string, addr netip.Addr) (json.RawMessage, error) {
+	c, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.Write([]byte(addr.String() + "\n")); err != nil {
+		return nil, err
+	}
+	var raw json.RawMessage
+	err = json.NewDecoder(io.LimitReader(c, 1<<16)).Decode(&raw)
+	return raw, err
 }
 
 // aggregate sums up the connections from addr to the ports.
