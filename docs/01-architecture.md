@@ -9,7 +9,7 @@ Data plane описан в спецификации niko-server
 
 | Слой | Что | Где код |
 |---|---|---|
-| **Data plane** | niko-server (форк sing-box): фронт-мультиплексоры и бэкенды протоколов; Xray (форк) для REALITY; движки белых списков (olcRTC, OpenFlux). | `arngory/sing-box` (`cmd/niko-server`), `arngory/xray-core`, форки движков |
+| **Data plane** | niko-server (форк sing-box): фронт-мультиплексоры и бэкенды протоколов; Xray (форк) для REALITY; движки белых списков (olcRTC, OpenFlux). | `arngory/niko-server`, `arngory/xray-core`, форки движков |
 | **Control plane** | raycontrol: состояние, генерация конфигов, ротация, SPA и файрвол, подписка, API, установка, обновления, бэкапы. | этот репозиторий |
 
 Нода — самодостаточная установка на одном хосте. Центрального сервера нет; у ноды своя ключевая пара,

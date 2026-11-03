@@ -5,7 +5,7 @@
 Работа идёт в двух местах:
 
 - **raycontrol** (этот репозиторий) — control plane;
-- **niko-server** (`arngory/sing-box`, `cmd/niko-server`) — data plane, по SPEC с изменениями из 08, «Следствие 3».
+- **niko-server** ([`arngory/niko-server`](https://github.com/arngory/niko-server), ведёт серверная сессия) — data plane, по SPEC (`docs/SPEC.md` там же) с изменениями из 08, «Следствие 3».
   Клиентские доработки — в `arngory/niko`.
 
 Правила (P-17): свои форки, закреплённые версии, release notes EN + RU, релиз после каждого законченного блока.

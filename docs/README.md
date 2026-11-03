@@ -29,6 +29,6 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [handoff/niko-r3-note.md](handoff/niko-r3-note.md) | Серверная часть R2/R3: профили Hysteria2, DoH, naive, регистрация по приглашению `rcinv1:`, что проверить в CI Niko. |
 | [handoff/niko-r3-reply.md](handoff/niko-r3-reply.md) | Ответ на RAYCONTROL.md §9–§10: DoH напрямую на ноду, ссылка `rcinv1:` как URI, перенос niko-server в `arngory/niko-server`. |
 
-Статус: решения приняты (08), документы 01–04 переписаны под них. Data plane — [niko-server](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/SPEC.md), control plane — raycontrol.
+Статус: решения приняты (08), документы 01–04 переписаны под них. Data plane — [niko-server](https://github.com/arngory/niko-server) ([SPEC](https://github.com/arngory/niko-server/blob/main/docs/SPEC.md)), control plane — raycontrol; обе ведёт эта сессия.
 Код v0 перенесён в `legacy/`. Этапы R0 и R1 реализованы, установка проверяется в CI на Debian 12/13, Ubuntu 24.04 и
-Rocky Linux 9/10 (решение R2-1); niko-server-v0.1.1 выпущен, следующий шаг — релиз raycontrol v0.2.0 (RELEASE.md).
+Rocky Linux 9/10 (решение R2-1); niko-server живёт в [`arngory/niko-server`](https://github.com/arngory/niko-server) (релиз v0.1.2), raycontrol v0.2.0 выпущен.

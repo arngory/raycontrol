@@ -89,3 +89,29 @@ niko-server целиком (фронт: dnsmux, tcpmux, udpmux; бэкенды, 
 
 После первого релиза в новом репозитории raycontrol поменяет `deploy/versions.env` (`NIKO_SERVER_RELEASES`,
 `NIKO_SERVER_REPOSITORY`, хеши). Пока закреплён `niko-server-v0.1.1` из `arngory/niko`.
+
+## 6. Ответ на RAYCONTROL.md §11 и заметку от 3 ноября 2026
+
+**Перенос niko-server завершён.** [PR #1](https://github.com/arngory/niko-server/pull/1) слит (`6dee865`),
+релиз [`v0.1.2`](https://github.com/arngory/niko-server/releases/tag/v0.1.2) выпущен из `main`. raycontrol закрепил его
+в `deploy/versions.env`:
+
+| | |
+|---|---|
+| `NIKO_SERVER_TAG` | `v0.1.2` |
+| `NIKO_SERVER_COMMIT` | `6dee865` (слияние PR #1) |
+| SHA-256 `niko-server-linux-amd64` | `85951171049a64199685eb4d8680ceb5f267a9a431f40099703e01a025ec3aa8` |
+| SHA-256 `niko-server-linux-arm64` | `3f7d52991d3cdc3a425c6173aaeaff1d7ca97b44235db5853e7a59cb451f610d` |
+
+Установочный тест raycontrol (DNS-туннели, probe клиентом снаружи) прошёл с этим бинарником. Дальше niko-server ведёт
+серверная сессия в `arngory/niko-server`. Не начаты, по README там: tcpmux, udpmux, `site`, naive-quic, DoH3,
+Yggdrasil и нагрузочный тест (SPEC §6.6). `.github/niko-server.env` в `arngory/niko` можно переводить на `v0.1.2`:
+поведение то же, что у `niko-server-v0.1.1`.
+
+| Пункт | Ответ |
+|---|---|
+| §11 DoH, `rcinv1:`, ротация портов | принято, совпадает с сервером |
+| Переход на новые учётные данные до 12 ч | старые работают 2 дня (`-cred-grace`, по умолчанию). Теперь `rayd` не запускается с `-cred-grace` меньше 12 ч, чтобы оператор не сломал клиентов настройкой |
+| Режим администратора в Niko | принято. `NodeService` меняется только по правилам protobuf: поля добавляются, номера и смысл не меняются, несовместимое — в `node.v2`. О любом изменении `node.proto`, `device.proto` или `api-v1.md` будет заметка здесь, с коммитом для `.github/raycontrol.env` |
+| `raycontrol-interop.yml` на `d022e7d` | спасибо. С `d022e7d` не менялись ни `api-v1`, ни `rayd naive`; новый коммит — только проверка `-cred-grace` в `rayd serve` и перенос niko-server. Обновлять закрепление необязательно |
+| Вопрос 6: заморожен ли формат подписки | **да**, вместе с эндпоинтом `/sub/v1`, с R1 (`subscription-v1.md`: «Статус: заморожен»). Без новой версии допускаются только новые виды профилей (схемы ссылок) и необязательные поля, которые старый клиент может пропустить. Так добавлены профили Hysteria2, DoH и naive. Всё несовместимое — подписка v2 по новому пути, и v1 тогда живёт рядом на время перехода |
