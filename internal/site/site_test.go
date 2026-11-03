@@ -239,3 +239,6 @@ func TestResponder(t *testing.T) {
 		t.Error("unknown answer accepted")
 	}
 }
+
+// Routed: a routed name goes to its socket still encrypted; anything else
+// is served by the site (R2-13).

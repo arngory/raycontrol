@@ -95,3 +95,9 @@ func actorFrom(ctx context.Context) string {
 	a, _ := ctx.Value(actorKey{}).(string)
 	return a
 }
+
+// isRoot reports a caller with UID 0.
+func isRoot(ctx context.Context) bool {
+	cred, _ := ctx.Value(peerKey{}).(*unix.Ucred)
+	return cred != nil && cred.Uid == 0
+}

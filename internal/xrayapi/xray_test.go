@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -31,6 +32,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
+
+	"github.com/arngory/raycontrol/internal/doh"
+	"github.com/arngory/raycontrol/internal/naive"
+	"github.com/arngory/raycontrol/internal/nikoipc"
+	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/site"
@@ -259,6 +267,7 @@ func TestRealityWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	m.FrontTCP = false // Xray on its own TCP port (R2-7)
 	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run")}
 	if err := os.MkdirAll(filepath.Dir(paths.APISocket("reality")), 0o755); err != nil {
 		t.Fatal(err)
@@ -431,6 +440,11 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	if bin == "" {
 		t.Skip("set XRAY_BIN to an Xray built from arngory/xray-core")
 	}
+	// TCP 443 goes through the niko-server front (tcpmux, R2-15).
+	niko := os.Getenv("NIKO_SERVER_BIN")
+	if niko == "" {
+		t.Skip("set NIKO_SERVER_BIN to niko-server v0.2 or later (tcpmux)")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	dir := t.TempDir()
@@ -448,6 +462,20 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// DoH behind REALITY's port, passed on by the site (R3-2).
+	dohSvc, err := provision.CreateService(ctx, st, store.Service{Kind: "doh", Name: "doh", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dohName struct{ SNI string }
+	json.Unmarshal([]byte(dohSvc.Settings), &dohName)
+	// naive the same way (R2-14).
+	naiveSvc, err := provision.CreateService(ctx, st, store.Service{Kind: "naive", Name: "naive", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var naiveName struct{ SNI string }
+	json.Unmarshal([]byte(naiveSvc.Settings), &naiveName)
 	siteSvc, err := st.ServiceByName(ctx, "site")
 	if err != nil {
 		t.Fatal(err)
@@ -488,7 +516,7 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 	root := mk("Test Root", true, nil, &rootKey.PublicKey, nil, rootKey)
 	inter := mk("Test Intermediate", true, nil, &interKey.PublicKey, root, rootKey)
-	leaf := mk(name, false, []string{name, nextName}, &leafKey.PublicKey, inter, interKey)
+	leaf := mk(name, false, []string{name, nextName, dohName.SNI, naiveName.SNI}, &leafKey.PublicKey, inter, interKey)
 	var chainPEM bytes.Buffer
 	for _, c := range []*x509.Certificate{leaf, inter, root} {
 		pem.Encode(&chainPEM, &pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
@@ -501,13 +529,14 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 
 	user, _ := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
-	st.SetUserServices(ctx, "alice", []int64{svc.ID})
+	st.SetUserServices(ctx, "alice", []int64{svc.ID, dohSvc.ID, naiveSvc.ID})
 	m, err := render.Collect(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
 	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run")}
-	for _, d := range []string{filepath.Dir(paths.APISocket("reality")), filepath.Dir(paths.SiteSocket("site"))} {
+	for _, d := range []string{filepath.Dir(paths.APISocket("reality")), filepath.Dir(paths.SiteSocket("site")),
+		filepath.Join(paths.Run, "reality"), filepath.Dir(paths.DoHSocket("doh")), filepath.Dir(paths.NaiveSocket("naive"))} {
 		os.MkdirAll(d, 0o755)
 	}
 	files, skipped, err := render.Render(m, paths)
@@ -544,6 +573,30 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 	go site.Serve(ctx, ln, handler, cert, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
+	// The sockets the front passes DoH and naive connections to, before the
+	// front, as on a node (rayd and the naive unit come first).
+	quiet := slog.New(slog.DiscardHandler)
+	dl, err := nikoipc.ListenFD(paths.DoHSocket("doh"), os.Getuid(), quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nl, err := nikoipc.ListenFD(paths.NaiveSocket("naive"), os.Getuid(), quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Their QUIC sides (DoH3, naive-quic, R3-5): datagrams from the front.
+	dl3, err := nikoipc.ListenPacket(paths.DoH3Socket("doh"), os.Getuid(), quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nl3, err := nikoipc.ListenPacket(paths.NaiveQUICSocket("naive"), os.Getuid(), quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The front as rendered, on the test's port and with the test's UID for
+	// every backend.
+	stopFront := runFront(t, niko, filepath.Join(paths.Rendered, "front", "front.json"), port)
+
 	delete(serverCfg, "dns")
 	delete(serverCfg, "routing")
 	serverCfg["outbounds"] = []map[string]any{{"protocol": "freedom", "settings": map[string]any{
@@ -558,6 +611,9 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Links say TCP 443; the test's front is on another port.
+	onPort := func(link string) string { return strings.Replace(link, ":443?", ":"+strconv.Itoa(port)+"?", 1) }
+	link = onPort(link)
 	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "through reality") }))
 	defer page.Close()
 	fetchThroughLink(t, bin, link, "", page.URL)
@@ -585,6 +641,119 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 	probe(name)
 
+	// DoH through REALITY's port: REALITY hands the site what is not its
+	// own, the site passes the DoH name on to rayd's endpoint.
+	answer := bytes.Repeat([]byte{7}, 40)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write(answer) }))
+	defer upstream.Close()
+	token := m.Creds[dohSvc.ID][user.ID]
+	dohSrv := &http.Server{Handler: &doh.Handler{Upstreams: []string{upstream.URL},
+		Tokens: func(context.Context) (map[string]bool, error) { return map[string]bool{token: true}, nil }},
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+			Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2"}}}
+	go dohSrv.ServeTLS(dl, "", "")
+	defer dohSrv.Close()
+	dc := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
+		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return tls.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port), &tls.Config{ServerName: dohName.SNI, RootCAs: roots, NextProtos: []string{"h2"}})
+		},
+		ForceAttemptHTTP2: true,
+	}}
+	dohLink := sub.DoHLink(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == dohSvc.ID })], token)
+	u, _ := url.Parse(dohLink)
+	resp, err := dc.Get("https://" + u.Host + u.Path + "?dns=" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 20)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !bytes.Equal(body, answer) || resp.ProtoMajor != 2 {
+		t.Fatalf("DoH through REALITY: %s %s %q", resp.Status, resp.Proto, body)
+	}
+
+	// naive on the same port: the front passes the name's sockets to the
+	// naive process, which takes an authenticated CONNECT with padding.
+	var direct net.Dialer // the test's page is on loopback, which the node refuses
+	naiveSrv := &http.Server{Handler: &naive.Server{Users: &naive.Users{Path: filepath.Join(paths.Rendered, "naive", render.NaiveUsers)},
+		Answer: handler, Dial: direct.DialContext, Log: slog.New(slog.DiscardHandler)},
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+			Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2"}}}
+	go naiveSrv.ServeTLS(nl, "", "")
+	defer naiveSrv.Close()
+	naiveLink, _ := url.Parse(sub.NaiveLink(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == naiveSvc.ID })], m.Creds[naiveSvc.ID][user.ID]))
+	password, _ := naiveLink.User.Password()
+	if naiveLink.Scheme != "naive+https" || naiveLink.Hostname() != naiveName.SNI || password == "" {
+		t.Fatalf("naive link %s", naiveLink.Redacted())
+	}
+	nt := &http.Transport{ForceAttemptHTTP2: true, DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return tls.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port), &tls.Config{ServerName: naiveName.SNI, RootCAs: roots, NextProtos: []string{"h2"},
+			CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}})
+	}}
+	defer nt.CloseIdleConnections()
+	pr, pw := io.Pipe()
+	req, _ := http.NewRequest(http.MethodConnect, "https://"+naiveName.SNI, pr)
+	req.Host = page.Listener.Addr().String()
+	req.Header.Set("Padding", naive.PaddingHeader())
+	req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(naiveLink.User.String())))
+	resp, err = nt.RoundTrip(req)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("naive CONNECT through REALITY: %v %v", resp, err)
+	}
+	tunnel := naive.ClientStream(resp.Body, pw)
+	fmt.Fprintf(tunnel, "GET / HTTP/1.1\r\nHost: page\r\nConnection: close\r\n\r\n")
+	got, _ := io.ReadAll(io.LimitReader(tunnel, 4096))
+	pw.Close()
+	resp.Body.Close()
+	if !bytes.Contains(got, []byte("through reality")) {
+		t.Fatalf("naive through REALITY: %q", got)
+	}
+
+	// The same names over QUIC through the front's UDP side: DoH3 and
+	// naive-quic, as rayd serves them (serveHTTP3).
+	h3 := func(pc net.PacketConn, h http.Handler) {
+		ln, err := quic.ListenEarly(pc, http3.ConfigureTLSConfig(&tls.Config{MinVersion: tls.VersionTLS13,
+			CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, Certificates: []tls.Certificate{cert}}), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := &http3.Server{Handler: h}
+		t.Cleanup(func() { srv.Close(); ln.Close() })
+		go srv.ServeListener(ln)
+	}
+	h3(dl3, dohSrv.Handler)
+	h3(nl3, naiveSrv.Handler)
+	h3client := &http3.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}},
+		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			return quic.DialAddrEarly(ctx, "127.0.0.1:"+strconv.Itoa(port), tlsCfg, cfg)
+		}}
+	defer h3client.Close()
+	resp, err = (&http.Client{Transport: h3client, Timeout: 5 * time.Second}).Get("https://" + u.Host + u.Path + "?dns=" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 20)))
+	if err != nil {
+		t.Fatalf("DoH3: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !bytes.Equal(body, answer) || resp.ProtoMajor != 3 {
+		t.Fatalf("DoH3 through the front: %s %s %q", resp.Status, resp.Proto, body)
+	}
+	pr3, pw3 := io.Pipe()
+	req3, _ := http.NewRequest(http.MethodConnect, "https://"+naiveName.SNI, pr3)
+	req3.Host = page.Listener.Addr().String()
+	req3.Header.Set("Padding", naive.PaddingHeader())
+	req3.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(naiveLink.User.String())))
+	resp3, err := h3client.RoundTrip(req3)
+	if err != nil || resp3.StatusCode != 200 {
+		t.Fatalf("naive-quic CONNECT: %v %v", resp3, err)
+	}
+	tunnel3 := naive.ClientStream(resp3.Body, pw3)
+	fmt.Fprintf(tunnel3, "GET / HTTP/1.1\r\nHost: page\r\nConnection: close\r\n\r\n")
+	got3, _ := io.ReadAll(io.LimitReader(tunnel3, 4096))
+	pw3.Close()
+	resp3.Body.Close()
+	if !bytes.Contains(got3, []byte("through reality")) {
+		t.Fatalf("naive-quic through the front: %q", got3)
+	}
+
 	// The switch: the subscription had the next link; the node renders the
 	// next keys and name, the site follows the name.
 	profiles, err := sub.Profiles(m, m.Users[0])
@@ -610,6 +779,10 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 	stopServer()
 	os.Remove(paths.APISocket("reality"))
+	os.Remove(filepath.Join(paths.Run, "reality", "reality.sock"))
+	// The front's route follows the new name: it restarts, as on a node.
+	stopFront()
+	runFront(t, niko, filepath.Join(paths.Rendered, "front", "front.json"), port)
 	delete(serverCfg, "dns")
 	delete(serverCfg, "routing")
 	serverCfg["outbounds"] = []map[string]any{{"protocol": "freedom", "settings": map[string]any{
@@ -623,9 +796,379 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	if newLink != profiles[0].Next.Link || !strings.Contains(newLink, "sni="+nextName) {
 		t.Fatalf("after the switch:\n%s\nnext was\n%s", newLink, profiles[0].Next.Link)
 	}
+	newLink = onPort(newLink)
 	fetchThroughLink(t, bin, newLink, "", page.URL)
 	if err := tryThroughLink(t, bin, link, "", page.URL, 3); err == nil {
 		t.Fatal("the previous keys still work after the switch")
 	}
 	probe(nextName)
+}
+
+// runFront starts the niko-server front from a rendered config, listening
+// on the test's TCP port, every backend expected under the test's UID.
+func runFront(t *testing.T, niko, rendered string, port int) (stop func()) {
+	t.Helper()
+	var cfg map[string]any
+	b, err := os.ReadFile(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	tcp, _ := cfg["tcp"].(map[string]any)
+	if tcp == nil {
+		t.Fatalf("no tcp section in the front config:\n%s", b)
+	}
+	tcp["listen"] = []string{"127.0.0.1:" + strconv.Itoa(port)}
+	if udp, ok := cfg["udp"].(map[string]any); ok {
+		udp["listen"] = []string{"127.0.0.1:" + strconv.Itoa(port)}
+	}
+	for _, ref := range cfg["backends"].(map[string]any) {
+		ref.(map[string]any)["uid"] = os.Getuid()
+	}
+	delete(cfg, "dns")
+	path := writeJSON(t, cfg)
+	if out, err := exec.Command(niko, "check", "-c", path).CombinedOutput(); err != nil {
+		t.Fatalf("niko-server check: %v\n%s", err, out)
+	}
+	cmd := exec.Command(niko, "front", "-c", path)
+	var logs bytes.Buffer
+	cmd.Stderr = &logs
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; ; i++ {
+		if c, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port)); err == nil {
+			c.Close()
+			break
+		}
+		if i == 100 {
+			t.Fatalf("the front does not listen:\n%s", logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Let the fd links come up before the first connection.
+	time.Sleep(300 * time.Millisecond)
+	stopped := false
+	stop = func() {
+		if !stopped {
+			stopped = true
+			cmd.Process.Kill()
+			cmd.Wait()
+		}
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+// TestHysteriaWithXray: both Hysteria2 services as rendered (R3-4), on
+// niko-server behind its UDP front: hy2-masq by the name in the QUIC
+// Initial, hy2-obfs by salamander, both on one port. An Xray client built
+// from the subscription links gets through; a wrong password does not; a
+// rotated user list is read again without a restart. Set XRAY_BIN (the
+// client) and NIKO_SERVER_BIN (v0.3 or later).
+func TestHysteriaWithXray(t *testing.T) {
+	bin := os.Getenv("XRAY_BIN")
+	if bin == "" {
+		t.Skip("set XRAY_BIN to an Xray built from arngory/xray-core")
+	}
+	niko := os.Getenv("NIKO_SERVER_BIN")
+	if niko == "" {
+		t.Skip("set NIKO_SERVER_BIN to niko-server v0.3 or later (udpmux)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := provision.Init(ctx, st, provision.Options{Host: "127.0.0.1", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	masq, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-masq", Name: "hy2", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obfs, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-obfs", Name: "hy2o", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The site's certificate: a wildcard of the node's domain, as DNS-01 gets.
+	rootKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	rootTmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Test Root"}, IsCA: true,
+		BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	rootDER, _ := x509.CreateCertificate(rand.Reader, rootTmpl, rootTmpl, &rootKey.PublicKey, rootKey)
+	root, _ := x509.ParseCertificate(rootDER)
+	leafDER, _ := x509.CreateCertificate(rand.Reader, &x509.Certificate{SerialNumber: big.NewInt(2), DNSNames: []string{"*.example.com"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}, root, &leafKey.PublicKey, rootKey)
+	keyDER, _ := x509.MarshalPKCS8PrivateKey(leafKey)
+	site, _ := st.ServiceByName(ctx, "site")
+	st.UpdateService(ctx, site.ID, store.ServiceUpdate{Set: map[string][]byte{
+		provision.SecretTLSChain: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER}), provision.SecretTLSKey: keyDER}})
+	rootFile := filepath.Join(dir, "root.pem")
+	os.WriteFile(rootFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER}), 0o644)
+
+	st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+	st.SetUserServices(ctx, "alice", []int64{masq.ID, obfs.ID})
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run")}
+	files, _, err := render.Render(m, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The files as rayd writes them, and the copies the units' ExecStartPre
+	// make in the runtime directories.
+	copies := map[string]string{
+		filepath.Join(paths.Rendered, "hy2", render.HysteriaKey):   paths.Credential("hy2", render.HysteriaKey),
+		filepath.Join(paths.Rendered, "hy2o", render.HysteriaKey):  paths.Credential("hy2o", render.HysteriaKey),
+		filepath.Join(paths.Rendered, "hy2o", render.HysteriaObfs): paths.Credential("hy2o", render.HysteriaObfs),
+		filepath.Join(paths.Rendered, "front", "hy2o.salamander"):  paths.FrontSalamander("hy2o"),
+	}
+	for _, f := range files {
+		os.MkdirAll(filepath.Dir(f.Path), 0o755)
+		os.WriteFile(f.Path, f.Content, 0o644)
+		if to, ok := copies[f.Path]; ok {
+			os.MkdirAll(filepath.Dir(to), 0o755)
+			os.WriteFile(to, f.Content, 0o600)
+		}
+	}
+	port := freeUDP(t)
+	for _, name := range []string{"hy2", "hy2o"} {
+		runNiko(t, niko, "backend", filepath.Join(paths.Rendered, name, "backend.json"), func(cfg map[string]any) {
+			cfg["front_uid"] = os.Getuid()
+		})
+	}
+	runNiko(t, niko, "front", filepath.Join(paths.Rendered, "front", "front.json"), func(cfg map[string]any) {
+		cfg["udp"].(map[string]any)["listen"] = []string{"127.0.0.1:" + strconv.Itoa(port)}
+		for _, ref := range cfg["backends"].(map[string]any) {
+			ref.(map[string]any)["uid"] = os.Getuid()
+		}
+		delete(cfg, "tcp")
+	})
+
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "through reality") }))
+	defer page.Close()
+	profiles, err := sub.Profiles(m, m.Users[0])
+	if err != nil || len(profiles) != 2 {
+		t.Fatalf("profiles %v %v", profiles, err)
+	}
+	for _, svc := range []store.Service{masq, obfs} {
+		link := profiles[slices.IndexFunc(profiles, func(p sub.Profile) bool { return p.Name == svc.Name })].Link
+		// Both on UDP 443, as the front serves them; here the test's port.
+		if !strings.Contains(link, ":443/") {
+			t.Fatalf("%s: link not on UDP 443: %s", svc.Name, link)
+		}
+		link = strings.Replace(link, ":443/", ":"+strconv.Itoa(port)+"/", 1)
+		if err := tryHysteria(t, bin, link, "", rootFile, page.URL, 30); err != nil {
+			t.Fatalf("%s: no response through Hysteria2: %v", svc.Name, err)
+		}
+		if err := tryHysteria(t, bin, link, "wrong", rootFile, page.URL, 3); err == nil {
+			t.Fatalf("%s: a wrong password got through", svc.Name)
+		}
+	}
+
+	// Channel probes through Hysteria2 (R4-16, niko-server v0.5): the probe
+	// name leads to the subscription endpoint on loopback.
+	masqLink := profiles[slices.IndexFunc(profiles, func(p sub.Profile) bool { return p.Name == masq.Name })].Link
+	probeThroughHysteria(t, ctx, st, m, bin, strings.Replace(masqLink, ":443/", ":"+strconv.Itoa(port)+"/", 1), rootFile,
+		paths.StatsSocket(masq.Name))
+
+	// A new user: rayd rewrites users.json; the backend reads it again
+	// by itself (no restart: the file is marked Reload).
+	bob, _ := st.CreateUser(ctx, store.User{Name: "bob", Enabled: true})
+	st.SetUserServices(ctx, "bob", []int64{masq.ID})
+	if m, err = render.Collect(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	if files, _, err = render.Render(m, paths); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if f.Path == filepath.Join(paths.Rendered, "hy2", render.HysteriaUsers) {
+			if !f.Reload {
+				t.Fatal("the users file restarts the backend")
+			}
+			os.WriteFile(f.Path, f.Content, 0o644)
+		}
+	}
+	bobs, _ := sub.Profiles(m, m.Users[slices.IndexFunc(m.Users, func(u render.User) bool { return u.ID == bob.ID })])
+	link := strings.Replace(bobs[0].Link, ":443/", ":"+strconv.Itoa(port)+"/", 1)
+	if err := tryHysteria(t, bin, link, "", rootFile, page.URL, 30); err != nil {
+		t.Fatalf("a user added while the backend runs: %v", err)
+	}
+}
+
+// runNiko runs a niko-server process from a rendered config, adjusted for
+// the test; it may reach any address (loopback pages).
+func runNiko(t *testing.T, niko, role, rendered string, adjust func(map[string]any)) {
+	t.Helper()
+	var cfg map[string]any
+	b, err := os.ReadFile(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	adjust(cfg)
+	path := writeJSON(t, cfg)
+	if out, err := exec.Command(niko, "check", "-c", path).CombinedOutput(); err != nil {
+		t.Fatalf("niko-server check %s: %v\n%s", rendered, err, out)
+	}
+	cmd := exec.Command(niko, role, "-c", path)
+	cmd.Env = append(os.Environ(), "NIKO_SERVER_UNSAFE_ANY_DESTINATION=1")
+	var logs bytes.Buffer
+	cmd.Stderr = &logs
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+		if t.Failed() {
+			t.Logf("niko-server %s:\n%s", role, logs.String())
+		}
+	})
+	time.Sleep(300 * time.Millisecond)
+}
+
+func freeUDP(t *testing.T) int {
+	t.Helper()
+	c, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	return c.LocalAddr().(*net.UDPAddr).Port
+}
+
+// tryHysteria runs an Xray client from a hysteria2:// link (auth replaces
+// the link's password if set), trusting root, and fetches page through it.
+func tryHysteria(t *testing.T, bin, link, auth, root, page string, tries int) error {
+	t.Helper()
+	socksPort, stop := hysteriaSocks(t, bin, link, auth, root)
+	defer stop()
+	proxy, _ := url.Parse("socks5://127.0.0.1:" + strconv.Itoa(socksPort))
+	hc := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: 5 * time.Second}
+	var lastErr error
+	for i := 0; i < tries; i++ {
+		resp, err := hc.Get(page)
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if string(body) != "through reality" {
+				return fmt.Errorf("body %q", body)
+			}
+			return nil
+		}
+		lastErr = err
+		time.Sleep(200 * time.Millisecond)
+	}
+	return lastErr
+}
+
+// hysteriaSocks runs an Xray client of a Hysteria2 link behind a SOCKS port.
+func hysteriaSocks(t *testing.T, bin, link, auth, root string) (int, func()) {
+	t.Helper()
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	if auth == "" {
+		auth = u.User.Username()
+	}
+	port, _ := strconv.Atoi(u.Port())
+	tlsSettings := map[string]any{"serverName": q.Get("sni"), "alpn": []string{"h3"}, "curvePreferences": []string{"X25519MLKEM768"},
+		"disableSystemRoot": true, "certificates": []map[string]string{{"certificateFile": root, "usage": "verify"}}}
+	if pin := q.Get("pinSHA256"); pin != "" {
+		// hy2-obfs: a self-signed certificate, pinned.
+		tlsSettings = map[string]any{"serverName": q.Get("sni"), "alpn": []string{"h3"}, "curvePreferences": []string{"X25519MLKEM768"},
+			"pinnedPeerCertSha256": pin}
+	}
+	stream := map[string]any{
+		"network":          "hysteria",
+		"security":         "tls",
+		"tlsSettings":      tlsSettings,
+		"hysteriaSettings": map[string]any{"version": 2, "auth": auth},
+	}
+	if q.Get("obfs") == "salamander" {
+		stream["finalmask"] = map[string]any{"udp": []map[string]any{{"type": "salamander", "settings": map[string]string{"password": q.Get("obfs-password")}}}}
+	}
+	socksPort := freePort(t)
+	client := writeJSON(t, map[string]any{
+		"log":      map[string]string{"loglevel": "warning"},
+		"inbounds": []map[string]any{{"listen": "127.0.0.1", "port": socksPort, "protocol": "socks", "settings": map[string]any{"udp": false}}},
+		"outbounds": []map[string]any{{
+			"protocol":       "hysteria",
+			"settings":       map[string]any{"version": 2, "address": u.Hostname(), "port": port},
+			"streamSettings": stream,
+		}},
+	})
+	return socksPort, runXray(t, bin, client)
+}
+
+// probeThroughHysteria runs the subscription endpoint with probes where the
+// rendered config sends the probe name, then a TCP probe through Hysteria2.
+func probeThroughHysteria(t *testing.T, ctx context.Context, st *store.Store, m render.Model, bin, link, root, statsSocket string) {
+	t.Helper()
+	svc, _ := st.ServiceByName(ctx, provision.SubscriptionService)
+	secrets, _ := st.ServiceSecrets(ctx, svc.ID)
+	tlsCfg, err := sub.TLSConfig(secrets[provision.SecretTLSCert], secrets[provision.SecretTLSKey])
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := provision.LoadNodeKeys(ctx, st)
+	srv := &sub.Server{Store: st, Keys: keys, Log: slog.New(slog.DiscardHandler)}
+	srv.Probe = &probe.Server{Auth: srv.Device, Log: srv.Log}
+	sctx, stop := context.WithCancel(ctx)
+	defer stop()
+	go srv.Serve(sctx, "127.0.0.1:"+strconv.Itoa(m.SubscriptionPort()), tlsCfg)
+	dev, key, err := st.CreateDevice(ctx, m.Users[0].Name, "probe", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	socksPort, stopClient := hysteriaSocks(t, bin, link, "", root)
+	defer stopClient()
+	sc := sub.Client{Addr: net.JoinHostPort(render.ProbeName, "443"), Pin: mustPin(t, secrets[provision.SecretTLSCert]),
+		DeviceID: dev.ID, DeviceKey: key}
+	hc := sc.HTTP()
+	proxy, _ := url.Parse("socks5h://127.0.0.1:" + strconv.Itoa(socksPort))
+	hc.Transport.(*http.Transport).Proxy = http.ProxyURL(proxy)
+	c := probe.Client{HTTP: hc, Base: "https://" + sc.Addr, Authorize: sc.Authorize}
+	var down probe.Transfer
+	for range 30 {
+		if down, err = c.Down(ctx, 1<<20); err == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if err != nil || down.Server.Bytes != 1<<20 {
+		t.Fatalf("probe through Hysteria2: %+v %v", down, err)
+	}
+	// The backend's session stats for this address (niko-server v0.6):
+	// the client above is one of its sessions.
+	for _, svc := range m.Services {
+		if svc.Kind != "hy2-masq" {
+			continue
+		}
+		c, err := net.Dial("unix", statsSocket)
+		if err != nil {
+			t.Fatalf("stats socket of %s: %v", svc.Name, err)
+		}
+		fmt.Fprintln(c, "127.0.0.1")
+		var st struct{ Connections int }
+		err = json.NewDecoder(c).Decode(&st)
+		c.Close()
+		if err != nil || st.Connections < 1 {
+			t.Fatalf("session stats of %s: %+v %v", svc.Name, st, err)
+		}
+	}
 }

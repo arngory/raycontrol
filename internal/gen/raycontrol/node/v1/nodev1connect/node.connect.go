@@ -2,8 +2,9 @@
 //
 // Source: raycontrol/node/v1/node.proto
 
-// Node API of raycontrol. In R0 it is served on the local unix socket only
-// (rayctl); the remote listener behind SPA and mTLS comes in R3.
+// Node API of raycontrol: on the local unix socket for rayctl, and on the
+// remote API behind SPA and mTLS for admin devices (R3-3,
+// docs/spec/api-v1.md).
 // Compatibility follows protobuf rules; breaking changes go to node.v2.
 package nodev1connect
 
@@ -76,6 +77,9 @@ const (
 	// NodeServiceRevokeDeviceProcedure is the fully-qualified name of the NodeService's RevokeDevice
 	// RPC.
 	NodeServiceRevokeDeviceProcedure = "/raycontrol.node.v1.NodeService/RevokeDevice"
+	// NodeServiceCreateInviteProcedure is the fully-qualified name of the NodeService's CreateInvite
+	// RPC.
+	NodeServiceCreateInviteProcedure = "/raycontrol.node.v1.NodeService/CreateInvite"
 	// NodeServiceListAuditProcedure is the fully-qualified name of the NodeService's ListAudit RPC.
 	NodeServiceListAuditProcedure = "/raycontrol.node.v1.NodeService/ListAudit"
 	// NodeServiceGetAdminAccessProcedure is the fully-qualified name of the NodeService's
@@ -93,6 +97,10 @@ const (
 	NodeServiceSyncDNSProcedure = "/raycontrol.node.v1.NodeService/SyncDNS"
 	// NodeServiceRemoveDNSProcedure is the fully-qualified name of the NodeService's RemoveDNS RPC.
 	NodeServiceRemoveDNSProcedure = "/raycontrol.node.v1.NodeService/RemoveDNS"
+	// NodeServiceBackupProcedure is the fully-qualified name of the NodeService's Backup RPC.
+	NodeServiceBackupProcedure = "/raycontrol.node.v1.NodeService/Backup"
+	// NodeServiceGetMetricsProcedure is the fully-qualified name of the NodeService's GetMetrics RPC.
+	NodeServiceGetMetricsProcedure = "/raycontrol.node.v1.NodeService/GetMetrics"
 	// NodeServiceGetDeploymentProcedure is the fully-qualified name of the NodeService's GetDeployment
 	// RPC.
 	NodeServiceGetDeploymentProcedure = "/raycontrol.node.v1.NodeService/GetDeployment"
@@ -121,7 +129,11 @@ type NodeServiceClient interface {
 	// CreateDevice returns the device bundle with the device key. The key is
 	// not stored anywhere it can be read back through the API.
 	CreateDevice(context.Context, *connect.Request[v1.CreateDeviceRequest]) (*connect.Response[v1.CreateDeviceResponse], error)
+	// RevokeDevice revokes a device, or withdraws an unused invite.
 	RevokeDevice(context.Context, *connect.Request[v1.RevokeDeviceRequest]) (*connect.Response[v1.RevokeDeviceResponse], error)
+	// CreateInvite returns a one-time invite ("rcinv1:..."): the client
+	// registers the device itself through the remote API (R3-3).
+	CreateInvite(context.Context, *connect.Request[v1.CreateInviteRequest]) (*connect.Response[v1.CreateInviteResponse], error)
 	ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error)
 	// Admin access: addresses (CIDR) that reach SSH without SPA (emergency
 	// access, docs/08-decisions.md D-6).
@@ -134,6 +146,13 @@ type NodeServiceClient interface {
 	GetDNS(context.Context, *connect.Request[v1.GetDNSRequest]) (*connect.Response[v1.GetDNSResponse], error)
 	SyncDNS(context.Context, *connect.Request[v1.SyncDNSRequest]) (*connect.Response[v1.SyncDNSResponse], error)
 	RemoveDNS(context.Context, *connect.Request[v1.RemoveDNSRequest]) (*connect.Response[v1.RemoveDNSResponse], error)
+	// Backup returns a consistent copy of the node's database. Root only: it
+	// holds every key (R4-13); rayctl encrypts it with the operator's
+	// passphrase, which never reaches rayd.
+	Backup(context.Context, *connect.Request[v1.BackupRequest]) (*connect.Response[v1.BackupResponse], error)
+	// GetMetrics returns aggregate metrics in the Prometheus text format, no
+	// names of users, devices or services (R4-14).
+	GetMetrics(context.Context, *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error)
 	// GetDeployment returns what root must install for the current services:
 	// system users, unit files and other files. rayctl apply writes them.
 	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
@@ -240,6 +259,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("RevokeDevice")),
 			connect.WithClientOptions(opts...),
 		),
+		createInvite: connect.NewClient[v1.CreateInviteRequest, v1.CreateInviteResponse](
+			httpClient,
+			baseURL+NodeServiceCreateInviteProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("CreateInvite")),
+			connect.WithClientOptions(opts...),
+		),
 		listAudit: connect.NewClient[v1.ListAuditRequest, v1.ListAuditResponse](
 			httpClient,
 			baseURL+NodeServiceListAuditProcedure,
@@ -282,6 +307,18 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("RemoveDNS")),
 			connect.WithClientOptions(opts...),
 		),
+		backup: connect.NewClient[v1.BackupRequest, v1.BackupResponse](
+			httpClient,
+			baseURL+NodeServiceBackupProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("Backup")),
+			connect.WithClientOptions(opts...),
+		),
+		getMetrics: connect.NewClient[v1.GetMetricsRequest, v1.GetMetricsResponse](
+			httpClient,
+			baseURL+NodeServiceGetMetricsProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetMetrics")),
+			connect.WithClientOptions(opts...),
+		),
 		getDeployment: connect.NewClient[v1.GetDeploymentRequest, v1.GetDeploymentResponse](
 			httpClient,
 			baseURL+NodeServiceGetDeploymentProcedure,
@@ -308,6 +345,7 @@ type nodeServiceClient struct {
 	listDevices       *connect.Client[v1.ListDevicesRequest, v1.ListDevicesResponse]
 	createDevice      *connect.Client[v1.CreateDeviceRequest, v1.CreateDeviceResponse]
 	revokeDevice      *connect.Client[v1.RevokeDeviceRequest, v1.RevokeDeviceResponse]
+	createInvite      *connect.Client[v1.CreateInviteRequest, v1.CreateInviteResponse]
 	listAudit         *connect.Client[v1.ListAuditRequest, v1.ListAuditResponse]
 	getAdminAccess    *connect.Client[v1.GetAdminAccessRequest, v1.GetAdminAccessResponse]
 	setAdminAccess    *connect.Client[v1.SetAdminAccessRequest, v1.SetAdminAccessResponse]
@@ -315,6 +353,8 @@ type nodeServiceClient struct {
 	getDNS            *connect.Client[v1.GetDNSRequest, v1.GetDNSResponse]
 	syncDNS           *connect.Client[v1.SyncDNSRequest, v1.SyncDNSResponse]
 	removeDNS         *connect.Client[v1.RemoveDNSRequest, v1.RemoveDNSResponse]
+	backup            *connect.Client[v1.BackupRequest, v1.BackupResponse]
+	getMetrics        *connect.Client[v1.GetMetricsRequest, v1.GetMetricsResponse]
 	getDeployment     *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
 }
 
@@ -393,6 +433,11 @@ func (c *nodeServiceClient) RevokeDevice(ctx context.Context, req *connect.Reque
 	return c.revokeDevice.CallUnary(ctx, req)
 }
 
+// CreateInvite calls raycontrol.node.v1.NodeService.CreateInvite.
+func (c *nodeServiceClient) CreateInvite(ctx context.Context, req *connect.Request[v1.CreateInviteRequest]) (*connect.Response[v1.CreateInviteResponse], error) {
+	return c.createInvite.CallUnary(ctx, req)
+}
+
 // ListAudit calls raycontrol.node.v1.NodeService.ListAudit.
 func (c *nodeServiceClient) ListAudit(ctx context.Context, req *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error) {
 	return c.listAudit.CallUnary(ctx, req)
@@ -428,6 +473,16 @@ func (c *nodeServiceClient) RemoveDNS(ctx context.Context, req *connect.Request[
 	return c.removeDNS.CallUnary(ctx, req)
 }
 
+// Backup calls raycontrol.node.v1.NodeService.Backup.
+func (c *nodeServiceClient) Backup(ctx context.Context, req *connect.Request[v1.BackupRequest]) (*connect.Response[v1.BackupResponse], error) {
+	return c.backup.CallUnary(ctx, req)
+}
+
+// GetMetrics calls raycontrol.node.v1.NodeService.GetMetrics.
+func (c *nodeServiceClient) GetMetrics(ctx context.Context, req *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error) {
+	return c.getMetrics.CallUnary(ctx, req)
+}
+
 // GetDeployment calls raycontrol.node.v1.NodeService.GetDeployment.
 func (c *nodeServiceClient) GetDeployment(ctx context.Context, req *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {
 	return c.getDeployment.CallUnary(ctx, req)
@@ -456,7 +511,11 @@ type NodeServiceHandler interface {
 	// CreateDevice returns the device bundle with the device key. The key is
 	// not stored anywhere it can be read back through the API.
 	CreateDevice(context.Context, *connect.Request[v1.CreateDeviceRequest]) (*connect.Response[v1.CreateDeviceResponse], error)
+	// RevokeDevice revokes a device, or withdraws an unused invite.
 	RevokeDevice(context.Context, *connect.Request[v1.RevokeDeviceRequest]) (*connect.Response[v1.RevokeDeviceResponse], error)
+	// CreateInvite returns a one-time invite ("rcinv1:..."): the client
+	// registers the device itself through the remote API (R3-3).
+	CreateInvite(context.Context, *connect.Request[v1.CreateInviteRequest]) (*connect.Response[v1.CreateInviteResponse], error)
 	ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error)
 	// Admin access: addresses (CIDR) that reach SSH without SPA (emergency
 	// access, docs/08-decisions.md D-6).
@@ -469,6 +528,13 @@ type NodeServiceHandler interface {
 	GetDNS(context.Context, *connect.Request[v1.GetDNSRequest]) (*connect.Response[v1.GetDNSResponse], error)
 	SyncDNS(context.Context, *connect.Request[v1.SyncDNSRequest]) (*connect.Response[v1.SyncDNSResponse], error)
 	RemoveDNS(context.Context, *connect.Request[v1.RemoveDNSRequest]) (*connect.Response[v1.RemoveDNSResponse], error)
+	// Backup returns a consistent copy of the node's database. Root only: it
+	// holds every key (R4-13); rayctl encrypts it with the operator's
+	// passphrase, which never reaches rayd.
+	Backup(context.Context, *connect.Request[v1.BackupRequest]) (*connect.Response[v1.BackupResponse], error)
+	// GetMetrics returns aggregate metrics in the Prometheus text format, no
+	// names of users, devices or services (R4-14).
+	GetMetrics(context.Context, *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error)
 	// GetDeployment returns what root must install for the current services:
 	// system users, unit files and other files. rayctl apply writes them.
 	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
@@ -571,6 +637,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("RevokeDevice")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceCreateInviteHandler := connect.NewUnaryHandler(
+		NodeServiceCreateInviteProcedure,
+		svc.CreateInvite,
+		connect.WithSchema(nodeServiceMethods.ByName("CreateInvite")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceListAuditHandler := connect.NewUnaryHandler(
 		NodeServiceListAuditProcedure,
 		svc.ListAudit,
@@ -613,6 +685,18 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("RemoveDNS")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceBackupHandler := connect.NewUnaryHandler(
+		NodeServiceBackupProcedure,
+		svc.Backup,
+		connect.WithSchema(nodeServiceMethods.ByName("Backup")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceGetMetricsHandler := connect.NewUnaryHandler(
+		NodeServiceGetMetricsProcedure,
+		svc.GetMetrics,
+		connect.WithSchema(nodeServiceMethods.ByName("GetMetrics")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceGetDeploymentHandler := connect.NewUnaryHandler(
 		NodeServiceGetDeploymentProcedure,
 		svc.GetDeployment,
@@ -651,6 +735,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceCreateDeviceHandler.ServeHTTP(w, r)
 		case NodeServiceRevokeDeviceProcedure:
 			nodeServiceRevokeDeviceHandler.ServeHTTP(w, r)
+		case NodeServiceCreateInviteProcedure:
+			nodeServiceCreateInviteHandler.ServeHTTP(w, r)
 		case NodeServiceListAuditProcedure:
 			nodeServiceListAuditHandler.ServeHTTP(w, r)
 		case NodeServiceGetAdminAccessProcedure:
@@ -665,6 +751,10 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceSyncDNSHandler.ServeHTTP(w, r)
 		case NodeServiceRemoveDNSProcedure:
 			nodeServiceRemoveDNSHandler.ServeHTTP(w, r)
+		case NodeServiceBackupProcedure:
+			nodeServiceBackupHandler.ServeHTTP(w, r)
+		case NodeServiceGetMetricsProcedure:
+			nodeServiceGetMetricsHandler.ServeHTTP(w, r)
 		case NodeServiceGetDeploymentProcedure:
 			nodeServiceGetDeploymentHandler.ServeHTTP(w, r)
 		default:
@@ -736,6 +826,10 @@ func (UnimplementedNodeServiceHandler) RevokeDevice(context.Context, *connect.Re
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.RevokeDevice is not implemented"))
 }
 
+func (UnimplementedNodeServiceHandler) CreateInvite(context.Context, *connect.Request[v1.CreateInviteRequest]) (*connect.Response[v1.CreateInviteResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.CreateInvite is not implemented"))
+}
+
 func (UnimplementedNodeServiceHandler) ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.ListAudit is not implemented"))
 }
@@ -762,6 +856,14 @@ func (UnimplementedNodeServiceHandler) SyncDNS(context.Context, *connect.Request
 
 func (UnimplementedNodeServiceHandler) RemoveDNS(context.Context, *connect.Request[v1.RemoveDNSRequest]) (*connect.Response[v1.RemoveDNSResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.RemoveDNS is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) Backup(context.Context, *connect.Request[v1.BackupRequest]) (*connect.Response[v1.BackupResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.Backup is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetMetrics(context.Context, *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetMetrics is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {

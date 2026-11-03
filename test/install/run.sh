@@ -201,6 +201,50 @@ if out="$(client "$phone")"; then
 	fail "revoked device still reaches the node: $out"
 fi
 client -carrier tcp "$laptop" || fail "probe over the TCP carrier"
+# Channel probes (R4-16) after SPA: TCP both ways and the UDP echo, whose
+# port SPA opens with the subscription's.
+out="$(client -channel "$laptop")" || fail "channel probe: $out"
+[[ $out == *"channel udp: 50 sent, 50 back; lost up 0, down 0"* ]] || fail "channel probe over UDP: $out"
+[[ $out == *"channel link: "*" connections of this address on 443"* ]] || fail "no link stats: $out"
+
+log "$distro: remote API"
+x rayctl service add api api >/dev/null
+# REALITY with its site and naive behind it: units, users and the naive
+# socket directory are installed (no certificate on this network, so the
+# processes wait for one) and go away with the uninstall.
+x rayctl service add reality reality >/dev/null
+x rayctl service add naive naive >/dev/null
+# Yggdrasil the same way: its unit waits for the site's certificate (R4-15).
+x rayctl service add yggdrasil ygg >/dev/null
+# hy2-obfs needs no certificate of the site: it really runs, a niko-server
+# backend behind the front's UDP 443 (udpmux, R3-4).
+x rayctl service add hy2-obfs hy2o >/dev/null
+x rayctl apply >/dev/null || fail "rayctl apply for the API, REALITY, naive, Yggdrasil and Hysteria2"
+units="$(x systemctl cat niko-ygg.service)" || fail "no unit for Yggdrasil"
+[[ $units == *PrivateNetwork=yes* && $units == *SupplementaryGroups=niko-inner* ]] || fail "the Yggdrasil unit is not unix-only with inner: $units"
+[[ $(x id -nG niko-front) == *niko-ygg* ]] || fail "the front cannot reach the Yggdrasil socket"
+[[ $(x stat -c '%a %U %G' /run/niko/naive-in) == "2750 niko-naive niko-front" ]] || fail "no socket directory for naive (the front passes connections there)"
+units="$(x systemctl cat niko-naive.service)" || fail "no unit for naive"
+[[ $units == *" -probe 127.0.0.1:"* && $units == *IPAddressAllow=127.0.0.1* ]] || fail "naive does not lead the probe name to the endpoint: $units"
+wait_active niko-hy2o.service niko-front.service
+[[ $(x ss -Hulpn 'sport = :443') == *niko-server* ]] || fail "the front does not listen on UDP 443"
+[[ $(x stat -c '%a %U' /run/niko/front/hy2o.salamander) == "400 niko-front" ]] || fail "the front's salamander copy is not 0400 niko-front"
+invite="$(x rayctl device invite alice console -role admin | grep -o 'rcinv1:[A-Za-z0-9_-]*')" || fail "no invite"
+# From the client's container: register a device from the invite, then
+# administer the node through the API with it, and give it a new key.
+# shellcheck disable=SC2016 # expands in the client container
+docker run --rm --network "$net" -v "$bin:/opt/rc:ro" "$image" sh -ec '
+	/opt/rc/rayctl remote enroll -o /root/console.rcdev "$1"
+	/opt/rc/rayctl -remote /root/console.rcdev status
+	/opt/rc/rayctl -remote /root/console.rcdev user add carol
+	/opt/rc/rayctl -remote /root/console.rcdev remote rotate
+	/opt/rc/rayctl -remote /root/console.rcdev remote whoami
+	if /opt/rc/rayctl -remote /root/console.rcdev backup; then exit 1; fi
+	if /opt/rc/rayctl remote enroll -o /root/again.rcdev "$1"; then echo "an invite worked twice"; exit 1; fi
+' _ "$invite" | sed -E 's/rc(dev|inv)1:[A-Za-z0-9_-]+/rc\11:<redacted>/g' || fail "remote API from the client"
+[[ $(x rayctl user list) == *carol* ]] || fail "the user made through the remote API is missing"
+[[ $(x rayctl audit) == *"alice/console (remote)"* ]] || fail "the remote admin is not in the audit log"
+[[ $(x rayctl device list alice) == *registered* ]] || fail "the remote device is not listed as registered"
 
 log "$distro: host firewall reloads and flush ruleset"
 case $distro in
@@ -226,7 +270,7 @@ report="$(x cat /root/report.txt)"
 for section in "== versions" "== system" "== node" "== units" "checks"; do
 	[[ $report == *"$section"* ]] || fail "report lacks $section"
 done
-for leak in "$ip" example.test rcdev1: "$phone_id"; do
+for leak in "$ip" example.test rcdev1: rcinv1: "$phone_id"; do
 	if [[ $report == *"$leak"* ]]; then
 		fail "report leaks $leak"
 	fi
@@ -238,7 +282,9 @@ log "$distro: update and rollback"
 x /usr/local/bin/rayctl update -local /opt/rc -yes || fail "rayctl update"
 x test -s /var/lib/raycontrol-install/previous/rayd || fail "update kept no previous binaries"
 wait_active rayd.service rayspa.service "${dataplane[@]}"
-client -addr "$ip" "$laptop" >/dev/null || fail "probe after update"
+# Channel probes still work after the restart (UDP echo included).
+out="$(client -channel -addr "$ip" "$laptop")" || fail "probe after update: $out"
+[[ $out == *"channel udp: 50 sent, 50 back"* ]] || fail "no UDP echo after update: $out"
 x /usr/local/bin/rayctl update -rollback || fail "rayctl update -rollback"
 wait_active rayd.service rayspa.service "${dataplane[@]}"
 client -addr "$ip" "$laptop" >/dev/null || fail "probe after rollback"
@@ -251,6 +297,27 @@ fi
 wait_active rayd.service rayspa.service "${dataplane[@]}"
 client -addr "$ip" "$laptop" >/dev/null || fail "probe after the automatic rollback"
 x rm -rf /root/broken
+
+log "$distro: backup, restore and metrics"
+x sh -c 'umask 077 && echo "a test passphrase" > /root/pass'
+x /usr/local/bin/rayctl backup -o /root/node.rcbak -passphrase-file /root/pass || fail "rayctl backup"
+[[ $(x stat -c %a /root/node.rcbak) == 600 ]] || fail "the backup is not 0600"
+if x grep -qa -e SQLite -e alice /root/node.rcbak; then
+	fail "the backup is readable without the passphrase"
+fi
+x rayctl user add bob >/dev/null
+x /usr/local/bin/rayctl restore -i /root/node.rcbak -passphrase-file /root/pass -yes || fail "rayctl restore"
+users="$(x rayctl user list)"
+[[ $users == *alice* && $users != *bob* ]] || fail "restore did not bring back the state of the backup: $users"
+wait_active rayd.service rayspa.service "${dataplane[@]}"
+client -addr "$ip" "$laptop" >/dev/null || fail "probe after restore"
+# Three users: alice, carol from the remote API, the operator's own.
+metrics="$(x /usr/local/bin/rayctl metrics)" || fail "rayctl metrics"
+for m in 'raycontrol_users{state="active"} 3' 'raycontrol_services{kind="dnstt",enabled="true"} 1' \
+	'raycontrol_early_drops_packets_total{reason="ipv4-fragment"}'; do
+	[[ $metrics == *"$m"* ]] || fail "metrics lack $m: $metrics"
+done
+x rm -f /root/node.rcbak /root/pass
 
 log "$distro: uninstall"
 x /usr/local/bin/rayctl uninstall -yes || fail "rayctl uninstall"

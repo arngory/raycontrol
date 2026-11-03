@@ -5,14 +5,20 @@ Control plane for a self-contained proxy node. The data plane is
 (a sing-box fork); raycontrol keeps users and keys, renders configs, runs the
 SPA-gated firewall, rotates keys and serves the subscription and API.
 
-Status: **R1** done — perimeter (SPA v2 over UDP and TCP), DNS tunnels with
+Status: **R1–R3** done, **R4** all but `export`. **R1** — perimeter (SPA v2 over UDP and TCP), DNS tunnels with
 the inner stage on Xray, signed subscriptions, installer. **R2** — VLESS +
 REALITY + Vision on Xray (post-quantum key exchange and signature) with
-self-steal on the node's own decoy site, certificates through ACME. **R4** —
+self-steal on the node's own decoy site, certificates through ACME. **R3** —
+Hysteria2 twice (masquerade and salamander, both on UDP 443 behind the
+niko-server front, udpmux), DNS over HTTPS and NaiveProxy (h2); REALITY, DoH and
+naive share TCP 443 behind the same front (tcpmux); the remote API behind SPA
+with mTLS and one-time invites. **R4** —
 rotation of user credentials and REALITY keys and names, Cloudflare for DNS
 records and wildcard certificates, uninstall back to the host's snapshot,
-redacted reports, a kernel-side early drop. Data plane: niko-server-v0.1.1
-(DNS front, dnstt and MasterDnsVPN backends); see
+redacted reports, a kernel-side early drop, encrypted backups, local metrics,
+Yggdrasil (direct TLS links behind the front, into the inner stage), channel probes
+for clients and Brutal ceilings for Hysteria2. Data plane: niko-server v0.6.0
+(the front on UDP 53, TCP 443 and UDP 443; DNS tunnel, Hysteria2 and Yggdrasil backends); see
 [docs/04-roadmap.md](docs/04-roadmap.md).
 
 From a bare Debian 13 server to a bundle for the client, step by step:
@@ -79,6 +85,12 @@ rayctl dns                                            # DNS provider, records th
 rayctl update                                         # newest verified release in place, rolls back on failure
 rayctl admin 198.51.100.7                             # addresses that reach SSH without SPA
 rayctl report -o report.txt                           # redacted report for an issue
+rayctl backup -o node.rcbak                           # every key of the node under a passphrase
+rayctl restore -i node.rcbak [-host NEW_IP]           # back here, or onto a new host after install
+rayctl metrics                                        # counts and times for Prometheus, no names
+rayctl device invite alice phone                      # one-time rcinv1: invite, the client registers itself
+rayctl remote enroll -o laptop.rcdev rcinv1:...       # elsewhere: an admin device from an invite
+rayctl -remote laptop.rcdev status                    # any admin command through the remote API
 rayctl uninstall                                      # take everything back
 ```
 
@@ -136,10 +148,13 @@ Control plane самодостаточной прокси-ноды. Data plane �
 raycontrol хранит пользователей и ключи, генерирует конфиги, ведёт файрвол со SPA,
 ротирует ключи, отдаёт подписку и API.
 
-- **Статус:** R1 готов — периметр (SPA v2 по UDP и TCP), DNS-туннели с внутренней ступенью на Xray, подписанные
-  подписки, установщик. R2 — REALITY на Xray с постквантом и self-steal на своём сайте-приманке, сертификаты через
-  ACME. R4 — ротация UUID и ключей/имён REALITY, Cloudflare для DNS-записей и wildcard-сертификата, удаление до снимка
-  системы, очищенные отчёты, ранний отброс пакетов до стека ядра. Data plane — niko-server-v0.1.1.
+- **Статус:** R1–R3 готовы, в R4 осталось `export`. R1 — периметр (SPA v2 по UDP и TCP), DNS-туннели с внутренней
+  ступенью на Xray, подписанные подписки, установщик. R2 — REALITY на Xray с постквантом и self-steal на своём
+  сайте-приманке, сертификаты через ACME. R3 — Hysteria2 дважды на UDP 443 за фронтом, DoH и naive (h2 и QUIC) на
+  общем 443, удалённый API с mTLS и приглашениями. R4 — ротация UUID и ключей/имён REALITY, Cloudflare для DNS-записей
+  и wildcard-сертификата, удаление до снимка системы, очищенные отчёты, ранний отброс пакетов до стека ядра,
+  резервные копии, метрики, Yggdrasil (прямые TLS-линки за фронтом, в `inner`), замер канала для клиентов и потолки
+  Brutal. Data plane — niko-server v0.6.0 ([`arngory/niko-server`](https://github.com/arngory/niko-server)).
 - **С нуля на Debian 13:** [docs/10-quickstart-debian13.md](docs/10-quickstart-debian13.md); все команды —
   [docs/cheatsheet.md](docs/cheatsheet.md).
 - **Установка:** любой современный Linux с systemd; полная установка проверяется в CI на Debian 12/13, Ubuntu 24.04,
@@ -148,8 +163,9 @@ raycontrol хранит пользователей и ключи, генерир
   настраиваются сами. На RHEL-семействе `sudo` не видит `/usr/local/bin` — `sudo -i` или полный путь.
   Восстановление с консоли: `rayspa teardown`. Проверка ноды снаружи, как клиент: `rayctl probe rcdev1:...`.
 - **Администрирование:** всё, что умеет API для клиента, на ноде умеет `rayctl` (пользователи, устройства, сервисы,
-  `apply`, адреса администратора, `report` — очищенный отчёт для issue, `uninstall` — полный откат установки по журналу,
-  проверенный сравнением со снимком системы). Нода ничего не отправляет наружу сама.
+  `apply`, адреса администратора, `report` — очищенный отчёт для issue, `backup`/`restore` — копия ноды под парольной
+  фразой, `metrics` — счётчики без имён, `uninstall` — полный откат установки по журналу, проверенный сравнением со
+  снимком системы). Нода ничего не отправляет наружу сама.
 - **Сборка:** Go 1.26, `go build ./cmd/...`, `go test ./...`; API генерируется `scripts/gen.sh`.
 - **Документы:** [docs/](docs/README.md); формат SPA v2 заморожен в [docs/spec/spa-v2.md](docs/spec/spa-v2.md).
 - **v0:** bash-установщик перенесён в [legacy/](legacy/); для новых установок не использовать.

@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/spa"
@@ -130,6 +131,8 @@ func TestEndpoint(t *testing.T) {
 	addr := ln.Addr().String()
 	ln.Close()
 	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	// Channel probes on the same endpoint, with the device's auth (R4-16).
+	srv.Probe = &probe.Server{Auth: srv.Device, Log: quiet()}
 	go srv.Serve(ctx, addr, f.tlsCfg)
 	time.Sleep(200 * time.Millisecond)
 
@@ -184,8 +187,26 @@ func TestEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.V != 1 || p.Seq != 1 || p.Expires-p.Issued != int64(sub.Lifetime/time.Second) || len(p.Profiles) != 1 {
+	if p.V != 1 || p.Seq != 1 || p.Expires-p.Issued != int64(sub.Lifetime/time.Second) || len(p.Profiles) != 1 ||
+		p.Probe == nil || p.Probe.V != 1 || p.Probe.UDP || p.Probe.Tunnel != probe.Name ||
+		len(p.Probe.TunnelSvc) != 1 || p.Probe.TunnelSvc[0] != p.Profiles[0].Svc {
 		t.Fatalf("payload %+v", p)
+	}
+	for _, auth := range []bool{false, true} {
+		req, _ := http.NewRequest("GET", "https://"+addr+probe.PathDown+"?bytes=1000", nil)
+		if auth {
+			req.Header.Set(sub.DeviceHeader, f.device.ID)
+			req.Header.Set("Authorization", sub.AuthToken(f.key, time.Now().Unix()/60))
+		}
+		r, err := pq.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, _ := io.Copy(io.Discard, r.Body)
+		r.Body.Close()
+		if want := map[bool]int{false: 404, true: 200}[auth]; r.StatusCode != want || (auth && n != 1000) {
+			t.Fatalf("probe, auth %v: %d, %d bytes", auth, r.StatusCode, n)
+		}
 	}
 	link, err := url.Parse(p.Profiles[0].Link)
 	if err != nil {

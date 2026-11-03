@@ -516,6 +516,7 @@ type Device struct {
 	Role      string // user | admin
 	CreatedAt time.Time
 	RevokedAt *time.Time
+	CertPin   string // TLS client key of a device registered through the API
 }
 
 // CreateDevice enrolls a device for a user and returns its fresh SPA key.
@@ -546,7 +547,7 @@ func (s *Store) CreateDevice(ctx context.Context, userName, name, role string) (
 
 // ListDevices returns devices, optionally of one user.
 func (s *Store) ListDevices(ctx context.Context, userName string) ([]Device, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT d.id, u.name, d.name, d.role, d.created_at, d.revoked_at
+	rows, err := s.db.QueryContext(ctx, `SELECT d.id, u.name, d.name, d.role, d.created_at, d.revoked_at, coalesce(d.cert_pin, '')
 		FROM devices d JOIN users u ON u.id = d.user_id
 		WHERE ? = '' OR u.name = ? ORDER BY u.name, d.name`, userName, userName)
 	if err != nil {
@@ -558,7 +559,7 @@ func (s *Store) ListDevices(ctx context.Context, userName string) ([]Device, err
 		var d Device
 		var created int64
 		var revoked sql.NullInt64
-		if err := rows.Scan(&d.ID, &d.UserName, &d.Name, &d.Role, &created, &revoked); err != nil {
+		if err := rows.Scan(&d.ID, &d.UserName, &d.Name, &d.Role, &created, &revoked, &d.CertPin); err != nil {
 			return nil, err
 		}
 		d.CreatedAt, d.RevokedAt = time.Unix(created, 0), timePtr(revoked)
@@ -596,17 +597,28 @@ func (s *Store) RevokeDevice(ctx context.Context, id string) error {
 
 // SPADevices returns the devices that may currently pass SPA: not revoked,
 // owned by an enabled and unexpired user, with that user's enabled services
-// plus the subscription service, which every device may reach.
+// plus the subscription service, which every device may reach, and the API
+// for admin devices registered through it (they have a client certificate).
+// Active invites pass too, to the API only (R3-3).
 func (s *Store) SPADevices(ctx context.Context) ([]spa.Device, error) {
+	now := s.now().Unix()
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT d.id, d.spa_key, sv.id
 		FROM devices d
 		JOIN users u ON u.id = d.user_id
 		JOIN services sv ON sv.enabled = 1 AND (sv.kind = 'subscription'
+			OR (sv.kind = 'api' AND d.role = 'admin' AND d.cert_pin IS NOT NULL)
 			OR sv.id IN (SELECT service_id FROM user_services WHERE user_id = u.id))
 		WHERE d.revoked_at IS NULL AND u.enabled = 1
 		  AND (u.expires_at IS NULL OR u.expires_at > ?)
-		ORDER BY d.id, sv.id`, s.now().Unix())
+		UNION ALL
+		SELECT i.id, i.spa_key, sv.id
+		FROM invites i
+		JOIN users u ON u.id = i.user_id
+		JOIN services sv ON sv.enabled = 1 AND sv.kind = 'api'
+		WHERE i.used_at IS NULL AND i.expires_at > ? AND u.enabled = 1
+		  AND (u.expires_at IS NULL OR u.expires_at > ?)
+		ORDER BY 1, 3`, now, now, now)
 	if err != nil {
 		return nil, err
 	}

@@ -203,7 +203,52 @@ rayctl probe @phone.bundle
 
 С `-redact` вывод можно показать кому угодно: адреса и имена в нём заменены.
 
-## 9. Дальше
+## 9. Резервная копия
+
+В базе ноды все её ключи, поэтому копия шифруется парольной фразой (не короче 12 символов, спрашивается дважды) и
+пишется с правами 0600. Держите её вне ноды, а фразу — отдельно от файла.
+
+```bash
+rayctl backup -o /root/node-$(date +%F).rcbak
+scp root@NODE:/root/node-*.rcbak .      # с вашей машины; на ноде потом rm
+```
+
+Вернуть на той же ноде — `rayctl restore -i FILE`. Перенести на новый сервер: там шаги 1–4 с новым адресом, затем
+
+```bash
+rayctl restore -i node.rcbak -host NEW_IP
+```
+
+Записи в Cloudflare переедут на новый адрес сами; устройствам нужны новые пакеты (`rayctl device add`): в старых прежний адрес. Пользователи,
+их учётные данные и ключи сервисов остаются прежними. Старый сервер после переезда снимайте с `-keep-dns`, иначе он
+удалит записи, которые уже указывают на новый, и до этого не запускайте обе ноды сразу: каждая раз в час правит записи
+под свой адрес.
+
+```bash
+rayctl uninstall -keep-dns     # на старом сервере
+```
+
+## 10. Администрирование со своей машины
+
+На ноде включите удалённый API и сделайте приглашение для своего устройства:
+
+```bash
+rayctl service add api api && rayctl apply
+rayctl device invite <ваш-пользователь> laptop -role admin
+```
+
+На своей машине (тот же `rayctl`, Linux или macOS) — регистрация по приглашению и дальше любые команды через API:
+
+```bash
+rayctl remote enroll -o laptop.rcdev 'rcinv1:…'
+rayctl -remote laptop.rcdev status
+rayctl -remote laptop.rcdev device invite alice phone      # приглашение для телефона alice — уже без SSH
+```
+
+Файл `laptop.rcdev` — ключ устройства: права 0600, храните как SSH-ключ. Приглашение одноразовое и живёт сутки
+(`-ttl`). `apply`, `update`, `backup`, `uninstall` по-прежнему только на ноде.
+
+## 11. Дальше
 
 - `rayctl update -check` — есть ли новый релиз; `rayctl update` — поставить его: подпись проверяется, при сбое прежняя
   версия возвращается сама; `rayctl update -rollback` — вернуть её вручную.
@@ -211,4 +256,6 @@ rayctl probe @phone.bundle
   ([09-observability.md](09-observability.md)).
 - `rayctl service rotate reality` — новые ключи и имя REALITY раньше срока; с `-now` — сразу.
 - `rayctl service set site answer=silent` — сайт вместо 404 молчит до таймаута; `rayctl apply` после.
+- `rayctl metrics -o FILE` — счётчики для node_exporter (textfile collector) по своему таймеру: только числа.
 - `rayctl uninstall` — убрать всё, включая записи raycontrol в Cloudflare; система вернётся к снимку до установки.
+  Сначала `rayctl backup`, если ноду может понадобиться вернуть.

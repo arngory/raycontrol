@@ -25,7 +25,7 @@ func plan(t *testing.T) (deploy.Plan, render.Model) {
 	}
 	t.Cleanup(func() { st.Close() })
 	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
-	for _, s := range [][3]string{{"dnstt", "dns", ""}, {"reality", "reality", `{"target":"www.example.org:443"}`}, {"naive", "naive", ""}} {
+	for _, s := range [][3]string{{"dnstt", "dns", ""}, {"reality", "reality", `{"target":"www.example.org:443"}`}, {"olcrtc", "olc", ""}} {
 		if _, err := provision.CreateService(ctx, st, store.Service{Kind: s[0], Name: s[1], Enabled: true, Settings: s[2]}); err != nil {
 			t.Fatal(err)
 		}
@@ -59,7 +59,8 @@ func TestBuild(t *testing.T) {
 	if users["niko-front"].UID != 9100 || users["rayd"].UID != 9190 || users["rayspa"].UID != 9191 {
 		t.Fatalf("fixed uids: %+v", users)
 	}
-	if !slices.Equal(users["niko-front"].ExtraGroups, []string{"niko-dns"}) ||
+	// The front reaches REALITY's socket (tcpmux, R2-15) and the DNS backends.
+	if !slices.Equal(users["niko-front"].ExtraGroups, []string{"niko-reality", "niko-dns"}) ||
 		!slices.Equal(users["niko-dns"].ExtraGroups, []string{"niko-inner"}) ||
 		!slices.Equal(users["rayd"].ExtraGroups, []string{"niko-dns", "niko-front", "niko-inner", "niko-reality"}) {
 		t.Fatalf("groups: %+v", users)
@@ -67,16 +68,19 @@ func TestBuild(t *testing.T) {
 	if !slices.Equal(p.Units, []string{"rayd.service", "rayspa.service", "niko-inner.service", "niko-reality.service", "niko-dns.service", "niko-front.service"}) {
 		t.Fatalf("units %v", p.Units)
 	}
-	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "naive") {
+	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "olc") {
 		t.Fatalf("warnings %v", p.Warnings)
 	}
-	// REALITY binds TCP 443 itself until the front has tcpmux (R2-7).
+	// REALITY behind the front: a unix socket, no capability (R2-15).
 	reality := file(p, "/etc/systemd/system/niko-reality.service")
-	for _, want := range []string{"User=niko-reality", "AmbientCapabilities=CAP_NET_BIND_SERVICE\n", "CapabilityBoundingSet=CAP_NET_BIND_SERVICE\n",
+	for _, want := range []string{"User=niko-reality", "CapabilityBoundingSet=\n",
 		"ExecStart=/usr/local/libexec/raycontrol/xray run -c /var/lib/raycontrol/rendered/reality/xray.json", "ReadWritePaths=/run/niko/reality-api"} {
 		if !strings.Contains(reality, want) {
 			t.Errorf("reality unit lacks %q", want)
 		}
+	}
+	if strings.Contains(reality, "CAP_NET_BIND_SERVICE") {
+		t.Error("REALITY binds a port itself behind the front")
 	}
 	if !strings.Contains(file(p, "/etc/tmpfiles.d/raycontrol.conf"), "d /run/niko/reality-api 2750 niko-reality rayd") {
 		t.Error("REALITY API directory not restricted to rayd")
@@ -93,7 +97,8 @@ func TestBuild(t *testing.T) {
 		}
 	}
 	front := file(p, "/etc/systemd/system/niko-front.service")
-	if !strings.Contains(front, "AmbientCapabilities=CAP_NET_BIND_SERVICE") || !strings.Contains(front, "SupplementaryGroups=niko-dns") {
+	if !strings.Contains(front, "AmbientCapabilities=CAP_NET_BIND_SERVICE") || !strings.Contains(front, "SupplementaryGroups=niko-reality niko-dns") ||
+		!strings.Contains(front, "After=network-online.target niko-dns.service niko-reality.service") {
 		t.Errorf("front unit:\n%s", front)
 	}
 	if !strings.Contains(file(p, "/etc/systemd/system/rayspa.service"), "AmbientCapabilities=CAP_NET_ADMIN") {
@@ -148,7 +153,7 @@ func TestHostApply(t *testing.T) {
 	all := strings.Join(cmds, "\n")
 	for _, want := range []string{
 		"useradd --system --uid 9100 --gid niko-front", "groupadd --system --gid 9100 niko-front",
-		"usermod --append --groups niko-dns niko-front",
+		"usermod --append --groups niko-reality,niko-dns niko-front",
 		"systemctl enable --now niko-inner.service", "systemctl disable --now niko-old.service",
 		"systemd-tmpfiles --create", "systemctl try-restart systemd-resolved.service",
 	} {
@@ -563,5 +568,96 @@ func TestUninstallUFW(t *testing.T) {
 	}
 	if all = strings.Join(cmds, "\n"); !strings.Contains(all, "ufw reload") {
 		t.Fatalf("no ufw reload:\n%s", all)
+	}
+}
+
+// Hysteria2 on Xray (R3-1): the key copied in by root, the bind capability
+// only for UDP 443.
+func TestBuildHysteria(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	for _, k := range []string{"hy2-masq", "hy2-obfs"} {
+		if _, err := provision.CreateService(ctx, st, store.Service{Kind: k, Name: k, Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _, err := render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	masq, obfs := file(p, "/etc/systemd/system/niko-hy2-masq.service"), file(p, "/etc/systemd/system/niko-hy2-obfs.service")
+	// niko-server backends behind the UDP front (R3-4): no capability, the
+	// key (and salamander) copied in by root, out to public addresses only.
+	for name, u := range map[string]string{"masq": masq, "obfs": obfs} {
+		for _, want := range []string{"ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c /var/lib/raycontrol/rendered/hy2-",
+			"ExecStartPre=+install -m 0400 -o niko-hy2-", "CapabilityBoundingSet=\n", "IPAddressDeny=localhost"} {
+			if !strings.Contains(u, want) {
+				t.Errorf("%s unit lacks %q:\n%s", name, want, u)
+			}
+		}
+		if strings.Contains(u, "CAP_NET_BIND_SERVICE") {
+			t.Errorf("%s binds a port itself", name)
+		}
+	}
+	if !strings.Contains(obfs, "/run/niko/hy2-obfs/salamander") {
+		t.Error("hy2-obfs gets no salamander password")
+	}
+	front := file(p, "/etc/systemd/system/niko-front.service")
+	for _, want := range []string{"SupplementaryGroups=niko-hy2-masq niko-hy2-obfs",
+		"ExecStartPre=+install -m 0400 -o niko-front -g niko-front /var/lib/raycontrol/rendered/front/hy2-obfs.salamander /run/niko/front/hy2-obfs.salamander",
+		"RuntimeDirectory=niko/front\n", "AmbientCapabilities=CAP_NET_BIND_SERVICE"} {
+		if !strings.Contains(front, want) {
+			t.Errorf("front unit lacks %q:\n%s", want, front)
+		}
+	}
+}
+
+func TestBuildNaive(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	for _, k := range []string{"reality", "naive"} {
+		if _, err := provision.CreateService(ctx, st, store.Service{Kind: k, Name: k, Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _, err := render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	u := file(p, "/etc/systemd/system/niko-naive.service")
+	for _, want := range []string{
+		"ExecStart=/usr/local/bin/rayd naive -answer 404 -users /var/lib/raycontrol/rendered/naive/users.json",
+		"-socket /run/niko/naive-in/naive.sock", "ExecStartPre=+install -m 0400 -o niko-naive",
+		"IPAddressDeny=localhost link-local multicast 10.0.0.0/8", "CapabilityBoundingSet=\n",
+	} {
+		if !strings.Contains(u, want) {
+			t.Errorf("naive unit lacks %q:\n%s", want, u)
+		}
+	}
+	if !strings.Contains(file(p, "/etc/tmpfiles.d/raycontrol.conf"), "d /run/niko/naive-in 2750 niko-naive niko-front -") {
+		t.Errorf("no socket directory for the site:\n%s", file(p, "/etc/tmpfiles.d/raycontrol.conf"))
+	}
+	if len(p.Warnings) != 0 {
+		t.Errorf("warnings %v", p.Warnings)
 	}
 }

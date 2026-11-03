@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+// What a client device calls on the remote API of a node (R3-3,
+// docs/spec/api-v1.md). Every call runs over TLS 1.3 with X25519MLKEM768,
+// the node's certificate pinned, and a client certificate: the device is
+// known by its key (base64url SHA-256 of the SubjectPublicKeyInfo).
+// Compatibility follows protobuf rules; breaking changes go to device.v2.
+package raycontrol.device.v1;
+
+option go_package = "github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1;devicev1";
+
+service DeviceService {
+  // Register turns an invite into a device known by the client certificate
+  // of this connection, once. Any failure is NOT_FOUND without details.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  // GetSelf describes the calling device.
+  rpc GetSelf(GetSelfRequest) returns (GetSelfResponse);
+  // RotateCertificate moves the calling device to a new client key.
+  rpc RotateCertificate(RotateCertificateRequest) returns (RotateCertificateResponse);
+}
+
+message RegisterRequest {
+  string invite_id = 1;
+  int64 minute = 2; // floor(unix time / 60) on the client; ±2 accepted
+  // HMAC-SHA256(invite key, "raycontrol-register-v1" || BE64(minute) ||
+  // the pin of this connection's client certificate, as ASCII).
+  bytes mac = 3;
+}
+message RegisterResponse {
+  string bundle = 1; // "rcdev1:..." of the new device (docs/spec/spa-v2.md §8)
+  string device_id = 2;
+  string role = 3; // user | admin
+}
+
+message GetSelfRequest {}
+message GetSelfResponse {
+  string device_id = 1;
+  string user = 2;
+  string name = 3;
+  string role = 4;
+}
+
+message RotateCertificateRequest {
+  bytes certificate = 1; // DER of the new client certificate (ECDSA P-256 or Ed25519 key)
+  // By the new key: ECDSA (ASN.1) over SHA-256 of the message, or Ed25519
+  // over the message, the message being "raycontrol-rotate-v1" || old pin ||
+  // new pin (ASCII).
+  bytes signature = 2;
+}
+message RotateCertificateResponse {}

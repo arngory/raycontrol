@@ -119,3 +119,62 @@ func TestFixMeta(t *testing.T) {
 		t.Fatalf("missing group: %v %v", fixed, err)
 	}
 }
+
+// naive reads its users file again by itself: a new user restarts nothing.
+func TestApplyReload(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	for _, k := range []string{"reality", "naive"} {
+		if _, err := provision.CreateService(ctx, st, store.Service{Kind: k, Name: k, Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	site, err := st.ServiceByName(ctx, "site")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, cert, err := provision.SelfSigned("site.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetServiceSecret(ctx, site.ID, provision.SecretTLSKey, key)
+	st.SetServiceSecret(ctx, site.ID, provision.SecretTLSChain, cert) // only its presence matters here
+	naive, _ := st.ServiceByName(ctx, "naive")
+
+	var restarted []string
+	a := &Applier{
+		Store: st, Paths: render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: "/run/niko"},
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Restart: func(_ context.Context, verb, unit string) error {
+			restarted = append(restarted, verb+" "+unit)
+			return nil
+		},
+		Inner: func(string) InnerAPI { return &fakeInner{} },
+	}
+	if err := a.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(restarted, "restart niko-naive.service") {
+		t.Fatalf("first apply restarted %v", restarted)
+	}
+	restarted = nil
+	users := filepath.Join(dir, "rendered", "naive", render.NaiveUsers)
+	before, _ := os.ReadFile(users)
+	if _, err := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	st.SetUserServices(ctx, "alice", []int64{naive.ID})
+	if err := a.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(users)
+	if string(before) == string(after) || slices.Contains(restarted, "try-restart niko-naive.service") {
+		t.Fatalf("users %s -> %s, restarted %v", before, after, restarted)
+	}
+}

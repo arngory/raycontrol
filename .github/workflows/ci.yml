@@ -44,8 +44,8 @@ jobs:
       - run: sudo RAYCONTROL_NETNS_TEST=1 unshare -n ./perimeter.test -test.run TestNetns -test.v
 
   xray:
-    # The rendered inner stage on a real Xray from the pinned fork: config
-    # check, users through the API, traffic through VLESS with ML-KEM-768.
+    # The rendered inner stage, REALITY and Hysteria2 on a real Xray from the
+    # pinned fork, REALITY, DoH and naive behind the pinned niko-server front.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -64,7 +64,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: XRAY_BIN="$RUNNER_TEMP/xray" go test -count=1 -run 'WithXray' -v ./internal/xrayapi
+      # The pinned niko-server release: REALITY, DoH and naive through its
+      # front on TCP 443 (tcpmux, R2-15).
+      - run: scripts/niko-server.sh amd64 "$RUNNER_TEMP/niko-server"
+      - run: XRAY_BIN="$RUNNER_TEMP/xray" NIKO_SERVER_BIN="$RUNNER_TEMP/niko-server" go test -count=1 -run 'WithXray|WithNikoServer|ThroughXray' -v ./internal/xrayapi
       - uses: actions/upload-artifact@v4
         with:
           name: xray

@@ -33,8 +33,9 @@ type Client struct {
 // (clock more than two minutes off) or no SPA grant on a shared address.
 var ErrRefused = errors.New("subscription refused (404)")
 
-// Fetch returns the verified payload.
-func (c Client) Fetch(ctx context.Context, now time.Time) (Payload, error) {
+// HTTP is a client for the endpoint: TLS 1.3 with X25519MLKEM768 only and
+// the certificate pinned.
+func (c Client) HTTP() *http.Client {
 	pin := func(raw [][]byte, _ [][]*x509.Certificate) error {
 		if len(raw) == 0 {
 			return errors.New("no certificate")
@@ -50,7 +51,7 @@ func (c Client) Fetch(ctx context.Context, now time.Time) (Payload, error) {
 		}
 		return nil
 	}
-	hc := &http.Client{Transport: &http.Transport{
+	return &http.Client{Transport: &http.Transport{
 		TLSClientConfig: &tls.Config{
 			MinVersion:       tls.VersionTLS13,
 			CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
@@ -60,6 +61,17 @@ func (c Client) Fetch(ctx context.Context, now time.Time) (Payload, error) {
 		},
 		ForceAttemptHTTP2: true,
 	}}
+}
+
+// Authorize names the device and adds its token for the current minute.
+func (c Client) Authorize(req *http.Request) {
+	req.Header.Set(DeviceHeader, c.DeviceID)
+	req.Header.Set("Authorization", AuthToken(c.DeviceKey, time.Now().Unix()/60))
+}
+
+// Fetch returns the verified payload.
+func (c Client) Fetch(ctx context.Context, now time.Time) (Payload, error) {
+	hc := c.HTTP()
 	defer hc.CloseIdleConnections()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+c.Addr+Path, nil)
 	if err != nil {

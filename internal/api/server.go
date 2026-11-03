@@ -404,7 +404,12 @@ func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.
 
 func devicePB(d store.Device) *nodev1.Device {
 	return &nodev1.Device{Id: d.ID, User: d.UserName, Name: d.Name, Role: d.Role,
-		CreatedAt: d.CreatedAt.Unix(), RevokedAt: unixOrZero(d.RevokedAt)}
+		CreatedAt: d.CreatedAt.Unix(), RevokedAt: unixOrZero(d.RevokedAt), Registered: d.CertPin != ""}
+}
+
+func invitePB(inv store.Invite) *nodev1.Invite {
+	return &nodev1.Invite{Id: inv.ID, User: inv.UserName, Name: inv.Name, Role: inv.Role,
+		CreatedAt: inv.CreatedAt.Unix(), ExpiresAt: inv.ExpiresAt.Unix()}
 }
 
 func (s *Server) ListDevices(ctx context.Context, req *connect.Request[nodev1.ListDevicesRequest]) (*connect.Response[nodev1.ListDevicesResponse], error) {
@@ -415,6 +420,15 @@ func (s *Server) ListDevices(ctx context.Context, req *connect.Request[nodev1.Li
 	resp := &nodev1.ListDevicesResponse{}
 	for _, d := range devices {
 		resp.Devices = append(resp.Devices, devicePB(d))
+	}
+	invites, err := s.Store.ListInvites(ctx)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	for _, inv := range invites {
+		if req.Msg.User == "" || req.Msg.User == inv.UserName {
+			resp.Invites = append(resp.Invites, invitePB(inv))
+		}
 	}
 	return connect.NewResponse(resp), nil
 }
@@ -484,6 +498,17 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 			b.Services = append(b.Services, bs)
 		}
 	}
+	if d.Role == "admin" && d.CertPin != "" {
+		api, err := s.apiEndpoint(ctx)
+		if err != nil {
+			return "", err
+		}
+		if api != nil {
+			ep := api.endpoint
+			b.API = &ep
+			b.Services = append(b.Services, node.BundleService{ID: uint16(api.svc.ID), Kind: api.svc.Kind, Name: api.svc.Name})
+		}
+	}
 	keys, err := provision.LoadNodeKeys(ctx, s.Store)
 	if err != nil {
 		return "", err
@@ -493,11 +518,95 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 }
 
 func (s *Server) RevokeDevice(ctx context.Context, req *connect.Request[nodev1.RevokeDeviceRequest]) (*connect.Response[nodev1.RevokeDeviceResponse], error) {
+	action := "device.revoke"
 	err := s.Store.RevokeDevice(ctx, req.Msg.Id)
-	if err := s.done(ctx, "device.revoke", req.Msg.Id, err); err != nil {
+	if errors.Is(err, store.ErrNotFound) {
+		if ierr := s.Store.DeleteInvite(ctx, req.Msg.Id); ierr == nil || !errors.Is(ierr, store.ErrNotFound) {
+			action, err = "invite.delete", ierr
+		}
+	}
+	if err := s.done(ctx, action, req.Msg.Id, err); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.RevokeDeviceResponse{}), nil
+}
+
+// DefaultInviteTTL is how long an invite works when the request says nothing.
+const DefaultInviteTTL = 24 * time.Hour
+
+func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.CreateInviteRequest]) (*connect.Response[nodev1.CreateInviteResponse], error) {
+	role := req.Msg.Role
+	if role == "" {
+		role = "user"
+	}
+	ttl := time.Duration(req.Msg.TtlSeconds) * time.Second
+	if ttl == 0 {
+		ttl = DefaultInviteTTL
+	}
+	var code string
+	api, err := s.apiEndpoint(ctx)
+	if err == nil && api == nil {
+		err = fmt.Errorf("%w: no remote API on the node (rayctl service add api api, then rayctl apply)", store.ErrInvalid)
+	}
+	var inv store.Invite
+	if err == nil {
+		var key [spa.KeySize]byte
+		inv, key, err = s.Store.CreateInvite(ctx, req.Msg.User, req.Msg.Name, role, ttl)
+		if err == nil {
+			code, err = s.inviteCode(ctx, inv, key, api)
+		}
+	}
+	if err := s.done(ctx, "invite.create:"+role, req.Msg.User+"/"+req.Msg.Name, err); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: invitePB(inv), InviteCode: code}), nil
+}
+
+// apiEndpoint returns the enabled API service and where clients reach it,
+// or nil without one.
+func (s *Server) apiEndpoint(ctx context.Context) (*apiService, error) {
+	services, err := s.Store.ListServices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, svc := range services {
+		if svc.Kind != "api" || !svc.Enabled {
+			continue
+		}
+		ports, err := svc.Ports()
+		if err != nil || len(ports) == 0 {
+			return nil, fmt.Errorf("api service has no port: %w", err)
+		}
+		secrets, err := s.Store.ServiceSecrets(ctx, svc.ID)
+		if err != nil {
+			return nil, err
+		}
+		pin, err := provision.SPKIPin(secrets[provision.SecretTLSCert])
+		if err != nil {
+			return nil, err
+		}
+		return &apiService{svc: svc, endpoint: node.BundleSub{Port: ports[0].Num, Pin: pin}}, nil
+	}
+	return nil, nil
+}
+
+type apiService struct {
+	svc      store.Service
+	endpoint node.BundleSub
+}
+
+// inviteCode encodes an invite: what SPA needs, with the invite's key and
+// the API as its only service, and where the API is.
+func (s *Server) inviteCode(ctx context.Context, inv store.Invite, key [spa.KeySize]byte, api *apiService) (string, error) {
+	host, err := node.Host(ctx, s.Store)
+	if err != nil {
+		return "", err
+	}
+	ep := api.endpoint
+	b := node.Bundle{Version: 1, Host: host, SPA: node.FromParams(s.Params), DeviceID: inv.ID,
+		DeviceKey: hex.EncodeToString(key[:]), API: &ep, Expires: inv.ExpiresAt.Unix(),
+		Services: []node.BundleService{{ID: uint16(api.svc.ID), Kind: api.svc.Kind, Name: api.svc.Name}}}
+	return b.EncodeInvite()
 }
 
 func (s *Server) ListAudit(ctx context.Context, req *connect.Request[nodev1.ListAuditRequest]) (*connect.Response[nodev1.ListAuditResponse], error) {

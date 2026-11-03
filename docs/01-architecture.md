@@ -9,7 +9,7 @@ Data plane описан в спецификации niko-server
 
 | Слой | Что | Где код |
 |---|---|---|
-| **Data plane** | niko-server (форк sing-box): фронт-мультиплексоры и бэкенды протоколов; Xray (форк) для REALITY; движки белых списков (olcRTC, OpenFlux). | `arngory/sing-box` (`cmd/niko-server`), `arngory/xray-core`, форки движков |
+| **Data plane** | niko-server (форк sing-box): фронт-мультиплексоры и бэкенды протоколов; Xray (форк) для REALITY; движки белых списков (olcRTC, OpenFlux). | `arngory/niko-server`, `arngory/xray-core`, форки движков |
 | **Control plane** | raycontrol: состояние, генерация конфигов, ротация, SPA и файрвол, подписка, API, установка, обновления, бэкапы. | этот репозиторий |
 
 Нода — самодостаточная установка на одном хосте. Центрального сервера нет; у ноды своя ключевая пара,
@@ -56,8 +56,9 @@ Data plane описан в спецификации niko-server
   бэкенд видит виртуальный `net.PacketConn`. Ответы идут обратно тем же путём и уходят с общего сокета фронта.
 - Права на сокет бэкенда — только у UID фронта; бэкенд принимает соединения только от UID фронта (`SO_PEERCRED`).
 
-Цена разделения — лишняя копия UDP-датаграмм через фронт. Её проверяет нагрузочный тест (SPEC §6.4);
-если она окажется заметной, для UDP рассматривается передача через `SO_REUSEPORT` + eBPF.
+Цена разделения — лишняя копия UDP-датаграмм через фронт. Нагрузочный тест niko-server (SPEC §6.6) узкого места
+не показал (итог — в [04-roadmap.md](04-roadmap.md), «Технические проверки»); если копия окажется заметной на
+настоящей ноде, для UDP рассматривается передача через `SO_REUSEPORT` + eBPF.
 
 ## Внутренняя ступень (`inner`)
 
@@ -79,7 +80,7 @@ Data plane описан в спецификации niko-server
 | dnstt, masterdns | dns, UDP 53 открыт | DNS | DNS-запросы | KCP/smux, ARQ | ключ туннеля → `inner` | через `inner` |
 | olcrtc | rendezvous | WebRTC | видеозвонок | smux | PSK → `inner` | через `inner` |
 | openflux | rendezvous | документы | правки документов | своя | ключ → `inner` | через `inner` |
-| yggdrasil | direct, TCP 443 за SPA | TLS | — | Yggdrasil | ключ узла | — (нужно проверить) |
+| yggdrasil | direct, TCP 443 за SPA | TLS 1.3 | сайт (пустой `404` не-линку) | Yggdrasil → `inner` | ключ из UUID `inner` | линк X25519MLKEM768, трафик — через `inner` (R4-15) |
 
 ## Control plane
 
@@ -130,8 +131,9 @@ settings        key, value                                           — вкл�
 - Локальный: unix socket, `SO_PEERCRED` — для `rayctl`.
 - **Подписка** (с первого этапа): HTTPS за SPA, ответ подписан ключом ноды; через неё клиент получает
   ротируемые учётные данные.
-- Полный API (этап M3): protobuf + ConnectRPC, отдельный порт за SPA + mTLS, роли user и admin, регистрация
-  устройства по одноразовой ссылке или QR. TLS — с `X25519MLKEM768`.
+- Удалённый API (R3, [spec/api-v1.md](spec/api-v1.md)): protobuf + ConnectRPC, отдельный порт за SPA + mTLS по ключу
+  устройства, роли user и admin, регистрация устройства по одноразовому приглашению `rcinv1:` (строка или QR).
+  TLS — только с `X25519MLKEM768`.
 
 ## Структура репозитория raycontrol
 

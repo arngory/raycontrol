@@ -58,7 +58,24 @@ type Payload struct {
 	Issued   int64     `json:"issued"`
 	Expires  int64     `json:"expires"`
 	Profiles []Profile `json:"profiles"`
+	// Probe says the endpoint serves channel probes (spec/probe-v1.md).
+	Probe *ProbeHint `json:"probe,omitempty"`
 }
+
+// ProbeHint: probe-v1 on the subscription endpoint; UDP: the echo on the
+// same port number; Tunnel: the name that leads to the endpoint through the
+// tunnels of the services in TunnelSvc.
+type ProbeHint struct {
+	V         int      `json:"v"`
+	UDP       bool     `json:"udp"`
+	Tunnel    string   `json:"tunnel,omitempty"`
+	TunnelSvc []uint16 `json:"tunnel_svc,omitempty"`
+}
+
+// ProbeTunnels are the kinds whose exits send the probe name to the
+// endpoint: Xray (inner behind the DNS tunnels and Yggdrasil, REALITY),
+// rayd naive and the Hysteria2 backends (niko-server v0.5).
+var ProbeTunnels = []string{"dnstt", "masterdns", "yggdrasil", "reality", "naive", "hy2-masq", "hy2-obfs"}
 
 // Envelope is what the endpoint returns.
 type Envelope struct {
@@ -222,6 +239,53 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 				p.Next = &Next{Link: link(set.Next), From: set.NextFrom.Unix()}
 			}
 			out = append(out, p)
+		case "yggdrasil":
+			if inner == nil || m.Inner[u.ID] == "" {
+				continue
+			}
+			link, err := YggdrasilLink(m, s, *inner, m.Inner[u.ID])
+			if err != nil {
+				return nil, err
+			}
+			p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: link}
+			if set := m.Sets[inner.ID][u.ID]; set.Next != "" {
+				next, err := YggdrasilLink(m, s, *inner, set.Next)
+				if err != nil {
+					return nil, err
+				}
+				p.Next = &Next{Link: next, From: set.NextFrom.Unix()}
+			}
+			out = append(out, p)
+		case "doh":
+			token := m.Creds[s.ID][u.ID]
+			if token == "" {
+				continue
+			}
+			p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: DoHLink(m, s, token)}
+			if set := m.Sets[s.ID][u.ID]; set.Next != "" {
+				p.Next = &Next{Link: DoHLink(m, s, set.Next), From: set.NextFrom.Unix()}
+			}
+			out = append(out, p)
+		case "naive":
+			password := m.Creds[s.ID][u.ID]
+			if password == "" {
+				continue
+			}
+			p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: NaiveLink(m, s, password)}
+			if set := m.Sets[s.ID][u.ID]; set.Next != "" {
+				p.Next = &Next{Link: NaiveLink(m, s, set.Next), From: set.NextFrom.Unix()}
+			}
+			out = append(out, p)
+		case "hy2-masq", "hy2-obfs":
+			password := m.Creds[s.ID][u.ID]
+			if password == "" {
+				continue
+			}
+			p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: HysteriaLink(m, s, password)}
+			if set := m.Sets[s.ID][u.ID]; set.Next != "" {
+				p.Next = &Next{Link: HysteriaLink(m, s, set.Next), From: set.NextFrom.Unix()}
+			}
+			out = append(out, p)
 		case "reality":
 			link, err := RealityLink(m, s, u.ID)
 			if err != nil {
@@ -257,6 +321,97 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 		}
 	}
 	return out, nil
+}
+
+// YggdrasilLink is a user's Yggdrasil profile (spec/subscription-v1.md §4):
+// VLESS with ML-KEM-768 to inner at the node's mesh address and exit port,
+// carried by Yggdrasil with one peer, the node itself, over a TLS link
+// under the service's name. niko-ygg is "<peer URI>;<the user's key>", the
+// key (a 32-byte ed25519 seed, hex) derived from the same inner UUID.
+func YggdrasilLink(m render.Model, s, inner render.Service, uuid string) (string, error) {
+	st, nodeKey, err := render.YggdrasilNode(s)
+	if err != nil {
+		return "", err
+	}
+	_, encryption, err := render.VLESSEncryption(inner.Secrets[provision.SecretMLKEMSeed])
+	if err != nil {
+		return "", err
+	}
+	peer := url.URL{Scheme: "tls", Host: net.JoinHostPort(st.SNI, "443"),
+		RawQuery: url.Values{"sni": {st.SNI}, "key": {hex.EncodeToString(nodeKey)}}.Encode()}
+	q := url.Values{}
+	q.Set("type", "raw")
+	q.Set("encryption", encryption)
+	q.Set("niko-node", m.NodeID)
+	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
+	q.Set("niko-ygg", peer.String()+";"+hex.EncodeToString(render.YggdrasilKey(uuid).Seed()))
+	host := net.JoinHostPort(render.YggdrasilAddress(nodeKey).String(), strconv.Itoa(st.ExitPort))
+	return "vless://" + uuid + "@" + host + "?" + q.Encode() + "#" + url.PathEscape(s.Name), nil
+}
+
+// DoHLink is the DoH endpoint of a user (spec/subscription-v1.md §4): the
+// standard https://<name>/dns-query/<token> with the Niko parameters, which
+// the client drops before it asks.
+func DoHLink(m render.Model, s render.Service, token string) string {
+	var st struct {
+		SNI string `json:"sni"`
+	}
+	_ = json.Unmarshal([]byte(s.Settings), &st)
+	q := url.Values{}
+	q.Set("niko-node", m.NodeID)
+	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
+	return "https://" + st.SNI + "/dns-query/" + url.PathEscape(token) + "?" + q.Encode() + "#" + url.PathEscape(s.Name)
+}
+
+// NaiveLink is the naive endpoint of a user (spec/subscription-v1.md §4):
+// naive+https://niko:<password>@<name>:443 with the Niko parameters. The
+// server checks the password only.
+func NaiveLink(m render.Model, s render.Service, password string) string {
+	var st struct {
+		SNI string `json:"sni"`
+	}
+	_ = json.Unmarshal([]byte(s.Settings), &st)
+	q := url.Values{}
+	q.Set("niko-node", m.NodeID)
+	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
+	return "naive+https://" + url.UserPassword("niko", password).String() + "@" + st.SNI + ":443?" + q.Encode() + "#" + url.PathEscape(s.Name)
+}
+
+// HysteriaLink is the share link of a Hysteria2 service with a user's
+// password (spec/subscription-v1.md §4): the standard hysteria2:// form,
+// salamander for hy2-obfs, and the Niko parameters.
+func HysteriaLink(m render.Model, s render.Service, password string) string {
+	var st struct {
+		SNI string `json:"sni"`
+	}
+	_ = json.Unmarshal([]byte(s.Settings), &st)
+	port := 443
+	if ports, err := s.Ports(); err == nil {
+		for _, p := range ports {
+			if p.Proto == "udp" {
+				port = int(p.Num)
+			}
+		}
+	}
+	q := url.Values{}
+	q.Set("sni", st.SNI)
+	q.Set("insecure", "0")
+	if s.Kind == "hy2-obfs" {
+		q.Set("obfs", "salamander")
+		q.Set("obfs-password", string(s.Secrets[provision.SecretObfsPassword]))
+		// A self-signed certificate: Niko pins its key (niko-pin), other
+		// clients its hash (pinSHA256).
+		cert := s.Secrets[provision.SecretTLSCert]
+		if pin, err := provision.SPKIPin(cert); err == nil {
+			q.Set("niko-pin", pin)
+		}
+		sum := sha256.Sum256(cert)
+		q.Set("pinSHA256", hex.EncodeToString(sum[:]))
+	}
+	q.Set("niko-node", m.NodeID)
+	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
+	host := net.JoinHostPort(m.Host, strconv.Itoa(port))
+	return "hysteria2://" + url.PathEscape(password) + "@" + host + "/?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
 
 // RealityLink is the share link of a REALITY service for a user, "" if the

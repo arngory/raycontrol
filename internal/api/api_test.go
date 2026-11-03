@@ -223,7 +223,8 @@ func TestPerimeterFeed(t *testing.T) {
 			ports[p.Proto+"/"+strconv.Itoa(int(p.Port))] = true
 		}
 	}
-	if len(first.Devices) != 0 || !ports["tcp/443"] || !ports["tcp/2222"] || len(ports) != 3 || len(first.PublicPorts) != 1 ||
+	// The subscription's TCP and UDP (the probe echo), REALITY, SSH.
+	if len(first.Devices) != 0 || !ports["tcp/443"] || !ports["tcp/2222"] || len(ports) != 4 || len(first.PublicPorts) != 1 ||
 		first.PublicPorts[0].Port != 53 || !first.Spa.TcpCarrier || first.Spa.LenMax != uint32(srv.Params.LenMax) ||
 		len(first.AdminPorts) != 1 || first.AdminPorts[0].Port != 2222 {
 		t.Fatalf("first snapshot: %v", first)

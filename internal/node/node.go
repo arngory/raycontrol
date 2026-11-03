@@ -24,6 +24,9 @@ const (
 
 	// BundlePrefix marks an encoded device bundle.
 	BundlePrefix = "rcdev1:"
+	// InvitePrefix marks an encoded invite: a bundle of a one-time SPA key
+	// that opens the API only, for registration (R3-3).
+	InvitePrefix = "rcinv1:"
 )
 
 // SPAParams is the JSON form of spa.Params, shared by the settings table and
@@ -152,6 +155,11 @@ type Bundle struct {
 	// "mldsa65" (base64url).
 	NodeKeys map[string]string `json:"node_keys,omitempty"`
 	Sub      *BundleSub        `json:"sub,omitempty"`
+	// API locates the remote API (R3-3), for admin devices and invites;
+	// same shape as Sub, served at https://<host>:<port>/.
+	API *BundleSub `json:"api,omitempty"`
+	// Expires is when an invite stops working (Unix time); bundles have none.
+	Expires int64 `json:"expires,omitempty"`
 }
 
 // BundleSub locates the subscription endpoint: https://<host>:<port>/sub/v1,
@@ -162,20 +170,36 @@ type BundleSub struct {
 }
 
 // Encode returns the bundle as "rcdev1:" + base64url(JSON), without padding.
-func (b Bundle) Encode() (string, error) {
+func (b Bundle) Encode() (string, error) { return b.encode(BundlePrefix) }
+
+// EncodeInvite returns the bundle of an invite as "rcinv1:" + base64url(JSON).
+func (b Bundle) EncodeInvite() (string, error) { return b.encode(InvitePrefix) }
+
+func (b Bundle) encode(prefix string) (string, error) {
 	j, err := json.Marshal(b)
 	if err != nil {
 		return "", err
 	}
-	return BundlePrefix + base64.RawURLEncoding.EncodeToString(j), nil
+	return prefix + base64.RawURLEncoding.EncodeToString(j), nil
 }
 
 // DecodeBundle parses an encoded bundle.
-func DecodeBundle(s string) (Bundle, error) {
+func DecodeBundle(s string) (Bundle, error) { return decode(s, BundlePrefix) }
+
+// DecodeInvite parses an encoded invite.
+func DecodeInvite(s string) (Bundle, error) {
+	b, err := decode(s, InvitePrefix)
+	if err == nil && (b.API == nil || b.Expires == 0) {
+		err = errors.New("the invite has no API endpoint or no expiry")
+	}
+	return b, err
+}
+
+func decode(s, prefix string) (Bundle, error) {
 	var b Bundle
-	rest, ok := strings.CutPrefix(strings.TrimSpace(s), BundlePrefix)
+	rest, ok := strings.CutPrefix(strings.TrimSpace(s), prefix)
 	if !ok {
-		return b, fmt.Errorf("bundle must start with %q", BundlePrefix)
+		return b, fmt.Errorf("must start with %q", prefix)
 	}
 	j, err := base64.RawURLEncoding.DecodeString(rest)
 	if err != nil {

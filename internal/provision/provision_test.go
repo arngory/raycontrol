@@ -2,9 +2,12 @@ package provision
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -48,8 +51,21 @@ func TestInit(t *testing.T) {
 		t.Fatal(err)
 	}
 	ports, _ := svc.Ports()
-	if len(ports) != 1 || ports[0].Proto != "tcp" || (ports[0].Num >= p.PortBase && ports[0].Num < p.PortBase+p.PortRange) {
+	// TCP for the endpoint, UDP of the same number for the probe echo (R4-16).
+	if len(ports) != 2 || ports[0].Proto != "tcp" || ports[1] != (store.Port{Proto: "udp", Num: ports[0].Num}) ||
+		(ports[0].Num >= p.PortBase && ports[0].Num < p.PortBase+p.PortRange) {
 		t.Fatalf("subscription port %v vs SPA range %d+%d", ports, p.PortBase, p.PortRange)
+	}
+	// A node set up before R4-16 has the TCP port only: rayd adds the UDP one.
+	st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: fmt.Sprintf(`{"ports":["tcp/%d"]}`, ports[0].Num)})
+	for range 2 {
+		if err := SubscriptionUDP(ctx, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc, _ = st.ServiceByName(ctx, SubscriptionService)
+	if got, _ := svc.Ports(); !slices.Equal(got, ports) {
+		t.Fatalf("after SubscriptionUDP: %v, want %v", got, ports)
 	}
 	secrets, _ := st.ServiceSecrets(ctx, svc.ID)
 	if pin, err := SPKIPin(secrets[SecretTLSCert]); err != nil || len(pin) != 43 {
@@ -181,5 +197,112 @@ func TestSiteAnswer(t *testing.T) {
 	}
 	if r, err = SetServiceOption(ctx, st, "r", "rotate_sni", "true"); err != nil || !*ParseRealityState(r).RotateSNI {
 		t.Fatalf("rotate_sni back on: %v %s", err, r.Settings)
+	}
+}
+
+func TestHysteriaServices(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p, _ := Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"})
+	masq, err := CreateService(ctx, st, store.Service{Kind: "hy2-masq", Name: "hy2-masq", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obfs, err := CreateService(ctx, st, store.Service{Kind: "hy2-obfs", Name: "hy2-obfs", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := st.ServiceByName(ctx, "site")
+	if err != nil {
+		t.Fatal("no site created for Hysteria2's certificate")
+	}
+	// Both on UDP 443: the front tells them apart (udpmux, R3-4); each has
+	// its own port schedule.
+	mp, _ := masq.Ports()
+	op, _ := obfs.Ports()
+	if len(mp) != 1 || mp[0] != (store.Port{Proto: "udp", Num: 443}) || len(op) != 1 || op[0] != (store.Port{Proto: "udp", Num: 443}) {
+		t.Fatalf("ports: masq %v, obfs %v", mp, op)
+	}
+	rm, ok1 := ServiceRotation(masq)
+	ro, ok2 := ServiceRotation(obfs)
+	if !ok1 || !ok2 || (rm.Base < ro.Base+ro.Range && ro.Base < rm.Base+rm.Range) ||
+		(rm.Base < p.PortBase+p.PortRange && p.PortBase < rm.Base+rm.Range) {
+		t.Fatalf("rotations: masq %+v, obfs %+v, SPA %d+%d", rm, ro, p.PortBase, p.PortRange)
+	}
+	// hy2-masq: under the site's certificate. hy2-obfs: its own, self-signed,
+	// with a name that is in no DNS.
+	all, _ := st.ListServices(ctx)
+	names, _ := SiteNames(site, all)
+	var sni struct{ SNI string }
+	json.Unmarshal([]byte(masq.Settings), &sni)
+	if SiteOf(masq) != "site" || !strings.HasSuffix(sni.SNI, ".example.com") || !slices.Contains(names, sni.SNI) {
+		t.Fatalf("masq: name %q, site certificate %v", sni.SNI, names)
+	}
+	json.Unmarshal([]byte(obfs.Settings), &sni)
+	secrets, _ := st.ServiceSecrets(ctx, obfs.ID)
+	cert, err := x509.ParseCertificate(secrets[SecretTLSCert])
+	if SiteOf(obfs) != "" || !strings.HasSuffix(sni.SNI, ".invalid") || slices.Contains(names, sni.SNI) || err != nil ||
+		cert.VerifyHostname(sni.SNI) != nil || len(secrets[SecretTLSKey]) == 0 {
+		t.Fatalf("obfs: name %q, certificate %v", sni.SNI, err)
+	}
+	if len(secrets[SecretObfsPassword]) < 32 {
+		t.Fatalf("salamander password %q", secrets[SecretObfsPassword])
+	}
+}
+
+// DoH rides on REALITY's TCP 443 through the node's site (R3-2).
+func TestDoHService(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"})
+	if _, err := CreateService(ctx, st, store.Service{Kind: "doh", Name: "doh", Enabled: true}); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("DoH without REALITY: %v", err)
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "reality", Name: "reality", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := CreateService(ctx, st, store.Service{Kind: "doh", Name: "doh", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ports, _ := d.Ports()
+	site, _ := st.ServiceByName(ctx, "site")
+	all, _ := st.ListServices(ctx)
+	names, _ := SiteNames(site, all)
+	var sni struct{ SNI string }
+	json.Unmarshal([]byte(d.Settings), &sni)
+	// TCP 443 and UDP 443 (DoH3), both behind the front.
+	if SiteOf(d) != "site" || !slices.Equal(ports, []store.Port{{Proto: "tcp", Num: 443}, {Proto: "udp", Num: 443}}) || !slices.Contains(names, sni.SNI) {
+		t.Fatalf("doh: %s, ports %v, site names %v", d.Settings, ports, names)
+	}
+	// A schedule only with a UDP port: DoH and naive on UDP 443 too (DoH3,
+	// naive-quic) have one, like Hysteria2; a TCP-only service would not.
+	n, err := CreateService(ctx, st, store.Service{Kind: "naive", Name: "naive", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcpOnly, err := CreateService(ctx, st, store.Service{Kind: "naive", Name: "naive2", Enabled: true, Settings: `{"ports":["tcp/443"]}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := CreateService(ctx, st, store.Service{Kind: "hy2-masq", Name: "hy2", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, svc := range []store.Service{d, n, h} {
+		if _, ok := ServiceRotation(svc); !ok {
+			t.Errorf("%s has no UDP schedule: %s", svc.Kind, svc.Settings)
+		}
+	}
+	if _, ok := ServiceRotation(tcpOnly); ok || strings.Contains(tcpOnly.Settings, "udp_rotation") || len(tcpOnly.Secrets[SecretPortKey]) != 0 {
+		t.Errorf("a TCP-only service has a UDP schedule: %s", tcpOnly.Settings)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/arngory/raycontrol/internal/node"
+	chprobe "github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/redact"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/sub"
@@ -29,6 +30,7 @@ func probe(ctx context.Context, args []string) error {
 	addr := fs.String("addr", "", "node address to use instead of the bundle's host")
 	links := fs.Bool("links", false, "print the profile links (they carry credentials)")
 	redacted := fs.Bool("redact", false, "hide the node's address and names, IDs and keys, to share the output in an issue")
+	channel := fs.Bool("channel", false, "then measure the channel (probe-v1): TCP down and up, UDP echo")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
 		return errUsage
 	}
@@ -112,6 +114,9 @@ func probe(ctx context.Context, args []string) error {
 				printf("  %s (service %d)\n", pr.Name, pr.Svc)
 			}
 		}
+		if *channel {
+			return measure(ctx, client, p, printf)
+		}
 		return nil
 	}
 	return fmt.Errorf("node not reachable: %w", lastErr)
@@ -119,7 +124,8 @@ func probe(ctx context.Context, args []string) error {
 
 // readArg reads the bundle from the argument, a file (@FILE) or stdin
 // (-); in a file or on stdin the rcdev1 token is found in whatever text
-// surrounds it (the output of rayctl device add, a message).
+// surrounds it (the output of rayctl device add, a message); an rcinv1
+// invite is found the same way.
 func readArg(s string) (string, error) {
 	var text string
 	switch {
@@ -139,7 +145,7 @@ func readArg(s string) (string, error) {
 		return s, nil
 	}
 	for _, f := range strings.Fields(text) {
-		if strings.HasPrefix(f, "rcdev1:") {
+		if strings.HasPrefix(f, node.BundlePrefix) || strings.HasPrefix(f, node.InvitePrefix) {
 			return f, nil
 		}
 	}
@@ -167,4 +173,54 @@ func sendSPA(carrier string, to netip.AddrPort, pkt []byte) error {
 	defer c.Close()
 	_, err = c.Write(pkt)
 	return err
+}
+
+// measure runs the channel probes of probe-v1 (R4-16) after SPA: 8 MiB
+// down, 4 MiB up, and 50 datagrams of 1200 bytes 20 ms apart.
+func measure(ctx context.Context, sc sub.Client, p sub.Payload, printf func(string, ...any)) error {
+	if p.Probe == nil {
+		printf("channel: the node serves no probes (raycontrol before R4-16)\n")
+		return nil
+	}
+	hc := sc.HTTP()
+	defer hc.CloseIdleConnections()
+	c := chprobe.Client{HTTP: hc, Base: "https://" + sc.Addr, Authorize: sc.Authorize}
+	tcp := func(t chprobe.Transfer) string {
+		if t.Server.TCP == nil {
+			return ""
+		}
+		return fmt.Sprintf(" (node: rtt %.1f ms, retransmits %d)", float64(t.Server.TCP.RTTus)/1000, t.Server.TCP.Retrans)
+	}
+	down, err := c.Down(ctx, 8<<20)
+	if err != nil {
+		return fmt.Errorf("channel down: %w", err)
+	}
+	printf("channel down: %d bytes in %v, %.1f Mbit/s%s\n", down.Bytes, down.Duration.Round(time.Millisecond), down.Mbps(), tcp(down))
+	up, err := c.Up(ctx, 4<<20)
+	if err != nil {
+		return fmt.Errorf("channel up: %w", err)
+	}
+	upRate := 0.0
+	if up.Server.Ms > 0 {
+		upRate = float64(up.Server.Bytes) * 8 / float64(up.Server.Ms) / 1000
+	}
+	printf("channel up: %d bytes, %.1f Mbit/s at the node%s\n", up.Server.Bytes, upRate, tcp(up))
+	if st, err := c.Link(ctx); err != nil {
+		printf("channel link: %v\n", err)
+	} else {
+		printf("channel link: %d connections of this address on 443 at the node; rtt median %.1f ms, retransmits %.2f%%\n",
+			st.Connections, float64(st.RTTus.Median)/1000, st.RetransRate*100)
+	}
+	if !p.Probe.UDP {
+		printf("channel udp: no echo on this node\n")
+		return nil
+	}
+	e, err := c.Echo(ctx, 50, 1200, 20*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("channel udp: %w", err)
+	}
+	ms := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
+	printf("channel udp: %d sent, %d back; lost up %d, down %d; rtt min/avg/max %.1f/%.1f/%.1f ms, jitter %.1f ms, reordered %d\n",
+		e.Sent, e.Received, e.LostUp(), e.LostDown(), ms(e.RTTMin), ms(e.RTTAvg), ms(e.RTTMax), ms(e.Jitter), e.Reordered)
+	return nil
 }

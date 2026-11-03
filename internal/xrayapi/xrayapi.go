@@ -69,43 +69,73 @@ func (c *Client) Remove(ctx context.Context, tag, email string) error {
 	return c.alter(ctx, tag, &command.RemoveUserOperation{Email: email})
 }
 
-// VLESSUsers returns email -> UUID of the inbound's users.
-func (c *Client) VLESSUsers(ctx context.Context, tag string) (map[string]string, error) {
+// codec turns a user's secret into an account of the inbound's protocol
+// and back.
+type codec struct {
+	account func(secret string) proto.Message
+	secret  func(b []byte) (string, error)
+}
+
+func vlessCodec(flow string) codec {
+	return codec{
+		account: func(id string) proto.Message { return &vless.Account{Id: id, Flow: flow} },
+		secret: func(b []byte) (string, error) {
+			var acc vless.Account
+			err := proto.Unmarshal(b, &acc)
+			return acc.Id, err
+		},
+	}
+}
+
+func (c *Client) users(ctx context.Context, tag string, cd codec) (map[string]string, error) {
 	resp, err := c.c.GetInboundUsers(ctx, connect.NewRequest(&command.GetInboundUserRequest{Tag: tag}))
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]string{}
 	for _, u := range resp.Msg.Users {
-		var acc vless.Account
+		secret := ""
 		if u.Account != nil {
-			if err := proto.Unmarshal(u.Account.Value, &acc); err != nil {
+			if secret, err = cd.secret(u.Account.Value); err != nil {
 				return nil, fmt.Errorf("user %s: %w", u.Email, err)
 			}
 		}
-		out[u.Email] = acc.Id
+		out[u.Email] = secret
 	}
 	return out, nil
+}
+
+// VLESSUsers returns email -> UUID of the inbound's users.
+func (c *Client) VLESSUsers(ctx context.Context, tag string) (map[string]string, error) {
+	return c.users(ctx, tag, vlessCodec(""))
 }
 
 // SyncVLESS makes the inbound's users exactly want (email -> UUID), added
 // with the given flow, and reports how many were added and removed.
 func (c *Client) SyncVLESS(ctx context.Context, tag, flow string, want map[string]string) (added, removed int, err error) {
-	have, err := c.VLESSUsers(ctx, tag)
+	return c.sync(ctx, tag, vlessCodec(flow), want)
+}
+
+func (c *Client) sync(ctx context.Context, tag string, cd codec, want map[string]string) (added, removed int, err error) {
+	have, err := c.users(ctx, tag, cd)
 	if err != nil {
 		return 0, 0, err
 	}
-	for email, id := range have {
-		if want[email] != id {
+	for email, secret := range have {
+		if want[email] != secret {
 			if err := c.Remove(ctx, tag, email); err != nil {
 				return added, removed, fmt.Errorf("remove %s: %w", email, err)
 			}
 			removed++
 		}
 	}
-	for email, id := range want {
-		if have[email] != id {
-			if err := c.AddVLESS(ctx, tag, flow, email, id); err != nil {
+	for email, secret := range want {
+		if have[email] != secret {
+			acc, err := typed(cd.account(secret))
+			if err != nil {
+				return added, removed, err
+			}
+			if err := c.alter(ctx, tag, &command.AddUserOperation{User: &protocol.User{Email: email, Account: acc}}); err != nil {
 				return added, removed, fmt.Errorf("add %s: %w", email, err)
 			}
 			added++

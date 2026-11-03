@@ -13,7 +13,7 @@
 | Hysteria2 salamander | бэкенд niko-server | direct, UDP 443 | SPA | X25519MLKEM768 |
 | NaiveProxy h2 и QUIC | бэкенд niko-server | direct, TCP/UDP 443 | SPA | X25519MLKEM768 |
 | DoH / DoH3 | бэкенд niko-server | direct, TCP/UDP 443 | SPA | X25519MLKEM768 |
-| Yggdrasil | бэкенд niko-server | direct, TCP 443 | SPA | проверить |
+| Yggdrasil | бэкенд niko-server (ядро yggdrasil-go, выход в `inner`) | direct, TCP 443 | SPA | линк X25519MLKEM768, трафик через `inner` (R4-15) |
 | dnstt | бэкенд niko-server (библиотека из форка) | dns, UDP 53 | открыт, ключ туннеля | через `inner` |
 | MasterDnsVPN | бэкенд niko-server (библиотека из форка) | dns, UDP 53 | открыт, ключ туннеля | через `inner` |
 | olcRTC | движок из форка | rendezvous (Jitsi, Телемост, WB Stream) | входящих нет | через `inner` |

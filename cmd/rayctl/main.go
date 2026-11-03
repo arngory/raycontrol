@@ -21,11 +21,12 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/arngory/raycontrol/internal/api"
+	"github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1/devicev1connect"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
 )
 
-const usageText = `usage: rayctl [-socket PATH] [-json] <command>
+const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
 
   status
   user list
@@ -36,13 +37,17 @@ const usageText = `usage: rayctl [-socket PATH] [-json] <command>
   service list
   service add KIND NAME [-settings JSON]
   service enable|disable|del NAME
-  service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false
+  service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false;
+                                            hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none)
   service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
                                             schedule: after the lead time, or at once with -now
   device list [USER]
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
-  device revoke ID
+  device revoke ID                          a device, or an invite not yet used
+  device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE]
+                                            a one-time invite: the client registers the device itself
+                                            through the remote API (service add api api)
   audit [-n 50]
   admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA
   dns [status]                              the DNS provider and the records the node needs
@@ -51,7 +56,7 @@ const usageText = `usage: rayctl [-socket PATH] [-json] <command>
   dns sync                                  bring the zone in line now
   dns remove [-keep-records]                delete raycontrol's records and forget the provider
 
-  install -host ADDR [-domain D] [-admin A] [-cloudflare-token-file F] [-services reality,dnstt,masterdns|none]
+  install -host ADDR [-domain D] [-admin A] [-cloudflare-token-file F] [-services reality,hy2-masq,hy2-obfs,dnstt,masterdns|none]
           [-dataplane DIR]                    set the node up on this host (root); with -domain REALITY by default
   apply                                       install what the current services need (root)
   update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-rollback]
@@ -59,13 +64,29 @@ const usageText = `usage: rayctl [-socket PATH] [-json] <command>
                                               previous binaries if the node does not come back (root)
   uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]
                                               take back everything install and apply changed (root)
+  backup [-o FILE] [-passphrase-file F]       the node's state sealed with a passphrase (root):
+                                              users, keys, services, certificates
+  restore -i FILE [-passphrase-file F] [-host ADDR] [-yes]
+                                              put a backup in place and bring the node up on it,
+                                              here or on a new host after install (root)
+  metrics [-o FILE]                           counts and times in the Prometheus text format; with
+                                              -o for a collector's textfile directory
 
   report [-o FILE] [-logs warning|info|none] [-since 24h] [-id ID]
       a redacted report for an issue: versions, system, checks, units,
       counts and warnings; nothing is sent anywhere
-  probe [-carrier udp|tcp|auto] [-addr A] [-links] [-redact] BUNDLE|@FILE|-
+  probe [-carrier udp|tcp|auto] [-addr A] [-links] [-redact] [-channel] BUNDLE|@FILE|-
       check a node from outside like a client: SPA, then the subscription
-      (pin, both signatures). Needs only the device bundle.
+      (pin, both signatures). Needs only the device bundle. -channel then
+      measures the channel (TCP down and up, UDP echo; probe-v1).
+
+  From another machine, through the node's remote API (admin devices):
+  remote enroll [-o FILE] [-carrier udp|tcp|auto] [-addr A] INVITE|@FILE|-
+      register a device from an invite (rcinv1:...): a new client key, SPA,
+      then the API; writes the device file (bundle and key, mode 0600)
+  -remote FILE <command>                    status, user, service, device, audit, admin, dns, metrics
+                                            run against the node through its API
+  -remote FILE remote whoami|rotate         the device; a new client key for it
 `
 
 // version is set at release build time (-X main.version).
@@ -74,6 +95,9 @@ var version = "dev"
 type cli struct {
 	c    nodev1connect.NodeServiceClient
 	json bool
+	// With -remote: the device and its DeviceService client.
+	identity *remoteIdentity
+	dev      devicev1connect.DeviceServiceClient
 }
 
 func main() {
@@ -81,6 +105,7 @@ func main() {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usageText) }
 	socket := fs.String("socket", "/run/raycontrol/rayd.sock", "rayd API socket")
 	asJSON := fs.Bool("json", false, "print responses as JSON")
+	remote := fs.String("remote", "", "use a node's remote API with this device file (rayctl remote enroll)")
 	fs.Parse(os.Args[1:])
 	if fs.NArg() == 0 {
 		fs.Usage()
@@ -90,6 +115,12 @@ func main() {
 	c := &cli{c: api.NewUnixClient(*socket), json: *asJSON}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	if *remote != "" && (fs.Arg(0) != "remote" || fs.Arg(1) != "enroll") {
+		if err := c.useRemote(ctx, *remote, fs.Arg(0)); err != nil {
+			fmt.Fprintln(os.Stderr, "rayctl:", err)
+			os.Exit(1)
+		}
+	}
 	if err := c.run(ctx, fs.Args()); err != nil {
 		fmt.Fprintln(os.Stderr, "rayctl:", err)
 		if errors.Is(err, errUsage) {
@@ -138,6 +169,14 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.report(ctx, args[1:])
 	case "dns":
 		return c.dns(ctx, sub, rest)
+	case "remote":
+		return c.remoteCmd(ctx, sub, rest)
+	case "backup":
+		return c.backup(ctx, args[1:])
+	case "restore":
+		return c.restore(ctx, args[1:])
+	case "metrics":
+		return c.metrics(ctx, args[1:])
 	case "update":
 		return c.update(ctx, args[1:])
 	case "uninstall":
@@ -377,10 +416,49 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 			return err
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
-			fmt.Fprintln(w, "ID\tUSER\tNAME\tROLE\tCREATED\tREVOKED")
+			fmt.Fprintln(w, "ID\tUSER\tNAME\tROLE\tCREATED\tREVOKED\tAPI")
 			for _, d := range r.Msg.Devices {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", d.Id, d.User, d.Name, d.Role, when(d.CreatedAt), when(d.RevokedAt))
+				api := "-"
+				if d.Registered {
+					api = "registered"
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", d.Id, d.User, d.Name, d.Role, when(d.CreatedAt), when(d.RevokedAt), api)
 			}
+			for _, inv := range r.Msg.Invites {
+				state := "invite until " + when(inv.ExpiresAt)
+				if inv.ExpiresAt <= time.Now().Unix() {
+					state = "invite expired"
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t-\t%s\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.CreatedAt), state)
+			}
+		})
+	case "invite":
+		fs := flag.NewFlagSet("device invite", flag.ContinueOnError)
+		role := fs.String("role", "user", "user or admin")
+		ttl := fs.Duration("ttl", 24*time.Hour, "how long the invite works (up to a week)")
+		out := fs.String("o", "", "write the invite alone to this file (mode 0600) instead of the screen")
+		if err := need(args, 2); err != nil {
+			return err
+		}
+		if err := fs.Parse(args[2:]); err != nil {
+			return errUsage
+		}
+		r, err := c.c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{
+			User: args[0], Name: args[1], Role: *role, TtlSeconds: int64(ttl.Seconds())}))
+		if err != nil {
+			return err
+		}
+		inv := r.Msg.Invite
+		if *out != "" {
+			if err := os.WriteFile(*out, []byte(r.Msg.InviteCode+"\n"), 0o600); err != nil {
+				return fmt.Errorf("invite %s made, but not written (rayctl device revoke %s): %w", inv.Id, inv.Id, err)
+			}
+			fmt.Printf("invite %s for %s/%s (%s) until %s in %s\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.ExpiresAt), *out)
+			return nil
+		}
+		return c.print(r.Msg, func(w *tabwriter.Writer) {
+			fmt.Fprintf(w, "invite %s for %s/%s (%s), once, until %s. The client registers with it through the API:\n\n%s\n",
+				inv.Id, inv.User, inv.Name, inv.Role, when(inv.ExpiresAt), r.Msg.InviteCode)
 		})
 	case "add":
 		fs := flag.NewFlagSet("device add", flag.ContinueOnError)

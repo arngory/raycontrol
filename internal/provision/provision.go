@@ -56,6 +56,8 @@ const (
 	SecretShortIDs      = "short_ids"            // REALITY, comma-separated hex
 	SecretSiteSeed      = "site_seed"            // decoy site content
 	SecretTLSChain      = "tls_chain"            // ACME certificate chain, PEM
+	SecretObfsPassword  = "obfs_password"        //nolint:gosec // G101: a name; hy2-obfs, salamander
+	SecretYggdrasilSeed = "yggdrasil_seed"       // the node's Yggdrasil key, an ed25519 seed
 	SubscriptionService = "subscription"
 )
 
@@ -178,12 +180,48 @@ func subscriptionService(p spa.Params, host string) (store.Service, error) {
 	if err != nil {
 		return store.Service{}, err
 	}
-	settings, _ := json.Marshal(map[string][]string{"ports": {fmt.Sprintf("tcp/%d", port)}})
+	// The UDP port of the same number: the echo of channel probes (R4-16).
+	settings, _ := json.Marshal(map[string][]string{"ports": {fmt.Sprintf("tcp/%d", port), fmt.Sprintf("udp/%d", port)}})
 	return store.Service{
 		Kind: "subscription", Name: SubscriptionService, Enabled: true, Settings: string(settings),
 		Secrets: map[string][]byte{SecretTLSKey: key, SecretTLSCert: cert},
 	}, nil
 }
+
+// SubscriptionUDP gives the subscription service the UDP port of its TCP
+// port's number, for the echo of channel probes (R4-16), on nodes set up
+// before it.
+func SubscriptionUDP(ctx context.Context, st *store.Store) error {
+	svc, err := st.ServiceByName(ctx, SubscriptionService)
+	if err != nil {
+		return err
+	}
+	ports, err := svc.Ports()
+	if err != nil || len(ports) == 0 {
+		return fmt.Errorf("subscription service has no port: %w", err)
+	}
+	want := store.Port{Proto: "udp", Num: ports[0].Num}
+	if slices.Contains(ports, want) {
+		return nil
+	}
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
+		return err
+	}
+	list := make([]string, 0, len(ports)+1)
+	for _, p := range ports {
+		list = append(list, p.String())
+	}
+	settings["ports"] = append(list, want.String())
+	b, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	return st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: string(b)})
+}
+
+// SelfSigned makes a self-signed ECDSA P-256 certificate for host.
+func SelfSigned(host string) (keyDER, certDER []byte, err error) { return selfSigned(host) }
 
 func selfSigned(host string) (keyDER, certDER []byte, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -197,6 +235,7 @@ func selfSigned(host string) (keyDER, certDER []byte, err error) {
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: host},
+		DNSNames:     []string{host},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().AddDate(10, 0, 0),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -291,6 +330,118 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			return svc, err
 		}
 		svc.Secrets[SecretSiteSeed] = seed
+	case "hy2-masq":
+		// Hysteria2 with masquerade (R3-1): a random name of the node's
+		// domain under the certificate of its site.
+		site, err := siteFor(ctx, st, all)
+		if err != nil {
+			return svc, err
+		}
+		if all, err = st.ListServices(ctx); err != nil {
+			return svc, err
+		}
+		settings["site"] = site.Name
+		if _, ok := settings["sni"]; !ok {
+			name, err := newZone(ctx, st, all)
+			if err != nil {
+				return svc, err
+			}
+			settings["sni"] = name
+		}
+	case "doh", "naive", "yggdrasil":
+		// DoH (R3-2), naive (R2-14) and Yggdrasil (R4-15) share TCP 443 behind
+		// the front (R2-15) under names of the node's domain, with the
+		// certificate of the site REALITY steals from (unknown names go to
+		// REALITY, which answers as that site).
+		site := ""
+		for _, s := range all {
+			if s.Kind == "reality" && s.Enabled && siteOf(s) != "" {
+				site = siteOf(s)
+			}
+		}
+		if site == "" {
+			return svc, fmt.Errorf("%w %s shares TCP 443 with REALITY under the node's own site: add reality first (rayctl service add reality reality)", store.ErrInvalid, svc.Kind)
+		}
+		settings["site"] = site
+		if _, ok := settings["sni"]; !ok {
+			name, err := newZone(ctx, st, all)
+			if err != nil {
+				return svc, err
+			}
+			settings["sni"] = name
+		}
+		if _, ok := settings["ports"]; !ok {
+			// TCP 443 and, for DoH3 and naive-quic, UDP 443: both behind the
+			// front (R2-15, R3-5). Yggdrasil links are TLS over TCP only.
+			settings["ports"] = []string{"tcp/443", "udp/443"}
+			if svc.Kind == "yggdrasil" {
+				settings["ports"] = []string{"tcp/443"}
+			}
+		}
+		if svc.Kind == "yggdrasil" {
+			// The node's key, and the port of its mesh address that leads to
+			// inner: random per node, like everything a scan could match.
+			seed := make([]byte, 32)
+			if _, err := rand.Read(seed); err != nil {
+				return svc, err
+			}
+			svc.Secrets[SecretYggdrasilSeed] = seed
+			if _, ok := settings["exit_port"]; !ok {
+				port, err := randInt(1024, 65535)
+				if err != nil {
+					return svc, err
+				}
+				settings["exit_port"] = port
+			}
+		}
+	case "api":
+		// The remote API (R3-3): one per node, its own random TCP port behind
+		// SPA, a self-signed certificate clients pin like the subscription's.
+		for _, s := range all {
+			if s.Kind == "api" {
+				return svc, fmt.Errorf("%w the node has its API already: %s", store.ErrInvalid, s.Name)
+			}
+		}
+		host, err := node.Host(ctx, st)
+		if err != nil {
+			return svc, err
+		}
+		key, cert, err := selfSigned(host)
+		if err != nil {
+			return svc, err
+		}
+		svc.Secrets[SecretTLSKey], svc.Secrets[SecretTLSCert] = key, cert
+		if _, ok := settings["ports"]; !ok {
+			port, err := freePort(ctx, st, all)
+			if err != nil {
+				return svc, err
+			}
+			settings["ports"] = []string{fmt.Sprintf("tcp/%d", port)}
+		}
+	case "hy2-obfs":
+		// Hysteria2 inside salamander (R3-1): nothing of it shows outside,
+		// so its certificate is its own, self-signed, pinned by clients
+		// (niko-pin) and never in DNS or CT logs.
+		if _, ok := settings["sni"]; !ok {
+			label := make([]byte, 6)
+			if _, err := rand.Read(label); err != nil {
+				return svc, err
+			}
+			settings["sni"] = hex.EncodeToString(label) + ".invalid"
+		}
+		sni, _ := settings["sni"].(string)
+		key, cert, err := selfSigned(sni)
+		if err != nil {
+			return svc, err
+		}
+		svc.Secrets[SecretTLSKey], svc.Secrets[SecretTLSCert] = key, cert
+		pw := make([]byte, 24)
+		if _, err := rand.Read(pw); err != nil {
+			return svc, err
+		}
+		svc.Secrets[SecretObfsPassword] = []byte(base64.RawURLEncoding.EncodeToString(pw))
+		// UDP 443 like hy2-masq: the front tells them apart by salamander
+		// (udpmux, R3-4).
 	case "reality":
 		if _, ok := settings["target"]; !ok {
 			// Self-steal: the node's own decoy site answers non-clients.
@@ -310,8 +461,13 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 	}
 
 	if rotates(svc.Kind) {
-		if _, ok := settings["udp_rotation"]; !ok {
-			rot, key, err := newRotation(ctx, st, all)
+		// This service's own ports count as taken too.
+		b, err := json.Marshal(settings)
+		if err != nil {
+			return svc, err
+		}
+		if _, ok := settings["udp_rotation"]; !ok && hasUDP(store.Service{Kind: svc.Kind, Settings: string(b)}) {
+			rot, key, err := newRotation(ctx, st, append(slices.Clone(all), store.Service{Kind: svc.Kind, Settings: string(b)}))
 			if err != nil {
 				return svc, err
 			}
@@ -451,14 +607,26 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			return svc, fmt.Errorf("%w rotate_sni: true or false", store.ErrInvalid)
 		}
 		v = b
+	case (svc.Kind == "hy2-masq" || svc.Kind == "hy2-obfs") && (key == "up_mbps" || key == "down_mbps"):
+		// The ceilings of the server's Brutal per connection (R4-16): up is
+		// what the node sends a client at most (the node's channel or its
+		// tariff), down what a client may send it; 0 removes the ceiling.
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 || n > 100000 {
+			return svc, fmt.Errorf("%w %s: Mbit/s, 0 to 100000 (0: none)", store.ErrInvalid, key)
+		}
+		v = n
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni; hy2-*: up_mbps, down_mbps)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
 		return svc, err
 	}
 	settings[key] = v
+	if v == 0 {
+		delete(settings, key)
+	}
 	b, err := json.Marshal(settings)
 	if err != nil {
 		return svc, err
@@ -589,15 +757,53 @@ func rotates(kind string) bool {
 	return slices.Contains([]string{"hy2-masq", "hy2-obfs", "naive", "doh"}, kind)
 }
 
-// ServiceRotation returns the schedule of a service, if it has one.
+// ServiceRotation returns the schedule of a service, if it has one and a
+// UDP port for it to lead to: DoH and naive serve TCP 443 only until a
+// udpmux (DoH3, naive-quic), and clients must not be told otherwise.
 func ServiceRotation(svc store.Service) (Rotation, bool) {
 	var s struct {
 		Rot *Rotation `json:"udp_rotation"`
 	}
-	if json.Unmarshal([]byte(svc.Settings), &s) != nil || s.Rot == nil || s.Rot.Range == 0 {
+	if json.Unmarshal([]byte(svc.Settings), &s) != nil || s.Rot == nil || s.Rot.Range == 0 || !hasUDP(svc) {
 		return Rotation{}, false
 	}
 	return *s.Rot, true
+}
+
+func hasUDP(svc store.Service) bool {
+	ports, err := svc.Ports()
+	return err == nil && slices.ContainsFunc(ports, func(p store.Port) bool { return p.Proto == "udp" })
+}
+
+// freePort picks a random port that no SPA range, rotation range, service
+// port or the ACME responder uses.
+func freePort(ctx context.Context, st *store.Store, all []store.Service) (int, error) {
+	params, err := node.LoadParams(ctx, st)
+	if err != nil {
+		return 0, err
+	}
+	acme := -1
+	if b, err := st.GetSetting(ctx, settingACMEPort); err == nil {
+		acme, _ = strconv.Atoi(string(b))
+	}
+	for range 1000 {
+		p, err := randInt(20000, 60999)
+		if err != nil {
+			return 0, err
+		}
+		taken := p == acme || (p >= int(params.PortBase) && p < int(params.PortBase)+int(params.PortRange))
+		for _, s := range all {
+			if r, ok := ServiceRotation(s); ok && p >= int(r.Base) && p < int(r.Base)+int(r.Range) {
+				taken = true
+			}
+			ports, _ := s.Ports()
+			taken = taken || slices.ContainsFunc(ports, func(x store.Port) bool { return int(x.Num) == p })
+		}
+		if !taken {
+			return p, nil
+		}
+	}
+	return 0, errors.New("no free port")
 }
 
 // newRotation picks a port range that overlaps neither the SPA range, nor

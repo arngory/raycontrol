@@ -21,11 +21,18 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [cheatsheet.md](cheatsheet.md) | Все команды `rayctl` на одной странице. |
 | [spec/spa-v2.md](spec/spa-v2.md) | Формат SPA v2 и пакета регистрации устройства (заморожен). |
 | [spec/subscription-v1.md](spec/subscription-v1.md) | Подписка: запрос, подписи, ссылки с параметрами `niko-*` (заморожена). |
+| [spec/api-v1.md](spec/api-v1.md) | Удалённый API: приглашения `rcinv1:`, регистрация, mTLS по ключу устройства, роли. |
 | [RELEASE.md](RELEASE.md) | Ключ подписи и выпуск релизов. |
 | [handoff/niko-session.md](handoff/niko-session.md) | Что передать в сессию Niko: правки SPEC, контракт niko-server, доработки клиента. |
 | [handoff/niko-r1-reply.md](handoff/niko-r1-reply.md) | Ответ на документы R1 сессии Niko: TCP-носитель SPA, замечания к CONFIG и IPC. |
 | [handoff/niko-r4-note.md](handoff/niko-r4-note.md) | Что изменилось на сервере в R4 и что нужно от клиента: `next`, импорт пакета, требования к пакетам. |
+| [handoff/niko-r3-note.md](handoff/niko-r3-note.md) | Серверная часть R2/R3: профили Hysteria2, DoH, naive, регистрация по приглашению `rcinv1:`, что проверить в CI Niko. |
+| [handoff/niko-r3-reply.md](handoff/niko-r3-reply.md) | Ответ на RAYCONTROL.md §9–§10: DoH напрямую на ноду, ссылка `rcinv1:` как URI, перенос niko-server в `arngory/niko-server`. |
+| [handoff/niko-mux-note.md](handoff/niko-mux-note.md) | Фронт niko-server на 443: tcpmux и udpmux, Hysteria2 на sing-quic, naive-quic и DoH3, что поменять в CI Niko. |
+| [handoff/niko-ygg-note.md](handoff/niko-ygg-note.md) | Yggdrasil на ноде (R4-15): профиль `niko-ygg`, конфиг ядра клиента, ротация ключа вместе с UUID. |
+| [handoff/niko-probe-note.md](handoff/niko-probe-note.md) | Замер канала (R4-16, ответ на §13): TCP и эхо UDP на эндпоинте подписки, потолки Brutal, что дальше. |
+| [handoff/niko-prompt-2026-11-03.md](handoff/niko-prompt-2026-11-03.md) | Промпт для сессии клиента: всё с прошлых закреплений (фронт, Yggdrasil, замер, Brutal), что сделать и что прислать. |
 
-Статус: решения приняты (08), документы 01–04 переписаны под них. Data plane — [niko-server](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/SPEC.md), control plane — raycontrol.
+Статус: решения приняты (08), документы 01–04 переписаны под них. Data plane — [niko-server](https://github.com/arngory/niko-server) ([SPEC](https://github.com/arngory/niko-server/blob/main/docs/SPEC.md)), control plane — raycontrol; обе ведёт эта сессия.
 Код v0 перенесён в `legacy/`. Этапы R0 и R1 реализованы, установка проверяется в CI на Debian 12/13, Ubuntu 24.04 и
-Rocky Linux 9/10 (решение R2-1); niko-server-v0.1.1 выпущен, следующий шаг — релиз raycontrol v0.2.0 (RELEASE.md).
+Rocky Linux 9/10 (решение R2-1); niko-server живёт в [`arngory/niko-server`](https://github.com/arngory/niko-server) (релиз v0.6.0), raycontrol v0.2.0 выпущен.
