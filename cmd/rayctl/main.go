@@ -447,6 +447,7 @@ func keyState(s *nodev1.Service) string {
 		RotatedAt int64  `json:"rotated_at"`
 		NextFrom  int64  `json:"next_from"`
 		SNINext   string `json:"sni_next"`
+		PrevUntil int64  `json:"prev_until"`
 	}
 	_ = json.Unmarshal([]byte(s.SettingsJson), &st)
 	day := func(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04") }
@@ -462,6 +463,9 @@ func keyState(s *nodev1.Service) string {
 	}
 	if st.NextFrom != 0 && st.SNINext != "" {
 		out += " with a new name"
+	}
+	if st.PrevUntil != 0 {
+		out += ", previous keys until " + day(st.PrevUntil) // R4-19
 	}
 	return out
 }

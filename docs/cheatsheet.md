@@ -79,7 +79,7 @@
 | `rayctl service set reality rotate_sni=false` | не менять имя REALITY при ротации |
 | `rayctl service set hy2-masq up_mbps=500` | потолок серверного Brutal на соединение: нода шлёт клиенту не быстрее min(500 Мбит/с, темп клиента); `down_mbps` — потолок отдачи клиента; `0` — без потолка |
 | `rayctl service set ygg peers=tls://host:443,quic://host:443` → `rayctl apply` | публичные пиры Yggdrasil (по умолчанию нет): нода видна в сети Yggdrasil, клиенты получают пиры как запасной путь; `peers=none` — выключить |
-| `rayctl service rotate reality [-now]` | новые ключи (и имя) REALITY: через срок публикации или сразу |
+| `rayctl service rotate reality [-now]` | новые ключи (и имя) REALITY: через срок публикации или сразу; с `-now` прежние ключи сразу перестают работать, иначе принимаются ещё `-cred-grace` |
 
 ## DNS (Cloudflare)
 
@@ -119,7 +119,7 @@ shred -u /root/phone.bundle
 
 | Флаг | По умолчанию | Что |
 |---|---|---|
-| `-cred-period` / `-cred-lead` / `-cred-grace` | 30 д / 3 д / 2 д | UUID пользователей: срок, публикация заранее, приём старого |
+| `-cred-period` / `-cred-lead` / `-cred-grace` | 30 д / 3 д / 2 д | UUID пользователей: срок, публикация заранее, приём старого; `-cred-grace` — и приём прежних ключей REALITY (R4-19) |
 | `-reality-period` / `-reality-prepare` | 90 д / 1 д | ключи и имя REALITY; время на сертификат нового имени |
 | `-spa-tcp` | true | TCP-носитель SPA; `false`, если хватает UDP |
 | `-acme-directory` | Let's Encrypt | CA; пусто — без сертификатов |

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -275,5 +276,35 @@ func TestReality(t *testing.T) {
 	if !strings.Contains(string(tcp), `{"backend":"r","sni":["www.example.org"]}`) || !strings.Contains(string(tcp), `"default":"r"`) ||
 		!strings.Contains(string(backends), `"r":{"mode":"proxy-v2","socket":"/run/niko/r/reality.sock"`) {
 		t.Fatalf("front tcp %s backends %s", tcp, backends)
+	}
+
+	// After a switch with a grace period (R4-19): the previous keys on an
+	// inbound of their own, which the current one hands what it does not
+	// recognise; it hands the target what it does not recognise in turn.
+	before := in
+	e := provision.RealityEpoch{Period: 90 * 24 * time.Hour, Lead: 3 * 24 * time.Hour, Prepare: 24 * time.Hour, Grace: 48 * time.Hour}
+	for _, at := range []time.Duration{87, 90} {
+		if n, err := provision.RotateReality(ctx, st, svc.CreatedAt.Add(at*24*time.Hour), e, nil, nil); err != nil || n != 1 {
+			t.Fatalf("rotate: %d %v", n, err)
+		}
+	}
+	if m, err = render.Collect(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	c, _ = read(m)
+	if len(c.Inbounds) != 2 {
+		t.Fatalf("inbounds during the grace period: %d", len(c.Inbounds))
+	}
+	cur, prev := c.Inbounds[0], c.Inbounds[1]
+	if cur.Stream.Reality.Target != "/run/niko/r/reality-prev.sock" || cur.Stream.Reality.PrivateKey == before.Stream.Reality.PrivateKey ||
+		prev.Listen != "/run/niko/r/reality-prev.sock,0600" || prev.Stream.Sockopt.AcceptProxyProtocol ||
+		prev.Stream.Reality.Target != "www.example.org:443" || prev.Stream.Reality.PrivateKey != before.Stream.Reality.PrivateKey ||
+		!slices.Equal(prev.Stream.Reality.ShortIDs, before.Stream.Reality.ShortIDs) || prev.Settings.Decryption != before.Settings.Decryption ||
+		!slices.Equal(prev.Stream.Reality.ServerNames, before.Stream.Reality.ServerNames) || len(prev.Settings.Clients) != 1 {
+		t.Fatalf("grace period:\ncurrent %+v\nprevious %+v", cur, prev)
+	}
+	r2 := m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })]
+	if tags := render.XrayTags(r2); !slices.Equal(tags, []string{render.RealityTag, render.RealityPrevTag}) {
+		t.Fatalf("tags %v", tags)
 	}
 }

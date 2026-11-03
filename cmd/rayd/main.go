@@ -128,11 +128,11 @@ func cmdServe(args []string) error {
 	credPeriod := fs.Duration("cred-period", 30*24*time.Hour, "how long a user credential stays current (0: no rotation)")
 	credLead := fs.Duration("cred-lead", 3*24*time.Hour, "the next credential is in the subscription this long before the switch")
 	probeDaily := fs.Int("probe-daily-mib", probe.DefaultDaily>>20, "channel probes: MiB per device and UTC day, both directions")
-	credGrace := fs.Duration("cred-grace", 2*24*time.Hour, "the previous credential is accepted this long after the switch (12h at least)")
+	credGrace := fs.Duration("cred-grace", 2*24*time.Hour, "the previous credential (and REALITY key set) is accepted this long after the switch (12h at least)")
 	realityPeriod := fs.Duration("reality-period", 90*24*time.Hour, "how long REALITY keys stay current; their next set is published -cred-lead ahead (0: no rotation)")
 	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new REALITY server name may wait for its certificate")
 	fs.Parse(args)
-	epoch := provision.RealityEpoch{Period: *realityPeriod, Lead: *credLead, Prepare: *realityPrepare}
+	epoch := provision.RealityEpoch{Period: *realityPeriod, Lead: *credLead, Prepare: *realityPrepare, Grace: *credGrace}
 	if err := epoch.Check(); err != nil {
 		return err
 	}

@@ -294,7 +294,7 @@ func TestRealityWithXray(t *testing.T) {
 	if out, err := exec.Command(bin, "run", "-test", "-c", server).CombinedOutput(); err != nil {
 		t.Fatalf("xray -test: %v\n%s", err, out)
 	}
-	runXray(t, bin, server)
+	stopServer := runXray(t, bin, server)
 
 	link, err := sub.RealityLink(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.Kind == "reality" })], user.ID)
 	if err != nil {
@@ -323,6 +323,71 @@ func TestRealityWithXray(t *testing.T) {
 	defer conn.Close()
 	if got := conn.ConnectionState().PeerCertificates[0].Raw; !bytes.Equal(got, targetCert.Certificate[0]) {
 		t.Fatal("a probe without credentials does not get the target's certificate")
+	}
+
+	// The keys rotate under the same name (a foreign target, R4-7). For the
+	// grace period the previous keys get in through the current inbound's
+	// target (R4-19), users synced on both inbounds; then only the new ones.
+	day := 24 * time.Hour
+	e := provision.RealityEpoch{Period: 90 * day, Lead: 3 * day, Prepare: day, Grace: 2 * day}
+	restart := func(at time.Time) {
+		t.Helper()
+		if n, err := provision.RotateReality(ctx, st, at, e, nil, nil); err != nil || n != 1 {
+			t.Fatalf("rotate at %v: %d %v", at, n, err)
+		}
+		if m, err = render.Collect(ctx, st); err != nil {
+			t.Fatal(err)
+		}
+		m.FrontTCP = false
+		files, _, err := render.Render(m, paths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		serverCfg = nil
+		json.Unmarshal(files[0].Content, &serverCfg)
+		delete(serverCfg, "dns")
+		delete(serverCfg, "routing")
+		serverCfg["outbounds"] = []map[string]any{{"protocol": "freedom", "settings": map[string]any{
+			"finalRules": []map[string]any{{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}}}
+		stopServer()
+		os.Remove(api)
+		os.Remove(filepath.Join(paths.Run, "reality", render.RealityPrevTag+".sock"))
+		os.MkdirAll(filepath.Join(paths.Run, "reality"), 0o755)
+		stopServer = runXray(t, bin, writeJSON(t, serverCfg))
+		waitFile(t, api)
+	}
+	restart(svc.CreatedAt.Add(87 * day)) // published, nothing changes for Xray yet
+	restart(svc.CreatedAt.Add(90 * day)) // switched
+	if tags := render.XrayTags(m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.Kind == "reality" })]); len(tags) != 2 {
+		t.Fatalf("tags during the grace period: %v", tags)
+	}
+	newLink, err := sub.RealityLink(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.Kind == "reality" })], user.ID)
+	if err != nil || newLink == link {
+		t.Fatalf("new link: %v", err)
+	}
+	fetchThroughLink(t, bin, newLink, "", page.URL)
+	fetchThroughLink(t, bin, link, "", page.URL)
+	for _, tag := range []string{render.RealityTag, render.RealityPrevTag} {
+		if added, _, err := xrayapi.Dial(api).SyncVLESS(ctx, tag, render.RealityFlow, want); err != nil || added != 1 {
+			t.Fatalf("sync %s: +%d %v", tag, added, err)
+		}
+	}
+	fetchThroughLink(t, bin, link, newID, page.URL)
+	fetchThroughLink(t, bin, newLink, newID, page.URL)
+	probeConn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", "127.0.0.1:"+strconv.Itoa(port),
+		&tls.Config{ServerName: "target.test", InsecureSkipVerify: true}) //nolint:gosec // looking at the certificate
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := probeConn.ConnectionState().PeerCertificates[0].Raw; !bytes.Equal(got, targetCert.Certificate[0]) {
+		t.Fatal("through the chain a probe does not get the target's certificate")
+	}
+	probeConn.Close()
+
+	restart(svc.CreatedAt.Add(92 * day)) // the grace period is over
+	fetchThroughLink(t, bin, newLink, "", page.URL)
+	if err := tryThroughLink(t, bin, link, "", page.URL, 3); err == nil {
+		t.Fatal("the previous keys still work after the grace period")
 	}
 }
 
@@ -486,7 +551,7 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	// the next name too, as the manager does it: new keys and a new name of
 	// the node's own domain.
 	day := 24 * time.Hour
-	epoch := provision.RealityEpoch{Period: 90 * day, Lead: 3 * day, Prepare: day}
+	epoch := provision.RealityEpoch{Period: 90 * day, Lead: 3 * day, Prepare: day, Grace: 2 * day}
 	resolves := func(context.Context, string) error { return nil }
 	if n, err := provision.RotateReality(ctx, st, svc.CreatedAt.Add(86*day), epoch, resolves, nil); err != nil || n != 1 {
 		t.Fatalf("prepare: %d %v", n, err)
@@ -760,34 +825,44 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	if err != nil || profiles[0].Next == nil {
 		t.Fatalf("no next in the subscription: %v", err)
 	}
-	if n, err := provision.RotateReality(ctx, st, svc.CreatedAt.Add(90*day), epoch, resolves, nil); err != nil || n != 1 {
-		t.Fatalf("switch: %d %v", n, err)
-	}
-	m, err = render.Collect(ctx, st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if files, skipped, err = render.Render(m, paths); err != nil || len(skipped) != 0 {
-		t.Fatalf("render: %v, skipped %v", err, skipped)
-	}
-	serverCfg = nil
-	for _, f := range files {
-		os.WriteFile(f.Path, f.Content, 0o644)
-		if f.Service == "reality" {
-			json.Unmarshal(f.Content, &serverCfg)
+	// Re-render after a rotation step and restart REALITY and the front, as
+	// rayd and the units do on a node.
+	restart := func(at time.Time) {
+		t.Helper()
+		if n, err := provision.RotateReality(ctx, st, at, epoch, resolves, nil); err != nil || n != 1 {
+			t.Fatalf("rotate at %v: %d %v", at, n, err)
 		}
+		if m, err = render.Collect(ctx, st); err != nil {
+			t.Fatal(err)
+		}
+		if files, skipped, err = render.Render(m, paths); err != nil || len(skipped) != 0 {
+			t.Fatalf("render: %v, skipped %v", err, skipped)
+		}
+		serverCfg = nil
+		for _, f := range files {
+			os.WriteFile(f.Path, f.Content, 0o644)
+			if f.Service == "reality" {
+				json.Unmarshal(f.Content, &serverCfg)
+			}
+		}
+		stopServer()
+		for _, sock := range []string{paths.APISocket("reality"), filepath.Join(paths.Run, "reality", "reality.sock"),
+			filepath.Join(paths.Run, "reality", render.RealityPrevTag+".sock")} {
+			os.Remove(sock)
+		}
+		// The front's route follows the new name: it restarts, as on a node.
+		stopFront()
+		stopFront = runFront(t, niko, filepath.Join(paths.Rendered, "front", "front.json"), port)
+		delete(serverCfg, "dns")
+		delete(serverCfg, "routing")
+		serverCfg["outbounds"] = []map[string]any{{"protocol": "freedom", "settings": map[string]any{
+			"finalRules": []map[string]any{{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}}}
+		stopServer = runXray(t, bin, writeJSON(t, serverCfg))
 	}
-	stopServer()
-	os.Remove(paths.APISocket("reality"))
-	os.Remove(filepath.Join(paths.Run, "reality", "reality.sock"))
-	// The front's route follows the new name: it restarts, as on a node.
-	stopFront()
-	runFront(t, niko, filepath.Join(paths.Rendered, "front", "front.json"), port)
-	delete(serverCfg, "dns")
-	delete(serverCfg, "routing")
-	serverCfg["outbounds"] = []map[string]any{{"protocol": "freedom", "settings": map[string]any{
-		"finalRules": []map[string]any{{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}}}
-	runXray(t, bin, writeJSON(t, serverCfg))
+	restart(svc.CreatedAt.Add(90 * day))
+	if ins, _ := serverCfg["inbounds"].([]any); len(ins) != 2 {
+		t.Fatalf("inbounds during the grace period: %d", len(ins))
+	}
 
 	newLink, err := sub.RealityLink(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.Kind == "reality" })], user.ID)
 	if err != nil {
@@ -798,8 +873,21 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 	newLink = onPort(newLink)
 	fetchThroughLink(t, bin, newLink, "", page.URL)
+	// The previous keys and name still get in for the grace period (R4-19),
+	// through the current inbound's target; probes under either name meet
+	// the site.
+	fetchThroughLink(t, bin, link, "", page.URL)
+	probe(nextName)
+	probe(name)
+
+	// After the grace period only the current keys work.
+	restart(svc.CreatedAt.Add(92 * day))
+	if ins, _ := serverCfg["inbounds"].([]any); len(ins) != 1 {
+		t.Fatalf("inbounds after the grace period: %d", len(ins))
+	}
+	fetchThroughLink(t, bin, newLink, "", page.URL)
 	if err := tryThroughLink(t, bin, link, "", page.URL, 3); err == nil {
-		t.Fatal("the previous keys still work after the switch")
+		t.Fatal("the previous keys still work after the grace period")
 	}
 	probe(nextName)
 }

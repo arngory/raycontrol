@@ -645,7 +645,7 @@ var sniffing = map[string]any{"enabled": true, "destOverride": []string{"http", 
 // xrayFile is the config of an Xray exit: one inbound, the API on its own
 // unix socket, DoH, and routing that keeps private networks and BitTorrent
 // out.
-func xrayFile(s Service, m Model, p Paths, inbound map[string]any) (File, error) {
+func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, error) {
 	outbounds := []map[string]any{
 		{"tag": "direct", "protocol": "freedom", "streamSettings": map[string]any{"sockopt": map[string]string{"domainStrategy": "UseIP"}}},
 		{"tag": "block", "protocol": "blackhole"},
@@ -674,7 +674,7 @@ func xrayFile(s Service, m Model, p Paths, inbound map[string]any) (File, error)
 			"servers":       []string{"https+local://1.1.1.1/dns-query", "https+local://9.9.9.9/dns-query"},
 			"queryStrategy": "UseIP",
 		},
-		"inbounds":  []map[string]any{inbound},
+		"inbounds":  inbounds,
 		"outbounds": outbounds,
 		"routing":   map[string]any{"domainStrategy": "IPOnDemand", "rules": rules},
 	})
@@ -684,8 +684,13 @@ func xrayFile(s Service, m Model, p Paths, inbound map[string]any) (File, error)
 	return File{Path: path.Join(p.Rendered, s.Name, "xray.json"), Mode: 0o640, Group: GroupName(s.Name), Content: b, Service: s.Name}, nil
 }
 
-// RealityTag is the inbound tag of a REALITY service (Xray API target).
-const RealityTag = "reality"
+// RealityTag is the inbound tag of a REALITY service (Xray API target);
+// RealityPrevTag the inbound of its previous keys during the grace period
+// after a switch (R4-19).
+const (
+	RealityTag     = "reality"
+	RealityPrevTag = "reality-prev"
+)
 
 // RealityFlow is the VLESS flow of REALITY clients.
 const RealityFlow = "xtls-rprx-vision"
@@ -754,6 +759,48 @@ func NextReality(s Service) (next Service, from time.Time, ok bool) {
 	return next, time.Unix(state.NextFrom, 0), true
 }
 
+// PrevReality returns a REALITY service as it was before its last switch,
+// while the previous keys are accepted (R4-19); ok is false otherwise.
+func PrevReality(s Service) (prev Service, ok bool) {
+	state := provision.ParseRealityState(s.Service)
+	if state.PrevUntil == 0 {
+		return s, false
+	}
+	prev = s
+	prev.Secrets = maps.Clone(s.Secrets)
+	for _, name := range provision.RealitySecrets {
+		v, ok := s.Secrets[provision.PrevSecret(name)]
+		if !ok {
+			return s, false
+		}
+		prev.Secrets[name] = v
+	}
+	if state.SNIPrev != "" {
+		var settings map[string]any
+		if err := json.Unmarshal([]byte(s.Settings), &settings); err != nil {
+			return s, false
+		}
+		settings["sni"] = state.SNIPrev
+		b, err := json.Marshal(settings)
+		if err != nil {
+			return s, false
+		}
+		prev.Settings = string(b)
+	}
+	return prev, true
+}
+
+// XrayTags are the inbounds of an Xray service whose users rayd syncs.
+func XrayTags(s Service) []string {
+	if s.Kind != "reality" {
+		return []string{InnerTag}
+	}
+	if _, ok := PrevReality(s); ok {
+		return []string{RealityTag, RealityPrevTag}
+	}
+	return []string{RealityTag}
+}
+
 // ShortIDs returns the shortIds of a REALITY service.
 func ShortIDs(s Service) []string {
 	return strings.Split(string(s.Secrets[provision.SecretShortIDs]), ",")
@@ -773,31 +820,29 @@ func realityConfig(s Service, m Model, p Paths) (File, error) {
 	if rs.Site != "" {
 		rs.Target = p.SiteSocket(rs.Site)
 	}
-	decryption, _, err := VLESSEncryption(s.Secrets[provision.SecretMLKEMSeed])
-	if err != nil {
-		return File{}, fmt.Errorf("reality %s: %w", s.Name, err)
-	}
-	enc := base64.RawURLEncoding
 	clients := xrayClients(m, s, RealityFlow)
-	stream := map[string]any{
-		"network":  "raw",
-		"security": "reality",
-		"realitySettings": map[string]any{
-			"target":      rs.Target,
-			"xver":        0,
-			"serverNames": []string{rs.SNI},
-			"privateKey":  enc.EncodeToString(s.Secrets[provision.SecretRealityKey]),
-			"mldsa65Seed": enc.EncodeToString(s.Secrets[provision.SecretRealityMLDSA]),
-			"shortIds":    ShortIDs(s),
-			"maxTimeDiff": RealityMaxTimeDiff.Milliseconds(),
-		},
+	// During the grace period after a switch (R4-19) the previous keys get an
+	// inbound of their own on a socket of this process: the current inbound
+	// hands it what it does not recognise, and it hands the site (or the
+	// target) what it does not recognise in turn. Clients that have not moved
+	// yet get in; a probe meets the same site as ever.
+	var prevInbound map[string]any
+	target := rs.Target
+	if prev, ok := PrevReality(s); ok {
+		var ps RealitySettings
+		_ = json.Unmarshal([]byte(prev.Settings), &ps)
+		in, err := realityInbound(prev, RealityPrevTag, ps.SNI, rs.Target, clients)
+		if err != nil {
+			return File{}, err
+		}
+		in["listen"] = p.socket(s.Name, RealityPrevTag) + ",0600"
+		prevInbound, target = in, p.socket(s.Name, RealityPrevTag)
 	}
-	inbound := map[string]any{
-		"tag":      RealityTag,
-		"protocol": "vless",
-		"settings": map[string]any{"clients": clients, "decryption": decryption},
-		"sniffing": sniffing,
+	inbound, err := realityInbound(s, RealityTag, rs.SNI, target, clients)
+	if err != nil {
+		return File{}, err
 	}
+	stream := inbound["streamSettings"].(map[string]any)
 	if m.FrontTCP {
 		// The front passes the stream with a PROXY v2 header (CONFIG.md).
 		inbound["listen"] = p.socket(s.Name, "reality") + ",0660"
@@ -812,8 +857,39 @@ func realityConfig(s Service, m Model, p Paths) (File, error) {
 			inbound["listen"] = "::"
 		}
 	}
-	inbound["streamSettings"] = stream
+	if prevInbound != nil {
+		return xrayFile(s, m, p, inbound, prevInbound)
+	}
 	return xrayFile(s, m, p, inbound)
+}
+
+// realityInbound is a REALITY inbound with the keys of s under a server
+// name; what it does not recognise goes to target.
+func realityInbound(s Service, tag, sni, target string, clients []map[string]string) (map[string]any, error) {
+	decryption, _, err := VLESSEncryption(s.Secrets[provision.SecretMLKEMSeed])
+	if err != nil {
+		return nil, fmt.Errorf("reality %s: %w", s.Name, err)
+	}
+	enc := base64.RawURLEncoding
+	return map[string]any{
+		"tag":      tag,
+		"protocol": "vless",
+		"settings": map[string]any{"clients": clients, "decryption": decryption},
+		"sniffing": sniffing,
+		"streamSettings": map[string]any{
+			"network":  "raw",
+			"security": "reality",
+			"realitySettings": map[string]any{
+				"target":      target,
+				"xver":        0,
+				"serverNames": []string{sni},
+				"privateKey":  enc.EncodeToString(s.Secrets[provision.SecretRealityKey]),
+				"mldsa65Seed": enc.EncodeToString(s.Secrets[provision.SecretRealityMLDSA]),
+				"shortIds":    ShortIDs(s),
+				"maxTimeDiff": RealityMaxTimeDiff.Milliseconds(),
+			},
+		},
+	}, nil
 }
 
 // tcpPort is the TCP port of a service (443 unless its settings say else).
