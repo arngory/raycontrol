@@ -267,4 +267,22 @@ func TestDoHService(t *testing.T) {
 	if SiteOf(d) != "site" || len(ports) != 1 || ports[0] != (store.Port{Proto: "tcp", Num: 443}) || !slices.Contains(names, sni.SNI) {
 		t.Fatalf("doh: %s, ports %v, site names %v", d.Settings, ports, names)
 	}
+	// TCP only until a udpmux: no UDP port schedule, in the settings or for
+	// clients; Hysteria2 on UDP keeps its own.
+	n, err := CreateService(ctx, st, store.Service{Kind: "naive", Name: "naive", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := CreateService(ctx, st, store.Service{Kind: "hy2-masq", Name: "hy2", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, svc := range []store.Service{d, n} {
+		if _, ok := ServiceRotation(svc); ok || strings.Contains(svc.Settings, "udp_rotation") || len(svc.Secrets[SecretPortKey]) != 0 {
+			t.Errorf("%s has a UDP schedule: %s", svc.Kind, svc.Settings)
+		}
+	}
+	if _, ok := ServiceRotation(h); !ok {
+		t.Errorf("hy2-masq has no UDP schedule: %s", h.Settings)
+	}
 }

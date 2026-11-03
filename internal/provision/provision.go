@@ -413,12 +413,12 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 	}
 
 	if rotates(svc.Kind) {
-		if _, ok := settings["udp_rotation"]; !ok {
-			// This service's own ports count as taken too.
-			b, err := json.Marshal(settings)
-			if err != nil {
-				return svc, err
-			}
+		// This service's own ports count as taken too.
+		b, err := json.Marshal(settings)
+		if err != nil {
+			return svc, err
+		}
+		if _, ok := settings["udp_rotation"]; !ok && hasUDP(store.Service{Kind: svc.Kind, Settings: string(b)}) {
 			rot, key, err := newRotation(ctx, st, append(slices.Clone(all), store.Service{Kind: svc.Kind, Settings: string(b)}))
 			if err != nil {
 				return svc, err
@@ -697,15 +697,22 @@ func rotates(kind string) bool {
 	return slices.Contains([]string{"hy2-masq", "hy2-obfs", "naive", "doh"}, kind)
 }
 
-// ServiceRotation returns the schedule of a service, if it has one.
+// ServiceRotation returns the schedule of a service, if it has one and a
+// UDP port for it to lead to: DoH and naive serve TCP 443 only until a
+// udpmux (DoH3, naive-quic), and clients must not be told otherwise.
 func ServiceRotation(svc store.Service) (Rotation, bool) {
 	var s struct {
 		Rot *Rotation `json:"udp_rotation"`
 	}
-	if json.Unmarshal([]byte(svc.Settings), &s) != nil || s.Rot == nil || s.Rot.Range == 0 {
+	if json.Unmarshal([]byte(svc.Settings), &s) != nil || s.Rot == nil || s.Rot.Range == 0 || !hasUDP(svc) {
 		return Rotation{}, false
 	}
 	return *s.Rot, true
+}
+
+func hasUDP(svc store.Service) bool {
+	ports, err := svc.Ports()
+	return err == nil && slices.ContainsFunc(ports, func(p store.Port) bool { return p.Proto == "udp" })
 }
 
 // freePort picks a random port that no SPA range, rotation range, service
