@@ -390,8 +390,11 @@ func TestRealityRotationUrgent(t *testing.T) {
 	if err := RequestRealityRotation(ctx, st, "r", now, e.Lead, true); err != nil {
 		t.Fatal(err)
 	}
-	if rotate(now) != 1 || rotate(now) != 1 {
-		t.Fatal("urgent rotation")
+	if n := rotate(now); n != 1 {
+		t.Fatal("urgent rotation not published")
+	}
+	if n := rotate(now); n != 1 {
+		t.Fatal("urgent rotation not switched")
 	}
 	_, state, secrets := reload(t, ctx, st, "r")
 	if state.PrevUntil != 0 || state.SNIPrev != "" || state.Urgent || state.RotateAt != 0 {
