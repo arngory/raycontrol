@@ -5,7 +5,7 @@ Control plane for a self-contained proxy node. The data plane is
 (a sing-box fork); raycontrol keeps users and keys, renders configs, runs the
 SPA-gated firewall, rotates keys and serves the subscription and API.
 
-Status: **R1** done — perimeter (SPA v2 over UDP and TCP), DNS tunnels with
+Status: **R1–R3** done, **R4** all but `export`. **R1** — perimeter (SPA v2 over UDP and TCP), DNS tunnels with
 the inner stage on Xray, signed subscriptions, installer. **R2** — VLESS +
 REALITY + Vision on Xray (post-quantum key exchange and signature) with
 self-steal on the node's own decoy site, certificates through ACME. **R3** —
@@ -16,7 +16,8 @@ with mTLS and one-time invites. **R4** —
 rotation of user credentials and REALITY keys and names, Cloudflare for DNS
 records and wildcard certificates, uninstall back to the host's snapshot,
 redacted reports, a kernel-side early drop, encrypted backups, local metrics,
-Yggdrasil (direct TLS links behind the front, into the inner stage). Data plane: niko-server v0.6.0
+Yggdrasil (direct TLS links behind the front, into the inner stage), channel probes
+for clients and Brutal ceilings for Hysteria2. Data plane: niko-server v0.6.0
 (the front on UDP 53, TCP 443 and UDP 443; DNS tunnel, Hysteria2 and Yggdrasil backends); see
 [docs/04-roadmap.md](docs/04-roadmap.md).
 
@@ -147,10 +148,13 @@ Control plane самодостаточной прокси-ноды. Data plane �
 raycontrol хранит пользователей и ключи, генерирует конфиги, ведёт файрвол со SPA,
 ротирует ключи, отдаёт подписку и API.
 
-- **Статус:** R1 готов — периметр (SPA v2 по UDP и TCP), DNS-туннели с внутренней ступенью на Xray, подписанные
-  подписки, установщик. R2 — REALITY на Xray с постквантом и self-steal на своём сайте-приманке, сертификаты через
-  ACME. R4 — ротация UUID и ключей/имён REALITY, Cloudflare для DNS-записей и wildcard-сертификата, удаление до снимка
-  системы, очищенные отчёты, ранний отброс пакетов до стека ядра, Yggdrasil (прямые TLS-линки за фронтом, в `inner`). Data plane — niko-server v0.6.0 ([`arngory/niko-server`](https://github.com/arngory/niko-server)).
+- **Статус:** R1–R3 готовы, в R4 осталось `export`. R1 — периметр (SPA v2 по UDP и TCP), DNS-туннели с внутренней
+  ступенью на Xray, подписанные подписки, установщик. R2 — REALITY на Xray с постквантом и self-steal на своём
+  сайте-приманке, сертификаты через ACME. R3 — Hysteria2 дважды на UDP 443 за фронтом, DoH и naive (h2 и QUIC) на
+  общем 443, удалённый API с mTLS и приглашениями. R4 — ротация UUID и ключей/имён REALITY, Cloudflare для DNS-записей
+  и wildcard-сертификата, удаление до снимка системы, очищенные отчёты, ранний отброс пакетов до стека ядра,
+  резервные копии, метрики, Yggdrasil (прямые TLS-линки за фронтом, в `inner`), замер канала для клиентов и потолки
+  Brutal. Data plane — niko-server v0.6.0 ([`arngory/niko-server`](https://github.com/arngory/niko-server)).
 - **С нуля на Debian 13:** [docs/10-quickstart-debian13.md](docs/10-quickstart-debian13.md); все команды —
   [docs/cheatsheet.md](docs/cheatsheet.md).
 - **Установка:** любой современный Linux с systemd; полная установка проверяется в CI на Debian 12/13, Ubuntu 24.04,
