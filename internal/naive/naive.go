@@ -37,7 +37,8 @@ type Server struct {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodConnect || r.ProtoMajor != 2 || r.Header.Get("Padding") == "" || !s.authorized(r) {
+	// HTTP/2 (TCP) or HTTP/3 (QUIC); naive never speaks HTTP/1 to a server.
+	if r.Method != http.MethodConnect || r.ProtoMajor < 2 || r.Header.Get("Padding") == "" || !s.authorized(r) {
 		s.Answer.ServeHTTP(w, r)
 		return
 	}

@@ -337,7 +337,9 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			settings["sni"] = name
 		}
 		if _, ok := settings["ports"]; !ok {
-			settings["ports"] = []string{"tcp/443"} // DoH3 and naive-quic wait for a udpmux
+			// TCP 443 and, for DoH3 and naive-quic, UDP 443: both behind the
+			// front (R2-15, R3-5).
+			settings["ports"] = []string{"tcp/443", "udp/443"}
 		}
 	case "api":
 		// The remote API (R3-3): one per node, its own random TCP port behind

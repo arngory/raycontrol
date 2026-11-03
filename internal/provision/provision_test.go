@@ -265,12 +265,17 @@ func TestDoHService(t *testing.T) {
 	names, _ := SiteNames(site, all)
 	var sni struct{ SNI string }
 	json.Unmarshal([]byte(d.Settings), &sni)
-	if SiteOf(d) != "site" || len(ports) != 1 || ports[0] != (store.Port{Proto: "tcp", Num: 443}) || !slices.Contains(names, sni.SNI) {
+	// TCP 443 and UDP 443 (DoH3), both behind the front.
+	if SiteOf(d) != "site" || !slices.Equal(ports, []store.Port{{Proto: "tcp", Num: 443}, {Proto: "udp", Num: 443}}) || !slices.Contains(names, sni.SNI) {
 		t.Fatalf("doh: %s, ports %v, site names %v", d.Settings, ports, names)
 	}
-	// TCP only until a udpmux: no UDP port schedule, in the settings or for
-	// clients; Hysteria2 on UDP keeps its own.
+	// A schedule only with a UDP port: DoH and naive on UDP 443 too (DoH3,
+	// naive-quic) have one, like Hysteria2; a TCP-only service would not.
 	n, err := CreateService(ctx, st, store.Service{Kind: "naive", Name: "naive", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcpOnly, err := CreateService(ctx, st, store.Service{Kind: "naive", Name: "naive2", Enabled: true, Settings: `{"ports":["tcp/443"]}`})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,12 +283,12 @@ func TestDoHService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, svc := range []store.Service{d, n} {
-		if _, ok := ServiceRotation(svc); ok || strings.Contains(svc.Settings, "udp_rotation") || len(svc.Secrets[SecretPortKey]) != 0 {
-			t.Errorf("%s has a UDP schedule: %s", svc.Kind, svc.Settings)
+	for _, svc := range []store.Service{d, n, h} {
+		if _, ok := ServiceRotation(svc); !ok {
+			t.Errorf("%s has no UDP schedule: %s", svc.Kind, svc.Settings)
 		}
 	}
-	if _, ok := ServiceRotation(h); !ok {
-		t.Errorf("hy2-masq has no UDP schedule: %s", h.Settings)
+	if _, ok := ServiceRotation(tcpOnly); ok || strings.Contains(tcpOnly.Settings, "udp_rotation") || len(tcpOnly.Secrets[SecretPortKey]) != 0 {
+		t.Errorf("a TCP-only service has a UDP schedule: %s", tcpOnly.Settings)
 	}
 }

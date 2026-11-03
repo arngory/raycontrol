@@ -287,13 +287,14 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		}
 		units = append(units, unit{
 			name:        render.UnitName(s.Name),
-			description: "raycontrol naive " + s.Name + " (HTTP/2, X25519MLKEM768)",
+			description: "raycontrol naive " + s.Name + " (HTTP/2 and HTTP/3, X25519MLKEM768)",
 			needs:       path.Join(dir, render.NaiveChain),
 			service: []string{
 				"User=" + g, "Group=" + g,
 				fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s", g, g, path.Join(dir, render.NaiveKey), key),
 				"ExecStart=" + bin.Rayd + " naive -answer " + answer + " -users " + path.Join(dir, render.NaiveUsers) +
-					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name),
+					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name) +
+					" -quic-socket " + p.NaiveQUICSocket(s.Name),
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
 				"ReadWritePaths=" + path.Dir(p.NaiveSocket(s.Name)),

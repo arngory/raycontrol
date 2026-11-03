@@ -90,6 +90,9 @@ type Model struct {
 	// DoH and naive as passed sockets. Collect sets it; without it REALITY
 	// binds its TCP port itself (R2-7), and DoH and naive are not served.
 	FrontTCP bool
+	// FrontUDP puts UDP 443 behind the front (udpmux, v0.3, R3-4, R3-5):
+	// Hysteria2 always; DoH3 and naive-quic only with it.
+	FrontUDP bool
 }
 
 // HostIPv6 reports whether this host can open IPv6 sockets.
@@ -105,7 +108,7 @@ func HostIPv6() bool {
 // Collect reads the model from the store and creates missing inner
 // credentials for users who reach a service behind the inner stage.
 func Collect(ctx context.Context, st *store.Store) (Model, error) {
-	m := Model{IPv6: HostIPv6(), FrontTCP: true}
+	m := Model{IPv6: HostIPv6(), FrontTCP: true, FrontUDP: true}
 	params, err := node.LoadParams(ctx, st)
 	if err != nil {
 		return m, err
@@ -431,6 +434,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			}
 			_ = json.Unmarshal([]byte(s.Settings), &st)
 			ref := backendRef{Socket: p.DoHSocket(s.Name), Mode: "fd", UID: RaydUID}
+			quic := backendRef{Socket: p.DoH3Socket(s.Name), Mode: "packet", UID: RaydUID}
 			if s.Kind == "naive" {
 				fs, err := naiveFiles(s, m, p)
 				if err != nil {
@@ -442,9 +446,15 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				}
 				files = append(files, fs...)
 				ref = backendRef{Socket: p.NaiveSocket(s.Name), Mode: "fd", UID: s.UID}
+				quic = backendRef{Socket: p.NaiveQUICSocket(s.Name), Mode: "packet", UID: s.UID}
 			}
 			backends[s.Name] = ref
 			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: s.Name})
+			// The same name over QUIC: DoH3 and naive-quic (R3-5).
+			if m.FrontUDP {
+				backends[quicBackend(s.Name)] = quic
+				udpRoutes = append(udpRoutes, udpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: quicBackend(s.Name)})
+			}
 		case "ssh", "subscription", "api":
 			// Not data-plane processes.
 		default:
@@ -868,11 +878,24 @@ const (
 // DoHSocket is where rayd serves a DoH service for the site to pass it on.
 func (p Paths) DoHSocket(service string) string { return p.socket(service, "doh") }
 
-// NaiveSocket is where a naive process takes the connections the site
-// passes on; the directory belongs to the naive user and the site's group.
+// NaiveSocket is where a naive process takes the connections the front
+// passes; the directory belongs to the naive user and the front's group.
 func (p Paths) NaiveSocket(service string) string {
 	return path.Join(p.Run, service+"-in", "naive.sock")
 }
+
+// NaiveQUICSocket is where a naive process takes its QUIC datagrams from
+// the front (naive-quic, R3-5).
+func (p Paths) NaiveQUICSocket(service string) string {
+	return path.Join(p.Run, service+"-in", "quic.sock")
+}
+
+// DoH3Socket is where rayd takes the DoH service's QUIC datagrams (DoH3).
+func (p Paths) DoH3Socket(service string) string { return p.socket(service, "doh3") }
+
+// quicBackend names the front's backend for a service's QUIC side; "/" is
+// not allowed in service names.
+func quicBackend(service string) string { return service + "/quic" }
 
 // Files of a naive service (R2-14).
 const (

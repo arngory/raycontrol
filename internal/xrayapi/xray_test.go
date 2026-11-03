@@ -32,6 +32,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
+
 	"github.com/arngory/raycontrol/internal/doh"
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/nikoipc"
@@ -580,6 +583,15 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Their QUIC sides (DoH3, naive-quic, R3-5): datagrams from the front.
+	dl3, err := nikoipc.ListenPacket(paths.DoH3Socket("doh"), os.Getuid(), quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nl3, err := nikoipc.ListenPacket(paths.NaiveQUICSocket("naive"), os.Getuid(), quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// The front as rendered, on the test's port and with the test's UID for
 	// every backend.
 	stopFront := runFront(t, niko, filepath.Join(paths.Rendered, "front", "front.json"), port)
@@ -695,6 +707,52 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 		t.Fatalf("naive through REALITY: %q", got)
 	}
 
+	// The same names over QUIC through the front's UDP side: DoH3 and
+	// naive-quic, as rayd serves them (serveHTTP3).
+	h3 := func(pc net.PacketConn, h http.Handler) {
+		ln, err := quic.ListenEarly(pc, http3.ConfigureTLSConfig(&tls.Config{MinVersion: tls.VersionTLS13,
+			CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, Certificates: []tls.Certificate{cert}}), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := &http3.Server{Handler: h}
+		t.Cleanup(func() { srv.Close(); ln.Close() })
+		go srv.ServeListener(ln)
+	}
+	h3(dl3, dohSrv.Handler)
+	h3(nl3, naiveSrv.Handler)
+	h3client := &http3.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}},
+		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			return quic.DialAddrEarly(ctx, "127.0.0.1:"+strconv.Itoa(port), tlsCfg, cfg)
+		}}
+	defer h3client.Close()
+	resp, err = (&http.Client{Transport: h3client, Timeout: 5 * time.Second}).Get("https://" + u.Host + u.Path + "?dns=" + base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 20)))
+	if err != nil {
+		t.Fatalf("DoH3: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !bytes.Equal(body, answer) || resp.ProtoMajor != 3 {
+		t.Fatalf("DoH3 through the front: %s %s %q", resp.Status, resp.Proto, body)
+	}
+	pr3, pw3 := io.Pipe()
+	req3, _ := http.NewRequest(http.MethodConnect, "https://"+naiveName.SNI, pr3)
+	req3.Host = page.Listener.Addr().String()
+	req3.Header.Set("Padding", naive.PaddingHeader())
+	req3.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(naiveLink.User.String())))
+	resp3, err := h3client.RoundTrip(req3)
+	if err != nil || resp3.StatusCode != 200 {
+		t.Fatalf("naive-quic CONNECT: %v %v", resp3, err)
+	}
+	tunnel3 := naive.ClientStream(resp3.Body, pw3)
+	fmt.Fprintf(tunnel3, "GET / HTTP/1.1\r\nHost: page\r\nConnection: close\r\n\r\n")
+	got3, _ := io.ReadAll(io.LimitReader(tunnel3, 4096))
+	pw3.Close()
+	resp3.Body.Close()
+	if !bytes.Contains(got3, []byte("through reality")) {
+		t.Fatalf("naive-quic through the front: %q", got3)
+	}
+
 	// The switch: the subscription had the next link; the node renders the
 	// next keys and name, the site follows the name.
 	profiles, err := sub.Profiles(m, m.Users[0])
@@ -762,6 +820,9 @@ func runFront(t *testing.T, niko, rendered string, port int) (stop func()) {
 		t.Fatalf("no tcp section in the front config:\n%s", b)
 	}
 	tcp["listen"] = []string{"127.0.0.1:" + strconv.Itoa(port)}
+	if udp, ok := cfg["udp"].(map[string]any); ok {
+		udp["listen"] = []string{"127.0.0.1:" + strconv.Itoa(port)}
+	}
 	for _, ref := range cfg["backends"].(map[string]any) {
 		ref.(map[string]any)["uid"] = os.Getuid()
 	}

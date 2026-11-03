@@ -22,6 +22,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
+
 	"github.com/arngory/raycontrol/internal/api"
 	"github.com/arngory/raycontrol/internal/certs"
 	"github.com/arngory/raycontrol/internal/cloudflare"
@@ -263,6 +266,7 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 // dohListener is a running DoH endpoint and the certificate it serves.
 type dohListener struct {
 	srv  *http.Server
+	h3   context.CancelFunc // DoH3
 	cert [32]byte
 }
 
@@ -275,6 +279,7 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 	stop := func(name string) {
 		if l := running[name]; l != nil {
 			_ = l.srv.Close()
+			l.h3()
 			delete(running, name)
 		}
 	}
@@ -327,7 +332,18 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 				TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
 					Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}}}
 			go func() { _ = srv.ServeTLS(ln, "", "") }()
-			running[svc.Name] = &dohListener{srv: srv, cert: sum}
+			// DoH3: the same handler over QUIC, datagrams from the front (R3-5).
+			h3ctx, h3stop := context.WithCancel(ctx)
+			if pc, err := nikoipc.ListenPacket(p.DoH3Socket(svc.Name), render.FrontUID, log); err != nil {
+				log.Error("doh3 socket", "service", svc.Name, "err", err)
+			} else {
+				go func() {
+					if err := serveHTTP3(h3ctx, pc, cert, h); err != nil {
+						log.Error("doh3", "service", svc.Name, "err", err)
+					}
+				}()
+			}
+			running[svc.Name] = &dohListener{srv: srv, h3: h3stop, cert: sum}
 			log.Info("doh serving", "service", svc.Name)
 		}
 		for name := range running {
@@ -632,6 +648,7 @@ func cmdNaive(args []string) error {
 	chain := fs.String("chain", "", "certificate chain (PEM, leaf first)")
 	key := fs.String("key", "", "private key (PEM)")
 	socket := fs.String("socket", "", "SOCK_SEQPACKET socket the front passes connections to (niko-server IPC, mode fd)")
+	quicSocket := fs.String("quic-socket", "", "SOCK_SEQPACKET socket the front sends QUIC datagrams to (naive-quic; IPC mode packet)")
 	frontUID := fs.Int("front-uid", render.FrontUID, "UID of the niko-server front, the only peer accepted")
 	fs.Parse(args)
 	if *users == "" || *chain == "" || *key == "" || *socket == "" {
@@ -655,8 +672,21 @@ func cmdNaive(args []string) error {
 	if err != nil {
 		return err
 	}
+	ns := &naive.Server{Users: &naive.Users{Path: *users}, Answer: handler, Log: log}
+	if *quicSocket != "" {
+		// naive-quic (R3-5): the same server over HTTP/3.
+		pc, err := nikoipc.ListenPacket(*quicSocket, *frontUID, log)
+		if err != nil {
+			return err
+		}
+		go func() {
+			if err := serveHTTP3(ctx, pc, cert, ns); err != nil {
+				log.Error("naive-quic", "err", err)
+			}
+		}()
+	}
 	srv := &http.Server{
-		Handler:           &naive.Server{Users: &naive.Users{Path: *users}, Answer: handler, Log: log},
+		Handler:           ns,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       5 * time.Minute,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelDebug),
@@ -669,6 +699,28 @@ func cmdNaive(args []string) error {
 	}()
 	log.Info("serving naive", "socket", *socket, "answer", *answer)
 	if err := srv.ServeTLS(ln, "", ""); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+// serveHTTP3 serves h on QUIC over the front's datagrams until ctx ends:
+// TLS 1.3 with X25519MLKEM768 only, ALPN h3.
+func serveHTTP3(ctx context.Context, pc net.PacketConn, cert tls.Certificate, h http.Handler) error {
+	tlsConf := http3.ConfigureTLSConfig(&tls.Config{MinVersion: tls.VersionTLS13,
+		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, Certificates: []tls.Certificate{cert}})
+	ln, err := quic.ListenEarly(pc, tlsConf, &quic.Config{MaxIdleTimeout: 2 * time.Minute, KeepAlivePeriod: 0})
+	if err != nil {
+		return err
+	}
+	srv := &http3.Server{Handler: h, IdleTimeout: 2 * time.Minute}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+		_ = ln.Close()
+		_ = pc.Close()
+	}()
+	if err := srv.ServeListener(ln); err != nil && ctx.Err() == nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, quic.ErrServerClosed) {
 		return err
 	}
 	return nil
