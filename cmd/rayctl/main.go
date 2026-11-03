@@ -39,7 +39,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service add KIND NAME [-settings JSON]
   service enable|disable|del NAME
   service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false;
-                                            hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none)
+                                            hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
+                                            yggdrasil: peers=URI,URI|none (public peers, then rayctl apply)
   service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
                                             schedule: after the lead time, or at once with -now
   device list [USER]
@@ -408,8 +409,11 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
 			fmt.Fprintf(w, "%s: %s\n", r.Msg.Service.Name, r.Msg.Service.SettingsJson)
-			if r.Msg.Service.Kind == "site" {
+			switch r.Msg.Service.Kind {
+			case "site":
 				fmt.Fprintln(w, "run rayctl apply to restart the site with it")
+			case "yggdrasil":
+				fmt.Fprintln(w, "run rayctl apply: the unit gets network access with public peers, and loses it without")
 			}
 		})
 	case "rotate":

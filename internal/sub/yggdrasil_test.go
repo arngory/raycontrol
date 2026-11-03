@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/netip"
 	"net/url"
 	"path"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/store"
@@ -252,5 +254,100 @@ func TestBrutalCeilings(t *testing.T) {
 	}
 	if _, err := provision.SetServiceOption(ctx, st, "hy2o", "up_mbps", "-1"); err == nil {
 		t.Fatal("a negative ceiling")
+	}
+}
+
+// Public peers (P-14, R4-18): off by default; set, they reach the backend's
+// options, the unit's network and the link as fallback peers.
+func TestYggdrasilPeers(t *testing.T) {
+	tooMany := ""
+	for i := range provision.MaxYggdrasilPeers + 1 {
+		tooMany += fmt.Sprintf("tls://h%d.example.net:443,", i)
+	}
+	for _, bad := range []string{"", "none,", "unix:///tmp/x", "tls://10.0.0.1:443", "tls://[fe80::1]:443", "tls://host", "http://h:80",
+		"tls://u:p@h:443", "tls://h:0", tooMany} {
+		if _, err := provision.YggdrasilPeers(bad); err == nil {
+			t.Errorf("peers %q accepted", bad)
+		}
+	}
+	peers, err := provision.YggdrasilPeers(" tls://ygg.example.net:443?key=00ff , quic://203.0.113.9:443,tls://ygg.example.net:443?key=00ff")
+	if err != nil || !slices.Equal(peers, []string{"tls://ygg.example.net:443?key=00ff", "quic://203.0.113.9:443"}) {
+		t.Fatalf("peers %v %v", peers, err)
+	}
+
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "reality", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "yggdrasil", Name: "bad", Enabled: true, Settings: `{"peers":["tcp://192.168.1.1:1"]}`}); err == nil {
+		t.Fatal("a private peer at creation")
+	}
+	y, err := provision.CreateService(ctx, st, store.Service{Kind: "yggdrasil", Name: "ygg", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, _ := st.ServiceByName(ctx, "site")
+	var settings render.YggdrasilSettings
+	json.Unmarshal([]byte(y.Settings), &settings)
+	keyDER, certDER, _ := provision.SelfSigned(settings.SNI)
+	st.SetServiceSecret(ctx, site.ID, provision.SecretTLSChain, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}))
+	st.SetServiceSecret(ctx, site.ID, provision.SecretTLSKey, keyDER)
+	st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+	st.SetUserServices(ctx, "alice", []int64{y.ID})
+
+	state := func() (backendPeers []string, unit string, via []string) {
+		t.Helper()
+		m, _ := render.Collect(ctx, st)
+		files, _, err := render.Render(m, render.DefaultPaths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if strings.HasSuffix(f.Path, "/ygg/backend.json") {
+				var b struct{ Options struct{ Peers []string } }
+				json.Unmarshal(f.Content, &b)
+				backendPeers = b.Options.Peers
+			}
+		}
+		for _, f := range deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries).Files {
+			if strings.HasSuffix(f.Path, "/niko-ygg.service") {
+				unit = string(f.Content)
+			}
+		}
+		profiles, err := sub.Profiles(m, m.Users[0])
+		if err != nil || len(profiles) != 1 {
+			t.Fatalf("profiles %v %v", profiles, err)
+		}
+		link, _ := url.Parse(profiles[0].Link)
+		return backendPeers, unit, link.Query()["niko-ygg-via"]
+	}
+
+	bp, unit, via := state()
+	if bp != nil || via != nil || !strings.Contains(unit, "PrivateNetwork=yes") || !strings.Contains(unit, "RestrictAddressFamilies=AF_UNIX\n") {
+		t.Fatalf("peers by default: %v %v\n%s", bp, via, unit)
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "ygg", "peers", "tls://ygg.example.net:443?key=00ff,quic://203.0.113.9:443"); err != nil {
+		t.Fatal(err)
+	}
+	bp, unit, via = state()
+	want := []string{"tls://ygg.example.net:443?key=00ff", "quic://203.0.113.9:443"}
+	if !slices.Equal(bp, want) || !slices.Equal(via, want) || strings.Contains(unit, "PrivateNetwork") ||
+		!strings.Contains(unit, "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6") || !strings.Contains(unit, "IPAddressDeny=localhost link-local") {
+		t.Fatalf("with peers: %v %v\n%s", bp, via, unit)
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "ygg", "peers", "tls://127.0.0.1:443"); err == nil {
+		t.Fatal("a loopback peer")
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "ygg", "peers", "none"); err != nil {
+		t.Fatal(err)
+	}
+	if bp, unit, via = state(); bp != nil || via != nil || !strings.Contains(unit, "PrivateNetwork=yes") {
+		t.Fatalf("peers removed: %v %v\n%s", bp, via, unit)
 	}
 }

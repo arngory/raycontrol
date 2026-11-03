@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -379,6 +380,20 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			}
 		}
 		if svc.Kind == "yggdrasil" {
+			if peers, ok := settings["peers"]; ok {
+				list, _ := peers.([]any)
+				var uris []string
+				for _, p := range list {
+					s, _ := p.(string)
+					uris = append(uris, s)
+				}
+				if len(uris) != len(list) || len(uris) == 0 {
+					return svc, fmt.Errorf("%w yggdrasil peers: a list of peer URIs", store.ErrInvalid)
+				}
+				if _, err := YggdrasilPeers(strings.Join(uris, ",")); err != nil {
+					return svc, err
+				}
+			}
 			// The node's key, and the port of its mesh address that leads to
 			// inner: random per node, like everything a scan could match.
 			seed := make([]byte, 32)
@@ -616,8 +631,18 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			return svc, fmt.Errorf("%w %s: Mbit/s, 0 to 100000 (0: none)", store.ErrInvalid, key)
 		}
 		v = n
+	case svc.Kind == "yggdrasil" && key == "peers":
+		// Public peers (P-14, R4-18): off unless set; none removes them.
+		v = 0
+		if value != "" && value != "none" {
+			peers, err := YggdrasilPeers(value)
+			if err != nil {
+				return svc, err
+			}
+			v = peers
+		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni; hy2-*: up_mbps, down_mbps)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni; hy2-*: up_mbps, down_mbps; yggdrasil: peers)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
@@ -636,6 +661,43 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 	}
 	svc.Settings = string(b)
 	return svc, nil
+}
+
+// MaxYggdrasilPeers bounds the public peers of a Yggdrasil service.
+const MaxYggdrasilPeers = 8
+
+// YggdrasilPeers parses the public peers of a Yggdrasil service (P-14,
+// R4-18): comma-separated peer URIs as yggdrasil-go takes them, over TLS,
+// QUIC, WebSocket or plain TCP, with a host and a port. The node peers with
+// them, and clients get them as a fallback path to the node.
+func YggdrasilPeers(value string) ([]string, error) {
+	var peers []string
+	for p := range strings.SplitSeq(value, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		u, err := url.Parse(p)
+		if err != nil || u.Host == "" || u.Port() == "" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+			return nil, fmt.Errorf("%w yggdrasil peer %q: want a URI like tls://host:port", store.ErrInvalid, p)
+		}
+		if !slices.Contains([]string{"tls", "quic", "wss", "ws", "tcp"}, u.Scheme) {
+			return nil, fmt.Errorf("%w yggdrasil peer %q: scheme tls, quic, wss, ws or tcp", store.ErrInvalid, p)
+		}
+		if port, err := strconv.Atoi(u.Port()); err != nil || port < 1 || port > 65535 {
+			return nil, fmt.Errorf("%w yggdrasil peer %q: bad port", store.ErrInvalid, p)
+		}
+		if ip := net.ParseIP(u.Hostname()); ip != nil && (!ip.IsGlobalUnicast() || ip.IsPrivate()) {
+			return nil, fmt.Errorf("%w yggdrasil peer %q: a public address, or a name", store.ErrInvalid, p)
+		}
+		if !slices.Contains(peers, p) {
+			peers = append(peers, p)
+		}
+	}
+	if len(peers) == 0 || len(peers) > MaxYggdrasilPeers {
+		return nil, fmt.Errorf("%w yggdrasil peers: 1 to %d peer URIs, comma-separated", store.ErrInvalid, MaxYggdrasilPeers)
+	}
+	return peers, nil
 }
 
 // SiteAnswer returns what a decoy site answers (site.Answer404 when unset,

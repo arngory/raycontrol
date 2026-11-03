@@ -34,6 +34,10 @@ type YggdrasilSettings struct {
 	SNI      string `json:"sni"`
 	Site     string `json:"site"`
 	ExitPort int    `json:"exit_port"`
+	// Peers are public peers (P-14, R4-18): the node peers with them and
+	// becomes reachable through the mesh, and clients get them as a
+	// fallback path. None by default: clients peer with the node directly.
+	Peers []string `json:"peers,omitempty"`
 }
 
 // YggdrasilKey is a user's Yggdrasil key, derived from their inner UUID: it
@@ -126,6 +130,13 @@ func yggdrasilFiles(s Service, m Model, inner Service, p Paths) ([]File, error) 
 		}
 	}
 	dir := path.Join(p.Rendered, s.Name)
+	options := map[string]any{
+		"private_key_file": p.Credential(s.Name, YggdrasilNodeKey),
+		"exit_ports":       []int{st.ExitPort},
+	}
+	if len(st.Peers) > 0 {
+		options["peers"] = st.Peers
+	}
 	b, err := jsonFile(map[string]any{
 		"schema": Schema, "role": "backend", "kind": "yggdrasil", "log": map[string]string{"level": "warn"},
 		"socket": p.socket(s.Name, "fd"), "front_uid": FrontUID,
@@ -135,11 +146,8 @@ func yggdrasilFiles(s Service, m Model, inner Service, p Paths) ([]File, error) 
 			"key_file":         p.Credential(s.Name, YggdrasilTLSKey),
 			"curves":           []string{"X25519MLKEM768"},
 		},
-		"options": map[string]any{
-			"private_key_file": p.Credential(s.Name, YggdrasilNodeKey),
-			"exit_ports":       []int{st.ExitPort},
-		},
-		"inner": p.InnerSocket(inner.Name),
+		"options": options,
+		"inner":   p.InnerSocket(inner.Name),
 	})
 	if err != nil {
 		return nil, err

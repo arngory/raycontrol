@@ -31,7 +31,8 @@ service NodeService {
   // next keys first, or at once (leaked keys, a blocked name).
   rpc RotateService(RotateServiceRequest) returns (RotateServiceResponse);
   // SetServiceOption changes one of the few settings that may change after
-  // creation: a site's answer, whether REALITY moves its server name.
+  // creation: a site's answer, whether REALITY moves its server name,
+  // Hysteria2's Brutal ceilings, Yggdrasil's public peers.
   rpc SetServiceOption(SetServiceOptionRequest) returns (SetServiceOptionResponse);
 
   rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);

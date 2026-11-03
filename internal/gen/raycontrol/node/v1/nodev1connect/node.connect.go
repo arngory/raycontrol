@@ -130,7 +130,8 @@ type NodeServiceClient interface {
 	// next keys first, or at once (leaked keys, a blocked name).
 	RotateService(context.Context, *connect.Request[v1.RotateServiceRequest]) (*connect.Response[v1.RotateServiceResponse], error)
 	// SetServiceOption changes one of the few settings that may change after
-	// creation: a site's answer, whether REALITY moves its server name.
+	// creation: a site's answer, whether REALITY moves its server name,
+	// Hysteria2's Brutal ceilings, Yggdrasil's public peers.
 	SetServiceOption(context.Context, *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error)
 	ListDevices(context.Context, *connect.Request[v1.ListDevicesRequest]) (*connect.Response[v1.ListDevicesResponse], error)
 	// CreateDevice returns the device bundle with the device key. The key is
@@ -529,7 +530,8 @@ type NodeServiceHandler interface {
 	// next keys first, or at once (leaked keys, a blocked name).
 	RotateService(context.Context, *connect.Request[v1.RotateServiceRequest]) (*connect.Response[v1.RotateServiceResponse], error)
 	// SetServiceOption changes one of the few settings that may change after
-	// creation: a site's answer, whether REALITY moves its server name.
+	// creation: a site's answer, whether REALITY moves its server name,
+	// Hysteria2's Brutal ceilings, Yggdrasil's public peers.
 	SetServiceOption(context.Context, *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error)
 	ListDevices(context.Context, *connect.Request[v1.ListDevicesRequest]) (*connect.Response[v1.ListDevicesResponse], error)
 	// CreateDevice returns the device bundle with the device key. The key is

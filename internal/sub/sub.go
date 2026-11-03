@@ -327,7 +327,8 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 // VLESS with ML-KEM-768 to inner at the node's mesh address and exit port,
 // carried by Yggdrasil with one peer, the node itself, over a TLS link
 // under the service's name. niko-ygg is "<peer URI>;<the user's key>", the
-// key (a 32-byte ed25519 seed, hex) derived from the same inner UUID.
+// key (a 32-byte ed25519 seed, hex) derived from the same inner UUID; each
+// niko-ygg-via is a public peer of the node, when it has them.
 func YggdrasilLink(m render.Model, s, inner render.Service, uuid string) (string, error) {
 	st, nodeKey, err := render.YggdrasilNode(s)
 	if err != nil {
@@ -345,6 +346,11 @@ func YggdrasilLink(m render.Model, s, inner render.Service, uuid string) (string
 	q.Set("niko-node", m.NodeID)
 	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
 	q.Set("niko-ygg", peer.String()+";"+hex.EncodeToString(render.YggdrasilKey(uuid).Seed()))
+	// Public peers (R4-18): a fallback path through the mesh when the node
+	// cannot be reached directly.
+	for _, p := range st.Peers {
+		q.Add("niko-ygg-via", p)
+	}
 	host := net.JoinHostPort(render.YggdrasilAddress(nodeKey).String(), strconv.Itoa(st.ExitPort))
 	return "vless://" + uuid + "@" + host + "?" + q.Encode() + "#" + url.PathEscape(s.Name), nil
 }
