@@ -46,6 +46,7 @@
 | `rayctl user add [NAME] -services a,b [-expires 30d\|2026-12-31] [-limit 50G]` | без имени — непрозрачный `u-xxxx-xxxx` |
 | `rayctl user list` | пользователи |
 | `rayctl user services NAME a,b` | какие сервисы доступны |
+| `rayctl user export NAME [-o F]` | ссылки пользователя, как в подписке (и следующие, если ждёт смена); в них учётные данные, вызов попадает в аудит; работают только с адреса, который открыл SPA |
 | `rayctl user enable\|disable\|del NAME` | включить, отключить, удалить |
 | `rayctl device add USER NAME [-role admin] [-o F]` | пакет устройства `rcdev1:…` — один раз, на экран или в файл 0600 |
 | `rayctl device list [USER]` | устройства |

@@ -187,6 +187,10 @@ if grep -E '^(wrote|restarting)' <<<"$again"; then
 fi
 
 x rayctl user add alice -services dns,mdns >/dev/null
+# export: the subscription's links, audited (P-10).
+exported="$(x rayctl user export alice)"
+[[ $(grep -c '^vless://' <<<"$exported") == 2 ]] || fail "rayctl user export: $exported"
+[[ $(x rayctl audit -n 1) == *user.export* ]] || fail "export is not audited"
 device() { x rayctl device add alice "$1" | awk '/enrolled/ {id=$2} /^rcdev1:/ {print id, $0}'; }
 read -r phone_id phone < <(device phone)
 read -r _ laptop < <(device laptop)

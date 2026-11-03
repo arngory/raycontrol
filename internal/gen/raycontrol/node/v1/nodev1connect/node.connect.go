@@ -51,6 +51,8 @@ const (
 	NodeServiceSetUserServicesProcedure = "/raycontrol.node.v1.NodeService/SetUserServices"
 	// NodeServiceDeleteUserProcedure is the fully-qualified name of the NodeService's DeleteUser RPC.
 	NodeServiceDeleteUserProcedure = "/raycontrol.node.v1.NodeService/DeleteUser"
+	// NodeServiceExportUserProcedure is the fully-qualified name of the NodeService's ExportUser RPC.
+	NodeServiceExportUserProcedure = "/raycontrol.node.v1.NodeService/ExportUser"
 	// NodeServiceListServicesProcedure is the fully-qualified name of the NodeService's ListServices
 	// RPC.
 	NodeServiceListServicesProcedure = "/raycontrol.node.v1.NodeService/ListServices"
@@ -114,6 +116,11 @@ type NodeServiceClient interface {
 	SetUserEnabled(context.Context, *connect.Request[v1.SetUserEnabledRequest]) (*connect.Response[v1.SetUserEnabledResponse], error)
 	SetUserServices(context.Context, *connect.Request[v1.SetUserServicesRequest]) (*connect.Response[v1.SetUserServicesResponse], error)
 	DeleteUser(context.Context, *connect.Request[v1.DeleteUserRequest]) (*connect.Response[v1.DeleteUserResponse], error)
+	// ExportUser returns a user's profiles: the links of their subscription
+	// (docs/spec/subscription-v1.md §4), each with the next one while a
+	// switch is pending (P-10). They hold the user's credentials, so the
+	// call is audited. They work only from an address SPA has opened.
+	ExportUser(context.Context, *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error)
 	ListServices(context.Context, *connect.Request[v1.ListServicesRequest]) (*connect.Response[v1.ListServicesResponse], error)
 	CreateService(context.Context, *connect.Request[v1.CreateServiceRequest]) (*connect.Response[v1.CreateServiceResponse], error)
 	SetServiceEnabled(context.Context, *connect.Request[v1.SetServiceEnabledRequest]) (*connect.Response[v1.SetServiceEnabledResponse], error)
@@ -203,6 +210,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			httpClient,
 			baseURL+NodeServiceDeleteUserProcedure,
 			connect.WithSchema(nodeServiceMethods.ByName("DeleteUser")),
+			connect.WithClientOptions(opts...),
+		),
+		exportUser: connect.NewClient[v1.ExportUserRequest, v1.ExportUserResponse](
+			httpClient,
+			baseURL+NodeServiceExportUserProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("ExportUser")),
 			connect.WithClientOptions(opts...),
 		),
 		listServices: connect.NewClient[v1.ListServicesRequest, v1.ListServicesResponse](
@@ -336,6 +349,7 @@ type nodeServiceClient struct {
 	setUserEnabled    *connect.Client[v1.SetUserEnabledRequest, v1.SetUserEnabledResponse]
 	setUserServices   *connect.Client[v1.SetUserServicesRequest, v1.SetUserServicesResponse]
 	deleteUser        *connect.Client[v1.DeleteUserRequest, v1.DeleteUserResponse]
+	exportUser        *connect.Client[v1.ExportUserRequest, v1.ExportUserResponse]
 	listServices      *connect.Client[v1.ListServicesRequest, v1.ListServicesResponse]
 	createService     *connect.Client[v1.CreateServiceRequest, v1.CreateServiceResponse]
 	setServiceEnabled *connect.Client[v1.SetServiceEnabledRequest, v1.SetServiceEnabledResponse]
@@ -386,6 +400,11 @@ func (c *nodeServiceClient) SetUserServices(ctx context.Context, req *connect.Re
 // DeleteUser calls raycontrol.node.v1.NodeService.DeleteUser.
 func (c *nodeServiceClient) DeleteUser(ctx context.Context, req *connect.Request[v1.DeleteUserRequest]) (*connect.Response[v1.DeleteUserResponse], error) {
 	return c.deleteUser.CallUnary(ctx, req)
+}
+
+// ExportUser calls raycontrol.node.v1.NodeService.ExportUser.
+func (c *nodeServiceClient) ExportUser(ctx context.Context, req *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error) {
+	return c.exportUser.CallUnary(ctx, req)
 }
 
 // ListServices calls raycontrol.node.v1.NodeService.ListServices.
@@ -496,6 +515,11 @@ type NodeServiceHandler interface {
 	SetUserEnabled(context.Context, *connect.Request[v1.SetUserEnabledRequest]) (*connect.Response[v1.SetUserEnabledResponse], error)
 	SetUserServices(context.Context, *connect.Request[v1.SetUserServicesRequest]) (*connect.Response[v1.SetUserServicesResponse], error)
 	DeleteUser(context.Context, *connect.Request[v1.DeleteUserRequest]) (*connect.Response[v1.DeleteUserResponse], error)
+	// ExportUser returns a user's profiles: the links of their subscription
+	// (docs/spec/subscription-v1.md §4), each with the next one while a
+	// switch is pending (P-10). They hold the user's credentials, so the
+	// call is audited. They work only from an address SPA has opened.
+	ExportUser(context.Context, *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error)
 	ListServices(context.Context, *connect.Request[v1.ListServicesRequest]) (*connect.Response[v1.ListServicesResponse], error)
 	CreateService(context.Context, *connect.Request[v1.CreateServiceRequest]) (*connect.Response[v1.CreateServiceResponse], error)
 	SetServiceEnabled(context.Context, *connect.Request[v1.SetServiceEnabledRequest]) (*connect.Response[v1.SetServiceEnabledResponse], error)
@@ -581,6 +605,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		NodeServiceDeleteUserProcedure,
 		svc.DeleteUser,
 		connect.WithSchema(nodeServiceMethods.ByName("DeleteUser")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceExportUserHandler := connect.NewUnaryHandler(
+		NodeServiceExportUserProcedure,
+		svc.ExportUser,
+		connect.WithSchema(nodeServiceMethods.ByName("ExportUser")),
 		connect.WithHandlerOptions(opts...),
 	)
 	nodeServiceListServicesHandler := connect.NewUnaryHandler(
@@ -717,6 +747,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceSetUserServicesHandler.ServeHTTP(w, r)
 		case NodeServiceDeleteUserProcedure:
 			nodeServiceDeleteUserHandler.ServeHTTP(w, r)
+		case NodeServiceExportUserProcedure:
+			nodeServiceExportUserHandler.ServeHTTP(w, r)
 		case NodeServiceListServicesProcedure:
 			nodeServiceListServicesHandler.ServeHTTP(w, r)
 		case NodeServiceCreateServiceProcedure:
@@ -788,6 +820,10 @@ func (UnimplementedNodeServiceHandler) SetUserServices(context.Context, *connect
 
 func (UnimplementedNodeServiceHandler) DeleteUser(context.Context, *connect.Request[v1.DeleteUserRequest]) (*connect.Response[v1.DeleteUserResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.DeleteUser is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) ExportUser(context.Context, *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.ExportUser is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) ListServices(context.Context, *connect.Request[v1.ListServicesRequest]) (*connect.Response[v1.ListServicesResponse], error) {

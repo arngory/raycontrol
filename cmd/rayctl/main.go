@@ -34,6 +34,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             without NAME: an opaque handle such as u-k3f9-x2qa
   user enable|disable|del NAME
   user services NAME a,b
+  user export NAME [-o FILE]                the user's links, as in the subscription (they hold credentials)
   service list
   service add KIND NAME [-settings JSON]
   service enable|disable|del NAME
@@ -284,8 +285,65 @@ func (c *cli) user(ctx context.Context, sub string, args []string) error {
 		}
 		_, err := c.c.DeleteUser(ctx, connect.NewRequest(&nodev1.DeleteUserRequest{Name: args[0]}))
 		return err
+	case "export":
+		return c.exportUser(ctx, args)
 	}
 	return errUsage
+}
+
+// exportUser prints the links of a user's subscription (P-10), or writes
+// them to a file 0600. They hold the user's credentials.
+func (c *cli) exportUser(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("user export", flag.ContinueOnError)
+	out := fs.String("o", "", "write the links to this file (mode 0600) instead of the screen")
+	if err := need(args, 1); err != nil {
+		return err
+	}
+	if err := fs.Parse(args[1:]); err != nil {
+		return errUsage
+	}
+	r, err := c.c.ExportUser(ctx, connect.NewRequest(&nodev1.ExportUserRequest{Name: args[0]}))
+	if err != nil {
+		return err
+	}
+	text := exportText(r.Msg.Profiles)
+	if c.json {
+		b, err := protojson.MarshalOptions{Multiline: true, EmitUnpopulated: true}.Marshal(r.Msg)
+		if err != nil {
+			return err
+		}
+		text = string(b) + "\n"
+	}
+	if *out == "" {
+		fmt.Print(text)
+		return nil
+	}
+	f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: the operator's file
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(text); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	fmt.Printf("%d profiles of %s in %s: pass it over a trusted channel, then delete it\n", len(r.Msg.Profiles), args[0], *out)
+	return nil
+}
+
+// exportText is one comment line and one link per profile; a pending
+// switch adds the next link with its time.
+func exportText(profiles []*nodev1.Profile) string {
+	var b strings.Builder
+	for _, p := range profiles {
+		fmt.Fprintf(&b, "# %s (service %d)\n%s\n", p.Service, p.ServiceId, p.Link)
+		if p.NextLink != "" {
+			fmt.Fprintf(&b, "# %s from %s\n%s\n", p.Service, time.Unix(p.NextFrom, 0).UTC().Format(time.RFC3339), p.NextLink)
+		}
+	}
+	return b.String()
 }
 
 func (c *cli) service(ctx context.Context, sub string, args []string) error {

@@ -26,6 +26,7 @@ import (
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
+	"github.com/arngory/raycontrol/internal/sub"
 )
 
 // Server implements NodeService on top of the store.
@@ -325,6 +326,53 @@ func (s *Server) DeleteUser(ctx context.Context, req *connect.Request[nodev1.Del
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.DeleteUserResponse{}), nil
+}
+
+// ExportUser returns the links of a user's subscription (P-10). They hold
+// credentials, so every call is audited, failed ones too; nothing changes.
+func (s *Server) ExportUser(ctx context.Context, req *connect.Request[nodev1.ExportUserRequest]) (*connect.Response[nodev1.ExportUserResponse], error) {
+	name := req.Msg.Name
+	profiles, err := s.export(ctx, name)
+	result := "ok"
+	if err != nil {
+		result = "error: " + err.Error()
+	}
+	if aerr := s.Store.Audit(ctx, actorFrom(ctx), "user.export", name, result); aerr != nil && err == nil {
+		err = aerr
+	}
+	if err != nil {
+		if errors.Is(err, errUserInactive) {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+		}
+		return nil, toConnect(err)
+	}
+	resp := &nodev1.ExportUserResponse{}
+	for _, p := range profiles {
+		pb := &nodev1.Profile{ServiceId: uint32(p.Svc), Service: p.Name, Link: p.Link}
+		if p.Next != nil {
+			pb.NextLink, pb.NextFrom = p.Next.Link, p.Next.From
+		}
+		resp.Profiles = append(resp.Profiles, pb)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+var errUserInactive = errors.New("user is disabled or expired")
+
+func (s *Server) export(ctx context.Context, name string) ([]sub.Profile, error) {
+	if _, err := s.Store.UserByName(ctx, name); err != nil {
+		return nil, err
+	}
+	m, err := render.Collect(ctx, s.Store)
+	if err != nil {
+		return nil, err
+	}
+	for _, u := range m.Users {
+		if u.Name == name {
+			return sub.Profiles(m, u)
+		}
+	}
+	return nil, errUserInactive
 }
 
 func servicePB(svc store.Service) *nodev1.Service {
