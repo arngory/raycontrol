@@ -209,8 +209,14 @@ x rayctl service add api api >/dev/null
 # processes wait for one) and go away with the uninstall.
 x rayctl service add reality reality >/dev/null
 x rayctl service add naive naive >/dev/null
-x rayctl apply >/dev/null || fail "rayctl apply for the API, REALITY and naive"
+# hy2-obfs needs no certificate of the site: it really runs, a niko-server
+# backend behind the front's UDP 443 (udpmux, R3-4).
+x rayctl service add hy2-obfs hy2o >/dev/null
+x rayctl apply >/dev/null || fail "rayctl apply for the API, REALITY, naive and Hysteria2"
 [[ $(x stat -c '%a %U %G' /run/niko/naive-in) == "2750 niko-naive niko-front" ]] || fail "no socket directory for naive (the front passes connections there)"
+wait_active niko-hy2o.service niko-front.service
+[[ $(x ss -Hulpn 'sport = :443') == *niko-server* ]] || fail "the front does not listen on UDP 443"
+[[ $(x stat -c '%a %U' /run/niko/front/hy2o.salamander) == "400 niko-front" ]] || fail "the front's salamander copy is not 0400 niko-front"
 invite="$(x rayctl device invite alice console -role admin | grep -o 'rcinv1:[A-Za-z0-9_-]*')" || fail "no invite"
 # From the client's container: register a device from the invite, then
 # administer the node through the API with it, and give it a new key.
