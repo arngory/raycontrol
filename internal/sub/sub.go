@@ -58,6 +58,15 @@ type Payload struct {
 	Issued   int64     `json:"issued"`
 	Expires  int64     `json:"expires"`
 	Profiles []Profile `json:"profiles"`
+	// Probe says the endpoint serves channel probes (spec/probe-v1.md).
+	Probe *ProbeHint `json:"probe,omitempty"`
+}
+
+// ProbeHint: probe-v1 on the subscription endpoint; UDP: the echo on the
+// same port number.
+type ProbeHint struct {
+	V   int  `json:"v"`
+	UDP bool `json:"udp"`
 }
 
 // Envelope is what the endpoint returns.

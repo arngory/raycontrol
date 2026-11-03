@@ -76,6 +76,7 @@
 | `rayctl service enable\|disable\|del NAME` | включить, выключить, удалить |
 | `rayctl service set site answer=404\|403\|silent\|pages` | что сайт отвечает тем, кого отклонил REALITY; потом `rayctl apply` |
 | `rayctl service set reality rotate_sni=false` | не менять имя REALITY при ротации |
+| `rayctl service set hy2-masq up_mbps=500` | потолок серверного Brutal на соединение: нода шлёт клиенту не быстрее min(500 Мбит/с, темп клиента); `down_mbps` — потолок отдачи клиента; `0` — без потолка |
 | `rayctl service rotate reality [-now]` | новые ключи (и имя) REALITY: через срок публикации или сразу |
 
 ## DNS (Cloudflare)

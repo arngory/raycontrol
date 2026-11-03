@@ -34,6 +34,7 @@ import (
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/nikoipc"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/site"
@@ -126,6 +127,7 @@ func cmdServe(args []string) error {
 	acmeDir := fs.String("acme-directory", certs.LetsEncrypt, "ACME directory for the sites' certificates (empty: none)")
 	credPeriod := fs.Duration("cred-period", 30*24*time.Hour, "how long a user credential stays current (0: no rotation)")
 	credLead := fs.Duration("cred-lead", 3*24*time.Hour, "the next credential is in the subscription this long before the switch")
+	probeDaily := fs.Int("probe-daily-mib", probe.DefaultDaily>>20, "channel probes: MiB per device and UTC day, both directions")
 	credGrace := fs.Duration("cred-grace", 2*24*time.Hour, "the previous credential is accepted this long after the switch (12h at least)")
 	realityPeriod := fs.Duration("reality-period", 90*24*time.Hour, "how long REALITY keys stay current; their next set is published -cred-lead ahead (0: no rotation)")
 	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new REALITY server name may wait for its certificate")
@@ -205,7 +207,7 @@ func cmdServe(args []string) error {
 	go syncDNS(ctx, st, srv.Changes, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
 	go serveRemote(ctx, &api.Remote{Server: srv, Log: log}, srv.Changes)
-	if err := startSubscription(ctx, st, log); err != nil {
+	if err := startSubscription(ctx, st, log, *probeDaily); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
 	log.Info("serving", "socket", *socket, "node", fmt.Sprintf("%x", params.NodeID))
@@ -520,7 +522,7 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 
 // startSubscription serves the subscription endpoint on the port of the
 // subscription service, if it is enabled.
-func startSubscription(ctx context.Context, st *store.Store, log *slog.Logger) error {
+func startSubscription(ctx context.Context, st *store.Store, log *slog.Logger, probeDailyMiB int) error {
 	svc, err := st.ServiceByName(ctx, provision.SubscriptionService)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !svc.Enabled) {
 		log.Info("subscription service disabled")
@@ -546,13 +548,29 @@ func startSubscription(ctx context.Context, st *store.Store, log *slog.Logger) e
 		return err
 	}
 	s := &sub.Server{Store: st, Keys: keys, Log: log}
-	addr := ":" + strconv.Itoa(int(ports[0].Num))
+	port := int(ports[0].Num)
+	addr := ":" + strconv.Itoa(port)
+	// Channel probes (R4-16) on the same endpoint, and their UDP echo on
+	// the same port number, which SPA opens with the TCP one.
+	s.Probe = &probe.Server{Auth: s.Device, Daily: int64(probeDailyMiB) << 20, Log: log}
+	if err := provision.SubscriptionUDP(ctx, st); err != nil {
+		log.Warn("probe: the subscription service has no UDP port", "err", err)
+	} else if pc, err := net.ListenPacket("udp", addr); err != nil {
+		log.Warn("probe: no UDP echo", "err", err)
+	} else {
+		s.Probe.UDPPort = port
+		go func() {
+			<-ctx.Done()
+			_ = pc.Close()
+		}()
+		go func() { _ = s.Probe.ServeUDP(pc) }()
+	}
 	go func() {
 		if err := s.Serve(ctx, addr, tlsCfg); err != nil {
 			log.Error("subscription endpoint", "err", err)
 		}
 	}()
-	log.Info("subscription endpoint", "addr", addr)
+	log.Info("subscription endpoint", "addr", addr, "probe_udp", s.Probe.UDPPort != 0)
 	return nil
 }
 

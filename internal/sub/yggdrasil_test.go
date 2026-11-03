@@ -203,3 +203,54 @@ func TestYggdrasilService(t *testing.T) {
 		t.Fatalf("users while rotating %v", keys)
 	}
 }
+
+// The Brutal ceilings of Hysteria2 (R4-16): service options rendered into
+// the backend's options; 0 removes them.
+func TestBrutalCeilings(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7"})
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-obfs", Name: "hy2o", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	options := func() map[string]any {
+		m, _ := render.Collect(ctx, st)
+		files, _, err := render.Render(m, render.Paths{Rendered: "/r", Run: "/run/niko"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if f.Path == "/r/hy2o/backend.json" {
+				var cfg struct{ Options map[string]any }
+				json.Unmarshal(f.Content, &cfg)
+				return cfg.Options
+			}
+		}
+		t.Fatal("no backend.json")
+		return nil
+	}
+	if o := options(); o["up_mbps"] != nil || o["down_mbps"] != nil {
+		t.Fatalf("ceilings by default: %v", o)
+	}
+	for _, kv := range [][2]string{{"up_mbps", "500"}, {"down_mbps", "50"}} {
+		if _, err := provision.SetServiceOption(ctx, st, "hy2o", kv[0], kv[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if o := options(); o["up_mbps"] != float64(500) || o["down_mbps"] != float64(50) {
+		t.Fatalf("ceilings: %v", o)
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "hy2o", "up_mbps", "0"); err != nil {
+		t.Fatal(err)
+	}
+	if o := options(); o["up_mbps"] != nil || o["down_mbps"] != float64(50) {
+		t.Fatalf("up removed: %v", o)
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "hy2o", "up_mbps", "-1"); err == nil {
+		t.Fatal("a negative ceiling")
+	}
+}

@@ -180,11 +180,44 @@ func subscriptionService(p spa.Params, host string) (store.Service, error) {
 	if err != nil {
 		return store.Service{}, err
 	}
-	settings, _ := json.Marshal(map[string][]string{"ports": {fmt.Sprintf("tcp/%d", port)}})
+	// The UDP port of the same number: the echo of channel probes (R4-16).
+	settings, _ := json.Marshal(map[string][]string{"ports": {fmt.Sprintf("tcp/%d", port), fmt.Sprintf("udp/%d", port)}})
 	return store.Service{
 		Kind: "subscription", Name: SubscriptionService, Enabled: true, Settings: string(settings),
 		Secrets: map[string][]byte{SecretTLSKey: key, SecretTLSCert: cert},
 	}, nil
+}
+
+// SubscriptionUDP gives the subscription service the UDP port of its TCP
+// port's number, for the echo of channel probes (R4-16), on nodes set up
+// before it.
+func SubscriptionUDP(ctx context.Context, st *store.Store) error {
+	svc, err := st.ServiceByName(ctx, SubscriptionService)
+	if err != nil {
+		return err
+	}
+	ports, err := svc.Ports()
+	if err != nil || len(ports) == 0 {
+		return fmt.Errorf("subscription service has no port: %w", err)
+	}
+	want := store.Port{Proto: "udp", Num: ports[0].Num}
+	if slices.Contains(ports, want) {
+		return nil
+	}
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
+		return err
+	}
+	list := make([]string, 0, len(ports)+1)
+	for _, p := range ports {
+		list = append(list, p.String())
+	}
+	settings["ports"] = append(list, want.String())
+	b, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	return st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: string(b)})
 }
 
 // SelfSigned makes a self-signed ECDSA P-256 certificate for host.
@@ -574,14 +607,26 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			return svc, fmt.Errorf("%w rotate_sni: true or false", store.ErrInvalid)
 		}
 		v = b
+	case (svc.Kind == "hy2-masq" || svc.Kind == "hy2-obfs") && (key == "up_mbps" || key == "down_mbps"):
+		// The ceilings of the server's Brutal per connection (R4-16): up is
+		// what the node sends a client at most (the node's channel or its
+		// tariff), down what a client may send it; 0 removes the ceiling.
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 || n > 100000 {
+			return svc, fmt.Errorf("%w %s: Mbit/s, 0 to 100000 (0: none)", store.ErrInvalid, key)
+		}
+		v = n
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni; hy2-*: up_mbps, down_mbps)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
 		return svc, err
 	}
 	settings[key] = v
+	if v == 0 {
+		delete(settings, key)
+	}
 	b, err := json.Marshal(settings)
 	if err != nil {
 		return svc, err

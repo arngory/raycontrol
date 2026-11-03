@@ -201,6 +201,10 @@ if out="$(client "$phone")"; then
 	fail "revoked device still reaches the node: $out"
 fi
 client -carrier tcp "$laptop" || fail "probe over the TCP carrier"
+# Channel probes (R4-16) after SPA: TCP both ways and the UDP echo, whose
+# port SPA opens with the subscription's.
+out="$(client -channel "$laptop")" || fail "channel probe: $out"
+[[ $out == *"channel udp: 50 sent, 50 back; lost up 0, down 0"* ]] || fail "channel probe over UDP: $out"
 
 log "$distro: remote API"
 x rayctl service add api api >/dev/null
@@ -275,7 +279,9 @@ log "$distro: update and rollback"
 x /usr/local/bin/rayctl update -local /opt/rc -yes || fail "rayctl update"
 x test -s /var/lib/raycontrol-install/previous/rayd || fail "update kept no previous binaries"
 wait_active rayd.service rayspa.service "${dataplane[@]}"
-client -addr "$ip" "$laptop" >/dev/null || fail "probe after update"
+# Channel probes still work after the restart (UDP echo included).
+out="$(client -channel -addr "$ip" "$laptop")" || fail "probe after update: $out"
+[[ $out == *"channel udp: 50 sent, 50 back"* ]] || fail "no UDP echo after update: $out"
 x /usr/local/bin/rayctl update -rollback || fail "rayctl update -rollback"
 wait_active rayd.service rayspa.service "${dataplane[@]}"
 client -addr "$ip" "$laptop" >/dev/null || fail "probe after rollback"

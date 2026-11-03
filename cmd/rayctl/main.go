@@ -37,7 +37,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service list
   service add KIND NAME [-settings JSON]
   service enable|disable|del NAME
-  service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false
+  service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false;
+                                            hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none)
   service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
                                             schedule: after the lead time, or at once with -now
   device list [USER]
@@ -74,9 +75,10 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   report [-o FILE] [-logs warning|info|none] [-since 24h] [-id ID]
       a redacted report for an issue: versions, system, checks, units,
       counts and warnings; nothing is sent anywhere
-  probe [-carrier udp|tcp|auto] [-addr A] [-links] [-redact] BUNDLE|@FILE|-
+  probe [-carrier udp|tcp|auto] [-addr A] [-links] [-redact] [-channel] BUNDLE|@FILE|-
       check a node from outside like a client: SPA, then the subscription
-      (pin, both signatures). Needs only the device bundle.
+      (pin, both signatures). Needs only the device bundle. -channel then
+      measures the channel (TCP down and up, UDP echo; probe-v1).
 
   From another machine, through the node's remote API (admin devices):
   remote enroll [-o FILE] [-carrier udp|tcp|auto] [-addr A] INVITE|@FILE|-

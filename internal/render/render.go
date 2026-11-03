@@ -837,6 +837,19 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 	}
 	dir := path.Join(p.Rendered, s.Name)
 	options := map[string]any{}
+	// The ceilings of the server's Brutal (R4-16): it sends at min(up_mbps,
+	// the client's rate), BBR without the client's; down_mbps caps clients.
+	var ceil struct {
+		Up   int `json:"up_mbps"`
+		Down int `json:"down_mbps"`
+	}
+	_ = json.Unmarshal([]byte(s.Settings), &ceil)
+	if ceil.Up > 0 {
+		options["up_mbps"] = ceil.Up
+	}
+	if ceil.Down > 0 {
+		options["down_mbps"] = ceil.Down
+	}
 	cfg := map[string]any{
 		"schema": Schema, "role": "backend", "kind": s.Kind, "log": map[string]string{"level": "warn"},
 		"socket": p.socket(s.Name, "packet"), "front_uid": FrontUID,

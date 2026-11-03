@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -50,8 +51,21 @@ func TestInit(t *testing.T) {
 		t.Fatal(err)
 	}
 	ports, _ := svc.Ports()
-	if len(ports) != 1 || ports[0].Proto != "tcp" || (ports[0].Num >= p.PortBase && ports[0].Num < p.PortBase+p.PortRange) {
+	// TCP for the endpoint, UDP of the same number for the probe echo (R4-16).
+	if len(ports) != 2 || ports[0].Proto != "tcp" || ports[1] != (store.Port{Proto: "udp", Num: ports[0].Num}) ||
+		(ports[0].Num >= p.PortBase && ports[0].Num < p.PortBase+p.PortRange) {
 		t.Fatalf("subscription port %v vs SPA range %d+%d", ports, p.PortBase, p.PortRange)
+	}
+	// A node set up before R4-16 has the TCP port only: rayd adds the UDP one.
+	st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: fmt.Sprintf(`{"ports":["tcp/%d"]}`, ports[0].Num)})
+	for range 2 {
+		if err := SubscriptionUDP(ctx, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc, _ = st.ServiceByName(ctx, SubscriptionService)
+	if got, _ := svc.Ports(); !slices.Equal(got, ports) {
+		t.Fatalf("after SubscriptionUDP: %v, want %v", got, ports)
 	}
 	secrets, _ := st.ServiceSecrets(ctx, svc.ID)
 	if pin, err := SPKIPin(secrets[SecretTLSCert]); err != nil || len(pin) != 43 {

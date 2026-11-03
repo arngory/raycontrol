@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/store"
@@ -31,6 +32,9 @@ type Server struct {
 	Store *store.Store
 	Keys  provision.NodeKeys
 	Log   *slog.Logger
+	// Probe, when set, serves the channel probes (spec/probe-v1.md) on the
+	// same endpoint, and the subscription says so.
+	Probe *probe.Server
 	now   func() time.Time
 
 	mu sync.Mutex // serialises seq
@@ -65,8 +69,12 @@ func (s *Server) Serve(ctx context.Context, addr string, tlsCfg *tls.Config) err
 	}
 	mux := http.NewServeMux()
 	mux.Handle(Path, s)
+	if s.Probe != nil {
+		mux.Handle("/probe/v1/", s.Probe)
+	}
 	srv := &http.Server{
 		Handler:           mux,
+		ConnContext:       probe.ConnContext,
 		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
@@ -93,6 +101,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(env)
+}
+
+// Device checks a request as the subscription does (spec/subscription-v1.md
+// §2) and returns the device's ID.
+func (s *Server) Device(r *http.Request) (string, error) {
+	id := r.Header.Get(DeviceHeader)
+	_, key, err := s.Store.ActiveDevice(r.Context(), id)
+	if err != nil {
+		return "", err
+	}
+	if !CheckAuth(r.Header.Get("Authorization"), key, s.clock()) {
+		return "", errors.New("auth")
+	}
+	return id, nil
 }
 
 func (s *Server) handle(r *http.Request) (Envelope, error) {
@@ -134,10 +156,14 @@ func (s *Server) Build(ctx context.Context, userName string, now time.Time) (Env
 	if err != nil {
 		return Envelope{}, err
 	}
-	return Sign(Payload{
+	p := Payload{
 		V: 1, NodeID: m.NodeID, Seq: seq, Time: now.Unix(), Issued: now.Unix(),
 		Expires: now.Add(Lifetime).Unix(), Profiles: profiles,
-	}, s.Keys)
+	}
+	if s.Probe != nil {
+		p.Probe = &ProbeHint{V: 1, UDP: s.Probe.UDPPort != 0}
+	}
+	return Sign(p, s.Keys)
 }
 
 // nextSeq returns a counter that grows with every response, across restarts.

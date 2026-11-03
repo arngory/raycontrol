@@ -30,6 +30,7 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [handoff/niko-r3-reply.md](handoff/niko-r3-reply.md) | Ответ на RAYCONTROL.md §9–§10: DoH напрямую на ноду, ссылка `rcinv1:` как URI, перенос niko-server в `arngory/niko-server`. |
 | [handoff/niko-mux-note.md](handoff/niko-mux-note.md) | Фронт niko-server на 443: tcpmux и udpmux, Hysteria2 на sing-quic, naive-quic и DoH3, что поменять в CI Niko. |
 | [handoff/niko-ygg-note.md](handoff/niko-ygg-note.md) | Yggdrasil на ноде (R4-15): профиль `niko-ygg`, конфиг ядра клиента, ротация ключа вместе с UUID. |
+| [handoff/niko-probe-note.md](handoff/niko-probe-note.md) | Замер канала (R4-16, ответ на §13): TCP и эхо UDP на эндпоинте подписки, потолки Brutal, что дальше. |
 
 Статус: решения приняты (08), документы 01–04 переписаны под них. Data plane — [niko-server](https://github.com/arngory/niko-server) ([SPEC](https://github.com/arngory/niko-server/blob/main/docs/SPEC.md)), control plane — raycontrol; обе ведёт эта сессия.
 Код v0 перенесён в `legacy/`. Этапы R0 и R1 реализованы, установка проверяется в CI на Debian 12/13, Ubuntu 24.04 и
