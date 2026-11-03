@@ -274,6 +274,14 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	// naive (R2-14): rayd naive behind the site, which passes its name on.
 	// It exits to the internet and nowhere else: not the node itself, not
 	// local networks (also checked in the process, address by address).
+	// Channel probes through naive (R4-16): the probe name leads to the
+	// subscription endpoint on loopback, its port only (checked in rayd
+	// naive; systemd lets loopback through for it).
+	probeArg, probeAllow := "", ""
+	if port := m.SubscriptionPort(); port != 0 {
+		probeArg = fmt.Sprintf(" -probe 127.0.0.1:%d", port)
+		probeAllow = "IPAddressAllow=127.0.0.1"
+	}
 	for _, s := range naives {
 		g := render.GroupName(s.Name)
 		raydGroups = append(raydGroups, g)
@@ -296,7 +304,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 				fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s", g, g, path.Join(dir, render.NaiveKey), key),
 				"ExecStart=" + bin.Rayd + " naive -answer " + answer + " -users " + path.Join(dir, render.NaiveUsers) +
 					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name) +
-					" -quic-socket " + p.NaiveQUICSocket(s.Name),
+					" -quic-socket " + p.NaiveQUICSocket(s.Name) + probeArg,
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
 				"ReadWritePaths=" + path.Dir(p.NaiveSocket(s.Name)),
@@ -304,6 +312,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 				"CapabilityBoundingSet=",
 				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
 				"IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7",
+				probeAllow,
 			},
 		})
 	}

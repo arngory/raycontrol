@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/site"
 )
 
@@ -202,5 +203,63 @@ func TestPublic(t *testing.T) {
 			c.Close()
 		}
 		t.Fatalf("dialed loopback: %v", err)
+	}
+}
+
+// The probe name, and only it, leads to the probe endpoint on loopback
+// (R4-16); loopback itself stays out of reach.
+func TestProbeName(t *testing.T) {
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			c, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _ = io.Copy(c, c); c.Close() }()
+		}
+	}()
+	users := filepath.Join(t.TempDir(), "users.json")
+	writeUsers(t, users, "secret-one")
+	answer, _ := site.Responder(site.Answer404, "")
+	h := &Server{Users: &Users{Path: users}, Answer: answer, Probe: echo.Addr().String(), Log: slog.New(slog.DiscardHandler)}
+	srv := httptest.NewUnstartedServer(h)
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+	tr := &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // G402: the test's own server
+		NextProtos:         []string{"h2"},
+	}}
+	defer tr.CloseIdleConnections()
+	through := func(host string) error {
+		pr, pw := io.Pipe()
+		req, _ := http.NewRequest(http.MethodConnect, srv.URL, pr)
+		req.Host = host
+		req.Header.Set("Padding", paddingHeader())
+		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("niko:secret-one")))
+		resp, err := tr.RoundTrip(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		s := &paddedStream{r: resp.Body, w: pw}
+		if _, err := s.Write([]byte("probe")); err != nil {
+			return err
+		}
+		got := make([]byte, 5)
+		_, err = io.ReadFull(s, got)
+		pw.Close()
+		return err
+	}
+	if err := through(net.JoinHostPort(probe.Name, "443")); err != nil {
+		t.Fatalf("the probe name: %v", err)
+	}
+	if err := through(echo.Addr().String()); err == nil {
+		t.Fatal("loopback reached by its address")
 	}
 }

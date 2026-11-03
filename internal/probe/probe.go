@@ -27,6 +27,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Name is where a client reaches the probes through a tunnel: the exits
+// (Xray, rayd naive, the Hysteria2 backends) send it to the endpoint.
+const Name = "probe.raycontrol.invalid"
+
 // Paths, limits and the trailer of a down probe.
 const (
 	PathDown = "/probe/v1/down"

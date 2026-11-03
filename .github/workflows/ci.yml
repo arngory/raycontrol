@@ -67,7 +67,7 @@ jobs:
       # The pinned niko-server release: REALITY, DoH and naive through its
       # front on TCP 443 (tcpmux, R2-15).
       - run: scripts/niko-server.sh amd64 "$RUNNER_TEMP/niko-server"
-      - run: XRAY_BIN="$RUNNER_TEMP/xray" NIKO_SERVER_BIN="$RUNNER_TEMP/niko-server" go test -count=1 -run 'WithXray|WithNikoServer' -v ./internal/xrayapi
+      - run: XRAY_BIN="$RUNNER_TEMP/xray" NIKO_SERVER_BIN="$RUNNER_TEMP/niko-server" go test -count=1 -run 'WithXray|WithNikoServer|ThroughXray' -v ./internal/xrayapi
       - uses: actions/upload-artifact@v4
         with:
           name: xray

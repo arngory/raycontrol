@@ -17,6 +17,7 @@ import (
 	"path"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/site"
 	"github.com/arngory/raycontrol/internal/store"
@@ -600,6 +602,22 @@ var privateNets = []string{
 	"::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8",
 }
 
+// ProbeName is where a client reaches the channel probes through a tunnel
+// (spec/probe-v1.md): the exits send it to the subscription endpoint.
+const ProbeName = probe.Name
+
+// SubscriptionPort is the port of the enabled subscription endpoint, or 0.
+func (m Model) SubscriptionPort() int {
+	for _, s := range m.Services {
+		if s.Kind == "subscription" {
+			if ports, err := s.Ports(); err == nil && len(ports) > 0 {
+				return int(ports[0].Num)
+			}
+		}
+	}
+	return 0
+}
+
 // InnerTag is the inbound tag of the inner stage (Xray API target).
 const InnerTag = "inner"
 
@@ -612,7 +630,7 @@ func innerConfig(s Service, m Model, p Paths) (File, error) {
 		return File{}, fmt.Errorf("inner %s: %w", s.Name, err)
 	}
 	clients := xrayClients(m, s, "")
-	return xrayFile(s, p, map[string]any{
+	return xrayFile(s, m, p, map[string]any{
 		"tag":      InnerTag,
 		"listen":   p.InnerSocket(s.Name) + ",0660",
 		"protocol": "vless",
@@ -627,7 +645,26 @@ var sniffing = map[string]any{"enabled": true, "destOverride": []string{"http", 
 // xrayFile is the config of an Xray exit: one inbound, the API on its own
 // unix socket, DoH, and routing that keeps private networks and BitTorrent
 // out.
-func xrayFile(s Service, p Paths, inbound map[string]any) (File, error) {
+func xrayFile(s Service, m Model, p Paths, inbound map[string]any) (File, error) {
+	outbounds := []map[string]any{
+		{"tag": "direct", "protocol": "freedom", "streamSettings": map[string]any{"sockopt": map[string]string{"domainStrategy": "UseIP"}}},
+		{"tag": "block", "protocol": "blackhole"},
+	}
+	rules := []map[string]any{
+		{"ip": privateNets, "outboundTag": "block"},
+		{"protocol": []string{"bittorrent"}, "outboundTag": "block"},
+	}
+	// Channel probes through the tunnel (R4-16): the probe name goes to the
+	// subscription endpoint on loopback, TCP and UDP alike, before the rule
+	// that keeps loopback out.
+	if port := m.SubscriptionPort(); port != 0 {
+		// Xray's freedom refuses private targets unless a final rule lets
+		// this one through.
+		outbounds = append(outbounds, map[string]any{"tag": "probe", "protocol": "freedom",
+			"settings": map[string]any{"redirect": fmt.Sprintf("127.0.0.1:%d", port),
+				"finalRules": []map[string]any{{"action": "allow", "network": "tcp,udp", "ip": []string{"127.0.0.1/32"}, "port": strconv.Itoa(port)}}}})
+		rules = append([]map[string]any{{"domain": []string{"full:" + ProbeName}, "outboundTag": "probe"}}, rules...)
+	}
 	b, err := jsonFile(map[string]any{
 		"log": map[string]string{"loglevel": "warning", "access": "none"},
 		"api": map[string]any{"tag": "api", "listen": p.APISocket(s.Name), "services": []string{"HandlerService"}},
@@ -637,18 +674,9 @@ func xrayFile(s Service, p Paths, inbound map[string]any) (File, error) {
 			"servers":       []string{"https+local://1.1.1.1/dns-query", "https+local://9.9.9.9/dns-query"},
 			"queryStrategy": "UseIP",
 		},
-		"inbounds": []map[string]any{inbound},
-		"outbounds": []map[string]any{
-			{"tag": "direct", "protocol": "freedom", "streamSettings": map[string]any{"sockopt": map[string]string{"domainStrategy": "UseIP"}}},
-			{"tag": "block", "protocol": "blackhole"},
-		},
-		"routing": map[string]any{
-			"domainStrategy": "IPOnDemand",
-			"rules": []map[string]any{
-				{"ip": privateNets, "outboundTag": "block"},
-				{"protocol": []string{"bittorrent"}, "outboundTag": "block"},
-			},
-		},
+		"inbounds":  []map[string]any{inbound},
+		"outbounds": outbounds,
+		"routing":   map[string]any{"domainStrategy": "IPOnDemand", "rules": rules},
 	})
 	if err != nil {
 		return File{}, err
@@ -785,7 +813,7 @@ func realityConfig(s Service, m Model, p Paths) (File, error) {
 		}
 	}
 	inbound["streamSettings"] = stream
-	return xrayFile(s, p, inbound)
+	return xrayFile(s, m, p, inbound)
 }
 
 // tcpPort is the TCP port of a service (443 unless its settings say else).

@@ -223,6 +223,8 @@ units="$(x systemctl cat niko-ygg.service)" || fail "no unit for Yggdrasil"
 [[ $units == *PrivateNetwork=yes* && $units == *SupplementaryGroups=niko-inner* ]] || fail "the Yggdrasil unit is not unix-only with inner: $units"
 [[ $(x id -nG niko-front) == *niko-ygg* ]] || fail "the front cannot reach the Yggdrasil socket"
 [[ $(x stat -c '%a %U %G' /run/niko/naive-in) == "2750 niko-naive niko-front" ]] || fail "no socket directory for naive (the front passes connections there)"
+units="$(x systemctl cat niko-naive.service)" || fail "no unit for naive"
+[[ $units == *" -probe 127.0.0.1:"* && $units == *IPAddressAllow=127.0.0.1* ]] || fail "naive does not lead the probe name to the endpoint: $units"
 wait_active niko-hy2o.service niko-front.service
 [[ $(x ss -Hulpn 'sport = :443') == *niko-server* ]] || fail "the front does not listen on UDP 443"
 [[ $(x stat -c '%a %U' /run/niko/front/hy2o.salamander) == "400 niko-front" ]] || fail "the front's salamander copy is not 0400 niko-front"

@@ -63,11 +63,19 @@ type Payload struct {
 }
 
 // ProbeHint: probe-v1 on the subscription endpoint; UDP: the echo on the
-// same port number.
+// same port number; Tunnel: the name that leads to the endpoint through the
+// tunnels of the services in TunnelSvc.
 type ProbeHint struct {
-	V   int  `json:"v"`
-	UDP bool `json:"udp"`
+	V         int      `json:"v"`
+	UDP       bool     `json:"udp"`
+	Tunnel    string   `json:"tunnel,omitempty"`
+	TunnelSvc []uint16 `json:"tunnel_svc,omitempty"`
 }
+
+// ProbeTunnels are the kinds whose exits send the probe name to the
+// endpoint: Xray (inner behind the DNS tunnels and Yggdrasil, REALITY) and
+// rayd naive.
+var ProbeTunnels = []string{"dnstt", "masterdns", "yggdrasil", "reality", "naive"}
 
 // Envelope is what the endpoint returns.
 type Envelope struct {

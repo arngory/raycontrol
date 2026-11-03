@@ -668,6 +668,7 @@ func cmdNaive(args []string) error {
 	socket := fs.String("socket", "", "SOCK_SEQPACKET socket the front passes connections to (niko-server IPC, mode fd)")
 	quicSocket := fs.String("quic-socket", "", "SOCK_SEQPACKET socket the front sends QUIC datagrams to (naive-quic; IPC mode packet)")
 	frontUID := fs.Int("front-uid", render.FrontUID, "UID of the niko-server front, the only peer accepted")
+	probeAddr := fs.String("probe", "", "where the probe name leads (the subscription endpoint on loopback, R4-16)")
 	fs.Parse(args)
 	if *users == "" || *chain == "" || *key == "" || *socket == "" {
 		return errors.New("naive needs -users, -chain, -key and -socket")
@@ -691,6 +692,9 @@ func cmdNaive(args []string) error {
 		return err
 	}
 	ns := &naive.Server{Users: &naive.Users{Path: *users}, Answer: handler, Log: log}
+	// Channel probes through the tunnel (R4-16): the probe name, and only
+	// it, leads to the endpoint; the rest to public addresses.
+	ns.Probe = *probeAddr
 	if *quicSocket != "" {
 		// naive-quic (R3-5): the same server over HTTP/3.
 		pc, err := nikoipc.ListenPacket(*quicSocket, *frontUID, log)

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -161,7 +162,14 @@ func (s *Server) Build(ctx context.Context, userName string, now time.Time) (Env
 		Expires: now.Add(Lifetime).Unix(), Profiles: profiles,
 	}
 	if s.Probe != nil {
-		p.Probe = &ProbeHint{V: 1, UDP: s.Probe.UDPPort != 0}
+		p.Probe = &ProbeHint{V: 1, UDP: s.Probe.UDPPort != 0, Tunnel: probe.Name}
+		for _, pr := range profiles {
+			for _, svc := range m.Services {
+				if uint16(svc.ID) == pr.Svc && slices.Contains(ProbeTunnels, svc.Kind) && !slices.Contains(p.Probe.TunnelSvc, pr.Svc) {
+					p.Probe.TunnelSvc = append(p.Probe.TunnelSvc, pr.Svc)
+				}
+			}
+		}
 	}
 	return Sign(p, s.Keys)
 }

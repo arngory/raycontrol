@@ -188,7 +188,8 @@ func TestEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p.V != 1 || p.Seq != 1 || p.Expires-p.Issued != int64(sub.Lifetime/time.Second) || len(p.Profiles) != 1 ||
-		p.Probe == nil || p.Probe.V != 1 || p.Probe.UDP {
+		p.Probe == nil || p.Probe.V != 1 || p.Probe.UDP || p.Probe.Tunnel != probe.Name ||
+		len(p.Probe.TunnelSvc) != 1 || p.Probe.TunnelSvc[0] != p.Profiles[0].Svc {
 		t.Fatalf("payload %+v", p)
 	}
 	for _, auth := range []bool{false, true} {

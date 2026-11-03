@@ -23,6 +23,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/arngory/raycontrol/internal/probe"
 )
 
 // Server handles the requests of one naive service.
@@ -33,7 +35,10 @@ type Server struct {
 	Answer http.Handler
 	// Dial reaches the destination; PublicDialer when nil.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
-	Log  *slog.Logger
+	// Probe is where the probe name leads (the subscription endpoint on
+	// loopback, R4-16); that name and no other address reaches it.
+	Probe string
+	Log   *slog.Logger
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +63,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	dial := s.Dial
 	if dial == nil {
 		dial = PublicDialer().DialContext
+	}
+	if host, _, _ := net.SplitHostPort(target); s.Probe != "" && host == probe.Name {
+		var d net.Dialer
+		dial, target = d.DialContext, s.Probe
 	}
 	dctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	out, err := dial(dctx, "tcp", target)
