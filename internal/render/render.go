@@ -242,7 +242,7 @@ func (p Paths) APISocket(service string) string {
 }
 
 // XrayKinds run on Xray and get their users through its API.
-var XrayKinds = []string{"inner", "reality", "hy2-masq", "hy2-obfs"}
+var XrayKinds = []string{"inner", "reality"}
 
 // UserCredentials reports whether every user of a service kind has a
 // secret of their own there, with rotation (R4-1): a UUID for REALITY, a
@@ -266,7 +266,7 @@ func XrayUsers(m Model, s Service) (tag string, users map[string]string) {
 	case s.Kind == "reality":
 		creds, tag = m.Creds[s.ID], RealityTag
 	case IsHysteria(s.Kind):
-		creds, tag = m.Creds[s.ID], HysteriaTag
+		creds, tag = m.Creds[s.ID], "" // niko-server: the same users in a file
 	case s.Kind == "naive":
 		creds, tag = m.Creds[s.ID], "" // not Xray: the same users, hashed into a file
 	}
@@ -338,6 +338,12 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		SNI     []string `json:"sni"`
 		Backend string   `json:"backend"`
 	}
+	type udpRoute struct {
+		SNI                    []string `json:"sni,omitempty"`
+		SalamanderPasswordFile string   `json:"salamander_password_file,omitempty"`
+		Backend                string   `json:"backend"`
+	}
+	var udpRoutes []udpRoute
 	var zones []route
 	var tcpRoutes []tcpRoute
 	tcpDefault := "" // the first REALITY service: its target answers like the site
@@ -394,6 +400,16 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				return nil, nil, err
 			}
 			files = append(files, fs...)
+			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "packet"), Mode: "packet", UID: s.UID}
+			if s.Kind == "hy2-obfs" {
+				udpRoutes = append(udpRoutes, udpRoute{SalamanderPasswordFile: p.FrontSalamander(s.Name), Backend: s.Name})
+			} else {
+				var st struct {
+					SNI string `json:"sni"`
+				}
+				_ = json.Unmarshal([]byte(s.Settings), &st)
+				udpRoutes = append(udpRoutes, udpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: s.Name})
+			}
 		case "site":
 			fs, err := siteFiles(s, m, p)
 			if err != nil {
@@ -463,6 +479,14 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				tcp["default"] = tcpDefault
 			}
 			front["tcp"] = tcp
+		}
+		if len(udpRoutes) > 0 {
+			// udpmux (R3-4): QUIC by name, salamander by password.
+			listen := []string{"0.0.0.0:443"}
+			if m.IPv6 {
+				listen = append(listen, "[::]:443")
+			}
+			front["udp"] = map[string]any{"listen": listen, "idle": "60s", "routes": udpRoutes}
 		}
 		b, err := jsonFile(front)
 		if err != nil {
@@ -747,20 +771,27 @@ func tcpPort(s Service) (int, error) {
 	return 0, fmt.Errorf("service %s has no TCP port", s.Name)
 }
 
-// HysteriaTag is the inbound tag of a Hysteria2 service (Xray API target).
-const HysteriaTag = "hysteria"
-
-// Hysteria2 files: the TLS chain and key of the service's site certificate
-// next to the Xray config, so that a renewal restarts the service too.
+// Hysteria2 files (R3-4): the backend's config, its users (read again by
+// the backend when they change), the certificate chain, the key and for
+// hy2-obfs the salamander password, which systemd copies for the backend;
+// the front gets its own copy of that password to recognise the flows.
 const (
 	HysteriaChain = "chain.pem"
 	HysteriaKey   = "key.pem"
+	HysteriaUsers = "users.json"
+	HysteriaObfs  = "salamander"
 )
 
-// hysteriaFiles renders a Hysteria2 service on Xray (R3-1, until a udpmux):
-// TLS 1.3 with X25519MLKEM768 only; hy2-masq under its own name with the
-// site's certificate and an empty 404 without a password, like the site;
-// hy2-obfs with a self-signed certificate clients pin, inside salamander.
+// FrontSalamander is where the front reads a hy2-obfs password.
+func (p Paths) FrontSalamander(service string) string {
+	return p.Credential("front", service+".salamander")
+}
+
+// hysteriaFiles renders a Hysteria2 service as a niko-server backend behind
+// udpmux (R3-4): TLS 1.3 with X25519MLKEM768 only; hy2-masq under its own
+// name with the site's certificate and an empty 404 without a password,
+// like the site; hy2-obfs with a self-signed certificate clients pin,
+// inside salamander.
 func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 	// hy2-masq: the site's certificate; hy2-obfs: its own, self-signed.
 	chain, keyDER := s.Secrets[provision.SecretTLSChain], s.Secrets[provision.SecretTLSKey]
@@ -773,69 +804,54 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 			}
 		}
 	}
-	port := 0
-	ports, err := s.Ports()
+	dir := path.Join(p.Rendered, s.Name)
+	options := map[string]any{}
+	cfg := map[string]any{
+		"schema": Schema, "role": "backend", "kind": s.Kind, "log": map[string]string{"level": "warn"},
+		"socket": p.socket(s.Name, "packet"), "front_uid": FrontUID,
+		"users_file": path.Join(dir, HysteriaUsers),
+		"tls": map[string]any{
+			"certificate_file": path.Join(dir, HysteriaChain),
+			"key_file":         p.Credential(s.Name, HysteriaKey),
+			"curves":           []string{"X25519MLKEM768"},
+		},
+		"options": options,
+	}
+	var files []File
+	if s.Kind == "hy2-obfs" {
+		options["obfs_password_file"] = p.Credential(s.Name, HysteriaObfs)
+		pw := s.Secrets[provision.SecretObfsPassword]
+		files = append(files,
+			File{Path: path.Join(dir, HysteriaObfs), Mode: 0o600, Content: pw, Service: s.Name},
+			File{Path: path.Join(p.Rendered, "front", s.Name+".salamander"), Mode: 0o600, Content: pw, Service: "front"})
+	}
+	b, err := jsonFile(cfg)
 	if err != nil {
 		return nil, err
 	}
-	for _, pt := range ports {
-		if pt.Proto == "udp" {
-			port = int(pt.Num)
-		}
+	// Users: the current credential of each, and the next and previous
+	// while they rotate (R4-1), under distinct names.
+	_, creds := XrayUsers(m, s)
+	type user struct {
+		Name    string            `json:"name"`
+		Enabled bool              `json:"enabled"`
+		Hy2     map[string]string `json:"hy2"`
 	}
-	if port == 0 {
-		return nil, fmt.Errorf("service %s has no UDP port", s.Name)
+	users := []user{}
+	for _, name := range slices.Sorted(maps.Keys(creds)) {
+		users = append(users, user{Name: name, Enabled: true, Hy2: map[string]string{"password": creds[name]}})
 	}
-	dir := path.Join(p.Rendered, s.Name)
-	stream := map[string]any{
-		"network":  "hysteria",
-		"security": "tls",
-		"tlsSettings": map[string]any{
-			"minVersion":       "1.3",
-			"alpn":             []string{"h3"},
-			"curvePreferences": []string{"X25519MLKEM768"},
-			"certificates": []map[string]string{{
-				"certificateFile": path.Join(dir, HysteriaChain),
-				"keyFile":         p.Credential(s.Name, HysteriaKey),
-			}},
-		},
-		"hysteriaSettings": map[string]any{
-			"version":    2,
-			"masquerade": map[string]any{"type": "string", "statusCode": 404, "content": ""},
-		},
-	}
-	if s.Kind == "hy2-obfs" {
-		stream["finalmask"] = map[string]any{"udp": []map[string]any{{
-			"type": "salamander", "settings": map[string]string{"password": string(s.Secrets[provision.SecretObfsPassword])},
-		}}}
-	}
-	_, users := XrayUsers(m, s)
-	clients := make([]map[string]string, 0, len(users))
-	for _, email := range slices.Sorted(maps.Keys(users)) {
-		clients = append(clients, map[string]string{"auth": users[email], "email": email})
-	}
-	listen := "0.0.0.0"
-	if m.IPv6 {
-		listen = "::"
-	}
-	cfg, err := xrayFile(s, p, map[string]any{
-		"tag":            HysteriaTag,
-		"listen":         listen,
-		"port":           port,
-		"protocol":       "hysteria",
-		"settings":       map[string]any{"version": 2, "clients": clients},
-		"streamSettings": stream,
-		"sniffing":       sniffing,
-	})
+	u, err := jsonFile(map[string]any{"users": users})
 	if err != nil {
 		return nil, err
 	}
 	key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
-	return []File{
-		cfg,
-		{Path: path.Join(dir, HysteriaChain), Mode: 0o640, Group: GroupName(s.Name), Content: chain, Service: s.Name},
-		{Path: path.Join(dir, HysteriaKey), Mode: 0o600, Content: key, Service: s.Name},
-	}, nil
+	return append(files,
+		File{Path: path.Join(dir, "backend.json"), Mode: 0o640, Group: GroupName(s.Name), Content: b, Service: s.Name},
+		File{Path: path.Join(dir, HysteriaUsers), Mode: 0o640, Group: GroupName(s.Name), Content: u, Service: s.Name, Reload: true},
+		File{Path: path.Join(dir, HysteriaChain), Mode: 0o640, Group: GroupName(s.Name), Content: chain, Service: s.Name},
+		File{Path: path.Join(dir, HysteriaKey), Mode: 0o600, Content: key, Service: s.Name},
+	), nil
 }
 
 // SiteSocket is the TLS socket of the decoy site, the self-steal target.

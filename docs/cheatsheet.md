@@ -67,7 +67,7 @@
 | Команда | Что делает |
 |---|---|
 | `rayctl service add reality reality` | REALITY с self-steal на своём сайте-приманке |
-| `rayctl service add hy2-masq hy2-masq` · `rayctl service add hy2-obfs hy2-obfs` | Hysteria2: UDP 443 с маскировкой и salamander на своём порту |
+| `rayctl service add hy2-masq hy2-masq` · `rayctl service add hy2-obfs hy2-obfs` | Hysteria2: оба на UDP 443 за фронтом — с маскировкой и в salamander |
 | `rayctl service add doh doh` | DoH для клиентов на TCP 443 (после REALITY) |
 | `rayctl service add naive naive` | NaiveProxy (HTTP/2) на TCP 443 (после REALITY); потом `rayctl apply` |
 | `rayctl service add dnstt dns` · `rayctl service add masterdns mdns` | DNS-туннели (резервный канал) |

@@ -206,17 +206,18 @@ func TestHysteriaServices(t *testing.T) {
 	if err != nil {
 		t.Fatal("no site created for Hysteria2's certificate")
 	}
+	// Both on UDP 443: the front tells them apart (udpmux, R3-4); each has
+	// its own port schedule.
 	mp, _ := masq.Ports()
 	op, _ := obfs.Ports()
-	if len(mp) != 1 || mp[0] != (store.Port{Proto: "udp", Num: 443}) || len(op) != 1 || op[0].Proto != "udp" || op[0].Num == 443 ||
-		(op[0].Num >= p.PortBase && op[0].Num < p.PortBase+p.PortRange) {
+	if len(mp) != 1 || mp[0] != (store.Port{Proto: "udp", Num: 443}) || len(op) != 1 || op[0] != (store.Port{Proto: "udp", Num: 443}) {
 		t.Fatalf("ports: masq %v, obfs %v", mp, op)
 	}
-	for _, s := range []store.Service{masq, obfs} {
-		r, ok := ServiceRotation(s)
-		if !ok || (op[0].Num >= r.Base && op[0].Num < r.Base+r.Range) {
-			t.Fatalf("%s: rotation %+v overlaps the obfs port %d", s.Name, r, op[0].Num)
-		}
+	rm, ok1 := ServiceRotation(masq)
+	ro, ok2 := ServiceRotation(obfs)
+	if !ok1 || !ok2 || (rm.Base < ro.Base+ro.Range && ro.Base < rm.Base+rm.Range) ||
+		(rm.Base < p.PortBase+p.PortRange && p.PortBase < rm.Base+rm.Range) {
+		t.Fatalf("rotations: masq %+v, obfs %+v, SPA %d+%d", rm, ro, p.PortBase, p.PortRange)
 	}
 	// hy2-masq: under the site's certificate. hy2-obfs: its own, self-signed,
 	// with a name that is in no DNS.

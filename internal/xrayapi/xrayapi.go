@@ -15,7 +15,6 @@ import (
 	"github.com/arngory/raycontrol/internal/gen/xray/app/proxyman/command/commandconnect"
 	"github.com/arngory/raycontrol/internal/gen/xray/common/protocol"
 	"github.com/arngory/raycontrol/internal/gen/xray/common/serial"
-	"github.com/arngory/raycontrol/internal/gen/xray/proxy/hysteria/account"
 	"github.com/arngory/raycontrol/internal/gen/xray/proxy/vless"
 )
 
@@ -88,15 +87,6 @@ func vlessCodec(flow string) codec {
 	}
 }
 
-var hysteriaCodec = codec{
-	account: func(auth string) proto.Message { return &account.Account{Auth: auth} },
-	secret: func(b []byte) (string, error) {
-		var acc account.Account
-		err := proto.Unmarshal(b, &acc)
-		return acc.Auth, err
-	},
-}
-
 func (c *Client) users(ctx context.Context, tag string, cd codec) (map[string]string, error) {
 	resp, err := c.c.GetInboundUsers(ctx, connect.NewRequest(&command.GetInboundUserRequest{Tag: tag}))
 	if err != nil {
@@ -124,11 +114,6 @@ func (c *Client) VLESSUsers(ctx context.Context, tag string) (map[string]string,
 // with the given flow, and reports how many were added and removed.
 func (c *Client) SyncVLESS(ctx context.Context, tag, flow string, want map[string]string) (added, removed int, err error) {
 	return c.sync(ctx, tag, vlessCodec(flow), want)
-}
-
-// SyncHysteria does the same for a Hysteria2 inbound (email -> password).
-func (c *Client) SyncHysteria(ctx context.Context, tag string, want map[string]string) (added, removed int, err error) {
-	return c.sync(ctx, tag, hysteriaCodec, want)
 }
 
 func (c *Client) sync(ctx context.Context, tag string, cd codec, want map[string]string) (added, removed int, err error) {

@@ -800,14 +800,20 @@ func runFront(t *testing.T, niko, rendered string, port int) (stop func()) {
 	return stop
 }
 
-// TestHysteriaWithXray: both Hysteria2 services as rendered (R3-1) on the
-// pinned Xray, with the site's certificate under their own names; a client
-// built from the subscription link gets through, also after the Xray API
-// adds a user; a wrong password does not.
+// TestHysteriaWithXray: both Hysteria2 services as rendered (R3-4), on
+// niko-server behind its UDP front: hy2-masq by the name in the QUIC
+// Initial, hy2-obfs by salamander, both on one port. An Xray client built
+// from the subscription links gets through; a wrong password does not; a
+// rotated user list is read again without a restart. Set XRAY_BIN (the
+// client) and NIKO_SERVER_BIN (v0.3 or later).
 func TestHysteriaWithXray(t *testing.T) {
 	bin := os.Getenv("XRAY_BIN")
 	if bin == "" {
 		t.Skip("set XRAY_BIN to an Xray built from arngory/xray-core")
+	}
+	niko := os.Getenv("NIKO_SERVER_BIN")
+	if niko == "" {
+		t.Skip("set NIKO_SERVER_BIN to niko-server v0.3 or later (udpmux)")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -820,14 +826,11 @@ func TestHysteriaWithXray(t *testing.T) {
 	if _, err := provision.Init(ctx, st, provision.Options{Host: "127.0.0.1", Domain: "example.com"}); err != nil {
 		t.Fatal(err)
 	}
-	masqPort, obfsPort := freeUDP(t), freeUDP(t)
-	masq, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-masq", Name: "hy2", Enabled: true,
-		Settings: fmt.Sprintf(`{"ports":["udp/%d"]}`, masqPort)})
+	masq, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-masq", Name: "hy2", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	obfs, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-obfs", Name: "hy2o", Enabled: true,
-		Settings: fmt.Sprintf(`{"ports":["udp/%d"]}`, obfsPort)})
+	obfs, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-obfs", Name: "hy2o", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -858,6 +861,36 @@ func TestHysteriaWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The files as rayd writes them, and the copies the units' ExecStartPre
+	// make in the runtime directories.
+	copies := map[string]string{
+		filepath.Join(paths.Rendered, "hy2", render.HysteriaKey):   paths.Credential("hy2", render.HysteriaKey),
+		filepath.Join(paths.Rendered, "hy2o", render.HysteriaKey):  paths.Credential("hy2o", render.HysteriaKey),
+		filepath.Join(paths.Rendered, "hy2o", render.HysteriaObfs): paths.Credential("hy2o", render.HysteriaObfs),
+		filepath.Join(paths.Rendered, "front", "hy2o.salamander"):  paths.FrontSalamander("hy2o"),
+	}
+	for _, f := range files {
+		os.MkdirAll(filepath.Dir(f.Path), 0o755)
+		os.WriteFile(f.Path, f.Content, 0o644)
+		if to, ok := copies[f.Path]; ok {
+			os.MkdirAll(filepath.Dir(to), 0o755)
+			os.WriteFile(to, f.Content, 0o600)
+		}
+	}
+	port := freeUDP(t)
+	for _, name := range []string{"hy2", "hy2o"} {
+		runNiko(t, niko, "backend", filepath.Join(paths.Rendered, name, "backend.json"), func(cfg map[string]any) {
+			cfg["front_uid"] = os.Getuid()
+		})
+	}
+	runNiko(t, niko, "front", filepath.Join(paths.Rendered, "front", "front.json"), func(cfg map[string]any) {
+		cfg["udp"].(map[string]any)["listen"] = []string{"127.0.0.1:" + strconv.Itoa(port)}
+		for _, ref := range cfg["backends"].(map[string]any) {
+			ref.(map[string]any)["uid"] = os.Getuid()
+		}
+		delete(cfg, "tcp")
+	})
+
 	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "through reality") }))
 	defer page.Close()
 	profiles, err := sub.Profiles(m, m.Users[0])
@@ -865,52 +898,77 @@ func TestHysteriaWithXray(t *testing.T) {
 		t.Fatalf("profiles %v %v", profiles, err)
 	}
 	for _, svc := range []store.Service{masq, obfs} {
-		var serverCfg map[string]any
-		for _, f := range files {
-			if f.Service != svc.Name {
-				continue
-			}
-			os.MkdirAll(filepath.Dir(f.Path), 0o755)
-			os.WriteFile(f.Path, f.Content, 0o644)
-			if filepath.Base(f.Path) == render.HysteriaKey {
-				// What the unit's ExecStartPre does: the key in the runtime directory.
-				os.MkdirAll(filepath.Dir(paths.Credential(svc.Name, render.HysteriaKey)), 0o755)
-				os.WriteFile(paths.Credential(svc.Name, render.HysteriaKey), f.Content, 0o600)
-			}
-			if filepath.Base(f.Path) == "xray.json" {
-				json.Unmarshal(f.Content, &serverCfg)
-			}
-		}
-		os.MkdirAll(filepath.Dir(paths.APISocket(svc.Name)), 0o755)
-		delete(serverCfg, "dns")
-		delete(serverCfg, "routing")
-		serverCfg["outbounds"] = []map[string]any{{"protocol": "freedom", "settings": map[string]any{
-			"finalRules": []map[string]any{{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}}}
-		server := writeJSON(t, serverCfg)
-		if out, err := exec.Command(bin, "run", "-test", "-c", server).CombinedOutput(); err != nil {
-			t.Fatalf("%s: xray -test: %v\n%s", svc.Name, err, out)
-		}
-		runXray(t, bin, server)
-
 		link := profiles[slices.IndexFunc(profiles, func(p sub.Profile) bool { return p.Name == svc.Name })].Link
+		// Both on UDP 443, as the front serves them; here the test's port.
+		if !strings.Contains(link, ":443/") {
+			t.Fatalf("%s: link not on UDP 443: %s", svc.Name, link)
+		}
+		link = strings.Replace(link, ":443/", ":"+strconv.Itoa(port)+"/", 1)
 		if err := tryHysteria(t, bin, link, "", rootFile, page.URL, 30); err != nil {
 			t.Fatalf("%s: no response through Hysteria2: %v", svc.Name, err)
-		}
-		// A user added through the API.
-		api := paths.APISocket(svc.Name)
-		waitFile(t, api)
-		_, want := render.XrayUsers(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })])
-		want["u9"] = "a-password-for-u9"
-		if added, _, err := xrayapi.Dial(api).SyncHysteria(ctx, render.HysteriaTag, want); err != nil || added != 1 {
-			t.Fatalf("%s: sync: +%d %v", svc.Name, added, err)
-		}
-		if err := tryHysteria(t, bin, link, "a-password-for-u9", rootFile, page.URL, 30); err != nil {
-			t.Fatalf("%s: added user: %v", svc.Name, err)
 		}
 		if err := tryHysteria(t, bin, link, "wrong", rootFile, page.URL, 3); err == nil {
 			t.Fatalf("%s: a wrong password got through", svc.Name)
 		}
 	}
+
+	// A new user: rayd rewrites users.json; the backend reads it again
+	// by itself (no restart: the file is marked Reload).
+	bob, _ := st.CreateUser(ctx, store.User{Name: "bob", Enabled: true})
+	st.SetUserServices(ctx, "bob", []int64{masq.ID})
+	if m, err = render.Collect(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	if files, _, err = render.Render(m, paths); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if f.Path == filepath.Join(paths.Rendered, "hy2", render.HysteriaUsers) {
+			if !f.Reload {
+				t.Fatal("the users file restarts the backend")
+			}
+			os.WriteFile(f.Path, f.Content, 0o644)
+		}
+	}
+	bobs, _ := sub.Profiles(m, m.Users[slices.IndexFunc(m.Users, func(u render.User) bool { return u.ID == bob.ID })])
+	link := strings.Replace(bobs[0].Link, ":443/", ":"+strconv.Itoa(port)+"/", 1)
+	if err := tryHysteria(t, bin, link, "", rootFile, page.URL, 30); err != nil {
+		t.Fatalf("a user added while the backend runs: %v", err)
+	}
+}
+
+// runNiko runs a niko-server process from a rendered config, adjusted for
+// the test; it may reach any address (loopback pages).
+func runNiko(t *testing.T, niko, role, rendered string, adjust func(map[string]any)) {
+	t.Helper()
+	var cfg map[string]any
+	b, err := os.ReadFile(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	adjust(cfg)
+	path := writeJSON(t, cfg)
+	if out, err := exec.Command(niko, "check", "-c", path).CombinedOutput(); err != nil {
+		t.Fatalf("niko-server check %s: %v\n%s", rendered, err, out)
+	}
+	cmd := exec.Command(niko, role, "-c", path)
+	cmd.Env = append(os.Environ(), "NIKO_SERVER_UNSAFE_ANY_DESTINATION=1")
+	var logs bytes.Buffer
+	cmd.Stderr = &logs
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+		if t.Failed() {
+			t.Logf("niko-server %s:\n%s", role, logs.String())
+		}
+	})
+	time.Sleep(300 * time.Millisecond)
 }
 
 func freeUDP(t *testing.T) int {

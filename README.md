@@ -9,10 +9,10 @@ Status: **R1** done — perimeter (SPA v2 over UDP and TCP), DNS tunnels with
 the inner stage on Xray, signed subscriptions, installer. **R2** — VLESS +
 REALITY + Vision on Xray (post-quantum key exchange and signature) with
 self-steal on the node's own decoy site, certificates through ACME. **R3** —
-Hysteria2 twice (masquerade on UDP 443, salamander, on Xray until the UDP
-front), DNS over HTTPS and NaiveProxy (h2); REALITY, DoH and naive share TCP 443
-behind the niko-server front (tcpmux); the remote API behind SPA with mTLS and
-one-time invites. **R4** —
+Hysteria2 twice (masquerade and salamander, both on UDP 443 behind the
+niko-server front, udpmux), DNS over HTTPS and NaiveProxy (h2); REALITY, DoH and
+naive share TCP 443 behind the same front (tcpmux); the remote API behind SPA
+with mTLS and one-time invites. **R4** —
 rotation of user credentials and REALITY keys and names, Cloudflare for DNS
 records and wildcard certificates, uninstall back to the host's snapshot,
 redacted reports, a kernel-side early drop, encrypted backups, local metrics. Data plane: niko-server v0.2.0

@@ -15,7 +15,6 @@ import (
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/site"
-	"github.com/arngory/raycontrol/internal/store"
 )
 
 // Binaries are the executables the units start.
@@ -239,20 +238,35 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		xrays = append(xrays, s)
 	}
 
-	// Hysteria2 on Xray (R3-1): its own UDP port, the key copied in by root.
+	// Hysteria2 behind udpmux (R3-4): niko-server backends on the front's
+	// datagrams; they go out to public addresses only.
 	for _, s := range hysteria {
 		g := render.GroupName(s.Name)
 		raydGroups = append(raydGroups, g)
+		frontGroups = append(frontGroups, g) // the front connects to packet.sock
 		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID})
-		caps := ""
-		if ports, _ := s.Ports(); slices.ContainsFunc(ports, func(pt store.Port) bool { return pt.Num < 1024 }) {
-			caps = "AmbientCapabilities=CAP_NET_BIND_SERVICE" // UDP 443 until niko-server's udpmux
+		dir := path.Join(p.Rendered, s.Name)
+		creds := []string{fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
+			g, g, path.Join(dir, render.HysteriaKey), p.Credential(s.Name, render.HysteriaKey))}
+		if s.Kind == "hy2-obfs" {
+			creds = append(creds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
+				g, g, path.Join(dir, render.HysteriaObfs), p.Credential(s.Name, render.HysteriaObfs)))
 		}
-		u := xrayUnit(s, "raycontrol Hysteria2 "+s.Name+" (Xray, "+s.Kind+", ML-KEM-768)", caps)
-		u.service = append(u.service, fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
-			g, g, path.Join(p.Rendered, s.Name, render.HysteriaKey), p.Credential(s.Name, render.HysteriaKey)))
-		units = append(units, u)
-		xrays = append(xrays, s)
+		units = append(units, unit{
+			name:        render.UnitName(s.Name),
+			description: "niko-server backend " + s.Name + " (Hysteria2, " + s.Kind + ")",
+			needs:       path.Join(dir, "backend.json"),
+			service: append([]string{
+				"User=" + g, "Group=" + g,
+				"ExecStart=" + bin.NikoServer + " backend -c " + path.Join(dir, "backend.json"),
+				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
+				"RuntimeDirectoryMode=0710",
+				"UMask=0007",
+				"CapabilityBoundingSet=",
+				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+				"IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7",
+			}, creds...),
+		})
 	}
 
 	// naive (R2-14): rayd naive behind the site, which passes its name on.
@@ -347,19 +361,33 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 				after = append(after, render.UnitName(s.Name))
 			}
 		}
+		for _, s := range hysteria {
+			after = append(after, render.UnitName(s.Name))
+		}
+		// The salamander passwords of hy2-obfs: copied in by root, readable
+		// by the front only.
+		var frontCreds []string
+		for _, s := range hysteria {
+			if s.Kind == "hy2-obfs" {
+				frontCreds = append(frontCreds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o niko-front -g niko-front %s %s",
+					path.Join(p.Rendered, "front", s.Name+".salamander"), p.FrontSalamander(s.Name)))
+			}
+		}
 		units = append(units, unit{
 			name:        render.UnitName("front"),
 			description: "niko-server front (multiplexers)",
 			needs:       path.Join(p.Rendered, "front", "front.json"),
 			after:       after,
-			service: []string{
+			service: append([]string{
 				"User=niko-front", "Group=niko-front", groups(frontGroups),
 				"ExecStart=" + bin.NikoServer + " front -c " + path.Join(p.Rendered, "front", "front.json"),
+				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, "front"), "/run/"),
+				"RuntimeDirectoryMode=0700",
 				"AmbientCapabilities=CAP_NET_BIND_SERVICE",
 				"CapabilityBoundingSet=CAP_NET_BIND_SERVICE",
 				"UMask=0007",
 				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
-			},
+			}, frontCreds...),
 		})
 	}
 

@@ -596,15 +596,29 @@ func TestBuildHysteria(t *testing.T) {
 	}
 	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
 	masq, obfs := file(p, "/etc/systemd/system/niko-hy2-masq.service"), file(p, "/etc/systemd/system/niko-hy2-obfs.service")
+	// niko-server backends behind the UDP front (R3-4): no capability, the
+	// key (and salamander) copied in by root, out to public addresses only.
 	for name, u := range map[string]string{"masq": masq, "obfs": obfs} {
-		for _, want := range []string{"ExecStart=/usr/local/libexec/raycontrol/xray run -c /var/lib/raycontrol/rendered/hy2-", "ExecStartPre=+install -m 0400 -o niko-hy2-"} {
+		for _, want := range []string{"ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c /var/lib/raycontrol/rendered/hy2-",
+			"ExecStartPre=+install -m 0400 -o niko-hy2-", "CapabilityBoundingSet=\n", "IPAddressDeny=localhost"} {
 			if !strings.Contains(u, want) {
 				t.Errorf("%s unit lacks %q:\n%s", name, want, u)
 			}
 		}
+		if strings.Contains(u, "CAP_NET_BIND_SERVICE") {
+			t.Errorf("%s binds a port itself", name)
+		}
 	}
-	if !strings.Contains(masq, "AmbientCapabilities=CAP_NET_BIND_SERVICE") || strings.Contains(obfs, "AmbientCapabilities=CAP_NET_BIND_SERVICE") {
-		t.Error("the bind capability belongs to UDP 443 only")
+	if !strings.Contains(obfs, "/run/niko/hy2-obfs/salamander") {
+		t.Error("hy2-obfs gets no salamander password")
+	}
+	front := file(p, "/etc/systemd/system/niko-front.service")
+	for _, want := range []string{"SupplementaryGroups=niko-hy2-masq niko-hy2-obfs",
+		"ExecStartPre=+install -m 0400 -o niko-front -g niko-front /var/lib/raycontrol/rendered/front/hy2-obfs.salamander /run/niko/front/hy2-obfs.salamander",
+		"RuntimeDirectory=niko/front\n", "AmbientCapabilities=CAP_NET_BIND_SERVICE"} {
+		if !strings.Contains(front, want) {
+			t.Errorf("front unit lacks %q:\n%s", want, front)
+		}
 	}
 }
 

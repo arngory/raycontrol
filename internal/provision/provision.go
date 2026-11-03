@@ -385,15 +385,8 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			return svc, err
 		}
 		svc.Secrets[SecretObfsPassword] = []byte(base64.RawURLEncoding.EncodeToString(pw))
-		// UDP 443 belongs to hy2-masq until a udpmux tells them apart;
-		// salamander needs no well-known port anyway.
-		if _, ok := settings["ports"]; !ok {
-			port, err := freePort(ctx, st, all)
-			if err != nil {
-				return svc, err
-			}
-			settings["ports"] = []string{fmt.Sprintf("udp/%d", port)}
-		}
+		// UDP 443 like hy2-masq: the front tells them apart by salamander
+		// (udpmux, R3-4).
 	case "reality":
 		if _, ok := settings["target"]; !ok {
 			// Self-steal: the node's own decoy site answers non-clients.
