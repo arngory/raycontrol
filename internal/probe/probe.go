@@ -106,14 +106,18 @@ type Server struct {
 	Auth    func(*http.Request) (string, error)
 	Daily   int64 // bytes per device and UTC day; 0 means DefaultDaily
 	UDPPort int   // where the echo listens, told to clients
-	Log     *slog.Logger
-	now     func() time.Time
+	// LinkPorts are the node's ports whose connections link reports: the
+	// tunnels' TCP 443 when empty.
+	LinkPorts []uint16
+	Log       *slog.Logger
+	now       func() time.Time
 
 	mu       sync.Mutex
 	day      int64
 	used     map[string]int64
 	busy     map[string]bool
 	sessions map[[tokenSize]byte]*session
+	lastLink map[string]time.Time
 }
 
 type session struct {
@@ -200,6 +204,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.startUDP(w, device)
 	case r.URL.Path == PathUDP && r.Method == http.MethodGet:
 		s.endUDP(w, r, device)
+	case r.URL.Path == PathLink && r.Method == http.MethodGet:
+		s.link(w, r, device)
 	default:
 		http.NotFound(w, r)
 	}

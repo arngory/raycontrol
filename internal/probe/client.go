@@ -255,3 +255,16 @@ func (c Client) Echo(ctx context.Context, count, size int, interval time.Duratio
 	}
 	return e, err
 }
+
+// Link asks for the server's view of this address's connections to the
+// tunnel port (directly, not through a tunnel).
+func (c Client) Link(ctx context.Context) (LinkStats, error) {
+	var st LinkStats
+	resp, err := c.do(ctx, http.MethodGet, PathLink, nil)
+	if err != nil {
+		return st, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	err = json.NewDecoder(resp.Body).Decode(&st)
+	return st, err
+}

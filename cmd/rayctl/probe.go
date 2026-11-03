@@ -205,6 +205,10 @@ func measure(ctx context.Context, sc sub.Client, p sub.Payload, printf func(stri
 		upRate = float64(up.Server.Bytes) * 8 / float64(up.Server.Ms) / 1000
 	}
 	printf("channel up: %d bytes, %.1f Mbit/s at the node%s\n", up.Server.Bytes, upRate, tcp(up))
+	if st, err := c.Link(ctx); err == nil {
+		printf("channel link: %d connections of this address on 443 at the node; rtt median %.1f ms, retransmits %.2f%%\n",
+			st.Connections, float64(st.RTTus.Median)/1000, st.RetransRate*100)
+	}
 	if !p.Probe.UDP {
 		printf("channel udp: no echo on this node\n")
 		return nil

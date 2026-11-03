@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
@@ -267,5 +268,54 @@ func TestClient(t *testing.T) {
 	if err != nil || e.Sent != 40 || e.Received != 40 || e.Server.Received != 40 || e.LostUp() != 0 || e.LostDown() != 0 ||
 		e.RTTMin <= 0 || e.RTTMax < e.RTTAvg || e.RTTAvg < e.RTTMin {
 		t.Fatalf("echo %+v %v", e, err)
+	}
+}
+
+// sock_diag sees the host's connections with TCP_INFO; the stats sum up
+// those from one address to the tunnel ports.
+func TestLink(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { io.Copy(c, c); c.Close() }()
+		}
+	}()
+	port := uint16(ln.Addr().(*net.TCPAddr).Port)
+	for range 3 {
+		c, err := net.Dial("tcp4", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		c.Write(make([]byte, 100000))
+		io.ReadFull(c, make([]byte, 100000))
+	}
+	conns, err := tcpConnections()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := aggregate(conns, netip.MustParseAddr("127.0.0.1"), []uint16{port})
+	if st.Connections != 3 || st.RTTus.Max == 0 || st.RTTus.Min > st.RTTus.Median || st.SegsOut == 0 {
+		t.Fatalf("stats %+v", st)
+	}
+	if other := aggregate(conns, netip.MustParseAddr("203.0.113.9"), []uint16{port}); other.Connections != 0 {
+		t.Fatalf("another address: %+v", other)
+	}
+
+	// Through a tunnel the request comes from loopback: no answer about it.
+	_, c, url, _ := testServer(t, DefaultDaily)
+	if resp := get(t, c, "GET", url+PathLink, "phone", nil); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("link from loopback: %d", resp.StatusCode)
+	}
+	if resp := get(t, c, "GET", url+PathLink, "phone", nil); resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("link twice in 5 s: %d", resp.StatusCode)
 	}
 }

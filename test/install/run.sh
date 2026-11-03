@@ -205,6 +205,7 @@ client -carrier tcp "$laptop" || fail "probe over the TCP carrier"
 # port SPA opens with the subscription's.
 out="$(client -channel "$laptop")" || fail "channel probe: $out"
 [[ $out == *"channel udp: 50 sent, 50 back; lost up 0, down 0"* ]] || fail "channel probe over UDP: $out"
+[[ $out == *"channel link: "*" connections of this address on 443"* ]] || fail "no link stats: $out"
 
 log "$distro: remote API"
 x rayctl service add api api >/dev/null
