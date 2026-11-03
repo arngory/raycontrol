@@ -468,7 +468,9 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 				"RuntimeDirectoryMode=0755",
 				"UMask=0027",
 				"CapabilityBoundingSet=",
-				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+				// AF_NETLINK: sock_diag, the node's view of a device's
+				// connections for probes (R4-16); read-only, no capability.
+				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
 			},
 		},
 		{
