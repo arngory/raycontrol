@@ -455,6 +455,27 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				backends[quicBackend(s.Name)] = quic
 				udpRoutes = append(udpRoutes, udpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: quicBackend(s.Name)})
 			}
+		case "yggdrasil":
+			// A TLS link behind tcpmux by name (R4-15), into inner.
+			if !m.FrontTCP {
+				skipped = append(skipped, s.Name+" (needs the front on TCP 443)")
+				continue
+			}
+			if inner == nil {
+				return nil, nil, fmt.Errorf("service %s needs the inner stage, which is missing or disabled", s.Name)
+			}
+			if !m.hasCert(provision.SiteOf(s.Service)) {
+				skipped = append(skipped, s.Name+" (waits for its site's certificate)")
+				continue
+			}
+			fs, err := yggdrasilFiles(s, m, *inner, p)
+			if err != nil {
+				return nil, nil, err
+			}
+			files = append(files, fs...)
+			st, _, _ := YggdrasilNode(s)
+			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "fd"), Mode: "fd", UID: s.UID}
+			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: s.Name})
 		case "ssh", "subscription", "api":
 			// Not data-plane processes.
 		default:

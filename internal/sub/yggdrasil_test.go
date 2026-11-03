@@ -1,0 +1,205 @@
+package sub_test
+
+import (
+	"context"
+	"crypto/ed25519"
+	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
+	"net/netip"
+	"net/url"
+	"path"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/render"
+	"github.com/arngory/raycontrol/internal/store"
+	"github.com/arngory/raycontrol/internal/sub"
+)
+
+// Vectors from yggdrasil-go's address.AddrForKey.
+func TestYggdrasilAddress(t *testing.T) {
+	for key, want := range map[string]string{
+		"eae1c8793b5597c4b3f490e76ac31172c439690f8ee14142bb851a61f9a49f0e": "200:2a3c:6f0d:8954:d076:9816:de31:2a79",
+		"627f17d893e5697a4ba2208bc80b0292e7f58d8120eb353c1b55429db9c6b196": "201:7603:a09d:b06a:5a16:d177:7dd0:dfd3",
+		"2205b70216c0f4ca46301ac84029229db6fd68c34b8aac4f0d0966c1b3975f2b": "202:efd2:47ef:49f8:59ad:ce7f:29bd:feb6",
+		"000000000fffffff000000000000000000000000000000000000000000000000": "224:0:1f:ffff:ffff:ffff:ffff:ffff",
+		strings.Repeat("00", 32): "200::",
+	} {
+		raw, _ := hex.DecodeString(key)
+		if got := render.YggdrasilAddress(raw); got != netip.MustParseAddr(want) {
+			t.Errorf("%s: %s, want %s", key, got, want)
+		}
+	}
+}
+
+// A Yggdrasil service from creation to the subscription link (R4-15).
+func TestYggdrasilService(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "reality", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	y, err := provision.CreateService(ctx, st, store.Service{Kind: "yggdrasil", Name: "ygg", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings render.YggdrasilSettings
+	json.Unmarshal([]byte(y.Settings), &settings)
+	y.Secrets, _ = st.ServiceSecrets(ctx, y.ID)
+	ports, _ := y.Ports()
+	if settings.Site != "site" || !strings.HasSuffix(settings.SNI, ".example.com") || settings.ExitPort < 1024 ||
+		!slices.Equal(ports, []store.Port{{Proto: "tcp", Num: 443}}) || len(y.Secrets[provision.SecretYggdrasilSeed]) != 32 {
+		t.Fatalf("yggdrasil: %s", y.Settings)
+	}
+	if _, ok := provision.ServiceRotation(y); ok {
+		t.Fatal("a TCP-only service has a UDP schedule")
+	}
+	if _, err := st.ServiceByName(ctx, "inner"); err != nil {
+		t.Fatal("no inner stage for yggdrasil")
+	}
+	site, _ := st.ServiceByName(ctx, "site")
+	all, _ := st.ListServices(ctx)
+	if names, _ := provision.SiteNames(site, all); !slices.Contains(names, settings.SNI) {
+		t.Fatalf("the site's certificate does not cover %s: %v", settings.SNI, names)
+	}
+
+	u, _ := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+	st.SetUserServices(ctx, "alice", []int64{y.ID})
+	m, _ := render.Collect(ctx, st)
+	p := render.Paths{Rendered: "/r", Run: "/run/niko"}
+	if _, skipped, _ := render.Render(m, p); !slices.ContainsFunc(skipped, func(s string) bool { return strings.HasPrefix(s, "ygg ") }) {
+		t.Fatalf("rendered before the site has a certificate: %v", skipped)
+	}
+	keyDER, certDER, _ := provision.SelfSigned(settings.SNI)
+	st.SetServiceSecret(ctx, site.ID, provision.SecretTLSChain, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}))
+	st.SetServiceSecret(ctx, site.ID, provision.SecretTLSKey, keyDER)
+	m, _ = render.Collect(ctx, st)
+	files, _, err := render.Render(m, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := func(name string) render.File {
+		for _, f := range files {
+			if f.Path == name {
+				return f
+			}
+		}
+		t.Fatalf("no %s", name)
+		return render.File{}
+	}
+	var backend struct {
+		Kind, Socket, Inner string
+		UsersFile           string `json:"users_file"`
+		Options             struct {
+			PrivateKeyFile string `json:"private_key_file"`
+			ExitPorts      []int  `json:"exit_ports"`
+		}
+	}
+	json.Unmarshal(file("/r/ygg/backend.json").Content, &backend)
+	if backend.Kind != "yggdrasil" || backend.Socket != "/run/niko/ygg/fd.sock" || backend.Inner != "/run/niko/inner/vless.sock" ||
+		backend.Options.PrivateKeyFile != "/run/niko/ygg/node.key" || !slices.Equal(backend.Options.ExitPorts, []int{settings.ExitPort}) {
+		t.Fatalf("backend.json: %s", file("/r/ygg/backend.json").Content)
+	}
+	if f := file("/r/ygg/node.key"); f.Mode != 0o600 || f.Group != "" || len(f.Content) != 65 {
+		t.Fatalf("node.key: %o %q", f.Mode, f.Group)
+	}
+	if !file("/r/ygg/users.json").Reload {
+		t.Fatal("users.json restarts the backend")
+	}
+	var front struct {
+		TCP struct {
+			Routes []struct {
+				SNI     []string
+				Backend string
+			}
+		}
+		Backends map[string]struct {
+			Socket, Mode string
+			UID          int
+		}
+	}
+	json.Unmarshal(file("/r/front/front.json").Content, &front)
+	if b := front.Backends["ygg"]; b.Mode != "fd" || b.Socket != "/run/niko/ygg/fd.sock" || b.UID != y.UID ||
+		!slices.ContainsFunc(front.TCP.Routes, func(r struct {
+			SNI     []string
+			Backend string
+		}) bool {
+			return r.Backend == "ygg" && slices.Equal(r.SNI, []string{settings.SNI})
+		}) {
+		t.Fatalf("front.json: %s", file("/r/front/front.json").Content)
+	}
+
+	// The link: VLESS to inner at the node's mesh address, the peer and the
+	// user's key in niko-ygg; the server lets that key in.
+	usersKeys := func() map[string]string {
+		var f struct {
+			Users []struct {
+				Name      string
+				Yggdrasil struct {
+					PublicKey string `json:"public_key"`
+				}
+			}
+		}
+		json.Unmarshal(file(path.Join("/r/ygg", render.YggdrasilUsers)).Content, &f)
+		out := map[string]string{}
+		for _, u := range f.Users {
+			out[u.Name] = u.Yggdrasil.PublicKey
+		}
+		return out
+	}
+	profiles, err := sub.Profiles(m, m.Users[0])
+	if err != nil || len(profiles) != 1 {
+		t.Fatalf("profiles %+v %v", profiles, err)
+	}
+	link, _ := url.Parse(profiles[0].Link)
+	q := link.Query()
+	peerURI, keyHex, _ := strings.Cut(q.Get("niko-ygg"), ";")
+	peer, _ := url.Parse(peerURI)
+	nodeSeed := y.Secrets[provision.SecretYggdrasilSeed]
+	nodeKey := ed25519.NewKeyFromSeed(nodeSeed).Public().(ed25519.PublicKey)
+	seed, _ := hex.DecodeString(keyHex)
+	if link.Scheme != "vless" || link.User.Username() != m.Inner[u.ID] || link.Hostname() != render.YggdrasilAddress(nodeKey).String() ||
+		link.Port() != strconv.Itoa(settings.ExitPort) || q.Get("type") != "raw" || !strings.HasPrefix(q.Get("encryption"), "mlkem768x25519plus.") ||
+		peer.Scheme != "tls" || peer.Host != settings.SNI+":443" || peer.Query().Get("sni") != settings.SNI ||
+		peer.Query().Get("key") != hex.EncodeToString(nodeKey) || len(seed) != 32 {
+		t.Fatalf("link %s", profiles[0].Link)
+	}
+	userKey := hex.EncodeToString(ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey))
+	if keys := usersKeys(); len(keys) != 1 || keys[render.InnerEmail(u.ID)] != userKey {
+		t.Fatalf("users %v, the link's key %s", keys, userKey)
+	}
+
+	// The inner UUID rotates: the next link has the next key, which the
+	// server takes from the publication on.
+	day := 24 * time.Hour
+	r := store.Rotation{Period: 30 * day, Lead: 3 * day, Grace: 2 * day}
+	if n, err := st.RotateCredentials(ctx, time.Now().Add(28*day), r, render.NewUUID); err != nil || n == 0 {
+		t.Fatalf("publish: %d %v", n, err)
+	}
+	m, _ = render.Collect(ctx, st)
+	files, _, _ = render.Render(m, p)
+	profiles, _ = sub.Profiles(m, m.Users[0])
+	inner, _ := st.ServiceByName(ctx, "inner")
+	next := m.Sets[inner.ID][u.ID].Next
+	if profiles[0].Next == nil || !strings.Contains(profiles[0].Next.Link, next) {
+		t.Fatalf("no next link: %+v", profiles[0])
+	}
+	nl, _ := url.Parse(profiles[0].Next.Link)
+	_, nextHex, _ := strings.Cut(nl.Query().Get("niko-ygg"), ";")
+	nextSeed, _ := hex.DecodeString(nextHex)
+	nextKey := hex.EncodeToString(ed25519.NewKeyFromSeed(nextSeed).Public().(ed25519.PublicKey))
+	if keys := usersKeys(); keys[render.InnerEmail(u.ID)+"-n"] != nextKey || nextKey == userKey {
+		t.Fatalf("users while rotating %v", keys)
+	}
+}

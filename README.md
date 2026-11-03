@@ -15,8 +15,9 @@ naive share TCP 443 behind the same front (tcpmux); the remote API behind SPA
 with mTLS and one-time invites. **R4** —
 rotation of user credentials and REALITY keys and names, Cloudflare for DNS
 records and wildcard certificates, uninstall back to the host's snapshot,
-redacted reports, a kernel-side early drop, encrypted backups, local metrics. Data plane: niko-server v0.3.0
-(DNS front, dnstt and MasterDnsVPN backends); see
+redacted reports, a kernel-side early drop, encrypted backups, local metrics,
+Yggdrasil (direct TLS links behind the front, into the inner stage). Data plane: niko-server v0.4.0
+(the front on UDP 53, TCP 443 and UDP 443; DNS tunnel, Hysteria2 and Yggdrasil backends); see
 [docs/04-roadmap.md](docs/04-roadmap.md).
 
 From a bare Debian 13 server to a bundle for the client, step by step:

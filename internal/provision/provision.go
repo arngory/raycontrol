@@ -57,6 +57,7 @@ const (
 	SecretSiteSeed      = "site_seed"            // decoy site content
 	SecretTLSChain      = "tls_chain"            // ACME certificate chain, PEM
 	SecretObfsPassword  = "obfs_password"        //nolint:gosec // G101: a name; hy2-obfs, salamander
+	SecretYggdrasilSeed = "yggdrasil_seed"       // the node's Yggdrasil key, an ed25519 seed
 	SubscriptionService = "subscription"
 )
 
@@ -314,11 +315,11 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			}
 			settings["sni"] = name
 		}
-	case "doh", "naive":
-		// DoH (R3-2) and naive (R2-14) ride on REALITY's TCP 443: REALITY
-		// hands the site whatever is not its own client, and the site passes
-		// their names on to their sockets. So they need REALITY stealing from
-		// the node's site.
+	case "doh", "naive", "yggdrasil":
+		// DoH (R3-2), naive (R2-14) and Yggdrasil (R4-15) share TCP 443 behind
+		// the front (R2-15) under names of the node's domain, with the
+		// certificate of the site REALITY steals from (unknown names go to
+		// REALITY, which answers as that site).
 		site := ""
 		for _, s := range all {
 			if s.Kind == "reality" && s.Enabled && siteOf(s) != "" {
@@ -326,7 +327,7 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			}
 		}
 		if site == "" {
-			return svc, fmt.Errorf("%w %s rides on REALITY's TCP 443 with the node's own site: add reality first (rayctl service add reality reality)", store.ErrInvalid, svc.Kind)
+			return svc, fmt.Errorf("%w %s shares TCP 443 with REALITY under the node's own site: add reality first (rayctl service add reality reality)", store.ErrInvalid, svc.Kind)
 		}
 		settings["site"] = site
 		if _, ok := settings["sni"]; !ok {
@@ -338,8 +339,27 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		}
 		if _, ok := settings["ports"]; !ok {
 			// TCP 443 and, for DoH3 and naive-quic, UDP 443: both behind the
-			// front (R2-15, R3-5).
+			// front (R2-15, R3-5). Yggdrasil links are TLS over TCP only.
 			settings["ports"] = []string{"tcp/443", "udp/443"}
+			if svc.Kind == "yggdrasil" {
+				settings["ports"] = []string{"tcp/443"}
+			}
+		}
+		if svc.Kind == "yggdrasil" {
+			// The node's key, and the port of its mesh address that leads to
+			// inner: random per node, like everything a scan could match.
+			seed := make([]byte, 32)
+			if _, err := rand.Read(seed); err != nil {
+				return svc, err
+			}
+			svc.Secrets[SecretYggdrasilSeed] = seed
+			if _, ok := settings["exit_port"]; !ok {
+				port, err := randInt(1024, 65535)
+				if err != nil {
+					return svc, err
+				}
+				settings["exit_port"] = port
+			}
 		}
 	case "api":
 		// The remote API (R3-3): one per node, its own random TCP port behind

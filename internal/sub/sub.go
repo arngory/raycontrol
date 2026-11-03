@@ -222,6 +222,23 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 				p.Next = &Next{Link: link(set.Next), From: set.NextFrom.Unix()}
 			}
 			out = append(out, p)
+		case "yggdrasil":
+			if inner == nil || m.Inner[u.ID] == "" {
+				continue
+			}
+			link, err := YggdrasilLink(m, s, *inner, m.Inner[u.ID])
+			if err != nil {
+				return nil, err
+			}
+			p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: link}
+			if set := m.Sets[inner.ID][u.ID]; set.Next != "" {
+				next, err := YggdrasilLink(m, s, *inner, set.Next)
+				if err != nil {
+					return nil, err
+				}
+				p.Next = &Next{Link: next, From: set.NextFrom.Unix()}
+			}
+			out = append(out, p)
 		case "doh":
 			token := m.Creds[s.ID][u.ID]
 			if token == "" {
@@ -287,6 +304,32 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 		}
 	}
 	return out, nil
+}
+
+// YggdrasilLink is a user's Yggdrasil profile (spec/subscription-v1.md §4):
+// VLESS with ML-KEM-768 to inner at the node's mesh address and exit port,
+// carried by Yggdrasil with one peer, the node itself, over a TLS link
+// under the service's name. niko-ygg is "<peer URI>;<the user's key>", the
+// key (a 32-byte ed25519 seed, hex) derived from the same inner UUID.
+func YggdrasilLink(m render.Model, s, inner render.Service, uuid string) (string, error) {
+	st, nodeKey, err := render.YggdrasilNode(s)
+	if err != nil {
+		return "", err
+	}
+	_, encryption, err := render.VLESSEncryption(inner.Secrets[provision.SecretMLKEMSeed])
+	if err != nil {
+		return "", err
+	}
+	peer := url.URL{Scheme: "tls", Host: net.JoinHostPort(st.SNI, "443"),
+		RawQuery: url.Values{"sni": {st.SNI}, "key": {hex.EncodeToString(nodeKey)}}.Encode()}
+	q := url.Values{}
+	q.Set("type", "raw")
+	q.Set("encryption", encryption)
+	q.Set("niko-node", m.NodeID)
+	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
+	q.Set("niko-ygg", peer.String()+";"+hex.EncodeToString(render.YggdrasilKey(uuid).Seed()))
+	host := net.JoinHostPort(render.YggdrasilAddress(nodeKey).String(), strconv.Itoa(st.ExitPort))
+	return "vless://" + uuid + "@" + host + "?" + q.Encode() + "#" + url.PathEscape(s.Name), nil
 }
 
 // DoHLink is the DoH endpoint of a user (spec/subscription-v1.md §4): the

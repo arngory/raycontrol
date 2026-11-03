@@ -209,10 +209,15 @@ x rayctl service add api api >/dev/null
 # processes wait for one) and go away with the uninstall.
 x rayctl service add reality reality >/dev/null
 x rayctl service add naive naive >/dev/null
+# Yggdrasil the same way: its unit waits for the site's certificate (R4-15).
+x rayctl service add yggdrasil ygg >/dev/null
 # hy2-obfs needs no certificate of the site: it really runs, a niko-server
 # backend behind the front's UDP 443 (udpmux, R3-4).
 x rayctl service add hy2-obfs hy2o >/dev/null
-x rayctl apply >/dev/null || fail "rayctl apply for the API, REALITY, naive and Hysteria2"
+x rayctl apply >/dev/null || fail "rayctl apply for the API, REALITY, naive, Yggdrasil and Hysteria2"
+units="$(x systemctl cat niko-ygg.service)" || fail "no unit for Yggdrasil"
+[[ $units == *PrivateNetwork=yes* && $units == *SupplementaryGroups=niko-inner* ]] || fail "the Yggdrasil unit is not unix-only with inner: $units"
+[[ $(x id -nG niko-front) == *niko-ygg* ]] || fail "the front cannot reach the Yggdrasil socket"
 [[ $(x stat -c '%a %U %G' /run/niko/naive-in) == "2750 niko-naive niko-front" ]] || fail "no socket directory for naive (the front passes connections there)"
 wait_active niko-hy2o.service niko-front.service
 [[ $(x ss -Hulpn 'sport = :443') == *niko-server* ]] || fail "the front does not listen on UDP 443"

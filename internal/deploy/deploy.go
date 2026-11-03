@@ -133,7 +133,7 @@ func groups(gs []string) string {
 func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Plan {
 	var plan Plan
 	var inner *render.Service
-	var dns, reality, sites, hysteria, naives []render.Service
+	var dns, reality, sites, hysteria, naives, yggs []render.Service
 	for i, s := range m.Services {
 		switch {
 		case s.Kind == "inner":
@@ -148,6 +148,8 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			hysteria = append(hysteria, s)
 		case s.Kind == "naive":
 			naives = append(naives, s)
+		case s.Kind == "yggdrasil":
+			yggs = append(yggs, s)
 		case s.UID != 0:
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("service %s (%s) is not deployed by this version", s.Name, s.Kind))
 		}
@@ -349,6 +351,48 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		})
 	}
 
+	// Yggdrasil (R4-15): a niko-server backend on the streams the front
+	// passes by name; its mesh address leads to inner only. Unix sockets
+	// only: the yggdrasil-go core and the netstack live in the process.
+	// Until its site has a certificate the files are not there, and the unit
+	// waits for them (ConditionPathExists); rayd starts it once they are.
+	for _, s := range yggs {
+		dir := path.Join(p.Rendered, s.Name)
+		g := render.GroupName(s.Name)
+		raydGroups = append(raydGroups, g)
+		frontGroups = append(frontGroups, g) // the front connects to fd.sock
+		var extra []string
+		if inner != nil {
+			extra = []string{render.GroupName(inner.Name)}
+		}
+		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID, ExtraGroups: extra})
+		var creds []string
+		for _, name := range []string{render.YggdrasilTLSKey, render.YggdrasilNodeKey} {
+			creds = append(creds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
+				g, g, path.Join(dir, name), p.Credential(s.Name, name)))
+		}
+		var after []string
+		if inner != nil {
+			after = append(after, render.UnitName(inner.Name))
+		}
+		units = append(units, unit{
+			name:        render.UnitName(s.Name),
+			description: "niko-server backend " + s.Name + " (Yggdrasil, TLS links with X25519MLKEM768 into inner)",
+			needs:       path.Join(dir, "backend.json"),
+			after:       after,
+			service: append([]string{
+				"User=" + g, "Group=" + g, groups(extra),
+				"ExecStart=" + bin.NikoServer + " backend -c " + path.Join(dir, "backend.json"),
+				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
+				"RuntimeDirectoryMode=0710",
+				"UMask=0007",
+				"CapabilityBoundingSet=",
+				"PrivateNetwork=yes",
+				"RestrictAddressFamilies=AF_UNIX",
+			}, creds...),
+		})
+	}
+
 	if hasFront {
 		// rayd writes the front config and sets its group.
 		raydGroups = append(raydGroups, render.GroupName("front"))
@@ -363,6 +407,9 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			}
 		}
 		for _, s := range hysteria {
+			after = append(after, render.UnitName(s.Name))
+		}
+		for _, s := range yggs {
 			after = append(after, render.UnitName(s.Name))
 		}
 		// The salamander passwords of hy2-obfs: copied in by root, readable

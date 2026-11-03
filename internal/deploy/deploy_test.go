@@ -25,7 +25,7 @@ func plan(t *testing.T) (deploy.Plan, render.Model) {
 	}
 	t.Cleanup(func() { st.Close() })
 	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
-	for _, s := range [][3]string{{"dnstt", "dns", ""}, {"reality", "reality", `{"target":"www.example.org:443"}`}, {"yggdrasil", "ygg", ""}} {
+	for _, s := range [][3]string{{"dnstt", "dns", ""}, {"reality", "reality", `{"target":"www.example.org:443"}`}, {"olcrtc", "olc", ""}} {
 		if _, err := provision.CreateService(ctx, st, store.Service{Kind: s[0], Name: s[1], Enabled: true, Settings: s[2]}); err != nil {
 			t.Fatal(err)
 		}
@@ -68,7 +68,7 @@ func TestBuild(t *testing.T) {
 	if !slices.Equal(p.Units, []string{"rayd.service", "rayspa.service", "niko-inner.service", "niko-reality.service", "niko-dns.service", "niko-front.service"}) {
 		t.Fatalf("units %v", p.Units)
 	}
-	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "ygg") {
+	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "olc") {
 		t.Fatalf("warnings %v", p.Warnings)
 	}
 	// REALITY behind the front: a unix socket, no capability (R2-15).
