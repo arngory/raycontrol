@@ -99,9 +99,12 @@ func TestTCPProbes(t *testing.T) {
 }
 
 func TestLimits(t *testing.T) {
-	s, c, url, _ := testServer(t, 4<<20)
+	s, c, url, _ := testServer(t, 128<<20)
 	// One probe per device at a time: a down that is not read holds it.
-	resp := get(t, c, "GET", url+PathDown+"?bytes=3000000", "phone", nil)
+	// 64 MiB: more than the client's HTTP/2 window and the socket buffers
+	// take, so the server is still writing when the client stops.
+	const big = 64 << 20
+	resp := get(t, c, "GET", url+PathDown+"?bytes="+strconv.Itoa(big), "phone", nil)
 	if second := get(t, c, "GET", url+PathDown+"?bytes=10", "phone", nil); second.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("a second probe at once: %d", second.StatusCode)
 	}
@@ -113,12 +116,14 @@ func TestLimits(t *testing.T) {
 	io.ReadFull(resp.Body, buf)
 	resp.Body.Close()
 	deadline := time.Now().Add(5 * time.Second)
+	var used int64
 	for {
 		s.mu.Lock()
-		busy, used := s.busy["phone"], s.used["phone"]
+		busy := s.busy["phone"]
+		used = s.used["phone"]
 		s.mu.Unlock()
 		if !busy {
-			if used >= 3000000 {
+			if used >= big {
 				t.Fatalf("a cut probe counted %d bytes", used)
 			}
 			break
@@ -128,8 +133,8 @@ func TestLimits(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	// The day's volume: 4 MiB, of which some is spent.
-	if resp := get(t, c, "GET", url+PathDown+"?bytes=4194304", "phone", nil); resp.StatusCode != http.StatusTooManyRequests ||
+	// The day's volume: 128 MiB, of which some is spent.
+	if resp := get(t, c, "GET", url+PathDown+"?bytes="+strconv.Itoa(int(128<<20-used+1)), "phone", nil); resp.StatusCode != http.StatusTooManyRequests ||
 		resp.Header.Get("Retry-After") == "" {
 		t.Fatalf("over the day's volume: %d", resp.StatusCode)
 	}
