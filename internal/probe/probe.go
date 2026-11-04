@@ -112,8 +112,12 @@ type Server struct {
 	// Hysteria lists the Hysteria2 services' stats sockets by service ID,
 	// for link; nil leaves Hysteria2 out.
 	Hysteria func() map[string]string
-	Log      *slog.Logger
-	now      func() time.Time
+	// Account names the device's user as the Hysteria2 backends know it, so
+	// that link gives that user's own sessions one by one (niko-server
+	// v0.7); nil, or an error, leaves the aggregates alone.
+	Account func(ctx context.Context, device string) (string, error)
+	Log     *slog.Logger
+	now     func() time.Time
 
 	mu       sync.Mutex
 	day      int64

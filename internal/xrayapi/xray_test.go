@@ -1242,21 +1242,38 @@ func probeThroughHysteria(t *testing.T, ctx context.Context, st *store.Store, m 
 		t.Fatalf("probe through Hysteria2: %+v %v", down, err)
 	}
 	// The backend's session stats for this address (niko-server v0.6):
-	// the client above is one of its sessions.
-	for _, svc := range m.Services {
-		if svc.Kind != "hy2-masq" {
-			continue
+	// the client above is one of its sessions. Asked with the user's name
+	// as link asks (niko-server v0.7, R4-20), it is listed on its own too;
+	// asked with another user's name, it is not.
+	type stats struct {
+		Connections int
+		Own         []struct {
+			RTTus       uint64 `json:"rtt_us"`
+			PacketsSent uint64 `json:"packets_sent"`
 		}
+	}
+	ask := func(line string) stats {
+		t.Helper()
 		c, err := net.Dial("unix", statsSocket)
 		if err != nil {
-			t.Fatalf("stats socket of %s: %v", svc.Name, err)
+			t.Fatalf("stats socket: %v", err)
 		}
-		fmt.Fprintln(c, "127.0.0.1")
-		var st struct{ Connections int }
-		err = json.NewDecoder(c).Decode(&st)
-		c.Close()
-		if err != nil || st.Connections < 1 {
-			t.Fatalf("session stats of %s: %+v %v", svc.Name, st, err)
+		defer c.Close()
+		fmt.Fprintln(c, line)
+		var st stats
+		if err := json.NewDecoder(c).Decode(&st); err != nil {
+			t.Fatalf("session stats for %q: %v", line, err)
 		}
+		return st
+	}
+	if st := ask("127.0.0.1"); st.Connections < 1 || st.Own != nil {
+		t.Fatalf("session stats: %+v", st)
+	}
+	own := ask("127.0.0.1 " + render.InnerEmail(m.Users[0].ID))
+	if own.Connections < 1 || len(own.Own) < 1 || own.Own[0].RTTus == 0 || own.Own[0].PacketsSent == 0 {
+		t.Fatalf("own sessions: %+v", own)
+	}
+	if other := ask("127.0.0.1 " + render.InnerEmail(m.Users[0].ID+1000)); len(other.Own) != 0 {
+		t.Fatalf("another user's view: %+v", other)
 	}
 }
