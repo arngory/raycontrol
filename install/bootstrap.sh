@@ -51,7 +51,7 @@ PUBKEY="RWQBergjLoDHqeme5vyIuIRXJLjTj1EF3jR1nlWBVJO3rWxgy9SZj4bD"
 # every rayctl command it calls. It is raised too when a release closes a
 # hole, so that a mirror cannot hand out an older signed release as the
 # latest one (docs/RELEASE.md).
-MIN_VERSION="v0.9.0"
+MIN_VERSION="v0.10.0"
 
 die() {
 	echo "bootstrap: $*" >&2
