@@ -49,6 +49,8 @@ type Gate struct {
 	public     []Port
 	admin      []netip.Prefix
 	adminPorts []Port
+	relays     []netip.Prefix
+	relayPorts []Port
 	// holders tracks which devices opened an address and port and until
 	// when, so that a revocation closes only what nobody else still holds.
 	holders  map[grantKey]map[string]time.Time
@@ -134,6 +136,15 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		admin = append(admin, p)
 	}
 	adminPorts := portsOf(snap.AdminPorts)
+	var relays []netip.Prefix
+	for _, a := range snap.RelayPrefixes {
+		p, err := netip.ParsePrefix(a)
+		if err != nil || !p.IsSingleIP() {
+			return fmt.Errorf("perimeter: relay address %q: one address only", a)
+		}
+		relays = append(relays, p)
+	}
+	relayPorts := portsOf(snap.RelayPorts)
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -161,6 +172,12 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 			return err
 		}
 		g.admin, g.adminPorts = admin, adminPorts
+	}
+	if !slices.Equal(relays, g.relays) || !slices.Equal(relayPorts, g.relayPorts) {
+		if err := g.fw.SetRelays(relays, relayPorts); err != nil {
+			return err
+		}
+		g.relays, g.relayPorts = relays, relayPorts
 	}
 	g.revokeLocked()
 	if err := g.acmeLocked(snap.GetAcme()); err != nil {
@@ -299,6 +316,11 @@ func (g *Gate) restoreLocked() error {
 	}
 	if len(g.admin) > 0 || len(g.adminPorts) > 0 {
 		if err := g.fw.SetAdmin(g.admin, g.adminPorts); err != nil {
+			return err
+		}
+	}
+	if len(g.relays) > 0 || len(g.relayPorts) > 0 {
+		if err := g.fw.SetRelays(g.relays, g.relayPorts); err != nil {
 			return err
 		}
 	}

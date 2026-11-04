@@ -36,6 +36,9 @@ type Firewall interface {
 	// SetAdmin opens ports (SSH) to the given prefixes without SPA:
 	// emergency access when SPA itself fails.
 	SetAdmin(prefixes []netip.Prefix, ports []Port) error
+	// SetRelays opens the service ports to relays' addresses without SPA
+	// (relay-v1): devices knock at the relay, which forwards to this node.
+	SetRelays(addrs []netip.Prefix, ports []Port) error
 	// SetRotation replaces the UDP slot ports redirected to service ports
 	// (spa-v2.md §11): slot port -> service port.
 	SetRotation(udp map[uint16]uint16) error
@@ -120,6 +123,9 @@ table inet %[1]s {
 	set admin4 { type ipv4_addr; flags interval; }
 	set admin6 { type ipv6_addr; flags interval; }
 	set admin_ports { type inet_proto . inet_service; }
+	set relay4 { type ipv4_addr; }
+	set relay6 { type ipv6_addr; }
+	set relay_ports { type inet_proto . inet_service; }
 	map rot_udp { type inet_service : inet_service; }
 	map acme_redirect { type inet_service : inet_service; flags timeout; }
 	set acme_in { type inet_service; flags timeout; }
@@ -176,6 +182,8 @@ table inet %[1]s {
 		meta l4proto . th dport @public accept
 		ip saddr @admin4 meta l4proto . th dport @admin_ports accept
 		ip6 saddr @admin6 meta l4proto . th dport @admin_ports accept
+		ip saddr @relay4 meta l4proto . th dport @relay_ports accept
+		ip6 saddr @relay6 meta l4proto . th dport @relay_ports accept
 		ip saddr . meta l4proto . th dport @allow4 accept
 		ip6 saddr . meta l4proto . th dport @allow6 accept
 	}
@@ -280,6 +288,30 @@ func (n *NFT) SetAdmin(prefixes []netip.Prefix, ports []Port) error {
 		name  string
 		elems []string
 	}{{"admin4", v4}, {"admin6", v6}, {"admin_ports", portElems(ports)}} {
+		fmt.Fprintf(&b, "flush set inet %s %s\n", Table, set.name)
+		if len(set.elems) > 0 {
+			fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set.name, strings.Join(set.elems, ", "))
+		}
+	}
+	return n.run(b.String())
+}
+
+// SetRelays replaces the relays' addresses (single ones) and the ports they
+// reach.
+func (n *NFT) SetRelays(addrs []netip.Prefix, ports []Port) error {
+	var v4, v6 []string
+	for _, p := range addrs {
+		if p.Addr().Is4() {
+			v4 = append(v4, p.Addr().String())
+		} else {
+			v6 = append(v6, p.Addr().String())
+		}
+	}
+	var b strings.Builder
+	for _, set := range []struct {
+		name  string
+		elems []string
+	}{{"relay4", v4}, {"relay6", v6}, {"relay_ports", portElems(ports)}} {
 		fmt.Fprintf(&b, "flush set inet %s %s\n", Table, set.name)
 		if len(set.elems) > 0 {
 			fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set.name, strings.Join(set.elems, ", "))

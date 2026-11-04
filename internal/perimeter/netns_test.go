@@ -334,6 +334,61 @@ func TestNetns(t *testing.T) {
 			t.Fatal("ssh open for a foreign admin prefix")
 		}
 	})
+	t.Run("a relay's address reaches the relay ports without SPA, not SSH", func(t *testing.T) {
+		// relay-v1 §3: devices knock at the relay; this node lets the
+		// relay's address in on the service ports only.
+		svc, err := net.Listen("tcp", "127.0.0.1:18444")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer svc.Close()
+		ssh, err := net.Listen("tcp", "127.0.0.1:18023")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ssh.Close()
+		for _, l := range []net.Listener{svc, ssh} {
+			go func() {
+				for {
+					c, err := l.Accept()
+					if err != nil {
+						return
+					}
+					c.Close()
+				}
+			}()
+		}
+		dial := func(port string) bool {
+			c, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 700*time.Millisecond)
+			if err == nil {
+				c.Close()
+			}
+			return err == nil
+		}
+		if dial("18444") {
+			t.Fatal("service open before the relay")
+		}
+		snap.RelayPrefixes = []string{"127.0.0.1/32"}
+		snap.RelayPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 18444}}
+		snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 18023}}
+		snap.AdminPrefixes = nil
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		if !dial("18444") {
+			t.Fatal("the relay's address cannot reach the relay port")
+		}
+		if dial("18023") {
+			t.Fatal("the relay's address reaches SSH")
+		}
+		snap.RelayPrefixes = nil
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		if dial("18444") {
+			t.Fatal("the service stays open after the relay is gone")
+		}
+	})
 	t.Run("rotated UDP port reaches the service after SPA", func(t *testing.T) {
 		// A UDP service on 18443 with its own port schedule (spa-v2.md §11).
 		echo, err := net.ListenPacket("udp", "127.0.0.1:18443")

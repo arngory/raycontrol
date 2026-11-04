@@ -31,6 +31,11 @@ message Snapshot {
   // ACME window: while open, TCP 80 from any address goes to acme.port,
   // where rayd answers HTTP-01 challenges. Absent or past: closed.
   AcmeWindow acme = 8;
+  // Relays (relay-v1): these single addresses reach relay_ports (the
+  // services, the subscription, the API; never SSH) without SPA. Devices
+  // knock at the relay, which forwards to this node.
+  repeated string relay_prefixes = 9;
+  repeated Port relay_ports = 10;
 }
 
 message AcmeWindow {

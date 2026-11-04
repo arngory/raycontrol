@@ -26,6 +26,8 @@ type fakeFW struct {
 	public     []Port
 	admin      []netip.Prefix
 	adminPorts []Port
+	relays     []netip.Prefix
+	relayPorts []Port
 	rot        map[uint16]uint16
 	open       map[string]time.Duration // "addr port" -> ttl
 	gone       bool                     // table removed behind the gate's back
@@ -78,6 +80,10 @@ func (f *fakeFW) SetRotation(udp map[uint16]uint16) error {
 }
 func (f *fakeFW) SetAdmin(p []netip.Prefix, ports []Port) error {
 	f.admin, f.adminPorts = p, ports
+	return nil
+}
+func (f *fakeFW) SetRelays(p []netip.Prefix, ports []Port) error {
+	f.relays, f.relayPorts = p, ports
 	return nil
 }
 func (f *fakeFW) Allow(a netip.Addr, ports []Port, ttl time.Duration) error {
@@ -233,6 +239,8 @@ func TestGateRestoresTable(t *testing.T) {
 	snap := testSnapshot(alice)
 	snap.AdminPrefixes = []string{"198.51.100.0/24"}
 	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 22}}
+	snap.RelayPrefixes = []string{"192.0.2.44/32", "2001:db8::44/128"}
+	snap.RelayPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 443}, {Proto: "udp", Port: 443}}
 	snap.Services[1].Rotation = &perimeterv1.Rotation{PortKey: key(0x55), PortBase: 20000, PortRange: 1000, TargetPort: 443}
 	if err := g.Update(snap); err != nil {
 		t.Fatal(err)
@@ -246,8 +254,8 @@ func TestGateRestoresTable(t *testing.T) {
 	if _, err := g.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if fw.setups != 1 || len(fw.public) != 1 || len(fw.admin) != 1 || len(fw.adminPorts) != 1 {
-		t.Fatalf("setups=%d public=%v admin=%v %v", fw.setups, fw.public, fw.admin, fw.adminPorts)
+	if fw.setups != 1 || len(fw.public) != 1 || len(fw.admin) != 1 || len(fw.adminPorts) != 1 || len(fw.relays) != 2 || len(fw.relayPorts) != 2 {
+		t.Fatalf("setups=%d public=%v admin=%v %v relays=%v %v", fw.setups, fw.public, fw.admin, fw.adminPorts, fw.relays, fw.relayPorts)
 	}
 	if len(fw.udp) == 0 || len(fw.tcp) == 0 || len(fw.rot) == 0 {
 		t.Fatalf("slots not restored: udp=%v tcp=%v rot=%v", fw.udp, fw.tcp, fw.rot)
@@ -404,5 +412,17 @@ func TestRuleset(t *testing.T) {
 	set, _ = elements(netip.MustParseAddr("2001:db8::1"), []Port{{"udp", 443}}, 0)
 	if set != "allow6" {
 		t.Errorf("v6 set %s", set)
+	}
+}
+
+// A relay is one address (relay-v1 §3): a wider prefix in the snapshot is
+// refused, so a mistake cannot open the services to a network.
+func TestGateRelayOneAddress(t *testing.T) {
+	fw := &fakeFW{}
+	g := NewGate(fw, quiet)
+	snap := testSnapshot()
+	snap.RelayPrefixes = []string{"192.0.2.0/24"}
+	if err := g.Update(snap); err == nil || len(fw.relays) != 0 {
+		t.Fatalf("relay network accepted: %v %v", err, fw.relays)
 	}
 }

@@ -117,7 +117,12 @@ type Snapshot struct {
 	AdminPorts    []*Port  `protobuf:"bytes,7,rep,name=admin_ports,json=adminPorts,proto3" json:"admin_ports,omitempty"`
 	// ACME window: while open, TCP 80 from any address goes to acme.port,
 	// where rayd answers HTTP-01 challenges. Absent or past: closed.
-	Acme          *AcmeWindow `protobuf:"bytes,8,opt,name=acme,proto3" json:"acme,omitempty"`
+	Acme *AcmeWindow `protobuf:"bytes,8,opt,name=acme,proto3" json:"acme,omitempty"`
+	// Relays (relay-v1): these single addresses reach relay_ports (the
+	// services, the subscription, the API; never SSH) without SPA. Devices
+	// knock at the relay, which forwards to this node.
+	RelayPrefixes []string `protobuf:"bytes,9,rep,name=relay_prefixes,json=relayPrefixes,proto3" json:"relay_prefixes,omitempty"`
+	RelayPorts    []*Port  `protobuf:"bytes,10,rep,name=relay_ports,json=relayPorts,proto3" json:"relay_ports,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -204,6 +209,20 @@ func (x *Snapshot) GetAdminPorts() []*Port {
 func (x *Snapshot) GetAcme() *AcmeWindow {
 	if x != nil {
 		return x.Acme
+	}
+	return nil
+}
+
+func (x *Snapshot) GetRelayPrefixes() []string {
+	if x != nil {
+		return x.RelayPrefixes
+	}
+	return nil
+}
+
+func (x *Snapshot) GetRelayPorts() []*Port {
+	if x != nil {
+		return x.RelayPorts
 	}
 	return nil
 }
@@ -633,7 +652,7 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"'raycontrol/perimeter/v1/perimeter.proto\x12\x17raycontrol.perimeter.v1\"\x17\n" +
 	"\x15WatchPerimeterRequest\"W\n" +
 	"\x16WatchPerimeterResponse\x12=\n" +
-	"\bsnapshot\x18\x01 \x01(\v2!.raycontrol.perimeter.v1.SnapshotR\bsnapshot\"\xb7\x03\n" +
+	"\bsnapshot\x18\x01 \x01(\v2!.raycontrol.perimeter.v1.SnapshotR\bsnapshot\"\x9e\x04\n" +
 	"\bSnapshot\x12\x1a\n" +
 	"\brevision\x18\x01 \x01(\x04R\brevision\x124\n" +
 	"\x03spa\x18\x02 \x01(\v2\".raycontrol.perimeter.v1.SPAParamsR\x03spa\x129\n" +
@@ -643,7 +662,11 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"\x0eadmin_prefixes\x18\x06 \x03(\tR\radminPrefixes\x12>\n" +
 	"\vadmin_ports\x18\a \x03(\v2\x1d.raycontrol.perimeter.v1.PortR\n" +
 	"adminPorts\x127\n" +
-	"\x04acme\x18\b \x01(\v2#.raycontrol.perimeter.v1.AcmeWindowR\x04acme\"6\n" +
+	"\x04acme\x18\b \x01(\v2#.raycontrol.perimeter.v1.AcmeWindowR\x04acme\x12%\n" +
+	"\x0erelay_prefixes\x18\t \x03(\tR\rrelayPrefixes\x12>\n" +
+	"\vrelay_ports\x18\n" +
+	" \x03(\v2\x1d.raycontrol.perimeter.v1.PortR\n" +
+	"relayPorts\"6\n" +
 	"\n" +
 	"AcmeWindow\x12\x12\n" +
 	"\x04port\x18\x01 \x01(\rR\x04port\x12\x14\n" +
@@ -717,15 +740,16 @@ var file_raycontrol_perimeter_v1_perimeter_proto_depIdxs = []int32{
 	8,  // 4: raycontrol.perimeter.v1.Snapshot.public_ports:type_name -> raycontrol.perimeter.v1.Port
 	8,  // 5: raycontrol.perimeter.v1.Snapshot.admin_ports:type_name -> raycontrol.perimeter.v1.Port
 	3,  // 6: raycontrol.perimeter.v1.Snapshot.acme:type_name -> raycontrol.perimeter.v1.AcmeWindow
-	8,  // 7: raycontrol.perimeter.v1.Service.ports:type_name -> raycontrol.perimeter.v1.Port
-	7,  // 8: raycontrol.perimeter.v1.Service.rotation:type_name -> raycontrol.perimeter.v1.Rotation
-	0,  // 9: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:input_type -> raycontrol.perimeter.v1.WatchPerimeterRequest
-	1,  // 10: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:output_type -> raycontrol.perimeter.v1.WatchPerimeterResponse
-	10, // [10:11] is the sub-list for method output_type
-	9,  // [9:10] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	8,  // 7: raycontrol.perimeter.v1.Snapshot.relay_ports:type_name -> raycontrol.perimeter.v1.Port
+	8,  // 8: raycontrol.perimeter.v1.Service.ports:type_name -> raycontrol.perimeter.v1.Port
+	7,  // 9: raycontrol.perimeter.v1.Service.rotation:type_name -> raycontrol.perimeter.v1.Rotation
+	0,  // 10: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:input_type -> raycontrol.perimeter.v1.WatchPerimeterRequest
+	1,  // 11: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:output_type -> raycontrol.perimeter.v1.WatchPerimeterResponse
+	11, // [11:12] is the sub-list for method output_type
+	10, // [10:11] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_raycontrol_perimeter_v1_perimeter_proto_init() }
