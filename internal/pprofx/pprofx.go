@@ -1,6 +1,8 @@
 // Package pprofx serves Go's profiles (net/http/pprof) for a profile under
-// real load on a node (O-3), on loopback or a unix socket only: profiles
-// show what the process does, and they cost CPU while taken.
+// real load on a node (O-3), on a unix socket only: profiles show what the
+// process does, and they cost CPU while taken. Not on loopback: the data
+// plane's processes reach loopback (S-2 leaves it to them), not a 0600
+// socket of root or rayd.
 //
 //	RAYD_PPROF=unix:/run/raycontrol/rayd-pprof.sock   (any rayd command)
 //	curl --unix-socket /run/raycontrol/rayd-pprof.sock -o cpu.pb.gz 'http://x/debug/pprof/profile?seconds=30'
@@ -15,15 +17,16 @@ import (
 	"net/http/pprof"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 )
 
 // Env names the variable Start reads.
 const Env = "RAYD_PPROF"
 
-// Start serves the profiles at the address in Env, if it is set:
-// unix:PATH (the socket 0600), or a loopback host:port. Anything else is
-// refused.
+// Start serves the profiles at the address in Env, if it is set: unix:PATH,
+// the socket its owner's only (made under umask 077, so never wider even
+// for a moment). Anything else is refused.
 func Start(log *slog.Logger) error {
 	addr := os.Getenv(Env)
 	if addr == "" {
@@ -46,24 +49,14 @@ func Start(log *slog.Logger) error {
 }
 
 func listen(addr string) (net.Listener, error) {
-	if path, ok := strings.CutPrefix(addr, "unix:"); ok {
-		_ = os.Remove(path)
-		ln, err := net.Listen("unix", path)
-		if err != nil {
-			return nil, err
-		}
-		if err := os.Chmod(path, 0o600); err != nil {
-			ln.Close()
-			return nil, err
-		}
-		return ln, nil
+	path, ok := strings.CutPrefix(addr, "unix:")
+	if !ok || path == "" {
+		return nil, errors.New("only unix:PATH (a socket for its owner only)")
 	}
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil, err
-	}
-	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
-		return nil, errors.New("only unix:PATH or a loopback address (127.0.0.1:PORT, [::1]:PORT)")
-	}
-	return net.Listen("tcp", addr)
+	_ = os.Remove(path)
+	// Start runs first thing in main, before other goroutines make files.
+	old := syscall.Umask(0o077)
+	ln, err := net.Listen("unix", path)
+	syscall.Umask(old)
+	return ln, err
 }
