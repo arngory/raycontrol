@@ -18,6 +18,13 @@ import (
 
 func plan(t *testing.T) (deploy.Plan, render.Model) {
 	t.Helper()
+	m, files := plan2(t, render.DefaultPaths)
+	return deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries), m
+}
+
+// plan2 renders the test node's services for the paths.
+func plan2(t *testing.T, paths render.Paths) (render.Model, []render.File) {
+	t.Helper()
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
 	if err != nil {
@@ -34,11 +41,11 @@ func plan(t *testing.T) (deploy.Plan, render.Model) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	files, _, err := render.Render(m, render.DefaultPaths)
+	files, _, err := render.Render(m, paths)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries), m
+	return m, files
 }
 
 func file(p deploy.Plan, path string) string {
@@ -109,6 +116,32 @@ func TestBuild(t *testing.T) {
 	}
 	if !strings.Contains(file(p, "/etc/systemd/resolved.conf.d/raycontrol.conf"), "DNSStubListener=no") {
 		t.Error("resolved stub not disabled though DNS tunnels exist")
+	}
+
+	// Without systemd (rayd serve -supervise): the data-plane units only,
+	// from their own lines.
+	var units []string
+	for _, pr := range p.Processes {
+		units = append(units, pr.Unit)
+	}
+	if !slices.Equal(units, p.Units[2:]) {
+		t.Fatalf("processes %v, units %v", units, p.Units)
+	}
+	d := p.Processes[2]
+	if d.Unit != "niko-dns.service" || d.Dir != "/run/niko/dns" || d.Needs != "/var/lib/raycontrol/rendered/dns/backend.json" ||
+		!slices.Equal(d.Args, []string{"/usr/local/libexec/raycontrol/niko-server", "backend", "-c", "/var/lib/raycontrol/rendered/dns/backend.json"}) ||
+		len(d.Copies) != 1 || d.Copies[0] != [2]string{"/var/lib/raycontrol/rendered/dns/noise.key", "/run/niko/dns/noise.key"} {
+		t.Errorf("dns process %+v", d)
+	}
+	if !slices.Contains(p.Dirs, "/run/niko") || !slices.Contains(p.Dirs, "/run/niko/reality-api") {
+		t.Errorf("dirs %v", p.Dirs)
+	}
+	// Paths outside /run stay where they are.
+	other := render.Paths{Rendered: "/tmp/r", Run: "/tmp/run"}
+	m, files := plan2(t, other)
+	q := deploy.Build(m, files, other, deploy.DefaultBinaries)
+	if q.Processes[0].Dir != "/tmp/run/inner" || !slices.Contains(q.Dirs, "/tmp/run/inner-api") {
+		t.Errorf("inner process %+v, dirs %v", q.Processes[0], q.Dirs)
 	}
 }
 

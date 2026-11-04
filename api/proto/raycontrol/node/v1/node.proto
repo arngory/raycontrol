@@ -34,6 +34,11 @@ service NodeService {
   // creation: a site's answer, whether REALITY moves its server name,
   // Hysteria2's Brutal ceilings, Yggdrasil's public peers.
   rpc SetServiceOption(SetServiceOptionRequest) returns (SetServiceOptionResponse);
+  // SetCertificate puts the operator's own certificate on a site, in place
+  // of one from ACME, for every service under it (REALITY self-steal,
+  // hy2-masq, naive, DoH, Yggdrasil). With ACME on, rayd renews it when it
+  // is due. On the node only: it carries the private key.
+  rpc SetCertificate(SetCertificateRequest) returns (SetCertificateResponse);
 
   rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
   // CreateDevice returns the device bundle with the device key. The key is
@@ -263,6 +268,19 @@ message SetServiceOptionRequest {
 }
 message SetServiceOptionResponse {
   Service service = 1;
+}
+
+message SetCertificateRequest {
+  string service = 1; // a site
+  bytes chain_pem = 2; // leaf first
+  bytes key_pem = 3;
+}
+message SetCertificateResponse {
+  repeated string names = 1; // the site's names in use, all covered
+  int64 not_after = 2; // unix seconds
+  // Names REALITY moves to at its next key switch that the certificate
+  // does not cover: the switch waits for a certificate that does.
+  repeated string missing_next = 3;
 }
 
 message RotateServiceRequest {

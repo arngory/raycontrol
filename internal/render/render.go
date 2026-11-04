@@ -14,6 +14,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"maps"
+	"os"
 	"path"
 	"slices"
 	"sort"
@@ -46,6 +47,19 @@ const Schema = 1
 type Paths struct {
 	Rendered string // written by rayd
 	Run      string // runtime directories of the data plane
+	// Supervised: the data plane runs as rayd's child processes, under
+	// rayd's own user, without systemd (rayd serve -supervise). The peer
+	// checks on the sockets then expect that user, not the fixed UIDs.
+	Supervised bool
+}
+
+// PeerUID is the UID a process accepts on its socket: the fixed one, or
+// rayd's own when the data plane runs supervised.
+func (p Paths) PeerUID(fixed int) int {
+	if p.Supervised {
+		return os.Getuid()
+	}
+	return fixed
 }
 
 // DefaultPaths are the paths on an installed node.
@@ -362,7 +376,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			}
 			zone := provision.Zone(s.Service)
 			zones = append(zones, route{Zone: zone, Backend: s.Name})
-			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "packet"), Mode: "packet", UID: s.UID}
+			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
 			f, secret, err := dnsBackend(s, zone, inner.Name, p)
 			if err != nil {
 				return nil, nil, err
@@ -387,7 +401,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			}
 			files = append(files, f)
 			if m.FrontTCP {
-				backends[s.Name] = backendRef{Socket: p.socket(s.Name, "reality"), Mode: "proxy-v2", UID: s.UID}
+				backends[s.Name] = backendRef{Socket: p.socket(s.Name, "reality"), Mode: "proxy-v2", UID: p.PeerUID(s.UID)}
 				var rs RealitySettings
 				_ = json.Unmarshal([]byte(s.Settings), &rs)
 				tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{rs.SNI}, Backend: s.Name})
@@ -405,7 +419,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				return nil, nil, err
 			}
 			files = append(files, fs...)
-			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "packet"), Mode: "packet", UID: s.UID}
+			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
 			if s.Kind == "hy2-obfs" {
 				udpRoutes = append(udpRoutes, udpRoute{SalamanderPasswordFile: p.FrontSalamander(s.Name), Backend: s.Name})
 			} else {
@@ -435,8 +449,8 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				SNI string `json:"sni"`
 			}
 			_ = json.Unmarshal([]byte(s.Settings), &st)
-			ref := backendRef{Socket: p.DoHSocket(s.Name), Mode: "fd", UID: RaydUID}
-			quic := backendRef{Socket: p.DoH3Socket(s.Name), Mode: "packet", UID: RaydUID}
+			ref := backendRef{Socket: p.DoHSocket(s.Name), Mode: "fd", UID: p.PeerUID(RaydUID)}
+			quic := backendRef{Socket: p.DoH3Socket(s.Name), Mode: "packet", UID: p.PeerUID(RaydUID)}
 			if s.Kind == "naive" {
 				fs, err := naiveFiles(s, m, p)
 				if err != nil {
@@ -447,8 +461,8 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 					continue
 				}
 				files = append(files, fs...)
-				ref = backendRef{Socket: p.NaiveSocket(s.Name), Mode: "fd", UID: s.UID}
-				quic = backendRef{Socket: p.NaiveQUICSocket(s.Name), Mode: "packet", UID: s.UID}
+				ref = backendRef{Socket: p.NaiveSocket(s.Name), Mode: "fd", UID: p.PeerUID(s.UID)}
+				quic = backendRef{Socket: p.NaiveQUICSocket(s.Name), Mode: "packet", UID: p.PeerUID(s.UID)}
 			}
 			backends[s.Name] = ref
 			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: s.Name})
@@ -476,7 +490,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			}
 			files = append(files, fs...)
 			st, _, _ := YggdrasilNode(s)
-			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "fd"), Mode: "fd", UID: s.UID}
+			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "fd"), Mode: "fd", UID: p.PeerUID(s.UID)}
 			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: s.Name})
 		case "ssh", "subscription", "api":
 			// Not data-plane processes.
@@ -558,7 +572,7 @@ func dnsBackend(s Service, zone, inner string, p Paths) (cfg, secret File, err e
 		"kind":      s.Kind,
 		"log":       map[string]string{"level": "warn"},
 		"socket":    p.socket(s.Name, "packet"),
-		"front_uid": FrontUID,
+		"front_uid": p.PeerUID(FrontUID),
 		"options":   opts,
 		"inner":     p.InnerSocket(inner),
 	})
@@ -961,7 +975,7 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 	}
 	cfg := map[string]any{
 		"schema": Schema, "role": "backend", "kind": s.Kind, "log": map[string]string{"level": "warn"},
-		"socket": p.socket(s.Name, "packet"), "front_uid": FrontUID,
+		"socket": p.socket(s.Name, "packet"), "front_uid": p.PeerUID(FrontUID),
 		// Session stats for the channel probes' link (R4-16, niko-server v0.6).
 		"stats_socket": p.StatsSocket(s.Name),
 		"users_file":   path.Join(dir, HysteriaUsers),

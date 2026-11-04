@@ -434,6 +434,14 @@ func (s *Server) SetServiceOption(ctx context.Context, req *connect.Request[node
 	return connect.NewResponse(&nodev1.SetServiceOptionResponse{Service: servicePB(svc)}), nil
 }
 
+func (s *Server) SetCertificate(ctx context.Context, req *connect.Request[nodev1.SetCertificateRequest]) (*connect.Response[nodev1.SetCertificateResponse], error) {
+	c, err := provision.SetCertificate(ctx, s.Store, req.Msg.Service, req.Msg.ChainPem, req.Msg.KeyPem, time.Now())
+	if err := s.done(ctx, "service.cert", req.Msg.Service, err); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&nodev1.SetCertificateResponse{Names: c.Names, NotAfter: c.NotAfter.Unix(), MissingNext: c.MissingNext}), nil
+}
+
 func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.RotateServiceRequest]) (*connect.Response[nodev1.RotateServiceResponse], error) {
 	now := time.Now()
 	at := now.Add(s.RealityLead)

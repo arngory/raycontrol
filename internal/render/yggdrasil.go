@@ -140,7 +140,7 @@ func yggdrasilFiles(s Service, m Model, inner Service, p Paths) ([]File, error) 
 	}
 	b, err := jsonFile(map[string]any{
 		"schema": Schema, "role": "backend", "kind": "yggdrasil", "log": map[string]string{"level": "warn"},
-		"socket": p.socket(s.Name, "fd"), "front_uid": FrontUID,
+		"socket": p.socket(s.Name, "fd"), "front_uid": p.PeerUID(FrontUID),
 		"users_file": path.Join(dir, YggdrasilUsers),
 		"tls": map[string]any{
 			"certificate_file": path.Join(dir, YggdrasilChain),

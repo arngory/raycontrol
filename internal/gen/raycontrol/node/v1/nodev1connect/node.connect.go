@@ -71,6 +71,9 @@ const (
 	// NodeServiceSetServiceOptionProcedure is the fully-qualified name of the NodeService's
 	// SetServiceOption RPC.
 	NodeServiceSetServiceOptionProcedure = "/raycontrol.node.v1.NodeService/SetServiceOption"
+	// NodeServiceSetCertificateProcedure is the fully-qualified name of the NodeService's
+	// SetCertificate RPC.
+	NodeServiceSetCertificateProcedure = "/raycontrol.node.v1.NodeService/SetCertificate"
 	// NodeServiceListDevicesProcedure is the fully-qualified name of the NodeService's ListDevices RPC.
 	NodeServiceListDevicesProcedure = "/raycontrol.node.v1.NodeService/ListDevices"
 	// NodeServiceCreateDeviceProcedure is the fully-qualified name of the NodeService's CreateDevice
@@ -137,6 +140,11 @@ type NodeServiceClient interface {
 	// creation: a site's answer, whether REALITY moves its server name,
 	// Hysteria2's Brutal ceilings, Yggdrasil's public peers.
 	SetServiceOption(context.Context, *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error)
+	// SetCertificate puts the operator's own certificate on a site, in place
+	// of one from ACME, for every service under it (REALITY self-steal,
+	// hy2-masq, naive, DoH, Yggdrasil). With ACME on, rayd renews it when it
+	// is due. On the node only: it carries the private key.
+	SetCertificate(context.Context, *connect.Request[v1.SetCertificateRequest]) (*connect.Response[v1.SetCertificateResponse], error)
 	ListDevices(context.Context, *connect.Request[v1.ListDevicesRequest]) (*connect.Response[v1.ListDevicesResponse], error)
 	// CreateDevice returns the device bundle with the device key. The key is
 	// not stored anywhere it can be read back through the API.
@@ -266,6 +274,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("SetServiceOption")),
 			connect.WithClientOptions(opts...),
 		),
+		setCertificate: connect.NewClient[v1.SetCertificateRequest, v1.SetCertificateResponse](
+			httpClient,
+			baseURL+NodeServiceSetCertificateProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetCertificate")),
+			connect.WithClientOptions(opts...),
+		),
 		listDevices: connect.NewClient[v1.ListDevicesRequest, v1.ListDevicesResponse](
 			httpClient,
 			baseURL+NodeServiceListDevicesProcedure,
@@ -380,6 +394,7 @@ type nodeServiceClient struct {
 	deleteService     *connect.Client[v1.DeleteServiceRequest, v1.DeleteServiceResponse]
 	rotateService     *connect.Client[v1.RotateServiceRequest, v1.RotateServiceResponse]
 	setServiceOption  *connect.Client[v1.SetServiceOptionRequest, v1.SetServiceOptionResponse]
+	setCertificate    *connect.Client[v1.SetCertificateRequest, v1.SetCertificateResponse]
 	listDevices       *connect.Client[v1.ListDevicesRequest, v1.ListDevicesResponse]
 	createDevice      *connect.Client[v1.CreateDeviceRequest, v1.CreateDeviceResponse]
 	revokeDevice      *connect.Client[v1.RevokeDeviceRequest, v1.RevokeDeviceResponse]
@@ -461,6 +476,11 @@ func (c *nodeServiceClient) RotateService(ctx context.Context, req *connect.Requ
 // SetServiceOption calls raycontrol.node.v1.NodeService.SetServiceOption.
 func (c *nodeServiceClient) SetServiceOption(ctx context.Context, req *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error) {
 	return c.setServiceOption.CallUnary(ctx, req)
+}
+
+// SetCertificate calls raycontrol.node.v1.NodeService.SetCertificate.
+func (c *nodeServiceClient) SetCertificate(ctx context.Context, req *connect.Request[v1.SetCertificateRequest]) (*connect.Response[v1.SetCertificateResponse], error) {
+	return c.setCertificate.CallUnary(ctx, req)
 }
 
 // ListDevices calls raycontrol.node.v1.NodeService.ListDevices.
@@ -568,6 +588,11 @@ type NodeServiceHandler interface {
 	// creation: a site's answer, whether REALITY moves its server name,
 	// Hysteria2's Brutal ceilings, Yggdrasil's public peers.
 	SetServiceOption(context.Context, *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error)
+	// SetCertificate puts the operator's own certificate on a site, in place
+	// of one from ACME, for every service under it (REALITY self-steal,
+	// hy2-masq, naive, DoH, Yggdrasil). With ACME on, rayd renews it when it
+	// is due. On the node only: it carries the private key.
+	SetCertificate(context.Context, *connect.Request[v1.SetCertificateRequest]) (*connect.Response[v1.SetCertificateResponse], error)
 	ListDevices(context.Context, *connect.Request[v1.ListDevicesRequest]) (*connect.Response[v1.ListDevicesResponse], error)
 	// CreateDevice returns the device bundle with the device key. The key is
 	// not stored anywhere it can be read back through the API.
@@ -691,6 +716,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		NodeServiceSetServiceOptionProcedure,
 		svc.SetServiceOption,
 		connect.WithSchema(nodeServiceMethods.ByName("SetServiceOption")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceSetCertificateHandler := connect.NewUnaryHandler(
+		NodeServiceSetCertificateProcedure,
+		svc.SetCertificate,
+		connect.WithSchema(nodeServiceMethods.ByName("SetCertificate")),
 		connect.WithHandlerOptions(opts...),
 	)
 	nodeServiceListDevicesHandler := connect.NewUnaryHandler(
@@ -817,6 +848,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceRotateServiceHandler.ServeHTTP(w, r)
 		case NodeServiceSetServiceOptionProcedure:
 			nodeServiceSetServiceOptionHandler.ServeHTTP(w, r)
+		case NodeServiceSetCertificateProcedure:
+			nodeServiceSetCertificateHandler.ServeHTTP(w, r)
 		case NodeServiceListDevicesProcedure:
 			nodeServiceListDevicesHandler.ServeHTTP(w, r)
 		case NodeServiceCreateDeviceProcedure:
@@ -908,6 +941,10 @@ func (UnimplementedNodeServiceHandler) RotateService(context.Context, *connect.R
 
 func (UnimplementedNodeServiceHandler) SetServiceOption(context.Context, *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetServiceOption is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetCertificate(context.Context, *connect.Request[v1.SetCertificateRequest]) (*connect.Response[v1.SetCertificateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetCertificate is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) ListDevices(context.Context, *connect.Request[v1.ListDevicesRequest]) (*connect.Response[v1.ListDevicesResponse], error) {

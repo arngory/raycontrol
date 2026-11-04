@@ -125,7 +125,11 @@ func cmdServe(args []string) error {
 	spaMaxTTL := fs.Duration("spa-max-ttl", time.Hour, "longest access a SPA packet may ask for")
 	spaTCP := fs.Bool("spa-tcp", true, "also accept SPA v2 over TCP on the slot ports")
 	rendered := fs.String("rendered", render.DefaultPaths.Rendered, "directory for rendered data-plane files")
+	run := fs.String("run", render.DefaultPaths.Run, "runtime directory of the data plane: its sockets and credentials")
 	liveApply := fs.Bool("live", true, "render and apply data-plane files while serving")
+	supervise := fs.Bool("supervise", false, "run the data plane as child processes, without systemd (tests, containers): no users, groups or sandbox")
+	xrayBin := fs.String("xray", deploy.DefaultBinaries.Xray, "Xray binary for -supervise")
+	nikoBin := fs.String("niko-server", deploy.DefaultBinaries.NikoServer, "niko-server binary for -supervise")
 	acmeDir := fs.String("acme-directory", certs.LetsEncrypt, "ACME directory for the sites' certificates (empty: none)")
 	credPeriod := fs.Duration("cred-period", 30*24*time.Hour, "how long a user credential stays current (0: no rotation)")
 	credLead := fs.Duration("cred-lead", 3*24*time.Hour, "the next credential is in the subscription this long before the switch")
@@ -157,8 +161,7 @@ func cmdServe(args []string) error {
 	}
 
 	go pruneAudit(ctx, st, log)
-	paths := render.DefaultPaths
-	paths.Rendered = *rendered
+	paths := render.Paths{Rendered: *rendered, Run: *run, Supervised: *supervise}
 	rotateNow := make(chan struct{}, 1)
 	srv := &api.Server{Store: st, Params: params, Version: version, Paths: paths, Binaries: deploy.DefaultBinaries,
 		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead,
@@ -177,12 +180,29 @@ func cmdServe(args []string) error {
 		log.Warn("rayspa user not found; only root receives the perimeter feed", "user", *rayspaUser)
 	}
 
+	if *supervise && !*liveApply {
+		return errors.New("-supervise needs -live: the processes read the rendered files")
+	}
 	if *liveApply {
 		applier := &live.Applier{Store: st, Paths: paths, Log: log}
+		var sup *live.Supervisor
+		if *supervise {
+			sup, err = supervisor(paths, *xrayBin, *nikoBin, st, log)
+			if err != nil {
+				return err
+			}
+			applier.Restart = sup.Restart
+		}
 		// The socket opens after the first render: rayctl apply waits for it
 		// before it starts the data-plane units that read these files.
 		if err := applier.Apply(ctx); err != nil {
 			log.Error("apply", "err", err)
+		}
+		if sup != nil {
+			done := make(chan struct{})
+			go func() { sup.Run(ctx); close(done) }()
+			// Stopped before rayd returns.
+			defer func() { stop(); <-done }()
 		}
 		go applier.Run(ctx, srv.Changes)
 	}
@@ -209,11 +229,37 @@ func cmdServe(args []string) error {
 	go syncDNS(ctx, st, srv.Changes, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
 	go serveRemote(ctx, &api.Remote{Server: srv, Log: log}, srv.Changes)
-	if err := startSubscription(ctx, st, log, *probeDaily); err != nil {
+	if err := startSubscription(ctx, st, paths, log, *probeDaily); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
 	log.Info("serving", "socket", *socket, "node", fmt.Sprintf("%x", params.NodeID))
 	return srv.ServeUnix(ctx, *socket, policy, per.Handler)
+}
+
+// supervisor runs the data plane without systemd (-supervise): the plan
+// rayctl apply would install, as child processes.
+func supervisor(paths render.Paths, xray, niko string, st *store.Store, log *slog.Logger) (*live.Supervisor, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	bins := deploy.Binaries{Rayd: self, Xray: xray, NikoServer: niko}
+	for _, b := range []string{xray, niko} {
+		if _, err := os.Stat(b); err != nil {
+			log.Warn("supervise: binary missing; its services will not start", "err", err)
+		}
+	}
+	return &live.Supervisor{Log: log, Plan: func(ctx context.Context) (deploy.Plan, error) {
+		m, err := render.Collect(ctx, st)
+		if err != nil {
+			return deploy.Plan{}, err
+		}
+		files, _, err := render.Render(m, paths)
+		if err != nil {
+			return deploy.Plan{}, err
+		}
+		return deploy.Build(m, files, paths, bins), nil
+	}}, nil
 }
 
 // startCertificates issues and renews the sites' certificates through ACME
@@ -324,7 +370,7 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 				continue
 			}
 			// The front passes the sockets of the DoH name here (R2-15).
-			ln, err := nikoipc.ListenFD(p.DoHSocket(svc.Name), render.FrontUID, log)
+			ln, err := nikoipc.ListenFD(p.DoHSocket(svc.Name), p.PeerUID(render.FrontUID), log)
 			if err != nil {
 				log.Error("doh socket", "service", svc.Name, "err", err)
 				continue
@@ -338,7 +384,7 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 			go func() { _ = srv.ServeTLS(ln, "", "") }()
 			// DoH3: the same handler over QUIC, datagrams from the front (R3-5).
 			h3ctx, h3stop := context.WithCancel(ctx)
-			if pc, err := nikoipc.ListenPacket(p.DoH3Socket(svc.Name), render.FrontUID, log); err != nil {
+			if pc, err := nikoipc.ListenPacket(p.DoH3Socket(svc.Name), p.PeerUID(render.FrontUID), log); err != nil {
 				log.Error("doh3 socket", "service", svc.Name, "err", err)
 			} else {
 				go func() {
@@ -524,7 +570,7 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 
 // startSubscription serves the subscription endpoint on the port of the
 // subscription service, if it is enabled.
-func startSubscription(ctx context.Context, st *store.Store, log *slog.Logger, probeDailyMiB int) error {
+func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, probeDailyMiB int) error {
 	svc, err := st.ServiceByName(ctx, provision.SubscriptionService)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !svc.Enabled) {
 		log.Info("subscription service disabled")
@@ -564,7 +610,7 @@ func startSubscription(ctx context.Context, st *store.Store, log *slog.Logger, p
 			}
 			for _, svc := range services {
 				if svc.Enabled && render.IsHysteria(svc.Kind) {
-					out[strconv.FormatInt(svc.ID, 10)] = render.DefaultPaths.StatsSocket(svc.Name)
+					out[strconv.FormatInt(svc.ID, 10)] = paths.StatsSocket(svc.Name)
 				}
 			}
 			return out

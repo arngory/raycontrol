@@ -139,6 +139,8 @@ func (r *Remote) device(ctx context.Context) (store.Device, error) {
 var nodeOnly = map[string]bool{
 	nodev1connect.NodeServiceGetDeploymentProcedure: true,
 	nodev1connect.NodeServiceBackupProcedure:        true,
+	// The site's private key stays off the network.
+	nodev1connect.NodeServiceSetCertificateProcedure: true,
 }
 
 // adminOnly lets admin devices call NodeService; the audit log names them.

@@ -89,6 +89,7 @@
 | `rayctl service set reality rotate_sni=false` | не менять имя REALITY при ротации |
 | `rayctl service set hy2-masq up_mbps=500` | потолок серверного Brutal на соединение: нода шлёт клиенту не быстрее min(500 Мбит/с, темп клиента); `down_mbps` — потолок отдачи клиента; `0` — без потолка |
 | `rayctl service set ygg peers=tls://host:443,quic://203.0.113.9:443` → `rayctl apply` | публичные пиры Yggdrasil (по умолчанию нет; `quic` — только по IP): нода видна в сети Yggdrasil, клиенты получают пиры как запасной путь; `peers=none` — выключить |
+| `rayctl service cert site -chain chain.pem -key key.pem` | свой сертификат сайта вместо ACME (свой CA, другой ACME-клиент, тестовый CA): для REALITY, hy2-masq, naive, DoH и Yggdrasil под сайтом; должен покрывать все имена сайта |
 | `rayctl service rotate reality [-now]` | новые ключи (и имя) REALITY: через срок публикации или сразу; с `-now` прежние ключи сразу перестают работать, иначе принимаются ещё `-cred-grace` |
 
 ## DNS (Cloudflare)
@@ -133,3 +134,5 @@ shred -u /root/phone.bundle
 | `-reality-period` / `-reality-prepare` | 90 д / 1 д | ключи и имя REALITY; время на сертификат нового имени |
 | `-spa-tcp` | true | TCP-носитель SPA; `false`, если хватает UDP |
 | `-acme-directory` | Let's Encrypt | CA; пусто — без сертификатов |
+| `-run` | `/run/niko` | каталог сокетов и копий секретов data plane |
+| `-supervise` · `-xray` · `-niko-server` | выкл. | без systemd (CI, контейнеры): data plane — дочерние процессы rayd под его пользователем; не для ноды (R4-22, `test/supervise/run.sh`) |
