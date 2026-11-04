@@ -144,6 +144,10 @@ message GetDeploymentResponse {
   repeated string warnings = 4;
   // Ports clients reach; host firewalls (firewalld, ufw) must let them through.
   repeated PortRange host_ports = 5;
+  // The same ports as they arrive from outside, before the node's own
+  // redirects (the ACME window is TCP 80 there): what a provider's firewall
+  // in front of the host must let in.
+  repeated PortRange outside_ports = 6;
 }
 
 message PortRange {

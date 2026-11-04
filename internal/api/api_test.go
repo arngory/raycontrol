@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -277,7 +278,31 @@ func TestPerimeterFeed(t *testing.T) {
 	}
 	if len(dep.Msg.Units) != 6 || len(dep.Msg.Warnings) != 0 || len(dep.Msg.HostPorts) == 0 {
 		t.Fatalf("deployment units %v warnings %v host ports %v", dep.Msg.Units, dep.Msg.Warnings, dep.Msg.HostPorts)
+	} // From outside the ACME window is TCP 80 (no DNS provider here); the
+	// rest is the same.
+	has := func(rs []*nodev1.PortRange, proto string, port uint32) bool {
+		return slices.ContainsFunc(rs, func(r *nodev1.PortRange) bool { return r.Proto == proto && r.From <= port && port <= r.To })
 	}
+	check := func() {
+		t.Helper()
+		dep, err := c.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = srv.Store.ServiceByName(ctx, "site")
+		site := err == nil
+		acme, _ := provision.ACMEPort(ctx, srv.Store)
+		if has(dep.Msg.OutsidePorts, "tcp", 80) != site || has(dep.Msg.HostPorts, "tcp", uint32(acme)) != site ||
+			has(dep.Msg.OutsidePorts, "tcp", uint32(acme)) || len(dep.Msg.OutsidePorts) != len(dep.Msg.HostPorts) {
+			t.Fatalf("site %v: outside %v, host %v (acme %d)", site, dep.Msg.OutsidePorts, dep.Msg.HostPorts, acme)
+		}
+	}
+	check()
+	// With a site (REALITY brings it on a node with a domain).
+	if _, err := provision.CreateService(ctx, srv.Store, store.Service{Kind: "site", Name: "site", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	check()
 }
 
 func TestPerimeterFeedDenied(t *testing.T) {
