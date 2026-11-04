@@ -83,6 +83,17 @@ Payload:
 
 Пустой резолвер означает «выбирает клиент» (резолвер сети, свой список).
 
+**Строгий разбор (Niko 1.26, RAYCONTROL.md §22).** Строку, которая нарушает одно из правил, клиент отбрасывает молча:
+- схемы — только `vless://`, `hysteria2://`, `naive+https://`, `naive+quic://` и `https://` для DoH;
+- у VLESS есть `encryption`, и это не `none`; у REALITY есть `pqv`;
+- параметров `insecure` и `allowInsecure` нет совсем, даже со значением 0;
+- `hy2-obfs` — только с `niko-pin`;
+- у naive `cert` и `extra-headers` клиент не читает: нода на них не полагается.
+
+Подписка, API и замеры не перенаправляют: ответ 3xx клиент считает ошибкой, и нода на любой такой путь отвечает 404.
+Правила проверяет тест `internal/sub` `TestLinksForStrictClient`: ссылки всех видов сервисов и ссылки `next` при
+ротации.
+
 Те же ссылки без подписи печатает `rayctl user export NAME` (P-10, R4-17): по строке комментария и ссылке на профиль,
 при ожидаемой смене — и следующая ссылка с моментом `from`.
 
@@ -123,8 +134,8 @@ vless://<uuid>@<host>:443?type=raw&security=reality&flow=xtls-rprx-vision&encryp
 Стандартная ссылка Hysteria2 с параметрами Niko:
 
 ```
-hysteria2://<пароль>@<host>:<порт>/?sni=<имя>&insecure=0&niko-node=<node_id>&niko-svc=<id>#hy2-masq
-hysteria2://<пароль>@<host>:<порт>/?sni=<имя>&insecure=0&obfs=salamander&obfs-password=<пароль salamander>
+hysteria2://<пароль>@<host>:<порт>/?sni=<имя>&niko-node=<node_id>&niko-svc=<id>#hy2-masq
+hysteria2://<пароль>@<host>:<порт>/?sni=<имя>&obfs=salamander&obfs-password=<пароль salamander>
   &niko-pin=<SPKI SHA-256, base64url>&pinSHA256=<SHA-256 сертификата, hex>&niko-node=<node_id>&niko-svc=<id>#hy2-obfs
 ```
 

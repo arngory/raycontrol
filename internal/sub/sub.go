@@ -413,7 +413,8 @@ func HysteriaLink(m render.Model, s render.Service, password string) string {
 	}
 	q := url.Values{}
 	q.Set("sni", st.SNI)
-	q.Set("insecure", "0")
+	// No insecure parameter at all, not even 0: Niko rejects a line that
+	// has one (RAYCONTROL.md §22), and the certificate is checked anyway.
 	if s.Kind == "hy2-obfs" {
 		q.Set("obfs", "salamander")
 		q.Set("obfs-password", string(s.Secrets[provision.SecretObfsPassword]))
