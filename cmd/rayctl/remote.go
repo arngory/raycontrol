@@ -108,7 +108,7 @@ func openPort(ctx context.Context, b node.Bundle, ip netip.Addr, port uint16, ca
 	if err != nil || len(k) != spa.KeySize {
 		return errors.New("bad device key")
 	}
-	carriers := map[string][]string{"auto": {"udp", "tcp"}, "udp": {"udp"}, "tcp": {"tcp"}}[carrier]
+	carriers := map[string][]string{"auto": {"udp", "tls"}, "udp": {"udp"}, "tcp": {"tcp"}, "tls": {"tls"}}[carrier]
 	if carriers == nil {
 		return errUsage
 	}

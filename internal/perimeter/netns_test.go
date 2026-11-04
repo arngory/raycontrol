@@ -272,6 +272,27 @@ func TestNetns(t *testing.T) {
 			t.Fatal("service closed after TCP SPA")
 		}
 	})
+	t.Run("TCP carrier as a TLS ClientHello opens the service", func(t *testing.T) {
+		// spa-v2.md §10.1 (RAYCONTROL.md §22.2.3).
+		snap.Devices = []*perimeterv1.Device{alice}
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		c, err := net.Dial("tcp", "127.0.0.1:"+slotPort())
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, err := spa.TLSCarrier(sealNow())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Write(rec)
+		c.Close()
+		waitResult(nil)
+		if !reach() {
+			t.Fatal("service closed after the ClientHello carrier")
+		}
+	})
 	t.Run("admin prefix reaches SSH without SPA", func(t *testing.T) {
 		ssh, err := net.Listen("tcp", "127.0.0.1:18022")
 		if err != nil {

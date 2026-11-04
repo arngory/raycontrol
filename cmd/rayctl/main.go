@@ -88,16 +88,16 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   report [-o FILE] [-logs warning|info|none] [-since 24h] [-id ID]
       a redacted report for an issue: versions, system, checks, units,
       counts and warnings; nothing is sent anywhere
-  knock [-carrier udp|tcp|auto] [-addr A] [-ttl 10m] BUNDLE|@FILE
+  knock [-carrier udp|tls|tcp|auto] [-addr A] [-ttl 10m] BUNDLE|@FILE
       SPA only: open the device's services to this address for a while; with
       the emergency bundle, SSH (then ssh as usual)
-  probe [-carrier udp|tcp|auto] [-addr A] [-links] [-redact] [-channel] BUNDLE|@FILE|-
+  probe [-carrier udp|tls|tcp|auto] [-addr A] [-links] [-redact] [-channel] BUNDLE|@FILE|-
       check a node from outside like a client: SPA, then the subscription
       (pin, both signatures). Needs only the device bundle. -channel then
       measures the channel (TCP down and up, UDP echo; probe-v1).
 
   From another machine, through the node's remote API (admin devices):
-  remote enroll [-o FILE] [-carrier udp|tcp|auto] [-addr A] INVITE|@FILE|-
+  remote enroll [-o FILE] [-carrier udp|tls|tcp|auto] [-addr A] INVITE|@FILE|-
       register a device from an invite (rcinv1:...): a new client key, SPA,
       then the API; writes the device file (bundle and key, mode 0600)
   -remote FILE <command>                    status, user, service, device, audit, admin, dns, metrics, summary
