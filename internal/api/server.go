@@ -434,6 +434,14 @@ func (s *Server) SetServiceOption(ctx context.Context, req *connect.Request[node
 	return connect.NewResponse(&nodev1.SetServiceOptionResponse{Service: servicePB(svc)}), nil
 }
 
+func (s *Server) SetCertificate(ctx context.Context, req *connect.Request[nodev1.SetCertificateRequest]) (*connect.Response[nodev1.SetCertificateResponse], error) {
+	c, err := provision.SetCertificate(ctx, s.Store, req.Msg.Service, req.Msg.ChainPem, req.Msg.KeyPem, time.Now())
+	if err := s.done(ctx, "service.cert", req.Msg.Service, err); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&nodev1.SetCertificateResponse{Names: c.Names, NotAfter: c.NotAfter.Unix(), MissingNext: c.MissingNext}), nil
+}
+
 func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.RotateServiceRequest]) (*connect.Response[nodev1.RotateServiceResponse], error) {
 	now := time.Now()
 	at := now.Add(s.RealityLead)
@@ -696,7 +704,9 @@ func (s *Server) SetAdminAccess(ctx context.Context, req *connect.Request[nodev1
 // hostPorts lists the ports clients reach: the SPA range (UDP and the TCP
 // carrier) and the ports of enabled services. Rotated UDP slot ports need no
 // entry: they are redirected to the service port before any input chain.
-func (s *Server) hostPorts(ctx context.Context) ([]deploy.PortRange, error) {
+// outside is the same list before the node's redirects, for a provider's
+// firewall: TCP 80 for the ACME window, and only while HTTP-01 is in use.
+func (s *Server) hostPorts(ctx context.Context) (host, outside []deploy.PortRange, err error) {
 	last := uint16(int(s.Params.PortBase) + int(s.Params.PortRange) - 1)
 	ports := []deploy.PortRange{
 		{Proto: "udp", From: s.Params.PortBase, To: last},
@@ -704,15 +714,7 @@ func (s *Server) hostPorts(ctx context.Context) ([]deploy.PortRange, error) {
 	}
 	services, err := s.Store.ListServices(ctx)
 	if err != nil {
-		return nil, err
-	}
-	if slices.ContainsFunc(services, func(svc store.Service) bool { return svc.Enabled && svc.Kind == "site" }) {
-		// The ACME window redirects TCP 80 here; host firewalls must pass it.
-		port, err := provision.ACMEPort(ctx, s.Store)
-		if err != nil {
-			return nil, err
-		}
-		ports = append(ports, deploy.PortRange{Proto: "tcp", From: port, To: port})
+		return nil, nil, err
 	}
 	for _, svc := range services {
 		if !svc.Enabled {
@@ -720,13 +722,26 @@ func (s *Server) hostPorts(ctx context.Context) ([]deploy.PortRange, error) {
 		}
 		ps, err := svc.Ports()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, p := range ps {
 			ports = append(ports, deploy.PortRange{Proto: p.Proto, From: p.Num, To: p.Num})
 		}
 	}
-	return deploy.MergePorts(ports), nil
+	outside = slices.Clone(ports)
+	if slices.ContainsFunc(services, func(svc store.Service) bool { return svc.Enabled && svc.Kind == "site" }) {
+		// The ACME window redirects TCP 80 here; host firewalls must pass it.
+		port, err := provision.ACMEPort(ctx, s.Store)
+		if err != nil {
+			return nil, nil, err
+		}
+		ports = append(ports, deploy.PortRange{Proto: "tcp", From: port, To: port})
+		// With a DNS provider certificates come through DNS-01: no window.
+		if c, _, err := provision.Cloudflare(ctx, s.Store); err == nil && c == nil {
+			outside = append(outside, deploy.PortRange{Proto: "tcp", From: 80, To: 80})
+		}
+	}
+	return deploy.MergePorts(ports), deploy.MergePorts(outside), nil
 }
 
 func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.GetDeploymentRequest]) (*connect.Response[nodev1.GetDeploymentResponse], error) {
@@ -739,7 +754,8 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	}
 	plan := deploy.Build(m, files, s.Paths, s.Binaries)
-	plan.HostPorts, err = s.hostPorts(ctx)
+	var outside []deploy.PortRange
+	plan.HostPorts, outside, err = s.hostPorts(ctx)
 	if err != nil {
 		return nil, toConnect(err)
 	}
@@ -747,6 +763,9 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 	resp := &nodev1.GetDeploymentResponse{Units: plan.Units, Warnings: plan.Warnings}
 	for _, r := range plan.HostPorts {
 		resp.HostPorts = append(resp.HostPorts, &nodev1.PortRange{Proto: r.Proto, From: uint32(r.From), To: uint32(r.To)})
+	}
+	for _, r := range outside {
+		resp.OutsidePorts = append(resp.OutsidePorts, &nodev1.PortRange{Proto: r.Proto, From: uint32(r.From), To: uint32(r.To)})
 	}
 	for _, name := range skipped {
 		resp.Warnings = append(resp.Warnings, "not rendered by this version: "+name)

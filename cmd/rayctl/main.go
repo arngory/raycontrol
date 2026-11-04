@@ -41,6 +41,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false;
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
                                             yggdrasil: peers=URI,URI|none (public peers, then rayctl apply)
+  service cert SITE -chain F -key F         a certificate of your own for the site and the services under
+                                            it, in place of ACME's (on the node only)
   service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
                                             schedule: after the lead time, or at once with -now
   device list [USER]
@@ -420,6 +422,36 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 				fmt.Fprintln(w, "run rayctl apply to restart the site with it")
 			case "yggdrasil":
 				fmt.Fprintln(w, "run rayctl apply: the unit gets network access with public peers, and loses it without")
+			}
+		})
+	case "cert":
+		fs := flag.NewFlagSet("service cert", flag.ContinueOnError)
+		chain := fs.String("chain", "", "certificate chain, PEM, leaf first")
+		key := fs.String("key", "", "private key, PEM")
+		if err := need(args, 1); err != nil {
+			return err
+		}
+		if err := fs.Parse(args[1:]); err != nil || *chain == "" || *key == "" {
+			return errUsage
+		}
+		chainPEM, err := os.ReadFile(*chain)
+		if err != nil {
+			return err
+		}
+		keyPEM, err := os.ReadFile(*key)
+		if err != nil {
+			return err
+		}
+		r, err := c.c.SetCertificate(ctx, connect.NewRequest(&nodev1.SetCertificateRequest{Service: args[0], ChainPem: chainPEM, KeyPem: keyPEM}))
+		if err != nil {
+			return err
+		}
+		return c.print(r.Msg, func(w *tabwriter.Writer) {
+			fmt.Fprintf(w, "certificate on %s until %s for %s\n", args[0],
+				time.Unix(r.Msg.NotAfter, 0).UTC().Format(time.RFC3339), strings.Join(r.Msg.Names, ", "))
+			if len(r.Msg.MissingNext) > 0 {
+				fmt.Fprintf(w, "it does not cover %s, the name REALITY moves to next: that switch waits for a certificate that does\n",
+					strings.Join(r.Msg.MissingNext, ", "))
 			}
 		})
 	case "rotate":

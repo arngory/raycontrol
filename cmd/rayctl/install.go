@@ -87,10 +87,38 @@ func preflight() (warnings []string, err error) {
 	}
 	running, _ := os.ReadFile("/proc/sys/kernel/osrelease")
 	warnings = append(warnings, updateWarnings("", strings.TrimSpace(string(running)))...)
+	// SPA slots, invites and certificates go by the clock.
+	if out, err := exec.Command("timedatectl", "show", "-p", "NTPSynchronized", "--value").Output(); err == nil && strings.TrimSpace(string(out)) != "yes" {
+		warnings = append(warnings, "the clock is not synchronized over NTP: SPA and certificates need the right time "+
+			"(apt install systemd-timesyncd, or chrony)")
+	}
+	if meminfo, err := os.ReadFile("/proc/meminfo"); err == nil {
+		if w := memoryWarning(string(meminfo)); w != "" {
+			warnings = append(warnings, w)
+		}
+	}
 	if len(problems) > 0 {
 		return warnings, errors.New("this host cannot run a node:\n  - " + strings.Join(problems, "\n  - "))
 	}
 	return warnings, nil
+}
+
+// minMemoryMiB is the memory below which install warns: the node with every
+// service takes about 250 MiB (docs/10-quickstart-debian13.md), the
+// system its own besides.
+const minMemoryMiB = 900
+
+// memoryWarning reads /proc/meminfo.
+func memoryWarning(meminfo string) string {
+	for _, l := range strings.Split(meminfo, "\n") {
+		if f := strings.Fields(l); len(f) >= 2 && f[0] == "MemTotal:" {
+			kib, err := strconv.Atoi(f[1])
+			if err == nil && kib/1024 < minMemoryMiB {
+				return fmt.Sprintf("%d MiB of memory: the node with every service takes about 250 MiB besides the system; 1 GiB or more is advised", kib/1024)
+			}
+		}
+	}
+	return ""
 }
 
 // updateWarnings says when the host runs behind its own fixes: a newer
@@ -559,7 +587,40 @@ func (c *cli) deploy(ctx context.Context, h *deploy.Host, keep ...string) error 
 		}
 		return nil
 	}
-	return h.Apply(plan, keep...)
+	if err := h.Apply(plan, keep...); err != nil {
+		return err
+	}
+	if len(resp.Msg.OutsidePorts) > 0 {
+		fmt.Println("a firewall of the provider in front of the host (security group, cloud firewall) must let in:",
+			outsidePorts(resp.Msg.OutsidePorts))
+	}
+	return nil
+}
+
+// outsidePorts lists port ranges for a person: "tcp+udp 443, tcp 22".
+func outsidePorts(rs []*nodev1.PortRange) string {
+	type span struct{ from, to uint32 }
+	var order []span
+	protos := map[span][]string{}
+	for _, r := range rs {
+		k := span{r.From, r.To}
+		if _, ok := protos[k]; !ok {
+			order = append(order, k)
+		}
+		protos[k] = append(protos[k], r.Proto)
+	}
+	slices.SortFunc(order, func(a, b span) int { return int(a.from) - int(b.from) })
+	var out []string
+	for _, k := range order {
+		ps := protos[k]
+		slices.Sort(ps)
+		n := strconv.Itoa(int(k.from))
+		if k.to != k.from {
+			n += "-" + strconv.Itoa(int(k.to))
+		}
+		out = append(out, strings.Join(slices.Compact(ps), "+")+" "+n)
+	}
+	return strings.Join(out, ", ")
 }
 
 // adminAccess shows or replaces the addresses that reach SSH without SPA.

@@ -21,7 +21,7 @@ jobs:
           ./scripts/gen.sh
           git diff --exit-code -- internal/gen
       - name: Shell scripts
-        run: shellcheck -x scripts/*.sh install/*.sh test/install/*.sh
+        run: shellcheck -x scripts/*.sh install/*.sh test/install/*.sh test/supervise/*.sh
       - run: go vet ./...
       - run: go test -race -count=1 ./...
       # Built from source with the module's Go: prebuilt binaries made with an
@@ -67,7 +67,9 @@ jobs:
       # The pinned niko-server release: REALITY, DoH and naive through its
       # front on TCP 443 (tcpmux, R2-15).
       - run: scripts/niko-server.sh amd64 "$RUNNER_TEMP/niko-server"
-      - run: XRAY_BIN="$RUNNER_TEMP/xray" NIKO_SERVER_BIN="$RUNNER_TEMP/niko-server" go test -count=1 -run 'WithXray|WithNikoServer|ThroughXray' -v ./internal/xrayapi
+      # A supervised node (rayd serve -supervise) takes port 443 as a node does.
+      - run: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
+      - run: XRAY_BIN="$RUNNER_TEMP/xray" NIKO_SERVER_BIN="$RUNNER_TEMP/niko-server" go test -count=1 -run 'WithXray|WithNikoServer|ThroughXray|Supervised' -v ./internal/xrayapi
       - uses: actions/upload-artifact@v4
         with:
           name: xray
@@ -145,6 +147,29 @@ jobs:
         run: test/install/prepare.sh ${{ matrix.distro }}
       - name: Install and probe
         run: test/install/run.sh ${{ matrix.distro }} bin
+
+  supervise:
+    # A node without systemd (rayd serve -supervise) in a plain container,
+    # probed from a second one: the recipe for a client's CI.
+    needs: xray
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build raycontrol
+        run: for c in rayd rayctl; do CGO_ENABLED=0 go build -trimpath -o bin/$c ./cmd/$c; done
+      - uses: actions/download-artifact@v4
+        with:
+          name: xray
+          path: bin
+      - name: niko-server release
+        run: |
+          scripts/niko-server.sh amd64 bin/niko-server
+          chmod +x bin/*
+      - run: test/supervise/run.sh bin debian:13
 
   build:
     # The release archive as the Release workflow makes it, without the

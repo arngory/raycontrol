@@ -67,6 +67,23 @@ func TestBytes(t *testing.T) {
 	}
 }
 
+func TestMemoryWarning(t *testing.T) {
+	if w := memoryWarning("MemTotal:         496000 kB\nMemFree: 1 kB\n"); !strings.Contains(w, "484 MiB") {
+		t.Errorf("512 MB host: %q", w)
+	}
+	if w := memoryWarning("MemTotal:        2014000 kB\n"); w != "" {
+		t.Errorf("2 GB host: %q", w)
+	}
+}
+
+func TestOutsidePorts(t *testing.T) {
+	got := outsidePorts([]*nodev1.PortRange{{Proto: "tcp", From: 443, To: 443}, {Proto: "udp", From: 20100, To: 20611},
+		{Proto: "tcp", From: 22, To: 22}, {Proto: "udp", From: 443, To: 443}, {Proto: "tcp", From: 20100, To: 20611}})
+	if got != "tcp 22, tcp+udp 443, tcp+udp 20100-20611" {
+		t.Errorf("%q", got)
+	}
+}
+
 func TestUpdateWarnings(t *testing.T) {
 	if !versionLess("6.1.0-27-amd64", "6.1.0-28-amd64") || versionLess("6.12.9", "6.2.1") || !versionLess("5.14.0-427.el9", "5.14.0-503.el9") {
 		t.Fatal("versionLess")

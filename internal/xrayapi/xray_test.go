@@ -403,6 +403,30 @@ func fetchThroughLink(t *testing.T, bin, link, id, page string) {
 // tryThroughLink is fetchThroughLink returning the last error after tries.
 func tryThroughLink(t *testing.T, bin, link, id, page string, tries int) error {
 	t.Helper()
+	socksPort, stop := realitySocks(t, bin, link, id)
+	defer stop()
+	proxy, _ := url.Parse("socks5://127.0.0.1:" + strconv.Itoa(socksPort))
+	hc := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: 5 * time.Second}
+	var lastErr error
+	for i := 0; i < tries; i++ {
+		resp, err := hc.Get(page)
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if string(body) != "through reality" {
+				return fmt.Errorf("body %q", body)
+			}
+			return nil
+		}
+		lastErr = err
+		time.Sleep(200 * time.Millisecond)
+	}
+	return lastErr
+}
+
+// realitySocks runs an Xray client of a REALITY link behind a SOCKS port.
+func realitySocks(t *testing.T, bin, link, id string) (int, func()) {
+	t.Helper()
 	u, err := url.Parse(link)
 	if err != nil {
 		t.Fatal(err)
@@ -432,25 +456,7 @@ func tryThroughLink(t *testing.T, bin, link, id, page string, tries int) error {
 			},
 		}},
 	})
-	stop := runXray(t, bin, client)
-	defer stop()
-	proxy, _ := url.Parse("socks5://127.0.0.1:" + strconv.Itoa(socksPort))
-	hc := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: 5 * time.Second}
-	var lastErr error
-	for i := 0; i < tries; i++ {
-		resp, err := hc.Get(page)
-		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if string(body) != "through reality" {
-				return fmt.Errorf("body %q", body)
-			}
-			return nil
-		}
-		lastErr = err
-		time.Sleep(200 * time.Millisecond)
-	}
-	return lastErr
+	return socksPort, runXray(t, bin, client)
 }
 
 func runXray(t *testing.T, bin, cfg string) (stop func()) {
