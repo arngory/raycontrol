@@ -217,8 +217,11 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	}
 	hasFront := slices.ContainsFunc(files, func(f render.File) bool { return f.Service == "front" })
 
-	var raydGroups, frontGroups []string
+	var raydGroups []string
 	var units []unit
+	// frontIn lets a service write its sockets for the front (ProtectSystem
+	// makes /run read-only past RuntimeDirectory).
+	frontIn := func(s render.Service) string { return "ReadWritePaths=" + p.FrontDir(s.Name) }
 
 	// Xray processes: the inner stage and REALITY. The API socket lives
 	// apart: only rayd may reach it (tmpfiles below).
@@ -292,12 +295,14 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		}
 		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID, ExtraGroups: extra})
 		caps := ""
-		if m.FrontTCP {
-			frontGroups = append(frontGroups, g) // the front connects to reality.sock
-		} else {
+		if !m.FrontTCP {
 			caps = "AmbientCapabilities=CAP_NET_BIND_SERVICE" // binds TCP 443 itself (R2-7)
 		}
-		units = append(units, xrayUnit(s, "raycontrol REALITY "+s.Name+" (Xray, VLESS + REALITY + Vision, ML-KEM-768)", caps))
+		u := xrayUnit(s, "raycontrol REALITY "+s.Name+" (Xray, VLESS + REALITY + Vision, ML-KEM-768)", caps)
+		if m.FrontTCP {
+			u.service = append(u.service, frontIn(s)) // the front connects to reality.sock
+		}
+		units = append(units, u)
 		xrays = append(xrays, s)
 	}
 
@@ -315,7 +320,6 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	for _, s := range hysteria {
 		g := render.GroupName(s.Name)
 		raydGroups = append(raydGroups, g)
-		frontGroups = append(frontGroups, g) // the front connects to packet.sock
 		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID})
 		dir := path.Join(p.Rendered, s.Name)
 		creds := []string{fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
@@ -333,6 +337,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 				"ExecStart=" + bin.NikoServer + " backend -c " + path.Join(dir, "backend.json"),
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
+				frontIn(s), // the front connects to packet.sock
 				"UMask=0007",
 				"CapabilityBoundingSet=",
 				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
@@ -387,7 +392,6 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	for _, s := range dns {
 		g := render.GroupName(s.Name)
 		raydGroups = append(raydGroups, g)
-		frontGroups = append(frontGroups, g)
 		var extra []string
 		if inner != nil {
 			extra = []string{render.GroupName(inner.Name)}
@@ -396,7 +400,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		// Secrets: copied by root into the runtime directory, readable by the
 		// service user only. Not LoadCredential=: systemd does not set up
 		// credentials in containers (Docker, LXC), and the copy keeps them
-		// from the front, which shares the service group (R2-9).
+		// from everyone but the service user (R2-9).
 		var creds []string
 		for _, f := range files {
 			if f.Service == s.Name && f.Group == "" {
@@ -418,6 +422,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 				"ExecStart=" + bin.NikoServer + " backend -c " + path.Join(p.Rendered, s.Name, "backend.json"),
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
+				frontIn(s), // the front connects to packet.sock
 				"UMask=0007",
 				"CapabilityBoundingSet=",
 				// Only unix sockets: the front brings the packets, inner takes the streams.
@@ -436,7 +441,6 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		dir := path.Join(p.Rendered, s.Name)
 		g := render.GroupName(s.Name)
 		raydGroups = append(raydGroups, g)
-		frontGroups = append(frontGroups, g) // the front connects to fd.sock
 		var extra []string
 		if inner != nil {
 			extra = []string{render.GroupName(inner.Name)}
@@ -470,6 +474,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 				"ExecStart=" + bin.NikoServer + " backend -c " + path.Join(dir, "backend.json"),
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
+				frontIn(s), // the front connects to fd.sock
 				"UMask=0007",
 				"CapabilityBoundingSet=",
 			}, append(network, creds...)...),
@@ -479,7 +484,9 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	if hasFront {
 		// rayd writes the front config and sets its group.
 		raydGroups = append(raydGroups, render.GroupName("front"))
-		plan.Users = append(plan.Users, SystemUser{Name: render.GroupName("front"), UID: render.FrontUID, ExtraGroups: frontGroups})
+		// In no service group: the front reaches their sockets through
+		// their FrontDir, not their files (S-1).
+		plan.Users = append(plan.Users, SystemUser{Name: render.GroupName("front"), UID: render.FrontUID})
 		var after []string
 		for _, s := range dns {
 			after = append(after, render.UnitName(s.Name))
@@ -510,7 +517,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			needs:       path.Join(p.Rendered, "front", "front.json"),
 			after:       after,
 			service: append([]string{
-				"User=niko-front", "Group=niko-front", groups(frontGroups),
+				"User=niko-front", "Group=niko-front",
 				"ExecStart=" + bin.NikoServer + " front -c " + path.Join(p.Rendered, "front", "front.json"),
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, "front"), "/run/"),
 				"RuntimeDirectoryMode=0700",
@@ -575,14 +582,20 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		// setgid: the API socket Xray creates inherits the rayd group.
 		tmp += fmt.Sprintf("d %s 2750 %s rayd -\n", path.Dir(p.APISocket(s.Name)), render.GroupName(s.Name))
 	}
-	// DoH (rayd) and naive: sockets the front passes connections to (R2-15),
-	// reached through the front's group only.
+	// Sockets the front passes connections and datagrams to (R2-15), each
+	// in a directory of the service user and the front's group: the front
+	// reaches them and nothing else of the services (S-1).
 	for _, s := range m.Services {
 		if s.Kind == "doh" {
 			tmp += fmt.Sprintf("d %s 2750 rayd %s -\n", path.Dir(p.DoHSocket(s.Name)), render.GroupName("front"))
 		}
-		if s.Kind == "naive" {
-			tmp += fmt.Sprintf("d %s 2750 %s %s -\n", path.Dir(p.NaiveSocket(s.Name)), render.GroupName(s.Name), render.GroupName("front"))
+	}
+	for _, s := range slices.Concat(naives, dns, hysteria, yggs) {
+		tmp += fmt.Sprintf("d %s 2750 %s %s -\n", p.FrontDir(s.Name), render.GroupName(s.Name), render.GroupName("front"))
+	}
+	if m.FrontTCP {
+		for _, s := range reality {
+			tmp += fmt.Sprintf("d %s 2750 %s %s -\n", p.FrontDir(s.Name), render.GroupName(s.Name), render.GroupName("front"))
 		}
 	}
 	for _, l := range strings.Split(tmp, "\n") {

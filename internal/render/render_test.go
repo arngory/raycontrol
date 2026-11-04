@@ -107,7 +107,7 @@ func TestRender(t *testing.T) {
 		}
 	}
 	b := front.Backends["dns"]
-	if b.Mode != "packet" || b.Socket != "/run/niko/dns/packet.sock" || b.UID < 9110 || b.UID > 9179 {
+	if b.Mode != "packet" || b.Socket != "/run/niko/dns-in/packet.sock" || b.UID < 9110 || b.UID > 9179 {
 		t.Fatalf("dns backend ref = %+v", b)
 	}
 	for _, z := range front.DNS.Zones {
@@ -320,13 +320,13 @@ func TestReality(t *testing.T) {
 	m.FrontTCP = true
 	c, front = read(m)
 	in = c.Inbounds[0]
-	if in.Listen != "/run/niko/r/reality.sock,0660" || in.Port != 0 || !in.Stream.Sockopt.AcceptProxyProtocol {
+	if in.Listen != "/run/niko/r-in/reality.sock,0660" || in.Port != 0 || !in.Stream.Sockopt.AcceptProxyProtocol {
 		t.Fatalf("inbound behind the front %+v", in)
 	}
 	tcp, _ := json.Marshal(front["tcp"])
 	backends, _ := json.Marshal(front["backends"])
 	if !strings.Contains(string(tcp), `{"backend":"r","sni":["www.example.org"]}`) || !strings.Contains(string(tcp), `"default":"r"`) ||
-		!strings.Contains(string(backends), `"r":{"mode":"proxy-v2","socket":"/run/niko/r/reality.sock"`) {
+		!strings.Contains(string(backends), `"r":{"mode":"proxy-v2","socket":"/run/niko/r-in/reality.sock"`) {
 		t.Fatalf("front tcp %s backends %s", tcp, backends)
 	}
 

@@ -382,7 +382,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			}
 			zone := provision.Zone(s.Service)
 			zones = append(zones, route{Zone: zone, Backend: s.Name})
-			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
+			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
 			f, secret, err := dnsBackend(s, zone, inner.Name, p)
 			if err != nil {
 				return err
@@ -407,7 +407,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			}
 			files = append(files, f)
 			if m.FrontTCP {
-				backends[s.Name] = backendRef{Socket: p.socket(s.Name, "reality"), Mode: "proxy-v2", UID: p.PeerUID(s.UID)}
+				backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "reality"), Mode: "proxy-v2", UID: p.PeerUID(s.UID)}
 				var rs RealitySettings
 				_ = json.Unmarshal([]byte(s.Settings), &rs)
 				tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{rs.SNI}, Backend: s.Name})
@@ -425,7 +425,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				return err
 			}
 			files = append(files, fs...)
-			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
+			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
 			if s.Kind == "hy2-obfs" {
 				udpRoutes = append(udpRoutes, udpRoute{SalamanderPasswordFile: p.FrontSalamander(s.Name), Backend: s.Name})
 			} else {
@@ -496,7 +496,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			}
 			files = append(files, fs...)
 			st, _, _ := YggdrasilNode(s)
-			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "fd"), Mode: "fd", UID: p.PeerUID(s.UID)}
+			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "fd"), Mode: "fd", UID: p.PeerUID(s.UID)}
 			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: s.Name})
 		case "ssh", "subscription", "api":
 			// Not data-plane processes.
@@ -607,7 +607,7 @@ func dnsBackend(s Service, zone, inner string, p Paths) (cfg, secret File, err e
 		"role":      "backend",
 		"kind":      s.Kind,
 		"log":       map[string]string{"level": "warn"},
-		"socket":    p.socket(s.Name, "packet"),
+		"socket":    p.FrontSocket(s.Name, "packet"),
 		"front_uid": p.PeerUID(FrontUID),
 		"options":   opts,
 		"inner":     p.InnerSocket(inner),
@@ -895,7 +895,7 @@ func realityConfig(s Service, m Model, p Paths) (File, error) {
 	stream := inbound["streamSettings"].(map[string]any)
 	if m.FrontTCP {
 		// The front passes the stream with a PROXY v2 header (CONFIG.md).
-		inbound["listen"] = p.socket(s.Name, "reality") + ",0660"
+		inbound["listen"] = p.FrontSocket(s.Name, "reality") + ",0660"
 		stream["sockopt"] = map[string]any{"acceptProxyProtocol": true}
 	} else {
 		port, err := tcpPort(s)
@@ -1011,7 +1011,7 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 	}
 	cfg := map[string]any{
 		"schema": Schema, "role": "backend", "kind": s.Kind, "log": map[string]string{"level": "warn"},
-		"socket": p.socket(s.Name, "packet"), "front_uid": p.PeerUID(FrontUID),
+		"socket": p.FrontSocket(s.Name, "packet"), "front_uid": p.PeerUID(FrontUID),
 		// Session stats for the channel probes' link (R4-16, niko-server v0.6).
 		"stats_socket": p.StatsSocket(s.Name),
 		"users_file":   path.Join(dir, HysteriaUsers),
@@ -1077,17 +1077,24 @@ func (p Paths) StatsSocket(service string) string { return p.socket(service, "st
 // DoHSocket is where rayd serves a DoH service for the site to pass it on.
 func (p Paths) DoHSocket(service string) string { return p.socket(service, "doh") }
 
-// NaiveSocket is where a naive process takes the connections the front
-// passes; the directory belongs to the naive user and the front's group.
-func (p Paths) NaiveSocket(service string) string {
-	return path.Join(p.Run, service+"-in", "naive.sock")
+// FrontSocket is where a backend takes what the front passes it. The
+// directory belongs to the service user and the front's group (setgid, so
+// the socket gets that group): the front reaches the socket and nothing
+// else of the service, its rendered keys least of all (S-1).
+func (p Paths) FrontSocket(service, kind string) string {
+	return path.Join(p.FrontDir(service), kind+".sock")
 }
+
+// FrontDir is the directory of a service's FrontSockets.
+func (p Paths) FrontDir(service string) string { return path.Join(p.Run, service+"-in") }
+
+// NaiveSocket is where a naive process takes the connections the front
+// passes.
+func (p Paths) NaiveSocket(service string) string { return p.FrontSocket(service, "naive") }
 
 // NaiveQUICSocket is where a naive process takes its QUIC datagrams from
 // the front (naive-quic, R3-5).
-func (p Paths) NaiveQUICSocket(service string) string {
-	return path.Join(p.Run, service+"-in", "quic.sock")
-}
+func (p Paths) NaiveQUICSocket(service string) string { return p.FrontSocket(service, "quic") }
 
 // DoH3Socket is where rayd takes the DoH service's QUIC datagrams (DoH3).
 func (p Paths) DoH3Socket(service string) string { return p.socket(service, "doh3") }

@@ -315,7 +315,15 @@ x rayctl service add hy2-obfs hy2o >/dev/null
 x rayctl apply >/dev/null || fail "rayctl apply for the API, REALITY, naive, Yggdrasil and Hysteria2"
 units="$(x systemctl cat niko-ygg.service)" || fail "no unit for Yggdrasil"
 [[ $units == *PrivateNetwork=yes* && $units == *SupplementaryGroups=niko-inner* ]] || fail "the Yggdrasil unit is not unix-only with inner: $units"
-[[ $(x id -nG niko-front) == *niko-ygg* ]] || fail "the front cannot reach the Yggdrasil socket"
+# The front reaches each backend's socket through a directory of the
+# service user and the front's group, not through the service's group:
+# rendered keys and credentials stay out of its reach (S-1).
+[[ $(x id -nG niko-front) == niko-front ]] || fail "the front is in other groups: $(x id -nG niko-front)"
+for d in ygg-in dns-in reality-in; do
+	[[ $(x stat -c '%a %G' "/run/niko/$d") == "2750 niko-front" ]] || fail "no socket directory /run/niko/$d for the front"
+done
+x runuser -u niko-front -- cat /var/lib/raycontrol/rendered/inner/xray.json >/dev/null 2>&1 && fail "the front reads inner's config"
+x runuser -u niko-front -- cat /var/lib/raycontrol/rendered/dns/backend.json >/dev/null 2>&1 && fail "the front reads a backend's config"
 # Public peers (R4-18): the unit goes out to the internet with them, and back
 # to no network without.
 x rayctl service set ygg peers=tls://192.0.2.10:443 >/dev/null || fail "rayctl service set ygg peers"
