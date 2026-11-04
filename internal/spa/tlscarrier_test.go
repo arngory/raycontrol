@@ -59,3 +59,25 @@ func TestTLSCarrier(t *testing.T) {
 		t.Fatal("two carriers are the same")
 	}
 }
+
+// The node parses ClientHello carriers from anyone: no input may panic, and
+// what comes out is at most a packet's length, inside the input.
+func FuzzFromTLSCarrier(f *testing.F) {
+	pkt := bytes.Repeat([]byte{7}, 100)
+	hello, err := TLSCarrier(pkt)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(hello)
+	f.Add(hello[:60])
+	f.Add([]byte{0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0xff, 0xff, 0xff})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		out, err := FromTLSCarrier(data)
+		if err != nil {
+			return
+		}
+		if len(out) == 0 || len(out) > MaxPacketLen || !bytes.Contains(data, out) {
+			t.Fatalf("carrier gave %d bytes", len(out))
+		}
+	})
+}

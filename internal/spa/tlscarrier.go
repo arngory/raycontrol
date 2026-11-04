@@ -165,6 +165,9 @@ func FromTLSCarrier(data []byte) ([]byte, error) {
 			return nil, bad
 		}
 		if typ == extSessionTicket {
+			if l == 0 || l > MaxPacketLen {
+				return nil, bad // empty or longer than any packet
+			}
 			return b[4 : 4+l], nil
 		}
 		b = b[4+l:]
