@@ -1616,6 +1616,7 @@ type LoopHealth struct {
 	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`                           // the last error
 	Runs          uint64                 `protobuf:"varint,5,opt,name=runs,proto3" json:"runs,omitempty"`
 	Errors        uint64                 `protobuf:"varint,6,opt,name=errors,proto3" json:"errors,omitempty"`
+	Failing       bool                   `protobuf:"varint,7,opt,name=failing,proto3" json:"failing,omitempty"` // the last round failed (rayd after v0.10.0)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1690,6 +1691,13 @@ func (x *LoopHealth) GetErrors() uint64 {
 		return x.Errors
 	}
 	return 0
+}
+
+func (x *LoopHealth) GetFailing() bool {
+	if x != nil {
+		return x.Failing
+	}
+	return false
 }
 
 type User struct {
@@ -4523,7 +4531,7 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\bservices\x18\x05 \x01(\rR\bservices\x12%\n" +
 	"\x0eactive_devices\x18\x06 \x01(\rR\ractiveDevices\x12\x1b\n" +
 	"\tspa_ports\x18\a \x03(\rR\bspaPorts\x124\n" +
-	"\x05loops\x18\b \x03(\v2\x1e.raycontrol.node.v1.LoopHealthR\x05loops\"\x9a\x01\n" +
+	"\x05loops\x18\b \x03(\v2\x1e.raycontrol.node.v1.LoopHealthR\x05loops\"\xb4\x01\n" +
 	"\n" +
 	"LoopHealth\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x17\n" +
@@ -4532,7 +4540,8 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"last_error\x18\x03 \x01(\x03R\tlastError\x12\x14\n" +
 	"\x05error\x18\x04 \x01(\tR\x05error\x12\x12\n" +
 	"\x04runs\x18\x05 \x01(\x04R\x04runs\x12\x16\n" +
-	"\x06errors\x18\x06 \x01(\x04R\x06errors\"\xe2\x01\n" +
+	"\x06errors\x18\x06 \x01(\x04R\x06errors\x12\x18\n" +
+	"\afailing\x18\a \x01(\bR\afailing\"\xe2\x01\n" +
 	"\x04User\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +

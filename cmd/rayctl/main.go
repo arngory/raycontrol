@@ -266,7 +266,8 @@ func loopState(l *nodev1.LoopHealth, now time.Time) string {
 		}
 		return now.Sub(time.Unix(unix, 0)).Round(time.Second).String() + " ago"
 	}
-	if l.LastError > l.LastOk {
+	// failing comes from rayd after v0.10.0; an older one gives the times.
+	if l.Failing || l.LastError > l.LastOk {
 		return fmt.Sprintf("FAILED %s: %s (last ok %s)", ago(l.LastError), l.Error, ago(l.LastOk))
 	}
 	return "ok " + ago(l.LastOk)

@@ -232,7 +232,7 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 	}
 	for _, l := range s.Health.Loops() {
 		resp.Loops = append(resp.Loops, &nodev1.LoopHealth{Name: l.Name, LastOk: unixOf(l.LastOK), LastError: unixOf(l.LastErr),
-			Error: l.Err, Runs: l.Runs, Errors: l.Errors})
+			Error: l.Err, Runs: l.Runs, Errors: l.Errors, Failing: l.Failing()})
 	}
 	return connect.NewResponse(resp), nil
 }

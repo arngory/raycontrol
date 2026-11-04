@@ -211,6 +211,7 @@ message LoopHealth {
   string error = 4;    // the last error
   uint64 runs = 5;
   uint64 errors = 6;
+  bool failing = 7;    // the last round failed (rayd after v0.10.0)
 }
 
 message User {

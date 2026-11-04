@@ -710,7 +710,8 @@ rayctl -remote laptop.rcdev device invite alice phone      # приглашен�
 - `rayctl metrics -o FILE` — счётчики для node_exporter (textfile collector) по своему таймеру: только числа.
 - `rayctl status` — в конце по строке на каждый цикл `rayd`: применение (`apply`), сертификат каждого сайта
   (`acme <сайт>`), записи DNS, смены ключей. `ok 40s ago` — последний круг удался; `FAILED 3m ago: <ошибка>` — нет, и
-  когда был последний успех. В метриках то же без текста ошибки: `raycontrol_loop_last_success_seconds` и
-  `raycontrol_loop_last_error_seconds`.
+  когда был последний успех. В метриках то же без текста ошибки: `raycontrol_loop_last_success_seconds`,
+  `raycontrol_loop_last_error_seconds` и `raycontrol_loop_failing` (1, если последний круг не удался). Строки удалённых
+  сайтов и сервисов исчезают сами; проверка чужой цели REALITY идёт сразу при её смене и раз в 6 часов.
 - `rayctl uninstall` — убрать всё, включая записи raycontrol в Cloudflare; система вернётся к снимку до установки.
   Сначала `rayctl backup`, если ноду может понадобиться вернуть.
