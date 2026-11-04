@@ -392,8 +392,8 @@ func (h *Host) sandbox(ctx context.Context) (bool, string) {
 // ipFirewall checks that IPAddressDeny= holds: a unit denied localhost
 // tries this process's listener.
 func (h *Host) ipFirewall(ctx context.Context) (bool, string) {
-	if h.LookPath("bash") != nil {
-		return true, "not checked (no bash)"
+	if h.LookPath("bash") != nil || h.LookPath("timeout") != nil {
+		return true, "not checked (no bash or timeout)"
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -412,8 +412,10 @@ func (h *Host) ipFirewall(ctx context.Context) (bool, string) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	// Refused (EPERM) or dropped (the connect hangs until timeout): both
+	// mean the filter holds; only a connection that opens means it does not.
 	_, err = h.Run(ctx, "", "systemd-run", "--wait", "--quiet", "--collect", "-p", "IPAddressDeny=localhost",
-		"bash", "-c", fmt.Sprintf("exec 3<>/dev/tcp/127.0.0.1/%d", port))
+		"timeout", "5", "bash", "-c", fmt.Sprintf("exec 3<>/dev/tcp/127.0.0.1/%d", port))
 	if err == nil {
 		return false, "IPAddressDeny= is not enforced"
 	}
