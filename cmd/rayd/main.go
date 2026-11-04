@@ -268,7 +268,7 @@ func supervisor(paths render.Paths, xray, niko string, st *store.Store, log *slo
 		}
 	}
 	return &live.Supervisor{Log: log, Plan: func(ctx context.Context) (deploy.Plan, error) {
-		m, err := render.Collect(ctx, st)
+		m, err := render.CollectForRender(ctx, st)
 		if err != nil {
 			return deploy.Plan{}, err
 		}

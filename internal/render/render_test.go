@@ -388,7 +388,13 @@ func TestDNSAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.CreateDevice(ctx, "bob", "laptop", "user") // bob has no tunnel
-	m, err = render.Collect(ctx, st)
+	// Without the keys (Collect alone), the service is not rendered: an
+	// empty keys file would lock every device out.
+	m, _ = render.Collect(ctx, st)
+	if _, _, err := render.Render(m, render.DefaultPaths); !render.Partial(err) || !strings.Contains(err.Error(), "dns") {
+		t.Fatalf("render without the dnsauth keys: %v", err)
+	}
+	m, err = render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}

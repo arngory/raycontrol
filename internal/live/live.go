@@ -68,7 +68,7 @@ func (a *Applier) inner(socket string) InnerAPI {
 // is skipped (and not restarted); the others go on, and the errors come back
 // joined.
 func (a *Applier) Apply(ctx context.Context) error {
-	m, err := render.Collect(ctx, a.Store)
+	m, err := render.CollectForRender(ctx, a.Store)
 	if err != nil {
 		return err
 	}

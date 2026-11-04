@@ -113,6 +113,7 @@ type Model struct {
 	FrontUDP bool
 	// DNSAuth maps a dnstt service with dnsauth on to the keys of the
 	// devices allowed on it (spec/dnsauth-v1.md): "<device id> <hex>".
+	// Only CollectForRender fills it.
 	DNSAuth map[int64][]string
 }
 
@@ -230,14 +231,28 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 			m.Sets[inner.ID][id] = all[id]
 		}
 	}
-	// dnsauth-v1: the keys of the devices allowed on each dnstt service that
-	// has it on, derived per service (spec/dnsauth-v1.md §2).
+	return m, nil
+}
+
+// CollectForRender is Collect plus what only the rendered files need: the
+// dnsauth-v1 keys of the devices allowed on each dnstt service that has it
+// on, derived per service (spec/dnsauth-v1.md §2). Subscriptions and
+// exports take Collect and skip the devices and the key derivation.
+func CollectForRender(ctx context.Context, st *store.Store) (Model, error) {
+	m, err := Collect(ctx, st)
+	if err != nil {
+		return m, err
+	}
+	var params spa.Params
 	var devices []spa.Device
 	for _, svc := range m.Services {
 		if DNSAuthMode(svc.Service) == "off" {
 			continue
 		}
 		if devices == nil {
+			if params, err = node.LoadParams(ctx, st); err != nil {
+				return m, err
+			}
 			if devices, err = st.SPADevices(ctx); err != nil {
 				return m, err
 			}
@@ -427,7 +442,12 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			zone := provision.Zone(s.Service)
 			zones = append(zones, route{Zone: zone, Backend: s.Name})
 			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
-			f, secret, auth, err := dnsBackend(s, zone, inner.Name, p, m.DNSAuth[s.ID])
+			keys, ok := m.DNSAuth[s.ID]
+			if !ok && s.Kind == "dnstt" && DNSAuthMode(s.Service) != "off" {
+				// An empty keys file would lock every device out.
+				return errors.New("dnsauth keys not collected (render.CollectForRender)")
+			}
+			f, secret, auth, err := dnsBackend(s, zone, inner.Name, p, keys)
 			if err != nil {
 				return err
 			}

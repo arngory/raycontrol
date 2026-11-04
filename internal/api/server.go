@@ -769,7 +769,7 @@ func (s *Server) hostPorts(ctx context.Context) (host, outside []deploy.PortRang
 }
 
 func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.GetDeploymentRequest]) (*connect.Response[nodev1.GetDeploymentResponse], error) {
-	m, err := render.Collect(ctx, s.Store)
+	m, err := render.CollectForRender(ctx, s.Store)
 	if err != nil {
 		return nil, toConnect(err)
 	}
