@@ -225,6 +225,27 @@ if out="$(client -report "$report" "$laptop" 2>&1)"; then fail "a second report 
 [[ $out == *"HTTP 429"* ]] || fail "second report: $out"
 summary="$(x rayctl summary)"
 [[ $summary == *"from smaller networks"*"1 reports"* ]] || fail "rayctl summary: $summary"
+# Hints: a test AS database (test/install/asndb) puts this private network in
+# AS64512; ten devices report from it; then the subscription carries the
+# hint and rayctl summary shows the network.
+if [[ ! -f $bin/asn-test.mmdb ]] && command -v go >/dev/null; then
+	(cd "$here/../.." && go run ./test/install/asndb -o "$bin/asn-test.mmdb" 0.0.0.0/0)
+fi
+if [[ -f $bin/asn-test.mmdb ]]; then
+	x rayctl summary db /opt/rc/asn-test.mmdb >/dev/null || fail "rayctl summary db"
+	for i in $(seq 1 10); do
+		read -r _ hint < <(device "hint$i")
+		out="$(client -report "$report" "$hint" 2>&1)" || fail "report $i from AS64512: $out"
+	done
+	out="$(client "$laptop")" || fail "probe after the reports: $out"
+	[[ $out == *"hints for this network (10 reports in 7 days): order [$svc]"* ]] || fail "no hint in the subscription: $out"
+	summary="$(x rayctl summary)"
+	[[ $summary == *"AS64512"*"Test Net"*"10 reports"* && $summary == *"operator database"*"raycontrol-test-asn"* ]] ||
+		fail "rayctl summary with the test database: $summary"
+	x rayctl summary db -remove >/dev/null
+else
+	log "$distro: no test AS database (no go): hints not checked"
+fi
 x rayctl summary off >/dev/null
 
 log "$distro: remote API"

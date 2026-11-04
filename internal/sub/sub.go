@@ -354,6 +354,10 @@ func YggdrasilLink(m render.Model, s, inner render.Service, uuid string) (string
 	// Public peers (R4-18): a fallback path through the mesh when the node
 	// cannot be reached directly.
 	for _, p := range st.Peers {
+		// QUIC peers by address only (set before that rule: left out).
+		if u, err := url.Parse(p); err == nil && u.Scheme == "quic" && net.ParseIP(u.Hostname()) == nil {
+			continue
+		}
 		q.Add("niko-ygg-via", p)
 	}
 	host := net.JoinHostPort(render.YggdrasilAddress(nodeKey).String(), strconv.Itoa(st.ExitPort))

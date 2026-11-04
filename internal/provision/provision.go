@@ -687,8 +687,15 @@ func YggdrasilPeers(value string) ([]string, error) {
 		if port, err := strconv.Atoi(u.Port()); err != nil || port < 1 || port > 65535 {
 			return nil, fmt.Errorf("%w yggdrasil peer %q: bad port", store.ErrInvalid, p)
 		}
-		if ip := net.ParseIP(u.Hostname()); ip != nil && (!ip.IsGlobalUnicast() || ip.IsPrivate()) {
+		ip := net.ParseIP(u.Hostname())
+		if ip != nil && (!ip.IsGlobalUnicast() || ip.IsPrivate()) {
 			return nil, fmt.Errorf("%w yggdrasil peer %q: a public address, or a name", store.ErrInvalid, p)
+		}
+		// yggdrasil-go resolves a quic:// name itself, with the system
+		// resolver: on a client that means past its own DNS, in clear on the
+		// network where the direct path fails. QUIC peers go by address.
+		if ip == nil && u.Scheme == "quic" {
+			return nil, fmt.Errorf("%w yggdrasil peer %q: a quic peer needs an IP address, not a name", store.ErrInvalid, p)
 		}
 		if !slices.Contains(peers, p) {
 			peers = append(peers, p)

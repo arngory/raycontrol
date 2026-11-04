@@ -265,7 +265,7 @@ func TestYggdrasilPeers(t *testing.T) {
 		tooMany += fmt.Sprintf("tls://h%d.example.net:443,", i)
 	}
 	for _, bad := range []string{"", "none,", "unix:///tmp/x", "tls://10.0.0.1:443", "tls://[fe80::1]:443", "tls://host", "http://h:80",
-		"tls://u:p@h:443", "tls://h:0", tooMany} {
+		"tls://u:p@h:443", "tls://h:0", "quic://ygg.example.net:443", tooMany} {
 		if _, err := provision.YggdrasilPeers(bad); err == nil {
 			t.Errorf("peers %q accepted", bad)
 		}
@@ -343,6 +343,17 @@ func TestYggdrasilPeers(t *testing.T) {
 	}
 	if _, err := provision.SetServiceOption(ctx, st, "ygg", "peers", "tls://127.0.0.1:443"); err == nil {
 		t.Fatal("a loopback peer")
+	}
+	// A quic:// name set before names were refused stays out of the link
+	// (the client could not resolve it safely), and in the node's peers.
+	svc, _ := st.ServiceByName(ctx, "ygg")
+	var raw map[string]any
+	json.Unmarshal([]byte(svc.Settings), &raw)
+	raw["peers"] = []string{"quic://ygg.example.net:443", "tls://ygg.example.net:443?key=00ff"}
+	b, _ := json.Marshal(raw)
+	st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: string(b)})
+	if bp, _, via = state(); len(bp) != 2 || !slices.Equal(via, []string{"tls://ygg.example.net:443?key=00ff"}) {
+		t.Fatalf("a quic name: backend %v, link %v", bp, via)
 	}
 	if _, err := provision.SetServiceOption(ctx, st, "ygg", "peers", "none"); err != nil {
 		t.Fatal(err)

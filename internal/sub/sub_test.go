@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"slices"
@@ -26,6 +27,7 @@ import (
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
+	"github.com/arngory/raycontrol/internal/summary"
 )
 
 type fixture struct {
@@ -426,5 +428,58 @@ func TestRealityKeysInSubscription(t *testing.T) {
 	svcNow := m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })]
 	if pbk, _, _ := render.RealityKeys(svcNow); pbk != cur.Query().Get("pbk") {
 		t.Fatal("server keys changed before the switch")
+	}
+}
+
+// The hint of the network goes into the signed subscription (R4-21), only
+// for the client's own services, and not for a request from the node.
+func TestHintsInSubscription(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7"})
+	svc, _ := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true, Settings: `{"target":"www.example.org:443"}`})
+	st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+	st.SetUserServices(ctx, "alice", []int64{svc.ID})
+	keys, err := provision.LoadNodeKeys(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asked []uint16
+	s := &sub.Server{Store: st, Keys: keys, Hints: func(_ context.Context, addr netip.Addr, svcs []uint16) *summary.Hints {
+		asked = svcs
+		if addr.String() != "198.51.100.20" {
+			return nil
+		}
+		return &summary.Hints{Order: svcs, Devices: 12, Days: 7}
+	}}
+	nodeKeys := keys.PublicJSON()
+	payload := func(addr string) sub.Payload {
+		t.Helper()
+		var a netip.Addr
+		if addr != "" {
+			a = netip.MustParseAddr(addr)
+		}
+		e, err := s.BuildFor(ctx, "alice", a, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(e, nodeKeys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	p := payload("198.51.100.20")
+	if p.Hints == nil || !slices.Equal(p.Hints.Order, []uint16{uint16(svc.ID)}) || p.Hints.Devices != 12 || !slices.Equal(asked, []uint16{uint16(svc.ID)}) {
+		t.Fatalf("hints %+v, asked about %v", p.Hints, asked)
+	}
+	for _, addr := range []string{"", "127.0.0.1", "203.0.113.99"} {
+		if p := payload(addr); p.Hints != nil {
+			t.Fatalf("hints for %q: %+v", addr, p.Hints)
+		}
 	}
 }
