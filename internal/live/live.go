@@ -122,6 +122,9 @@ func (a *Applier) Apply(ctx context.Context) error {
 			}
 			continue
 		}
+		if errors.Is(err, os.ErrNotExist) && f.Refresh {
+			continue // a broken service's users: only replaced, never made (Q-1)
+		}
 		if err == nil || errors.Is(err, os.ErrNotExist) {
 			err = writeFile(f)
 		}

@@ -2,6 +2,7 @@ package live
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -197,5 +198,81 @@ func TestApplyReload(t *testing.T) {
 	after, _ := os.ReadFile(users)
 	if string(before) == string(after) || slices.Contains(restarted, "try-restart niko-naive.service") {
 		t.Fatalf("users %s -> %s, restarted %v", before, after, restarted)
+	}
+}
+
+// A service that fails to render keeps its process (Q-1), but who may
+// connect to it still follows the database: a revoked device's key leaves
+// its keys file, reread without a restart. A file that is not there is not
+// made for a broken service.
+func TestApplyBrokenKeepsRevoking(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	dns, err := provision.CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns", Enabled: true, Settings: `{"auth":"required"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	st.SetUserServices(ctx, "alice", []int64{dns.ID})
+	d1, _, _ := st.CreateDevice(ctx, "alice", "phone", "user")
+	d2, _, _ := st.CreateDevice(ctx, "alice", "laptop", "user")
+
+	var restarted []string
+	a := &Applier{
+		Store: st, Paths: render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: "/run/niko"},
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Restart: func(_ context.Context, verb, unit string) error {
+			restarted = append(restarted, verb+" "+unit)
+			return nil
+		},
+		Inner: func(string) InnerAPI { return &fakeInner{} },
+	}
+	if err := a.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	keys := filepath.Join(dir, "rendered", "dns", render.DNSAuthKeys)
+	if b, _ := os.ReadFile(keys); !strings.Contains(string(b), d1.ID) || !strings.Contains(string(b), d2.ID) {
+		t.Fatalf("keys file:\n%s", b)
+	}
+
+	// Broken: inner off (a database from before the check), then a
+	// revocation.
+	st.SetServiceEnabled(ctx, "inner", false)
+	must(t, st.RevokeDevice(ctx, d1.ID))
+	restarted = nil
+	if err := a.Apply(ctx); !render.Partial(err) {
+		t.Fatalf("apply with a broken dns: %v", err)
+	}
+	b, _ := os.ReadFile(keys)
+	if strings.Contains(string(b), d1.ID) || !strings.Contains(string(b), d2.ID) {
+		t.Fatalf("revoked device still in the broken service's keys:\n%s", b)
+	}
+	if slices.ContainsFunc(restarted, func(s string) bool { return strings.Contains(s, "niko-dns") }) {
+		t.Fatalf("broken service restarted: %v", restarted)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "rendered", "dns", "backend.json")); err != nil {
+		t.Fatalf("the broken service lost its config: %v", err)
+	}
+	// Not made where it is missing.
+	os.Remove(keys)
+	must(t, st.RevokeDevice(ctx, d2.ID))
+	a.Apply(ctx)
+	if _, err := os.Stat(keys); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("keys file made for a broken service: %v", err)
+	}
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
 	}
 }
