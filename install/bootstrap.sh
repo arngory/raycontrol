@@ -233,6 +233,15 @@ main() {
 	# table drops the node's traffic. The release's own rayctl backs it up,
 	# then removes only what v0 installed.
 	if [[ $REMOVE_V0 == 1 ]]; then
+		# The rest of the host first: if it cannot run a node anyway, v0 and
+		# its firewall stay where they are.
+		local pre=0
+		"$tmp/rayctl" check -allow-v0 "$@" || pre=$?
+		case $pre in
+		0) ;;
+		126) die "cannot run programs from $tmp (mounted noexec?): run again with TMPDIR set to a directory that allows it" ;;
+		*) die "this host cannot run a node even without raycontrol v0 (see above); v0 was left as it was" ;;
+		esac
 		local purge=()
 		if [[ $PURGE_V0 == 1 ]]; then purge=(-purge-packages); fi
 		"$tmp/rayctl" legacy -remove -yes "${purge[@]}" || die "raycontrol v0 was not removed completely (see above)"

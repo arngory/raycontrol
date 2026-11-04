@@ -188,10 +188,10 @@ x sh -c '
 	mkdir -p /etc/ray-aio /etc/xray
 	printf "DOMAIN=\"v0.example.test\"\n" > /etc/ray-aio/install.conf
 	printf "#!/bin/bash\nsource /etc/ray-aio/install.conf\n" > /usr/local/bin/raycontrol
-	printf "#!/bin/sh\nexec /opt/rc/listen tcp:443 udp:8443\n" > /usr/local/bin/xray
+	cp /opt/rc/listen /usr/local/bin/xray
 	chmod +x /usr/local/bin/raycontrol /usr/local/bin/xray
 	echo "{}" > /etc/xray/config.json
-	printf "[Service]\nExecStart=/usr/local/bin/xray -config /etc/xray/config.json\n[Install]\nWantedBy=multi-user.target\n" \
+	printf "[Service]\nEnvironment=\"LISTEN=tcp:443 udp:8443\"\nExecStart=/usr/local/bin/xray -config /etc/xray/config.json\n[Install]\nWantedBy=multi-user.target\n" \
 		> /etc/systemd/system/xray.service
 	systemctl daemon-reload && systemctl enable --now xray.service
 	nft add table inet filter && nft add set inet filter knock_stage1 "{ type ipv4_addr; }"' >/dev/null 2>&1 || fail "v0 set-up"

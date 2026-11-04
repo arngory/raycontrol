@@ -49,6 +49,9 @@ const (
 	knockMarker = "knock_stage1"
 )
 
+// Binaries are v0's own servers: the ports they hold go with v0.
+func Binaries() []string { return []string{xrayBin, hysteriaBin} }
+
 // debianNFTConf is Debian's stock /etc/nftables.conf: v0 saved its whole
 // ruleset over it.
 const debianNFTConf = `#!/usr/sbin/nft -f

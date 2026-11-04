@@ -63,6 +63,10 @@ type Options struct {
 	Host     string   // the public address clients use
 	Domain   string   // with a domain, certificates come from Let's Encrypt
 	Services []string // what the install sets up: DNS tunnels need UDP 53
+	// AllowV0: raycontrol v0 is about to go (bootstrap -remove-v0 checks
+	// the rest first): it is not a failure, nor are the ports its Xray and
+	// Hysteria2 hold.
+	AllowV0 bool
 }
 
 // Host is what the checks look at; System is this machine, tests replace
@@ -232,14 +236,22 @@ func (h *Host) Check(ctx context.Context, o Options) []Result {
 		Run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 			return h.Run(ctx, "", name, args...)
 		}}
-	if f := lh.Detect(ctx); f.Any() {
+	switch f := lh.Detect(ctx); {
+	case f.Any() && o.AllowV0:
+		adv("raycontrol v0", true, fmt.Sprintf("ray.sh is installed and goes next (%d items)", len(f.Items)), "")
+	case f.Any():
 		req("raycontrol v0", false, fmt.Sprintf("ray.sh is installed (%d items: %s, …)", len(f.Items), f.Items[0]),
 			"bash bootstrap.sh -remove-v0 with the same arguments backs it up and removes only what it installed (on a node: rayctl legacy -remove)")
-	} else {
+	default:
 		req("raycontrol v0", true, "not installed", "")
 	}
 	listeners := h.listeners()
-	ours := func(l listener) bool { return slices.Contains([]string{"niko-server", "xray", "rayd"}, l.comm) }
+	// The node's own processes, by their binary (a name such as xray is
+	// anyone's); with AllowV0 also v0's, which go before the install.
+	ours := func(l listener) bool {
+		return strings.HasPrefix(l.exe, deploy.DataPlaneDir+"/") || l.exe == deploy.DefaultBinaries.Rayd ||
+			o.AllowV0 && slices.Contains(legacy.Binaries(), l.exe)
+	}
 	for _, p := range []struct {
 		proto string
 		port  uint16
