@@ -19,6 +19,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/release"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -308,7 +309,8 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool) error {
 	restoreDB := now > then
 	if restoreDB {
 		fmt.Printf("The update moved the database to schema %d; the previous version runs on %d.\n"+
-			"The database goes back to its copy from %s: users, devices and settings changed since are lost.\n",
+			"The database goes back to its copy from %s: users, devices and settings added or changed since are lost;\n"+
+			"revoked devices, disabled users and the admin addresses stay as they are now.\n",
 			now, then, fi.ModTime().Format(time.DateTime))
 		if !yes {
 			fmt.Print("Type yes to go on: ")
@@ -332,6 +334,11 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool) error {
 	if _, err := os.Stat(saved); restoreDB && err == nil {
 		if err := run("systemctl", "stop", "rayd.service"); err != nil {
 			return err
+		}
+		// Revocations since the copy stay (the copy is root's, in
+		// previousDir): a rollback must not let a revoked device back in.
+		if err := store.CarryRevocations(ctx, saved, deploy.DB, node.AdminAccessSetting); err != nil {
+			return fmt.Errorf("keeping the revocations made since the update: %w", err)
 		}
 		if err := copyDB(saved, deploy.DB); err != nil {
 			return fmt.Errorf("putting the database back: %w", err)

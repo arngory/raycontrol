@@ -23,6 +23,10 @@ const (
 	settingHost  = "public_host"
 	settingAdmin = "admin_access"
 
+	// AdminAccessSetting is where the admin addresses are kept: a rollback
+	// of the database keeps them as they are now (store.CarryRevocations).
+	AdminAccessSetting = settingAdmin
+
 	// BundlePrefix marks an encoded device bundle.
 	BundlePrefix = "rcdev1:"
 	// InvitePrefix marks an encoded invite: a bundle of a one-time SPA key
