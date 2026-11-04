@@ -8,7 +8,7 @@
 | Что | Где |
 |---|---|
 | raycontrol | релиз [`v0.4.0`](https://github.com/arngory/raycontrol/releases/tag/v0.4.0) (`cd53db1`) |
-| niko-server | в v0.4.0 — [`v0.6.1`](https://github.com/arngory/niko-server/releases/tag/v0.6.1) (`c9ccb72`, ядро Yggdrasil из `arngory/yggdrasil-go`). `own` из п. 2 ниже — в v0.7.0 (следующий пин) |
+| niko-server | в v0.4.0 — [`v0.6.1`](https://github.com/arngory/niko-server/releases/tag/v0.6.1) (`c9ccb72`, ядро Yggdrasil из `arngory/yggdrasil-go`). `own` из п. 2 ниже — в [`v0.7.0`](https://github.com/arngory/niko-server/releases/tag/v0.7.0) (`af20974`), закреплён в ветке raycontrol, выйдет со следующим релизом |
 | Что нового с `5e3c5ec` | `rayctl user export`, публичные пиры Yggdrasil (`niko-ygg-via`), перекрытие ключей REALITY — всё в [niko-prompt-2026-11-03-addendum.md](niko-prompt-2026-11-03-addendum.md) |
 
 ## 1. Ответы на §14.2
@@ -33,8 +33,8 @@
    - Несколько своих сессий бывает, если два устройства одного пользователя стоят за одним адресом или клиент
      переподключился. Их различает `rate_bps`, который вы объявили сами.
    - Суммы по адресу остаются как были.
-   - Нужен niko-server v0.7.0: [#10](https://github.com/arngory/niko-server/pull/10), затем пин в raycontrol. Пока
-     поля нет — работают суммы.
+   - Нужен niko-server v0.7.0 ([#10](https://github.com/arngory/niko-server/pull/10)): он уже закреплён в ветке
+     raycontrol и выйдет со следующим релизом. Со старым бэкендом поля нет, остаются суммы.
 3. **HTTP.**
    - Эндпоинт объявляет в ALPN `h2` и `http/1.1`.
    - `down` объявляет trailer заранее (`Trailer: Probe-Result`). Поэтому trailer приходит и по h2, и в chunked
@@ -105,4 +105,4 @@
 ## 5. Что прислать в ответ
 
 1. Согласны ли с правками §2 (без `kind` и `mcc_mnc`, `devices` как число отчётов) и §3.
-2. Когда блок G возьмёт `own` (после пина niko-server v0.7.0 в raycontrol).
+2. Когда блок G возьмёт `own` (с релизом raycontrol, где закреплён niko-server v0.7.0).
