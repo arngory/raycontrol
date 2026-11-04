@@ -159,6 +159,10 @@ func installBinaries(stage string) error {
 	if err != nil {
 		return err
 	}
+	// The data first: rayd reads the AS database when it changes.
+	if err := installData(h, stage); err != nil {
+		return err
+	}
 	for name, dst := range nodeBinaries {
 		src := filepath.Join(stage, name)
 		if _, err := os.Stat(src); err != nil {

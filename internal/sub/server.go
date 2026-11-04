@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/store"
+	"github.com/arngory/raycontrol/internal/summary"
 )
 
 // Path is the endpoint path; DeviceHeader names the device.
@@ -36,6 +38,9 @@ type Server struct {
 	// Probe, when set, serves the channel probes (spec/probe-v1.md) on the
 	// same endpoint, and the subscription says so.
 	Probe *probe.Server
+	// Hints, when set, gives the hint for the network of an address and the
+	// services of the profiles (R4-21).
+	Hints func(ctx context.Context, addr netip.Addr, svcs []uint16) *summary.Hints
 	now   func() time.Time
 
 	mu sync.Mutex // serialises seq
@@ -131,11 +136,21 @@ func (s *Server) handle(r *http.Request) (Envelope, error) {
 	if !CheckAuth(r.Header.Get("Authorization"), key, now) {
 		return Envelope{}, errors.New("auth")
 	}
-	return s.Build(ctx, dev.UserName, now)
+	addr := netip.Addr{}
+	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
+		addr = ap.Addr().Unmap()
+	}
+	return s.BuildFor(ctx, dev.UserName, addr, now)
 }
 
 // Build returns the signed subscription of a user.
 func (s *Server) Build(ctx context.Context, userName string, now time.Time) (Envelope, error) {
+	return s.BuildFor(ctx, userName, netip.Addr{}, now)
+}
+
+// BuildFor returns the signed subscription of a user asking from addr: with
+// the hint for that network, when there is one.
+func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr, now time.Time) (Envelope, error) {
 	m, err := render.Collect(ctx, s.Store)
 	if err != nil {
 		return Envelope{}, err
@@ -170,6 +185,13 @@ func (s *Server) Build(ctx context.Context, userName string, now time.Time) (Env
 				}
 			}
 		}
+	}
+	if s.Hints != nil && addr.IsValid() && !addr.IsLoopback() {
+		svcs := make([]uint16, 0, len(profiles))
+		for _, pr := range profiles {
+			svcs = append(svcs, pr.Svc)
+		}
+		p.Hints = s.Hints(ctx, addr, svcs)
 	}
 	return Sign(p, s.Keys)
 }

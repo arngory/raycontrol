@@ -68,6 +68,14 @@ service NodeService {
   // names of users, devices or services (R4-14).
   rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
 
+  // GetSummary returns the state of the client summaries (R4-21): whether
+  // the node takes reports, the AS lookup, and the networks with at least
+  // k reports; smaller groups only as a total.
+  rpc GetSummary(GetSummaryRequest) returns (GetSummaryResponse);
+  // SetSummary turns the reports on or off, and the online AS lookup. The
+  // token is stored by rayd and never returned.
+  rpc SetSummary(SetSummaryRequest) returns (SetSummaryResponse);
+
   // GetDeployment returns what root must install for the current services:
   // system users, unit files and other files. rayctl apply writes them.
   rpc GetDeployment(GetDeploymentRequest) returns (GetDeploymentResponse);
@@ -325,3 +333,52 @@ message AuditEntry {
 
 message ListAuditRequest { uint32 limit = 1; }
 message ListAuditResponse { repeated AuditEntry entries = 1; }
+
+message GetSummaryRequest {
+  // days counted: 1 to 30, 7 when 0.
+  uint32 days = 1;
+}
+message GetSummaryResponse {
+  bool enabled = 1;
+  // api is the online lookup turned on ("ipinfo"), or empty.
+  string api = 2;
+  // dbs are the AS databases in lookup order.
+  repeated SummaryDB dbs = 3;
+  repeated SummaryNetwork networks = 4;
+  // other_reports come from networks with fewer than k reports.
+  int64 other_reports = 5;
+  uint32 days = 6;
+  uint32 k = 7;
+}
+message SummaryDB {
+  string role = 1; // operator | release
+  string path = 2;
+  bool present = 3;
+  int64 built = 4; // unix seconds, from the file's metadata
+  string type = 5;
+}
+message SummaryNetwork {
+  uint32 asn = 1;
+  string name = 2;
+  string country = 3;
+  int64 reports = 4;
+  map<string, int64> nets = 5;
+  repeated SummaryService services = 6;
+}
+message SummaryService {
+  uint32 id = 1;
+  string name = 2;
+  map<string, int64> results = 3;
+  map<string, int64> udp = 4;
+  map<string, int64> mbps = 5;
+  map<string, int64> stall_kib = 6;
+}
+message SetSummaryRequest {
+  // enabled: "on" or "off"; empty leaves it.
+  string enabled = 1;
+  // api: "ipinfo" with a token turns the lookup on, "none" turns it off;
+  // empty leaves it.
+  string api = 2;
+  string token = 3;
+}
+message SetSummaryResponse {}

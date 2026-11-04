@@ -18,6 +18,7 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [08-decisions.md](08-decisions.md) | **Принятые решения** — главнее остальных документов при расхождении. |
 | [09-observability.md](09-observability.md) | Логи, телеметрия (её нет), отчёт для issue, QA, обезличенные идентификаторы. |
 | [10-quickstart-debian13.md](10-quickstart-debian13.md) | Нода с нуля на Debian 13 с Cloudflare и выдача подписки клиенту. |
+| [11-asn-sources.md](11-asn-sources.md) | Источники IP → ASN для сводки клиентов: базы и API, их лицензии и условия. |
 | [cheatsheet.md](cheatsheet.md) | Все команды `rayctl` на одной странице. |
 | [spec/spa-v2.md](spec/spa-v2.md) | Формат SPA v2 и пакета регистрации устройства (заморожен). |
 | [spec/subscription-v1.md](spec/subscription-v1.md) | Подписка: запрос, подписи, ссылки с параметрами `niko-*` (заморожена). |

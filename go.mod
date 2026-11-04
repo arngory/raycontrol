@@ -18,11 +18,14 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
+	github.com/maxmind/mmdbwriter v1.2.0 // indirect
 	github.com/mdlayher/netlink v1.9.1-0.20260312172110-2a932c0fc1ae // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/ncruces/go-strftime v1.1.0 // indirect
+	github.com/oschwald/maxminddb-golang/v2 v2.8.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/text v0.43.0 // indirect

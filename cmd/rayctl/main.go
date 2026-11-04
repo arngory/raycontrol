@@ -57,6 +57,10 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             (token asked for without echo when no file is given)
   dns sync                                  bring the zone in line now
   dns remove [-keep-records]                delete raycontrol's records and forget the provider
+  summary [show] [-days 7]                  client summaries: networks with enough reports (R4-21)
+  summary on|off                            take client reports (and give hints) or not
+  summary api ipinfo [-token-file F] | none the online AS lookup for addresses the databases miss
+  summary db FILE.mmdb | -remove            an AS database of your own before the release's (root)
 
   install -host ADDR [-domain D] [-admin A] [-cloudflare-token-file F] [-services reality,hy2-masq,hy2-obfs,dnstt,masterdns|none]
           [-dataplane DIR]                    set the node up on this host (root); with -domain REALITY by default
@@ -86,7 +90,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   remote enroll [-o FILE] [-carrier udp|tcp|auto] [-addr A] INVITE|@FILE|-
       register a device from an invite (rcinv1:...): a new client key, SPA,
       then the API; writes the device file (bundle and key, mode 0600)
-  -remote FILE <command>                    status, user, service, device, audit, admin, dns, metrics
+  -remote FILE <command>                    status, user, service, device, audit, admin, dns, metrics, summary
                                             run against the node through its API
   -remote FILE remote whoami|rotate         the device; a new client key for it
 `
@@ -171,6 +175,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.report(ctx, args[1:])
 	case "dns":
 		return c.dns(ctx, sub, rest)
+	case "summary":
+		return c.summaryCmd(ctx, sub, rest)
 	case "remote":
 		return c.remoteCmd(ctx, sub, rest)
 	case "backup":

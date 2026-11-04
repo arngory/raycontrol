@@ -7,7 +7,10 @@ name: Release
 # deploy/versions.env, so one signature covers everything bootstrap installs. Runs on a pushed
 # tag v*, or by hand (Actions -> Release -> Run workflow) with the tag as input:
 # the release then creates the tag on the commit it was run from.
-# Needs the repository secret MINISIGN_SECRET_KEY (docs/RELEASE.md).
+# The archives also carry IPinfo Lite, the AS database of the client
+# summaries (R4-21, CC BY-SA 4.0, attribution in NOTICE).
+# Needs the repository secrets MINISIGN_SECRET_KEY and IPINFO_TOKEN
+# (docs/RELEASE.md).
 on:
   push:
     tags: ["v*"]
@@ -24,7 +27,28 @@ permissions:
   contents: read
 
 jobs:
+  asn:
+    # One download for both archives.
+    runs-on: ubuntu-24.04
+    steps:
+      - name: IPinfo Lite
+        env:
+          IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
+        run: |
+          test -n "$IPINFO_TOKEN" || { echo "IPINFO_TOKEN is not set"; exit 1; }
+          curl -fsSL --retry 3 --retry-delay 5 -o ipinfo_lite.mmdb "https://ipinfo.io/data/ipinfo_lite.mmdb?token=${IPINFO_TOKEN}"
+          # An MMDB ends with its metadata after this marker; anything
+          # small or without it is an error page, not the database.
+          test "$(stat -c %s ipinfo_lite.mmdb)" -gt 1000000
+          tail -c 131072 ipinfo_lite.mmdb | grep -qa 'MaxMind.com'
+          sha256sum ipinfo_lite.mmdb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipinfo-lite
+          path: ipinfo_lite.mmdb
+
   build:
+    needs: asn
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -63,17 +87,23 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
         run: go build -trimpath -ldflags "-s -w -buildid=" -o ../dist/xray ./main
+      - uses: actions/download-artifact@v4
+        with:
+          name: ipinfo-lite
+          path: dist
       - name: Archive
         env:
           GOARCH: ${{ matrix.goarch }}
         run: |
           . deploy/versions.env
+          cp deploy/NOTICE dist/NOTICE
           {
             echo "raycontrol ${TAG} ${GITHUB_SHA}"
             echo "xray ${XRAY_REPOSITORY} ${XRAY_COMMIT}"
             echo "niko-server ${NIKO_SERVER_TAG} ${NIKO_SERVER_REPOSITORY} ${NIKO_SERVER_COMMIT}"
+            echo "ipinfo-lite $(sha256sum dist/ipinfo_lite.mmdb | cut -d' ' -f1) $(date -u +%Y-%m-%d)"
           } > dist/VERSIONS
-          tar -czf "raycontrol-linux-${GOARCH}.tar.gz" -C dist rayd rayspa rayctl xray niko-server VERSIONS
+          tar -czf "raycontrol-linux-${GOARCH}.tar.gz" -C dist rayd rayspa rayctl xray niko-server VERSIONS ipinfo_lite.mmdb NOTICE
       - uses: actions/upload-artifact@v4
         with:
           name: raycontrol-${{ matrix.goarch }}
@@ -88,6 +118,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
+          pattern: raycontrol-*
           merge-multiple: true
       - name: Release notes exist
         run: test -s ".github/release-notes/${TAG}.md"

@@ -38,6 +38,13 @@ var DefaultBinaries = Binaries{
 // DataPlaneDir holds the data-plane binaries raycontrol installs.
 const DataPlaneDir = "/usr/local/libexec/raycontrol"
 
+// DataDir holds the data a release ships: the AS database of the client
+// summaries (IPinfo Lite, R4-21) and the notice of its licence.
+const DataDir = "/usr/local/share/raycontrol"
+
+// DataFiles are the files of DataDir, by their names in the release.
+var DataFiles = []string{"ipinfo_lite.mmdb", "NOTICE"}
+
 // Paths of the control plane on an installed node.
 const (
 	StateDir   = "/var/lib/raycontrol"

@@ -39,6 +39,16 @@
 | `nft list table inet raycontrol` | периметр; цепочка `early` — отброшенное до сборки фрагментов |
 | `rayctl metrics [-o /var/lib/node_exporter/textfile/raycontrol.prom]` | счётчики в формате Prometheus: только числа, без имён и адресов |
 
+## Сводка от клиентов (необязательно, R4-21)
+
+| Команда | Что делает |
+|---|---|
+| `rayctl summary on\|off` | принимать отчёты клиентов о сетях (клиенты шлют только с согласия пользователя) и давать подсказки о порядке профилей |
+| `rayctl summary [-days 7]` | сети, где не меньше 10 отчётов: что работает, потери UDP, скорость; остальное — одной суммой; базы AS и их даты |
+| `rayctl summary api ipinfo [-token-file F]` · `rayctl summary api none` | API ipinfo для адресов, которых нет в базах: спрашивает по сети /24 или /48, не по адресу |
+| `rayctl summary db F.mmdb` · `rayctl summary db -remove` | своя база AS (IPinfo Lite своим токеном, GeoLite2 ASN своим ключом) впереди базы из релиза; root, на ноде |
+| `rayctl probe -report '{"v":1,…}' @bundle` | отправить отчёт как клиент (probe-v1 §6), для проверки |
+
 ## Пользователи и устройства
 
 | Команда | Что делает |

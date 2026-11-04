@@ -41,7 +41,7 @@ const PubKey = "RWQBergjLoDHqeme5vyIuIRXJLjTj1EF3jR1nlWBVJO3rWxgy9SZj4bD"
 var DefaultMirrors = []string{"https://ghfast.top/", "https://gh-proxy.com/"}
 
 // Files are what an archive may hold; anything else is refused.
-var Files = []string{"rayd", "rayspa", "rayctl", "xray", "niko-server", "VERSIONS"}
+var Files = []string{"rayd", "rayspa", "rayctl", "xray", "niko-server", "VERSIONS", "ipinfo_lite.mmdb", "NOTICE"}
 
 // Verify checks a minisign signature of msg with a public key (the base64
 // line of a .pub file) and returns the trusted comment. Both the

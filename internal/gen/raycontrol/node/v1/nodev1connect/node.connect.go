@@ -103,6 +103,10 @@ const (
 	NodeServiceBackupProcedure = "/raycontrol.node.v1.NodeService/Backup"
 	// NodeServiceGetMetricsProcedure is the fully-qualified name of the NodeService's GetMetrics RPC.
 	NodeServiceGetMetricsProcedure = "/raycontrol.node.v1.NodeService/GetMetrics"
+	// NodeServiceGetSummaryProcedure is the fully-qualified name of the NodeService's GetSummary RPC.
+	NodeServiceGetSummaryProcedure = "/raycontrol.node.v1.NodeService/GetSummary"
+	// NodeServiceSetSummaryProcedure is the fully-qualified name of the NodeService's SetSummary RPC.
+	NodeServiceSetSummaryProcedure = "/raycontrol.node.v1.NodeService/SetSummary"
 	// NodeServiceGetDeploymentProcedure is the fully-qualified name of the NodeService's GetDeployment
 	// RPC.
 	NodeServiceGetDeploymentProcedure = "/raycontrol.node.v1.NodeService/GetDeployment"
@@ -161,6 +165,13 @@ type NodeServiceClient interface {
 	// GetMetrics returns aggregate metrics in the Prometheus text format, no
 	// names of users, devices or services (R4-14).
 	GetMetrics(context.Context, *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error)
+	// GetSummary returns the state of the client summaries (R4-21): whether
+	// the node takes reports, the AS lookup, and the networks with at least
+	// k reports; smaller groups only as a total.
+	GetSummary(context.Context, *connect.Request[v1.GetSummaryRequest]) (*connect.Response[v1.GetSummaryResponse], error)
+	// SetSummary turns the reports on or off, and the online AS lookup. The
+	// token is stored by rayd and never returned.
+	SetSummary(context.Context, *connect.Request[v1.SetSummaryRequest]) (*connect.Response[v1.SetSummaryResponse], error)
 	// GetDeployment returns what root must install for the current services:
 	// system users, unit files and other files. rayctl apply writes them.
 	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
@@ -333,6 +344,18 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("GetMetrics")),
 			connect.WithClientOptions(opts...),
 		),
+		getSummary: connect.NewClient[v1.GetSummaryRequest, v1.GetSummaryResponse](
+			httpClient,
+			baseURL+NodeServiceGetSummaryProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetSummary")),
+			connect.WithClientOptions(opts...),
+		),
+		setSummary: connect.NewClient[v1.SetSummaryRequest, v1.SetSummaryResponse](
+			httpClient,
+			baseURL+NodeServiceSetSummaryProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetSummary")),
+			connect.WithClientOptions(opts...),
+		),
 		getDeployment: connect.NewClient[v1.GetDeploymentRequest, v1.GetDeploymentResponse](
 			httpClient,
 			baseURL+NodeServiceGetDeploymentProcedure,
@@ -370,6 +393,8 @@ type nodeServiceClient struct {
 	removeDNS         *connect.Client[v1.RemoveDNSRequest, v1.RemoveDNSResponse]
 	backup            *connect.Client[v1.BackupRequest, v1.BackupResponse]
 	getMetrics        *connect.Client[v1.GetMetricsRequest, v1.GetMetricsResponse]
+	getSummary        *connect.Client[v1.GetSummaryRequest, v1.GetSummaryResponse]
+	setSummary        *connect.Client[v1.SetSummaryRequest, v1.SetSummaryResponse]
 	getDeployment     *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
 }
 
@@ -503,6 +528,16 @@ func (c *nodeServiceClient) GetMetrics(ctx context.Context, req *connect.Request
 	return c.getMetrics.CallUnary(ctx, req)
 }
 
+// GetSummary calls raycontrol.node.v1.NodeService.GetSummary.
+func (c *nodeServiceClient) GetSummary(ctx context.Context, req *connect.Request[v1.GetSummaryRequest]) (*connect.Response[v1.GetSummaryResponse], error) {
+	return c.getSummary.CallUnary(ctx, req)
+}
+
+// SetSummary calls raycontrol.node.v1.NodeService.SetSummary.
+func (c *nodeServiceClient) SetSummary(ctx context.Context, req *connect.Request[v1.SetSummaryRequest]) (*connect.Response[v1.SetSummaryResponse], error) {
+	return c.setSummary.CallUnary(ctx, req)
+}
+
 // GetDeployment calls raycontrol.node.v1.NodeService.GetDeployment.
 func (c *nodeServiceClient) GetDeployment(ctx context.Context, req *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {
 	return c.getDeployment.CallUnary(ctx, req)
@@ -561,6 +596,13 @@ type NodeServiceHandler interface {
 	// GetMetrics returns aggregate metrics in the Prometheus text format, no
 	// names of users, devices or services (R4-14).
 	GetMetrics(context.Context, *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error)
+	// GetSummary returns the state of the client summaries (R4-21): whether
+	// the node takes reports, the AS lookup, and the networks with at least
+	// k reports; smaller groups only as a total.
+	GetSummary(context.Context, *connect.Request[v1.GetSummaryRequest]) (*connect.Response[v1.GetSummaryResponse], error)
+	// SetSummary turns the reports on or off, and the online AS lookup. The
+	// token is stored by rayd and never returned.
+	SetSummary(context.Context, *connect.Request[v1.SetSummaryRequest]) (*connect.Response[v1.SetSummaryResponse], error)
 	// GetDeployment returns what root must install for the current services:
 	// system users, unit files and other files. rayctl apply writes them.
 	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
@@ -729,6 +771,18 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("GetMetrics")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceGetSummaryHandler := connect.NewUnaryHandler(
+		NodeServiceGetSummaryProcedure,
+		svc.GetSummary,
+		connect.WithSchema(nodeServiceMethods.ByName("GetSummary")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceSetSummaryHandler := connect.NewUnaryHandler(
+		NodeServiceSetSummaryProcedure,
+		svc.SetSummary,
+		connect.WithSchema(nodeServiceMethods.ByName("SetSummary")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceGetDeploymentHandler := connect.NewUnaryHandler(
 		NodeServiceGetDeploymentProcedure,
 		svc.GetDeployment,
@@ -789,6 +843,10 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceBackupHandler.ServeHTTP(w, r)
 		case NodeServiceGetMetricsProcedure:
 			nodeServiceGetMetricsHandler.ServeHTTP(w, r)
+		case NodeServiceGetSummaryProcedure:
+			nodeServiceGetSummaryHandler.ServeHTTP(w, r)
+		case NodeServiceSetSummaryProcedure:
+			nodeServiceSetSummaryHandler.ServeHTTP(w, r)
 		case NodeServiceGetDeploymentProcedure:
 			nodeServiceGetDeploymentHandler.ServeHTTP(w, r)
 		default:
@@ -902,6 +960,14 @@ func (UnimplementedNodeServiceHandler) Backup(context.Context, *connect.Request[
 
 func (UnimplementedNodeServiceHandler) GetMetrics(context.Context, *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetMetrics is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetSummary(context.Context, *connect.Request[v1.GetSummaryRequest]) (*connect.Response[v1.GetSummaryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetSummary is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetSummary(context.Context, *connect.Request[v1.SetSummaryRequest]) (*connect.Response[v1.SetSummaryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetSummary is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {

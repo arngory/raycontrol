@@ -268,3 +268,24 @@ func (c Client) Link(ctx context.Context) (LinkStats, error) {
 	err = json.NewDecoder(resp.Body).Decode(&st)
 	return st, err
 }
+
+// Report sends a summary of this network (§6, R4-21); the node answers
+// 204, or 429 when this network was reported today.
+func (c Client) Report(ctx context.Context, body []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Base+PathReport, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.Authorize(req)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("report: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	return nil
+}

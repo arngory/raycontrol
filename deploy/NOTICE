@@ -1,0 +1,12 @@
+raycontrol — third-party data in this release
+
+ipinfo_lite.mmdb
+  IP address data powered by IPinfo (https://ipinfo.io).
+  IPinfo Lite, licensed under the Creative Commons Attribution-ShareAlike 4.0
+  International License (https://creativecommons.org/licenses/by-sa/4.0/).
+  Shipped unmodified. raycontrol uses it on the node to find the autonomous
+  system of a client's address for the optional client summaries (R4-21);
+  addresses are not stored.
+
+Данные о сетях — IPinfo Lite (https://ipinfo.io), лицензия CC BY-SA 4.0,
+поставляются без изменений.
