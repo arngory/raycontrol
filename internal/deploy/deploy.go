@@ -552,7 +552,9 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			after: []string{"rayd.service", "nftables.service", "firewalld.service", "ufw.service"},
 			service: []string{
 				"User=rayspa", "Group=rayspa",
-				"ExecStart=" + bin.Rayspa + " run -socket " + Socket,
+				"ExecStart=" + bin.Rayspa + " run -socket " + Socket + " -state /var/lib/rayspa/snapshot.pb",
+				// The last snapshot: SPA keys and the admin addresses, rayspa's only.
+				"StateDirectory=rayspa", "StateDirectoryMode=0700",
 				"AmbientCapabilities=CAP_NET_ADMIN",
 				"CapabilityBoundingSet=CAP_NET_ADMIN",
 				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",

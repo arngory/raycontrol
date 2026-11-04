@@ -366,6 +366,17 @@ if x systemctl is-active --quiet systemd-journald; then
 	x journalctl -u rayspa -p warning --no-pager | grep -q "table was removed" || fail "rayspa's warning is not at warning priority"
 fi
 
+# rayspa starting while rayd is down takes its saved snapshot: the admin
+# addresses reach SSH without rayd (Q-3).
+log "$distro: rayspa without rayd"
+x systemctl stop rayd.service
+x systemctl restart rayspa.service
+wait_table "rayspa restart without rayd"
+x test -s /var/lib/rayspa/snapshot.pb || fail "rayspa saved no snapshot"
+x nft list set inet raycontrol admin4 | grep -q 192.0.2.1 || fail "rayspa without rayd lost the admin addresses"
+x systemctl start rayd.service
+wait_active rayd.service rayspa.service "${dataplane[@]}"
+
 log "$distro: reboot"
 docker restart "$node" >/dev/null
 boot
