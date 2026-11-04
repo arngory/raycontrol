@@ -381,7 +381,16 @@ x systemctl stop rayd.service
 x systemctl restart rayspa.service
 wait_table "rayspa restart without rayd"
 x test -s /var/lib/rayspa/snapshot.pb || fail "rayspa saved no snapshot"
-x nft list set inet raycontrol admin4 | grep -q 192.0.2.1 || fail "rayspa without rayd lost the admin addresses"
+# The table comes up empty first; the saved snapshot follows right after.
+restored=0
+for _ in $(seq 20); do
+	if x nft list set inet raycontrol admin4 | grep -q 192.0.2.1; then
+		restored=1
+		break
+	fi
+	sleep 0.5
+done
+[[ $restored == 1 ]] || fail "rayspa without rayd lost the admin addresses"
 x systemctl start rayd.service
 wait_active rayd.service rayspa.service "${dataplane[@]}"
 
