@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -348,45 +349,89 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool) error {
 }
 
 // copyDB copies a stopped SQLite database: the file, and its WAL if one is
-// left; a stale WAL or shared-memory file at the destination goes. The copy
-// keeps the owner of the file it replaces, or else of its directory: rayd
-// owns the database, root the copy kept for a rollback.
+// left. It runs as root in directories rayd owns, so it follows no link and
+// trusts no name there: the source is opened without following a link and
+// must be a regular file; each copy is a fresh temporary file (O_EXCL) in
+// the destination directory, given the directory's owner through its
+// descriptor, then renamed over the target (a rename replaces a planted link,
+// it does not follow it). The stale WAL and shared memory go first, so a
+// crash never leaves the new database next to the old one's WAL.
 func copyDB(src, dst string) error {
-	owner, err := os.Stat(dst)
+	dir := filepath.Dir(dst)
+	di, err := os.Lstat(dir)
 	if err != nil {
-		if owner, err = os.Stat(filepath.Dir(dst)); err != nil {
-			return err
-		}
-	}
-	st, _ := owner.Sys().(*syscall.Stat_t)
-	for _, suffix := range []string{"", "-wal"} {
-		b, err := os.ReadFile(src + suffix) //nolint:gosec // G304: fixed paths
-		switch {
-		case errors.Is(err, os.ErrNotExist) && suffix != "":
-			if err := os.Remove(dst + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			continue
-		case err != nil:
-			return err
-		}
-		tmp := dst + suffix + ".tmp"
-		if err := os.WriteFile(tmp, b, 0o600); err != nil {
-			return err
-		}
-		if st != nil {
-			if err := os.Chown(tmp, int(st.Uid), int(st.Gid)); err != nil {
-				return err
-			}
-		}
-		if err := os.Rename(tmp, dst+suffix); err != nil {
-			return err
-		}
-	}
-	if err := os.Remove(dst + "-shm"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if !di.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	owner, _ := di.Sys().(*syscall.Stat_t)
+	for _, stale := range []string{dst + "-wal", dst + "-shm"} {
+		if err := os.Remove(stale); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	for _, suffix := range []string{"", "-wal"} {
+		b, err := readRegular(src + suffix)
+		if errors.Is(err, os.ErrNotExist) && suffix != "" {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		f, err := os.CreateTemp(dir, filepath.Base(dst+suffix)+".*.tmp")
+		if err != nil {
+			return err
+		}
+		tmp := f.Name()
+		werr := func() error {
+			if _, err := f.Write(b); err != nil {
+				return err
+			}
+			if err := f.Chmod(0o600); err != nil {
+				return err
+			}
+			if owner != nil {
+				if err := f.Chown(int(owner.Uid), int(owner.Gid)); err != nil {
+					return err
+				}
+			}
+			if err := f.Sync(); err != nil {
+				return err
+			}
+			return f.Close()
+		}()
+		if werr != nil {
+			f.Close()
+			os.Remove(tmp)
+			return werr
+		}
+		if err := os.Rename(tmp, dst+suffix); err != nil {
+			os.Remove(tmp)
+			return err
+		}
+	}
 	return nil
+}
+
+// readRegular reads a regular file without following a link to it.
+func readRegular(name string) ([]byte, error) {
+	f, err := os.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // G304: rayd's database, opened without following a link
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, fmt.Errorf("%s is a link, not the database", name)
+		}
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	return io.ReadAll(f)
 }
 
 // mirrors are the URL prefixes tried when github.com does not answer:
