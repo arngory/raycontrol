@@ -26,7 +26,7 @@
 | Поезд | Клиент | raycontrol | niko-server | Статус |
 |---|---|---|---|---|
 | T1 | Niko 1.26.0 (B1) | v0.9.0, `2dc56b38935d4c6b62505e425be67a0940858f3a` | v0.7.0, `af20974909af503ca7abf63662ce36e635481ede` (в архиве релиза) | клиент закрепляет v0.9.0 (рабочая копия), ждём interop и VPS-CHECK |
-| T2 | Niko 1.27 (B2: uTLS и §22 на клиенте) | v0.10.0, в ветке: разбор S/Q/O, тест строгого разбора, dnsauth (выключен) | v0.8.0, PR [arngory/niko-server#11](https://github.com/arngory/niko-server/pull/11): salamander, PMTU, dnsauth | собирается |
+| T2 | Niko 1.27 (B2: uTLS и §22 на клиенте) | v0.10.0, в ветке: разбор S/Q/O, тест строгого разбора, dnsauth (выключен), SPA в форме ClientHello, `open=true` | **v0.8.0**, `9709508fa8a5b476fe2db72069edb7e87ad66e7a`; SHA-256 amd64 `fa712e192b08b12c2fbf42a99613945862756ac423112025e8bc872f9bc1fe80`, arm64 `d7c85e4eede7d4906fc43ce71cdce2f3e508d09756cfdf17f4e540864855b558`; закреплён в ветке raycontrol | собирается; raycontrol v0.10.0 — после «да» пользователя |
 
 Что блокирует T1: interop клиента на v0.9.0 и проверка VPS (`VPS-CHECK.md`) у пользователя.
 
@@ -62,8 +62,9 @@
 Клиентская сессия в `arngory/raycontrol` не пушит: свои строки она передаёт сообщением, сервер переносит их сюда.
 
 **Серверу от клиента**
-- Тег и sha niko-server новее v0.7.0. *Ответ:* v0.8.0 собирается из `9709508fa8a5b476fe2db72069edb7e87ad66e7a`
-  (PR [arngory/niko-server#11](https://github.com/arngory/niko-server/pull/11)). Для T1 остаётся v0.7.0.
+- Тег и sha niko-server новее v0.7.0. *Ответ:* **v0.8.0 вышел**, `9709508fa8a5b476fe2db72069edb7e87ad66e7a`
+  (хэши бинарников — в таблице поезда). Он совместим с raycontrol v0.9.0: новое в нём только включается опциями.
+  Клиенту для T2 — вместе с raycontrol v0.10.0. Для T1 остаётся v0.7.0.
 
 **Клиенту от сервера — ответы клиента (2026-11-04)**
 - T1:
