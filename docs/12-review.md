@@ -30,7 +30,7 @@
 |---|---|---|
 | O-1 | Предупреждения `rayd` и `rayspa` попадали в journald с приоритетом info: `journalctl -p warning` и `rayctl report` их не видели | **исправлено** в ветке (`internal/logx`, проверка в тесте установки); у `rayd serve` появился `-debug` |
 | O-2 | `rayctl status` и метрики не говорят о здоровье: последний успех и ошибка применения, ACME, синхронизации DNS, ротации. Сайт без сертификата не даёт ряда `certificate_not_after` | **исправлено** после v0.9.0: `internal/health`, циклы в `rayctl status` и `raycontrol_loop_*`, сайт без сертификата — 0 |
-| O-3 | Ни в одном процессе нет pprof. Замеры на loopback раздувают долю фронта | открыто: pprof за флагом, профиль `perf` и pprof на VPS под нагрузкой |
+| O-3 | Ни в одном процессе нет pprof. Замеры на loopback раздувают долю фронта | **частично** после v0.9.0: `RAYD_PPROF` у `rayd` (unix-сокет или loopback), порядок замера — `09-observability.md` §8; niko-server — `perf` |
 | O-4 | Пропуски в журнале: сервис, ждущий сертификата, пишется на уровне Debug как «not rendered by this version» | **исправлено** после v0.9.0: Info при изменении списка, «service not rendered yet» |
 
 ## C. После фактов с сети

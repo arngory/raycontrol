@@ -37,6 +37,7 @@ import (
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/nikoipc"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/pprofx"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -71,6 +72,11 @@ commands:
 func main() {
 	if len(os.Args) < 2 {
 		usage()
+	}
+	// Profiles under real load (O-3): off unless RAYD_PPROF is set.
+	if err := pprofx.Start(logx.New(os.Stderr, slog.LevelInfo)); err != nil {
+		fmt.Fprintln(os.Stderr, "rayd:", err)
+		os.Exit(1)
 	}
 	var err error
 	switch os.Args[1] {
