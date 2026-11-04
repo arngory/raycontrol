@@ -641,8 +641,17 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			}
 			v = peers
 		}
+	case svc.Kind == "dnstt" && key == "auth":
+		// dnsauth-v1 (spec/dnsauth-v1.md §5): off until clients sign.
+		if !slices.Contains([]string{"off", "optional", "required"}, value) {
+			return svc, fmt.Errorf("%w auth: off, optional or required", store.ErrInvalid)
+		}
+		v = value
+		if value == "off" {
+			v = 0
+		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni; hy2-*: up_mbps, down_mbps; yggdrasil: peers)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt: auth)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {

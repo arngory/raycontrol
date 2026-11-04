@@ -31,6 +31,7 @@ import (
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/site"
+	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -110,7 +111,26 @@ type Model struct {
 	// FrontUDP puts UDP 443 behind the front (udpmux, v0.3, R3-4, R3-5):
 	// Hysteria2 always; DoH3 and naive-quic only with it.
 	FrontUDP bool
+	// DNSAuth maps a dnstt service with dnsauth on to the keys of the
+	// devices allowed on it (spec/dnsauth-v1.md): "<device id> <hex>".
+	DNSAuth map[int64][]string
 }
+
+// DNSAuthMode is a dnstt service's dnsauth-v1 mode: off, optional or
+// required (spec/dnsauth-v1.md §5).
+func DNSAuthMode(s store.Service) string {
+	var st struct {
+		Auth string `json:"auth"`
+	}
+	_ = json.Unmarshal([]byte(s.Settings), &st)
+	if s.Kind != "dnstt" || st.Auth == "" {
+		return "off"
+	}
+	return st.Auth
+}
+
+// DNSAuthKeys is the file name of a dnstt service's device keys.
+const DNSAuthKeys = "auth.keys"
 
 // HostIPv6 reports whether this host can open IPv6 sockets.
 func HostIPv6() bool {
@@ -209,6 +229,30 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 			m.Inner[id] = all[id].Current
 			m.Sets[inner.ID][id] = all[id]
 		}
+	}
+	// dnsauth-v1: the keys of the devices allowed on each dnstt service that
+	// has it on, derived per service (spec/dnsauth-v1.md §2).
+	var devices []spa.Device
+	for _, svc := range m.Services {
+		if DNSAuthMode(svc.Service) == "off" {
+			continue
+		}
+		if devices == nil {
+			if devices, err = st.SPADevices(ctx); err != nil {
+				return m, err
+			}
+		}
+		if m.DNSAuth == nil {
+			m.DNSAuth = map[int64][]string{}
+		}
+		lines := []string{}
+		for _, d := range devices {
+			if slices.Contains(d.Allowed, uint16(svc.ID)) {
+				k := spa.DNSAuthKey(d.Key, params.NodeID, uint16(svc.ID))
+				lines = append(lines, d.ID+" "+hex.EncodeToString(k[:]))
+			}
+		}
+		m.DNSAuth[svc.ID] = lines
 	}
 	return m, nil
 }
@@ -383,11 +427,14 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			zone := provision.Zone(s.Service)
 			zones = append(zones, route{Zone: zone, Backend: s.Name})
 			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
-			f, secret, err := dnsBackend(s, zone, inner.Name, p)
+			f, secret, auth, err := dnsBackend(s, zone, inner.Name, p, m.DNSAuth[s.ID])
 			if err != nil {
 				return err
 			}
 			files = append(files, f, secret)
+			if auth != nil {
+				files = append(files, *auth)
+			}
 		case "inner":
 			f, err := innerConfig(s, m, p)
 			if err != nil {
@@ -580,8 +627,21 @@ func Partial(err error) bool {
 	return errors.As(err, &se)
 }
 
-func dnsBackend(s Service, zone, inner string, p Paths) (cfg, secret File, err error) {
+func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string) (cfg, secret File, auth *File, err error) {
 	opts := map[string]any{}
+	// dnsauth-v1 (spec/dnsauth-v1.md): the devices' keys in a file of the
+	// service group (the front is in none, R4-28), which the backend
+	// rereads: a new or revoked device needs no restart.
+	if mode := DNSAuthMode(s.Service); mode != "off" {
+		keysFile := path.Join(p.Rendered, s.Name, DNSAuthKeys)
+		opts["auth"] = mode
+		opts["auth_keys_file"] = keysFile
+		content := "# dnsauth-v1 keys of the devices allowed on " + s.Name + ", written by rayd\n"
+		for _, l := range authKeys {
+			content += l + "\n"
+		}
+		auth = &File{Path: keysFile, Mode: 0o640, Group: GroupName(s.Name), Content: []byte(content), Service: s.Name, Reload: true}
+	}
 	var secretName string
 	var secretValue []byte
 	switch s.Kind {
@@ -600,7 +660,7 @@ func dnsBackend(s Service, zone, inner string, p Paths) (cfg, secret File, err e
 		opts["encryption_key_file"] = p.Credential(s.Name, secretName)
 	}
 	if len(s.Secrets) == 0 || len(secretValue) == 0 {
-		return cfg, secret, fmt.Errorf("service %s has no key", s.Name)
+		return cfg, secret, nil, fmt.Errorf("service %s has no key", s.Name)
 	}
 	b, err := jsonFile(map[string]any{
 		"schema":    Schema,
@@ -613,14 +673,14 @@ func dnsBackend(s Service, zone, inner string, p Paths) (cfg, secret File, err e
 		"inner":     p.InnerSocket(inner),
 	})
 	if err != nil {
-		return cfg, secret, err
+		return cfg, secret, nil, err
 	}
 	dir := path.Join(p.Rendered, s.Name)
 	cfg = File{Path: path.Join(dir, "backend.json"), Mode: 0o640, Group: GroupName(s.Name), Content: b, Service: s.Name}
 	// Secrets are read by systemd (root), which gives the process its own
 	// copy (Paths.Credential), so the file needs no group access.
 	secret = File{Path: path.Join(dir, secretName), Mode: 0o600, Content: secretValue, Service: s.Name}
-	return cfg, secret, nil
+	return cfg, secret, auth, nil
 }
 
 // VLESSEncryption returns the server ("decryption") and client

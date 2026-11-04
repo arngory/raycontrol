@@ -60,3 +60,18 @@ func (p Params) ActivePorts(t time.Time) []uint16 {
 func (p Params) aad() []byte {
 	return append([]byte(aadLabel), p.NodeID[:]...)
 }
+
+// DNSAuthKey derives a device's key for the queries of one DNS tunnel
+// service (spec/dnsauth-v1.md §2): HKDF-SHA256(ikm = device key, salt =
+// node ID, info = "raycontrol-dnsauth-v1" || service ID). The tunnel's
+// backend gets these keys, never the device keys themselves.
+func DNSAuthKey(deviceKey [KeySize]byte, nodeID [NodeIDSize]byte, serviceID uint16) [KeySize]byte {
+	info := append([]byte("raycontrol-dnsauth-v1"), byte(serviceID>>8), byte(serviceID))
+	k, err := hkdf.Key(sha256.New, deviceKey[:], nodeID[:], string(info), KeySize)
+	if err != nil {
+		panic(err)
+	}
+	var out [KeySize]byte
+	copy(out[:], k)
+	return out
+}

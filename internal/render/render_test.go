@@ -2,6 +2,7 @@ package render_test
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -10,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	nodepkg "github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
+	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -358,5 +361,64 @@ func TestReality(t *testing.T) {
 	r2 := m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })]
 	if tags := render.XrayTags(r2); !slices.Equal(tags, []string{render.RealityTag, render.RealityPrevTag}) {
 		t.Fatalf("tags %v", tags)
+	}
+}
+
+// dnsauth-v1: with auth on, the dnstt backend gets the mode and a keys file
+// of the devices allowed on the service, derived per service; the file is
+// reread by the backend, not a reason to restart it.
+func TestDNSAuth(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	m, _ := render.Collect(ctx, st)
+	files, _, _ := render.Render(m, render.DefaultPaths)
+	for _, f := range files {
+		if strings.HasSuffix(f.Path, "/"+render.DNSAuthKeys) || (f.Service == "dns" && strings.Contains(string(f.Content), `"auth"`)) {
+			t.Fatalf("auth without the option: %s", f.Path)
+		}
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "dns", "auth", "strict"); err == nil {
+		t.Fatal("auth=strict accepted")
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "dns", "auth", "required"); err != nil {
+		t.Fatal(err)
+	}
+	dev, key, err := st.CreateDevice(ctx, "alice", "phone", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.CreateDevice(ctx, "bob", "laptop", "user") // bob has no tunnel
+	m, err = render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _, err = render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := st.ServiceByName(ctx, "dns")
+	params, _ := nodepkg.LoadParams(ctx, st)
+	want := spa.DNSAuthKey(key, params.NodeID, uint16(dns.ID))
+	var keys, backend string
+	for _, f := range files {
+		switch f.Path {
+		case "/var/lib/raycontrol/rendered/dns/" + render.DNSAuthKeys:
+			keys = string(f.Content)
+			if f.Mode != 0o640 || f.Group != "niko-dns" || !f.Reload {
+				t.Errorf("keys file %+v", f)
+			}
+		case "/var/lib/raycontrol/rendered/dns/backend.json":
+			backend = string(f.Content)
+		}
+	}
+	if !strings.Contains(keys, dev.ID+" "+hex.EncodeToString(want[:])+"\n") || strings.Count(keys, "\n") != 2 {
+		t.Fatalf("keys file:\n%s", keys)
+	}
+	if !strings.Contains(backend, `"auth": "required"`) || !strings.Contains(backend, `"auth_keys_file": "/var/lib/raycontrol/rendered/dns/auth.keys"`) {
+		t.Fatalf("backend:\n%s", backend)
+	}
+	// The other tunnel (masterdns) is left alone.
+	if _, err := provision.SetServiceOption(ctx, st, "mdns", "auth", "required"); err == nil {
+		t.Fatal("auth on masterdns")
 	}
 }

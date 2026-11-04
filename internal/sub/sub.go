@@ -231,6 +231,10 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 					return nil, err
 				}
 				q.Set("niko-dns", "dnstt;;"+zone+";"+pub)
+				// Sign the queries with the device's key (spec/dnsauth-v1.md).
+				if render.DNSAuthMode(s.Service) != "off" {
+					q.Set("niko-dnsauth", "v1")
+				}
 			} else {
 				var settings struct {
 					Method int `json:"encryption_method"`

@@ -76,6 +76,7 @@ Payload:
 | `niko-svc` | ID сервиса для scope SPA |
 | `niko-dns` | DNS-туннель: `dnstt;<резолвер>;<зона>;<pubkey hex>` или `masterdns;<резолверы через ,>;<зона>;<метод>` |
 | `niko-dnskey` | ключ MasterDnsVPN (текст, как в его файле ключа) |
+| `niko-dnsauth` | `v1`: подписывать запросы dnstt ключом устройства ([`dnsauth-v1.md`](dnsauth-v1.md)); нет параметра — не подписывать |
 | `niko-pin` | SHA-256 SPKI сертификата (base64url), например для `hy2-obfs` (R3) |
 | `niko-inner` | вторая ступень для протоколов с собственной ссылкой (R5) |
 | `niko-ygg` | Yggdrasil: `<пир>;<ключ пользователя>` — URI пира и seed ed25519 (hex, 32 байта) (R4-15) |
