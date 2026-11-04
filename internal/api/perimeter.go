@@ -125,6 +125,12 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 				snap.Services = append(snap.Services, ps)
 			}
 			for _, port := range ports {
+				// "open" makes TCP 443 public, never another port the
+				// service was given (tcp/22 would take SSH out from
+				// behind SPA).
+				if !svc.Public() && port != openPort {
+					continue
+				}
 				if !public[port.String()] {
 					public[port.String()] = true
 					snap.PublicPorts = append(snap.PublicPorts, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
@@ -194,6 +200,9 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 	}
 	return snap, nil
 }
+
+// openPort is the one port "open" makes public.
+var openPort = store.Port{Proto: "tcp", Num: 443}
 
 // realityOpen reports a REALITY service with "open": TCP 443 to everyone
 // (RAYCONTROL.md §22.2.2).

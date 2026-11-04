@@ -286,6 +286,26 @@ func TestPerimeterFeed(t *testing.T) {
 	if !pub["tcp/443"] || !pub["udp/53"] || pub["tcp/2222"] || !slices.ContainsFunc(open.Services, func(s *perimeterv1.Service) bool { return len(s.Ports) == 1 && s.Ports[0].Port == 443 }) {
 		t.Fatalf("open REALITY: public %v services %v", pub, open.Services)
 	}
+	// "open" publishes TCP 443 only, never another port the service was
+	// given.
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "r2",
+		SettingsJson: `{"target":"www.example.org:443","ports":["tcp/443","tcp/2223"],"open":true}`})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	for _, p := range stream.Msg().Snapshot.PublicPorts {
+		if p.Port == 2223 {
+			t.Fatalf("open REALITY published tcp/2223: %v", stream.Msg().Snapshot.PublicPorts)
+		}
+	}
+	if _, err := c.DeleteService(ctx, connect.NewRequest(&nodev1.DeleteServiceRequest{Name: "r2"})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
 	if _, err := c.SetServiceOption(ctx, connect.NewRequest(&nodev1.SetServiceOptionRequest{Name: "reality", Key: "open", Value: "false"})); err != nil {
 		t.Fatal(err)
 	}
