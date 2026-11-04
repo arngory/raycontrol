@@ -87,8 +87,13 @@ REALITY, Hysteria2 и naive остаются сквозными от клиен�
 
 ## 7. Этапы
 
-1. **R6-a.** Режим relay у фронта niko-server (L4 TCP и UDP к одному адресу), `rayctl relay add`, пропуск адреса
-   relay на выходе, `bootstrap.sh -relay`.
+1. **R6-a.**
+   - **Сторона выхода — готово** (raycontrol после v0.10.0): `rayctl relay add <имя> <адрес>`, `list`, `remove`, только
+     root на ноде. Адрес — один публичный IP. Он доходит до портов всех включённых сервисов, кроме SSH и публичных,
+     без SPA (наборы `relay4`, `relay6`, `relay_ports` в таблице периметра).
+   - **Сторона relay — дальше.** Пересылка ядром вместо фронта niko-server: на relay `rayspa` пускает тех, кто
+     постучался SPA, а nftables делает DNAT и masquerade к выходу. Трафик не проходит через userspace.
+     `bootstrap.sh -relay`.
 2. **R6-b.** `relays` и `via` в подписке, SPA к relay, ключ `K_relay`. Клиент: разбор, путь через relay в watchdog.
 3. **R6-c.** `probe-v1` на relay, поле `path` в сводке, детектор белого списка у клиента.
 

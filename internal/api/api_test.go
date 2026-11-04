@@ -296,6 +296,35 @@ func TestPerimeterFeed(t *testing.T) {
 		t.Fatalf("closed again: %v", p)
 	}
 
+	// A relay (relay-v1): its address reaches the service ports, not SSH,
+	// not the public DNS port; removing it takes them away.
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "msk", Address: "198.51.100.20"})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	rs := stream.Msg().Snapshot
+	rports := map[string]bool{}
+	for _, p := range rs.RelayPorts {
+		rports[fmt.Sprintf("%s/%d", p.Proto, p.Port)] = true
+	}
+	if !slices.Equal(rs.RelayPrefixes, []string{"198.51.100.20/32"}) || !rports["tcp/443"] || rports["tcp/2222"] || rports["udp/53"] {
+		t.Fatalf("relay: prefixes %v ports %v", rs.RelayPrefixes, rports)
+	}
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "lan", Address: "10.0.0.5"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("a private relay address: %v", err)
+	}
+	if _, err := c.RemoveRelay(ctx, connect.NewRequest(&nodev1.RemoveRelayRequest{Name: "msk"})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	if p := stream.Msg().Snapshot.RelayPrefixes; len(p) != 0 {
+		t.Fatalf("relay still there: %v", p)
+	}
+
 	// An ACME order opens the window in the feed, its end closes it.
 	srv.SetACMEWindow(18080, time.Now().Add(time.Minute))
 	if !stream.Receive() {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"connectrpc.com/connect"
@@ -158,6 +159,30 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 	}
 	for _, a := range admin {
 		snap.AdminPrefixes = append(snap.AdminPrefixes, a.String())
+	}
+	// Relays (relay-v1): their addresses reach the ports of every enabled
+	// service that is not SSH and not public anyway; never the admin ports.
+	relays, err := p.Store.ListRelays(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(relays) > 0 {
+		for _, r := range relays {
+			snap.RelayPrefixes = append(snap.RelayPrefixes, netip.PrefixFrom(r.Address, r.Address.BitLen()).String())
+		}
+		seen := map[string]bool{}
+		for _, svc := range services {
+			if !svc.Enabled || svc.Kind == "ssh" || svc.Public() {
+				continue
+			}
+			ports, _ := svc.Ports()
+			for _, port := range ports {
+				if !seen[port.String()] {
+					seen[port.String()] = true
+					snap.RelayPorts = append(snap.RelayPorts, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
+				}
+			}
+		}
 	}
 	for _, svc := range services {
 		if svc.Enabled && svc.Kind == "ssh" {

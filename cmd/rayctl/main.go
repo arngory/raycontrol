@@ -54,6 +54,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             through the remote API (service add api api)
   audit [-n 50]
   admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA
+  relay add NAME ADDRESS | list | remove NAME   relays in front of the node (relay-v1): one address
+                                            each, reaching the service ports without SPA; root only
   dns [status]                              the DNS provider and the records the node needs
   dns cloudflare [-token-file F]            records and wildcard certificates through Cloudflare
                                             (token asked for without echo when no file is given)
@@ -179,6 +181,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.device(ctx, sub, rest)
 	case "audit":
 		return c.audit(ctx, args[1:])
+	case "relay":
+		return c.relay(ctx, sub, rest)
 	case "admin":
 		return c.adminAccess(ctx, args[1:])
 	case "check":

@@ -57,6 +57,13 @@ service NodeService {
   rpc GetAdminAccess(GetAdminAccessRequest) returns (GetAdminAccessResponse);
   rpc SetAdminAccess(SetAdminAccessRequest) returns (SetAdminAccessResponse);
 
+  // Relays in front of the node (relay-v1): one address each, which
+  // reaches the service ports without SPA. Adding and removing is for
+  // root on the node only: a relay opens the perimeter.
+  rpc AddRelay(AddRelayRequest) returns (AddRelayResponse);
+  rpc ListRelays(ListRelaysRequest) returns (ListRelaysResponse);
+  rpc RemoveRelay(RemoveRelayRequest) returns (RemoveRelayResponse);
+
   // The DNS provider (Cloudflare): the node's records in its zone and
   // certificates through DNS-01 with a wildcard name (R4-10). The token is
   // stored by rayd and never returned.
@@ -135,6 +142,21 @@ message GetAdminAccessResponse { repeated string cidrs = 1; }
 
 message SetAdminAccessRequest { repeated string cidrs = 1; }
 message SetAdminAccessResponse {}
+
+message Relay {
+  string name = 1;
+  string address = 2;
+  int64 created_at = 3;
+}
+message AddRelayRequest {
+  string name = 1;
+  string address = 2;  // one public IP
+}
+message AddRelayResponse { Relay relay = 1; }
+message ListRelaysRequest {}
+message ListRelaysResponse { repeated Relay relays = 1; }
+message RemoveRelayRequest { string name = 1; }
+message RemoveRelayResponse {}
 
 message GetDeploymentRequest {}
 message GetDeploymentResponse {

@@ -202,6 +202,10 @@ func TestRemoteAPI(t *testing.T) {
 	if _, err := admin.node.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("the rendered keys through the remote API: %v", err)
 	}
+	// A relay opens the service ports to an address: root on the node only.
+	if _, err := admin.node.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r", Address: "198.51.100.20"})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("a remote relay: %v", err)
+	}
 	audit, err := c.ListAudit(ctx, connect.NewRequest(&nodev1.ListAuditRequest{Limit: 5}))
 	if err != nil {
 		t.Fatal(err)

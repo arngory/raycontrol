@@ -143,6 +143,9 @@ var nodeOnly = map[string]bool{
 	nodev1connect.NodeServiceBackupProcedure:        true,
 	// The site's private key stays off the network.
 	nodev1connect.NodeServiceSetCertificateProcedure: true,
+	// A relay opens the service ports to an address (relay-v1).
+	nodev1connect.NodeServiceAddRelayProcedure:    true,
+	nodev1connect.NodeServiceRemoveRelayProcedure: true,
 }
 
 // adminOnly lets admin devices call NodeService; the audit log names them.

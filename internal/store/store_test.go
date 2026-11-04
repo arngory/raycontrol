@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -348,5 +349,34 @@ func TestNewerSchema(t *testing.T) {
 	}
 	if v, err := Schema(ctx, filepath.Join(t.TempDir(), "none.db")); err != nil || v != 0 {
 		t.Fatalf("no file: %d, %v", v, err)
+	}
+}
+
+func TestRelays(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	if _, err := s.CreateRelay(ctx, "msk", netip.MustParseAddr("198.51.100.20")); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []struct {
+		name string
+		addr string
+	}{{"msk", "198.51.100.21"}, {"spb", "198.51.100.20"}, {"lan", "192.168.1.5"}, {"lo", "127.0.0.1"}, {"any", "0.0.0.0"}, {"Bad Name", "198.51.100.22"}} {
+		if _, err := s.CreateRelay(ctx, bad.name, netip.MustParseAddr(bad.addr)); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s %s: %v", bad.name, bad.addr, err)
+		}
+	}
+	if _, err := s.CreateRelay(ctx, "v6", netip.MustParseAddr("2001:db8::20")); err != nil {
+		t.Fatal(err)
+	}
+	rs, err := s.ListRelays(ctx)
+	if err != nil || len(rs) != 2 || rs[0].Name != "msk" || rs[1].Address.String() != "2001:db8::20" {
+		t.Fatalf("%v %v", rs, err)
+	}
+	if err := s.DeleteRelay(ctx, "msk"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteRelay(ctx, "msk"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete twice: %v", err)
 	}
 }
