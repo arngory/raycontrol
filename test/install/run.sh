@@ -216,12 +216,12 @@ out="$(client -channel "$laptop")" || fail "channel probe: $out"
 svc="$(sed -n 's/^  dns (service \([0-9]*\))$/\1/p' <<<"$out" | head -1)"
 [[ -n $svc ]] || fail "no dns service id in: $out"
 report="{\"v\":1,\"net\":\"wifi\",\"obs\":[{\"svc\":$svc,\"result\":\"works\",\"udp\":\"0-1\"}]}"
-if out="$(client -report "$report" "$laptop")"; then fail "a report taken while summaries are off: $out"; fi
+if out="$(client -report "$report" "$laptop" 2>&1)"; then fail "a report taken while summaries are off: $out"; fi
 [[ $out == *"HTTP 404"* ]] || fail "report while off: $out"
 x rayctl summary on >/dev/null || fail "rayctl summary on"
 out="$(client -report "$report" "$laptop")" || fail "report: $out"
 [[ $out == *"report taken"* ]] || fail "report not taken: $out"
-if out="$(client -report "$report" "$laptop")"; then fail "a second report the same day was taken: $out"; fi
+if out="$(client -report "$report" "$laptop" 2>&1)"; then fail "a second report the same day was taken: $out"; fi
 [[ $out == *"HTTP 429"* ]] || fail "second report: $out"
 summary="$(x rayctl summary)"
 [[ $summary == *"from smaller networks"*"1 reports"* ]] || fail "rayctl summary: $summary"
