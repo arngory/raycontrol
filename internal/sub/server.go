@@ -45,7 +45,7 @@ type Server struct {
 	// TCPCarrier: the node takes SPA over TCP, bare and as a ClientHello
 	// (rayd -spa-tcp); the subscription lists the carriers.
 	TCPCarrier bool
-	now   func() time.Time
+	now        func() time.Time
 
 	mu sync.Mutex // serialises seq
 }
