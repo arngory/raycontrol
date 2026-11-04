@@ -401,13 +401,11 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		// service user only. Not LoadCredential=: systemd does not set up
 		// credentials in containers (Docker, LXC), and the copy keeps them
 		// from everyone but the service user (R2-9).
-		var creds []string
-		for _, f := range files {
-			if f.Service == s.Name && f.Group == "" {
-				creds = append(creds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
-					g, g, f.Path, p.Credential(s.Name, path.Base(f.Path))))
-			}
-		}
+		// By kind, not from this render's files: a service that failed to
+		// render keeps its earlier key, and its unit must still copy it.
+		secret := render.DNSSecret(s.Kind)
+		creds := []string{fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
+			g, g, path.Join(p.Rendered, s.Name, secret), p.Credential(s.Name, secret))}
 		after := []string{}
 		if inner != nil {
 			after = append(after, render.UnitName(inner.Name))

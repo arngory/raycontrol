@@ -647,6 +647,16 @@ func Partial(err error) bool {
 	return errors.As(err, &se)
 }
 
+// DNSSecret is the file of a DNS tunnel's key, by kind: systemd copies it
+// for the backend (Paths.Credential), whether this render wrote it or an
+// earlier one did.
+func DNSSecret(kind string) string {
+	if kind == "masterdns" {
+		return "encryption.key"
+	}
+	return "noise.key"
+}
+
 func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string) (cfg, secret File, auth *File, err error) {
 	opts := map[string]any{}
 	// dnsauth-v1 (spec/dnsauth-v1.md): the devices' keys in a file of the
@@ -664,9 +674,10 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string) (cfg,
 	}
 	var secretName string
 	var secretValue []byte
+	secretName = DNSSecret(s.Kind)
 	switch s.Kind {
 	case "dnstt":
-		secretName, secretValue = "noise.key", []byte(hex.EncodeToString(s.Secrets[provision.SecretNoisePrivate])+"\n")
+		secretValue = []byte(hex.EncodeToString(s.Secrets[provision.SecretNoisePrivate]) + "\n")
 		opts["zone"] = zone
 		opts["private_key_file"] = p.Credential(s.Name, secretName)
 	case "masterdns":
@@ -674,7 +685,7 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string) (cfg,
 			Method int `json:"encryption_method"`
 		}
 		_ = json.Unmarshal([]byte(s.Settings), &settings)
-		secretName, secretValue = "encryption.key", s.Secrets[provision.SecretMasterDNSKey]
+		secretValue = s.Secrets[provision.SecretMasterDNSKey]
 		opts["zones"] = []string{zone}
 		opts["encryption_method"] = settings.Method
 		opts["encryption_key_file"] = p.Credential(s.Name, secretName)
