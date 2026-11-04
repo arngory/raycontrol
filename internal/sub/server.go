@@ -178,6 +178,9 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 	}
 	if s.Probe != nil {
 		p.Probe = &ProbeHint{V: 1, UDP: s.Probe.UDPPort != 0, Tunnel: probe.Name}
+		if s.Probe.Report != nil {
+			p.Probe.Report = summary.Optional
+		}
 		for _, pr := range profiles {
 			for _, svc := range m.Services {
 				if uint16(svc.ID) == pr.Svc && slices.Contains(ProbeTunnels, svc.Kind) && !slices.Contains(p.Probe.TunnelSvc, pr.Svc) {

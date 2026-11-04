@@ -134,7 +134,8 @@ func TestEndpoint(t *testing.T) {
 	ln.Close()
 	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
 	// Channel probes on the same endpoint, with the device's auth (R4-16).
-	srv.Probe = &probe.Server{Auth: srv.Device, Log: quiet()}
+	srv.Probe = &probe.Server{Auth: srv.Device, Log: quiet(),
+		Report: func(context.Context, string, netip.Addr, io.Reader) error { return nil }}
 	go srv.Serve(ctx, addr, f.tlsCfg)
 	time.Sleep(200 * time.Millisecond)
 
@@ -191,7 +192,9 @@ func TestEndpoint(t *testing.T) {
 	}
 	if p.V != 1 || p.Seq != 1 || p.Expires-p.Issued != int64(sub.Lifetime/time.Second) || len(p.Profiles) != 1 ||
 		p.Probe == nil || p.Probe.V != 1 || p.Probe.UDP || p.Probe.Tunnel != probe.Name ||
-		len(p.Probe.TunnelSvc) != 1 || p.Probe.TunnelSvc[0] != p.Profiles[0].Svc {
+		len(p.Probe.TunnelSvc) != 1 || p.Probe.TunnelSvc[0] != p.Profiles[0].Svc ||
+		// The report fields beyond the first ones of v1 (Niko §20).
+		!slices.Equal(p.Probe.Report, []string{"udp_mtu"}) {
 		t.Fatalf("payload %+v", p)
 	}
 	for _, auth := range []bool{false, true} {

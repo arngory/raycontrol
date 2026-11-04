@@ -386,6 +386,7 @@ message SummaryNetwork {
   int64 reports = 4;
   map<string, int64> nets = 5;
   repeated SummaryService services = 6;
+  map<string, int64> udp_mtu = 7; // reports by UDP MTU bucket
 }
 message SummaryService {
   uint32 id = 1;

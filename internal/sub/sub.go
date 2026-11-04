@@ -71,8 +71,11 @@ type Payload struct {
 // same port number; Tunnel: the name that leads to the endpoint through the
 // tunnels of the services in TunnelSvc.
 type ProbeHint struct {
-	V         int      `json:"v"`
-	UDP       bool     `json:"udp"`
+	V   int  `json:"v"`
+	UDP bool `json:"udp"`
+	// Report lists the optional report fields the node takes (probe-v1
+	// §6): a client sends one only when it is here.
+	Report    []string `json:"report,omitempty"`
 	Tunnel    string   `json:"tunnel,omitempty"`
 	TunnelSvc []uint16 `json:"tunnel_svc,omitempty"`
 }

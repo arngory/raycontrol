@@ -25,8 +25,12 @@ func (f fakeASN) Lookup(_ context.Context, a netip.Addr) (asn.Info, bool) {
 func TestParse(t *testing.T) {
 	good := `{"v":1,"net":"cellular","obs":[{"svc":3,"result":"works","tcp_stall_kib":16,"udp":"0-1","mbps":"5-20"},{"svc":4,"result":"fails"}]}`
 	r, err := Parse(strings.NewReader(good))
-	if err != nil || len(r.Obs) != 2 || r.Obs[0].TCPStallKiB != 16 {
+	if err != nil || len(r.Obs) != 2 || r.Obs[0].TCPStallKiB != 16 || r.UDPMTU != "" {
 		t.Fatalf("good report: %+v %v", r, err)
+	}
+	// The network's UDP MTU, a bucket, at the top (Niko §20).
+	if r, err := Parse(strings.NewReader(`{"v":1,"net":"wifi","udp_mtu":"1350-1472","obs":[{"svc":1,"result":"works"}]}`)); err != nil || r.UDPMTU != "1350-1472" {
+		t.Fatalf("udp_mtu: %+v %v", r, err)
 	}
 	for _, bad := range []string{
 		`{"v":2,"net":"wifi","obs":[{"svc":1,"result":"works"}]}`,
@@ -36,6 +40,8 @@ func TestParse(t *testing.T) {
 		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","tcp_stall_kib":17}]}`,
 		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","udp":"3"}]}`,
 		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","mbps":"7"}]}`,
+		`{"v":1,"net":"wifi","udp_mtu":"1300","obs":[{"svc":1,"result":"works"}]}`,
+		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","udp_mtu":"<1200"}]}`,
 		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works"},{"svc":1,"result":"fails"}]}`,
 		`{"v":1,"net":"wifi","obs":[{"svc":0,"result":"works"}]}`,
 		`{"v":1,"net":"wifi","mcc_mnc":"25001","obs":[{"svc":1,"result":"works"}]}`,
@@ -94,7 +100,7 @@ func TestTakeAndHints(t *testing.T) {
 	report := func(device string, addr netip.Addr, body string) error {
 		return c.Take(ctx, device, addr, strings.NewReader(body))
 	}
-	r1 := `{"v":1,"net":"cellular","obs":[{"svc":1,"result":"fails","udp":"none"},{"svc":2,"result":"works","tcp_stall_kib":16},{"svc":3,"result":"degraded","tcp_stall_kib":16}]}`
+	r1 := `{"v":1,"net":"cellular","udp_mtu":"<1200","obs":[{"svc":1,"result":"fails","udp":"none"},{"svc":2,"result":"works","tcp_stall_kib":16},{"svc":3,"result":"degraded","tcp_stall_kib":16}]}`
 
 	if err := report(devices[0], mobile, r1); !errors.Is(err, ErrDisabled) {
 		t.Fatalf("taken while off: %v", err)
@@ -134,7 +140,7 @@ func TestTakeAndHints(t *testing.T) {
 	}
 	h := c.Hints(ctx, mobile, svcs)
 	if h == nil || h.Devices != 10 || h.Days != Window || !slices.Equal(h.Order, []uint16{2, 3, 1}) ||
-		!slices.Equal(h.Avoid, []uint16{1}) || !h.UDPBlocked || h.TCPStallKiB != 16 {
+		!slices.Equal(h.Avoid, []uint16{1}) || !h.UDPBlocked || h.TCPStallKiB != 16 || h.UDPMTU != "<1200" {
 		t.Fatalf("hint %+v", h)
 	}
 	// Only the client's own services; nothing for a small network, a
@@ -152,7 +158,7 @@ func TestTakeAndHints(t *testing.T) {
 	// The view shows AS 64500 and folds the small one into others.
 	nets, others, err := c.View(ctx, 7)
 	if err != nil || len(nets) != 1 || nets[0].ASN != 64500 || nets[0].Name != "Mobile One" || nets[0].Reports != 10 ||
-		nets[0].Nets["cellular"] != 10 || nets[0].Services[1]["result"]["fails"] != 10 || others != 1 {
+		nets[0].Nets["cellular"] != 10 || nets[0].Services[1]["result"]["fails"] != 10 || nets[0].MTU["<1200"] != 10 || others != 1 {
 		t.Fatalf("view %+v others %d %v", nets, others, err)
 	}
 
@@ -200,5 +206,21 @@ func TestSetAPI(t *testing.T) {
 	}
 	if p, tok := API(ctx, st); p != "" || tok != "" {
 		t.Fatalf("API after none %q %q", p, tok)
+	}
+}
+
+func TestMajority(t *testing.T) {
+	for _, c := range []struct {
+		m    map[string]int64
+		want string
+	}{
+		{map[string]int64{"<1200": 6, "1472+": 4}, "<1200"},
+		{map[string]int64{"<1200": 5, "1472+": 5}, ""},
+		{map[string]int64{"1350-1472": 9}, ""}, // fewer than K
+		{nil, ""},
+	} {
+		if got := majority(c.m); got != c.want {
+			t.Errorf("%v: %q, want %q", c.m, got, c.want)
+		}
 	}
 }

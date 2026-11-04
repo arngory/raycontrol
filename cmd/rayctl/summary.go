@@ -150,6 +150,9 @@ func printSummary(w *tabwriter.Writer, m *nodev1.GetSummaryResponse) {
 	}
 	for _, n := range m.Networks {
 		fmt.Fprintf(w, "\nAS%d\t%s\t%s\t%d reports\t%s\n", n.Asn, n.Name, n.Country, n.Reports, counts(n.Nets))
+		if len(n.UdpMtu) > 0 {
+			fmt.Fprintf(w, "  udp mtu\t%s\n", counts(n.UdpMtu))
+		}
 		for _, s := range n.Services {
 			fmt.Fprintf(w, "  %s (%d)\t%s\tudp %s\tmbps %s\tstall KiB %s\n", s.Name, s.Id, counts(s.Results), counts(s.Udp), counts(s.Mbps), counts(s.StallKib))
 		}

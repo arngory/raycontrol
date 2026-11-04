@@ -32,7 +32,7 @@ const (
 	K        = 10      // reports from a network before it gets a hint
 	Keep     = 30      // days the counters are kept
 	Window   = 7       // days a hint is counted over
-	Majority = 0.6     // the share that makes avoid, udp_blocked, tcp_stall_kib
+	Majority = 0.6     // the share that makes avoid, udp_blocked, tcp_stall_kib, udp_mtu
 	MaxObs   = 16      // observations in a report
 	MaxBody  = 4 << 10 // bytes of a report
 	day      = 24 * time.Hour
@@ -46,13 +46,22 @@ var (
 	UDP     = []string{"0-1", "1-5", "5-20", "20-50", "50-100", "none"}
 	Mbps    = []string{"<1", "1-5", "5-20", "20-100", "100+"}
 	Stalls  = []int{8, 16, 32, 64, 128}
+	// MTUs: the largest UDP datagram that came back from the probe echo,
+	// for the network as a whole; under 1200 QUIC does not pass.
+	MTUs = []string{"<1200", "1200-1350", "1350-1472", "1472+"}
 )
+
+// Optional are the report fields beyond the first ones of v1 that this
+// node takes; the subscription lists them (probe.report), so a client
+// sends a field only to nodes that know it (an older node answers 400).
+var Optional = []string{"udp_mtu"}
 
 // Report is what a client sends (probe-v1 §6).
 type Report struct {
-	V   int    `json:"v"`
-	Net string `json:"net"`
-	Obs []Obs  `json:"obs"`
+	V      int    `json:"v"`
+	Net    string `json:"net"`
+	Obs    []Obs  `json:"obs"`
+	UDPMTU string `json:"udp_mtu,omitempty"` // a bucket of MTUs, optional
 }
 
 // Obs is one profile's outcome in the network.
@@ -170,6 +179,9 @@ func Parse(body io.Reader) (Report, error) {
 	if !slices.Contains(Nets, r.Net) {
 		return r, fmt.Errorf("%w: net %q", ErrInvalid, r.Net)
 	}
+	if r.UDPMTU != "" && !slices.Contains(MTUs, r.UDPMTU) {
+		return r, fmt.Errorf("%w: udp_mtu %q", ErrInvalid, r.UDPMTU)
+	}
 	if len(r.Obs) == 0 || len(r.Obs) > MaxObs {
 		return r, fmt.Errorf("%w: 1 to %d observations", ErrInvalid, MaxObs)
 	}
@@ -253,6 +265,9 @@ func (c *Collector) Take(ctx context.Context, device string, addr netip.Addr, bo
 		return store.SummaryCount{Day: today, ASN: info.ASN, Svc: svc, Field: field, Bucket: bucket, N: 1}
 	}
 	counts := []store.SummaryCount{row(0, "reports", ""), row(0, "net", r.Net)}
+	if r.UDPMTU != "" {
+		counts = append(counts, row(0, "mtu", r.UDPMTU))
+	}
 	for _, o := range r.Obs {
 		counts = append(counts, row(o.Svc, "result", o.Result))
 		if o.TCPStallKiB != 0 {
