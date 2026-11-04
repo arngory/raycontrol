@@ -702,6 +702,10 @@ rayctl -remote laptop.rcdev device invite alice phone      # приглашен�
   `rayctl update -rollback` — вернуть её вручную.
 - `rayctl service rotate reality` — новые ключи и имя REALITY раньше срока; с `-now` — сразу.
 - `rayctl service set site answer=silent` — сайт вместо 404 молчит до таймаута; `rayctl apply` после.
+- `rayctl service set reality open=true` — TCP 443 открыт всем, без SPA. Хост, который молчит на 443, хотя к нему
+  идут TLS-сессии, заметен. Неавторизованным REALITY отвечает как сайт. Цена: активное зондирование 443 становится
+  возможным и для остальных сервисов за фронтом на TCP 443 (naive, DoH, Yggdrasil). SPA по-прежнему закрывает UDP
+  443, API и подписку.
 - `rayctl metrics -o FILE` — счётчики для node_exporter (textfile collector) по своему таймеру: только числа.
 - `rayctl status` — в конце по строке на каждый цикл `rayd`: применение (`apply`), сертификат каждого сайта
   (`acme <сайт>`), записи DNS, смены ключей. `ok 40s ago` — последний круг удался; `FAILED 3m ago: <ошибка>` — нет, и

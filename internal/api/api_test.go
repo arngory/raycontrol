@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -267,6 +268,32 @@ func TestPerimeterFeed(t *testing.T) {
 	}
 	if a := stream.Msg().Snapshot.AdminPrefixes; len(a) != 2 || a[1] != "198.51.100.0/24" {
 		t.Fatalf("admin prefixes %v", a)
+	}
+
+	// REALITY open to everyone (RAYCONTROL.md §22.2.2): its TCP 443 is public,
+	// and the service stays in the SPA scopes.
+	if _, err := c.SetServiceOption(ctx, connect.NewRequest(&nodev1.SetServiceOptionRequest{Name: "reality", Key: "open", Value: "true"})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	open := stream.Msg().Snapshot
+	pub := map[string]bool{}
+	for _, p := range open.PublicPorts {
+		pub[fmt.Sprintf("%s/%d", p.Proto, p.Port)] = true
+	}
+	if !pub["tcp/443"] || !pub["udp/53"] || pub["tcp/2222"] || !slices.ContainsFunc(open.Services, func(s *perimeterv1.Service) bool { return len(s.Ports) == 1 && s.Ports[0].Port == 443 }) {
+		t.Fatalf("open REALITY: public %v services %v", pub, open.Services)
+	}
+	if _, err := c.SetServiceOption(ctx, connect.NewRequest(&nodev1.SetServiceOptionRequest{Name: "reality", Key: "open", Value: "false"})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	if p := stream.Msg().Snapshot.PublicPorts; len(p) != 1 || p[0].Port != 53 {
+		t.Fatalf("closed again: %v", p)
 	}
 
 	// An ACME order opens the window in the feed, its end closes it.

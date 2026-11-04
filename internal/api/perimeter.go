@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 // PerimeterServer feeds rayspa. Its snapshots carry device keys, so only the
@@ -112,7 +114,15 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 		if err != nil {
 			return nil, fmt.Errorf("service %s: %w", svc.Name, err)
 		}
-		if svc.Public() {
+		if svc.Public() || realityOpen(svc) {
+			if !svc.Public() {
+				// Its TCP ports public, and still a service for SPA scopes.
+				ps := &perimeterv1.Service{Id: uint32(svc.ID)}
+				for _, port := range ports {
+					ps.Ports = append(ps.Ports, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
+				}
+				snap.Services = append(snap.Services, ps)
+			}
 			for _, port := range ports {
 				if !public[port.String()] {
 					public[port.String()] = true
@@ -158,4 +168,17 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 		}
 	}
 	return snap, nil
+}
+
+// realityOpen reports a REALITY service with "open": TCP 443 to everyone
+// (RAYCONTROL.md §22.2.2).
+func realityOpen(svc store.Service) bool {
+	if svc.Kind != "reality" {
+		return false
+	}
+	var st struct {
+		Open bool `json:"open"`
+	}
+	_ = json.Unmarshal([]byte(svc.Settings), &st)
+	return st.Open
 }
