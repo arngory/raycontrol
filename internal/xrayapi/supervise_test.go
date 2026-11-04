@@ -155,7 +155,7 @@ func TestSupervisedNode(t *testing.T) {
 
 	// Every unit of the plan runs: its socket is there.
 	paths := render.Paths{Run: filepath.Join(run, "run")}
-	for _, sock := range []string{paths.InnerSocket("inner"), filepath.Join(paths.Run, "ygg", "fd.sock"),
+	for _, sock := range []string{paths.InnerSocket("inner"), paths.FrontSocket("ygg", "fd"),
 		paths.StatsSocket("hy2o"), paths.SiteSocket("site")} {
 		for i := 0; ; i++ {
 			if _, err := os.Stat(sock); err == nil {
