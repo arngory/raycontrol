@@ -13,17 +13,16 @@ import (
 // DB is an MMDB file: IPinfo Lite (asn "AS13335", as_name, country_code) or
 // MaxMind's GeoLite2/GeoIP2 ASN layout (autonomous_system_number,
 // autonomous_system_organization). The file may come, go or be replaced
-// while the node runs: it is opened again when it changes, looked at once a
-// minute at most.
+// while the node runs: each lookup looks at it (a stat) and opens it again
+// when it changed. It answers for any address it holds, private ones too:
+// a test database may map a test network to an AS.
 type DB struct {
 	Path string
 
-	mu      sync.Mutex
-	r       *maxminddb.Reader
-	mod     time.Time
-	size    int64
-	checked time.Time
-	now     func() time.Time
+	mu   sync.Mutex
+	r    *maxminddb.Reader
+	mod  time.Time
+	size int64
 }
 
 // record holds the fields of both layouts.
@@ -35,22 +34,10 @@ type record struct {
 	GeoOrg      string `maxminddb:"autonomous_system_organization"`
 }
 
-func (d *DB) clock() time.Time {
-	if d.now != nil {
-		return d.now()
-	}
-	return time.Now()
-}
-
 // reader returns the open file, opening it again if it changed.
 func (d *DB) reader() *maxminddb.Reader {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	now := d.clock()
-	if d.r != nil && now.Sub(d.checked) < time.Minute {
-		return d.r
-	}
-	d.checked = now
 	st, err := os.Stat(d.Path)
 	if err != nil {
 		if d.r != nil {

@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/arngory/raycontrol/internal/asn"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -131,7 +130,7 @@ func (t *tally) hints(svcs []uint16) *Hints {
 // Hints returns the hint for a client at addr with these services, or nil:
 // reports off, an address without an AS, too few reports from it.
 func (c *Collector) Hints(ctx context.Context, addr netip.Addr, svcs []uint16) *Hints {
-	if c == nil || !Enabled(ctx, c.Store) || c.ASN == nil || !asn.Public(addr) {
+	if c == nil || !Enabled(ctx, c.Store) || c.ASN == nil || !addr.IsValid() || addr.IsLoopback() {
 		return nil
 	}
 	info, ok := c.ASN.Lookup(ctx, addr)

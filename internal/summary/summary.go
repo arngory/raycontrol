@@ -239,8 +239,10 @@ func (c *Collector) Take(ctx context.Context, device string, addr netip.Addr, bo
 			return fmt.Errorf("%w: svc %d is not the user's", ErrInvalid, o.Svc)
 		}
 	}
+	// The databases answer for any address they hold (a test database may
+	// map a test network); an online lookup only for public ones.
 	var info asn.Info
-	if c.ASN != nil && asn.Public(addr) {
+	if c.ASN != nil {
 		info, _ = c.ASN.Lookup(ctx, addr)
 	}
 	today := c.clock().Unix() / dayS

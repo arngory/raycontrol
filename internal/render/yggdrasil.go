@@ -37,6 +37,7 @@ type YggdrasilSettings struct {
 	// Peers are public peers (P-14, R4-18): the node peers with them and
 	// becomes reachable through the mesh, and clients get them as a
 	// fallback path. None by default: clients peer with the node directly.
+	// QUIC peers go by IP address (the client cannot resolve them safely).
 	Peers []string `json:"peers,omitempty"`
 }
 

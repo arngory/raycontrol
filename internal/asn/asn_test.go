@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/maxmind/mmdbwriter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
@@ -51,10 +50,6 @@ func TestDB(t *testing.T) {
 		t.Fatal("found in a missing file")
 	}
 	writeMMDB(t, path, "ipinfo_lite.mmdb", "203.0.113.0/24", ipinfoRecord("AS64500", "Example Net", "KZ"))
-	now := time.Now()
-	db.now = func() time.Time { return now }
-	// The miss above was checked a moment ago: the file shows up after a minute.
-	now = now.Add(2 * time.Minute)
 	info, ok := db.Lookup(context.Background(), netip.MustParseAddr("::ffff:203.0.113.9"))
 	if !ok || info != (Info{ASN: 64500, Name: "Example Net", Country: "KZ"}) {
 		t.Fatalf("lookup %+v %v", info, ok)
@@ -66,14 +61,10 @@ func TestDB(t *testing.T) {
 		t.Fatalf("built %q %v", kind, ok)
 	}
 
-	// Replaced by a GeoLite2 ASN layout: opened again once the minute is up.
+	// Replaced by a GeoLite2 ASN layout: opened again at the next lookup.
 	writeMMDB(t, path+".new", "GeoLite2-ASN", "203.0.113.0/24", mmdbtype.Map{
 		"autonomous_system_number": mmdbtype.Uint32(64501), "autonomous_system_organization": mmdbtype.String("Geo Net")})
 	os.Rename(path+".new", path)
-	if info, _ := db.Lookup(context.Background(), netip.MustParseAddr("203.0.113.9")); info.ASN != 64500 {
-		t.Fatal("reopened within the minute")
-	}
-	now = now.Add(2 * time.Minute)
 	if info, ok := db.Lookup(context.Background(), netip.MustParseAddr("203.0.113.9")); !ok || info.ASN != 64501 || info.Name != "Geo Net" {
 		t.Fatalf("after replacing: %+v %v", info, ok)
 	}
