@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/netip"
 	"time"
@@ -113,7 +112,10 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 		}
 		ports, err := svc.Ports()
 		if err != nil {
-			return nil, fmt.Errorf("service %s: %w", svc.Name, err)
+			// Settings from before a check (S-3): the service is not
+			// rendered either (render.ServiceErrors), so it gets no port;
+			// the others keep theirs.
+			continue
 		}
 		if svc.Public() || realityOpen(svc) {
 			if !svc.Public() {

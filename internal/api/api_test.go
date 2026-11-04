@@ -253,9 +253,9 @@ func TestPerimeterFeed(t *testing.T) {
 	if a := stream.Msg().Snapshot.AdminPrefixes; len(a) != 2 || a[0] != "198.51.100.7/32" {
 		t.Fatalf("admin prefixes %v", a)
 	}
-	// Nothing wider than /16 and /32: admin addresses reach SSH without SPA
+	// Nothing wider than /16 and /48: admin addresses reach SSH without SPA
 	// (S-3). ::ffff:0:0/96 is 0.0.0.0/0.
-	for _, bad := range []string{"nonsense", "0.0.0.0/0", "10.0.0.0/15", "::/0", "2001:db8::/31", "::ffff:0:0/96"} {
+	for _, bad := range []string{"nonsense", "0.0.0.0/0", "10.0.0.0/15", "::/0", "2001:db8::/32", "2001:db8::/47", "::ffff:0:0/96"} {
 		if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{bad}})); connect.CodeOf(err) != connect.CodeInvalidArgument {
 			t.Fatalf("admin %s: %v", bad, err)
 		}

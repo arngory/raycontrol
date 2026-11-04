@@ -746,7 +746,7 @@ func (s *Server) hostPorts(ctx context.Context) (host, outside []deploy.PortRang
 		}
 		ps, err := svc.Ports()
 		if err != nil {
-			return nil, nil, err
+			continue // not rendered, not in the perimeter (snapshot)
 		}
 		for _, p := range ps {
 			ports = append(ports, deploy.PortRange{Proto: p.Proto, From: p.Num, To: p.Num})
@@ -791,6 +791,11 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 	}
 	for _, r := range outside {
 		resp.OutsidePorts = append(resp.OutsidePorts, &nodev1.PortRange{Proto: r.Proto, From: uint32(r.From), To: uint32(r.To)})
+	}
+	for _, svc := range m.Services {
+		if _, err := svc.Ports(); err != nil {
+			resp.Warnings = append(resp.Warnings, "closed in the perimeter: "+err.Error())
+		}
 	}
 	for _, name := range skipped {
 		resp.Warnings = append(resp.Warnings, "not rendered yet: "+name)
