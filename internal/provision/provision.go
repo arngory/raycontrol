@@ -499,6 +499,15 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		return svc, err
 	}
 	svc.Settings = string(b)
+	if svc.Enabled {
+		// siteFor may have just made the site: read the list again.
+		if all, err = st.ListServices(ctx); err != nil {
+			return svc, err
+		}
+		if err := requirements(svc, all, true); err != nil {
+			return svc, err
+		}
+	}
 	if NeedsInner(svc.Kind) && !slices.ContainsFunc(all, func(s store.Service) bool { return s.Kind == "inner" }) {
 		if _, err := CreateService(ctx, st, store.Service{Kind: "inner", Name: "inner", Enabled: true}); err != nil {
 			return svc, fmt.Errorf("creating inner: %w", err)

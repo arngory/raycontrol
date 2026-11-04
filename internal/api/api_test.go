@@ -568,4 +568,36 @@ func TestServiceDependents(t *testing.T) {
 	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "inner", Enabled: false})); err != nil {
 		t.Fatalf("disable inner after dnstt: %v", err)
 	}
+	// Nor does one come on, or get made, while its stage is off.
+	_, err = c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "dns", Enabled: true}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "inner, which is disabled") {
+		t.Fatalf("enable dnstt without inner: %v", err)
+	}
+	for _, kind := range []string{"masterdns", "olcrtc"} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: kind, Name: kind})); err == nil || !strings.Contains(err.Error(), "inner, which is disabled") {
+			t.Fatalf("create %s without inner: %v", kind, err)
+		}
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "inner", Enabled: true})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "dns", Enabled: true})); err != nil {
+		t.Fatalf("enable dnstt with inner: %v", err)
+	}
+	// A REALITY whose decoy site is off.
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "reality"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "reality", Enabled: false})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "site", Enabled: false})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "reality2"})); err == nil || !strings.Contains(err.Error(), "site, which is disabled") {
+		t.Fatalf("create reality on a disabled site: %v", err)
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "reality", Enabled: true})); err == nil || !strings.Contains(err.Error(), "site, which is disabled") {
+		t.Fatalf("enable reality on a disabled site: %v", err)
+	}
 }

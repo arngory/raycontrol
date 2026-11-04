@@ -427,7 +427,9 @@ func (s *Server) CreateService(ctx context.Context, req *connect.Request[nodev1.
 
 func (s *Server) SetServiceEnabled(ctx context.Context, req *connect.Request[nodev1.SetServiceEnabledRequest]) (*connect.Response[nodev1.SetServiceEnabledResponse], error) {
 	var err error
-	if !req.Msg.Enabled {
+	if req.Msg.Enabled {
+		err = provision.CheckRequirements(ctx, s.Store, req.Msg.Name)
+	} else {
 		err = provision.CheckNoDependents(ctx, s.Store, req.Msg.Name)
 	}
 	if err == nil {

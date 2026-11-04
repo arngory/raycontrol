@@ -444,12 +444,51 @@ func Dependents(ctx context.Context, st *store.Store, name string) ([]string, er
 			continue
 		}
 		switch {
-		case target.Kind == "inner" && (s.Kind == "dnstt" || s.Kind == "masterdns" || s.Kind == "yggdrasil"),
+		case target.Kind == "inner" && NeedsInner(s.Kind),
 			target.Kind == "site" && siteOf(s) == name:
 			out = append(out, s.Name)
 		}
 	}
 	return out, nil
+}
+
+// CheckRequirements refuses to turn on a service whose stage is off: what
+// exits through inner while inner is disabled or missing, a REALITY whose
+// decoy site is disabled or missing. It would not render (Q-1).
+func CheckRequirements(ctx context.Context, st *store.Store, name string) error {
+	all, err := st.ListServices(ctx)
+	if err != nil {
+		return err
+	}
+	i := slices.IndexFunc(all, func(s store.Service) bool { return s.Name == name })
+	if i < 0 {
+		return nil // the store says not found
+	}
+	return requirements(all[i], all, false)
+}
+
+// requirements checks svc against the others; creating allows a missing
+// inner, which CreateService then adds.
+func requirements(svc store.Service, all []store.Service, creating bool) error {
+	if NeedsInner(svc.Kind) {
+		i := slices.IndexFunc(all, func(s store.Service) bool { return s.Kind == "inner" })
+		switch {
+		case i >= 0 && !all[i].Enabled:
+			return fmt.Errorf("%w: %s works through %s, which is disabled: enable it first", store.ErrInvalid, svc.Name, all[i].Name)
+		case i < 0 && !creating:
+			return fmt.Errorf("%w: %s works through the inner stage, which is missing", store.ErrInvalid, svc.Name)
+		}
+	}
+	if site := siteOf(svc); site != "" {
+		i := slices.IndexFunc(all, func(s store.Service) bool { return s.Name == site })
+		switch {
+		case i < 0:
+			return fmt.Errorf("%w: %s works through the site %s, which is missing", store.ErrInvalid, svc.Name, site)
+		case !all[i].Enabled:
+			return fmt.Errorf("%w: %s works through %s, which is disabled: enable it first", store.ErrInvalid, svc.Name, site)
+		}
+	}
+	return nil
 }
 
 // CheckNoDependents refuses to take away a service others work through.
