@@ -22,7 +22,7 @@ import (
 // subscription, which every device may reach, shows that the window opened.
 func knock(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("knock", flag.ContinueOnError)
-	carrier := fs.String("carrier", "auto", "SPA carrier: udp, tls (TCP as a TLS ClientHello), tcp (bare TCP) or auto (UDP, then tls)")
+	carrier := fs.String("carrier", "auto", "SPA carrier: udp, tls (TCP as a TLS ClientHello), tcp (bare TCP) or auto (UDP, then tls, then bare TCP for a node before v0.10)")
 	addr := fs.String("addr", "", "node address to use instead of the bundle's host")
 	ttl := fs.Duration("ttl", 0, "how long to stay open (0: the node's default, 10 min; at most its -spa-max-ttl, 1 h)")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *ttl < 0 {
@@ -53,7 +53,7 @@ func knock(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	carriers := map[string][]string{"auto": {"udp", "tls"}, "udp": {"udp"}, "tcp": {"tcp"}, "tls": {"tls"}}[*carrier]
+	carriers := carrierList(*carrier)
 	if carriers == nil {
 		return errUsage
 	}

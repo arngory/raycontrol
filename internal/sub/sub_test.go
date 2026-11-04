@@ -488,3 +488,21 @@ func TestHintsInSubscription(t *testing.T) {
 		}
 	}
 }
+
+// With -spa-tcp the hint lists the TCP carriers in the order to try them:
+// the ClientHello before bare TCP.
+func TestCarrierHintOrder(t *testing.T) {
+	f := setup(t)
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet(), TCPCarrier: true}
+	env, err := srv.Build(context.Background(), "alice", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := sub.Verify(env, f.keys.PublicJSON())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.SPA == nil || !slices.Equal(p.SPA.Carriers, []string{"udp", "tls", "tcp"}) {
+		t.Fatalf("carriers %+v", p.SPA)
+	}
+}

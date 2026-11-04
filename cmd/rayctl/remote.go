@@ -108,7 +108,7 @@ func openPort(ctx context.Context, b node.Bundle, ip netip.Addr, port uint16, ca
 	if err != nil || len(k) != spa.KeySize {
 		return errors.New("bad device key")
 	}
-	carriers := map[string][]string{"auto": {"udp", "tls"}, "udp": {"udp"}, "tcp": {"tcp"}, "tls": {"tls"}}[carrier]
+	carriers := carrierList(carrier)
 	if carriers == nil {
 		return errUsage
 	}
@@ -180,7 +180,7 @@ func (c *cli) remoteCmd(ctx context.Context, sub string, args []string) error {
 func remoteEnroll(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("remote enroll", flag.ContinueOnError)
 	out := fs.String("o", "", "the device file to write (mode 0600; default: <node>-<device>.rcdev)")
-	carrier := fs.String("carrier", "auto", "SPA carrier: udp, tcp or auto")
+	carrier := fs.String("carrier", "auto", "SPA carrier: udp, tls (TCP as a TLS ClientHello), tcp (bare TCP) or auto (UDP, then tls, then bare TCP for a node before v0.10)")
 	addr := fs.String("addr", "", "node address to use instead of the invite's host")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
 		return errUsage

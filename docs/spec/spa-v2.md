@@ -185,7 +185,7 @@ rcdev1:<base64url без '=' от JSON>
   `session_ticket` и проверяет их как пакет (§6). Иначе — голый пакет из §10. Принимаются обе формы.
 - Эталон: `internal/spa` `TLSCarrier` / `FromTLSCarrier`. Тест проверяет, что `crypto/tls` разбирает запись как
   ClientHello.
-- Порядок в клиенте: UDP, затем ClientHello. Голый TCP — для нод до raycontrol v0.10.0: они ClientHello не понимают.
+- Порядок в клиенте: UDP, затем ClientHello, затем голый TCP — для нод до raycontrol v0.10.0: они ClientHello не понимают. Подсказка `spa.carriers` в подписке (subscription-v1) перечисляет носители в этом же порядке. `rayctl -carrier auto` идёт так же.
 
 ## 11. Ротация UDP-портов сервисов
 

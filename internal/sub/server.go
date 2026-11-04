@@ -184,7 +184,9 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 		SPA: &SPAHint{Carriers: []string{"udp"}},
 	}
 	if s.TCPCarrier {
-		p.SPA.Carriers = append(p.SPA.Carriers, "tcp", "tls")
+		// In the order to try: the ClientHello before bare TCP, which a
+		// DPI box sees as odd.
+		p.SPA.Carriers = append(p.SPA.Carriers, "tls", "tcp")
 	}
 	if s.Probe != nil {
 		p.Probe = &ProbeHint{V: 1, UDP: s.Probe.UDPPort != 0, Tunnel: probe.Name}

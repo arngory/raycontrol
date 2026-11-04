@@ -37,7 +37,7 @@
 | `rayctl service list` | сервисы; для REALITY — когда сменились ключи и когда следующая смена |
 | `rayctl audit [-n 50]` | журнал действий администратора |
 | `rayctl report [-o F] [-logs warning\|info\|none] [-since 24h]` | очищенный отчёт для issue, ничего не отправляет |
-| `rayctl probe [-carrier udp\|tcp\|auto] [-redact] @bundle` | проверить ноду снаружи, как клиент |
+| `rayctl probe [-carrier udp\|tls\|tcp\|auto] [-redact] @bundle` | проверить ноду снаружи, как клиент; `auto` — UDP, ClientHello, голый TCP |
 | `journalctl -u rayd -u rayspa -u 'niko-*' -f` | журналы ноды |
 | `systemctl status rayd rayspa 'niko-*'` | состояние юнитов |
 | `nft list table inet raycontrol` | периметр; цепочка `early` — отброшенное до сборки фрагментов |
