@@ -19,6 +19,14 @@
 #
 #   sudo bash bootstrap.sh -check [-host <address>] [-services reality,dnstt]
 #
+# -remove-v0 first takes away raycontrol v0 (ray.sh, "Ray-AIO"), which holds
+# port 443 and drops the node's traffic: a backup of it goes to /root, then
+# only what v0 installed is removed (rayctl legacy, R4-26). With
+# -purge-v0-packages also the packages only v0 needed (certbot, PostgreSQL,
+# qrencode; each only if nothing else uses it):
+#
+#   sudo bash bootstrap.sh -remove-v0 -host <public address> [-domain <domain>]
+#
 # Works on any systemd-based Linux with apt, dnf, zypper or pacman; tested on
 # Debian 12/13, Ubuntu 24.04 and Rocky Linux 9/10 (the check tells about the
 # rest). The signature is checked with openssl, so minisign is not needed.
@@ -164,6 +172,8 @@ remove_deps() {
 # bootstrap's: a refusal, a failure or -check removes them.
 HANDED_OVER=0
 CHECK_ONLY=0
+REMOVE_V0=0
+PURGE_V0=0
 cleanup() {
 	local status=$?
 	if [[ -n ${BOOT_TMP:-} ]]; then rm -rf "$BOOT_TMP"; fi
@@ -173,9 +183,17 @@ cleanup() {
 }
 
 main() {
-	if [[ ${1:-} == -check ]]; then
-		CHECK_ONLY=1
+	while [[ $# -gt 0 ]]; do
+		case $1 in
+		-check) CHECK_ONLY=1 ;;
+		-remove-v0) REMOVE_V0=1 ;;
+		-purge-v0-packages) REMOVE_V0=1 PURGE_V0=1 ;;
+		*) break ;;
+		esac
 		shift
+	done
+	if [[ $CHECK_ONLY == 1 && $REMOVE_V0 == 1 ]]; then
+		die "-check changes nothing and -remove-v0 removes raycontrol v0: use one of them"
 	fi
 	[[ $EUID -eq 0 ]] || die "run as root"
 	[[ -d /run/systemd/system ]] || die "systemd is required"
@@ -209,6 +227,20 @@ main() {
 		verify_minisig "$tmp/SHA256SUMS" "$tmp/SHA256SUMS.minisig" "$PUBKEY" || die "release signature does not verify"
 		(cd "$tmp" && grep " ${tarball}\$" SHA256SUMS | sha256sum -c -) || die "checksum mismatch"
 		tar -xzf "$tmp/$tarball" -C "$tmp"
+	fi
+
+	# raycontrol v0 goes first, when asked: it holds 443 and its nftables
+	# table drops the node's traffic. The release's own rayctl backs it up,
+	# then removes only what v0 installed.
+	if [[ $REMOVE_V0 == 1 ]]; then
+		local purge=()
+		if [[ $PURGE_V0 == 1 ]]; then purge=(-purge-packages); fi
+		"$tmp/rayctl" legacy -remove -yes "${purge[@]}" || die "raycontrol v0 was not removed completely (see above)"
+	fi
+
+	# -check lists what -remove-v0 would take (rayctl legacy only reads).
+	if [[ $CHECK_ONLY == 1 ]]; then
+		"$tmp/rayctl" legacy || true
 	fi
 
 	# The host first, with the release's own rayctl: nothing of raycontrol

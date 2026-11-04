@@ -67,6 +67,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   check [-host ADDR] [-domain D] [-services a,b]
                                               whether this host can run a node: what is required (install
                                               refuses without it), what is advised; changes nothing (root)
+  legacy [-remove [-yes] [-purge-packages]]  raycontrol v0 (ray.sh) on this host; -remove backs it up, then
+                                              removes only what it installed (root)
   install -host ADDR [-domain D] [-admin A] [-cloudflare-token-file F] [-services reality,hy2-masq,hy2-obfs,dnstt,masterdns|none]
           [-dataplane DIR]                    set the node up on this host (root); with -domain REALITY by default
   apply                                       install what the current services need (root)
@@ -86,6 +88,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   report [-o FILE] [-logs warning|info|none] [-since 24h] [-id ID]
       a redacted report for an issue: versions, system, checks, units,
       counts and warnings; nothing is sent anywhere
+  knock [-carrier udp|tcp|auto] [-addr A] [-ttl 10m] BUNDLE|@FILE
+      SPA only: open the device's services to this address for a while; with
+      the emergency bundle, SSH (then ssh as usual)
   probe [-carrier udp|tcp|auto] [-addr A] [-links] [-redact] [-channel] BUNDLE|@FILE|-
       check a node from outside like a client: SPA, then the subscription
       (pin, both signatures). Needs only the device bundle. -channel then
@@ -172,6 +177,10 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.adminAccess(ctx, args[1:])
 	case "check":
 		return c.check(ctx, args[1:])
+	case "legacy":
+		return c.legacyCmd(ctx, args[1:])
+	case "knock":
+		return knock(ctx, args[1:])
 	case "install":
 		return c.install(ctx, args[1:])
 	case "apply":

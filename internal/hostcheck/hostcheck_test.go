@@ -138,6 +138,9 @@ func TestRequiredFailures(t *testing.T) {
 		{"LXC without nesting", "systemd sandbox", func(_ *Host, _ string, out map[string]string) {
 			out["systemd-run"] = "Job for run-u12.service failed because the control process exited with error code.\n"
 		}},
+		{"raycontrol v0", "raycontrol v0", func(_ *Host, root string, _ map[string]string) {
+			os.MkdirAll(filepath.Join(root, "/etc/ray-aio"), 0o755)
+		}},
 		{"256 MB", "memory", func(_ *Host, root string, _ map[string]string) {
 			os.WriteFile(filepath.Join(root, "/proc/meminfo"), []byte("MemTotal: 250000 kB\n"), 0o644)
 		}},

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/arngory/raycontrol/internal/deploy"
+	"github.com/arngory/raycontrol/internal/legacy"
 	"github.com/arngory/raycontrol/internal/perimeter"
 )
 
@@ -224,6 +225,18 @@ func (h *Host) Check(ctx context.Context, o Options) []Result {
 	}
 	if len(freeDetail) > 0 {
 		req("disk", minFree>>20 >= MinFreeMiB, strings.Join(freeDetail, ", "), fmt.Sprintf("%d MiB free at least", MinFreeMiB))
+	}
+	// raycontrol v0 (ray.sh): its Xray holds 443 and its table drops what
+	// the node serves (R4-26).
+	lh := &legacy.Host{Root: h.Root, LookPath: h.LookPath,
+		Run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			return h.Run(ctx, "", name, args...)
+		}}
+	if f := lh.Detect(ctx); f.Any() {
+		req("raycontrol v0", false, fmt.Sprintf("ray.sh is installed (%d items: %s, …)", len(f.Items), f.Items[0]),
+			"bash bootstrap.sh -remove-v0 with the same arguments backs it up and removes only what it installed (on a node: rayctl legacy -remove)")
+	} else {
+		req("raycontrol v0", true, "not installed", "")
 	}
 	listeners := h.listeners()
 	ours := func(l listener) bool { return slices.Contains([]string{"niko-server", "xray", "rayd"}, l.comm) }
