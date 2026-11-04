@@ -244,6 +244,7 @@ func cmdServe(args []string) error {
 	}
 	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, hb, log)
 	go syncDNS(ctx, st, srv.Changes, hb, log)
+	go checkRealityTargets(ctx, st, hb, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
 	go serveRemote(ctx, &api.Remote{Server: srv, Log: log}, srv.Changes)
 	if err := startSubscription(ctx, st, paths, log, *probeDaily); err != nil {
@@ -699,6 +700,43 @@ func pruneSummary(ctx context.Context, c *summary.Collector, log *slog.Logger) {
 // rotateCredentials advances the rotation of user credentials every ten
 // minutes (R4-1); a change re-renders, which adds and removes UUIDs through
 // the Xray API without a restart.
+// checkRealityTargets checks every 6 hours what a REALITY service with a
+// foreign target needs from it (TLS 1.3, X25519MLKEM768, a chain longer than
+// REALITY's ML-DSA-65 certificate): a site that moves to a short chain
+// breaks REALITY, and the loop "reality-target <service>" in rayctl status
+// says so (RAYCONTROL.md §22.2.1).
+func checkRealityTargets(ctx context.Context, st *store.Store, hb *health.Board, log *slog.Logger) {
+	for {
+		services, err := st.ListServices(ctx)
+		if err == nil {
+			for _, svc := range services {
+				if svc.Kind != "reality" || !svc.Enabled {
+					continue
+				}
+				target, sni, err := provision.RealityTargetFromJSON(svc.Settings)
+				if err != nil || target == "" || strings.HasPrefix(target, "/") || strings.HasPrefix(target, "site:") {
+					continue // self-steal: the node's own site, checked when its certificate loads
+				}
+				cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				err = provision.CheckRealityTarget(cctx, target, sni)
+				cancel()
+				if ctx.Err() != nil {
+					return
+				}
+				hb.Done("reality-target "+svc.Name, err)
+				if err != nil {
+					log.Warn("REALITY target no longer fits", "service", svc.Name, "err", err)
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(6 * time.Hour):
+		}
+	}
+}
+
 func rotateCredentials(ctx context.Context, st *store.Store, r store.Rotation, notify func(), hb *health.Board, log *slog.Logger) {
 	for {
 		n, err := st.RotateCredentials(ctx, time.Now(), r, render.NewUUID)
