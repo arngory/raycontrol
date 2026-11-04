@@ -409,6 +409,9 @@ log "$distro: update and rollback"
 # signature): replaced, restarted, applied, checked; then put back.
 x /usr/local/bin/rayctl update -local /opt/rc -yes || fail "rayctl update"
 x test -s /var/lib/raycontrol-install/previous/rayd || fail "update kept no previous binaries"
+# And the database as it was with rayd stopped, for a rollback across a
+# schema change (Q-2).
+[[ $(x stat -c %a /var/lib/raycontrol-install/previous/rayd.db) == 600 ]] || fail "update kept no copy of the database"
 wait_active rayd.service rayspa.service "${dataplane[@]}"
 # Channel probes still work after the restart (UDP echo included).
 out="$(client -channel -addr "$ip" "$laptop")" || fail "probe after update: $out"

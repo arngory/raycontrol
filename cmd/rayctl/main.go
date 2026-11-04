@@ -129,7 +129,13 @@ func main() {
 	}
 
 	c := &cli{c: api.NewUnixClient(*socket), json: *asJSON}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// An update downloads ~50 MB, maybe through slow mirrors; its restart
+	// and rollback have their own time (Q-2).
+	timeout := 5 * time.Minute
+	if fs.Arg(0) == "update" {
+		timeout = 30 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if *remote != "" && (fs.Arg(0) != "remote" || fs.Arg(1) != "enroll") {
 		if err := c.useRemote(ctx, *remote, fs.Arg(0)); err != nil {

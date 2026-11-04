@@ -73,6 +73,16 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	sort.Strings(names)
+	// A database a newer raycontrol migrated is not this one's to run: its
+	// tables may have changed under the code (Q-2).
+	var applied sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&applied); err != nil {
+		return err
+	}
+	if known := KnownSchema(); applied.Valid && int(applied.Int64) > known {
+		return fmt.Errorf("%w: the database is at schema %d, this raycontrol knows %d: update raycontrol, or rayctl update -rollback puts back the database from before the update",
+			ErrNewerSchema, applied.Int64, known)
+	}
 	for _, name := range names {
 		version, err := strconv.Atoi(strings.SplitN(filepath.Base(name), "_", 2)[0])
 		if err != nil {
@@ -101,6 +111,39 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// ErrNewerSchema: the database was migrated by a newer raycontrol.
+var ErrNewerSchema = errors.New("store: database from a newer raycontrol")
+
+// KnownSchema is the newest migration this build has.
+func KnownSchema() int {
+	names, _ := fs.Glob(migrations, "migrations/*.sql")
+	known := 0
+	for _, name := range names {
+		if v, err := strconv.Atoi(strings.SplitN(filepath.Base(name), "_", 2)[0]); err == nil {
+			known = max(known, v)
+		}
+	}
+	return known
+}
+
+// Schema reads the newest migration applied to the database at path,
+// without opening it for writing or migrating it (0: none, or no file).
+func Schema(ctx context.Context, path string) (int, error) {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	var v sql.NullInt64
+	if err := db.QueryRowContext(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&v); err != nil {
+		return 0, err
+	}
+	return int(v.Int64), nil
 }
 
 func (s *Store) tx(ctx context.Context, fn func(*sql.Tx) error) error {

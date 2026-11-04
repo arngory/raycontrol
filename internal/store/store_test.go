@@ -323,3 +323,30 @@ func TestSnapshot(t *testing.T) {
 		t.Fatalf("snapshot files left: %v", left)
 	}
 }
+
+// A database a newer raycontrol migrated is refused, and Schema reads its
+// version without migrating it (Q-2).
+func TestNewerSchema(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "rayd.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, err := Schema(ctx, path); err != nil || v != KnownSchema() || v == 0 {
+		t.Fatalf("schema %d, %v; known %d", v, err, KnownSchema())
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO schema_migrations (version, applied_at) VALUES (?, 0)`, KnownSchema()+1); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if _, err := Open(ctx, path); !errors.Is(err, ErrNewerSchema) {
+		t.Fatalf("newer schema opened: %v", err)
+	}
+	if v, err := Schema(ctx, path); err != nil || v != KnownSchema()+1 {
+		t.Fatalf("schema %d, %v", v, err)
+	}
+	if v, err := Schema(ctx, filepath.Join(t.TempDir(), "none.db")); err != nil || v != 0 {
+		t.Fatalf("no file: %d, %v", v, err)
+	}
+}
