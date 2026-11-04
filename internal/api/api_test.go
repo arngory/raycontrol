@@ -252,8 +252,21 @@ func TestPerimeterFeed(t *testing.T) {
 	if a := stream.Msg().Snapshot.AdminPrefixes; len(a) != 2 || a[0] != "198.51.100.7/32" {
 		t.Fatalf("admin prefixes %v", a)
 	}
-	if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{"nonsense"}})); connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Fatalf("bad cidr: %v", err)
+	// Nothing wider than /16 and /32: admin addresses reach SSH without SPA
+	// (S-3). ::ffff:0:0/96 is 0.0.0.0/0.
+	for _, bad := range []string{"nonsense", "0.0.0.0/0", "10.0.0.0/15", "::/0", "2001:db8::/31", "::ffff:0:0/96"} {
+		if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{bad}})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("admin %s: %v", bad, err)
+		}
+	}
+	if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{"10.1.0.0/16", "::ffff:198.51.100.0/120"}})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	if a := stream.Msg().Snapshot.AdminPrefixes; len(a) != 2 || a[1] != "198.51.100.0/24" {
+		t.Fatalf("admin prefixes %v", a)
 	}
 
 	// An ACME order opens the window in the feed, its end closes it.

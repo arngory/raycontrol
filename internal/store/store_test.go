@@ -212,6 +212,16 @@ func TestServicePorts(t *testing.T) {
 	if p, _ := dns.Ports(); !dns.Public() || len(p) != 1 || p[0].String() != "udp/53" {
 		t.Fatalf("dnstt = %v public=%v", p, dns.Public())
 	}
+	// A public service keeps its own ports: no other port out from behind
+	// SPA (S-3).
+	for _, bad := range []string{`{"ports":["tcp/22"]}`, `{"ports":["udp/53","udp/443"]}`} {
+		if _, err := s.CreateService(ctx, Service{Kind: "dnstt", Name: "dns-bad", Settings: bad}); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("public service with %s: %v", bad, err)
+		}
+	}
+	if _, err := s.CreateService(ctx, Service{Kind: "masterdns", Name: "dns-ok", Settings: `{"ports":["udp/53"]}`}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestRotateCredentials(t *testing.T) {

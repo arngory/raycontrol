@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -68,14 +69,20 @@ func (svc Service) Ports() ([]Port, error) {
 	if err := json.Unmarshal([]byte(svc.Settings), &s); err != nil {
 		return nil, fmt.Errorf("%w settings of %s: %w", ErrInvalid, svc.Name, err)
 	}
+	k := kindPorts[svc.Kind]
 	if len(s.Ports) == 0 {
-		return kindPorts[svc.Kind].ports, nil
+		return k.ports, nil
 	}
 	out := make([]Port, 0, len(s.Ports))
 	for _, p := range s.Ports {
 		port, err := ParsePort(p)
 		if err != nil {
 			return nil, err
+		}
+		// A public service is reachable without SPA: other ports there
+		// would take any service out from behind it (S-3).
+		if k.public && !slices.Contains(k.ports, port) {
+			return nil, fmt.Errorf("%w port %s of %s: a public service keeps its own ports (%s)", ErrInvalid, port, svc.Name, portList(k.ports))
 		}
 		out = append(out, port)
 	}
@@ -84,3 +91,11 @@ func (svc Service) Ports() ([]Port, error) {
 
 // Public reports whether the service is reachable without SPA.
 func (svc Service) Public() bool { return kindPorts[svc.Kind].public }
+
+func portList(ps []Port) string {
+	out := make([]string, len(ps))
+	for i, p := range ps {
+		out[i] = p.String()
+	}
+	return strings.Join(out, ", ")
+}

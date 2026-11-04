@@ -237,6 +237,12 @@ func SetAdminAccess(ctx context.Context, st *store.Store, list []string) ([]neti
 	if err != nil {
 		return nil, err
 	}
+	for _, p := range ps {
+		if p.Bits() < MinAdminBits(p.Addr()) {
+			return nil, fmt.Errorf("%w admin prefix %s: wider than /%d opens SSH to a whole provider; from changing addresses use SPA (rayctl knock)",
+				store.ErrInvalid, p, MinAdminBits(p.Addr()))
+		}
+	}
 	out := make([]string, len(ps))
 	for i, p := range ps {
 		out[i] = p.String()
@@ -246,6 +252,16 @@ func SetAdminAccess(ctx context.Context, st *store.Store, list []string) ([]neti
 		return nil, err
 	}
 	return ps, st.SetSetting(ctx, settingAdmin, b)
+}
+
+// MinAdminBits is the widest admin prefix: /16 for IPv4, /32 for IPv6
+// (S-3). Admin addresses reach SSH without SPA, so 0.0.0.0/0 there would
+// open SSH to everyone, through the API too.
+func MinAdminBits(a netip.Addr) int {
+	if a.Is4() {
+		return 16
+	}
+	return 32
 }
 
 // ParsePrefixes parses CIDRs or bare addresses.
@@ -259,6 +275,14 @@ func ParsePrefixes(list []string) ([]netip.Prefix, error) {
 				return nil, fmt.Errorf("%w admin address %q: use an IP or CIDR", store.ErrInvalid, s)
 			}
 			p = netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen())
+		}
+		// ::ffff:a.b.c.d/n is IPv4: the firewall matches IPv4 packets by
+		// their IPv4 address.
+		if p.Addr().Is4In6() {
+			if p.Bits() < 96 {
+				return nil, fmt.Errorf("%w admin address %q: an IPv4-mapped prefix shorter than /96", store.ErrInvalid, s)
+			}
+			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
 		}
 		out = append(out, p.Masked())
 	}
