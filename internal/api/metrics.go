@@ -156,7 +156,23 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 		if notAfter, ok := certNotAfter(secrets); ok {
 			m.Add("raycontrol_certificate_not_after_seconds", "When the service's certificate expires (Unix time).",
 				float64(notAfter.Unix()), "service", svc.Name, "kind", svc.Kind)
+		} else if svc.Kind == "site" {
+			// A site still without one: 0, so that an alert on "expires
+			// soon" fires for it too (O-2).
+			m.Add("raycontrol_certificate_not_after_seconds", "When the service's certificate expires (Unix time).",
+				0, "service", svc.Name, "kind", svc.Kind)
 		}
+	}
+
+	// rayd's loops (O-2): the last success and failure of each; the error
+	// itself is in rayctl status.
+	for _, l := range s.Health.Loops() {
+		m.Add("raycontrol_loop_last_success_seconds", "When the loop last succeeded (Unix time, 0 when never).",
+			float64(unixOf(l.LastOK)), "loop", l.Name)
+		m.Add("raycontrol_loop_last_error_seconds", "When the loop last failed (Unix time, 0 when never).",
+			float64(unixOf(l.LastErr)), "loop", l.Name)
+		m.Add("raycontrol_loop_runs_total", "Rounds of the loop since rayd started.", float64(l.Runs), "loop", l.Name)
+		m.Add("raycontrol_loop_errors_total", "Failed rounds of the loop since rayd started.", float64(l.Errors), "loop", l.Name)
 	}
 
 	// REALITY rotation (R4-7).

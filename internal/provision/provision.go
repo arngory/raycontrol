@@ -616,6 +616,19 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			return svc, fmt.Errorf("%w site answer %q: want one of %s", store.ErrInvalid, value, strings.Join(site.Answers, ", "))
 		}
 		v = value
+	case svc.Kind == "reality" && key == "open":
+		// TCP 443 open to everyone, not behind SPA (RAYCONTROL.md §22.2.2):
+		// a host silent on 443 while TLS sessions go to it stands out, and
+		// REALITY answers the unauthenticated as its site. The other
+		// services on the front's TCP 443 become reachable too.
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return svc, fmt.Errorf("%w open: true or false", store.ErrInvalid)
+		}
+		v = b
+		if !b {
+			v = 0
+		}
 	case svc.Kind == "reality" && key == "rotate_sni":
 		b, err := strconv.ParseBool(value)
 		if err != nil {
@@ -641,8 +654,17 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			}
 			v = peers
 		}
+	case svc.Kind == "dnstt" && key == "auth":
+		// dnsauth-v1 (spec/dnsauth-v1.md §5): off until clients sign.
+		if !slices.Contains([]string{"off", "optional", "required"}, value) {
+			return svc, fmt.Errorf("%w auth: off, optional or required", store.ErrInvalid)
+		}
+		v = value
+		if value == "off" {
+			v = 0
+		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni; hy2-*: up_mbps, down_mbps; yggdrasil: peers)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt: auth)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {

@@ -607,7 +607,7 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run")}
 	for _, d := range []string{filepath.Dir(paths.APISocket("reality")), filepath.Dir(paths.SiteSocket("site")),
-		filepath.Join(paths.Run, "reality"), filepath.Dir(paths.DoHSocket("doh")), filepath.Dir(paths.NaiveSocket("naive"))} {
+		filepath.Join(paths.Run, "reality"), paths.FrontDir("reality"), filepath.Dir(paths.DoHSocket("doh")), filepath.Dir(paths.NaiveSocket("naive"))} {
 		os.MkdirAll(d, 0o755)
 	}
 	files, skipped, err := render.Render(m, paths)
@@ -852,7 +852,7 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 			}
 		}
 		stopServer()
-		for _, sock := range []string{paths.APISocket("reality"), filepath.Join(paths.Run, "reality", "reality.sock"),
+		for _, sock := range []string{paths.APISocket("reality"), paths.FrontSocket("reality", "reality"),
 			filepath.Join(paths.Run, "reality", render.RealityPrevTag+".sock")} {
 			os.Remove(sock)
 		}
@@ -1024,6 +1024,9 @@ func TestHysteriaWithXray(t *testing.T) {
 		filepath.Join(paths.Rendered, "hy2o", render.HysteriaKey):  paths.Credential("hy2o", render.HysteriaKey),
 		filepath.Join(paths.Rendered, "hy2o", render.HysteriaObfs): paths.Credential("hy2o", render.HysteriaObfs),
 		filepath.Join(paths.Rendered, "front", "hy2o.salamander"):  paths.FrontSalamander("hy2o"),
+	}
+	for _, name := range []string{"hy2", "hy2o"} {
+		os.MkdirAll(paths.FrontDir(name), 0o755) // the sockets for the front (S-1)
 	}
 	for _, f := range files {
 		os.MkdirAll(filepath.Dir(f.Path), 0o755)

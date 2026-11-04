@@ -31,11 +31,13 @@ import (
 	"github.com/arngory/raycontrol/internal/cloudflare"
 	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/doh"
+	"github.com/arngory/raycontrol/internal/health"
 	"github.com/arngory/raycontrol/internal/live"
 	"github.com/arngory/raycontrol/internal/logx"
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/nikoipc"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/pprofx"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -70,6 +72,11 @@ commands:
 func main() {
 	if len(os.Args) < 2 {
 		usage()
+	}
+	// Profiles under real load (O-3): off unless RAYD_PPROF is set.
+	if err := pprofx.Start(logx.New(os.Stderr, slog.LevelInfo)); err != nil {
+		fmt.Fprintln(os.Stderr, "rayd:", err)
+		os.Exit(1)
 	}
 	var err error
 	switch os.Args[1] {
@@ -166,11 +173,13 @@ func cmdServe(args []string) error {
 		return err
 	}
 
-	go pruneAudit(ctx, st, log)
+	// Where the loops below report: rayctl status and the metrics (O-2).
+	hb := &health.Board{}
+	go pruneAudit(ctx, st, hb, log)
 	paths := render.Paths{Rendered: *rendered, Run: *run, Supervised: *supervise}
 	rotateNow := make(chan struct{}, 1)
 	srv := &api.Server{Store: st, Params: params, Version: version, Paths: paths, Binaries: deploy.DefaultBinaries,
-		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead,
+		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead, Health: hb,
 		Rotate: func() {
 			select {
 			case rotateNow <- struct{}{}:
@@ -190,7 +199,7 @@ func cmdServe(args []string) error {
 		return errors.New("-supervise needs -live: the processes read the rendered files")
 	}
 	if *liveApply {
-		applier := &live.Applier{Store: st, Paths: paths, Log: log}
+		applier := &live.Applier{Store: st, Paths: paths, Log: log, Report: func(err error) { hb.Done("apply", err) }}
 		var sup *live.Supervisor
 		if *supervise {
 			sup, err = supervisor(paths, *xrayBin, *nikoBin, st, log)
@@ -201,7 +210,9 @@ func cmdServe(args []string) error {
 		}
 		// The socket opens after the first render: rayctl apply waits for it
 		// before it starts the data-plane units that read these files.
-		if err := applier.Apply(ctx); err != nil {
+		err := applier.Apply(ctx)
+		hb.Done("apply", err)
+		if err != nil {
 			log.Error("apply", "err", err)
 		}
 		if sup != nil {
@@ -222,17 +233,18 @@ func cmdServe(args []string) error {
 			return fmt.Errorf("-cred-grace must be at least %v: clients move to the new credential up to 12 h after the switch", minCredGrace)
 		}
 		r := store.Rotation{Period: *credPeriod, Lead: *credLead, Grace: *credGrace}
-		go rotateCredentials(ctx, st, r, func() { srv.Notify() }, log)
+		go rotateCredentials(ctx, st, r, func() { srv.Notify() }, hb, log)
 	}
 	var cm *certs.Manager
 	var is *certs.Issuer
 	if *acmeDir != "" {
-		if cm, is, err = startCertificates(ctx, st, srv, *acmeDir, log); err != nil {
+		if cm, is, err = startCertificates(ctx, st, srv, *acmeDir, hb, log); err != nil {
 			log.Error("certificates not managed", "err", err)
 		}
 	}
-	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, log)
-	go syncDNS(ctx, st, srv.Changes, log)
+	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, hb, log)
+	go syncDNS(ctx, st, srv.Changes, hb, log)
+	go checkRealityTargets(ctx, st, hb, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
 	go serveRemote(ctx, &api.Remote{Server: srv, Log: log}, srv.Changes)
 	if err := startSubscription(ctx, st, paths, log, *probeDaily); err != nil {
@@ -261,16 +273,17 @@ func supervisor(paths render.Paths, xray, niko string, st *store.Store, log *slo
 			return deploy.Plan{}, err
 		}
 		files, _, err := render.Render(m, paths)
-		if err != nil {
+		if err != nil && !render.Partial(err) {
 			return deploy.Plan{}, err
 		}
+		// The applier reports the broken services; the rest runs (Q-1).
 		return deploy.Build(m, files, paths, bins), nil
 	}}, nil
 }
 
 // startCertificates issues and renews the sites' certificates through ACME
 // HTTP-01, opening the perimeter window for each order (R2-11).
-func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, directory string, log *slog.Logger) (*certs.Manager, *certs.Issuer, error) {
+func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, directory string, hb *health.Board, log *slog.Logger) (*certs.Manager, *certs.Issuer, error) {
 	key, err := certs.AccountKey(ctx, st)
 	if err != nil {
 		return nil, nil, err
@@ -295,6 +308,7 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 		return &cloudflare.Solver{Client: c, Zone: zone}, nil
 	}
 	m := &certs.Manager{Store: st, Issue: is.Issue, Notify: srv.Notify, Log: log,
+		Report: func(site string, err error) { hb.Done("acme "+site, err) },
 		Wildcard: func(ctx context.Context) string {
 			if c, _, err := provision.Cloudflare(ctx, st); err != nil || c == nil {
 				return ""
@@ -514,7 +528,7 @@ func dohTokens(ctx context.Context, st *store.Store, service int64) (map[string]
 // syncDNS keeps the node's records in its DNS provider's zone: when the
 // records it needs change (a DNS tunnel added or removed) and every hour
 // against drift (R4-10).
-func syncDNS(ctx context.Context, st *store.Store, changes func() <-chan struct{}, log *slog.Logger) {
+func syncDNS(ctx context.Context, st *store.Store, changes func() <-chan struct{}, hb *health.Board, log *slog.Logger) {
 	last := ""
 	next := time.Time{}
 	for {
@@ -523,6 +537,11 @@ func syncDNS(ctx context.Context, st *store.Store, changes func() <-chan struct{
 		key := fmt.Sprint(records)
 		if c, _, perr := provision.Cloudflare(ctx, st); err == nil && perr == nil && c != nil && (key != last || time.Now().After(next)) {
 			done, problems, err := provision.SyncDNS(ctx, st)
+			if err == nil && len(problems) > 0 {
+				hb.Done("dns", fmt.Errorf("%d records not as they should be: %s", len(problems), strings.Join(problems, "; ")))
+			} else {
+				hb.Done("dns", err)
+			}
 			switch {
 			case err != nil:
 				log.Warn("DNS records not synced", "err", err)
@@ -550,13 +569,14 @@ func syncDNS(ctx context.Context, st *store.Store, changes func() <-chan struct{
 // on an operator request. A new server name needs a certificate first: the
 // manager is woken for it. Without certificate management the names stay.
 func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoch, is *certs.Issuer, cm *certs.Manager,
-	now <-chan struct{}, notify func(), log *slog.Logger) {
+	now <-chan struct{}, notify func(), hb *health.Board, log *slog.Logger) {
 	var resolves func(context.Context, string) error
 	if is != nil && cm != nil {
 		resolves = func(ctx context.Context, name string) error { return is.CheckDNS(ctx, []string{name}) }
 	}
 	for {
 		n, err := provision.RotateReality(ctx, st, time.Now(), e, resolves, log)
+		hb.Done("reality-rotation", err)
 		if err != nil {
 			log.Error("REALITY rotation", "err", err)
 		} else if n > 0 {
@@ -680,9 +700,47 @@ func pruneSummary(ctx context.Context, c *summary.Collector, log *slog.Logger) {
 // rotateCredentials advances the rotation of user credentials every ten
 // minutes (R4-1); a change re-renders, which adds and removes UUIDs through
 // the Xray API without a restart.
-func rotateCredentials(ctx context.Context, st *store.Store, r store.Rotation, notify func(), log *slog.Logger) {
+// checkRealityTargets checks every 6 hours what a REALITY service with a
+// foreign target needs from it (TLS 1.3, X25519MLKEM768, a chain longer than
+// REALITY's ML-DSA-65 certificate): a site that moves to a short chain
+// breaks REALITY, and the loop "reality-target <service>" in rayctl status
+// says so (RAYCONTROL.md §22.2.1).
+func checkRealityTargets(ctx context.Context, st *store.Store, hb *health.Board, log *slog.Logger) {
+	for {
+		services, err := st.ListServices(ctx)
+		if err == nil {
+			for _, svc := range services {
+				if svc.Kind != "reality" || !svc.Enabled {
+					continue
+				}
+				target, sni, err := provision.RealityTargetFromJSON(svc.Settings)
+				if err != nil || target == "" || strings.HasPrefix(target, "/") || strings.HasPrefix(target, "site:") {
+					continue // self-steal: the node's own site, checked when its certificate loads
+				}
+				cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				err = provision.CheckRealityTarget(cctx, target, sni)
+				cancel()
+				if ctx.Err() != nil {
+					return
+				}
+				hb.Done("reality-target "+svc.Name, err)
+				if err != nil {
+					log.Warn("REALITY target no longer fits", "service", svc.Name, "err", err)
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(6 * time.Hour):
+		}
+	}
+}
+
+func rotateCredentials(ctx context.Context, st *store.Store, r store.Rotation, notify func(), hb *health.Board, log *slog.Logger) {
 	for {
 		n, err := st.RotateCredentials(ctx, time.Now(), r, render.NewUUID)
+		hb.Done("credential-rotation", err)
 		if err != nil {
 			log.Error("credential rotation", "err", err)
 		} else if n > 0 {
@@ -697,16 +755,21 @@ func rotateCredentials(ctx context.Context, st *store.Store, r store.Rotation, n
 	}
 }
 
-func pruneAudit(ctx context.Context, st *store.Store, log *slog.Logger) {
+func pruneAudit(ctx context.Context, st *store.Store, hb *health.Board, log *slog.Logger) {
 	t := time.NewTicker(24 * time.Hour)
 	defer t.Stop()
 	for {
-		if err := st.PruneAudit(ctx, time.Now().Add(-auditKeep)); err != nil && ctx.Err() == nil {
-			log.Warn("audit prune failed", "err", err)
+		aerr := st.PruneAudit(ctx, time.Now().Add(-auditKeep))
+		if aerr != nil && ctx.Err() == nil {
+			log.Warn("audit prune failed", "err", aerr)
 		}
 		// Invites used or expired a week ago: their key opens nothing anymore.
-		if err := st.PruneInvites(ctx, time.Now().Add(-7*24*time.Hour)); err != nil && ctx.Err() == nil {
-			log.Warn("invite prune failed", "err", err)
+		ierr := st.PruneInvites(ctx, time.Now().Add(-7*24*time.Hour))
+		if ierr != nil && ctx.Err() == nil {
+			log.Warn("invite prune failed", "err", ierr)
+		}
+		if ctx.Err() == nil {
+			hb.Done("prune", errors.Join(aerr, ierr))
 		}
 		select {
 		case <-ctx.Done():

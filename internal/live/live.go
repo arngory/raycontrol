@@ -40,6 +40,10 @@ type Applier struct {
 	Restart func(ctx context.Context, verb, unit string) error
 	// Inner returns an API client for an inner API socket; nil dials Xray.
 	Inner func(socket string) InnerAPI
+	// Report, if set, gets the outcome of every Apply in Run (O-2).
+	Report func(error)
+
+	skipped []string // the waiting services last logged
 }
 
 func (a *Applier) restart(ctx context.Context, verb, unit string) error {
@@ -68,12 +72,22 @@ func (a *Applier) Apply(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	files, skipped, err := render.Render(m, a.Paths)
-	if err != nil {
-		return err
+	// A service that cannot be rendered keeps its files and its process;
+	// the others are applied (Q-1).
+	files, skipped, rerr := render.Render(m, a.Paths)
+	if rerr != nil && !render.Partial(rerr) {
+		return rerr
 	}
-	for _, s := range skipped {
-		a.Log.Debug("not rendered by this version", "service", s)
+	var errs []error
+	if rerr != nil {
+		errs = append(errs, rerr)
+	}
+	// Waiting services are logged when the list changes, not on every apply.
+	if !slices.Equal(skipped, a.skipped) {
+		for _, s := range skipped {
+			a.Log.Info("service not rendered yet", "service", s)
+		}
+		a.skipped = skipped
 	}
 
 	// Service users traverse this directory to their own subdirectory.
@@ -90,7 +104,6 @@ func (a *Applier) Apply(ctx context.Context) error {
 	}
 	changed := map[string][]change{} // service -> changed files
 	failed := map[string]bool{}
-	var errs []error
 	for _, f := range files {
 		if failed[f.Service] {
 			continue
@@ -286,7 +299,14 @@ func (a *Applier) Run(ctx context.Context, changes func() <-chan struct{}) {
 	for {
 		// Taken before Apply: a change during Apply wakes the next round.
 		wake := changes()
-		if err := a.Apply(ctx); err != nil && ctx.Err() == nil {
+		err := a.Apply(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if a.Report != nil {
+			a.Report(err)
+		}
+		if err != nil {
 			a.Log.Error("apply", "err", err)
 		}
 		select {

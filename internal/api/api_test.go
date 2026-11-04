@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -252,8 +253,47 @@ func TestPerimeterFeed(t *testing.T) {
 	if a := stream.Msg().Snapshot.AdminPrefixes; len(a) != 2 || a[0] != "198.51.100.7/32" {
 		t.Fatalf("admin prefixes %v", a)
 	}
-	if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{"nonsense"}})); connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Fatalf("bad cidr: %v", err)
+	// Nothing wider than /16 and /32: admin addresses reach SSH without SPA
+	// (S-3). ::ffff:0:0/96 is 0.0.0.0/0.
+	for _, bad := range []string{"nonsense", "0.0.0.0/0", "10.0.0.0/15", "::/0", "2001:db8::/31", "::ffff:0:0/96"} {
+		if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{bad}})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("admin %s: %v", bad, err)
+		}
+	}
+	if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{"10.1.0.0/16", "::ffff:198.51.100.0/120"}})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	if a := stream.Msg().Snapshot.AdminPrefixes; len(a) != 2 || a[1] != "198.51.100.0/24" {
+		t.Fatalf("admin prefixes %v", a)
+	}
+
+	// REALITY open to everyone (RAYCONTROL.md §22.2.2): its TCP 443 is public,
+	// and the service stays in the SPA scopes.
+	if _, err := c.SetServiceOption(ctx, connect.NewRequest(&nodev1.SetServiceOptionRequest{Name: "reality", Key: "open", Value: "true"})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	open := stream.Msg().Snapshot
+	pub := map[string]bool{}
+	for _, p := range open.PublicPorts {
+		pub[fmt.Sprintf("%s/%d", p.Proto, p.Port)] = true
+	}
+	if !pub["tcp/443"] || !pub["udp/53"] || pub["tcp/2222"] || !slices.ContainsFunc(open.Services, func(s *perimeterv1.Service) bool { return len(s.Ports) == 1 && s.Ports[0].Port == 443 }) {
+		t.Fatalf("open REALITY: public %v services %v", pub, open.Services)
+	}
+	if _, err := c.SetServiceOption(ctx, connect.NewRequest(&nodev1.SetServiceOptionRequest{Name: "reality", Key: "open", Value: "false"})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	if p := stream.Msg().Snapshot.PublicPorts; len(p) != 1 || p[0].Port != 53 {
+		t.Fatalf("closed again: %v", p)
 	}
 
 	// An ACME order opens the window in the feed, its end closes it.
@@ -454,5 +494,29 @@ func TestSummaryAPI(t *testing.T) {
 	}
 	if _, err := c.SetSummary(ctx, connect.NewRequest(&nodev1.SetSummaryRequest{Enabled: "off"})); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A service others work through stays while they are on (Q-1): without
+// inner the DNS tunnels cannot be rendered.
+func TestServiceDependents(t *testing.T) {
+	_, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "dnstt", Name: "dns"})); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "inner", Enabled: false}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "dns works through inner") {
+		t.Fatalf("disable inner under dnstt: %v", err)
+	}
+	if _, err := c.DeleteService(ctx, connect.NewRequest(&nodev1.DeleteServiceRequest{Name: "inner"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("delete inner under dnstt: %v", err)
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "dns", Enabled: false})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "inner", Enabled: false})); err != nil {
+		t.Fatalf("disable inner after dnstt: %v", err)
 	}
 }

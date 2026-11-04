@@ -18,7 +18,7 @@ records and wildcard certificates, uninstall back to the host's snapshot,
 redacted reports, a kernel-side early drop, encrypted backups, local metrics,
 Yggdrasil (direct TLS links behind the front, into the inner stage; public peers by
 choice), channel probes for clients and Brutal ceilings for Hysteria2, `rayctl user export`,
-REALITY keys that overlap for a grace period after a switch. Data plane: niko-server v0.7.0
+REALITY keys that overlap for a grace period after a switch. Data plane: niko-server v0.8.0
 (the front on UDP 53, TCP 443 and UDP 443; DNS tunnel, Hysteria2 and Yggdrasil backends); see
 [docs/04-roadmap.md](docs/04-roadmap.md).
 
@@ -155,7 +155,7 @@ raycontrol хранит пользователей и ключи, генерир
   общем 443, удалённый API с mTLS и приглашениями. R4 — ротация UUID и ключей/имён REALITY, Cloudflare для DNS-записей
   и wildcard-сертификата, удаление до снимка системы, очищенные отчёты, ранний отброс пакетов до стека ядра,
   резервные копии, метрики, Yggdrasil (прямые TLS-линки за фронтом, в `inner`; публичные пиры — по выбору), замер
-  канала для клиентов и потолки Brutal, `rayctl user export`, перекрытие ключей REALITY после смены. Data plane — niko-server v0.7.0 ([`arngory/niko-server`](https://github.com/arngory/niko-server)).
+  канала для клиентов и потолки Brutal, `rayctl user export`, перекрытие ключей REALITY после смены. Data plane — niko-server v0.8.0 ([`arngory/niko-server`](https://github.com/arngory/niko-server)).
 - **С нуля на Debian 13:** [docs/10-quickstart-debian13.md](docs/10-quickstart-debian13.md); все команды —
   [docs/cheatsheet.md](docs/cheatsheet.md).
 - **Установка:** любой современный Linux с systemd; полная установка проверяется в CI на Debian 12/13, Ubuntu 24.04,

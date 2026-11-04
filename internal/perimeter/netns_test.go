@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -271,6 +272,27 @@ func TestNetns(t *testing.T) {
 			t.Fatal("service closed after TCP SPA")
 		}
 	})
+	t.Run("TCP carrier as a TLS ClientHello opens the service", func(t *testing.T) {
+		// spa-v2.md §10.1 (RAYCONTROL.md §22.2.3).
+		snap.Devices = []*perimeterv1.Device{alice}
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		c, err := net.Dial("tcp", "127.0.0.1:"+slotPort())
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, err := spa.TLSCarrier(sealNow())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Write(rec)
+		c.Close()
+		waitResult(nil)
+		if !reach() {
+			t.Fatal("service closed after the ClientHello carrier")
+		}
+	})
 	t.Run("admin prefix reaches SSH without SPA", func(t *testing.T) {
 		ssh, err := net.Listen("tcp", "127.0.0.1:18022")
 		if err != nil {
@@ -464,4 +486,88 @@ func loUp(t *testing.T) {
 	if err := unix.IoctlIfreq(fd, unix.SIOCSIFFLAGS, ifr); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestNetnsDataPlaneToNode: a data-plane process (UID 9100-9179) does not
+// reach the node's own addresses, root does; loopback stays open to both
+// (the channel probe, S-2). Same conditions as TestNetns.
+func TestNetnsDataPlaneToNode(t *testing.T) {
+	if os.Getenv("RAYCONTROL_NETNS_TEST") != "1" {
+		t.Skip("set RAYCONTROL_NETNS_TEST=1 and run as root under unshare -n")
+	}
+	loUp(t)
+	// A non-loopback address of the node, as a lo alias.
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ifr, err := unix.NewIfreq("lo:9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ifr.SetInet4Addr([]byte{192, 0, 2, 9}); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.IoctlIfreq(fd, unix.SIOCSIFADDR, ifr); err != nil {
+		t.Fatal(err)
+	}
+	unix.Close(fd)
+
+	fw := &NFT{NflogGroup: 7, FilterLoopback: true}
+	if err := fw.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Teardown()
+	if err := fw.SetPublic([]Port{{"tcp", 18999}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, addr := range []string{"192.0.2.9:18999", "127.0.0.1:18999"} {
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		go func() {
+			for {
+				c, err := l.Accept()
+				if err != nil {
+					return
+				}
+				c.Close()
+			}
+		}()
+	}
+	for _, c := range []struct {
+		uid  int
+		addr [4]byte
+		want bool
+	}{
+		{0, [4]byte{192, 0, 2, 9}, true},
+		{9110, [4]byte{192, 0, 2, 9}, false},
+		{9100, [4]byte{192, 0, 2, 9}, false},
+		{9190, [4]byte{192, 0, 2, 9}, true}, // rayd
+		{9110, [4]byte{127, 0, 0, 1}, true},
+	} {
+		err := dialAs(c.uid, c.addr, 18999)
+		if (err == nil) != c.want {
+			t.Errorf("uid %d to %v: %v, want reachable=%v", c.uid, c.addr, err, c.want)
+		}
+	}
+}
+
+// dialAs connects over TCP from a socket owned by uid: the socket takes the
+// thread's fsuid when it is made, and that is what "meta skuid" matches.
+func dialAs(uid int, addr [4]byte, port int) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	unix.Setfsuid(uid)
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
+	unix.Setfsuid(0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	tv := unix.Timeval{Sec: 2}
+	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_SNDTIMEO, &tv)
+	return unix.Connect(fd, &unix.SockaddrInet4{Port: port, Addr: addr})
 }

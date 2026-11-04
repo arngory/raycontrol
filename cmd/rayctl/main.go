@@ -88,16 +88,16 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   report [-o FILE] [-logs warning|info|none] [-since 24h] [-id ID]
       a redacted report for an issue: versions, system, checks, units,
       counts and warnings; nothing is sent anywhere
-  knock [-carrier udp|tcp|auto] [-addr A] [-ttl 10m] BUNDLE|@FILE
+  knock [-carrier udp|tls|tcp|auto] [-addr A] [-ttl 10m] BUNDLE|@FILE
       SPA only: open the device's services to this address for a while; with
       the emergency bundle, SSH (then ssh as usual)
-  probe [-carrier udp|tcp|auto] [-addr A] [-links] [-redact] [-channel] BUNDLE|@FILE|-
+  probe [-carrier udp|tls|tcp|auto] [-addr A] [-links] [-redact] [-channel] BUNDLE|@FILE|-
       check a node from outside like a client: SPA, then the subscription
       (pin, both signatures). Needs only the device bundle. -channel then
       measures the channel (TCP down and up, UDP echo; probe-v1).
 
   From another machine, through the node's remote API (admin devices):
-  remote enroll [-o FILE] [-carrier udp|tcp|auto] [-addr A] INVITE|@FILE|-
+  remote enroll [-o FILE] [-carrier udp|tls|tcp|auto] [-addr A] INVITE|@FILE|-
       register a device from an invite (rcinv1:...): a new client key, SPA,
       then the API; writes the device file (bundle and key, mode 0600)
   -remote FILE <command>                    status, user, service, device, audit, admin, dns, metrics, summary
@@ -129,7 +129,13 @@ func main() {
 	}
 
 	c := &cli{c: api.NewUnixClient(*socket), json: *asJSON}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// An update downloads ~50 MB, maybe through slow mirrors; its restart
+	// and rollback have their own time (Q-2).
+	timeout := 5 * time.Minute
+	if fs.Arg(0) == "update" {
+		timeout = 30 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if *remote != "" && (fs.Arg(0) != "remote" || fs.Arg(1) != "enroll") {
 		if err := c.useRemote(ctx, *remote, fs.Arg(0)); err != nil {
@@ -240,7 +246,26 @@ func (c *cli) status(ctx context.Context) error {
 	return c.print(m, func(w *tabwriter.Writer) {
 		fmt.Fprintf(w, "version\t%s\nnode\t%s\nhost\t%s\nusers\t%d\nservices\t%d\nactive devices\t%d\nspa ports\t%v\n",
 			m.Version, m.NodeId, m.Host, m.Users, m.Services, m.ActiveDevices, m.SpaPorts)
+		// rayd's loops: the last round of each (O-2).
+		for _, l := range m.Loops {
+			fmt.Fprintf(w, "%s\t%s\n", l.Name, loopState(l, time.Now()))
+		}
 	})
+}
+
+// loopState says how a loop's last round went: "ok 12s ago", or "FAILED
+// 3m ago: <error> (last ok 2h ago)".
+func loopState(l *nodev1.LoopHealth, now time.Time) string {
+	ago := func(unix int64) string {
+		if unix == 0 {
+			return "never"
+		}
+		return now.Sub(time.Unix(unix, 0)).Round(time.Second).String() + " ago"
+	}
+	if l.LastError > l.LastOk {
+		return fmt.Sprintf("FAILED %s: %s (last ok %s)", ago(l.LastError), l.Error, ago(l.LastOk))
+	}
+	return "ok " + ago(l.LastOk)
 }
 
 func (c *cli) user(ctx context.Context, sub string, args []string) error {

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/httpx"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -79,7 +80,9 @@ func (s *Server) Serve(ctx context.Context, addr string, tlsCfg *tls.Config) err
 		mux.Handle("/probe/v1/", s.Probe)
 	}
 	srv := &http.Server{
-		Handler:           mux,
+		// No redirects, not even ServeMux's: Niko takes a 3xx from the
+		// subscription or the probes for an error (RAYCONTROL.md §22).
+		Handler:           httpx.NoRedirect(mux),
 		ConnContext:       probe.ConnContext,
 		TLSConfig:         tlsCfg,
 		ReadHeaderTimeout: 5 * time.Second,

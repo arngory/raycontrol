@@ -21,6 +21,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
+	"github.com/arngory/raycontrol/internal/health"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -48,6 +49,8 @@ type Server struct {
 	Rotate      func()
 	// DNSChanged runs after the DNS provider changed (certificates check).
 	DNSChanged func()
+	// Health is where rayd's loops report (O-2): status and metrics.
+	Health *health.Board
 
 	mu   sync.Mutex
 	rev  uint64
@@ -184,6 +187,14 @@ func (s *Server) done(ctx context.Context, action, target string, err error) err
 	return toConnect(err)
 }
 
+// unixOf is t in Unix seconds, 0 for the zero time.
+func unixOf(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
 func unixOrZero(t *time.Time) int64 {
 	if t == nil {
 		return 0
@@ -218,6 +229,10 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 	}
 	for _, p := range s.Params.ActivePorts(time.Now()) {
 		resp.SpaPorts = append(resp.SpaPorts, uint32(p))
+	}
+	for _, l := range s.Health.Loops() {
+		resp.Loops = append(resp.Loops, &nodev1.LoopHealth{Name: l.Name, LastOk: unixOf(l.LastOK), LastError: unixOf(l.LastErr),
+			Error: l.Err, Runs: l.Runs, Errors: l.Errors})
 	}
 	return connect.NewResponse(resp), nil
 }
@@ -411,7 +426,13 @@ func (s *Server) CreateService(ctx context.Context, req *connect.Request[nodev1.
 }
 
 func (s *Server) SetServiceEnabled(ctx context.Context, req *connect.Request[nodev1.SetServiceEnabledRequest]) (*connect.Response[nodev1.SetServiceEnabledResponse], error) {
-	err := s.Store.SetServiceEnabled(ctx, req.Msg.Name, req.Msg.Enabled)
+	var err error
+	if !req.Msg.Enabled {
+		err = provision.CheckNoDependents(ctx, s.Store, req.Msg.Name)
+	}
+	if err == nil {
+		err = s.Store.SetServiceEnabled(ctx, req.Msg.Name, req.Msg.Enabled)
+	}
 	if err := s.done(ctx, "service.enable="+strconv.FormatBool(req.Msg.Enabled), req.Msg.Name, err); err != nil {
 		return nil, err
 	}
@@ -419,7 +440,10 @@ func (s *Server) SetServiceEnabled(ctx context.Context, req *connect.Request[nod
 }
 
 func (s *Server) DeleteService(ctx context.Context, req *connect.Request[nodev1.DeleteServiceRequest]) (*connect.Response[nodev1.DeleteServiceResponse], error) {
-	err := s.Store.DeleteService(ctx, req.Msg.Name)
+	err := provision.CheckNoDependents(ctx, s.Store, req.Msg.Name)
+	if err == nil {
+		err = s.Store.DeleteService(ctx, req.Msg.Name)
+	}
 	if err := s.done(ctx, "service.delete", req.Msg.Name, err); err != nil {
 		return nil, err
 	}
@@ -749,9 +773,10 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 	if err != nil {
 		return nil, toConnect(err)
 	}
-	files, skipped, err := render.Render(m, s.Paths)
-	if err != nil {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	// A broken service is named in the warnings; the rest is deployed (Q-1).
+	files, skipped, rerr := render.Render(m, s.Paths)
+	if rerr != nil && !render.Partial(rerr) {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, rerr)
 	}
 	plan := deploy.Build(m, files, s.Paths, s.Binaries)
 	var outside []deploy.PortRange
@@ -768,7 +793,13 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 		resp.OutsidePorts = append(resp.OutsidePorts, &nodev1.PortRange{Proto: r.Proto, From: uint32(r.From), To: uint32(r.To)})
 	}
 	for _, name := range skipped {
-		resp.Warnings = append(resp.Warnings, "not rendered by this version: "+name)
+		resp.Warnings = append(resp.Warnings, "not rendered yet: "+name)
+	}
+	var broken render.ServiceErrors
+	if errors.As(rerr, &broken) {
+		for _, e := range broken {
+			resp.Warnings = append(resp.Warnings, "not rendered: "+e.Error())
+		}
 	}
 	for _, u := range plan.Users {
 		resp.Users = append(resp.Users, &nodev1.SystemUser{Name: u.Name, Uid: uint32(u.UID), ExtraGroups: u.ExtraGroups})

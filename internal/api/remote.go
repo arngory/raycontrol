@@ -21,6 +21,7 @@ import (
 	devicev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1/devicev1connect"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
+	"github.com/arngory/raycontrol/internal/httpx"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -88,14 +89,15 @@ func (r *Remote) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle(nodev1connect.NewNodeServiceHandler(r.Server, connect.WithInterceptors(r.adminOnly())))
 	mux.Handle(devicev1connect.NewDeviceServiceHandler(r))
-	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	// No redirects: Niko takes a 3xx for an error (RAYCONTROL.md §22).
+	return httpx.NoRedirect(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.TLS == nil || len(req.TLS.PeerCertificates) == 0 {
 			http.NotFound(w, req)
 			return
 		}
 		pin := CertPin(req.TLS.PeerCertificates[0])
 		mux.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), certPinKey{}, pin)))
-	})
+	}))
 }
 
 // Serve serves on ln until ctx ends.

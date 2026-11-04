@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/arngory/raycontrol/internal/api"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
@@ -80,6 +81,7 @@ func run(args []string) error {
 	group := fs.Uint("nflog-group", 7, "NFLOG group for SPA packets")
 	rate := fs.Int("rate", 20, "SPA packets (and TCP SYNs) per second per source")
 	debug := fs.Bool("debug", false, "log rejected packets")
+	state := fs.String("state", "", "keep the last snapshot in this file and start from it (Q-3); empty: none")
 	fs.Parse(args)
 
 	level := slog.LevelInfo
@@ -110,7 +112,13 @@ func run(args []string) error {
 	carrier := &perimeter.TCPCarrier{Handler: handle, LenMax: gate.LenMax, Log: log}
 	defer carrier.Close()
 
-	go watch(ctx, *socket, gate, carrier, log)
+	// The last snapshot from rayd, until rayd answers: the admin addresses
+	// and SPA (the emergency bundle's SSH) work without rayd, after a reboot
+	// or an update that left rayd down (Q-3).
+	if *state != "" {
+		restore(*state, gate, carrier, log)
+	}
+	go watch(ctx, *socket, *state, gate, carrier, log)
 	go func() {
 		if err := perimeter.ReadNFLOG(ctx, uint16(*group), handle, log); err != nil {
 			log.Error("nflog", "err", err)
@@ -139,9 +147,50 @@ func run(args []string) error {
 	}
 }
 
+// restore applies the snapshot saved in file, if there is one.
+func restore(file string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, log *slog.Logger) {
+	b, err := os.ReadFile(file) //nolint:gosec // G304: the operator's -state path
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	snap := &perimeterv1.Snapshot{}
+	if err == nil {
+		err = proto.Unmarshal(b, snap)
+	}
+	if err == nil {
+		err = gate.Update(snap)
+	}
+	if err != nil {
+		log.Warn("saved snapshot not applied; waiting for rayd", "file", file, "err", err)
+		return
+	}
+	if ports, err := gate.Tick(); err == nil {
+		carrier.Reconcile(ports)
+	}
+	age := time.Duration(0)
+	if fi, err := os.Stat(file); err == nil {
+		age = time.Since(fi.ModTime()).Round(time.Second)
+	}
+	log.Info("saved snapshot applied until rayd answers", "revision", snap.GetRevision(), "devices", len(snap.Devices), "age", age)
+}
+
+// save keeps snap for the next start: written aside, then renamed, so a
+// crash leaves the old one or the new one.
+func save(file string, snap *perimeterv1.Snapshot) error {
+	b, err := proto.Marshal(snap)
+	if err != nil {
+		return err
+	}
+	tmp := file + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, file)
+}
+
 // watch follows the perimeter feed from rayd, reconnecting with backoff.
 // While rayd is away the last snapshot stays in force.
-func watch(ctx context.Context, socket string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, log *slog.Logger) {
+func watch(ctx context.Context, socket, state string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, log *slog.Logger) {
 	client := perimeterv1connect.NewPerimeterServiceClient(api.UnixHTTPClient(socket), api.BaseURL)
 	backoff := time.Second
 	for ctx.Err() == nil {
@@ -158,6 +207,11 @@ func watch(ctx context.Context, socket string, gate *perimeter.Gate, carrier *pe
 					carrier.Reconcile(ports)
 				}
 				log.Info("snapshot applied", "revision", snap.GetRevision(), "devices", len(snap.Devices))
+				if state != "" {
+					if err := save(state, snap); err != nil {
+						log.Warn("saving the snapshot", "file", state, "err", err)
+					}
+				}
 			}
 			err = stream.Err()
 			stream.Close()

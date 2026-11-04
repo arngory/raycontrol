@@ -212,6 +212,16 @@ func TestServicePorts(t *testing.T) {
 	if p, _ := dns.Ports(); !dns.Public() || len(p) != 1 || p[0].String() != "udp/53" {
 		t.Fatalf("dnstt = %v public=%v", p, dns.Public())
 	}
+	// A public service keeps its own ports: no other port out from behind
+	// SPA (S-3).
+	for _, bad := range []string{`{"ports":["tcp/22"]}`, `{"ports":["udp/53","udp/443"]}`} {
+		if _, err := s.CreateService(ctx, Service{Kind: "dnstt", Name: "dns-bad", Settings: bad}); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("public service with %s: %v", bad, err)
+		}
+	}
+	if _, err := s.CreateService(ctx, Service{Kind: "masterdns", Name: "dns-ok", Settings: `{"ports":["udp/53"]}`}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestRotateCredentials(t *testing.T) {
@@ -311,5 +321,32 @@ func TestSnapshot(t *testing.T) {
 	}
 	if left, _ := filepath.Glob(filepath.Join(dir, "rayd.db.snapshot-*")); len(left) != 0 {
 		t.Fatalf("snapshot files left: %v", left)
+	}
+}
+
+// A database a newer raycontrol migrated is refused, and Schema reads its
+// version without migrating it (Q-2).
+func TestNewerSchema(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "rayd.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, err := Schema(ctx, path); err != nil || v != KnownSchema() || v == 0 {
+		t.Fatalf("schema %d, %v; known %d", v, err, KnownSchema())
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO schema_migrations (version, applied_at) VALUES (?, 0)`, KnownSchema()+1); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if _, err := Open(ctx, path); !errors.Is(err, ErrNewerSchema) {
+		t.Fatalf("newer schema opened: %v", err)
+	}
+	if v, err := Schema(ctx, path); err != nil || v != KnownSchema()+1 {
+		t.Fatalf("schema %d, %v", v, err)
+	}
+	if v, err := Schema(ctx, filepath.Join(t.TempDir(), "none.db")); err != nil || v != 0 {
+		t.Fatalf("no file: %d, %v", v, err)
 	}
 }

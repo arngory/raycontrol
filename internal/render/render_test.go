@@ -2,15 +2,19 @@ package render_test
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	nodepkg "github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
+	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -106,7 +110,7 @@ func TestRender(t *testing.T) {
 		}
 	}
 	b := front.Backends["dns"]
-	if b.Mode != "packet" || b.Socket != "/run/niko/dns/packet.sock" || b.UID < 9110 || b.UID > 9179 {
+	if b.Mode != "packet" || b.Socket != "/run/niko/dns-in/packet.sock" || b.UID < 9110 || b.UID > 9179 {
 		t.Fatalf("dns backend ref = %+v", b)
 	}
 	for _, z := range front.DNS.Zones {
@@ -150,14 +154,65 @@ func TestRender(t *testing.T) {
 func TestDisabledInner(t *testing.T) {
 	ctx := context.Background()
 	st := node(t)
+	// A service that does not go through inner.
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true,
+		Settings: `{"target":"www.example.org:443","sni":"www.example.org"}`}); err != nil {
+		t.Fatal(err)
+	}
 	st.SetServiceEnabled(ctx, "inner", false)
 	m, err := render.Collect(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := render.Render(m, render.DefaultPaths); err == nil {
-		t.Fatal("tunnels rendered without the inner stage")
+	// The tunnels cannot be rendered; everything else still is (Q-1).
+	files, _, err := render.Render(m, render.DefaultPaths)
+	var broken render.ServiceErrors
+	if !errors.As(err, &broken) || len(broken) != 2 || !render.Partial(err) {
+		t.Fatalf("tunnels without the inner stage: %v", err)
 	}
+	for _, f := range files {
+		if f.Service == "dns" || f.Service == "mdns" {
+			t.Errorf("%s rendered without the inner stage", f.Path)
+		}
+		if f.Service == "front" && strings.Contains(string(f.Content), `"zones"`) {
+			t.Errorf("the front routes the broken tunnels: %s", f.Content)
+		}
+	}
+	all, _, err := render.Render(withInner(t, st), render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What does not depend on inner is the same either way.
+	want := map[string]string{}
+	for _, f := range all {
+		if f.Service != "dns" && f.Service != "mdns" && f.Service != "front" && f.Service != "inner" {
+			want[f.Path] = string(f.Content)
+		}
+	}
+	got := 0
+	for _, f := range files {
+		if c, ok := want[f.Path]; ok {
+			got++
+			if c != string(f.Content) {
+				t.Errorf("%s differs", f.Path)
+			}
+		}
+	}
+	if got != len(want) || len(want) == 0 {
+		t.Fatalf("%d of %d other files rendered", got, len(want))
+	}
+}
+
+func withInner(t *testing.T, st *store.Store) render.Model {
+	t.Helper()
+	ctx := context.Background()
+	st.SetServiceEnabled(ctx, "inner", true)
+	defer st.SetServiceEnabled(ctx, "inner", false)
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
 }
 
 func TestVLESSEncryption(t *testing.T) {
@@ -268,13 +323,13 @@ func TestReality(t *testing.T) {
 	m.FrontTCP = true
 	c, front = read(m)
 	in = c.Inbounds[0]
-	if in.Listen != "/run/niko/r/reality.sock,0660" || in.Port != 0 || !in.Stream.Sockopt.AcceptProxyProtocol {
+	if in.Listen != "/run/niko/r-in/reality.sock,0660" || in.Port != 0 || !in.Stream.Sockopt.AcceptProxyProtocol {
 		t.Fatalf("inbound behind the front %+v", in)
 	}
 	tcp, _ := json.Marshal(front["tcp"])
 	backends, _ := json.Marshal(front["backends"])
 	if !strings.Contains(string(tcp), `{"backend":"r","sni":["www.example.org"]}`) || !strings.Contains(string(tcp), `"default":"r"`) ||
-		!strings.Contains(string(backends), `"r":{"mode":"proxy-v2","socket":"/run/niko/r/reality.sock"`) {
+		!strings.Contains(string(backends), `"r":{"mode":"proxy-v2","socket":"/run/niko/r-in/reality.sock"`) {
 		t.Fatalf("front tcp %s backends %s", tcp, backends)
 	}
 
@@ -306,5 +361,64 @@ func TestReality(t *testing.T) {
 	r2 := m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })]
 	if tags := render.XrayTags(r2); !slices.Equal(tags, []string{render.RealityTag, render.RealityPrevTag}) {
 		t.Fatalf("tags %v", tags)
+	}
+}
+
+// dnsauth-v1: with auth on, the dnstt backend gets the mode and a keys file
+// of the devices allowed on the service, derived per service; the file is
+// reread by the backend, not a reason to restart it.
+func TestDNSAuth(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	m, _ := render.Collect(ctx, st)
+	files, _, _ := render.Render(m, render.DefaultPaths)
+	for _, f := range files {
+		if strings.HasSuffix(f.Path, "/"+render.DNSAuthKeys) || (f.Service == "dns" && strings.Contains(string(f.Content), `"auth"`)) {
+			t.Fatalf("auth without the option: %s", f.Path)
+		}
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "dns", "auth", "strict"); err == nil {
+		t.Fatal("auth=strict accepted")
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "dns", "auth", "required"); err != nil {
+		t.Fatal(err)
+	}
+	dev, key, err := st.CreateDevice(ctx, "alice", "phone", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.CreateDevice(ctx, "bob", "laptop", "user") // bob has no tunnel
+	m, err = render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _, err = render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := st.ServiceByName(ctx, "dns")
+	params, _ := nodepkg.LoadParams(ctx, st)
+	want := spa.DNSAuthKey(key, params.NodeID, uint16(dns.ID))
+	var keys, backend string
+	for _, f := range files {
+		switch f.Path {
+		case "/var/lib/raycontrol/rendered/dns/" + render.DNSAuthKeys:
+			keys = string(f.Content)
+			if f.Mode != 0o640 || f.Group != "niko-dns" || !f.Reload {
+				t.Errorf("keys file %+v", f)
+			}
+		case "/var/lib/raycontrol/rendered/dns/backend.json":
+			backend = string(f.Content)
+		}
+	}
+	if !strings.Contains(keys, dev.ID+" "+hex.EncodeToString(want[:])+"\n") || strings.Count(keys, "\n") != 2 {
+		t.Fatalf("keys file:\n%s", keys)
+	}
+	if !strings.Contains(backend, `"auth": "required"`) || !strings.Contains(backend, `"auth_keys_file": "/var/lib/raycontrol/rendered/dns/auth.keys"`) {
+		t.Fatalf("backend:\n%s", backend)
+	}
+	// The other tunnel (masterdns) is left alone.
+	if _, err := provision.SetServiceOption(ctx, st, "mdns", "auth", "required"); err == nil {
+		t.Fatal("auth on masterdns")
 	}
 }

@@ -63,7 +63,7 @@ x /opt/rc/rayctl user add alice -services reality,hy2o,ygg >/dev/null
 bundle="$(x /opt/rc/rayctl device add alice laptop | grep '^rcdev1:')" || fail "no bundle"
 
 log "the data plane under rayd"
-for sock in /run/niko/inner/vless.sock /run/niko/site/tls.sock /run/niko/hy2o/stats.sock /run/niko/ygg/fd.sock; do
+for sock in /run/niko/inner/vless.sock /run/niko/site/tls.sock /run/niko/hy2o/stats.sock /run/niko/ygg-in/fd.sock; do
 	for _ in $(seq 100); do x test -S "$sock" && break; sleep 0.2; done
 	x test -S "$sock" || fail "no $sock"
 done

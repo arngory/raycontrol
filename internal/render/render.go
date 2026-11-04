@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -30,6 +31,7 @@ import (
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/site"
+	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -109,7 +111,26 @@ type Model struct {
 	// FrontUDP puts UDP 443 behind the front (udpmux, v0.3, R3-4, R3-5):
 	// Hysteria2 always; DoH3 and naive-quic only with it.
 	FrontUDP bool
+	// DNSAuth maps a dnstt service with dnsauth on to the keys of the
+	// devices allowed on it (spec/dnsauth-v1.md): "<device id> <hex>".
+	DNSAuth map[int64][]string
 }
+
+// DNSAuthMode is a dnstt service's dnsauth-v1 mode: off, optional or
+// required (spec/dnsauth-v1.md §5).
+func DNSAuthMode(s store.Service) string {
+	var st struct {
+		Auth string `json:"auth"`
+	}
+	_ = json.Unmarshal([]byte(s.Settings), &st)
+	if s.Kind != "dnstt" || st.Auth == "" {
+		return "off"
+	}
+	return st.Auth
+}
+
+// DNSAuthKeys is the file name of a dnstt service's device keys.
+const DNSAuthKeys = "auth.keys"
 
 // HostIPv6 reports whether this host can open IPv6 sockets.
 func HostIPv6() bool {
@@ -208,6 +229,30 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 			m.Inner[id] = all[id].Current
 			m.Sets[inner.ID][id] = all[id]
 		}
+	}
+	// dnsauth-v1: the keys of the devices allowed on each dnstt service that
+	// has it on, derived per service (spec/dnsauth-v1.md §2).
+	var devices []spa.Device
+	for _, svc := range m.Services {
+		if DNSAuthMode(svc.Service) == "off" {
+			continue
+		}
+		if devices == nil {
+			if devices, err = st.SPADevices(ctx); err != nil {
+				return m, err
+			}
+		}
+		if m.DNSAuth == nil {
+			m.DNSAuth = map[int64][]string{}
+		}
+		lines := []string{}
+		for _, d := range devices {
+			if slices.Contains(d.Allowed, uint16(svc.ID)) {
+				k := spa.DNSAuthKey(d.Key, params.NodeID, uint16(svc.ID))
+				lines = append(lines, d.ID+" "+hex.EncodeToString(k[:]))
+			}
+		}
+		m.DNSAuth[svc.ID] = lines
 	}
 	return m, nil
 }
@@ -333,7 +378,9 @@ func jsonFile(v any) ([]byte, error) {
 }
 
 // Render returns all files for the model. Kinds the renderer does not
-// handle yet are skipped and named in the second result.
+// handle yet, and services waiting for a certificate, are skipped and named
+// in the second result. A service that cannot be rendered comes back in a
+// ServiceErrors, with the files of all the others.
 func Render(m Model, p Paths) ([]File, []string, error) {
 	var files []File
 	var skipped []string
@@ -368,24 +415,30 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 	tcpDefault := "" // the first REALITY service: its target answers like the site
 	backends := map[string]backendRef{}
 
-	for _, s := range m.Services {
+	// one renders a service. On an error nothing of it is kept, and the
+	// others go on (Q-1): one broken service must not hold back users,
+	// revocations and key rotations everywhere else.
+	one := func(s Service) error {
 		switch s.Kind {
 		case "dnstt", "masterdns":
 			if inner == nil {
-				return nil, nil, fmt.Errorf("service %s needs the inner stage, which is missing or disabled", s.Name)
+				return errors.New("needs the inner stage, which is missing or disabled")
 			}
 			zone := provision.Zone(s.Service)
 			zones = append(zones, route{Zone: zone, Backend: s.Name})
-			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
-			f, secret, err := dnsBackend(s, zone, inner.Name, p)
+			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
+			f, secret, auth, err := dnsBackend(s, zone, inner.Name, p, m.DNSAuth[s.ID])
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			files = append(files, f, secret)
+			if auth != nil {
+				files = append(files, *auth)
+			}
 		case "inner":
 			f, err := innerConfig(s, m, p)
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			files = append(files, f)
 		case "reality":
@@ -393,15 +446,15 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			_ = json.Unmarshal([]byte(s.Settings), &rs)
 			if rs.Site != "" && !m.hasCert(rs.Site) {
 				skipped = append(skipped, s.Name+" (waits for the certificate of "+rs.Site+")")
-				continue
+				return nil
 			}
 			f, err := realityConfig(s, m, p)
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			files = append(files, f)
 			if m.FrontTCP {
-				backends[s.Name] = backendRef{Socket: p.socket(s.Name, "reality"), Mode: "proxy-v2", UID: p.PeerUID(s.UID)}
+				backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "reality"), Mode: "proxy-v2", UID: p.PeerUID(s.UID)}
 				var rs RealitySettings
 				_ = json.Unmarshal([]byte(s.Settings), &rs)
 				tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{rs.SNI}, Backend: s.Name})
@@ -412,14 +465,14 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		case "hy2-masq", "hy2-obfs":
 			if site := provision.SiteOf(s.Service); s.Kind == "hy2-masq" && !m.hasCert(site) {
 				skipped = append(skipped, s.Name+" (waits for the certificate of "+site+")")
-				continue
+				return nil
 			}
 			fs, err := hysteriaFiles(s, m, p)
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			files = append(files, fs...)
-			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
+			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
 			if s.Kind == "hy2-obfs" {
 				udpRoutes = append(udpRoutes, udpRoute{SalamanderPasswordFile: p.FrontSalamander(s.Name), Backend: s.Name})
 			} else {
@@ -432,7 +485,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		case "site":
 			fs, err := siteFiles(s, m, p)
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			if fs == nil {
 				skipped = append(skipped, s.Name+" (waits for its certificate)")
@@ -443,7 +496,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			// sockets it passes.
 			if !m.FrontTCP {
 				skipped = append(skipped, s.Name+" (needs the front on TCP 443)")
-				continue
+				return nil
 			}
 			var st struct {
 				SNI string `json:"sni"`
@@ -454,11 +507,11 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if s.Kind == "naive" {
 				fs, err := naiveFiles(s, m, p)
 				if err != nil {
-					return nil, nil, err
+					return err
 				}
 				if fs == nil {
 					skipped = append(skipped, s.Name+" (waits for its site's certificate)")
-					continue
+					return nil
 				}
 				files = append(files, fs...)
 				ref = backendRef{Socket: p.NaiveSocket(s.Name), Mode: "fd", UID: p.PeerUID(s.UID)}
@@ -475,27 +528,38 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			// A TLS link behind tcpmux by name (R4-15), into inner.
 			if !m.FrontTCP {
 				skipped = append(skipped, s.Name+" (needs the front on TCP 443)")
-				continue
+				return nil
 			}
 			if inner == nil {
-				return nil, nil, fmt.Errorf("service %s needs the inner stage, which is missing or disabled", s.Name)
+				return errors.New("needs the inner stage, which is missing or disabled")
 			}
 			if !m.hasCert(provision.SiteOf(s.Service)) {
 				skipped = append(skipped, s.Name+" (waits for its site's certificate)")
-				continue
+				return nil
 			}
 			fs, err := yggdrasilFiles(s, m, *inner, p)
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			files = append(files, fs...)
 			st, _, _ := YggdrasilNode(s)
-			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "fd"), Mode: "fd", UID: p.PeerUID(s.UID)}
+			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "fd"), Mode: "fd", UID: p.PeerUID(s.UID)}
 			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: s.Name})
 		case "ssh", "subscription", "api":
 			// Not data-plane processes.
 		default:
 			skipped = append(skipped, s.Name+" ("+s.Kind+")")
+		}
+		return nil
+	}
+	var errs ServiceErrors
+	for _, s := range m.Services {
+		nf, nz, nt, nu, def := len(files), len(zones), len(tcpRoutes), len(udpRoutes), tcpDefault
+		if err := one(s); err != nil {
+			files, zones, tcpRoutes, udpRoutes, tcpDefault = files[:nf], zones[:nz], tcpRoutes[:nt], udpRoutes[:nu], def
+			delete(backends, s.Name)
+			delete(backends, quicBackend(s.Name))
+			errs = append(errs, fmt.Errorf("service %s: %w", s.Name, err))
 		}
 	}
 
@@ -541,11 +605,43 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		}
 		files = append(files, File{Path: path.Join(p.Rendered, "front", "front.json"), Mode: 0o640, Group: GroupName("front"), Content: b, Service: "front"})
 	}
+	if len(errs) > 0 {
+		return files, skipped, errs
+	}
 	return files, skipped, nil
 }
 
-func dnsBackend(s Service, zone, inner string, p Paths) (cfg, secret File, err error) {
+// ServiceErrors are the services Render could not render. The files it
+// returns with them are complete for every other service and may be
+// applied: the broken ones keep their files on disk, and the front leaves
+// them out.
+type ServiceErrors []error
+
+func (e ServiceErrors) Error() string   { return errors.Join(e...).Error() }
+func (e ServiceErrors) Unwrap() []error { return e }
+
+// Partial reports whether err from Render leaves the other services' files
+// usable.
+func Partial(err error) bool {
+	var se ServiceErrors
+	return errors.As(err, &se)
+}
+
+func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string) (cfg, secret File, auth *File, err error) {
 	opts := map[string]any{}
+	// dnsauth-v1 (spec/dnsauth-v1.md): the devices' keys in a file of the
+	// service group (the front is in none, R4-28), which the backend
+	// rereads: a new or revoked device needs no restart.
+	if mode := DNSAuthMode(s.Service); mode != "off" {
+		keysFile := path.Join(p.Rendered, s.Name, DNSAuthKeys)
+		opts["auth"] = mode
+		opts["auth_keys_file"] = keysFile
+		content := "# dnsauth-v1 keys of the devices allowed on " + s.Name + ", written by rayd\n"
+		for _, l := range authKeys {
+			content += l + "\n"
+		}
+		auth = &File{Path: keysFile, Mode: 0o640, Group: GroupName(s.Name), Content: []byte(content), Service: s.Name, Reload: true}
+	}
 	var secretName string
 	var secretValue []byte
 	switch s.Kind {
@@ -564,27 +660,27 @@ func dnsBackend(s Service, zone, inner string, p Paths) (cfg, secret File, err e
 		opts["encryption_key_file"] = p.Credential(s.Name, secretName)
 	}
 	if len(s.Secrets) == 0 || len(secretValue) == 0 {
-		return cfg, secret, fmt.Errorf("service %s has no key", s.Name)
+		return cfg, secret, nil, fmt.Errorf("service %s has no key", s.Name)
 	}
 	b, err := jsonFile(map[string]any{
 		"schema":    Schema,
 		"role":      "backend",
 		"kind":      s.Kind,
 		"log":       map[string]string{"level": "warn"},
-		"socket":    p.socket(s.Name, "packet"),
+		"socket":    p.FrontSocket(s.Name, "packet"),
 		"front_uid": p.PeerUID(FrontUID),
 		"options":   opts,
 		"inner":     p.InnerSocket(inner),
 	})
 	if err != nil {
-		return cfg, secret, err
+		return cfg, secret, nil, err
 	}
 	dir := path.Join(p.Rendered, s.Name)
 	cfg = File{Path: path.Join(dir, "backend.json"), Mode: 0o640, Group: GroupName(s.Name), Content: b, Service: s.Name}
 	// Secrets are read by systemd (root), which gives the process its own
 	// copy (Paths.Credential), so the file needs no group access.
 	secret = File{Path: path.Join(dir, secretName), Mode: 0o600, Content: secretValue, Service: s.Name}
-	return cfg, secret, nil
+	return cfg, secret, auth, nil
 }
 
 // VLESSEncryption returns the server ("decryption") and client
@@ -859,7 +955,7 @@ func realityConfig(s Service, m Model, p Paths) (File, error) {
 	stream := inbound["streamSettings"].(map[string]any)
 	if m.FrontTCP {
 		// The front passes the stream with a PROXY v2 header (CONFIG.md).
-		inbound["listen"] = p.socket(s.Name, "reality") + ",0660"
+		inbound["listen"] = p.FrontSocket(s.Name, "reality") + ",0660"
 		stream["sockopt"] = map[string]any{"acceptProxyProtocol": true}
 	} else {
 		port, err := tcpPort(s)
@@ -975,7 +1071,7 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 	}
 	cfg := map[string]any{
 		"schema": Schema, "role": "backend", "kind": s.Kind, "log": map[string]string{"level": "warn"},
-		"socket": p.socket(s.Name, "packet"), "front_uid": p.PeerUID(FrontUID),
+		"socket": p.FrontSocket(s.Name, "packet"), "front_uid": p.PeerUID(FrontUID),
 		// Session stats for the channel probes' link (R4-16, niko-server v0.6).
 		"stats_socket": p.StatsSocket(s.Name),
 		"users_file":   path.Join(dir, HysteriaUsers),
@@ -1041,17 +1137,24 @@ func (p Paths) StatsSocket(service string) string { return p.socket(service, "st
 // DoHSocket is where rayd serves a DoH service for the site to pass it on.
 func (p Paths) DoHSocket(service string) string { return p.socket(service, "doh") }
 
-// NaiveSocket is where a naive process takes the connections the front
-// passes; the directory belongs to the naive user and the front's group.
-func (p Paths) NaiveSocket(service string) string {
-	return path.Join(p.Run, service+"-in", "naive.sock")
+// FrontSocket is where a backend takes what the front passes it. The
+// directory belongs to the service user and the front's group (setgid, so
+// the socket gets that group): the front reaches the socket and nothing
+// else of the service, its rendered keys least of all (S-1).
+func (p Paths) FrontSocket(service, kind string) string {
+	return path.Join(p.FrontDir(service), kind+".sock")
 }
+
+// FrontDir is the directory of a service's FrontSockets.
+func (p Paths) FrontDir(service string) string { return path.Join(p.Run, service+"-in") }
+
+// NaiveSocket is where a naive process takes the connections the front
+// passes.
+func (p Paths) NaiveSocket(service string) string { return p.FrontSocket(service, "naive") }
 
 // NaiveQUICSocket is where a naive process takes its QUIC datagrams from
 // the front (naive-quic, R3-5).
-func (p Paths) NaiveQUICSocket(service string) string {
-	return path.Join(p.Run, service+"-in", "quic.sock")
-}
+func (p Paths) NaiveQUICSocket(service string) string { return p.FrontSocket(service, "quic") }
 
 // DoH3Socket is where rayd takes the DoH service's QUIC datagrams (DoH3).
 func (p Paths) DoH3Socket(service string) string { return p.socket(service, "doh3") }

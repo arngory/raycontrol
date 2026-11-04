@@ -99,6 +99,7 @@ func TestYggdrasilWithNikoServer(t *testing.T) {
 			t.Fatal(err)
 		}
 		os.MkdirAll(filepath.Join(paths.Run, "ygg"), 0o700)
+		os.MkdirAll(paths.FrontDir("ygg"), 0o700) // the socket for the front (S-1)
 		os.WriteFile(paths.Credential("ygg", name), b, 0o600)
 	}
 	backend := filepath.Join(paths.Rendered, "ygg", "backend.json")

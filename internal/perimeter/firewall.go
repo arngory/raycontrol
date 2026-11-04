@@ -62,6 +62,9 @@ type NFT struct {
 	// FilterLoopback drops the "accept everything on lo" rule. Only for tests
 	// in a network namespace, where all traffic is loopback.
 	FilterLoopback bool
+	// GuardUIDs are the data-plane processes (DataPlaneUIDs when empty):
+	// they carry users' traffic, which must not reach the node itself.
+	GuardUIDs string
 
 	destroy bool // nft and kernel support "destroy element"
 }
@@ -81,6 +84,10 @@ func (n *NFT) run(script string) error {
 	return nil
 }
 
+// DataPlaneUIDs are the UIDs of the front and the data-plane services
+// (render.FrontUID to store.LastServiceUID, docs/08-decisions.md, R1-6).
+const DataPlaneUIDs = "9100-9179"
+
 // Ruleset returns the table definition. It replaces any previous version of
 // the table atomically.
 func (n *NFT) Ruleset() string {
@@ -97,6 +104,10 @@ func (n *NFT) Ruleset() string {
 		lo = "# loopback filtered (test)"
 		loNAT = "chain output_nat { type nat hook output priority -100; policy accept; udp dport @rot_udp redirect to : udp dport map @rot_udp; " +
 			"tcp dport @acme_redirect redirect to : tcp dport map @acme_redirect; }"
+	}
+	guard := n.GuardUIDs
+	if guard == "" {
+		guard = DataPlaneUIDs
 	}
 	return fmt.Sprintf(`table inet %[1]s {}
 delete table inet %[1]s
@@ -168,8 +179,24 @@ table inet %[1]s {
 		ip saddr . meta l4proto . th dport @allow4 accept
 		ip6 saddr . meta l4proto . th dport @allow6 accept
 	}
+
+	# Users' traffic does not reach the node itself (S-2): a proxy exit
+	# connecting to one of the node's own addresses would come in on lo,
+	# past SPA and the admin addresses, to SSH, the API and the
+	# subscription. Loopback stays with the processes' own rules (Xray's
+	# block list, systemd's IPAddressDeny): the channel probe goes there.
+	chain output {
+		type filter hook output priority 0; policy accept;
+		meta skuid %[7]s fib daddr type local ip daddr != 127.0.0.0/8 jump to_node
+		meta skuid %[7]s fib daddr type local ip6 daddr != ::1 jump to_node
+	}
+	chain to_node {
+		counter comment "data-plane-to-node"
+		meta l4proto tcp reject with tcp reset
+		reject with icmpx admin-prohibited
+	}
 }
-`, Table, limit, n.NflogGroup, lo, loNAT, lo)
+`, Table, limit, n.NflogGroup, lo, loNAT, lo, guard)
 }
 
 // Setup installs the table and detects whether "destroy element" works.

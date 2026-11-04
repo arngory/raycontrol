@@ -178,6 +178,17 @@ message GetStatusResponse {
   uint32 active_devices = 6;
   // SPA ports open right now (previous, current and next slot).
   repeated uint32 spa_ports = 7;
+  // rayd's loops: when each last succeeded and failed (O-2).
+  repeated LoopHealth loops = 8;
+}
+
+message LoopHealth {
+  string name = 1;     // apply, acme <site>, dns, reality-rotation, ...
+  int64 last_ok = 2;   // unix seconds, 0 = never
+  int64 last_error = 3; // unix seconds, 0 = never
+  string error = 4;    // the last error
+  uint64 runs = 5;
+  uint64 errors = 6;
 }
 
 message User {

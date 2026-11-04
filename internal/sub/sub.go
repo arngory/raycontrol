@@ -231,6 +231,10 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 					return nil, err
 				}
 				q.Set("niko-dns", "dnstt;;"+zone+";"+pub)
+				// Sign the queries with the device's key (spec/dnsauth-v1.md).
+				if render.DNSAuthMode(s.Service) != "off" {
+					q.Set("niko-dnsauth", "v1")
+				}
 			} else {
 				var settings struct {
 					Method int `json:"encryption_method"`
@@ -413,7 +417,8 @@ func HysteriaLink(m render.Model, s render.Service, password string) string {
 	}
 	q := url.Values{}
 	q.Set("sni", st.SNI)
-	q.Set("insecure", "0")
+	// No insecure parameter at all, not even 0: Niko rejects a line that
+	// has one (RAYCONTROL.md §22), and the certificate is checked anyway.
 	if s.Kind == "hy2-obfs" {
 		q.Set("obfs", "salamander")
 		q.Set("obfs-password", string(s.Secrets[provision.SecretObfsPassword]))

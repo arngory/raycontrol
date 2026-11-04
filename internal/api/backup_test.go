@@ -3,15 +3,18 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"golang.org/x/sys/unix"
 
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/health"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -71,9 +74,13 @@ func TestBackup(t *testing.T) {
 }
 
 func TestMetrics(t *testing.T) {
-	_, sock, _ := startServer(t)
+	srv, sock, _ := startServer(t)
 	ctx := context.Background()
 	c := NewUnixClient(sock)
+	// rayd's loops report here (O-2).
+	srv.Health = &health.Board{Now: func() time.Time { return time.Unix(1700000000, 0) }}
+	srv.Health.Done("apply", nil)
+	srv.Health.Done("acme site", errors.New("site.example.org does not resolve"))
 	for _, svc := range [][3]string{{"reality", "reality", `{"target":"www.example.org:443"}`}, {"hy2-obfs", "hy2", ""}} {
 		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: svc[0], Name: svc[1], SettingsJson: svc[2]})); err != nil {
 			t.Fatal(err)
@@ -107,13 +114,25 @@ func TestMetrics(t *testing.T) {
 		`raycontrol_certificate_not_after_seconds{service="hy2",kind="hy2-obfs"} `,
 		`raycontrol_reality_next_from_seconds{service="reality"} 0`,
 		"# TYPE raycontrol_dns_problems gauge\nraycontrol_dns_problems ",
+		`raycontrol_loop_last_success_seconds{loop="apply"} 1700000000`,
+		`raycontrol_loop_last_error_seconds{loop="acme site"} 1700000000`,
+		`raycontrol_loop_last_success_seconds{loop="acme site"} 0`,
+		`raycontrol_loop_errors_total{loop="acme site"} 1`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("no %q in\n%s", want, text)
 		}
 	}
-	if strings.Contains(text, "alice") || strings.Contains(text, "phone") {
-		t.Errorf("names of users or devices in the metrics:\n%s", text)
+	if strings.Contains(text, "alice") || strings.Contains(text, "phone") || strings.Contains(text, "does not resolve") {
+		t.Errorf("names of users or devices, or error text, in the metrics:\n%s", text)
+	}
+	st, err := c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := st.Msg.Loops; len(l) != 2 || l[0].Name != "acme site" || l[0].Error != "site.example.org does not resolve" || l[0].LastOk != 0 ||
+		l[1].Name != "apply" || l[1].LastOk != 1700000000 {
+		t.Fatalf("status loops %v", l)
 	}
 	// Each family is one block: its samples follow its TYPE line.
 	family := ""

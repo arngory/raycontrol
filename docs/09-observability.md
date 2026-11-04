@@ -87,3 +87,22 @@ journald хоста (`SystemMaxUse`, `MaxRetentionSec`).
 
 Аккаунты платформ для белых списков (R5) — отдельная тема: там учётные данные чужие, и правила для них решаются вместе с
 движками olcRTC и OpenFlux.
+
+## 8. Профили под нагрузкой
+
+Для разбора производительности на VPS (разбор, O-3). По умолчанию выключено: профиль показывает, что делает процесс,
+и пока снимается, ест CPU.
+
+- **rayd** (и `rayd naive`, `rayd site`) отдаёт профили Go, если задана переменная `RAYD_PPROF`: `unix:ПУТЬ` (сокет
+  0600) или адрес на loopback. Другие адреса не принимаются.
+
+  ```
+  systemctl edit rayd        # [Service] Environment=RAYD_PPROF=unix:/run/raycontrol/rayd-pprof.sock
+  systemctl restart rayd
+  curl --unix-socket /run/raycontrol/rayd-pprof.sock -o cpu.pb.gz 'http://x/debug/pprof/profile?seconds=30'
+  go tool pprof -top cpu.pb.gz
+  ```
+
+  После замера — `systemctl revert rayd && systemctl restart rayd`.
+- **niko-server и Xray** — `perf record -g -p <PID> -- sleep 30`, затем `perf report`: символы Go в бинарниках есть.
+- Замеры на loopback раздувают долю фронта: мерить на ноде под настоящим трафиком.

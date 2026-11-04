@@ -315,7 +315,15 @@ x rayctl service add hy2-obfs hy2o >/dev/null
 x rayctl apply >/dev/null || fail "rayctl apply for the API, REALITY, naive, Yggdrasil and Hysteria2"
 units="$(x systemctl cat niko-ygg.service)" || fail "no unit for Yggdrasil"
 [[ $units == *PrivateNetwork=yes* && $units == *SupplementaryGroups=niko-inner* ]] || fail "the Yggdrasil unit is not unix-only with inner: $units"
-[[ $(x id -nG niko-front) == *niko-ygg* ]] || fail "the front cannot reach the Yggdrasil socket"
+# The front reaches each backend's socket through a directory of the
+# service user and the front's group, not through the service's group:
+# rendered keys and credentials stay out of its reach (S-1).
+[[ $(x id -nG niko-front) == niko-front ]] || fail "the front is in other groups: $(x id -nG niko-front)"
+for d in ygg-in dns-in reality-in; do
+	[[ $(x stat -c '%a %G' "/run/niko/$d") == "2750 niko-front" ]] || fail "no socket directory /run/niko/$d for the front"
+done
+x runuser -u niko-front -- cat /var/lib/raycontrol/rendered/inner/xray.json >/dev/null 2>&1 && fail "the front reads inner's config"
+x runuser -u niko-front -- cat /var/lib/raycontrol/rendered/dns/backend.json >/dev/null 2>&1 && fail "the front reads a backend's config"
 # Public peers (R4-18): the unit goes out to the internet with them, and back
 # to no network without.
 x rayctl service set ygg peers=tls://192.0.2.10:443 >/dev/null || fail "rayctl service set ygg peers"
@@ -366,6 +374,26 @@ if x systemctl is-active --quiet systemd-journald; then
 	x journalctl -u rayspa -p warning --no-pager | grep -q "table was removed" || fail "rayspa's warning is not at warning priority"
 fi
 
+# rayspa starting while rayd is down takes its saved snapshot: the admin
+# addresses reach SSH without rayd (Q-3).
+log "$distro: rayspa without rayd"
+x systemctl stop rayd.service
+x systemctl restart rayspa.service
+wait_table "rayspa restart without rayd"
+x test -s /var/lib/rayspa/snapshot.pb || fail "rayspa saved no snapshot"
+# The table comes up empty first; the saved snapshot follows right after.
+restored=0
+for _ in $(seq 20); do
+	if x nft list set inet raycontrol admin4 | grep -q 192.0.2.1; then
+		restored=1
+		break
+	fi
+	sleep 0.5
+done
+[[ $restored == 1 ]] || fail "rayspa without rayd lost the admin addresses"
+x systemctl start rayd.service
+wait_active rayd.service rayspa.service "${dataplane[@]}"
+
 log "$distro: reboot"
 docker restart "$node" >/dev/null
 boot
@@ -390,6 +418,9 @@ log "$distro: update and rollback"
 # signature): replaced, restarted, applied, checked; then put back.
 x /usr/local/bin/rayctl update -local /opt/rc -yes || fail "rayctl update"
 x test -s /var/lib/raycontrol-install/previous/rayd || fail "update kept no previous binaries"
+# And the database as it was with rayd stopped, for a rollback across a
+# schema change (Q-2).
+[[ $(x stat -c %a /var/lib/raycontrol-install/previous/rayd.db) == 600 ]] || fail "update kept no copy of the database"
 wait_active rayd.service rayspa.service "${dataplane[@]}"
 # Channel probes still work after the restart (UDP echo included).
 out="$(client -channel -addr "$ip" "$laptop")" || fail "probe after update: $out"

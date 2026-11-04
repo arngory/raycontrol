@@ -173,11 +173,12 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 			return err
 		}
 	}
+	// Exactly these groups: systemd starts a unit with the user's groups
+	// from /etc/group, so one the plan no longer lists must go (the front
+	// left the backends' groups, S-1). These users are raycontrol's own.
 	for _, u := range plan.Users {
-		if len(u.ExtraGroups) > 0 {
-			if err := h.run("usermod", "--append", "--groups", strings.Join(u.ExtraGroups, ","), u.Name); err != nil {
-				return err
-			}
+		if err := h.run("usermod", "--groups", strings.Join(u.ExtraGroups, ","), u.Name); err != nil {
+			return err
 		}
 	}
 

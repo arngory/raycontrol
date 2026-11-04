@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"github.com/arngory/raycontrol/internal/spa"
 	"io"
 	"log/slog"
 	"net"
@@ -168,10 +169,19 @@ func (c *TCPCarrier) handle(conn net.Conn) {
 		timeout = 3 * time.Second
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(timeout))
-	// One byte more than the maximum shows an oversized packet.
-	data, err := io.ReadAll(io.LimitReader(conn, int64(c.LenMax()+1)))
+	// One byte more than the maximum shows an oversized packet. A
+	// ClientHello carrier (spa-v2.md §10.1) is longer than a bare packet.
+	limit := max(c.LenMax()+1, spa.TLSCarrierMax+1)
+	data, err := io.ReadAll(io.LimitReader(conn, int64(limit)))
 	if len(data) == 0 || (err != nil && !errors.Is(err, io.EOF) && !isTimeout(err)) {
 		return
+	}
+	if spa.IsTLSCarrier(data) {
+		if data, err = spa.FromTLSCarrier(data); err != nil {
+			return
+		}
+	} else if len(data) > c.LenMax() {
+		data = data[:c.LenMax()+1] // oversized: refused as before
 	}
 	addr, err := netip.ParseAddrPort(conn.RemoteAddr().String())
 	if err != nil {

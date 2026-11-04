@@ -58,6 +58,8 @@ type Manager struct {
 	Issue func(ctx context.Context, names []string, key crypto.Signer) ([][]byte, error)
 	// Notify runs after a certificate is stored (rayd re-renders).
 	Notify func()
+	// Report, if set, gets each order's outcome per site (O-2).
+	Report func(site string, err error)
 	Log    *slog.Logger
 	// Every is the check interval; failures back off from it up to a day.
 	Every time.Duration
@@ -148,6 +150,9 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 		if err != nil && len(next) > 0 && len(order) == len(want) && due(chain, names, now) {
 			m.log().Warn("certificate with the next name not issued, renewing without it", "service", svc.Name, "err", err)
 			err = m.issue(ctx, svc, names)
+		}
+		if m.Report != nil {
+			m.Report(svc.Name, err)
 		}
 		if err != nil {
 			m.fails[svc.Name]++

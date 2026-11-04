@@ -109,7 +109,7 @@ func TestYggdrasilService(t *testing.T) {
 		}
 	}
 	json.Unmarshal(file("/r/ygg/backend.json").Content, &backend)
-	if backend.Kind != "yggdrasil" || backend.Socket != "/run/niko/ygg/fd.sock" || backend.Inner != "/run/niko/inner/vless.sock" ||
+	if backend.Kind != "yggdrasil" || backend.Socket != "/run/niko/ygg-in/fd.sock" || backend.Inner != "/run/niko/inner/vless.sock" ||
 		backend.Options.PrivateKeyFile != "/run/niko/ygg/node.key" || !slices.Equal(backend.Options.ExitPorts, []int{settings.ExitPort}) {
 		t.Fatalf("backend.json: %s", file("/r/ygg/backend.json").Content)
 	}
@@ -132,7 +132,7 @@ func TestYggdrasilService(t *testing.T) {
 		}
 	}
 	json.Unmarshal(file("/r/front/front.json").Content, &front)
-	if b := front.Backends["ygg"]; b.Mode != "fd" || b.Socket != "/run/niko/ygg/fd.sock" || b.UID != y.UID ||
+	if b := front.Backends["ygg"]; b.Mode != "fd" || b.Socket != "/run/niko/ygg-in/fd.sock" || b.UID != y.UID ||
 		!slices.ContainsFunc(front.TCP.Routes, func(r struct {
 			SNI     []string
 			Backend string

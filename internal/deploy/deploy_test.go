@@ -66,8 +66,9 @@ func TestBuild(t *testing.T) {
 	if users["niko-front"].UID != 9100 || users["rayd"].UID != 9190 || users["rayspa"].UID != 9191 {
 		t.Fatalf("fixed uids: %+v", users)
 	}
-	// The front reaches REALITY's socket (tcpmux, R2-15) and the DNS backends.
-	if !slices.Equal(users["niko-front"].ExtraGroups, []string{"niko-reality", "niko-dns"}) ||
+	// The front reaches REALITY's socket (tcpmux, R2-15) and the DNS backends
+	// through their -in directories, not their groups (S-1).
+	if len(users["niko-front"].ExtraGroups) != 0 ||
 		!slices.Equal(users["niko-dns"].ExtraGroups, []string{"niko-inner"}) ||
 		!slices.Equal(users["rayd"].ExtraGroups, []string{"niko-dns", "niko-front", "niko-inner", "niko-reality"}) {
 		t.Fatalf("groups: %+v", users)
@@ -104,7 +105,7 @@ func TestBuild(t *testing.T) {
 		}
 	}
 	front := file(p, "/etc/systemd/system/niko-front.service")
-	if !strings.Contains(front, "AmbientCapabilities=CAP_NET_BIND_SERVICE") || !strings.Contains(front, "SupplementaryGroups=niko-reality niko-dns") ||
+	if !strings.Contains(front, "AmbientCapabilities=CAP_NET_BIND_SERVICE") || strings.Contains(front, "SupplementaryGroups") ||
 		!strings.Contains(front, "After=network-online.target niko-dns.service niko-reality.service") {
 		t.Errorf("front unit:\n%s", front)
 	}
@@ -186,7 +187,7 @@ func TestHostApply(t *testing.T) {
 	all := strings.Join(cmds, "\n")
 	for _, want := range []string{
 		"useradd --system --uid 9100 --gid niko-front", "groupadd --system --gid 9100 niko-front",
-		"usermod --append --groups niko-reality,niko-dns niko-front",
+		"usermod --groups  niko-front", "usermod --groups niko-inner niko-dns",
 		"systemctl enable --now niko-inner.service", "systemctl disable --now niko-old.service",
 		"systemd-tmpfiles --create", "systemctl try-restart systemd-resolved.service",
 	} {
@@ -646,7 +647,10 @@ func TestBuildHysteria(t *testing.T) {
 		t.Error("hy2-obfs gets no salamander password")
 	}
 	front := file(p, "/etc/systemd/system/niko-front.service")
-	for _, want := range []string{"SupplementaryGroups=niko-hy2-masq niko-hy2-obfs",
+	if strings.Contains(front, "SupplementaryGroups") {
+		t.Errorf("the front is in the backends' groups (S-1):\n%s", front)
+	}
+	for _, want := range []string{
 		"ExecStartPre=+install -m 0400 -o niko-front -g niko-front /var/lib/raycontrol/rendered/front/hy2-obfs.salamander /run/niko/front/hy2-obfs.salamander",
 		"RuntimeDirectory=niko/front\n", "AmbientCapabilities=CAP_NET_BIND_SERVICE"} {
 		if !strings.Contains(front, want) {

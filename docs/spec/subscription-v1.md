@@ -76,12 +76,24 @@ Payload:
 | `niko-svc` | ID сервиса для scope SPA |
 | `niko-dns` | DNS-туннель: `dnstt;<резолвер>;<зона>;<pubkey hex>` или `masterdns;<резолверы через ,>;<зона>;<метод>` |
 | `niko-dnskey` | ключ MasterDnsVPN (текст, как в его файле ключа) |
+| `niko-dnsauth` | `v1`: подписывать запросы dnstt ключом устройства ([`dnsauth-v1.md`](dnsauth-v1.md)); нет параметра — не подписывать |
 | `niko-pin` | SHA-256 SPKI сертификата (base64url), например для `hy2-obfs` (R3) |
 | `niko-inner` | вторая ступень для протоколов с собственной ссылкой (R5) |
 | `niko-ygg` | Yggdrasil: `<пир>;<ключ пользователя>` — URI пира и seed ed25519 (hex, 32 байта) (R4-15) |
 | `niko-ygg-via` | Yggdrasil, повторяемый: публичный пир ноды — запасной путь через сеть Yggdrasil (R4-18) |
 
 Пустой резолвер означает «выбирает клиент» (резолвер сети, свой список).
+
+**Строгий разбор (Niko 1.26, RAYCONTROL.md §22).** Строку, которая нарушает одно из правил, клиент отбрасывает молча:
+- схемы — только `vless://`, `hysteria2://`, `naive+https://`, `naive+quic://` и `https://` для DoH;
+- у VLESS есть `encryption`, и это не `none`; у REALITY есть `pqv`;
+- параметров `insecure` и `allowInsecure` нет совсем, даже со значением 0;
+- `hy2-obfs` — только с `niko-pin`;
+- у naive `cert` и `extra-headers` клиент не читает: нода на них не полагается.
+
+Подписка, API и замеры не перенаправляют: ответ 3xx клиент считает ошибкой, и нода на любой такой путь отвечает 404.
+Правила проверяет тест `internal/sub` `TestLinksForStrictClient`: ссылки всех видов сервисов и ссылки `next` при
+ротации.
 
 Те же ссылки без подписи печатает `rayctl user export NAME` (P-10, R4-17): по строке комментария и ссылке на профиль,
 при ожидаемой смене — и следующая ссылка с моментом `from`.
@@ -123,8 +135,8 @@ vless://<uuid>@<host>:443?type=raw&security=reality&flow=xtls-rprx-vision&encryp
 Стандартная ссылка Hysteria2 с параметрами Niko:
 
 ```
-hysteria2://<пароль>@<host>:<порт>/?sni=<имя>&insecure=0&niko-node=<node_id>&niko-svc=<id>#hy2-masq
-hysteria2://<пароль>@<host>:<порт>/?sni=<имя>&insecure=0&obfs=salamander&obfs-password=<пароль salamander>
+hysteria2://<пароль>@<host>:<порт>/?sni=<имя>&niko-node=<node_id>&niko-svc=<id>#hy2-masq
+hysteria2://<пароль>@<host>:<порт>/?sni=<имя>&obfs=salamander&obfs-password=<пароль salamander>
   &niko-pin=<SPKI SHA-256, base64url>&pinSHA256=<SHA-256 сертификата, hex>&niko-node=<node_id>&niko-svc=<id>#hy2-obfs
 ```
 
