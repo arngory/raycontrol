@@ -22,6 +22,7 @@ import (
 	"github.com/arngory/raycontrol/internal/api"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
+	"github.com/arngory/raycontrol/internal/logx"
 	"github.com/arngory/raycontrol/internal/perimeter"
 )
 
@@ -85,7 +86,7 @@ func run(args []string) error {
 	if *debug {
 		level = slog.LevelDebug
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	log := logx.New(os.Stderr, level)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
