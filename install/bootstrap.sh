@@ -31,7 +31,9 @@
 # Debian 12/13, Ubuntu 24.04 and Rocky Linux 9/10 (the check tells about the
 # rest). The signature is checked with openssl, so minisign is not needed.
 #
-# RAYCONTROL_VERSION=v0.2.0 pins a release; default is the latest one.
+# RAYCONTROL_VERSION=v0.9.0 pins a release; default is the latest one. The
+# version is read from the signature, so a mirror cannot swap one release for
+# another, and nothing older than MIN_VERSION is installed.
 # RAYCONTROL_MIRRORS="https://mirror.example/ ..." are URL prefixes tried when
 # github.com does not answer (RU, CN); the signature check makes any mirror
 # safe to use. The defaults are public GitHub proxies.
@@ -45,6 +47,11 @@ VERSION="${RAYCONTROL_VERSION:-latest}"
 # (docs/RELEASE.md). Only this base64 line matters; the "untrusted comment"
 # line of the .pub file is not part of the key.
 PUBKEY="RWQBergjLoDHqeme5vyIuIRXJLjTj1EF3jR1nlWBVJO3rWxgy9SZj4bD"
+# MIN_VERSION is the oldest release this script installs: the first one with
+# every rayctl command it calls. It is raised too when a release closes a
+# hole, so that a mirror cannot hand out an older signed release as the
+# latest one (docs/RELEASE.md).
+MIN_VERSION="v0.9.0"
 
 die() {
 	echo "bootstrap: $*" >&2
@@ -113,6 +120,45 @@ _verify_minisig() {
 	} >"$dir/gmsg" || return 1
 	sed -n 4p "$sigfile" | base64 -d >"$dir/gsig" 2>/dev/null || return 1
 	openssl pkeyutl -verify -pubin -inkey "$dir/pk.pem" -rawin -in "$dir/gmsg" -sigfile "$dir/gsig" >/dev/null 2>&1 || return 1
+}
+
+# signed_version SIGFILE prints the release named by a verified signature's
+# trusted comment ("trusted comment: raycontrol v0.9.0").
+signed_version() {
+	local t
+	t="$(sed -n 3p "$1")"
+	[[ $t == "trusted comment: raycontrol "* ]] || return 1
+	t=${t#trusted comment: raycontrol }
+	[[ $t =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+	printf '%s\n' "$t"
+}
+
+# version_lt A B: release A (vX.Y.Z) is older than release B.
+version_lt() {
+	local a b i
+	IFS=. read -ra a <<<"${1#v}"
+	IFS=. read -ra b <<<"${2#v}"
+	for i in 0 1 2; do
+		if ((10#${a[i]} != 10#${b[i]})); then
+			((10#${a[i]} < 10#${b[i]}))
+			return
+		fi
+	done
+	return 1
+}
+
+# check_version SIGNED says why the signed release cannot be installed: it is
+# not the one asked for (RAYCONTROL_VERSION), or it is older than MIN_VERSION.
+check_version() {
+	local signed=$1
+	if [[ $VERSION != latest && $signed != "$VERSION" ]]; then
+		echo "asked for $VERSION, the signature says $signed"
+		return 1
+	fi
+	if version_lt "$signed" "$MIN_VERSION"; then
+		echo "the release is $signed, older than $MIN_VERSION, the oldest this bootstrap.sh installs"
+		return 1
+	fi
 }
 
 # install_deps installs what is missing: curl, openssl, nft and polkit (rayd
@@ -195,6 +241,12 @@ main() {
 	if [[ $CHECK_ONLY == 1 && $REMOVE_V0 == 1 ]]; then
 		die "-check changes nothing and -remove-v0 removes raycontrol v0: use one of them"
 	fi
+	if [[ $VERSION != latest ]]; then
+		[[ $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "RAYCONTROL_VERSION is vX.Y.Z, not $VERSION"
+		if version_lt "$VERSION" "$MIN_VERSION"; then
+			die "this bootstrap.sh installs $MIN_VERSION or newer; for $VERSION take the one of that release: https://raw.githubusercontent.com/${REPO}/${VERSION}/install/bootstrap.sh"
+		fi
+	fi
 	[[ $EUID -eq 0 ]] || die "run as root"
 	[[ -d /run/systemd/system ]] || die "systemd is required"
 	case "$(uname -m)" in
@@ -225,6 +277,10 @@ main() {
 			fetch "$base/$f" "$tmp/$f" || die "cannot download $f"
 		done
 		verify_minisig "$tmp/SHA256SUMS" "$tmp/SHA256SUMS.minisig" "$PUBKEY" || die "release signature does not verify"
+		local signed why
+		signed="$(signed_version "$tmp/SHA256SUMS.minisig")" || die "the signature names no raycontrol release"
+		why="$(check_version "$signed")" || die "$why"
+		log "release $signed, signature verified"
 		(cd "$tmp" && grep " ${tarball}\$" SHA256SUMS | sha256sum -c -) || die "checksum mismatch"
 		tar -xzf "$tmp/$tarball" -C "$tmp"
 	fi
