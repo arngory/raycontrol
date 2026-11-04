@@ -194,7 +194,9 @@ func TestEndpoint(t *testing.T) {
 		p.Probe == nil || p.Probe.V != 1 || p.Probe.UDP || p.Probe.Tunnel != probe.Name ||
 		len(p.Probe.TunnelSvc) != 1 || p.Probe.TunnelSvc[0] != p.Profiles[0].Svc ||
 		// The report fields beyond the first ones of v1 (Niko §20).
-		!slices.Equal(p.Probe.Report, []string{"udp_mtu"}) {
+		!slices.Equal(p.Probe.Report, []string{"udp_mtu"}) ||
+		// The SPA carriers: UDP only without -spa-tcp.
+		p.SPA == nil || !slices.Equal(p.SPA.Carriers, []string{"udp"}) {
 		t.Fatalf("payload %+v", p)
 	}
 	for _, auth := range []bool{false, true} {

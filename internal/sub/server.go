@@ -42,6 +42,9 @@ type Server struct {
 	// Hints, when set, gives the hint for the network of an address and the
 	// services of the profiles (R4-21).
 	Hints func(ctx context.Context, addr netip.Addr, svcs []uint16) *summary.Hints
+	// TCPCarrier: the node takes SPA over TCP, bare and as a ClientHello
+	// (rayd -spa-tcp); the subscription lists the carriers.
+	TCPCarrier bool
 	now   func() time.Time
 
 	mu sync.Mutex // serialises seq
@@ -178,6 +181,10 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 	p := Payload{
 		V: 1, NodeID: m.NodeID, Seq: seq, Time: now.Unix(), Issued: now.Unix(),
 		Expires: now.Add(Lifetime).Unix(), Profiles: profiles,
+		SPA: &SPAHint{Carriers: []string{"udp"}},
+	}
+	if s.TCPCarrier {
+		p.SPA.Carriers = append(p.SPA.Carriers, "tcp", "tls")
 	}
 	if s.Probe != nil {
 		p.Probe = &ProbeHint{V: 1, UDP: s.Probe.UDPPort != 0, Tunnel: probe.Name}

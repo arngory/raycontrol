@@ -65,6 +65,15 @@ type Payload struct {
 	// subscription was asked from, out of the client summaries (R4-21,
 	// probe-v1 §6.2); only with enough reports from that network.
 	Hints *summary.Hints `json:"hints,omitempty"`
+	// SPA lists the carriers the node takes (spa-v2 §10, §10.1): a client
+	// skips what is not there instead of trying it. Nodes before v0.10.1
+	// do not send it.
+	SPA *SPAHint `json:"spa,omitempty"`
+}
+
+// SPAHint: "udp", "tcp" (bare, §10), "tls" (ClientHello, §10.1).
+type SPAHint struct {
+	Carriers []string `json:"carriers"`
 }
 
 // ProbeHint: probe-v1 on the subscription endpoint; UDP: the echo on the

@@ -247,7 +247,7 @@ func cmdServe(args []string) error {
 	go checkRealityTargets(ctx, st, hb, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
 	go serveRemote(ctx, &api.Remote{Server: srv, Log: log}, srv.Changes)
-	if err := startSubscription(ctx, st, paths, log, *probeDaily); err != nil {
+	if err := startSubscription(ctx, st, paths, log, *probeDaily, *spaTCP); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
 	log.Info("serving", "socket", *socket, "node", fmt.Sprintf("%x", params.NodeID))
@@ -596,7 +596,7 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 
 // startSubscription serves the subscription endpoint on the port of the
 // subscription service, if it is enabled.
-func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, probeDailyMiB int) error {
+func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, probeDailyMiB int, tcpCarrier bool) error {
 	svc, err := st.ServiceByName(ctx, provision.SubscriptionService)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !svc.Enabled) {
 		log.Info("subscription service disabled")
@@ -621,7 +621,7 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 	if err != nil {
 		return err
 	}
-	s := &sub.Server{Store: st, Keys: keys, Log: log}
+	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier}
 	port := int(ports[0].Num)
 	addr := ":" + strconv.Itoa(port)
 	// Channel probes (R4-16) on the same endpoint, and their UDP echo on
