@@ -133,6 +133,8 @@ jobs:
           for c in rayd rayspa rayctl; do CGO_ENABLED=0 go build -trimpath -o bin/$c ./cmd/$c; done
           # The test AS database for the hints of the client summaries.
           go run ./test/install/asndb -o bin/asn-test.mmdb 0.0.0.0/0
+          # Holds port 443 for the refusal of the host check.
+          CGO_ENABLED=0 go build -o bin/listen ./test/install/listen
       - uses: actions/download-artifact@v4
         with:
           name: xray

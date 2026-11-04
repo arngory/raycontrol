@@ -64,6 +64,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   summary api ipinfo [-token-file F] | none the online AS lookup for addresses the databases miss
   summary db FILE.mmdb | -remove            an AS database of your own before the release's (root)
 
+  check [-host ADDR] [-domain D] [-services a,b]
+                                              whether this host can run a node: what is required (install
+                                              refuses without it), what is advised; changes nothing (root)
   install -host ADDR [-domain D] [-admin A] [-cloudflare-token-file F] [-services reality,hy2-masq,hy2-obfs,dnstt,masterdns|none]
           [-dataplane DIR]                    set the node up on this host (root); with -domain REALITY by default
   apply                                       install what the current services need (root)
@@ -167,6 +170,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.audit(ctx, args[1:])
 	case "admin":
 		return c.adminAccess(ctx, args[1:])
+	case "check":
+		return c.check(ctx, args[1:])
 	case "install":
 		return c.install(ctx, args[1:])
 	case "apply":

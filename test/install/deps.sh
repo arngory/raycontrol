@@ -16,11 +16,19 @@ base=${BASE[$distro]:-}
 script=$EXTRA_CA_SETUP'
 set -eu
 . /i/bootstrap.sh
+before=""
+for c in curl openssl nft pkcheck; do command -v "$c" >/dev/null || before="$before $c"; done
 install_deps
 for c in curl openssl nft pkcheck sha256sum tar base64 mktemp; do
 	command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 1; }
 done
 echo "deps ok: $(nft --version), $(openssl version)"
+# A refused host gets back what it had: what was missing is missing again.
+remove_deps
+for c in $before; do
+	if command -v "$c" >/dev/null; then echo "remove_deps left $c" >&2; exit 1; fi
+done
+echo "removed again:$before"
 '
 net_args
 log "install_deps on $base"
