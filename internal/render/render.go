@@ -663,6 +663,10 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string) (cfg,
 	// service group (the front is in none, R4-28), which the backend
 	// rereads: a new or revoked device needs no restart.
 	if mode := DNSAuthMode(s.Service); mode != "off" {
+		if mode != "optional" && mode != "required" {
+			// The backend would refuse to start, or worse, read it as off.
+			return cfg, secret, nil, fmt.Errorf("service %s: auth %q: off, optional or required", s.Name, mode)
+		}
 		keysFile := path.Join(p.Rendered, s.Name, DNSAuthKeys)
 		opts["auth"] = mode
 		opts["auth_keys_file"] = keysFile

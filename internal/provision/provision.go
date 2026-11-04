@@ -286,6 +286,9 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 
 	switch svc.Kind {
 	case "dnstt", "masterdns":
+		if a, ok := settings["auth"]; ok && (svc.Kind != "dnstt" || !slices.Contains([]any{"off", "optional", "required"}, a)) {
+			return svc, fmt.Errorf("%w auth %v: dnstt only, off, optional or required (spec/dnsauth-v1.md)", store.ErrInvalid, a)
+		}
 		if _, ok := settings["zone"]; !ok {
 			zone, err := newZone(ctx, st, all)
 			if err != nil {

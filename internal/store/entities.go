@@ -10,6 +10,7 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/spa"
@@ -198,6 +199,12 @@ func (s *Store) CreateService(ctx context.Context, svc Service) (Service, error)
 	}
 	if HasProcess(svc.Kind) && !processNameRE.MatchString(svc.Name) {
 		return svc, fmt.Errorf("%w service name %q: services with a process need 1-27 of a-z 0-9 -", ErrInvalid, svc.Name)
+	}
+	// A process's runtime directories are <name>, <name>-in (what the front
+	// passes) and <name>-api (Xray's API), its user niko-<name>: "x-in"
+	// would take x's, "front" the front's.
+	if HasProcess(svc.Kind) && (svc.Name == "front" || strings.HasSuffix(svc.Name, "-in") || strings.HasSuffix(svc.Name, "-api")) {
+		return svc, fmt.Errorf("%w service name %q: front and names ending in -in or -api are taken", ErrInvalid, svc.Name)
 	}
 	svc.CreatedAt = s.now().Truncate(time.Second)
 	err := s.tx(ctx, func(tx *sql.Tx) error {

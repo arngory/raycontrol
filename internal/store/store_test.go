@@ -380,3 +380,24 @@ func TestRelays(t *testing.T) {
 		t.Fatalf("delete twice: %v", err)
 	}
 }
+
+// A process's runtime directories are <name>, <name>-in and <name>-api: a
+// service may not take another's, nor the front's.
+func TestServiceNamesTaken(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	for _, name := range []string{"front", "dns-in", "reality-api"} {
+		if _, err := s.CreateService(ctx, Service{Kind: "naive", Name: name, Enabled: true}); !errors.Is(err, ErrInvalid) {
+			t.Errorf("service %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"inner", "frontier", "api-x"} {
+		if _, err := s.CreateService(ctx, Service{Kind: "naive", Name: name, Enabled: true}); err != nil {
+			t.Errorf("service %s: %v", name, err)
+		}
+	}
+	// Without a process there are no directories: the API service is "api".
+	if _, err := s.CreateService(ctx, Service{Kind: "ssh", Name: "admin-in", Enabled: true}); err != nil {
+		t.Errorf("ssh admin-in: %v", err)
+	}
+}

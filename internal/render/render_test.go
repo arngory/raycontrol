@@ -427,4 +427,19 @@ func TestDNSAuth(t *testing.T) {
 	if _, err := provision.SetServiceOption(ctx, st, "mdns", "auth", "required"); err == nil {
 		t.Fatal("auth on masterdns")
 	}
+	// Nor is an unknown mode taken at creation, and one in the database
+	// (written by hand) keeps the service from rendering.
+	for _, svc := range []store.Service{
+		{Kind: "dnstt", Name: "dns2", Settings: `{"auth":"strict"}`},
+		{Kind: "masterdns", Name: "mdns2", Settings: `{"auth":"required"}`},
+	} {
+		if _, err := provision.CreateService(ctx, st, svc); !errors.Is(err, store.ErrInvalid) {
+			t.Errorf("%s %s: %v", svc.Kind, svc.Settings, err)
+		}
+	}
+	i := slices.IndexFunc(m.Services, func(s render.Service) bool { return s.Name == "dns" })
+	m.Services[i].Settings = strings.Replace(m.Services[i].Settings, `"auth":"required"`, `"auth":"strict"`, 1)
+	if _, _, err := render.Render(m, render.DefaultPaths); !render.Partial(err) || !strings.Contains(err.Error(), `auth "strict"`) {
+		t.Fatalf("render with auth=strict: %v", err)
+	}
 }
