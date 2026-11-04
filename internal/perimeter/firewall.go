@@ -224,10 +224,12 @@ table inet %[1]s {
 	# past SPA and the admin addresses, to SSH, the API and the
 	# subscription. Loopback stays with the processes' own rules (Xray's
 	# block list, systemd's IPAddressDeny): the channel probe goes there.
+	# A local destination always leaves through lo, so every other packet
+	# stops at the first, cheapest match; the FIB lookup comes last.
 	chain output {
 		type filter hook output priority 0; policy accept;
-		meta skuid %[7]s fib daddr type local ip daddr != 127.0.0.0/8 jump to_node
-		meta skuid %[7]s fib daddr type local ip6 daddr != ::1 jump to_node
+		oif "lo" meta skuid %[7]s ip daddr != 127.0.0.0/8 fib daddr type local jump to_node
+		oif "lo" meta skuid %[7]s ip6 daddr != ::1 fib daddr type local jump to_node
 	}
 	chain to_node {
 		counter comment "data-plane-to-node"

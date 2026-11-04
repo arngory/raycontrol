@@ -393,6 +393,43 @@ func TestTCPCarrier(t *testing.T) {
 		t.Fatal("no oversized packet")
 	}
 
+	// A ClientHello carrier is read by its record length and handled at
+	// once, while the client waits for an answer like a browser would.
+	hello, err := spa.TLSCarrier(pkt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(int(port)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Write(hello[:7])
+	conn.Write(hello[7:])
+	select {
+	case p := <-got:
+		if !slices.Equal(p, pkt) {
+			t.Fatalf("ClientHello carrier: got %d bytes", len(p))
+		}
+	case <-time.After(c.ReadTimeout / 2):
+		t.Fatal("ClientHello carrier waited for the client to close")
+	}
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil || isTimeout(err) {
+		t.Fatalf("connection after a ClientHello carrier: %v, want a reset", err)
+	}
+	conn.Close()
+	// A record longer than the carrier bound is not read.
+	conn, err = net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(int(port)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Write([]byte{0x16, 0x03, 0x01, 0xff, 0xff})
+	conn.SetReadDeadline(time.Now().Add(c.ReadTimeout / 2))
+	if _, err := conn.Read(make([]byte, 1)); err == nil || isTimeout(err) {
+		t.Fatalf("oversized record: %v, want a reset", err)
+	}
+	conn.Close()
+
 	c.Reconcile(nil)
 	if conn, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(int(port)), time.Second); err == nil {
 		conn.Close()

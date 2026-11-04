@@ -567,6 +567,18 @@ func TestNetnsDataPlaneToNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	unix.Close(fd)
+	// And one on another interface, as a node's public address: traffic
+	// to it still leaves through lo, which the output chain matches first.
+	for _, args := range [][]string{
+		{"link", "add", "rc-va", "type", "veth", "peer", "name", "rc-vb"},
+		{"addr", "add", "192.0.2.10/24", "dev", "rc-va"},
+		{"link", "set", "rc-va", "up"},
+		{"link", "set", "rc-vb", "up"},
+	} {
+		if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
+			t.Fatalf("ip %v: %v %s", args, err, out)
+		}
+	}
 
 	fw := &NFT{NflogGroup: 7, FilterLoopback: true}
 	if err := fw.Setup(); err != nil {
@@ -576,7 +588,7 @@ func TestNetnsDataPlaneToNode(t *testing.T) {
 	if err := fw.SetPublic([]Port{{"tcp", 18999}}); err != nil {
 		t.Fatal(err)
 	}
-	for _, addr := range []string{"192.0.2.9:18999", "127.0.0.1:18999"} {
+	for _, addr := range []string{"192.0.2.9:18999", "192.0.2.10:18999", "127.0.0.1:18999"} {
 		l, err := net.Listen("tcp", addr)
 		if err != nil {
 			t.Fatal(err)
@@ -602,6 +614,8 @@ func TestNetnsDataPlaneToNode(t *testing.T) {
 		{9100, [4]byte{192, 0, 2, 9}, false},
 		{9190, [4]byte{192, 0, 2, 9}, true}, // rayd
 		{9110, [4]byte{127, 0, 0, 1}, true},
+		{0, [4]byte{192, 0, 2, 10}, true},
+		{9110, [4]byte{192, 0, 2, 10}, false},
 	} {
 		err := dialAs(c.uid, c.addr, 18999)
 		if (err == nil) != c.want {
