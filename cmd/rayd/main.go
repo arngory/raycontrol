@@ -566,6 +566,19 @@ func startSubscription(ctx context.Context, st *store.Store, log *slog.Logger, p
 				}
 			}
 			return out
+		},
+		// The device's user as the Hysteria2 users file names it: link then
+		// lists that user's own sessions one by one (niko-server v0.7).
+		Account: func(ctx context.Context, device string) (string, error) {
+			d, _, err := st.ActiveDevice(ctx, device)
+			if err != nil {
+				return "", err
+			}
+			u, err := st.UserByName(ctx, d.UserName)
+			if err != nil {
+				return "", err
+			}
+			return render.InnerEmail(u.ID), nil
 		}}
 	if err := provision.SubscriptionUDP(ctx, st); err != nil {
 		log.Warn("probe: the subscription service has no UDP port", "err", err)

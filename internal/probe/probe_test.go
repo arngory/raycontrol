@@ -340,13 +340,46 @@ func TestHysteriaStats(t *testing.T) {
 		line, _ := bufio.NewReader(c).ReadString('\n')
 		fmt.Fprintf(c, `{"connections":1,"asked":%q}`+"\n", strings.TrimSpace(line))
 	}()
-	raw, err := hysteriaStats(path, netip.MustParseAddr("198.51.100.7"))
+	raw, err := hysteriaStats(path, netip.MustParseAddr("198.51.100.7"), "u7")
+	var got struct {
+		Connections int
+		Asked       string
+	}
+	json.Unmarshal(raw, &got)
+	if err != nil || got.Connections != 1 || got.Asked != "198.51.100.7 u7" {
+		t.Fatalf("stats %s %v", raw, err)
+	}
+}
+
+// A backend before niko-server v0.7 closes on a line with a name: the
+// address alone then still gets the aggregates.
+func TestSessionStatsOldBackend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stats.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			line, _ := bufio.NewReader(c).ReadString('\n')
+			if ip, err := netip.ParseAddr(strings.TrimSpace(line)); err == nil {
+				fmt.Fprintf(c, `{"connections":1,"asked":%q}`+"\n", ip)
+			}
+			c.Close()
+		}
+	}()
+	raw, err := sessionStats(path, netip.MustParseAddr("198.51.100.7"), "u7")
 	var got struct {
 		Connections int
 		Asked       string
 	}
 	json.Unmarshal(raw, &got)
 	if err != nil || got.Connections != 1 || got.Asked != "198.51.100.7" {
-		t.Fatalf("stats %s %v", raw, err)
+		t.Fatalf("stats from an old backend %s %v", raw, err)
 	}
 }

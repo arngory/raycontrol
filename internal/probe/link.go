@@ -89,8 +89,14 @@ func (s *Server) link(w http.ResponseWriter, r *http.Request, device string) {
 	}
 	st := aggregate(conns, addr, ports)
 	if s.Hysteria != nil {
+		account := ""
+		if s.Account != nil {
+			if name, err := s.Account(r.Context(), device); err == nil {
+				account = name
+			}
+		}
 		for id, path := range s.Hysteria() {
-			if raw, err := hysteriaStats(path, addr); err == nil {
+			if raw, err := sessionStats(path, addr, account); err == nil {
 				if st.Hysteria2 == nil {
 					st.Hysteria2 = map[string]json.RawMessage{}
 				}
@@ -104,16 +110,32 @@ func (s *Server) link(w http.ResponseWriter, r *http.Request, device string) {
 	_ = json.NewEncoder(w).Encode(st)
 }
 
+// sessionStats asks a Hysteria2 backend for the sessions of addr and the
+// account's own ones; a backend before niko-server v0.7 answers nothing to
+// a name, so it gets the address alone.
+func sessionStats(path string, addr netip.Addr, account string) (json.RawMessage, error) {
+	raw, err := hysteriaStats(path, addr, account)
+	if err != nil && account != "" {
+		raw, err = hysteriaStats(path, addr, "")
+	}
+	return raw, err
+}
+
 // hysteriaStats asks a Hysteria2 backend for the sessions of addr: the
-// address on a line in, its JSON out.
-func hysteriaStats(path string, addr netip.Addr) (json.RawMessage, error) {
+// address (and the account whose own sessions to list) on a line in, its
+// JSON out.
+func hysteriaStats(path string, addr netip.Addr, account string) (json.RawMessage, error) {
 	c, err := net.DialTimeout("unix", path, time.Second)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = c.Close() }()
 	_ = c.SetDeadline(time.Now().Add(2 * time.Second))
-	if _, err := c.Write([]byte(addr.String() + "\n")); err != nil {
+	line := addr.String()
+	if account != "" {
+		line += " " + account
+	}
+	if _, err := c.Write([]byte(line + "\n")); err != nil {
 		return nil, err
 	}
 	var raw json.RawMessage
