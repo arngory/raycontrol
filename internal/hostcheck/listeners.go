@@ -17,6 +17,7 @@ type listener struct {
 	addr  netip.AddrPort
 	inode string
 	comm  string // process name, "" if unknown
+	exe   string // the process's binary, " (deleted)" cut off
 	pid   int
 }
 
@@ -43,14 +44,16 @@ func (h *Host) listeners() []listener {
 			if inode, ok := strings.CutPrefix(link, "socket:["); err == nil && ok {
 				inode = strings.TrimSuffix(inode, "]")
 				if _, seen := owner[inode]; !seen {
-					owner[inode] = listener{pid: pid, comm: strings.TrimSpace(h.read(filepath.Join("/proc", p.Name(), "comm")))}
+					exe, _ := os.Readlink(h.path(filepath.Join("/proc", p.Name(), "exe")))
+					owner[inode] = listener{pid: pid, comm: strings.TrimSpace(h.read(filepath.Join("/proc", p.Name(), "comm"))),
+						exe: strings.TrimSuffix(exe, " (deleted)")}
 				}
 			}
 		}
 	}
 	for i, l := range out {
 		if o, ok := owner[l.inode]; ok {
-			out[i].pid, out[i].comm = o.pid, o.comm
+			out[i].pid, out[i].comm, out[i].exe = o.pid, o.comm, o.exe
 		}
 	}
 	return out

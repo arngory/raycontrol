@@ -138,6 +138,9 @@ func TestRequiredFailures(t *testing.T) {
 		{"LXC without nesting", "systemd sandbox", func(_ *Host, _ string, out map[string]string) {
 			out["systemd-run"] = "Job for run-u12.service failed because the control process exited with error code.\n"
 		}},
+		{"raycontrol v0", "raycontrol v0", func(_ *Host, root string, _ map[string]string) {
+			os.MkdirAll(filepath.Join(root, "/etc/ray-aio"), 0o755)
+		}},
 		{"256 MB", "memory", func(_ *Host, root string, _ map[string]string) {
 			os.WriteFile(filepath.Join(root, "/proc/meminfo"), []byte("MemTotal: 250000 kB\n"), 0o644)
 		}},
@@ -174,26 +177,60 @@ func TestRequiredFailures(t *testing.T) {
 	}
 }
 
+// addListener puts a socket on proto/port in the fake /proc, held by a
+// process with this name and binary.
+func addListener(root, file, line, pid, inode, comm, exe string) {
+	f := filepath.Join(root, "/proc/net", file)
+	b, _ := os.ReadFile(f)
+	os.WriteFile(f, append(b, line...), 0o644)
+	os.MkdirAll(filepath.Join(root, "/proc", pid, "fd"), 0o755)
+	os.WriteFile(filepath.Join(root, "/proc", pid, "comm"), []byte(comm+"\n"), 0o644)
+	os.Symlink("socket:["+inode+"]", filepath.Join(root, "/proc", pid, "fd", "3"))
+	if exe != "" {
+		os.Symlink(exe, filepath.Join(root, "/proc", pid, "exe"))
+	}
+}
+
+const tcp443 = "   1: 00000000:01BB 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 7001 1\n"
+
 func TestOwnListenersAndResolved(t *testing.T) {
 	h, root, _ := fakeHost(t)
-	add := func(file, line string, pid, inode, comm string) {
-		f := filepath.Join(root, "/proc/net", file)
-		b, _ := os.ReadFile(f)
-		os.WriteFile(f, append(b, line...), 0o644)
-		os.MkdirAll(filepath.Join(root, "/proc", pid, "fd"), 0o755)
-		os.WriteFile(filepath.Join(root, "/proc", pid, "comm"), []byte(comm+"\n"), 0o644)
-		os.Symlink("socket:["+inode+"]", filepath.Join(root, "/proc", pid, "fd", "3"))
-	}
-	// The node's own front on 443 (rayctl check on an installed node), and
+	// The node's own front on 443 (rayctl check on an installed node, after
+	// an update: the replaced binary reads "(deleted)"), and
 	// systemd-resolved's stub on 127.0.0.53:53, which the node turns off.
-	add("tcp", "   1: 00000000:01BB 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 7001 1\n", "900", "7001", "niko-server")
-	add("udp", "   2: 3500007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   991        0 7002 2\n", "300", "7002", "systemd-resolve")
+	addListener(root, "tcp", tcp443, "900", "7001", "niko-server", "/usr/local/libexec/raycontrol/niko-server (deleted)")
+	addListener(root, "udp", "   2: 3500007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   991        0 7002 2\n",
+		"300", "7002", "systemd-resolve", "/usr/lib/systemd/systemd-resolved")
 	rs := h.Check(context.Background(), Options{Services: []string{"masterdns"}})
 	if f := Failed(rs); len(f) != 0 {
 		t.Fatalf("failed: %+v", f)
 	}
 	if r, _ := find(rs, Required, "port udp 53"); !r.OK {
 		t.Fatalf("resolved's stub: %+v", r)
+	}
+}
+
+func TestForeignXrayAndV0(t *testing.T) {
+	ctx := context.Background()
+	// Someone else's Xray on 443: the name is not enough to be the node's.
+	h, root, _ := fakeHost(t)
+	addListener(root, "tcp", tcp443, "700", "7001", "xray", "/usr/bin/xray")
+	if f := Failed(h.Check(ctx, Options{})); len(f) != 1 || f[0].Name != "port tcp 443" {
+		t.Fatalf("foreign xray: %+v", f)
+	}
+	// v0's Xray on 443: a failure, unless v0 goes next (-remove-v0).
+	h, root, _ = fakeHost(t)
+	os.MkdirAll(filepath.Join(root, "/etc/ray-aio"), 0o755)
+	addListener(root, "tcp", tcp443, "701", "7001", "xray", "/usr/local/bin/xray")
+	if f := Failed(h.Check(ctx, Options{})); len(f) != 2 {
+		t.Fatalf("v0 without -allow-v0: %+v", f)
+	}
+	rs := h.Check(ctx, Options{AllowV0: true})
+	if f := Failed(rs); len(f) != 0 {
+		t.Fatalf("v0 with -allow-v0: %+v", f)
+	}
+	if r, ok := find(rs, Advised, "raycontrol v0"); !ok || !strings.Contains(r.Detail, "goes next") {
+		t.Fatalf("v0 advisory: %+v", r)
 	}
 }
 

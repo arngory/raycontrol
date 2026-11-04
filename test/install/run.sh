@@ -177,11 +177,42 @@ done
 # shellcheck disable=SC2016 # expands in the container
 x sh -c 'kill "$(cat /run/listen.pid)"; rm /run/listen.pid'
 
+log "$distro: raycontrol v0 in the way (R4-26)"
+# What legacy/ray.sh leaves: its settings and CLI, an Xray unit holding TCP
+# 443, its port-knocking set in table inet filter. Debian's stock table of
+# that name is kept aside: v0 replaced it, and the stock nftables.conf loads
+# it again at the next boot.
+x sh -c 'nft list table inet filter > /root/stock-filter.nft 2>/dev/null || rm -f /root/stock-filter.nft'
+# shellcheck disable=SC2016 # expands in the container
+x sh -c '
+	mkdir -p /etc/ray-aio /etc/xray
+	printf "DOMAIN=\"v0.example.test\"\n" > /etc/ray-aio/install.conf
+	printf "#!/bin/bash\nsource /etc/ray-aio/install.conf\n" > /usr/local/bin/raycontrol
+	cp /opt/rc/listen /usr/local/bin/xray
+	chmod +x /usr/local/bin/raycontrol /usr/local/bin/xray
+	echo "{}" > /etc/xray/config.json
+	printf "[Service]\nEnvironment=\"LISTEN=tcp:443 udp:8443\"\nExecStart=/usr/local/bin/xray -config /etc/xray/config.json\n[Install]\nWantedBy=multi-user.target\n" \
+		> /etc/systemd/system/xray.service
+	systemctl daemon-reload && systemctl enable --now xray.service
+	nft add table inet filter && nft add set inet filter knock_stage1 "{ type ipv4_addr; }"' >/dev/null 2>&1 || fail "v0 set-up"
+if out="$(x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -check -host "$ip" 2>&1)"; then
+	fail "bootstrap -check passed with v0 installed: $out"
+fi
+[[ $out == *"FAIL  raycontrol v0: ray.sh is installed"*"-remove-v0"* ]] || fail "v0 not named: $out"
+
 # The emergency bundle bootstrap prints stays out of the (public) CI log.
 # The data plane (xray, niko-server) comes from /opt/rc like a release's;
 # one DNS tunnel is set up by the install itself, the other one below.
-x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -host "$ip" -domain example.test -admin 192.0.2.1 -services dnstt |
+# -remove-v0 backs v0 up and removes it first.
+x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -remove-v0 -host "$ip" -domain example.test -admin 192.0.2.1 -services dnstt |
 	sed -E 's/rcdev1:[A-Za-z0-9_-]+/rcdev1:<redacted>/g' || fail "bootstrap"
+for f in /etc/ray-aio /usr/local/bin/raycontrol /usr/local/bin/xray /etc/xray /etc/systemd/system/xray.service; do
+	x test ! -e "$f" || fail "-remove-v0 left $f"
+done
+if x nft list set inet filter knock_stage1 >/dev/null 2>&1; then fail "-remove-v0 left the knocking table"; fi
+# shellcheck disable=SC2016 # expands in the container
+x sh -c 'ls /root/raycontrol-v0-*.tar.gz >/dev/null && rm -f /root/raycontrol-v0-*.tar.gz' || fail "no backup of v0"
+x sh -c 'if [ -f /root/stock-filter.nft ]; then nft -f /root/stock-filter.nft; rm -f /root/stock-filter.nft; fi' || fail "stock filter table"
 for b in xray niko-server; do
 	[[ $(x stat -c '%a %U' "/usr/local/libexec/raycontrol/$b") == "755 root" ]] || fail "$b not installed by bootstrap"
 done
@@ -328,6 +359,12 @@ client "$laptop" >/dev/null || fail "probe after the firewall reload"
 x nft flush ruleset
 wait_table "nft flush ruleset"
 client "$laptop" >/dev/null || fail "probe after flush ruleset"
+# Warnings reach journald at warning priority: journalctl -p warning, as the
+# guide says, shows rayspa's note about the restored table.
+# (Where journald itself runs: some container hosts cannot start it.)
+if x systemctl is-active --quiet systemd-journald; then
+	x journalctl -u rayspa -p warning --no-pager | grep -q "table was removed" || fail "rayspa's warning is not at warning priority"
+fi
 
 log "$distro: reboot"
 docker restart "$node" >/dev/null

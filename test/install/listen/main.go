@@ -2,6 +2,7 @@
 // host whose port 443 is taken must be refused.
 //
 //	listen tcp:443 udp:443
+//	LISTEN="tcp:443 udp:8443" listen -config /etc/xray/config.json
 package main
 
 import (
@@ -14,7 +15,13 @@ import (
 )
 
 func main() {
-	for _, a := range os.Args[1:] {
+	// LISTEN, when set, names the ports instead of the arguments: a copy of
+	// this program can stand in for a server whose arguments are its own.
+	ports := os.Args[1:]
+	if env := os.Getenv("LISTEN"); env != "" {
+		ports = strings.Fields(env)
+	}
+	for _, a := range ports {
 		proto, port, _ := strings.Cut(a, ":")
 		var err error
 		switch proto {

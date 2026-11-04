@@ -27,10 +27,12 @@ func (c *cli) check(ctx context.Context, args []string) error {
 		fs.String(f, "", "as for install; not used by the check")
 	}
 	fs.Bool("checked", false, "as for install; not used by the check")
+	allowV0 := fs.Bool("allow-v0", false, "raycontrol v0 goes next (bootstrap.sh -remove-v0): it and the ports it holds are not failures")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
-	return hostCheck(ctx, os.Stdout, hostcheck.Options{Host: *host, Domain: *domain, Services: splitList(*services)}, false, c.json)
+	return hostCheck(ctx, os.Stdout, hostcheck.Options{Host: *host, Domain: *domain, Services: splitList(*services), AllowV0: *allowV0},
+		false, c.json)
 }
 
 // hostCheck runs the checks and prints them, all or (quiet) only what

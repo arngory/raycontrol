@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/arngory/raycontrol/internal/api"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
+	"github.com/arngory/raycontrol/internal/logx"
 	"github.com/arngory/raycontrol/internal/perimeter"
 )
 
@@ -37,6 +39,20 @@ commands:
 	os.Exit(2)
 }
 
+// teardown removes the perimeter table. While rayspa.service runs it puts
+// the table back within seconds (R1-7), so it must be stopped first.
+func teardown() error {
+	if exec.Command("systemctl", "is-active", "--quiet", "rayspa.service").Run() == nil {
+		return errors.New("rayspa.service is running and restores the table within seconds: systemctl stop rayspa first " +
+			"(it starts again at boot or with systemctl start rayspa); to let only your address reach SSH, rayctl admin ADDR is enough")
+	}
+	if err := (&perimeter.NFT{}).Teardown(); err != nil {
+		return err
+	}
+	fmt.Println("perimeter removed: the node is open until rayspa starts again")
+	return nil
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -46,7 +62,7 @@ func main() {
 	case "run":
 		err = run(os.Args[2:])
 	case "teardown":
-		err = (&perimeter.NFT{}).Teardown()
+		err = teardown()
 	case "version":
 		fmt.Println(version)
 	default:
@@ -70,7 +86,7 @@ func run(args []string) error {
 	if *debug {
 		level = slog.LevelDebug
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	log := logx.New(os.Stderr, level)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

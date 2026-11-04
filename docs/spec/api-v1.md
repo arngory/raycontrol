@@ -103,10 +103,10 @@ rcinv1:<base64url без '=' от JSON>
 | Роль | SPA до API | `DeviceService` | `NodeService` |
 |---|---|---|---|
 | `user` | нет (только `Register` по приглашению) | — | — |
-| `admin` (зарегистрирован через API) | да | `GetSelf`, `RotateCertificate` | всё, кроме `Backup` и `GetDeployment` |
+| `admin` (зарегистрирован через API) | да | `GetSelf`, `RotateCertificate` | всё, кроме `Backup`, `GetDeployment` и `SetCertificate` |
 
 - `Backup` и `GetDeployment` — только root на самой ноде: в базе и в отрисованных файлах все закрытые ключи ноды
-  (R4-13). Через API они отвечают `permission_denied`.
+  (R4-13). `SetCertificate` — тоже: в запросе закрытый ключ сайта (R4-23). Через API они отвечают `permission_denied`.
 - То, что меняет сам хост, через API не делается: `rayctl apply` (юниты, пользователи, порты хост-файрвола для
   новых сервисов), `update`, `uninstall`, `restore`, `backup`. Сервис, добавленный через API, начнёт работать после
   `rayctl apply` на ноде, если ему нужен свой процесс или порт в хост-файрволе.

@@ -32,6 +32,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/doh"
 	"github.com/arngory/raycontrol/internal/live"
+	"github.com/arngory/raycontrol/internal/logx"
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/nikoipc"
 	"github.com/arngory/raycontrol/internal/node"
@@ -137,6 +138,7 @@ func cmdServe(args []string) error {
 	credGrace := fs.Duration("cred-grace", 2*24*time.Hour, "the previous credential (and REALITY key set) is accepted this long after the switch (12h at least)")
 	realityPeriod := fs.Duration("reality-period", 90*24*time.Hour, "how long REALITY keys stay current; their next set is published -cred-lead ahead (0: no rotation)")
 	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new REALITY server name may wait for its certificate")
+	debug := fs.Bool("debug", false, "log at debug level: refused subscription requests with their addresses (personal data: turn it off after use)")
 	fs.Parse(args)
 	epoch := provision.RealityEpoch{Period: *realityPeriod, Lead: *credLead, Prepare: *realityPrepare, Grace: *credGrace}
 	if err := epoch.Check(); err != nil {
@@ -145,7 +147,11 @@ func cmdServe(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	level := slog.LevelInfo
+	if *debug {
+		level = slog.LevelDebug
+	}
+	log := logx.New(os.Stderr, level)
 
 	st, err := store.Open(ctx, *db)
 	if err != nil {
@@ -727,7 +733,7 @@ func cmdSite(args []string) error {
 	if err != nil {
 		return err
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	log := logx.New(os.Stderr, slog.LevelInfo)
 	chainPEM, err := os.ReadFile(*chain)
 	if err != nil {
 		return err
@@ -781,7 +787,7 @@ func cmdNaive(args []string) error {
 	if err != nil {
 		return err
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	log := logx.New(os.Stderr, slog.LevelInfo)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ln, err := nikoipc.ListenFD(*socket, *frontUID, log)
