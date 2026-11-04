@@ -21,6 +21,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/hostcheck"
 	"github.com/arngory/raycontrol/internal/redact"
 )
 
@@ -89,17 +90,17 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	}
 
 	p("\n== system\n")
-	id2, ver := osRelease()
+	id2, ver := hostcheck.System().OSRelease()
 	p("os\t%s %s\nkernel\t%s\narch\t%s\nsystemd\t%s\nnft\t%s\n", id2, ver, firstLine("uname", "-r"), firstLine("uname", "-m"),
 		firstLine("systemctl", "--version"), firstLine("nft", "--version"))
 	p("selinux\t%s\nfirewalld\t%s\nufw\t%s\n", firstLine("getenforce"), firstLine("systemctl", "is-active", "firewalld"), firstLine("ufw", "status"))
-	warnings, perr := preflight()
-	p("checks\t%s\n", map[bool]string{true: "ok", false: "failed"}[perr == nil])
-	if perr != nil {
-		p("%v\n", perr)
-	}
-	for _, x := range warnings {
-		p("warning\t%s\n", x)
+	// The host check without its network lookups: the report stays offline.
+	rs := hostcheck.System().Check(ctx, hostcheck.Options{})
+	p("checks\t%s\n", map[bool]string{true: "ok", false: "failed"}[len(hostcheck.Failed(rs)) == 0])
+	for _, r := range rs {
+		if !r.OK {
+			p("%s\t%s: %s\n", r.Level, r.Name, r.Detail)
+		}
 	}
 
 	p("\n== node\n")

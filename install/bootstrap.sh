@@ -11,8 +11,16 @@
 #   less bootstrap.sh
 #   sudo bash bootstrap.sh -host <public address> [-domain <domain>]
 #
+# Before it installs anything of raycontrol it checks the host (rayctl check,
+# docs/08-decisions.md, R4-24): what is required, what is advised. A host that
+# cannot run a node is refused, and the packages this run installed are
+# removed again. -check, as the first argument, only checks and leaves the
+# host as it was:
+#
+#   sudo bash bootstrap.sh -check [-host <address>] [-services reality,dnstt]
+#
 # Works on any systemd-based Linux with apt, dnf, zypper or pacman; tested on
-# Debian 12/13, Ubuntu 24.04 and Rocky Linux 9/10 (rayctl install checks the
+# Debian 12/13, Ubuntu 24.04 and Rocky Linux 9/10 (the check tells about the
 # rest). The signature is checked with openssl, so minisign is not needed.
 #
 # RAYCONTROL_VERSION=v0.2.0 pins a release; default is the latest one.
@@ -136,7 +144,39 @@ install_deps() {
 	fi
 }
 
+# remove_deps takes back what install_deps installed in this run.
+remove_deps() {
+	[[ -n $INSTALLED_PKGS ]] || return 0
+	local manager=${INSTALLED_PKGS%%:*} names
+	IFS=, read -ra names <<<"${INSTALLED_PKGS#*:}"
+	log "removing what this run installed: ${names[*]}"
+	case $manager in
+	apt) apt-get -o DPkg::Lock::Timeout=300 remove -y -q "${names[@]}" ;;
+	dnf) dnf remove -y -q "${names[@]}" ;;
+	zypper) zypper --non-interactive remove "${names[@]}" ;;
+	pacman) pacman -R --noconfirm "${names[@]}" ;;
+	esac || log "could not remove ${names[*]}; remove them with $manager"
+	INSTALLED_PKGS=""
+}
+
+# cleanup runs on exit. Until rayctl install takes them over (it records them
+# for rayctl uninstall), the packages this run installed are the
+# bootstrap's: a refusal, a failure or -check removes them.
+HANDED_OVER=0
+CHECK_ONLY=0
+cleanup() {
+	local status=$?
+	if [[ -n ${BOOT_TMP:-} ]]; then rm -rf "$BOOT_TMP"; fi
+	if [[ $HANDED_OVER == 0 ]] && [[ $status -ne 0 || $CHECK_ONLY == 1 ]]; then
+		remove_deps
+	fi
+}
+
 main() {
+	if [[ ${1:-} == -check ]]; then
+		CHECK_ONLY=1
+		shift
+	fi
 	[[ $EUID -eq 0 ]] || die "run as root"
 	[[ -d /run/systemd/system ]] || die "systemd is required"
 	case "$(uname -m)" in
@@ -144,11 +184,10 @@ main() {
 	aarch64) ARCH=arm64 ;;
 	*) die "unsupported architecture $(uname -m)" ;;
 	esac
-	install_deps
-
 	# Global: the EXIT trap runs after main has returned.
 	BOOT_TMP="$(mktemp -d)"
-	trap 'rm -rf "$BOOT_TMP"' EXIT
+	trap cleanup EXIT
+	install_deps
 	local tmp=$BOOT_TMP
 	if [[ -n ${RAYCONTROL_LOCAL_DIR:-} ]]; then
 		log "installing from $RAYCONTROL_LOCAL_DIR without verification (test mode)"
@@ -171,6 +210,22 @@ main() {
 		(cd "$tmp" && grep " ${tarball}\$" SHA256SUMS | sha256sum -c -) || die "checksum mismatch"
 		tar -xzf "$tmp/$tarball" -C "$tmp"
 	fi
+
+	# The host first, with the release's own rayctl: nothing of raycontrol
+	# is installed yet.
+	local status=0
+	"$tmp/rayctl" check "$@" || status=$?
+	case $status in
+	0) ;;
+	126) die "cannot run programs from $tmp (mounted noexec?): run again with TMPDIR set to a directory that allows it" ;;
+	2) die "the arguments are not right (see above)" ;;
+	*) die "this host cannot run a node (see above); it was left as it was" ;;
+	esac
+	if [[ $CHECK_ONLY == 1 ]]; then
+		log "check only: nothing installed"
+		return 0
+	fi
+
 	install -m 0755 "$tmp/rayd" "$tmp/rayspa" "$tmp/rayctl" /usr/local/bin/
 	# SELinux (RHEL family): binaries get the label of their place, not of $tmp.
 	if command -v restorecon >/dev/null; then
@@ -183,7 +238,10 @@ main() {
 	else
 		log "the release has no data plane (xray, niko-server): install them later"
 	fi
-	/usr/local/bin/rayctl install ${INSTALLED_PKGS:+-packages "$INSTALLED_PKGS"} "${dataplane[@]}" "$@"
+	# From here rayctl install owns the packages: it records them, and
+	# rayctl uninstall -purge-packages takes them back.
+	HANDED_OVER=1
+	/usr/local/bin/rayctl install -checked ${INSTALLED_PKGS:+-packages "$INSTALLED_PKGS"} "${dataplane[@]}" "$@"
 }
 
 # Sourcing the file (tests) only defines the functions.

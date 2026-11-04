@@ -118,6 +118,19 @@ Restart=always
 RestartSec=2
 `
 
+// Sandbox is the hardening every unit has, as KEY=VALUE: the host check
+// runs a transient unit with it (and PrivateNetwork, which the unix-only
+// backends add) before the install.
+func Sandbox() []string {
+	var out []string
+	for _, l := range strings.Split(strings.TrimSpace(hardening), "\n") {
+		if !strings.HasPrefix(l, "Restart") {
+			out = append(out, l)
+		}
+	}
+	return append(out, "PrivateNetwork=yes")
+}
+
 type unit struct {
 	name        string
 	description string

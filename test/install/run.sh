@@ -156,6 +156,27 @@ x sh -c 'if systemctl is-enabled -q firewalld 2>/dev/null; then for i in $(seq 6
 sed -n '/^const sysctl = `/,/^`/p' "$here/../../internal/deploy/deploy.go" | grep -o '^net\.[a-z0-9_.]*' |
 	docker exec -i "$node" sh -c 'cat > /root/sysctl.keys'
 snapshot /root/before.snap
+
+log "$distro: host check (R4-24)"
+# -check only checks: a host that can run a node, nothing installed after.
+out="$(x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -check -host "$ip" -domain example.test -services dnstt 2>&1)" ||
+	fail "bootstrap -check on a good host: $out"
+echo "$out"
+[[ $out == *"ok    nftables: the perimeter table loads"* && $out == *"ok    systemd sandbox"* && $out == *"This host can run a node"* ]] ||
+	fail "check report: $out"
+x test ! -e /usr/local/bin/rayctl || fail "bootstrap -check installed rayctl"
+# Port 443 taken: refused before anything is installed.
+x sh -c '/opt/rc/listen tcp:443 udp:443 & echo $! > /run/listen.pid'
+if out="$(x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -host "$ip" -domain example.test -admin 192.0.2.1 2>&1)"; then
+	fail "bootstrap went on with port 443 taken: $out"
+fi
+[[ $out == *"FAIL  port tcp 443: tcp "*":443 is taken by listen"* && $out == *"this host cannot run a node"* ]] || fail "refusal: $out"
+for f in /usr/local/bin/rayd /usr/local/bin/rayctl /var/lib/raycontrol /var/lib/raycontrol-install; do
+	x test ! -e "$f" || fail "a refused bootstrap left $f"
+done
+# shellcheck disable=SC2016 # expands in the container
+x sh -c 'kill "$(cat /run/listen.pid)"; rm /run/listen.pid'
+
 # The emergency bundle bootstrap prints stays out of the (public) CI log.
 # The data plane (xray, niko-server) comes from /opt/rc like a release's;
 # one DNS tunnel is set up by the install itself, the other one below.

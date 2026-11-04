@@ -1,0 +1,248 @@
+package hostcheck
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// fakeHost is a Debian 13 KVM guest with 2 GiB, 2 CPUs, everything in
+// place; tests break one thing at a time.
+func fakeHost(t *testing.T) (*Host, string, map[string]string) {
+	t.Helper()
+	root := t.TempDir()
+	write := func(p, s string) {
+		t.Helper()
+		os.MkdirAll(filepath.Join(root, filepath.Dir(p)), 0o755)
+		if err := os.WriteFile(filepath.Join(root, p), []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, d := range []string{"/run/systemd/system", "/lib/modules/6.12.48-amd64"} {
+		os.MkdirAll(filepath.Join(root, d), 0o755)
+	}
+	write("/run/dbus/system_bus_socket", "")
+	write("/proc/sys/kernel/osrelease", "6.12.48-amd64\n")
+	write("/proc/meminfo", "MemTotal:        2014000 kB\n")
+	write("/proc/sys/net/ipv4/tcp_available_congestion_control", "reno cubic bbr\n")
+	write("/proc/sys/net/core/rmem_max", "16777216\n")
+	write("/proc/sys/net/core/wmem_max", "16777216\n")
+	write("/etc/os-release", "ID=debian\nVERSION_ID=\"13\"\n")
+	write("/etc/apt/apt.conf.d/20auto-upgrades", "APT::Periodic::Unattended-Upgrade \"1\";\n")
+	write("/usr/bin/unattended-upgrade", "")
+	header := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+	write("/proc/net/tcp", header+
+		"   0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1001 1\n")
+	write("/proc/net/udp", header)
+	write("/proc/net/tcp6", header)
+	write("/proc/net/udp6", header)
+	out := map[string]string{
+		"systemctl --version":                         "systemd 257 (257.13-1~deb13u1)\n",
+		"systemctl show -P LoadState polkit.service":  "loaded\n",
+		"timedatectl show -p NTPSynchronized --value": "yes\n",
+		"systemd-detect-virt -v":                      "kvm\n",
+	}
+	h := &Host{Root: root,
+		Run: func(_ context.Context, _, name string, args ...string) ([]byte, error) {
+			k := strings.Join(append([]string{name}, args...), " ")
+			if name == "systemd-detect-virt" && args[0] == "-c" {
+				if v, ok := out[k]; ok {
+					return []byte(v), nil
+				}
+				return []byte("none\n"), errors.New("exit status 1")
+			}
+			if name == "nft" || name == "systemd-run" {
+				if v, ok := out[name]; ok {
+					return []byte(v), errors.New("exit status 1")
+				}
+				return nil, nil
+			}
+			if v, ok := out[k]; ok {
+				return []byte(v), nil
+			}
+			return nil, errors.New("exit status 1")
+		},
+		LookPath: func(string) error { return nil },
+		Euid:     func() int { return 0 },
+		Free:     func(string) (uint64, error) { return 8 << 30, nil },
+		Addrs: func() ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("2001:db8::7")}, nil
+		},
+		CPUs:  func() int { return 2 },
+		Reach: func(context.Context, string) error { return nil },
+	}
+	return h, root, out
+}
+
+func find(rs []Result, level Level, name string) (Result, bool) {
+	for _, r := range rs {
+		if r.Level == level && r.Name == name {
+			return r, true
+		}
+	}
+	return Result{}, false
+}
+
+func TestGoodHost(t *testing.T) {
+	h, _, _ := fakeHost(t)
+	rs := h.Check(context.Background(), Options{Host: "203.0.113.7", Domain: "example.com", Services: []string{"reality", "dnstt"}})
+	for _, r := range rs {
+		// 2001:db8:: is documentation space, not a public address.
+		if !r.OK && r.Name != "IPv6" {
+			t.Errorf("%s %s: %s", r.Level, r.Name, r.Detail)
+		}
+	}
+	var b bytes.Buffer
+	Report(&b, rs, false)
+	for _, want := range []string{"Required: without these", "ok    nftables: the perimeter table loads in kernel 6.12.48-amd64",
+		"ok    port tcp 443: free", "ok    virtualization: kvm", "Only a probe from outside"} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("report lacks %q:\n%s", want, b.String())
+		}
+	}
+	b.Reset()
+	Report(&b, rs, true)
+	if b.Len() != 0 {
+		t.Errorf("quiet report of a good host:\n%s", b.String())
+	}
+}
+
+func TestRequiredFailures(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name  string
+		check string
+		edit  func(h *Host, root string, out map[string]string)
+	}{
+		{"not root", "root", func(h *Host, _ string, _ map[string]string) { h.Euid = func() int { return 1000 } }},
+		{"old systemd", "systemd", func(_ *Host, _ string, out map[string]string) { out["systemctl --version"] = "systemd 239\n" }},
+		{"no polkit", "polkit", func(_ *Host, _ string, out map[string]string) {
+			out["systemctl show -P LoadState polkit.service"] = "not-found\n"
+		}},
+		{"no nft", "commands", func(h *Host, _ string, _ map[string]string) {
+			h.LookPath = func(n string) error {
+				if n == "nft" {
+					return errors.New("not found")
+				}
+				return nil
+			}
+		}},
+		{"old kernel", "nftables", func(_ *Host, _ string, out map[string]string) {
+			out["nft"] = "Error: Could not process rule: No such file or directory\n"
+		}},
+		{"LXC without nesting", "systemd sandbox", func(_ *Host, _ string, out map[string]string) {
+			out["systemd-run"] = "Job for run-u12.service failed because the control process exited with error code.\n"
+		}},
+		{"256 MB", "memory", func(_ *Host, root string, _ map[string]string) {
+			os.WriteFile(filepath.Join(root, "/proc/meminfo"), []byte("MemTotal: 250000 kB\n"), 0o644)
+		}},
+		{"full disk", "disk", func(h *Host, _ string, _ map[string]string) {
+			h.Free = func(string) (uint64, error) { return 100 << 20, nil }
+		}},
+		{"nginx on 443", "port tcp 443", func(_ *Host, root string, _ map[string]string) {
+			f := filepath.Join(root, "/proc/net/tcp6")
+			b, _ := os.ReadFile(f)
+			os.WriteFile(f, append(b, "   1: 00000000000000000000000000000000:01BB 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4242 1\n"...), 0o644)
+			os.MkdirAll(filepath.Join(root, "/proc/812/fd"), 0o755)
+			os.WriteFile(filepath.Join(root, "/proc/812/comm"), []byte("nginx\n"), 0o644)
+			os.Symlink("socket:[4242]", filepath.Join(root, "/proc/812/fd/6"))
+		}},
+		{"dnsmasq on 53", "port udp 53", func(_ *Host, root string, _ map[string]string) {
+			f := filepath.Join(root, "/proc/net/udp")
+			b, _ := os.ReadFile(f)
+			os.WriteFile(f, append(b, "   2: 0100007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 5151 2\n"...), 0o644)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, root, out := fakeHost(t)
+			h.Sandbox = true
+			c.edit(h, root, out)
+			rs := h.Check(ctx, Options{Host: "203.0.113.7", Services: []string{"dnstt"}})
+			failed := Failed(rs)
+			if len(failed) != 1 || failed[0].Name != c.check || failed[0].Fix == "" {
+				t.Fatalf("failed: %+v", failed)
+			}
+			if c.name == "nginx on 443" && !strings.Contains(failed[0].Detail, "tcp [::]:443 is taken by nginx (pid 812)") {
+				t.Errorf("detail: %s", failed[0].Detail)
+			}
+		})
+	}
+}
+
+func TestOwnListenersAndResolved(t *testing.T) {
+	h, root, _ := fakeHost(t)
+	add := func(file, line string, pid, inode, comm string) {
+		f := filepath.Join(root, "/proc/net", file)
+		b, _ := os.ReadFile(f)
+		os.WriteFile(f, append(b, line...), 0o644)
+		os.MkdirAll(filepath.Join(root, "/proc", pid, "fd"), 0o755)
+		os.WriteFile(filepath.Join(root, "/proc", pid, "comm"), []byte(comm+"\n"), 0o644)
+		os.Symlink("socket:["+inode+"]", filepath.Join(root, "/proc", pid, "fd", "3"))
+	}
+	// The node's own front on 443 (rayctl check on an installed node), and
+	// systemd-resolved's stub on 127.0.0.53:53, which the node turns off.
+	add("tcp", "   1: 00000000:01BB 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 7001 1\n", "900", "7001", "niko-server")
+	add("udp", "   2: 3500007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   991        0 7002 2\n", "300", "7002", "systemd-resolve")
+	rs := h.Check(context.Background(), Options{Services: []string{"masterdns"}})
+	if f := Failed(rs); len(f) != 0 {
+		t.Fatalf("failed: %+v", f)
+	}
+	if r, _ := find(rs, Required, "port udp 53"); !r.OK {
+		t.Fatalf("resolved's stub: %+v", r)
+	}
+}
+
+func TestAdvised(t *testing.T) {
+	h, root, out := fakeHost(t)
+	out["systemd-detect-virt -c"] = "lxc\n"
+	out["timedatectl show -p NTPSynchronized --value"] = "no\n"
+	os.WriteFile(filepath.Join(root, "/proc/sys/net/ipv4/tcp_available_congestion_control"), []byte("reno cubic\n"), 0o644)
+	os.MkdirAll(filepath.Join(root, "/lib/modules/6.12.57-amd64"), 0o755)
+	os.WriteFile(filepath.Join(root, "/proc/meminfo"), []byte("MemTotal: 496000 kB\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "/proc/sys/net/core/rmem_max"), []byte("212992\n"), 0o644)
+	os.Chmod(filepath.Join(root, "/proc/sys/net/core/rmem_max"), 0o444)
+	h.CPUs = func() int { return 1 }
+	h.Reach = func(context.Context, string) error { return errors.New("connection refused") }
+	h.Addrs = func() ([]netip.Addr, error) { return []netip.Addr{netip.MustParseAddr("10.0.0.5")}, nil }
+	rs := h.Check(context.Background(), Options{Host: "203.0.113.7", Domain: "example.com"})
+	if f := Failed(rs); len(f) != 0 {
+		t.Fatalf("failed: %+v", f)
+	}
+	for _, name := range []string{"virtualization", "clock", "BBR", "memory", "processors", "updates", "Let's Encrypt", "IPv6"} {
+		if r, ok := find(rs, Advised, name); !ok || r.OK {
+			t.Errorf("%s: %+v", name, r)
+		}
+	}
+	if os.Geteuid() != 0 { // root writes through 0444
+		if r, _ := find(rs, Advised, "UDP buffers"); r.OK {
+			t.Errorf("read-only buffers: %+v", r)
+		}
+	}
+	if r, _ := find(rs, Advised, "public address"); !strings.Contains(r.Detail, "1:1 NAT") {
+		t.Errorf("NAT: %+v", r)
+	}
+	if r, _ := find(rs, Advised, "updates"); !strings.Contains(r.Detail, "kernel 6.12.57-amd64 is installed but 6.12.48-amd64 is running") {
+		t.Errorf("kernel: %+v", r)
+	}
+}
+
+func TestParseHexAddr(t *testing.T) {
+	for in, want := range map[string]string{
+		"0100007F:01BB":                         "127.0.0.1:443",
+		"00000000000000000000000001000000:0035": "[::1]:53",
+		"0000000000000000FFFF00000100007F:0050": "127.0.0.1:80",
+	} {
+		got, ok := parseHexAddr(in)
+		if !ok || got.String() != want {
+			t.Errorf("%s: %v %v, want %s", in, got, ok, want)
+		}
+	}
+	if !VersionLess("6.1.0-27-amd64", "6.1.0-28-amd64") || VersionLess("6.12.9", "6.2.1") || !VersionLess("5.14.0-427.el9", "5.14.0-503.el9") {
+		t.Fatal("VersionLess")
+	}
+}

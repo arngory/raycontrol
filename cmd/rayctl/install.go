@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,184 +19,9 @@ import (
 
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
-	"github.com/arngory/raycontrol/internal/perimeter"
+	"github.com/arngory/raycontrol/internal/hostcheck"
 	"github.com/arngory/raycontrol/internal/render"
 )
-
-// tested are the systems the install test runs on (docs/08-decisions.md,
-// R2-1); others install with a warning if the checks below pass.
-var tested = map[string][]string{"debian": {"12", "13"}, "ubuntu": {"24.04"}, "rocky": {"9", "10"}}
-
-func isTested(id, version string) bool {
-	for _, v := range tested[id] {
-		// Rocky's VERSION_ID carries the minor release: "10.0".
-		if version == v || (id == "rocky" && strings.HasPrefix(version, v+".")) {
-			return true
-		}
-	}
-	return false
-}
-
-// minSystemd is the first systemd with every hardening directive the units
-// use (ProtectClock=).
-const minSystemd = 245
-
-// preflight checks what the node needs from the host, whatever the
-// distribution: systemd, the commands raycontrol runs, polkit, and an nft
-// and kernel that load the perimeter table.
-func preflight() (warnings []string, err error) {
-	var problems []string
-	if _, err := os.Stat("/run/systemd/system"); err != nil {
-		problems = append(problems, "systemd is not running")
-	} else if out, err := exec.Command("systemctl", "--version").Output(); err == nil {
-		if f := strings.Fields(string(out)); len(f) > 1 {
-			if v, err := strconv.Atoi(f[1]); err == nil && v < minSystemd {
-				problems = append(problems, fmt.Sprintf("systemd %d is too old, %d or newer is needed", v, minSystemd))
-			}
-		}
-	}
-	for _, cmd := range []string{"nft", "systemctl", "useradd", "groupadd", "usermod", "runuser", "systemd-tmpfiles", "sysctl"} {
-		if _, err := exec.LookPath(cmd); err != nil {
-			problems = append(problems, "command "+cmd+" is missing")
-		}
-	}
-	for _, bin := range []string{deploy.DefaultBinaries.Rayd, deploy.DefaultBinaries.Rayspa} {
-		if _, err := os.Stat(bin); err != nil {
-			problems = append(problems, bin+" is missing (install/bootstrap.sh installs it)")
-		}
-	}
-	if _, err := os.Stat("/run/dbus/system_bus_socket"); err != nil {
-		problems = append(problems, "the D-Bus system bus is not running: rayd talks to systemd over it")
-	}
-	if out, _ := exec.Command("systemctl", "show", "-P", "LoadState", "polkit.service").Output(); strings.TrimSpace(string(out)) != "loaded" {
-		problems = append(problems, "polkit is not installed: rayd restarts data-plane units through it (apt install polkitd, dnf install polkit)")
-	}
-	if _, err := exec.LookPath("nft"); err == nil {
-		// A dry run in the kernel: nft and the kernel must support every
-		// expression of the table (inet nat, maps, dynamic sets, NFLOG).
-		cmd := exec.Command("nft", "-c", "-f", "-")
-		cmd.Stdin = strings.NewReader((&perimeter.NFT{NflogGroup: 7}).Ruleset())
-		if out, err := cmd.CombinedOutput(); err != nil {
-			problems = append(problems, fmt.Sprintf("nft or the kernel cannot load the perimeter table: %v: %s", err, strings.TrimSpace(string(out))))
-		}
-	}
-	if id, ver := osRelease(); !isTested(id, ver) {
-		warnings = append(warnings, fmt.Sprintf("%s %s is not among the tested systems (Debian 12/13, Ubuntu 24.04, Rocky Linux 9/10); "+
-			"the checks passed, so the install goes on", id, ver))
-	}
-	running, _ := os.ReadFile("/proc/sys/kernel/osrelease")
-	warnings = append(warnings, updateWarnings("", strings.TrimSpace(string(running)))...)
-	// SPA slots, invites and certificates go by the clock.
-	if out, err := exec.Command("timedatectl", "show", "-p", "NTPSynchronized", "--value").Output(); err == nil && strings.TrimSpace(string(out)) != "yes" {
-		warnings = append(warnings, "the clock is not synchronized over NTP: SPA and certificates need the right time "+
-			"(apt install systemd-timesyncd, or chrony)")
-	}
-	if meminfo, err := os.ReadFile("/proc/meminfo"); err == nil {
-		if w := memoryWarning(string(meminfo)); w != "" {
-			warnings = append(warnings, w)
-		}
-	}
-	if len(problems) > 0 {
-		return warnings, errors.New("this host cannot run a node:\n  - " + strings.Join(problems, "\n  - "))
-	}
-	return warnings, nil
-}
-
-// minMemoryMiB is the memory below which install warns: the node with every
-// service takes about 250 MiB (docs/10-quickstart-debian13.md), the
-// system its own besides.
-const minMemoryMiB = 900
-
-// memoryWarning reads /proc/meminfo.
-func memoryWarning(meminfo string) string {
-	for _, l := range strings.Split(meminfo, "\n") {
-		if f := strings.Fields(l); len(f) >= 2 && f[0] == "MemTotal:" {
-			kib, err := strconv.Atoi(f[1])
-			if err == nil && kib/1024 < minMemoryMiB {
-				return fmt.Sprintf("%d MiB of memory: the node with every service takes about 250 MiB besides the system; 1 GiB or more is advised", kib/1024)
-			}
-		}
-	}
-	return ""
-}
-
-// updateWarnings says when the host runs behind its own fixes: a newer
-// kernel installed but not booted, a reboot asked for, no automatic
-// security updates. Remote bugs in the network stack are fixed in the
-// kernel; the perimeter limits what reaches it, it does not replace the
-// fix (docs/08-decisions.md, R4-9). root is a test seam.
-func updateWarnings(root, running string) []string {
-	var out []string
-	if entries, err := os.ReadDir(filepath.Join(root, "/lib/modules")); err == nil && running != "" {
-		newest := running
-		for _, e := range entries {
-			if e.IsDir() && versionLess(newest, e.Name()) {
-				newest = e.Name()
-			}
-		}
-		if newest != running {
-			out = append(out, fmt.Sprintf("kernel %s is installed but %s is running: reboot to run the fixes", newest, running))
-		}
-	}
-	if _, err := os.Stat(filepath.Join(root, "/var/run/reboot-required")); err == nil {
-		out = append(out, "the system asks for a reboot (/var/run/reboot-required)")
-	}
-	auto := false
-	if b, err := os.ReadFile(filepath.Join(root, "/etc/apt/apt.conf.d/20auto-upgrades")); err == nil { //nolint:gosec // G304: a fixed path (root is a test seam)
-		_, err := os.Stat(filepath.Join(root, "/usr/bin/unattended-upgrade"))
-		auto = err == nil && strings.Contains(string(b), `Unattended-Upgrade "1"`)
-	}
-	for _, timer := range []string{"dnf-automatic-install.timer", "dnf-automatic.timer"} {
-		if _, err := os.Stat(filepath.Join(root, "/etc/systemd/system/timers.target.wants", timer)); err == nil {
-			auto = true
-		}
-	}
-	if !auto {
-		out = append(out, "security updates are not installed automatically "+
-			"(apt install unattended-upgrades; or dnf install dnf-automatic && systemctl enable --now dnf-automatic-install.timer)")
-	}
-	return out
-}
-
-// versionLess compares kernel versions (6.1.0-28-amd64, 5.14.0-427.el9):
-// runs of digits as numbers, the rest as text.
-func versionLess(a, b string) bool {
-	pa, pb := versionParts.FindAllString(a, -1), versionParts.FindAllString(b, -1)
-	for i := 0; i < len(pa) && i < len(pb); i++ {
-		if pa[i] == pb[i] {
-			continue
-		}
-		na, ea := strconv.Atoi(pa[i])
-		nb, eb := strconv.Atoi(pb[i])
-		if ea == nil && eb == nil {
-			return na < nb
-		}
-		return pa[i] < pb[i]
-	}
-	return len(pa) < len(pb)
-}
-
-var versionParts = regexp.MustCompile(`\d+|\D+`)
-
-func osRelease() (id, version string) {
-	f, err := os.Open("/etc/os-release")
-	if err != nil {
-		return "", ""
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		k, v, _ := strings.Cut(sc.Text(), "=")
-		v = strings.Trim(v, `"`)
-		switch k {
-		case "ID":
-			id = v
-		case "VERSION_ID":
-			version = v
-		}
-	}
-	return id, version
-}
 
 // sshPort reads the port sshd listens on, 22 if it cannot tell.
 func sshPort() int {
@@ -244,6 +68,7 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	cfToken := fs.String("cloudflare-token-file", "", "Cloudflare API token file: DNS records and wildcard certificates (needs -domain)")
 	dataplane := fs.String("dataplane", "", "directory with the xray and niko-server the bootstrap verified, installed to "+deploy.DataPlaneDir)
 	services := fs.String("services", "", "services to set up now: reality, hy2-masq, hy2-obfs, doh (after reality), dnstt, masterdns (default with -domain: reality; \"none\" for none)")
+	checked := fs.Bool("checked", false, "the bootstrap has shown the host check: print only required checks that fail now")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
@@ -253,12 +78,15 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	if *host == "" {
 		return errors.New("-host is required")
 	}
-	warnings, err := preflight()
-	for _, w := range warnings {
-		fmt.Println("warning:", w)
-	}
-	if err != nil {
+	// Before anything changes: a host that cannot run a node is left as it
+	// was (docs/08-decisions.md, R4-24).
+	if err := hostCheck(ctx, os.Stdout, hostcheck.Options{Host: *host, Domain: *domain, Services: splitList(*services)}, *checked, false); err != nil {
 		return err
+	}
+	for _, bin := range []string{deploy.DefaultBinaries.Rayd, deploy.DefaultBinaries.Rayspa} {
+		if _, err := os.Stat(bin); err != nil {
+			return fmt.Errorf("%s is missing: install/bootstrap.sh installs it", bin)
+		}
 	}
 	if *admin == "" {
 		return errors.New("no admin address: pass -admin, or install from an SSH session")

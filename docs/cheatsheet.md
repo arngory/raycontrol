@@ -9,6 +9,7 @@
 
 | Команда | Что делает |
 |---|---|
+| `rayctl check [-host A] [-domain D] [-services a,b]` · `bash bootstrap.sh -check …` | годится ли хост: обязательное (без него установка откажет) и желательное; ничего не меняет (R4-24) |
 | `bash bootstrap.sh -host IP -domain D -cloudflare-token-file F [-services reality,dnstt,masterdns]` | поставить ноду: зависимости, подписанный релиз с data plane, `rayctl install`, сервисы |
 | `rayctl install -host IP [-domain D] [-admin A] [-cloudflare-token-file F] [-services …\|none] [-dataplane DIR]` | то же без bootstrap; `-dataplane` — каталог с проверенными `xray` и `niko-server` |
 | `rayctl apply` | поставить то, что нужно новым сервисам: пользователи, юниты, файлы |
