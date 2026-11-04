@@ -17,10 +17,13 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/arngory/raycontrol/internal/summary"
 )
 
 func testServer(t *testing.T, daily int64) (*Server, *http.Client, string, *net.UDPConn) {
@@ -381,5 +384,48 @@ func TestSessionStatsOldBackend(t *testing.T) {
 	json.Unmarshal(raw, &got)
 	if err != nil || got.Connections != 1 || got.Asked != "198.51.100.7" {
 		t.Fatalf("stats from an old backend %s %v", raw, err)
+	}
+}
+
+// The report endpoint: off without a collector, 409 through a tunnel, and
+// the collector's errors as status codes.
+func TestReport(t *testing.T) {
+	s, c, url, _ := testServer(t, DefaultDaily)
+	if resp := get(t, c, "POST", url+PathReport, "phone", strings.NewReader("{}")); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("no collector: %d", resp.StatusCode)
+	}
+	var got []string
+	s.Report = func(_ context.Context, device string, addr netip.Addr, body io.Reader) error {
+		b, _ := io.ReadAll(body)
+		got = append(got, device+" "+addr.String()+" "+string(b))
+		switch string(b) {
+		case "off":
+			return summary.ErrDisabled
+		case "again":
+			return summary.ErrRepeated
+		case "bad":
+			return fmt.Errorf("%w: test", summary.ErrInvalid)
+		case "broken":
+			return errors.New("disk")
+		}
+		return nil
+	}
+	if resp := get(t, c, "POST", url+PathReport, "phone", strings.NewReader("ok")); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("through a tunnel: %d", resp.StatusCode)
+	}
+	for body, want := range map[string]int{"ok": 204, "off": 404, "again": 429, "bad": 400, "broken": 500} {
+		req := httptest.NewRequest("POST", PathReport, strings.NewReader(body))
+		req.RemoteAddr = "[::ffff:203.0.113.5]:4321"
+		w := httptest.NewRecorder()
+		s.report(w, req, "phone")
+		if w.Code != want {
+			t.Errorf("%s: %d, want %d", body, w.Code, want)
+		}
+		if body == "again" && w.Header().Get("Retry-After") == "" {
+			t.Error("429 without Retry-After")
+		}
+	}
+	if len(got) != 5 || !slices.Contains(got, "phone 203.0.113.5 ok") {
+		t.Fatalf("calls %q", got)
 	}
 }

@@ -398,3 +398,36 @@ func TestExportUser(t *testing.T) {
 		t.Fatalf("disabled user: %v", err)
 	}
 }
+
+func TestSummaryAPI(t *testing.T) {
+	_, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	SummaryDBs = [][2]string{{"operator", filepath.Join(t.TempDir(), "none.mmdb")}}
+
+	r, err := c.GetSummary(ctx, connect.NewRequest(&nodev1.GetSummaryRequest{}))
+	if err != nil || r.Msg.Enabled || r.Msg.Api != "" || r.Msg.Days != 7 || r.Msg.K != 10 || len(r.Msg.Dbs) != 1 || r.Msg.Dbs[0].Present {
+		t.Fatalf("summary while off: %+v %v", r.Msg, err)
+	}
+	if _, err := c.SetSummary(ctx, connect.NewRequest(&nodev1.SetSummaryRequest{Enabled: "on"})); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := c.GetSummary(ctx, connect.NewRequest(&nodev1.GetSummaryRequest{Days: 30})); !r.Msg.Enabled || r.Msg.Days != 30 {
+		t.Fatalf("after on: %+v", r.Msg)
+	}
+	if _, err := c.SetSummary(ctx, connect.NewRequest(&nodev1.SetSummaryRequest{Enabled: "maybe"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("bad switch: %v", err)
+	}
+	if _, err := c.SetSummary(ctx, connect.NewRequest(&nodev1.SetSummaryRequest{Api: "geoip", Token: "secret-token"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("unknown provider: %v", err)
+	}
+	audit, _ := c.ListAudit(ctx, connect.NewRequest(&nodev1.ListAuditRequest{}))
+	for _, e := range audit.Msg.Entries {
+		if strings.Contains(e.Target, "secret-token") || strings.Contains(e.Result, "secret-token") {
+			t.Fatalf("token in the audit log: %+v", e)
+		}
+	}
+	if _, err := c.SetSummary(ctx, connect.NewRequest(&nodev1.SetSummaryRequest{Enabled: "off"})); err != nil {
+		t.Fatal(err)
+	}
+}

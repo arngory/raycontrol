@@ -26,6 +26,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/arngory/raycontrol/internal/api"
+	"github.com/arngory/raycontrol/internal/asn"
 	"github.com/arngory/raycontrol/internal/certs"
 	"github.com/arngory/raycontrol/internal/cloudflare"
 	"github.com/arngory/raycontrol/internal/deploy"
@@ -40,6 +41,7 @@ import (
 	"github.com/arngory/raycontrol/internal/site"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
+	"github.com/arngory/raycontrol/internal/summary"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -580,6 +582,12 @@ func startSubscription(ctx context.Context, st *store.Store, log *slog.Logger, p
 			}
 			return render.InnerEmail(u.ID), nil
 		}}
+	// Client summaries (R4-21): reports in, hints out; both only while the
+	// administrator has them on (rayctl summary on).
+	sum := &summary.Collector{Store: st, ASN: summary.Sources(st, &asn.DB{Path: summary.OperatorDB}, &asn.DB{Path: summary.ReleaseDB})}
+	s.Probe.Report = sum.Take
+	s.Hints = sum.Hints
+	go pruneSummary(ctx, sum, log)
 	if err := provision.SubscriptionUDP(ctx, st); err != nil {
 		log.Warn("probe: the subscription service has no UDP port", "err", err)
 	} else if pc, err := net.ListenPacket("udp", addr); err != nil {
@@ -599,6 +607,22 @@ func startSubscription(ctx context.Context, st *store.Store, log *slog.Logger, p
 	}()
 	log.Info("subscription endpoint", "addr", addr, "probe_udp", s.Probe.UDPPort != 0)
 	return nil
+}
+
+// pruneSummary drops the summary counters past their 30 days, daily.
+func pruneSummary(ctx context.Context, c *summary.Collector, log *slog.Logger) {
+	for {
+		if n, err := c.Prune(ctx); err != nil {
+			log.Warn("summary: prune", "err", err)
+		} else if n > 0 {
+			log.Info("summary: old counters dropped", "rows", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(6 * time.Hour):
+		}
+	}
 }
 
 // rotateCredentials advances the rotation of user credentials every ten

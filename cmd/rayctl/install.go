@@ -294,6 +294,9 @@ func (c *cli) install(ctx context.Context, args []string) error {
 			}
 			fmt.Println("installed", b.dst)
 		}
+		if err := installData(h, *dataplane); err != nil {
+			return err
+		}
 	}
 	// Control plane only: rayd and rayspa units, tmpfiles, polkit, sysctl.
 	base := deploy.Build(render.Model{}, nil, render.DefaultPaths, deploy.DefaultBinaries)
@@ -579,4 +582,27 @@ func (c *cli) adminAccess(ctx context.Context, args []string) error {
 			fmt.Fprintln(w, p)
 		}
 	})
+}
+
+// installData puts the release's data (the AS database and its notice) in
+// deploy.DataDir through the journal; a release without it changes nothing.
+func installData(h *deploy.Host, dir string) error {
+	for _, name := range deploy.DataFiles {
+		b, err := os.ReadFile(filepath.Join(dir, name)) //nolint:gosec // G304: the verified release
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(deploy.DataDir, name)
+		changed, err := h.WriteFile(deploy.File{Path: dst, Mode: 0o644, Content: b})
+		if err != nil {
+			return fmt.Errorf("installing %s: %w", name, err)
+		}
+		if changed {
+			fmt.Println("installed", dst)
+		}
+	}
+	return nil
 }

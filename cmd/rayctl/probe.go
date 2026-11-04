@@ -31,6 +31,7 @@ func probe(ctx context.Context, args []string) error {
 	links := fs.Bool("links", false, "print the profile links (they carry credentials)")
 	redacted := fs.Bool("redact", false, "hide the node's address and names, IDs and keys, to share the output in an issue")
 	channel := fs.Bool("channel", false, "then measure the channel (probe-v1): TCP down and up, UDP echo")
+	report := fs.String("report", "", "then send this summary of the network (probe-v1 §6), JSON or @FILE")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
 		return errUsage
 	}
@@ -113,6 +114,25 @@ func probe(ctx context.Context, args []string) error {
 			} else {
 				printf("  %s (service %d)\n", pr.Name, pr.Svc)
 			}
+		}
+		if h := p.Hints; h != nil {
+			printf("hints for this network (%d reports in %d days): order %v, avoid %v, udp blocked %v, tcp stall %d KiB\n",
+				h.Devices, h.Days, h.Order, h.Avoid, h.UDPBlocked, h.TCPStallKiB)
+		}
+		if *report != "" {
+			body := []byte(*report)
+			if strings.HasPrefix(*report, "@") {
+				if body, err = os.ReadFile(strings.TrimPrefix(*report, "@")); err != nil {
+					return err
+				}
+			}
+			hc := client.HTTP()
+			c := chprobe.Client{HTTP: hc, Base: "https://" + client.Addr, Authorize: client.Authorize}
+			if err := c.Report(ctx, body); err != nil {
+				return err
+			}
+			hc.CloseIdleConnections()
+			printf("report taken\n")
 		}
 		if *channel {
 			return measure(ctx, client, p, printf)

@@ -19,12 +19,15 @@ import (
 	mrand "math/rand/v2"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/arngory/raycontrol/internal/summary"
 )
 
 // Name is where a client reaches the probes through a tunnel: the exits
@@ -36,6 +39,8 @@ const (
 	PathDown = "/probe/v1/down"
 	PathUp   = "/probe/v1/up"
 	PathUDP  = "/probe/v1/udp"
+	// PathReport takes a client's summary of a network (§6, R4-21).
+	PathReport = "/probe/v1/report"
 
 	MaxBytes     = 256 << 20 // one TCP probe
 	MaxTime      = 30 * time.Second
@@ -112,6 +117,9 @@ type Server struct {
 	// Hysteria lists the Hysteria2 services' stats sockets by service ID,
 	// for link; nil leaves Hysteria2 out.
 	Hysteria func() map[string]string
+	// Report records a client's summary of the network it asks from (R4-21);
+	// nil: the node takes no reports.
+	Report func(ctx context.Context, device string, addr netip.Addr, body io.Reader) error
 	// Account names the device's user as the Hysteria2 backends know it, so
 	// that link gives that user's own sessions one by one (niko-server
 	// v0.7); nil, or an error, leaves the aggregates alone.
@@ -213,6 +221,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.endUDP(w, r, device)
 	case r.URL.Path == PathLink && r.Method == http.MethodGet:
 		s.link(w, r, device)
+	case r.URL.Path == PathReport && r.Method == http.MethodPost:
+		s.report(w, r, device)
 	default:
 		http.NotFound(w, r)
 	}
@@ -463,4 +473,37 @@ func tcpInfo(ctx context.Context) *TCPInfo {
 	}
 	return &TCPInfo{RTTus: info.Rtt, RTTVarus: info.Rttvar, MinRTTus: info.Min_rtt, Retrans: info.Total_retrans,
 		DeliveryBps: info.Delivery_rate * 8, Cwnd: info.Snd_cwnd, PMTU: info.Pmtu}
+}
+
+// report takes a client's summary of the network it asks from: directly,
+// since through a tunnel the address is the node's own.
+func (s *Server) report(w http.ResponseWriter, r *http.Request, device string) {
+	if s.Report == nil {
+		http.NotFound(w, r)
+		return
+	}
+	ap, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if ap.Addr().Unmap().IsLoopback() {
+		http.Error(w, "a report is about the network it comes from, not through a tunnel", http.StatusConflict)
+		return
+	}
+	err = s.Report(r.Context(), device, ap.Addr().Unmap(), r.Body)
+	switch {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, summary.ErrDisabled):
+		http.NotFound(w, r)
+	case errors.Is(err, summary.ErrRepeated):
+		w.Header().Set("Retry-After", strconv.FormatInt(86400-s.clock().Unix()%86400, 10))
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
+	case errors.Is(err, summary.ErrInvalid):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	default:
+		s.Log.Warn("probe: report", "err", err)
+		http.Error(w, "report not taken", http.StatusInternalServerError)
+	}
 }

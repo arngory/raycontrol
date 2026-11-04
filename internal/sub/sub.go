@@ -22,6 +22,7 @@ import (
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/spa"
+	"github.com/arngory/raycontrol/internal/summary"
 )
 
 const (
@@ -60,6 +61,10 @@ type Payload struct {
 	Profiles []Profile `json:"profiles"`
 	// Probe says the endpoint serves channel probes (spec/probe-v1.md).
 	Probe *ProbeHint `json:"probe,omitempty"`
+	// Hints is a starting order of the profiles for the network the
+	// subscription was asked from, out of the client summaries (R4-21,
+	// probe-v1 §6.2); only with enough reports from that network.
+	Hints *summary.Hints `json:"hints,omitempty"`
 }
 
 // ProbeHint: probe-v1 on the subscription endpoint; UDP: the echo on the

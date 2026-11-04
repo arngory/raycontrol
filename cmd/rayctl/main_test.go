@@ -4,11 +4,14 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/summary"
 )
 
 func TestParseExpiry(t *testing.T) {
@@ -128,5 +131,12 @@ func TestExportText(t *testing.T) {
 	want := "# reality (service 4)\nvless://a\n# reality from 2026-01-01T00:00:00Z\nvless://b\n# hy2 (service 5)\nhysteria2://c\n"
 	if got != want {
 		t.Fatalf("got\n%s\nwant\n%s", got, want)
+	}
+}
+
+// rayd reads the release's AS database where install and update put it.
+func TestReleaseDBPath(t *testing.T) {
+	if summary.ReleaseDB != filepath.Join(deploy.DataDir, "ipinfo_lite.mmdb") || !slices.Contains(deploy.DataFiles, filepath.Base(summary.ReleaseDB)) {
+		t.Fatalf("%s is not where the release puts it (%s)", summary.ReleaseDB, deploy.DataDir)
 	}
 }

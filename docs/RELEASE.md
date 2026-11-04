@@ -22,6 +22,12 @@
 `RWQBergjLoDHqeme5vyIuIRXJLjTj1EF3jR1nlWBVJO3rWxgy9SZj4bD` (уже в `install/bootstrap.sh`). Строка
 `untrusted comment` из `.pub` — только подпись к файлу: в `bootstrap.sh` и в `minisign -P` она не нужна.
 
+## Один раз: токен IPinfo
+
+Релиз несёт базу AS для сводки от клиентов — IPinfo Lite (R4-21, CC BY-SA 4.0). Release-workflow скачивает её
+токеном из секрета репозитория `IPINFO_TOKEN`: бесплатный аккаунт на ipinfo.io → токен → Settings → Secrets and
+variables → Actions. Без секрета релиз не собирается. База кладётся в архив без изменений, атрибуция — в `NOTICE`.
+
 ## Выпуск
 
 1. Файл `.github/release-notes/<тег>.md` (например `v0.2.0.md`) — уже в ветке, из которой выпускается релиз.
@@ -31,7 +37,7 @@
      существующий тег он не перезаписывает;
    - **тегом**: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. Workflow собирает `raycontrol-linux-{amd64,arm64}.tar.gz` (`rayd`, `rayspa`, `rayctl`, `xray`, `niko-server`,
-   `VERSIONS`), считает `SHA256SUMS`, подписывает его (trusted comment `raycontrol vX.Y.Z` — по нему `rayctl update`
+   `ipinfo_lite.mmdb`, `NOTICE`, `VERSIONS`), считает `SHA256SUMS`, подписывает его (trusted comment `raycontrol vX.Y.Z` — по нему `rayctl update`
    узнаёт версию) и публикует релиз с этими файлами и `SHA256SUMS.minisig`.
 
 `install/bootstrap.sh` берёт последний релиз (или `RAYCONTROL_VERSION`), а сам скрипт по README скачивается из `main`:

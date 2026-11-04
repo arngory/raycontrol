@@ -211,6 +211,22 @@ out="$(client -channel "$laptop")" || fail "channel probe: $out"
 [[ $out == *"channel udp: 50 sent, 50 back; lost up 0, down 0"* ]] || fail "channel probe over UDP: $out"
 [[ $out == *"channel link: "*" connections of this address on 443"* ]] || fail "no link stats: $out"
 
+# Client summaries (R4-21): off until turned on; one report per network a
+# day; the node shows networks with fewer than k reports only as a total.
+svc="$(sed -n 's/^  dns (service \([0-9]*\))$/\1/p' <<<"$out" | head -1)"
+[[ -n $svc ]] || fail "no dns service id in: $out"
+report="{\"v\":1,\"net\":\"wifi\",\"obs\":[{\"svc\":$svc,\"result\":\"works\",\"udp\":\"0-1\"}]}"
+if out="$(client -report "$report" "$laptop")"; then fail "a report taken while summaries are off: $out"; fi
+[[ $out == *"HTTP 404"* ]] || fail "report while off: $out"
+x rayctl summary on >/dev/null || fail "rayctl summary on"
+out="$(client -report "$report" "$laptop")" || fail "report: $out"
+[[ $out == *"report taken"* ]] || fail "report not taken: $out"
+if out="$(client -report "$report" "$laptop")"; then fail "a second report the same day was taken: $out"; fi
+[[ $out == *"HTTP 429"* ]] || fail "second report: $out"
+summary="$(x rayctl summary)"
+[[ $summary == *"from smaller networks"*"1 reports"* ]] || fail "rayctl summary: $summary"
+x rayctl summary off >/dev/null
+
 log "$distro: remote API"
 x rayctl service add api api >/dev/null
 # REALITY with its site and naive behind it: units, users and the naive
