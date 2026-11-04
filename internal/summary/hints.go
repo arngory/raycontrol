@@ -2,6 +2,7 @@ package summary
 
 import (
 	"context"
+	"maps"
 	"net/netip"
 	"slices"
 	"sort"
@@ -18,6 +19,7 @@ type Hints struct {
 	Avoid       []uint16 `json:"avoid,omitempty"`         // services that mostly fail here
 	UDPBlocked  bool     `json:"udp_blocked,omitempty"`   // UDP mostly does not pass
 	TCPStallKiB int      `json:"tcp_stall_kib,omitempty"` // TCP mostly stalls near this many KiB
+	UDPMTU      string   `json:"udp_mtu,omitempty"`       // the UDP MTU most reports give (a bucket of MTUs)
 	Devices     int64    `json:"devices"`                 // reports counted (not distinct devices)
 	Days        int      `json:"days"`
 }
@@ -26,6 +28,7 @@ type Hints struct {
 type tally struct {
 	reports int64
 	nets    map[string]int64
+	mtu     map[string]int64
 	svc     map[int64]map[string]map[string]int64 // svc -> field -> bucket -> n
 }
 
@@ -34,7 +37,7 @@ func sum(rows []store.SummaryCount) map[uint32]*tally {
 	for _, r := range rows {
 		t := out[r.ASN]
 		if t == nil {
-			t = &tally{nets: map[string]int64{}, svc: map[int64]map[string]map[string]int64{}}
+			t = &tally{nets: map[string]int64{}, mtu: map[string]int64{}, svc: map[int64]map[string]map[string]int64{}}
 			out[r.ASN] = t
 		}
 		if r.Svc == 0 {
@@ -43,6 +46,8 @@ func sum(rows []store.SummaryCount) map[uint32]*tally {
 				t.reports += r.N
 			case "net":
 				t.nets[r.Bucket] += r.N
+			case "mtu":
+				t.mtu[r.Bucket] += r.N
 			}
 			continue
 		}
@@ -120,11 +125,27 @@ func (t *tally) hints(svcs []uint16) *Hints {
 			h.TCPStallKiB, _ = strconv.Atoi(best)
 		}
 	}
+	h.UDPMTU = majority(t.mtu)
 	slices.Sort(h.Avoid)
-	if len(h.Order) == 0 && len(h.Avoid) == 0 && !h.UDPBlocked && h.TCPStallKiB == 0 {
+	if len(h.Order) == 0 && len(h.Avoid) == 0 && !h.UDPBlocked && h.TCPStallKiB == 0 && h.UDPMTU == "" {
 		return nil
 	}
 	return h
+}
+
+// majority is the bucket with at least Majority of the counts, given K of
+// them at least; "" otherwise.
+func majority(m map[string]int64) string {
+	all := total(m)
+	if all < K {
+		return ""
+	}
+	for _, b := range slices.Sorted(maps.Keys(m)) {
+		if float64(m[b]) >= Majority*float64(all) {
+			return b
+		}
+	}
+	return ""
 }
 
 // Hints returns the hint for a client at addr with these services, or nil:
@@ -151,6 +172,7 @@ type Network struct {
 	Country  string
 	Reports  int64
 	Nets     map[string]int64
+	MTU      map[string]int64
 	Services map[int64]map[string]map[string]int64 // svc -> field -> bucket -> n
 }
 
@@ -174,7 +196,7 @@ func (c *Collector) View(ctx context.Context, days int) (nets []Network, others 
 			others += t.reports
 			continue
 		}
-		nets = append(nets, Network{ASN: as, Name: names[as][0], Country: names[as][1], Reports: t.reports, Nets: t.nets, Services: t.svc})
+		nets = append(nets, Network{ASN: as, Name: names[as][0], Country: names[as][1], Reports: t.reports, Nets: t.nets, MTU: t.mtu, Services: t.svc})
 	}
 	sort.Slice(nets, func(i, j int) bool {
 		if nets[i].Reports != nets[j].Reports {

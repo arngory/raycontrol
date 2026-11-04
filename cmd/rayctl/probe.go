@@ -116,8 +116,8 @@ func probe(ctx context.Context, args []string) error {
 			}
 		}
 		if h := p.Hints; h != nil {
-			printf("hints for this network (%d reports in %d days): order %v, avoid %v, udp blocked %v, tcp stall %d KiB\n",
-				h.Devices, h.Days, h.Order, h.Avoid, h.UDPBlocked, h.TCPStallKiB)
+			printf("hints for this network (%d reports in %d days): order %v, avoid %v, udp blocked %v, tcp stall %d KiB, udp mtu %q\n",
+				h.Devices, h.Days, h.Order, h.Avoid, h.UDPBlocked, h.TCPStallKiB, h.UDPMTU)
 		}
 		if *report != "" {
 			body := []byte(*report)
