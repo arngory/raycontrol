@@ -261,9 +261,10 @@ func supervisor(paths render.Paths, xray, niko string, st *store.Store, log *slo
 			return deploy.Plan{}, err
 		}
 		files, _, err := render.Render(m, paths)
-		if err != nil {
+		if err != nil && !render.Partial(err) {
 			return deploy.Plan{}, err
 		}
+		// The applier reports the broken services; the rest runs (Q-1).
 		return deploy.Build(m, files, paths, bins), nil
 	}}, nil
 }

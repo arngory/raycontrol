@@ -3,6 +3,7 @@ package render_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -150,14 +151,65 @@ func TestRender(t *testing.T) {
 func TestDisabledInner(t *testing.T) {
 	ctx := context.Background()
 	st := node(t)
+	// A service that does not go through inner.
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true,
+		Settings: `{"target":"www.example.org:443","sni":"www.example.org"}`}); err != nil {
+		t.Fatal(err)
+	}
 	st.SetServiceEnabled(ctx, "inner", false)
 	m, err := render.Collect(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := render.Render(m, render.DefaultPaths); err == nil {
-		t.Fatal("tunnels rendered without the inner stage")
+	// The tunnels cannot be rendered; everything else still is (Q-1).
+	files, _, err := render.Render(m, render.DefaultPaths)
+	var broken render.ServiceErrors
+	if !errors.As(err, &broken) || len(broken) != 2 || !render.Partial(err) {
+		t.Fatalf("tunnels without the inner stage: %v", err)
 	}
+	for _, f := range files {
+		if f.Service == "dns" || f.Service == "mdns" {
+			t.Errorf("%s rendered without the inner stage", f.Path)
+		}
+		if f.Service == "front" && strings.Contains(string(f.Content), `"zones"`) {
+			t.Errorf("the front routes the broken tunnels: %s", f.Content)
+		}
+	}
+	all, _, err := render.Render(withInner(t, st), render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What does not depend on inner is the same either way.
+	want := map[string]string{}
+	for _, f := range all {
+		if f.Service != "dns" && f.Service != "mdns" && f.Service != "front" && f.Service != "inner" {
+			want[f.Path] = string(f.Content)
+		}
+	}
+	got := 0
+	for _, f := range files {
+		if c, ok := want[f.Path]; ok {
+			got++
+			if c != string(f.Content) {
+				t.Errorf("%s differs", f.Path)
+			}
+		}
+	}
+	if got != len(want) || len(want) == 0 {
+		t.Fatalf("%d of %d other files rendered", got, len(want))
+	}
+}
+
+func withInner(t *testing.T, st *store.Store) render.Model {
+	t.Helper()
+	ctx := context.Background()
+	st.SetServiceEnabled(ctx, "inner", true)
+	defer st.SetServiceEnabled(ctx, "inner", false)
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
 }
 
 func TestVLESSEncryption(t *testing.T) {

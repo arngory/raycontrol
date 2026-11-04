@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -421,4 +422,44 @@ func setFields(settings string, fields map[string]any) (string, error) {
 	}
 	b, err := json.Marshal(m)
 	return string(b), err
+}
+
+// Dependents are the enabled services that work through the service name:
+// the DNS tunnels and Yggdrasil through inner, the services of a site
+// through that site. Disabling or deleting it while they are on would leave
+// them unrenderable (Q-1).
+func Dependents(ctx context.Context, st *store.Store, name string) ([]string, error) {
+	all, err := st.ListServices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	i := slices.IndexFunc(all, func(s store.Service) bool { return s.Name == name })
+	if i < 0 {
+		return nil, nil // the store says not found
+	}
+	target := all[i]
+	var out []string
+	for _, s := range all {
+		if !s.Enabled || s.Name == name {
+			continue
+		}
+		switch {
+		case target.Kind == "inner" && (s.Kind == "dnstt" || s.Kind == "masterdns" || s.Kind == "yggdrasil"),
+			target.Kind == "site" && siteOf(s) == name:
+			out = append(out, s.Name)
+		}
+	}
+	return out, nil
+}
+
+// CheckNoDependents refuses to take away a service others work through.
+func CheckNoDependents(ctx context.Context, st *store.Store, name string) error {
+	deps, err := Dependents(ctx, st, name)
+	if err != nil {
+		return err
+	}
+	if len(deps) > 0 {
+		return fmt.Errorf("%w: %s works through %s: disable or delete it first", store.ErrInvalid, strings.Join(deps, ", "), name)
+	}
+	return nil
 }

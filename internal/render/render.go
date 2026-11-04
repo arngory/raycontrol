@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -333,7 +334,9 @@ func jsonFile(v any) ([]byte, error) {
 }
 
 // Render returns all files for the model. Kinds the renderer does not
-// handle yet are skipped and named in the second result.
+// handle yet, and services waiting for a certificate, are skipped and named
+// in the second result. A service that cannot be rendered comes back in a
+// ServiceErrors, with the files of all the others.
 func Render(m Model, p Paths) ([]File, []string, error) {
 	var files []File
 	var skipped []string
@@ -368,24 +371,27 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 	tcpDefault := "" // the first REALITY service: its target answers like the site
 	backends := map[string]backendRef{}
 
-	for _, s := range m.Services {
+	// one renders a service. On an error nothing of it is kept, and the
+	// others go on (Q-1): one broken service must not hold back users,
+	// revocations and key rotations everywhere else.
+	one := func(s Service) error {
 		switch s.Kind {
 		case "dnstt", "masterdns":
 			if inner == nil {
-				return nil, nil, fmt.Errorf("service %s needs the inner stage, which is missing or disabled", s.Name)
+				return errors.New("needs the inner stage, which is missing or disabled")
 			}
 			zone := provision.Zone(s.Service)
 			zones = append(zones, route{Zone: zone, Backend: s.Name})
 			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
 			f, secret, err := dnsBackend(s, zone, inner.Name, p)
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			files = append(files, f, secret)
 		case "inner":
 			f, err := innerConfig(s, m, p)
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			files = append(files, f)
 		case "reality":
@@ -393,11 +399,11 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			_ = json.Unmarshal([]byte(s.Settings), &rs)
 			if rs.Site != "" && !m.hasCert(rs.Site) {
 				skipped = append(skipped, s.Name+" (waits for the certificate of "+rs.Site+")")
-				continue
+				return nil
 			}
 			f, err := realityConfig(s, m, p)
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			files = append(files, f)
 			if m.FrontTCP {
@@ -412,11 +418,11 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		case "hy2-masq", "hy2-obfs":
 			if site := provision.SiteOf(s.Service); s.Kind == "hy2-masq" && !m.hasCert(site) {
 				skipped = append(skipped, s.Name+" (waits for the certificate of "+site+")")
-				continue
+				return nil
 			}
 			fs, err := hysteriaFiles(s, m, p)
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			files = append(files, fs...)
 			backends[s.Name] = backendRef{Socket: p.socket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
@@ -432,7 +438,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		case "site":
 			fs, err := siteFiles(s, m, p)
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			if fs == nil {
 				skipped = append(skipped, s.Name+" (waits for its certificate)")
@@ -443,7 +449,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			// sockets it passes.
 			if !m.FrontTCP {
 				skipped = append(skipped, s.Name+" (needs the front on TCP 443)")
-				continue
+				return nil
 			}
 			var st struct {
 				SNI string `json:"sni"`
@@ -454,11 +460,11 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if s.Kind == "naive" {
 				fs, err := naiveFiles(s, m, p)
 				if err != nil {
-					return nil, nil, err
+					return err
 				}
 				if fs == nil {
 					skipped = append(skipped, s.Name+" (waits for its site's certificate)")
-					continue
+					return nil
 				}
 				files = append(files, fs...)
 				ref = backendRef{Socket: p.NaiveSocket(s.Name), Mode: "fd", UID: p.PeerUID(s.UID)}
@@ -475,18 +481,18 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			// A TLS link behind tcpmux by name (R4-15), into inner.
 			if !m.FrontTCP {
 				skipped = append(skipped, s.Name+" (needs the front on TCP 443)")
-				continue
+				return nil
 			}
 			if inner == nil {
-				return nil, nil, fmt.Errorf("service %s needs the inner stage, which is missing or disabled", s.Name)
+				return errors.New("needs the inner stage, which is missing or disabled")
 			}
 			if !m.hasCert(provision.SiteOf(s.Service)) {
 				skipped = append(skipped, s.Name+" (waits for its site's certificate)")
-				continue
+				return nil
 			}
 			fs, err := yggdrasilFiles(s, m, *inner, p)
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			files = append(files, fs...)
 			st, _, _ := YggdrasilNode(s)
@@ -496,6 +502,17 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			// Not data-plane processes.
 		default:
 			skipped = append(skipped, s.Name+" ("+s.Kind+")")
+		}
+		return nil
+	}
+	var errs ServiceErrors
+	for _, s := range m.Services {
+		nf, nz, nt, nu, def := len(files), len(zones), len(tcpRoutes), len(udpRoutes), tcpDefault
+		if err := one(s); err != nil {
+			files, zones, tcpRoutes, udpRoutes, tcpDefault = files[:nf], zones[:nz], tcpRoutes[:nt], udpRoutes[:nu], def
+			delete(backends, s.Name)
+			delete(backends, quicBackend(s.Name))
+			errs = append(errs, fmt.Errorf("service %s: %w", s.Name, err))
 		}
 	}
 
@@ -541,7 +558,26 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		}
 		files = append(files, File{Path: path.Join(p.Rendered, "front", "front.json"), Mode: 0o640, Group: GroupName("front"), Content: b, Service: "front"})
 	}
+	if len(errs) > 0 {
+		return files, skipped, errs
+	}
 	return files, skipped, nil
+}
+
+// ServiceErrors are the services Render could not render. The files it
+// returns with them are complete for every other service and may be
+// applied: the broken ones keep their files on disk, and the front leaves
+// them out.
+type ServiceErrors []error
+
+func (e ServiceErrors) Error() string   { return errors.Join(e...).Error() }
+func (e ServiceErrors) Unwrap() []error { return e }
+
+// Partial reports whether err from Render leaves the other services' files
+// usable.
+func Partial(err error) bool {
+	var se ServiceErrors
+	return errors.As(err, &se)
 }
 
 func dnsBackend(s Service, zone, inner string, p Paths) (cfg, secret File, err error) {

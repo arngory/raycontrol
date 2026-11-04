@@ -469,3 +469,27 @@ func TestSummaryAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A service others work through stays while they are on (Q-1): without
+// inner the DNS tunnels cannot be rendered.
+func TestServiceDependents(t *testing.T) {
+	_, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "dnstt", Name: "dns"})); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "inner", Enabled: false}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "dns works through inner") {
+		t.Fatalf("disable inner under dnstt: %v", err)
+	}
+	if _, err := c.DeleteService(ctx, connect.NewRequest(&nodev1.DeleteServiceRequest{Name: "inner"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("delete inner under dnstt: %v", err)
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "dns", Enabled: false})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "inner", Enabled: false})); err != nil {
+		t.Fatalf("disable inner after dnstt: %v", err)
+	}
+}

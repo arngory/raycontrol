@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/arngory/raycontrol/internal/provision"
@@ -83,6 +84,26 @@ func TestApply(t *testing.T) {
 	}
 	if len(restarted) != 0 || len(inner.calls) != 1 || len(inner.calls[0]) != 1 {
 		t.Fatalf("user change: restarted %v, inner %v", restarted, inner.calls)
+	}
+
+	// inner off under the tunnel (a database from before the API refused
+	// it): the tunnel keeps its files and process, the rest is applied (Q-1).
+	// A new service at the same time still comes up.
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-obfs", Name: "hy2", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	st.SetServiceEnabled(ctx, "inner", false)
+	restarted = nil
+	err = a.Apply(ctx)
+	if err == nil || !strings.Contains(err.Error(), "service dns") {
+		t.Fatalf("apply without inner: %v", err)
+	}
+	slices.Sort(restarted)
+	if !slices.Equal(restarted, []string{"restart niko-front.service", "restart niko-hy2.service"}) {
+		t.Fatalf("apply without inner restarted %v", restarted)
+	}
+	if _, err := os.Stat(filepath.Join(paths.Rendered, "dns", "noise.key")); err != nil {
+		t.Fatalf("the broken tunnel lost its files: %v", err)
 	}
 }
 
