@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,6 +52,7 @@ type Gate struct {
 	adminPorts []Port
 	relays     []netip.Prefix
 	relayPorts []Port
+	forward    []Port // every service port: what a relay forwards
 	// holders tracks which devices opened an address and port and until
 	// when, so that a revocation closes only what nobody else still holds.
 	holders  map[grantKey]map[string]time.Time
@@ -178,6 +180,21 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 			return err
 		}
 		g.relays, g.relayPorts = relays, relayPorts
+	}
+	var forward []Port
+	for _, ps := range services {
+		for _, p := range ps {
+			if !slices.Contains(forward, p) {
+				forward = append(forward, p)
+			}
+		}
+	}
+	slices.SortFunc(forward, func(a, b Port) int { return strings.Compare(a.String(), b.String()) })
+	if !slices.Equal(forward, g.forward) {
+		if err := g.fw.SetForward(forward); err != nil {
+			return err
+		}
+		g.forward = forward
 	}
 	g.revokeLocked()
 	if err := g.acmeLocked(snap.GetAcme()); err != nil {
@@ -321,6 +338,11 @@ func (g *Gate) restoreLocked() error {
 	}
 	if len(g.relays) > 0 || len(g.relayPorts) > 0 {
 		if err := g.fw.SetRelays(g.relays, g.relayPorts); err != nil {
+			return err
+		}
+	}
+	if len(g.forward) > 0 {
+		if err := g.fw.SetForward(g.forward); err != nil {
 			return err
 		}
 	}

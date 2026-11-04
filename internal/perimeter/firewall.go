@@ -36,6 +36,9 @@ type Firewall interface {
 	// SetAdmin opens ports (SSH) to the given prefixes without SPA:
 	// emergency access when SPA itself fails.
 	SetAdmin(prefixes []netip.Prefix, ports []Port) error
+	// SetForward replaces the ports a relay forwards to its exit (no-op
+	// when the host is not a relay).
+	SetForward(ports []Port) error
 	// SetRelays opens the service ports to relays' addresses without SPA
 	// (relay-v1): devices knock at the relay, which forwards to this node.
 	SetRelays(addrs []netip.Prefix, ports []Port) error
@@ -68,6 +71,10 @@ type NFT struct {
 	// GuardUIDs are the data-plane processes (DataPlaneUIDs when empty):
 	// they carry users' traffic, which must not reach the node itself.
 	GuardUIDs string
+	// RelayTo makes this host a relay (relay-v1 §3.1): the forwarded ports
+	// (SetForward) go to this exit by DNAT, only from addresses with an SPA
+	// grant, masqueraded. Invalid: not a relay.
+	RelayTo netip.Addr
 
 	destroy bool // nft and kernel support "destroy element"
 }
@@ -111,6 +118,30 @@ func (n *NFT) Ruleset() string {
 	guard := n.GuardUIDs
 	if guard == "" {
 		guard = DataPlaneUIDs
+	}
+	relay := ""
+	if to := n.RelayTo.Unmap(); to.IsValid() {
+		family, nfproto, saddr, set := "ip", "ipv4", "ip saddr", "@allow4"
+		if to.Is6() {
+			family, nfproto, saddr, set = "ip6", "ipv6", "ip6 saddr", "@allow6"
+		}
+		relay = fmt.Sprintf(`
+	# A relay (relay-v1 §3.1): the forwarded ports go to the exit, in the
+	# kernel; only from an address with an SPA grant for the port.
+	set relay_fwd { type inet_proto . inet_service; }
+	chain relay_dnat {
+		type nat hook prerouting priority dstnat - 1; policy accept;
+		meta nfproto %[5]s fib daddr type local meta l4proto . th dport @relay_fwd dnat %[1]s to %[2]s
+	}
+	chain relay_forward {
+		type filter hook forward priority 0; policy accept;
+		ct status dnat %[1]s daddr %[2]s %[3]s . meta l4proto . th dport %[4]s accept
+		ct status dnat %[1]s daddr %[2]s counter drop comment "relay-no-grant"
+	}
+	chain relay_snat {
+		type nat hook postrouting priority srcnat; policy accept;
+		ct status dnat %[1]s daddr %[2]s masquerade
+	}`, family, to, saddr, set, nfproto)
 	}
 	return fmt.Sprintf(`table inet %[1]s {}
 delete table inet %[1]s
@@ -202,9 +233,9 @@ table inet %[1]s {
 		counter comment "data-plane-to-node"
 		meta l4proto tcp reject with tcp reset
 		reject with icmpx admin-prohibited
-	}
+	}%[8]s
 }
-`, Table, limit, n.NflogGroup, lo, loNAT, lo, guard)
+`, Table, limit, n.NflogGroup, lo, loNAT, lo, guard, relay)
 }
 
 // Setup installs the table and detects whether "destroy element" works.
@@ -292,6 +323,19 @@ func (n *NFT) SetAdmin(prefixes []netip.Prefix, ports []Port) error {
 		if len(set.elems) > 0 {
 			fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set.name, strings.Join(set.elems, ", "))
 		}
+	}
+	return n.run(b.String())
+}
+
+// SetForward replaces the ports a relay forwards (relay-v1 §3.1).
+func (n *NFT) SetForward(ports []Port) error {
+	if !n.RelayTo.IsValid() {
+		return nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "flush set inet %s relay_fwd\n", Table)
+	if elems := portElems(ports); len(elems) > 0 {
+		fmt.Fprintf(&b, "add element inet %s relay_fwd { %s }\n", Table, strings.Join(elems, ", "))
 	}
 	return n.run(b.String())
 }

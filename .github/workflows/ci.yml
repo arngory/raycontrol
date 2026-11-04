@@ -21,7 +21,7 @@ jobs:
           ./scripts/gen.sh
           git diff --exit-code -- internal/gen
       - name: Shell scripts
-        run: shellcheck -x scripts/*.sh install/*.sh test/install/*.sh test/supervise/*.sh
+        run: shellcheck -x scripts/*.sh install/*.sh test/install/*.sh test/supervise/*.sh test/relay/*.sh
       - run: go vet ./...
       - run: go test -race -count=1 ./...
       # Built from source with the module's Go: prebuilt binaries made with an
@@ -42,6 +42,8 @@ jobs:
       - run: sudo apt-get install -y nftables
       - run: go test -c -o perimeter.test ./internal/perimeter
       - run: sudo RAYCONTROL_NETNS_TEST=1 unshare -n ./perimeter.test -test.run TestNetns -test.v
+      # A relay in the kernel between three namespaces (relay-v1 §3.1).
+      - run: sudo test/relay/run.sh ./perimeter.test
 
   xray:
     # The rendered inner stage, REALITY and Hysteria2 on a real Xray from the

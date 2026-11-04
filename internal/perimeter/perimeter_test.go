@@ -28,6 +28,7 @@ type fakeFW struct {
 	adminPorts []Port
 	relays     []netip.Prefix
 	relayPorts []Port
+	forward    []Port
 	rot        map[uint16]uint16
 	open       map[string]time.Duration // "addr port" -> ttl
 	gone       bool                     // table removed behind the gate's back
@@ -80,6 +81,10 @@ func (f *fakeFW) SetRotation(udp map[uint16]uint16) error {
 }
 func (f *fakeFW) SetAdmin(p []netip.Prefix, ports []Port) error {
 	f.admin, f.adminPorts = p, ports
+	return nil
+}
+func (f *fakeFW) SetForward(ports []Port) error {
+	f.forward = ports
 	return nil
 }
 func (f *fakeFW) SetRelays(p []netip.Prefix, ports []Port) error {
