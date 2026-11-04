@@ -132,13 +132,20 @@ func (a *Applier) Apply(ctx context.Context) error {
 			continue
 		}
 		if svc, ok := xrayService(m, service); ok && len(cs) == 1 && cs[0].old != nil && sameExceptClients(cs[0].old, cs[0].new) {
-			tag, want := render.XrayUsers(m, svc)
+			_, want := render.XrayUsers(m, svc)
 			api := a.inner(a.Paths.APISocket(service))
 			flow := ""
 			if svc.Kind == "reality" {
 				flow = render.RealityFlow
 			}
-			added, removed, err := api.SyncVLESS(ctx, tag, flow, want)
+			// The same users on every inbound: REALITY's previous keys have
+			// one of their own for a while (R4-19).
+			var added, removed int
+			var err error
+			for _, tag := range render.XrayTags(svc) {
+				a1, r1, e := api.SyncVLESS(ctx, tag, flow, want)
+				added, removed, err = added+a1, removed+r1, errors.Join(err, e)
+			}
 			if err == nil {
 				a.Log.Info("xray users synced", "service", service, "added", added, "removed", removed)
 				continue

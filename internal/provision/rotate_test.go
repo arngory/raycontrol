@@ -283,3 +283,126 @@ func TestRealityRotationOff(t *testing.T) {
 		t.Fatalf("state %+v", state)
 	}
 }
+
+// With a grace period (R4-19) the switch comes a little early, the previous
+// set and name stay for the grace period, the site's certificate keeps the
+// previous name meanwhile, and then they go.
+func TestRealityRotationGrace(t *testing.T) {
+	ctx, st := rotationNode(t)
+	svc, err := CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := svc.CreatedAt
+	_, _, first := reload(t, ctx, st, "r")
+	site, _ := st.ServiceByName(ctx, "site")
+	oldName := SiteName(site)
+	e := epoch
+	e.Grace = 2 * day
+	resolves := func(context.Context, string) error { return nil }
+	rotate := func(at time.Time) int {
+		t.Helper()
+		n, err := RotateReality(ctx, st, at, e, resolves, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := rotate(created.Add(86 * day)); n != 1 {
+		t.Fatalf("prepare: %d", n)
+	}
+	_, state, _ := reload(t, ctx, st, "r")
+	newName := state.SNINext
+	storeCert(t, ctx, st, "site", oldName, newName)
+	if n := rotate(created.Add(86*day + time.Hour)); n != 1 {
+		t.Fatalf("publish: %d", n)
+	}
+	from := created.Add(90 * day)
+	if n := rotate(from.Add(-RealityEarly - time.Second)); n != 0 {
+		t.Fatal("switched too early")
+	}
+	if n := rotate(from.Add(-RealityEarly)); n != 1 {
+		t.Fatal("not switched ahead of time")
+	}
+	svc, state, secrets := reload(t, ctx, st, "r")
+	if state.PrevUntil != from.Add(2*day).Unix() || state.SNIPrev != oldName || state.RotatedAt != from.Unix() {
+		t.Fatalf("after the switch: %+v", state)
+	}
+	for _, name := range RealitySecrets {
+		if !bytes.Equal(secrets[PrevSecret(name)], first[name]) || bytes.Equal(secrets[name], first[name]) {
+			t.Fatalf("previous %s", name)
+		}
+	}
+	site, _ = st.ServiceByName(ctx, "site")
+	all, _ := st.ListServices(ctx)
+	if names, _ := SiteNames(site, all); !slices.Contains(names, oldName) || !slices.Contains(names, newName) {
+		t.Fatalf("names while the previous one is accepted: %v", names)
+	}
+
+	if n := rotate(from.Add(2*day - time.Minute)); n != 0 {
+		t.Fatal("previous keys dropped early")
+	}
+	if n := rotate(from.Add(2 * day)); n != 1 {
+		t.Fatal("previous keys kept")
+	}
+	_, state, secrets = reload(t, ctx, st, "r")
+	if state.PrevUntil != 0 || state.SNIPrev != "" {
+		t.Fatalf("after the grace period: %+v", state)
+	}
+	for _, name := range RealitySecrets {
+		if _, ok := secrets[PrevSecret(name)]; ok {
+			t.Fatalf("previous %s kept", name)
+		}
+	}
+	all, _ = st.ListServices(ctx)
+	if names, _ := SiteNames(site, all); slices.Contains(names, oldName) {
+		t.Fatalf("names after the grace period: %v", names)
+	}
+}
+
+// rotate -now (leaked keys, a blocked name) keeps nothing of the old sets,
+// grace period or not (R4-19).
+func TestRealityRotationUrgent(t *testing.T) {
+	ctx, st := rotationNode(t)
+	svc, err := CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := svc.CreatedAt
+	e := epoch
+	e.Grace = 2 * day
+	noDNS := func(context.Context, string) error { return errors.New("NXDOMAIN") }
+	rotate := func(at time.Time) int {
+		t.Helper()
+		n, err := RotateReality(ctx, st, at, e, noDNS, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if rotate(created.Add(88*day)) != 1 || rotate(created.Add(91*day)) != 1 {
+		t.Fatal("scheduled rotation")
+	}
+	if _, state, _ := reload(t, ctx, st, "r"); state.PrevUntil == 0 {
+		t.Fatal("no grace period after a scheduled switch")
+	}
+	now := created.Add(91*day + time.Hour)
+	if err := RequestRealityRotation(ctx, st, "r", now, e.Lead, true); err != nil {
+		t.Fatal(err)
+	}
+	if n := rotate(now); n != 1 {
+		t.Fatal("urgent rotation not published")
+	}
+	if n := rotate(now); n != 1 {
+		t.Fatal("urgent rotation not switched")
+	}
+	_, state, secrets := reload(t, ctx, st, "r")
+	if state.PrevUntil != 0 || state.SNIPrev != "" || state.Urgent || state.RotateAt != 0 {
+		t.Fatalf("after an urgent switch: %+v", state)
+	}
+	for _, name := range RealitySecrets {
+		if _, ok := secrets[PrevSecret(name)]; ok {
+			t.Fatalf("previous %s kept after an urgent switch", name)
+		}
+	}
+}

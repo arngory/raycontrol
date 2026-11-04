@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 )
 
 func TestParseExpiry(t *testing.T) {
@@ -115,5 +117,16 @@ func TestInstallServices(t *testing.T) {
 	}
 	if _, err := parse("-domain", "example.com", "-services", "vmess"); err == nil {
 		t.Error("unknown kind")
+	}
+}
+
+func TestExportText(t *testing.T) {
+	got := exportText([]*nodev1.Profile{
+		{ServiceId: 4, Service: "reality", Link: "vless://a", NextLink: "vless://b", NextFrom: 1767225600},
+		{ServiceId: 5, Service: "hy2", Link: "hysteria2://c"},
+	})
+	want := "# reality (service 4)\nvless://a\n# reality from 2026-01-01T00:00:00Z\nvless://b\n# hy2 (service 5)\nhysteria2://c\n"
+	if got != want {
+		t.Fatalf("got\n%s\nwant\n%s", got, want)
 	}
 }

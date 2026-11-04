@@ -16,6 +16,11 @@ service NodeService {
   rpc SetUserEnabled(SetUserEnabledRequest) returns (SetUserEnabledResponse);
   rpc SetUserServices(SetUserServicesRequest) returns (SetUserServicesResponse);
   rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+  // ExportUser returns a user's profiles: the links of their subscription
+  // (docs/spec/subscription-v1.md §4), each with the next one while a
+  // switch is pending (P-10). They hold the user's credentials, so the
+  // call is audited. They work only from an address SPA has opened.
+  rpc ExportUser(ExportUserRequest) returns (ExportUserResponse);
 
   rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
   rpc CreateService(CreateServiceRequest) returns (CreateServiceResponse);
@@ -26,7 +31,8 @@ service NodeService {
   // next keys first, or at once (leaked keys, a blocked name).
   rpc RotateService(RotateServiceRequest) returns (RotateServiceResponse);
   // SetServiceOption changes one of the few settings that may change after
-  // creation: a site's answer, whether REALITY moves its server name.
+  // creation: a site's answer, whether REALITY moves its server name,
+  // Hysteria2's Brutal ceilings, Yggdrasil's public peers.
   rpc SetServiceOption(SetServiceOptionRequest) returns (SetServiceOptionResponse);
 
   rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
@@ -194,6 +200,21 @@ message SetUserServicesResponse {}
 
 message DeleteUserRequest { string name = 1; }
 message DeleteUserResponse {}
+
+message ExportUserRequest { string name = 1; }
+message ExportUserResponse {
+  repeated Profile profiles = 1;
+}
+// Profile is one profile of the subscription.
+message Profile {
+  uint32 service_id = 1;
+  string service = 2;
+  string link = 3;
+  // next_link replaces link from next_from (unix seconds) on; empty when
+  // nothing is pending.
+  string next_link = 4;
+  int64 next_from = 5;
+}
 
 message Service {
   uint32 id = 1; // also the SPA scope ID

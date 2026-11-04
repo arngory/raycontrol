@@ -353,3 +353,48 @@ func TestDNSProvider(t *testing.T) {
 		t.Fatal("provider kept")
 	}
 }
+
+func TestExportUser(t *testing.T) {
+	_, sock, changes := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+
+	for _, svc := range [][3]string{{"reality", "reality", `{"target":"www.example.org:443"}`}, {"hy2-masq", "hy2", ""}, {"ssh", "ssh", ""}} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: svc[0], Name: svc[1], SettingsJson: svc[2]})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"reality", "hy2", "ssh"}})); err != nil {
+		t.Fatal(err)
+	}
+	before := changes.Load()
+	r, err := c.ExportUser(ctx, connect.NewRequest(&nodev1.ExportUserRequest{Name: "alice"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ssh has no profile; the others are the subscription's links.
+	got := map[string]string{}
+	for _, p := range r.Msg.Profiles {
+		got[p.Service] = p.Link
+	}
+	if len(got) != 2 || !strings.HasPrefix(got["reality"], "vless://") || !strings.HasPrefix(got["hy2"], "hysteria2://") {
+		t.Fatalf("profiles = %v", r.Msg.Profiles)
+	}
+	if changes.Load() != before {
+		t.Fatal("export changed the node")
+	}
+	audit, err := c.ListAudit(ctx, connect.NewRequest(&nodev1.ListAuditRequest{}))
+	if err != nil || audit.Msg.Entries[0].Action != "user.export" || audit.Msg.Entries[0].Target != "alice" {
+		t.Fatalf("audit = %v, %v", audit.Msg.GetEntries(), err)
+	}
+
+	if _, err := c.ExportUser(ctx, connect.NewRequest(&nodev1.ExportUserRequest{Name: "nobody"})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("missing user: %v", err)
+	}
+	if _, err := c.SetUserEnabled(ctx, connect.NewRequest(&nodev1.SetUserEnabledRequest{Name: "alice"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ExportUser(ctx, connect.NewRequest(&nodev1.ExportUserRequest{Name: "alice"})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("disabled user: %v", err)
+	}
+}

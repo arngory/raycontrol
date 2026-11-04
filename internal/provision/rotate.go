@@ -16,11 +16,14 @@ import (
 	"github.com/arngory/raycontrol/internal/store"
 )
 
-// REALITY keys rotate in epochs (docs/08-decisions.md, R4-7). Xray holds
-// one private key per inbound, so keys cannot overlap: the next set (X25519
-// and ML-DSA-65 keys, the ML-KEM-768 seed of the second layer, shortIds and,
-// with the node's own site, the server name) goes into subscriptions a lead
-// time before the switch and replaces the current one at the switch.
+// REALITY keys rotate in epochs (docs/08-decisions.md, R4-7): the next set
+// (X25519 and ML-DSA-65 keys, the ML-KEM-768 seed of the second layer,
+// shortIds and, with the node's own site, the server name) goes into
+// subscriptions a lead time before the switch and replaces the current one
+// at the switch. Xray holds one private key per inbound, so the previous set
+// gets a second inbound for a grace period (R4-19): the current inbound
+// hands it what it does not recognise, in place of the site, and it hands
+// the site what it does not recognise in turn.
 //
 // The server name only ever moves to another random subdomain of the
 // node's own domain (self-steal): nothing outside the node is looked up,
@@ -33,6 +36,16 @@ var RealitySecrets = []string{SecretRealityKey, SecretRealityMLDSA, SecretMLKEMS
 // NextSecret is the name of the next value of a secret.
 func NextSecret(name string) string { return name + ".next" }
 
+// PrevSecret is the name of the previous value of a secret, kept for the
+// grace period after a switch (R4-19).
+func PrevSecret(name string) string { return name + ".prev" }
+
+// RealityEarly is how long before its time a switch happens when the
+// previous keys stay accepted: a client that moves at the time on a clock a
+// little ahead finds the new keys, and one that has not moved yet still gets
+// in with the previous ones (REALITY allows clocks 2 minutes apart).
+const RealityEarly = 2 * time.Minute
+
 // RealityState is the rotation state in the settings of a REALITY service.
 type RealityState struct {
 	RotatedAt  int64  `json:"rotated_at,omitempty"`  // last switch; the service's creation before the first
@@ -41,6 +54,9 @@ type RealityState struct {
 	SNINext    string `json:"sni_next,omitempty"`    // the server name after the switch, if it changes
 	RotateSNI  *bool  `json:"rotate_sni,omitempty"`  // false keeps the server name
 	RotateAt   int64  `json:"rotate_at,omitempty"`   // switch requested by the operator for this time
+	Urgent     bool   `json:"urgent,omitempty"`      // switch at once, the current set not kept (leaked keys)
+	PrevUntil  int64  `json:"prev_until,omitempty"`  // the previous set is accepted until then (R4-19)
+	SNIPrev    string `json:"sni_prev,omitempty"`    // the server name of the previous set
 }
 
 // ParseRealityState reads the rotation state of a service.
@@ -58,6 +74,7 @@ type RealityEpoch struct {
 	Period  time.Duration // a key set is current this long
 	Lead    time.Duration // the next set is in subscriptions this long before the switch
 	Prepare time.Duration // a new server name may take this long to get its certificate
+	Grace   time.Duration // the previous set is accepted this long after the switch (0: not at all)
 }
 
 // Check reports a schedule that cannot work.
@@ -117,10 +134,21 @@ func rotateOne(ctx context.Context, st *store.Store, all []store.Service, svc st
 		due = min(due, state.RotateAt)
 	}
 	lead := int64(e.Lead / time.Second)
+	early := int64(0)
+	if e.Grace > 0 {
+		early = int64(RealityEarly / time.Second)
+	}
 
 	switch {
-	case state.NextFrom != 0 && t >= state.NextFrom:
-		return true, switchReality(ctx, st, all, svc, state, log)
+	case state.NextFrom != 0 && t >= state.NextFrom-early:
+		grace := e.Grace
+		if state.Urgent {
+			grace = 0 // leaked keys or a blocked name: nothing of the old set stays
+		}
+		return true, switchReality(ctx, st, all, svc, state, grace, log)
+
+	case state.PrevUntil != 0 && t >= state.PrevUntil:
+		return true, dropPrevReality(ctx, st, svc, log)
 
 	case state.NextFrom != 0:
 		return false, nil
@@ -188,8 +216,10 @@ func publishReality(ctx context.Context, st *store.Store, svc store.Service, sta
 }
 
 // switchReality makes the next set current; with a new server name, the
-// site follows when it had the old one.
-func switchReality(ctx context.Context, st *store.Store, all []store.Service, svc store.Service, state RealityState, log *slog.Logger) error {
+// site follows when it had the old one. With a grace period the current
+// set becomes the previous one until then (R4-19).
+func switchReality(ctx context.Context, st *store.Store, all []store.Service, svc store.Service, state RealityState,
+	grace time.Duration, log *slog.Logger) error {
 	secrets, err := st.ServiceSecrets(ctx, svc.ID)
 	if err != nil {
 		return err
@@ -213,9 +243,21 @@ func switchReality(ctx context.Context, st *store.Store, all []store.Service, sv
 		SNI string `json:"sni"`
 	}
 	_ = json.Unmarshal([]byte(svc.Settings), &old)
-	fields := map[string]any{"rotated_at": state.NextFrom, "prepared_at": nil, "next_from": nil, "sni_next": nil, "rotate_at": nil}
+	fields := map[string]any{"rotated_at": state.NextFrom, "prepared_at": nil, "next_from": nil, "sni_next": nil, "rotate_at": nil,
+		"urgent": nil, "prev_until": nil, "sni_prev": nil}
 	if state.SNINext != "" {
 		fields["sni"] = state.SNINext
+	}
+	for _, name := range RealitySecrets {
+		if v, ok := secrets[name]; ok && grace > 0 {
+			u.Set[PrevSecret(name)] = v
+		} else {
+			u.Delete = append(u.Delete, PrevSecret(name))
+		}
+	}
+	if grace > 0 {
+		fields["prev_until"] = state.NextFrom + int64(grace/time.Second)
+		fields["sni_prev"] = old.SNI
 	}
 	if u.Settings, err = setFields(svc.Settings, fields); err != nil {
 		return err
@@ -239,6 +281,20 @@ func switchReality(ctx context.Context, st *store.Store, all []store.Service, sv
 	return nil
 }
 
+// dropPrevReality ends the grace period of the previous set.
+func dropPrevReality(ctx context.Context, st *store.Store, svc store.Service, log *slog.Logger) error {
+	settings, err := setFields(svc.Settings, map[string]any{"prev_until": nil, "sni_prev": nil})
+	if err != nil {
+		return err
+	}
+	u := store.ServiceUpdate{Settings: settings}
+	for _, name := range RealitySecrets {
+		u.Delete = append(u.Delete, PrevSecret(name))
+	}
+	log.Info("REALITY previous keys no longer accepted", "service", svc.Name)
+	return st.UpdateService(ctx, svc.ID, u)
+}
+
 // RequestRealityRotation asks for the next switch of a REALITY service:
 // a lead time away (clients get the next keys first), or at once (clients
 // that have not fetched their subscription since lose the profile until
@@ -258,6 +314,10 @@ func RequestRealityRotation(ctx context.Context, st *store.Store, name string, n
 		at = now
 	}
 	fields := map[string]any{"rotate_at": at.Unix()}
+	if immediately {
+		// Nothing of the current set stays after the switch (R4-19).
+		fields["urgent"] = true
+	}
 	if state := ParseRealityState(svc); state.NextFrom != 0 && at.Unix() < state.NextFrom {
 		fields["next_from"] = max(at.Unix(), now.Unix()) // a published switch only moves earlier
 	}
@@ -304,7 +364,13 @@ func SiteNames(site store.Service, all []store.Service) (names, next []string) {
 	}
 	for _, s := range all {
 		if s.Kind == "reality" && s.Enabled && siteOf(s) == site.Name {
-			next = add(next, ParseRealityState(s).SNINext)
+			state := ParseRealityState(s)
+			// The previous name while its keys are accepted (R4-19): a probe
+			// under it still meets the site's own certificate.
+			if state.PrevUntil != 0 {
+				names = add(names, state.SNIPrev)
+			}
+			next = add(next, state.SNINext)
 		}
 	}
 	return names, next

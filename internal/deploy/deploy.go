@@ -386,6 +386,15 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		if inner != nil {
 			after = append(after, render.UnitName(inner.Name))
 		}
+		// With public peers (P-14, R4-18) the core dials them: the internet
+		// only, like the other backends that go out; otherwise no network.
+		network := []string{"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX"}
+		if st, _, err := render.YggdrasilNode(s); err == nil && len(st.Peers) > 0 {
+			network = []string{
+				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+				"IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7",
+			}
+		}
 		units = append(units, unit{
 			name:        render.UnitName(s.Name),
 			description: "niko-server backend " + s.Name + " (Yggdrasil, TLS links with X25519MLKEM768 into inner)",
@@ -398,9 +407,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 				"RuntimeDirectoryMode=0710",
 				"UMask=0007",
 				"CapabilityBoundingSet=",
-				"PrivateNetwork=yes",
-				"RestrictAddressFamilies=AF_UNIX",
-			}, creds...),
+			}, append(network, creds...)...),
 		})
 	}
 

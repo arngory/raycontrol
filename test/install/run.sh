@@ -187,6 +187,10 @@ if grep -E '^(wrote|restarting)' <<<"$again"; then
 fi
 
 x rayctl user add alice -services dns,mdns >/dev/null
+# export: the subscription's links, audited (P-10).
+exported="$(x rayctl user export alice)"
+[[ $(grep -c '^vless://' <<<"$exported") == 2 ]] || fail "rayctl user export: $exported"
+[[ $(x rayctl audit -n 1) == *user.export* ]] || fail "export is not audited"
 device() { x rayctl device add alice "$1" | awk '/enrolled/ {id=$2} /^rcdev1:/ {print id, $0}'; }
 read -r phone_id phone < <(device phone)
 read -r _ laptop < <(device laptop)
@@ -223,6 +227,16 @@ x rayctl apply >/dev/null || fail "rayctl apply for the API, REALITY, naive, Ygg
 units="$(x systemctl cat niko-ygg.service)" || fail "no unit for Yggdrasil"
 [[ $units == *PrivateNetwork=yes* && $units == *SupplementaryGroups=niko-inner* ]] || fail "the Yggdrasil unit is not unix-only with inner: $units"
 [[ $(x id -nG niko-front) == *niko-ygg* ]] || fail "the front cannot reach the Yggdrasil socket"
+# Public peers (R4-18): the unit goes out to the internet with them, and back
+# to no network without.
+x rayctl service set ygg peers=tls://192.0.2.10:443 >/dev/null || fail "rayctl service set ygg peers"
+x rayctl apply >/dev/null || fail "rayctl apply with Yggdrasil peers"
+units="$(x systemctl cat niko-ygg.service)"
+[[ $units != *PrivateNetwork=yes* && $units == *"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"* && $units == *IPAddressDeny=localhost* ]] ||
+	fail "the Yggdrasil unit with peers: $units"
+x rayctl service set ygg peers=none >/dev/null
+x rayctl apply >/dev/null || fail "rayctl apply without Yggdrasil peers"
+[[ $(x systemctl cat niko-ygg.service) == *PrivateNetwork=yes* ]] || fail "the Yggdrasil unit kept its network"
 [[ $(x stat -c '%a %U %G' /run/niko/naive-in) == "2750 niko-naive niko-front" ]] || fail "no socket directory for naive (the front passes connections there)"
 units="$(x systemctl cat niko-naive.service)" || fail "no unit for naive"
 [[ $units == *" -probe 127.0.0.1:"* && $units == *IPAddressAllow=127.0.0.1* ]] || fail "naive does not lead the probe name to the endpoint: $units"
