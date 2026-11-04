@@ -40,6 +40,8 @@ type Applier struct {
 	Restart func(ctx context.Context, verb, unit string) error
 	// Inner returns an API client for an inner API socket; nil dials Xray.
 	Inner func(socket string) InnerAPI
+	// Report, if set, gets the outcome of every Apply in Run (O-2).
+	Report func(error)
 
 	skipped []string // the waiting services last logged
 }
@@ -297,7 +299,14 @@ func (a *Applier) Run(ctx context.Context, changes func() <-chan struct{}) {
 	for {
 		// Taken before Apply: a change during Apply wakes the next round.
 		wake := changes()
-		if err := a.Apply(ctx); err != nil && ctx.Err() == nil {
+		err := a.Apply(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if a.Report != nil {
+			a.Report(err)
+		}
+		if err != nil {
 			a.Log.Error("apply", "err", err)
 		}
 		select {

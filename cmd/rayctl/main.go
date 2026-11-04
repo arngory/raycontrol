@@ -246,7 +246,26 @@ func (c *cli) status(ctx context.Context) error {
 	return c.print(m, func(w *tabwriter.Writer) {
 		fmt.Fprintf(w, "version\t%s\nnode\t%s\nhost\t%s\nusers\t%d\nservices\t%d\nactive devices\t%d\nspa ports\t%v\n",
 			m.Version, m.NodeId, m.Host, m.Users, m.Services, m.ActiveDevices, m.SpaPorts)
+		// rayd's loops: the last round of each (O-2).
+		for _, l := range m.Loops {
+			fmt.Fprintf(w, "%s\t%s\n", l.Name, loopState(l, time.Now()))
+		}
 	})
+}
+
+// loopState says how a loop's last round went: "ok 12s ago", or "FAILED
+// 3m ago: <error> (last ok 2h ago)".
+func loopState(l *nodev1.LoopHealth, now time.Time) string {
+	ago := func(unix int64) string {
+		if unix == 0 {
+			return "never"
+		}
+		return now.Sub(time.Unix(unix, 0)).Round(time.Second).String() + " ago"
+	}
+	if l.LastError > l.LastOk {
+		return fmt.Sprintf("FAILED %s: %s (last ok %s)", ago(l.LastError), l.Error, ago(l.LastOk))
+	}
+	return "ok " + ago(l.LastOk)
 }
 
 func (c *cli) user(ctx context.Context, sub string, args []string) error {

@@ -703,5 +703,9 @@ rayctl -remote laptop.rcdev device invite alice phone      # приглашен�
 - `rayctl service rotate reality` — новые ключи и имя REALITY раньше срока; с `-now` — сразу.
 - `rayctl service set site answer=silent` — сайт вместо 404 молчит до таймаута; `rayctl apply` после.
 - `rayctl metrics -o FILE` — счётчики для node_exporter (textfile collector) по своему таймеру: только числа.
+- `rayctl status` — в конце по строке на каждый цикл `rayd`: применение (`apply`), сертификат каждого сайта
+  (`acme <сайт>`), записи DNS, смены ключей. `ok 40s ago` — последний круг удался; `FAILED 3m ago: <ошибка>` — нет, и
+  когда был последний успех. В метриках то же без текста ошибки: `raycontrol_loop_last_success_seconds` и
+  `raycontrol_loop_last_error_seconds`.
 - `rayctl uninstall` — убрать всё, включая записи raycontrol в Cloudflare; система вернётся к снимку до установки.
   Сначала `rayctl backup`, если ноду может понадобиться вернуть.

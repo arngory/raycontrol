@@ -21,6 +21,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
+	"github.com/arngory/raycontrol/internal/health"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -48,6 +49,8 @@ type Server struct {
 	Rotate      func()
 	// DNSChanged runs after the DNS provider changed (certificates check).
 	DNSChanged func()
+	// Health is where rayd's loops report (O-2): status and metrics.
+	Health *health.Board
 
 	mu   sync.Mutex
 	rev  uint64
@@ -184,6 +187,14 @@ func (s *Server) done(ctx context.Context, action, target string, err error) err
 	return toConnect(err)
 }
 
+// unixOf is t in Unix seconds, 0 for the zero time.
+func unixOf(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
 func unixOrZero(t *time.Time) int64 {
 	if t == nil {
 		return 0
@@ -218,6 +229,10 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 	}
 	for _, p := range s.Params.ActivePorts(time.Now()) {
 		resp.SpaPorts = append(resp.SpaPorts, uint32(p))
+	}
+	for _, l := range s.Health.Loops() {
+		resp.Loops = append(resp.Loops, &nodev1.LoopHealth{Name: l.Name, LastOk: unixOf(l.LastOK), LastError: unixOf(l.LastErr),
+			Error: l.Err, Runs: l.Runs, Errors: l.Errors})
 	}
 	return connect.NewResponse(resp), nil
 }
