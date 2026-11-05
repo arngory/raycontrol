@@ -223,6 +223,11 @@ func installRelay(bundlePath, packages string) error {
 			return checkRelaySSH(snap, port, sess.addr, b.Name)
 		},
 		forward: func() error {
+			// The value before raycontrol first: once our file is there, a
+			// reboot would turn forwarding on with nothing to undo it by.
+			if err := recordForwarding(h.Journal, procForward); err != nil {
+				return err
+			}
 			return turnForwardingOn(procForward,
 				func() error { _, err := h.WriteFile(forwardFile); return err },
 				func() error { return os.Remove(forwardFile.Path) },
@@ -237,22 +242,17 @@ func installRelay(bundlePath, packages string) error {
 			return h.EnableNow(relayUnit)
 		},
 		unforward: func() {
-			_ = os.Remove(forwardFile.Path)
-			// The value before raycontrol, if raycontrol ever set it: a
-			// re-install's forwarding goes with its relay.
-			if c, ok := h.Journal.Original(deploy.ChangeSysctl, "", "net.ipv4.ip_forward"); ok && c.Value != "" {
-				_ = os.WriteFile(procForward, []byte(c.Value+"\n"), 0o644) //nolint:gosec // G306: /proc
-			}
+			unforwardAt(forwardFile.Path, procForward,
+				func() (string, bool) {
+					c, ok := h.Journal.Original(deploy.ChangeSysctl, "", forwardKey)
+					return c.Value, ok
+				},
+				func() { _ = runApart("sysctl", "-q", "-p", deploy.HardeningSysctl) })
 		},
 		// Past RestartSec (2 s): a rayspa that dies after its snapshot has
 		// restarted by then.
 		settle: func(ctx context.Context) error {
-			select {
-			case <-ctx.Done():
-				return errInterrupted
-			case <-time.After(3 * time.Second):
-			}
-			return stillRunning(showUnit, restarts)
+			return settleFor(ctx, 3*time.Second, func() error { return stillRunning(showUnit, restarts) })
 		},
 	}
 	snap, warning, err := steps.run(ctx)
@@ -361,8 +361,47 @@ func checkForwarding(read func() ([]byte, error), boot, file string) error {
 	return nil
 }
 
-// procForward is the kernel's forwarding switch.
-const procForward = "/proc/sys/net/ipv4/ip_forward"
+// procForward is the kernel's forwarding switch, forwardKey its sysctl name.
+const (
+	procForward = "/proc/sys/net/ipv4/ip_forward"
+	forwardKey  = "net.ipv4.ip_forward"
+)
+
+// recordForwarding journals the forwarding value from before raycontrol,
+// unless it is there already: the first record holds it.
+func recordForwarding(j *deploy.Journal, proc string) error {
+	if j.Has(deploy.ChangeSysctl, "", forwardKey) {
+		return nil
+	}
+	v, err := os.ReadFile(proc) //nolint:gosec // G304: /proc
+	if err != nil {
+		return err
+	}
+	return j.Record(deploy.Change{Kind: deploy.ChangeSysctl, Name: forwardKey, Value: strings.TrimSpace(string(v))})
+}
+
+// unforwardAt removes our sysctl file and writes back the forwarding value
+// from before raycontrol, if raycontrol ever set it: a failed install's
+// host, a re-install's too, does not forward without its relay's table.
+// Writing it resets accept_redirects in the kernel: the hardening goes on
+// again (reapply).
+func unforwardAt(file, proc string, original func() (string, bool), reapply func()) {
+	_ = os.Remove(file)
+	if v, ok := original(); ok && v != "" {
+		_ = os.WriteFile(proc, []byte(v+"\n"), 0o644) //nolint:gosec // G306: /proc
+		reapply()
+	}
+}
+
+// settleFor waits d, then checks.
+func settleFor(ctx context.Context, d time.Duration, check func() error) error {
+	select {
+	case <-ctx.Done():
+		return errInterrupted
+	case <-time.After(d):
+	}
+	return check()
+}
 
 // turnForwardingOn writes our sysctl file and applies it, once all of
 // sysctl.d is known to keep forwarding on at boot; on a failure the file

@@ -660,3 +660,74 @@ func TestWaitActive(t *testing.T) {
 		t.Errorf("interrupted: %v", err)
 	}
 }
+
+// The forwarding value before raycontrol is journaled first, once.
+func TestRecordForwarding(t *testing.T) {
+	j, err := deploy.OpenJournal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proc := t.TempDir() + "/ip_forward"
+	if err := os.WriteFile(proc, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordForwarding(j, proc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proc, []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordForwarding(j, proc); err != nil {
+		t.Fatal(err)
+	}
+	if c, ok := j.Original(deploy.ChangeSysctl, "", "net.ipv4.ip_forward"); !ok || c.Value != "0" {
+		t.Fatalf("before raycontrol: %+v %v", c, ok)
+	}
+	if err := recordForwarding(j, t.TempDir()+"/none"); err != nil {
+		t.Fatalf("recorded already, nothing to read: %v", err)
+	}
+	fresh, _ := deploy.OpenJournal(t.TempDir())
+	if err := recordForwarding(fresh, t.TempDir()+"/none"); err == nil {
+		t.Fatal("an unreadable value said nothing")
+	}
+}
+
+// A failed install's forwarding: our file goes, the value before raycontrol
+// comes back with the hardening; nothing else when raycontrol never set it.
+func TestUnforward(t *testing.T) {
+	dir := t.TempDir()
+	file, proc := dir+"/91-raycontrol-relay.conf", dir+"/ip_forward"
+	for name, c := range map[string]struct {
+		before   string
+		recorded bool
+		want     string
+	}{
+		"recorded":     {"0", true, "0"},
+		"never ours":   {"", false, "1"},
+		"docker's own": {"1", true, "1"},
+	} {
+		os.WriteFile(file, []byte("net.ipv4.ip_forward = 1\n"), 0o644)
+		os.WriteFile(proc, []byte("1\n"), 0o644)
+		reapplied := false
+		unforwardAt(file, proc, func() (string, bool) { return c.before, c.recorded }, func() { reapplied = true })
+		got, _ := os.ReadFile(proc)
+		if _, err := os.Stat(file); !errors.Is(err, os.ErrNotExist) || strings.TrimSpace(string(got)) != c.want || reapplied != c.recorded {
+			t.Errorf("%s: file %v, now %q, hardening again %v", name, err, got, reapplied)
+		}
+	}
+}
+
+// The last check waits, unless interrupted, and says what it finds.
+func TestSettle(t *testing.T) {
+	checked := false
+	if err := settleFor(context.Background(), time.Millisecond, func() error { checked = true; return errors.New("restarted") }); err == nil || !checked {
+		t.Fatalf("settle: %v %v", err, checked)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	checked = false
+	start := time.Now()
+	if err := settleFor(ctx, 5*time.Second, func() error { checked = true; return nil }); !errors.Is(err, errInterrupted) || checked || time.Since(start) > time.Second {
+		t.Fatalf("interrupted: %v %v after %v", err, checked, time.Since(start))
+	}
+}

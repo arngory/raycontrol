@@ -37,7 +37,7 @@ func RelayPlan(bin Binaries) Plan {
 		Users: []SystemUser{{Name: "rayspa", UID: render.RayspaUID}},
 		Files: []File{
 			u.file(),
-			{Path: "/etc/sysctl.d/90-raycontrol.conf", Mode: 0o644, Content: []byte(sysctl)},
+			{Path: HardeningSysctl, Mode: 0o644, Content: []byte(sysctl)},
 			// Forwarding only in the relay role (relay-v1 §3.1); IPv4: the
 			// exit is one IPv4 address.
 			{Path: RelaySysctl, Mode: 0o644, Content: []byte(

@@ -52,6 +52,8 @@ const (
 	// RayspaState is the last snapshot rayspa applied, its start until rayd
 	// or the exit answers.
 	RayspaState = "/var/lib/rayspa/snapshot.pb"
+	// HardeningSysctl is the network hardening every raycontrol host gets.
+	HardeningSysctl = "/etc/sysctl.d/90-raycontrol.conf"
 	// RelaySysctl turns forwarding on, on a relay host only.
 	RelaySysctl = "/etc/sysctl.d/91-raycontrol-relay.conf"
 	Socket      = "/run/raycontrol/rayd.sock"
@@ -609,7 +611,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	plan.Files = append(plan.Files,
 		File{Path: "/etc/tmpfiles.d/raycontrol.conf", Mode: 0o644, Content: []byte(tmp)},
 		File{Path: "/etc/polkit-1/rules.d/50-raycontrol.rules", Mode: 0o644, Content: []byte(polkitRule)},
-		File{Path: "/etc/sysctl.d/90-raycontrol.conf", Mode: 0o644, Content: []byte(sysctl)},
+		File{Path: HardeningSysctl, Mode: 0o644, Content: []byte(sysctl)},
 	)
 	if len(dns) > 0 {
 		// UDP 53 belongs to the front; the host resolver must not listen on it.
