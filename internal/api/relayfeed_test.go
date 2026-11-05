@@ -115,7 +115,7 @@ func TestRelayFeed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		b, err := node.DecodeRelayBundle(r)
+		b, err := node.DecodeRelayBundle(r.Bundle)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -202,7 +202,7 @@ func TestRelayFeedStreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := node.DecodeRelayBundle(enc)
+	b, _ := node.DecodeRelayBundle(enc.Bundle)
 	addr, _ := serveRemoteFrom(t, srv, "198.51.100.20:40000")
 	cert, _ := DecodeClientCertificate([]byte(b.Cert))
 	feed := perimeterv1connect.NewRelayServiceClient(remoteHTTP(b.API.Pin, cert), "https://"+addr)
@@ -233,16 +233,32 @@ func TestRelayAccess(t *testing.T) {
 	ctx := context.Background()
 	c := NewUnixClient(sock)
 	c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "api", Name: "api"}))
-	for name, addr := range map[string]string{"r1": "198.51.100.20", "r6": "2001:db8::20"} {
-		if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: name, Address: addr})); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r1", Address: "198.51.100.20"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r6", Address: "2001:db8::20"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("an IPv6 relay added: %v", err)
+	}
+	// One an older version added.
+	if _, err := srv.Store.CreateRelay(ctx, "r6", netip.MustParseAddr("2001:db8::20")); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r6", ExitAddress: "2001:db8::7", Admin: []string{"192.0.2.7"}}); !errors.Is(err, store.ErrInvalid) {
 		t.Fatalf("an IPv6 relay: %v", err)
 	}
-	if _, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.2.7"}}); err != nil {
-		t.Fatal(err)
+	// rayctl's default admin list (its SSH session) only for a relay that
+	// has none yet; a new bundle keeps the list the relay has.
+	for i, want := range []struct {
+		ifNone, admin string
+		kept          bool
+	}{{"192.0.2.7", "192.0.2.7/32", false}, {"192.0.2.99", "192.0.2.7/32", true}} {
+		r, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "203.0.113.7", AdminIfNone: []string{want.ifNone}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(r.Admin, []string{want.admin}) || r.AdminKept != want.kept || r.SshPort != 22 {
+			t.Fatalf("bundle %d: admin %v, kept %v, ssh %d", i, r.Admin, r.AdminKept, r.SshPort)
+		}
 	}
 	before, _ := srv.Store.RelayByName(ctx, "r1")
 	apiSvc, _ := srv.apiEndpoint(ctx)

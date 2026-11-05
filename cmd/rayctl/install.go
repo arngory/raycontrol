@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +24,45 @@ import (
 	"github.com/arngory/raycontrol/internal/render"
 )
 
+// sshdPorts reads the ports sshd listens on (sshd -T): those of its listen
+// addresses, which say them all.
+func sshdPorts() ([]int, error) {
+	out, err := exec.Command("sshd", "-T").Output()
+	if err != nil {
+		return nil, fmt.Errorf("sshd -T: %w", err)
+	}
+	return parseSSHDPorts(string(out))
+}
+
+func parseSSHDPorts(out string) ([]int, error) {
+	var ports, listen []int
+	for _, line := range strings.Split(out, "\n") {
+		key, v, _ := strings.Cut(strings.TrimSpace(line), " ")
+		into := &ports
+		switch key {
+		case "port":
+		case "listenaddress":
+			into = &listen
+			if _, p, err := net.SplitHostPort(v); err == nil {
+				v = p
+			}
+		default:
+			continue
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 65535 {
+			return nil, fmt.Errorf("sshd -T: %s %q", key, v)
+		}
+		if !slices.Contains(*into, n) {
+			*into = append(*into, n)
+		}
+	}
+	if len(listen) > 0 {
+		return listen, nil
+	}
+	return ports, nil
+}
+
 // sshPort reads the port sshd listens on, 22 if it cannot tell.
 func sshPort() int {
 	out, err := exec.Command("sshd", "-T").Output()
@@ -38,56 +78,84 @@ func sshPort() int {
 	return 22
 }
 
-// sshClient returns the address of the current SSH session, if any: from
-// the environment, or, since sudo resets it, from the nearest parent
-// process that has it (root reads their environments).
+// sshClient returns the address of the SSH session this command runs in,
+// if any: SSH_CONNECTION (or SSH_CLIENT) of this process or, since sudo and
+// su reset the environment, of the nearest parent that has it (root reads
+// their environments). Only when the chain of parents reaches sshd: a
+// variable left in a tmux or screen session, or set by hand, says nothing
+// about where the operator is now.
 func sshClient() string {
-	from := func(get func(string) string) string {
-		for _, v := range []string{"SSH_CONNECTION", "SSH_CLIENT"} {
-			if f := strings.Fields(get(v)); len(f) > 0 {
-				return f[0]
+	return sshClientIn(os.Getpid(), readProc)
+}
+
+// proc is what sshClient reads of a process.
+type proc struct {
+	comm string
+	ppid int
+	env  func(string) string
+}
+
+func sshClientIn(self int, read func(pid int) (proc, bool)) string {
+	addr := ""
+	pid := self
+	for range 32 {
+		if pid <= 1 {
+			return ""
+		}
+		p, ok := read(pid)
+		if !ok {
+			return ""
+		}
+		if p.comm == "sshd" || strings.HasPrefix(p.comm, "sshd-") || p.comm == "dropbear" {
+			return addr
+		}
+		if addr == "" {
+			for _, v := range []string{"SSH_CONNECTION", "SSH_CLIENT"} {
+				if f := strings.Fields(p.env(v)); len(f) > 0 {
+					addr = f[0]
+					break
+				}
 			}
 		}
-		return ""
+		pid = p.ppid
 	}
-	if a := from(os.Getenv); a != "" {
-		return a
+	return ""
+}
+
+// readProc reads a process from /proc; this process's environment is its
+// own, as it is now.
+func readProc(pid int) (proc, bool) {
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)) //nolint:gosec // G304: /proc
+	if err != nil {
+		return proc{}, false
 	}
-	pid := os.Getppid()
-	for range 8 {
-		if pid <= 1 {
-			break
-		}
-		env, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid)) //nolint:gosec // G304: /proc
-		if err == nil {
-			vars := map[string]string{}
+	// pid (comm) state ppid ...: comm may hold spaces and parentheses.
+	s := string(stat)
+	open, end := strings.IndexByte(s, '('), strings.LastIndexByte(s, ')')
+	if open < 0 || end < open {
+		return proc{}, false
+	}
+	f := strings.Fields(s[end+1:])
+	if len(f) < 2 {
+		return proc{}, false
+	}
+	ppid, err := strconv.Atoi(f[1])
+	if err != nil {
+		return proc{}, false
+	}
+	p := proc{comm: s[open+1 : end], ppid: ppid, env: os.Getenv}
+	if pid != os.Getpid() {
+		vars := map[string]string{}
+		if env, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid)); err == nil { //nolint:gosec // G304: /proc
 			for _, kv := range strings.Split(string(env), "\x00") {
 				if k, v, ok := strings.Cut(kv, "="); ok {
 					vars[k] = v
 				}
 			}
-			if a := from(func(k string) string { return vars[k] }); a != "" {
-				return a
-			}
 		}
-		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)) //nolint:gosec // G304: /proc
-		if err != nil {
-			break
-		}
-		// pid (comm) state ppid ...: comm may hold spaces, so after the ")".
-		rest := string(stat)
-		if i := strings.LastIndexByte(rest, ')'); i >= 0 {
-			rest = rest[i+1:]
-		}
-		f := strings.Fields(rest)
-		if len(f) < 2 {
-			break
-		}
-		if pid, err = strconv.Atoi(f[1]); err != nil {
-			break
-		}
+		p.env = func(k string) string { return vars[k] }
 	}
-	return ""
+	return p, true
 }
 
 func needRoot() error {
@@ -134,7 +202,7 @@ func (c *cli) install(ctx context.Context, args []string) error {
 		}
 	}
 	if *admin == "" {
-		return errors.New("no admin address: pass -admin, or install from an SSH session")
+		return errors.New("no admin address: pass -admin, or install from an SSH session (not from tmux or screen)")
 	}
 	kinds, err := installServices(*services, *domain, fs)
 	if err != nil {

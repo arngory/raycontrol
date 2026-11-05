@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -47,19 +48,28 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 		exit := fs.String("exit", "", "the exit's IP the relay forwards to (default: the node's host)")
 		ssh := fs.Uint("ssh-port", 0, "the relay host's SSH port, reached from the admin addresses (default: as before, 22 at first)")
 		out := fs.String("o", "", "write the bundle to this new file (0600) instead of printing it")
-		admin := fs.String("admin", sshClient(), "addresses that reach the relay host's SSH without SPA (comma-separated; default: this SSH session; "+
-			"needed: nothing else opens it yet)")
+		admin := fs.String("admin", "", "addresses that reach the relay host's SSH without SPA (comma-separated; default: the relay's, "+
+			"or this SSH session's for a relay with none yet; needed: nothing else opens it yet)")
 		if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *ssh > 65535 {
 			return errUsage
 		}
 		if err := needRoot(); err != nil {
 			return err
 		}
+		session := sshClient()
 		r, err := c.c.IssueRelayBundle(ctx, connect.NewRequest(&nodev1.IssueRelayBundleRequest{
-			Name: fs.Arg(0), ExitAddress: *exit, SshPort: uint32(*ssh), Admin: splitList(*admin)}))
+			Name: fs.Arg(0), ExitAddress: *exit, SshPort: uint32(*ssh), Admin: splitList(*admin), AdminIfNone: splitList(session)}))
 		if err != nil {
 			return err
 		}
+		from := "as given"
+		switch {
+		case r.Msg.AdminKept:
+			from = "the relay's own, kept (rayctl relay set changes them)"
+		case *admin == "":
+			from = "this SSH session's address (" + session + "), the default for a relay with none"
+		}
+		fmt.Fprintf(os.Stderr, "relay %s: its host's SSH (tcp/%d) from %s: %s\n", fs.Arg(0), r.Msg.SshPort, strings.Join(r.Msg.Admin, ", "), from)
 		if *out == "" {
 			fmt.Println(r.Msg.Bundle)
 		} else if err := writeNew(*out, []byte(r.Msg.Bundle+"\n")); err != nil {

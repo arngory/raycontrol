@@ -93,7 +93,7 @@ func relayExit(ctx context.Context, t *testing.T, dir, exit, relayAddr string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "relay.bundle"), []byte(bundle+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "relay.bundle"), []byte(bundle.Bundle+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	rp, err := provision.RelayParams(ctx, st, "r1")

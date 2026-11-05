@@ -1174,7 +1174,10 @@ type IssueRelayBundleRequest struct {
 	// Addresses that reach the relay host's SSH without SPA (its own, never
 	// the exit's list); empty keeps them; a relay needs some. Devices allowed
 	// the exit's SSH may also open it by SPA with their K_relay.
-	Admin         []string `protobuf:"bytes,4,rep,name=admin,proto3" json:"admin,omitempty"`
+	Admin []string `protobuf:"bytes,4,rep,name=admin,proto3" json:"admin,omitempty"`
+	// Used when admin is empty and the relay has no list yet: rayctl's
+	// default, the address of the SSH session it runs in.
+	AdminIfNone   []string `protobuf:"bytes,5,rep,name=admin_if_none,json=adminIfNone,proto3" json:"admin_if_none,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1237,9 +1240,19 @@ func (x *IssueRelayBundleRequest) GetAdmin() []string {
 	return nil
 }
 
+func (x *IssueRelayBundleRequest) GetAdminIfNone() []string {
+	if x != nil {
+		return x.AdminIfNone
+	}
+	return nil
+}
+
 type IssueRelayBundleResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Bundle        string                 `protobuf:"bytes,1,opt,name=bundle,proto3" json:"bundle,omitempty"`
+	SshPort       uint32                 `protobuf:"varint,2,opt,name=ssh_port,json=sshPort,proto3" json:"ssh_port,omitempty"`       // the relay host's SSH port now
+	Admin         []string               `protobuf:"bytes,3,rep,name=admin,proto3" json:"admin,omitempty"`                           // and its admin addresses
+	AdminKept     bool                   `protobuf:"varint,4,opt,name=admin_kept,json=adminKept,proto3" json:"admin_kept,omitempty"` // the relay's list from before, none asked for
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1279,6 +1292,27 @@ func (x *IssueRelayBundleResponse) GetBundle() string {
 		return x.Bundle
 	}
 	return ""
+}
+
+func (x *IssueRelayBundleResponse) GetSshPort() uint32 {
+	if x != nil {
+		return x.SshPort
+	}
+	return 0
+}
+
+func (x *IssueRelayBundleResponse) GetAdmin() []string {
+	if x != nil {
+		return x.Admin
+	}
+	return nil
+}
+
+func (x *IssueRelayBundleResponse) GetAdminKept() bool {
+	if x != nil {
+		return x.AdminKept
+	}
+	return false
 }
 
 type SetRelayAccessRequest struct {
@@ -4709,14 +4743,19 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x06relays\x18\x01 \x03(\v2\x19.raycontrol.node.v1.RelayR\x06relays\"(\n" +
 	"\x12RemoveRelayRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\x15\n" +
-	"\x13RemoveRelayResponse\"\x81\x01\n" +
+	"\x13RemoveRelayResponse\"\xa5\x01\n" +
 	"\x17IssueRelayBundleRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12!\n" +
 	"\fexit_address\x18\x02 \x01(\tR\vexitAddress\x12\x19\n" +
 	"\bssh_port\x18\x03 \x01(\rR\asshPort\x12\x14\n" +
-	"\x05admin\x18\x04 \x03(\tR\x05admin\"2\n" +
+	"\x05admin\x18\x04 \x03(\tR\x05admin\x12\"\n" +
+	"\radmin_if_none\x18\x05 \x03(\tR\vadminIfNone\"\x82\x01\n" +
 	"\x18IssueRelayBundleResponse\x12\x16\n" +
-	"\x06bundle\x18\x01 \x01(\tR\x06bundle\"\\\n" +
+	"\x06bundle\x18\x01 \x01(\tR\x06bundle\x12\x19\n" +
+	"\bssh_port\x18\x02 \x01(\rR\asshPort\x12\x14\n" +
+	"\x05admin\x18\x03 \x03(\tR\x05admin\x12\x1d\n" +
+	"\n" +
+	"admin_kept\x18\x04 \x01(\bR\tadminKept\"\\\n" +
 	"\x15SetRelayAccessRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
 	"\bssh_port\x18\x02 \x01(\rR\asshPort\x12\x14\n" +

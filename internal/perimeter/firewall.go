@@ -199,6 +199,7 @@ table inet %[1]s {
 	chain input {
 		type filter hook input priority -10; policy drop;
 		%[4]s
+		ct mark & %[9]s == %[9]s ct state established ct direction original jump relay_flow
 		ct state established,related accept
 		ct state invalid drop
 		icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } accept
@@ -215,10 +216,21 @@ table inet %[1]s {
 		meta l4proto . th dport @public accept
 		ip saddr @admin4 meta l4proto . th dport @admin_ports accept
 		ip6 saddr @admin6 meta l4proto . th dport @admin_ports accept
-		ip saddr @relay4 meta l4proto . th dport @relay_ports accept
-		ip6 saddr @relay6 meta l4proto . th dport @relay_ports accept
+		ip saddr @relay4 meta l4proto . th dport @relay_ports ct mark set ct mark | %[9]s accept
+		ip6 saddr @relay6 meta l4proto . th dport @relay_ports ct mark set ct mark | %[9]s accept
 		ip saddr . meta l4proto . th dport @allow4 accept
 		ip6 saddr . meta l4proto . th dport @allow6 accept
+	}
+
+	# A flow a relay opened (marked when let in) goes on while its address is
+	# still a relay and its port still a relay port: a relay removed, or a
+	# service no longer forwarded, loses the flows it had open too, not only
+	# new ones, without the conntrack tool. Related packets (ICMP errors
+	# from routers on the way) and the node's replies are not looked at.
+	chain relay_flow {
+		ip saddr @relay4 meta l4proto . th dport @relay_ports return
+		ip6 saddr @relay6 meta l4proto . th dport @relay_ports return
+		counter drop comment "relay-removed"
 	}
 
 	# Users' traffic does not reach the node itself (S-2): a proxy exit
@@ -239,7 +251,7 @@ table inet %[1]s {
 		reject with icmpx admin-prohibited
 	}%[8]s
 }
-`, Table, limit, n.NflogGroup, lo, loNAT, lo, guard, relay)
+`, Table, limit, n.NflogGroup, lo, loNAT, lo, guard, relay, relayMark)
 }
 
 // Setup installs the table and detects whether "destroy element" works.
@@ -344,21 +356,12 @@ func (n *NFT) SetForward(ports []Port) error {
 	return n.run(b.String())
 }
 
-// SetRelays replaces the relays' addresses (single ones) and the ports they
-// reach.
-// ForgetSource ends the tracked flows from an address (conntrack -D), so a
-// relay removed loses the flows it had through too. Without the conntrack
-// tool they end when they close.
-func (n *NFT) ForgetSource(a netip.Addr) {
-	path, err := exec.LookPath("conntrack")
-	if err != nil {
-		return
-	}
-	// Both directions: flows from the relay, and those masqueraded to it.
-	_ = exec.Command(path, "-D", "-s", a.String()).Run() //nolint:gosec // G204: a fixed tool, an address
-	_ = exec.Command(path, "-D", "-d", a.String()).Run() //nolint:gosec // G204: a fixed tool, an address
-}
+// relayMark is the conntrack mark bit of flows a relay opened (relay_flow).
+// Other bits of the mark stay as they are.
+const relayMark = "0x00400000"
 
+// SetRelays replaces the relays' addresses (single ones) and the ports they
+// reach. The flows a relay opened end when it goes (relay_flow).
 func (n *NFT) SetRelays(addrs []netip.Prefix, ports []Port) error {
 	var v4, v6 []string
 	for _, p := range addrs {

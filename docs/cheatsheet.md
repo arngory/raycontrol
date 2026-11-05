@@ -144,8 +144,9 @@ shred -u /root/phone.bundle
 ## Relay (relay-v1, черновик)
 
 ```
-rayctl relay add msk 198.51.100.20   # адрес relay доходит до портов сервисов без SPA, но не до SSH
-rayctl relay bundle -o msk.bundle msk   # пакет для хоста relay: новый сертификат и ключи SPA, прежние не работают
+rayctl relay add msk 198.51.100.20   # адрес relay (IPv4) доходит до портов сервисов без SPA, но не до SSH
+rayctl relay bundle -o msk.bundle msk   # пакет для хоста relay: новый сертификат и ключи SPA, прежние не работают;
+                                        # SSH relay: его список, у нового — адрес этой SSH-сессии (или -admin)
 rayctl relay set -admin 203.0.113.9 msk   # адреса для SSH хоста relay (и -ssh-port), без нового пакета
 rayctl relay list
 rayctl relay remove msk   # потерянный relay: только remove отнимает у его адреса порты сервисов

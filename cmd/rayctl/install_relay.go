@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"slices"
@@ -27,6 +28,10 @@ const relaySnapshot = "/var/lib/rayspa/snapshot.pb"
 // removed, so a relay that cannot reach its exit does not lock its admin
 // out, now or at the next boot.
 func installRelay(bundlePath, packages string) error {
+	// Before the journal: a node's records are its own.
+	if _, err := os.Stat(deploy.DB); err == nil {
+		return fmt.Errorf("this host is a node (%s): a relay goes on a host of its own", deploy.DB)
+	}
 	h, err := journaledHost()
 	if err != nil {
 		return err
@@ -47,9 +52,6 @@ func installRelay(bundlePath, packages string) error {
 			}
 		}
 	}
-	if _, err := os.Stat(deploy.DB); err == nil {
-		return fmt.Errorf("this host is a node (%s): a relay goes on a host of its own", deploy.DB)
-	}
 	raw, err := os.ReadFile(bundlePath) //nolint:gosec // G304: the operator's file
 	if err != nil {
 		return err
@@ -66,6 +68,16 @@ func installRelay(bundlePath, packages string) error {
 	if _, err := os.Stat(deploy.DefaultBinaries.Rayspa); err != nil {
 		return fmt.Errorf("%s is missing: install/bootstrap.sh -relay installs it", deploy.DefaultBinaries.Rayspa)
 	}
+	// The relay opens one SSH port, from its admin addresses: sshd must be
+	// on that one only, or the operator is locked out on the others.
+	sshd, err := sshdPorts()
+	if err != nil {
+		return fmt.Errorf("a relay closes all but its SSH port, and sshd's cannot be told (%w): fix sshd first", err)
+	}
+	if len(sshd) != 1 {
+		return fmt.Errorf("sshd listens on %v: a relay opens one SSH port; keep one (Port, ListenAddress in sshd_config)", sshd)
+	}
+	port := sshd[0]
 	plan := deploy.RelayPlan(deploy.DefaultBinaries)
 	for _, u := range plan.Users {
 		if err := h.EnsureUser(u); err != nil {
@@ -89,19 +101,21 @@ func installRelay(bundlePath, packages string) error {
 	if err := run("systemctl", "daemon-reload"); err != nil {
 		return err
 	}
-	for _, u := range plan.Units {
-		if err := h.EnableNow(u); err != nil {
-			return err
-		}
-		// A rayspa already running keeps the bundle before: restart it.
-		if err := run("systemctl", "restart", u); err != nil {
-			return err
-		}
-	}
+	// From here on rayspa may run, and run at boot: every way out but
+	// success stops it, disables it and removes its table.
 	fail := func(why error) error {
 		_ = run("systemctl", "disable", "--now", "rayspa.service")
 		_ = run(deploy.DefaultBinaries.Rayspa, "teardown")
 		return fmt.Errorf("%w; rayspa is stopped and disabled and the host left open", why)
+	}
+	for _, u := range plan.Units {
+		if err := h.EnableNow(u); err != nil {
+			return fail(err)
+		}
+		// A rayspa already running keeps the bundle before: restart it.
+		if err := run("systemctl", "restart", u); err != nil {
+			return fail(err)
+		}
 	}
 	if err := waitFile(relaySnapshot, 45*time.Second); err != nil {
 		return fail(fmt.Errorf("the relay took no perimeter from its exit %s (API port %d) within 45 s: does the exit know this "+
@@ -112,16 +126,33 @@ func installRelay(bundlePath, packages string) error {
 	if err != nil {
 		return fail(err)
 	}
-	port := sshPort()
 	if len(snap.AdminPrefixes) == 0 || !slices.ContainsFunc(snap.AdminPorts, func(p *perimeterv1.Port) bool { return p.Proto == "tcp" && int(p.Port) == port }) {
 		return fail(fmt.Errorf("the relay's perimeter would not let SSH in here: sshd listens on %d, the relay's SSH port is %v, "+
 			"its admin addresses %v; on the exit: rayctl relay set -ssh-port %d -admin <your address> %s",
 			port, snap.AdminPorts, snap.AdminPrefixes, port, b.Name))
 	}
+	// This SSH session's next connection must get in too.
+	if client := sshClient(); client != "" && !adminIncludes(snap.AdminPrefixes, client) {
+		return fail(fmt.Errorf("this SSH session comes from %s, not from the relay's admin addresses %v: the next one would be "+
+			"refused; on the exit: rayctl relay set -admin %s %s, then install again", client, snap.AdminPrefixes, client, b.Name))
+	}
 	fmt.Printf("relay %s up: knocks with K_relay open the exit's services through here (exit %s).\n"+
 		"This host's SSH (port %d) is reachable from %s, the relay's own admin addresses (rayctl relay set on the exit).\n",
 		b.Name, b.Exit, port, strings.Join(snap.AdminPrefixes, ", "))
 	return nil
+}
+
+// adminIncludes tells whether an address is inside one of the prefixes.
+func adminIncludes(prefixes []string, addr string) bool {
+	a, err := netip.ParseAddr(addr)
+	if err != nil {
+		return false
+	}
+	a = a.Unmap().WithZone("")
+	return slices.ContainsFunc(prefixes, func(s string) bool {
+		p, err := netip.ParsePrefix(s)
+		return err == nil && p.Contains(a)
+	})
 }
 
 // readSnapshot reads the perimeter rayspa saved.

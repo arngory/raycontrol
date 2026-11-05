@@ -172,8 +172,16 @@ message IssueRelayBundleRequest {
   // the exit's list); empty keeps them; a relay needs some. Devices allowed
   // the exit's SSH may also open it by SPA with their K_relay.
   repeated string admin = 4;
+  // Used when admin is empty and the relay has no list yet: rayctl's
+  // default, the address of the SSH session it runs in.
+  repeated string admin_if_none = 5;
 }
-message IssueRelayBundleResponse { string bundle = 1; }
+message IssueRelayBundleResponse {
+  string bundle = 1;
+  uint32 ssh_port = 2;       // the relay host's SSH port now
+  repeated string admin = 3; // and its admin addresses
+  bool admin_kept = 4;       // the relay's list from before, none asked for
+}
 message SetRelayAccessRequest {
   string name = 1;
   uint32 ssh_port = 2;       // 0 keeps it
