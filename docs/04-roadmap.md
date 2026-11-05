@@ -191,8 +191,10 @@ systemd-юниты, хранение секретов через systemd credent
 - [ ] v0.11.1: `rayctl check` и здоровье rayd (`resolver`) — нечитаемый resolv.conf или без `nameserver`.
 - [ ] v0.11.1: `rayctl dns cloudflare` и `apply` снимают паузу выпуска сертификата после локальной ошибки.
 - [x] v0.11.1: без ложного `service doh (doh) is not deployed` (f51577a); `rayctl report -logs debug`.
-- [ ] naive не соединяется у клиента: разбор по логам прогона (SNI-поддомен, wildcard, сертификат, маршрут фронта).
-- [ ] dnstt: резолвер по стране и сети — стартовые списки у клиента и подсказки по AS из сводок, без перебора ASN.
+- [x] naive не соединялся: клиент не стучал SPA (Niko 1.32.1).
+- [ ] naive: адрес ноды в хосте ссылки и поддомен в `sni=`, как у hy2 и REALITY — ждёт ответа клиента о `sni=`.
+- [x] dnstt, сервер: `obs[].dns` и `hints.dns` в сводке (probe-v1 §6.1, §6.2).
+- [ ] dnstt, клиент: перебор резолверов для сети (Niko).
 - [ ] Окно отладки `rayctl debug on -for 30m [-device ID]`: уровни rayd, rayspa, niko-server, Xray с откатом.
 - [ ] CI: фронт делит UDP 53 с настоящим systemd-resolved в образе с systemd.
 - [ ] Маркер возврата стаба (`.gone`) — в каталоге состояния, а не рядом с drop-in resolved.

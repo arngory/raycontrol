@@ -22,9 +22,12 @@ type Hints struct {
 	UDPMTU      string   `json:"udp_mtu,omitempty"`       // the UDP MTU most reports give (a bucket of MTUs)
 	// ViaRelay: most reports from the network came through a relay of the
 	// node (relay-v1 §9.3): a starting point for the client's detector.
-	ViaRelay bool  `json:"via_relay,omitempty"`
-	Devices  int64 `json:"devices"` // reports counted (not distinct devices)
-	Days     int   `json:"days"`
+	ViaRelay bool `json:"via_relay,omitempty"`
+	// DNS: the kind of resolver the DNS tunnels mostly work through here
+	// (Resolvers): where the client starts its search in a new network.
+	DNS     string `json:"dns,omitempty"`
+	Devices int64  `json:"devices"` // reports counted (not distinct devices)
+	Days    int    `json:"days"`
 }
 
 // tally is the counters of one AS over the window.
@@ -100,7 +103,7 @@ func (t *tally) hints(svcs []uint16) *Hints {
 	}
 	var order []scored
 	var udpNone, udpAll int64
-	stalls := map[string]int64{}
+	stalls, dns := map[string]int64{}, map[string]int64{}
 	var tcpAll int64
 	for _, s := range svcs {
 		f := t.svc[int64(s)]
@@ -112,6 +115,9 @@ func (t *tally) hints(svcs []uint16) *Hints {
 		}
 		udpAll += total(f["udp"])
 		udpNone += f["udp"]["none"]
+		for b, v := range f["dns"] {
+			dns[b] += v
+		}
 		if n < K {
 			continue // too few here to tell this service apart
 		}
@@ -144,8 +150,9 @@ func (t *tally) hints(svcs []uint16) *Hints {
 		}
 	}
 	h.UDPMTU = majority(t.mtu)
+	h.DNS = majority(dns)
 	slices.Sort(h.Avoid)
-	if len(h.Order) == 0 && len(h.Avoid) == 0 && !h.UDPBlocked && h.TCPStallKiB == 0 && h.UDPMTU == "" && !h.ViaRelay {
+	if len(h.Order) == 0 && len(h.Avoid) == 0 && !h.UDPBlocked && h.TCPStallKiB == 0 && h.UDPMTU == "" && !h.ViaRelay && h.DNS == "" {
 		return nil
 	}
 	return h

@@ -46,6 +46,9 @@ func TestParse(t *testing.T) {
 		`{"v":1,"net":"wifi","obs":[{"svc":0,"result":"works"}]}`,
 		`{"v":1,"net":"wifi","mcc_mnc":"25001","obs":[{"svc":1,"result":"works"}]}`,
 		`{"v":1,"net":"wifi","obs":[{"svc":1,"kind":"reality","result":"works"}]}`,
+		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","dns":"dnscrypt"}]}`,
+		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","dns":"8.8.8.8"}]}`,
+		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"fails","dns":"doh"}]}`,
 		`{"v":1,"net":"wifi","obs":[` + strings.Repeat(`{"svc":1,"result":"works"},`, 2000) + `]}`,
 	} {
 		if _, err := Parse(strings.NewReader(bad)); !errors.Is(err, ErrInvalid) {
@@ -286,6 +289,81 @@ func TestPathAndViaRelay(t *testing.T) {
 	h = c.Hints(ctx, direct, []uint16{1})
 	if h == nil || h.ViaRelay || !slices.Equal(h.Order, []uint16{1}) || h.Avoid != nil || h.Devices != 10 {
 		t.Fatalf("hint with direct reports: %+v", h)
+	}
+}
+
+// A DNS tunnel's observation names the kind of resolver it works through;
+// the network's hint gives the kind most of them work through.
+func TestResolverHint(t *testing.T) {
+	ctx := context.Background()
+	st, c, devices := node(t)
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
+	SetEnabled(ctx, st, true)
+	var tunnels []int64
+	for _, k := range []string{"dnstt", "masterdns"} {
+		svc, err := st.CreateService(ctx, store.Service{Kind: k, Name: k, Enabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tunnels = append(tunnels, svc.ID)
+	}
+	for i := range devices {
+		st.SetUserServices(ctx, fmt.Sprintf("user%d", i), []int64{1, tunnels[0], tunnels[1]})
+	}
+	dnstt, mdns := tunnels[0], tunnels[1]
+	mobile := netip.MustParseAddr("203.0.113.10")
+	body := func(dns1, dns2 string) string {
+		return fmt.Sprintf(`{"v":1,"net":"cellular","obs":[{"svc":1,"result":"works"},{"svc":%d,"result":"works","dns":%q},{"svc":%d,"result":"degraded","dns":%q}]}`,
+			dnstt, dns1, mdns, dns2)
+	}
+
+	// Only a DNS tunnel names a resolver.
+	if err := c.Take(ctx, devices[0], mobile, strings.NewReader(`{"v":1,"net":"cellular","obs":[{"svc":1,"result":"works","dns":"udp"}]}`)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a resolver for a service that is no DNS tunnel: %v", err)
+	}
+	// A failing tunnel names none: it may be reported without one.
+	if err := c.Take(ctx, devices[0], mobile, strings.NewReader(fmt.Sprintf(`{"v":1,"net":"cellular","obs":[{"svc":%d,"result":"fails"}]}`, dnstt))); err != nil {
+		t.Fatal(err)
+	}
+	// Nine more: dnstt mostly through UDP, masterdns through UDP as well
+	// but for two through DoH; 16 of the 18 working ones are udp.
+	for i, d := range devices[1:10] {
+		m := "udp"
+		if i < 2 {
+			m = "doh"
+		}
+		if err := c.Take(ctx, d, mobile, strings.NewReader(body("udp", m))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := c.Hints(ctx, mobile, []uint16{1, uint16(dnstt), uint16(mdns)})
+	if h == nil || h.DNS != "udp" || h.Devices != 10 {
+		t.Fatalf("hint %+v", h)
+	}
+	// A client without the tunnels gets no resolver (nor a hint at all:
+	// service 1 has nine observations here).
+	if h := c.Hints(ctx, mobile, []uint16{1}); h != nil {
+		t.Fatalf("hint without tunnels %+v", h)
+	}
+	nets, _, err := c.View(ctx, 7)
+	if err != nil || len(nets) != 1 || nets[0].Services[mdns]["dns"]["doh"] != 2 || nets[0].Services[dnstt]["dns"]["udp"] != 9 {
+		t.Fatalf("view %+v %v", nets, err)
+	}
+
+	// No majority, no resolver: two kinds half and half.
+	now = now.Add(8 * 24 * time.Hour)
+	for i, d := range devices[:10] {
+		m := "doh"
+		if i%2 == 0 {
+			m = "dot"
+		}
+		if err := c.Take(ctx, d, mobile, strings.NewReader(body(m, m))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if h := c.Hints(ctx, mobile, []uint16{uint16(dnstt), uint16(mdns)}); h == nil || h.DNS != "" {
+		t.Fatalf("hint without a majority %+v", h)
 	}
 }
 

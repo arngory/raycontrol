@@ -464,6 +464,8 @@ message SummaryService {
   map<string, int64> udp = 4;
   map<string, int64> mbps = 5;
   map<string, int64> stall_kib = 6;
+  // DNS tunnels: working observations by resolver kind (probe-v1 §6.1).
+  map<string, int64> dns = 7;
 }
 message SetSummaryRequest {
   // enabled: "on" or "off"; empty leaves it.
