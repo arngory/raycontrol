@@ -95,6 +95,11 @@
   (хэши бинарников — в таблице поезда). Он совместим с raycontrol v0.9.0: новое в нём только включается опциями.
   Клиенту для T2 — вместе с raycontrol v0.10.0. Для T1 остаётся v0.7.0.
 
+**Клиент о Niko 1.31.0 (2026-11-05):** выпущен, `eb76f2e`, SHA256SUMS сходится. relay-v1 не черновик, пины raycontrol
+v0.10.1 (`7adfc75`) и niko-server v0.8.1 (`89b95e2`), keepalive Hysteria2 к нодам на v0.8.1 — 25 с. Неизвестные поля
+клиент пропускает (raysub — нестрогий JSON, Kotlin читает по имени). Ждёт черновик R6-c. *Сервер:* черновик —
+relay-v1 §9, в §9.4 три вопроса.
+
 **Клиент об interop с relay (2026-11-05):** зелёный с первого прогона (Niko `6777ff2`, raycontrol-interop, job
 supervised) на raycontrol `7adfc75` + niko-server v0.8.1.
 - Топология TEST-NET в docker: клиент 203.0.113.1, выход .2 под `rayd serve -supervise`, relay .3 с настоящим
