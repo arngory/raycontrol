@@ -595,6 +595,19 @@ func TestRelaysInSubscription(t *testing.T) {
 		t.Fatalf("probe endpoint with reports %+v", p.Relays[0].Probe)
 	}
 
+	// A probe endpoint on REALITY's port: the relay does not forward
+	// REALITY there, and its profile does not name the relay.
+	ports, _ := reality.Ports()
+	if err := f.st.IssueRelay(ctx, "r1", store.RelayIssue{SPA: b, SSHPort: 22, Admin: []string{"192.0.2.7/32"}, CertPin: "pin3",
+		ProbePort: ports[0].Num, ProbePin: "probe-pin"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, pr := range build().Profiles {
+		if pr.Svc == uint16(reality.ID) && len(pr.Via) != 0 {
+			t.Errorf("REALITY through a relay that does not forward it: %v", pr.Via)
+		}
+	}
+
 	// Asked for through the relay: the relay's address, whose hints are
 	// not the client's (relay-v1 §9.3).
 	srv.Hints = func(context.Context, netip.Addr, []uint16) *summary.Hints { return &summary.Hints{Days: 30} }

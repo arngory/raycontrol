@@ -11,6 +11,7 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/arngory/raycontrol/internal/asn"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/summary"
@@ -64,8 +65,8 @@ func (f *relayFeed) Report(ctx context.Context, req *connect.Request[perimeterv1
 	if network.Addr().Is4() {
 		wantBits = 24
 	}
-	if err != nil || network != network.Masked() || !network.Addr().IsGlobalUnicast() || network.Bits() != wantBits {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("the client's network is a /24 or a /48 of a unicast address"))
+	if err != nil || network != network.Masked() || !asn.Public(network.Addr()) || network.Bits() != wantBits {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("the client's network is a /24 or a /48 of a public address"))
 	}
 	if len(req.Msg.Body) > summary.MaxBody {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("a report is at most %d bytes", summary.MaxBody))

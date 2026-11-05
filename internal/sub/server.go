@@ -240,7 +240,7 @@ func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) erro
 	if err != nil {
 		return err
 	}
-	var ids []string
+	var listed []store.Relay
 	for _, r := range relays {
 		if r.CertPin == "" {
 			continue
@@ -257,16 +257,39 @@ func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) erro
 				Report: s.Probe != nil && s.Probe.Report != nil}
 		}
 		p.Relays = append(p.Relays, h)
-		ids = append(ids, r.Name)
+		listed = append(listed, r)
 	}
-	if len(ids) == 0 {
+	if len(listed) == 0 {
 		return nil
+	}
+	services, err := s.Store.ListServices(ctx)
+	if err != nil {
+		return err
+	}
+	ports := map[uint16][]store.Port{}
+	for _, svc := range services {
+		ports[uint16(svc.ID)], _ = svc.Ports()
+	}
+	// A relay forwards a service's ports but its own SSH and probe
+	// endpoint's (RelaySnapshot): a service on none of the rest is not
+	// reached there.
+	forwards := func(r store.Relay, svc uint16) bool {
+		return slices.ContainsFunc(ports[svc], func(p store.Port) bool {
+			return p != (store.Port{Proto: "tcp", Num: r.SSHPort}) && (r.ProbePort == 0 || p.Num != r.ProbePort)
+		})
 	}
 	for i := range p.Profiles {
 		for _, svc := range m.Services {
-			if uint16(svc.ID) == p.Profiles[i].Svc && RelayKinds(svc.Kind) && !svc.Public() {
-				p.Profiles[i].Via = slices.Clone(ids)
+			if uint16(svc.ID) != p.Profiles[i].Svc || !RelayKinds(svc.Kind) || svc.Public() {
+				continue
 			}
+			var via []string
+			for _, r := range listed {
+				if forwards(r, p.Profiles[i].Svc) {
+					via = append(via, r.Name)
+				}
+			}
+			p.Profiles[i].Via = via
 		}
 	}
 	return nil

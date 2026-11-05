@@ -12,6 +12,7 @@
 package asn
 
 import (
+	"slices"
 	"context"
 	"net/netip"
 	"strconv"
@@ -54,10 +55,19 @@ func ParseASN(s string) (uint32, bool) {
 }
 
 // Public reports whether an address can have an AS worth asking about: not
-// private, loopback, link-local or otherwise special.
+// private, loopback, link-local or otherwise special, nor in a range no
+// client on the Internet comes from (this network, shared address space,
+// benchmarking, reserved).
 func Public(addr netip.Addr) bool {
 	addr = addr.Unmap()
-	return addr.IsGlobalUnicast() && !addr.IsPrivate()
+	return addr.IsGlobalUnicast() && !addr.IsPrivate() && !slices.ContainsFunc(special, func(p netip.Prefix) bool { return p.Contains(addr) })
+}
+
+var special = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("240.0.0.0/4"),
 }
 
 // Network is what an API is asked about instead of the address: its /24

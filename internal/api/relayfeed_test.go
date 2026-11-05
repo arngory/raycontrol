@@ -422,6 +422,9 @@ func TestRelayReport(t *testing.T) {
 		"a /23":                  {dev.ID, "203.0.112.0/23", "{}", connect.CodeInvalidArgument},
 		"a /64":                  {dev.ID, "2001:db8:5::/64", "{}", connect.CodeInvalidArgument},
 		"loopback":               {dev.ID, "127.0.0.0/24", "{}", connect.CodeInvalidArgument},
+		"shared address space":   {dev.ID, "100.64.1.0/24", "{}", connect.CodeInvalidArgument},
+		"reserved":               {dev.ID, "240.0.0.0/24", "{}", connect.CodeInvalidArgument},
+		"private":                {dev.ID, "10.1.2.0/24", "{}", connect.CodeInvalidArgument},
 		"IPv4 in IPv6":           {dev.ID, "::ffff:203.0.113.0/120", "{}", connect.CodeInvalidArgument},
 		"no network":             {dev.ID, "", "{}", connect.CodeInvalidArgument},
 		"a body over the limit":  {dev.ID, "203.0.113.0/24", strings.Repeat(" ", summary.MaxBody+1), connect.CodeInvalidArgument},
@@ -547,6 +550,13 @@ func TestRelayProbeUp(t *testing.T) {
 		}
 		t.Fatalf("probe up: want %v", want)
 	}
+	// Just started: a relay's rayd relay may be reconnecting.
+	if !r.RelayProbeUp("r1") {
+		t.Fatal("no grace after the node's start")
+	}
+	mu.Lock()
+	now = now.Add(relayProbeGrace + time.Second)
+	mu.Unlock()
 	rayspa := open(false)
 	if r.RelayProbeUp("r1") {
 		t.Fatal("rayspa's feed taken for rayd relay's")
