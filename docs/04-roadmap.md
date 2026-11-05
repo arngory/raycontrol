@@ -197,7 +197,7 @@ systemd-юниты, хранение секретов через systemd credent
 - [x] dnstt, сервер: `obs[].dns` и `hints.dns` в сводке (probe-v1 §6.1, §6.2).
 - [ ] dnstt, клиент: перебор резолверов для сети (Niko).
 - [x] Окно отладки `rayctl debug on -for 30m`: уровни rayd, rayspa, niko-server, Xray с откатом (без `-device`).
-- [ ] CI: фронт делит UDP 53 с настоящим systemd-resolved в образе с systemd.
+- [x] CI: фронт делит UDP 53 с настоящим systemd-resolved раннера, и заглушка встаёт после его перезапуска (`test/dns53`).
 - [x] Маркер возврата стаба — в каталоге состояния (`resolved-stub.pending`); метка v0.11.0 (`.gone`) понимается.
 
 ## Технические проверки

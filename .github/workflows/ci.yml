@@ -21,7 +21,7 @@ jobs:
           ./scripts/gen.sh
           git diff --exit-code -- internal/gen
       - name: Shell scripts
-        run: shellcheck -x scripts/*.sh install/*.sh test/install/*.sh test/supervise/*.sh test/relay/*.sh
+        run: shellcheck -x scripts/*.sh install/*.sh test/install/*.sh test/supervise/*.sh test/relay/*.sh test/dns53/*.sh
       - run: go vet ./...
       - run: go test -race -count=1 ./...
       # Built from source with the module's Go: prebuilt binaries made with an
@@ -76,6 +76,10 @@ jobs:
       # A supervised node (rayd serve -supervise) takes port 443 as a node does.
       - run: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
       - run: XRAY_BIN="$RUNNER_TEMP/xray" NIKO_SERVER_BIN="$RUNNER_TEMP/niko-server" go test -count=1 -run 'WithXray|WithNikoServer|ThroughXray|Supervised' -v ./internal/xrayapi
+      # The DNS front beside the runner's own systemd-resolved: they share
+      # UDP 53 (niko-server v0.8.2), the stub binds again when resolved
+      # restarts beside the front.
+      - run: sudo test/dns53/resolved.sh "$RUNNER_TEMP/niko-server"
       - uses: actions/upload-artifact@v4
         with:
           name: xray
