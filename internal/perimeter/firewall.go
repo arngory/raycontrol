@@ -474,6 +474,27 @@ func (n *NFT) Allow(addr netip.Addr, ports []Port, ttl time.Duration) error {
 	return n.run(add)
 }
 
+// Grant is a port open to an address for the time left.
+type Grant struct {
+	Addr netip.Addr
+	Port Port
+	TTL  time.Duration
+}
+
+// AllowAll opens the grants in one transaction, on a table just made
+// (Setup): there is nothing of theirs to replace.
+func (n *NFT) AllowAll(grants []Grant) error {
+	var b strings.Builder
+	for _, gr := range grants {
+		set, elems := elements(gr.Addr, []Port{gr.Port}, gr.TTL)
+		fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set, elems)
+	}
+	if b.Len() == 0 {
+		return nil
+	}
+	return n.run(b.String())
+}
+
 // Deny closes ports for addr now.
 func (n *NFT) Deny(addr netip.Addr, ports []Port) error {
 	var firstErr error

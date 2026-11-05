@@ -35,8 +35,10 @@ type fakeFW struct {
 	setups     int
 	acmePort   uint16
 	acmeTTL    time.Duration
-	relaysSets int // SetRelays calls
-	adminFails int // SetAdmin calls still to fail
+	relaysSets int      // SetRelays calls
+	adminFails int      // SetAdmin calls still to fail
+	spaFails   int      // SetSPAPorts calls still to fail
+	calls      []string // Setup, SetAdmin, SetRelays, Allow, SetSPAPorts, in order
 }
 
 func (f *fakeFW) SetACME(port uint16, ttl time.Duration) error {
@@ -51,6 +53,7 @@ func (f *fakeFW) Setup() error {
 	defer f.mu.Unlock()
 	f.setups++
 	f.gone = false
+	f.calls = append(f.calls, "Setup")
 	return nil
 }
 func (f *fakeFW) Present() (bool, error) {
@@ -72,6 +75,11 @@ func (f *fakeFW) Teardown() error { return nil }
 func (f *fakeFW) SetSPAPorts(udp, tcp []uint16) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls = append(f.calls, "SetSPAPorts")
+	if f.spaFails > 0 {
+		f.spaFails--
+		return errors.New("nft: busy")
+	}
 	f.udp, f.tcp = udp, tcp
 	return nil
 }
@@ -83,6 +91,7 @@ func (f *fakeFW) SetRotation(udp map[uint16]uint16) error {
 	return nil
 }
 func (f *fakeFW) SetAdmin(p []netip.Prefix, ports []Port) error {
+	f.calls = append(f.calls, "SetAdmin")
 	if f.adminFails > 0 {
 		f.adminFails--
 		return errors.New("nft: busy")
@@ -97,6 +106,7 @@ func (f *fakeFW) SetForward(ports []Port) error {
 func (f *fakeFW) SetRelays(p []netip.Prefix, ports []Port) error {
 	f.relays, f.relayPorts = p, ports
 	f.relaysSets++
+	f.calls = append(f.calls, "SetRelays")
 	return nil
 }
 func (f *fakeFW) Allow(a netip.Addr, ports []Port, ttl time.Duration) error {
@@ -108,6 +118,7 @@ func (f *fakeFW) Allow(a netip.Addr, ports []Port, ttl time.Duration) error {
 	for _, p := range ports {
 		f.open[a.String()+" "+p.String()] = ttl
 	}
+	f.calls = append(f.calls, "Allow")
 	return nil
 }
 func (f *fakeFW) Deny(a netip.Addr, ports []Port) error {
@@ -282,7 +293,8 @@ func TestGateRestoresTable(t *testing.T) {
 		t.Fatalf("setups=%d err=%v", fw.setups, err)
 	}
 
-	// A restore that fails halfway leaves a table, and is tried again.
+	// A restore that fails halfway leaves a table, and is tried again, a
+	// second later (then less and less often).
 	fw.flush()
 	fw.adminFails = 1
 	if _, err := g.Tick(); err == nil {
@@ -291,11 +303,65 @@ func TestGateRestoresTable(t *testing.T) {
 	if ok, _ := fw.Present(); !ok || len(fw.relays) != 0 {
 		t.Fatalf("after a failed restore: present %v, relays %v", ok, fw.relays)
 	}
+	if _, err := g.Tick(); !errors.Is(err, ErrNotReady) || fw.setups != 2 {
+		t.Fatalf("tried again at once: setups=%d %v", fw.setups, err)
+	}
+	now = now.Add(time.Second)
+	fw.calls = nil
 	if _, err := g.Tick(); err != nil || fw.setups != 3 || len(fw.admin) != 1 || len(fw.relays) != 2 {
 		t.Fatalf("restore again: setups=%d admin=%v relays=%v %v", fw.setups, fw.admin, fw.relays, err)
 	}
+	// relay_check last, with the grants back.
+	if a, r := slices.Index(fw.calls, "Allow"), slices.Index(fw.calls, "SetRelays"); a < 0 || r < a {
+		t.Fatalf("restore order %v", fw.calls)
+	}
 	if _, err := g.Tick(); err != nil || fw.setups != 3 {
 		t.Fatalf("restored once: setups=%d %v", fw.setups, err)
+	}
+	// Not done before the slots are back either.
+	fw.flush()
+	fw.spaFails = 1
+	if _, err := g.Tick(); err == nil {
+		t.Fatal("a restore failing at the slots said nothing")
+	}
+	now = now.Add(time.Second)
+	if _, err := g.Tick(); err != nil || fw.setups != 5 || len(fw.udp) == 0 {
+		t.Fatalf("restore again after the slots: setups=%d udp=%v %v", fw.setups, fw.udp, err)
+	}
+}
+
+// A snapshot the firewall took only in part is applied in full by Tick,
+// without waiting for rayd to send another; one that comes while the
+// table is being restored waits for the restore.
+func TestGatePendingSnapshot(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	fw := &fakeFW{}
+	g := NewGate(fw, quiet)
+	g.now = func() time.Time { return now }
+	snap := testSnapshot(&perimeterv1.Device{Id: "alice", Key: key(0x11), Allowed: []uint32{2}})
+	snap.AdminPrefixes = []string{"198.51.100.0/24"}
+	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 22}}
+	fw.adminFails = 1
+	if err := g.Update(snap); err == nil || len(fw.admin) != 0 {
+		t.Fatalf("a failed update: admin %v, %v", fw.admin, err)
+	}
+	if _, err := g.Tick(); err != nil || len(fw.admin) != 1 || fw.relaysSets != 1 {
+		t.Fatalf("pending snapshot: admin %v, SetRelays %d, %v", fw.admin, fw.relaysSets, err)
+	}
+
+	fw.flush()
+	fw.adminFails = 1
+	if _, err := g.Tick(); err == nil {
+		t.Fatal("a failed restore said nothing")
+	}
+	snap.RelayPrefixes = []string{"192.0.2.44/32"}
+	snap.RelayPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 443}}
+	fw.calls = nil
+	if err := g.Update(snap); err != nil || len(fw.relays) != 1 {
+		t.Fatalf("update while restoring: relays %v, %v", fw.relays, err)
+	}
+	if len(fw.calls) == 0 || fw.calls[0] != "Setup" {
+		t.Fatalf("an update wrote into a half-made table: %v", fw.calls)
 	}
 }
 

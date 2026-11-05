@@ -52,9 +52,12 @@ type Gate struct {
 	adminPorts []Port
 	relays     []netip.Prefix
 	relayPorts []Port
-	relaysSet  bool   // SetRelays has run: relay_check is on
-	restoring  bool   // a restore of the table has not finished
-	forward    []Port // every service port: what a relay forwards
+	relaysSet  bool      // SetRelays has run: relay_check is on
+	restoring  bool      // a restore of the table has not finished
+	pending    *update   // a snapshot not applied in full yet
+	failures   int       // catching up failed so many times in a row
+	retryAt    time.Time // and is tried again from then on
+	forward    []Port    // every service port: what a relay forwards
 	// holders tracks which devices opened an address and port and until
 	// when, so that a revocation closes only what nobody else still holds.
 	holders  map[grantKey]map[string]time.Time
@@ -151,45 +154,91 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		relays = append(relays, p)
 	}
 	relayPorts := portsOf(snap.RelayPorts)
+	sp := snap.Spa
+	u := &update{
+		params: params, devices: devices, allowed: allowed, services: services, local: local, rotations: rotations,
+		public: public, admin: admin, adminPorts: adminPorts, relays: relays, relayPorts: relayPorts,
+		defTTL: time.Duration(sp.DefaultTtlS) * time.Second, maxTTL: time.Duration(sp.MaxTtlS) * time.Second,
+		tcpCarrier: sp.TcpCarrier, acme: snap.GetAcme(),
+	}
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	sp := snap.Spa
-	defTTL, maxTTL := time.Duration(sp.DefaultTtlS)*time.Second, time.Duration(sp.MaxTtlS)*time.Second
+	g.pending = u
+	return g.catchUpLocked()
+}
+
+// update is a snapshot checked, to be applied.
+type update struct {
+	params             spa.Params
+	devices            []spa.Device
+	allowed            map[string][]uint16
+	services           map[uint16][]Port
+	local              map[uint16]bool
+	rotations          []rotation
+	public, adminPorts []Port
+	relayPorts         []Port
+	admin, relays      []netip.Prefix
+	defTTL, maxTTL     time.Duration
+	tcpCarrier         bool
+	acme               *perimeterv1.AcmeWindow
+}
+
+// catchUpLocked finishes a restore of the table, then applies the snapshot
+// still pending. What fails stays to do, and Tick tries again: rayd sends a
+// snapshot again only when something changes.
+func (g *Gate) catchUpLocked() error {
+	if g.restoring {
+		if err := g.restoreLocked(); err != nil {
+			return err
+		}
+	}
+	if g.pending != nil {
+		if err := g.applyLocked(g.pending); err != nil {
+			return err
+		}
+		g.pending = nil
+	}
+	return nil
+}
+
+// applyLocked brings the table in line with u. The gate's copies change only
+// with the firewall: after a failure, the same u applies what is left.
+func (g *Gate) applyLocked(u *update) error {
 	// A new verifier also drops the replay cache, so keep it unless the
 	// parameters really changed.
-	if g.verifier == nil || params != g.params || defTTL != g.defaultTTL || maxTTL != g.maxTTL {
-		g.verifier = spa.NewVerifier(params, defTTL, maxTTL, 100000)
+	if g.verifier == nil || u.params != g.params || u.defTTL != g.defaultTTL || u.maxTTL != g.maxTTL {
+		g.verifier = spa.NewVerifier(u.params, u.defTTL, u.maxTTL, 100000)
 		g.verifier.SetClock(g.now)
 	}
-	g.verifier.SetDevices(devices)
-	g.params, g.tcpCarrier = params, sp.TcpCarrier
-	g.defaultTTL, g.maxTTL = defTTL, maxTTL
-	g.services, g.allowed, g.rotations = services, allowed, rotations
+	g.verifier.SetDevices(u.devices)
+	g.params, g.tcpCarrier = u.params, u.tcpCarrier
+	g.defaultTTL, g.maxTTL = u.defTTL, u.maxTTL
+	g.services, g.allowed, g.rotations = u.services, u.allowed, u.rotations
 
-	if !slices.Equal(public, g.public) {
-		if err := g.fw.SetPublic(public); err != nil {
+	if !slices.Equal(u.public, g.public) {
+		if err := g.fw.SetPublic(u.public); err != nil {
 			return err
 		}
-		g.public = public
+		g.public = u.public
 	}
-	if !slices.Equal(admin, g.admin) || !slices.Equal(adminPorts, g.adminPorts) {
-		if err := g.fw.SetAdmin(admin, adminPorts); err != nil {
+	if !slices.Equal(u.admin, g.admin) || !slices.Equal(u.adminPorts, g.adminPorts) {
+		if err := g.fw.SetAdmin(u.admin, u.adminPorts); err != nil {
 			return err
 		}
-		g.admin, g.adminPorts = admin, adminPorts
+		g.admin, g.adminPorts = u.admin, u.adminPorts
 	}
 	// Once at least, even with no relays: it also ends flows of relays
 	// removed while rayspa was down.
-	if !g.relaysSet || !slices.Equal(relays, g.relays) || !slices.Equal(relayPorts, g.relayPorts) {
-		if err := g.fw.SetRelays(relays, relayPorts); err != nil {
+	if !g.relaysSet || !slices.Equal(u.relays, g.relays) || !slices.Equal(u.relayPorts, g.relayPorts) {
+		if err := g.fw.SetRelays(u.relays, u.relayPorts); err != nil {
 			return err
 		}
-		g.relays, g.relayPorts, g.relaysSet = relays, relayPorts, true
+		g.relays, g.relayPorts, g.relaysSet = u.relays, u.relayPorts, true
 	}
 	var forward []Port
-	for id, ps := range services {
-		if local[id] {
+	for id, ps := range u.services {
+		if u.local[id] {
 			continue // served here: a relay's own SSH
 		}
 		for _, p := range ps {
@@ -206,7 +255,7 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		g.forward = forward
 	}
 	g.revokeLocked()
-	if err := g.acmeLocked(snap.GetAcme()); err != nil {
+	if err := g.acmeLocked(u.acme); err != nil {
 		return err
 	}
 	return g.slotsLocked()
@@ -304,10 +353,26 @@ func (g *Gate) Tick() ([]uint16, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !present || g.restoring {
-		if err := g.restoreLocked(); err != nil {
+	if !present && !g.restoring {
+		g.restoring = true
+		g.log.Warn("nftables table was removed (flush ruleset? nftables or firewalld reload?), restoring", "table", Table)
+	}
+	if g.restoring || g.pending != nil {
+		// A firewall that keeps failing is tried again less and less
+		// often: a restore makes one nft call per grant, under the lock.
+		now := g.now()
+		if now.Before(g.retryAt) {
+			return nil, fmt.Errorf("%w: catching up with the table", ErrNotReady)
+		}
+		if err := g.catchUpLocked(); err != nil {
+			g.failures++
+			g.retryAt = now.Add(min(30*time.Second, time.Second<<min(g.failures-1, 5)))
 			return nil, err
 		}
+		if g.failures > 0 {
+			g.log.Info("perimeter table caught up", "failures", g.failures)
+		}
+		g.failures, g.retryAt = 0, time.Time{}
 	}
 	if g.verifier == nil {
 		return nil, ErrNotReady
@@ -361,7 +426,7 @@ func (g *Gate) restoreLocked() error {
 			return err
 		}
 	}
-	grants := 0
+	var grants []Grant
 	for key, devs := range g.holders {
 		var until time.Time
 		for _, u := range devs {
@@ -370,10 +435,19 @@ func (g *Gate) restoreLocked() error {
 			}
 		}
 		if ttl := until.Sub(now); ttl > 0 {
-			if err := g.fw.Allow(key.addr, []Port{key.port}, ttl); err != nil {
+			grants = append(grants, Grant{Addr: key.addr, Port: key.port, TTL: ttl})
+		}
+	}
+	if all, ok := g.fw.(interface{ AllowAll([]Grant) error }); ok {
+		// One transaction, not one nft call per grant.
+		if err := all.AllowAll(grants); err != nil {
+			return err
+		}
+	} else {
+		for _, gr := range grants {
+			if err := g.fw.Allow(gr.Addr, []Port{gr.Port}, gr.TTL); err != nil {
 				return err
 			}
-			grants++
 		}
 	}
 	// Last, with the grants back: relay_check cuts what nothing lets in.
@@ -388,7 +462,7 @@ func (g *Gate) restoreLocked() error {
 		}
 	}
 	g.restoring = false
-	g.log.Warn("nftables table was removed (flush ruleset? nftables or firewalld reload?), restored", "table", Table, "grants", grants)
+	g.log.Info("perimeter table restored", "table", Table, "grants", len(grants))
 	return nil
 }
 

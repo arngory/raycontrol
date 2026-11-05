@@ -289,8 +289,8 @@ func TestRelayAccess(t *testing.T) {
 	if err != nil || !slices.Equal(snap.AdminPrefixes, []string{"203.0.113.9/32"}) || snap.AdminPorts[0].Port != 2200 {
 		t.Fatalf("relay snapshot after SetRelayAccess: %v %v", snap, err)
 	}
-	// A port public anyway (REALITY open=true) is no relay port at the exit:
-	// the relay's flows there are nobody's to cut.
+	// A port public now (REALITY open=true) stays a relay port: the relay's
+	// flows there are marked, and end with the relay once open is off.
 	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "reality",
 		SettingsJson: `{"target":"www.example.org:443","ports":["tcp/443","udp/443"],"open":true}`})); err != nil {
 		t.Fatal(err)
@@ -302,7 +302,7 @@ func TestRelayAccess(t *testing.T) {
 	has := func(ports []*perimeterv1.Port, proto string, n uint32) bool {
 		return slices.ContainsFunc(ports, func(p *perimeterv1.Port) bool { return p.Proto == proto && p.Port == n })
 	}
-	if !has(exit.PublicPorts, "tcp", 443) || has(exit.RelayPorts, "tcp", 443) || !has(exit.RelayPorts, "udp", 443) {
+	if !has(exit.PublicPorts, "tcp", 443) || !has(exit.RelayPorts, "tcp", 443) || !has(exit.RelayPorts, "udp", 443) {
 		t.Fatalf("open REALITY: public %v, relay ports %v", exit.PublicPorts, exit.RelayPorts)
 	}
 }
