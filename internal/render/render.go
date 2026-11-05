@@ -194,10 +194,12 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 			inner = &m.Services[i]
 		}
 	}
-	if slices.ContainsFunc(m.Services, func(s Service) bool { return s.Kind == "dnstt" || s.Kind == "masterdns" }) {
-		if m.DNSProbeKey, err = st.DNSProbeKey(ctx); err != nil {
-			return m, err
-		}
+	// The dnsprobe-v1 key, made once whatever the services: the front's
+	// unit installs it from the first deploy, so a dnstt service added
+	// later through the API finds it there (a front told to read a key
+	// its unit never copied in would stay down, 443 and 53 with it).
+	if m.DNSProbeKey, err = st.DNSProbeKey(ctx); err != nil {
+		return m, err
 	}
 
 	users, err := st.ListUsers(ctx)
@@ -627,14 +629,18 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			}
 			dns := map[string]any{"listen": listen, "zones": zones}
 			// dnsprobe-v1: the front answers resolver checks itself in
-			// the dnstt zones (niko-server v0.8.3), with the key root
-			// copies in.
+			// the dnstt zones (niko-server v0.8.3).
 			if slices.ContainsFunc(zones, func(z route) bool { return z.Probe }) {
 				dns["probe_key_file"] = p.FrontDNSProbe()
-				files = append(files, File{Path: path.Join(p.Rendered, "front", DNSProbeKeyFile), Mode: 0o600,
-					Content: []byte(hex.EncodeToString(m.DNSProbeKey) + "\n"), Service: "front"})
 			}
 			front["dns"] = dns
+		}
+		// The key root copies in, with every front: the unit is written by
+		// rayctl apply, the config also by rayd as services change, and a
+		// dnstt zone may come between the two.
+		if len(m.DNSProbeKey) == 32 {
+			files = append(files, File{Path: path.Join(p.Rendered, "front", DNSProbeKeyFile), Mode: 0o600,
+				Content: []byte(hex.EncodeToString(m.DNSProbeKey) + "\n"), Service: "front"})
 		}
 		if len(tcpRoutes) > 0 {
 			listen := []string{"0.0.0.0:443"}

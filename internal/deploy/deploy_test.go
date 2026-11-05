@@ -1128,9 +1128,9 @@ func TestResolverProblem(t *testing.T) {
 	}
 }
 
-// A credential the render did not write (a DNS service that could not be
-// rendered) is not installed: a missing file would keep the whole front
-// down (Q-1).
+// A credential the render did not write (the salamander password of a
+// hy2-obfs service that could not be rendered, say) is not installed: a
+// missing file would keep the whole front down (Q-1).
 func TestFrontCredentialsOnlyRendered(t *testing.T) {
 	m, files := plan2(t, render.DefaultPaths)
 	key := "/var/lib/raycontrol/rendered/front/dnsprobe.key"
@@ -1140,5 +1140,58 @@ func TestFrontCredentialsOnlyRendered(t *testing.T) {
 	partial := slices.DeleteFunc(slices.Clone(files), func(f render.File) bool { return f.Path == key })
 	if front := file(deploy.Build(m, partial, render.DefaultPaths, deploy.DefaultBinaries), "/etc/systemd/system/niko-front.service"); front == "" || strings.Contains(front, key) {
 		t.Fatalf("a key not rendered is installed:\n%s", front)
+	}
+}
+
+// A node deployed without a dnstt zone (REALITY and masterdns here): the
+// front's unit installs the probe key all the same, so a dnstt service
+// added later through the API, whose config rayd renders with
+// probe_key_file, finds the key and the front stays up.
+func TestProbeKeyBeforeDNSTT(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range [][3]string{{"masterdns", "mdns", ""}, {"reality", "reality", `{"target":"www.example.org:443"}`}} {
+		if _, err := provision.CreateService(ctx, st, store.Service{Kind: s[0], Name: s[1], Enabled: true, Settings: s[2]}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := render.CollectForRender(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _, err := render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := file(deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries), "/etc/systemd/system/niko-front.service")
+	if !strings.Contains(unit, "/run/niko/front/dnsprobe.key") {
+		t.Fatalf("the front's unit does not install the probe key:\n%s", unit)
+	}
+	for _, f := range files {
+		if f.Service == "front" && strings.Contains(string(f.Content), "probe_key_file") {
+			t.Fatal("probe_key_file without a dnstt zone")
+		}
+	}
+	// Later, through the API: a dnstt service, rendered live.
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if m, err = render.CollectForRender(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	if files, _, err = render.Render(m, render.DefaultPaths); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f.Path, "/front/front.json") && !strings.Contains(string(f.Content), `"probe_key_file": "/run/niko/front/dnsprobe.key"`) {
+			t.Fatalf("live front config:\n%s", f.Content)
+		}
 	}
 }
