@@ -44,6 +44,9 @@ jobs:
       - run: sudo RAYCONTROL_NETNS_TEST=1 unshare -n ./perimeter.test -test.run TestNetns -test.v
       # A relay in the kernel between three namespaces (relay-v1 §3.1).
       - run: sudo test/relay/run.sh ./perimeter.test
+      # The same with the real parts: the exit's feed and rayspa -relay.
+      - run: go test -c -o api.test ./internal/api && go build -o rayspa ./cmd/rayspa
+      - run: sudo test/relay/e2e.sh ./api.test ./rayspa
 
   xray:
     # The rendered inner stage, REALITY and Hysteria2 on a real Xray from the
