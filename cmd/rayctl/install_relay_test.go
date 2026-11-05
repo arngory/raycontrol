@@ -107,28 +107,30 @@ func TestCheckRelaySSH(t *testing.T) {
 	}
 }
 
-// fakeRelayHost follows the steps of a relay install.
+// fakeRelayHost follows the steps of a relay install, with rayspa's state.
 type fakeRelayHost struct {
-	calls     []string
-	unit      bool // rayspa's unit file is there
-	table     bool // the perimeter's table is there
-	fail      string
-	panicAt   string
-	cancelAt  string
-	cancel    func()
-	stuckOpen bool // teardown leaves the table
+	calls                   []string
+	unit, enabled, active   bool // rayspa's unit file, enabled, running
+	table, guarded          bool // the perimeter's table, the guard timer armed
+	fail, panicAt, cancelAt string
+	cancel                  func()
 }
 
-func (f *fakeRelayHost) call(name string) error {
+func (f *fakeRelayHost) call(name string, then func()) error {
 	f.calls = append(f.calls, name)
-	if name == f.cancelAt {
-		f.cancel()
-	}
+	defer func() {
+		if name == f.cancelAt {
+			f.cancel()
+		}
+	}()
 	if name == f.panicAt {
 		panic(name)
 	}
 	if name == f.fail {
 		return errors.New(name + " failed")
+	}
+	if then != nil {
+		then()
 	}
 	return nil
 }
@@ -137,108 +139,125 @@ func (f *fakeRelayHost) steps() relaySteps {
 	return relaySteps{
 		unitExists: func() bool { return f.unit },
 		systemctl: func(args ...string) error {
-			err := f.call(strings.Join(args, " "))
-			if err == nil && args[0] == "start" {
-				f.table = true
-			}
-			return err
+			return f.call(strings.Join(args, " "), func() {
+				switch strings.Join(args[:len(args)-1], " ") {
+				case "disable":
+					f.enabled = false
+				case "disable --now":
+					f.enabled, f.active = false, false
+				case "stop":
+					f.active = false
+				case "start":
+					f.active, f.table = true, true
+				}
+			})
 		},
 		teardown: func() error {
-			err := f.call("teardown")
-			if err == nil && !f.stuckOpen {
-				f.table = false
+			if f.active {
+				f.calls = append(f.calls, "teardown")
+				return errors.New("rayspa.service is running")
 			}
-			return err
+			return f.call("teardown", func() { f.table = false })
 		},
-		tableGone: func() bool { return !f.table },
-		write: func() error {
-			err := f.call("write")
-			if err == nil {
-				f.unit = true
+		tableGone:      func() bool { return !f.table },
+		write:          func() error { return f.call("write", func() { f.unit = true }) },
+		removeSnapshot: func() error { return f.call("rm snapshot", nil) },
+		guard:          func() error { return f.call("guard", func() { f.guarded = true }) },
+		unguard: func() error {
+			if !f.guarded {
+				f.calls = append(f.calls, "unguard")
+				return errors.New("not loaded")
 			}
-			return err
+			return f.call("unguard", func() { f.guarded = false })
 		},
-		removeSnapshot: func() { f.calls = append(f.calls, "rm snapshot") },
-		waitSnapshot: func(ctx context.Context) error {
-			if err := f.call("wait"); err != nil {
-				return err
-			}
-			if ctx.Err() != nil {
-				return errors.New("interrupted")
-			}
-			return nil
-		},
-		readSnapshot: func() (*perimeterv1.Snapshot, error) { return &perimeterv1.Snapshot{}, f.call("read") },
-		check:        func(*perimeterv1.Snapshot) (string, error) { return "", f.call("check") },
-		enable:       func() error { return f.call("enable") },
+		waitSnapshot: func(context.Context) error { return f.call("wait", nil) },
+		readSnapshot: func() (*perimeterv1.Snapshot, error) { return &perimeterv1.Snapshot{}, f.call("read", nil) },
+		check:        func(*perimeterv1.Snapshot) (string, error) { return "", f.call("check", nil) },
+		forward:      func() error { return f.call("forward", nil) },
+		enable:       func() error { return f.call("enable", func() { f.enabled, f.active = true, true }) },
 	}
 }
 
-// rayspa is enabled only after the check; an earlier install's is disabled
-// before the first write; every other way out takes rayspa down.
+func (f *fakeRelayHost) run() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.cancel = cancel
+	_, _, err := f.steps().run(ctx)
+	return err
+}
+
+// rayspa is enabled, and forwarding on, only after the check; an earlier
+// install's is disabled before the first write; a guard timer covers what
+// rayctl cannot; every other way out takes rayspa down, and says when that
+// failed.
 func TestRelaySteps(t *testing.T) {
 	const u = relayUnit
-	happy := []string{"write", "stop " + u, "rm snapshot", "start " + u, "wait", "read", "check", "enable"}
-	down := []string{"disable --now " + u, "teardown"}
-	run := func(f *fakeRelayHost) error {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		f.cancel = cancel
-		_, _, err := f.steps().run(ctx)
-		return err
-	}
+	happy := []string{"write", "stop " + u, "rm snapshot", "guard", "start " + u, "wait", "read", "check", "forward", "enable", "unguard"}
+	down := []string{"disable --now " + u, "teardown", "unguard"}
+	open := func(f *fakeRelayHost) bool { return !f.enabled && !f.active && !f.table && !f.guarded }
 
 	f := &fakeRelayHost{}
-	if err := run(f); err != nil || !slices.Equal(f.calls, happy) {
-		t.Fatalf("a new relay: %v %v", f.calls, err)
+	if err := f.run(); err != nil || !slices.Equal(f.calls, happy) || !f.enabled || !f.active || f.guarded {
+		t.Fatalf("a new relay: %v %+v %v", f.calls, f, err)
 	}
-	f = &fakeRelayHost{unit: true}
-	if err := run(f); err != nil || !slices.Equal(f.calls, append([]string{"disable " + u}, happy...)) {
+	f = &fakeRelayHost{unit: true, enabled: true, active: true, table: true}
+	if err := f.run(); err != nil || !slices.Equal(f.calls, append([]string{"disable " + u}, happy...)) || !f.enabled {
 		t.Fatalf("again: %v %v", f.calls, err)
 	}
-	f = &fakeRelayHost{unit: true, fail: "disable " + u}
-	if err := run(f); err == nil || !slices.Equal(f.calls, []string{"disable " + u}) || !strings.Contains(err.Error(), "nothing changed") {
+	f = &fakeRelayHost{unit: true, enabled: true, active: true, table: true, fail: "disable " + u}
+	if err := f.run(); err == nil || !slices.Equal(f.calls, []string{"disable " + u}) || !strings.Contains(err.Error(), "nothing changed") {
 		t.Fatalf("an earlier rayspa that stays enabled: %v %v", f.calls, err)
 	}
 
+	// A failure at any step: nothing after it, rayspa down, the host open.
 	for i, at := range happy {
-		if at == "rm snapshot" {
-			continue
-		}
 		f := &fakeRelayHost{fail: at}
-		err := run(f)
+		err := f.run()
 		want := append(slices.Clone(happy[:i+1]), down...)
 		if at == "write" {
-			want = append(slices.Clone(happy[:1]), "teardown") // no unit yet
+			want = []string{"write", "teardown", "unguard"} // no unit yet
 		}
-		if err == nil || !slices.Equal(f.calls, want) || !strings.Contains(err.Error(), "left open") {
-			t.Errorf("%s fails: %v %v", at, f.calls, err)
+		if at == "unguard" {
+			f.guarded = false // armed still: it only takes down again what is down
+		}
+		if err == nil || !slices.Equal(f.calls, want) || !strings.Contains(err.Error(), "left open") || !open(f) {
+			t.Errorf("%s fails: %v %+v %v", at, f.calls, f, err)
 		}
 	}
-
-	// A signal: the next step does not run, rayspa goes down.
-	for _, at := range []string{"start " + u, "wait", "enable"} {
+	// A signal at any step: the same, from the next step on.
+	for i, at := range happy {
 		f := &fakeRelayHost{cancelAt: at}
-		err := run(f)
-		if err == nil || !strings.Contains(err.Error(), "interrupted") || !slices.Equal(f.calls[len(f.calls)-2:], down) ||
-			at != "enable" && slices.Contains(f.calls, "enable") {
-			t.Errorf("a signal at %s: %v %v", at, f.calls, err)
+		err := f.run()
+		want := append(slices.Clone(happy[:i+1]), down...)
+		if err == nil || !strings.Contains(err.Error(), "interrupted") || !slices.Equal(f.calls, want) || !open(f) {
+			t.Errorf("a signal at %s: %v %+v %v", at, f.calls, f, err)
 		}
 	}
-
-	// A panic takes rayspa down too.
+	// A panic too.
 	f = &fakeRelayHost{panicAt: "check"}
 	func() {
 		defer func() { _ = recover() }()
-		_ = run(f)
+		_ = f.run()
 	}()
-	if !slices.Equal(f.calls[len(f.calls)-2:], down) {
-		t.Errorf("a panic: %v", f.calls)
+	if !slices.Equal(f.calls, append(slices.Clone(happy[:8]), down...)) || !open(f) {
+		t.Errorf("a panic: %v %+v", f.calls, f)
 	}
 
-	// A host that stays closed is said so.
-	f = &fakeRelayHost{fail: "check", stuckOpen: true}
-	if err := run(f); err == nil || !strings.Contains(err.Error(), "could NOT") {
-		t.Errorf("a table left: %v", err)
+	// rayspa that cannot be disabled keeps its table: said so, and the
+	// guard stays armed to try again.
+	f = &fakeRelayHost{fail: "disable --now " + u, cancelAt: "check"}
+	if err := f.run(); err == nil || !strings.Contains(err.Error(), "could NOT") || !f.guarded || !f.table {
+		t.Errorf("a table left: %+v %v", f, err)
+	}
+	// Open now, but enabled for the next boot: said so.
+	g := (&fakeRelayHost{}).steps()
+	g.systemctl = func(args ...string) error {
+		if args[0] == "disable" || args[0] == "start" {
+			return errors.New("failed")
+		}
+		return nil
+	}
+	if _, _, err := g.run(context.Background()); err == nil || !strings.Contains(err.Error(), "at boot") {
+		t.Errorf("enabled at boot: %v", err)
 	}
 }

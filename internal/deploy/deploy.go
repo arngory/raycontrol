@@ -47,10 +47,15 @@ var DataFiles = []string{"ipinfo_lite.mmdb", "NOTICE"}
 
 // Paths of the control plane on an installed node.
 const (
-	StateDir   = "/var/lib/raycontrol"
-	DB         = StateDir + "/rayd.db"
-	Socket     = "/run/raycontrol/rayd.sock"
-	AdminGroup = "raycontrol"
+	StateDir = "/var/lib/raycontrol"
+	DB       = StateDir + "/rayd.db"
+	// RayspaState is the last snapshot rayspa applied, its start until rayd
+	// or the exit answers.
+	RayspaState = "/var/lib/rayspa/snapshot.pb"
+	// RelaySysctl turns forwarding on, on a relay host only.
+	RelaySysctl = "/etc/sysctl.d/91-raycontrol-relay.conf"
+	Socket      = "/run/raycontrol/rayd.sock"
+	AdminGroup  = "raycontrol"
 )
 
 // SystemUser is a system user (with a group of the same name).
@@ -557,7 +562,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			after: []string{"rayd.service", "nftables.service", "firewalld.service", "ufw.service"},
 			service: []string{
 				"User=rayspa", "Group=rayspa",
-				"ExecStart=" + bin.Rayspa + " run -socket " + Socket + " -state /var/lib/rayspa/snapshot.pb",
+				"ExecStart=" + bin.Rayspa + " run -socket " + Socket + " -state " + RayspaState,
 				// The last snapshot: SPA keys and the admin addresses, rayspa's only.
 				"StateDirectory=rayspa", "StateDirectoryMode=0700",
 				"AmbientCapabilities=CAP_NET_ADMIN",
