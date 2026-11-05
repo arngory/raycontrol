@@ -23,39 +23,52 @@ func TestSSHClient(t *testing.T) {
 		}
 	}
 	none := env()
-	session := env("SSH_CONNECTION", "203.0.113.9 50000 198.51.100.1 22")
+	sess := env("SSH_CONNECTION", "203.0.113.9 50000 198.51.100.1 2200")
+	want := session{"203.0.113.9", 2200}
+	long := map[int]proc{}
+	for pid := 10; pid < 60; pid++ {
+		long[pid] = proc{"bash", pid + 1, sess}
+	}
+	long[60] = proc{"sshd", 1, none}
 	for name, c := range map[string]struct {
 		procs map[int]proc
-		want  string
+		want  session
 	}{
 		"direct": {map[int]proc{
-			10: {"rayctl", 9, session}, 9: {"bash", 8, session}, 8: {"sshd-session", 7, none}, 7: {"sshd", 1, none},
-		}, "203.0.113.9"},
+			10: {"rayctl", 9, sess}, 9: {"bash", 8, sess}, 8: {"sshd-session", 7, none}, 7: {"sshd", 1, none},
+		}, want},
 		"through sudo": {map[int]proc{
-			10: {"rayctl", 9, none}, 9: {"sudo", 8, session}, 8: {"bash", 7, session}, 7: {"sshd", 1, none},
-		}, "203.0.113.9"},
+			10: {"rayctl", 9, none}, 9: {"sudo", 8, sess}, 8: {"bash", 7, sess}, 7: {"sshd", 1, none},
+		}, want},
+		"sudo -i": {map[int]proc{
+			10: {"rayctl", 9, none}, 9: {"bash", 8, none}, 8: {"sudo", 7, sess}, 7: {"bash", 6, sess}, 6: {"sshd-session", 1, none},
+		}, want},
+		"su -, doas": {map[int]proc{
+			10: {"rayctl", 9, none}, 9: {"bash", 8, none}, 8: {"su", 7, sess}, 7: {"doas", 6, sess}, 6: {"bash", 5, sess}, 5: {"sshd-auth", 1, none},
+		}, want},
 		"SSH_CLIENT, an older sshd": {map[int]proc{
 			10: {"rayctl", 9, env("SSH_CLIENT", "2001:db8::9 50000 22")}, 9: {"sshd", 1, none},
-		}, "2001:db8::9"},
+		}, session{"2001:db8::9", 22}},
 		"the nearest session": {map[int]proc{
 			10: {"rayctl", 9, env("SSH_CONNECTION", "192.0.2.1 1 2 3")}, 9: {"sshd-session", 8, none},
-			8: {"bash", 7, session}, 7: {"sshd", 1, none},
-		}, "192.0.2.1"},
+			8: {"bash", 7, sess}, 7: {"sshd", 1, none},
+		}, session{"192.0.2.1", 3}},
 		"tmux": {map[int]proc{
-			10: {"rayctl", 9, session}, 9: {"bash", 8, session}, 8: {"tmux: server", 1, session},
-		}, ""},
+			10: {"rayctl", 9, sess}, 9: {"bash", 8, sess}, 8: {"tmux: server", 1, sess},
+		}, session{}},
 		"by hand on the console": {map[int]proc{
-			10: {"rayctl", 9, session}, 9: {"login", 1, none},
-		}, ""},
-		"a process gone": {map[int]proc{10: {"rayctl", 9, session}}, ""},
-		"no session":     {map[int]proc{10: {"rayctl", 9, none}, 9: {"sshd", 1, none}}, ""},
+			10: {"rayctl", 9, sess}, 9: {"login", 1, none},
+		}, session{}},
+		"a process gone": {map[int]proc{10: {"rayctl", 9, sess}}, session{}},
+		"no session":     {map[int]proc{10: {"rayctl", 9, none}, 9: {"sshd", 1, none}}, session{}},
+		"too far up":     {long, session{}},
 	} {
-		got := sshClientIn(10, func(pid int) (proc, bool) {
+		got := sshSessionIn(10, func(pid int) (proc, bool) {
 			p, ok := c.procs[pid]
 			return p, ok
 		})
 		if got != c.want {
-			t.Errorf("%s: %q, want %q", name, got, c.want)
+			t.Errorf("%s: %+v, want %+v", name, got, c.want)
 		}
 	}
 }

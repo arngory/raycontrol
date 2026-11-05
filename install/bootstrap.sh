@@ -184,7 +184,7 @@ install_deps() {
 		return
 	fi
 	log "installing ${missing[*]}"
-	local pkgs=()
+	local pkgs=() p
 	if command -v apt-get >/dev/null; then
 		for p in "${missing[@]}"; do [[ $p == polkit ]] && pkgs+=(polkitd) || pkgs+=("$p"); done
 		export DEBIAN_FRONTEND=noninteractive

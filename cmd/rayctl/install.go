@@ -24,10 +24,14 @@ import (
 	"github.com/arngory/raycontrol/internal/render"
 )
 
-// sshdPorts reads the ports sshd listens on (sshd -T): those of its listen
-// addresses, which say them all.
+// sshdPorts reads the ports sshd is configured to listen on (sshd -T):
+// those of its listen addresses, which say them all.
 func sshdPorts() ([]int, error) {
-	out, err := exec.Command("sshd", "-T").Output()
+	bin, err := exec.LookPath("sshd")
+	if err != nil {
+		bin = "/usr/sbin/sshd" // su without -: sbin is not in PATH
+	}
+	out, err := exec.Command(bin, "-T").Output() //nolint:gosec // G204: the host's sshd
 	if err != nil {
 		return nil, fmt.Errorf("sshd -T: %w", err)
 	}
@@ -43,6 +47,10 @@ func parseSSHDPorts(out string) ([]int, error) {
 		case "port":
 		case "listenaddress":
 			into = &listen
+			// "[::]:22", "0.0.0.0:22 rdomain red"
+			if f := strings.Fields(v); len(f) > 0 {
+				v = f[0]
+			}
 			if _, p, err := net.SplitHostPort(v); err == nil {
 				v = p
 			}
@@ -63,19 +71,43 @@ func parseSSHDPorts(out string) ([]int, error) {
 	return ports, nil
 }
 
-// sshPort reads the port sshd listens on, 22 if it cannot tell.
+// sshPort is the port sshd listens on for a node's SSH service: the one
+// this session came in on if sshd has several, 22 if it cannot tell.
 func sshPort() int {
-	out, err := exec.Command("sshd", "-T").Output()
-	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if v, ok := strings.CutPrefix(line, "port "); ok {
-				if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-					return n
-				}
+	ports, err := sshdPorts()
+	if err != nil || len(ports) == 0 {
+		return 22
+	}
+	if s := sshSession().port; slices.Contains(ports, s) {
+		return s
+	}
+	return ports[0]
+}
+
+// listening tells whether something listens on TCP port on this host
+// (/proc/net/tcp and tcp6): sshd, or systemd for ssh.socket.
+func listening(port int) bool {
+	var tables []string
+	for _, f := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		if b, err := os.ReadFile(f); err == nil { //nolint:gosec // G304: /proc
+			tables = append(tables, string(b))
+		}
+	}
+	return listensOn(tables, port)
+}
+
+func listensOn(tables []string, port int) bool {
+	want := fmt.Sprintf(":%04X", port)
+	for _, t := range tables {
+		for _, line := range strings.Split(t, "\n")[1:] {
+			// sl local_address rem_address st ...; 0A is LISTEN.
+			f := strings.Fields(line)
+			if len(f) > 3 && f[3] == "0A" && strings.HasSuffix(f[1], want) {
+				return true
 			}
 		}
 	}
-	return 22
+	return false
 }
 
 // sshClient returns the address of the SSH session this command runs in,
@@ -85,7 +117,18 @@ func sshPort() int {
 // variable left in a tmux or screen session, or set by hand, says nothing
 // about where the operator is now.
 func sshClient() string {
-	return sshClientIn(os.Getpid(), readProc)
+	return sshSession().addr
+}
+
+// session is an SSH session's client address and the server port it came
+// in on (0: not said).
+type session struct {
+	addr string
+	port int
+}
+
+func sshSession() session {
+	return sshSessionIn(os.Getpid(), readProc)
 }
 
 // proc is what sshClient reads of a process.
@@ -95,31 +138,39 @@ type proc struct {
 	env  func(string) string
 }
 
-func sshClientIn(self int, read func(pid int) (proc, bool)) string {
-	addr := ""
+func sshSessionIn(self int, read func(pid int) (proc, bool)) session {
+	var found session
 	pid := self
 	for range 32 {
 		if pid <= 1 {
-			return ""
+			return session{}
 		}
 		p, ok := read(pid)
 		if !ok {
-			return ""
+			return session{}
 		}
 		if p.comm == "sshd" || strings.HasPrefix(p.comm, "sshd-") || p.comm == "dropbear" {
-			return addr
+			return found
 		}
-		if addr == "" {
-			for _, v := range []string{"SSH_CONNECTION", "SSH_CLIENT"} {
-				if f := strings.Fields(p.env(v)); len(f) > 0 {
-					addr = f[0]
+		if found.addr == "" {
+			// SSH_CONNECTION: client, its port, server, its port;
+			// SSH_CLIENT (older): client, its port, the server's port.
+			for _, v := range []struct {
+				name string
+				port int
+			}{{"SSH_CONNECTION", 3}, {"SSH_CLIENT", 2}} {
+				if f := strings.Fields(p.env(v.name)); len(f) > 0 {
+					found = session{addr: f[0]}
+					if len(f) > v.port {
+						found.port, _ = strconv.Atoi(f[v.port])
+					}
 					break
 				}
 			}
 		}
 		pid = p.ppid
 	}
-	return ""
+	return session{}
 }
 
 // readProc reads a process from /proc; this process's environment is its
