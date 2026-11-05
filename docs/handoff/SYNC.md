@@ -26,14 +26,15 @@
   4. Interop зелёный — выходит клиент, поезд здесь закрывается.
   5. В заметках обоих релизов указана совместимая пара версий.
 
-Обновлено: 2026-11-04, сервер (T1 закрыт, raycontrol v0.10.0; второй круг разбора в ветках).
+Обновлено: 2026-11-05, сервер (T1 и T2 закрыты; v0.10.1 и niko-server v0.8.1 готовятся).
 
 ## Поезд
 
 | Поезд | Клиент | raycontrol | niko-server | Статус |
 |---|---|---|---|---|
 | T1 | Niko 1.26.0 (B1), коммит `da17ec3` в arngory/niko; следом 1.26.1 — только скрытие имён в журнале, контракт тот же | v0.9.0, `2dc56b38935d4c6b62505e425be67a0940858f3a` | v0.7.0, `af20974909af503ca7abf63662ce36e635481ede` (в архиве релиза) | **закрыт** 2026-11-04: interop на `rayd -supervise` зелёный (supervised, invite, naive), SHA256SUMS у APK сверены |
-| T2 | Niko 1.27 (B2): эталонный ClientHello Chrome для uTLS и REALITY, SPA в форме ClientHello, dnsauth-v1, relay — когда relay-v1 выйдет из черновика | **v0.10.0**, `2fb9dfd1d167fda7f48beba89f021c23358b9b98`: разбор S/Q/O, тест строгого разбора, dnsauth (выключен), SPA в форме ClientHello, `open=true` | **v0.8.0**, `9709508fa8a5b476fe2db72069edb7e87ad66e7a`; SHA-256 amd64 `fa712e192b08b12c2fbf42a99613945862756ac423112025e8bc872f9bc1fe80`, arm64 `d7c85e4eede7d4906fc43ce71cdce2f3e508d09756cfdf17f4e540864855b558`; в архиве raycontrol v0.10.0 | сервер выпущен; клиент собирает 1.27 |
+| T2 | Niko 1.27 (B2): эталонный ClientHello Chrome для uTLS и REALITY, SPA в форме ClientHello, dnsauth-v1, relay — когда relay-v1 выйдет из черновика | **v0.10.0**, `2fb9dfd1d167fda7f48beba89f021c23358b9b98`: разбор S/Q/O, тест строгого разбора, dnsauth (выключен), SPA в форме ClientHello, `open=true` | **v0.8.0**, `9709508fa8a5b476fe2db72069edb7e87ad66e7a`; SHA-256 amd64 `fa712e192b08b12c2fbf42a99613945862756ac423112025e8bc872f9bc1fe80`, arm64 `d7c85e4eede7d4906fc43ce71cdce2f3e508d09756cfdf17f4e540864855b558`; в архиве raycontrol v0.10.0 | **закрыт** 2026-11-05: Niko v1.27.0, коммит `5073de1` в arngory/niko; interop на `rayd -supervise` зелёный (REALITY с ClientHello Chrome 156, dnstt с `auth=required`, носители SPA), SHA256SUMS у APK сверены |
+| T3 | Niko: закрепить в interop raycontrol v0.10.1 и niko-server v0.8.1; relay — после заморозки relay-v1. Сейчас у клиента B3 (батарея и стабильность), серверной части там нет | v0.10.1 — в ветке, ждёт повторного ревью и «да» пользователя | v0.8.1 — в ветке | готовится |
 
 Что в 1.26 касается сервера:
 - строгий разбор строк подписки (§4: схемы, `encryption` и `pqv` обязательны, `insecure` не принимается);
@@ -90,6 +91,14 @@
 - Тег и sha niko-server новее v0.7.0. *Ответ:* **v0.8.0 вышел**, `9709508fa8a5b476fe2db72069edb7e87ad66e7a`
   (хэши бинарников — в таблице поезда). Он совместим с raycontrol v0.9.0: новое в нём только включается опциями.
   Клиенту для T2 — вместе с raycontrol v0.10.0. Для T1 остаётся v0.7.0.
+
+**Клиент о T2 (2026-11-05):** в 1.27.0:
+- эталон ClientHello Chrome 156 stable для uTLS, REALITY и `tls://` Yggdrasil (ядро 427f972) с еженедельной сверкой
+  JA4;
+- SPA носителем ClientHello, порядок UDP → ClientHello → голый TCP;
+- `spa.carriers`: перечисленные носители первыми; голый TCP — только той ноде, что его перечислила или не прислала
+  списка;
+- dnsauth-v1; оба вектора совпали, второй закреплён тестом в форке (cf063af).
 
 **План клиента на T2 (Niko 1.27, B2)**
 1. Закрепить в interop raycontrol v0.10.0 (`2fb9dfd`) и niko-server v0.8.0 (`9709508`).
