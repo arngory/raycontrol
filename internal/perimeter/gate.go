@@ -268,7 +268,7 @@ func (g *Gate) applyLocked(u *update) error {
 	g.adoptLocked(u)
 	var errs []error
 	// Revocations first: they wait for nothing else.
-	errs = append(errs, g.denyLocked(), g.regrantLocked())
+	errs = append(errs, g.regrantLocked(), g.denyLocked())
 	if !slices.Equal(u.public, g.public) {
 		if err := g.fw.SetPublic(u.public); err != nil {
 			errs = append(errs, err)
@@ -286,14 +286,21 @@ func (g *Gate) applyLocked(u *update) error {
 	// Once at least, even with no relays: it also ends flows of relays
 	// removed while rayspa was down. A relay port becoming public waits for
 	// the public ports: relay_check would cut its flows meanwhile.
-	becomesPublic := func(p Port) bool { return !slices.Contains(u.relayPorts, p) && slices.Contains(u.public, p) }
-	if !g.relaysSet || !slices.Equal(u.relays, g.relays) || !slices.Equal(u.relayPorts, g.relayPorts) {
-		if !slices.Equal(u.public, g.public) && slices.ContainsFunc(g.relayPorts, becomesPublic) {
-			errs = append(errs, errors.New("perimeter: relay ports wait for the public ports they become"))
-		} else if err := g.fw.SetRelays(u.relays, u.relayPorts); err != nil {
+	// Only those ports wait: the relays' addresses, a removal above all,
+	// go through.
+	relayPorts := u.relayPorts
+	if !slices.Equal(u.public, g.public) {
+		for _, p := range g.relayPorts {
+			if !slices.Contains(relayPorts, p) && slices.Contains(u.public, p) {
+				relayPorts = append(slices.Clone(relayPorts), p)
+			}
+		}
+	}
+	if !g.relaysSet || !slices.Equal(u.relays, g.relays) || !slices.Equal(relayPorts, g.relayPorts) {
+		if err := g.fw.SetRelays(u.relays, relayPorts); err != nil {
 			errs = append(errs, err)
 		} else {
-			g.relays, g.relayPorts, g.relaysSet = u.relays, u.relayPorts, true
+			g.relays, g.relayPorts, g.relaysSet = u.relays, relayPorts, true
 		}
 	}
 	var forward []Port
@@ -346,13 +353,12 @@ func (g *Gate) adoptLocked(u *update) {
 			}
 		}
 		switch {
+		case len(devs) == 0 && !revoked && !g.regrant[key]:
+			delete(g.holders, key) // expired: so is its element
 		case len(devs) == 0:
 			delete(g.holders, key)
 			delete(g.regrant, key)
-			if g.revoking == nil {
-				g.revoking = map[grantKey]bool{}
-			}
-			g.revoking[key] = true
+			g.revokeLater(key)
 		case revoked:
 			// Others hold it still: as long as the longest of them, not
 			// as long as the device revoked.
@@ -381,15 +387,29 @@ func (g *Gate) regrantLocked() error {
 	var errs []error
 	now := g.now()
 	for key := range g.regrant {
-		if ttl := longest(g.holders[key]).Sub(now); ttl > 0 {
-			if err := g.fw.Allow(key.addr, []Port{key.port}, ttl); err != nil {
-				errs = append(errs, fmt.Errorf("shortening a grant on %v: %w", key.port, err))
-				continue
-			}
+		ttl := longest(g.holders[key]).Sub(now)
+		if ttl <= 0 {
+			// The others went meanwhile: the element still has the
+			// revoked device's time, so it is closed instead.
+			delete(g.regrant, key)
+			g.revokeLater(key)
+			continue
+		}
+		if err := g.fw.Allow(key.addr, []Port{key.port}, ttl); err != nil {
+			errs = append(errs, fmt.Errorf("shortening a grant on %v: %w", key.port, err))
+			continue
 		}
 		delete(g.regrant, key)
 	}
 	return errors.Join(errs...)
+}
+
+// revokeLater puts a grant to close in revoking (denyLocked).
+func (g *Gate) revokeLater(key grantKey) {
+	if g.revoking == nil {
+		g.revoking = map[grantKey]bool{}
+	}
+	g.revoking[key] = true
 }
 
 // denyLocked closes the revoked grants; those the firewall refuses stay to
@@ -468,19 +488,21 @@ func (g *Gate) Handle(src netip.Addr, pkt []byte) (spa.Grant, error) {
 		}
 		byTTL[end.Sub(now)] = append(byTTL[end.Sub(now)], p)
 	}
-	for ttl, ps := range byTTL {
+	for _, ttl := range slices.Sorted(maps.Keys(byTTL)) {
+		ps := byTTL[ttl]
 		if err := g.fw.Allow(src, ps, ttl); err != nil {
 			return grant, err
 		}
-	}
-	for _, p := range ports {
-		key := grantKey{src.Unmap(), p}
-		if g.holders[key] == nil {
-			g.holders[key] = map[string]time.Time{}
+		// Held as soon as open: a revocation must find what is open.
+		for _, p := range ps {
+			key := grantKey{src.Unmap(), p}
+			if g.holders[key] == nil {
+				g.holders[key] = map[string]time.Time{}
+			}
+			delete(g.revoking, key) // held again: not to be closed
+			delete(g.regrant, key)  // set to its longest just now
+			g.holders[key][grant.DeviceID] = until
 		}
-		delete(g.revoking, key) // held again: not to be closed
-		delete(g.regrant, key)  // set to its longest just now
-		g.holders[key][grant.DeviceID] = until
 	}
 	return grant, nil
 }
