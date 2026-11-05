@@ -246,7 +246,7 @@ func cmdServe(args []string) error {
 	go syncDNS(ctx, st, srv.Changes, hb, log)
 	go checkRealityTargets(ctx, st, srv.Changes, hb, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
-	go serveRemote(ctx, &api.Remote{Server: srv, Log: log}, srv.Changes)
+	go serveRemote(ctx, &api.Remote{Server: srv, Log: log, Perimeter: per}, srv.Changes)
 	if err := startSubscription(ctx, st, paths, log, *probeDaily, *spaTCP); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}

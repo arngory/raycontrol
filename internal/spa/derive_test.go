@@ -30,6 +30,19 @@ func TestDerivedKeyVectors(t *testing.T) {
 			t.Errorf("%s key %x, want %s", name, c.got, c.want)
 		}
 	}
+	// The client's vector (Niko, T2): device key 11 x 32, node ID 33 x 16,
+	// service 3.
+	var dev11 [KeySize]byte
+	var node33 [NodeIDSize]byte
+	for i := range dev11 {
+		dev11[i] = 0x11
+	}
+	for i := range node33 {
+		node33[i] = 0x33
+	}
+	if k := DNSAuthKey(dev11, node33, 3); hex.EncodeToString(k[:]) != "2f9bd5e6fc2ef3f56206998eee87f2d4b798a66c3c846ef34eff2f2647599bd5" {
+		t.Errorf("client's dnsauth vector: %x", k)
+	}
 	if RelayKey(dev, node, "r2") == relay {
 		t.Error("two relays share a key")
 	}
