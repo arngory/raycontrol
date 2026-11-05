@@ -20,15 +20,19 @@ type Hints struct {
 	UDPBlocked  bool     `json:"udp_blocked,omitempty"`   // UDP mostly does not pass
 	TCPStallKiB int      `json:"tcp_stall_kib,omitempty"` // TCP mostly stalls near this many KiB
 	UDPMTU      string   `json:"udp_mtu,omitempty"`       // the UDP MTU most reports give (a bucket of MTUs)
-	Devices     int64    `json:"devices"`                 // reports counted (not distinct devices)
-	Days        int      `json:"days"`
+	// ViaRelay: most reports from the network came through a relay of the
+	// node (relay-v1 §9.3): a starting point for the client's detector.
+	ViaRelay bool  `json:"via_relay,omitempty"`
+	Devices  int64 `json:"devices"` // reports counted (not distinct devices)
+	Days     int   `json:"days"`
 }
 
 // tally is the counters of one AS over the window.
 type tally struct {
-	reports int64
+	reports int64 // direct ones (and older ones, without a path)
 	nets    map[string]int64
 	mtu     map[string]int64
+	path    map[string]int64
 	svc     map[int64]map[string]map[string]int64 // svc -> field -> bucket -> n
 }
 
@@ -37,7 +41,7 @@ func sum(rows []store.SummaryCount) map[uint32]*tally {
 	for _, r := range rows {
 		t := out[r.ASN]
 		if t == nil {
-			t = &tally{nets: map[string]int64{}, mtu: map[string]int64{}, svc: map[int64]map[string]map[string]int64{}}
+			t = &tally{nets: map[string]int64{}, mtu: map[string]int64{}, path: map[string]int64{}, svc: map[int64]map[string]map[string]int64{}}
 			out[r.ASN] = t
 		}
 		if r.Svc == 0 {
@@ -48,6 +52,8 @@ func sum(rows []store.SummaryCount) map[uint32]*tally {
 				t.nets[r.Bucket] += r.N
 			case "mtu":
 				t.mtu[r.Bucket] += r.N
+			case "path":
+				t.path[r.Bucket] += r.N
 			}
 			continue
 		}
@@ -72,10 +78,19 @@ func total(m map[string]int64) int64 {
 
 // hints of one AS for the services the client has.
 func (t *tally) hints(svcs []uint16) *Hints {
-	if t == nil || t.reports < K {
+	if t == nil {
 		return nil
 	}
-	h := &Hints{Devices: t.reports, Days: Window}
+	// Where most come through a relay, few may come directly: the hint
+	// to start with the relay stands on its own.
+	viaRelay := majority(t.path) == "relay"
+	if t.reports < K {
+		if viaRelay {
+			return &Hints{ViaRelay: true, Devices: total(t.path), Days: Window}
+		}
+		return nil
+	}
+	h := &Hints{Devices: t.reports, Days: Window, ViaRelay: viaRelay}
 	type scored struct {
 		svc   uint16
 		score float64
@@ -127,7 +142,7 @@ func (t *tally) hints(svcs []uint16) *Hints {
 	}
 	h.UDPMTU = majority(t.mtu)
 	slices.Sort(h.Avoid)
-	if len(h.Order) == 0 && len(h.Avoid) == 0 && !h.UDPBlocked && h.TCPStallKiB == 0 && h.UDPMTU == "" {
+	if len(h.Order) == 0 && len(h.Avoid) == 0 && !h.UDPBlocked && h.TCPStallKiB == 0 && h.UDPMTU == "" && !h.ViaRelay {
 		return nil
 	}
 	return h

@@ -407,13 +407,15 @@ func TestReport(t *testing.T) {
 			return fmt.Errorf("%w: test", summary.ErrInvalid)
 		case "broken":
 			return errors.New("disk")
+		case "away":
+			return summary.ErrUnavailable
 		}
 		return nil
 	}
 	if resp := get(t, c, "POST", url+PathReport, "phone", strings.NewReader("ok")); resp.StatusCode != http.StatusConflict {
 		t.Fatalf("through a tunnel: %d", resp.StatusCode)
 	}
-	for body, want := range map[string]int{"ok": 204, "off": 404, "again": 429, "bad": 400, "broken": 500} {
+	for body, want := range map[string]int{"ok": 204, "off": 404, "again": 429, "bad": 400, "broken": 500, "away": 503} {
 		req := httptest.NewRequest("POST", PathReport, strings.NewReader(body))
 		req.RemoteAddr = "[::ffff:203.0.113.5]:4321"
 		w := httptest.NewRecorder()
@@ -421,11 +423,11 @@ func TestReport(t *testing.T) {
 		if w.Code != want {
 			t.Errorf("%s: %d, want %d", body, w.Code, want)
 		}
-		if body == "again" && w.Header().Get("Retry-After") == "" {
-			t.Error("429 without Retry-After")
+		if (body == "again" || body == "away") && w.Header().Get("Retry-After") == "" {
+			t.Errorf("%d without Retry-After", w.Code)
 		}
 	}
-	if len(got) != 5 || !slices.Contains(got, "phone 203.0.113.5 ok") {
+	if len(got) != 6 || !slices.Contains(got, "phone 203.0.113.5 ok") {
 		t.Fatalf("calls %q", got)
 	}
 }

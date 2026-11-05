@@ -502,6 +502,10 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request, device string) {
 		http.Error(w, err.Error(), http.StatusTooManyRequests)
 	case errors.Is(err, summary.ErrInvalid):
 		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, summary.ErrUnavailable):
+		// A relay whose exit is away: later, not a refusal (relay-v1 §9.3).
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 	default:
 		s.Log.Warn("probe: report", "err", err)
 		http.Error(w, "report not taken", http.StatusInternalServerError)
