@@ -262,10 +262,6 @@ main() {
 		RELAY_BUNDLE="$(cd "$(dirname "$RELAY_BUNDLE")" && pwd)/$(basename "$RELAY_BUNDLE")"
 		# Before the node's binaries are replaced by the release's.
 		[[ ! -e /var/lib/raycontrol/rayd.db ]] || die "this host is a node (/var/lib/raycontrol/rayd.db): a relay goes on a host of its own"
-		# One relay install at a time: not even binaries swapped under one.
-		if command -v flock >/dev/null && ! flock -n /run/raycontrol-relay-install.lock true; then
-			die "another rayctl install -relay is running on this host"
-		fi
 	fi
 	if [[ $VERSION != latest ]]; then
 		[[ $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "RAYCONTROL_VERSION is vX.Y.Z, not $VERSION"
@@ -274,6 +270,21 @@ main() {
 		fi
 	fi
 	[[ $EUID -eq 0 ]] || die "run as root"
+	# One relay install at a time, from here to rayctl, which takes the
+	# same lock: not even binaries swapped under one. Root's file alone.
+	if [[ -n $RELAY_BUNDLE ]] && command -v flock >/dev/null; then
+		local relay_lock=/run/raycontrol-relay-install.lock rc=0
+		if ! (umask 077 && : >>"$relay_lock" && chmod 600 "$relay_lock"); then
+			die "cannot create $relay_lock"
+		fi
+		exec 9<"$relay_lock"
+		flock -n -E 75 9 || rc=$?
+		if ((rc == 75)); then
+			die "another rayctl install -relay is running on this host"
+		elif ((rc != 0)); then
+			die "cannot lock $relay_lock"
+		fi
+	fi
 	[[ -d /run/systemd/system ]] || die "systemd is required"
 	case "$(uname -m)" in
 	x86_64) ARCH=amd64 ;;
@@ -323,6 +334,7 @@ main() {
 			restorecon /usr/local/bin/rayspa /usr/local/bin/rayctl || true
 		fi
 		HANDED_OVER=1
+		exec 9<&- # rayctl takes the lock itself
 		/usr/local/bin/rayctl install -relay "$RELAY_BUNDLE" ${INSTALLED_PKGS:+-packages "$INSTALLED_PKGS"}
 		return
 	fi

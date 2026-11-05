@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -188,25 +190,15 @@ func installRelay(bundlePath, packages string) error {
 		unguard: func() error { return unguardAt(guardLock, guardArmed, runApart) },
 		waitSnapshot: func(ctx context.Context) error {
 			// Started without blocking (under the guard's lock): it may
-			// wait for network-online.target first.
-			deadline := time.Now().Add(2 * time.Minute)
-			for {
-				out, _ := commandApart("systemctl", "is-active", relayUnit).Output()
-				v := strings.TrimSpace(string(out))
-				if v == "active" {
-					break
-				}
-				if v == "failed" || time.Now().After(deadline) {
-					return fmt.Errorf("rayspa did not start (%s): journalctl -u rayspa says why", v)
-				}
-				select {
-				case <-ctx.Done():
-					return errInterrupted
-				case <-time.After(500 * time.Millisecond):
-				}
+			// wait for network-online.target first (up to 2 min).
+			if err := waitActive(ctx, showUnit, 150*time.Second, 500*time.Millisecond); err != nil {
+				return err
 			}
 			err := waitFile(ctx, relaySnapshot, 45*time.Second)
 			if err != nil && ctx.Err() == nil {
+				if st, _ := showUnit(); st["NRestarts"] != "" && st["NRestarts"] != "0" {
+					return fmt.Errorf("rayspa restarted %s times: journalctl -u rayspa says why", st["NRestarts"])
+				}
 				return fmt.Errorf("the relay took no perimeter from its exit %s (API port %d) within 45 s: does the exit "+
 					"know this host's address (rayctl relay list), is its api service on, and is this the newest bundle? "+
 					"journalctl -u rayspa says more", b.Exit, b.API.Port)
@@ -221,10 +213,12 @@ func installRelay(bundlePath, packages string) error {
 			if _, err := h.WriteFile(forwardFile); err != nil {
 				return err
 			}
-			// All of sysctl.d in order, as at boot: a file after ours that
-			// turns it off (99-sysctl.conf, a hardening profile) shows now.
-			applied := commandApart("sysctl", "-q", "--system").Run()
-			return checkForwarding(func() ([]byte, error) { return os.ReadFile("/proc/sys/net/ipv4/ip_forward") }, applied)
+			// Our file only, its old value journaled for uninstall; then
+			// what the kernel has now and what all of sysctl.d gives at
+			// boot, read without applying anyone else's settings.
+			h.ApplySysctl([]deploy.File{forwardFile})
+			boot, file := sysctlAtBoot(sysctlDirs, "net.ipv4.ip_forward")
+			return checkForwarding(func() ([]byte, error) { return os.ReadFile("/proc/sys/net/ipv4/ip_forward") }, boot, file)
 		},
 		enable: func() error { return h.EnableNow(relayUnit) },
 	}
@@ -265,7 +259,7 @@ func underGuard(lock, armed string, f func() error) error {
 	}
 	defer syscall.Flock(int(l.Fd()), syscall.LOCK_UN) //nolint:errcheck // closing unlocks too
 	if _, err := os.Stat(armed); errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("the guard timer took rayspa down: the install took over %v", guardAfter)
+		return fmt.Errorf("%w: the install took over %v", errGuardOff, guardAfter)
 	} else if err != nil {
 		return err
 	}
@@ -288,6 +282,11 @@ const relayInstallLock = "/run/raycontrol-relay-install.lock"
 func takeInstallLock(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: a fixed path
 	if err != nil {
+		return nil, err
+	}
+	// Root's alone: anyone who could open it could hold it.
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
 		return nil, err
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
@@ -313,19 +312,96 @@ func maybeActive(out string) bool {
 	return v != "inactive" && v != "failed"
 }
 
-// checkForwarding reads net.ipv4.ip_forward after sysctl --system (applied:
-// its error) and says what keeps it off.
-func checkForwarding(read func() ([]byte, error), applied error) error {
+// checkForwarding says what keeps net.ipv4.ip_forward off: now (read), or
+// at boot (the value sysctl.d gives, from file).
+func checkForwarding(read func() ([]byte, error), boot, file string) error {
 	v, err := read()
 	switch {
 	case err != nil:
 		return fmt.Errorf("net.ipv4.ip_forward cannot be read: %w", err)
-	case strings.TrimSpace(string(v)) == "1":
-		return nil
-	case applied != nil:
-		return fmt.Errorf("net.ipv4.ip_forward stays off: sysctl --system failed (%w)", applied)
+	case strings.TrimSpace(string(v)) != "1":
+		return fmt.Errorf("net.ipv4.ip_forward stays off (%s)", strings.TrimSpace(string(v)))
+	case boot != "1":
+		return fmt.Errorf("net.ipv4.ip_forward would be %q at boot: %s comes after %s", boot, file, deploy.RelaySysctl)
 	}
-	return fmt.Errorf("net.ipv4.ip_forward stays off: a sysctl file after %s turns it off (sysctl --system shows which)", deploy.RelaySysctl)
+	return nil
+}
+
+// sysctlDirs are where systemd-sysctl reads, first wins for a file name.
+var sysctlDirs = []string{"/etc/sysctl.d", "/run/sysctl.d", "/usr/local/lib/sysctl.d", "/usr/lib/sysctl.d", "/lib/sysctl.d"}
+
+// sysctlAtBoot is the value of key that sysctl.d gives at boot, and the file
+// it comes from: files by name across dirs (a name in an earlier dir hides
+// it in later ones), in name order, the last setting wins; /etc/sysctl.conf
+// last, as procps reads it.
+func sysctlAtBoot(dirs []string, key string) (value, file string) {
+	byName := map[string]string{}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		paths, _ := filepath.Glob(filepath.Join(dirs[i], "*.conf"))
+		for _, p := range paths {
+			byName[filepath.Base(p)] = p
+		}
+	}
+	files := make([]string, 0, len(byName)+1)
+	for _, name := range slices.Sorted(maps.Keys(byName)) {
+		files = append(files, byName[name])
+	}
+	files = append(files, filepath.Join(filepath.Dir(dirs[0]), "sysctl.conf"))
+	want := strings.ReplaceAll(key, "/", ".")
+	for _, f := range files {
+		b, err := os.ReadFile(f) //nolint:gosec // G304: sysctl's own files
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || line[0] == '#' || line[0] == ';' {
+				continue
+			}
+			k, v, ok := strings.Cut(strings.TrimPrefix(line, "-"), "=")
+			if ok && strings.ReplaceAll(strings.TrimSpace(k), "/", ".") == want {
+				value, file = strings.TrimSpace(v), f
+			}
+		}
+	}
+	return value, file
+}
+
+// showUnit reads rayspa's unit state from systemd.
+func showUnit() (map[string]string, error) {
+	out, err := commandApart("systemctl", "show", "-p", "ActiveState,SubState,Result,NRestarts,Job", relayUnit).Output()
+	st := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			st[k] = strings.TrimSpace(v)
+		}
+	}
+	return st, err
+}
+
+// waitActive waits for rayspa to run: active, not restarted, the start
+// result a success. With Restart=always it is never "failed": a crash loop
+// shows as restarts.
+func waitActive(ctx context.Context, show func() (map[string]string, error), limit, every time.Duration) error {
+	deadline := time.Now().Add(limit)
+	for {
+		st, _ := show()
+		switch {
+		case st["NRestarts"] != "" && st["NRestarts"] != "0":
+			return fmt.Errorf("rayspa restarted %s times: journalctl -u rayspa says why", st["NRestarts"])
+		case st["Result"] != "" && st["Result"] != "success":
+			return fmt.Errorf("rayspa did not start (%s): journalctl -u rayspa says why", st["Result"])
+		case st["ActiveState"] == "active" && st["SubState"] == "running":
+			return nil
+		case time.Now().After(deadline):
+			return fmt.Errorf("rayspa did not start within %v (%s/%s): journalctl -u rayspa says why", limit, st["ActiveState"], st["SubState"])
+		}
+		select {
+		case <-ctx.Done():
+			return errInterrupted
+		case <-time.After(every):
+		}
+	}
 }
 
 // unguardAt disarms the guard, under its lock: an error if it went off.
@@ -375,7 +451,10 @@ type relaySteps struct {
 	enable         func() error // journaled, enable --now
 }
 
-var errInterrupted = errors.New("interrupted")
+var (
+	errInterrupted = errors.New("interrupted")
+	errGuardOff    = errors.New("the guard timer took rayspa down")
+)
 
 // run writes the relay, starts rayspa without enabling it, and enables it,
 // with forwarding, once its first snapshot passes the check.
@@ -456,7 +535,7 @@ func (r relaySteps) stop(why error, armed bool) error {
 		return fmt.Errorf("%w; the host is open now, but rayspa is still enabled and closes it again at boot%s: run systemctl disable %s",
 			why, paren(disable), relayUnit)
 	}
-	if err := r.unguard(); armed && err != nil {
+	if err := r.unguard(); armed && err != nil && !errors.Is(why, errGuardOff) {
 		return fmt.Errorf("%w; rayspa is stopped and disabled and the host left open (%s)", why, joined(err))
 	}
 	return fmt.Errorf("%w; rayspa is stopped and disabled and the host left open", why)

@@ -3,14 +3,17 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/deploy"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 )
 
@@ -155,7 +158,7 @@ func (f *fakeRelayHost) steps() relaySteps {
 	return relaySteps{
 		unitExists: func() bool { return f.unit },
 		enabled:    func() bool { return f.enabled || f.stuckActive }, // no answer: maybe
-		active:     func() bool { return f.active },
+		active:     func() bool { return f.active || f.stuckActive },  // no answer: maybe
 		systemctl: func(args ...string) error {
 			verb := strings.Join(args[:len(args)-1], " ")
 			if verb == "disable --now" && f.stuckEnabled {
@@ -200,7 +203,7 @@ func (f *fakeRelayHost) steps() relaySteps {
 		unguard: func() error {
 			if !f.guarded {
 				f.calls = append(f.calls, "unguard")
-				return errors.New("went off, or never armed")
+				return fmt.Errorf("%w (went off, or never armed)", errGuardOff)
 			}
 			return f.call("unguard", func() { f.guarded = false })
 		},
@@ -303,10 +306,28 @@ func TestRelaySteps(t *testing.T) {
 	if _, err := f.run(); err == nil || !strings.Contains(err.Error(), "could not be seen to stop") || strings.Contains(err.Error(), "open") || !f.guarded {
 		t.Errorf("still running: %+v %v", f, err)
 	}
-	// The guard that went off is said, not only the step that failed.
+	// The guard that went off is said, not only the step that failed;
+	// once disarmed, or never armed, nothing is said about it.
 	f = &fakeRelayHost{guardOffAt: "start " + u, fails: []string{"wait"}}
 	if _, err := f.run(); err == nil || !strings.Contains(err.Error(), "went off") {
 		t.Errorf("the guard went off: %v", err)
+	}
+	// Once only, when the disarm itself found it gone.
+	f = &fakeRelayHost{guardOffAt: "check"}
+	if _, err := f.run(); err == nil || strings.Count(err.Error(), errGuardOff.Error()) != 1 {
+		t.Errorf("the guard went off, said: %v", err)
+	}
+	for _, at := range []string{"enable", "forward", "write", "guard"} {
+		f = &fakeRelayHost{fails: []string{at}}
+		if _, err := f.run(); err == nil || strings.Contains(err.Error(), "went off") {
+			t.Errorf("%s fails: %v", at, err)
+		}
+	}
+	// No unit yet (a new host): systemd not answering says nothing of a
+	// rayspa that was never there.
+	f = &fakeRelayHost{stuckActive: true, fails: []string{"write"}}
+	if _, err := f.run(); err == nil || !strings.Contains(err.Error(), "left open") {
+		t.Errorf("no unit: %v", err)
 	}
 	// The guard that went off before rayspa starts: it does not start.
 	f = &fakeRelayHost{}
@@ -443,26 +464,99 @@ func TestSystemctlAnswers(t *testing.T) {
 	}
 }
 
-// Forwarding is read back after all of sysctl.d, and what keeps it off is
-// said.
+// Forwarding: on now, and on at boot as all of sysctl.d gives it.
 func TestCheckForwarding(t *testing.T) {
 	read := func(v string, err error) func() ([]byte, error) {
 		return func() ([]byte, error) { return []byte(v), err }
 	}
-	if err := checkForwarding(read("1\n", nil), nil); err != nil {
+	if err := checkForwarding(read("1\n", nil), "1", deploy.RelaySysctl); err != nil {
 		t.Fatal(err)
 	}
 	for name, c := range map[string]struct {
-		read    func() ([]byte, error)
-		applied error
-		says    string
+		read       func() ([]byte, error)
+		boot, says string
 	}{
-		"overridden":     {read("0\n", nil), nil, "a sysctl file after"},
-		"sysctl failed":  {read("0\n", nil), errors.New("exit status 1"), "sysctl --system failed"},
-		"cannot be read": {read("", os.ErrPermission), nil, "cannot be read"},
+		"off now":        {read("0\n", nil), "1", "stays off (0)"},
+		"off at boot":    {read("1\n", nil), "0", "/etc/sysctl.d/99-hardening.conf comes after"},
+		"cannot be read": {read("", os.ErrPermission), "1", "cannot be read"},
 	} {
-		if err := checkForwarding(c.read, c.applied); err == nil || !strings.Contains(err.Error(), c.says) {
+		err := checkForwarding(c.read, c.boot, "/etc/sysctl.d/99-hardening.conf")
+		if err == nil || !strings.Contains(err.Error(), c.says) {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// The value at boot: files by name across the directories, an earlier
+// directory hiding a file of the same name, the last setting winning,
+// sysctl.conf last.
+func TestSysctlAtBoot(t *testing.T) {
+	root := t.TempDir()
+	etc, lib := root+"/etc/sysctl.d", root+"/usr/lib/sysctl.d"
+	for path, body := range map[string]string{
+		lib + "/50-default.conf":          "net.ipv4.ip_forward = 0\n",
+		etc + "/91-raycontrol-relay.conf": "# relay\nnet.ipv4.ip_forward = 1\n",
+		lib + "/99-hardening.conf":        "net/ipv4/ip_forward=0\n",
+		etc + "/99-hardening.conf":        "; hidden lib file\nkernel.foo = 1\n",
+		root + "/etc/sysctl.conf":         "#net.ipv4.ip_forward = 0\n",
+		etc + "/90-other.conf.disabled":   "net.ipv4.ip_forward = 0\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dirs := []string{etc, root + "/run/sysctl.d", lib}
+	if v, f := sysctlAtBoot(dirs, "net.ipv4.ip_forward"); v != "1" || f != etc+"/91-raycontrol-relay.conf" {
+		t.Fatalf("ours last: %q from %s", v, f)
+	}
+	if err := os.WriteFile(etc+"/99-zz.conf", []byte("-net.ipv4.ip_forward = 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if v, f := sysctlAtBoot(dirs, "net.ipv4.ip_forward"); v != "0" || f != etc+"/99-zz.conf" {
+		t.Fatalf("a later file: %q from %s", v, f)
+	}
+	if err := os.WriteFile(root+"/etc/sysctl.conf", []byte("net.ipv4.ip_forward=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := sysctlAtBoot(dirs, "net.ipv4.ip_forward"); v != "1" {
+		t.Fatalf("sysctl.conf last: %q", v)
+	}
+}
+
+// Waiting for rayspa: running, or a restart, a failed result, the limit.
+func TestWaitActive(t *testing.T) {
+	seq := func(states ...map[string]string) func() (map[string]string, error) {
+		i := 0
+		return func() (map[string]string, error) {
+			st := states[min(i, len(states)-1)]
+			i++
+			return st, nil
+		}
+	}
+	activating := map[string]string{"ActiveState": "activating", "SubState": "start-pre", "Result": "success", "NRestarts": "0", "Job": "1"}
+	running := map[string]string{"ActiveState": "active", "SubState": "running", "Result": "success", "NRestarts": "0"}
+	ctx := context.Background()
+	if err := waitActive(ctx, seq(activating, activating, running), time.Second, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		show func() (map[string]string, error)
+		says string
+	}{
+		"a crash loop":   {seq(activating, map[string]string{"ActiveState": "activating", "SubState": "auto-restart", "Result": "exit-code", "NRestarts": "2"}), "restarted 2 times"},
+		"a failed start": {seq(map[string]string{"ActiveState": "inactive", "SubState": "dead", "Result": "exit-code", "NRestarts": "0"}), "did not start (exit-code)"},
+		"never":          {seq(activating), "did not start within"},
+	} {
+		if err := waitActive(ctx, c.show, 20*time.Millisecond, time.Millisecond); err == nil || !strings.Contains(err.Error(), c.says) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := waitActive(cancelled, seq(activating), time.Second, time.Millisecond); !errors.Is(err, errInterrupted) {
+		t.Errorf("interrupted: %v", err)
 	}
 }
