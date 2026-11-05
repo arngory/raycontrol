@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -102,5 +104,141 @@ func TestCheckRelaySSH(t *testing.T) {
 	}
 	if _, err := checkRelaySSH(&perimeterv1.Snapshot{AdminPorts: snap.AdminPorts}, 22, "203.0.113.9", "r1"); err == nil {
 		t.Error("no admin addresses")
+	}
+}
+
+// fakeRelayHost follows the steps of a relay install.
+type fakeRelayHost struct {
+	calls     []string
+	unit      bool // rayspa's unit file is there
+	table     bool // the perimeter's table is there
+	fail      string
+	panicAt   string
+	cancelAt  string
+	cancel    func()
+	stuckOpen bool // teardown leaves the table
+}
+
+func (f *fakeRelayHost) call(name string) error {
+	f.calls = append(f.calls, name)
+	if name == f.cancelAt {
+		f.cancel()
+	}
+	if name == f.panicAt {
+		panic(name)
+	}
+	if name == f.fail {
+		return errors.New(name + " failed")
+	}
+	return nil
+}
+
+func (f *fakeRelayHost) steps() relaySteps {
+	return relaySteps{
+		unitExists: func() bool { return f.unit },
+		systemctl: func(args ...string) error {
+			err := f.call(strings.Join(args, " "))
+			if err == nil && args[0] == "start" {
+				f.table = true
+			}
+			return err
+		},
+		teardown: func() error {
+			err := f.call("teardown")
+			if err == nil && !f.stuckOpen {
+				f.table = false
+			}
+			return err
+		},
+		tableGone: func() bool { return !f.table },
+		write: func() error {
+			err := f.call("write")
+			if err == nil {
+				f.unit = true
+			}
+			return err
+		},
+		removeSnapshot: func() { f.calls = append(f.calls, "rm snapshot") },
+		waitSnapshot: func(ctx context.Context) error {
+			if err := f.call("wait"); err != nil {
+				return err
+			}
+			if ctx.Err() != nil {
+				return errors.New("interrupted")
+			}
+			return nil
+		},
+		readSnapshot: func() (*perimeterv1.Snapshot, error) { return &perimeterv1.Snapshot{}, f.call("read") },
+		check:        func(*perimeterv1.Snapshot) (string, error) { return "", f.call("check") },
+		enable:       func() error { return f.call("enable") },
+	}
+}
+
+// rayspa is enabled only after the check; an earlier install's is disabled
+// before the first write; every other way out takes rayspa down.
+func TestRelaySteps(t *testing.T) {
+	const u = relayUnit
+	happy := []string{"write", "stop " + u, "rm snapshot", "start " + u, "wait", "read", "check", "enable"}
+	down := []string{"disable --now " + u, "teardown"}
+	run := func(f *fakeRelayHost) error {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		f.cancel = cancel
+		_, _, err := f.steps().run(ctx)
+		return err
+	}
+
+	f := &fakeRelayHost{}
+	if err := run(f); err != nil || !slices.Equal(f.calls, happy) {
+		t.Fatalf("a new relay: %v %v", f.calls, err)
+	}
+	f = &fakeRelayHost{unit: true}
+	if err := run(f); err != nil || !slices.Equal(f.calls, append([]string{"disable " + u}, happy...)) {
+		t.Fatalf("again: %v %v", f.calls, err)
+	}
+	f = &fakeRelayHost{unit: true, fail: "disable " + u}
+	if err := run(f); err == nil || !slices.Equal(f.calls, []string{"disable " + u}) || !strings.Contains(err.Error(), "nothing changed") {
+		t.Fatalf("an earlier rayspa that stays enabled: %v %v", f.calls, err)
+	}
+
+	for i, at := range happy {
+		if at == "rm snapshot" {
+			continue
+		}
+		f := &fakeRelayHost{fail: at}
+		err := run(f)
+		want := append(slices.Clone(happy[:i+1]), down...)
+		if at == "write" {
+			want = append(slices.Clone(happy[:1]), "teardown") // no unit yet
+		}
+		if err == nil || !slices.Equal(f.calls, want) || !strings.Contains(err.Error(), "left open") {
+			t.Errorf("%s fails: %v %v", at, f.calls, err)
+		}
+	}
+
+	// A signal: the next step does not run, rayspa goes down.
+	for _, at := range []string{"start " + u, "wait", "enable"} {
+		f := &fakeRelayHost{cancelAt: at}
+		err := run(f)
+		if err == nil || !strings.Contains(err.Error(), "interrupted") || !slices.Equal(f.calls[len(f.calls)-2:], down) ||
+			at != "enable" && slices.Contains(f.calls, "enable") {
+			t.Errorf("a signal at %s: %v %v", at, f.calls, err)
+		}
+	}
+
+	// A panic takes rayspa down too.
+	f = &fakeRelayHost{panicAt: "check"}
+	func() {
+		defer func() { _ = recover() }()
+		_ = run(f)
+	}()
+	if !slices.Equal(f.calls[len(f.calls)-2:], down) {
+		t.Errorf("a panic: %v", f.calls)
+	}
+
+	// A host that stays closed is said so.
+	f = &fakeRelayHost{fail: "check", stuckOpen: true}
+	if err := run(f); err == nil || !strings.Contains(err.Error(), "could NOT") {
+		t.Errorf("a table left: %v", err)
 	}
 }

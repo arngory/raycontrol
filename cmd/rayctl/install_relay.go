@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -9,7 +10,6 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -18,6 +18,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/perimeter"
 )
 
 // relaySnapshot is where rayspa keeps the last snapshot it applied.
@@ -84,87 +85,62 @@ func installRelay(bundlePath, packages string) error {
 		}
 	}
 
-	// From the first write on, a rayspa from an earlier install would start
-	// at boot with a bundle nobody checked: every way out but success stops
-	// rayspa, disables it and removes its table.
-	var once sync.Once
-	stop := func() {
-		once.Do(func() {
-			_ = run("systemctl", "disable", "--now", "rayspa.service")
-			_ = run(deploy.DefaultBinaries.Rayspa, "teardown")
-		})
+	// Ctrl-C, a closed SSH connection (SIGHUP, unless nohup ignores it),
+	// systemd: the install stops at its next step, the way any failure does.
+	sigs := []os.Signal{os.Interrupt, syscall.SIGTERM}
+	if !signal.Ignored(syscall.SIGHUP) {
+		sigs = append(sigs, syscall.SIGHUP)
 	}
-	fail := func(why error) error {
-		stop()
-		return fmt.Errorf("%w; rayspa is stopped and disabled and the host left open", why)
-	}
-	// Ctrl-C, a closed SSH connection (SIGHUP), systemd: the same.
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	done := make(chan struct{})
-	defer func() {
-		signal.Stop(sig)
-		close(done)
-	}()
-	go func() {
-		select {
-		case s := <-sig:
-			stop()
-			fmt.Fprintf(os.Stderr, "rayctl: %v: rayspa is stopped and disabled and the host left open\n", s)
-			os.Exit(1)
-		case <-done:
-		}
-	}()
-
+	ctx, cancel := signal.NotifyContext(context.Background(), sigs...)
+	defer cancel()
 	plan := deploy.RelayPlan(deploy.DefaultBinaries)
-	for _, u := range plan.Users {
-		if err := h.EnsureUser(u); err != nil {
-			return fail(err)
-		}
+	unitFile := "/etc/systemd/system/" + relayUnit
+	steps := relaySteps{
+		unitExists: func() bool { _, err := os.Stat(unitFile); return err == nil },
+		systemctl:  func(args ...string) error { return runApart("systemctl", args...) },
+		teardown:   func() error { return runApart(deploy.DefaultBinaries.Rayspa, "teardown") },
+		tableGone: func() bool {
+			present, err := (&perimeter.NFT{}).Present()
+			return err == nil && !present
+		},
+		write: func() error {
+			for _, u := range plan.Users {
+				if err := h.EnsureUser(u); err != nil {
+					return err
+				}
+			}
+			files := append([]deploy.File{{Path: deploy.RelayBundle, Mode: 0o600, Content: []byte(strings.TrimSpace(string(raw)) + "\n")}}, plan.Files...)
+			var sysctl []deploy.File
+			for _, f := range files {
+				changed, err := h.WriteFile(f)
+				if err != nil {
+					return err
+				}
+				if changed && strings.HasPrefix(f.Path, "/etc/sysctl.d/") {
+					sysctl = append(sysctl, f)
+				}
+			}
+			h.ApplySysctl(sysctl)
+			return runApart("systemctl", "daemon-reload")
+		},
+		removeSnapshot: func() { _ = os.Remove(relaySnapshot) },
+		waitSnapshot: func(ctx context.Context) error {
+			if err := waitFile(ctx, relaySnapshot, 45*time.Second); err != nil {
+				return fmt.Errorf("the relay took no perimeter from its exit %s (API port %d) within 45 s (%w): does the exit "+
+					"know this host's address (rayctl relay list), is its api service on, and is this the newest bundle? "+
+					"journalctl -u rayspa says more", b.Exit, b.API.Port, err)
+			}
+			return nil
+		},
+		readSnapshot: func() (*perimeterv1.Snapshot, error) { return readSnapshot(relaySnapshot) },
+		check: func(snap *perimeterv1.Snapshot) (string, error) {
+			return checkRelaySSH(snap, port, sess.addr, b.Name)
+		},
+		enable: func() error { return h.EnableNow(relayUnit) },
 	}
-	files := append([]deploy.File{{Path: deploy.RelayBundle, Mode: 0o600, Content: []byte(strings.TrimSpace(string(raw)) + "\n")}}, plan.Files...)
-	var sysctl []deploy.File
-	for _, f := range files {
-		changed, err := h.WriteFile(f)
-		if err != nil {
-			return fail(err)
-		}
-		if changed && strings.HasPrefix(f.Path, "/etc/sysctl.d/") {
-			sysctl = append(sysctl, f)
-		}
-	}
-	h.ApplySysctl(sysctl)
-	// A snapshot from an earlier install is not proof of this one.
-	_ = os.Remove(relaySnapshot)
-	if err := run("systemctl", "daemon-reload"); err != nil {
-		return fail(err)
-	}
-	// Started, not enabled: if rayctl dies before the checks, a reboot
-	// opens the host again. An earlier install's rayspa is disabled until
-	// this one is checked, and restarted with the new bundle.
-	for _, u := range plan.Units {
-		_ = run("systemctl", "disable", u)
-		if err := run("systemctl", "restart", u); err != nil {
-			return fail(err)
-		}
-	}
-	if err := waitFile(relaySnapshot, 45*time.Second); err != nil {
-		return fail(fmt.Errorf("the relay took no perimeter from its exit %s (API port %d) within 45 s: does the exit know this "+
-			"host's address (rayctl relay list), is its api service on, and is this the newest bundle? journalctl -u rayspa says more",
-			b.Exit, b.API.Port))
-	}
-	snap, err := readSnapshot(relaySnapshot)
+	snap, warning, err := steps.run(ctx)
 	if err != nil {
-		return fail(err)
-	}
-	warning, err := checkRelaySSH(snap, port, sess.addr, b.Name)
-	if err != nil {
-		return fail(err)
-	}
-	for _, u := range plan.Units {
-		if err := h.EnableNow(u); err != nil {
-			return fail(err)
-		}
+		return err
 	}
 	if warning != "" {
 		fmt.Fprintln(os.Stderr, "warning:", warning)
@@ -172,6 +148,112 @@ func installRelay(bundlePath, packages string) error {
 	fmt.Printf("relay %s up: knocks with K_relay open the exit's services through here (exit %s).\n"+
 		"This host's SSH (port %d) is reachable from %s, the relay's own admin addresses (rayctl relay set on the exit).\n",
 		b.Name, b.Exit, port, strings.Join(snap.AdminPrefixes, ", "))
+	return nil
+}
+
+// relayUnit is rayspa's unit, the one RelayPlan installs.
+const relayUnit = "rayspa.service"
+
+// relaySteps is the part of a relay install that can lock the operator
+// out, with the host's operations given so that a test can follow it.
+type relaySteps struct {
+	unitExists     func() bool
+	systemctl      func(args ...string) error
+	teardown       func() error // rayspa teardown
+	tableGone      func() bool
+	write          func() error // users, files, sysctl, daemon-reload
+	removeSnapshot func()
+	waitSnapshot   func(context.Context) error
+	readSnapshot   func() (*perimeterv1.Snapshot, error)
+	check          func(*perimeterv1.Snapshot) (string, error)
+	enable         func() error // journaled, enable --now
+}
+
+// run writes the relay, starts rayspa without enabling it, and enables it
+// once its first snapshot passes the check. An earlier install's rayspa is
+// disabled before the first write: rayctl killed at any point leaves no
+// rayspa enabled with a bundle nobody checked, so a reboot opens the host.
+// Every other way out, a cancelled ctx (a signal) and a panic included,
+// stops and disables rayspa and removes its table; if that fails, the error
+// says so.
+func (r relaySteps) run(ctx context.Context) (snap *perimeterv1.Snapshot, warning string, err error) {
+	if r.unitExists() {
+		if err := r.systemctl("disable", relayUnit); err != nil {
+			return nil, "", fmt.Errorf("an earlier install's rayspa stays enabled, nothing changed: %w", err)
+		}
+	}
+	ok := false
+	defer func() {
+		if ok {
+			return
+		}
+		if serr := r.stop(); serr != nil {
+			err = fmt.Errorf("%w; rayspa could NOT be taken down (%w): run %s teardown before you leave this session",
+				err, serr, deploy.DefaultBinaries.Rayspa)
+		} else {
+			err = fmt.Errorf("%w; rayspa is stopped and disabled and the host left open", err)
+		}
+	}()
+	step := func(f func() error) error {
+		if ctx.Err() != nil {
+			return errors.New("interrupted")
+		}
+		return f()
+	}
+	if err := step(r.write); err != nil {
+		return nil, "", err
+	}
+	// Stopped before its snapshot goes: a rayspa still running would save
+	// the earlier bundle's perimeter, and that would be checked instead.
+	if err := step(func() error { return r.systemctl("stop", relayUnit) }); err != nil {
+		return nil, "", err
+	}
+	r.removeSnapshot()
+	if err := step(func() error { return r.systemctl("start", relayUnit) }); err != nil {
+		return nil, "", err
+	}
+	if err := step(func() error { return r.waitSnapshot(ctx) }); err != nil {
+		return nil, "", err
+	}
+	if snap, err = r.readSnapshot(); err != nil {
+		return nil, "", err
+	}
+	if warning, err = r.check(snap); err != nil {
+		return nil, "", err
+	}
+	if err := step(r.enable); err != nil {
+		return nil, "", err
+	}
+	if ctx.Err() != nil {
+		return nil, "", errors.New("interrupted")
+	}
+	ok = true
+	return snap, warning, nil
+}
+
+// stop takes rayspa down and tells whether the host is really open.
+func (r relaySteps) stop() error {
+	var disable error
+	if r.unitExists() {
+		disable = r.systemctl("disable", "--now", relayUnit)
+	}
+	tear := r.teardown()
+	if !r.tableGone() {
+		return errors.Join(disable, tear, errors.New("the perimeter's table is still there"))
+	}
+	// Open now; rayspa left enabled would close the host again at boot.
+	return disable
+}
+
+// runApart runs a command in a process group of its own: a second Ctrl-C
+// at the terminal does not reach it halfway.
+func runApart(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
 
@@ -246,7 +328,7 @@ func readSnapshot(path string) (*perimeterv1.Snapshot, error) {
 }
 
 // waitFile waits until a file exists.
-func waitFile(path string, limit time.Duration) error {
+func waitFile(ctx context.Context, path string, limit time.Duration) error {
 	deadline := time.Now().Add(limit)
 	for {
 		if _, err := os.Stat(path); err == nil {
@@ -254,6 +336,10 @@ func waitFile(path string, limit time.Duration) error {
 		} else if time.Now().After(deadline) {
 			return errors.New("timed out")
 		}
-		time.Sleep(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return errors.New("interrupted")
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
 }
