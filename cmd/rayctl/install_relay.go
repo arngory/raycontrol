@@ -104,7 +104,7 @@ func installRelay(bundlePath, packages string) error {
 	}
 	// Recorded first, before anything can fail: rayctl uninstall takes all
 	// of it back, the binaries the bootstrap put in place too.
-	for _, bin := range []string{deploy.DefaultBinaries.Rayspa, "/usr/local/bin/rayctl"} {
+	for _, bin := range []string{deploy.DefaultBinaries.Rayspa, "/usr/local/bin/rayctl", deploy.DefaultBinaries.Rayd} {
 		if _, err := os.Stat(bin); err == nil {
 			if err := h.Journal.Record(deploy.Change{Kind: deploy.ChangeBinary, Path: bin}); err != nil {
 				return err
@@ -265,7 +265,74 @@ func installRelay(bundlePath, packages string) error {
 	fmt.Printf("relay %s up: knocks with K_relay open the exit's services through here (exit %s).\n"+
 		"This host's SSH (port %d) is reachable from %s, the relay's own admin addresses (rayctl relay set on the exit).\n",
 		b.Name, b.Exit, port, strings.Join(snap.AdminPrefixes, ", "))
+	// The relay's probe endpoint (relay-v1 §9.1), once the relay is up: it
+	// is the relay's extra, and the relay works without it.
+	probe := relayProbe{
+		bundle: b,
+		hasRayd: func() bool {
+			_, err := os.Stat(deploy.DefaultBinaries.Rayd)
+			return err == nil
+		},
+		enable:  func() error { return h.EnableNow(deploy.RelayProbeUnit) },
+		restart: func() error { return runApart("systemctl", "restart", deploy.RelayProbeUnit) },
+		stop:    func() error { return runApart("systemctl", "disable", "--now", deploy.RelayProbeUnit) },
+		settle: func() error {
+			return settleFor(ctx, 3*time.Second, func() error {
+				out, _ := commandApart("systemctl", "is-active", deploy.RelayProbeUnit).Output()
+				if s := strings.TrimSpace(string(out)); s != "active" {
+					return fmt.Errorf("rayd relay is %s", s)
+				}
+				return nil
+			})
+		},
+	}
+	if note, err := probe.start(); err != nil {
+		fmt.Fprintln(os.Stderr, "warning:", err)
+	} else if note != "" {
+		fmt.Println(note)
+	}
+	var probePort uint16
+	if b.Probe != nil {
+		probePort = b.Probe.Port
+	}
+	h.WarnRelayDropChains(probePort)
 	return nil
+}
+
+// relayProbe starts rayd relay, the relay's probe endpoint, on a relay that
+// is up.
+type relayProbe struct {
+	bundle                        node.RelayBundle
+	hasRayd                       func() bool
+	enable, restart, stop, settle func() error
+}
+
+// start runs rayd relay with this bundle (restarted: an earlier one may run
+// with the bundle before), or stops it for a bundle without an endpoint.
+// An error is a warning: the relay forwards all the same.
+func (p relayProbe) start() (string, error) {
+	if p.bundle.Probe == nil {
+		_ = p.stop()
+		return "", errors.New("the bundle has no probe endpoint (one from before v0.11): the relay works without it; " +
+			"a new bundle from the exit (rayctl relay bundle) has one")
+	}
+	if !p.hasRayd() {
+		return "", fmt.Errorf("%s is missing (install/bootstrap.sh -relay installs it): the relay works without its probe endpoint",
+			deploy.DefaultBinaries.Rayd)
+	}
+	err := p.enable()
+	if err == nil {
+		err = p.restart()
+	}
+	if err == nil {
+		err = p.settle()
+	}
+	if err != nil {
+		return "", fmt.Errorf("the relay's probe endpoint did not start (%w): journalctl -u %s says why; the relay works without it",
+			err, deploy.RelayProbeUnit)
+	}
+	return fmt.Sprintf("Its probe endpoint (rayd relay) is on tcp/%d and udp/%d: a provider's firewall in front of this host "+
+		"lets both through.", p.bundle.Probe.Port, p.bundle.Probe.Port), nil
 }
 
 // armGuard arms the guard: one left from an earlier install goes first,

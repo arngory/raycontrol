@@ -430,4 +430,18 @@ func TestReport(t *testing.T) {
 	if len(got) != 6 || !slices.Contains(got, "phone 203.0.113.5 ok") {
 		t.Fatalf("calls %q", got)
 	}
+	// From a relay's address: about a network the node does not see.
+	s.Relayed = func(_ context.Context, a netip.Addr) bool { return a == netip.MustParseAddr("198.51.100.20") }
+	for addr, want := range map[string]int{"198.51.100.20:4321": 409, "[::ffff:198.51.100.20]:4321": 409, "203.0.113.5:4321": 204} {
+		req := httptest.NewRequest("POST", PathReport, strings.NewReader("ok"))
+		req.RemoteAddr = addr
+		w := httptest.NewRecorder()
+		s.report(w, req, "phone")
+		if w.Code != want {
+			t.Errorf("from %s: %d, want %d", addr, w.Code, want)
+		}
+	}
+	if len(got) != 7 {
+		t.Fatalf("a report through a relay taken: %q", got)
+	}
 }

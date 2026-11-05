@@ -56,8 +56,8 @@ func (c *cli) update(ctx context.Context, args []string) error {
 	if err := needRoot(); err != nil {
 		return err
 	}
-	if _, err := os.Stat(deploy.DefaultBinaries.Rayd); err != nil {
-		return errors.New("raycontrol is not installed here (install/bootstrap.sh)")
+	if err := updatable(deploy.DB, deploy.RelayBundle); err != nil {
+		return err
 	}
 	if *rollback {
 		carry := carryMust
@@ -504,4 +504,17 @@ func mirrors() []string {
 		return strings.Fields(m)
 	}
 	return release.DefaultMirrors
+}
+
+// updatable says why this host cannot be updated with rayctl update: no
+// node here, or a relay (rayd is there too since v0.11), which takes a new
+// release with install/bootstrap.sh -relay.
+func updatable(db, relayBundle string) error {
+	if _, err := os.Stat(db); err == nil {
+		return nil
+	}
+	if _, err := os.Stat(relayBundle); err == nil {
+		return errors.New("this host is a relay: install/bootstrap.sh -relay with its bundle takes a new release")
+	}
+	return errors.New("raycontrol is not installed here (install/bootstrap.sh)")
 }

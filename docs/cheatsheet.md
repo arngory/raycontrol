@@ -146,14 +146,17 @@ shred -u /root/phone.bundle
 ```
 rayctl relay add msk 198.51.100.20   # адрес relay (IPv4) доходит до портов сервисов без SPA, но не до SSH
 rayctl relay bundle -o msk.bundle msk   # пакет для хоста relay: новый сертификат и ключи SPA, прежние не работают;
-                                        # SSH relay: его список, у нового — адрес этой SSH-сессии (или -admin)
+                                        # SSH relay: его список, у нового — адрес этой SSH-сессии (или -admin);
+                                        # порт замера relay (TCP и UDP) — открыть в файрволе провайдера relay
 rayctl relay set -admin 203.0.113.9 msk   # адреса для SSH хоста relay (и -ssh-port), без нового пакета
-rayctl relay list
+rayctl relay list   # с портом замера (PROBE)
 rayctl relay remove msk   # потерянный relay: только remove отнимает у его адреса порты сервисов
 ```
 
 На хосте relay (пакет скопировать туда и только туда — в нём ключ):
 
 ```
-sudo bash bootstrap.sh -relay msk.bundle   # rayspa, пересылка ядром к выходу; SSH — с адресов администратора relay
+sudo bash bootstrap.sh -relay msk.bundle   # rayspa, пересылка ядром к выходу; SSH — с адресов администратора relay;
+                                           # rayd relay — точка замера relay (если её нет, relay работает и без неё)
+journalctl -u rayd-relay                   # точка замера relay: поток от выхода, отчёты
 ```

@@ -80,12 +80,24 @@ type Payload struct {
 
 // RelayHint is a relay in front of the node (relay-v1 §4): its address and
 // its own SPA, at which a device knocks with its K_relay (spa.RelayKey with
-// the relay's ID). SubPin, the pin of its probe endpoint, comes with R6-c.
+// the relay's ID), and its probe endpoint when rayd relay serves one.
 type RelayHint struct {
-	ID     string         `json:"id"`
-	Host   string         `json:"host"`
-	SubPin string         `json:"sub_pin,omitempty"`
-	SPA    node.SPAParams `json:"spa"`
+	ID    string          `json:"id"`
+	Host  string          `json:"host"`
+	SPA   node.SPAParams  `json:"spa"`
+	Probe *RelayProbeHint `json:"probe,omitempty"`
+}
+
+// RelayProbeHint is a relay's probe-v1 endpoint (relay-v1 §9.2): at
+// host:port, its certificate by pin, RC1 with the device's K_relay. Svc
+// names it in an explicit knock scope; Report: it takes reports (§9.3).
+type RelayProbeHint struct {
+	V      int    `json:"v"`
+	Port   uint16 `json:"port"`
+	Pin    string `json:"pin"`
+	Svc    uint16 `json:"svc"`
+	UDP    bool   `json:"udp"`
+	Report bool   `json:"report"`
 }
 
 // RelayKinds are the kinds a relay forwards to (relay-v1 §4): the DNS

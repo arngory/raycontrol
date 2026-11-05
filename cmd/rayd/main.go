@@ -40,6 +40,7 @@ import (
 	"github.com/arngory/raycontrol/internal/pprofx"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/relayprobe"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/site"
 	"github.com/arngory/raycontrol/internal/store"
@@ -64,6 +65,7 @@ commands:
   serve    serve the node API on the local socket
   site     serve the decoy site on a unix socket (run by its own unit)
   naive    serve NaiveProxy (HTTP/2) behind the niko-server front (its own unit)
+  relay    serve a relay host's probe endpoint (relay-v1 §9.1; its own unit there)
   version  print the version
 `)
 	os.Exit(2)
@@ -88,6 +90,8 @@ func main() {
 		err = cmdSite(os.Args[2:])
 	case "naive":
 		err = cmdNaive(os.Args[2:])
+	case "relay":
+		err = cmdRelay(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:
@@ -245,9 +249,21 @@ func cmdServe(args []string) error {
 	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, hb, log)
 	go syncDNS(ctx, st, srv.Changes, hb, log)
 	go checkRealityTargets(ctx, st, srv.Changes, hb, log)
+	frontUID := render.FrontUID
+	if *supervise {
+		frontUID = os.Getuid() // the front is a child of rayd's
+	}
+	go checkPort53(ctx, st, &deploy.Host{}, frontUID, hb, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
-	go serveRemote(ctx, &api.Remote{Server: srv, Log: log, Perimeter: per}, srv.Changes)
-	if err := startSubscription(ctx, st, paths, log, *probeDaily, *spaTCP); err != nil {
+	// Client summaries (R4-21): reports in, from devices and through relays
+	// (relay-v1 §9.3), hints out; only while the administrator has them on
+	// (rayctl summary on). One collector: a device's network counts once a
+	// day whichever way its report came.
+	sum := &summary.Collector{Store: st, ASN: summary.Sources(st, &asn.DB{Path: summary.OperatorDB}, &asn.DB{Path: summary.ReleaseDB})}
+	go pruneSummary(ctx, sum, log)
+	remote := &api.Remote{Server: srv, Log: log, Perimeter: per, RelayReport: sum.TakeVia}
+	go serveRemote(ctx, remote, srv.Changes)
+	if err := startSubscription(ctx, st, paths, log, sum, remote.RelayProbeUp, *probeDaily, *spaTCP); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
 	log.Info("serving", "socket", *socket, "node", fmt.Sprintf("%x", params.NodeID))
@@ -596,7 +612,7 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 
 // startSubscription serves the subscription endpoint on the port of the
 // subscription service, if it is enabled.
-func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, probeDailyMiB int, tcpCarrier bool) error {
+func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, sum *summary.Collector, relayProbe func(string) bool, probeDailyMiB int, tcpCarrier bool) error {
 	svc, err := st.ServiceByName(ctx, provision.SubscriptionService)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !svc.Enabled) {
 		log.Info("subscription service disabled")
@@ -621,7 +637,7 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 	if err != nil {
 		return err
 	}
-	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier}
+	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier, RelayProbe: relayProbe}
 	port := int(ports[0].Num)
 	addr := ":" + strconv.Itoa(port)
 	// Channel probes (R4-16) on the same endpoint, and their UDP echo on
@@ -654,12 +670,9 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 			}
 			return render.InnerEmail(u.ID), nil
 		}}
-	// Client summaries (R4-21): reports in, hints out; both only while the
-	// administrator has them on (rayctl summary on).
-	sum := &summary.Collector{Store: st, ASN: summary.Sources(st, &asn.DB{Path: summary.OperatorDB}, &asn.DB{Path: summary.ReleaseDB})}
 	s.Probe.Report = sum.Take
+	s.Probe.Relayed = s.FromRelay
 	s.Hints = sum.Hints
-	go pruneSummary(ctx, sum, log)
 	if err := provision.SubscriptionUDP(ctx, st); err != nil {
 		log.Warn("probe: the subscription service has no UDP port", "err", err)
 	} else if pc, err := net.ListenPacket("udp", addr); err != nil {
@@ -679,6 +692,38 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 	}()
 	log.Info("subscription endpoint", "addr", addr, "probe_udp", s.Probe.UDPPort != 0)
 	return nil
+}
+
+// checkPort53 looks every few minutes for sockets on UDP 53 besides the
+// front's and systemd-resolved's stub while the node has DNS tunnels: the
+// front shares the port with SO_REUSEADDR, so a DNS server that binds it
+// the same way takes the queries to its address without a sound (rayctl
+// status shows it).
+func checkPort53(ctx context.Context, st *store.Store, h *deploy.Host, frontUID int, hb *health.Board, log *slog.Logger) {
+	for {
+		services, err := st.ListServices(ctx)
+		tunnels := err == nil && slices.ContainsFunc(services, func(s store.Service) bool {
+			return s.Enabled && (s.Kind == "dnstt" || s.Kind == "masterdns")
+		})
+		if tunnels {
+			var others []string
+			for _, o := range h.OthersOn53(frontUID) {
+				others = append(others, o.Addr+" ("+o.Owner+")")
+			}
+			if len(others) > 0 {
+				err = fmt.Errorf("UDP 53 is held beside the front by %s: the DNS tunnels' queries there do not reach it", strings.Join(others, ", "))
+				log.Warn("port 53", "err", err)
+			}
+			hb.Done("port53", err)
+		} else {
+			hb.Retain("port53", nil) // no tunnels, nothing to say
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Minute):
+		}
+	}
 }
 
 // pruneSummary drops the summary counters past their 30 days, daily.
@@ -916,6 +961,47 @@ func cmdNaive(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// cmdRelay serves the probe-v1 endpoint of a relay host (relay-v1 §9.1):
+// TCP (TLS) and the UDP echo on the bundle's port, the devices and their
+// K_relay from the exit, reports passed on to the exit.
+func cmdRelay(args []string) error {
+	fs := flag.NewFlagSet("relay", flag.ExitOnError)
+	bundle := fs.String("bundle", "", "the relay's bundle (rayctl relay bundle on the exit); a file only its owner reads")
+	daily := fs.Int("probe-daily", 0, "probe volume per device and UTC day, MiB (default: probe-v1's)")
+	state := fs.String("state", "", "keep the devices of the exit's last snapshot here, for a start while the exit is away")
+	fs.Parse(args)
+	if *bundle == "" || fs.NArg() != 0 || *daily < 0 {
+		return errors.New("relay needs -bundle")
+	}
+	b, err := node.ReadRelayBundle(*bundle)
+	if err != nil {
+		return err
+	}
+	log := logx.New(os.Stderr, slog.LevelInfo)
+	s, tlsCfg, err := relayprobe.New(b, int64(*daily)<<20, log)
+	if err != nil {
+		return err
+	}
+	s.State = *state
+	if err := s.Load(); err != nil {
+		log.Warn("relay probe: kept devices not read; waiting for the exit", "err", err)
+	}
+	addr := ":" + strconv.Itoa(int(b.Probe.Port))
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		_ = ln.Close()
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	log.Info("relay probe endpoint", "relay", b.Name, "port", b.Probe.Port, "exit", b.Exit, "version", version)
+	return s.Serve(ctx, ln, pc, tlsCfg)
 }
 
 // serveHTTP3 serves h on QUIC over the front's datagrams until ctx ends:

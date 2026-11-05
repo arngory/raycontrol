@@ -46,6 +46,9 @@ type Server struct {
 	// TCPCarrier: the node takes SPA over TCP, bare and as a ClientHello
 	// (rayd -spa-tcp); the subscription lists the carriers.
 	TCPCarrier bool
+	// RelayProbe, when set, says whether a relay's rayd relay is there:
+	// the subscription lists its probe endpoint only then (relay-v1 §9.2).
+	RelayProbe func(name string) bool
 	now        func() time.Time
 
 	mu sync.Mutex // serialises seq
@@ -205,7 +208,9 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 	if err := s.addRelays(ctx, &p, m); err != nil {
 		return Envelope{}, err
 	}
-	if s.Hints != nil && addr.IsValid() && !addr.IsLoopback() {
+	// Through a relay the address is the relay's: its network's hints are
+	// not the client's (relay-v1 §9.3).
+	if s.Hints != nil && addr.IsValid() && !addr.IsLoopback() && !s.FromRelay(ctx, addr) {
 		svcs := make([]uint16, 0, len(profiles))
 		for _, pr := range profiles {
 			svcs = append(svcs, pr.Svc)
@@ -213,6 +218,18 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 		p.Hints = s.Hints(ctx, addr, svcs)
 	}
 	return Sign(p, s.Keys)
+}
+
+// FromRelay reports whether addr is a relay's (relay-v1 §3): what comes
+// from there is a client's behind the relay, whose own address the node
+// does not see.
+func (s *Server) FromRelay(ctx context.Context, addr netip.Addr) bool {
+	relays, err := s.Store.ListRelays(ctx)
+	if err != nil {
+		return true // unknown: no hints, no report, rather than a wrong AS
+	}
+	addr = addr.Unmap()
+	return slices.ContainsFunc(relays, func(r store.Relay) bool { return r.Address == addr })
 }
 
 // addRelays lists the relays in front of the node and marks the profiles
@@ -223,7 +240,7 @@ func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) erro
 	if err != nil {
 		return err
 	}
-	var ids []string
+	var listed []store.Relay
 	for _, r := range relays {
 		if r.CertPin == "" {
 			continue
@@ -232,17 +249,45 @@ func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) erro
 		if err != nil {
 			return err
 		}
-		p.Relays = append(p.Relays, RelayHint{ID: r.Name, Host: r.Address.String(), SPA: node.FromParams(params)})
-		ids = append(ids, r.Name)
+		h := RelayHint{ID: r.Name, Host: r.Address.String(), SPA: node.FromParams(params)}
+		if r.ProbePort != 0 && r.ProbePin != "" && s.RelayProbe != nil && s.RelayProbe(r.Name) {
+			// The relay passes reports on to this node: it takes them when
+			// this node does.
+			h.Probe = &RelayProbeHint{V: 1, Port: r.ProbePort, Pin: r.ProbePin, Svc: provision.RelayProbeSvc, UDP: true,
+				Report: s.Probe != nil && s.Probe.Report != nil}
+		}
+		p.Relays = append(p.Relays, h)
+		listed = append(listed, r)
 	}
-	if len(ids) == 0 {
+	if len(listed) == 0 {
 		return nil
+	}
+	services, err := s.Store.ListServices(ctx)
+	if err != nil {
+		return err
+	}
+	byID := map[uint16]store.Service{}
+	for _, svc := range services {
+		byID[uint16(svc.ID)] = svc
+	}
+	ssh := provision.SSHPorts(services)
+	// A relay forwards what its snapshot says (provision.RelayPorts).
+	forwards := func(r store.Relay, svc uint16) bool {
+		ports, err := provision.RelayPorts(r, byID[svc], ssh)
+		return err == nil && len(ports) > 0
 	}
 	for i := range p.Profiles {
 		for _, svc := range m.Services {
-			if uint16(svc.ID) == p.Profiles[i].Svc && RelayKinds(svc.Kind) && !svc.Public() {
-				p.Profiles[i].Via = slices.Clone(ids)
+			if uint16(svc.ID) != p.Profiles[i].Svc || !RelayKinds(svc.Kind) || svc.Public() {
+				continue
 			}
+			var via []string
+			for _, r := range listed {
+				if forwards(r, p.Profiles[i].Svc) {
+					via = append(via, r.Name)
+				}
+			}
+			p.Profiles[i].Via = via
 		}
 	}
 	return nil

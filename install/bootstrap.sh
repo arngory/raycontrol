@@ -28,9 +28,10 @@
 #   sudo bash bootstrap.sh -remove-v0 -host <public address> [-domain <domain>]
 #
 # -relay <bundle file> makes the host a relay in front of an exit instead of a
-# node (spec/relay-v1.md §3.1): only rayspa, forwarding in the kernel. The
-# bundle comes from "rayctl relay bundle <name>" on the exit; it holds the
-# relay's private key, so it is copied to the relay host only:
+# node (spec/relay-v1.md §3.1): rayspa, forwarding in the kernel, and rayd
+# relay, the relay's probe endpoint (§9.1). The bundle comes from "rayctl
+# relay bundle <name>" on the exit; it holds the relay's private key, so it
+# is copied to the relay host only:
 #
 #   sudo bash bootstrap.sh -relay relay.bundle
 #
@@ -47,6 +48,9 @@
 # RAYCONTROL_LOCAL_DIR=<dir> installs rayd, rayspa and rayctl from <dir>
 # without downloading or verifying anything: for tests only.
 set -euo pipefail
+# Root's umask may be 027 or 077 (hardened images): what is put in place
+# for the services must stay readable by their users.
+umask 022
 
 REPO="arngory/raycontrol"
 VERSION="${RAYCONTROL_VERSION:-latest}"
@@ -61,6 +65,8 @@ PUBKEY="RWQBergjLoDHqeme5vyIuIRXJLjTj1EF3jR1nlWBVJO3rWxgy9SZj4bD"
 MIN_VERSION="v0.10.0"
 # RELAY_MIN_VERSION is the first release that can be a relay (-relay).
 RELAY_MIN_VERSION="v0.10.1"
+# RELAY_PROBE_MIN_VERSION is the first release with rayd relay (relay-v1 §9.1).
+RELAY_PROBE_MIN_VERSION="v0.11.0"
 
 die() {
 	echo "bootstrap: $*" >&2
@@ -322,16 +328,21 @@ main() {
 		tar -xzf "$tmp/$tarball" -C "$tmp"
 	fi
 
-	# A relay: rayspa and rayctl only, no host check for a node; rayctl
-	# install -relay checks what a relay needs and stops rayspa again if the
-	# exit gives it no perimeter.
+	# A relay: rayspa, rayd (its probe endpoint, rayd relay) and rayctl,
+	# no host check for a node; rayctl install -relay checks what a relay
+	# needs and stops rayspa again if the exit gives it no perimeter.
 	if [[ -n $RELAY_BUNDLE ]]; then
 		if [[ -z ${RAYCONTROL_LOCAL_DIR:-} ]] && version_lt "$signed" "$RELAY_MIN_VERSION"; then
 			die "the release is $signed; a relay needs $RELAY_MIN_VERSION or newer"
 		fi
-		install -m 0755 "$tmp/rayspa" "$tmp/rayctl" /usr/local/bin/
+		local relay_bins=("$tmp/rayspa" "$tmp/rayctl")
+		# rayd relay, the relay's probe endpoint, from the release that has it.
+		if [[ -n ${RAYCONTROL_LOCAL_DIR:-} ]] || ! version_lt "$signed" "$RELAY_PROBE_MIN_VERSION"; then
+			relay_bins+=("$tmp/rayd")
+		fi
+		install -m 0755 "${relay_bins[@]}" /usr/local/bin/
 		if command -v restorecon >/dev/null; then
-			restorecon /usr/local/bin/rayspa /usr/local/bin/rayctl || true
+			restorecon "${relay_bins[@]/#"$tmp"//usr/local/bin}" || true
 		fi
 		HANDED_OVER=1
 		exec 9<&- # rayctl takes the lock itself

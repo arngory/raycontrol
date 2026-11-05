@@ -82,11 +82,14 @@ func (t *tally) hints(svcs []uint16) *Hints {
 		return nil
 	}
 	// Where most come through a relay, few may come directly: the hint
-	// to start with the relay stands on its own.
-	viaRelay := majority(t.path) == "relay"
+	// to start with the relay stands on its own. Of all the reports: the
+	// direct ones from before path (v0.10.1) have no path row, and
+	// t.reports counts every direct one.
+	relay := t.path["relay"]
+	viaRelay := relay >= K && float64(relay) >= Majority*float64(t.reports+relay)
 	if t.reports < K {
 		if viaRelay {
-			return &Hints{ViaRelay: true, Devices: total(t.path), Days: Window}
+			return &Hints{ViaRelay: true, Devices: t.reports + relay, Days: Window}
 		}
 		return nil
 	}

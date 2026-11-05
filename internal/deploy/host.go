@@ -130,7 +130,7 @@ func (h *Host) WriteFile(f File) (bool, error) {
 	if err := h.Journal.RecordFile(f.Path); err != nil {
 		return false, err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { //nolint:gosec // G301: system directories
+	if err := mkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return false, err
 	}
 	tmp := p + ".raycontrol-new"
@@ -141,6 +141,62 @@ func (h *Host) WriteFile(f File) (bool, error) {
 		return false, err
 	}
 	return true, os.Rename(tmp, p)
+}
+
+// mkdirAll makes dir and its missing parents with mode, whatever the umask:
+// the services, under their own users, go through them.
+func mkdirAll(dir string, mode os.FileMode) error {
+	if fi, err := os.Stat(dir); err == nil {
+		if !fi.IsDir() {
+			return fmt.Errorf("%s is not a directory", dir)
+		}
+		return nil
+	}
+	if parent := filepath.Dir(dir); parent != dir {
+		if err := mkdirAll(parent, mode); err != nil {
+			return err
+		}
+	}
+	if err := os.Mkdir(dir, mode); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return os.Chmod(dir, mode)
+}
+
+// openDirs are directories the services go through (to their binaries,
+// the release's data) or, for the state, into:
+// before v0.11 an install under a umask of 027 or 077 left them closed to
+// everyone but root. repairModes opens them again; nothing is taken away.
+var openDirs = []struct {
+	path string
+	bits os.FileMode
+}{
+	{filepath.Dir(DataPlaneDir), 0o055}, {DataPlaneDir, 0o055},
+	{DataDir, 0o055},
+	{StateDir, 0o011},
+}
+
+// repairModes gives the directories of openDirs the bits the services need,
+// and the data-plane binaries theirs, saying what it changed.
+func (h *Host) repairModes() {
+	fix := func(p string, bits os.FileMode, dir bool) {
+		fi, err := os.Lstat(h.path(p))
+		if err != nil || fi.IsDir() != dir || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&bits == bits {
+			return
+		}
+		mode := fi.Mode().Perm() | bits
+		if err := os.Chmod(h.path(p), mode); err != nil {
+			fmt.Fprintf(h.Out, "warning: %s is mode %v, closed to the services: %v\n", p, fi.Mode().Perm(), err)
+			return
+		}
+		fmt.Fprintf(h.Out, "%s was mode %v, closed to the services: now %v\n", p, fi.Mode().Perm(), mode)
+	}
+	for _, d := range openDirs {
+		fix(d.path, d.bits, true)
+	}
+	for _, b := range []string{DefaultBinaries.Xray, DefaultBinaries.NikoServer, DefaultBinaries.Rayd, DefaultBinaries.Rayspa} {
+		fix(b, 0o055, false)
+	}
 }
 
 // InstallBinary puts an executable in place like any file: journaled, so a
@@ -168,6 +224,7 @@ const (
 // executables exist, in plan order, and restarts those whose files changed.
 // Units listed in keep are left alone (rayctl install starts rayspa last).
 func (h *Host) Apply(plan Plan, keep ...string) error {
+	h.repairModes()
 	for _, u := range plan.Users {
 		if err := h.EnsureUser(u); err != nil {
 			return err
@@ -185,7 +242,7 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 	changedUnits := map[string]bool{}
 	changedFiles := map[string]bool{}
 	var written []string
-	var resolvedChanged, sysctlChanged, tmpfilesChanged bool
+	var sysctlChanged, tmpfilesChanged bool
 	for _, f := range plan.Files {
 		if h.skipFile(f.Path) {
 			continue
@@ -203,8 +260,6 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 		switch {
 		case strings.HasPrefix(f.Path, "/etc/systemd/system/"):
 			changedUnits[filepath.Base(f.Path)] = true
-		case strings.HasPrefix(f.Path, "/etc/systemd/resolved.conf.d/"):
-			resolvedChanged = true
 		case strings.HasPrefix(f.Path, "/etc/sysctl.d/"):
 			sysctlChanged = true
 		case strings.HasPrefix(f.Path, "/etc/tmpfiles.d/"):
@@ -221,13 +276,8 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 	if sysctlChanged {
 		h.ApplySysctl(plan.Files)
 	}
-	// The front answers DNS tunnels on UDP 53. A run that wrote the
-	// drop-in but stopped before the restart left the stub on: it goes now.
-	frontDNS := slices.ContainsFunc(plan.Files, func(f File) bool { return f.Path == ResolvedDropIn })
-	if resolvedChanged || frontDNS && h.stubOn53() {
-		if err := h.freePort53(); err != nil {
-			return err
-		}
+	if err := h.giveBackStub(); err != nil {
+		return err
 	}
 	if err := h.run("systemctl", "daemon-reload"); err != nil {
 		return err
@@ -235,7 +285,7 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 	if err := h.hostFirewalls(plan, changedFiles); err != nil {
 		return err
 	}
-	if frontDNS && slices.Contains(plan.Units, "niko-front.service") {
+	if plan.FrontDNS && slices.Contains(plan.Units, "niko-front.service") {
 		h.warnPort53(render.FrontUID)
 	}
 
@@ -390,28 +440,114 @@ func (h *Host) removeStale(plan Plan) error {
 	return nil
 }
 
-// freePort53 turns off the systemd-resolved stub listener. If resolv.conf
-// points at the stub, it is pointed at the upstream list first, so that the
-// host keeps resolving.
-func (h *Host) freePort53() error {
-	rc := h.path("/etc/resolv.conf")
-	if target, err := os.Readlink(rc); err == nil && strings.HasSuffix(target, "stub-resolv.conf") {
-		if err := h.Journal.Record(Change{Kind: ChangeSymlink, Path: "/etc/resolv.conf", Target: target}); err != nil {
-			return err
-		}
-		if err := os.Remove(rc); err != nil {
-			return err
-		}
-		if err := os.Symlink(resolvConf, rc); err != nil {
-			return err
-		}
-		fmt.Fprintln(h.Out, "/etc/resolv.conf now points to", resolvConf, "instead of", stubResolv)
+// stubPending marks a stub being given back: the drop-in is out of
+// resolved's sight (it reads *.conf only), the stub not yet seen back.
+const stubPending = ResolvedDropIn + ".gone"
+
+// SharesDNSFrom is the first niko-server whose front shares UDP 53 with
+// systemd-resolved's stub (SO_REUSEADDR).
+var SharesDNSFrom = [3]int{0, 8, 2}
+
+// giveBackStub undoes what installs before v0.11 did for the DNS tunnels:
+// they turned systemd-resolved's stub off and pointed /etc/resolv.conf at
+// the uplink servers, which left a host whose resolved has only its
+// fallback servers without a resolver. The front shares UDP 53 with the
+// stub from niko-server v0.8.2; with an older one installed, nothing
+// changes yet.
+//
+// The front restarts first: an older one holds 53 without SO_REUSEADDR,
+// and the stub, which resolved does not retry, could not bind beside it.
+// Then resolved, and resolv.conf goes back to what the journal says it was
+// only once the stub is seen on 127.0.0.53; until then it stays on the
+// uplink list, and the next apply tries again (resolved only). A stub up
+// already is not restarted. A drop-in that is not ours, and a resolv.conf
+// the journal does not say raycontrol changed, stay.
+func (h *Host) giveBackStub() error {
+	dropIn := false
+	if b, err := os.ReadFile(h.path(ResolvedDropIn)); err == nil {
+		dropIn = bytes.HasPrefix(b, []byte("# Generated by raycontrol"))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	// Debian and RHEL servers often run without systemd-resolved: nothing to free.
-	if out, _ := h.Run("systemctl", "show", "-P", "LoadState", "systemd-resolved.service"); strings.TrimSpace(string(out)) == "not-found" {
+	_, err := os.Stat(h.path(stubPending))
+	pending := err == nil
+	rc := h.path("/etc/resolv.conf")
+	target, _ := os.Readlink(rc)
+	orig, journaled := h.Journal.Original(ChangeSymlink, "/etc/resolv.conf", "")
+	pointed := target == resolvConf && journaled && orig.Target != "" && orig.Target != resolvConf
+	if !dropIn && !pending && !pointed {
 		return nil
 	}
-	if err := h.run("systemctl", "try-restart", "systemd-resolved.service"); err != nil {
+	if ok, why := h.frontSharesDNS(); !ok {
+		fmt.Fprintf(h.Out, "warning: %s: systemd-resolved's stub stays off for now\n", why)
+		return nil
+	}
+	if dropIn {
+		// Another DNS server on 53 (with the stub off for it, since the
+		// DNS tunnels went perhaps): the stub would take 127.0.0.53 from
+		// it at the next boot.
+		if others := h.OthersOn53(render.FrontUID); len(others) > 0 {
+			fmt.Fprintf(h.Out, "warning: UDP 53 is held by %s %s: systemd-resolved's stub stays off (%s stays)\n",
+				others[0].Owner, others[0].Addr, ResolvedDropIn)
+			return nil
+		}
+		// The front first, while the drop-in is still in place: an older
+		// one holds 53 alone, and a run stopped after this starts again
+		// here.
+		if !h.stubOn53() && h.loadState("niko-front.service") == "loaded" {
+			if err := h.tryRestart("niko-front.service"); err != nil {
+				return err
+			}
+		}
+		if err := os.Rename(h.path(ResolvedDropIn), h.path(stubPending)); err != nil {
+			return err
+		}
+		fmt.Fprintln(h.Out, "removed", ResolvedDropIn+": the DNS tunnels share UDP 53 with systemd-resolved's stub")
+	}
+	if h.loadState("systemd-resolved.service") == "not-found" {
+		if err := os.Remove(h.path(stubPending)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if !h.stubOn53() {
+		if err := h.tryRestart("systemd-resolved.service"); err != nil {
+			return err
+		}
+	}
+	if !h.stubOn53() {
+		fmt.Fprintf(h.Out, "warning: systemd-resolved's stub is not on 127.0.0.53: /etc/resolv.conf stays where it is, "+
+			"and the next rayctl apply tries again (journalctl -u systemd-resolved says why)\n")
+		return nil
+	}
+	if err := os.Remove(h.path(stubPending)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if !pointed {
+		return nil
+	}
+	tmp := rc + ".raycontrol-new"
+	_ = os.Remove(tmp)
+	if err := os.Symlink(orig.Target, tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, rc); err != nil {
+		return err
+	}
+	fmt.Fprintln(h.Out, "/etc/resolv.conf points to", orig.Target, "again")
+	return nil
+}
+
+// loadState is a unit's LoadState: "loaded", "not-found", or "" when
+// systemctl does not say (--value, not -P: systemd 245 has no -P).
+func (h *Host) loadState(unit string) string {
+	out, _ := h.Run("systemctl", "show", "--property=LoadState", "--value", unit)
+	return strings.TrimSpace(string(out))
+}
+
+// tryRestart restarts a unit if it runs; its failure is a warning.
+func (h *Host) tryRestart(unit string) error {
+	if err := h.run("systemctl", "try-restart", unit); err != nil {
 		var ee *exec.ExitError
 		if !errors.As(err, &ee) {
 			return err
@@ -419,4 +555,27 @@ func (h *Host) freePort53() error {
 		fmt.Fprintln(h.Out, "warning:", err)
 	}
 	return nil
+}
+
+// frontSharesDNS reports whether the installed niko-server shares UDP 53
+// with systemd-resolved's stub (SharesDNSFrom or newer), or why not. With
+// no niko-server there is no front to hold 53.
+func (h *Host) frontSharesDNS() (bool, string) {
+	if _, err := os.Stat(h.path(DefaultBinaries.NikoServer)); errors.Is(err, os.ErrNotExist) {
+		return true, ""
+	}
+	out, err := h.Run(DefaultBinaries.NikoServer, "version")
+	f := strings.Fields(string(out))
+	var v [3]int
+	if err != nil || len(f) < 2 {
+		return false, fmt.Sprintf("cannot tell niko-server's version (%q)", strings.TrimSpace(string(out)))
+	}
+	if _, err := fmt.Sscanf(strings.TrimPrefix(f[1], "v"), "%d.%d.%d", &v[0], &v[1], &v[2]); err != nil {
+		return false, fmt.Sprintf("cannot tell niko-server's version (%q)", f[1])
+	}
+	if slices.Compare(v[:], SharesDNSFrom[:]) < 0 {
+		return false, fmt.Sprintf("niko-server %s is older than v%d.%d.%d, which shares UDP 53 with the stub", f[1],
+			SharesDNSFrom[0], SharesDNSFrom[1], SharesDNSFrom[2])
+	}
+	return true, ""
 }

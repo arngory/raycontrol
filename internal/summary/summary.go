@@ -104,7 +104,15 @@ type Collector struct {
 	day  int64
 	salt [32]byte
 	seen map[[32]byte]bool
+	// tries counts a device's reports through relays today, before any
+	// lookup: a relay names the network, and every new one could cost an
+	// online one.
+	tries map[[32]byte]int
 }
+
+// RelayTries bounds a device's reports through relays a day: one a network,
+// and a client goes through few.
+const RelayTries = 8
 
 func (c *Collector) clock() time.Time {
 	if c.now != nil {
@@ -217,24 +225,49 @@ func Parse(body io.Reader) (Report, error) {
 // once reports whether the device has not reported from this AS today. It
 // keeps keyed hashes in memory under a key of the day, and forgets both
 // when the day ends: nothing ties a device to a network on disk.
+// try counts a report through a relay of device today, false past
+// RelayTries.
+func (c *Collector) try(device string, today int64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.newDay(today)
+	k := c.key(device, "relay")
+	if c.tries[k] >= RelayTries {
+		return false
+	}
+	c.tries[k]++
+	return true
+}
+
 func (c *Collector) once(device string, as uint32, today int64) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.seen == nil || c.day != today {
-		c.day, c.seen = today, map[[32]byte]bool{}
-		_, _ = rand.Read(c.salt[:])
-	}
-	m := hmac.New(sha256.New, c.salt[:])
-	m.Write([]byte(device))
-	m.Write([]byte{0})
-	m.Write([]byte(strconv.FormatUint(uint64(as), 10)))
-	var k [32]byte
-	copy(k[:], m.Sum(nil))
+	c.newDay(today)
+	k := c.key(device, strconv.FormatUint(uint64(as), 10))
 	if c.seen[k] {
 		return false
 	}
 	c.seen[k] = true
 	return true
+}
+
+// newDay starts today's counters, with a new salt: c.mu held.
+func (c *Collector) newDay(today int64) {
+	if c.seen == nil || c.day != today {
+		c.day, c.seen, c.tries = today, map[[32]byte]bool{}, map[[32]byte]int{}
+		_, _ = rand.Read(c.salt[:])
+	}
+}
+
+// key names a device and what of it is counted today, salted.
+func (c *Collector) key(device, what string) [32]byte {
+	m := hmac.New(sha256.New, c.salt[:])
+	m.Write([]byte(device))
+	m.Write([]byte{0})
+	m.Write([]byte(what))
+	var k [32]byte
+	copy(k[:], m.Sum(nil))
+	return k
 }
 
 // Take records a report from a device at addr, sent to the node directly.
@@ -250,6 +283,9 @@ func (c *Collector) Take(ctx context.Context, device string, addr netip.Addr, bo
 func (c *Collector) TakeVia(ctx context.Context, device string, network netip.Prefix, body io.Reader) error {
 	if !network.IsValid() {
 		return fmt.Errorf("%w: no network", ErrInvalid)
+	}
+	if !c.try(device, c.clock().Unix()/dayS) {
+		return ErrRepeated
 	}
 	return c.take(ctx, device, network.Masked().Addr(), "relay", body)
 }

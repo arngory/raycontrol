@@ -93,6 +93,12 @@ func TestInstallServices(t *testing.T) {
 		{[]string{"-domain", "example.com", "-services", "none"}, ""},
 		{[]string{"-domain", "example.com", "-services", ""}, ""},
 		{[]string{"-domain", "example.com", "-services", "reality,dnstt,masterdns"}, "reality:reality dnstt:dns masterdns:mdns"},
+		// Every kind the cheatsheet adds; REALITY first, whose site the
+		// others on TCP 443 take; a kind once.
+		{[]string{"-domain", "example.com", "-services", "naive,yggdrasil,doh,hy2-masq,reality,api,naive"},
+			"reality:reality naive:naive yggdrasil:ygg doh:doh hy2-masq:hy2-masq api:api"},
+		// The remote API needs no domain.
+		{[]string{"-services", "api"}, "api:api"},
 	} {
 		got, err := parse(c.args...)
 		var s []string

@@ -68,7 +68,7 @@ func (s *Server) RemoveRelay(ctx context.Context, req *connect.Request[nodev1.Re
 }
 
 func relayPB(r store.Relay) *nodev1.Relay {
-	return &nodev1.Relay{Name: r.Name, Address: r.Address.String(), CreatedAt: r.CreatedAt.Unix()}
+	return &nodev1.Relay{Name: r.Name, Address: r.Address.String(), CreatedAt: r.CreatedAt.Unix(), ProbePort: uint32(r.ProbePort)}
 }
 
 // IssueRelayBundle makes a relay its client certificate, its SPA parameters
@@ -127,7 +127,8 @@ func (s *Server) issueRelayBundle(ctx context.Context, req *nodev1.IssueRelayBun
 	// New SPA parameters with every bundle, clear of the ports the relay
 	// forwards or serves: the keys of the devices for the relay change with
 	// them. Nothing is written before every check has passed.
-	_, spaJSON, err := provision.NewRelayParams(append(forwarded, store.Port{Proto: "tcp", Num: sshPort}))
+	served := append(slices.Clone(forwarded), store.Port{Proto: "tcp", Num: sshPort})
+	params, spaJSON, err := provision.NewRelayParams(served)
 	if err != nil {
 		return nil, err
 	}
@@ -139,14 +140,31 @@ func (s *Server) issueRelayBundle(ctx context.Context, req *nodev1.IssueRelayBun
 	if err != nil {
 		return nil, err
 	}
-	bundle, err := node.RelayBundle{Version: 1, Name: relay.Name, Exit: exit, API: apiSvc.endpoint, Cert: string(pem)}.Encode()
+	// The relay's probe endpoint (relay-v1 §9.1): a port of its own, new
+	// with every bundle like its certificate.
+	probePort, err := provision.RelayProbePort(served, params)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.Store.IssueRelay(ctx, relay.Name, store.RelayIssue{SPA: spaJSON, SSHPort: sshPort, Admin: admin, CertPin: CertPin(cert.Leaf)}); err != nil {
+	probeKey, probeCert, err := provision.SelfSigned(relay.Name)
+	if err != nil {
 		return nil, err
 	}
-	return &nodev1.IssueRelayBundleResponse{Bundle: bundle, SshPort: uint32(sshPort), Admin: admin, AdminKept: kept}, nil
+	probePin, err := provision.SPKIPin(probeCert)
+	if err != nil {
+		return nil, err
+	}
+	probePEM := append(encodePEM("CERTIFICATE", probeCert), encodePEM("PRIVATE KEY", probeKey)...)
+	bundle, err := node.RelayBundle{Version: 1, Name: relay.Name, Exit: exit, API: apiSvc.endpoint, Cert: string(pem),
+		Probe: &node.RelayProbe{Port: probePort, Cert: string(probePEM)}}.Encode()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.Store.IssueRelay(ctx, relay.Name, store.RelayIssue{SPA: spaJSON, SSHPort: sshPort, Admin: admin, CertPin: CertPin(cert.Leaf),
+		ProbePort: probePort, ProbePin: probePin}); err != nil {
+		return nil, err
+	}
+	return &nodev1.IssueRelayBundleResponse{Bundle: bundle, SshPort: uint32(sshPort), Admin: admin, AdminKept: kept, ProbePort: uint32(probePort)}, nil
 }
 
 // relayAccess checks the relay host's SSH port and admin list asked for,
@@ -225,6 +243,9 @@ func (s *Server) SetRelayAccess(ctx context.Context, req *connect.Request[nodev1
 		if params, err := provision.RelayParams(ctx, s.Store, relay.Name); err == nil &&
 			int(sshPort) >= int(params.PortBase) && int(sshPort) < int(params.PortBase)+int(params.PortRange) {
 			return fmt.Errorf("%w ssh port %d: in the relay's SPA range", store.ErrInvalid, sshPort)
+		}
+		if sshPort == relay.ProbePort {
+			return fmt.Errorf("%w ssh port %d: the relay's probe endpoint", store.ErrInvalid, sshPort)
 		}
 		return s.Store.SetRelayAccess(ctx, relay.Name, sshPort, admin)
 	}()

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/arngory/raycontrol/internal/deploy"
@@ -115,8 +116,10 @@ func TestBuild(t *testing.T) {
 	if !strings.Contains(file(p, "/etc/tmpfiles.d/raycontrol.conf"), "d /run/niko/inner-api 2750 niko-inner rayd") {
 		t.Error("inner API directory not restricted to rayd")
 	}
-	if !strings.Contains(file(p, "/etc/systemd/resolved.conf.d/raycontrol.conf"), "DNSStubListener=no") {
-		t.Error("resolved stub not disabled though DNS tunnels exist")
+	// The DNS tunnels share UDP 53 with systemd-resolved's stub: the host's
+	// resolver stays as it is.
+	if !p.FrontDNS || file(p, deploy.ResolvedDropIn) != "" {
+		t.Error("the front does not answer DNS, or the resolver is changed")
 	}
 
 	// Without systemd (rayd serve -supervise): the data-plane units only,
@@ -189,13 +192,14 @@ func TestHostApply(t *testing.T) {
 		"useradd --system --uid 9100 --gid niko-front", "groupadd --system --gid 9100 niko-front",
 		"usermod --groups  niko-front", "usermod --groups niko-inner niko-dns",
 		"systemctl enable --now niko-inner.service", "systemctl disable --now niko-old.service",
-		"systemd-tmpfiles --create", "systemctl try-restart systemd-resolved.service",
+		"systemd-tmpfiles --create",
 	} {
 		if !strings.Contains(all, want) {
 			t.Errorf("missing command %q in:\n%s", want, all)
 		}
 	}
-	for _, unwanted := range []string{"useradd --system --uid 9190", "enable --now niko-dns.service", "enable --now rayd.service"} {
+	for _, unwanted := range []string{"useradd --system --uid 9190", "enable --now niko-dns.service", "enable --now rayd.service",
+		"systemd-resolved"} {
 		if strings.Contains(all, unwanted) {
 			t.Errorf("unexpected %q", unwanted)
 		}
@@ -203,7 +207,7 @@ func TestHostApply(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "/etc/systemd/system/niko-old.service")); !os.IsNotExist(err) {
 		t.Error("stale unit kept")
 	}
-	if target, _ := os.Readlink(filepath.Join(root, "/etc/resolv.conf")); target != "/run/systemd/resolve/resolv.conf" {
+	if target, _ := os.Readlink(filepath.Join(root, "/etc/resolv.conf")); target != "../run/systemd/resolve/stub-resolv.conf" {
 		t.Errorf("resolv.conf -> %s", target)
 	}
 
@@ -256,10 +260,10 @@ func TestHostFirewalls(t *testing.T) {
 	root := t.TempDir()
 	os.MkdirAll(filepath.Join(root, "/etc/firewalld"), 0o755)
 	os.MkdirAll(filepath.Join(root, "/proc/net"), 0o755)
-	// 127.0.0.53:53 held by uid 101 (a resolver), 0.0.0.0:53 by the front.
+	// 127.0.0.1:53 held by uid 101 (another resolver), 0.0.0.0:53 by the front.
 	os.WriteFile(filepath.Join(root, "/proc/net/udp"), []byte(
 		"  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"+
-			"  1: 3500007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   101        0 1 2 0 0\n"+
+			"  1: 0100007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   101        0 1 2 0 0\n"+
 			"  2: 00000000:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000  9100        0 1 2 0 0\n"), 0o644)
 	var cmds []string
 	out := &bytes.Buffer{}
@@ -310,7 +314,7 @@ func TestHostFirewalls(t *testing.T) {
 	log := out.String()
 	for _, want := range []string{
 		"warning: nftables chain inet filter input drops incoming packets by default; it must accept tcp/22 tcp/40000-44095 udp/53",
-		"warning: UDP port 53 (127.0.0.53) is taken by user ",
+		"warning: UDP port 53 (127.0.0.1) is taken by ",
 	} {
 		if !strings.Contains(log, want) {
 			t.Errorf("missing %q in:\n%s", want, log)
@@ -346,6 +350,9 @@ func TestBuildSelfSteal(t *testing.T) {
 		t.Fatalf("skipped %v", skipped)
 	}
 	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	if p.FrontDNS {
+		t.Error("the front answers DNS on a node without DNS tunnels")
+	}
 	site := file(p, "/etc/systemd/system/niko-site.service")
 	for _, want := range []string{
 		"ConditionPathExists=/var/lib/raycontrol/rendered/site/chain.pem\n",
@@ -737,8 +744,22 @@ func TestBuildDNSKeyWithoutRender(t *testing.T) {
 // for it at each start, and forwarding on.
 func TestRelayPlan(t *testing.T) {
 	p := deploy.RelayPlan(deploy.DefaultBinaries)
-	if len(p.Units) != 1 || p.Units[0] != "rayspa.service" || len(p.Users) != 1 || p.Users[0].Name != "rayspa" {
-		t.Fatalf("plan %+v", p)
+	if !slices.Equal(p.Units, []string{"rayspa.service", deploy.RelayProbeUnit}) || len(p.Users) != 2 ||
+		p.Users[0].Name != "rayspa" || p.Users[1].Name != "rayd" {
+		t.Fatalf("plan units %v, users %v", p.Units, p.Users)
+	}
+	// rayd relay: no privileges, its own copy of the bundle (relay-v1 §9.1).
+	probe := file(p, "/etc/systemd/system/"+deploy.RelayProbeUnit)
+	for _, want := range []string{
+		"ExecStartPre=+install -m 0400 -o rayd -g rayd /etc/raycontrol/relay.bundle /run/rayd-relay/relay.bundle",
+		"ExecStart=/usr/local/bin/rayd relay -bundle /run/rayd-relay/relay.bundle -state /var/lib/rayd-relay/devices.json",
+		"StateDirectory=rayd-relay\n", "StateDirectoryMode=0700",
+		"User=rayd", "CapabilityBoundingSet=\n", "After=network-online.target rayspa.service",
+		"PartOf=rayspa.service\n", "Requisite=rayspa.service\n", "[Install]\nWantedBy=rayspa.service\n",
+	} {
+		if !strings.Contains(probe, want) {
+			t.Errorf("rayd relay unit lacks %q:\n%s", want, probe)
+		}
 	}
 	u := file(p, "/etc/systemd/system/rayspa.service")
 	for _, want := range []string{
@@ -756,57 +777,233 @@ func TestRelayPlan(t *testing.T) {
 	}
 }
 
-// UDP 53 is the front's only with DNS tunnels: without them the resolver's
-// stub stays and nothing is said; with them a stub left on by a run that
-// stopped early goes even though the drop-in is already there.
+// The DNS tunnels share UDP 53 with systemd-resolved's stub: its sockets on
+// 127.0.0.53 and 127.0.0.54 draw no warning, another resolver's do; and a
+// host where an install before v0.11 turned the stub off gets it back: the
+// front restarts before resolved (an older front holds 53 alone, and the
+// stub could not bind beside it), and resolv.conf goes back on the stub
+// only once the stub is up, else at a later apply. A drop-in that is not
+// ours stays, and so does a resolv.conf raycontrol did not change.
 func TestPort53(t *testing.T) {
-	apply := func(t *testing.T, p deploy.Plan, dropIn bool) (cmds []string, log string) {
+	const (
+		restartFront    = "systemctl try-restart niko-front.service"
+		restartResolved = "systemctl try-restart systemd-resolved.service"
+		header          = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"
+		stub            = "  1: 3500007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   991        0 1 2 0 0\n" +
+			"  2: 3600007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   991        0 1 2 0 0\n"
+		other = "  3: 0100007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   992        0 1 2 0 0\n"
+		ours  = "# Generated by raycontrol: the node answers its DNS tunnel zones on port 53.\n[Resolve]\nDNSStubListener=no\n"
+	)
+	type host struct {
+		root string
+		h    *deploy.Host
+		cmds *[]string
+		out  *bytes.Buffer
+	}
+	// newHost: udp is /proc/net/udp now; stubComes, whether the stub binds
+	// when resolved restarts; niko is the installed niko-server's version.
+	niko, resolvedState := "v0.8.2", "loaded"
+	newHost := func(t *testing.T, udp, dropIn string, oldResolv, stubComes bool) host {
 		t.Helper()
 		root := t.TempDir()
 		os.MkdirAll(filepath.Join(root, "/proc/net"), 0o755)
-		os.WriteFile(filepath.Join(root, "/proc/net/udp"), []byte(
-			"  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"+
-				"  1: 3500007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   991        0 1 2 0 0\n"+
-				"  2: 3600007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   991        0 1 2 0 0\n"), 0o644)
-		if dropIn {
+		procUDP := filepath.Join(root, "/proc/net/udp")
+		os.WriteFile(procUDP, []byte(header+udp), 0o644)
+		os.MkdirAll(filepath.Join(root, "/etc"), 0o755)
+		os.MkdirAll(filepath.Join(root, deploy.DataPlaneDir), 0o755)
+		os.WriteFile(filepath.Join(root, deploy.DefaultBinaries.NikoServer), nil, 0o755)
+		if dropIn != "" {
 			os.MkdirAll(filepath.Join(root, filepath.Dir(deploy.ResolvedDropIn)), 0o755)
-			os.WriteFile(filepath.Join(root, deploy.ResolvedDropIn), []byte(file(p, deploy.ResolvedDropIn)), 0o644)
+			os.WriteFile(filepath.Join(root, deploy.ResolvedDropIn), []byte(dropIn), 0o644)
+		}
+		j, err := deploy.OpenJournal(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if oldResolv {
+			// What an install before v0.11 did, journaled.
+			j.Record(deploy.Change{Kind: deploy.ChangeSymlink, Path: "/etc/resolv.conf", Target: "../run/systemd/resolve/stub-resolv.conf"})
+			os.Symlink("/run/systemd/resolve/resolv.conf", filepath.Join(root, "/etc/resolv.conf"))
+		} else {
+			os.Symlink("../run/systemd/resolve/stub-resolv.conf", filepath.Join(root, "/etc/resolv.conf"))
 		}
 		out := &bytes.Buffer{}
+		var cmds []string
 		h := &deploy.Host{
-			Root: root,
-			Out:  out,
+			Root: root, Out: out, Journal: j,
 			Run: func(name string, args ...string) ([]byte, error) {
-				cmds = append(cmds, name+" "+strings.Join(args, " "))
+				c := name + " " + strings.Join(args, " ")
+				cmds = append(cmds, c)
+				switch {
+				case c == restartResolved && stubComes:
+					os.WriteFile(procUDP, []byte(header+stub+udp), 0o644)
+				case c == deploy.DefaultBinaries.NikoServer+" version":
+					return []byte("niko-server " + niko + "\n"), nil
+				case c == "systemctl show --property=LoadState --value systemd-resolved.service":
+					return []byte(resolvedState + "\n"), nil
+				case strings.HasPrefix(c, "systemctl show --property=LoadState --value "):
+					return []byte("loaded\n"), nil
+				}
 				return nil, nil
 			},
 			LookPath:    func(string) (string, error) { return "", errors.New("none") },
 			LookupUser:  func(string) (int, error) { return 0, errors.New("unknown") },
 			LookupGroup: func(string) (int, error) { return 0, errors.New("unknown") },
 		}
-		if err := h.Apply(p, "rayd.service"); err != nil {
+		return host{root, h, &cmds, out}
+	}
+	apply := func(t *testing.T, h host, p deploy.Plan) {
+		t.Helper()
+		*h.cmds = nil
+		if err := h.h.Apply(p, "rayd.service"); err != nil {
 			t.Fatal(err)
 		}
-		return cmds, out.String()
 	}
-	const restart = "systemctl try-restart systemd-resolved.service"
+	resolv := func(h host) string {
+		target, _ := os.Readlink(filepath.Join(h.root, "/etc/resolv.conf"))
+		return target
+	}
 
 	p, _ := plan(t)
-	if !slices.Contains(p.Units, "niko-front.service") || file(p, deploy.ResolvedDropIn) == "" {
+	if !p.FrontDNS || !slices.Contains(p.Units, "niko-front.service") {
 		t.Fatalf("the test plan has no front or no DNS tunnels: %v", p.Units)
 	}
-	cmds, log := apply(t, p, true)
-	if !slices.Contains(cmds, restart) {
-		t.Errorf("the stub is on and the drop-in unchanged, but resolved was not restarted:\n%s", strings.Join(cmds, "\n"))
+
+	// A fresh host: the stub stays, untouched and unmentioned.
+	h := newHost(t, stub, "", false, true)
+	apply(t, h, p)
+	if slices.Contains(*h.cmds, restartResolved) || strings.Contains(h.out.String(), "UDP port 53") {
+		t.Errorf("the stub touched or reported:\n%s\n%s", strings.Join(*h.cmds, "\n"), h.out)
 	}
-	if !strings.Contains(log, "warning: UDP port 53 (127.0.0.54) is taken") {
-		t.Errorf("a stub still on after the restart not reported:\n%s", log)
+	// Another resolver on 53: reported.
+	h = newHost(t, stub+other, "", false, true)
+	apply(t, h, p)
+	if !strings.Contains(h.out.String(), "warning: UDP port 53 (127.0.0.1) is taken") {
+		t.Errorf("another resolver not reported:\n%s", h.out)
+	}
+	// After an older install: the front, then resolved, then resolv.conf.
+	h = newHost(t, "", ours, true, true)
+	apply(t, h, p)
+	front, resolved := slices.Index(*h.cmds, restartFront), slices.Index(*h.cmds, restartResolved)
+	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn)); !os.IsNotExist(err) || front < 0 || resolved < front {
+		t.Errorf("the stub not given back, or resolved before the front: %v\n%s", err, strings.Join(*h.cmds, "\n"))
+	}
+	if got := resolv(h); got != "../run/systemd/resolve/stub-resolv.conf" {
+		t.Errorf("resolv.conf -> %s", got)
+	}
+	// The stub does not come up: resolv.conf stays on the uplink list, said;
+	// the next apply tries resolved again (not the front), and once the
+	// stub is up, finishes without restarting anything.
+	h = newHost(t, "", ours, true, false)
+	apply(t, h, p)
+	if got := resolv(h); got != "/run/systemd/resolve/resolv.conf" || !strings.Contains(h.out.String(), "stub is not on 127.0.0.53") {
+		t.Errorf("resolv.conf -> %s without the stub:\n%s", got, h.out)
+	}
+	apply(t, h, p)
+	if !slices.Contains(*h.cmds, restartResolved) || slices.Contains(*h.cmds, restartFront) {
+		t.Errorf("the next apply: resolved again, the front not:\n%s", strings.Join(*h.cmds, "\n"))
+	}
+	os.WriteFile(filepath.Join(h.root, "/proc/net/udp"), []byte(header+stub), 0o644)
+	apply(t, h, p)
+	if got := resolv(h); got != "../run/systemd/resolve/stub-resolv.conf" || slices.Contains(*h.cmds, restartResolved) {
+		t.Errorf("resolv.conf -> %s with the stub up, restarts:\n%s", got, strings.Join(*h.cmds, "\n"))
+	}
+	apply(t, h, p)
+	if slices.Contains(*h.cmds, restartResolved) {
+		t.Error("resolved restarted again once all is back")
+	}
+	// Another DNS server holds 53 (the stub off for it): the stub stays off.
+	h = newHost(t, other, ours, true, true)
+	apply(t, h, p)
+	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn)); err != nil || slices.Contains(*h.cmds, restartResolved) {
+		t.Errorf("the stub given back over another DNS server: %v\n%s", err, h.out)
+	}
+	// systemd-resolved gone since: applies go on, again and again.
+	resolvedState = "not-found"
+	h = newHost(t, "", ours, true, true)
+	apply(t, h, p)
+	apply(t, h, p)
+	resolvedState = "loaded"
+	// An older niko-server, which cannot share 53: nothing changes yet.
+	niko = "v0.8.1"
+	h = newHost(t, "", ours, true, true)
+	apply(t, h, p)
+	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn)); err != nil || slices.Contains(*h.cmds, restartResolved) ||
+		resolv(h) != "/run/systemd/resolve/resolv.conf" || !strings.Contains(h.out.String(), "older than v0.8.2") {
+		t.Errorf("the stub given back beside an older front: %v\n%s", err, h.out)
+	}
+	niko = "v0.8.2"
+	// A run that stopped halfway (drop-in moved aside), then uninstall: it
+	// goes too.
+	h = newHost(t, "", ours, true, false)
+	apply(t, h, p)
+	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn+".gone")); err != nil {
+		t.Fatalf("no mark of the stub being given back: %v", err)
+	}
+	if err := h.h.Uninstall(h.h.Journal, deploy.UninstallOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn+".gone")); !os.IsNotExist(err) {
+		t.Errorf("uninstall left the moved drop-in: %v", err)
+	}
+	// A drop-in of the administrator's at that path stays; a resolv.conf on
+	// the uplink list the journal does not know of stays too.
+	h = newHost(t, stub, "[Resolve]\nDNSStubListener=no\n", false, true)
+	os.Remove(filepath.Join(h.root, "/etc/resolv.conf"))
+	os.Symlink("/run/systemd/resolve/resolv.conf", filepath.Join(h.root, "/etc/resolv.conf"))
+	apply(t, h, p)
+	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn)); err != nil || slices.Contains(*h.cmds, restartResolved) ||
+		resolv(h) != "/run/systemd/resolve/resolv.conf" {
+		t.Errorf("the administrator's resolver changed: %v %s\n%s", err, resolv(h), strings.Join(*h.cmds, "\n"))
+	}
+	// Without DNS tunnels, 53 is not the front's: nothing said.
+	p.FrontDNS = false
+	h = newHost(t, stub+other, "", false, true)
+	apply(t, h, p)
+	if strings.Contains(h.out.String(), "UDP port 53") {
+		t.Errorf("no DNS tunnels, yet:\n%s", h.out)
+	}
+}
+
+// Under a umask of 077 the directories a plan's files need are still open
+// to the services, and an install that left ours closed is opened again;
+// nothing else changes.
+func TestModesUnderUmask(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	root := t.TempDir()
+	os.Chmod(root, 0o755)
+	h := &deploy.Host{Root: root, Out: &bytes.Buffer{}}
+	if _, err := h.WriteFile(deploy.File{Path: deploy.DefaultBinaries.Xray, Mode: 0o755, Content: []byte("x")}); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"/usr", "/usr/local", "/usr/local/libexec", deploy.DataPlaneDir} {
+		if fi, err := os.Stat(filepath.Join(root, d)); err != nil || fi.Mode().Perm() != 0o755 {
+			t.Errorf("%s: %v %v", d, fi.Mode().Perm(), err)
+		}
 	}
 
-	// The same front without DNS tunnels: 53 is not its.
-	p.Files = slices.DeleteFunc(slices.Clone(p.Files), func(f deploy.File) bool { return f.Path == deploy.ResolvedDropIn })
-	cmds, log = apply(t, p, false)
-	if slices.Contains(cmds, restart) || strings.Contains(log, "UDP port 53") {
-		t.Errorf("no DNS tunnels, yet:\n%s\n%s", strings.Join(cmds, "\n"), log)
+	// As an older install under that umask left them.
+	for _, d := range []string{deploy.DataPlaneDir, "/usr/local/libexec", deploy.StateDir, "/etc/private"} {
+		os.MkdirAll(filepath.Join(root, d), 0o700)
+		os.Chmod(filepath.Join(root, d), 0o700)
+	}
+	os.Chmod(filepath.Join(root, deploy.DefaultBinaries.Xray), 0o700)
+	out := &bytes.Buffer{}
+	h = &deploy.Host{Root: root, Out: out, Run: func(string, ...string) ([]byte, error) { return nil, nil },
+		LookPath: func(string) (string, error) { return "", errors.New("none") }}
+	if err := h.Apply(deploy.Plan{}); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]os.FileMode{
+		deploy.DataPlaneDir: 0o755, "/usr/local/libexec": 0o755, deploy.StateDir: 0o711,
+		deploy.DefaultBinaries.Xray: 0o755, "/etc/private": 0o700,
+	} {
+		if fi, err := os.Stat(filepath.Join(root, p)); err != nil || fi.Mode().Perm() != want {
+			t.Errorf("%s: %v, want %v (%v)", p, fi.Mode().Perm(), want, err)
+		}
+	}
+	if !strings.Contains(out.String(), deploy.DataPlaneDir+" was mode -rwx------, closed to the services") {
+		t.Errorf("not said:\n%s", out)
 	}
 }

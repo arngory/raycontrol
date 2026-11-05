@@ -120,6 +120,10 @@ type Server struct {
 	// Report records a client's summary of the network it asks from (R4-21);
 	// nil: the node takes no reports.
 	Report func(ctx context.Context, device string, addr netip.Addr, body io.Reader) error
+	// Relayed, when set, says that an address is a relay's: a report from
+	// there is about a network the node does not see, and goes to the
+	// relay's own endpoint instead (relay-v1 §9.3).
+	Relayed func(ctx context.Context, addr netip.Addr) bool
 	// Account names the device's user as the Hysteria2 backends know it, so
 	// that link gives that user's own sessions one by one (niko-server
 	// v0.7); nil, or an error, leaves the aggregates alone.
@@ -489,6 +493,10 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request, device string) {
 	}
 	if ap.Addr().Unmap().IsLoopback() {
 		http.Error(w, "a report is about the network it comes from, not through a tunnel", http.StatusConflict)
+		return
+	}
+	if s.Relayed != nil && s.Relayed(r.Context(), ap.Addr().Unmap()) {
+		http.Error(w, "a report through a relay goes to the relay's endpoint", http.StatusConflict)
 		return
 	}
 	err = s.Report(r.Context(), device, ap.Addr().Unmap(), r.Body)

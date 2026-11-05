@@ -385,6 +385,11 @@ func TestPerimeterFeed(t *testing.T) {
 	has := func(rs []*nodev1.PortRange, proto string, port uint32) bool {
 		return slices.ContainsFunc(rs, func(r *nodev1.PortRange) bool { return r.Proto == proto && r.From <= port && port <= r.To })
 	}
+	// The front answers DNS tunnels when they are there: rayctl's apply
+	// warns about UDP 53 by it.
+	if !dep.Msg.FrontDns || !has(dep.Msg.HostPorts, "udp", 53) {
+		t.Fatalf("front_dns %v with host ports %v", dep.Msg.FrontDns, dep.Msg.HostPorts)
+	}
 	check := func() {
 		t.Helper()
 		dep, err := c.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{}))

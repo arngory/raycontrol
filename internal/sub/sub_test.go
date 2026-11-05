@@ -563,4 +563,62 @@ func TestRelaysInSubscription(t *testing.T) {
 			t.Errorf("%s (%s): via %v", pr.Name, kinds[pr.Svc], pr.Via)
 		}
 	}
+
+	// The probe endpoint (relay-v1 §9.2): with a bundle that has one, and
+	// only while the relay's rayd relay is there.
+	if p.Relays[0].Probe != nil {
+		t.Fatalf("a probe endpoint from a bundle without one: %+v", p.Relays[0].Probe)
+	}
+	b, _ := json.Marshal(node.FromParams(params))
+	if err := f.st.IssueRelay(ctx, "r1", store.RelayIssue{SPA: b, SSHPort: 22, Admin: []string{"192.0.2.7/32"}, CertPin: "pin2",
+		ProbePort: 31000, ProbePin: "probe-pin"}); err != nil {
+		t.Fatal(err)
+	}
+	up := false
+	srv.RelayProbe = func(name string) bool { return up && name == "r1" }
+	if p := build(); p.Relays[0].Probe != nil {
+		t.Fatalf("a probe endpoint while rayd relay is away: %+v", p.Relays[0].Probe)
+	}
+	up = true
+	want := sub.RelayProbeHint{V: 1, Port: 31000, Pin: "probe-pin", Svc: provision.RelayProbeSvc, UDP: true}
+	if p := build(); p.Relays[0].Probe == nil || *p.Relays[0].Probe != want {
+		t.Fatalf("probe endpoint %+v, want %+v", p.Relays[0].Probe, want)
+	}
+	// It takes reports when the node does.
+	srv.Probe = &probe.Server{}
+	if p := build(); p.Relays[0].Probe == nil || *p.Relays[0].Probe != want {
+		t.Fatalf("probe endpoint of a node without reports %+v", p.Relays[0].Probe)
+	}
+	srv.Probe = &probe.Server{Report: func(context.Context, string, netip.Addr, io.Reader) error { return nil }}
+	want.Report = true
+	if p := build(); p.Relays[0].Probe == nil || *p.Relays[0].Probe != want {
+		t.Fatalf("probe endpoint with reports %+v", p.Relays[0].Probe)
+	}
+
+	// A probe endpoint on REALITY's port: the relay does not forward
+	// REALITY there, and its profile does not name the relay.
+	ports, _ := reality.Ports()
+	if err := f.st.IssueRelay(ctx, "r1", store.RelayIssue{SPA: b, SSHPort: 22, Admin: []string{"192.0.2.7/32"}, CertPin: "pin3",
+		ProbePort: ports[0].Num, ProbePin: "probe-pin"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, pr := range build().Profiles {
+		if pr.Svc == uint16(reality.ID) && len(pr.Via) != 0 {
+			t.Errorf("REALITY through a relay that does not forward it: %v", pr.Via)
+		}
+	}
+
+	// Asked for through the relay: the relay's address, whose hints are
+	// not the client's (relay-v1 §9.3).
+	srv.Hints = func(context.Context, netip.Addr, []uint16) *summary.Hints { return &summary.Hints{Days: 30} }
+	for addr, want := range map[string]bool{"198.51.100.20": false, "::ffff:198.51.100.20": false, "203.0.113.9": true} {
+		env, err := srv.BuildFor(ctx, "alice", netip.MustParseAddr(addr), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, _ := sub.Verify(env, f.keys.PublicJSON())
+		if (p.Hints != nil) != want {
+			t.Errorf("from %s: hints %+v", addr, p.Hints)
+		}
+	}
 }

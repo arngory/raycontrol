@@ -288,3 +288,62 @@ func TestPathAndViaRelay(t *testing.T) {
 		t.Fatalf("hint with direct reports: %+v", h)
 	}
 }
+
+// Direct reports from before path (v0.10.1) have no path row: they count
+// against via_relay all the same.
+func TestViaRelayCountsOldReports(t *testing.T) {
+	ctx := context.Background()
+	st, c, devices := node(t)
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
+	SetEnabled(ctx, st, true)
+	day := now.Unix() / dayS
+	if err := st.AddSummary(ctx, []store.SummaryCount{{Day: day - 1, ASN: 64502, Field: "reports", N: 50}}, "White Net", "ZZ"); err != nil {
+		t.Fatal(err)
+	}
+	relayed := `{"v":1,"net":"cellular","path":"relay","obs":[{"svc":1,"result":"fails"}]}`
+	for _, d := range devices[:10] {
+		if err := c.TakeVia(ctx, d, netip.MustParsePrefix("192.0.2.0/24"), strings.NewReader(relayed)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if h := c.Hints(ctx, netip.MustParseAddr("192.0.2.77"), []uint16{1}); h != nil && h.ViaRelay {
+		t.Fatalf("10 of 60 reports through a relay make via_relay: %+v", h)
+	}
+}
+
+// countingASN counts its lookups.
+type countingASN struct {
+	asn.Source
+	n int
+}
+
+func (c *countingASN) Lookup(ctx context.Context, addr netip.Addr) (asn.Info, bool) {
+	c.n++
+	return c.Source.Lookup(ctx, addr)
+}
+
+// A relay names the network of a report: past RelayTries a day a device's
+// reports through relays are refused before any lookup.
+func TestRelayTries(t *testing.T) {
+	ctx := context.Background()
+	st, c, devices := node(t)
+	SetEnabled(ctx, st, true)
+	src := &countingASN{Source: c.ASN}
+	c.ASN = src
+	relayed := `{"v":1,"net":"cellular","path":"relay","obs":[{"svc":1,"result":"fails"}]}`
+	for i := range RelayTries + 3 {
+		before := src.n
+		err := c.TakeVia(ctx, devices[0], netip.PrefixFrom(netip.AddrFrom4([4]byte{198, 51, byte(i), 0}), 24), strings.NewReader(relayed))
+		if i >= RelayTries && (!errors.Is(err, ErrRepeated) || src.n != before) {
+			t.Fatalf("report %d past the limit: %v, %d lookups", i, err, src.n-before)
+		}
+		if i < RelayTries && src.n == before {
+			t.Fatalf("report %d within the limit not looked up: %v", i, err)
+		}
+	}
+	// Another device has its own.
+	if err := c.TakeVia(ctx, devices[1], netip.MustParsePrefix("198.51.200.0/24"), strings.NewReader(relayed)); errors.Is(err, ErrRepeated) {
+		t.Fatalf("another device refused: %v", err)
+	}
+}

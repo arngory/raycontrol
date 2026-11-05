@@ -154,6 +154,7 @@ message Relay {
   string name = 1;
   string address = 2;
   int64 created_at = 3;
+  uint32 probe_port = 4; // its probe endpoint, TCP and UDP (relay-v1 §9.1); 0: none
 }
 message AddRelayRequest {
   string name = 1;
@@ -181,6 +182,7 @@ message IssueRelayBundleResponse {
   uint32 ssh_port = 2;       // the relay host's SSH port now
   repeated string admin = 3; // and its admin addresses
   bool admin_kept = 4;       // the relay's list from before, none asked for
+  uint32 probe_port = 5;     // its probe endpoint, TCP and UDP (relay-v1 §9.1)
 }
 message SetRelayAccessRequest {
   string name = 1;
@@ -201,6 +203,8 @@ message GetDeploymentResponse {
   // redirects (the ACME window is TCP 80 there): what a provider's firewall
   // in front of the host must let in.
   repeated PortRange outside_ports = 6;
+  // The front answers DNS tunnels on UDP 53 (beside systemd-resolved's stub).
+  bool front_dns = 7;
 }
 
 message PortRange {

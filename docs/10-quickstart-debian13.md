@@ -221,12 +221,15 @@ less bootstrap.sh
 bash bootstrap.sh -host 203.0.113.7 -domain example.com -cloudflare-token-file /root/cf.token -services reality,dnstt,masterdns
 ```
 
-`-services` — что поднять сразу:
+`-services` — что поднять сразу, через запятую:
 - `reality` — с доменом он ставится и без флага;
+- `hy2-masq`, `hy2-obfs` — Hysteria2 на UDP 443;
+- `doh`, `naive`, `yggdrasil` — делят TCP 443 с REALITY, он создаётся первым;
 - `dnstt` и `masterdns` — DNS-туннели, резервный канал;
+- `api` — удалённый API (домен ему не нужен);
 - `none` — ничего.
 
-Остальные сервисы — §8.
+Например: `-services reality,naive,hy2-masq,dnstt`. Добавить сервис потом — §8.
 
 Что делает установка:
 1. Bootstrap ставит недостающее (curl, openssl, nftables, polkit), проверяет подпись релиза и проверяет хост (§0).

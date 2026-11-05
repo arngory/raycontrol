@@ -3,11 +3,14 @@ package api
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -17,11 +20,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/asn"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
+	"github.com/arngory/raycontrol/internal/sub"
+	"github.com/arngory/raycontrol/internal/summary"
 )
 
 // relayE2E is what the exit leaves for the client in the shared directory.
@@ -29,6 +36,18 @@ type relayE2E struct {
 	Relay     node.SPAParams `json:"relay"`
 	ExitNode  string         `json:"exit_node"`
 	DeviceKey string         `json:"device_key"`
+	DeviceID  string         `json:"device_id"`
+	Reality   int64          `json:"reality"`
+}
+
+// e2eASN puts the client's network (TEST-NET-2) in an AS of its own.
+type e2eASN struct{}
+
+func (e2eASN) Lookup(_ context.Context, addr netip.Addr) (asn.Info, bool) {
+	if netip.MustParsePrefix("198.51.100.0/24").Contains(addr) {
+		return asn.Info{ASN: 64500, Name: "Test Net", Country: "ZZ"}, true
+	}
+	return asn.Info{}, false
 }
 
 // TestRelayE2ERole plays one part of the relay test with the real pieces
@@ -41,6 +60,12 @@ type relayE2E struct {
 //   - client: 443 at the relay is closed, also after a knock with the
 //     device's own key; after a knock with its K_relay, TCP and UDP 443
 //     reach the exit, which sees the relay.
+//
+// With rayd relay on the relay too (relay-v1 §9): the exit's subscription
+// lists the relay's probe endpoint once rayd relay holds its feed; the
+// client finds it closed before the knock, and after it takes down and the
+// UDP echo with K_relay (not with its own key), and its report through the
+// relay is counted at the exit once (again: 429).
 func TestRelayE2ERole(t *testing.T) {
 	role := os.Getenv("RAYCONTROL_RELAY_E2E_ROLE")
 	if role == "" {
@@ -82,7 +107,7 @@ func relayExit(ctx context.Context, t *testing.T, dir, exit, relayAddr string) {
 	if err := st.SetUserServices(ctx, "alice", []int64{reality.ID}); err != nil {
 		t.Fatal(err)
 	}
-	_, key, err := st.CreateDevice(ctx, "alice", "phone", "user")
+	dev, key, err := st.CreateDevice(ctx, "alice", "phone", "user")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +125,8 @@ func relayExit(ctx context.Context, t *testing.T, dir, exit, relayAddr string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := json.Marshal(relayE2E{Relay: node.FromParams(rp), ExitNode: hex.EncodeToString(params.NodeID[:]), DeviceKey: hex.EncodeToString(key[:])})
+	b, _ := json.Marshal(relayE2E{Relay: node.FromParams(rp), ExitNode: hex.EncodeToString(params.NodeID[:]), DeviceKey: hex.EncodeToString(key[:]),
+		DeviceID: dev.ID, Reality: reality.ID})
 	if err := os.WriteFile(filepath.Join(dir, "client.json"), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -119,9 +145,44 @@ func relayExit(ctx context.Context, t *testing.T, dir, exit, relayAddr string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Reports through the relay, counted in the client's network's AS.
+	if err := summary.SetEnabled(ctx, st, true); err != nil {
+		t.Fatal(err)
+	}
 	r := &Remote{Server: srv, Log: slog.New(slog.NewTextHandler(os.Stderr, nil)),
-		Perimeter: &PerimeterServer{Server: srv, DefaultTTL: 10 * time.Minute, MaxTTL: time.Hour, Refresh: time.Minute}}
+		Perimeter:   &PerimeterServer{Server: srv, DefaultTTL: 10 * time.Minute, MaxTTL: time.Hour, Refresh: time.Minute},
+		RelayReport: (&summary.Collector{Store: st, ASN: e2eASN{}}).TakeVia}
 	go r.Serve(ctx, ln, cfg)
+	// Once rayd relay holds its feed, the subscription lists the relay's
+	// probe endpoint (relay-v1 §9.2): the client takes it from there.
+	go func() {
+		for ctx.Err() == nil && !r.RelayProbeUp("r1") {
+			time.Sleep(100 * time.Millisecond)
+		}
+		keys, err := provision.LoadNodeKeys(ctx, st)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		s := &sub.Server{Store: st, Keys: keys, Log: r.Log, RelayProbe: r.RelayProbeUp,
+			Probe: &probe.Server{Report: func(context.Context, string, netip.Addr, io.Reader) error { return nil }}}
+		env, err := s.Build(ctx, "alice", time.Now())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		p, err := sub.Verify(env, keys.PublicJSON())
+		if err != nil || len(p.Relays) != 1 {
+			t.Errorf("subscription: %v %v", p.Relays, err)
+			return
+		}
+		b, _ := json.Marshal(p.Relays[0])
+		if err := os.WriteFile(filepath.Join(dir, "relay.json"), b, 0o600); err != nil {
+			t.Error(err)
+			return
+		}
+		fmt.Println("exit: rayd relay up")
+	}()
 
 	// 443 answers with the address it sees.
 	tl, err := net.Listen("tcp", ":443")
@@ -190,6 +251,32 @@ func relayClient(ctx context.Context, t *testing.T, dir, relay, seen string) {
 	n, _ := hex.DecodeString(c.ExitNode)
 	copy(devKey[:], k)
 	copy(exitNode[:], n)
+	kRelay := spa.RelayKey(devKey, exitNode, params.NodeID, "r1")
+
+	// The relay's probe endpoint, as the subscription gives it once rayd
+	// relay holds its feed.
+	var hint sub.RelayHint
+	for i := 0; ; i++ {
+		b, err := os.ReadFile(filepath.Join(dir, "relay.json"))
+		if err == nil {
+			err = json.Unmarshal(b, &hint)
+		}
+		if err == nil {
+			break
+		}
+		if i == 150 {
+			t.Fatalf("no probe endpoint in the subscription: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if hint.Probe == nil || hint.Probe.Svc != provision.RelayProbeSvc || !hint.Probe.UDP || !hint.Probe.Report {
+		t.Fatalf("relay in the subscription %+v", hint)
+	}
+	probeAddr := net.JoinHostPort(relay, fmt.Sprint(hint.Probe.Port))
+	if c, err := net.DialTimeout("tcp", probeAddr, time.Second); err == nil {
+		c.Close()
+		t.Fatal("the relay's probe endpoint open before SPA")
+	}
 
 	tcp := func() (string, error) {
 		conn, err := net.DialTimeout("tcp", net.JoinHostPort(relay, "443"), time.Second)
@@ -223,7 +310,7 @@ func relayClient(ctx context.Context, t *testing.T, dir, relay, seen string) {
 	if got, err := tcp(); err == nil {
 		t.Fatalf("443 at the relay open after a knock with the device's own key (the exit saw %s)", got)
 	}
-	knock(spa.RelayKey(devKey, exitNode, params.NodeID, "r1"))
+	knock(kRelay)
 	got, err := tcp()
 	if err != nil {
 		t.Fatalf("443 at the relay after SPA with K_relay: %v", err)
@@ -251,4 +338,62 @@ func relayClient(ctx context.Context, t *testing.T, dir, relay, seen string) {
 		}
 	}
 	fmt.Println("client: through the relay with K_relay, not with the device's own key, and not before; no routing")
+	relayProbeClient(t, c, hint, probeAddr, kRelay, devKey)
+}
+
+// relayProbeClient takes the relay's probe endpoint (relay-v1 §9): down and
+// the UDP echo with K_relay, not with the device's own key; a report
+// through the relay counted at the exit once.
+func relayProbeClient(t *testing.T, c relayE2E, hint sub.RelayHint, addr string, kRelay, devKey [spa.KeySize]byte) {
+	t.Helper()
+	hc := &http.Client{Timeout: 10 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: PinnedTLS(hint.Probe.Pin, nil), ForceAttemptHTTP2: true}}
+	do := func(method, path string, key [spa.KeySize]byte, body string) (int, []byte) {
+		t.Helper()
+		req, _ := http.NewRequest(method, "https://"+addr+path, strings.NewReader(body))
+		req.Header.Set(sub.DeviceHeader, c.DeviceID)
+		req.Header.Set("Authorization", sub.AuthToken(key, time.Now().Unix()/60))
+		resp, err := hc.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, b
+	}
+	if code, _ := do(http.MethodGet, probe.PathDown+"?bytes=1000", devKey, ""); code != http.StatusNotFound {
+		t.Fatalf("down at the relay with the device's own key: %d", code)
+	}
+	if code, b := do(http.MethodGet, probe.PathDown+"?bytes=100000", kRelay, ""); code != http.StatusOK || len(b) != 100000 {
+		t.Fatalf("down at the relay: %d, %d bytes", code, len(b))
+	}
+	code, b := do(http.MethodPost, probe.PathUDP, kRelay, "")
+	var sess probe.UDPSession
+	if code != http.StatusOK || json.Unmarshal(b, &sess) != nil || sess.Port != int(hint.Probe.Port) {
+		t.Fatalf("UDP session at the relay: %d %s", code, b)
+	}
+	token, _ := base64.RawURLEncoding.DecodeString(sess.Token)
+	u, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.Close()
+	dgram := make([]byte, probe.HeaderSize)
+	copy(dgram, token)
+	u.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := u.Write(dgram); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 128)
+	if n, err := u.Read(buf); err != nil || n != probe.HeaderSize || string(buf[:16]) != string(token) {
+		t.Fatalf("UDP echo at the relay: %d %v", n, err)
+	}
+	report := fmt.Sprintf(`{"v":1,"net":"wifi","obs":[{"svc":%d,"result":"works"}],"path":"relay"}`, c.Reality)
+	if code, b := do(http.MethodPost, probe.PathReport, kRelay, report); code != http.StatusNoContent {
+		t.Fatalf("report through the relay: %d %s", code, b)
+	}
+	if code, b := do(http.MethodPost, probe.PathReport, kRelay, report); code != http.StatusTooManyRequests {
+		t.Fatalf("a second report from the network today: %d %s", code, b)
+	}
+	fmt.Println("client: the relay's probe endpoint with K_relay only, the UDP echo, a report counted at the exit once")
 }

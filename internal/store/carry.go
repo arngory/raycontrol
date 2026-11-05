@@ -18,7 +18,8 @@ import (
 //   - a service disabled or deleted stays disabled, a REALITY no longer open
 //     is not open, and a DNS tunnel keeps the stricter dnsauth mode;
 //   - an unused invite withdrawn stays withdrawn, a relay removed stays
-//     removed, and a relay's certificate, SPA and SSH access stay as now;
+//     removed, and a relay's certificate, SPA, SSH access and probe
+//     endpoint stay as now;
 //   - the settings named in keep (the admin addresses) take current's value.
 //
 // Users and relays are matched by ID, name or address, and creation time:
@@ -97,6 +98,12 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 		  WHERE EXISTS (SELECT 1 FROM cur.relays c WHERE c.id = relays.id AND c.ssh_port IS NOT relays.ssh_port)`},
 		{"relays", "admin_json", `UPDATE relays SET admin_json = (SELECT c.admin_json FROM cur.relays c WHERE c.id = relays.id)
 		  WHERE EXISTS (SELECT 1 FROM cur.relays c WHERE c.id = relays.id AND c.admin_json IS NOT relays.admin_json)`},
+		// Its probe endpoint came in the same bundle: the subscription names
+		// the certificate the relay serves.
+		{"relays", "probe_pin", `UPDATE relays SET probe_pin = (SELECT c.probe_pin FROM cur.relays c WHERE c.id = relays.id),
+		    probe_port = (SELECT c.probe_port FROM cur.relays c WHERE c.id = relays.id)
+		  WHERE EXISTS (SELECT 1 FROM cur.relays c WHERE c.id = relays.id
+		                AND (c.probe_pin IS NOT relays.probe_pin OR c.probe_port IS NOT relays.probe_port))`},
 	} {
 		// The copy may be older than the table or the column; the current
 		// database is newer, so it has them.

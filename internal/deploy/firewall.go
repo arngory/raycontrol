@@ -237,36 +237,47 @@ func (h *Host) ufw(changed bool) (active bool, err error) {
 	return active, nil
 }
 
-// warnDropChains warns about input chains of other tables that drop by
-// default: rayspa cannot open ports there, so the operator must.
-func (h *Host) warnDropChains(ports []PortRange, handled map[string]bool) {
+// nftChain is a base chain as nft -j list chains gives it.
+type nftChain struct {
+	Family string `json:"family"`
+	Table  string `json:"table"`
+	Name   string `json:"name"`
+	Hook   string `json:"hook"`
+	Policy string `json:"policy"`
+}
+
+// dropChains are the base chains of other tables on a hook that drop by
+// default; nil when nft cannot tell.
+func (h *Host) dropChains(hook string) []nftChain {
 	out, err := h.Run("nft", "-j", "list", "chains")
 	if err != nil {
-		return
+		return nil
 	}
 	var ruleset struct {
 		Nftables []struct {
-			Chain *struct {
-				Family string `json:"family"`
-				Table  string `json:"table"`
-				Name   string `json:"name"`
-				Hook   string `json:"hook"`
-				Policy string `json:"policy"`
-			} `json:"chain"`
+			Chain *nftChain `json:"chain"`
 		} `json:"nftables"`
 	}
 	if json.Unmarshal(out, &ruleset) != nil {
-		return
+		return nil
 	}
+	var drop []nftChain
+	for _, e := range ruleset.Nftables {
+		if c := e.Chain; c != nil && c.Hook == hook && c.Policy == "drop" && c.Table != rayspaTable {
+			drop = append(drop, *c)
+		}
+	}
+	return drop
+}
+
+// warnDropChains warns about input chains of other tables that drop by
+// default: rayspa cannot open ports there, so the operator must.
+func (h *Host) warnDropChains(ports []PortRange, handled map[string]bool) {
 	var list []string
 	for _, p := range ports {
 		list = append(list, p.String())
 	}
-	for _, e := range ruleset.Nftables {
-		c := e.Chain
-		if c == nil || c.Hook != "input" || c.Policy != "drop" || c.Table == rayspaTable {
-			continue
-		}
+	for _, c := range h.dropChains("input") {
 		if c.Table == "firewalld" && handled["firewalld"] {
 			continue
 		}
@@ -279,29 +290,62 @@ func (h *Host) warnDropChains(ports []PortRange, handled map[string]bool) {
 	}
 }
 
+// WarnRelayDropChains warns, on a relay host, about chains of other tables
+// (ufw, firewalld) that drop by default what the relay needs: the
+// forwarded packets, and its probe endpoint's port (0: none).
+func (h *Host) WarnRelayDropChains(probePort uint16) {
+	for _, c := range h.dropChains("forward") {
+		fmt.Fprintf(h.Out, "warning: nftables chain %s %s %s drops forwarded packets by default: the relay forwards "+
+			"nothing to the exit until it accepts them (ufw: DEFAULT_FORWARD_POLICY=\"ACCEPT\" in /etc/default/ufw)\n",
+			c.Family, c.Table, c.Name)
+	}
+	if probePort == 0 {
+		return
+	}
+	for _, c := range h.dropChains("input") {
+		fmt.Fprintf(h.Out, "warning: nftables chain %s %s %s drops incoming packets by default: it must accept "+
+			"tcp/%d and udp/%d, the relay's probe endpoint (ufw allow %d)\n", c.Family, c.Table, c.Name, probePort, probePort, probePort)
+	}
+}
+
 // rayspaTable is perimeter.Table.
 const rayspaTable = "raycontrol"
 
 // warnPort53 warns when another process holds UDP port 53 that the front
 // needs for the DNS tunnels.
 func (h *Host) warnPort53(frontUID int) {
-	for _, l := range h.port53() {
-		if l.uid == frontUID {
-			continue
-		}
-		owner := strconv.Itoa(l.uid)
-		if u, err := user.LookupId(owner); err == nil {
-			owner = u.Username
-		}
-		fmt.Fprintf(h.Out, "warning: UDP port 53 (%s) is taken by user %s (another DNS server?); "+
-			"the front cannot answer the DNS tunnels until it is freed\n", l.addr, owner)
+	for _, o := range h.OthersOn53(frontUID) {
+		fmt.Fprintf(h.Out, "warning: UDP port 53 (%s) is taken by %s (another DNS server?); "+
+			"the DNS tunnels' queries there do not reach the front\n", o.Addr, o.Owner)
 	}
 }
 
-// stubOn53 reports whether systemd-resolved's stub listener (127.0.0.53,
-// 127.0.0.54) holds UDP port 53.
+// Holder53 is a socket on UDP port 53 that is not the front's.
+type Holder53 struct{ Addr, Owner string }
+
+// OthersOn53 lists the sockets on UDP port 53 other than the front's and
+// systemd-resolved's stub (127.0.0.53, 127.0.0.54), which shares the port
+// with the front: both bind with SO_REUSEADDR (niko-server v0.8.2). Another
+// such socket takes the datagrams to its own address, quietly; one without
+// it keeps the front from starting.
+func (h *Host) OthersOn53(frontUID int) []Holder53 {
+	var out []Holder53
+	for _, l := range h.port53() {
+		if l.uid == frontUID || l.addr == "127.0.0.53" || l.addr == "127.0.0.54" {
+			continue
+		}
+		owner := "uid " + strconv.Itoa(l.uid)
+		if u, err := user.LookupId(strconv.Itoa(l.uid)); err == nil {
+			owner = "user " + u.Username
+		}
+		out = append(out, Holder53{l.addr, owner})
+	}
+	return out
+}
+
+// stubOn53 reports whether systemd-resolved's stub holds 127.0.0.53:53.
 func (h *Host) stubOn53() bool {
-	return slices.ContainsFunc(h.port53(), func(l udpListener) bool { return l.addr == "127.0.0.53" || l.addr == "127.0.0.54" })
+	return slices.ContainsFunc(h.port53(), func(l udpListener) bool { return l.addr == "127.0.0.53" })
 }
 
 type udpListener struct {

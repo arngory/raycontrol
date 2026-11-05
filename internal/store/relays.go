@@ -25,6 +25,11 @@ type Relay struct {
 	CertPin string
 	// Admin are the prefixes that reach the relay host's SSH without SPA.
 	Admin []string
+	// ProbePort and ProbePin are the relay's probe-v1 endpoint (relay-v1
+	// §9.1): TCP and UDP on one port, and the pin of its certificate. Zero
+	// and empty for a bundle that had none.
+	ProbePort uint16
+	ProbePin  string
 }
 
 // CreateRelay adds a relay: a name and one public address.
@@ -51,7 +56,8 @@ func (s *Store) CreateRelay(ctx context.Context, name string, addr netip.Addr) (
 
 // ListRelays returns the relays by name.
 func (s *Store) ListRelays(ctx context.Context) ([]Relay, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, address, created_at, COALESCE(spa_json, ''), ssh_port, COALESCE(cert_pin, ''), COALESCE(admin_json, '') FROM relays ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, address, created_at, COALESCE(spa_json, ''), ssh_port, COALESCE(cert_pin, ''), COALESCE(admin_json, ''),
+		COALESCE(probe_port, 0), COALESCE(probe_pin, '') FROM relays ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +67,7 @@ func (s *Store) ListRelays(ctx context.Context) ([]Relay, error) {
 		var r Relay
 		var addr, spaJSON, adminJSON string
 		var created int64
-		if err := rows.Scan(&r.ID, &r.Name, &addr, &created, &spaJSON, &r.SSHPort, &r.CertPin, &adminJSON); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &addr, &created, &spaJSON, &r.SSHPort, &r.CertPin, &adminJSON, &r.ProbePort, &r.ProbePin); err != nil {
 			return nil, err
 		}
 		if adminJSON != "" {
@@ -142,24 +148,30 @@ func (s *Store) RelayByCertPin(ctx context.Context, pin string) (Relay, error) {
 
 // RelayIssue is what a new bundle sets for a relay, all at once.
 type RelayIssue struct {
-	SPA     []byte // JSON of node.SPAParams
-	SSHPort uint16
-	Admin   []string
-	CertPin string
+	SPA       []byte // JSON of node.SPAParams
+	SSHPort   uint16
+	Admin     []string
+	CertPin   string
+	ProbePort uint16
+	ProbePin  string
 }
 
-// IssueRelay sets a relay's SPA, SSH port, admin list and certificate pin in
-// one statement: a bundle refused halfway changes none of them.
+// IssueRelay sets a relay's SPA, SSH port, admin list, certificate pin and
+// probe endpoint in one statement: a bundle refused halfway changes none of
+// them.
 func (s *Store) IssueRelay(ctx context.Context, name string, ri RelayIssue) error {
-	if ri.CertPin == "" || ri.SSHPort == 0 || len(ri.SPA) == 0 {
-		return fmt.Errorf("%w relay issue: SPA, SSH port and pin needed", ErrInvalid)
+	if ri.CertPin == "" || ri.SSHPort == 0 || len(ri.SPA) == 0 || ri.ProbePort == 0 || ri.ProbePin == "" {
+		return fmt.Errorf("%w relay issue: SPA, SSH port, pin and probe endpoint needed", ErrInvalid)
+	}
+	if ri.ProbePort == ri.SSHPort {
+		return fmt.Errorf("%w relay issue: the probe endpoint on the SSH port %d", ErrInvalid, ri.SSHPort)
 	}
 	admin, err := json.Marshal(ri.Admin)
 	if err != nil {
 		return err
 	}
-	return s.affectOne(ctx, "relay", name, `UPDATE relays SET spa_json = ?, ssh_port = ?, admin_json = ?, cert_pin = ? WHERE name = ?`,
-		string(ri.SPA), ri.SSHPort, string(admin), ri.CertPin, name)
+	return s.affectOne(ctx, "relay", name, `UPDATE relays SET spa_json = ?, ssh_port = ?, admin_json = ?, cert_pin = ?, probe_port = ?, probe_pin = ? WHERE name = ?`,
+		string(ri.SPA), ri.SSHPort, string(admin), ri.CertPin, ri.ProbePort, ri.ProbePin, name)
 }
 
 // SetRelayAccess sets the relay host's SSH port and admin list, keeping its

@@ -2,14 +2,17 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
 
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
@@ -93,5 +96,81 @@ func TestRelaySnapshot(t *testing.T) {
 	if len(snap.PublicPorts) != 0 || len(snap.RelayPrefixes) != 0 || len(snap.AdminPrefixes) != 0 ||
 		len(snap.AdminPorts) != 1 || snap.AdminPorts[0].Port != 22 {
 		t.Fatalf("relay snapshot %v", snap)
+	}
+}
+
+// A relay's probe endpoint (relay-v1 §9.1): a local service of its own ID,
+// TCP and UDP on its port, open to every device the relay knows; a service
+// of the exit's on that port is not forwarded there.
+func TestRelaySnapshotProbe(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c := NewUnixClient(sock)
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "reality",
+		SettingsJson: `{"target":"www.example.org:443"}`})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"reality"}})); err != nil {
+		t.Fatal(err)
+	}
+	dev, _, err := srv.Store.CreateDevice(ctx, "alice", "phone", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Store.CreateRelay(ctx, "r1", netip.MustParseAddr("198.51.100.20")); err != nil {
+		t.Fatal(err)
+	}
+	per := &PerimeterServer{Server: srv, DefaultTTL: 10 * time.Minute, MaxTTL: time.Hour}
+	issue := func(port uint16) {
+		t.Helper()
+		params, _ := provision.RelayParams(ctx, srv.Store, "r1")
+		b, _ := json.Marshal(node.FromParams(params))
+		if err := srv.Store.IssueRelay(ctx, "r1", store.RelayIssue{SPA: b, SSHPort: 22, Admin: []string{"192.0.2.7/32"}, CertPin: "pin",
+			ProbePort: port, ProbePin: "probe"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	issue(31000)
+	snap, err := per.RelaySnapshot(ctx, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeSvc := uint32(provision.RelayProbeSvc)
+	var found bool
+	for _, s := range snap.Services {
+		if s.Id != probeSvc {
+			continue
+		}
+		found = true
+		if !s.Local || len(s.Ports) != 2 || s.Ports[0].Proto != "tcp" || s.Ports[1].Proto != "udp" ||
+			s.Ports[0].Port != 31000 || s.Ports[1].Port != 31000 {
+			t.Errorf("probe service %v", s)
+		}
+	}
+	if !found || len(snap.Devices) != 1 || snap.Devices[0].Id != dev.ID || !slices.Contains(snap.Devices[0].Allowed, probeSvc) {
+		t.Fatalf("relay snapshot without the probe endpoint for the device: %v", snap)
+	}
+	if known, err := per.RelayKnows(ctx, "r1", dev.ID); err != nil || !known {
+		t.Fatalf("the relay does not know the device: %v %v", known, err)
+	}
+	if known, _ := per.RelayKnows(ctx, "r1", "nope"); known {
+		t.Fatal("the relay knows a device that is not there")
+	}
+
+	// On REALITY's port: REALITY is not forwarded there (the subscription
+	// still is).
+	issue(443)
+	reality, _ := srv.Store.ServiceByName(ctx, "reality")
+	snap, _ = per.RelaySnapshot(ctx, "r1")
+	for _, s := range snap.Services {
+		for _, p := range s.Ports {
+			if p.Port == 443 && s.Id != probeSvc {
+				t.Errorf("service %d forwards the probe endpoint's port: %v", s.Id, s)
+			}
+		}
+	}
+	if len(snap.Devices) != 1 || slices.Contains(snap.Devices[0].Allowed, uint32(reality.ID)) {
+		t.Errorf("REALITY through the relay on the probe endpoint's port: %v", snap.Devices)
 	}
 }

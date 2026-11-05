@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"strings"
 )
 
@@ -23,6 +24,16 @@ type RelayBundle struct {
 	Exit    netip.Addr `json:"exit"` // the DNAT target and the API's host
 	API     BundleSub  `json:"api"`
 	Cert    string     `json:"cert"` // PEM: the certificate, then its PKCS#8 key
+	// Probe is the relay's probe-v1 endpoint (relay-v1 §9.1), which rayd
+	// relay serves; bundles before v0.11 have none.
+	Probe *RelayProbe `json:"probe,omitempty"`
+}
+
+// RelayProbe is a relay's probe endpoint: TCP and UDP on one port, and the
+// server certificate whose pin the exit puts in the subscription.
+type RelayProbe struct {
+	Port uint16 `json:"port"`
+	Cert string `json:"cert"` // PEM: the certificate, then its PKCS#8 key
 }
 
 // Encode returns the bundle as "rcrelay1:" + base64url(JSON).
@@ -53,6 +64,25 @@ func DecodeRelayBundle(s string) (RelayBundle, error) {
 		return b, fmt.Errorf("unsupported relay bundle version %d", b.Version)
 	case !b.Exit.IsValid() || b.API.Port == 0 || b.API.Pin == "" || b.Cert == "" || b.Name == "":
 		return b, errors.New("relay bundle without exit, API, certificate or name")
+	case b.Probe != nil && (b.Probe.Port == 0 || b.Probe.Cert == ""):
+		return b, errors.New("relay bundle with a probe endpoint without port or certificate")
 	}
 	return b, nil
+}
+
+// ReadRelayBundle reads a relay's bundle from a file that only its owner may
+// read: it holds the relay's keys.
+func ReadRelayBundle(path string) (RelayBundle, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return RelayBundle{}, err
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return RelayBundle{}, fmt.Errorf("relay bundle %s is mode %v: it holds a private key, make it 0600", path, fi.Mode().Perm())
+	}
+	b, err := os.ReadFile(path) //nolint:gosec // G304: the configured bundle
+	if err != nil {
+		return RelayBundle{}, err
+	}
+	return DecodeRelayBundle(string(b))
 }
