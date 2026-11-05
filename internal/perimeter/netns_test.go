@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -381,85 +383,140 @@ func TestNetns(t *testing.T) {
 		if dial("18023") {
 			t.Fatal("the relay's address reaches SSH")
 		}
-		// Flows the relay has open end with it, not only new ones; first
-		// when its port is no longer forwarded, then when it goes.
-		open := func() (net.Conn, chan string) {
+		// Flows the relay has open end with it, not only new ones: when its
+		// port is no longer forwarded, when it goes; TCP with a reset. Not
+		// when something else still lets them in (a public port), and not
+		// when the table is made again.
+		type flow struct {
+			c   net.Conn
+			got chan string
+		}
+		open := func(proto string, port int) flow {
 			t.Helper()
-			flow, err := net.Listen("tcp", "127.0.0.1:18445")
+			addr := fmt.Sprintf("127.0.0.1:%d", port)
+			got := make(chan string, 8)
+			if proto == "udp" {
+				pc, err := net.ListenPacket("udp", addr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { pc.Close() })
+				go func() {
+					buf := make([]byte, 16)
+					for {
+						n, from, err := pc.ReadFrom(buf)
+						if err != nil {
+							return
+						}
+						got <- string(buf[:n])
+						pc.WriteTo(buf[:n], from) // a reply: the flow is established
+					}
+				}()
+				c, err := net.Dial("udp", addr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { c.Close() })
+				return flow{c, got}
+			}
+			l, err := net.Listen("tcp", addr)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer flow.Close()
-			got := make(chan string, 8)
+			defer l.Close()
+			c, err := net.DialTimeout("tcp", addr, 700*time.Millisecond)
+			if err != nil {
+				t.Fatalf("the relay's address cannot open a flow to %s", addr)
+			}
+			// Accepted before the listener closes, which would reset it.
+			sc, err := l.Accept()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { c.Close(); sc.Close() })
 			go func() {
-				c, err := flow.Accept()
-				if err != nil {
-					return
-				}
-				defer c.Close()
 				buf := make([]byte, 16)
 				for {
-					n, err := c.Read(buf)
+					n, err := sc.Read(buf)
 					if err != nil {
 						return
 					}
 					got <- string(buf[:n])
 				}
 			}()
-			c, err := net.DialTimeout("tcp", "127.0.0.1:18445", 700*time.Millisecond)
-			if err != nil {
-				t.Fatal("the relay's address cannot open a flow to a relay port")
-			}
-			return c, got
+			return flow{c, got}
 		}
-		sends := func(c net.Conn, got chan string, msg string) bool {
+		sends := func(f flow, msg string) bool {
 			t.Helper()
-			if _, err := c.Write([]byte(msg)); err != nil {
+			if _, err := f.c.Write([]byte(msg)); err != nil {
 				return false
 			}
 			select {
-			case m := <-got:
+			case m := <-f.got:
 				return m == msg
 			case <-time.After(700 * time.Millisecond):
 				return false
 			}
 		}
-		snap.RelayPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 18444}, {Proto: "tcp", Port: 18445}}
+		port := func(proto string, n uint32) *perimeterv1.Port { return &perimeterv1.Port{Proto: proto, Port: n} }
+		public := snap.PublicPorts
+		snap.RelayPorts = []*perimeterv1.Port{port("tcp", 18444), port("tcp", 18445), port("udp", 18446), port("tcp", 18447)}
 		if err := gate.Update(snap); err != nil {
 			t.Fatal(err)
 		}
-		c1, got1 := open()
-		defer c1.Close()
-		if !sends(c1, got1, "a") {
-			t.Fatal("an open relay flow does not pass")
+		tcpFlow, udpFlow, publicFlow := open("tcp", 18445), open("udp", 18446), open("tcp", 18447)
+		for _, f := range []flow{tcpFlow, udpFlow, publicFlow} {
+			if !sends(f, "a") {
+				t.Fatal("an open relay flow does not pass")
+			}
 		}
-		snap.RelayPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 18444}}
+		// The table made again: the flows go on, before the relays are back
+		// in it and after.
+		if err := fw.Setup(); err != nil {
+			t.Fatal(err)
+		}
+		if !sends(tcpFlow, "b") {
+			t.Fatal("a relay flow cut by the table made again")
+		}
+		if out, err := exec.Command("nft", "delete", "table", "inet", Table).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		if _, err := gate.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		if !sends(tcpFlow, "c") || !sends(udpFlow, "c") {
+			t.Fatal("a relay flow cut by the table restored")
+		}
+		snap.RelayPorts = []*perimeterv1.Port{port("tcp", 18444), port("udp", 18446), port("tcp", 18447)}
 		if err := gate.Update(snap); err != nil {
 			t.Fatal(err)
 		}
-		if sends(c1, got1, "b") {
+		if sends(tcpFlow, "d") {
 			t.Fatal("a relay flow goes on after its port is no longer forwarded")
 		}
-		snap.RelayPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 18444}, {Proto: "tcp", Port: 18445}}
-		if err := gate.Update(snap); err != nil {
-			t.Fatal(err)
-		}
-		c2, got2 := open()
-		defer c2.Close()
-		if !sends(c2, got2, "c") {
-			t.Fatal("an open relay flow does not pass")
+		tcpFlow.c.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := tcpFlow.c.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("a cut relay flow is not reset: %v", err)
 		}
 		snap.RelayPrefixes = nil
+		snap.PublicPorts = append(slices.Clone(public), port("tcp", 18447))
 		if err := gate.Update(snap); err != nil {
 			t.Fatal(err)
 		}
-		if sends(c2, got2, "d") {
-			t.Fatal("a relay flow goes on after the relay is gone")
+		if sends(udpFlow, "e") {
+			t.Fatal("a UDP relay flow goes on after the relay is gone")
+		}
+		if !sends(publicFlow, "e") {
+			t.Fatal("a relay flow to a port now public is cut")
 		}
 		if dial("18444") {
 			t.Fatal("the service stays open after the relay is gone")
 		}
-		snap.RelayPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 18444}}
+		snap.RelayPorts = []*perimeterv1.Port{port("tcp", 18444)}
+		snap.PublicPorts = public
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("rotated UDP port reaches the service after SPA", func(t *testing.T) {
 		// A UDP service on 18443 with its own port schedule (spa-v2.md §11).

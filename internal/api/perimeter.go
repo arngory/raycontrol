@@ -164,10 +164,14 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 	if err != nil {
 		return nil, err
 	}
-	if len(relays) > 0 {
-		for _, r := range relays {
-			snap.RelayPrefixes = append(snap.RelayPrefixes, netip.PrefixFrom(r.Address, r.Address.BitLen()).String())
+	for _, r := range relays {
+		// A relay host is IPv4 (relay-v1 §3.1): an IPv6 relay a branch
+		// build added cannot get a bundle, so its address reaches nothing.
+		if a := r.Address.Unmap(); a.Is4() {
+			snap.RelayPrefixes = append(snap.RelayPrefixes, netip.PrefixFrom(a, 32).String())
 		}
+	}
+	if len(snap.RelayPrefixes) > 0 {
 		seen := map[string]bool{}
 		for _, svc := range services {
 			if !svc.Enabled || svc.Kind == "ssh" || svc.Public() {

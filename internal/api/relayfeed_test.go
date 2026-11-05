@@ -246,6 +246,10 @@ func TestRelayAccess(t *testing.T) {
 	if _, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r6", ExitAddress: "2001:db8::7", Admin: []string{"192.0.2.7"}}); !errors.Is(err, store.ErrInvalid) {
 		t.Fatalf("an IPv6 relay: %v", err)
 	}
+	// It cannot be a relay, so its address reaches nothing.
+	if snap, err := (&PerimeterServer{Server: srv}).snapshot(ctx); err != nil || !slices.Equal(snap.RelayPrefixes, []string{"198.51.100.20/32"}) {
+		t.Fatalf("relay prefixes %v %v", snap.GetRelayPrefixes(), err)
+	}
 	// rayctl's default admin list (its SSH session) only for a relay that
 	// has none yet; a new bundle keeps the list the relay has.
 	for i, want := range []struct {

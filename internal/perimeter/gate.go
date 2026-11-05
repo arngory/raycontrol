@@ -52,6 +52,7 @@ type Gate struct {
 	adminPorts []Port
 	relays     []netip.Prefix
 	relayPorts []Port
+	relaysSet  bool   // SetRelays has run: relay_check is on
 	forward    []Port // every service port: what a relay forwards
 	// holders tracks which devices opened an address and port and until
 	// when, so that a revocation closes only what nobody else still holds.
@@ -177,11 +178,13 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		}
 		g.admin, g.adminPorts = admin, adminPorts
 	}
-	if !slices.Equal(relays, g.relays) || !slices.Equal(relayPorts, g.relayPorts) {
+	// Once at least, even with no relays: it also ends flows of relays
+	// removed while rayspa was down.
+	if !g.relaysSet || !slices.Equal(relays, g.relays) || !slices.Equal(relayPorts, g.relayPorts) {
 		if err := g.fw.SetRelays(relays, relayPorts); err != nil {
 			return err
 		}
-		g.relays, g.relayPorts = relays, relayPorts
+		g.relays, g.relayPorts, g.relaysSet = relays, relayPorts, true
 	}
 	var forward []Port
 	for id, ps := range services {
@@ -341,7 +344,7 @@ func (g *Gate) restoreLocked() error {
 			return err
 		}
 	}
-	if len(g.relays) > 0 || len(g.relayPorts) > 0 {
+	if g.relaysSet {
 		if err := g.fw.SetRelays(g.relays, g.relayPorts); err != nil {
 			return err
 		}

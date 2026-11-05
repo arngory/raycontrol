@@ -199,7 +199,7 @@ table inet %[1]s {
 	chain input {
 		type filter hook input priority -10; policy drop;
 		%[4]s
-		ct mark & %[9]s == %[9]s ct state established ct direction original jump relay_flow
+		ct mark & %[9]s == %[9]s ct state established ct direction original jump relay_check
 		ct state established,related accept
 		ct state invalid drop
 		icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } accept
@@ -210,27 +210,32 @@ table inet %[1]s {
 
 		tcp dport @spa_tcp tcp flags syn update @rate4 { ip saddr %[2]s } drop
 		tcp dport @spa_tcp tcp flags syn update @rate6 { ip6 saddr %[2]s } drop
-		tcp dport @spa_tcp accept
+		jump admit
+	}
 
+	# What lets a flow in. A relay's flows (most of an exit's traffic when
+	# it has relays: first) are marked in conntrack, so that relay_check
+	# can tell them later.
+	chain admit {
+		ip saddr @relay4 meta l4proto . th dport @relay_ports ct mark set ct mark | %[9]s accept
+		ip6 saddr @relay6 meta l4proto . th dport @relay_ports ct mark set ct mark | %[9]s accept
+		tcp dport @spa_tcp accept
 		tcp dport @acme_in accept
 		meta l4proto . th dport @public accept
 		ip saddr @admin4 meta l4proto . th dport @admin_ports accept
 		ip6 saddr @admin6 meta l4proto . th dport @admin_ports accept
-		ip saddr @relay4 meta l4proto . th dport @relay_ports ct mark set ct mark | %[9]s accept
-		ip6 saddr @relay6 meta l4proto . th dport @relay_ports ct mark set ct mark | %[9]s accept
 		ip saddr . meta l4proto . th dport @allow4 accept
 		ip6 saddr . meta l4proto . th dport @allow6 accept
 	}
 
-	# A flow a relay opened (marked when let in) goes on while its address is
-	# still a relay and its port still a relay port: a relay removed, or a
-	# service no longer forwarded, loses the flows it had open too, not only
-	# new ones, without the conntrack tool. Related packets (ICMP errors
-	# from routers on the way) and the node's replies are not looked at.
-	chain relay_flow {
-		ip saddr @relay4 meta l4proto . th dport @relay_ports return
-		ip6 saddr @relay6 meta l4proto . th dport @relay_ports return
-		counter drop comment "relay-removed"
+	# A flow a relay opened goes on only while something still lets it in
+	# (admit): a relay removed, or a service no longer forwarded, loses
+	# the flows it had open too, not only new ones, unless its port is
+	# public or the address has a grant. TCP gets a reset. Related packets
+	# (ICMP errors from routers on the way) and the node's replies are not
+	# looked at. SetRelays fills it: until then, after Setup, open flows
+	# go on as before.
+	chain relay_check {
 	}
 
 	# Users' traffic does not reach the node itself (S-2): a proxy exit
@@ -356,12 +361,15 @@ func (n *NFT) SetForward(ports []Port) error {
 	return n.run(b.String())
 }
 
-// relayMark is the conntrack mark bit of flows a relay opened (relay_flow).
-// Other bits of the mark stay as they are.
+// relayMark is the conntrack mark bit of flows a relay opened (admit,
+// relay_check); other bits stay as they are. Rules elsewhere that set the
+// whole mark, or match it without a mask, see this bit too
+// (docs/08-decisions.md, R4-32).
 const relayMark = "0x00400000"
 
 // SetRelays replaces the relays' addresses (single ones) and the ports they
-// reach. The flows a relay opened end when it goes (relay_flow).
+// reach, and turns relay_check on: the flows a relay opened end when
+// nothing lets them in any more.
 func (n *NFT) SetRelays(addrs []netip.Prefix, ports []Port) error {
 	var v4, v6 []string
 	for _, p := range addrs {
@@ -381,6 +389,12 @@ func (n *NFT) SetRelays(addrs []netip.Prefix, ports []Port) error {
 			fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set.name, strings.Join(set.elems, ", "))
 		}
 	}
+	// With the sets, in the same transaction.
+	fmt.Fprintf(&b, "flush chain inet %[1]s relay_check\n"+
+		"add rule inet %[1]s relay_check jump admit\n"+
+		"add rule inet %[1]s relay_check counter comment \"relay-removed\"\n"+
+		"add rule inet %[1]s relay_check meta l4proto tcp reject with tcp reset\n"+
+		"add rule inet %[1]s relay_check drop\n", Table)
 	return n.run(b.String())
 }
 
