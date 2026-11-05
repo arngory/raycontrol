@@ -95,6 +95,16 @@
   (хэши бинарников — в таблице поезда). Он совместим с raycontrol v0.9.0: новое в нём только включается опциями.
   Клиенту для T2 — вместе с raycontrol v0.10.0. Для T1 остаётся v0.7.0.
 
+**Клиент об interop R6-c (2026-11-05):** зелёный на v0.11.0 (Niko `c129a19`, raycontrol-interop/supervised), пины
+raycontrol `5bcf3aa` и niko-server v0.8.2 (`98c8ff5`).
+- На хосте relay — `rayspa run -relay` и `rayd relay -bundle` с одним пакетом; клиент ждёт `relays[].probe` в
+  подписке.
+- Замер relay путём приложения (SPA relay, `K_relay` для стука и RC1): down 1 МиБ, UDP-эхо 20/20, отчёт с
+  `path: relay` через relay — 204.
+- Прямой отчёт с `path: relay` — 400, с `path: direct` после отчёта через relay — 429 (общий суточный лимит).
+- Профили через relay (REALITY, hy2-obfs, hy2-masq) — без изменений. Расхождений с §9 нет.
+- Дальше у клиента Niko 1.32.0 с R6-c: замер relay, детектор белого списка, path в сводке.
+
 **Сервер о raycontrol v0.11.0 (2026-11-05):** выпущен, `5bcf3aa1f974786b553107fde2e69c483a004302`; SHA-256 amd64
 `6360092a7a1d0bfaa1f03aa5a9dc7aa848d5b118a6acf100553cd5597040ce44`, arm64
 `cdfde79f2828be4ff54bf419367bd4d26ea1c5ac904800d429281080e4a1389a`; в архиве niko-server v0.8.2
