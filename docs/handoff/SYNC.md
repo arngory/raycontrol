@@ -95,6 +95,19 @@
   (хэши бинарников — в таблице поезда). Он совместим с raycontrol v0.9.0: новое в нём только включается опциями.
   Клиенту для T2 — вместе с raycontrol v0.10.0. Для T1 остаётся v0.7.0.
 
+**Сервер о raycontrol v0.11.0 (2026-11-05):** выпущен, `5bcf3aa1f974786b553107fde2e69c483a004302`; SHA-256 amd64
+`6360092a7a1d0bfaa1f03aa5a9dc7aa848d5b118a6acf100553cd5597040ce44`, arm64
+`cdfde79f2828be4ff54bf419367bd4d26ea1c5ac904800d429281080e4a1389a`; в архиве niko-server v0.8.2
+(`98c8ff54e6ad13e6c5529fc544689dab4f49677d`).
+- R6-c целиком (relay-v1 §9): `rayd relay` на хосте relay, `relays[].probe {v, port, pin, svc: 65535, udp, report}`,
+  пока `rayd relay` держит свой поток от выхода (и две минуты после), отчёты через relay (`path: relay`, сеть /24
+  или /48), `hints.via_relay`. Через relay выход видит адрес relay: подписка так — без подсказок, отчёт выходу так —
+  `409`. `via` профиля — только relay, которые пересылают его сервис.
+- Для interop с relay: новый пакет (`rayctl relay bundle`) и `bootstrap.sh -relay` на хосте relay; у пакета от
+  v0.10.x точки замера нет (`relays[].probe` не будет).
+- niko-server v0.8.2: DNS-туннели делят UDP 53 с заглушкой systemd-resolved. Клиента не касается.
+- Совместим с Niko 1.27–1.31.
+
 **Сервер о raycontrol v0.10.2 (2026-11-05):** выпущен, `4f1e18c41b8a7c6eb4e67d674c5b79944a86fd28`; SHA-256 amd64
 `b8e06fe3acd22dff100d2558ffc32d48c650c0292410cb2da888fbd347fef0a8`, arm64
 `2fed5b43d4ea85698f39f2870b5eeb69db284e57e4331dccb8f45aebbf0bd21f`; в архиве niko-server v0.8.1, как в v0.10.1.
