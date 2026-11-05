@@ -24,8 +24,28 @@ func TestVerifyAndZone(t *testing.T) {
 	}
 	bad := *c
 	bad.Token = "bad"
-	if err := bad.Verify(ctx); err == nil || !strings.Contains(err.Error(), "Invalid API Token") {
+	if err := bad.Verify(ctx); err == nil || !strings.Contains(err.Error(), "Invalid API Token") || !strings.Contains(err.Error(), "not its ID") {
 		t.Fatalf("bad token: %v", err)
+	}
+}
+
+// A token of an account is unknown to /user/tokens/verify (1000 Invalid API
+// Token): it is checked under the account of the zones it reads.
+func TestVerifyAccountToken(t *testing.T) {
+	ctx := context.Background()
+	f, c := cftest.New(t)
+	f.AccountToken = "acct"
+	c.Token = "acct"
+	if err := c.Verify(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if z, err := c.ZoneFor(ctx, "node.example.com"); err != nil || z.ID != "z1" {
+		t.Fatalf("zone %+v %v", z, err)
+	}
+	// An account token that sees no zone is reported as the API says.
+	f.Zones = nil
+	if err := c.Verify(ctx); err == nil || !strings.Contains(err.Error(), "1000 Invalid API Token") {
+		t.Fatalf("no zones: %v", err)
 	}
 }
 
