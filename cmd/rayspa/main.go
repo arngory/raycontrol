@@ -102,7 +102,7 @@ func run(args []string) error {
 	fw := &perimeter.NFT{NflogGroup: uint16(*group), RateLimit: *rate}
 	open := localFeed(*socket)
 	if *relayBundle != "" {
-		b, err := readRelayBundle(*relayBundle)
+		b, err := node.ReadRelayBundle(*relayBundle)
 		if err != nil {
 			return err
 		}
@@ -268,22 +268,6 @@ func relayFeed(b node.RelayBundle) (openFeed, error) {
 		}
 		return relayStream{s}, nil
 	}, nil
-}
-
-// readRelayBundle reads the relay's bundle: root's file, it holds the key.
-func readRelayBundle(path string) (node.RelayBundle, error) {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return node.RelayBundle{}, err
-	}
-	if fi.Mode().Perm()&0o077 != 0 {
-		return node.RelayBundle{}, fmt.Errorf("relay bundle %s is mode %v: it holds a private key, make it 0600", path, fi.Mode().Perm())
-	}
-	b, err := os.ReadFile(path) //nolint:gosec // G304: the configured bundle
-	if err != nil {
-		return node.RelayBundle{}, err
-	}
-	return node.DecodeRelayBundle(string(b))
 }
 
 func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, log *slog.Logger) {

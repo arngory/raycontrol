@@ -49,7 +49,8 @@ func (f *relayFeed) relayFrom(ctx context.Context, peer string) (store.Relay, er
 // turns into its answer to the client: FailedPrecondition for summaries off
 // (404), ResourceExhausted for a network already counted today (429),
 // InvalidArgument for a bad report (400), PermissionDenied for a device the
-// relay does not know (403), Unavailable for too many calls at once (503).
+// relay does not know (404, as for an unknown device), Unavailable for too
+// many calls at once (503).
 func (f *relayFeed) Report(ctx context.Context, req *connect.Request[perimeterv1.ReportRequest]) (*connect.Response[perimeterv1.ReportResponse], error) {
 	relay, err := f.relayFrom(ctx, req.Peer().Addr)
 	if err != nil {

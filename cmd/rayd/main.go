@@ -40,6 +40,7 @@ import (
 	"github.com/arngory/raycontrol/internal/pprofx"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/relayprobe"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/site"
 	"github.com/arngory/raycontrol/internal/store"
@@ -64,6 +65,7 @@ commands:
   serve    serve the node API on the local socket
   site     serve the decoy site on a unix socket (run by its own unit)
   naive    serve NaiveProxy (HTTP/2) behind the niko-server front (its own unit)
+  relay    serve a relay host's probe endpoint (relay-v1 §9.1; its own unit there)
   version  print the version
 `)
 	os.Exit(2)
@@ -88,6 +90,8 @@ func main() {
 		err = cmdSite(os.Args[2:])
 	case "naive":
 		err = cmdNaive(os.Args[2:])
+	case "relay":
+		err = cmdRelay(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:
@@ -919,6 +923,42 @@ func cmdNaive(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// cmdRelay serves the probe-v1 endpoint of a relay host (relay-v1 §9.1):
+// TCP (TLS) and the UDP echo on the bundle's port, the devices and their
+// K_relay from the exit, reports passed on to the exit.
+func cmdRelay(args []string) error {
+	fs := flag.NewFlagSet("relay", flag.ExitOnError)
+	bundle := fs.String("bundle", "", "the relay's bundle (rayctl relay bundle on the exit); a file only its owner reads")
+	daily := fs.Int("probe-daily", 0, "probe volume per device and UTC day, MiB (default: probe-v1's)")
+	fs.Parse(args)
+	if *bundle == "" || fs.NArg() != 0 || *daily < 0 {
+		return errors.New("relay needs -bundle")
+	}
+	b, err := node.ReadRelayBundle(*bundle)
+	if err != nil {
+		return err
+	}
+	log := logx.New(os.Stderr, slog.LevelInfo)
+	s, tlsCfg, err := relayprobe.New(b, int64(*daily)<<20, log)
+	if err != nil {
+		return err
+	}
+	addr := ":" + strconv.Itoa(int(b.Probe.Port))
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		_ = ln.Close()
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	log.Info("relay probe endpoint", "relay", b.Name, "port", b.Probe.Port, "exit", b.Exit, "version", version)
+	return s.Serve(ctx, ln, pc, tlsCfg)
 }
 
 // serveHTTP3 serves h on QUIC over the front's datagrams until ctx ends:

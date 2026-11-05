@@ -26,11 +26,11 @@ func TestReadRelayBundle(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "relay.bundle")
 	os.WriteFile(path, []byte(enc+"\n"), 0o644)
-	if _, err := readRelayBundle(path); err == nil || !strings.Contains(err.Error(), "0600") {
+	if _, err := node.ReadRelayBundle(path); err == nil || !strings.Contains(err.Error(), "0600") {
 		t.Fatalf("a bundle others can read: %v", err)
 	}
 	os.Chmod(path, 0o600)
-	b, err := readRelayBundle(path)
+	b, err := node.ReadRelayBundle(path)
 	if err != nil || b.Name != "r1" || b.Exit.String() != "203.0.113.7" {
 		t.Fatalf("bundle %+v %v", b, err)
 	}

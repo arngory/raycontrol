@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"strings"
 )
 
@@ -67,4 +68,21 @@ func DecodeRelayBundle(s string) (RelayBundle, error) {
 		return b, errors.New("relay bundle with a probe endpoint without port or certificate")
 	}
 	return b, nil
+}
+
+// ReadRelayBundle reads a relay's bundle from a file that only its owner may
+// read: it holds the relay's keys.
+func ReadRelayBundle(path string) (RelayBundle, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return RelayBundle{}, err
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return RelayBundle{}, fmt.Errorf("relay bundle %s is mode %v: it holds a private key, make it 0600", path, fi.Mode().Perm())
+	}
+	b, err := os.ReadFile(path) //nolint:gosec // G304: the configured bundle
+	if err != nil {
+		return RelayBundle{}, err
+	}
+	return DecodeRelayBundle(string(b))
 }
