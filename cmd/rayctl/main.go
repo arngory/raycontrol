@@ -68,7 +68,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   summary on|off                            take client reports (and give hints) or not
   summary api ipinfo [-token-file F] | none the online AS lookup for addresses the databases miss
   summary db FILE.mmdb | -remove            an AS database of your own before the release's (root)
-  debug [show] | on [-for 30m] | off        the debug window: rayd, rayspa and the data plane log at debug
+  debug [show] | on [-for 30m] | off        the debug window: rayd, rayspa and niko-server log at debug
                                             level (client addresses too) until it closes by itself; root
 
   check [-host ADDR] [-domain D] [-services a,b]

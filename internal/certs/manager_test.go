@@ -249,3 +249,22 @@ func TestManagerWildcard(t *testing.T) {
 		t.Fatal("rotation waits for a certificate it has")
 	}
 }
+
+// Run sleeps until the soonest next try when a retry moved one forward,
+// not its whole interval.
+func TestManagerWait(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	m := &Manager{next: map[string]time.Time{}}
+	if w := m.wait(time.Hour, now); w != time.Hour {
+		t.Fatalf("nothing pending: %v", w)
+	}
+	m.next["a"] = now.Add(2 * time.Hour)
+	m.next["b"] = now.Add(10 * time.Minute)
+	if w := m.wait(time.Hour, now); w != 10*time.Minute {
+		t.Fatalf("a retry in 10m: %v", w)
+	}
+	m.next["c"] = now.Add(-time.Minute) // due already
+	if w := m.wait(time.Hour, now); w != time.Second {
+		t.Fatalf("one due: %v", w)
+	}
+}

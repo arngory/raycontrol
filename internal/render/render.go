@@ -115,8 +115,9 @@ type Model struct {
 	// devices allowed on it (spec/dnsauth-v1.md): "<device id> <hex>".
 	// Only CollectForRender fills it.
 	DNSAuth map[int64][]string
-	// Debug: the debug window is open (rayctl debug): the data plane logs
-	// at debug level (Xray at info, its access log still off).
+	// Debug: the debug window is open (rayctl debug): niko-server logs at
+	// debug level. Xray stays at warning: at info it logs the users'
+	// destinations.
 	Debug bool
 }
 
@@ -867,7 +868,9 @@ func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, er
 		rules = append([]map[string]any{{"domain": []string{"full:" + ProbeName}, "outboundTag": "probe"}}, rules...)
 	}
 	b, err := jsonFile(map[string]any{
-		"log": map[string]string{"loglevel": map[bool]string{false: "warning", true: "info"}[m.Debug], "access": "none"},
+		// Warning even in the debug window: at info Xray logs where every
+		// connection goes, the users' destinations.
+		"log": map[string]string{"loglevel": "warning", "access": "none"},
 		"api": map[string]any{"tag": "api", "listen": p.APISocket(s.Name), "services": []string{"HandlerService"}},
 		"dns": map[string]any{
 			// DoH to public resolvers: the host resolver may sit in a private

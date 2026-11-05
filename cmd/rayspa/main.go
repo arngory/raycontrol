@@ -277,6 +277,7 @@ type debugLevel struct {
 	level  slog.LevelVar
 	mu     sync.Mutex
 	timer  *time.Timer
+	gen    uint64 // a timer set before the latest snapshot does nothing
 }
 
 func (d *debugLevel) until(t int64) {
@@ -288,13 +289,21 @@ func (d *debugLevel) until(t int64) {
 	if d.timer != nil {
 		d.timer.Stop()
 	}
+	d.gen++
 	left := time.Until(time.Unix(t, 0))
 	if t == 0 || left <= 0 {
 		d.level.Set(slog.LevelInfo)
 		return
 	}
 	d.level.Set(slog.LevelDebug)
-	d.timer = time.AfterFunc(left, func() { d.level.Set(slog.LevelInfo) })
+	gen := d.gen
+	d.timer = time.AfterFunc(left, func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if d.gen == gen {
+			d.level.Set(slog.LevelInfo)
+		}
+	})
 }
 
 func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, dl *debugLevel, log *slog.Logger) {

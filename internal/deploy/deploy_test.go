@@ -944,7 +944,7 @@ func TestPort53(t *testing.T) {
 	niko = "v0.8.2"
 	// A run that stopped halfway (drop-in moved aside), then uninstall: it
 	// goes too.
-	mark := filepath.Join(deploy.StateDir, "resolved-stub.pending")
+	mark := filepath.Join(deploy.JournalDir, "resolved-stub.pending")
 	h = newHost(t, "", ours, true, false)
 	apply(t, h, p)
 	if _, err := os.Stat(filepath.Join(h.root, mark)); err != nil {

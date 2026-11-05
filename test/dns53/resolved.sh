@@ -26,7 +26,12 @@ fail() {
 	ss -Hlunp 'sport = :53' >&2 || true
 	exit 1
 }
-bound() { ss -Hlun 'sport = :53' | grep -q "$1:53 "; }
+# bound ADDR: a UDP socket on ADDR:53. resolved binds its stub to lo, which
+# ss prints as 127.0.0.53%lo:53.
+bound() {
+	local re=${1//./\\.}
+	ss -Hlun 'sport = :53' | awk '{print $4}' | grep -Eq "^${re}(%[^:]+)?:53$"
+}
 waitfor() {
 	for _ in $(seq 50); do
 		bound "$1" && return 0

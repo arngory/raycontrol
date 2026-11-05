@@ -12,7 +12,7 @@ import (
 )
 
 // debug opens or closes the debug window (docs/09-observability.md §3):
-// rayd, rayspa and the data plane log at debug level until it ends by
+// rayd, rayspa and niko-server log at debug level until it ends by
 // itself. Client addresses then reach the journal.
 func (c *cli) debug(ctx context.Context, sub string, args []string) error {
 	switch sub {
@@ -38,7 +38,7 @@ func (c *cli) debug(ctx context.Context, sub string, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("debug window open until %s: rayd, rayspa and the data plane log at debug level\n", clock(r.Msg.Until))
+		fmt.Printf("debug window open until %s: rayd, rayspa and niko-server log at debug level (Xray stays at warning)\n", clock(r.Msg.Until))
 		fmt.Println("the data-plane services restart now and when the window closes; their connections drop")
 		fmt.Println("client addresses go to the journal: rayctl debug off when done")
 		fmt.Printf("logs of the window: rayctl report -logs debug -since %dm -id <run> -o FILE\n", int((*d + 10*time.Minute).Minutes()))

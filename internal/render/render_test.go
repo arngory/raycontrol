@@ -475,7 +475,8 @@ func TestDebugLevels(t *testing.T) {
 		t.Fatalf("usual levels %v", got)
 	}
 	st.SetDebugUntil(ctx, time.Now().Add(time.Hour))
-	want = map[string]string{"front": "debug/", "dns": "debug/", "mdns": "debug/", "inner": "info/none"}
+	// Xray at warning still: at info it logs the users' destinations.
+	want = map[string]string{"front": "debug/", "dns": "debug/", "mdns": "debug/", "inner": "warning/none"}
 	if got := levels(); !maps.Equal(got, want) {
 		t.Fatalf("debug levels %v", got)
 	}

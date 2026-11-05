@@ -95,8 +95,8 @@ service NodeService {
   // token is stored by rayd and never returned.
   rpc SetSummary(SetSummaryRequest) returns (SetSummaryResponse);
   // SetDebug opens the debug window for a while or closes it: rayd, rayspa
-  // and the data plane log at debug level until it ends by itself
-  // (docs/09-observability.md §3). On the node only.
+  // and niko-server log at debug level until it ends by itself
+  // (docs/09-observability.md §3). Root on the node only.
   rpc SetDebug(SetDebugRequest) returns (SetDebugResponse);
 
   // GetDeployment returns what root must install for the current services:

@@ -736,6 +736,9 @@ func checkPort53(ctx context.Context, st *store.Store, h *deploy.Host, frontUID 
 func followDebug(ctx context.Context, st *store.Store, level *slog.LevelVar, always bool, changes func() <-chan struct{}, notify func(), log *slog.Logger) {
 	open := false
 	for {
+		// The channel before the store: a change between the two wakes
+		// the loop instead of going unseen.
+		wake := changes()
 		now, until := time.Now(), st.DebugUntil(ctx)
 		on := now.Before(until)
 		switch {
@@ -758,7 +761,7 @@ func followDebug(ctx context.Context, st *store.Store, level *slog.LevelVar, alw
 		select {
 		case <-ctx.Done():
 			return
-		case <-changes():
+		case <-wake:
 		case <-time.After(wait):
 		}
 	}

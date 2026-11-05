@@ -127,9 +127,20 @@ func (m *Manager) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-m.wakeCh():
-		case <-time.After(every):
+		case <-time.After(m.wait(every, time.Now())):
 		}
 	}
+}
+
+// wait is how long Run sleeps: every, or less when a site's next try comes
+// sooner (one Retry moved forward). Run's goroutine only, as Once.
+func (m *Manager) wait(every time.Duration, now time.Time) time.Duration {
+	for _, next := range m.next {
+		if d := next.Sub(now); d < every {
+			every = max(d, time.Second)
+		}
+	}
+	return every
 }
 
 // Once issues what is due and returns how many certificates it stored.

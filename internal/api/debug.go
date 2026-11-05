@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -16,13 +17,19 @@ import (
 // level (its processes restart), rayspa takes it from its next snapshot
 // and rayd from DebugChanged; the window ends by itself.
 func (s *Server) SetDebug(ctx context.Context, req *connect.Request[nodev1.SetDebugRequest]) (*connect.Response[nodev1.SetDebugResponse], error) {
-	d := time.Duration(req.Msg.Seconds) * time.Second
+	// Client addresses go to the journal, which root reads.
+	if !isRoot(ctx) {
+		return nil, connect.NewError(connect.CodePermissionDenied, errors.New("the debug window: root only"))
+	}
 	var until time.Time
 	var err error
+	// The bound before the product: a huge count must not wrap around.
+	sec := req.Msg.Seconds
+	d := time.Duration(min(max(sec, 0), int64(store.MaxDebug/time.Second)+1)) * time.Second
 	switch {
-	case req.Msg.Seconds < 0 || d > store.MaxDebug:
-		err = fmt.Errorf("%w: a debug window of %v (a day at most)", store.ErrInvalid, d)
-	case d > 0:
+	case sec < 0 || sec > int64(store.MaxDebug/time.Second):
+		err = fmt.Errorf("%w: a debug window of %ds (a day at most)", store.ErrInvalid, sec)
+	case sec > 0:
 		until = time.Now().Add(d).Truncate(time.Second)
 	}
 	if err == nil {

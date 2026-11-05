@@ -208,8 +208,8 @@ type NodeServiceClient interface {
 	// token is stored by rayd and never returned.
 	SetSummary(context.Context, *connect.Request[v1.SetSummaryRequest]) (*connect.Response[v1.SetSummaryResponse], error)
 	// SetDebug opens the debug window for a while or closes it: rayd, rayspa
-	// and the data plane log at debug level until it ends by itself
-	// (docs/09-observability.md §3). On the node only.
+	// and niko-server log at debug level until it ends by itself
+	// (docs/09-observability.md §3). Root on the node only.
 	SetDebug(context.Context, *connect.Request[v1.SetDebugRequest]) (*connect.Response[v1.SetDebugResponse], error)
 	// GetDeployment returns what root must install for the current services:
 	// system users, unit files and other files. rayctl apply writes them.
@@ -745,8 +745,8 @@ type NodeServiceHandler interface {
 	// token is stored by rayd and never returned.
 	SetSummary(context.Context, *connect.Request[v1.SetSummaryRequest]) (*connect.Response[v1.SetSummaryResponse], error)
 	// SetDebug opens the debug window for a while or closes it: rayd, rayspa
-	// and the data plane log at debug level until it ends by itself
-	// (docs/09-observability.md §3). On the node only.
+	// and niko-server log at debug level until it ends by itself
+	// (docs/09-observability.md §3). Root on the node only.
 	SetDebug(context.Context, *connect.Request[v1.SetDebugRequest]) (*connect.Response[v1.SetDebugResponse], error)
 	// GetDeployment returns what root must install for the current services:
 	// system users, unit files and other files. rayctl apply writes them.

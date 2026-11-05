@@ -7,7 +7,7 @@ import (
 )
 
 // The debug window (rayctl debug, docs/09-observability.md §3): until this
-// time rayd, rayspa and the data plane log at debug level. Client
+// time rayd, rayspa and niko-server log at debug level. Client
 // addresses then reach the journal, so the window always ends by itself.
 const settingDebugUntil = "debug_until"
 

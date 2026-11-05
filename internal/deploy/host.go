@@ -508,11 +508,13 @@ func (h *Host) removeStale(plan Plan) error {
 }
 
 // stubPending marks a stub being given back: the drop-in is gone, the stub
-// not yet seen back. It is ours, so it lives with the node's state, not in
-// resolved's directory; stubPendingOld is v0.11.0's mark there, the drop-in
-// moved aside (resolved reads *.conf only), honoured and removed alike.
+// not yet seen back. It is ours, so it lives in the install journal's
+// directory, root's alone (the state directory is rayd's: a link put there
+// could turn root's write elsewhere), not in resolved's; stubPendingOld is
+// v0.11.0's mark there, the drop-in moved aside (resolved reads *.conf
+// only), honoured and removed alike.
 const (
-	stubPending    = StateDir + "/resolved-stub.pending"
+	stubPending    = JournalDir + "/resolved-stub.pending"
 	stubPendingOld = ResolvedDropIn + ".gone"
 )
 
@@ -597,12 +599,14 @@ func (h *Host) giveBackStub() error {
 		}
 		// The mark first: a run stopped between the two finds it and the
 		// drop-in, and starts here again.
-		if err := mkdirAll(h.path(StateDir), 0o711); err != nil {
+		if err := mkdirAll(h.path(JournalDir), 0o700); err != nil {
 			return err
 		}
-		if err := os.WriteFile(h.path(stubPending), nil, 0o600); err != nil {
+		f, err := os.OpenFile(h.path(stubPending), os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+		if err != nil {
 			return err
 		}
+		f.Close()
 		if err := os.Remove(h.path(ResolvedDropIn)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
