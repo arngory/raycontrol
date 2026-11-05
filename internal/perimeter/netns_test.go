@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"google.golang.org/protobuf/proto"
 
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/spa"
@@ -460,7 +461,7 @@ func TestNetns(t *testing.T) {
 		}
 		port := func(proto string, n uint32) *perimeterv1.Port { return &perimeterv1.Port{Proto: proto, Port: n} }
 		public := snap.PublicPorts
-		snap.RelayPorts = []*perimeterv1.Port{port("tcp", 18444), port("tcp", 18445), port("udp", 18446), port("tcp", 18447)}
+		snap.RelayPorts = []*perimeterv1.Port{port("tcp", 18444), port("tcp", 18445), port("udp", 18446), port("tcp", 18447), port("tcp", 18448)}
 		if err := gate.Update(snap); err != nil {
 			t.Fatal(err)
 		}
@@ -486,6 +487,33 @@ func TestNetns(t *testing.T) {
 		}
 		if !sends(tcpFlow, "c") || !sends(udpFlow, "c") {
 			t.Fatal("a relay flow cut by the table restored")
+		}
+		if !dial("18444") {
+			t.Fatal("no new relay flow after the table is restored")
+		}
+		// rayspa started again with the relay removed meanwhile: the flow
+		// the relay had open ends.
+		downFlow := open("tcp", 18448)
+		if !sends(downFlow, "a") {
+			t.Fatal("an open relay flow does not pass")
+		}
+		gone := proto.Clone(snap).(*perimeterv1.Snapshot)
+		gone.RelayPrefixes, gone.RelayPorts = nil, nil // as rayd sends it with no relays
+		if err := fw.Setup(); err != nil {
+			t.Fatal(err)
+		}
+		if err := NewGate(fw, quiet).Update(gone); err != nil {
+			t.Fatal(err)
+		}
+		if sends(downFlow, "b") {
+			t.Fatal("a relay flow goes on after rayspa started again without the relay")
+		}
+		// This test's gate puts its own table back.
+		if out, err := exec.Command("nft", "delete", "table", "inet", Table).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		if _, err := gate.Tick(); err != nil {
+			t.Fatal(err)
 		}
 		snap.RelayPorts = []*perimeterv1.Port{port("tcp", 18444), port("udp", 18446), port("tcp", 18447)}
 		if err := gate.Update(snap); err != nil {

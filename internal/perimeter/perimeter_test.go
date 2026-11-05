@@ -35,6 +35,8 @@ type fakeFW struct {
 	setups     int
 	acmePort   uint16
 	acmeTTL    time.Duration
+	relaysSets int // SetRelays calls
+	adminFails int // SetAdmin calls still to fail
 }
 
 func (f *fakeFW) SetACME(port uint16, ttl time.Duration) error {
@@ -63,6 +65,7 @@ func (f *fakeFW) flush() {
 	defer f.mu.Unlock()
 	f.gone = true
 	f.udp, f.tcp, f.public, f.admin, f.adminPorts, f.rot, f.open = nil, nil, nil, nil, nil, nil, nil
+	f.relays, f.relayPorts, f.forward = nil, nil, nil
 	f.acmePort, f.acmeTTL = 0, 0
 }
 func (f *fakeFW) Teardown() error { return nil }
@@ -80,6 +83,10 @@ func (f *fakeFW) SetRotation(udp map[uint16]uint16) error {
 	return nil
 }
 func (f *fakeFW) SetAdmin(p []netip.Prefix, ports []Port) error {
+	if f.adminFails > 0 {
+		f.adminFails--
+		return errors.New("nft: busy")
+	}
 	f.admin, f.adminPorts = p, ports
 	return nil
 }
@@ -89,6 +96,7 @@ func (f *fakeFW) SetForward(ports []Port) error {
 }
 func (f *fakeFW) SetRelays(p []netip.Prefix, ports []Port) error {
 	f.relays, f.relayPorts = p, ports
+	f.relaysSets++
 	return nil
 }
 func (f *fakeFW) Allow(a netip.Addr, ports []Port, ttl time.Duration) error {
@@ -272,6 +280,38 @@ func TestGateRestoresTable(t *testing.T) {
 	// Nothing to restore while the table is there.
 	if _, err := g.Tick(); err != nil || fw.setups != 1 {
 		t.Fatalf("setups=%d err=%v", fw.setups, err)
+	}
+
+	// A restore that fails halfway leaves a table, and is tried again.
+	fw.flush()
+	fw.adminFails = 1
+	if _, err := g.Tick(); err == nil {
+		t.Fatal("a failed restore said nothing")
+	}
+	if ok, _ := fw.Present(); !ok || len(fw.relays) != 0 {
+		t.Fatalf("after a failed restore: present %v, relays %v", ok, fw.relays)
+	}
+	if _, err := g.Tick(); err != nil || fw.setups != 3 || len(fw.admin) != 1 || len(fw.relays) != 2 {
+		t.Fatalf("restore again: setups=%d admin=%v relays=%v %v", fw.setups, fw.admin, fw.relays, err)
+	}
+	if _, err := g.Tick(); err != nil || fw.setups != 3 {
+		t.Fatalf("restored once: setups=%d %v", fw.setups, err)
+	}
+}
+
+// relay_check goes on with the first snapshot, relays or none: it ends the
+// flows of relays removed while rayspa was down.
+func TestGateRelaysOnce(t *testing.T) {
+	fw := &fakeFW{}
+	g := NewGate(fw, quiet)
+	snap := testSnapshot(&perimeterv1.Device{Id: "alice", Key: key(0x11), Allowed: []uint32{2}})
+	for range 2 {
+		if err := g.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fw.relaysSets != 1 {
+		t.Fatalf("SetRelays %d times", fw.relaysSets)
 	}
 }
 

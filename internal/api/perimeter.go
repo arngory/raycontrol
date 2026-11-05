@@ -179,7 +179,12 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 			}
 			ports, _ := servicePorts(svc, ssh)
 			for _, port := range ports {
-				if !seen[port.String()] {
+				// Public anyway (REALITY open=true): the relay's flows there
+				// are nobody's to cut.
+				public := slices.ContainsFunc(snap.PublicPorts, func(p *perimeterv1.Port) bool {
+					return p.Proto == port.Proto && p.Port == uint32(port.Num)
+				})
+				if !public && !seen[port.String()] {
 					seen[port.String()] = true
 					snap.RelayPorts = append(snap.RelayPorts, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
 				}

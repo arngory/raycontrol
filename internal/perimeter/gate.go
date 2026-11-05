@@ -53,6 +53,7 @@ type Gate struct {
 	relays     []netip.Prefix
 	relayPorts []Port
 	relaysSet  bool   // SetRelays has run: relay_check is on
+	restoring  bool   // a restore of the table has not finished
 	forward    []Port // every service port: what a relay forwards
 	// holders tracks which devices opened an address and port and until
 	// when, so that a revocation closes only what nobody else still holds.
@@ -303,7 +304,7 @@ func (g *Gate) Tick() ([]uint16, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !present {
+	if !present || g.restoring {
 		if err := g.restoreLocked(); err != nil {
 			return nil, err
 		}
@@ -330,7 +331,11 @@ func (g *Gate) Tick() ([]uint16, error) {
 // it, grants included with the time they have left. Until then the node
 // was as open as the rest of the ruleset let it be, so this runs on every
 // tick.
+//
+// A restore that fails halfway is tried again at the next tick, the table
+// being there or not.
 func (g *Gate) restoreLocked() error {
+	g.restoring = true
 	if err := g.fw.Setup(); err != nil {
 		return err
 	}
@@ -341,11 +346,6 @@ func (g *Gate) restoreLocked() error {
 	}
 	if len(g.admin) > 0 || len(g.adminPorts) > 0 {
 		if err := g.fw.SetAdmin(g.admin, g.adminPorts); err != nil {
-			return err
-		}
-	}
-	if g.relaysSet {
-		if err := g.fw.SetRelays(g.relays, g.relayPorts); err != nil {
 			return err
 		}
 	}
@@ -376,11 +376,20 @@ func (g *Gate) restoreLocked() error {
 			grants++
 		}
 	}
-	g.log.Warn("nftables table was removed (flush ruleset? nftables or firewalld reload?), restored", "table", Table, "grants", grants)
-	if g.verifier == nil {
-		return nil
+	// Last, with the grants back: relay_check cuts what nothing lets in.
+	if g.relaysSet {
+		if err := g.fw.SetRelays(g.relays, g.relayPorts); err != nil {
+			return err
+		}
 	}
-	return g.slotsLocked()
+	if g.verifier != nil {
+		if err := g.slotsLocked(); err != nil {
+			return err
+		}
+	}
+	g.restoring = false
+	g.log.Warn("nftables table was removed (flush ruleset? nftables or firewalld reload?), restored", "table", Table, "grants", grants)
+	return nil
 }
 
 func (g *Gate) slotsLocked() error {
