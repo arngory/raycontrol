@@ -190,7 +190,7 @@ systemd-юниты, хранение секретов через systemd credent
 - [x] v0.11.1: install и apply открывают `/etc/resolv.conf` (и цель ссылки) до 0644, как `repairModes`.
 - [x] v0.11.1: `rayctl check` и здоровье rayd (`resolver`) — нечитаемый resolv.conf или без `nameserver`.
 - [x] v0.11.1: `rayctl dns cloudflare` и `dns sync` повторяют выпуск сертификата сразу (не чаще раза в 15 минут).
-- [ ] v0.11.1: заметки к релизу и выпуск — по «да» пользователя.
+- [x] v0.11.1: выпущен (`ace9290`), с niko-server v0.8.3.
 - [x] v0.11.1: без ложного `service doh (doh) is not deployed` (f51577a); `rayctl report -logs debug`.
 - [x] naive не соединялся: клиент не стучал SPA (Niko 1.32.1).
 - [x] naive: адрес ноды в хосте ссылки и поддомен в `sni=`, как у hy2 и REALITY.

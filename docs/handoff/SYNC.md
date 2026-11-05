@@ -133,6 +133,18 @@ raycontrol `5bcf3aa` и niko-server v0.8.2 (`98c8ff5`).
   (сессия по ClientID, ответ тому, кто спросил), но резолвер, добавленный в сессию, — с EDNS не меньше, чем у тех, с которыми она началась
   (dnsprobe-v1 §6).
 
+**Сервер о raycontrol v0.11.1 (2026-11-05):** выпущен, `ace92903ea2c41eb473f413ee738d6a0d7ad1b10`; SHA-256 архивов
+amd64 `9b2bb93c0175aca2174e326f198f87cfe8216b8c2cb8bede8d931c7c7b4cb1b1`, arm64
+`12d46c4df5a3eafbe373ca3904173c601374927c100e3ecb55ee9d1095705bb7`; подпись minisign проверена. В архиве niko-server
+v0.8.3 (`2f949d50f27fabb44a5ce1cb05b13b5ab72a9245`; SHA-256 amd64
+`53337177dcb137824a5ef9cd006ed437962eac2ec3d3826a36d4de85f3974d31`, arm64
+`fda759bb9fdaccfa3b9ddd5cdab52e0ed63fcee0c864e456e7aa45f89cacfabc`).
+- dnsprobe-v1 — в формате 4d10bd3 (nonce ответа, только зоны dnstt); клиент сверил вектор (Niko 2a722f9).
+- Ключ пробы создаётся и рендерится с любым фронтом; `probe_key_file` — только при зоне dnstt. Нечитаемый ключ
+  niko-server выключает пробы, фронт работает.
+- Резолвер, добавленный в сессию dnstt, — с EDNS не меньше, чем у тех, с которыми она началась (dnsprobe-v1 §6).
+- Маскировка DNS-туннелей — отдельный кейс, TBD (roadmap): шифрованная обвязка dnstt, скрытый ClientID, набивка.
+
 **Сервер о raycontrol v0.11.0 (2026-11-05):** выпущен, `5bcf3aa1f974786b553107fde2e69c483a004302`; SHA-256 amd64
 `6360092a7a1d0bfaa1f03aa5a9dc7aa848d5b118a6acf100553cd5597040ce44`, arm64
 `cdfde79f2828be4ff54bf419367bd4d26ea1c5ac904800d429281080e4a1389a`; в архиве niko-server v0.8.2
