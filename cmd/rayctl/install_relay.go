@@ -24,9 +24,25 @@ import (
 // relaySnapshot is where rayspa keeps the last snapshot it applied.
 const relaySnapshot = deploy.RayspaState
 
-// relayGuard is the transient systemd timer that takes rayspa down if
-// rayctl dies (kill -9, out of memory) before rayspa passed its checks.
-const relayGuard = "raycontrol-relay-guard"
+// The guard: a transient systemd timer that takes rayspa down if rayctl
+// dies (kill -9, out of memory) before rayspa passed its checks. It acts
+// only while guardArmed is there, under guardLock, so that disarming it and
+// its going off cannot cross: one of them happens, and rayctl knows which.
+const (
+	relayGuard = "raycontrol-relay-guard"
+	guardLock  = "/run/" + relayGuard + ".lock"
+	guardArmed = "/run/" + relayGuard + ".armed"
+	// guardAfter covers starting rayspa (network-online.target may take two
+	// minutes) and its first snapshot (45 s).
+	guardAfter = 5 * time.Minute
+)
+
+// guardCommand is the systemd-run command line that arms the guard.
+func guardCommand(flock, rayspa string) []string {
+	return []string{"systemd-run", "--unit=" + relayGuard, fmt.Sprintf("--on-active=%d", int(guardAfter/time.Second)),
+		"--timer-property=AccuracySec=1s", "--collect", flock, guardLock, "/bin/sh", "-c",
+		"test -e " + guardArmed + " || exit 0; rm -f " + guardArmed + "; systemctl disable --now " + relayUnit + "; exec " + rayspa + " teardown"}
+}
 
 // installRelay makes this host a relay (spec/relay-v1.md §3.1): the bundle,
 // rayspa taking its perimeter from the exit, forwarding on. rayspa closes
@@ -50,10 +66,14 @@ func installRelay(bundlePath, packages string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", bundlePath, err)
 	}
-	for _, tool := range []string{"nft", "systemctl", "install"} {
+	for _, tool := range []string{"nft", "systemctl", "systemd-run", "install"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			return fmt.Errorf("%s is missing: a relay needs nftables and systemd", tool)
 		}
+	}
+	flock, err := exec.LookPath("flock")
+	if err != nil {
+		return errors.New("flock is missing (util-linux): the install's guard timer needs it")
 	}
 	if _, err := os.Stat(deploy.DefaultBinaries.Rayspa); err != nil {
 		return fmt.Errorf("%s is missing: install/bootstrap.sh -relay installs it", deploy.DefaultBinaries.Rayspa)
@@ -114,6 +134,7 @@ func installRelay(bundlePath, packages string) error {
 	rayspa := deploy.DefaultBinaries.Rayspa
 	steps := relaySteps{
 		unitExists: func() bool { _, err := os.Stat(unitFile); return err == nil },
+		enabled:    func() bool { return commandApart("systemctl", "is-enabled", "--quiet", relayUnit).Run() == nil },
 		systemctl:  func(args ...string) error { return runApart("systemctl", args...) },
 		teardown:   func() error { return runApart(rayspa, "teardown") },
 		tableGone:  tableGone,
@@ -145,10 +166,13 @@ func installRelay(bundlePath, packages string) error {
 		},
 		guard: func() error {
 			_ = runApart("systemctl", "stop", relayGuard+".timer") // one left from an earlier install
-			return runApart("systemd-run", "--unit="+relayGuard, "--on-active=120", "--timer-property=AccuracySec=1s", "--collect",
-				"/bin/sh", "-c", "systemctl disable --now "+relayUnit+"; exec "+rayspa+" teardown")
+			if err := os.WriteFile(guardArmed, nil, 0o600); err != nil {
+				return err
+			}
+			args := guardCommand(flock, rayspa)
+			return runApart(args[0], args[1:]...)
 		},
-		unguard: func() error { return runApart("systemctl", "stop", relayGuard+".timer") },
+		unguard: unguard,
 		waitSnapshot: func(ctx context.Context) error {
 			err := waitFile(ctx, relaySnapshot, 45*time.Second)
 			if err != nil && ctx.Err() == nil {
@@ -184,6 +208,28 @@ func installRelay(bundlePath, packages string) error {
 	return nil
 }
 
+// unguard disarms the guard, under its lock: an error if it went off.
+func unguard() error { return unguardAt(guardLock, guardArmed) }
+
+func unguardAt(lock, armed string) error {
+	f, err := os.OpenFile(lock, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: a fixed path
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // closing unlocks too
+	if err := os.Remove(armed); errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("the guard timer took rayspa down: the install took over %v", guardAfter)
+	} else if err != nil {
+		return err
+	}
+	_ = runApart("systemctl", "stop", relayGuard+".timer")
+	return nil
+}
+
 // tableGone tells whether the perimeter's table is gone (nft list tables,
 // apart from the terminal).
 func tableGone() bool {
@@ -203,13 +249,14 @@ const relayUnit = "rayspa.service"
 // out, with the host's operations given so that a test can follow it.
 type relaySteps struct {
 	unitExists     func() bool
+	enabled        func() bool // systemctl is-enabled
 	systemctl      func(args ...string) error
 	teardown       func() error // rayspa teardown
 	tableGone      func() bool
 	write          func() error // users, files, sysctl but forwarding, daemon-reload
 	removeSnapshot func() error
 	guard          func() error // arms relayGuard
-	unguard        func() error // and disarms it
+	unguard        func() error // disarms it, or says it went off
 	waitSnapshot   func(context.Context) error
 	readSnapshot   func() (*perimeterv1.Snapshot, error)
 	check          func(*perimeterv1.Snapshot) (string, error)
@@ -225,9 +272,10 @@ var errInterrupted = errors.New("interrupted")
 //   - An earlier install's rayspa is disabled before the first write, and
 //     rayspa is only started until the check: a reboot opens the host,
 //     whatever happened to rayctl.
-//   - Before rayspa starts, a timer is armed that takes it down after two
-//     minutes unless the install disarms it: kill -9 or running out of
-//     memory leave no rayspa running on an unchecked perimeter either.
+//   - Before anything changes, a timer is armed that takes rayspa down
+//     after guardAfter unless the install disarms it, once the check has
+//     passed: kill -9 or running out of memory leave no rayspa running on
+//     an unchecked perimeter either. If it went off, the install fails.
 //   - Every other way out, a cancelled ctx (a signal) and a panic included,
 //     takes rayspa down at once; if that fails, the error says so and the
 //     timer is left to try again.
@@ -252,17 +300,18 @@ func (r relaySteps) run(ctx context.Context) (snap *perimeterv1.Snapshot, warnin
 	// Stopped before its snapshot goes: a rayspa still running would save
 	// the earlier bundle's perimeter, and that would be checked instead.
 	for _, f := range []func() error{
+		r.guard, // before anything changes: the earlier rayspa still runs
 		r.write,
 		func() error { return r.systemctl("stop", relayUnit) },
 		r.removeSnapshot,
-		r.guard,
 		func() error { return r.systemctl("start", relayUnit) },
 		func() error { return r.waitSnapshot(ctx) },
 		func() (err error) { snap, err = r.readSnapshot(); return err },
 		func() (err error) { warning, err = r.check(snap); return err },
-		r.forward,
-		r.enable,
+		// Checked: rayspa may run now, whatever happens to rayctl.
 		r.unguard,
+		r.enable,
+		r.forward,
 	} {
 		if err := step(f); err != nil {
 			return nil, "", err
@@ -288,7 +337,7 @@ func (r relaySteps) stop(why error) error {
 		return fmt.Errorf("%w; rayspa could NOT be taken down (%s): run systemctl disable --now %s && %s teardown "+
 			"before you leave this session", why, joined(disable, tear, errors.New("its table is still there")), relayUnit,
 			deploy.DefaultBinaries.Rayspa)
-	case disable != nil:
+	case disable != nil && r.enabled():
 		return fmt.Errorf("%w; the host is open now, but rayspa is still enabled and closes it again at boot (%s): "+
 			"run systemctl disable %s", why, joined(disable), relayUnit)
 	}

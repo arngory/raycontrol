@@ -114,7 +114,10 @@ func run(args []string) error {
 		// Forwarding is the relay's job (relay-v1 §3.1): rayctl install
 		// -relay turns it on; without it the kernel drops what it redirects.
 		if v, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err == nil && strings.TrimSpace(string(v)) != "1" {
-			log.Error("net.ipv4.ip_forward is off: nothing reaches the exit (sysctl -w net.ipv4.ip_forward=1)")
+			// rayctl install -relay turns it on only once this rayspa's
+			// first snapshot is checked: a warning until then, no error.
+			log.Warn("net.ipv4.ip_forward is off: nothing reaches the exit until it is on " +
+				"(rayctl install -relay turns it on once the relay is checked; sysctl -w net.ipv4.ip_forward=1)")
 		}
 	}
 	if err := fw.Setup(); err != nil {
