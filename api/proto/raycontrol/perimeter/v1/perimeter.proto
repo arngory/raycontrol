@@ -19,9 +19,24 @@ service PerimeterService {
 // devices (K_relay), never the devices' own keys.
 service RelayService {
   rpc WatchRelay(WatchRelayRequest) returns (stream WatchRelayResponse);
+  // Report passes on a client summary report the relay took at its probe-v1
+  // endpoint (relay-v1 §9.3): the relay checked RC1 with the device's
+  // K_relay. The exit takes it for a device the relay knows, about the
+  // client's network, never its address.
+  rpc Report(ReportRequest) returns (ReportResponse);
 }
 
 message WatchRelayRequest {}
+
+message ReportRequest {
+  string device = 1;
+  // The client's network: a /24 for IPv4, a /48 for IPv6.
+  string network = 2;
+  // The report as the client sent it (probe-v1 §6.1), path "relay".
+  bytes body = 3;
+}
+
+message ReportResponse {}
 
 message WatchRelayResponse {
   Snapshot snapshot = 1;

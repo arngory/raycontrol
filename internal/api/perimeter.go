@@ -232,41 +232,10 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 		return nil, err
 	}
 	snap := &perimeterv1.Snapshot{Spa: p.spaPB(params)}
-	services, err := p.Store.ListServices(ctx)
+	var scoped map[uint16]bool
+	snap.Services, scoped, err = p.relayServices(ctx, relay)
 	if err != nil {
 		return nil, err
-	}
-	scoped := map[uint16]bool{}
-	ssh := sshPorts(services)
-	sshPort := store.Port{Proto: "tcp", Num: relay.SSHPort}
-	for _, svc := range services {
-		if !svc.Enabled || svc.Public() {
-			continue
-		}
-		if svc.Kind == "ssh" {
-			if !scoped[uint16(svc.ID)] {
-				snap.Services = append(snap.Services, &perimeterv1.Service{Id: uint32(svc.ID), Local: true,
-					Ports: []*perimeterv1.Port{{Proto: sshPort.Proto, Port: uint32(sshPort.Num)}}})
-				scoped[uint16(svc.ID)] = true
-			}
-			continue
-		}
-		ports, err := servicePorts(svc, ssh)
-		if err != nil {
-			continue
-		}
-		// The relay host's SSH is not forwarded (IssueRelayBundle refuses
-		// such a port; a service given it later loses it here).
-		ports = slices.DeleteFunc(ports, func(p store.Port) bool { return p == sshPort })
-		if len(ports) == 0 {
-			continue
-		}
-		ps := &perimeterv1.Service{Id: uint32(svc.ID)}
-		for _, port := range ports {
-			ps.Ports = append(ps.Ports, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
-		}
-		snap.Services = append(snap.Services, ps)
-		scoped[uint16(svc.ID)] = true
 	}
 	devices, err := p.Store.SPADevices(ctx)
 	if err != nil {
@@ -288,6 +257,72 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 	snap.AdminPrefixes = slices.Clone(relay.Admin)
 	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: uint32(relay.SSHPort)}}
 	return snap, nil
+}
+
+// relayServices are the services a relay forwards to this node and its own
+// SSH (local), and their IDs.
+func (p *PerimeterServer) relayServices(ctx context.Context, relay store.Relay) ([]*perimeterv1.Service, map[uint16]bool, error) {
+	var out []*perimeterv1.Service
+	services, err := p.Store.ListServices(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	scoped := map[uint16]bool{}
+	ssh := sshPorts(services)
+	sshPort := store.Port{Proto: "tcp", Num: relay.SSHPort}
+	for _, svc := range services {
+		if !svc.Enabled || svc.Public() {
+			continue
+		}
+		if svc.Kind == "ssh" {
+			if !scoped[uint16(svc.ID)] {
+				out = append(out, &perimeterv1.Service{Id: uint32(svc.ID), Local: true,
+					Ports: []*perimeterv1.Port{{Proto: sshPort.Proto, Port: uint32(sshPort.Num)}}})
+				scoped[uint16(svc.ID)] = true
+			}
+			continue
+		}
+		ports, err := servicePorts(svc, ssh)
+		if err != nil {
+			continue
+		}
+		// The relay host's SSH is not forwarded (IssueRelayBundle refuses
+		// such a port; a service given it later loses it here).
+		ports = slices.DeleteFunc(ports, func(p store.Port) bool { return p == sshPort })
+		if len(ports) == 0 {
+			continue
+		}
+		ps := &perimeterv1.Service{Id: uint32(svc.ID)}
+		for _, port := range ports {
+			ps.Ports = append(ps.Ports, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
+		}
+		out = append(out, ps)
+		scoped[uint16(svc.ID)] = true
+	}
+	return out, scoped, nil
+}
+
+// RelayKnows reports whether a relay knows the device: whether it may
+// reach a service the relay forwards (the devices of RelaySnapshot).
+func (p *PerimeterServer) RelayKnows(ctx context.Context, name, device string) (bool, error) {
+	relay, err := p.Store.RelayByName(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	_, scoped, err := p.relayServices(ctx, relay)
+	if err != nil {
+		return false, err
+	}
+	devices, err := p.Store.SPADevices(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, d := range devices {
+		if d.ID == device {
+			return slices.ContainsFunc(d.Allowed, func(id uint16) bool { return scoped[id] }), nil
+		}
+	}
+	return false, nil
 }
 
 // sshPorts are the ports of the SSH services, enabled or not: sshd listens

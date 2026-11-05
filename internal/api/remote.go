@@ -11,9 +11,11 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -40,10 +42,14 @@ type Remote struct {
 	// Perimeter, if set, serves the relays in front of the node their
 	// perimeter (RelayService, relay-v1 §3.1); its TTLs and carrier apply.
 	Perimeter *PerimeterServer
-	now       func() time.Time
+	// RelayReport takes the client summary reports relays pass on
+	// (summary.Collector.TakeVia); nil, relays' reports are refused.
+	RelayReport func(ctx context.Context, device string, network netip.Prefix, body io.Reader) error
+	now         func() time.Time
 
 	relayMu      sync.Mutex
 	relayStreams map[string]int // WatchRelay streams open per relay
+	relayReports map[string]int // Report calls under way per relay
 }
 
 var (

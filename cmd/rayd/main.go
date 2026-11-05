@@ -246,8 +246,14 @@ func cmdServe(args []string) error {
 	go syncDNS(ctx, st, srv.Changes, hb, log)
 	go checkRealityTargets(ctx, st, srv.Changes, hb, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
-	go serveRemote(ctx, &api.Remote{Server: srv, Log: log, Perimeter: per}, srv.Changes)
-	if err := startSubscription(ctx, st, paths, log, *probeDaily, *spaTCP); err != nil {
+	// Client summaries (R4-21): reports in, from devices and through relays
+	// (relay-v1 §9.3), hints out; only while the administrator has them on
+	// (rayctl summary on). One collector: a device's network counts once a
+	// day whichever way its report came.
+	sum := &summary.Collector{Store: st, ASN: summary.Sources(st, &asn.DB{Path: summary.OperatorDB}, &asn.DB{Path: summary.ReleaseDB})}
+	go pruneSummary(ctx, sum, log)
+	go serveRemote(ctx, &api.Remote{Server: srv, Log: log, Perimeter: per, RelayReport: sum.TakeVia}, srv.Changes)
+	if err := startSubscription(ctx, st, paths, log, sum, *probeDaily, *spaTCP); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
 	log.Info("serving", "socket", *socket, "node", fmt.Sprintf("%x", params.NodeID))
@@ -596,7 +602,7 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 
 // startSubscription serves the subscription endpoint on the port of the
 // subscription service, if it is enabled.
-func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, probeDailyMiB int, tcpCarrier bool) error {
+func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, sum *summary.Collector, probeDailyMiB int, tcpCarrier bool) error {
 	svc, err := st.ServiceByName(ctx, provision.SubscriptionService)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !svc.Enabled) {
 		log.Info("subscription service disabled")
@@ -654,12 +660,8 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 			}
 			return render.InnerEmail(u.ID), nil
 		}}
-	// Client summaries (R4-21): reports in, hints out; both only while the
-	// administrator has them on (rayctl summary on).
-	sum := &summary.Collector{Store: st, ASN: summary.Sources(st, &asn.DB{Path: summary.OperatorDB}, &asn.DB{Path: summary.ReleaseDB})}
 	s.Probe.Report = sum.Take
 	s.Hints = sum.Hints
-	go pruneSummary(ctx, sum, log)
 	if err := provision.SubscriptionUDP(ctx, st); err != nil {
 		log.Warn("probe: the subscription service has no UDP port", "err", err)
 	} else if pc, err := net.ListenPacket("udp", addr); err != nil {

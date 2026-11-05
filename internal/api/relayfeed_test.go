@@ -3,11 +3,15 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/netip"
 	"os"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +23,7 @@ import (
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/store"
+	"github.com/arngory/raycontrol/internal/summary"
 )
 
 // fromListener makes every connection look as if it came from one address,
@@ -45,7 +50,7 @@ func (l fromListener) Accept() (net.Conn, error) {
 
 // serveRemoteFrom serves srv's remote API, with relays, to connections that
 // come from the given address.
-func serveRemoteFrom(t *testing.T, srv *Server, from string) (string, string) {
+func serveRemoteFrom(t *testing.T, srv *Server, from string, with ...func(*Remote)) (string, string) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	svc, _ := srv.Store.ServiceByName(ctx, "api")
@@ -61,6 +66,9 @@ func serveRemoteFrom(t *testing.T, srv *Server, from string) (string, string) {
 	}
 	r := &Remote{Server: srv, Log: slog.New(slog.DiscardHandler),
 		Perimeter: &PerimeterServer{Server: srv, DefaultTTL: 10 * time.Minute, MaxTTL: time.Hour, Refresh: time.Minute}}
+	for _, f := range with {
+		f(r)
+	}
 	done := make(chan error, 1)
 	go func() {
 		done <- r.Serve(ctx, fromListener{ln, net.TCPAddrFromAddrPort(netip.MustParseAddrPort(from))}, cfg)
@@ -304,5 +312,168 @@ func TestRelayAccess(t *testing.T) {
 	}
 	if !has(exit.PublicPorts, "tcp", 443) || !has(exit.RelayPorts, "tcp", 443) || !has(exit.RelayPorts, "udp", 443) {
 		t.Fatalf("open REALITY: public %v, relay ports %v", exit.PublicPorts, exit.RelayPorts)
+	}
+}
+
+// A relay passes on its devices' reports (relay-v1 §9.3): about a /24 or a
+// /48, for a device it knows, from its own address with its certificate;
+// the summary's refusals come back as codes the relay can answer with.
+func TestRelayReport(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	c := NewUnixClient(sock)
+	for _, s := range []*nodev1.CreateServiceRequest{
+		{Kind: "api", Name: "api"},
+		{Kind: "reality", Name: "reality", SettingsJson: `{"target":"www.example.org:443"}`},
+	} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(s)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"reality"}})); err != nil {
+		t.Fatal(err)
+	}
+	dev, _, err := srv.Store.CreateDevice(ctx, "alice", "phone", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone, _, _ := srv.Store.CreateDevice(ctx, "alice", "old", "user")
+	if err := srv.Store.RevokeDevice(ctx, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r1", Address: "198.51.100.20"})); err != nil {
+		t.Fatal(err)
+	}
+	enc, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.2.7"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := node.DecodeRelayBundle(enc.Bundle)
+	cert, _ := DecodeClientCertificate([]byte(b.Cert))
+
+	type call struct {
+		device  string
+		network netip.Prefix
+		body    string
+	}
+	var (
+		mu      sync.Mutex
+		calls   []call
+		answer  error
+		block   chan struct{}
+		entered = make(chan struct{}, 16)
+	)
+	take := func(_ context.Context, device string, network netip.Prefix, body io.Reader) error {
+		b, _ := io.ReadAll(body)
+		mu.Lock()
+		calls = append(calls, call{device, network, string(b)})
+		err, wait := answer, block
+		mu.Unlock()
+		if wait != nil {
+			entered <- struct{}{}
+			<-wait
+		}
+		return err
+	}
+	addr, _ := serveRemoteFrom(t, srv, "198.51.100.20:40000", func(r *Remote) { r.RelayReport = take })
+	feed := perimeterv1connect.NewRelayServiceClient(remoteHTTP(b.API.Pin, cert), "https://"+addr)
+	report := func(device, network, body string) error {
+		_, err := feed.Report(ctx, connect.NewRequest(&perimeterv1.ReportRequest{Device: device, Network: network, Body: []byte(body)}))
+		return err
+	}
+
+	if err := report(dev.ID, "203.0.113.0/24", `{"v":1}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := report(dev.ID, "2001:db8:5::/48", `{"v":1}`); err != nil {
+		t.Fatal(err)
+	}
+	want := []call{{dev.ID, netip.MustParsePrefix("203.0.113.0/24"), `{"v":1}`}, {dev.ID, netip.MustParsePrefix("2001:db8:5::/48"), `{"v":1}`}}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("taken %v", calls)
+	}
+
+	for name, c := range map[string]struct {
+		device, network, body string
+		code                  connect.Code
+	}{
+		"an address":             {dev.ID, "203.0.113.7/32", "{}", connect.CodeInvalidArgument},
+		"an address as a /24":    {dev.ID, "203.0.113.7/24", "{}", connect.CodeInvalidArgument},
+		"a /23":                  {dev.ID, "203.0.112.0/23", "{}", connect.CodeInvalidArgument},
+		"a /64":                  {dev.ID, "2001:db8:5::/64", "{}", connect.CodeInvalidArgument},
+		"loopback":               {dev.ID, "127.0.0.0/24", "{}", connect.CodeInvalidArgument},
+		"IPv4 in IPv6":           {dev.ID, "::ffff:203.0.113.0/120", "{}", connect.CodeInvalidArgument},
+		"no network":             {dev.ID, "", "{}", connect.CodeInvalidArgument},
+		"a body over the limit":  {dev.ID, "203.0.113.0/24", strings.Repeat(" ", summary.MaxBody+1), connect.CodeInvalidArgument},
+		"a device it never knew": {"nope", "203.0.113.0/24", "{}", connect.CodePermissionDenied},
+		"a revoked device":       {gone.ID, "203.0.113.0/24", "{}", connect.CodePermissionDenied},
+	} {
+		if err := report(c.device, c.network, c.body); connect.CodeOf(err) != c.code {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if len(calls) != 2 {
+		t.Fatalf("refused reports reached the summary: %v", calls[2:])
+	}
+
+	// The summary's refusals.
+	for err, code := range map[error]connect.Code{
+		summary.ErrDisabled:                     connect.CodeFailedPrecondition,
+		summary.ErrRepeated:                     connect.CodeResourceExhausted,
+		fmt.Errorf("%w: x", summary.ErrInvalid): connect.CodeInvalidArgument,
+		store.ErrNotFound:                       connect.CodePermissionDenied,
+		errors.New("disk full"):                 connect.CodeInternal,
+	} {
+		mu.Lock()
+		answer = err
+		mu.Unlock()
+		if got := report(dev.ID, "203.0.113.0/24", "{}"); connect.CodeOf(got) != code || code == connect.CodeInternal && strings.Contains(got.Error(), "disk") {
+			t.Errorf("%v: %v", err, got)
+		}
+	}
+	mu.Lock()
+	answer = nil
+	mu.Unlock()
+
+	// At most four at once from one relay.
+	mu.Lock()
+	block = make(chan struct{})
+	mu.Unlock()
+	var wg sync.WaitGroup
+	for range maxRelayReports {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := report(dev.ID, "203.0.113.0/24", "{}"); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	for range maxRelayReports {
+		<-entered
+	}
+	if err := report(dev.ID, "203.0.113.0/24", "{}"); connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Errorf("a fifth at once: %v", err)
+	}
+	mu.Lock()
+	close(block)
+	block = nil
+	mu.Unlock()
+	wg.Wait()
+	if err := report(dev.ID, "203.0.113.0/24", "{}"); err != nil {
+		t.Errorf("after the others: %v", err)
+	}
+
+	// The certificate from another address; a node without the summary.
+	other, _ := serveRemoteFrom(t, srv, "198.51.100.99:40000", func(r *Remote) { r.RelayReport = take })
+	stranger := perimeterv1connect.NewRelayServiceClient(remoteHTTP(b.API.Pin, cert), "https://"+other)
+	if _, err := stranger.Report(ctx, connect.NewRequest(&perimeterv1.ReportRequest{Device: dev.ID, Network: "203.0.113.0/24", Body: []byte("{}")})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Errorf("from another address: %v", err)
+	}
+	plain, _ := serveRemoteFrom(t, srv, "198.51.100.20:40000")
+	without := perimeterv1connect.NewRelayServiceClient(remoteHTTP(b.API.Pin, cert), "https://"+plain)
+	if _, err := without.Report(ctx, connect.NewRequest(&perimeterv1.ReportRequest{Device: dev.ID, Network: "203.0.113.0/24", Body: []byte("{}")})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("without the summary: %v", err)
 	}
 }
