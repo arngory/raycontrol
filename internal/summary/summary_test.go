@@ -46,6 +46,9 @@ func TestParse(t *testing.T) {
 		`{"v":1,"net":"wifi","obs":[{"svc":0,"result":"works"}]}`,
 		`{"v":1,"net":"wifi","mcc_mnc":"25001","obs":[{"svc":1,"result":"works"}]}`,
 		`{"v":1,"net":"wifi","obs":[{"svc":1,"kind":"reality","result":"works"}]}`,
+		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","dns":"dnscrypt"}]}`,
+		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","dns":"8.8.8.8"}]}`,
+		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"fails","dns":"doh"}]}`,
 		`{"v":1,"net":"wifi","obs":[` + strings.Repeat(`{"svc":1,"result":"works"},`, 2000) + `]}`,
 	} {
 		if _, err := Parse(strings.NewReader(bad)); !errors.Is(err, ErrInvalid) {
@@ -286,6 +289,84 @@ func TestPathAndViaRelay(t *testing.T) {
 	h = c.Hints(ctx, direct, []uint16{1})
 	if h == nil || h.ViaRelay || !slices.Equal(h.Order, []uint16{1}) || h.Avoid != nil || h.Devices != 10 {
 		t.Fatalf("hint with direct reports: %+v", h)
+	}
+}
+
+// A DNS tunnel's observation names the kind of resolver it works through;
+// the network's hint gives, per tunnel kind, the resolver most of them work
+// through: their queries differ, and so do the resolvers that pass them.
+func TestResolverHint(t *testing.T) {
+	ctx := context.Background()
+	st, c, devices := node(t)
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
+	SetEnabled(ctx, st, true)
+	var tunnels []int64
+	for _, k := range []string{"dnstt", "masterdns"} {
+		svc, err := st.CreateService(ctx, store.Service{Kind: k, Name: k, Enabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tunnels = append(tunnels, svc.ID)
+	}
+	for i := range devices {
+		st.SetUserServices(ctx, fmt.Sprintf("user%d", i), []int64{1, tunnels[0], tunnels[1]})
+	}
+	dnstt, mdns := tunnels[0], tunnels[1]
+	mobile := netip.MustParseAddr("203.0.113.10")
+	body := func(dns1, dns2 string) string {
+		return fmt.Sprintf(`{"v":1,"net":"cellular","obs":[{"svc":1,"result":"works"},{"svc":%d,"result":"works","dns":%q},{"svc":%d,"result":"degraded","dns":%q}]}`,
+			dnstt, dns1, mdns, dns2)
+	}
+
+	// Only a DNS tunnel names a resolver.
+	if err := c.Take(ctx, devices[0], mobile, strings.NewReader(`{"v":1,"net":"cellular","obs":[{"svc":1,"result":"works","dns":"udp"}]}`)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a resolver for a service that is no DNS tunnel: %v", err)
+	}
+	// A failing tunnel names none: it may be reported without one.
+	if err := c.Take(ctx, devices[0], netip.MustParseAddr("198.51.100.5"), strings.NewReader(fmt.Sprintf(`{"v":1,"net":"cellular","obs":[{"svc":%d,"result":"fails"}]}`, dnstt))); err != nil {
+		t.Fatal(err)
+	}
+	// Ten reports: dnstt through DoH, masterdns through UDP but for two
+	// through DoH (8 of 10).
+	for i, d := range devices[:10] {
+		m := "udp"
+		if i < 2 {
+			m = "doh"
+		}
+		if err := c.Take(ctx, d, mobile, strings.NewReader(body("doh", m))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := c.Hints(ctx, mobile, []uint16{1, uint16(dnstt), uint16(mdns)})
+	if h == nil || h.DNS["dnstt"] != "doh" || h.DNS["masterdns"] != "udp" || len(h.DNS) != 2 || h.Devices != 10 {
+		t.Fatalf("hint %+v", h)
+	}
+	// Only the client's own tunnels; none without them.
+	if h := c.Hints(ctx, mobile, []uint16{1, uint16(mdns)}); h == nil || len(h.DNS) != 1 || h.DNS["masterdns"] != "udp" {
+		t.Fatalf("hint with masterdns only %+v", h)
+	}
+	if h := c.Hints(ctx, mobile, []uint16{1}); h == nil || h.DNS != nil {
+		t.Fatalf("hint without tunnels %+v", h)
+	}
+	nets, _, err := c.View(ctx, 7)
+	if err != nil || len(nets) != 1 || nets[0].Services[mdns]["dns"]["doh"] != 2 || nets[0].Services[dnstt]["dns"]["doh"] != 10 {
+		t.Fatalf("view %+v %v", nets, err)
+	}
+
+	// No majority, no resolver: two kinds half and half.
+	now = now.Add(8 * 24 * time.Hour)
+	for i, d := range devices[:10] {
+		m := "doh"
+		if i%2 == 0 {
+			m = "dot"
+		}
+		if err := c.Take(ctx, d, mobile, strings.NewReader(body(m, m))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if h := c.Hints(ctx, mobile, []uint16{1, uint16(dnstt), uint16(mdns)}); h == nil || h.DNS != nil {
+		t.Fatalf("hint without a majority %+v", h)
 	}
 }
 

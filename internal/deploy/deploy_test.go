@@ -107,7 +107,9 @@ func TestBuild(t *testing.T) {
 	}
 	front := file(p, "/etc/systemd/system/niko-front.service")
 	if !strings.Contains(front, "AmbientCapabilities=CAP_NET_BIND_SERVICE") || strings.Contains(front, "SupplementaryGroups") ||
-		!strings.Contains(front, "After=network-online.target niko-dns.service niko-reality.service") {
+		!strings.Contains(front, "After=network-online.target niko-dns.service niko-reality.service") ||
+		// dnsprobe-v1: the key copied in by root, for the front alone.
+		!strings.Contains(front, "ExecStartPre=+install -m 0400 -o niko-front -g niko-front /var/lib/raycontrol/rendered/front/dnsprobe.key /run/niko/front/dnsprobe.key") {
 		t.Errorf("front unit:\n%s", front)
 	}
 	if !strings.Contains(file(p, "/etc/systemd/system/rayspa.service"), "AmbientCapabilities=CAP_NET_ADMIN") {
@@ -336,6 +338,10 @@ func TestBuildSelfSteal(t *testing.T) {
 	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
+	// DoH, which rayd serves itself: deployed, not warned about.
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "doh", Name: "doh", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
 	m, err := render.Collect(ctx, st)
 	if err != nil {
 		t.Fatal(err)
@@ -352,6 +358,11 @@ func TestBuildSelfSteal(t *testing.T) {
 	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
 	if p.FrontDNS {
 		t.Error("the front answers DNS on a node without DNS tunnels")
+	}
+	for _, w := range p.Warnings {
+		if strings.Contains(w, "doh") {
+			t.Errorf("DoH warned about: %s", w)
+		}
 	}
 	site := file(p, "/etc/systemd/system/niko-site.service")
 	for _, want := range []string{
@@ -935,16 +946,32 @@ func TestPort53(t *testing.T) {
 	niko = "v0.8.2"
 	// A run that stopped halfway (drop-in moved aside), then uninstall: it
 	// goes too.
+	mark := filepath.Join(deploy.JournalDir, "resolved-stub.pending")
 	h = newHost(t, "", ours, true, false)
 	apply(t, h, p)
-	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn+".gone")); err != nil {
+	if _, err := os.Stat(filepath.Join(h.root, mark)); err != nil {
 		t.Fatalf("no mark of the stub being given back: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn)); !os.IsNotExist(err) {
+		t.Fatalf("the drop-in stays: %v", err)
 	}
 	if err := h.h.Uninstall(h.h.Journal, deploy.UninstallOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn+".gone")); !os.IsNotExist(err) {
-		t.Errorf("uninstall left the moved drop-in: %v", err)
+	if _, err := os.Stat(filepath.Join(h.root, mark)); !os.IsNotExist(err) {
+		t.Errorf("uninstall left the mark: %v", err)
+	}
+	if !slices.Contains(*h.cmds, restartResolved) {
+		t.Errorf("uninstall did not restart resolved after a halfway give-back:\n%s", strings.Join(*h.cmds, "\n"))
+	}
+	// v0.11.0's mark, the drop-in moved aside, from a run stopped halfway:
+	// the next apply finishes, and the mark goes.
+	h = newHost(t, "", ours, true, false)
+	os.Rename(filepath.Join(h.root, deploy.ResolvedDropIn), filepath.Join(h.root, deploy.ResolvedDropIn+".gone"))
+	os.WriteFile(filepath.Join(h.root, "/proc/net/udp"), []byte(header+stub), 0o644)
+	apply(t, h, p)
+	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn+".gone")); !os.IsNotExist(err) || resolv(h) != "../run/systemd/resolve/stub-resolv.conf" {
+		t.Errorf("v0.11.0's mark: %v, resolv.conf -> %s\n%s", err, resolv(h), h.out)
 	}
 	// A drop-in of the administrator's at that path stays; a resolv.conf on
 	// the uplink list the journal does not know of stays too.
@@ -1005,5 +1032,166 @@ func TestModesUnderUmask(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), deploy.DataPlaneDir+" was mode -rwx------, closed to the services") {
 		t.Errorf("not said:\n%s", out)
+	}
+
+	// A resolv.conf written under that umask, by itself or behind the
+	// link to resolved's file, is opened for reading.
+	for _, link := range []string{"", "/run/systemd/resolve/stub-resolv.conf", "../run/resolv.conf"} {
+		os.Remove(filepath.Join(root, deploy.ResolvConf))
+		file := deploy.ResolvConf
+		if link != "" {
+			file = filepath.Join(filepath.Dir(deploy.ResolvConf), link)
+			if filepath.IsAbs(link) {
+				file = link
+			}
+			os.Symlink(link, filepath.Join(root, deploy.ResolvConf))
+		}
+		os.MkdirAll(filepath.Join(root, filepath.Dir(file)), 0o755)
+		os.WriteFile(filepath.Join(root, file), []byte("nameserver 192.0.2.53\n"), 0o600)
+		os.Chmod(filepath.Join(root, file), 0o600)
+		if err := h.Apply(deploy.Plan{}); err != nil {
+			t.Fatal(err)
+		}
+		if fi, err := os.Stat(filepath.Join(root, file)); err != nil || fi.Mode().Perm() != 0o644 {
+			t.Errorf("resolv.conf %q: %v %v", link, fi.Mode().Perm(), err)
+		}
+	}
+
+	// Two links in a row: the file at the end.
+	os.Remove(filepath.Join(root, deploy.ResolvConf))
+	os.Symlink("/run/a", filepath.Join(root, deploy.ResolvConf))
+	os.Symlink("b", filepath.Join(root, "/run/a"))
+	os.WriteFile(filepath.Join(root, "/run/b"), []byte("nameserver 192.0.2.53\n"), 0o600)
+	os.Chmod(filepath.Join(root, "/run/b"), 0o600)
+	if err := h.Apply(deploy.Plan{}); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(filepath.Join(root, "/run/b")); fi.Mode().Perm() != 0o644 {
+		t.Errorf("two links: %v", fi.Mode().Perm())
+	}
+	if p := deploy.ResolverProblem(root); p != "" {
+		t.Errorf("two links: %q", p)
+	}
+
+	// Another user's file is left alone: resolved's own are open anyway,
+	// and a closed one in a directory that user owns could be swapped.
+	if os.Geteuid() == 0 {
+		os.Chmod(filepath.Join(root, "/run/b"), 0o600)
+		os.Chown(filepath.Join(root, "/run/b"), 65534, 65534)
+		if err := h.Apply(deploy.Plan{}); err != nil {
+			t.Fatal(err)
+		}
+		if fi, _ := os.Stat(filepath.Join(root, "/run/b")); fi.Mode().Perm() != 0o600 {
+			t.Errorf("another user's file opened: %v", fi.Mode().Perm())
+		}
+		if p := deploy.ResolverProblem(root); !strings.Contains(p, "chmod o+r /run/b") {
+			t.Errorf("advice for another user's file: %q", p)
+		}
+	}
+}
+
+// The services resolve names with the host's resolv.conf: it must be
+// readable by them and name a server.
+func TestResolverProblem(t *testing.T) {
+	root := t.TempDir()
+	conf := filepath.Join(root, deploy.ResolvConf)
+	os.MkdirAll(filepath.Dir(conf), 0o755)
+	if p := deploy.ResolverProblem(root); !strings.Contains(p, "no such file") {
+		t.Errorf("no resolv.conf: %q", p)
+	}
+	os.WriteFile(conf, []byte("nameserver 192.0.2.53\n"), 0o600)
+	os.Chmod(conf, 0o600)
+	if p := deploy.ResolverProblem(root); !strings.Contains(p, "cannot read") {
+		t.Errorf("mode 0600: %q", p)
+	}
+	os.Chmod(conf, 0o644)
+	if p := deploy.ResolverProblem(root); p != "" {
+		t.Errorf("good: %q", p)
+	}
+	os.WriteFile(conf, []byte("search example.com\n# nameserver 192.0.2.53\n"), 0o644)
+	if p := deploy.ResolverProblem(root); !strings.Contains(p, "no nameserver") {
+		t.Errorf("without a server: %q", p)
+	}
+	// Behind resolved's link, within the root.
+	os.Remove(conf)
+	stub := filepath.Join(root, "/run/systemd/resolve/stub-resolv.conf")
+	os.MkdirAll(filepath.Dir(stub), 0o755)
+	os.WriteFile(stub, []byte("nameserver 127.0.0.53\noptions edns0 trust-ad\n"), 0o600)
+	os.Chmod(stub, 0o600)
+	os.Symlink("/run/systemd/resolve/stub-resolv.conf", conf)
+	if p := deploy.ResolverProblem(root); !strings.Contains(p, "cannot read") {
+		t.Errorf("link to a closed file: %q", p)
+	}
+	os.Chmod(stub, 0o644)
+	if p := deploy.ResolverProblem(root); p != "" {
+		t.Errorf("link: %q", p)
+	}
+}
+
+// A credential the render did not write (the salamander password of a
+// hy2-obfs service that could not be rendered, say) is not installed: a
+// missing file would keep the whole front down (Q-1).
+func TestFrontCredentialsOnlyRendered(t *testing.T) {
+	m, files := plan2(t, render.DefaultPaths)
+	key := "/var/lib/raycontrol/rendered/front/dnsprobe.key"
+	if !strings.Contains(file(deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries), "/etc/systemd/system/niko-front.service"), key) {
+		t.Fatal("the rendered key is not installed")
+	}
+	partial := slices.DeleteFunc(slices.Clone(files), func(f render.File) bool { return f.Path == key })
+	if front := file(deploy.Build(m, partial, render.DefaultPaths, deploy.DefaultBinaries), "/etc/systemd/system/niko-front.service"); front == "" || strings.Contains(front, key) {
+		t.Fatalf("a key not rendered is installed:\n%s", front)
+	}
+}
+
+// A node deployed without a dnstt zone (REALITY and masterdns here): the
+// front's unit installs the probe key all the same, so a dnstt service
+// added later through the API, whose config rayd renders with
+// probe_key_file, finds the key and the front stays up.
+func TestProbeKeyBeforeDNSTT(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range [][3]string{{"masterdns", "mdns", ""}, {"reality", "reality", `{"target":"www.example.org:443"}`}} {
+		if _, err := provision.CreateService(ctx, st, store.Service{Kind: s[0], Name: s[1], Enabled: true, Settings: s[2]}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := render.CollectForRender(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _, err := render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := file(deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries), "/etc/systemd/system/niko-front.service")
+	if !strings.Contains(unit, "/run/niko/front/dnsprobe.key") {
+		t.Fatalf("the front's unit does not install the probe key:\n%s", unit)
+	}
+	for _, f := range files {
+		if f.Service == "front" && strings.Contains(string(f.Content), "probe_key_file") {
+			t.Fatal("probe_key_file without a dnstt zone")
+		}
+	}
+	// Later, through the API: a dnstt service, rendered live.
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if m, err = render.CollectForRender(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	if files, _, err = render.Render(m, render.DefaultPaths); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f.Path, "/front/front.json") && !strings.Contains(string(f.Content), `"probe_key_file": "/run/niko/front/dnsprobe.key"`) {
+			t.Fatalf("live front config:\n%s", f.Content)
+		}
 	}
 }

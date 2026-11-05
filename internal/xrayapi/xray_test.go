@@ -753,7 +753,7 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	defer naiveSrv.Close()
 	naiveLink, _ := url.Parse(sub.NaiveLink(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == naiveSvc.ID })], m.Creds[naiveSvc.ID][user.ID]))
 	password, _ := naiveLink.User.Password()
-	if naiveLink.Scheme != "naive+https" || naiveLink.Hostname() != naiveName.SNI || password == "" {
+	if naiveLink.Scheme != "naive+https" || naiveLink.Hostname() != m.Host || naiveLink.Query().Get("sni") != naiveName.SNI || password == "" {
 		t.Fatalf("naive link %s", naiveLink.Redacted())
 	}
 	nt := &http.Transport{ForceAttemptHTTP2: true, DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {

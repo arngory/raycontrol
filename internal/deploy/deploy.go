@@ -231,6 +231,9 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			naives = append(naives, s)
 		case s.Kind == "yggdrasil":
 			yggs = append(yggs, s)
+		case s.Kind == "doh":
+			// rayd serves it (serveDoH), behind the front: its socket
+			// directory is below, no unit of its own.
 		case s.UID != 0:
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("service %s (%s) is not deployed by this version", s.Name, s.Kind))
 		}
@@ -520,13 +523,25 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		for _, s := range yggs {
 			after = append(after, render.UnitName(s.Name))
 		}
-		// The salamander passwords of hy2-obfs: copied in by root, readable
-		// by the front only.
+		// The front's credentials, copied in by root, readable by the front
+		// only: the dnsprobe-v1 key and the salamander passwords of
+		// hy2-obfs. Only what this render wrote: a service that could not
+		// be rendered leaves none, and an install of a missing file would
+		// keep the whole front down (Q-1).
+		rendered := map[string]bool{}
+		for _, f := range files {
+			rendered[f.Path] = true
+		}
 		var frontCreds []string
+		cred := func(src, dst string) {
+			if rendered[src] {
+				frontCreds = append(frontCreds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o niko-front -g niko-front %s %s", src, dst))
+			}
+		}
+		cred(path.Join(p.Rendered, "front", render.DNSProbeKeyFile), p.FrontDNSProbe())
 		for _, s := range hysteria {
 			if s.Kind == "hy2-obfs" {
-				frontCreds = append(frontCreds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o niko-front -g niko-front %s %s",
-					path.Join(p.Rendered, "front", s.Name+".salamander"), p.FrontSalamander(s.Name)))
+				cred(path.Join(p.Rendered, "front", s.Name+".salamander"), p.FrontSalamander(s.Name))
 			}
 		}
 		units = append(units, unit{

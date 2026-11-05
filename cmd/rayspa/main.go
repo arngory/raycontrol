@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -89,11 +90,10 @@ func run(args []string) error {
 		"(rayctl relay bundle) instead of rayd, and forward the services to the exit")
 	fs.Parse(args)
 
-	level := slog.LevelInfo
-	if *debug {
-		level = slog.LevelDebug
-	}
-	log := logx.New(os.Stderr, level)
+	// -debug always; otherwise while rayd's debug window is open.
+	dl := &debugLevel{always: *debug}
+	dl.level.Set(map[bool]slog.Level{false: slog.LevelInfo, true: slog.LevelDebug}[*debug])
+	log := logx.New(os.Stderr, &dl.level)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -143,7 +143,7 @@ func run(args []string) error {
 	if *state != "" {
 		restore(*state, gate, carrier, log)
 	}
-	go watch(ctx, open, *state, gate, carrier, log)
+	go watch(ctx, open, *state, gate, carrier, dl, log)
 	go func() {
 		if err := perimeter.ReadNFLOG(ctx, uint16(*group), handle, log); err != nil {
 			log.Error("nflog", "err", err)
@@ -270,7 +270,43 @@ func relayFeed(b node.RelayBundle) (openFeed, error) {
 	}, nil
 }
 
-func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, log *slog.Logger) {
+// debugLevel is rayspa's log level: debug with -debug, or until the end of
+// the debug window a snapshot names (rayctl debug), then back by itself.
+type debugLevel struct {
+	always bool
+	level  slog.LevelVar
+	mu     sync.Mutex
+	timer  *time.Timer
+	gen    uint64 // a timer set before the latest snapshot does nothing
+}
+
+func (d *debugLevel) until(t int64) {
+	if d == nil || d.always {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.timer != nil {
+		d.timer.Stop()
+	}
+	d.gen++
+	left := time.Until(time.Unix(t, 0))
+	if t == 0 || left <= 0 {
+		d.level.Set(slog.LevelInfo)
+		return
+	}
+	d.level.Set(slog.LevelDebug)
+	gen := d.gen
+	d.timer = time.AfterFunc(left, func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if d.gen == gen {
+			d.level.Set(slog.LevelInfo)
+		}
+	})
+}
+
+func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, dl *debugLevel, log *slog.Logger) {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		stream, err := open(ctx)
@@ -278,6 +314,7 @@ func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gat
 			for stream.Receive() {
 				backoff = time.Second
 				snap := stream.Snapshot()
+				dl.until(snap.GetDebugUntil())
 				// A snapshot applied in part is the gate's all the same:
 				// Tick applies the rest, and it is saved for the next start.
 				if err := gate.Update(snap); errors.Is(err, perimeter.ErrPending) {

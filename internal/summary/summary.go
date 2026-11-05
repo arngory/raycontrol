@@ -52,12 +52,18 @@ var (
 	// Paths: how the client reaches the node from the network (relay-v1
 	// §9.3): directly, or through a relay of the node.
 	Paths = []string{"direct", "relay"}
+	// Resolvers: the kind of resolver a DNS tunnel works through in the
+	// network, never its address: the network's own (net), a public one
+	// over UDP 53 (udp), DoH or DoT.
+	Resolvers = []string{"net", "udp", "doh", "dot"}
+	// TunnelKinds are the services whose observations may name a resolver.
+	TunnelKinds = []string{"dnstt", "masterdns"}
 )
 
 // Optional are the report fields beyond the first ones of v1 that this
 // node takes; the subscription lists them (probe.report), so a client
 // sends a field only to nodes that know it (an older node answers 400).
-var Optional = []string{"udp_mtu", "path"}
+var Optional = []string{"udp_mtu", "path", "dns"}
 
 // Report is what a client sends (probe-v1 §6).
 type Report struct {
@@ -75,6 +81,9 @@ type Obs struct {
 	TCPStallKiB int    `json:"tcp_stall_kib,omitempty"`
 	UDP         string `json:"udp,omitempty"`
 	Mbps        string `json:"mbps,omitempty"`
+	// DNS: the kind of resolver a DNS tunnel works through (Resolvers),
+	// only with works or degraded, only for TunnelKinds.
+	DNS string `json:"dns,omitempty"`
 }
 
 // Errors of Report, for the endpoint's status codes.
@@ -216,6 +225,10 @@ func Parse(body io.Reader) (Report, error) {
 			return r, fmt.Errorf("%w: udp %q", ErrInvalid, o.UDP)
 		case o.Mbps != "" && !slices.Contains(Mbps, o.Mbps):
 			return r, fmt.Errorf("%w: mbps %q", ErrInvalid, o.Mbps)
+		case o.DNS != "" && !slices.Contains(Resolvers, o.DNS):
+			return r, fmt.Errorf("%w: dns %q", ErrInvalid, o.DNS)
+		case o.DNS != "" && o.Result == "fails":
+			return r, fmt.Errorf("%w: dns with fails (it names the resolver a tunnel works through)", ErrInvalid)
 		}
 		seen[o.Svc] = true
 	}
@@ -319,6 +332,9 @@ func (c *Collector) take(ctx context.Context, device string, addr netip.Addr, pa
 			return fmt.Errorf("%w: svc %d is not the user's", ErrInvalid, o.Svc)
 		}
 	}
+	if err := c.tunnelsOnly(ctx, r.Obs); err != nil {
+		return err
+	}
 	// The databases answer for any address they hold (a test database may
 	// map a test network); an online lookup only for public ones.
 	var info asn.Info
@@ -356,8 +372,43 @@ func (c *Collector) take(ctx context.Context, device string, addr netip.Addr, pa
 		if o.Mbps != "" {
 			counts = append(counts, row(o.Svc, "mbps", o.Mbps))
 		}
+		if o.DNS != "" {
+			counts = append(counts, row(o.Svc, "dns", o.DNS))
+		}
 	}
 	return c.Store.AddSummary(ctx, counts, info.Name, info.Country)
+}
+
+// tunnelsOnly refuses a resolver named for a service that is no DNS
+// tunnel. The services are read only when a report names one.
+func (c *Collector) tunnelsOnly(ctx context.Context, obs []Obs) error {
+	if !slices.ContainsFunc(obs, func(o Obs) bool { return o.DNS != "" }) {
+		return nil
+	}
+	kinds := c.kinds(ctx)
+	if kinds == nil {
+		return errors.New("summary: the node's services cannot be read")
+	}
+	for _, o := range obs {
+		if o.DNS != "" && !slices.Contains(TunnelKinds, kinds[o.Svc]) {
+			return fmt.Errorf("%w: dns for svc %d, which is no DNS tunnel", ErrInvalid, o.Svc)
+		}
+	}
+	return nil
+}
+
+// kinds maps the node's services to their kinds, nil if they cannot be
+// read.
+func (c *Collector) kinds(ctx context.Context) map[int64]string {
+	services, err := c.Store.ListServices(ctx)
+	if err != nil {
+		return nil
+	}
+	kinds := make(map[int64]string, len(services))
+	for _, s := range services {
+		kinds[s.ID] = s.Kind
+	}
+	return kinds
 }
 
 // Prune drops the counters older than Keep days.

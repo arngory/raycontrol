@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/arngory/raycontrol/internal/render"
 )
@@ -179,24 +180,90 @@ var openDirs = []struct {
 // repairModes gives the directories of openDirs the bits the services need,
 // and the data-plane binaries theirs, saying what it changed.
 func (h *Host) repairModes() {
-	fix := func(p string, bits os.FileMode, dir bool) {
-		fi, err := os.Lstat(h.path(p))
-		if err != nil || fi.IsDir() != dir || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&bits == bits {
+	// Opened without following a link and changed through the descriptor:
+	// a file swapped for a link after the check cannot turn the chmod onto
+	// another file. ours: only a file of the user that runs this (root),
+	// for one in a directory others own.
+	fix := func(p string, bits os.FileMode, dir, ours bool) {
+		f, err := os.OpenFile(h.path(p), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		fi, err := f.Stat()
+		if err != nil || fi.IsDir() != dir || !dir && !fi.Mode().IsRegular() || fi.Mode().Perm()&bits == bits {
+			return
+		}
+		if st, ok := fi.Sys().(*syscall.Stat_t); ours && (!ok || int(st.Uid) != os.Geteuid()) {
 			return
 		}
 		mode := fi.Mode().Perm() | bits
-		if err := os.Chmod(h.path(p), mode); err != nil {
+		if err := f.Chmod(mode); err != nil {
 			fmt.Fprintf(h.Out, "warning: %s is mode %v, closed to the services: %v\n", p, fi.Mode().Perm(), err)
 			return
 		}
 		fmt.Fprintf(h.Out, "%s was mode %v, closed to the services: now %v\n", p, fi.Mode().Perm(), mode)
 	}
 	for _, d := range openDirs {
-		fix(d.path, d.bits, true)
+		fix(d.path, d.bits, true, false)
 	}
 	for _, b := range []string{DefaultBinaries.Xray, DefaultBinaries.NikoServer, DefaultBinaries.Rayd, DefaultBinaries.Rayspa} {
-		fix(b, 0o055, false)
+		fix(b, 0o055, false, false)
 	}
+	// The services resolve names themselves (rayd: ACME, Cloudflare): a
+	// resolv.conf they cannot read leaves Go asking localhost. Through
+	// its links, as /etc/resolv.conf to resolved's stub file; resolved's
+	// own files are its user's, and open already.
+	fix(resolvTarget(h.path, ResolvConf), 0o044, false, true)
+}
+
+// ResolvConf is the host's resolver configuration.
+const ResolvConf = "/etc/resolv.conf"
+
+// ResolverProblem says why the services could not resolve names with the
+// host's resolv.conf, or "" when they can: they run under their own users,
+// so it must be readable by others, and it must name a server (without
+// one Go asks localhost). root is the host's root, "" for this host.
+func ResolverProblem(root string) string {
+	at := func(p string) string { return filepath.Join(root, p) }
+	target := resolvTarget(at, ResolvConf)
+	fi, err := os.Stat(at(target))
+	if err != nil {
+		return fmt.Sprintf("%s: %v: point it at a file with a nameserver line (with systemd-resolved: %s)", ResolvConf, err, stubResolv)
+	}
+	if fi.Mode().Perm()&0o004 == 0 {
+		fix := "rayctl apply opens it"
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid != 0 {
+			fix = "chmod o+r " + target + " (rayctl apply opens only a file of root's)"
+		}
+		return fmt.Sprintf("%s is mode %v: the services cannot read it: %s", ResolvConf, fi.Mode().Perm(), fix)
+	}
+	b, err := os.ReadFile(at(target)) //nolint:gosec // G304: the host's resolv.conf
+	if err != nil {
+		return fmt.Sprintf("%s: %v", ResolvConf, err)
+	}
+	for line := range strings.Lines(string(b)) {
+		if f := strings.Fields(line); len(f) > 1 && f[0] == "nameserver" {
+			return ""
+		}
+	}
+	return ResolvConf + " names no nameserver, so Go asks localhost:53: add a nameserver line"
+}
+
+// resolvTarget is the file a resolv.conf link leads to through up to 8
+// links, within the host's root, or the path itself.
+func resolvTarget(at func(string) string, p string) string {
+	for range 8 {
+		t, err := os.Readlink(at(p))
+		if err != nil {
+			return p
+		}
+		if !filepath.IsAbs(t) {
+			t = filepath.Join(filepath.Dir(p), t)
+		}
+		p = t
+	}
+	return p
 }
 
 // InstallBinary puts an executable in place like any file: journaled, so a
@@ -440,9 +507,41 @@ func (h *Host) removeStale(plan Plan) error {
 	return nil
 }
 
-// stubPending marks a stub being given back: the drop-in is out of
-// resolved's sight (it reads *.conf only), the stub not yet seen back.
-const stubPending = ResolvedDropIn + ".gone"
+// stubPending marks a stub being given back: the drop-in is gone, the stub
+// not yet seen back. It is ours, so it lives in the install journal's
+// directory, root's alone (the state directory is rayd's: a link put there
+// could turn root's write elsewhere), not in resolved's; stubPendingOld is
+// v0.11.0's mark there, the drop-in moved aside (resolved reads *.conf
+// only), honoured and removed alike.
+const (
+	stubPending    = JournalDir + "/resolved-stub.pending"
+	stubPendingOld = ResolvedDropIn + ".gone"
+)
+
+// stubMarked reports whether a stub is being given back.
+func (h *Host) stubMarked() bool {
+	for _, p := range []string{stubPending, stubPendingOld} {
+		if _, err := os.Stat(h.path(p)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// unmarkStub removes the marks; it reports whether there was one.
+func (h *Host) unmarkStub() (bool, error) {
+	was := false
+	for _, p := range []string{stubPending, stubPendingOld} {
+		err := os.Remove(h.path(p))
+		switch {
+		case err == nil:
+			was = true
+		case !errors.Is(err, os.ErrNotExist):
+			return was, err
+		}
+	}
+	return was, nil
+}
 
 // SharesDNSFrom is the first niko-server whose front shares UDP 53 with
 // systemd-resolved's stub (SO_REUSEADDR).
@@ -469,8 +568,7 @@ func (h *Host) giveBackStub() error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	_, err := os.Stat(h.path(stubPending))
-	pending := err == nil
+	pending := h.stubMarked()
 	rc := h.path("/etc/resolv.conf")
 	target, _ := os.Readlink(rc)
 	orig, journaled := h.Journal.Original(ChangeSymlink, "/etc/resolv.conf", "")
@@ -499,16 +597,24 @@ func (h *Host) giveBackStub() error {
 				return err
 			}
 		}
-		if err := os.Rename(h.path(ResolvedDropIn), h.path(stubPending)); err != nil {
+		// The mark first: a run stopped between the two finds it and the
+		// drop-in, and starts here again.
+		if err := mkdirAll(h.path(JournalDir), 0o700); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(h.path(stubPending), os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+		if err != nil {
+			return err
+		}
+		f.Close()
+		if err := os.Remove(h.path(ResolvedDropIn)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		fmt.Fprintln(h.Out, "removed", ResolvedDropIn+": the DNS tunnels share UDP 53 with systemd-resolved's stub")
 	}
 	if h.loadState("systemd-resolved.service") == "not-found" {
-		if err := os.Remove(h.path(stubPending)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return nil
+		_, err := h.unmarkStub()
+		return err
 	}
 	if !h.stubOn53() {
 		if err := h.tryRestart("systemd-resolved.service"); err != nil {
@@ -520,7 +626,7 @@ func (h *Host) giveBackStub() error {
 			"and the next rayctl apply tries again (journalctl -u systemd-resolved says why)\n")
 		return nil
 	}
-	if err := os.Remove(h.path(stubPending)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if _, err := h.unmarkStub(); err != nil {
 		return err
 	}
 	if !pointed {

@@ -198,6 +198,8 @@ var nodeOnly = map[string]bool{
 	// A relay opens the service ports to an address (relay-v1).
 	nodev1connect.NodeServiceAddRelayProcedure:    true,
 	nodev1connect.NodeServiceRemoveRelayProcedure: true,
+	// Client addresses go to the journal, which only root reads.
+	nodev1connect.NodeServiceSetDebugProcedure: true,
 }
 
 // adminOnly lets admin devices call NodeService; the audit log names them.

@@ -3,7 +3,13 @@ package xrayapi_test
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base32"
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
@@ -13,6 +19,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -87,6 +94,16 @@ func TestSupervisedNode(t *testing.T) {
 	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "yggdrasil", Name: "ygg", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
+	// dnstt behind the front's UDP 53, which answers dnsprobe-v1 itself
+	// (niko-server v0.8.3).
+	dnsSvc, err := provision.CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dnsZone struct {
+		Zone string `json:"zone"`
+	}
+	json.Unmarshal([]byte(dnsSvc.Settings), &dnsZone)
 	// The site's certificate from a test CA (rayctl service cert).
 	ca, err := testca.New([]string{"*.example.test"}, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))
 	if err != nil {
@@ -102,6 +119,10 @@ func TestSupervisedNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeKey, err := st.DNSProbeKey(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,6 +189,23 @@ func TestSupervisedNode(t *testing.T) {
 		}
 	}
 
+	// The front answers a resolver check with the subscription's key.
+	if dnsZone.Zone == "" {
+		t.Fatalf("no zone in %s", dnsSvc.Settings)
+	}
+	var probeAnswer []byte
+	for range 50 {
+		if probeAnswer, err = dnsProbe(net.JoinHostPort(ip.String(), "53"), probeKey, dnsZone.Zone); err == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	// What the node saw: EDNS 1232, no 0x20, this host's address.
+	if err != nil || binary.BigEndian.Uint16(probeAnswer[16:18]) != 1232 || probeAnswer[18] != 0 ||
+		netip.AddrFrom16([16]byte(probeAnswer[19:35])).Unmap() != ip {
+		t.Fatalf("dnsprobe: %x %v", probeAnswer, err)
+	}
+
 	probeVia := func(name string, socksPort int) {
 		t.Helper()
 		sc := sub.Client{Addr: net.JoinHostPort(render.ProbeName, "443"), Pin: pin, DeviceID: dev.ID, DeviceKey: key}
@@ -231,4 +269,75 @@ func hostAddr(t *testing.T) netip.Addr {
 	}
 	t.Skip("no address other than loopback")
 	return netip.Addr{}
+}
+
+// dnsProbe checks a resolver as a client does (docs/spec/dnsprobe-v1.md):
+// a small probe sent straight to the node; it returns the decrypted
+// plaintext after checking the answer's shape (as dnstt's) and its token.
+func dnsProbe(server string, key []byte, zone string) ([]byte, error) {
+	var b [24]byte
+	b[0] = 1
+	binary.BigEndian.PutUint32(b[2:6], uint32(time.Now().Unix()/60))
+	if _, err := rand.Read(b[6:14]); err != nil {
+		return nil, err
+	}
+	mac := func(k []byte, parts ...[]byte) []byte {
+		m := hmac.New(sha256.New, k)
+		for _, p := range parts {
+			m.Write(p)
+		}
+		return m.Sum(nil)
+	}
+	copy(b[14:], mac(key, []byte("dnsprobe-v1 q"), []byte(zone), b[:14])[:10])
+	label := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b[:]))
+	q := []byte{0x42, 0x42, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 1}
+	for _, l := range strings.Split(label+"."+zone, ".") {
+		q = append(q, byte(len(l)))
+		q = append(q, l...)
+	}
+	q = append(q, 0, 0, 16, 0, 1)                      // TXT IN
+	q = append(q, 0, 0, 41, 4, 0xd0, 0, 0, 0, 0, 0, 0) // OPT 1232
+	c, err := net.Dial("udp", server)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(time.Second))
+	if _, err := c.Write(q); err != nil {
+		return nil, err
+	}
+	r := make([]byte, 4096)
+	n, err := c.Read(r)
+	if err != nil {
+		return nil, err
+	}
+	r = r[:n]
+	questionEnd := 12 + len(label) + 1 + len(zone) + 2 + 4
+	// As dnstt answers: QR and AA, one TXT with TTL 60.
+	if n < questionEnd+12 || binary.BigEndian.Uint16(r[2:4]) != 0x8400 || binary.BigEndian.Uint16(r[6:8]) != 1 ||
+		binary.BigEndian.Uint32(r[questionEnd+6:questionEnd+10]) != 60 {
+		return nil, fmt.Errorf("answer of %d bytes: % x", n, r[:min(n, 16)])
+	}
+	rd := r[questionEnd+12 : questionEnd+12+int(binary.BigEndian.Uint16(r[questionEnd+10:questionEnd+12]))]
+	var data []byte
+	for len(rd) > 0 {
+		l := int(rd[0])
+		data, rd = append(data, rd[1:1+l]...), rd[1+l:]
+	}
+	// The answer's nonce, then the ciphertext.
+	if len(data) < 8 {
+		return nil, fmt.Errorf("TXT data of %d bytes", len(data))
+	}
+	nonce, plain := data[:8], data[8:]
+	enc := mac(key, []byte("dnsprobe-v1 e"))
+	for i := 0; i < len(plain); i += 32 {
+		block := mac(enc, b[:], nonce, binary.BigEndian.AppendUint32(nil, uint32(i/32)))
+		for j := 0; j < 32 && i+j < len(plain); j++ {
+			plain[i+j] ^= block[j]
+		}
+	}
+	if len(plain) != 35 || !bytes.Equal(plain[:16], mac(key, []byte("dnsprobe-v1 a"), b[:], plain[16:35])[:16]) {
+		return plain, fmt.Errorf("token or length: %x", plain)
+	}
+	return plain, nil
 }

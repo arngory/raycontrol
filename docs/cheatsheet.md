@@ -36,7 +36,8 @@
 | `rayctl status` | версия, нода, число пользователей, сервисов, устройств, порты SPA сейчас |
 | `rayctl service list` | сервисы; для REALITY — когда сменились ключи и когда следующая смена |
 | `rayctl audit [-n 50]` | журнал действий администратора |
-| `rayctl report [-o F] [-logs warning\|info\|none] [-since 24h]` | очищенный отчёт для issue, ничего не отправляет |
+| `rayctl debug on [-for 30m]` / `off` / `show` | окно отладки: rayd, rayspa и data plane пишут подробно, с адресами клиентов; закрывается само (до суток); службы data plane перезапускаются |
+| `rayctl report [-o F] [-logs warning\|info\|debug\|none] [-since 24h] [-id ID]` | очищенный отчёт для issue, ничего не отправляет; `-logs debug` — со строками `-debug`, один `-id` на прогон |
 | `rayctl probe [-carrier udp\|tls\|tcp\|auto] [-redact] @bundle` | проверить ноду снаружи, как клиент; `auto` — UDP, ClientHello, голый TCP |
 | `journalctl -u rayd -u rayspa -u 'niko-*' -f` | журналы ноды |
 | `systemctl status rayd rayspa 'niko-*'` | состояние юнитов |

@@ -401,3 +401,21 @@ func TestServiceNamesTaken(t *testing.T) {
 		t.Errorf("ssh admin-in: %v", err)
 	}
 }
+
+// The dnsprobe-v1 key is made once: the same 32 bytes every time after.
+func TestDNSProbeKey(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	a, err := st.DNSProbeKey(ctx)
+	if err != nil || len(a) != 32 {
+		t.Fatalf("key %x %v", a, err)
+	}
+	b, _ := st.DNSProbeKey(ctx)
+	if !bytes.Equal(a, b) {
+		t.Fatal("the key changed")
+	}
+}

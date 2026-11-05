@@ -311,6 +311,9 @@ type Snapshot struct {
 	// knock at the relay, which forwards to this node.
 	RelayPrefixes []string `protobuf:"bytes,9,rep,name=relay_prefixes,json=relayPrefixes,proto3" json:"relay_prefixes,omitempty"`
 	RelayPorts    []*Port  `protobuf:"bytes,10,rep,name=relay_ports,json=relayPorts,proto3" json:"relay_ports,omitempty"`
+	// The debug window (rayctl debug): until then, unix seconds, rayspa logs
+	// every SPA access and refusal. 0 or past: none.
+	DebugUntil    int64 `protobuf:"varint,11,opt,name=debug_until,json=debugUntil,proto3" json:"debug_until,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -413,6 +416,13 @@ func (x *Snapshot) GetRelayPorts() []*Port {
 		return x.RelayPorts
 	}
 	return nil
+}
+
+func (x *Snapshot) GetDebugUntil() int64 {
+	if x != nil {
+		return x.DebugUntil
+	}
+	return 0
 }
 
 type AcmeWindow struct {
@@ -859,7 +869,7 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"\bsnapshot\x18\x01 \x01(\v2!.raycontrol.perimeter.v1.SnapshotR\bsnapshot\"\x17\n" +
 	"\x15WatchPerimeterRequest\"W\n" +
 	"\x16WatchPerimeterResponse\x12=\n" +
-	"\bsnapshot\x18\x01 \x01(\v2!.raycontrol.perimeter.v1.SnapshotR\bsnapshot\"\x9e\x04\n" +
+	"\bsnapshot\x18\x01 \x01(\v2!.raycontrol.perimeter.v1.SnapshotR\bsnapshot\"\xbf\x04\n" +
 	"\bSnapshot\x12\x1a\n" +
 	"\brevision\x18\x01 \x01(\x04R\brevision\x124\n" +
 	"\x03spa\x18\x02 \x01(\v2\".raycontrol.perimeter.v1.SPAParamsR\x03spa\x129\n" +
@@ -873,7 +883,9 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"\x0erelay_prefixes\x18\t \x03(\tR\rrelayPrefixes\x12>\n" +
 	"\vrelay_ports\x18\n" +
 	" \x03(\v2\x1d.raycontrol.perimeter.v1.PortR\n" +
-	"relayPorts\"6\n" +
+	"relayPorts\x12\x1f\n" +
+	"\vdebug_until\x18\v \x01(\x03R\n" +
+	"debugUntil\"6\n" +
 	"\n" +
 	"AcmeWindow\x12\x12\n" +
 	"\x04port\x18\x01 \x01(\rR\x04port\x12\x14\n" +

@@ -195,10 +195,15 @@ func TestEndpoint(t *testing.T) {
 		p.Probe == nil || p.Probe.V != 1 || p.Probe.UDP || p.Probe.Tunnel != probe.Name ||
 		len(p.Probe.TunnelSvc) != 1 || p.Probe.TunnelSvc[0] != p.Profiles[0].Svc ||
 		// The report fields beyond the first ones of v1 (Niko §20).
-		!slices.Equal(p.Probe.Report, []string{"udp_mtu", "path"}) ||
+		!slices.Equal(p.Probe.Report, []string{"udp_mtu", "path", "dns"}) ||
 		// The SPA carriers: UDP only without -spa-tcp.
-		p.SPA == nil || !slices.Equal(p.SPA.Carriers, []string{"udp"}) {
+		p.SPA == nil || !slices.Equal(p.SPA.Carriers, []string{"udp"}) ||
+		// The user has a dnstt profile: the dnsprobe-v1 key.
+		p.DNSProbe == nil || p.DNSProbe.V != 1 || len(p.DNSProbe.Key) != 43 {
 		t.Fatalf("payload %+v", p)
+	}
+	if key, _ := f.st.DNSProbeKey(context.Background()); base64.RawURLEncoding.EncodeToString(key) != p.DNSProbe.Key {
+		t.Fatal("dns_probe.key is not the node's")
 	}
 	for _, auth := range []bool{false, true} {
 		req, _ := http.NewRequest("GET", "https://"+addr+probe.PathDown+"?bytes=1000", nil)

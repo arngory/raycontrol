@@ -33,7 +33,7 @@ import (
 func (c *cli) report(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("report", flag.ContinueOnError)
 	out := fs.String("o", "", "write to this file instead of the screen")
-	logs := fs.String("logs", "warning", "journal priority to include: warning, info or none")
+	logs := fs.String("logs", "warning", "journal priority to include: warning, info, debug (rayd and rayspa run with -debug) or none")
 	since := fs.String("since", "24h", "how far back the journal goes")
 	id := fs.String("id", "", "report ID to reuse, so that reports for one issue match (default: a new random one)")
 	if err := fs.Parse(args); err != nil {
@@ -161,7 +161,7 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	}
 
 	if *logs != "none" {
-		prio := map[string]string{"warning": "warning", "info": "info"}[*logs]
+		prio := map[string]string{"warning": "warning", "info": "info", "debug": "debug"}[*logs]
 		if prio == "" {
 			return errUsage
 		}

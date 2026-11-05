@@ -94,6 +94,10 @@ service NodeService {
   // SetSummary turns the reports on or off, and the online AS lookup. The
   // token is stored by rayd and never returned.
   rpc SetSummary(SetSummaryRequest) returns (SetSummaryResponse);
+  // SetDebug opens the debug window for a while or closes it: rayd, rayspa
+  // and niko-server log at debug level until it ends by itself
+  // (docs/09-observability.md §3). Root on the node only.
+  rpc SetDebug(SetDebugRequest) returns (SetDebugResponse);
 
   // GetDeployment returns what root must install for the current services:
   // system users, unit files and other files. rayctl apply writes them.
@@ -237,6 +241,8 @@ message GetStatusResponse {
   repeated uint32 spa_ports = 7;
   // rayd's loops: when each last succeeded and failed (O-2).
   repeated LoopHealth loops = 8;
+  // The end of the debug window (rayctl debug), unix seconds; 0: none.
+  int64 debug_until = 9;
 }
 
 message LoopHealth {
@@ -464,6 +470,8 @@ message SummaryService {
   map<string, int64> udp = 4;
   map<string, int64> mbps = 5;
   map<string, int64> stall_kib = 6;
+  // DNS tunnels: working observations by resolver kind (probe-v1 §6.1).
+  map<string, int64> dns = 7;
 }
 message SetSummaryRequest {
   // enabled: "on" or "off"; empty leaves it.
@@ -474,3 +482,10 @@ message SetSummaryRequest {
   string token = 3;
 }
 message SetSummaryResponse {}
+message SetDebugRequest {
+  // seconds: how long the window stays open, up to a day; 0 closes it.
+  int64 seconds = 1;
+}
+message SetDebugResponse {
+  int64 until = 1; // unix seconds; 0: closed
+}

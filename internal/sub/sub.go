@@ -76,6 +76,17 @@ type Payload struct {
 	SPA *SPAHint `json:"spa,omitempty"`
 	// Relays in front of the node (relay-v1 §4).
 	Relays []RelayHint `json:"relays,omitempty"`
+	// DNSProbe is the key of dnsprobe-v1 (spec/dnsprobe-v1.md), for a
+	// user with a dnstt profile: the client checks resolvers with it in
+	// the dnstt zones.
+	DNSProbe *DNSProbeHint `json:"dns_probe,omitempty"`
+}
+
+// DNSProbeHint carries the node's dnsprobe-v1 key, base64url without
+// padding.
+type DNSProbeHint struct {
+	V   int    `json:"v"`
+	Key string `json:"key"`
 }
 
 // RelayHint is a relay in front of the node (relay-v1 §4): its address and
@@ -430,17 +441,20 @@ func DoHLink(m render.Model, s render.Service, token string) string {
 }
 
 // NaiveLink is the naive endpoint of a user (spec/subscription-v1.md §4):
-// naive+https://niko:<password>@<name>:443 with the Niko parameters. The
-// server checks the password only.
+// naive+https://niko:<password>@<node address>:443?sni=<name> with the Niko
+// parameters, like hysteria2:// and vless://: the client needs no lookup of
+// the name in its network and finds the node by its address. The server
+// checks the password only.
 func NaiveLink(m render.Model, s render.Service, password string) string {
 	var st struct {
 		SNI string `json:"sni"`
 	}
 	_ = json.Unmarshal([]byte(s.Settings), &st)
 	q := url.Values{}
+	q.Set("sni", st.SNI)
 	q.Set("niko-node", m.NodeID)
 	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
-	return "naive+https://" + url.UserPassword("niko", password).String() + "@" + st.SNI + ":443?" + q.Encode() + "#" + url.PathEscape(s.Name)
+	return "naive+https://" + url.UserPassword("niko", password).String() + "@" + net.JoinHostPort(m.Host, "443") + "?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
 
 // HysteriaLink is the share link of a Hysteria2 service with a user's

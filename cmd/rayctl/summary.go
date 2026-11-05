@@ -154,7 +154,11 @@ func printSummary(w *tabwriter.Writer, m *nodev1.GetSummaryResponse) {
 			fmt.Fprintf(w, "  udp mtu\t%s\n", counts(n.UdpMtu))
 		}
 		for _, s := range n.Services {
-			fmt.Fprintf(w, "  %s (%d)\t%s\tudp %s\tmbps %s\tstall KiB %s\n", s.Name, s.Id, counts(s.Results), counts(s.Udp), counts(s.Mbps), counts(s.StallKib))
+			fmt.Fprintf(w, "  %s (%d)\t%s\tudp %s\tmbps %s\tstall KiB %s", s.Name, s.Id, counts(s.Results), counts(s.Udp), counts(s.Mbps), counts(s.StallKib))
+			if len(s.Dns) > 0 {
+				fmt.Fprintf(w, "\tresolvers %s", counts(s.Dns)) // DNS tunnels only
+			}
+			fmt.Fprintln(w)
 		}
 	}
 	fmt.Fprintf(w, "\nfrom smaller networks\t%d reports\n", m.OtherReports)

@@ -115,6 +115,21 @@ type Model struct {
 	// devices allowed on it (spec/dnsauth-v1.md): "<device id> <hex>".
 	// Only CollectForRender fills it.
 	DNSAuth map[int64][]string
+	// DNSProbeKey is the node's dnsprobe-v1 key (docs/spec/dnsprobe-v1.md)
+	// when it has a DNS tunnel: the front answers resolver checks with it.
+	DNSProbeKey []byte
+	// Debug: the debug window is open (rayctl debug): niko-server logs at
+	// debug level. Xray stays at warning: at info it logs the users'
+	// destinations.
+	Debug bool
+}
+
+// nikoLevel is niko-server's log level for the model.
+func (m Model) nikoLevel() string {
+	if m.Debug {
+		return "debug"
+	}
+	return "warn"
 }
 
 // DNSAuthMode is a dnstt service's dnsauth-v1 mode: off, optional or
@@ -147,6 +162,7 @@ func HostIPv6() bool {
 // credentials for users who reach a service behind the inner stage.
 func Collect(ctx context.Context, st *store.Store) (Model, error) {
 	m := Model{IPv6: HostIPv6(), FrontTCP: true, FrontUDP: true}
+	m.Debug = time.Now().Before(st.DebugUntil(ctx))
 	params, err := node.LoadParams(ctx, st)
 	if err != nil {
 		return m, err
@@ -177,6 +193,13 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 		if m.Services[i].Kind == "inner" {
 			inner = &m.Services[i]
 		}
+	}
+	// The dnsprobe-v1 key, made once whatever the services: the front's
+	// unit installs it from the first deploy, so a dnstt service added
+	// later through the API finds it there (a front told to read a key
+	// its unit never copied in would stay down, 443 and 53 with it).
+	if m.DNSProbeKey, err = st.DNSProbeKey(ctx); err != nil {
+		return m, err
 	}
 
 	users, err := st.ListUsers(ctx)
@@ -413,6 +436,9 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 	type route struct {
 		Zone    string `json:"zone"`
 		Backend string `json:"backend"`
+		// Probe: the front answers dnsprobe-v1 in this zone. dnstt
+		// only: the answers are built as dnstt's.
+		Probe bool `json:"probe,omitempty"`
 	}
 	type backendRef struct {
 		Socket string `json:"socket"`
@@ -444,14 +470,14 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				return errors.New("needs the inner stage, which is missing or disabled")
 			}
 			zone := provision.Zone(s.Service)
-			zones = append(zones, route{Zone: zone, Backend: s.Name})
+			zones = append(zones, route{Zone: zone, Backend: s.Name, Probe: s.Kind == "dnstt" && len(m.DNSProbeKey) == 32})
 			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
 			keys, ok := m.DNSAuth[s.ID]
 			if !ok && s.Kind == "dnstt" && DNSAuthMode(s.Service) != "off" {
 				// An empty keys file would lock every device out.
 				return errors.New("dnsauth keys not collected (render.CollectForRender)")
 			}
-			f, secret, auth, err := dnsBackend(s, zone, inner.Name, p, keys)
+			f, secret, auth, err := dnsBackend(s, zone, inner.Name, p, keys, m.nikoLevel())
 			if err != nil {
 				return err
 			}
@@ -593,7 +619,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		front := map[string]any{
 			"schema":   Schema,
 			"role":     "front",
-			"log":      map[string]string{"level": "warn"},
+			"log":      map[string]string{"level": m.nikoLevel()},
 			"backends": backends,
 		}
 		if len(zones) > 0 {
@@ -601,7 +627,20 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if m.IPv6 {
 				listen = append(listen, "[::]:53")
 			}
-			front["dns"] = map[string]any{"listen": listen, "zones": zones}
+			dns := map[string]any{"listen": listen, "zones": zones}
+			// dnsprobe-v1: the front answers resolver checks itself in
+			// the dnstt zones (niko-server v0.8.3).
+			if slices.ContainsFunc(zones, func(z route) bool { return z.Probe }) {
+				dns["probe_key_file"] = p.FrontDNSProbe()
+			}
+			front["dns"] = dns
+		}
+		// The key root copies in, with every front: the unit is written by
+		// rayctl apply, the config also by rayd as services change, and a
+		// dnstt zone may come between the two.
+		if len(m.DNSProbeKey) == 32 {
+			files = append(files, File{Path: path.Join(p.Rendered, "front", DNSProbeKeyFile), Mode: 0o600,
+				Content: []byte(hex.EncodeToString(m.DNSProbeKey) + "\n"), Service: "front"})
 		}
 		if len(tcpRoutes) > 0 {
 			listen := []string{"0.0.0.0:443"}
@@ -705,7 +744,7 @@ func accessFiles(s Service, m Model, p Paths, inner *Service) []File {
 	return out
 }
 
-func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string) (cfg, secret File, auth *File, err error) {
+func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level string) (cfg, secret File, auth *File, err error) {
 	opts := map[string]any{}
 	// dnsauth-v1 (spec/dnsauth-v1.md): the devices' keys in a file of the
 	// service group (the front is in none, R4-28), which the backend
@@ -745,7 +784,7 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string) (cfg,
 		"schema":    Schema,
 		"role":      "backend",
 		"kind":      s.Kind,
-		"log":       map[string]string{"level": "warn"},
+		"log":       map[string]string{"level": level},
 		"socket":    p.FrontSocket(s.Name, "packet"),
 		"front_uid": p.PeerUID(FrontUID),
 		"options":   opts,
@@ -855,6 +894,8 @@ func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, er
 		rules = append([]map[string]any{{"domain": []string{"full:" + ProbeName}, "outboundTag": "probe"}}, rules...)
 	}
 	b, err := jsonFile(map[string]any{
+		// Warning even in the debug window: at info Xray logs where every
+		// connection goes, the users' destinations.
 		"log": map[string]string{"loglevel": "warning", "access": "none"},
 		"api": map[string]any{"tag": "api", "listen": p.APISocket(s.Name), "services": []string{"HandlerService"}},
 		"dns": map[string]any{
@@ -1106,6 +1147,14 @@ const (
 	HysteriaObfs  = "salamander"
 )
 
+// DNSProbeKeyFile is the dnsprobe-v1 key's file among the front's.
+const DNSProbeKeyFile = "dnsprobe.key"
+
+// FrontDNSProbe is where the front reads the dnsprobe-v1 key.
+func (p Paths) FrontDNSProbe() string {
+	return p.Credential("front", DNSProbeKeyFile)
+}
+
 // FrontSalamander is where the front reads a hy2-obfs password.
 func (p Paths) FrontSalamander(service string) string {
 	return p.Credential("front", service+".salamander")
@@ -1166,7 +1215,7 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 		options["probe"] = map[string]any{"name": ProbeName, "address": fmt.Sprintf("127.0.0.1:%d", port)}
 	}
 	cfg := map[string]any{
-		"schema": Schema, "role": "backend", "kind": s.Kind, "log": map[string]string{"level": "warn"},
+		"schema": Schema, "role": "backend", "kind": s.Kind, "log": map[string]string{"level": m.nikoLevel()},
 		"socket": p.FrontSocket(s.Name, "packet"), "front_uid": p.PeerUID(FrontUID),
 		// Session stats for the channel probes' link (R4-16, niko-server v0.6).
 		"stats_socket": p.StatsSocket(s.Name),

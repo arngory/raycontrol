@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -138,6 +139,31 @@ func TestRender(t *testing.T) {
 	}
 	if k := byPath["/var/lib/raycontrol/rendered/mdns/encryption.key"].Content; len(k) != 32 {
 		t.Fatalf("masterdns key %q", k)
+	}
+
+	// dnsprobe-v1: the front's key file, root's, read where root copies it.
+	// Probes are answered in the dnstt zone only: masterdns answers look
+	// otherwise.
+	var probeCfg struct {
+		DNS struct {
+			ProbeKeyFile string `json:"probe_key_file"`
+			Zones        []struct {
+				Backend string `json:"backend"`
+				Probe   bool   `json:"probe"`
+			} `json:"zones"`
+		} `json:"dns"`
+	}
+	json.Unmarshal(f.Content, &probeCfg)
+	for _, z := range probeCfg.DNS.Zones {
+		if z.Probe != (z.Backend == "dns") {
+			t.Errorf("zone of %s: probe %v", z.Backend, z.Probe)
+		}
+	}
+	probeKey := byPath["/var/lib/raycontrol/rendered/front/dnsprobe.key"]
+	stored, _ := st.DNSProbeKey(ctx)
+	if probeCfg.DNS.ProbeKeyFile != "/run/niko/front/dnsprobe.key" || probeKey.Mode != 0o600 || probeKey.Group != "" ||
+		string(probeKey.Content) != hex.EncodeToString(stored)+"\n" || len(stored) != 32 {
+		t.Fatalf("probe key: %q, file %+v", probeCfg.DNS.ProbeKeyFile, probeKey)
 	}
 
 	inner := string(byPath["/var/lib/raycontrol/rendered/inner/xray.json"].Content)
@@ -441,5 +467,46 @@ func TestDNSAuth(t *testing.T) {
 	m.Services[i].Settings = strings.Replace(m.Services[i].Settings, `"auth":"required"`, `"auth":"strict"`, 1)
 	if _, _, err := render.Render(m, render.DefaultPaths); !render.Partial(err) || !strings.Contains(err.Error(), `auth "strict"`) {
 		t.Fatalf("render with auth=strict: %v", err)
+	}
+}
+
+// The debug window (rayctl debug) raises the data plane's levels; Xray's
+// access log stays off. Without it the usual warn levels.
+func TestDebugLevels(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	levels := func() map[string]string {
+		m, err := render.Collect(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, _, err := render.Render(m, render.DefaultPaths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]string{}
+		for _, f := range files {
+			var c struct {
+				Log map[string]string `json:"log"`
+			}
+			if json.Unmarshal(f.Content, &c) == nil && c.Log != nil {
+				out[f.Service] = c.Log["level"] + c.Log["loglevel"] + "/" + c.Log["access"]
+			}
+		}
+		return out
+	}
+	want := map[string]string{"front": "warn/", "dns": "warn/", "mdns": "warn/", "inner": "warning/none"}
+	if got := levels(); !maps.Equal(got, want) {
+		t.Fatalf("usual levels %v", got)
+	}
+	st.SetDebugUntil(ctx, time.Now().Add(time.Hour))
+	// Xray at warning still: at info it logs the users' destinations.
+	want = map[string]string{"front": "debug/", "dns": "debug/", "mdns": "debug/", "inner": "warning/none"}
+	if got := levels(); !maps.Equal(got, want) {
+		t.Fatalf("debug levels %v", got)
+	}
+	st.SetDebugUntil(ctx, time.Now().Add(-time.Second))
+	if got := levels(); got["front"] != "warn/" || got["inner"] != "warning/none" {
+		t.Fatalf("after the window %v", got)
 	}
 }

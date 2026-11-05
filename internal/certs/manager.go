@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/provision"
@@ -71,7 +72,9 @@ type Manager struct {
 	once  sync.Once
 	fails map[string]int
 	next  map[string]time.Time
+	last  map[string]time.Time // the last failed try of a site
 	wake  chan struct{}
+	retry atomic.Bool
 }
 
 // Wake makes Run check now, as when a site needs a new name; failures keep
@@ -81,6 +84,23 @@ func (m *Manager) Wake() {
 	case m.wakeCh() <- struct{}{}:
 	default:
 	}
+}
+
+// RetryGap spaces the tries that operators' changes start: at most four an
+// hour, under Let's Encrypt's five failed validations an hour per name.
+const RetryGap = 15 * time.Minute
+
+// backoff is the wait after fails failures in a row: an hour, doubling up
+// to a day.
+func backoff(fails int) time.Duration { return min(time.Hour<<min(fails-1, 5), 24*time.Hour) }
+
+// Retry makes Run try the failed sites now too, on an operator's change
+// that may have fixed them (a DNS token, the records): RetryGap after
+// their last try at the earliest. The count of failures stays, so a site
+// that fails again waits longer.
+func (m *Manager) Retry() {
+	m.retry.Store(true)
+	m.Wake()
 }
 
 func (m *Manager) wakeCh() chan struct{} {
@@ -107,15 +127,35 @@ func (m *Manager) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-m.wakeCh():
-		case <-time.After(every):
+		case <-time.After(m.wait(every, time.Now())):
 		}
 	}
+}
+
+// wait is how long Run sleeps: every, or less when a site's next try comes
+// sooner (one Retry moved forward). Run's goroutine only, as Once.
+func (m *Manager) wait(every time.Duration, now time.Time) time.Duration {
+	for _, next := range m.next {
+		if d := next.Sub(now); d < every {
+			every = max(d, time.Second)
+		}
+	}
+	return every
 }
 
 // Once issues what is due and returns how many certificates it stored.
 func (m *Manager) Once(ctx context.Context, now time.Time) int {
 	if m.fails == nil {
-		m.fails, m.next = map[string]int{}, map[string]time.Time{}
+		m.fails, m.next, m.last = map[string]int{}, map[string]time.Time{}, map[string]time.Time{}
+	}
+	// From the last try, not from next: changes in a row (a cron job) keep
+	// the gap however many there are.
+	if m.retry.Swap(false) {
+		for name, next := range m.next {
+			if soon := m.last[name].Add(RetryGap); soon.Before(next) {
+				m.next[name] = soon
+			}
+		}
 	}
 	services, err := m.Store.ListServices(ctx)
 	if err != nil {
@@ -156,13 +196,15 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 		}
 		if err != nil {
 			m.fails[svc.Name]++
-			wait := min(time.Hour<<min(m.fails[svc.Name]-1, 5), 24*time.Hour)
+			wait := backoff(m.fails[svc.Name])
 			m.next[svc.Name] = now.Add(wait)
+			m.last[svc.Name] = now
 			m.log().Warn("certificate not issued, retrying later", "service", svc.Name, "in", wait, "err", err)
 			continue
 		}
 		delete(m.fails, svc.Name)
 		delete(m.next, svc.Name)
+		delete(m.last, svc.Name)
 		stored++
 	}
 	if stored > 0 && m.Notify != nil {

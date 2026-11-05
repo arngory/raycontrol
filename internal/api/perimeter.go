@@ -76,7 +76,7 @@ func (p *PerimeterServer) WatchPerimeter(ctx context.Context, _ *connect.Request
 // snapshot builds the perimeter state from the store. Revision is left 0 so
 // that equal states marshal equally.
 func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, error) {
-	snap := &perimeterv1.Snapshot{Spa: p.spaPB(p.Params)}
+	snap := &perimeterv1.Snapshot{Spa: p.spaPB(p.Params), DebugUntil: unixOf(debugUntil(ctx, p.Store))}
 
 	devices, err := p.Store.SPADevices(ctx)
 	if err != nil {

@@ -74,6 +74,68 @@ func TestManager(t *testing.T) {
 	if n := m.Once(ctx, now.Add(61*24*time.Hour+2*time.Hour)); n != 1 || len(issued) != 2 {
 		t.Fatalf("renewal after the backoff: %d %v", n, issued)
 	}
+
+	// An operator's change retries at once and keeps the count: the third
+	// failure in a row waits four hours.
+	fail = true
+	at := now.Add(122 * 24 * time.Hour)
+	m.Once(ctx, at)
+	m.Once(ctx, at.Add(2*time.Hour)) // the second failure waits two hours
+	fail = false
+	if n := m.Once(ctx, at.Add(3*time.Hour)); n != 0 {
+		t.Fatal("retried within the backoff")
+	}
+	fail = true
+	m.Retry()
+	if n := m.Once(ctx, at.Add(3*time.Hour)); n != 0 || m.fails["site"] != 3 {
+		t.Fatalf("operator's retry: stored %d, fails %d", n, m.fails["site"])
+	}
+	if !m.next["site"].Equal(at.Add(3*time.Hour + 4*time.Hour)) {
+		t.Fatalf("after the retry the site waits until %v", m.next["site"])
+	}
+	fail = false
+	if n := m.Once(ctx, at.Add(3*time.Hour+time.Minute)); n != 0 {
+		t.Fatal("retried again without a change")
+	}
+	// Changes in a row (a cron job): a try RetryGap after the last at most.
+	m.Retry()
+	if n := m.Once(ctx, at.Add(3*time.Hour+2*time.Minute)); n != 0 {
+		t.Fatal("retried within RetryGap of the last try")
+	}
+	if n := m.Once(ctx, at.Add(3*time.Hour+RetryGap)); n != 1 {
+		t.Fatalf("operator's retry after a fix: %d", n)
+	}
+}
+
+// Changes every minute for an hour (a cron job running rayctl dns sync)
+// against a site that keeps failing: a try every RetryGap at most, under
+// Let's Encrypt's five failed validations an hour per name.
+func TestManagerRetryGap(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "site", Name: "site", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	tries := 0
+	m := &Manager{Store: st, Issue: func(context.Context, []string, crypto.Signer) ([][]byte, error) {
+		tries++
+		return nil, errors.New("does not resolve")
+	}}
+	start := time.Unix(1767225600, 0)
+	m.Once(ctx, start)
+	for i := 1; i <= 60; i++ {
+		m.Retry()
+		m.Retry() // two changes in a row: rayctl dns cloudflare, then dns sync
+		m.Once(ctx, start.Add(time.Duration(i)*time.Minute))
+	}
+	if tries != 5 { // at 0, 15, 30, 45 and 60 minutes
+		t.Fatalf("%d tries in an hour", tries)
+	}
 }
 
 func TestAccountKey(t *testing.T) {
@@ -185,5 +247,24 @@ func TestManagerWildcard(t *testing.T) {
 	// Published at once: the wildcard covers the next name already.
 	if n, _ := provision.RotateReality(ctx, st, r.CreatedAt.Add(86*24*time.Hour+time.Minute), epoch, ok, nil); n != 1 {
 		t.Fatal("rotation waits for a certificate it has")
+	}
+}
+
+// Run sleeps until the soonest next try when a retry moved one forward,
+// not its whole interval.
+func TestManagerWait(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	m := &Manager{next: map[string]time.Time{}}
+	if w := m.wait(time.Hour, now); w != time.Hour {
+		t.Fatalf("nothing pending: %v", w)
+	}
+	m.next["a"] = now.Add(2 * time.Hour)
+	m.next["b"] = now.Add(10 * time.Minute)
+	if w := m.wait(time.Hour, now); w != 10*time.Minute {
+		t.Fatalf("a retry in 10m: %v", w)
+	}
+	m.next["c"] = now.Add(-time.Minute) // due already
+	if w := m.wait(time.Hour, now); w != time.Second {
+		t.Fatalf("one due: %v", w)
 	}
 }

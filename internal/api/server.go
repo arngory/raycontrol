@@ -47,7 +47,8 @@ type Server struct {
 	// keys are published; Rotate, if set, runs the rotation at once.
 	RealityLead time.Duration
 	Rotate      func()
-	// DNSChanged runs after the DNS provider changed (certificates check).
+	// DNSChanged runs after the operator changed the DNS provider or its
+	// records: the certificates are tried again (certs.Manager.Retry).
 	DNSChanged func()
 	// Health is where rayd's loops report (O-2): status and metrics.
 	Health *health.Board
@@ -226,6 +227,7 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 		Users:         uint32(len(users)),
 		Services:      uint32(len(services)),
 		ActiveDevices: uint32(len(devices)),
+		DebugUntil:    unixOf(debugUntil(ctx, s.Store)),
 	}
 	for _, p := range s.Params.ActivePorts(time.Now()) {
 		resp.SpaPorts = append(resp.SpaPorts, uint32(p))
@@ -903,6 +905,11 @@ func (s *Server) SyncDNS(ctx context.Context, _ *connect.Request[nodev1.SyncDNSR
 	changes, problems, err := provision.SyncDNS(ctx, s.Store)
 	if err := s.done(ctx, "dns.sync", "", err); err != nil {
 		return nil, err
+	}
+	// Records fixed by hand: the certificates need not wait for their
+	// back-off.
+	if s.DNSChanged != nil {
+		s.DNSChanged()
 	}
 	status, err := s.dnsStatus(ctx, changes, problems)
 	if err != nil {

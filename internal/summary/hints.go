@@ -22,9 +22,14 @@ type Hints struct {
 	UDPMTU      string   `json:"udp_mtu,omitempty"`       // the UDP MTU most reports give (a bucket of MTUs)
 	// ViaRelay: most reports from the network came through a relay of the
 	// node (relay-v1 §9.3): a starting point for the client's detector.
-	ViaRelay bool  `json:"via_relay,omitempty"`
-	Devices  int64 `json:"devices"` // reports counted (not distinct devices)
-	Days     int   `json:"days"`
+	ViaRelay bool `json:"via_relay,omitempty"`
+	// DNS: by tunnel kind (dnstt, masterdns), the kind of resolver it
+	// mostly works through here (Resolvers): where the client starts its
+	// search in a new network. Per tunnel: their queries differ, and so do
+	// the resolvers that pass them.
+	DNS     map[string]string `json:"dns,omitempty"`
+	Devices int64             `json:"devices"` // reports counted (not distinct devices)
+	Days    int               `json:"days"`
 }
 
 // tally is the counters of one AS over the window.
@@ -76,8 +81,15 @@ func total(m map[string]int64) int64 {
 	return n
 }
 
-// hints of one AS for the services the client has.
-func (t *tally) hints(svcs []uint16) *Hints {
+// namesResolvers reports whether any of the services has observations that
+// name a resolver: only then the hints need the services' kinds.
+func (t *tally) namesResolvers(svcs []uint16) bool {
+	return t != nil && slices.ContainsFunc(svcs, func(s uint16) bool { return len(t.svc[int64(s)]["dns"]) > 0 })
+}
+
+// hints of one AS for the services the client has; kinds names the kind
+// of each service, for the resolvers' hint.
+func (t *tally) hints(svcs []uint16, kinds map[int64]string) *Hints {
 	if t == nil {
 		return nil
 	}
@@ -100,7 +112,7 @@ func (t *tally) hints(svcs []uint16) *Hints {
 	}
 	var order []scored
 	var udpNone, udpAll int64
-	stalls := map[string]int64{}
+	stalls, dns := map[string]int64{}, map[string]map[string]int64{}
 	var tcpAll int64
 	for _, s := range svcs {
 		f := t.svc[int64(s)]
@@ -112,6 +124,14 @@ func (t *tally) hints(svcs []uint16) *Hints {
 		}
 		udpAll += total(f["udp"])
 		udpNone += f["udp"]["none"]
+		if k := kinds[int64(s)]; k != "" && len(f["dns"]) > 0 {
+			if dns[k] == nil {
+				dns[k] = map[string]int64{}
+			}
+			for b, v := range f["dns"] {
+				dns[k][b] += v
+			}
+		}
 		if n < K {
 			continue // too few here to tell this service apart
 		}
@@ -144,8 +164,16 @@ func (t *tally) hints(svcs []uint16) *Hints {
 		}
 	}
 	h.UDPMTU = majority(t.mtu)
+	for k, m := range dns {
+		if b := majority(m); b != "" {
+			if h.DNS == nil {
+				h.DNS = map[string]string{}
+			}
+			h.DNS[k] = b
+		}
+	}
 	slices.Sort(h.Avoid)
-	if len(h.Order) == 0 && len(h.Avoid) == 0 && !h.UDPBlocked && h.TCPStallKiB == 0 && h.UDPMTU == "" && !h.ViaRelay {
+	if len(h.Order) == 0 && len(h.Avoid) == 0 && !h.UDPBlocked && h.TCPStallKiB == 0 && h.UDPMTU == "" && !h.ViaRelay && len(h.DNS) == 0 {
 		return nil
 	}
 	return h
@@ -180,7 +208,12 @@ func (c *Collector) Hints(ctx context.Context, addr netip.Addr, svcs []uint16) *
 	if err != nil {
 		return nil
 	}
-	return sum(rows)[info.ASN].hints(svcs)
+	t := sum(rows)[info.ASN]
+	var kinds map[int64]string
+	if t.namesResolvers(svcs) {
+		kinds = c.kinds(ctx)
+	}
+	return t.hints(svcs, kinds)
 }
 
 // Network is the administrator's view of one AS over some days.

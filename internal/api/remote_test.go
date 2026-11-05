@@ -202,6 +202,10 @@ func TestRemoteAPI(t *testing.T) {
 	if _, err := admin.node.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("the rendered keys through the remote API: %v", err)
 	}
+	// Client addresses in the journal: root on the node only.
+	if _, err := admin.node.SetDebug(ctx, connect.NewRequest(&nodev1.SetDebugRequest{Seconds: 60})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("a remote debug window: %v", err)
+	}
 	// A relay opens the service ports to an address: root on the node only.
 	if _, err := admin.node.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r", Address: "198.51.100.20"})); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("a remote relay: %v", err)
