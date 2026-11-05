@@ -342,11 +342,45 @@ func TestGatePendingSnapshot(t *testing.T) {
 	snap.AdminPrefixes = []string{"198.51.100.0/24"}
 	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 22}}
 	fw.adminFails = 1
-	if err := g.Update(snap); err == nil || len(fw.admin) != 0 {
+	if err := g.Update(snap); !errors.Is(err, ErrPending) || len(fw.admin) != 0 {
 		t.Fatalf("a failed update: admin %v, %v", fw.admin, err)
 	}
-	if _, err := g.Tick(); err != nil || len(fw.admin) != 1 || fw.relaysSets != 1 {
-		t.Fatalf("pending snapshot: admin %v, SetRelays %d, %v", fw.admin, fw.relaysSets, err)
+	now = now.Add(time.Second)
+	if _, err := g.Tick(); err != nil || len(fw.admin) != 1 || fw.relaysSets != 1 || g.pending != nil {
+		t.Fatalf("pending snapshot: admin %v, SetRelays %d, pending %v, %v", fw.admin, fw.relaysSets, g.pending != nil, err)
+	}
+
+	// A snapshot that keeps failing: the slots move on all the same, and
+	// the tries come less and less often.
+	fw.adminFails = 1000
+	snap.AdminPrefixes = []string{"198.51.100.0/25"}
+	if err := g.Update(snap); !errors.Is(err, ErrPending) {
+		t.Fatal(err)
+	}
+	slots := slices.Clone(fw.udp)
+	tries := fw.adminFails
+	for range 3 {
+		now = now.Add(10 * time.Minute) // a slot
+		ports, err := g.Tick()
+		if ports == nil || err == nil || slices.Equal(fw.udp, slots) {
+			t.Fatalf("slots stuck behind a failing snapshot: %v -> %v, ports %v, %v", slots, fw.udp, ports, err)
+		}
+		slots = slices.Clone(fw.udp)
+	}
+	if tries-fw.adminFails != 3 {
+		t.Fatalf("%d tries in 3 ticks", tries-fw.adminFails)
+	}
+	for range 5 {
+		now = now.Add(time.Second)
+		g.Tick()
+	}
+	if tries-fw.adminFails > 6 || g.retryAt.Sub(now) < 2*time.Second {
+		t.Fatalf("no backoff: %d tries, next in %v", tries-fw.adminFails, g.retryAt.Sub(now))
+	}
+	// A snapshot that goes through ends the backoff.
+	fw.adminFails = 0
+	if err := g.Update(snap); err != nil || g.failures != 0 || !g.retryAt.IsZero() {
+		t.Fatalf("after a good update: failures %d, retry at %v, %v", g.failures, g.retryAt, err)
 	}
 
 	fw.flush()
@@ -362,6 +396,19 @@ func TestGatePendingSnapshot(t *testing.T) {
 	}
 	if len(fw.calls) == 0 || fw.calls[0] != "Setup" {
 		t.Fatalf("an update wrote into a half-made table: %v", fw.calls)
+	}
+}
+
+// Admin prefixes inside others go: an interval set refuses overlaps.
+func TestMergePrefixes(t *testing.T) {
+	var in []netip.Prefix
+	for _, s := range []string{"198.51.100.7/32", "198.51.100.0/24", "2001:db8:1::/48", "198.51.100.9/24", "203.0.113.5/32", "2001:db8:1:2::/64"} {
+		in = append(in, netip.MustParsePrefix(s))
+	}
+	got := mergePrefixes(in)
+	want := []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24"), netip.MustParsePrefix("203.0.113.5/32"), netip.MustParsePrefix("2001:db8:1::/48")}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%v", got)
 	}
 }
 

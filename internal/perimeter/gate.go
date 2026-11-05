@@ -18,6 +18,10 @@ import (
 // ErrNotReady is returned before the first snapshot arrives.
 var ErrNotReady = errors.New("perimeter: no snapshot yet")
 
+// ErrPending: the snapshot is the gate's now, but the firewall took it only
+// in part; Tick applies the rest. It is worth saving all the same.
+var ErrPending = errors.New("perimeter: snapshot applied in part, the rest follows")
+
 // rotation is a UDP port schedule: spa.Params reused with the service's key
 // and range (spa-v2.md §11).
 type rotation struct {
@@ -144,6 +148,7 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		}
 		admin = append(admin, p)
 	}
+	admin = mergePrefixes(admin)
 	adminPorts := portsOf(snap.AdminPorts)
 	var relays []netip.Prefix
 	for _, a := range snap.RelayPrefixes {
@@ -165,7 +170,33 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.pending = u
-	return g.catchUpLocked()
+	if err := g.catchUpLocked(g.now()); err != nil {
+		return fmt.Errorf("%w: %w", ErrPending, err)
+	}
+	return nil
+}
+
+// mergePrefixes leaves out prefixes inside others, and repeats: an interval
+// set takes no overlaps ("conflicting intervals specified"), and rayctl
+// admin set takes 198.51.100.0/24 with 198.51.100.7 in it.
+func mergePrefixes(ps []netip.Prefix) []netip.Prefix {
+	in := make([]netip.Prefix, 0, len(ps))
+	for _, p := range ps {
+		in = append(in, p.Masked())
+	}
+	slices.SortFunc(in, func(a, b netip.Prefix) int {
+		if a.Bits() != b.Bits() {
+			return a.Bits() - b.Bits()
+		}
+		return a.Addr().Compare(b.Addr())
+	})
+	var out []netip.Prefix
+	for _, p := range in {
+		if !slices.ContainsFunc(out, func(q netip.Prefix) bool { return q.Bits() <= p.Bits() && q.Contains(p.Addr()) }) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // update is a snapshot checked, to be applied.
@@ -185,20 +216,33 @@ type update struct {
 }
 
 // catchUpLocked finishes a restore of the table, then applies the snapshot
-// still pending. What fails stays to do, and Tick tries again: rayd sends a
-// snapshot again only when something changes.
-func (g *Gate) catchUpLocked() error {
-	if g.restoring {
-		if err := g.restoreLocked(); err != nil {
-			return err
+// still pending. What fails stays to do, and Tick tries again, less and
+// less often (1 s doubling to 30 s): rayd sends a snapshot again only when
+// something changes.
+func (g *Gate) catchUpLocked(now time.Time) error {
+	err := func() error {
+		if g.restoring {
+			if err := g.restoreLocked(); err != nil {
+				return err
+			}
 		}
-	}
-	if g.pending != nil {
-		if err := g.applyLocked(g.pending); err != nil {
-			return err
+		if g.pending != nil {
+			if err := g.applyLocked(g.pending); err != nil {
+				return err
+			}
+			g.pending = nil
 		}
-		g.pending = nil
+		return nil
+	}()
+	if err != nil {
+		g.failures++
+		g.retryAt = now.Add(min(30*time.Second, time.Second<<min(g.failures-1, 5)))
+		return err
 	}
+	if g.failures > 0 {
+		g.log.Info("perimeter caught up", "failures", g.failures)
+	}
+	g.failures, g.retryAt = 0, time.Time{}
 	return nil
 }
 
@@ -215,6 +259,8 @@ func (g *Gate) applyLocked(u *update) error {
 	g.params, g.tcpCarrier = u.params, u.tcpCarrier
 	g.defaultTTL, g.maxTTL = u.defTTL, u.maxTTL
 	g.services, g.allowed, g.rotations = u.services, u.allowed, u.rotations
+	// Revocations first: they do not wait for the rest of the table.
+	g.revokeLocked()
 
 	if !slices.Equal(u.public, g.public) {
 		if err := g.fw.SetPublic(u.public); err != nil {
@@ -254,7 +300,6 @@ func (g *Gate) applyLocked(u *update) error {
 		}
 		g.forward = forward
 	}
-	g.revokeLocked()
 	if err := g.acmeLocked(u.acme); err != nil {
 		return err
 	}
@@ -345,7 +390,7 @@ func (g *Gate) Handle(src netip.Addr, pkt []byte) (spa.Grant, error) {
 // Tick restores the table if something removed it, moves the SPA ports to
 // the current slots and forgets expired holders (the firewall expires the
 // elements itself). It returns the TCP carrier ports that should be
-// listening.
+// listening, also with an error while a snapshot is behind.
 func (g *Gate) Tick() ([]uint16, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -357,22 +402,19 @@ func (g *Gate) Tick() ([]uint16, error) {
 		g.restoring = true
 		g.log.Warn("nftables table was removed (flush ruleset? nftables or firewalld reload?), restoring", "table", Table)
 	}
+	var behind error
 	if g.restoring || g.pending != nil {
-		// A firewall that keeps failing is tried again less and less
-		// often: a restore makes one nft call per grant, under the lock.
-		now := g.now()
-		if now.Before(g.retryAt) {
-			return nil, fmt.Errorf("%w: catching up with the table", ErrNotReady)
+		// A firewall that keeps failing is tried again less and less often.
+		if now := g.now(); now.Before(g.retryAt) {
+			behind = fmt.Errorf("%w: catching up with the table", ErrNotReady)
+		} else {
+			behind = g.catchUpLocked(now)
 		}
-		if err := g.catchUpLocked(); err != nil {
-			g.failures++
-			g.retryAt = now.Add(min(30*time.Second, time.Second<<min(g.failures-1, 5)))
-			return nil, err
+		// Without the whole table the slots have nowhere to go; with only a
+		// snapshot behind, they move on as ever, or SPA stops for everyone.
+		if behind != nil && g.restoring {
+			return nil, behind
 		}
-		if g.failures > 0 {
-			g.log.Info("perimeter table caught up", "failures", g.failures)
-		}
-		g.failures, g.retryAt = 0, time.Time{}
 	}
 	if g.verifier == nil {
 		return nil, ErrNotReady
@@ -388,8 +430,11 @@ func (g *Gate) Tick() ([]uint16, error) {
 			delete(g.holders, key)
 		}
 	}
-	err = g.slotsLocked()
-	return slices.Clone(g.tcpPorts), err
+	if err := g.slotsLocked(); err != nil {
+		return nil, err
+	}
+	// The ports are good even when a snapshot is behind.
+	return slices.Clone(g.tcpPorts), behind
 }
 
 // restoreLocked re-creates the table with everything the gate had put in

@@ -162,7 +162,7 @@ func run(args []string) error {
 			if err != nil && !errors.Is(err, perimeter.ErrNotReady) {
 				log.Warn("tick", "err", err)
 			}
-			if err == nil {
+			if ports != nil {
 				carrier.Reconcile(ports)
 			}
 		}
@@ -182,11 +182,13 @@ func restore(file string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, l
 	if err == nil {
 		err = gate.Update(snap)
 	}
-	if err != nil {
+	if errors.Is(err, perimeter.ErrPending) {
+		log.Warn("saved snapshot applied in part; the rest follows", "file", file, "err", err)
+	} else if err != nil {
 		log.Warn("saved snapshot not applied; waiting for rayd", "file", file, "err", err)
 		return
 	}
-	if ports, err := gate.Tick(); err == nil {
+	if ports, _ := gate.Tick(); ports != nil {
 		carrier.Reconcile(ports)
 	}
 	age := time.Duration(0)
@@ -289,14 +291,19 @@ func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gat
 			for stream.Receive() {
 				backoff = time.Second
 				snap := stream.Snapshot()
-				if err := gate.Update(snap); err != nil {
+				// A snapshot applied in part is the gate's all the same:
+				// Tick applies the rest, and it is saved for the next start.
+				if err := gate.Update(snap); errors.Is(err, perimeter.ErrPending) {
+					log.Warn("snapshot applied in part; the rest follows", "revision", snap.GetRevision(), "err", err)
+				} else if err != nil {
 					log.Error("applying snapshot", "revision", snap.GetRevision(), "err", err)
 					continue
+				} else {
+					log.Info("snapshot applied", "revision", snap.GetRevision(), "devices", len(snap.Devices))
 				}
-				if ports, err := gate.Tick(); err == nil {
+				if ports, _ := gate.Tick(); ports != nil {
 					carrier.Reconcile(ports)
 				}
-				log.Info("snapshot applied", "revision", snap.GetRevision(), "devices", len(snap.Devices))
 				if state != "" {
 					if err := save(state, snap); err != nil {
 						log.Warn("saving the snapshot", "file", state, "err", err)

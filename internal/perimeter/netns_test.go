@@ -321,7 +321,7 @@ func TestNetns(t *testing.T) {
 		if dial() {
 			t.Fatal("ssh open before admin access")
 		}
-		snap.AdminPrefixes = []string{"127.0.0.0/8"}
+		snap.AdminPrefixes = []string{"127.0.0.0/8", "127.0.0.1/32"} // overlapping: merged for the interval set
 		snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 18022}}
 		if err := gate.Update(snap); err != nil {
 			t.Fatal(err)
@@ -667,8 +667,8 @@ func TestNetns(t *testing.T) {
 		if ok, err := fw.Present(); !ok || err != nil {
 			t.Fatalf("present after tick: %v %v", ok, err)
 		}
-		if !strings.Contains(allow4(), "127.0.0.1") {
-			t.Fatal("grant lost")
+		if got := allow4(); !strings.Contains(got, "127.0.0.1") || !strings.Contains(got, "expires") {
+			t.Fatalf("grant lost, or back without its timeout: %s", got)
 		}
 		// The slot ports log to rayspa again.
 		sendUDP(make([]byte, 120))
