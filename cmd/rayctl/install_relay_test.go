@@ -271,13 +271,18 @@ func TestRelaySteps(t *testing.T) {
 			t.Errorf("%s fails: %v %+v %v", at, f.calls, f, err)
 		}
 	}
-	// A signal at any step: the same, from the next step on.
-	for i, at := range happy {
+	// A signal at any step: the same, from the next step on; at the last,
+	// the install is complete.
+	for i, at := range happy[:len(happy)-1] {
 		f := &fakeRelayHost{cancelAt: at}
 		_, err := f.run()
 		if err == nil || !strings.Contains(err.Error(), "interrupted") || !slices.Equal(f.calls, after(i, true)) || !open(f) {
 			t.Errorf("a signal at %s: %v %+v %v", at, f.calls, f, err)
 		}
+	}
+	f = &fakeRelayHost{cancelAt: happy[len(happy)-1]}
+	if _, err := f.run(); err != nil || !f.enabled || !f.active {
+		t.Errorf("a signal at the last step: %+v %v", f, err)
 	}
 	// A panic too.
 	f = &fakeRelayHost{panicAt: "check"}
@@ -518,11 +523,69 @@ func TestSysctlAtBoot(t *testing.T) {
 	if v, f := sysctlAtBoot(dirs, "net.ipv4.ip_forward"); v != "0" || f != etc+"/99-zz.conf" {
 		t.Fatalf("a later file: %q from %s", v, f)
 	}
+	// systemd-sysctl does not read sysctl.conf by itself.
 	if err := os.WriteFile(root+"/etc/sysctl.conf", []byte("net.ipv4.ip_forward=1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := sysctlAtBoot(dirs, "net.ipv4.ip_forward"); v != "1" {
-		t.Fatalf("sysctl.conf last: %q", v)
+	if v, _ := sysctlAtBoot(dirs, "net.ipv4.ip_forward"); v != "0" {
+		t.Fatalf("sysctl.conf read: %q", v)
+	}
+	// The other name of the same variable, and a glob over it.
+	os.Remove(etc + "/99-zz.conf")
+	for name, line := range map[string]string{"99-stig.conf": "net.ipv4.conf.all.forwarding = 0", "99-glob.conf": "net/ipv4/conf/*/forwarding=0"} {
+		if err := os.WriteFile(etc+"/"+name, []byte(line+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if v, f := sysctlAtBoot(dirs, forwardKeys...); v != "0" || f != etc+"/"+name {
+			t.Errorf("%s: %q from %s", name, v, f)
+		}
+		os.Remove(etc + "/" + name)
+	}
+	// A glob over another subtree does not count.
+	if err := os.WriteFile(etc+"/99-other.conf", []byte("net.ipv4.conf.all.rp_filter = 0\nnet.ipv6.conf.*.forwarding = 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := sysctlAtBoot(dirs, forwardKeys...); v != "1" {
+		t.Errorf("another key: %q", v)
+	}
+}
+
+// Forwarding goes on only if it stays on at boot, and a failure leaves the
+// kernel as it was, without our file.
+func TestTurnForwardingOn(t *testing.T) {
+	dir := t.TempDir()
+	proc := dir + "/ip_forward"
+	setup := func() (written, removed, applied *bool) {
+		t.Helper()
+		if err := os.WriteFile(proc, []byte("0\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var w, r, a bool
+		return &w, &r, &a
+	}
+	read := func() string { b, _ := os.ReadFile(proc); return strings.TrimSpace(string(b)) }
+	run := func(boot string, takes bool) (written, removed, applied bool, err error) {
+		w, r, a := setup()
+		err = turnForwardingOn(proc,
+			func() error { *w = true; return nil },
+			func() error { *r = true; return nil },
+			func() {
+				*a = true
+				if takes {
+					os.WriteFile(proc, []byte("1\n"), 0o644)
+				}
+			},
+			func() (string, string) { return boot, "/etc/sysctl.d/99-zz.conf" })
+		return *w, *r, *a, err
+	}
+	if w, r, a, err := run("1", true); err != nil || !w || r || !a || read() != "1" {
+		t.Fatalf("on: %v written %v removed %v applied %v now %s", err, w, r, a, read())
+	}
+	if _, r, a, err := run("0", true); err == nil || !strings.Contains(err.Error(), "99-zz.conf") || !r || a || read() != "0" {
+		t.Fatalf("off at boot: %v removed %v applied %v now %s", err, r, a, read())
+	}
+	if _, r, _, err := run("1", false); err == nil || !r || read() != "0" {
+		t.Fatalf("does not take: %v removed %v now %s", err, r, read())
 	}
 }
 
@@ -539,24 +602,46 @@ func TestWaitActive(t *testing.T) {
 	activating := map[string]string{"ActiveState": "activating", "SubState": "start-pre", "Result": "success", "NRestarts": "0", "Job": "1"}
 	running := map[string]string{"ActiveState": "active", "SubState": "running", "Result": "success", "NRestarts": "0"}
 	ctx := context.Background()
-	if err := waitActive(ctx, seq(activating, activating, running), time.Second, time.Millisecond); err != nil {
+	if err := waitActive(ctx, seq(activating, activating, running), "0", time.Second, time.Millisecond); err != nil {
 		t.Fatal(err)
+	}
+	// Queued behind network-online.target: the last run's Result and
+	// restarts are not this one's.
+	stale := map[string]string{"ActiveState": "inactive", "SubState": "dead", "Result": "exit-code", "NRestarts": "4", "Job": "112"}
+	if err := waitActive(ctx, seq(stale, stale, running), "0", time.Second, time.Millisecond); err != nil {
+		t.Fatalf("queued: %v", err)
+	}
+	// Restarts counted from before the start.
+	again := map[string]string{"ActiveState": "active", "SubState": "running", "Result": "success", "NRestarts": "3"}
+	if err := waitActive(ctx, seq(again), "3", time.Second, time.Millisecond); err != nil {
+		t.Fatalf("restarts before: %v", err)
+	}
+	if err := stillRunning(seq(again), "3"); err != nil {
+		t.Fatalf("still running: %v", err)
+	}
+	for name, st := range map[string]map[string]string{
+		"restarted since": {"ActiveState": "active", "SubState": "running", "NRestarts": "4"},
+		"stopped":         {"ActiveState": "activating", "SubState": "auto-restart", "NRestarts": "3"},
+	} {
+		if err := stillRunning(seq(st), "3"); err == nil {
+			t.Errorf("still running, %s", name)
+		}
 	}
 	for name, c := range map[string]struct {
 		show func() (map[string]string, error)
 		says string
 	}{
-		"a crash loop":   {seq(activating, map[string]string{"ActiveState": "activating", "SubState": "auto-restart", "Result": "exit-code", "NRestarts": "2"}), "restarted 2 times"},
+		"a crash loop":   {seq(activating, map[string]string{"ActiveState": "activating", "SubState": "auto-restart", "Result": "exit-code", "NRestarts": "2"}), "restarted (2 times)"},
 		"a failed start": {seq(map[string]string{"ActiveState": "inactive", "SubState": "dead", "Result": "exit-code", "NRestarts": "0"}), "did not start (exit-code)"},
 		"never":          {seq(activating), "did not start within"},
 	} {
-		if err := waitActive(ctx, c.show, 20*time.Millisecond, time.Millisecond); err == nil || !strings.Contains(err.Error(), c.says) {
+		if err := waitActive(ctx, c.show, "0", 20*time.Millisecond, time.Millisecond); err == nil || !strings.Contains(err.Error(), c.says) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if err := waitActive(cancelled, seq(activating), time.Second, time.Millisecond); !errors.Is(err, errInterrupted) {
+	if err := waitActive(cancelled, seq(activating), "0", time.Second, time.Millisecond); !errors.Is(err, errInterrupted) {
 		t.Errorf("interrupted: %v", err)
 	}
 }

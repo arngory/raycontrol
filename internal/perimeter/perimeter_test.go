@@ -1031,6 +1031,36 @@ func TestGateRevokeWhileRestoring(t *testing.T) {
 		t.Fatal("a revoked grant waits for a Setup that keeps failing")
 	}
 
+	// Shortened too: bob's 10 s, not alice's hour, while Setup keeps failing.
+	fw.failing = nil
+	fw.flush()
+	fw.adminFails = 1
+	alice.Allowed = []uint32{2}
+	bob := &perimeterv1.Device{Id: "bob", Key: key(0x22), Allowed: []uint32{2}}
+	snap.Devices = append(snap.Devices, bob)
+	now = now.Add(time.Second)
+	if err := g.Update(snap); err == nil {
+		t.Fatal("a failed restore said nothing")
+	}
+	p, _ := paramsOf(snap.Spa)
+	for k, ttl := range map[byte]time.Duration{0x11: time.Hour, 0x22: 10 * time.Second} {
+		pkt, _ := spa.SealRandom(p, [spa.KeySize]byte(key(k)), spa.Request{Time: now, TTL: ttl})
+		if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), pkt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fw.failing = map[string]int{"Setup": 100}
+	alice.Allowed = nil
+	if err := g.Update(snap); !errors.Is(err, ErrPending) {
+		t.Fatal(err)
+	}
+	fw.mu.Lock()
+	ttl := fw.open["203.0.113.9 udp/443"]
+	fw.mu.Unlock()
+	if ttl > 10*time.Second {
+		t.Fatalf("a revoked holder's time stays while Setup fails: %v", ttl)
+	}
+
 	fw = &fakeFW{}
 	g = NewGate(fw, quiet)
 	g.now = func() time.Time { return now }

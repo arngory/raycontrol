@@ -233,7 +233,8 @@ func (g *Gate) catchUpLocked(now time.Time) error {
 		}
 		if g.restoring {
 			// Into whatever table there is: a Setup that keeps failing
-			// should not keep revoked grants open.
+			// should not keep revoked grants open, or long.
+			_ = g.regrantLocked()
 			_ = g.denyLocked()
 			if err := g.restoreLocked(); err != nil {
 				return err
