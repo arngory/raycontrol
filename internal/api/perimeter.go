@@ -16,6 +16,7 @@ import (
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -74,20 +75,7 @@ func (p *PerimeterServer) WatchPerimeter(ctx context.Context, _ *connect.Request
 // snapshot builds the perimeter state from the store. Revision is left 0 so
 // that equal states marshal equally.
 func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, error) {
-	pr := p.Params
-	snap := &perimeterv1.Snapshot{Spa: &perimeterv1.SPAParams{
-		NodeId:      pr.NodeID[:],
-		EpochLenS:   uint32(pr.EpochLen / time.Second),
-		SlotLenS:    uint32(pr.SlotLen / time.Second),
-		PortKey:     pr.PortKey[:],
-		PortBase:    uint32(pr.PortBase),
-		PortRange:   uint32(pr.PortRange),
-		LenMin:      uint32(pr.LenMin),
-		LenMax:      uint32(pr.LenMax),
-		DefaultTtlS: uint32(p.DefaultTTL / time.Second),
-		MaxTtlS:     uint32(p.MaxTTL / time.Second),
-		TcpCarrier:  p.TCPCarrier,
-	}}
+	snap := &perimeterv1.Snapshot{Spa: p.spaPB(p.Params)}
 
 	devices, err := p.Store.SPADevices(ctx)
 	if err != nil {
@@ -200,6 +188,87 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 			}
 		}
 	}
+	return snap, nil
+}
+
+// spaPB is the SPA part of a snapshot for a parameter set.
+func (p *PerimeterServer) spaPB(pr spa.Params) *perimeterv1.SPAParams {
+	return &perimeterv1.SPAParams{
+		NodeId:      pr.NodeID[:],
+		EpochLenS:   uint32(pr.EpochLen / time.Second),
+		SlotLenS:    uint32(pr.SlotLen / time.Second),
+		PortKey:     pr.PortKey[:],
+		PortBase:    uint32(pr.PortBase),
+		PortRange:   uint32(pr.PortRange),
+		LenMin:      uint32(pr.LenMin),
+		LenMax:      uint32(pr.LenMax),
+		DefaultTtlS: uint32(p.DefaultTTL / time.Second),
+		MaxTtlS:     uint32(p.MaxTTL / time.Second),
+		TcpCarrier:  p.TCPCarrier,
+	}
+}
+
+// RelaySnapshot is the perimeter of a relay in front of this node, as its
+// rayspa takes it (relay-v1 §3.1): the relay's own SPA; each device with its
+// key for this relay (spa.RelayKey), never its own; the services the relay
+// forwards, with the same IDs and ports (SPA scopes stay as they are), but
+// not SSH, not the public ones, and no UDP port rotation (§4); the relay
+// host's SSH for the admin addresses only.
+func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*perimeterv1.Snapshot, error) {
+	relay, err := p.Store.RelayByName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	params, err := provision.RelayParams(ctx, p.Store, name)
+	if err != nil {
+		return nil, err
+	}
+	snap := &perimeterv1.Snapshot{Spa: p.spaPB(params)}
+	services, err := p.Store.ListServices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	forwarded := map[uint16]bool{}
+	for _, svc := range services {
+		if !svc.Enabled || svc.Kind == "ssh" || svc.Public() {
+			continue
+		}
+		ports, err := svc.Ports()
+		if err != nil || len(ports) == 0 {
+			continue
+		}
+		ps := &perimeterv1.Service{Id: uint32(svc.ID)}
+		for _, port := range ports {
+			ps.Ports = append(ps.Ports, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
+		}
+		snap.Services = append(snap.Services, ps)
+		forwarded[uint16(svc.ID)] = true
+	}
+	devices, err := p.Store.SPADevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range devices {
+		var allowed []uint32
+		for _, id := range d.Allowed {
+			if forwarded[id] {
+				allowed = append(allowed, uint32(id))
+			}
+		}
+		if len(allowed) == 0 {
+			continue
+		}
+		k := spa.RelayKey(d.Key, p.Params.NodeID, relay.Name)
+		snap.Devices = append(snap.Devices, &perimeterv1.Device{Id: d.ID, Key: k[:], Allowed: allowed})
+	}
+	admin, err := node.AdminAccess(ctx, p.Store)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range admin {
+		snap.AdminPrefixes = append(snap.AdminPrefixes, a.String())
+	}
+	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: uint32(relay.SSHPort)}}
 	return snap, nil
 }
 

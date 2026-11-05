@@ -33,6 +33,10 @@ REALITY, Hysteria2 и naive остаются сквозными от клиен�
                         info = "raycontrol-relay-v1" || relay_id, L = 32)
   ```
 
+  `relay_id` — имя relay байтами UTF-8, то же, что `relays[].id` в подписке и `<имя>` в `rayctl relay add`; `node_id` —
+  16 байт выхода. Пример (тест `TestDerivedKeyVectors`): ключ устройства `00 01 … 1f`, `node_id` `a0 a1 … af`, relay
+  `r1` — `K_relay = bfef0a7e5a6b933c577b794f5097f6d86bb16bd9b24d9fc0c4a06454dd926489`.
+
   Захваченный relay не может стучаться к выходу ключами устройств и не отличает одно устройство от другого вне
   своего SPA.
 - **Выход пускает адрес relay** на порты сервисов, которые relay пересылает, постоянно и без SPA. Это отдельный набор

@@ -12,6 +12,21 @@ service PerimeterService {
   rpc WatchPerimeter(WatchPerimeterRequest) returns (stream WatchPerimeterResponse);
 }
 
+// RelayService is the perimeter feed of a relay in front of this node
+// (relay-v1 §3.1), on the remote API: the relay proves itself with the
+// client certificate the exit made for it (rayctl relay add) and calls from
+// its own address. The snapshot carries the relay's SPA and its keys of the
+// devices (K_relay), never the devices' own keys.
+service RelayService {
+  rpc WatchRelay(WatchRelayRequest) returns (stream WatchRelayResponse);
+}
+
+message WatchRelayRequest {}
+
+message WatchRelayResponse {
+  Snapshot snapshot = 1;
+}
+
 message WatchPerimeterRequest {}
 
 message WatchPerimeterResponse {

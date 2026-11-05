@@ -63,6 +63,10 @@ service NodeService {
   rpc AddRelay(AddRelayRequest) returns (AddRelayResponse);
   rpc ListRelays(ListRelaysRequest) returns (ListRelaysResponse);
   rpc RemoveRelay(RemoveRelayRequest) returns (RemoveRelayResponse);
+  // IssueRelayBundle makes the relay a new client certificate (the one
+  // before stops working) and returns what its host needs (relay-v1 §3).
+  // It holds the relay's private key: root on the node only.
+  rpc IssueRelayBundle(IssueRelayBundleRequest) returns (IssueRelayBundleResponse);
 
   // The DNS provider (Cloudflare): the node's records in its zone and
   // certificates through DNS-01 with a wildcard name (R4-10). The token is
@@ -157,6 +161,12 @@ message ListRelaysRequest {}
 message ListRelaysResponse { repeated Relay relays = 1; }
 message RemoveRelayRequest { string name = 1; }
 message RemoveRelayResponse {}
+message IssueRelayBundleRequest {
+  string name = 1;
+  string exit_address = 2;  // the exit's IP; empty: the node's host if it is one
+  uint32 ssh_port = 3;      // the relay host's SSH; 0 keeps it (22 at first)
+}
+message IssueRelayBundleResponse { string bundle = 1; }
 
 message GetDeploymentRequest {}
 message GetDeploymentResponse {

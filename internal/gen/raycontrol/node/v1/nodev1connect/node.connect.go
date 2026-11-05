@@ -99,6 +99,9 @@ const (
 	NodeServiceListRelaysProcedure = "/raycontrol.node.v1.NodeService/ListRelays"
 	// NodeServiceRemoveRelayProcedure is the fully-qualified name of the NodeService's RemoveRelay RPC.
 	NodeServiceRemoveRelayProcedure = "/raycontrol.node.v1.NodeService/RemoveRelay"
+	// NodeServiceIssueRelayBundleProcedure is the fully-qualified name of the NodeService's
+	// IssueRelayBundle RPC.
+	NodeServiceIssueRelayBundleProcedure = "/raycontrol.node.v1.NodeService/IssueRelayBundle"
 	// NodeServiceSetDNSProviderProcedure is the fully-qualified name of the NodeService's
 	// SetDNSProvider RPC.
 	NodeServiceSetDNSProviderProcedure = "/raycontrol.node.v1.NodeService/SetDNSProvider"
@@ -171,6 +174,10 @@ type NodeServiceClient interface {
 	AddRelay(context.Context, *connect.Request[v1.AddRelayRequest]) (*connect.Response[v1.AddRelayResponse], error)
 	ListRelays(context.Context, *connect.Request[v1.ListRelaysRequest]) (*connect.Response[v1.ListRelaysResponse], error)
 	RemoveRelay(context.Context, *connect.Request[v1.RemoveRelayRequest]) (*connect.Response[v1.RemoveRelayResponse], error)
+	// IssueRelayBundle makes the relay a new client certificate (the one
+	// before stops working) and returns what its host needs (relay-v1 §3).
+	// It holds the relay's private key: root on the node only.
+	IssueRelayBundle(context.Context, *connect.Request[v1.IssueRelayBundleRequest]) (*connect.Response[v1.IssueRelayBundleResponse], error)
 	// The DNS provider (Cloudflare): the node's records in its zone and
 	// certificates through DNS-01 with a wildcard name (R4-10). The token is
 	// stored by rayd and never returned.
@@ -352,6 +359,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("RemoveRelay")),
 			connect.WithClientOptions(opts...),
 		),
+		issueRelayBundle: connect.NewClient[v1.IssueRelayBundleRequest, v1.IssueRelayBundleResponse](
+			httpClient,
+			baseURL+NodeServiceIssueRelayBundleProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("IssueRelayBundle")),
+			connect.WithClientOptions(opts...),
+		),
 		setDNSProvider: connect.NewClient[v1.SetDNSProviderRequest, v1.SetDNSProviderResponse](
 			httpClient,
 			baseURL+NodeServiceSetDNSProviderProcedure,
@@ -435,6 +448,7 @@ type nodeServiceClient struct {
 	addRelay          *connect.Client[v1.AddRelayRequest, v1.AddRelayResponse]
 	listRelays        *connect.Client[v1.ListRelaysRequest, v1.ListRelaysResponse]
 	removeRelay       *connect.Client[v1.RemoveRelayRequest, v1.RemoveRelayResponse]
+	issueRelayBundle  *connect.Client[v1.IssueRelayBundleRequest, v1.IssueRelayBundleResponse]
 	setDNSProvider    *connect.Client[v1.SetDNSProviderRequest, v1.SetDNSProviderResponse]
 	getDNS            *connect.Client[v1.GetDNSRequest, v1.GetDNSResponse]
 	syncDNS           *connect.Client[v1.SyncDNSRequest, v1.SyncDNSResponse]
@@ -566,6 +580,11 @@ func (c *nodeServiceClient) RemoveRelay(ctx context.Context, req *connect.Reques
 	return c.removeRelay.CallUnary(ctx, req)
 }
 
+// IssueRelayBundle calls raycontrol.node.v1.NodeService.IssueRelayBundle.
+func (c *nodeServiceClient) IssueRelayBundle(ctx context.Context, req *connect.Request[v1.IssueRelayBundleRequest]) (*connect.Response[v1.IssueRelayBundleResponse], error) {
+	return c.issueRelayBundle.CallUnary(ctx, req)
+}
+
 // SetDNSProvider calls raycontrol.node.v1.NodeService.SetDNSProvider.
 func (c *nodeServiceClient) SetDNSProvider(ctx context.Context, req *connect.Request[v1.SetDNSProviderRequest]) (*connect.Response[v1.SetDNSProviderResponse], error) {
 	return c.setDNSProvider.CallUnary(ctx, req)
@@ -661,6 +680,10 @@ type NodeServiceHandler interface {
 	AddRelay(context.Context, *connect.Request[v1.AddRelayRequest]) (*connect.Response[v1.AddRelayResponse], error)
 	ListRelays(context.Context, *connect.Request[v1.ListRelaysRequest]) (*connect.Response[v1.ListRelaysResponse], error)
 	RemoveRelay(context.Context, *connect.Request[v1.RemoveRelayRequest]) (*connect.Response[v1.RemoveRelayResponse], error)
+	// IssueRelayBundle makes the relay a new client certificate (the one
+	// before stops working) and returns what its host needs (relay-v1 §3).
+	// It holds the relay's private key: root on the node only.
+	IssueRelayBundle(context.Context, *connect.Request[v1.IssueRelayBundleRequest]) (*connect.Response[v1.IssueRelayBundleResponse], error)
 	// The DNS provider (Cloudflare): the node's records in its zone and
 	// certificates through DNS-01 with a wildcard name (R4-10). The token is
 	// stored by rayd and never returned.
@@ -838,6 +861,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("RemoveRelay")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceIssueRelayBundleHandler := connect.NewUnaryHandler(
+		NodeServiceIssueRelayBundleProcedure,
+		svc.IssueRelayBundle,
+		connect.WithSchema(nodeServiceMethods.ByName("IssueRelayBundle")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceSetDNSProviderHandler := connect.NewUnaryHandler(
 		NodeServiceSetDNSProviderProcedure,
 		svc.SetDNSProvider,
@@ -942,6 +971,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceListRelaysHandler.ServeHTTP(w, r)
 		case NodeServiceRemoveRelayProcedure:
 			nodeServiceRemoveRelayHandler.ServeHTTP(w, r)
+		case NodeServiceIssueRelayBundleProcedure:
+			nodeServiceIssueRelayBundleHandler.ServeHTTP(w, r)
 		case NodeServiceSetDNSProviderProcedure:
 			nodeServiceSetDNSProviderHandler.ServeHTTP(w, r)
 		case NodeServiceGetDNSProcedure:
@@ -1063,6 +1094,10 @@ func (UnimplementedNodeServiceHandler) ListRelays(context.Context, *connect.Requ
 
 func (UnimplementedNodeServiceHandler) RemoveRelay(context.Context, *connect.Request[v1.RemoveRelayRequest]) (*connect.Response[v1.RemoveRelayResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.RemoveRelay is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) IssueRelayBundle(context.Context, *connect.Request[v1.IssueRelayBundleRequest]) (*connect.Response[v1.IssueRelayBundleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.IssueRelayBundle is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) SetDNSProvider(context.Context, *connect.Request[v1.SetDNSProviderRequest]) (*connect.Response[v1.SetDNSProviderResponse], error) {

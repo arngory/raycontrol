@@ -21,6 +21,7 @@ import (
 	devicev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1/devicev1connect"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
+	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
 	"github.com/arngory/raycontrol/internal/httpx"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
@@ -35,7 +36,10 @@ import (
 type Remote struct {
 	Server *Server
 	Log    *slog.Logger
-	now    func() time.Time
+	// Perimeter, if set, serves the relays in front of the node their
+	// perimeter (RelayService, relay-v1 §3.1); its TTLs and carrier apply.
+	Perimeter *PerimeterServer
+	now       func() time.Time
 }
 
 var (
@@ -89,6 +93,9 @@ func (r *Remote) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle(nodev1connect.NewNodeServiceHandler(r.Server, connect.WithInterceptors(r.adminOnly())))
 	mux.Handle(devicev1connect.NewDeviceServiceHandler(r))
+	if r.Perimeter != nil {
+		mux.Handle(perimeterv1connect.NewRelayServiceHandler(&relayFeed{r}))
+	}
 	// No redirects: Niko takes a 3xx for an error (RAYCONTROL.md §22).
 	return httpx.NoRedirect(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.TLS == nil || len(req.TLS.PeerCertificates) == 0 {
@@ -141,6 +148,8 @@ func (r *Remote) device(ctx context.Context) (store.Device, error) {
 var nodeOnly = map[string]bool{
 	nodev1connect.NodeServiceGetDeploymentProcedure: true,
 	nodev1connect.NodeServiceBackupProcedure:        true,
+	// A relay's bundle holds its private key.
+	nodev1connect.NodeServiceIssueRelayBundleProcedure: true,
 	// The site's private key stays off the network.
 	nodev1connect.NodeServiceSetCertificateProcedure: true,
 	// A relay opens the service ports to an address (relay-v1).

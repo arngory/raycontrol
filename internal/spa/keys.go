@@ -75,3 +75,18 @@ func DNSAuthKey(deviceKey [KeySize]byte, nodeID [NodeIDSize]byte, serviceID uint
 	copy(out[:], k)
 	return out
 }
+
+// RelayKey derives a device's SPA key for one relay in front of the node
+// (spec/relay-v1.md §3): HKDF-SHA256(ikm = device key, salt = the exit's node
+// ID, info = "raycontrol-relay-v1" || the relay's name, as relays[].id in the
+// subscription). The relay gets these keys, never the device keys: a relay
+// taken over cannot knock at the exit with them, nor at another relay.
+func RelayKey(deviceKey [KeySize]byte, exitNodeID [NodeIDSize]byte, relayName string) [KeySize]byte {
+	k, err := hkdf.Key(sha256.New, deviceKey[:], exitNodeID[:], "raycontrol-relay-v1"+relayName, KeySize)
+	if err != nil {
+		panic(err)
+	}
+	var out [KeySize]byte
+	copy(out[:], k)
+	return out
+}

@@ -55,6 +55,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   audit [-n 50]
   admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA
   relay add NAME ADDRESS | list | remove NAME   relays in front of the node (relay-v1): one address
+  relay bundle [-exit IP] [-ssh-port N] [-o FILE] NAME   the relay host's bundle (a new certificate)
                                             each, reaching the service ports without SPA; root only
   dns [status]                              the DNS provider and the records the node needs
   dns cloudflare [-token-file F]            records and wildcard certificates through Cloudflare
