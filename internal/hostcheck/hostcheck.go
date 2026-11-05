@@ -261,8 +261,9 @@ func (h *Host) Check(ctx context.Context, o Options) []Result {
 			"stop and disable what listens there (systemctl disable --now nginx): the node serves 443 itself")
 	}
 	if slices.ContainsFunc(o.Services, func(s string) bool { return s == "dnstt" || s == "masterdns" }) {
-		// systemd-resolved's stub goes when the DNS tunnels come (the node
-		// sets DNSStubListener=no); anything else keeps the port.
+		// systemd-resolved's stub shares the port with the front (both
+		// bind with SO_REUSEADDR, niko-server v0.8.2); anything else
+		// keeps it.
 		others := others(listeners, "udp", 53, func(l listener) bool { return ours(l) || l.comm == "systemd-resolve" })
 		req("port udp 53", len(others) == 0, describe(others),
 			"stop what listens there (bind9, dnsmasq, unbound): the DNS tunnels answer on UDP 53")

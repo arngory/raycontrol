@@ -312,10 +312,11 @@ func (h *Host) WarnRelayDropChains(probePort uint16) {
 const rayspaTable = "raycontrol"
 
 // warnPort53 warns when another process holds UDP port 53 that the front
-// needs for the DNS tunnels.
+// needs for the DNS tunnels. systemd-resolved's stub (127.0.0.53,
+// 127.0.0.54) shares it with the front: both bind with SO_REUSEADDR.
 func (h *Host) warnPort53(frontUID int) {
 	for _, l := range h.port53() {
-		if l.uid == frontUID {
+		if l.uid == frontUID || l.addr == "127.0.0.53" || l.addr == "127.0.0.54" {
 			continue
 		}
 		owner := strconv.Itoa(l.uid)
@@ -325,12 +326,6 @@ func (h *Host) warnPort53(frontUID int) {
 		fmt.Fprintf(h.Out, "warning: UDP port 53 (%s) is taken by user %s (another DNS server?); "+
 			"the front cannot answer the DNS tunnels until it is freed\n", l.addr, owner)
 	}
-}
-
-// stubOn53 reports whether systemd-resolved's stub listener (127.0.0.53,
-// 127.0.0.54) holds UDP port 53.
-func (h *Host) stubOn53() bool {
-	return slices.ContainsFunc(h.port53(), func(l udpListener) bool { return l.addr == "127.0.0.53" || l.addr == "127.0.0.54" })
 }
 
 type udpListener struct {

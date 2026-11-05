@@ -159,4 +159,6 @@ legacy/        v0
 - `install/bootstrap.sh` проверяет ОС и архитектуру, скачивает подписанный релиз (minisign + `SHA256SUMS`)
   и запускает `rayctl install`.
 - Все бинарники — из своих форков и своих релизов, версии закреплены в `deploy/` (правила P-17).
-- Debian 12/13, Ubuntu 24.04 LTS; amd64 и arm64. systemd-resolved stub выключается (нужен UDP 53).
+- Debian 12/13, Ubuntu 24.04 LTS; amd64 и arm64. UDP 53 фронт делит с заглушкой systemd-resolved (127.0.0.53,
+  127.0.0.54): оба сокета с SO_REUSEADDR, резолвер хоста и `/etc/resolv.conf` не трогаются (с v0.11; раньше
+  заглушка выключалась, и `apply` её возвращает).
