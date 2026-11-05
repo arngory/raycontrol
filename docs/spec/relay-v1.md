@@ -137,7 +137,10 @@ REALITY, Hysteria2 и naive остаются сквозными от клиен�
        Трафик не проходит через userspace.
      - Снимок relay — от выхода (`RelayService`); `rayctl relay bundle`.
      - Проверено целиком в трёх пространствах имён: `test/relay/e2e.sh`.
-     - Осталось `bootstrap.sh -relay`.
+     - `bootstrap.sh -relay <пакет>` → `rayctl install -relay`: только `rayspa` и `rayctl`, пакет у root (0600), копия
+       для `rayspa` при каждом старте, `net.ipv4.ip_forward = 1`, всё в журнале для `rayctl uninstall`. Если за 45 с
+       первый снимок не пришёл, `rayspa` останавливается и таблица снимается: relay без выхода не запирает SSH.
+     - SSH самого relay открыт только с адресов администратора выхода (`rayctl admin` на выходе).
 2. **R6-b.** `relays` и `via` в подписке, SPA к relay, ключ `K_relay`. Клиент: разбор, путь через relay в watchdog.
 3. **R6-c.** `probe-v1` на relay, поле `path` в сводке, детектор белого списка у клиента.
 

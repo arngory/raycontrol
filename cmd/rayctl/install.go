@@ -69,11 +69,15 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	dataplane := fs.String("dataplane", "", "directory with the xray and niko-server the bootstrap verified, installed to "+deploy.DataPlaneDir)
 	services := fs.String("services", "", "services to set up now: reality, hy2-masq, hy2-obfs, doh (after reality), dnstt, masterdns (default with -domain: reality; \"none\" for none)")
 	checked := fs.Bool("checked", false, "the bootstrap has shown the host check: print only required checks that fail now")
+	relay := fs.String("relay", "", "make this host a relay in front of an exit (relay-v1): the bundle file from rayctl relay bundle on the exit")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
 	if err := needRoot(); err != nil {
 		return err
+	}
+	if *relay != "" {
+		return installRelay(*relay, *packages)
 	}
 	if *host == "" {
 		return errors.New("-host is required")
