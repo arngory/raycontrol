@@ -12,9 +12,9 @@
 package asn
 
 import (
-	"slices"
 	"context"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 )
