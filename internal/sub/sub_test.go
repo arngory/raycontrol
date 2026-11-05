@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -504,5 +505,62 @@ func TestCarrierHintOrder(t *testing.T) {
 	}
 	if p.SPA == nil || !slices.Equal(p.SPA.Carriers, []string{"udp", "tls", "tcp"}) {
 		t.Fatalf("carriers %+v", p.SPA)
+	}
+}
+
+// Relays in the subscription (relay-v1 §4): once a relay has its bundle it
+// is listed with its own SPA, and the profiles it forwards name it in via;
+// DNS tunnels do not go through relays.
+func TestRelaysInSubscription(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	build := func() sub.Payload {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	reality, err := provision.CreateService(ctx, f.st, store.Service{Kind: "reality", Name: "reality", Enabled: true,
+		Settings: `{"target":"www.example.org:443"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := f.st.ServiceByName(ctx, "dns")
+	if err := f.st.SetUserServices(ctx, "alice", []int64{dns.ID, reality.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.st.CreateRelay(ctx, "r1", netip.MustParseAddr("198.51.100.20")); err != nil {
+		t.Fatal(err)
+	}
+	if p := build(); len(p.Relays) != 0 {
+		t.Fatalf("a relay without a bundle listed: %+v", p.Relays)
+	}
+	if err := f.st.SetRelayCertPin(ctx, "r1", "pin"); err != nil {
+		t.Fatal(err)
+	}
+	p := build()
+	params, err := provision.RelayParams(ctx, f.st, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Relays) != 1 || p.Relays[0].ID != "r1" || p.Relays[0].Host != "198.51.100.20" || p.Relays[0].SPA != node.FromParams(params) {
+		t.Fatalf("relays %+v", p.Relays)
+	}
+	kinds := map[uint16]string{uint16(dns.ID): "dnstt", uint16(reality.ID): "reality"}
+	if len(p.Profiles) != 2 {
+		t.Fatalf("profiles %+v", p.Profiles)
+	}
+	for _, pr := range p.Profiles {
+		wantVia := kinds[pr.Svc] == "reality"
+		if (len(pr.Via) == 1 && pr.Via[0] == "r1") != wantVia {
+			t.Errorf("%s (%s): via %v", pr.Name, kinds[pr.Svc], pr.Via)
+		}
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/arngory/raycontrol/internal/httpx"
+	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -201,6 +202,9 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 			}
 		}
 	}
+	if err := s.addRelays(ctx, &p, m); err != nil {
+		return Envelope{}, err
+	}
 	if s.Hints != nil && addr.IsValid() && !addr.IsLoopback() {
 		svcs := make([]uint16, 0, len(profiles))
 		for _, pr := range profiles {
@@ -209,6 +213,39 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 		p.Hints = s.Hints(ctx, addr, svcs)
 	}
 	return Sign(p, s.Keys)
+}
+
+// addRelays lists the relays in front of the node and marks the profiles
+// they forward (relay-v1 §4). A relay is listed once its bundle is issued:
+// before that its host forwards nothing.
+func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) error {
+	relays, err := s.Store.ListRelays(ctx)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for _, r := range relays {
+		if r.CertPin == "" {
+			continue
+		}
+		params, err := provision.RelayParams(ctx, s.Store, r.Name)
+		if err != nil {
+			return err
+		}
+		p.Relays = append(p.Relays, RelayHint{ID: r.Name, Host: r.Address.String(), SPA: node.FromParams(params)})
+		ids = append(ids, r.Name)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	for i := range p.Profiles {
+		for _, svc := range m.Services {
+			if uint16(svc.ID) == p.Profiles[i].Svc && RelayKinds(svc.Kind) && !svc.Public() {
+				p.Profiles[i].Via = slices.Clone(ids)
+			}
+		}
+	}
+	return nil
 }
 
 // nextSeq returns a counter that grows with every response, across restarts.

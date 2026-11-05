@@ -89,6 +89,9 @@ REALITY, Hysteria2 и naive остаются сквозными от клиен�
 
 ## 4. Подписка
 
+Сервер готов (после raycontrol v0.10.0): `relays[]` без `sub_pin` (он придёт с R6-c) и `profiles[].via`. Relay попадает
+в подписку, когда для него выдан пакет (`rayctl relay bundle`).
+
 ```json
 "relays": [{"id": "r1", "host": "198.51.100.20", "sub_pin": "…", "spa": {"node_id": "…", "...": "…"}}],
 "profiles": [{"svc": 3, "name": "reality", "link": "vless://…", "via": ["r1"]}]
@@ -141,7 +144,8 @@ REALITY, Hysteria2 и naive остаются сквозными от клиен�
        для `rayspa` при каждом старте, `net.ipv4.ip_forward = 1`, всё в журнале для `rayctl uninstall`. Если за 45 с
        первый снимок не пришёл, `rayspa` останавливается и таблица снимается: relay без выхода не запирает SSH.
      - SSH самого relay открыт только с адресов администратора выхода (`rayctl admin` на выходе).
-2. **R6-b.** `relays` и `via` в подписке, SPA к relay, ключ `K_relay`. Клиент: разбор, путь через relay в watchdog.
+2. **R6-b.** `relays` и `via` в подписке, SPA к relay, ключ `K_relay`: сторона сервера **готова в ветке**. Клиент:
+   разбор, путь через relay в watchdog.
 3. **R6-c.** `probe-v1` на relay, поле `path` в сводке, детектор белого списка у клиента.
 
 ## 8. Решено с клиентом (2026-11-04)

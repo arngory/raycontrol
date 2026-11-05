@@ -13,12 +13,14 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 
+	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/spa"
@@ -42,6 +44,9 @@ type Profile struct {
 	Name string `json:"name"`
 	Link string `json:"link"`
 	Next *Next  `json:"next,omitempty"`
+	// Via names the relays the profile also goes through (relay-v1 §4): the
+	// same link with the relay's host, knocked at the relay with K_relay.
+	Via []string `json:"via,omitempty"`
 }
 
 // Next is the credential that replaces Link from a given time (R4).
@@ -69,6 +74,24 @@ type Payload struct {
 	// skips what is not there instead of trying it. Nodes before v0.10.1
 	// do not send it.
 	SPA *SPAHint `json:"spa,omitempty"`
+	// Relays in front of the node (relay-v1 §4).
+	Relays []RelayHint `json:"relays,omitempty"`
+}
+
+// RelayHint is a relay in front of the node (relay-v1 §4): its address and
+// its own SPA, at which a device knocks with its K_relay (spa.RelayKey with
+// the relay's ID). SubPin, the pin of its probe endpoint, comes with R6-c.
+type RelayHint struct {
+	ID     string         `json:"id"`
+	Host   string         `json:"host"`
+	SubPin string         `json:"sub_pin,omitempty"`
+	SPA    node.SPAParams `json:"spa"`
+}
+
+// RelayKinds are the kinds a relay forwards to (relay-v1 §4): the DNS
+// tunnels and Yggdrasil have paths of their own.
+func RelayKinds(kind string) bool {
+	return !slices.Contains([]string{"dnstt", "masterdns", "yggdrasil", "ssh", "subscription", "api"}, kind)
 }
 
 // SPAHint: "udp", "tcp" (bare, §10), "tls" (ClientHello, §10.1).
