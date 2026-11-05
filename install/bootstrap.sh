@@ -28,9 +28,10 @@
 #   sudo bash bootstrap.sh -remove-v0 -host <public address> [-domain <domain>]
 #
 # -relay <bundle file> makes the host a relay in front of an exit instead of a
-# node (spec/relay-v1.md §3.1): only rayspa, forwarding in the kernel. The
-# bundle comes from "rayctl relay bundle <name>" on the exit; it holds the
-# relay's private key, so it is copied to the relay host only:
+# node (spec/relay-v1.md §3.1): rayspa, forwarding in the kernel, and rayd
+# relay, the relay's probe endpoint (§9.1). The bundle comes from "rayctl
+# relay bundle <name>" on the exit; it holds the relay's private key, so it
+# is copied to the relay host only:
 #
 #   sudo bash bootstrap.sh -relay relay.bundle
 #
@@ -322,16 +323,16 @@ main() {
 		tar -xzf "$tmp/$tarball" -C "$tmp"
 	fi
 
-	# A relay: rayspa and rayctl only, no host check for a node; rayctl
-	# install -relay checks what a relay needs and stops rayspa again if the
-	# exit gives it no perimeter.
+	# A relay: rayspa, rayd (its probe endpoint, rayd relay) and rayctl,
+	# no host check for a node; rayctl install -relay checks what a relay
+	# needs and stops rayspa again if the exit gives it no perimeter.
 	if [[ -n $RELAY_BUNDLE ]]; then
 		if [[ -z ${RAYCONTROL_LOCAL_DIR:-} ]] && version_lt "$signed" "$RELAY_MIN_VERSION"; then
 			die "the release is $signed; a relay needs $RELAY_MIN_VERSION or newer"
 		fi
-		install -m 0755 "$tmp/rayspa" "$tmp/rayctl" /usr/local/bin/
+		install -m 0755 "$tmp/rayspa" "$tmp/rayctl" "$tmp/rayd" /usr/local/bin/
 		if command -v restorecon >/dev/null; then
-			restorecon /usr/local/bin/rayspa /usr/local/bin/rayctl || true
+			restorecon /usr/local/bin/rayspa /usr/local/bin/rayctl /usr/local/bin/rayd || true
 		fi
 		HANDED_OVER=1
 		exec 9<&- # rayctl takes the lock itself

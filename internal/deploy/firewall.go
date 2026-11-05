@@ -237,36 +237,47 @@ func (h *Host) ufw(changed bool) (active bool, err error) {
 	return active, nil
 }
 
-// warnDropChains warns about input chains of other tables that drop by
-// default: rayspa cannot open ports there, so the operator must.
-func (h *Host) warnDropChains(ports []PortRange, handled map[string]bool) {
+// nftChain is a base chain as nft -j list chains gives it.
+type nftChain struct {
+	Family string `json:"family"`
+	Table  string `json:"table"`
+	Name   string `json:"name"`
+	Hook   string `json:"hook"`
+	Policy string `json:"policy"`
+}
+
+// dropChains are the base chains of other tables on a hook that drop by
+// default; nil when nft cannot tell.
+func (h *Host) dropChains(hook string) []nftChain {
 	out, err := h.Run("nft", "-j", "list", "chains")
 	if err != nil {
-		return
+		return nil
 	}
 	var ruleset struct {
 		Nftables []struct {
-			Chain *struct {
-				Family string `json:"family"`
-				Table  string `json:"table"`
-				Name   string `json:"name"`
-				Hook   string `json:"hook"`
-				Policy string `json:"policy"`
-			} `json:"chain"`
+			Chain *nftChain `json:"chain"`
 		} `json:"nftables"`
 	}
 	if json.Unmarshal(out, &ruleset) != nil {
-		return
+		return nil
 	}
+	var drop []nftChain
+	for _, e := range ruleset.Nftables {
+		if c := e.Chain; c != nil && c.Hook == hook && c.Policy == "drop" && c.Table != rayspaTable {
+			drop = append(drop, *c)
+		}
+	}
+	return drop
+}
+
+// warnDropChains warns about input chains of other tables that drop by
+// default: rayspa cannot open ports there, so the operator must.
+func (h *Host) warnDropChains(ports []PortRange, handled map[string]bool) {
 	var list []string
 	for _, p := range ports {
 		list = append(list, p.String())
 	}
-	for _, e := range ruleset.Nftables {
-		c := e.Chain
-		if c == nil || c.Hook != "input" || c.Policy != "drop" || c.Table == rayspaTable {
-			continue
-		}
+	for _, c := range h.dropChains("input") {
 		if c.Table == "firewalld" && handled["firewalld"] {
 			continue
 		}
@@ -276,6 +287,24 @@ func (h *Host) warnDropChains(ports []PortRange, handled map[string]bool) {
 		}
 		fmt.Fprintf(h.Out, "warning: nftables chain %s %s %s drops incoming packets by default; "+
 			"it must accept %s, or clients cannot reach the node\n", c.Family, c.Table, c.Name, strings.Join(list, " "))
+	}
+}
+
+// WarnRelayDropChains warns, on a relay host, about chains of other tables
+// (ufw, firewalld) that drop by default what the relay needs: the
+// forwarded packets, and its probe endpoint's port (0: none).
+func (h *Host) WarnRelayDropChains(probePort uint16) {
+	for _, c := range h.dropChains("forward") {
+		fmt.Fprintf(h.Out, "warning: nftables chain %s %s %s drops forwarded packets by default: the relay forwards "+
+			"nothing to the exit until it accepts them (ufw: DEFAULT_FORWARD_POLICY=\"ACCEPT\" in /etc/default/ufw)\n",
+			c.Family, c.Table, c.Name)
+	}
+	if probePort == 0 {
+		return
+	}
+	for _, c := range h.dropChains("input") {
+		fmt.Fprintf(h.Out, "warning: nftables chain %s %s %s drops incoming packets by default: it must accept "+
+			"tcp/%d and udp/%d, the relay's probe endpoint (ufw allow %d)\n", c.Family, c.Table, c.Name, probePort, probePort, probePort)
 	}
 }
 

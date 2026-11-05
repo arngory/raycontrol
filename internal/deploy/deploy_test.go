@@ -737,8 +737,20 @@ func TestBuildDNSKeyWithoutRender(t *testing.T) {
 // for it at each start, and forwarding on.
 func TestRelayPlan(t *testing.T) {
 	p := deploy.RelayPlan(deploy.DefaultBinaries)
-	if len(p.Units) != 1 || p.Units[0] != "rayspa.service" || len(p.Users) != 1 || p.Users[0].Name != "rayspa" {
-		t.Fatalf("plan %+v", p)
+	if !slices.Equal(p.Units, []string{"rayspa.service", deploy.RelayProbeUnit}) || len(p.Users) != 2 ||
+		p.Users[0].Name != "rayspa" || p.Users[1].Name != "rayd" {
+		t.Fatalf("plan units %v, users %v", p.Units, p.Users)
+	}
+	// rayd relay: no privileges, its own copy of the bundle (relay-v1 §9.1).
+	probe := file(p, "/etc/systemd/system/"+deploy.RelayProbeUnit)
+	for _, want := range []string{
+		"ExecStartPre=+install -m 0400 -o rayd -g rayd /etc/raycontrol/relay.bundle /run/rayd-relay/relay.bundle",
+		"ExecStart=/usr/local/bin/rayd relay -bundle /run/rayd-relay/relay.bundle",
+		"User=rayd", "CapabilityBoundingSet=\n", "After=network-online.target rayspa.service",
+	} {
+		if !strings.Contains(probe, want) {
+			t.Errorf("rayd relay unit lacks %q:\n%s", want, probe)
+		}
 	}
 	u := file(p, "/etc/systemd/system/rayspa.service")
 	for _, want := range []string{

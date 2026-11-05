@@ -5,11 +5,13 @@
 # addresses). The exit is a node with a relay r1; the relay runs the real
 # rayspa with -relay and the bundle the exit made, takes its perimeter from
 # the exit's API and forwards TCP and UDP 443 to it after a knock with the
-# device's K_relay. Needs root, ip and nft.
+# device's K_relay. It runs the real rayd relay too, the relay's probe
+# endpoint (§9): down, the UDP echo and a report passed on to the exit.
+# Needs root, ip and nft.
 #
-#   sudo test/relay/e2e.sh [api.test rayspa]
+#   sudo test/relay/e2e.sh [api.test rayspa rayd]
 #
-# Without arguments it builds both (go in PATH).
+# Without arguments it builds all three (go in PATH).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 bin="$(mktemp -d)"
@@ -23,11 +25,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ -n ${1:-} && -n ${2:-} ]]; then
+if [[ -n ${1:-} && -n ${2:-} && -n ${3:-} ]]; then
 	cp "$1" "$bin/api.test"
 	cp "$2" "$bin/rayspa"
+	cp "$3" "$bin/rayd"
 else
-	(cd "$here/../.." && go test -c -o "$bin/api.test" ./internal/api && go build -o "$bin/rayspa" ./cmd/rayspa)
+	(cd "$here/../.." && go test -c -o "$bin/api.test" ./internal/api && go build -o "$bin/rayspa" ./cmd/rayspa &&
+		go build -o "$bin/rayd" ./cmd/rayd)
 fi
 mkdir -m 0700 "$bin/shared"
 
@@ -69,9 +73,17 @@ for _ in $(seq 100); do
 	grep -q "snapshot applied" "$bin/relay.log" && break
 	sleep 0.2
 done
+# The relay's probe endpoint: the same bundle, its own feed from the exit.
+ip netns exec rc-e2e-r "$bin/rayd" relay -bundle "$bin/shared/relay.bundle" >"$bin/probe.log" 2>&1 &
+pids+=($!)
+for _ in $(seq 100); do
+	grep -q "rayd relay up" "$bin/exit.log" && break
+	sleep 0.2
+done
 if ! role rc-e2e-c client RAYCONTROL_RELAY_ADDR=198.51.100.1 RAYCONTROL_RELAY_SEEN=203.0.113.1 RAYCONTROL_RELAY_EXIT=203.0.113.2; then
 	echo "--- exit"; cat "$bin/exit.log"
 	echo "--- relay (rayspa)"; cat "$bin/relay.log"
+	echo "--- relay (rayd relay)"; cat "$bin/probe.log"
 	echo "--- relay ruleset"; ip netns exec rc-e2e-r nft list ruleset
 	exit 1
 fi

@@ -15,6 +15,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/deploy"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
+	"github.com/arngory/raycontrol/internal/node"
 )
 
 // A relay opens one SSH port: sshd's, from its listen addresses, which
@@ -729,5 +730,44 @@ func TestSettle(t *testing.T) {
 	start := time.Now()
 	if err := settleFor(ctx, 5*time.Second, func() error { checked = true; return nil }); !errors.Is(err, errInterrupted) || checked || time.Since(start) > time.Second {
 		t.Fatalf("interrupted: %v %v after %v", err, checked, time.Since(start))
+	}
+}
+
+// rayd relay starts once the relay is up, restarted for this bundle; a
+// bundle without a probe endpoint stops it; any failure is a warning, the
+// relay working without it.
+func TestRelayProbeStart(t *testing.T) {
+	var calls []string
+	call := func(name string, err error) func() error {
+		return func() error { calls = append(calls, name); return err }
+	}
+	with := node.RelayBundle{Name: "r1", Probe: &node.RelayProbe{Port: 31000}}
+	boom := errors.New("boom")
+	for name, c := range map[string]struct {
+		p     relayProbe
+		calls string
+		ok    bool
+	}{
+		"up": {relayProbe{bundle: with, hasRayd: func() bool { return true },
+			enable: call("enable", nil), restart: call("restart", nil), stop: call("stop", nil), settle: call("settle", nil)},
+			"enable restart settle", true},
+		"an old bundle": {relayProbe{bundle: node.RelayBundle{Name: "r1"}, hasRayd: func() bool { return true },
+			enable: call("enable", nil), restart: call("restart", nil), stop: call("stop", nil), settle: call("settle", nil)},
+			"stop", false},
+		"no rayd": {relayProbe{bundle: with, hasRayd: func() bool { return false },
+			enable: call("enable", nil), restart: call("restart", nil), stop: call("stop", nil), settle: call("settle", nil)},
+			"", false},
+		"enable fails": {relayProbe{bundle: with, hasRayd: func() bool { return true },
+			enable: call("enable", boom), restart: call("restart", nil), stop: call("stop", nil), settle: call("settle", nil)},
+			"enable", false},
+		"dies at once": {relayProbe{bundle: with, hasRayd: func() bool { return true },
+			enable: call("enable", nil), restart: call("restart", nil), stop: call("stop", nil), settle: call("settle", boom)},
+			"enable restart settle", false},
+	} {
+		calls = nil
+		note, err := c.p.start()
+		if (err == nil) != c.ok || strings.Join(calls, " ") != c.calls || c.ok && !strings.Contains(note, "tcp/31000 and udp/31000") {
+			t.Errorf("%s: calls %v, note %q, err %v", name, calls, note, err)
+		}
 	}
 }

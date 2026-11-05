@@ -156,5 +156,7 @@ rayctl relay remove msk   # потерянный relay: только remove от
 На хосте relay (пакет скопировать туда и только туда — в нём ключ):
 
 ```
-sudo bash bootstrap.sh -relay msk.bundle   # rayspa, пересылка ядром к выходу; SSH — с адресов администратора relay
+sudo bash bootstrap.sh -relay msk.bundle   # rayspa, пересылка ядром к выходу; SSH — с адресов администратора relay;
+                                           # rayd relay — точка замера relay (если её нет, relay работает и без неё)
+journalctl -u rayd-relay                   # точка замера relay: поток от выхода, отчёты
 ```
