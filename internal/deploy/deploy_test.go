@@ -1127,3 +1127,18 @@ func TestResolverProblem(t *testing.T) {
 		t.Errorf("link: %q", p)
 	}
 }
+
+// A credential the render did not write (a DNS service that could not be
+// rendered) is not installed: a missing file would keep the whole front
+// down (Q-1).
+func TestFrontCredentialsOnlyRendered(t *testing.T) {
+	m, files := plan2(t, render.DefaultPaths)
+	key := "/var/lib/raycontrol/rendered/front/dnsprobe.key"
+	if !strings.Contains(file(deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries), "/etc/systemd/system/niko-front.service"), key) {
+		t.Fatal("the rendered key is not installed")
+	}
+	partial := slices.DeleteFunc(slices.Clone(files), func(f render.File) bool { return f.Path == key })
+	if front := file(deploy.Build(m, partial, render.DefaultPaths, deploy.DefaultBinaries), "/etc/systemd/system/niko-front.service"); front == "" || strings.Contains(front, key) {
+		t.Fatalf("a key not rendered is installed:\n%s", front)
+	}
+}

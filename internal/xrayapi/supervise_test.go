@@ -193,15 +193,17 @@ func TestSupervisedNode(t *testing.T) {
 	if dnsZone.Zone == "" {
 		t.Fatalf("no zone in %s", dnsSvc.Settings)
 	}
-	var probeAnswer []string
+	var probeAnswer []byte
 	for range 50 {
 		if probeAnswer, err = dnsProbe(net.JoinHostPort(ip.String(), "53"), probeKey, dnsZone.Zone); err == nil {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	if err != nil || len(probeAnswer) != 2 || !strings.HasPrefix(probeAnswer[1], "seen edns=1232 case=0 from=") {
-		t.Fatalf("dnsprobe: %q %v", probeAnswer, err)
+	// What the node saw: EDNS 1232, no 0x20, this host's address.
+	if err != nil || binary.BigEndian.Uint16(probeAnswer[16:18]) != 1232 || probeAnswer[18] != 0 ||
+		netip.AddrFrom16([16]byte(probeAnswer[19:35])).Unmap() != ip {
+		t.Fatalf("dnsprobe: %x %v", probeAnswer, err)
 	}
 
 	probeVia := func(name string, socksPort int) {
@@ -270,25 +272,24 @@ func hostAddr(t *testing.T) netip.Addr {
 }
 
 // dnsProbe checks a resolver as a client does (docs/spec/dnsprobe-v1.md):
-// a small probe sent straight to the node, its TXT strings back, the token
-// checked against the key.
-func dnsProbe(server string, key []byte, zone string) ([]string, error) {
+// a small probe sent straight to the node; it returns the decrypted
+// plaintext after checking the answer's shape (as dnstt's) and its token.
+func dnsProbe(server string, key []byte, zone string) ([]byte, error) {
 	var b [24]byte
 	b[0] = 1
 	binary.BigEndian.PutUint32(b[2:6], uint32(time.Now().Unix()/60))
 	if _, err := rand.Read(b[6:14]); err != nil {
 		return nil, err
 	}
-	mac := func(parts ...[]byte) []byte {
-		m := hmac.New(sha256.New, key)
+	mac := func(k []byte, parts ...[]byte) []byte {
+		m := hmac.New(sha256.New, k)
 		for _, p := range parts {
 			m.Write(p)
 		}
 		return m.Sum(nil)
 	}
-	copy(b[14:], mac([]byte("dnsprobe-v1 q"), []byte(zone), b[:14])[:10])
-	enc := base32.StdEncoding.WithPadding(base32.NoPadding)
-	label := strings.ToLower(enc.EncodeToString(b[:]))
+	copy(b[14:], mac(key, []byte("dnsprobe-v1 q"), []byte(zone), b[:14])[:10])
+	label := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b[:]))
 	q := []byte{0x42, 0x42, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 1}
 	for _, l := range strings.Split(label+"."+zone, ".") {
 		q = append(q, byte(len(l)))
@@ -312,17 +313,26 @@ func dnsProbe(server string, key []byte, zone string) ([]string, error) {
 	}
 	r = r[:n]
 	questionEnd := 12 + len(label) + 1 + len(zone) + 2 + 4
-	if n < questionEnd+12 || binary.BigEndian.Uint16(r[6:8]) != 1 {
-		return nil, fmt.Errorf("answer of %d bytes, %d records", n, binary.BigEndian.Uint16(r[6:8]))
+	// As dnstt answers: QR and AA, one TXT with TTL 60.
+	if n < questionEnd+12 || binary.BigEndian.Uint16(r[2:4]) != 0x8400 || binary.BigEndian.Uint16(r[6:8]) != 1 ||
+		binary.BigEndian.Uint32(r[questionEnd+6:questionEnd+10]) != 60 {
+		return nil, fmt.Errorf("answer of %d bytes: % x", n, r[:min(n, 16)])
 	}
 	rd := r[questionEnd+12 : questionEnd+12+int(binary.BigEndian.Uint16(r[questionEnd+10:questionEnd+12]))]
-	var strs []string
+	var plain []byte
 	for len(rd) > 0 {
 		l := int(rd[0])
-		strs, rd = append(strs, string(rd[1:1+l])), rd[1+l:]
+		plain, rd = append(plain, rd[1:1+l]...), rd[1+l:]
 	}
-	if want := "v1 " + strings.ToLower(enc.EncodeToString(mac([]byte("dnsprobe-v1 a"), b[:])[:16])); len(strs) == 0 || strs[0] != want {
-		return strs, fmt.Errorf("token %q, want %q", strs, want)
+	enc := mac(key, []byte("dnsprobe-v1 e"))
+	for i := 0; i < len(plain); i += 32 {
+		block := mac(enc, b[:], binary.BigEndian.AppendUint32(nil, uint32(i/32)))
+		for j := 0; j < 32 && i+j < len(plain); j++ {
+			plain[i+j] ^= block[j]
+		}
 	}
-	return strs, nil
+	if len(plain) != 35 || !bytes.Equal(plain[:16], mac(key, []byte("dnsprobe-v1 a"), b[:])[:16]) {
+		return plain, fmt.Errorf("token or length: %x", plain)
+	}
+	return plain, nil
 }
