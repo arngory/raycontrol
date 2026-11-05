@@ -115,9 +115,11 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		allowed[d.Id] = sd.Allowed
 	}
 	services := make(map[uint16][]Port, len(snap.Services))
+	local := map[uint16]bool{}
 	var rotations []rotation
 	for _, s := range snap.Services {
 		services[uint16(s.Id)] = portsOf(s.Ports)
+		local[uint16(s.Id)] = s.Local
 		if r := s.Rotation; r != nil {
 			if len(r.PortKey) != spa.KeySize || r.PortRange == 0 || r.PortBase+r.PortRange > 65536 {
 				return fmt.Errorf("perimeter: bad rotation of service %d", s.Id)
@@ -182,7 +184,10 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		g.relays, g.relayPorts = relays, relayPorts
 	}
 	var forward []Port
-	for _, ps := range services {
+	for id, ps := range services {
+		if local[id] {
+			continue // served here: a relay's own SSH
+		}
 		for _, p := range ps {
 			if !slices.Contains(forward, p) {
 				forward = append(forward, p)

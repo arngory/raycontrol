@@ -89,7 +89,7 @@ func relayExit(ctx context.Context, t *testing.T, dir, exit, relayAddr string) {
 	if _, err := st.CreateRelay(ctx, "r1", netip.MustParseAddr(relayAddr)); err != nil {
 		t.Fatal(err)
 	}
-	bundle, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: exit})
+	bundle, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: exit, Admin: []string{"192.0.2.1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func relayClient(ctx context.Context, t *testing.T, dir, relay, seen string) {
 	if got, err := tcp(); err == nil {
 		t.Fatalf("443 at the relay open after a knock with the device's own key (the exit saw %s)", got)
 	}
-	knock(spa.RelayKey(devKey, exitNode, "r1"))
+	knock(spa.RelayKey(devKey, exitNode, params.NodeID, "r1"))
 	got, err := tcp()
 	if err != nil {
 		t.Fatalf("443 at the relay after SPA with K_relay: %v", err)

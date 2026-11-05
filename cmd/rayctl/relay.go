@@ -47,6 +47,8 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 		exit := fs.String("exit", "", "the exit's IP the relay forwards to (default: the node's host)")
 		ssh := fs.Uint("ssh-port", 0, "the relay host's SSH port, reached from the admin addresses (default: as before, 22 at first)")
 		out := fs.String("o", "", "write the bundle to this new file (0600) instead of printing it")
+		admin := fs.String("admin", sshClient(), "addresses that reach the relay host's SSH without SPA (comma-separated; default: this SSH session; "+
+			"the devices allowed the node's SSH open it by SPA either way)")
 		if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *ssh > 65535 {
 			return errUsage
 		}
@@ -54,7 +56,7 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 			return err
 		}
 		r, err := c.c.IssueRelayBundle(ctx, connect.NewRequest(&nodev1.IssueRelayBundleRequest{
-			Name: fs.Arg(0), ExitAddress: *exit, SshPort: uint32(*ssh)}))
+			Name: fs.Arg(0), ExitAddress: *exit, SshPort: uint32(*ssh), Admin: splitList(*admin)}))
 		if err != nil {
 			return err
 		}
@@ -63,8 +65,9 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 		} else if err := writeNew(*out, []byte(r.Msg.Bundle+"\n")); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "relay %s: a new certificate; the bundle before no longer works.\n"+
-			"It holds the relay's private key: copy it to the relay host only, then there:\n"+
+		fmt.Fprintf(os.Stderr, "relay %s: a new certificate and new SPA keys for it; the bundle before, and the keys a lost\n"+
+			"relay host held, no longer work. Clients take the new keys with their next subscription.\n"+
+			"The bundle holds the relay's private key: copy it to the relay host only, then there:\n"+
 			"  bootstrap.sh -relay BUNDLE_FILE\n", fs.Arg(0))
 		return nil
 	case "remove":

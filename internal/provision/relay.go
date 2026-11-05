@@ -39,3 +39,18 @@ func RelayParams(ctx context.Context, st *store.Store, name string) (spa.Params,
 	}
 	return spa.Params{}, store.ErrInvalid
 }
+
+// RekeyRelay gives a relay new SPA parameters, and so its devices new keys
+// for it (spa.RelayKey takes the relay's node ID): what a seized relay held
+// stops working.
+func RekeyRelay(ctx context.Context, st *store.Store, name string) (spa.Params, error) {
+	p, err := spa.RandomParams(nil)
+	if err != nil {
+		return p, err
+	}
+	b, err := json.Marshal(node.FromParams(p))
+	if err != nil {
+		return p, err
+	}
+	return p, st.ReplaceRelaySPA(ctx, name, b)
+}

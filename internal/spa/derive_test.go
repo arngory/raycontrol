@@ -6,8 +6,8 @@ import (
 )
 
 // The derived keys of relay-v1 §3 and dnsauth-v1 §2, as the specs give them:
-// device key 00..1f, node ID a0..af, relay "r1", service 3. The client
-// derives the same.
+// device key 00..1f, node ID a0..af, the relay's node ID b0..bf and name
+// "r1", service 3. The client derives the same.
 func TestDerivedKeyVectors(t *testing.T) {
 	var dev [KeySize]byte
 	var node [NodeIDSize]byte
@@ -17,13 +17,17 @@ func TestDerivedKeyVectors(t *testing.T) {
 	for i := range node {
 		node[i] = byte(0xa0 + i)
 	}
-	relay := RelayKey(dev, node, "r1")
+	var relayNode [NodeIDSize]byte
+	for i := range relayNode {
+		relayNode[i] = byte(0xb0 + i)
+	}
+	relay := RelayKey(dev, node, relayNode, "r1")
 	dns := DNSAuthKey(dev, node, 3)
 	for name, c := range map[string]struct {
 		got  []byte
 		want string
 	}{
-		"relay":   {relay[:], "bfef0a7e5a6b933c577b794f5097f6d86bb16bd9b24d9fc0c4a06454dd926489"},
+		"relay":   {relay[:], "6e84ab4641da09239a34c5b76756ecd3787291e57d2eb34ece0433bee3a1a504"},
 		"dnsauth": {dns[:], "0b485b425e8b19e0ec7c0362d55fdc34338147f984b87ee005455c8f5fc68b1c"},
 	} {
 		if hex.EncodeToString(c.got) != c.want {
@@ -43,7 +47,10 @@ func TestDerivedKeyVectors(t *testing.T) {
 	if k := DNSAuthKey(dev11, node33, 3); hex.EncodeToString(k[:]) != "2f9bd5e6fc2ef3f56206998eee87f2d4b798a66c3c846ef34eff2f2647599bd5" {
 		t.Errorf("client's dnsauth vector: %x", k)
 	}
-	if RelayKey(dev, node, "r2") == relay {
+	if RelayKey(dev, node, relayNode, "r2") == relay {
 		t.Error("two relays share a key")
+	}
+	if RelayKey(dev, node, [NodeIDSize]byte{}, "r1") == relay {
+		t.Error("a relay's new node ID leaves the key as it was")
 	}
 }

@@ -549,7 +549,10 @@ type Service struct {
 	Ports []*Port                `protobuf:"bytes,2,rep,name=ports,proto3" json:"ports,omitempty"`
 	// UDP port rotation (spa-v2.md §11): the slot ports of this schedule are
 	// redirected to target_port.
-	Rotation      *Rotation `protobuf:"bytes,3,opt,name=rotation,proto3" json:"rotation,omitempty"`
+	Rotation *Rotation `protobuf:"bytes,3,opt,name=rotation,proto3" json:"rotation,omitempty"`
+	// Local: served by this host, never forwarded. On a relay, its own SSH
+	// (relay-v1 §3.1); every other service there is forwarded to the exit.
+	Local         bool `protobuf:"varint,4,opt,name=local,proto3" json:"local,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -603,6 +606,13 @@ func (x *Service) GetRotation() *Rotation {
 		return x.Rotation
 	}
 	return nil
+}
+
+func (x *Service) GetLocal() bool {
+	if x != nil {
+		return x.Local
+	}
+	return false
 }
 
 type Rotation struct {
@@ -773,11 +783,12 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"\x06Device\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\fR\x03key\x12\x18\n" +
-	"\aallowed\x18\x03 \x03(\rR\aallowed\"\x8d\x01\n" +
+	"\aallowed\x18\x03 \x03(\rR\aallowed\"\xa3\x01\n" +
 	"\aService\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\rR\x02id\x123\n" +
 	"\x05ports\x18\x02 \x03(\v2\x1d.raycontrol.perimeter.v1.PortR\x05ports\x12=\n" +
-	"\brotation\x18\x03 \x01(\v2!.raycontrol.perimeter.v1.RotationR\brotation\"\x82\x01\n" +
+	"\brotation\x18\x03 \x01(\v2!.raycontrol.perimeter.v1.RotationR\brotation\x12\x14\n" +
+	"\x05local\x18\x04 \x01(\bR\x05local\"\x82\x01\n" +
 	"\bRotation\x12\x19\n" +
 	"\bport_key\x18\x01 \x01(\fR\aportKey\x12\x1b\n" +
 	"\tport_base\x18\x02 \x01(\rR\bportBase\x12\x1d\n" +

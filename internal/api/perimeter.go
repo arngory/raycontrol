@@ -215,7 +215,9 @@ func (p *PerimeterServer) spaPB(pr spa.Params) *perimeterv1.SPAParams {
 // key for this relay (spa.RelayKey), never its own; the services the relay
 // forwards, with the same IDs and ports (SPA scopes stay as they are), but
 // not SSH, not the public ones, and no UDP port rotation (§4); the relay
-// host's SSH for the admin addresses only.
+// host's own SSH as a local service in the scope of the exit's SSH, so the
+// devices allowed SSH there open it here by SPA, and for the relay's own
+// admin addresses (never the exit's).
 func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*perimeterv1.Snapshot, error) {
 	relay, err := p.Store.RelayByName(ctx, name)
 	if err != nil {
@@ -230,14 +232,29 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 	if err != nil {
 		return nil, err
 	}
-	forwarded := map[uint16]bool{}
+	scoped := map[uint16]bool{}
 	ssh := sshPorts(services)
+	sshPort := store.Port{Proto: "tcp", Num: relay.SSHPort}
 	for _, svc := range services {
-		if !svc.Enabled || svc.Kind == "ssh" || svc.Public() {
+		if !svc.Enabled || svc.Public() {
+			continue
+		}
+		if svc.Kind == "ssh" {
+			if !scoped[uint16(svc.ID)] {
+				snap.Services = append(snap.Services, &perimeterv1.Service{Id: uint32(svc.ID), Local: true,
+					Ports: []*perimeterv1.Port{{Proto: sshPort.Proto, Port: uint32(sshPort.Num)}}})
+				scoped[uint16(svc.ID)] = true
+			}
 			continue
 		}
 		ports, err := servicePorts(svc, ssh)
-		if err != nil || len(ports) == 0 {
+		if err != nil {
+			continue
+		}
+		// The relay host's SSH is not forwarded (IssueRelayBundle refuses
+		// such a port; a service given it later loses it here).
+		ports = slices.DeleteFunc(ports, func(p store.Port) bool { return p == sshPort })
+		if len(ports) == 0 {
 			continue
 		}
 		ps := &perimeterv1.Service{Id: uint32(svc.ID)}
@@ -245,7 +262,7 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 			ps.Ports = append(ps.Ports, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
 		}
 		snap.Services = append(snap.Services, ps)
-		forwarded[uint16(svc.ID)] = true
+		scoped[uint16(svc.ID)] = true
 	}
 	devices, err := p.Store.SPADevices(ctx)
 	if err != nil {
@@ -254,32 +271,27 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 	for _, d := range devices {
 		var allowed []uint32
 		for _, id := range d.Allowed {
-			if forwarded[id] {
+			if scoped[id] {
 				allowed = append(allowed, uint32(id))
 			}
 		}
 		if len(allowed) == 0 {
 			continue
 		}
-		k := spa.RelayKey(d.Key, p.Params.NodeID, relay.Name)
+		k := spa.RelayKey(d.Key, p.Params.NodeID, params.NodeID, relay.Name)
 		snap.Devices = append(snap.Devices, &perimeterv1.Device{Id: d.ID, Key: k[:], Allowed: allowed})
 	}
-	admin, err := node.AdminAccess(ctx, p.Store)
-	if err != nil {
-		return nil, err
-	}
-	for _, a := range admin {
-		snap.AdminPrefixes = append(snap.AdminPrefixes, a.String())
-	}
+	snap.AdminPrefixes = slices.Clone(relay.Admin)
 	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: uint32(relay.SSHPort)}}
 	return snap, nil
 }
 
-// sshPorts are the ports of the enabled SSH services.
+// sshPorts are the ports of the SSH services, enabled or not: sshd listens
+// whatever the service's state.
 func sshPorts(services []store.Service) map[store.Port]bool {
 	out := map[store.Port]bool{}
 	for _, svc := range services {
-		if svc.Enabled && svc.Kind == "ssh" {
+		if svc.Kind == "ssh" {
 			ports, _ := svc.Ports()
 			for _, p := range ports {
 				out[p] = true

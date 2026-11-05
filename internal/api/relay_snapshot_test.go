@@ -10,14 +10,15 @@ import (
 	"connectrpc.com/connect"
 
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
 // A relay's perimeter (relay-v1 §3.1): its own SPA, kept; each device with
 // its key for this relay only; the forwarded services with their IDs, not
-// SSH and not the public DNS tunnel; the relay host's SSH for the admin
-// addresses.
+// SSH and not the public DNS tunnel; the relay host's SSH by SPA for the
+// devices allowed SSH, and for the relay's own admin addresses.
 func TestRelaySnapshot(t *testing.T) {
 	srv, sock, _ := startServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -63,7 +64,10 @@ func TestRelaySnapshot(t *testing.T) {
 	ids := map[uint32]bool{}
 	for _, s := range snap.Services {
 		ids[s.Id] = true
-		if s.Id == uint32(ssh.ID) || s.Rotation != nil {
+		// SSH: the relay host's own, a local scope for the devices allowed
+		// the exit's SSH; never forwarded.
+		if s.Id == uint32(ssh.ID) != s.Local || s.Rotation != nil ||
+			s.Local && (len(s.Ports) != 1 || s.Ports[0].Port != 22) {
 			t.Errorf("relay service %v", s)
 		}
 		for _, p := range s.Ports {
@@ -75,17 +79,18 @@ func TestRelaySnapshot(t *testing.T) {
 	if !ids[uint32(reality.ID)] {
 		t.Fatalf("REALITY not forwarded: %v", snap.Services)
 	}
-	want := spa.RelayKey(key, srv.Params.NodeID, "r1")
+	rp, _ := provision.RelayParams(ctx, srv.Store, "r1")
+	want := spa.RelayKey(key, srv.Params.NodeID, rp.NodeID, "r1")
 	if len(snap.Devices) != 1 || snap.Devices[0].Id != dev.ID || string(snap.Devices[0].Key) != string(want[:]) || string(snap.Devices[0].Key) == string(key[:]) {
 		t.Fatalf("relay devices %v", snap.Devices)
 	}
 	for _, id := range snap.Devices[0].Allowed {
 		if !ids[id] {
-			t.Errorf("device allowed %d, which the relay does not forward", id)
+			t.Errorf("device allowed %d, which the relay has not", id)
 		}
 	}
-	if len(snap.PublicPorts) != 0 || len(snap.RelayPrefixes) != 0 ||
-		len(snap.AdminPrefixes) != 1 || snap.AdminPrefixes[0] != "198.51.100.7/32" ||
+	// The relay's own admin addresses, never the exit's.
+	if len(snap.PublicPorts) != 0 || len(snap.RelayPrefixes) != 0 || len(snap.AdminPrefixes) != 0 ||
 		len(snap.AdminPorts) != 1 || snap.AdminPorts[0].Port != 22 {
 		t.Fatalf("relay snapshot %v", snap)
 	}

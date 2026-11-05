@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"strings"
@@ -22,6 +23,8 @@ type Relay struct {
 	// CertPin names the client certificate the exit made for the relay,
 	// empty until then: with it the relay takes its perimeter.
 	CertPin string
+	// Admin are the prefixes that reach the relay host's SSH without SPA.
+	Admin []string
 }
 
 // CreateRelay adds a relay: a name and one public address.
@@ -48,7 +51,7 @@ func (s *Store) CreateRelay(ctx context.Context, name string, addr netip.Addr) (
 
 // ListRelays returns the relays by name.
 func (s *Store) ListRelays(ctx context.Context) ([]Relay, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, address, created_at, COALESCE(spa_json, ''), ssh_port, COALESCE(cert_pin, '') FROM relays ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, address, created_at, COALESCE(spa_json, ''), ssh_port, COALESCE(cert_pin, ''), COALESCE(admin_json, '') FROM relays ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -56,10 +59,15 @@ func (s *Store) ListRelays(ctx context.Context) ([]Relay, error) {
 	var out []Relay
 	for rows.Next() {
 		var r Relay
-		var addr, spaJSON string
+		var addr, spaJSON, adminJSON string
 		var created int64
-		if err := rows.Scan(&r.ID, &r.Name, &addr, &created, &spaJSON, &r.SSHPort, &r.CertPin); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &addr, &created, &spaJSON, &r.SSHPort, &r.CertPin, &adminJSON); err != nil {
 			return nil, err
+		}
+		if adminJSON != "" {
+			if err := json.Unmarshal([]byte(adminJSON), &r.Admin); err != nil {
+				return nil, fmt.Errorf("relay %s admin: %w", r.Name, err)
+			}
 		}
 		if spaJSON != "" {
 			r.SPA = []byte(spaJSON)
@@ -99,6 +107,12 @@ func (s *Store) SetRelaySPA(ctx context.Context, name string, spaJSON []byte) (b
 	return n == 1, err
 }
 
+// ReplaceRelaySPA replaces a relay's SPA parameters: its devices' keys for
+// it change with them (relay-v1 §3).
+func (s *Store) ReplaceRelaySPA(ctx context.Context, name string, spaJSON []byte) error {
+	return s.affectOne(ctx, "relay", name, `UPDATE relays SET spa_json = ? WHERE name = ?`, string(spaJSON), name)
+}
+
 // SetRelayCertPin replaces the pin of a relay's client certificate: the one
 // before stops working.
 func (s *Store) SetRelayCertPin(ctx context.Context, name, pin string) error {
@@ -124,6 +138,16 @@ func (s *Store) RelayByCertPin(ctx context.Context, pin string) (Relay, error) {
 		}
 	}
 	return Relay{}, ErrNotFound
+}
+
+// SetRelayAdmin replaces the prefixes that reach the relay host's SSH
+// without SPA (validated by the caller).
+func (s *Store) SetRelayAdmin(ctx context.Context, name string, prefixes []string) error {
+	b, err := json.Marshal(prefixes)
+	if err != nil {
+		return err
+	}
+	return s.affectOne(ctx, "relay", name, `UPDATE relays SET admin_json = ? WHERE name = ?`, string(b), name)
 }
 
 // SetRelaySSHPort sets the port of the relay host's SSH.

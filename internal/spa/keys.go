@@ -78,11 +78,15 @@ func DNSAuthKey(deviceKey [KeySize]byte, nodeID [NodeIDSize]byte, serviceID uint
 
 // RelayKey derives a device's SPA key for one relay in front of the node
 // (spec/relay-v1.md §3): HKDF-SHA256(ikm = device key, salt = the exit's node
-// ID, info = "raycontrol-relay-v1" || the relay's name, as relays[].id in the
-// subscription). The relay gets these keys, never the device keys: a relay
-// taken over cannot knock at the exit with them, nor at another relay.
-func RelayKey(deviceKey [KeySize]byte, exitNodeID [NodeIDSize]byte, relayName string) [KeySize]byte {
-	k, err := hkdf.Key(sha256.New, deviceKey[:], exitNodeID[:], "raycontrol-relay-v1"+relayName, KeySize)
+// ID, info = "raycontrol-relay-v1" || the relay's own node ID (16 bytes) ||
+// the relay's name, as relays[].id in the subscription). The relay gets
+// these keys, never the device keys: a relay taken over cannot knock at the
+// exit with them, nor at another relay. The relay's node ID is new with
+// every bundle (rayctl relay bundle) and every relay added again, so the
+// keys a seized relay held stop working there too.
+func RelayKey(deviceKey [KeySize]byte, exitNodeID, relayNodeID [NodeIDSize]byte, relayName string) [KeySize]byte {
+	info := append(append([]byte("raycontrol-relay-v1"), relayNodeID[:]...), relayName...)
+	k, err := hkdf.Key(sha256.New, deviceKey[:], exitNodeID[:], string(info), KeySize)
 	if err != nil {
 		panic(err)
 	}

@@ -720,7 +720,10 @@ func (s *Server) GetAdminAccess(ctx context.Context, _ *connect.Request[nodev1.G
 }
 
 func (s *Server) SetAdminAccess(ctx context.Context, req *connect.Request[nodev1.SetAdminAccessRequest]) (*connect.Response[nodev1.SetAdminAccessResponse], error) {
-	_, err := node.SetAdminAccess(ctx, s.Store, req.Msg.Cidrs)
+	err := s.relaysOutside(ctx, req.Msg.Cidrs)
+	if err == nil {
+		_, err = node.SetAdminAccess(ctx, s.Store, req.Msg.Cidrs)
+	}
 	if err := s.done(ctx, "admin.access", strings.Join(req.Msg.Cidrs, ","), err); err != nil {
 		return nil, err
 	}

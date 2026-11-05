@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 // fromListener makes every connection look as if it came from one address,
@@ -82,16 +85,36 @@ func TestRelayFeed(t *testing.T) {
 	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r1", Address: "198.51.100.20"})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.IssueRelayBundle(ctx, connect.NewRequest(&nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "exit.example.com"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Fatalf("a bundle with a name for the exit: %v", err)
+	// Root only: the bundle holds the relay's key.
+	_, err := c.IssueRelayBundle(ctx, connect.NewRequest(&nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.2.7"}}))
+	if (os.Getuid() == 0) != (err == nil) || os.Getuid() != 0 && connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("bundle as uid %d: %v", os.Getuid(), err)
+	}
+	// A relay with no admin addresses yet, on a node without SSH as a
+	// service; and the API's port, which relays forward.
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r2", Address: "198.51.100.21"})); err != nil {
+		t.Fatal(err)
+	}
+	apiSvc, _ := srv.apiEndpoint(ctx)
+	for name, req := range map[string]*nodev1.IssueRelayBundleRequest{
+		"a name for the exit":       {Name: "r1", ExitAddress: "exit.example.com", Admin: []string{"192.0.2.7"}},
+		"an exit of another family": {Name: "r1", ExitAddress: "2001:db8::7", Admin: []string{"192.0.2.7"}},
+		"nobody for its SSH":        {Name: "r2", ExitAddress: "203.0.113.7"},
+		"SSH on a forwarded port":   {Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.2.7"}, SshPort: uint32(apiSvc.endpoint.Port)},
+		"a wide admin prefix":       {Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.0.0/8"}},
+	} {
+		if _, err := srv.issueRelayBundle(ctx, req); !errors.Is(err, store.ErrInvalid) {
+			t.Errorf("bundle with %s: %v", name, err)
+		}
 	}
 	issue := func() node.RelayBundle {
 		t.Helper()
-		r, err := c.IssueRelayBundle(ctx, connect.NewRequest(&nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "203.0.113.7", SshPort: 2200}))
+		r, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "203.0.113.7", SshPort: 2200,
+			Admin: []string{"192.0.2.7"}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		b, err := node.DecodeRelayBundle(r.Msg.Bundle)
+		b, err := node.DecodeRelayBundle(r)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -142,6 +165,11 @@ func TestRelayFeed(t *testing.T) {
 	s2 := watch(b2, addr)
 	if !s2.Receive() {
 		t.Fatalf("new bundle: %v", s2.Err())
+	}
+	// A new bundle is a new SPA for the relay, and so new device keys there.
+	if again := s2.Msg().Snapshot; string(again.Spa.NodeId) == string(snap.Spa.NodeId) ||
+		len(again.Devices) > 0 && len(snap.Devices) > 0 && string(again.Devices[0].Key) == string(snap.Devices[0].Key) {
+		t.Fatal("the relay kept its SPA and keys across a new bundle")
 	}
 	s2.Close()
 

@@ -7,3 +7,6 @@ ALTER TABLE relays ADD COLUMN ssh_port INTEGER NOT NULL DEFAULT 22;
 -- the relay takes its perimeter from the exit's API (RelayService).
 ALTER TABLE relays ADD COLUMN cert_pin TEXT;
 CREATE UNIQUE INDEX relays_cert_pin ON relays (cert_pin) WHERE cert_pin IS NOT NULL;
+-- The addresses that reach the relay host's SSH without SPA: its own list,
+-- not the exit's (JSON array of prefixes; NULL: none).
+ALTER TABLE relays ADD COLUMN admin_json TEXT;

@@ -30,12 +30,16 @@ REALITY, Hysteria2 и naive остаются сквозными от клиен�
 
   ```
   K_relay = HKDF-SHA256(ikm = SPA-ключ устройства, salt = node_id выхода,
-                        info = "raycontrol-relay-v1" || relay_id, L = 32)
+                        info = "raycontrol-relay-v1" || node_id relay || relay_id, L = 32)
   ```
 
-  `relay_id` — имя relay байтами UTF-8, то же, что `relays[].id` в подписке и `<имя>` в `rayctl relay add`; `node_id` —
-  16 байт выхода. Пример (тест `TestDerivedKeyVectors`): ключ устройства `00 01 … 1f`, `node_id` `a0 a1 … af`, relay
-  `r1` — `K_relay = bfef0a7e5a6b933c577b794f5097f6d86bb16bd9b24d9fc0c4a06454dd926489`.
+  - `relay_id` — имя relay байтами UTF-8, то же, что `relays[].id` в подписке и `<имя>` в `rayctl relay add`.
+  - `node_id` выхода — 16 байт из SPA выхода; `node_id relay` — 16 байт из `relays[].spa.node_id`.
+  - `node_id relay` меняется с каждым пакетом (`rayctl relay bundle`) и при новом `rayctl relay add`. Поэтому ключи,
+    которые были у захваченного relay, перестают работать после нового пакета, даже под тем же именем. Клиент берёт
+    новые параметры relay из подписки.
+  - Пример (тест `TestDerivedKeyVectors`): ключ устройства `00 01 … 1f`, `node_id` выхода `a0 a1 … af`, `node_id`
+    relay `b0 b1 … bf`, relay `r1` — `K_relay = 6e84ab4641da09239a34c5b76756ecd3787291e57d2eb34ece0433bee3a1a504`.
 
   Захваченный relay не может стучаться к выходу ключами устройств и не отличает одно устройство от другого вне
   своего SPA.

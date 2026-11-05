@@ -1167,10 +1167,14 @@ func (*RemoveRelayResponse) Descriptor() ([]byte, []int) {
 }
 
 type IssueRelayBundleRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	ExitAddress   string                 `protobuf:"bytes,2,opt,name=exit_address,json=exitAddress,proto3" json:"exit_address,omitempty"` // the exit's IP; empty: the node's host if it is one
-	SshPort       uint32                 `protobuf:"varint,3,opt,name=ssh_port,json=sshPort,proto3" json:"ssh_port,omitempty"`            // the relay host's SSH; 0 keeps it (22 at first)
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Name        string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	ExitAddress string                 `protobuf:"bytes,2,opt,name=exit_address,json=exitAddress,proto3" json:"exit_address,omitempty"` // the exit's IP; empty: the node's host if it is one
+	SshPort     uint32                 `protobuf:"varint,3,opt,name=ssh_port,json=sshPort,proto3" json:"ssh_port,omitempty"`            // the relay host's SSH; 0 keeps it (22 at first)
+	// Addresses that reach the relay host's SSH without SPA (its own, never
+	// the exit's list); empty keeps them. Devices allowed the exit's SSH
+	// open it by SPA with their K_relay either way.
+	Admin         []string `protobuf:"bytes,4,rep,name=admin,proto3" json:"admin,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1224,6 +1228,13 @@ func (x *IssueRelayBundleRequest) GetSshPort() uint32 {
 		return x.SshPort
 	}
 	return 0
+}
+
+func (x *IssueRelayBundleRequest) GetAdmin() []string {
+	if x != nil {
+		return x.Admin
+	}
+	return nil
 }
 
 type IssueRelayBundleResponse struct {
@@ -4602,11 +4613,12 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x06relays\x18\x01 \x03(\v2\x19.raycontrol.node.v1.RelayR\x06relays\"(\n" +
 	"\x12RemoveRelayRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\x15\n" +
-	"\x13RemoveRelayResponse\"k\n" +
+	"\x13RemoveRelayResponse\"\x81\x01\n" +
 	"\x17IssueRelayBundleRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12!\n" +
 	"\fexit_address\x18\x02 \x01(\tR\vexitAddress\x12\x19\n" +
-	"\bssh_port\x18\x03 \x01(\rR\asshPort\"2\n" +
+	"\bssh_port\x18\x03 \x01(\rR\asshPort\x12\x14\n" +
+	"\x05admin\x18\x04 \x03(\tR\x05admin\"2\n" +
 	"\x18IssueRelayBundleResponse\x12\x16\n" +
 	"\x06bundle\x18\x01 \x01(\tR\x06bundle\"\x16\n" +
 	"\x14GetDeploymentRequest\"\xb7\x02\n" +

@@ -468,3 +468,18 @@ func TestGateRelayOneAddress(t *testing.T) {
 		t.Fatalf("relay network accepted: %v %v", err, fw.relays)
 	}
 }
+
+// On a relay, its own SSH is a local service (relay-v1 §3.1): in the scope
+// of the devices allowed SSH, never forwarded to the exit.
+func TestGateLocalNotForwarded(t *testing.T) {
+	fw := &fakeFW{}
+	g := NewGate(fw, quiet)
+	snap := testSnapshot()
+	snap.Services[2].Local = true // tcp/22
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(fw.forward, Port{"tcp", 22}) || !slices.Contains(fw.forward, Port{"tcp", 443}) {
+		t.Fatalf("forward %v", fw.forward)
+	}
+}

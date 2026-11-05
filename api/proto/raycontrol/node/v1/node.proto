@@ -165,6 +165,10 @@ message IssueRelayBundleRequest {
   string name = 1;
   string exit_address = 2;  // the exit's IP; empty: the node's host if it is one
   uint32 ssh_port = 3;      // the relay host's SSH; 0 keeps it (22 at first)
+  // Addresses that reach the relay host's SSH without SPA (its own, never
+  // the exit's list); empty keeps them. Devices allowed the exit's SSH
+  // open it by SPA with their K_relay either way.
+  repeated string admin = 4;
 }
 message IssueRelayBundleResponse { string bundle = 1; }
 

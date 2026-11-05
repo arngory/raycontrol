@@ -84,6 +84,9 @@ message Service {
   // UDP port rotation (spa-v2.md §11): the slot ports of this schedule are
   // redirected to target_port.
   Rotation rotation = 3;
+  // Local: served by this host, never forwarded. On a relay, its own SSH
+  // (relay-v1 §3.1); every other service there is forwarded to the exit.
+  bool local = 4;
 }
 
 message Rotation {

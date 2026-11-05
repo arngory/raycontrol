@@ -317,9 +317,22 @@ func TestPerimeterFeed(t *testing.T) {
 	}
 
 	// A relay (relay-v1): its address reaches the service ports, not SSH,
-	// not the public DNS port; removing it takes them away.
+	// not the public DNS port; removing it takes them away. Not inside an
+	// admin prefix, which reaches SSH, nor an admin prefix around a relay.
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "msk", Address: "198.51.100.20"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("a relay inside the admin prefix 198.51.100.0/24: %v", err)
+	}
+	if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{"198.51.100.7"}})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
 	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "msk", Address: "198.51.100.20"})); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{"198.51.100.0/24"}})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("an admin prefix around a relay: %v", err)
 	}
 	if !stream.Receive() {
 		t.Fatal(stream.Err())
