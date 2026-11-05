@@ -92,6 +92,23 @@ func (j *Journal) Has(kind, path, name string) bool {
 	return false
 }
 
+// Original is the first change of this kind for this path or name: the
+// state before raycontrol.
+func (j *Journal) Original(kind, path, name string) (Change, bool) {
+	if j == nil {
+		return Change{}, false
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	k := Change{Kind: kind, Path: path, Name: name}.key()
+	for _, c := range j.Changes {
+		if c.key() == k {
+			return c, true
+		}
+	}
+	return Change{}, false
+}
+
 // Record adds a change unless one for the same kind and key is there. It
 // first merges what another instance (another rayctl run, or a nested one)
 // saved meanwhile: the first record of a path holds its original state and

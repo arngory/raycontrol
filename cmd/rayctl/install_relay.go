@@ -228,13 +228,31 @@ func installRelay(bundlePath, packages string) error {
 				func() error { return os.Remove(forwardFile.Path) },
 				// Our file only, its old value journaled for uninstall.
 				func() { h.ApplySysctl([]deploy.File{forwardFile}) },
-				func() (string, string) { return sysctlAtBoot(sysctlDirs, forwardKeys...) })
+				func() (string, string) { return forwardingAtBoot(sysctlDirs) })
 		},
 		enable: func() error {
 			if err := stillRunning(showUnit, restarts); err != nil {
 				return err
 			}
 			return h.EnableNow(relayUnit)
+		},
+		unforward: func() {
+			_ = os.Remove(forwardFile.Path)
+			// The value before raycontrol, if raycontrol ever set it: a
+			// re-install's forwarding goes with its relay.
+			if c, ok := h.Journal.Original(deploy.ChangeSysctl, "", "net.ipv4.ip_forward"); ok && c.Value != "" {
+				_ = os.WriteFile(procForward, []byte(c.Value+"\n"), 0o644) //nolint:gosec // G306: /proc
+			}
+		},
+		// Past RestartSec (2 s): a rayspa that dies after its snapshot has
+		// restarted by then.
+		settle: func(ctx context.Context) error {
+			select {
+			case <-ctx.Done():
+				return errInterrupted
+			case <-time.After(3 * time.Second):
+			}
+			return stillRunning(showUnit, restarts)
 		},
 	}
 	snap, warning, err := steps.run(ctx)
@@ -337,32 +355,23 @@ func checkForwarding(read func() ([]byte, error), boot, file string) error {
 	case strings.TrimSpace(string(v)) != "1":
 		return fmt.Errorf("net.ipv4.ip_forward stays off (%s)", strings.TrimSpace(string(v)))
 	case boot != "1":
-		return fmt.Errorf("net.ipv4.ip_forward would be %q at boot: %s comes after %s", boot, file, deploy.RelaySysctl)
+		return fmt.Errorf("net.ipv4.ip_forward would be %q at boot, from %s (systemd-sysctl and udev read it after %s)",
+			boot, file, deploy.RelaySysctl)
 	}
 	return nil
 }
 
-// procForward is the kernel's forwarding switch; forwardKeys are its names
-// in sysctl.d (net.ipv4.conf.all.forwarding is the same variable).
+// procForward is the kernel's forwarding switch.
 const procForward = "/proc/sys/net/ipv4/ip_forward"
 
-var forwardKeys = []string{"net.ipv4.ip_forward", "net.ipv4.conf.all.forwarding"}
-
 // turnForwardingOn writes our sysctl file and applies it, once all of
-// sysctl.d is known to keep forwarding on at boot; on any failure the file
-// goes and the kernel's value comes back, so that a failed install leaves
-// no host forwarding without its relay's table.
+// sysctl.d is known to keep forwarding on at boot; on a failure the file
+// goes (the kernel's value is stop's: it knows the one before raycontrol).
 func turnForwardingOn(proc string, write, remove func() error, apply func(), boot func() (string, string)) error {
-	old, _ := os.ReadFile(proc) //nolint:gosec // G304: /proc
 	if err := write(); err != nil {
 		return err
 	}
-	undo := func() {
-		_ = remove()
-		if len(old) > 0 {
-			_ = os.WriteFile(proc, old, 0o644) //nolint:gosec // G306: /proc
-		}
-	}
+	undo := func() { _ = remove() }
 	if v, file := boot(); v != "1" {
 		undo()
 		return checkForwarding(func() ([]byte, error) { return []byte("1"), nil }, v, file)
@@ -378,13 +387,15 @@ func turnForwardingOn(proc string, write, remove func() error, apply func(), boo
 // sysctlDirs are where systemd-sysctl reads, first wins for a file name.
 var sysctlDirs = []string{"/etc/sysctl.d", "/run/sysctl.d", "/usr/local/lib/sysctl.d", "/usr/lib/sysctl.d", "/lib/sysctl.d"}
 
-// sysctlAtBoot is the value that sysctl.d gives at boot to the variable
-// named keys, and the file it comes from, as systemd-sysctl reads them:
-// files by name across dirs (a name in an earlier dir hides it in later
-// ones), in name order, the last setting wins, glob keys included
-// (net.ipv4.conf.*.forwarding). /etc/sysctl.conf only through a file
-// there (Debian's 99-sysctl.conf link).
-func sysctlAtBoot(dirs []string, keys ...string) (value, file string) {
+// sysctlEntry is one setting of sysctl.d, its key in /proc/sys form.
+type sysctlEntry struct{ key, value, file string }
+
+// sysctlEntries reads sysctl.d as systemd-sysctl does: files by name across
+// dirs (a name in an earlier dir hides it in later ones), in name order; a
+// key set again to another value moves to the end, to the same value keeps
+// its place. /etc/sysctl.conf only through a file there (Debian's
+// 99-sysctl.conf link).
+func sysctlEntries(dirs []string) []sysctlEntry {
 	byName := map[string]string{}
 	for i := len(dirs) - 1; i >= 0; i-- {
 		paths, _ := filepath.Glob(filepath.Join(dirs[i], "*.conf"))
@@ -392,16 +403,9 @@ func sysctlAtBoot(dirs []string, keys ...string) (value, file string) {
 			byName[filepath.Base(p)] = p
 		}
 	}
-	files := make([]string, 0, len(byName))
+	var entries []sysctlEntry
 	for _, name := range slices.Sorted(maps.Keys(byName)) {
-		files = append(files, byName[name])
-	}
-	slash := func(k string) string { return strings.ReplaceAll(strings.TrimSpace(k), ".", "/") }
-	names := make([]string, len(keys))
-	for i, k := range keys {
-		names[i] = slash(k)
-	}
-	for _, f := range files {
+		f := byName[name]
 		b, err := os.ReadFile(f) //nolint:gosec // G304: sysctl's own files
 		if err != nil {
 			continue
@@ -415,11 +419,43 @@ func sysctlAtBoot(dirs []string, keys ...string) (value, file string) {
 			if !ok {
 				continue
 			}
-			// Dots or slashes alike; a glob over /proc/sys paths.
-			pattern := strings.ReplaceAll(strings.TrimSpace(k), ".", "/")
-			if slices.ContainsFunc(names, func(n string) bool { m, _ := path.Match(pattern, n); return m }) {
-				value, file = strings.TrimSpace(v), f
+			e := sysctlEntry{strings.ReplaceAll(strings.TrimSpace(k), ".", "/"), strings.TrimSpace(v), f}
+			if i := slices.IndexFunc(entries, func(o sysctlEntry) bool { return o.key == e.key }); i >= 0 {
+				if entries[i].value == e.value {
+					continue
+				}
+				entries = slices.Delete(entries, i, i+1)
 			}
+			entries = append(entries, e)
+		}
+	}
+	return entries
+}
+
+// forwardingAtBoot is IPv4 forwarding as sysctl.d leaves it at boot, and the
+// file that decides: net.ipv4.ip_forward and net.ipv4.conf.all.forwarding
+// are one variable; a glob applies only to keys not set by name. udev runs
+// systemd-sysctl again for each interface that comes, so a glob over
+// conf/*/forwarding, the default for new interfaces or one interface's own
+// that turn it off turn it off where packets come in, wherever they are.
+func forwardingAtBoot(dirs []string) (value, file string) {
+	entries := sysctlEntries(dirs)
+	glob := func(k string) bool { return strings.ContainsAny(k, "*?[") }
+	byName := func(n string) bool {
+		return slices.ContainsFunc(entries, func(e sysctlEntry) bool { return e.key == n })
+	}
+	for _, e := range entries {
+		for _, n := range []string{"net/ipv4/ip_forward", "net/ipv4/conf/all/forwarding"} {
+			if m, _ := path.Match(e.key, n); m && (!glob(e.key) || !byName(n)) {
+				value, file = e.value, e.file
+			}
+		}
+	}
+	for _, e := range entries {
+		iface, ok := strings.CutPrefix(e.key, "net/ipv4/conf/")
+		iface, ok2 := strings.CutSuffix(iface, "/forwarding")
+		if ok && ok2 && iface != "all" && iface != "lo" && e.value != "1" {
+			return e.value, e.file
 		}
 	}
 	return value, file
@@ -447,6 +483,10 @@ func waitActive(ctx context.Context, show func() (map[string]string, error), bas
 		st, _ := show()
 		queued := st["Job"] != "" && st["Job"] != "0"
 		switch {
+		case strings.HasPrefix(st["SubState"], "auto-restart"):
+			// Exited, to be started again: before systemd 254 the start
+			// job stays queued through it.
+			return fmt.Errorf("rayspa exited (%s, %s): journalctl -u rayspa says why", st["SubState"], st["Result"])
 		case !queued && restartedSince(st, base):
 			return fmt.Errorf("rayspa restarted (%s times): journalctl -u rayspa says why", st["NRestarts"])
 		case !queued && st["Result"] != "" && st["Result"] != "success":
@@ -528,8 +568,10 @@ type relaySteps struct {
 	waitSnapshot   func(context.Context) error
 	readSnapshot   func() (*perimeterv1.Snapshot, error)
 	check          func(*perimeterv1.Snapshot) (string, error)
-	forward        func() error // net.ipv4.ip_forward on
-	enable         func() error // journaled, enable --now
+	forward        func() error                // net.ipv4.ip_forward on
+	unforward      func()                      // our sysctl file gone, the value before raycontrol back
+	settle         func(context.Context) error // rayspa still running a while after
+	enable         func() error                // journaled, enable --now
 }
 
 var (
@@ -584,19 +626,22 @@ func (r relaySteps) run(ctx context.Context) (snap *perimeterv1.Snapshot, warnin
 		func() error { err := r.unguard(); armed = armed && err != nil; return err },
 		r.enable,
 		r.forward,
+		func() error { return r.settle(ctx) },
 	} {
 		if err := step(f); err != nil {
 			return nil, "", err
 		}
 	}
-	// Forwarding, the last step, is done: a signal now finds the install
-	// complete, not something to take down.
+	// The last step is done: a signal now finds the install complete, not
+	// something to take down.
 	ok = true
 	return snap, warning, nil
 }
 
 // stop takes rayspa down after why, and says whether the host is open.
 func (r relaySteps) stop(why error, armed bool) error {
+	// No forwarding without the relay's table, whatever else happens.
+	r.unforward()
 	unit := r.unitExists()
 	var disable error
 	if unit {

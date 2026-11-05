@@ -122,6 +122,7 @@ type fakeRelayHost struct {
 	stuckEnabled          bool   // disable fails (read-only /etc): nothing changes
 	stuckActive           bool   // systemd does not answer: rayspa runs on, teardown goes ahead
 	crashAt, guardOffAt   string // rayspa dies, or the guard goes off, at that call
+	forwarding            bool   // net.ipv4.ip_forward on, and our file there
 	fails                 []string
 	panicAt, cancelAt     string
 	cancel                func()
@@ -215,8 +216,10 @@ func (f *fakeRelayHost) steps() relaySteps {
 			}
 			return "", f.call("check", nil)
 		},
-		forward: func() error { return f.call("forward", nil) },
-		enable:  func() error { return f.call("enable", func() { f.enabled, f.active = true, true }) },
+		forward:   func() error { return f.call("forward", func() { f.forwarding = true }) },
+		unforward: func() { f.calls = append(f.calls, "unforward"); f.forwarding = false },
+		settle:    func(context.Context) error { return f.call("settle", nil) },
+		enable:    func() error { return f.call("enable", func() { f.enabled, f.active = true, true }) },
 	}
 }
 
@@ -234,21 +237,21 @@ func (f *fakeRelayHost) run() (*perimeterv1.Snapshot, error) {
 // every other way out takes rayspa down, and says when that failed.
 func TestRelaySteps(t *testing.T) {
 	const u = relayUnit
-	happy := []string{"guard", "write", "stop " + u, "rm snapshot", "start " + u, "wait", "read", "check", "unguard", "enable", "forward"}
-	down := []string{"disable --now " + u, "teardown", "unguard"}
-	open := func(f *fakeRelayHost) bool { return !f.enabled && !f.active && !f.table && !f.guarded }
+	happy := []string{"guard", "write", "stop " + u, "rm snapshot", "start " + u, "wait", "read", "check", "unguard", "enable", "forward", "settle"}
+	down := []string{"unforward", "disable --now " + u, "teardown", "unguard"}
+	open := func(f *fakeRelayHost) bool { return !f.enabled && !f.active && !f.table && !f.guarded && !f.forwarding }
 	// What a failure (or a step done, then a signal) at step i leaves: what
 	// ran, then down; on a new host without a unit, nothing to disable.
 	after := func(i int, done bool) []string {
 		w := slices.Index(happy, "write")
 		if i < w || i == w && !done {
-			return append(slices.Clone(happy[:i+1]), "teardown", "unguard")
+			return append(slices.Clone(happy[:i+1]), "unforward", "teardown", "unguard")
 		}
 		return append(slices.Clone(happy[:i+1]), down...)
 	}
 
 	f := &fakeRelayHost{}
-	if snap, err := f.run(); err != nil || !slices.Equal(f.calls, happy) || !f.enabled || !f.active || f.guarded || snap != f.snap {
+	if snap, err := f.run(); err != nil || !slices.Equal(f.calls, happy) || !f.enabled || !f.active || f.guarded || !f.forwarding || snap != f.snap {
 		t.Fatalf("a new relay: %v %+v %v", f.calls, f, err)
 	}
 	f = &fakeRelayHost{unit: true, enabled: true, active: true, table: true}
@@ -260,6 +263,12 @@ func TestRelaySteps(t *testing.T) {
 		t.Fatalf("an earlier rayspa that stays enabled: %v %v", f.calls, err)
 	}
 
+	// A re-install of a forwarding relay that fails early: its forwarding
+	// goes with it.
+	f = &fakeRelayHost{unit: true, enabled: true, active: true, table: true, forwarding: true, fails: []string{"wait"}}
+	if _, err := f.run(); err == nil || f.forwarding {
+		t.Errorf("a failed re-install still forwards: %+v %v", f, err)
+	}
 	// A failure at any step: nothing after it, rayspa down, the host open.
 	for i, at := range happy {
 		f := &fakeRelayHost{fails: []string{at}}
@@ -482,7 +491,7 @@ func TestCheckForwarding(t *testing.T) {
 		boot, says string
 	}{
 		"off now":        {read("0\n", nil), "1", "stays off (0)"},
-		"off at boot":    {read("1\n", nil), "0", "/etc/sysctl.d/99-hardening.conf comes after"},
+		"off at boot":    {read("1\n", nil), "0", "from /etc/sysctl.d/99-hardening.conf"},
 		"cannot be read": {read("", os.ErrPermission), "1", "cannot be read"},
 	} {
 		err := checkForwarding(c.read, c.boot, "/etc/sysctl.d/99-hardening.conf")
@@ -492,20 +501,18 @@ func TestCheckForwarding(t *testing.T) {
 	}
 }
 
-// The value at boot: files by name across the directories, an earlier
-// directory hiding a file of the same name, the last setting winning,
-// sysctl.conf last.
-func TestSysctlAtBoot(t *testing.T) {
+// Forwarding at boot, as systemd-sysctl and udev leave it: files by name
+// across the directories, an earlier directory hiding a file of the same
+// name; a key set again to another value moves last, to the same value
+// keeps its place; one variable under two names; a glob only for keys not
+// set by name; interfaces' own settings, globs and the default as udev
+// applies them; sysctl.conf not read.
+func TestForwardingAtBoot(t *testing.T) {
 	root := t.TempDir()
 	etc, lib := root+"/etc/sysctl.d", root+"/usr/lib/sysctl.d"
-	for path, body := range map[string]string{
-		lib + "/50-default.conf":          "net.ipv4.ip_forward = 0\n",
-		etc + "/91-raycontrol-relay.conf": "# relay\nnet.ipv4.ip_forward = 1\n",
-		lib + "/99-hardening.conf":        "net/ipv4/ip_forward=0\n",
-		etc + "/99-hardening.conf":        "; hidden lib file\nkernel.foo = 1\n",
-		root + "/etc/sysctl.conf":         "#net.ipv4.ip_forward = 0\n",
-		etc + "/90-other.conf.disabled":   "net.ipv4.ip_forward = 0\n",
-	} {
+	dirs := []string{etc, root + "/run/sysctl.d", lib}
+	write := func(path, body string) {
+		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -513,40 +520,42 @@ func TestSysctlAtBoot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	dirs := []string{etc, root + "/run/sysctl.d", lib}
-	if v, f := sysctlAtBoot(dirs, "net.ipv4.ip_forward"); v != "1" || f != etc+"/91-raycontrol-relay.conf" {
-		t.Fatalf("ours last: %q from %s", v, f)
+	base := map[string]string{
+		lib + "/05-default.conf":          "net.ipv4.ip_forward = 0\n",
+		etc + "/91-raycontrol-relay.conf": "# relay\nnet.ipv4.ip_forward = 1\n",
+		lib + "/99-hardening.conf":        "net/ipv4/ip_forward=0\n",
+		etc + "/99-hardening.conf":        "; hides the lib file\nkernel.foo = 1\n",
+		root + "/etc/sysctl.conf":         "net.ipv4.ip_forward = 0\n",
+		etc + "/90-other.conf.disabled":   "net.ipv4.ip_forward = 0\n",
 	}
-	if err := os.WriteFile(etc+"/99-zz.conf", []byte("-net.ipv4.ip_forward = 0\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if v, f := sysctlAtBoot(dirs, "net.ipv4.ip_forward"); v != "0" || f != etc+"/99-zz.conf" {
-		t.Fatalf("a later file: %q from %s", v, f)
-	}
-	// systemd-sysctl does not read sysctl.conf by itself.
-	if err := os.WriteFile(root+"/etc/sysctl.conf", []byte("net.ipv4.ip_forward=1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if v, _ := sysctlAtBoot(dirs, "net.ipv4.ip_forward"); v != "0" {
-		t.Fatalf("sysctl.conf read: %q", v)
-	}
-	// The other name of the same variable, and a glob over it.
-	os.Remove(etc + "/99-zz.conf")
-	for name, line := range map[string]string{"99-stig.conf": "net.ipv4.conf.all.forwarding = 0", "99-glob.conf": "net/ipv4/conf/*/forwarding=0"} {
-		if err := os.WriteFile(etc+"/"+name, []byte(line+"\n"), 0o644); err != nil {
-			t.Fatal(err)
+	for name, c := range map[string]struct {
+		extra      map[string]string
+		value, why string
+	}{
+		"ours last":                   {nil, "1", "91-raycontrol-relay.conf"},
+		"a later file":                {map[string]string{etc + "/99-zz.conf": "-net.ipv4.ip_forward = 0\r\n"}, "0", "99-zz.conf"},
+		"the other name":              {map[string]string{etc + "/99-stig.conf": "net.ipv4.conf.all.forwarding = 0\n"}, "0", "99-stig.conf"},
+		"a glob":                      {map[string]string{etc + "/99-glob.conf": "net/ipv4/conf/*/forwarding=0\n"}, "0", "99-glob.conf"},
+		"a glob before ours, by udev": {map[string]string{etc + "/10-glob.conf": "net.ipv4.conf.*.forwarding = 0\n"}, "0", "10-glob.conf"},
+		"the default":                 {map[string]string{etc + "/10-def.conf": "net.ipv4.conf.default.forwarding = 0\n"}, "0", "10-def.conf"},
+		"one interface":               {map[string]string{etc + "/10-eth.conf": "net.ipv4.conf.eth0.forwarding = 0\n"}, "0", "10-eth.conf"},
+		// The same value keeps its earlier place: the other name, between,
+		// has the last word.
+		"same value keeps its place": {map[string]string{etc + "/10-x.conf": "net.ipv4.ip_forward = 1\n", etc + "/50-y.conf": "net.ipv4.conf.all.forwarding = 0\n"}, "0", "50-y.conf"},
+		// A glob does not override a key set by name, whatever the order.
+		"by name beats a glob": {map[string]string{etc + "/99-g.conf": "net.ipv4.ip_*=0\n"}, "1", "91-raycontrol-relay.conf"},
+		"another key":          {map[string]string{etc + "/99-o.conf": "net.ipv4.conf.all.rp_filter = 0\nnet.ipv6.conf.*.forwarding = 0\nnet.ipv4.conf.lo.forwarding = 0\n"}, "1", "91-raycontrol-relay.conf"},
+	} {
+		os.RemoveAll(root)
+		for p, b := range base {
+			write(p, b)
 		}
-		if v, f := sysctlAtBoot(dirs, forwardKeys...); v != "0" || f != etc+"/"+name {
+		for p, b := range c.extra {
+			write(p, b)
+		}
+		if v, f := forwardingAtBoot(dirs); v != c.value || !strings.HasSuffix(f, "/"+c.why) {
 			t.Errorf("%s: %q from %s", name, v, f)
 		}
-		os.Remove(etc + "/" + name)
-	}
-	// A glob over another subtree does not count.
-	if err := os.WriteFile(etc+"/99-other.conf", []byte("net.ipv4.conf.all.rp_filter = 0\nnet.ipv6.conf.*.forwarding = 0\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if v, _ := sysctlAtBoot(dirs, forwardKeys...); v != "1" {
-		t.Errorf("another key: %q", v)
 	}
 }
 
@@ -631,13 +640,19 @@ func TestWaitActive(t *testing.T) {
 		show func() (map[string]string, error)
 		says string
 	}{
-		"a crash loop":   {seq(activating, map[string]string{"ActiveState": "activating", "SubState": "auto-restart", "Result": "exit-code", "NRestarts": "2"}), "restarted (2 times)"},
+		"a crash loop":   {seq(activating, map[string]string{"ActiveState": "active", "SubState": "running", "Result": "success", "NRestarts": "2"}), "restarted (2 times)"},
 		"a failed start": {seq(map[string]string{"ActiveState": "inactive", "SubState": "dead", "Result": "exit-code", "NRestarts": "0"}), "did not start (exit-code)"},
 		"never":          {seq(activating), "did not start within"},
 	} {
 		if err := waitActive(ctx, c.show, "0", 20*time.Millisecond, time.Millisecond); err == nil || !strings.Contains(err.Error(), c.says) {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+	// Exited and to be started again: a failure, even with the start job
+	// still queued (systemd before 254).
+	restart := map[string]string{"ActiveState": "activating", "SubState": "auto-restart", "Result": "exit-code", "NRestarts": "0", "Job": "9"}
+	if err := waitActive(ctx, seq(activating, restart), "0", time.Second, time.Millisecond); err == nil || !strings.Contains(err.Error(), "exited") {
+		t.Errorf("auto-restart: %v", err)
 	}
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
