@@ -12,7 +12,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 dir=$(mktemp -d)
 front=
 cleanup() {
-	[ -n "$front" ] && kill "$front" 2>/dev/null || true
+	if [ -n "$front" ]; then
+		kill "$front" 2>/dev/null || true
+	fi
 	rm -rf "$dir"
 }
 trap cleanup EXIT
