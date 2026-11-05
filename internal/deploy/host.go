@@ -221,7 +221,10 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 	if sysctlChanged {
 		h.ApplySysctl(plan.Files)
 	}
-	if resolvedChanged {
+	// The front answers DNS tunnels on UDP 53. A run that wrote the
+	// drop-in but stopped before the restart left the stub on: it goes now.
+	frontDNS := slices.ContainsFunc(plan.Files, func(f File) bool { return f.Path == ResolvedDropIn })
+	if resolvedChanged || frontDNS && h.stubOn53() {
 		if err := h.freePort53(); err != nil {
 			return err
 		}
@@ -232,7 +235,7 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 	if err := h.hostFirewalls(plan, changedFiles); err != nil {
 		return err
 	}
-	if slices.Contains(plan.Units, "niko-front.service") {
+	if frontDNS && slices.Contains(plan.Units, "niko-front.service") {
 		h.warnPort53(render.FrontUID)
 	}
 

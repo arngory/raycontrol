@@ -30,7 +30,7 @@ const API = "https://api.cloudflare.com/client/v4"
 const Owner = "raycontrol"
 
 // Client talks to the API with a token that may edit the zone's DNS
-// (Zone.DNS:Edit, Zone.Zone:Read).
+// (Zone.DNS:Edit, Zone.Zone:Read): a user's token or an account's.
 type Client struct {
 	Token   string
 	BaseURL string       // API when empty
@@ -63,8 +63,12 @@ func (r Record) proxied() bool { return r.Proxied != nil && *r.Proxied }
 // Error is an API failure.
 type Error struct {
 	Status   int
+	Codes    []int
 	Messages []string
 }
+
+// invalidToken: the API does not know the token (code 1000).
+const invalidToken = 1000
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("cloudflare: HTTP %d: %s", e.Status, strings.Join(e.Messages, "; "))
@@ -116,6 +120,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	if !env.Success || resp.StatusCode >= 300 {
 		e := &Error{Status: resp.StatusCode}
 		for _, m := range env.Errors {
+			e.Codes = append(e.Codes, m.Code)
 			e.Messages = append(e.Messages, fmt.Sprintf("%d %s", m.Code, m.Message))
 		}
 		return e
@@ -126,12 +131,48 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	return nil
 }
 
-// Verify checks that the token is valid and active.
+// Verify checks that the token is valid and active. A token of an account
+// (Manage Account, API Tokens) is unknown to /user/tokens/verify, which
+// answers 1000 Invalid API Token: it is checked under the accounts of the
+// zones it can read.
 func (c *Client) Verify(ctx context.Context) error {
+	err := c.verify(ctx, "/user/tokens/verify")
+	var e *Error
+	if err == nil || !errors.As(err, &e) || !slices.Contains(e.Codes, invalidToken) {
+		return err
+	}
+	var zones []struct {
+		Account struct {
+			ID string `json:"id"`
+		} `json:"account"`
+	}
+	if c.do(ctx, http.MethodGet, "/zones", url.Values{"per_page": {"50"}}, nil, &zones) == nil {
+		var seen []string
+		for _, z := range zones {
+			id := z.Account.ID
+			if id == "" || slices.Contains(seen, id) {
+				continue
+			}
+			seen = append(seen, id)
+			aerr := c.verify(ctx, "/accounts/"+url.PathEscape(id)+"/tokens/verify")
+			if aerr == nil {
+				return nil
+			}
+			var ae *Error
+			if !errors.As(aerr, &ae) || !slices.Contains(ae.Codes, invalidToken) {
+				return aerr // the account knows the token: expired, disabled
+			}
+		}
+	}
+	return fmt.Errorf("%w (give the token's value, shown once when it is made, not its ID; "+
+		"a user's token or an account's, with Zone.Zone:Read and Zone.DNS:Edit on the node's zone)", err)
+}
+
+func (c *Client) verify(ctx context.Context, path string) error {
 	var r struct {
 		Status string `json:"status"`
 	}
-	if err := c.do(ctx, http.MethodGet, "/user/tokens/verify", nil, nil, &r); err != nil {
+	if err := c.do(ctx, http.MethodGet, path, nil, nil, &r); err != nil {
 		return err
 	}
 	if r.Status != "active" {

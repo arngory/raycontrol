@@ -285,6 +285,33 @@ const rayspaTable = "raycontrol"
 // warnPort53 warns when another process holds UDP port 53 that the front
 // needs for the DNS tunnels.
 func (h *Host) warnPort53(frontUID int) {
+	for _, l := range h.port53() {
+		if l.uid == frontUID {
+			continue
+		}
+		owner := strconv.Itoa(l.uid)
+		if u, err := user.LookupId(owner); err == nil {
+			owner = u.Username
+		}
+		fmt.Fprintf(h.Out, "warning: UDP port 53 (%s) is taken by user %s (another DNS server?); "+
+			"the front cannot answer the DNS tunnels until it is freed\n", l.addr, owner)
+	}
+}
+
+// stubOn53 reports whether systemd-resolved's stub listener (127.0.0.53,
+// 127.0.0.54) holds UDP port 53.
+func (h *Host) stubOn53() bool {
+	return slices.ContainsFunc(h.port53(), func(l udpListener) bool { return l.addr == "127.0.0.53" || l.addr == "127.0.0.54" })
+}
+
+type udpListener struct {
+	addr string
+	uid  int
+}
+
+// port53 lists the sockets bound to UDP port 53.
+func (h *Host) port53() []udpListener {
+	var out []udpListener
 	for _, f := range []string{"/proc/net/udp", "/proc/net/udp6"} {
 		data, err := os.ReadFile(h.path(f)) //nolint:gosec // G304: fixed paths
 		if err != nil {
@@ -302,17 +329,13 @@ func (h *Host) warnPort53(frontUID int) {
 				continue
 			}
 			uid, err := strconv.Atoi(fields[7])
-			if err != nil || uid == frontUID {
+			if err != nil {
 				continue
 			}
-			owner := strconv.Itoa(uid)
-			if u, err := user.LookupId(owner); err == nil {
-				owner = u.Username
-			}
-			fmt.Fprintf(h.Out, "warning: UDP port 53 (%s) is taken by user %s (another DNS server?); "+
-				"the front cannot answer the DNS tunnels until it is freed\n", hexAddr(addr), owner)
+			out = append(out, udpListener{hexAddr(addr), uid})
 		}
 	}
+	return out
 }
 
 // hexAddr formats an address from /proc/net/udp{,6}: 32-bit words in host

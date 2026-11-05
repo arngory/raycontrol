@@ -87,6 +87,9 @@ func node(t *testing.T) (*store.Store, *Collector, []string) {
 		"203.0.113.10": {ASN: 64500, Name: "Mobile One", Country: "KZ"},
 		"203.0.113.11": {ASN: 64500, Name: "Mobile One", Country: "KZ"},
 		"198.51.100.5": {ASN: 64501, Name: "Small Net", Country: "UZ"},
+		// A network behind a white list: a relay passes its /24.
+		"192.0.2.0":  {ASN: 64502, Name: "White Net", Country: "RU"},
+		"192.0.2.77": {ASN: 64502, Name: "White Net", Country: "RU"},
 	}}
 	return st, c, devices
 }
@@ -222,5 +225,66 @@ func TestMajority(t *testing.T) {
 		if got := majority(c.m); got != c.want {
 			t.Errorf("%v: %q, want %q", c.m, got, c.want)
 		}
+	}
+}
+
+// The path a report came by (relay-v1 §9.3): a relay passes the client's
+// network and the report says relay; those reports make via_relay and stay
+// out of the network's direct hints.
+func TestPathAndViaRelay(t *testing.T) {
+	ctx := context.Background()
+	st, c, devices := node(t)
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
+	SetEnabled(ctx, st, true)
+	white := netip.MustParsePrefix("192.0.2.77/24")
+	direct := netip.MustParseAddr("192.0.2.77")
+	relayed := `{"v":1,"net":"cellular","path":"relay","obs":[{"svc":1,"result":"fails"}]}`
+	straight := `{"v":1,"net":"cellular","path":"direct","obs":[{"svc":1,"result":"works"}]}`
+
+	// The path says how the report came.
+	if err := c.TakeVia(ctx, devices[0], white, strings.NewReader(straight)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a relay's report saying direct: %v", err)
+	}
+	if err := c.TakeVia(ctx, devices[0], white, strings.NewReader(`{"v":1,"net":"cellular","obs":[{"svc":1,"result":"fails"}]}`)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a relay's report without a path: %v", err)
+	}
+	if err := c.Take(ctx, devices[0], direct, strings.NewReader(relayed)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a direct report saying relay: %v", err)
+	}
+	if err := c.TakeVia(ctx, devices[0], netip.Prefix{}, strings.NewReader(relayed)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("no network: %v", err)
+	}
+	if _, err := Parse(strings.NewReader(`{"v":1,"net":"wifi","path":"tunnel","obs":[{"svc":1,"result":"works"}]}`)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("an unknown path: %v", err)
+	}
+
+	// Ten through the relay: a network behind a white list, so start with
+	// the relay; nothing about its direct path yet.
+	for _, d := range devices[:10] {
+		if err := c.TakeVia(ctx, d, white, strings.NewReader(relayed)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := c.TakeVia(ctx, devices[0], white, strings.NewReader(relayed)); !errors.Is(err, ErrRepeated) {
+		t.Fatalf("twice a day through the relay: %v", err)
+	}
+	h := c.Hints(ctx, direct, []uint16{1})
+	if h == nil || !h.ViaRelay || h.Order != nil || h.Avoid != nil || h.Devices != 10 {
+		t.Fatalf("hint behind a white list: %+v", h)
+	}
+
+	// Next day ten come directly, and it works: direct hints from them alone
+	// (the relay's fails do not count), and no longer mostly through the
+	// relay.
+	now = now.Add(24 * time.Hour)
+	for _, d := range devices[:10] {
+		if err := c.Take(ctx, d, direct, strings.NewReader(straight)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h = c.Hints(ctx, direct, []uint16{1})
+	if h == nil || h.ViaRelay || !slices.Equal(h.Order, []uint16{1}) || h.Avoid != nil || h.Devices != 10 {
+		t.Fatalf("hint with direct reports: %+v", h)
 	}
 }

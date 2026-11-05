@@ -16,14 +16,17 @@ import (
 )
 
 // API is the part of Cloudflare's API raycontrol uses: one zone, example.com,
-// and the token "good". Record filters: name, type, comment.exact.
+// of the account "a1", and the token "good". AccountToken, when set, is a
+// token of that account: /user/tokens/verify does not know it, as on
+// Cloudflare. Record filters: name, type, comment.exact.
 type API struct {
-	mu      sync.Mutex
-	token   string
-	Zones   []cloudflare.Zone
-	Records map[string]cloudflare.Record // by ID
-	next    int
-	calls   []string
+	mu           sync.Mutex
+	token        string
+	AccountToken string
+	Zones        []cloudflare.Zone
+	Records      map[string]cloudflare.Record // by ID
+	next         int
+	calls        []string
 }
 
 func New(t testing.TB) (*API, *cloudflare.Client) {
@@ -57,20 +60,34 @@ func (f *API) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(code)
 		_ = json.NewEncoder(w).Encode(env)
 	}
-	if req.Header.Get("Authorization") != "Bearer "+f.token {
-		reply(403, nil, "Invalid API Token")
+	auth := req.Header.Get("Authorization")
+	account := f.AccountToken != "" && auth == "Bearer "+f.AccountToken
+	if auth != "Bearer "+f.token && !account {
+		reply(401, nil, "Invalid API Token")
 		return
 	}
 	parts := strings.Split(strings.Trim(req.URL.Path, "/"), "/")
 	q := req.URL.Query()
 	switch {
+	case req.URL.Path == "/user/tokens/verify" && account:
+		reply(401, nil, "Invalid API Token")
 	case req.URL.Path == "/user/tokens/verify":
 		reply(200, map[string]string{"status": "active"})
+	case req.URL.Path == "/accounts/a1/tokens/verify" && account:
+		reply(200, map[string]string{"status": "active"})
 	case req.URL.Path == "/zones":
-		var out []cloudflare.Zone
+		type zone struct {
+			cloudflare.Zone
+			Account struct {
+				ID string `json:"id"`
+			} `json:"account"`
+		}
+		var out []zone
 		for _, z := range f.Zones {
-			if z.Name == q.Get("name") {
-				out = append(out, z)
+			if q.Get("name") == "" || z.Name == q.Get("name") {
+				o := zone{Zone: z}
+				o.Account.ID = "a1"
+				out = append(out, o)
 			}
 		}
 		reply(200, out)

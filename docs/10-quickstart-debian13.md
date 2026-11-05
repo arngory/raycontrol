@@ -139,6 +139,10 @@ bash bootstrap.sh -remove-v0 -host 203.0.113.7 -domain example.com -cloudflare-t
       на неё.
 - API-токен Cloudflare: *My Profile → API Tokens → Create Token → шаблон «Edit zone DNS»*.
   - Права **Zone · DNS · Edit** и **Zone · Zone · Read**, Zone Resources — только эта зона.
+  - Подходит и токен аккаунта (*Manage Account → Account API Tokens*) с теми же правами. Его нода проверяет через
+    аккаунт зоны: проверка пользователя (`/user/tokens/verify`) такого токена не знает и отвечает
+    `1000 Invalid API Token`. До v0.10.2 такой токен поэтому не принимался.
+  - Нужно значение токена: его показывают один раз при создании. ID токена из списка не подходит.
   - Глобальный API-ключ не нужен и не подходит.
 
 Без Cloudflare тоже можно. Записи тогда заводятся вручную (`rayctl dns` покажет, какие), а сертификат выпускается через

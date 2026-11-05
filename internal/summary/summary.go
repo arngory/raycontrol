@@ -49,12 +49,15 @@ var (
 	// MTUs: the largest UDP datagram that came back from the probe echo,
 	// for the network as a whole; under 1200 QUIC does not pass.
 	MTUs = []string{"<1200", "1200-1350", "1350-1472", "1472+"}
+	// Paths: how the client reaches the node from the network (relay-v1
+	// §9.3): directly, or through a relay of the node.
+	Paths = []string{"direct", "relay"}
 )
 
 // Optional are the report fields beyond the first ones of v1 that this
 // node takes; the subscription lists them (probe.report), so a client
 // sends a field only to nodes that know it (an older node answers 400).
-var Optional = []string{"udp_mtu"}
+var Optional = []string{"udp_mtu", "path"}
 
 // Report is what a client sends (probe-v1 §6).
 type Report struct {
@@ -62,6 +65,7 @@ type Report struct {
 	Net    string `json:"net"`
 	Obs    []Obs  `json:"obs"`
 	UDPMTU string `json:"udp_mtu,omitempty"` // a bucket of MTUs, optional
+	Path   string `json:"path,omitempty"`    // one of Paths, optional
 }
 
 // Obs is one profile's outcome in the network.
@@ -78,6 +82,9 @@ var (
 	ErrDisabled = errors.New("the node takes no reports")
 	ErrRepeated = errors.New("this network was reported today")
 	ErrInvalid  = errors.New("bad report")
+	// ErrUnavailable: a relay cannot pass the report to its exit now; the
+	// client tries again later (relay-v1 §9.3).
+	ErrUnavailable = errors.New("the exit cannot be reached now")
 )
 
 // Settings keys.
@@ -182,6 +189,9 @@ func Parse(body io.Reader) (Report, error) {
 	if r.UDPMTU != "" && !slices.Contains(MTUs, r.UDPMTU) {
 		return r, fmt.Errorf("%w: udp_mtu %q", ErrInvalid, r.UDPMTU)
 	}
+	if r.Path != "" && !slices.Contains(Paths, r.Path) {
+		return r, fmt.Errorf("%w: path %q", ErrInvalid, r.Path)
+	}
 	if len(r.Obs) == 0 || len(r.Obs) > MaxObs {
 		return r, fmt.Errorf("%w: 1 to %d observations", ErrInvalid, MaxObs)
 	}
@@ -227,16 +237,38 @@ func (c *Collector) once(device string, as uint32, today int64) bool {
 	return true
 }
 
-// Take records a report from a device at addr. The AS comes from the
-// address; the address itself is not kept. Observations of services the
-// device's user has no access to are refused.
+// Take records a report from a device at addr, sent to the node directly.
+// The AS comes from the address; the address itself is not kept.
+// Observations of services the device's user has no access to are refused.
 func (c *Collector) Take(ctx context.Context, device string, addr netip.Addr, body io.Reader) error {
+	return c.take(ctx, device, addr, "direct", body)
+}
+
+// TakeVia records a report a relay passed on (relay-v1 §9.3): the client's
+// network as the relay saw it (/24, /48), never its address; the report's
+// path must say relay.
+func (c *Collector) TakeVia(ctx context.Context, device string, network netip.Prefix, body io.Reader) error {
+	if !network.IsValid() {
+		return fmt.Errorf("%w: no network", ErrInvalid)
+	}
+	return c.take(ctx, device, network.Masked().Addr(), "relay", body)
+}
+
+func (c *Collector) take(ctx context.Context, device string, addr netip.Addr, path string, body io.Reader) error {
 	if !Enabled(ctx, c.Store) {
 		return ErrDisabled
 	}
 	r, err := Parse(body)
 	if err != nil {
 		return err
+	}
+	// A report says the path it came by: the relay's are about another
+	// way into the node, apart from the direct ones.
+	if r.Path == "" {
+		r.Path = "direct"
+	}
+	if r.Path != path {
+		return fmt.Errorf("%w: path %q, sent %s", ErrInvalid, r.Path, path)
 	}
 	d, _, err := c.Store.ActiveDevice(ctx, device)
 	if err != nil {
@@ -261,10 +293,19 @@ func (c *Collector) Take(ctx context.Context, device string, addr netip.Addr, bo
 	if !c.once(device, info.ASN, today) {
 		return ErrRepeated
 	}
+	// Through a relay, the observations go under fields of their own: the
+	// hints of a network (its direct path) stay its own.
+	prefix := ""
+	if path == "relay" {
+		prefix = "relay:"
+	}
 	row := func(svc int64, field, bucket string) store.SummaryCount {
+		if svc != 0 || field != "path" {
+			field = prefix + field
+		}
 		return store.SummaryCount{Day: today, ASN: info.ASN, Svc: svc, Field: field, Bucket: bucket, N: 1}
 	}
-	counts := []store.SummaryCount{row(0, "reports", ""), row(0, "net", r.Net)}
+	counts := []store.SummaryCount{row(0, "reports", ""), row(0, "net", r.Net), row(0, "path", path)}
 	if r.UDPMTU != "" {
 		counts = append(counts, row(0, "mtu", r.UDPMTU))
 	}

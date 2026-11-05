@@ -214,7 +214,7 @@ var knownFiles = []string{
 	"/etc/tmpfiles.d/raycontrol.conf",
 	"/etc/polkit-1/rules.d/50-raycontrol.rules",
 	"/etc/sysctl.d/90-raycontrol.conf",
-	"/etc/systemd/resolved.conf.d/raycontrol.conf",
+	ResolvedDropIn,
 	FirewalldService,
 	UFWProfile,
 }

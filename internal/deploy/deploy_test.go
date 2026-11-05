@@ -755,3 +755,58 @@ func TestRelayPlan(t *testing.T) {
 		t.Error("relay sysctl")
 	}
 }
+
+// UDP 53 is the front's only with DNS tunnels: without them the resolver's
+// stub stays and nothing is said; with them a stub left on by a run that
+// stopped early goes even though the drop-in is already there.
+func TestPort53(t *testing.T) {
+	apply := func(t *testing.T, p deploy.Plan, dropIn bool) (cmds []string, log string) {
+		t.Helper()
+		root := t.TempDir()
+		os.MkdirAll(filepath.Join(root, "/proc/net"), 0o755)
+		os.WriteFile(filepath.Join(root, "/proc/net/udp"), []byte(
+			"  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n"+
+				"  1: 3500007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   991        0 1 2 0 0\n"+
+				"  2: 3600007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   991        0 1 2 0 0\n"), 0o644)
+		if dropIn {
+			os.MkdirAll(filepath.Join(root, filepath.Dir(deploy.ResolvedDropIn)), 0o755)
+			os.WriteFile(filepath.Join(root, deploy.ResolvedDropIn), []byte(file(p, deploy.ResolvedDropIn)), 0o644)
+		}
+		out := &bytes.Buffer{}
+		h := &deploy.Host{
+			Root: root,
+			Out:  out,
+			Run: func(name string, args ...string) ([]byte, error) {
+				cmds = append(cmds, name+" "+strings.Join(args, " "))
+				return nil, nil
+			},
+			LookPath:    func(string) (string, error) { return "", errors.New("none") },
+			LookupUser:  func(string) (int, error) { return 0, errors.New("unknown") },
+			LookupGroup: func(string) (int, error) { return 0, errors.New("unknown") },
+		}
+		if err := h.Apply(p, "rayd.service"); err != nil {
+			t.Fatal(err)
+		}
+		return cmds, out.String()
+	}
+	const restart = "systemctl try-restart systemd-resolved.service"
+
+	p, _ := plan(t)
+	if !slices.Contains(p.Units, "niko-front.service") || file(p, deploy.ResolvedDropIn) == "" {
+		t.Fatalf("the test plan has no front or no DNS tunnels: %v", p.Units)
+	}
+	cmds, log := apply(t, p, true)
+	if !slices.Contains(cmds, restart) {
+		t.Errorf("the stub is on and the drop-in unchanged, but resolved was not restarted:\n%s", strings.Join(cmds, "\n"))
+	}
+	if !strings.Contains(log, "warning: UDP port 53 (127.0.0.54) is taken") {
+		t.Errorf("a stub still on after the restart not reported:\n%s", log)
+	}
+
+	// The same front without DNS tunnels: 53 is not its.
+	p.Files = slices.DeleteFunc(slices.Clone(p.Files), func(f deploy.File) bool { return f.Path == deploy.ResolvedDropIn })
+	cmds, log = apply(t, p, false)
+	if slices.Contains(cmds, restart) || strings.Contains(log, "UDP port 53") {
+		t.Errorf("no DNS tunnels, yet:\n%s\n%s", strings.Join(cmds, "\n"), log)
+	}
+}
