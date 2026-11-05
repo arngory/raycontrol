@@ -193,7 +193,7 @@ systemd-юниты, хранение секретов через systemd credent
 - [ ] v0.11.1: заметки к релизу и выпуск — по «да» пользователя.
 - [x] v0.11.1: без ложного `service doh (doh) is not deployed` (f51577a); `rayctl report -logs debug`.
 - [x] naive не соединялся: клиент не стучал SPA (Niko 1.32.1).
-- [ ] naive: адрес ноды в хосте ссылки и поддомен в `sni=`, как у hy2 и REALITY — ждёт ответа клиента о `sni=`.
+- [x] naive: адрес ноды в хосте ссылки и поддомен в `sni=`, как у hy2 и REALITY.
 - [x] dnstt, сервер: `obs[].dns` и `hints.dns` в сводке (probe-v1 §6.1, §6.2).
 - [ ] dnstt, клиент: перебор резолверов для сети (Niko).
 - [ ] Окно отладки `rayctl debug on -for 30m [-device ID]`: уровни rayd, rayspa, niko-server, Xray с откатом.

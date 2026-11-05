@@ -163,10 +163,13 @@ https://<имя>/dns-query/<токен>?niko-node=<node_id>&niko-svc=<id>#doh
 ### Профиль naive (R2)
 
 ```
-naive+https://niko:<пароль>@<имя>:443?niko-node=<node_id>&niko-svc=<id>#naive
+naive+https://niko:<пароль>@<адрес ноды>:443?sni=<имя>&niko-node=<node_id>&niko-svc=<id>#naive
 ```
 
-- HTTP/2 CONNECT к `<имя>:443` (TCP 443 ноды после SPA; `<имя>` — поддомен ноды под её сертификатом),
+- В хосте — адрес ноды, как у `hysteria2://` и `vless://`; `<имя>` — поддомен ноды под её сертификатом, он идёт в
+  SNI. Клиенту не нужен DNS-запрос имени в своей сети, и ноду он находит по адресу. До raycontrol v0.11.1 в хосте было
+  имя, а `sni` не было; Niko берёт `sni` у naive во всех версиях.
+- HTTP/2 CONNECT к адресу ноды на TCP 443 после SPA, TLS с SNI `<имя>`,
   `Proxy-Authorization: Basic` с этими именем и паролем, заголовок `Padding` и паддинг первых 8 кадров в каждую
   сторону — как у NaiveProxy. Сервер проверяет только пароль.
 - TLS 1.3, только `X25519MLKEM768`. Пароль — учётные данные с ротацией: новый приходит в `next`.

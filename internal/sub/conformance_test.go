@@ -160,6 +160,10 @@ func strictProblems(kind, link string) []string {
 			out = append(out, "hy2 with obfs but no niko-pin")
 		}
 	case "naive+https", "naive+quic":
+		// The node's address in the host: the name goes in sni.
+		if q.Get("sni") == "" {
+			out = append(out, "naive without sni")
+		}
 		// The client ignores these; the node must not rely on them.
 		for _, key := range []string{"cert", "extra-headers"} {
 			if q.Has(key) {
