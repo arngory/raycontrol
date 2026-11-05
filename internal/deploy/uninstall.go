@@ -24,9 +24,10 @@ type UninstallOptions struct {
 }
 
 // Runtime directories, gone at reboot anyway.
-// /var/lib/rayspa holds the perimeter's copy of its last snapshot: nothing
-// that is not in the database, and gone with the perimeter.
-var runtimeDirs = []string{"/run/niko", "/run/raycontrol", "/var/lib/rayspa"}
+// /var/lib/rayspa holds the perimeter's copy of its last snapshot, and
+// /var/lib/rayd-relay a relay's probe endpoint's devices: nothing that is
+// not the exit's, and gone with them.
+var runtimeDirs = []string{"/run/niko", "/run/raycontrol", "/var/lib/rayspa", "/var/lib/rayd-relay"}
 
 // Uninstall reverts what the journal records, newest first within each
 // step: units off, perimeter table gone, sysctl values back, files restored

@@ -65,6 +65,8 @@ PUBKEY="RWQBergjLoDHqeme5vyIuIRXJLjTj1EF3jR1nlWBVJO3rWxgy9SZj4bD"
 MIN_VERSION="v0.10.0"
 # RELAY_MIN_VERSION is the first release that can be a relay (-relay).
 RELAY_MIN_VERSION="v0.10.1"
+# RELAY_PROBE_MIN_VERSION is the first release with rayd relay (relay-v1 §9.1).
+RELAY_PROBE_MIN_VERSION="v0.11.0"
 
 die() {
 	echo "bootstrap: $*" >&2
@@ -333,9 +335,14 @@ main() {
 		if [[ -z ${RAYCONTROL_LOCAL_DIR:-} ]] && version_lt "$signed" "$RELAY_MIN_VERSION"; then
 			die "the release is $signed; a relay needs $RELAY_MIN_VERSION or newer"
 		fi
-		install -m 0755 "$tmp/rayspa" "$tmp/rayctl" "$tmp/rayd" /usr/local/bin/
+		local relay_bins=("$tmp/rayspa" "$tmp/rayctl")
+		# rayd relay, the relay's probe endpoint, from the release that has it.
+		if [[ -n ${RAYCONTROL_LOCAL_DIR:-} ]] || ! version_lt "$signed" "$RELAY_PROBE_MIN_VERSION"; then
+			relay_bins+=("$tmp/rayd")
+		fi
+		install -m 0755 "${relay_bins[@]}" /usr/local/bin/
 		if command -v restorecon >/dev/null; then
-			restorecon /usr/local/bin/rayspa /usr/local/bin/rayctl /usr/local/bin/rayd || true
+			restorecon "${relay_bins[@]/#"$tmp"//usr/local/bin}" || true
 		fi
 		HANDED_OVER=1
 		exec 9<&- # rayctl takes the lock itself

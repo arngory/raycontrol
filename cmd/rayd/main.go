@@ -933,6 +933,7 @@ func cmdRelay(args []string) error {
 	fs := flag.NewFlagSet("relay", flag.ExitOnError)
 	bundle := fs.String("bundle", "", "the relay's bundle (rayctl relay bundle on the exit); a file only its owner reads")
 	daily := fs.Int("probe-daily", 0, "probe volume per device and UTC day, MiB (default: probe-v1's)")
+	state := fs.String("state", "", "keep the devices of the exit's last snapshot here, for a start while the exit is away")
 	fs.Parse(args)
 	if *bundle == "" || fs.NArg() != 0 || *daily < 0 {
 		return errors.New("relay needs -bundle")
@@ -945,6 +946,10 @@ func cmdRelay(args []string) error {
 	s, tlsCfg, err := relayprobe.New(b, int64(*daily)<<20, log)
 	if err != nil {
 		return err
+	}
+	s.State = *state
+	if err := s.Load(); err != nil {
+		log.Warn("relay probe: kept devices not read; waiting for the exit", "err", err)
 	}
 	addr := ":" + strconv.Itoa(int(b.Probe.Port))
 	ln, err := net.Listen("tcp", addr)

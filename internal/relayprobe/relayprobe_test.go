@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -37,14 +39,18 @@ type exit struct {
 	probe   bool
 	reports []*perimeterv1.ReportRequest
 	answer  error
+	refuse  error         // the feed's answer instead of a snapshot
 	drop    chan struct{} // closed: the feed ends
 }
 
 func (e *exit) WatchRelay(ctx context.Context, req *connect.Request[perimeterv1.WatchRelayRequest], s *connect.ServerStream[perimeterv1.WatchRelayResponse]) error {
 	e.mu.Lock()
 	e.probe = req.Msg.Probe
-	drop := e.drop
+	drop, refuse := e.drop, e.refuse
 	e.mu.Unlock()
+	if refuse != nil {
+		return refuse
+	}
 	if err := s.Send(&perimeterv1.WatchRelayResponse{Snapshot: e.snap}); err != nil {
 		return err
 	}
@@ -266,4 +272,67 @@ func TestNew(t *testing.T) {
 			_ = resp.Body.Close()
 		}
 	}
+}
+
+// The devices of the last snapshot are kept for a start while the exit is
+// away; when the exit answers that it does not know the relay (removed, a
+// new bundle), they go, kept ones too.
+func TestKeptDevices(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var key [spa.KeySize]byte
+	key[0] = 7
+	state := filepath.Join(t.TempDir(), "devices.pb")
+	e := &exit{drop: make(chan struct{}), snap: &perimeterv1.Snapshot{Devices: []*perimeterv1.Device{
+		{Id: "dev1", Key: key[:], Allowed: []uint32{uint32(provision.RelayProbeSvc)}}}}}
+	_, h := perimeterv1connect.NewRelayServiceHandler(e)
+	hs := httptest.NewUnstartedServer(h)
+	hs.EnableHTTP2 = true
+	hs.StartTLS()
+	defer hs.Close()
+	newServer := func() *Server {
+		s := &Server{Name: "r1", Exit: perimeterv1connect.NewRelayServiceClient(hs.Client(), hs.URL), Log: slog.New(slog.DiscardHandler), State: state}
+		s.Probe = &probe.Server{Auth: s.auth, Log: s.Log}
+		return s
+	}
+	known := func(s *Server) bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		_, ok := s.devices["dev1"]
+		return ok
+	}
+	wait := func(cond func() bool, what string) {
+		t.Helper()
+		for range 300 {
+			if cond() {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatal(what)
+	}
+
+	s := newServer()
+	wctx, stop := context.WithCancel(ctx)
+	go s.Watch(wctx)
+	wait(func() bool { return known(s) }, "no devices from the exit")
+	wait(func() bool { _, err := os.Stat(state); return err == nil }, "devices not kept")
+	stop()
+	if fi, _ := os.Stat(state); fi.Mode().Perm() != 0o600 {
+		t.Errorf("kept devices mode %v", fi.Mode().Perm())
+	}
+
+	// A new start, the exit away: the kept devices.
+	s = newServer()
+	if err := s.Load(); err != nil || !known(s) {
+		t.Fatalf("kept devices not loaded: %v", err)
+	}
+
+	// The exit no longer knows the relay: they go.
+	e.mu.Lock()
+	e.refuse = connect.NewError(connect.CodeNotFound, errors.New("not found"))
+	e.mu.Unlock()
+	go s.Watch(ctx)
+	wait(func() bool { return !known(s) }, "devices kept though the exit does not know the relay")
+	wait(func() bool { _, err := os.Stat(state); return errors.Is(err, os.ErrNotExist) }, "kept devices not removed")
 }

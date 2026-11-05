@@ -746,8 +746,10 @@ func TestRelayPlan(t *testing.T) {
 	probe := file(p, "/etc/systemd/system/"+deploy.RelayProbeUnit)
 	for _, want := range []string{
 		"ExecStartPre=+install -m 0400 -o rayd -g rayd /etc/raycontrol/relay.bundle /run/rayd-relay/relay.bundle",
-		"ExecStart=/usr/local/bin/rayd relay -bundle /run/rayd-relay/relay.bundle",
+		"ExecStart=/usr/local/bin/rayd relay -bundle /run/rayd-relay/relay.bundle -state /var/lib/rayd-relay/devices.pb",
+		"StateDirectory=rayd-relay\n", "StateDirectoryMode=0700",
 		"User=rayd", "CapabilityBoundingSet=\n", "After=network-online.target rayspa.service",
+		"PartOf=rayspa.service\n", "Requisite=rayspa.service\n",
 	} {
 		if !strings.Contains(probe, want) {
 			t.Errorf("rayd relay unit lacks %q:\n%s", want, probe)

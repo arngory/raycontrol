@@ -146,6 +146,8 @@ type unit struct {
 	// needs is the file the process reads: until rayd has rendered it, the
 	// unit is skipped instead of failing (rayd starts it then).
 	needs string
+	// unitLines are more lines of [Unit] (dependencies).
+	unitLines []string
 }
 
 func (u unit) file() File {
@@ -157,6 +159,9 @@ func (u unit) file() File {
 	fmt.Fprintf(&b, "Wants=network-online.target\nAfter=%s\nStartLimitIntervalSec=0\n", strings.Join(after, " "))
 	if u.needs != "" {
 		fmt.Fprintf(&b, "ConditionPathExists=%s\n", u.needs)
+	}
+	for _, l := range u.unitLines {
+		b.WriteString(l + "\n")
 	}
 	b.WriteString("\n[Service]\n")
 	for _, l := range u.service {

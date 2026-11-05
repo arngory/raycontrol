@@ -17,11 +17,13 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"slices"
 	"sync"
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/arngory/raycontrol/internal/api"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
@@ -44,6 +46,9 @@ type Server struct {
 	Exit  perimeterv1connect.RelayServiceClient
 	Probe *probe.Server
 	Log   *slog.Logger
+	// State keeps the devices of the last snapshot for a restart while the
+	// exit is away ("" none); it holds their K_relay, so only rayd's.
+	State string
 
 	mu      sync.Mutex
 	devices map[string][spa.KeySize]byte // K_relay of the devices the relay knows
@@ -184,6 +189,56 @@ func (s *Server) Handler() http.Handler {
 	return httpx.NoRedirect(mux)
 }
 
+// Load takes the devices kept in State by an earlier run: the exit may be
+// away when this one starts.
+func (s *Server) Load() error {
+	if s.State == "" {
+		return nil
+	}
+	b, err := os.ReadFile(s.State)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	snap := &perimeterv1.Snapshot{}
+	if err := proto.Unmarshal(b, snap); err != nil {
+		return fmt.Errorf("%s: %w", s.State, err)
+	}
+	s.take(snap)
+	return nil
+}
+
+// save keeps the devices of snap in State: written aside, then renamed.
+func (s *Server) save(snap *perimeterv1.Snapshot) error {
+	if s.State == "" {
+		return nil
+	}
+	b, err := proto.Marshal(&perimeterv1.Snapshot{Revision: snap.GetRevision(), Devices: snap.GetDevices()})
+	if err != nil {
+		return err
+	}
+	tmp := s.State + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.State)
+}
+
+// forget drops the devices, kept ones included: the exit no longer knows
+// this relay (removed, or a new bundle), so they are no longer its.
+func (s *Server) forget() {
+	s.mu.Lock()
+	s.devices = nil
+	s.mu.Unlock()
+	if s.State != "" {
+		if err := os.Remove(s.State); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.Log.Warn("relay probe: kept devices not removed", "err", err)
+		}
+	}
+}
+
 // take adopts a snapshot of the exit's: the devices allowed this endpoint.
 func (s *Server) take(snap *perimeterv1.Snapshot) {
 	devices := map[string][spa.KeySize]byte{}
@@ -215,13 +270,23 @@ func (s *Server) Watch(ctx context.Context) {
 		if err == nil {
 			for stream.Receive() {
 				backoff = time.Second
-				s.take(stream.Msg().Snapshot)
+				snap := stream.Msg().Snapshot
+				s.take(snap)
 				s.setUp(true)
+				if err := s.save(snap); err != nil {
+					s.Log.Warn("relay probe: devices not kept", "err", err)
+				}
 			}
 			err = stream.Err()
 			_ = stream.Close()
 		}
 		s.setUp(false)
+		// The exit answers, and does not know this relay: not away, but
+		// gone for this bundle. Its devices go; the feed is tried again.
+		switch connect.CodeOf(err) {
+		case connect.CodeNotFound, connect.CodePermissionDenied, connect.CodeUnauthenticated:
+			s.forget()
+		}
 		if ctx.Err() != nil {
 			return
 		}

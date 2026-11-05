@@ -105,3 +105,21 @@ func TestCopyDBFIFO(t *testing.T) {
 		t.Fatal("copyDB hangs on a FIFO")
 	}
 }
+
+// A relay host has rayd too, but no node database: rayctl update is not
+// for it.
+func TestUpdatable(t *testing.T) {
+	dir := t.TempDir()
+	db, bundle := filepath.Join(dir, "rayd.db"), filepath.Join(dir, "relay.bundle")
+	if err := updatable(db, bundle); err == nil || !strings.Contains(err.Error(), "not installed") {
+		t.Errorf("nothing here: %v", err)
+	}
+	os.WriteFile(bundle, nil, 0o600)
+	if err := updatable(db, bundle); err == nil || !strings.Contains(err.Error(), "relay") {
+		t.Errorf("a relay: %v", err)
+	}
+	os.WriteFile(db, nil, 0o600)
+	if err := updatable(db, bundle); err != nil {
+		t.Errorf("a node: %v", err)
+	}
+}

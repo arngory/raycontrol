@@ -16,6 +16,10 @@ const relayBundleCopy = "/run/rayspa/relay.bundle"
 // endpoint (relay-v1 §9.1).
 const RelayProbeUnit = "rayd-relay.service"
 
+// RelayProbeState is where rayd relay keeps the devices of its last
+// snapshot.
+const RelayProbeState = "/var/lib/rayd-relay/devices.pb"
+
 // relayProbeBundleCopy is rayd relay's copy of the bundle, as rayspa's.
 const relayProbeBundleCopy = "/run/rayd-relay/relay.bundle"
 
@@ -41,16 +45,23 @@ func RelayPlan(bin Binaries) Plan {
 		},
 	}
 	// The relay's probe endpoint (relay-v1 §9.1): no privileges, a port
-	// above 1024, its own copy of the bundle.
+	// above 1024, its own copy of the bundle. It runs only beside rayspa:
+	// rayspa stopped (a failed install, the guard, by hand) stops it, and
+	// it does not start without rayspa, so the exit never lists an
+	// endpoint on a relay that forwards nothing.
 	probe := unit{
 		name:        RelayProbeUnit,
 		description: "raycontrol relay probe endpoint (relay-v1 §9.1)",
 		after:       []string{u.name},
+		unitLines:   []string{"PartOf=" + u.name, "Requisite=" + u.name},
 		service: []string{
 			"User=rayd", "Group=rayd",
 			"RuntimeDirectory=rayd-relay", "RuntimeDirectoryMode=0700",
 			"ExecStartPre=+install -m 0400 -o rayd -g rayd " + RelayBundle + " " + relayProbeBundleCopy,
-			"ExecStart=" + bin.Rayd + " relay -bundle " + relayProbeBundleCopy,
+			"ExecStart=" + bin.Rayd + " relay -bundle " + relayProbeBundleCopy + " -state " + RelayProbeState,
+			// The devices of the last snapshot, for a start while the exit
+			// is away (their K_relay: rayd's only).
+			"StateDirectory=rayd-relay", "StateDirectoryMode=0700",
 			"CapabilityBoundingSet=",
 			"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
 		},
