@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/arngory/raycontrol/internal/cloudflare"
 	"github.com/arngory/raycontrol/internal/cloudflare/cftest"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -75,5 +76,49 @@ func TestCloudflareDNS(t *testing.T) {
 	}
 	if cl, _, _ := Cloudflare(ctx, st); cl != nil {
 		t.Fatal("provider kept after remove")
+	}
+}
+
+// NSName is the name the delegation asks for, chosen once whoever asks
+// first, and none when the node asks for no delegation (no DNS tunnel, or
+// a host that is a name: the operator delegates on their own).
+func TestNSName(t *testing.T) {
+	ctx := context.Background()
+	open := func(host string) *store.Store {
+		st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { st.Close() })
+		if _, err := Init(ctx, st, Options{Host: host, Domain: "example.com"}); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	st := open("203.0.113.7")
+	if ns, err := NSName(ctx, st); ns != "" || err != nil {
+		t.Fatalf("without a DNS tunnel: %q %v", ns, err)
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	ns, err := NSName(ctx, st)
+	if err != nil || !strings.HasSuffix(ns, ".example.com") {
+		t.Fatalf("NS name %q %v", ns, err)
+	}
+	records, _, _ := DNSRecords(ctx, st)
+	if !slices.ContainsFunc(records, func(r cloudflare.Record) bool { return r.Type == "NS" && r.Content == ns }) {
+		t.Fatalf("records ask for another name than %s: %+v", ns, records)
+	}
+	if again, _ := NSName(ctx, st); again != ns {
+		t.Fatalf("NS name changed: %s, then %s", ns, again)
+	}
+
+	named := open("node.example.com")
+	if _, err := CreateService(ctx, named, store.Service{Kind: "dnstt", Name: "dns", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if ns, err := NSName(ctx, named); ns != "" || err != nil {
+		t.Fatalf("host a name: %q %v", ns, err)
 	}
 }

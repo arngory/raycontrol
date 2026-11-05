@@ -135,6 +135,36 @@ func DNSRecords(ctx context.Context, st *store.Store) (records []cloudflare.Reco
 	return records, nil, nil
 }
 
+// NSName is the name DNS tunnel zones are delegated to, as DNSRecords
+// asks for it (chosen once, here or there): the front answers SOA and NS at
+// the apex of dnstt zones with it (niko-server v0.9.0). "" when DNSRecords
+// would ask for no delegation: no DNS tunnel, no domain, or a host that is
+// a name. Then the delegation, if any, is the operator's own, and the
+// front must not name another server.
+func NSName(ctx context.Context, st *store.Store) (string, error) {
+	domain, err := Domain(ctx, st)
+	if err != nil || domain == "" {
+		return "", err
+	}
+	host, err := node.Host(ctx, st)
+	if err != nil {
+		return "", err
+	}
+	if _, err := netip.ParseAddr(host); err != nil {
+		return "", nil
+	}
+	all, err := st.ListServices(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !slices.ContainsFunc(all, func(s store.Service) bool {
+		return (s.Kind == "dnstt" || s.Kind == "masterdns") && s.Enabled && Zone(s) != ""
+	}) {
+		return "", nil
+	}
+	return nsName(ctx, st, all)
+}
+
 // nsName is the name DNS tunnel zones are delegated to: a random label of
 // the node's domain, chosen once.
 func nsName(ctx context.Context, st *store.Store, all []store.Service) (string, error) {
