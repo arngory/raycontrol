@@ -122,3 +122,42 @@ func TestNSName(t *testing.T) {
 		t.Fatalf("host a name: %q %v", ns, err)
 	}
 }
+
+// Callers that choose the name at once all get the same one.
+func TestNSNameRace(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	names := make(chan string, 16)
+	for range 8 {
+		go func() {
+			n, _ := NSName(ctx, st)
+			names <- n
+		}()
+		go func() {
+			records, _, _ := DNSRecords(ctx, st)
+			for _, r := range records {
+				if r.Type == "NS" {
+					names <- r.Content
+					return
+				}
+			}
+			names <- ""
+		}()
+	}
+	first := <-names
+	for range 15 {
+		if n := <-names; n != first || n == "" {
+			t.Fatalf("names %q and %q", first, n)
+		}
+	}
+}

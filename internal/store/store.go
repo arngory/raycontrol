@@ -174,6 +174,15 @@ func (s *Store) SetSetting(ctx context.Context, key string, value []byte) error 
 	return err
 }
 
+// InitSetting stores value unless the setting has one, and returns the
+// one stored: of two callers choosing at once, both get the first choice.
+func (s *Store) InitSetting(ctx context.Context, key string, value []byte) ([]byte, error) {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING`, key, value); err != nil {
+		return nil, err
+	}
+	return s.GetSetting(ctx, key)
+}
+
 // Snapshot returns a consistent copy of the database (VACUUM INTO a file
 // next to it, read back and removed): the input of a backup.
 func (s *Store) Snapshot(ctx context.Context) ([]byte, error) {

@@ -437,6 +437,15 @@ fi
 wait_active rayd.service rayspa.service "${dataplane[@]}"
 client -addr "$ip" "$laptop" >/dev/null || fail "probe after the automatic rollback"
 x rm -rf /root/broken
+# A release whose niko-server does not start: rayd and rayspa come back,
+# the data plane does not; the update rolls back by itself all the same.
+x sh -c 'mkdir -p /root/broken && cp /opt/rc/* /root/broken/ && printf "#!/bin/sh\nexit 1\n" > /root/broken/niko-server && chmod 755 /root/broken/niko-server'
+if x /usr/local/bin/rayctl update -local /root/broken -yes; then
+	fail "an update with a broken niko-server succeeded"
+fi
+wait_active rayd.service rayspa.service "${dataplane[@]}"
+client -addr "$ip" "$laptop" >/dev/null || fail "probe after the automatic rollback (niko-server)"
+x rm -rf /root/broken
 
 log "$distro: backup, restore and metrics"
 x sh -c 'umask 077 && echo "a test passphrase" > /root/pass'

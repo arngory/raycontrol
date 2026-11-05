@@ -177,7 +177,11 @@ func nsName(ctx context.Context, st *store.Store, all []store.Service) (string, 
 	if err != nil {
 		return "", err
 	}
-	return name, st.SetSetting(ctx, settingNSName, []byte(name))
+	// Render, the DNS sync and the API may ask at once the first time:
+	// all of them take the name stored first, so the front and the
+	// delegation never name two servers.
+	stored, err := st.InitSetting(ctx, settingNSName, []byte(name))
+	return string(stored), err
 }
 
 // SyncDNS brings the zone in line with DNSRecords. Without a DNS provider
