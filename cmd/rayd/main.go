@@ -249,7 +249,11 @@ func cmdServe(args []string) error {
 	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, hb, log)
 	go syncDNS(ctx, st, srv.Changes, hb, log)
 	go checkRealityTargets(ctx, st, srv.Changes, hb, log)
-	go checkPort53(ctx, st, &deploy.Host{}, hb, log)
+	frontUID := render.FrontUID
+	if *supervise {
+		frontUID = os.Getuid() // the front is a child of rayd's
+	}
+	go checkPort53(ctx, st, &deploy.Host{}, frontUID, hb, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
 	// Client summaries (R4-21): reports in, from devices and through relays
 	// (relay-v1 §9.3), hints out; only while the administrator has them on
@@ -695,7 +699,7 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 // front shares the port with SO_REUSEADDR, so a DNS server that binds it
 // the same way takes the queries to its address without a sound (rayctl
 // status shows it).
-func checkPort53(ctx context.Context, st *store.Store, h *deploy.Host, hb *health.Board, log *slog.Logger) {
+func checkPort53(ctx context.Context, st *store.Store, h *deploy.Host, frontUID int, hb *health.Board, log *slog.Logger) {
 	for {
 		services, err := st.ListServices(ctx)
 		tunnels := err == nil && slices.ContainsFunc(services, func(s store.Service) bool {
@@ -703,7 +707,7 @@ func checkPort53(ctx context.Context, st *store.Store, h *deploy.Host, hb *healt
 		})
 		if tunnels {
 			var others []string
-			for _, o := range h.OthersOn53(render.FrontUID) {
+			for _, o := range h.OthersOn53(frontUID) {
 				others = append(others, o.Addr+" ("+o.Owner+")")
 			}
 			if len(others) > 0 {
@@ -711,6 +715,8 @@ func checkPort53(ctx context.Context, st *store.Store, h *deploy.Host, hb *healt
 				log.Warn("port 53", "err", err)
 			}
 			hb.Done("port53", err)
+		} else {
+			hb.Retain("port53", nil) // no tunnels, nothing to say
 		}
 		select {
 		case <-ctx.Done():

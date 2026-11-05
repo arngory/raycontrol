@@ -440,18 +440,28 @@ func (h *Host) removeStale(plan Plan) error {
 	return nil
 }
 
+// stubPending marks a stub being given back: the drop-in is out of
+// resolved's sight (it reads *.conf only), the stub not yet seen back.
+const stubPending = ResolvedDropIn + ".gone"
+
+// SharesDNSFrom is the first niko-server whose front shares UDP 53 with
+// systemd-resolved's stub (SO_REUSEADDR).
+var SharesDNSFrom = [3]int{0, 8, 2}
+
 // giveBackStub undoes what installs before v0.11 did for the DNS tunnels:
 // they turned systemd-resolved's stub off and pointed /etc/resolv.conf at
 // the uplink servers, which left a host whose resolved has only its
 // fallback servers without a resolver. The front shares UDP 53 with the
-// stub now (niko-server v0.8.2).
+// stub from niko-server v0.8.2; with an older one installed, nothing
+// changes yet.
 //
-// The front restarts first: an older one holds 53 without SO_REUSEADDR, and
-// the stub, which resolved does not retry, could not bind beside it. Then
-// resolved, and resolv.conf goes back to what the journal says it was only
-// once the stub is seen on 127.0.0.53; until then it stays on the uplink
-// list, and the next apply tries again. A drop-in that is not ours, and a
-// resolv.conf the journal does not say raycontrol changed, stay.
+// The front restarts first: an older one holds 53 without SO_REUSEADDR,
+// and the stub, which resolved does not retry, could not bind beside it.
+// Then resolved, and resolv.conf goes back to what the journal says it was
+// only once the stub is seen on 127.0.0.53; until then it stays on the
+// uplink list, and the next apply tries again (resolved only). A stub up
+// already is not restarted. A drop-in that is not ours, and a resolv.conf
+// the journal does not say raycontrol changed, stay.
 func (h *Host) giveBackStub() error {
 	dropIn := false
 	if b, err := os.ReadFile(h.path(ResolvedDropIn)); err == nil {
@@ -459,37 +469,53 @@ func (h *Host) giveBackStub() error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	_, err := os.Stat(h.path(stubPending))
+	pending := err == nil
 	rc := h.path("/etc/resolv.conf")
 	target, _ := os.Readlink(rc)
 	orig, journaled := h.Journal.Original(ChangeSymlink, "/etc/resolv.conf", "")
 	pointed := target == resolvConf && journaled && orig.Target != "" && orig.Target != resolvConf
-	if !dropIn && !pointed {
+	if !dropIn && !pending && !pointed {
+		return nil
+	}
+	if !h.frontSharesDNS() {
+		fmt.Fprintf(h.Out, "warning: the installed niko-server is older than v%d.%d.%d: systemd-resolved's stub stays off until it is updated\n",
+			SharesDNSFrom[0], SharesDNSFrom[1], SharesDNSFrom[2])
 		return nil
 	}
 	if dropIn {
-		if err := os.Remove(h.path(ResolvedDropIn)); err != nil {
+		if err := os.Rename(h.path(ResolvedDropIn), h.path(stubPending)); err != nil {
 			return err
 		}
 		fmt.Fprintln(h.Out, "removed", ResolvedDropIn+": the DNS tunnels share UDP 53 with systemd-resolved's stub")
 	}
-	if out, _ := h.Run("systemctl", "show", "-P", "LoadState", "systemd-resolved.service"); strings.TrimSpace(string(out)) == "not-found" {
-		return nil
-	}
-	for _, unit := range []string{"niko-front.service", "systemd-resolved.service"} {
-		if err := h.run("systemctl", "try-restart", unit); err != nil {
-			var ee *exec.ExitError
-			if !errors.As(err, &ee) {
-				return err
-			}
-			fmt.Fprintln(h.Out, "warning:", err)
-		}
-	}
-	if !pointed {
-		return nil
+	if h.loadState("systemd-resolved.service") == "not-found" {
+		return os.Remove(h.path(stubPending))
 	}
 	if !h.stubOn53() {
-		fmt.Fprintf(h.Out, "warning: systemd-resolved's stub is not on 127.0.0.53: /etc/resolv.conf stays on %s, "+
-			"and the next rayctl apply tries again (journalctl -u systemd-resolved says why)\n", resolvConf)
+		units := []string{"systemd-resolved.service"}
+		if dropIn && h.loadState("niko-front.service") == "loaded" {
+			units = append([]string{"niko-front.service"}, units...)
+		}
+		for _, unit := range units {
+			if err := h.run("systemctl", "try-restart", unit); err != nil {
+				var ee *exec.ExitError
+				if !errors.As(err, &ee) {
+					return err
+				}
+				fmt.Fprintln(h.Out, "warning:", err)
+			}
+		}
+	}
+	if !h.stubOn53() {
+		fmt.Fprintf(h.Out, "warning: systemd-resolved's stub is not on 127.0.0.53: /etc/resolv.conf stays where it is, "+
+			"and the next rayctl apply tries again (journalctl -u systemd-resolved says why)\n")
+		return nil
+	}
+	if err := os.Remove(h.path(stubPending)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if !pointed {
 		return nil
 	}
 	tmp := rc + ".raycontrol-new"
@@ -502,4 +528,29 @@ func (h *Host) giveBackStub() error {
 	}
 	fmt.Fprintln(h.Out, "/etc/resolv.conf points to", orig.Target, "again")
 	return nil
+}
+
+// loadState is a unit's LoadState: "loaded", "not-found", or "" when
+// systemctl does not say.
+func (h *Host) loadState(unit string) string {
+	out, _ := h.Run("systemctl", "show", "-P", "LoadState", unit)
+	return strings.TrimSpace(string(out))
+}
+
+// frontSharesDNS reports whether the installed niko-server shares UDP 53
+// with systemd-resolved's stub (SharesDNSFrom or newer).
+func (h *Host) frontSharesDNS() bool {
+	out, err := h.Run(DefaultBinaries.NikoServer, "version")
+	if err != nil {
+		return false
+	}
+	var v [3]int
+	f := strings.Fields(string(out))
+	if len(f) < 2 {
+		return false
+	}
+	if _, err := fmt.Sscanf(strings.TrimPrefix(f[1], "v"), "%d.%d.%d", &v[0], &v[1], &v[2]); err != nil {
+		return false
+	}
+	return slices.Compare(v[:], SharesDNSFrom[:]) >= 0
 }

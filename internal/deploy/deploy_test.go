@@ -798,7 +798,8 @@ func TestPort53(t *testing.T) {
 		out  *bytes.Buffer
 	}
 	// newHost: udp is /proc/net/udp now; stubComes, whether the stub binds
-	// when resolved restarts.
+	// when resolved restarts; niko is the installed niko-server's version.
+	niko := "v0.8.2"
 	newHost := func(t *testing.T, udp, dropIn string, oldResolv, stubComes bool) host {
 		t.Helper()
 		root := t.TempDir()
@@ -828,8 +829,13 @@ func TestPort53(t *testing.T) {
 			Run: func(name string, args ...string) ([]byte, error) {
 				c := name + " " + strings.Join(args, " ")
 				cmds = append(cmds, c)
-				if c == restartResolved && stubComes {
+				switch {
+				case c == restartResolved && stubComes:
 					os.WriteFile(procUDP, []byte(header+stub+udp), 0o644)
+				case c == deploy.DefaultBinaries.NikoServer+" version":
+					return []byte("niko-server " + niko + "\n"), nil
+				case strings.HasPrefix(c, "systemctl show -P LoadState "):
+					return []byte("loaded\n"), nil
 				}
 				return nil, nil
 			},
@@ -855,6 +861,7 @@ func TestPort53(t *testing.T) {
 	if !p.FrontDNS || !slices.Contains(p.Units, "niko-front.service") {
 		t.Fatalf("the test plan has no front or no DNS tunnels: %v", p.Units)
 	}
+
 	// A fresh host: the stub stays, untouched and unmentioned.
 	h := newHost(t, stub, "", false, true)
 	apply(t, h, p)
@@ -878,20 +885,47 @@ func TestPort53(t *testing.T) {
 		t.Errorf("resolv.conf -> %s", got)
 	}
 	// The stub does not come up: resolv.conf stays on the uplink list, said;
-	// the next apply, the stub up, finishes.
+	// the next apply tries resolved again (not the front), and once the
+	// stub is up, finishes without restarting anything.
 	h = newHost(t, "", ours, true, false)
 	apply(t, h, p)
 	if got := resolv(h); got != "/run/systemd/resolve/resolv.conf" || !strings.Contains(h.out.String(), "stub is not on 127.0.0.53") {
 		t.Errorf("resolv.conf -> %s without the stub:\n%s", got, h.out)
 	}
+	apply(t, h, p)
+	if !slices.Contains(*h.cmds, restartResolved) || slices.Contains(*h.cmds, restartFront) {
+		t.Errorf("the next apply: resolved again, the front not:\n%s", strings.Join(*h.cmds, "\n"))
+	}
 	os.WriteFile(filepath.Join(h.root, "/proc/net/udp"), []byte(header+stub), 0o644)
 	apply(t, h, p)
-	if got := resolv(h); got != "../run/systemd/resolve/stub-resolv.conf" {
-		t.Errorf("resolv.conf -> %s at the next apply", got)
+	if got := resolv(h); got != "../run/systemd/resolve/stub-resolv.conf" || slices.Contains(*h.cmds, restartResolved) {
+		t.Errorf("resolv.conf -> %s with the stub up, restarts:\n%s", got, strings.Join(*h.cmds, "\n"))
 	}
 	apply(t, h, p)
 	if slices.Contains(*h.cmds, restartResolved) {
 		t.Error("resolved restarted again once all is back")
+	}
+	// An older niko-server, which cannot share 53: nothing changes yet.
+	niko = "v0.8.1"
+	h = newHost(t, "", ours, true, true)
+	apply(t, h, p)
+	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn)); err != nil || slices.Contains(*h.cmds, restartResolved) ||
+		resolv(h) != "/run/systemd/resolve/resolv.conf" || !strings.Contains(h.out.String(), "older than v0.8.2") {
+		t.Errorf("the stub given back beside an older front: %v\n%s", err, h.out)
+	}
+	niko = "v0.8.2"
+	// A run that stopped halfway (drop-in moved aside), then uninstall: it
+	// goes too.
+	h = newHost(t, "", ours, true, false)
+	apply(t, h, p)
+	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn+".gone")); err != nil {
+		t.Fatalf("no mark of the stub being given back: %v", err)
+	}
+	if err := h.h.Uninstall(h.h.Journal, deploy.UninstallOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn+".gone")); !os.IsNotExist(err) {
+		t.Errorf("uninstall left the moved drop-in: %v", err)
 	}
 	// A drop-in of the administrator's at that path stays; a resolv.conf on
 	// the uplink list the journal does not know of stays too.

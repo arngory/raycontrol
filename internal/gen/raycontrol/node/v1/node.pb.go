@@ -1474,7 +1474,9 @@ type GetDeploymentResponse struct {
 	// The same ports as they arrive from outside, before the node's own
 	// redirects (the ACME window is TCP 80 there): what a provider's firewall
 	// in front of the host must let in.
-	OutsidePorts  []*PortRange `protobuf:"bytes,6,rep,name=outside_ports,json=outsidePorts,proto3" json:"outside_ports,omitempty"`
+	OutsidePorts []*PortRange `protobuf:"bytes,6,rep,name=outside_ports,json=outsidePorts,proto3" json:"outside_ports,omitempty"`
+	// The front answers DNS tunnels on UDP 53 (beside systemd-resolved's stub).
+	FrontDns      bool `protobuf:"varint,7,opt,name=front_dns,json=frontDns,proto3" json:"front_dns,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1549,6 +1551,13 @@ func (x *GetDeploymentResponse) GetOutsidePorts() []*PortRange {
 		return x.OutsidePorts
 	}
 	return nil
+}
+
+func (x *GetDeploymentResponse) GetFrontDns() bool {
+	if x != nil {
+		return x.FrontDns
+	}
+	return false
 }
 
 type PortRange struct {
@@ -4781,7 +4790,7 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\bssh_port\x18\x02 \x01(\rR\asshPort\x12\x14\n" +
 	"\x05admin\x18\x03 \x03(\tR\x05admin\"\x18\n" +
 	"\x16SetRelayAccessResponse\"\x16\n" +
-	"\x14GetDeploymentRequest\"\xb7\x02\n" +
+	"\x14GetDeploymentRequest\"\xd4\x02\n" +
 	"\x15GetDeploymentResponse\x124\n" +
 	"\x05users\x18\x01 \x03(\v2\x1e.raycontrol.node.v1.SystemUserR\x05users\x124\n" +
 	"\x05files\x18\x02 \x03(\v2\x1e.raycontrol.node.v1.DeployFileR\x05files\x12\x14\n" +
@@ -4789,7 +4798,8 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\bwarnings\x18\x04 \x03(\tR\bwarnings\x12<\n" +
 	"\n" +
 	"host_ports\x18\x05 \x03(\v2\x1d.raycontrol.node.v1.PortRangeR\thostPorts\x12B\n" +
-	"\routside_ports\x18\x06 \x03(\v2\x1d.raycontrol.node.v1.PortRangeR\foutsidePorts\"E\n" +
+	"\routside_ports\x18\x06 \x03(\v2\x1d.raycontrol.node.v1.PortRangeR\foutsidePorts\x12\x1b\n" +
+	"\tfront_dns\x18\a \x01(\bR\bfrontDns\"E\n" +
 	"\tPortRange\x12\x14\n" +
 	"\x05proto\x18\x01 \x01(\tR\x05proto\x12\x12\n" +
 	"\x04from\x18\x02 \x01(\rR\x04from\x12\x0e\n" +

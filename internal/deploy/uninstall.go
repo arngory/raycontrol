@@ -125,6 +125,11 @@ func (h *Host) Uninstall(j *Journal, opts UninstallOptions) error {
 	}
 
 	_, _ = h.Run("systemctl", "daemon-reload")
+	// A stub given back only halfway (giveBackStub): the drop-in, moved
+	// aside, goes too.
+	if err := os.Remove(h.path(stubPending)); err == nil {
+		resolved = true
+	}
 	if resolved {
 		_, _ = h.Run("systemctl", "try-restart", "systemd-resolved.service")
 	}

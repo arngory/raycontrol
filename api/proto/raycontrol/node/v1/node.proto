@@ -203,6 +203,8 @@ message GetDeploymentResponse {
   // redirects (the ACME window is TCP 80 there): what a provider's firewall
   // in front of the host must let in.
   repeated PortRange outside_ports = 6;
+  // The front answers DNS tunnels on UDP 53 (beside systemd-resolved's stub).
+  bool front_dns = 7;
 }
 
 message PortRange {
