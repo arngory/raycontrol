@@ -331,7 +331,7 @@ func dnsProbe(server string, key []byte, zone string) ([]byte, error) {
 			plain[i+j] ^= block[j]
 		}
 	}
-	if len(plain) != 35 || !bytes.Equal(plain[:16], mac(key, []byte("dnsprobe-v1 a"), b[:])[:16]) {
+	if len(plain) != 35 || !bytes.Equal(plain[:16], mac(key, []byte("dnsprobe-v1 a"), b[:], plain[16:35])[:16]) {
 		return plain, fmt.Errorf("token or length: %x", plain)
 	}
 	return plain, nil
