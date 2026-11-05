@@ -855,6 +855,7 @@ type Relay struct {
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Address       string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
 	CreatedAt     int64                  `protobuf:"varint,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	ProbePort     uint32                 `protobuf:"varint,4,opt,name=probe_port,json=probePort,proto3" json:"probe_port,omitempty"` // its probe endpoint, TCP and UDP (relay-v1 §9.1); 0: none
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -906,6 +907,13 @@ func (x *Relay) GetAddress() string {
 func (x *Relay) GetCreatedAt() int64 {
 	if x != nil {
 		return x.CreatedAt
+	}
+	return 0
+}
+
+func (x *Relay) GetProbePort() uint32 {
+	if x != nil {
+		return x.ProbePort
 	}
 	return 0
 }
@@ -1253,6 +1261,7 @@ type IssueRelayBundleResponse struct {
 	SshPort       uint32                 `protobuf:"varint,2,opt,name=ssh_port,json=sshPort,proto3" json:"ssh_port,omitempty"`       // the relay host's SSH port now
 	Admin         []string               `protobuf:"bytes,3,rep,name=admin,proto3" json:"admin,omitempty"`                           // and its admin addresses
 	AdminKept     bool                   `protobuf:"varint,4,opt,name=admin_kept,json=adminKept,proto3" json:"admin_kept,omitempty"` // the relay's list from before, none asked for
+	ProbePort     uint32                 `protobuf:"varint,5,opt,name=probe_port,json=probePort,proto3" json:"probe_port,omitempty"` // its probe endpoint, TCP and UDP (relay-v1 §9.1)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1313,6 +1322,13 @@ func (x *IssueRelayBundleResponse) GetAdminKept() bool {
 		return x.AdminKept
 	}
 	return false
+}
+
+func (x *IssueRelayBundleResponse) GetProbePort() uint32 {
+	if x != nil {
+		return x.ProbePort
+	}
+	return 0
 }
 
 type SetRelayAccessRequest struct {
@@ -4727,12 +4743,14 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x05cidrs\x18\x01 \x03(\tR\x05cidrs\"-\n" +
 	"\x15SetAdminAccessRequest\x12\x14\n" +
 	"\x05cidrs\x18\x01 \x03(\tR\x05cidrs\"\x18\n" +
-	"\x16SetAdminAccessResponse\"T\n" +
+	"\x16SetAdminAccessResponse\"s\n" +
 	"\x05Relay\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
 	"\aaddress\x18\x02 \x01(\tR\aaddress\x12\x1d\n" +
 	"\n" +
-	"created_at\x18\x03 \x01(\x03R\tcreatedAt\"?\n" +
+	"created_at\x18\x03 \x01(\x03R\tcreatedAt\x12\x1d\n" +
+	"\n" +
+	"probe_port\x18\x04 \x01(\rR\tprobePort\"?\n" +
 	"\x0fAddRelayRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
 	"\aaddress\x18\x02 \x01(\tR\aaddress\"C\n" +
@@ -4749,13 +4767,15 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\fexit_address\x18\x02 \x01(\tR\vexitAddress\x12\x19\n" +
 	"\bssh_port\x18\x03 \x01(\rR\asshPort\x12\x14\n" +
 	"\x05admin\x18\x04 \x03(\tR\x05admin\x12\"\n" +
-	"\radmin_if_none\x18\x05 \x03(\tR\vadminIfNone\"\x82\x01\n" +
+	"\radmin_if_none\x18\x05 \x03(\tR\vadminIfNone\"\xa1\x01\n" +
 	"\x18IssueRelayBundleResponse\x12\x16\n" +
 	"\x06bundle\x18\x01 \x01(\tR\x06bundle\x12\x19\n" +
 	"\bssh_port\x18\x02 \x01(\rR\asshPort\x12\x14\n" +
 	"\x05admin\x18\x03 \x03(\tR\x05admin\x12\x1d\n" +
 	"\n" +
-	"admin_kept\x18\x04 \x01(\bR\tadminKept\"\\\n" +
+	"admin_kept\x18\x04 \x01(\bR\tadminKept\x12\x1d\n" +
+	"\n" +
+	"probe_port\x18\x05 \x01(\rR\tprobePort\"\\\n" +
 	"\x15SetRelayAccessRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
 	"\bssh_port\x18\x02 \x01(\rR\asshPort\x12\x14\n" +

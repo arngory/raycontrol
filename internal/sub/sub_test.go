@@ -563,4 +563,35 @@ func TestRelaysInSubscription(t *testing.T) {
 			t.Errorf("%s (%s): via %v", pr.Name, kinds[pr.Svc], pr.Via)
 		}
 	}
+
+	// The probe endpoint (relay-v1 §9.2): with a bundle that has one, and
+	// only while the relay's rayd relay is there.
+	if p.Relays[0].Probe != nil {
+		t.Fatalf("a probe endpoint from a bundle without one: %+v", p.Relays[0].Probe)
+	}
+	b, _ := json.Marshal(node.FromParams(params))
+	if err := f.st.IssueRelay(ctx, "r1", store.RelayIssue{SPA: b, SSHPort: 22, Admin: []string{"192.0.2.7/32"}, CertPin: "pin2",
+		ProbePort: 31000, ProbePin: "probe-pin"}); err != nil {
+		t.Fatal(err)
+	}
+	up := false
+	srv.RelayProbe = func(name string) bool { return up && name == "r1" }
+	if p := build(); p.Relays[0].Probe != nil {
+		t.Fatalf("a probe endpoint while rayd relay is away: %+v", p.Relays[0].Probe)
+	}
+	up = true
+	want := sub.RelayProbeHint{V: 1, Port: 31000, Pin: "probe-pin", Svc: provision.RelayProbeSvc, UDP: true}
+	if p := build(); p.Relays[0].Probe == nil || *p.Relays[0].Probe != want {
+		t.Fatalf("probe endpoint %+v, want %+v", p.Relays[0].Probe, want)
+	}
+	// It takes reports when the node does.
+	srv.Probe = &probe.Server{}
+	if p := build(); p.Relays[0].Probe == nil || *p.Relays[0].Probe != want {
+		t.Fatalf("probe endpoint of a node without reports %+v", p.Relays[0].Probe)
+	}
+	srv.Probe = &probe.Server{Report: func(context.Context, string, netip.Addr, io.Reader) error { return nil }}
+	want.Report = true
+	if p := build(); p.Relays[0].Probe == nil || *p.Relays[0].Probe != want {
+		t.Fatalf("probe endpoint with reports %+v", p.Relays[0].Probe)
+	}
 }

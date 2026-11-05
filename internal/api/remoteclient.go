@@ -62,6 +62,10 @@ func EncodeClientCertificate(c tls.Certificate) ([]byte, error) {
 	return append(out, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key})...), nil
 }
 
+func encodePEM(typ string, der []byte) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der})
+}
+
 // DecodeClientCertificate reads what EncodeClientCertificate wrote.
 func DecodeClientCertificate(b []byte) (tls.Certificate, error) {
 	c, err := tls.X509KeyPair(b, b)

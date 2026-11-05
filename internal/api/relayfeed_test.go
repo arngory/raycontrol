@@ -133,6 +133,25 @@ func TestRelayFeed(t *testing.T) {
 	if b.Name != "r1" || b.Exit != netip.MustParseAddr("203.0.113.7") || b.API.Port == 0 {
 		t.Fatalf("bundle %+v", b)
 	}
+	// Its probe endpoint (relay-v1 §9.1): the exit keeps the pin of the
+	// certificate it gave, on a port clear of the relay's others.
+	if b.Probe == nil {
+		t.Fatal("a bundle without a probe endpoint")
+	}
+	probeCert, err := DecodeClientCertificate([]byte(b.Probe.Cert))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r1, _ := srv.Store.RelayByName(ctx, "r1")
+	rp, _ := provision.RelayParams(ctx, srv.Store, "r1")
+	if r1.ProbePin != CertPin(probeCert.Leaf) || r1.ProbePort != b.Probe.Port || b.Probe.Port == 2200 || b.Probe.Port == b.API.Port ||
+		int(b.Probe.Port) >= int(rp.PortBase) && int(b.Probe.Port) < int(rp.PortBase)+int(rp.PortRange) {
+		t.Fatalf("probe endpoint %d (pin %s), relay %+v, SPA range %d+%d", b.Probe.Port, CertPin(probeCert.Leaf), r1, rp.PortBase, rp.PortRange)
+	}
+	// SSH cannot move onto it.
+	if _, err := c.SetRelayAccess(ctx, connect.NewRequest(&nodev1.SetRelayAccessRequest{Name: "r1", SshPort: uint32(b.Probe.Port)})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("SSH onto the probe endpoint: %v", err)
+	}
 	addr, pin := serveRemoteFrom(t, srv, "198.51.100.20:40000")
 	if pin != b.API.Pin {
 		t.Fatalf("bundle pin %s, the API's %s", b.API.Pin, pin)
@@ -476,4 +495,83 @@ func TestRelayReport(t *testing.T) {
 	if _, err := without.Report(ctx, connect.NewRequest(&perimeterv1.ReportRequest{Device: dev.ID, Network: "203.0.113.0/24", Body: []byte("{}")})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Errorf("without the summary: %v", err)
 	}
+}
+
+// The subscription lists a relay's probe endpoint while its rayd relay is
+// there (relay-v1 §9.2): while its feed is open, and a while after for a
+// reconnect; rayspa's feed does not count.
+func TestRelayProbeUp(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	c := NewUnixClient(sock)
+	c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "api", Name: "api"}))
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r1", Address: "198.51.100.20"})); err != nil {
+		t.Fatal(err)
+	}
+	enc, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.2.7"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := node.DecodeRelayBundle(enc.Bundle)
+	var (
+		mu  sync.Mutex
+		now = time.Now()
+		r   *Remote
+	)
+	addr, _ := serveRemoteFrom(t, srv, "198.51.100.20:40000", func(rr *Remote) {
+		r = rr
+		rr.now = func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return now
+		}
+	})
+	cert, _ := DecodeClientCertificate([]byte(b.Cert))
+	feed := perimeterv1connect.NewRelayServiceClient(remoteHTTP(b.API.Pin, cert), "https://"+addr)
+	open := func(probe bool) *connect.ServerStreamForClient[perimeterv1.WatchRelayResponse] {
+		t.Helper()
+		s, err := feed.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{Probe: probe}))
+		if err != nil || !s.Receive() {
+			t.Fatalf("feed: %v %v", err, s.Err())
+		}
+		return s
+	}
+	waitFor := func(want bool) {
+		t.Helper()
+		for range 100 {
+			if r.RelayProbeUp("r1") == want {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("probe up: want %v", want)
+	}
+	rayspa := open(false)
+	if r.RelayProbeUp("r1") {
+		t.Fatal("rayspa's feed taken for rayd relay's")
+	}
+	rayd := open(true)
+	if !r.RelayProbeUp("r1") || r.RelayProbeUp("r2") {
+		t.Fatal("rayd relay's feed not seen, or seen for another relay")
+	}
+	rayd.Close()
+	for range 100 {
+		r.relayMu.Lock()
+		n := r.relayProbes["r1"]
+		r.relayMu.Unlock()
+		if n == 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Gone a moment ago: still listed, for a reconnect.
+	if !r.RelayProbeUp("r1") {
+		t.Fatal("rayd relay dropped at once, with no time to reconnect")
+	}
+	mu.Lock()
+	now = now.Add(relayProbeGrace + time.Second)
+	mu.Unlock()
+	waitFor(false)
+	rayspa.Close()
 }

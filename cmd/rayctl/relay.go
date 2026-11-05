@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -38,9 +39,13 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 				fmt.Fprintln(w, "no relays")
 				return
 			}
-			fmt.Fprintln(w, "NAME\tADDRESS\tADDED")
+			fmt.Fprintln(w, "NAME\tADDRESS\tPROBE\tADDED")
 			for _, r := range r.Msg.Relays {
-				fmt.Fprintf(w, "%s\t%s\t%s\n", r.Name, r.Address, time.Unix(r.CreatedAt, 0).UTC().Format(time.DateOnly))
+				probe := "-"
+				if r.ProbePort != 0 {
+					probe = strconv.FormatUint(uint64(r.ProbePort), 10)
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.Name, r.Address, probe, time.Unix(r.CreatedAt, 0).UTC().Format(time.DateOnly))
 			}
 		})
 	case "bundle":
@@ -70,6 +75,10 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 			from = "this SSH session's address (" + session + "), the default for a relay with none"
 		}
 		fmt.Fprintf(os.Stderr, "relay %s: its host's SSH (tcp/%d) from %s: %s\n", fs.Arg(0), r.Msg.SshPort, strings.Join(r.Msg.Admin, ", "), from)
+		if r.Msg.ProbePort != 0 {
+			fmt.Fprintf(os.Stderr, "relay %s: its probe endpoint on tcp/%d and udp/%d (rayd relay): a provider's firewall in front of\n"+
+				"the relay host lets both through, as it does the forwarded ports\n", fs.Arg(0), r.Msg.ProbePort, r.Msg.ProbePort)
+		}
 		if *out == "" {
 			fmt.Println(r.Msg.Bundle)
 		} else if err := writeNew(*out, []byte(r.Msg.Bundle+"\n")); err != nil {

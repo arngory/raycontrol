@@ -26,7 +26,11 @@ service RelayService {
   rpc Report(ReportRequest) returns (ReportResponse);
 }
 
-message WatchRelayRequest {}
+message WatchRelayRequest {
+  // The feed of rayd relay, the relay's probe endpoint (relay-v1 §9.1), not
+  // of its rayspa: while one is open the subscription lists the endpoint.
+  bool probe = 1;
+}
 
 message ReportRequest {
   string device = 1;

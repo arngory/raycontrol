@@ -135,10 +135,21 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 		return connect.NewError(connect.CodeResourceExhausted, errors.New("too many feeds for this relay"))
 	}
 	f.r.relayStreams[relay.Name]++
+	probe := req.Msg.Probe
+	if probe {
+		if f.r.relayProbes == nil {
+			f.r.relayProbes, f.r.relayProbeAt = map[string]int{}, map[string]time.Time{}
+		}
+		f.r.relayProbes[relay.Name]++
+	}
 	f.r.relayMu.Unlock()
 	defer func() {
 		f.r.relayMu.Lock()
 		f.r.relayStreams[relay.Name]--
+		if probe {
+			f.r.relayProbes[relay.Name]--
+			f.r.relayProbeAt[relay.Name] = f.r.clock()
+		}
 		f.r.relayMu.Unlock()
 	}()
 	refresh := p.Refresh

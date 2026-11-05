@@ -25,7 +25,10 @@ const (
 )
 
 type WatchRelayRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The feed of rayd relay, the relay's probe endpoint (relay-v1 §9.1), not
+	// of its rayspa: while one is open the subscription lists the endpoint.
+	Probe         bool `protobuf:"varint,1,opt,name=probe,proto3" json:"probe,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -58,6 +61,13 @@ func (x *WatchRelayRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use WatchRelayRequest.ProtoReflect.Descriptor instead.
 func (*WatchRelayRequest) Descriptor() ([]byte, []int) {
 	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *WatchRelayRequest) GetProbe() bool {
+	if x != nil {
+		return x.Probe
+	}
+	return false
 }
 
 type ReportRequest struct {
@@ -837,8 +847,9 @@ var File_raycontrol_perimeter_v1_perimeter_proto protoreflect.FileDescriptor
 
 const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"\n" +
-	"'raycontrol/perimeter/v1/perimeter.proto\x12\x17raycontrol.perimeter.v1\"\x13\n" +
-	"\x11WatchRelayRequest\"U\n" +
+	"'raycontrol/perimeter/v1/perimeter.proto\x12\x17raycontrol.perimeter.v1\")\n" +
+	"\x11WatchRelayRequest\x12\x14\n" +
+	"\x05probe\x18\x01 \x01(\bR\x05probe\"U\n" +
 	"\rReportRequest\x12\x16\n" +
 	"\x06device\x18\x01 \x01(\tR\x06device\x12\x18\n" +
 	"\anetwork\x18\x02 \x01(\tR\anetwork\x12\x12\n" +

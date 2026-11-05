@@ -46,6 +46,9 @@ type Server struct {
 	// TCPCarrier: the node takes SPA over TCP, bare and as a ClientHello
 	// (rayd -spa-tcp); the subscription lists the carriers.
 	TCPCarrier bool
+	// RelayProbe, when set, says whether a relay's rayd relay is there:
+	// the subscription lists its probe endpoint only then (relay-v1 §9.2).
+	RelayProbe func(name string) bool
 	now        func() time.Time
 
 	mu sync.Mutex // serialises seq
@@ -232,7 +235,14 @@ func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) erro
 		if err != nil {
 			return err
 		}
-		p.Relays = append(p.Relays, RelayHint{ID: r.Name, Host: r.Address.String(), SPA: node.FromParams(params)})
+		h := RelayHint{ID: r.Name, Host: r.Address.String(), SPA: node.FromParams(params)}
+		if r.ProbePort != 0 && r.ProbePin != "" && s.RelayProbe != nil && s.RelayProbe(r.Name) {
+			// The relay passes reports on to this node: it takes them when
+			// this node does.
+			h.Probe = &RelayProbeHint{V: 1, Port: r.ProbePort, Pin: r.ProbePin, Svc: provision.RelayProbeSvc, UDP: true,
+				Report: s.Probe != nil && s.Probe.Report != nil}
+		}
+		p.Relays = append(p.Relays, h)
 		ids = append(ids, r.Name)
 	}
 	if len(ids) == 0 {

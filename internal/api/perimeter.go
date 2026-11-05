@@ -237,6 +237,13 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 	if err != nil {
 		return nil, err
 	}
+	// The relay's probe endpoint (relay-v1 §9.1): served there, open to
+	// every device the relay knows.
+	probe := relay.ProbePort != 0 && !scoped[provision.RelayProbeSvc]
+	if probe {
+		snap.Services = append(snap.Services, &perimeterv1.Service{Id: uint32(provision.RelayProbeSvc), Local: true,
+			Ports: []*perimeterv1.Port{{Proto: "tcp", Port: uint32(relay.ProbePort)}, {Proto: "udp", Port: uint32(relay.ProbePort)}}})
+	}
 	devices, err := p.Store.SPADevices(ctx)
 	if err != nil {
 		return nil, err
@@ -250,6 +257,9 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 		}
 		if len(allowed) == 0 {
 			continue
+		}
+		if probe {
+			allowed = append(allowed, uint32(provision.RelayProbeSvc))
 		}
 		k := spa.RelayKey(d.Key, p.Params.NodeID, params.NodeID, relay.Name)
 		snap.Devices = append(snap.Devices, &perimeterv1.Device{Id: d.ID, Key: k[:], Allowed: allowed})
@@ -286,9 +296,12 @@ func (p *PerimeterServer) relayServices(ctx context.Context, relay store.Relay) 
 		if err != nil {
 			continue
 		}
-		// The relay host's SSH is not forwarded (IssueRelayBundle refuses
-		// such a port; a service given it later loses it here).
-		ports = slices.DeleteFunc(ports, func(p store.Port) bool { return p == sshPort })
+		// The relay host's SSH and its probe endpoint are not forwarded
+		// (IssueRelayBundle keeps clear of them; a service given one later
+		// loses it here).
+		ports = slices.DeleteFunc(ports, func(p store.Port) bool {
+			return p == sshPort || relay.ProbePort != 0 && p.Num == relay.ProbePort
+		})
 		if len(ports) == 0 {
 			continue
 		}

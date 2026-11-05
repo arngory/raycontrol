@@ -2,8 +2,10 @@ package provision
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"slices"
 
 	"github.com/arngory/raycontrol/internal/node"
@@ -60,4 +62,30 @@ func NewRelayParams(avoid []store.Port) (spa.Params, []byte, error) {
 		return p, b, err
 	}
 	return spa.Params{}, nil, fmt.Errorf("%w: no SPA range for the relay clear of its ports", store.ErrInvalid)
+}
+
+// RelayProbeSvc is the scope ID of a relay's own probe-v1 endpoint (relay-v1
+// §9.1): a local service of the relay, which a knock names in an explicit
+// scope. The exit's services have IDs far below it.
+const RelayProbeSvc uint16 = 65535
+
+// RelayProbePort draws the port of a relay's probe endpoint, TCP and UDP on
+// one number: clear of the ports the relay forwards or serves, of either
+// protocol, and of its SPA range.
+func RelayProbePort(avoid []store.Port, p spa.Params) (uint16, error) {
+	const lo, hi = 10000, 60000
+	// From a random port on, the first free one: found if there is one.
+	start, err := rand.Int(rand.Reader, big.NewInt(hi-lo))
+	if err != nil {
+		return 0, err
+	}
+	for i := range int64(hi - lo) {
+		port := uint16(lo + (start.Int64()+i)%(hi-lo))
+		if int(port) >= int(p.PortBase) && int(port) < int(p.PortBase)+int(p.PortRange) ||
+			slices.ContainsFunc(avoid, func(a store.Port) bool { return a.Num == port }) {
+			continue
+		}
+		return port, nil
+	}
+	return 0, fmt.Errorf("%w: no port for the relay's probe endpoint", store.ErrInvalid)
 }

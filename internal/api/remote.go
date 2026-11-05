@@ -48,8 +48,27 @@ type Remote struct {
 	now         func() time.Time
 
 	relayMu      sync.Mutex
-	relayStreams map[string]int // WatchRelay streams open per relay
-	relayReports map[string]int // Report calls under way per relay
+	relayStreams map[string]int       // WatchRelay streams open per relay
+	relayReports map[string]int       // Report calls under way per relay
+	relayProbes  map[string]int       // rayd relay's feeds open per relay
+	relayProbeAt map[string]time.Time // when the last of them closed
+}
+
+// relayProbeGrace keeps a relay's probe endpoint listed while its rayd relay
+// reconnects (an exit's restart, a network blip).
+const relayProbeGrace = 2 * time.Minute
+
+// RelayProbeUp reports whether a relay's rayd relay is there, so that the
+// subscription lists its probe endpoint (relay-v1 §9.2): its feed is open,
+// or closed less than relayProbeGrace ago.
+func (r *Remote) RelayProbeUp(name string) bool {
+	r.relayMu.Lock()
+	defer r.relayMu.Unlock()
+	if r.relayProbes[name] > 0 {
+		return true
+	}
+	at, ok := r.relayProbeAt[name]
+	return ok && r.clock().Sub(at) < relayProbeGrace
 }
 
 var (
