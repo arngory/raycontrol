@@ -70,6 +70,9 @@ message Snapshot {
   // knock at the relay, which forwards to this node.
   repeated string relay_prefixes = 9;
   repeated Port relay_ports = 10;
+  // The debug window (rayctl debug): until then, unix seconds, rayspa logs
+  // every SPA access and refusal. 0 or past: none.
+  int64 debug_until = 11;
 }
 
 message AcmeWindow {

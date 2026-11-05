@@ -597,16 +597,20 @@ journalctl -u rayd -p warning --since -1h
    date -u '+%F %T UTC'
    ```
 
-2. **По желанию — подробнее на время прогона.** `rayspa -debug` пишет каждый SPA-доступ и отказ (с адресом и
-   устройством): видно, дошёл ли SPA клиента. `rayd -debug` — отказы подписки с адресом. Это адреса людей (P3):
-   включайте только на прогон.
+2. **Подробные журналы на время прогона** (v0.11.1):
 
    ```bash
-   systemctl edit rayspa
+   rayctl debug on -for 1h
    ```
 
-   В открывшемся файле — строка `ExecStart` из `systemctl cat rayspa` с ` -debug` в конце, перед ней пустой
-   `ExecStart=`:
+   До конца окна rayd, rayspa и data plane пишут подробно: niko-server на уровне debug, Xray на info (журнал
+   доступа остаётся выключенным). rayspa пишет каждый SPA-доступ и отказ с адресом и устройством: видно, дошёл ли
+   SPA клиента.
+   - Службы data plane перезапускаются при открытии и при закрытии окна: их соединения рвутся.
+   - В журнал попадают адреса людей (P3). Окно закрывается само, раньше — `rayctl debug off`.
+   - `rayctl status` показывает открытое окно.
+
+   В v0.11.0 этого нет: только `-debug` у rayspa через `systemctl edit rayspa`. В открывшемся файле:
 
    ```
    [Service]
@@ -614,12 +618,7 @@ journalctl -u rayd -p warning --since -1h
    ExecStart=/usr/local/bin/rayspa run -socket /run/raycontrol/rayd.sock -state /var/lib/rayspa/snapshot.pb -debug
    ```
 
-   ```bash
-   systemctl restart rayspa
-   ```
-
-   Для rayd так же (`systemctl edit rayd`). Data plane (Xray, niko-server) пишет только предупреждения и ошибки,
-   поднять уровень сейчас нельзя.
+   Потом `systemctl restart rayspa`, а после прогона `systemctl revert rayspa && systemctl restart rayspa`.
 3. **Прогон.** Клиент гоняет сервисы по очереди и отмечает время каждого.
 4. **Выгрузка, очищенная.** Адреса заменены токенами, общими внутри отчёта. Один `-id` на весь прогон, чтобы отчёты
    сводились:
@@ -636,10 +635,10 @@ journalctl -u rayd -p warning --since -1h
    journalctl -u rayd -u rayspa -u 'niko-*' --since '2026-11-05 10:00:00 UTC' -o short-iso-precise > /root/run1.raw.log
    ```
 
-6. **Вернуть уровень**:
+6. **Закрыть окно**, если прогон кончился раньше:
 
    ```bash
-   systemctl revert rayspa rayd && systemctl restart rayspa rayd
+   rayctl debug off
    ```
 
 ## 12. Резервная копия

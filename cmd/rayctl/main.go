@@ -68,6 +68,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   summary on|off                            take client reports (and give hints) or not
   summary api ipinfo [-token-file F] | none the online AS lookup for addresses the databases miss
   summary db FILE.mmdb | -remove            an AS database of your own before the release's (root)
+  debug [show] | on [-for 30m] | off        the debug window: rayd, rayspa and the data plane log at debug
+                                            level (client addresses too) until it closes by itself; root
 
   check [-host ADDR] [-domain D] [-services a,b]
                                               whether this host can run a node: what is required (install
@@ -211,6 +213,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.dns(ctx, sub, rest)
 	case "summary":
 		return c.summaryCmd(ctx, sub, rest)
+	case "debug":
+		return c.debug(ctx, sub, rest)
 	case "remote":
 		return c.remoteCmd(ctx, sub, rest)
 	case "backup":
@@ -258,6 +262,9 @@ func (c *cli) status(ctx context.Context) error {
 	return c.print(m, func(w *tabwriter.Writer) {
 		fmt.Fprintf(w, "version\t%s\nnode\t%s\nhost\t%s\nusers\t%d\nservices\t%d\nactive devices\t%d\nspa ports\t%v\n",
 			m.Version, m.NodeId, m.Host, m.Users, m.Services, m.ActiveDevices, m.SpaPorts)
+		if m.DebugUntil != 0 {
+			fmt.Fprintf(w, "debug\topen until %s (rayctl debug off)\n", clock(m.DebugUntil))
+		}
 		// rayd's loops: the last round of each (O-2).
 		for _, l := range m.Loops {
 			fmt.Fprintf(w, "%s\t%s\n", l.Name, loopState(l, time.Now()))

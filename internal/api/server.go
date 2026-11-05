@@ -227,6 +227,7 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 		Users:         uint32(len(users)),
 		Services:      uint32(len(services)),
 		ActiveDevices: uint32(len(devices)),
+		DebugUntil:    unixOf(debugUntil(ctx, s.Store)),
 	}
 	for _, p := range s.Params.ActivePorts(time.Now()) {
 		resp.SpaPorts = append(resp.SpaPorts, uint32(p))

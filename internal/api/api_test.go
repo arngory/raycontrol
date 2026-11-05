@@ -619,3 +619,46 @@ func TestServiceDependents(t *testing.T) {
 		t.Fatalf("enable reality on a disabled site: %v", err)
 	}
 }
+
+// The debug window: up to a day, in the status and in the perimeter
+// snapshot while open, audited; closing it clears both.
+func TestDebugWindow(t *testing.T) {
+	srv, sock, changes := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	for _, sec := range []int64{-1, 24*3600 + 1} {
+		if _, err := c.SetDebug(ctx, connect.NewRequest(&nodev1.SetDebugRequest{Seconds: sec})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("a window of %ds: %v", sec, err)
+		}
+	}
+	before := changes.Load()
+	r, err := c.SetDebug(ctx, connect.NewRequest(&nodev1.SetDebugRequest{Seconds: 1800}))
+	if err != nil || r.Msg.Until < time.Now().Add(29*time.Minute).Unix() || r.Msg.Until > time.Now().Add(31*time.Minute).Unix() {
+		t.Fatalf("open: %+v %v", r, err)
+	}
+	if changes.Load() == before {
+		t.Fatal("no change: the data plane is not rendered again")
+	}
+	if st, _ := c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{})); st.Msg.DebugUntil != r.Msg.Until {
+		t.Fatalf("status: %d, want %d", st.Msg.DebugUntil, r.Msg.Until)
+	}
+	p := &PerimeterServer{Server: srv, DefaultTTL: 10 * time.Minute, MaxTTL: time.Hour}
+	if snap, err := p.snapshot(ctx); err != nil || snap.DebugUntil != r.Msg.Until {
+		t.Fatalf("snapshot: %v %v", snap.GetDebugUntil(), err)
+	}
+	// A window that ended is none.
+	srv.Store.SetDebugUntil(ctx, time.Now().Add(-time.Minute))
+	if st, _ := c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{})); st.Msg.DebugUntil != 0 {
+		t.Fatalf("status after the end: %d", st.Msg.DebugUntil)
+	}
+	if r, err := c.SetDebug(ctx, connect.NewRequest(&nodev1.SetDebugRequest{})); err != nil || r.Msg.Until != 0 {
+		t.Fatalf("close: %+v %v", r, err)
+	}
+	if !srv.Store.DebugUntil(ctx).IsZero() {
+		t.Fatal("still set after closing")
+	}
+	audit, _ := c.ListAudit(ctx, connect.NewRequest(&nodev1.ListAuditRequest{}))
+	if !slices.ContainsFunc(audit.Msg.Entries, func(e *nodev1.AuditEntry) bool { return e.Action == "debug" && e.Target == "30m0s" }) {
+		t.Fatalf("not audited: %+v", audit.Msg.Entries)
+	}
+}

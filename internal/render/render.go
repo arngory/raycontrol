@@ -115,6 +115,17 @@ type Model struct {
 	// devices allowed on it (spec/dnsauth-v1.md): "<device id> <hex>".
 	// Only CollectForRender fills it.
 	DNSAuth map[int64][]string
+	// Debug: the debug window is open (rayctl debug): the data plane logs
+	// at debug level (Xray at info, its access log still off).
+	Debug bool
+}
+
+// nikoLevel is niko-server's log level for the model.
+func (m Model) nikoLevel() string {
+	if m.Debug {
+		return "debug"
+	}
+	return "warn"
 }
 
 // DNSAuthMode is a dnstt service's dnsauth-v1 mode: off, optional or
@@ -147,6 +158,7 @@ func HostIPv6() bool {
 // credentials for users who reach a service behind the inner stage.
 func Collect(ctx context.Context, st *store.Store) (Model, error) {
 	m := Model{IPv6: HostIPv6(), FrontTCP: true, FrontUDP: true}
+	m.Debug = time.Now().Before(st.DebugUntil(ctx))
 	params, err := node.LoadParams(ctx, st)
 	if err != nil {
 		return m, err
@@ -451,7 +463,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				// An empty keys file would lock every device out.
 				return errors.New("dnsauth keys not collected (render.CollectForRender)")
 			}
-			f, secret, auth, err := dnsBackend(s, zone, inner.Name, p, keys)
+			f, secret, auth, err := dnsBackend(s, zone, inner.Name, p, keys, m.nikoLevel())
 			if err != nil {
 				return err
 			}
@@ -593,7 +605,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		front := map[string]any{
 			"schema":   Schema,
 			"role":     "front",
-			"log":      map[string]string{"level": "warn"},
+			"log":      map[string]string{"level": m.nikoLevel()},
 			"backends": backends,
 		}
 		if len(zones) > 0 {
@@ -705,7 +717,7 @@ func accessFiles(s Service, m Model, p Paths, inner *Service) []File {
 	return out
 }
 
-func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string) (cfg, secret File, auth *File, err error) {
+func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level string) (cfg, secret File, auth *File, err error) {
 	opts := map[string]any{}
 	// dnsauth-v1 (spec/dnsauth-v1.md): the devices' keys in a file of the
 	// service group (the front is in none, R4-28), which the backend
@@ -745,7 +757,7 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string) (cfg,
 		"schema":    Schema,
 		"role":      "backend",
 		"kind":      s.Kind,
-		"log":       map[string]string{"level": "warn"},
+		"log":       map[string]string{"level": level},
 		"socket":    p.FrontSocket(s.Name, "packet"),
 		"front_uid": p.PeerUID(FrontUID),
 		"options":   opts,
@@ -855,7 +867,7 @@ func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, er
 		rules = append([]map[string]any{{"domain": []string{"full:" + ProbeName}, "outboundTag": "probe"}}, rules...)
 	}
 	b, err := jsonFile(map[string]any{
-		"log": map[string]string{"loglevel": "warning", "access": "none"},
+		"log": map[string]string{"loglevel": map[bool]string{false: "warning", true: "info"}[m.Debug], "access": "none"},
 		"api": map[string]any{"tag": "api", "listen": p.APISocket(s.Name), "services": []string{"HandlerService"}},
 		"dns": map[string]any{
 			// DoH to public resolvers: the host resolver may sit in a private
@@ -1166,7 +1178,7 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 		options["probe"] = map[string]any{"name": ProbeName, "address": fmt.Sprintf("127.0.0.1:%d", port)}
 	}
 	cfg := map[string]any{
-		"schema": Schema, "role": "backend", "kind": s.Kind, "log": map[string]string{"level": "warn"},
+		"schema": Schema, "role": "backend", "kind": s.Kind, "log": map[string]string{"level": m.nikoLevel()},
 		"socket": p.FrontSocket(s.Name, "packet"), "front_uid": p.PeerUID(FrontUID),
 		// Session stats for the channel probes' link (R4-16, niko-server v0.6).
 		"stats_socket": p.StatsSocket(s.Name),

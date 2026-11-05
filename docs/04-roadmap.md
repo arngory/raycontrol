@@ -196,7 +196,7 @@ systemd-юниты, хранение секретов через systemd credent
 - [x] naive: адрес ноды в хосте ссылки и поддомен в `sni=`, как у hy2 и REALITY.
 - [x] dnstt, сервер: `obs[].dns` и `hints.dns` в сводке (probe-v1 §6.1, §6.2).
 - [ ] dnstt, клиент: перебор резолверов для сети (Niko).
-- [ ] Окно отладки `rayctl debug on -for 30m [-device ID]`: уровни rayd, rayspa, niko-server, Xray с откатом.
+- [x] Окно отладки `rayctl debug on -for 30m`: уровни rayd, rayspa, niko-server, Xray с откатом (без `-device`).
 - [ ] CI: фронт делит UDP 53 с настоящим systemd-resolved в образе с systemd.
 - [ ] Маркер возврата стаба (`.gone`) — в каталоге состояния, а не рядом с drop-in resolved.
 

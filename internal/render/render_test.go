@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -441,5 +442,45 @@ func TestDNSAuth(t *testing.T) {
 	m.Services[i].Settings = strings.Replace(m.Services[i].Settings, `"auth":"required"`, `"auth":"strict"`, 1)
 	if _, _, err := render.Render(m, render.DefaultPaths); !render.Partial(err) || !strings.Contains(err.Error(), `auth "strict"`) {
 		t.Fatalf("render with auth=strict: %v", err)
+	}
+}
+
+// The debug window (rayctl debug) raises the data plane's levels; Xray's
+// access log stays off. Without it the usual warn levels.
+func TestDebugLevels(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	levels := func() map[string]string {
+		m, err := render.Collect(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, _, err := render.Render(m, render.DefaultPaths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]string{}
+		for _, f := range files {
+			var c struct {
+				Log map[string]string `json:"log"`
+			}
+			if json.Unmarshal(f.Content, &c) == nil && c.Log != nil {
+				out[f.Service] = c.Log["level"] + c.Log["loglevel"] + "/" + c.Log["access"]
+			}
+		}
+		return out
+	}
+	want := map[string]string{"front": "warn/", "dns": "warn/", "mdns": "warn/", "inner": "warning/none"}
+	if got := levels(); !maps.Equal(got, want) {
+		t.Fatalf("usual levels %v", got)
+	}
+	st.SetDebugUntil(ctx, time.Now().Add(time.Hour))
+	want = map[string]string{"front": "debug/", "dns": "debug/", "mdns": "debug/", "inner": "info/none"}
+	if got := levels(); !maps.Equal(got, want) {
+		t.Fatalf("debug levels %v", got)
+	}
+	st.SetDebugUntil(ctx, time.Now().Add(-time.Second))
+	if got := levels(); got["front"] != "warn/" || got["inner"] != "warning/none" {
+		t.Fatalf("after the window %v", got)
 	}
 }

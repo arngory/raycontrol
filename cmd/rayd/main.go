@@ -158,9 +158,10 @@ func cmdServe(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	level := slog.LevelInfo
+	// -debug always; otherwise while the debug window is open (followDebug).
+	level := new(slog.LevelVar)
 	if *debug {
-		level = slog.LevelDebug
+		level.Set(slog.LevelDebug)
 	}
 	log := logx.New(os.Stderr, level)
 
@@ -255,6 +256,7 @@ func cmdServe(args []string) error {
 	}
 	go checkPort53(ctx, st, &deploy.Host{}, frontUID, hb, log)
 	go checkResolver(ctx, hb, log)
+	go followDebug(ctx, st, level, *debug, srv.Changes, srv.Notify, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
 	// Client summaries (R4-21): reports in, from devices and through relays
 	// (relay-v1 §9.3), hints out; only while the administrator has them on
@@ -724,6 +726,40 @@ func checkPort53(ctx context.Context, st *store.Store, h *deploy.Host, frontUID 
 		case <-ctx.Done():
 			return
 		case <-time.After(5 * time.Minute):
+		}
+	}
+}
+
+// followDebug keeps rayd's level on the debug window (rayctl debug), and
+// renders the data plane again when the window ends by itself: its level
+// follows the window, as rayspa's does through its snapshot.
+func followDebug(ctx context.Context, st *store.Store, level *slog.LevelVar, always bool, changes func() <-chan struct{}, notify func(), log *slog.Logger) {
+	open := false
+	for {
+		now, until := time.Now(), st.DebugUntil(ctx)
+		on := now.Before(until)
+		switch {
+		case on && !open:
+			log.Warn("debug window open: client addresses go to the journal", "until", until.UTC().Format(time.RFC3339))
+		case !on && open:
+			log.Info("debug window closed")
+			notify()
+		}
+		open = on
+		if on || always {
+			level.Set(slog.LevelDebug)
+		} else {
+			level.Set(slog.LevelInfo)
+		}
+		wait := time.Hour
+		if on {
+			wait = until.Sub(now)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-changes():
+		case <-time.After(wait):
 		}
 	}
 }
