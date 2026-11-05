@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 )
@@ -114,6 +116,7 @@ type fakeRelayHost struct {
 	unit, enabled, active bool // rayspa's unit file, enabled, running
 	table, guarded        bool // the perimeter's table, the guard timer armed
 	stuckEnabled          bool // disable --now stops rayspa but cannot disable it
+	stuckActive           bool // systemd does not answer: rayspa runs on, teardown goes ahead
 	fails                 []string
 	panicAt, cancelAt     string
 	cancel                func()
@@ -144,12 +147,17 @@ func (f *fakeRelayHost) steps() relaySteps {
 	return relaySteps{
 		unitExists: func() bool { return f.unit },
 		enabled:    func() bool { return f.enabled },
+		active:     func() bool { return f.active },
 		systemctl: func(args ...string) error {
 			verb := strings.Join(args[:len(args)-1], " ")
 			if verb == "disable --now" && f.stuckEnabled {
 				f.calls = append(f.calls, strings.Join(args, " "))
 				f.active = false
 				return errors.New("read-only /etc")
+			}
+			if verb == "disable --now" && f.stuckActive {
+				f.calls = append(f.calls, strings.Join(args, " "))
+				return errors.New("timed out")
 			}
 			return f.call(strings.Join(args, " "), func() {
 				switch verb {
@@ -165,7 +173,7 @@ func (f *fakeRelayHost) steps() relaySteps {
 			})
 		},
 		teardown: func() error {
-			if f.active {
+			if f.active && !f.stuckActive {
 				f.calls = append(f.calls, "teardown")
 				return errors.New("rayspa.service is running")
 			}
@@ -175,6 +183,13 @@ func (f *fakeRelayHost) steps() relaySteps {
 		write:          func() error { return f.call("write", func() { f.unit = true }) },
 		removeSnapshot: func() error { return f.call("rm snapshot", nil) },
 		guard:          func() error { return f.call("guard", func() { f.guarded = true }) },
+		start: func() error {
+			if !f.guarded {
+				f.calls = append(f.calls, "start "+relayUnit)
+				return errors.New("the guard went off")
+			}
+			return f.call("start "+relayUnit, func() { f.active, f.table = true, true })
+		},
 		unguard: func() error {
 			if !f.guarded {
 				f.calls = append(f.calls, "unguard")
@@ -270,11 +285,24 @@ func TestRelaySteps(t *testing.T) {
 	if _, err := f.run(); err == nil || !strings.Contains(err.Error(), "could NOT") || !f.guarded || !f.table {
 		t.Errorf("a table left: %+v %v", f, err)
 	}
-	// Open now, but still enabled for the next boot: said so, the guard
-	// left armed to disable it.
+	// Open now, but still enabled for the next boot: said so.
 	f = &fakeRelayHost{fails: []string{"forward"}, stuckEnabled: true}
 	if _, err := f.run(); err == nil || !strings.Contains(err.Error(), "at boot") || f.calls[len(f.calls)-1] != "teardown" {
 		t.Errorf("enabled at boot: %v %v", f.calls, err)
+	}
+	// systemd that does not answer: rayspa may run on and put its table
+	// back. Not said to be open, and the guard stays armed.
+	f = &fakeRelayHost{stuckActive: true, fails: []string{"wait"}}
+	if _, err := f.run(); err == nil || !strings.Contains(err.Error(), "could NOT be stopped") || !f.guarded {
+		t.Errorf("still running: %+v %v", f, err)
+	}
+	// The guard that went off before rayspa starts: it does not start.
+	f = &fakeRelayHost{}
+	g := f.steps()
+	guard := g.guard
+	g.guard = func() error { err := guard(); f.guarded = false; return err }
+	if _, _, err := g.run(context.Background()); err == nil || slices.Contains(f.calls, "wait") || f.active {
+		t.Errorf("started without a guard: %v %v", f.calls, err)
 	}
 	// Not enabled, only not disabled: open, and nothing about the boot.
 	f = &fakeRelayHost{fails: []string{"start " + u, "disable --now " + u}}
@@ -284,11 +312,12 @@ func TestRelaySteps(t *testing.T) {
 }
 
 // The guard goes off only while armed, under its lock, and takes rayspa
-// down; disarming it says whether it went off.
+// down; disarming it says whether it went off; rayspa starts only while it
+// is armed.
 func TestGuard(t *testing.T) {
 	cmd := strings.Join(guardCommand("/usr/bin/flock", "/usr/local/bin/rayspa"), " ")
 	for _, want := range []string{
-		"systemd-run --unit=" + relayGuard + " --on-active=300 ", "--collect", "/usr/bin/flock " + guardLock + " /bin/sh -c ",
+		"systemd-run --unit=" + relayGuard + " --on-active=300 --timer-property=AccuracySec=1s --collect /usr/bin/flock " + guardLock + " /bin/sh -c ",
 		"test -e " + guardArmed + " || exit 0; rm -f " + guardArmed + "; systemctl disable --now rayspa.service; exec /usr/local/bin/rayspa teardown",
 	} {
 		if !strings.Contains(cmd, want) {
@@ -297,16 +326,59 @@ func TestGuard(t *testing.T) {
 	}
 	dir := t.TempDir()
 	lock, armed := dir+"/lock", dir+"/armed"
-	if err := os.WriteFile(armed, nil, 0o600); err != nil {
+	var calls []string
+	run := func(name string, args ...string) error {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return nil
+	}
+
+	// Armed: one left before goes, timer and service; the token is there.
+	if err := armGuard(armed, run, "/usr/bin/flock", "/usr/local/bin/rayspa"); err != nil {
 		t.Fatal(err)
 	}
-	if err := unguardAt(lock, armed); err != nil {
-		t.Fatalf("armed: %v", err)
+	if _, err := os.Stat(armed); err != nil || len(calls) != 2 ||
+		calls[0] != "systemctl stop "+relayGuard+".timer "+relayGuard+".service" || !strings.HasPrefix(calls[1], "systemd-run ") {
+		t.Fatalf("arming: %v %v", calls, err)
+	}
+	calls = nil
+	if err := startGuarded(lock, armed, run); err != nil || !slices.Equal(calls, []string{"systemctl start " + relayUnit}) {
+		t.Fatalf("start while armed: %v %v", calls, err)
+	}
+	calls = nil
+	if err := unguardAt(lock, armed, run); err != nil || !slices.Equal(calls, []string{"systemctl stop " + relayGuard + ".timer"}) {
+		t.Fatalf("disarming: %v %v", calls, err)
 	}
 	if _, err := os.Stat(armed); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("still armed")
 	}
-	if err := unguardAt(lock, armed); err == nil || !strings.Contains(err.Error(), "took rayspa down") {
+	calls = nil
+	if err := unguardAt(lock, armed, run); err == nil || !strings.Contains(err.Error(), "took rayspa down") {
 		t.Fatalf("went off: %v", err)
+	}
+	if err := startGuarded(lock, armed, run); err == nil || len(calls) != 0 {
+		t.Fatalf("start after the guard went off: %v %v", calls, err)
+	}
+
+	// With util-linux flock, as the guard holds it: disarming waits for a
+	// guard going off and says so, whether the guard's lock is exclusive or
+	// shared (so rayctl's must be exclusive).
+	path, err := exec.LookPath("flock")
+	if err != nil {
+		t.Skip("no flock here")
+	}
+	for _, mode := range []string{"-x", "-s"} {
+		if err := os.WriteFile(armed, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		guard := exec.Command(path, mode, lock, "/bin/sh", "-c", "sleep 0.5; test -e "+armed+" || exit 0; rm -f "+armed)
+		if err := guard.Start(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond) // the guard holds the lock
+		err := unguardAt(lock, armed, run)
+		_ = guard.Wait()
+		if err == nil {
+			t.Errorf("flock %s: disarmed while the guard went off", mode)
+		}
 	}
 }
