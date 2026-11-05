@@ -42,7 +42,7 @@ func TestWriteQR(t *testing.T) {
 		for x, cell := range cells {
 			for half, y := range []int{2 * row, 2*row + 1} {
 				want := x >= 4 && y >= 4 && x-4 < code.Size && y-4 < code.Size && code.Black(x-4, y-4)
-				got := strings.Contains(cell, map[int]string{0: "[30;", 1: ";40m"}[half])
+				got := strings.Contains(cell, map[int]string{0: "[38;5;16;", 1: ";48;5;16m"}[half])
 				if got != want {
 					t.Fatalf("module %d,%d: dark %v, want %v (%q)", x, y, got, want, cell)
 				}
