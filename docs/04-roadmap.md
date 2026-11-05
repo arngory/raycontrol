@@ -183,6 +183,20 @@ systemd-юниты, хранение секретов через systemd credent
 - **QR приглашения в `rayctl`.** Сейчас приглашение выводится строкой, а QR рисует внешний `qrencode`
   (`10-quickstart-debian13.md` §9).
 
+## Бэклог после первой установки на VPS (v0.11.0)
+
+По строке на задачу. Подробности — [10-quickstart-debian13.md](10-quickstart-debian13.md) §11 и `handoff/SYNC.md`.
+
+- [ ] v0.11.1: install и apply открывают `/etc/resolv.conf` (и цель ссылки) до 0644, как `repairModes`.
+- [ ] v0.11.1: `rayctl check` и здоровье rayd (`resolver`) — нечитаемый resolv.conf или без `nameserver`.
+- [ ] v0.11.1: `rayctl dns cloudflare` и `apply` снимают паузу выпуска сертификата после локальной ошибки.
+- [x] v0.11.1: без ложного `service doh (doh) is not deployed` (f51577a); `rayctl report -logs debug`.
+- [ ] naive не соединяется у клиента: разбор по логам прогона (SNI-поддомен, wildcard, сертификат, маршрут фронта).
+- [ ] dnstt: резолвер по стране и сети — стартовые списки у клиента и подсказки по AS из сводок, без перебора ASN.
+- [ ] Окно отладки `rayctl debug on -for 30m [-device ID]`: уровни rayd, rayspa, niko-server, Xray с откатом.
+- [ ] CI: фронт делит UDP 53 с настоящим systemd-resolved в образе с systemd.
+- [ ] Маркер возврата стаба (`.gone`) — в каталоге состояния, а не рядом с drop-in resolved.
+
 ## Технические проверки
 
 Из [08-decisions.md](08-decisions.md), раздел «Следствия»:
