@@ -26,7 +26,7 @@
   4. Interop зелёный — выходит клиент, поезд здесь закрывается.
   5. В заметках обоих релизов указана совместимая пара версий.
 
-Обновлено: 2026-11-05, сервер (T1 и T2 закрыты; raycontrol v0.10.1, niko-server v0.8.1 и Niko 1.30.0 вышли).
+Обновлено: 2026-11-05, сервер (T1, T2 и T3 закрыты; relay-v1 заморожен).
 
 ## Поезд
 
@@ -34,7 +34,7 @@
 |---|---|---|---|---|
 | T1 | Niko 1.26.0 (B1), коммит `da17ec3` в arngory/niko; следом 1.26.1 — только скрытие имён в журнале, контракт тот же | v0.9.0, `2dc56b38935d4c6b62505e425be67a0940858f3a` | v0.7.0, `af20974909af503ca7abf63662ce36e635481ede` (в архиве релиза) | **закрыт** 2026-11-04: interop на `rayd -supervise` зелёный (supervised, invite, naive), SHA256SUMS у APK сверены |
 | T2 | Niko 1.27 (B2): эталонный ClientHello Chrome для uTLS и REALITY, SPA в форме ClientHello, dnsauth-v1, relay — когда relay-v1 выйдет из черновика | **v0.10.0**, `2fb9dfd1d167fda7f48beba89f021c23358b9b98`: разбор S/Q/O, тест строгого разбора, dnsauth (выключен), SPA в форме ClientHello, `open=true` | **v0.8.0**, `9709508fa8a5b476fe2db72069edb7e87ad66e7a`; SHA-256 amd64 `fa712e192b08b12c2fbf42a99613945862756ac423112025e8bc872f9bc1fe80`, arm64 `d7c85e4eede7d4906fc43ce71cdce2f3e508d09756cfdf17f4e540864855b558`; в архиве raycontrol v0.10.0 | **закрыт** 2026-11-05: Niko v1.27.0, коммит `5073de1` в arngory/niko; interop на `rayd -supervise` зелёный (REALITY с ClientHello Chrome 156, dnstt с `auth=required`, носители SPA), SHA256SUMS у APK сверены |
-| T3 | Niko 1.28.0 (B3) **выпущен** 2026-11-05, коммит `7b13f93`; Niko 1.29.0 (B4) **выпущен** 2026-11-05, коммит `7860f49`; Niko 1.30.0 (B5) **выпущен** 2026-11-05, коммит `f87b698`, в нём клиент relay-v1 (черновик, включается, только если нода прислала `relays[]`); у всех SHA256SUMS сходится. Дальше: interop с raycontrol v0.10.1 и niko-server v0.8.1, с relay, затем заморозка relay-v1 | **v0.10.1**, `7adfc757053964adb6a32988c799571b2383688d`, выпущен 2026-11-05; SHA-256 amd64 `7db0d1a0c509dae5259b411f0c8e00207a188836fdecae349adf7fcf61259c73`, arm64 `037f8a7d607d1e3cb0fb20a997a52ea255aff2189be6ad0f21e728039d4c138a`; в архиве niko-server v0.8.1 | **v0.8.1**, `89b95e2583f823b30699bdc06d5b8472d015e824`; SHA-256 amd64 `e444f6fa0020f4a890624972a3527d5ea7aff6c8589c218926704a0da9d591b9`, arm64 `435acde0c078d3fde912c9a60784ade38dcc4b5879bf062fa0e407cbeb11afc5`; в архиве raycontrol v0.10.1 | raycontrol и niko-server выпущены; клиенту — закрепить обе версии в interop и сделать interop с relay (`rayspa run -relay`), затем заморозка relay-v1 |
+| T3 | Niko 1.28.0 (B3) **выпущен** 2026-11-05, коммит `7b13f93`; Niko 1.29.0 (B4) **выпущен** 2026-11-05, коммит `7860f49`; Niko 1.30.0 (B5) **выпущен** 2026-11-05, коммит `f87b698`, в нём клиент relay-v1 (черновик, включается, только если нода прислала `relays[]`); у всех SHA256SUMS сходится. Дальше: interop с raycontrol v0.10.1 и niko-server v0.8.1, с relay, затем заморозка relay-v1 | **v0.10.1**, `7adfc757053964adb6a32988c799571b2383688d`, выпущен 2026-11-05; SHA-256 amd64 `7db0d1a0c509dae5259b411f0c8e00207a188836fdecae349adf7fcf61259c73`, arm64 `037f8a7d607d1e3cb0fb20a997a52ea255aff2189be6ad0f21e728039d4c138a`; в архиве niko-server v0.8.1 | **v0.8.1**, `89b95e2583f823b30699bdc06d5b8472d015e824`; SHA-256 amd64 `e444f6fa0020f4a890624972a3527d5ea7aff6c8589c218926704a0da9d591b9`, arm64 `435acde0c078d3fde912c9a60784ade38dcc4b5879bf062fa0e407cbeb11afc5`; в архиве raycontrol v0.10.1 | **закрыт** 2026-11-05: interop на raycontrol v0.10.1 + niko-server v0.8.1 зелёный с первого прогона (Niko `6777ff2`, job supervised), в том числе с relay (`rayspa run -relay`, TEST-NET в docker); relay-v1 заморожен. Дальше у клиента Niko 1.31.0: relay не черновик, пины v0.10.1 / v0.8.1 |
 
 Что в 1.26 касается сервера:
 - строгий разбор строк подписки (§4: схемы, `encryption` и `pqv` обязательны, `insecure` не принимается);
@@ -59,7 +59,7 @@
 | Разбор безопасности, качества, производительности | сервер | S-1…S-4, Q-1…Q-3, O-1…O-4, P-1/P-2/P-6 **готовы** в ветке; S-7, S-8, Q-4…Q-7, P-3…P-5 — после фактов с VPS | `docs/12-review.md` |
 | dnsauth-v1: метка ключа устройства в запросах dnstt | сервер (нода, niko-server) | **готово**, по умолчанию `off` | `docs/spec/dnsauth-v1.md` |
 | dnsauth-v1 на клиенте: подписывать запросы dnstt при `niko-dnsauth=v1` | клиент | не начато | dnsauth-v1 §2–§3 |
-| §22.1 relay-хоп и детектор белого списка | сервер: формат и роль `relay`; клиент: `via`, watchdog | сервер: **выпущено** в raycontrol v0.10.1 (R6-a, R6-b); клиент: черновик в Niko 1.30.0 (`f87b698`); interop после v0.10.1, затем заморозка формата; R6-c (замер на relay, детектор) — дальше | `docs/spec/relay-v1.md` |
+| §22.1 relay-хоп и детектор белого списка | сервер: формат и роль `relay`; клиент: `via`, watchdog | сервер: **выпущено** в raycontrol v0.10.1 (R6-a, R6-b); клиент: Niko 1.30.0; interop зелёный, формат **заморожен** 2026-11-05; R6-c (замер на relay, детектор белого списка) — дальше | `docs/spec/relay-v1.md` |
 | §22.2.1 размер цепочки приманки при ML-DSA-65 | сервер | **было** (R2-8, R2-12): RSA-цепочка с корнем у приманки, проверка длины у чужой цели и сертификата оператора; **новое** — перепроверка чужой цели раз в 6 ч (`reality-target` в `rayctl status`) | R4-31 |
 | §22.2.2 TCP 443 открыт всем (опция) | сервер | **готово**: `rayctl service set <reality> open=true`, по умолчанию закрыт | R4-31 |
 | §22.2.3 TCP-носитель SPA в форме ClientHello | сервер: нода и спецификация; клиент: отправка | **сервер готов**: нода принимает обе формы, эталон `spa.TLSCarrier`; клиенту — отправка | spa-v2 §10.1 |
@@ -80,7 +80,7 @@
 | subscription-v1 `spa.carriers` | какие носители SPA нода принимает, **в порядке, в котором их пробовать**: `["udp","tls","tcp"]` (с `-spa-tcp`) или `["udp"]` | raycontrol v0.10.1 | идти по списку; нет поля — старая нода: UDP, ClientHello, голый TCP |
 | dnsauth-v1 (поведение ноды, формат тот же) | без верной метки — NXDOMAIN и при малом EDNS (раньше dnstt отвечал FORMERR); у полного перебора ключей есть бюджет (100 000 HMAC в секунду, запас на 2 с): сверх него запрос без известной сессии получает NXDOMAIN; первые 8 байт запроса, который не прошёл ни одним ключом, нода запоминает и больше не перебирает | niko-server v0.8.1 | первый запрос новой сессии повторять, как при потере; известные сессии бюджет не тратят |
 | Hysteria2 с salamander (поведение ноды) | первые пакеты сервера 1272 байта (с солью — 1280): фронт шлёт с DF | niko-server v0.8.1 | клиенту то же стоит сделать у себя: QUIC под salamander начинать с 1272 |
-| relay-v1 §3, §4 | `K_relay` с вектором; в подписке `relays[]` (`id`, `host`, `spa`; `sub_pin` — с R6-c) и `profiles[].via`; сторона relay — ядро (`rayspa -relay`), проверено в `test/relay/e2e.sh` | raycontrol v0.10.1 | `via` и путь через relay в watchdog; формат заморожу после первого interop клиента с relay |
+| relay-v1 §3, §4 | `K_relay` с вектором; в подписке `relays[]` (`id`, `host`, `spa`; `sub_pin` — с R6-c) и `profiles[].via`; сторона relay — ядро (`rayspa -relay`), проверено в `test/relay/e2e.sh` | raycontrol v0.10.1 | `via` и путь через relay в watchdog; **заморожен** 2026-11-05 после interop |
 | probe-v1, api-v1 | без изменений в T2 | — | — |
 
 ## Открытые вопросы
@@ -94,6 +94,18 @@
 - Тег и sha niko-server новее v0.7.0. *Ответ:* **v0.8.0 вышел**, `9709508fa8a5b476fe2db72069edb7e87ad66e7a`
   (хэши бинарников — в таблице поезда). Он совместим с raycontrol v0.9.0: новое в нём только включается опциями.
   Клиенту для T2 — вместе с raycontrol v0.10.0. Для T1 остаётся v0.7.0.
+
+**Клиент об interop с relay (2026-11-05):** зелёный с первого прогона (Niko `6777ff2`, raycontrol-interop, job
+supervised) на raycontrol `7adfc75` + niko-server v0.8.1.
+- Топология TEST-NET в docker: клиент 203.0.113.1, выход .2 под `rayd serve -supervise`, relay .3 с настоящим
+  `rayspa run -relay` (NET_ADMIN, ip_forward; «snapshot applied», 5 правил dnat/masquerade).
+- На выходе: `service add api api`, `relay add r1 203.0.113.3`, `relay bundle -exit 203.0.113.2 -admin 203.0.113.1/32`.
+- Подписка через relay: хост из `relays[].host`, SPA relay ключом `K_relay`, пин и обе подписи выхода; `node_id`
+  совпадает.
+- Профили с `via`: REALITY 1 МиБ, UDP-эхо 20/20; hy2-obfs и hy2-masq на UDP 443 — 1 МиБ, эхо 20/20, Brutal
+  50 Мбит/с.
+- Контракт как в relay-v1 §3–§4, расхождений нет. *Сервер:* relay-v1 **заморожен**.
+- Дальше у клиента Niko 1.31.0: relay не черновик, пины v0.10.1 / v0.8.1, keepalive Hysteria2 к нодам на v0.8.1 — 25 с.
 
 **Клиент о Niko 1.30.0 (B5, качество, 2026-11-05):**
 - В CI smoke на эмуляторе API 34: релизный APK запускается, поворачивает экран, сворачивается и открывается снова;

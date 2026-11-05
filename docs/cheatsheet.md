@@ -141,7 +141,7 @@ shred -u /root/phone.bundle
 | `-run` | `/run/niko` | каталог сокетов и копий секретов data plane |
 | `-supervise` · `-xray` · `-niko-server` | выкл. | без systemd (CI, контейнеры): data plane — дочерние процессы rayd под его пользователем; не для ноды (R4-22, `test/supervise/run.sh`) |
 
-## Relay (relay-v1, черновик)
+## Relay (relay-v1)
 
 ```
 rayctl relay add msk 198.51.100.20   # адрес relay (IPv4) доходит до портов сервисов без SPA, но не до SSH
