@@ -507,9 +507,39 @@ func (h *Host) removeStale(plan Plan) error {
 	return nil
 }
 
-// stubPending marks a stub being given back: the drop-in is out of
-// resolved's sight (it reads *.conf only), the stub not yet seen back.
-const stubPending = ResolvedDropIn + ".gone"
+// stubPending marks a stub being given back: the drop-in is gone, the stub
+// not yet seen back. It is ours, so it lives with the node's state, not in
+// resolved's directory; stubPendingOld is v0.11.0's mark there, the drop-in
+// moved aside (resolved reads *.conf only), honoured and removed alike.
+const (
+	stubPending    = StateDir + "/resolved-stub.pending"
+	stubPendingOld = ResolvedDropIn + ".gone"
+)
+
+// stubMarked reports whether a stub is being given back.
+func (h *Host) stubMarked() bool {
+	for _, p := range []string{stubPending, stubPendingOld} {
+		if _, err := os.Stat(h.path(p)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// unmarkStub removes the marks; it reports whether there was one.
+func (h *Host) unmarkStub() (bool, error) {
+	was := false
+	for _, p := range []string{stubPending, stubPendingOld} {
+		err := os.Remove(h.path(p))
+		switch {
+		case err == nil:
+			was = true
+		case !errors.Is(err, os.ErrNotExist):
+			return was, err
+		}
+	}
+	return was, nil
+}
 
 // SharesDNSFrom is the first niko-server whose front shares UDP 53 with
 // systemd-resolved's stub (SO_REUSEADDR).
@@ -536,8 +566,7 @@ func (h *Host) giveBackStub() error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	_, err := os.Stat(h.path(stubPending))
-	pending := err == nil
+	pending := h.stubMarked()
 	rc := h.path("/etc/resolv.conf")
 	target, _ := os.Readlink(rc)
 	orig, journaled := h.Journal.Original(ChangeSymlink, "/etc/resolv.conf", "")
@@ -566,16 +595,22 @@ func (h *Host) giveBackStub() error {
 				return err
 			}
 		}
-		if err := os.Rename(h.path(ResolvedDropIn), h.path(stubPending)); err != nil {
+		// The mark first: a run stopped between the two finds it and the
+		// drop-in, and starts here again.
+		if err := mkdirAll(h.path(StateDir), 0o711); err != nil {
+			return err
+		}
+		if err := os.WriteFile(h.path(stubPending), nil, 0o600); err != nil {
+			return err
+		}
+		if err := os.Remove(h.path(ResolvedDropIn)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		fmt.Fprintln(h.Out, "removed", ResolvedDropIn+": the DNS tunnels share UDP 53 with systemd-resolved's stub")
 	}
 	if h.loadState("systemd-resolved.service") == "not-found" {
-		if err := os.Remove(h.path(stubPending)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return nil
+		_, err := h.unmarkStub()
+		return err
 	}
 	if !h.stubOn53() {
 		if err := h.tryRestart("systemd-resolved.service"); err != nil {
@@ -587,7 +622,7 @@ func (h *Host) giveBackStub() error {
 			"and the next rayctl apply tries again (journalctl -u systemd-resolved says why)\n")
 		return nil
 	}
-	if err := os.Remove(h.path(stubPending)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if _, err := h.unmarkStub(); err != nil {
 		return err
 	}
 	if !pointed {

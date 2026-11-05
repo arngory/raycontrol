@@ -944,16 +944,32 @@ func TestPort53(t *testing.T) {
 	niko = "v0.8.2"
 	// A run that stopped halfway (drop-in moved aside), then uninstall: it
 	// goes too.
+	mark := filepath.Join(deploy.StateDir, "resolved-stub.pending")
 	h = newHost(t, "", ours, true, false)
 	apply(t, h, p)
-	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn+".gone")); err != nil {
+	if _, err := os.Stat(filepath.Join(h.root, mark)); err != nil {
 		t.Fatalf("no mark of the stub being given back: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn)); !os.IsNotExist(err) {
+		t.Fatalf("the drop-in stays: %v", err)
 	}
 	if err := h.h.Uninstall(h.h.Journal, deploy.UninstallOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn+".gone")); !os.IsNotExist(err) {
-		t.Errorf("uninstall left the moved drop-in: %v", err)
+	if _, err := os.Stat(filepath.Join(h.root, mark)); !os.IsNotExist(err) {
+		t.Errorf("uninstall left the mark: %v", err)
+	}
+	if !slices.Contains(*h.cmds, restartResolved) {
+		t.Errorf("uninstall did not restart resolved after a halfway give-back:\n%s", strings.Join(*h.cmds, "\n"))
+	}
+	// v0.11.0's mark, the drop-in moved aside, from a run stopped halfway:
+	// the next apply finishes, and the mark goes.
+	h = newHost(t, "", ours, true, false)
+	os.Rename(filepath.Join(h.root, deploy.ResolvedDropIn), filepath.Join(h.root, deploy.ResolvedDropIn+".gone"))
+	os.WriteFile(filepath.Join(h.root, "/proc/net/udp"), []byte(header+stub), 0o644)
+	apply(t, h, p)
+	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn+".gone")); !os.IsNotExist(err) || resolv(h) != "../run/systemd/resolve/stub-resolv.conf" {
+		t.Errorf("v0.11.0's mark: %v, resolv.conf -> %s\n%s", err, resolv(h), h.out)
 	}
 	// A drop-in of the administrator's at that path stays; a resolv.conf on
 	// the uplink list the journal does not know of stays too.

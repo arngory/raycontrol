@@ -198,7 +198,7 @@ systemd-юниты, хранение секретов через systemd credent
 - [ ] dnstt, клиент: перебор резолверов для сети (Niko).
 - [x] Окно отладки `rayctl debug on -for 30m`: уровни rayd, rayspa, niko-server, Xray с откатом (без `-device`).
 - [ ] CI: фронт делит UDP 53 с настоящим systemd-resolved в образе с systemd.
-- [ ] Маркер возврата стаба (`.gone`) — в каталоге состояния, а не рядом с drop-in resolved.
+- [x] Маркер возврата стаба — в каталоге состояния (`resolved-stub.pending`); метка v0.11.0 (`.gone`) понимается.
 
 ## Технические проверки
 
