@@ -79,14 +79,11 @@ func installRelay(bundlePath, packages string) error {
 		return fmt.Errorf("%s is missing: install/bootstrap.sh -relay installs it", deploy.DefaultBinaries.Rayspa)
 	}
 	// One install at a time: two would share the guard.
-	installLock, err := os.OpenFile("/run/raycontrol-relay-install.lock", os.O_RDWR|os.O_CREATE, 0o600)
+	installLock, err := takeInstallLock(relayInstallLock)
 	if err != nil {
 		return err
 	}
 	defer installLock.Close()
-	if err := syscall.Flock(int(installLock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return errors.New("another rayctl install -relay is running on this host")
-	}
 	sshd, err := sshdPorts()
 	if err != nil {
 		return fmt.Errorf("a relay closes all but its SSH port, and sshd's cannot be told (%w): fix sshd first", err)
@@ -127,6 +124,10 @@ func installRelay(bundlePath, packages string) error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), sigs...)
 	defer cancel()
+	// Ctrl-Z would leave rayctl stopped with rayspa started and the guard
+	// waiting on rayctl.
+	signal.Ignore(syscall.SIGTSTP)
+	defer signal.Reset(syscall.SIGTSTP)
 	// The host's commands too run apart from the terminal's Ctrl-C.
 	h.Run = func(name string, args ...string) ([]byte, error) { return commandApart(name, args...).CombinedOutput() }
 	plan := deploy.RelayPlan(deploy.DefaultBinaries)
@@ -147,13 +148,11 @@ func installRelay(bundlePath, packages string) error {
 		// have rayspa enabled and running.
 		enabled: func() bool {
 			out, _ := commandApart("systemctl", "is-enabled", relayUnit).Output()
-			v := strings.TrimSpace(string(out))
-			return v != "disabled" && v != "not-found"
+			return maybeEnabled(string(out))
 		},
 		active: func() bool {
 			out, _ := commandApart("systemctl", "is-active", relayUnit).Output()
-			v := strings.TrimSpace(string(out))
-			return v != "inactive" && v != "failed"
+			return maybeActive(string(out))
 		},
 		systemctl: func(args ...string) error { return runApart("systemctl", args...) },
 		teardown:  func() error { return runApart(rayspa, "teardown") },
@@ -188,6 +187,24 @@ func installRelay(bundlePath, packages string) error {
 		start:   func() error { return startGuarded(guardLock, guardArmed, runApart) },
 		unguard: func() error { return unguardAt(guardLock, guardArmed, runApart) },
 		waitSnapshot: func(ctx context.Context) error {
+			// Started without blocking (under the guard's lock): it may
+			// wait for network-online.target first.
+			deadline := time.Now().Add(2 * time.Minute)
+			for {
+				out, _ := commandApart("systemctl", "is-active", relayUnit).Output()
+				v := strings.TrimSpace(string(out))
+				if v == "active" {
+					break
+				}
+				if v == "failed" || time.Now().After(deadline) {
+					return fmt.Errorf("rayspa did not start (%s): journalctl -u rayspa says why", v)
+				}
+				select {
+				case <-ctx.Done():
+					return errInterrupted
+				case <-time.After(500 * time.Millisecond):
+				}
+			}
 			err := waitFile(ctx, relaySnapshot, 45*time.Second)
 			if err != nil && ctx.Err() == nil {
 				return fmt.Errorf("the relay took no perimeter from its exit %s (API port %d) within 45 s: does the exit "+
@@ -204,14 +221,10 @@ func installRelay(bundlePath, packages string) error {
 			if _, err := h.WriteFile(forwardFile); err != nil {
 				return err
 			}
-			// Every time, and checked: another sysctl file may turn it off
-			// again at boot (99-sysctl.conf comes after ours).
-			h.ApplySysctl([]deploy.File{forwardFile})
-			if v, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err != nil || strings.TrimSpace(string(v)) != "1" {
-				return fmt.Errorf("net.ipv4.ip_forward stays off (%s %v): another sysctl setting turns it off; "+
-					"sysctl --system shows which", strings.TrimSpace(string(v)), err)
-			}
-			return nil
+			// All of sysctl.d in order, as at boot: a file after ours that
+			// turns it off (99-sysctl.conf, a hardening profile) shows now.
+			applied := commandApart("sysctl", "-q", "--system").Run()
+			return checkForwarding(func() ([]byte, error) { return os.ReadFile("/proc/sys/net/ipv4/ip_forward") }, applied)
 		},
 		enable: func() error { return h.EnableNow(relayUnit) },
 	}
@@ -261,8 +274,58 @@ func underGuard(lock, armed string, f func() error) error {
 
 // startGuarded starts rayspa only while the guard is armed: the guard that
 // went off before would leave it running unchecked.
+//
+// The start job is only queued under the lock (--no-block): starting may
+// wait minutes for the network, and the guard must not wait on rayctl meanwhile.
 func startGuarded(lock, armed string, run func(string, ...string) error) error {
-	return underGuard(lock, armed, func() error { return run("systemctl", "start", relayUnit) })
+	return underGuard(lock, armed, func() error { return run("systemctl", "start", "--no-block", relayUnit) })
+}
+
+// relayInstallLock keeps two relay installs from running at once.
+const relayInstallLock = "/run/raycontrol-relay-install.lock"
+
+// takeInstallLock takes the install lock or says another install has it.
+func takeInstallLock(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: a fixed path
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errors.New("another rayctl install -relay is running on this host")
+		}
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return f, nil
+}
+
+// maybeEnabled reads systemctl is-enabled: enabled unless it says it is
+// not; no answer may hide an enabled rayspa.
+func maybeEnabled(out string) bool {
+	v := strings.TrimSpace(out)
+	return v != "disabled" && v != "not-found" && v != "masked"
+}
+
+// maybeActive reads systemctl is-active: running unless it says it is not.
+func maybeActive(out string) bool {
+	v := strings.TrimSpace(out)
+	return v != "inactive" && v != "failed"
+}
+
+// checkForwarding reads net.ipv4.ip_forward after sysctl --system (applied:
+// its error) and says what keeps it off.
+func checkForwarding(read func() ([]byte, error), applied error) error {
+	v, err := read()
+	switch {
+	case err != nil:
+		return fmt.Errorf("net.ipv4.ip_forward cannot be read: %w", err)
+	case strings.TrimSpace(string(v)) == "1":
+		return nil
+	case applied != nil:
+		return fmt.Errorf("net.ipv4.ip_forward stays off: sysctl --system failed (%w)", applied)
+	}
+	return fmt.Errorf("net.ipv4.ip_forward stays off: a sysctl file after %s turns it off (sysctl --system shows which)", deploy.RelaySysctl)
 }
 
 // unguardAt disarms the guard, under its lock: an error if it went off.
@@ -333,10 +396,10 @@ func (r relaySteps) run(ctx context.Context) (snap *perimeterv1.Snapshot, warnin
 			return nil, "", fmt.Errorf("an earlier install's rayspa stays enabled, nothing changed: %w", err)
 		}
 	}
-	ok := false
+	ok, armed := false, false
 	defer func() {
 		if !ok {
-			err = r.stop(err)
+			err = r.stop(err, armed)
 		}
 	}()
 	step := func(f func() error) error {
@@ -348,7 +411,8 @@ func (r relaySteps) run(ctx context.Context) (snap *perimeterv1.Snapshot, warnin
 	// Stopped before its snapshot goes: a rayspa still running would save
 	// the earlier bundle's perimeter, and that would be checked instead.
 	for _, f := range []func() error{
-		r.guard, // before anything changes: the earlier rayspa still runs
+		// Before anything changes: the earlier rayspa still runs.
+		func() error { err := r.guard(); armed = err == nil; return err },
 		r.write,
 		func() error { return r.systemctl("stop", relayUnit) },
 		r.removeSnapshot,
@@ -357,7 +421,7 @@ func (r relaySteps) run(ctx context.Context) (snap *perimeterv1.Snapshot, warnin
 		func() (err error) { snap, err = r.readSnapshot(); return err },
 		func() (err error) { warning, err = r.check(snap); return err },
 		// Checked: rayspa may run now, whatever happens to rayctl.
-		r.unguard,
+		func() error { err := r.unguard(); armed = armed && err != nil; return err },
 		r.enable,
 		r.forward,
 	} {
@@ -373,28 +437,37 @@ func (r relaySteps) run(ctx context.Context) (snap *perimeterv1.Snapshot, warnin
 }
 
 // stop takes rayspa down after why, and says whether the host is open.
-func (r relaySteps) stop(why error) error {
+func (r relaySteps) stop(why error, armed bool) error {
+	unit := r.unitExists()
 	var disable error
-	if r.unitExists() {
+	if unit {
 		disable = r.systemctl("disable", "--now", relayUnit)
 	}
 	tear := r.teardown()
+	fix := fmt.Sprintf("run systemctl disable --now %s && %s teardown before you leave this session", relayUnit, deploy.DefaultBinaries.Rayspa)
 	switch {
 	case !r.tableGone():
-		// The timer, if armed, tries again.
-		return fmt.Errorf("%w; rayspa could NOT be taken down (%s): run systemctl disable --now %s && %s teardown "+
-			"before you leave this session", why, joined(disable, tear, errors.New("its table is still there")), relayUnit,
-			deploy.DefaultBinaries.Rayspa)
+		// The guard, if armed, tries again.
+		return fmt.Errorf("%w; rayspa could NOT be taken down%s: %s", why, paren(disable, tear, errors.New("its table is still there")), fix)
+	case unit && r.active():
+		// Perhaps running still, and putting its table back within seconds.
+		return fmt.Errorf("%w; rayspa could not be seen to stop%s: %s", why, paren(disable, tear), fix)
 	case disable != nil && r.enabled():
-		return fmt.Errorf("%w; the host is open now, but rayspa is still enabled and closes it again at boot (%s): "+
-			"run systemctl disable %s", why, joined(disable), relayUnit)
-	case r.active():
-		// Running still: it puts its table back within seconds.
-		return fmt.Errorf("%w; rayspa could NOT be stopped (%s): run systemctl disable --now %s && %s teardown "+
-			"before you leave this session", why, joined(disable, tear), relayUnit, deploy.DefaultBinaries.Rayspa)
+		return fmt.Errorf("%w; the host is open now, but rayspa is still enabled and closes it again at boot%s: run systemctl disable %s",
+			why, paren(disable), relayUnit)
 	}
-	_ = r.unguard() // not needed any more; may not be armed
+	if err := r.unguard(); armed && err != nil {
+		return fmt.Errorf("%w; rayspa is stopped and disabled and the host left open (%s)", why, joined(err))
+	}
 	return fmt.Errorf("%w; rayspa is stopped and disabled and the host left open", why)
+}
+
+// paren is joined in parentheses after a space, or nothing.
+func paren(errs ...error) string {
+	if s := joined(errs...); s != "" {
+		return " (" + s + ")"
+	}
+	return ""
 }
 
 // joined puts errors on one line.

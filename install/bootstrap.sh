@@ -262,6 +262,10 @@ main() {
 		RELAY_BUNDLE="$(cd "$(dirname "$RELAY_BUNDLE")" && pwd)/$(basename "$RELAY_BUNDLE")"
 		# Before the node's binaries are replaced by the release's.
 		[[ ! -e /var/lib/raycontrol/rayd.db ]] || die "this host is a node (/var/lib/raycontrol/rayd.db): a relay goes on a host of its own"
+		# One relay install at a time: not even binaries swapped under one.
+		if command -v flock >/dev/null && ! flock -n /run/raycontrol-relay-install.lock true; then
+			die "another rayctl install -relay is running on this host"
+		fi
 	fi
 	if [[ $VERSION != latest ]]; then
 		[[ $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "RAYCONTROL_VERSION is vX.Y.Z, not $VERSION"

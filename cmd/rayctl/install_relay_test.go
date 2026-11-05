@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -113,10 +114,11 @@ func TestCheckRelaySSH(t *testing.T) {
 // fakeRelayHost follows the steps of a relay install, with rayspa's state.
 type fakeRelayHost struct {
 	calls                 []string
-	unit, enabled, active bool // rayspa's unit file, enabled, running
-	table, guarded        bool // the perimeter's table, the guard timer armed
-	stuckEnabled          bool // disable --now stops rayspa but cannot disable it
-	stuckActive           bool // systemd does not answer: rayspa runs on, teardown goes ahead
+	unit, enabled, active bool   // rayspa's unit file, enabled, running
+	table, guarded        bool   // the perimeter's table, the guard timer armed
+	stuckEnabled          bool   // disable fails (read-only /etc): nothing changes
+	stuckActive           bool   // systemd does not answer: rayspa runs on, teardown goes ahead
+	crashAt, guardOffAt   string // rayspa dies, or the guard goes off, at that call
 	fails                 []string
 	panicAt, cancelAt     string
 	cancel                func()
@@ -128,6 +130,12 @@ func (f *fakeRelayHost) call(name string, then func()) error {
 	defer func() {
 		if name == f.cancelAt {
 			f.cancel()
+		}
+		if name == f.crashAt {
+			f.active = false
+		}
+		if name == f.guardOffAt {
+			f.guarded = false
 		}
 	}()
 	if name == f.panicAt {
@@ -146,13 +154,12 @@ func (f *fakeRelayHost) steps() relaySteps {
 	f.snap = &perimeterv1.Snapshot{Revision: 7}
 	return relaySteps{
 		unitExists: func() bool { return f.unit },
-		enabled:    func() bool { return f.enabled },
+		enabled:    func() bool { return f.enabled || f.stuckActive }, // no answer: maybe
 		active:     func() bool { return f.active },
 		systemctl: func(args ...string) error {
 			verb := strings.Join(args[:len(args)-1], " ")
 			if verb == "disable --now" && f.stuckEnabled {
 				f.calls = append(f.calls, strings.Join(args, " "))
-				f.active = false
 				return errors.New("read-only /etc")
 			}
 			if verb == "disable --now" && f.stuckActive {
@@ -285,16 +292,21 @@ func TestRelaySteps(t *testing.T) {
 	if _, err := f.run(); err == nil || !strings.Contains(err.Error(), "could NOT") || !f.guarded || !f.table {
 		t.Errorf("a table left: %+v %v", f, err)
 	}
-	// Open now, but still enabled for the next boot: said so.
-	f = &fakeRelayHost{fails: []string{"forward"}, stuckEnabled: true}
+	// Open now (rayspa died), but still enabled for the next boot: said so.
+	f = &fakeRelayHost{fails: []string{"forward"}, stuckEnabled: true, crashAt: "forward"}
 	if _, err := f.run(); err == nil || !strings.Contains(err.Error(), "at boot") || f.calls[len(f.calls)-1] != "teardown" {
 		t.Errorf("enabled at boot: %v %v", f.calls, err)
 	}
 	// systemd that does not answer: rayspa may run on and put its table
 	// back. Not said to be open, and the guard stays armed.
 	f = &fakeRelayHost{stuckActive: true, fails: []string{"wait"}}
-	if _, err := f.run(); err == nil || !strings.Contains(err.Error(), "could NOT be stopped") || !f.guarded {
+	if _, err := f.run(); err == nil || !strings.Contains(err.Error(), "could not be seen to stop") || strings.Contains(err.Error(), "open") || !f.guarded {
 		t.Errorf("still running: %+v %v", f, err)
+	}
+	// The guard that went off is said, not only the step that failed.
+	f = &fakeRelayHost{guardOffAt: "start " + u, fails: []string{"wait"}}
+	if _, err := f.run(); err == nil || !strings.Contains(err.Error(), "went off") {
+		t.Errorf("the guard went off: %v", err)
 	}
 	// The guard that went off before rayspa starts: it does not start.
 	f = &fakeRelayHost{}
@@ -341,7 +353,19 @@ func TestGuard(t *testing.T) {
 		t.Fatalf("arming: %v %v", calls, err)
 	}
 	calls = nil
-	if err := startGuarded(lock, armed, run); err != nil || !slices.Equal(calls, []string{"systemctl start " + relayUnit}) {
+	// Under the lock: the guard cannot go off while the start is queued.
+	inLock := func(name string, args ...string) error {
+		f, err := os.OpenFile(lock, os.O_RDWR, 0)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+			return errors.New("ran outside the guard's lock")
+		}
+		return run(name, args...)
+	}
+	if err := startGuarded(lock, armed, inLock); err != nil || !slices.Equal(calls, []string{"systemctl start --no-block " + relayUnit}) {
 		t.Fatalf("start while armed: %v %v", calls, err)
 	}
 	calls = nil
@@ -379,6 +403,66 @@ func TestGuard(t *testing.T) {
 		_ = guard.Wait()
 		if err == nil {
 			t.Errorf("flock %s: disarmed while the guard went off", mode)
+		}
+	}
+}
+
+// One install at a time.
+func TestInstallLock(t *testing.T) {
+	path := t.TempDir() + "/lock"
+	first, err := takeInstallLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := takeInstallLock(path); err == nil || !strings.Contains(err.Error(), "another") {
+		t.Fatalf("a second install: %v", err)
+	}
+	first.Close()
+	again, err := takeInstallLock(path)
+	if err != nil {
+		t.Fatalf("after the first: %v", err)
+	}
+	again.Close()
+	if _, err := takeInstallLock(t.TempDir() + "/no/such/dir/lock"); err == nil || strings.Contains(err.Error(), "another") {
+		t.Fatalf("an error that is no other install: %v", err)
+	}
+}
+
+// What systemctl says, or does not: rayspa counts as enabled and running
+// unless systemd says it is not.
+func TestSystemctlAnswers(t *testing.T) {
+	for out, want := range map[string]bool{"enabled\n": true, "disabled\n": false, "not-found\n": false, "masked": false, "": true, "static": true} {
+		if maybeEnabled(out) != want {
+			t.Errorf("is-enabled %q: %v", out, !want)
+		}
+	}
+	for out, want := range map[string]bool{"active\n": true, "inactive\n": false, "failed": false, "activating": true, "": true} {
+		if maybeActive(out) != want {
+			t.Errorf("is-active %q: %v", out, !want)
+		}
+	}
+}
+
+// Forwarding is read back after all of sysctl.d, and what keeps it off is
+// said.
+func TestCheckForwarding(t *testing.T) {
+	read := func(v string, err error) func() ([]byte, error) {
+		return func() ([]byte, error) { return []byte(v), err }
+	}
+	if err := checkForwarding(read("1\n", nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		read    func() ([]byte, error)
+		applied error
+		says    string
+	}{
+		"overridden":     {read("0\n", nil), nil, "a sysctl file after"},
+		"sysctl failed":  {read("0\n", nil), errors.New("exit status 1"), "sysctl --system failed"},
+		"cannot be read": {read("", os.ErrPermission), nil, "cannot be read"},
+	} {
+		if err := checkForwarding(c.read, c.applied); err == nil || !strings.Contains(err.Error(), c.says) {
+			t.Errorf("%s: %v", name, err)
 		}
 	}
 }
