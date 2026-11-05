@@ -336,6 +336,10 @@ func TestBuildSelfSteal(t *testing.T) {
 	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
+	// DoH, which rayd serves itself: deployed, not warned about.
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "doh", Name: "doh", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
 	m, err := render.Collect(ctx, st)
 	if err != nil {
 		t.Fatal(err)
@@ -352,6 +356,11 @@ func TestBuildSelfSteal(t *testing.T) {
 	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
 	if p.FrontDNS {
 		t.Error("the front answers DNS on a node without DNS tunnels")
+	}
+	for _, w := range p.Warnings {
+		if strings.Contains(w, "doh") {
+			t.Errorf("DoH warned about: %s", w)
+		}
 	}
 	site := file(p, "/etc/systemd/system/niko-site.service")
 	for _, want := range []string{

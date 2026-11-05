@@ -231,6 +231,9 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			naives = append(naives, s)
 		case s.Kind == "yggdrasil":
 			yggs = append(yggs, s)
+		case s.Kind == "doh":
+			// rayd serves it (serveDoH), behind the front: its socket
+			// directory is below, no unit of its own.
 		case s.UID != 0:
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("service %s (%s) is not deployed by this version", s.Name, s.Kind))
 		}
