@@ -38,6 +38,8 @@ type fakeFW struct {
 	relaysSets int      // SetRelays calls
 	adminFails int      // SetAdmin calls still to fail
 	spaFails   int      // SetSPAPorts calls still to fail
+	denyFails  int      // Deny calls still to fail
+	publicBad  bool     // SetPublic always fails
 	calls      []string // Setup, SetAdmin, SetRelays, Allow, SetSPAPorts, in order
 }
 
@@ -54,6 +56,9 @@ func (f *fakeFW) Setup() error {
 	f.setups++
 	f.gone = false
 	f.calls = append(f.calls, "Setup")
+	// A new table: nothing of the old one, grants included.
+	f.udp, f.tcp, f.public, f.admin, f.adminPorts, f.rot, f.open = nil, nil, nil, nil, nil, nil, nil
+	f.relays, f.relayPorts, f.forward = nil, nil, nil
 	return nil
 }
 func (f *fakeFW) Present() (bool, error) {
@@ -83,7 +88,13 @@ func (f *fakeFW) SetSPAPorts(udp, tcp []uint16) error {
 	f.udp, f.tcp = udp, tcp
 	return nil
 }
-func (f *fakeFW) SetPublic(p []Port) error { f.public = p; return nil }
+func (f *fakeFW) SetPublic(p []Port) error {
+	if f.publicBad {
+		return errors.New("nft: no such port")
+	}
+	f.public = p
+	return nil
+}
 func (f *fakeFW) SetRotation(udp map[uint16]uint16) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -124,6 +135,10 @@ func (f *fakeFW) Allow(a netip.Addr, ports []Port, ttl time.Duration) error {
 func (f *fakeFW) Deny(a netip.Addr, ports []Port) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.denyFails > 0 {
+		f.denyFails--
+		return errors.New("nft: busy")
+	}
 	for _, p := range ports {
 		delete(f.open, a.String()+" "+p.String())
 	}
@@ -634,5 +649,120 @@ func TestGateLocalNotForwarded(t *testing.T) {
 	}
 	if slices.Contains(fw.forward, Port{"tcp", 22}) || !slices.Contains(fw.forward, Port{"tcp", 443}) {
 		t.Fatalf("forward %v", fw.forward)
+	}
+}
+
+// A revocation the firewall refuses is tried again; one that comes while a
+// restore keeps failing is not opened again by the restore.
+func TestGateRevocations(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	fw := &fakeFW{}
+	g := NewGate(fw, quiet)
+	g.now = func() time.Time { return now }
+	alice := &perimeterv1.Device{Id: "alice", Key: key(0x11), Allowed: []uint32{2}}
+	snap := testSnapshot(alice)
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
+	}
+	knock := func() {
+		t.Helper()
+		if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), seal(t, snap, 0x11, now)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const grant = "203.0.113.9 udp/443"
+	knock()
+	alice.Allowed = nil
+	fw.denyFails = 1
+	if err := g.Update(snap); !errors.Is(err, ErrPending) || !fw.isOpen(grant) {
+		t.Fatalf("a refused revocation: open %v, %v", fw.isOpen(grant), err)
+	}
+	now = now.Add(time.Second)
+	if _, err := g.Tick(); err != nil || fw.isOpen(grant) || len(g.revoking) != 0 {
+		t.Fatalf("revocation tried again: open %v, %v", fw.isOpen(grant), err)
+	}
+
+	alice.Allowed = []uint32{2}
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	knock()
+	fw.flush()
+	fw.spaFails = 2 // the restore fails at the slots, after the grants, twice
+	now = now.Add(time.Second)
+	if _, err := g.Tick(); err == nil || !fw.isOpen(grant) {
+		t.Fatalf("a failed restore: open %v, %v", fw.isOpen(grant), err)
+	}
+	alice.Allowed = nil
+	if err := g.Update(snap); !errors.Is(err, ErrPending) {
+		t.Fatal(err)
+	}
+	if fw.isOpen(grant) {
+		t.Fatal("a restore opened again what the snapshot revokes")
+	}
+
+	// A grant still waiting to be closed, then held again by a new knock:
+	// it stays open.
+	now = now.Add(time.Minute)
+	if _, err := g.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	alice.Allowed = []uint32{2}
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
+	}
+	knock()
+	alice.Allowed = nil
+	fw.denyFails = 1000
+	if err := g.Update(snap); !errors.Is(err, ErrPending) {
+		t.Fatal(err)
+	}
+	alice.Allowed = []uint32{2}
+	if err := g.Update(snap); !errors.Is(err, ErrPending) {
+		t.Fatal(err)
+	}
+	knock()
+	fw.denyFails = 0
+	now = now.Add(time.Minute)
+	if _, err := g.Tick(); err != nil || !fw.isOpen(grant) {
+		t.Fatalf("a grant held again was closed: %v", err)
+	}
+}
+
+// One part the firewall keeps refusing does not hold back the others, and
+// admin prefixes come merged and unmapped.
+func TestGatePartsApart(t *testing.T) {
+	fw := &fakeFW{publicBad: true}
+	g := NewGate(fw, quiet)
+	snap := testSnapshot()
+	snap.AdminPrefixes = []string{"198.51.100.7/32", "198.51.100.0/24", "::ffff:203.0.113.0/120"}
+	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 22}}
+	if err := g.Update(snap); !errors.Is(err, ErrPending) {
+		t.Fatal(err)
+	}
+	want := []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24"), netip.MustParsePrefix("203.0.113.0/24")}
+	if !slices.Equal(fw.admin, want) || fw.relaysSets != 1 || len(fw.udp) == 0 {
+		t.Fatalf("behind a broken public port: admin %v, SetRelays %d, slots %v", fw.admin, fw.relaysSets, fw.udp)
+	}
+}
+
+// The TCP carrier off: no ports, said as an empty list, so that the
+// listeners close.
+func TestGateCarrierOff(t *testing.T) {
+	g := NewGate(&fakeFW{}, quiet)
+	snap := testSnapshot()
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
+	}
+	if ports, err := g.Tick(); err != nil || len(ports) == 0 {
+		t.Fatalf("carrier on: %v %v", ports, err)
+	}
+	snap.Spa.TcpCarrier = false
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
+	}
+	if ports, err := g.Tick(); err != nil || ports == nil || len(ports) != 0 {
+		t.Fatalf("carrier off: %#v %v", ports, err)
 	}
 }

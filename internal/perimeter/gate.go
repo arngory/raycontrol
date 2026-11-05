@@ -56,12 +56,13 @@ type Gate struct {
 	adminPorts []Port
 	relays     []netip.Prefix
 	relayPorts []Port
-	relaysSet  bool      // SetRelays has run: relay_check is on
-	restoring  bool      // a restore of the table has not finished
-	pending    *update   // a snapshot not applied in full yet
-	failures   int       // catching up failed so many times in a row
-	retryAt    time.Time // and is tried again from then on
-	forward    []Port    // every service port: what a relay forwards
+	relaysSet  bool              // SetRelays has run: relay_check is on
+	restoring  bool              // a restore of the table has not finished
+	pending    *update           // a snapshot not applied in full yet
+	revoking   map[grantKey]bool // revoked grants the firewall has not closed yet
+	failures   int               // catching up failed so many times in a row
+	retryAt    time.Time         // and is tried again from then on
+	forward    []Port            // every service port: what a relay forwards
 	// holders tracks which devices opened an address and port and until
 	// when, so that a revocation closes only what nobody else still holds.
 	holders  map[grantKey]map[string]time.Time
@@ -146,6 +147,9 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		if err != nil {
 			return fmt.Errorf("perimeter: admin prefix %q: %w", s, err)
 		}
+		if a := p.Addr(); a.Is4In6() && p.Bits() >= 96 {
+			p = netip.PrefixFrom(a.Unmap(), p.Bits()-96) // or IPv4 packets never match it
+		}
 		admin = append(admin, p)
 	}
 	admin = mergePrefixes(admin)
@@ -221,6 +225,11 @@ type update struct {
 // something changes.
 func (g *Gate) catchUpLocked(now time.Time) error {
 	err := func() error {
+		if g.pending != nil {
+			// Devices and scopes first: a restore must not open again what
+			// the snapshot revokes.
+			g.adoptLocked(g.pending)
+		}
 		if g.restoring {
 			if err := g.restoreLocked(); err != nil {
 				return err
@@ -248,39 +257,36 @@ func (g *Gate) catchUpLocked(now time.Time) error {
 
 // applyLocked brings the table in line with u. The gate's copies change only
 // with the firewall: after a failure, the same u applies what is left.
+//
+// Each part goes on its own: one the firewall keeps refusing does not hold
+// back the others (the admin addresses after a broken public port).
 func (g *Gate) applyLocked(u *update) error {
-	// A new verifier also drops the replay cache, so keep it unless the
-	// parameters really changed.
-	if g.verifier == nil || u.params != g.params || u.defTTL != g.defaultTTL || u.maxTTL != g.maxTTL {
-		g.verifier = spa.NewVerifier(u.params, u.defTTL, u.maxTTL, 100000)
-		g.verifier.SetClock(g.now)
-	}
-	g.verifier.SetDevices(u.devices)
-	g.params, g.tcpCarrier = u.params, u.tcpCarrier
-	g.defaultTTL, g.maxTTL = u.defTTL, u.maxTTL
-	g.services, g.allowed, g.rotations = u.services, u.allowed, u.rotations
-	// Revocations first: they do not wait for the rest of the table.
-	g.revokeLocked()
-
+	g.adoptLocked(u)
+	var errs []error
+	// Revocations first: they wait for nothing else.
+	errs = append(errs, g.denyLocked())
 	if !slices.Equal(u.public, g.public) {
 		if err := g.fw.SetPublic(u.public); err != nil {
-			return err
+			errs = append(errs, err)
+		} else {
+			g.public = u.public
 		}
-		g.public = u.public
 	}
 	if !slices.Equal(u.admin, g.admin) || !slices.Equal(u.adminPorts, g.adminPorts) {
 		if err := g.fw.SetAdmin(u.admin, u.adminPorts); err != nil {
-			return err
+			errs = append(errs, err)
+		} else {
+			g.admin, g.adminPorts = u.admin, u.adminPorts
 		}
-		g.admin, g.adminPorts = u.admin, u.adminPorts
 	}
 	// Once at least, even with no relays: it also ends flows of relays
 	// removed while rayspa was down.
 	if !g.relaysSet || !slices.Equal(u.relays, g.relays) || !slices.Equal(u.relayPorts, g.relayPorts) {
 		if err := g.fw.SetRelays(u.relays, u.relayPorts); err != nil {
-			return err
+			errs = append(errs, err)
+		} else {
+			g.relays, g.relayPorts, g.relaysSet = u.relays, u.relayPorts, true
 		}
-		g.relays, g.relayPorts, g.relaysSet = u.relays, u.relayPorts, true
 	}
 	var forward []Port
 	for id, ps := range u.services {
@@ -296,14 +302,58 @@ func (g *Gate) applyLocked(u *update) error {
 	slices.SortFunc(forward, func(a, b Port) int { return strings.Compare(a.String(), b.String()) })
 	if !slices.Equal(forward, g.forward) {
 		if err := g.fw.SetForward(forward); err != nil {
-			return err
+			errs = append(errs, err)
+		} else {
+			g.forward = forward
 		}
-		g.forward = forward
 	}
-	if err := g.acmeLocked(u.acme); err != nil {
-		return err
+	errs = append(errs, g.acmeLocked(u.acme), g.slotsLocked())
+	return errors.Join(errs...)
+}
+
+// adoptLocked takes the devices, their scopes and the SPA parameters of u,
+// and drops the holders u revokes: their grants wait in revoking until the
+// firewall closes them (denyLocked), and a restore does not open them again.
+func (g *Gate) adoptLocked(u *update) {
+	// A new verifier also drops the replay cache, so keep it unless the
+	// parameters really changed.
+	if g.verifier == nil || u.params != g.params || u.defTTL != g.defaultTTL || u.maxTTL != g.maxTTL {
+		g.verifier = spa.NewVerifier(u.params, u.defTTL, u.maxTTL, 100000)
+		g.verifier.SetClock(g.now)
 	}
-	return g.slotsLocked()
+	g.verifier.SetDevices(u.devices)
+	g.params, g.tcpCarrier = u.params, u.tcpCarrier
+	g.defaultTTL, g.maxTTL = u.defTTL, u.maxTTL
+	g.services, g.allowed, g.rotations = u.services, u.allowed, u.rotations
+	for key, devs := range g.holders {
+		for dev := range devs {
+			if !slices.Contains(g.portsFor(g.allowed[dev]), key.port) {
+				delete(devs, dev)
+			}
+		}
+		if len(devs) == 0 {
+			delete(g.holders, key)
+			if g.revoking == nil {
+				g.revoking = map[grantKey]bool{}
+			}
+			g.revoking[key] = true
+		}
+	}
+}
+
+// denyLocked closes the revoked grants; those the firewall refuses stay to
+// do, and the snapshot with them.
+func (g *Gate) denyLocked() error {
+	var errs []error
+	for key := range g.revoking {
+		if err := g.fw.Deny(key.addr, []Port{key.port}); err != nil {
+			errs = append(errs, fmt.Errorf("closing a revoked grant on %v: %w", key.port, err))
+			continue
+		}
+		delete(g.revoking, key)
+		g.log.Debug("revoked", "addr", key.addr, "port", key.port)
+	}
+	return errors.Join(errs...)
 }
 
 // acmeLocked opens, moves or closes the ACME window.
@@ -341,26 +391,6 @@ func (g *Gate) portsFor(ids []uint16) []Port {
 	return out
 }
 
-// revokeLocked drops holders whose device no longer has the port and closes
-// address/port pairs nobody holds any more.
-func (g *Gate) revokeLocked() {
-	for key, devs := range g.holders {
-		for dev := range devs {
-			if !slices.Contains(g.portsFor(g.allowed[dev]), key.port) {
-				delete(devs, dev)
-			}
-		}
-		if len(devs) == 0 {
-			delete(g.holders, key)
-			if err := g.fw.Deny(key.addr, []Port{key.port}); err != nil {
-				g.log.Warn("closing a revoked grant failed", "port", key.port, "err", err)
-			} else {
-				g.log.Debug("revoked", "addr", key.addr, "port", key.port)
-			}
-		}
-	}
-}
-
 // Handle checks one SPA packet from src and opens the granted ports.
 func (g *Gate) Handle(src netip.Addr, pkt []byte) (spa.Grant, error) {
 	g.mu.Lock()
@@ -382,6 +412,7 @@ func (g *Gate) Handle(src netip.Addr, pkt []byte) (spa.Grant, error) {
 		if g.holders[key] == nil {
 			g.holders[key] = map[string]time.Time{}
 		}
+		delete(g.revoking, key) // held again: not to be closed
 		g.holders[key][grant.DeviceID] = until
 	}
 	return grant, nil
@@ -433,8 +464,9 @@ func (g *Gate) Tick() ([]uint16, error) {
 	if err := g.slotsLocked(); err != nil {
 		return nil, err
 	}
-	// The ports are good even when a snapshot is behind.
-	return slices.Clone(g.tcpPorts), behind
+	// The ports are good even when a snapshot is behind; none is an empty
+	// list, not nil: the carrier closes what it has.
+	return append([]uint16{}, g.tcpPorts...), behind
 }
 
 // restoreLocked re-creates the table with everything the gate had put in
@@ -449,6 +481,7 @@ func (g *Gate) restoreLocked() error {
 	if err := g.fw.Setup(); err != nil {
 		return err
 	}
+	g.revoking = nil // a new table: no grant of theirs in it
 	if len(g.public) > 0 {
 		if err := g.fw.SetPublic(g.public); err != nil {
 			return err
