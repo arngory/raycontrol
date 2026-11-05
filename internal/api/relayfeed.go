@@ -18,6 +18,9 @@ type relayFeed struct{ r *Remote }
 
 var errNotRelay = connect.NewError(connect.CodeNotFound, errors.New("not found"))
 
+// maxRelayStreams bounds the WatchRelay streams of one relay at once.
+const maxRelayStreams = 2
+
 // WatchRelay streams a relay's perimeter: the current snapshot at once and a
 // new one after every change. The caller is the relay whose client
 // certificate this is, calling from the relay's address; anyone else gets
@@ -35,6 +38,23 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 		f.r.Log.Warn("relay certificate from another address", "relay", relay.Name, "from", req.Peer().Addr)
 		return errNotRelay
 	}
+	// One relay runs one rayspa: a second stream may overlap a reconnect,
+	// more is a relay doing work it has no need for.
+	f.r.relayMu.Lock()
+	if f.r.relayStreams == nil {
+		f.r.relayStreams = map[string]int{}
+	}
+	if f.r.relayStreams[relay.Name] >= maxRelayStreams {
+		f.r.relayMu.Unlock()
+		return connect.NewError(connect.CodeResourceExhausted, errors.New("too many feeds for this relay"))
+	}
+	f.r.relayStreams[relay.Name]++
+	f.r.relayMu.Unlock()
+	defer func() {
+		f.r.relayMu.Lock()
+		f.r.relayStreams[relay.Name]--
+		f.r.relayMu.Unlock()
+	}()
 	refresh := p.Refresh
 	if refresh <= 0 {
 		refresh = time.Minute

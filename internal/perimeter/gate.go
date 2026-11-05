@@ -181,6 +181,15 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		if err := g.fw.SetRelays(relays, relayPorts); err != nil {
 			return err
 		}
+		// A relay removed: its flows already through end too, not only new
+		// ones (established flows pass before the relay rules).
+		if f, ok := g.fw.(interface{ ForgetSource(netip.Addr) }); ok {
+			for _, p := range g.relays {
+				if !slices.Contains(relays, p) {
+					f.ForgetSource(p.Addr())
+				}
+			}
+		}
 		g.relays, g.relayPorts = relays, relayPorts
 	}
 	var forward []Port

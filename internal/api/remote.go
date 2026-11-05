@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -40,6 +41,9 @@ type Remote struct {
 	// perimeter (RelayService, relay-v1 §3.1); its TTLs and carrier apply.
 	Perimeter *PerimeterServer
 	now       func() time.Time
+
+	relayMu      sync.Mutex
+	relayStreams map[string]int // WatchRelay streams open per relay
 }
 
 var (

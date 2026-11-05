@@ -147,6 +147,13 @@ func TestCarryRevocationsMore(t *testing.T) {
 		t.Fatal(err)
 	}
 	must(t, s.SetRelayCertPin(ctx, "relay1", "relay-old"))
+	if _, err := s.CreateRelay(ctx, "relay2", netip.MustParseAddr("198.51.100.21")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetRelaySPA(ctx, "relay2", []byte(`{"old":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := s.CreateService(ctx, Service{Kind: "dnstt", Name: "dns", Enabled: true, Settings: `{"auth":"optional"}`})
 	s.Close()
 	copyFile(t, current, saved)
 
@@ -172,6 +179,10 @@ func TestCarryRevocationsMore(t *testing.T) {
 		t.Fatal(err)
 	}
 	must(t, s.DeleteRelay(ctx, "relay1"))
+	must(t, s.ReplaceRelaySPA(ctx, "relay2", []byte(`{"new":1}`)))
+	if _, err := s.db.ExecContext(ctx, `UPDATE services SET settings_json = json_set(settings_json, '$.auth', 'required') WHERE id = ?`, dns.ID); err != nil {
+		t.Fatal(err)
+	}
 	s.Close()
 
 	if err := CarryRevocations(ctx, saved, current); err != nil {
@@ -185,8 +196,11 @@ func TestCarryRevocationsMore(t *testing.T) {
 	if u, err := s.UserByName(ctx, "mallory"); err != nil || u.Enabled {
 		t.Errorf("deleted mallory (her ID reused): enabled %v %v", u.Enabled, err)
 	}
-	if rs, _ := s.ListRelays(ctx); len(rs) != 0 {
-		t.Errorf("removed relay back: %v", rs)
+	if rs, _ := s.ListRelays(ctx); len(rs) != 1 || rs[0].Name != "relay2" || string(rs[0].SPA) != `{"new":1}` {
+		t.Errorf("relays %+v: removed one back, or the old SPA", rs)
+	}
+	if svc, _ := s.ServiceByName(ctx, "dns"); !strings.Contains(svc.Settings, `"auth":"required"`) {
+		t.Errorf("dnsauth went back: %s", svc.Settings)
 	}
 	var n int
 	s.db.QueryRowContext(ctx, `SELECT count(*) FROM user_services us JOIN users u ON u.id = us.user_id WHERE u.name = 'alice'`).Scan(&n)

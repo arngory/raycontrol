@@ -186,3 +186,41 @@ func TestRelayFeed(t *testing.T) {
 		s.Close()
 	}
 }
+
+// One relay gets at most two feeds at once.
+func TestRelayFeedStreams(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	c := NewUnixClient(sock)
+	c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "api", Name: "api"}))
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r1", Address: "198.51.100.20"})); err != nil {
+		t.Fatal(err)
+	}
+	enc, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.2.7"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := node.DecodeRelayBundle(enc)
+	addr, _ := serveRemoteFrom(t, srv, "198.51.100.20:40000")
+	cert, _ := DecodeClientCertificate([]byte(b.Cert))
+	feed := perimeterv1connect.NewRelayServiceClient(remoteHTTP(b.API.Pin, cert), "https://"+addr)
+	var open []*connect.ServerStreamForClient[perimeterv1.WatchRelayResponse]
+	for range 2 {
+		s, err := feed.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{}))
+		if err != nil || !s.Receive() {
+			t.Fatalf("feed: %v %v", err, s.Err())
+		}
+		open = append(open, s)
+	}
+	s, _ := feed.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{}))
+	if s.Receive() || connect.CodeOf(s.Err()) != connect.CodeResourceExhausted {
+		t.Fatalf("a third feed: %v", s.Err())
+	}
+	open[0].Close()
+	time.Sleep(200 * time.Millisecond)
+	s, _ = feed.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{}))
+	if !s.Receive() {
+		t.Fatalf("a feed after one closed: %v", s.Err())
+	}
+}

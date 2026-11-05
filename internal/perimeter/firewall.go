@@ -344,6 +344,17 @@ func (n *NFT) SetForward(ports []Port) error {
 
 // SetRelays replaces the relays' addresses (single ones) and the ports they
 // reach.
+// ForgetSource ends the tracked flows from an address (conntrack -D), so a
+// relay removed loses the flows it had through too. Without the conntrack
+// tool they end when they close.
+func (n *NFT) ForgetSource(a netip.Addr) {
+	path, err := exec.LookPath("conntrack")
+	if err != nil {
+		return
+	}
+	_ = exec.Command(path, "-D", "-s", a.String()).Run() //nolint:gosec // G204: a fixed tool, an address
+}
+
 func (n *NFT) SetRelays(addrs []netip.Prefix, ports []Port) error {
 	var v4, v6 []string
 	for _, p := range addrs {

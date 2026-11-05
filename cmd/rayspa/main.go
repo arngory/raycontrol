@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -110,6 +111,11 @@ func run(args []string) error {
 			return err
 		}
 		log.Info("relay", "name", b.Name, "exit", b.Exit)
+		// Forwarding is the relay's job (relay-v1 §3.1): rayctl install
+		// -relay turns it on; without it the kernel drops what it redirects.
+		if v, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err == nil && strings.TrimSpace(string(v)) != "1" {
+			log.Error("net.ipv4.ip_forward is off: nothing reaches the exit (sysctl -w net.ipv4.ip_forward=1)")
+		}
 	}
 	if err := fw.Setup(); err != nil {
 		return err

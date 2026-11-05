@@ -15,10 +15,10 @@ import (
 //     replaced stays replaced;
 //   - a user disabled or deleted stays disabled, an earlier expiry stays,
 //     and a service taken from a user stays taken;
-//   - a service disabled or deleted stays disabled, and a REALITY no longer
-//     open is not open;
+//   - a service disabled or deleted stays disabled, a REALITY no longer open
+//     is not open, and a DNS tunnel keeps the stricter dnsauth mode;
 //   - an unused invite withdrawn stays withdrawn, a relay removed stays
-//     removed, and a relay's certificate replaced stays replaced;
+//     removed, and a relay's certificate and SPA replaced stay replaced;
 //   - the settings named in keep (the admin addresses) take current's value.
 //
 // Users and relays are matched by ID, name or address, and creation time:
@@ -69,6 +69,13 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 		`UPDATE services SET settings_json = json_remove(settings_json, '$.open')
 		  WHERE kind = 'reality' AND json_extract(settings_json, '$.open') = 1
 		    AND NOT EXISTS (SELECT 1 FROM cur.services c WHERE c.id = services.id AND json_extract(c.settings_json, '$.open') = 1)`,
+		// dnsauth (dnsauth-v1 §5): the stricter mode of the two stays.
+		`UPDATE services SET settings_json = json_set(settings_json, '$.auth',
+		    (SELECT json_extract(c.settings_json, '$.auth') FROM cur.services c WHERE c.id = services.id))
+		  WHERE kind = 'dnstt'
+		    AND (SELECT CASE json_extract(c.settings_json, '$.auth') WHEN 'required' THEN 2 WHEN 'optional' THEN 1 ELSE 0 END
+		         FROM cur.services c WHERE c.id = services.id)
+		      > CASE json_extract(settings_json, '$.auth') WHEN 'required' THEN 2 WHEN 'optional' THEN 1 ELSE 0 END`,
 	}
 	type table struct{ name, column, stmt string }
 	for _, t := range []table{
@@ -81,6 +88,9 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 		                    WHERE c.id = relays.id AND c.address = relays.address AND c.created_at = relays.created_at)`},
 		{"relays", "cert_pin", `UPDATE relays SET cert_pin = (SELECT c.cert_pin FROM cur.relays c WHERE c.id = relays.id)
 		  WHERE EXISTS (SELECT 1 FROM cur.relays c WHERE c.id = relays.id AND c.cert_pin IS NOT relays.cert_pin)`},
+		// A relay's SPA goes with its certificate: new keys for a lost relay.
+		{"relays", "spa_json", `UPDATE relays SET spa_json = (SELECT c.spa_json FROM cur.relays c WHERE c.id = relays.id)
+		  WHERE EXISTS (SELECT 1 FROM cur.relays c WHERE c.id = relays.id AND c.spa_json IS NOT relays.spa_json)`},
 	} {
 		// The copy may be older than the table or the column; the current
 		// database is newer, so it has them.

@@ -314,7 +314,14 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool, carry carry) error {
 		fmt.Println("no copy of the database from before the update: it stays as it is")
 		return c.rollback(ctx, "asked for", false, carry)
 	}
-	now, err := store.Schema(ctx, deploy.DB)
+	// rayd's database is read from root's copy: SQLite would follow a link
+	// or block on a FIFO planted in rayd's directory.
+	current, done, err := rootCopy(deploy.DB)
+	if err != nil {
+		return err
+	}
+	now, err := store.Schema(ctx, current)
+	done()
 	if err != nil {
 		return err
 	}
@@ -359,7 +366,11 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 		// Revocations since the copy stay (the copy is root's, in
 		// previousDir): a rollback must not let a revoked device back in.
 		if carry != carrySkip {
-			err := store.CarryRevocations(ctx, saved, deploy.DB, node.AdminAccessSetting)
+			current, done, err := rootCopy(deploy.DB)
+			if err == nil {
+				err = store.CarryRevocations(ctx, saved, current, node.AdminAccessSetting)
+				done()
+			}
 			switch {
 			case err != nil && carry == carryMust:
 				return fmt.Errorf("keeping the revocations made since the update: %w (rayd is stopped; "+
@@ -447,6 +458,22 @@ func copyDB(src, dst string) error {
 		}
 	}
 	return nil
+}
+
+// rootCopy copies rayd's database (and its WAL) into a directory of root's
+// own, with copyDB's checks, for SQLite to read there; done removes it.
+func rootCopy(db string) (path string, done func(), err error) {
+	dir, err := os.MkdirTemp("", "rayctl-db-")
+	if err != nil {
+		return "", nil, err
+	}
+	done = func() { _ = os.RemoveAll(dir) }
+	path = filepath.Join(dir, filepath.Base(db))
+	if err := copyDB(db, path); err != nil {
+		done()
+		return "", nil, err
+	}
+	return path, done, nil
 }
 
 // readRegular reads a regular file without following a link to it.
