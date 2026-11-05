@@ -312,20 +312,40 @@ func (h *Host) WarnRelayDropChains(probePort uint16) {
 const rayspaTable = "raycontrol"
 
 // warnPort53 warns when another process holds UDP port 53 that the front
-// needs for the DNS tunnels. systemd-resolved's stub (127.0.0.53,
-// 127.0.0.54) shares it with the front: both bind with SO_REUSEADDR.
+// needs for the DNS tunnels.
 func (h *Host) warnPort53(frontUID int) {
+	for _, o := range h.OthersOn53(frontUID) {
+		fmt.Fprintf(h.Out, "warning: UDP port 53 (%s) is taken by %s (another DNS server?); "+
+			"the DNS tunnels' queries there do not reach the front\n", o.Addr, o.Owner)
+	}
+}
+
+// Holder53 is a socket on UDP port 53 that is not the front's.
+type Holder53 struct{ Addr, Owner string }
+
+// OthersOn53 lists the sockets on UDP port 53 other than the front's and
+// systemd-resolved's stub (127.0.0.53, 127.0.0.54), which shares the port
+// with the front: both bind with SO_REUSEADDR (niko-server v0.8.2). Another
+// such socket takes the datagrams to its own address, quietly; one without
+// it keeps the front from starting.
+func (h *Host) OthersOn53(frontUID int) []Holder53 {
+	var out []Holder53
 	for _, l := range h.port53() {
 		if l.uid == frontUID || l.addr == "127.0.0.53" || l.addr == "127.0.0.54" {
 			continue
 		}
-		owner := strconv.Itoa(l.uid)
-		if u, err := user.LookupId(owner); err == nil {
-			owner = u.Username
+		owner := "uid " + strconv.Itoa(l.uid)
+		if u, err := user.LookupId(strconv.Itoa(l.uid)); err == nil {
+			owner = "user " + u.Username
 		}
-		fmt.Fprintf(h.Out, "warning: UDP port 53 (%s) is taken by user %s (another DNS server?); "+
-			"the front cannot answer the DNS tunnels until it is freed\n", l.addr, owner)
+		out = append(out, Holder53{l.addr, owner})
 	}
+	return out
+}
+
+// stubOn53 reports whether systemd-resolved's stub holds 127.0.0.53:53.
+func (h *Host) stubOn53() bool {
+	return slices.ContainsFunc(h.port53(), func(l udpListener) bool { return l.addr == "127.0.0.53" })
 }
 
 type udpListener struct {

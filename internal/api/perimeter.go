@@ -95,12 +95,12 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 		return nil, err
 	}
 	public := map[string]bool{}
-	ssh := sshPorts(services)
+	ssh := provision.SSHPorts(services)
 	for _, svc := range services {
 		if !svc.Enabled {
 			continue
 		}
-		ports, err := servicePorts(svc, ssh)
+		ports, err := provision.ServicePorts(svc, ssh)
 		if err != nil {
 			// Settings from before a check (S-3): the service is not
 			// rendered either (render.ServiceErrors), so it gets no port;
@@ -177,7 +177,7 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 			if !svc.Enabled || svc.Kind == "ssh" || svc.Public() {
 				continue
 			}
-			ports, _ := servicePorts(svc, ssh)
+			ports, _ := provision.ServicePorts(svc, ssh)
 			for _, port := range ports {
 				if !seen[port.String()] {
 					seen[port.String()] = true
@@ -278,7 +278,7 @@ func (p *PerimeterServer) relayServices(ctx context.Context, relay store.Relay) 
 		return nil, nil, err
 	}
 	scoped := map[uint16]bool{}
-	ssh := sshPorts(services)
+	ssh := provision.SSHPorts(services)
 	sshPort := store.Port{Proto: "tcp", Num: relay.SSHPort}
 	for _, svc := range services {
 		if !svc.Enabled || svc.Public() {
@@ -292,16 +292,10 @@ func (p *PerimeterServer) relayServices(ctx context.Context, relay store.Relay) 
 			}
 			continue
 		}
-		ports, err := servicePorts(svc, ssh)
+		ports, err := provision.RelayPorts(relay, svc, ssh)
 		if err != nil {
 			continue
 		}
-		// The relay host's SSH and its probe endpoint are not forwarded
-		// (IssueRelayBundle keeps clear of them; a service given one later
-		// loses it here).
-		ports = slices.DeleteFunc(ports, func(p store.Port) bool {
-			return p == sshPort || relay.ProbePort != 0 && p.Num == relay.ProbePort
-		})
 		if len(ports) == 0 {
 			continue
 		}
@@ -336,33 +330,6 @@ func (p *PerimeterServer) RelayKnows(ctx context.Context, name, device string) (
 		}
 	}
 	return false, nil
-}
-
-// sshPorts are the ports of the SSH services, enabled or not: sshd listens
-// whatever the service's state.
-func sshPorts(services []store.Service) map[store.Port]bool {
-	out := map[store.Port]bool{}
-	for _, svc := range services {
-		if svc.Kind == "ssh" {
-			ports, _ := svc.Ports()
-			for _, p := range ports {
-				out[p] = true
-			}
-		}
-	}
-	return out
-}
-
-// servicePorts are a service's ports in the perimeter: never SSH's for
-// another service. Creating one is refused (provision.sshPortsApart); a
-// database from before the check may have one, and a grant or a relay for
-// that service must not reach sshd.
-func servicePorts(svc store.Service, ssh map[store.Port]bool) ([]store.Port, error) {
-	ports, err := svc.Ports()
-	if err != nil || svc.Kind == "ssh" {
-		return ports, err
-	}
-	return slices.DeleteFunc(slices.Clone(ports), func(p store.Port) bool { return ssh[p] }), nil
 }
 
 // openPort is the one port "open" makes public.

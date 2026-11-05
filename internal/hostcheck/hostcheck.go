@@ -264,7 +264,10 @@ func (h *Host) Check(ctx context.Context, o Options) []Result {
 		// systemd-resolved's stub shares the port with the front (both
 		// bind with SO_REUSEADDR, niko-server v0.8.2); anything else
 		// keeps it.
-		others := others(listeners, "udp", 53, func(l listener) bool { return ours(l) || l.comm == "systemd-resolve" })
+		others := others(listeners, "udp", 53, func(l listener) bool {
+			stub := l.addr.Addr() == netip.MustParseAddr("127.0.0.53") || l.addr.Addr() == netip.MustParseAddr("127.0.0.54")
+			return ours(l) || l.comm == "systemd-resolve" && stub
+		})
 		req("port udp 53", len(others) == 0, describe(others),
 			"stop what listens there (bind9, dnsmasq, unbound): the DNS tunnels answer on UDP 53")
 	}

@@ -197,7 +197,8 @@ func TestOwnListenersAndResolved(t *testing.T) {
 	h, root, _ := fakeHost(t)
 	// The node's own front on 443 (rayctl check on an installed node, after
 	// an update: the replaced binary reads "(deleted)"), and
-	// systemd-resolved's stub on 127.0.0.53:53, which the node turns off.
+	// systemd-resolved's stub on 127.0.0.53:53, which shares the port with
+	// the front.
 	addListener(root, "tcp", tcp443, "900", "7001", "niko-server", "/usr/local/libexec/raycontrol/niko-server (deleted)")
 	addListener(root, "udp", "   2: 3500007F:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   991        0 7002 2\n",
 		"300", "7002", "systemd-resolve", "/usr/lib/systemd/systemd-resolved")
@@ -207,6 +208,13 @@ func TestOwnListenersAndResolved(t *testing.T) {
 	}
 	if r, _ := find(rs, Required, "port udp 53"); !r.OK {
 		t.Fatalf("resolved's stub: %+v", r)
+	}
+	// resolved on another address (DNSStubListenerExtra=0.0.0.0): the
+	// front's port is taken.
+	addListener(root, "udp", "   3: 00000000:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000   991        0 7003 2\n",
+		"301", "7003", "systemd-resolve", "/usr/lib/systemd/systemd-resolved")
+	if r, _ := find(h.Check(context.Background(), Options{Services: []string{"masterdns"}}), Required, "port udp 53"); r.OK {
+		t.Fatalf("resolved on 0.0.0.0:53 passed: %+v", r)
 	}
 }
 

@@ -18,7 +18,7 @@ const RelayProbeUnit = "rayd-relay.service"
 
 // RelayProbeState is where rayd relay keeps the devices of its last
 // snapshot.
-const RelayProbeState = "/var/lib/rayd-relay/devices.pb"
+const RelayProbeState = "/var/lib/rayd-relay/devices.json"
 
 // relayProbeBundleCopy is rayd relay's copy of the bundle, as rayspa's.
 const relayProbeBundleCopy = "/run/rayd-relay/relay.bundle"
@@ -48,12 +48,14 @@ func RelayPlan(bin Binaries) Plan {
 	// above 1024, its own copy of the bundle. It runs only beside rayspa:
 	// rayspa stopped (a failed install, the guard, by hand) stops it, and
 	// it does not start without rayspa, so the exit never lists an
-	// endpoint on a relay that forwards nothing.
+	// endpoint on a relay that forwards nothing; and rayspa's start pulls
+	// it in (enabled, it is wanted by rayspa), so it comes back with it.
 	probe := unit{
 		name:        RelayProbeUnit,
 		description: "raycontrol relay probe endpoint (relay-v1 §9.1)",
 		after:       []string{u.name},
 		unitLines:   []string{"PartOf=" + u.name, "Requisite=" + u.name},
+		wantedBy:    u.name,
 		service: []string{
 			"User=rayd", "Group=rayd",
 			"RuntimeDirectory=rayd-relay", "RuntimeDirectoryMode=0700",

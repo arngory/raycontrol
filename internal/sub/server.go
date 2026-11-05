@@ -266,17 +266,15 @@ func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) erro
 	if err != nil {
 		return err
 	}
-	ports := map[uint16][]store.Port{}
+	byID := map[uint16]store.Service{}
 	for _, svc := range services {
-		ports[uint16(svc.ID)], _ = svc.Ports()
+		byID[uint16(svc.ID)] = svc
 	}
-	// A relay forwards a service's ports but its own SSH and probe
-	// endpoint's (RelaySnapshot): a service on none of the rest is not
-	// reached there.
+	ssh := provision.SSHPorts(services)
+	// A relay forwards what its snapshot says (provision.RelayPorts).
 	forwards := func(r store.Relay, svc uint16) bool {
-		return slices.ContainsFunc(ports[svc], func(p store.Port) bool {
-			return p != (store.Port{Proto: "tcp", Num: r.SSHPort}) && (r.ProbePort == 0 || p.Num != r.ProbePort)
-		})
+		ports, err := provision.RelayPorts(r, byID[svc], ssh)
+		return err == nil && len(ports) > 0
 	}
 	for i := range p.Profiles {
 		for _, svc := range m.Services {

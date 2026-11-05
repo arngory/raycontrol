@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -23,7 +24,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/arngory/raycontrol/internal/api"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
@@ -49,6 +49,9 @@ type Server struct {
 	// State keeps the devices of the last snapshot for a restart while the
 	// exit is away ("" none); it holds their K_relay, so only rayd's.
 	State string
+	// ID names the bundle (its client certificate's pin): kept devices of
+	// another bundle, another exit's perhaps, are not taken.
+	ID string
 
 	mu      sync.Mutex
 	devices map[string][spa.KeySize]byte // K_relay of the devices the relay knows
@@ -77,6 +80,7 @@ func New(b node.RelayBundle, daily int64, log *slog.Logger) (*Server, *tls.Confi
 	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: api.PinnedTLS(b.API.Pin, &cert), ForceAttemptHTTP2: true}}
 	s := &Server{
 		Name: b.Name,
+		ID:   api.CertPin(cert.Leaf),
 		Exit: perimeterv1connect.NewRelayServiceClient(hc, "https://"+netip.AddrPortFrom(b.Exit, b.API.Port).String()),
 		Log:  log,
 	}
@@ -189,8 +193,15 @@ func (s *Server) Handler() http.Handler {
 	return httpx.NoRedirect(mux)
 }
 
-// Load takes the devices kept in State by an earlier run: the exit may be
-// away when this one starts.
+// kept is State's content: the devices of the last snapshot, for the
+// bundle ID.
+type kept struct {
+	ID      string            `json:"id"`
+	Devices map[string][]byte `json:"devices"` // K_relay by device ID
+}
+
+// Load takes the devices kept in State by an earlier run with this bundle:
+// the exit may be away when this one starts.
 func (s *Server) Load() error {
 	if s.State == "" {
 		return nil
@@ -202,20 +213,37 @@ func (s *Server) Load() error {
 	if err != nil {
 		return err
 	}
-	snap := &perimeterv1.Snapshot{}
-	if err := proto.Unmarshal(b, snap); err != nil {
+	var k kept
+	if err := json.Unmarshal(b, &k); err != nil {
 		return fmt.Errorf("%s: %w", s.State, err)
 	}
-	s.take(snap)
+	if k.ID != s.ID {
+		return fmt.Errorf("%s: the devices of another bundle", s.State)
+	}
+	devices := map[string][spa.KeySize]byte{}
+	for id, key := range k.Devices {
+		if len(key) == spa.KeySize {
+			devices[id] = [spa.KeySize]byte(key)
+		}
+	}
+	s.mu.Lock()
+	s.devices = devices
+	s.mu.Unlock()
 	return nil
 }
 
-// save keeps the devices of snap in State: written aside, then renamed.
-func (s *Server) save(snap *perimeterv1.Snapshot) error {
+// save keeps the devices in State: written aside, then renamed.
+func (s *Server) save() error {
 	if s.State == "" {
 		return nil
 	}
-	b, err := proto.Marshal(&perimeterv1.Snapshot{Revision: snap.GetRevision(), Devices: snap.GetDevices()})
+	k := kept{ID: s.ID, Devices: map[string][]byte{}}
+	s.mu.Lock()
+	for id, key := range s.devices {
+		k.Devices[id] = key[:]
+	}
+	s.mu.Unlock()
+	b, err := json.Marshal(k)
 	if err != nil {
 		return err
 	}
@@ -273,7 +301,7 @@ func (s *Server) Watch(ctx context.Context) {
 				snap := stream.Msg().Snapshot
 				s.take(snap)
 				s.setUp(true)
-				if err := s.save(snap); err != nil {
+				if err := s.save(); err != nil {
 					s.Log.Warn("relay probe: devices not kept", "err", err)
 				}
 			}

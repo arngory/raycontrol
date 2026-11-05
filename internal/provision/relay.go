@@ -89,3 +89,46 @@ func RelayProbePort(avoid []store.Port, p spa.Params) (uint16, error) {
 	}
 	return 0, fmt.Errorf("%w: no port for the relay's probe endpoint", store.ErrInvalid)
 }
+
+// SSHPorts are the ports of the SSH services, enabled or not: sshd listens
+// whatever the service's state.
+func SSHPorts(services []store.Service) map[store.Port]bool {
+	out := map[store.Port]bool{}
+	for _, svc := range services {
+		if svc.Kind == "ssh" {
+			ports, _ := svc.Ports()
+			for _, p := range ports {
+				out[p] = true
+			}
+		}
+	}
+	return out
+}
+
+// ServicePorts are a service's ports in the perimeter: never SSH's for
+// another service. Creating one is refused (provision.sshPortsApart); a
+// database from before the check may have one, and a grant or a relay for
+// that service must not reach sshd.
+func ServicePorts(svc store.Service, ssh map[store.Port]bool) ([]store.Port, error) {
+	ports, err := svc.Ports()
+	if err != nil || svc.Kind == "ssh" {
+		return ports, err
+	}
+	return slices.DeleteFunc(slices.Clone(ports), func(p store.Port) bool { return ssh[p] }), nil
+}
+
+// RelayPorts are the ports of svc a relay forwards: its own (ServicePorts),
+// but the relay host's SSH and the relay's probe endpoint, which the relay
+// serves itself (IssueRelayBundle keeps clear of them; a service given one
+// later loses it there). The relay's snapshot and the subscription's via
+// both go by it.
+func RelayPorts(relay store.Relay, svc store.Service, ssh map[store.Port]bool) ([]store.Port, error) {
+	ports, err := ServicePorts(svc, ssh)
+	if err != nil {
+		return nil, err
+	}
+	sshPort := store.Port{Proto: "tcp", Num: relay.SSHPort}
+	return slices.DeleteFunc(slices.Clone(ports), func(p store.Port) bool {
+		return p == sshPort || relay.ProbePort != 0 && p.Num == relay.ProbePort
+	}), nil
+}

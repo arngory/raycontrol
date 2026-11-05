@@ -150,6 +150,8 @@ type unit struct {
 	needs string
 	// unitLines are more lines of [Unit] (dependencies).
 	unitLines []string
+	// wantedBy is the unit enabling it pulls in: multi-user.target if empty.
+	wantedBy string
 }
 
 func (u unit) file() File {
@@ -170,7 +172,11 @@ func (u unit) file() File {
 		b.WriteString(l + "\n")
 	}
 	b.WriteString(hardening)
-	b.WriteString("\n[Install]\nWantedBy=multi-user.target\n")
+	wantedBy := u.wantedBy
+	if wantedBy == "" {
+		wantedBy = "multi-user.target"
+	}
+	fmt.Fprintf(&b, "\n[Install]\nWantedBy=%s\n", wantedBy)
 	return File{Path: "/etc/systemd/system/" + u.name, Mode: 0o644, Content: []byte(b.String())}
 }
 

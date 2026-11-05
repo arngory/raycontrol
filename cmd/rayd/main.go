@@ -249,6 +249,7 @@ func cmdServe(args []string) error {
 	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, hb, log)
 	go syncDNS(ctx, st, srv.Changes, hb, log)
 	go checkRealityTargets(ctx, st, srv.Changes, hb, log)
+	go checkPort53(ctx, st, &deploy.Host{}, hb, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
 	// Client summaries (R4-21): reports in, from devices and through relays
 	// (relay-v1 §9.3), hints out; only while the administrator has them on
@@ -687,6 +688,36 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 	}()
 	log.Info("subscription endpoint", "addr", addr, "probe_udp", s.Probe.UDPPort != 0)
 	return nil
+}
+
+// checkPort53 looks every few minutes for sockets on UDP 53 besides the
+// front's and systemd-resolved's stub while the node has DNS tunnels: the
+// front shares the port with SO_REUSEADDR, so a DNS server that binds it
+// the same way takes the queries to its address without a sound (rayctl
+// status shows it).
+func checkPort53(ctx context.Context, st *store.Store, h *deploy.Host, hb *health.Board, log *slog.Logger) {
+	for {
+		services, err := st.ListServices(ctx)
+		tunnels := err == nil && slices.ContainsFunc(services, func(s store.Service) bool {
+			return s.Enabled && (s.Kind == "dnstt" || s.Kind == "masterdns")
+		})
+		if tunnels {
+			var others []string
+			for _, o := range h.OthersOn53(render.FrontUID) {
+				others = append(others, o.Addr+" ("+o.Owner+")")
+			}
+			if len(others) > 0 {
+				err = fmt.Errorf("UDP 53 is held beside the front by %s: the DNS tunnels' queries there do not reach it", strings.Join(others, ", "))
+				log.Warn("port 53", "err", err)
+			}
+			hb.Done("port53", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Minute):
+		}
+	}
 }
 
 // pruneSummary drops the summary counters past their 30 days, daily.

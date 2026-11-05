@@ -282,7 +282,7 @@ func TestKeptDevices(t *testing.T) {
 	defer cancel()
 	var key [spa.KeySize]byte
 	key[0] = 7
-	state := filepath.Join(t.TempDir(), "devices.pb")
+	state := filepath.Join(t.TempDir(), "devices.json")
 	e := &exit{drop: make(chan struct{}), snap: &perimeterv1.Snapshot{Devices: []*perimeterv1.Device{
 		{Id: "dev1", Key: key[:], Allowed: []uint32{uint32(provision.RelayProbeSvc)}}}}}
 	_, h := perimeterv1connect.NewRelayServiceHandler(e)
@@ -291,7 +291,8 @@ func TestKeptDevices(t *testing.T) {
 	hs.StartTLS()
 	defer hs.Close()
 	newServer := func() *Server {
-		s := &Server{Name: "r1", Exit: perimeterv1connect.NewRelayServiceClient(hs.Client(), hs.URL), Log: slog.New(slog.DiscardHandler), State: state}
+		s := &Server{Name: "r1", Exit: perimeterv1connect.NewRelayServiceClient(hs.Client(), hs.URL), Log: slog.New(slog.DiscardHandler),
+			State: state, ID: "bundle-1"}
 		s.Probe = &probe.Server{Auth: s.auth, Log: s.Log}
 		return s
 	}
@@ -322,7 +323,13 @@ func TestKeptDevices(t *testing.T) {
 		t.Errorf("kept devices mode %v", fi.Mode().Perm())
 	}
 
-	// A new start, the exit away: the kept devices.
+	// A new start, the exit away: the kept devices; not with another
+	// bundle, though (another exit's, perhaps).
+	other := newServer()
+	other.ID = "bundle-2"
+	if err := other.Load(); err == nil || known(other) {
+		t.Fatalf("another bundle's devices taken: %v", err)
+	}
 	s = newServer()
 	if err := s.Load(); err != nil || !known(s) {
 		t.Fatalf("kept devices not loaded: %v", err)
