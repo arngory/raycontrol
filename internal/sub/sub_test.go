@@ -594,4 +594,18 @@ func TestRelaysInSubscription(t *testing.T) {
 	if p := build(); p.Relays[0].Probe == nil || *p.Relays[0].Probe != want {
 		t.Fatalf("probe endpoint with reports %+v", p.Relays[0].Probe)
 	}
+
+	// Asked for through the relay: the relay's address, whose hints are
+	// not the client's (relay-v1 §9.3).
+	srv.Hints = func(context.Context, netip.Addr, []uint16) *summary.Hints { return &summary.Hints{Days: 30} }
+	for addr, want := range map[string]bool{"198.51.100.20": false, "::ffff:198.51.100.20": false, "203.0.113.9": true} {
+		env, err := srv.BuildFor(ctx, "alice", netip.MustParseAddr(addr), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, _ := sub.Verify(env, f.keys.PublicJSON())
+		if (p.Hints != nil) != want {
+			t.Errorf("from %s: hints %+v", addr, p.Hints)
+		}
+	}
 }

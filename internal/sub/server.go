@@ -208,7 +208,9 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 	if err := s.addRelays(ctx, &p, m); err != nil {
 		return Envelope{}, err
 	}
-	if s.Hints != nil && addr.IsValid() && !addr.IsLoopback() {
+	// Through a relay the address is the relay's: its network's hints are
+	// not the client's (relay-v1 §9.3).
+	if s.Hints != nil && addr.IsValid() && !addr.IsLoopback() && !s.FromRelay(ctx, addr) {
 		svcs := make([]uint16, 0, len(profiles))
 		for _, pr := range profiles {
 			svcs = append(svcs, pr.Svc)
@@ -216,6 +218,18 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 		p.Hints = s.Hints(ctx, addr, svcs)
 	}
 	return Sign(p, s.Keys)
+}
+
+// FromRelay reports whether addr is a relay's (relay-v1 §3): what comes
+// from there is a client's behind the relay, whose own address the node
+// does not see.
+func (s *Server) FromRelay(ctx context.Context, addr netip.Addr) bool {
+	relays, err := s.Store.ListRelays(ctx)
+	if err != nil {
+		return true // unknown: no hints, no report, rather than a wrong AS
+	}
+	addr = addr.Unmap()
+	return slices.ContainsFunc(relays, func(r store.Relay) bool { return r.Address == addr })
 }
 
 // addRelays lists the relays in front of the node and marks the profiles

@@ -666,6 +666,7 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 			return render.InnerEmail(u.ID), nil
 		}}
 	s.Probe.Report = sum.Take
+	s.Probe.Relayed = s.FromRelay
 	s.Hints = sum.Hints
 	if err := provision.SubscriptionUDP(ctx, st); err != nil {
 		log.Warn("probe: the subscription service has no UDP port", "err", err)
