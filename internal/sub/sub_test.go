@@ -198,7 +198,7 @@ func TestEndpoint(t *testing.T) {
 		!slices.Equal(p.Probe.Report, []string{"udp_mtu", "path", "dns"}) ||
 		// The SPA carriers: UDP only without -spa-tcp.
 		p.SPA == nil || !slices.Equal(p.SPA.Carriers, []string{"udp"}) ||
-		// The user has a DNS tunnel: the dnsprobe-v1 key.
+		// The user has a dnstt profile: the dnsprobe-v1 key.
 		p.DNSProbe == nil || p.DNSProbe.V != 1 || len(p.DNSProbe.Key) != 43 {
 		t.Fatalf("payload %+v", p)
 	}

@@ -523,8 +523,6 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		for _, s := range yggs {
 			after = append(after, render.UnitName(s.Name))
 		}
-		// The salamander passwords of hy2-obfs: copied in by root, readable
-		// by the front only.
 		// The front's credentials, copied in by root, readable by the front
 		// only: the dnsprobe-v1 key and the salamander passwords of
 		// hy2-obfs. Only what this render wrote: a service that could not

@@ -77,7 +77,8 @@ type Payload struct {
 	// Relays in front of the node (relay-v1 §4).
 	Relays []RelayHint `json:"relays,omitempty"`
 	// DNSProbe is the key of dnsprobe-v1 (spec/dnsprobe-v1.md), for a
-	// user with a DNS tunnel: the client checks resolvers with it.
+	// user with a dnstt profile: the client checks resolvers with it in
+	// the dnstt zones.
 	DNSProbe *DNSProbeHint `json:"dns_probe,omitempty"`
 }
 

@@ -434,6 +434,9 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 	type route struct {
 		Zone    string `json:"zone"`
 		Backend string `json:"backend"`
+		// Probe: the front answers dnsprobe-v1 in this zone. dnstt
+		// only: the answers are built as dnstt's.
+		Probe bool `json:"probe,omitempty"`
 	}
 	type backendRef struct {
 		Socket string `json:"socket"`
@@ -465,7 +468,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				return errors.New("needs the inner stage, which is missing or disabled")
 			}
 			zone := provision.Zone(s.Service)
-			zones = append(zones, route{Zone: zone, Backend: s.Name})
+			zones = append(zones, route{Zone: zone, Backend: s.Name, Probe: s.Kind == "dnstt" && len(m.DNSProbeKey) == 32})
 			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
 			keys, ok := m.DNSAuth[s.ID]
 			if !ok && s.Kind == "dnstt" && DNSAuthMode(s.Service) != "off" {
@@ -623,9 +626,10 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				listen = append(listen, "[::]:53")
 			}
 			dns := map[string]any{"listen": listen, "zones": zones}
-			// dnsprobe-v1: the front answers resolver checks itself
-			// (niko-server v0.8.3), with the key root copies in.
-			if len(m.DNSProbeKey) == 32 {
+			// dnsprobe-v1: the front answers resolver checks itself in
+			// the dnstt zones (niko-server v0.8.3), with the key root
+			// copies in.
+			if slices.ContainsFunc(zones, func(z route) bool { return z.Probe }) {
 				dns["probe_key_file"] = p.FrontDNSProbe()
 				files = append(files, File{Path: path.Join(p.Rendered, "front", DNSProbeKeyFile), Mode: 0o600,
 					Content: []byte(hex.EncodeToString(m.DNSProbeKey) + "\n"), Service: "front"})

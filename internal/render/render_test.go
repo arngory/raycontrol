@@ -142,12 +142,23 @@ func TestRender(t *testing.T) {
 	}
 
 	// dnsprobe-v1: the front's key file, root's, read where root copies it.
+	// Probes are answered in the dnstt zone only: masterdns answers look
+	// otherwise.
 	var probeCfg struct {
 		DNS struct {
 			ProbeKeyFile string `json:"probe_key_file"`
+			Zones        []struct {
+				Backend string `json:"backend"`
+				Probe   bool   `json:"probe"`
+			} `json:"zones"`
 		} `json:"dns"`
 	}
 	json.Unmarshal(f.Content, &probeCfg)
+	for _, z := range probeCfg.DNS.Zones {
+		if z.Probe != (z.Backend == "dns") {
+			t.Errorf("zone of %s: probe %v", z.Backend, z.Probe)
+		}
+	}
 	probeKey := byPath["/var/lib/raycontrol/rendered/front/dnsprobe.key"]
 	stored, _ := st.DNSProbeKey(ctx)
 	if probeCfg.DNS.ProbeKeyFile != "/run/niko/front/dnsprobe.key" || probeKey.Mode != 0o600 || probeKey.Group != "" ||

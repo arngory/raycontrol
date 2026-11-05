@@ -319,14 +319,19 @@ func dnsProbe(server string, key []byte, zone string) ([]byte, error) {
 		return nil, fmt.Errorf("answer of %d bytes: % x", n, r[:min(n, 16)])
 	}
 	rd := r[questionEnd+12 : questionEnd+12+int(binary.BigEndian.Uint16(r[questionEnd+10:questionEnd+12]))]
-	var plain []byte
+	var data []byte
 	for len(rd) > 0 {
 		l := int(rd[0])
-		plain, rd = append(plain, rd[1:1+l]...), rd[1+l:]
+		data, rd = append(data, rd[1:1+l]...), rd[1+l:]
 	}
+	// The answer's nonce, then the ciphertext.
+	if len(data) < 8 {
+		return nil, fmt.Errorf("TXT data of %d bytes", len(data))
+	}
+	nonce, plain := data[:8], data[8:]
 	enc := mac(key, []byte("dnsprobe-v1 e"))
 	for i := 0; i < len(plain); i += 32 {
-		block := mac(enc, b[:], binary.BigEndian.AppendUint32(nil, uint32(i/32)))
+		block := mac(enc, b[:], nonce, binary.BigEndian.AppendUint32(nil, uint32(i/32)))
 		for j := 0; j < 32 && i+j < len(plain); j++ {
 			plain[i+j] ^= block[j]
 		}
