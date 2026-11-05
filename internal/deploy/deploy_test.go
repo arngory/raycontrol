@@ -350,6 +350,9 @@ func TestBuildSelfSteal(t *testing.T) {
 		t.Fatalf("skipped %v", skipped)
 	}
 	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	if p.FrontDNS {
+		t.Error("the front answers DNS on a node without DNS tunnels")
+	}
 	site := file(p, "/etc/systemd/system/niko-site.service")
 	for _, want := range []string{
 		"ConditionPathExists=/var/lib/raycontrol/rendered/site/chain.pem\n",
@@ -799,7 +802,7 @@ func TestPort53(t *testing.T) {
 	}
 	// newHost: udp is /proc/net/udp now; stubComes, whether the stub binds
 	// when resolved restarts; niko is the installed niko-server's version.
-	niko := "v0.8.2"
+	niko, resolvedState := "v0.8.2", "loaded"
 	newHost := func(t *testing.T, udp, dropIn string, oldResolv, stubComes bool) host {
 		t.Helper()
 		root := t.TempDir()
@@ -807,6 +810,8 @@ func TestPort53(t *testing.T) {
 		procUDP := filepath.Join(root, "/proc/net/udp")
 		os.WriteFile(procUDP, []byte(header+udp), 0o644)
 		os.MkdirAll(filepath.Join(root, "/etc"), 0o755)
+		os.MkdirAll(filepath.Join(root, deploy.DataPlaneDir), 0o755)
+		os.WriteFile(filepath.Join(root, deploy.DefaultBinaries.NikoServer), nil, 0o755)
 		if dropIn != "" {
 			os.MkdirAll(filepath.Join(root, filepath.Dir(deploy.ResolvedDropIn)), 0o755)
 			os.WriteFile(filepath.Join(root, deploy.ResolvedDropIn), []byte(dropIn), 0o644)
@@ -834,7 +839,9 @@ func TestPort53(t *testing.T) {
 					os.WriteFile(procUDP, []byte(header+stub+udp), 0o644)
 				case c == deploy.DefaultBinaries.NikoServer+" version":
 					return []byte("niko-server " + niko + "\n"), nil
-				case strings.HasPrefix(c, "systemctl show -P LoadState "):
+				case c == "systemctl show --property=LoadState --value systemd-resolved.service":
+					return []byte(resolvedState + "\n"), nil
+				case strings.HasPrefix(c, "systemctl show --property=LoadState --value "):
 					return []byte("loaded\n"), nil
 				}
 				return nil, nil
@@ -905,6 +912,18 @@ func TestPort53(t *testing.T) {
 	if slices.Contains(*h.cmds, restartResolved) {
 		t.Error("resolved restarted again once all is back")
 	}
+	// Another DNS server holds 53 (the stub off for it): the stub stays off.
+	h = newHost(t, other, ours, true, true)
+	apply(t, h, p)
+	if _, err := os.Stat(filepath.Join(h.root, deploy.ResolvedDropIn)); err != nil || slices.Contains(*h.cmds, restartResolved) {
+		t.Errorf("the stub given back over another DNS server: %v\n%s", err, h.out)
+	}
+	// systemd-resolved gone since: applies go on, again and again.
+	resolvedState = "not-found"
+	h = newHost(t, "", ours, true, true)
+	apply(t, h, p)
+	apply(t, h, p)
+	resolvedState = "loaded"
 	// An older niko-server, which cannot share 53: nothing changes yet.
 	niko = "v0.8.1"
 	h = newHost(t, "", ours, true, true)

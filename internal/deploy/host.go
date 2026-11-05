@@ -478,33 +478,41 @@ func (h *Host) giveBackStub() error {
 	if !dropIn && !pending && !pointed {
 		return nil
 	}
-	if !h.frontSharesDNS() {
-		fmt.Fprintf(h.Out, "warning: the installed niko-server is older than v%d.%d.%d: systemd-resolved's stub stays off until it is updated\n",
-			SharesDNSFrom[0], SharesDNSFrom[1], SharesDNSFrom[2])
+	if ok, why := h.frontSharesDNS(); !ok {
+		fmt.Fprintf(h.Out, "warning: %s: systemd-resolved's stub stays off for now\n", why)
 		return nil
 	}
 	if dropIn {
+		// Another DNS server on 53 (with the stub off for it, since the
+		// DNS tunnels went perhaps): the stub would take 127.0.0.53 from
+		// it at the next boot.
+		if others := h.OthersOn53(render.FrontUID); len(others) > 0 {
+			fmt.Fprintf(h.Out, "warning: UDP 53 is held by %s %s: systemd-resolved's stub stays off (%s stays)\n",
+				others[0].Owner, others[0].Addr, ResolvedDropIn)
+			return nil
+		}
+		// The front first, while the drop-in is still in place: an older
+		// one holds 53 alone, and a run stopped after this starts again
+		// here.
+		if !h.stubOn53() && h.loadState("niko-front.service") == "loaded" {
+			if err := h.tryRestart("niko-front.service"); err != nil {
+				return err
+			}
+		}
 		if err := os.Rename(h.path(ResolvedDropIn), h.path(stubPending)); err != nil {
 			return err
 		}
 		fmt.Fprintln(h.Out, "removed", ResolvedDropIn+": the DNS tunnels share UDP 53 with systemd-resolved's stub")
 	}
 	if h.loadState("systemd-resolved.service") == "not-found" {
-		return os.Remove(h.path(stubPending))
+		if err := os.Remove(h.path(stubPending)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
 	}
 	if !h.stubOn53() {
-		units := []string{"systemd-resolved.service"}
-		if dropIn && h.loadState("niko-front.service") == "loaded" {
-			units = append([]string{"niko-front.service"}, units...)
-		}
-		for _, unit := range units {
-			if err := h.run("systemctl", "try-restart", unit); err != nil {
-				var ee *exec.ExitError
-				if !errors.As(err, &ee) {
-					return err
-				}
-				fmt.Fprintln(h.Out, "warning:", err)
-			}
+		if err := h.tryRestart("systemd-resolved.service"); err != nil {
+			return err
 		}
 	}
 	if !h.stubOn53() {
@@ -531,26 +539,43 @@ func (h *Host) giveBackStub() error {
 }
 
 // loadState is a unit's LoadState: "loaded", "not-found", or "" when
-// systemctl does not say.
+// systemctl does not say (--value, not -P: systemd 245 has no -P).
 func (h *Host) loadState(unit string) string {
-	out, _ := h.Run("systemctl", "show", "-P", "LoadState", unit)
+	out, _ := h.Run("systemctl", "show", "--property=LoadState", "--value", unit)
 	return strings.TrimSpace(string(out))
 }
 
-// frontSharesDNS reports whether the installed niko-server shares UDP 53
-// with systemd-resolved's stub (SharesDNSFrom or newer).
-func (h *Host) frontSharesDNS() bool {
-	out, err := h.Run(DefaultBinaries.NikoServer, "version")
-	if err != nil {
-		return false
+// tryRestart restarts a unit if it runs; its failure is a warning.
+func (h *Host) tryRestart(unit string) error {
+	if err := h.run("systemctl", "try-restart", unit); err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			return err
+		}
+		fmt.Fprintln(h.Out, "warning:", err)
 	}
-	var v [3]int
+	return nil
+}
+
+// frontSharesDNS reports whether the installed niko-server shares UDP 53
+// with systemd-resolved's stub (SharesDNSFrom or newer), or why not. With
+// no niko-server there is no front to hold 53.
+func (h *Host) frontSharesDNS() (bool, string) {
+	if _, err := os.Stat(h.path(DefaultBinaries.NikoServer)); errors.Is(err, os.ErrNotExist) {
+		return true, ""
+	}
+	out, err := h.Run(DefaultBinaries.NikoServer, "version")
 	f := strings.Fields(string(out))
-	if len(f) < 2 {
-		return false
+	var v [3]int
+	if err != nil || len(f) < 2 {
+		return false, fmt.Sprintf("cannot tell niko-server's version (%q)", strings.TrimSpace(string(out)))
 	}
 	if _, err := fmt.Sscanf(strings.TrimPrefix(f[1], "v"), "%d.%d.%d", &v[0], &v[1], &v[2]); err != nil {
-		return false
+		return false, fmt.Sprintf("cannot tell niko-server's version (%q)", f[1])
 	}
-	return slices.Compare(v[:], SharesDNSFrom[:]) >= 0
+	if slices.Compare(v[:], SharesDNSFrom[:]) < 0 {
+		return false, fmt.Sprintf("niko-server %s is older than v%d.%d.%d, which shares UDP 53 with the stub", f[1],
+			SharesDNSFrom[0], SharesDNSFrom[1], SharesDNSFrom[2])
+	}
+	return true, ""
 }

@@ -627,8 +627,20 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		File{Path: HardeningSysctl, Mode: 0o644, Content: []byte(sysctl)},
 	)
 	// The front answers the DNS tunnels on UDP 53, beside systemd-resolved's
-	// stub, which keeps 127.0.0.53 and 127.0.0.54 (niko-server v0.8.2).
-	plan.FrontDNS = len(dns) > 0
+	// stub, which keeps 127.0.0.53 and 127.0.0.54 (niko-server v0.8.2): when
+	// its rendered config listens there (a tunnel that did not render is
+	// not there).
+	front := path.Join(p.Rendered, "front", "front.json")
+	for _, f := range files {
+		if f.Path == front {
+			var c struct {
+				DNS *struct {
+					Listen []string `json:"listen"`
+				} `json:"dns"`
+			}
+			plan.FrontDNS = json.Unmarshal(f.Content, &c) == nil && c.DNS != nil && len(c.DNS.Listen) > 0
+		}
+	}
 	return plan
 }
 
