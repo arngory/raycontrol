@@ -644,6 +644,40 @@ func TestNetns(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	t.Run("grants without destroy element", func(t *testing.T) {
+		// nft before 1.0.8 and kernels before 6.3: what is absent cannot
+		// fail a delete, and what fails is said.
+		was := fw.destroy
+		fw.destroy = false
+		defer func() { fw.destroy = was }()
+		a, p := netip.MustParseAddr("192.0.2.77"), []Port{{"tcp", 18999}, {"udp", 18999}}
+		list := func() string {
+			out, err := exec.Command("nft", "list", "set", "inet", Table, "allow4").CombinedOutput()
+			if err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			return string(out)
+		}
+		if err := fw.Deny(a, p); err != nil {
+			t.Fatalf("closing what is not there: %v", err)
+		}
+		if err := fw.Allow(a, p, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+		if err := fw.Allow(a, p, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		if got := list(); !strings.Contains(got, "192.0.2.77 . tcp . 18999 timeout 1m") || strings.Contains(got, "timeout 1h") {
+			t.Fatalf("a shorter grant again: %s", got)
+		}
+		if err := fw.Deny(a, p); err != nil || strings.Contains(list(), "192.0.2.77") {
+			t.Fatalf("closed: %v\n%s", err, list())
+		}
+		bad := netip.MustParseAddr("192.0.2.78")
+		if err := fw.Deny(bad, []Port{{"nosuchproto", 1}}); err == nil {
+			t.Fatal("a real error said nothing")
+		}
+	})
 	t.Run("table restored after flush ruleset", func(t *testing.T) {
 		allow4 := func() string {
 			out, err := exec.Command("nft", "list", "set", "inet", Table, "allow4").CombinedOutput()

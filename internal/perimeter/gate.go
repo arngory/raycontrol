@@ -60,6 +60,7 @@ type Gate struct {
 	restoring  bool              // a restore of the table has not finished
 	pending    *update           // a snapshot not applied in full yet
 	revoking   map[grantKey]bool // revoked grants the firewall has not closed yet
+	regrant    map[grantKey]bool // grants to set to their longest holder left
 	failures   int               // catching up failed so many times in a row
 	retryAt    time.Time         // and is tried again from then on
 	forward    []Port            // every service port: what a relay forwards
@@ -231,6 +232,9 @@ func (g *Gate) catchUpLocked(now time.Time) error {
 			g.adoptLocked(g.pending)
 		}
 		if g.restoring {
+			// Into whatever table there is: a Setup that keeps failing
+			// should not keep revoked grants open.
+			_ = g.denyLocked()
 			if err := g.restoreLocked(); err != nil {
 				return err
 			}
@@ -264,7 +268,7 @@ func (g *Gate) applyLocked(u *update) error {
 	g.adoptLocked(u)
 	var errs []error
 	// Revocations first: they wait for nothing else.
-	errs = append(errs, g.denyLocked())
+	errs = append(errs, g.denyLocked(), g.regrantLocked())
 	if !slices.Equal(u.public, g.public) {
 		if err := g.fw.SetPublic(u.public); err != nil {
 			errs = append(errs, err)
@@ -280,9 +284,13 @@ func (g *Gate) applyLocked(u *update) error {
 		}
 	}
 	// Once at least, even with no relays: it also ends flows of relays
-	// removed while rayspa was down.
+	// removed while rayspa was down. A relay port becoming public waits for
+	// the public ports: relay_check would cut its flows meanwhile.
+	becomesPublic := func(p Port) bool { return !slices.Contains(u.relayPorts, p) && slices.Contains(u.public, p) }
 	if !g.relaysSet || !slices.Equal(u.relays, g.relays) || !slices.Equal(u.relayPorts, g.relayPorts) {
-		if err := g.fw.SetRelays(u.relays, u.relayPorts); err != nil {
+		if !slices.Equal(u.public, g.public) && slices.ContainsFunc(g.relayPorts, becomesPublic) {
+			errs = append(errs, errors.New("perimeter: relay ports wait for the public ports they become"))
+		} else if err := g.fw.SetRelays(u.relays, u.relayPorts); err != nil {
 			errs = append(errs, err)
 		} else {
 			g.relays, g.relayPorts, g.relaysSet = u.relays, u.relayPorts, true
@@ -325,20 +333,63 @@ func (g *Gate) adoptLocked(u *update) {
 	g.params, g.tcpCarrier = u.params, u.tcpCarrier
 	g.defaultTTL, g.maxTTL = u.defTTL, u.maxTTL
 	g.services, g.allowed, g.rotations = u.services, u.allowed, u.rotations
+	now := g.now()
 	for key, devs := range g.holders {
-		for dev := range devs {
-			if !slices.Contains(g.portsFor(g.allowed[dev]), key.port) {
+		revoked := false
+		for dev, until := range devs {
+			switch {
+			case !now.Before(until):
+				delete(devs, dev) // expired: the element goes by itself
+			case !slices.Contains(g.portsFor(g.allowed[dev]), key.port):
 				delete(devs, dev)
+				revoked = true
 			}
 		}
-		if len(devs) == 0 {
+		switch {
+		case len(devs) == 0:
 			delete(g.holders, key)
+			delete(g.regrant, key)
 			if g.revoking == nil {
 				g.revoking = map[grantKey]bool{}
 			}
 			g.revoking[key] = true
+		case revoked:
+			// Others hold it still: as long as the longest of them, not
+			// as long as the device revoked.
+			if g.regrant == nil {
+				g.regrant = map[grantKey]bool{}
+			}
+			g.regrant[key] = true
 		}
 	}
+}
+
+// longest is when the last of a grant's holders expires.
+func longest(devs map[string]time.Time) time.Time {
+	var until time.Time
+	for _, u := range devs {
+		if u.After(until) {
+			until = u
+		}
+	}
+	return until
+}
+
+// regrantLocked sets grants that lost a holder to their longest holder
+// left; those the firewall refuses stay to do.
+func (g *Gate) regrantLocked() error {
+	var errs []error
+	now := g.now()
+	for key := range g.regrant {
+		if ttl := longest(g.holders[key]).Sub(now); ttl > 0 {
+			if err := g.fw.Allow(key.addr, []Port{key.port}, ttl); err != nil {
+				errs = append(errs, fmt.Errorf("shortening a grant on %v: %w", key.port, err))
+				continue
+			}
+		}
+		delete(g.regrant, key)
+	}
+	return errors.Join(errs...)
 }
 
 // denyLocked closes the revoked grants; those the firewall refuses stay to
@@ -403,16 +454,32 @@ func (g *Gate) Handle(src netip.Addr, pkt []byte) (spa.Grant, error) {
 		return grant, err
 	}
 	ports := g.portsFor(grant.Scope)
-	if err := g.fw.Allow(src, ports, grant.TTL); err != nil {
-		return grant, err
+	now := g.now()
+	until := now.Add(grant.TTL)
+	// A grant lasts as long as its longest holder: a shorter knock from
+	// the same address (CGNAT) does not cut another device's grant short.
+	byTTL := map[time.Duration][]Port{}
+	for _, p := range ports {
+		end := until
+		for dev, u := range g.holders[grantKey{src.Unmap(), p}] {
+			if dev != grant.DeviceID && u.After(end) {
+				end = u // another device's, longer
+			}
+		}
+		byTTL[end.Sub(now)] = append(byTTL[end.Sub(now)], p)
 	}
-	until := g.now().Add(grant.TTL)
+	for ttl, ps := range byTTL {
+		if err := g.fw.Allow(src, ps, ttl); err != nil {
+			return grant, err
+		}
+	}
 	for _, p := range ports {
 		key := grantKey{src.Unmap(), p}
 		if g.holders[key] == nil {
 			g.holders[key] = map[string]time.Time{}
 		}
 		delete(g.revoking, key) // held again: not to be closed
+		delete(g.regrant, key)  // set to its longest just now
 		g.holders[key][grant.DeviceID] = until
 	}
 	return grant, nil
@@ -481,7 +548,7 @@ func (g *Gate) restoreLocked() error {
 	if err := g.fw.Setup(); err != nil {
 		return err
 	}
-	g.revoking = nil // a new table: no grant of theirs in it
+	g.revoking, g.regrant = nil, nil // a new table: grants come back at their longest
 	if len(g.public) > 0 {
 		if err := g.fw.SetPublic(g.public); err != nil {
 			return err

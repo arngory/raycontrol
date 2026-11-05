@@ -454,24 +454,28 @@ func elements(addr netip.Addr, ports []Port, ttl time.Duration) (set, elems stri
 	return set, strings.Join(parts, ", ")
 }
 
-// Allow opens ports for addr until ttl passes; a repeat resets the timer.
+// Allow opens ports for addr until ttl passes; a repeat sets the timer anew,
+// shorter or longer.
 func (n *NFT) Allow(addr netip.Addr, ports []Port, ttl time.Duration) error {
 	if len(ports) == 0 {
 		return nil
 	}
+	set, elems := elements(addr, ports, ttl)
+	// One transaction: the old element (if any) goes, the new timer starts.
+	return n.run(n.forget(addr, ports) + fmt.Sprintf("add element inet %s %s { %s }\n", Table, set, elems))
+}
+
+// forget is the part of a transaction that removes elements, there or not.
+// Without "destroy element" (nft before 1.0.8, kernels before 6.3), adding
+// first makes the delete unable to fail for an absent element, so that the
+// transaction fails only for real.
+func (n *NFT) forget(addr netip.Addr, ports []Port) string {
 	set, keys := elements(addr, ports, 0)
-	_, elems := elements(addr, ports, ttl)
-	add := fmt.Sprintf("add element inet %s %s { %s }\n", Table, set, elems)
 	if n.destroy {
-		// One transaction: the old element (if any) goes, the new timer starts.
-		return n.run(fmt.Sprintf("destroy element inet %s %s { %s }\n", Table, set, keys) + add)
+		return fmt.Sprintf("destroy element inet %s %s { %s }\n", Table, set, keys)
 	}
-	// Older nft and kernels: delete may fail when the element is absent.
-	for _, p := range ports {
-		_, k := elements(addr, []Port{p}, 0)
-		_ = n.run(fmt.Sprintf("delete element inet %s %s { %s }\n", Table, set, k))
-	}
-	return n.run(add)
+	_, placeholders := elements(addr, ports, time.Second)
+	return fmt.Sprintf("add element inet %[1]s %[2]s { %[3]s }\ndelete element inet %[1]s %[2]s { %[4]s }\n", Table, set, placeholders, keys)
 }
 
 // Grant is a port open to an address for the time left.
@@ -495,20 +499,12 @@ func (n *NFT) AllowAll(grants []Grant) error {
 	return n.run(b.String())
 }
 
-// Deny closes ports for addr now.
+// Deny closes ports for addr now, in one transaction; an error is real.
 func (n *NFT) Deny(addr netip.Addr, ports []Port) error {
-	var firstErr error
-	for _, p := range ports {
-		set, k := elements(addr, []Port{p}, 0)
-		verb := "delete"
-		if n.destroy {
-			verb = "destroy"
-		}
-		if err := n.run(fmt.Sprintf("%s element inet %s %s { %s }\n", verb, Table, set, k)); err != nil && n.destroy && firstErr == nil {
-			firstErr = err
-		}
+	if len(ports) == 0 {
+		return nil
 	}
-	return firstErr
+	return n.run(n.forget(addr, ports))
 }
 
 // Drops counts what one rule of the early chain dropped.

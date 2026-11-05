@@ -35,17 +35,20 @@ type fakeFW struct {
 	setups     int
 	acmePort   uint16
 	acmeTTL    time.Duration
-	relaysSets int      // SetRelays calls
-	adminFails int      // SetAdmin calls still to fail
-	spaFails   int      // SetSPAPorts calls still to fail
-	denyFails  int      // Deny calls still to fail
-	publicBad  bool     // SetPublic always fails
-	calls      []string // Setup, SetAdmin, SetRelays, Allow, SetSPAPorts, in order
+	relaysSets int            // SetRelays calls
+	adminFails int            // SetAdmin calls still to fail
+	spaFails   int            // SetSPAPorts calls still to fail
+	denyFails  int            // Deny calls still to fail
+	failing    map[string]int // SetPublic, SetRelays, SetForward, SetACME calls still to fail
+	calls      []string       // Setup, SetAdmin, SetRelays, Allow, SetSPAPorts, in order
 }
 
 func (f *fakeFW) SetACME(port uint16, ttl time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.fails("SetACME") {
+		return errors.New("nft: busy")
+	}
 	f.acmePort, f.acmeTTL = port, ttl
 	return nil
 }
@@ -88,8 +91,15 @@ func (f *fakeFW) SetSPAPorts(udp, tcp []uint16) error {
 	f.udp, f.tcp = udp, tcp
 	return nil
 }
+func (f *fakeFW) fails(name string) bool {
+	if f.failing[name] > 0 {
+		f.failing[name]--
+		return true
+	}
+	return false
+}
 func (f *fakeFW) SetPublic(p []Port) error {
-	if f.publicBad {
+	if f.fails("SetPublic") {
 		return errors.New("nft: no such port")
 	}
 	f.public = p
@@ -111,10 +121,16 @@ func (f *fakeFW) SetAdmin(p []netip.Prefix, ports []Port) error {
 	return nil
 }
 func (f *fakeFW) SetForward(ports []Port) error {
+	if f.fails("SetForward") {
+		return errors.New("nft: busy")
+	}
 	f.forward = ports
 	return nil
 }
 func (f *fakeFW) SetRelays(p []netip.Prefix, ports []Port) error {
+	if f.fails("SetRelays") {
+		return errors.New("nft: busy")
+	}
 	f.relays, f.relayPorts = p, ports
 	f.relaysSets++
 	f.calls = append(f.calls, "SetRelays")
@@ -731,19 +747,112 @@ func TestGateRevocations(t *testing.T) {
 }
 
 // One part the firewall keeps refusing does not hold back the others, and
-// admin prefixes come merged and unmapped.
+// what it refused is applied when it takes it; admin prefixes come merged
+// and unmapped.
 func TestGatePartsApart(t *testing.T) {
-	fw := &fakeFW{publicBad: true}
+	now := time.Unix(1767225600, 0)
+	snap := func() *perimeterv1.Snapshot {
+		s := testSnapshot()
+		s.AdminPrefixes = []string{"198.51.100.7/32", "198.51.100.0/24", "::ffff:203.0.113.0/120"}
+		s.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 22}}
+		s.RelayPrefixes = []string{"192.0.2.44/32"}
+		s.RelayPorts = []*perimeterv1.Port{{Proto: "udp", Port: 8443}}
+		s.Acme = &perimeterv1.AcmeWindow{Port: 18080, Until: now.Add(time.Minute).Unix()}
+		return s
+	}
+	admin := []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24"), netip.MustParsePrefix("203.0.113.0/24")}
+	applied := func(fw *fakeFW) map[string]bool {
+		return map[string]bool{
+			"SetPublic": len(fw.public) == 1, "SetRelays": len(fw.relays) == 1, "SetForward": len(fw.forward) > 0,
+			"SetACME": fw.acmePort == 18080, "SetAdmin": slices.Equal(fw.admin, admin), "slots": len(fw.udp) > 0,
+		}
+	}
+	for _, part := range []string{"SetPublic", "SetRelays", "SetForward", "SetACME"} {
+		fw := &fakeFW{failing: map[string]int{part: 1}}
+		g := NewGate(fw, quiet)
+		g.now = func() time.Time { return now }
+		if err := g.Update(snap()); !errors.Is(err, ErrPending) {
+			t.Fatalf("%s refused: %v", part, err)
+		}
+		for name, ok := range applied(fw) {
+			if ok == (name == part) {
+				t.Errorf("%s refused: %s applied %v", part, name, ok)
+			}
+		}
+		now = now.Add(time.Second)
+		if _, err := g.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		for name, ok := range applied(fw) {
+			if !ok {
+				t.Errorf("%s refused, then taken: %s not applied", part, name)
+			}
+		}
+	}
+}
+
+// A relay port that becomes public waits for the public ports: meanwhile
+// relay_check would cut its flows.
+func TestGateRelayPortBecomesPublic(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	fw := &fakeFW{}
 	g := NewGate(fw, quiet)
-	snap := testSnapshot()
-	snap.AdminPrefixes = []string{"198.51.100.7/32", "198.51.100.0/24", "::ffff:203.0.113.0/120"}
-	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 22}}
-	if err := g.Update(snap); !errors.Is(err, ErrPending) {
+	g.now = func() time.Time { return now }
+	s := testSnapshot()
+	s.RelayPrefixes = []string{"192.0.2.44/32"}
+	s.RelayPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 443}}
+	if err := g.Update(s); err != nil {
 		t.Fatal(err)
 	}
-	want := []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24"), netip.MustParsePrefix("203.0.113.0/24")}
-	if !slices.Equal(fw.admin, want) || fw.relaysSets != 1 || len(fw.udp) == 0 {
-		t.Fatalf("behind a broken public port: admin %v, SetRelays %d, slots %v", fw.admin, fw.relaysSets, fw.udp)
+	s.RelayPorts = nil
+	s.PublicPorts = append(s.PublicPorts, &perimeterv1.Port{Proto: "tcp", Port: 443})
+	fw.failing = map[string]int{"SetPublic": 1}
+	if err := g.Update(s); !errors.Is(err, ErrPending) || len(fw.relayPorts) != 1 {
+		t.Fatalf("relay ports went before the public ones: %v %v", fw.relayPorts, err)
+	}
+	now = now.Add(time.Second)
+	if _, err := g.Tick(); err != nil || len(fw.relayPorts) != 0 || len(fw.public) != 2 {
+		t.Fatalf("then: relay %v public %v %v", fw.relayPorts, fw.public, err)
+	}
+}
+
+// Devices behind one address (CGNAT) share its grants: a grant lasts as
+// long as its longest holder, and a revoked holder's time goes with it.
+func TestGateSharedAddress(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	fw := &fakeFW{}
+	g := NewGate(fw, quiet)
+	g.now = func() time.Time { return now }
+	alice := &perimeterv1.Device{Id: "alice", Key: key(0x11), Allowed: []uint32{2}}
+	bob := &perimeterv1.Device{Id: "bob", Key: key(0x22), Allowed: []uint32{2}}
+	snap := testSnapshot(alice, bob)
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := paramsOf(snap.Spa)
+	knock := func(k byte, ttl time.Duration) {
+		t.Helper()
+		pkt, err := spa.SealRandom(p, [spa.KeySize]byte(key(k)), spa.Request{Time: now, TTL: ttl})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), pkt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const grant = "203.0.113.9 udp/443"
+	ttl := func() time.Duration { fw.mu.Lock(); defer fw.mu.Unlock(); return fw.open[grant] }
+	knock(0x11, time.Hour)
+	knock(0x22, 5*time.Minute)
+	if ttl() != time.Hour {
+		t.Fatalf("a shorter knock cut the grant to %v", ttl())
+	}
+	alice.Allowed = nil
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
+	}
+	if ttl() != 5*time.Minute {
+		t.Fatalf("alice revoked, the grant still lasts %v", ttl())
 	}
 }
 
