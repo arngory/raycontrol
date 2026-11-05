@@ -48,7 +48,7 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 		ssh := fs.Uint("ssh-port", 0, "the relay host's SSH port, reached from the admin addresses (default: as before, 22 at first)")
 		out := fs.String("o", "", "write the bundle to this new file (0600) instead of printing it")
 		admin := fs.String("admin", sshClient(), "addresses that reach the relay host's SSH without SPA (comma-separated; default: this SSH session; "+
-			"the devices allowed the node's SSH open it by SPA either way)")
+			"needed: nothing else opens it yet)")
 		if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *ssh > 65535 {
 			return errUsage
 		}
@@ -65,10 +65,24 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 		} else if err := writeNew(*out, []byte(r.Msg.Bundle+"\n")); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "relay %s: a new certificate and new SPA keys for it; the bundle before, and the keys a lost\n"+
-			"relay host held, no longer work. Clients take the new keys with their next subscription.\n"+
-			"The bundle holds the relay's private key: copy it to the relay host only, then there:\n"+
+		fmt.Fprintf(os.Stderr, "relay %s: a new certificate and new SPA keys for it; the bundle before no longer works, and the\n"+
+			"running relay stops taking its perimeter until the new bundle is installed there. Clients take the new keys\n"+
+			"with their next subscription. A lost relay host still reaches the services from its address: rayctl relay\n"+
+			"remove it. The bundle holds the relay's private key: copy it to the relay host only, then there:\n"+
 			"  bootstrap.sh -relay BUNDLE_FILE\n", fs.Arg(0))
+		return nil
+	case "set":
+		fs := flag.NewFlagSet("relay set", flag.ContinueOnError)
+		ssh := fs.Uint("ssh-port", 0, "the relay host's SSH port (0 keeps it)")
+		admin := fs.String("admin", "", "addresses that reach the relay host's SSH without SPA (comma-separated; empty keeps them)")
+		if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *ssh > 65535 || (*ssh == 0 && *admin == "") {
+			return errUsage
+		}
+		if _, err := c.c.SetRelayAccess(ctx, connect.NewRequest(&nodev1.SetRelayAccessRequest{
+			Name: fs.Arg(0), SshPort: uint32(*ssh), Admin: splitList(*admin)})); err != nil {
+			return err
+		}
+		fmt.Printf("relay %s: the relay takes the new SSH access with its next snapshot (within a minute)\n", fs.Arg(0))
 		return nil
 	case "remove":
 		if len(args) != 1 {

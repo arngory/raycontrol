@@ -102,6 +102,9 @@ const (
 	// NodeServiceIssueRelayBundleProcedure is the fully-qualified name of the NodeService's
 	// IssueRelayBundle RPC.
 	NodeServiceIssueRelayBundleProcedure = "/raycontrol.node.v1.NodeService/IssueRelayBundle"
+	// NodeServiceSetRelayAccessProcedure is the fully-qualified name of the NodeService's
+	// SetRelayAccess RPC.
+	NodeServiceSetRelayAccessProcedure = "/raycontrol.node.v1.NodeService/SetRelayAccess"
 	// NodeServiceSetDNSProviderProcedure is the fully-qualified name of the NodeService's
 	// SetDNSProvider RPC.
 	NodeServiceSetDNSProviderProcedure = "/raycontrol.node.v1.NodeService/SetDNSProvider"
@@ -178,6 +181,9 @@ type NodeServiceClient interface {
 	// before stops working) and returns what its host needs (relay-v1 §3).
 	// It holds the relay's private key: root on the node only.
 	IssueRelayBundle(context.Context, *connect.Request[v1.IssueRelayBundleRequest]) (*connect.Response[v1.IssueRelayBundleResponse], error)
+	// SetRelayAccess changes the relay host's SSH port and admin addresses
+	// without a new bundle: its SPA and certificate stay.
+	SetRelayAccess(context.Context, *connect.Request[v1.SetRelayAccessRequest]) (*connect.Response[v1.SetRelayAccessResponse], error)
 	// The DNS provider (Cloudflare): the node's records in its zone and
 	// certificates through DNS-01 with a wildcard name (R4-10). The token is
 	// stored by rayd and never returned.
@@ -365,6 +371,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("IssueRelayBundle")),
 			connect.WithClientOptions(opts...),
 		),
+		setRelayAccess: connect.NewClient[v1.SetRelayAccessRequest, v1.SetRelayAccessResponse](
+			httpClient,
+			baseURL+NodeServiceSetRelayAccessProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetRelayAccess")),
+			connect.WithClientOptions(opts...),
+		),
 		setDNSProvider: connect.NewClient[v1.SetDNSProviderRequest, v1.SetDNSProviderResponse](
 			httpClient,
 			baseURL+NodeServiceSetDNSProviderProcedure,
@@ -449,6 +461,7 @@ type nodeServiceClient struct {
 	listRelays        *connect.Client[v1.ListRelaysRequest, v1.ListRelaysResponse]
 	removeRelay       *connect.Client[v1.RemoveRelayRequest, v1.RemoveRelayResponse]
 	issueRelayBundle  *connect.Client[v1.IssueRelayBundleRequest, v1.IssueRelayBundleResponse]
+	setRelayAccess    *connect.Client[v1.SetRelayAccessRequest, v1.SetRelayAccessResponse]
 	setDNSProvider    *connect.Client[v1.SetDNSProviderRequest, v1.SetDNSProviderResponse]
 	getDNS            *connect.Client[v1.GetDNSRequest, v1.GetDNSResponse]
 	syncDNS           *connect.Client[v1.SyncDNSRequest, v1.SyncDNSResponse]
@@ -585,6 +598,11 @@ func (c *nodeServiceClient) IssueRelayBundle(ctx context.Context, req *connect.R
 	return c.issueRelayBundle.CallUnary(ctx, req)
 }
 
+// SetRelayAccess calls raycontrol.node.v1.NodeService.SetRelayAccess.
+func (c *nodeServiceClient) SetRelayAccess(ctx context.Context, req *connect.Request[v1.SetRelayAccessRequest]) (*connect.Response[v1.SetRelayAccessResponse], error) {
+	return c.setRelayAccess.CallUnary(ctx, req)
+}
+
 // SetDNSProvider calls raycontrol.node.v1.NodeService.SetDNSProvider.
 func (c *nodeServiceClient) SetDNSProvider(ctx context.Context, req *connect.Request[v1.SetDNSProviderRequest]) (*connect.Response[v1.SetDNSProviderResponse], error) {
 	return c.setDNSProvider.CallUnary(ctx, req)
@@ -684,6 +702,9 @@ type NodeServiceHandler interface {
 	// before stops working) and returns what its host needs (relay-v1 §3).
 	// It holds the relay's private key: root on the node only.
 	IssueRelayBundle(context.Context, *connect.Request[v1.IssueRelayBundleRequest]) (*connect.Response[v1.IssueRelayBundleResponse], error)
+	// SetRelayAccess changes the relay host's SSH port and admin addresses
+	// without a new bundle: its SPA and certificate stay.
+	SetRelayAccess(context.Context, *connect.Request[v1.SetRelayAccessRequest]) (*connect.Response[v1.SetRelayAccessResponse], error)
 	// The DNS provider (Cloudflare): the node's records in its zone and
 	// certificates through DNS-01 with a wildcard name (R4-10). The token is
 	// stored by rayd and never returned.
@@ -867,6 +888,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("IssueRelayBundle")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceSetRelayAccessHandler := connect.NewUnaryHandler(
+		NodeServiceSetRelayAccessProcedure,
+		svc.SetRelayAccess,
+		connect.WithSchema(nodeServiceMethods.ByName("SetRelayAccess")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceSetDNSProviderHandler := connect.NewUnaryHandler(
 		NodeServiceSetDNSProviderProcedure,
 		svc.SetDNSProvider,
@@ -973,6 +1000,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceRemoveRelayHandler.ServeHTTP(w, r)
 		case NodeServiceIssueRelayBundleProcedure:
 			nodeServiceIssueRelayBundleHandler.ServeHTTP(w, r)
+		case NodeServiceSetRelayAccessProcedure:
+			nodeServiceSetRelayAccessHandler.ServeHTTP(w, r)
 		case NodeServiceSetDNSProviderProcedure:
 			nodeServiceSetDNSProviderHandler.ServeHTTP(w, r)
 		case NodeServiceGetDNSProcedure:
@@ -1098,6 +1127,10 @@ func (UnimplementedNodeServiceHandler) RemoveRelay(context.Context, *connect.Req
 
 func (UnimplementedNodeServiceHandler) IssueRelayBundle(context.Context, *connect.Request[v1.IssueRelayBundleRequest]) (*connect.Response[v1.IssueRelayBundleResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.IssueRelayBundle is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetRelayAccess(context.Context, *connect.Request[v1.SetRelayAccessRequest]) (*connect.Response[v1.SetRelayAccessResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetRelayAccess is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) SetDNSProvider(context.Context, *connect.Request[v1.SetDNSProviderRequest]) (*connect.Response[v1.SetDNSProviderResponse], error) {

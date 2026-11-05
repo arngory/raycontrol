@@ -186,7 +186,7 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		if f, ok := g.fw.(interface{ ForgetSource(netip.Addr) }); ok {
 			for _, p := range g.relays {
 				if !slices.Contains(relays, p) {
-					f.ForgetSource(p.Addr())
+					go f.ForgetSource(p.Addr()) // a command: not under the gate's lock
 				}
 			}
 		}

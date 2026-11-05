@@ -38,13 +38,54 @@ func sshPort() int {
 	return 22
 }
 
-// sshClient returns the address of the current SSH session, if any.
+// sshClient returns the address of the current SSH session, if any: from
+// the environment, or, since sudo resets it, from the nearest parent
+// process that has it (root reads their environments).
 func sshClient() string {
-	if f := strings.Fields(os.Getenv("SSH_CONNECTION")); len(f) > 0 {
-		return f[0]
+	from := func(get func(string) string) string {
+		for _, v := range []string{"SSH_CONNECTION", "SSH_CLIENT"} {
+			if f := strings.Fields(get(v)); len(f) > 0 {
+				return f[0]
+			}
+		}
+		return ""
 	}
-	if f := strings.Fields(os.Getenv("SSH_CLIENT")); len(f) > 0 {
-		return f[0]
+	if a := from(os.Getenv); a != "" {
+		return a
+	}
+	pid := os.Getppid()
+	for range 8 {
+		if pid <= 1 {
+			break
+		}
+		env, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid)) //nolint:gosec // G304: /proc
+		if err == nil {
+			vars := map[string]string{}
+			for _, kv := range strings.Split(string(env), "\x00") {
+				if k, v, ok := strings.Cut(kv, "="); ok {
+					vars[k] = v
+				}
+			}
+			if a := from(func(k string) string { return vars[k] }); a != "" {
+				return a
+			}
+		}
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)) //nolint:gosec // G304: /proc
+		if err != nil {
+			break
+		}
+		// pid (comm) state ppid ...: comm may hold spaces, so after the ")".
+		rest := string(stat)
+		if i := strings.LastIndexByte(rest, ')'); i >= 0 {
+			rest = rest[i+1:]
+		}
+		f := strings.Fields(rest)
+		if len(f) < 2 {
+			break
+		}
+		if pid, err = strconv.Atoi(f[1]); err != nil {
+			break
+		}
 	}
 	return ""
 }

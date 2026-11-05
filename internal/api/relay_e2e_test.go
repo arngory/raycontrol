@@ -152,6 +152,21 @@ func relayExit(ctx context.Context, t *testing.T, dir, exit, relayAddr string) {
 			pc.WriteTo([]byte(from.(*net.UDPAddr).IP.String()), from)
 		}
 	}()
+	// A port the relay does not forward: the client must not reach it by
+	// routing through the relay.
+	other, err := net.Listen("tcp", ":8081")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			c, err := other.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
 	fmt.Println("exit ready")
 	<-ctx.Done()
 }
@@ -228,5 +243,12 @@ func relayClient(ctx context.Context, t *testing.T, dir, relay, seen string) {
 	if err != nil || string(buf[:m]) != seen {
 		t.Fatalf("UDP 443 through the relay: %q %v", buf[:m], err)
 	}
-	fmt.Println("client: through the relay with K_relay, not with the device's own key, and not before")
+	// The relay forwards what it forwards, and is no router for the rest.
+	if exit := os.Getenv("RAYCONTROL_RELAY_EXIT"); exit != "" {
+		if c, err := net.DialTimeout("tcp", net.JoinHostPort(exit, "8081"), time.Second); err == nil {
+			c.Close()
+			t.Fatal("the exit's tcp/8081 reached through the relay as a router")
+		}
+	}
+	fmt.Println("client: through the relay with K_relay, not with the device's own key, and not before; no routing")
 }

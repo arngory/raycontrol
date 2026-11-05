@@ -88,8 +88,9 @@ func (s *Server) issueRelayBundle(ctx context.Context, req *nodev1.IssueRelayBun
 	if err != nil {
 		return "", err
 	}
-	if req.SshPort > 65535 {
-		return "", fmt.Errorf("%w ssh port %d", store.ErrInvalid, req.SshPort)
+	// The relay host forwards IPv4 (net.ipv4.ip_forward); IPv6 relays later.
+	if !relay.Address.Is4() {
+		return "", fmt.Errorf("%w relay %s: a relay host is IPv4 for now", store.ErrInvalid, relay.Address)
 	}
 	exit, err := s.exitAddress(ctx, req.ExitAddress, relay.Address)
 	if err != nil {
@@ -103,55 +104,23 @@ func (s *Server) issueRelayBundle(ctx context.Context, req *nodev1.IssueRelayBun
 	if apiSvc == nil {
 		return "", fmt.Errorf("%w: the relay takes its perimeter from the remote API: enable the api service first", store.ErrInvalid)
 	}
-	admin := relay.Admin
-	if len(req.Admin) > 0 {
-		ps, err := node.ParsePrefixes(req.Admin)
-		if err != nil {
-			return "", err
-		}
-		admin = nil
-		for _, p := range ps {
-			if p.Bits() < node.MinAdminBits(p.Addr()) {
-				return "", fmt.Errorf("%w admin prefix %s: wider than /%d", store.ErrInvalid, p, node.MinAdminBits(p.Addr()))
-			}
-			admin = append(admin, p.String())
-		}
+	sshPort, admin, err := relayAccess(relay, req.SshPort, req.Admin)
+	if err != nil {
+		return "", err
 	}
 	services, err := s.Store.ListServices(ctx)
 	if err != nil {
 		return "", err
 	}
-	// Someone must be able to reach the relay host's SSH: its admin
-	// addresses, or the devices allowed the exit's SSH, by SPA.
-	if len(admin) == 0 && !slices.ContainsFunc(services, func(svc store.Service) bool { return svc.Kind == "ssh" && svc.Enabled }) {
-		return "", fmt.Errorf("%w: the relay host's SSH would open for nobody: give admin addresses (-admin) or enable the ssh service", store.ErrInvalid)
-	}
-	sshPort := relay.SSHPort
-	if req.SshPort != 0 {
-		sshPort = uint16(req.SshPort)
-	}
-	// New SPA parameters with every bundle: the keys of the devices for the
-	// relay change with them, so a bundle replaced because its host was
-	// lost takes the old keys with it.
-	params, err := provision.RekeyRelay(ctx, s.Store, relay.Name)
+	forwarded, err := relayForwarded(services, sshPort)
 	if err != nil {
 		return "", err
 	}
-	// The relay forwards the service ports to the exit and answers SPA on
-	// its range: its own SSH must be neither.
-	ssh := store.Port{Proto: "tcp", Num: sshPort}
-	if int(sshPort) >= int(params.PortBase) && int(sshPort) < int(params.PortBase)+int(params.PortRange) {
-		return "", fmt.Errorf("%w ssh port %d: in the relay's SPA range", store.ErrInvalid, sshPort)
-	}
-	for _, svc := range services {
-		if ports, err := svc.Ports(); err == nil && svc.Kind != "ssh" && slices.Contains(ports, ssh) {
-			return "", fmt.Errorf("%w ssh port %d: %s's, which the relay forwards", store.ErrInvalid, sshPort, svc.Name)
-		}
-	}
-	if err := s.Store.SetRelaySSHPort(ctx, relay.Name, sshPort); err != nil {
-		return "", err
-	}
-	if err := s.Store.SetRelayAdmin(ctx, relay.Name, admin); err != nil {
+	// New SPA parameters with every bundle, clear of the ports the relay
+	// forwards or serves: the keys of the devices for the relay change with
+	// them. Nothing is written before every check has passed.
+	_, spaJSON, err := provision.NewRelayParams(append(forwarded, store.Port{Proto: "tcp", Num: sshPort}))
+	if err != nil {
 		return "", err
 	}
 	cert, err := NewClientCertificate()
@@ -162,10 +131,95 @@ func (s *Server) issueRelayBundle(ctx context.Context, req *nodev1.IssueRelayBun
 	if err != nil {
 		return "", err
 	}
-	if err := s.Store.SetRelayCertPin(ctx, relay.Name, CertPin(cert.Leaf)); err != nil {
+	if err := s.Store.IssueRelay(ctx, relay.Name, store.RelayIssue{SPA: spaJSON, SSHPort: sshPort, Admin: admin, CertPin: CertPin(cert.Leaf)}); err != nil {
 		return "", err
 	}
 	return node.RelayBundle{Version: 1, Name: relay.Name, Exit: exit, API: apiSvc.endpoint, Cert: string(pem)}.Encode()
+}
+
+// relayAccess checks the relay host's SSH port and admin list asked for,
+// keeping the relay's own where none is given. The list must not be empty:
+// the devices allowed SSH have no way yet to knock at a relay with their
+// K_relay (rayctl knock does not), so the list is the only way in.
+func relayAccess(relay store.Relay, port uint32, cidrs []string) (uint16, []string, error) {
+	if port > 65535 {
+		return 0, nil, fmt.Errorf("%w ssh port %d", store.ErrInvalid, port)
+	}
+	sshPort := relay.SSHPort
+	if port != 0 {
+		sshPort = uint16(port)
+	}
+	admin := relay.Admin
+	if len(cidrs) > 0 {
+		ps, err := node.ParsePrefixes(cidrs)
+		if err != nil {
+			return 0, nil, err
+		}
+		admin = nil
+		for _, p := range ps {
+			if p.Bits() < node.MinAdminBits(p.Addr()) {
+				return 0, nil, fmt.Errorf("%w admin prefix %s: wider than /%d", store.ErrInvalid, p, node.MinAdminBits(p.Addr()))
+			}
+			admin = append(admin, p.String())
+		}
+	}
+	if len(admin) == 0 {
+		return 0, nil, fmt.Errorf("%w: the relay host's SSH needs admin addresses (-admin): run from an SSH session or give them", store.ErrInvalid)
+	}
+	return sshPort, admin, nil
+}
+
+// relayForwarded are the ports a relay forwards (every enabled service's,
+// not SSH's, not public ones'); the relay host's own SSH must not be one.
+func relayForwarded(services []store.Service, sshPort uint16) ([]store.Port, error) {
+	ssh := store.Port{Proto: "tcp", Num: sshPort}
+	var out []store.Port
+	for _, svc := range services {
+		if svc.Kind == "ssh" || svc.Public() || !svc.Enabled {
+			continue
+		}
+		ports, err := svc.Ports()
+		if err != nil {
+			continue
+		}
+		if slices.Contains(ports, ssh) {
+			return nil, fmt.Errorf("%w ssh port %d: %s's, which the relay forwards", store.ErrInvalid, sshPort, svc.Name)
+		}
+		out = append(out, ports...)
+	}
+	return out, nil
+}
+
+// SetRelayAccess changes the relay host's SSH port and admin list without a
+// new bundle: the running relay takes them with its next snapshot, its SPA
+// and certificate stay.
+func (s *Server) SetRelayAccess(ctx context.Context, req *connect.Request[nodev1.SetRelayAccessRequest]) (*connect.Response[nodev1.SetRelayAccessResponse], error) {
+	err := func() error {
+		relay, err := s.Store.RelayByName(ctx, req.Msg.Name)
+		if err != nil {
+			return err
+		}
+		sshPort, admin, err := relayAccess(relay, req.Msg.SshPort, req.Msg.Admin)
+		if err != nil {
+			return err
+		}
+		services, err := s.Store.ListServices(ctx)
+		if err != nil {
+			return err
+		}
+		if _, err := relayForwarded(services, sshPort); err != nil {
+			return err
+		}
+		if params, err := provision.RelayParams(ctx, s.Store, relay.Name); err == nil &&
+			int(sshPort) >= int(params.PortBase) && int(sshPort) < int(params.PortBase)+int(params.PortRange) {
+			return fmt.Errorf("%w ssh port %d: in the relay's SPA range", store.ErrInvalid, sshPort)
+		}
+		return s.Store.SetRelayAccess(ctx, relay.Name, sshPort, admin)
+	}()
+	if err := s.done(ctx, "relay.access", req.Msg.Name, err); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&nodev1.SetRelayAccessResponse{}), nil
 }
 
 // exitAddress is the exit's IP for a relay's DNAT, of the relay's family

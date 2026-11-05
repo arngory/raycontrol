@@ -134,9 +134,11 @@ func (n *NFT) Ruleset() string {
 		meta nfproto %[5]s fib daddr type local meta l4proto . th dport @relay_fwd dnat %[1]s to %[2]s
 	}
 	chain relay_forward {
-		type filter hook forward priority 0; policy accept;
+		type filter hook forward priority 0; policy drop;
+		ct state established,related accept
 		ct status dnat %[1]s daddr %[2]s %[3]s . meta l4proto . th dport %[4]s accept
 		ct status dnat %[1]s daddr %[2]s counter drop comment "relay-no-grant"
+		counter comment "relay-not-forwarded"
 	}
 	chain relay_snat {
 		type nat hook postrouting priority srcnat; policy accept;
@@ -352,7 +354,9 @@ func (n *NFT) ForgetSource(a netip.Addr) {
 	if err != nil {
 		return
 	}
+	// Both directions: flows from the relay, and those masqueraded to it.
 	_ = exec.Command(path, "-D", "-s", a.String()).Run() //nolint:gosec // G204: a fixed tool, an address
+	_ = exec.Command(path, "-D", "-d", a.String()).Run() //nolint:gosec // G204: a fixed tool, an address
 }
 
 func (n *NFT) SetRelays(addrs []netip.Prefix, ports []Port) error {

@@ -140,6 +140,41 @@ func (s *Store) RelayByCertPin(ctx context.Context, pin string) (Relay, error) {
 	return Relay{}, ErrNotFound
 }
 
+// RelayIssue is what a new bundle sets for a relay, all at once.
+type RelayIssue struct {
+	SPA     []byte // JSON of node.SPAParams
+	SSHPort uint16
+	Admin   []string
+	CertPin string
+}
+
+// IssueRelay sets a relay's SPA, SSH port, admin list and certificate pin in
+// one statement: a bundle refused halfway changes none of them.
+func (s *Store) IssueRelay(ctx context.Context, name string, ri RelayIssue) error {
+	if ri.CertPin == "" || ri.SSHPort == 0 || len(ri.SPA) == 0 {
+		return fmt.Errorf("%w relay issue: SPA, SSH port and pin needed", ErrInvalid)
+	}
+	admin, err := json.Marshal(ri.Admin)
+	if err != nil {
+		return err
+	}
+	return s.affectOne(ctx, "relay", name, `UPDATE relays SET spa_json = ?, ssh_port = ?, admin_json = ?, cert_pin = ? WHERE name = ?`,
+		string(ri.SPA), ri.SSHPort, string(admin), ri.CertPin, name)
+}
+
+// SetRelayAccess sets the relay host's SSH port and admin list, keeping its
+// SPA and certificate: the running relay takes them with its next snapshot.
+func (s *Store) SetRelayAccess(ctx context.Context, name string, sshPort uint16, admin []string) error {
+	if sshPort == 0 {
+		return fmt.Errorf("%w relay SSH port 0", ErrInvalid)
+	}
+	b, err := json.Marshal(admin)
+	if err != nil {
+		return err
+	}
+	return s.affectOne(ctx, "relay", name, `UPDATE relays SET ssh_port = ?, admin_json = ? WHERE name = ?`, sshPort, string(b), name)
+}
+
 // SetRelayAdmin replaces the prefixes that reach the relay host's SSH
 // without SPA (validated by the caller).
 func (s *Store) SetRelayAdmin(ctx context.Context, name string, prefixes []string) error {

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -222,5 +223,50 @@ func TestRelayFeedStreams(t *testing.T) {
 	s, _ = feed.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{}))
 	if !s.Receive() {
 		t.Fatalf("a feed after one closed: %v", s.Err())
+	}
+}
+
+// A refused bundle changes nothing of the relay; SetRelayAccess changes its
+// SSH access and nothing else; a relay host is IPv4 for now.
+func TestRelayAccess(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "api", Name: "api"}))
+	for name, addr := range map[string]string{"r1": "198.51.100.20", "r6": "2001:db8::20"} {
+		if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: name, Address: addr})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r6", ExitAddress: "2001:db8::7", Admin: []string{"192.0.2.7"}}); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("an IPv6 relay: %v", err)
+	}
+	if _, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.2.7"}}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := srv.Store.RelayByName(ctx, "r1")
+	apiSvc, _ := srv.apiEndpoint(ctx)
+	if _, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.2.8"},
+		SshPort: uint32(apiSvc.endpoint.Port)}); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("SSH on a forwarded port: %v", err)
+	}
+	if after, _ := srv.Store.RelayByName(ctx, "r1"); string(after.SPA) != string(before.SPA) || after.CertPin != before.CertPin ||
+		after.SSHPort != before.SSHPort || !slices.Equal(after.Admin, before.Admin) {
+		t.Fatalf("a refused bundle changed the relay: %+v -> %+v", before, after)
+	}
+	if _, err := c.SetRelayAccess(ctx, connect.NewRequest(&nodev1.SetRelayAccessRequest{Name: "r1", SshPort: 2200, Admin: []string{"203.0.113.9"}})); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := srv.Store.RelayByName(ctx, "r1")
+	if string(after.SPA) != string(before.SPA) || after.CertPin != before.CertPin || after.SSHPort != 2200 || !slices.Equal(after.Admin, []string{"203.0.113.9/32"}) {
+		t.Fatalf("SetRelayAccess: %+v", after)
+	}
+	if _, err := c.SetRelayAccess(ctx, connect.NewRequest(&nodev1.SetRelayAccessRequest{Name: "r1", SshPort: uint32(apiSvc.endpoint.Port)})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("SetRelayAccess to a forwarded port: %v", err)
+	}
+	per := &PerimeterServer{Server: srv, DefaultTTL: time.Minute, MaxTTL: time.Hour}
+	snap, err := per.RelaySnapshot(ctx, "r1")
+	if err != nil || !slices.Equal(snap.AdminPrefixes, []string{"203.0.113.9/32"}) || snap.AdminPorts[0].Port != 2200 {
+		t.Fatalf("relay snapshot after SetRelayAccess: %v %v", snap, err)
 	}
 }

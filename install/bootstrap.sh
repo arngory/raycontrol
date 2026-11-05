@@ -180,13 +180,25 @@ install_deps() {
 	command -v openssl >/dev/null || missing+=(openssl)
 	command -v nft >/dev/null || missing+=(nftables)
 	command -v pkcheck >/dev/null || missing+=(polkit)
+	# conntrack: a relay removed loses its flows already open, not only new
+	# ones (rayspa, relay-v1).
+	command -v conntrack >/dev/null || missing+=(conntrack)
 	if [[ ${#missing[@]} -eq 0 ]]; then
 		return
 	fi
 	log "installing ${missing[*]}"
-	local pkgs=()
-	if command -v apt-get >/dev/null; then
-		for p in "${missing[@]}"; do [[ $p == polkit ]] && pkgs+=(polkitd) || pkgs+=("$p"); done
+	# Package names: polkit is polkitd on Debian, conntrack is
+	# conntrack-tools elsewhere.
+	local pkgs=() p apt=0
+	command -v apt-get >/dev/null && apt=1
+	for p in "${missing[@]}"; do
+		case $p in
+		polkit) if ((apt)); then pkgs+=(polkitd); else pkgs+=(polkit); fi ;;
+		conntrack) if ((apt)); then pkgs+=(conntrack); else pkgs+=(conntrack-tools); fi ;;
+		*) pkgs+=("$p") ;;
+		esac
+	done
+	if ((apt)); then
 		export DEBIAN_FRONTEND=noninteractive
 		# A fresh VPS often runs unattended-upgrades first: wait for its lock.
 		local lock=(-o DPkg::Lock::Timeout=300)
@@ -194,14 +206,14 @@ install_deps() {
 		apt-get "${lock[@]}" install -y -q ca-certificates "${pkgs[@]}"
 		INSTALLED_PKGS="apt:$(IFS=,; echo "${pkgs[*]}")"
 	elif command -v dnf >/dev/null; then
-		dnf install -y -q ca-certificates "${missing[@]}"
-		INSTALLED_PKGS="dnf:$(IFS=,; echo "${missing[*]}")"
+		dnf install -y -q ca-certificates "${pkgs[@]}"
+		INSTALLED_PKGS="dnf:$(IFS=,; echo "${pkgs[*]}")"
 	elif command -v zypper >/dev/null; then
-		zypper --non-interactive install ca-certificates "${missing[@]}"
-		INSTALLED_PKGS="zypper:$(IFS=,; echo "${missing[*]}")"
+		zypper --non-interactive install ca-certificates "${pkgs[@]}"
+		INSTALLED_PKGS="zypper:$(IFS=,; echo "${pkgs[*]}")"
 	elif command -v pacman >/dev/null; then
-		pacman -Sy --noconfirm --needed ca-certificates "${missing[@]}"
-		INSTALLED_PKGS="pacman:$(IFS=,; echo "${missing[*]}")"
+		pacman -Sy --noconfirm --needed ca-certificates "${pkgs[@]}"
+		INSTALLED_PKGS="pacman:$(IFS=,; echo "${pkgs[*]}")"
 	else
 		die "install ${missing[*]} with your package manager and run again"
 	fi

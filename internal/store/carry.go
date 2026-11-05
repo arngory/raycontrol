@@ -18,7 +18,7 @@ import (
 //   - a service disabled or deleted stays disabled, a REALITY no longer open
 //     is not open, and a DNS tunnel keeps the stricter dnsauth mode;
 //   - an unused invite withdrawn stays withdrawn, a relay removed stays
-//     removed, and a relay's certificate and SPA replaced stay replaced;
+//     removed, and a relay's certificate, SPA and SSH access stay as now;
 //   - the settings named in keep (the admin addresses) take current's value.
 //
 // Users and relays are matched by ID, name or address, and creation time:
@@ -88,9 +88,15 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 		                    WHERE c.id = relays.id AND c.address = relays.address AND c.created_at = relays.created_at)`},
 		{"relays", "cert_pin", `UPDATE relays SET cert_pin = (SELECT c.cert_pin FROM cur.relays c WHERE c.id = relays.id)
 		  WHERE EXISTS (SELECT 1 FROM cur.relays c WHERE c.id = relays.id AND c.cert_pin IS NOT relays.cert_pin)`},
-		// A relay's SPA goes with its certificate: new keys for a lost relay.
+		// A relay's SPA goes with its certificate (new keys for a lost relay),
+		// and its SSH access with both: the relay runs on what the current
+		// database gave it.
 		{"relays", "spa_json", `UPDATE relays SET spa_json = (SELECT c.spa_json FROM cur.relays c WHERE c.id = relays.id)
 		  WHERE EXISTS (SELECT 1 FROM cur.relays c WHERE c.id = relays.id AND c.spa_json IS NOT relays.spa_json)`},
+		{"relays", "ssh_port", `UPDATE relays SET ssh_port = (SELECT c.ssh_port FROM cur.relays c WHERE c.id = relays.id)
+		  WHERE EXISTS (SELECT 1 FROM cur.relays c WHERE c.id = relays.id AND c.ssh_port IS NOT relays.ssh_port)`},
+		{"relays", "admin_json", `UPDATE relays SET admin_json = (SELECT c.admin_json FROM cur.relays c WHERE c.id = relays.id)
+		  WHERE EXISTS (SELECT 1 FROM cur.relays c WHERE c.id = relays.id AND c.admin_json IS NOT relays.admin_json)`},
 	} {
 		// The copy may be older than the table or the column; the current
 		// database is newer, so it has them.

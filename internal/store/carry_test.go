@@ -180,6 +180,7 @@ func TestCarryRevocationsMore(t *testing.T) {
 	}
 	must(t, s.DeleteRelay(ctx, "relay1"))
 	must(t, s.ReplaceRelaySPA(ctx, "relay2", []byte(`{"new":1}`)))
+	must(t, s.SetRelayAccess(ctx, "relay2", 2222, []string{"203.0.113.9/32"}))
 	if _, err := s.db.ExecContext(ctx, `UPDATE services SET settings_json = json_set(settings_json, '$.auth', 'required') WHERE id = ?`, dns.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +197,8 @@ func TestCarryRevocationsMore(t *testing.T) {
 	if u, err := s.UserByName(ctx, "mallory"); err != nil || u.Enabled {
 		t.Errorf("deleted mallory (her ID reused): enabled %v %v", u.Enabled, err)
 	}
-	if rs, _ := s.ListRelays(ctx); len(rs) != 1 || rs[0].Name != "relay2" || string(rs[0].SPA) != `{"new":1}` {
+	if rs, _ := s.ListRelays(ctx); len(rs) != 1 || rs[0].Name != "relay2" || string(rs[0].SPA) != `{"new":1}` ||
+		rs[0].SSHPort != 2222 || len(rs[0].Admin) != 1 || rs[0].Admin[0] != "203.0.113.9/32" {
 		t.Errorf("relays %+v: removed one back, or the old SPA", rs)
 	}
 	if svc, _ := s.ServiceByName(ctx, "dns"); !strings.Contains(svc.Settings, `"auth":"required"`) {

@@ -255,9 +255,11 @@ func x25519Share() []byte {
 	return k.PublicKey().Bytes()
 }
 
-// greaseECH is a GREASE encrypted_client_hello as Chrome sends without an ECH
-// config: the capture's suite, and a random config ID, enc and payload of
-// the capture's lengths.
+// greaseECH is a GREASE encrypted_client_hello as Chrome (BoringSSL) sends
+// without an ECH config: the capture's suite, a random config ID, a fresh
+// X25519 public key as enc (random bytes would set its top bit half the
+// time, which a key never does), and a random payload of 144, 176, 208 or
+// 240 bytes, drawn per connection.
 func greaseECH(tmpl []byte) ([]byte, error) {
 	s := cryptobyte.String(tmpl)
 	var outer uint8
@@ -273,8 +275,12 @@ func greaseECH(tmpl []byte) ([]byte, error) {
 	b.AddUint16(kdf)
 	b.AddUint16(aead)
 	b.AddBytes(fresh(1))
-	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(fresh(len(enc))) })
-	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(fresh(len(payload))) })
+	if len(enc) != 32 {
+		return nil, errors.New("spa: encrypted_client_hello of the capture: not X25519")
+	}
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(x25519Share()) })
+	n := fresh(1)[0] & 3 // 144, 176, 208 or 240
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(fresh(16 + 32*(4+int(n)))) })
 	return b.Bytes()
 }
 

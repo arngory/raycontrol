@@ -3,6 +3,8 @@ package provision
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"slices"
 
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/spa"
@@ -40,17 +42,22 @@ func RelayParams(ctx context.Context, st *store.Store, name string) (spa.Params,
 	return spa.Params{}, store.ErrInvalid
 }
 
-// RekeyRelay gives a relay new SPA parameters, and so its devices new keys
-// for it (spa.RelayKey takes the relay's node ID): what a seized relay held
-// stops working.
-func RekeyRelay(ctx context.Context, st *store.Store, name string) (spa.Params, error) {
-	p, err := spa.RandomParams(nil)
-	if err != nil {
-		return p, err
+// NewRelayParams draws SPA parameters for a relay whose range keeps clear of
+// the given ports, which the relay forwards or serves itself: a knock on a
+// slot port that is also a forwarded one would go to the exit instead.
+func NewRelayParams(avoid []store.Port) (spa.Params, []byte, error) {
+	for range 100 {
+		p, err := spa.RandomParams(nil)
+		if err != nil {
+			return p, nil, err
+		}
+		if slices.ContainsFunc(avoid, func(port store.Port) bool {
+			return int(port.Num) >= int(p.PortBase) && int(port.Num) < int(p.PortBase)+int(p.PortRange)
+		}) {
+			continue
+		}
+		b, err := json.Marshal(node.FromParams(p))
+		return p, b, err
 	}
-	b, err := json.Marshal(node.FromParams(p))
-	if err != nil {
-		return p, err
-	}
-	return p, st.ReplaceRelaySPA(ctx, name, b)
+	return spa.Params{}, nil, fmt.Errorf("%w: no SPA range for the relay clear of its ports", store.ErrInvalid)
 }

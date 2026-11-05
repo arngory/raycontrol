@@ -47,6 +47,8 @@ for l in "rc-e2e-c rc-e2e-c" "rc-e2e-r rc-e2e-rc" "rc-e2e-r rc-e2e-rx" "rc-e2e-x
 	ip -n "$n" link set "$d" up
 done
 ip -n rc-e2e-c route add default via 198.51.100.1
+# The exit could answer the client directly: the relay must still not route.
+ip -n rc-e2e-x route add 198.51.100.0/24 via 203.0.113.1
 ip netns exec rc-e2e-r sysctl -q -w net.ipv4.ip_forward=1
 
 role() { # namespace role [env...]
@@ -67,7 +69,7 @@ for _ in $(seq 100); do
 	grep -q "snapshot applied" "$bin/relay.log" && break
 	sleep 0.2
 done
-if ! role rc-e2e-c client RAYCONTROL_RELAY_ADDR=198.51.100.1 RAYCONTROL_RELAY_SEEN=203.0.113.1; then
+if ! role rc-e2e-c client RAYCONTROL_RELAY_ADDR=198.51.100.1 RAYCONTROL_RELAY_SEEN=203.0.113.1 RAYCONTROL_RELAY_EXIT=203.0.113.2; then
 	echo "--- exit"; cat "$bin/exit.log"
 	echo "--- relay (rayspa)"; cat "$bin/relay.log"
 	echo "--- relay ruleset"; ip netns exec rc-e2e-r nft list ruleset

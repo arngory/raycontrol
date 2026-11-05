@@ -17,9 +17,9 @@ script=$EXTRA_CA_SETUP'
 set -eu
 . /i/bootstrap.sh
 before=""
-for c in curl openssl nft pkcheck; do command -v "$c" >/dev/null || before="$before $c"; done
+for c in curl openssl nft pkcheck conntrack; do command -v "$c" >/dev/null || before="$before $c"; done
 install_deps
-for c in curl openssl nft pkcheck sha256sum tar base64 mktemp; do
+for c in curl openssl nft pkcheck conntrack sha256sum tar base64 mktemp; do
 	command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 1; }
 done
 echo "deps ok: $(nft --version), $(openssl version)"

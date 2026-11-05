@@ -105,7 +105,7 @@ func (h parsedHello) shape() string {
 			}
 			v = strings.Join(ks, ",")
 		case id == extECH:
-			v = fmt.Sprintf("GREASE ECH %x, %d bytes", d[:5], len(d))
+			v = fmt.Sprintf("GREASE ECH %x", d[:5]) // its length is drawn per connection
 		case id == extSessionTicket:
 			v = "ticket"
 		default:
@@ -170,9 +170,9 @@ func TestTLSCarrierLikeChrome(t *testing.T) {
 		t.Fatalf("the capture's JA4 %s, Chrome 156's is t13d1517h2_8daaf6152771_cb7bf5808d99", got)
 	}
 	pkt := make([]byte, 200)
-	orders := map[string]bool{}
+	orders, echLens := map[string]bool{}, map[int]bool{}
 	var first parsedHello
-	for i := range 20 {
+	for i := range 40 {
 		c, err := TLSCarrier(pkt)
 		if err != nil {
 			t.Fatal(err)
@@ -191,6 +191,17 @@ func TestTLSCarrierLikeChrome(t *testing.T) {
 			t.Fatalf("GREASE extensions %04x %04x", h.exts[0], h.exts[len(h.exts)-1])
 		}
 		orders[fmt.Sprint(h.exts[1:len(h.exts)-1])] = true
+		// GREASE ECH as BoringSSL makes it: enc an X25519 key (its top bit
+		// clear), the payload 144, 176, 208 or 240 bytes.
+		ech := h.data[extECH]
+		enc, payload := ech[8:8+32], ech[8+32+2:]
+		if binary.BigEndian.Uint16(ech[6:]) != 32 || enc[31]&0x80 != 0 {
+			t.Fatalf("GREASE ECH enc %x", enc)
+		}
+		if n := len(payload); n < 144 || n > 240 || (n-16)%32 != 0 {
+			t.Fatalf("GREASE ECH payload of %d bytes", n)
+		}
+		echLens[len(payload)] = true
 		if i == 0 {
 			first = h
 			continue
@@ -203,5 +214,8 @@ func TestTLSCarrierLikeChrome(t *testing.T) {
 	}
 	if len(orders) < 2 {
 		t.Error("the extensions come in one order only")
+	}
+	if len(echLens) < 2 {
+		t.Error("the GREASE ECH payload has one length only")
 	}
 }
