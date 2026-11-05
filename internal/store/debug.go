@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
+	"fmt"
 	"strconv"
 	"time"
 )
@@ -33,4 +35,32 @@ func (s *Store) SetDebugUntil(ctx context.Context, t time.Time) error {
 		return s.DeleteSetting(ctx, settingDebugUntil)
 	}
 	return s.SetSetting(ctx, settingDebugUntil, []byte(strconv.FormatInt(t.Unix(), 10)))
+}
+
+// settingDNSProbeKey is the node's key of dnsprobe-v1 (docs/spec/
+// dnsprobe-v1.md): 32 bytes, made once, sent to users with a DNS tunnel.
+const settingDNSProbeKey = "dns_probe_key"
+
+// DNSProbeKey returns the node's dnsprobe-v1 key, making it the first
+// time. Two callers at once get the same key: the first insert wins.
+func (s *Store) DNSProbeKey(ctx context.Context) ([]byte, error) {
+	if v, err := s.GetSetting(ctx, settingDNSProbeKey); err == nil && len(v) == 32 {
+		return v, nil
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING`,
+		settingDNSProbeKey, key); err != nil {
+		return nil, err
+	}
+	v, err := s.GetSetting(ctx, settingDNSProbeKey)
+	if err != nil {
+		return nil, err
+	}
+	if len(v) != 32 {
+		return nil, fmt.Errorf("%w: dns_probe_key of %d bytes", ErrInvalid, len(v))
+	}
+	return v, nil
 }

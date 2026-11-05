@@ -115,6 +115,9 @@ type Model struct {
 	// devices allowed on it (spec/dnsauth-v1.md): "<device id> <hex>".
 	// Only CollectForRender fills it.
 	DNSAuth map[int64][]string
+	// DNSProbeKey is the node's dnsprobe-v1 key (docs/spec/dnsprobe-v1.md)
+	// when it has a DNS tunnel: the front answers resolver checks with it.
+	DNSProbeKey []byte
 	// Debug: the debug window is open (rayctl debug): niko-server logs at
 	// debug level. Xray stays at warning: at info it logs the users'
 	// destinations.
@@ -189,6 +192,11 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 	for i := range m.Services {
 		if m.Services[i].Kind == "inner" {
 			inner = &m.Services[i]
+		}
+	}
+	if slices.ContainsFunc(m.Services, func(s Service) bool { return s.Kind == "dnstt" || s.Kind == "masterdns" }) {
+		if m.DNSProbeKey, err = st.DNSProbeKey(ctx); err != nil {
+			return m, err
 		}
 	}
 
@@ -614,7 +622,15 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if m.IPv6 {
 				listen = append(listen, "[::]:53")
 			}
-			front["dns"] = map[string]any{"listen": listen, "zones": zones}
+			dns := map[string]any{"listen": listen, "zones": zones}
+			// dnsprobe-v1: the front answers resolver checks itself
+			// (niko-server v0.8.3), with the key root copies in.
+			if len(m.DNSProbeKey) == 32 {
+				dns["probe_key_file"] = p.FrontDNSProbe()
+				files = append(files, File{Path: path.Join(p.Rendered, "front", DNSProbeKeyFile), Mode: 0o600,
+					Content: []byte(hex.EncodeToString(m.DNSProbeKey) + "\n"), Service: "front"})
+			}
+			front["dns"] = dns
 		}
 		if len(tcpRoutes) > 0 {
 			listen := []string{"0.0.0.0:443"}
@@ -1120,6 +1136,14 @@ const (
 	HysteriaUsers = "users.json"
 	HysteriaObfs  = "salamander"
 )
+
+// DNSProbeKeyFile is the dnsprobe-v1 key's file among the front's.
+const DNSProbeKeyFile = "dnsprobe.key"
+
+// FrontDNSProbe is where the front reads the dnsprobe-v1 key.
+func (p Paths) FrontDNSProbe() string {
+	return p.Credential("front", DNSProbeKeyFile)
+}
 
 // FrontSalamander is where the front reads a hy2-obfs password.
 func (p Paths) FrontSalamander(service string) string {

@@ -141,6 +141,20 @@ func TestRender(t *testing.T) {
 		t.Fatalf("masterdns key %q", k)
 	}
 
+	// dnsprobe-v1: the front's key file, root's, read where root copies it.
+	var probeCfg struct {
+		DNS struct {
+			ProbeKeyFile string `json:"probe_key_file"`
+		} `json:"dns"`
+	}
+	json.Unmarshal(f.Content, &probeCfg)
+	probeKey := byPath["/var/lib/raycontrol/rendered/front/dnsprobe.key"]
+	stored, _ := st.DNSProbeKey(ctx)
+	if probeCfg.DNS.ProbeKeyFile != "/run/niko/front/dnsprobe.key" || probeKey.Mode != 0o600 || probeKey.Group != "" ||
+		string(probeKey.Content) != hex.EncodeToString(stored)+"\n" || len(stored) != 32 {
+		t.Fatalf("probe key: %q, file %+v", probeCfg.DNS.ProbeKeyFile, probeKey)
+	}
+
 	inner := string(byPath["/var/lib/raycontrol/rendered/inner/xray.json"].Content)
 	for _, want := range []string{`"mlkem768x25519plus.native.600s.`, `"/run/niko/inner/vless.sock,0660"`, `"/run/niko/inner-api/api.sock"`, `"10.0.0.0/8"`, `"u1"`} {
 		if !strings.Contains(inner, want) {

@@ -76,6 +76,16 @@ type Payload struct {
 	SPA *SPAHint `json:"spa,omitempty"`
 	// Relays in front of the node (relay-v1 §4).
 	Relays []RelayHint `json:"relays,omitempty"`
+	// DNSProbe is the key of dnsprobe-v1 (spec/dnsprobe-v1.md), for a
+	// user with a DNS tunnel: the client checks resolvers with it.
+	DNSProbe *DNSProbeHint `json:"dns_probe,omitempty"`
+}
+
+// DNSProbeHint carries the node's dnsprobe-v1 key, base64url without
+// padding.
+type DNSProbeHint struct {
+	V   int    `json:"v"`
+	Key string `json:"key"`
 }
 
 // RelayHint is a relay in front of the node (relay-v1 §4): its address and

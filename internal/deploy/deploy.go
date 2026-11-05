@@ -526,6 +526,11 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		// The salamander passwords of hy2-obfs: copied in by root, readable
 		// by the front only.
 		var frontCreds []string
+		// The dnsprobe-v1 key, with DNS tunnels (render.Model.DNSProbeKey).
+		if len(dns) > 0 && len(m.DNSProbeKey) == 32 {
+			frontCreds = append(frontCreds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o niko-front -g niko-front %s %s",
+				path.Join(p.Rendered, "front", render.DNSProbeKeyFile), p.FrontDNSProbe()))
+		}
 		for _, s := range hysteria {
 			if s.Kind == "hy2-obfs" {
 				frontCreds = append(frontCreds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o niko-front -g niko-front %s %s",

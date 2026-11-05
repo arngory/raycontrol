@@ -107,7 +107,9 @@ func TestBuild(t *testing.T) {
 	}
 	front := file(p, "/etc/systemd/system/niko-front.service")
 	if !strings.Contains(front, "AmbientCapabilities=CAP_NET_BIND_SERVICE") || strings.Contains(front, "SupplementaryGroups") ||
-		!strings.Contains(front, "After=network-online.target niko-dns.service niko-reality.service") {
+		!strings.Contains(front, "After=network-online.target niko-dns.service niko-reality.service") ||
+		// dnsprobe-v1: the key copied in by root, for the front alone.
+		!strings.Contains(front, "ExecStartPre=+install -m 0400 -o niko-front -g niko-front /var/lib/raycontrol/rendered/front/dnsprobe.key /run/niko/front/dnsprobe.key") {
 		t.Errorf("front unit:\n%s", front)
 	}
 	if !strings.Contains(file(p, "/etc/systemd/system/rayspa.service"), "AmbientCapabilities=CAP_NET_ADMIN") {
