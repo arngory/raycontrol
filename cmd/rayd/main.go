@@ -738,7 +738,7 @@ func checkResolver(ctx context.Context, hb *health.Board, log *slog.Logger) {
 		p := deploy.ResolverProblem("")
 		var err error
 		if p != "" {
-			err = errors.New(p + " (chmod 644 /etc/resolv.conf, or rayctl apply)")
+			err = errors.New(p)
 			if p != last {
 				log.Warn("resolver", "err", err)
 			}

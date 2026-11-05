@@ -293,7 +293,8 @@ func TestPathAndViaRelay(t *testing.T) {
 }
 
 // A DNS tunnel's observation names the kind of resolver it works through;
-// the network's hint gives the kind most of them work through.
+// the network's hint gives, per tunnel kind, the resolver most of them work
+// through: their queries differ, and so do the resolvers that pass them.
 func TestResolverHint(t *testing.T) {
 	ctx := context.Background()
 	st, c, devices := node(t)
@@ -323,31 +324,33 @@ func TestResolverHint(t *testing.T) {
 		t.Fatalf("a resolver for a service that is no DNS tunnel: %v", err)
 	}
 	// A failing tunnel names none: it may be reported without one.
-	if err := c.Take(ctx, devices[0], mobile, strings.NewReader(fmt.Sprintf(`{"v":1,"net":"cellular","obs":[{"svc":%d,"result":"fails"}]}`, dnstt))); err != nil {
+	if err := c.Take(ctx, devices[0], netip.MustParseAddr("198.51.100.5"), strings.NewReader(fmt.Sprintf(`{"v":1,"net":"cellular","obs":[{"svc":%d,"result":"fails"}]}`, dnstt))); err != nil {
 		t.Fatal(err)
 	}
-	// Nine more: dnstt mostly through UDP, masterdns through UDP as well
-	// but for two through DoH; 16 of the 18 working ones are udp.
-	for i, d := range devices[1:10] {
+	// Ten reports: dnstt through DoH, masterdns through UDP but for two
+	// through DoH (8 of 10).
+	for i, d := range devices[:10] {
 		m := "udp"
 		if i < 2 {
 			m = "doh"
 		}
-		if err := c.Take(ctx, d, mobile, strings.NewReader(body("udp", m))); err != nil {
+		if err := c.Take(ctx, d, mobile, strings.NewReader(body("doh", m))); err != nil {
 			t.Fatal(err)
 		}
 	}
 	h := c.Hints(ctx, mobile, []uint16{1, uint16(dnstt), uint16(mdns)})
-	if h == nil || h.DNS != "udp" || h.Devices != 10 {
+	if h == nil || h.DNS["dnstt"] != "doh" || h.DNS["masterdns"] != "udp" || len(h.DNS) != 2 || h.Devices != 10 {
 		t.Fatalf("hint %+v", h)
 	}
-	// A client without the tunnels gets no resolver (nor a hint at all:
-	// service 1 has nine observations here).
-	if h := c.Hints(ctx, mobile, []uint16{1}); h != nil {
+	// Only the client's own tunnels; none without them.
+	if h := c.Hints(ctx, mobile, []uint16{1, uint16(mdns)}); h == nil || len(h.DNS) != 1 || h.DNS["masterdns"] != "udp" {
+		t.Fatalf("hint with masterdns only %+v", h)
+	}
+	if h := c.Hints(ctx, mobile, []uint16{1}); h == nil || h.DNS != nil {
 		t.Fatalf("hint without tunnels %+v", h)
 	}
 	nets, _, err := c.View(ctx, 7)
-	if err != nil || len(nets) != 1 || nets[0].Services[mdns]["dns"]["doh"] != 2 || nets[0].Services[dnstt]["dns"]["udp"] != 9 {
+	if err != nil || len(nets) != 1 || nets[0].Services[mdns]["dns"]["doh"] != 2 || nets[0].Services[dnstt]["dns"]["doh"] != 10 {
 		t.Fatalf("view %+v %v", nets, err)
 	}
 
@@ -362,7 +365,7 @@ func TestResolverHint(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if h := c.Hints(ctx, mobile, []uint16{uint16(dnstt), uint16(mdns)}); h == nil || h.DNS != "" {
+	if h := c.Hints(ctx, mobile, []uint16{1, uint16(dnstt), uint16(mdns)}); h == nil || h.DNS != nil {
 		t.Fatalf("hint without a majority %+v", h)
 	}
 }

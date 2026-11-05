@@ -72,6 +72,7 @@ type Manager struct {
 	once  sync.Once
 	fails map[string]int
 	next  map[string]time.Time
+	last  map[string]time.Time // the last failed try of a site
 	wake  chan struct{}
 	retry atomic.Bool
 }
@@ -134,11 +135,13 @@ func (m *Manager) Run(ctx context.Context) {
 // Once issues what is due and returns how many certificates it stored.
 func (m *Manager) Once(ctx context.Context, now time.Time) int {
 	if m.fails == nil {
-		m.fails, m.next = map[string]int{}, map[string]time.Time{}
+		m.fails, m.next, m.last = map[string]int{}, map[string]time.Time{}, map[string]time.Time{}
 	}
+	// From the last try, not from next: changes in a row (a cron job) keep
+	// the gap however many there are.
 	if m.retry.Swap(false) {
 		for name, next := range m.next {
-			if soon := next.Add(-backoff(m.fails[name])).Add(RetryGap); soon.Before(next) {
+			if soon := m.last[name].Add(RetryGap); soon.Before(next) {
 				m.next[name] = soon
 			}
 		}
@@ -184,11 +187,13 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 			m.fails[svc.Name]++
 			wait := backoff(m.fails[svc.Name])
 			m.next[svc.Name] = now.Add(wait)
+			m.last[svc.Name] = now
 			m.log().Warn("certificate not issued, retrying later", "service", svc.Name, "in", wait, "err", err)
 			continue
 		}
 		delete(m.fails, svc.Name)
 		delete(m.next, svc.Name)
+		delete(m.last, svc.Name)
 		stored++
 	}
 	if stored > 0 && m.Notify != nil {

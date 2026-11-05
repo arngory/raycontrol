@@ -107,6 +107,37 @@ func TestManager(t *testing.T) {
 	}
 }
 
+// Changes every minute for an hour (a cron job running rayctl dns sync)
+// against a site that keeps failing: a try every RetryGap at most, under
+// Let's Encrypt's five failed validations an hour per name.
+func TestManagerRetryGap(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "site", Name: "site", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	tries := 0
+	m := &Manager{Store: st, Issue: func(context.Context, []string, crypto.Signer) ([][]byte, error) {
+		tries++
+		return nil, errors.New("does not resolve")
+	}}
+	start := time.Unix(1767225600, 0)
+	m.Once(ctx, start)
+	for i := 1; i <= 60; i++ {
+		m.Retry()
+		m.Retry() // two changes in a row: rayctl dns cloudflare, then dns sync
+		m.Once(ctx, start.Add(time.Duration(i)*time.Minute))
+	}
+	if tries != 5 { // at 0, 15, 30, 45 and 60 minutes
+		t.Fatalf("%d tries in an hour", tries)
+	}
+}
+
 func TestAccountKey(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))

@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/arngory/raycontrol/internal/render"
 )
@@ -179,28 +180,41 @@ var openDirs = []struct {
 // repairModes gives the directories of openDirs the bits the services need,
 // and the data-plane binaries theirs, saying what it changed.
 func (h *Host) repairModes() {
-	fix := func(p string, bits os.FileMode, dir bool) {
-		fi, err := os.Lstat(h.path(p))
-		if err != nil || fi.IsDir() != dir || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&bits == bits {
+	// Opened without following a link and changed through the descriptor:
+	// a file swapped for a link after the check cannot turn the chmod onto
+	// another file. ours: only a file of the user that runs this (root),
+	// for one in a directory others own.
+	fix := func(p string, bits os.FileMode, dir, ours bool) {
+		f, err := os.OpenFile(h.path(p), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		fi, err := f.Stat()
+		if err != nil || fi.IsDir() != dir || !dir && !fi.Mode().IsRegular() || fi.Mode().Perm()&bits == bits {
+			return
+		}
+		if st, ok := fi.Sys().(*syscall.Stat_t); ours && (!ok || int(st.Uid) != os.Geteuid()) {
 			return
 		}
 		mode := fi.Mode().Perm() | bits
-		if err := os.Chmod(h.path(p), mode); err != nil {
+		if err := f.Chmod(mode); err != nil {
 			fmt.Fprintf(h.Out, "warning: %s is mode %v, closed to the services: %v\n", p, fi.Mode().Perm(), err)
 			return
 		}
 		fmt.Fprintf(h.Out, "%s was mode %v, closed to the services: now %v\n", p, fi.Mode().Perm(), mode)
 	}
 	for _, d := range openDirs {
-		fix(d.path, d.bits, true)
+		fix(d.path, d.bits, true, false)
 	}
 	for _, b := range []string{DefaultBinaries.Xray, DefaultBinaries.NikoServer, DefaultBinaries.Rayd, DefaultBinaries.Rayspa} {
-		fix(b, 0o055, false)
+		fix(b, 0o055, false, false)
 	}
 	// The services resolve names themselves (rayd: ACME, Cloudflare): a
 	// resolv.conf they cannot read leaves Go asking localhost. Through
-	// one link, as /etc/resolv.conf to resolved's stub file.
-	fix(resolvTarget(h.path, ResolvConf), 0o044, false)
+	// its links, as /etc/resolv.conf to resolved's stub file; resolved's
+	// own files are its user's, and open already.
+	fix(resolvTarget(h.path, ResolvConf), 0o044, false, true)
 }
 
 // ResolvConf is the host's resolver configuration.
@@ -212,15 +226,19 @@ const ResolvConf = "/etc/resolv.conf"
 // one Go asks localhost). root is the host's root, "" for this host.
 func ResolverProblem(root string) string {
 	at := func(p string) string { return filepath.Join(root, p) }
-	p := at(resolvTarget(at, ResolvConf))
-	fi, err := os.Stat(p)
+	target := resolvTarget(at, ResolvConf)
+	fi, err := os.Stat(at(target))
 	if err != nil {
-		return fmt.Sprintf("%s: %v", ResolvConf, err)
+		return fmt.Sprintf("%s: %v: point it at a file with a nameserver line (with systemd-resolved: %s)", ResolvConf, err, stubResolv)
 	}
 	if fi.Mode().Perm()&0o004 == 0 {
-		return fmt.Sprintf("%s is mode %v: the services cannot read it", ResolvConf, fi.Mode().Perm())
+		fix := "rayctl apply opens it"
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid != 0 {
+			fix = "chmod o+r " + target + " (rayctl apply opens only a file of root's)"
+		}
+		return fmt.Sprintf("%s is mode %v: the services cannot read it: %s", ResolvConf, fi.Mode().Perm(), fix)
 	}
-	b, err := os.ReadFile(p) //nolint:gosec // G304: the host's resolv.conf
+	b, err := os.ReadFile(at(target)) //nolint:gosec // G304: the host's resolv.conf
 	if err != nil {
 		return fmt.Sprintf("%s: %v", ResolvConf, err)
 	}
@@ -229,20 +247,23 @@ func ResolverProblem(root string) string {
 			return ""
 		}
 	}
-	return ResolvConf + " names no nameserver: Go asks localhost:53"
+	return ResolvConf + " names no nameserver, so Go asks localhost:53: add a nameserver line"
 }
 
-// resolvTarget is the file a resolv.conf link points to (one link deep,
-// within the host's root), or the path itself.
+// resolvTarget is the file a resolv.conf link leads to through up to 8
+// links, within the host's root, or the path itself.
 func resolvTarget(at func(string) string, p string) string {
-	t, err := os.Readlink(at(p))
-	if err != nil {
-		return p
+	for range 8 {
+		t, err := os.Readlink(at(p))
+		if err != nil {
+			return p
+		}
+		if !filepath.IsAbs(t) {
+			t = filepath.Join(filepath.Dir(p), t)
+		}
+		p = t
 	}
-	if !filepath.IsAbs(t) {
-		t = filepath.Join(filepath.Dir(p), t)
-	}
-	return t
+	return p
 }
 
 // InstallBinary puts an executable in place like any file: journaled, so a

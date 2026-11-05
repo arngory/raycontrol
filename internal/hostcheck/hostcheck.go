@@ -309,8 +309,7 @@ func (h *Host) Check(ctx context.Context, o Options) []Result {
 		adv("updates", false, w.detail, w.fix)
 	}
 	if p := deploy.ResolverProblem(h.Root); p != "" {
-		adv("resolver", false, p, "chmod 644 /etc/resolv.conf (rayctl install and apply do it) and a nameserver line in it: "+
-			"rayd resolves the ACME and Cloudflare names itself")
+		adv("resolver", false, p, "a resolv.conf the services can read, with a nameserver line: rayd resolves the ACME and Cloudflare names itself")
 	} else {
 		adv("resolver", true, "", "")
 	}

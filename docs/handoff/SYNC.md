@@ -83,7 +83,7 @@
 | relay-v1 §3, §4 | `K_relay` с вектором; в подписке `relays[]` (`id`, `host`, `spa`; `sub_pin` — с R6-c) и `profiles[].via`; сторона relay — ядро (`rayspa -relay`), проверено в `test/relay/e2e.sh` | raycontrol v0.10.1 | `via` и путь через relay в watchdog; **заморожен** 2026-11-05 после interop |
 | probe-v1, api-v1 | без изменений в T2 | — | — |
 | subscription-v1 §4 | naive: в хосте адрес ноды, имя — в `sni=` (как у hy2 и REALITY) | raycontrol v0.11.1 (в ветке) | ничего: Niko берёт `sni=` у naive во всех версиях (ответ клиента 2026-11-05); Niko до 1.32.1 так находит ноду по адресу и стучит |
-| probe-v1 §6.1, §6.2 | `obs[].dns` — вид резолвера (`net`, `udp`, `doh`, `dot`), через который работает DNS-туннель, только у `dnstt`/`masterdns` и только с `works`/`degraded`; `probe.report` объявляет `"dns"`; `hints.dns` — вид, на который пришлись ≥ 60 % рабочих наблюдений (их ≥ k) | raycontrol v0.11.1 (в ветке) | слать `dns`, только если он есть в `probe.report`; с `hints.dns` начинать перебор резолверов в новой сети |
+| probe-v1 §6.1, §6.2 | `obs[].dns` — вид резолвера (`net`, `udp`, `doh`, `dot`), через который работает DNS-туннель, только у `dnstt`/`masterdns` и только с `works`/`degraded`; `probe.report` объявляет `"dns"`; `hints.dns` — **по виду туннеля**: `{"dnstt": "doh", "masterdns": "udp"}`, у каждого вида — вид резолвера, на который пришлись ≥ 60 % рабочих наблюдений этого туннеля (их ≥ k) | raycontrol v0.11.1 (в ветке) | слать `dns`, только если он есть в `probe.report`; с `hints.dns[<вид туннеля>]` начинать перебор резолверов в новой сети |
 
 ## Открытые вопросы
 

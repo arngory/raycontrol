@@ -385,13 +385,9 @@ func (c *Collector) tunnelsOnly(ctx context.Context, obs []Obs) error {
 	if !slices.ContainsFunc(obs, func(o Obs) bool { return o.DNS != "" }) {
 		return nil
 	}
-	services, err := c.Store.ListServices(ctx)
-	if err != nil {
-		return err
-	}
-	kinds := map[int64]string{}
-	for _, s := range services {
-		kinds[s.ID] = s.Kind
+	kinds := c.kinds(ctx)
+	if kinds == nil {
+		return errors.New("summary: the node's services cannot be read")
 	}
 	for _, o := range obs {
 		if o.DNS != "" && !slices.Contains(TunnelKinds, kinds[o.Svc]) {
@@ -399,6 +395,20 @@ func (c *Collector) tunnelsOnly(ctx context.Context, obs []Obs) error {
 		}
 	}
 	return nil
+}
+
+// kinds maps the node's services to their kinds, nil if they cannot be
+// read.
+func (c *Collector) kinds(ctx context.Context) map[int64]string {
+	services, err := c.Store.ListServices(ctx)
+	if err != nil {
+		return nil
+	}
+	kinds := make(map[int64]string, len(services))
+	for _, s := range services {
+		kinds[s.ID] = s.Kind
+	}
+	return kinds
 }
 
 // Prune drops the counters older than Keep days.

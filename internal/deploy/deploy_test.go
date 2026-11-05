@@ -1038,6 +1038,38 @@ func TestModesUnderUmask(t *testing.T) {
 			t.Errorf("resolv.conf %q: %v %v", link, fi.Mode().Perm(), err)
 		}
 	}
+
+	// Two links in a row: the file at the end.
+	os.Remove(filepath.Join(root, deploy.ResolvConf))
+	os.Symlink("/run/a", filepath.Join(root, deploy.ResolvConf))
+	os.Symlink("b", filepath.Join(root, "/run/a"))
+	os.WriteFile(filepath.Join(root, "/run/b"), []byte("nameserver 192.0.2.53\n"), 0o600)
+	os.Chmod(filepath.Join(root, "/run/b"), 0o600)
+	if err := h.Apply(deploy.Plan{}); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(filepath.Join(root, "/run/b")); fi.Mode().Perm() != 0o644 {
+		t.Errorf("two links: %v", fi.Mode().Perm())
+	}
+	if p := deploy.ResolverProblem(root); p != "" {
+		t.Errorf("two links: %q", p)
+	}
+
+	// Another user's file is left alone: resolved's own are open anyway,
+	// and a closed one in a directory that user owns could be swapped.
+	if os.Geteuid() == 0 {
+		os.Chmod(filepath.Join(root, "/run/b"), 0o600)
+		os.Chown(filepath.Join(root, "/run/b"), 65534, 65534)
+		if err := h.Apply(deploy.Plan{}); err != nil {
+			t.Fatal(err)
+		}
+		if fi, _ := os.Stat(filepath.Join(root, "/run/b")); fi.Mode().Perm() != 0o600 {
+			t.Errorf("another user's file opened: %v", fi.Mode().Perm())
+		}
+		if p := deploy.ResolverProblem(root); !strings.Contains(p, "chmod o+r /run/b") {
+			t.Errorf("advice for another user's file: %q", p)
+		}
+	}
 }
 
 // The services resolve names with the host's resolv.conf: it must be
