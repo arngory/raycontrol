@@ -48,6 +48,9 @@
 # RAYCONTROL_LOCAL_DIR=<dir> installs rayd, rayspa and rayctl from <dir>
 # without downloading or verifying anything: for tests only.
 set -euo pipefail
+# Root's umask may be 027 or 077 (hardened images): what is put in place
+# for the services must stay readable by their users.
+umask 022
 
 REPO="arngory/raycontrol"
 VERSION="${RAYCONTROL_VERSION:-latest}"

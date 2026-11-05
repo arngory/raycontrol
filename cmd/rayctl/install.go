@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -227,7 +228,8 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	packages := fs.String("packages", "", "packages the bootstrap installed, as manager:name,name (recorded for uninstall)")
 	cfToken := fs.String("cloudflare-token-file", "", "Cloudflare API token file: DNS records and wildcard certificates (needs -domain)")
 	dataplane := fs.String("dataplane", "", "directory with the xray and niko-server the bootstrap verified, installed to "+deploy.DataPlaneDir)
-	services := fs.String("services", "", "services to set up now: reality, hy2-masq, hy2-obfs, doh (after reality), dnstt, masterdns (default with -domain: reality; \"none\" for none)")
+	services := fs.String("services", "", "services to set up now: "+strings.Join(installKinds, ", ")+
+		" (doh, naive and yggdrasil share TCP 443 with reality, which goes first; default with -domain: reality; \"none\" for none)")
 	checked := fs.Bool("checked", false, "the bootstrap has shown the host check: print only required checks that fail now")
 	relay := fs.String("relay", "", "make this host a relay in front of an exit (relay-v1): the bundle file from rayctl relay bundle on the exit")
 	if err := fs.Parse(args); err != nil {
@@ -446,22 +448,43 @@ func installServices(list, domain string, fs *flag.FlagSet) ([]serviceKind, erro
 		}
 		list = "reality"
 	}
-	names := map[string]string{"reality": "reality", "dnstt": "dns", "masterdns": "mdns", "hy2-masq": "hy2-masq", "hy2-obfs": "hy2-obfs", "doh": "doh"}
 	var out []serviceKind
 	for _, k := range splitList(list) {
 		if k == "none" {
 			return nil, nil
 		}
-		name, ok := names[k]
+		name, ok := installNames[k]
 		if !ok {
-			return nil, fmt.Errorf("-services: %q is not one of reality, hy2-masq, hy2-obfs, doh, dnstt, masterdns", k)
+			return nil, fmt.Errorf("-services: %q is not one of %s", k, strings.Join(installKinds, ", "))
 		}
-		if domain == "" {
+		// The remote API has a port and a certificate of its own.
+		if domain == "" && k != "api" {
 			return nil, fmt.Errorf("-services %s needs -domain", k)
 		}
-		out = append(out, serviceKind{k, name})
+		if !slices.ContainsFunc(out, func(s serviceKind) bool { return s.kind == k }) {
+			out = append(out, serviceKind{k, name})
+		}
 	}
+	// REALITY first: DoH, naive and Yggdrasil take its site.
+	slices.SortStableFunc(out, func(a, b serviceKind) int {
+		return cmp.Compare(boolInt(a.kind != "reality"), boolInt(b.kind != "reality"))
+	})
 	return out, nil
+}
+
+// installKinds are the kinds -services takes, and installNames the names
+// their services get (as in the cheatsheet's rayctl service add).
+var (
+	installKinds = []string{"reality", "hy2-masq", "hy2-obfs", "doh", "naive", "yggdrasil", "dnstt", "masterdns", "api"}
+	installNames = map[string]string{"reality": "reality", "hy2-masq": "hy2-masq", "hy2-obfs": "hy2-obfs", "doh": "doh",
+		"naive": "naive", "yggdrasil": "ygg", "dnstt": "dns", "masterdns": "mdns", "api": "api"}
+)
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // journaledHost acts on this machine and records every change.

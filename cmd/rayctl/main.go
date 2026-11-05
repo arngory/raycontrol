@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -132,6 +133,11 @@ func main() {
 		os.Exit(2)
 	}
 
+	// Root's umask may be 027 or 077 (hardened images): what rayctl puts in
+	// place for the services (directories, binaries) must not follow it.
+	if os.Geteuid() == 0 {
+		syscall.Umask(0o022)
+	}
 	c := &cli{c: api.NewUnixClient(*socket), json: *asJSON}
 	// An update downloads ~50 MB, maybe through slow mirrors; its restart
 	// and rollback have their own time (Q-2).

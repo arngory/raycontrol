@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/arngory/raycontrol/internal/deploy"
@@ -820,5 +821,48 @@ func TestPort53(t *testing.T) {
 	cmds, log = apply(t, p, false)
 	if slices.Contains(cmds, restart) || strings.Contains(log, "UDP port 53") {
 		t.Errorf("no DNS tunnels, yet:\n%s\n%s", strings.Join(cmds, "\n"), log)
+	}
+}
+
+// Under a umask of 077 the directories a plan's files need are still open
+// to the services, and an install that left ours closed is opened again;
+// nothing else changes.
+func TestModesUnderUmask(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	root := t.TempDir()
+	os.Chmod(root, 0o755)
+	h := &deploy.Host{Root: root, Out: &bytes.Buffer{}}
+	if _, err := h.WriteFile(deploy.File{Path: deploy.DefaultBinaries.Xray, Mode: 0o755, Content: []byte("x")}); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"/usr", "/usr/local", "/usr/local/libexec", deploy.DataPlaneDir} {
+		if fi, err := os.Stat(filepath.Join(root, d)); err != nil || fi.Mode().Perm() != 0o755 {
+			t.Errorf("%s: %v %v", d, fi.Mode().Perm(), err)
+		}
+	}
+
+	// As an older install under that umask left them.
+	for _, d := range []string{deploy.DataPlaneDir, "/usr/local/libexec", deploy.StateDir, "/etc/private"} {
+		os.MkdirAll(filepath.Join(root, d), 0o700)
+		os.Chmod(filepath.Join(root, d), 0o700)
+	}
+	os.Chmod(filepath.Join(root, deploy.DefaultBinaries.Xray), 0o700)
+	out := &bytes.Buffer{}
+	h = &deploy.Host{Root: root, Out: out, Run: func(string, ...string) ([]byte, error) { return nil, nil },
+		LookPath: func(string) (string, error) { return "", errors.New("none") }}
+	if err := h.Apply(deploy.Plan{}); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]os.FileMode{
+		deploy.DataPlaneDir: 0o755, "/usr/local/libexec": 0o755, deploy.StateDir: 0o711,
+		deploy.DefaultBinaries.Xray: 0o755, "/etc/private": 0o700,
+	} {
+		if fi, err := os.Stat(filepath.Join(root, p)); err != nil || fi.Mode().Perm() != want {
+			t.Errorf("%s: %v, want %v (%v)", p, fi.Mode().Perm(), want, err)
+		}
+	}
+	if !strings.Contains(out.String(), deploy.DataPlaneDir+" was mode -rwx------, closed to the services") {
+		t.Errorf("not said:\n%s", out)
 	}
 }

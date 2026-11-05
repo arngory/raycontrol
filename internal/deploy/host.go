@@ -130,7 +130,7 @@ func (h *Host) WriteFile(f File) (bool, error) {
 	if err := h.Journal.RecordFile(f.Path); err != nil {
 		return false, err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil { //nolint:gosec // G301: system directories
+	if err := mkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return false, err
 	}
 	tmp := p + ".raycontrol-new"
@@ -141,6 +141,63 @@ func (h *Host) WriteFile(f File) (bool, error) {
 		return false, err
 	}
 	return true, os.Rename(tmp, p)
+}
+
+// mkdirAll makes dir and its missing parents with mode, whatever the umask:
+// the services, under their own users, go through them.
+func mkdirAll(dir string, mode os.FileMode) error {
+	if fi, err := os.Stat(dir); err == nil {
+		if !fi.IsDir() {
+			return fmt.Errorf("%s is not a directory", dir)
+		}
+		return nil
+	}
+	if parent := filepath.Dir(dir); parent != dir {
+		if err := mkdirAll(parent, mode); err != nil {
+			return err
+		}
+	}
+	if err := os.Mkdir(dir, mode); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return os.Chmod(dir, mode)
+}
+
+// openDirs are directories the services go through (to their binaries,
+// the release's data, the resolver's drop-in) or, for the state, into:
+// before v0.11 an install under a umask of 027 or 077 left them closed to
+// everyone but root. repairModes opens them again; nothing is taken away.
+var openDirs = []struct {
+	path string
+	bits os.FileMode
+}{
+	{filepath.Dir(DataPlaneDir), 0o055}, {DataPlaneDir, 0o055},
+	{DataDir, 0o055},
+	{filepath.Dir(ResolvedDropIn), 0o055},
+	{StateDir, 0o011},
+}
+
+// repairModes gives the directories of openDirs the bits the services need,
+// and the data-plane binaries theirs, saying what it changed.
+func (h *Host) repairModes() {
+	fix := func(p string, bits os.FileMode, dir bool) {
+		fi, err := os.Lstat(h.path(p))
+		if err != nil || fi.IsDir() != dir || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm()&bits == bits {
+			return
+		}
+		mode := fi.Mode().Perm() | bits
+		if err := os.Chmod(h.path(p), mode); err != nil {
+			fmt.Fprintf(h.Out, "warning: %s is mode %v, closed to the services: %v\n", p, fi.Mode().Perm(), err)
+			return
+		}
+		fmt.Fprintf(h.Out, "%s was mode %v, closed to the services: now %v\n", p, fi.Mode().Perm(), mode)
+	}
+	for _, d := range openDirs {
+		fix(d.path, d.bits, true)
+	}
+	for _, b := range []string{DefaultBinaries.Xray, DefaultBinaries.NikoServer, DefaultBinaries.Rayd} {
+		fix(b, 0o055, false)
+	}
 }
 
 // InstallBinary puts an executable in place like any file: journaled, so a
@@ -168,6 +225,7 @@ const (
 // executables exist, in plan order, and restarts those whose files changed.
 // Units listed in keep are left alone (rayctl install starts rayspa last).
 func (h *Host) Apply(plan Plan, keep ...string) error {
+	h.repairModes()
 	for _, u := range plan.Users {
 		if err := h.EnsureUser(u); err != nil {
 			return err
