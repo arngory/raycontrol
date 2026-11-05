@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
+	"slices"
 	"time"
 
 	"connectrpc.com/connect"
@@ -94,11 +95,12 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 		return nil, err
 	}
 	public := map[string]bool{}
+	ssh := sshPorts(services)
 	for _, svc := range services {
 		if !svc.Enabled {
 			continue
 		}
-		ports, err := svc.Ports()
+		ports, err := servicePorts(svc, ssh)
 		if err != nil {
 			// Settings from before a check (S-3): the service is not
 			// rendered either (render.ServiceErrors), so it gets no port;
@@ -171,7 +173,7 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 			if !svc.Enabled || svc.Kind == "ssh" || svc.Public() {
 				continue
 			}
-			ports, _ := svc.Ports()
+			ports, _ := servicePorts(svc, ssh)
 			for _, port := range ports {
 				if !seen[port.String()] {
 					seen[port.String()] = true
@@ -229,11 +231,12 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 		return nil, err
 	}
 	forwarded := map[uint16]bool{}
+	ssh := sshPorts(services)
 	for _, svc := range services {
 		if !svc.Enabled || svc.Kind == "ssh" || svc.Public() {
 			continue
 		}
-		ports, err := svc.Ports()
+		ports, err := servicePorts(svc, ssh)
 		if err != nil || len(ports) == 0 {
 			continue
 		}
@@ -270,6 +273,32 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 	}
 	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: uint32(relay.SSHPort)}}
 	return snap, nil
+}
+
+// sshPorts are the ports of the enabled SSH services.
+func sshPorts(services []store.Service) map[store.Port]bool {
+	out := map[store.Port]bool{}
+	for _, svc := range services {
+		if svc.Enabled && svc.Kind == "ssh" {
+			ports, _ := svc.Ports()
+			for _, p := range ports {
+				out[p] = true
+			}
+		}
+	}
+	return out
+}
+
+// servicePorts are a service's ports in the perimeter: never SSH's for
+// another service. Creating one is refused (provision.sshPortsApart); a
+// database from before the check may have one, and a grant or a relay for
+// that service must not reach sshd.
+func servicePorts(svc store.Service, ssh map[store.Port]bool) ([]store.Port, error) {
+	ports, err := svc.Ports()
+	if err != nil || svc.Kind == "ssh" {
+		return ports, err
+	}
+	return slices.DeleteFunc(slices.Clone(ports), func(p store.Port) bool { return ssh[p] }), nil
 }
 
 // openPort is the one port "open" makes public.

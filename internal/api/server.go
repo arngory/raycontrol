@@ -794,9 +794,30 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 	for _, r := range outside {
 		resp.OutsidePorts = append(resp.OutsidePorts, &nodev1.PortRange{Proto: r.Proto, From: uint32(r.From), To: uint32(r.To)})
 	}
+	if ignored, err := node.AdminAccessIgnored(ctx, s.Store); err == nil {
+		for _, p := range ignored {
+			resp.Warnings = append(resp.Warnings, fmt.Sprintf("admin address %s is ignored: wider than /%d (rayctl admin to set it again)", p, node.MinAdminBits(p.Addr())))
+		}
+	}
+	ssh := map[store.Port]string{}
 	for _, svc := range m.Services {
-		if _, err := svc.Ports(); err != nil {
+		if svc.Kind == "ssh" {
+			ports, _ := svc.Ports()
+			for _, p := range ports {
+				ssh[p] = svc.Name
+			}
+		}
+	}
+	for _, svc := range m.Services {
+		ports, err := svc.Ports()
+		if err != nil {
 			resp.Warnings = append(resp.Warnings, "closed in the perimeter: "+err.Error())
+			continue
+		}
+		for _, p := range ports {
+			if name, ok := ssh[p]; ok && svc.Kind != "ssh" {
+				resp.Warnings = append(resp.Warnings, fmt.Sprintf("closed in the perimeter: port %s of %s is %s's", p, svc.Name, name))
+			}
 		}
 	}
 	for _, name := range skipped {

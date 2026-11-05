@@ -48,6 +48,7 @@ func (c *cli) update(ctx context.Context, args []string) error {
 	yes := fs.Bool("yes", false, "do not ask")
 	force := fs.Bool("force", false, "install even if the release is not newer")
 	rollback := fs.Bool("rollback", false, "put back the binaries the last update replaced")
+	noCarry := fs.Bool("no-carry", false, "with -rollback: put the database copy back as it is, without what was revoked since (when the current database cannot be read)")
 	local := fs.String("local", "", "binaries from this directory, not verified: for tests only")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
@@ -59,7 +60,11 @@ func (c *cli) update(ctx context.Context, args []string) error {
 		return errors.New("raycontrol is not installed here (install/bootstrap.sh)")
 	}
 	if *rollback {
-		return c.rollbackUpdate(ctx, *yes)
+		carry := carryMust
+		if *noCarry {
+			carry = carrySkip
+		}
+		return c.rollbackUpdate(ctx, *yes, carry)
 	}
 
 	if err := os.MkdirAll(deploy.JournalDir, 0o700); err != nil {
@@ -281,7 +286,9 @@ func (c *cli) failUpdate(ctx context.Context, cause error) error {
 	fmt.Println("update failed:", cause)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartTimeout)
 	defer cancel()
-	if err := c.rollback(ctx, "the update failed", true); err != nil {
+	// The copy is minutes old: if the database the failed update left
+	// cannot be read, the copy goes back as it is.
+	if err := c.rollback(ctx, "the update failed", true, carryTry); err != nil {
 		return fmt.Errorf("%w; rollback failed too: %w", cause, err)
 	}
 	return fmt.Errorf("update failed, the previous version runs again: %w", cause)
@@ -290,13 +297,22 @@ func (c *cli) failUpdate(ctx context.Context, cause error) error {
 // rollbackUpdate installs the binaries the last update kept aside, asked
 // for by hand: the database goes back only if the update moved its schema,
 // and then only when confirmed, since what changed since is lost.
-func (c *cli) rollbackUpdate(ctx context.Context, yes bool) error {
+// carry is what a rollback does with what was revoked since the copy.
+type carry int
+
+const (
+	carryMust carry = iota // carried, or no rollback
+	carryTry               // carried if it can be, else the copy as it is
+	carrySkip              // the copy as it is
+)
+
+func (c *cli) rollbackUpdate(ctx context.Context, yes bool, carry carry) error {
 	saved := filepath.Join(previousDir, "rayd.db")
 	fi, err := os.Stat(saved)
 	if err != nil {
 		// An update by an older rayctl kept no copy.
 		fmt.Println("no copy of the database from before the update: it stays as it is")
-		return c.rollback(ctx, "asked for", false)
+		return c.rollback(ctx, "asked for", false, carry)
 	}
 	now, err := store.Schema(ctx, deploy.DB)
 	if err != nil {
@@ -308,10 +324,15 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool) error {
 	}
 	restoreDB := now > then
 	if restoreDB {
+		kept := "What was taken away since stays taken away: revoked devices, disabled or deleted users and relays,\n" +
+			"services taken from users or disabled, replaced certificates, the admin addresses.\n"
+		if carry == carrySkip {
+			kept = "-no-carry: what was revoked since comes back too.\n"
+		}
 		fmt.Printf("The update moved the database to schema %d; the previous version runs on %d.\n"+
-			"The database goes back to its copy from %s: users, devices and settings added or changed since are lost;\n"+
-			"revoked devices, disabled users and the admin addresses stay as they are now.\n",
-			now, then, fi.ModTime().Format(time.DateTime))
+			"The database goes back to its copy from %s: users, devices and settings added or changed since are lost,\n"+
+			"credentials rotated since come back. %s",
+			now, then, fi.ModTime().Format(time.DateTime), kept)
 		if !yes {
 			fmt.Print("Type yes to go on: ")
 			answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
@@ -320,10 +341,10 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool) error {
 			}
 		}
 	}
-	return c.rollback(ctx, "asked for", restoreDB)
+	return c.rollback(ctx, "asked for", restoreDB, carry)
 }
 
-func (c *cli) rollback(ctx context.Context, why string, restoreDB bool) error {
+func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry carry) error {
 	b, err := os.ReadFile(filepath.Join(previousDir, "VERSION")) //nolint:gosec // G304: a fixed path
 	if err != nil {
 		return errors.New("no previous binaries: nothing to roll back to")
@@ -337,8 +358,15 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool) error {
 		}
 		// Revocations since the copy stay (the copy is root's, in
 		// previousDir): a rollback must not let a revoked device back in.
-		if err := store.CarryRevocations(ctx, saved, deploy.DB, node.AdminAccessSetting); err != nil {
-			return fmt.Errorf("keeping the revocations made since the update: %w", err)
+		if carry != carrySkip {
+			err := store.CarryRevocations(ctx, saved, deploy.DB, node.AdminAccessSetting)
+			switch {
+			case err != nil && carry == carryMust:
+				return fmt.Errorf("keeping the revocations made since the update: %w (rayd is stopped; "+
+					"rayctl update -rollback -no-carry puts the copy back as it is)", err)
+			case err != nil:
+				fmt.Println("the revocations since the update could not be carried, the copy goes back as it is:", err)
+			}
 		}
 		if err := copyDB(saved, deploy.DB); err != nil {
 			return fmt.Errorf("putting the database back: %w", err)
@@ -423,7 +451,8 @@ func copyDB(src, dst string) error {
 
 // readRegular reads a regular file without following a link to it.
 func readRegular(name string) ([]byte, error) {
-	f, err := os.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // G304: rayd's database, opened without following a link
+	// O_NONBLOCK: a FIFO planted in its place must not hang root here.
+	f, err := os.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) //nolint:gosec // G304: rayd's database, opened without following a link
 	if err != nil {
 		if errors.Is(err, syscall.ELOOP) {
 			return nil, fmt.Errorf("%s is a link, not the database", name)

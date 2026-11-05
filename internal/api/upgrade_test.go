@@ -47,6 +47,8 @@ func TestOlderDatabaseLimits(t *testing.T) {
 		`INSERT INTO settings (key, value) VALUES ('admin_access', '["0.0.0.0/0","2001:db8::/32","198.51.100.7/32","2001:db8:1::/48"]')
 			ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
 		`UPDATE services SET settings_json = json_set(settings_json, '$.ports', json('["udp/53","tcp/22"]')) WHERE name = 'dns'`,
+		`UPDATE services SET settings_json = json_set(settings_json, '$.ports', json('["tcp/443","tcp/22"]')) WHERE name = 'reality'`,
+		`INSERT INTO relays (name, address, created_at) VALUES ('r1', '198.51.100.20', 0)`,
 	} {
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			t.Fatal(err)
@@ -75,8 +77,18 @@ func TestOlderDatabaseLimits(t *testing.T) {
 	if len(snap.AdminPorts) != 1 || snap.AdminPorts[0].Port != 22 {
 		t.Fatalf("admin ports %v", snap.AdminPorts)
 	}
+	// REALITY keeps 443; SSH's port, which v0.9 let it have too, is not in
+	// its scope nor among the relay's ports.
 	if !slices.ContainsFunc(snap.Services, func(s *perimeterv1.Service) bool { return len(s.Ports) == 1 && s.Ports[0].Port == 443 }) {
-		t.Fatalf("REALITY lost its port: %v", snap.Services)
+		t.Fatalf("REALITY scope: %v", snap.Services)
+	}
+	for _, p := range snap.RelayPorts {
+		if p.Proto == "tcp" && p.Port == 22 {
+			t.Fatalf("relay ports %v: SSH's port", snap.RelayPorts)
+		}
+	}
+	if len(snap.RelayPorts) == 0 {
+		t.Fatal("no relay ports")
 	}
 	if _, _, err := srv.hostPorts(ctx); err != nil {
 		t.Fatalf("host ports of an older database: %v", err)

@@ -75,7 +75,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   install -host ADDR [-domain D] [-admin A] [-cloudflare-token-file F] [-services reality,hy2-masq,hy2-obfs,dnstt,masterdns|none]
           [-dataplane DIR]                    set the node up on this host (root); with -domain REALITY by default
   apply                                       install what the current services need (root)
-  update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-rollback]
+  update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-rollback [-no-carry]]
                                               the newest verified release in place, back to the
                                               previous binaries if the node does not come back (root)
   uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]

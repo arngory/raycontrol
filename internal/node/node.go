@@ -241,6 +241,27 @@ func AdminAccess(ctx context.Context, st *store.Store) ([]netip.Prefix, error) {
 	return slices.DeleteFunc(ps, func(p netip.Prefix) bool { return p.Bits() < MinAdminBits(p.Addr()) }), nil
 }
 
+// AdminAccessIgnored are the stored admin prefixes AdminAccess leaves out:
+// wider than the limits, from a database before them (S-3).
+func AdminAccessIgnored(ctx context.Context, st *store.Store) ([]netip.Prefix, error) {
+	b, err := st.GetSetting(ctx, settingAdmin)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var list []string
+	if err := json.Unmarshal(b, &list); err != nil {
+		return nil, err
+	}
+	ps, err := ParsePrefixes(list)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(ps, func(p netip.Prefix) bool { return p.Bits() >= MinAdminBits(p.Addr()) }), nil
+}
+
 // SetAdminAccess replaces the admin prefixes. Single addresses are accepted
 // and stored as /32 or /128.
 func SetAdminAccess(ctx context.Context, st *store.Store, list []string) ([]netip.Prefix, error) {

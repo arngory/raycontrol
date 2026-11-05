@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -115,5 +117,91 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// What else a rollback must not give back: a deleted user whose ID went to
+// a new one, a relay removed, a service taken from a user or disabled, a
+// REALITY no longer open, and certificates replaced.
+func TestCarryRevocationsMore(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	saved, current := filepath.Join(dir, "saved.db"), filepath.Join(dir, "current.db")
+	s, err := Open(ctx, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []User{{Name: "alice", Enabled: true}, {Name: "mallory", Enabled: true}} {
+		if _, err := s.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r1, _ := s.CreateService(ctx, Service{Kind: "reality", Name: "r1", Enabled: true, Settings: `{"open":true}`})
+	r2, _ := s.CreateService(ctx, Service{Kind: "naive", Name: "n1", Enabled: true})
+	must(t, s.SetUserServices(ctx, "alice", []int64{r1.ID, r2.ID}))
+	d, _, _ := s.CreateDevice(ctx, "alice", "phone", "user")
+	if _, err := s.db.ExecContext(ctx, `UPDATE devices SET cert_pin = 'old-pin' WHERE id = ?`, d.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateRelay(ctx, "relay1", netip.MustParseAddr("198.51.100.20")); err != nil {
+		t.Fatal(err)
+	}
+	must(t, s.SetRelayCertPin(ctx, "relay1", "relay-old"))
+	s.Close()
+	copyFile(t, current, saved)
+
+	s, err = Open(ctx, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mallory, _ := s.UserByName(ctx, "mallory")
+	must(t, s.DeleteUser(ctx, "mallory"))
+	bob, err := s.CreateUser(ctx, User{Name: "bob", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bob.ID != mallory.ID {
+		t.Logf("bob got ID %d, mallory had %d: the case below is weaker", bob.ID, mallory.ID)
+	}
+	must(t, s.SetUserServices(ctx, "alice", []int64{r1.ID}))
+	must(t, s.SetServiceEnabled(ctx, "n1", false))
+	if _, err := s.db.ExecContext(ctx, `UPDATE services SET settings_json = json_remove(settings_json, '$.open') WHERE id = ?`, r1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE devices SET cert_pin = 'new-pin' WHERE id = ?`, d.ID); err != nil {
+		t.Fatal(err)
+	}
+	must(t, s.DeleteRelay(ctx, "relay1"))
+	s.Close()
+
+	if err := CarryRevocations(ctx, saved, current); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(ctx, saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if u, err := s.UserByName(ctx, "mallory"); err != nil || u.Enabled {
+		t.Errorf("deleted mallory (her ID reused): enabled %v %v", u.Enabled, err)
+	}
+	if rs, _ := s.ListRelays(ctx); len(rs) != 0 {
+		t.Errorf("removed relay back: %v", rs)
+	}
+	var n int
+	s.db.QueryRowContext(ctx, `SELECT count(*) FROM user_services us JOIN users u ON u.id = us.user_id WHERE u.name = 'alice'`).Scan(&n)
+	if n != 1 {
+		t.Errorf("alice has %d services, want 1", n)
+	}
+	if svc, _ := s.ServiceByName(ctx, "n1"); svc.Enabled {
+		t.Error("disabled service enabled again")
+	}
+	if svc, _ := s.ServiceByName(ctx, "r1"); strings.Contains(svc.Settings, "open") {
+		t.Errorf("REALITY open again: %s", svc.Settings)
+	}
+	var pin string
+	s.db.QueryRowContext(ctx, `SELECT cert_pin FROM devices WHERE id = ?`, d.ID).Scan(&pin)
+	if pin != "new-pin" {
+		t.Errorf("device certificate pin %q, want the new one", pin)
 	}
 }

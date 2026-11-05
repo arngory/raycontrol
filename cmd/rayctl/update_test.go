@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // copyDB takes the file and its WAL, drops a stale WAL and shared memory at
@@ -79,5 +81,27 @@ func TestCopyDBLinks(t *testing.T) {
 	os.Symlink(secret, src+"-wal")
 	if err := copyDB(src, filepath.Join(t.TempDir(), "out.db")); err == nil {
 		t.Fatal("a linked WAL was read")
+	}
+}
+
+// A FIFO left in the database's place does not hang root's copy: it is
+// refused at once.
+func TestCopyDBFIFO(t *testing.T) {
+	dir := t.TempDir()
+	src, dst := filepath.Join(dir, "rayd.db"), filepath.Join(dir, "copy", "rayd.db")
+	os.Mkdir(filepath.Dir(dst), 0o700)
+	os.WriteFile(src, []byte("db"), 0o600)
+	if err := syscall.Mkfifo(src+"-wal", 0o600); err != nil {
+		t.Skip(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- copyDB(src, dst) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("copy with a FIFO for the WAL: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("copyDB hangs on a FIFO")
 	}
 }

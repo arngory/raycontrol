@@ -114,10 +114,14 @@ func (a *Applier) Apply(ctx context.Context) error {
 			// written (rayctl apply creates it): fix group and mode, and
 			// restart the process that could not read the file.
 			fixed, err := fixMeta(f)
-			if err != nil {
+			switch {
+			case err != nil:
 				failed[f.Service] = true
 				errs = append(errs, fmt.Errorf("service %s: %s: %w", f.Service, f.Path, err))
-			} else if fixed {
+			case fixed && f.Refresh:
+				// A broken service's users: reread, never a restart (Q-1).
+				changed[f.Service] = append(changed[f.Service], change{old, f.Content, true})
+			case fixed:
 				changed[f.Service] = append(changed[f.Service], change{nil, f.Content, false})
 			}
 			continue
