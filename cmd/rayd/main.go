@@ -254,6 +254,7 @@ func cmdServe(args []string) error {
 		frontUID = os.Getuid() // the front is a child of rayd's
 	}
 	go checkPort53(ctx, st, &deploy.Host{}, frontUID, hb, log)
+	go checkResolver(ctx, hb, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
 	// Client summaries (R4-21): reports in, from devices and through relays
 	// (relay-v1 §9.3), hints out; only while the administrator has them on
@@ -332,7 +333,8 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 			d, _ := provision.Domain(ctx, st)
 			return d
 		}}
-	srv.DNSChanged = m.Wake
+	// The operator's DNS change may be the fix of a failure: try now.
+	srv.DNSChanged = m.Retry
 	go m.Run(ctx)
 	// A new site (rayctl service add reality) gets its certificate now, not
 	// at the next hourly check; failures keep their back-off.
@@ -718,6 +720,31 @@ func checkPort53(ctx context.Context, st *store.Store, h *deploy.Host, frontUID 
 		} else {
 			hb.Retain("port53", nil) // no tunnels, nothing to say
 		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Minute):
+		}
+	}
+}
+
+// checkResolver looks every few minutes whether rayd can resolve names
+// with the host's resolv.conf (rayctl status: resolver): unreadable to it
+// or without a server, every lookup goes to localhost, and certificates
+// and DNS records fail with "lookup … on [::1]:53".
+func checkResolver(ctx context.Context, hb *health.Board, log *slog.Logger) {
+	last := ""
+	for {
+		p := deploy.ResolverProblem("")
+		var err error
+		if p != "" {
+			err = errors.New(p + " (chmod 644 /etc/resolv.conf, or rayctl apply)")
+			if p != last {
+				log.Warn("resolver", "err", err)
+			}
+		}
+		last = p
+		hb.Done("resolver", err)
 		select {
 		case <-ctx.Done():
 			return

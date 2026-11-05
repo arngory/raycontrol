@@ -33,6 +33,7 @@ func fakeHost(t *testing.T) (*Host, string, map[string]string) {
 	write("/proc/sys/net/core/rmem_max", "16777216\n")
 	write("/proc/sys/net/core/wmem_max", "16777216\n")
 	write("/etc/os-release", "ID=debian\nVERSION_ID=\"13\"\n")
+	write("/etc/resolv.conf", "nameserver 127.0.0.53\n")
 	write("/etc/apt/apt.conf.d/20auto-upgrades", "APT::Periodic::Unattended-Upgrade \"1\";\n")
 	write("/usr/bin/unattended-upgrade", "")
 	header := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
@@ -251,6 +252,7 @@ func TestAdvised(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "/proc/meminfo"), []byte("MemTotal: 496000 kB\n"), 0o644)
 	os.WriteFile(filepath.Join(root, "/proc/sys/net/core/rmem_max"), []byte("212992\n"), 0o644)
 	os.Chmod(filepath.Join(root, "/proc/sys/net/core/rmem_max"), 0o444)
+	os.Chmod(filepath.Join(root, "/etc/resolv.conf"), 0o600) // written under umask 077
 	h.CPUs = func() int { return 1 }
 	h.Reach = func(context.Context, string) error { return errors.New("connection refused") }
 	h.Addrs = func() ([]netip.Addr, error) { return []netip.Addr{netip.MustParseAddr("10.0.0.5")}, nil }
@@ -258,7 +260,7 @@ func TestAdvised(t *testing.T) {
 	if f := Failed(rs); len(f) != 0 {
 		t.Fatalf("failed: %+v", f)
 	}
-	for _, name := range []string{"virtualization", "clock", "BBR", "memory", "processors", "updates", "Let's Encrypt", "IPv6"} {
+	for _, name := range []string{"virtualization", "clock", "BBR", "memory", "processors", "updates", "Let's Encrypt", "IPv6", "resolver"} {
 		if r, ok := find(rs, Advised, name); !ok || r.OK {
 			t.Errorf("%s: %+v", name, r)
 		}

@@ -187,9 +187,10 @@ systemd-юниты, хранение секретов через systemd credent
 
 По строке на задачу. Подробности — [10-quickstart-debian13.md](10-quickstart-debian13.md) §11 и `handoff/SYNC.md`.
 
-- [ ] v0.11.1: install и apply открывают `/etc/resolv.conf` (и цель ссылки) до 0644, как `repairModes`.
-- [ ] v0.11.1: `rayctl check` и здоровье rayd (`resolver`) — нечитаемый resolv.conf или без `nameserver`.
-- [ ] v0.11.1: `rayctl dns cloudflare` и `apply` снимают паузу выпуска сертификата после локальной ошибки.
+- [x] v0.11.1: install и apply открывают `/etc/resolv.conf` (и цель ссылки) до 0644, как `repairModes`.
+- [x] v0.11.1: `rayctl check` и здоровье rayd (`resolver`) — нечитаемый resolv.conf или без `nameserver`.
+- [x] v0.11.1: `rayctl dns cloudflare` и `dns sync` повторяют выпуск сертификата сразу (не чаще раза в 15 минут).
+- [ ] v0.11.1: заметки к релизу и выпуск — по «да» пользователя.
 - [x] v0.11.1: без ложного `service doh (doh) is not deployed` (f51577a); `rayctl report -logs debug`.
 - [x] naive не соединялся: клиент не стучал SPA (Niko 1.32.1).
 - [ ] naive: адрес ноды в хосте ссылки и поддомен в `sni=`, как у hy2 и REALITY — ждёт ответа клиента о `sni=`.

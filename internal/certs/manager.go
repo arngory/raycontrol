@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/provision"
@@ -72,6 +73,7 @@ type Manager struct {
 	fails map[string]int
 	next  map[string]time.Time
 	wake  chan struct{}
+	retry atomic.Bool
 }
 
 // Wake makes Run check now, as when a site needs a new name; failures keep
@@ -81,6 +83,23 @@ func (m *Manager) Wake() {
 	case m.wakeCh() <- struct{}{}:
 	default:
 	}
+}
+
+// RetryGap spaces the tries that operators' changes start: at most four an
+// hour, under Let's Encrypt's five failed validations an hour per name.
+const RetryGap = 15 * time.Minute
+
+// backoff is the wait after fails failures in a row: an hour, doubling up
+// to a day.
+func backoff(fails int) time.Duration { return min(time.Hour<<min(fails-1, 5), 24*time.Hour) }
+
+// Retry makes Run try the failed sites now too, on an operator's change
+// that may have fixed them (a DNS token, the records): RetryGap after
+// their last try at the earliest. The count of failures stays, so a site
+// that fails again waits longer.
+func (m *Manager) Retry() {
+	m.retry.Store(true)
+	m.Wake()
 }
 
 func (m *Manager) wakeCh() chan struct{} {
@@ -116,6 +135,13 @@ func (m *Manager) Run(ctx context.Context) {
 func (m *Manager) Once(ctx context.Context, now time.Time) int {
 	if m.fails == nil {
 		m.fails, m.next = map[string]int{}, map[string]time.Time{}
+	}
+	if m.retry.Swap(false) {
+		for name, next := range m.next {
+			if soon := next.Add(-backoff(m.fails[name])).Add(RetryGap); soon.Before(next) {
+				m.next[name] = soon
+			}
+		}
 	}
 	services, err := m.Store.ListServices(ctx)
 	if err != nil {
@@ -156,7 +182,7 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 		}
 		if err != nil {
 			m.fails[svc.Name]++
-			wait := min(time.Hour<<min(m.fails[svc.Name]-1, 5), 24*time.Hour)
+			wait := backoff(m.fails[svc.Name])
 			m.next[svc.Name] = now.Add(wait)
 			m.log().Warn("certificate not issued, retrying later", "service", svc.Name, "in", wait, "err", err)
 			continue

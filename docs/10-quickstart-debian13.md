@@ -197,7 +197,9 @@ ss -ltnup 'sport = :443'
   установкой. Файлы, которые вы создаёте руками, следуют umask вашей оболочки. `umask` должен показать `0022`; если
   там `0077` или `0027`, выполните `umask 022`.
 - systemd-resolved выключать не нужно: нода делит с ним UDP 53 (§7).
-- Если вы всё же выключили его и написали `/etc/resolv.conf` сами, файлу нужны права 0644:
+- Если вы всё же выключили его и написали `/etc/resolv.conf` сами, файлу нужны права 0644. С v0.11.1 их ставят
+  `rayctl install` и `rayctl apply`, а `rayctl check` и строка `resolver` в `rayctl status` показывают нечитаемый
+  файл или файл без `nameserver`. Проверить и исправить руками:
 
   ```bash
   ls -lL /etc/resolv.conf
@@ -572,8 +574,8 @@ journalctl -u rayd -p warning --since -1h
 
 | Признак | Что проверить |
 |---|---|
-| Нет строки `certificate stored`, в `rayctl status` — `acme site FAILED` | `journalctl -u rayd \| grep -i certif`. С Cloudflare — права токена (§1) и `rayctl dns`. Без него — записи A и TCP 80 у провайдера. Неудачу нода повторяет через час, потом через 2, 4… до суток. Пауза живёт в памяти rayd. Если ошибка была на самой ноде (`does not resolve`, `lookup … on [::1]:53`, токен) и вы её исправили — `systemctl restart rayd`, и выпуск пойдёт сразу: Let's Encrypt о такой неудаче не знает. Если отказал сам Let's Encrypt (`urn:ietf:params:acme:error:…`), ради этого не перезапускайте: лимит — 5 неудач в час на имя |
-| `lookup … on [::1]:53` или `127.0.0.1:53`: `connection refused` | службы не могут прочитать `/etc/resolv.conf` или в нём нет `nameserver` (§2): `ls -lL /etc/resolv.conf` — нужно 0644 |
+| Нет строки `certificate stored`, в `rayctl status` — `acme site FAILED` | `journalctl -u rayd \| grep -i certif`. С Cloudflare — права токена (§1) и `rayctl dns`. Без него — записи A и TCP 80 у провайдера. Неудачу нода повторяет через час, потом через 2, 4… до суток. Пауза живёт в памяти rayd. Если ошибка была на самой ноде (`does not resolve`, `lookup … on [::1]:53`, токен) и вы её исправили — `systemctl restart rayd`, и выпуск пойдёт сразу: Let's Encrypt о такой неудаче не знает. С v0.11.1 то же делают `rayctl dns cloudflare` и `rayctl dns sync`, не чаще раза в 15 минут на сайт. Если отказал сам Let's Encrypt (`urn:ietf:params:acme:error:…`), ради этого не перезапускайте: лимит — 5 неудач в час на имя |
+| `lookup … on [::1]:53` или `127.0.0.1:53`: `connection refused`; `resolver FAILED` в `rayctl status` (v0.11.1) | службы не могут прочитать `/etc/resolv.conf` или в нём нет `nameserver` (§2): `ls -lL /etc/resolv.conf` — нужно 0644, `rayctl apply` ставит это сам (v0.11.1) |
 | `Failed at step EXEC … Permission denied` у `niko-*` | установка до v0.11.0 под строгим umask: `rayctl apply` из v0.11.0 открывает каталоги и бинарники. Перед `rayctl update` с v0.10 — `umask 022` (§17) |
 | `port53 FAILED` в `rayctl status` | UDP 53 рядом с фронтом занял другой DNS-сервер: `ss -lunp 'sport = :53'` |
 | `warning: service doh (doh) is not deployed by this version` (v0.11.0) | ложное предупреждение: DoH обслуживает сам rayd, своего юнита у него нет. Уйдёт в следующем релизе |

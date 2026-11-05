@@ -197,6 +197,52 @@ func (h *Host) repairModes() {
 	for _, b := range []string{DefaultBinaries.Xray, DefaultBinaries.NikoServer, DefaultBinaries.Rayd, DefaultBinaries.Rayspa} {
 		fix(b, 0o055, false)
 	}
+	// The services resolve names themselves (rayd: ACME, Cloudflare): a
+	// resolv.conf they cannot read leaves Go asking localhost. Through
+	// one link, as /etc/resolv.conf to resolved's stub file.
+	fix(resolvTarget(h.path, ResolvConf), 0o044, false)
+}
+
+// ResolvConf is the host's resolver configuration.
+const ResolvConf = "/etc/resolv.conf"
+
+// ResolverProblem says why the services could not resolve names with the
+// host's resolv.conf, or "" when they can: they run under their own users,
+// so it must be readable by others, and it must name a server (without
+// one Go asks localhost). root is the host's root, "" for this host.
+func ResolverProblem(root string) string {
+	at := func(p string) string { return filepath.Join(root, p) }
+	p := at(resolvTarget(at, ResolvConf))
+	fi, err := os.Stat(p)
+	if err != nil {
+		return fmt.Sprintf("%s: %v", ResolvConf, err)
+	}
+	if fi.Mode().Perm()&0o004 == 0 {
+		return fmt.Sprintf("%s is mode %v: the services cannot read it", ResolvConf, fi.Mode().Perm())
+	}
+	b, err := os.ReadFile(p) //nolint:gosec // G304: the host's resolv.conf
+	if err != nil {
+		return fmt.Sprintf("%s: %v", ResolvConf, err)
+	}
+	for line := range strings.Lines(string(b)) {
+		if f := strings.Fields(line); len(f) > 1 && f[0] == "nameserver" {
+			return ""
+		}
+	}
+	return ResolvConf + " names no nameserver: Go asks localhost:53"
+}
+
+// resolvTarget is the file a resolv.conf link points to (one link deep,
+// within the host's root), or the path itself.
+func resolvTarget(at func(string) string, p string) string {
+	t, err := os.Readlink(at(p))
+	if err != nil {
+		return p
+	}
+	if !filepath.IsAbs(t) {
+		t = filepath.Join(filepath.Dir(p), t)
+	}
+	return t
 }
 
 // InstallBinary puts an executable in place like any file: journaled, so a

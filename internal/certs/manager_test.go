@@ -74,6 +74,37 @@ func TestManager(t *testing.T) {
 	if n := m.Once(ctx, now.Add(61*24*time.Hour+2*time.Hour)); n != 1 || len(issued) != 2 {
 		t.Fatalf("renewal after the backoff: %d %v", n, issued)
 	}
+
+	// An operator's change retries at once and keeps the count: the third
+	// failure in a row waits four hours.
+	fail = true
+	at := now.Add(122 * 24 * time.Hour)
+	m.Once(ctx, at)
+	m.Once(ctx, at.Add(2*time.Hour)) // the second failure waits two hours
+	fail = false
+	if n := m.Once(ctx, at.Add(3*time.Hour)); n != 0 {
+		t.Fatal("retried within the backoff")
+	}
+	fail = true
+	m.Retry()
+	if n := m.Once(ctx, at.Add(3*time.Hour)); n != 0 || m.fails["site"] != 3 {
+		t.Fatalf("operator's retry: stored %d, fails %d", n, m.fails["site"])
+	}
+	if !m.next["site"].Equal(at.Add(3*time.Hour + 4*time.Hour)) {
+		t.Fatalf("after the retry the site waits until %v", m.next["site"])
+	}
+	fail = false
+	if n := m.Once(ctx, at.Add(3*time.Hour+time.Minute)); n != 0 {
+		t.Fatal("retried again without a change")
+	}
+	// Changes in a row (a cron job): a try RetryGap after the last at most.
+	m.Retry()
+	if n := m.Once(ctx, at.Add(3*time.Hour+2*time.Minute)); n != 0 {
+		t.Fatal("retried within RetryGap of the last try")
+	}
+	if n := m.Once(ctx, at.Add(3*time.Hour+RetryGap)); n != 1 {
+		t.Fatalf("operator's retry after a fix: %d", n)
+	}
 }
 
 func TestAccountKey(t *testing.T) {

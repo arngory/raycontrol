@@ -1015,4 +1015,65 @@ func TestModesUnderUmask(t *testing.T) {
 	if !strings.Contains(out.String(), deploy.DataPlaneDir+" was mode -rwx------, closed to the services") {
 		t.Errorf("not said:\n%s", out)
 	}
+
+	// A resolv.conf written under that umask, by itself or behind the
+	// link to resolved's file, is opened for reading.
+	for _, link := range []string{"", "/run/systemd/resolve/stub-resolv.conf", "../run/resolv.conf"} {
+		os.Remove(filepath.Join(root, deploy.ResolvConf))
+		file := deploy.ResolvConf
+		if link != "" {
+			file = filepath.Join(filepath.Dir(deploy.ResolvConf), link)
+			if filepath.IsAbs(link) {
+				file = link
+			}
+			os.Symlink(link, filepath.Join(root, deploy.ResolvConf))
+		}
+		os.MkdirAll(filepath.Join(root, filepath.Dir(file)), 0o755)
+		os.WriteFile(filepath.Join(root, file), []byte("nameserver 192.0.2.53\n"), 0o600)
+		os.Chmod(filepath.Join(root, file), 0o600)
+		if err := h.Apply(deploy.Plan{}); err != nil {
+			t.Fatal(err)
+		}
+		if fi, err := os.Stat(filepath.Join(root, file)); err != nil || fi.Mode().Perm() != 0o644 {
+			t.Errorf("resolv.conf %q: %v %v", link, fi.Mode().Perm(), err)
+		}
+	}
+}
+
+// The services resolve names with the host's resolv.conf: it must be
+// readable by them and name a server.
+func TestResolverProblem(t *testing.T) {
+	root := t.TempDir()
+	conf := filepath.Join(root, deploy.ResolvConf)
+	os.MkdirAll(filepath.Dir(conf), 0o755)
+	if p := deploy.ResolverProblem(root); !strings.Contains(p, "no such file") {
+		t.Errorf("no resolv.conf: %q", p)
+	}
+	os.WriteFile(conf, []byte("nameserver 192.0.2.53\n"), 0o600)
+	os.Chmod(conf, 0o600)
+	if p := deploy.ResolverProblem(root); !strings.Contains(p, "cannot read") {
+		t.Errorf("mode 0600: %q", p)
+	}
+	os.Chmod(conf, 0o644)
+	if p := deploy.ResolverProblem(root); p != "" {
+		t.Errorf("good: %q", p)
+	}
+	os.WriteFile(conf, []byte("search example.com\n# nameserver 192.0.2.53\n"), 0o644)
+	if p := deploy.ResolverProblem(root); !strings.Contains(p, "no nameserver") {
+		t.Errorf("without a server: %q", p)
+	}
+	// Behind resolved's link, within the root.
+	os.Remove(conf)
+	stub := filepath.Join(root, "/run/systemd/resolve/stub-resolv.conf")
+	os.MkdirAll(filepath.Dir(stub), 0o755)
+	os.WriteFile(stub, []byte("nameserver 127.0.0.53\noptions edns0 trust-ad\n"), 0o600)
+	os.Chmod(stub, 0o600)
+	os.Symlink("/run/systemd/resolve/stub-resolv.conf", conf)
+	if p := deploy.ResolverProblem(root); !strings.Contains(p, "cannot read") {
+		t.Errorf("link to a closed file: %q", p)
+	}
+	os.Chmod(stub, 0o644)
+	if p := deploy.ResolverProblem(root); p != "" {
+		t.Errorf("link: %q", p)
+	}
 }
