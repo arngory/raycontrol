@@ -253,9 +253,9 @@ func TestPerimeterFeed(t *testing.T) {
 	if a := stream.Msg().Snapshot.AdminPrefixes; len(a) != 2 || a[0] != "198.51.100.7/32" {
 		t.Fatalf("admin prefixes %v", a)
 	}
-	// Nothing wider than /16 and /32: admin addresses reach SSH without SPA
+	// Nothing wider than /16 and /48: admin addresses reach SSH without SPA
 	// (S-3). ::ffff:0:0/96 is 0.0.0.0/0.
-	for _, bad := range []string{"nonsense", "0.0.0.0/0", "10.0.0.0/15", "::/0", "2001:db8::/31", "::ffff:0:0/96"} {
+	for _, bad := range []string{"nonsense", "0.0.0.0/0", "10.0.0.0/15", "::/0", "2001:db8::/32", "2001:db8::/47", "::ffff:0:0/96"} {
 		if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{bad}})); connect.CodeOf(err) != connect.CodeInvalidArgument {
 			t.Fatalf("admin %s: %v", bad, err)
 		}
@@ -286,6 +286,26 @@ func TestPerimeterFeed(t *testing.T) {
 	if !pub["tcp/443"] || !pub["udp/53"] || pub["tcp/2222"] || !slices.ContainsFunc(open.Services, func(s *perimeterv1.Service) bool { return len(s.Ports) == 1 && s.Ports[0].Port == 443 }) {
 		t.Fatalf("open REALITY: public %v services %v", pub, open.Services)
 	}
+	// "open" publishes TCP 443 only, never another port the service was
+	// given.
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "r2",
+		SettingsJson: `{"target":"www.example.org:443","ports":["tcp/443","tcp/2223"],"open":true}`})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	for _, p := range stream.Msg().Snapshot.PublicPorts {
+		if p.Port == 2223 {
+			t.Fatalf("open REALITY published tcp/2223: %v", stream.Msg().Snapshot.PublicPorts)
+		}
+	}
+	if _, err := c.DeleteService(ctx, connect.NewRequest(&nodev1.DeleteServiceRequest{Name: "r2"})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
 	if _, err := c.SetServiceOption(ctx, connect.NewRequest(&nodev1.SetServiceOptionRequest{Name: "reality", Key: "open", Value: "false"})); err != nil {
 		t.Fatal(err)
 	}
@@ -294,6 +314,48 @@ func TestPerimeterFeed(t *testing.T) {
 	}
 	if p := stream.Msg().Snapshot.PublicPorts; len(p) != 1 || p[0].Port != 53 {
 		t.Fatalf("closed again: %v", p)
+	}
+
+	// A relay (relay-v1): its address reaches the service ports, not SSH,
+	// not the public DNS port; removing it takes them away. Not inside an
+	// admin prefix, which reaches SSH, nor an admin prefix around a relay.
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "msk", Address: "198.51.100.20"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("a relay inside the admin prefix 198.51.100.0/24: %v", err)
+	}
+	if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{"198.51.100.7"}})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "msk", Address: "198.51.100.20"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SetAdminAccess(ctx, connect.NewRequest(&nodev1.SetAdminAccessRequest{Cidrs: []string{"198.51.100.0/24"}})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("an admin prefix around a relay: %v", err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	rs := stream.Msg().Snapshot
+	rports := map[string]bool{}
+	for _, p := range rs.RelayPorts {
+		rports[fmt.Sprintf("%s/%d", p.Proto, p.Port)] = true
+	}
+	if !slices.Equal(rs.RelayPrefixes, []string{"198.51.100.20/32"}) || !rports["tcp/443"] || rports["tcp/2222"] || rports["udp/53"] {
+		t.Fatalf("relay: prefixes %v ports %v", rs.RelayPrefixes, rports)
+	}
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "lan", Address: "10.0.0.5"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("a private relay address: %v", err)
+	}
+	if _, err := c.RemoveRelay(ctx, connect.NewRequest(&nodev1.RemoveRelayRequest{Name: "msk"})); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatal(stream.Err())
+	}
+	if p := stream.Msg().Snapshot.RelayPrefixes; len(p) != 0 {
+		t.Fatalf("relay still there: %v", p)
 	}
 
 	// An ACME order opens the window in the feed, its end closes it.
@@ -518,5 +580,37 @@ func TestServiceDependents(t *testing.T) {
 	}
 	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "inner", Enabled: false})); err != nil {
 		t.Fatalf("disable inner after dnstt: %v", err)
+	}
+	// Nor does one come on, or get made, while its stage is off.
+	_, err = c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "dns", Enabled: true}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "inner, which is disabled") {
+		t.Fatalf("enable dnstt without inner: %v", err)
+	}
+	for _, kind := range []string{"masterdns", "olcrtc"} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: kind, Name: kind})); err == nil || !strings.Contains(err.Error(), "inner, which is disabled") {
+			t.Fatalf("create %s without inner: %v", kind, err)
+		}
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "inner", Enabled: true})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "dns", Enabled: true})); err != nil {
+		t.Fatalf("enable dnstt with inner: %v", err)
+	}
+	// A REALITY whose decoy site is off.
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "reality"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "reality", Enabled: false})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "site", Enabled: false})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "reality2"})); err == nil || !strings.Contains(err.Error(), "site, which is disabled") {
+		t.Fatalf("create reality on a disabled site: %v", err)
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "reality", Enabled: true})); err == nil || !strings.Contains(err.Error(), "site, which is disabled") {
+		t.Fatalf("enable reality on a disabled site: %v", err)
 	}
 }

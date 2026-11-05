@@ -173,11 +173,16 @@ rcdev1:<base64url без '=' от JSON>
 
 - Клиент пишет одну TLS-запись `16 03 01 <длина>` с ClientHello:
   - `legacy_version` `03 03`, случайные `random` (32 байта) и `session_id` (32 байта);
-  - набор шифров и расширений, как у браузера, в случайном порядке: `supported_versions` (1.3, 1.2),
-    `supported_groups` (X25519MLKEM768, x25519, P-256, P-384), `key_share` с настоящим ключом ML-KEM-768
-    у X25519MLKEM768 и случайным x25519, `signature_algorithms`, `psk_key_exchange_modes`, `ec_point_formats`,
-    `extended_master_secret`, `renegotiation_info`, ALPN `h2`, `http/1.1`;
-  - SNI нет, как при обращении по адресу;
+  - шифры и расширения — как у настоящего Chrome: снимок Google Chrome 156 stable (`internal/spa/chrome_hello.hex`,
+    снят CI клиента, форк sing-box 427f972) с ML-DSA и GREASE в `signature_algorithms`, `trust_anchors`, ALPS,
+    GREASE ECH. На каждое соединение заново, как у Chrome:
+    - `random`, `session_id`;
+    - ключи в `key_share`: настоящий ML-KEM-768 и x25519;
+    - все значения GREASE;
+    - GREASE ECH, как у BoringSSL: `enc` — свежий открытый ключ X25519 (у случайных байт старший бит был бы взведён в
+      половине случаев, у ключа — никогда), данные — случайные, длины 144, 176, 208 или 240 байт;
+    - порядок расширений: GREASE остаются первым и последним.
+  - SNI нет, как при обращении по адресу. JA4 — `t13i1516h2_8daaf6152771_cb7bf5808d99`, у носителя клиента такой же;
   - **пакет SPA (§5) целиком — данные расширения `session_ticket` (`0x0023`)**: так выглядит непрозрачный тикет
     клиента, который возобновляет сессию.
 - Дальше — как в §10: соединение закрывается, ответа нет.
@@ -185,7 +190,7 @@ rcdev1:<base64url без '=' от JSON>
   `session_ticket` и проверяет их как пакет (§6). Иначе — голый пакет из §10. Принимаются обе формы.
 - Эталон: `internal/spa` `TLSCarrier` / `FromTLSCarrier`. Тест проверяет, что `crypto/tls` разбирает запись как
   ClientHello.
-- Порядок в клиенте: UDP, затем ClientHello. Голый TCP — для нод до raycontrol v0.10.0: они ClientHello не понимают.
+- Порядок в клиенте: UDP, затем ClientHello, затем голый TCP — для нод до raycontrol v0.10.0: они ClientHello не понимают. Подсказка `spa.carriers` в подписке (subscription-v1) перечисляет носители в этом же порядке. `rayctl -carrier auto` идёт так же.
 
 ## 11. Ротация UDP-портов сервисов
 

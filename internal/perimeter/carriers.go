@@ -169,22 +169,43 @@ func (c *TCPCarrier) handle(conn net.Conn) {
 		timeout = 3 * time.Second
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(timeout))
-	// One byte more than the maximum shows an oversized packet. A
-	// ClientHello carrier (spa-v2.md §10.1) is longer than a bare packet.
-	limit := max(c.LenMax()+1, spa.TLSCarrierMax+1)
-	data, err := io.ReadAll(io.LimitReader(conn, int64(limit)))
-	if len(data) == 0 || (err != nil && !errors.Is(err, io.EOF) && !isTimeout(err)) {
-		return
-	}
-	if spa.IsTLSCarrier(data) {
-		if data, err = spa.FromTLSCarrier(data); err != nil {
-			return
-		}
-	} else if len(data) > c.LenMax() {
-		data = data[:c.LenMax()+1] // oversized: refused as before
-	}
 	addr, err := netip.ParseAddrPort(conn.RemoteAddr().String())
 	if err != nil {
+		return
+	}
+	var hdr [5]byte
+	n, err := io.ReadFull(conn, hdr[:])
+	if n == 0 {
+		return
+	}
+	if n == len(hdr) && spa.IsTLSCarrier(hdr[:]) {
+		// A ClientHello carrier (spa-v2.md §10.1) says its length: read
+		// exactly the record and answer at once. A client that sent a
+		// ClientHello waits for the server's answer instead of closing,
+		// and must not hold a slot until the timeout.
+		rec := int(binary.BigEndian.Uint16(hdr[3:5]))
+		if len(hdr)+rec > spa.TLSCarrierMax {
+			return
+		}
+		data := make([]byte, len(hdr)+rec)
+		copy(data, hdr[:])
+		if _, err := io.ReadFull(conn, data[len(hdr):]); err != nil {
+			return
+		}
+		if data, err = spa.FromTLSCarrier(data); err == nil {
+			c.Handler(addr.Addr().Unmap(), data)
+		}
+		return
+	}
+	// A bare packet ends where the connection does. One byte more than the
+	// maximum shows an oversized packet.
+	data := hdr[:n]
+	if err == nil {
+		var rest []byte
+		rest, err = io.ReadAll(io.LimitReader(conn, int64(c.LenMax()+1-n)))
+		data = append(data, rest...)
+	}
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) && !isTimeout(err) {
 		return
 	}
 	c.Handler(addr.Addr().Unmap(), data)

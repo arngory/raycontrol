@@ -47,10 +47,17 @@ var DataFiles = []string{"ipinfo_lite.mmdb", "NOTICE"}
 
 // Paths of the control plane on an installed node.
 const (
-	StateDir   = "/var/lib/raycontrol"
-	DB         = StateDir + "/rayd.db"
-	Socket     = "/run/raycontrol/rayd.sock"
-	AdminGroup = "raycontrol"
+	StateDir = "/var/lib/raycontrol"
+	DB       = StateDir + "/rayd.db"
+	// RayspaState is the last snapshot rayspa applied, its start until rayd
+	// or the exit answers.
+	RayspaState = "/var/lib/rayspa/snapshot.pb"
+	// HardeningSysctl is the network hardening every raycontrol host gets.
+	HardeningSysctl = "/etc/sysctl.d/90-raycontrol.conf"
+	// RelaySysctl turns forwarding on, on a relay host only.
+	RelaySysctl = "/etc/sysctl.d/91-raycontrol-relay.conf"
+	Socket      = "/run/raycontrol/rayd.sock"
+	AdminGroup  = "raycontrol"
 )
 
 // SystemUser is a system user (with a group of the same name).
@@ -401,13 +408,11 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		// service user only. Not LoadCredential=: systemd does not set up
 		// credentials in containers (Docker, LXC), and the copy keeps them
 		// from everyone but the service user (R2-9).
-		var creds []string
-		for _, f := range files {
-			if f.Service == s.Name && f.Group == "" {
-				creds = append(creds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
-					g, g, f.Path, p.Credential(s.Name, path.Base(f.Path))))
-			}
-		}
+		// By kind, not from this render's files: a service that failed to
+		// render keeps its earlier key, and its unit must still copy it.
+		secret := render.DNSSecret(s.Kind)
+		creds := []string{fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
+			g, g, path.Join(p.Rendered, s.Name, secret), p.Credential(s.Name, secret))}
 		after := []string{}
 		if inner != nil {
 			after = append(after, render.UnitName(inner.Name))
@@ -559,7 +564,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			after: []string{"rayd.service", "nftables.service", "firewalld.service", "ufw.service"},
 			service: []string{
 				"User=rayspa", "Group=rayspa",
-				"ExecStart=" + bin.Rayspa + " run -socket " + Socket + " -state /var/lib/rayspa/snapshot.pb",
+				"ExecStart=" + bin.Rayspa + " run -socket " + Socket + " -state " + RayspaState,
 				// The last snapshot: SPA keys and the admin addresses, rayspa's only.
 				"StateDirectory=rayspa", "StateDirectoryMode=0700",
 				"AmbientCapabilities=CAP_NET_ADMIN",
@@ -606,7 +611,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	plan.Files = append(plan.Files,
 		File{Path: "/etc/tmpfiles.d/raycontrol.conf", Mode: 0o644, Content: []byte(tmp)},
 		File{Path: "/etc/polkit-1/rules.d/50-raycontrol.rules", Mode: 0o644, Content: []byte(polkitRule)},
-		File{Path: "/etc/sysctl.d/90-raycontrol.conf", Mode: 0o644, Content: []byte(sysctl)},
+		File{Path: HardeningSysctl, Mode: 0o644, Content: []byte(sysctl)},
 	)
 	if len(dns) > 0 {
 		// UDP 53 belongs to the front; the host resolver must not listen on it.

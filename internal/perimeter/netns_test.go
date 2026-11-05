@@ -4,18 +4,21 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
+	"google.golang.org/protobuf/proto"
 
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/spa"
@@ -318,7 +321,7 @@ func TestNetns(t *testing.T) {
 		if dial() {
 			t.Fatal("ssh open before admin access")
 		}
-		snap.AdminPrefixes = []string{"127.0.0.0/8"}
+		snap.AdminPrefixes = []string{"127.0.0.0/8", "127.0.0.1/32"} // overlapping: merged for the interval set
 		snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 18022}}
 		if err := gate.Update(snap); err != nil {
 			t.Fatal(err)
@@ -332,6 +335,215 @@ func TestNetns(t *testing.T) {
 		}
 		if dial() {
 			t.Fatal("ssh open for a foreign admin prefix")
+		}
+	})
+	t.Run("a relay's address reaches the relay ports without SPA, not SSH", func(t *testing.T) {
+		// relay-v1 §3: devices knock at the relay; this node lets the
+		// relay's address in on the service ports only.
+		svc, err := net.Listen("tcp", "127.0.0.1:18444")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer svc.Close()
+		ssh, err := net.Listen("tcp", "127.0.0.1:18023")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ssh.Close()
+		for _, l := range []net.Listener{svc, ssh} {
+			go func() {
+				for {
+					c, err := l.Accept()
+					if err != nil {
+						return
+					}
+					c.Close()
+				}
+			}()
+		}
+		dial := func(port string) bool {
+			c, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 700*time.Millisecond)
+			if err == nil {
+				c.Close()
+			}
+			return err == nil
+		}
+		if dial("18444") {
+			t.Fatal("service open before the relay")
+		}
+		snap.RelayPrefixes = []string{"127.0.0.1/32"}
+		snap.RelayPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 18444}}
+		snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 18023}}
+		snap.AdminPrefixes = nil
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		if !dial("18444") {
+			t.Fatal("the relay's address cannot reach the relay port")
+		}
+		if dial("18023") {
+			t.Fatal("the relay's address reaches SSH")
+		}
+		// Flows the relay has open end with it, not only new ones: when its
+		// port is no longer forwarded, when it goes; TCP with a reset. Not
+		// when something else still lets them in (a public port), and not
+		// when the table is made again.
+		type flow struct {
+			c   net.Conn
+			got chan string
+		}
+		open := func(proto string, port int) flow {
+			t.Helper()
+			addr := fmt.Sprintf("127.0.0.1:%d", port)
+			got := make(chan string, 8)
+			if proto == "udp" {
+				pc, err := net.ListenPacket("udp", addr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { pc.Close() })
+				go func() {
+					buf := make([]byte, 16)
+					for {
+						n, from, err := pc.ReadFrom(buf)
+						if err != nil {
+							return
+						}
+						got <- string(buf[:n])
+						pc.WriteTo(buf[:n], from) // a reply: the flow is established
+					}
+				}()
+				c, err := net.Dial("udp", addr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { c.Close() })
+				return flow{c, got}
+			}
+			l, err := net.Listen("tcp", addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.Close()
+			c, err := net.DialTimeout("tcp", addr, 700*time.Millisecond)
+			if err != nil {
+				t.Fatalf("the relay's address cannot open a flow to %s", addr)
+			}
+			// Accepted before the listener closes, which would reset it.
+			sc, err := l.Accept()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { c.Close(); sc.Close() })
+			go func() {
+				buf := make([]byte, 16)
+				for {
+					n, err := sc.Read(buf)
+					if err != nil {
+						return
+					}
+					got <- string(buf[:n])
+				}
+			}()
+			return flow{c, got}
+		}
+		sends := func(f flow, msg string) bool {
+			t.Helper()
+			if _, err := f.c.Write([]byte(msg)); err != nil {
+				return false
+			}
+			select {
+			case m := <-f.got:
+				return m == msg
+			case <-time.After(700 * time.Millisecond):
+				return false
+			}
+		}
+		port := func(proto string, n uint32) *perimeterv1.Port { return &perimeterv1.Port{Proto: proto, Port: n} }
+		public := snap.PublicPorts
+		snap.RelayPorts = []*perimeterv1.Port{port("tcp", 18444), port("tcp", 18445), port("udp", 18446), port("tcp", 18447), port("tcp", 18448)}
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		tcpFlow, udpFlow, publicFlow := open("tcp", 18445), open("udp", 18446), open("tcp", 18447)
+		for _, f := range []flow{tcpFlow, udpFlow, publicFlow} {
+			if !sends(f, "a") {
+				t.Fatal("an open relay flow does not pass")
+			}
+		}
+		// The table made again: the flows go on, before the relays are back
+		// in it and after.
+		if err := fw.Setup(); err != nil {
+			t.Fatal(err)
+		}
+		if !sends(tcpFlow, "b") {
+			t.Fatal("a relay flow cut by the table made again")
+		}
+		if out, err := exec.Command("nft", "delete", "table", "inet", Table).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		if _, err := gate.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		if !sends(tcpFlow, "c") || !sends(udpFlow, "c") {
+			t.Fatal("a relay flow cut by the table restored")
+		}
+		if !dial("18444") {
+			t.Fatal("no new relay flow after the table is restored")
+		}
+		// rayspa started again with the relay removed meanwhile: the flow
+		// the relay had open ends.
+		downFlow := open("tcp", 18448)
+		if !sends(downFlow, "a") {
+			t.Fatal("an open relay flow does not pass")
+		}
+		gone := proto.Clone(snap).(*perimeterv1.Snapshot)
+		gone.RelayPrefixes, gone.RelayPorts = nil, nil // as rayd sends it with no relays
+		if err := fw.Setup(); err != nil {
+			t.Fatal(err)
+		}
+		if err := NewGate(fw, quiet).Update(gone); err != nil {
+			t.Fatal(err)
+		}
+		if sends(downFlow, "b") {
+			t.Fatal("a relay flow goes on after rayspa started again without the relay")
+		}
+		// This test's gate puts its own table back.
+		if out, err := exec.Command("nft", "delete", "table", "inet", Table).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		if _, err := gate.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		snap.RelayPorts = []*perimeterv1.Port{port("tcp", 18444), port("udp", 18446), port("tcp", 18447)}
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		if sends(tcpFlow, "d") {
+			t.Fatal("a relay flow goes on after its port is no longer forwarded")
+		}
+		tcpFlow.c.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := tcpFlow.c.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("a cut relay flow is not reset: %v", err)
+		}
+		snap.RelayPrefixes = nil
+		snap.PublicPorts = append(slices.Clone(public), port("tcp", 18447))
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		if sends(udpFlow, "e") {
+			t.Fatal("a UDP relay flow goes on after the relay is gone")
+		}
+		if !sends(publicFlow, "e") {
+			t.Fatal("a relay flow to a port now public is cut")
+		}
+		if dial("18444") {
+			t.Fatal("the service stays open after the relay is gone")
+		}
+		snap.RelayPorts = []*perimeterv1.Port{port("tcp", 18444)}
+		snap.PublicPorts = public
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
 		}
 	})
 	t.Run("rotated UDP port reaches the service after SPA", func(t *testing.T) {
@@ -432,6 +644,40 @@ func TestNetns(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	t.Run("grants without destroy element", func(t *testing.T) {
+		// nft before 1.0.8 and kernels before 6.3: what is absent cannot
+		// fail a delete, and what fails is said.
+		was := fw.destroy
+		fw.destroy = false
+		defer func() { fw.destroy = was }()
+		a, p := netip.MustParseAddr("192.0.2.77"), []Port{{"tcp", 18999}, {"udp", 18999}}
+		list := func() string {
+			out, err := exec.Command("nft", "list", "set", "inet", Table, "allow4").CombinedOutput()
+			if err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			return string(out)
+		}
+		if err := fw.Deny(a, p); err != nil {
+			t.Fatalf("closing what is not there: %v", err)
+		}
+		if err := fw.Allow(a, p, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+		if err := fw.Allow(a, p, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		if got := list(); !strings.Contains(got, "192.0.2.77 . tcp . 18999 timeout 1m") || strings.Contains(got, "timeout 1h") {
+			t.Fatalf("a shorter grant again: %s", got)
+		}
+		if err := fw.Deny(a, p); err != nil || strings.Contains(list(), "192.0.2.77") {
+			t.Fatalf("closed: %v\n%s", err, list())
+		}
+		bad := netip.MustParseAddr("192.0.2.78")
+		if err := fw.Deny(bad, []Port{{"nosuchproto", 1}}); err == nil {
+			t.Fatal("a real error said nothing")
+		}
+	})
 	t.Run("table restored after flush ruleset", func(t *testing.T) {
 		allow4 := func() string {
 			out, err := exec.Command("nft", "list", "set", "inet", Table, "allow4").CombinedOutput()
@@ -455,8 +701,8 @@ func TestNetns(t *testing.T) {
 		if ok, err := fw.Present(); !ok || err != nil {
 			t.Fatalf("present after tick: %v %v", ok, err)
 		}
-		if !strings.Contains(allow4(), "127.0.0.1") {
-			t.Fatal("grant lost")
+		if got := allow4(); !strings.Contains(got, "127.0.0.1") || !strings.Contains(got, "expires") {
+			t.Fatalf("grant lost, or back without its timeout: %s", got)
 		}
 		// The slot ports log to rayspa again.
 		sendUDP(make([]byte, 120))
@@ -512,6 +758,18 @@ func TestNetnsDataPlaneToNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	unix.Close(fd)
+	// And one on another interface, as a node's public address: traffic
+	// to it still leaves through lo, which the output chain matches first.
+	for _, args := range [][]string{
+		{"link", "add", "rc-va", "type", "veth", "peer", "name", "rc-vb"},
+		{"addr", "add", "192.0.2.10/24", "dev", "rc-va"},
+		{"link", "set", "rc-va", "up"},
+		{"link", "set", "rc-vb", "up"},
+	} {
+		if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
+			t.Fatalf("ip %v: %v %s", args, err, out)
+		}
+	}
 
 	fw := &NFT{NflogGroup: 7, FilterLoopback: true}
 	if err := fw.Setup(); err != nil {
@@ -521,7 +779,7 @@ func TestNetnsDataPlaneToNode(t *testing.T) {
 	if err := fw.SetPublic([]Port{{"tcp", 18999}}); err != nil {
 		t.Fatal(err)
 	}
-	for _, addr := range []string{"192.0.2.9:18999", "127.0.0.1:18999"} {
+	for _, addr := range []string{"192.0.2.9:18999", "192.0.2.10:18999", "127.0.0.1:18999"} {
 		l, err := net.Listen("tcp", addr)
 		if err != nil {
 			t.Fatal(err)
@@ -547,6 +805,8 @@ func TestNetnsDataPlaneToNode(t *testing.T) {
 		{9100, [4]byte{192, 0, 2, 9}, false},
 		{9190, [4]byte{192, 0, 2, 9}, true}, // rayd
 		{9110, [4]byte{127, 0, 0, 1}, true},
+		{0, [4]byte{192, 0, 2, 10}, true},
+		{9110, [4]byte{192, 0, 2, 10}, false},
 	} {
 		err := dialAs(c.uid, c.addr, 18999)
 		if (err == nil) != c.want {

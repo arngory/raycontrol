@@ -6,7 +6,9 @@
 package health
 
 import (
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,7 +20,8 @@ type Loop struct {
 	Errors  uint64
 	LastOK  time.Time // zero: never
 	LastErr time.Time // zero: never
-	Err     string    // the last error
+	Err     string    // the last error, on one line
+	failing bool      // the last round failed
 }
 
 // Board collects the loops. The zero value is ready; a nil Board ignores
@@ -50,12 +53,30 @@ func (b *Board) Done(name string, err error) {
 		b.loops[name] = l
 	}
 	l.Runs++
+	l.failing = err != nil
 	if err != nil {
 		l.Errors++
-		l.LastErr, l.Err = now, err.Error()
+		// Joined errors (render.ServiceErrors) come on several lines; status
+		// and the log show one.
+		l.LastErr, l.Err = now, strings.Join(strings.Fields(strings.ReplaceAll(err.Error(), "\n", " ; ")), " ")
 		return
 	}
 	l.LastOK = now
+}
+
+// Retain forgets the loops named prefix+<name> for every name not in keep:
+// a deleted site or service no longer shows as failing.
+func (b *Board) Retain(prefix string, keep []string) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for name := range b.loops {
+		if rest, ok := strings.CutPrefix(name, prefix); ok && !slices.Contains(keep, rest) {
+			delete(b.loops, name)
+		}
+	}
 }
 
 // Loops returns the records by name.
@@ -73,5 +94,6 @@ func (b *Board) Loops() []Loop {
 	return out
 }
 
-// Failing reports whether the loop's last round failed.
-func (l Loop) Failing() bool { return l.LastErr.After(l.LastOK) }
+// Failing reports whether the loop's last round failed (two rounds in the
+// same second tell nothing by their times).
+func (l Loop) Failing() bool { return l.failing }

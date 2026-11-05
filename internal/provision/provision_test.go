@@ -198,6 +198,29 @@ func TestSiteAnswer(t *testing.T) {
 	if r, err = SetServiceOption(ctx, st, "r", "rotate_sni", "true"); err != nil || !*ParseRealityState(r).RotateSNI {
 		t.Fatalf("rotate_sni back on: %v %s", err, r.Settings)
 	}
+	// "open" opens TCP 443 only: a REALITY moved off it has nothing to open.
+	if _, err := SetServiceOption(ctx, st, "r", "open", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "reality", Name: "r8443", Enabled: true, Settings: `{"ports":["tcp/8443"]}`}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetServiceOption(ctx, st, "r8443", "open", "true"); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("open off tcp/443: %v", err)
+	}
+	if _, err := SetServiceOption(ctx, st, "r8443", "open", "false"); err != nil {
+		t.Fatalf("open=false off tcp/443: %v", err)
+	}
+	// SSH shares no port: a grant for the other service would reach sshd.
+	if _, err := CreateService(ctx, st, store.Service{Kind: "ssh", Name: "ssh", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "reality", Name: "r22", Enabled: true, Settings: `{"ports":["tcp/22"]}`}); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("reality on SSH's port: %v", err)
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "ssh", Name: "ssh2", Enabled: true, Settings: `{"ports":["tcp/8443"]}`}); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("ssh on a service's port: %v", err)
+	}
 }
 
 func TestHysteriaServices(t *testing.T) {

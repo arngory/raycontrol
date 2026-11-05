@@ -388,7 +388,13 @@ func TestDNSAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.CreateDevice(ctx, "bob", "laptop", "user") // bob has no tunnel
-	m, err = render.Collect(ctx, st)
+	// Without the keys (Collect alone), the service is not rendered: an
+	// empty keys file would lock every device out.
+	m, _ = render.Collect(ctx, st)
+	if _, _, err := render.Render(m, render.DefaultPaths); !render.Partial(err) || !strings.Contains(err.Error(), "dns") {
+		t.Fatalf("render without the dnsauth keys: %v", err)
+	}
+	m, err = render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,5 +426,20 @@ func TestDNSAuth(t *testing.T) {
 	// The other tunnel (masterdns) is left alone.
 	if _, err := provision.SetServiceOption(ctx, st, "mdns", "auth", "required"); err == nil {
 		t.Fatal("auth on masterdns")
+	}
+	// Nor is an unknown mode taken at creation, and one in the database
+	// (written by hand) keeps the service from rendering.
+	for _, svc := range []store.Service{
+		{Kind: "dnstt", Name: "dns2", Settings: `{"auth":"strict"}`},
+		{Kind: "masterdns", Name: "mdns2", Settings: `{"auth":"required"}`},
+	} {
+		if _, err := provision.CreateService(ctx, st, svc); !errors.Is(err, store.ErrInvalid) {
+			t.Errorf("%s %s: %v", svc.Kind, svc.Settings, err)
+		}
+	}
+	i := slices.IndexFunc(m.Services, func(s render.Service) bool { return s.Name == "dns" })
+	m.Services[i].Settings = strings.Replace(m.Services[i].Settings, `"auth":"required"`, `"auth":"strict"`, 1)
+	if _, _, err := render.Render(m, render.DefaultPaths); !render.Partial(err) || !strings.Contains(err.Error(), `auth "strict"`) {
+		t.Fatalf("render with auth=strict: %v", err)
 	}
 }

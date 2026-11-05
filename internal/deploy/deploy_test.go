@@ -698,3 +698,60 @@ func TestBuildNaive(t *testing.T) {
 		t.Errorf("warnings %v", p.Warnings)
 	}
 }
+
+// A DNS tunnel that failed to render keeps its earlier files (Q-1); its unit
+// must still copy the key in, or the next start runs without one.
+func TestBuildDNSKeyWithoutRender(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	for _, k := range []string{"dnstt", "masterdns"} {
+		if _, err := provision.CreateService(ctx, st, store.Service{Kind: k, Name: k, Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := render.CollectForRender(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _, err := render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	others := slices.DeleteFunc(files, func(f render.File) bool { return f.Service == "dnstt" || f.Service == "masterdns" })
+	p := deploy.Build(m, others, render.DefaultPaths, deploy.DefaultBinaries)
+	for name, key := range map[string]string{"dnstt": "noise.key", "masterdns": "encryption.key"} {
+		want := "ExecStartPre=+install -m 0400 -o niko-" + name + " -g niko-" + name +
+			" /var/lib/raycontrol/rendered/" + name + "/" + key + " /run/niko/" + name + "/" + key
+		if u := file(p, "/etc/systemd/system/niko-"+name+".service"); !strings.Contains(u, want) {
+			t.Errorf("%s unit lacks %q:\n%s", name, want, u)
+		}
+	}
+}
+
+// A relay host (relay-v1 §3.1): rayspa alone, with the bundle root copies in
+// for it at each start, and forwarding on.
+func TestRelayPlan(t *testing.T) {
+	p := deploy.RelayPlan(deploy.DefaultBinaries)
+	if len(p.Units) != 1 || p.Units[0] != "rayspa.service" || len(p.Users) != 1 || p.Users[0].Name != "rayspa" {
+		t.Fatalf("plan %+v", p)
+	}
+	u := file(p, "/etc/systemd/system/rayspa.service")
+	for _, want := range []string{
+		"ExecStartPre=+install -m 0400 -o rayspa -g rayspa /etc/raycontrol/relay.bundle /run/rayspa/relay.bundle",
+		"ExecStart=/usr/local/bin/rayspa run -relay /run/rayspa/relay.bundle -state /var/lib/rayspa/snapshot.pb",
+		"User=rayspa", "CapabilityBoundingSet=CAP_NET_ADMIN\n", "RuntimeDirectoryMode=0700",
+	} {
+		if !strings.Contains(u, want) {
+			t.Errorf("relay unit lacks %q:\n%s", want, u)
+		}
+	}
+	if !strings.Contains(file(p, "/etc/sysctl.d/91-raycontrol-relay.conf"), "net.ipv4.ip_forward = 1") ||
+		!strings.Contains(file(p, "/etc/sysctl.d/90-raycontrol.conf"), "accept_redirects = 0") {
+		t.Error("relay sysctl")
+	}
+}

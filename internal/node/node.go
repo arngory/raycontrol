@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,6 +22,10 @@ const (
 	settingSPA   = "spa_params"
 	settingHost  = "public_host"
 	settingAdmin = "admin_access"
+
+	// AdminAccessSetting is where the admin addresses are kept: a rollback
+	// of the database keeps them as they are now (store.CarryRevocations).
+	AdminAccessSetting = settingAdmin
 
 	// BundlePrefix marks an encoded device bundle.
 	BundlePrefix = "rcdev1:"
@@ -227,7 +232,34 @@ func AdminAccess(ctx context.Context, st *store.Store) ([]netip.Prefix, error) {
 	if err := json.Unmarshal(b, &list); err != nil {
 		return nil, err
 	}
-	return ParsePrefixes(list)
+	ps, err := ParsePrefixes(list)
+	if err != nil {
+		return nil, err
+	}
+	// A database from before the limit (S-3) may hold a wider prefix:
+	// it reaches nothing until set again within the limit.
+	return slices.DeleteFunc(ps, func(p netip.Prefix) bool { return p.Bits() < MinAdminBits(p.Addr()) }), nil
+}
+
+// AdminAccessIgnored are the stored admin prefixes AdminAccess leaves out:
+// wider than the limits, from a database before them (S-3).
+func AdminAccessIgnored(ctx context.Context, st *store.Store) ([]netip.Prefix, error) {
+	b, err := st.GetSetting(ctx, settingAdmin)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var list []string
+	if err := json.Unmarshal(b, &list); err != nil {
+		return nil, err
+	}
+	ps, err := ParsePrefixes(list)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(ps, func(p netip.Prefix) bool { return p.Bits() >= MinAdminBits(p.Addr()) }), nil
 }
 
 // SetAdminAccess replaces the admin prefixes. Single addresses are accepted
@@ -254,14 +286,14 @@ func SetAdminAccess(ctx context.Context, st *store.Store, list []string) ([]neti
 	return ps, st.SetSetting(ctx, settingAdmin, b)
 }
 
-// MinAdminBits is the widest admin prefix: /16 for IPv4, /32 for IPv6
-// (S-3). Admin addresses reach SSH without SPA, so 0.0.0.0/0 there would
-// open SSH to everyone, through the API too.
+// MinAdminBits is the widest admin prefix: /16 for IPv4, /48 for IPv6, a
+// site, not a provider's /32 (S-3). Admin addresses reach SSH without SPA,
+// so 0.0.0.0/0 there would open SSH to everyone, through the API too.
 func MinAdminBits(a netip.Addr) int {
 	if a.Is4() {
 		return 16
 	}
-	return 32
+	return 48
 }
 
 // ParsePrefixes parses CIDRs or bare addresses.

@@ -26,7 +26,7 @@ import (
 // only the device bundle, not rayd.
 func probe(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
-	carrier := fs.String("carrier", "auto", "SPA carrier: udp, tls (TCP as a TLS ClientHello), tcp (bare TCP) or auto (UDP, then tls)")
+	carrier := fs.String("carrier", "auto", "SPA carrier: udp, tls (TCP as a TLS ClientHello), tcp (bare TCP) or auto (UDP, then tls, then bare TCP for a node before v0.10)")
 	addr := fs.String("addr", "", "node address to use instead of the bundle's host")
 	links := fs.Bool("links", false, "print the profile links (they carry credentials)")
 	redacted := fs.Bool("redact", false, "hide the node's address and names, IDs and keys, to share the output in an issue")
@@ -66,7 +66,7 @@ func probe(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	carriers := map[string][]string{"auto": {"udp", "tls"}, "udp": {"udp"}, "tcp": {"tcp"}, "tls": {"tls"}}[*carrier]
+	carriers := carrierList(*carrier)
 	if carriers == nil {
 		return errUsage
 	}
@@ -181,6 +181,13 @@ func resolve(ctx context.Context, host string) (netip.Addr, error) {
 		return netip.Addr{}, fmt.Errorf("resolving %s: %w", host, err)
 	}
 	return ips[0].Unmap(), nil
+}
+
+// carrierList is the order the carriers are tried in for -carrier: auto
+// is UDP, then the ClientHello, then bare TCP for a node before v0.10,
+// which takes no ClientHello; nil for an unknown name.
+func carrierList(name string) []string {
+	return map[string][]string{"auto": {"udp", "tls", "tcp"}, "udp": {"udp"}, "tcp": {"tcp"}, "tls": {"tls"}}[name]
 }
 
 // sendSPA sends one packet: a UDP datagram, or the first data of a TCP

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/arngory/raycontrol/internal/httpx"
+	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -42,7 +43,10 @@ type Server struct {
 	// Hints, when set, gives the hint for the network of an address and the
 	// services of the profiles (R4-21).
 	Hints func(ctx context.Context, addr netip.Addr, svcs []uint16) *summary.Hints
-	now   func() time.Time
+	// TCPCarrier: the node takes SPA over TCP, bare and as a ClientHello
+	// (rayd -spa-tcp); the subscription lists the carriers.
+	TCPCarrier bool
+	now        func() time.Time
 
 	mu sync.Mutex // serialises seq
 }
@@ -178,6 +182,12 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 	p := Payload{
 		V: 1, NodeID: m.NodeID, Seq: seq, Time: now.Unix(), Issued: now.Unix(),
 		Expires: now.Add(Lifetime).Unix(), Profiles: profiles,
+		SPA: &SPAHint{Carriers: []string{"udp"}},
+	}
+	if s.TCPCarrier {
+		// In the order to try: the ClientHello before bare TCP, which a
+		// DPI box sees as odd.
+		p.SPA.Carriers = append(p.SPA.Carriers, "tls", "tcp")
 	}
 	if s.Probe != nil {
 		p.Probe = &ProbeHint{V: 1, UDP: s.Probe.UDPPort != 0, Tunnel: probe.Name}
@@ -192,6 +202,9 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 			}
 		}
 	}
+	if err := s.addRelays(ctx, &p, m); err != nil {
+		return Envelope{}, err
+	}
 	if s.Hints != nil && addr.IsValid() && !addr.IsLoopback() {
 		svcs := make([]uint16, 0, len(profiles))
 		for _, pr := range profiles {
@@ -200,6 +213,39 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 		p.Hints = s.Hints(ctx, addr, svcs)
 	}
 	return Sign(p, s.Keys)
+}
+
+// addRelays lists the relays in front of the node and marks the profiles
+// they forward (relay-v1 §4). A relay is listed once its bundle is issued:
+// before that its host forwards nothing.
+func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) error {
+	relays, err := s.Store.ListRelays(ctx)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for _, r := range relays {
+		if r.CertPin == "" {
+			continue
+		}
+		params, err := provision.RelayParams(ctx, s.Store, r.Name)
+		if err != nil {
+			return err
+		}
+		p.Relays = append(p.Relays, RelayHint{ID: r.Name, Host: r.Address.String(), SPA: node.FromParams(params)})
+		ids = append(ids, r.Name)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	for i := range p.Profiles {
+		for _, svc := range m.Services {
+			if uint16(svc.ID) == p.Profiles[i].Svc && RelayKinds(svc.Kind) && !svc.Public() {
+				p.Profiles[i].Via = slices.Clone(ids)
+			}
+		}
+	}
+	return nil
 }
 
 // nextSeq returns a counter that grows with every response, across restarts.

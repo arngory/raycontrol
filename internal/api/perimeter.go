@@ -4,8 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
+	"net/netip"
+	"slices"
 	"time"
 
 	"connectrpc.com/connect"
@@ -16,6 +17,7 @@ import (
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -74,20 +76,7 @@ func (p *PerimeterServer) WatchPerimeter(ctx context.Context, _ *connect.Request
 // snapshot builds the perimeter state from the store. Revision is left 0 so
 // that equal states marshal equally.
 func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, error) {
-	pr := p.Params
-	snap := &perimeterv1.Snapshot{Spa: &perimeterv1.SPAParams{
-		NodeId:      pr.NodeID[:],
-		EpochLenS:   uint32(pr.EpochLen / time.Second),
-		SlotLenS:    uint32(pr.SlotLen / time.Second),
-		PortKey:     pr.PortKey[:],
-		PortBase:    uint32(pr.PortBase),
-		PortRange:   uint32(pr.PortRange),
-		LenMin:      uint32(pr.LenMin),
-		LenMax:      uint32(pr.LenMax),
-		DefaultTtlS: uint32(p.DefaultTTL / time.Second),
-		MaxTtlS:     uint32(p.MaxTTL / time.Second),
-		TcpCarrier:  p.TCPCarrier,
-	}}
+	snap := &perimeterv1.Snapshot{Spa: p.spaPB(p.Params)}
 
 	devices, err := p.Store.SPADevices(ctx)
 	if err != nil {
@@ -106,13 +95,17 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 		return nil, err
 	}
 	public := map[string]bool{}
+	ssh := sshPorts(services)
 	for _, svc := range services {
 		if !svc.Enabled {
 			continue
 		}
-		ports, err := svc.Ports()
+		ports, err := servicePorts(svc, ssh)
 		if err != nil {
-			return nil, fmt.Errorf("service %s: %w", svc.Name, err)
+			// Settings from before a check (S-3): the service is not
+			// rendered either (render.ServiceErrors), so it gets no port;
+			// the others keep theirs.
+			continue
 		}
 		if svc.Public() || realityOpen(svc) {
 			if !svc.Public() {
@@ -124,6 +117,12 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 				snap.Services = append(snap.Services, ps)
 			}
 			for _, port := range ports {
+				// "open" makes TCP 443 public, never another port the
+				// service was given (tcp/22 would take SSH out from
+				// behind SPA).
+				if !svc.Public() && port != openPort {
+					continue
+				}
 				if !public[port.String()] {
 					public[port.String()] = true
 					snap.PublicPorts = append(snap.PublicPorts, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
@@ -159,6 +158,34 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 	for _, a := range admin {
 		snap.AdminPrefixes = append(snap.AdminPrefixes, a.String())
 	}
+	// Relays (relay-v1): their addresses reach the ports of every enabled
+	// service that is not SSH and not public anyway; never the admin ports.
+	relays, err := p.Store.ListRelays(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range relays {
+		// A relay host is IPv4 (relay-v1 §3.1): an IPv6 relay a branch
+		// build added cannot get a bundle, so its address reaches nothing.
+		if a := r.Address.Unmap(); a.Is4() {
+			snap.RelayPrefixes = append(snap.RelayPrefixes, netip.PrefixFrom(a, 32).String())
+		}
+	}
+	if len(snap.RelayPrefixes) > 0 {
+		seen := map[string]bool{}
+		for _, svc := range services {
+			if !svc.Enabled || svc.Kind == "ssh" || svc.Public() {
+				continue
+			}
+			ports, _ := servicePorts(svc, ssh)
+			for _, port := range ports {
+				if !seen[port.String()] {
+					seen[port.String()] = true
+					snap.RelayPorts = append(snap.RelayPorts, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
+				}
+			}
+		}
+	}
 	for _, svc := range services {
 		if svc.Enabled && svc.Kind == "ssh" {
 			ports, _ := svc.Ports()
@@ -169,6 +196,129 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 	}
 	return snap, nil
 }
+
+// spaPB is the SPA part of a snapshot for a parameter set.
+func (p *PerimeterServer) spaPB(pr spa.Params) *perimeterv1.SPAParams {
+	return &perimeterv1.SPAParams{
+		NodeId:      pr.NodeID[:],
+		EpochLenS:   uint32(pr.EpochLen / time.Second),
+		SlotLenS:    uint32(pr.SlotLen / time.Second),
+		PortKey:     pr.PortKey[:],
+		PortBase:    uint32(pr.PortBase),
+		PortRange:   uint32(pr.PortRange),
+		LenMin:      uint32(pr.LenMin),
+		LenMax:      uint32(pr.LenMax),
+		DefaultTtlS: uint32(p.DefaultTTL / time.Second),
+		MaxTtlS:     uint32(p.MaxTTL / time.Second),
+		TcpCarrier:  p.TCPCarrier,
+	}
+}
+
+// RelaySnapshot is the perimeter of a relay in front of this node, as its
+// rayspa takes it (relay-v1 §3.1): the relay's own SPA; each device with its
+// key for this relay (spa.RelayKey), never its own; the services the relay
+// forwards, with the same IDs and ports (SPA scopes stay as they are), but
+// not SSH, not the public ones, and no UDP port rotation (§4); the relay
+// host's own SSH as a local service in the scope of the exit's SSH, so the
+// devices allowed SSH there open it here by SPA, and for the relay's own
+// admin addresses (never the exit's).
+func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*perimeterv1.Snapshot, error) {
+	relay, err := p.Store.RelayByName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	params, err := provision.RelayParams(ctx, p.Store, name)
+	if err != nil {
+		return nil, err
+	}
+	snap := &perimeterv1.Snapshot{Spa: p.spaPB(params)}
+	services, err := p.Store.ListServices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	scoped := map[uint16]bool{}
+	ssh := sshPorts(services)
+	sshPort := store.Port{Proto: "tcp", Num: relay.SSHPort}
+	for _, svc := range services {
+		if !svc.Enabled || svc.Public() {
+			continue
+		}
+		if svc.Kind == "ssh" {
+			if !scoped[uint16(svc.ID)] {
+				snap.Services = append(snap.Services, &perimeterv1.Service{Id: uint32(svc.ID), Local: true,
+					Ports: []*perimeterv1.Port{{Proto: sshPort.Proto, Port: uint32(sshPort.Num)}}})
+				scoped[uint16(svc.ID)] = true
+			}
+			continue
+		}
+		ports, err := servicePorts(svc, ssh)
+		if err != nil {
+			continue
+		}
+		// The relay host's SSH is not forwarded (IssueRelayBundle refuses
+		// such a port; a service given it later loses it here).
+		ports = slices.DeleteFunc(ports, func(p store.Port) bool { return p == sshPort })
+		if len(ports) == 0 {
+			continue
+		}
+		ps := &perimeterv1.Service{Id: uint32(svc.ID)}
+		for _, port := range ports {
+			ps.Ports = append(ps.Ports, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
+		}
+		snap.Services = append(snap.Services, ps)
+		scoped[uint16(svc.ID)] = true
+	}
+	devices, err := p.Store.SPADevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range devices {
+		var allowed []uint32
+		for _, id := range d.Allowed {
+			if scoped[id] {
+				allowed = append(allowed, uint32(id))
+			}
+		}
+		if len(allowed) == 0 {
+			continue
+		}
+		k := spa.RelayKey(d.Key, p.Params.NodeID, params.NodeID, relay.Name)
+		snap.Devices = append(snap.Devices, &perimeterv1.Device{Id: d.ID, Key: k[:], Allowed: allowed})
+	}
+	snap.AdminPrefixes = slices.Clone(relay.Admin)
+	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: uint32(relay.SSHPort)}}
+	return snap, nil
+}
+
+// sshPorts are the ports of the SSH services, enabled or not: sshd listens
+// whatever the service's state.
+func sshPorts(services []store.Service) map[store.Port]bool {
+	out := map[store.Port]bool{}
+	for _, svc := range services {
+		if svc.Kind == "ssh" {
+			ports, _ := svc.Ports()
+			for _, p := range ports {
+				out[p] = true
+			}
+		}
+	}
+	return out
+}
+
+// servicePorts are a service's ports in the perimeter: never SSH's for
+// another service. Creating one is refused (provision.sshPortsApart); a
+// database from before the check may have one, and a grant or a relay for
+// that service must not reach sshd.
+func servicePorts(svc store.Service, ssh map[store.Port]bool) ([]store.Port, error) {
+	ports, err := svc.Ports()
+	if err != nil || svc.Kind == "ssh" {
+		return ports, err
+	}
+	return slices.DeleteFunc(slices.Clone(ports), func(p store.Port) bool { return ssh[p] }), nil
+}
+
+// openPort is the one port "open" makes public.
+var openPort = store.Port{Proto: "tcp", Num: 443}
 
 // realityOpen reports a REALITY service with "open": TCP 443 to everyone
 // (RAYCONTROL.md §22.2.2).

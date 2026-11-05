@@ -232,7 +232,7 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 	}
 	for _, l := range s.Health.Loops() {
 		resp.Loops = append(resp.Loops, &nodev1.LoopHealth{Name: l.Name, LastOk: unixOf(l.LastOK), LastError: unixOf(l.LastErr),
-			Error: l.Err, Runs: l.Runs, Errors: l.Errors})
+			Error: l.Err, Runs: l.Runs, Errors: l.Errors, Failing: l.Failing()})
 	}
 	return connect.NewResponse(resp), nil
 }
@@ -427,7 +427,9 @@ func (s *Server) CreateService(ctx context.Context, req *connect.Request[nodev1.
 
 func (s *Server) SetServiceEnabled(ctx context.Context, req *connect.Request[nodev1.SetServiceEnabledRequest]) (*connect.Response[nodev1.SetServiceEnabledResponse], error) {
 	var err error
-	if !req.Msg.Enabled {
+	if req.Msg.Enabled {
+		err = provision.CheckRequirements(ctx, s.Store, req.Msg.Name)
+	} else {
 		err = provision.CheckNoDependents(ctx, s.Store, req.Msg.Name)
 	}
 	if err == nil {
@@ -718,7 +720,10 @@ func (s *Server) GetAdminAccess(ctx context.Context, _ *connect.Request[nodev1.G
 }
 
 func (s *Server) SetAdminAccess(ctx context.Context, req *connect.Request[nodev1.SetAdminAccessRequest]) (*connect.Response[nodev1.SetAdminAccessResponse], error) {
-	_, err := node.SetAdminAccess(ctx, s.Store, req.Msg.Cidrs)
+	err := s.relaysOutside(ctx, req.Msg.Cidrs)
+	if err == nil {
+		_, err = node.SetAdminAccess(ctx, s.Store, req.Msg.Cidrs)
+	}
 	if err := s.done(ctx, "admin.access", strings.Join(req.Msg.Cidrs, ","), err); err != nil {
 		return nil, err
 	}
@@ -746,7 +751,7 @@ func (s *Server) hostPorts(ctx context.Context) (host, outside []deploy.PortRang
 		}
 		ps, err := svc.Ports()
 		if err != nil {
-			return nil, nil, err
+			continue // not rendered, not in the perimeter (snapshot)
 		}
 		for _, p := range ps {
 			ports = append(ports, deploy.PortRange{Proto: p.Proto, From: p.Num, To: p.Num})
@@ -769,7 +774,7 @@ func (s *Server) hostPorts(ctx context.Context) (host, outside []deploy.PortRang
 }
 
 func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.GetDeploymentRequest]) (*connect.Response[nodev1.GetDeploymentResponse], error) {
-	m, err := render.Collect(ctx, s.Store)
+	m, err := render.CollectForRender(ctx, s.Store)
 	if err != nil {
 		return nil, toConnect(err)
 	}
@@ -791,6 +796,32 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 	}
 	for _, r := range outside {
 		resp.OutsidePorts = append(resp.OutsidePorts, &nodev1.PortRange{Proto: r.Proto, From: uint32(r.From), To: uint32(r.To)})
+	}
+	if ignored, err := node.AdminAccessIgnored(ctx, s.Store); err == nil {
+		for _, p := range ignored {
+			resp.Warnings = append(resp.Warnings, fmt.Sprintf("admin address %s is ignored: wider than /%d (rayctl admin to set it again)", p, node.MinAdminBits(p.Addr())))
+		}
+	}
+	ssh := map[store.Port]string{}
+	for _, svc := range m.Services {
+		if svc.Kind == "ssh" {
+			ports, _ := svc.Ports()
+			for _, p := range ports {
+				ssh[p] = svc.Name
+			}
+		}
+	}
+	for _, svc := range m.Services {
+		ports, err := svc.Ports()
+		if err != nil {
+			resp.Warnings = append(resp.Warnings, "closed in the perimeter: "+err.Error())
+			continue
+		}
+		for _, p := range ports {
+			if name, ok := ssh[p]; ok && svc.Kind != "ssh" {
+				resp.Warnings = append(resp.Warnings, fmt.Sprintf("closed in the perimeter: port %s of %s is %s's", p, svc.Name, name))
+			}
+		}
 	}
 	for _, name := range skipped {
 		resp.Warnings = append(resp.Warnings, "not rendered yet: "+name)

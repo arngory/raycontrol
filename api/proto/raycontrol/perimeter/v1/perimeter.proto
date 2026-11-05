@@ -12,6 +12,21 @@ service PerimeterService {
   rpc WatchPerimeter(WatchPerimeterRequest) returns (stream WatchPerimeterResponse);
 }
 
+// RelayService is the perimeter feed of a relay in front of this node
+// (relay-v1 §3.1), on the remote API: the relay proves itself with the
+// client certificate the exit made for it (rayctl relay add) and calls from
+// its own address. The snapshot carries the relay's SPA and its keys of the
+// devices (K_relay), never the devices' own keys.
+service RelayService {
+  rpc WatchRelay(WatchRelayRequest) returns (stream WatchRelayResponse);
+}
+
+message WatchRelayRequest {}
+
+message WatchRelayResponse {
+  Snapshot snapshot = 1;
+}
+
 message WatchPerimeterRequest {}
 
 message WatchPerimeterResponse {
@@ -31,6 +46,11 @@ message Snapshot {
   // ACME window: while open, TCP 80 from any address goes to acme.port,
   // where rayd answers HTTP-01 challenges. Absent or past: closed.
   AcmeWindow acme = 8;
+  // Relays (relay-v1): these single addresses reach relay_ports (the
+  // services, the subscription, the API; never SSH) without SPA. Devices
+  // knock at the relay, which forwards to this node.
+  repeated string relay_prefixes = 9;
+  repeated Port relay_ports = 10;
 }
 
 message AcmeWindow {
@@ -64,6 +84,9 @@ message Service {
   // UDP port rotation (spa-v2.md §11): the slot ports of this schedule are
   // redirected to target_port.
   Rotation rotation = 3;
+  // Local: served by this host, never forwarded. On a relay, its own SSH
+  // (relay-v1 §3.1); every other service there is forwarded to the exit.
+  bool local = 4;
 }
 
 message Rotation {

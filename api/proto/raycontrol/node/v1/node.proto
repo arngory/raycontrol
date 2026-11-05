@@ -57,6 +57,20 @@ service NodeService {
   rpc GetAdminAccess(GetAdminAccessRequest) returns (GetAdminAccessResponse);
   rpc SetAdminAccess(SetAdminAccessRequest) returns (SetAdminAccessResponse);
 
+  // Relays in front of the node (relay-v1): one address each, which
+  // reaches the service ports without SPA. Adding and removing is for
+  // root on the node only: a relay opens the perimeter.
+  rpc AddRelay(AddRelayRequest) returns (AddRelayResponse);
+  rpc ListRelays(ListRelaysRequest) returns (ListRelaysResponse);
+  rpc RemoveRelay(RemoveRelayRequest) returns (RemoveRelayResponse);
+  // IssueRelayBundle makes the relay a new client certificate (the one
+  // before stops working) and returns what its host needs (relay-v1 §3).
+  // It holds the relay's private key: root on the node only.
+  rpc IssueRelayBundle(IssueRelayBundleRequest) returns (IssueRelayBundleResponse);
+  // SetRelayAccess changes the relay host's SSH port and admin addresses
+  // without a new bundle: its SPA and certificate stay.
+  rpc SetRelayAccess(SetRelayAccessRequest) returns (SetRelayAccessResponse);
+
   // The DNS provider (Cloudflare): the node's records in its zone and
   // certificates through DNS-01 with a wildcard name (R4-10). The token is
   // stored by rayd and never returned.
@@ -136,6 +150,45 @@ message GetAdminAccessResponse { repeated string cidrs = 1; }
 message SetAdminAccessRequest { repeated string cidrs = 1; }
 message SetAdminAccessResponse {}
 
+message Relay {
+  string name = 1;
+  string address = 2;
+  int64 created_at = 3;
+}
+message AddRelayRequest {
+  string name = 1;
+  string address = 2;  // one public IP
+}
+message AddRelayResponse { Relay relay = 1; }
+message ListRelaysRequest {}
+message ListRelaysResponse { repeated Relay relays = 1; }
+message RemoveRelayRequest { string name = 1; }
+message RemoveRelayResponse {}
+message IssueRelayBundleRequest {
+  string name = 1;
+  string exit_address = 2;  // the exit's IP; empty: the node's host if it is one
+  uint32 ssh_port = 3;      // the relay host's SSH; 0 keeps it (22 at first)
+  // Addresses that reach the relay host's SSH without SPA (its own, never
+  // the exit's list); empty keeps them; a relay needs some. Devices allowed
+  // the exit's SSH may also open it by SPA with their K_relay.
+  repeated string admin = 4;
+  // Used when admin is empty and the relay has no list yet: rayctl's
+  // default, the address of the SSH session it runs in.
+  repeated string admin_if_none = 5;
+}
+message IssueRelayBundleResponse {
+  string bundle = 1;
+  uint32 ssh_port = 2;       // the relay host's SSH port now
+  repeated string admin = 3; // and its admin addresses
+  bool admin_kept = 4;       // the relay's list from before, none asked for
+}
+message SetRelayAccessRequest {
+  string name = 1;
+  uint32 ssh_port = 2;       // 0 keeps it
+  repeated string admin = 3; // empty keeps them
+}
+message SetRelayAccessResponse {}
+
 message GetDeploymentRequest {}
 message GetDeploymentResponse {
   repeated SystemUser users = 1;
@@ -189,6 +242,7 @@ message LoopHealth {
   string error = 4;    // the last error
   uint64 runs = 5;
   uint64 errors = 6;
+  bool failing = 7;    // the last round failed (rayd after v0.10.0)
 }
 
 message User {

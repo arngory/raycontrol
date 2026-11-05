@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/release"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -46,6 +48,7 @@ func (c *cli) update(ctx context.Context, args []string) error {
 	yes := fs.Bool("yes", false, "do not ask")
 	force := fs.Bool("force", false, "install even if the release is not newer")
 	rollback := fs.Bool("rollback", false, "put back the binaries the last update replaced")
+	noCarry := fs.Bool("no-carry", false, "with -rollback: put the database copy back as it is, without what was revoked since (when the current database cannot be read)")
 	local := fs.String("local", "", "binaries from this directory, not verified: for tests only")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
@@ -57,7 +60,11 @@ func (c *cli) update(ctx context.Context, args []string) error {
 		return errors.New("raycontrol is not installed here (install/bootstrap.sh)")
 	}
 	if *rollback {
-		return c.rollbackUpdate(ctx, *yes)
+		carry := carryMust
+		if *noCarry {
+			carry = carrySkip
+		}
+		return c.rollbackUpdate(ctx, *yes, carry)
 	}
 
 	if err := os.MkdirAll(deploy.JournalDir, 0o700); err != nil {
@@ -279,7 +286,9 @@ func (c *cli) failUpdate(ctx context.Context, cause error) error {
 	fmt.Println("update failed:", cause)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartTimeout)
 	defer cancel()
-	if err := c.rollback(ctx, "the update failed", true); err != nil {
+	// The copy is minutes old: if the database the failed update left
+	// cannot be read, the copy goes back as it is.
+	if err := c.rollback(ctx, "the update failed", true, carryTry); err != nil {
 		return fmt.Errorf("%w; rollback failed too: %w", cause, err)
 	}
 	return fmt.Errorf("update failed, the previous version runs again: %w", cause)
@@ -288,15 +297,31 @@ func (c *cli) failUpdate(ctx context.Context, cause error) error {
 // rollbackUpdate installs the binaries the last update kept aside, asked
 // for by hand: the database goes back only if the update moved its schema,
 // and then only when confirmed, since what changed since is lost.
-func (c *cli) rollbackUpdate(ctx context.Context, yes bool) error {
+// carry is what a rollback does with what was revoked since the copy.
+type carry int
+
+const (
+	carryMust carry = iota // carried, or no rollback
+	carryTry               // carried if it can be, else the copy as it is
+	carrySkip              // the copy as it is
+)
+
+func (c *cli) rollbackUpdate(ctx context.Context, yes bool, carry carry) error {
 	saved := filepath.Join(previousDir, "rayd.db")
 	fi, err := os.Stat(saved)
 	if err != nil {
 		// An update by an older rayctl kept no copy.
 		fmt.Println("no copy of the database from before the update: it stays as it is")
-		return c.rollback(ctx, "asked for", false)
+		return c.rollback(ctx, "asked for", false, carry)
 	}
-	now, err := store.Schema(ctx, deploy.DB)
+	// rayd's database is read from root's copy: SQLite would follow a link
+	// or block on a FIFO planted in rayd's directory.
+	current, done, err := rootCopy(deploy.DB)
+	if err != nil {
+		return err
+	}
+	now, err := store.Schema(ctx, current)
+	done()
 	if err != nil {
 		return err
 	}
@@ -306,9 +331,15 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool) error {
 	}
 	restoreDB := now > then
 	if restoreDB {
+		kept := "What was taken away since stays taken away: revoked devices, disabled or deleted users and relays,\n" +
+			"services taken from users or disabled, replaced certificates, the admin addresses.\n"
+		if carry == carrySkip {
+			kept = "-no-carry: what was revoked since comes back too.\n"
+		}
 		fmt.Printf("The update moved the database to schema %d; the previous version runs on %d.\n"+
-			"The database goes back to its copy from %s: users, devices and settings changed since are lost.\n",
-			now, then, fi.ModTime().Format(time.DateTime))
+			"The database goes back to its copy from %s: users, devices and settings added or changed since are lost,\n"+
+			"credentials rotated since come back. %s",
+			now, then, fi.ModTime().Format(time.DateTime), kept)
 		if !yes {
 			fmt.Print("Type yes to go on: ")
 			answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
@@ -317,10 +348,10 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool) error {
 			}
 		}
 	}
-	return c.rollback(ctx, "asked for", restoreDB)
+	return c.rollback(ctx, "asked for", restoreDB, carry)
 }
 
-func (c *cli) rollback(ctx context.Context, why string, restoreDB bool) error {
+func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry carry) error {
 	b, err := os.ReadFile(filepath.Join(previousDir, "VERSION")) //nolint:gosec // G304: a fixed path
 	if err != nil {
 		return errors.New("no previous binaries: nothing to roll back to")
@@ -331,6 +362,22 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool) error {
 	if _, err := os.Stat(saved); restoreDB && err == nil {
 		if err := run("systemctl", "stop", "rayd.service"); err != nil {
 			return err
+		}
+		// Revocations since the copy stay (the copy is root's, in
+		// previousDir): a rollback must not let a revoked device back in.
+		if carry != carrySkip {
+			current, done, err := rootCopy(deploy.DB)
+			if err == nil {
+				err = store.CarryRevocations(ctx, saved, current, node.AdminAccessSetting)
+				done()
+			}
+			switch {
+			case err != nil && carry == carryMust:
+				return fmt.Errorf("keeping the revocations made since the update: %w (rayd is stopped; "+
+					"rayctl update -rollback -no-carry puts the copy back as it is)", err)
+			case err != nil:
+				fmt.Println("the revocations since the update could not be carried, the copy goes back as it is:", err)
+			}
 		}
 		if err := copyDB(saved, deploy.DB); err != nil {
 			return fmt.Errorf("putting the database back: %w", err)
@@ -348,45 +395,106 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool) error {
 }
 
 // copyDB copies a stopped SQLite database: the file, and its WAL if one is
-// left; a stale WAL or shared-memory file at the destination goes. The copy
-// keeps the owner of the file it replaces, or else of its directory: rayd
-// owns the database, root the copy kept for a rollback.
+// left. It runs as root in directories rayd owns, so it follows no link and
+// trusts no name there: the source is opened without following a link and
+// must be a regular file; each copy is a fresh temporary file (O_EXCL) in
+// the destination directory, given the directory's owner through its
+// descriptor, then renamed over the target (a rename replaces a planted link,
+// it does not follow it). The stale WAL and shared memory go first, so a
+// crash never leaves the new database next to the old one's WAL.
 func copyDB(src, dst string) error {
-	owner, err := os.Stat(dst)
+	dir := filepath.Dir(dst)
+	di, err := os.Lstat(dir)
 	if err != nil {
-		if owner, err = os.Stat(filepath.Dir(dst)); err != nil {
-			return err
-		}
-	}
-	st, _ := owner.Sys().(*syscall.Stat_t)
-	for _, suffix := range []string{"", "-wal"} {
-		b, err := os.ReadFile(src + suffix) //nolint:gosec // G304: fixed paths
-		switch {
-		case errors.Is(err, os.ErrNotExist) && suffix != "":
-			if err := os.Remove(dst + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			continue
-		case err != nil:
-			return err
-		}
-		tmp := dst + suffix + ".tmp"
-		if err := os.WriteFile(tmp, b, 0o600); err != nil {
-			return err
-		}
-		if st != nil {
-			if err := os.Chown(tmp, int(st.Uid), int(st.Gid)); err != nil {
-				return err
-			}
-		}
-		if err := os.Rename(tmp, dst+suffix); err != nil {
-			return err
-		}
-	}
-	if err := os.Remove(dst + "-shm"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if !di.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	owner, _ := di.Sys().(*syscall.Stat_t)
+	for _, stale := range []string{dst + "-wal", dst + "-shm"} {
+		if err := os.Remove(stale); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	for _, suffix := range []string{"", "-wal"} {
+		b, err := readRegular(src + suffix)
+		if errors.Is(err, os.ErrNotExist) && suffix != "" {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		f, err := os.CreateTemp(dir, filepath.Base(dst+suffix)+".*.tmp")
+		if err != nil {
+			return err
+		}
+		tmp := f.Name()
+		werr := func() error {
+			if _, err := f.Write(b); err != nil {
+				return err
+			}
+			if err := f.Chmod(0o600); err != nil {
+				return err
+			}
+			if owner != nil {
+				if err := f.Chown(int(owner.Uid), int(owner.Gid)); err != nil {
+					return err
+				}
+			}
+			if err := f.Sync(); err != nil {
+				return err
+			}
+			return f.Close()
+		}()
+		if werr != nil {
+			f.Close()
+			os.Remove(tmp)
+			return werr
+		}
+		if err := os.Rename(tmp, dst+suffix); err != nil {
+			os.Remove(tmp)
+			return err
+		}
+	}
 	return nil
+}
+
+// rootCopy copies rayd's database (and its WAL) into a directory of root's
+// own, with copyDB's checks, for SQLite to read there; done removes it.
+func rootCopy(db string) (path string, done func(), err error) {
+	dir, err := os.MkdirTemp("", "rayctl-db-")
+	if err != nil {
+		return "", nil, err
+	}
+	done = func() { _ = os.RemoveAll(dir) }
+	path = filepath.Join(dir, filepath.Base(db))
+	if err := copyDB(db, path); err != nil {
+		done()
+		return "", nil, err
+	}
+	return path, done, nil
+}
+
+// readRegular reads a regular file without following a link to it.
+func readRegular(name string) ([]byte, error) {
+	// O_NONBLOCK: a FIFO planted in its place must not hang root here.
+	f, err := os.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) //nolint:gosec // G304: rayd's database, opened without following a link
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, fmt.Errorf("%s is a link, not the database", name)
+		}
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	return io.ReadAll(f)
 }
 
 // mirrors are the URL prefixes tried when github.com does not answer:

@@ -27,6 +27,13 @@
 #
 #   sudo bash bootstrap.sh -remove-v0 -host <public address> [-domain <domain>]
 #
+# -relay <bundle file> makes the host a relay in front of an exit instead of a
+# node (spec/relay-v1.md §3.1): only rayspa, forwarding in the kernel. The
+# bundle comes from "rayctl relay bundle <name>" on the exit; it holds the
+# relay's private key, so it is copied to the relay host only:
+#
+#   sudo bash bootstrap.sh -relay relay.bundle
+#
 # Works on any systemd-based Linux with apt, dnf, zypper or pacman; tested on
 # Debian 12/13, Ubuntu 24.04 and Rocky Linux 9/10 (the check tells about the
 # rest). The signature is checked with openssl, so minisign is not needed.
@@ -51,7 +58,9 @@ PUBKEY="RWQBergjLoDHqeme5vyIuIRXJLjTj1EF3jR1nlWBVJO3rWxgy9SZj4bD"
 # every rayctl command it calls. It is raised too when a release closes a
 # hole, so that a mirror cannot hand out an older signed release as the
 # latest one (docs/RELEASE.md).
-MIN_VERSION="v0.9.0"
+MIN_VERSION="v0.10.0"
+# RELAY_MIN_VERSION is the first release that can be a relay (-relay).
+RELAY_MIN_VERSION="v0.10.1"
 
 die() {
 	echo "bootstrap: $*" >&2
@@ -175,7 +184,7 @@ install_deps() {
 		return
 	fi
 	log "installing ${missing[*]}"
-	local pkgs=()
+	local pkgs=() p
 	if command -v apt-get >/dev/null; then
 		for p in "${missing[@]}"; do [[ $p == polkit ]] && pkgs+=(polkitd) || pkgs+=("$p"); done
 		export DEBIAN_FRONTEND=noninteractive
@@ -220,6 +229,7 @@ HANDED_OVER=0
 CHECK_ONLY=0
 REMOVE_V0=0
 PURGE_V0=0
+RELAY_BUNDLE=""
 cleanup() {
 	local status=$?
 	if [[ -n ${BOOT_TMP:-} ]]; then rm -rf "$BOOT_TMP"; fi
@@ -234,12 +244,24 @@ main() {
 		-check) CHECK_ONLY=1 ;;
 		-remove-v0) REMOVE_V0=1 ;;
 		-purge-v0-packages) REMOVE_V0=1 PURGE_V0=1 ;;
+		-relay)
+			[[ -n ${2:-} ]] || die "-relay needs the bundle file (rayctl relay bundle on the exit)"
+			RELAY_BUNDLE=$2
+			shift
+			;;
 		*) break ;;
 		esac
 		shift
 	done
 	if [[ $CHECK_ONLY == 1 && $REMOVE_V0 == 1 ]]; then
 		die "-check changes nothing and -remove-v0 removes raycontrol v0: use one of them"
+	fi
+	if [[ -n $RELAY_BUNDLE ]]; then
+		[[ $CHECK_ONLY == 0 && $REMOVE_V0 == 0 ]] || die "-relay installs a relay: without -check or -remove-v0"
+		[[ -r $RELAY_BUNDLE ]] || die "cannot read the relay bundle $RELAY_BUNDLE"
+		RELAY_BUNDLE="$(cd "$(dirname "$RELAY_BUNDLE")" && pwd)/$(basename "$RELAY_BUNDLE")"
+		# Before the node's binaries are replaced by the release's.
+		[[ ! -e /var/lib/raycontrol/rayd.db ]] || die "this host is a node (/var/lib/raycontrol/rayd.db): a relay goes on a host of its own"
 	fi
 	if [[ $VERSION != latest ]]; then
 		[[ $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "RAYCONTROL_VERSION is vX.Y.Z, not $VERSION"
@@ -248,6 +270,21 @@ main() {
 		fi
 	fi
 	[[ $EUID -eq 0 ]] || die "run as root"
+	# One relay install at a time, from here to rayctl, which takes the
+	# same lock: not even binaries swapped under one. Root's file alone.
+	if [[ -n $RELAY_BUNDLE ]] && command -v flock >/dev/null; then
+		local relay_lock=/run/raycontrol-relay-install.lock rc=0
+		if ! (umask 077 && : >>"$relay_lock" && chmod 600 "$relay_lock"); then
+			die "cannot create $relay_lock"
+		fi
+		exec 9<"$relay_lock"
+		flock -n -E 75 9 || rc=$?
+		if ((rc == 75)); then
+			die "another rayctl install -relay is running on this host"
+		elif ((rc != 0)); then
+			die "cannot lock $relay_lock"
+		fi
+	fi
 	[[ -d /run/systemd/system ]] || die "systemd is required"
 	case "$(uname -m)" in
 	x86_64) ARCH=amd64 ;;
@@ -283,6 +320,23 @@ main() {
 		log "release $signed, signature verified"
 		(cd "$tmp" && grep " ${tarball}\$" SHA256SUMS | sha256sum -c -) || die "checksum mismatch"
 		tar -xzf "$tmp/$tarball" -C "$tmp"
+	fi
+
+	# A relay: rayspa and rayctl only, no host check for a node; rayctl
+	# install -relay checks what a relay needs and stops rayspa again if the
+	# exit gives it no perimeter.
+	if [[ -n $RELAY_BUNDLE ]]; then
+		if [[ -z ${RAYCONTROL_LOCAL_DIR:-} ]] && version_lt "$signed" "$RELAY_MIN_VERSION"; then
+			die "the release is $signed; a relay needs $RELAY_MIN_VERSION or newer"
+		fi
+		install -m 0755 "$tmp/rayspa" "$tmp/rayctl" /usr/local/bin/
+		if command -v restorecon >/dev/null; then
+			restorecon /usr/local/bin/rayspa /usr/local/bin/rayctl || true
+		fi
+		HANDED_OVER=1
+		exec 9<&- # rayctl takes the lock itself
+		/usr/local/bin/rayctl install -relay "$RELAY_BUNDLE" ${INSTALLED_PKGS:+-packages "$INSTALLED_PKGS"}
+		return
 	fi
 
 	# raycontrol v0 goes first, when asked: it holds 443 and its nftables

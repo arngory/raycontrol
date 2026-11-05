@@ -25,6 +25,8 @@ const _ = connect.IsAtLeastVersion1_13_0
 const (
 	// PerimeterServiceName is the fully-qualified name of the PerimeterService service.
 	PerimeterServiceName = "raycontrol.perimeter.v1.PerimeterService"
+	// RelayServiceName is the fully-qualified name of the RelayService service.
+	RelayServiceName = "raycontrol.perimeter.v1.RelayService"
 )
 
 // These constants are the fully-qualified names of the RPCs defined in this package. They're
@@ -38,6 +40,8 @@ const (
 	// PerimeterServiceWatchPerimeterProcedure is the fully-qualified name of the PerimeterService's
 	// WatchPerimeter RPC.
 	PerimeterServiceWatchPerimeterProcedure = "/raycontrol.perimeter.v1.PerimeterService/WatchPerimeter"
+	// RelayServiceWatchRelayProcedure is the fully-qualified name of the RelayService's WatchRelay RPC.
+	RelayServiceWatchRelayProcedure = "/raycontrol.perimeter.v1.RelayService/WatchRelay"
 )
 
 // PerimeterServiceClient is a client for the raycontrol.perimeter.v1.PerimeterService service.
@@ -113,4 +117,74 @@ type UnimplementedPerimeterServiceHandler struct{}
 
 func (UnimplementedPerimeterServiceHandler) WatchPerimeter(context.Context, *connect.Request[v1.WatchPerimeterRequest], *connect.ServerStream[v1.WatchPerimeterResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.perimeter.v1.PerimeterService.WatchPerimeter is not implemented"))
+}
+
+// RelayServiceClient is a client for the raycontrol.perimeter.v1.RelayService service.
+type RelayServiceClient interface {
+	WatchRelay(context.Context, *connect.Request[v1.WatchRelayRequest]) (*connect.ServerStreamForClient[v1.WatchRelayResponse], error)
+}
+
+// NewRelayServiceClient constructs a client for the raycontrol.perimeter.v1.RelayService service.
+// By default, it uses the Connect protocol with the binary Protobuf Codec, asks for gzipped
+// responses, and sends uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the
+// connect.WithGRPC() or connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewRelayServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) RelayServiceClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	relayServiceMethods := v1.File_raycontrol_perimeter_v1_perimeter_proto.Services().ByName("RelayService").Methods()
+	return &relayServiceClient{
+		watchRelay: connect.NewClient[v1.WatchRelayRequest, v1.WatchRelayResponse](
+			httpClient,
+			baseURL+RelayServiceWatchRelayProcedure,
+			connect.WithSchema(relayServiceMethods.ByName("WatchRelay")),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// relayServiceClient implements RelayServiceClient.
+type relayServiceClient struct {
+	watchRelay *connect.Client[v1.WatchRelayRequest, v1.WatchRelayResponse]
+}
+
+// WatchRelay calls raycontrol.perimeter.v1.RelayService.WatchRelay.
+func (c *relayServiceClient) WatchRelay(ctx context.Context, req *connect.Request[v1.WatchRelayRequest]) (*connect.ServerStreamForClient[v1.WatchRelayResponse], error) {
+	return c.watchRelay.CallServerStream(ctx, req)
+}
+
+// RelayServiceHandler is an implementation of the raycontrol.perimeter.v1.RelayService service.
+type RelayServiceHandler interface {
+	WatchRelay(context.Context, *connect.Request[v1.WatchRelayRequest], *connect.ServerStream[v1.WatchRelayResponse]) error
+}
+
+// NewRelayServiceHandler builds an HTTP handler from the service implementation. It returns the
+// path on which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewRelayServiceHandler(svc RelayServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	relayServiceMethods := v1.File_raycontrol_perimeter_v1_perimeter_proto.Services().ByName("RelayService").Methods()
+	relayServiceWatchRelayHandler := connect.NewServerStreamHandler(
+		RelayServiceWatchRelayProcedure,
+		svc.WatchRelay,
+		connect.WithSchema(relayServiceMethods.ByName("WatchRelay")),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/raycontrol.perimeter.v1.RelayService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case RelayServiceWatchRelayProcedure:
+			relayServiceWatchRelayHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedRelayServiceHandler returns CodeUnimplemented from all methods.
+type UnimplementedRelayServiceHandler struct{}
+
+func (UnimplementedRelayServiceHandler) WatchRelay(context.Context, *connect.Request[v1.WatchRelayRequest], *connect.ServerStream[v1.WatchRelayResponse]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.perimeter.v1.RelayService.WatchRelay is not implemented"))
 }

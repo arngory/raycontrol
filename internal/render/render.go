@@ -113,6 +113,7 @@ type Model struct {
 	FrontUDP bool
 	// DNSAuth maps a dnstt service with dnsauth on to the keys of the
 	// devices allowed on it (spec/dnsauth-v1.md): "<device id> <hex>".
+	// Only CollectForRender fills it.
 	DNSAuth map[int64][]string
 }
 
@@ -230,14 +231,28 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 			m.Sets[inner.ID][id] = all[id]
 		}
 	}
-	// dnsauth-v1: the keys of the devices allowed on each dnstt service that
-	// has it on, derived per service (spec/dnsauth-v1.md §2).
+	return m, nil
+}
+
+// CollectForRender is Collect plus what only the rendered files need: the
+// dnsauth-v1 keys of the devices allowed on each dnstt service that has it
+// on, derived per service (spec/dnsauth-v1.md §2). Subscriptions and
+// exports take Collect and skip the devices and the key derivation.
+func CollectForRender(ctx context.Context, st *store.Store) (Model, error) {
+	m, err := Collect(ctx, st)
+	if err != nil {
+		return m, err
+	}
+	var params spa.Params
 	var devices []spa.Device
 	for _, svc := range m.Services {
 		if DNSAuthMode(svc.Service) == "off" {
 			continue
 		}
 		if devices == nil {
+			if params, err = node.LoadParams(ctx, st); err != nil {
+				return m, err
+			}
 			if devices, err = st.SPADevices(ctx); err != nil {
 				return m, err
 			}
@@ -281,6 +296,10 @@ type File struct {
 	// Reload: the process reads the file again by itself when it changes
 	// (users of naive), so a change needs no restart.
 	Reload bool
+	// Refresh: only replaces the file if it is there. The users of a
+	// service that failed to render (Q-1) still go out, so a revocation
+	// reaches its running process; nothing new is made for it.
+	Refresh bool
 }
 
 // UnitName is the systemd unit of a service's process.
@@ -427,7 +446,12 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			zone := provision.Zone(s.Service)
 			zones = append(zones, route{Zone: zone, Backend: s.Name})
 			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
-			f, secret, auth, err := dnsBackend(s, zone, inner.Name, p, m.DNSAuth[s.ID])
+			keys, ok := m.DNSAuth[s.ID]
+			if !ok && s.Kind == "dnstt" && DNSAuthMode(s.Service) != "off" {
+				// An empty keys file would lock every device out.
+				return errors.New("dnsauth keys not collected (render.CollectForRender)")
+			}
+			f, secret, auth, err := dnsBackend(s, zone, inner.Name, p, keys)
 			if err != nil {
 				return err
 			}
@@ -560,6 +584,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			delete(backends, s.Name)
 			delete(backends, quicBackend(s.Name))
 			errs = append(errs, fmt.Errorf("service %s: %w", s.Name, err))
+			files = append(files, accessFiles(s, m, p, inner)...)
 		}
 	}
 
@@ -627,26 +652,80 @@ func Partial(err error) bool {
 	return errors.As(err, &se)
 }
 
+// DNSSecret is the file of a DNS tunnel's key, by kind: systemd copies it
+// for the backend (Paths.Credential), whether this render wrote it or an
+// earlier one did.
+func DNSSecret(kind string) string {
+	if kind == "masterdns" {
+		return "encryption.key"
+	}
+	return "noise.key"
+}
+
+// dnsAuthFile is a dnstt service's keys file (spec/dnsauth-v1.md), which
+// the backend rereads.
+func dnsAuthFile(s Service, p Paths, authKeys []string) File {
+	content := "# dnsauth-v1 keys of the devices allowed on " + s.Name + ", written by rayd\n"
+	for _, l := range authKeys {
+		content += l + "\n"
+	}
+	return File{Path: path.Join(p.Rendered, s.Name, DNSAuthKeys), Mode: 0o640, Group: GroupName(s.Name), Content: []byte(content), Service: s.Name, Reload: true}
+}
+
+// accessFiles are the files that say who may connect to a service, built
+// without the rest of it: a service that failed to render still gets them
+// (Refresh), so a revoked user or device loses it there too (Q-1).
+func accessFiles(s Service, m Model, p Paths, inner *Service) []File {
+	dir := path.Join(p.Rendered, s.Name)
+	var out []File
+	add := func(name string, b []byte, err error) {
+		if err == nil {
+			out = append(out, File{Path: path.Join(dir, name), Mode: 0o640, Group: GroupName(s.Name), Content: b, Service: s.Name, Reload: true, Refresh: true})
+		}
+	}
+	switch s.Kind {
+	case "hy2-masq", "hy2-obfs":
+		b, err := hysteriaUsers(m, s)
+		add(HysteriaUsers, b, err)
+	case "naive":
+		b, err := naiveUsers(m, s)
+		add(NaiveUsers, b, err)
+	case "yggdrasil":
+		if inner != nil {
+			b, err := jsonFile(map[string]any{"users": yggdrasilUsers(m, s, *inner)})
+			add(YggdrasilUsers, b, err)
+		}
+	case "dnstt":
+		if keys, ok := m.DNSAuth[s.ID]; ok && DNSAuthMode(s.Service) != "off" {
+			f := dnsAuthFile(s, p, keys)
+			f.Refresh = true
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string) (cfg, secret File, auth *File, err error) {
 	opts := map[string]any{}
 	// dnsauth-v1 (spec/dnsauth-v1.md): the devices' keys in a file of the
 	// service group (the front is in none, R4-28), which the backend
 	// rereads: a new or revoked device needs no restart.
 	if mode := DNSAuthMode(s.Service); mode != "off" {
-		keysFile := path.Join(p.Rendered, s.Name, DNSAuthKeys)
-		opts["auth"] = mode
-		opts["auth_keys_file"] = keysFile
-		content := "# dnsauth-v1 keys of the devices allowed on " + s.Name + ", written by rayd\n"
-		for _, l := range authKeys {
-			content += l + "\n"
+		if mode != "optional" && mode != "required" {
+			// The backend would refuse to start, or worse, read it as off.
+			return cfg, secret, nil, fmt.Errorf("service %s: auth %q: off, optional or required", s.Name, mode)
 		}
-		auth = &File{Path: keysFile, Mode: 0o640, Group: GroupName(s.Name), Content: []byte(content), Service: s.Name, Reload: true}
+		f := dnsAuthFile(s, p, authKeys)
+		opts["auth"] = mode
+		opts["auth_keys_file"] = f.Path
+		auth = &f
 	}
 	var secretName string
 	var secretValue []byte
+	secretName = DNSSecret(s.Kind)
 	switch s.Kind {
 	case "dnstt":
-		secretName, secretValue = "noise.key", []byte(hex.EncodeToString(s.Secrets[provision.SecretNoisePrivate])+"\n")
+		secretValue = []byte(hex.EncodeToString(s.Secrets[provision.SecretNoisePrivate]) + "\n")
 		opts["zone"] = zone
 		opts["private_key_file"] = p.Credential(s.Name, secretName)
 	case "masterdns":
@@ -654,7 +733,7 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string) (cfg,
 			Method int `json:"encryption_method"`
 		}
 		_ = json.Unmarshal([]byte(s.Settings), &settings)
-		secretName, secretValue = "encryption.key", s.Secrets[provision.SecretMasterDNSKey]
+		secretValue = s.Secrets[provision.SecretMasterDNSKey]
 		opts["zones"] = []string{zone}
 		opts["encryption_method"] = settings.Method
 		opts["encryption_key_file"] = p.Credential(s.Name, secretName)
@@ -1037,6 +1116,23 @@ func (p Paths) FrontSalamander(service string) string {
 // name with the site's certificate and an empty 404 without a password,
 // like the site; hy2-obfs with a self-signed certificate clients pin,
 // inside salamander.
+// hysteriaUsers is a Hysteria2 backend's users file: the current credential
+// of each, and the next and previous while they rotate (R4-1), under
+// distinct names.
+func hysteriaUsers(m Model, s Service) ([]byte, error) {
+	_, creds := XrayUsers(m, s)
+	type user struct {
+		Name    string            `json:"name"`
+		Enabled bool              `json:"enabled"`
+		Hy2     map[string]string `json:"hy2"`
+	}
+	users := []user{}
+	for _, name := range slices.Sorted(maps.Keys(creds)) {
+		users = append(users, user{Name: name, Enabled: true, Hy2: map[string]string{"password": creds[name]}})
+	}
+	return jsonFile(map[string]any{"users": users})
+}
+
 func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 	// hy2-masq: the site's certificate; hy2-obfs: its own, self-signed.
 	chain, keyDER := s.Secrets[provision.SecretTLSChain], s.Secrets[provision.SecretTLSKey]
@@ -1094,19 +1190,7 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Users: the current credential of each, and the next and previous
-	// while they rotate (R4-1), under distinct names.
-	_, creds := XrayUsers(m, s)
-	type user struct {
-		Name    string            `json:"name"`
-		Enabled bool              `json:"enabled"`
-		Hy2     map[string]string `json:"hy2"`
-	}
-	users := []user{}
-	for _, name := range slices.Sorted(maps.Keys(creds)) {
-		users = append(users, user{Name: name, Enabled: true, Hy2: map[string]string{"password": creds[name]}})
-	}
-	u, err := jsonFile(map[string]any{"users": users})
+	u, err := hysteriaUsers(m, s)
 	if err != nil {
 		return nil, err
 	}
@@ -1173,6 +1257,18 @@ const (
 // naiveFiles are the site's certificate (naive answers for a name under
 // it) and the hashes of the users' passwords, which the process reads again
 // when they rotate.
+// naiveUsers is a naive process's users file: the hashes of the
+// credentials, sorted.
+func naiveUsers(m Model, s Service) ([]byte, error) {
+	_, users := XrayUsers(m, s)
+	hashes := make([]string, 0, len(users))
+	for _, email := range slices.Sorted(maps.Keys(users)) {
+		hashes = append(hashes, naive.HashPassword(users[email]))
+	}
+	slices.Sort(hashes)
+	return jsonFile(hashes)
+}
+
 func naiveFiles(s Service, m Model, p Paths) ([]File, error) {
 	site := provision.SiteOf(s.Service)
 	if !m.hasCert(site) {
@@ -1184,13 +1280,7 @@ func naiveFiles(s Service, m Model, p Paths) ([]File, error) {
 			chain, keyDER = x.Secrets[provision.SecretTLSChain], x.Secrets[provision.SecretTLSKey]
 		}
 	}
-	_, users := XrayUsers(m, s)
-	hashes := make([]string, 0, len(users))
-	for _, email := range slices.Sorted(maps.Keys(users)) {
-		hashes = append(hashes, naive.HashPassword(users[email]))
-	}
-	slices.Sort(hashes)
-	u, err := jsonFile(hashes)
+	u, err := naiveUsers(m, s)
 	if err != nil {
 		return nil, err
 	}

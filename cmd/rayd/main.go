@@ -244,10 +244,10 @@ func cmdServe(args []string) error {
 	}
 	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, hb, log)
 	go syncDNS(ctx, st, srv.Changes, hb, log)
-	go checkRealityTargets(ctx, st, hb, log)
+	go checkRealityTargets(ctx, st, srv.Changes, hb, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
-	go serveRemote(ctx, &api.Remote{Server: srv, Log: log}, srv.Changes)
-	if err := startSubscription(ctx, st, paths, log, *probeDaily); err != nil {
+	go serveRemote(ctx, &api.Remote{Server: srv, Log: log, Perimeter: per}, srv.Changes)
+	if err := startSubscription(ctx, st, paths, log, *probeDaily, *spaTCP); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
 	log.Info("serving", "socket", *socket, "node", fmt.Sprintf("%x", params.NodeID))
@@ -268,7 +268,7 @@ func supervisor(paths render.Paths, xray, niko string, st *store.Store, log *slo
 		}
 	}
 	return &live.Supervisor{Log: log, Plan: func(ctx context.Context) (deploy.Plan, error) {
-		m, err := render.Collect(ctx, st)
+		m, err := render.CollectForRender(ctx, st)
 		if err != nil {
 			return deploy.Plan{}, err
 		}
@@ -596,7 +596,7 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 
 // startSubscription serves the subscription endpoint on the port of the
 // subscription service, if it is enabled.
-func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, probeDailyMiB int) error {
+func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, probeDailyMiB int, tcpCarrier bool) error {
 	svc, err := st.ServiceByName(ctx, provision.SubscriptionService)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !svc.Enabled) {
 		log.Info("subscription service disabled")
@@ -621,7 +621,7 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 	if err != nil {
 		return err
 	}
-	s := &sub.Server{Store: st, Keys: keys, Log: log}
+	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier}
 	port := int(ports[0].Num)
 	addr := ":" + strconv.Itoa(port)
 	// Channel probes (R4-16) on the same endpoint, and their UDP echo on
@@ -700,16 +700,29 @@ func pruneSummary(ctx context.Context, c *summary.Collector, log *slog.Logger) {
 // rotateCredentials advances the rotation of user credentials every ten
 // minutes (R4-1); a change re-renders, which adds and removes UUIDs through
 // the Xray API without a restart.
-// checkRealityTargets checks every 6 hours what a REALITY service with a
-// foreign target needs from it (TLS 1.3, X25519MLKEM768, a chain longer than
-// REALITY's ML-DSA-65 certificate): a site that moves to a short chain
-// breaks REALITY, and the loop "reality-target <service>" in rayctl status
-// says so (RAYCONTROL.md §22.2.1).
-func checkRealityTargets(ctx context.Context, st *store.Store, hb *health.Board, log *slog.Logger) {
+// checkRealityTargets checks what a REALITY service with a foreign target
+// needs from it (TLS 1.3, X25519MLKEM768, a chain longer than REALITY's
+// ML-DSA-65 certificate): a new or changed target at once, all of them every
+// 6 hours, since a site that moves to a short chain breaks REALITY. The loop
+// "reality-target <service>" in rayctl status says so (RAYCONTROL.md
+// §22.2.1). On every change it also forgets the health of deleted services
+// and sites.
+func checkRealityTargets(ctx context.Context, st *store.Store, changes func() <-chan struct{}, hb *health.Board, log *slog.Logger) {
+	checked := map[string]string{} // service: the target and name last checked
+	all := time.Now()
 	for {
+		wake := changes()
+		full := !time.Now().Before(all)
+		if full {
+			all = time.Now().Add(6 * time.Hour)
+		}
 		services, err := st.ListServices(ctx)
 		if err == nil {
+			var targets, sites []string
 			for _, svc := range services {
+				if svc.Kind == "site" {
+					sites = append(sites, svc.Name)
+				}
 				if svc.Kind != "reality" || !svc.Enabled {
 					continue
 				}
@@ -717,22 +730,35 @@ func checkRealityTargets(ctx context.Context, st *store.Store, hb *health.Board,
 				if err != nil || target == "" || strings.HasPrefix(target, "/") || strings.HasPrefix(target, "site:") {
 					continue // self-steal: the node's own site, checked when its certificate loads
 				}
+				targets = append(targets, svc.Name)
+				if !full && checked[svc.Name] == target+" "+sni {
+					continue
+				}
 				cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				err = provision.CheckRealityTarget(cctx, target, sni)
 				cancel()
 				if ctx.Err() != nil {
 					return
 				}
+				checked[svc.Name] = target + " " + sni
 				hb.Done("reality-target "+svc.Name, err)
 				if err != nil {
 					log.Warn("REALITY target no longer fits", "service", svc.Name, "err", err)
+				}
+			}
+			hb.Retain("reality-target ", targets)
+			hb.Retain("acme ", sites)
+			for name := range checked {
+				if !slices.Contains(targets, name) {
+					delete(checked, name)
 				}
 			}
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(6 * time.Hour):
+		case <-wake:
+		case <-time.After(time.Until(all)):
 		}
 	}
 }

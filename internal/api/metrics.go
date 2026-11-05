@@ -173,6 +173,11 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 			float64(unixOf(l.LastErr)), "loop", l.Name)
 		m.Add("raycontrol_loop_runs_total", "Rounds of the loop since rayd started.", float64(l.Runs), "loop", l.Name)
 		m.Add("raycontrol_loop_errors_total", "Failed rounds of the loop since rayd started.", float64(l.Errors), "loop", l.Name)
+		failing := 0.0
+		if l.Failing() {
+			failing = 1
+		}
+		m.Add("raycontrol_loop_failing", "1 when the loop's last round failed.", failing, "loop", l.Name)
 	}
 
 	// REALITY rotation (R4-7).

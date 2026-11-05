@@ -280,9 +280,15 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		return svc, fmt.Errorf("%w settings: %w", store.ErrInvalid, err)
 	}
 	svc.Secrets = map[string][]byte{}
+	if err := sshPortsApart(svc, all); err != nil {
+		return svc, err
+	}
 
 	switch svc.Kind {
 	case "dnstt", "masterdns":
+		if a, ok := settings["auth"]; ok && (svc.Kind != "dnstt" || !slices.Contains([]any{"off", "optional", "required"}, a)) {
+			return svc, fmt.Errorf("%w auth %v: dnstt only, off, optional or required (spec/dnsauth-v1.md)", store.ErrInvalid, a)
+		}
 		if _, ok := settings["zone"]; !ok {
 			zone, err := newZone(ctx, st, all)
 			if err != nil {
@@ -496,12 +502,46 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		return svc, err
 	}
 	svc.Settings = string(b)
+	if svc.Enabled {
+		// siteFor may have just made the site: read the list again.
+		if all, err = st.ListServices(ctx); err != nil {
+			return svc, err
+		}
+		if err := requirements(svc, all, true); err != nil {
+			return svc, err
+		}
+	}
 	if NeedsInner(svc.Kind) && !slices.ContainsFunc(all, func(s store.Service) bool { return s.Kind == "inner" }) {
 		if _, err := CreateService(ctx, st, store.Service{Kind: "inner", Name: "inner", Enabled: true}); err != nil {
 			return svc, fmt.Errorf("creating inner: %w", err)
 		}
 	}
 	return st.CreateService(ctx, svc)
+}
+
+// sshPortsApart refuses a service that shares a port with SSH: an SPA grant
+// or a relay for the other service would reach sshd past the admin rules.
+// Services on the front share their ports by design; SSH shares none.
+func sshPortsApart(svc store.Service, all []store.Service) error {
+	ports, err := svc.Ports()
+	if err != nil {
+		return err
+	}
+	for _, other := range all {
+		if (svc.Kind == "ssh") == (other.Kind == "ssh") {
+			continue
+		}
+		theirs, err := other.Ports()
+		if err != nil {
+			continue
+		}
+		for _, p := range ports {
+			if slices.Contains(theirs, p) {
+				return fmt.Errorf("%w port %s of %s: %s uses it, and SSH shares no port", store.ErrInvalid, p, svc.Name, other.Name)
+			}
+		}
+	}
+	return nil
 }
 
 // RealityTarget returns the target and server name of REALITY settings.
@@ -628,6 +668,9 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 		v = b
 		if !b {
 			v = 0
+		} else if ports, err := svc.Ports(); err != nil || !slices.Contains(ports, store.Port{Proto: "tcp", Num: 443}) {
+			// Only TCP 443 opens; a REALITY moved off it has nothing to open.
+			return svc, fmt.Errorf("%w open: %s does not listen on tcp/443", store.ErrInvalid, svc.Name)
 		}
 	case svc.Kind == "reality" && key == "rotate_sni":
 		b, err := strconv.ParseBool(value)

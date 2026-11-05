@@ -94,7 +94,8 @@ journald хоста (`SystemMaxUse`, `MaxRetentionSec`).
 и пока снимается, ест CPU.
 
 - **rayd** (и `rayd naive`, `rayd site`) отдаёт профили Go, если задана переменная `RAYD_PPROF`: `unix:ПУТЬ` (сокет
-  0600) или адрес на loopback. Другие адреса не принимаются.
+  только для владельца с момента создания). Другие адреса не принимаются, loopback тоже: до него достают процессы
+  сервисов.
 
   ```
   systemctl edit rayd        # [Service] Environment=RAYD_PPROF=unix:/run/raycontrol/rayd-pprof.sock

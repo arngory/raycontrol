@@ -37,7 +37,7 @@
 | `rayctl service list` | сервисы; для REALITY — когда сменились ключи и когда следующая смена |
 | `rayctl audit [-n 50]` | журнал действий администратора |
 | `rayctl report [-o F] [-logs warning\|info\|none] [-since 24h]` | очищенный отчёт для issue, ничего не отправляет |
-| `rayctl probe [-carrier udp\|tcp\|auto] [-redact] @bundle` | проверить ноду снаружи, как клиент |
+| `rayctl probe [-carrier udp\|tls\|tcp\|auto] [-redact] @bundle` | проверить ноду снаружи, как клиент; `auto` — UDP, ClientHello, голый TCP |
 | `journalctl -u rayd -u rayspa -u 'niko-*' -f` | журналы ноды |
 | `systemctl status rayd rayspa 'niko-*'` | состояние юнитов |
 | `nft list table inet raycontrol` | периметр; цепочка `early` — отброшенное до сборки фрагментов |
@@ -140,3 +140,20 @@ shred -u /root/phone.bundle
 | `-acme-directory` | Let's Encrypt | CA; пусто — без сертификатов |
 | `-run` | `/run/niko` | каталог сокетов и копий секретов data plane |
 | `-supervise` · `-xray` · `-niko-server` | выкл. | без systemd (CI, контейнеры): data plane — дочерние процессы rayd под его пользователем; не для ноды (R4-22, `test/supervise/run.sh`) |
+
+## Relay (relay-v1, черновик)
+
+```
+rayctl relay add msk 198.51.100.20   # адрес relay (IPv4) доходит до портов сервисов без SPA, но не до SSH
+rayctl relay bundle -o msk.bundle msk   # пакет для хоста relay: новый сертификат и ключи SPA, прежние не работают;
+                                        # SSH relay: его список, у нового — адрес этой SSH-сессии (или -admin)
+rayctl relay set -admin 203.0.113.9 msk   # адреса для SSH хоста relay (и -ssh-port), без нового пакета
+rayctl relay list
+rayctl relay remove msk   # потерянный relay: только remove отнимает у его адреса порты сервисов
+```
+
+На хосте relay (пакет скопировать туда и только туда — в нём ключ):
+
+```
+sudo bash bootstrap.sh -relay msk.bundle   # rayspa, пересылка ядром к выходу; SSH — с адресов администратора relay
+```

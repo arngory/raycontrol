@@ -54,6 +54,10 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             through the remote API (service add api api)
   audit [-n 50]
   admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA
+  relay add NAME ADDRESS | list | remove NAME   relays in front of the node (relay-v1): one address
+  relay bundle [-exit IP] [-ssh-port N] [-admin CIDRS] [-o FILE] NAME   the relay host's bundle (new certificate, new SPA keys)
+  relay set [-ssh-port N] [-admin CIDRS] NAME   the relay host's SSH access, without a new bundle
+                                            each, reaching the service ports without SPA; root only
   dns [status]                              the DNS provider and the records the node needs
   dns cloudflare [-token-file F]            records and wildcard certificates through Cloudflare
                                             (token asked for without echo when no file is given)
@@ -72,7 +76,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   install -host ADDR [-domain D] [-admin A] [-cloudflare-token-file F] [-services reality,hy2-masq,hy2-obfs,dnstt,masterdns|none]
           [-dataplane DIR]                    set the node up on this host (root); with -domain REALITY by default
   apply                                       install what the current services need (root)
-  update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-rollback]
+  update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-rollback [-no-carry]]
                                               the newest verified release in place, back to the
                                               previous binaries if the node does not come back (root)
   uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]
@@ -179,6 +183,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.device(ctx, sub, rest)
 	case "audit":
 		return c.audit(ctx, args[1:])
+	case "relay":
+		return c.relay(ctx, sub, rest)
 	case "admin":
 		return c.adminAccess(ctx, args[1:])
 	case "check":
@@ -262,7 +268,8 @@ func loopState(l *nodev1.LoopHealth, now time.Time) string {
 		}
 		return now.Sub(time.Unix(unix, 0)).Round(time.Second).String() + " ago"
 	}
-	if l.LastError > l.LastOk {
+	// failing comes from rayd after v0.10.0; an older one gives the times.
+	if l.Failing || l.LastError > l.LastOk {
 		return fmt.Sprintf("FAILED %s: %s (last ok %s)", ago(l.LastError), l.Error, ago(l.LastOk))
 	}
 	return "ok " + ago(l.LastOk)

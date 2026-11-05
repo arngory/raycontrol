@@ -68,7 +68,7 @@ func (a *Applier) inner(socket string) InnerAPI {
 // is skipped (and not restarted); the others go on, and the errors come back
 // joined.
 func (a *Applier) Apply(ctx context.Context) error {
-	m, err := render.Collect(ctx, a.Store)
+	m, err := render.CollectForRender(ctx, a.Store)
 	if err != nil {
 		return err
 	}
@@ -114,13 +114,20 @@ func (a *Applier) Apply(ctx context.Context) error {
 			// written (rayctl apply creates it): fix group and mode, and
 			// restart the process that could not read the file.
 			fixed, err := fixMeta(f)
-			if err != nil {
+			switch {
+			case err != nil:
 				failed[f.Service] = true
 				errs = append(errs, fmt.Errorf("service %s: %s: %w", f.Service, f.Path, err))
-			} else if fixed {
+			case fixed && f.Refresh:
+				// A broken service's users: reread, never a restart (Q-1).
+				changed[f.Service] = append(changed[f.Service], change{old, f.Content, true})
+			case fixed:
 				changed[f.Service] = append(changed[f.Service], change{nil, f.Content, false})
 			}
 			continue
+		}
+		if errors.Is(err, os.ErrNotExist) && f.Refresh {
+			continue // a broken service's users: only replaced, never made (Q-1)
 		}
 		if err == nil || errors.Is(err, os.ErrNotExist) {
 			err = writeFile(f)

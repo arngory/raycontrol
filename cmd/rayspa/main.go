@@ -10,10 +10,12 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
 	"github.com/arngory/raycontrol/internal/logx"
+	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/perimeter"
 )
 
@@ -82,6 +85,8 @@ func run(args []string) error {
 	rate := fs.Int("rate", 20, "SPA packets (and TCP SYNs) per second per source")
 	debug := fs.Bool("debug", false, "log rejected packets")
 	state := fs.String("state", "", "keep the last snapshot in this file and start from it (Q-3); empty: none")
+	relayBundle := fs.String("relay", "", "run as a relay (relay-v1 §3.1): take the perimeter from the exit named in this bundle "+
+		"(rayctl relay bundle) instead of rayd, and forward the services to the exit")
 	fs.Parse(args)
 
 	level := slog.LevelInfo
@@ -95,6 +100,26 @@ func run(args []string) error {
 	// The table stays after rayspa exits: the node fails closed. Use
 	// "rayspa teardown" from the console to open it.
 	fw := &perimeter.NFT{NflogGroup: uint16(*group), RateLimit: *rate}
+	open := localFeed(*socket)
+	if *relayBundle != "" {
+		b, err := readRelayBundle(*relayBundle)
+		if err != nil {
+			return err
+		}
+		fw.RelayTo = b.Exit
+		if open, err = relayFeed(b); err != nil {
+			return err
+		}
+		log.Info("relay", "name", b.Name, "exit", b.Exit)
+		// Forwarding is the relay's job (relay-v1 §3.1): rayctl install
+		// -relay turns it on; without it the kernel drops what it redirects.
+		if v, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err == nil && strings.TrimSpace(string(v)) != "1" {
+			// rayctl install -relay turns it on only once this rayspa's
+			// first snapshot is checked: a warning until then, no error.
+			log.Warn("net.ipv4.ip_forward is off: nothing reaches the exit until it is on " +
+				"(rayctl install -relay turns it on once the relay is checked; sysctl -w net.ipv4.ip_forward=1)")
+		}
+	}
 	if err := fw.Setup(); err != nil {
 		return err
 	}
@@ -118,7 +143,7 @@ func run(args []string) error {
 	if *state != "" {
 		restore(*state, gate, carrier, log)
 	}
-	go watch(ctx, *socket, *state, gate, carrier, log)
+	go watch(ctx, open, *state, gate, carrier, log)
 	go func() {
 		if err := perimeter.ReadNFLOG(ctx, uint16(*group), handle, log); err != nil {
 			log.Error("nflog", "err", err)
@@ -140,7 +165,7 @@ func run(args []string) error {
 			if err != nil && !errors.Is(err, perimeter.ErrNotReady) {
 				log.Warn("tick", "err", err)
 			}
-			if err == nil {
+			if ports != nil {
 				carrier.Reconcile(ports)
 			}
 		}
@@ -160,11 +185,13 @@ func restore(file string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, l
 	if err == nil {
 		err = gate.Update(snap)
 	}
-	if err != nil {
+	if errors.Is(err, perimeter.ErrPending) {
+		log.Warn("saved snapshot applied in part; the rest follows", "file", file, "err", err)
+	} else if err != nil {
 		log.Warn("saved snapshot not applied; waiting for rayd", "file", file, "err", err)
 		return
 	}
-	if ports, err := gate.Tick(); err == nil {
+	if ports, _ := gate.Tick(); ports != nil {
 		carrier.Reconcile(ports)
 	}
 	age := time.Duration(0)
@@ -190,23 +217,96 @@ func save(file string, snap *perimeterv1.Snapshot) error {
 
 // watch follows the perimeter feed from rayd, reconnecting with backoff.
 // While rayd is away the last snapshot stays in force.
-func watch(ctx context.Context, socket, state string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, log *slog.Logger) {
+// snapshots is a perimeter feed: rayd's on the node, the exit's on a relay.
+type snapshots interface {
+	Receive() bool
+	Snapshot() *perimeterv1.Snapshot
+	Err() error
+	Close() error
+}
+
+type openFeed func(ctx context.Context) (snapshots, error)
+
+type localStream struct {
+	*connect.ServerStreamForClient[perimeterv1.WatchPerimeterResponse]
+}
+
+func (s localStream) Snapshot() *perimeterv1.Snapshot { return s.Msg().Snapshot }
+
+type relayStream struct {
+	*connect.ServerStreamForClient[perimeterv1.WatchRelayResponse]
+}
+
+func (s relayStream) Snapshot() *perimeterv1.Snapshot { return s.Msg().Snapshot }
+
+// localFeed is rayd's feed on its socket.
+func localFeed(socket string) openFeed {
 	client := perimeterv1connect.NewPerimeterServiceClient(api.UnixHTTPClient(socket), api.BaseURL)
+	return func(ctx context.Context) (snapshots, error) {
+		s, err := client.WatchPerimeter(ctx, connect.NewRequest(&perimeterv1.WatchPerimeterRequest{}))
+		if err != nil {
+			return nil, err
+		}
+		return localStream{s}, nil
+	}
+}
+
+// relayFeed is the exit's feed for this relay: its remote API, the exit's
+// certificate checked by its pin, the relay's own client certificate.
+func relayFeed(b node.RelayBundle) (openFeed, error) {
+	cert, err := api.DecodeClientCertificate([]byte(b.Cert))
+	if err != nil {
+		return nil, fmt.Errorf("relay bundle certificate: %w", err)
+	}
+	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: api.PinnedTLS(b.API.Pin, &cert), ForceAttemptHTTP2: true}}
+	base := "https://" + netip.AddrPortFrom(b.Exit, b.API.Port).String()
+	client := perimeterv1connect.NewRelayServiceClient(hc, base)
+	return func(ctx context.Context) (snapshots, error) {
+		s, err := client.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{}))
+		if err != nil {
+			return nil, err
+		}
+		return relayStream{s}, nil
+	}, nil
+}
+
+// readRelayBundle reads the relay's bundle: root's file, it holds the key.
+func readRelayBundle(path string) (node.RelayBundle, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return node.RelayBundle{}, err
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return node.RelayBundle{}, fmt.Errorf("relay bundle %s is mode %v: it holds a private key, make it 0600", path, fi.Mode().Perm())
+	}
+	b, err := os.ReadFile(path) //nolint:gosec // G304: the configured bundle
+	if err != nil {
+		return node.RelayBundle{}, err
+	}
+	return node.DecodeRelayBundle(string(b))
+}
+
+func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, log *slog.Logger) {
 	backoff := time.Second
 	for ctx.Err() == nil {
-		stream, err := client.WatchPerimeter(ctx, connect.NewRequest(&perimeterv1.WatchPerimeterRequest{}))
+		stream, err := open(ctx)
 		if err == nil {
 			for stream.Receive() {
 				backoff = time.Second
-				snap := stream.Msg().Snapshot
-				if err := gate.Update(snap); err != nil {
+				snap := stream.Snapshot()
+				// A snapshot applied in part is the gate's all the same:
+				// Tick applies the rest, and it is saved for the next start.
+				if err := gate.Update(snap); errors.Is(err, perimeter.ErrPending) {
+					log.Warn("snapshot applied in part; the rest follows", "revision", snap.GetRevision(), "err", err)
+				} else if err != nil {
 					log.Error("applying snapshot", "revision", snap.GetRevision(), "err", err)
 					continue
+				} else {
+					log.Info("snapshot applied", "revision", snap.GetRevision(), "devices", len(snap.Devices))
 				}
-				if ports, err := gate.Tick(); err == nil {
+				if ports, _ := gate.Tick(); ports != nil {
 					carrier.Reconcile(ports)
 				}
-				log.Info("snapshot applied", "revision", snap.GetRevision(), "devices", len(snap.Devices))
 				if state != "" {
 					if err := save(state, snap); err != nil {
 						log.Warn("saving the snapshot", "file", state, "err", err)
@@ -214,7 +314,7 @@ func watch(ctx context.Context, socket, state string, gate *perimeter.Gate, carr
 				}
 			}
 			err = stream.Err()
-			stream.Close()
+			_ = stream.Close()
 		}
 		if ctx.Err() != nil {
 			return

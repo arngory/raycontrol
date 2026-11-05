@@ -705,11 +705,13 @@ rayctl -remote laptop.rcdev device invite alice phone      # приглашен�
 - `rayctl service set reality open=true` — TCP 443 открыт всем, без SPA. Хост, который молчит на 443, хотя к нему
   идут TLS-сессии, заметен. Неавторизованным REALITY отвечает как сайт. Цена: активное зондирование 443 становится
   возможным и для остальных сервисов за фронтом на TCP 443 (naive, DoH, Yggdrasil). SPA по-прежнему закрывает UDP
-  443, API и подписку.
+  443, API и подписку. Открывается только TCP 443: другие порты REALITY остаются за SPA, а REALITY не на 443 эту опцию
+  не принимает. SSH не делит порт ни с каким сервисом.
 - `rayctl metrics -o FILE` — счётчики для node_exporter (textfile collector) по своему таймеру: только числа.
 - `rayctl status` — в конце по строке на каждый цикл `rayd`: применение (`apply`), сертификат каждого сайта
   (`acme <сайт>`), записи DNS, смены ключей. `ok 40s ago` — последний круг удался; `FAILED 3m ago: <ошибка>` — нет, и
-  когда был последний успех. В метриках то же без текста ошибки: `raycontrol_loop_last_success_seconds` и
-  `raycontrol_loop_last_error_seconds`.
+  когда был последний успех. В метриках то же без текста ошибки: `raycontrol_loop_last_success_seconds`,
+  `raycontrol_loop_last_error_seconds` и `raycontrol_loop_failing` (1, если последний круг не удался). Строки удалённых
+  сайтов и сервисов исчезают сами; проверка чужой цели REALITY идёт сразу при её смене и раз в 6 часов.
 - `rayctl uninstall` — убрать всё, включая записи raycontrol в Cloudflare; система вернётся к снимку до установки.
   Сначала `rayctl backup`, если ноду может понадобиться вернуть.

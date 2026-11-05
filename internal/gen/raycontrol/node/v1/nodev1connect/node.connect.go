@@ -93,6 +93,18 @@ const (
 	// NodeServiceSetAdminAccessProcedure is the fully-qualified name of the NodeService's
 	// SetAdminAccess RPC.
 	NodeServiceSetAdminAccessProcedure = "/raycontrol.node.v1.NodeService/SetAdminAccess"
+	// NodeServiceAddRelayProcedure is the fully-qualified name of the NodeService's AddRelay RPC.
+	NodeServiceAddRelayProcedure = "/raycontrol.node.v1.NodeService/AddRelay"
+	// NodeServiceListRelaysProcedure is the fully-qualified name of the NodeService's ListRelays RPC.
+	NodeServiceListRelaysProcedure = "/raycontrol.node.v1.NodeService/ListRelays"
+	// NodeServiceRemoveRelayProcedure is the fully-qualified name of the NodeService's RemoveRelay RPC.
+	NodeServiceRemoveRelayProcedure = "/raycontrol.node.v1.NodeService/RemoveRelay"
+	// NodeServiceIssueRelayBundleProcedure is the fully-qualified name of the NodeService's
+	// IssueRelayBundle RPC.
+	NodeServiceIssueRelayBundleProcedure = "/raycontrol.node.v1.NodeService/IssueRelayBundle"
+	// NodeServiceSetRelayAccessProcedure is the fully-qualified name of the NodeService's
+	// SetRelayAccess RPC.
+	NodeServiceSetRelayAccessProcedure = "/raycontrol.node.v1.NodeService/SetRelayAccess"
 	// NodeServiceSetDNSProviderProcedure is the fully-qualified name of the NodeService's
 	// SetDNSProvider RPC.
 	NodeServiceSetDNSProviderProcedure = "/raycontrol.node.v1.NodeService/SetDNSProvider"
@@ -159,6 +171,19 @@ type NodeServiceClient interface {
 	// access, docs/08-decisions.md D-6).
 	GetAdminAccess(context.Context, *connect.Request[v1.GetAdminAccessRequest]) (*connect.Response[v1.GetAdminAccessResponse], error)
 	SetAdminAccess(context.Context, *connect.Request[v1.SetAdminAccessRequest]) (*connect.Response[v1.SetAdminAccessResponse], error)
+	// Relays in front of the node (relay-v1): one address each, which
+	// reaches the service ports without SPA. Adding and removing is for
+	// root on the node only: a relay opens the perimeter.
+	AddRelay(context.Context, *connect.Request[v1.AddRelayRequest]) (*connect.Response[v1.AddRelayResponse], error)
+	ListRelays(context.Context, *connect.Request[v1.ListRelaysRequest]) (*connect.Response[v1.ListRelaysResponse], error)
+	RemoveRelay(context.Context, *connect.Request[v1.RemoveRelayRequest]) (*connect.Response[v1.RemoveRelayResponse], error)
+	// IssueRelayBundle makes the relay a new client certificate (the one
+	// before stops working) and returns what its host needs (relay-v1 §3).
+	// It holds the relay's private key: root on the node only.
+	IssueRelayBundle(context.Context, *connect.Request[v1.IssueRelayBundleRequest]) (*connect.Response[v1.IssueRelayBundleResponse], error)
+	// SetRelayAccess changes the relay host's SSH port and admin addresses
+	// without a new bundle: its SPA and certificate stay.
+	SetRelayAccess(context.Context, *connect.Request[v1.SetRelayAccessRequest]) (*connect.Response[v1.SetRelayAccessResponse], error)
 	// The DNS provider (Cloudflare): the node's records in its zone and
 	// certificates through DNS-01 with a wildcard name (R4-10). The token is
 	// stored by rayd and never returned.
@@ -322,6 +347,36 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("SetAdminAccess")),
 			connect.WithClientOptions(opts...),
 		),
+		addRelay: connect.NewClient[v1.AddRelayRequest, v1.AddRelayResponse](
+			httpClient,
+			baseURL+NodeServiceAddRelayProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("AddRelay")),
+			connect.WithClientOptions(opts...),
+		),
+		listRelays: connect.NewClient[v1.ListRelaysRequest, v1.ListRelaysResponse](
+			httpClient,
+			baseURL+NodeServiceListRelaysProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("ListRelays")),
+			connect.WithClientOptions(opts...),
+		),
+		removeRelay: connect.NewClient[v1.RemoveRelayRequest, v1.RemoveRelayResponse](
+			httpClient,
+			baseURL+NodeServiceRemoveRelayProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("RemoveRelay")),
+			connect.WithClientOptions(opts...),
+		),
+		issueRelayBundle: connect.NewClient[v1.IssueRelayBundleRequest, v1.IssueRelayBundleResponse](
+			httpClient,
+			baseURL+NodeServiceIssueRelayBundleProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("IssueRelayBundle")),
+			connect.WithClientOptions(opts...),
+		),
+		setRelayAccess: connect.NewClient[v1.SetRelayAccessRequest, v1.SetRelayAccessResponse](
+			httpClient,
+			baseURL+NodeServiceSetRelayAccessProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetRelayAccess")),
+			connect.WithClientOptions(opts...),
+		),
 		setDNSProvider: connect.NewClient[v1.SetDNSProviderRequest, v1.SetDNSProviderResponse](
 			httpClient,
 			baseURL+NodeServiceSetDNSProviderProcedure,
@@ -402,6 +457,11 @@ type nodeServiceClient struct {
 	listAudit         *connect.Client[v1.ListAuditRequest, v1.ListAuditResponse]
 	getAdminAccess    *connect.Client[v1.GetAdminAccessRequest, v1.GetAdminAccessResponse]
 	setAdminAccess    *connect.Client[v1.SetAdminAccessRequest, v1.SetAdminAccessResponse]
+	addRelay          *connect.Client[v1.AddRelayRequest, v1.AddRelayResponse]
+	listRelays        *connect.Client[v1.ListRelaysRequest, v1.ListRelaysResponse]
+	removeRelay       *connect.Client[v1.RemoveRelayRequest, v1.RemoveRelayResponse]
+	issueRelayBundle  *connect.Client[v1.IssueRelayBundleRequest, v1.IssueRelayBundleResponse]
+	setRelayAccess    *connect.Client[v1.SetRelayAccessRequest, v1.SetRelayAccessResponse]
 	setDNSProvider    *connect.Client[v1.SetDNSProviderRequest, v1.SetDNSProviderResponse]
 	getDNS            *connect.Client[v1.GetDNSRequest, v1.GetDNSResponse]
 	syncDNS           *connect.Client[v1.SyncDNSRequest, v1.SyncDNSResponse]
@@ -518,6 +578,31 @@ func (c *nodeServiceClient) SetAdminAccess(ctx context.Context, req *connect.Req
 	return c.setAdminAccess.CallUnary(ctx, req)
 }
 
+// AddRelay calls raycontrol.node.v1.NodeService.AddRelay.
+func (c *nodeServiceClient) AddRelay(ctx context.Context, req *connect.Request[v1.AddRelayRequest]) (*connect.Response[v1.AddRelayResponse], error) {
+	return c.addRelay.CallUnary(ctx, req)
+}
+
+// ListRelays calls raycontrol.node.v1.NodeService.ListRelays.
+func (c *nodeServiceClient) ListRelays(ctx context.Context, req *connect.Request[v1.ListRelaysRequest]) (*connect.Response[v1.ListRelaysResponse], error) {
+	return c.listRelays.CallUnary(ctx, req)
+}
+
+// RemoveRelay calls raycontrol.node.v1.NodeService.RemoveRelay.
+func (c *nodeServiceClient) RemoveRelay(ctx context.Context, req *connect.Request[v1.RemoveRelayRequest]) (*connect.Response[v1.RemoveRelayResponse], error) {
+	return c.removeRelay.CallUnary(ctx, req)
+}
+
+// IssueRelayBundle calls raycontrol.node.v1.NodeService.IssueRelayBundle.
+func (c *nodeServiceClient) IssueRelayBundle(ctx context.Context, req *connect.Request[v1.IssueRelayBundleRequest]) (*connect.Response[v1.IssueRelayBundleResponse], error) {
+	return c.issueRelayBundle.CallUnary(ctx, req)
+}
+
+// SetRelayAccess calls raycontrol.node.v1.NodeService.SetRelayAccess.
+func (c *nodeServiceClient) SetRelayAccess(ctx context.Context, req *connect.Request[v1.SetRelayAccessRequest]) (*connect.Response[v1.SetRelayAccessResponse], error) {
+	return c.setRelayAccess.CallUnary(ctx, req)
+}
+
 // SetDNSProvider calls raycontrol.node.v1.NodeService.SetDNSProvider.
 func (c *nodeServiceClient) SetDNSProvider(ctx context.Context, req *connect.Request[v1.SetDNSProviderRequest]) (*connect.Response[v1.SetDNSProviderResponse], error) {
 	return c.setDNSProvider.CallUnary(ctx, req)
@@ -607,6 +692,19 @@ type NodeServiceHandler interface {
 	// access, docs/08-decisions.md D-6).
 	GetAdminAccess(context.Context, *connect.Request[v1.GetAdminAccessRequest]) (*connect.Response[v1.GetAdminAccessResponse], error)
 	SetAdminAccess(context.Context, *connect.Request[v1.SetAdminAccessRequest]) (*connect.Response[v1.SetAdminAccessResponse], error)
+	// Relays in front of the node (relay-v1): one address each, which
+	// reaches the service ports without SPA. Adding and removing is for
+	// root on the node only: a relay opens the perimeter.
+	AddRelay(context.Context, *connect.Request[v1.AddRelayRequest]) (*connect.Response[v1.AddRelayResponse], error)
+	ListRelays(context.Context, *connect.Request[v1.ListRelaysRequest]) (*connect.Response[v1.ListRelaysResponse], error)
+	RemoveRelay(context.Context, *connect.Request[v1.RemoveRelayRequest]) (*connect.Response[v1.RemoveRelayResponse], error)
+	// IssueRelayBundle makes the relay a new client certificate (the one
+	// before stops working) and returns what its host needs (relay-v1 §3).
+	// It holds the relay's private key: root on the node only.
+	IssueRelayBundle(context.Context, *connect.Request[v1.IssueRelayBundleRequest]) (*connect.Response[v1.IssueRelayBundleResponse], error)
+	// SetRelayAccess changes the relay host's SSH port and admin addresses
+	// without a new bundle: its SPA and certificate stay.
+	SetRelayAccess(context.Context, *connect.Request[v1.SetRelayAccessRequest]) (*connect.Response[v1.SetRelayAccessResponse], error)
 	// The DNS provider (Cloudflare): the node's records in its zone and
 	// certificates through DNS-01 with a wildcard name (R4-10). The token is
 	// stored by rayd and never returned.
@@ -766,6 +864,36 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("SetAdminAccess")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceAddRelayHandler := connect.NewUnaryHandler(
+		NodeServiceAddRelayProcedure,
+		svc.AddRelay,
+		connect.WithSchema(nodeServiceMethods.ByName("AddRelay")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceListRelaysHandler := connect.NewUnaryHandler(
+		NodeServiceListRelaysProcedure,
+		svc.ListRelays,
+		connect.WithSchema(nodeServiceMethods.ByName("ListRelays")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceRemoveRelayHandler := connect.NewUnaryHandler(
+		NodeServiceRemoveRelayProcedure,
+		svc.RemoveRelay,
+		connect.WithSchema(nodeServiceMethods.ByName("RemoveRelay")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceIssueRelayBundleHandler := connect.NewUnaryHandler(
+		NodeServiceIssueRelayBundleProcedure,
+		svc.IssueRelayBundle,
+		connect.WithSchema(nodeServiceMethods.ByName("IssueRelayBundle")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceSetRelayAccessHandler := connect.NewUnaryHandler(
+		NodeServiceSetRelayAccessProcedure,
+		svc.SetRelayAccess,
+		connect.WithSchema(nodeServiceMethods.ByName("SetRelayAccess")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceSetDNSProviderHandler := connect.NewUnaryHandler(
 		NodeServiceSetDNSProviderProcedure,
 		svc.SetDNSProvider,
@@ -864,6 +992,16 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceGetAdminAccessHandler.ServeHTTP(w, r)
 		case NodeServiceSetAdminAccessProcedure:
 			nodeServiceSetAdminAccessHandler.ServeHTTP(w, r)
+		case NodeServiceAddRelayProcedure:
+			nodeServiceAddRelayHandler.ServeHTTP(w, r)
+		case NodeServiceListRelaysProcedure:
+			nodeServiceListRelaysHandler.ServeHTTP(w, r)
+		case NodeServiceRemoveRelayProcedure:
+			nodeServiceRemoveRelayHandler.ServeHTTP(w, r)
+		case NodeServiceIssueRelayBundleProcedure:
+			nodeServiceIssueRelayBundleHandler.ServeHTTP(w, r)
+		case NodeServiceSetRelayAccessProcedure:
+			nodeServiceSetRelayAccessHandler.ServeHTTP(w, r)
 		case NodeServiceSetDNSProviderProcedure:
 			nodeServiceSetDNSProviderHandler.ServeHTTP(w, r)
 		case NodeServiceGetDNSProcedure:
@@ -973,6 +1111,26 @@ func (UnimplementedNodeServiceHandler) GetAdminAccess(context.Context, *connect.
 
 func (UnimplementedNodeServiceHandler) SetAdminAccess(context.Context, *connect.Request[v1.SetAdminAccessRequest]) (*connect.Response[v1.SetAdminAccessResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetAdminAccess is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) AddRelay(context.Context, *connect.Request[v1.AddRelayRequest]) (*connect.Response[v1.AddRelayResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.AddRelay is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) ListRelays(context.Context, *connect.Request[v1.ListRelaysRequest]) (*connect.Response[v1.ListRelaysResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.ListRelays is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) RemoveRelay(context.Context, *connect.Request[v1.RemoveRelayRequest]) (*connect.Response[v1.RemoveRelayResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.RemoveRelay is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) IssueRelayBundle(context.Context, *connect.Request[v1.IssueRelayBundleRequest]) (*connect.Response[v1.IssueRelayBundleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.IssueRelayBundle is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetRelayAccess(context.Context, *connect.Request[v1.SetRelayAccessRequest]) (*connect.Response[v1.SetRelayAccessResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetRelayAccess is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) SetDNSProvider(context.Context, *connect.Request[v1.SetDNSProviderRequest]) (*connect.Response[v1.SetDNSProviderResponse], error) {
