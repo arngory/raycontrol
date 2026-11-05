@@ -453,19 +453,23 @@ REALITY раз в 90) новые приходят туда же заранее.
 Нужен сервис `api` (§8) и Niko 1.16 или новее.
 
 ```bash
-apt install -y qrencode
+rayctl device invite u-k3f9-x2qa phone -ttl 30m -qr
 ```
+
+В Niko — отсканировать QR и подтвердить.
+- `-qr` (с v0.12.0) рисует QR прямо в терминале, без `qrencode` и без файла с приглашением на диске.
+- Терминалу нужна ширина около 95 колонок, тема любая: цвета QR заданы явно.
+- Если QR не влезает или нужна картинка — приглашение в файл и `qrencode`:
 
 ```bash
 rayctl device invite u-k3f9-x2qa phone -ttl 30m -o /root/invite.txt
 ```
 
 ```bash
-tr -d '\n' < /root/invite.txt | qrencode -t ansiutf8; shred -u /root/invite.txt
+tr -d '\n' < /root/invite.txt | qrencode -o /root/invite.png; shred -u /root/invite.txt
 ```
 
-В Niko — отсканировать QR (или открыть ссылку `rcinv1:`) и подтвердить. Терминалу нужна ширина около 100 колонок.
-Если QR не влезает — `qrencode -o invite.png` и показать картинку.
+Картинку показать и удалить (`shred -u /root/invite.png`).
 
 **Почему это безопаснее пакета:**
 - **Ключ телефона рождается на телефоне.** Ключ клиентского сертификата создаётся там и хранится в Android Keystore.
@@ -490,7 +494,7 @@ tr -d '\n' < /root/invite.txt | qrencode -t ansiutf8; shred -u /root/invite.txt
 Роль — у устройства, а не у пользователя: у одного человека телефон может быть администратором, а ноутбук — нет.
 
 ```bash
-rayctl device invite u-k3f9-x2qa admin-phone -role admin -ttl 30m -o /root/invite.txt
+rayctl device invite u-k3f9-x2qa admin-phone -role admin -ttl 30m -qr
 ```
 
 - Повысить готовое устройство нельзя: выдайте новое приглашение с `-role admin`, старое при необходимости отзовите.

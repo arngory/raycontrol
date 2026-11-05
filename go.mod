@@ -13,6 +13,7 @@ require (
 	golang.org/x/sys v0.49.0
 	google.golang.org/protobuf v1.36.6
 	modernc.org/sqlite v1.61.1
+	rsc.io/qr v0.2.0
 )
 
 require (
