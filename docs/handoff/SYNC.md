@@ -64,7 +64,7 @@
 | §22.2.3 TCP-носитель SPA в форме ClientHello | сервер: нода и спецификация; клиент: отправка | **сервер готов**: нода принимает обе формы, эталон `spa.TLSCarrier`; клиенту — отправка | spa-v2 §10.1 |
 | §22.2.4 порог SPA на всплеск при смене слота | сервер; клиент уже объединил повторы | **без изменений**: 20/с на адрес, всплеск 40, с объединёнными повторами хватает | R4-31 |
 | Проверка на VPS по VPS-CHECK | пользователь | ждём | `VPS-CHECK.md` у клиента |
-| ClientHello носителя SPA — как у Chrome 150+ (ML-DSA и GREASE в `signature_algorithms`, `trust_anchors`) | сервер | в очереди T2 | `docs/FINGERPRINT.md` в arngory/niko, spa-v2 §10.1 |
+| ClientHello носителя SPA — как у Chrome 150+ (ML-DSA и GREASE в `signature_algorithms`, `trust_anchors`) | сервер | **готово** в ветке: `spa.TLSCarrier` строится из снимка Chrome 156 клиента (sing-box 427f972), без SNI, JA4 `t13i1516h2_8daaf6152771_cb7bf5808d99` — как у носителя клиента (`TestTLSCarrierLikeChrome`) | spa-v2 §10.1 |
 | Второй круг разбора после v0.10.0 (безопасность, корректность, производительность) | сервер | **готово** в ветках raycontrol и niko-server, ждёт v0.10.1 и v0.8.1; повторное ревью идёт | `docs/12-review.md`, коммиты после `984c093` |
 
 ## Изменения контракта

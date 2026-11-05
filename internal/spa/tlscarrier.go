@@ -1,11 +1,19 @@
 package spa
 
 import (
+	"bytes"
+	"crypto/ecdh"
 	"crypto/mlkem"
 	"crypto/rand"
+	_ "embed"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	mrand "math/rand/v2"
+	"strings"
+	"sync"
+
+	"golang.org/x/crypto/cryptobyte"
 )
 
 // The TCP carrier in the shape of a TLS ClientHello (spa-v2.md §10.1,
@@ -13,97 +21,261 @@ import (
 // connection are the class of traffic some censors drop on sight; the start
 // of a TLS handshake is not. The SPA packet travels as the opaque ticket of
 // the session_ticket extension, which a client resuming a session sends as
-// it is; everything else is what a browser's ClientHello carries, with fresh
-// random values and a real ML-KEM-768 key share.
+// it is.
+//
+// Everything else is a real Chrome's ClientHello (chrome_hello.hex, Google
+// Chrome 156.0.8078.47 stable on Linux, captured by Niko's fingerprint CI,
+// arngory/sing-box 427f972), made new per connection as Chrome does: random,
+// session ID, key shares (a real ML-KEM-768 key), every GREASE value, the
+// GREASE ECH payload, the order of the extensions; no server name, as for an
+// address. Niko sends the same carrier: the two share the capture, and their
+// JA4 is t13i1516h2_8daaf6152771_cb7bf5808d99.
 
 const (
+	extServerName    = 0x0000
 	extSessionTicket = 0x0023
+	extKeyShare      = 0x0033
+	extGroups        = 0x000a
+	extSigAlgs       = 0x000d
+	extVersions      = 0x002b
+	extECH           = 0xfe0d
 	// TLSCarrierMax bounds what the node reads of a ClientHello carrier.
 	TLSCarrierMax = 4096
 )
+
+//go:embed chrome_hello.hex
+var chromeHelloHex string
+
+type helloExt struct {
+	typ  uint16
+	data []byte
+}
+
+// chromeHello is the capture, parsed once.
+var chromeHello = sync.OnceValues(func() (struct {
+	ciphers []uint16
+	exts    []helloExt
+}, error) {
+	var t struct {
+		ciphers []uint16
+		exts    []helloExt
+	}
+	raw, err := hex.DecodeString(strings.TrimSpace(chromeHelloHex))
+	if err != nil {
+		return t, err
+	}
+	s := cryptobyte.String(raw)
+	var rec, msg, sid, ciphers, comp, exts cryptobyte.String
+	var typ uint8
+	if !s.Skip(3) || !s.ReadUint16LengthPrefixed(&rec) || !rec.ReadUint8(&typ) || typ != 1 ||
+		!rec.ReadUint24LengthPrefixed(&msg) || !msg.Skip(2+32) || !msg.ReadUint8LengthPrefixed(&sid) ||
+		!msg.ReadUint16LengthPrefixed(&ciphers) || !msg.ReadUint8LengthPrefixed(&comp) || !msg.ReadUint16LengthPrefixed(&exts) {
+		return t, errors.New("spa: the Chrome ClientHello does not parse")
+	}
+	for !ciphers.Empty() {
+		var c uint16
+		ciphers.ReadUint16(&c)
+		t.ciphers = append(t.ciphers, c)
+	}
+	for !exts.Empty() {
+		var e helloExt
+		var data cryptobyte.String
+		if !exts.ReadUint16(&e.typ) || !exts.ReadUint16LengthPrefixed(&data) {
+			return t, errors.New("spa: the Chrome ClientHello does not parse")
+		}
+		if e.typ != extServerName {
+			e.data = data
+			t.exts = append(t.exts, e)
+		}
+	}
+	return t, nil
+})
+
+// isGREASE matches the GREASE values of RFC 8701: 0x?a?a, both bytes equal.
+func isGREASE(v uint16) bool { return v&0x0f0f == 0x0a0a && v>>8 == v&0xff }
+
+// grease draws GREASE values as BoringSSL does, one per use; the second
+// GREASE extension differs from the first.
+type grease struct{ cipher, group, ext1, ext2, version uint16 }
+
+func newGREASE() grease {
+	var b [5]byte
+	_, _ = rand.Read(b[:])
+	v := func(x byte) uint16 { y := uint16(x&0xf0) | 0x0a; return y<<8 | y }
+	g := grease{cipher: v(b[0]), group: v(b[1]), ext1: v(b[2]), ext2: v(b[3]), version: v(b[4])}
+	if g.ext2 == g.ext1 {
+		g.ext2 ^= 0x1010
+	}
+	return g
+}
 
 // TLSCarrier wraps a sealed SPA packet in a ClientHello record.
 func TLSCarrier(pkt []byte) ([]byte, error) {
 	if len(pkt) == 0 || len(pkt) > MaxPacketLen {
 		return nil, errors.New("spa: packet length out of range")
 	}
-	var random, sessionID, x25519 [32]byte
-	_, _ = rand.Read(random[:])
-	_, _ = rand.Read(sessionID[:])
-	_, _ = rand.Read(x25519[:])
-	dk, err := mlkem.GenerateKey768()
+	t, err := chromeHello()
 	if err != nil {
 		return nil, err
 	}
-	hybrid := append(dk.EncapsulationKey().Bytes(), x25519[:]...) // X25519MLKEM768: ML-KEM first
-
-	u16 := func(b []byte, v int) []byte { return binary.BigEndian.AppendUint16(b, uint16(v)) }
-	ext := func(typ int, body []byte) []byte { return append(u16(u16(nil, typ), len(body)), body...) }
-	list16 := func(items ...int) []byte {
-		var b []byte
-		for _, it := range items {
-			b = u16(b, it)
+	g := newGREASE()
+	// GREASE values inside a list of uint16 after a length prefix of n bytes.
+	regrease := func(data []byte, prefix int, v uint16) []byte {
+		out := bytes.Clone(data)
+		for i := prefix; i+1 < len(out); i += 2 {
+			if isGREASE(binary.BigEndian.Uint16(out[i:])) {
+				binary.BigEndian.PutUint16(out[i:], v)
+			}
 		}
-		return u16(nil, len(b)) // the caller appends b
+		return out
+	}
+	var exts []helloExt
+	firstGREASE := true
+	for _, e := range t.exts {
+		var data []byte
+		typ := e.typ
+		switch {
+		case isGREASE(typ):
+			typ, data = g.ext1, bytes.Clone(e.data)
+			if !firstGREASE {
+				typ = g.ext2
+			}
+			firstGREASE = false
+		case typ == extGroups:
+			data = regrease(e.data, 2, g.group)
+		case typ == extSigAlgs:
+			data = regrease(e.data, 2, g.group)
+		case typ == extVersions:
+			data = regrease(e.data, 1, g.version)
+		case typ == extKeyShare:
+			if data, err = keyShares(e.data, g.group); err != nil {
+				return nil, err
+			}
+		case typ == extECH:
+			if data, err = greaseECH(e.data); err != nil {
+				return nil, err
+			}
+		case typ == extSessionTicket:
+			data = pkt
+		default:
+			data = e.data
+		}
+		exts = append(exts, helloExt{typ, data})
+	}
+	// Chrome shuffles its extensions, the GREASE ones staying first and last.
+	if len(exts) > 2 && isGREASE(exts[0].typ) && isGREASE(exts[len(exts)-1].typ) {
+		mid := exts[1 : len(exts)-1]
+		mrand.Shuffle(len(mid), func(i, j int) { mid[i], mid[j] = mid[j], mid[i] })
 	}
 
-	var exts [][]byte
-	// supported_versions: TLS 1.3, 1.2.
-	exts = append(exts, ext(0x002b, []byte{4, 0x03, 0x04, 0x03, 0x03}))
-	// supported_groups: X25519MLKEM768, x25519, secp256r1, secp384r1.
-	groups := []int{0x11ec, 0x001d, 0x0017, 0x0018}
-	g := list16(groups...)
-	for _, v := range groups {
-		g = u16(g, v)
-	}
-	exts = append(exts, ext(0x000a, g))
-	// key_share: X25519MLKEM768 and x25519.
-	var ks []byte
-	ks = u16(ks, 0x11ec)
-	ks = u16(ks, len(hybrid))
-	ks = append(ks, hybrid...)
-	ks = u16(ks, 0x001d)
-	ks = u16(ks, 32)
-	ks = append(ks, x25519[:]...)
-	exts = append(exts, ext(0x0033, append(u16(nil, len(ks)), ks...)))
-	// signature_algorithms: ecdsa_secp256r1_sha256, rsa_pss_rsae_sha256,
-	// rsa_pkcs1_sha256, ecdsa_secp384r1_sha384, rsa_pss_rsae_sha384,
-	// rsa_pkcs1_sha384, rsa_pss_rsae_sha512, rsa_pkcs1_sha512.
-	algs := []int{0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601}
-	sa := list16(algs...)
-	for _, v := range algs {
-		sa = u16(sa, v)
-	}
-	exts = append(exts, ext(0x000d, sa))
-	exts = append(exts, ext(0x002d, []byte{1, 1}))                                                          // psk_key_exchange_modes: psk_dhe_ke
-	exts = append(exts, ext(0x000b, []byte{1, 0}))                                                          // ec_point_formats: uncompressed
-	exts = append(exts, ext(0x0017, nil))                                                                   // extended_master_secret
-	exts = append(exts, ext(0xff01, []byte{0}))                                                             // renegotiation_info
-	exts = append(exts, ext(0x0010, []byte{0, 12, 2, 'h', '2', 8, 'h', 't', 't', 'p', '/', '1', '.', '1'})) // ALPN
-	exts = append(exts, ext(extSessionTicket, pkt))                                                         // the SPA packet
-	// Browsers shuffle their extensions; so does this.
-	mrand.Shuffle(len(exts), func(i, j int) { exts[i], exts[j] = exts[j], exts[i] })
+	var b cryptobyte.Builder
+	b.AddUint8(0x16)
+	b.AddUint16(0x0301)
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+		b.AddUint8(1) // client_hello
+		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+			var random, sessionID [32]byte
+			_, _ = rand.Read(random[:])
+			_, _ = rand.Read(sessionID[:])
+			b.AddUint16(0x0303)
+			b.AddBytes(random[:])
+			b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(sessionID[:]) })
+			b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+				for _, c := range t.ciphers {
+					if isGREASE(c) {
+						c = g.cipher
+					}
+					b.AddUint16(c)
+				}
+			})
+			b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) { b.AddUint8(0) }) // compression: null
+			b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+				for _, e := range exts {
+					b.AddUint16(e.typ)
+					b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(e.data) })
+				}
+			})
+		})
+	})
+	return b.Bytes()
+}
 
-	var body []byte
-	body = append(body, 0x03, 0x03)
-	body = append(body, random[:]...)
-	body = append(body, 32)
-	body = append(body, sessionID[:]...)
-	suites := []int{0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8}
-	body = u16(body, 2*len(suites))
-	for _, s := range suites {
-		body = u16(body, s)
+// keyShares makes the capture's key shares anew: the GREASE one with its
+// single zero byte, X25519MLKEM768 with a real ML-KEM-768 encapsulation key
+// then an X25519 share, x25519 alone.
+func keyShares(tmpl []byte, greaseGroup uint16) ([]byte, error) {
+	s := cryptobyte.String(tmpl)
+	var shares cryptobyte.String
+	if !s.ReadUint16LengthPrefixed(&shares) {
+		return nil, errors.New("spa: key_share of the capture")
 	}
-	body = append(body, 1, 0) // compression: null
-	var all []byte
-	for _, e := range exts {
-		all = append(all, e...)
+	var b cryptobyte.Builder
+	var err error
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+		for !shares.Empty() {
+			var group uint16
+			var key cryptobyte.String
+			if !shares.ReadUint16(&group) || !shares.ReadUint16LengthPrefixed(&key) {
+				err = errors.New("spa: key_share of the capture")
+				return
+			}
+			var share []byte
+			switch {
+			case isGREASE(group):
+				group, share = greaseGroup, []byte{0}
+			case group == 0x11ec: // X25519MLKEM768: ML-KEM first
+				dk, kerr := mlkem.GenerateKey768()
+				if kerr != nil {
+					err = kerr
+					return
+				}
+				share = append(dk.EncapsulationKey().Bytes(), x25519Share()...)
+			case group == 0x001d:
+				share = x25519Share()
+			default:
+				share = make([]byte, len(key))
+				_, _ = rand.Read(share)
+			}
+			b.AddUint16(group)
+			b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(share) })
+		}
+	})
+	if err != nil {
+		return nil, err
 	}
-	body = u16(body, len(all))
-	body = append(body, all...)
+	return b.Bytes()
+}
 
-	hs := append([]byte{0x01, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}, body...)
-	return append([]byte{0x16, 0x03, 0x01, byte(len(hs) >> 8), byte(len(hs))}, hs...), nil
+// x25519Share is a fresh X25519 public key.
+func x25519Share() []byte {
+	k, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err) // crypto/rand does not fail
+	}
+	return k.PublicKey().Bytes()
+}
+
+// greaseECH is a GREASE encrypted_client_hello as Chrome sends without an ECH
+// config: the capture's suite, and a random config ID, enc and payload of
+// the capture's lengths.
+func greaseECH(tmpl []byte) ([]byte, error) {
+	s := cryptobyte.String(tmpl)
+	var outer uint8
+	var kdf, aead uint16
+	var enc, payload cryptobyte.String
+	if !s.ReadUint8(&outer) || outer != 0 || !s.ReadUint16(&kdf) || !s.ReadUint16(&aead) || !s.Skip(1) ||
+		!s.ReadUint16LengthPrefixed(&enc) || !s.ReadUint16LengthPrefixed(&payload) {
+		return nil, errors.New("spa: encrypted_client_hello of the capture")
+	}
+	fresh := func(n int) []byte { b := make([]byte, n); _, _ = rand.Read(b); return b }
+	var b cryptobyte.Builder
+	b.AddUint8(0)
+	b.AddUint16(kdf)
+	b.AddUint16(aead)
+	b.AddBytes(fresh(1))
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(fresh(len(enc))) })
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(fresh(len(payload))) })
+	return b.Bytes()
 }
 
 // IsTLSCarrier reports whether data starts like a TLS handshake record.
