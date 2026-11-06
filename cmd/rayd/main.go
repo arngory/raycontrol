@@ -289,6 +289,8 @@ func cmdServe(args []string) error {
 		frontUID = os.Getuid() // the front is a child of rayd's
 	}
 	go checkPort53(ctx, st, &deploy.Host{}, frontUID, hb, log)
+	// The DNS path's events (dnstt's counters, an hour of them).
+	go watchDNSTT(ctx, st, paths, hb)
 	go checkResolver(ctx, hb, log)
 	go followDebug(ctx, st, level, *debug, srv.Changes, srv.Notify, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)

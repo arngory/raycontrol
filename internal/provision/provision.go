@@ -261,11 +261,6 @@ func SPKIPin(certDER []byte) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
 }
 
-// MasterDNSSealAuth turns seal and auth on (optional) for a new masterdns
-// service: niko-server v0.11.0 takes them, the v0.10.0 pinned now does not
-// (its check refuses the backend's config). On with the v0.11.0 pin.
-const MasterDNSSealAuth = false
-
 // kindsNeedingInner send their traffic to the inner stage.
 var kindsNeedingInner = []string{"dnstt", "masterdns", "olcrtc", "openflux", "yggdrasil"}
 
@@ -311,17 +306,18 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			// hold its new ones back (niko-server's load test, review 7).
 			// Older clients: rayctl service set NAME auth=optional.
 			settings["auth"] = "required"
-		} else if !ok && MasterDNSSealAuth {
-			// masterdns (spec/dnsauth-masterdns.md §4): the session of a
-			// device that signs is bound to it; clients that do not sign
-			// keep working.
+		} else if !ok {
+			// masterdns (spec/dnsauth-masterdns.md §4, niko-server
+			// v0.11.0): the session of a device that signs is bound to
+			// it; clients that do not sign keep working.
 			settings["auth"] = "optional"
 		}
 		if a, ok := settings["seal"]; ok && !slices.Contains([]any{"off", "optional", "required"}, a) {
 			return svc, fmt.Errorf("%w seal %v: off, optional or required (spec/dnsseal-v1.md, spec/mdseal-v1.md)", store.ErrInvalid, a)
-		} else if !ok && (svc.Kind == "dnstt" || MasterDNSSealAuth) {
-			// Sealed for the clients that ask (Niko 1.35 seals dnstt),
-			// as before for the others: optional costs them nothing.
+		} else if !ok {
+			// Sealed for the clients that ask (Niko 1.35 seals dnstt;
+			// masterdns, mdseal-v1, Niko 1.36), as before for
+			// the others: optional costs them nothing.
 			settings["seal"] = "optional"
 		}
 		if z, ok := settings["zone"]; !ok {

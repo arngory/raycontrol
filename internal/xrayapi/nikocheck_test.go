@@ -16,12 +16,13 @@ import (
 )
 
 // TestRenderedConfigsWithNikoServer renders a node with every service the
-// niko-server front and backends serve, their options on (dnstt with
-// dnsauth and the seal required, the probe and the apex, Brutal ceilings,
-// Yggdrasil peers), and has the pinned niko-server check the front's
-// config and every backend's. An option the pinned version does not know
-// fails here, not on a node, where the front refuses its whole config and
-// TCP 443, UDP 443 and UDP 53 go down with it. Set NIKO_SERVER_BIN.
+// niko-server front and backends serve, their options on (dnstt and
+// masterdns with dnsauth and the seal required, the probe and the apex,
+// Brutal ceilings, Yggdrasil peers), and has the pinned niko-server check
+// the front's config and every backend's. An option the pinned version
+// does not know fails here, not on a node, where the front refuses its
+// whole config and TCP 443, UDP 443 and UDP 53 go down with it. Set
+// NIKO_SERVER_BIN.
 func TestRenderedConfigsWithNikoServer(t *testing.T) {
 	niko := os.Getenv("NIKO_SERVER_BIN")
 	if niko == "" {
@@ -58,10 +59,16 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 	for _, o := range [][3]string{
 		{"dns", "auth", "required"},
 		{"dns", "seal", "required"},
+		{"mdns", "auth", "required"},
+		{"mdns", "seal", "required"},
 		{"hy2o", "up_mbps", "100"},
 		{"hy2m", "down_mbps", "50"},
 		{"ygg", "peers", "tls://192.0.2.10:443"},
 		{"reality", "open", "true"},
+		// Spare zones (niko-server v0.11.0): dnstt's options.zones, front
+		// entries, masterdns's list.
+		{"dns", "spare_zones", "2"},
+		{"mdns", "spare_zones", "1"},
 	} {
 		if _, err := provision.SetServiceOption(ctx, st, o[0], o[1], o[2]); err != nil {
 			t.Fatalf("%s %s=%s: %v", o[0], o[1], o[2], err)

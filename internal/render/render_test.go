@@ -160,12 +160,9 @@ func TestRender(t *testing.T) {
 	// A new masterdns service: dnsauth and mdseal-v1 optional (with
 	// niko-server v0.11.0); the seal takes the service's key, no file of
 	// its own.
-	if provision.MasterDNSSealAuth && (mopts["auth"] != "optional" || mopts["auth_keys_file"] != "/var/lib/raycontrol/rendered/mdns/auth.keys" ||
-		mopts["seal"] != "optional" || mopts["seal_key_file"] != nil) {
+	if mopts["auth"] != "optional" || mopts["auth_keys_file"] != "/var/lib/raycontrol/rendered/mdns/auth.keys" ||
+		mopts["seal"] != "optional" || mopts["seal_key_file"] != nil {
 		t.Fatalf("a new masterdns service's options: %v", mopts)
-	}
-	if !provision.MasterDNSSealAuth && (mopts["auth"] != nil || mopts["seal"] != nil) {
-		t.Fatalf("a new masterdns service's options before niko-server v0.11.0: %v", mopts)
 	}
 
 	// dnsprobe-v1: the front's key file, root's, read where root copies it.
@@ -242,7 +239,7 @@ func TestDisabledInner(t *testing.T) {
 			t.Errorf("the front routes the broken tunnels: %s", f.Content)
 		}
 	}
-	if !keys["dns"] || keys["mdns"] != provision.MasterDNSSealAuth {
+	if !keys["dns"] || !keys["mdns"] {
 		t.Errorf("the devices' keys of the broken tunnels: %v", keys)
 	}
 	all, _, err := render.Render(withInner(t, st), render.DefaultPaths)
@@ -440,11 +437,7 @@ func TestDNSAuth(t *testing.T) {
 	st := node(t)
 	// A new dnstt service takes signed queries only (review 7); a new
 	// masterdns one the others too (spec/dnsauth-masterdns.md §4).
-	mdnsMode := "off" // until niko-server v0.11.0 (provision.MasterDNSSealAuth)
-	if provision.MasterDNSSealAuth {
-		mdnsMode = "optional"
-	}
-	for name, want := range map[string]string{"dns": "required", "mdns": mdnsMode} {
+	for name, want := range map[string]string{"dns": "required", "mdns": "optional"} {
 		if svc, _ := st.ServiceByName(ctx, name); render.DNSAuthMode(svc) != want {
 			t.Fatalf("a new %s service: auth %q", svc.Kind, render.DNSAuthMode(svc))
 		}

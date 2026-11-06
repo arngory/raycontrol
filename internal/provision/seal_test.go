@@ -183,13 +183,9 @@ func TestDNSTunnelModes(t *testing.T) {
 	if _, err := Init(ctx, st, Options{Domain: "example.com", Host: "203.0.113.7"}); err != nil {
 		t.Fatal(err)
 	}
-	mdnsMode := "off" // until niko-server v0.11.0 takes them (MasterDNSSealAuth)
-	if MasterDNSSealAuth {
-		mdnsMode = "optional"
-	}
 	for _, c := range []struct{ kind, name, settings, auth, seal string }{
 		{"dnstt", "dns", "", "required", "optional"},
-		{"masterdns", "mdns", "", mdnsMode, mdnsMode},
+		{"masterdns", "mdns", "", "optional", "optional"},
 		{"dnstt", "dns2", `{"auth":"optional","seal":"off"}`, "optional", "off"},
 		{"masterdns", "mdns2", `{"auth":"required","seal":"required"}`, "required", "required"},
 		{"masterdns", "mdns3", `{"auth":"off","seal":"off"}`, "off", "off"},

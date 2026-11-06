@@ -699,7 +699,9 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if m.IPv6 {
 				listen = append(listen, "[::]:53")
 			}
-			dns := map[string]any{"listen": listen, "zones": zones}
+			// The front's counters for rayctl metrics (niko-server
+			// v0.11.0): queries by zone, probes, refusals.
+			dns := map[string]any{"listen": listen, "zones": zones, "stats_socket": p.FrontStats()}
 			// dnsprobe-v1: the front answers resolver checks itself in
 			// the dnstt zones (niko-server v0.8.3).
 			if slices.ContainsFunc(zones, func(z route) bool { return z.Probe }) {
@@ -888,7 +890,7 @@ func dnsBackend(s Service, zones []string, inner string, p Paths, authKeys []str
 	if len(s.Secrets) == 0 || len(secretValue) == 0 {
 		return cfg, nil, nil, fmt.Errorf("service %s has no key", s.Name)
 	}
-	b, err := jsonFile(map[string]any{
+	backend := map[string]any{
 		"schema":    Schema,
 		"role":      "backend",
 		"kind":      s.Kind,
@@ -897,7 +899,14 @@ func dnsBackend(s Service, zones []string, inner string, p Paths, authKeys []str
 		"front_uid": p.PeerUID(FrontUID),
 		"options":   opts,
 		"inner":     p.InnerSocket(inner),
-	})
+	}
+	if s.Kind == "dnstt" {
+		// The backend's counters for rayctl metrics and status (niko-
+		// server v0.11.0): in its runtime directory, which rayd's group
+		// may pass through.
+		backend["stats_socket"] = p.StatsSocket(s.Name)
+	}
+	b, err := jsonFile(backend)
 	if err != nil {
 		return cfg, nil, nil, err
 	}
