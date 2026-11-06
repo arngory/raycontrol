@@ -80,7 +80,10 @@ Payload:
 | `niko-svc` | ID сервиса для scope SPA |
 | `niko-dns` | DNS-туннель: `dnstt;<резолвер>;<зона>;<pubkey hex>` или `masterdns;<резолверы через ,>;<зона>;<метод>` |
 | `niko-dnskey` | ключ MasterDnsVPN (текст, как в его файле ключа) |
-| `niko-dnsauth` | `v1`: подписывать запросы dnstt ключом устройства ([`dnsauth-v1.md`](dnsauth-v1.md)); нет параметра — не подписывать |
+| `niko-dnsauth` | `v1`: подписывать запросы ключом устройства — dnstt ([`dnsauth-v1.md`](dnsauth-v1.md)), с raycontrol v0.14.0 и masterdns ([`dnsauth-masterdns.md`](dnsauth-masterdns.md)); K для ID сервиса из `niko-svc`; нет параметра — не подписывать |
+| `niko-dnsseal` | dnstt: `v1;<ключ base64url>` — печать обвязки ([`dnsseal-v1.md`](dnsseal-v1.md), raycontrol v0.13.0); нет параметра — печать выключена |
+| `niko-mdseal` | masterdns (raycontrol v0.14.0): `v1` — нода печатает ответы тем, кто просит (`optional`), `v1;required` — только запечатанные, открытые отбрасывать ([`mdseal-v1.md`](mdseal-v1.md)); ключ — `niko-dnskey`; нет параметра — печать выключена |
+| `niko-dns-spare` | dnstt и masterdns (raycontrol v0.14.0): запасные зоны того же туннеля через `,`, до 4, в порядке перебора ([`dnszones-v1.md`](dnszones-v1.md)); ключи, печать и метка — как у основной |
 | `niko-pin` | SHA-256 SPKI сертификата (base64url), например для `hy2-obfs` (R3) |
 | `niko-inner` | вторая ступень для протоколов с собственной ссылкой (R5) |
 | `niko-ygg` | Yggdrasil: `<пир>;<ключ пользователя>` — URI пира и seed ed25519 (hex, 32 байта) (R4-15) |
