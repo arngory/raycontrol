@@ -3,11 +3,8 @@ package api
 import (
 	"context"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"io"
-	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +12,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/arngory/raycontrol/internal/dnsttstats"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/provision"
 )
@@ -210,7 +208,7 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 		if svc.Kind != "dnstt" || !svc.Enabled {
 			continue
 		}
-		st, err := readDNSTTStats(ctx, s.Paths.StatsSocket(svc.Name))
+		st, err := dnsttstats.Read(ctx, s.Paths.StatsSocket(svc.Name))
 		if err != nil {
 			continue
 		}
@@ -219,49 +217,8 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 	return m.String(), nil
 }
 
-// DNSTTStats is what a dnstt backend gives on its stats socket
-// (niko-server dnsttserver.StatsSnapshot).
-type DNSTTStats struct {
-	Queries           uint64 `json:"queries"`
-	MemoHits          uint64 `json:"memo_hits"`
-	Sessions          int    `json:"sessions"`
-	Handshakes        int    `json:"handshakes"`
-	SessionsAdmitted  uint64 `json:"sessions_admitted"`
-	RefusedFull       uint64 `json:"sessions_refused_full"`
-	RefusedRate       uint64 `json:"sessions_refused_rate"`
-	RefusedDevice     uint64 `json:"sessions_refused_device"`
-	SessionsEvicted   uint64 `json:"sessions_evicted"`
-	HandshakeTimeouts uint64 `json:"handshake_timeouts"`
-	StreamsRefused    uint64 `json:"streams_refused"`
-	AuthValid         uint64 `json:"auth_valid"`
-	AuthUntagged      uint64 `json:"auth_untagged"`
-	AuthRefused       uint64 `json:"auth_refused"`
-	AuthThrottled     uint64 `json:"auth_throttled"`
-	SealOpened        uint64 `json:"seal_opened"`
-	SealUnsealed      uint64 `json:"seal_unsealed"`
-	SealRefused       uint64 `json:"seal_refused"`
-}
-
-// readDNSTTStats reads a dnstt backend's counters: one JSON line given to
-// whoever connects, within 2 s.
-func readDNSTTStats(ctx context.Context, path string) (DNSTTStats, error) {
-	var st DNSTTStats
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	c, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
-	if err != nil {
-		return st, err
-	}
-	defer c.Close()
-	if d, ok := ctx.Deadline(); ok {
-		_ = c.SetDeadline(d)
-	}
-	err = json.NewDecoder(io.LimitReader(c, 64<<10)).Decode(&st)
-	return st, err
-}
-
 // addDNSTTStats adds a dnstt service's counters, labelled by service.
-func addDNSTTStats(m *Metrics, service string, st DNSTTStats) {
+func addDNSTTStats(m *Metrics, service string, st dnsttstats.Snapshot) {
 	add := func(name, help string, v uint64, labels ...string) {
 		m.Add(name, help, float64(v), append([]string{"service", service}, labels...)...)
 	}

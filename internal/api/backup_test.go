@@ -201,34 +201,3 @@ func serveStats(t *testing.T, path, line string) {
 		}
 	}()
 }
-
-// A backend that takes the connection and says nothing holds rayctl metrics
-// only until the deadline.
-func TestReadDNSTTStatsSilent(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "stats.sock")
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	held := make(chan net.Conn, 1)
-	go func() {
-		if c, err := ln.Accept(); err == nil {
-			held <- c
-		}
-	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	if _, err := readDNSTTStats(ctx, path); err == nil {
-		t.Fatal("no error from a silent socket")
-	}
-	if d := time.Since(start); d > time.Second {
-		t.Fatalf("held %v", d)
-	}
-	select {
-	case c := <-held:
-		c.Close()
-	default:
-	}
-}
