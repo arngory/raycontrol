@@ -58,6 +58,17 @@ func (s *Store) DNSCheckKey(ctx context.Context) ([]byte, error) {
 	return s.nodeKey(ctx, settingDNSCheckKey)
 }
 
+// RenewDNSCheckKey replaces the node's device key for its DNS check (with
+// rayctl service rotate <dnstt>): the node-check lines of the dnsauth keys
+// change at the next render, and whoever read the old ones is out.
+func (s *Store) RenewDNSCheckKey(ctx context.Context) error {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return err
+	}
+	return s.SetSetting(ctx, settingDNSCheckKey, key)
+}
+
 // nodeKey returns the node's key of 32 bytes kept as setting, making it the
 // first time. Two callers at once get the same key: the first insert wins.
 func (s *Store) nodeKey(ctx context.Context, setting string) ([]byte, error) {

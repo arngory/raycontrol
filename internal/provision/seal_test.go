@@ -53,9 +53,17 @@ func TestRotateSealKey(t *testing.T) {
 
 	now := time.Unix(1_800_000_000, 0)
 	grace := 48 * time.Hour
+	checkBefore, err := st.DNSCheckKey(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	state, err := RotateSealKey(ctx, st, "dns", now, grace, false)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The node's own check key is renewed with the seal key.
+	if checkAfter, err := st.DNSCheckKey(ctx); err != nil || len(checkAfter) != 32 || bytes.Equal(checkAfter, checkBefore) {
+		t.Fatalf("the node's check key not renewed: %v", err)
 	}
 	svc, s1, k := keys()
 	if state.RotatedAt != now.Unix() || state.PrevUntil != now.Add(grace).Unix() || ParseSealState(svc) != state {
