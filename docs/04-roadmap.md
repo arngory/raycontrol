@@ -228,7 +228,7 @@ systemd-юниты, хранение секретов через systemd credent
 - [x] dnsseal-v1: печать обвязки dnstt (`seal=optional|required`); по ревью и предложению клиента — метка HMAC
   (4 байта) вместо проверки нулями, память повторов с `N`.
 - [x] `rcinv2` — короткое приглашение (api-v1 §3a): `rayctl device invite … -format rcinv2`, QR версии 8–9 вместо 17
-  (клиенту — Niko 1.34 вместе с PIN).
+  (клиенту — Niko 1.35).
 - [x] `tcp` в `obs[].dns` и `hints.dns` (probe-v1 §6.1, `probe.report` с `dns_tcp`): резолвер по TCP 53 из Niko 1.34.
 - [x] Ротация ключа печати: `rayctl service rotate <dnstt> [-now]`, прежний ключ принимается `-cred-grace`; нода
   перечитывает ключи без перезапуска.

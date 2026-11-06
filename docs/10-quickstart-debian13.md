@@ -479,7 +479,7 @@ tr -d '\n' < /root/invite.txt | qrencode -o /root/invite.png; shred -u /root/inv
 rayctl device invite u-k3f9-x2qa phone -ttl 30m -qr -pin
 ```
 
-С `-format rcinv2` (с v0.13, нужен Niko 1.34) приглашение вдвое короче, QR — около 60 колонок вместо 95 и легче
+С `-format rcinv2` (с v0.13, нужен Niko 1.35) приглашение вдвое короче, QR — около 60 колонок вместо 95 и легче
 для камеры (api-v1 §3a):
 
 ```bash

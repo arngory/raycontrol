@@ -55,7 +55,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv1|rcinv2]
                                             a one-time invite: the client registers the device itself
                                             through the remote API (service add api api); rcinv2 is
-                                            the short form (QR half the size, Niko 1.34 or later)
+                                            the short form (QR half the size, Niko 1.35 or later)
   audit [-n 50]
   admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA
   relay add NAME ADDRESS | list | remove NAME   relays in front of the node (relay-v1): one address
@@ -636,7 +636,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		out := fs.String("o", "", "write the invite alone to this file (mode 0600) instead of the screen")
 		showQR := fs.Bool("qr", false, "draw the invite as a QR code on the screen for the phone to scan, instead of the text")
 		withPIN := fs.Bool("pin", false, "the invite also needs a PIN of 6 digits, shown here once: tell it by another channel")
-		format := fs.String("format", "rcinv1", "rcinv1, or rcinv2: the short form, a QR half the size (Niko 1.34 or later)")
+		format := fs.String("format", "rcinv1", "rcinv1, or rcinv2: the short form, a QR half the size (Niko 1.35 or later)")
 		if err := need(args, 2); err != nil {
 			return err
 		}
