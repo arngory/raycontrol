@@ -66,6 +66,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   dns cloudflare [-token-file F]            records and wildcard certificates through Cloudflare
                                             (token asked for without echo when no file is given)
   dns sync                                  bring the zone in line now
+  dns check [-now] [-resolver google,nsdi,udp:IP,…]
+                                            the DNS tunnel zones from the node: delegation, front,
+                                            backend, resolvers (rayd's last check; -now: at once)
   dns remove [-keep-records]                delete raycontrol's records and forget the provider
   summary [show] [-days 7]                  client summaries: networks with enough reports (R4-21)
   summary on|off                            take client reports (and give hints) or not
@@ -287,6 +290,10 @@ func loopState(l *nodev1.LoopHealth, now time.Time) string {
 	// failing comes from rayd after v0.10.0; an older one gives the times.
 	if l.Failing || l.LastError > l.LastOk {
 		return fmt.Sprintf("FAILED %s: %s (last ok %s)", ago(l.LastError), l.Error, ago(l.LastOk))
+	}
+	if l.Detail != "" {
+		// What the round found (dns-zone: the zone's summary).
+		return "ok " + ago(l.LastOk) + ": " + l.Detail
 	}
 	return "ok " + ago(l.LastOk)
 }

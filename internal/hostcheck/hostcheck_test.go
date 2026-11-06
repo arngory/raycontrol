@@ -3,6 +3,7 @@ package hostcheck
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/netip"
 	"os"
@@ -291,5 +292,33 @@ func TestParseHexAddr(t *testing.T) {
 	}
 	if !VersionLess("6.1.0-27-amd64", "6.1.0-28-amd64") || VersionLess("6.12.9", "6.2.1") || !VersionLess("5.14.0-427.el9", "5.14.0-503.el9") {
 		t.Fatal("VersionLess")
+	}
+}
+
+// The Internet level (rayd's check of the DNS zones): shown, never a
+// failure of the host, not in a quiet report.
+func TestInternetLevel(t *testing.T) {
+	rs := []Result{{Level: Required, Name: "nftables", OK: true},
+		{Level: Internet, Name: "DNS zone t3x.example.com (dns)", OK: false, Detail: "example.com has no NS for t3x.example.com", Fix: "rayctl dns sync"},
+		{Level: Internet, Name: "DNS zone k2p.example.com (mdns)", OK: true, Detail: "delegated; 3/3 resolvers (4m ago)"}}
+	if f := Failed(rs); len(f) != 0 {
+		t.Fatalf("failed %+v", f)
+	}
+	var b bytes.Buffer
+	Report(&b, rs, false)
+	for _, want := range []string{"Internet: the node's DNS zones as rayd last checked them (rayctl dns check)\n",
+		"  FAIL  DNS zone t3x.example.com (dns): example.com has no NS for t3x.example.com\n          → rayctl dns sync\n",
+		"  ok    DNS zone k2p.example.com (mdns): delegated; 3/3 resolvers (4m ago)\n"} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("report lacks %q:\n%s", want, b.String())
+		}
+	}
+	b.Reset()
+	Report(&b, rs, true)
+	if strings.Contains(b.String(), "DNS zone") {
+		t.Fatalf("quiet report:\n%s", b.String())
+	}
+	if j, err := json.Marshal(rs[1]); err != nil || !strings.Contains(string(j), `"level":"internet"`) {
+		t.Fatalf("json %s %v", j, err)
 	}
 }
