@@ -345,3 +345,13 @@ func TestCheckUpdates(t *testing.T) {
 		t.Fatalf("no release: %+v", l)
 	}
 }
+
+// A spare zone's loop goes by its zone, the main one's by its service.
+func TestDNSZoneLoop(t *testing.T) {
+	if got := dnsZoneLoop(dnscheck.Zone{Service: "dns", Name: "t.example.com"}); got != "dns" {
+		t.Errorf("main %q", got)
+	}
+	if got := dnsZoneLoop(dnscheck.Zone{Service: "dns", Name: "s.example.net", Spare: true}); got != "dns s.example.net" {
+		t.Errorf("spare %q", got)
+	}
+}

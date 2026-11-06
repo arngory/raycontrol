@@ -317,6 +317,36 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			// As the front and the delegation compare it.
 			settings["zone"] = canonicalZone(zs)
 		}
+		if raw, ok := settings["spare_zones"]; ok {
+			// As service set takes them: a number, or the zones.
+			var value string
+			switch x := raw.(type) {
+			case float64:
+				value = strconv.FormatFloat(x, 'f', -1, 64)
+			case []any:
+				for i, z := range x {
+					zs, ok := z.(string)
+					if !ok {
+						return svc, fmt.Errorf("%w spare_zones: a number or a list of zones", store.ErrInvalid)
+					}
+					if i > 0 {
+						value += ","
+					}
+					value += zs
+				}
+			default:
+				return svc, fmt.Errorf("%w spare_zones: a number or a list of zones", store.ErrInvalid)
+			}
+			main, _ := json.Marshal(map[string]any{"zone": settings["zone"]})
+			spares, err := spareZones(ctx, st, store.Service{Name: svc.Name, Settings: string(main)}, all, value)
+			if err != nil {
+				return svc, err
+			}
+			delete(settings, "spare_zones")
+			if len(spares) > 0 {
+				settings["spare_zones"] = spares
+			}
+		}
 		if svc.Kind == "dnstt" {
 			key, err := ecdh.X25519().GenerateKey(rand.Reader)
 			if err != nil {
@@ -681,7 +711,40 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 		return svc, err
 	}
 	var v any
+	also := map[string]any{} // other settings the change makes
 	switch {
+	case (svc.Kind == "dnstt" || svc.Kind == "masterdns") && key == "spare_zones":
+		// Spare zones of the tunnel (spec/dnszones-v1.md §5): delegated
+		// and served as the main zone, in the links so that clients move
+		// to them by themselves when the main one is blocked.
+		all, err := st.ListServices(ctx)
+		if err != nil {
+			return svc, err
+		}
+		spares, err := spareZones(ctx, st, svc, all, value)
+		if err != nil {
+			return svc, err
+		}
+		v = 0
+		if len(spares) > 0 {
+			v = spares
+		}
+	case (svc.Kind == "dnstt" || svc.Kind == "masterdns") && key == "zone":
+		// A spare zone becomes the main one, and the main one leaves
+		// (§5): clients have the new main zone already, as a spare, and
+		// lose the old one with their next subscription.
+		z := canonicalZone(value)
+		spares := SpareZones(svc)
+		i := slices.Index(spares, z)
+		if i < 0 {
+			return svc, fmt.Errorf("%w zone %s: not a spare zone of %s (spare zones: %s); clients must have a zone before it becomes the main one",
+				store.ErrInvalid, value, svc.Name, strings.Join(spares, ", "))
+		}
+		v = z
+		also["spare_zones"] = 0
+		if rest := slices.Delete(slices.Clone(spares), i, i+1); len(rest) > 0 {
+			also["spare_zones"] = rest
+		}
 	case svc.Kind == "site" && key == "answer":
 		if !slices.Contains(site.Answers, value) {
 			return svc, fmt.Errorf("%w site answer %q: want one of %s", store.ErrInvalid, value, strings.Join(site.Answers, ", "))
@@ -740,15 +803,18 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			v = 0
 		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt: auth, seal)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt: auth, seal, spare_zones, zone; masterdns: spare_zones, zone)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
 		return svc, err
 	}
-	settings[key] = v
-	if v == 0 {
-		delete(settings, key)
+	also[key] = v
+	for k, x := range also {
+		settings[k] = x
+		if x == 0 {
+			delete(settings, k)
+		}
 	}
 	b, err := json.Marshal(settings)
 	if err != nil {
@@ -875,8 +941,9 @@ func ACMEPort(ctx context.Context, st *store.Store) (uint16, error) {
 	return 0, errors.New("no free port for the ACME responder")
 }
 
-// newZone returns "<label>.<domain>" with a random label not used yet.
-func newZone(ctx context.Context, st *store.Store, all []store.Service) (string, error) {
+// newZone returns "<label>.<domain>" with a random label not used yet, by
+// all nor among taken (zones chosen in the same change).
+func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ...string) (string, error) {
 	domain, err := Domain(ctx, st)
 	if err != nil {
 		return "", err
@@ -897,27 +964,35 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service) (string,
 			label[i] = alphabet[n]
 		}
 		zone := string(label) + "." + domain
-		if zone != string(ns) && zoneConflict(zone, all) == "" && !slices.ContainsFunc(all, func(s store.Service) bool { return strings.Contains(s.Settings, `"`+zone+`"`) }) {
+		if zone != string(ns) && zoneConflict(zone, all) == "" && !slices.ContainsFunc(taken, func(t string) bool { return zonesClash(zone, t) }) &&
+			!slices.ContainsFunc(all, func(s store.Service) bool { return strings.Contains(s.Settings, `"`+zone+`"`) }) {
 			return zone, nil
 		}
 	}
 }
 
-// zoneConflict names the DNS tunnel service among all whose zone is zone,
-// or holds it, or lies within it; "" when none does. The front refuses
-// such zones (niko-server v0.11.0): a name under both is either's, and a
-// tunnel's last label of data can spell the inner zone.
+// zoneConflict names the DNS tunnel service among all one of whose zones
+// (the main one or a spare) is zone, or holds it, or lies within it; ""
+// when none does. The front refuses such zones (niko-server v0.11.0): a
+// name under both is either's, and a tunnel's last label of data can
+// spell the inner zone.
 func zoneConflict(zone string, all []store.Service) string {
 	for _, svc := range all {
 		if svc.Kind != "dnstt" && svc.Kind != "masterdns" {
 			continue
 		}
-		other := Zone(svc)
-		if other != "" && (other == zone || strings.HasSuffix(zone, "."+other) || strings.HasSuffix(other, "."+zone)) {
-			return svc.Name
+		for _, other := range Zones(svc) {
+			if zonesClash(zone, other) {
+				return svc.Name
+			}
 		}
 	}
 	return ""
+}
+
+// zonesClash reports whether two zones are one, or one holds the other.
+func zonesClash(a, b string) bool {
+	return a == b || strings.HasSuffix(a, "."+b) || strings.HasSuffix(b, "."+a)
 }
 
 // Zone returns the "zone" setting of a DNS tunnel service as the front,
@@ -929,6 +1004,94 @@ func Zone(svc store.Service) string {
 	}
 	_ = json.Unmarshal([]byte(svc.Settings), &s)
 	return canonicalZone(s.Zone)
+}
+
+// MaxSpareZones is how many spare zones a DNS tunnel takes (niko-server's
+// options.zones, spec/dnszones-v1.md §2).
+const MaxSpareZones = 4
+
+// SpareZones returns the spare zones of a DNS tunnel service
+// (spec/dnszones-v1.md), in the order clients try them.
+func SpareZones(svc store.Service) []string {
+	var s struct {
+		Spare []string `json:"spare_zones"`
+	}
+	_ = json.Unmarshal([]byte(svc.Settings), &s)
+	var out []string
+	for _, z := range s.Spare {
+		if z = canonicalZone(z); z != "" {
+			out = append(out, z)
+		}
+	}
+	return out
+}
+
+// Zones is a DNS tunnel service's main zone and its spares; none without
+// a main zone. The node delegates and serves each the same way.
+func Zones(svc store.Service) []string {
+	z := Zone(svc)
+	if z == "" {
+		return nil
+	}
+	return append([]string{z}, SpareZones(svc)...)
+}
+
+// spareZones reads the spare zones asked for a service: none ("", "0",
+// "none"), a number of zones made up in the node's domain as a main zone
+// is (those it has stay, the first ones), or the operator's own, comma
+// separated. Each must be a DNS name, none twice, none clashing with the
+// service's main zone, another service's zones or the name the zones are
+// delegated to.
+func spareZones(ctx context.Context, st *store.Store, svc store.Service, all []store.Service, value string) ([]string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "0" || value == "none" {
+		return nil, nil
+	}
+	main := Zone(svc)
+	var others []store.Service
+	for _, o := range all {
+		if o.ID != svc.ID {
+			others = append(others, o)
+		}
+	}
+	ns, _ := st.GetSetting(ctx, settingNSName)
+	if n, err := strconv.Atoi(value); err == nil {
+		if n < 0 || n > MaxSpareZones {
+			return nil, fmt.Errorf("%w spare_zones=%d: 0 to %d", store.ErrInvalid, n, MaxSpareZones)
+		}
+		out := SpareZones(svc)
+		if len(out) > n {
+			return out[:n], nil
+		}
+		for len(out) < n {
+			z, err := newZone(ctx, st, all, append([]string{main}, out...)...)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, z)
+		}
+		return out, nil
+	}
+	var out []string
+	for _, raw := range strings.Split(value, ",") {
+		z := canonicalZone(strings.TrimSpace(raw))
+		switch {
+		case !zoneName.MatchString(z) || len(z) > 253:
+			return nil, fmt.Errorf("%w spare zone %q: a DNS name of two labels or more", store.ErrInvalid, raw)
+		case zonesClash(z, main) || slices.ContainsFunc(out, func(o string) bool { return zonesClash(z, o) }):
+			return nil, fmt.Errorf("%w spare zone %s: the same as, or nested with, another zone of %s", store.ErrInvalid, z, svc.Name)
+		case len(ns) > 0 && zonesClash(z, string(ns)):
+			return nil, fmt.Errorf("%w spare zone %s: the name the zones are delegated to is %s", store.ErrInvalid, z, ns)
+		}
+		if other := zoneConflict(z, others); other != "" {
+			return nil, fmt.Errorf("%w spare zone %s: the same as, or nested with, a zone of %s", store.ErrInvalid, z, other)
+		}
+		out = append(out, z)
+	}
+	if len(out) > MaxSpareZones {
+		return nil, fmt.Errorf("%w spare_zones: %d zones, %d at most", store.ErrInvalid, len(out), MaxSpareZones)
+	}
+	return out, nil
 }
 
 func canonicalZone(z string) string { return strings.ToLower(strings.TrimSuffix(z, ".")) }

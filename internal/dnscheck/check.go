@@ -34,6 +34,7 @@ type Zone struct {
 	Service string // the service's name
 	Kind    string // dnstt | masterdns
 	Name    string // the zone
+	Spare   bool   // a spare zone of the service (spec/dnszones-v1.md), not its main one
 	// NS is the name the parent should delegate the zone to; "" when the
 	// delegation is the operator's own.
 	NS string

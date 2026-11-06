@@ -173,3 +173,18 @@ func TestProbeDNSZones(t *testing.T) {
 		t.Fatalf("masterdns %+v", m)
 	}
 }
+
+// rayctl service list: a DNS tunnel's spare zones after its keys.
+func TestKeyStateSpareZones(t *testing.T) {
+	d := &nodev1.Service{Kind: "dnstt", SettingsJson: `{"auth":"required","seal":"optional","spare_zones":["s.example.net","u.example.org"]}`}
+	if got := keyState(d); got != "auth required, seal optional, spare zones s.example.net u.example.org" {
+		t.Errorf("dnstt %q", got)
+	}
+	m := &nodev1.Service{Kind: "masterdns", SettingsJson: `{"zone":"m.example.com","spare_zones":["v.example.net"]}`}
+	if got := keyState(m); got != "spare zones v.example.net" {
+		t.Errorf("masterdns %q", got)
+	}
+	if got := keyState(&nodev1.Service{Kind: "masterdns", SettingsJson: `{}`}); got != "" {
+		t.Errorf("masterdns without spares %q", got)
+	}
+}

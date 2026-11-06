@@ -46,7 +46,10 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service enable|disable|del NAME
   service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false;
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
-                                            yggdrasil: peers=URI,URI|none (public peers, then rayctl apply)
+                                            yggdrasil: peers=URI,URI|none (public peers, then rayctl apply);
+                                            dnstt: auth=, seal=off|optional|required; dnstt, masterdns:
+                                            spare_zones=N|ZONE,ZONE|none (spare zones, made up or your own),
+                                            zone=SPARE (a spare becomes the main zone, the main one leaves)
   service cert SITE -chain F -key F         a certificate of your own for the site and the services under
                                             it, in place of ACME's (on the node only)
   service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
@@ -586,7 +589,10 @@ func keyState(s *nodev1.Service) string {
 		if st.PrevUntil != 0 {
 			out += ", previous key until " + day(st.PrevUntil)
 		}
-		return out
+		return out + spareZones(s)
+	}
+	if s.Kind == "masterdns" {
+		return strings.TrimPrefix(spareZones(s), ", ")
 	}
 	if s.Kind != "reality" {
 		return ""
@@ -615,6 +621,19 @@ func keyState(s *nodev1.Service) string {
 		out += ", previous keys until " + day(st.PrevUntil) // R4-19
 	}
 	return out
+}
+
+// spareZones lists a DNS tunnel's spare zones (spec/dnszones-v1.md) after
+// its keys, "" without any.
+func spareZones(s *nodev1.Service) string {
+	var st struct {
+		Spare []string `json:"spare_zones"`
+	}
+	_ = json.Unmarshal([]byte(s.SettingsJson), &st)
+	if len(st.Spare) == 0 {
+		return ""
+	}
+	return ", spare zones " + strings.Join(st.Spare, " ")
 }
 
 func (c *cli) device(ctx context.Context, sub string, args []string) error {

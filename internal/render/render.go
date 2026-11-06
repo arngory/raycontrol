@@ -494,22 +494,31 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if inner == nil {
 				return errors.New("needs the inner stage, which is missing or disabled")
 			}
-			zone := provision.Zone(s.Service)
-			r := route{Zone: zone, Backend: s.Name, Probe: s.Kind == "dnstt" && len(m.DNSProbeKey) == 32}
+			all := provision.Zones(s.Service)
+			if len(all) == 0 {
+				return errors.New("no zone")
+			}
+			r := route{Backend: s.Name, Probe: s.Kind == "dnstt" && len(m.DNSProbeKey) == 32}
 			// A zone whose answers are all sealed: the front pads its
 			// probe answers as they are (dnsseal-v1 §6).
 			r.SealPad = r.Probe && DNSSealMode(s.Service) == "required"
 			if s.Kind == "dnstt" && m.NSName != "" {
 				r.NS = []string{m.NSName}
 			}
-			zones = append(zones, r)
+			// Each zone, the spare ones as the main one: the same
+			// backend, probe, apex and padding (spec/dnszones-v1.md §4;
+			// the front does not tie a tunnel's entries together).
+			for _, z := range all {
+				r.Zone = z
+				zones = append(zones, r)
+			}
 			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
 			keys, ok := m.DNSAuth[s.ID]
 			if !ok && s.Kind == "dnstt" && DNSAuthMode(s.Service) != "off" {
 				// An empty keys file would lock every device out.
 				return errors.New("dnsauth keys not collected (render.CollectForRender)")
 			}
-			f, secrets, auth, err := dnsBackend(s, zone, inner.Name, p, keys, m.nikoLevel())
+			f, secrets, auth, err := dnsBackend(s, all, inner.Name, p, keys, m.nikoLevel())
 			if err != nil {
 				return err
 			}
@@ -777,7 +786,9 @@ func accessFiles(s Service, m Model, p Paths, inner *Service) []File {
 	return out
 }
 
-func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level string) (cfg File, secrets []File, auth *File, err error) {
+// dnsBackend renders a DNS tunnel's backend for its zones, the main one
+// first.
+func dnsBackend(s Service, zones []string, inner string, p Paths, authKeys []string, level string) (cfg File, secrets []File, auth *File, err error) {
 	opts := map[string]any{}
 	// dnsauth-v1 (spec/dnsauth-v1.md): the devices' keys in a file of the
 	// service group (the front is in none, R4-28), which the backend
@@ -798,7 +809,11 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level
 	switch s.Kind {
 	case "dnstt":
 		secretValue = []byte(hex.EncodeToString(s.Secrets[provision.SecretNoisePrivate]) + "\n")
-		opts["zone"] = zone
+		opts["zone"] = zones[0]
+		if len(zones) > 1 {
+			// Spare zones of the same tunnel (niko-server v0.11.0).
+			opts["zones"] = zones[1:]
+		}
 		opts["private_key_file"] = p.Credential(s.Name, secretName)
 		// dnsseal-v1 (spec/dnsseal-v1.md): the keys in a file of the
 		// service group, as dnsauth's, which the backend rereads (niko-
@@ -830,7 +845,7 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level
 		}
 		_ = json.Unmarshal([]byte(s.Settings), &settings)
 		secretValue = s.Secrets[provision.SecretMasterDNSKey]
-		opts["zones"] = []string{zone}
+		opts["zones"] = zones // masterdns takes a list as it is (DOMAIN)
 		opts["encryption_method"] = settings.Method
 		opts["encryption_key_file"] = p.Credential(s.Name, secretName)
 	}

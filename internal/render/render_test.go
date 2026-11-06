@@ -670,3 +670,73 @@ func sealKeyLines(b []byte) []string {
 	}
 	return out
 }
+
+// Spare zones (spec/dnszones-v1.md §4): a front entry each, with the main
+// zone's backend, probe, apex and padding; dnstt takes them as options.zones
+// (niko-server v0.11.0), masterdns in its list.
+func TestRenderSpareZones(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	st.SetSetting(ctx, "dns_ns_name", []byte("ns9.example.com"))
+	if _, err := provision.SetServiceOption(ctx, st, "dns", "spare_zones", "s.example.net,u.example.org"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "dns", "seal", "required"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "mdns", "spare_zones", "v.example.net"); err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := st.ServiceByName(ctx, "dns")
+	mdns, _ := st.ServiceByName(ctx, "mdns")
+	m, err := render.CollectForRender(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, skipped, err := render.Render(m, render.DefaultPaths)
+	if err != nil || len(skipped) != 0 {
+		t.Fatalf("%v %v", skipped, err)
+	}
+	byPath := map[string]render.File{}
+	for _, f := range files {
+		byPath[f.Path] = f
+	}
+	var front struct {
+		DNS struct {
+			Zones []struct {
+				Zone, Backend string
+				Probe         bool     `json:"probe"`
+				SealPad       bool     `json:"seal_pad"`
+				NS            []string `json:"ns"`
+			} `json:"zones"`
+		} `json:"dns"`
+	}
+	if err := json.Unmarshal(byPath["/var/lib/raycontrol/rendered/front/front.json"].Content, &front); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, z := range front.DNS.Zones {
+		got[z.Zone] = z.Backend
+		if dnstt := z.Backend == "dns"; z.Probe != dnstt || z.SealPad != dnstt || dnstt != slices.Equal(z.NS, []string{"ns9.example.com"}) {
+			t.Errorf("zone %+v", z)
+		}
+	}
+	want := map[string]string{provision.Zone(dns): "dns", "s.example.net": "dns", "u.example.org": "dns", provision.Zone(mdns): "mdns", "v.example.net": "mdns"}
+	if !maps.Equal(got, want) {
+		t.Fatalf("front zones %v, want %v", got, want)
+	}
+	var dnstt, md struct {
+		Options struct {
+			Zone  string   `json:"zone"`
+			Zones []string `json:"zones"`
+		} `json:"options"`
+	}
+	json.Unmarshal(byPath["/var/lib/raycontrol/rendered/dns/backend.json"].Content, &dnstt)
+	json.Unmarshal(byPath["/var/lib/raycontrol/rendered/mdns/backend.json"].Content, &md)
+	if dnstt.Options.Zone != provision.Zone(dns) || !slices.Equal(dnstt.Options.Zones, []string{"s.example.net", "u.example.org"}) {
+		t.Fatalf("dnstt options %+v", dnstt.Options)
+	}
+	if md.Options.Zone != "" || !slices.Equal(md.Options.Zones, []string{provision.Zone(mdns), "v.example.net"}) {
+		t.Fatalf("masterdns options %+v", md.Options)
+	}
+}

@@ -904,6 +904,16 @@ func checkRealityTargets(ctx context.Context, st *store.Store, changes func() <-
 	}
 }
 
+// dnsZoneLoop names a zone's loop in rayctl status after "dns-zone ": the
+// main zone by its service, as before; a spare one by its service and
+// itself (spec/dnszones-v1.md).
+func dnsZoneLoop(z dnscheck.Zone) string {
+	if z.Spare {
+		return z.Service + " " + z.Name
+	}
+	return z.Service
+}
+
 // dnsMonitor checks the node's DNS tunnel zones (internal/dnscheck): every
 // full check with rayd's resolvers goes to the health board, a loop per
 // zone ("dns-zone <service>" in rayctl status), and a zone's failure to
@@ -921,21 +931,22 @@ func dnsMonitor(ctx context.Context, st *store.Store, resolvers []dnscheck.Resol
 			var services []string
 			for _, z := range rep.Zones {
 				svc := z.Zone.Service
-				services = append(services, svc)
+				loop := dnsZoneLoop(z.Zone)
+				services = append(services, loop)
 				err := z.Err()
-				hb.Report("dns-zone "+svc, z.Summary(), err)
+				hb.Report("dns-zone "+loop, z.Summary(), err)
 				msg := ""
 				if err != nil {
 					msg = err.Error()
 				}
 				switch {
-				case msg == logged[svc]:
+				case msg == logged[loop]:
 				case err != nil:
 					log.Warn("DNS zone check failed", "service", svc, "zone", z.Zone.Name, "err", err)
 				default:
 					log.Info("DNS zone check passes again", "service", svc, "zone", z.Zone.Name)
 				}
-				logged[svc] = msg
+				logged[loop] = msg
 			}
 			hb.Retain("dns-zone ", services)
 		}}
@@ -969,7 +980,7 @@ func checkDNSZones(ctx context.Context, mon *dnscheck.Monitor, st *store.Store, 
 		if err == nil {
 			services := make([]string, 0, len(zones))
 			for _, z := range zones {
-				services = append(services, z.Service)
+				services = append(services, dnsZoneLoop(z))
 			}
 			hb.Retain("dns-zone ", services)
 		}
