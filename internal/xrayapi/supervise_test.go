@@ -64,6 +64,15 @@ func TestSupervisedNode(t *testing.T) {
 			t.Skipf("port 443 (%s): %v; run as root or with net.ipv4.ip_unprivileged_port_start=0", network, err)
 		}
 	}
+	// And UDP 53 on every address, beside systemd-resolved's stub, as the
+	// front takes it (SO_REUSEADDR): a host where another service holds
+	// port 53 without it (a CI runner had one on 127.0.0.100) cannot run
+	// the front at all, so not this test.
+	if pc, err := listenUDPReuse(":53"); err != nil {
+		t.Skipf("UDP 53 beside the stub: %v; another service holds port 53 on this host", err)
+	} else {
+		pc.Close()
+	}
 	ip := hostAddr(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
