@@ -51,6 +51,8 @@ func node(t *testing.T) *store.Store {
 func TestRender(t *testing.T) {
 	ctx := context.Background()
 	st := node(t)
+	// The name the tunnel zones are delegated to (DNSRecords chooses it).
+	st.SetSetting(ctx, "dns_ns_name", []byte("ns9.example.com"))
 	m, err := render.Collect(ctx, st)
 	if err != nil {
 		t.Fatal(err)
@@ -148,8 +150,9 @@ func TestRender(t *testing.T) {
 		DNS struct {
 			ProbeKeyFile string `json:"probe_key_file"`
 			Zones        []struct {
-				Backend string `json:"backend"`
-				Probe   bool   `json:"probe"`
+				Backend string   `json:"backend"`
+				Probe   bool     `json:"probe"`
+				NS      []string `json:"ns"`
 			} `json:"zones"`
 		} `json:"dns"`
 	}
@@ -157,6 +160,10 @@ func TestRender(t *testing.T) {
 	for _, z := range probeCfg.DNS.Zones {
 		if z.Probe != (z.Backend == "dns") {
 			t.Errorf("zone of %s: probe %v", z.Backend, z.Probe)
+		}
+		// The apex too: dnstt zones only.
+		if dnstt := z.Backend == "dns"; dnstt != slices.Equal(z.NS, []string{"ns9.example.com"}) || !dnstt && z.NS != nil {
+			t.Errorf("zone of %s: ns %v", z.Backend, z.NS)
 		}
 	}
 	probeKey := byPath["/var/lib/raycontrol/rendered/front/dnsprobe.key"]

@@ -237,24 +237,55 @@ func (c *cli) restartNode(ctx context.Context, want string) error {
 	if err := run("systemctl", "restart", "rayspa.service"); err != nil {
 		return err
 	}
-	out, _ := exec.Command("systemctl", "list-units", "niko-*", "--state=active", "--plain", "--no-legend").Output()
+	out, _ := exec.Command("systemctl", "list-units", "niko-*.service", "--state=active", "--plain", "--no-legend").Output()
+	restarts := map[string]string{} // each data-plane unit's restarts once restarted
+	var units []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if f := strings.Fields(line); len(f) > 0 {
 			if err := run("systemctl", "try-restart", f[0]); err != nil {
 				return err
 			}
+			st, _ := unitState(f[0])()
+			units, restarts[f[0]] = append(units, f[0]), st["NRestarts"]
 		}
 	}
 	for i := 0; ; i++ {
 		if exec.Command("systemctl", "is-active", "--quiet", "rayspa.service").Run() == nil &&
 			exec.Command("nft", "list", "table", "inet", "raycontrol").Run() == nil {
-			return nil
+			break
 		}
 		if i == 30 {
 			return errors.New("rayspa did not bring the perimeter back (journalctl -u rayspa)")
 		}
 		time.Sleep(time.Second)
 	}
+	return waitDataPlane(ctx, units, restarts, unitState, 3*time.Second, 30*time.Second, 500*time.Millisecond)
+}
+
+// waitDataPlane waits for each data-plane unit that ran before the update
+// to run after it, and still a moment later: a config the new niko-server
+// refuses, or a crash at start (a restart, or a unit that stays down),
+// fails the update, which then puts the previous binaries back. The units
+// of the front carry TCP and UDP 443 and DNS: without this check an update
+// could leave the node with none and report success.
+func waitDataPlane(ctx context.Context, units []string, restarts map[string]string,
+	state func(string) func() (map[string]string, error), settle, limit, every time.Duration) error {
+	for _, u := range units {
+		if err := waitUnit(ctx, u, state(u), restarts[u], limit, every); err != nil {
+			return err
+		}
+	}
+	select {
+	case <-ctx.Done():
+		return errInterrupted
+	case <-time.After(settle):
+	}
+	for _, u := range units {
+		if err := waitUnit(ctx, u, state(u), restarts[u], limit, every); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // waitRayd waits until rayd answers, with the version wanted ("local" and

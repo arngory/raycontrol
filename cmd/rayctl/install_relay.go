@@ -568,22 +568,18 @@ func forwardingAtBoot(dirs []string) (value, file string) {
 }
 
 // showUnit reads rayspa's unit state from systemd.
-func showUnit() (map[string]string, error) {
-	out, err := commandApart("systemctl", "show", "-p", "ActiveState,SubState,Result,NRestarts,Job", relayUnit).Output()
-	st := map[string]string{}
-	for _, line := range strings.Split(string(out), "\n") {
-		if k, v, ok := strings.Cut(line, "="); ok {
-			st[k] = strings.TrimSpace(v)
-		}
-	}
-	return st, err
-}
+func showUnit() (map[string]string, error) { return unitState(relayUnit)() }
 
 // waitActive waits for rayspa to run: active, not restarted since base
 // restarts, the start result a success. With Restart=always it is never
 // "failed": a crash loop shows as restarts. While the start job is queued
 // (network-online.target), Result and NRestarts are the last run's.
 func waitActive(ctx context.Context, show func() (map[string]string, error), base string, limit, every time.Duration) error {
+	return waitUnit(ctx, "rayspa", show, base, limit, every)
+}
+
+// waitUnit is waitActive for any unit, named in the errors.
+func waitUnit(ctx context.Context, unit string, show func() (map[string]string, error), base string, limit, every time.Duration) error {
 	deadline := time.Now().Add(limit)
 	for {
 		st, _ := show()
@@ -592,21 +588,35 @@ func waitActive(ctx context.Context, show func() (map[string]string, error), bas
 		case strings.HasPrefix(st["SubState"], "auto-restart"):
 			// Exited, to be started again: before systemd 254 the start
 			// job stays queued through it.
-			return fmt.Errorf("rayspa exited (%s, %s): journalctl -u rayspa says why", st["SubState"], st["Result"])
+			return fmt.Errorf("%s exited (%s, %s): journalctl -u %s says why", unit, st["SubState"], st["Result"], unit)
 		case !queued && restartedSince(st, base):
-			return fmt.Errorf("rayspa restarted (%s times): journalctl -u rayspa says why", st["NRestarts"])
+			return fmt.Errorf("%s restarted (%s times): journalctl -u %s says why", unit, st["NRestarts"], unit)
 		case !queued && st["Result"] != "" && st["Result"] != "success":
-			return fmt.Errorf("rayspa did not start (%s): journalctl -u rayspa says why", st["Result"])
+			return fmt.Errorf("%s did not start (%s): journalctl -u %s says why", unit, st["Result"], unit)
 		case !queued && st["ActiveState"] == "active" && st["SubState"] == "running":
 			return nil
 		case time.Now().After(deadline):
-			return fmt.Errorf("rayspa did not start within %v (%s/%s): journalctl -u rayspa says why", limit, st["ActiveState"], st["SubState"])
+			return fmt.Errorf("%s did not start within %v (%s/%s): journalctl -u %s says why", unit, limit, st["ActiveState"], st["SubState"], unit)
 		}
 		select {
 		case <-ctx.Done():
 			return errInterrupted
 		case <-time.After(every):
 		}
+	}
+}
+
+// unitState reads a unit's state as waitUnit wants it.
+func unitState(unit string) func() (map[string]string, error) {
+	return func() (map[string]string, error) {
+		out, err := commandApart("systemctl", "show", "-p", "ActiveState,SubState,Result,NRestarts,Job", unit).Output()
+		st := map[string]string{}
+		for _, line := range strings.Split(string(out), "\n") {
+			if k, v, ok := strings.Cut(line, "="); ok {
+				st[k] = strings.TrimSpace(v)
+			}
+		}
+		return st, err
 	}
 }
 

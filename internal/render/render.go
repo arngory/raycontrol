@@ -118,6 +118,9 @@ type Model struct {
 	// DNSProbeKey is the node's dnsprobe-v1 key (docs/spec/dnsprobe-v1.md)
 	// when it has a DNS tunnel: the front answers resolver checks with it.
 	DNSProbeKey []byte
+	// NSName is the name DNS tunnel zones are delegated to ("" before
+	// one is chosen): the front answers the apex of dnstt zones with it.
+	NSName string
 	// Debug: the debug window is open (rayctl debug): niko-server logs at
 	// debug level. Xray stays at warning: at info it logs the users'
 	// destinations.
@@ -199,6 +202,9 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 	// later through the API finds it there (a front told to read a key
 	// its unit never copied in would stay down, 443 and 53 with it).
 	if m.DNSProbeKey, err = st.DNSProbeKey(ctx); err != nil {
+		return m, err
+	}
+	if m.NSName, err = provision.NSName(ctx, st); err != nil {
 		return m, err
 	}
 
@@ -439,6 +445,9 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		// Probe: the front answers dnsprobe-v1 in this zone. dnstt
 		// only: the answers are built as dnstt's.
 		Probe bool `json:"probe,omitempty"`
+		// NS: the name the zone is delegated to; the front answers SOA
+		// and NS at its apex (niko-server v0.9.0). dnstt only, as Probe.
+		NS []string `json:"ns,omitempty"`
 	}
 	type backendRef struct {
 		Socket string `json:"socket"`
@@ -470,7 +479,11 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				return errors.New("needs the inner stage, which is missing or disabled")
 			}
 			zone := provision.Zone(s.Service)
-			zones = append(zones, route{Zone: zone, Backend: s.Name, Probe: s.Kind == "dnstt" && len(m.DNSProbeKey) == 32})
+			r := route{Zone: zone, Backend: s.Name, Probe: s.Kind == "dnstt" && len(m.DNSProbeKey) == 32}
+			if s.Kind == "dnstt" && m.NSName != "" {
+				r.NS = []string{m.NSName}
+			}
+			zones = append(zones, r)
 			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
 			keys, ok := m.DNSAuth[s.ID]
 			if !ok && s.Kind == "dnstt" && DNSAuthMode(s.Service) != "off" {

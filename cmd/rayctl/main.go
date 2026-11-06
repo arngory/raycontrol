@@ -50,7 +50,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
   device revoke ID                          a device, or an invite not yet used
-  device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE]
+  device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE | -qr]
                                             a one-time invite: the client registers the device itself
                                             through the remote API (service add api api)
   audit [-n 50]
@@ -600,11 +600,15 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		role := fs.String("role", "user", "user or admin")
 		ttl := fs.Duration("ttl", 24*time.Hour, "how long the invite works (up to a week)")
 		out := fs.String("o", "", "write the invite alone to this file (mode 0600) instead of the screen")
+		showQR := fs.Bool("qr", false, "draw the invite as a QR code on the screen for the phone to scan, instead of the text")
 		if err := need(args, 2); err != nil {
 			return err
 		}
 		if err := fs.Parse(args[2:]); err != nil {
 			return errUsage
+		}
+		if *showQR && (*out != "" || c.json) {
+			return fmt.Errorf("%w: -qr draws on the screen: not with -o or -json", errUsage)
 		}
 		r, err := c.c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{
 			User: args[0], Name: args[1], Role: *role, TtlSeconds: int64(ttl.Seconds())}))
@@ -617,6 +621,13 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 				return fmt.Errorf("invite %s made, but not written (rayctl device revoke %s): %w", inv.Id, inv.Id, err)
 			}
 			fmt.Printf("invite %s for %s/%s (%s) until %s in %s\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.ExpiresAt), *out)
+			return nil
+		}
+		if *showQR {
+			fmt.Printf("invite %s for %s/%s (%s), once, until %s. Scan it in Niko:\n\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.ExpiresAt))
+			if err := writeQR(os.Stdout, r.Msg.InviteCode); err != nil {
+				return fmt.Errorf("invite %s made, but not drawn (rayctl device revoke %s): %w", inv.Id, inv.Id, err)
+			}
 			return nil
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
