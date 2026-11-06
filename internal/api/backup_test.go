@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,16 @@ func TestMetrics(t *testing.T) {
 	if _, err := c.CreateDevice(ctx, connect.NewRequest(&nodev1.CreateDeviceRequest{User: "alice", Name: "phone"})); err != nil {
 		t.Fatal(err)
 	}
+	// Two dnstt services: the counters of the one whose backend gives them
+	// on its stats socket; the other, without one, has none and no error.
+	srv.Paths.Run = t.TempDir()
+	for _, name := range []string{"dns", "dns2"} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "dnstt", Name: name})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	serveStats(t, srv.Paths.StatsSocket("dns"), `{"queries":5,"memo_hits":6,"sessions":1,"handshakes":0,"sessions_admitted":7,`+
+		`"sessions_refused_device":2,"auth_refused":3,"seal_opened":4,"unknown":9}`+"\n")
 	resp, err := c.GetMetrics(ctx, connect.NewRequest(&nodev1.GetMetricsRequest{}))
 	if err != nil {
 		t.Fatal(err)
@@ -118,6 +129,15 @@ func TestMetrics(t *testing.T) {
 		`raycontrol_loop_last_error_seconds{loop="acme site"} 1700000000`,
 		`raycontrol_loop_last_success_seconds{loop="acme site"} 0`,
 		`raycontrol_loop_errors_total{loop="acme site"} 1`,
+		`raycontrol_dnstt_queries_total{service="dns"} 5`,
+		`raycontrol_dnstt_memo_hits_total{service="dns"} 6`,
+		`raycontrol_dnstt_sessions{service="dns"} 1`,
+		`raycontrol_dnstt_handshakes{service="dns"} 0`,
+		`raycontrol_dnstt_sessions_admitted_total{service="dns"} 7`,
+		`raycontrol_dnstt_sessions_refused_total{service="dns",reason="full"} 0`,
+		`raycontrol_dnstt_sessions_refused_total{service="dns",reason="device"} 2`,
+		`raycontrol_dnstt_auth_total{service="dns",result="refused"} 3`,
+		`raycontrol_dnstt_seal_total{service="dns",result="opened"} 4`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("no %q in\n%s", want, text)
@@ -125,6 +145,9 @@ func TestMetrics(t *testing.T) {
 	}
 	if strings.Contains(text, "alice") || strings.Contains(text, "phone") || strings.Contains(text, "does not resolve") {
 		t.Errorf("names of users or devices, or error text, in the metrics:\n%s", text)
+	}
+	if strings.Contains(text, `service="dns2"`) {
+		t.Errorf("counters of a dnstt service without a stats socket:\n%s", text)
 	}
 	st, err := c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
 	if err != nil {
@@ -152,5 +175,60 @@ func TestMetrics(t *testing.T) {
 		if name := strings.FieldsFunc(line, func(r rune) bool { return r == '{' || r == ' ' })[0]; name != family {
 			t.Errorf("sample %q outside its family (%s)", line, family)
 		}
+	}
+}
+
+// serveStats gives line to each connection on a unix socket at path, as a
+// dnstt backend's stats socket does.
+func serveStats(t *testing.T, path, line string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte(line))
+			c.Close()
+		}
+	}()
+}
+
+// A backend that takes the connection and says nothing holds rayctl metrics
+// only until the deadline.
+func TestReadDNSTTStatsSilent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stats.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	held := make(chan net.Conn, 1)
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			held <- c
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := readDNSTTStats(ctx, path); err == nil {
+		t.Fatal("no error from a silent socket")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("held %v", d)
+	}
+	select {
+	case c := <-held:
+		c.Close()
+	default:
 	}
 }

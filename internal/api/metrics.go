@@ -3,8 +3,11 @@ package api
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -200,7 +203,89 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 	m.Add("raycontrol_dns_problems", "Problems with the DNS records the node needs.", float64(len(problems)))
 
 	m.Add("raycontrol_spa_ports", "SPA ports open now.", float64(len(s.Params.ActivePorts(now))))
+
+	// The DNS path: each enabled dnstt service's counters, from its
+	// backend's stats socket (niko-server v0.11.0); none when it has none.
+	for _, svc := range services {
+		if svc.Kind != "dnstt" || !svc.Enabled {
+			continue
+		}
+		st, err := readDNSTTStats(ctx, s.Paths.StatsSocket(svc.Name))
+		if err != nil {
+			continue
+		}
+		addDNSTTStats(&m, svc.Name, st)
+	}
 	return m.String(), nil
+}
+
+// DNSTTStats is what a dnstt backend gives on its stats socket
+// (niko-server dnsttserver.StatsSnapshot).
+type DNSTTStats struct {
+	Queries           uint64 `json:"queries"`
+	MemoHits          uint64 `json:"memo_hits"`
+	Sessions          int    `json:"sessions"`
+	Handshakes        int    `json:"handshakes"`
+	SessionsAdmitted  uint64 `json:"sessions_admitted"`
+	RefusedFull       uint64 `json:"sessions_refused_full"`
+	RefusedRate       uint64 `json:"sessions_refused_rate"`
+	RefusedDevice     uint64 `json:"sessions_refused_device"`
+	SessionsEvicted   uint64 `json:"sessions_evicted"`
+	HandshakeTimeouts uint64 `json:"handshake_timeouts"`
+	StreamsRefused    uint64 `json:"streams_refused"`
+	AuthValid         uint64 `json:"auth_valid"`
+	AuthUntagged      uint64 `json:"auth_untagged"`
+	AuthRefused       uint64 `json:"auth_refused"`
+	AuthThrottled     uint64 `json:"auth_throttled"`
+	SealOpened        uint64 `json:"seal_opened"`
+	SealUnsealed      uint64 `json:"seal_unsealed"`
+	SealRefused       uint64 `json:"seal_refused"`
+}
+
+// readDNSTTStats reads a dnstt backend's counters: one JSON line given to
+// whoever connects, within 2 s.
+func readDNSTTStats(ctx context.Context, path string) (DNSTTStats, error) {
+	var st DNSTTStats
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	c, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
+	if err != nil {
+		return st, err
+	}
+	defer c.Close()
+	if d, ok := ctx.Deadline(); ok {
+		_ = c.SetDeadline(d)
+	}
+	err = json.NewDecoder(io.LimitReader(c, 64<<10)).Decode(&st)
+	return st, err
+}
+
+// addDNSTTStats adds a dnstt service's counters, labelled by service.
+func addDNSTTStats(m *Metrics, service string, st DNSTTStats) {
+	add := func(name, help string, v uint64, labels ...string) {
+		m.Add(name, help, float64(v), append([]string{"service", service}, labels...)...)
+	}
+	add("raycontrol_dnstt_queries_total", "DNS queries the dnstt backend parsed.", st.Queries)
+	add("raycontrol_dnstt_memo_hits_total", "Resolvers' retries answered from the memo.", st.MemoHits)
+	m.Add("raycontrol_dnstt_sessions", "dnstt sessions now.", float64(st.Sessions), "service", service)
+	m.Add("raycontrol_dnstt_handshakes", "dnstt sessions in their Noise handshake now.", float64(st.Handshakes), "service", service)
+	add("raycontrol_dnstt_sessions_admitted_total", "New dnstt sessions admitted.", st.SessionsAdmitted)
+	type sample struct {
+		label string
+		v     uint64
+	}
+	for _, r := range []sample{{"full", st.RefusedFull}, {"rate", st.RefusedRate}, {"device", st.RefusedDevice}} {
+		add("raycontrol_dnstt_sessions_refused_total", "New dnstt sessions refused, by reason.", r.v, "reason", r.label)
+	}
+	add("raycontrol_dnstt_sessions_evicted_total", "A device's silent dnstt session closed for its new one.", st.SessionsEvicted)
+	add("raycontrol_dnstt_handshake_timeouts_total", "dnstt sessions closed with the Noise handshake undone.", st.HandshakeTimeouts)
+	add("raycontrol_dnstt_streams_refused_total", "Streams over a dnstt session's bound.", st.StreamsRefused)
+	for _, r := range []sample{{"valid", st.AuthValid}, {"untagged", st.AuthUntagged}, {"refused", st.AuthRefused}, {"throttled", st.AuthThrottled}} {
+		add("raycontrol_dnstt_auth_total", "dnsauth-v1 checks of queries, by result.", r.v, "result", r.label)
+	}
+	for _, r := range []sample{{"opened", st.SealOpened}, {"unsealed", st.SealUnsealed}, {"refused", st.SealRefused}} {
+		add("raycontrol_dnstt_seal_total", "dnsseal-v1 queries, by result.", r.v, "result", r.label)
+	}
 }
 
 // certNotAfter reads the end of validity of a service's certificate: the
