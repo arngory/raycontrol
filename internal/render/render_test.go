@@ -472,7 +472,11 @@ func TestDNSAuth(t *testing.T) {
 			backend = string(f.Content)
 		}
 	}
-	if !strings.Contains(keys, dev.ID+" "+hex.EncodeToString(want[:])+"\n") || strings.Count(keys, "\n") != 2 {
+	// The device's line, and the node's own for its check (review 8).
+	checkKey, _ := st.DNSCheckKey(ctx)
+	node, _ := provision.DNSCheckAuthKey(checkKey, params.NodeID, dns.ID)
+	if !strings.Contains(keys, dev.ID+" "+hex.EncodeToString(want[:])+"\n") || strings.Count(keys, "\n") != 3 ||
+		!strings.Contains(keys, provision.DNSCheckDevice+" "+hex.EncodeToString(node[:])+"\n") {
 		t.Fatalf("keys file:\n%s", keys)
 	}
 	if !strings.Contains(backend, `"auth": "required"`) || !strings.Contains(backend, `"auth_keys_file": "/var/lib/raycontrol/rendered/dns/auth.keys"`) {

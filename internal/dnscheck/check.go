@@ -47,7 +47,7 @@ type Zone struct {
 	Seal     string // dnsseal-v1 mode (dnstt): off, optional or required
 	SealKey  Key    // seals the poll unless the seal is off
 	Auth     string // dnsauth-v1 mode (dnstt)
-	AuthKey  Key    // a device's key for the service, for a tagged poll; the node has none
+	AuthKey  Key    // a dnsauth-v1 key on the service for a tagged poll: the node's own (provision.DNSCheckDevice)
 	SvcID    uint16
 }
 
@@ -131,7 +131,11 @@ type Checker struct {
 	System []netip.AddrPort // recursive resolvers that find the parents; nil: the host's (SystemResolvers)
 	// Local reports an address of this host; nil: its interfaces.
 	Local func(netip.Addr) bool
-	Now   func() time.Time // the probes' minute; nil: time.Now
+	// Private lets the walk ask a parent's server at an address no public
+	// server has (PublicAddr): tests and labs. Off, such servers are not
+	// asked, wherever a zone's DNS points.
+	Private bool
+	Now     func() time.Time // the probes' minute; nil: time.Now
 	// The pace: a second copy after Retry without an answer, none after
 	// GiveUp, a round within Round, Parallel resolvers at once.
 	Retry, GiveUp, Round time.Duration

@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -22,15 +23,48 @@ type Resolver struct {
 }
 
 // Public reports whether a resolver may be asked for by a remote caller:
-// one of the named ones, or a public unicast address on port 53. A remote
-// administrator gets no way to make the node dial its loopback, private or
-// link-local addresses, or other ports (review 7).
+// one of the named ones, or a public address on port 53 (PublicAddr). A
+// remote administrator gets no way to make the node dial its loopback,
+// private or other non-public addresses, or other ports (reviews 7, 8).
 func (r Resolver) Public() bool {
 	if !strings.Contains(r.Name, ":") {
 		return true // a named one (or the system's, read by the node)
 	}
-	a := r.Addr.Addr().Unmap()
-	return r.Addr.Port() == 53 && a.IsGlobalUnicast() && !a.IsPrivate() && !a.IsLoopback() && !a.IsLinkLocalUnicast()
+	return r.Addr.Port() == 53 && PublicAddr(r.Addr.Addr())
+}
+
+// nonPublic are ranges of global unicast no public DNS server is in (RFC
+// 6890 and the special-purpose registries): shared address space (CGNAT,
+// where providers keep internal resolvers), IETF protocol assignments,
+// documentation, benchmarking, reserved; NAT64, 6to4 and Teredo, which
+// embed IPv4 addresses (private ones too); discard-only; site-local.
+var nonPublic = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001::/32"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("fec0::/10"),
+}
+
+// PublicAddr reports whether a public DNS server may have address a:
+// global unicast, neither private, loopback nor link-local, and in none of
+// the nonPublic ranges.
+func PublicAddr(a netip.Addr) bool {
+	a = a.Unmap()
+	if !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() {
+		return false
+	}
+	return !slices.ContainsFunc(nonPublic, func(p netip.Prefix) bool { return p.Contains(a) })
 }
 
 // String is the resolver as the check shows it: "google 8.8.8.8".

@@ -145,12 +145,18 @@ func (rd *round) parent(ctx context.Context, zone string, v6 bool) (parentZone, 
 					addrs = family(addrsIn(ar.answers, n), v6)
 				}
 			}
+			// Only where a public server may be (review 8): the parent's
+			// servers come from DNS, which a remote administrator's zone
+			// can point at the node's own network.
+			if !rd.c.Private {
+				addrs = slices.DeleteFunc(addrs, func(a netip.Addr) bool { return !PublicAddr(a) })
+			}
 			if len(addrs) > 0 {
 				p.servers = append(p.servers, parentServer{name: n, addr: netip.AddrPortFrom(addrs[0], 53)})
 			}
 		}
 		if len(p.servers) == 0 {
-			return p, fmt.Errorf("no server of %s with an address", owner)
+			return p, fmt.Errorf("no server of %s with a public address", owner)
 		}
 		return p, nil
 	})

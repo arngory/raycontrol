@@ -182,7 +182,7 @@ func remoteEnroll(ctx context.Context, args []string) error {
 	out := fs.String("o", "", "the device file to write (mode 0600; default: <node>-<device>.rcdev)")
 	carrier := fs.String("carrier", "auto", "SPA carrier: udp, tls (TCP as a TLS ClientHello), tcp (bare TCP) or auto (UDP, then tls, then bare TCP for a node before v0.10)")
 	addr := fs.String("addr", "", "node address to use instead of the invite's host")
-	pin := fs.String("pin", "", "the invite's PIN, when it needs one (6 digits, told apart from the invite)")
+	pin := fs.String("pin", "", "the invite's PIN, when it needs one (6 digits, told apart from the invite); asked for on a terminal when not given, which keeps it out of ps and the shell's history")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
 		return errUsage
 	}
@@ -204,6 +204,12 @@ func remoteEnroll(ctx context.Context, args []string) error {
 	// Asked before anything goes to the node: a missing PIN costs no try,
 	// but the user should know before the walk to the API.
 	code := strings.ReplaceAll(*pin, " ", "")
+	if inv.PIN && code == "" && terminal(os.Stdin) {
+		if code, err = readSecret("the invite's PIN, as the administrator told it: ", "", false); err != nil {
+			return err
+		}
+		code = strings.ReplaceAll(code, " ", "")
+	}
 	if inv.PIN && code == "" {
 		return errors.New("the invite needs its PIN: -pin, as the administrator told it")
 	}

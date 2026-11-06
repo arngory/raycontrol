@@ -278,6 +278,7 @@ func CollectForRender(ctx context.Context, st *store.Store) (Model, error) {
 	}
 	var params spa.Params
 	var devices []spa.Device
+	var checkKey []byte
 	for _, svc := range m.Services {
 		if DNSAuthMode(svc.Service) == "off" {
 			continue
@@ -287,6 +288,9 @@ func CollectForRender(ctx context.Context, st *store.Store) (Model, error) {
 				return m, err
 			}
 			if devices, err = st.SPADevices(ctx); err != nil {
+				return m, err
+			}
+			if checkKey, err = st.DNSCheckKey(ctx); err != nil {
 				return m, err
 			}
 		}
@@ -300,7 +304,12 @@ func CollectForRender(ctx context.Context, st *store.Store) (Model, error) {
 				lines = append(lines, d.ID+" "+hex.EncodeToString(k[:]))
 			}
 		}
-		m.DNSAuth[svc.ID] = lines
+		// The node's own line: its check tags its polls (dnscheck).
+		k, err := provision.DNSCheckAuthKey(checkKey, params.NodeID, svc.ID)
+		if err != nil {
+			return m, err
+		}
+		m.DNSAuth[svc.ID] = append(lines, provision.DNSCheckDevice+" "+hex.EncodeToString(k[:]))
 	}
 	return m, nil
 }

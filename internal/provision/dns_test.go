@@ -10,6 +10,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/cloudflare"
 	"github.com/arngory/raycontrol/internal/cloudflare/cftest"
+	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -194,9 +195,17 @@ func TestDNSCheckTargets(t *testing.T) {
 	probeKey, _ := st.DNSProbeKey(ctx)
 	dns, _ := st.ServiceByName(ctx, "dns")
 	secrets, _ := st.ServiceSecrets(ctx, dns.ID)
+	// dnsauth on (the default): the node's own key, its line in the keys.
+	checkKey, _ := st.DNSCheckKey(ctx)
+	params, _ := node.LoadParams(ctx, st)
+	authKey, err := DNSCheckAuthKey(checkKey, params.NodeID, dns.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	d, m := zones[0], zones[1]
 	if d.Service != "dns" || d.Kind != "dnstt" || d.Name != Zone(dns) || d.NS != ns || d.Host != "203.0.113.7" || int64(d.SvcID) != dns.ID ||
-		string(d.ProbeKey) != string(probeKey) || d.Seal != "optional" || string(d.SealKey) != string(secrets[SecretSealKey]) || d.Auth != "required" || d.AuthKey != nil {
+		string(d.ProbeKey) != string(probeKey) || d.Seal != "optional" || string(d.SealKey) != string(secrets[SecretSealKey]) || d.Auth != "required" ||
+		string(d.AuthKey) != string(authKey[:]) {
 		t.Fatalf("dnstt %+v", d)
 	}
 	if m.Service != "mdns" || m.Kind != "masterdns" || m.NS != ns || m.ProbeKey != nil || m.SealKey != nil || m.Seal != "" {
@@ -208,6 +217,16 @@ func TestDNSCheckTargets(t *testing.T) {
 	}
 	if zones, _ := DNSCheckTargets(ctx, st); zones[0].Seal != "off" || zones[0].SealKey != nil {
 		t.Fatalf("seal off %+v", zones[0])
+	}
+	// dnsauth off: an open poll, no key.
+	if _, err := SetServiceOption(ctx, st, "dns", "auth", "off"); err != nil {
+		t.Fatal(err)
+	}
+	if zones, _ := DNSCheckTargets(ctx, st); zones[0].Auth != "off" || zones[0].AuthKey != nil {
+		t.Fatalf("auth off %+v", zones[0])
+	}
+	if _, err := DNSCheckAuthKey(checkKey[:31], params.NodeID, dns.ID); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("a short check key: %v", err)
 	}
 }
 

@@ -3,6 +3,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/rand"
@@ -710,9 +712,30 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		}
 		if *showQR {
 			fmt.Printf("invite %s for %s/%s (%s), once, until %s. Scan it in Niko:\n\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.ExpiresAt))
-			if err := writeQR(os.Stdout, r.Msg.InviteCode); err != nil {
+			var qrText bytes.Buffer
+			if err := writeQR(&qrText, r.Msg.InviteCode); err != nil {
 				return fmt.Errorf("invite %s made, but not drawn (rayctl device revoke %s): %w", inv.Id, inv.Id, err)
 			}
+			if _, err := os.Stdout.Write(qrText.Bytes()); err != nil {
+				return fmt.Errorf("invite %s made, but not drawn (rayctl device revoke %s): %w", inv.Id, inv.Id, err)
+			}
+			if r.Msg.Pin == "" {
+				return nil
+			}
+			// Never the PIN beside the QR, where one photo or screenshot
+			// takes both (review 8): on a terminal it comes once the QR
+			// is wiped, otherwise on stderr, apart from the QR's stream.
+			if !terminal(os.Stdin) || !terminal(os.Stdout) {
+				fmt.Fprintf(os.Stderr, "PIN %s %s: tell it by another channel than the invite; %d wrong tries withdraw it\n",
+					r.Msg.Pin[:3], r.Msg.Pin[3:], inv.PinTries)
+				return nil
+			}
+			fmt.Print("\nOnce the QR is scanned or sent, Enter wipes it and shows the PIN.")
+			if _, err := bufio.NewReader(os.Stdin).ReadString('\n'); err != nil {
+				return fmt.Errorf("invite %s made, its PIN not shown (rayctl device revoke %s): %w", inv.Id, inv.Id, err)
+			}
+			// Up over the QR, the prompt and the Enter, and clear below.
+			fmt.Printf("\033[%dA\033[J", bytes.Count(qrText.Bytes(), []byte("\n"))+2)
 			pinLine()
 			return nil
 		}

@@ -43,6 +43,11 @@ func TestResolverPublic(t *testing.T) {
 		"google": true, "udp:9.9.9.9": true, "tcp:1.1.1.1": true, "udp:[2606:4700:4700::1111]": true,
 		"tcp:127.0.0.1:22": false, "udp:10.0.0.1": false, "udp:169.254.169.254": false, "udp:8.8.8.8:5353": false,
 		"tcp:[::1]:53": false, "udp:192.168.1.1": false, "udp:[fe80::1]": false,
+		// Review 8: CGNAT, NAT64 of a private address, site-local,
+		// benchmarking, reserved, documentation, 6to4, Teredo.
+		"udp:100.100.100.100": false, "udp:[64:ff9b::a00:1]": false, "udp:[fec0::1]": false, "udp:198.18.0.1": false,
+		"udp:240.0.0.1": false, "udp:203.0.113.5": false, "udp:[2002:a00:1::1]": false, "udp:[2001:0:a00:1::1]": false,
+		"udp:[2001:4860:4860::8888]": true,
 	} {
 		rs, err := ParseResolvers([]string{in})
 		if err != nil {

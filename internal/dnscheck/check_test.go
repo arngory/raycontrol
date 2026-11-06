@@ -371,10 +371,17 @@ func TestCheckNode(t *testing.T) {
 		if zr.Backend.State != OK || !strings.HasPrefix(zr.Backend.Detail, "alive: NODATA to a sealed poll without a device's tag") {
 			t.Fatalf("backend %+v", zr.Backend)
 		}
-		// With a device's key the poll goes through (rayctl probe -dns).
+		// With a key the poll goes through: the node's own (provision.
+		// DNSCheckDevice), a device's (rayctl probe -dns).
 		zones[0].AuthKey = seq(0x60, 32)
 		if zr := w.check(t, zones).Zones[0]; zr.Backend.State != OK || !strings.HasPrefix(zr.Backend.Detail, "sealed poll answered") {
 			t.Fatalf("tagged %+v", zr.Backend)
+		}
+		// Tagged, a backend with another seal key is not alive but wrong
+		// (review 8: untagged, NODATA read as alive hid a stale key).
+		w.front.zones[dnsttZone].sealKey, w.front.zones[dnsttZone].seal = seq(0x50, 32), "required"
+		if zr := w.check(t, zones).Zones[0]; zr.Backend.State != Warn || zr.Backend.Detail != "NODATA to a sealed poll: the backend does not take the service's seal key" {
+			t.Fatalf("tagged, another seal key %+v", zr.Backend)
 		}
 	})
 	t.Run("another seal key", func(t *testing.T) {
@@ -408,11 +415,14 @@ func TestCheckRoundOver(t *testing.T) {
 	for _, r := range w.resolvers {
 		r.silent = true
 	}
-	w.checker.GiveUp, w.checker.Retry = time.Second, 500*time.Millisecond
+	// A round that waited for the resolvers would take GiveUp at least:
+	// far past the Round, whatever the load (-race in parallel took 1.5 s
+	// for a round of 300 ms once).
+	w.checker.GiveUp, w.checker.Retry = 6*time.Second, 3*time.Second
 	w.checker.Round = 300 * time.Millisecond
 	start := time.Now()
 	z := w.check(t, w.zones()[:1]).Zones[0]
-	if d := time.Since(start); d > 900*time.Millisecond {
+	if d := time.Since(start); d > 3*time.Second {
 		t.Fatalf("the round took %v", d)
 	}
 	if z.Err() != nil || row(t, z, "8.8.8.8").Small.State != Skip {

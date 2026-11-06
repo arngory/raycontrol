@@ -44,7 +44,24 @@ const settingDNSProbeKey = "dns_probe_key"
 // DNSProbeKey returns the node's dnsprobe-v1 key, making it the first
 // time. Two callers at once get the same key: the first insert wins.
 func (s *Store) DNSProbeKey(ctx context.Context) ([]byte, error) {
-	if v, err := s.GetSetting(ctx, settingDNSProbeKey); err == nil && len(v) == 32 {
+	return s.nodeKey(ctx, settingDNSProbeKey)
+}
+
+// settingDNSCheckKey is the node's own device key for the check of its DNS
+// tunnel zones (dnscheck): 32 bytes, made once, never sent anywhere. Its
+// dnsauth-v1 keys are the node's line in the keys of each dnstt service.
+const settingDNSCheckKey = "dns_check_key"
+
+// DNSCheckKey returns the node's device key for its DNS check, making it
+// the first time.
+func (s *Store) DNSCheckKey(ctx context.Context) ([]byte, error) {
+	return s.nodeKey(ctx, settingDNSCheckKey)
+}
+
+// nodeKey returns the node's key of 32 bytes kept as setting, making it the
+// first time. Two callers at once get the same key: the first insert wins.
+func (s *Store) nodeKey(ctx context.Context, setting string) ([]byte, error) {
+	if v, err := s.GetSetting(ctx, setting); err == nil && len(v) == 32 {
 		return v, nil
 	}
 	key := make([]byte, 32)
@@ -52,15 +69,15 @@ func (s *Store) DNSProbeKey(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING`,
-		settingDNSProbeKey, key); err != nil {
+		setting, key); err != nil {
 		return nil, err
 	}
-	v, err := s.GetSetting(ctx, settingDNSProbeKey)
+	v, err := s.GetSetting(ctx, setting)
 	if err != nil {
 		return nil, err
 	}
 	if len(v) != 32 {
-		return nil, fmt.Errorf("%w: dns_probe_key of %d bytes", ErrInvalid, len(v))
+		return nil, fmt.Errorf("%w: %s of %d bytes", ErrInvalid, setting, len(v))
 	}
 	return v, nil
 }

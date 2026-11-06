@@ -27,11 +27,9 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 
 	"github.com/arngory/raycontrol/internal/dnscheck"
-	nodepkg "github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
-	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
 	"github.com/arngory/raycontrol/internal/testca"
@@ -127,7 +125,7 @@ func TestSupervisedNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
-	st.SetUserServices(ctx, "alice", []int64{reality.ID, hy.ID, dnsSvc.ID})
+	st.SetUserServices(ctx, "alice", []int64{reality.ID, hy.ID})
 	dev, key, err := st.CreateDevice(ctx, "alice", "laptop", "user")
 	if err != nil {
 		t.Fatal(err)
@@ -154,18 +152,13 @@ func TestSupervisedNode(t *testing.T) {
 	subSvc, _ := st.ServiceByName(ctx, provision.SubscriptionService)
 	subSecrets, _ := st.ServiceSecrets(ctx, subSvc.ID)
 	pin := mustPin(t, subSecrets[provision.SecretTLSCert])
+	// A new dnstt service takes tagged queries only: the check polls with
+	// the node's own key, its line in the keys rayd renders (no device of
+	// alice's is on the service).
 	dnsTargets, err := provision.DNSCheckTargets(ctx, st)
-	if err != nil || len(dnsTargets) != 1 || dnsTargets[0].Auth != "required" {
+	if err != nil || len(dnsTargets) != 1 || dnsTargets[0].Auth != "required" || len(dnsTargets[0].AuthKey) != 32 {
 		t.Fatalf("DNS check targets %v %v", dnsTargets, err)
 	}
-	// A new dnstt service takes tagged queries only, and the node holds no
-	// device's key: the test polls as alice's laptop does.
-	params, err := nodepkg.LoadParams(ctx, st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	authKey := spa.DNSAuthKey(key, params.NodeID, uint16(dnsSvc.ID))
-	dnsTargets[0].AuthKey = authKey[:]
 	st.Close()
 
 	// rayd and its data plane, short paths: unix sockets take 107 bytes.
@@ -354,7 +347,7 @@ func checkThroughResolvers(t *testing.T, ctx context.Context, ip netip.Addr, zon
 	if err != nil {
 		t.Fatal(err)
 	}
-	checker := &dnscheck.Checker{System: []netip.AddrPort{netip.MustParseAddrPort(system.LocalAddr().String())}}
+	checker := &dnscheck.Checker{System: []netip.AddrPort{netip.MustParseAddrPort(system.LocalAddr().String())}, Private: true}
 	z := checker.Check(ctx, []dnscheck.Zone{zone}, resolvers, false).Zones[0]
 	if !z.Delegated || z.Parent.State != dnscheck.OK || z.Err() != nil {
 		t.Fatalf("through resolvers: parent %+v, err %v", z.Parent, z.Err())

@@ -207,6 +207,12 @@ func readToken(file string) (string, error) {
 	return strings.TrimSpace(t), nil
 }
 
+// terminal reports whether f is a terminal.
+func terminal(f *os.File) bool {
+	_, err := unix.IoctlGetTermios(int(f.Fd()), unix.TCGETS)
+	return err == nil
+}
+
 // readSecret reads a secret from a file, or from the terminal without echo
 // (twice with confirm), never from the command line (shell history, ps).
 // Only the line end is cut off.

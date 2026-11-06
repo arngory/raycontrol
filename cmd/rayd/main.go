@@ -970,9 +970,9 @@ func checkDNSZones(ctx context.Context, mon *dnscheck.Monitor, st *store.Store, 
 				return
 			}
 			log.Warn("DNS zone check: the zones not read", "err", err)
-			if next.IsZero() {
-				next = now.Add(dnsParentEvery)
-			}
+			// Again in dnsParentEvery, never sooner: a database that
+			// keeps failing spun the loop on a time gone by (review 8).
+			next = now.Add(dnsParentEvery)
 		case len(zones) == 0:
 			key, next, waiting = "", time.Time{}, false
 		case dnsZonesKey(zones) != key:

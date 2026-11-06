@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -126,7 +127,7 @@ func TestCheckDNSZones(t *testing.T) {
 	resolvers, _ := dnscheck.ParseResolvers(dnscheck.DefaultResolvers)
 	mon := dnsMonitor(ctx, st, resolvers, hb, log)
 	mon.Checker = &dnscheck.Checker{Net: fake, System: []netip.AddrPort{netip.MustParseAddrPort("192.0.2.53:53")},
-		Local: func(netip.Addr) bool { return false }, Retry: 5 * time.Millisecond, GiveUp: 20 * time.Millisecond}
+		Local: func(netip.Addr) bool { return false }, Private: true, Retry: 5 * time.Millisecond, GiveUp: 20 * time.Millisecond}
 	var mu sync.Mutex
 	wake := make(chan struct{})
 	changes := func() <-chan struct{} {
@@ -195,3 +196,32 @@ func TestCheckDNSZones(t *testing.T) {
 		t.Fatal("a next check after the loop ended")
 	}
 }
+
+// Zones that cannot be read are read again every dnsParentEvery, not in a
+// loop: the store closed, a few warnings in 200 ms (review 8: the loop
+// spun on a time gone by, 760 000 rounds a second).
+func TestCheckDNSZonesUnreadable(t *testing.T) {
+	defer func(every time.Duration) { dnsParentEvery = every }(dnsParentEvery)
+	dnsParentEvery = 50 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	var lines countLines
+	mon := &dnscheck.Monitor{}
+	checkDNSZones(ctx, mon, st, func() <-chan struct{} { return nil }, time.Hour, &health.Board{}, slog.New(&lines))
+	if n := lines.n.Load(); n == 0 || n > 6 {
+		t.Fatalf("%d warnings in 200 ms", n)
+	}
+}
+
+// countLines is a slog handler that counts the records.
+type countLines struct{ n atomic.Int64 }
+
+func (c *countLines) Enabled(context.Context, slog.Level) bool  { return true }
+func (c *countLines) Handle(context.Context, slog.Record) error { c.n.Add(1); return nil }
+func (c *countLines) WithAttrs([]slog.Attr) slog.Handler        { return c }
+func (c *countLines) WithGroup(string) slog.Handler             { return c }
