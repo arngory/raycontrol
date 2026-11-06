@@ -1,4 +1,4 @@
-package dnsttstats
+package dnsstats
 
 import (
 	"context"

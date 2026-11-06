@@ -1222,6 +1222,11 @@ const (
 // DNSProbeKeyFile is the dnsprobe-v1 key's file among the front's.
 const DNSProbeKeyFile = "dnsprobe.key"
 
+// FrontStats is where the DNS front gives its counters (dns.stats_socket,
+// niko-server v0.11.0): in the front's runtime directory, which the front
+// group (rayd) may pass through.
+func (p Paths) FrontStats() string { return p.socket("front", "stats") }
+
 // FrontDNSProbe is where the front reads the dnsprobe-v1 key.
 func (p Paths) FrontDNSProbe() string {
 	return p.Credential("front", DNSProbeKeyFile)

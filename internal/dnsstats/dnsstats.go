@@ -1,8 +1,9 @@
-// Package dnsttstats reads the counters of a dnstt backend, which
-// niko-server (v0.11.0) gives on its stats socket, and keeps an hour of
-// them: rayctl metrics shows the counters, rayctl status what happened in
-// the last hour (refused sessions, dnsauth and seal refusals).
-package dnsttstats
+// Package dnsstats reads the counters of the DNS path, which niko-server
+// (v0.11.0) gives on stats sockets: a dnstt backend's, and the DNS front's.
+// It keeps an hour of a backend's: rayctl metrics shows the counters,
+// rayctl status what happened in the last hour (refused session starts,
+// dnsauth and seal refusals).
+package dnsstats
 
 import (
 	"context"
@@ -44,18 +45,48 @@ type Snapshot struct {
 // connects, within 2 s and 64 KiB.
 func Read(ctx context.Context, path string) (Snapshot, error) {
 	var s Snapshot
+	err := readJSON(ctx, path, &s)
+	return s, err
+}
+
+// Front is what the DNS front gives on its stats socket (niko-server
+// nikoserver.DNSFrontSnapshot, dns.stats_socket).
+type Front struct {
+	Started        int64             `json:"started"`
+	Queries        map[string]uint64 `json:"queries"` // queries in a zone, by zone
+	Malformed      uint64            `json:"malformed"`
+	Refused        uint64            `json:"refused"` // outside the zones
+	Apex           uint64            `json:"apex"`
+	Probes         uint64            `json:"probes"`
+	ProbesOverRate uint64            `json:"probes_over_rate"`
+	Forwarded      uint64            `json:"forwarded"`
+	BackendAway    uint64            `json:"backend_away"`
+	Answers        uint64            `json:"answers"`
+	Unmatched      uint64            `json:"unmatched"`
+	Truncated      uint64            `json:"truncated"`
+}
+
+// ReadFront reads the DNS front's counters, as Read a backend's.
+func ReadFront(ctx context.Context, path string) (Front, error) {
+	var f Front
+	err := readJSON(ctx, path, &f)
+	return f, err
+}
+
+// readJSON reads one JSON value given to whoever connects to a unix
+// socket at path, within 2 s and 64 KiB.
+func readJSON(ctx context.Context, path string, v any) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	c, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
 	if err != nil {
-		return s, err
+		return err
 	}
 	defer c.Close()
 	if d, ok := ctx.Deadline(); ok {
 		_ = c.SetDeadline(d)
 	}
-	err = json.NewDecoder(io.LimitReader(c, 64<<10)).Decode(&s)
-	return s, err
+	return json.NewDecoder(io.LimitReader(c, 64<<10)).Decode(v)
 }
 
 // counters are a snapshot's counters, in one order, for Sub and restart.

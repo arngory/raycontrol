@@ -12,7 +12,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	"github.com/arngory/raycontrol/internal/dnsttstats"
+	"github.com/arngory/raycontrol/internal/dnsstats"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/provision"
 )
@@ -228,17 +228,28 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 		if svc.Kind != "dnstt" || !svc.Enabled {
 			continue
 		}
-		st, err := dnsttstats.Read(ctx, s.Paths.StatsSocket(svc.Name))
+		st, err := dnsstats.Read(ctx, s.Paths.StatsSocket(svc.Name))
 		if err != nil {
 			continue
 		}
 		addDNSTTStats(&m, svc.Name, st)
 	}
+	// The DNS front's: queries by zone (which zone of a tunnel clients
+	// still reach, spec/dnszones-v1.md), probes, refusals, answers lost.
+	if f, err := dnsstats.ReadFront(ctx, s.Paths.FrontStats()); err == nil {
+		owner := map[string]string{}
+		for _, svc := range services {
+			for _, z := range provision.Zones(svc) {
+				owner[z] = svc.Name
+			}
+		}
+		addFrontStats(&m, f, owner)
+	}
 	return m.String(), nil
 }
 
 // addDNSTTStats adds a dnstt service's counters, labelled by service.
-func addDNSTTStats(m *Metrics, service string, st dnsttstats.Snapshot) {
+func addDNSTTStats(m *Metrics, service string, st dnsstats.Snapshot) {
 	add := func(name, help string, v uint64, labels ...string) {
 		m.Add(name, help, float64(v), append([]string{"service", service}, labels...)...)
 	}
@@ -265,6 +276,32 @@ func addDNSTTStats(m *Metrics, service string, st dnsttstats.Snapshot) {
 	}
 }
 
+// addFrontStats adds the DNS front's counters; a zone's queries labelled by
+// the zone and the service it is of (owner).
+func addFrontStats(m *Metrics, f dnsstats.Front, owner map[string]string) {
+	for _, z := range sortedKeys(f.Queries) {
+		m.Add("raycontrol_dns_front_queries_total", "DNS queries in a zone of the node's, by zone.", float64(f.Queries[z]), "zone", z, "service", owner[z])
+	}
+	for _, c := range []struct {
+		name, help string
+		v          uint64
+		labels     []string
+	}{
+		{"raycontrol_dns_front_refused_total", "DNS queries outside the node's zones, refused.", f.Refused, nil},
+		{"raycontrol_dns_front_malformed_total", "Datagrams on port 53 that are no query the front reads.", f.Malformed, nil},
+		{"raycontrol_dns_front_apex_total", "Queries the front answered at a zone's apex (SOA, NS).", f.Apex, nil},
+		{"raycontrol_dns_front_probes_total", "dnsprobe-v1 probes, by result.", f.Probes, []string{"result", "answered"}},
+		{"raycontrol_dns_front_probes_total", "dnsprobe-v1 probes, by result.", f.ProbesOverRate, []string{"result", "over_rate"}},
+		{"raycontrol_dns_front_forwarded_total", "Queries passed to a tunnel's backend.", f.Forwarded, nil},
+		{"raycontrol_dns_front_backend_away_total", "Queries not passed on: the backend away or its queue full.", f.BackendAway, nil},
+		{"raycontrol_dns_front_answers_total", "Backends' answers sent on, truncated ones included.", f.Answers, nil},
+		{"raycontrol_dns_front_truncated_total", "Answers over the requester's size, sent with TC and no records.", f.Truncated, nil},
+		{"raycontrol_dns_front_unmatched_total", "Backends' answers no query waited for, dropped.", f.Unmatched, nil},
+	} {
+		m.Add(c.name, c.help, float64(c.v), c.labels...)
+	}
+}
+
 // certNotAfter reads the end of validity of a service's certificate: the
 // ACME chain (PEM) or a self-signed certificate (DER).
 func certNotAfter(secrets map[string][]byte) (time.Time, bool) {
@@ -283,7 +320,7 @@ func certNotAfter(secrets map[string][]byte) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func sortedKeys(m map[string]int) []string {
+func sortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
