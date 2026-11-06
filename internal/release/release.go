@@ -40,8 +40,14 @@ const PubKey = "RWQBergjLoDHqeme5vyIuIRXJLjTj1EF3jR1nlWBVJO3rWxgy9SZj4bD"
 // as in bootstrap.sh; the signature makes any mirror safe to use.
 var DefaultMirrors = []string{"https://ghfast.top/", "https://gh-proxy.com/"}
 
-// Files are what an archive may hold; anything else is refused.
+// Files are the files of an archive, as the release workflow packs them.
+// Releases before v0.15.0 refuse any other name (Extract): a file added
+// to the archive means those update through v0.15.0 or later first, and the
+// release notes say so (TestArchiveFiles).
 var Files = []string{"rayd", "rayspa", "rayctl", "xray", "niko-server", "VERSIONS", "ipinfo_lite.mmdb", "NOTICE"}
+
+// FilesBeforeV015 are the names releases v0.5.0 to v0.14 take in an archive.
+var FilesBeforeV015 = []string{"rayd", "rayspa", "rayctl", "xray", "niko-server", "VERSIONS", "ipinfo_lite.mmdb", "NOTICE"}
 
 // Verify checks a minisign signature of msg with a public key (the base64
 // line of a .pub file) and returns the trusted comment. Both the
@@ -296,8 +302,29 @@ func sumOf(sums []byte, name string) (string, error) {
 	return "", fmt.Errorf("SHA256SUMS has no %s", name)
 }
 
-// Extract writes the archive's files to dir: only the names in Files, plain
-// files, nothing outside dir. It returns the names written.
+// maxArchiveFiles bounds the files of an archive.
+const maxArchiveFiles = 64
+
+// archiveName is a plain name in dir: letters, digits, '.', '_' and '-',
+// not starting with a dot.
+func archiveName(name string) bool {
+	if name == "" || len(name) > 64 || name[0] == '.' {
+		return false
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// Extract writes the archive's files to dir and returns the names written:
+// plain files with plain names, each once, nothing outside dir. Names this
+// version does not know (Files) are written too: a later release may bring
+// a file only its own rayctl knows how to install, and that rayctl does,
+// from dir (rayctl apply during an update). Before v0.15.0 such a name
+// failed the update.
 func Extract(archive []byte, dir string) ([]string, error) {
 	zr, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
@@ -314,10 +341,10 @@ func Extract(archive []byte, dir string) ([]string, error) {
 			return names, err
 		}
 		name := filepath.Clean(h.Name)
-		if h.Typeflag != tar.TypeReg || !slices.Contains(Files, name) || slices.Contains(names, name) {
+		if h.Typeflag != tar.TypeReg || !archiveName(name) || slices.Contains(names, name) || len(names) == maxArchiveFiles {
 			return names, fmt.Errorf("unexpected %q in the archive", h.Name)
 		}
-		out, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755) //nolint:gosec // G302,G304: a name from Files in our temp dir
+		out, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755) //nolint:gosec // G302,G304: a plain name in our temp dir
 		if err != nil {
 			return names, err
 		}

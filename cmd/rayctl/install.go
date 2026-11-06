@@ -583,6 +583,16 @@ func (c *cli) apply(ctx context.Context, _ []string) error {
 	if err := needRoot(); err != nil {
 		return err
 	}
+	// During an update the rayctl that ran it gives the release's files:
+	// those it did not know how to install, this one does.
+	if stage := os.Getenv(updateStageEnv); stage != "" {
+		if filepath.Dir(filepath.Clean(stage)) != deploy.JournalDir {
+			return fmt.Errorf("%s=%s: not an update's staging directory", updateStageEnv, stage)
+		}
+		if err := installBinaries(stage); err != nil {
+			return fmt.Errorf("installing the release's files: %w", err)
+		}
+	}
 	h, err := journaledHost()
 	if err != nil {
 		return err

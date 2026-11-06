@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +30,11 @@ import (
 // previousDir keeps the binaries an update replaced, for rollback; root
 // only, removed with the install journal at uninstall.
 var previousDir = filepath.Join(deploy.JournalDir, "previous")
+
+// updateStageEnv names the update's staging directory for the rayctl it
+// installed: that rayctl's apply installs what the release brings and the
+// rayctl that ran the update did not know (release.Extract).
+const updateStageEnv = "RAYCONTROL_UPDATE_STAGE"
 
 // nodeBinaries are the installed binaries by archive name.
 var nodeBinaries = map[string]string{
@@ -149,6 +157,11 @@ func (c *cli) update(ctx context.Context, args []string) error {
 	if err := os.WriteFile(filepath.Join(previousDir, "VERSION"), []byte(version+"\n"), 0o600); err != nil {
 		return err
 	}
+	// The data-plane units that run now: after the update each must run
+	// again. Taken before rayd stops: rayd restarts the units whose config
+	// changed when it starts, and one the new niko-server refuses would be
+	// in auto-restart, not active, by the time the update looked (review).
+	before := activeDataPlane()
 	// The database too, as it is with rayd stopped: the new version may
 	// migrate it, and the old one must not run on the new schema (Q-2). The
 	// data plane runs on meanwhile; the perimeter keeps its table.
@@ -167,11 +180,52 @@ func (c *cli) update(ctx context.Context, args []string) error {
 	// took.
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartTimeout)
 	defer cancel()
-	if err := c.restartNode(rctx, newVersion); err != nil {
+	if err := c.restartNode(rctx, newVersion, stage, before); err != nil {
 		return c.failUpdate(ctx, err)
 	}
 	fmt.Printf("raycontrol %s is running; the previous binaries are kept for rayctl update -rollback\n", newVersion)
+	c.belowDefaults(ctx)
 	return nil
+}
+
+// belowDefaults says which services keep modes weaker than a new one of
+// their kind gets: an update leaves them as they were (their clients may
+// not do more), and only the operator knows when to change them.
+func (c *cli) belowDefaults(ctx context.Context) {
+	r, err := c.c.ListServices(ctx, connect.NewRequest(&nodev1.ListServicesRequest{}))
+	if err != nil {
+		return
+	}
+	for _, s := range r.Msg.Services {
+		for _, line := range weakerModes(s.Kind, s.SettingsJson) {
+			fmt.Printf("service %s: %s\n", s.Name, line)
+		}
+	}
+}
+
+// weakerModes lists what a DNS tunnel keeps below a new one's modes
+// (provision.CreateService): dnstt auth required, both seal optional,
+// masterdns auth optional.
+func weakerModes(kind, settings string) []string {
+	if kind != "dnstt" && kind != "masterdns" {
+		return nil
+	}
+	var st struct {
+		Auth string `json:"auth"`
+		Seal string `json:"seal"`
+	}
+	_ = json.Unmarshal([]byte(settings), &st)
+	var out []string
+	switch {
+	case kind == "dnstt" && st.Auth != "required":
+		out = append(out, fmt.Sprintf("auth %s, a new dnstt service has required (rayctl service set <name> auth=required once its clients sign)", cmp.Or(st.Auth, "off")))
+	case kind == "masterdns" && cmp.Or(st.Auth, "off") == "off":
+		out = append(out, "auth off, a new masterdns service has optional (rayctl service set <name> auth=optional)")
+	}
+	if cmp.Or(st.Seal, "off") == "off" {
+		out = append(out, "seal off, a new service has optional (rayctl service set <name> seal=optional)")
+	}
+	return out
 }
 
 // installBinaries puts the staged binaries in place: the control plane in
@@ -221,7 +275,7 @@ func installBinaries(stage string) error {
 // restartNode restarts the control plane, applies the deployment of the
 // binaries now installed, restarts the perimeter and the data plane, and
 // checks that the node answers with the expected version.
-func (c *cli) restartNode(ctx context.Context, want string) error {
+func (c *cli) restartNode(ctx context.Context, want, stage string, before []string) error {
 	if err := run("systemctl", "restart", "rayd.service"); err != nil {
 		return err
 	}
@@ -231,23 +285,23 @@ func (c *cli) restartNode(ctx context.Context, want string) error {
 	// The rayctl now installed applies: its deployment may differ.
 	apply := exec.CommandContext(ctx, "/usr/local/bin/rayctl", "apply")
 	apply.Stdout, apply.Stderr = os.Stdout, os.Stderr
+	if stage != "" {
+		apply.Env = append(os.Environ(), updateStageEnv+"="+stage)
+	}
 	if err := apply.Run(); err != nil {
 		return fmt.Errorf("rayctl apply: %w", err)
 	}
 	if err := run("systemctl", "restart", "rayspa.service"); err != nil {
 		return err
 	}
-	out, _ := exec.Command("systemctl", "list-units", "niko-*.service", "--state=active", "--plain", "--no-legend").Output()
 	restarts := map[string]string{} // each data-plane unit's restarts once restarted
 	var units []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if f := strings.Fields(line); len(f) > 0 {
-			if err := run("systemctl", "try-restart", f[0]); err != nil {
-				return err
-			}
-			st, _ := unitState(f[0])()
-			units, restarts[f[0]] = append(units, f[0]), st["NRestarts"]
+	for _, u := range dataPlaneAfter(before, activeDataPlane(), unitLoaded) {
+		if err := run("systemctl", "try-restart", u); err != nil {
+			return err
 		}
+		st, _ := unitState(u)()
+		units, restarts[u] = append(units, u), st["NRestarts"]
 	}
 	for i := 0; ; i++ {
 		if exec.Command("systemctl", "is-active", "--quiet", "rayspa.service").Run() == nil &&
@@ -389,6 +443,7 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 	}
 	prev := strings.TrimSpace(string(b))
 	fmt.Printf("rolling back to %s (%s)\n", prev, why)
+	before := activeDataPlane()
 	saved := filepath.Join(previousDir, "rayd.db")
 	if _, err := os.Stat(saved); restoreDB && err == nil {
 		if err := run("systemctl", "stop", "rayd.service"); err != nil {
@@ -422,7 +477,7 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 	if want == "dev" {
 		want = ""
 	}
-	return c.restartNode(ctx, want)
+	return c.restartNode(ctx, want, "", before)
 }
 
 // copyDB copies a stopped SQLite database: the file, and its WAL if one is
@@ -548,4 +603,39 @@ func updatable(db, relayBundle string) error {
 		return errors.New("this host is a relay: install/bootstrap.sh -relay with its bundle takes a new release")
 	}
 	return errors.New("raycontrol is not installed here (install/bootstrap.sh)")
+}
+
+// activeDataPlane lists the niko-* units that run now.
+func activeDataPlane() []string {
+	out, _ := exec.Command("systemctl", "list-units", "niko-*.service", "--state=active", "--plain", "--no-legend").Output()
+	var units []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if f := strings.Fields(line); len(f) > 0 {
+			units = append(units, f[0])
+		}
+	}
+	return units
+}
+
+// dataPlaneAfter are the units an update waits for: those that ran before
+// it, unless the new deployment removed them, and those that run now.
+func dataPlaneAfter(before, now []string, loaded func(string) bool) []string {
+	var units []string
+	for _, u := range before {
+		if loaded(u) && !slices.Contains(units, u) {
+			units = append(units, u)
+		}
+	}
+	for _, u := range now {
+		if !slices.Contains(units, u) {
+			units = append(units, u)
+		}
+	}
+	return units
+}
+
+// unitLoaded reports whether systemd has a unit file for unit.
+func unitLoaded(unit string) bool {
+	out, err := exec.Command("systemctl", "show", "-p", "LoadState", "--value", unit).Output() //nolint:gosec // G204: a unit name systemd listed
+	return err == nil && strings.TrimSpace(string(out)) == "loaded"
 }

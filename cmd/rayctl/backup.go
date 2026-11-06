@@ -131,6 +131,7 @@ func (c *cli) restore(ctx context.Context, args []string) error {
 		return fmt.Errorf("the backup's database does not hold node %s: %s", meta.NodeID, strings.TrimSpace(string(got)))
 	}
 
+	before := activeDataPlane() // those the restored state still has must run again
 	if err := run("systemctl", "stop", "rayd.service"); err != nil {
 		return err
 	}
@@ -140,7 +141,7 @@ func (c *cli) restore(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Println("restored", deploy.DB, "- the previous state is in", aside, "until you remove it")
-	if err := c.restartNode(ctx, ""); err != nil {
+	if err := c.restartNode(ctx, "", "", before); err != nil {
 		return fmt.Errorf("%w; to go back: systemctl stop rayd; mv %s %s; rayctl apply", err, aside, deploy.DB)
 	}
 	if *host != "" {

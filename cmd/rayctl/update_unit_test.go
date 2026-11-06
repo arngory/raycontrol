@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -65,6 +66,47 @@ func TestWaitDataPlane(t *testing.T) {
 		err := wait(map[string][]map[string]string{"niko-front.service": c.seq})
 		if err == nil || !strings.Contains(err.Error(), c.says) || !strings.Contains(err.Error(), "niko-front.service") {
 			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// The units an update waits for: those that ran before it (taken before
+// rayd restarts them: one the new niko-server refuses is in auto-restart,
+// not active, afterwards), unless the new deployment removed them, and
+// those that run now (review of the update path).
+func TestDataPlaneAfter(t *testing.T) {
+	before := []string{"niko-front.service", "niko-dns.service"}
+	now := []string{"niko-dns.service", "niko-mdns.service"}
+	all := func(string) bool { return true }
+	if got := dataPlaneAfter(before, now, all); !slices.Equal(got, []string{"niko-front.service", "niko-dns.service", "niko-mdns.service"}) {
+		t.Fatalf("got %v", got)
+	}
+	// The front crash-loops after the update: still waited for.
+	if got := dataPlaneAfter(before, []string{"niko-dns.service"}, all); !slices.Contains(got, "niko-front.service") {
+		t.Fatalf("a unit that ran before is not waited for: %v", got)
+	}
+	// A unit the new deployment removed is not.
+	gone := func(u string) bool { return u != "niko-front.service" }
+	if got := dataPlaneAfter(before, now, gone); slices.Contains(got, "niko-front.service") {
+		t.Fatalf("a removed unit is waited for: %v", got)
+	}
+}
+
+// After an update: the DNS tunnels that keep modes weaker than a new one's.
+func TestWeakerModes(t *testing.T) {
+	for _, c := range []struct {
+		kind, settings string
+		n              int
+	}{
+		{"dnstt", `{"auth":"required","seal":"optional"}`, 0},
+		{"dnstt", `{}`, 2},
+		{"dnstt", `{"auth":"optional","seal":"required"}`, 1},
+		{"masterdns", `{"auth":"optional","seal":"optional"}`, 0},
+		{"masterdns", `{"encryption_method":5}`, 2},
+		{"reality", `{}`, 0},
+	} {
+		if got := weakerModes(c.kind, c.settings); len(got) != c.n {
+			t.Errorf("%s %s: %q", c.kind, c.settings, got)
 		}
 	}
 }

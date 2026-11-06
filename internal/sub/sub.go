@@ -261,7 +261,9 @@ func CheckAuth(header string, deviceKey [spa.KeySize]byte, now time.Time) bool {
 	return err == nil && hmac.Equal(mac, authMAC(deviceKey, minute))
 }
 
-// Profiles builds the profiles of a user from the rendered model.
+// Profiles builds the profiles of a user from the rendered model: those
+// that could be made, and an error naming each service whose profile could
+// not. One service's broken settings do not take the user's others away.
 func Profiles(m render.Model, u render.User) ([]Profile, error) {
 	var inner *render.Service
 	for i := range m.Services {
@@ -270,155 +272,165 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 		}
 	}
 	var out []Profile
+	var errs []error
 	for _, s := range m.Services {
-		allowed := false
-		for _, id := range u.Services {
-			allowed = allowed || id == s.ID
-		}
-		if !allowed {
+		if !slices.Contains(u.Services, s.ID) {
 			continue
 		}
-		switch s.Kind {
-		case "dnstt", "masterdns":
-			if inner == nil || m.Inner[u.ID] == "" {
-				continue
-			}
-			_, encryption, err := render.VLESSEncryption(inner.Secrets[provision.SecretMLKEMSeed])
+		p, err := serviceProfile(m, u, s, inner)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("service %s: %w", s.Name, err))
+		case p != nil:
+			out = append(out, *p)
+		}
+	}
+	return out, errors.Join(errs...)
+}
+
+// serviceProfile is a user's profile of one service, nil when the user has
+// none there (no credential yet, no inner stage).
+func serviceProfile(m render.Model, u render.User, s render.Service, inner *render.Service) (*Profile, error) {
+	switch s.Kind {
+	case "dnstt", "masterdns":
+		if inner == nil || m.Inner[u.ID] == "" {
+			return nil, nil
+		}
+		_, encryption, err := render.VLESSEncryption(inner.Secrets[provision.SecretMLKEMSeed])
+		if err != nil {
+			return nil, err
+		}
+		q := url.Values{}
+		q.Set("type", "raw")
+		q.Set("encryption", encryption)
+		q.Set("niko-node", m.NodeID)
+		q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
+		zone := provision.Zone(s.Service)
+		if s.Kind == "dnstt" {
+			pub, err := render.DNSTTPublicKey(s)
 			if err != nil {
 				return nil, err
 			}
-			q := url.Values{}
-			q.Set("type", "raw")
-			q.Set("encryption", encryption)
-			q.Set("niko-node", m.NodeID)
-			q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
-			zone := provision.Zone(s.Service)
-			if s.Kind == "dnstt" {
-				pub, err := render.DNSTTPublicKey(s)
-				if err != nil {
-					return nil, err
-				}
-				q.Set("niko-dns", "dnstt;;"+zone+";"+pub)
-				// dnsseal-v1: the zone's key when the seal is on.
-				if render.DNSSealMode(s.Service) != "off" && len(s.Secrets[provision.SecretSealKey]) == 32 {
-					q.Set("niko-dnsseal", "v1;"+base64.RawURLEncoding.EncodeToString(s.Secrets[provision.SecretSealKey]))
-				}
-			} else {
-				var settings struct {
-					Method int `json:"encryption_method"`
-				}
-				_ = json.Unmarshal([]byte(s.Settings), &settings)
-				q.Set("niko-dns", "masterdns;;"+zone+";"+strconv.Itoa(settings.Method))
-				q.Set("niko-dnskey", string(s.Secrets[provision.SecretMasterDNSKey]))
-				// mdseal-v1 (spec/mdseal-v1.md §6): the answers sealed with
-				// niko-dnskey; with required the client drops open ones.
-				switch render.DNSSealMode(s.Service) {
-				case "optional":
-					q.Set("niko-mdseal", "v1")
-				case "required":
-					q.Set("niko-mdseal", "v1;required")
-				}
+			q.Set("niko-dns", "dnstt;;"+zone+";"+pub)
+			// dnsseal-v1: the zone's key when the seal is on.
+			if render.DNSSealMode(s.Service) != "off" && len(s.Secrets[provision.SecretSealKey]) == 32 {
+				q.Set("niko-dnsseal", "v1;"+base64.RawURLEncoding.EncodeToString(s.Secrets[provision.SecretSealKey]))
 			}
-			// Sign the queries with the device's key (spec/dnsauth-v1.md,
-			// spec/dnsauth-masterdns.md): K from niko-node and niko-svc.
-			if render.DNSAuthMode(s.Service) != "off" {
-				q.Set("niko-dnsauth", "v1")
+		} else {
+			var settings struct {
+				Method int `json:"encryption_method"`
 			}
-			// Spare zones (spec/dnszones-v1.md §2), in the order clients
-			// try them; the same keys as the main zone.
-			if spares := provision.SpareZones(s.Service); len(spares) > 0 {
-				q.Set("niko-dns-spare", strings.Join(spares, ","))
+			_ = json.Unmarshal([]byte(s.Settings), &settings)
+			q.Set("niko-dns", "masterdns;;"+zone+";"+strconv.Itoa(settings.Method))
+			q.Set("niko-dnskey", string(s.Secrets[provision.SecretMasterDNSKey]))
+			// mdseal-v1 (spec/mdseal-v1.md §6): the answers sealed with
+			// niko-dnskey; with required the client drops open ones.
+			switch render.DNSSealMode(s.Service) {
+			case "optional":
+				q.Set("niko-mdseal", "v1")
+			case "required":
+				q.Set("niko-mdseal", "v1;required")
 			}
-			link := func(uuid string) string {
-				return "vless://" + uuid + "@inner:1?" + q.Encode() + "#" + url.PathEscape(s.Name)
-			}
-			p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: link(m.Inner[u.ID])}
-			if set := m.Sets[inner.ID][u.ID]; set.Next != "" {
-				p.Next = &Next{Link: link(set.Next), From: set.NextFrom.Unix()}
-			}
-			out = append(out, p)
-		case "yggdrasil":
-			if inner == nil || m.Inner[u.ID] == "" {
-				continue
-			}
-			link, err := YggdrasilLink(m, s, *inner, m.Inner[u.ID])
+		}
+		// Sign the queries with the device's key (spec/dnsauth-v1.md,
+		// spec/dnsauth-masterdns.md): K from niko-node and niko-svc.
+		if render.DNSAuthMode(s.Service) != "off" {
+			q.Set("niko-dnsauth", "v1")
+		}
+		// Spare zones (spec/dnszones-v1.md §2), in the order clients
+		// try them; the same keys as the main zone.
+		if spares := provision.SpareZones(s.Service); len(spares) > 0 {
+			q.Set("niko-dns-spare", strings.Join(spares, ","))
+		}
+		link := func(uuid string) string {
+			return "vless://" + uuid + "@inner:1?" + q.Encode() + "#" + url.PathEscape(s.Name)
+		}
+		p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: link(m.Inner[u.ID])}
+		if set := m.Sets[inner.ID][u.ID]; set.Next != "" {
+			p.Next = &Next{Link: link(set.Next), From: set.NextFrom.Unix()}
+		}
+		return &p, nil
+	case "yggdrasil":
+		if inner == nil || m.Inner[u.ID] == "" {
+			return nil, nil
+		}
+		link, err := YggdrasilLink(m, s, *inner, m.Inner[u.ID])
+		if err != nil {
+			return nil, err
+		}
+		p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: link}
+		if set := m.Sets[inner.ID][u.ID]; set.Next != "" {
+			next, err := YggdrasilLink(m, s, *inner, set.Next)
 			if err != nil {
 				return nil, err
 			}
+			p.Next = &Next{Link: next, From: set.NextFrom.Unix()}
+		}
+		return &p, nil
+	case "doh":
+		token := m.Creds[s.ID][u.ID]
+		if token == "" {
+			return nil, nil
+		}
+		p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: DoHLink(m, s, token)}
+		if set := m.Sets[s.ID][u.ID]; set.Next != "" {
+			p.Next = &Next{Link: DoHLink(m, s, set.Next), From: set.NextFrom.Unix()}
+		}
+		return &p, nil
+	case "naive":
+		password := m.Creds[s.ID][u.ID]
+		if password == "" {
+			return nil, nil
+		}
+		p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: NaiveLink(m, s, password)}
+		if set := m.Sets[s.ID][u.ID]; set.Next != "" {
+			p.Next = &Next{Link: NaiveLink(m, s, set.Next), From: set.NextFrom.Unix()}
+		}
+		return &p, nil
+	case "hy2-masq", "hy2-obfs":
+		password := m.Creds[s.ID][u.ID]
+		if password == "" {
+			return nil, nil
+		}
+		p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: HysteriaLink(m, s, password)}
+		if set := m.Sets[s.ID][u.ID]; set.Next != "" {
+			p.Next = &Next{Link: HysteriaLink(m, s, set.Next), From: set.NextFrom.Unix()}
+		}
+		return &p, nil
+	case "reality":
+		link, err := RealityLink(m, s, u.ID)
+		if err != nil {
+			return nil, err
+		}
+		if link != "" {
 			p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: link}
-			if set := m.Sets[inner.ID][u.ID]; set.Next != "" {
-				next, err := YggdrasilLink(m, s, *inner, set.Next)
+			// One next per profile: the earliest switch, the user's
+			// credential (R4-1) or the service's keys (R4-7).
+			set := m.Sets[s.ID][u.ID]
+			if set.Next != "" {
+				next, err := realityLink(m, s, set.Next, u.ID)
 				if err != nil {
 					return nil, err
 				}
 				p.Next = &Next{Link: next, From: set.NextFrom.Unix()}
 			}
-			out = append(out, p)
-		case "doh":
-			token := m.Creds[s.ID][u.ID]
-			if token == "" {
-				continue
-			}
-			p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: DoHLink(m, s, token)}
-			if set := m.Sets[s.ID][u.ID]; set.Next != "" {
-				p.Next = &Next{Link: DoHLink(m, s, set.Next), From: set.NextFrom.Unix()}
-			}
-			out = append(out, p)
-		case "naive":
-			password := m.Creds[s.ID][u.ID]
-			if password == "" {
-				continue
-			}
-			p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: NaiveLink(m, s, password)}
-			if set := m.Sets[s.ID][u.ID]; set.Next != "" {
-				p.Next = &Next{Link: NaiveLink(m, s, set.Next), From: set.NextFrom.Unix()}
-			}
-			out = append(out, p)
-		case "hy2-masq", "hy2-obfs":
-			password := m.Creds[s.ID][u.ID]
-			if password == "" {
-				continue
-			}
-			p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: HysteriaLink(m, s, password)}
-			if set := m.Sets[s.ID][u.ID]; set.Next != "" {
-				p.Next = &Next{Link: HysteriaLink(m, s, set.Next), From: set.NextFrom.Unix()}
-			}
-			out = append(out, p)
-		case "reality":
-			link, err := RealityLink(m, s, u.ID)
-			if err != nil {
-				return nil, err
-			}
-			if link != "" {
-				p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: link}
-				// One next per profile: the earliest switch, the user's
-				// credential (R4-1) or the service's keys (R4-7).
-				set := m.Sets[s.ID][u.ID]
+			if ns, from, ok := render.NextReality(s); ok && (p.Next == nil || from.Unix() <= p.Next.From) {
+				// The next credential is accepted from its publication on,
+				// so it goes with the next keys when there is one.
+				uuid := m.Creds[s.ID][u.ID]
 				if set.Next != "" {
-					next, err := realityLink(m, s, set.Next, u.ID)
-					if err != nil {
-						return nil, err
-					}
-					p.Next = &Next{Link: next, From: set.NextFrom.Unix()}
+					uuid = set.Next
 				}
-				if ns, from, ok := render.NextReality(s); ok && (p.Next == nil || from.Unix() <= p.Next.From) {
-					// The next credential is accepted from its publication on,
-					// so it goes with the next keys when there is one.
-					uuid := m.Creds[s.ID][u.ID]
-					if set.Next != "" {
-						uuid = set.Next
-					}
-					next, err := realityLink(m, ns, uuid, u.ID)
-					if err != nil {
-						return nil, err
-					}
-					p.Next = &Next{Link: next, From: from.Unix()}
+				next, err := realityLink(m, ns, uuid, u.ID)
+				if err != nil {
+					return nil, err
 				}
-				out = append(out, p)
+				p.Next = &Next{Link: next, From: from.Unix()}
 			}
+			return &p, nil
 		}
 	}
-	return out, nil
+	return nil, nil
 }
 
 // YggdrasilLink is a user's Yggdrasil profile (spec/subscription-v1.md §4):

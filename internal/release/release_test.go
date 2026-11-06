@@ -159,9 +159,25 @@ func TestExtract(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(dir, "rayctl")); string(b) != "2" {
 		t.Fatalf("rayctl %q", b)
 	}
+	// A file a later release brings: written for its own rayctl to install.
+	later := archive(t, map[string]string{"rayd": "1", "slipstream-server": "3"})
+	dir = t.TempDir()
+	if names, err := Extract(later, dir); err != nil || len(names) != 2 {
+		t.Fatalf("a later release's file: %v %v", names, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "slipstream-server")); string(b) != "3" {
+		t.Fatalf("slipstream-server %q", b)
+	}
+	many := map[string]string{}
+	for i := range maxArchiveFiles + 1 {
+		many[fmt.Sprintf("f%d", i)] = "x"
+	}
 	for name, a := range map[string][]byte{
 		"outside":  archive(t, map[string]string{"../rayd": "x"}),
-		"unknown":  archive(t, map[string]string{"evil": "x"}),
+		"in a dir": archive(t, map[string]string{"lib/x": "x"}),
+		"hidden":   archive(t, map[string]string{".profile": "x"}),
+		"odd name": archive(t, map[string]string{"a b": "x"}),
+		"too many": archive(t, many),
 		"symlink":  archive(t, nil, &tar.Header{Name: "xray", Typeflag: tar.TypeSymlink, Linkname: "/etc/shadow"}),
 		"twice":    archive(t, map[string]string{"rayd": "1"}, &tar.Header{Name: "rayd", Typeflag: tar.TypeReg}),
 		"not gzip": []byte("plain"),
@@ -263,5 +279,39 @@ func TestLatest(t *testing.T) {
 	}
 	if _, err := f.Latest(ctx, newKey(t).pub); err == nil {
 		t.Fatal("another key's signature taken")
+	}
+}
+
+// The release workflow packs the files of Files, and no file a release
+// before v0.15.0 would refuse: that would leave those nodes no way to
+// update but a new install. Adding one is a choice: FilesBeforeV015 stays,
+// this test changes, and the release notes tell older nodes to go through
+// v0.15 first.
+func TestArchiveFiles(t *testing.T) {
+	wf, err := os.ReadFile("../../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var packed []string
+	for _, line := range strings.Split(string(wf), "\n") {
+		if _, rest, ok := strings.Cut(line, "tar -czf "); ok {
+			f := strings.Fields(rest)
+			for i, w := range f {
+				if w == "-C" && i+2 < len(f) {
+					packed = f[i+2:]
+				}
+			}
+		}
+	}
+	if len(packed) == 0 {
+		t.Fatal("no tar -czf ... -C dist <files> in release.yml")
+	}
+	for _, name := range packed {
+		if !slices.Contains(Files, name) {
+			t.Errorf("release.yml packs %s, which Files lacks", name)
+		}
+		if !slices.Contains(FilesBeforeV015, name) {
+			t.Errorf("release.yml packs %s: releases before v0.15.0 refuse it (see FilesBeforeV015)", name)
+		}
 	}
 }

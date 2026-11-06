@@ -191,7 +191,9 @@ func TestEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.V != 1 || p.Seq != 1 || p.Expires-p.Issued != int64(sub.Lifetime/time.Second) || len(p.Profiles) != 1 ||
+	// seq: the clock in milliseconds at least (a database put back holds
+	// an older count).
+	if p.V != 1 || p.Seq < uint64(p.Issued)*1000 || p.Expires-p.Issued != int64(sub.Lifetime/time.Second) || len(p.Profiles) != 1 ||
 		p.Probe == nil || p.Probe.V != 1 || p.Probe.UDP || p.Probe.Tunnel != probe.Name ||
 		len(p.Probe.TunnelSvc) != 1 || p.Probe.TunnelSvc[0] != p.Profiles[0].Svc ||
 		// The report fields beyond the first ones of v1 (Niko §20).
@@ -530,6 +532,40 @@ func TestCarrierHintOrder(t *testing.T) {
 	}
 }
 
+// seq grows across a database put back (update rollback, restore): never
+// below the clock in milliseconds, so a client that saw the newer one takes
+// the next answer.
+func TestSeqAfterRollback(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	seq := func(at time.Time) uint64 {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p.Seq
+	}
+	now := time.Now()
+	a := seq(now)
+	// The database from before: the count it held.
+	if err := f.st.SetSetting(ctx, "sub_seq", []byte("41")); err != nil {
+		t.Fatal(err)
+	}
+	if b := seq(now.Add(time.Second)); b <= a {
+		t.Fatalf("seq %d after the rollback, %d before", b, a)
+	}
+	// Answers in the same millisecond still grow.
+	if c, d := seq(now.Add(time.Second)), seq(now.Add(time.Second)); d <= c {
+		t.Fatalf("seq %d then %d", c, d)
+	}
+}
+
 // The node's name (subscription-v1 §3): in the payload as kept, no field
 // without one, and a name the node refused never gets there.
 func TestNodeNameInSubscription(t *testing.T) {
@@ -803,5 +839,25 @@ func TestDNSTunnelLinks(t *testing.T) {
 		if !strings.Contains(links[name], raw) {
 			t.Errorf("%s: no %s in %s", name, raw, links[name])
 		}
+	}
+}
+
+// One service whose profile cannot be made (here: a broken inner key under
+// a DNS tunnel) leaves that profile out, not the user's others: Profiles
+// gives those with an error naming the service (review of the update path).
+func TestProfilesPartial(t *testing.T) {
+	inner := render.Service{Service: store.Service{ID: 1, Kind: "inner", Name: "inner"},
+		Secrets: map[string][]byte{provision.SecretMLKEMSeed: []byte("short")}}
+	dns := render.Service{Service: store.Service{ID: 2, Kind: "dnstt", Name: "dns"}}
+	doh := render.Service{Service: store.Service{ID: 3, Kind: "doh", Name: "doh", Settings: `{"sni":"d.example.com"}`}}
+	m := render.Model{NodeID: "00", Host: "203.0.113.7", Services: []render.Service{inner, dns, doh},
+		Inner: map[int64]string{7: "uuid"}, Creds: map[int64]map[int64]string{3: {7: "token"}}}
+	u := render.User{ID: 7, Name: "alice", Services: []int64{2, 3}}
+	got, err := sub.Profiles(m, u)
+	if err == nil || !strings.Contains(err.Error(), "service dns") {
+		t.Fatalf("no error for the broken service: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "doh" {
+		t.Fatalf("profiles %+v", got)
 	}
 }

@@ -177,13 +177,18 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 	}
 	profiles, err := Profiles(m, *user)
 	if err != nil {
-		return Envelope{}, err
+		// The others go out: a 404 for all of them kept the client on its
+		// last subscription, without the next keys of the rest (review).
+		s.Log.Warn("subscription: profiles left out", "user", userName, "err", err)
+		if len(profiles) == 0 {
+			return Envelope{}, err
+		}
 	}
 	name, err := node.Name(ctx, s.Store)
 	if err != nil {
 		return Envelope{}, err
 	}
-	seq, err := s.nextSeq(ctx)
+	seq, err := s.nextSeq(ctx, now)
 	if err != nil {
 		return Envelope{}, err
 	}
@@ -309,7 +314,7 @@ func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) erro
 }
 
 // nextSeq returns a counter that grows with every response, across restarts.
-func (s *Server) nextSeq(ctx context.Context) (uint64, error) {
+func (s *Server) nextSeq(ctx context.Context, now time.Time) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var seq uint64
@@ -318,7 +323,10 @@ func (s *Server) nextSeq(ctx context.Context) (uint64, error) {
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return 0, err
 	}
-	seq++
+	// Never below the clock in milliseconds: a database put back (update
+	// rollback, restore) holds an older count, and clients drop answers
+	// with a seq below one they have seen (subscription-v1 §3).
+	seq = max(seq+1, uint64(max(now.UnixMilli(), 0)))
 	return seq, s.Store.SetSetting(ctx, settingSeq, []byte(strconv.FormatUint(seq, 10)))
 }
 
