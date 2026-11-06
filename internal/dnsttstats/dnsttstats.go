@@ -17,12 +17,12 @@ import (
 // Snapshot is what a dnstt backend gives on its stats socket (niko-server
 // dnsttserver.StatsSnapshot).
 type Snapshot struct {
-	Started           int64  `json:"started,omitempty"` // the backend's start, Unix seconds; 0: not said
-	Queries           uint64 `json:"queries"`
-	MemoHits          uint64 `json:"memo_hits"`
-	Sessions          int    `json:"sessions"`
-	Handshakes        int    `json:"handshakes"`
-	SessionsAdmitted  uint64 `json:"sessions_admitted"`
+	Started          int64  `json:"started,omitempty"` // the backend's start, Unix seconds; 0: not said
+	Queries          uint64 `json:"queries"`
+	MemoHits         uint64 `json:"memo_hits"`
+	Sessions         int    `json:"sessions"`
+	Handshakes       int    `json:"handshakes"`
+	SessionsAdmitted uint64 `json:"sessions_admitted"`
 	// Session starts refused, by start packet: a client's retries count
 	// again.
 	RefusedFull       uint64 `json:"starts_refused_full"`
