@@ -861,3 +861,49 @@ func TestProfilesPartial(t *testing.T) {
 		t.Fatalf("profiles %+v", got)
 	}
 }
+
+// A DNS tunnel whose zone nests with an earlier one's (v0.13 took such
+// zones) is left out of the front by the render, and so out of the
+// subscription: its link would fail every client (review of the update
+// path).
+func TestUnservedZoneNotInSubscription(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	dns, _ := f.st.ServiceByName(ctx, "dns")
+	dns2, err := provision.CreateService(ctx, f.st, store.Service{Kind: "dnstt", Name: "dns2", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.st.SetUserServices(ctx, "alice", []int64{dns.ID, dns2.ID})
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	names := func() []string {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, pr := range p.Profiles {
+			out = append(out, pr.Name)
+		}
+		return out
+	}
+	if got := names(); !slices.Contains(got, "dns2") {
+		t.Fatalf("before: %v", got)
+	}
+	// As v0.13 stored it: a zone under the first tunnel's.
+	var st map[string]any
+	json.Unmarshal([]byte(dns2.Settings), &st)
+	st["zone"] = "x." + provision.Zone(dns)
+	b, _ := json.Marshal(st)
+	if err := f.st.UpdateService(ctx, dns2.ID, store.ServiceUpdate{Settings: string(b)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := names(); slices.Contains(got, "dns2") || !slices.Contains(got, "dns") {
+		t.Fatalf("a nested zone's tunnel handed out: %v", got)
+	}
+}

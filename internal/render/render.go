@@ -509,24 +509,8 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if len(all) == 0 {
 				return errors.New("no zone")
 			}
-			// Zones stored before they were checked (v0.13 took nested
-			// ones): the later service is left out, as a broken one is,
-			// not the front's whole config (niko-server v0.11.0 refuses
-			// zones that nest, and TCP and UDP 443 would go with it).
-			for _, z := range all {
-				for other, svc := range taken {
-					if provision.ZonesClash(z, other) {
-						return fmt.Errorf("zone %s is, or nests with, zone %s of %s: a name under both would be either's; give it another zone", z, other, svc)
-					}
-				}
-				// The name the zones are delegated to, in a zone of any
-				// tunnel: the front would send the queries for its
-				// address to that tunnel (niko-server v0.11.0 refuses the
-				// front's whole config with it, masterdns's zones too:
-				// review 14).
-				if ns := provision.CanonicalZone(m.NSName); ns != "" && (ns == z || strings.HasSuffix(ns, "."+z)) {
-					return fmt.Errorf("zone %s holds %s, the name the zones are delegated to: give it another zone", z, ns)
-				}
+			if err := zoneProblem(all, taken, m.NSName); err != nil {
+				return err
 			}
 			for _, z := range all {
 				taken[z] = s.Name
@@ -768,6 +752,51 @@ type ServiceErrors []error
 
 func (e ServiceErrors) Error() string   { return errors.Join(e...).Error() }
 func (e ServiceErrors) Unwrap() []error { return e }
+
+// zoneProblem says why a DNS tunnel's zones cannot be in the front beside
+// those taken (zone: its service). Zones stored before they were checked
+// (v0.13 took nested ones): the later service is left out, as a broken one
+// is, not the front's whole config (niko-server v0.11.0 refuses zones that
+// nest, and TCP and UDP 443 would go with it).
+func zoneProblem(zones []string, taken map[string]string, nsName string) error {
+	for _, z := range zones {
+		for other, svc := range taken {
+			if provision.ZonesClash(z, other) {
+				return fmt.Errorf("zone %s is, or nests with, zone %s of %s: a name under both would be either's; give it another zone", z, other, svc)
+			}
+		}
+		// The name the zones are delegated to, in a zone of any tunnel:
+		// the front would send the queries for its address to that tunnel
+		// (niko-server v0.11.0 refuses the front's whole config with it,
+		// masterdns's zones too: review 14).
+		if ns := provision.CanonicalZone(nsName); ns != "" && (ns == z || strings.HasSuffix(ns, "."+z)) {
+			return fmt.Errorf("zone %s holds %s, the name the zones are delegated to: give it another zone", z, ns)
+		}
+	}
+	return nil
+}
+
+// UnservedZones lists the DNS tunnels the front leaves out for their zones
+// (zoneProblem), in Render's order: the subscription does not hand out
+// links the node does not serve (review of the update path).
+func UnservedZones(m Model) map[int64]error {
+	out := map[int64]error{}
+	taken := map[string]string{}
+	for _, s := range m.Services {
+		if s.Kind != "dnstt" && s.Kind != "masterdns" {
+			continue
+		}
+		all := provision.Zones(s.Service)
+		if err := zoneProblem(all, taken, m.NSName); err != nil {
+			out[s.ID] = err
+			continue
+		}
+		for _, z := range all {
+			taken[z] = s.Name
+		}
+	}
+	return out
+}
 
 // Partial reports whether err from Render leaves the other services' files
 // usable.

@@ -176,6 +176,12 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 		return Envelope{}, errors.New("user not active")
 	}
 	profiles, err := Profiles(m, *user)
+	// Not the links of a DNS tunnel the front leaves out for its zones
+	// (rayd logs why; zones v0.13 took that nest): they would fail every
+	// client that tries them.
+	if out := render.UnservedZones(m); len(out) > 0 {
+		profiles = slices.DeleteFunc(profiles, func(pr Profile) bool { return out[int64(pr.Svc)] != nil })
+	}
 	if err != nil {
 		// The others go out: a 404 for all of them kept the client on its
 		// last subscription, without the next keys of the rest (review).
