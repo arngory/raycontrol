@@ -56,14 +56,14 @@ func TestRender(t *testing.T) {
 	st := node(t)
 	// The name the tunnel zones are delegated to (DNSRecords chooses it).
 	st.SetSetting(ctx, "dns_ns_name", []byte("ns9.example.com"))
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(m.Inner) != 1 {
 		t.Fatalf("inner credentials for %d users, want only alice", len(m.Inner))
 	}
-	again, _ := render.Collect(ctx, st)
+	again, _ := render.CollectForRender(ctx, st)
 	for id, uuid := range m.Inner {
 		if again.Inner[id] != uuid {
 			t.Fatal("inner credentials changed between renders")
@@ -206,7 +206,7 @@ func TestDisabledInner(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.SetServiceEnabled(ctx, "inner", false)
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,9 @@ func TestDisabledInner(t *testing.T) {
 		t.Fatalf("tunnels without the inner stage: %v", err)
 	}
 	for _, f := range files {
-		if f.Service == "dns" || f.Service == "mdns" {
+		// The devices' keys of a broken dnstt service still go (Q-1: a
+		// revoked device loses it there too); nothing else of the tunnels.
+		if (f.Service == "dns" || f.Service == "mdns") && !f.Refresh {
 			t.Errorf("%s rendered without the inner stage", f.Path)
 		}
 		if f.Service == "front" && strings.Contains(string(f.Content), `"zones"`) {
@@ -254,7 +256,7 @@ func withInner(t *testing.T, st *store.Store) render.Model {
 	ctx := context.Background()
 	st.SetServiceEnabled(ctx, "inner", true)
 	defer st.SetServiceEnabled(ctx, "inner", false)
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +287,7 @@ func TestReality(t *testing.T) {
 	alice, _ := st.UserByName(ctx, "alice")
 	bob, _ := st.UserByName(ctx, "bob")
 	st.SetUserServices(ctx, "bob", []int64{svc.ID})
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +391,7 @@ func TestReality(t *testing.T) {
 			t.Fatalf("rotate: %d %v", n, err)
 		}
 	}
-	if m, err = render.Collect(ctx, st); err != nil {
+	if m, err = render.CollectForRender(ctx, st); err != nil {
 		t.Fatal(err)
 	}
 	c, _ = read(m)
@@ -416,7 +418,14 @@ func TestReality(t *testing.T) {
 func TestDNSAuth(t *testing.T) {
 	ctx := context.Background()
 	st := node(t)
-	m, _ := render.Collect(ctx, st)
+	// A new dnstt service takes signed queries only (review 7).
+	if dns, _ := st.ServiceByName(ctx, "dns"); render.DNSAuthMode(dns) != "required" {
+		t.Fatalf("a new dnstt service: auth %q", render.DNSAuthMode(dns))
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "dns", "auth", "off"); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := render.CollectForRender(ctx, st)
 	files, _, _ := render.Render(m, render.DefaultPaths)
 	for _, f := range files {
 		if strings.HasSuffix(f.Path, "/"+render.DNSAuthKeys) || (f.Service == "dns" && strings.Contains(string(f.Content), `"auth"`)) {
@@ -496,7 +505,7 @@ func TestDebugLevels(t *testing.T) {
 	ctx := context.Background()
 	st := node(t)
 	levels := func() map[string]string {
-		m, err := render.Collect(ctx, st)
+		m, err := render.CollectForRender(ctx, st)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -551,7 +560,7 @@ func TestRenderSeal(t *testing.T) {
 		if _, err := provision.SetServiceOption(ctx, st, dns.Name, "seal", mode); err != nil {
 			t.Fatal(err)
 		}
-		m, err := render.Collect(ctx, st)
+		m, err := render.CollectForRender(ctx, st)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -598,7 +607,7 @@ func TestRenderSeal(t *testing.T) {
 	}
 	// The key stays the same from collect to collect.
 	before, _ := st.ServiceSecrets(ctx, dns.ID)
-	if _, err := render.Collect(ctx, st); err != nil {
+	if _, err := render.CollectForRender(ctx, st); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := st.ServiceSecrets(ctx, dns.ID)
@@ -609,7 +618,7 @@ func TestRenderSeal(t *testing.T) {
 	// previous one after it until its grace is over.
 	keyFile := func() string {
 		t.Helper()
-		m, err := render.Collect(ctx, st)
+		m, err := render.CollectForRender(ctx, st)
 		if err != nil {
 			t.Fatal(err)
 		}

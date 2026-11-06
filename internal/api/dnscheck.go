@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"connectrpc.com/connect"
 
@@ -25,6 +26,16 @@ func (s *Server) CheckDNSZones(ctx context.Context, req *connect.Request[nodev1.
 		var err error
 		if resolvers, err = dnscheck.ParseResolvers(req.Msg.Resolvers); err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+		// Over the remote API, only resolvers the node may well ask: the
+		// named ones and public addresses on port 53.
+		if !isLocal(ctx) {
+			for _, r := range resolvers {
+				if !r.Public() {
+					return nil, connect.NewError(connect.CodeInvalidArgument,
+						fmt.Errorf("resolver %s: over the remote API only the named ones or a public address on port 53", r.Name))
+				}
+			}
 		}
 	}
 	if !req.Msg.Now && len(resolvers) == 0 {

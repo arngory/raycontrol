@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/arngory/raycontrol/internal/cloudflare/cftest"
+	"github.com/arngory/raycontrol/internal/dnscheck"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
@@ -701,5 +702,17 @@ func TestDebugWindow(t *testing.T) {
 	audit, _ := c.ListAudit(ctx, connect.NewRequest(&nodev1.ListAuditRequest{}))
 	if !slices.ContainsFunc(audit.Msg.Entries, func(e *nodev1.AuditEntry) bool { return e.Action == "debug" && e.Target == "30m0s" }) {
 		t.Fatalf("not audited: %+v", audit.Msg.Entries)
+	}
+}
+
+// Over the remote API (no peer of the node's socket), CheckDNSZones takes
+// only named resolvers and public addresses on port 53 (review 7).
+func TestCheckDNSZonesRemoteResolvers(t *testing.T) {
+	srv := &Server{DNSCheck: &dnscheck.Monitor{}}
+	for _, r := range []string{"tcp:127.0.0.1:22", "udp:10.0.0.1", "udp:169.254.169.254:80"} {
+		_, err := srv.CheckDNSZones(context.Background(), connect.NewRequest(&nodev1.CheckDNSZonesRequest{Resolvers: []string{r}}))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("%s over the remote API: %v", r, err)
+		}
 	}
 }

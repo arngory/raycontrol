@@ -21,6 +21,18 @@ type Resolver struct {
 	WarnOnly bool
 }
 
+// Public reports whether a resolver may be asked for by a remote caller:
+// one of the named ones, or a public unicast address on port 53. A remote
+// administrator gets no way to make the node dial its loopback, private or
+// link-local addresses, or other ports (review 7).
+func (r Resolver) Public() bool {
+	if !strings.Contains(r.Name, ":") {
+		return true // a named one (or the system's, read by the node)
+	}
+	a := r.Addr.Addr().Unmap()
+	return r.Addr.Port() == 53 && a.IsGlobalUnicast() && !a.IsPrivate() && !a.IsLoopback() && !a.IsLinkLocalUnicast()
+}
+
 // String is the resolver as the check shows it: "google 8.8.8.8".
 func (r Resolver) String() string {
 	if strings.HasPrefix(r.Name, "udp:") || strings.HasPrefix(r.Name, "tcp:") {

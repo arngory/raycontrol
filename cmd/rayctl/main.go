@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/base32"
@@ -559,6 +560,7 @@ func keyState(s *nodev1.Service) string {
 	if s.Kind == "dnstt" {
 		// dnsseal-v1: the mode, and the key's switch if there was one.
 		var st struct {
+			Auth      string `json:"auth"`
 			Seal      string `json:"seal"`
 			RotatedAt int64  `json:"seal_rotated_at"`
 			PrevUntil int64  `json:"seal_prev_until"`
@@ -567,7 +569,13 @@ func keyState(s *nodev1.Service) string {
 		if st.Seal == "" {
 			st.Seal = "off"
 		}
-		out := "seal " + st.Seal
+		out := "auth " + st.Auth
+		if st.Auth != "required" {
+			// dnsauth-v1 off or optional: new sessions can be held back
+			// by anyone (niko-server's load test).
+			out = "auth " + cmp.Or(st.Auth, "off") + " (open: auth=required keeps floods out)"
+		}
+		out += ", seal " + st.Seal
 		if st.RotatedAt != 0 {
 			out += ", key since " + day(st.RotatedAt)
 		}

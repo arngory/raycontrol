@@ -21,6 +21,7 @@ import (
 	"math/big"
 	"net"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -289,16 +290,28 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 	case "dnstt", "masterdns":
 		if a, ok := settings["auth"]; ok && (svc.Kind != "dnstt" || !slices.Contains([]any{"off", "optional", "required"}, a)) {
 			return svc, fmt.Errorf("%w auth %v: dnstt only, off, optional or required (spec/dnsauth-v1.md)", store.ErrInvalid, a)
+		} else if !ok && svc.Kind == "dnstt" {
+			// A new dnstt service takes signed queries only (Niko 1.27
+			// and later sign): without, anyone can start sessions and
+			// hold its new ones back (niko-server's load test, review 7).
+			// Older clients: rayctl service set NAME auth=optional.
+			settings["auth"] = "required"
 		}
 		if a, ok := settings["seal"]; ok && (svc.Kind != "dnstt" || !slices.Contains([]any{"off", "optional", "required"}, a)) {
 			return svc, fmt.Errorf("%w seal %v: dnstt only, off, optional or required (spec/dnsseal-v1.md)", store.ErrInvalid, a)
 		}
-		if _, ok := settings["zone"]; !ok {
+		if z, ok := settings["zone"]; !ok {
 			zone, err := newZone(ctx, st, all)
 			if err != nil {
 				return svc, err
 			}
 			settings["zone"] = zone
+		} else if zs, isString := z.(string); !isString || !zoneName.MatchString(strings.TrimSuffix(zs, ".")) || len(zs) > 253 {
+			// niko-server refuses a config with another (its dnsName).
+			return svc, fmt.Errorf("%w zone %v: a DNS name of two labels or more", store.ErrInvalid, z)
+		} else {
+			// As the front and the delegation compare it.
+			settings["zone"] = canonicalZone(zs)
 		}
 		if svc.Kind == "dnstt" {
 			key, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -712,8 +725,9 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			v = peers
 		}
 	case svc.Kind == "dnstt" && (key == "auth" || key == "seal"):
-		// dnsauth-v1 (spec/dnsauth-v1.md §5): off until clients sign;
-		// dnsseal-v1 (spec/dnsseal-v1.md §10): off until clients seal.
+		// dnsauth-v1 (spec/dnsauth-v1.md §5): required on a new service,
+		// optional or off for clients that do not sign; dnsseal-v1
+		// (spec/dnsseal-v1.md §10): off until clients seal.
 		if !slices.Contains([]string{"off", "optional", "required"}, value) {
 			return svc, fmt.Errorf("%w %s: off, optional or required", store.ErrInvalid, key)
 		}
@@ -885,14 +899,22 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service) (string,
 	}
 }
 
-// Zone returns the "zone" setting of a DNS tunnel service.
+// Zone returns the "zone" setting of a DNS tunnel service as the front,
+// the parent zone and clients compare it: lower case, no final dot (a
+// service made before v0.13.0 may keep it written otherwise).
 func Zone(svc store.Service) string {
 	var s struct {
 		Zone string `json:"zone"`
 	}
 	_ = json.Unmarshal([]byte(svc.Settings), &s)
-	return s.Zone
+	return canonicalZone(s.Zone)
 }
+
+func canonicalZone(z string) string { return strings.ToLower(strings.TrimSuffix(z, ".")) }
+
+// zoneName is a DNS name of two labels or more, as niko-server takes a
+// zone (its config's dnsName).
+var zoneName = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
 
 // Rotation is the UDP port schedule of a service (spa-v2.md §11).
 type Rotation struct {

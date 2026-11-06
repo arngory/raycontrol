@@ -215,6 +215,9 @@ func (c *Checker) Check(ctx context.Context, zones []Zone, resolvers []Resolver,
 	nodes := make([][]netip.Addr, len(zones))
 	var wg sync.WaitGroup
 	for i, z := range zones {
+		// As the front matches it and the parent writes it (review 7: a
+		// zone in capitals or with a final dot was "not delegated").
+		z.Name, z.NS = canonical(z.Name), canonical(z.NS)
 		rep.Zones[i] = ZoneResult{Zone: z}
 		wg.Go(func() {
 			nodes[i] = rd.node(ctx, z.Host)

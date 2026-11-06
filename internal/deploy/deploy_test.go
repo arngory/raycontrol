@@ -38,7 +38,7 @@ func plan2(t *testing.T, paths render.Paths) (render.Model, []render.File) {
 			t.Fatal(err)
 		}
 	}
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +343,7 @@ func TestBuildSelfSteal(t *testing.T) {
 	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "doh", Name: "doh", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -639,7 +639,7 @@ func TestBuildHysteria(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -691,7 +691,7 @@ func TestBuildNaive(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}

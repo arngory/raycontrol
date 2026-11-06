@@ -30,11 +30,15 @@ type Monitor struct {
 
 	mu      sync.Mutex
 	last    *Report            // the last full check with Resolvers
-	custom  map[string]*Report // the last of other resolvers
+	custom  map[string]*Report // the last of other resolvers, maxCustom at most
+	order   []string           // custom's keys, oldest first
 	running map[string]*monitorRun
 	forced  time.Time // when the last forced check started
 	next    time.Time // the next periodic check
 }
+
+// maxCustom: the reports of other sets of resolvers a Monitor keeps.
+const maxCustom = 8
 
 type monitorRun struct {
 	done chan struct{}
@@ -148,6 +152,15 @@ func (m *Monitor) Run(ctx context.Context, o RunOptions) (Report, error) {
 			} else {
 				if m.custom == nil {
 					m.custom = map[string]*Report{}
+				}
+				if _, ok := m.custom[key]; !ok {
+					// A few sets of resolvers kept, the oldest go (each
+					// asked set was kept for good).
+					if len(m.order) >= maxCustom {
+						delete(m.custom, m.order[0])
+						m.order = m.order[1:]
+					}
+					m.order = append(m.order, key)
 				}
 				m.custom[key] = &rep
 			}

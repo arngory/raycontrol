@@ -196,7 +196,7 @@ func TestDNSCheckTargets(t *testing.T) {
 	secrets, _ := st.ServiceSecrets(ctx, dns.ID)
 	d, m := zones[0], zones[1]
 	if d.Service != "dns" || d.Kind != "dnstt" || d.Name != Zone(dns) || d.NS != ns || d.Host != "203.0.113.7" || int64(d.SvcID) != dns.ID ||
-		string(d.ProbeKey) != string(probeKey) || d.Seal != "optional" || string(d.SealKey) != string(secrets[SecretSealKey]) || d.Auth != "off" || d.AuthKey != nil {
+		string(d.ProbeKey) != string(probeKey) || d.Seal != "optional" || string(d.SealKey) != string(secrets[SecretSealKey]) || d.Auth != "required" || d.AuthKey != nil {
 		t.Fatalf("dnstt %+v", d)
 	}
 	if m.Service != "mdns" || m.Kind != "masterdns" || m.NS != ns || m.ProbeKey != nil || m.SealKey != nil || m.Seal != "" {
@@ -208,5 +208,32 @@ func TestDNSCheckTargets(t *testing.T) {
 	}
 	if zones, _ := DNSCheckTargets(ctx, st); zones[0].Seal != "off" || zones[0].SealKey != nil {
 		t.Fatalf("seal off %+v", zones[0])
+	}
+}
+
+// A zone given at creation is a DNS name, kept as the front compares it;
+// one kept otherwise before reads the same through Zone (review 7).
+func TestZoneSetting(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	for i, bad := range []string{`""`, `"localhost"`, `"a b.example.com"`, `"-x.example.com"`, `5`, `"x..example.com"`} {
+		_, err := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "bad" + string(rune('a'+i)), Enabled: true, Settings: `{"zone":` + bad + `}`})
+		if !errors.Is(err, store.ErrInvalid) {
+			t.Errorf("zone %s: %v", bad, err)
+		}
+	}
+	svc, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "m", Enabled: true, Settings: `{"zone":"T.Example.COM."}`})
+	if err != nil || !strings.Contains(svc.Settings, `"zone":"t.example.com"`) || Zone(svc) != "t.example.com" {
+		t.Fatalf("%s %v", svc.Settings, err)
+	}
+	if z := Zone(store.Service{Settings: `{"zone":"Old.Example.com."}`}); z != "old.example.com" {
+		t.Fatalf("an older service's zone: %q", z)
 	}
 }

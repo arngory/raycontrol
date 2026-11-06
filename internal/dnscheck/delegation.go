@@ -254,7 +254,9 @@ func (rd *round) delegation(ctx context.Context, z Zone, node []netip.Addr) (Ste
 
 	to := strings.Join(names, ", ")
 	if len(node) == 0 {
-		return Step{State: Warn, Detail: fmt.Sprintf("%s delegates %s to %s (%s); the node's own address is not known", servers, z.Name, to, addrList(names, addrs))}, true
+		// Delegated, but not known to be here: no resolver is asked a
+		// zone that may lead to someone else's server (review 7).
+		return Step{State: Warn, Detail: fmt.Sprintf("%s delegates %s to %s (%s); the node's own address is not known, so the resolvers are not asked", servers, z.Name, to, addrList(names, addrs))}, false
 	}
 	var stray []string
 	for _, n := range names {
