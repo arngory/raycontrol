@@ -488,6 +488,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 	}
 	var udpRoutes []udpRoute
 	var zones []route
+	taken := map[string]string{} // a zone in the front: its service
 	var tcpRoutes []tcpRoute
 	tcpDefault := "" // the first REALITY service: its target answers like the site
 	backends := map[string]backendRef{}
@@ -504,6 +505,20 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			all := provision.Zones(s.Service)
 			if len(all) == 0 {
 				return errors.New("no zone")
+			}
+			// Zones stored before they were checked (v0.13 took nested
+			// ones): the later service is left out, as a broken one is,
+			// not the front's whole config (niko-server v0.11.0 refuses
+			// zones that nest, and TCP and UDP 443 would go with it).
+			for _, z := range all {
+				for other, svc := range taken {
+					if provision.ZonesClash(z, other) {
+						return fmt.Errorf("zone %s is, or nests with, zone %s of %s: a name under both would be either's; give it another zone", z, other, svc)
+					}
+				}
+			}
+			for _, z := range all {
+				taken[z] = s.Name
 			}
 			r := route{Backend: s.Name, Probe: s.Kind == "dnstt" && len(m.DNSProbeKey) == 32}
 			// A zone whose answers are all sealed: the front pads its

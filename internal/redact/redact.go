@@ -6,6 +6,7 @@
 package redact
 
 import (
+	"slices"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -33,6 +34,16 @@ func New(names ...string) *Redactor {
 		}
 	}
 	return r
+}
+
+// Add takes more of the node's names (its DNS tunnel zones, found later
+// than the domain and host).
+func (r *Redactor) Add(names ...string) {
+	for _, n := range names {
+		if n = strings.TrimSpace(strings.ToLower(strings.TrimSuffix(n, "."))); n != "" && !slices.Contains(r.names, n) {
+			r.names = append(r.names, n)
+		}
+	}
 }
 
 var (

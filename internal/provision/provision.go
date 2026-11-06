@@ -275,6 +275,16 @@ func NeedsInner(kind string) bool { return slices.Contains(kindsNeedingInner, ki
 // CreateService fills in defaults and secrets, stores the service and, if
 // it needs the inner stage and there is none yet, creates "inner" too.
 func CreateService(ctx context.Context, st *store.Store, svc store.Service) (store.Service, error) {
+	// Taken as service set takes it: two creates at once each checked
+	// their zone and name against a list without the other's (review 13).
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
+	return createService(ctx, st, svc)
+}
+
+// createService is CreateService under settingsMu, which it holds when it
+// makes the services another needs (inner, the site).
+func createService(ctx context.Context, st *store.Store, svc store.Service) (store.Service, error) {
 	all, err := st.ListServices(ctx)
 	if err != nil {
 		return svc, err
@@ -327,6 +337,10 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			// The front takes no zone twice, nor one inside another
 			// (niko-server v0.11.0): a name under both would be either's.
 			return svc, fmt.Errorf("%w zone %v: the same as, or nested with, the zone of %s", store.ErrInvalid, z, other)
+		} else if name, err := nodeNameClash(ctx, st, all, canonicalZone(zs)); err != nil {
+			return svc, err
+		} else if name != "" {
+			return svc, fmt.Errorf("%w zone %v: it would take %s", store.ErrInvalid, z, name)
 		} else {
 			// As the front and the delegation compare it.
 			settings["zone"] = canonicalZone(zs)
@@ -585,7 +599,7 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		}
 	}
 	if NeedsInner(svc.Kind) && !slices.ContainsFunc(all, func(s store.Service) bool { return s.Kind == "inner" }) {
-		if _, err := CreateService(ctx, st, store.Service{Kind: "inner", Name: "inner", Enabled: true}); err != nil {
+		if _, err := createService(ctx, st, store.Service{Kind: "inner", Name: "inner", Enabled: true}); err != nil {
 			return svc, fmt.Errorf("creating inner: %w", err)
 		}
 	}
@@ -712,7 +726,7 @@ func siteFor(ctx context.Context, st *store.Store, all []store.Service) (store.S
 		return store.Service{}, fmt.Errorf("%w reality: without a node domain give a foreign target: "+
 			`-settings '{"target":"www.example.org:443"}'`, store.ErrInvalid)
 	}
-	return CreateService(ctx, st, store.Service{Kind: "site", Name: "site", Enabled: true})
+	return createService(ctx, st, store.Service{Kind: "site", Name: "site", Enabled: true})
 }
 
 // SetServiceOption changes a setting that may change after creation: the
@@ -982,7 +996,10 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ..
 	// Nor the name DNS tunnel zones are delegated to.
 	ns, _ := st.GetSetting(ctx, settingNSName)
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
-	for {
+	// Bounded (review 13): a zone stored at or above the domain, as v0.13
+	// took, clashes with every name under it, and the search went on
+	// forever, the render and the DNS sync with it.
+	for range 10000 {
 		label := make([]byte, 3)
 		for i := range label {
 			n, err := randInt(0, len(alphabet)-1)
@@ -997,6 +1014,48 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ..
 			return zone, nil
 		}
 	}
+	other := ""
+	for _, svc := range all {
+		for _, z := range Zones(svc) {
+			if z == domain || strings.HasSuffix(domain, "."+z) {
+				other = ": the zone of " + svc.Name + " holds the domain itself"
+			}
+		}
+	}
+	return "", fmt.Errorf("%w: no free name under %s%s", store.ErrInvalid, domain, other)
+}
+
+// nodeNameClash says which of the node's own names a DNS tunnel zone would
+// take from it, "" when none: the node's domain (a zone at or above it
+// would delegate every name of the node away), the name the zones are
+// delegated to (delegating it breaks every tunnel's delegation), a
+// service's server name (the site and the services under it would go
+// with it). A zone under such a name takes nothing.
+func nodeNameClash(ctx context.Context, st *store.Store, all []store.Service, zone string) (string, error) {
+	domain, err := Domain(ctx, st)
+	if err != nil {
+		return "", err
+	}
+	holds := func(name string) bool { return name != "" && (name == zone || strings.HasSuffix(name, "."+zone)) }
+	if holds(domain) {
+		return "the node's domain " + domain, nil
+	}
+	if ns, err := st.GetSetting(ctx, settingNSName); err == nil && holds(string(ns)) {
+		return "the name the zones are delegated to, " + string(ns), nil
+	}
+	for _, svc := range all {
+		var names struct {
+			SNI     string `json:"sni"`
+			SNINext string `json:"sni_next"`
+		}
+		_ = json.Unmarshal([]byte(svc.Settings), &names)
+		for _, n := range []string{names.SNI, names.SNINext} {
+			if holds(canonicalZone(n)) {
+				return "the server name of " + svc.Name + ", " + n, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 // zoneConflict names the DNS tunnel service among all one of whose zones
@@ -1017,6 +1076,10 @@ func zoneConflict(zone string, all []store.Service) string {
 	}
 	return ""
 }
+
+// ZonesClash reports whether two zones are one, or one holds the other:
+// the front refuses them together (niko-server v0.11.0).
+func ZonesClash(a, b string) bool { return zonesClash(a, b) }
 
 // zonesClash reports whether two zones are one, or one holds the other.
 func zonesClash(a, b string) bool {
@@ -1113,6 +1176,11 @@ func spareZones(ctx context.Context, st *store.Store, svc store.Service, all []s
 		}
 		if other := zoneConflict(z, others); other != "" {
 			return nil, fmt.Errorf("%w spare zone %s: the same as, or nested with, a zone of %s", store.ErrInvalid, z, other)
+		}
+		if name, err := nodeNameClash(ctx, st, all, z); err != nil {
+			return nil, err
+		} else if name != "" {
+			return nil, fmt.Errorf("%w spare zone %s: it would take %s", store.ErrInvalid, z, name)
 		}
 		out = append(out, z)
 	}

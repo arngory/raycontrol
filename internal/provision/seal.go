@@ -103,13 +103,19 @@ func RotateSealKey(ctx context.Context, st *store.Store, name string, now time.T
 	if u.Settings, err = setFields(svc.Settings, map[string]any{"seal_rotated_at": state.RotatedAt, "seal_prev_until": state.PrevUntil}); err != nil {
 		return SealState{}, err
 	}
+	// The node's own dnsauth key for its check (node-check in the keys of
+	// every dnstt service) is renewed with it: it had no other way to
+	// change (review 9). First: a failure here leaves the seal key as it
+	// was, where after the switch an operator's retry would switch again
+	// and drop the key clients were moving to (review 13). The check may
+	// warn once until the next render.
+	if err := st.RenewDNSCheckKey(ctx); err != nil {
+		return SealState{}, err
+	}
 	if err := st.UpdateService(ctx, svc.ID, u); err != nil {
 		return SealState{}, err
 	}
-	// The node's own dnsauth key for its check (node-check in the keys of
-	// every dnstt service) is renewed with it: it had no other way to
-	// change (review 9). The check may warn once until the next render.
-	return state, st.RenewDNSCheckKey(ctx)
+	return state, nil
 }
 
 // ExpireSealKeys drops the previous seal keys whose grace is over at now

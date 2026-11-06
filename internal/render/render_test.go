@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -794,5 +795,52 @@ func TestRenderSpareZones(t *testing.T) {
 	}
 	if md.Options.Zone != "" || !slices.Equal(md.Options.Zones, []string{provision.Zone(mdns), "v.example.net"}) {
 		t.Fatalf("masterdns options %+v", md.Options)
+	}
+}
+
+// Zones stored before they were checked (v0.13 took nested ones): the
+// later service is left out with an error naming both, not the front's
+// whole config, which niko-server v0.11.0 refuses with nested zones; and
+// it cannot be enabled again while the other is.
+func TestRenderNestedZonesKept(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	dns, _ := st.ServiceByName(ctx, "dns")
+	// Created as provision took it, then given a zone nested in dns's,
+	// as an older raycontrol stored it.
+	old, err := provision.CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "older", Enabled: true, Settings: `{"zone":"q.example.net"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nested := strings.Replace(old.Settings, `"q.example.net"`, `"x.`+provision.Zone(dns)+`"`, 1)
+	if err := st.UpdateService(ctx, old.ID, store.ServiceUpdate{Settings: nested}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := render.CollectForRender(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _, err := render.Render(m, render.DefaultPaths)
+	if !render.Partial(err) || !strings.Contains(fmt.Sprint(err), "service older: zone x.") ||
+		!strings.Contains(fmt.Sprint(err), "nests with, zone "+provision.Zone(dns)+" of dns") {
+		t.Fatalf("render: %v", err)
+	}
+	front := false
+	for _, f := range files {
+		front = front || f.Service == "front"
+	}
+	if !front {
+		t.Fatal("no front config for the others")
+	}
+	for _, f := range files {
+		if f.Service == "front" && strings.Contains(string(f.Content), `"x.`+provision.Zone(dns)+`"`) {
+			t.Fatalf("the front routes the nested zone: %s", f.Content)
+		}
+	}
+	if err := st.SetServiceEnabled(ctx, "older", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := provision.CheckRequirements(ctx, st, "older"); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("enabling a service whose zone nests with an enabled one's: %v", err)
 	}
 }

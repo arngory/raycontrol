@@ -465,7 +465,23 @@ func CheckRequirements(ctx context.Context, st *store.Store, name string) error 
 	if i < 0 {
 		return nil // the store says not found
 	}
-	return requirements(all[i], all, false)
+	if err := requirements(all[i], all, false); err != nil {
+		return err
+	}
+	// Zones kept from before they were checked (v0.13 took nested ones):
+	// enabled together, the front would refuse its whole config.
+	var enabled []store.Service
+	for _, o := range all {
+		if o.Enabled && o.Name != name {
+			enabled = append(enabled, o)
+		}
+	}
+	for _, z := range Zones(all[i]) {
+		if other := zoneConflict(z, enabled); other != "" {
+			return fmt.Errorf("%w: zone %s of %s is, or nests with, a zone of %s, which is enabled: a name under both would be either's", store.ErrInvalid, z, name, other)
+		}
+	}
+	return nil
 }
 
 // requirements checks svc against the others; creating allows a missing

@@ -19,6 +19,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/api"
 	"github.com/arngory/raycontrol/internal/dnscheck"
+	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/node"
 	chprobe "github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/redact"
@@ -82,8 +83,9 @@ func probe(ctx context.Context, args []string) error {
 		DeviceID: b.DeviceID, DeviceKey: key, NodeKeys: b.NodeKeys, NodeID: b.SPA.NodeID,
 	}
 	printf := func(format string, a ...any) { fmt.Printf(format, a...) }
+	var red *redact.Redactor
 	if *redacted {
-		red := redact.New(host, domainOf(host))
+		red = redact.New(host, domainOf(host))
 		printf = func(format string, a ...any) { fmt.Print(red.String(fmt.Sprintf(format, a...))) }
 		*links = false
 	}
@@ -142,7 +144,7 @@ func probe(ctx context.Context, args []string) error {
 			printf("report taken\n")
 		}
 		if *dnsCheck {
-			if err := probeDNS(ctx, &p, host, key, *dnsResolvers, printf); err != nil {
+			if err := probeDNS(ctx, &p, host, ip, key, *dnsResolvers, red, printf); err != nil {
 				return err
 			}
 		}
@@ -158,20 +160,40 @@ func probe(ctx context.Context, args []string) error {
 // rayd checks them from the node (internal/dnscheck): through this
 // machine's resolvers, with the device's own dnsauth key and the seal key
 // of the link, so what works for rayd and not here is this network's.
-func probeDNS(ctx context.Context, p *sub.Payload, host string, deviceKey [spa.KeySize]byte, resolverList string, printf func(string, ...any)) error {
-	zones := probeDNSZones(p, host, deviceKey)
+func probeDNS(ctx context.Context, p *sub.Payload, host string, ip netip.Addr, deviceKey [spa.KeySize]byte, resolverList string,
+	red *redact.Redactor, printf func(string, ...any)) error {
+	zones := probeDNSZones(p, host, ip, deviceKey)
 	if len(zones) == 0 {
 		printf("no DNS tunnel in the subscription\n")
 		return nil
+	}
+	if red != nil {
+		// The zones, and the domains they are under, are the node's
+		// names too (review 13: -redact printed them in clear).
+		for _, z := range zones {
+			red.Add(z.Name)
+			if _, parent, ok := strings.Cut(z.Name, "."); ok && strings.Contains(parent, ".") {
+				red.Add(parent)
+			}
+		}
 	}
 	resolvers, err := dnscheck.ParseResolvers(splitList(resolverList))
 	if err != nil {
 		return err
 	}
 	rep := (&dnscheck.Checker{}).Check(ctx, zones, resolvers, false)
+	pb := api.DNSReportPB(rep)
+	// The fixes are the node's commands: said as such off the node.
+	for _, z := range pb.Zones {
+		for _, s := range []*nodev1.DNSCheckStep{z.Parent, z.Front, z.Backend} {
+			if s != nil && s.Fix != "" {
+				s.Fix = "on the node: " + s.Fix
+			}
+		}
+	}
 	var out strings.Builder
 	w := tabwriter.NewWriter(&out, 0, 4, 2, ' ', 0)
-	printDNSCheck(w, api.DNSReportPB(rep), time.Now())
+	printDNSCheck(w, pb, time.Now())
 	if err := w.Flush(); err != nil {
 		return err
 	}
@@ -184,7 +206,7 @@ func probeDNS(ctx context.Context, p *sub.Payload, host string, deviceKey [spa.K
 // what a check needs: the probe key of the subscription, the seal key of
 // the link and the device's dnsauth key for the service, the same in each
 // zone of a link.
-func probeDNSZones(p *sub.Payload, host string, deviceKey [spa.KeySize]byte) []dnscheck.Zone {
+func probeDNSZones(p *sub.Payload, host string, ip netip.Addr, deviceKey [spa.KeySize]byte) []dnscheck.Zone {
 	var probeKey []byte
 	if p.DNSProbe != nil {
 		probeKey, _ = base64.RawURLEncoding.DecodeString(p.DNSProbe.Key)
@@ -200,7 +222,9 @@ func probeDNSZones(p *sub.Payload, host string, deviceKey [spa.KeySize]byte) []d
 		if len(f) < 3 || (f[0] != "dnstt" && f[0] != "masterdns") || f[2] == "" {
 			continue
 		}
-		z := dnscheck.Zone{Service: pr.Name, Kind: f[0], Name: f[2], Host: host, SvcID: pr.Svc}
+		// The front is asked at the node's address: off the node the
+		// checker's fallback, loopback, is this machine's own (review 13).
+		z := dnscheck.Zone{Service: pr.Name, Kind: f[0], Name: f[2], Host: host, SvcID: pr.Svc, Front: netip.AddrPortFrom(ip, 53)}
 		if z.Kind == "dnstt" {
 			if len(probeKey) == 32 {
 				z.ProbeKey = probeKey

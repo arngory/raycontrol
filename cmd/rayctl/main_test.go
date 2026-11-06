@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"flag"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -168,7 +169,7 @@ func TestProbeDNSZones(t *testing.T) {
 			{Svc: 7, Name: "reality", Link: "vless://u@203.0.113.7:443?security=reality#reality"},
 		},
 	}
-	zones := probeDNSZones(&p, "203.0.113.7", dev)
+	zones := probeDNSZones(&p, "203.0.113.7", netip.MustParseAddr("203.0.113.7"), dev)
 	var names []string
 	for _, z := range zones {
 		names = append(names, z.Name)
@@ -178,6 +179,13 @@ func TestProbeDNSZones(t *testing.T) {
 	}
 	id, _ := hex.DecodeString(nodeID)
 	want := spa.DNSAuthKey(dev, [spa.NodeIDSize]byte(id), 5)
+	// The front is asked at the node's address, never at this machine's
+	// loopback (review 13).
+	for _, z := range zones {
+		if z.Front != netip.MustParseAddrPort("203.0.113.7:53") {
+			t.Fatalf("%s: front at %v", z.Name, z.Front)
+		}
+	}
 	for _, d := range zones[:3] {
 		if d.Kind != "dnstt" || d.Service != "dns" || d.Spare != (d.Name != "t.example.com") || d.Host != "203.0.113.7" || d.SvcID != 5 ||
 			len(d.ProbeKey) != 32 || d.Seal != "required" || !bytes.Equal(d.SealKey, seal) || d.Auth != "required" || !bytes.Equal(d.AuthKey, want[:]) {
