@@ -168,6 +168,11 @@ func TestRender(t *testing.T) {
 		len(mkeys.Content) != 33 || mkeys.Content[32] != '\n' {
 		t.Fatalf("masterdns keys file %+v, option %v", mkeys, mopts["encryption_key_file"])
 	}
+	// Its credential copy is not what the backend reads: a new key there
+	// restarts nothing (dnstt's private key still does).
+	if !byPath["/var/lib/raycontrol/rendered/mdns/encryption.key"].Reload || byPath["/var/lib/raycontrol/rendered/dns/noise.key"].Reload {
+		t.Fatal("masterdns's key copy restarts its backend, or dnstt's does not")
+	}
 	if mopts["auth"] != "optional" || mopts["auth_keys_file"] != "/var/lib/raycontrol/rendered/mdns/auth.keys" ||
 		mopts["seal"] != "optional" || mopts["seal_key_file"] != nil || mopts["auth_hint"] != "optional" {
 		t.Fatalf("a new masterdns service's options: %v", mopts)

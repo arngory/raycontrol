@@ -1009,7 +1009,10 @@ func dnsBackend(s Service, zones []string, inner string, p Paths, authKeys []str
 	cfg = File{Path: path.Join(dir, "backend.json"), Mode: 0o640, Group: GroupName(s.Name), Content: b, Service: s.Name}
 	// Secrets are read by systemd (root), which gives the process its own
 	// copy (Paths.Credential), so the file needs no group access.
-	secret := File{Path: path.Join(dir, secretName), Mode: 0o600, Content: secretValue, Service: s.Name}
+	// masterdns's backend reads its keys from MasterDNSKeysFile, which it
+	// rereads: a new key in this copy restarts nothing (a rotation kept no
+	// session on the previous key, review of the install test).
+	secret := File{Path: path.Join(dir, secretName), Mode: 0o600, Content: secretValue, Service: s.Name, Reload: s.Kind == "masterdns"}
 	return cfg, append([]File{secret}, secrets...), auth, nil
 }
 
