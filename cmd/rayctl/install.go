@@ -22,6 +22,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/hostcheck"
+	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/render"
 )
 
@@ -224,6 +225,7 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	host := fs.String("host", "", "public address clients use (required)")
 	domain := fs.String("domain", "", "base domain (needed for DNS tunnels)")
+	name := fs.String("name", "", "the node's name, which clients show with its address (at most 48 characters; rayctl node name later)")
 	admin := fs.String("admin", sshClient(), "addresses that reach SSH without SPA (comma-separated; default: this SSH session)")
 	packages := fs.String("packages", "", "packages the bootstrap installed, as manager:name,name (recorded for uninstall)")
 	cfToken := fs.String("cloudflare-token-file", "", "Cloudflare API token file: DNS records and wildcard certificates (needs -domain)")
@@ -243,6 +245,11 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	}
 	if *host == "" {
 		return errors.New("-host is required")
+	}
+	// Checked before anything changes; set once rayd is up.
+	nodeName, err := node.CleanName(*name)
+	if err != nil {
+		return fmt.Errorf("-name: %w", err)
 	}
 	// Before anything changes: a host that cannot run a node is left as it
 	// was (docs/08-decisions.md, R4-24).
@@ -360,6 +367,12 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	}
 	if err := waitSocket(deploy.Socket); err != nil {
 		return err
+	}
+	// Only when given: an install again without -name keeps the name.
+	if nodeName != "" {
+		if _, err := c.c.SetNodeName(ctx, connect.NewRequest(&nodev1.SetNodeNameRequest{Name: nodeName})); err != nil {
+			return err
+		}
 	}
 
 	// SSH as a service, admin access, emergency device.

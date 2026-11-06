@@ -530,6 +530,49 @@ func TestCarrierHintOrder(t *testing.T) {
 	}
 }
 
+// The node's name (subscription-v1 §3): in the payload as kept, no field
+// without one, and a name the node refused never gets there.
+func TestNodeNameInSubscription(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	build := func() (sub.Payload, string) {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(env.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p, string(raw)
+	}
+	if p, raw := build(); p.Name != "" || strings.Contains(raw, `"name":""`) {
+		t.Fatalf("a node without a name: %q in %s", p.Name, raw)
+	}
+	smile := string(rune(0x1F642))
+	if _, err := node.SetName(ctx, f.st, "Амстердам "+smile); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := node.SetName(ctx, f.st, "Амстердам "+smile+string(rune(0x202E))+"evil"); err == nil {
+		t.Fatal("a bidi override was taken")
+	}
+	if p, _ := build(); p.Name != "Амстердам "+smile {
+		t.Fatalf("name %+q", p.Name)
+	}
+	if _, err := node.SetName(ctx, f.st, ""); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := build(); p.Name != "" {
+		t.Fatalf("removed name still sent: %+q", p.Name)
+	}
+}
+
 // Relays in the subscription (relay-v1 §4): once a relay has its bundle it
 // is listed with its own SPA, and the profiles it forwards name it in via;
 // DNS tunnels do not go through relays.

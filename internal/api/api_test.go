@@ -724,6 +724,44 @@ func TestDebugWindow(t *testing.T) {
 	}
 }
 
+// The node's name: set as kept, in the status, audited; refused names leave
+// it as it was; "" takes it away.
+func TestNodeName(t *testing.T) {
+	_, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	name := func() string {
+		t.Helper()
+		st, err := c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st.Msg.Name
+	}
+	if n := name(); n != "" {
+		t.Fatalf("a new node is named %q", n)
+	}
+	r, err := c.SetNodeName(ctx, connect.NewRequest(&nodev1.SetNodeNameRequest{Name: "  Амстердам  1 "}))
+	if err != nil || r.Msg.Name != "Амстердам 1" || name() != "Амстердам 1" {
+		t.Fatalf("set: %+v %v, status %q", r, err, name())
+	}
+	for _, bad := range []string{"x" + string(rune(0x202E)) + "y", "a\nb", strings.Repeat("n", 49)} {
+		if _, err := c.SetNodeName(ctx, connect.NewRequest(&nodev1.SetNodeNameRequest{Name: bad})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("%+q: %v", bad, err)
+		}
+	}
+	if n := name(); n != "Амстердам 1" {
+		t.Fatalf("after refused names: %q", n)
+	}
+	if r, err := c.SetNodeName(ctx, connect.NewRequest(&nodev1.SetNodeNameRequest{})); err != nil || r.Msg.Name != "" || name() != "" {
+		t.Fatalf("remove: %+v %v, status %q", r, err, name())
+	}
+	audit, _ := c.ListAudit(ctx, connect.NewRequest(&nodev1.ListAuditRequest{}))
+	if !slices.ContainsFunc(audit.Msg.Entries, func(e *nodev1.AuditEntry) bool { return e.Action == "node name" && e.Target == "Амстердам 1" }) {
+		t.Fatalf("not audited: %+v", audit.Msg.Entries)
+	}
+}
+
 // Over the remote API (no peer of the node's socket), CheckDNSZones takes
 // only named resolvers and public addresses on port 53 (review 7).
 func TestCheckDNSZonesRemoteResolvers(t *testing.T) {

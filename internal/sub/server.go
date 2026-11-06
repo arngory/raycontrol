@@ -179,12 +179,16 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 	if err != nil {
 		return Envelope{}, err
 	}
+	name, err := node.Name(ctx, s.Store)
+	if err != nil {
+		return Envelope{}, err
+	}
 	seq, err := s.nextSeq(ctx)
 	if err != nil {
 		return Envelope{}, err
 	}
 	p := Payload{
-		V: 1, NodeID: m.NodeID, Seq: seq, Time: now.Unix(), Issued: now.Unix(),
+		V: 1, NodeID: m.NodeID, Name: name, Seq: seq, Time: now.Unix(), Issued: now.Unix(),
 		Expires: now.Add(Lifetime).Unix(), Profiles: profiles,
 		SPA: &SPAHint{Carriers: []string{"udp"}},
 	}

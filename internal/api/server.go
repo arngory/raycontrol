@@ -234,10 +234,15 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 	if err != nil {
 		return nil, toConnect(err)
 	}
+	name, err := node.Name(ctx, s.Store)
+	if err != nil {
+		return nil, toConnect(err)
+	}
 	resp := &nodev1.GetStatusResponse{
 		Version:       s.Version,
 		NodeId:        hex.EncodeToString(s.Params.NodeID[:]),
 		Host:          host,
+		Name:          name,
 		Users:         uint32(len(users)),
 		Services:      uint32(len(services)),
 		ActiveDevices: uint32(len(devices)),

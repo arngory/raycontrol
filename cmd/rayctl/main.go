@@ -35,6 +35,8 @@ import (
 const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
 
   status
+  node name [NAME | ""]                     show, set or remove the node's name, which clients show
+                                            with its address (at most 48 characters)
   user list
   user add [NAME] [-services a,b] [-expires 2026-12-31|30d] [-limit 50G] [-note TEXT]
                                             without NAME: an opaque handle such as u-k3f9-x2qa
@@ -91,7 +93,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                               refuses without it), what is advised; changes nothing (root)
   legacy [-remove [-yes] [-purge-packages]]  raycontrol v0 (ray.sh) on this host; -remove backs it up, then
                                               removes only what it installed (root)
-  install -host ADDR [-domain D] [-admin A] [-cloudflare-token-file F] [-services reality,hy2-masq,hy2-obfs,dnstt,masterdns|none]
+  install -host ADDR [-domain D] [-name NAME] [-admin A] [-cloudflare-token-file F] [-services reality,hy2-masq,hy2-obfs,dnstt,masterdns|none]
           [-dataplane DIR]                    set the node up on this host (root); with -domain REALITY by default
   apply                                       install what the current services need (root)
   update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-rollback [-no-carry]]
@@ -198,6 +200,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 	switch cmd {
 	case "status":
 		return c.status(ctx)
+	case "node":
+		return c.nodeCmd(ctx, sub, rest)
 	case "user":
 		return c.user(ctx, sub, rest)
 	case "service":
@@ -275,8 +279,12 @@ func (c *cli) status(ctx context.Context) error {
 	}
 	m := r.Msg
 	return c.print(m, func(w *tabwriter.Writer) {
-		fmt.Fprintf(w, "version\t%s\nnode\t%s\nhost\t%s\nusers\t%d\nservices\t%d\nactive devices\t%d\nspa ports\t%v\n",
-			m.Version, m.NodeId, m.Host, m.Users, m.Services, m.ActiveDevices, m.SpaPorts)
+		fmt.Fprintf(w, "version\t%s\nnode\t%s\n", m.Version, m.NodeId)
+		if m.Name != "" {
+			fmt.Fprintf(w, "name\t%s\n", m.Name)
+		}
+		fmt.Fprintf(w, "host\t%s\nusers\t%d\nservices\t%d\nactive devices\t%d\nspa ports\t%v\n",
+			m.Host, m.Users, m.Services, m.ActiveDevices, m.SpaPorts)
 		if m.DebugUntil != 0 {
 			fmt.Fprintf(w, "debug\topen until %s (rayctl debug off)\n", clock(m.DebugUntil))
 		}
@@ -284,6 +292,38 @@ func (c *cli) status(ctx context.Context) error {
 		for _, l := range m.Loops {
 			fmt.Fprintf(w, "%s\t%s\n", l.Name, loopState(l, time.Now()))
 		}
+	})
+}
+
+// nodeCmd: rayctl node name [NAME]. Without NAME it shows the name; ""
+// removes it.
+func (c *cli) nodeCmd(ctx context.Context, sub string, args []string) error {
+	if sub != "name" || len(args) > 1 {
+		return errUsage
+	}
+	if len(args) == 0 {
+		r, err := c.c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
+		if err != nil {
+			return err
+		}
+		return c.print(&nodev1.SetNodeNameResponse{Name: r.Msg.Name}, func(w *tabwriter.Writer) {
+			if r.Msg.Name == "" {
+				fmt.Fprintln(w, "no name (rayctl node name NAME)")
+				return
+			}
+			fmt.Fprintln(w, r.Msg.Name)
+		})
+	}
+	r, err := c.c.SetNodeName(ctx, connect.NewRequest(&nodev1.SetNodeNameRequest{Name: args[0]}))
+	if err != nil {
+		return err
+	}
+	return c.print(r.Msg, func(w *tabwriter.Writer) {
+		if r.Msg.Name == "" {
+			fmt.Fprintln(w, "the node has no name now; clients show its address from their next subscription")
+			return
+		}
+		fmt.Fprintf(w, "the node is %q now; clients show it from their next subscription\n", r.Msg.Name)
 	})
 }
 

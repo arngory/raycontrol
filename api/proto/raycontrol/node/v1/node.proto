@@ -108,6 +108,9 @@ service NodeService {
   // and niko-server log at debug level until it ends by itself
   // (docs/09-observability.md §3). Root on the node only.
   rpc SetDebug(SetDebugRequest) returns (SetDebugResponse);
+  // SetNodeName names the node, or takes its name away with "": clients
+  // show it with the node's address (subscription-v1 §3, field name).
+  rpc SetNodeName(SetNodeNameRequest) returns (SetNodeNameResponse);
 
   // GetDeployment returns what root must install for the current services:
   // system users, unit files and other files. rayctl apply writes them.
@@ -306,6 +309,16 @@ message GetStatusResponse {
   repeated LoopHealth loops = 8;
   // The end of the debug window (rayctl debug), unix seconds; 0: none.
   int64 debug_until = 9;
+  // The node's name (rayctl node name); empty: none.
+  string name = 10;
+}
+
+message SetNodeNameRequest {
+  // At most 48 characters; runs of spaces become one. Empty removes it.
+  string name = 1;
+}
+message SetNodeNameResponse {
+  string name = 1; // as kept
 }
 
 message LoopHealth {

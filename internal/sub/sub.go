@@ -57,8 +57,11 @@ type Next struct {
 
 // Payload is the signed content.
 type Payload struct {
-	V        int       `json:"v"`
-	NodeID   string    `json:"node_id"`
+	V      int    `json:"v"`
+	NodeID string `json:"node_id"`
+	// Name is the node's name (rayctl node name), for the client to show
+	// with its address; checked by node.CleanName. None: no field.
+	Name     string    `json:"name,omitempty"`
 	Seq      uint64    `json:"seq"`
 	Time     int64     `json:"time"`
 	Issued   int64     `json:"issued"`
