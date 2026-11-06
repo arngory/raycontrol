@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
@@ -663,6 +665,12 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		if *showQR && (*out != "" || c.json) {
 			return fmt.Errorf("%w: -qr draws on the screen: not with -o or -json", errUsage)
 		}
+		// The PIN comes after the QR is wiped, which needs a terminal to
+		// read Enter from and draw on (review 9: on stderr it still landed
+		// under the QR through ssh without -t, | tee or </dev/null).
+		if *showQR && *withPIN && (!terminal(os.Stdin) || !terminal(os.Stdout)) {
+			return fmt.Errorf("%w: -qr with -pin needs a terminal (ssh -t), or -o to write the invite to a file", errUsage)
+		}
 		if *format != "rcinv1" && *format != "rcinv2" {
 			return fmt.Errorf("%w: -format rcinv1 or rcinv2", errUsage)
 		}
@@ -723,16 +731,26 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 				return nil
 			}
 			// Never the PIN beside the QR, where one photo or screenshot
-			// takes both (review 8): on a terminal it comes once the QR
-			// is wiped, otherwise on stderr, apart from the QR's stream.
-			if !terminal(os.Stdin) || !terminal(os.Stdout) {
-				fmt.Fprintf(os.Stderr, "PIN %s %s: tell it by another channel than the invite; %d wrong tries withdraw it\n",
-					r.Msg.Pin[:3], r.Msg.Pin[3:], inv.PinTries)
-				return nil
-			}
+			// takes both (review 8): it comes once the QR is wiped. What
+			// was typed ahead (a pasted blank line) does not wipe it
+			// unseen; Ctrl-C says how to withdraw the invite.
+			_ = unix.IoctlSetInt(int(os.Stdin.Fd()), unix.TCFLSH, unix.TCIFLUSH)
 			fmt.Print("\nOnce the QR is scanned or sent, Enter wipes it and shows the PIN.")
-			if _, err := bufio.NewReader(os.Stdin).ReadString('\n'); err != nil {
-				return fmt.Errorf("invite %s made, its PIN not shown (rayctl device revoke %s): %w", inv.Id, inv.Id, err)
+			stop := make(chan os.Signal, 1)
+			signal.Notify(stop, os.Interrupt)
+			defer signal.Stop(stop)
+			line := make(chan error, 1)
+			go func() {
+				_, err := bufio.NewReader(os.Stdin).ReadString('\n')
+				line <- err
+			}()
+			select {
+			case err := <-line:
+				if err != nil {
+					return fmt.Errorf("invite %s made, its PIN not shown (rayctl device revoke %s): %w", inv.Id, inv.Id, err)
+				}
+			case <-stop:
+				return fmt.Errorf("invite %s made, its PIN not shown: rayctl device revoke %s", inv.Id, inv.Id)
 			}
 			// Up over the QR, the prompt and the Enter, and clear below.
 			fmt.Printf("\033[%dA\033[J", bytes.Count(qrText.Bytes(), []byte("\n"))+2)

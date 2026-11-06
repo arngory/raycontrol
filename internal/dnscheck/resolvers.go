@@ -36,8 +36,9 @@ func (r Resolver) Public() bool {
 // nonPublic are ranges of global unicast no public DNS server is in (RFC
 // 6890 and the special-purpose registries): shared address space (CGNAT,
 // where providers keep internal resolvers), IETF protocol assignments,
-// documentation, benchmarking, reserved; NAT64, 6to4 and Teredo, which
-// embed IPv4 addresses (private ones too); discard-only; site-local.
+// documentation, benchmarking, reserved; the local-use NAT64 prefix, 6to4,
+// Teredo and IPv4-compatible addresses, which embed IPv4 ones (private ones
+// too); discard-only; site-local.
 var nonPublic = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
 	netip.MustParsePrefix("100.64.0.0/10"),
@@ -47,20 +48,32 @@ var nonPublic = []netip.Prefix{
 	netip.MustParsePrefix("198.51.100.0/24"),
 	netip.MustParsePrefix("203.0.113.0/24"),
 	netip.MustParsePrefix("240.0.0.0/4"),
-	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("::/96"),
 	netip.MustParsePrefix("64:ff9b:1::/48"),
 	netip.MustParsePrefix("100::/64"),
 	netip.MustParsePrefix("2001::/32"),
+	netip.MustParsePrefix("2001:2::/48"),
 	netip.MustParsePrefix("2001:db8::/32"),
 	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("3fff::/20"),
 	netip.MustParsePrefix("fec0::/10"),
 }
 
+// nat64 is the well-known NAT64 prefix (RFC 6052): DNS64 makes addresses
+// in it for every IPv4-only name, those of public servers too, so on an
+// IPv6-only node the IPv4 address in its last 32 bits is what is judged
+// (review 9: refusing the prefix left such nodes no parent server).
+var nat64 = netip.MustParsePrefix("64:ff9b::/96")
+
 // PublicAddr reports whether a public DNS server may have address a:
 // global unicast, neither private, loopback nor link-local, and in none of
-// the nonPublic ranges.
+// the nonPublic ranges; in the NAT64 prefix, the IPv4 address it embeds.
 func PublicAddr(a netip.Addr) bool {
 	a = a.Unmap()
+	if nat64.Contains(a) {
+		b := a.As16()
+		a = netip.AddrFrom4([4]byte(b[12:]))
+	}
 	if !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() {
 		return false
 	}

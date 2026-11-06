@@ -48,6 +48,11 @@ func TestResolverPublic(t *testing.T) {
 		"udp:100.100.100.100": false, "udp:[64:ff9b::a00:1]": false, "udp:[fec0::1]": false, "udp:198.18.0.1": false,
 		"udp:240.0.0.1": false, "udp:203.0.113.5": false, "udp:[2002:a00:1::1]": false, "udp:[2001:0:a00:1::1]": false,
 		"udp:[2001:4860:4860::8888]": true,
+		// Review 9: NAT64 by what it embeds (DNS64 of a public server on
+		// an IPv6-only node); benchmarking, RFC 9637 documentation and
+		// IPv4-compatible forms refused.
+		"udp:[64:ff9b::808:808]": true, "udp:[2001:2::1]": false, "udp:[3fff::1]": false, "udp:[::a00:1]": false,
+		"udp:[64:ff9b:1::808:808]": false,
 	} {
 		rs, err := ParseResolvers([]string{in})
 		if err != nil {

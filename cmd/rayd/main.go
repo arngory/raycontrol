@@ -157,6 +157,8 @@ func cmdServe(args []string) error {
 	dnsCheck := fs.Duration("dns-check", time.Hour, "check the DNS tunnel zones from the node this often, ±10 %: the delegation, the front and the backend, the zones through public resolvers (0: only on demand, rayctl dns check -now)")
 	dnsCheckResolvers := fs.String("dns-check-resolvers", strings.Join(dnscheck.DefaultResolvers, ","),
 		"resolvers the DNS check asks: "+strings.Join(dnscheck.ResolverNames(), ", ")+", udp:IP or tcp:IP")
+	dnsCheckPrivate := fs.Bool("dns-check-private", false,
+		"the DNS check asks the parent zone's servers at private, shared or reserved addresses too (a lab's own parent zone)")
 	fs.Parse(args)
 	epoch := provision.RealityEpoch{Period: *realityPeriod, Lead: *credLead, Prepare: *realityPrepare, Grace: *credGrace}
 	if err := epoch.Check(); err != nil {
@@ -203,6 +205,7 @@ func cmdServe(args []string) error {
 			}
 		},
 		DNSCheck: dnsMonitor(ctx, st, dnsResolvers, hb, log)}
+	srv.DNSCheck.Checker.Private = *dnsCheckPrivate
 	per := &api.PerimeterServer{Server: srv, RayspaUID: -1, DefaultTTL: *spaTTL, MaxTTL: *spaMaxTTL, TCPCarrier: *spaTCP, Refresh: time.Minute}
 	policy := api.PeerPolicy{Group: *group}
 	if u, err := user.Lookup(*rayspaUser); err == nil {
@@ -970,9 +973,12 @@ func checkDNSZones(ctx context.Context, mon *dnscheck.Monitor, st *store.Store, 
 				return
 			}
 			log.Warn("DNS zone check: the zones not read", "err", err)
-			// Again in dnsParentEvery, never sooner: a database that
-			// keeps failing spun the loop on a time gone by (review 8).
-			next = now.Add(dnsParentEvery)
+			// Again in dnsParentEvery when the planned time has gone by:
+			// a database that keeps failing spun the loop on it (review
+			// 8); a later plan stays (review 9).
+			if !next.After(now) {
+				next = now.Add(dnsParentEvery)
+			}
 		case len(zones) == 0:
 			key, next, waiting = "", time.Time{}, false
 		case dnsZonesKey(zones) != key:

@@ -132,8 +132,8 @@ type Checker struct {
 	// Local reports an address of this host; nil: its interfaces.
 	Local func(netip.Addr) bool
 	// Private lets the walk ask a parent's server at an address no public
-	// server has (PublicAddr): tests and labs. Off, such servers are not
-	// asked, wherever a zone's DNS points.
+	// server has (PublicAddr): tests, and labs (rayd -dns-check-private).
+	// Off, such servers are not asked, wherever a zone's DNS points.
 	Private bool
 	Now     func() time.Time // the probes' minute; nil: time.Now
 	// The pace: a second copy after Retry without an answer, none after
