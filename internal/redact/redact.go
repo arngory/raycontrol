@@ -6,13 +6,13 @@
 package redact
 
 import (
-	"slices"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strings"
 )
 
