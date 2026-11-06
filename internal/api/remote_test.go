@@ -221,6 +221,21 @@ func TestRemotePIN(t *testing.T) {
 	if _, err := newRemoteDevice(t, addr, pin).registerPIN(ctx, resp.Msg.InviteCode, now, "123456"); err != nil {
 		t.Fatalf("an invite without a PIN, a PIN sent: %v", err)
 	}
+	// rayctl metrics counts the wrong PINs and the invite they withdrew;
+	// missing ones count for nothing.
+	if _, err := c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{User: "alice", Name: "watch", Pin: true})); err != nil {
+		t.Fatal(err)
+	}
+	m, err := c.GetMetrics(ctx, connect.NewRequest(&nodev1.GetMetricsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"raycontrol_invite_pin_wrong_total 7\n", "raycontrol_invite_pin_withdrawn_total 1\n",
+		`raycontrol_invites{state="active"} 1` + "\n", `raycontrol_invites{state="expired"} 0` + "\n"} {
+		if !strings.Contains(m.Msg.Text, want) {
+			t.Errorf("no %q in\n%s", want, m.Msg.Text)
+		}
+	}
 }
 
 func mustAtoi(t *testing.T, s string) int {

@@ -202,6 +202,26 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 
 	m.Add("raycontrol_spa_ports", "SPA ports open now.", float64(len(s.Params.ActivePorts(now))))
 
+	// Invites: those waiting, and the wrong PINs (api-v1 §4) since rayd
+	// started; a run of them is someone trying PINs of an invite they hold.
+	invites, err := s.Store.ListInvites(ctx)
+	if err != nil {
+		return "", err
+	}
+	byInvite := map[string]int{"active": 0, "expired": 0}
+	for _, inv := range invites {
+		if inv.ExpiresAt.After(now) {
+			byInvite["active"]++
+		} else {
+			byInvite["expired"]++
+		}
+	}
+	for _, k := range sortedKeys(byInvite) {
+		m.Add("raycontrol_invites", "Invites not yet used, by state.", float64(byInvite[k]), "state", k)
+	}
+	m.Add("raycontrol_invite_pin_wrong_total", "Wrong invite PINs since rayd started.", float64(s.pinWrong.Load()))
+	m.Add("raycontrol_invite_pin_withdrawn_total", "Invites withdrawn by their last wrong PIN since rayd started.", float64(s.pinWithdrawn.Load()))
+
 	// The DNS path: each enabled dnstt service's counters, from its
 	// backend's stats socket (niko-server v0.11.0); none when it has none.
 	for _, svc := range services {

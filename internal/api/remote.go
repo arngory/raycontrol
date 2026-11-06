@@ -278,9 +278,11 @@ func (r *Remote) Register(ctx context.Context, req *connect.Request[devicev1.Reg
 			if err != nil {
 				return nil, errInvite
 			}
+			s.pinWrong.Add(1)
 			why := "wrong PIN"
 			if left == 0 {
 				why = "wrong PIN, the invite is withdrawn"
+				s.pinWithdrawn.Add(1)
 			}
 			_ = s.done(ctx, "invite.pin-wrong", inv.UserName+"/"+inv.Name, nil)
 			return nil, pinRefused(why, left)

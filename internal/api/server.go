@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
@@ -61,6 +62,10 @@ type Server struct {
 	// DNSCheck checks the DNS tunnel zones from the node (CheckDNSZones);
 	// nil: the call is unavailable.
 	DNSCheck *dnscheck.Monitor
+
+	// Wrong invite PINs, and the invites the last of them withdrew, since
+	// rayd started (rayctl metrics).
+	pinWrong, pinWithdrawn atomic.Uint64
 
 	mu   sync.Mutex
 	rev  uint64
