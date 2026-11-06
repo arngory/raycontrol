@@ -97,7 +97,10 @@ func Init(ctx context.Context, st *store.Store, o Options) (spa.Params, error) {
 		return params, err
 	}
 	if o.Domain != "" {
-		if err := st.SetSetting(ctx, settingDomain, []byte(strings.ToLower(o.Domain))); err != nil {
+		// As the zones are kept: lower case, no final dot (review 15: a
+		// domain given with one made the NS name end in a dot, and a zone
+		// holding it passed the checks, which compared names as written).
+		if err := st.SetSetting(ctx, settingDomain, []byte(canonicalZone(o.Domain))); err != nil {
 			return params, err
 		}
 	}
@@ -1032,7 +1035,12 @@ func nodeNameClash(ctx context.Context, st *store.Store, all []store.Service, zo
 	if err != nil {
 		return "", err
 	}
-	holds := func(name string) bool { return name != "" && (name == zone || strings.HasSuffix(name, "."+zone)) }
+	// Names as niko-server compares them: lower case, no final dot (a
+	// domain stored before Init canonicalized it may end in one).
+	holds := func(name string) bool {
+		name = canonicalZone(name)
+		return name != "" && (name == zone || strings.HasSuffix(name, "."+zone))
+	}
 	if holds(domain) {
 		return "the node's domain " + domain, nil
 	}
@@ -1076,6 +1084,10 @@ func zoneConflict(zone string, all []store.Service) string {
 // ZonesClash reports whether two zones are one, or one holds the other:
 // the front refuses them together (niko-server v0.11.0).
 func ZonesClash(a, b string) bool { return zonesClash(a, b) }
+
+// CanonicalZone is a name as zones are kept and niko-server compares them:
+// lower case, no final dot.
+func CanonicalZone(z string) string { return canonicalZone(z) }
 
 // zonesClash reports whether two zones are one, or one holds the other.
 func zonesClash(a, b string) bool {

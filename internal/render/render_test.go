@@ -836,6 +836,35 @@ func TestRenderNestedZonesKept(t *testing.T) {
 	if err := provision.CheckRequirements(ctx, st, "older"); !errors.Is(err, store.ErrInvalid) {
 		t.Fatalf("enabling a service whose zone nests with an enabled one's: %v", err)
 	}
+	// dns broken further on (a seal mode no release wrote): its zone is not
+	// the front's, so the later service whose zone nests with it is served
+	// (review 15: the zone stayed taken, and neither was).
+	if err := st.SetServiceEnabled(ctx, "older", true); err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(dns.Settings), &settings); err != nil {
+		t.Fatal(err)
+	}
+	settings["seal"] = "bogus"
+	broken, _ := json.Marshal(settings)
+	if err := st.UpdateService(ctx, dns.ID, store.ServiceUpdate{Settings: string(broken)}); err != nil {
+		t.Fatal(err)
+	}
+	if m, err = render.CollectForRender(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	files, _, err = render.Render(m, render.DefaultPaths)
+	if !render.Partial(err) || !strings.Contains(fmt.Sprint(err), "service dns: ") || strings.Contains(fmt.Sprint(err), "service older:") {
+		t.Fatalf("render with dns broken: %v", err)
+	}
+	served := false
+	for _, f := range files {
+		served = served || f.Service == "front" && strings.Contains(string(f.Content), `"x.`+provision.Zone(dns)+`"`)
+	}
+	if !served {
+		t.Fatal("the front leaves out older's zone for a broken service's")
+	}
 }
 
 // A zone that holds the name the zones are delegated to (stored before
@@ -843,25 +872,30 @@ func TestRenderNestedZonesKept(t *testing.T) {
 // of the front with an error, not the front (niko-server v0.11.0 refuses
 // such a config).
 func TestRenderZoneHoldsNSName(t *testing.T) {
-	for _, name := range []string{"dns", "mdns"} {
-		t.Run(name, func(t *testing.T) { renderZoneHoldsNSName(t, name) })
+	for _, c := range []struct{ name, ns string }{
+		{"dns", "ns9.%s"}, {"mdns", "ns9.%s"},
+		// As written by a node whose domain was given with a final dot
+		// (review 15): niko-server compares the canonical name.
+		{"dns", "NS9.%s."},
+	} {
+		t.Run(c.name+" "+c.ns, func(t *testing.T) { renderZoneHoldsNSName(t, c.name, c.ns) })
 	}
 }
 
-func renderZoneHoldsNSName(t *testing.T, name string) {
+func renderZoneHoldsNSName(t *testing.T, name, nsFormat string) {
 	ctx := context.Background()
 	st := node(t)
 	dns, _ := st.ServiceByName(ctx, name)
-	st.SetSetting(ctx, "dns_ns_name", []byte("ns9."+provision.Zone(dns)))
+	st.SetSetting(ctx, "dns_ns_name", []byte(fmt.Sprintf(nsFormat, provision.Zone(dns))))
 	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.NSName != "ns9."+provision.Zone(dns) {
+	if m.NSName != fmt.Sprintf(nsFormat, provision.Zone(dns)) {
 		t.Fatalf("NS name %q", m.NSName)
 	}
 	files, _, err := render.Render(m, render.DefaultPaths)
-	if !render.Partial(err) || !strings.Contains(fmt.Sprint(err), "service "+name+": zone "+provision.Zone(dns)+" holds ns9.") {
+	if !render.Partial(err) || !strings.Contains(strings.ToLower(fmt.Sprint(err)), "service "+name+": zone "+provision.Zone(dns)+" holds ns9.") {
 		t.Fatalf("render: %v", err)
 	}
 	front := false

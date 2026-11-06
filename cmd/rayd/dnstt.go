@@ -51,6 +51,10 @@ func watchDNSTT(ctx context.Context, st *store.Store, paths render.Paths, hb *he
 
 // roundDNSTT is one round of watchDNSTT at now.
 func roundDNSTT(ctx context.Context, st *store.Store, paths render.Paths, windows map[string]*dnsstats.Window[dnsstats.Snapshot], now time.Time, hb *health.Board) {
+	// Each sample at the time it was read: a socket that does not answer
+	// holds the round up to 2 s (review 15: samples stamped at the round's
+	// start skewed the spans).
+	start := time.Now()
 	services, err := st.ListServices(ctx)
 	if err != nil {
 		return
@@ -74,7 +78,7 @@ func roundDNSTT(ctx context.Context, st *store.Store, paths render.Paths, window
 			hb.Report("dnstt "+svc.Name, "", fmt.Errorf("the backend gives no counters: %w", err))
 			continue
 		}
-		w.Add(now, s)
+		w.Add(now.Add(time.Since(start)), s)
 		d, span, ok := w.Delta()
 		hb.Report("dnstt "+svc.Name, dnsstats.Summary(s, d, span, ok), nil)
 	}

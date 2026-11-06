@@ -521,7 +521,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				// address to that tunnel (niko-server v0.11.0 refuses the
 				// front's whole config with it, masterdns's zones too:
 				// review 14).
-				if ns := m.NSName; ns != "" && (ns == z || strings.HasSuffix(ns, "."+z)) {
+				if ns := provision.CanonicalZone(m.NSName); ns != "" && (ns == z || strings.HasSuffix(ns, "."+z)) {
 					return fmt.Errorf("zone %s holds %s, the name the zones are delegated to: give it another zone", z, ns)
 				}
 			}
@@ -679,6 +679,14 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		nf, nz, nt, nu, def := len(files), len(zones), len(tcpRoutes), len(udpRoutes), tcpDefault
 		if err := one(s); err != nil {
 			files, zones, tcpRoutes, udpRoutes, tcpDefault = files[:nf], zones[:nz], tcpRoutes[:nt], udpRoutes[:nu], def
+			// Its zones are not the front's after all: a later service
+			// whose old zone nests with one of them is not left out for it
+			// (review 15).
+			for z, name := range taken {
+				if name == s.Name {
+					delete(taken, z)
+				}
+			}
 			delete(backends, s.Name)
 			delete(backends, quicBackend(s.Name))
 			errs = append(errs, fmt.Errorf("service %s: %w", s.Name, err))
