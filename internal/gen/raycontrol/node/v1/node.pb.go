@@ -4046,12 +4046,13 @@ func (x *CreateInviteRequest) GetPin() bool {
 }
 
 type CreateInviteResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Invite        *Invite                `protobuf:"bytes,1,opt,name=invite,proto3" json:"invite,omitempty"`
-	InviteCode    string                 `protobuf:"bytes,2,opt,name=invite_code,json=inviteCode,proto3" json:"invite_code,omitempty"` // "rcinv1:..." (docs/spec/api-v1.md)
-	Pin           string                 `protobuf:"bytes,3,opt,name=pin,proto3" json:"pin,omitempty"`                                 // the PIN, shown once; "" without
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Invite          *Invite                `protobuf:"bytes,1,opt,name=invite,proto3" json:"invite,omitempty"`
+	InviteCode      string                 `protobuf:"bytes,2,opt,name=invite_code,json=inviteCode,proto3" json:"invite_code,omitempty"`                  // "rcinv1:..." (docs/spec/api-v1.md)
+	Pin             string                 `protobuf:"bytes,3,opt,name=pin,proto3" json:"pin,omitempty"`                                                  // the PIN, shown once; "" without
+	InviteCodeShort string                 `protobuf:"bytes,4,opt,name=invite_code_short,json=inviteCodeShort,proto3" json:"invite_code_short,omitempty"` // the same invite as "RCINV2:..." (api-v1 §3a); "" if the host cannot go in it
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *CreateInviteResponse) Reset() {
@@ -4101,6 +4102,13 @@ func (x *CreateInviteResponse) GetInviteCode() string {
 func (x *CreateInviteResponse) GetPin() string {
 	if x != nil {
 		return x.Pin
+	}
+	return ""
+}
+
+func (x *CreateInviteResponse) GetInviteCodeShort() string {
+	if x != nil {
+		return x.InviteCodeShort
 	}
 	return ""
 }
@@ -5123,12 +5131,13 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x04role\x18\x03 \x01(\tR\x04role\x12\x1f\n" +
 	"\vttl_seconds\x18\x04 \x01(\x03R\n" +
 	"ttlSeconds\x12\x10\n" +
-	"\x03pin\x18\x05 \x01(\bR\x03pin\"}\n" +
+	"\x03pin\x18\x05 \x01(\bR\x03pin\"\xa9\x01\n" +
 	"\x14CreateInviteResponse\x122\n" +
 	"\x06invite\x18\x01 \x01(\v2\x1a.raycontrol.node.v1.InviteR\x06invite\x12\x1f\n" +
 	"\vinvite_code\x18\x02 \x01(\tR\n" +
 	"inviteCode\x12\x10\n" +
-	"\x03pin\x18\x03 \x01(\tR\x03pin\"~\n" +
+	"\x03pin\x18\x03 \x01(\tR\x03pin\x12*\n" +
+	"\x11invite_code_short\x18\x04 \x01(\tR\x0finviteCodeShort\"~\n" +
 	"\n" +
 	"AuditEntry\x12\x12\n" +
 	"\x04time\x18\x01 \x01(\x03R\x04time\x12\x14\n" +

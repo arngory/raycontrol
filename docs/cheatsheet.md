@@ -66,7 +66,7 @@
 | `rayctl device add USER NAME [-role admin] [-o F]` | пакет устройства `rcdev1:…` — один раз, на экран или в файл 0600 |
 | `rayctl device list [USER]` | устройства |
 | `rayctl device revoke ID` | отозвать: SPA, подписка и API для него закрываются; неиспользованное приглашение — отозвать |
-| `rayctl device invite USER NAME [-role admin] [-ttl 24h] [-o F \| -qr] [-pin]` | одноразовое приглашение `rcinv1:…`: клиент сам регистрирует устройство через API (нужен сервис `api`); `-qr` рисует QR в терминале; `-pin` — ещё PIN из 6 цифр, сообщить другим каналом |
+| `rayctl device invite USER NAME [-role admin] [-ttl 24h] [-o F \| -qr] [-pin] [-format rcinv2]` | одноразовое приглашение `rcinv1:…`: клиент сам регистрирует устройство через API (нужен сервис `api`); `-qr` рисует QR в терминале; `-pin` — ещё PIN из 6 цифр, сообщить другим каналом; `-format rcinv2` — короткое `RCINV2:…`, QR вдвое меньше (Niko 1.34) |
 
 ## Удалённое администрирование (R3)
 

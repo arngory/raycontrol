@@ -429,6 +429,7 @@ message CreateInviteResponse {
   Invite invite = 1;
   string invite_code = 2; // "rcinv1:..." (docs/spec/api-v1.md)
   string pin = 3; // the PIN, shown once; "" without
+  string invite_code_short = 4; // the same invite as "RCINV2:..." (api-v1 §3a); "" if the host cannot go in it
 }
 
 message AuditEntry {

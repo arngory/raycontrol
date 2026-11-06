@@ -640,7 +640,7 @@ func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.C
 	if ttl == 0 {
 		ttl = DefaultInviteTTL
 	}
-	var code, pin string
+	var code, short, pin string
 	api, err := s.apiEndpoint(ctx)
 	if err == nil && api == nil {
 		err = fmt.Errorf("%w: no remote API on the node (rayctl service add api api, then rayctl apply)", store.ErrInvalid)
@@ -658,7 +658,7 @@ func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.C
 		var key [spa.KeySize]byte
 		inv, key, err = s.Store.CreateInvite(ctx, req.Msg.User, req.Msg.Name, role, ttl, withPIN)
 		if err == nil {
-			code, err = s.inviteCode(ctx, inv, key, api)
+			code, short, err = s.inviteCode(ctx, inv, key, api)
 		}
 	}
 	what := "invite.create:" + role
@@ -668,7 +668,7 @@ func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.C
 	if err := s.done(ctx, what, req.Msg.User+"/"+req.Msg.Name, err); err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: invitePB(inv), InviteCode: code, Pin: pin}), nil
+	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: invitePB(inv), InviteCode: code, Pin: pin, InviteCodeShort: short}), nil
 }
 
 // newPIN is a PIN of 6 digits, uniform.
@@ -714,17 +714,23 @@ type apiService struct {
 }
 
 // inviteCode encodes an invite: what SPA needs, with the invite's key and
-// the API as its only service, and where the API is.
-func (s *Server) inviteCode(ctx context.Context, inv store.Invite, key [spa.KeySize]byte, api *apiService) (string, error) {
+// the API as its only service, and where the API is; as rcinv1 and in the
+// short form rcinv2 (api-v1 §3a), "" when the host cannot go in it.
+func (s *Server) inviteCode(ctx context.Context, inv store.Invite, key [spa.KeySize]byte, api *apiService) (string, string, error) {
 	host, err := node.Host(ctx, s.Store)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	ep := api.endpoint
 	b := node.Bundle{Version: 1, Host: host, SPA: node.FromParams(s.Params), DeviceID: inv.ID,
 		DeviceKey: hex.EncodeToString(key[:]), API: &ep, Expires: inv.ExpiresAt.Unix(), PIN: inv.PinProof != nil,
 		Services: []node.BundleService{{ID: uint16(api.svc.ID), Kind: api.svc.Kind, Name: api.svc.Name}}}
-	return b.EncodeInvite()
+	code, err := b.EncodeInvite()
+	if err != nil {
+		return "", "", err
+	}
+	short, _ := b.EncodeInvite2()
+	return code, short, nil
 }
 
 func (s *Server) ListAudit(ctx context.Context, req *connect.Request[nodev1.ListAuditRequest]) (*connect.Response[nodev1.ListAuditResponse], error) {

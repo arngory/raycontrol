@@ -52,9 +52,10 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
   device revoke ID                          a device, or an invite not yet used
-  device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE | -qr] [-pin]
+  device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv1|rcinv2]
                                             a one-time invite: the client registers the device itself
-                                            through the remote API (service add api api)
+                                            through the remote API (service add api api); rcinv2 is
+                                            the short form (QR half the size, Niko 1.34 or later)
   audit [-n 50]
   admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA
   relay add NAME ADDRESS | list | remove NAME   relays in front of the node (relay-v1): one address
@@ -635,6 +636,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		out := fs.String("o", "", "write the invite alone to this file (mode 0600) instead of the screen")
 		showQR := fs.Bool("qr", false, "draw the invite as a QR code on the screen for the phone to scan, instead of the text")
 		withPIN := fs.Bool("pin", false, "the invite also needs a PIN of 6 digits, shown here once: tell it by another channel")
+		format := fs.String("format", "rcinv1", "rcinv1, or rcinv2: the short form, a QR half the size (Niko 1.34 or later)")
 		if err := need(args, 2); err != nil {
 			return err
 		}
@@ -644,12 +646,27 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		if *showQR && (*out != "" || c.json) {
 			return fmt.Errorf("%w: -qr draws on the screen: not with -o or -json", errUsage)
 		}
+		if *format != "rcinv1" && *format != "rcinv2" {
+			return fmt.Errorf("%w: -format rcinv1 or rcinv2", errUsage)
+		}
 		r, err := c.c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{
 			User: args[0], Name: args[1], Role: *role, TtlSeconds: int64(ttl.Seconds()), Pin: *withPIN}))
 		if err != nil {
 			return err
 		}
 		inv := r.Msg.Invite
+		if *format == "rcinv2" {
+			if r.Msg.InviteCodeShort == "" {
+				// A node from before v0.13, or a host that is no address
+				// and no ASCII name: withdraw rather than hand out rcinv1.
+				_, rerr := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: inv.Id}))
+				if rerr != nil {
+					return fmt.Errorf("the node made invite %s, but not as rcinv2 (raycontrol v0.13 has it), and it is not withdrawn: rayctl device revoke %s: %w", inv.Id, inv.Id, rerr)
+				}
+				return errors.New("the node made the invite, but not as rcinv2 (raycontrol v0.13 has it, and the node's host must be an address or an ASCII name): withdrawn; invite with -format rcinv1")
+			}
+			r.Msg.InviteCode = r.Msg.InviteCodeShort
+		}
 		if *withPIN && r.Msg.Pin == "" {
 			// A node from before v0.13 drops the field it does not know
 			// and makes an invite without a PIN: withdraw it rather than

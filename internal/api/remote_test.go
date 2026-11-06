@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -154,6 +155,18 @@ func TestRemotePIN(t *testing.T) {
 		inv, err := node.DecodeInvite(resp.Msg.InviteCode)
 		if err != nil || !inv.PIN {
 			t.Fatalf("the invite does not say it needs a PIN: %+v %v", inv, err)
+		}
+		// The short form (api-v1 §3a) carries the same invite.
+		short, err := node.DecodeInvite(resp.Msg.InviteCodeShort)
+		if err != nil || !strings.HasPrefix(resp.Msg.InviteCodeShort, node.InvitePrefix2) {
+			t.Fatalf("rcinv2 %q: %v", resp.Msg.InviteCodeShort, err)
+		}
+		short.Services[0].Name, short.Services[0].Kind = inv.Services[0].Name, inv.Services[0].Kind
+		if !reflect.DeepEqual(short, inv) {
+			t.Fatalf("rcinv2 %+v, rcinv1 %+v", short, inv)
+		}
+		if len(resp.Msg.InviteCodeShort) > len(resp.Msg.InviteCode)/2 {
+			t.Fatalf("rcinv2 of %d characters, rcinv1 of %d", len(resp.Msg.InviteCodeShort), len(resp.Msg.InviteCode))
 		}
 		return resp.Msg.InviteCode, resp.Msg.Pin
 	}

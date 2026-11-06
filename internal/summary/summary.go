@@ -54,8 +54,9 @@ var (
 	Paths = []string{"direct", "relay"}
 	// Resolvers: the kind of resolver a DNS tunnel works through in the
 	// network, never its address: the network's own (net), a public one
-	// over UDP 53 (udp), DoH or DoT.
-	Resolvers = []string{"net", "udp", "doh", "dot"}
+	// over UDP 53 (udp) or over TCP 53 (tcp, RFC 7766: Niko 1.34, where
+	// UDP 53 is intercepted and TCP is not), DoH or DoT.
+	Resolvers = []string{"net", "udp", "tcp", "doh", "dot"}
 	// TunnelKinds are the services whose observations may name a resolver.
 	TunnelKinds = []string{"dnstt", "masterdns"}
 )
@@ -63,7 +64,8 @@ var (
 // Optional are the report fields beyond the first ones of v1 that this
 // node takes; the subscription lists them (probe.report), so a client
 // sends a field only to nodes that know it (an older node answers 400).
-var Optional = []string{"udp_mtu", "path", "dns"}
+// dns_tcp is not a field but a value: dns "tcp" (raycontrol v0.13.0).
+var Optional = []string{"udp_mtu", "path", "dns", "dns_tcp"}
 
 // Report is what a client sends (probe-v1 §6).
 type Report struct {
