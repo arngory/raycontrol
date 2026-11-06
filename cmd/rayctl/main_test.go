@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/hex"
 	"flag"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -10,6 +14,8 @@ import (
 
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/spa"
+	"github.com/arngory/raycontrol/internal/sub"
 	"github.com/arngory/raycontrol/internal/summary"
 )
 
@@ -132,5 +138,38 @@ func TestExportText(t *testing.T) {
 func TestReleaseDBPath(t *testing.T) {
 	if summary.ReleaseDB != filepath.Join(deploy.DataDir, "ipinfo_lite.mmdb") || !slices.Contains(deploy.DataFiles, filepath.Base(summary.ReleaseDB)) {
 		t.Fatalf("%s is not where the release puts it (%s)", summary.ReleaseDB, deploy.DataDir)
+	}
+}
+
+// rayctl probe -dns takes its zones from the subscription's links: the
+// dnstt one with the probe key, the seal key of the link and the device's
+// dnsauth key for the service; masterdns with its zone alone.
+func TestProbeDNSZones(t *testing.T) {
+	var dev [spa.KeySize]byte
+	dev[0] = 1
+	nodeID := strings.Repeat("ab", spa.NodeIDSize)
+	seal := bytes.Repeat([]byte{9}, 32)
+	p := sub.Payload{
+		DNSProbe: &sub.DNSProbeHint{V: 1, Key: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))},
+		Profiles: []sub.Profile{
+			{Svc: 5, Name: "dns", Link: "vless://u@inner:1?niko-dns=" + url.QueryEscape("dnstt;;t.example.com;pub") +
+				"&niko-dnsseal=" + url.QueryEscape("v1;"+base64.RawURLEncoding.EncodeToString(seal)) + "&niko-dnsauth=v1&niko-node=" + nodeID + "&niko-svc=5#dns"},
+			{Svc: 6, Name: "mdns", Link: "vless://u@inner:1?niko-dns=" + url.QueryEscape("masterdns;;m.example.com;5") + "&niko-dnskey=x#mdns"},
+			{Svc: 7, Name: "reality", Link: "vless://u@203.0.113.7:443?security=reality#reality"},
+		},
+	}
+	zones := probeDNSZones(&p, "203.0.113.7", dev)
+	if len(zones) != 2 {
+		t.Fatalf("zones %+v", zones)
+	}
+	id, _ := hex.DecodeString(nodeID)
+	want := spa.DNSAuthKey(dev, [spa.NodeIDSize]byte(id), 5)
+	d, m := zones[0], zones[1]
+	if d.Kind != "dnstt" || d.Name != "t.example.com" || d.Host != "203.0.113.7" || d.SvcID != 5 || len(d.ProbeKey) != 32 ||
+		d.Seal != "required" || !bytes.Equal(d.SealKey, seal) || d.Auth != "required" || !bytes.Equal(d.AuthKey, want[:]) {
+		t.Fatalf("dnstt %+v", d)
+	}
+	if m.Kind != "masterdns" || m.Name != "m.example.com" || m.ProbeKey != nil || m.AuthKey != nil {
+		t.Fatalf("masterdns %+v", m)
 	}
 }

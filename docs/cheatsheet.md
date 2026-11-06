@@ -53,6 +53,7 @@
 | `rayctl summary api ipinfo [-token-file F]` · `rayctl summary api none` | API ipinfo для адресов, которых нет в базах: спрашивает по сети /24 или /48, не по адресу |
 | `rayctl summary db F.mmdb` · `rayctl summary db -remove` | своя база AS (IPinfo Lite своим токеном, GeoLite2 ASN своим ключом) впереди базы из релиза; root, на ноде |
 | `rayctl probe -report '{"v":1,…}' @bundle` | отправить отчёт как клиент (probe-v1 §6), для проверки |
+| `rayctl probe -dns [-resolver system,google,udp:IP] @bundle` | DNS-туннели из подписки глазами этой машины: делегирование у родителя, фронт и бэкенд ноды (опрос с печатью и меткой этого устройства), зоны через резолвер машины или `-resolver` — то же, что `rayctl dns check` с ноды, но из сети администратора |
 
 ## Пользователи и устройства
 
