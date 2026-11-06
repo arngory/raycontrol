@@ -308,7 +308,7 @@ func TestCheckDNSZonesChangeDuringError(t *testing.T) {
 // The update check says in rayctl status what it found, never failing the
 // loop: a newer release, the same one, or why it could not look.
 func TestCheckUpdates(t *testing.T) {
-	serve := func(broken bool) *release.Fetcher {
+	serve := func(broken bool) func(context.Context) (string, error) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if broken {
 				http.Error(w, "down", http.StatusBadGateway)
@@ -318,9 +318,13 @@ func TestCheckUpdates(t *testing.T) {
 			http.NotFound(w, r)
 		}))
 		t.Cleanup(srv.Close)
-		return &release.Fetcher{Base: srv.URL}
+		f := &release.Fetcher{Base: srv.URL}
+		return func(ctx context.Context) (string, error) { return f.Latest(ctx, release.PubKey) }
 	}
-	detail := func(f *release.Fetcher, running string) health.Loop {
+	latest := func(v string) func(context.Context) (string, error) {
+		return func(context.Context) (string, error) { return v, nil }
+	}
+	detail := func(f func(context.Context) (string, error), running string) health.Loop {
 		hb := &health.Board{}
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
@@ -343,6 +347,17 @@ func TestCheckUpdates(t *testing.T) {
 	}
 	if l := detail(serve(false), "v0.13.0"); l.Failing() || !strings.HasPrefix(l.Detail, "not checked: ") {
 		t.Fatalf("no release: %+v", l)
+	}
+	// A signed newer release, and the same one.
+	if l := detail(latest("v0.15.0"), "v0.14.0"); l.Failing() || l.Detail != "v0.15.0 is out, this node runs v0.14.0: rayctl update" {
+		t.Fatalf("newer: %+v", l)
+	}
+	if l := detail(latest("v0.14.0"), "v0.14.0"); l.Failing() || l.Detail != "up to date (v0.14.0)" {
+		t.Fatalf("same: %+v", l)
+	}
+	// CI builds carry a commit, not a release: not checked at all.
+	if release.IsRelease("0123456789ab") || release.IsRelease("dev") || !release.IsRelease("v0.14.0") {
+		t.Fatal("IsRelease")
 	}
 }
 

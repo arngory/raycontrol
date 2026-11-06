@@ -100,6 +100,10 @@ func VersionOf(trusted string) (string, error) {
 
 var semver = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
 
+// IsRelease reports whether v names a release (vX.Y.Z), not a dev build or
+// a CI build's commit.
+func IsRelease(v string) bool { return semver.MatchString(v) }
+
 // Newer reports whether release version a is newer than b. Anything that is
 // not vX.Y.Z (a "dev" build) is older than every release.
 func Newer(a, b string) bool {

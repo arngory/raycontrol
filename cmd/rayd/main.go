@@ -155,7 +155,7 @@ func cmdServe(args []string) error {
 	realityPeriod := fs.Duration("reality-period", 90*24*time.Hour, "how long REALITY keys stay current; their next set is published -cred-lead ahead (0: no rotation)")
 	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new REALITY server name may wait for its certificate")
 	debug := fs.Bool("debug", false, "log at debug level: refused subscription requests with their addresses (personal data: turn it off after use)")
-	updateCheck := fs.Duration("update-check", 0, "look for a newer raycontrol release this often, ±10 % (0: never): the node fetches the latest SHA256SUMS and its signature from github.com, or a mirror, which see the node's address; rayctl status says what it found")
+	updateCheck := fs.Duration("update-check", 0, "look for a newer raycontrol release this often, an hour or more, ±10 % (0: never; release builds only): the node fetches the latest SHA256SUMS and its signature from github.com, which sees the node's address; rayctl status says what it found")
 	dnsCheck := fs.Duration("dns-check", time.Hour, "check the DNS tunnel zones from the node this often, ±10 %: the delegation, the front and the backend, the zones through public resolvers (0: only on demand, rayctl dns check -now)")
 	dnsCheckResolvers := fs.String("dns-check-resolvers", strings.Join(dnscheck.DefaultResolvers, ","),
 		"resolvers the DNS check asks: "+strings.Join(dnscheck.ResolverNames(), ", ")+", udp:IP or tcp:IP")
@@ -245,6 +245,9 @@ func cmdServe(args []string) error {
 		}
 		go applier.Run(ctx, srv.Changes)
 	}
+	if *updateCheck > 0 && *updateCheck < time.Hour {
+		return errors.New("-update-check must be an hour or more: each check asks github.com from the node")
+	}
 	if *credPeriod > 0 {
 		if *credLead >= *credPeriod {
 			return errors.New("-cred-lead must be shorter than -cred-period")
@@ -269,8 +272,16 @@ func cmdServe(args []string) error {
 	go checkRealityTargets(ctx, st, srv.Changes, hb, log)
 	if *dnsCheck > 0 {
 		go checkDNSZones(ctx, srv.DNSCheck, st, srv.Changes, *dnsCheck, hb, log)
-		if *updateCheck > 0 && version != "dev" {
-			go checkUpdates(ctx, &release.Fetcher{Mirrors: release.DefaultMirrors}, version, *updateCheck, hb, log)
+	}
+	if *updateCheck > 0 {
+		if release.IsRelease(version) {
+			// GitHub only: a mirror would learn the node's address too,
+			// for a question the operator can ask by hand.
+			f := &release.Fetcher{}
+			latest := func(ctx context.Context) (string, error) { return f.Latest(ctx, release.PubKey) }
+			go checkUpdates(ctx, latest, version, *updateCheck, hb, log)
+		} else {
+			log.Info("no update check: this build is no release", "version", version)
 		}
 	}
 	frontUID := render.FrontUID
@@ -1040,11 +1051,11 @@ func checkDNSZones(ctx context.Context, mon *dnscheck.Monitor, st *store.Store, 
 // address). The loop "update" in rayctl status says what it found; a
 // check that fails is said there too, never as a failure of the node, and
 // a new release goes to the log once.
-func checkUpdates(ctx context.Context, f *release.Fetcher, running string, period time.Duration, hb *health.Board, log *slog.Logger) {
+func checkUpdates(ctx context.Context, fetch func(context.Context) (string, error), running string, period time.Duration, hb *health.Board, log *slog.Logger) {
 	said := ""
 	for {
 		cctx, cancel := context.WithTimeout(ctx, time.Minute)
-		latest, err := f.Latest(cctx, release.PubKey)
+		latest, err := fetch(cctx)
 		cancel()
 		switch {
 		case ctx.Err() != nil:
