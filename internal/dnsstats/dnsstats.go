@@ -51,6 +51,8 @@ type Snapshot struct {
 func Read(ctx context.Context, path string) (Snapshot, error) {
 	var s Snapshot
 	err := readJSON(ctx, path, &s)
+	// Gauges as sent are not trusted to be sane.
+	s.Sessions, s.Handshakes = max(s.Sessions, 0), max(s.Handshakes, 0)
 	return s, err
 }
 
@@ -69,6 +71,7 @@ type Front struct {
 	Answers        uint64            `json:"answers"`
 	Unmatched      uint64            `json:"unmatched"`
 	Truncated      uint64            `json:"truncated"`
+	Dropped        uint64            `json:"dropped"` // the backends' messages not sent on
 }
 
 // ReadFront reads the DNS front's counters, as Read a backend's.
@@ -155,7 +158,7 @@ func wentDown(now, before []*uint64) bool {
 
 func (f *Front) counters() []*uint64 {
 	return []*uint64{&f.Malformed, &f.Refused, &f.Apex, &f.Probes, &f.ProbesOverRate, &f.Forwarded, &f.BackendAway,
-		&f.Answers, &f.Unmatched, &f.Truncated}
+		&f.Answers, &f.Unmatched, &f.Truncated, &f.Dropped}
 }
 
 // Sub is what f counted since o, a zone's queries too.
@@ -206,9 +209,10 @@ func (w *Window[T]) span() time.Duration {
 	return time.Hour
 }
 
-// Add takes a snapshot read at now. A restart starts the window again.
+// Add takes a snapshot read at now. A restart starts the window again, and
+// so does a clock that went back (time.Now's readings never do).
 func (w *Window[T]) Add(now time.Time, s T) {
-	if n := len(w.points); n > 0 && s.Restarted(w.points[n-1].s) {
+	if n := len(w.points); n > 0 && (s.Restarted(w.points[n-1].s) || now.Before(w.points[n-1].at)) {
 		w.points = w.points[:0]
 	}
 	w.points = append(w.points, point[T]{now, s})
@@ -243,6 +247,15 @@ func (w *Window[T]) Delta() (d T, span time.Duration, ok bool) {
 		return last.s, since, true
 	}
 	first := w.points[0]
+	// A run that started after the window's beginning: all of it since
+	// the start (review: from its second snapshot on the window lost what
+	// came before the first one).
+	if started := last.s.StartedAt(); started != 0 {
+		at := time.Unix(started, 0)
+		if at.Before(first.at) && !at.Before(last.at.Add(-w.span())) {
+			return last.s, last.at.Sub(at), true
+		}
+	}
 	return last.s.Sub(first.s), last.at.Sub(first.at), true
 }
 
@@ -259,22 +272,22 @@ func Summary(now Snapshot, d Snapshot, span time.Duration, ok bool) string {
 	}
 	parts := []string{plural64(d.Queries, "query", "queries"), plural64(d.SessionsAdmitted, "new session", "new sessions")}
 	for _, e := range []struct {
-		n    uint64
-		what string
+		n         uint64
+		one, many string
 	}{
-		{d.RefusedFull, "session starts refused (node full)"},
-		{d.RefusedRate, "session starts refused (too fast)"},
-		{d.RefusedDevice, "session starts refused (device's limit)"},
-		{d.SessionsEvicted, "silent sessions replaced"},
-		{d.HandshakeTimeouts, "handshakes timed out"},
-		{d.StreamsRefused, "streams refused"},
-		{d.AuthRefused, "refused by dnsauth"},
-		{d.AuthUntagged, "taken without a dnsauth tag"},
-		{d.SealRefused, "refused by the seal"},
-		{d.SealUnsealed, "taken unsealed"},
+		{d.RefusedFull, "session start refused (node full)", "session starts refused (node full)"},
+		{d.RefusedRate, "session start refused (too fast)", "session starts refused (too fast)"},
+		{d.RefusedDevice, "session start refused (device's limit)", "session starts refused (device's limit)"},
+		{d.SessionsEvicted, "silent session replaced", "silent sessions replaced"},
+		{d.HandshakeTimeouts, "handshake timed out", "handshakes timed out"},
+		{d.StreamsRefused, "stream refused", "streams refused"},
+		{d.AuthRefused, "refused by dnsauth", "refused by dnsauth"},
+		{d.AuthUntagged, "taken without a dnsauth tag", "taken without a dnsauth tag"},
+		{d.SealRefused, "refused by the seal", "refused by the seal"},
+		{d.SealUnsealed, "taken unsealed", "taken unsealed"},
 	} {
 		if e.n > 0 {
-			parts = append(parts, fmt.Sprintf("%d %s", e.n, e.what))
+			parts = append(parts, plural64(e.n, e.one, e.many))
 		}
 	}
 	if len(d.Zones) > 1 {
@@ -318,20 +331,21 @@ func FrontSummary(d Front, span time.Duration, ok bool) string {
 	}
 	parts := []string{head}
 	for _, e := range []struct {
-		n    uint64
-		what string
+		n         uint64
+		one, many string
 	}{
-		{d.Refused, "refused outside the zones"},
-		{d.Apex, "apex answers"},
-		{d.Probes, "probes answered"},
-		{d.ProbesOverRate, "probes over the rate"},
-		{d.BackendAway, "not passed on (backend away or busy)"},
-		{d.Unmatched, "answers no query waited for"},
-		{d.Truncated, "answers truncated"},
-		{d.Malformed, "malformed"},
+		{d.Refused, "refused outside the zones", "refused outside the zones"},
+		{d.Apex, "apex answer", "apex answers"},
+		{d.Probes, "probe answered", "probes answered"},
+		{d.ProbesOverRate, "probe over the rate", "probes over the rate"},
+		{d.BackendAway, "not passed on (backend away or busy)", "not passed on (backend away or busy)"},
+		{d.Unmatched, "answer no query waited for", "answers no query waited for"},
+		{d.Truncated, "answer truncated", "answers truncated"},
+		{d.Dropped, "answer dropped", "answers dropped"},
+		{d.Malformed, "malformed", "malformed"},
 	} {
 		if e.n > 0 {
-			parts = append(parts, fmt.Sprintf("%d %s", e.n, e.what))
+			parts = append(parts, plural64(e.n, e.one, e.many))
 		}
 	}
 	return strings.Join(parts, ", ")
@@ -353,8 +367,8 @@ func plural64(n uint64, one, many string) string {
 
 // short is d as 1h, 1h5m, 12m or 40s.
 func short(d time.Duration) string {
-	if d < time.Minute {
-		return d.Round(time.Second).String()
+	if d = max(d, 0).Round(time.Second); d < time.Minute {
+		return fmt.Sprintf("%ds", d/time.Second)
 	}
 	d = d.Round(time.Minute)
 	h, m := d/time.Hour, (d%time.Hour)/time.Minute

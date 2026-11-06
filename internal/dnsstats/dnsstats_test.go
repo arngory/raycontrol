@@ -184,3 +184,37 @@ func TestWindowZones(t *testing.T) {
 		t.Fatal("a zone's count went down: no restart")
 	}
 }
+
+// Review: one of a kind in the singular; a span rounded once; a clock that
+// went back starts again; a run younger than the window keeps all of it.
+func TestSummaryEdges(t *testing.T) {
+	d := Snapshot{Queries: 1, SessionsAdmitted: 1, RefusedFull: 1, SessionsEvicted: 1, HandshakeTimeouts: 1, StreamsRefused: 1}
+	want := "1 session; last 1m: 1 query, 1 new session, 1 session start refused (node full), 1 silent session replaced, 1 handshake timed out, 1 stream refused"
+	if got := Summary(Snapshot{Sessions: 1}, d, time.Minute, true); got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+	if got := FrontSummary(Front{Queries: map[string]uint64{"t.example.com": 1}, Apex: 1, Dropped: 1}, time.Minute, true); got != "last 1m: 1 query, 1 apex answer, 1 answer dropped" {
+		t.Errorf("front %q", got)
+	}
+	for d, want := range map[time.Duration]string{59600 * time.Millisecond: "1m", 0: "0s", -time.Hour: "0s", 59 * time.Second: "59s"} {
+		if got := short(d); got != want {
+			t.Errorf("short(%v) = %q, want %q", d, got, want)
+		}
+	}
+	t0 := time.Unix(1700000000, 0)
+	w := &Window[Snapshot]{}
+	w.Add(t0, Snapshot{Queries: 10})
+	w.Add(t0.Add(-time.Minute), Snapshot{Queries: 20})
+	if len(w.points) != 1 {
+		t.Fatalf("a clock that went back: %d points", len(w.points))
+	}
+	// Started 5 minutes before the first snapshot: since the start, at
+	// the second snapshot too.
+	w = &Window[Snapshot]{}
+	started := t0.Add(-5 * time.Minute).Unix()
+	w.Add(t0, Snapshot{Started: started, Queries: 100})
+	w.Add(t0.Add(time.Minute), Snapshot{Started: started, Queries: 110})
+	if d, span, ok := w.Delta(); !ok || d.Queries != 110 || span != 6*time.Minute {
+		t.Fatalf("since the start: %d over %v", d.Queries, span)
+	}
+}
