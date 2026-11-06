@@ -351,6 +351,22 @@ func TestAuthHintOption(t *testing.T) {
 	if h, _ := hint(); h != "off" {
 		t.Fatalf("auth off: hint %s", h)
 	}
+	// off beside required: refused both ways, a client signs one version.
+	SetServiceOption(ctx, st, "dns", "auth", "required")
+	other, err := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns3", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetServiceOption(ctx, st, "dns", "auth_hint", "required"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetServiceOption(ctx, st, other.Name, "auth_hint", "off"); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("off beside required: %v", err)
+	}
+	SetServiceOption(ctx, st, "dns", "auth_hint", "off")
+	if _, err := SetServiceOption(ctx, st, "dns", "auth_hint", "optional"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns2", Settings: `{"auth":"optional","auth_hint":"required"}`}); !errors.Is(err, store.ErrInvalid) {
 		t.Fatalf("created with auth_hint required under auth optional: %v", err)
 	}

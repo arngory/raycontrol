@@ -174,14 +174,14 @@ func (c *cli) update(ctx context.Context, args []string) error {
 	}
 
 	if err := installBinaries(stage); err != nil {
-		return c.failUpdate(ctx, fmt.Errorf("installing: %w", err))
+		return c.failUpdate(ctx, fmt.Errorf("installing: %w", err), before)
 	}
 	// Restart and rollback each get their own time, whatever the download
 	// took.
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartTimeout)
 	defer cancel()
 	if err := c.restartNode(rctx, newVersion, stage, before); err != nil {
-		return c.failUpdate(ctx, err)
+		return c.failUpdate(ctx, err, before)
 	}
 	fmt.Printf("raycontrol %s is running; the previous binaries are kept for rayctl update -rollback\n", newVersion)
 	c.belowDefaults(ctx)
@@ -296,7 +296,17 @@ func (c *cli) restartNode(ctx context.Context, want, stage string, before []stri
 	}
 	restarts := map[string]string{} // each data-plane unit's restarts once restarted
 	var units []string
-	for _, u := range dataPlaneAfter(before, activeDataPlane(), unitLoaded) {
+	// The deployment's units too: one a new service brings that fails at
+	// once is in auto-restart, not active, when listed (review).
+	now := activeDataPlane()
+	if d, err := c.c.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{})); err == nil {
+		for _, u := range d.Msg.Units {
+			if strings.HasPrefix(u, "niko-") {
+				now = append(now, u)
+			}
+		}
+	}
+	for _, u := range dataPlaneAfter(before, now, unitLoaded) {
 		if err := run("systemctl", "try-restart", u); err != nil {
 			return err
 		}
@@ -367,13 +377,16 @@ const restartTimeout = 5 * time.Minute
 
 // failUpdate puts the previous binaries and database back after a failed
 // update.
-func (c *cli) failUpdate(ctx context.Context, cause error) error {
+func (c *cli) failUpdate(ctx context.Context, cause error, before []string) error {
 	fmt.Println("update failed:", cause)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartTimeout)
 	defer cancel()
 	// The copy is minutes old: if the database the failed update left
 	// cannot be read, the copy goes back as it is.
-	if err := c.rollback(ctx, "the update failed", true, carryTry); err != nil {
+	// The units that ran before the update: the one whose failure brought
+	// the rollback here is likely in auto-restart by now, not in the
+	// rollback's own list (review).
+	if err := c.rollback(ctx, "the update failed", true, carryTry, before...); err != nil {
 		return fmt.Errorf("%w; rollback failed too: %w", cause, err)
 	}
 	return fmt.Errorf("update failed, the previous version runs again: %w", cause)
@@ -436,14 +449,14 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool, carry carry) error {
 	return c.rollback(ctx, "asked for", restoreDB, carry)
 }
 
-func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry carry) error {
+func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry carry, ran ...string) error {
 	b, err := os.ReadFile(filepath.Join(previousDir, "VERSION")) //nolint:gosec // G304: a fixed path
 	if err != nil {
 		return errors.New("no previous binaries: nothing to roll back to")
 	}
 	prev := strings.TrimSpace(string(b))
 	fmt.Printf("rolling back to %s (%s)\n", prev, why)
-	before := activeDataPlane()
+	before := append(activeDataPlane(), ran...)
 	saved := filepath.Join(previousDir, "rayd.db")
 	if _, err := os.Stat(saved); restoreDB && err == nil {
 		if err := run("systemctl", "stop", "rayd.service"); err != nil {

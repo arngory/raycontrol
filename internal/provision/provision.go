@@ -837,6 +837,23 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 		if value == "required" && DNSAuthMode(svc) != "required" {
 			return svc, fmt.Errorf("%w auth_hint required needs auth required (now %s): a dnsauth-v1 tag would pass as untagged", store.ErrInvalid, DNSAuthMode(svc))
 		}
+		// The subscription says one dnsauth version for all of a user's
+		// tunnels (dnsauth.v): required (v2 only) beside off (v1 only)
+		// would leave one of them refusing every query of a client (review).
+		if value == "required" || value == "off" {
+			others, err := st.ListServices(ctx)
+			if err != nil {
+				return svc, err
+			}
+			for _, o := range others {
+				if o.ID == svc.ID || (o.Kind != "dnstt" && o.Kind != "masterdns") {
+					continue
+				}
+				if h := DNSAuthHint(o); (value == "required" && h == "off") || (value == "off" && h == "required") {
+					return svc, fmt.Errorf("%w auth_hint %s: %s has auth_hint %s, and a client signs one version for all the tunnels (set it to optional first)", store.ErrInvalid, value, o.Name, h)
+				}
+			}
+		}
 		v = value
 	case (svc.Kind == "dnstt" || svc.Kind == "masterdns") && (key == "auth" || key == "seal"):
 		// dnsauth-v1 (spec/dnsauth-v1.md §5, spec/dnsauth-masterdns.md

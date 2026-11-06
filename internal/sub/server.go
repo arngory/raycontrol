@@ -38,6 +38,12 @@ type Server struct {
 	Store *store.Store
 	Keys  provision.NodeKeys
 	Log   *slog.Logger
+	// ClockSeqAfter: seq keeps to the clock in milliseconds only from then
+	// on (rayd: 10 minutes after it starts). An update that fails in its
+	// first minutes puts the database back under the old version, which
+	// counts on from the old seq: a client that took the clock's from the
+	// new rayd meanwhile would refuse every answer of the old one (review).
+	ClockSeqAfter time.Time
 	// Probe, when set, serves the channel probes (spec/probe-v1.md) on the
 	// same endpoint, and the subscription says so.
 	Probe *probe.Server
@@ -332,7 +338,10 @@ func (s *Server) nextSeq(ctx context.Context, now time.Time) (uint64, error) {
 	// Never below the clock in milliseconds: a database put back (update
 	// rollback, restore) holds an older count, and clients drop answers
 	// with a seq below one they have seen (subscription-v1 §3).
-	seq = max(seq+1, uint64(max(now.UnixMilli(), 0)))
+	seq++
+	if !now.Before(s.ClockSeqAfter) {
+		seq = max(seq, uint64(max(now.UnixMilli(), 0)))
+	}
 	return seq, s.Store.SetSetting(ctx, settingSeq, []byte(strconv.FormatUint(seq, 10)))
 }
 

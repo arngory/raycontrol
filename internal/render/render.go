@@ -782,8 +782,16 @@ func zoneProblem(zones []string, taken map[string]string, nsName string) error {
 func UnservedZones(m Model) map[int64]error {
 	out := map[int64]error{}
 	taken := map[string]string{}
+	inner := slices.ContainsFunc(m.Services, func(s Service) bool { return s.Kind == "inner" })
 	for _, s := range m.Services {
 		if s.Kind != "dnstt" && s.Kind != "masterdns" {
+			continue
+		}
+		// A tunnel Render leaves out for another reason frees its zones
+		// there too: one stored with a nested zone after it is then served
+		// (review).
+		if err := dnsTunnelProblem(s, inner); err != nil {
+			out[s.ID] = err
 			continue
 		}
 		all := provision.Zones(s.Service)
@@ -796,6 +804,26 @@ func UnservedZones(m Model) map[int64]error {
 		}
 	}
 	return out
+}
+
+// dnsTunnelProblem is what makes Render leave a DNS tunnel out before its
+// zones: no inner stage, a mode it does not know, its key missing.
+func dnsTunnelProblem(s Service, inner bool) error {
+	if !inner {
+		return errors.New("needs the inner stage, which is missing or disabled")
+	}
+	for what, mode := range map[string]string{"auth": DNSAuthMode(s.Service), "seal": DNSSealMode(s.Service), "auth_hint": DNSAuthHint(s.Service)} {
+		if !slices.Contains([]string{"off", "optional", "required"}, mode) {
+			return fmt.Errorf("%s %q: off, optional or required", what, mode)
+		}
+	}
+	switch {
+	case s.Kind == "dnstt" && len(s.Secrets[provision.SecretNoisePrivate]) != 32:
+		return errors.New("no key")
+	case s.Kind == "masterdns" && len(s.Secrets[provision.SecretMasterDNSKey]) == 0:
+		return errors.New("no key")
+	}
+	return nil
 }
 
 // Partial reports whether err from Render leaves the other services' files

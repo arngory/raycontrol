@@ -560,6 +560,17 @@ func TestSeqAfterRollback(t *testing.T) {
 	if b := seq(now.Add(time.Second)); b <= a {
 		t.Fatalf("seq %d after the rollback, %d before", b, a)
 	}
+	// Before ClockSeqAfter (a rayd that just started, maybe an update
+	// about to fail): one more than the stored count, no jump.
+	early := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet(), ClockSeqAfter: now.Add(time.Hour)}
+	f.st.SetSetting(ctx, "sub_seq", []byte("41"))
+	env, err := early.Build(ctx, "alice", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := sub.Verify(env, f.keys.PublicJSON()); p.Seq != 42 {
+		t.Fatalf("seq %d before ClockSeqAfter, want 42", p.Seq)
+	}
 	// Answers in the same millisecond still grow.
 	if c, d := seq(now.Add(time.Second)), seq(now.Add(time.Second)); d <= c {
 		t.Fatalf("seq %d then %d", c, d)
@@ -905,5 +916,92 @@ func TestUnservedZoneNotInSubscription(t *testing.T) {
 	}
 	if got := names(); slices.Contains(got, "dns2") || !slices.Contains(got, "dns") {
 		t.Fatalf("a nested zone's tunnel handed out: %v", got)
+	}
+	// The first tunnel left out for another reason (a mode Render does not
+	// know): its zone is free, the second one is served and handed out,
+	// the first one not (review).
+	dns, _ = f.st.ServiceByName(ctx, "dns")
+	var d map[string]any
+	json.Unmarshal([]byte(dns.Settings), &d)
+	d["seal"] = "bogus"
+	b, _ = json.Marshal(d)
+	f.st.UpdateService(ctx, dns.ID, store.ServiceUpdate{Settings: string(b)})
+	if got := names(); !slices.Contains(got, "dns2") || slices.Contains(got, "dns") {
+		t.Fatalf("with the first tunnel broken: %v", got)
+	}
+}
+
+// BuildFor with services that fail and dnsauth modes that differ (review):
+// a broken service is left out and the rest go out; all broken: an error,
+// no empty subscription; a tunnel the user cannot use does not change the
+// user's dnsauth.v; tunnels that differ both ways give 2.
+func TestBuildForPartialAndModes(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	dns, _ := f.st.ServiceByName(ctx, "dns")
+	dns2, err := provision.CreateService(ctx, f.st, store.Service{Kind: "dnstt", Name: "dns2", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.st.SetUserServices(ctx, "alice", []int64{dns.ID, dns2.ID})
+	build := func() (*sub.Payload, error) {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", time.Now())
+		if err != nil {
+			return nil, err
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &p, nil
+	}
+	// dns2's key gone: its profile cannot be made.
+	if err := f.st.UpdateService(ctx, dns2.ID, store.ServiceUpdate{Delete: []string{provision.SecretNoisePrivate}}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := build()
+	if err != nil || len(p.Profiles) != 1 || p.Profiles[0].Name != "dns" {
+		t.Fatalf("one broken service: %+v %v", p, err)
+	}
+	// Both broken: an error, not a subscription without profiles.
+	f.st.UpdateService(ctx, dns.ID, store.ServiceUpdate{Delete: []string{provision.SecretNoisePrivate}})
+	if p, err := build(); err == nil {
+		t.Fatalf("every service broken: %+v", p)
+	}
+
+	// dnsauth.v over a user's tunnels only.
+	g := setup(t)
+	srv = &sub.Server{Store: g.st, Keys: g.keys, Log: quiet()}
+	other, err := provision.CreateService(ctx, g.st, store.Service{Kind: "dnstt", Name: "other", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provision.SetServiceOption(ctx, g.st, "other", "auth_hint", "required"); err != nil {
+		t.Fatal(err)
+	}
+	versions := func() []int {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, _ := sub.Verify(env, g.keys.PublicJSON())
+		return p.DNSAuth.V
+	}
+	if v := versions(); !slices.Equal(v, []int{1, 2}) {
+		t.Fatalf("a tunnel alice cannot use changed hers: %v", v)
+	}
+	// Both ways at once (as stored before the check): 2, where tunnels go.
+	gdns, _ := g.st.ServiceByName(ctx, "dns")
+	var st map[string]any
+	json.Unmarshal([]byte(gdns.Settings), &st)
+	st["auth_hint"] = "off"
+	b, _ := json.Marshal(st)
+	g.st.UpdateService(ctx, gdns.ID, store.ServiceUpdate{Settings: string(b)})
+	g.st.SetUserServices(ctx, "alice", []int64{gdns.ID, other.ID})
+	if v := versions(); !slices.Equal(v, []int{2}) {
+		t.Fatalf("off beside required: %v", v)
 	}
 }

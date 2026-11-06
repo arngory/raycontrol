@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"flag"
+	"io"
 	"net/netip"
 	"net/url"
 	"os"
@@ -300,5 +301,30 @@ func TestPrintSummaryZones(t *testing.T) {
 		if strings.Contains(l, "dns (3)") != strings.HasSuffix(l, "zones 0:3 1:7") || strings.Contains(l, "mdns (4)") && strings.Contains(l, "zones") {
 			t.Errorf("line %q", l)
 		}
+	}
+}
+
+// The bootstrap passes its arguments to check and to install alike: check
+// takes every flag install has (review: bootstrap.sh -name failed the check).
+func TestCheckTakesInstallFlags(t *testing.T) {
+	install := flag.NewFlagSet("install", flag.ContinueOnError)
+	installFlags(install)
+	var args []string
+	install.VisitAll(func(f *flag.Flag) {
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			args = append(args, "-"+f.Name)
+			return
+		}
+		args = append(args, "-"+f.Name, "x")
+	})
+	check := flag.NewFlagSet("check", flag.ContinueOnError)
+	check.SetOutput(io.Discard)
+	check.String("host", "", "")
+	check.String("domain", "", "")
+	check.String("services", "", "")
+	check.Bool("allow-v0", false, "")
+	defineInstallFlags(check)
+	if err := check.Parse(args); err != nil {
+		t.Fatalf("check refuses install's flags: %v", err)
 	}
 }

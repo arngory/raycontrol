@@ -223,6 +223,22 @@ func needRoot() error {
 // never locked out.
 func (c *cli) install(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
+	o := installFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return errUsage
+	}
+	return c.installWith(ctx, fs, o)
+}
+
+// installOptions are install's flags.
+type installOptions struct {
+	host, domain, name, admin, packages, cfToken, dataplane, services, relay *string
+	checked                                                                  *bool
+}
+
+// installFlags defines install's flags on fs: install, and check, which
+// takes the same arguments from the bootstrap (TestCheckTakesInstallFlags).
+func installFlags(fs *flag.FlagSet) installOptions {
 	host := fs.String("host", "", "public address clients use (required)")
 	domain := fs.String("domain", "", "base domain (needed for DNS tunnels)")
 	name := fs.String("name", "", "the node's name, which clients show with its address (at most 48 characters; rayctl node name later)")
@@ -234,9 +250,13 @@ func (c *cli) install(ctx context.Context, args []string) error {
 		" (doh, naive and yggdrasil share TCP 443 with reality, which goes first; default with -domain: reality; \"none\" for none)")
 	checked := fs.Bool("checked", false, "the bootstrap has shown the host check: print only required checks that fail now")
 	relay := fs.String("relay", "", "make this host a relay in front of an exit (relay-v1): the bundle file from rayctl relay bundle on the exit")
-	if err := fs.Parse(args); err != nil {
-		return errUsage
-	}
+	return installOptions{host: host, domain: domain, name: name, admin: admin, packages: packages, cfToken: cfToken,
+		dataplane: dataplane, services: services, relay: relay, checked: checked}
+}
+
+func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOptions) error {
+	host, domain, name, admin, packages, cfToken, dataplane, services, relay, checked :=
+		o.host, o.domain, o.name, o.admin, o.packages, o.cfToken, o.dataplane, o.services, o.relay, o.checked
 	if err := needRoot(); err != nil {
 		return err
 	}
