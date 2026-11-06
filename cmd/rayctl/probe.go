@@ -172,7 +172,9 @@ func probeDNS(ctx context.Context, p *sub.Payload, host string, deviceKey [spa.K
 	var out strings.Builder
 	w := tabwriter.NewWriter(&out, 0, 4, 2, ' ', 0)
 	printDNSCheck(w, api.DNSReportPB(rep), time.Now())
-	w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
 	printf("%s", out.String())
 	return nil
 }
