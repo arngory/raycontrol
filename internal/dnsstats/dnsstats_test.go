@@ -68,7 +68,7 @@ func TestReadSilent(t *testing.T) {
 func TestWindow(t *testing.T) {
 	t0 := time.Unix(1700000000, 0)
 	started := t0.Add(-10 * time.Minute).Unix()
-	w := &Window{}
+	w := &Window[Snapshot]{}
 	if _, _, ok := w.Delta(); ok {
 		t.Fatal("delta of an empty window")
 	}
@@ -94,13 +94,13 @@ func TestWindow(t *testing.T) {
 		t.Fatalf("after a restart: %+v %v %v", d, span, ok)
 	}
 	// A backend long up when rayd starts: nothing until the next snapshot.
-	w = &Window{}
+	w = &Window[Snapshot]{}
 	w.Add(t0, Snapshot{Started: t0.Add(-48 * time.Hour).Unix(), Queries: 1 << 20})
 	if _, _, ok := w.Delta(); ok {
 		t.Fatal("delta of a long run from one snapshot")
 	}
 	// Without its start, a counter that went down tells a restart.
-	w = &Window{}
+	w = &Window[Snapshot]{}
 	w.Add(t0, Snapshot{Queries: 50})
 	w.Add(t0.Add(time.Minute), Snapshot{Queries: 80})
 	if d, _, _ := w.Delta(); d.Queries != 30 {
@@ -126,5 +126,39 @@ func TestSummary(t *testing.T) {
 		if got := short(d); got != want {
 			t.Errorf("short(%v) = %q, want %q", d, got, want)
 		}
+	}
+}
+
+// The front's window: a zone's queries over the hour, and its summary.
+func TestFrontWindow(t *testing.T) {
+	t0 := time.Unix(1700000000, 0)
+	started := t0.Add(-2 * time.Hour).Unix()
+	w := &Window[Front]{}
+	w.Add(t0, Front{Started: started, Queries: map[string]uint64{"t.example.com": 1000}, Refused: 5})
+	if _, _, ok := w.Delta(); ok {
+		t.Fatal("a delta from one snapshot of a front up for two hours")
+	}
+	if got := FrontSummary(Front{}, 0, false); got != "counting" {
+		t.Errorf("%q", got)
+	}
+	// Clients move to the spare zone: its queries appear and grow.
+	w.Add(t0.Add(30*time.Minute), Front{Started: started, Queries: map[string]uint64{"t.example.com": 1100, "s.example.net": 40},
+		Refused: 7, Probes: 3, BackendAway: 1})
+	d, span, ok := w.Delta()
+	if !ok || span != 30*time.Minute || d.Queries["t.example.com"] != 100 || d.Queries["s.example.net"] != 40 || d.Refused != 2 || d.Probes != 3 {
+		t.Fatalf("delta %+v %v %v", d, span, ok)
+	}
+	want := "last 30m: 140 queries (s.example.net 40, t.example.com 100), 2 refused outside the zones, 3 probes answered, 1 not passed on (backend away or busy)"
+	if got := FrontSummary(d, span, ok); got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+	// A zone gone from the front, or a count that went down: a restart.
+	w.Add(t0.Add(31*time.Minute), Front{Started: started, Queries: map[string]uint64{"s.example.net": 41}})
+	if _, _, ok := w.Delta(); ok || len(w.points) != 1 {
+		t.Fatalf("a zone's count went down: %d points", len(w.points))
+	}
+	// One zone: no list.
+	if got := FrontSummary(Front{Queries: map[string]uint64{"t.example.com": 1}}, time.Hour, true); got != "last 1h: 1 query" {
+		t.Errorf("%q", got)
 	}
 }
