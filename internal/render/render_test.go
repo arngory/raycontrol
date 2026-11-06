@@ -845,13 +845,20 @@ func TestRenderNestedZonesKept(t *testing.T) {
 	}
 }
 
-// A dnstt zone that holds the name the zones are delegated to (stored
-// before raycontrol refused it): the service is left out of the front with
-// an error, not the front (niko-server v0.11.0 refuses such a config).
+// A zone that holds the name the zones are delegated to (stored before
+// raycontrol refused it), dnstt's or masterdns's: the service is left out
+// of the front with an error, not the front (niko-server v0.11.0 refuses
+// such a config).
 func TestRenderZoneHoldsNSName(t *testing.T) {
+	for _, name := range []string{"dns", "mdns"} {
+		t.Run(name, func(t *testing.T) { renderZoneHoldsNSName(t, name) })
+	}
+}
+
+func renderZoneHoldsNSName(t *testing.T, name string) {
 	ctx := context.Background()
 	st := node(t)
-	dns, _ := st.ServiceByName(ctx, "dns")
+	dns, _ := st.ServiceByName(ctx, name)
 	st.SetSetting(ctx, "dns_ns_name", []byte("ns9."+provision.Zone(dns)))
 	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
@@ -861,7 +868,7 @@ func TestRenderZoneHoldsNSName(t *testing.T) {
 		t.Fatalf("NS name %q", m.NSName)
 	}
 	files, _, err := render.Render(m, render.DefaultPaths)
-	if !render.Partial(err) || !strings.Contains(fmt.Sprint(err), "service dns: zone "+provision.Zone(dns)+" holds ns9.") {
+	if !render.Partial(err) || !strings.Contains(fmt.Sprint(err), "service "+name+": zone "+provision.Zone(dns)+" holds ns9.") {
 		t.Fatalf("render: %v", err)
 	}
 	front := false
