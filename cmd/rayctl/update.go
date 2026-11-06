@@ -301,9 +301,13 @@ func (c *cli) restartNode(ctx context.Context, want, stage string, before []stri
 	now := activeDataPlane()
 	if d, err := c.c.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{})); err == nil {
 		for _, u := range d.Msg.Units {
-			if strings.HasPrefix(u, "niko-") {
-				now = append(now, u)
+			if !strings.HasPrefix(u, "niko-") {
+				continue
 			}
+			if st, err := unitState(u)(); err == nil && waitsForFile(st) {
+				continue
+			}
+			now = append(now, u)
 		}
 	}
 	for _, u := range dataPlaneAfter(before, now, unitLoaded) {
@@ -645,6 +649,14 @@ func dataPlaneAfter(before, now []string, loaded func(string) bool) []string {
 		}
 	}
 	return units
+}
+
+// waitsForFile reports whether systemd skipped a unit for an unmet
+// condition, no start queued: a service rendered once its certificate is
+// issued (site, naive, reality, ygg) stays so until then, and an update
+// does not wait for it.
+func waitsForFile(st map[string]string) bool {
+	return st["ActiveState"] == "inactive" && st["ConditionResult"] == "no" && (st["Job"] == "" || st["Job"] == "0")
 }
 
 // unitLoaded reports whether systemd has a unit file for unit.

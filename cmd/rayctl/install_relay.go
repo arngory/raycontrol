@@ -609,7 +609,7 @@ func waitUnit(ctx context.Context, unit string, show func() (map[string]string, 
 // unitState reads a unit's state as waitUnit wants it.
 func unitState(unit string) func() (map[string]string, error) {
 	return func() (map[string]string, error) {
-		out, err := commandApart("systemctl", "show", "-p", "ActiveState,SubState,Result,NRestarts,Job", unit).Output()
+		out, err := commandApart("systemctl", "show", "-p", "ActiveState,SubState,Result,NRestarts,Job,ConditionResult", unit).Output()
 		st := map[string]string{}
 		for _, line := range strings.Split(string(out), "\n") {
 			if k, v, ok := strings.Cut(line, "="); ok {

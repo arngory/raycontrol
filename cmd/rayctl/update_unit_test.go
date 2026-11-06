@@ -92,6 +92,26 @@ func TestDataPlaneAfter(t *testing.T) {
 	}
 }
 
+// A unit skipped for its missing certificate is not waited for; one in
+// auto-restart, failed or with its start queued is.
+func TestWaitsForFile(t *testing.T) {
+	for _, c := range []struct {
+		st   map[string]string
+		want bool
+	}{
+		{map[string]string{"ActiveState": "inactive", "SubState": "dead", "ConditionResult": "no", "Job": ""}, true},
+		{map[string]string{"ActiveState": "inactive", "SubState": "dead", "ConditionResult": "no", "Job": "0"}, true},
+		{map[string]string{"ActiveState": "inactive", "SubState": "dead", "ConditionResult": "no", "Job": "12"}, false},
+		{map[string]string{"ActiveState": "activating", "SubState": "auto-restart", "ConditionResult": "yes"}, false},
+		{map[string]string{"ActiveState": "failed", "SubState": "failed", "ConditionResult": "yes"}, false},
+		{map[string]string{"ActiveState": "active", "SubState": "running", "ConditionResult": "yes"}, false},
+	} {
+		if got := waitsForFile(c.st); got != c.want {
+			t.Errorf("%v: %v, want %v", c.st, got, c.want)
+		}
+	}
+}
+
 // After an update: the DNS tunnels that keep modes weaker than a new one's.
 func TestWeakerModes(t *testing.T) {
 	for _, c := range []struct {
