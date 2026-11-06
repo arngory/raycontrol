@@ -23,9 +23,11 @@ type Snapshot struct {
 	Sessions          int    `json:"sessions"`
 	Handshakes        int    `json:"handshakes"`
 	SessionsAdmitted  uint64 `json:"sessions_admitted"`
-	RefusedFull       uint64 `json:"sessions_refused_full"`
-	RefusedRate       uint64 `json:"sessions_refused_rate"`
-	RefusedDevice     uint64 `json:"sessions_refused_device"`
+	// Session starts refused, by start packet: a client's retries count
+	// again.
+	RefusedFull       uint64 `json:"starts_refused_full"`
+	RefusedRate       uint64 `json:"starts_refused_rate"`
+	RefusedDevice     uint64 `json:"starts_refused_device"`
 	SessionsEvicted   uint64 `json:"sessions_evicted"`
 	HandshakeTimeouts uint64 `json:"handshake_timeouts"`
 	StreamsRefused    uint64 `json:"streams_refused"`
@@ -165,9 +167,9 @@ func Summary(now Snapshot, d Snapshot, span time.Duration, ok bool) string {
 		n    uint64
 		what string
 	}{
-		{d.RefusedFull, "sessions refused (node full)"},
-		{d.RefusedRate, "sessions refused (too fast)"},
-		{d.RefusedDevice, "sessions refused (device's limit)"},
+		{d.RefusedFull, "session starts refused (node full)"},
+		{d.RefusedRate, "session starts refused (too fast)"},
+		{d.RefusedDevice, "session starts refused (device's limit)"},
 		{d.SessionsEvicted, "silent sessions replaced"},
 		{d.HandshakeTimeouts, "handshakes timed out"},
 		{d.StreamsRefused, "streams refused"},

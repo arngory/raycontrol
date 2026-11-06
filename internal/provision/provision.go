@@ -309,6 +309,10 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		} else if zs, isString := z.(string); !isString || !zoneName.MatchString(strings.TrimSuffix(zs, ".")) || len(zs) > 253 {
 			// niko-server refuses a config with another (its dnsName).
 			return svc, fmt.Errorf("%w zone %v: a DNS name of two labels or more", store.ErrInvalid, z)
+		} else if other := zoneConflict(canonicalZone(zs), all); other != "" {
+			// The front takes no zone twice, nor one inside another
+			// (niko-server v0.11.0): a name under both would be either's.
+			return svc, fmt.Errorf("%w zone %v: the same as, or nested with, the zone of %s", store.ErrInvalid, z, other)
 		} else {
 			// As the front and the delegation compare it.
 			settings["zone"] = canonicalZone(zs)
@@ -893,10 +897,27 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service) (string,
 			label[i] = alphabet[n]
 		}
 		zone := string(label) + "." + domain
-		if zone != string(ns) && !slices.ContainsFunc(all, func(s store.Service) bool { return strings.Contains(s.Settings, `"`+zone+`"`) }) {
+		if zone != string(ns) && zoneConflict(zone, all) == "" && !slices.ContainsFunc(all, func(s store.Service) bool { return strings.Contains(s.Settings, `"`+zone+`"`) }) {
 			return zone, nil
 		}
 	}
+}
+
+// zoneConflict names the DNS tunnel service among all whose zone is zone,
+// or holds it, or lies within it; "" when none does. The front refuses
+// such zones (niko-server v0.11.0): a name under both is either's, and a
+// tunnel's last label of data can spell the inner zone.
+func zoneConflict(zone string, all []store.Service) string {
+	for _, svc := range all {
+		if svc.Kind != "dnstt" && svc.Kind != "masterdns" {
+			continue
+		}
+		other := Zone(svc)
+		if other != "" && (other == zone || strings.HasSuffix(zone, "."+other) || strings.HasSuffix(other, "."+zone)) {
+			return svc.Name
+		}
+	}
+	return ""
 }
 
 // Zone returns the "zone" setting of a DNS tunnel service as the front,

@@ -118,7 +118,7 @@ func TestSummary(t *testing.T) {
 		t.Errorf("%q", got)
 	}
 	d := Snapshot{Queries: 4120, SessionsAdmitted: 1, RefusedFull: 2, AuthRefused: 140, SealRefused: 1}
-	want := "1 session; last 1h: 4120 queries, 1 new session, 2 sessions refused (node full), 140 refused by dnsauth, 1 refused by the seal"
+	want := "1 session; last 1h: 4120 queries, 1 new session, 2 session starts refused (node full), 140 refused by dnsauth, 1 refused by the seal"
 	if got := Summary(Snapshot{Sessions: 1}, d, time.Hour+20*time.Second, true); got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}

@@ -107,7 +107,7 @@ func TestMetrics(t *testing.T) {
 		}
 	}
 	serveStats(t, srv.Paths.StatsSocket("dns"), `{"queries":5,"memo_hits":6,"sessions":1,"handshakes":0,"sessions_admitted":7,`+
-		`"sessions_refused_device":2,"auth_refused":3,"seal_opened":4,"unknown":9}`+"\n")
+		`"starts_refused_device":2,"auth_refused":3,"seal_opened":4,"unknown":9}`+"\n")
 	resp, err := c.GetMetrics(ctx, connect.NewRequest(&nodev1.GetMetricsRequest{}))
 	if err != nil {
 		t.Fatal(err)
@@ -134,8 +134,8 @@ func TestMetrics(t *testing.T) {
 		`raycontrol_dnstt_sessions{service="dns"} 1`,
 		`raycontrol_dnstt_handshakes{service="dns"} 0`,
 		`raycontrol_dnstt_sessions_admitted_total{service="dns"} 7`,
-		`raycontrol_dnstt_sessions_refused_total{service="dns",reason="full"} 0`,
-		`raycontrol_dnstt_sessions_refused_total{service="dns",reason="device"} 2`,
+		`raycontrol_dnstt_starts_refused_total{service="dns",reason="full"} 0`,
+		`raycontrol_dnstt_starts_refused_total{service="dns",reason="device"} 2`,
 		`raycontrol_dnstt_auth_total{service="dns",result="refused"} 3`,
 		`raycontrol_dnstt_seal_total{service="dns",result="opened"} 4`,
 	} {

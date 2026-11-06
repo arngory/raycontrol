@@ -252,7 +252,7 @@ func addDNSTTStats(m *Metrics, service string, st dnsttstats.Snapshot) {
 		v     uint64
 	}
 	for _, r := range []sample{{"full", st.RefusedFull}, {"rate", st.RefusedRate}, {"device", st.RefusedDevice}} {
-		add("raycontrol_dnstt_sessions_refused_total", "New dnstt sessions refused, by reason.", r.v, "reason", r.label)
+		add("raycontrol_dnstt_starts_refused_total", "dnstt session starts refused, by reason; a client's retries count again.", r.v, "reason", r.label)
 	}
 	add("raycontrol_dnstt_sessions_evicted_total", "A device's silent dnstt session closed for its new one.", st.SessionsEvicted)
 	add("raycontrol_dnstt_handshake_timeouts_total", "dnstt sessions closed with the Noise handshake undone.", st.HandshakeTimeouts)
