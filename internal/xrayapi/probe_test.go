@@ -56,7 +56,7 @@ func TestProbeThroughXray(t *testing.T) {
 	}
 
 	// The subscription endpoint with probes, on its port, as rayd runs it.
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}

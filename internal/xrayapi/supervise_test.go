@@ -27,9 +27,11 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 
 	"github.com/arngory/raycontrol/internal/dnscheck"
+	nodepkg "github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
+	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
 	"github.com/arngory/raycontrol/internal/testca"
@@ -125,7 +127,7 @@ func TestSupervisedNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
-	st.SetUserServices(ctx, "alice", []int64{reality.ID, hy.ID})
+	st.SetUserServices(ctx, "alice", []int64{reality.ID, hy.ID, dnsSvc.ID})
 	dev, key, err := st.CreateDevice(ctx, "alice", "laptop", "user")
 	if err != nil {
 		t.Fatal(err)
@@ -153,9 +155,17 @@ func TestSupervisedNode(t *testing.T) {
 	subSecrets, _ := st.ServiceSecrets(ctx, subSvc.ID)
 	pin := mustPin(t, subSecrets[provision.SecretTLSCert])
 	dnsTargets, err := provision.DNSCheckTargets(ctx, st)
-	if err != nil || len(dnsTargets) != 1 {
+	if err != nil || len(dnsTargets) != 1 || dnsTargets[0].Auth != "required" {
 		t.Fatalf("DNS check targets %v %v", dnsTargets, err)
 	}
+	// A new dnstt service takes tagged queries only, and the node holds no
+	// device's key: the test polls as alice's laptop does.
+	params, err := nodepkg.LoadParams(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authKey := spa.DNSAuthKey(key, params.NodeID, uint16(dnsSvc.ID))
+	dnsTargets[0].AuthKey = authKey[:]
 	st.Close()
 
 	// rayd and its data plane, short paths: unix sockets take 107 bytes.
