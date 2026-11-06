@@ -20,6 +20,32 @@ import (
 // nothing until they fetch their subscription. Only one previous key is
 // kept: a second switch within the grace drops the one before.
 
+// DNSSealMode is a dnstt service's dnsseal-v1 mode: off, optional or
+// required (spec/dnsseal-v1.md §5); off when unset.
+func DNSSealMode(s store.Service) string {
+	var st struct {
+		Seal string `json:"seal"`
+	}
+	_ = json.Unmarshal([]byte(s.Settings), &st)
+	if s.Kind != "dnstt" || st.Seal == "" {
+		return "off"
+	}
+	return st.Seal
+}
+
+// DNSAuthMode is a dnstt service's dnsauth-v1 mode: off, optional or
+// required (spec/dnsauth-v1.md §5).
+func DNSAuthMode(s store.Service) string {
+	var st struct {
+		Auth string `json:"auth"`
+	}
+	_ = json.Unmarshal([]byte(s.Settings), &st)
+	if s.Kind != "dnstt" || st.Auth == "" {
+		return "off"
+	}
+	return st.Auth
+}
+
 // SealState is the rotation state in the settings of a dnstt service.
 type SealState struct {
 	RotatedAt int64 `json:"seal_rotated_at,omitempty"` // last switch; 0 before the first

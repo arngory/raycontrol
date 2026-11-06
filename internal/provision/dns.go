@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/arngory/raycontrol/internal/cloudflare"
+	"github.com/arngory/raycontrol/internal/dnscheck"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -163,6 +164,54 @@ func NSName(ctx context.Context, st *store.Store) (string, error) {
 		return "", nil
 	}
 	return nsName(ctx, st, all)
+}
+
+// DNSCheckTargets are the zones the node checks from itself (dnscheck,
+// rayd -dns-check): those of the enabled dnstt and masterdns services, as
+// DNSRecords selects them, with what the check needs. The parent should
+// delegate each to NSName and so to the node's host; a dnstt zone has the
+// node's probe key and its service's seal mode and current seal key (its
+// poll is sealed as a client's would be), and dnsauth's mode: the node
+// holds no device key to tag a poll with.
+func DNSCheckTargets(ctx context.Context, st *store.Store) ([]dnscheck.Zone, error) {
+	host, err := node.Host(ctx, st)
+	if err != nil {
+		return nil, err
+	}
+	ns, err := NSName(ctx, st)
+	if err != nil {
+		return nil, err
+	}
+	all, err := st.ListServices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var zones []dnscheck.Zone
+	var probeKey []byte
+	for _, s := range all {
+		zone := Zone(s)
+		if !s.Enabled || (s.Kind != "dnstt" && s.Kind != "masterdns") || zone == "" {
+			continue
+		}
+		z := dnscheck.Zone{Service: s.Name, Kind: s.Kind, Name: zone, NS: ns, Host: host, SvcID: uint16(s.ID)}
+		if s.Kind == "dnstt" {
+			if probeKey == nil {
+				if probeKey, err = st.DNSProbeKey(ctx); err != nil {
+					return nil, err
+				}
+			}
+			z.ProbeKey, z.Seal, z.Auth = probeKey, DNSSealMode(s), DNSAuthMode(s)
+			if z.Seal != "off" {
+				secrets, err := st.ServiceSecrets(ctx, s.ID)
+				if err != nil {
+					return nil, err
+				}
+				z.SealKey = secrets[SecretSealKey]
+			}
+		}
+		zones = append(zones, z)
+	}
+	return zones, nil
 }
 
 // nsName is the name DNS tunnel zones are delegated to: a random label of

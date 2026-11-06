@@ -137,32 +137,14 @@ func (m Model) nikoLevel() string {
 
 // DNSSealMode is a dnstt service's dnsseal-v1 mode: off, optional or
 // required (spec/dnsseal-v1.md §5); off when unset.
-func DNSSealMode(s store.Service) string {
-	var st struct {
-		Seal string `json:"seal"`
-	}
-	_ = json.Unmarshal([]byte(s.Settings), &st)
-	if s.Kind != "dnstt" || st.Seal == "" {
-		return "off"
-	}
-	return st.Seal
-}
+func DNSSealMode(s store.Service) string { return provision.DNSSealMode(s) }
 
 // DNSSealKeyFile is the dnsseal-v1 keys file among a dnstt service's.
 const DNSSealKeyFile = "seal.keys"
 
 // DNSAuthMode is a dnstt service's dnsauth-v1 mode: off, optional or
 // required (spec/dnsauth-v1.md §5).
-func DNSAuthMode(s store.Service) string {
-	var st struct {
-		Auth string `json:"auth"`
-	}
-	_ = json.Unmarshal([]byte(s.Settings), &st)
-	if s.Kind != "dnstt" || st.Auth == "" {
-		return "off"
-	}
-	return st.Auth
-}
+func DNSAuthMode(s store.Service) string { return provision.DNSAuthMode(s) }
 
 // DNSAuthKeys is the file name of a dnstt service's device keys.
 const DNSAuthKeys = "auth.keys"

@@ -161,3 +161,52 @@ func TestNSNameRace(t *testing.T) {
 		}
 	}
 }
+
+// The zones the node checks itself: enabled DNS tunnels with a zone, the
+// NS name and host of DNSRecords, the probe and seal keys for dnstt.
+func TestDNSCheckTargets(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if zones, err := DNSCheckTargets(ctx, st); err != nil || len(zones) != 0 {
+		t.Fatalf("no tunnels: %v %v", zones, err)
+	}
+	for _, s := range []store.Service{{Kind: "dnstt", Name: "dns", Enabled: true}, {Kind: "masterdns", Name: "mdns", Enabled: true},
+		{Kind: "dnstt", Name: "off", Enabled: false}, {Kind: "reality", Name: "reality", Enabled: true}} {
+		if _, err := CreateService(ctx, st, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := SetServiceOption(ctx, st, "dns", "seal", "optional"); err != nil {
+		t.Fatal(err)
+	}
+	zones, err := DNSCheckTargets(ctx, st)
+	if err != nil || len(zones) != 2 {
+		t.Fatalf("zones %v %v", zones, err)
+	}
+	ns, _ := NSName(ctx, st)
+	probeKey, _ := st.DNSProbeKey(ctx)
+	dns, _ := st.ServiceByName(ctx, "dns")
+	secrets, _ := st.ServiceSecrets(ctx, dns.ID)
+	d, m := zones[0], zones[1]
+	if d.Service != "dns" || d.Kind != "dnstt" || d.Name != Zone(dns) || d.NS != ns || d.Host != "203.0.113.7" || int64(d.SvcID) != dns.ID ||
+		string(d.ProbeKey) != string(probeKey) || d.Seal != "optional" || string(d.SealKey) != string(secrets[SecretSealKey]) || d.Auth != "off" || d.AuthKey != nil {
+		t.Fatalf("dnstt %+v", d)
+	}
+	if m.Service != "mdns" || m.Kind != "masterdns" || m.NS != ns || m.ProbeKey != nil || m.SealKey != nil || m.Seal != "" {
+		t.Fatalf("masterdns %+v", m)
+	}
+	// The seal off: no key to seal with.
+	if _, err := SetServiceOption(ctx, st, "dns", "seal", "off"); err != nil {
+		t.Fatal(err)
+	}
+	if zones, _ := DNSCheckTargets(ctx, st); zones[0].Seal != "off" || zones[0].SealKey != nil {
+		t.Fatalf("seal off %+v", zones[0])
+	}
+}

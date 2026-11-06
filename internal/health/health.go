@@ -21,6 +21,7 @@ type Loop struct {
 	LastOK  time.Time // zero: never
 	LastErr time.Time // zero: never
 	Err     string    // the last error, on one line
+	Detail  string    // what the last round found, on one line (a check's summary)
 	failing bool      // the last round failed
 }
 
@@ -34,7 +35,12 @@ type Board struct {
 }
 
 // Done records a round of the loop name: a success when err is nil.
-func (b *Board) Done(name string, err error) {
+func (b *Board) Done(name string, err error) { b.Report(name, "", err) }
+
+// Report records a round of a check with what it found: Done with a
+// detail, which status shows beside the time (dns-zone: the zone's
+// summary).
+func (b *Board) Report(name, detail string, err error) {
 	if b == nil {
 		return
 	}
@@ -54,14 +60,19 @@ func (b *Board) Done(name string, err error) {
 	}
 	l.Runs++
 	l.failing = err != nil
+	l.Detail = oneLine(detail)
 	if err != nil {
 		l.Errors++
-		// Joined errors (render.ServiceErrors) come on several lines; status
-		// and the log show one.
-		l.LastErr, l.Err = now, strings.Join(strings.Fields(strings.ReplaceAll(err.Error(), "\n", " ; ")), " ")
+		l.LastErr, l.Err = now, oneLine(err.Error())
 		return
 	}
 	l.LastOK = now
+}
+
+// oneLine puts joined errors (render.ServiceErrors), which come on several
+// lines, on one.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(strings.ReplaceAll(s, "\n", " ; ")), " ")
 }
 
 // Retain forgets the loops named prefix+<name> for every name not in keep:
