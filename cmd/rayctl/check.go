@@ -51,11 +51,16 @@ func (c *cli) internetChecks(ctx context.Context) []hostcheck.Result {
 	if err != nil || r.Msg.CheckedAt == 0 {
 		return nil
 	}
-	ago := time.Since(time.Unix(r.Msg.CheckedAt, 0)).Round(time.Minute).String()
+	ago := time.Since(time.Unix(r.Msg.CheckedAt, 0))
+	if ago < time.Minute {
+		ago = ago.Round(time.Second)
+	} else {
+		ago = ago.Round(time.Minute)
+	}
 	var rs []hostcheck.Result
 	for _, z := range r.Msg.Zones {
 		res := hostcheck.Result{Level: hostcheck.Internet, Name: "DNS zone " + z.Zone + " (" + z.Service + ")", OK: z.Error == "",
-			Detail: z.Summary + " (" + ago + " ago)"}
+			Detail: z.Summary + " (" + ago.String() + " ago)"}
 		if !res.OK {
 			res.Detail, res.Fix = z.Error, "rayctl dns check -now"
 			for _, s := range []*nodev1.DNSCheckStep{z.Parent, z.Front} {

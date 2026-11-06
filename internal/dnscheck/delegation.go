@@ -176,7 +176,7 @@ func (rd *round) delegation(ctx context.Context, z Zone, node []netip.Addr) (Ste
 		if ctx.Err() != nil {
 			return Step{State: Skip, Detail: errRoundOver.Error()}, false
 		}
-		return Step{State: Warn, Detail: "the parent not found: " + err.Error(),
+		return Step{State: Warn, Detail: "not found: " + err.Error(),
 			Fix: "rayctl status: resolver; the node asks the parent through its own resolver"}, false
 	}
 	answers := make([]parentAnswer, len(p.servers))
