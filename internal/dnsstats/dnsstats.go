@@ -41,8 +41,9 @@ type Snapshot struct {
 	SealUnsealed      uint64 `json:"seal_unsealed"`
 	SealRefused       uint64 `json:"seal_refused"`
 	// Zones are each zone's queries with a device's valid dnsauth tag (the
-	// main zone and its spares): which zone clients reach, which no one
-	// without a device's key makes up; none with auth off.
+	// main zone and its spares): which zones clients reach; none with auth
+	// off. A hint, not proof: the tag does not cover the zone, so whoever
+	// sees a device's query can send it again in any zone.
 	Zones map[string]uint64 `json:"zones,omitempty"`
 }
 

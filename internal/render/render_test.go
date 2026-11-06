@@ -844,3 +844,36 @@ func TestRenderNestedZonesKept(t *testing.T) {
 		t.Fatalf("enabling a service whose zone nests with an enabled one's: %v", err)
 	}
 }
+
+// A dnstt zone that holds the name the zones are delegated to (stored
+// before raycontrol refused it): the service is left out of the front with
+// an error, not the front (niko-server v0.11.0 refuses such a config).
+func TestRenderZoneHoldsNSName(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	dns, _ := st.ServiceByName(ctx, "dns")
+	st.SetSetting(ctx, "dns_ns_name", []byte("ns9."+provision.Zone(dns)))
+	m, err := render.CollectForRender(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.NSName != "ns9."+provision.Zone(dns) {
+		t.Fatalf("NS name %q", m.NSName)
+	}
+	files, _, err := render.Render(m, render.DefaultPaths)
+	if !render.Partial(err) || !strings.Contains(fmt.Sprint(err), "service dns: zone "+provision.Zone(dns)+" holds ns9.") {
+		t.Fatalf("render: %v", err)
+	}
+	front := false
+	for _, f := range files {
+		if f.Service == "front" {
+			front = true
+			if strings.Contains(string(f.Content), `"`+provision.Zone(dns)+`"`) {
+				t.Fatalf("the front routes the zone: %s", f.Content)
+			}
+		}
+	}
+	if !front {
+		t.Fatal("no front config for the others")
+	}
+}

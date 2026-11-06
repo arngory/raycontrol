@@ -516,6 +516,12 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 						return fmt.Errorf("zone %s is, or nests with, zone %s of %s: a name under both would be either's; give it another zone", z, other, svc)
 					}
 				}
+				// The name the zones are delegated to, in a zone: the
+				// front would send the queries for its address to the
+				// tunnel (niko-server v0.11.0 refuses it).
+				if ns := m.NSName; s.Kind == "dnstt" && ns != "" && (ns == z || strings.HasSuffix(ns, "."+z)) {
+					return fmt.Errorf("zone %s holds %s, the name the zones are delegated to: give it another zone", z, ns)
+				}
 			}
 			for _, z := range all {
 				taken[z] = s.Name
