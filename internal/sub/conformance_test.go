@@ -2,9 +2,11 @@ package sub_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/pem"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -20,8 +22,8 @@ import (
 // rules Niko 1.26 parses subscription lines by (RAYCONTROL.md §22,
 // subscription-v1.md §4): a line that breaks one is dropped by the client
 // without a word, so a mismatch has to fail here, before a node release.
-// All kinds of services, and the next links of a rotation, which a client
-// switches to unattended.
+// All kinds of services, the DNS tunnels with their modes and spare zones,
+// and the next links of a rotation, which a client switches to unattended.
 func TestLinksForStrictClient(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
@@ -40,7 +42,9 @@ func TestLinksForStrictClient(t *testing.T) {
 		{"naive", "naive", ""},
 		{"doh", "doh", ""},
 		{"dnstt", "dns", ""},
-		{"masterdns", "mdns", ""},
+		{"dnstt", "dns-spare", `{"spare_zones":2}`},
+		{"masterdns", "mdns", `{"auth":"optional","seal":"optional"}`},
+		{"masterdns", "mdns-strict", `{"auth":"required","seal":"required","spare_zones":["s.example.net","u.example.org"]}`},
 		{"yggdrasil", "ygg", ""},
 	}
 	var ids []int64
@@ -118,6 +122,51 @@ func TestLinksForStrictClient(t *testing.T) {
 			}
 		}
 	}
+	// The DNS tunnels' parameters are there to be checked.
+	for name, keys := range map[string][]string{
+		"dns-spare":   {"niko-dnsauth", "niko-dnsseal", "niko-dns-spare"},
+		"mdns":        {"niko-dnsauth", "niko-mdseal"},
+		"mdns-strict": {"niko-dnsauth", "niko-mdseal", "niko-dns-spare"},
+	} {
+		u, _ := url.Parse(byName[name].Link)
+		for _, key := range keys {
+			if !u.Query().Has(key) {
+				t.Errorf("%s: no %s in %s", name, key, byName[name].Link)
+			}
+		}
+	}
+}
+
+// The DNS parameters' rules catch what the client would drop.
+func TestDNSProblems(t *testing.T) {
+	good := url.Values{"niko-dns": {"masterdns;;m.example.com;5"}, "niko-dnskey": {"k"}, "niko-mdseal": {"v1;required"},
+		"niko-dnsauth": {"v1"}, "niko-dns-spare": {"a.example.net,b.example.org"}}
+	if p := dnsProblems("masterdns", good); len(p) != 0 {
+		t.Fatalf("good line: %v", p)
+	}
+	for key, bad := range map[string]string{
+		"niko-mdseal":    "v1;strict",
+		"niko-dnsauth":   "v2",
+		"niko-dnsseal":   "v1;AAAA",
+		"niko-dns-spare": "a.example.net,m.example.com",
+	} {
+		q := url.Values{}
+		for k, v := range good {
+			q[k] = v
+		}
+		q.Set(key, bad)
+		if p := dnsProblems("masterdns", q); len(p) == 0 {
+			t.Errorf("%s=%s passed", key, bad)
+		}
+	}
+	for _, spares := range []string{"a.example.net,a.example.net", "A.example.net", "a.example.net.", "x", "a.ex.net,b.ex.net,c.ex.net,d.ex.net,e.ex.net"} {
+		if p := dnsProblems("dnstt", url.Values{"niko-dns": {"dnstt;;t.example.com;" + strings.Repeat("ab", 32)}, "niko-dns-spare": {spares}}); len(p) == 0 {
+			t.Errorf("niko-dns-spare=%s passed", spares)
+		}
+	}
+	if p := dnsProblems("reality", url.Values{"niko-mdseal": {"v1"}}); len(p) == 0 {
+		t.Error("niko-mdseal on a REALITY line passed")
+	}
 }
 
 func nextLink(p sub.Profile) string {
@@ -174,5 +223,61 @@ func strictProblems(kind, link string) []string {
 	if q.Get("niko-node") == "" || q.Get("niko-svc") == "" {
 		out = append(out, "no niko-node or niko-svc")
 	}
+	return append(out, dnsProblems(kind, q)...)
+}
+
+// dnsProblems lists what the client holds against a DNS tunnel's
+// parameters (subscription-v1 §4, mdseal-v1 §6, dnszones-v1 §2): each on
+// the lines of its kinds only, in its form; the spare zones DNS names, up
+// to 4, apart from the main zone and from each other.
+func dnsProblems(kind string, q url.Values) []string {
+	var out []string
+	for key, kinds := range map[string][]string{
+		"niko-dns": {"dnstt", "masterdns"}, "niko-dnsauth": {"dnstt", "masterdns"}, "niko-dns-spare": {"dnstt", "masterdns"},
+		"niko-dnsseal": {"dnstt"}, "niko-dnskey": {"masterdns"}, "niko-mdseal": {"masterdns"},
+	} {
+		if q.Has(key) && !slices.Contains(kinds, kind) {
+			out = append(out, key+" on a "+kind+" line")
+		}
+	}
+	if kind != "dnstt" && kind != "masterdns" {
+		return out
+	}
+	f := strings.Split(q.Get("niko-dns"), ";")
+	if len(f) != 4 || f[0] != kind || !dnsName.MatchString(f[2]) || f[3] == "" {
+		return append(out, "niko-dns "+q.Get("niko-dns"))
+	}
+	if q.Has("niko-dnsauth") && q.Get("niko-dnsauth") != "v1" {
+		out = append(out, "niko-dnsauth "+q.Get("niko-dnsauth"))
+	}
+	if q.Has("niko-dnsseal") {
+		k, ok := strings.CutPrefix(q.Get("niko-dnsseal"), "v1;")
+		if b, err := base64.RawURLEncoding.DecodeString(k); !ok || err != nil || len(b) != 32 {
+			out = append(out, "niko-dnsseal "+q.Get("niko-dnsseal"))
+		}
+	}
+	if v := q.Get("niko-mdseal"); q.Has("niko-mdseal") && v != "v1" && v != "v1;required" {
+		out = append(out, "niko-mdseal "+v)
+	}
+	if kind == "masterdns" && q.Get("niko-dnskey") == "" {
+		out = append(out, "masterdns without niko-dnskey")
+	}
+	if q.Has("niko-dns-spare") {
+		spares := strings.Split(q.Get("niko-dns-spare"), ",")
+		if len(spares) > 4 {
+			out = append(out, "niko-dns-spare with more than 4 zones")
+		}
+		seen := []string{f[2]}
+		for _, z := range spares {
+			if !dnsName.MatchString(z) || slices.Contains(seen, z) {
+				out = append(out, "niko-dns-spare zone "+z)
+			}
+			seen = append(seen, z)
+		}
+	}
 	return out
 }
+
+// dnsName is a zone as links carry it: a DNS name of two labels or more,
+// lower case, without the final dot.
+var dnsName = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)

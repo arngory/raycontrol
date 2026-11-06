@@ -195,7 +195,7 @@ func TestEndpoint(t *testing.T) {
 		p.Probe == nil || p.Probe.V != 1 || p.Probe.UDP || p.Probe.Tunnel != probe.Name ||
 		len(p.Probe.TunnelSvc) != 1 || p.Probe.TunnelSvc[0] != p.Profiles[0].Svc ||
 		// The report fields beyond the first ones of v1 (Niko §20).
-		!slices.Equal(p.Probe.Report, []string{"udp_mtu", "path", "dns", "dns_tcp"}) ||
+		!slices.Equal(p.Probe.Report, []string{"udp_mtu", "path", "dns", "dns_tcp", "dns_zone"}) ||
 		// The SPA carriers: UDP only without -spa-tcp.
 		p.SPA == nil || !slices.Equal(p.SPA.Carriers, []string{"udp"}) ||
 		// The user has a dnstt profile: the dnsprobe-v1 key.
@@ -228,13 +228,20 @@ func TestEndpoint(t *testing.T) {
 	q := link.Query()
 	dnsParts := strings.Split(q.Get("niko-dns"), ";")
 	if link.Scheme != "vless" || !strings.HasPrefix(q.Get("encryption"), "mlkem768x25519plus.native.0rtt.") ||
-		q.Get("niko-node") != p.NodeID || len(dnsParts) != 4 || dnsParts[0] != "dnstt" || len(dnsParts[3]) != 64 ||
-		q.Has("niko-dnsseal") {
+		q.Get("niko-node") != p.NodeID || len(dnsParts) != 4 || dnsParts[0] != "dnstt" || len(dnsParts[3]) != 64 {
 		t.Fatalf("link %s", p.Profiles[0].Link)
 	}
+	// dnsseal-v1, optional on a new service: the link carries the zone's
+	// key (spec/dnsseal-v1.md §2).
+	dns, _ := f.st.ServiceByName(context.Background(), "dns")
+	secrets, _ := f.st.ServiceSecrets(context.Background(), dns.ID)
+	sealKey := secrets[provision.SecretSealKey]
+	if got := q.Get("niko-dnsseal"); got != "v1;"+base64.RawURLEncoding.EncodeToString(sealKey) || len(sealKey) != 32 {
+		t.Fatalf("niko-dnsseal %q", got)
+	}
 
-	// dnsseal-v1 on: the link carries the zone's key (spec/dnsseal-v1.md §2).
-	if _, err := provision.SetServiceOption(context.Background(), f.st, "dns", "seal", "optional"); err != nil {
+	// The seal off: no key in the link.
+	if _, err := provision.SetServiceOption(context.Background(), f.st, "dns", "seal", "off"); err != nil {
 		t.Fatal(err)
 	}
 	resp2, err := get(pq, true)
@@ -249,16 +256,8 @@ func TestEndpoint(t *testing.T) {
 		t.Fatalf("seq did not grow: %d then %d", p.Seq, p2.Seq)
 	}
 	link2, _ := url.Parse(p2.Profiles[0].Link)
-	svcs, _ := f.st.ListServices(context.Background())
-	var sealKey []byte
-	for _, s := range svcs {
-		if s.Name == "dns" {
-			secrets, _ := f.st.ServiceSecrets(context.Background(), s.ID)
-			sealKey = secrets[provision.SecretSealKey]
-		}
-	}
-	if got := link2.Query().Get("niko-dnsseal"); got != "v1;"+base64.RawURLEncoding.EncodeToString(sealKey) || len(sealKey) != 32 {
-		t.Fatalf("niko-dnsseal %q", got)
+	if q2 := link2.Query(); q2.Has("niko-dnsseal") || q2.Get("niko-dns") != q.Get("niko-dns") {
+		t.Fatalf("link with the seal off %s", p2.Profiles[0].Link)
 	}
 
 	// A revoked device gets nothing.
@@ -642,6 +641,81 @@ func TestRelaysInSubscription(t *testing.T) {
 		p, _ := sub.Verify(env, f.keys.PublicJSON())
 		if (p.Hints != nil) != want {
 			t.Errorf("from %s: hints %+v", addr, p.Hints)
+		}
+	}
+}
+
+// The DNS tunnels' parameters by service: niko-mdseal for the masterdns
+// seal (mdseal-v1 §6), niko-dnsauth on either kind when dnsauth is on,
+// niko-dns-spare with the spare zones in the order clients try them
+// (dnszones-v1 §2); none of them when off or without spares.
+func TestDNSTunnelLinks(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	for _, s := range []store.Service{
+		{Kind: "dnstt", Name: "dns", Settings: `{"spare_zones":["U.example.org.","s.example.net"]}`},
+		{Kind: "dnstt", Name: "dns-open", Settings: `{"auth":"off","seal":"off"}`},
+		{Kind: "masterdns", Name: "mdns", Settings: `{"spare_zones":["v.example.net"],"auth":"optional","seal":"optional"}`},
+		{Kind: "masterdns", Name: "mdns-sealed", Settings: `{"auth":"off","seal":"required"}`},
+		{Kind: "masterdns", Name: "mdns-signed", Settings: `{"auth":"required","seal":"off"}`},
+	} {
+		s.Enabled = true
+		svc, err := provision.CreateService(ctx, st, s)
+		if err != nil {
+			t.Fatalf("%s: %v", s.Name, err)
+		}
+		ids = append(ids, svc.ID)
+	}
+	st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+	st.SetUserServices(ctx, "alice", ids)
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := sub.Profiles(m, m.Users[0])
+	if err != nil || len(profiles) != len(ids) {
+		t.Fatalf("profiles %v %v", profiles, err)
+	}
+	want := map[string]map[string]string{ // "" absent
+		"dns":         {"niko-dnsauth": "v1", "niko-mdseal": "", "niko-dns-spare": "u.example.org,s.example.net"},
+		"dns-open":    {"niko-dnsauth": "", "niko-dnsseal": "", "niko-mdseal": "", "niko-dns-spare": ""},
+		"mdns":        {"niko-dnsauth": "v1", "niko-mdseal": "v1", "niko-dnsseal": "", "niko-dns-spare": "v.example.net"},
+		"mdns-sealed": {"niko-dnsauth": "", "niko-mdseal": "v1;required", "niko-dns-spare": ""},
+		"mdns-signed": {"niko-dnsauth": "v1", "niko-mdseal": "", "niko-dns-spare": ""},
+	}
+	links := map[string]string{}
+	for _, p := range profiles {
+		links[p.Name] = p.Link
+		u, err := url.Parse(p.Link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := u.Query()
+		for key, v := range want[p.Name] {
+			if q.Get(key) != v || q.Has(key) != (v != "") {
+				t.Errorf("%s: %s %q, want %q", p.Name, key, q.Get(key), v)
+			}
+		}
+		// dnsauth's key comes from the node and the service (dnsauth-v1 §2).
+		if q.Get("niko-node") != m.NodeID || q.Get("niko-svc") != strconv.Itoa(int(p.Svc)) {
+			t.Errorf("%s: niko-node %q, niko-svc %q", p.Name, q.Get("niko-node"), q.Get("niko-svc"))
+		}
+		if strings.HasPrefix(p.Name, "mdns") && q.Get("niko-dnskey") == "" {
+			t.Errorf("%s: no niko-dnskey", p.Name)
+		}
+	}
+	// Encoded as the other parameters: the comma and the semicolon too.
+	for name, raw := range map[string]string{"dns": "niko-dns-spare=u.example.org%2Cs.example.net", "mdns-sealed": "niko-mdseal=v1%3Brequired"} {
+		if !strings.Contains(links[name], raw) {
+			t.Errorf("%s: no %s in %s", name, raw, links[name])
 		}
 	}
 }

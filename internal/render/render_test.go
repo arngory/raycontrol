@@ -137,23 +137,34 @@ func TestRender(t *testing.T) {
 		t.Fatalf("noise key file %+v", key)
 	}
 	// dnsseal-v1: the key file whatever the mode, in the service group and
-	// reread by the backend; the mode off by default.
+	// reread by the backend; optional on a new service.
 	sealFile := byPath["/var/lib/raycontrol/rendered/dns/seal.keys"]
 	if sealFile.Mode != 0o640 || sealFile.Group != "niko-dns" || !sealFile.Reload || len(sealKeyLines(sealFile.Content)) != 1 ||
 		len(sealKeyLines(sealFile.Content)[0]) != 64 {
 		t.Fatalf("seal key file %+v", sealFile)
 	}
-	if _, on := opts["seal"]; on || opts["seal_key_file"] != nil {
-		t.Fatalf("the seal on by default: %v", opts)
+	if opts["seal"] != "optional" || opts["seal_key_file"] != sealFile.Path || opts["auth"] != "required" {
+		t.Fatalf("a new dnstt service's options: %v", opts)
 	}
 
 	var mdns map[string]any
 	json.Unmarshal(byPath["/var/lib/raycontrol/rendered/mdns/backend.json"].Content, &mdns)
-	if mdns["options"].(map[string]any)["encryption_method"].(float64) != 5 {
-		t.Fatalf("masterdns must use AES-256-GCM: %v", mdns["options"])
+	mopts := mdns["options"].(map[string]any)
+	if mopts["encryption_method"].(float64) != 5 {
+		t.Fatalf("masterdns must use AES-256-GCM: %v", mopts)
 	}
 	if k := byPath["/var/lib/raycontrol/rendered/mdns/encryption.key"].Content; len(k) != 32 {
 		t.Fatalf("masterdns key %q", k)
+	}
+	// A new masterdns service: dnsauth and mdseal-v1 optional (with
+	// niko-server v0.11.0); the seal takes the service's key, no file of
+	// its own.
+	if provision.MasterDNSSealAuth && (mopts["auth"] != "optional" || mopts["auth_keys_file"] != "/var/lib/raycontrol/rendered/mdns/auth.keys" ||
+		mopts["seal"] != "optional" || mopts["seal_key_file"] != nil) {
+		t.Fatalf("a new masterdns service's options: %v", mopts)
+	}
+	if !provision.MasterDNSSealAuth && (mopts["auth"] != nil || mopts["seal"] != nil) {
+		t.Fatalf("a new masterdns service's options before niko-server v0.11.0: %v", mopts)
 	}
 
 	// dnsprobe-v1: the front's key file, root's, read where root copies it.
@@ -216,15 +227,22 @@ func TestDisabledInner(t *testing.T) {
 	if !errors.As(err, &broken) || len(broken) != 2 || !render.Partial(err) {
 		t.Fatalf("tunnels without the inner stage: %v", err)
 	}
+	keys := map[string]bool{}
 	for _, f := range files {
-		// The devices' keys of a broken dnstt service still go (Q-1: a
+		// The devices' keys of a broken DNS tunnel still go (Q-1: a
 		// revoked device loses it there too); nothing else of the tunnels.
 		if (f.Service == "dns" || f.Service == "mdns") && !f.Refresh {
 			t.Errorf("%s rendered without the inner stage", f.Path)
 		}
+		if f.Refresh && strings.HasSuffix(f.Path, "/"+render.DNSAuthKeys) {
+			keys[f.Service] = true
+		}
 		if f.Service == "front" && strings.Contains(string(f.Content), `"zones"`) {
 			t.Errorf("the front routes the broken tunnels: %s", f.Content)
 		}
+	}
+	if !keys["dns"] || keys["mdns"] != provision.MasterDNSSealAuth {
+		t.Errorf("the devices' keys of the broken tunnels: %v", keys)
 	}
 	all, _, err := render.Render(withInner(t, st), render.DefaultPaths)
 	if err != nil {
@@ -412,41 +430,54 @@ func TestReality(t *testing.T) {
 	}
 }
 
-// dnsauth-v1: with auth on, the dnstt backend gets the mode and a keys file
-// of the devices allowed on the service, derived per service; the file is
-// reread by the backend, not a reason to restart it.
+// dnsauth-v1: with auth on, a DNS tunnel's backend gets the mode and a
+// keys file of the devices allowed on the service, derived per service;
+// the file is reread by the backend, not a reason to restart it. dnstt and
+// masterdns alike, but for the node's own line: dnstt only.
 func TestDNSAuth(t *testing.T) {
 	ctx := context.Background()
 	st := node(t)
-	// A new dnstt service takes signed queries only (review 7).
-	if dns, _ := st.ServiceByName(ctx, "dns"); render.DNSAuthMode(dns) != "required" {
-		t.Fatalf("a new dnstt service: auth %q", render.DNSAuthMode(dns))
+	// A new dnstt service takes signed queries only (review 7); a new
+	// masterdns one the others too (spec/dnsauth-masterdns.md §4).
+	mdnsMode := "off" // until niko-server v0.11.0 (provision.MasterDNSSealAuth)
+	if provision.MasterDNSSealAuth {
+		mdnsMode = "optional"
 	}
-	if _, err := provision.SetServiceOption(ctx, st, "dns", "auth", "off"); err != nil {
-		t.Fatal(err)
+	for name, want := range map[string]string{"dns": "required", "mdns": mdnsMode} {
+		if svc, _ := st.ServiceByName(ctx, name); render.DNSAuthMode(svc) != want {
+			t.Fatalf("a new %s service: auth %q", svc.Kind, render.DNSAuthMode(svc))
+		}
+	}
+	for _, name := range []string{"dns", "mdns"} {
+		if _, err := provision.SetServiceOption(ctx, st, name, "auth", "off"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	m, _ := render.CollectForRender(ctx, st)
 	files, _, _ := render.Render(m, render.DefaultPaths)
 	for _, f := range files {
-		if strings.HasSuffix(f.Path, "/"+render.DNSAuthKeys) || (f.Service == "dns" && strings.Contains(string(f.Content), `"auth"`)) {
+		if strings.HasSuffix(f.Path, "/"+render.DNSAuthKeys) || ((f.Service == "dns" || f.Service == "mdns") && strings.Contains(string(f.Content), `"auth"`)) {
 			t.Fatalf("auth without the option: %s", f.Path)
 		}
 	}
-	if _, err := provision.SetServiceOption(ctx, st, "dns", "auth", "strict"); err == nil {
-		t.Fatal("auth=strict accepted")
-	}
-	if _, err := provision.SetServiceOption(ctx, st, "dns", "auth", "required"); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"dns", "mdns"} {
+		if _, err := provision.SetServiceOption(ctx, st, name, "auth", "strict"); err == nil {
+			t.Fatalf("auth=strict accepted on %s", name)
+		}
+		if _, err := provision.SetServiceOption(ctx, st, name, "auth", "required"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	dev, key, err := st.CreateDevice(ctx, "alice", "phone", "user")
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.CreateDevice(ctx, "bob", "laptop", "user") // bob has no tunnel
-	// Without the keys (Collect alone), the service is not rendered: an
+	// Without the keys (Collect alone), neither tunnel is rendered: an
 	// empty keys file would lock every device out.
 	m, _ = render.Collect(ctx, st)
-	if _, _, err := render.Render(m, render.DefaultPaths); !render.Partial(err) || !strings.Contains(err.Error(), "dns") {
+	if _, _, err := render.Render(m, render.DefaultPaths); !render.Partial(err) ||
+		!strings.Contains(err.Error(), "service dns: dnsauth keys not collected") || !strings.Contains(err.Error(), "service mdns: dnsauth keys not collected") {
 		t.Fatalf("render without the dnsauth keys: %v", err)
 	}
 	m, err = render.CollectForRender(ctx, st)
@@ -457,49 +488,58 @@ func TestDNSAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dns, _ := st.ServiceByName(ctx, "dns")
-	params, _ := nodepkg.LoadParams(ctx, st)
-	want := spa.DNSAuthKey(key, params.NodeID, uint16(dns.ID))
-	var keys, backend string
+	keys, backend := map[string]string{}, map[string]string{}
 	for _, f := range files {
-		switch f.Path {
-		case "/var/lib/raycontrol/rendered/dns/" + render.DNSAuthKeys:
-			keys = string(f.Content)
-			if f.Mode != 0o640 || f.Group != "niko-dns" || !f.Reload {
+		switch {
+		case strings.HasSuffix(f.Path, "/"+render.DNSAuthKeys):
+			keys[f.Service] = string(f.Content)
+			if f.Path != "/var/lib/raycontrol/rendered/"+f.Service+"/"+render.DNSAuthKeys || f.Mode != 0o640 ||
+				f.Group != render.GroupName(f.Service) || !f.Reload {
 				t.Errorf("keys file %+v", f)
 			}
-		case "/var/lib/raycontrol/rendered/dns/backend.json":
-			backend = string(f.Content)
+		case strings.HasSuffix(f.Path, "/backend.json"):
+			backend[f.Service] = string(f.Content)
 		}
 	}
-	// The device's line, and the node's own for its check (review 8).
+	dns, _ := st.ServiceByName(ctx, "dns")
+	mdns, _ := st.ServiceByName(ctx, "mdns")
+	params, _ := nodepkg.LoadParams(ctx, st)
+	// The device's line, and on dnstt the node's own for its check (review
+	// 8); the masterdns check asks untagged, so no line of the node there.
+	want := spa.DNSAuthKey(key, params.NodeID, uint16(dns.ID))
 	checkKey, _ := st.DNSCheckKey(ctx)
 	node, _ := provision.DNSCheckAuthKey(checkKey, params.NodeID, dns.ID)
-	if !strings.Contains(keys, dev.ID+" "+hex.EncodeToString(want[:])+"\n") || strings.Count(keys, "\n") != 3 ||
-		!strings.Contains(keys, provision.DNSCheckDevice+" "+hex.EncodeToString(node[:])+"\n") {
-		t.Fatalf("keys file:\n%s", keys)
+	if !strings.Contains(keys["dns"], dev.ID+" "+hex.EncodeToString(want[:])+"\n") || strings.Count(keys["dns"], "\n") != 3 ||
+		!strings.Contains(keys["dns"], provision.DNSCheckDevice+" "+hex.EncodeToString(node[:])+"\n") {
+		t.Fatalf("dnstt keys file:\n%s", keys["dns"])
 	}
-	if !strings.Contains(backend, `"auth": "required"`) || !strings.Contains(backend, `"auth_keys_file": "/var/lib/raycontrol/rendered/dns/auth.keys"`) {
-		t.Fatalf("backend:\n%s", backend)
+	want = spa.DNSAuthKey(key, params.NodeID, uint16(mdns.ID))
+	if !strings.Contains(keys["mdns"], dev.ID+" "+hex.EncodeToString(want[:])+"\n") || strings.Count(keys["mdns"], "\n") != 2 ||
+		strings.Contains(keys["mdns"], provision.DNSCheckDevice) {
+		t.Fatalf("masterdns keys file:\n%s", keys["mdns"])
 	}
-	// The other tunnel (masterdns) is left alone.
-	if _, err := provision.SetServiceOption(ctx, st, "mdns", "auth", "required"); err == nil {
-		t.Fatal("auth on masterdns")
+	for _, name := range []string{"dns", "mdns"} {
+		if !strings.Contains(backend[name], `"auth": "required"`) ||
+			!strings.Contains(backend[name], `"auth_keys_file": "/var/lib/raycontrol/rendered/`+name+`/auth.keys"`) {
+			t.Fatalf("%s backend:\n%s", name, backend[name])
+		}
 	}
 	// Nor is an unknown mode taken at creation, and one in the database
 	// (written by hand) keeps the service from rendering.
 	for _, svc := range []store.Service{
 		{Kind: "dnstt", Name: "dns2", Settings: `{"auth":"strict"}`},
-		{Kind: "masterdns", Name: "mdns2", Settings: `{"auth":"required"}`},
+		{Kind: "masterdns", Name: "mdns2", Settings: `{"auth":"on"}`},
 	} {
 		if _, err := provision.CreateService(ctx, st, svc); !errors.Is(err, store.ErrInvalid) {
 			t.Errorf("%s %s: %v", svc.Kind, svc.Settings, err)
 		}
 	}
-	i := slices.IndexFunc(m.Services, func(s render.Service) bool { return s.Name == "dns" })
-	m.Services[i].Settings = strings.Replace(m.Services[i].Settings, `"auth":"required"`, `"auth":"strict"`, 1)
-	if _, _, err := render.Render(m, render.DefaultPaths); !render.Partial(err) || !strings.Contains(err.Error(), `auth "strict"`) {
-		t.Fatalf("render with auth=strict: %v", err)
+	for _, name := range []string{"dns", "mdns"} {
+		i := slices.IndexFunc(m.Services, func(s render.Service) bool { return s.Name == name })
+		m.Services[i].Settings = strings.Replace(m.Services[i].Settings, `"auth":"required"`, `"auth":"strict"`, 1)
+		if _, _, err := render.Render(m, render.DefaultPaths); !render.Partial(err) || !strings.Contains(err.Error(), "service "+name+`: auth "strict"`) {
+			t.Fatalf("render with auth=strict on %s: %v", name, err)
+		}
 	}
 }
 
@@ -546,8 +586,9 @@ func TestDebugLevels(t *testing.T) {
 
 // dnsseal-v1 turned on: the backend reads the key the unit copies in; in
 // required mode the front pads its probe answers as the zone's (§6), not
-// in optional; masterdns takes no seal. The key is the service's, made
-// once even for a dnstt service from before (render.Collect).
+// in optional. The key is the service's, made once even for a dnstt
+// service from before (render.Collect). masterdns (mdseal-v1) takes the
+// mode alone: it seals with the key it has.
 func TestRenderSeal(t *testing.T) {
 	ctx := context.Background()
 	st := node(t)
@@ -560,9 +601,11 @@ func TestRenderSeal(t *testing.T) {
 	}
 	// A service from before dnsseal-v1: no key yet.
 	st.UpdateService(ctx, dns.ID, store.ServiceUpdate{Delete: []string{provision.SecretSealKey}})
-	for _, mode := range []string{"optional", "required"} {
-		if _, err := provision.SetServiceOption(ctx, st, dns.Name, "seal", mode); err != nil {
-			t.Fatal(err)
+	for _, mode := range []string{"off", "optional", "required"} {
+		for _, name := range []string{dns.Name, "mdns"} {
+			if _, err := provision.SetServiceOption(ctx, st, name, "seal", mode); err != nil {
+				t.Fatal(err)
+			}
 		}
 		m, err := render.CollectForRender(ctx, st)
 		if err != nil {
@@ -580,7 +623,7 @@ func TestRenderSeal(t *testing.T) {
 			Options map[string]any `json:"options"`
 		}
 		json.Unmarshal(byPath["/var/lib/raycontrol/rendered/dns/backend.json"].Content, &backend)
-		if backend.Options["seal"] != mode || backend.Options["seal_key_file"] != "/var/lib/raycontrol/rendered/dns/seal.keys" {
+		if on := mode != "off"; on != (backend.Options["seal"] == mode) || on != (backend.Options["seal_key_file"] == "/var/lib/raycontrol/rendered/dns/seal.keys") {
 			t.Fatalf("%s: options %v", mode, backend.Options)
 		}
 		secrets, _ := st.ServiceSecrets(ctx, dns.ID)
@@ -605,8 +648,11 @@ func TestRenderSeal(t *testing.T) {
 			Options map[string]any `json:"options"`
 		}
 		json.Unmarshal(byPath["/var/lib/raycontrol/rendered/mdns/backend.json"].Content, &mdns)
-		if mdns.Options["seal"] != nil {
-			t.Fatalf("masterdns sealed: %v", mdns.Options)
+		if (mode != "off") != (mdns.Options["seal"] == mode) || mdns.Options["seal_key_file"] != nil {
+			t.Fatalf("%s: masterdns options %v", mode, mdns.Options)
+		}
+		if _, ok := byPath["/var/lib/raycontrol/rendered/mdns/seal.keys"]; ok {
+			t.Fatalf("%s: a seal key file for masterdns", mode)
 		}
 	}
 	// The key stays the same from collect to collect.
@@ -652,11 +698,21 @@ func TestRenderSeal(t *testing.T) {
 	if got, want := keyFile(), hex.EncodeToString(rotated[provision.SecretSealKey])+"\n"; got != want {
 		t.Fatalf("key file after the grace: %q, want %q", got, want)
 	}
-	if _, err := provision.SetServiceOption(ctx, st, dns.Name, "seal", "on"); err == nil {
-		t.Fatal("seal=on taken")
+	for _, name := range []string{dns.Name, "mdns"} {
+		if _, err := provision.SetServiceOption(ctx, st, name, "seal", "on"); err == nil {
+			t.Fatalf("seal=on taken on %s", name)
+		}
 	}
-	if _, err := provision.SetServiceOption(ctx, st, "mdns", "seal", "required"); err == nil {
-		t.Fatal("a seal for masterdns taken")
+	// A mode written by hand keeps the service from rendering: the backend
+	// would refuse it.
+	m, err := render.CollectForRender(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(m.Services, func(s render.Service) bool { return s.Name == "mdns" })
+	m.Services[i].Settings = strings.Replace(m.Services[i].Settings, `"seal":"required"`, `"seal":"on"`, 1)
+	if _, _, err := render.Render(m, render.DefaultPaths); !render.Partial(err) || !strings.Contains(err.Error(), `service mdns: seal "on"`) {
+		t.Fatalf("render with seal=on: %v", err)
 	}
 }
 

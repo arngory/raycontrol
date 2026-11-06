@@ -179,9 +179,11 @@ func probeDNS(ctx context.Context, p *sub.Payload, host string, deviceKey [spa.K
 	return nil
 }
 
-// probeDNSZones are the DNS tunnel zones of a subscription's links, with
+// probeDNSZones are the DNS tunnel zones of a subscription's links, the
+// main one and its spares (niko-dns-spare, spec/dnszones-v1.md §2), with
 // what a check needs: the probe key of the subscription, the seal key of
-// the link and the device's dnsauth key for the service.
+// the link and the device's dnsauth key for the service, the same in each
+// zone of a link.
 func probeDNSZones(p *sub.Payload, host string, deviceKey [spa.KeySize]byte) []dnscheck.Zone {
 	var probeKey []byte
 	if p.DNSProbe != nil {
@@ -217,14 +219,21 @@ func probeDNSZones(p *sub.Payload, host string, deviceKey [spa.KeySize]byte) []d
 			}
 		}
 		zones = append(zones, z)
+		for spare := range strings.SplitSeq(q.Get("niko-dns-spare"), ",") {
+			if spare != "" {
+				zz := z
+				zz.Name, zz.Spare = spare, true
+				zones = append(zones, zz)
+			}
+		}
 	}
 	return zones
 }
 
 // readArg reads the bundle from the argument, a file (@FILE) or stdin
 // (-); in a file or on stdin the rcdev1 token is found in whatever text
-// surrounds it (the output of rayctl device add, a message); an rcinv1
-// invite is found the same way.
+// surrounds it (the output of rayctl device add, a message); an invite,
+// RCINV2 or rcinv1, is found the same way.
 func readArg(s string) (string, error) {
 	var text string
 	switch {
@@ -243,8 +252,10 @@ func readArg(s string) (string, error) {
 	default:
 		return s, nil
 	}
+	n := len(node.InvitePrefix2)
 	for _, f := range strings.Fields(text) {
-		if strings.HasPrefix(f, node.BundlePrefix) || strings.HasPrefix(f, node.InvitePrefix) {
+		if strings.HasPrefix(f, node.BundlePrefix) || strings.HasPrefix(f, node.InvitePrefix) ||
+			len(f) > n && strings.EqualFold(f[:n], node.InvitePrefix2) {
 			return f, nil
 		}
 	}

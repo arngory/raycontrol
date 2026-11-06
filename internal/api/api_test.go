@@ -560,7 +560,7 @@ func TestExportUser(t *testing.T) {
 }
 
 func TestSummaryAPI(t *testing.T) {
-	_, sock, _ := startServer(t)
+	srv, sock, _ := startServer(t)
 	ctx := context.Background()
 	c := NewUnixClient(sock)
 	SummaryDBs = [][2]string{{"operator", filepath.Join(t.TempDir(), "none.mmdb")}}
@@ -574,6 +574,25 @@ func TestSummaryAPI(t *testing.T) {
 	}
 	if r, _ := c.GetSummary(ctx, connect.NewRequest(&nodev1.GetSummaryRequest{Days: 30})); !r.Msg.Enabled || r.Msg.Days != 30 {
 		t.Fatalf("after on: %+v", r.Msg)
+	}
+	// A network's counts by service: the resolvers and the zones of a DNS
+	// tunnel among them.
+	today := time.Now().Unix() / 86400
+	rows := []store.SummaryCount{{Day: today, ASN: 64500, Field: "reports", N: 10}}
+	for field, buckets := range map[string]map[string]int64{"result": {"works": 10}, "dns": {"udp": 10}, "zone": {"0": 3, "1": 7}} {
+		for b, n := range buckets {
+			rows = append(rows, store.SummaryCount{Day: today, ASN: 64500, Svc: 9, Field: field, Bucket: b, N: n})
+		}
+	}
+	if err := srv.Store.AddSummary(ctx, rows, "Mobile One", "KZ"); err != nil {
+		t.Fatal(err)
+	}
+	r, err = c.GetSummary(ctx, connect.NewRequest(&nodev1.GetSummaryRequest{}))
+	if err != nil || len(r.Msg.Networks) != 1 || len(r.Msg.Networks[0].Services) != 1 {
+		t.Fatalf("summary with a network: %+v %v", r.Msg, err)
+	}
+	if s := r.Msg.Networks[0].Services[0]; s.Id != 9 || s.Dns["udp"] != 10 || s.Zone["0"] != 3 || s.Zone["1"] != 7 || len(s.Zone) != 2 {
+		t.Fatalf("service counts %+v", s)
 	}
 	if _, err := c.SetSummary(ctx, connect.NewRequest(&nodev1.SetSummaryRequest{Enabled: "maybe"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("bad switch: %v", err)

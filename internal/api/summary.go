@@ -54,7 +54,7 @@ func (s *Server) GetSummary(ctx context.Context, req *connect.Request[nodev1.Get
 		for _, id := range slices.Sorted(maps.Keys(n.Services)) {
 			f := n.Services[id]
 			pb.Services = append(pb.Services, &nodev1.SummaryService{Id: uint32(id), Name: names[id],
-				Results: f["result"], Udp: f["udp"], Mbps: f["mbps"], StallKib: f["stall"], Dns: f["dns"]})
+				Results: f["result"], Udp: f["udp"], Mbps: f["mbps"], StallKib: f["stall"], Dns: f["dns"], Zone: f["zone"]})
 		}
 		resp.Networks = append(resp.Networks, pb)
 	}

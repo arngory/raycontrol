@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -163,6 +164,83 @@ func TestSealKeysAndOptionsRace(t *testing.T) {
 		svc, _ := st.ServiceByName(ctx, "dns")
 		if !bytes.Contains([]byte(svc.Settings), []byte(`"seal":"`+mode+`"`)) || ParseSealState(svc).PrevUntil != 0 {
 			t.Fatalf("round %d: %s", i, svc.Settings)
+		}
+	}
+}
+
+// A new DNS tunnel's modes: dnstt takes signed queries only, masterdns
+// both kinds, and both seal for the clients that ask; given modes stay,
+// unknown ones are refused, and a service from before reads as off.
+// masterdns takes dnsauth only under AES-GCM (spec/dnsauth-masterdns.md
+// §3).
+func TestDNSTunnelModes(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := Init(ctx, st, Options{Domain: "example.com", Host: "203.0.113.7"}); err != nil {
+		t.Fatal(err)
+	}
+	mdnsMode := "off" // until niko-server v0.11.0 takes them (MasterDNSSealAuth)
+	if MasterDNSSealAuth {
+		mdnsMode = "optional"
+	}
+	for _, c := range []struct{ kind, name, settings, auth, seal string }{
+		{"dnstt", "dns", "", "required", "optional"},
+		{"masterdns", "mdns", "", mdnsMode, mdnsMode},
+		{"dnstt", "dns2", `{"auth":"optional","seal":"off"}`, "optional", "off"},
+		{"masterdns", "mdns2", `{"auth":"required","seal":"required"}`, "required", "required"},
+		{"masterdns", "mdns3", `{"auth":"off","seal":"off"}`, "off", "off"},
+	} {
+		svc, err := CreateService(ctx, st, store.Service{Kind: c.kind, Name: c.name, Enabled: true, Settings: c.settings})
+		if err != nil || DNSAuthMode(svc) != c.auth || DNSSealMode(svc) != c.seal {
+			t.Errorf("%s %s: auth %s, seal %s, %v", c.kind, c.settings, DNSAuthMode(svc), DNSSealMode(svc), err)
+		}
+	}
+	for i, bad := range []string{`{"auth":"on"}`, `{"seal":"strict"}`, `{"seal":true}`} {
+		for _, kind := range []string{"dnstt", "masterdns"} {
+			name := "bad" + string(rune('a'+i)) + kind
+			if _, err := CreateService(ctx, st, store.Service{Kind: kind, Name: name, Enabled: true, Settings: bad}); !errors.Is(err, store.ErrInvalid) {
+				t.Errorf("%s %s: %v", kind, bad, err)
+			}
+		}
+	}
+	// A service from before keeps what it had: no mode reads as off. Other
+	// kinds have none.
+	for _, svc := range []store.Service{{Kind: "masterdns", Settings: `{"zone":"m.example.com"}`},
+		{Kind: "reality", Settings: `{"auth":"required","seal":"required"}`}} {
+		if DNSAuthMode(svc) != "off" || DNSSealMode(svc) != "off" {
+			t.Errorf("%s %s: auth %s, seal %s", svc.Kind, svc.Settings, DNSAuthMode(svc), DNSSealMode(svc))
+		}
+	}
+
+	// service set on masterdns: off removes the mode, the others set it.
+	mode := map[string]func(store.Service) string{"auth": DNSAuthMode, "seal": DNSSealMode}
+	for _, key := range []string{"auth", "seal"} {
+		for _, v := range []string{"required", "off", "optional"} {
+			svc, err := SetServiceOption(ctx, st, "mdns", key, v)
+			if err != nil || mode[key](svc) != v || (v == "off") == strings.Contains(svc.Settings, `"`+key+`"`) {
+				t.Fatalf("mdns %s=%s: %s %v", key, v, svc.Settings, err)
+			}
+		}
+		if _, err := SetServiceOption(ctx, st, "mdns", key, "on"); !errors.Is(err, store.ErrInvalid) {
+			t.Fatalf("mdns %s=on: %v", key, err)
+		}
+	}
+	// dnsauth under a method that leaves the query unauthenticated (set by
+	// hand): refused; off and the seal still go.
+	mdns, _ := st.ServiceByName(ctx, "mdns")
+	if err := st.UpdateService(ctx, mdns.ID, store.ServiceUpdate{Settings: strings.Replace(mdns.Settings, `"encryption_method":5`, `"encryption_method":2`, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetServiceOption(ctx, st, "mdns", "auth", "required"); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("auth under method 2: %v", err)
+	}
+	for _, o := range [][2]string{{"auth", "off"}, {"seal", "required"}} {
+		if _, err := SetServiceOption(ctx, st, "mdns", o[0], o[1]); err != nil {
+			t.Fatalf("%s=%s under method 2: %v", o[0], o[1], err)
 		}
 	}
 }

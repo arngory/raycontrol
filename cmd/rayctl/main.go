@@ -47,7 +47,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false;
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
                                             yggdrasil: peers=URI,URI|none (public peers, then rayctl apply);
-                                            dnstt: auth=, seal=off|optional|required; dnstt, masterdns:
+                                            dnstt, masterdns: auth=, seal=off|optional|required,
                                             spare_zones=N|ZONE,ZONE|none (spare zones, made up or your own),
                                             zone=SPARE (a spare becomes the main zone, the main one leaves)
   service cert SITE -chain F -key F         a certificate of your own for the site and the services under
@@ -60,10 +60,11 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
   device revoke ID                          a device, or an invite not yet used
-  device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv1|rcinv2]
+  device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv2|rcinv1]
                                             a one-time invite: the client registers the device itself
                                             through the remote API (service add api api); rcinv2 is
-                                            the short form (QR half the size, Niko 1.35 or later)
+                                            the short form (QR half the size, Niko 1.35 or later),
+                                            rcinv1 for older Niko
   audit [-n 50]
   admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA
   relay add NAME ADDRESS | list | remove NAME   relays in front of the node (relay-v1): one address
@@ -119,8 +120,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
 
   From another machine, through the node's remote API (admin devices):
   remote enroll [-o FILE] [-carrier udp|tls|tcp|auto] [-addr A] INVITE|@FILE|-
-      register a device from an invite (rcinv1:...): a new client key, SPA,
-      then the API; writes the device file (bundle and key, mode 0600)
+      register a device from an invite (RCINV2:... or rcinv1:...): a new client
+      key, SPA, then the API; writes the device file (bundle and key, mode 0600)
   -remote FILE <command>                    status, user, service, device, audit, admin, dns, metrics, summary
                                             run against the node through its API
   -remote FILE remote whoami|rotate         the device; a new client key for it
@@ -561,11 +562,13 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 }
 
 // keyState says when a REALITY service last switched keys and when the
-// published next switch is (R4-7).
+// published next switch is (R4-7); for a DNS tunnel, its dnsauth and seal
+// modes.
 func keyState(s *nodev1.Service) string {
 	day := func(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04") }
-	if s.Kind == "dnstt" {
-		// dnsseal-v1: the mode, and the key's switch if there was one.
+	if s.Kind == "dnstt" || s.Kind == "masterdns" {
+		// The modes, and the switch of a dnstt seal key if there was one
+		// (masterdns seals with its own key).
 		var st struct {
 			Auth      string `json:"auth"`
 			Seal      string `json:"seal"`
@@ -590,9 +593,6 @@ func keyState(s *nodev1.Service) string {
 			out += ", previous key until " + day(st.PrevUntil)
 		}
 		return out + spareZones(s)
-	}
-	if s.Kind == "masterdns" {
-		return strings.TrimPrefix(spareZones(s), ", ")
 	}
 	if s.Kind != "reality" {
 		return ""
@@ -674,13 +674,17 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		out := fs.String("o", "", "write the invite alone to this file (mode 0600) instead of the screen")
 		showQR := fs.Bool("qr", false, "draw the invite as a QR code on the screen for the phone to scan, instead of the text")
 		withPIN := fs.Bool("pin", false, "the invite also needs a PIN of 6 digits, shown here once: tell it by another channel")
-		format := fs.String("format", "rcinv1", "rcinv1, or rcinv2: the short form, a QR half the size (Niko 1.35 or later)")
+		format := fs.String("format", "rcinv2", "rcinv2: the short form, a QR half the size (Niko 1.35 or later); rcinv1 for older Niko")
 		if err := need(args, 2); err != nil {
 			return err
 		}
 		if err := fs.Parse(args[2:]); err != nil {
 			return errUsage
 		}
+		// -format given: that format or none; without it rcinv1 where the
+		// node makes no rcinv2.
+		asked := false
+		fs.Visit(func(f *flag.Flag) { asked = asked || f.Name == "format" })
 		if *showQR && (*out != "" || c.json) {
 			return fmt.Errorf("%w: -qr draws on the screen: not with -o or -json", errUsage)
 		}
@@ -699,18 +703,6 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 			return err
 		}
 		inv := r.Msg.Invite
-		if *format == "rcinv2" {
-			if r.Msg.InviteCodeShort == "" {
-				// A node from before v0.13, or a host that is no address
-				// and no ASCII name: withdraw rather than hand out rcinv1.
-				_, rerr := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: inv.Id}))
-				if rerr != nil {
-					return fmt.Errorf("the node made invite %s, but not as rcinv2 (raycontrol v0.13 has it), and it is not withdrawn: rayctl device revoke %s: %w", inv.Id, inv.Id, rerr)
-				}
-				return errors.New("the node made the invite, but not as rcinv2 (raycontrol v0.13 has it, and the node's host must be an address or an ASCII name): withdrawn; invite with -format rcinv1")
-			}
-			r.Msg.InviteCode = r.Msg.InviteCodeShort
-		}
 		if *withPIN && r.Msg.Pin == "" {
 			// A node from before v0.13 drops the field it does not know
 			// and makes an invite without a PIN: withdraw it rather than
@@ -720,6 +712,23 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 				return fmt.Errorf("the node made invite %s without a PIN (raycontrol v0.13 has them), and it is not withdrawn: rayctl device revoke %s: %w", inv.Id, inv.Id, rerr)
 			}
 			return fmt.Errorf("the node made the invite without a PIN (raycontrol v0.13 has them): withdrawn; update the node or invite without -pin")
+		}
+		if *format == "rcinv2" {
+			switch {
+			case r.Msg.InviteCodeShort != "":
+				r.Msg.InviteCode = r.Msg.InviteCodeShort
+			case !asked:
+				// A node from before v0.13, or a host that is no address
+				// and no ASCII name: rcinv1, which every Niko reads.
+				fmt.Fprintln(os.Stderr, "rayctl: the invite is rcinv1: the node makes no rcinv2 (raycontrol v0.13 has it, and the node's host must be an address or an ASCII name)")
+			default:
+				// Asked for: withdraw rather than hand out rcinv1.
+				_, rerr := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: inv.Id}))
+				if rerr != nil {
+					return fmt.Errorf("the node made invite %s, but not as rcinv2 (raycontrol v0.13 has it), and it is not withdrawn: rayctl device revoke %s: %w", inv.Id, inv.Id, rerr)
+				}
+				return errors.New("the node made the invite, but not as rcinv2 (raycontrol v0.13 has it, and the node's host must be an address or an ASCII name): withdrawn; invite with -format rcinv1")
+			}
 		}
 		// The PIN goes to the screen, never into the invite's file: it
 		// travels apart from the invite.

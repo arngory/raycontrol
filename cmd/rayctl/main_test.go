@@ -2,18 +2,25 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"text/tabwriter"
 	"time"
+
+	"connectrpc.com/connect"
 
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/sub"
 	"github.com/arngory/raycontrol/internal/summary"
@@ -143,7 +150,8 @@ func TestReleaseDBPath(t *testing.T) {
 
 // rayctl probe -dns takes its zones from the subscription's links: the
 // dnstt one with the probe key, the seal key of the link and the device's
-// dnsauth key for the service; masterdns with its zone alone.
+// dnsauth key for the service; masterdns with its zone alone. The spare
+// zones of a link (niko-dns-spare) after its main one, with its keys.
 func TestProbeDNSZones(t *testing.T) {
 	var dev [spa.KeySize]byte
 	dev[0] = 1
@@ -153,38 +161,133 @@ func TestProbeDNSZones(t *testing.T) {
 		DNSProbe: &sub.DNSProbeHint{V: 1, Key: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))},
 		Profiles: []sub.Profile{
 			{Svc: 5, Name: "dns", Link: "vless://u@inner:1?niko-dns=" + url.QueryEscape("dnstt;;t.example.com;pub") +
-				"&niko-dnsseal=" + url.QueryEscape("v1;"+base64.RawURLEncoding.EncodeToString(seal)) + "&niko-dnsauth=v1&niko-node=" + nodeID + "&niko-svc=5#dns"},
-			{Svc: 6, Name: "mdns", Link: "vless://u@inner:1?niko-dns=" + url.QueryEscape("masterdns;;m.example.com;5") + "&niko-dnskey=x#mdns"},
+				"&niko-dnsseal=" + url.QueryEscape("v1;"+base64.RawURLEncoding.EncodeToString(seal)) + "&niko-dnsauth=v1&niko-node=" + nodeID +
+				"&niko-svc=5&niko-dns-spare=" + url.QueryEscape("s.example.net,u.example.org") + "#dns"},
+			{Svc: 6, Name: "mdns", Link: "vless://u@inner:1?niko-dns=" + url.QueryEscape("masterdns;;m.example.com;5") + "&niko-dnskey=x" +
+				"&niko-mdseal=v1&niko-dnsauth=v1&niko-node=" + nodeID + "&niko-svc=6&niko-dns-spare=v.example.net#mdns"},
 			{Svc: 7, Name: "reality", Link: "vless://u@203.0.113.7:443?security=reality#reality"},
 		},
 	}
 	zones := probeDNSZones(&p, "203.0.113.7", dev)
-	if len(zones) != 2 {
-		t.Fatalf("zones %+v", zones)
+	var names []string
+	for _, z := range zones {
+		names = append(names, z.Name)
+	}
+	if want := []string{"t.example.com", "s.example.net", "u.example.org", "m.example.com", "v.example.net"}; !slices.Equal(names, want) {
+		t.Fatalf("zones %v, want %v", names, want)
 	}
 	id, _ := hex.DecodeString(nodeID)
 	want := spa.DNSAuthKey(dev, [spa.NodeIDSize]byte(id), 5)
-	d, m := zones[0], zones[1]
-	if d.Kind != "dnstt" || d.Name != "t.example.com" || d.Host != "203.0.113.7" || d.SvcID != 5 || len(d.ProbeKey) != 32 ||
-		d.Seal != "required" || !bytes.Equal(d.SealKey, seal) || d.Auth != "required" || !bytes.Equal(d.AuthKey, want[:]) {
-		t.Fatalf("dnstt %+v", d)
+	for _, d := range zones[:3] {
+		if d.Kind != "dnstt" || d.Service != "dns" || d.Spare != (d.Name != "t.example.com") || d.Host != "203.0.113.7" || d.SvcID != 5 ||
+			len(d.ProbeKey) != 32 || d.Seal != "required" || !bytes.Equal(d.SealKey, seal) || d.Auth != "required" || !bytes.Equal(d.AuthKey, want[:]) {
+			t.Fatalf("dnstt %+v", d)
+		}
 	}
-	if m.Kind != "masterdns" || m.Name != "m.example.com" || m.ProbeKey != nil || m.AuthKey != nil {
-		t.Fatalf("masterdns %+v", m)
+	for _, m := range zones[3:] {
+		if m.Kind != "masterdns" || m.Service != "mdns" || m.Spare != (m.Name != "m.example.com") || m.SvcID != 6 || m.ProbeKey != nil || m.AuthKey != nil {
+			t.Fatalf("masterdns %+v", m)
+		}
 	}
 }
 
-// rayctl service list: a DNS tunnel's spare zones after its keys.
-func TestKeyStateSpareZones(t *testing.T) {
-	d := &nodev1.Service{Kind: "dnstt", SettingsJson: `{"auth":"required","seal":"optional","spare_zones":["s.example.net","u.example.org"]}`}
-	if got := keyState(d); got != "auth required, seal optional, spare zones s.example.net u.example.org" {
-		t.Errorf("dnstt %q", got)
+// rayctl service list: a DNS tunnel's dnsauth and seal modes, dnstt's or
+// masterdns's, then its spare zones.
+func TestKeyStateDNS(t *testing.T) {
+	for _, c := range []struct{ kind, settings, want string }{
+		{"dnstt", `{"auth":"required","seal":"optional","spare_zones":["s.example.net","u.example.org"]}`,
+			"auth required, seal optional, spare zones s.example.net u.example.org"},
+		{"masterdns", `{"auth":"required","seal":"required","encryption_method":5}`, "auth required, seal required"},
+		{"masterdns", `{"zone":"m.example.com","auth":"optional","seal":"optional","spare_zones":["v.example.net"]}`,
+			"auth optional (open: auth=required keeps floods out), seal optional, spare zones v.example.net"},
+		// A masterdns service from before: neither mode.
+		{"masterdns", `{}`, "auth off (open: auth=required keeps floods out), seal off"},
+	} {
+		if got := keyState(&nodev1.Service{Kind: c.kind, SettingsJson: c.settings}); got != c.want {
+			t.Errorf("%s %s: %q", c.kind, c.settings, got)
+		}
 	}
-	m := &nodev1.Service{Kind: "masterdns", SettingsJson: `{"zone":"m.example.com","spare_zones":["v.example.net"]}`}
-	if got := keyState(m); got != "spare zones v.example.net" {
-		t.Errorf("masterdns %q", got)
+}
+
+// inviteNode makes invites as a node does, the short form when it has one,
+// and keeps the IDs of those withdrawn.
+type inviteNode struct {
+	nodev1connect.NodeServiceClient
+	short   string
+	revoked []string
+}
+
+func (n *inviteNode) CreateInvite(context.Context, *connect.Request[nodev1.CreateInviteRequest]) (*connect.Response[nodev1.CreateInviteResponse], error) {
+	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: &nodev1.Invite{Id: "inv1", User: "alice", Name: "phone", Role: "user"},
+		InviteCode: "rcinv1:long", InviteCodeShort: n.short}), nil
+}
+
+func (n *inviteNode) RevokeDevice(_ context.Context, req *connect.Request[nodev1.RevokeDeviceRequest]) (*connect.Response[nodev1.RevokeDeviceResponse], error) {
+	n.revoked = append(n.revoked, req.Msg.Id)
+	return connect.NewResponse(&nodev1.RevokeDeviceResponse{}), nil
+}
+
+// rayctl device invite: rcinv2 by default (Niko 1.35), rcinv1 when asked.
+// From a node that makes no rcinv2 (before v0.13, or a host that cannot go
+// in it) rcinv1 by default; with -format rcinv2 the invite is withdrawn.
+func TestInviteFormat(t *testing.T) {
+	for _, c := range []struct {
+		short string
+		args  []string
+		want  string // the invite written; "": none, withdrawn
+	}{
+		{"RCINV2:SHORT", nil, "RCINV2:SHORT"},
+		{"RCINV2:SHORT", []string{"-format", "rcinv2"}, "RCINV2:SHORT"},
+		{"RCINV2:SHORT", []string{"-format", "rcinv1"}, "rcinv1:long"},
+		{"", nil, "rcinv1:long"},
+		{"", []string{"-format", "rcinv1"}, "rcinv1:long"},
+		{"", []string{"-format", "rcinv2"}, ""},
+	} {
+		n := &inviteNode{short: c.short}
+		out := filepath.Join(t.TempDir(), "invite")
+		err := (&cli{c: n}).device(context.Background(), "invite", append([]string{"alice", "phone", "-o", out}, c.args...))
+		got, _ := os.ReadFile(out)
+		if c.want == "" && (err == nil || got != nil || !slices.Equal(n.revoked, []string{"inv1"})) ||
+			c.want != "" && (err != nil || string(got) != c.want+"\n" || n.revoked != nil) {
+			t.Errorf("short %q, %v: %v, wrote %q, withdrew %v", c.short, c.args, err, got, n.revoked)
+		}
 	}
-	if got := keyState(&nodev1.Service{Kind: "masterdns", SettingsJson: `{}`}); got != "" {
-		t.Errorf("masterdns without spares %q", got)
+	if err := (&cli{c: &inviteNode{}}).device(context.Background(), "invite", []string{"alice", "phone", "-format", "rcinv3"}); !errors.Is(err, errUsage) {
+		t.Errorf("-format rcinv3: %v", err)
+	}
+}
+
+// remote enroll @FILE finds the invite in the text around it, as rayctl
+// device invite prints it, whichever the form.
+func TestReadArgInvite(t *testing.T) {
+	for _, code := range []string{"RCINV2:AIA4WADRA4AACAQD", "rcinv2:aia4wadra4aacaqd", "rcinv1:eyJ2IjoxfQ"} {
+		f := filepath.Join(t.TempDir(), "invite.txt")
+		text := "invite 3f2a for alice/phone (user), once, until 2026-11-07 10:00. The client registers with it through the API:\n\n" + code + "\n"
+		if err := os.WriteFile(f, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := readArg("@" + f); err != nil || got != code {
+			t.Errorf("%s: %q %v", code, got, err)
+		}
+	}
+}
+
+// rayctl summary: a dnstt service's working zones beside its resolvers,
+// nothing for a service without.
+func TestPrintSummaryZones(t *testing.T) {
+	var b bytes.Buffer
+	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	printSummary(w, &nodev1.GetSummaryResponse{Days: 7, K: 10, Networks: []*nodev1.SummaryNetwork{{Asn: 64500, Name: "Mobile One", Reports: 10,
+		Services: []*nodev1.SummaryService{
+			{Id: 3, Name: "dns", Results: map[string]int64{"works": 10}, Dns: map[string]int64{"udp": 10}, Zone: map[string]int64{"0": 3, "1": 7}},
+			{Id: 4, Name: "mdns", Results: map[string]int64{"works": 10}, Dns: map[string]int64{"udp": 10}},
+		}}}})
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(b.String(), "\n") {
+		if strings.Contains(l, "dns (3)") != strings.HasSuffix(l, "zones 0:3 1:7") || strings.Contains(l, "mdns (4)") && strings.Contains(l, "zones") {
+			t.Errorf("line %q", l)
+		}
 	}
 }

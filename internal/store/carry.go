@@ -73,7 +73,7 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 		// dnsauth (dnsauth-v1 §5): the stricter mode of the two stays.
 		`UPDATE services SET settings_json = json_set(settings_json, '$.auth',
 		    (SELECT json_extract(c.settings_json, '$.auth') FROM cur.services c WHERE c.id = services.id))
-		  WHERE kind = 'dnstt'
+		  WHERE kind IN ('dnstt', 'masterdns')
 		    AND (SELECT CASE json_extract(c.settings_json, '$.auth') WHEN 'required' THEN 2 WHEN 'optional' THEN 1 ELSE 0 END
 		         FROM cur.services c WHERE c.id = services.id)
 		      > CASE json_extract(settings_json, '$.auth') WHEN 'required' THEN 2 WHEN 'optional' THEN 1 ELSE 0 END`,

@@ -158,6 +158,10 @@ func printSummary(w *tabwriter.Writer, m *nodev1.GetSummaryResponse) {
 			if len(s.Dns) > 0 {
 				fmt.Fprintf(w, "\tresolvers %s", counts(s.Dns)) // DNS tunnels only
 			}
+			if len(s.Zone) > 0 {
+				// dnstt: 0 the main zone, then the spares in the links' order.
+				fmt.Fprintf(w, "\tzones %s", counts(s.Zone))
+			}
 			fmt.Fprintln(w)
 		}
 	}

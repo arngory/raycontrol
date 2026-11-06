@@ -20,27 +20,28 @@ import (
 // nothing until they fetch their subscription. Only one previous key is
 // kept: a second switch within the grace drops the one before.
 
-// DNSSealMode is a dnstt service's dnsseal-v1 mode: off, optional or
-// required (spec/dnsseal-v1.md §5); off when unset.
+// DNSSealMode is a DNS tunnel's seal mode: off, optional or required,
+// dnsseal-v1 for dnstt (spec/dnsseal-v1.md §5), mdseal-v1 for masterdns
+// (spec/mdseal-v1.md §5); off when unset.
 func DNSSealMode(s store.Service) string {
 	var st struct {
 		Seal string `json:"seal"`
 	}
 	_ = json.Unmarshal([]byte(s.Settings), &st)
-	if s.Kind != "dnstt" || st.Seal == "" {
+	if (s.Kind != "dnstt" && s.Kind != "masterdns") || st.Seal == "" {
 		return "off"
 	}
 	return st.Seal
 }
 
-// DNSAuthMode is a dnstt service's dnsauth-v1 mode: off, optional or
-// required (spec/dnsauth-v1.md §5).
+// DNSAuthMode is a DNS tunnel's dnsauth-v1 mode: off, optional or
+// required (spec/dnsauth-v1.md §5, spec/dnsauth-masterdns.md §4).
 func DNSAuthMode(s store.Service) string {
 	var st struct {
 		Auth string `json:"auth"`
 	}
 	_ = json.Unmarshal([]byte(s.Settings), &st)
-	if s.Kind != "dnstt" || st.Auth == "" {
+	if (s.Kind != "dnstt" && s.Kind != "masterdns") || st.Auth == "" {
 		return "off"
 	}
 	return st.Auth

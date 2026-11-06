@@ -340,7 +340,7 @@ units="$(x systemctl cat niko-naive.service)" || fail "no unit for naive"
 wait_active niko-hy2o.service niko-front.service
 [[ $(x ss -Hulpn 'sport = :443') == *niko-server* ]] || fail "the front does not listen on UDP 443"
 [[ $(x stat -c '%a %U' /run/niko/front/hy2o.salamander) == "400 niko-front" ]] || fail "the front's salamander copy is not 0400 niko-front"
-invite="$(x rayctl device invite alice console -role admin | grep -o 'rcinv1:[A-Za-z0-9_-]*')" || fail "no invite"
+invite="$(x rayctl device invite alice console -role admin | grep -o 'RCINV2:[A-Z2-7]*')" || fail "no invite"
 # From the client's container: register a device from the invite, then
 # administer the node through the API with it, and give it a new key.
 # shellcheck disable=SC2016 # expands in the client container
@@ -352,7 +352,7 @@ docker run --rm --network "$net" -v "$bin:/opt/rc:ro" "$image" sh -ec '
 	/opt/rc/rayctl -remote /root/console.rcdev remote whoami
 	if /opt/rc/rayctl -remote /root/console.rcdev backup; then exit 1; fi
 	if /opt/rc/rayctl remote enroll -o /root/again.rcdev "$1"; then echo "an invite worked twice"; exit 1; fi
-' _ "$invite" | sed -E 's/rc(dev|inv)1:[A-Za-z0-9_-]+/rc\11:<redacted>/g' || fail "remote API from the client"
+' _ "$invite" | sed -E 's/rc(dev|inv)1:[A-Za-z0-9_-]+/rc\11:<redacted>/g; s/RCINV2:[A-Z2-7]+/RCINV2:<redacted>/g' || fail "remote API from the client"
 [[ $(x rayctl user list) == *carol* ]] || fail "the user made through the remote API is missing"
 [[ $(x rayctl audit) == *"alice/console (remote)"* ]] || fail "the remote admin is not in the audit log"
 [[ $(x rayctl device list alice) == *registered* ]] || fail "the remote device is not listed as registered"
@@ -407,7 +407,7 @@ report="$(x cat /root/report.txt)"
 for section in "== versions" "== system" "== node" "== units" "checks"; do
 	[[ $report == *"$section"* ]] || fail "report lacks $section"
 done
-for leak in "$ip" example.test rcdev1: rcinv1: "$phone_id"; do
+for leak in "$ip" example.test rcdev1: rcinv1: RCINV2: "$phone_id"; do
 	if [[ $report == *"$leak"* ]]; then
 		fail "report leaks $leak"
 	fi

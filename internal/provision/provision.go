@@ -261,6 +261,11 @@ func SPKIPin(certDER []byte) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
 }
 
+// MasterDNSSealAuth turns seal and auth on (optional) for a new masterdns
+// service: niko-server v0.11.0 takes them, the v0.10.0 pinned now does not
+// (its check refuses the backend's config). On with the v0.11.0 pin.
+const MasterDNSSealAuth = false
+
 // kindsNeedingInner send their traffic to the inner stage.
 var kindsNeedingInner = []string{"dnstt", "masterdns", "olcrtc", "openflux", "yggdrasil"}
 
@@ -288,17 +293,26 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 
 	switch svc.Kind {
 	case "dnstt", "masterdns":
-		if a, ok := settings["auth"]; ok && (svc.Kind != "dnstt" || !slices.Contains([]any{"off", "optional", "required"}, a)) {
-			return svc, fmt.Errorf("%w auth %v: dnstt only, off, optional or required (spec/dnsauth-v1.md)", store.ErrInvalid, a)
+		if a, ok := settings["auth"]; ok && !slices.Contains([]any{"off", "optional", "required"}, a) {
+			return svc, fmt.Errorf("%w auth %v: off, optional or required (spec/dnsauth-v1.md)", store.ErrInvalid, a)
 		} else if !ok && svc.Kind == "dnstt" {
 			// A new dnstt service takes signed queries only (Niko 1.27
 			// and later sign): without, anyone can start sessions and
 			// hold its new ones back (niko-server's load test, review 7).
 			// Older clients: rayctl service set NAME auth=optional.
 			settings["auth"] = "required"
+		} else if !ok && MasterDNSSealAuth {
+			// masterdns (spec/dnsauth-masterdns.md §4): the session of a
+			// device that signs is bound to it; clients that do not sign
+			// keep working.
+			settings["auth"] = "optional"
 		}
-		if a, ok := settings["seal"]; ok && (svc.Kind != "dnstt" || !slices.Contains([]any{"off", "optional", "required"}, a)) {
-			return svc, fmt.Errorf("%w seal %v: dnstt only, off, optional or required (spec/dnsseal-v1.md)", store.ErrInvalid, a)
+		if a, ok := settings["seal"]; ok && !slices.Contains([]any{"off", "optional", "required"}, a) {
+			return svc, fmt.Errorf("%w seal %v: off, optional or required (spec/dnsseal-v1.md, spec/mdseal-v1.md)", store.ErrInvalid, a)
+		} else if !ok && (svc.Kind == "dnstt" || MasterDNSSealAuth) {
+			// Sealed for the clients that ask (Niko 1.35 seals dnstt),
+			// as before for the others: optional costs them nothing.
+			settings["seal"] = "optional"
 		}
 		if z, ok := settings["zone"]; !ok {
 			zone, err := newZone(ctx, st, all)
@@ -791,19 +805,33 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			}
 			v = peers
 		}
-	case svc.Kind == "dnstt" && (key == "auth" || key == "seal"):
-		// dnsauth-v1 (spec/dnsauth-v1.md §5): required on a new service,
-		// optional or off for clients that do not sign; dnsseal-v1
-		// (spec/dnsseal-v1.md §10): off until clients seal.
+	case (svc.Kind == "dnstt" || svc.Kind == "masterdns") && (key == "auth" || key == "seal"):
+		// dnsauth-v1 (spec/dnsauth-v1.md §5, spec/dnsauth-masterdns.md
+		// §4): required on a new dnstt service, optional on a new
+		// masterdns one, optional or off for clients that do not sign;
+		// the seal (dnsseal-v1, mdseal-v1 §5): optional on a new service,
+		// required once every client seals.
 		if !slices.Contains([]string{"off", "optional", "required"}, value) {
 			return svc, fmt.Errorf("%w %s: off, optional or required", store.ErrInvalid, key)
+		}
+		if svc.Kind == "masterdns" && key == "auth" && value != "off" {
+			// Methods 0 to 2 leave the query unauthenticated: a tag under
+			// them means nothing (spec/dnsauth-masterdns.md §3). The node
+			// sets 5: only a service changed by hand gets here.
+			var md struct {
+				Method int `json:"encryption_method"`
+			}
+			_ = json.Unmarshal([]byte(svc.Settings), &md)
+			if md.Method < 3 {
+				return svc, fmt.Errorf("%w auth: %s has encryption_method %d, dnsauth needs 3 to 5 (AES-GCM)", store.ErrInvalid, name, md.Method)
+			}
 		}
 		v = value
 		if value == "off" {
 			v = 0
 		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt: auth, seal, spare_zones, zone; masterdns: spare_zones, zone)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt, masterdns: auth, seal, spare_zones, zone)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
