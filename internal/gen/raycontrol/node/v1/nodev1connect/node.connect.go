@@ -114,6 +114,9 @@ const (
 	NodeServiceSyncDNSProcedure = "/raycontrol.node.v1.NodeService/SyncDNS"
 	// NodeServiceRemoveDNSProcedure is the fully-qualified name of the NodeService's RemoveDNS RPC.
 	NodeServiceRemoveDNSProcedure = "/raycontrol.node.v1.NodeService/RemoveDNS"
+	// NodeServiceCheckDNSZonesProcedure is the fully-qualified name of the NodeService's CheckDNSZones
+	// RPC.
+	NodeServiceCheckDNSZonesProcedure = "/raycontrol.node.v1.NodeService/CheckDNSZones"
 	// NodeServiceBackupProcedure is the fully-qualified name of the NodeService's Backup RPC.
 	NodeServiceBackupProcedure = "/raycontrol.node.v1.NodeService/Backup"
 	// NodeServiceGetMetricsProcedure is the fully-qualified name of the NodeService's GetMetrics RPC.
@@ -195,6 +198,14 @@ type NodeServiceClient interface {
 	GetDNS(context.Context, *connect.Request[v1.GetDNSRequest]) (*connect.Response[v1.GetDNSResponse], error)
 	SyncDNS(context.Context, *connect.Request[v1.SyncDNSRequest]) (*connect.Response[v1.SyncDNSResponse], error)
 	RemoveDNS(context.Context, *connect.Request[v1.RemoveDNSRequest]) (*connect.Response[v1.RemoveDNSResponse], error)
+	// CheckDNSZones checks the DNS tunnel zones from the node: the
+	// delegation at the parent's own servers, the front and the backend on
+	// the node, and each zone through public resolvers with dnsprobe-v1
+	// (docs/09-observability.md). Without now it returns the last periodic
+	// check (rayd -dns-check). now checks at once, at most once per 30 s:
+	// a call within that gets the last check (limited), calls at the same
+	// time share one. The answer holds no secret.
+	CheckDNSZones(context.Context, *connect.Request[v1.CheckDNSZonesRequest]) (*connect.Response[v1.CheckDNSZonesResponse], error)
 	// Backup returns a consistent copy of the node's database. Root only: it
 	// holds every key (R4-13); rayctl encrypts it with the operator's
 	// passphrase, which never reaches rayd.
@@ -409,6 +420,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("RemoveDNS")),
 			connect.WithClientOptions(opts...),
 		),
+		checkDNSZones: connect.NewClient[v1.CheckDNSZonesRequest, v1.CheckDNSZonesResponse](
+			httpClient,
+			baseURL+NodeServiceCheckDNSZonesProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("CheckDNSZones")),
+			connect.WithClientOptions(opts...),
+		),
 		backup: connect.NewClient[v1.BackupRequest, v1.BackupResponse](
 			httpClient,
 			baseURL+NodeServiceBackupProcedure,
@@ -480,6 +497,7 @@ type nodeServiceClient struct {
 	getDNS            *connect.Client[v1.GetDNSRequest, v1.GetDNSResponse]
 	syncDNS           *connect.Client[v1.SyncDNSRequest, v1.SyncDNSResponse]
 	removeDNS         *connect.Client[v1.RemoveDNSRequest, v1.RemoveDNSResponse]
+	checkDNSZones     *connect.Client[v1.CheckDNSZonesRequest, v1.CheckDNSZonesResponse]
 	backup            *connect.Client[v1.BackupRequest, v1.BackupResponse]
 	getMetrics        *connect.Client[v1.GetMetricsRequest, v1.GetMetricsResponse]
 	getSummary        *connect.Client[v1.GetSummaryRequest, v1.GetSummaryResponse]
@@ -638,6 +656,11 @@ func (c *nodeServiceClient) RemoveDNS(ctx context.Context, req *connect.Request[
 	return c.removeDNS.CallUnary(ctx, req)
 }
 
+// CheckDNSZones calls raycontrol.node.v1.NodeService.CheckDNSZones.
+func (c *nodeServiceClient) CheckDNSZones(ctx context.Context, req *connect.Request[v1.CheckDNSZonesRequest]) (*connect.Response[v1.CheckDNSZonesResponse], error) {
+	return c.checkDNSZones.CallUnary(ctx, req)
+}
+
 // Backup calls raycontrol.node.v1.NodeService.Backup.
 func (c *nodeServiceClient) Backup(ctx context.Context, req *connect.Request[v1.BackupRequest]) (*connect.Response[v1.BackupResponse], error) {
 	return c.backup.CallUnary(ctx, req)
@@ -734,6 +757,14 @@ type NodeServiceHandler interface {
 	GetDNS(context.Context, *connect.Request[v1.GetDNSRequest]) (*connect.Response[v1.GetDNSResponse], error)
 	SyncDNS(context.Context, *connect.Request[v1.SyncDNSRequest]) (*connect.Response[v1.SyncDNSResponse], error)
 	RemoveDNS(context.Context, *connect.Request[v1.RemoveDNSRequest]) (*connect.Response[v1.RemoveDNSResponse], error)
+	// CheckDNSZones checks the DNS tunnel zones from the node: the
+	// delegation at the parent's own servers, the front and the backend on
+	// the node, and each zone through public resolvers with dnsprobe-v1
+	// (docs/09-observability.md). Without now it returns the last periodic
+	// check (rayd -dns-check). now checks at once, at most once per 30 s:
+	// a call within that gets the last check (limited), calls at the same
+	// time share one. The answer holds no secret.
+	CheckDNSZones(context.Context, *connect.Request[v1.CheckDNSZonesRequest]) (*connect.Response[v1.CheckDNSZonesResponse], error)
 	// Backup returns a consistent copy of the node's database. Root only: it
 	// holds every key (R4-13); rayctl encrypts it with the operator's
 	// passphrase, which never reaches rayd.
@@ -944,6 +975,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("RemoveDNS")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceCheckDNSZonesHandler := connect.NewUnaryHandler(
+		NodeServiceCheckDNSZonesProcedure,
+		svc.CheckDNSZones,
+		connect.WithSchema(nodeServiceMethods.ByName("CheckDNSZones")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceBackupHandler := connect.NewUnaryHandler(
 		NodeServiceBackupProcedure,
 		svc.Backup,
@@ -1042,6 +1079,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceSyncDNSHandler.ServeHTTP(w, r)
 		case NodeServiceRemoveDNSProcedure:
 			nodeServiceRemoveDNSHandler.ServeHTTP(w, r)
+		case NodeServiceCheckDNSZonesProcedure:
+			nodeServiceCheckDNSZonesHandler.ServeHTTP(w, r)
 		case NodeServiceBackupProcedure:
 			nodeServiceBackupHandler.ServeHTTP(w, r)
 		case NodeServiceGetMetricsProcedure:
@@ -1181,6 +1220,10 @@ func (UnimplementedNodeServiceHandler) SyncDNS(context.Context, *connect.Request
 
 func (UnimplementedNodeServiceHandler) RemoveDNS(context.Context, *connect.Request[v1.RemoveDNSRequest]) (*connect.Response[v1.RemoveDNSResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.RemoveDNS is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) CheckDNSZones(context.Context, *connect.Request[v1.CheckDNSZonesRequest]) (*connect.Response[v1.CheckDNSZonesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.CheckDNSZones is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) Backup(context.Context, *connect.Request[v1.BackupRequest]) (*connect.Response[v1.BackupResponse], error) {

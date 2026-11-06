@@ -21,6 +21,7 @@ import (
 	"connectrpc.com/connect"
 
 	"github.com/arngory/raycontrol/internal/deploy"
+	"github.com/arngory/raycontrol/internal/dnscheck"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
 	"github.com/arngory/raycontrol/internal/health"
@@ -57,6 +58,9 @@ type Server struct {
 	DNSChanged func()
 	// Health is where rayd's loops report (O-2): status and metrics.
 	Health *health.Board
+	// DNSCheck checks the DNS tunnel zones from the node (CheckDNSZones);
+	// nil: the call is unavailable.
+	DNSCheck *dnscheck.Monitor
 
 	mu   sync.Mutex
 	rev  uint64
@@ -239,7 +243,7 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 	}
 	for _, l := range s.Health.Loops() {
 		resp.Loops = append(resp.Loops, &nodev1.LoopHealth{Name: l.Name, LastOk: unixOf(l.LastOK), LastError: unixOf(l.LastErr),
-			Error: l.Err, Runs: l.Runs, Errors: l.Errors, Failing: l.Failing()})
+			Error: l.Err, Runs: l.Runs, Errors: l.Errors, Failing: l.Failing(), Detail: l.Detail})
 	}
 	return connect.NewResponse(resp), nil
 }
