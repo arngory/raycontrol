@@ -184,7 +184,7 @@ func cmdServe(args []string) error {
 	paths := render.Paths{Rendered: *rendered, Run: *run, Supervised: *supervise}
 	rotateNow := make(chan struct{}, 1)
 	srv := &api.Server{Store: st, Params: params, Version: version, Paths: paths, Binaries: deploy.DefaultBinaries,
-		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead, Health: hb,
+		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead, CredGrace: *credGrace, Health: hb,
 		Rotate: func() {
 			select {
 			case rotateNow <- struct{}{}:
@@ -604,6 +604,13 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 			if cm != nil {
 				cm.Wake()
 			}
+		}
+		// The previous seal keys of dnstt services past their grace
+		// (spec/dnsseal-v1.md §8): the key files lose them.
+		if n, err := provision.ExpireSealKeys(ctx, st, time.Now(), log); err != nil {
+			log.Error("seal keys", "err", err)
+		} else if n > 0 {
+			notify()
 		}
 		select {
 		case <-ctx.Done():

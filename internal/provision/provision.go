@@ -657,6 +657,8 @@ func siteFor(ctx context.Context, st *store.Store, all []store.Service) (store.S
 // SetServiceOption changes a setting that may change after creation: the
 // answer of a site, whether REALITY moves its server name (R4-7, R4-8).
 func SetServiceOption(ctx context.Context, st *store.Store, name, key, value string) (store.Service, error) {
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
 	svc, err := st.ServiceByName(ctx, name)
 	if err != nil {
 		return svc, err

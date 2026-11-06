@@ -809,20 +809,29 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level
 		secretValue = []byte(hex.EncodeToString(s.Secrets[provision.SecretNoisePrivate]) + "\n")
 		opts["zone"] = zone
 		opts["private_key_file"] = p.Credential(s.Name, secretName)
-		// dnsseal-v1 (spec/dnsseal-v1.md): the key file always, for the
-		// unit copies it from the first deploy; the mode when it is on.
-		seal := s.Secrets[provision.SecretSealKey]
-		if len(seal) != 32 {
+		// dnsseal-v1 (spec/dnsseal-v1.md): the keys in a file of the
+		// service group, as dnsauth's, which the backend rereads (niko-
+		// server v0.10.0): a new key and the end of the previous one's
+		// grace need no restart. The current key first, then the previous
+		// one while it is accepted (§8, provision.RotateSealKey). Written
+		// whatever the mode; the mode goes to the backend when it is on.
+		if len(s.Secrets[provision.SecretSealKey]) != 32 {
 			return cfg, nil, nil, fmt.Errorf("service %s has no seal key (render.Collect)", s.Name)
 		}
-		secrets = append(secrets, File{Path: path.Join(p.Rendered, s.Name, DNSSealKeyFile), Mode: 0o600,
-			Content: []byte(hex.EncodeToString(seal) + "\n"), Service: s.Name})
+		var keys strings.Builder
+		keys.WriteString("# dnsseal-v1 keys of " + s.Name + ", the current first, written by rayd\n")
+		for _, k := range provision.SealKeys(s.Service, s.Secrets) {
+			keys.WriteString(hex.EncodeToString(k) + "\n")
+		}
+		sealFile := File{Path: path.Join(p.Rendered, s.Name, DNSSealKeyFile), Mode: 0o640, Group: GroupName(s.Name),
+			Content: []byte(keys.String()), Service: s.Name, Reload: true}
+		secrets = append(secrets, sealFile)
 		if mode := DNSSealMode(s.Service); mode != "off" {
 			if mode != "optional" && mode != "required" {
 				return cfg, nil, nil, fmt.Errorf("service %s: seal %q: off, optional or required", s.Name, mode)
 			}
 			opts["seal"] = mode
-			opts["seal_key_file"] = p.Credential(s.Name, DNSSealKeyFile)
+			opts["seal_key_file"] = sealFile.Path
 		}
 	case "masterdns":
 		var settings struct {

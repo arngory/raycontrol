@@ -28,7 +28,9 @@ service NodeService {
   rpc DeleteService(DeleteServiceRequest) returns (DeleteServiceResponse);
   // RotateService asks for the next key switch of a REALITY service
   // (docs/08-decisions.md, R4-7): a lead time away, so that clients get the
-  // next keys first, or at once (leaked keys, a blocked name).
+  // next keys first, or at once (leaked keys, a blocked name). For a dnstt
+  // service it switches the seal key at once (spec/dnsseal-v1.md §8): the
+  // previous one stays accepted for the credential grace, unless now.
   rpc RotateService(RotateServiceRequest) returns (RotateServiceResponse);
   // SetServiceOption changes one of the few settings that may change after
   // creation: a site's answer, whether REALITY moves its server name,
@@ -368,6 +370,8 @@ message RotateServiceRequest {
 }
 message RotateServiceResponse {
   int64 switch_at = 1; // unix seconds; later if a new server name waits for its certificate
+  bool seal = 2; // a dnstt service: its seal key switched at switch_at
+  int64 prev_until = 3; // the previous seal key is accepted until then (unix seconds); 0: no longer
 }
 
 message Device {

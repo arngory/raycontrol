@@ -3434,7 +3434,9 @@ func (x *RotateServiceRequest) GetNow() bool {
 
 type RotateServiceResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	SwitchAt      int64                  `protobuf:"varint,1,opt,name=switch_at,json=switchAt,proto3" json:"switch_at,omitempty"` // unix seconds; later if a new server name waits for its certificate
+	SwitchAt      int64                  `protobuf:"varint,1,opt,name=switch_at,json=switchAt,proto3" json:"switch_at,omitempty"`    // unix seconds; later if a new server name waits for its certificate
+	Seal          bool                   `protobuf:"varint,2,opt,name=seal,proto3" json:"seal,omitempty"`                            // a dnstt service: its seal key switched at switch_at
+	PrevUntil     int64                  `protobuf:"varint,3,opt,name=prev_until,json=prevUntil,proto3" json:"prev_until,omitempty"` // the previous seal key is accepted until then (unix seconds); 0: no longer
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3472,6 +3474,20 @@ func (*RotateServiceResponse) Descriptor() ([]byte, []int) {
 func (x *RotateServiceResponse) GetSwitchAt() int64 {
 	if x != nil {
 		return x.SwitchAt
+	}
+	return 0
+}
+
+func (x *RotateServiceResponse) GetSeal() bool {
+	if x != nil {
+		return x.Seal
+	}
+	return false
+}
+
+func (x *RotateServiceResponse) GetPrevUntil() int64 {
+	if x != nil {
+		return x.PrevUntil
 	}
 	return 0
 }
@@ -5058,9 +5074,12 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\fmissing_next\x18\x03 \x03(\tR\vmissingNext\"<\n" +
 	"\x14RotateServiceRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
-	"\x03now\x18\x02 \x01(\bR\x03now\"4\n" +
+	"\x03now\x18\x02 \x01(\bR\x03now\"g\n" +
 	"\x15RotateServiceResponse\x12\x1b\n" +
-	"\tswitch_at\x18\x01 \x01(\x03R\bswitchAt\"\xb2\x01\n" +
+	"\tswitch_at\x18\x01 \x01(\x03R\bswitchAt\x12\x12\n" +
+	"\x04seal\x18\x02 \x01(\bR\x04seal\x12\x1d\n" +
+	"\n" +
+	"prev_until\x18\x03 \x01(\x03R\tprevUntil\"\xb2\x01\n" +
 	"\x06Device\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04user\x18\x02 \x01(\tR\x04user\x12\x12\n" +

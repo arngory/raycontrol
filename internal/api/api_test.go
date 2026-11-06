@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -445,6 +446,32 @@ func TestRotateService(t *testing.T) {
 	svc, _ := srv.Store.ServiceByName(ctx, "r")
 	if provision.ParseRealityState(svc).RotateAt == 0 {
 		t.Fatalf("no request stored: %s", svc.Settings)
+	}
+
+	// dnstt: the seal key switches at once (spec/dnsseal-v1.md §8); the
+	// previous one is accepted for the grace, or not at all with now.
+	srv.CredGrace = 48 * time.Hour
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "dnstt", Name: "dns"})); err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := srv.Store.ServiceByName(ctx, "dns")
+	before, _ := srv.Store.ServiceSecrets(ctx, dns.ID)
+	start := time.Now().Unix()
+	r, err = c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "dns"}))
+	if err != nil || !r.Msg.Seal || r.Msg.SwitchAt < start || r.Msg.PrevUntil < start+48*3600 || r.Msg.PrevUntil > time.Now().Add(48*time.Hour).Unix() {
+		t.Fatalf("rotate dnstt: %v %v", r, err)
+	}
+	after, _ := srv.Store.ServiceSecrets(ctx, dns.ID)
+	if bytes.Equal(after[provision.SecretSealKey], before[provision.SecretSealKey]) ||
+		!bytes.Equal(after[provision.PrevSecret(provision.SecretSealKey)], before[provision.SecretSealKey]) {
+		t.Fatal("the seal key did not switch, or the previous one is not kept")
+	}
+	r, err = c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "dns", Now: true}))
+	if err != nil || !r.Msg.Seal || r.Msg.PrevUntil != 0 {
+		t.Fatalf("rotate dnstt now: %v %v", r, err)
+	}
+	if now, _ := srv.Store.ServiceSecrets(ctx, dns.ID); now[provision.PrevSecret(provision.SecretSealKey)] != nil {
+		t.Fatal("the previous seal key kept after a switch at once")
 	}
 }
 

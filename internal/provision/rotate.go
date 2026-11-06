@@ -86,9 +86,10 @@ func (e RealityEpoch) Check() error {
 	return nil
 }
 
-// realityMu serializes the rotation and operator requests: both rewrite
-// the settings of a service from what they read.
-var realityMu sync.Mutex
+// settingsMu serializes what rewrites the settings of a service from what
+// it read: the rotations (REALITY keys, seal keys) and the operator's
+// requests (rotate, set), so that none undoes another's change.
+var settingsMu sync.Mutex
 
 // RotateReality advances the key rotation of every enabled REALITY service
 // at now and returns how many changed. resolves checks that a name points
@@ -96,8 +97,8 @@ var realityMu sync.Mutex
 // switches the operator asks for happen.
 func RotateReality(ctx context.Context, st *store.Store, now time.Time, e RealityEpoch,
 	resolves func(ctx context.Context, name string) error, log *slog.Logger) (int, error) {
-	realityMu.Lock()
-	defer realityMu.Unlock()
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
 	if log == nil {
 		log = slog.Default()
 	}
@@ -301,8 +302,8 @@ func dropPrevReality(ctx context.Context, st *store.Store, svc store.Service, lo
 // that have not fetched their subscription since lose the profile until
 // they do; for leaked keys or a blocked name).
 func RequestRealityRotation(ctx context.Context, st *store.Store, name string, now time.Time, lead time.Duration, immediately bool) error {
-	realityMu.Lock()
-	defer realityMu.Unlock()
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
 	svc, err := st.ServiceByName(ctx, name)
 	if err != nil {
 		return err

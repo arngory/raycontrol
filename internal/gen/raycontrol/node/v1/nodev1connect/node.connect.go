@@ -148,7 +148,9 @@ type NodeServiceClient interface {
 	DeleteService(context.Context, *connect.Request[v1.DeleteServiceRequest]) (*connect.Response[v1.DeleteServiceResponse], error)
 	// RotateService asks for the next key switch of a REALITY service
 	// (docs/08-decisions.md, R4-7): a lead time away, so that clients get the
-	// next keys first, or at once (leaked keys, a blocked name).
+	// next keys first, or at once (leaked keys, a blocked name). For a dnstt
+	// service it switches the seal key at once (spec/dnsseal-v1.md §8): the
+	// previous one stays accepted for the credential grace, unless now.
 	RotateService(context.Context, *connect.Request[v1.RotateServiceRequest]) (*connect.Response[v1.RotateServiceResponse], error)
 	// SetServiceOption changes one of the few settings that may change after
 	// creation: a site's answer, whether REALITY moves its server name,
@@ -685,7 +687,9 @@ type NodeServiceHandler interface {
 	DeleteService(context.Context, *connect.Request[v1.DeleteServiceRequest]) (*connect.Response[v1.DeleteServiceResponse], error)
 	// RotateService asks for the next key switch of a REALITY service
 	// (docs/08-decisions.md, R4-7): a lead time away, so that clients get the
-	// next keys first, or at once (leaked keys, a blocked name).
+	// next keys first, or at once (leaked keys, a blocked name). For a dnstt
+	// service it switches the seal key at once (spec/dnsseal-v1.md §8): the
+	// previous one stays accepted for the credential grace, unless now.
 	RotateService(context.Context, *connect.Request[v1.RotateServiceRequest]) (*connect.Response[v1.RotateServiceResponse], error)
 	// SetServiceOption changes one of the few settings that may change after
 	// creation: a site's answer, whether REALITY moves its server name,

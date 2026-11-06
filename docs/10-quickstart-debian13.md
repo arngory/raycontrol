@@ -824,6 +824,7 @@ rayctl -remote laptop.rcdev device invite alice phone      # приглашен�
     перед обновлением — `umask 022`.
   - На хосте relay `rayctl update` отказывает: его обновляет `bootstrap.sh -relay`.
 - `rayctl service rotate reality` — новые ключи и имя REALITY раньше срока; с `-now` — сразу.
+- `rayctl service rotate dns` — новый ключ печати dnstt (dnsseal-v1) сразу; прежний принимается ещё `-cred-grace`, с `-now` — нет.
 - `rayctl service set site answer=silent` — сайт вместо 404 молчит до таймаута; `rayctl apply` после.
 - `rayctl service set reality open=true` — TCP 443 открыт всем, без SPA. Хост, который молчит на 443, хотя к нему
   идут TLS-сессии, заметен. Неавторизованным REALITY отвечает как сайт. Цена: активное зондирование 443 становится

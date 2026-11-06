@@ -45,7 +45,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service cert SITE -chain F -key F         a certificate of your own for the site and the services under
                                             it, in place of ACME's (on the node only)
   service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
-                                            schedule: after the lead time, or at once with -now
+                                            schedule: after the lead time, or at once with -now;
+                                            dnstt: a new seal key at once, the previous one accepted
+                                            for -cred-grace (with -now: not at all)
   device list [USER]
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
@@ -527,8 +529,16 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 			return err
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
-			fmt.Fprintf(w, "%s switches to new keys at %s (later if a new server name waits for its certificate)\n",
-				args[0], time.Unix(r.Msg.SwitchAt, 0).UTC().Format(time.RFC3339))
+			switch {
+			case r.Msg.Seal && r.Msg.PrevUntil != 0:
+				fmt.Fprintf(w, "%s has a new seal key, in subscriptions from now; the previous one is accepted until %s\n",
+					args[0], time.Unix(r.Msg.PrevUntil, 0).UTC().Format(time.RFC3339))
+			case r.Msg.Seal:
+				fmt.Fprintf(w, "%s has a new seal key; the previous one is no longer accepted: clients get nothing until they fetch their subscription\n", args[0])
+			default:
+				fmt.Fprintf(w, "%s switches to new keys at %s (later if a new server name waits for its certificate)\n",
+					args[0], time.Unix(r.Msg.SwitchAt, 0).UTC().Format(time.RFC3339))
+			}
 		})
 	}
 	return errUsage
@@ -537,6 +547,27 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 // keyState says when a REALITY service last switched keys and when the
 // published next switch is (R4-7).
 func keyState(s *nodev1.Service) string {
+	day := func(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04") }
+	if s.Kind == "dnstt" {
+		// dnsseal-v1: the mode, and the key's switch if there was one.
+		var st struct {
+			Seal      string `json:"seal"`
+			RotatedAt int64  `json:"seal_rotated_at"`
+			PrevUntil int64  `json:"seal_prev_until"`
+		}
+		_ = json.Unmarshal([]byte(s.SettingsJson), &st)
+		if st.Seal == "" {
+			st.Seal = "off"
+		}
+		out := "seal " + st.Seal
+		if st.RotatedAt != 0 {
+			out += ", key since " + day(st.RotatedAt)
+		}
+		if st.PrevUntil != 0 {
+			out += ", previous key until " + day(st.PrevUntil)
+		}
+		return out
+	}
 	if s.Kind != "reality" {
 		return ""
 	}
@@ -547,7 +578,6 @@ func keyState(s *nodev1.Service) string {
 		PrevUntil int64  `json:"prev_until"`
 	}
 	_ = json.Unmarshal([]byte(s.SettingsJson), &st)
-	day := func(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04") }
 	out := "since creation"
 	if st.RotatedAt != 0 {
 		out = "since " + day(st.RotatedAt)
@@ -620,6 +650,16 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 			return err
 		}
 		inv := r.Msg.Invite
+		if *withPIN && r.Msg.Pin == "" {
+			// A node from before v0.13 drops the field it does not know
+			// and makes an invite without a PIN: withdraw it rather than
+			// let it pass for one that has one.
+			_, rerr := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: inv.Id}))
+			if rerr != nil {
+				return fmt.Errorf("the node made invite %s without a PIN (raycontrol v0.13 has them), and it is not withdrawn: rayctl device revoke %s: %w", inv.Id, inv.Id, rerr)
+			}
+			return fmt.Errorf("the node made the invite without a PIN (raycontrol v0.13 has them): withdrawn; update the node or invite without -pin")
+		}
 		// The PIN goes to the screen, never into the invite's file: it
 		// travels apart from the invite.
 		pinLine := func() {

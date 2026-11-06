@@ -49,6 +49,9 @@ type Server struct {
 	// keys are published; Rotate, if set, runs the rotation at once.
 	RealityLead time.Duration
 	Rotate      func()
+	// CredGrace is how long a previous dnstt seal key stays accepted after
+	// the operator switched it (rayd -cred-grace); zero: not at all.
+	CredGrace time.Duration
 	// DNSChanged runs after the operator changed the DNS provider or its
 	// records: the certificates are tried again (certs.Manager.Retry).
 	DNSChanged func()
@@ -474,6 +477,14 @@ func (s *Server) SetCertificate(ctx context.Context, req *connect.Request[nodev1
 
 func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.RotateServiceRequest]) (*connect.Response[nodev1.RotateServiceResponse], error) {
 	now := time.Now()
+	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "dnstt" {
+		// dnsseal-v1 §8: the new key at once, the previous one for the grace.
+		state, err := provision.RotateSealKey(ctx, s.Store, req.Msg.Name, now, s.CredGrace, req.Msg.Now)
+		if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
+			return nil, err
+		}
+		return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Seal: true, PrevUntil: state.PrevUntil}), nil
+	}
 	at := now.Add(s.RealityLead)
 	if req.Msg.Now {
 		at = now

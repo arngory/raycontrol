@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -134,9 +136,11 @@ func TestRender(t *testing.T) {
 	if key.Mode != 0o600 || key.Group != "" || len(strings.TrimSpace(string(key.Content))) != 64 {
 		t.Fatalf("noise key file %+v", key)
 	}
-	// dnsseal-v1: the key file whatever the mode; the mode off by default.
+	// dnsseal-v1: the key file whatever the mode, in the service group and
+	// reread by the backend; the mode off by default.
 	sealFile := byPath["/var/lib/raycontrol/rendered/dns/seal.keys"]
-	if sealFile.Mode != 0o600 || sealFile.Group != "" || len(strings.TrimSpace(string(sealFile.Content))) != 64 {
+	if sealFile.Mode != 0o640 || sealFile.Group != "niko-dns" || !sealFile.Reload || len(sealKeyLines(sealFile.Content)) != 1 ||
+		len(sealKeyLines(sealFile.Content)[0]) != 64 {
 		t.Fatalf("seal key file %+v", sealFile)
 	}
 	if _, on := opts["seal"]; on || opts["seal_key_file"] != nil {
@@ -563,11 +567,11 @@ func TestRenderSeal(t *testing.T) {
 			Options map[string]any `json:"options"`
 		}
 		json.Unmarshal(byPath["/var/lib/raycontrol/rendered/dns/backend.json"].Content, &backend)
-		if backend.Options["seal"] != mode || backend.Options["seal_key_file"] != "/run/niko/dns/seal.keys" {
+		if backend.Options["seal"] != mode || backend.Options["seal_key_file"] != "/var/lib/raycontrol/rendered/dns/seal.keys" {
 			t.Fatalf("%s: options %v", mode, backend.Options)
 		}
 		secrets, _ := st.ServiceSecrets(ctx, dns.ID)
-		if got := strings.TrimSpace(string(byPath["/var/lib/raycontrol/rendered/dns/seal.keys"].Content)); got != hex.EncodeToString(secrets[provision.SecretSealKey]) || len(got) != 64 {
+		if got := sealKeyLines(byPath["/var/lib/raycontrol/rendered/dns/seal.keys"].Content); len(got) != 1 || got[0] != hex.EncodeToString(secrets[provision.SecretSealKey]) {
 			t.Fatalf("%s: seal key file %q", mode, got)
 		}
 		var front struct {
@@ -601,10 +605,55 @@ func TestRenderSeal(t *testing.T) {
 	if !bytes.Equal(before[provision.SecretSealKey], after[provision.SecretSealKey]) {
 		t.Fatal("the seal key changed")
 	}
+	// A switch of the key (spec/dnsseal-v1.md §8): the new key first, the
+	// previous one after it until its grace is over.
+	keyFile := func() string {
+		t.Helper()
+		m, err := render.Collect(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, _, err := render.Render(m, render.DefaultPaths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if f.Path == "/var/lib/raycontrol/rendered/dns/seal.keys" {
+				return strings.Join(sealKeyLines(f.Content), "\n") + "\n"
+			}
+		}
+		t.Fatal("no seal key file")
+		return ""
+	}
+	now := time.Now()
+	if _, err := provision.RotateSealKey(ctx, st, dns.Name, now, time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	rotated, _ := st.ServiceSecrets(ctx, dns.ID)
+	if got, want := keyFile(), hex.EncodeToString(rotated[provision.SecretSealKey])+"\n"+hex.EncodeToString(after[provision.SecretSealKey])+"\n"; got != want {
+		t.Fatalf("key file after a switch:\n%s\nwant\n%s", got, want)
+	}
+	if _, err := provision.ExpireSealKeys(ctx, st, now.Add(time.Hour), slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := keyFile(), hex.EncodeToString(rotated[provision.SecretSealKey])+"\n"; got != want {
+		t.Fatalf("key file after the grace: %q, want %q", got, want)
+	}
 	if _, err := provision.SetServiceOption(ctx, st, dns.Name, "seal", "on"); err == nil {
 		t.Fatal("seal=on taken")
 	}
 	if _, err := provision.SetServiceOption(ctx, st, "mdns", "seal", "required"); err == nil {
 		t.Fatal("a seal for masterdns taken")
 	}
+}
+
+// sealKeyLines are the keys of a seal key file, without its comments.
+func sealKeyLines(b []byte) []string {
+	var out []string
+	for l := range strings.SplitSeq(string(b), "\n") {
+		if l != "" && !strings.HasPrefix(l, "#") {
+			out = append(out, l)
+		}
+	}
+	return out
 }
