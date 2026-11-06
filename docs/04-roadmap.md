@@ -258,9 +258,12 @@ systemd-юниты, хранение секретов через systemd credent
 - [x] проверка обновлений со строкой в `status` (по выбору: запрос к GitHub выдаёт адрес ноды): `rayd -update-check`, по умолчанию выключена;
 - запасные DNS-зоны и их ротация (поле подписки, клиент переключается сам): черновик
   [`spec/dnszones-v1.md`](spec/dnszones-v1.md) (`niko-dns-spare`, `spare_zones`, dnstt со списком зон) — у клиента
-  на согласовании;
-- счётчики DNS-пути: niko-server v0.11.0 отдаёт их на `stats_socket` dnstt (сделано); raycontrol — рендер сокета и
-  `rayctl metrics` вместе с пином v0.11.0;
+  на согласовании; сторона ноды сделана (`rayctl service set <dns> spare_zones=N|зоны`, `zone=<запасная>`,
+  делегирование, фронт, самопроверка, бэкенды dnstt и masterdns), параметр ссылки — после ответа клиента;
+- счётчики DNS-пути: niko-server v0.11.0 отдаёт их на `stats_socket` dnstt и `dns.stats_socket` фронта (сделано);
+  raycontrol читает их в `rayctl metrics` (сделано), рендер сокетов и события в `status` (циклы `dnstt <сервис>` и
+  `dns-front`: сессии и отказы за час, запросы по зонам) — вместе с пином v0.11.0; неверные PIN и отозванные ими
+  приглашения — в метриках (сделано);
 - dnsauth для masterdns: черновик — [`spec/dnsauth-masterdns.md`](spec/dnsauth-masterdns.md) (метка под шифром,
   сессия привязана к устройству; правки по ревью клиента внесены); печать ответов —
   [`spec/mdseal-v1.md`](spec/mdseal-v1.md) (черновик, векторы); обе стороны в форке — у клиента, niko-server передаёт
