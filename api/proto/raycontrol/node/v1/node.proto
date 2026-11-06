@@ -388,6 +388,9 @@ message Invite {
   string role = 4;
   int64 created_at = 5;
   int64 expires_at = 6;
+  // pin_tries: the invite needs a PIN, with this many wrong ones left; 0:
+  // no PIN.
+  int32 pin_tries = 7;
 }
 
 message ListDevicesRequest { string user = 1; }
@@ -414,10 +417,14 @@ message CreateInviteRequest {
   string name = 2; // of the device
   string role = 3; // user | admin
   int64 ttl_seconds = 4; // 0: a day; at most a week
+  // pin: the invite also needs a PIN of 6 digits, told by another channel
+  // (docs/spec/api-v1.md §3).
+  bool pin = 5;
 }
 message CreateInviteResponse {
   Invite invite = 1;
   string invite_code = 2; // "rcinv1:..." (docs/spec/api-v1.md)
+  string pin = 3; // the PIN, shown once; "" without
 }
 
 message AuditEntry {

@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -90,7 +91,26 @@ var (
 const (
 	RegisterLabel = "raycontrol-register-v1"
 	RotateLabel   = "raycontrol-rotate-v1"
+	PinLabel      = "raycontrol-invite-pin-v1"
 )
+
+// InvitePinProof is what Register brings for an invite's PIN (api-v1 §4).
+func InvitePinProof(inviteKey [spa.KeySize]byte, pin string) []byte {
+	m := hmac.New(sha256.New, inviteKey[:])
+	m.Write([]byte(PinLabel))
+	m.Write([]byte(pin))
+	return m.Sum(nil)
+}
+
+// pinRefused is Register's answer for a PIN missing or wrong: what the
+// client tells its user, with the tries the invite has still.
+func pinRefused(why string, left int) error {
+	err := connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s: %d tries left", why, left))
+	if detail, derr := connect.NewErrorDetail(&devicev1.PinTries{Left: int32(left)}); derr == nil {
+		err.AddDetail(detail)
+	}
+	return err
+}
 
 type certPinKey struct{}
 
@@ -246,6 +266,26 @@ func (r *Remote) Register(ctx context.Context, req *connect.Request[devicev1.Reg
 		return nil, errInvite
 	}
 	ctx = context.WithValue(ctx, actorKey{}, "invite "+inv.ID)
+	// The PIN (api-v1 §4), only now the request has proved the invite:
+	// whoever gets this far holds it. A missing PIN costs no try (an
+	// older client); a wrong one does, and the last withdraws the invite.
+	if inv.PinProof != nil {
+		if len(req.Msg.PinProof) == 0 {
+			return nil, pinRefused("the invite needs its PIN", inv.PinTries)
+		}
+		if !hmac.Equal(req.Msg.PinProof, inv.PinProof) {
+			left, err := s.Store.FailInvitePIN(ctx, inv.ID)
+			if err != nil {
+				return nil, errInvite
+			}
+			why := "wrong PIN"
+			if left == 0 {
+				why = "wrong PIN, the invite is withdrawn"
+			}
+			_ = s.done(ctx, "invite.pin-wrong", inv.UserName+"/"+inv.Name, nil)
+			return nil, pinRefused(why, left)
+		}
+	}
 	d, devKey, err := s.Store.UseInvite(ctx, inv.ID, pin)
 	var bundle string
 	if err == nil {

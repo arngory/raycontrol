@@ -3,9 +3,11 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -493,7 +495,7 @@ func devicePB(d store.Device) *nodev1.Device {
 
 func invitePB(inv store.Invite) *nodev1.Invite {
 	return &nodev1.Invite{Id: inv.ID, User: inv.UserName, Name: inv.Name, Role: inv.Role,
-		CreatedAt: inv.CreatedAt.Unix(), ExpiresAt: inv.ExpiresAt.Unix()}
+		CreatedAt: inv.CreatedAt.Unix(), ExpiresAt: inv.ExpiresAt.Unix(), PinTries: int32(inv.PinTries)}
 }
 
 func (s *Server) ListDevices(ctx context.Context, req *connect.Request[nodev1.ListDevicesRequest]) (*connect.Response[nodev1.ListDevicesResponse], error) {
@@ -627,23 +629,44 @@ func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.C
 	if ttl == 0 {
 		ttl = DefaultInviteTTL
 	}
-	var code string
+	var code, pin string
 	api, err := s.apiEndpoint(ctx)
 	if err == nil && api == nil {
 		err = fmt.Errorf("%w: no remote API on the node (rayctl service add api api, then rayctl apply)", store.ErrInvalid)
 	}
+	// A PIN (api-v1 §3): 6 digits, told by another channel; the node
+	// keeps only the proof Register must bring.
+	var withPIN store.InvitePIN
+	if err == nil && req.Msg.Pin {
+		if pin, err = newPIN(); err == nil {
+			withPIN = func(key [spa.KeySize]byte) []byte { return InvitePinProof(key, pin) }
+		}
+	}
 	var inv store.Invite
 	if err == nil {
 		var key [spa.KeySize]byte
-		inv, key, err = s.Store.CreateInvite(ctx, req.Msg.User, req.Msg.Name, role, ttl)
+		inv, key, err = s.Store.CreateInvite(ctx, req.Msg.User, req.Msg.Name, role, ttl, withPIN)
 		if err == nil {
 			code, err = s.inviteCode(ctx, inv, key, api)
 		}
 	}
-	if err := s.done(ctx, "invite.create:"+role, req.Msg.User+"/"+req.Msg.Name, err); err != nil {
+	what := "invite.create:" + role
+	if req.Msg.Pin {
+		what += ":pin"
+	}
+	if err := s.done(ctx, what, req.Msg.User+"/"+req.Msg.Name, err); err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: invitePB(inv), InviteCode: code}), nil
+	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: invitePB(inv), InviteCode: code, Pin: pin}), nil
+}
+
+// newPIN is a PIN of 6 digits, uniform.
+func newPIN() (string, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%06d", n.Int64()), nil
 }
 
 // apiEndpoint returns the enabled API service and where clients reach it,
@@ -688,7 +711,7 @@ func (s *Server) inviteCode(ctx context.Context, inv store.Invite, key [spa.KeyS
 	}
 	ep := api.endpoint
 	b := node.Bundle{Version: 1, Host: host, SPA: node.FromParams(s.Params), DeviceID: inv.ID,
-		DeviceKey: hex.EncodeToString(key[:]), API: &ep, Expires: inv.ExpiresAt.Unix(),
+		DeviceKey: hex.EncodeToString(key[:]), API: &ep, Expires: inv.ExpiresAt.Unix(), PIN: inv.PinProof != nil,
 		Services: []node.BundleService{{ID: uint16(api.svc.ID), Kind: api.svc.Kind, Name: api.svc.Name}}}
 	return b.EncodeInvite()
 }

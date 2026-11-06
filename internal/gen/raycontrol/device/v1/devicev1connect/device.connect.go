@@ -50,7 +50,9 @@ const (
 // DeviceServiceClient is a client for the raycontrol.device.v1.DeviceService service.
 type DeviceServiceClient interface {
 	// Register turns an invite into a device known by the client certificate
-	// of this connection, once. Any failure is NOT_FOUND without details.
+	// of this connection, once. Any failure is NOT_FOUND without details, but
+	// for the PIN of an invite that needs one, once the request has proved
+	// the invite (its mac): PERMISSION_DENIED with a PinTries detail.
 	Register(context.Context, *connect.Request[v1.RegisterRequest]) (*connect.Response[v1.RegisterResponse], error)
 	// GetSelf describes the calling device.
 	GetSelf(context.Context, *connect.Request[v1.GetSelfRequest]) (*connect.Response[v1.GetSelfResponse], error)
@@ -115,7 +117,9 @@ func (c *deviceServiceClient) RotateCertificate(ctx context.Context, req *connec
 // DeviceServiceHandler is an implementation of the raycontrol.device.v1.DeviceService service.
 type DeviceServiceHandler interface {
 	// Register turns an invite into a device known by the client certificate
-	// of this connection, once. Any failure is NOT_FOUND without details.
+	// of this connection, once. Any failure is NOT_FOUND without details, but
+	// for the PIN of an invite that needs one, once the request has proved
+	// the invite (its mac): PERMISSION_DENIED with a PinTries detail.
 	Register(context.Context, *connect.Request[v1.RegisterRequest]) (*connect.Response[v1.RegisterResponse], error)
 	// GetSelf describes the calling device.
 	GetSelf(context.Context, *connect.Request[v1.GetSelfRequest]) (*connect.Response[v1.GetSelfResponse], error)

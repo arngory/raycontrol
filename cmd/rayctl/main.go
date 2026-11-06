@@ -50,7 +50,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
   device revoke ID                          a device, or an invite not yet used
-  device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE | -qr]
+  device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE | -qr] [-pin]
                                             a one-time invite: the client registers the device itself
                                             through the remote API (service add api api)
   audit [-n 50]
@@ -592,6 +592,9 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 				if inv.ExpiresAt <= time.Now().Unix() {
 					state = "invite expired"
 				}
+				if inv.PinTries > 0 {
+					state += fmt.Sprintf(", PIN (%d tries)", inv.PinTries)
+				}
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t-\t%s\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.CreatedAt), state)
 			}
 		})
@@ -601,6 +604,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		ttl := fs.Duration("ttl", 24*time.Hour, "how long the invite works (up to a week)")
 		out := fs.String("o", "", "write the invite alone to this file (mode 0600) instead of the screen")
 		showQR := fs.Bool("qr", false, "draw the invite as a QR code on the screen for the phone to scan, instead of the text")
+		withPIN := fs.Bool("pin", false, "the invite also needs a PIN of 6 digits, shown here once: tell it by another channel")
 		if err := need(args, 2); err != nil {
 			return err
 		}
@@ -611,16 +615,25 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 			return fmt.Errorf("%w: -qr draws on the screen: not with -o or -json", errUsage)
 		}
 		r, err := c.c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{
-			User: args[0], Name: args[1], Role: *role, TtlSeconds: int64(ttl.Seconds())}))
+			User: args[0], Name: args[1], Role: *role, TtlSeconds: int64(ttl.Seconds()), Pin: *withPIN}))
 		if err != nil {
 			return err
 		}
 		inv := r.Msg.Invite
+		// The PIN goes to the screen, never into the invite's file: it
+		// travels apart from the invite.
+		pinLine := func() {
+			if r.Msg.Pin != "" {
+				fmt.Printf("\nPIN %s %s: tell it by another channel than the invite; %d wrong tries withdraw it\n",
+					r.Msg.Pin[:3], r.Msg.Pin[3:], inv.PinTries)
+			}
+		}
 		if *out != "" {
 			if err := os.WriteFile(*out, []byte(r.Msg.InviteCode+"\n"), 0o600); err != nil {
 				return fmt.Errorf("invite %s made, but not written (rayctl device revoke %s): %w", inv.Id, inv.Id, err)
 			}
 			fmt.Printf("invite %s for %s/%s (%s) until %s in %s\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.ExpiresAt), *out)
+			pinLine()
 			return nil
 		}
 		if *showQR {
@@ -628,11 +641,16 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 			if err := writeQR(os.Stdout, r.Msg.InviteCode); err != nil {
 				return fmt.Errorf("invite %s made, but not drawn (rayctl device revoke %s): %w", inv.Id, inv.Id, err)
 			}
+			pinLine()
 			return nil
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
 			fmt.Fprintf(w, "invite %s for %s/%s (%s), once, until %s. The client registers with it through the API:\n\n%s\n",
 				inv.Id, inv.User, inv.Name, inv.Role, when(inv.ExpiresAt), r.Msg.InviteCode)
+			if r.Msg.Pin != "" {
+				fmt.Fprintf(w, "\nPIN %s %s: tell it by another channel than the invite; %d wrong tries withdraw it\n",
+					r.Msg.Pin[:3], r.Msg.Pin[3:], inv.PinTries)
+			}
 		})
 	case "add":
 		fs := flag.NewFlagSet("device add", flag.ContinueOnError)

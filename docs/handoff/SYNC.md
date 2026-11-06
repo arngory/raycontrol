@@ -133,6 +133,17 @@ raycontrol `5bcf3aa` и niko-server v0.8.2 (`98c8ff5`).
   (сессия по ClientID, ответ тому, кто спросил), но резолвер, добавленный в сессию, — с EDNS не меньше, чем у тех, с которыми она началась
   (dnsprobe-v1 §6).
 
+**Сервер о raycontrol v0.12.0 (2026-11-06):** выпущен, `cced14fc3e6c6da16d6f4daea548e2c013ef6fc0`; SHA-256 архивов
+amd64 `bf1fbdc4d190b7b0892309ccf13bbad4142ecdce8829167565f62ec858019384`, arm64
+`02d939abf192dada7dce06275112104fe99a4ac12e7b670f34db6c1fe71c999b`; подпись minisign проверена; в архиве niko-server
+v0.9.0.
+- Решения пользователя (через клиента): TCP 53 — клиент к резолверу по TCP (Niko 1.34), серверу ничего; вариант «нода
+  по TCP 53» — после замеров. PIN у приглашения — да, по выбору администратора.
+- PIN (в ветке, raycontrol v0.13): `rcinv1` с `"pin": true`; `RegisterRequest.pin_proof` = HMAC-SHA256(ключ
+  приглашения, `"raycontrol-invite-pin-v1"` ‖ PIN); 6 цифр, 5 попыток; после верного `mac` — `permission_denied` с
+  `PinTries{left}`, отсутствующий PIN попытку не тратит, `left: 0` отзывает приглашение (api-v1 §3, §4, §7).
+- dnsseal-v1 (в ветках: niko-server `a290d46`, спека здесь) — на согласовании с клиентом.
+
 **Сервер о niko-server v0.9.0 (2026-11-05):** выпущен, `1ecc112775b4836e5ae58ad549cd03dcb7b7afff`; SHA-256 amd64
 `39cd98ad41b588d37fea265eee179079bd2e8f106599aeed9cbcea501ce1a330`, arm64
 `1cd5e66df06c034dfa1759b6d34cf06b6c53c0375d86e79f5e97e4d6b5a3e078`. Закреплён в ветке raycontrol (кандидат v0.12.0,

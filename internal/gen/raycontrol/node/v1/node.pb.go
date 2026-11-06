@@ -3570,13 +3570,16 @@ func (x *Device) GetRegistered() bool {
 
 // Invite is an invite not yet used.
 type Invite struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	User          string                 `protobuf:"bytes,2,opt,name=user,proto3" json:"user,omitempty"`
-	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"` // of the device it becomes
-	Role          string                 `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
-	CreatedAt     int64                  `protobuf:"varint,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	ExpiresAt     int64                  `protobuf:"varint,6,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Id        string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	User      string                 `protobuf:"bytes,2,opt,name=user,proto3" json:"user,omitempty"`
+	Name      string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"` // of the device it becomes
+	Role      string                 `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
+	CreatedAt int64                  `protobuf:"varint,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	ExpiresAt int64                  `protobuf:"varint,6,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// pin_tries: the invite needs a PIN, with this many wrong ones left; 0:
+	// no PIN.
+	PinTries      int32 `protobuf:"varint,7,opt,name=pin_tries,json=pinTries,proto3" json:"pin_tries,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3649,6 +3652,13 @@ func (x *Invite) GetCreatedAt() int64 {
 func (x *Invite) GetExpiresAt() int64 {
 	if x != nil {
 		return x.ExpiresAt
+	}
+	return 0
+}
+
+func (x *Invite) GetPinTries() int32 {
+	if x != nil {
+		return x.PinTries
 	}
 	return 0
 }
@@ -3942,11 +3952,14 @@ func (*RevokeDeviceResponse) Descriptor() ([]byte, []int) {
 }
 
 type CreateInviteRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	User          string                 `protobuf:"bytes,1,opt,name=user,proto3" json:"user,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`                                // of the device
-	Role          string                 `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"`                                // user | admin
-	TtlSeconds    int64                  `protobuf:"varint,4,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"` // 0: a day; at most a week
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	User       string                 `protobuf:"bytes,1,opt,name=user,proto3" json:"user,omitempty"`
+	Name       string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`                                // of the device
+	Role       string                 `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"`                                // user | admin
+	TtlSeconds int64                  `protobuf:"varint,4,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"` // 0: a day; at most a week
+	// pin: the invite also needs a PIN of 6 digits, told by another channel
+	// (docs/spec/api-v1.md §3).
+	Pin           bool `protobuf:"varint,5,opt,name=pin,proto3" json:"pin,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4009,10 +4022,18 @@ func (x *CreateInviteRequest) GetTtlSeconds() int64 {
 	return 0
 }
 
+func (x *CreateInviteRequest) GetPin() bool {
+	if x != nil {
+		return x.Pin
+	}
+	return false
+}
+
 type CreateInviteResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Invite        *Invite                `protobuf:"bytes,1,opt,name=invite,proto3" json:"invite,omitempty"`
 	InviteCode    string                 `protobuf:"bytes,2,opt,name=invite_code,json=inviteCode,proto3" json:"invite_code,omitempty"` // "rcinv1:..." (docs/spec/api-v1.md)
+	Pin           string                 `protobuf:"bytes,3,opt,name=pin,proto3" json:"pin,omitempty"`                                 // the PIN, shown once; "" without
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4057,6 +4078,13 @@ func (x *CreateInviteResponse) GetInvite() *Invite {
 func (x *CreateInviteResponse) GetInviteCode() string {
 	if x != nil {
 		return x.InviteCode
+	}
+	return ""
+}
+
+func (x *CreateInviteResponse) GetPin() string {
+	if x != nil {
+		return x.Pin
 	}
 	return ""
 }
@@ -5044,7 +5072,7 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"revoked_at\x18\x06 \x01(\x03R\trevokedAt\x12\x1e\n" +
 	"\n" +
 	"registered\x18\a \x01(\bR\n" +
-	"registered\"\x92\x01\n" +
+	"registered\"\xaf\x01\n" +
 	"\x06Invite\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04user\x18\x02 \x01(\tR\x04user\x12\x12\n" +
@@ -5053,7 +5081,8 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x05 \x01(\x03R\tcreatedAt\x12\x1d\n" +
 	"\n" +
-	"expires_at\x18\x06 \x01(\x03R\texpiresAt\"(\n" +
+	"expires_at\x18\x06 \x01(\x03R\texpiresAt\x12\x1b\n" +
+	"\tpin_tries\x18\a \x01(\x05R\bpinTries\"(\n" +
 	"\x12ListDevicesRequest\x12\x12\n" +
 	"\x04user\x18\x01 \x01(\tR\x04user\"\x81\x01\n" +
 	"\x13ListDevicesResponse\x124\n" +
@@ -5068,17 +5097,19 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x06bundle\x18\x02 \x01(\tR\x06bundle\"%\n" +
 	"\x13RevokeDeviceRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"\x16\n" +
-	"\x14RevokeDeviceResponse\"r\n" +
+	"\x14RevokeDeviceResponse\"\x84\x01\n" +
 	"\x13CreateInviteRequest\x12\x12\n" +
 	"\x04user\x18\x01 \x01(\tR\x04user\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
 	"\x04role\x18\x03 \x01(\tR\x04role\x12\x1f\n" +
 	"\vttl_seconds\x18\x04 \x01(\x03R\n" +
-	"ttlSeconds\"k\n" +
+	"ttlSeconds\x12\x10\n" +
+	"\x03pin\x18\x05 \x01(\bR\x03pin\"}\n" +
 	"\x14CreateInviteResponse\x122\n" +
 	"\x06invite\x18\x01 \x01(\v2\x1a.raycontrol.node.v1.InviteR\x06invite\x12\x1f\n" +
 	"\vinvite_code\x18\x02 \x01(\tR\n" +
-	"inviteCode\"~\n" +
+	"inviteCode\x12\x10\n" +
+	"\x03pin\x18\x03 \x01(\tR\x03pin\"~\n" +
 	"\n" +
 	"AuditEntry\x12\x12\n" +
 	"\x04time\x18\x01 \x01(\x03R\x04time\x12\x14\n" +

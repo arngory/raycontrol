@@ -85,3 +85,46 @@ func TestInvites(t *testing.T) {
 		t.Fatalf("after prune: %v", list)
 	}
 }
+
+// An invite with a PIN keeps the proof, not the PIN; each wrong PIN takes
+// a try, and the last withdraws the invite; one without a PIN takes none.
+func TestInvitePIN(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if _, err := s.CreateUser(ctx, User{Name: "alice", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	proof := func(key [32]byte) []byte { return append([]byte("proof:"), key[:4]...) }
+	inv, key, err := s.CreateInvite(ctx, "alice", "phone", "user", time.Hour, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.ActiveInvite(ctx, inv.ID)
+	if err != nil || string(got.PinProof) != string(proof(key)) || got.PinTries != InvitePinTries {
+		t.Fatalf("active: %+v %v", got, err)
+	}
+	for want := InvitePinTries - 1; want > 0; want-- {
+		if left, err := s.FailInvitePIN(ctx, inv.ID); err != nil || left != want {
+			t.Fatalf("wrong PIN: %d left, want %d (%v)", left, want, err)
+		}
+	}
+	if list, _ := s.ListInvites(ctx); len(list) != 1 || list[0].PinTries != 1 {
+		t.Fatalf("list %+v", list)
+	}
+	if left, err := s.FailInvitePIN(ctx, inv.ID); err != nil || left != 0 {
+		t.Fatalf("the last wrong PIN: %d %v", left, err)
+	}
+	if _, _, err := s.ActiveInvite(ctx, inv.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a withdrawn invite: %v", err)
+	}
+	if _, err := s.FailInvitePIN(ctx, inv.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a wrong PIN for a withdrawn invite: %v", err)
+	}
+	plain, _, err := s.CreateInvite(ctx, "alice", "laptop", "user", time.Hour)
+	if err != nil || plain.PinProof != nil || plain.PinTries != 0 {
+		t.Fatalf("without a PIN: %+v %v", plain, err)
+	}
+	if _, err := s.FailInvitePIN(ctx, plain.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a wrong PIN for an invite without one: %v", err)
+	}
+}

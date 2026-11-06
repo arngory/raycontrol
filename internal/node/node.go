@@ -165,6 +165,9 @@ type Bundle struct {
 	API *BundleSub `json:"api,omitempty"`
 	// Expires is when an invite stops working (Unix time); bundles have none.
 	Expires int64 `json:"expires,omitempty"`
+	// PIN: the invite also needs a PIN, told by another channel
+	// (api-v1 §3): the client asks for it before it registers.
+	PIN bool `json:"pin,omitempty"`
 }
 
 // BundleSub locates the subscription endpoint: https://<host>:<port>/sub/v1,
