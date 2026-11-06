@@ -162,3 +162,25 @@ func TestFrontWindow(t *testing.T) {
 		t.Errorf("%q", got)
 	}
 }
+
+// A tunnel with spare zones: each zone's tagged queries over the hour, in
+// the summary; a zone's count that went down is a restart.
+func TestWindowZones(t *testing.T) {
+	t0 := time.Unix(1700000000, 0)
+	started := t0.Add(-2 * time.Hour).Unix()
+	w := &Window[Snapshot]{}
+	w.Add(t0, Snapshot{Started: started, Queries: 100, Zones: map[string]uint64{"t.example.com": 90, "s.example.net": 0}})
+	w.Add(t0.Add(time.Hour), Snapshot{Started: started, Queries: 300, Zones: map[string]uint64{"t.example.com": 100, "s.example.net": 150}})
+	d, span, ok := w.Delta()
+	if !ok || d.Zones["t.example.com"] != 10 || d.Zones["s.example.net"] != 150 {
+		t.Fatalf("zones %v", d.Zones)
+	}
+	want := "0 sessions; last 1h: 200 queries, 0 new sessions, tagged by zone: s.example.net 150, t.example.com 10"
+	if got := Summary(Snapshot{}, d, span, ok); got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+	w.Add(t0.Add(61*time.Minute), Snapshot{Started: started, Queries: 301, Zones: map[string]uint64{"t.example.com": 100, "s.example.net": 3}})
+	if _, _, ok := w.Delta(); ok {
+		t.Fatal("a zone's count went down: no restart")
+	}
+}

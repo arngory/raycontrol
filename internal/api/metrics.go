@@ -274,6 +274,11 @@ func addDNSTTStats(m *Metrics, service string, st dnsstats.Snapshot) {
 	for _, r := range []sample{{"opened", st.SealOpened}, {"unsealed", st.SealUnsealed}, {"refused", st.SealRefused}} {
 		add("raycontrol_dnstt_seal_total", "dnsseal-v1 queries, by result.", r.v, "result", r.label)
 	}
+	// Which zones of the tunnel clients reach (dnszones-v1): queries with
+	// a device's valid tag, which no one without a device's key makes up.
+	for _, z := range sortedKeys(st.Zones) {
+		add("raycontrol_dnstt_zone_tagged_total", "dnstt queries with a device's valid dnsauth tag, by zone.", st.Zones[z], "zone", z)
+	}
 }
 
 // addFrontStats adds the DNS front's counters; a zone's queries labelled by

@@ -40,6 +40,10 @@ type Snapshot struct {
 	SealOpened        uint64 `json:"seal_opened"`
 	SealUnsealed      uint64 `json:"seal_unsealed"`
 	SealRefused       uint64 `json:"seal_refused"`
+	// Zones are each zone's queries with a device's valid dnsauth tag (the
+	// main zone and its spares): which zone clients reach, which no one
+	// without a device's key makes up; none with auth off.
+	Zones map[string]uint64 `json:"zones,omitempty"`
 }
 
 // Read reads a backend's counters: one JSON line given to whoever
@@ -97,21 +101,44 @@ func (s *Snapshot) counters() []*uint64 {
 		&s.AuthThrottled, &s.SealOpened, &s.SealUnsealed, &s.SealRefused}
 }
 
-// Sub is what s counted since o: the counters' differences; Started and
-// the gauges (sessions, handshakes) are s's.
+// Sub is what s counted since o: the counters' differences, a zone's
+// too; Started and the gauges (sessions, handshakes) are s's.
 func (s Snapshot) Sub(o Snapshot) Snapshot {
 	d := s
 	dc, oc := d.counters(), o.counters()
 	for i := range dc {
 		*dc[i] -= *oc[i]
 	}
+	d.Zones = subZones(s.Zones, o.Zones)
 	return d
 }
 
 // Restarted tells whether s comes from another run of the backend than o:
 // another start, or a counter that went down.
 func (s Snapshot) Restarted(o Snapshot) bool {
-	return s.Started != o.Started || wentDown(s.counters(), o.counters())
+	return s.Started != o.Started || wentDown(s.counters(), o.counters()) || zonesDown(s.Zones, o.Zones)
+}
+
+// subZones is each zone's count in now since before (0 for one new).
+func subZones(now, before map[string]uint64) map[string]uint64 {
+	if now == nil {
+		return nil
+	}
+	d := make(map[string]uint64, len(now))
+	for z, n := range now {
+		d[z] = n - min(n, before[z])
+	}
+	return d
+}
+
+// zonesDown tells whether a zone's count went down, or a zone went.
+func zonesDown(now, before map[string]uint64) bool {
+	for z, n := range before {
+		if now[z] < n {
+			return true
+		}
+	}
+	return false
 }
 
 // StartedAt is the backend's start, Unix seconds; 0 when not said.
@@ -138,24 +165,16 @@ func (f Front) Sub(o Front) Front {
 	for i := range dc {
 		*dc[i] -= *oc[i]
 	}
-	d.Queries = make(map[string]uint64, len(f.Queries))
-	for z, n := range f.Queries {
-		d.Queries[z] = n - min(n, o.Queries[z])
+	d.Queries = subZones(f.Queries, o.Queries)
+	if d.Queries == nil {
+		d.Queries = map[string]uint64{}
 	}
 	return d
 }
 
 // Restarted tells whether f comes from another run of the front than o.
 func (f Front) Restarted(o Front) bool {
-	if f.Started != o.Started || wentDown(f.counters(), o.counters()) {
-		return true
-	}
-	for z, n := range o.Queries {
-		if f.Queries[z] < n {
-			return true
-		}
-	}
-	return false
+	return f.Started != o.Started || wentDown(f.counters(), o.counters()) || zonesDown(f.Queries, o.Queries)
 }
 
 // StartedAt is the front's start, Unix seconds.
@@ -257,6 +276,19 @@ func Summary(now Snapshot, d Snapshot, span time.Duration, ok bool) string {
 		if e.n > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", e.n, e.what))
 		}
+	}
+	if len(d.Zones) > 1 {
+		// Which zones clients reach (dnszones-v1): the tagged queries.
+		zones := make([]string, 0, len(d.Zones))
+		for z := range d.Zones {
+			zones = append(zones, z)
+		}
+		slices.Sort(zones)
+		by := make([]string, len(zones))
+		for i, z := range zones {
+			by[i] = fmt.Sprintf("%s %d", z, d.Zones[z])
+		}
+		parts = append(parts, "tagged by zone: "+strings.Join(by, ", "))
 	}
 	return head + "; last " + short(span) + ": " + strings.Join(parts, ", ")
 }

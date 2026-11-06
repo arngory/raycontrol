@@ -111,7 +111,7 @@ func TestMetrics(t *testing.T) {
 	serveStats(t, srv.Paths.FrontStats(), `{"started":1700000000,"queries":{"`+zoneOf(t, c, "dns")+`":11,"z.example.net":2},"refused":3,`+
 		`"probes":4,"probes_over_rate":1,"forwarded":9,"answers":8,"truncated":2,"unmatched":1,"backend_away":0}`+"\n")
 	serveStats(t, srv.Paths.StatsSocket("dns"), `{"queries":5,"memo_hits":6,"sessions":1,"handshakes":0,"sessions_admitted":7,`+
-		`"starts_refused_device":2,"auth_refused":3,"seal_opened":4,"unknown":9}`+"\n")
+		`"starts_refused_device":2,"auth_refused":3,"seal_opened":4,"unknown":9,"zones":{"z1.example.com":3}}`+"\n")
 	resp, err := c.GetMetrics(ctx, connect.NewRequest(&nodev1.GetMetricsRequest{}))
 	if err != nil {
 		t.Fatal(err)
@@ -142,6 +142,7 @@ func TestMetrics(t *testing.T) {
 		`raycontrol_dnstt_starts_refused_total{service="dns",reason="device"} 2`,
 		`raycontrol_dnstt_auth_total{service="dns",result="refused"} 3`,
 		`raycontrol_dnstt_seal_total{service="dns",result="opened"} 4`,
+		`raycontrol_dnstt_zone_tagged_total{service="dns",zone="z1.example.com"} 3`,
 		`raycontrol_dns_front_queries_total{zone="` + zoneOf(t, c, "dns") + `",service="dns"} 11`,
 		`raycontrol_dns_front_queries_total{zone="z.example.net",service=""} 2`,
 		"raycontrol_dns_front_refused_total 3\n",
