@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -36,6 +37,7 @@ func probe(ctx context.Context, args []string) error {
 	carrier := fs.String("carrier", "auto", "SPA carrier: udp, tls (TCP as a TLS ClientHello), tcp (bare TCP) or auto (UDP, then tls, then bare TCP for a node before v0.10)")
 	addr := fs.String("addr", "", "node address to use instead of the bundle's host")
 	links := fs.Bool("links", false, "print the profile links (they carry credentials)")
+	payload := fs.Bool("payload", false, "print the subscription's payload as JSON on a line of its own, after \"payload \" (it carries credentials)")
 	redacted := fs.Bool("redact", false, "hide the node's address and names, IDs and keys, to share the output in an issue")
 	channel := fs.Bool("channel", false, "then measure the channel (probe-v1): TCP down and up, UDP echo")
 	report := fs.String("report", "", "then send this summary of the network (probe-v1 §6), JSON or @FILE")
@@ -88,7 +90,7 @@ func probe(ctx context.Context, args []string) error {
 	if *redacted {
 		red = redact.New(host, domainOf(host))
 		printf = func(format string, a ...any) { fmt.Print(red.String(fmt.Sprintf(format, a...))) }
-		*links = false
+		*links, *payload = false, false
 	}
 	printf("node %s (%s), device %s\n", host, ip, b.DeviceID)
 
@@ -124,6 +126,13 @@ func probe(ctx context.Context, args []string) error {
 			} else {
 				printf("  %s (service %d)\n", pr.Name, pr.Svc)
 			}
+		}
+		if *payload {
+			b, err := json.Marshal(p)
+			if err != nil {
+				return err
+			}
+			printf("payload %s\n", b)
 		}
 		if h := p.Hints; h != nil {
 			printf("hints for this network (%d reports in %d days): order %v, avoid %v, udp blocked %v, tcp stall %d KiB, udp mtu %q\n",

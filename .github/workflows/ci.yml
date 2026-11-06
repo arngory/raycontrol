@@ -160,6 +160,37 @@ jobs:
       - name: Install and probe
         run: test/install/run.sh ${{ matrix.distro }} bin
 
+  upgrade:
+    # The update from the latest release, by its own rayctl, to this build
+    # (test/install/upgrade.sh): the node it gives must be the one a fresh
+    # install of this build gives, subscription included.
+    needs: xray
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build raycontrol
+        run: for c in rayd rayspa rayctl; do CGO_ENABLED=0 go build -trimpath -o bin/$c ./cmd/$c; done
+      - uses: actions/download-artifact@v4
+        with:
+          name: xray
+          path: bin
+      - name: niko-server release
+        run: |
+          scripts/niko-server.sh amd64 bin/niko-server
+          chmod +x bin/*
+      - name: The latest release
+        run: test/install/previous.sh old
+      - name: Bootstrap dependencies on the bare image
+        run: test/install/deps.sh debian13
+      - name: Prepare the systemd image
+        run: test/install/prepare.sh debian13
+      - name: Update and compare with a fresh install
+        run: test/install/upgrade.sh debian13 bin old
+
   supervise:
     # A node without systemd (rayd serve -supervise) in a plain container,
     # probed from a second one: the recipe for a client's CI.
