@@ -154,9 +154,9 @@ func ExpireSealKeys(ctx context.Context, st *store.Store, now time.Time, log *sl
 		var field, secret, what string
 		switch svc.Kind {
 		case "dnstt":
-			until, field, secret, what = ParseSealState(svc).PrevUntil, "seal_prev_until", SecretSealKey, "seal key"
+			until, field, secret, what = ParseSealState(svc).PrevUntil, "seal_prev_until", SecretSealKey, "seal key" //nolint:gosec // G101: names of a setting and a secret
 		case "masterdns":
-			until, field, secret, what = ParseMasterDNSKeyState(svc).PrevUntil, "key_prev_until", SecretMasterDNSKey, "service key"
+			until, field, secret, what = ParseMasterDNSKeyState(svc).PrevUntil, "key_prev_until", SecretMasterDNSKey, "service key" //nolint:gosec // G101: names of a setting and a secret
 		default:
 			continue
 		}
