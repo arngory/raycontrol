@@ -833,6 +833,10 @@ func Partial(err error) bool {
 	return errors.As(err, &se)
 }
 
+// MasterDNSKeysFile holds a masterdns service's keys in its rendered
+// directory, the current first (spec/masterdns-key-rotation.md §3).
+const MasterDNSKeysFile = "service.keys"
+
 // DNSSecret is the file of a DNS tunnel's key, by kind: systemd copies it
 // for the backend (Paths.Credential), whether this render wrote it or an
 // earlier one did.
@@ -958,7 +962,20 @@ func dnsBackend(s Service, zones []string, inner string, p Paths, authKeys []str
 		secretValue = s.Secrets[provision.SecretMasterDNSKey]
 		opts["zones"] = zones // masterdns takes a list as it is (DOMAIN)
 		opts["encryption_method"] = settings.Method
-		opts["encryption_key_file"] = p.Credential(s.Name, secretName)
+		// The service's keys in a file of the service group, which the
+		// backend rereads (niko-server v0.13.0, spec/masterdns-key-
+		// rotation.md §3): the current first, then the previous one while
+		// it is taken. A switch needs no restart, and the sessions on the
+		// previous key go on through its grace.
+		var keys strings.Builder
+		for _, k := range provision.MasterDNSKeys(s.Service, s.Secrets) {
+			keys.Write(k)
+			keys.WriteByte('\n')
+		}
+		keyFile := File{Path: path.Join(p.Rendered, s.Name, MasterDNSKeysFile), Mode: 0o640, Group: GroupName(s.Name),
+			Content: []byte(keys.String()), Service: s.Name, Reload: true}
+		secrets = append(secrets, keyFile)
+		opts["encryption_key_file"] = keyFile.Path
 		// mdseal-v1 (spec/mdseal-v1.md §6): sealed with the service's own
 		// key, the one above; the mode alone.
 		if seal != "off" {

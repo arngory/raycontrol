@@ -1,6 +1,7 @@
 # Смена ключа сервиса masterdns
 
-Статус: **согласована** с клиентом (2026-11-06). Касается ключа сервиса masterdns (`ENCRYPTION_KEY`,
+Статус: **согласована** с клиентом (2026-11-06); сделано в raycontrol v0.15.0 и niko-server v0.13.0 (форк masterdns
+f0eadfa). Касается ключа сервиса masterdns (`ENCRYPTION_KEY`,
 в ссылке `niko-dnskey`, subscription-v1 §4): им masterdns шифрует кадры (метод 5, AES-256-GCM), от него выводятся
 ключи печати ответов (mdseal-v1 §2).
 

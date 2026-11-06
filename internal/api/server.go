@@ -491,13 +491,22 @@ func (s *Server) SetCertificate(ctx context.Context, req *connect.Request[nodev1
 
 func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.RotateServiceRequest]) (*connect.Response[nodev1.RotateServiceResponse], error) {
 	now := time.Now()
+	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "masterdns" {
+		// masterdns-key-rotation §2: the new key at once, in subscriptions
+		// from now; the previous one for the grace (its sessions go on).
+		state, err := provision.RotateMasterDNSKey(ctx, s.Store, req.Msg.Name, now, s.CredGrace, req.Msg.Now)
+		if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
+			return nil, err
+		}
+		return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Seal: true, Key: "service", PrevUntil: state.PrevUntil}), nil
+	}
 	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "dnstt" {
 		// dnsseal-v1 §8: the new key at once, the previous one for the grace.
 		state, err := provision.RotateSealKey(ctx, s.Store, req.Msg.Name, now, s.CredGrace, req.Msg.Now)
 		if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
 			return nil, err
 		}
-		return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Seal: true, PrevUntil: state.PrevUntil}), nil
+		return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Seal: true, Key: "seal", PrevUntil: state.PrevUntil}), nil
 	}
 	at := now.Add(s.RealityLead)
 	if req.Msg.Now {

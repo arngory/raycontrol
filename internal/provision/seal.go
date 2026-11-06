@@ -148,20 +148,29 @@ func ExpireSealKeys(ctx context.Context, st *store.Store, now time.Time, log *sl
 	}
 	n := 0
 	for _, svc := range all {
-		if svc.Kind != "dnstt" {
+		// dnstt's seal key; masterdns's service key
+		// (spec/masterdns-key-rotation.md §2).
+		var until int64
+		var field, secret, what string
+		switch svc.Kind {
+		case "dnstt":
+			until, field, secret, what = ParseSealState(svc).PrevUntil, "seal_prev_until", SecretSealKey, "seal key"
+		case "masterdns":
+			until, field, secret, what = ParseMasterDNSKeyState(svc).PrevUntil, "key_prev_until", SecretMasterDNSKey, "service key"
+		default:
 			continue
 		}
-		if until := ParseSealState(svc).PrevUntil; until == 0 || now.Unix() < until {
+		if until == 0 || now.Unix() < until {
 			continue
 		}
-		settings, err := setFields(svc.Settings, map[string]any{"seal_prev_until": nil})
+		settings, err := setFields(svc.Settings, map[string]any{field: nil})
 		if err != nil {
 			return n, err
 		}
-		if err := st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: settings, Delete: []string{PrevSecret(SecretSealKey)}}); err != nil {
+		if err := st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: settings, Delete: []string{PrevSecret(secret)}}); err != nil {
 			return n, err
 		}
-		log.Info("previous seal key no longer accepted", "service", svc.Name)
+		log.Info("previous "+what+" no longer accepted", "service", svc.Name)
 		n++
 	}
 	return n, nil

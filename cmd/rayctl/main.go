@@ -57,8 +57,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             it, in place of ACME's (on the node only)
   service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
                                             schedule: after the lead time, or at once with -now;
-                                            dnstt: a new seal key at once, the previous one accepted
-                                            for -cred-grace (with -now: not at all)
+                                            dnstt: a new seal key at once, masterdns: a new service key
+                                            at once; the previous one accepted for -cred-grace (with
+                                            -now: not at all)
   device list [USER]
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
@@ -587,12 +588,13 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 			return err
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
+			what := cmp.Or(r.Msg.Key, "seal")
 			switch {
 			case r.Msg.Seal && r.Msg.PrevUntil != 0:
-				fmt.Fprintf(w, "%s has a new seal key, in subscriptions from now; the previous one is accepted until %s\n",
-					args[0], time.Unix(r.Msg.PrevUntil, 0).UTC().Format(time.RFC3339))
+				fmt.Fprintf(w, "%s has a new %s key, in subscriptions from now; the previous one is accepted until %s\n",
+					args[0], what, time.Unix(r.Msg.PrevUntil, 0).UTC().Format(time.RFC3339))
 			case r.Msg.Seal:
-				fmt.Fprintf(w, "%s has a new seal key; the previous one is no longer accepted: clients get nothing until they fetch their subscription\n", args[0])
+				fmt.Fprintf(w, "%s has a new %s key; the previous one is no longer accepted (its sessions closed): clients get nothing until they fetch their subscription\n", args[0], what)
 			default:
 				fmt.Fprintf(w, "%s switches to new keys at %s (later if a new server name waits for its certificate)\n",
 					args[0], time.Unix(r.Msg.SwitchAt, 0).UTC().Format(time.RFC3339))
@@ -616,8 +618,14 @@ func keyState(s *nodev1.Service) string {
 			Seal      string `json:"seal"`
 			RotatedAt int64  `json:"seal_rotated_at"`
 			PrevUntil int64  `json:"seal_prev_until"`
+			// masterdns's service key (spec/masterdns-key-rotation.md)
+			KeyRotatedAt int64 `json:"key_rotated_at"`
+			KeyPrevUntil int64 `json:"key_prev_until"`
 		}
 		_ = json.Unmarshal([]byte(s.SettingsJson), &st)
+		if s.Kind == "masterdns" {
+			st.RotatedAt, st.PrevUntil = st.KeyRotatedAt, st.KeyPrevUntil
+		}
 		if st.Seal == "" {
 			st.Seal = "off"
 		}

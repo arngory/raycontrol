@@ -3989,10 +3989,14 @@ func (x *RotateServiceRequest) GetNow() bool {
 }
 
 type RotateServiceResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SwitchAt      int64                  `protobuf:"varint,1,opt,name=switch_at,json=switchAt,proto3" json:"switch_at,omitempty"`    // unix seconds; later if a new server name waits for its certificate
-	Seal          bool                   `protobuf:"varint,2,opt,name=seal,proto3" json:"seal,omitempty"`                            // a dnstt service: its seal key switched at switch_at
-	PrevUntil     int64                  `protobuf:"varint,3,opt,name=prev_until,json=prevUntil,proto3" json:"prev_until,omitempty"` // the previous seal key is accepted until then (unix seconds); 0: no longer
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	SwitchAt  int64                  `protobuf:"varint,1,opt,name=switch_at,json=switchAt,proto3" json:"switch_at,omitempty"`    // unix seconds; later if a new server name waits for its certificate
+	Seal      bool                   `protobuf:"varint,2,opt,name=seal,proto3" json:"seal,omitempty"`                            // a dnstt service: its seal key switched at switch_at
+	PrevUntil int64                  `protobuf:"varint,3,opt,name=prev_until,json=prevUntil,proto3" json:"prev_until,omitempty"` // the previous seal key is accepted until then (unix seconds); 0: no longer
+	// The key that switched at once: "seal" (dnstt, seal set too), "service"
+	// (masterdns, spec/masterdns-key-rotation.md; seal set too, for rayctl
+	// before v0.15.0); empty for REALITY's scheduled switch.
+	Key           string `protobuf:"bytes,4,opt,name=key,proto3" json:"key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4046,6 +4050,13 @@ func (x *RotateServiceResponse) GetPrevUntil() int64 {
 		return x.PrevUntil
 	}
 	return 0
+}
+
+func (x *RotateServiceResponse) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
 }
 
 type Device struct {
@@ -5696,12 +5707,13 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\fmissing_next\x18\x03 \x03(\tR\vmissingNext\"<\n" +
 	"\x14RotateServiceRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
-	"\x03now\x18\x02 \x01(\bR\x03now\"g\n" +
+	"\x03now\x18\x02 \x01(\bR\x03now\"y\n" +
 	"\x15RotateServiceResponse\x12\x1b\n" +
 	"\tswitch_at\x18\x01 \x01(\x03R\bswitchAt\x12\x12\n" +
 	"\x04seal\x18\x02 \x01(\bR\x04seal\x12\x1d\n" +
 	"\n" +
-	"prev_until\x18\x03 \x01(\x03R\tprevUntil\"\xb2\x01\n" +
+	"prev_until\x18\x03 \x01(\x03R\tprevUntil\x12\x10\n" +
+	"\x03key\x18\x04 \x01(\tR\x03key\"\xb2\x01\n" +
 	"\x06Device\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04user\x18\x02 \x01(\tR\x04user\x12\x12\n" +
