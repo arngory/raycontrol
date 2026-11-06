@@ -1,6 +1,8 @@
 # slipstream-v1: slipstream на ноде raycontrol
 
-Статус: **черновик** (2026-11-06), на согласовании с клиентом. Сервер — форк `arngory/slipstream` (upstream
+Статус: **согласована** с клиентом (2026-11-06): ссылка (§4), длина зоны ≤ 20, клиент — ветка форка
+`client/pin-alpn-sni` (4973972: пин SPKI, ALPN и SNI из аргументов, поле dnsauth-v2, без key log, Android), сервер —
+`server/hardening` (4f41434). Сервер — форк `arngory/slipstream` (upstream
 EndPositive/slipstream 0.1.0, Apache-2.0, picoquic); клиент — тот же форк, сборка под Android у клиента.
 
 ## 1. Что это и что не так с сервером как он есть
@@ -83,7 +85,7 @@ slipstream — TCP-прокси поверх QUIC с multipath, пакеты QUI
 | `niko-slip` | `v1;<пин, base64url SHA-256 SPKI>;<ALPN>;<SNI>` |
 | `niko-dnsauth` | `v1` — подписывать; версия — по полю подписки `dnsauth.v`, у slipstream всегда `2` |
 
-(Имена и порядок полей — на согласование с клиентом.)
+Согласовано с клиентом. Резолверы — выбор клиента, как у dnstt; несколько резолверов — несколько путей multipath.
 
 ## 5. Что менять
 
