@@ -146,6 +146,9 @@ const DNSSealKeyFile = "seal.keys"
 // required (spec/dnsauth-v1.md §5).
 func DNSAuthMode(s store.Service) string { return provision.DNSAuthMode(s) }
 
+// DNSAuthHint is a DNS tunnel's dnsauth-v2 mode (provision.DNSAuthHint).
+func DNSAuthHint(s store.Service) string { return provision.DNSAuthHint(s) }
+
 // DNSAuthKeys is the file name of a DNS tunnel's device keys.
 const DNSAuthKeys = "auth.keys"
 
@@ -506,24 +509,8 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if len(all) == 0 {
 				return errors.New("no zone")
 			}
-			// Zones stored before they were checked (v0.13 took nested
-			// ones): the later service is left out, as a broken one is,
-			// not the front's whole config (niko-server v0.11.0 refuses
-			// zones that nest, and TCP and UDP 443 would go with it).
-			for _, z := range all {
-				for other, svc := range taken {
-					if provision.ZonesClash(z, other) {
-						return fmt.Errorf("zone %s is, or nests with, zone %s of %s: a name under both would be either's; give it another zone", z, other, svc)
-					}
-				}
-				// The name the zones are delegated to, in a zone of any
-				// tunnel: the front would send the queries for its
-				// address to that tunnel (niko-server v0.11.0 refuses the
-				// front's whole config with it, masterdns's zones too:
-				// review 14).
-				if ns := provision.CanonicalZone(m.NSName); ns != "" && (ns == z || strings.HasSuffix(ns, "."+z)) {
-					return fmt.Errorf("zone %s holds %s, the name the zones are delegated to: give it another zone", z, ns)
-				}
+			if err := zoneProblem(all, taken, m.NSName); err != nil {
+				return err
 			}
 			for _, z := range all {
 				taken[z] = s.Name
@@ -766,12 +753,89 @@ type ServiceErrors []error
 func (e ServiceErrors) Error() string   { return errors.Join(e...).Error() }
 func (e ServiceErrors) Unwrap() []error { return e }
 
+// zoneProblem says why a DNS tunnel's zones cannot be in the front beside
+// those taken (zone: its service). Zones stored before they were checked
+// (v0.13 took nested ones): the later service is left out, as a broken one
+// is, not the front's whole config (niko-server v0.11.0 refuses zones that
+// nest, and TCP and UDP 443 would go with it).
+func zoneProblem(zones []string, taken map[string]string, nsName string) error {
+	for _, z := range zones {
+		for other, svc := range taken {
+			if provision.ZonesClash(z, other) {
+				return fmt.Errorf("zone %s is, or nests with, zone %s of %s: a name under both would be either's; give it another zone", z, other, svc)
+			}
+		}
+		// The name the zones are delegated to, in a zone of any tunnel:
+		// the front would send the queries for its address to that tunnel
+		// (niko-server v0.11.0 refuses the front's whole config with it,
+		// masterdns's zones too: review 14).
+		if ns := provision.CanonicalZone(nsName); ns != "" && (ns == z || strings.HasSuffix(ns, "."+z)) {
+			return fmt.Errorf("zone %s holds %s, the name the zones are delegated to: give it another zone", z, ns)
+		}
+	}
+	return nil
+}
+
+// UnservedZones lists the DNS tunnels the front leaves out for their zones
+// (zoneProblem), in Render's order: the subscription does not hand out
+// links the node does not serve (review of the update path).
+func UnservedZones(m Model) map[int64]error {
+	out := map[int64]error{}
+	taken := map[string]string{}
+	inner := slices.ContainsFunc(m.Services, func(s Service) bool { return s.Kind == "inner" })
+	for _, s := range m.Services {
+		if s.Kind != "dnstt" && s.Kind != "masterdns" {
+			continue
+		}
+		// A tunnel Render leaves out for another reason frees its zones
+		// there too: one stored with a nested zone after it is then served
+		// (review).
+		if err := dnsTunnelProblem(s, inner); err != nil {
+			out[s.ID] = err
+			continue
+		}
+		all := provision.Zones(s.Service)
+		if err := zoneProblem(all, taken, m.NSName); err != nil {
+			out[s.ID] = err
+			continue
+		}
+		for _, z := range all {
+			taken[z] = s.Name
+		}
+	}
+	return out
+}
+
+// dnsTunnelProblem is what makes Render leave a DNS tunnel out before its
+// zones: no inner stage, a mode it does not know, its key missing.
+func dnsTunnelProblem(s Service, inner bool) error {
+	if !inner {
+		return errors.New("needs the inner stage, which is missing or disabled")
+	}
+	for what, mode := range map[string]string{"auth": DNSAuthMode(s.Service), "seal": DNSSealMode(s.Service), "auth_hint": DNSAuthHint(s.Service)} {
+		if !slices.Contains([]string{"off", "optional", "required"}, mode) {
+			return fmt.Errorf("%s %q: off, optional or required", what, mode)
+		}
+	}
+	switch {
+	case s.Kind == "dnstt" && len(s.Secrets[provision.SecretNoisePrivate]) != 32:
+		return errors.New("no key")
+	case s.Kind == "masterdns" && len(s.Secrets[provision.SecretMasterDNSKey]) == 0:
+		return errors.New("no key")
+	}
+	return nil
+}
+
 // Partial reports whether err from Render leaves the other services' files
 // usable.
 func Partial(err error) bool {
 	var se ServiceErrors
 	return errors.As(err, &se)
 }
+
+// MasterDNSKeysFile holds a masterdns service's keys in its rendered
+// directory, the current first (spec/masterdns-key-rotation.md §3).
+const MasterDNSKeysFile = "service.keys"
 
 // DNSSecret is the file of a DNS tunnel's key, by kind: systemd copies it
 // for the backend (Paths.Credential), whether this render wrote it or an
@@ -842,6 +906,16 @@ func dnsBackend(s Service, zones []string, inner string, p Paths, authKeys []str
 		opts["auth"] = mode
 		opts["auth_keys_file"] = f.Path
 		auth = &f
+		// dnsauth-v2 (spec/dnsauth-v2.md, niko-server v0.12.0): keys
+		// found by the hint in a tag, outside the scan budget.
+		switch hint := DNSAuthHint(s.Service); {
+		case hint == "required" && mode != "required":
+			return cfg, nil, nil, fmt.Errorf("service %s: auth_hint required needs auth required", s.Name)
+		case hint == "optional" || hint == "required":
+			opts["auth_hint"] = hint
+		case hint != "off":
+			return cfg, nil, nil, fmt.Errorf("service %s: auth_hint %q: off, optional or required", s.Name, hint)
+		}
 	}
 	seal := DNSSealMode(s.Service)
 	if seal != "off" && seal != "optional" && seal != "required" {
@@ -888,7 +962,20 @@ func dnsBackend(s Service, zones []string, inner string, p Paths, authKeys []str
 		secretValue = s.Secrets[provision.SecretMasterDNSKey]
 		opts["zones"] = zones // masterdns takes a list as it is (DOMAIN)
 		opts["encryption_method"] = settings.Method
-		opts["encryption_key_file"] = p.Credential(s.Name, secretName)
+		// The service's keys in a file of the service group, which the
+		// backend rereads (niko-server v0.13.0, spec/masterdns-key-
+		// rotation.md §3): the current first, then the previous one while
+		// it is taken. A switch needs no restart, and the sessions on the
+		// previous key go on through its grace.
+		var keys strings.Builder
+		for _, k := range provision.MasterDNSKeys(s.Service, s.Secrets) {
+			keys.Write(k)
+			keys.WriteByte('\n')
+		}
+		keyFile := File{Path: path.Join(p.Rendered, s.Name, MasterDNSKeysFile), Mode: 0o640, Group: GroupName(s.Name),
+			Content: []byte(keys.String()), Service: s.Name, Reload: true}
+		secrets = append(secrets, keyFile)
+		opts["encryption_key_file"] = keyFile.Path
 		// mdseal-v1 (spec/mdseal-v1.md §6): sealed with the service's own
 		// key, the one above; the mode alone.
 		if seal != "off" {
@@ -922,7 +1009,10 @@ func dnsBackend(s Service, zones []string, inner string, p Paths, authKeys []str
 	cfg = File{Path: path.Join(dir, "backend.json"), Mode: 0o640, Group: GroupName(s.Name), Content: b, Service: s.Name}
 	// Secrets are read by systemd (root), which gives the process its own
 	// copy (Paths.Credential), so the file needs no group access.
-	secret := File{Path: path.Join(dir, secretName), Mode: 0o600, Content: secretValue, Service: s.Name}
+	// masterdns's backend reads its keys from MasterDNSKeysFile, which it
+	// rereads: a new key in this copy restarts nothing (a rotation kept no
+	// session on the previous key, review of the install test).
+	secret := File{Path: path.Join(dir, secretName), Mode: 0o600, Content: secretValue, Service: s.Name, Reload: s.Kind == "masterdns"}
 	return cfg, append([]File{secret}, secrets...), auth, nil
 }
 

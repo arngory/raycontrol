@@ -28,11 +28,9 @@ func (c *cli) check(ctx context.Context, args []string) error {
 	domain := fs.String("domain", "", "base domain: certificates from Let's Encrypt")
 	services := fs.String("services", "", "services the install sets up: dnstt and masterdns need UDP 53")
 	// The install's other flags, so that the bootstrap passes its arguments
-	// to both as they are.
-	for _, f := range []string{"admin", "packages", "cloudflare-token-file", "dataplane"} {
-		fs.String(f, "", "as for install; not used by the check")
-	}
-	fs.Bool("checked", false, "as for install; not used by the check")
+	// to both as they are (a flag install has and check not failed the
+	// bootstrap: review of -name).
+	defineInstallFlags(fs)
 	allowV0 := fs.Bool("allow-v0", false, "raycontrol v0 goes next (bootstrap.sh -remove-v0): it and the ports it holds are not failures")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
@@ -104,4 +102,21 @@ func hostCheck(ctx context.Context, w io.Writer, o hostcheck.Options, quiet, asJ
 			": this host cannot run a node; nothing was changed")
 	}
 	return nil
+}
+
+// defineInstallFlags puts install's flags that fs lacks on it, as ones the
+// check takes and does not use.
+func defineInstallFlags(fs *flag.FlagSet) {
+	all := flag.NewFlagSet("install", flag.ContinueOnError)
+	installFlags(all)
+	all.VisitAll(func(f *flag.Flag) {
+		if fs.Lookup(f.Name) != nil {
+			return
+		}
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			fs.Bool(f.Name, false, "as for install; not used by the check")
+			return
+		}
+		fs.String(f.Name, "", "as for install; not used by the check")
+	})
 }

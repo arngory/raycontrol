@@ -48,7 +48,8 @@ type Zone struct {
 	Seal     string // dnsseal-v1 mode (dnstt): off, optional or required
 	SealKey  Key    // seals the poll unless the seal is off
 	Auth     string // dnsauth-v1 mode (dnstt)
-	AuthKey  Key    // a dnsauth-v1 key on the service for a tagged poll: the node's own (provision.DNSCheckDevice)
+	AuthKey  Key    // a dnsauth key on the service for a tagged poll: the node's own (provision.DNSCheckDevice)
+	AuthV2   bool   // the service takes dnsauth-v2 tags (auth_hint not off): the poll signs with v2
 	SvcID    uint16
 }
 
@@ -381,7 +382,7 @@ func (c *Checker) backend(ctx context.Context, z Zone, addr netip.AddrPort) Step
 	if z.Auth != "" && z.Auth != "off" && len(z.AuthKey) == 32 {
 		auth = z.AuthKey
 	}
-	p, err := NewPoll(z.Name, seal, auth, c.now())
+	p, err := NewPoll(z.Name, seal, auth, z.AuthV2, c.now())
 	if err != nil {
 		return Step{State: Warn, Detail: err.Error()}
 	}

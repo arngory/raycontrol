@@ -69,7 +69,7 @@ func TestPoll(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 
 	// Open: ClientID, then 8 bytes of padding: 17 bytes, 28 characters.
-	p, err := NewPoll(zone, nil, nil, now)
+	p, err := NewPoll(zone, nil, nil, false, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestPoll(t *testing.T) {
 
 	// With a device's tag (dnsauth-v1 §3): 25 bytes, 40 characters.
 	authKey := seq(0x60, 32)
-	p, err = NewPoll(zone, nil, authKey, now)
+	p, err = NewPoll(zone, nil, authKey, false, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,11 +104,36 @@ func TestPoll(t *testing.T) {
 		t.Fatalf("tag %x, want %x", b[:8], want)
 	}
 
+	// dnsauth-v2 (spec/dnsauth-v2.md §6): the vectors, then a poll with
+	// the field: hint and tag over the rest.
+	vk, _ := hex.DecodeString("0b485b425e8b19e0ec7c0362d55fdc34338147f984b87ee005455c8f5fc68b1c")
+	vmsg := seq(0, 24)
+	for _, c := range []struct {
+		epoch uint32
+		field string
+	}{{2945448, "2d82b1220002a927"}} {
+		if got := hex.EncodeToString(authTag2(vk, c.epoch, vmsg)); got != c.field {
+			t.Fatalf("dnsauth-v2 field %s, want %s", got, c.field)
+		}
+	}
+	for e, hint := range map[uint32]string{2945447: "a5f9", 2945449: "e97f"} {
+		if got := hex.EncodeToString(authTag2(vk, e, vmsg)[:2]); got != hint {
+			t.Fatalf("hint at %d: %s, want %s", e, got, hint)
+		}
+	}
+	p, err = NewPoll(zone, nil, authKey, true, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := payload(p); len(b) != 25 || !bytes.Equal(b[:8], authTag2(authKey, uint32(now.Unix()/600), b[8:])) {
+		t.Fatalf("a v2 tagged poll %x", b)
+	}
+
 	// Sealed: N, T and C, labels of 32 to 63 characters; the node opens
 	// it and answers sealed.
 	sealKey := seq(0x40, 32)
 	for range 20 {
-		p, err = NewPoll(zone, sealKey, authKey, now)
+		p, err = NewPoll(zone, sealKey, authKey, false, now)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -347,6 +347,9 @@ func TestRemoteAPI(t *testing.T) {
 	if _, err := admin.node.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "bob"})); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := admin.node.SetNodeName(ctx, connect.NewRequest(&nodev1.SetNodeNameRequest{Name: "Амстердам"})); err != nil {
+		t.Fatalf("an admin device names the node: %v", err)
+	}
 	if _, err := admin.node.Backup(ctx, connect.NewRequest(&nodev1.BackupRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("a remote backup: %v", err)
 	}

@@ -15,7 +15,7 @@
 | `bash bootstrap.sh -host IP -domain D -cloudflare-token-file F [-services reality,dnstt,masterdns]` | поставить ноду: зависимости, подписанный релиз с data plane, `rayctl install`, сервисы |
 | `rayctl install -host IP [-domain D] [-admin A] [-cloudflare-token-file F] [-services …\|none] [-dataplane DIR]` | то же без bootstrap; `-dataplane` — каталог с проверенными `xray` и `niko-server` |
 | `rayctl apply` | поставить то, что нужно новым сервисам: пользователи, юниты, файлы |
-| `rayctl update [-check] [-version vX.Y.Z] [-from DIR] [-yes]` | обновить ноду до проверенного релиза; при сбое — сам откат |
+| `rayctl update [-check] [-version vX.Y.Z] [-from DIR] [-yes]` | обновить ноду до проверенного релиза; при сбое — сам откат. С v0.15.0: юниты data plane, которые работали до обновления, должны заработать снова (иначе откат); файлы релиза, которых прежняя версия не знает, ставит новый rayctl; в конце — DNS-туннели, у которых режимы слабее, чем у нового сервиса |
 | `rayctl update -rollback` | вернуть бинарники, которые заменило последнее обновление |
 | `rayctl uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]` | убрать всё по журналу установки, записи в Cloudflare тоже |
 | `rayctl admin <ваш IP> [прежние адреса…]` | с консоли провайдера: пустить свой адрес к SSH без SPA (список заменяется целиком) |
@@ -33,7 +33,8 @@
 
 | Команда | Что делает |
 |---|---|
-| `rayctl status` | версия, нода, число пользователей, сервисов, устройств, порты SPA сейчас; циклы rayd, `dns-zone <сервис>` — самопроверка зоны туннеля |
+| `rayctl node name "Амстердам"` (`""` — убрать) | имя ноды: клиенты показывают его рядом с адресом со следующей подписки; до 48 символов, без управляющих и невидимых. При установке — `bootstrap.sh … -name "Амстердам"` |
+| `rayctl status` | версия, нода (и её имя), число пользователей, сервисов, устройств, порты SPA сейчас; циклы rayd, `dns-zone <сервис>` — самопроверка зоны туннеля |
 | `rayctl service list` | сервисы; для REALITY — когда сменились ключи и когда следующая смена |
 | `rayctl audit [-n 50]` | журнал действий администратора |
 | `rayctl debug on [-for 30m]` / `off` / `show` | окно отладки: rayd, rayspa и data plane пишут подробно, с адресами клиентов; закрывается само (до суток); службы data plane перезапускаются |
@@ -52,6 +53,7 @@
 | `rayctl summary [-days 7]` | сети, где не меньше 10 отчётов: что работает, потери UDP, скорость; остальное — одной суммой; базы AS и их даты |
 | `rayctl summary api ipinfo [-token-file F]` · `rayctl summary api none` | API ipinfo для адресов, которых нет в базах: спрашивает по сети /24 или /48, не по адресу |
 | `rayctl summary db F.mmdb` · `rayctl summary db -remove` | своя база AS (IPinfo Lite своим токеном, GeoLite2 ASN своим ключом) впереди базы из релиза; root, на ноде |
+| `rayctl probe -payload @bundle` | ещё и payload подписки в JSON отдельной строкой после `payload ` (с учётными данными, как `-links`) |
 | `rayctl probe -report '{"v":1,…}' @bundle` | отправить отчёт как клиент (probe-v1 §6), для проверки |
 | `rayctl probe -dns [-resolver system,google,udp:IP] @bundle` | DNS-туннели из подписки глазами этой машины: делегирование у родителя, фронт и бэкенд ноды (опрос с печатью и меткой этого устройства), зоны через резолвер машины или `-resolver` — то же, что `rayctl dns check` с ноды, но из сети администратора |
 
@@ -97,11 +99,13 @@
 | `rayctl service set dns auth=optional\|required\|off` | dnsauth-v1: метка устройства в каждом запросе dnstt ([`spec/dnsauth-v1.md`](spec/dnsauth-v1.md)); `required` — только когда все клиенты её ставят (Niko 1.27+). Новый dnstt-сервис создаётся с `required` (v0.13.0), прежние остаются как были — `rayctl service list` показывает `auth … (open: …)`. Без `required` ключ не нужен: любой, кто знает зону (она видна в делегировании), а при `seal=required` — любой со ссылкой, может занять места рукопожатий dnstt (128), и новые сессии будут ждать; память нода держит в пределах и так (niko-server v0.10.0, нагрузочный тест) |
 | `rayctl service set dns seal=optional\|required\|off` | dnsseal-v1: обвязка dnstt запечатана ключом зоны ([`spec/dnsseal-v1.md`](spec/dnsseal-v1.md)); ключ уходит в ссылку; `optional` берёт и открытые запросы, `required` — только когда все клиенты запечатывают (с v0.13, Niko 1.35+). Новый dnstt-сервис с v0.14 создаётся с `optional` |
 | `rayctl service set mdns seal=… auth=…` | masterdns (с v0.14, niko-server v0.11.0): `seal` — ответы запечатаны ключом сервиса (mdseal-v1, [`spec/mdseal-v1.md`](spec/mdseal-v1.md)), `auth` — метка устройства в каждом запросе, сессия привязана к устройству ([`spec/dnsauth-masterdns.md`](spec/dnsauth-masterdns.md)); `optional` — для тех клиентов, что умеют, `required` — когда умеют все. Новый masterdns-сервис создаётся с `optional` для обоих |
+| `rayctl service set dns auth_hint=required` (`optional` — по умолчанию, `off`) | dnsauth-v2 ([`spec/dnsauth-v2.md`](spec/dnsauth-v2.md)): ключ устройства находится по подсказке в метке, без перебора. `optional` берёт и метки v1 перебором, как раньше; `required` — только v2 (мусор с верной обёрткой ничего не стоит ноде), когда все клиенты подписывают по v2; только при `auth=required`. Подписка говорит клиентам, какую версию брать (`dnsauth.v`) |
 | `rayctl service set dns spare_zones=2` (или `=a.example.net,b.example.org`, `=none`) → `rayctl apply` | запасные зоны DNS-туннеля, до 4 ([`spec/dnszones-v1.md`](spec/dnszones-v1.md)): число — случайные зоны в домене ноды, как основная (уже заданные остаются); список — свои (для чужих доменов делегирование заводит оператор, Cloudflare — если токен покрывает зону). Нода делегирует, обслуживает и проверяет каждую, как основную (`rayctl status`: `dns-zone dns <зона>`). Зоны не совпадают и не вкладываются друг в друга ни внутри сервиса, ни между сервисами. Для dnstt и masterdns |
 | `rayctl service set dns zone=<запасная>` → `rayctl apply` | запасная зона становится основной, прежняя основная уходит: только запасная — она у клиентов уже есть; прежнюю они теряют со следующей подпиской |
 | `rayctl service rotate dns [-now]` | новый ключ печати сразу, в подписке с этого момента; прежний нода принимает ещё `-cred-grace` (2 дня), с `-now` — не принимает (ключ утёк): клиенты без новой подписки не получают ничего, пока её не обновят. Второй сброс в пределах срока снимает ключ до прежнего. Заодно меняется ключ самопроверки ноды (строка `node-check` в ключах dnsauth всех dnstt-сервисов). `rayctl service list` показывает режим, дату ключа и срок прежнего |
 | `rayctl service set ygg peers=tls://host:443,quic://203.0.113.9:443` → `rayctl apply` | публичные пиры Yggdrasil, до 8 (по умолчанию нет; `quic` — только по IP; лучше разные операторы и `tls`/`quic`/`wss`): нода видна в сети Yggdrasil, клиенты получают пиры как запасной путь; `peers=none` — выключить |
 | `rayctl service cert site -chain chain.pem -key key.pem` | свой сертификат сайта вместо ACME (свой CA, другой ACME-клиент, тестовый CA): для REALITY, hy2-masq, naive, DoH и Yggdrasil под сайтом; должен покрывать все имена сайта |
+| `rayctl service rotate mdns [-now]` | новый ключ сервиса masterdns сразу, в подписке с этого момента; прежний бэкенд принимает ещё `-cred-grace` (сессии на нём идут дальше), с `-now` — нет (его сессии закрываются). Файл ключей перечитывается без перезапуска. `rayctl service list` показывает дату ключа и срок прежнего |
 | `rayctl service rotate reality [-now]` | новые ключи (и имя) REALITY: через срок публикации или сразу; с `-now` прежние ключи сразу перестают работать, иначе принимаются ещё `-cred-grace` |
 
 ## DNS

@@ -191,7 +191,9 @@ func TestEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.V != 1 || p.Seq != 1 || p.Expires-p.Issued != int64(sub.Lifetime/time.Second) || len(p.Profiles) != 1 ||
+	// seq: the clock in milliseconds at least (a database put back holds
+	// an older count).
+	if p.V != 1 || p.Seq < uint64(p.Issued)*1000 || p.Expires-p.Issued != int64(sub.Lifetime/time.Second) || len(p.Profiles) != 1 ||
 		p.Probe == nil || p.Probe.V != 1 || p.Probe.UDP || p.Probe.Tunnel != probe.Name ||
 		len(p.Probe.TunnelSvc) != 1 || p.Probe.TunnelSvc[0] != p.Profiles[0].Svc ||
 		// The report fields beyond the first ones of v1 (Niko §20).
@@ -530,6 +532,137 @@ func TestCarrierHintOrder(t *testing.T) {
 	}
 }
 
+// seq grows across a database put back (update rollback, restore): never
+// below the clock in milliseconds, so a client that saw the newer one takes
+// the next answer.
+func TestSeqAfterRollback(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	seq := func(at time.Time) uint64 {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p.Seq
+	}
+	now := time.Now()
+	a := seq(now)
+	// The database from before: the count it held.
+	if err := f.st.SetSetting(ctx, "sub_seq", []byte("41")); err != nil {
+		t.Fatal(err)
+	}
+	if b := seq(now.Add(time.Second)); b <= a {
+		t.Fatalf("seq %d after the rollback, %d before", b, a)
+	}
+	// Before ClockSeqAfter (a rayd that just started, maybe an update
+	// about to fail): one more than the stored count, no jump.
+	early := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet(), ClockSeqAfter: now.Add(time.Hour)}
+	f.st.SetSetting(ctx, "sub_seq", []byte("41"))
+	env, err := early.Build(ctx, "alice", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := sub.Verify(env, f.keys.PublicJSON()); p.Seq != 42 {
+		t.Fatalf("seq %d before ClockSeqAfter, want 42", p.Seq)
+	}
+	// Answers in the same millisecond still grow.
+	if c, d := seq(now.Add(time.Second)), seq(now.Add(time.Second)); d <= c {
+		t.Fatalf("seq %d then %d", c, d)
+	}
+}
+
+// The node's name (subscription-v1 §3): in the payload as kept, no field
+// without one, and a name the node refused never gets there.
+func TestNodeNameInSubscription(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	build := func() (sub.Payload, string) {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(env.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p, string(raw)
+	}
+	if p, raw := build(); p.Name != "" || strings.Contains(raw, `"name":""`) {
+		t.Fatalf("a node without a name: %q in %s", p.Name, raw)
+	}
+	smile := string(rune(0x1F642))
+	if _, err := node.SetName(ctx, f.st, "Амстердам "+smile); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := node.SetName(ctx, f.st, "Амстердам "+smile+string(rune(0x202E))+"evil"); err == nil {
+		t.Fatal("a bidi override was taken")
+	}
+	if p, _ := build(); p.Name != "Амстердам "+smile {
+		t.Fatalf("name %+q", p.Name)
+	}
+	if _, err := node.SetName(ctx, f.st, ""); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := build(); p.Name != "" {
+		t.Fatalf("removed name still sent: %+q", p.Name)
+	}
+}
+
+// dnsauth in the subscription (spec/dnsauth-v2.md §4): both versions with
+// auth_hint optional, 2 alone with required, 1 alone with off; none
+// without a DNS tunnel that checks tags.
+func TestDNSAuthVersionsInSubscription(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	versions := func() []int {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.DNSAuth == nil {
+			return nil
+		}
+		return p.DNSAuth.V
+	}
+	for _, c := range []struct {
+		key, value string
+		want       []int
+	}{
+		{"", "", []int{1, 2}},
+		{"auth_hint", "required", []int{2}},
+		{"auth_hint", "off", []int{1}},
+		{"auth_hint", "optional", []int{1, 2}},
+		{"auth", "off", nil},
+	} {
+		if c.key != "" {
+			if _, err := provision.SetServiceOption(ctx, f.st, "dns", c.key, c.value); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := versions(); !slices.Equal(got, c.want) {
+			t.Errorf("%s=%s: dnsauth.v %v, want %v", c.key, c.value, got, c.want)
+		}
+	}
+}
+
 // Relays in the subscription (relay-v1 §4): once a relay has its bundle it
 // is listed with its own SPA, and the profiles it forwards name it in via;
 // DNS tunnels do not go through relays.
@@ -717,5 +850,158 @@ func TestDNSTunnelLinks(t *testing.T) {
 		if !strings.Contains(links[name], raw) {
 			t.Errorf("%s: no %s in %s", name, raw, links[name])
 		}
+	}
+}
+
+// One service whose profile cannot be made (here: a broken inner key under
+// a DNS tunnel) leaves that profile out, not the user's others: Profiles
+// gives those with an error naming the service (review of the update path).
+func TestProfilesPartial(t *testing.T) {
+	inner := render.Service{Service: store.Service{ID: 1, Kind: "inner", Name: "inner"},
+		Secrets: map[string][]byte{provision.SecretMLKEMSeed: []byte("short")}}
+	dns := render.Service{Service: store.Service{ID: 2, Kind: "dnstt", Name: "dns"}}
+	doh := render.Service{Service: store.Service{ID: 3, Kind: "doh", Name: "doh", Settings: `{"sni":"d.example.com"}`}}
+	m := render.Model{NodeID: "00", Host: "203.0.113.7", Services: []render.Service{inner, dns, doh},
+		Inner: map[int64]string{7: "uuid"}, Creds: map[int64]map[int64]string{3: {7: "token"}}}
+	u := render.User{ID: 7, Name: "alice", Services: []int64{2, 3}}
+	got, err := sub.Profiles(m, u)
+	if err == nil || !strings.Contains(err.Error(), "service dns") {
+		t.Fatalf("no error for the broken service: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "doh" {
+		t.Fatalf("profiles %+v", got)
+	}
+}
+
+// A DNS tunnel whose zone nests with an earlier one's (v0.13 took such
+// zones) is left out of the front by the render, and so out of the
+// subscription: its link would fail every client (review of the update
+// path).
+func TestUnservedZoneNotInSubscription(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	dns, _ := f.st.ServiceByName(ctx, "dns")
+	dns2, err := provision.CreateService(ctx, f.st, store.Service{Kind: "dnstt", Name: "dns2", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.st.SetUserServices(ctx, "alice", []int64{dns.ID, dns2.ID})
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	names := func() []string {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, pr := range p.Profiles {
+			out = append(out, pr.Name)
+		}
+		return out
+	}
+	if got := names(); !slices.Contains(got, "dns2") {
+		t.Fatalf("before: %v", got)
+	}
+	// As v0.13 stored it: a zone under the first tunnel's.
+	var st map[string]any
+	json.Unmarshal([]byte(dns2.Settings), &st)
+	st["zone"] = "x." + provision.Zone(dns)
+	b, _ := json.Marshal(st)
+	if err := f.st.UpdateService(ctx, dns2.ID, store.ServiceUpdate{Settings: string(b)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := names(); slices.Contains(got, "dns2") || !slices.Contains(got, "dns") {
+		t.Fatalf("a nested zone's tunnel handed out: %v", got)
+	}
+	// The first tunnel left out for another reason (a mode Render does not
+	// know): its zone is free, the second one is served and handed out,
+	// the first one not (review).
+	dns, _ = f.st.ServiceByName(ctx, "dns")
+	var d map[string]any
+	json.Unmarshal([]byte(dns.Settings), &d)
+	d["seal"] = "bogus"
+	b, _ = json.Marshal(d)
+	f.st.UpdateService(ctx, dns.ID, store.ServiceUpdate{Settings: string(b)})
+	if got := names(); !slices.Contains(got, "dns2") || slices.Contains(got, "dns") {
+		t.Fatalf("with the first tunnel broken: %v", got)
+	}
+}
+
+// BuildFor with services that fail and dnsauth modes that differ (review):
+// a broken service is left out and the rest go out; all broken: an error,
+// no empty subscription; a tunnel the user cannot use does not change the
+// user's dnsauth.v; tunnels that differ both ways give 2.
+func TestBuildForPartialAndModes(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	dns, _ := f.st.ServiceByName(ctx, "dns")
+	dns2, err := provision.CreateService(ctx, f.st, store.Service{Kind: "dnstt", Name: "dns2", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.st.SetUserServices(ctx, "alice", []int64{dns.ID, dns2.ID})
+	build := func() (*sub.Payload, error) {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", time.Now())
+		if err != nil {
+			return nil, err
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &p, nil
+	}
+	// dns2's key gone: its profile cannot be made.
+	if err := f.st.UpdateService(ctx, dns2.ID, store.ServiceUpdate{Delete: []string{provision.SecretNoisePrivate}}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := build()
+	if err != nil || len(p.Profiles) != 1 || p.Profiles[0].Name != "dns" {
+		t.Fatalf("one broken service: %+v %v", p, err)
+	}
+	// Both broken: an error, not a subscription without profiles.
+	f.st.UpdateService(ctx, dns.ID, store.ServiceUpdate{Delete: []string{provision.SecretNoisePrivate}})
+	if p, err := build(); err == nil {
+		t.Fatalf("every service broken: %+v", p)
+	}
+
+	// dnsauth.v over a user's tunnels only.
+	g := setup(t)
+	srv = &sub.Server{Store: g.st, Keys: g.keys, Log: quiet()}
+	other, err := provision.CreateService(ctx, g.st, store.Service{Kind: "dnstt", Name: "other", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provision.SetServiceOption(ctx, g.st, "other", "auth_hint", "required"); err != nil {
+		t.Fatal(err)
+	}
+	versions := func() []int {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, _ := sub.Verify(env, g.keys.PublicJSON())
+		return p.DNSAuth.V
+	}
+	if v := versions(); !slices.Equal(v, []int{1, 2}) {
+		t.Fatalf("a tunnel alice cannot use changed hers: %v", v)
+	}
+	// Both ways at once (as stored before the check): 2, where tunnels go.
+	gdns, _ := g.st.ServiceByName(ctx, "dns")
+	var st map[string]any
+	json.Unmarshal([]byte(gdns.Settings), &st)
+	st["auth_hint"] = "off"
+	b, _ := json.Marshal(st)
+	g.st.UpdateService(ctx, gdns.ID, store.ServiceUpdate{Settings: string(b)})
+	g.st.SetUserServices(ctx, "alice", []int64{gdns.ID, other.ID})
+	if v := versions(); !slices.Equal(v, []int{2}) {
+		t.Fatalf("off beside required: %v", v)
 	}
 }

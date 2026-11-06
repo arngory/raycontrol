@@ -38,6 +38,12 @@ type Server struct {
 	Store *store.Store
 	Keys  provision.NodeKeys
 	Log   *slog.Logger
+	// ClockSeqAfter: seq keeps to the clock in milliseconds only from then
+	// on (rayd: 10 minutes after it starts). An update that fails in its
+	// first minutes puts the database back under the old version, which
+	// counts on from the old seq: a client that took the clock's from the
+	// new rayd meanwhile would refuse every answer of the old one (review).
+	ClockSeqAfter time.Time
 	// Probe, when set, serves the channel probes (spec/probe-v1.md) on the
 	// same endpoint, and the subscription says so.
 	Probe *probe.Server
@@ -176,15 +182,30 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 		return Envelope{}, errors.New("user not active")
 	}
 	profiles, err := Profiles(m, *user)
+	// Not the links of a DNS tunnel the front leaves out for its zones
+	// (rayd logs why; zones v0.13 took that nest): they would fail every
+	// client that tries them.
+	if out := render.UnservedZones(m); len(out) > 0 {
+		profiles = slices.DeleteFunc(profiles, func(pr Profile) bool { return out[int64(pr.Svc)] != nil })
+	}
+	if err != nil {
+		// The others go out: a 404 for all of them kept the client on its
+		// last subscription, without the next keys of the rest (review).
+		s.Log.Warn("subscription: profiles left out", "user", userName, "err", err)
+		if len(profiles) == 0 {
+			return Envelope{}, err
+		}
+	}
+	name, err := node.Name(ctx, s.Store)
 	if err != nil {
 		return Envelope{}, err
 	}
-	seq, err := s.nextSeq(ctx)
+	seq, err := s.nextSeq(ctx, now)
 	if err != nil {
 		return Envelope{}, err
 	}
 	p := Payload{
-		V: 1, NodeID: m.NodeID, Seq: seq, Time: now.Unix(), Issued: now.Unix(),
+		V: 1, NodeID: m.NodeID, Name: name, Seq: seq, Time: now.Unix(), Issued: now.Unix(),
 		Expires: now.Add(Lifetime).Unix(), Profiles: profiles,
 		SPA: &SPAHint{Carriers: []string{"udp"}},
 	}
@@ -218,6 +239,7 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 	}) {
 		p.DNSProbe = &DNSProbeHint{V: 1, Key: base64.RawURLEncoding.EncodeToString(m.DNSProbeKey)}
 	}
+	p.DNSAuth = dnsAuthVersions(m, profiles)
 	// Through a relay the address is the relay's: its network's hints are
 	// not the client's (relay-v1 §9.3).
 	if s.Hints != nil && addr.IsValid() && !addr.IsLoopback() && !s.FromRelay(ctx, addr) {
@@ -304,7 +326,7 @@ func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) erro
 }
 
 // nextSeq returns a counter that grows with every response, across restarts.
-func (s *Server) nextSeq(ctx context.Context) (uint64, error) {
+func (s *Server) nextSeq(ctx context.Context, now time.Time) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var seq uint64
@@ -313,6 +335,45 @@ func (s *Server) nextSeq(ctx context.Context) (uint64, error) {
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return 0, err
 	}
+	// Never below the clock in milliseconds: a database put back (update
+	// rollback, restore) holds an older count, and clients drop answers
+	// with a seq below one they have seen (subscription-v1 §3).
 	seq++
+	if !now.Before(s.ClockSeqAfter) {
+		seq = max(seq, uint64(max(now.UnixMilli(), 0)))
+	}
 	return seq, s.Store.SetSetting(ctx, settingSeq, []byte(strconv.FormatUint(seq, 10)))
+}
+
+// dnsAuthVersions is what the user's DNS tunnels that check tags take
+// (spec/dnsauth-v2.md §4): 1 unless one of them takes v2 only
+// (auth_hint=required), 2 unless one of them takes no v2 (auth_hint=off).
+// The field is one for all of them: when they disagree both ways, 2,
+// where the tunnels go.
+func dnsAuthVersions(m render.Model, profiles []Profile) *DNSAuthVersions {
+	v1, v2, any := true, true, false
+	for _, svc := range m.Services {
+		if (svc.Kind != "dnstt" && svc.Kind != "masterdns") || render.DNSAuthMode(svc.Service) == "off" ||
+			!slices.ContainsFunc(profiles, func(pr Profile) bool { return pr.Svc == uint16(svc.ID) }) {
+			continue
+		}
+		any = true
+		switch render.DNSAuthHint(svc.Service) {
+		case "required":
+			v1 = false
+		case "off":
+			v2 = false
+		}
+	}
+	if !any {
+		return nil
+	}
+	d := &DNSAuthVersions{}
+	if v1 {
+		d.V = append(d.V, 1)
+	}
+	if v2 || !v1 {
+		d.V = append(d.V, 2)
+	}
+	return d
 }

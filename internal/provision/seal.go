@@ -47,6 +47,24 @@ func DNSAuthMode(s store.Service) string {
 	return st.Auth
 }
 
+// DNSAuthHint is a DNS tunnel's dnsauth-v2 mode (spec/dnsauth-v2.md §4):
+// off, optional or required, and off when its tags are not checked. Unset
+// is optional: the node's niko-server checks v2 tags from v0.12.0, so a
+// service from before gets them with the update, as a new one does.
+func DNSAuthHint(s store.Service) string {
+	if DNSAuthMode(s) == "off" {
+		return "off"
+	}
+	var st struct {
+		Hint string `json:"auth_hint"`
+	}
+	_ = json.Unmarshal([]byte(s.Settings), &st)
+	if st.Hint == "" {
+		return "optional"
+	}
+	return st.Hint
+}
+
 // SealState is the rotation state in the settings of a dnstt service.
 type SealState struct {
 	RotatedAt int64 `json:"seal_rotated_at,omitempty"` // last switch; 0 before the first
@@ -130,20 +148,29 @@ func ExpireSealKeys(ctx context.Context, st *store.Store, now time.Time, log *sl
 	}
 	n := 0
 	for _, svc := range all {
-		if svc.Kind != "dnstt" {
+		// dnstt's seal key; masterdns's service key
+		// (spec/masterdns-key-rotation.md §2).
+		var until int64
+		var field, secret, what string
+		switch svc.Kind {
+		case "dnstt":
+			until, field, secret, what = ParseSealState(svc).PrevUntil, "seal_prev_until", SecretSealKey, "seal key" //nolint:gosec // G101: names of a setting and a secret
+		case "masterdns":
+			until, field, secret, what = ParseMasterDNSKeyState(svc).PrevUntil, "key_prev_until", SecretMasterDNSKey, "service key" //nolint:gosec // G101: names of a setting and a secret
+		default:
 			continue
 		}
-		if until := ParseSealState(svc).PrevUntil; until == 0 || now.Unix() < until {
+		if until == 0 || now.Unix() < until {
 			continue
 		}
-		settings, err := setFields(svc.Settings, map[string]any{"seal_prev_until": nil})
+		settings, err := setFields(svc.Settings, map[string]any{field: nil})
 		if err != nil {
 			return n, err
 		}
-		if err := st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: settings, Delete: []string{PrevSecret(SecretSealKey)}}); err != nil {
+		if err := st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: settings, Delete: []string{PrevSecret(secret)}}); err != nil {
 			return n, err
 		}
-		log.Info("previous seal key no longer accepted", "service", svc.Name)
+		log.Info("previous "+what+" no longer accepted", "service", svc.Name)
 		n++
 	}
 	return n, nil

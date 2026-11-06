@@ -315,6 +315,14 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			// it; clients that do not sign keep working.
 			settings["auth"] = "optional"
 		}
+		// dnsauth-v2 (spec/dnsauth-v2.md §4): optional when unset
+		// (DNSAuthHint); required takes no v1 tag, so it needs auth
+		// required, as niko-server does.
+		if h, ok := settings["auth_hint"]; ok && !slices.Contains([]any{"off", "optional", "required"}, h) {
+			return svc, fmt.Errorf("%w auth_hint %v: off, optional or required (spec/dnsauth-v2.md)", store.ErrInvalid, h)
+		} else if ok && h == "required" && settings["auth"] != "required" {
+			return svc, fmt.Errorf("%w auth_hint required needs auth required: a dnsauth-v1 tag would pass as untagged", store.ErrInvalid)
+		}
 		if a, ok := settings["seal"]; ok && !slices.Contains([]any{"off", "optional", "required"}, a) {
 			return svc, fmt.Errorf("%w seal %v: off, optional or required (spec/dnsseal-v1.md, spec/mdseal-v1.md)", store.ErrInvalid, a)
 		} else if !ok {
@@ -818,6 +826,35 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			}
 			v = peers
 		}
+	case (svc.Kind == "dnstt" || svc.Kind == "masterdns") && key == "auth_hint":
+		// dnsauth-v2 (spec/dnsauth-v2.md §4): optional finds a v2 tag by
+		// its hint and still scans for v1; required takes no v1 tag at
+		// all, once every client signs v2 (dnsauth.v in the
+		// subscription). Kept as set, off too: unset is optional.
+		if !slices.Contains([]string{"off", "optional", "required"}, value) {
+			return svc, fmt.Errorf("%w auth_hint: off, optional or required", store.ErrInvalid)
+		}
+		if value == "required" && DNSAuthMode(svc) != "required" {
+			return svc, fmt.Errorf("%w auth_hint required needs auth required (now %s): a dnsauth-v1 tag would pass as untagged", store.ErrInvalid, DNSAuthMode(svc))
+		}
+		// The subscription says one dnsauth version for all of a user's
+		// tunnels (dnsauth.v): required (v2 only) beside off (v1 only)
+		// would leave one of them refusing every query of a client (review).
+		if value == "required" || value == "off" {
+			others, err := st.ListServices(ctx)
+			if err != nil {
+				return svc, err
+			}
+			for _, o := range others {
+				if o.ID == svc.ID || (o.Kind != "dnstt" && o.Kind != "masterdns") {
+					continue
+				}
+				if h := DNSAuthHint(o); (value == "required" && h == "off") || (value == "off" && h == "required") {
+					return svc, fmt.Errorf("%w auth_hint %s: %s has auth_hint %s, and a client signs one version for all the tunnels (set it to optional first)", store.ErrInvalid, value, o.Name, h)
+				}
+			}
+		}
+		v = value
 	case (svc.Kind == "dnstt" || svc.Kind == "masterdns") && (key == "auth" || key == "seal"):
 		// dnsauth-v1 (spec/dnsauth-v1.md §5, spec/dnsauth-masterdns.md
 		// §4): required on a new dnstt service, optional on a new
@@ -826,6 +863,9 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 		// required once every client seals.
 		if !slices.Contains([]string{"off", "optional", "required"}, value) {
 			return svc, fmt.Errorf("%w %s: off, optional or required", store.ErrInvalid, key)
+		}
+		if key == "auth" && value != "required" && DNSAuthHint(svc) == "required" {
+			return svc, fmt.Errorf("%w auth %s: %s has auth_hint required, which needs auth required (auth_hint=optional first)", store.ErrInvalid, value, name)
 		}
 		if svc.Kind == "masterdns" && key == "auth" && value != "off" {
 			// Methods 0 to 2 leave the query unauthenticated: a tag under
@@ -844,7 +884,7 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			v = 0
 		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt, masterdns: auth, seal, spare_zones, zone)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {

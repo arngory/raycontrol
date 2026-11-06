@@ -31,9 +31,9 @@ type Poll struct {
 }
 
 // NewPoll makes a poll of zone: sealed with sealKey unless it is nil, and
-// with a dnsauth-v1 tag when authKey is not nil (a device's key for the
-// service, spa.DNSAuthKey).
-func NewPoll(zone string, sealKey, authKey []byte, now time.Time) (Poll, error) {
+// with a device's tag when authKey is not nil (its key for the service,
+// spa.DNSAuthKey): dnsauth-v2 with v2, otherwise dnsauth-v1.
+func NewPoll(zone string, sealKey, authKey []byte, v2 bool, now time.Time) (Poll, error) {
 	pad := pollPadding
 	if sealKey != nil {
 		// Under the seal a padding frame of random length (0 to 31 bytes):
@@ -46,7 +46,11 @@ func NewPoll(zone string, sealKey, authKey []byte, now time.Time) (Poll, error) 
 	}
 	payload[clientIDLen] = paddingByte + byte(pad)
 	if authKey != nil {
-		payload = append(authTag(authKey, uint32(now.Unix()/authEpoch), payload), payload...)
+		tag := authTag
+		if v2 {
+			tag = authTag2
+		}
+		payload = append(tag(authKey, uint32(now.Unix()/authEpoch), payload), payload...)
 	}
 	if sealKey != nil {
 		var n [sealNonceLen]byte
@@ -101,6 +105,15 @@ func authTag(key []byte, epoch uint32, payload []byte) []byte {
 	var e [4]byte
 	binary.BigEndian.PutUint32(e[:], epoch)
 	return mac(key, []byte("dnsauth1"), e[:], payload)[:authTagLen]
+}
+
+// authTag2 is the dnsauth-v2 field of a payload in an epoch
+// (spec/dnsauth-v2.md §2): the key's hint for the epoch, then the tag.
+func authTag2(key []byte, epoch uint32, payload []byte) []byte {
+	var e [4]byte
+	binary.BigEndian.PutUint32(e[:], epoch)
+	hint := mac(key, []byte("dnsauth2-hint"), e[:])[:2]
+	return append(hint, mac(key, []byte("dnsauth2-tag"), e[:], payload)[:authTagLen-2]...)
 }
 
 // randN is a random number below n (at most 256), for lengths.

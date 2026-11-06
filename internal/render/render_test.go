@@ -144,7 +144,8 @@ func TestRender(t *testing.T) {
 		len(sealKeyLines(sealFile.Content)[0]) != 64 {
 		t.Fatalf("seal key file %+v", sealFile)
 	}
-	if opts["seal"] != "optional" || opts["seal_key_file"] != sealFile.Path || opts["auth"] != "required" {
+	// dnsauth-v2 optional with auth on (DNSAuthHint), niko-server v0.12.0.
+	if opts["seal"] != "optional" || opts["seal_key_file"] != sealFile.Path || opts["auth"] != "required" || opts["auth_hint"] != "optional" {
 		t.Fatalf("a new dnstt service's options: %v", opts)
 	}
 
@@ -160,8 +161,20 @@ func TestRender(t *testing.T) {
 	// A new masterdns service: dnsauth and mdseal-v1 optional (with
 	// niko-server v0.11.0); the seal takes the service's key, no file of
 	// its own.
+	// The service's keys in a file the backend rereads (niko-server
+	// v0.13.0, masterdns-key-rotation §3): the one key of a new service.
+	mkeys := byPath["/var/lib/raycontrol/rendered/mdns/service.keys"]
+	if mopts["encryption_key_file"] != mkeys.Path || mkeys.Mode != 0o640 || mkeys.Group != "niko-mdns" || !mkeys.Reload ||
+		len(mkeys.Content) != 33 || mkeys.Content[32] != '\n' {
+		t.Fatalf("masterdns keys file %+v, option %v", mkeys, mopts["encryption_key_file"])
+	}
+	// Its credential copy is not what the backend reads: a new key there
+	// restarts nothing (dnstt's private key still does).
+	if !byPath["/var/lib/raycontrol/rendered/mdns/encryption.key"].Reload || byPath["/var/lib/raycontrol/rendered/dns/noise.key"].Reload {
+		t.Fatal("masterdns's key copy restarts its backend, or dnstt's does not")
+	}
 	if mopts["auth"] != "optional" || mopts["auth_keys_file"] != "/var/lib/raycontrol/rendered/mdns/auth.keys" ||
-		mopts["seal"] != "optional" || mopts["seal_key_file"] != nil {
+		mopts["seal"] != "optional" || mopts["seal_key_file"] != nil || mopts["auth_hint"] != "optional" {
 		t.Fatalf("a new masterdns service's options: %v", mopts)
 	}
 

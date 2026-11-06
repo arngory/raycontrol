@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"flag"
+	"io"
 	"net/netip"
 	"net/url"
 	"os"
@@ -204,10 +205,13 @@ func TestProbeDNSZones(t *testing.T) {
 func TestKeyStateDNS(t *testing.T) {
 	for _, c := range []struct{ kind, settings, want string }{
 		{"dnstt", `{"auth":"required","seal":"optional","spare_zones":["s.example.net","u.example.org"]}`,
-			"auth required, seal optional, spare zones s.example.net u.example.org"},
-		{"masterdns", `{"auth":"required","seal":"required","encryption_method":5}`, "auth required, seal required"},
+			"auth required, v2 optional, seal optional, spare zones s.example.net u.example.org"},
+		{"masterdns", `{"auth":"required","seal":"required","encryption_method":5}`, "auth required, v2 optional, seal required"},
+		// dnsauth-v2 as set (optional when unset)
+		{"dnstt", `{"auth":"required","auth_hint":"required","seal":"off"}`, "auth required, v2 required, seal off"},
+		{"dnstt", `{"auth":"optional","auth_hint":"off"}`, "auth optional (open: auth=required keeps floods out), v2 off, seal off"},
 		{"masterdns", `{"zone":"m.example.com","auth":"optional","seal":"optional","spare_zones":["v.example.net"]}`,
-			"auth optional (open: auth=required keeps floods out), seal optional, spare zones v.example.net"},
+			"auth optional (open: auth=required keeps floods out), v2 optional, seal optional, spare zones v.example.net"},
 		// A masterdns service from before: neither mode.
 		{"masterdns", `{}`, "auth off (open: auth=required keeps floods out), seal off"},
 	} {
@@ -297,5 +301,30 @@ func TestPrintSummaryZones(t *testing.T) {
 		if strings.Contains(l, "dns (3)") != strings.HasSuffix(l, "zones 0:3 1:7") || strings.Contains(l, "mdns (4)") && strings.Contains(l, "zones") {
 			t.Errorf("line %q", l)
 		}
+	}
+}
+
+// The bootstrap passes its arguments to check and to install alike: check
+// takes every flag install has (review: bootstrap.sh -name failed the check).
+func TestCheckTakesInstallFlags(t *testing.T) {
+	install := flag.NewFlagSet("install", flag.ContinueOnError)
+	installFlags(install)
+	var args []string
+	install.VisitAll(func(f *flag.Flag) {
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			args = append(args, "-"+f.Name)
+			return
+		}
+		args = append(args, "-"+f.Name, "x")
+	})
+	check := flag.NewFlagSet("check", flag.ContinueOnError)
+	check.SetOutput(io.Discard)
+	check.String("host", "", "")
+	check.String("domain", "", "")
+	check.String("services", "", "")
+	check.Bool("allow-v0", false, "")
+	defineInstallFlags(check)
+	if err := check.Parse(args); err != nil {
+		t.Fatalf("check refuses install's flags: %v", err)
 	}
 }

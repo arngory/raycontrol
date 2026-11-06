@@ -238,6 +238,23 @@ if grep -E '^(wrote|restarting)' <<<"$again"; then
 	fail "a second apply changed things"
 fi
 
+# masterdns's service key changes while the backend runs (niko-server
+# v0.13.0): the file it rereads holds the new key and the previous one, and
+# the process is the same.
+pid="$(x systemctl show -p MainPID --value niko-mdns.service)"
+x rayctl service rotate mdns >/dev/null || fail "rayctl service rotate mdns"
+for _ in $(seq 20); do
+	[[ $(x sh -c 'wc -l < /var/lib/raycontrol/rendered/mdns/service.keys' 2>/dev/null) == 2 ]] && break
+	sleep 0.5
+done
+[[ $(x sh -c 'wc -l < /var/lib/raycontrol/rendered/mdns/service.keys') == 2 ]] || fail "the masterdns keys file after a rotation"
+[[ $(x stat -c '%a %G' /var/lib/raycontrol/rendered/mdns/service.keys) == "640 niko-mdns" ]] || fail "masterdns keys file mode"
+sleep 12 # the backend rereads it every 5 s, and takes a text read twice
+[[ $(x systemctl show -p MainPID --value niko-mdns.service) == "$pid" ]] || fail "masterdns restarted for a new key"
+if x journalctl -u niko-mdns.service --no-pager | grep -E 'masterdns keys .* not (taken|read)'; then
+	fail "masterdns did not take the keys file"
+fi
+
 x rayctl user add alice -services dns,mdns >/dev/null
 # export: the subscription's links, audited (P-10).
 exported="$(x rayctl user export alice)"

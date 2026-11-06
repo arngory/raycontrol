@@ -22,6 +22,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/hostcheck"
+	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/render"
 )
 
@@ -222,8 +223,25 @@ func needRoot() error {
 // never locked out.
 func (c *cli) install(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
+	o := installFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return errUsage
+	}
+	return c.installWith(ctx, fs, o)
+}
+
+// installOptions are install's flags.
+type installOptions struct {
+	host, domain, name, admin, packages, cfToken, dataplane, services, relay *string
+	checked                                                                  *bool
+}
+
+// installFlags defines install's flags on fs: install, and check, which
+// takes the same arguments from the bootstrap (TestCheckTakesInstallFlags).
+func installFlags(fs *flag.FlagSet) installOptions {
 	host := fs.String("host", "", "public address clients use (required)")
 	domain := fs.String("domain", "", "base domain (needed for DNS tunnels)")
+	name := fs.String("name", "", "the node's name, which clients show with its address (at most 48 characters; rayctl node name later)")
 	admin := fs.String("admin", sshClient(), "addresses that reach SSH without SPA (comma-separated; default: this SSH session)")
 	packages := fs.String("packages", "", "packages the bootstrap installed, as manager:name,name (recorded for uninstall)")
 	cfToken := fs.String("cloudflare-token-file", "", "Cloudflare API token file: DNS records and wildcard certificates (needs -domain)")
@@ -232,9 +250,13 @@ func (c *cli) install(ctx context.Context, args []string) error {
 		" (doh, naive and yggdrasil share TCP 443 with reality, which goes first; default with -domain: reality; \"none\" for none)")
 	checked := fs.Bool("checked", false, "the bootstrap has shown the host check: print only required checks that fail now")
 	relay := fs.String("relay", "", "make this host a relay in front of an exit (relay-v1): the bundle file from rayctl relay bundle on the exit")
-	if err := fs.Parse(args); err != nil {
-		return errUsage
-	}
+	return installOptions{host: host, domain: domain, name: name, admin: admin, packages: packages, cfToken: cfToken,
+		dataplane: dataplane, services: services, relay: relay, checked: checked}
+}
+
+func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOptions) error {
+	host, domain, name, admin, packages, cfToken, dataplane, services, relay, checked :=
+		o.host, o.domain, o.name, o.admin, o.packages, o.cfToken, o.dataplane, o.services, o.relay, o.checked
 	if err := needRoot(); err != nil {
 		return err
 	}
@@ -243,6 +265,11 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	}
 	if *host == "" {
 		return errors.New("-host is required")
+	}
+	// Checked before anything changes; set once rayd is up.
+	nodeName, err := node.CleanName(*name)
+	if err != nil {
+		return fmt.Errorf("-name: %w", err)
 	}
 	// Before anything changes: a host that cannot run a node is left as it
 	// was (docs/08-decisions.md, R4-24).
@@ -360,6 +387,12 @@ func (c *cli) install(ctx context.Context, args []string) error {
 	}
 	if err := waitSocket(deploy.Socket); err != nil {
 		return err
+	}
+	// Only when given: an install again without -name keeps the name.
+	if nodeName != "" {
+		if _, err := c.c.SetNodeName(ctx, connect.NewRequest(&nodev1.SetNodeNameRequest{Name: nodeName})); err != nil {
+			return err
+		}
 	}
 
 	// SSH as a service, admin access, emergency device.
@@ -569,6 +602,16 @@ func waitSocket(path string) error {
 func (c *cli) apply(ctx context.Context, _ []string) error {
 	if err := needRoot(); err != nil {
 		return err
+	}
+	// During an update the rayctl that ran it gives the release's files:
+	// those it did not know how to install, this one does.
+	if stage := os.Getenv(updateStageEnv); stage != "" {
+		if filepath.Dir(filepath.Clean(stage)) != deploy.JournalDir {
+			return fmt.Errorf("%s=%s: not an update's staging directory", updateStageEnv, stage)
+		}
+		if err := installBinaries(stage); err != nil {
+			return fmt.Errorf("installing the release's files: %w", err)
+		}
 	}
 	h, err := journaledHost()
 	if err != nil {

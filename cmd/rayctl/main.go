@@ -35,6 +35,8 @@ import (
 const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
 
   status
+  node name [NAME | ""]                     show, set or remove the node's name, which clients show
+                                            with its address (at most 48 characters)
   user list
   user add [NAME] [-services a,b] [-expires 2026-12-31|30d] [-limit 50G] [-note TEXT]
                                             without NAME: an opaque handle such as u-k3f9-x2qa
@@ -47,15 +49,17 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false;
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
                                             yggdrasil: peers=URI,URI|none (public peers, then rayctl apply);
-                                            dnstt, masterdns: auth=, seal=off|optional|required,
+                                            dnstt, masterdns: auth=, auth_hint=, seal=off|optional|required
+                                            (auth_hint: dnsauth-v2 tags; required needs auth=required),
                                             spare_zones=N|ZONE,ZONE|none (spare zones, made up or your own),
                                             zone=SPARE (a spare becomes the main zone, the main one leaves)
   service cert SITE -chain F -key F         a certificate of your own for the site and the services under
                                             it, in place of ACME's (on the node only)
   service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
                                             schedule: after the lead time, or at once with -now;
-                                            dnstt: a new seal key at once, the previous one accepted
-                                            for -cred-grace (with -now: not at all)
+                                            dnstt: a new seal key at once, masterdns: a new service key
+                                            at once; the previous one accepted for -cred-grace (with
+                                            -now: not at all)
   device list [USER]
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
@@ -91,7 +95,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                               refuses without it), what is advised; changes nothing (root)
   legacy [-remove [-yes] [-purge-packages]]  raycontrol v0 (ray.sh) on this host; -remove backs it up, then
                                               removes only what it installed (root)
-  install -host ADDR [-domain D] [-admin A] [-cloudflare-token-file F] [-services reality,hy2-masq,hy2-obfs,dnstt,masterdns|none]
+  install -host ADDR [-domain D] [-name NAME] [-admin A] [-cloudflare-token-file F] [-services reality,hy2-masq,hy2-obfs,dnstt,masterdns|none]
           [-dataplane DIR]                    set the node up on this host (root); with -domain REALITY by default
   apply                                       install what the current services need (root)
   update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-rollback [-no-carry]]
@@ -198,6 +202,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 	switch cmd {
 	case "status":
 		return c.status(ctx)
+	case "node":
+		return c.nodeCmd(ctx, sub, rest)
 	case "user":
 		return c.user(ctx, sub, rest)
 	case "service":
@@ -275,8 +281,12 @@ func (c *cli) status(ctx context.Context) error {
 	}
 	m := r.Msg
 	return c.print(m, func(w *tabwriter.Writer) {
-		fmt.Fprintf(w, "version\t%s\nnode\t%s\nhost\t%s\nusers\t%d\nservices\t%d\nactive devices\t%d\nspa ports\t%v\n",
-			m.Version, m.NodeId, m.Host, m.Users, m.Services, m.ActiveDevices, m.SpaPorts)
+		fmt.Fprintf(w, "version\t%s\nnode\t%s\n", m.Version, m.NodeId)
+		if m.Name != "" {
+			fmt.Fprintf(w, "name\t%s\n", m.Name)
+		}
+		fmt.Fprintf(w, "host\t%s\nusers\t%d\nservices\t%d\nactive devices\t%d\nspa ports\t%v\n",
+			m.Host, m.Users, m.Services, m.ActiveDevices, m.SpaPorts)
 		if m.DebugUntil != 0 {
 			fmt.Fprintf(w, "debug\topen until %s (rayctl debug off)\n", clock(m.DebugUntil))
 		}
@@ -284,6 +294,38 @@ func (c *cli) status(ctx context.Context) error {
 		for _, l := range m.Loops {
 			fmt.Fprintf(w, "%s\t%s\n", l.Name, loopState(l, time.Now()))
 		}
+	})
+}
+
+// nodeCmd: rayctl node name [NAME]. Without NAME it shows the name; ""
+// removes it.
+func (c *cli) nodeCmd(ctx context.Context, sub string, args []string) error {
+	if sub != "name" || len(args) > 1 {
+		return errUsage
+	}
+	if len(args) == 0 {
+		r, err := c.c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
+		if err != nil {
+			return err
+		}
+		return c.print(&nodev1.SetNodeNameResponse{Name: r.Msg.Name}, func(w *tabwriter.Writer) {
+			if r.Msg.Name == "" {
+				fmt.Fprintln(w, "no name (rayctl node name NAME)")
+				return
+			}
+			fmt.Fprintln(w, r.Msg.Name)
+		})
+	}
+	r, err := c.c.SetNodeName(ctx, connect.NewRequest(&nodev1.SetNodeNameRequest{Name: args[0]}))
+	if err != nil {
+		return err
+	}
+	return c.print(r.Msg, func(w *tabwriter.Writer) {
+		if r.Msg.Name == "" {
+			fmt.Fprintln(w, "the node has no name now; clients show its address from their next subscription")
+			return
+		}
+		fmt.Fprintf(w, "the node is %q now; clients show it from their next subscription\n", r.Msg.Name)
 	})
 }
 
@@ -546,12 +588,13 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 			return err
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
+			what := cmp.Or(r.Msg.Key, "seal")
 			switch {
 			case r.Msg.Seal && r.Msg.PrevUntil != 0:
-				fmt.Fprintf(w, "%s has a new seal key, in subscriptions from now; the previous one is accepted until %s\n",
-					args[0], time.Unix(r.Msg.PrevUntil, 0).UTC().Format(time.RFC3339))
+				fmt.Fprintf(w, "%s has a new %s key, in subscriptions from now; the previous one is accepted until %s\n",
+					args[0], what, time.Unix(r.Msg.PrevUntil, 0).UTC().Format(time.RFC3339))
 			case r.Msg.Seal:
-				fmt.Fprintf(w, "%s has a new seal key; the previous one is no longer accepted: clients get nothing until they fetch their subscription\n", args[0])
+				fmt.Fprintf(w, "%s has a new %s key; the previous one is no longer accepted (its sessions closed): clients get nothing until they fetch their subscription\n", args[0], what)
 			default:
 				fmt.Fprintf(w, "%s switches to new keys at %s (later if a new server name waits for its certificate)\n",
 					args[0], time.Unix(r.Msg.SwitchAt, 0).UTC().Format(time.RFC3339))
@@ -571,11 +614,18 @@ func keyState(s *nodev1.Service) string {
 		// (masterdns seals with its own key).
 		var st struct {
 			Auth      string `json:"auth"`
+			AuthHint  string `json:"auth_hint"`
 			Seal      string `json:"seal"`
 			RotatedAt int64  `json:"seal_rotated_at"`
 			PrevUntil int64  `json:"seal_prev_until"`
+			// masterdns's service key (spec/masterdns-key-rotation.md)
+			KeyRotatedAt int64 `json:"key_rotated_at"`
+			KeyPrevUntil int64 `json:"key_prev_until"`
 		}
 		_ = json.Unmarshal([]byte(s.SettingsJson), &st)
+		if s.Kind == "masterdns" {
+			st.RotatedAt, st.PrevUntil = st.KeyRotatedAt, st.KeyPrevUntil
+		}
 		if st.Seal == "" {
 			st.Seal = "off"
 		}
@@ -584,6 +634,10 @@ func keyState(s *nodev1.Service) string {
 			// dnsauth-v1 off or optional: new sessions can be held back
 			// by anyone (niko-server's load test).
 			out = "auth " + cmp.Or(st.Auth, "off") + " (open: auth=required keeps floods out)"
+		}
+		if st.Auth != "" && st.Auth != "off" {
+			// dnsauth-v2: optional when unset (provision.DNSAuthHint).
+			out += ", v2 " + cmp.Or(st.AuthHint, "optional")
 		}
 		out += ", seal " + st.Seal
 		if st.RotatedAt != 0 {
