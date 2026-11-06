@@ -11,7 +11,9 @@ option go_package = "github.com/arngory/raycontrol/internal/gen/raycontrol/devic
 
 service DeviceService {
   // Register turns an invite into a device known by the client certificate
-  // of this connection, once. Any failure is NOT_FOUND without details.
+  // of this connection, once. Any failure is NOT_FOUND without details, but
+  // for the PIN of an invite that needs one, once the request has proved
+  // the invite (its mac): PERMISSION_DENIED with a PinTries detail.
   rpc Register(RegisterRequest) returns (RegisterResponse);
   // GetSelf describes the calling device.
   rpc GetSelf(GetSelfRequest) returns (GetSelfResponse);
@@ -25,6 +27,17 @@ message RegisterRequest {
   // HMAC-SHA256(invite key, "raycontrol-register-v1" || BE64(minute) ||
   // the pin of this connection's client certificate, as ASCII).
   bytes mac = 3;
+  // For an invite with "pin": true (docs/spec/api-v1.md §3):
+  // HMAC-SHA256(invite key, "raycontrol-invite-pin-v1" || the PIN, as
+  // ASCII digits).
+  bytes pin_proof = 4;
+}
+
+// PinTries is the detail of PERMISSION_DENIED from Register: the PIN was
+// missing or wrong; left is the tries the invite has still. A wrong PIN
+// with none left withdraws the invite.
+message PinTries {
+  int32 left = 1;
 }
 message RegisterResponse {
   string bundle = 1; // "rcdev1:..." of the new device (docs/spec/spa-v2.md §8)

@@ -82,6 +82,10 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 	for _, t := range []table{
 		{"invites", "", `DELETE FROM invites WHERE used_at IS NULL
 		  AND NOT EXISTS (SELECT 1 FROM cur.invites c WHERE c.id = invites.id AND c.used_at IS NULL)`},
+		// A PIN's wrong tries since the copy count (api-v1 §3): fewer
+		// left of the two, or a rollback would hand guesses back.
+		{"invites", "pin_tries", `UPDATE invites SET pin_tries = (SELECT c.pin_tries FROM cur.invites c WHERE c.id = invites.id)
+		  WHERE EXISTS (SELECT 1 FROM cur.invites c WHERE c.id = invites.id AND c.pin_tries < invites.pin_tries)`},
 		{"devices", "cert_pin", `UPDATE devices SET cert_pin = (SELECT c.cert_pin FROM cur.devices c WHERE c.id = devices.id)
 		  WHERE EXISTS (SELECT 1 FROM cur.devices c WHERE c.id = devices.id AND c.cert_pin IS NOT devices.cert_pin)`},
 		{"relays", "", `DELETE FROM relays

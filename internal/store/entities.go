@@ -259,6 +259,19 @@ func (s *Store) ServiceSecrets(ctx context.Context, serviceID int64) (map[string
 	return out, rows.Err()
 }
 
+// InitServiceSecret stores value unless the service has that secret, and
+// returns the one stored: of two callers making it at once, both get the
+// first.
+func (s *Store) InitServiceSecret(ctx context.Context, serviceID int64, name string, value []byte) ([]byte, error) {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO service_secrets (service_id, name, value) VALUES (?, ?, ?)
+		ON CONFLICT(service_id, name) DO NOTHING`, serviceID, name, value); err != nil {
+		return nil, err
+	}
+	var v []byte
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM service_secrets WHERE service_id = ? AND name = ?`, serviceID, name).Scan(&v)
+	return v, err
+}
+
 // SetServiceSecret stores or replaces one secret of a service.
 func (s *Store) SetServiceSecret(ctx context.Context, serviceID int64, name string, value []byte) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO service_secrets (service_id, name, value) VALUES (?, ?, ?)

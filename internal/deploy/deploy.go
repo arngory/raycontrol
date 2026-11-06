@@ -426,6 +426,8 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		// from everyone but the service user (R2-9).
 		// By kind, not from this render's files: a service that failed to
 		// render keeps its earlier key, and its unit must still copy it.
+		// dnsseal-v1's keys are not among them: the backend reads them in
+		// place, in a file of the service group, as dnsauth's.
 		secret := render.DNSSecret(s.Kind)
 		creds := []string{fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
 			g, g, path.Join(p.Rendered, s.Name, secret), p.Credential(s.Name, secret))}

@@ -28,7 +28,9 @@ service NodeService {
   rpc DeleteService(DeleteServiceRequest) returns (DeleteServiceResponse);
   // RotateService asks for the next key switch of a REALITY service
   // (docs/08-decisions.md, R4-7): a lead time away, so that clients get the
-  // next keys first, or at once (leaked keys, a blocked name).
+  // next keys first, or at once (leaked keys, a blocked name). For a dnstt
+  // service it switches the seal key at once (spec/dnsseal-v1.md §8): the
+  // previous one stays accepted for the credential grace, unless now.
   rpc RotateService(RotateServiceRequest) returns (RotateServiceResponse);
   // SetServiceOption changes one of the few settings that may change after
   // creation: a site's answer, whether REALITY moves its server name,
@@ -78,6 +80,14 @@ service NodeService {
   rpc GetDNS(GetDNSRequest) returns (GetDNSResponse);
   rpc SyncDNS(SyncDNSRequest) returns (SyncDNSResponse);
   rpc RemoveDNS(RemoveDNSRequest) returns (RemoveDNSResponse);
+  // CheckDNSZones checks the DNS tunnel zones from the node: the
+  // delegation at the parent's own servers, the front and the backend on
+  // the node, and each zone through public resolvers with dnsprobe-v1
+  // (docs/09-observability.md). Without now it returns the last periodic
+  // check (rayd -dns-check). now checks at once, at most once per 30 s:
+  // a call within that gets the last check (limited), calls at the same
+  // time share one. The answer holds no secret.
+  rpc CheckDNSZones(CheckDNSZonesRequest) returns (CheckDNSZonesResponse);
 
   // Backup returns a consistent copy of the node's database. Root only: it
   // holds every key (R4-13); rayctl encrypts it with the operator's
@@ -133,6 +143,59 @@ message DNSRecord {
   string type = 1;
   string name = 2;
   string content = 3;
+}
+
+message CheckDNSZonesRequest {
+  bool now = 1; // check now instead of returning the last periodic check
+  // Ask these resolvers instead of rayd's (-dns-check-resolvers), now:
+  // google, cloudflare, quad9, nsdi, msk-ix, yandex, system, udp:IP or
+  // tcp:IP. The Russian ones and system only warn.
+  repeated string resolvers = 2;
+}
+message CheckDNSZonesResponse {
+  int64 checked_at = 1; // unix seconds; 0: no check yet
+  int64 next_at = 2;    // the next periodic check, unix seconds; 0: none
+  bool limited = 3;     // now came within 30 s of the last check: this is that one
+  repeated string resolvers = 4; // those asked, as "google 8.8.8.8"
+  repeated DNSZoneCheck zones = 5;
+  uint32 duration_ms = 6;
+}
+
+// DNSZoneCheck is one zone's check.
+message DNSZoneCheck {
+  string service = 1;
+  string kind = 2;    // dnstt | masterdns
+  string zone = 3;
+  string ns = 4;      // the name the parent should delegate it to; "" when the delegation is the operator's own
+  string state = 5;   // ok | warn | fail
+  string summary = 6;
+  string error = 7;   // why the zone fails; "" when it does not
+  bool delegated = 8; // the parent delegates it to the node: resolvers were asked
+  DNSCheckStep parent = 9;
+  DNSCheckStep front = 10;
+  DNSCheckStep backend = 11;
+  repeated DNSResolverCheck resolvers = 12;
+}
+
+// DNSCheckStep is one step of a zone's check.
+message DNSCheckStep {
+  string state = 1; // ok | warn | fail | skip
+  string detail = 2;
+  string fix = 3;
+  uint32 rtt_ms = 4;
+}
+
+// DNSResolverCheck is a zone through one resolver.
+message DNSResolverCheck {
+  string resolver = 1;    // "google 8.8.8.8", "udp:192.0.2.9"
+  string network = 2;     // udp | tcp
+  bool warn_only = 3;     // its failures only warn
+  DNSCheckStep soa = 4;   // the apex (dnstt with an NS name); it may come from its cache
+  DNSCheckStep small = 5; // the small probe (dnstt); an answer to a random name (masterdns)
+  DNSCheckStep large = 6; // the large probe (dnstt)
+  uint32 edns = 7;        // the UDP size it advertised to the node; 0: none, or not seen
+  bool case_randomized = 8; // 0x20 seen by the node
+  string egress = 9;      // its address as the node saw it
 }
 
 message BackupRequest {}
@@ -253,6 +316,7 @@ message LoopHealth {
   uint64 runs = 5;
   uint64 errors = 6;
   bool failing = 7;    // the last round failed (rayd after v0.10.0)
+  string detail = 8;   // what the last round found (dns-zone <service>: the zone's summary)
 }
 
 message User {
@@ -368,6 +432,8 @@ message RotateServiceRequest {
 }
 message RotateServiceResponse {
   int64 switch_at = 1; // unix seconds; later if a new server name waits for its certificate
+  bool seal = 2; // a dnstt service: its seal key switched at switch_at
+  int64 prev_until = 3; // the previous seal key is accepted until then (unix seconds); 0: no longer
 }
 
 message Device {
@@ -388,6 +454,9 @@ message Invite {
   string role = 4;
   int64 created_at = 5;
   int64 expires_at = 6;
+  // pin_tries: the invite needs a PIN, with this many wrong ones left; 0:
+  // no PIN.
+  int32 pin_tries = 7;
 }
 
 message ListDevicesRequest { string user = 1; }
@@ -414,10 +483,15 @@ message CreateInviteRequest {
   string name = 2; // of the device
   string role = 3; // user | admin
   int64 ttl_seconds = 4; // 0: a day; at most a week
+  // pin: the invite also needs a PIN of 6 digits, told by another channel
+  // (docs/spec/api-v1.md §3).
+  bool pin = 5;
 }
 message CreateInviteResponse {
   Invite invite = 1;
   string invite_code = 2; // "rcinv1:..." (docs/spec/api-v1.md)
+  string pin = 3; // the PIN, shown once; "" without
+  string invite_code_short = 4; // the same invite as "RCINV2:..." (api-v1 §3a); "" if the host cannot go in it
 }
 
 message AuditEntry {

@@ -131,6 +131,21 @@ func (c *cli) report(ctx context.Context, args []string) error {
 		}
 		p("dns provider\t%s, %d records needed, %d problems\n", provider, len(d.Msg.Status.Records), len(d.Msg.Status.Problems))
 	}
+	// The zones rayd checks from the node, without their names.
+	if stErr == nil {
+		zones, failing := 0, 0
+		for _, l := range st.Msg.Loops {
+			if strings.HasPrefix(l.Name, "dns-zone ") {
+				zones++
+				if l.Failing {
+					failing++
+				}
+			}
+		}
+		if zones > 0 {
+			p("dns zones\t%d checked from the node, %d failing\n", zones, failing)
+		}
+	}
 
 	p("\n== units\n")
 	units, _ := filepath.Glob("/etc/systemd/system/niko-*.service")

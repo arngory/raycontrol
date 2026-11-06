@@ -3,6 +3,9 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/base32"
@@ -11,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
@@ -18,6 +22,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
@@ -45,14 +50,17 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service cert SITE -chain F -key F         a certificate of your own for the site and the services under
                                             it, in place of ACME's (on the node only)
   service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
-                                            schedule: after the lead time, or at once with -now
+                                            schedule: after the lead time, or at once with -now;
+                                            dnstt: a new seal key at once, the previous one accepted
+                                            for -cred-grace (with -now: not at all)
   device list [USER]
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
   device revoke ID                          a device, or an invite not yet used
-  device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE | -qr]
+  device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv1|rcinv2]
                                             a one-time invite: the client registers the device itself
-                                            through the remote API (service add api api)
+                                            through the remote API (service add api api); rcinv2 is
+                                            the short form (QR half the size, Niko 1.35 or later)
   audit [-n 50]
   admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA
   relay add NAME ADDRESS | list | remove NAME   relays in front of the node (relay-v1): one address
@@ -63,6 +71,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   dns cloudflare [-token-file F]            records and wildcard certificates through Cloudflare
                                             (token asked for without echo when no file is given)
   dns sync                                  bring the zone in line now
+  dns check [-now] [-resolver google,nsdi,udp:IP,…]
+                                            the DNS tunnel zones from the node: delegation, front,
+                                            backend, resolvers (rayd's last check; -now: at once)
   dns remove [-keep-records]                delete raycontrol's records and forget the provider
   summary [show] [-days 7]                  client summaries: networks with enough reports (R4-21)
   summary on|off                            take client reports (and give hints) or not
@@ -284,6 +295,10 @@ func loopState(l *nodev1.LoopHealth, now time.Time) string {
 	// failing comes from rayd after v0.10.0; an older one gives the times.
 	if l.Failing || l.LastError > l.LastOk {
 		return fmt.Sprintf("FAILED %s: %s (last ok %s)", ago(l.LastError), l.Error, ago(l.LastOk))
+	}
+	if l.Detail != "" {
+		// What the round found (dns-zone: the zone's summary).
+		return "ok " + ago(l.LastOk) + ": " + l.Detail
 	}
 	return "ok " + ago(l.LastOk)
 }
@@ -527,8 +542,16 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 			return err
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
-			fmt.Fprintf(w, "%s switches to new keys at %s (later if a new server name waits for its certificate)\n",
-				args[0], time.Unix(r.Msg.SwitchAt, 0).UTC().Format(time.RFC3339))
+			switch {
+			case r.Msg.Seal && r.Msg.PrevUntil != 0:
+				fmt.Fprintf(w, "%s has a new seal key, in subscriptions from now; the previous one is accepted until %s\n",
+					args[0], time.Unix(r.Msg.PrevUntil, 0).UTC().Format(time.RFC3339))
+			case r.Msg.Seal:
+				fmt.Fprintf(w, "%s has a new seal key; the previous one is no longer accepted: clients get nothing until they fetch their subscription\n", args[0])
+			default:
+				fmt.Fprintf(w, "%s switches to new keys at %s (later if a new server name waits for its certificate)\n",
+					args[0], time.Unix(r.Msg.SwitchAt, 0).UTC().Format(time.RFC3339))
+			}
 		})
 	}
 	return errUsage
@@ -537,6 +560,34 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 // keyState says when a REALITY service last switched keys and when the
 // published next switch is (R4-7).
 func keyState(s *nodev1.Service) string {
+	day := func(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04") }
+	if s.Kind == "dnstt" {
+		// dnsseal-v1: the mode, and the key's switch if there was one.
+		var st struct {
+			Auth      string `json:"auth"`
+			Seal      string `json:"seal"`
+			RotatedAt int64  `json:"seal_rotated_at"`
+			PrevUntil int64  `json:"seal_prev_until"`
+		}
+		_ = json.Unmarshal([]byte(s.SettingsJson), &st)
+		if st.Seal == "" {
+			st.Seal = "off"
+		}
+		out := "auth " + st.Auth
+		if st.Auth != "required" {
+			// dnsauth-v1 off or optional: new sessions can be held back
+			// by anyone (niko-server's load test).
+			out = "auth " + cmp.Or(st.Auth, "off") + " (open: auth=required keeps floods out)"
+		}
+		out += ", seal " + st.Seal
+		if st.RotatedAt != 0 {
+			out += ", key since " + day(st.RotatedAt)
+		}
+		if st.PrevUntil != 0 {
+			out += ", previous key until " + day(st.PrevUntil)
+		}
+		return out
+	}
 	if s.Kind != "reality" {
 		return ""
 	}
@@ -547,7 +598,6 @@ func keyState(s *nodev1.Service) string {
 		PrevUntil int64  `json:"prev_until"`
 	}
 	_ = json.Unmarshal([]byte(s.SettingsJson), &st)
-	day := func(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04") }
 	out := "since creation"
 	if st.RotatedAt != 0 {
 		out = "since " + day(st.RotatedAt)
@@ -592,6 +642,9 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 				if inv.ExpiresAt <= time.Now().Unix() {
 					state = "invite expired"
 				}
+				if inv.PinTries > 0 {
+					state += fmt.Sprintf(", PIN (%d tries)", inv.PinTries)
+				}
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t-\t%s\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.CreatedAt), state)
 			}
 		})
@@ -601,6 +654,8 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		ttl := fs.Duration("ttl", 24*time.Hour, "how long the invite works (up to a week)")
 		out := fs.String("o", "", "write the invite alone to this file (mode 0600) instead of the screen")
 		showQR := fs.Bool("qr", false, "draw the invite as a QR code on the screen for the phone to scan, instead of the text")
+		withPIN := fs.Bool("pin", false, "the invite also needs a PIN of 6 digits, shown here once: tell it by another channel")
+		format := fs.String("format", "rcinv1", "rcinv1, or rcinv2: the short form, a QR half the size (Niko 1.35 or later)")
 		if err := need(args, 2); err != nil {
 			return err
 		}
@@ -610,29 +665,105 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		if *showQR && (*out != "" || c.json) {
 			return fmt.Errorf("%w: -qr draws on the screen: not with -o or -json", errUsage)
 		}
+		// The PIN comes after the QR is wiped, which needs a terminal to
+		// read Enter from and draw on (review 9: on stderr it still landed
+		// under the QR through ssh without -t, | tee or </dev/null).
+		if *showQR && *withPIN && (!terminal(os.Stdin) || !terminal(os.Stdout)) {
+			return fmt.Errorf("%w: -qr with -pin needs a terminal (ssh -t), or -o to write the invite to a file", errUsage)
+		}
+		if *format != "rcinv1" && *format != "rcinv2" {
+			return fmt.Errorf("%w: -format rcinv1 or rcinv2", errUsage)
+		}
 		r, err := c.c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{
-			User: args[0], Name: args[1], Role: *role, TtlSeconds: int64(ttl.Seconds())}))
+			User: args[0], Name: args[1], Role: *role, TtlSeconds: int64(ttl.Seconds()), Pin: *withPIN}))
 		if err != nil {
 			return err
 		}
 		inv := r.Msg.Invite
+		if *format == "rcinv2" {
+			if r.Msg.InviteCodeShort == "" {
+				// A node from before v0.13, or a host that is no address
+				// and no ASCII name: withdraw rather than hand out rcinv1.
+				_, rerr := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: inv.Id}))
+				if rerr != nil {
+					return fmt.Errorf("the node made invite %s, but not as rcinv2 (raycontrol v0.13 has it), and it is not withdrawn: rayctl device revoke %s: %w", inv.Id, inv.Id, rerr)
+				}
+				return errors.New("the node made the invite, but not as rcinv2 (raycontrol v0.13 has it, and the node's host must be an address or an ASCII name): withdrawn; invite with -format rcinv1")
+			}
+			r.Msg.InviteCode = r.Msg.InviteCodeShort
+		}
+		if *withPIN && r.Msg.Pin == "" {
+			// A node from before v0.13 drops the field it does not know
+			// and makes an invite without a PIN: withdraw it rather than
+			// let it pass for one that has one.
+			_, rerr := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: inv.Id}))
+			if rerr != nil {
+				return fmt.Errorf("the node made invite %s without a PIN (raycontrol v0.13 has them), and it is not withdrawn: rayctl device revoke %s: %w", inv.Id, inv.Id, rerr)
+			}
+			return fmt.Errorf("the node made the invite without a PIN (raycontrol v0.13 has them): withdrawn; update the node or invite without -pin")
+		}
+		// The PIN goes to the screen, never into the invite's file: it
+		// travels apart from the invite.
+		pinLine := func() {
+			if r.Msg.Pin != "" {
+				fmt.Printf("\nPIN %s %s: tell it by another channel than the invite; %d wrong tries withdraw it\n",
+					r.Msg.Pin[:3], r.Msg.Pin[3:], inv.PinTries)
+			}
+		}
 		if *out != "" {
 			if err := os.WriteFile(*out, []byte(r.Msg.InviteCode+"\n"), 0o600); err != nil {
 				return fmt.Errorf("invite %s made, but not written (rayctl device revoke %s): %w", inv.Id, inv.Id, err)
 			}
 			fmt.Printf("invite %s for %s/%s (%s) until %s in %s\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.ExpiresAt), *out)
+			pinLine()
 			return nil
 		}
 		if *showQR {
 			fmt.Printf("invite %s for %s/%s (%s), once, until %s. Scan it in Niko:\n\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.ExpiresAt))
-			if err := writeQR(os.Stdout, r.Msg.InviteCode); err != nil {
+			var qrText bytes.Buffer
+			if err := writeQR(&qrText, r.Msg.InviteCode); err != nil {
 				return fmt.Errorf("invite %s made, but not drawn (rayctl device revoke %s): %w", inv.Id, inv.Id, err)
 			}
+			if _, err := os.Stdout.Write(qrText.Bytes()); err != nil {
+				return fmt.Errorf("invite %s made, but not drawn (rayctl device revoke %s): %w", inv.Id, inv.Id, err)
+			}
+			if r.Msg.Pin == "" {
+				return nil
+			}
+			// Never the PIN beside the QR, where one photo or screenshot
+			// takes both (review 8): it comes once the QR is wiped. What
+			// was typed ahead (a pasted blank line) does not wipe it
+			// unseen; Ctrl-C says how to withdraw the invite.
+			_ = unix.IoctlSetInt(int(os.Stdin.Fd()), unix.TCFLSH, unix.TCIFLUSH)
+			fmt.Print("\nOnce the QR is scanned or sent, Enter wipes it and shows the PIN.")
+			stop := make(chan os.Signal, 1)
+			signal.Notify(stop, os.Interrupt)
+			defer signal.Stop(stop)
+			line := make(chan error, 1)
+			go func() {
+				_, err := bufio.NewReader(os.Stdin).ReadString('\n')
+				line <- err
+			}()
+			select {
+			case err := <-line:
+				if err != nil {
+					return fmt.Errorf("invite %s made, its PIN not shown (rayctl device revoke %s): %w", inv.Id, inv.Id, err)
+				}
+			case <-stop:
+				return fmt.Errorf("invite %s made, its PIN not shown: rayctl device revoke %s", inv.Id, inv.Id)
+			}
+			// Up over the QR, the prompt and the Enter, and clear below.
+			fmt.Printf("\033[%dA\033[J", bytes.Count(qrText.Bytes(), []byte("\n"))+2)
+			pinLine()
 			return nil
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
 			fmt.Fprintf(w, "invite %s for %s/%s (%s), once, until %s. The client registers with it through the API:\n\n%s\n",
 				inv.Id, inv.User, inv.Name, inv.Role, when(inv.ExpiresAt), r.Msg.InviteCode)
+			if r.Msg.Pin != "" {
+				fmt.Fprintf(w, "\nPIN %s %s: tell it by another channel than the invite; %d wrong tries withdraw it\n",
+					r.Msg.Pin[:3], r.Msg.Pin[3:], inv.PinTries)
+			}
 		})
 	case "add":
 		fs := flag.NewFlagSet("device add", flag.ContinueOnError)

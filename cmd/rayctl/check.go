@@ -8,14 +8,20 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
+	"connectrpc.com/connect"
+
+	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/hostcheck"
 )
 
 // check tells whether this host can run a node: what is required (the
 // install refuses without it), what is advised, what only a probe from
 // outside shows (docs/08-decisions.md, R4-24). It changes nothing and
-// needs no rayd: the bootstrap runs it before it installs anything.
+// needs no rayd: the bootstrap runs it before it installs anything. When
+// rayd runs, its last check of the DNS zones comes too (Internet), which
+// never counts as a failure.
 func (c *cli) check(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	host := fs.String("host", "", "public address clients will use")
@@ -32,13 +38,48 @@ func (c *cli) check(ctx context.Context, args []string) error {
 		return errUsage
 	}
 	return hostCheck(ctx, os.Stdout, hostcheck.Options{Host: *host, Domain: *domain, Services: splitList(*services), AllowV0: *allowV0},
-		false, c.json)
+		false, c.json, c.internetChecks(ctx)...)
+}
+
+// internetChecks is rayd's last check of the DNS zones as results of the
+// Internet level; none when rayd does not answer (before the install) or
+// has not checked yet.
+func (c *cli) internetChecks(ctx context.Context) []hostcheck.Result {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	r, err := c.c.CheckDNSZones(ctx, connect.NewRequest(&nodev1.CheckDNSZonesRequest{}))
+	if err != nil || r.Msg.CheckedAt == 0 {
+		return nil
+	}
+	ago := time.Since(time.Unix(r.Msg.CheckedAt, 0))
+	if ago < time.Minute {
+		ago = ago.Round(time.Second)
+	} else {
+		ago = ago.Round(time.Minute)
+	}
+	var rs []hostcheck.Result
+	for _, z := range r.Msg.Zones {
+		res := hostcheck.Result{Level: hostcheck.Internet, Name: "DNS zone " + z.Zone + " (" + z.Service + ")", OK: z.Error == "",
+			Detail: z.Summary + " (" + ago.String() + " ago)"}
+		if !res.OK {
+			res.Detail, res.Fix = z.Error, "rayctl dns check -now"
+			for _, s := range []*nodev1.DNSCheckStep{z.Parent, z.Front} {
+				if s.GetState() == "fail" && s.GetFix() != "" {
+					res.Fix = s.Fix
+					break
+				}
+			}
+		}
+		rs = append(rs, res)
+	}
+	return rs
 }
 
 // hostCheck runs the checks and prints them, all or (quiet) only what
-// failed; it returns an error when a required check failed.
-func hostCheck(ctx context.Context, w io.Writer, o hostcheck.Options, quiet, asJSON bool) error {
-	rs := hostcheck.System().Check(ctx, o)
+// failed; it returns an error when a required check failed. extra are
+// results found elsewhere (Internet).
+func hostCheck(ctx context.Context, w io.Writer, o hostcheck.Options, quiet, asJSON bool, extra ...hostcheck.Result) error {
+	rs := append(hostcheck.System().Check(ctx, o), extra...)
 	failed := hostcheck.Failed(rs)
 	if asJSON {
 		enc := json.NewEncoder(w)
@@ -51,7 +92,7 @@ func hostCheck(ctx context.Context, w io.Writer, o hostcheck.Options, quiet, asJ
 		if !quiet && len(failed) == 0 {
 			warned := 0
 			for _, r := range rs {
-				if !r.OK {
+				if !r.OK && r.Level == hostcheck.Advised {
 					warned++
 				}
 			}

@@ -328,11 +328,11 @@ func TestResolverHint(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Ten reports: dnstt through DoH, masterdns through UDP but for two
-	// through DoH (8 of 10).
+	// through TCP 53 (8 of 10).
 	for i, d := range devices[:10] {
 		m := "udp"
 		if i < 2 {
-			m = "doh"
+			m = "tcp"
 		}
 		if err := c.Take(ctx, d, mobile, strings.NewReader(body("doh", m))); err != nil {
 			t.Fatal(err)
@@ -350,7 +350,7 @@ func TestResolverHint(t *testing.T) {
 		t.Fatalf("hint without tunnels %+v", h)
 	}
 	nets, _, err := c.View(ctx, 7)
-	if err != nil || len(nets) != 1 || nets[0].Services[mdns]["dns"]["doh"] != 2 || nets[0].Services[dnstt]["dns"]["doh"] != 10 {
+	if err != nil || len(nets) != 1 || nets[0].Services[mdns]["dns"]["tcp"] != 2 || nets[0].Services[dnstt]["dns"]["doh"] != 10 {
 		t.Fatalf("view %+v %v", nets, err)
 	}
 

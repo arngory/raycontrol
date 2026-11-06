@@ -3,9 +3,11 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -19,6 +21,7 @@ import (
 	"connectrpc.com/connect"
 
 	"github.com/arngory/raycontrol/internal/deploy"
+	"github.com/arngory/raycontrol/internal/dnscheck"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
 	"github.com/arngory/raycontrol/internal/health"
@@ -47,11 +50,17 @@ type Server struct {
 	// keys are published; Rotate, if set, runs the rotation at once.
 	RealityLead time.Duration
 	Rotate      func()
+	// CredGrace is how long a previous dnstt seal key stays accepted after
+	// the operator switched it (rayd -cred-grace); zero: not at all.
+	CredGrace time.Duration
 	// DNSChanged runs after the operator changed the DNS provider or its
 	// records: the certificates are tried again (certs.Manager.Retry).
 	DNSChanged func()
 	// Health is where rayd's loops report (O-2): status and metrics.
 	Health *health.Board
+	// DNSCheck checks the DNS tunnel zones from the node (CheckDNSZones);
+	// nil: the call is unavailable.
+	DNSCheck *dnscheck.Monitor
 
 	mu   sync.Mutex
 	rev  uint64
@@ -234,7 +243,7 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 	}
 	for _, l := range s.Health.Loops() {
 		resp.Loops = append(resp.Loops, &nodev1.LoopHealth{Name: l.Name, LastOk: unixOf(l.LastOK), LastError: unixOf(l.LastErr),
-			Error: l.Err, Runs: l.Runs, Errors: l.Errors, Failing: l.Failing()})
+			Error: l.Err, Runs: l.Runs, Errors: l.Errors, Failing: l.Failing(), Detail: l.Detail})
 	}
 	return connect.NewResponse(resp), nil
 }
@@ -472,6 +481,14 @@ func (s *Server) SetCertificate(ctx context.Context, req *connect.Request[nodev1
 
 func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.RotateServiceRequest]) (*connect.Response[nodev1.RotateServiceResponse], error) {
 	now := time.Now()
+	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "dnstt" {
+		// dnsseal-v1 §8: the new key at once, the previous one for the grace.
+		state, err := provision.RotateSealKey(ctx, s.Store, req.Msg.Name, now, s.CredGrace, req.Msg.Now)
+		if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
+			return nil, err
+		}
+		return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Seal: true, PrevUntil: state.PrevUntil}), nil
+	}
 	at := now.Add(s.RealityLead)
 	if req.Msg.Now {
 		at = now
@@ -493,7 +510,7 @@ func devicePB(d store.Device) *nodev1.Device {
 
 func invitePB(inv store.Invite) *nodev1.Invite {
 	return &nodev1.Invite{Id: inv.ID, User: inv.UserName, Name: inv.Name, Role: inv.Role,
-		CreatedAt: inv.CreatedAt.Unix(), ExpiresAt: inv.ExpiresAt.Unix()}
+		CreatedAt: inv.CreatedAt.Unix(), ExpiresAt: inv.ExpiresAt.Unix(), PinTries: int32(inv.PinTries)}
 }
 
 func (s *Server) ListDevices(ctx context.Context, req *connect.Request[nodev1.ListDevicesRequest]) (*connect.Response[nodev1.ListDevicesResponse], error) {
@@ -627,23 +644,44 @@ func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.C
 	if ttl == 0 {
 		ttl = DefaultInviteTTL
 	}
-	var code string
+	var code, short, pin string
 	api, err := s.apiEndpoint(ctx)
 	if err == nil && api == nil {
 		err = fmt.Errorf("%w: no remote API on the node (rayctl service add api api, then rayctl apply)", store.ErrInvalid)
 	}
+	// A PIN (api-v1 §3): 6 digits, told by another channel; the node
+	// keeps only the proof Register must bring.
+	var withPIN store.InvitePIN
+	if err == nil && req.Msg.Pin {
+		if pin, err = newPIN(); err == nil {
+			withPIN = func(key [spa.KeySize]byte) []byte { return InvitePinProof(key, pin) }
+		}
+	}
 	var inv store.Invite
 	if err == nil {
 		var key [spa.KeySize]byte
-		inv, key, err = s.Store.CreateInvite(ctx, req.Msg.User, req.Msg.Name, role, ttl)
+		inv, key, err = s.Store.CreateInvite(ctx, req.Msg.User, req.Msg.Name, role, ttl, withPIN)
 		if err == nil {
-			code, err = s.inviteCode(ctx, inv, key, api)
+			code, short, err = s.inviteCode(ctx, inv, key, api)
 		}
 	}
-	if err := s.done(ctx, "invite.create:"+role, req.Msg.User+"/"+req.Msg.Name, err); err != nil {
+	what := "invite.create:" + role
+	if req.Msg.Pin {
+		what += ":pin"
+	}
+	if err := s.done(ctx, what, req.Msg.User+"/"+req.Msg.Name, err); err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: invitePB(inv), InviteCode: code}), nil
+	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: invitePB(inv), InviteCode: code, Pin: pin, InviteCodeShort: short}), nil
+}
+
+// newPIN is a PIN of 6 digits, uniform.
+func newPIN() (string, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%06d", n.Int64()), nil
 }
 
 // apiEndpoint returns the enabled API service and where clients reach it,
@@ -680,17 +718,23 @@ type apiService struct {
 }
 
 // inviteCode encodes an invite: what SPA needs, with the invite's key and
-// the API as its only service, and where the API is.
-func (s *Server) inviteCode(ctx context.Context, inv store.Invite, key [spa.KeySize]byte, api *apiService) (string, error) {
+// the API as its only service, and where the API is; as rcinv1 and in the
+// short form rcinv2 (api-v1 §3a), "" when the host cannot go in it.
+func (s *Server) inviteCode(ctx context.Context, inv store.Invite, key [spa.KeySize]byte, api *apiService) (string, string, error) {
 	host, err := node.Host(ctx, s.Store)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	ep := api.endpoint
 	b := node.Bundle{Version: 1, Host: host, SPA: node.FromParams(s.Params), DeviceID: inv.ID,
-		DeviceKey: hex.EncodeToString(key[:]), API: &ep, Expires: inv.ExpiresAt.Unix(),
+		DeviceKey: hex.EncodeToString(key[:]), API: &ep, Expires: inv.ExpiresAt.Unix(), PIN: inv.PinProof != nil,
 		Services: []node.BundleService{{ID: uint16(api.svc.ID), Kind: api.svc.Kind, Name: api.svc.Name}}}
-	return b.EncodeInvite()
+	code, err := b.EncodeInvite()
+	if err != nil {
+		return "", "", err
+	}
+	short, _ := b.EncodeInvite2()
+	return code, short, nil
 }
 
 func (s *Server) ListAudit(ctx context.Context, req *connect.Request[nodev1.ListAuditRequest]) (*connect.Response[nodev1.ListAuditResponse], error) {

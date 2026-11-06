@@ -225,3 +225,52 @@ func TestCarryRevocationsMore(t *testing.T) {
 		t.Errorf("device certificate pin %q, want the new one", pin)
 	}
 }
+
+// An invite's wrong PINs since the copy count after a rollback: the tries
+// left are the fewer of the two (api-v1 §3), not the copy's.
+func TestCarryInvitePINTries(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cur := filepath.Join(dir, "rayd.db")
+	s, err := Open(ctx, cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateUser(ctx, User{Name: "alice", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	inv, _, err := s.CreateInvite(ctx, "alice", "phone", "user", time.Hour, func(k [32]byte) []byte { return k[:] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	saved := filepath.Join(dir, "saved.db")
+	b, err := os.ReadFile(cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(saved, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if s, err = Open(ctx, cur); err != nil {
+		t.Fatal(err)
+	}
+	for range InvitePinTries - 1 {
+		if _, err := s.FailInvitePIN(ctx, inv.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Close()
+	if err := CarryRevocations(ctx, saved, cur); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(ctx, saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	back, _, err := r.ActiveInvite(ctx, inv.ID)
+	if err != nil || back.PinTries != 1 {
+		t.Fatalf("after the rollback: %d tries left (%v), want 1", back.PinTries, err)
+	}
+}

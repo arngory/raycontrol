@@ -195,7 +195,7 @@ func TestEndpoint(t *testing.T) {
 		p.Probe == nil || p.Probe.V != 1 || p.Probe.UDP || p.Probe.Tunnel != probe.Name ||
 		len(p.Probe.TunnelSvc) != 1 || p.Probe.TunnelSvc[0] != p.Profiles[0].Svc ||
 		// The report fields beyond the first ones of v1 (Niko §20).
-		!slices.Equal(p.Probe.Report, []string{"udp_mtu", "path", "dns"}) ||
+		!slices.Equal(p.Probe.Report, []string{"udp_mtu", "path", "dns", "dns_tcp"}) ||
 		// The SPA carriers: UDP only without -spa-tcp.
 		p.SPA == nil || !slices.Equal(p.SPA.Carriers, []string{"udp"}) ||
 		// The user has a dnstt profile: the dnsprobe-v1 key.
@@ -228,10 +228,15 @@ func TestEndpoint(t *testing.T) {
 	q := link.Query()
 	dnsParts := strings.Split(q.Get("niko-dns"), ";")
 	if link.Scheme != "vless" || !strings.HasPrefix(q.Get("encryption"), "mlkem768x25519plus.native.0rtt.") ||
-		q.Get("niko-node") != p.NodeID || len(dnsParts) != 4 || dnsParts[0] != "dnstt" || len(dnsParts[3]) != 64 {
+		q.Get("niko-node") != p.NodeID || len(dnsParts) != 4 || dnsParts[0] != "dnstt" || len(dnsParts[3]) != 64 ||
+		q.Has("niko-dnsseal") {
 		t.Fatalf("link %s", p.Profiles[0].Link)
 	}
 
+	// dnsseal-v1 on: the link carries the zone's key (spec/dnsseal-v1.md §2).
+	if _, err := provision.SetServiceOption(context.Background(), f.st, "dns", "seal", "optional"); err != nil {
+		t.Fatal(err)
+	}
 	resp2, err := get(pq, true)
 	if err != nil {
 		t.Fatal(err)
@@ -239,8 +244,21 @@ func TestEndpoint(t *testing.T) {
 	var env2 sub.Envelope
 	json.NewDecoder(resp2.Body).Decode(&env2)
 	resp2.Body.Close()
-	if p2, _ := sub.Verify(env2, f.keys.PublicJSON()); p2.Seq <= p.Seq {
+	p2, _ := sub.Verify(env2, f.keys.PublicJSON())
+	if p2.Seq <= p.Seq {
 		t.Fatalf("seq did not grow: %d then %d", p.Seq, p2.Seq)
+	}
+	link2, _ := url.Parse(p2.Profiles[0].Link)
+	svcs, _ := f.st.ListServices(context.Background())
+	var sealKey []byte
+	for _, s := range svcs {
+		if s.Name == "dns" {
+			secrets, _ := f.st.ServiceSecrets(context.Background(), s.ID)
+			sealKey = secrets[provision.SecretSealKey]
+		}
+	}
+	if got := link2.Query().Get("niko-dnsseal"); got != "v1;"+base64.RawURLEncoding.EncodeToString(sealKey) || len(sealKey) != 32 {
+		t.Fatalf("niko-dnsseal %q", got)
 	}
 
 	// A revoked device gets nothing.

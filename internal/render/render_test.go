@@ -1,10 +1,13 @@
 package render_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -53,14 +56,14 @@ func TestRender(t *testing.T) {
 	st := node(t)
 	// The name the tunnel zones are delegated to (DNSRecords chooses it).
 	st.SetSetting(ctx, "dns_ns_name", []byte("ns9.example.com"))
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(m.Inner) != 1 {
 		t.Fatalf("inner credentials for %d users, want only alice", len(m.Inner))
 	}
-	again, _ := render.Collect(ctx, st)
+	again, _ := render.CollectForRender(ctx, st)
 	for id, uuid := range m.Inner {
 		if again.Inner[id] != uuid {
 			t.Fatal("inner credentials changed between renders")
@@ -133,6 +136,16 @@ func TestRender(t *testing.T) {
 	if key.Mode != 0o600 || key.Group != "" || len(strings.TrimSpace(string(key.Content))) != 64 {
 		t.Fatalf("noise key file %+v", key)
 	}
+	// dnsseal-v1: the key file whatever the mode, in the service group and
+	// reread by the backend; the mode off by default.
+	sealFile := byPath["/var/lib/raycontrol/rendered/dns/seal.keys"]
+	if sealFile.Mode != 0o640 || sealFile.Group != "niko-dns" || !sealFile.Reload || len(sealKeyLines(sealFile.Content)) != 1 ||
+		len(sealKeyLines(sealFile.Content)[0]) != 64 {
+		t.Fatalf("seal key file %+v", sealFile)
+	}
+	if _, on := opts["seal"]; on || opts["seal_key_file"] != nil {
+		t.Fatalf("the seal on by default: %v", opts)
+	}
 
 	var mdns map[string]any
 	json.Unmarshal(byPath["/var/lib/raycontrol/rendered/mdns/backend.json"].Content, &mdns)
@@ -193,7 +206,7 @@ func TestDisabledInner(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.SetServiceEnabled(ctx, "inner", false)
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +217,9 @@ func TestDisabledInner(t *testing.T) {
 		t.Fatalf("tunnels without the inner stage: %v", err)
 	}
 	for _, f := range files {
-		if f.Service == "dns" || f.Service == "mdns" {
+		// The devices' keys of a broken dnstt service still go (Q-1: a
+		// revoked device loses it there too); nothing else of the tunnels.
+		if (f.Service == "dns" || f.Service == "mdns") && !f.Refresh {
 			t.Errorf("%s rendered without the inner stage", f.Path)
 		}
 		if f.Service == "front" && strings.Contains(string(f.Content), `"zones"`) {
@@ -241,7 +256,7 @@ func withInner(t *testing.T, st *store.Store) render.Model {
 	ctx := context.Background()
 	st.SetServiceEnabled(ctx, "inner", true)
 	defer st.SetServiceEnabled(ctx, "inner", false)
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +287,7 @@ func TestReality(t *testing.T) {
 	alice, _ := st.UserByName(ctx, "alice")
 	bob, _ := st.UserByName(ctx, "bob")
 	st.SetUserServices(ctx, "bob", []int64{svc.ID})
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +391,7 @@ func TestReality(t *testing.T) {
 			t.Fatalf("rotate: %d %v", n, err)
 		}
 	}
-	if m, err = render.Collect(ctx, st); err != nil {
+	if m, err = render.CollectForRender(ctx, st); err != nil {
 		t.Fatal(err)
 	}
 	c, _ = read(m)
@@ -403,7 +418,14 @@ func TestReality(t *testing.T) {
 func TestDNSAuth(t *testing.T) {
 	ctx := context.Background()
 	st := node(t)
-	m, _ := render.Collect(ctx, st)
+	// A new dnstt service takes signed queries only (review 7).
+	if dns, _ := st.ServiceByName(ctx, "dns"); render.DNSAuthMode(dns) != "required" {
+		t.Fatalf("a new dnstt service: auth %q", render.DNSAuthMode(dns))
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "dns", "auth", "off"); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := render.CollectForRender(ctx, st)
 	files, _, _ := render.Render(m, render.DefaultPaths)
 	for _, f := range files {
 		if strings.HasSuffix(f.Path, "/"+render.DNSAuthKeys) || (f.Service == "dns" && strings.Contains(string(f.Content), `"auth"`)) {
@@ -450,7 +472,11 @@ func TestDNSAuth(t *testing.T) {
 			backend = string(f.Content)
 		}
 	}
-	if !strings.Contains(keys, dev.ID+" "+hex.EncodeToString(want[:])+"\n") || strings.Count(keys, "\n") != 2 {
+	// The device's line, and the node's own for its check (review 8).
+	checkKey, _ := st.DNSCheckKey(ctx)
+	node, _ := provision.DNSCheckAuthKey(checkKey, params.NodeID, dns.ID)
+	if !strings.Contains(keys, dev.ID+" "+hex.EncodeToString(want[:])+"\n") || strings.Count(keys, "\n") != 3 ||
+		!strings.Contains(keys, provision.DNSCheckDevice+" "+hex.EncodeToString(node[:])+"\n") {
 		t.Fatalf("keys file:\n%s", keys)
 	}
 	if !strings.Contains(backend, `"auth": "required"`) || !strings.Contains(backend, `"auth_keys_file": "/var/lib/raycontrol/rendered/dns/auth.keys"`) {
@@ -483,7 +509,7 @@ func TestDebugLevels(t *testing.T) {
 	ctx := context.Background()
 	st := node(t)
 	levels := func() map[string]string {
-		m, err := render.Collect(ctx, st)
+		m, err := render.CollectForRender(ctx, st)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -516,4 +542,131 @@ func TestDebugLevels(t *testing.T) {
 	if got := levels(); got["front"] != "warn/" || got["inner"] != "warning/none" {
 		t.Fatalf("after the window %v", got)
 	}
+}
+
+// dnsseal-v1 turned on: the backend reads the key the unit copies in; in
+// required mode the front pads its probe answers as the zone's (§6), not
+// in optional; masterdns takes no seal. The key is the service's, made
+// once even for a dnstt service from before (render.Collect).
+func TestRenderSeal(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	services, _ := st.ListServices(ctx)
+	var dns store.Service
+	for _, s := range services {
+		if s.Kind == "dnstt" {
+			dns = s
+		}
+	}
+	// A service from before dnsseal-v1: no key yet.
+	st.UpdateService(ctx, dns.ID, store.ServiceUpdate{Delete: []string{provision.SecretSealKey}})
+	for _, mode := range []string{"optional", "required"} {
+		if _, err := provision.SetServiceOption(ctx, st, dns.Name, "seal", mode); err != nil {
+			t.Fatal(err)
+		}
+		m, err := render.CollectForRender(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, _, err := render.Render(m, render.DefaultPaths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		byPath := map[string]render.File{}
+		for _, f := range files {
+			byPath[f.Path] = f
+		}
+		var backend struct {
+			Options map[string]any `json:"options"`
+		}
+		json.Unmarshal(byPath["/var/lib/raycontrol/rendered/dns/backend.json"].Content, &backend)
+		if backend.Options["seal"] != mode || backend.Options["seal_key_file"] != "/var/lib/raycontrol/rendered/dns/seal.keys" {
+			t.Fatalf("%s: options %v", mode, backend.Options)
+		}
+		secrets, _ := st.ServiceSecrets(ctx, dns.ID)
+		if got := sealKeyLines(byPath["/var/lib/raycontrol/rendered/dns/seal.keys"].Content); len(got) != 1 || got[0] != hex.EncodeToString(secrets[provision.SecretSealKey]) {
+			t.Fatalf("%s: seal key file %q", mode, got)
+		}
+		var front struct {
+			DNS struct {
+				Zones []struct {
+					Backend string `json:"backend"`
+					SealPad bool   `json:"seal_pad"`
+				} `json:"zones"`
+			} `json:"dns"`
+		}
+		json.Unmarshal(byPath["/var/lib/raycontrol/rendered/front/front.json"].Content, &front)
+		for _, z := range front.DNS.Zones {
+			if z.SealPad != (z.Backend == "dns" && mode == "required") {
+				t.Errorf("%s: zone of %s: seal_pad %v", mode, z.Backend, z.SealPad)
+			}
+		}
+		var mdns struct {
+			Options map[string]any `json:"options"`
+		}
+		json.Unmarshal(byPath["/var/lib/raycontrol/rendered/mdns/backend.json"].Content, &mdns)
+		if mdns.Options["seal"] != nil {
+			t.Fatalf("masterdns sealed: %v", mdns.Options)
+		}
+	}
+	// The key stays the same from collect to collect.
+	before, _ := st.ServiceSecrets(ctx, dns.ID)
+	if _, err := render.CollectForRender(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := st.ServiceSecrets(ctx, dns.ID)
+	if !bytes.Equal(before[provision.SecretSealKey], after[provision.SecretSealKey]) {
+		t.Fatal("the seal key changed")
+	}
+	// A switch of the key (spec/dnsseal-v1.md §8): the new key first, the
+	// previous one after it until its grace is over.
+	keyFile := func() string {
+		t.Helper()
+		m, err := render.CollectForRender(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, _, err := render.Render(m, render.DefaultPaths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if f.Path == "/var/lib/raycontrol/rendered/dns/seal.keys" {
+				return strings.Join(sealKeyLines(f.Content), "\n") + "\n"
+			}
+		}
+		t.Fatal("no seal key file")
+		return ""
+	}
+	now := time.Now()
+	if _, err := provision.RotateSealKey(ctx, st, dns.Name, now, time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	rotated, _ := st.ServiceSecrets(ctx, dns.ID)
+	if got, want := keyFile(), hex.EncodeToString(rotated[provision.SecretSealKey])+"\n"+hex.EncodeToString(after[provision.SecretSealKey])+"\n"; got != want {
+		t.Fatalf("key file after a switch:\n%s\nwant\n%s", got, want)
+	}
+	if _, err := provision.ExpireSealKeys(ctx, st, now.Add(time.Hour), slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := keyFile(), hex.EncodeToString(rotated[provision.SecretSealKey])+"\n"; got != want {
+		t.Fatalf("key file after the grace: %q, want %q", got, want)
+	}
+	if _, err := provision.SetServiceOption(ctx, st, dns.Name, "seal", "on"); err == nil {
+		t.Fatal("seal=on taken")
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "mdns", "seal", "required"); err == nil {
+		t.Fatal("a seal for masterdns taken")
+	}
+}
+
+// sealKeyLines are the keys of a seal key file, without its comments.
+func sealKeyLines(b []byte) []string {
+	var out []string
+	for l := range strings.SplitSeq(string(b), "\n") {
+		if l != "" && !strings.HasPrefix(l, "#") {
+			out = append(out, l)
+		}
+	}
+	return out
 }

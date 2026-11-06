@@ -10,6 +10,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/cloudflare"
 	"github.com/arngory/raycontrol/internal/cloudflare/cftest"
+	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -159,5 +160,99 @@ func TestNSNameRace(t *testing.T) {
 		if n := <-names; n != first || n == "" {
 			t.Fatalf("names %q and %q", first, n)
 		}
+	}
+}
+
+// The zones the node checks itself: enabled DNS tunnels with a zone, the
+// NS name and host of DNSRecords, the probe and seal keys for dnstt.
+func TestDNSCheckTargets(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if zones, err := DNSCheckTargets(ctx, st); err != nil || len(zones) != 0 {
+		t.Fatalf("no tunnels: %v %v", zones, err)
+	}
+	for _, s := range []store.Service{{Kind: "dnstt", Name: "dns", Enabled: true}, {Kind: "masterdns", Name: "mdns", Enabled: true},
+		{Kind: "dnstt", Name: "off", Enabled: false}, {Kind: "reality", Name: "reality", Enabled: true}} {
+		if _, err := CreateService(ctx, st, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := SetServiceOption(ctx, st, "dns", "seal", "optional"); err != nil {
+		t.Fatal(err)
+	}
+	zones, err := DNSCheckTargets(ctx, st)
+	if err != nil || len(zones) != 2 {
+		t.Fatalf("zones %v %v", zones, err)
+	}
+	ns, _ := NSName(ctx, st)
+	probeKey, _ := st.DNSProbeKey(ctx)
+	dns, _ := st.ServiceByName(ctx, "dns")
+	secrets, _ := st.ServiceSecrets(ctx, dns.ID)
+	// dnsauth on (the default): the node's own key, its line in the keys.
+	checkKey, _ := st.DNSCheckKey(ctx)
+	params, _ := node.LoadParams(ctx, st)
+	authKey, err := DNSCheckAuthKey(checkKey, params.NodeID, dns.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, m := zones[0], zones[1]
+	if d.Service != "dns" || d.Kind != "dnstt" || d.Name != Zone(dns) || d.NS != ns || d.Host != "203.0.113.7" || int64(d.SvcID) != dns.ID ||
+		string(d.ProbeKey) != string(probeKey) || d.Seal != "optional" || string(d.SealKey) != string(secrets[SecretSealKey]) || d.Auth != "required" ||
+		string(d.AuthKey) != string(authKey[:]) {
+		t.Fatalf("dnstt %+v", d)
+	}
+	if m.Service != "mdns" || m.Kind != "masterdns" || m.NS != ns || m.ProbeKey != nil || m.SealKey != nil || m.Seal != "" {
+		t.Fatalf("masterdns %+v", m)
+	}
+	// The seal off: no key to seal with.
+	if _, err := SetServiceOption(ctx, st, "dns", "seal", "off"); err != nil {
+		t.Fatal(err)
+	}
+	if zones, _ := DNSCheckTargets(ctx, st); zones[0].Seal != "off" || zones[0].SealKey != nil {
+		t.Fatalf("seal off %+v", zones[0])
+	}
+	// dnsauth off: an open poll, no key.
+	if _, err := SetServiceOption(ctx, st, "dns", "auth", "off"); err != nil {
+		t.Fatal(err)
+	}
+	if zones, _ := DNSCheckTargets(ctx, st); zones[0].Auth != "off" || zones[0].AuthKey != nil {
+		t.Fatalf("auth off %+v", zones[0])
+	}
+	if _, err := DNSCheckAuthKey(checkKey[:31], params.NodeID, dns.ID); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("a short check key: %v", err)
+	}
+}
+
+// A zone given at creation is a DNS name, kept as the front compares it;
+// one kept otherwise before reads the same through Zone (review 7).
+func TestZoneSetting(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	for i, bad := range []string{`""`, `"localhost"`, `"a b.example.com"`, `"-x.example.com"`, `5`, `"x..example.com"`} {
+		_, err := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "bad" + string(rune('a'+i)), Enabled: true, Settings: `{"zone":` + bad + `}`})
+		if !errors.Is(err, store.ErrInvalid) {
+			t.Errorf("zone %s: %v", bad, err)
+		}
+	}
+	svc, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "m", Enabled: true, Settings: `{"zone":"T.Example.COM."}`})
+	if err != nil || !strings.Contains(svc.Settings, `"zone":"t.example.com"`) || Zone(svc) != "t.example.com" {
+		t.Fatalf("%s %v", svc.Settings, err)
+	}
+	if z := Zone(store.Service{Settings: `{"zone":"Old.Example.com."}`}); z != "old.example.com" {
+		t.Fatalf("an older service's zone: %q", z)
 	}
 }

@@ -96,6 +96,12 @@ func actorFrom(ctx context.Context) string {
 	return a
 }
 
+// isLocal reports a caller on the node's own socket, not the remote API.
+func isLocal(ctx context.Context) bool {
+	cred, _ := ctx.Value(peerKey{}).(*unix.Ucred)
+	return cred != nil
+}
+
 // isRoot reports a caller with UID 0.
 func isRoot(ctx context.Context) bool {
 	cred, _ := ctx.Value(peerKey{}).(*unix.Ucred)

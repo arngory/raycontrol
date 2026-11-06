@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/pem"
@@ -11,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -19,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,6 +33,7 @@ import (
 	"github.com/arngory/raycontrol/internal/certs"
 	"github.com/arngory/raycontrol/internal/cloudflare"
 	"github.com/arngory/raycontrol/internal/deploy"
+	"github.com/arngory/raycontrol/internal/dnscheck"
 	"github.com/arngory/raycontrol/internal/doh"
 	"github.com/arngory/raycontrol/internal/health"
 	"github.com/arngory/raycontrol/internal/live"
@@ -150,10 +154,19 @@ func cmdServe(args []string) error {
 	realityPeriod := fs.Duration("reality-period", 90*24*time.Hour, "how long REALITY keys stay current; their next set is published -cred-lead ahead (0: no rotation)")
 	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new REALITY server name may wait for its certificate")
 	debug := fs.Bool("debug", false, "log at debug level: refused subscription requests with their addresses (personal data: turn it off after use)")
+	dnsCheck := fs.Duration("dns-check", time.Hour, "check the DNS tunnel zones from the node this often, ±10 %: the delegation, the front and the backend, the zones through public resolvers (0: only on demand, rayctl dns check -now)")
+	dnsCheckResolvers := fs.String("dns-check-resolvers", strings.Join(dnscheck.DefaultResolvers, ","),
+		"resolvers the DNS check asks: "+strings.Join(dnscheck.ResolverNames(), ", ")+", udp:IP or tcp:IP")
+	dnsCheckPrivate := fs.Bool("dns-check-private", false,
+		"the DNS check asks the parent zone's servers at private, shared or reserved addresses too (a lab's own parent zone)")
 	fs.Parse(args)
 	epoch := provision.RealityEpoch{Period: *realityPeriod, Lead: *credLead, Prepare: *realityPrepare, Grace: *credGrace}
 	if err := epoch.Check(); err != nil {
 		return err
+	}
+	dnsResolvers, err := dnscheck.ParseResolvers([]string{*dnsCheckResolvers})
+	if err != nil {
+		return fmt.Errorf("-dns-check-resolvers: %w", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -184,13 +197,15 @@ func cmdServe(args []string) error {
 	paths := render.Paths{Rendered: *rendered, Run: *run, Supervised: *supervise}
 	rotateNow := make(chan struct{}, 1)
 	srv := &api.Server{Store: st, Params: params, Version: version, Paths: paths, Binaries: deploy.DefaultBinaries,
-		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead, Health: hb,
+		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead, CredGrace: *credGrace, Health: hb,
 		Rotate: func() {
 			select {
 			case rotateNow <- struct{}{}:
 			default:
 			}
-		}}
+		},
+		DNSCheck: dnsMonitor(ctx, st, dnsResolvers, hb, log)}
+	srv.DNSCheck.Checker.Private = *dnsCheckPrivate
 	per := &api.PerimeterServer{Server: srv, RayspaUID: -1, DefaultTTL: *spaTTL, MaxTTL: *spaMaxTTL, TCPCarrier: *spaTCP, Refresh: time.Minute}
 	policy := api.PeerPolicy{Group: *group}
 	if u, err := user.Lookup(*rayspaUser); err == nil {
@@ -250,6 +265,9 @@ func cmdServe(args []string) error {
 	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, hb, log)
 	go syncDNS(ctx, st, srv.Changes, hb, log)
 	go checkRealityTargets(ctx, st, srv.Changes, hb, log)
+	if *dnsCheck > 0 {
+		go checkDNSZones(ctx, srv.DNSCheck, st, srv.Changes, *dnsCheck, hb, log)
+	}
 	frontUID := render.FrontUID
 	if *supervise {
 		frontUID = os.Getuid() // the front is a child of rayd's
@@ -605,6 +623,13 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 				cm.Wake()
 			}
 		}
+		// The previous seal keys of dnstt services past their grace
+		// (spec/dnsseal-v1.md §8): the key files lose them.
+		if n, err := provision.ExpireSealKeys(ctx, st, time.Now(), log); err != nil {
+			log.Error("seal keys", "err", err)
+		} else if n > 0 {
+			notify()
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -872,6 +897,151 @@ func checkRealityTargets(ctx context.Context, st *store.Store, changes func() <-
 		case <-time.After(time.Until(all)):
 		}
 	}
+}
+
+// dnsMonitor checks the node's DNS tunnel zones (internal/dnscheck): every
+// full check with rayd's resolvers goes to the health board, a loop per
+// zone ("dns-zone <service>" in rayctl status), and a zone's failure to
+// the log when it changes. The checks send queries to the parent's servers
+// and to public resolvers from the node's address: no key, nothing about
+// users (docs/09-observability.md).
+func dnsMonitor(ctx context.Context, st *store.Store, resolvers []dnscheck.Resolver, hb *health.Board, log *slog.Logger) *dnscheck.Monitor {
+	var mu sync.Mutex
+	logged := map[string]string{} // service: the failure last logged
+	return &dnscheck.Monitor{Checker: &dnscheck.Checker{}, Resolvers: resolvers, Base: ctx,
+		Targets: func(ctx context.Context) ([]dnscheck.Zone, error) { return provision.DNSCheckTargets(ctx, st) },
+		Done: func(rep dnscheck.Report) {
+			mu.Lock()
+			defer mu.Unlock()
+			var services []string
+			for _, z := range rep.Zones {
+				svc := z.Zone.Service
+				services = append(services, svc)
+				err := z.Err()
+				hb.Report("dns-zone "+svc, z.Summary(), err)
+				msg := ""
+				if err != nil {
+					msg = err.Error()
+				}
+				switch {
+				case msg == logged[svc]:
+				case err != nil:
+					log.Warn("DNS zone check failed", "service", svc, "zone", z.Zone.Name, "err", err)
+				default:
+					log.Info("DNS zone check passes again", "service", svc, "zone", z.Zone.Name)
+				}
+				logged[svc] = msg
+			}
+			hb.Retain("dns-zone ", services)
+		}}
+}
+
+// Pace of the DNS zone check after a change of zones or of the node's
+// address: the parent from 30 s on (the front takes a new zone first),
+// every 30 s for up to 10 minutes. Variables for the tests.
+var (
+	dnsParentEvery = 30 * time.Second
+	dnsParentFor   = 10 * time.Minute
+)
+
+// checkDNSZones checks the DNS tunnel zones from the node every period,
+// ±10 % (internal/dnscheck; rayctl status: dns-zone <service>). After a
+// change of the zones or of the node's address it asks only the parent
+// until it delegates them, and the resolvers then: a resolver asked before
+// the delegation keeps the zone's absence in its cache, and clients with
+// it. On every change it also forgets the loops of zones that went.
+func checkDNSZones(ctx context.Context, mon *dnscheck.Monitor, st *store.Store, changes func() <-chan struct{}, period time.Duration,
+	hb *health.Board, log *slog.Logger) {
+	defer mon.SetNext(time.Time{})
+	var key string
+	var changed, next time.Time
+	waiting := false
+	for {
+		wake := changes()
+		zones, err := provision.DNSCheckTargets(ctx, st)
+		now := time.Now()
+		var retry time.Time // a read again sooner than next, after an error
+		if err == nil {
+			services := make([]string, 0, len(zones))
+			for _, z := range zones {
+				services = append(services, z.Service)
+			}
+			hb.Retain("dns-zone ", services)
+		}
+		switch {
+		case err != nil:
+			if ctx.Err() != nil {
+				return
+			}
+			log.Warn("DNS zone check: the zones not read", "err", err)
+			// Read again in dnsParentEvery: a change that woke the loop
+			// is not left to the plan, an hour away (review 10). Never
+			// sooner, or a database that keeps failing spins the loop
+			// (review 8); the plan itself stays (review 9).
+			if !next.After(now) {
+				next = now.Add(dnsParentEvery)
+			}
+			retry = now.Add(dnsParentEvery)
+		case len(zones) == 0:
+			key, next, waiting = "", time.Time{}, false
+		case dnsZonesKey(zones) != key:
+			key, changed, next, waiting = dnsZonesKey(zones), now, now.Add(dnsParentEvery), true
+		case now.Before(next):
+		case waiting && now.Sub(changed) < dnsParentFor:
+			rep, err := mon.Run(ctx, dnscheck.RunOptions{ParentOnly: true})
+			if err == nil && !slices.ContainsFunc(rep.Zones, func(z dnscheck.ZoneResult) bool { return !z.Delegated }) {
+				waiting = false
+				continue // the whole check now
+			}
+			next = time.Now().Add(dnsParentEvery)
+		default:
+			waiting = false
+			if _, err := mon.Run(ctx, dnscheck.RunOptions{}); err != nil && ctx.Err() == nil {
+				log.Warn("DNS zone check", "err", err)
+			}
+			next = time.Now().Add(jitter(period, 10))
+		}
+		mon.SetNext(next)
+		at := next
+		if !retry.IsZero() && retry.Before(at) {
+			at = retry
+		}
+		var timer <-chan time.Time
+		if !at.IsZero() {
+			timer = time.After(time.Until(at))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+		case <-timer:
+		}
+	}
+}
+
+// dnsZonesKey names what the delegation depends on: the zones, the name
+// they are delegated to and the node's host.
+func dnsZonesKey(zones []dnscheck.Zone) string {
+	keys := make([]string, 0, len(zones))
+	for _, z := range zones {
+		keys = append(keys, z.Service+" "+z.Kind+" "+z.Name+" "+z.NS+" "+z.Host)
+	}
+	slices.Sort(keys)
+	return strings.Join(keys, "\n")
+}
+
+// jitter is d, give or take percent %, at random: nodes started together
+// do not ask the same resolvers at the same moment.
+func jitter(d time.Duration, percent int64) time.Duration {
+	spread := int64(d) * percent / 100
+	if spread <= 0 {
+		return d
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(2*spread+1))
+	if err != nil {
+		return d
+	}
+	return time.Duration(int64(d) - spread + n.Int64())
 }
 
 func rotateCredentials(ctx context.Context, st *store.Store, r store.Rotation, notify func(), hb *health.Board, log *slog.Logger) {

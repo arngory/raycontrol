@@ -38,7 +38,7 @@ func plan2(t *testing.T, paths render.Paths) (render.Model, []render.File) {
 			t.Fatal(err)
 		}
 	}
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +136,7 @@ func TestBuild(t *testing.T) {
 	d := p.Processes[2]
 	if d.Unit != "niko-dns.service" || d.Dir != "/run/niko/dns" || d.Needs != "/var/lib/raycontrol/rendered/dns/backend.json" ||
 		!slices.Equal(d.Args, []string{"/usr/local/libexec/raycontrol/niko-server", "backend", "-c", "/var/lib/raycontrol/rendered/dns/backend.json"}) ||
+		// The Noise key; dnsseal-v1's keys are read in place.
 		len(d.Copies) != 1 || d.Copies[0] != [2]string{"/var/lib/raycontrol/rendered/dns/noise.key", "/run/niko/dns/noise.key"} {
 		t.Errorf("dns process %+v", d)
 	}
@@ -342,7 +343,7 @@ func TestBuildSelfSteal(t *testing.T) {
 	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "doh", Name: "doh", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -638,7 +639,7 @@ func TestBuildHysteria(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -690,7 +691,7 @@ func TestBuildNaive(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}

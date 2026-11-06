@@ -7,9 +7,13 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
+	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +84,11 @@ func newRemoteDevice(t *testing.T, addr, pin string) remoteDevice {
 
 // register uses an invite code the way a client does.
 func (rd remoteDevice) register(ctx context.Context, code string, minute int64) (*devicev1.RegisterResponse, error) {
+	return rd.registerPIN(ctx, code, minute, "")
+}
+
+// registerPIN is register with the invite's PIN ("" sends none).
+func (rd remoteDevice) registerPIN(ctx context.Context, code string, minute int64, pin string) (*devicev1.RegisterResponse, error) {
 	inv, err := node.DecodeInvite(code)
 	if err != nil {
 		return nil, err
@@ -89,11 +98,138 @@ func (rd remoteDevice) register(ctx context.Context, code string, minute int64) 
 		return nil, err
 	}
 	mac := RegisterMAC([spa.KeySize]byte(k), minute, CertPin(rd.cert.Leaf))
-	resp, err := rd.dev.Register(ctx, connect.NewRequest(&devicev1.RegisterRequest{InviteId: inv.DeviceID, Minute: minute, Mac: mac}))
+	req := &devicev1.RegisterRequest{InviteId: inv.DeviceID, Minute: minute, Mac: mac}
+	if pin != "" {
+		req.PinProof = InvitePinProof([spa.KeySize]byte(k), pin)
+	}
+	resp, err := rd.dev.Register(ctx, connect.NewRequest(req))
 	if err != nil {
 		return nil, err
 	}
 	return resp.Msg, nil
+}
+
+// pinLeft reads the PinTries detail of a refused registration.
+func pinLeft(t *testing.T, err error) int {
+	t.Helper()
+	var cerr *connect.Error
+	if !errors.As(err, &cerr) || cerr.Code() != connect.CodePermissionDenied {
+		t.Fatalf("not a PIN refusal: %v", err)
+	}
+	for _, d := range cerr.Details() {
+		if v, derr := d.Value(); derr == nil {
+			if p, ok := v.(*devicev1.PinTries); ok {
+				return int(p.Left)
+			}
+		}
+	}
+	t.Fatalf("no PinTries in %v", err)
+	return -1
+}
+
+// An invite with a PIN (api-v1 §3, §4): the invite says so; the PIN is
+// asked only of a request that proved the invite; a missing PIN costs no
+// try, a wrong one does, the last withdraws the invite; the right one
+// registers.
+func TestRemotePIN(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "api", Name: "api"})); err != nil {
+		t.Fatal(err)
+	}
+	addr, pin := startRemote(t, srv)
+	now := time.Now().Unix() / 60
+	invite := func(name string) (string, string) {
+		t.Helper()
+		resp, err := c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{User: "alice", Name: name, Pin: true}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Msg.Pin) != 6 || strings.Trim(resp.Msg.Pin, "0123456789") != "" || resp.Msg.Invite.PinTries != 5 {
+			t.Fatalf("PIN %q, %d tries", resp.Msg.Pin, resp.Msg.Invite.PinTries)
+		}
+		inv, err := node.DecodeInvite(resp.Msg.InviteCode)
+		if err != nil || !inv.PIN {
+			t.Fatalf("the invite does not say it needs a PIN: %+v %v", inv, err)
+		}
+		// The short form (api-v1 §3a) carries the same invite.
+		short, err := node.DecodeInvite(resp.Msg.InviteCodeShort)
+		if err != nil || !strings.HasPrefix(resp.Msg.InviteCodeShort, node.InvitePrefix2) {
+			t.Fatalf("rcinv2 %q: %v", resp.Msg.InviteCodeShort, err)
+		}
+		short.Services[0].Name, short.Services[0].Kind = inv.Services[0].Name, inv.Services[0].Kind
+		if !reflect.DeepEqual(short, inv) {
+			t.Fatalf("rcinv2 %+v, rcinv1 %+v", short, inv)
+		}
+		if len(resp.Msg.InviteCodeShort) > len(resp.Msg.InviteCode)/2 {
+			t.Fatalf("rcinv2 of %d characters, rcinv1 of %d", len(resp.Msg.InviteCodeShort), len(resp.Msg.InviteCode))
+		}
+		return resp.Msg.InviteCode, resp.Msg.Pin
+	}
+	wrong := func(right string) string { return fmt.Sprintf("%06d", (mustAtoi(t, right)+1)%1_000_000) }
+
+	code, right := invite("phone")
+	d := newRemoteDevice(t, addr, pin)
+	// No proof of the invite: not_found, as for any invite.
+	if _, err := d.dev.Register(ctx, connect.NewRequest(&devicev1.RegisterRequest{InviteId: "0000000000000000", Minute: now, PinProof: []byte{1}})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("an unknown invite with a PIN: %v", err)
+	}
+	// Missing: no try spent.
+	for range 3 {
+		if _, err := d.registerPIN(ctx, code, now, ""); pinLeft(t, err) != 5 {
+			t.Fatalf("a missing PIN: %v", err)
+		}
+	}
+	// Wrong: one try each.
+	for want := 4; want >= 3; want-- {
+		if _, err := d.registerPIN(ctx, code, now, wrong(right)); pinLeft(t, err) != want {
+			t.Fatalf("a wrong PIN: %v, want %d left", err, want)
+		}
+	}
+	list, err := c.ListDevices(ctx, connect.NewRequest(&nodev1.ListDevicesRequest{}))
+	if err != nil || len(list.Msg.Invites) != 1 || list.Msg.Invites[0].PinTries != 3 {
+		t.Fatalf("invites %+v %v", list.Msg, err)
+	}
+	// Right: registered.
+	if reg, err := d.registerPIN(ctx, code, now, right); err != nil || reg.DeviceId == "" {
+		t.Fatalf("the right PIN: %v", err)
+	}
+
+	// Five wrong ones withdraw the invite: then not_found, the right PIN too.
+	code, right = invite("tablet")
+	e := newRemoteDevice(t, addr, pin)
+	for want := 4; want >= 0; want-- {
+		if _, err := e.registerPIN(ctx, code, now, wrong(right)); pinLeft(t, err) != want {
+			t.Fatalf("wrong PIN %d: %v", 5-want, err)
+		}
+	}
+	if _, err := e.registerPIN(ctx, code, now, right); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("a withdrawn invite: %v", err)
+	}
+	// An invite without a PIN takes a proof it does not need.
+	resp, err := c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{User: "alice", Name: "laptop"}))
+	if err != nil || resp.Msg.Pin != "" || resp.Msg.Invite.PinTries != 0 {
+		t.Fatalf("an invite without a PIN: %+v %v", resp, err)
+	}
+	if inv, _ := node.DecodeInvite(resp.Msg.InviteCode); inv.PIN {
+		t.Fatal("an invite without a PIN says it needs one")
+	}
+	if _, err := newRemoteDevice(t, addr, pin).registerPIN(ctx, resp.Msg.InviteCode, now, "123456"); err != nil {
+		t.Fatalf("an invite without a PIN, a PIN sent: %v", err)
+	}
+}
+
+func mustAtoi(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func TestRemoteAPI(t *testing.T) {

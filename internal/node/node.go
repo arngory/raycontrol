@@ -165,6 +165,9 @@ type Bundle struct {
 	API *BundleSub `json:"api,omitempty"`
 	// Expires is when an invite stops working (Unix time); bundles have none.
 	Expires int64 `json:"expires,omitempty"`
+	// PIN: the invite also needs a PIN, told by another channel
+	// (api-v1 §3): the client asks for it before it registers.
+	PIN bool `json:"pin,omitempty"`
 }
 
 // BundleSub locates the subscription endpoint: https://<host>:<port>/sub/v1,
@@ -191,8 +194,12 @@ func (b Bundle) encode(prefix string) (string, error) {
 // DecodeBundle parses an encoded bundle.
 func DecodeBundle(s string) (Bundle, error) { return decode(s, BundlePrefix) }
 
-// DecodeInvite parses an encoded invite.
+// DecodeInvite parses an encoded invite, rcinv1 or the short rcinv2.
 func DecodeInvite(s string) (Bundle, error) {
+	s = strings.TrimSpace(s)
+	if len(s) >= len(InvitePrefix2) && strings.EqualFold(s[:len(InvitePrefix2)], InvitePrefix2) {
+		return decodeInvite2(s[len(InvitePrefix2):])
+	}
 	b, err := decode(s, InvitePrefix)
 	if err == nil && (b.API == nil || b.Expires == 0) {
 		err = errors.New("the invite has no API endpoint or no expiry")

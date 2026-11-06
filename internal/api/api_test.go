@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/arngory/raycontrol/internal/cloudflare/cftest"
+	"github.com/arngory/raycontrol/internal/dnscheck"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
@@ -446,6 +448,32 @@ func TestRotateService(t *testing.T) {
 	if provision.ParseRealityState(svc).RotateAt == 0 {
 		t.Fatalf("no request stored: %s", svc.Settings)
 	}
+
+	// dnstt: the seal key switches at once (spec/dnsseal-v1.md §8); the
+	// previous one is accepted for the grace, or not at all with now.
+	srv.CredGrace = 48 * time.Hour
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "dnstt", Name: "dns"})); err != nil {
+		t.Fatal(err)
+	}
+	dns, _ := srv.Store.ServiceByName(ctx, "dns")
+	before, _ := srv.Store.ServiceSecrets(ctx, dns.ID)
+	start := time.Now().Unix()
+	r, err = c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "dns"}))
+	if err != nil || !r.Msg.Seal || r.Msg.SwitchAt < start || r.Msg.PrevUntil < start+48*3600 || r.Msg.PrevUntil > time.Now().Add(48*time.Hour).Unix() {
+		t.Fatalf("rotate dnstt: %v %v", r, err)
+	}
+	after, _ := srv.Store.ServiceSecrets(ctx, dns.ID)
+	if bytes.Equal(after[provision.SecretSealKey], before[provision.SecretSealKey]) ||
+		!bytes.Equal(after[provision.PrevSecret(provision.SecretSealKey)], before[provision.SecretSealKey]) {
+		t.Fatal("the seal key did not switch, or the previous one is not kept")
+	}
+	r, err = c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "dns", Now: true}))
+	if err != nil || !r.Msg.Seal || r.Msg.PrevUntil != 0 {
+		t.Fatalf("rotate dnstt now: %v %v", r, err)
+	}
+	if now, _ := srv.Store.ServiceSecrets(ctx, dns.ID); now[provision.PrevSecret(provision.SecretSealKey)] != nil {
+		t.Fatal("the previous seal key kept after a switch at once")
+	}
 }
 
 func TestDNSProvider(t *testing.T) {
@@ -674,5 +702,17 @@ func TestDebugWindow(t *testing.T) {
 	audit, _ := c.ListAudit(ctx, connect.NewRequest(&nodev1.ListAuditRequest{}))
 	if !slices.ContainsFunc(audit.Msg.Entries, func(e *nodev1.AuditEntry) bool { return e.Action == "debug" && e.Target == "30m0s" }) {
 		t.Fatalf("not audited: %+v", audit.Msg.Entries)
+	}
+}
+
+// Over the remote API (no peer of the node's socket), CheckDNSZones takes
+// only named resolvers and public addresses on port 53 (review 7).
+func TestCheckDNSZonesRemoteResolvers(t *testing.T) {
+	srv := &Server{DNSCheck: &dnscheck.Monitor{}}
+	for _, r := range []string{"tcp:127.0.0.1:22", "udp:10.0.0.1", "udp:169.254.169.254:80"} {
+		_, err := srv.CheckDNSZones(context.Background(), connect.NewRequest(&nodev1.CheckDNSZonesRequest{Resolvers: []string{r}}))
+		if connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("%s over the remote API: %v", r, err)
+		}
 	}
 }

@@ -10,7 +10,9 @@ import (
 	"strings"
 
 	"github.com/arngory/raycontrol/internal/cloudflare"
+	"github.com/arngory/raycontrol/internal/dnscheck"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -163,6 +165,87 @@ func NSName(ctx context.Context, st *store.Store) (string, error) {
 		return "", nil
 	}
 	return nsName(ctx, st, all)
+}
+
+// DNSCheckDevice names the node's own line in the dnsauth-v1 keys of a
+// dnstt service (render.CollectForRender): the check from the node tags
+// its polls with it, so that where auth is required a backend without the
+// service's current seal key still shows as such, not as alive (review 8).
+// Device IDs are hex: this one is no device's.
+const DNSCheckDevice = "node-check"
+
+// DNSCheckAuthKey is the dnsauth-v1 key of the node's own check on a
+// service: derived as a device's (spa.DNSAuthKey) from the node's check
+// key (store.DNSCheckKey), which no subscription carries.
+func DNSCheckAuthKey(checkKey []byte, nodeID [spa.NodeIDSize]byte, svcID int64) ([spa.KeySize]byte, error) {
+	if len(checkKey) != spa.KeySize {
+		return [spa.KeySize]byte{}, fmt.Errorf("%w: a check key of %d bytes", store.ErrInvalid, len(checkKey))
+	}
+	return spa.DNSAuthKey([spa.KeySize]byte(checkKey), nodeID, uint16(svcID)), nil
+}
+
+// DNSCheckTargets are the zones the node checks from itself (dnscheck,
+// rayd -dns-check): those of the enabled dnstt and masterdns services, as
+// DNSRecords selects them, with what the check needs. The parent should
+// delegate each to NSName and so to the node's host; a dnstt zone has the
+// node's probe key, its service's seal mode and current seal key (its poll
+// is sealed as a client's would be), and dnsauth's mode with the node's
+// own key where auth is on (DNSCheckDevice).
+func DNSCheckTargets(ctx context.Context, st *store.Store) ([]dnscheck.Zone, error) {
+	host, err := node.Host(ctx, st)
+	if err != nil {
+		return nil, err
+	}
+	ns, err := NSName(ctx, st)
+	if err != nil {
+		return nil, err
+	}
+	all, err := st.ListServices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var zones []dnscheck.Zone
+	var probeKey, checkKey []byte
+	var params spa.Params
+	for _, s := range all {
+		zone := Zone(s)
+		if !s.Enabled || (s.Kind != "dnstt" && s.Kind != "masterdns") || zone == "" {
+			continue
+		}
+		z := dnscheck.Zone{Service: s.Name, Kind: s.Kind, Name: zone, NS: ns, Host: host, SvcID: uint16(s.ID)}
+		if s.Kind == "dnstt" {
+			if probeKey == nil {
+				if probeKey, err = st.DNSProbeKey(ctx); err != nil {
+					return nil, err
+				}
+			}
+			z.ProbeKey, z.Seal, z.Auth = probeKey, DNSSealMode(s), DNSAuthMode(s)
+			if z.Auth != "off" {
+				if checkKey == nil {
+					if params, err = node.LoadParams(ctx, st); err != nil {
+						return nil, err
+					}
+					if checkKey, err = st.DNSCheckKey(ctx); err != nil {
+						return nil, err
+					}
+				}
+				k, err := DNSCheckAuthKey(checkKey, params.NodeID, s.ID)
+				if err != nil {
+					return nil, err
+				}
+				z.AuthKey = k[:]
+			}
+			if z.Seal != "off" {
+				secrets, err := st.ServiceSecrets(ctx, s.ID)
+				if err != nil {
+					return nil, err
+				}
+				z.SealKey = secrets[SecretSealKey]
+			}
+		}
+		zones = append(zones, z)
+	}
+	return zones, nil
 }
 
 // nsName is the name DNS tunnel zones are delegated to: a random label of

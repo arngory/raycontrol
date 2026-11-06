@@ -287,6 +287,10 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 				}
 				q.Set("niko-dns", "dnstt;;"+zone+";"+pub)
 				// Sign the queries with the device's key (spec/dnsauth-v1.md).
+				// dnsseal-v1: the zone's key when the seal is on.
+				if render.DNSSealMode(s.Service) != "off" && len(s.Secrets[provision.SecretSealKey]) == 32 {
+					q.Set("niko-dnsseal", "v1;"+base64.RawURLEncoding.EncodeToString(s.Secrets[provision.SecretSealKey]))
+				}
 				if render.DNSAuthMode(s.Service) != "off" {
 					q.Set("niko-dnsauth", "v1")
 				}

@@ -54,6 +54,7 @@ rcinv1:<base64url без '=' от JSON>
 | `services` | один сервис — `api` (его `id` нужен для scope SPA) |
 | `api` | `{"port": N, "pin": "<base64url SHA-256 SPKI>"}` |
 | `expires` | Unix-время, после которого приглашение не работает (по умолчанию сутки, не больше недели) |
+| `pin` | `true`, если нужен ещё PIN (raycontrol v0.13): клиент спрашивает его до регистрации; нет поля — PIN не нужен |
 | `node_keys`, `sub` | нет: они придут в пакете после регистрации, по каналу, закреплённому пином `api.pin` |
 
 ```json
@@ -77,6 +78,66 @@ rcinv1:<base64url без '=' от JSON>
 Строка — секрет, пока не использована: тот, кто зарегистрируется первым, получит устройство. После регистрации она
 бесполезна.
 
+**PIN** (raycontrol v0.13, по выбору администратора: `rayctl device invite … -pin`).
+- Приглашению нужен ещё PIN из 6 цифр. rayctl показывает его один раз, а администратор сообщает его другим каналом,
+  не тем, что и QR.
+- Утёкшая строка без PIN бесполезна: 5 неверных PIN отзывают приглашение.
+- Нода хранит не PIN, а доказательство, которое ждёт от регистрации (§4). Проверить PIN можно только запросом к ноде,
+  офлайн-проверки нет.
+- `rayctl device list` показывает, сколько попыток осталось.
+
+## 3a. Короткое приглашение `RCINV2:` (raycontrol v0.13, Niko 1.35)
+
+То же приглашение, что `rcinv1`, в двоичной раскладке: около 250 символов вместо 650, QR версии 8–9 вместо 17 (у
+администратора — 57–61 колонка терминала). Регистрация (§4) не меняется. `rayctl device invite … -format rcinv2`; по
+умолчанию `rcinv1`, пока не выйдет Niko 1.35, потом умолчание станет `rcinv2`, а `rcinv1` останется по флагу.
+
+```
+RCINV2:<base32 RFC 4648, верхний регистр, без '='>
+```
+
+Префикс и алфавит base32 входят в алфавитно-цифровой режим QR (5,5 бита на символ). Регистр при чтении любой.
+Заглавная схема не открывает Niko из другого приложения (Android сравнивает схему с учётом регистра, а схема в
+манифесте — строчная): приглашение сканируют сканером Niko или вставляют строкой, а не открывают как ссылку.
+Двоичное, big-endian:
+
+| Поле | Байт | Как в `rcinv1` |
+|---|---|---|
+| версия | 1 | `2` |
+| флаги | 1 | бит 0 — `pin`; биты 1–2 — вид хоста: 0 — IPv4, 1 — IPv6, 2 — имя; остальные — 0 |
+| хост | 4, 16 или 1 + n | `host`; имя — длина (1 байт) и ASCII: буквы, цифры, `-`, `.`, метки 1–63, всего до 253; IDN — punycode |
+| `spa.node_id` | 16 | 32 hex |
+| `spa.epoch_len_s`, `spa.slot_len_s` | 4 + 4 | |
+| `spa.port_key` | 32 | 64 hex |
+| `spa.port_base`, `spa.port_range`, `spa.len_min`, `spa.len_max` | 2 × 4 | |
+| `device_id` | 8 | 16 hex |
+| `device_key` | 32 | 64 hex |
+| `services[0].id` | 2 | `kind` и `name` не передаются: сервис один, `api` |
+| `api.port` | 2 | |
+| `api.pin` | 32 | base64url SHA-256 SPKI |
+| `expires` | 4 | Unix-время |
+
+150 байт с IPv4 (247 символов), 162 с IPv6.
+
+Читатель отказывает, если версия не `2`, есть незнакомый бит флагов, вид хоста — 3, имя не по правилам выше, поле
+обрезано, после `expires` остались байты, `expires` или `api.port` — 0. Контрольной суммы нет: у QR своя коррекция
+ошибок, а обрезанную строку выдают длины полей.
+
+Векторы — тест `TestInvite2Vectors` (`internal/node/invite2_test.go`), посчитаны отдельно от кода (Python, по раскладке):
+`spa.node_id` = `00 … 0f`, `epoch_len_s` 34380, `slot_len_s` 1620, `port_key` = `20 … 3f`, `port_base` 21907,
+`port_range` 2955, `len_min` 136, `len_max` 206, `device_id` = `a0 … a7`, `device_key` = `40 … 5f`, сервис 7, порт API
+48213, `api.pin` = `60 … 7f`, `expires` 1767312000:
+
+- `203.0.113.7`, с PIN:
+  `RCINV2:AIA4WADRA4AACAQDAQCQMBYIBEFAWDANBYHQAAEGJQAAABSUEAQSEIZEEUTCOKBJFIVSYLJOF4YDCMRTGQ2TMNZYHE5DWPB5HY7VLEYLRMAIQAGOUCQ2FI5EUWTKOQCBIJBUIRKGI5EESSSLJRGU4T2QKFJFGVCVKZLVQWK2LNOF2XS7AAD3YVLAMFRGGZDFMZTWQ2LKNNWG23TPOBYXE43UOV3HO6DZPJ5XY7L6P5UVOCUA`;
+- `2001:db8::7`, без PIN:
+  `RCINV2:AIBCAAINXAAAAAAAAAAAAAAAAAAAOAABAIBQIBIGA4EASCQLBQGQ4DYAACDEYAAAAZKCAIJCEMSCKJRHFAUSUKZMFUXC6MBRGIZTINJWG44DSOR3HQ6T4P2VSMFYWAEIADHKBINCUOSKLJVHIBAUEQ2EIVDEOSCJJJFUYTKOJ5IFCUSTKRKVMV2YLFNFWXC5LZPQAB54KVQGCYTDMRSWMZ3INFVGW3DNNZXXA4LSON2HK5TXPB4XU634PV7H62KXBKAA`;
+- `node.example.com`, без PIN:
+  `RCINV2:AICBA3TPMRSS4ZLYMFWXA3DFFZRW63IAAEBAGBAFAYDQQCIKBMGA2DQPAAAIMTAAAADFIIBBEIRSIJJGE4UCSKRLFQWS4LZQGEZDGNBVGY3TQOJ2HM6D2PR7KWJQXCYARAAM5IFBUKR2JJNGU5AECQSDIRCUMR2IJFFEWTCNJZHVAUKSKNKFKVSXLBMVUW24LVPF6AAHXRKWAYLCMNSGKZTHNBUWU23MNVXG64DROJZXI5LWO54HS6T3PR6X473JK4FIA`.
+
+Нода, у которой хост — не адрес и не ASCII-имя, rcinv2 не делает (`invite_code_short` пустой), а `rayctl` с
+`-format rcinv2` тогда отзывает приглашение и просит `-format rcinv1`.
+
 ## 4. Регистрация
 
 1. Разобрать приглашение и проверить `expires` по своим часам.
@@ -88,13 +149,22 @@ rcinv1:<base64url без '=' от JSON>
    - `invite_id` — `device_id` приглашения;
    - `minute` — `floor(unix_time / 60)` по часам клиента; сервер принимает ±2;
    - `mac` — HMAC-SHA256(`device_key` приглашения, `"raycontrol-register-v1"` ‖ BE64(`minute`) ‖ `pin`), где `pin`
-     — ASCII-строка пина **того сертификата, с которым идёт это соединение**.
+     — ASCII-строка пина **того сертификата, с которым идёт это соединение**;
+   - `pin_proof` — у приглашения с `"pin": true`: HMAC-SHA256(`device_key` приглашения,
+     `"raycontrol-invite-pin-v1"` ‖ PIN ASCII-цифрами, без пробелов).
 6. Ответ: `bundle` — полный `rcdev1:` нового устройства (новый ключ SPA, `node_keys`, `sub`, сервисы пользователя, а
    для роли `admin` ещё `api` и сервис `api`), `device_id`, `role`. Клиент импортирует пакет как обычно.
 7. Приглашение израсходовано. Его доступы SPA закрываются, поэтому дальше клиент проходит SPA уже ключом из пакета.
 
 Любой отказ — `not_found` без подробностей: приглашение неизвестно, использовано, истекло или отозвано; неверный
-`mac`; часы расходятся больше чем на 2 минуты; этот клиентский ключ уже принадлежит другому устройству. Если свежее
+`mac`; часы расходятся больше чем на 2 минуты; этот клиентский ключ уже принадлежит другому устройству.
+
+Кроме PIN. Его нода проверяет только после верного `mac`, то есть только у того, кто держит приглашение.
+- PIN не прислан: `permission_denied` с деталью `raycontrol.device.v1.PinTries{left}`. Попытка не тратится: это старый
+  клиент или пользователь ещё не ввёл код.
+- PIN неверный: `permission_denied` с `PinTries{left}`, попыток на одну меньше. Клиент просит ввести снова.
+- Неверный при `left: 0`: приглашение отозвано, дальше `not_found`. Клиент говорит пользователю попросить новое.
+- Сравнение за постоянное время. Если свежее
 приглашение отклонено, его мог использовать кто-то другой: клиенту стоит сказать пользователю, чтобы администратор
 проверил `rayctl device list` и отозвал лишнее.
 
@@ -129,7 +199,7 @@ rcinv1:<base64url без '=' от JSON>
 |---|---|
 | `not_found` | `Register`: любой отказ (§4) |
 | `unauthenticated` | клиентский ключ не принадлежит активному устройству: не зарегистрирован, отозван, пользователь отключён или истёк |
-| `permission_denied` | устройство не `admin`, или вызов только для root на ноде |
+| `permission_denied` | устройство не `admin`, или вызов только для root на ноде; `Register`: PIN не прислан или неверный, деталь `PinTries{left}` (§4) |
 | `invalid_argument` | неверные данные: подпись при смене ключа, имя, срок приглашения |
 
 ## 8. Что проверить клиенту

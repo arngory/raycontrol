@@ -182,6 +182,7 @@ func remoteEnroll(ctx context.Context, args []string) error {
 	out := fs.String("o", "", "the device file to write (mode 0600; default: <node>-<device>.rcdev)")
 	carrier := fs.String("carrier", "auto", "SPA carrier: udp, tls (TCP as a TLS ClientHello), tcp (bare TCP) or auto (UDP, then tls, then bare TCP for a node before v0.10)")
 	addr := fs.String("addr", "", "node address to use instead of the invite's host")
+	pin := fs.String("pin", "", "the invite's PIN, when it needs one (6 digits, told apart from the invite); asked for on a terminal when not given, which keeps it out of ps and the shell's history")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
 		return errUsage
 	}
@@ -200,6 +201,18 @@ func remoteEnroll(ctx context.Context, args []string) error {
 	if err != nil || len(k) != spa.KeySize {
 		return errors.New("bad key in the invite")
 	}
+	// Asked before anything goes to the node: a missing PIN costs no try,
+	// but the user should know before the walk to the API.
+	code := strings.ReplaceAll(*pin, " ", "")
+	if inv.PIN && code == "" && terminal(os.Stdin) {
+		if code, err = readSecret("the invite's PIN, as the administrator told it: ", "", false); err != nil {
+			return err
+		}
+		code = strings.ReplaceAll(code, " ", "")
+	}
+	if inv.PIN && code == "" {
+		return errors.New("the invite needs its PIN: -pin, as the administrator told it")
+	}
 	cert, err := api.NewClientCertificate()
 	if err != nil {
 		return err
@@ -210,9 +223,19 @@ func remoteEnroll(ctx context.Context, args []string) error {
 		return err
 	}
 	minute := time.Now().Unix() / 60
-	r, err := dev.Register(ctx, connect.NewRequest(&devicev1.RegisterRequest{
+	req := &devicev1.RegisterRequest{
 		InviteId: inv.DeviceID, Minute: minute, Mac: api.RegisterMAC([spa.KeySize]byte(k), minute, api.CertPin(cert.Leaf)),
-	}))
+	}
+	if code != "" {
+		req.PinProof = api.InvitePinProof([spa.KeySize]byte(k), code)
+	}
+	r, err := dev.Register(ctx, connect.NewRequest(req))
+	if left, ok := pinTriesLeft(err); ok {
+		if left == 0 {
+			return errors.New("register: wrong PIN, and the invite is withdrawn: ask for a new one")
+		}
+		return fmt.Errorf("register: the PIN is missing or wrong; %d tries left", left)
+	}
 	if err != nil {
 		return fmt.Errorf("register: %w (used, expired or withdrawn invite, or the clock is off)", err)
 	}
@@ -294,4 +317,21 @@ func (c *cli) useRemote(ctx context.Context, path, cmd string) error {
 	}
 	c.c, c.dev, c.identity = n, d, &id
 	return nil
+}
+
+// pinTriesLeft reads Register's answer for a PIN missing or wrong (api-v1
+// §7): the tries the invite has still.
+func pinTriesLeft(err error) (int, bool) {
+	var cerr *connect.Error
+	if !errors.As(err, &cerr) || cerr.Code() != connect.CodePermissionDenied {
+		return 0, false
+	}
+	for _, d := range cerr.Details() {
+		if v, derr := d.Value(); derr == nil {
+			if t, ok := v.(*devicev1.PinTries); ok {
+				return int(t.Left), true
+			}
+		}
+	}
+	return 0, false
 }

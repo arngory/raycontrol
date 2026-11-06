@@ -37,11 +37,18 @@ const (
 	Required Level = iota
 	// Advised: the node works without it, worse.
 	Advised
+	// Internet: what the node sees of itself from outside once it runs
+	// (rayd's check of its DNS zones). Shown, never a failure of the host:
+	// the check and the install go on as before.
+	Internet
 )
 
 func (l Level) String() string {
-	if l == Required {
+	switch l {
+	case Required:
 		return "required"
+	case Internet:
+		return "internet"
 	}
 	return "advised"
 }
@@ -354,13 +361,14 @@ const Outside = "Only a probe from outside shows the provider's firewall, UDP fi
 // Report writes the results: all of them, or (quiet) only the required
 // checks that failed.
 func Report(w io.Writer, rs []Result, quiet bool) {
-	levels := []Level{Required, Advised}
+	levels := []Level{Required, Advised, Internet}
 	if quiet {
 		levels = levels[:1]
 	}
 	for _, level := range levels {
 		title := map[Level]string{Required: "Required: without these the node does not work",
-			Advised: "Advised: the node works without them, worse"}[level]
+			Advised:  "Advised: the node works without them, worse",
+			Internet: "Internet: the node's DNS zones as rayd last checked them (rayctl dns check)"}[level]
 		printed := false
 		for _, r := range rs {
 			if r.Level != level || (quiet && r.OK) {
@@ -372,7 +380,7 @@ func Report(w io.Writer, rs []Result, quiet bool) {
 			}
 			mark := "ok  "
 			if !r.OK {
-				mark = map[Level]string{Required: "FAIL", Advised: "warn"}[level]
+				mark = map[Level]string{Required: "FAIL", Advised: "warn", Internet: "FAIL"}[level]
 			}
 			line := "  " + mark + "  " + r.Name
 			if r.Detail != "" {

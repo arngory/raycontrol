@@ -24,6 +24,9 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/dns/dnsmessage"
+
+	"github.com/arngory/raycontrol/internal/dnscheck"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -60,6 +63,15 @@ func TestSupervisedNode(t *testing.T) {
 		if err != nil {
 			t.Skipf("port 443 (%s): %v; run as root or with net.ipv4.ip_unprivileged_port_start=0", network, err)
 		}
+	}
+	// And UDP 53 on every address, beside systemd-resolved's stub, as the
+	// front takes it (SO_REUSEADDR): a host where another service holds
+	// port 53 without it (a CI runner had one on 127.0.0.100) cannot run
+	// the front at all, so not this test.
+	if pc, err := listenUDPReuse(":53"); err != nil {
+		t.Skipf("UDP 53 beside the stub: %v; another service holds port 53 on this host", err)
+	} else {
+		pc.Close()
 	}
 	ip := hostAddr(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -140,6 +152,13 @@ func TestSupervisedNode(t *testing.T) {
 	subSvc, _ := st.ServiceByName(ctx, provision.SubscriptionService)
 	subSecrets, _ := st.ServiceSecrets(ctx, subSvc.ID)
 	pin := mustPin(t, subSecrets[provision.SecretTLSCert])
+	// A new dnstt service takes tagged queries only: the check polls with
+	// the node's own key, its line in the keys rayd renders (no device of
+	// alice's is on the service).
+	dnsTargets, err := provision.DNSCheckTargets(ctx, st)
+	if err != nil || len(dnsTargets) != 1 || dnsTargets[0].Auth != "required" || len(dnsTargets[0].AuthKey) != 32 {
+		t.Fatalf("DNS check targets %v %v", dnsTargets, err)
+	}
 	st.Close()
 
 	// rayd and its data plane, short paths: unix sockets take 107 bytes.
@@ -150,7 +169,7 @@ func TestSupervisedNode(t *testing.T) {
 	defer os.RemoveAll(run)
 	cmd := exec.Command(rayd, "serve", "-db", db, "-socket", filepath.Join(run, "rayd.sock"),
 		"-rendered", filepath.Join(dir, "rendered"), "-run", filepath.Join(run, "run"),
-		"-supervise", "-xray", bin, "-niko-server", niko, "-acme-directory", "")
+		"-supervise", "-xray", bin, "-niko-server", niko, "-acme-directory", "", "-dns-check", "0")
 	// Hysteria2's backend reaches test addresses only with this.
 	cmd.Env = append(os.Environ(), "NIKO_SERVER_UNSAFE_ANY_DESTINATION=1")
 	var logs bytes.Buffer
@@ -206,6 +225,24 @@ func TestSupervisedNode(t *testing.T) {
 		t.Fatalf("dnsprobe: %x %v", probeAnswer, err)
 	}
 
+	// The node's own check of the zone (internal/dnscheck) on the real
+	// front: the apex with the NS name, a probe, and a poll of the dnstt
+	// backend behind it, once the backend is up.
+	checker := &dnscheck.Checker{}
+	var zone dnscheck.ZoneResult
+	for range 30 {
+		zone = checker.Check(ctx, dnsTargets, nil, false).Zones[0]
+		if zone.Front.State == dnscheck.OK && zone.Backend.State == dnscheck.OK {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if want := "SOA and probe on " + net.JoinHostPort(ip.String(), "53"); zone.Front.Detail != want || zone.Backend.State != dnscheck.OK ||
+		!strings.HasPrefix(zone.Backend.Detail, "poll answered in") {
+		t.Fatalf("the node's check of its zone: front %+v, backend %+v", zone.Front, zone.Backend)
+	}
+	checkThroughResolvers(t, ctx, ip, dnsTargets[0])
+
 	probeVia := func(name string, socksPort int) {
 		t.Helper()
 		sc := sub.Client{Addr: net.JoinHostPort(render.ProbeName, "443"), Pin: pin, DeviceID: dev.ID, DeviceKey: key}
@@ -252,6 +289,199 @@ func TestSupervisedNode(t *testing.T) {
 	if err := json.Unmarshal(raw, &stats); err != nil || stats.Connections < 1 || len(stats.Own) < 1 || stats.Own[0].RTTus == 0 {
 		t.Fatalf("link from %s: %s (%+v, %v)", ls.Address, raw, stats, err)
 	}
+}
+
+// checkThroughResolvers checks the zone as rayd does, through resolvers of
+// the test's own that forward to the real front as public ones do: EDNS
+// 1232 with 0x20, 1220 and 512 toward the node. The parent is the test's
+// too: a server of example.test on 127.0.0.2:53, beside the front's
+// wildcard socket, delegates the zone to the node.
+func checkThroughResolvers(t *testing.T, ctx context.Context, ip netip.Addr, zone dnscheck.Zone) {
+	t.Helper()
+	parent, err := listenUDPReuse("127.0.0.2:53")
+	if err != nil {
+		t.Logf("no parent of the test's own on 127.0.0.2:53 (%v): the check through resolvers is skipped", err)
+		return
+	}
+	defer parent.Close()
+	go serveDNS(parent, func(q []byte) []byte {
+		return dnsAnswer(q, func(qq dnsmessage.Question, m *dnsmessage.Message) {
+			if qq.Type == dnsmessage.TypeNS && strings.EqualFold(qq.Name.String(), zone.Name+".") {
+				m.Authorities = []dnsmessage.Resource{dnsRR(zone.Name, &dnsmessage.NSResource{NS: dnsmessage.MustNewName(zone.NS + ".")})}
+				m.Additionals = []dnsmessage.Resource{dnsRR(zone.NS, &dnsmessage.AResource{A: ip.As4()})}
+			}
+		})
+	})
+	// The host's resolver, which finds the parent.
+	system, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer system.Close()
+	go serveDNS(system, func(q []byte) []byte {
+		return dnsAnswer(q, func(qq dnsmessage.Question, m *dnsmessage.Message) {
+			switch {
+			case qq.Type == dnsmessage.TypeSOA && qq.Name.String() == "example.test.":
+				m.Answers = []dnsmessage.Resource{dnsRR("example.test", &dnsmessage.SOAResource{NS: dnsmessage.MustNewName("ns1.example.test."),
+					MBox: dnsmessage.MustNewName("hostmaster.example.test."), MinTTL: 60})}
+			case qq.Type == dnsmessage.TypeNS && qq.Name.String() == "example.test.":
+				m.Answers = []dnsmessage.Resource{dnsRR("example.test", &dnsmessage.NSResource{NS: dnsmessage.MustNewName("ns1.example.test.")})}
+				m.Additionals = []dnsmessage.Resource{dnsRR("ns1.example.test", &dnsmessage.AResource{A: [4]byte{127, 0, 0, 2}})}
+			}
+		})
+	})
+	var names []string
+	for _, r := range []struct {
+		edns   uint16
+		case20 bool
+	}{{1232, true}, {1220, false}, {512, false}} {
+		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pc.Close()
+		go serveDNS(pc, func(q []byte) []byte { return forward(q, netip.AddrPortFrom(ip, 53), r.edns, r.case20) })
+		names = append(names, "udp:"+pc.LocalAddr().String())
+	}
+	resolvers, err := dnscheck.ParseResolvers(names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checker := &dnscheck.Checker{System: []netip.AddrPort{netip.MustParseAddrPort(system.LocalAddr().String())}, Private: true}
+	z := checker.Check(ctx, []dnscheck.Zone{zone}, resolvers, false).Zones[0]
+	if !z.Delegated || z.Parent.State != dnscheck.OK || z.Err() != nil {
+		t.Fatalf("through resolvers: parent %+v, err %v", z.Parent, z.Err())
+	}
+	for i, want := range []struct {
+		large dnscheck.State
+		edns  int
+		mixed bool
+	}{{dnscheck.OK, 1232, true}, {dnscheck.OK, 1220, false}, {dnscheck.Warn, 512, false}} {
+		r := z.Resolvers[i]
+		if r.SOA.State != dnscheck.OK || r.Small.State != dnscheck.OK || r.Large.State != want.large || r.EDNS != want.edns ||
+			r.Mixed != want.mixed || r.Egress != ip {
+			t.Errorf("through %s: %+v", r.Resolver, r)
+		}
+	}
+	if got := z.Summary(); got != "delegated; 3/3 resolvers; large 2/3; EDNS 512–1232" {
+		t.Errorf("summary %q", got)
+	}
+}
+
+// listenUDPReuse listens with SO_REUSEADDR, as the front does: an address
+// of its own on its port.
+func listenUDPReuse(addr string) (net.PacketConn, error) {
+	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
+		var serr error
+		if err := c.Control(func(fd uintptr) { serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1) }); err != nil {
+			return err
+		}
+		return serr
+	}}
+	return lc.ListenPacket(context.Background(), "udp", addr)
+}
+
+// serveDNS answers each datagram on pc until it is closed; nil: no answer.
+func serveDNS(pc net.PacketConn, answer func([]byte) []byte) {
+	buf := make([]byte, 65535)
+	for {
+		n, from, err := pc.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		if r := answer(append([]byte(nil), buf[:n]...)); r != nil {
+			_, _ = pc.WriteTo(r, from)
+		}
+	}
+}
+
+// dnsAnswer answers q with what fill puts in: NOERROR, the question as it
+// came; fill nil-answers stay NODATA.
+func dnsAnswer(q []byte, fill func(dnsmessage.Question, *dnsmessage.Message)) []byte {
+	var p dnsmessage.Parser
+	h, err := p.Start(q)
+	if err != nil {
+		return nil
+	}
+	qq, err := p.Question()
+	if err != nil {
+		return nil
+	}
+	m := dnsmessage.Message{Header: dnsmessage.Header{ID: h.ID, Response: true, RecursionDesired: h.RecursionDesired},
+		Questions: []dnsmessage.Question{qq}}
+	fill(qq, &m)
+	b, _ := m.Pack()
+	return b
+}
+
+func dnsRR(name string, body dnsmessage.ResourceBody) dnsmessage.Resource {
+	return dnsmessage.Resource{Header: dnsmessage.ResourceHeader{Name: dnsmessage.MustNewName(name + "."), Class: dnsmessage.ClassINET, TTL: 300}, Body: body}
+}
+
+// forward is a resolver: the question to the node without RD, with its own
+// EDNS size and, with case20, the name's case mixed (0x20); the answer back
+// to the client under the client's question and ID.
+func forward(q []byte, node netip.AddrPort, edns uint16, case20 bool) []byte {
+	var p dnsmessage.Parser
+	h, err := p.Start(q)
+	if err != nil {
+		return nil
+	}
+	qq, err := p.Question()
+	if err != nil {
+		return nil
+	}
+	up := qq
+	if case20 {
+		name := []byte(qq.Name.String())
+		for i := 0; i < len(name); i += 2 {
+			if name[i] >= 'a' && name[i] <= 'z' {
+				name[i] -= 'a' - 'A'
+			}
+		}
+		up.Name = dnsmessage.MustNewName(string(name))
+	}
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: h.ID ^ 0x5a5a})
+	_ = b.StartQuestions()
+	_ = b.Question(up)
+	_ = b.StartAdditionals()
+	var opt dnsmessage.ResourceHeader
+	_ = opt.SetEDNS0(int(edns), dnsmessage.RCodeSuccess, false)
+	_ = b.OPTResource(opt, dnsmessage.OPTResource{})
+	uq, err := b.Finish()
+	if err != nil {
+		return nil
+	}
+	c, err := net.Dial("udp", node.String())
+	if err != nil {
+		return nil
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := c.Write(uq); err != nil {
+		return nil
+	}
+	buf := make([]byte, 65535)
+	n, err := c.Read(buf)
+	if err != nil {
+		return nil
+	}
+	var a dnsmessage.Message
+	if err := a.Unpack(buf[:n]); err != nil {
+		return nil
+	}
+	for i := range a.Answers {
+		if strings.EqualFold(a.Answers[i].Header.Name.String(), qq.Name.String()) {
+			a.Answers[i].Header.Name = qq.Name
+		}
+	}
+	m := dnsmessage.Message{Header: dnsmessage.Header{ID: h.ID, Response: true, RecursionDesired: h.RecursionDesired, RecursionAvailable: true,
+		RCode: a.RCode}, Questions: []dnsmessage.Question{qq}, Answers: a.Answers, Authorities: a.Authorities}
+	var cliOpt dnsmessage.ResourceHeader
+	_ = cliOpt.SetEDNS0(1232, dnsmessage.RCodeSuccess, false)
+	m.Additionals = []dnsmessage.Resource{{Header: cliOpt, Body: &dnsmessage.OPTResource{}}}
+	out, _ := m.Pack()
+	return out
 }
 
 // hostAddr is an address of this host other than loopback: the node's, and

@@ -22,7 +22,19 @@ type Invite struct {
 	ExpiresAt time.Time
 	UsedAt    *time.Time
 	DeviceID  string // the device it became
+	// PinProof is what Register must bring with the invite's PIN
+	// (api-v1 §3), nil without one; PinTries the wrong PINs still allowed.
+	PinProof []byte
+	PinTries int
 }
+
+// InvitePinTries is how many wrong PINs an invite takes: the last one
+// withdraws it.
+const InvitePinTries = 5
+
+// InvitePIN gives the proof an invite's PIN makes, from the invite's key:
+// the store keeps the proof, never the PIN.
+type InvitePIN func(key [spa.KeySize]byte) []byte
 
 // MaxInviteTTL bounds how long an invite stays valid.
 const MaxInviteTTL = 7 * 24 * time.Hour
@@ -37,7 +49,10 @@ func newID() (string, error) {
 
 // CreateInvite makes a one-time invite for a device of a user and returns
 // its SPA key.
-func (s *Store) CreateInvite(ctx context.Context, userName, name, role string, ttl time.Duration) (Invite, [spa.KeySize]byte, error) {
+//
+// With pin, the invite also needs a PIN (api-v1 §3): pin makes the proof
+// from the key, and the invite takes InvitePinTries wrong ones.
+func (s *Store) CreateInvite(ctx context.Context, userName, name, role string, ttl time.Duration, pin ...InvitePIN) (Invite, [spa.KeySize]byte, error) {
 	var key [spa.KeySize]byte
 	if err := checkName("device", name); err != nil {
 		return Invite{}, key, err
@@ -68,14 +83,42 @@ func (s *Store) CreateInvite(ctx context.Context, userName, name, role string, t
 	}
 	now := s.now().Truncate(time.Second)
 	inv := Invite{ID: id, UserName: u.Name, Name: name, Role: role, CreatedAt: now, ExpiresAt: now.Add(ttl)}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO invites (id, user_id, name, role, spa_key, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		inv.ID, u.ID, inv.Name, inv.Role, key[:], now.Unix(), inv.ExpiresAt.Unix())
+	if len(pin) > 0 && pin[0] != nil {
+		inv.PinProof, inv.PinTries = pin[0](key), InvitePinTries
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO invites (id, user_id, name, role, spa_key, created_at, expires_at, pin_proof, pin_tries)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		inv.ID, u.ID, inv.Name, inv.Role, key[:], now.Unix(), inv.ExpiresAt.Unix(), inv.PinProof, inv.PinTries)
 	return inv, key, err
+}
+
+// FailInvitePIN counts a wrong PIN against an active invite and returns
+// the tries left. The last one withdraws the invite: its row goes, as a
+// revoked invite's does, and it is ErrNotFound from then on.
+func (s *Store) FailInvitePIN(ctx context.Context, id string) (left int, err error) {
+	err = s.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE invites SET pin_tries = pin_tries - 1
+			WHERE id = ? AND used_at IS NULL AND pin_proof IS NOT NULL AND pin_tries > 0`, id)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			return fmt.Errorf("invite %q: %w", id, ErrNotFound)
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT pin_tries FROM invites WHERE id = ?`, id).Scan(&left); err != nil {
+			return err
+		}
+		if left == 0 {
+			_, err = tx.ExecContext(ctx, `DELETE FROM invites WHERE id = ?`, id)
+		}
+		return err
+	})
+	return left, err
 }
 
 // ListInvites returns the invites not yet used, expired ones included.
 func (s *Store) ListInvites(ctx context.Context) ([]Invite, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT i.id, u.name, i.name, i.role, i.created_at, i.expires_at
+	rows, err := s.db.QueryContext(ctx, `SELECT i.id, u.name, i.name, i.role, i.created_at, i.expires_at, i.pin_proof, i.pin_tries
 		FROM invites i JOIN users u ON u.id = i.user_id WHERE i.used_at IS NULL ORDER BY u.name, i.name`)
 	if err != nil {
 		return nil, err
@@ -85,7 +128,7 @@ func (s *Store) ListInvites(ctx context.Context) ([]Invite, error) {
 	for rows.Next() {
 		var inv Invite
 		var created, expires int64
-		if err := rows.Scan(&inv.ID, &inv.UserName, &inv.Name, &inv.Role, &created, &expires); err != nil {
+		if err := rows.Scan(&inv.ID, &inv.UserName, &inv.Name, &inv.Role, &created, &expires, &inv.PinProof, &inv.PinTries); err != nil {
 			return nil, err
 		}
 		inv.CreatedAt, inv.ExpiresAt = time.Unix(created, 0), time.Unix(expires, 0)
@@ -113,10 +156,10 @@ func (s *Store) ActiveInvite(ctx context.Context, id string) (Invite, [spa.KeySi
 	var raw []byte
 	var created, expires int64
 	now := s.now().Unix()
-	err := s.db.QueryRowContext(ctx, `SELECT i.id, u.name, i.name, i.role, i.spa_key, i.created_at, i.expires_at
+	err := s.db.QueryRowContext(ctx, `SELECT i.id, u.name, i.name, i.role, i.spa_key, i.created_at, i.expires_at, i.pin_proof, i.pin_tries
 		FROM invites i JOIN users u ON u.id = i.user_id
 		WHERE i.id = ? AND i.used_at IS NULL AND i.expires_at > ? AND u.enabled = 1 AND (u.expires_at IS NULL OR u.expires_at > ?)`,
-		id, now, now).Scan(&inv.ID, &inv.UserName, &inv.Name, &inv.Role, &raw, &created, &expires)
+		id, now, now).Scan(&inv.ID, &inv.UserName, &inv.Name, &inv.Role, &raw, &created, &expires, &inv.PinProof, &inv.PinTries)
 	if errors.Is(err, sql.ErrNoRows) {
 		return inv, key, fmt.Errorf("invite %q: %w", id, ErrNotFound)
 	}

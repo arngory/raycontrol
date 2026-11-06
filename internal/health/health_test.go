@@ -43,9 +43,24 @@ func TestBoard(t *testing.T) {
 	if ls := b.Loops(); len(ls) != 2 || ls[0].Name != "acme site" || ls[1].Name != "apply" {
 		t.Fatalf("after retain %+v", ls)
 	}
+	// A check's detail goes with its round, the next round replaces it.
+	b.Report("dns-zone dns", "delegated;\n3/3 resolvers", nil)
+	if l := b.Loops()[2]; l.Name != "dns-zone dns" || l.Detail != "delegated; ; 3/3 resolvers" || l.Failing() || l.Runs != 1 {
+		t.Fatalf("report %+v", l)
+	}
+	b.Report("dns-zone dns", "not delegated", errors.New("no NS"))
+	if l := b.Loops()[2]; l.Detail != "not delegated" || !l.Failing() || l.Err != "no NS" {
+		t.Fatalf("failed report %+v", l)
+	}
+	b.Done("dns-zone dns", nil)
+	if l := b.Loops()[2]; l.Detail != "" {
+		t.Fatalf("detail after Done %+v", l)
+	}
+	b.Retain("dns-zone ", nil)
 	var nilBoard *Board
 	nilBoard.Retain("acme ", nil)
 	nilBoard.Done("x", nil)
+	nilBoard.Report("x", "y", nil)
 	if nilBoard.Loops() != nil {
 		t.Fatal("nil board")
 	}
