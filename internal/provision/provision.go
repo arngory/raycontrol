@@ -47,6 +47,7 @@ const (
 // Secret names, shared with the renderer (names, not secrets).
 const (
 	SecretNoisePrivate  = "noise_private"        // dnstt, X25519
+	SecretSealKey       = "seal_key"             // dnstt, dnsseal-v1, 32 bytes
 	SecretMasterDNSKey  = "encryption_key"       // MasterDnsVPN, hex text
 	SecretMLKEMSeed     = "mlkem768_seed"        //nolint:gosec // G101: a name; inner, VLESS encryption
 	SecretTLSKey        = "tls_key"              // subscription, PKCS#8 DER
@@ -289,6 +290,9 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		if a, ok := settings["auth"]; ok && (svc.Kind != "dnstt" || !slices.Contains([]any{"off", "optional", "required"}, a)) {
 			return svc, fmt.Errorf("%w auth %v: dnstt only, off, optional or required (spec/dnsauth-v1.md)", store.ErrInvalid, a)
 		}
+		if a, ok := settings["seal"]; ok && (svc.Kind != "dnstt" || !slices.Contains([]any{"off", "optional", "required"}, a)) {
+			return svc, fmt.Errorf("%w seal %v: dnstt only, off, optional or required (spec/dnsseal-v1.md)", store.ErrInvalid, a)
+		}
 		if _, ok := settings["zone"]; !ok {
 			zone, err := newZone(ctx, st, all)
 			if err != nil {
@@ -302,6 +306,14 @@ func CreateService(ctx context.Context, st *store.Store, svc store.Service) (sto
 				return svc, err
 			}
 			svc.Secrets[SecretNoisePrivate] = key.Bytes()
+			// dnsseal-v1: the zone's key, made with the service whatever
+			// the mode: the unit copies it from the first deploy, so the
+			// seal can be turned on later through the API.
+			seal := make([]byte, 32)
+			if _, err := rand.Read(seal); err != nil {
+				return svc, err
+			}
+			svc.Secrets[SecretSealKey] = seal
 		} else {
 			settings["encryption_method"] = masterdnsMethod
 			raw := make([]byte, 16)
@@ -697,17 +709,18 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			}
 			v = peers
 		}
-	case svc.Kind == "dnstt" && key == "auth":
-		// dnsauth-v1 (spec/dnsauth-v1.md §5): off until clients sign.
+	case svc.Kind == "dnstt" && (key == "auth" || key == "seal"):
+		// dnsauth-v1 (spec/dnsauth-v1.md §5): off until clients sign;
+		// dnsseal-v1 (spec/dnsseal-v1.md §10): off until clients seal.
 		if !slices.Contains([]string{"off", "optional", "required"}, value) {
-			return svc, fmt.Errorf("%w auth: off, optional or required", store.ErrInvalid)
+			return svc, fmt.Errorf("%w %s: off, optional or required", store.ErrInvalid, key)
 		}
 		v = value
 		if value == "off" {
 			v = 0
 		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt: auth)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt: auth, seal)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
@@ -981,4 +994,17 @@ func newRotation(ctx context.Context, st *store.Store, all []store.Service) (Rot
 		}
 	}
 	return Rotation{}, nil, errors.New("no free port range for UDP rotation")
+}
+
+// EnsureSealKey gives a dnstt service made before dnsseal-v1 its key: made
+// once, whoever asks first (render, at every collect). It returns the key.
+func EnsureSealKey(ctx context.Context, st *store.Store, svc store.Service, secrets map[string][]byte) ([]byte, error) {
+	if k := secrets[SecretSealKey]; len(k) == 32 || svc.Kind != "dnstt" {
+		return k, nil
+	}
+	k := make([]byte, 32)
+	if _, err := rand.Read(k); err != nil {
+		return nil, err
+	}
+	return st.InitServiceSecret(ctx, svc.ID, SecretSealKey, k)
 }

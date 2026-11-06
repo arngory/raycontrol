@@ -93,6 +93,8 @@
 | `rayctl service set site answer=404\|403\|silent\|pages` | что сайт отвечает тем, кого отклонил REALITY; потом `rayctl apply` |
 | `rayctl service set reality rotate_sni=false` | не менять имя REALITY при ротации |
 | `rayctl service set hy2-masq up_mbps=500` | потолок серверного Brutal на соединение: нода шлёт клиенту не быстрее min(500 Мбит/с, темп клиента); `down_mbps` — потолок отдачи клиента; `0` — без потолка |
+| `rayctl service set dns auth=optional\|required\|off` | dnsauth-v1: метка устройства в каждом запросе dnstt ([`spec/dnsauth-v1.md`](spec/dnsauth-v1.md)); `required` — только когда все клиенты её ставят |
+| `rayctl service set dns seal=optional\|required\|off` | dnsseal-v1: обвязка dnstt запечатана ключом зоны ([`spec/dnsseal-v1.md`](spec/dnsseal-v1.md)); ключ уходит в ссылку; `optional` берёт и открытые запросы, `required` — только когда все клиенты запечатывают (с v0.13, нужен Niko с dnsseal-v1) |
 | `rayctl service set ygg peers=tls://host:443,quic://203.0.113.9:443` → `rayctl apply` | публичные пиры Yggdrasil, до 8 (по умолчанию нет; `quic` — только по IP; лучше разные операторы и `tls`/`quic`/`wss`): нода видна в сети Yggdrasil, клиенты получают пиры как запасной путь; `peers=none` — выключить |
 | `rayctl service cert site -chain chain.pem -key key.pem` | свой сертификат сайта вместо ACME (свой CA, другой ACME-клиент, тестовый CA): для REALITY, hy2-masq, naive, DoH и Yggdrasil под сайтом; должен покрывать все имена сайта |
 | `rayctl service rotate reality [-now]` | новые ключи (и имя) REALITY: через срок публикации или сразу; с `-now` прежние ключи сразу перестают работать, иначе принимаются ещё `-cred-grace` |

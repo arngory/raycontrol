@@ -136,7 +136,9 @@ func TestBuild(t *testing.T) {
 	d := p.Processes[2]
 	if d.Unit != "niko-dns.service" || d.Dir != "/run/niko/dns" || d.Needs != "/var/lib/raycontrol/rendered/dns/backend.json" ||
 		!slices.Equal(d.Args, []string{"/usr/local/libexec/raycontrol/niko-server", "backend", "-c", "/var/lib/raycontrol/rendered/dns/backend.json"}) ||
-		len(d.Copies) != 1 || d.Copies[0] != [2]string{"/var/lib/raycontrol/rendered/dns/noise.key", "/run/niko/dns/noise.key"} {
+		// The Noise key, and the dnsseal-v1 key whatever the mode.
+		len(d.Copies) != 2 || d.Copies[0] != [2]string{"/var/lib/raycontrol/rendered/dns/noise.key", "/run/niko/dns/noise.key"} ||
+		d.Copies[1] != [2]string{"/var/lib/raycontrol/rendered/dns/seal.keys", "/run/niko/dns/seal.keys"} {
 		t.Errorf("dns process %+v", d)
 	}
 	if !slices.Contains(p.Dirs, "/run/niko") || !slices.Contains(p.Dirs, "/run/niko/reality-api") {

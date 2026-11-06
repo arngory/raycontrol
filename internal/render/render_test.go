@@ -1,6 +1,7 @@
 package render_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -132,6 +133,14 @@ func TestRender(t *testing.T) {
 	key := byPath["/var/lib/raycontrol/rendered/dns/noise.key"]
 	if key.Mode != 0o600 || key.Group != "" || len(strings.TrimSpace(string(key.Content))) != 64 {
 		t.Fatalf("noise key file %+v", key)
+	}
+	// dnsseal-v1: the key file whatever the mode; the mode off by default.
+	sealFile := byPath["/var/lib/raycontrol/rendered/dns/seal.keys"]
+	if sealFile.Mode != 0o600 || sealFile.Group != "" || len(strings.TrimSpace(string(sealFile.Content))) != 64 {
+		t.Fatalf("seal key file %+v", sealFile)
+	}
+	if _, on := opts["seal"]; on || opts["seal_key_file"] != nil {
+		t.Fatalf("the seal on by default: %v", opts)
 	}
 
 	var mdns map[string]any
@@ -515,5 +524,87 @@ func TestDebugLevels(t *testing.T) {
 	st.SetDebugUntil(ctx, time.Now().Add(-time.Second))
 	if got := levels(); got["front"] != "warn/" || got["inner"] != "warning/none" {
 		t.Fatalf("after the window %v", got)
+	}
+}
+
+// dnsseal-v1 turned on: the backend reads the key the unit copies in; in
+// required mode the front pads its probe answers as the zone's (§6), not
+// in optional; masterdns takes no seal. The key is the service's, made
+// once even for a dnstt service from before (render.Collect).
+func TestRenderSeal(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	services, _ := st.ListServices(ctx)
+	var dns store.Service
+	for _, s := range services {
+		if s.Kind == "dnstt" {
+			dns = s
+		}
+	}
+	// A service from before dnsseal-v1: no key yet.
+	st.UpdateService(ctx, dns.ID, store.ServiceUpdate{Delete: []string{provision.SecretSealKey}})
+	for _, mode := range []string{"optional", "required"} {
+		if _, err := provision.SetServiceOption(ctx, st, dns.Name, "seal", mode); err != nil {
+			t.Fatal(err)
+		}
+		m, err := render.Collect(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, _, err := render.Render(m, render.DefaultPaths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		byPath := map[string]render.File{}
+		for _, f := range files {
+			byPath[f.Path] = f
+		}
+		var backend struct {
+			Options map[string]any `json:"options"`
+		}
+		json.Unmarshal(byPath["/var/lib/raycontrol/rendered/dns/backend.json"].Content, &backend)
+		if backend.Options["seal"] != mode || backend.Options["seal_key_file"] != "/run/niko/dns/seal.keys" {
+			t.Fatalf("%s: options %v", mode, backend.Options)
+		}
+		secrets, _ := st.ServiceSecrets(ctx, dns.ID)
+		if got := strings.TrimSpace(string(byPath["/var/lib/raycontrol/rendered/dns/seal.keys"].Content)); got != hex.EncodeToString(secrets[provision.SecretSealKey]) || len(got) != 64 {
+			t.Fatalf("%s: seal key file %q", mode, got)
+		}
+		var front struct {
+			DNS struct {
+				Zones []struct {
+					Backend string `json:"backend"`
+					SealPad bool   `json:"seal_pad"`
+				} `json:"zones"`
+			} `json:"dns"`
+		}
+		json.Unmarshal(byPath["/var/lib/raycontrol/rendered/front/front.json"].Content, &front)
+		for _, z := range front.DNS.Zones {
+			if z.SealPad != (z.Backend == "dns" && mode == "required") {
+				t.Errorf("%s: zone of %s: seal_pad %v", mode, z.Backend, z.SealPad)
+			}
+		}
+		var mdns struct {
+			Options map[string]any `json:"options"`
+		}
+		json.Unmarshal(byPath["/var/lib/raycontrol/rendered/mdns/backend.json"].Content, &mdns)
+		if mdns.Options["seal"] != nil {
+			t.Fatalf("masterdns sealed: %v", mdns.Options)
+		}
+	}
+	// The key stays the same from collect to collect.
+	before, _ := st.ServiceSecrets(ctx, dns.ID)
+	if _, err := render.Collect(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := st.ServiceSecrets(ctx, dns.ID)
+	if !bytes.Equal(before[provision.SecretSealKey], after[provision.SecretSealKey]) {
+		t.Fatal("the seal key changed")
+	}
+	if _, err := provision.SetServiceOption(ctx, st, dns.Name, "seal", "on"); err == nil {
+		t.Fatal("seal=on taken")
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "mdns", "seal", "required"); err == nil {
+		t.Fatal("a seal for masterdns taken")
 	}
 }

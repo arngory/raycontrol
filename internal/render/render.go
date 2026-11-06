@@ -135,6 +135,22 @@ func (m Model) nikoLevel() string {
 	return "warn"
 }
 
+// DNSSealMode is a dnstt service's dnsseal-v1 mode: off, optional or
+// required (spec/dnsseal-v1.md §5); off when unset.
+func DNSSealMode(s store.Service) string {
+	var st struct {
+		Seal string `json:"seal"`
+	}
+	_ = json.Unmarshal([]byte(s.Settings), &st)
+	if s.Kind != "dnstt" || st.Seal == "" {
+		return "off"
+	}
+	return st.Seal
+}
+
+// DNSSealKeyFile is the dnsseal-v1 keys file among a dnstt service's.
+const DNSSealKeyFile = "seal.keys"
+
 // DNSAuthMode is a dnstt service's dnsauth-v1 mode: off, optional or
 // required (spec/dnsauth-v1.md §5).
 func DNSAuthMode(s store.Service) string {
@@ -189,6 +205,12 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 		secrets, err := st.ServiceSecrets(ctx, s.ID)
 		if err != nil {
 			return m, err
+		}
+		// dnsseal-v1: a dnstt service from before it gets its key now.
+		if s.Kind == "dnstt" {
+			if secrets[provision.SecretSealKey], err = provision.EnsureSealKey(ctx, st, s, secrets); err != nil {
+				return m, err
+			}
 		}
 		m.Services = append(m.Services, Service{s, secrets})
 	}
@@ -448,6 +470,9 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		// NS: the name the zone is delegated to; the front answers SOA
 		// and NS at its apex (niko-server v0.9.0). dnstt only, as Probe.
 		NS []string `json:"ns,omitempty"`
+		// SealPad: probe answers padded as the zone's sealed ones
+		// (niko-server v0.10.0).
+		SealPad bool `json:"seal_pad,omitempty"`
 	}
 	type backendRef struct {
 		Socket string `json:"socket"`
@@ -480,6 +505,9 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			}
 			zone := provision.Zone(s.Service)
 			r := route{Zone: zone, Backend: s.Name, Probe: s.Kind == "dnstt" && len(m.DNSProbeKey) == 32}
+			// A zone whose answers are all sealed: the front pads its
+			// probe answers as they are (dnsseal-v1 §6).
+			r.SealPad = r.Probe && DNSSealMode(s.Service) == "required"
 			if s.Kind == "dnstt" && m.NSName != "" {
 				r.NS = []string{m.NSName}
 			}
@@ -490,11 +518,12 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				// An empty keys file would lock every device out.
 				return errors.New("dnsauth keys not collected (render.CollectForRender)")
 			}
-			f, secret, auth, err := dnsBackend(s, zone, inner.Name, p, keys, m.nikoLevel())
+			f, secrets, auth, err := dnsBackend(s, zone, inner.Name, p, keys, m.nikoLevel())
 			if err != nil {
 				return err
 			}
-			files = append(files, f, secret)
+			files = append(files, f)
+			files = append(files, secrets...)
 			if auth != nil {
 				files = append(files, *auth)
 			}
@@ -757,7 +786,7 @@ func accessFiles(s Service, m Model, p Paths, inner *Service) []File {
 	return out
 }
 
-func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level string) (cfg, secret File, auth *File, err error) {
+func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level string) (cfg File, secrets []File, auth *File, err error) {
 	opts := map[string]any{}
 	// dnsauth-v1 (spec/dnsauth-v1.md): the devices' keys in a file of the
 	// service group (the front is in none, R4-28), which the backend
@@ -765,7 +794,7 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level
 	if mode := DNSAuthMode(s.Service); mode != "off" {
 		if mode != "optional" && mode != "required" {
 			// The backend would refuse to start, or worse, read it as off.
-			return cfg, secret, nil, fmt.Errorf("service %s: auth %q: off, optional or required", s.Name, mode)
+			return cfg, nil, nil, fmt.Errorf("service %s: auth %q: off, optional or required", s.Name, mode)
 		}
 		f := dnsAuthFile(s, p, authKeys)
 		opts["auth"] = mode
@@ -780,6 +809,21 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level
 		secretValue = []byte(hex.EncodeToString(s.Secrets[provision.SecretNoisePrivate]) + "\n")
 		opts["zone"] = zone
 		opts["private_key_file"] = p.Credential(s.Name, secretName)
+		// dnsseal-v1 (spec/dnsseal-v1.md): the key file always, for the
+		// unit copies it from the first deploy; the mode when it is on.
+		seal := s.Secrets[provision.SecretSealKey]
+		if len(seal) != 32 {
+			return cfg, nil, nil, fmt.Errorf("service %s has no seal key (render.Collect)", s.Name)
+		}
+		secrets = append(secrets, File{Path: path.Join(p.Rendered, s.Name, DNSSealKeyFile), Mode: 0o600,
+			Content: []byte(hex.EncodeToString(seal) + "\n"), Service: s.Name})
+		if mode := DNSSealMode(s.Service); mode != "off" {
+			if mode != "optional" && mode != "required" {
+				return cfg, nil, nil, fmt.Errorf("service %s: seal %q: off, optional or required", s.Name, mode)
+			}
+			opts["seal"] = mode
+			opts["seal_key_file"] = p.Credential(s.Name, DNSSealKeyFile)
+		}
 	case "masterdns":
 		var settings struct {
 			Method int `json:"encryption_method"`
@@ -791,7 +835,7 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level
 		opts["encryption_key_file"] = p.Credential(s.Name, secretName)
 	}
 	if len(s.Secrets) == 0 || len(secretValue) == 0 {
-		return cfg, secret, nil, fmt.Errorf("service %s has no key", s.Name)
+		return cfg, nil, nil, fmt.Errorf("service %s has no key", s.Name)
 	}
 	b, err := jsonFile(map[string]any{
 		"schema":    Schema,
@@ -804,14 +848,14 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level
 		"inner":     p.InnerSocket(inner),
 	})
 	if err != nil {
-		return cfg, secret, nil, err
+		return cfg, nil, nil, err
 	}
 	dir := path.Join(p.Rendered, s.Name)
 	cfg = File{Path: path.Join(dir, "backend.json"), Mode: 0o640, Group: GroupName(s.Name), Content: b, Service: s.Name}
 	// Secrets are read by systemd (root), which gives the process its own
 	// copy (Paths.Credential), so the file needs no group access.
-	secret = File{Path: path.Join(dir, secretName), Mode: 0o600, Content: secretValue, Service: s.Name}
-	return cfg, secret, auth, nil
+	secret := File{Path: path.Join(dir, secretName), Mode: 0o600, Content: secretValue, Service: s.Name}
+	return cfg, append([]File{secret}, secrets...), auth, nil
 }
 
 // VLESSEncryption returns the server ("decryption") and client
