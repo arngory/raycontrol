@@ -69,6 +69,11 @@ var nat64 = netip.MustParsePrefix("64:ff9b::/96")
 // global unicast, neither private, loopback nor link-local, and in none of
 // the nonPublic ranges; in the NAT64 prefix, the IPv4 address it embeds.
 func PublicAddr(a netip.Addr) bool {
+	// A zone (scope) belongs to link-local addresses, and Prefix.Contains
+	// is false for any address with one (review 10: "[fec0::1%1]" passed).
+	if a.Zone() != "" {
+		return false
+	}
 	a = a.Unmap()
 	if nat64.Contains(a) {
 		b := a.As16()

@@ -203,13 +203,15 @@ func TestCheckDNSZones(t *testing.T) {
 func TestCheckDNSZonesUnreadable(t *testing.T) {
 	defer func(every time.Duration) { dnsParentEvery = every }(dnsParentEvery)
 	dnsParentEvery = 50 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	// The store opened without the loop's time limit: its migrations took
+	// more than 200 ms under -race with other packages.
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "rayd.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
 	var lines countLines
 	mon := &dnscheck.Monitor{}
 	checkDNSZones(ctx, mon, st, func() <-chan struct{} { return nil }, time.Hour, &health.Board{}, slog.New(&lines))
@@ -225,3 +227,77 @@ func (c *countLines) Enabled(context.Context, slog.Level) bool  { return true }
 func (c *countLines) Handle(context.Context, slog.Record) error { c.n.Add(1); return nil }
 func (c *countLines) WithAttrs([]slog.Attr) slog.Handler        { return c }
 func (c *countLines) WithGroup(string) slog.Handler             { return c }
+
+// A change whose read of the zones fails: the new zone is checked once the
+// store reads again, without another change and without waiting for the
+// hourly plan (review 10: it waited up to the plan).
+func TestCheckDNSZonesChangeDuringError(t *testing.T) {
+	defer func(every, during time.Duration) { dnsParentEvery, dnsParentFor = every, during }(dnsParentEvery, dnsParentFor)
+	dnsParentEvery, dnsParentFor = 20*time.Millisecond, 5*time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	ns, _ := provision.NSName(ctx, st)
+	fake := &fakeDNS{ns: ns}
+	fake.set(true)
+	hb := &health.Board{}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	resolvers, _ := dnscheck.ParseResolvers(dnscheck.DefaultResolvers)
+	mon := dnsMonitor(ctx, st, resolvers, hb, log)
+	mon.Checker = &dnscheck.Checker{Net: fake, System: []netip.AddrPort{netip.MustParseAddrPort("192.0.2.53:53")},
+		Local: func(netip.Addr) bool { return false }, Private: true, Retry: 5 * time.Millisecond, GiveUp: 20 * time.Millisecond}
+	var mu sync.Mutex
+	wake := make(chan struct{})
+	changes := func() <-chan struct{} { mu.Lock(); defer mu.Unlock(); return wake }
+	notify := func() { mu.Lock(); close(wake); wake = make(chan struct{}); mu.Unlock() }
+	done := make(chan struct{})
+	go func() { checkDNSZones(ctx, mon, st, changes, time.Hour, hb, log); close(done) }()
+	defer func() { cancel(); <-done }()
+	checked := func(service string) bool {
+		for _, l := range hb.Loops() {
+			if l.Name == "dns-zone "+service && l.Runs > 0 {
+				return true
+			}
+		}
+		return false
+	}
+	until := func(what string, ok func() bool) {
+		t.Helper()
+		for range 400 {
+			if ok() {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("no %s", what)
+	}
+	until("first check", func() bool { return checked("dns") })
+	// A new zone, and the read of the zones fails (a setting the read
+	// needs, spoilt), then reads again.
+	orig, err := st.GetSetting(ctx, "dns_probe_key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns2", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSetting(ctx, "dns_probe_key", []byte("bad")); err != nil {
+		t.Fatal(err)
+	}
+	notify()
+	time.Sleep(100 * time.Millisecond)
+	if err := st.SetSetting(ctx, "dns_probe_key", orig); err != nil {
+		t.Fatal(err)
+	}
+	until("check of the new zone", func() bool { return checked("dns2") })
+}

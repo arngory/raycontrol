@@ -960,6 +960,7 @@ func checkDNSZones(ctx context.Context, mon *dnscheck.Monitor, st *store.Store, 
 		wake := changes()
 		zones, err := provision.DNSCheckTargets(ctx, st)
 		now := time.Now()
+		var retry time.Time // a read again sooner than next, after an error
 		if err == nil {
 			services := make([]string, 0, len(zones))
 			for _, z := range zones {
@@ -973,12 +974,14 @@ func checkDNSZones(ctx context.Context, mon *dnscheck.Monitor, st *store.Store, 
 				return
 			}
 			log.Warn("DNS zone check: the zones not read", "err", err)
-			// Again in dnsParentEvery when the planned time has gone by:
-			// a database that keeps failing spun the loop on it (review
-			// 8); a later plan stays (review 9).
+			// Read again in dnsParentEvery: a change that woke the loop
+			// is not left to the plan, an hour away (review 10). Never
+			// sooner, or a database that keeps failing spins the loop
+			// (review 8); the plan itself stays (review 9).
 			if !next.After(now) {
 				next = now.Add(dnsParentEvery)
 			}
+			retry = now.Add(dnsParentEvery)
 		case len(zones) == 0:
 			key, next, waiting = "", time.Time{}, false
 		case dnsZonesKey(zones) != key:
@@ -999,9 +1002,13 @@ func checkDNSZones(ctx context.Context, mon *dnscheck.Monitor, st *store.Store, 
 			next = time.Now().Add(jitter(period, 10))
 		}
 		mon.SetNext(next)
+		at := next
+		if !retry.IsZero() && retry.Before(at) {
+			at = retry
+		}
 		var timer <-chan time.Time
-		if !next.IsZero() {
-			timer = time.After(time.Until(next))
+		if !at.IsZero() {
+			timer = time.After(time.Until(at))
 		}
 		select {
 		case <-ctx.Done():

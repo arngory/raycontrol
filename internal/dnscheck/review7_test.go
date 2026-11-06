@@ -53,6 +53,8 @@ func TestResolverPublic(t *testing.T) {
 		// IPv4-compatible forms refused.
 		"udp:[64:ff9b::808:808]": true, "udp:[2001:2::1]": false, "udp:[3fff::1]": false, "udp:[::a00:1]": false,
 		"udp:[64:ff9b:1::808:808]": false,
+		// Review 10: an address with a zone, whatever it is.
+		"udp:[64:ff9b::a00:1%eth0]": false, "udp:[2002:a00:1::1%x]": false, "udp:[fec0::1%1]": false, "udp:[2001:4860:4860::8888%eth0]": false,
 	} {
 		rs, err := ParseResolvers([]string{in})
 		if err != nil {
