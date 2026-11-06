@@ -33,7 +33,7 @@
 
 | Команда | Что делает |
 |---|---|
-| `rayctl status` | версия, нода, число пользователей, сервисов, устройств, порты SPA сейчас |
+| `rayctl status` | версия, нода, число пользователей, сервисов, устройств, порты SPA сейчас; циклы rayd, `dns-zone <сервис>` — самопроверка зоны туннеля |
 | `rayctl service list` | сервисы; для REALITY — когда сменились ключи и когда следующая смена |
 | `rayctl audit [-n 50]` | журнал действий администратора |
 | `rayctl debug on [-for 30m]` / `off` / `show` | окно отладки: rayd, rayspa и data plane пишут подробно, с адресами клиентов; закрывается само (до суток); службы data plane перезапускаются |
@@ -100,7 +100,7 @@
 | `rayctl service cert site -chain chain.pem -key key.pem` | свой сертификат сайта вместо ACME (свой CA, другой ACME-клиент, тестовый CA): для REALITY, hy2-masq, naive, DoH и Yggdrasil под сайтом; должен покрывать все имена сайта |
 | `rayctl service rotate reality [-now]` | новые ключи (и имя) REALITY: через срок публикации или сразу; с `-now` прежние ключи сразу перестают работать, иначе принимаются ещё `-cred-grace` |
 
-## DNS (Cloudflare)
+## DNS
 
 | Команда | Что делает |
 |---|---|
@@ -108,6 +108,8 @@
 | `rayctl dns cloudflare [-token-file F]` | подключить Cloudflare; без файла токен спрашивается без эха |
 | `rayctl dns sync` | привести зону в порядок сейчас (rayd делает это сам) |
 | `rayctl dns remove [-keep-records]` | удалить записи raycontrol и забыть провайдера |
+| `rayctl dns check [-now]` | зоны туннелей с ноды: делегирование у серверов родителя, фронт и бэкенд, проба dnsprobe-v1 через Google, Cloudflare, Quad9 (EDNS, 0x20, выход резолвера); без `-now` — последняя проверка rayd, `-now` — сейчас, не чаще раза в 30 с |
+| `rayctl dns check -resolver nsdi,yandex` | то же через другие резолверы (`msk-ix`, `system`, `udp:IP`, `tcp:IP`); российские нода сама не спрашивает, их отказ — только предупреждение |
 
 ## Доступ администратора
 
@@ -142,6 +144,7 @@ shred -u /root/phone.bundle
 | `-reality-period` / `-reality-prepare` | 90 д / 1 д | ключи и имя REALITY; время на сертификат нового имени |
 | `-spa-tcp` | true | TCP-носитель SPA; `false`, если хватает UDP |
 | `-acme-directory` | Let's Encrypt | CA; пусто — без сертификатов |
+| `-dns-check` · `-dns-check-resolvers` | 1 ч ±10 % · `google,cloudflare,quad9` | самопроверка DNS-зон с ноды; `0` — только `rayctl dns check -now` |
 | `-run` | `/run/niko` | каталог сокетов и копий секретов data plane |
 | `-supervise` · `-xray` · `-niko-server` | выкл. | без systemd (CI, контейнеры): data plane — дочерние процессы rayd под его пользователем; не для ноды (R4-22, `test/supervise/run.sh`) |
 
