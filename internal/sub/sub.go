@@ -83,6 +83,16 @@ type Payload struct {
 	// user with a dnstt profile: the client checks resolvers with it in
 	// the dnstt zones.
 	DNSProbe *DNSProbeHint `json:"dns_probe,omitempty"`
+	// DNSAuth is the dnsauth versions the node takes on the user's DNS
+	// tunnels that check tags (spec/dnsauth-v2.md §4): a client that
+	// knows v2 signs with it when 2 is here, otherwise with v1. No field:
+	// no such tunnel, or a node before v0.15.0 (v1 only).
+	DNSAuth *DNSAuthVersions `json:"dnsauth,omitempty"`
+}
+
+// DNSAuthVersions lists dnsauth versions: 1, 2 or both.
+type DNSAuthVersions struct {
+	V []int `json:"v"`
 }
 
 // DNSProbeHint carries the node's dnsprobe-v1 key, base64url without

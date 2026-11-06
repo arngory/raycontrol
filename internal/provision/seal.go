@@ -47,6 +47,24 @@ func DNSAuthMode(s store.Service) string {
 	return st.Auth
 }
 
+// DNSAuthHint is a DNS tunnel's dnsauth-v2 mode (spec/dnsauth-v2.md §4):
+// off, optional or required, and off when its tags are not checked. Unset
+// is optional: the node's niko-server checks v2 tags from v0.12.0, so a
+// service from before gets them with the update, as a new one does.
+func DNSAuthHint(s store.Service) string {
+	if DNSAuthMode(s) == "off" {
+		return "off"
+	}
+	var st struct {
+		Hint string `json:"auth_hint"`
+	}
+	_ = json.Unmarshal([]byte(s.Settings), &st)
+	if st.Hint == "" {
+		return "optional"
+	}
+	return st.Hint
+}
+
 // SealState is the rotation state in the settings of a dnstt service.
 type SealState struct {
 	RotatedAt int64 `json:"seal_rotated_at,omitempty"` // last switch; 0 before the first

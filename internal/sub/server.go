@@ -222,6 +222,7 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 	}) {
 		p.DNSProbe = &DNSProbeHint{V: 1, Key: base64.RawURLEncoding.EncodeToString(m.DNSProbeKey)}
 	}
+	p.DNSAuth = dnsAuthVersions(m, profiles)
 	// Through a relay the address is the relay's: its network's hints are
 	// not the client's (relay-v1 §9.3).
 	if s.Hints != nil && addr.IsValid() && !addr.IsLoopback() && !s.FromRelay(ctx, addr) {
@@ -319,4 +320,37 @@ func (s *Server) nextSeq(ctx context.Context) (uint64, error) {
 	}
 	seq++
 	return seq, s.Store.SetSetting(ctx, settingSeq, []byte(strconv.FormatUint(seq, 10)))
+}
+
+// dnsAuthVersions is what the user's DNS tunnels that check tags take
+// (spec/dnsauth-v2.md §4): 1 unless one of them takes v2 only
+// (auth_hint=required), 2 unless one of them takes no v2 (auth_hint=off).
+// The field is one for all of them: when they disagree both ways, 2,
+// where the tunnels go.
+func dnsAuthVersions(m render.Model, profiles []Profile) *DNSAuthVersions {
+	v1, v2, any := true, true, false
+	for _, svc := range m.Services {
+		if (svc.Kind != "dnstt" && svc.Kind != "masterdns") || render.DNSAuthMode(svc.Service) == "off" ||
+			!slices.ContainsFunc(profiles, func(pr Profile) bool { return pr.Svc == uint16(svc.ID) }) {
+			continue
+		}
+		any = true
+		switch render.DNSAuthHint(svc.Service) {
+		case "required":
+			v1 = false
+		case "off":
+			v2 = false
+		}
+	}
+	if !any {
+		return nil
+	}
+	d := &DNSAuthVersions{}
+	if v1 {
+		d.V = append(d.V, 1)
+	}
+	if v2 || !v1 {
+		d.V = append(d.V, 2)
+	}
+	return d
 }

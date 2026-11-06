@@ -282,3 +282,76 @@ func TestZoneSetting(t *testing.T) {
 		}
 	}
 }
+
+// auth_hint (dnsauth-v2, spec/dnsauth-v2.md §4): optional when unset with
+// auth on, off with auth off; kept as set; required only with auth
+// required, and auth stays required while it is; the node's own poll signs
+// with v2 unless it is off.
+func TestAuthHintOption(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	dns, err := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := DNSAuthHint(dns); h != "optional" {
+		t.Fatalf("a new service: %s", h)
+	}
+	hint := func() (string, bool) {
+		t.Helper()
+		s, err := st.ServiceByName(ctx, "dns")
+		if err != nil {
+			t.Fatal(err)
+		}
+		zones, err := DNSCheckTargets(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return DNSAuthHint(s), zones[0].AuthV2
+	}
+	for _, c := range []struct {
+		key, value, want string
+		v2               bool
+	}{
+		{"auth_hint", "required", "required", true},
+		{"auth_hint", "off", "off", false},
+		{"auth_hint", "optional", "optional", true},
+	} {
+		if _, err := SetServiceOption(ctx, st, "dns", c.key, c.value); err != nil {
+			t.Fatalf("%s=%s: %v", c.key, c.value, err)
+		}
+		if h, v2 := hint(); h != c.want || v2 != c.v2 {
+			t.Fatalf("%s=%s: hint %s, v2 poll %v", c.key, c.value, h, v2)
+		}
+	}
+	if _, err := SetServiceOption(ctx, st, "dns", "auth_hint", "strict"); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("auth_hint=strict: %v", err)
+	}
+	// required needs auth required, and holds it there.
+	SetServiceOption(ctx, st, "dns", "auth_hint", "required")
+	if _, err := SetServiceOption(ctx, st, "dns", "auth", "optional"); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("auth optional under auth_hint required: %v", err)
+	}
+	SetServiceOption(ctx, st, "dns", "auth_hint", "optional")
+	if _, err := SetServiceOption(ctx, st, "dns", "auth", "optional"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetServiceOption(ctx, st, "dns", "auth_hint", "required"); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("auth_hint required under auth optional: %v", err)
+	}
+	// auth off: no hint, whatever is set.
+	SetServiceOption(ctx, st, "dns", "auth", "off")
+	if h, _ := hint(); h != "off" {
+		t.Fatalf("auth off: hint %s", h)
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns2", Settings: `{"auth":"optional","auth_hint":"required"}`}); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("created with auth_hint required under auth optional: %v", err)
+	}
+}

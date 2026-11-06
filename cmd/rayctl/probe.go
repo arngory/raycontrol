@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -239,6 +240,9 @@ func probeDNSZones(p *sub.Payload, host string, ip netip.Addr, deviceKey [spa.Ke
 				if id, err := hex.DecodeString(q.Get("niko-node")); err == nil && len(id) == spa.NodeIDSize {
 					k := spa.DNSAuthKey(deviceKey, [spa.NodeIDSize]byte(id), pr.Svc)
 					z.Auth, z.AuthKey = "required", k[:]
+					// dnsauth-v2 when the subscription says the node takes it
+					// (spec/dnsauth-v2.md §4), as Niko does.
+					z.AuthV2 = p.DNSAuth != nil && slices.Contains(p.DNSAuth.V, 2)
 				}
 			}
 		}

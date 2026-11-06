@@ -49,7 +49,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false;
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
                                             yggdrasil: peers=URI,URI|none (public peers, then rayctl apply);
-                                            dnstt, masterdns: auth=, seal=off|optional|required,
+                                            dnstt, masterdns: auth=, auth_hint=, seal=off|optional|required
+                                            (auth_hint: dnsauth-v2 tags; required needs auth=required),
                                             spare_zones=N|ZONE,ZONE|none (spare zones, made up or your own),
                                             zone=SPARE (a spare becomes the main zone, the main one leaves)
   service cert SITE -chain F -key F         a certificate of your own for the site and the services under
@@ -611,6 +612,7 @@ func keyState(s *nodev1.Service) string {
 		// (masterdns seals with its own key).
 		var st struct {
 			Auth      string `json:"auth"`
+			AuthHint  string `json:"auth_hint"`
 			Seal      string `json:"seal"`
 			RotatedAt int64  `json:"seal_rotated_at"`
 			PrevUntil int64  `json:"seal_prev_until"`
@@ -624,6 +626,10 @@ func keyState(s *nodev1.Service) string {
 			// dnsauth-v1 off or optional: new sessions can be held back
 			// by anyone (niko-server's load test).
 			out = "auth " + cmp.Or(st.Auth, "off") + " (open: auth=required keeps floods out)"
+		}
+		if st.Auth != "" && st.Auth != "off" {
+			// dnsauth-v2: optional when unset (provision.DNSAuthHint).
+			out += ", v2 " + cmp.Or(st.AuthHint, "optional")
 		}
 		out += ", seal " + st.Seal
 		if st.RotatedAt != 0 {

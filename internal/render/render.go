@@ -146,6 +146,9 @@ const DNSSealKeyFile = "seal.keys"
 // required (spec/dnsauth-v1.md §5).
 func DNSAuthMode(s store.Service) string { return provision.DNSAuthMode(s) }
 
+// DNSAuthHint is a DNS tunnel's dnsauth-v2 mode (provision.DNSAuthHint).
+func DNSAuthHint(s store.Service) string { return provision.DNSAuthHint(s) }
+
 // DNSAuthKeys is the file name of a DNS tunnel's device keys.
 const DNSAuthKeys = "auth.keys"
 
@@ -842,6 +845,16 @@ func dnsBackend(s Service, zones []string, inner string, p Paths, authKeys []str
 		opts["auth"] = mode
 		opts["auth_keys_file"] = f.Path
 		auth = &f
+		// dnsauth-v2 (spec/dnsauth-v2.md, niko-server v0.12.0): keys
+		// found by the hint in a tag, outside the scan budget.
+		switch hint := DNSAuthHint(s.Service); {
+		case hint == "required" && mode != "required":
+			return cfg, nil, nil, fmt.Errorf("service %s: auth_hint required needs auth required", s.Name)
+		case hint == "optional" || hint == "required":
+			opts["auth_hint"] = hint
+		case hint != "off":
+			return cfg, nil, nil, fmt.Errorf("service %s: auth_hint %q: off, optional or required", s.Name, hint)
+		}
 	}
 	seal := DNSSealMode(s.Service)
 	if seal != "off" && seal != "optional" && seal != "required" {

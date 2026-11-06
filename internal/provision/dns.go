@@ -238,6 +238,9 @@ func DNSCheckTargets(ctx context.Context, st *store.Store) ([]dnscheck.Zone, err
 					return nil, err
 				}
 				z.AuthKey = k[:]
+				// v2 where the backend takes it: with auth_hint=required
+				// a v1 tag would not get through.
+				z.AuthV2 = DNSAuthHint(s) != "off"
 			}
 			if z.Seal != "off" {
 				secrets, err := st.ServiceSecrets(ctx, s.ID)

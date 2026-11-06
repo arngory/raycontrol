@@ -573,6 +573,49 @@ func TestNodeNameInSubscription(t *testing.T) {
 	}
 }
 
+// dnsauth in the subscription (spec/dnsauth-v2.md §4): both versions with
+// auth_hint optional, 2 alone with required, 1 alone with off; none
+// without a DNS tunnel that checks tags.
+func TestDNSAuthVersionsInSubscription(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	versions := func() []int {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.DNSAuth == nil {
+			return nil
+		}
+		return p.DNSAuth.V
+	}
+	for _, c := range []struct {
+		key, value string
+		want       []int
+	}{
+		{"", "", []int{1, 2}},
+		{"auth_hint", "required", []int{2}},
+		{"auth_hint", "off", []int{1}},
+		{"auth_hint", "optional", []int{1, 2}},
+		{"auth", "off", nil},
+	} {
+		if c.key != "" {
+			if _, err := provision.SetServiceOption(ctx, f.st, "dns", c.key, c.value); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := versions(); !slices.Equal(got, c.want) {
+			t.Errorf("%s=%s: dnsauth.v %v, want %v", c.key, c.value, got, c.want)
+		}
+	}
+}
+
 // Relays in the subscription (relay-v1 §4): once a relay has its bundle it
 // is listed with its own SPA, and the profiles it forwards name it in via;
 // DNS tunnels do not go through relays.

@@ -104,3 +104,9 @@ hint (epoch + 1) = e97f
 - **niko-server:** `dnsttserver.Auth` и `DeviceAuth` — указатель подсказок по эпохам, проверка v2 без бюджета,
   режим `auth_hint`; masterdns — без изменений в форке (метка для `Authenticator` — те же 8 байт).
 - **raycontrol:** опция `auth_hint`, поле `dnsauth` в подписке, пин niko-server с v2.
+
+**Сделано в raycontrol v0.15.0** (с niko-server v0.12.0):
+- `auth_hint` не задан и `auth` не off — значит `optional`. Значение вычисляется при чтении, поэтому сервисы, созданные до обновления, получают v2 вместе с ним, как и новые.
+- `rayctl service set <dns> auth_hint=off|optional|required`. `required` — только при `auth=required` (как в niko-server: при `optional` метка v1 прошла бы как запрос без метки), а `auth` нельзя ослабить, пока `auth_hint=required`.
+- Поле `dnsauth.v` в подписке — по туннелям пользователя (subscription-v1 §3).
+- Самопроверка ноды (`rayctl dns check`) подписывает по v2, когда `auth_hint` не off. `rayctl probe -dns` — когда в подписке есть `2`.

@@ -144,7 +144,8 @@ func TestRender(t *testing.T) {
 		len(sealKeyLines(sealFile.Content)[0]) != 64 {
 		t.Fatalf("seal key file %+v", sealFile)
 	}
-	if opts["seal"] != "optional" || opts["seal_key_file"] != sealFile.Path || opts["auth"] != "required" {
+	// dnsauth-v2 optional with auth on (DNSAuthHint), niko-server v0.12.0.
+	if opts["seal"] != "optional" || opts["seal_key_file"] != sealFile.Path || opts["auth"] != "required" || opts["auth_hint"] != "optional" {
 		t.Fatalf("a new dnstt service's options: %v", opts)
 	}
 
@@ -161,7 +162,7 @@ func TestRender(t *testing.T) {
 	// niko-server v0.11.0); the seal takes the service's key, no file of
 	// its own.
 	if mopts["auth"] != "optional" || mopts["auth_keys_file"] != "/var/lib/raycontrol/rendered/mdns/auth.keys" ||
-		mopts["seal"] != "optional" || mopts["seal_key_file"] != nil {
+		mopts["seal"] != "optional" || mopts["seal_key_file"] != nil || mopts["auth_hint"] != "optional" {
 		t.Fatalf("a new masterdns service's options: %v", mopts)
 	}
 

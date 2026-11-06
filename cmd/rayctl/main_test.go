@@ -204,10 +204,13 @@ func TestProbeDNSZones(t *testing.T) {
 func TestKeyStateDNS(t *testing.T) {
 	for _, c := range []struct{ kind, settings, want string }{
 		{"dnstt", `{"auth":"required","seal":"optional","spare_zones":["s.example.net","u.example.org"]}`,
-			"auth required, seal optional, spare zones s.example.net u.example.org"},
-		{"masterdns", `{"auth":"required","seal":"required","encryption_method":5}`, "auth required, seal required"},
+			"auth required, v2 optional, seal optional, spare zones s.example.net u.example.org"},
+		{"masterdns", `{"auth":"required","seal":"required","encryption_method":5}`, "auth required, v2 optional, seal required"},
+		// dnsauth-v2 as set (optional when unset)
+		{"dnstt", `{"auth":"required","auth_hint":"required","seal":"off"}`, "auth required, v2 required, seal off"},
+		{"dnstt", `{"auth":"optional","auth_hint":"off"}`, "auth optional (open: auth=required keeps floods out), v2 off, seal off"},
 		{"masterdns", `{"zone":"m.example.com","auth":"optional","seal":"optional","spare_zones":["v.example.net"]}`,
-			"auth optional (open: auth=required keeps floods out), seal optional, spare zones v.example.net"},
+			"auth optional (open: auth=required keeps floods out), v2 optional, seal optional, spare zones v.example.net"},
 		// A masterdns service from before: neither mode.
 		{"masterdns", `{}`, "auth off (open: auth=required keeps floods out), seal off"},
 	} {
