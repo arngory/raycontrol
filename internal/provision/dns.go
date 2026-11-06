@@ -117,8 +117,12 @@ func DNSRecords(ctx context.Context, st *store.Store) (records []cloudflare.Reco
 	var zones []string
 	for _, s := range all {
 		if (s.Kind == "dnstt" || s.Kind == "masterdns") && s.Enabled {
-			if z := Zone(s); z != "" && !slices.Contains(zones, z) {
-				zones = append(zones, z)
+			// The spare zones too (spec/dnszones-v1.md §4): delegated as
+			// the main one, so that clients find them when they need them.
+			for _, z := range Zones(s) {
+				if !slices.Contains(zones, z) {
+					zones = append(zones, z)
+				}
 			}
 		}
 	}
@@ -243,7 +247,14 @@ func DNSCheckTargets(ctx context.Context, st *store.Store) ([]dnscheck.Zone, err
 				z.SealKey = secrets[SecretSealKey]
 			}
 		}
-		zones = append(zones, z)
+		// Each zone of the service, the spares as the main one
+		// (spec/dnszones-v1.md §4): a spare that is not delegated or not
+		// served is found before clients need it.
+		for i, name := range Zones(s) {
+			zz := z
+			zz.Name, zz.Spare = name, i > 0
+			zones = append(zones, zz)
+		}
 	}
 	return zones, nil
 }

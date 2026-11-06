@@ -3,6 +3,7 @@ package provision
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -254,5 +255,30 @@ func TestZoneSetting(t *testing.T) {
 	}
 	if z := Zone(store.Service{Settings: `{"zone":"Old.Example.com."}`}); z != "old.example.com" {
 		t.Fatalf("an older service's zone: %q", z)
+	}
+	// Another DNS service's zone, or one nested with it, is refused: the
+	// front (niko-server v0.11.0) takes neither, a name under both being
+	// either's. A sibling, or a name merely ending the same, is fine.
+	for i, bad := range []string{`"t.example.com"`, `"X.t.example.com."`, `"example.com"`} {
+		_, err := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "nest" + string(rune('a'+i)), Enabled: true, Settings: `{"zone":` + bad + `}`})
+		if !errors.Is(err, store.ErrInvalid) || !strings.Contains(fmt.Sprint(err), "nested with, the zone of m") {
+			t.Errorf("zone %s: %v", bad, err)
+		}
+	}
+	for i, ok := range []string{`"u.example.com"`, `"at.example.com"`} {
+		if _, err := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "fine" + string(rune('a'+i)), Enabled: true, Settings: `{"zone":` + ok + `}`}); err != nil {
+			t.Errorf("zone %s: %v", ok, err)
+		}
+	}
+	// A zone made up for a service is nested with none.
+	all, err := st.ListServices(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		z, err := newZone(ctx, st, all)
+		if err != nil || zoneConflict(z, all) != "" {
+			t.Fatalf("new zone %q: %v", z, err)
+		}
 	}
 }

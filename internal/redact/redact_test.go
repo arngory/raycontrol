@@ -39,3 +39,13 @@ ok: unit niko-dns.service active, port 53, version v0.1.1`
 		t.Error("tokens match across reports")
 	}
 }
+
+// Names learned later (a node's DNS tunnel zones) are hidden as well.
+func TestAdd(t *testing.T) {
+	r := New("203.0.113.7")
+	r.Add("T.Example.com.", "example.com", "")
+	out := r.String("zone t.example.com, NS ns9.example.com, other www.example.org")
+	if strings.Contains(out, "t.example.com") || strings.Contains(out, "ns9.example.com") || !strings.Contains(out, "www.example.org") {
+		t.Fatalf("%q", out)
+	}
+}

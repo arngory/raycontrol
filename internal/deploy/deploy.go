@@ -555,7 +555,10 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 				"User=niko-front", "Group=niko-front",
 				"ExecStart=" + bin.NikoServer + " front -c " + path.Join(p.Rendered, "front", "front.json"),
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, "front"), "/run/"),
-				"RuntimeDirectoryMode=0700",
+				// The front group (rayd) passes through to the stats
+				// socket; the credentials in it are the front's alone
+				// (0400).
+				"RuntimeDirectoryMode=0710",
 				"AmbientCapabilities=CAP_NET_BIND_SERVICE",
 				"CapabilityBoundingSet=CAP_NET_BIND_SERVICE",
 				"UMask=0007",

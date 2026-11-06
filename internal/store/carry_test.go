@@ -154,6 +154,7 @@ func TestCarryRevocationsMore(t *testing.T) {
 		t.Fatal(err)
 	}
 	dns, _ := s.CreateService(ctx, Service{Kind: "dnstt", Name: "dns", Enabled: true, Settings: `{"auth":"optional"}`})
+	mdns, _ := s.CreateService(ctx, Service{Kind: "masterdns", Name: "mdns", Enabled: true})
 	s.Close()
 	copyFile(t, current, saved)
 
@@ -184,8 +185,10 @@ func TestCarryRevocationsMore(t *testing.T) {
 	// A new bundle since: a new probe endpoint.
 	must(t, s.IssueRelay(ctx, "relay2", RelayIssue{SPA: []byte(`{"new":1}`), SSHPort: 2222, Admin: []string{"203.0.113.9/32"},
 		CertPin: "relay2-new", ProbePort: 31000, ProbePin: "probe-new"}))
-	if _, err := s.db.ExecContext(ctx, `UPDATE services SET settings_json = json_set(settings_json, '$.auth', 'required') WHERE id = ?`, dns.ID); err != nil {
-		t.Fatal(err)
+	for _, id := range []int64{dns.ID, mdns.ID} {
+		if _, err := s.db.ExecContext(ctx, `UPDATE services SET settings_json = json_set(settings_json, '$.auth', 'required') WHERE id = ?`, id); err != nil {
+			t.Fatal(err)
+		}
 	}
 	s.Close()
 
@@ -205,8 +208,10 @@ func TestCarryRevocationsMore(t *testing.T) {
 		rs[0].CertPin != "relay2-new" || rs[0].ProbePort != 31000 || rs[0].ProbePin != "probe-new" {
 		t.Errorf("relays %+v: removed one back, or the old SPA", rs)
 	}
-	if svc, _ := s.ServiceByName(ctx, "dns"); !strings.Contains(svc.Settings, `"auth":"required"`) {
-		t.Errorf("dnsauth went back: %s", svc.Settings)
+	for _, name := range []string{"dns", "mdns"} {
+		if svc, _ := s.ServiceByName(ctx, name); !strings.Contains(svc.Settings, `"auth":"required"`) {
+			t.Errorf("dnsauth of %s went back: %s", name, svc.Settings)
+		}
 	}
 	var n int
 	s.db.QueryRowContext(ctx, `SELECT count(*) FROM user_services us JOIN users u ON u.id = us.user_id WHERE u.name = 'alice'`).Scan(&n)

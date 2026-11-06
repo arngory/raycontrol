@@ -45,6 +45,7 @@ import (
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/relayprobe"
+	"github.com/arngory/raycontrol/internal/release"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/site"
 	"github.com/arngory/raycontrol/internal/store"
@@ -154,6 +155,7 @@ func cmdServe(args []string) error {
 	realityPeriod := fs.Duration("reality-period", 90*24*time.Hour, "how long REALITY keys stay current; their next set is published -cred-lead ahead (0: no rotation)")
 	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new REALITY server name may wait for its certificate")
 	debug := fs.Bool("debug", false, "log at debug level: refused subscription requests with their addresses (personal data: turn it off after use)")
+	updateCheck := fs.Duration("update-check", 0, "look for a newer raycontrol release this often, an hour or more, ±10 % (0: never; release builds only): the node fetches the latest SHA256SUMS and its signature from github.com, which sees the node's address; rayctl status says what it found")
 	dnsCheck := fs.Duration("dns-check", time.Hour, "check the DNS tunnel zones from the node this often, ±10 %: the delegation, the front and the backend, the zones through public resolvers (0: only on demand, rayctl dns check -now)")
 	dnsCheckResolvers := fs.String("dns-check-resolvers", strings.Join(dnscheck.DefaultResolvers, ","),
 		"resolvers the DNS check asks: "+strings.Join(dnscheck.ResolverNames(), ", ")+", udp:IP or tcp:IP")
@@ -243,6 +245,9 @@ func cmdServe(args []string) error {
 		}
 		go applier.Run(ctx, srv.Changes)
 	}
+	if *updateCheck > 0 && *updateCheck < time.Hour {
+		return errors.New("-update-check must be an hour or more: each check asks github.com from the node")
+	}
 	if *credPeriod > 0 {
 		if *credLead >= *credPeriod {
 			return errors.New("-cred-lead must be shorter than -cred-period")
@@ -268,11 +273,24 @@ func cmdServe(args []string) error {
 	if *dnsCheck > 0 {
 		go checkDNSZones(ctx, srv.DNSCheck, st, srv.Changes, *dnsCheck, hb, log)
 	}
+	if *updateCheck > 0 {
+		if release.IsRelease(version) {
+			// GitHub only: a mirror would learn the node's address too,
+			// for a question the operator can ask by hand.
+			f := &release.Fetcher{}
+			latest := func(ctx context.Context) (string, error) { return f.Latest(ctx, release.PubKey) }
+			go checkUpdates(ctx, latest, version, *updateCheck, hb, log)
+		} else {
+			log.Info("no update check: this build is no release", "version", version)
+		}
+	}
 	frontUID := render.FrontUID
 	if *supervise {
 		frontUID = os.Getuid() // the front is a child of rayd's
 	}
 	go checkPort53(ctx, st, &deploy.Host{}, frontUID, hb, log)
+	// The DNS path's events (dnstt's counters, an hour of them).
+	go watchDNSTT(ctx, st, paths, hb)
 	go checkResolver(ctx, hb, log)
 	go followDebug(ctx, st, level, *debug, srv.Changes, srv.Notify, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
@@ -899,6 +917,16 @@ func checkRealityTargets(ctx context.Context, st *store.Store, changes func() <-
 	}
 }
 
+// dnsZoneLoop names a zone's loop in rayctl status after "dns-zone ": the
+// main zone by its service, as before; a spare one by its service and
+// itself (spec/dnszones-v1.md).
+func dnsZoneLoop(z dnscheck.Zone) string {
+	if z.Spare {
+		return z.Service + " " + z.Name
+	}
+	return z.Service
+}
+
 // dnsMonitor checks the node's DNS tunnel zones (internal/dnscheck): every
 // full check with rayd's resolvers goes to the health board, a loop per
 // zone ("dns-zone <service>" in rayctl status), and a zone's failure to
@@ -916,21 +944,22 @@ func dnsMonitor(ctx context.Context, st *store.Store, resolvers []dnscheck.Resol
 			var services []string
 			for _, z := range rep.Zones {
 				svc := z.Zone.Service
-				services = append(services, svc)
+				loop := dnsZoneLoop(z.Zone)
+				services = append(services, loop)
 				err := z.Err()
-				hb.Report("dns-zone "+svc, z.Summary(), err)
+				hb.Report("dns-zone "+loop, z.Summary(), err)
 				msg := ""
 				if err != nil {
 					msg = err.Error()
 				}
 				switch {
-				case msg == logged[svc]:
+				case msg == logged[loop]:
 				case err != nil:
 					log.Warn("DNS zone check failed", "service", svc, "zone", z.Zone.Name, "err", err)
 				default:
 					log.Info("DNS zone check passes again", "service", svc, "zone", z.Zone.Name)
 				}
-				logged[svc] = msg
+				logged[loop] = msg
 			}
 			hb.Retain("dns-zone ", services)
 		}}
@@ -964,7 +993,7 @@ func checkDNSZones(ctx context.Context, mon *dnscheck.Monitor, st *store.Store, 
 		if err == nil {
 			services := make([]string, 0, len(zones))
 			for _, z := range zones {
-				services = append(services, z.Service)
+				services = append(services, dnsZoneLoop(z))
 			}
 			hb.Retain("dns-zone ", services)
 		}
@@ -1015,6 +1044,39 @@ func checkDNSZones(ctx context.Context, mon *dnscheck.Monitor, st *store.Store, 
 			return
 		case <-wake:
 		case <-timer:
+		}
+	}
+}
+
+// checkUpdates looks for a newer release every period, ±10 % (rayd
+// -update-check, off unless asked: github.com or a mirror sees the node's
+// address). The loop "update" in rayctl status says what it found; a
+// check that fails is said there too, never as a failure of the node, and
+// a new release goes to the log once.
+func checkUpdates(ctx context.Context, fetch func(context.Context) (string, error), running string, period time.Duration, hb *health.Board, log *slog.Logger) {
+	said := ""
+	for {
+		cctx, cancel := context.WithTimeout(ctx, time.Minute)
+		latest, err := fetch(cctx)
+		cancel()
+		switch {
+		case ctx.Err() != nil:
+			return
+		case err != nil:
+			hb.Report("update", "not checked: "+err.Error(), nil)
+		case release.Newer(latest, running):
+			hb.Report("update", latest+" is out, this node runs "+running+": rayctl update", nil)
+			if latest != said {
+				said = latest
+				log.Info("a newer release is out", "latest", latest, "running", running)
+			}
+		default:
+			hb.Report("update", "up to date ("+running+")", nil)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(jitter(period, 10)):
 		}
 	}
 }

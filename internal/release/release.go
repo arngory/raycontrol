@@ -100,6 +100,10 @@ func VersionOf(trusted string) (string, error) {
 
 var semver = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
 
+// IsRelease reports whether v names a release (vX.Y.Z), not a dev build or
+// a CI build's commit.
+func IsRelease(v string) bool { return semver.MatchString(v) }
+
 // Newer reports whether release version a is newer than b. Anything that is
 // not vX.Y.Z (a "dev" build) is older than every release.
 func Newer(a, b string) bool {
@@ -213,6 +217,25 @@ func (f *Fetcher) Fetch(ctx context.Context, version, arch, pubKey string) (Rele
 		return Release{}, err
 	}
 	return f.verified(ctx, version, arch, pubKey, sums, sig)
+}
+
+// Latest is the version of the latest release, from its signed SHA256SUMS
+// (the trusted comment, as Fetch reads it): what rayctl update would
+// install, with no archive downloaded.
+func (f *Fetcher) Latest(ctx context.Context, pubKey string) (string, error) {
+	sums, err := f.Get(ctx, "latest", "SHA256SUMS", 1<<16)
+	if err != nil {
+		return "", err
+	}
+	sig, err := f.Get(ctx, "latest", "SHA256SUMS.minisig", 1<<12)
+	if err != nil {
+		return "", err
+	}
+	trusted, err := Verify(sums, sig, pubKey)
+	if err != nil {
+		return "", fmt.Errorf("SHA256SUMS: %w", err)
+	}
+	return VersionOf(trusted)
 }
 
 // Local verifies a release from a directory holding SHA256SUMS, its

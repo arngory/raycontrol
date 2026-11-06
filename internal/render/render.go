@@ -111,7 +111,7 @@ type Model struct {
 	// FrontUDP puts UDP 443 behind the front (udpmux, v0.3, R3-4, R3-5):
 	// Hysteria2 always; DoH3 and naive-quic only with it.
 	FrontUDP bool
-	// DNSAuth maps a dnstt service with dnsauth on to the keys of the
+	// DNSAuth maps a DNS tunnel with dnsauth on to the keys of the
 	// devices allowed on it (spec/dnsauth-v1.md): "<device id> <hex>".
 	// Only CollectForRender fills it.
 	DNSAuth map[int64][]string
@@ -135,18 +135,18 @@ func (m Model) nikoLevel() string {
 	return "warn"
 }
 
-// DNSSealMode is a dnstt service's dnsseal-v1 mode: off, optional or
-// required (spec/dnsseal-v1.md §5); off when unset.
+// DNSSealMode is a DNS tunnel's seal mode (dnsseal-v1 for dnstt, mdseal-v1
+// for masterdns): off, optional or required; off when unset.
 func DNSSealMode(s store.Service) string { return provision.DNSSealMode(s) }
 
 // DNSSealKeyFile is the dnsseal-v1 keys file among a dnstt service's.
 const DNSSealKeyFile = "seal.keys"
 
-// DNSAuthMode is a dnstt service's dnsauth-v1 mode: off, optional or
+// DNSAuthMode is a DNS tunnel's dnsauth-v1 mode: off, optional or
 // required (spec/dnsauth-v1.md §5).
 func DNSAuthMode(s store.Service) string { return provision.DNSAuthMode(s) }
 
-// DNSAuthKeys is the file name of a dnstt service's device keys.
+// DNSAuthKeys is the file name of a DNS tunnel's device keys.
 const DNSAuthKeys = "auth.keys"
 
 // HostIPv6 reports whether this host can open IPv6 sockets.
@@ -268,7 +268,7 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 }
 
 // CollectForRender is Collect plus what only the rendered files need: the
-// dnsauth-v1 keys of the devices allowed on each dnstt service that has it
+// dnsauth-v1 keys of the devices allowed on each DNS tunnel that has it
 // on, derived per service (spec/dnsauth-v1.md §2). Subscriptions and
 // exports take Collect and skip the devices and the key derivation.
 func CollectForRender(ctx context.Context, st *store.Store) (Model, error) {
@@ -290,9 +290,6 @@ func CollectForRender(ctx context.Context, st *store.Store) (Model, error) {
 			if devices, err = st.SPADevices(ctx); err != nil {
 				return m, err
 			}
-			if checkKey, err = st.DNSCheckKey(ctx); err != nil {
-				return m, err
-			}
 		}
 		if m.DNSAuth == nil {
 			m.DNSAuth = map[int64][]string{}
@@ -304,12 +301,22 @@ func CollectForRender(ctx context.Context, st *store.Store) (Model, error) {
 				lines = append(lines, d.ID+" "+hex.EncodeToString(k[:]))
 			}
 		}
-		// The node's own line: its check tags its polls (dnscheck).
-		k, err := provision.DNSCheckAuthKey(checkKey, params.NodeID, svc.ID)
-		if err != nil {
-			return m, err
+		// The node's own line: its check tags its polls (dnscheck). Not
+		// for masterdns, whose check asks a random name, untagged: a key
+		// there would be one nobody uses.
+		if svc.Kind == "dnstt" {
+			if checkKey == nil {
+				if checkKey, err = st.DNSCheckKey(ctx); err != nil {
+					return m, err
+				}
+			}
+			k, err := provision.DNSCheckAuthKey(checkKey, params.NodeID, svc.ID)
+			if err != nil {
+				return m, err
+			}
+			lines = append(lines, provision.DNSCheckDevice+" "+hex.EncodeToString(k[:]))
 		}
-		m.DNSAuth[svc.ID] = append(lines, provision.DNSCheckDevice+" "+hex.EncodeToString(k[:]))
+		m.DNSAuth[svc.ID] = lines
 	}
 	return m, nil
 }
@@ -481,6 +488,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 	}
 	var udpRoutes []udpRoute
 	var zones []route
+	taken := map[string]string{} // a zone in the front: its service
 	var tcpRoutes []tcpRoute
 	tcpDefault := "" // the first REALITY service: its target answers like the site
 	backends := map[string]backendRef{}
@@ -494,22 +502,53 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if inner == nil {
 				return errors.New("needs the inner stage, which is missing or disabled")
 			}
-			zone := provision.Zone(s.Service)
-			r := route{Zone: zone, Backend: s.Name, Probe: s.Kind == "dnstt" && len(m.DNSProbeKey) == 32}
+			all := provision.Zones(s.Service)
+			if len(all) == 0 {
+				return errors.New("no zone")
+			}
+			// Zones stored before they were checked (v0.13 took nested
+			// ones): the later service is left out, as a broken one is,
+			// not the front's whole config (niko-server v0.11.0 refuses
+			// zones that nest, and TCP and UDP 443 would go with it).
+			for _, z := range all {
+				for other, svc := range taken {
+					if provision.ZonesClash(z, other) {
+						return fmt.Errorf("zone %s is, or nests with, zone %s of %s: a name under both would be either's; give it another zone", z, other, svc)
+					}
+				}
+				// The name the zones are delegated to, in a zone of any
+				// tunnel: the front would send the queries for its
+				// address to that tunnel (niko-server v0.11.0 refuses the
+				// front's whole config with it, masterdns's zones too:
+				// review 14).
+				if ns := provision.CanonicalZone(m.NSName); ns != "" && (ns == z || strings.HasSuffix(ns, "."+z)) {
+					return fmt.Errorf("zone %s holds %s, the name the zones are delegated to: give it another zone", z, ns)
+				}
+			}
+			for _, z := range all {
+				taken[z] = s.Name
+			}
+			r := route{Backend: s.Name, Probe: s.Kind == "dnstt" && len(m.DNSProbeKey) == 32}
 			// A zone whose answers are all sealed: the front pads its
 			// probe answers as they are (dnsseal-v1 §6).
 			r.SealPad = r.Probe && DNSSealMode(s.Service) == "required"
 			if s.Kind == "dnstt" && m.NSName != "" {
 				r.NS = []string{m.NSName}
 			}
-			zones = append(zones, r)
+			// Each zone, the spare ones as the main one: the same
+			// backend, probe, apex and padding (spec/dnszones-v1.md §4;
+			// the front does not tie a tunnel's entries together).
+			for _, z := range all {
+				r.Zone = z
+				zones = append(zones, r)
+			}
 			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
 			keys, ok := m.DNSAuth[s.ID]
-			if !ok && s.Kind == "dnstt" && DNSAuthMode(s.Service) != "off" {
+			if !ok && DNSAuthMode(s.Service) != "off" {
 				// An empty keys file would lock every device out.
 				return errors.New("dnsauth keys not collected (render.CollectForRender)")
 			}
-			f, secrets, auth, err := dnsBackend(s, zone, inner.Name, p, keys, m.nikoLevel())
+			f, secrets, auth, err := dnsBackend(s, all, inner.Name, p, keys, m.nikoLevel())
 			if err != nil {
 				return err
 			}
@@ -640,6 +679,14 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		nf, nz, nt, nu, def := len(files), len(zones), len(tcpRoutes), len(udpRoutes), tcpDefault
 		if err := one(s); err != nil {
 			files, zones, tcpRoutes, udpRoutes, tcpDefault = files[:nf], zones[:nz], tcpRoutes[:nt], udpRoutes[:nu], def
+			// Its zones are not the front's after all: a later service
+			// whose old zone nests with one of them is not left out for it
+			// (review 15).
+			for z, name := range taken {
+				if name == s.Name {
+					delete(taken, z)
+				}
+			}
 			delete(backends, s.Name)
 			delete(backends, quicBackend(s.Name))
 			errs = append(errs, fmt.Errorf("service %s: %w", s.Name, err))
@@ -660,7 +707,9 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if m.IPv6 {
 				listen = append(listen, "[::]:53")
 			}
-			dns := map[string]any{"listen": listen, "zones": zones}
+			// The front's counters for rayctl metrics (niko-server
+			// v0.11.0): queries by zone, probes, refusals.
+			dns := map[string]any{"listen": listen, "zones": zones, "stats_socket": p.FrontStats()}
 			// dnsprobe-v1: the front answers resolver checks itself in
 			// the dnstt zones (niko-server v0.8.3).
 			if slices.ContainsFunc(zones, func(z route) bool { return z.Probe }) {
@@ -734,8 +783,8 @@ func DNSSecret(kind string) string {
 	return "noise.key"
 }
 
-// dnsAuthFile is a dnstt service's keys file (spec/dnsauth-v1.md), which
-// the backend rereads.
+// dnsAuthFile is a DNS tunnel's keys file (spec/dnsauth-v1.md), which the
+// backend rereads.
 func dnsAuthFile(s Service, p Paths, authKeys []string) File {
 	content := "# dnsauth-v1 keys of the devices allowed on " + s.Name + ", written by rayd\n"
 	for _, l := range authKeys {
@@ -767,7 +816,7 @@ func accessFiles(s Service, m Model, p Paths, inner *Service) []File {
 			b, err := jsonFile(map[string]any{"users": yggdrasilUsers(m, s, *inner)})
 			add(YggdrasilUsers, b, err)
 		}
-	case "dnstt":
+	case "dnstt", "masterdns":
 		if keys, ok := m.DNSAuth[s.ID]; ok && DNSAuthMode(s.Service) != "off" {
 			f := dnsAuthFile(s, p, keys)
 			f.Refresh = true
@@ -777,7 +826,9 @@ func accessFiles(s Service, m Model, p Paths, inner *Service) []File {
 	return out
 }
 
-func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level string) (cfg File, secrets []File, auth *File, err error) {
+// dnsBackend renders a DNS tunnel's backend for its zones, the main one
+// first.
+func dnsBackend(s Service, zones []string, inner string, p Paths, authKeys []string, level string) (cfg File, secrets []File, auth *File, err error) {
 	opts := map[string]any{}
 	// dnsauth-v1 (spec/dnsauth-v1.md): the devices' keys in a file of the
 	// service group (the front is in none, R4-28), which the backend
@@ -792,13 +843,21 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level
 		opts["auth_keys_file"] = f.Path
 		auth = &f
 	}
+	seal := DNSSealMode(s.Service)
+	if seal != "off" && seal != "optional" && seal != "required" {
+		return cfg, nil, nil, fmt.Errorf("service %s: seal %q: off, optional or required", s.Name, seal)
+	}
 	var secretName string
 	var secretValue []byte
 	secretName = DNSSecret(s.Kind)
 	switch s.Kind {
 	case "dnstt":
 		secretValue = []byte(hex.EncodeToString(s.Secrets[provision.SecretNoisePrivate]) + "\n")
-		opts["zone"] = zone
+		opts["zone"] = zones[0]
+		if len(zones) > 1 {
+			// Spare zones of the same tunnel (niko-server v0.11.0).
+			opts["zones"] = zones[1:]
+		}
 		opts["private_key_file"] = p.Credential(s.Name, secretName)
 		// dnsseal-v1 (spec/dnsseal-v1.md): the keys in a file of the
 		// service group, as dnsauth's, which the backend rereads (niko-
@@ -817,11 +876,8 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level
 		sealFile := File{Path: path.Join(p.Rendered, s.Name, DNSSealKeyFile), Mode: 0o640, Group: GroupName(s.Name),
 			Content: []byte(keys.String()), Service: s.Name, Reload: true}
 		secrets = append(secrets, sealFile)
-		if mode := DNSSealMode(s.Service); mode != "off" {
-			if mode != "optional" && mode != "required" {
-				return cfg, nil, nil, fmt.Errorf("service %s: seal %q: off, optional or required", s.Name, mode)
-			}
-			opts["seal"] = mode
+		if seal != "off" {
+			opts["seal"] = seal
 			opts["seal_key_file"] = sealFile.Path
 		}
 	case "masterdns":
@@ -830,14 +886,19 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level
 		}
 		_ = json.Unmarshal([]byte(s.Settings), &settings)
 		secretValue = s.Secrets[provision.SecretMasterDNSKey]
-		opts["zones"] = []string{zone}
+		opts["zones"] = zones // masterdns takes a list as it is (DOMAIN)
 		opts["encryption_method"] = settings.Method
 		opts["encryption_key_file"] = p.Credential(s.Name, secretName)
+		// mdseal-v1 (spec/mdseal-v1.md §6): sealed with the service's own
+		// key, the one above; the mode alone.
+		if seal != "off" {
+			opts["seal"] = seal
+		}
 	}
 	if len(s.Secrets) == 0 || len(secretValue) == 0 {
 		return cfg, nil, nil, fmt.Errorf("service %s has no key", s.Name)
 	}
-	b, err := jsonFile(map[string]any{
+	backend := map[string]any{
 		"schema":    Schema,
 		"role":      "backend",
 		"kind":      s.Kind,
@@ -846,7 +907,14 @@ func dnsBackend(s Service, zone, inner string, p Paths, authKeys []string, level
 		"front_uid": p.PeerUID(FrontUID),
 		"options":   opts,
 		"inner":     p.InnerSocket(inner),
-	})
+	}
+	if s.Kind == "dnstt" {
+		// The backend's counters for rayctl metrics and status (niko-
+		// server v0.11.0): in its runtime directory, which rayd's group
+		// may pass through.
+		backend["stats_socket"] = p.StatsSocket(s.Name)
+	}
+	b, err := jsonFile(backend)
 	if err != nil {
 		return cfg, nil, nil, err
 	}
@@ -1206,6 +1274,11 @@ const (
 
 // DNSProbeKeyFile is the dnsprobe-v1 key's file among the front's.
 const DNSProbeKeyFile = "dnsprobe.key"
+
+// FrontStats is where the DNS front gives its counters (dns.stats_socket,
+// niko-server v0.11.0): in the front's runtime directory, which the front
+// group (rayd) may pass through.
+func (p Paths) FrontStats() string { return p.socket("front", "stats") }
 
 // FrontDNSProbe is where the front reads the dnsprobe-v1 key.
 func (p Paths) FrontDNSProbe() string {

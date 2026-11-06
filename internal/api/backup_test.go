@@ -3,7 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
 	"github.com/arngory/raycontrol/internal/health"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -97,6 +100,18 @@ func TestMetrics(t *testing.T) {
 	if _, err := c.CreateDevice(ctx, connect.NewRequest(&nodev1.CreateDeviceRequest{User: "alice", Name: "phone"})); err != nil {
 		t.Fatal(err)
 	}
+	// Two dnstt services: the counters of the one whose backend gives them
+	// on its stats socket; the other, without one, has none and no error.
+	srv.Paths.Run = t.TempDir()
+	for _, name := range []string{"dns", "dns2"} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "dnstt", Name: name})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	serveStats(t, srv.Paths.FrontStats(), `{"started":1700000000,"queries":{"`+zoneOf(t, c, "dns")+`":11,"z.example.net":2},"refused":3,`+
+		`"probes":4,"probes_over_rate":1,"forwarded":9,"answers":8,"truncated":2,"unmatched":1,"backend_away":0}`+"\n")
+	serveStats(t, srv.Paths.StatsSocket("dns"), `{"queries":5,"memo_hits":6,"sessions":1,"handshakes":0,"sessions_admitted":7,`+
+		`"starts_refused_device":2,"auth_refused":3,"seal_opened":4,"unknown":9,"zones":{"z1.example.com":3}}`+"\n")
 	resp, err := c.GetMetrics(ctx, connect.NewRequest(&nodev1.GetMetricsRequest{}))
 	if err != nil {
 		t.Fatal(err)
@@ -118,6 +133,26 @@ func TestMetrics(t *testing.T) {
 		`raycontrol_loop_last_error_seconds{loop="acme site"} 1700000000`,
 		`raycontrol_loop_last_success_seconds{loop="acme site"} 0`,
 		`raycontrol_loop_errors_total{loop="acme site"} 1`,
+		`raycontrol_dnstt_queries_total{service="dns"} 5`,
+		`raycontrol_dnstt_memo_hits_total{service="dns"} 6`,
+		`raycontrol_dnstt_sessions{service="dns"} 1`,
+		`raycontrol_dnstt_handshakes{service="dns"} 0`,
+		`raycontrol_dnstt_sessions_admitted_total{service="dns"} 7`,
+		`raycontrol_dnstt_starts_refused_total{service="dns",reason="full"} 0`,
+		`raycontrol_dnstt_starts_refused_total{service="dns",reason="device"} 2`,
+		`raycontrol_dnstt_auth_total{service="dns",result="refused"} 3`,
+		`raycontrol_dnstt_seal_total{service="dns",result="opened"} 4`,
+		`raycontrol_dnstt_zone_tagged_total{service="dns",zone="z1.example.com"} 3`,
+		`raycontrol_dns_front_queries_total{zone="` + zoneOf(t, c, "dns") + `",service="dns"} 11`,
+		`raycontrol_dns_front_queries_total{zone="z.example.net",service=""} 2`,
+		"raycontrol_dns_front_refused_total 3\n",
+		`raycontrol_dns_front_probes_total{result="answered"} 4`,
+		`raycontrol_dns_front_probes_total{result="over_rate"} 1`,
+		"raycontrol_dns_front_forwarded_total 9\n",
+		"raycontrol_dns_front_answers_total 8\n",
+		"raycontrol_dns_front_truncated_total 2\n",
+		"raycontrol_dns_front_unmatched_total 1\n",
+		"raycontrol_dns_front_backend_away_total 0\n",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("no %q in\n%s", want, text)
@@ -125,6 +160,9 @@ func TestMetrics(t *testing.T) {
 	}
 	if strings.Contains(text, "alice") || strings.Contains(text, "phone") || strings.Contains(text, "does not resolve") {
 		t.Errorf("names of users or devices, or error text, in the metrics:\n%s", text)
+	}
+	if strings.Contains(text, `service="dns2"`) {
+		t.Errorf("counters of a dnstt service without a stats socket:\n%s", text)
 	}
 	st, err := c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
 	if err != nil {
@@ -153,4 +191,50 @@ func TestMetrics(t *testing.T) {
 			t.Errorf("sample %q outside its family (%s)", line, family)
 		}
 	}
+}
+
+// serveStats gives line to each connection on a unix socket at path, as a
+// dnstt backend's stats socket does.
+func serveStats(t *testing.T, path, line string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte(line))
+			c.Close()
+		}
+	}()
+}
+
+// zoneOf is a service's zone as the node lists it.
+func zoneOf(t *testing.T, c nodev1connect.NodeServiceClient, name string) string {
+	t.Helper()
+	r, err := c.ListServices(context.Background(), connect.NewRequest(&nodev1.ListServicesRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range r.Msg.Services {
+		if s.Name == name {
+			var st struct {
+				Zone string `json:"zone"`
+			}
+			if err := json.Unmarshal([]byte(s.SettingsJson), &st); err != nil {
+				t.Fatal(err)
+			}
+			return st.Zone
+		}
+	}
+	t.Fatalf("no service %s", name)
+	return ""
 }

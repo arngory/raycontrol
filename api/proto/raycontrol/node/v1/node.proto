@@ -546,6 +546,9 @@ message SummaryService {
   map<string, int64> stall_kib = 6;
   // DNS tunnels: working observations by resolver kind (probe-v1 §6.1).
   map<string, int64> dns = 7;
+  // dnstt: working observations by zone, "0" the main one, "1" to "4" its
+  // spares in the links' order (probe-v1 §6, dnszones-v1 §3).
+  map<string, int64> zone = 8;
 }
 message SetSummaryRequest {
   // enabled: "on" or "off"; empty leaves it.

@@ -247,3 +247,21 @@ func TestLocal(t *testing.T) {
 		t.Fatalf("changed archive: %v", err)
 	}
 }
+
+// Latest reads the version off the signed SHA256SUMS of the latest release,
+// with no archive; another key's signature is refused.
+func TestLatest(t *testing.T) {
+	ctx := context.Background()
+	k := newKey(t)
+	f, hits := serveRelease(t, k, "v0.14.0", []byte("archive"), false)
+	f.Mirrors = nil
+	if v, err := f.Latest(ctx, k.pub); err != nil || v != "v0.14.0" {
+		t.Fatalf("latest %q %v", v, err)
+	}
+	if slices.ContainsFunc(*hits, func(p string) bool { return strings.HasSuffix(p, Archive("amd64")) }) {
+		t.Fatalf("an archive fetched: %v", *hits)
+	}
+	if _, err := f.Latest(ctx, newKey(t).pub); err == nil {
+		t.Fatal("another key's signature taken")
+	}
+}

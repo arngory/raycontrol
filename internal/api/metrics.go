@@ -8,10 +8,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
 
+	"github.com/arngory/raycontrol/internal/dnsstats"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/provision"
 )
@@ -200,7 +202,140 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 	m.Add("raycontrol_dns_problems", "Problems with the DNS records the node needs.", float64(len(problems)))
 
 	m.Add("raycontrol_spa_ports", "SPA ports open now.", float64(len(s.Params.ActivePorts(now))))
+
+	// Invites: those waiting, and the wrong PINs (api-v1 §4) since rayd
+	// started; a run of them is someone trying PINs of an invite they hold.
+	invites, err := s.Store.ListInvites(ctx)
+	if err != nil {
+		return "", err
+	}
+	byInvite := map[string]int{"active": 0, "expired": 0}
+	for _, inv := range invites {
+		if inv.ExpiresAt.After(now) {
+			byInvite["active"]++
+		} else {
+			byInvite["expired"]++
+		}
+	}
+	for _, k := range sortedKeys(byInvite) {
+		m.Add("raycontrol_invites", "Invites not yet used, by state.", float64(byInvite[k]), "state", k)
+	}
+	m.Add("raycontrol_invite_pin_wrong_total", "Wrong invite PINs since rayd started.", float64(s.pinWrong.Load()))
+	m.Add("raycontrol_invite_pin_withdrawn_total", "Invites withdrawn by their last wrong PIN since rayd started.", float64(s.pinWithdrawn.Load()))
+
+	// The DNS path: each enabled dnstt service's counters, from its
+	// backend's stats socket (niko-server v0.11.0), and the DNS front's;
+	// none from one that has none. Read at once: a stopped backend's
+	// socket may still take the connection and hold it to the deadline.
+	type read struct {
+		name string
+		st   dnsstats.Snapshot
+		err  error
+	}
+	var reads []*read
+	var front dnsstats.Front
+	var frontErr error
+	var wg sync.WaitGroup
+	for _, svc := range services {
+		if svc.Kind != "dnstt" || !svc.Enabled {
+			continue
+		}
+		r := &read{name: svc.Name}
+		reads = append(reads, r)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.st, r.err = dnsstats.Read(ctx, s.Paths.StatsSocket(r.name))
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		front, frontErr = dnsstats.ReadFront(ctx, s.Paths.FrontStats())
+	}()
+	wg.Wait()
+	for _, r := range reads {
+		if r.err == nil {
+			addDNSTTStats(&m, r.name, r.st)
+		}
+	}
+	// The front's: queries by zone (load: anyone can send a zone's name;
+	// which zone clients reach is dnstt's zone_tagged), probes, refusals,
+	// answers lost.
+	if frontErr == nil {
+		owner := map[string]string{}
+		for _, svc := range services {
+			for _, z := range provision.Zones(svc) {
+				owner[z] = svc.Name
+			}
+		}
+		addFrontStats(&m, front, owner)
+	}
 	return m.String(), nil
+}
+
+// addDNSTTStats adds a dnstt service's counters, labelled by service.
+func addDNSTTStats(m *Metrics, service string, st dnsstats.Snapshot) {
+	add := func(name, help string, v uint64, labels ...string) {
+		m.Add(name, help, float64(v), append([]string{"service", service}, labels...)...)
+	}
+	add("raycontrol_dnstt_queries_total", "DNS queries the dnstt backend parsed.", st.Queries)
+	add("raycontrol_dnstt_memo_hits_total", "Resolvers' retries answered from the memo.", st.MemoHits)
+	m.Add("raycontrol_dnstt_sessions", "dnstt sessions now.", float64(st.Sessions), "service", service)
+	m.Add("raycontrol_dnstt_handshakes", "dnstt sessions in their Noise handshake now.", float64(st.Handshakes), "service", service)
+	add("raycontrol_dnstt_sessions_admitted_total", "New dnstt sessions admitted.", st.SessionsAdmitted)
+	type sample struct {
+		label string
+		v     uint64
+	}
+	for _, r := range []sample{{"full", st.RefusedFull}, {"rate", st.RefusedRate}, {"device", st.RefusedDevice}} {
+		add("raycontrol_dnstt_starts_refused_total", "dnstt session starts refused, by reason; a client's retries count again.", r.v, "reason", r.label)
+	}
+	add("raycontrol_dnstt_sessions_evicted_total", "A device's silent dnstt session closed for its new one.", st.SessionsEvicted)
+	add("raycontrol_dnstt_handshake_timeouts_total", "dnstt sessions closed with the Noise handshake undone.", st.HandshakeTimeouts)
+	add("raycontrol_dnstt_streams_refused_total", "Streams over a dnstt session's bound.", st.StreamsRefused)
+	// niko-server counts a throttled query as refused too: refused here
+	// is the rest, so the results add up (clamped: the two are read apart).
+	refused := st.AuthRefused - min(st.AuthThrottled, st.AuthRefused)
+	for _, r := range []sample{{"valid", st.AuthValid}, {"untagged", st.AuthUntagged}, {"refused", refused}, {"throttled", st.AuthThrottled}} {
+		add("raycontrol_dnstt_auth_total", "dnsauth-v1 checks of queries, by result; throttled ones are refused unscanned.", r.v, "result", r.label)
+	}
+	for _, r := range []sample{{"opened", st.SealOpened}, {"unsealed", st.SealUnsealed}, {"refused", st.SealRefused}} {
+		add("raycontrol_dnstt_seal_total", "dnsseal-v1 queries, by result.", r.v, "result", r.label)
+	}
+	// Which zones of the tunnel clients reach (dnszones-v1): queries with
+	// a device's valid tag. A hint: the tag does not cover the zone, and
+	// whoever sees a device's query can send it again in another zone.
+	for _, z := range sortedKeys(st.Zones) {
+		add("raycontrol_dnstt_zone_tagged_total", "dnstt queries with a device's valid dnsauth tag, by zone.", st.Zones[z], "zone", z)
+	}
+}
+
+// addFrontStats adds the DNS front's counters; a zone's queries labelled by
+// the zone and the service it is of (owner).
+func addFrontStats(m *Metrics, f dnsstats.Front, owner map[string]string) {
+	for _, z := range sortedKeys(f.Queries) {
+		m.Add("raycontrol_dns_front_queries_total", "DNS queries in a zone of the node's, by zone: load, not reach.", float64(f.Queries[z]), "zone", z, "service", owner[z])
+	}
+	for _, c := range []struct {
+		name, help string
+		v          uint64
+		labels     []string
+	}{
+		{"raycontrol_dns_front_refused_total", "DNS queries outside the node's zones, refused.", f.Refused, nil},
+		{"raycontrol_dns_front_malformed_total", "Datagrams on port 53 that are no query the front reads.", f.Malformed, nil},
+		{"raycontrol_dns_front_apex_total", "Queries the front answered at a zone's apex (SOA, NS).", f.Apex, nil},
+		{"raycontrol_dns_front_probes_total", "dnsprobe-v1 probes, by result.", f.Probes, []string{"result", "answered"}},
+		{"raycontrol_dns_front_probes_total", "dnsprobe-v1 probes, by result.", f.ProbesOverRate, []string{"result", "over_rate"}},
+		{"raycontrol_dns_front_forwarded_total", "Queries passed to a tunnel's backend.", f.Forwarded, nil},
+		{"raycontrol_dns_front_backend_away_total", "Queries not passed on: the backend away or its queue full.", f.BackendAway, nil},
+		{"raycontrol_dns_front_answers_total", "Backends' answers sent on, truncated ones included.", f.Answers, nil},
+		{"raycontrol_dns_front_truncated_total", "Answers over the requester's size, sent with TC and no records.", f.Truncated, nil},
+		{"raycontrol_dns_front_unmatched_total", "Backends' answers no query waited for, dropped.", f.Unmatched, nil},
+		{"raycontrol_dns_front_dropped_total", "Backends' messages not sent on: unreadable, no question to truncate to, a failed write.", f.Dropped, nil},
+	} {
+		m.Add(c.name, c.help, float64(c.v), c.labels...)
+	}
 }
 
 // certNotAfter reads the end of validity of a service's certificate: the
@@ -221,7 +356,7 @@ func certNotAfter(secrets map[string][]byte) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func sortedKeys(m map[string]int) []string {
+func sortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)

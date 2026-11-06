@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/arngory/raycontrol/internal/asn"
+	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -64,8 +65,9 @@ var (
 // Optional are the report fields beyond the first ones of v1 that this
 // node takes; the subscription lists them (probe.report), so a client
 // sends a field only to nodes that know it (an older node answers 400).
-// dns_tcp is not a field but a value: dns "tcp" (raycontrol v0.13.0).
-var Optional = []string{"udp_mtu", "path", "dns", "dns_tcp"}
+// dns_tcp is not a field but a value: dns "tcp" (raycontrol v0.13.0);
+// dns_zone is obs[].zone (raycontrol v0.14.0).
+var Optional = []string{"udp_mtu", "path", "dns", "dns_tcp", "dns_zone"}
 
 // Report is what a client sends (probe-v1 §6).
 type Report struct {
@@ -86,6 +88,12 @@ type Obs struct {
 	// DNS: the kind of resolver a DNS tunnel works through (Resolvers),
 	// only with works or degraded, only for TunnelKinds.
 	DNS string `json:"dns,omitempty"`
+	// Zone: the zone a dnstt service works through here (nil: not said),
+	// 0 its main one, 1 to provision.MaxSpareZones its spares in the
+	// link's order (niko-dns-spare, spec/dnszones-v1.md §3); only with
+	// works or degraded. Clients leave a blocked main zone by themselves:
+	// these counts show the operator where it is blocked.
+	Zone *int `json:"zone,omitempty"`
 }
 
 // Errors of Report, for the endpoint's status codes.
@@ -231,6 +239,10 @@ func Parse(body io.Reader) (Report, error) {
 			return r, fmt.Errorf("%w: dns %q", ErrInvalid, o.DNS)
 		case o.DNS != "" && o.Result == "fails":
 			return r, fmt.Errorf("%w: dns with fails (it names the resolver a tunnel works through)", ErrInvalid)
+		case o.Zone != nil && (*o.Zone < 0 || *o.Zone > provision.MaxSpareZones):
+			return r, fmt.Errorf("%w: zone %d", ErrInvalid, *o.Zone)
+		case o.Zone != nil && o.Result == "fails":
+			return r, fmt.Errorf("%w: zone with fails (it names the zone a tunnel works through)", ErrInvalid)
 		}
 		seen[o.Svc] = true
 	}
@@ -377,14 +389,18 @@ func (c *Collector) take(ctx context.Context, device string, addr netip.Addr, pa
 		if o.DNS != "" {
 			counts = append(counts, row(o.Svc, "dns", o.DNS))
 		}
+		if o.Zone != nil {
+			counts = append(counts, row(o.Svc, "zone", strconv.Itoa(*o.Zone)))
+		}
 	}
 	return c.Store.AddSummary(ctx, counts, info.Name, info.Country)
 }
 
 // tunnelsOnly refuses a resolver named for a service that is no DNS
-// tunnel. The services are read only when a report names one.
+// tunnel, and a zone for one that is no dnstt service. The services are
+// read only when a report names one.
 func (c *Collector) tunnelsOnly(ctx context.Context, obs []Obs) error {
-	if !slices.ContainsFunc(obs, func(o Obs) bool { return o.DNS != "" }) {
+	if !slices.ContainsFunc(obs, func(o Obs) bool { return o.DNS != "" || o.Zone != nil }) {
 		return nil
 	}
 	kinds := c.kinds(ctx)
@@ -394,6 +410,9 @@ func (c *Collector) tunnelsOnly(ctx context.Context, obs []Obs) error {
 	for _, o := range obs {
 		if o.DNS != "" && !slices.Contains(TunnelKinds, kinds[o.Svc]) {
 			return fmt.Errorf("%w: dns for svc %d, which is no DNS tunnel", ErrInvalid, o.Svc)
+		}
+		if o.Zone != nil && kinds[o.Svc] != "dnstt" {
+			return fmt.Errorf("%w: zone for svc %d, which is no dnstt service", ErrInvalid, o.Svc)
 		}
 	}
 	return nil

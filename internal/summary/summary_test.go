@@ -32,6 +32,11 @@ func TestParse(t *testing.T) {
 	if r, err := Parse(strings.NewReader(`{"v":1,"net":"wifi","udp_mtu":"1350-1472","obs":[{"svc":1,"result":"works"}]}`)); err != nil || r.UDPMTU != "1350-1472" {
 		t.Fatalf("udp_mtu: %+v %v", r, err)
 	}
+	// The zone a tunnel works through: 0 the main one is one too.
+	r, err = Parse(strings.NewReader(`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","zone":0},{"svc":2,"result":"degraded","zone":4},{"svc":3,"result":"works"}]}`))
+	if err != nil || r.Obs[0].Zone == nil || *r.Obs[0].Zone != 0 || *r.Obs[1].Zone != 4 || r.Obs[2].Zone != nil {
+		t.Fatalf("zone: %+v %v", r, err)
+	}
 	for _, bad := range []string{
 		`{"v":2,"net":"wifi","obs":[{"svc":1,"result":"works"}]}`,
 		`{"v":1,"net":"satellite","obs":[{"svc":1,"result":"works"}]}`,
@@ -49,6 +54,11 @@ func TestParse(t *testing.T) {
 		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","dns":"dnscrypt"}]}`,
 		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","dns":"8.8.8.8"}]}`,
 		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"fails","dns":"doh"}]}`,
+		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","zone":5}]}`,
+		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","zone":-1}]}`,
+		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","zone":"1"}]}`,
+		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"works","zone":1.5}]}`,
+		`{"v":1,"net":"wifi","obs":[{"svc":1,"result":"fails","zone":1}]}`,
 		`{"v":1,"net":"wifi","obs":[` + strings.Repeat(`{"svc":1,"result":"works"},`, 2000) + `]}`,
 	} {
 		if _, err := Parse(strings.NewReader(bad)); !errors.Is(err, ErrInvalid) {
@@ -367,6 +377,56 @@ func TestResolverHint(t *testing.T) {
 	}
 	if h := c.Hints(ctx, mobile, []uint16{1, uint16(dnstt), uint16(mdns)}); h == nil || h.DNS != nil {
 		t.Fatalf("hint without a majority %+v", h)
+	}
+}
+
+// A dnstt observation names the zone it works through (dnszones-v1 §3):
+// counted per AS as the resolvers are, for the operator; no hint of it.
+// Only dnstt takes it.
+func TestZoneCounts(t *testing.T) {
+	ctx := context.Background()
+	st, c, devices := node(t)
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
+	SetEnabled(ctx, st, true)
+	var tunnels []int64
+	for _, k := range []string{"dnstt", "masterdns"} {
+		svc, err := st.CreateService(ctx, store.Service{Kind: k, Name: k, Enabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tunnels = append(tunnels, svc.ID)
+	}
+	for i := range devices {
+		st.SetUserServices(ctx, fmt.Sprintf("user%d", i), []int64{1, tunnels[0], tunnels[1]})
+	}
+	dnstt, mdns := tunnels[0], tunnels[1]
+	mobile := netip.MustParseAddr("203.0.113.10")
+	for svc, kind := range map[int64]string{1: "ssh", mdns: "masterdns"} {
+		body := fmt.Sprintf(`{"v":1,"net":"cellular","obs":[{"svc":%d,"result":"works","zone":1}]}`, svc)
+		if err := c.Take(ctx, devices[0], mobile, strings.NewReader(body)); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("a zone for %s: %v", kind, err)
+		}
+	}
+	// Ten reports: the main zone blocked here for seven, who work through
+	// the first spare; three through the main one.
+	for i, d := range devices[:10] {
+		zone := 1
+		if i < 3 {
+			zone = 0
+		}
+		body := fmt.Sprintf(`{"v":1,"net":"cellular","obs":[{"svc":%d,"result":"works","dns":"udp","zone":%d},{"svc":%d,"result":"works"}]}`, dnstt, zone, mdns)
+		if err := c.Take(ctx, d, mobile, strings.NewReader(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nets, _, err := c.View(ctx, 7)
+	if err != nil || len(nets) != 1 || nets[0].Services[dnstt]["zone"]["0"] != 3 || nets[0].Services[dnstt]["zone"]["1"] != 7 ||
+		nets[0].Services[mdns]["zone"] != nil {
+		t.Fatalf("view %+v %v", nets, err)
+	}
+	if h := c.Hints(ctx, mobile, []uint16{uint16(dnstt), uint16(mdns)}); h == nil || h.DNS["dnstt"] != "udp" {
+		t.Fatalf("hint %+v", h)
 	}
 }
 

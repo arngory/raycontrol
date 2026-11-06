@@ -89,8 +89,8 @@ rayctl report -o report.txt                           # redacted report for an i
 rayctl backup -o node.rcbak                           # every key of the node under a passphrase
 rayctl restore -i node.rcbak [-host NEW_IP]           # back here, or onto a new host after install
 rayctl metrics                                        # counts and times for Prometheus, no names
-rayctl device invite alice phone                      # one-time rcinv1: invite, the client registers itself
-rayctl remote enroll -o laptop.rcdev rcinv1:...       # elsewhere: an admin device from an invite
+rayctl device invite alice phone                      # one-time invite (RCINV2:, -format rcinv1 for older clients)
+rayctl remote enroll -o laptop.rcdev RCINV2:...       # elsewhere: an admin device from an invite
 rayctl -remote laptop.rcdev status                    # any admin command through the remote API
 rayctl uninstall                                      # take everything back
 ```

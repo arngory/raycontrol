@@ -286,13 +286,9 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 					return nil, err
 				}
 				q.Set("niko-dns", "dnstt;;"+zone+";"+pub)
-				// Sign the queries with the device's key (spec/dnsauth-v1.md).
 				// dnsseal-v1: the zone's key when the seal is on.
 				if render.DNSSealMode(s.Service) != "off" && len(s.Secrets[provision.SecretSealKey]) == 32 {
 					q.Set("niko-dnsseal", "v1;"+base64.RawURLEncoding.EncodeToString(s.Secrets[provision.SecretSealKey]))
-				}
-				if render.DNSAuthMode(s.Service) != "off" {
-					q.Set("niko-dnsauth", "v1")
 				}
 			} else {
 				var settings struct {
@@ -301,6 +297,24 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 				_ = json.Unmarshal([]byte(s.Settings), &settings)
 				q.Set("niko-dns", "masterdns;;"+zone+";"+strconv.Itoa(settings.Method))
 				q.Set("niko-dnskey", string(s.Secrets[provision.SecretMasterDNSKey]))
+				// mdseal-v1 (spec/mdseal-v1.md §6): the answers sealed with
+				// niko-dnskey; with required the client drops open ones.
+				switch render.DNSSealMode(s.Service) {
+				case "optional":
+					q.Set("niko-mdseal", "v1")
+				case "required":
+					q.Set("niko-mdseal", "v1;required")
+				}
+			}
+			// Sign the queries with the device's key (spec/dnsauth-v1.md,
+			// spec/dnsauth-masterdns.md): K from niko-node and niko-svc.
+			if render.DNSAuthMode(s.Service) != "off" {
+				q.Set("niko-dnsauth", "v1")
+			}
+			// Spare zones (spec/dnszones-v1.md §2), in the order clients
+			// try them; the same keys as the main zone.
+			if spares := provision.SpareZones(s.Service); len(spares) > 0 {
+				q.Set("niko-dns-spare", strings.Join(spares, ","))
 			}
 			link := func(uuid string) string {
 				return "vless://" + uuid + "@inner:1?" + q.Encode() + "#" + url.PathEscape(s.Name)

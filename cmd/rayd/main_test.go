@@ -5,6 +5,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -20,6 +22,7 @@ import (
 	"github.com/arngory/raycontrol/internal/dnscheck"
 	"github.com/arngory/raycontrol/internal/health"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/release"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -300,4 +303,70 @@ func TestCheckDNSZonesChangeDuringError(t *testing.T) {
 		t.Fatal(err)
 	}
 	until("check of the new zone", func() bool { return checked("dns2") })
+}
+
+// The update check says in rayctl status what it found, never failing the
+// loop: a newer release, the same one, or why it could not look.
+func TestCheckUpdates(t *testing.T) {
+	serve := func(broken bool) func(context.Context) (string, error) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if broken {
+				http.Error(w, "down", http.StatusBadGateway)
+				return
+			}
+			// Signed by another key than release.PubKey: refused as such.
+			http.NotFound(w, r)
+		}))
+		t.Cleanup(srv.Close)
+		f := &release.Fetcher{Base: srv.URL}
+		return func(ctx context.Context) (string, error) { return f.Latest(ctx, release.PubKey) }
+	}
+	latest := func(v string) func(context.Context) (string, error) {
+		return func(context.Context) (string, error) { return v, nil }
+	}
+	detail := func(f func(context.Context) (string, error), running string) health.Loop {
+		hb := &health.Board{}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { checkUpdates(ctx, f, running, time.Hour, hb, slog.New(slog.DiscardHandler)); close(done) }()
+		for range 200 {
+			if ls := hb.Loops(); len(ls) == 1 {
+				cancel()
+				<-done
+				return ls[0]
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+		<-done
+		t.Fatal("no update loop")
+		return health.Loop{}
+	}
+	if l := detail(serve(true), "v0.13.0"); l.Failing() || !strings.HasPrefix(l.Detail, "not checked: ") {
+		t.Fatalf("down: %+v", l)
+	}
+	if l := detail(serve(false), "v0.13.0"); l.Failing() || !strings.HasPrefix(l.Detail, "not checked: ") {
+		t.Fatalf("no release: %+v", l)
+	}
+	// A signed newer release, and the same one.
+	if l := detail(latest("v0.15.0"), "v0.14.0"); l.Failing() || l.Detail != "v0.15.0 is out, this node runs v0.14.0: rayctl update" {
+		t.Fatalf("newer: %+v", l)
+	}
+	if l := detail(latest("v0.14.0"), "v0.14.0"); l.Failing() || l.Detail != "up to date (v0.14.0)" {
+		t.Fatalf("same: %+v", l)
+	}
+	// CI builds carry a commit, not a release: not checked at all.
+	if release.IsRelease("0123456789ab") || release.IsRelease("dev") || !release.IsRelease("v0.14.0") {
+		t.Fatal("IsRelease")
+	}
+}
+
+// A spare zone's loop goes by its zone, the main one's by its service.
+func TestDNSZoneLoop(t *testing.T) {
+	if got := dnsZoneLoop(dnscheck.Zone{Service: "dns", Name: "t.example.com"}); got != "dns" {
+		t.Errorf("main %q", got)
+	}
+	if got := dnsZoneLoop(dnscheck.Zone{Service: "dns", Name: "s.example.net", Spare: true}); got != "dns s.example.net" {
+		t.Errorf("spare %q", got)
+	}
 }

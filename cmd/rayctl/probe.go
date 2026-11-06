@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -9,11 +10,16 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/api"
+	"github.com/arngory/raycontrol/internal/dnscheck"
+	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/node"
 	chprobe "github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/redact"
@@ -32,6 +38,8 @@ func probe(ctx context.Context, args []string) error {
 	redacted := fs.Bool("redact", false, "hide the node's address and names, IDs and keys, to share the output in an issue")
 	channel := fs.Bool("channel", false, "then measure the channel (probe-v1): TCP down and up, UDP echo")
 	report := fs.String("report", "", "then send this summary of the network (probe-v1 §6), JSON or @FILE")
+	dnsCheck := fs.Bool("dns", false, "then check the subscription's DNS tunnel zones as this machine sees them: the parent's delegation, the node's front and backend (a poll sealed and tagged as this device's), the zones through -resolver")
+	dnsResolvers := fs.String("resolver", "system", "with -dns: the resolvers to ask, "+strings.Join(dnscheck.ResolverNames(), ", ")+", udp:IP or tcp:IP")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
 		return errUsage
 	}
@@ -75,8 +83,9 @@ func probe(ctx context.Context, args []string) error {
 		DeviceID: b.DeviceID, DeviceKey: key, NodeKeys: b.NodeKeys, NodeID: b.SPA.NodeID,
 	}
 	printf := func(format string, a ...any) { fmt.Printf(format, a...) }
+	var red *redact.Redactor
 	if *redacted {
-		red := redact.New(host, domainOf(host))
+		red = redact.New(host, domainOf(host))
 		printf = func(format string, a ...any) { fmt.Print(red.String(fmt.Sprintf(format, a...))) }
 		*links = false
 	}
@@ -134,6 +143,11 @@ func probe(ctx context.Context, args []string) error {
 			hc.CloseIdleConnections()
 			printf("report taken\n")
 		}
+		if *dnsCheck {
+			if err := probeDNS(ctx, &p, host, ip, key, *dnsResolvers, red, printf); err != nil {
+				return err
+			}
+		}
 		if *channel {
 			return measure(ctx, client, p, printf)
 		}
@@ -142,10 +156,108 @@ func probe(ctx context.Context, args []string) error {
 	return fmt.Errorf("node not reachable: %w", lastErr)
 }
 
+// probeDNS checks the subscription's DNS tunnel zones from this machine, as
+// rayd checks them from the node (internal/dnscheck): through this
+// machine's resolvers, with the device's own dnsauth key and the seal key
+// of the link, so what works for rayd and not here is this network's.
+func probeDNS(ctx context.Context, p *sub.Payload, host string, ip netip.Addr, deviceKey [spa.KeySize]byte, resolverList string,
+	red *redact.Redactor, printf func(string, ...any)) error {
+	zones := probeDNSZones(p, host, ip, deviceKey)
+	if len(zones) == 0 {
+		printf("no DNS tunnel in the subscription\n")
+		return nil
+	}
+	if red != nil {
+		// The zones, and the domains they are under, are the node's
+		// names too (review 13: -redact printed them in clear).
+		for _, z := range zones {
+			red.Add(z.Name)
+			if _, parent, ok := strings.Cut(z.Name, "."); ok && strings.Contains(parent, ".") {
+				red.Add(parent)
+			}
+		}
+	}
+	resolvers, err := dnscheck.ParseResolvers(splitList(resolverList))
+	if err != nil {
+		return err
+	}
+	rep := (&dnscheck.Checker{}).Check(ctx, zones, resolvers, false)
+	pb := api.DNSReportPB(rep)
+	// The fixes are the node's commands: said as such off the node.
+	for _, z := range pb.Zones {
+		for _, s := range []*nodev1.DNSCheckStep{z.Parent, z.Front, z.Backend} {
+			if s != nil && s.Fix != "" {
+				s.Fix = "on the node: " + s.Fix
+			}
+		}
+	}
+	var out strings.Builder
+	w := tabwriter.NewWriter(&out, 0, 4, 2, ' ', 0)
+	printDNSCheck(w, pb, time.Now())
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	printf("%s", out.String())
+	return nil
+}
+
+// probeDNSZones are the DNS tunnel zones of a subscription's links, the
+// main one and its spares (niko-dns-spare, spec/dnszones-v1.md §2), with
+// what a check needs: the probe key of the subscription, the seal key of
+// the link and the device's dnsauth key for the service, the same in each
+// zone of a link.
+func probeDNSZones(p *sub.Payload, host string, ip netip.Addr, deviceKey [spa.KeySize]byte) []dnscheck.Zone {
+	var probeKey []byte
+	if p.DNSProbe != nil {
+		probeKey, _ = base64.RawURLEncoding.DecodeString(p.DNSProbe.Key)
+	}
+	var zones []dnscheck.Zone
+	for _, pr := range p.Profiles {
+		u, err := url.Parse(pr.Link)
+		if err != nil {
+			continue
+		}
+		q := u.Query()
+		f := strings.Split(q.Get("niko-dns"), ";") // kind;;zone;key or method
+		if len(f) < 3 || (f[0] != "dnstt" && f[0] != "masterdns") || f[2] == "" {
+			continue
+		}
+		// The front is asked at the node's address: off the node the
+		// checker's fallback, loopback, is this machine's own (review 13).
+		z := dnscheck.Zone{Service: pr.Name, Kind: f[0], Name: f[2], Host: host, SvcID: pr.Svc, Front: netip.AddrPortFrom(ip, 53)}
+		if z.Kind == "dnstt" {
+			if len(probeKey) == 32 {
+				z.ProbeKey = probeKey
+			}
+			z.Seal, z.Auth = "off", "off"
+			if v, ok := strings.CutPrefix(q.Get("niko-dnsseal"), "v1;"); ok {
+				if k, err := base64.RawURLEncoding.DecodeString(v); err == nil && len(k) == 32 {
+					z.Seal, z.SealKey = "required", k
+				}
+			}
+			if q.Get("niko-dnsauth") == "v1" {
+				if id, err := hex.DecodeString(q.Get("niko-node")); err == nil && len(id) == spa.NodeIDSize {
+					k := spa.DNSAuthKey(deviceKey, [spa.NodeIDSize]byte(id), pr.Svc)
+					z.Auth, z.AuthKey = "required", k[:]
+				}
+			}
+		}
+		zones = append(zones, z)
+		for spare := range strings.SplitSeq(q.Get("niko-dns-spare"), ",") {
+			if spare != "" {
+				zz := z
+				zz.Name, zz.Spare = spare, true
+				zones = append(zones, zz)
+			}
+		}
+	}
+	return zones
+}
+
 // readArg reads the bundle from the argument, a file (@FILE) or stdin
 // (-); in a file or on stdin the rcdev1 token is found in whatever text
-// surrounds it (the output of rayctl device add, a message); an rcinv1
-// invite is found the same way.
+// surrounds it (the output of rayctl device add, a message); an invite,
+// RCINV2 or rcinv1, is found the same way.
 func readArg(s string) (string, error) {
 	var text string
 	switch {
@@ -164,8 +276,10 @@ func readArg(s string) (string, error) {
 	default:
 		return s, nil
 	}
+	n := len(node.InvitePrefix2)
 	for _, f := range strings.Fields(text) {
-		if strings.HasPrefix(f, node.BundlePrefix) || strings.HasPrefix(f, node.InvitePrefix) {
+		if strings.HasPrefix(f, node.BundlePrefix) || strings.HasPrefix(f, node.InvitePrefix) ||
+			len(f) > n && strings.EqualFold(f[:n], node.InvitePrefix2) {
 			return f, nil
 		}
 	}
