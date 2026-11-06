@@ -5,6 +5,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -20,6 +22,7 @@ import (
 	"github.com/arngory/raycontrol/internal/dnscheck"
 	"github.com/arngory/raycontrol/internal/health"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/release"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -300,4 +303,45 @@ func TestCheckDNSZonesChangeDuringError(t *testing.T) {
 		t.Fatal(err)
 	}
 	until("check of the new zone", func() bool { return checked("dns2") })
+}
+
+// The update check says in rayctl status what it found, never failing the
+// loop: a newer release, the same one, or why it could not look.
+func TestCheckUpdates(t *testing.T) {
+	serve := func(broken bool) *release.Fetcher {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if broken {
+				http.Error(w, "down", http.StatusBadGateway)
+				return
+			}
+			// Signed by another key than release.PubKey: refused as such.
+			http.NotFound(w, r)
+		}))
+		t.Cleanup(srv.Close)
+		return &release.Fetcher{Base: srv.URL}
+	}
+	detail := func(f *release.Fetcher, running string) health.Loop {
+		hb := &health.Board{}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { checkUpdates(ctx, f, running, time.Hour, hb, slog.New(slog.DiscardHandler)); close(done) }()
+		for range 200 {
+			if ls := hb.Loops(); len(ls) == 1 {
+				cancel()
+				<-done
+				return ls[0]
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+		<-done
+		t.Fatal("no update loop")
+		return health.Loop{}
+	}
+	if l := detail(serve(true), "v0.13.0"); l.Failing() || !strings.HasPrefix(l.Detail, "not checked: ") {
+		t.Fatalf("down: %+v", l)
+	}
+	if l := detail(serve(false), "v0.13.0"); l.Failing() || !strings.HasPrefix(l.Detail, "not checked: ") {
+		t.Fatalf("no release: %+v", l)
+	}
 }

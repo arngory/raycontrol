@@ -215,6 +215,25 @@ func (f *Fetcher) Fetch(ctx context.Context, version, arch, pubKey string) (Rele
 	return f.verified(ctx, version, arch, pubKey, sums, sig)
 }
 
+// Latest is the version of the latest release, from its signed SHA256SUMS
+// (the trusted comment, as Fetch reads it): what rayctl update would
+// install, with no archive downloaded.
+func (f *Fetcher) Latest(ctx context.Context, pubKey string) (string, error) {
+	sums, err := f.Get(ctx, "latest", "SHA256SUMS", 1<<16)
+	if err != nil {
+		return "", err
+	}
+	sig, err := f.Get(ctx, "latest", "SHA256SUMS.minisig", 1<<12)
+	if err != nil {
+		return "", err
+	}
+	trusted, err := Verify(sums, sig, pubKey)
+	if err != nil {
+		return "", fmt.Errorf("SHA256SUMS: %w", err)
+	}
+	return VersionOf(trusted)
+}
+
 // Local verifies a release from a directory holding SHA256SUMS, its
 // signature and the archive, as downloaded from the release page: for
 // nodes that cannot reach GitHub or a mirror.

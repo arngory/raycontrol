@@ -146,6 +146,7 @@ shred -u /root/phone.bundle
 | `-spa-tcp` | true | TCP-носитель SPA; `false`, если хватает UDP |
 | `-acme-directory` | Let's Encrypt | CA; пусто — без сертификатов |
 | `-dns-check` · `-dns-check-resolvers` | 1 ч ±10 % · `google,cloudflare,quad9` | самопроверка DNS-зон с ноды; `0` — только `rayctl dns check -now` |
+| `-update-check` | `0` (выкл.) | искать новый релиз так часто (±10 %): нода берёт подписанный SHA256SUMS последнего релиза с github.com или зеркала — они видят адрес ноды; итог — строка `update` в `rayctl status`, новая версия — один раз в журнал |
 | `-run` | `/run/niko` | каталог сокетов и копий секретов data plane |
 | `-supervise` · `-xray` · `-niko-server` | выкл. | без systemd (CI, контейнеры): data plane — дочерние процессы rayd под его пользователем; не для ноды (R4-22, `test/supervise/run.sh`) |
 
