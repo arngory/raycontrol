@@ -153,6 +153,7 @@ type Mirror struct {
 
 	dl     sync.Mutex
 	active map[string]*download // a device's download
+	pacing map[net.Conn]int     // downloads a connection carries
 	total  int
 }
 

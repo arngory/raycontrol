@@ -60,7 +60,6 @@ func (m *Mirror) Handler(auth func(*http.Request) (string, error)) http.Handler 
 				return
 			}
 			defer m.end(dev, d)
-			defer paced(conn)()
 		}
 		// One range (app-update-v1 §2): several get the whole file.
 		if strings.Contains(r.Header.Get("Range"), ",") {
@@ -128,17 +127,16 @@ const takeover = 5 * time.Second
 // download at once: 429.
 func (m *Mirror) begin(ctx context.Context, dev string, conn net.Conn) (*download, bool) {
 	for try := 0; ; try++ {
-		d, old := m.take(dev, conn)
+		d, cut := m.take(dev, conn, try == 0)
 		if d != nil {
 			return d, true
 		}
-		if old == nil || try > 0 || conn == nil || old.conn == nil || old.conn == conn {
+		if cut == nil {
 			return nil, false
 		}
 		m.log().Debug("a device's download cut by its next", "device", dev)
-		_ = old.conn.Close()
 		select {
-		case <-old.done:
+		case <-cut.done:
 		case <-time.After(takeover):
 			return nil, false
 		case <-ctx.Done():
@@ -147,12 +145,19 @@ func (m *Mirror) begin(ctx context.Context, dev string, conn net.Conn) (*downloa
 	}
 }
 
-// take takes the device's place if it is free and the node has one: the
-// download, or the device's download under way.
-func (m *Mirror) take(dev string, conn net.Conn) (d, old *download) {
+// take takes the device's place if it is free and the node has one, and
+// paces the connection. Else, with cut, the device's download under way
+// on another connection has its connection closed (here, while it is
+// still under way: never a connection gone back to other requests), and
+// is returned to wait for.
+func (m *Mirror) take(dev string, conn net.Conn, cut bool) (d, old *download) {
 	m.dl.Lock()
 	defer m.dl.Unlock()
 	if a := m.active[dev]; a != nil {
+		if !cut || conn == nil || a.conn == nil || a.conn == conn {
+			return nil, nil
+		}
+		_ = a.conn.Close() // a TCP close does not block
 		return nil, a
 	}
 	if m.total >= PerNode {
@@ -160,10 +165,16 @@ func (m *Mirror) take(dev string, conn net.Conn) (d, old *download) {
 	}
 	if m.active == nil {
 		m.active = map[string]*download{}
+		m.pacing = map[net.Conn]int{}
 	}
 	d = &download{conn: conn, done: make(chan struct{})}
 	m.active[dev] = d
 	m.total++
+	if conn != nil {
+		if m.pacing[conn]++; m.pacing[conn] == 1 {
+			pace(conn, notSentLowat)
+		}
+	}
 	return d, nil
 }
 
@@ -173,6 +184,13 @@ func (m *Mirror) end(dev string, d *download) {
 		delete(m.active, dev)
 	}
 	m.total--
+	// A connection two downloads share (HTTP/2) is paced till both end.
+	if d.conn != nil {
+		if m.pacing[d.conn]--; m.pacing[d.conn] == 0 {
+			delete(m.pacing, d.conn)
+			pace(d.conn, 0)
+		}
+	}
 	m.dl.Unlock()
 	close(d.done)
 }
@@ -222,24 +240,19 @@ func (m *Mirror) tcpConn(ctx context.Context) net.Conn {
 	return c
 }
 
-// paced makes a download's writes wait on its client: with
+// pace makes a download's writes wait on its client: with
 // TCP_NOTSENT_LOWAT a write waits until most of what was not yet sent has
 // gone, so a client that takes nothing misses Stall while a slow live one
 // (from ~2 KB/s) keeps up. The kernel's buffer stays autotuned (the probes
-// measure over the same connections); the returned func puts the
-// connection back as it was.
-func paced(conn net.Conn) func() {
+// measure over the same connections); 0 puts the system's back.
+func pace(conn net.Conn, lowat int) {
 	tcp, ok := conn.(*net.TCPConn)
 	if !ok {
-		return func() {}
+		return
 	}
-	set := func(v int) {
-		if rc, err := tcp.SyscallConn(); err == nil {
-			_ = rc.Control(func(fd uintptr) {
-				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_NOTSENT_LOWAT, v)
-			})
-		}
+	if rc, err := tcp.SyscallConn(); err == nil {
+		_ = rc.Control(func(fd uintptr) {
+			_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_NOTSENT_LOWAT, lowat)
+		})
 	}
-	set(notSentLowat)
-	return func() { set(0) } // 0: the system's
 }

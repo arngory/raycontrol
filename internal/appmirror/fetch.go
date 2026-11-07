@@ -43,6 +43,9 @@ const (
 	// one not yet whole on GitHub (errIncomplete) costs no try.
 	maxTries   = 3
 	failMemory = 24 * time.Hour
+	// maxIncomplete releases not whole on GitHub cost no try in a check
+	// (two small files each); past them, each does.
+	maxIncomplete = 10
 	// releaseTimeout bounds the fetch of a release (a host that drips).
 	releaseTimeout = 45 * time.Minute
 	// spare is the room left beside a release being fetched.
@@ -200,7 +203,7 @@ func (m *Mirror) syncWith(ctx context.Context, list []ghRelease) error {
 // newest is the newest release of a kind the mirror can hold: the held
 // one, unless one of the candidates newer than it (newest first) verifies.
 func (m *Mirror) newest(ctx context.Context, cands []ghRelease, held *Release, errs *[]error) *Release {
-	tries := 0
+	tries, incomplete := 0, 0
 	for _, c := range cands {
 		if held != nil && semverCompare(c.Tag, held.Tag) <= 0 {
 			break
@@ -216,6 +219,9 @@ func (m *Mirror) newest(ctx context.Context, cands []ghRelease, held *Release, e
 			*errs = append(*errs, fmt.Errorf("%s: %w", c.Tag, err))
 			switch {
 			case errors.Is(err, errIncomplete):
+				if incomplete++; incomplete > maxIncomplete {
+					tries++
+				}
 			case errors.Is(err, errUnverified):
 				m.remember(c.Tag)
 				tries++
