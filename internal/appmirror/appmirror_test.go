@@ -460,3 +460,30 @@ func TestSetEnabled(t *testing.T) {
 		t.Fatalf("off: %v", err)
 	}
 }
+
+// A plain-HTTP source (the client's interop, RAYCONTROL_UNSAFE_APP_MIRROR_API)
+// only with AllowHTTP; GitHub's assets are HTTPS.
+func TestAllowHTTP(t *testing.T) {
+	ctx := context.Background()
+	k := newKey(t)
+	g := newGitHub(t)
+	plain := httptest.NewServer(g.srv.Config.Handler)
+	t.Cleanup(plain.Close)
+	g.release(k, "v1.0.0", false, apks("v1.0.0"), "", nil)
+	g.mu.Lock()
+	for i := range g.rels {
+		for j := range g.rels[i].Assets {
+			g.rels[i].Assets[j].URL = strings.Replace(g.rels[i].Assets[j].URL, g.srv.URL, plain.URL, 1)
+		}
+	}
+	g.mu.Unlock()
+	m := newMirror(t, g, k)
+	m.API, m.HTTP = plain.URL, plain.Client()
+	if err := m.Sync(ctx); err == nil || !strings.Contains(err.Error(), "asset URL") {
+		t.Fatalf("plain HTTP taken: %v", err)
+	}
+	m.AllowHTTP = true
+	if err := m.Sync(ctx); err != nil || len(m.Status(ctx).Releases) != 1 {
+		t.Fatalf("with AllowHTTP: %v", err)
+	}
+}

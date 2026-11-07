@@ -215,6 +215,17 @@ func cmdServe(args []string) error {
 	// The client's releases (spec/app-update-v1.md), beside the database:
 	// only while the administrator has the mirror on (rayctl app-mirror).
 	srv.AppMirror = &appmirror.Mirror{Store: st, Dir: filepath.Join(filepath.Dir(*db), "app"), Log: log}
+	// Interop (the client's CI): releases from a server of the test's,
+	// signed with its key. Never on a node in use: anything that key signs
+	// would go to its devices.
+	if api := os.Getenv("RAYCONTROL_UNSAFE_APP_MIRROR_API"); api != "" {
+		srv.AppMirror.API, srv.AppMirror.AllowHTTP = strings.TrimSuffix(api, "/"), true
+		log.Warn("UNSAFE: the client's releases come from a test source, plain HTTP allowed", "api", api)
+	}
+	if key := os.Getenv("RAYCONTROL_UNSAFE_APP_MIRROR_KEY"); key != "" {
+		srv.AppMirror.PubKey = key
+		log.Warn("UNSAFE: the client's releases are checked with a test key, not the client's", "key", key)
+	}
 	go srv.AppMirror.Run(ctx, func() time.Duration { return mrand.N(appmirror.Jitter) }) //nolint:gosec // G404: when to look, no secret
 	per := &api.PerimeterServer{Server: srv, RayspaUID: -1, DefaultTTL: *spaTTL, MaxTTL: *spaMaxTTL, TCPCarrier: *spaTCP, Refresh: time.Minute}
 	policy := api.PeerPolicy{Group: *group}

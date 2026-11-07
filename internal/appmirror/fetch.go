@@ -62,20 +62,23 @@ func (m *Mirror) client() *http.Client {
 			ResponseHeaderTimeout: 60 * time.Second,
 			ForceAttemptHTTP2:     true,
 		},
-		CheckRedirect: httpsOnly,
+		CheckRedirect: m.redirect,
 	}
 }
 
-// httpsOnly follows GitHub's redirects to its asset hosts, over HTTPS only.
-func httpsOnly(req *http.Request, via []*http.Request) error {
+// redirect follows GitHub's redirects to its asset hosts, over HTTPS only
+// (AllowHTTP: a test source).
+func (m *Mirror) redirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 5 {
 		return errors.New("too many redirects")
 	}
-	if req.URL.Scheme != "https" {
+	if !m.scheme(req.URL.Scheme) {
 		return fmt.Errorf("redirect to %s", req.URL.Scheme)
 	}
 	return nil
 }
+
+func (m *Mirror) scheme(s string) bool { return s == "https" || m.AllowHTTP && s == "http" }
 
 // Sync brings the mirror to the newest releases (app-update-v1 §3): those
 // it holds stay, a new one is fetched and verified whole before it takes
@@ -313,7 +316,7 @@ func (c *countWriter) Write(p []byte) (int, error) {
 // get copies at most limit bytes of an HTTPS URL to w; more is an error.
 func (m *Mirror) get(ctx context.Context, raw string, limit int64, w io.Writer) error {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" {
+	if err != nil || !m.scheme(u.Scheme) {
 		return fmt.Errorf("asset URL %q", raw)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)

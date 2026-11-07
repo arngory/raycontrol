@@ -118,7 +118,10 @@ type Mirror struct {
 	API    string       // https://api.github.com when empty (a test seam)
 	HTTP   *http.Client // with timeouts when nil
 	PubKey string       // PubKey when empty (a test seam)
-	Log    *slog.Logger
+	// AllowHTTP takes plain HTTP from the source: a test's, never GitHub
+	// (rayd: RAYCONTROL_UNSAFE_APP_MIRROR_API).
+	AllowHTTP bool
+	Log       *slog.Logger
 
 	mu      sync.Mutex
 	held    []Release // the stable first, then a newer pre-release
