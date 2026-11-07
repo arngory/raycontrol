@@ -12,7 +12,7 @@
 | `bash bootstrap.sh -remove-v0 -host IP …` · `rayctl legacy [-remove]` | убрать прежний raycontrol (v0, `ray.sh`) перед установкой: копия в `/root`, затем только его следы; `-purge-v0-packages` — и его пакеты (R4-26) |
 | `rayctl knock @bundle` | только SPA: открыть службы устройства своему адресу; с аварийным пакетом — SSH, затем `ssh` (R4-27) |
 | `rayctl check [-host A] [-domain D] [-services a,b]` · `bash bootstrap.sh -check …` | годится ли хост: обязательное (без него установка откажет) и желательное; ничего не меняет (R4-24) |
-| `bash bootstrap.sh -host IP -domain D -cloudflare-token-file F [-services reality,dnstt,masterdns]` | поставить ноду: зависимости, подписанный релиз с data plane, `rayctl install`, сервисы |
+| `bash bootstrap.sh -host IP -domain D -cloudflare-token-file F [-services reality,dnstt,masterdns,slipstream]` | поставить ноду: зависимости, подписанный релиз с data plane, `rayctl install`, сервисы |
 | `rayctl install -host IP [-domain D] [-admin A] [-cloudflare-token-file F] [-services …\|none] [-dataplane DIR]` | то же без bootstrap; `-dataplane` — каталог с проверенными `xray` и `niko-server` |
 | `rayctl apply` | поставить то, что нужно новым сервисам: пользователи, юниты, файлы |
 | `rayctl update [-check] [-version vX.Y.Z] [-from DIR] [-yes]` | обновить ноду до проверенного релиза; при сбое — сам откат. С v0.15.0: юниты data plane, которые работали до обновления, должны заработать снова (иначе откат); файлы релиза, которых прежняя версия не знает, ставит новый rayctl; в конце — DNS-туннели, у которых режимы слабее, чем у нового сервиса |
@@ -91,6 +91,7 @@
 | `rayctl service add naive naive` | NaiveProxy (HTTP/2) на TCP 443 (после REALITY); потом `rayctl apply` |
 | `rayctl service add yggdrasil ygg` | Yggdrasil: прямой TLS-линк на TCP 443 за фронтом (после REALITY), трафик идёт в `inner`; потом `rayctl apply` |
 | `rayctl service add dnstt dns` · `rayctl service add masterdns mdns` | DNS-туннели (резервный канал) |
+| `rayctl service add slipstream slip [-settings '{"zone":"s.example.net"}']` → `rayctl apply` | slipstream (с v0.16, [`spec/slipstream-v1.md`](spec/slipstream-v1.md)): DNS-туннель поверх QUIC с multipath, за DNS-фронтом. Зона — до 20 символов (иначе пакет QUIC Initial не влезет в запрос): своя — `zone`, без неё — случайная в домене ноды (если домен длиннее 16 символов, задайте свою). Каждый запрос несёт метку dnsauth-v2 устройства, фронт проверяет её до сервера; опций нет, ключ сервера (P-256) клиенты закрепляют, ротации нет. Ссылку берут Niko 1.37+, более старые пропускают строку |
 | `rayctl service add api api` | удалённый API для устройств-администраторов и регистрации по приглашениям |
 | `rayctl service enable\|disable\|del NAME` | включить, выключить, удалить |
 | `rayctl service set site answer=404\|403\|silent\|pages` | что сайт отвечает тем, кого отклонил REALITY; потом `rayctl apply` |
@@ -116,7 +117,7 @@
 | `rayctl dns cloudflare [-token-file F]` | подключить Cloudflare; без файла токен спрашивается без эха |
 | `rayctl dns sync` | привести зону в порядок сейчас (rayd делает это сам) |
 | `rayctl dns remove [-keep-records]` | удалить записи raycontrol и забыть провайдера |
-| `rayctl dns check [-now]` | зоны туннелей с ноды: делегирование у серверов родителя, фронт и бэкенд, проба dnsprobe-v1 через Google, Cloudflare, Quad9 (EDNS, 0x20, выход резолвера); без `-now` — последняя проверка rayd, `-now` — сейчас, не чаще раза в 30 с |
+| `rayctl dns check [-now]` | зоны туннелей с ноды: делегирование у серверов родителя, фронт и бэкенд, проба dnsprobe-v1 через Google, Cloudflare, Quad9 (EDNS, 0x20, выход резолвера); без `-now` — последняя проверка rayd, `-now` — сейчас, не чаще раза в 30 с. Зону slipstream — как dnstt (вершина и пробы фронта), без опроса сервера |
 | `rayctl dns check -resolver nsdi,yandex` | то же через другие резолверы (`msk-ix`, `system`, `udp:IP`, `tcp:IP`); российские нода сама не спрашивает, их отказ — только предупреждение |
 
 ## Доступ администратора
