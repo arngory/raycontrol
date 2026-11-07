@@ -37,7 +37,7 @@ import (
 // client then carries VLESS through the tunnel into inner and fetches a
 // page. A client without the key gets nowhere: the front counts its
 // queries untagged and the server sees none. Set XRAY_BIN,
-// NIKO_SERVER_BIN (v0.13.0 or later), SLIPSTREAM_SERVER_BIN and
+// NIKO_SERVER_BIN (v0.14.0 or later: devices), SLIPSTREAM_SERVER_BIN and
 // SLIPSTREAM_CLIENT_BIN.
 func TestSlipstreamWithNikoServer(t *testing.T) {
 	bin, niko := os.Getenv("XRAY_BIN"), os.Getenv("NIKO_SERVER_BIN")
