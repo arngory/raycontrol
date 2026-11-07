@@ -21,6 +21,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/arngory/raycontrol/internal/appmirror"
 	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/dnscheck"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
@@ -62,6 +63,9 @@ type Server struct {
 	// DNSCheck checks the DNS tunnel zones from the node (CheckDNSZones);
 	// nil: the call is unavailable.
 	DNSCheck *dnscheck.Monitor
+	// AppMirror keeps the client's releases (spec/app-update-v1.md); nil:
+	// the setting alone (tests).
+	AppMirror *appmirror.Mirror
 
 	// Wrong invite PINs, and the invites the last of them withdrew, since
 	// rayd started (rayctl metrics).

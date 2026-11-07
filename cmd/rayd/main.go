@@ -13,11 +13,13 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"os/user"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -29,6 +31,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/arngory/raycontrol/internal/api"
+	"github.com/arngory/raycontrol/internal/appmirror"
 	"github.com/arngory/raycontrol/internal/asn"
 	"github.com/arngory/raycontrol/internal/certs"
 	"github.com/arngory/raycontrol/internal/cloudflare"
@@ -209,6 +212,21 @@ func cmdServe(args []string) error {
 		},
 		DNSCheck: dnsMonitor(ctx, st, dnsResolvers, hb, log)}
 	srv.DNSCheck.Checker.Private = *dnsCheckPrivate
+	// The client's releases (spec/app-update-v1.md), beside the database:
+	// only while the administrator has the mirror on (rayctl app-mirror).
+	srv.AppMirror = &appmirror.Mirror{Store: st, Dir: filepath.Join(filepath.Dir(*db), "app"), Conn: probe.Conn, Log: log}
+	// Interop (the client's CI): releases from a server of the test's,
+	// signed with its key. Never on a node in use: anything that key signs
+	// would go to its devices.
+	if api := os.Getenv("RAYCONTROL_UNSAFE_APP_MIRROR_API"); api != "" {
+		srv.AppMirror.API, srv.AppMirror.AllowHTTP = strings.TrimSuffix(api, "/"), true
+		log.Warn("UNSAFE: the client's releases come from a test source, plain HTTP allowed", "api", api)
+	}
+	if key := os.Getenv("RAYCONTROL_UNSAFE_APP_MIRROR_KEY"); key != "" {
+		srv.AppMirror.PubKey = key
+		log.Warn("UNSAFE: the client's releases are checked with a test key, not the client's", "key", key)
+	}
+	go srv.AppMirror.Run(ctx, func() time.Duration { return mrand.N(appmirror.Jitter) }) //nolint:gosec // G404: when to look, no secret
 	per := &api.PerimeterServer{Server: srv, RayspaUID: -1, DefaultTTL: *spaTTL, MaxTTL: *spaMaxTTL, TCPCarrier: *spaTCP, Refresh: time.Minute}
 	policy := api.PeerPolicy{Group: *group}
 	if u, err := user.Lookup(*rayspaUser); err == nil {
@@ -303,7 +321,7 @@ func cmdServe(args []string) error {
 	go pruneSummary(ctx, sum, log)
 	remote := &api.Remote{Server: srv, Log: log, Perimeter: per, RelayReport: sum.TakeVia}
 	go serveRemote(ctx, remote, srv.Changes)
-	if err := startSubscription(ctx, st, paths, log, sum, remote.RelayProbeUp, *probeDaily, *spaTCP); err != nil {
+	if err := startSubscription(ctx, st, paths, log, sum, remote.RelayProbeUp, *probeDaily, *spaTCP, srv.AppMirror); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
 	log.Info("serving", "socket", *socket, "node", fmt.Sprintf("%x", params.NodeID))
@@ -660,7 +678,7 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 
 // startSubscription serves the subscription endpoint on the port of the
 // subscription service, if it is enabled.
-func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, sum *summary.Collector, relayProbe func(string) bool, probeDailyMiB int, tcpCarrier bool) error {
+func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, sum *summary.Collector, relayProbe func(string) bool, probeDailyMiB int, tcpCarrier bool, app *appmirror.Mirror) error {
 	svc, err := st.ServiceByName(ctx, provision.SubscriptionService)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !svc.Enabled) {
 		log.Info("subscription service disabled")
@@ -686,7 +704,7 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 		return err
 	}
 	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier, RelayProbe: relayProbe,
-		ClockSeqAfter: time.Now().Add(10 * time.Minute)}
+		ClockSeqAfter: time.Now().Add(10 * time.Minute), App: app}
 	port := int(ports[0].Num)
 	addr := ":" + strconv.Itoa(port)
 	// Channel probes (R4-16) on the same endpoint, and their UDP echo on

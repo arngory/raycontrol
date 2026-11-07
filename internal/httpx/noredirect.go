@@ -23,10 +23,16 @@ type noRedirect struct {
 
 func (n *noRedirect) WriteHeader(code int) {
 	if code >= 300 && code < 400 {
-		n.Header().Del("Location")
-		n.Header().Del("Content-Type")
+		// The 404 http.NotFound sends, word for word: a path that would
+		// redirect looks like any other unknown one.
+		h := n.Header()
+		h.Del("Location")
+		h.Del("Content-Length")
+		h.Set("Content-Type", "text/plain; charset=utf-8")
+		h.Set("X-Content-Type-Options", "nosniff")
 		n.dropped = true
 		n.ResponseWriter.WriteHeader(http.StatusNotFound)
+		_, _ = n.ResponseWriter.Write([]byte("404 page not found\n"))
 		return
 	}
 	n.ResponseWriter.WriteHeader(code)

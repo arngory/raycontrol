@@ -773,3 +773,36 @@ func TestCheckDNSZonesRemoteResolvers(t *testing.T) {
 		}
 	}
 }
+
+// rayctl app-mirror (spec/app-update-v1.md §3): off by default, on with
+// room for it, off again; the switch goes to the audit log.
+func TestAppMirrorAPI(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	r, err := c.GetAppMirror(ctx, connect.NewRequest(&nodev1.GetAppMirrorRequest{}))
+	if err != nil || r.Msg.Enabled || len(r.Msg.Releases) != 0 || r.Msg.Checked != 0 {
+		t.Fatalf("by default: %+v %v", r.Msg, err)
+	}
+	_, err = c.SetAppMirror(ctx, connect.NewRequest(&nodev1.SetAppMirrorRequest{Enabled: true}))
+	if err != nil {
+		// Too little room where the mirror would be: refused, so said.
+		if connect.CodeOf(err) != connect.CodeInvalidArgument || !strings.Contains(err.Error(), "free") {
+			t.Fatal(err)
+		}
+		t.Skip("less than 1 GiB free here:", err)
+	}
+	if r, _ := c.GetAppMirror(ctx, connect.NewRequest(&nodev1.GetAppMirrorRequest{})); !r.Msg.Enabled {
+		t.Fatal("not on")
+	}
+	if _, err := c.SetAppMirror(ctx, connect.NewRequest(&nodev1.SetAppMirrorRequest{})); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := c.GetAppMirror(ctx, connect.NewRequest(&nodev1.GetAppMirrorRequest{})); r.Msg.Enabled {
+		t.Fatal("not off")
+	}
+	entries, err := srv.Store.ListAudit(ctx, 10)
+	if err != nil || !slices.ContainsFunc(entries, func(e store.AuditEntry) bool { return e.Action == "app-mirror.set" && e.Target == "on" }) {
+		t.Errorf("audit %+v %v", entries, err)
+	}
+}

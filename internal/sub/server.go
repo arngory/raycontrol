@@ -1,6 +1,7 @@
 package sub
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/appmirror"
 	"github.com/arngory/raycontrol/internal/httpx"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/probe"
@@ -24,6 +26,14 @@ import (
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/summary"
 )
+
+// AppFiles is the mirror of the client's releases (appmirror.Mirror).
+type AppFiles interface {
+	// Hint is the subscription's field; nil leaves it out.
+	Hint(ctx context.Context) *appmirror.Hint
+	// Handler serves appmirror.Path to the devices auth takes.
+	Handler(auth func(*http.Request) (string, error)) http.Handler
+}
 
 // Path is the endpoint path; DeviceHeader names the device.
 const (
@@ -56,7 +66,13 @@ type Server struct {
 	// RelayProbe, when set, says whether a relay's rayd relay is there:
 	// the subscription lists its probe endpoint only then (relay-v1 §9.2).
 	RelayProbe func(name string) bool
-	now        func() time.Time
+	// App, when set, serves the client's releases on the same endpoint
+	// (spec/app-update-v1.md) and lists them in the subscription while
+	// the administrator has the mirror on (appmirror.Mirror).
+	App AppFiles
+	// Stall: appmirror.Stall when zero (a test seam).
+	Stall time.Duration
+	now   func() time.Time
 
 	mu sync.Mutex // serialises seq
 }
@@ -93,6 +109,9 @@ func (s *Server) Serve(ctx context.Context, addr string, tlsCfg *tls.Config) err
 	if s.Probe != nil {
 		mux.Handle("/probe/v1/", s.Probe)
 	}
+	if s.App != nil {
+		mux.Handle(appmirror.Path, s.App.Handler(s.Device))
+	}
 	srv := &http.Server{
 		// No redirects, not even ServeMux's: Niko takes a 3xx from the
 		// subscription or the probes for an error (RAYCONTROL.md §22).
@@ -103,6 +122,11 @@ func (s *Server) Serve(ctx context.Context, addr string, tlsCfg *tls.Config) err
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      20 * time.Second,
 		ErrorLog:          slog.NewLogLogger(s.Log.Handler(), slog.LevelDebug),
+		// A connection that takes no byte for so long goes. Over HTTP/2 a
+		// stream's write deadline only queues a reset behind the frame a
+		// stalled socket holds: a client that stopped reading kept its
+		// download's place until rayd restarted (review).
+		HTTP2: &http.HTTP2Config{WriteByteTimeout: cmp.Or(s.Stall, appmirror.Stall)},
 	}
 	go func() {
 		<-ctx.Done()
@@ -229,6 +253,9 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 	}
 	if err := s.addRelays(ctx, &p, m); err != nil {
 		return Envelope{}, err
+	}
+	if s.App != nil {
+		p.App = s.App.Hint(ctx)
 	}
 	// dnsprobe-v1: for a user with a dnstt profile, the zones the front
 	// answers probes in (masterdns answers look otherwise). Not for

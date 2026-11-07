@@ -20,6 +20,7 @@ import (
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 
+	"github.com/arngory/raycontrol/internal/appmirror"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -88,6 +89,10 @@ type Payload struct {
 	// knows v2 signs with it when 2 is here, otherwise with v1. No field:
 	// no such tunnel, or a node before v0.15.0 (v1 only).
 	DNSAuth *DNSAuthVersions `json:"dnsauth,omitempty"`
+	// App lists the client's releases the node serves at /app/v1
+	// (spec/app-update-v1.md §1): only while the administrator has the
+	// mirror on and it holds a verified release.
+	App *appmirror.Hint `json:"app,omitempty"`
 }
 
 // DNSAuthVersions lists dnsauth versions: 1, 2 or both.
