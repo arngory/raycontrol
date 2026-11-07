@@ -4,7 +4,8 @@
 # with the arguments given here (e.g. -host 203.0.113.7 -domain example.com
 # -name Amsterdam; the name is what clients show for the node).
 # The release carries the data plane too (Xray built from the pinned fork,
-# niko-server checked against pinned hashes) under the same signature;
+# niko-server and slipstream-server checked against pinned hashes) under
+# the same signature;
 # rayctl install puts it in /usr/local/libexec/raycontrol and sets the
 # services up (REALITY by default when a domain is given).
 #
@@ -306,7 +307,7 @@ main() {
 	if [[ -n ${RAYCONTROL_LOCAL_DIR:-} ]]; then
 		log "installing from $RAYCONTROL_LOCAL_DIR without verification (test mode)"
 		cp "$RAYCONTROL_LOCAL_DIR"/{rayd,rayspa,rayctl} "$tmp/"
-		for f in xray niko-server; do
+		for f in xray niko-server slipstream-server; do
 			if [[ -f $RAYCONTROL_LOCAL_DIR/$f ]]; then cp "$RAYCONTROL_LOCAL_DIR/$f" "$tmp/"; fi
 		done
 	else

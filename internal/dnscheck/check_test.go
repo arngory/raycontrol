@@ -123,6 +123,42 @@ func TestCheckHealthy(t *testing.T) {
 	}
 }
 
+// A slipstream zone is checked as dnstt's at the front (the apex and the
+// probes, which the front answers itself), with no backend poll. Without
+// the probe key (rayctl probe -dns for a user without dns_probe), an
+// answer to a random name, as masterdns's: never a skip that reads as ok.
+func TestCheckSlipstream(t *testing.T) {
+	w := newWorld(t)
+	z := w.zones()[0]
+	z.Service, z.Kind, z.Seal, z.SealKey, z.Auth = "slip", "slipstream", "", nil, ""
+	s := w.check(t, []Zone{z}).Zones[0]
+	if s.State() != OK || s.Front.Detail != "SOA and probe on 203.0.113.7:53" || s.Backend.State != Skip {
+		t.Errorf("with the key: front %+v, backend %+v, state %v", s.Front, s.Backend, s.State())
+	}
+	for _, addr := range []string{"8.8.8.8", "1.1.1.1", "9.9.9.9"} {
+		if r := row(t, s, addr); r.SOA.State != OK || r.Small.State != OK || r.Large.State != OK || r.EDNS == 0 {
+			t.Errorf("with the key via %s: %+v", addr, r)
+		}
+	}
+
+	z.ProbeKey, z.NS = nil, ""
+	s = w.check(t, []Zone{z}).Zones[0]
+	if s.State() != OK || !strings.HasPrefix(s.Front.Detail, "answers on 203.0.113.7:53") {
+		t.Errorf("without the key: front %+v, state %v", s.Front, s.State())
+	}
+	for _, addr := range []string{"8.8.8.8", "1.1.1.1", "9.9.9.9"} {
+		if r := row(t, s, addr); r.Small.State != OK || r.Small.Detail == "no probe key" {
+			t.Errorf("without the key via %s: %+v", addr, r.Small)
+		}
+	}
+	// A front that does not answer: a failure, not a skip.
+	w.net.handle(nodeFront, func(string, netip.Addr, []byte) []byte { return nil })
+	s = w.check(t, []Zone{z}, "google").Zones[0]
+	if s.Front.State != Fail || s.State() != Fail {
+		t.Errorf("front down: front %+v, state %v", s.Front, s.State())
+	}
+}
+
 // The parent in its variants: right without glue, no NS (the wildcard
 // answers), another NS name at the node, the glue elsewhere, servers that
 // disagree. No resolver hears of a zone before the parent delegates it to

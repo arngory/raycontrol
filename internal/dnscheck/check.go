@@ -32,7 +32,7 @@ import (
 // Zone is a zone to check and what the check needs of its service.
 type Zone struct {
 	Service string // the service's name
-	Kind    string // dnstt | masterdns
+	Kind    string // dnstt | masterdns | slipstream
 	Name    string // the zone
 	Spare   bool   // a spare zone of the service (spec/dnszones-v1.md), not its main one
 	// NS is the name the parent should delegate the zone to; "" when the
@@ -44,7 +44,7 @@ type Zone struct {
 	// Front is where the front is asked on the node; zero: the host's
 	// address when it is this host's, else 127.0.0.1:53.
 	Front    netip.AddrPort
-	ProbeKey Key    // dnsprobe-v1 (dnstt)
+	ProbeKey Key    // dnsprobe-v1 (dnstt, slipstream: the front answers it)
 	Seal     string // dnsseal-v1 mode (dnstt): off, optional or required
 	SealKey  Key    // seals the poll unless the seal is off
 	Auth     string // dnsauth-v1 mode (dnstt)
@@ -97,9 +97,9 @@ type Step struct {
 // ResolverResult is a zone through one resolver.
 type ResolverResult struct {
 	Resolver Resolver
-	SOA      Step // the zone's apex (dnstt with NS); it may come from the resolver's cache
-	Small    Step // dnstt: the small probe; masterdns: the answer to a random name
-	Large    Step // dnstt: the large probe
+	SOA      Step // the zone's apex (dnstt and slipstream with NS); it may come from the resolver's cache
+	Small    Step // dnstt, slipstream: the small probe; masterdns: the answer to a random name
+	Large    Step // dnstt, slipstream: the large probe
 	// What the node saw of the resolver (dnstt, from the probe).
 	EDNS   int  // the UDP size it advertised to the node, 0 without OPT
 	Mixed  bool // it applies 0x20
@@ -296,8 +296,18 @@ func failed(err error, state State, what string) Step {
 	return Step{State: state, Detail: what + err.Error()}
 }
 
+// probed reports whether the zone is checked with dnsprobe-v1 probes,
+// which the front answers itself: dnstt's always (without the key, a skip),
+// slipstream's when the check has the key. Otherwise an answer to a random
+// name: masterdns's, and slipstream's for a client without dns_probe (the
+// front answers an untagged query in its zone with NOERROR), never a
+// silent skip.
+func probed(z Zone) bool {
+	return z.Kind == "dnstt" || z.Kind == "slipstream" && len(z.ProbeKey) == 32
+}
+
 // front checks the zone at the front on the node: the apex and a small
-// probe for dnstt, an answer to a random name for masterdns. REFUSED is
+// probe where probed, an answer to a random name otherwise. REFUSED is
 // the front's own: the zone is not in its configuration.
 func (c *Checker) front(ctx context.Context, z Zone, addr netip.AddrPort) Step {
 	a := c.asker("udp", addr, queriesPerZone)
@@ -311,7 +321,7 @@ func (c *Checker) front(ctx context.Context, z Zone, addr netip.AddrPort) Step {
 		}
 		return s
 	}
-	if z.Kind != "dnstt" {
+	if !probed(z) {
 		x, err := c.randomName(ctx, a, z, false)
 		switch {
 		case err != nil:
@@ -431,8 +441,8 @@ func (c *Checker) backend(ctx context.Context, z Zone, addr netip.AddrPort) Step
 func (c *Checker) viaResolver(ctx context.Context, z Zone, r Resolver) ResolverResult {
 	res := ResolverResult{Resolver: r}
 	a := c.asker(r.Net, r.Addr, queriesPerZone)
-	switch z.Kind {
-	case "dnstt":
+	switch {
+	case probed(z):
 		if z.NS != "" {
 			res.SOA = c.apexVia(ctx, a, z)
 		}
@@ -525,15 +535,15 @@ func (c *Checker) probeVia(ctx context.Context, a *asker, z Zone, large bool, re
 	case err == nil && ans.Large:
 		return Step{State: OK, RTT: x.rtt}
 	case err == nil && ans.EDNS == 0:
-		return Step{State: Warn, Detail: "a small answer: it sends the node no EDNS; dnstt runs slower there", RTT: x.rtt}
+		return Step{State: Warn, Detail: "a small answer: it sends the node no EDNS; " + z.Kind + " runs slower there", RTT: x.rtt}
 	case err == nil:
-		return Step{State: Warn, Detail: fmt.Sprintf("a small answer: it advertises EDNS %d to the node; dnstt runs slower there", ans.EDNS), RTT: x.rtt}
+		return Step{State: Warn, Detail: fmt.Sprintf("a small answer: it advertises EDNS %d to the node; %s runs slower there", ans.EDNS, z.Kind), RTT: x.rtt}
 	case x.r != nil && x.r.Truncated:
 		return Step{State: Warn, Detail: "truncated (TC) over UDP: large answers need TCP there"}
 	case x.r == nil:
 		s := failed(err, Warn, "")
 		if s.State == Warn {
-			s.Detail = "large answers lost (" + err.Error() + "): dnstt will hardly work there"
+			s.Detail = "large answers lost (" + err.Error() + "): " + z.Kind + " will hardly work there"
 		}
 		return s
 	}

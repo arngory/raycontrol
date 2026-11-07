@@ -44,7 +44,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   user services NAME a,b
   user export NAME [-o FILE]                the user's links, as in the subscription (they hold credentials)
   service list
-  service add KIND NAME [-settings JSON]
+  service add KIND NAME [-settings JSON]    slipstream: -settings '{"zone":"s.example.net"}' for a zone
+                                            of your own (20 characters at most), else one is made up
   service enable|disable|del NAME
   service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false;
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
@@ -52,7 +53,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             dnstt, masterdns: auth=, auth_hint=, seal=off|optional|required
                                             (auth_hint: dnsauth-v2 tags; required needs auth=required),
                                             spare_zones=N|ZONE,ZONE|none (spare zones, made up or your own),
-                                            zone=SPARE (a spare becomes the main zone, the main one leaves)
+                                            zone=SPARE (a spare becomes the main zone, the main one leaves);
+                                            slipstream: none (dnsauth-v2 required, one zone, pinned key)
   service cert SITE -chain F -key F         a certificate of your own for the site and the services under
                                             it, in place of ACME's (on the node only)
   service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
@@ -95,7 +97,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                               refuses without it), what is advised; changes nothing (root)
   legacy [-remove [-yes] [-purge-packages]]  raycontrol v0 (ray.sh) on this host; -remove backs it up, then
                                               removes only what it installed (root)
-  install -host ADDR [-domain D] [-name NAME] [-admin A] [-cloudflare-token-file F] [-services reality,hy2-masq,hy2-obfs,dnstt,masterdns|none]
+  install -host ADDR [-domain D] [-name NAME] [-admin A] [-cloudflare-token-file F] [-services reality,hy2-masq,hy2-obfs,dnstt,masterdns,slipstream|none]
           [-dataplane DIR]                    set the node up on this host (root); with -domain REALITY by default
   apply                                       install what the current services need (root)
   update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-rollback [-no-carry]]
@@ -609,6 +611,11 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 // modes.
 func keyState(s *nodev1.Service) string {
 	day := func(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04") }
+	if s.Kind == "slipstream" {
+		// Fixed (spec/slipstream-v1.md): the front checks every query's
+		// dnsauth-v2 tag; the server's key is pinned, never rotated.
+		return "auth required, v2 required (at the front), pinned key"
+	}
 	if s.Kind == "dnstt" || s.Kind == "masterdns" {
 		// The modes, and the switch of a dnstt seal key if there was one
 		// (masterdns seals with its own key).

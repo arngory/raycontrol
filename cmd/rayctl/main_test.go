@@ -168,6 +168,8 @@ func TestProbeDNSZones(t *testing.T) {
 			{Svc: 6, Name: "mdns", Link: "vless://u@inner:1?niko-dns=" + url.QueryEscape("masterdns;;m.example.com;5") + "&niko-dnskey=x" +
 				"&niko-mdseal=v1&niko-dnsauth=v1&niko-node=" + nodeID + "&niko-svc=6&niko-dns-spare=v.example.net#mdns"},
 			{Svc: 7, Name: "reality", Link: "vless://u@203.0.113.7:443?security=reality#reality"},
+			{Svc: 8, Name: "slip", Link: "vless://u@inner:1?niko-dns=" + url.QueryEscape("slipstream;;q.example.com;8") +
+				"&niko-slip=" + url.QueryEscape("v1;"+strings.Repeat("A", 43)+";abcdefgh;quiet.dev") + "&niko-dnsauth=v1&niko-node=" + nodeID + "&niko-svc=8#slip"},
 		},
 	}
 	zones := probeDNSZones(&p, "203.0.113.7", netip.MustParseAddr("203.0.113.7"), dev)
@@ -175,7 +177,7 @@ func TestProbeDNSZones(t *testing.T) {
 	for _, z := range zones {
 		names = append(names, z.Name)
 	}
-	if want := []string{"t.example.com", "s.example.net", "u.example.org", "m.example.com", "v.example.net"}; !slices.Equal(names, want) {
+	if want := []string{"t.example.com", "s.example.net", "u.example.org", "m.example.com", "v.example.net", "q.example.com"}; !slices.Equal(names, want) {
 		t.Fatalf("zones %v, want %v", names, want)
 	}
 	id, _ := hex.DecodeString(nodeID)
@@ -193,10 +195,21 @@ func TestProbeDNSZones(t *testing.T) {
 			t.Fatalf("dnstt %+v", d)
 		}
 	}
-	for _, m := range zones[3:] {
+	for _, m := range zones[3:5] {
 		if m.Kind != "masterdns" || m.Service != "mdns" || m.Spare != (m.Name != "m.example.com") || m.SvcID != 6 || m.ProbeKey != nil || m.AuthKey != nil {
 			t.Fatalf("masterdns %+v", m)
 		}
+	}
+	// slipstream: the front's probes with the key; no tag (the front checks
+	// it before the server, and the check asks the front only).
+	if s := zones[5]; s.Kind != "slipstream" || s.Service != "slip" || s.SvcID != 8 || len(s.ProbeKey) != 32 || s.AuthKey != nil || s.Seal != "" {
+		t.Fatalf("slipstream %+v", s)
+	}
+	// Without dns_probe (a user with no dnstt): no key, and the check asks
+	// a random name (dnscheck.TestCheckSlipstream).
+	p.DNSProbe = nil
+	if s := probeDNSZones(&p, "203.0.113.7", netip.MustParseAddr("203.0.113.7"), dev)[5]; s.Kind != "slipstream" || s.ProbeKey != nil {
+		t.Fatalf("slipstream without dns_probe %+v", s)
 	}
 }
 

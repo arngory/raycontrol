@@ -282,11 +282,10 @@ func TestLatest(t *testing.T) {
 	}
 }
 
-// The release workflow packs the files of Files, and no file a release
-// before v0.15.0 would refuse: that would leave those nodes no way to
-// update but a new install. Adding one is a choice: FilesBeforeV015 stays,
-// this test changes, and the release notes tell older nodes to go through
-// v0.15 first.
+// The release workflow packs the files of Files. A file a release before
+// v0.15.0 would refuse is in FilesSince, and the notes of the release that
+// added it tell those nodes to update through v0.15.0 first: they have no
+// other way but a new install.
 func TestArchiveFiles(t *testing.T) {
 	wf, err := os.ReadFile("../../.github/workflows/release.yml")
 	if err != nil {
@@ -310,8 +309,21 @@ func TestArchiveFiles(t *testing.T) {
 		if !slices.Contains(Files, name) {
 			t.Errorf("release.yml packs %s, which Files lacks", name)
 		}
-		if !slices.Contains(FilesBeforeV015, name) {
-			t.Errorf("release.yml packs %s: releases before v0.15.0 refuse it (see FilesBeforeV015)", name)
+		if slices.Contains(FilesBeforeV015, name) {
+			continue
+		}
+		since, ok := FilesSince[name]
+		if !ok {
+			t.Errorf("release.yml packs %s: releases before v0.15.0 refuse it, and FilesSince lacks it", name)
+			continue
+		}
+		notes, err := os.ReadFile("../../.github/release-notes/" + since + ".md")
+		if err != nil {
+			t.Errorf("%s, added in %s: %v", name, since, err)
+			continue
+		}
+		if !strings.Contains(string(notes), "v0.15.0 first") {
+			t.Errorf("the notes of %s do not say that nodes before v0.15.0 update to it first (%s is new in the archive)", since, name)
 		}
 	}
 }

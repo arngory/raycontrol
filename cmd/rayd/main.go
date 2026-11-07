@@ -147,6 +147,7 @@ func cmdServe(args []string) error {
 	supervise := fs.Bool("supervise", false, "run the data plane as child processes, without systemd (tests, containers): no users, groups or sandbox")
 	xrayBin := fs.String("xray", deploy.DefaultBinaries.Xray, "Xray binary for -supervise")
 	nikoBin := fs.String("niko-server", deploy.DefaultBinaries.NikoServer, "niko-server binary for -supervise")
+	slipBin := fs.String("slipstream-server", deploy.DefaultBinaries.Slipstream, "slipstream-server binary for -supervise")
 	acmeDir := fs.String("acme-directory", certs.LetsEncrypt, "ACME directory for the sites' certificates (empty: none)")
 	credPeriod := fs.Duration("cred-period", 30*24*time.Hour, "how long a user credential stays current (0: no rotation)")
 	credLead := fs.Duration("cred-lead", 3*24*time.Hour, "the next credential is in the subscription this long before the switch")
@@ -224,7 +225,7 @@ func cmdServe(args []string) error {
 		applier := &live.Applier{Store: st, Paths: paths, Log: log, Report: func(err error) { hb.Done("apply", err) }}
 		var sup *live.Supervisor
 		if *supervise {
-			sup, err = supervisor(paths, *xrayBin, *nikoBin, st, log)
+			sup, err = supervisor(paths, deploy.Binaries{Xray: *xrayBin, NikoServer: *nikoBin, Slipstream: *slipBin}, st, log)
 			if err != nil {
 				return err
 			}
@@ -311,13 +312,13 @@ func cmdServe(args []string) error {
 
 // supervisor runs the data plane without systemd (-supervise): the plan
 // rayctl apply would install, as child processes.
-func supervisor(paths render.Paths, xray, niko string, st *store.Store, log *slog.Logger) (*live.Supervisor, error) {
+func supervisor(paths render.Paths, bins deploy.Binaries, st *store.Store, log *slog.Logger) (*live.Supervisor, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
-	bins := deploy.Binaries{Rayd: self, Xray: xray, NikoServer: niko}
-	for _, b := range []string{xray, niko} {
+	bins.Rayd = self
+	for _, b := range []string{bins.Xray, bins.NikoServer, bins.Slipstream} {
 		if _, err := os.Stat(b); err != nil {
 			log.Warn("supervise: binary missing; its services will not start", "err", err)
 		}
@@ -751,7 +752,7 @@ func checkPort53(ctx context.Context, st *store.Store, h *deploy.Host, frontUID 
 	for {
 		services, err := st.ListServices(ctx)
 		tunnels := err == nil && slices.ContainsFunc(services, func(s store.Service) bool {
-			return s.Enabled && (s.Kind == "dnstt" || s.Kind == "masterdns")
+			return s.Enabled && provision.DNSTunnel(s.Kind)
 		})
 		if tunnels {
 			var others []string

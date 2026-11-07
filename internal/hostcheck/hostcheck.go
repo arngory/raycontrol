@@ -267,7 +267,7 @@ func (h *Host) Check(ctx context.Context, o Options) []Result {
 		req(fmt.Sprintf("port %s %d", p.proto, p.port), len(others) == 0, describe(others),
 			"stop and disable what listens there (systemctl disable --now nginx): the node serves 443 itself")
 	}
-	if slices.ContainsFunc(o.Services, func(s string) bool { return s == "dnstt" || s == "masterdns" }) {
+	if slices.ContainsFunc(o.Services, func(s string) bool { return s == "dnstt" || s == "masterdns" || s == "slipstream" }) {
 		// systemd-resolved's stub shares the port with the front (both
 		// bind with SO_REUSEADDR, niko-server v0.8.2); anything else
 		// keeps it.

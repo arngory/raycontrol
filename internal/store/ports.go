@@ -42,6 +42,7 @@ var kindPorts = map[string]struct {
 	"hy2-obfs":     {ports: []Port{{"udp", 443}}, process: true},
 	"dnstt":        {ports: []Port{{"udp", 53}}, public: true, process: true},
 	"masterdns":    {ports: []Port{{"udp", 53}}, public: true, process: true},
+	"slipstream":   {ports: []Port{{"udp", 53}}, public: true, process: true},
 	"ssh":          {ports: []Port{{"tcp", 22}}},
 	"subscription": {}, // served by rayd; port chosen at install, in settings
 	"api":          {},

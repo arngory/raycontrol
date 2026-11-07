@@ -100,6 +100,7 @@ func TestBuild(t *testing.T) {
 		"User=niko-dns", "SupplementaryGroups=niko-inner", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX\n",
 		"ExecStartPre=+install -m 0400 -o niko-dns -g niko-dns /var/lib/raycontrol/rendered/dns/noise.key /run/niko/dns/noise.key\n", "RuntimeDirectory=niko/dns", "CapabilityBoundingSet=\n",
 		"ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c /var/lib/raycontrol/rendered/dns/backend.json",
+		"InaccessiblePaths=-/var/lib/raycontrol/rendered/inner\n",
 	} {
 		if !strings.Contains(dns, want) {
 			t.Errorf("dns unit lacks %q", want)
@@ -1194,5 +1195,87 @@ func TestProbeKeyBeforeDNSTT(t *testing.T) {
 		if strings.HasSuffix(f.Path, "/front/front.json") && !strings.Contains(string(f.Content), `"probe_key_file": "/run/niko/front/dnsprobe.key"`) {
 			t.Fatalf("live front config:\n%s", f.Content)
 		}
+	}
+}
+
+// A slipstream server (spec/slipstream-v1.md): its own user, in inner's
+// group, unix sockets only, its arguments from the settings, its key
+// copied in by root, the front started after it; a broken service gets no
+// unit.
+func TestBuildSlipstream(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	slip, err := provision.CreateService(ctx, st, store.Service{Kind: "slipstream", Name: "slip", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss, _ := provision.ParseSlipstream(slip)
+	m, err := render.CollectForRender(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _, err := render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	if !slices.Equal(p.Units, []string{"rayd.service", "rayspa.service", "niko-inner.service", "niko-slip.service", "niko-front.service"}) || len(p.Warnings) != 0 {
+		t.Fatalf("units %v, warnings %v", p.Units, p.Warnings)
+	}
+	i := slices.IndexFunc(p.Users, func(u deploy.SystemUser) bool { return u.Name == "niko-slip" })
+	if i < 0 || p.Users[i].UID != slip.UID || !slices.Equal(p.Users[i].ExtraGroups, []string{"niko-inner"}) {
+		t.Fatalf("users %+v", p.Users)
+	}
+	unit := file(p, "/etc/systemd/system/niko-slip.service")
+	args := "--front-socket /run/niko/slip-in/packet.sock --front-uid 9100 --tag-len 8 --target-unix /run/niko/inner/vless.sock" +
+		" --cert /var/lib/raycontrol/rendered/slip/cert.pem --key /run/niko/slip/key.pem --domain " + ss.Zone + " --alpn " + ss.ALPN
+	for _, want := range []string{
+		"Description=slipstream server slip", "ConditionPathExists=/var/lib/raycontrol/rendered/slip/cert.pem\n",
+		"User=niko-slip", "Group=niko-slip", "SupplementaryGroups=niko-inner", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX\n",
+		"ExecStart=/usr/local/libexec/raycontrol/slipstream-server " + args + "\n",
+		"ExecStartPre=+install -m 0400 -o niko-slip -g niko-slip /var/lib/raycontrol/rendered/slip/key.pem /run/niko/slip/key.pem\n",
+		"RuntimeDirectory=niko/slip", "ReadWritePaths=/run/niko/slip-in", "UMask=0007", "CapabilityBoundingSet=\n", "MemoryDenyWriteExecute=yes",
+		// In inner's group for its socket, not for its config (review).
+		"InaccessiblePaths=-/var/lib/raycontrol/rendered/inner\n",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("slip unit lacks %q:\n%s", want, unit)
+		}
+	}
+	if !strings.Contains(file(p, "/etc/systemd/system/niko-front.service"), "After=network-online.target niko-slip.service") {
+		t.Error("the front does not start after the server")
+	}
+	if !strings.Contains(file(p, "/etc/tmpfiles.d/raycontrol.conf"), "d /run/niko/slip-in 2750 niko-slip niko-front -") {
+		t.Error("no socket directory for the front")
+	}
+	pr := p.Processes[slices.IndexFunc(p.Processes, func(pr deploy.Process) bool { return pr.Unit == "niko-slip.service" })]
+	if pr.Args[0] != deploy.DefaultBinaries.Slipstream || strings.Join(pr.Args[1:], " ") != args ||
+		len(pr.Copies) != 1 || pr.Copies[0] != [2]string{"/var/lib/raycontrol/rendered/slip/key.pem", "/run/niko/slip/key.pem"} {
+		t.Errorf("process %+v", pr)
+	}
+
+	// Broken settings: no unit, a warning.
+	if err := st.UpdateService(ctx, slip.ID, store.ServiceUpdate{Settings: `{"zone":"` + ss.Zone + `"}`}); err != nil {
+		t.Fatal(err)
+	}
+	m, _ = render.CollectForRender(ctx, st)
+	files, _, _ = render.Render(m, render.DefaultPaths)
+	p = deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	if slices.Contains(p.Units, "niko-slip.service") || len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "quic_alpn") ||
+		strings.Contains(file(p, "/etc/tmpfiles.d/raycontrol.conf"), "slip-in") {
+		t.Errorf("broken: units %v, warnings %v", p.Units, p.Warnings)
+	}
+	// Its front keys file still goes out (a revocation reaches the front),
+	// but with no front config there is no front to run (review).
+	if !slices.ContainsFunc(files, func(f render.File) bool { return f.Path == render.DefaultPaths.FrontAuthKeys("slip") }) {
+		t.Error("no refresh of the front's keys file")
+	}
+	if slices.Contains(p.Units, "niko-front.service") || slices.ContainsFunc(p.Users, func(u deploy.SystemUser) bool { return u.Name == "niko-front" }) {
+		t.Errorf("a front without a config: units %v", p.Units)
 	}
 }

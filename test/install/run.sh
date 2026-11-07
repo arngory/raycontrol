@@ -225,9 +225,20 @@ if x grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then
 fi
 
 dataplane=(niko-inner.service niko-dns.service niko-mdns.service niko-front.service)
+# slipstream (docs/spec/slipstream-v1.md) when BIN_DIR has its server.
+slip=""
+if [[ -x $bin/slipstream-server ]]; then
+	slip=slip
+	dataplane+=(niko-slip.service)
+else
+	log "$distro: no slipstream-server in $bin: slipstream not checked"
+fi
 
 log "$distro: DNS tunnels"
 x rayctl service add masterdns mdns >/dev/null
+if [[ -n $slip ]]; then
+	x rayctl service add slipstream slip >/dev/null || fail "service add slipstream"
+fi
 x rayctl apply || fail "rayctl apply"
 wait_active "${dataplane[@]}"
 [[ $(x ss -Hulpn 'sport = :53') == *niko-server* ]] || fail "the front does not listen on UDP 53"
@@ -255,10 +266,28 @@ if x journalctl -u niko-mdns.service --no-pager | grep -E 'masterdns keys .* not
 	fail "masterdns did not take the keys file"
 fi
 
-x rayctl user add alice -services dns,mdns >/dev/null
+if [[ -n $slip ]]; then
+	# The static server under the backends' sandbox (unix sockets only,
+	# no W^X, @system-service): it runs, its key a copy for it alone, its
+	# socket in the front's directory, the front connected to it; the
+	# devices' keys a file of the front's.
+	[[ $(x stat -c '%a %U' /run/niko/slip/key.pem) == "400 niko-slip" ]] || fail "slipstream key copy is not 0400 niko-slip"
+	[[ $(x stat -c '%a %U %G' /run/niko/slip-in/packet.sock) == "660 niko-slip niko-front" ]] || fail "slipstream socket: $(x ls -l /run/niko/slip-in)"
+	[[ $(x stat -c '%a %G' /var/lib/raycontrol/rendered/front/slip.auth.keys) == "640 niko-front" ]] || fail "the front's slipstream keys file"
+	for _ in $(seq 20); do
+		x journalctl -u niko-slip.service --no-pager | grep -q 'Front connected' && break
+		sleep 0.5
+	done
+	x journalctl -u niko-slip.service --no-pager | grep -q 'Front connected' || fail "the front did not connect to slipstream"
+	[[ $(x rayctl service list) == *"slip"*"pinned key"* ]] || fail "rayctl service list: $(x rayctl service list)"
+fi
+
+x rayctl user add alice -services "dns,mdns${slip:+,$slip}" >/dev/null
 # export: the subscription's links, audited (P-10).
 exported="$(x rayctl user export alice)"
-[[ $(grep -c '^vless://' <<<"$exported") == 2 ]] || fail "rayctl user export: $exported"
+links=2
+if [[ -n $slip ]]; then links=3; fi
+[[ $(grep -c '^vless://' <<<"$exported") == "$links" ]] || fail "rayctl user export: $exported"
 [[ $(x rayctl audit -n 1) == *user.export* ]] || fail "export is not audited"
 device() { x rayctl device add alice "$1" | awk '/enrolled/ {id=$2} /^rcdev1:/ {print id, $0}'; }
 read -r phone_id phone < <(device phone)

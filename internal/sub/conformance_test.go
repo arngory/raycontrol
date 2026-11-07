@@ -46,6 +46,7 @@ func TestLinksForStrictClient(t *testing.T) {
 		{"masterdns", "mdns", `{"auth":"optional","seal":"optional"}`},
 		{"masterdns", "mdns-strict", `{"auth":"required","seal":"required","spare_zones":["s.example.net","u.example.org"]}`},
 		{"yggdrasil", "ygg", ""},
+		{"slipstream", "slip", ""},
 	}
 	var ids []int64
 	for _, k := range kinds {
@@ -127,6 +128,7 @@ func TestLinksForStrictClient(t *testing.T) {
 		"dns-spare":   {"niko-dnsauth", "niko-dnsseal", "niko-dns-spare"},
 		"mdns":        {"niko-dnsauth", "niko-mdseal"},
 		"mdns-strict": {"niko-dnsauth", "niko-mdseal", "niko-dns-spare"},
+		"slip":        {"niko-dnsauth", "niko-slip"},
 	} {
 		u, _ := url.Parse(byName[name].Link)
 		for _, key := range keys {
@@ -166,6 +168,44 @@ func TestDNSProblems(t *testing.T) {
 	}
 	if p := dnsProblems("reality", url.Values{"niko-mdseal": {"v1"}}); len(p) == 0 {
 		t.Error("niko-mdseal on a REALITY line passed")
+	}
+	pin := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	slip := url.Values{"niko-dns": {"slipstream;;s.example.com;7"}, "niko-svc": {"7"}, "niko-dnsauth": {"v1"},
+		"niko-slip": {"v1;" + pin + ";abcdefgh2;quiet.dev"}}
+	if p := dnsProblems("slipstream", slip); len(p) != 0 {
+		t.Fatalf("good slipstream line: %v", p)
+	}
+	for _, c := range [][2]string{
+		{"niko-dns", "slipstream;;s.example.com;8"},            // not the line's service
+		{"niko-dns", "slipstream;;abcdefghijkl.example.com;7"}, // 24 characters
+		{"niko-dns", "slipstream;x;s.example.com;7"},
+		{"niko-dnsauth", ""},
+		{"niko-slip", "v1;" + pin + ";picoquic_sample;quiet.dev"},
+		{"niko-dns-spare", "a.example.net"},
+	} {
+		key, bad := c[0], c[1]
+		q := url.Values{}
+		for k, v := range slip {
+			q[k] = v
+		}
+		if bad == "" {
+			q.Del(key)
+		} else {
+			q.Set(key, bad)
+		}
+		if p := dnsProblems("slipstream", q); len(p) == 0 {
+			t.Errorf("slipstream %s=%q passed", key, bad)
+		}
+	}
+	for _, v := range []string{"v2;" + pin + ";abcdefgh;quiet.dev", "v1;AAAA;abcdefgh;quiet.dev", "v1;" + pin + ";abcdefgh;quiet", "v1;" + pin + ";abcdefgh"} {
+		q := url.Values{}
+		for k, vv := range slip {
+			q[k] = vv
+		}
+		q.Set("niko-slip", v)
+		if p := dnsProblems("slipstream", q); len(p) == 0 {
+			t.Errorf("niko-slip=%s passed", v)
+		}
 	}
 }
 
@@ -233,19 +273,40 @@ func strictProblems(kind, link string) []string {
 func dnsProblems(kind string, q url.Values) []string {
 	var out []string
 	for key, kinds := range map[string][]string{
-		"niko-dns": {"dnstt", "masterdns"}, "niko-dnsauth": {"dnstt", "masterdns"}, "niko-dns-spare": {"dnstt", "masterdns"},
-		"niko-dnsseal": {"dnstt"}, "niko-dnskey": {"masterdns"}, "niko-mdseal": {"masterdns"},
+		"niko-dns": {"dnstt", "masterdns", "slipstream"}, "niko-dnsauth": {"dnstt", "masterdns", "slipstream"},
+		"niko-dns-spare": {"dnstt", "masterdns"}, "niko-dnsseal": {"dnstt"}, "niko-dnskey": {"masterdns"}, "niko-mdseal": {"masterdns"},
+		"niko-slip": {"slipstream"},
 	} {
 		if q.Has(key) && !slices.Contains(kinds, kind) {
 			out = append(out, key+" on a "+kind+" line")
 		}
 	}
-	if kind != "dnstt" && kind != "masterdns" {
+	if kind != "dnstt" && kind != "masterdns" && kind != "slipstream" {
 		return out
 	}
 	f := strings.Split(q.Get("niko-dns"), ";")
 	if len(f) != 4 || f[0] != kind || !dnsName.MatchString(f[2]) || f[3] == "" {
 		return append(out, "niko-dns "+q.Get("niko-dns"))
+	}
+	if kind == "slipstream" {
+		// slipstream-v1 §4: the zone (at most 20 characters) and the
+		// line's service; the pin, ALPN and name; signed always.
+		if len(f[2]) > provision.MaxSlipstreamZone || f[3] != q.Get("niko-svc") || f[1] != "" {
+			out = append(out, "niko-dns "+q.Get("niko-dns"))
+		}
+		if q.Get("niko-dnsauth") != "v1" {
+			out = append(out, "slipstream without niko-dnsauth=v1")
+		}
+		s := strings.Split(q.Get("niko-slip"), ";")
+		if len(s) != 4 || s[0] != "v1" {
+			return append(out, "niko-slip "+q.Get("niko-slip"))
+		}
+		if b, err := base64.RawURLEncoding.DecodeString(s[1]); err != nil || len(b) != 32 {
+			out = append(out, "niko-slip pin "+s[1])
+		}
+		if !regexp.MustCompile(`^[a-z0-9]{8,12}$`).MatchString(s[2]) || !regexp.MustCompile(`^[a-z][a-z0-9]{2,9}\.[a-z]{2,6}$`).MatchString(s[3]) {
+			out = append(out, "niko-slip ALPN or name "+s[2]+" "+s[3])
+		}
 	}
 	if q.Has("niko-dnsauth") && q.Get("niko-dnsauth") != "v1" {
 		out = append(out, "niko-dnsauth "+q.Get("niko-dnsauth"))

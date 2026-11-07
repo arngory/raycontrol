@@ -127,7 +127,7 @@ type RelayProbeHint struct {
 // RelayKinds are the kinds a relay forwards to (relay-v1 §4): the DNS
 // tunnels and Yggdrasil have paths of their own.
 func RelayKinds(kind string) bool {
-	return !slices.Contains([]string{"dnstt", "masterdns", "yggdrasil", "ssh", "subscription", "api"}, kind)
+	return !slices.Contains([]string{"dnstt", "masterdns", "slipstream", "yggdrasil", "ssh", "subscription", "api"}, kind)
 }
 
 // SPAHint: "udp", "tcp" (bare, §10), "tls" (ClientHello, §10.1).
@@ -151,7 +151,7 @@ type ProbeHint struct {
 // ProbeTunnels are the kinds whose exits send the probe name to the
 // endpoint: Xray (inner behind the DNS tunnels and Yggdrasil, REALITY),
 // rayd naive and the Hysteria2 backends (niko-server v0.5).
-var ProbeTunnels = []string{"dnstt", "masterdns", "yggdrasil", "reality", "naive", "hy2-masq", "hy2-obfs"}
+var ProbeTunnels = []string{"dnstt", "masterdns", "slipstream", "yggdrasil", "reality", "naive", "hy2-masq", "hy2-obfs"}
 
 // Envelope is what the endpoint returns.
 type Envelope struct {
@@ -292,7 +292,7 @@ func Profiles(m render.Model, u render.User) ([]Profile, error) {
 // none there (no credential yet, no inner stage).
 func serviceProfile(m render.Model, u render.User, s render.Service, inner *render.Service) (*Profile, error) {
 	switch s.Kind {
-	case "dnstt", "masterdns":
+	case "dnstt", "masterdns", "slipstream":
 		if inner == nil || m.Inner[u.ID] == "" {
 			return nil, nil
 		}
@@ -306,7 +306,21 @@ func serviceProfile(m render.Model, u render.User, s render.Service, inner *rend
 		q.Set("niko-node", m.NodeID)
 		q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
 		zone := provision.Zone(s.Service)
-		if s.Kind == "dnstt" {
+		switch s.Kind {
+		case "slipstream":
+			// spec/slipstream-v1.md §4: the zone and the service's ID; the
+			// server's key by its pin, the ALPN and name of its handshake.
+			ss, err := provision.ParseSlipstream(s.Service)
+			if err != nil {
+				return nil, err
+			}
+			pin, err := provision.SPKIPin(s.Secrets[provision.SecretTLSCert])
+			if err != nil {
+				return nil, fmt.Errorf("certificate: %w", err)
+			}
+			q.Set("niko-dns", "slipstream;;"+ss.Zone+";"+strconv.FormatInt(s.ID, 10))
+			q.Set("niko-slip", "v1;"+pin+";"+ss.ALPN+";"+ss.SNI)
+		case "dnstt":
 			pub, err := render.DNSTTPublicKey(s)
 			if err != nil {
 				return nil, err
@@ -316,7 +330,7 @@ func serviceProfile(m render.Model, u render.User, s render.Service, inner *rend
 			if render.DNSSealMode(s.Service) != "off" && len(s.Secrets[provision.SecretSealKey]) == 32 {
 				q.Set("niko-dnsseal", "v1;"+base64.RawURLEncoding.EncodeToString(s.Secrets[provision.SecretSealKey]))
 			}
-		} else {
+		default:
 			var settings struct {
 				Method int `json:"encryption_method"`
 			}
@@ -333,13 +347,15 @@ func serviceProfile(m render.Model, u render.User, s render.Service, inner *rend
 			}
 		}
 		// Sign the queries with the device's key (spec/dnsauth-v1.md,
-		// spec/dnsauth-masterdns.md): K from niko-node and niko-svc.
+		// spec/dnsauth-masterdns.md, slipstream: always, dnsauth-v2): K
+		// from niko-node and niko-svc.
 		if render.DNSAuthMode(s.Service) != "off" {
 			q.Set("niko-dnsauth", "v1")
 		}
 		// Spare zones (spec/dnszones-v1.md §2), in the order clients
-		// try them; the same keys as the main zone.
-		if spares := provision.SpareZones(s.Service); len(spares) > 0 {
+		// try them; the same keys as the main zone. slipstream has one
+		// zone (the server knows one, slipstream-v1 §3).
+		if spares := provision.SpareZones(s.Service); len(spares) > 0 && s.Kind != "slipstream" {
 			q.Set("niko-dns-spare", strings.Join(spares, ","))
 		}
 		link := func(uuid string) string {

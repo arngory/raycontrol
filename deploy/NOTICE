@@ -1,4 +1,4 @@
-raycontrol — third-party data in this release
+raycontrol — third-party data and programs in this release
 
 ipinfo_lite.mmdb
   IP address data powered by IPinfo (https://ipinfo.io).
@@ -10,3 +10,18 @@ ipinfo_lite.mmdb
 
 Данные о сетях — IPinfo Lite (https://ipinfo.io), лицензия CC BY-SA 4.0,
 поставляются без изменений.
+
+slipstream-server
+  The slipstream server (https://github.com/arngory/slipstream, a fork of
+  https://github.com/EndPositive/slipstream; Apache License 2.0), built static
+  from the release tag and commit in VERSIONS. Linked into it: picoquic and
+  picotls (MIT), OpenSSL 3 (Apache License 2.0) and SPCDNS (GNU LGPL 3.0).
+  The complete source of the binary, SPCDNS's included, is the repository at
+  that commit; .github/scripts/server-static.sh there builds it again, with
+  a changed SPCDNS too. The licence texts are in the repository.
+
+Сервер slipstream — форк arngory/slipstream (Apache 2.0), статическая сборка
+по тегу и коммиту из VERSIONS; внутри picoquic и picotls (MIT), OpenSSL 3
+(Apache 2.0) и SPCDNS (LGPL 3.0). Полный исходный код, включая SPCDNS, —
+репозиторий на этом коммите; .github/scripts/server-static.sh собирает его
+заново, в том числе с изменённым SPCDNS.

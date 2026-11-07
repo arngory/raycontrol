@@ -465,15 +465,21 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 	type route struct {
 		Zone    string `json:"zone"`
 		Backend string `json:"backend"`
-		// Probe: the front answers dnsprobe-v1 in this zone. dnstt
-		// only: the answers are built as dnstt's.
+		// Probe: the front answers dnsprobe-v1 in this zone. dnstt and
+		// slipstream: the answers are built as dnstt's.
 		Probe bool `json:"probe,omitempty"`
 		// NS: the name the zone is delegated to; the front answers SOA
-		// and NS at its apex (niko-server v0.9.0). dnstt only, as Probe.
+		// and NS at its apex (niko-server v0.9.0). dnstt and slipstream,
+		// as Probe.
 		NS []string `json:"ns,omitempty"`
 		// SealPad: probe answers padded as the zone's sealed ones
 		// (niko-server v0.10.0).
 		SealPad bool `json:"seal_pad,omitempty"`
+		// Tag: "slipstream", the front checks each query's dnsauth-v2
+		// tag with the keys of AuthKeysFile, by the hint, before the
+		// backend sees it (niko-server v0.13.0, spec/slipstream-v1.md §2).
+		Tag          string `json:"tag,omitempty"`
+		AuthKeysFile string `json:"auth_keys_file,omitempty"`
 	}
 	type backendRef struct {
 		Socket string `json:"socket"`
@@ -544,6 +550,36 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if auth != nil {
 				files = append(files, *auth)
 			}
+		case "slipstream":
+			if err := dnsTunnelProblem(s, inner != nil); err != nil {
+				return err
+			}
+			ss, err := provision.ParseSlipstream(s.Service)
+			if err != nil {
+				return err
+			}
+			if err := zoneProblem([]string{ss.Zone}, taken, m.NSName); err != nil {
+				return err
+			}
+			keys, ok := m.DNSAuth[s.ID]
+			if !ok {
+				// An empty keys file would lock every device out.
+				return errors.New("dnsauth keys not collected (render.CollectForRender)")
+			}
+			fs, err := slipstreamFiles(s, p)
+			if err != nil {
+				return err
+			}
+			taken[ss.Zone] = s.Name
+			auth := frontAuthFile(s, p, keys)
+			r := route{Zone: ss.Zone, Backend: s.Name, Probe: len(m.DNSProbeKey) == 32, Tag: "slipstream", AuthKeysFile: auth.Path}
+			if m.NSName != "" {
+				r.NS = []string{m.NSName}
+			}
+			zones = append(zones, r)
+			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
+			files = append(files, fs...)
+			files = append(files, auth)
 		case "inner":
 			f, err := innerConfig(s, m, p)
 			if err != nil {
@@ -698,7 +734,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			// v0.11.0): queries by zone, probes, refusals.
 			dns := map[string]any{"listen": listen, "zones": zones, "stats_socket": p.FrontStats()}
 			// dnsprobe-v1: the front answers resolver checks itself in
-			// the dnstt zones (niko-server v0.8.3).
+			// the dnstt and slipstream zones (niko-server v0.8.3).
 			if slices.ContainsFunc(zones, func(z route) bool { return z.Probe }) {
 				dns["probe_key_file"] = p.FrontDNSProbe()
 			}
@@ -784,7 +820,7 @@ func UnservedZones(m Model) map[int64]error {
 	taken := map[string]string{}
 	inner := slices.ContainsFunc(m.Services, func(s Service) bool { return s.Kind == "inner" })
 	for _, s := range m.Services {
-		if s.Kind != "dnstt" && s.Kind != "masterdns" {
+		if !provision.DNSTunnel(s.Kind) {
 			continue
 		}
 		// A tunnel Render leaves out for another reason frees its zones
@@ -822,6 +858,12 @@ func dnsTunnelProblem(s Service, inner bool) error {
 		return errors.New("no key")
 	case s.Kind == "masterdns" && len(s.Secrets[provision.SecretMasterDNSKey]) == 0:
 		return errors.New("no key")
+	case s.Kind == "slipstream" && (len(s.Secrets[provision.SecretTLSKey]) == 0 || len(s.Secrets[provision.SecretTLSCert]) == 0):
+		return errors.New("no key")
+	case s.Kind == "slipstream":
+		if _, err := provision.ParseSlipstream(s.Service); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -886,8 +928,74 @@ func accessFiles(s Service, m Model, p Paths, inner *Service) []File {
 			f.Refresh = true
 			out = append(out, f)
 		}
+	case "slipstream":
+		if keys, ok := m.DNSAuth[s.ID]; ok {
+			f := frontAuthFile(s, p, keys)
+			f.Refresh = true
+			out = append(out, f)
+		}
 	}
 	return out
+}
+
+// frontAuthFile is a slipstream service's device keys, which the front
+// checks every query's tag with (spec/slipstream-v1.md §2) and rereads by
+// itself (niko-server v0.13.0): in the front's directory, of its group.
+func frontAuthFile(s Service, p Paths, authKeys []string) File {
+	f := dnsAuthFile(s, p, authKeys)
+	f.Path, f.Group, f.Service = p.FrontAuthKeys(s.Name), GroupName("front"), "front"
+	return f
+}
+
+// FrontAuthKeys is where the front reads a slipstream service's device
+// keys.
+func (p Paths) FrontAuthKeys(service string) string {
+	return path.Join(p.Rendered, "front", service+"."+DNSAuthKeys)
+}
+
+// Files of a slipstream service (spec/slipstream-v1.md §3): its
+// certificate, which the server reads in place, and its key, which systemd
+// copies for it (Paths.Credential).
+const (
+	SlipstreamCert = "cert.pem"
+	SlipstreamKey  = "key.pem"
+)
+
+// slipstreamFiles are a slipstream service's certificate and key, PEM.
+func slipstreamFiles(s Service, p Paths) ([]File, error) {
+	keyDER, certDER := s.Secrets[provision.SecretTLSKey], s.Secrets[provision.SecretTLSCert]
+	if len(keyDER) == 0 || len(certDER) == 0 {
+		return nil, fmt.Errorf("service %s has no key", s.Name)
+	}
+	dir := path.Join(p.Rendered, s.Name)
+	return []File{
+		{Path: path.Join(dir, SlipstreamCert), Mode: 0o640, Group: GroupName(s.Name), Service: s.Name,
+			Content: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})},
+		{Path: path.Join(dir, SlipstreamKey), Mode: 0o600, Service: s.Name,
+			Content: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})},
+	}, nil
+}
+
+// SlipstreamArgs are the slipstream server's arguments for a service
+// (spec/slipstream-v1.md §2): its queries from the front's socket, the
+// dnsauth-v2 field the front checked skipped, the streams to the inner
+// stage, its own certificate, zone and ALPN; the limits are the server's
+// defaults.
+func SlipstreamArgs(s Service, inner string, p Paths) ([]string, error) {
+	ss, err := provision.ParseSlipstream(s.Service)
+	if err != nil {
+		return nil, fmt.Errorf("service %s: %w", s.Name, err)
+	}
+	return []string{
+		"--front-socket", p.FrontSocket(s.Name, "packet"),
+		"--front-uid", strconv.Itoa(p.PeerUID(FrontUID)),
+		"--tag-len", "8",
+		"--target-unix", p.InnerSocket(inner),
+		"--cert", path.Join(p.Rendered, s.Name, SlipstreamCert),
+		"--key", p.Credential(s.Name, SlipstreamKey),
+		"--domain", ss.Zone,
+		"--alpn", ss.ALPN,
+	}, nil
 }
 
 // dnsBackend renders a DNS tunnel's backend for its zones, the main one
