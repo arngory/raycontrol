@@ -44,6 +44,9 @@ func ParseSlipstream(svc store.Service) (SlipstreamSettings, error) {
 	if err := json.Unmarshal([]byte(svc.Settings), &s); err != nil {
 		return s, err
 	}
+	// As the front matches it (review): a zone stored from a domain as
+	// typed before v0.14 (capitals, a final dot) still serves.
+	s.Zone = canonicalZone(s.Zone)
 	switch {
 	case !zoneName.MatchString(s.Zone) || len(s.Zone) > MaxSlipstreamZone:
 		return s, fmt.Errorf("zone %q: a DNS name of two labels or more, at most %d characters", s.Zone, MaxSlipstreamZone)
@@ -78,6 +81,8 @@ func slipstreamService(ctx context.Context, st *store.Store, all []store.Service
 		if err != nil {
 			return err
 		}
+		// The domain as stored: before v0.14 as typed (capitals, a final dot).
+		zone = canonicalZone(zone)
 		if len(zone) > MaxSlipstreamZone {
 			return fmt.Errorf("%w: a zone under the node's domain would be %d characters, slipstream takes at most %d (spec/slipstream-v1.md §3): give zone=<a shorter name delegated to the node>", store.ErrInvalid, len(zone), MaxSlipstreamZone)
 		}

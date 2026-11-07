@@ -296,9 +296,18 @@ func failed(err error, state State, what string) Step {
 	return Step{State: state, Detail: what + err.Error()}
 }
 
+// probed reports whether the zone is checked with dnsprobe-v1 probes,
+// which the front answers itself: dnstt's always (without the key, a skip),
+// slipstream's when the check has the key. Otherwise an answer to a random
+// name: masterdns's, and slipstream's for a client without dns_probe (the
+// front answers an untagged query in its zone with NOERROR), never a
+// silent skip.
+func probed(z Zone) bool {
+	return z.Kind == "dnstt" || z.Kind == "slipstream" && len(z.ProbeKey) == 32
+}
+
 // front checks the zone at the front on the node: the apex and a small
-// probe for dnstt and slipstream (the front answers both itself), an
-// answer to a random name for masterdns. REFUSED is
+// probe where probed, an answer to a random name otherwise. REFUSED is
 // the front's own: the zone is not in its configuration.
 func (c *Checker) front(ctx context.Context, z Zone, addr netip.AddrPort) Step {
 	a := c.asker("udp", addr, queriesPerZone)
@@ -312,7 +321,7 @@ func (c *Checker) front(ctx context.Context, z Zone, addr netip.AddrPort) Step {
 		}
 		return s
 	}
-	if z.Kind == "masterdns" {
+	if !probed(z) {
 		x, err := c.randomName(ctx, a, z, false)
 		switch {
 		case err != nil:
@@ -432,8 +441,8 @@ func (c *Checker) backend(ctx context.Context, z Zone, addr netip.AddrPort) Step
 func (c *Checker) viaResolver(ctx context.Context, z Zone, r Resolver) ResolverResult {
 	res := ResolverResult{Resolver: r}
 	a := c.asker(r.Net, r.Addr, queriesPerZone)
-	switch z.Kind {
-	case "dnstt", "slipstream":
+	switch {
+	case probed(z):
 		if z.NS != "" {
 			res.SOA = c.apexVia(ctx, a, z)
 		}

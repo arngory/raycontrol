@@ -141,6 +141,25 @@ func TestSlipstreamZones(t *testing.T) {
 		t.Errorf("dnstt under the slipstream zone: %v", err)
 	}
 
+	// A domain stored as typed before v0.14 (capitals, a final dot): the
+	// zone made under it is canonical, and one stored so still parses.
+	ctx3, st3 := slipStore(t, "example.com")
+	if err := st3.SetSetting(ctx3, settingDomain, []byte("Example.COM.")); err != nil {
+		t.Fatal(err)
+	}
+	old, err := CreateService(ctx3, st3, store.Service{Kind: "slipstream", Name: "old", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ss, err := ParseSlipstream(old); err != nil || ss.Zone != Zone(old) || !strings.HasSuffix(ss.Zone, ".example.com") {
+		t.Errorf("under an old domain: %+v %v (%s)", ss, err, old.Settings)
+	}
+	stored := old
+	stored.Settings = strings.Replace(old.Settings, `.example.com"`, `.Example.COM."`, 1)
+	if ss, err := ParseSlipstream(stored); err != nil || ss.Zone != Zone(old) {
+		t.Errorf("a zone stored as typed: %+v %v (%s)", ss, err, stored.Settings)
+	}
+
 	// A domain with no room for a zone under it: the service asks for one.
 	ctx2, st2 := slipStore(t, "a-rather-long-domain.example")
 	if _, err := CreateService(ctx2, st2, store.Service{Kind: "slipstream", Name: "slip", Enabled: true}); err == nil ||

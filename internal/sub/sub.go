@@ -353,8 +353,9 @@ func serviceProfile(m render.Model, u render.User, s render.Service, inner *rend
 			q.Set("niko-dnsauth", "v1")
 		}
 		// Spare zones (spec/dnszones-v1.md §2), in the order clients
-		// try them; the same keys as the main zone.
-		if spares := provision.SpareZones(s.Service); len(spares) > 0 {
+		// try them; the same keys as the main zone. slipstream has one
+		// zone (the server knows one, slipstream-v1 §3).
+		if spares := provision.SpareZones(s.Service); len(spares) > 0 && s.Kind != "slipstream" {
 			q.Set("niko-dns-spare", strings.Join(spares, ","))
 		}
 		link := func(uuid string) string {

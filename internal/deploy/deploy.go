@@ -257,13 +257,25 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		}
 		return false
 	})
-	hasFront := slices.ContainsFunc(files, func(f render.File) bool { return f.Service == "front" })
+	// The front's config, not any file of the front's: a slipstream service
+	// that failed to render still refreshes its keys file there (review).
+	frontConfig := path.Join(p.Rendered, "front", "front.json")
+	hasFront := slices.ContainsFunc(files, func(f render.File) bool { return f.Path == frontConfig })
 
 	var raydGroups []string
 	var units []unit
 	// frontIn lets a service write its sockets for the front (ProtectSystem
 	// makes /run read-only past RuntimeDirectory).
 	frontIn := func(s render.Service) string { return "ReadWritePaths=" + p.FrontDir(s.Name) }
+	// innerHidden: the tunnels into inner are in its group for its socket,
+	// not for its config, which holds its decryption seed and every user's
+	// credential (review).
+	innerHidden := func() string {
+		if inner == nil {
+			return ""
+		}
+		return "InaccessiblePaths=-" + path.Join(p.Rendered, inner.Name)
+	}
 
 	// Xray processes: the inner stage and REALITY. The API socket lives
 	// apart: only rayd may reach it (tmpfiles below).
@@ -475,7 +487,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			needs:       needs,
 			after:       after,
 			service: append([]string{
-				"User=" + g, "Group=" + g, groups(extra),
+				"User=" + g, "Group=" + g, groups(extra), innerHidden(),
 				"ExecStart=" + exec,
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
@@ -527,7 +539,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			needs:       path.Join(dir, "backend.json"),
 			after:       after,
 			service: append([]string{
-				"User=" + g, "Group=" + g, groups(extra),
+				"User=" + g, "Group=" + g, groups(extra), innerHidden(),
 				"ExecStart=" + bin.NikoServer + " backend -c " + path.Join(dir, "backend.json"),
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",

@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -1046,7 +1047,9 @@ func TestSlipstreamInSubscription(t *testing.T) {
 	secrets, _ := f.st.ServiceSecrets(ctx, slip.ID)
 	pin, _ := provision.SPKIPin(secrets[provision.SecretTLSCert])
 	svc := strconv.FormatInt(slip.ID, 10)
+	params, _ := node.LoadParams(ctx, f.st)
 	if u.Scheme != "vless" || u.Host != "inner:1" || q.Get("niko-dns") != "slipstream;;"+ss.Zone+";"+svc || q.Get("niko-svc") != svc ||
+		q.Get("niko-node") != hex.EncodeToString(params.NodeID[:]) ||
 		q.Get("niko-slip") != "v1;"+pin+";"+ss.ALPN+";"+ss.SNI || q.Get("niko-dnsauth") != "v1" || q.Get("type") != "raw" ||
 		!strings.HasPrefix(q.Get("encryption"), "mlkem768x25519plus.") || q.Has("niko-dns-spare") || q.Has("niko-dnskey") || q.Has("niko-dnsseal") {
 		t.Errorf("link %s", p.Profiles[0].Link)

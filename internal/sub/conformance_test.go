@@ -175,12 +175,15 @@ func TestDNSProblems(t *testing.T) {
 	if p := dnsProblems("slipstream", slip); len(p) != 0 {
 		t.Fatalf("good slipstream line: %v", p)
 	}
-	for key, bad := range map[string]string{
-		"niko-dns":       "slipstream;;s.example.com;8", // not the line's service
-		"niko-dnsauth":   "",
-		"niko-slip":      "v1;" + pin + ";picoquic_sample;quiet.dev",
-		"niko-dns-spare": "a.example.net",
+	for _, c := range [][2]string{
+		{"niko-dns", "slipstream;;s.example.com;8"},            // not the line's service
+		{"niko-dns", "slipstream;;abcdefghijkl.example.com;7"}, // 24 characters
+		{"niko-dns", "slipstream;x;s.example.com;7"},
+		{"niko-dnsauth", ""},
+		{"niko-slip", "v1;" + pin + ";picoquic_sample;quiet.dev"},
+		{"niko-dns-spare", "a.example.net"},
 	} {
+		key, bad := c[0], c[1]
 		q := url.Values{}
 		for k, v := range slip {
 			q[k] = v

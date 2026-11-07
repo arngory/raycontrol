@@ -100,6 +100,7 @@ func TestBuild(t *testing.T) {
 		"User=niko-dns", "SupplementaryGroups=niko-inner", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX\n",
 		"ExecStartPre=+install -m 0400 -o niko-dns -g niko-dns /var/lib/raycontrol/rendered/dns/noise.key /run/niko/dns/noise.key\n", "RuntimeDirectory=niko/dns", "CapabilityBoundingSet=\n",
 		"ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c /var/lib/raycontrol/rendered/dns/backend.json",
+		"InaccessiblePaths=-/var/lib/raycontrol/rendered/inner\n",
 	} {
 		if !strings.Contains(dns, want) {
 			t.Errorf("dns unit lacks %q", want)
@@ -1239,6 +1240,8 @@ func TestBuildSlipstream(t *testing.T) {
 		"ExecStart=/usr/local/libexec/raycontrol/slipstream-server " + args + "\n",
 		"ExecStartPre=+install -m 0400 -o niko-slip -g niko-slip /var/lib/raycontrol/rendered/slip/key.pem /run/niko/slip/key.pem\n",
 		"RuntimeDirectory=niko/slip", "ReadWritePaths=/run/niko/slip-in", "UMask=0007", "CapabilityBoundingSet=\n", "MemoryDenyWriteExecute=yes",
+		// In inner's group for its socket, not for its config (review).
+		"InaccessiblePaths=-/var/lib/raycontrol/rendered/inner\n",
 	} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("slip unit lacks %q:\n%s", want, unit)
@@ -1266,5 +1269,13 @@ func TestBuildSlipstream(t *testing.T) {
 	if slices.Contains(p.Units, "niko-slip.service") || len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "quic_alpn") ||
 		strings.Contains(file(p, "/etc/tmpfiles.d/raycontrol.conf"), "slip-in") {
 		t.Errorf("broken: units %v, warnings %v", p.Units, p.Warnings)
+	}
+	// Its front keys file still goes out (a revocation reaches the front),
+	// but with no front config there is no front to run (review).
+	if !slices.ContainsFunc(files, func(f render.File) bool { return f.Path == render.DefaultPaths.FrontAuthKeys("slip") }) {
+		t.Error("no refresh of the front's keys file")
+	}
+	if slices.Contains(p.Units, "niko-front.service") || slices.ContainsFunc(p.Users, func(u deploy.SystemUser) bool { return u.Name == "niko-front" }) {
+		t.Errorf("a front without a config: units %v", p.Units)
 	}
 }

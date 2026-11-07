@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/dnscheck"
 	"github.com/arngory/raycontrol/internal/dnsstats"
 	nodepkg "github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
@@ -157,6 +159,25 @@ func TestSlipstreamWithNikoServer(t *testing.T) {
 		}
 	})
 
+	// The node's own check of the zone on this front: the apex and a probe,
+	// which the front answers itself; without the probe key (a client
+	// without dns_probe), an answer to a random name.
+	targets, err := provision.DNSCheckTargets(ctx, st)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("check targets %v %v", targets, err)
+	}
+	front := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(port))
+	targets[0].Front = front
+	// The parent's servers are not asked: the delegation is not this test's.
+	checker := &dnscheck.Checker{System: []netip.AddrPort{netip.MustParseAddrPort("127.0.0.1:9")}, Round: 10 * time.Second}
+	if z := checker.Check(ctx, targets, nil, false).Zones[0]; z.Front.State != dnscheck.OK || z.Front.Detail != "SOA and probe on "+front.String() {
+		t.Errorf("the node's check of the front: %+v", z.Front)
+	}
+	targets[0].ProbeKey, targets[0].NS = nil, ""
+	if z := checker.Check(ctx, targets, nil, false).Zones[0]; z.Front.State != dnscheck.OK || !strings.HasPrefix(z.Front.Detail, "answers on "+front.String()) {
+		t.Errorf("the check without the probe key: %+v", z.Front)
+	}
+
 	// The client, from the link.
 	profiles, err := sub.Profiles(m, m.Users[0])
 	if err != nil || len(profiles) != 1 {
@@ -172,8 +193,13 @@ func TestSlipstreamWithNikoServer(t *testing.T) {
 	if len(dnsf) != 4 || dnsf[0] != "slipstream" || len(slipf) != 4 || slipf[0] != "v1" || q.Get("niko-dnsauth") != "v1" {
 		t.Fatalf("link %s", profiles[0].Link)
 	}
+	// K as a client makes it: from the link's niko-node and niko-svc.
 	svcID, _ := strconv.Atoi(q.Get("niko-svc"))
-	k := spa.DNSAuthKey(devKey, params.NodeID, uint16(svcID))
+	nodeID, err := hex.DecodeString(q.Get("niko-node"))
+	if err != nil || len(nodeID) != spa.NodeIDSize || [spa.NodeIDSize]byte(nodeID) != params.NodeID {
+		t.Fatalf("niko-node %q", q.Get("niko-node"))
+	}
+	k := spa.DNSAuthKey(devKey, [spa.NodeIDSize]byte(nodeID), uint16(svcID))
 	startClient := func(key []byte) (int, *bytes.Buffer) {
 		t.Helper()
 		tcp := freePort(t)
