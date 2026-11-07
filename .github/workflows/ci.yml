@@ -73,9 +73,34 @@ jobs:
       # The pinned niko-server release: REALITY, DoH and naive through its
       # front on TCP 443 (tcpmux, R2-15).
       - run: scripts/niko-server.sh amd64 "$RUNNER_TEMP/niko-server"
+      # slipstream: the pinned server release, and the fork's client at its
+      # pinned commit for the end-to-end test.
+      - run: scripts/slipstream-server.sh amd64 "$RUNNER_TEMP/slipstream-server"
+      - name: Slipstream client commit
+        id: slipclient
+        run: . deploy/versions.env && echo "commit=$SLIPSTREAM_CLIENT_COMMIT" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: slipcache
+        with:
+          path: ${{ runner.temp }}/slipstream-client
+          key: slipstream-client-${{ steps.slipclient.outputs.commit }}-ubuntu-24.04
+      - name: Build the slipstream client
+        if: steps.slipcache.outputs.cache-hit != 'true'
+        run: |
+          . deploy/versions.env
+          sudo apt-get update -q
+          sudo apt-get install -y -q cmake pkg-config libssl-dev ninja-build meson
+          git clone -q "$SLIPSTREAM_SERVER_REPOSITORY" slipstream-src
+          git -C slipstream-src checkout -q "$SLIPSTREAM_CLIENT_COMMIT"
+          git -C slipstream-src submodule update -q --init --recursive
+          (cd slipstream-src && meson setup --buildtype=release --warnlevel=0 build >/dev/null && ninja -C build slipstream-client >/dev/null)
+          install -m 0755 slipstream-src/build/slipstream-client "$RUNNER_TEMP/slipstream-client"
       # A supervised node (rayd serve -supervise) takes port 443 as a node does.
       - run: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
-      - run: XRAY_BIN="$RUNNER_TEMP/xray" NIKO_SERVER_BIN="$RUNNER_TEMP/niko-server" go test -count=1 -run 'WithXray|WithNikoServer|ThroughXray|Supervised' -v ./internal/xrayapi
+      - run: >-
+          XRAY_BIN="$RUNNER_TEMP/xray" NIKO_SERVER_BIN="$RUNNER_TEMP/niko-server"
+          SLIPSTREAM_SERVER_BIN="$RUNNER_TEMP/slipstream-server" SLIPSTREAM_CLIENT_BIN="$RUNNER_TEMP/slipstream-client"
+          go test -count=1 -run 'WithXray|WithNikoServer|ThroughXray|Supervised' -v ./internal/xrayapi
       # The DNS front beside the runner's own systemd-resolved: they share
       # UDP 53 (niko-server v0.8.2), the stub binds again when resolved
       # restarts beside the front.
@@ -149,9 +174,10 @@ jobs:
         with:
           name: xray
           path: bin
-      - name: niko-server release
+      - name: niko-server and slipstream-server releases
         run: |
           scripts/niko-server.sh amd64 bin/niko-server
+          scripts/slipstream-server.sh amd64 bin/slipstream-server
           chmod +x bin/*
       - name: Bootstrap dependencies on the bare image
         run: test/install/deps.sh ${{ matrix.distro }}

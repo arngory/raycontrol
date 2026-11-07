@@ -48,6 +48,8 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 		{Kind: "yggdrasil", Name: "ygg"},
 		{Kind: "dnstt", Name: "dns"},
 		{Kind: "masterdns", Name: "mdns"},
+		// The front's zone with the tag check (niko-server v0.13.0).
+		{Kind: "slipstream", Name: "slip"},
 	} {
 		s.Enabled = true
 		svc, err := provision.CreateService(ctx, st, s)
