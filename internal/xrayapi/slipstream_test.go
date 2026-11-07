@@ -211,8 +211,11 @@ func TestSlipstreamWithNikoServer(t *testing.T) {
 	startClient := func(key []byte) (int, *bytes.Buffer) {
 		t.Helper()
 		tcp := freePort(t)
+		// --pin=: a pin is base64url and starts with "-" one time in 64;
+		// as a word of its own the client took it for options (a CI run
+		// failed so: "-r…" became a resolver).
 		args := []string{"-l", strconv.Itoa(tcp), "-r", "127.0.0.1:" + strconv.Itoa(port), "-d", dnsf[2],
-			"--pin", slipf[1], "--alpn", slipf[2], "--sni", slipf[3], "--quiet"}
+			"--pin=" + slipf[1], "--alpn=" + slipf[2], "--sni=" + slipf[3], "--quiet"}
 		cmd := exec.Command(client, args...)
 		if key != nil {
 			cmd.Args = append(cmd.Args, "--dnsauth")

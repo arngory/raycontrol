@@ -197,7 +197,7 @@ func slipLoad(t *testing.T, niko, server, client string, n int, span time.Durati
 		ports[i] = freePort(t)
 		k := spa.DNSAuthKey(keys[i], params.NodeID, uint16(svcID))
 		c := exec.Command(client, "-l", strconv.Itoa(ports[i]), "-r", "127.0.0.1:"+strconv.Itoa(port), "-d", dnsf[2],
-			"--pin", slipf[1], "--alpn", slipf[2], "--sni", slipf[3], "--dnsauth", "--quiet")
+			"--pin="+slipf[1], "--alpn="+slipf[2], "--sni="+slipf[3], "--dnsauth", "--quiet") // --pin=: a pin may start with "-"
 		c.Env = append(os.Environ(), "SLIPSTREAM_DNSAUTH_KEY="+hex.EncodeToString(k[:]))
 		if err := c.Start(); err != nil {
 			t.Fatal(err)
