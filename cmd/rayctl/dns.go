@@ -172,13 +172,15 @@ func printDNSCheck(w io.Writer, m *nodev1.CheckDNSZonesResponse, now time.Time) 
 				notes = append(notes, r.Resolver+" "+what+": "+s.Detail)
 			}
 		}
-		if z.Kind == "dnstt" {
+		// dnstt and slipstream: the front's probes; masterdns: an answer.
+		probed := z.Kind != "masterdns"
+		if probed {
 			fmt.Fprintln(w, "  RESOLVER\tSOA\tSMALL\tLARGE\tEDNS\t0x20\tEGRESS")
 		} else {
 			fmt.Fprintln(w, "  RESOLVER\tANSWER")
 		}
 		for _, r := range z.Resolvers {
-			if z.Kind != "dnstt" {
+			if !probed {
 				fmt.Fprintf(w, "  %s\t%s\n", r.Resolver, cell(r.Small, true))
 				note(r, "answer", r.Small)
 				continue

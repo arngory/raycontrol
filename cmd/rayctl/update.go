@@ -43,6 +43,9 @@ var nodeBinaries = map[string]string{
 	"rayctl":      "/usr/local/bin/rayctl",
 	"xray":        deploy.DefaultBinaries.Xray,
 	"niko-server": deploy.DefaultBinaries.NikoServer,
+	// v0.16.0: installed by this apply when an older rayctl updates
+	// (updateStageEnv), whose list lacks it.
+	"slipstream-server": deploy.DefaultBinaries.Slipstream,
 }
 
 // update replaces the node's binaries with a verified release, restarts
@@ -245,7 +248,7 @@ func installBinaries(stage string) error {
 		if _, err := os.Stat(src); err != nil {
 			continue
 		}
-		if name == "xray" || name == "niko-server" {
+		if name == "xray" || name == "niko-server" || name == "slipstream-server" {
 			if _, err := h.InstallBinary(src, dst); err != nil {
 				return err
 			}

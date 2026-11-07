@@ -41,6 +41,9 @@ func DNSAuthMode(s store.Service) string {
 		Auth string `json:"auth"`
 	}
 	_ = json.Unmarshal([]byte(s.Settings), &st)
+	if s.Kind == "slipstream" {
+		return "required" // the front checks every query's tag (spec/slipstream-v1.md §2)
+	}
 	if (s.Kind != "dnstt" && s.Kind != "masterdns") || st.Auth == "" {
 		return "off"
 	}
@@ -54,6 +57,9 @@ func DNSAuthMode(s store.Service) string {
 func DNSAuthHint(s store.Service) string {
 	if DNSAuthMode(s) == "off" {
 		return "off"
+	}
+	if s.Kind == "slipstream" {
+		return "required" // v2 only: no old clients (spec/slipstream-v1.md §2)
 	}
 	var st struct {
 		Hint string `json:"auth_hint"`

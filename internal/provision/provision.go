@@ -265,7 +265,7 @@ func SPKIPin(certDER []byte) (string, error) {
 }
 
 // kindsNeedingInner send their traffic to the inner stage.
-var kindsNeedingInner = []string{"dnstt", "masterdns", "olcrtc", "openflux", "yggdrasil"}
+var kindsNeedingInner = []string{"dnstt", "masterdns", "slipstream", "olcrtc", "openflux", "yggdrasil"}
 
 // NeedsInner reports whether a kind exits through the inner stage.
 func NeedsInner(kind string) bool { return slices.Contains(kindsNeedingInner, kind) }
@@ -403,6 +403,10 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 				return svc, err
 			}
 			svc.Secrets[SecretMasterDNSKey] = []byte(hex.EncodeToString(raw)) // 32 hex chars, as MasterDnsVPN expects
+		}
+	case "slipstream":
+		if err := slipstreamService(ctx, st, all, settings, svc.Secrets); err != nil {
+			return svc, err
 		}
 	case "inner":
 		seed := make([]byte, 64)
@@ -846,7 +850,7 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 				return svc, err
 			}
 			for _, o := range others {
-				if o.ID == svc.ID || (o.Kind != "dnstt" && o.Kind != "masterdns") {
+				if o.ID == svc.ID || !DNSTunnel(o.Kind) {
 					continue
 				}
 				if h := DNSAuthHint(o); (value == "required" && h == "off") || (value == "off" && h == "required") {
@@ -884,7 +888,7 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			v = 0
 		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: none)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
@@ -1109,7 +1113,7 @@ func nodeNameClash(ctx context.Context, st *store.Store, all []store.Service, zo
 // spell the inner zone.
 func zoneConflict(zone string, all []store.Service) string {
 	for _, svc := range all {
-		if svc.Kind != "dnstt" && svc.Kind != "masterdns" {
+		if !DNSTunnel(svc.Kind) {
 			continue
 		}
 		for _, other := range Zones(svc) {

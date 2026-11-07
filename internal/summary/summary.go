@@ -59,7 +59,7 @@ var (
 	// UDP 53 is intercepted and TCP is not), DoH or DoT.
 	Resolvers = []string{"net", "udp", "tcp", "doh", "dot"}
 	// TunnelKinds are the services whose observations may name a resolver.
-	TunnelKinds = []string{"dnstt", "masterdns"}
+	TunnelKinds = []string{"dnstt", "masterdns", "slipstream"}
 )
 
 // Optional are the report fields beyond the first ones of v1 that this

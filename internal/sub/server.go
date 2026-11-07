@@ -230,11 +230,12 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 	if err := s.addRelays(ctx, &p, m); err != nil {
 		return Envelope{}, err
 	}
-	// dnsprobe-v1: for a user with a dnstt profile, the zones the front
-	// answers probes in (masterdns answers look otherwise).
+	// dnsprobe-v1: for a user with a dnstt or slipstream profile, the
+	// zones the front answers probes in (masterdns answers look
+	// otherwise).
 	if len(m.DNSProbeKey) == 32 && slices.ContainsFunc(profiles, func(pr Profile) bool {
 		return slices.ContainsFunc(m.Services, func(svc render.Service) bool {
-			return uint16(svc.ID) == pr.Svc && svc.Kind == "dnstt"
+			return uint16(svc.ID) == pr.Svc && (svc.Kind == "dnstt" || svc.Kind == "slipstream")
 		})
 	}) {
 		p.DNSProbe = &DNSProbeHint{V: 1, Key: base64.RawURLEncoding.EncodeToString(m.DNSProbeKey)}
@@ -353,7 +354,7 @@ func (s *Server) nextSeq(ctx context.Context, now time.Time) (uint64, error) {
 func dnsAuthVersions(m render.Model, profiles []Profile) *DNSAuthVersions {
 	v1, v2, any := true, true, false
 	for _, svc := range m.Services {
-		if (svc.Kind != "dnstt" && svc.Kind != "masterdns") || render.DNSAuthMode(svc.Service) == "off" ||
+		if !provision.DNSTunnel(svc.Kind) || render.DNSAuthMode(svc.Service) == "off" ||
 			!slices.ContainsFunc(profiles, func(pr Profile) bool { return pr.Svc == uint16(svc.ID) }) {
 			continue
 		}

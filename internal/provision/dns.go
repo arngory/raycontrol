@@ -116,7 +116,7 @@ func DNSRecords(ctx context.Context, st *store.Store) (records []cloudflare.Reco
 	}
 	var zones []string
 	for _, s := range all {
-		if (s.Kind == "dnstt" || s.Kind == "masterdns") && s.Enabled {
+		if DNSTunnel(s.Kind) && s.Enabled {
 			// The spare zones too (spec/dnszones-v1.md §4): delegated as
 			// the main one, so that clients find them when they need them.
 			for _, z := range Zones(s) {
@@ -164,7 +164,7 @@ func NSName(ctx context.Context, st *store.Store) (string, error) {
 		return "", err
 	}
 	if !slices.ContainsFunc(all, func(s store.Service) bool {
-		return (s.Kind == "dnstt" || s.Kind == "masterdns") && s.Enabled && Zone(s) != ""
+		return DNSTunnel(s.Kind) && s.Enabled && Zone(s) != ""
 	}) {
 		return "", nil
 	}
@@ -189,12 +189,13 @@ func DNSCheckAuthKey(checkKey []byte, nodeID [spa.NodeIDSize]byte, svcID int64) 
 }
 
 // DNSCheckTargets are the zones the node checks from itself (dnscheck,
-// rayd -dns-check): those of the enabled dnstt and masterdns services, as
-// DNSRecords selects them, with what the check needs. The parent should
-// delegate each to NSName and so to the node's host; a dnstt zone has the
-// node's probe key, its service's seal mode and current seal key (its poll
-// is sealed as a client's would be), and dnsauth's mode with the node's
-// own key where auth is on (DNSCheckDevice).
+// rayd -dns-check): those of the enabled DNS tunnels, as DNSRecords
+// selects them, with what the check needs. The parent should delegate each
+// to NSName and so to the node's host; a dnstt or slipstream zone has the
+// node's probe key (the front answers its probes in both), a dnstt zone
+// its service's seal mode and current seal key (its poll is sealed as a
+// client's would be), and dnsauth's mode with the node's own key where auth
+// is on (DNSCheckDevice).
 func DNSCheckTargets(ctx context.Context, st *store.Store) ([]dnscheck.Zone, error) {
 	host, err := node.Host(ctx, st)
 	if err != nil {
@@ -213,17 +214,20 @@ func DNSCheckTargets(ctx context.Context, st *store.Store) ([]dnscheck.Zone, err
 	var params spa.Params
 	for _, s := range all {
 		zone := Zone(s)
-		if !s.Enabled || (s.Kind != "dnstt" && s.Kind != "masterdns") || zone == "" {
+		if !s.Enabled || !DNSTunnel(s.Kind) || zone == "" {
 			continue
 		}
 		z := dnscheck.Zone{Service: s.Name, Kind: s.Kind, Name: zone, NS: ns, Host: host, SvcID: uint16(s.ID)}
-		if s.Kind == "dnstt" {
+		if s.Kind == "dnstt" || s.Kind == "slipstream" {
 			if probeKey == nil {
 				if probeKey, err = st.DNSProbeKey(ctx); err != nil {
 					return nil, err
 				}
 			}
-			z.ProbeKey, z.Seal, z.Auth = probeKey, DNSSealMode(s), DNSAuthMode(s)
+			z.ProbeKey = probeKey
+		}
+		if s.Kind == "dnstt" {
+			z.Seal, z.Auth = DNSSealMode(s), DNSAuthMode(s)
 			if z.Auth != "off" {
 				if checkKey == nil {
 					if params, err = node.LoadParams(ctx, st); err != nil {

@@ -19,7 +19,7 @@ import (
 // ServiceKinds lists the services a node can run (docs/03-protocols.md).
 var ServiceKinds = []string{
 	"reality", "hy2-masq", "hy2-obfs", "naive", "doh", "yggdrasil",
-	"dnstt", "masterdns", "olcrtc", "openflux", "inner", "site",
+	"dnstt", "masterdns", "slipstream", "olcrtc", "openflux", "inner", "site",
 	"subscription", "api", "ssh",
 }
 

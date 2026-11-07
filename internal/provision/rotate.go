@@ -308,8 +308,13 @@ func RequestRealityRotation(ctx context.Context, st *store.Store, name string, n
 	if err != nil {
 		return err
 	}
+	if svc.Kind == "slipstream" {
+		// One certificate a server, one pin a client: a new key would cut
+		// every client off until its next subscription.
+		return fmt.Errorf("%w: %s (slipstream) has no rotation: its clients pin the server's one key (spec/slipstream-v1.md §3); a new key is a new service", store.ErrInvalid, name)
+	}
 	if svc.Kind != "reality" {
-		return fmt.Errorf("%w: %s is not a REALITY service", store.ErrInvalid, name)
+		return fmt.Errorf("%w: %s is not a REALITY service (rotation: reality, dnstt's seal key, masterdns's key)", store.ErrInvalid, name)
 	}
 	at := now.Add(lead)
 	if immediately {

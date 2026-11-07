@@ -23,6 +23,7 @@ type Binaries struct {
 	Rayspa     string
 	NikoServer string
 	Xray       string
+	Slipstream string // slipstream-server (spec/slipstream-v1.md)
 }
 
 // DefaultBinaries are the install locations. The data plane has a
@@ -33,6 +34,7 @@ var DefaultBinaries = Binaries{
 	Rayspa:     "/usr/local/bin/rayspa",
 	NikoServer: DataPlaneDir + "/niko-server",
 	Xray:       DataPlaneDir + "/xray",
+	Slipstream: DataPlaneDir + "/slipstream-server",
 }
 
 // DataPlaneDir holds the data-plane binaries raycontrol installs.
@@ -221,7 +223,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			inner = &m.Services[i]
 		case s.Kind == "site":
 			sites = append(sites, s)
-		case s.Kind == "dnstt" || s.Kind == "masterdns":
+		case provision.DNSTunnel(s.Kind):
 			dns = append(dns, s)
 		case s.Kind == "reality":
 			reality = append(reality, s)
@@ -238,6 +240,23 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("service %s (%s) is not deployed by this version", s.Name, s.Kind))
 		}
 	}
+	// A slipstream server takes its settings as arguments: without them,
+	// or without the inner stage, it has no unit (Render leaves it out of
+	// the front too).
+	dns = slices.DeleteFunc(dns, func(s render.Service) bool {
+		if s.Kind != "slipstream" {
+			return false
+		}
+		if inner == nil {
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf("service %s (slipstream) needs the inner stage", s.Name))
+			return true
+		}
+		if _, err := render.SlipstreamArgs(s, inner.Name, p); err != nil {
+			plan.Warnings = append(plan.Warnings, err.Error())
+			return true
+		}
+		return false
+	})
 	hasFront := slices.ContainsFunc(files, func(f render.File) bool { return f.Service == "front" })
 
 	var raydGroups []string
@@ -414,6 +433,18 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 
 	for _, s := range dns {
 		g := render.GroupName(s.Name)
+		// The process: niko-server's backend, or the slipstream server
+		// with its arguments (it reads no config file), which needs its
+		// certificate.
+		needs := path.Join(p.Rendered, s.Name, "backend.json")
+		exec := bin.NikoServer + " backend -c " + needs
+		description := "niko-server backend " + s.Name + " (" + s.Kind + ")"
+		if s.Kind == "slipstream" {
+			args, _ := render.SlipstreamArgs(s, inner.Name, p) // checked above
+			needs = path.Join(p.Rendered, s.Name, render.SlipstreamCert)
+			exec = bin.Slipstream + " " + strings.Join(args, " ")
+			description = "slipstream server " + s.Name + " (behind the DNS front)"
+		}
 		raydGroups = append(raydGroups, g)
 		var extra []string
 		if inner != nil {
@@ -429,6 +460,9 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		// dnsseal-v1's keys are not among them: the backend reads them in
 		// place, in a file of the service group, as dnsauth's.
 		secret := render.DNSSecret(s.Kind)
+		if s.Kind == "slipstream" {
+			secret = render.SlipstreamKey
+		}
 		creds := []string{fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
 			g, g, path.Join(p.Rendered, s.Name, secret), p.Credential(s.Name, secret))}
 		after := []string{}
@@ -437,12 +471,12 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		}
 		units = append(units, unit{
 			name:        render.UnitName(s.Name),
-			description: "niko-server backend " + s.Name + " (" + s.Kind + ")",
-			needs:       path.Join(p.Rendered, s.Name, "backend.json"),
+			description: description,
+			needs:       needs,
 			after:       after,
 			service: append([]string{
 				"User=" + g, "Group=" + g, groups(extra),
-				"ExecStart=" + bin.NikoServer + " backend -c " + path.Join(p.Rendered, s.Name, "backend.json"),
+				"ExecStart=" + exec,
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
 				frontIn(s), // the front connects to packet.sock

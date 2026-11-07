@@ -32,7 +32,7 @@ import (
 // Zone is a zone to check and what the check needs of its service.
 type Zone struct {
 	Service string // the service's name
-	Kind    string // dnstt | masterdns
+	Kind    string // dnstt | masterdns | slipstream
 	Name    string // the zone
 	Spare   bool   // a spare zone of the service (spec/dnszones-v1.md), not its main one
 	// NS is the name the parent should delegate the zone to; "" when the
@@ -44,7 +44,7 @@ type Zone struct {
 	// Front is where the front is asked on the node; zero: the host's
 	// address when it is this host's, else 127.0.0.1:53.
 	Front    netip.AddrPort
-	ProbeKey Key    // dnsprobe-v1 (dnstt)
+	ProbeKey Key    // dnsprobe-v1 (dnstt, slipstream: the front answers it)
 	Seal     string // dnsseal-v1 mode (dnstt): off, optional or required
 	SealKey  Key    // seals the poll unless the seal is off
 	Auth     string // dnsauth-v1 mode (dnstt)
@@ -97,9 +97,9 @@ type Step struct {
 // ResolverResult is a zone through one resolver.
 type ResolverResult struct {
 	Resolver Resolver
-	SOA      Step // the zone's apex (dnstt with NS); it may come from the resolver's cache
-	Small    Step // dnstt: the small probe; masterdns: the answer to a random name
-	Large    Step // dnstt: the large probe
+	SOA      Step // the zone's apex (dnstt and slipstream with NS); it may come from the resolver's cache
+	Small    Step // dnstt, slipstream: the small probe; masterdns: the answer to a random name
+	Large    Step // dnstt, slipstream: the large probe
 	// What the node saw of the resolver (dnstt, from the probe).
 	EDNS   int  // the UDP size it advertised to the node, 0 without OPT
 	Mixed  bool // it applies 0x20
@@ -297,7 +297,8 @@ func failed(err error, state State, what string) Step {
 }
 
 // front checks the zone at the front on the node: the apex and a small
-// probe for dnstt, an answer to a random name for masterdns. REFUSED is
+// probe for dnstt and slipstream (the front answers both itself), an
+// answer to a random name for masterdns. REFUSED is
 // the front's own: the zone is not in its configuration.
 func (c *Checker) front(ctx context.Context, z Zone, addr netip.AddrPort) Step {
 	a := c.asker("udp", addr, queriesPerZone)
@@ -311,7 +312,7 @@ func (c *Checker) front(ctx context.Context, z Zone, addr netip.AddrPort) Step {
 		}
 		return s
 	}
-	if z.Kind != "dnstt" {
+	if z.Kind == "masterdns" {
 		x, err := c.randomName(ctx, a, z, false)
 		switch {
 		case err != nil:
@@ -432,7 +433,7 @@ func (c *Checker) viaResolver(ctx context.Context, z Zone, r Resolver) ResolverR
 	res := ResolverResult{Resolver: r}
 	a := c.asker(r.Net, r.Addr, queriesPerZone)
 	switch z.Kind {
-	case "dnstt":
+	case "dnstt", "slipstream":
 		if z.NS != "" {
 			res.SOA = c.apexVia(ctx, a, z)
 		}
@@ -525,15 +526,15 @@ func (c *Checker) probeVia(ctx context.Context, a *asker, z Zone, large bool, re
 	case err == nil && ans.Large:
 		return Step{State: OK, RTT: x.rtt}
 	case err == nil && ans.EDNS == 0:
-		return Step{State: Warn, Detail: "a small answer: it sends the node no EDNS; dnstt runs slower there", RTT: x.rtt}
+		return Step{State: Warn, Detail: "a small answer: it sends the node no EDNS; " + z.Kind + " runs slower there", RTT: x.rtt}
 	case err == nil:
-		return Step{State: Warn, Detail: fmt.Sprintf("a small answer: it advertises EDNS %d to the node; dnstt runs slower there", ans.EDNS), RTT: x.rtt}
+		return Step{State: Warn, Detail: fmt.Sprintf("a small answer: it advertises EDNS %d to the node; %s runs slower there", ans.EDNS, z.Kind), RTT: x.rtt}
 	case x.r != nil && x.r.Truncated:
 		return Step{State: Warn, Detail: "truncated (TC) over UDP: large answers need TCP there"}
 	case x.r == nil:
 		s := failed(err, Warn, "")
 		if s.State == Warn {
-			s.Detail = "large answers lost (" + err.Error() + "): dnstt will hardly work there"
+			s.Detail = "large answers lost (" + err.Error() + "): " + z.Kind + " will hardly work there"
 		}
 		return s
 	}

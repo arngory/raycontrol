@@ -43,8 +43,12 @@ var DefaultMirrors = []string{"https://ghfast.top/", "https://gh-proxy.com/"}
 // Files are the files of an archive, as the release workflow packs them.
 // Releases before v0.15.0 refuse any other name (Extract): a file added
 // to the archive means those update through v0.15.0 or later first, and the
-// release notes say so (TestArchiveFiles).
-var Files = []string{"rayd", "rayspa", "rayctl", "xray", "niko-server", "VERSIONS", "ipinfo_lite.mmdb", "NOTICE"}
+// release notes say so (FilesSince, TestArchiveFiles).
+var Files = []string{"rayd", "rayspa", "rayctl", "xray", "niko-server", "slipstream-server", "VERSIONS", "ipinfo_lite.mmdb", "NOTICE"}
+
+// FilesSince are the files added to the archive after v0.15.0, by the
+// release that added them.
+var FilesSince = map[string]string{"slipstream-server": "v0.16.0"}
 
 // FilesBeforeV015 are the names releases v0.5.0 to v0.14 take in an archive.
 var FilesBeforeV015 = []string{"rayd", "rayspa", "rayctl", "xray", "niko-server", "VERSIONS", "ipinfo_lite.mmdb", "NOTICE"}

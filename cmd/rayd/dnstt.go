@@ -8,6 +8,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/dnsstats"
 	"github.com/arngory/raycontrol/internal/health"
+	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -99,7 +100,7 @@ func roundFront(ctx context.Context, st *store.Store, paths render.Paths, w *dns
 		return
 	}
 	if !slices.ContainsFunc(services, func(s store.Service) bool {
-		return s.Enabled && (s.Kind == "dnstt" || s.Kind == "masterdns")
+		return s.Enabled && provision.DNSTunnel(s.Kind)
 	}) {
 		hb.Retain("dns-front", nil)
 		*w = dnsstats.Window[dnsstats.Front]{}

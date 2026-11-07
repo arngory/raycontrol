@@ -332,7 +332,8 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 	// The data plane the bootstrap downloaded and verified with the release
 	// (one signature for all of it), in a directory of its own.
 	if *dataplane != "" {
-		for _, b := range []struct{ name, dst string }{{"xray", deploy.DefaultBinaries.Xray}, {"niko-server", deploy.DefaultBinaries.NikoServer}} {
+		for _, b := range []struct{ name, dst string }{{"xray", deploy.DefaultBinaries.Xray}, {"niko-server", deploy.DefaultBinaries.NikoServer},
+			{"slipstream-server", deploy.DefaultBinaries.Slipstream}} {
 			src := filepath.Join(*dataplane, b.name)
 			if _, err := os.Stat(src); err != nil {
 				fmt.Printf("warning: %s is not in %s: its services stay off until it is installed\n", b.name, *dataplane)
@@ -508,9 +509,9 @@ func installServices(list, domain string, fs *flag.FlagSet) ([]serviceKind, erro
 // installKinds are the kinds -services takes, and installNames the names
 // their services get (as in the cheatsheet's rayctl service add).
 var (
-	installKinds = []string{"reality", "hy2-masq", "hy2-obfs", "doh", "naive", "yggdrasil", "dnstt", "masterdns", "api"}
+	installKinds = []string{"reality", "hy2-masq", "hy2-obfs", "doh", "naive", "yggdrasil", "dnstt", "masterdns", "slipstream", "api"}
 	installNames = map[string]string{"reality": "reality", "hy2-masq": "hy2-masq", "hy2-obfs": "hy2-obfs", "doh": "doh",
-		"naive": "naive", "yggdrasil": "ygg", "dnstt": "dns", "masterdns": "mdns", "api": "api"}
+		"naive": "naive", "yggdrasil": "ygg", "dnstt": "dns", "masterdns": "mdns", "slipstream": "slip", "api": "api"}
 )
 
 func boolInt(b bool) int {

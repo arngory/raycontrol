@@ -1005,3 +1005,61 @@ func TestBuildForPartialAndModes(t *testing.T) {
 		t.Fatalf("off beside required: %v", v)
 	}
 }
+
+// A slipstream profile (spec/slipstream-v1.md §4): the link with its pin,
+// ALPN and name; dnsauth v2 alone, beside a dnstt service that takes both;
+// the probe key, which the front answers in its zone too; no relay.
+func TestSlipstreamInSubscription(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	build := func() sub.Payload {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	slip, err := provision.CreateService(ctx, f.st, store.Service{Kind: "slipstream", Name: "slip", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.SetUserServices(ctx, "alice", []int64{slip.ID}); err != nil {
+		t.Fatal(err)
+	}
+	p := build()
+	if len(p.Profiles) != 1 || p.DNSAuth == nil || !slices.Equal(p.DNSAuth.V, []int{2}) || p.DNSProbe == nil ||
+		!slices.Contains(sub.ProbeTunnels, "slipstream") {
+		t.Fatalf("payload %+v", p)
+	}
+	u, err := url.Parse(p.Profiles[0].Link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	ss, _ := provision.ParseSlipstream(slip)
+	secrets, _ := f.st.ServiceSecrets(ctx, slip.ID)
+	pin, _ := provision.SPKIPin(secrets[provision.SecretTLSCert])
+	svc := strconv.FormatInt(slip.ID, 10)
+	if u.Scheme != "vless" || u.Host != "inner:1" || q.Get("niko-dns") != "slipstream;;"+ss.Zone+";"+svc || q.Get("niko-svc") != svc ||
+		q.Get("niko-slip") != "v1;"+pin+";"+ss.ALPN+";"+ss.SNI || q.Get("niko-dnsauth") != "v1" || q.Get("type") != "raw" ||
+		!strings.HasPrefix(q.Get("encryption"), "mlkem768x25519plus.") || q.Has("niko-dns-spare") || q.Has("niko-dnskey") || q.Has("niko-dnsseal") {
+		t.Errorf("link %s", p.Profiles[0].Link)
+	}
+	// Beside dnstt (auth_hint optional): one version for both, 2.
+	dns, _ := f.st.ServiceByName(ctx, "dns")
+	if err := f.st.SetUserServices(ctx, "alice", []int64{slip.ID, dns.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if p := build(); len(p.Profiles) != 2 || !slices.Equal(p.DNSAuth.V, []int{2}) {
+		t.Errorf("beside dnstt: %d profiles, dnsauth %+v", len(p.Profiles), p.DNSAuth)
+	}
+	if sub.RelayKinds("slipstream") {
+		t.Error("slipstream through a relay")
+	}
+}

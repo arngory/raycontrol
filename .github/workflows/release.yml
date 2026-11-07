@@ -72,6 +72,8 @@ jobs:
         run: go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o dist/ ./cmd/...
       - name: niko-server
         run: scripts/niko-server.sh ${{ matrix.goarch }} dist/niko-server
+      - name: slipstream-server
+        run: scripts/slipstream-server.sh ${{ matrix.goarch }} dist/slipstream-server
       - name: Fetch Xray
         run: |
           . deploy/versions.env
@@ -101,9 +103,10 @@ jobs:
             echo "raycontrol ${TAG} ${GITHUB_SHA}"
             echo "xray ${XRAY_REPOSITORY} ${XRAY_COMMIT}"
             echo "niko-server ${NIKO_SERVER_TAG} ${NIKO_SERVER_REPOSITORY} ${NIKO_SERVER_COMMIT}"
+            echo "slipstream-server ${SLIPSTREAM_SERVER_TAG} ${SLIPSTREAM_SERVER_REPOSITORY} ${SLIPSTREAM_SERVER_COMMIT}"
             echo "ipinfo-lite $(sha256sum dist/ipinfo_lite.mmdb | cut -d' ' -f1) $(date -u +%Y-%m-%d)"
           } > dist/VERSIONS
-          tar -czf "raycontrol-linux-${GOARCH}.tar.gz" -C dist rayd rayspa rayctl xray niko-server VERSIONS ipinfo_lite.mmdb NOTICE
+          tar -czf "raycontrol-linux-${GOARCH}.tar.gz" -C dist rayd rayspa rayctl xray niko-server slipstream-server VERSIONS ipinfo_lite.mmdb NOTICE
       - uses: actions/upload-artifact@v4
         with:
           name: raycontrol-${{ matrix.goarch }}

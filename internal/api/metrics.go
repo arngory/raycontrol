@@ -333,6 +333,9 @@ func addFrontStats(m *Metrics, f dnsstats.Front, owner map[string]string) {
 		{"raycontrol_dns_front_truncated_total", "Answers over the requester's size, sent with TC and no records.", f.Truncated, nil},
 		{"raycontrol_dns_front_unmatched_total", "Backends' answers no query waited for, dropped.", f.Unmatched, nil},
 		{"raycontrol_dns_front_dropped_total", "Backends' messages not sent on: unreadable, no question to truncate to, a failed write.", f.Dropped, nil},
+		{"raycontrol_dns_front_untagged_total", "Queries of a slipstream zone without a device's valid tag: NOERROR, the server sees none.", f.Untagged, nil},
+		{"raycontrol_dns_front_replayed_total", "Queries of a slipstream zone whose tag passed before (copies): the server sees none.", f.Replayed, nil},
+		{"raycontrol_dns_front_replay_turns_total", "Generations of the front's memory of tags started early under load: older copies reach the server, which drops them.", f.ReplayTurns, nil},
 	} {
 		m.Add(c.name, c.help, float64(c.v), c.labels...)
 	}

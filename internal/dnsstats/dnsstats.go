@@ -73,6 +73,12 @@ type Front struct {
 	Unmatched      uint64            `json:"unmatched"`
 	Truncated      uint64            `json:"truncated"`
 	Dropped        uint64            `json:"dropped"` // the backends' messages not sent on
+	// The tagged zones (slipstream, niko-server v0.13.0): queries without
+	// a device's tag, copies of a passed one, and generations of the
+	// memory of passed fields started early (a load past ~870 a second).
+	Untagged    uint64 `json:"untagged"`
+	Replayed    uint64 `json:"replayed"`
+	ReplayTurns uint64 `json:"replay_turns"`
 }
 
 // ReadFront reads the DNS front's counters, as Read a backend's.
@@ -159,7 +165,7 @@ func wentDown(now, before []*uint64) bool {
 
 func (f *Front) counters() []*uint64 {
 	return []*uint64{&f.Malformed, &f.Refused, &f.Apex, &f.Probes, &f.ProbesOverRate, &f.Forwarded, &f.BackendAway,
-		&f.Answers, &f.Unmatched, &f.Truncated, &f.Dropped}
+		&f.Answers, &f.Unmatched, &f.Truncated, &f.Dropped, &f.Untagged, &f.Replayed, &f.ReplayTurns}
 }
 
 // Sub is what f counted since o, a zone's queries too.

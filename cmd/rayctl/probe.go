@@ -24,6 +24,7 @@ import (
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/node"
 	chprobe "github.com/arngory/raycontrol/internal/probe"
+	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/redact"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/sub"
@@ -229,12 +230,17 @@ func probeDNSZones(p *sub.Payload, host string, ip netip.Addr, deviceKey [spa.Ke
 		}
 		q := u.Query()
 		f := strings.Split(q.Get("niko-dns"), ";") // kind;;zone;key or method
-		if len(f) < 3 || (f[0] != "dnstt" && f[0] != "masterdns") || f[2] == "" {
+		if len(f) < 3 || !provision.DNSTunnel(f[0]) || f[2] == "" {
 			continue
 		}
 		// The front is asked at the node's address: off the node the
 		// checker's fallback, loopback, is this machine's own (review 13).
 		z := dnscheck.Zone{Service: pr.Name, Kind: f[0], Name: f[2], Host: host, SvcID: pr.Svc, Front: netip.AddrPortFrom(ip, 53)}
+		if z.Kind == "slipstream" && len(probeKey) == 32 {
+			// The front answers its probes (spec/slipstream-v1.md §2); the
+			// server, a QUIC handshake away, is not checked.
+			z.ProbeKey = probeKey
+		}
 		if z.Kind == "dnstt" {
 			if len(probeKey) == 32 {
 				z.ProbeKey = probeKey
