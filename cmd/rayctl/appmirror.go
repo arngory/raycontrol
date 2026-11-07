@@ -8,6 +8,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/arngory/raycontrol/internal/appmirror"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 )
 
@@ -55,5 +56,8 @@ func printAppMirror(w *tabwriter.Writer, m *nodev1.GetAppMirrorResponse) {
 	}
 	if m.Enabled && len(m.Releases) == 0 {
 		fmt.Fprintf(w, "releases\tnone yet\n")
+	}
+	if m.Enabled {
+		fmt.Fprintf(w, "downloads\t%d now (at most %d at once, one a device)\n", m.Downloads, appmirror.PerNode)
 	}
 }

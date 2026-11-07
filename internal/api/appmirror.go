@@ -20,7 +20,7 @@ func (s *Server) appMirror() *appmirror.Mirror {
 // (spec/app-update-v1.md).
 func (s *Server) GetAppMirror(ctx context.Context, _ *connect.Request[nodev1.GetAppMirrorRequest]) (*connect.Response[nodev1.GetAppMirrorResponse], error) {
 	st := s.appMirror().Status(ctx)
-	resp := &nodev1.GetAppMirrorResponse{Enabled: st.Enabled, Error: st.Err}
+	resp := &nodev1.GetAppMirrorResponse{Enabled: st.Enabled, Error: st.Err, Downloads: uint32(st.Downloads)}
 	if !st.Checked.IsZero() {
 		resp.Checked = st.Checked.Unix()
 	}

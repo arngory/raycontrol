@@ -591,6 +591,8 @@ message GetAppMirrorResponse {
   int64 checked = 3;
   // error is the last check's, empty when it went well.
   string error = 4;
+  // downloads under way now, of at most 16.
+  uint32 downloads = 5;
 }
 message AppRelease {
   string app = 1;

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -132,6 +133,17 @@ func (g *fakeGitHub) unlist(tags ...string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.rels = slices.DeleteFunc(g.rels, func(r ghRelease) bool { return slices.Contains(tags, r.Tag) })
+}
+
+// drop takes an asset off a listed release.
+func (g *fakeGitHub) drop(tag, name string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for i := range g.rels {
+		if g.rels[i].Tag == tag {
+			g.rels[i].Assets = slices.DeleteFunc(g.rels[i].Assets, func(a ghAsset) bool { return a.Name == name })
+		}
+	}
 }
 
 // upload adds an asset to a listed release, as its workflow does after
@@ -387,17 +399,26 @@ func TestSyncSelection(t *testing.T) {
 	g.upload("v1.41.0", "niko-v1.41.0-armeabi-v7a.apk", apks("v1.41.0")["niko-v1.41.0-armeabi-v7a.apk"])
 	check("", "v1.41.0")
 
-	// At most maxTries newer releases a check: a host that fails them all
-	// costs a bounded check, and the older one waits for the next.
+	// Releases whose upload died (no SHA256SUMS among the assets) cost no
+	// try: the whole one below them is taken.
+	for _, tag := range []string{"v1.45.0", "v1.44.0", "v1.43.0", "v1.42.5"} {
+		g.release(k, tag, apks(tag), "", nil)
+		g.drop(tag, sumsName)
+	}
+	g.release(k, "v1.42.0", apks("v1.42.0"), "", nil)
+	check("no SHA256SUMS in the release", "v1.42.0")
+
+	// At most maxTries newer releases fetched a check: a host that fails
+	// them all costs a bounded check, and the older one waits for the next.
 	for _, tag := range []string{"v2.0.0", "v2.1.0", "v2.2.0"} {
 		g.release(k, tag, apks(tag), "", nil)
 		g.mu.Lock()
 		delete(g.blob, "/dl/"+tag+"/"+sumsName)
 		g.mu.Unlock()
 	}
-	g.release(k, "v1.42.0", apks("v1.42.0"), "", nil)
-	check("404", "v1.41.0")
-	if n := g.hit("v1.42.0", sumsName); n != 0 {
+	g.release(k, "v1.46.0", apks("v1.46.0"), "", nil)
+	check("404", "v1.42.0")
+	if n := g.hit("v1.46.0", sumsName); n != 0 {
 		t.Errorf("a fourth release fetched in one check: %d", n)
 	}
 }
@@ -625,8 +646,13 @@ func TestHandler(t *testing.T) {
 	if resp, _ := get("POST", path, "d1", nil); resp.StatusCode != 404 {
 		t.Errorf("POST: %d", resp.StatusCode)
 	}
+	// If-None-Match: the file, not a 304 (no 3xx on this port).
+	if resp, b = get("GET", path, "d1", map[string]string{"If-None-Match": etag}); resp.StatusCode != 200 || len(b) != len(body) {
+		t.Errorf("If-None-Match: %d", resp.StatusCode)
+	}
 	// A device's second download, and the node's seventeenth: 429.
-	if !m.begin("d1") {
+	d1, ok := m.begin(ctx, "d1", nil)
+	if !ok {
 		t.Fatal("begin")
 	}
 	if resp, _ := get("GET", path, "d1", nil); resp.StatusCode != 429 || resp.Header.Get("Retry-After") == "" {
@@ -640,7 +666,7 @@ func TestHandler(t *testing.T) {
 		t.Errorf("another device: %d", resp.StatusCode)
 	}
 	for i := 1; i < PerNode; i++ {
-		m.begin(fmt.Sprintf("x%d", i))
+		m.begin(ctx, fmt.Sprintf("x%d", i), nil)
 	}
 	if resp, _ := get("GET", path, "d2", nil); resp.StatusCode != 429 {
 		t.Errorf("over the node's: %d", resp.StatusCode)
@@ -648,7 +674,7 @@ func TestHandler(t *testing.T) {
 	if resp, _ := get("HEAD", path, "d2", nil); resp.StatusCode != 200 {
 		t.Errorf("HEAD with the node's places taken: %d", resp.StatusCode)
 	}
-	m.end("d1")
+	m.end("d1", d1)
 	if resp, _ := get("GET", path, "d2", nil); resp.StatusCode != 200 {
 		t.Errorf("after one ended: %d", resp.StatusCode)
 	}
@@ -664,6 +690,114 @@ func TestStallWriterUntil(t *testing.T) {
 	s.until = time.Now().Add(-time.Second)
 	if _, err := s.Write([]byte("c")); !errors.Is(err, errTooLong) || rec.Body.String() != "ab" {
 		t.Fatalf("after: %v, body %q", err, rec.Body.String())
+	}
+}
+
+// A download that cannot go on (a write failed, or MaxDownload) is cut,
+// not ended: a clean end short of Content-Length would leave an HTTP/2
+// client that does not count with a torn file. Its place is freed.
+func TestHandlerCut(t *testing.T) {
+	ctx := context.Background()
+	k := newKey(t)
+	g := newGitHub(t)
+	g.release(k, "v1.38.0", apks("v1.38.0"), "", nil)
+	m := newMirror(t, g, k)
+	if err := m.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Store.SetSetting(ctx, settingEnabled, []byte("on")); err != nil {
+		t.Fatal(err)
+	}
+	h := m.Handler(func(*http.Request) (string, error) { return "d1", nil })
+	req := httptest.NewRequest("GET", Path+"niko/v1.38.0/niko-v1.38.0-arm64-v8a.apk", nil)
+	w := &failWriter{ResponseRecorder: httptest.NewRecorder()}
+	func() {
+		defer func() {
+			if r, _ := recover().(error); !errors.Is(r, http.ErrAbortHandler) {
+				t.Errorf("recovered %v, want http.ErrAbortHandler", r)
+			}
+		}()
+		h.ServeHTTP(w, req)
+	}()
+	if d, ok := m.begin(ctx, "d1", nil); !ok {
+		t.Error("the place still held after the cut")
+	} else {
+		m.end("d1", d)
+	}
+}
+
+// failWriter's body writes fail, as on a connection gone.
+type failWriter struct{ *httptest.ResponseRecorder }
+
+func (f *failWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+// A device's next download on another connection cuts the one under way
+// (a phone that changed networks resumes at once); on the same connection
+// it is a second one: 429.
+func TestBeginTakeover(t *testing.T) {
+	ctx := context.Background()
+	m := &Mirror{}
+	a1, a2 := net.Pipe()
+	defer a2.Close()
+	old, ok := m.begin(ctx, "d1", a1)
+	if !ok {
+		t.Fatal("begin")
+	}
+	if _, ok := m.begin(ctx, "d1", a1); ok {
+		t.Fatal("a second download on the same connection")
+	}
+	// The old download's handler ends once its connection is closed.
+	go func() {
+		_, _ = a2.Read(make([]byte, 1)) // returns when a1 is closed
+		m.end("d1", old)
+	}()
+	b1, b2 := net.Pipe()
+	defer b2.Close()
+	start := time.Now()
+	d, ok := m.begin(ctx, "d1", b1)
+	if !ok || time.Since(start) > takeover {
+		t.Fatalf("takeover: %v after %s", ok, time.Since(start))
+	}
+	if _, err := a1.Write([]byte("x")); err == nil {
+		t.Error("the old connection still open")
+	}
+	m.end("d1", d)
+	if len(m.active) != 0 || m.total != 0 {
+		t.Errorf("active %v, total %d", m.active, m.total)
+	}
+}
+
+// rayd stopping, even with a kick pending, drops nothing: the next start
+// would fetch it all again.
+func TestRunStopKeeps(t *testing.T) {
+	k := newKey(t)
+	g := newGitHub(t)
+	g.release(k, "v1.38.0", apks("v1.38.0"), "", nil)
+	m := newMirror(t, g, k)
+	ctx := context.Background()
+	if err := m.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Store.SetSetting(ctx, settingEnabled, []byte("on")); err != nil {
+		t.Fatal(err)
+	}
+	m.API = "https://127.0.0.1:1" // checks fail at once
+	for i := 0; i < 20; i++ {
+		rctx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { m.Run(rctx, nil); close(done) }()
+		for len(m.Status(ctx).Releases) == 0 || m.Status(ctx).Checked.IsZero() {
+			time.Sleep(time.Millisecond)
+		}
+		m.Kick()
+		cancel()
+		<-done
+		if _, err := os.Stat(filepath.Join(m.Dir, App, "v1.38.0")); err != nil {
+			t.Fatalf("run %d: dropped at stop: %v", i, err)
+		}
+		m.mu.Lock()
+		m.checked = time.Time{}
+		m.mu.Unlock()
 	}
 }
 

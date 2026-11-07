@@ -5397,7 +5397,9 @@ type GetAppMirrorResponse struct {
 	// checked is the last check of GitHub, unix seconds; 0: none yet.
 	Checked int64 `protobuf:"varint,3,opt,name=checked,proto3" json:"checked,omitempty"`
 	// error is the last check's, empty when it went well.
-	Error         string `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	Error string `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	// downloads under way now, of at most 16.
+	Downloads     uint32 `protobuf:"varint,5,opt,name=downloads,proto3" json:"downloads,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5458,6 +5460,13 @@ func (x *GetAppMirrorResponse) GetError() string {
 		return x.Error
 	}
 	return ""
+}
+
+func (x *GetAppMirrorResponse) GetDownloads() uint32 {
+	if x != nil {
+		return x.Downloads
+	}
+	return 0
 }
 
 type AppRelease struct {
@@ -6107,12 +6116,13 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x03api\x18\x02 \x01(\tR\x03api\x12\x14\n" +
 	"\x05token\x18\x03 \x01(\tR\x05token\"\x14\n" +
 	"\x12SetSummaryResponse\"\x15\n" +
-	"\x13GetAppMirrorRequest\"\x9c\x01\n" +
+	"\x13GetAppMirrorRequest\"\xba\x01\n" +
 	"\x14GetAppMirrorResponse\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12:\n" +
 	"\breleases\x18\x02 \x03(\v2\x1e.raycontrol.node.v1.AppReleaseR\breleases\x12\x18\n" +
 	"\achecked\x18\x03 \x01(\x03R\achecked\x12\x14\n" +
-	"\x05error\x18\x04 \x01(\tR\x05error\"\x98\x01\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\x12\x1c\n" +
+	"\tdownloads\x18\x05 \x01(\rR\tdownloads\"\x98\x01\n" +
 	"\n" +
 	"AppRelease\x12\x10\n" +
 	"\x03app\x18\x01 \x01(\tR\x03app\x12\x10\n" +

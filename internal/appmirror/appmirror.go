@@ -53,7 +53,8 @@ const (
 	PerNode = 16
 	// MaxDownload ends any download (the client resumes it).
 	MaxDownload = 15 * time.Minute
-	sendBuffer  = 256 << 10
+	// notSentLowat paces a download's writes (paced).
+	notSentLowat = 128 << 10
 	// RetryAfter is what a client over a limit waits, in seconds.
 	RetryAfter = 10
 	// Stall ends a download whose next piece does not leave for so long;
@@ -114,10 +115,11 @@ type HintRelease struct {
 
 // Status is what rayctl app-mirror shows.
 type Status struct {
-	Enabled  bool
-	Releases []Release
-	Checked  time.Time
-	Err      string
+	Enabled   bool
+	Releases  []Release
+	Checked   time.Time
+	Err       string
+	Downloads int // under way now, of at most PerNode
 }
 
 // Mirror holds the releases and serves them.
@@ -130,8 +132,9 @@ type Mirror struct {
 	// AllowHTTP takes plain HTTP from the source: a test's, never GitHub
 	// (rayd: RAYCONTROL_UNSAFE_APP_MIRROR_API).
 	AllowHTTP bool
-	// Conn gives a request's connection (probe.Conn): a download's send
-	// buffer is made small. Nil: left as it is.
+	// Conn gives a request's connection (probe.Conn): a download's writes
+	// are paced, and a device's next download cuts the one before on
+	// another connection. Nil: neither.
 	Conn func(context.Context) net.Conn
 	// Stall: Stall when zero (a test seam).
 	Stall time.Duration
@@ -149,7 +152,7 @@ type Mirror struct {
 	ownClient  *http.Client
 
 	dl     sync.Mutex
-	active map[string]bool // a device's download
+	active map[string]*download // a device's download
 	total  int
 }
 
@@ -178,8 +181,18 @@ func (m *Mirror) log() *slog.Logger {
 
 // Enabled says whether the administrator turned the mirror on.
 func Enabled(ctx context.Context, st *store.Store) bool {
+	on, err := enabled(ctx, st)
+	return err == nil && on
+}
+
+// enabled tells off from a setting that could not be read (rayd stops):
+// only off drops the files.
+func enabled(ctx context.Context, st *store.Store) (bool, error) {
 	v, err := st.GetSetting(ctx, settingEnabled)
-	return err == nil && string(v) == "on"
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return string(v) == "on", err
 }
 
 // SetEnabled turns the mirror on, with MinFree in its directory, or off;
@@ -242,9 +255,12 @@ func (m *Mirror) Kick() {
 // Status reports the mirror.
 func (m *Mirror) Status(ctx context.Context) Status {
 	on := Enabled(ctx, m.Store)
+	m.dl.Lock()
+	n := m.total
+	m.dl.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return Status{Enabled: on, Releases: slices.Clone(m.held), Checked: m.checked, Err: m.lastErr}
+	return Status{Enabled: on, Releases: slices.Clone(m.held), Checked: m.checked, Err: m.lastErr, Downloads: n}
 }
 
 // Hint is the subscription's field: nil when the mirror is off or holds
@@ -286,31 +302,40 @@ func (m *Mirror) Run(ctx context.Context, jitter func() time.Duration) {
 	m.mu.Unlock()
 	m.load()
 	for {
+		// stop is in place before the setting is read: an off that comes
+		// after the read stops the check.
+		sctx, stop := context.WithCancel(ctx)
+		m.mu.Lock()
+		m.stop = stop
+		m.mu.Unlock()
 		wait := time.Hour // off: look again now and then (and on a kick)
-		if Enabled(ctx, m.Store) {
-			sctx, stop := context.WithCancel(ctx)
-			m.mu.Lock()
-			m.stop = stop
-			m.mu.Unlock()
-			if err := m.Sync(sctx); err != nil {
+		switch on, err := enabled(sctx, m.Store); {
+		case err != nil:
+			// Not read (rayd stops, or off came meanwhile: its kick
+			// follows): nothing dropped on that.
+			wait = time.Minute
+		case on:
+			if err := m.Sync(sctx); err != nil && sctx.Err() == nil {
 				m.log().Warn("client releases not mirrored", "err", err)
 			}
-			m.mu.Lock()
-			m.stop = nil
-			m.mu.Unlock()
-			stop()
 			wait = Interval
 			if jitter != nil {
 				wait += jitter()
 			}
-		} else {
+		default:
 			m.clear()
 		}
+		m.mu.Lock()
+		m.stop = nil
+		m.mu.Unlock()
+		stop()
 		select {
 		case <-ctx.Done():
-			return
 		case <-kick:
 		case <-time.After(wait):
+		}
+		if ctx.Err() != nil {
+			return
 		}
 	}
 }

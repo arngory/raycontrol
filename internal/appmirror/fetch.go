@@ -38,8 +38,9 @@ type ghAsset struct {
 }
 
 const (
-	// maxTries: newer releases of a kind tried in one check, newest
-	// first; one that does not verify is not tried again for failMemory.
+	// maxTries: newer releases of a kind fetched in one check, newest
+	// first; one that does not verify is not tried again for failMemory,
+	// one not yet whole on GitHub (errIncomplete) costs no try.
 	maxTries   = 3
 	failMemory = 24 * time.Hour
 	// releaseTimeout bounds the fetch of a release (a host that drips).
@@ -48,10 +49,16 @@ const (
 	spare = 64 << 20
 )
 
-// errUnverified marks a release that does not verify (signature, names,
-// sizes, hashes), as against one the network failed to bring or whose
-// assets are not all up yet.
-var errUnverified = errors.New("does not verify")
+var (
+	// errUnverified marks a release that does not verify (signature,
+	// names, sizes, hashes), as against one the network failed to bring.
+	errUnverified = errors.New("does not verify")
+	// errIncomplete marks a release whose assets are not all up (yet):
+	// its upload still going, or dead. Seen from the listing and
+	// SHA256SUMS, it costs no try: a few of them do not hold back an older
+	// release that is whole.
+	errIncomplete = errors.New("not whole")
+)
 
 func unverified(format string, a ...any) error {
 	return fmt.Errorf("%w: %s", errUnverified, fmt.Sprintf(format, a...))
@@ -204,12 +211,16 @@ func (m *Mirror) newest(ctx context.Context, cands []ghRelease, held *Release, e
 		if tries == maxTries || ctx.Err() != nil {
 			break
 		}
-		tries++
 		r, err := m.fetch(ctx, c)
 		if err != nil {
 			*errs = append(*errs, fmt.Errorf("%s: %w", c.Tag, err))
-			if errors.Is(err, errUnverified) {
+			switch {
+			case errors.Is(err, errIncomplete):
+			case errors.Is(err, errUnverified):
 				m.remember(c.Tag)
+				tries++
+			default:
+				tries++
 			}
 			continue
 		}
@@ -297,9 +308,7 @@ func (m *Mirror) fetch(ctx context.Context, gr ghRelease) (Release, error) {
 		a, ok := assets[f.Name]
 		switch {
 		case !ok:
-			// Not remembered: the assets of a new release may still be
-			// going up.
-			return Release{}, fmt.Errorf("%s is listed but not in the release", f.Name)
+			return Release{}, fmt.Errorf("%w: %s is listed but not in the release", errIncomplete, f.Name)
 		case a.Size <= 0 || a.Size > MaxFile:
 			return Release{}, unverified("%s: %d bytes (at most %d)", f.Name, a.Size, MaxFile)
 		}
@@ -387,7 +396,7 @@ func syncDir(dir string) error {
 func (m *Mirror) small(ctx context.Context, assets map[string]ghAsset, name string, limit int64) ([]byte, error) {
 	a, ok := assets[name]
 	if !ok {
-		return nil, fmt.Errorf("no %s in the release (yet)", name)
+		return nil, fmt.Errorf("%w: no %s in the release", errIncomplete, name)
 	}
 	var buf bytes.Buffer
 	if err := m.get(ctx, a.URL, limit, &buf); err != nil {
