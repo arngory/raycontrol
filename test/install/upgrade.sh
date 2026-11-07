@@ -11,8 +11,9 @@
 #
 #   test/install/upgrade.sh DISTRO BIN_DIR OLD_DIR
 #
-# BIN_DIR as for run.sh. OLD_DIR holds the previous release's binaries
-# (rayd, rayspa, rayctl, niko-server, xray) and its install/ directory.
+# BIN_DIR as for run.sh, with slipstream-server (the archive has it since
+# v0.16.0). OLD_DIR holds the previous release's binaries (rayd, rayspa,
+# rayctl, niko-server, xray) and its install/ directory.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/install/lib.sh
@@ -28,6 +29,7 @@ for f in rayd rayspa rayctl niko-server xray; do
 	[[ -x $bin/$f ]] || die "$bin/$f is missing"
 	[[ -x $old/$f ]] || die "$old/$f is missing"
 done
+[[ -x $bin/slipstream-server ]] || die "$bin/slipstream-server is missing"
 [[ -f $old/install/bootstrap.sh ]] || die "$old/install/bootstrap.sh is missing"
 work=""
 node=""
@@ -170,7 +172,7 @@ x /usr/local/bin/rayctl update -local /opt/rc -yes || fail "rayctl update"
 for b in rayd rayspa rayctl; do
 	x cmp -s "/opt/rc/$b" "/usr/local/bin/$b" || fail "$b is not this build's after the update"
 done
-for b in niko-server xray; do
+for b in niko-server xray slipstream-server; do
 	x cmp -s "/opt/rc/$b" "/usr/local/libexec/raycontrol/$b" || fail "$b is not this build's after the update"
 done
 wait_active rayd.service rayspa.service niko-inner.service niko-dns.service niko-mdns.service niko-hy2o.service niko-front.service

@@ -36,9 +36,11 @@ variables → Actions. Без секрета релиз не собираетс�
      ветку (обычно `main`) и ввести тег `vX.Y.Z`. Workflow сам создаст тег на этом коммите вместе с релизом;
      существующий тег он не перезаписывает;
    - **тегом**: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. Workflow собирает `raycontrol-linux-{amd64,arm64}.tar.gz` (`rayd`, `rayspa`, `rayctl`, `xray`, `niko-server`,
-   `ipinfo_lite.mmdb`, `NOTICE`, `VERSIONS`), считает `SHA256SUMS`, подписывает его (trusted comment `raycontrol vX.Y.Z` — по нему `rayctl update`
-   узнаёт версию) и публикует релиз с этими файлами и `SHA256SUMS.minisig`.
+3. Workflow прогоняет весь CI (`ci.yml`) на этом коммите и собирает `raycontrol-linux-{amd64,arm64}.tar.gz` (`rayd`,
+   `rayspa`, `rayctl`, `xray`, `niko-server`, `slipstream-server`, `ipinfo_lite.mmdb`, `NOTICE`, `VERSIONS`), считает
+   `SHA256SUMS`, подписывает его (trusted comment `raycontrol vX.Y.Z` — по нему `rayctl update` узнаёт версию) и
+   публикует релиз с этими файлами и `SHA256SUMS.minisig`. Пока CI не зелёный, ничего не публикуется: v0.16.0 вышел
+   по зелёному прогону пулл-реквеста, а CI на `main`, шедший рядом с релизом, был красным.
 
 `install/bootstrap.sh` берёт последний релиз (или `RAYCONTROL_VERSION`), а сам скрипт по README скачивается из `main`:
 пока код не слит в `main`, скачивайте `bootstrap.sh` из рабочей ветки.
