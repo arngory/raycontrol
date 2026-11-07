@@ -11,10 +11,14 @@ nikosrv=$(realpath "$1")
 here=$(cd "$(dirname "$0")" && pwd)
 dir=$(mktemp -d)
 front=
+stopped=()
 cleanup() {
 	if [ -n "$front" ]; then
 		kill "$front" 2>/dev/null || true
 	fi
+	for unit in "${stopped[@]}"; do
+		systemctl start "$unit" || echo "could not start $unit again" >&2
+	done
 	rm -rf "$dir"
 }
 trap cleanup EXIT
@@ -46,6 +50,32 @@ expect() { # expect SERVER NAME WANT: the answer's rcode and count start with WA
 }
 
 bound 127.0.0.53 || fail "no systemd-resolved stub on 127.0.0.53"
+
+# Another listener on an address's UDP 53 keeps the front off 0.0.0.0:53
+# unless it binds with SO_REUSEADDR as resolved does. Some runner images run
+# one: "dns-resolver" on 127.0.0.100:53 (the front failed to bind beside
+# it). On a node rayctl check refuses that (port udp 53, required); here a
+# listener that is a systemd service is stopped for the test and started
+# again after it, and any other fails the test by name: what it checks is
+# the stub, not the runner's proxy.
+while read -r line; do
+	addr=$(awk '{print $4}' <<<"$line")
+	case "$addr" in 127.0.0.53%*:53 | 127.0.0.53:53 | 127.0.0.54:53) continue ;; esac
+	pid=$(grep -o 'pid=[0-9]*' <<<"$line" | head -n1 | cut -d= -f2)
+	unit=
+	if [ -n "$pid" ] && [ "$pid" != 1 ]; then
+		unit=$(ps -o unit= -p "$pid" | tr -d ' ')
+	fi
+	case "$unit" in
+	*.service)
+		[ "$unit" != systemd-resolved.service ] || continue
+		echo "note: $unit listens on $addr (no SO_REUSEADDR): stopped for the test" >&2
+		systemctl stop "$unit"
+		stopped+=("$unit")
+		;;
+	*) fail "another listener on UDP 53 that is no service to stop: $line" ;;
+	esac
+done < <(ss -Hlunp 'sport = :53')
 
 cat >"$dir/front.json" <<JSON
 {"schema": 1, "role": "front", "log": {"level": "info"},

@@ -4,6 +4,8 @@ on:
   push:
     branches: [main, "claude/**"]
   pull_request:
+  # The Release workflow runs all of it on the commit it releases.
+  workflow_call:
 
 permissions:
   contents: read
@@ -204,9 +206,13 @@ jobs:
         with:
           name: xray
           path: bin
-      - name: niko-server release
+      - name: niko-server and slipstream-server releases
+        # Both, as the archive carries both: a fresh install without
+        # slipstream-server differed from a node updated from v0.16.0, which
+        # has it (every run after v0.16.0 was out).
         run: |
           scripts/niko-server.sh amd64 bin/niko-server
+          scripts/slipstream-server.sh amd64 bin/slipstream-server
           chmod +x bin/*
       - name: The latest release
         run: test/install/previous.sh old

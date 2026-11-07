@@ -113,8 +113,9 @@ func TestRenderSlipstream(t *testing.T) {
 	}
 	var front struct {
 		Backends map[string]struct {
-			Socket string `json:"socket"`
-			Mode   string `json:"mode"`
+			Socket  string `json:"socket"`
+			Mode    string `json:"mode"`
+			Devices bool   `json:"devices"`
 		} `json:"backends"`
 		DNS struct {
 			Zones        []zone `json:"zones"`
@@ -139,7 +140,7 @@ func TestRenderSlipstream(t *testing.T) {
 			t.Errorf("zone %+v", o)
 		}
 	}
-	if b := front.Backends["slip"]; b.Socket != p.FrontSocket("slip", "packet") || b.Mode != "packet" {
+	if b := front.Backends["slip"]; b.Socket != p.FrontSocket("slip", "packet") || b.Mode != "packet" || !b.Devices {
 		t.Errorf("backend %+v", b)
 	}
 
@@ -149,9 +150,17 @@ func TestRenderSlipstream(t *testing.T) {
 	}
 	want := []string{"--front-socket", p.FrontSocket("slip", "packet"), "--front-uid", "9100", "--tag-len", "8",
 		"--target-unix", p.InnerSocket("inner"), "--cert", path.Join(dir, render.SlipstreamCert),
-		"--key", p.Credential("slip", render.SlipstreamKey), "--domain", ss.Zone, "--alpn", ss.ALPN}
+		"--key", p.Credential("slip", render.SlipstreamKey), "--domain", ss.Zone, "--alpn", ss.ALPN,
+		"--max-connections", "256", "--max-connections-per-device", "4"}
 	if !slices.Equal(args, want) {
 		t.Errorf("args\n%q\nwant\n%q", args, want)
+	}
+	// The limits as set (rayctl service set).
+	set := slip
+	set.Settings = strings.TrimSuffix(slip.Settings, "}") + `,"max_connections":256,"device_connections":2}`
+	if args, err := render.SlipstreamArgs(render.Service{Service: set}, "inner", p); err != nil ||
+		!slices.Equal(args[len(args)-4:], []string{"--max-connections", "256", "--max-connections-per-device", "2"}) {
+		t.Errorf("args with limits %q %v", args, err)
 	}
 	if got := render.UnservedZones(m); len(got) != 0 {
 		t.Errorf("unserved %v", got)

@@ -92,6 +92,7 @@
 | `rayctl service add yggdrasil ygg` | Yggdrasil: прямой TLS-линк на TCP 443 за фронтом (после REALITY), трафик идёт в `inner`; потом `rayctl apply` |
 | `rayctl service add dnstt dns` · `rayctl service add masterdns mdns` | DNS-туннели (резервный канал) |
 | `rayctl service add slipstream slip [-settings '{"zone":"s.example.net"}']` → `rayctl apply` | slipstream (с v0.16, [`spec/slipstream-v1.md`](spec/slipstream-v1.md)): DNS-туннель поверх QUIC с multipath, за DNS-фронтом. Зона — до 20 символов (иначе пакет QUIC Initial не влезет в запрос): своя — `zone`, без неё — случайная в домене ноды (если домен длиннее 16 символов, задайте свою). Каждый запрос несёт метку dnsauth-v2 устройства, фронт проверяет её до сервера; опций нет, ключ сервера (P-256) клиенты закрепляют, ротации нет. Ссылку берут Niko 1.37+, более старые пропускают строку |
+| `rayctl service set slip max_connections=512` · `device_connections=2` | пределы slipstream (с v0.17): соединений на сервис (16–1024, по умолчанию 256) и на одно устройство (1–16, по умолчанию 4; сверх любого из пределов уступает соединение устройства, молчащее дольше 5 с). `0` — по умолчанию. Сервер перезапускается. Сколько это людей — [`14-capacity.md`](14-capacity.md) |
 | `rayctl service add api api` | удалённый API для устройств-администраторов и регистрации по приглашениям |
 | `rayctl service enable\|disable\|del NAME` | включить, выключить, удалить |
 | `rayctl service set site answer=404\|403\|silent\|pages` | что сайт отвечает тем, кого отклонил REALITY; потом `rayctl apply` |

@@ -27,6 +27,12 @@ permissions:
   contents: read
 
 jobs:
+  ci:
+    # The whole CI on the commit being released: nothing is published unless
+    # it is green. v0.16.0 went out from a green pull request while CI on
+    # main, run beside the release, was red.
+    uses: ./.github/workflows/ci.yml
+
   asn:
     # One download for both archives.
     runs-on: ubuntu-24.04
@@ -113,7 +119,7 @@ jobs:
           path: raycontrol-linux-*.tar.gz
 
   release:
-    needs: build
+    needs: [ci, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

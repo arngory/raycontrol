@@ -1233,7 +1233,8 @@ func TestBuildSlipstream(t *testing.T) {
 	}
 	unit := file(p, "/etc/systemd/system/niko-slip.service")
 	args := "--front-socket /run/niko/slip-in/packet.sock --front-uid 9100 --tag-len 8 --target-unix /run/niko/inner/vless.sock" +
-		" --cert /var/lib/raycontrol/rendered/slip/cert.pem --key /run/niko/slip/key.pem --domain " + ss.Zone + " --alpn " + ss.ALPN
+		" --cert /var/lib/raycontrol/rendered/slip/cert.pem --key /run/niko/slip/key.pem --domain " + ss.Zone + " --alpn " + ss.ALPN +
+		" --max-connections 256 --max-connections-per-device 4"
 	for _, want := range []string{
 		"Description=slipstream server slip", "ConditionPathExists=/var/lib/raycontrol/rendered/slip/cert.pem\n",
 		"User=niko-slip", "Group=niko-slip", "SupplementaryGroups=niko-inner", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX\n",

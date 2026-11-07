@@ -89,10 +89,43 @@ func TestSlipstreamService(t *testing.T) {
 	if os.Zone == ss.Zone || os.ALPN == ss.ALPN {
 		t.Errorf("two services share %+v", os)
 	}
-	for _, kv := range [][2]string{{"zone", "x.example.com"}, {"auth", "off"}, {"auth_hint", "optional"}, {"seal", "required"}, {"spare_zones", "1"}} {
+	for _, kv := range [][2]string{{"zone", "x.example.com"}, {"auth", "off"}, {"auth_hint", "optional"}, {"seal", "required"}, {"spare_zones", "1"},
+		{"max_connections", "8"}, {"max_connections", "2048"}, {"max_connections", "x"}, {"device_connections", "17"}, {"device_connections", "-1"}} {
 		if _, err := SetServiceOption(ctx, st, "slip", kv[0], kv[1]); !errors.Is(err, store.ErrInvalid) {
 			t.Errorf("set %s=%s: %v", kv[0], kv[1], err)
 		}
+	}
+	// Its limits (spec/slipstream-v1.md §3): the defaults, as set, back to
+	// the defaults with 0.
+	if total, device := ss.Connections(); total != DefaultSlipstreamConnections || device != DefaultSlipstreamDeviceConnections {
+		t.Errorf("default limits %d %d", total, device)
+	}
+	for _, kv := range [][2]string{{"max_connections", "256"}, {"device_connections", "2"}} {
+		if _, err := SetServiceOption(ctx, st, "slip", kv[0], kv[1]); err != nil {
+			t.Fatalf("set %s=%s: %v", kv[0], kv[1], err)
+		}
+	}
+	got, _ := st.ServiceByName(ctx, "slip")
+	if s, err := ParseSlipstream(got); err != nil || s.Zone != ss.Zone || s.ALPN != ss.ALPN {
+		t.Fatalf("after set: %+v %v", s, err)
+	} else if total, device := s.Connections(); total != 256 || device != 2 {
+		t.Errorf("limits as set %d %d", total, device)
+	}
+	if _, err := SetServiceOption(ctx, st, "slip", "max_connections", "0"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = st.ServiceByName(ctx, "slip")
+	if s, _ := ParseSlipstream(got); s.MaxConnections != 0 || strings.Contains(got.Settings, "max_connections") {
+		t.Errorf("back to the default: %s", got.Settings)
+	}
+	// Given at creation, checked as set.
+	if _, err := CreateService(ctx, st, store.Service{Kind: "slipstream", Name: "big", Enabled: true,
+		Settings: `{"max_connections":512,"device_connections":8}`}); err != nil {
+		t.Errorf("limits at creation: %v", err)
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "slipstream", Name: "bad", Enabled: true,
+		Settings: `{"max_connections":4}`}); !errors.Is(err, store.ErrInvalid) {
+		t.Errorf("max_connections 4 at creation: %v", err)
 	}
 	if err := RequestRealityRotation(ctx, st, "slip", time.Now(), time.Hour, false); err == nil || !strings.Contains(err.Error(), "pin") {
 		t.Errorf("rotate: %v", err)
