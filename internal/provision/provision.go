@@ -784,6 +784,24 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 		if rest := slices.Delete(slices.Clone(spares), i, i+1); len(rest) > 0 {
 			also["spare_zones"] = rest
 		}
+	case svc.Kind == "slipstream" && (key == "max_connections" || key == "device_connections"):
+		// The server's limits (spec/slipstream-v1.md §3): a restart of
+		// it, its clients reconnect.
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return svc, fmt.Errorf("%w %s: a number (0: the default)", store.ErrInvalid, key)
+		}
+		ss, _ := ParseSlipstream(svc)
+		total, device := ss.MaxConnections, ss.DeviceConnections
+		if key == "max_connections" {
+			total = n
+		} else {
+			device = n
+		}
+		if err := slipstreamLimits(total, device); err != nil {
+			return svc, fmt.Errorf("%w: %w", store.ErrInvalid, err)
+		}
+		v = n
 	case svc.Kind == "site" && key == "answer":
 		if !slices.Contains(site.Answers, value) {
 			return svc, fmt.Errorf("%w site answer %q: want one of %s", store.ErrInvalid, value, strings.Join(site.Answers, ", "))
@@ -889,7 +907,7 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			v = 0
 		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: none)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {

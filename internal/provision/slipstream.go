@@ -31,6 +31,47 @@ type SlipstreamSettings struct {
 	Zone string `json:"zone"`
 	ALPN string `json:"quic_alpn"`
 	SNI  string `json:"quic_sni"`
+	// The server's connections at once (--max-connections) and one
+	// device's (--max-connections-per-device, by the device the front
+	// names); 0: the defaults (rayctl service set <slip> max_connections=,
+	// device_connections=).
+	MaxConnections    int `json:"max_connections,omitempty"`
+	DeviceConnections int `json:"device_connections,omitempty"`
+}
+
+// The limits of a slipstream service (spec/slipstream-v1.md §3): what one
+// server process carries (docs/14-capacity.md), and what a device needs —
+// its connection, and the one it left on another network until that one
+// is silent 30 s and gives way.
+const (
+	DefaultSlipstreamConnections       = 256
+	DefaultSlipstreamDeviceConnections = 4
+	MinSlipstreamConnections           = 16
+	MaxSlipstreamConnections           = 1024
+	MaxSlipstreamDeviceConnections     = 16
+)
+
+// Connections are the service's limits, the defaults filled in.
+func (s SlipstreamSettings) Connections() (total, device int) {
+	total, device = s.MaxConnections, s.DeviceConnections
+	if total == 0 {
+		total = DefaultSlipstreamConnections
+	}
+	if device == 0 {
+		device = DefaultSlipstreamDeviceConnections
+	}
+	return total, min(device, total)
+}
+
+// slipstreamLimits checks the limits as set (0: the default).
+func slipstreamLimits(total, device int) error {
+	if total != 0 && (total < MinSlipstreamConnections || total > MaxSlipstreamConnections) {
+		return fmt.Errorf("max_connections %d: %d to %d", total, MinSlipstreamConnections, MaxSlipstreamConnections)
+	}
+	if device != 0 && (device < 1 || device > MaxSlipstreamDeviceConnections) {
+		return fmt.Errorf("device_connections %d: 1 to %d", device, MaxSlipstreamDeviceConnections)
+	}
+	return nil
 }
 
 var (
@@ -54,6 +95,9 @@ func ParseSlipstream(svc store.Service) (SlipstreamSettings, error) {
 		return s, fmt.Errorf("quic_alpn %q: 8 to 12 of a-z and 0-9", s.ALPN)
 	case !slipSNI.MatchString(s.SNI):
 		return s, fmt.Errorf("quic_sni %q: <label>.<label>", s.SNI)
+	}
+	if err := slipstreamLimits(s.MaxConnections, s.DeviceConnections); err != nil {
+		return s, err
 	}
 	return s, nil
 }
@@ -99,6 +143,22 @@ func slipstreamService(ctx context.Context, st *store.Store, all []store.Service
 		settings["zone"] = canonicalZone(zs)
 	}
 
+	// The limits, when given at creation.
+	var limits struct {
+		Total  any `json:"max_connections"`
+		Device any `json:"device_connections"`
+	}
+	b, _ := json.Marshal(settings)
+	_ = json.Unmarshal(b, &limits)
+	total, okT := intSetting(limits.Total)
+	device, okD := intSetting(limits.Device)
+	if !okT || !okD {
+		return fmt.Errorf("%w: max_connections and device_connections are numbers", store.ErrInvalid)
+	}
+	if err := slipstreamLimits(total, device); err != nil {
+		return fmt.Errorf("%w: %w", store.ErrInvalid, err)
+	}
+
 	alpn, err := randomLabel("abcdefghijklmnopqrstuvwxyz0123456789", 8, 12)
 	if err != nil {
 		return err
@@ -119,6 +179,20 @@ func slipstreamService(ctx context.Context, st *store.Store, all []store.Service
 	settings["quic_alpn"], settings["quic_sni"] = alpn, sni
 	secrets[SecretTLSKey], secrets[SecretTLSCert] = key, cert
 	return nil
+}
+
+// intSetting reads a whole number from a setting as JSON gives it (nil: 0).
+func intSetting(v any) (int, bool) {
+	switch n := v.(type) {
+	case nil:
+		return 0, true
+	case float64:
+		if n != float64(int(n)) {
+			return 0, false
+		}
+		return int(n), true
+	}
+	return 0, false
 }
 
 // randomLabel is a random string of lo to hi characters of alphabet.

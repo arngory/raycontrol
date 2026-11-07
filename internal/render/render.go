@@ -485,6 +485,9 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		Socket string `json:"socket"`
 		Mode   string `json:"mode"`
 		UID    int    `json:"uid"`
+		// Devices: the front names each query's device (IPC version 2,
+		// niko-server v0.14.0), for the server's limit per device.
+		Devices bool `json:"devices,omitempty"`
 	}
 	type tcpRoute struct {
 		SNI     []string `json:"sni"`
@@ -577,7 +580,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				r.NS = []string{m.NSName}
 			}
 			zones = append(zones, r)
-			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
+			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID), Devices: true}
 			files = append(files, fs...)
 			files = append(files, auth)
 		case "inner":
@@ -977,15 +980,17 @@ func slipstreamFiles(s Service, p Paths) ([]File, error) {
 }
 
 // SlipstreamArgs are the slipstream server's arguments for a service
-// (spec/slipstream-v1.md §2): its queries from the front's socket, the
+// (spec/slipstream-v1.md §2-§3): its queries from the front's socket, the
 // dnsauth-v2 field the front checked skipped, the streams to the inner
-// stage, its own certificate, zone and ALPN; the limits are the server's
-// defaults.
+// stage, its own certificate, zone and ALPN, its connections at once and a
+// device's (the device the front names); the other limits are the
+// server's defaults.
 func SlipstreamArgs(s Service, inner string, p Paths) ([]string, error) {
 	ss, err := provision.ParseSlipstream(s.Service)
 	if err != nil {
 		return nil, fmt.Errorf("service %s: %w", s.Name, err)
 	}
+	total, device := ss.Connections()
 	return []string{
 		"--front-socket", p.FrontSocket(s.Name, "packet"),
 		"--front-uid", strconv.Itoa(p.PeerUID(FrontUID)),
@@ -995,6 +1000,8 @@ func SlipstreamArgs(s Service, inner string, p Paths) ([]string, error) {
 		"--key", p.Credential(s.Name, SlipstreamKey),
 		"--domain", ss.Zone,
 		"--alpn", ss.ALPN,
+		"--max-connections", strconv.Itoa(total),
+		"--max-connections-per-device", strconv.Itoa(device),
 	}, nil
 }
 

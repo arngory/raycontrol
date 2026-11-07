@@ -30,6 +30,8 @@ import (
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1/devicev1connect"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
+	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
@@ -54,7 +56,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             (auth_hint: dnsauth-v2 tags; required needs auth=required),
                                             spare_zones=N|ZONE,ZONE|none (spare zones, made up or your own),
                                             zone=SPARE (a spare becomes the main zone, the main one leaves);
-                                            slipstream: none (dnsauth-v2 required, one zone, pinned key)
+                                            slipstream: max_connections=16..1024, device_connections=1..16
+                                            (0: the defaults, 256 and 4; the server restarts)
   service cert SITE -chain F -key F         a certificate of your own for the site and the services under
                                             it, in place of ACME's (on the node only)
   service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
@@ -612,9 +615,11 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 func keyState(s *nodev1.Service) string {
 	day := func(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04") }
 	if s.Kind == "slipstream" {
-		// Fixed (spec/slipstream-v1.md): the front checks every query's
-		// dnsauth-v2 tag; the server's key is pinned, never rotated.
-		return "auth required, v2 required (at the front), pinned key"
+		// The front checks every query's dnsauth-v2 tag; the server's key
+		// is pinned, never rotated (spec/slipstream-v1.md); its limits.
+		ss, _ := provision.ParseSlipstream(store.Service{Kind: s.Kind, Settings: s.SettingsJson})
+		total, device := ss.Connections()
+		return fmt.Sprintf("auth required, v2 required (at the front), pinned key, connections %d, %d a device", total, device)
 	}
 	if s.Kind == "dnstt" || s.Kind == "masterdns" {
 		// The modes, and the switch of a dnstt seal key if there was one

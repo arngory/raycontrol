@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -54,13 +55,20 @@ func TestSlipstreamWithNikoServer(t *testing.T) {
 	if _, err := provision.Init(ctx, st, provision.Options{Host: "127.0.0.1", Domain: "example.com"}); err != nil {
 		t.Fatal(err)
 	}
-	slip, err := provision.CreateService(ctx, st, store.Service{Kind: "slipstream", Name: "slip", Enabled: true})
+	// One connection a device: a second client of the phone waits, the
+	// laptop's does not (server-v0.2.0, the device named by the front).
+	slip, err := provision.CreateService(ctx, st, store.Service{Kind: "slipstream", Name: "slip", Enabled: true,
+		Settings: `{"device_connections":1}`})
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
 	st.SetUserServices(ctx, "alice", []int64{slip.ID})
 	_, devKey, err := st.CreateDevice(ctx, "alice", "phone", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, laptopKey, err := st.CreateDevice(ctx, "alice", "laptop", "user")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,39 +234,53 @@ func TestSlipstreamWithNikoServer(t *testing.T) {
 	}
 	tcp, _ := startClient(k[:])
 
-	// VLESS through the tunnel into inner.
-	socks := freePort(t)
-	runXray(t, bin, writeJSON(t, map[string]any{
-		"log":      map[string]string{"loglevel": "warning"},
-		"inbounds": []map[string]any{{"listen": "127.0.0.1", "port": socks, "protocol": "socks", "settings": map[string]any{"udp": false}}},
-		"outbounds": []map[string]any{{"protocol": "vless", "settings": map[string]any{
-			"vnext": []map[string]any{{"address": "127.0.0.1", "port": tcp,
-				"users": []map[string]string{{"id": link.User.Username(), "encryption": q.Get("encryption")}}}}}}},
-	}))
+	// VLESS through a client's tunnel into inner: a page, within tries.
 	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		io.WriteString(w, strings.Repeat("through slipstream ", 4096))
 	}))
 	defer page.Close()
-	proxy, _ := url.Parse("socks5://127.0.0.1:" + strconv.Itoa(socks))
-	hc := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: 20 * time.Second}
-	var lastErr error
-	got := false
-	for range 30 {
-		resp, err := hc.Get(page.URL)
-		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if string(body) != strings.Repeat("through slipstream ", 4096) {
-				t.Fatalf("body of %d bytes", len(body))
+	fetch := func(tcp, tries int, timeout time.Duration) error {
+		t.Helper()
+		socks := freePort(t)
+		stop := runXray(t, bin, writeJSON(t, map[string]any{
+			"log":      map[string]string{"loglevel": "warning"},
+			"inbounds": []map[string]any{{"listen": "127.0.0.1", "port": socks, "protocol": "socks", "settings": map[string]any{"udp": false}}},
+			"outbounds": []map[string]any{{"protocol": "vless", "settings": map[string]any{
+				"vnext": []map[string]any{{"address": "127.0.0.1", "port": tcp,
+					"users": []map[string]string{{"id": link.User.Username(), "encryption": q.Get("encryption")}}}}}}},
+		}))
+		defer stop()
+		proxy, _ := url.Parse("socks5://127.0.0.1:" + strconv.Itoa(socks))
+		hc := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}, Timeout: timeout}
+		var lastErr error
+		for range tries {
+			resp, err := hc.Get(page.URL)
+			if err == nil {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if string(body) != strings.Repeat("through slipstream ", 4096) {
+					return fmt.Errorf("body of %d bytes", len(body))
+				}
+				return nil
 			}
-			got = true
-			break
+			lastErr = err
+			time.Sleep(time.Second)
 		}
-		lastErr = err
-		time.Sleep(time.Second)
+		return lastErr
 	}
-	if !got {
-		t.Fatalf("nothing through slipstream: %v", lastErr)
+	if err := fetch(tcp, 30, 20*time.Second); err != nil {
+		t.Fatalf("nothing through slipstream: %v", err)
+	}
+	// The phone's second client gets nothing while its first is there
+	// (keepalives: never silent 30 s); the laptop's gets through.
+	tcp2, _ := startClient(k[:])
+	if err := fetch(tcp2, 2, 8*time.Second); err == nil {
+		t.Error("a second connection of the device got through (device_connections 1)")
+	}
+	kl := spa.DNSAuthKey(laptopKey, [spa.NodeIDSize]byte(nodeID), uint16(svcID))
+	tcp3, _ := startClient(kl[:])
+	if err := fetch(tcp3, 30, 20*time.Second); err != nil {
+		t.Errorf("another device beside it: %v", err)
 	}
 	before, err := dnsstats.ReadFront(ctx, paths.FrontStats())
 	if err != nil {
