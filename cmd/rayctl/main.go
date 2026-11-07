@@ -92,6 +92,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   summary on|off                            take client reports (and give hints) or not
   summary api ipinfo [-token-file F] | none the online AS lookup for addresses the databases miss
   summary db FILE.mmdb | -remove            an AS database of your own before the release's (root)
+  app-mirror [show] | on | off              the client's releases on the node for its devices
+                                            (spec/app-update-v1.md; off by default)
   debug [show] | on [-for 30m] | off        the debug window: rayd, rayspa and niko-server log at debug
                                             level (client addresses too) until it closes by itself; root
 
@@ -239,6 +241,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.dns(ctx, sub, rest)
 	case "summary":
 		return c.summaryCmd(ctx, sub, rest)
+	case "app-mirror":
+		return c.appMirror(ctx, sub)
 	case "debug":
 		return c.debug(ctx, sub, rest)
 	case "remote":

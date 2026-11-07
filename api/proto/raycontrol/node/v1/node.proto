@@ -105,6 +105,12 @@ service NodeService {
   // SetSummary turns the reports on or off, and the online AS lookup. The
   // token is stored by rayd and never returned.
   rpc SetSummary(SetSummaryRequest) returns (SetSummaryResponse);
+  // GetAppMirror reports the mirror of the client's releases
+  // (spec/app-update-v1.md): on or off, what it holds, the last check.
+  rpc GetAppMirror(GetAppMirrorRequest) returns (GetAppMirrorResponse);
+  // SetAppMirror turns it on (with 1 GiB free for it) or off (its files
+  // go).
+  rpc SetAppMirror(SetAppMirrorRequest) returns (SetAppMirrorResponse);
   // SetDebug opens the debug window for a while or closes it: rayd, rayspa
   // and niko-server log at debug level until it ends by itself
   // (docs/09-observability.md §3). Root on the node only.
@@ -577,6 +583,27 @@ message SetSummaryRequest {
   string token = 3;
 }
 message SetSummaryResponse {}
+message GetAppMirrorRequest {}
+message GetAppMirrorResponse {
+  bool enabled = 1;
+  repeated AppRelease releases = 2;
+  // checked is the last check of GitHub, unix seconds; 0: none yet.
+  int64 checked = 3;
+  // error is the last check's, empty when it went well.
+  string error = 4;
+}
+message AppRelease {
+  string app = 1;
+  string tag = 2;
+  bool prerelease = 3;
+  int64 bytes = 4;
+  uint32 files = 5;
+  int64 verified = 6; // unix seconds
+}
+message SetAppMirrorRequest {
+  bool enabled = 1;
+}
+message SetAppMirrorResponse {}
 message SetDebugRequest {
   // seconds: how long the window stays open, up to a day; 0 closes it.
   int64 seconds = 1;

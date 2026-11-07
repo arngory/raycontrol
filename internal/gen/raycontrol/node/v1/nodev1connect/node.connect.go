@@ -125,6 +125,12 @@ const (
 	NodeServiceGetSummaryProcedure = "/raycontrol.node.v1.NodeService/GetSummary"
 	// NodeServiceSetSummaryProcedure is the fully-qualified name of the NodeService's SetSummary RPC.
 	NodeServiceSetSummaryProcedure = "/raycontrol.node.v1.NodeService/SetSummary"
+	// NodeServiceGetAppMirrorProcedure is the fully-qualified name of the NodeService's GetAppMirror
+	// RPC.
+	NodeServiceGetAppMirrorProcedure = "/raycontrol.node.v1.NodeService/GetAppMirror"
+	// NodeServiceSetAppMirrorProcedure is the fully-qualified name of the NodeService's SetAppMirror
+	// RPC.
+	NodeServiceSetAppMirrorProcedure = "/raycontrol.node.v1.NodeService/SetAppMirror"
 	// NodeServiceSetDebugProcedure is the fully-qualified name of the NodeService's SetDebug RPC.
 	NodeServiceSetDebugProcedure = "/raycontrol.node.v1.NodeService/SetDebug"
 	// NodeServiceSetNodeNameProcedure is the fully-qualified name of the NodeService's SetNodeName RPC.
@@ -223,6 +229,12 @@ type NodeServiceClient interface {
 	// SetSummary turns the reports on or off, and the online AS lookup. The
 	// token is stored by rayd and never returned.
 	SetSummary(context.Context, *connect.Request[v1.SetSummaryRequest]) (*connect.Response[v1.SetSummaryResponse], error)
+	// GetAppMirror reports the mirror of the client's releases
+	// (spec/app-update-v1.md): on or off, what it holds, the last check.
+	GetAppMirror(context.Context, *connect.Request[v1.GetAppMirrorRequest]) (*connect.Response[v1.GetAppMirrorResponse], error)
+	// SetAppMirror turns it on (with 1 GiB free for it) or off (its files
+	// go).
+	SetAppMirror(context.Context, *connect.Request[v1.SetAppMirrorRequest]) (*connect.Response[v1.SetAppMirrorResponse], error)
 	// SetDebug opens the debug window for a while or closes it: rayd, rayspa
 	// and niko-server log at debug level until it ends by itself
 	// (docs/09-observability.md §3). Root on the node only.
@@ -456,6 +468,18 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("SetSummary")),
 			connect.WithClientOptions(opts...),
 		),
+		getAppMirror: connect.NewClient[v1.GetAppMirrorRequest, v1.GetAppMirrorResponse](
+			httpClient,
+			baseURL+NodeServiceGetAppMirrorProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetAppMirror")),
+			connect.WithClientOptions(opts...),
+		),
+		setAppMirror: connect.NewClient[v1.SetAppMirrorRequest, v1.SetAppMirrorResponse](
+			httpClient,
+			baseURL+NodeServiceSetAppMirrorProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetAppMirror")),
+			connect.WithClientOptions(opts...),
+		),
 		setDebug: connect.NewClient[v1.SetDebugRequest, v1.SetDebugResponse](
 			httpClient,
 			baseURL+NodeServiceSetDebugProcedure,
@@ -514,6 +538,8 @@ type nodeServiceClient struct {
 	getMetrics        *connect.Client[v1.GetMetricsRequest, v1.GetMetricsResponse]
 	getSummary        *connect.Client[v1.GetSummaryRequest, v1.GetSummaryResponse]
 	setSummary        *connect.Client[v1.SetSummaryRequest, v1.SetSummaryResponse]
+	getAppMirror      *connect.Client[v1.GetAppMirrorRequest, v1.GetAppMirrorResponse]
+	setAppMirror      *connect.Client[v1.SetAppMirrorRequest, v1.SetAppMirrorResponse]
 	setDebug          *connect.Client[v1.SetDebugRequest, v1.SetDebugResponse]
 	setNodeName       *connect.Client[v1.SetNodeNameRequest, v1.SetNodeNameResponse]
 	getDeployment     *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
@@ -694,6 +720,16 @@ func (c *nodeServiceClient) SetSummary(ctx context.Context, req *connect.Request
 	return c.setSummary.CallUnary(ctx, req)
 }
 
+// GetAppMirror calls raycontrol.node.v1.NodeService.GetAppMirror.
+func (c *nodeServiceClient) GetAppMirror(ctx context.Context, req *connect.Request[v1.GetAppMirrorRequest]) (*connect.Response[v1.GetAppMirrorResponse], error) {
+	return c.getAppMirror.CallUnary(ctx, req)
+}
+
+// SetAppMirror calls raycontrol.node.v1.NodeService.SetAppMirror.
+func (c *nodeServiceClient) SetAppMirror(ctx context.Context, req *connect.Request[v1.SetAppMirrorRequest]) (*connect.Response[v1.SetAppMirrorResponse], error) {
+	return c.setAppMirror.CallUnary(ctx, req)
+}
+
 // SetDebug calls raycontrol.node.v1.NodeService.SetDebug.
 func (c *nodeServiceClient) SetDebug(ctx context.Context, req *connect.Request[v1.SetDebugRequest]) (*connect.Response[v1.SetDebugResponse], error) {
 	return c.setDebug.CallUnary(ctx, req)
@@ -798,6 +834,12 @@ type NodeServiceHandler interface {
 	// SetSummary turns the reports on or off, and the online AS lookup. The
 	// token is stored by rayd and never returned.
 	SetSummary(context.Context, *connect.Request[v1.SetSummaryRequest]) (*connect.Response[v1.SetSummaryResponse], error)
+	// GetAppMirror reports the mirror of the client's releases
+	// (spec/app-update-v1.md): on or off, what it holds, the last check.
+	GetAppMirror(context.Context, *connect.Request[v1.GetAppMirrorRequest]) (*connect.Response[v1.GetAppMirrorResponse], error)
+	// SetAppMirror turns it on (with 1 GiB free for it) or off (its files
+	// go).
+	SetAppMirror(context.Context, *connect.Request[v1.SetAppMirrorRequest]) (*connect.Response[v1.SetAppMirrorResponse], error)
 	// SetDebug opens the debug window for a while or closes it: rayd, rayspa
 	// and niko-server log at debug level until it ends by itself
 	// (docs/09-observability.md §3). Root on the node only.
@@ -1027,6 +1069,18 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("SetSummary")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceGetAppMirrorHandler := connect.NewUnaryHandler(
+		NodeServiceGetAppMirrorProcedure,
+		svc.GetAppMirror,
+		connect.WithSchema(nodeServiceMethods.ByName("GetAppMirror")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceSetAppMirrorHandler := connect.NewUnaryHandler(
+		NodeServiceSetAppMirrorProcedure,
+		svc.SetAppMirror,
+		connect.WithSchema(nodeServiceMethods.ByName("SetAppMirror")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceSetDebugHandler := connect.NewUnaryHandler(
 		NodeServiceSetDebugProcedure,
 		svc.SetDebug,
@@ -1117,6 +1171,10 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceGetSummaryHandler.ServeHTTP(w, r)
 		case NodeServiceSetSummaryProcedure:
 			nodeServiceSetSummaryHandler.ServeHTTP(w, r)
+		case NodeServiceGetAppMirrorProcedure:
+			nodeServiceGetAppMirrorHandler.ServeHTTP(w, r)
+		case NodeServiceSetAppMirrorProcedure:
+			nodeServiceSetAppMirrorHandler.ServeHTTP(w, r)
 		case NodeServiceSetDebugProcedure:
 			nodeServiceSetDebugHandler.ServeHTTP(w, r)
 		case NodeServiceSetNodeNameProcedure:
@@ -1270,6 +1328,14 @@ func (UnimplementedNodeServiceHandler) GetSummary(context.Context, *connect.Requ
 
 func (UnimplementedNodeServiceHandler) SetSummary(context.Context, *connect.Request[v1.SetSummaryRequest]) (*connect.Response[v1.SetSummaryResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetSummary is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetAppMirror(context.Context, *connect.Request[v1.GetAppMirrorRequest]) (*connect.Response[v1.GetAppMirrorResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetAppMirror is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetAppMirror(context.Context, *connect.Request[v1.SetAppMirrorRequest]) (*connect.Response[v1.SetAppMirrorResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetAppMirror is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) SetDebug(context.Context, *connect.Request[v1.SetDebugRequest]) (*connect.Response[v1.SetDebugResponse], error) {

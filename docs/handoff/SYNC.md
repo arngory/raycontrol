@@ -79,6 +79,7 @@
 | subscription-v1 §4 | у `hysteria2://` больше нет `insecure=0` | raycontrol v0.10.0 | ничего: строгий разбор такие строки и хочет |
 | subscription-v1 §4 | новый параметр `niko-dnsauth=v1` у профиля dnstt | raycontrol v0.10.0 (если администратор включил) | подписывать запросы (dnsauth-v1); без поддержки в режиме `required` туннель не работает |
 | subscription, API, probe | на 3xx — 404: нода никогда не перенаправляет | raycontrol v0.10.0 | ничего |
+| app-update-v1 (новое) | поле `app` в подписке и `/app/v1/niko/<tag>/<имя>` на порту подписки: релизы Niko, проверенные нодой | raycontrol v0.18.0 (если администратор включил `rayctl app-mirror on`) | читать `app`, качать с ноды с докачкой, проверять подпись как для GitHub (#58) |
 | dnsauth-v1 | новая спецификация | raycontrol v0.10.0 + niko-server v0.8.0 | см. задачу выше |
 | spa-v2 §10.1 | TCP-носитель в форме ClientHello (формат пакета не меняется) | raycontrol v0.10.0 | слать ClientHello вместо голого TCP; к нодам до v0.10.0 — голый TCP |
 | subscription-v1 `spa.carriers` | какие носители SPA нода принимает, **в порядке, в котором их пробовать**: `["udp","tls","tcp"]` (с `-spa-tcp`) или `["udp"]` | raycontrol v0.10.1 | идти по списку; нет поля — старая нода: UDP, ClientHello, голый TCP |

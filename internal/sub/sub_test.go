@@ -16,12 +16,14 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/appmirror"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
@@ -1071,5 +1073,42 @@ func TestSlipstreamInSubscription(t *testing.T) {
 	}
 	if sub.RelayKinds("slipstream") {
 		t.Error("slipstream through a relay")
+	}
+}
+
+// fakeApp stands in for appmirror.Mirror.
+type fakeApp struct{ hint *appmirror.Hint }
+
+func (f fakeApp) Hint(context.Context) *appmirror.Hint { return f.hint }
+func (f fakeApp) Handler(func(*http.Request) (string, error)) http.Handler {
+	return http.NotFoundHandler()
+}
+
+// The client's releases the node serves are listed in every user's
+// subscription (spec/app-update-v1.md §1), under the payload's signature;
+// none, no field.
+func TestSubscriptionApp(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	for _, hint := range []*appmirror.Hint{nil, {Niko: []appmirror.HintRelease{{Tag: "v1.38.0"}, {Tag: "v1.39.0-rc1", Prerelease: true}}}} {
+		srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet(), App: fakeApp{hint}}
+		env, err := srv.Build(ctx, "alice", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(p.App, hint) {
+			t.Errorf("app %+v, want %+v", p.App, hint)
+		}
+		raw, _ := base64.RawURLEncoding.DecodeString(env.Payload)
+		if hint == nil && strings.Contains(string(raw), `"app"`) {
+			t.Errorf("an app field without releases: %s", raw)
+		}
+		if hint != nil && !strings.Contains(string(raw), `"app":{"niko":[{"tag":"v1.38.0","prerelease":false},{"tag":"v1.39.0-rc1","prerelease":true}]}`) {
+			t.Errorf("payload %s", raw)
+		}
 	}
 }
