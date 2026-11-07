@@ -455,6 +455,12 @@ func ConnContext(ctx context.Context, c net.Conn) context.Context {
 	return context.WithValue(ctx, connKey{}, c)
 }
 
+// Conn is the connection ConnContext put in a request's context, or nil.
+func Conn(ctx context.Context) net.Conn {
+	c, _ := ctx.Value(connKey{}).(net.Conn)
+	return c
+}
+
 func tcpInfo(ctx context.Context) *TCPInfo {
 	c, _ := ctx.Value(connKey{}).(net.Conn)
 	if tc, ok := c.(*tls.Conn); ok {

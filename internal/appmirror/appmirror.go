@@ -8,10 +8,14 @@ package appmirror
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -47,10 +51,15 @@ const (
 	MinFree = 1 << 30
 	// PerNode downloads at once; a device has one.
 	PerNode = 16
-	// Stall ends a download that takes no byte for so long.
-	Stall = 60 * time.Second
+	// MaxDownload ends any download (the client resumes it).
+	MaxDownload = 15 * time.Minute
+	sendBuffer  = 256 << 10
 	// RetryAfter is what a client over a limit waits, in seconds.
 	RetryAfter = 10
+	// Stall ends a download whose next piece does not leave for so long;
+	// the subscription's server closes an HTTP/2 connection that takes no
+	// byte for as long.
+	Stall = 60 * time.Second
 
 	settingEnabled = "app_mirror"
 	sumsName       = "SHA256SUMS"
@@ -121,13 +130,23 @@ type Mirror struct {
 	// AllowHTTP takes plain HTTP from the source: a test's, never GitHub
 	// (rayd: RAYCONTROL_UNSAFE_APP_MIRROR_API).
 	AllowHTTP bool
-	Log       *slog.Logger
+	// Conn gives a request's connection (probe.Conn): a download's send
+	// buffer is made small. Nil: left as it is.
+	Conn func(context.Context) net.Conn
+	// Stall: Stall when zero (a test seam).
+	Stall time.Duration
+	Log   *slog.Logger
 
 	mu      sync.Mutex
 	held    []Release // the stable first, then a newer pre-release
 	checked time.Time
 	lastErr string
 	kick    chan struct{}
+	failed  map[string]time.Time // tags that did not verify, and when
+	stop    context.CancelFunc   // the check running, if any
+
+	clientOnce sync.Once
+	ownClient  *http.Client
 
 	dl     sync.Mutex
 	active map[string]bool // a device's download
@@ -167,7 +186,16 @@ func Enabled(ctx context.Context, st *store.Store) bool {
 // rayd's loop follows (Kick), and drops the files when it is off.
 func (m *Mirror) SetEnabled(ctx context.Context, on bool) error {
 	if !on {
-		return m.Store.SetSetting(ctx, settingEnabled, []byte("off"))
+		if err := m.Store.SetSetting(ctx, settingEnabled, []byte("off")); err != nil {
+			return err
+		}
+		// A check under way stops: off takes effect now, not after it.
+		m.mu.Lock()
+		if m.stop != nil {
+			m.stop()
+		}
+		m.mu.Unlock()
+		return nil
 	}
 	free, err := freeBytes(m.dir())
 	if err != nil {
@@ -187,7 +215,7 @@ func freeBytes(dir string) (uint64, error) {
 		var st unix.Statfs_t
 		err := unix.Statfs(dir, &st)
 		if err == nil {
-			return st.Bavail * uint64(st.Bsize), nil
+			return st.Bavail * uint64(st.Frsize), nil
 		}
 		parent := filepath.Dir(dir)
 		if !errors.Is(err, unix.ENOENT) || parent == dir {
@@ -213,9 +241,10 @@ func (m *Mirror) Kick() {
 
 // Status reports the mirror.
 func (m *Mirror) Status(ctx context.Context) Status {
+	on := Enabled(ctx, m.Store)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return Status{Enabled: Enabled(ctx, m.Store), Releases: slices.Clone(m.held), Checked: m.checked, Err: m.lastErr}
+	return Status{Enabled: on, Releases: slices.Clone(m.held), Checked: m.checked, Err: m.lastErr}
 }
 
 // Hint is the subscription's field: nil when the mirror is off or holds
@@ -259,9 +288,17 @@ func (m *Mirror) Run(ctx context.Context, jitter func() time.Duration) {
 	for {
 		wait := time.Hour // off: look again now and then (and on a kick)
 		if Enabled(ctx, m.Store) {
-			if err := m.Sync(ctx); err != nil {
+			sctx, stop := context.WithCancel(ctx)
+			m.mu.Lock()
+			m.stop = stop
+			m.mu.Unlock()
+			if err := m.Sync(sctx); err != nil {
 				m.log().Warn("client releases not mirrored", "err", err)
 			}
+			m.mu.Lock()
+			m.stop = nil
+			m.mu.Unlock()
+			stop()
 			wait = Interval
 			if jitter != nil {
 				wait += jitter()
@@ -302,8 +339,10 @@ func (m *Mirror) load() {
 	m.prune(held)
 }
 
-// check reads a release's directory: its manifest, its files by size, and
-// the signature of its SHA256SUMS again (cheap; the files are rayd's).
+// check reads a release's directory again (a previous rayd's): the
+// signature of its SHA256SUMS, the manifest's files against what it lists,
+// and every file's SHA-256 (~0.2 s for a release; a crash may have left a
+// file short or torn).
 func (m *Mirror) check(dir string) (Release, error) {
 	var r Release
 	b, err := os.ReadFile(filepath.Join(dir, manifestName)) //nolint:gosec // G304: rayd's own directory
@@ -313,20 +352,8 @@ func (m *Mirror) check(dir string) (Release, error) {
 	if err := json.Unmarshal(b, &r); err != nil {
 		return r, err
 	}
-	if !validTag(r.Tag) || filepath.Base(dir) != r.Tag {
+	if !validTag(r.Tag) || filepath.Base(dir) != r.Tag || r.Prerelease != isPre(r.Tag) {
 		return r, fmt.Errorf("tag %q", r.Tag)
-	}
-	if len(r.Files) < 3 || r.Files[0].Name != sumsName || r.Files[1].Name != sigName {
-		return r, errors.New("files")
-	}
-	for _, f := range r.Files {
-		if !validName(f.Name) {
-			return r, fmt.Errorf("file %q", f.Name)
-		}
-		st, err := os.Stat(filepath.Join(dir, f.Name))
-		if err != nil || st.Size() != f.Size {
-			return r, fmt.Errorf("file %s", f.Name)
-		}
 	}
 	sums, err := os.ReadFile(filepath.Join(dir, sumsName)) //nolint:gosec // G304: rayd's own directory
 	if err != nil {
@@ -339,7 +366,38 @@ func (m *Mirror) check(dir string) (Release, error) {
 	if err := m.verify(r.Tag, sums, sig); err != nil {
 		return r, err
 	}
+	listed, err := parseSums(sums)
+	if err != nil {
+		return r, err
+	}
+	want := []File{{Name: sumsName}, {Name: sigName}}
+	for _, f := range listed {
+		want = append(want, File{Name: f.Name, SHA256: f.SHA256})
+	}
+	if len(r.Files) != len(want) {
+		return r, errors.New("the manifest's files are not SHA256SUMS's")
+	}
+	for i, f := range r.Files {
+		if f.Name != want[i].Name || i >= 2 && f.SHA256 != want[i].SHA256 {
+			return r, fmt.Errorf("the manifest's %s is not SHA256SUMS's", f.Name)
+		}
+		got, size, err := hashFile(filepath.Join(dir, f.Name))
+		if err != nil || size != f.Size || got != f.SHA256 {
+			return r, fmt.Errorf("file %s is not as verified", f.Name)
+		}
+	}
 	return r, nil
+}
+
+func hashFile(path string) (string, int64, error) {
+	f, err := os.Open(path) //nolint:gosec // G304: rayd's own directory
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	return hex.EncodeToString(h.Sum(nil)), n, err
 }
 
 // verify checks a release's SHA256SUMS: the signature and its trusted

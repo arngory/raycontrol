@@ -1,7 +1,11 @@
 package appmirror
 
 import (
+	"cmp"
+	"context"
+	"crypto/tls"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -44,12 +48,20 @@ func (m *Mirror) Handler(auth func(*http.Request) (string, error)) http.Handler 
 			http.NotFound(w, r)
 			return
 		}
-		if !m.begin(dev) {
-			w.Header().Set("Retry-After", strconv.Itoa(RetryAfter))
-			http.Error(w, "busy", http.StatusTooManyRequests)
-			return
+		// A body takes a place: HEAD does not (nor does it wait for one).
+		if r.Method == http.MethodGet {
+			if !m.begin(dev) {
+				w.Header().Set("Retry-After", strconv.Itoa(RetryAfter))
+				http.Error(w, "busy", http.StatusTooManyRequests)
+				return
+			}
+			defer m.end(dev)
+			m.smallSendBuffer(r.Context())
 		}
-		defer m.end(dev)
+		// One range (app-update-v1 §2): several get the whole file.
+		if strings.Contains(r.Header.Get("Range"), ",") {
+			r.Header.Del("Range")
+		}
 		f, err := os.Open(filepath.Join(m.appDir(), rel.Tag, file.Name))
 		if err != nil {
 			// The release went (turned off, or a newer one in its place)
@@ -70,7 +82,8 @@ func (m *Mirror) Handler(auth func(*http.Request) (string, error)) http.Handler 
 		h.Set("X-Content-Type-Options", "nosniff")
 		// ServeContent: one range or the whole file, If-Range by the ETag,
 		// 416 with the size, Content-Length always.
-		http.ServeContent(&stallWriter{ResponseWriter: w, rc: http.NewResponseController(w)}, r, "", time.Time{}, f)
+		sw := &stallWriter{ResponseWriter: w, rc: http.NewResponseController(w), stall: cmp.Or(m.Stall, Stall), until: time.Now().Add(MaxDownload)}
+		http.ServeContent(sw, r, "", time.Time{}, f)
 	})
 }
 
@@ -108,16 +121,42 @@ func (m *Mirror) end(dev string) {
 }
 
 // stallWriter moves the write deadline on with every write: a download
-// that goes on, however slowly, is not cut by the server's WriteTimeout,
-// and one that takes nothing for Stall ends.
+// that goes on is not cut by the server's WriteTimeout, one whose next
+// piece does not leave within Stall ends, and none lasts past until (the
+// client resumes it with a range: a place does not stay with one device).
 type stallWriter struct {
 	http.ResponseWriter
-	rc *http.ResponseController
+	rc    *http.ResponseController
+	stall time.Duration
+	until time.Time
 }
 
+var errTooLong = errors.New("download longer than MaxDownload")
+
 func (s *stallWriter) Write(p []byte) (int, error) {
-	if err := s.rc.SetWriteDeadline(time.Now().Add(Stall)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+	if time.Now().After(s.until) {
+		return 0, errTooLong
+	}
+	if err := s.rc.SetWriteDeadline(time.Now().Add(s.stall)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		return 0, err
 	}
 	return s.ResponseWriter.Write(p)
+}
+
+// smallSendBuffer caps the socket's send buffer for a download: a writer
+// waits until part of the buffer drains, and with the kernel's autotuned
+// one (up to 4 MiB) a reader slower than ~20 KB/s missed Stall for every
+// piece; with 256 KiB, ~3 KB/s will do. Over a connection the
+// subscription's other requests share, which are small.
+func (m *Mirror) smallSendBuffer(ctx context.Context) {
+	if m.Conn == nil {
+		return
+	}
+	c := m.Conn(ctx)
+	if tc, ok := c.(*tls.Conn); ok {
+		c = tc.NetConn()
+	}
+	if tcp, ok := c.(*net.TCPConn); ok {
+		_ = tcp.SetWriteBuffer(sendBuffer)
+	}
 }

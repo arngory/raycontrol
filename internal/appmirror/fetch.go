@@ -3,6 +3,7 @@ package appmirror
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -21,18 +22,39 @@ import (
 	"time"
 )
 
-// ghRelease is what the GitHub API says of a release.
+// ghRelease is what the GitHub API says of a release. Its prerelease flag
+// is not used: the kind is the tag's (a "-" in it), which the trusted
+// comment binds; GitHub's flag is not signed.
 type ghRelease struct {
-	Tag        string    `json:"tag_name"`
-	Draft      bool      `json:"draft"`
-	Prerelease bool      `json:"prerelease"`
-	Assets     []ghAsset `json:"assets"`
+	Tag    string    `json:"tag_name"`
+	Draft  bool      `json:"draft"`
+	Assets []ghAsset `json:"assets"`
 }
 
 type ghAsset struct {
 	Name string `json:"name"`
 	Size int64  `json:"size"`
 	URL  string `json:"browser_download_url"`
+}
+
+const (
+	// maxTries: newer releases of a kind tried in one check, newest
+	// first; one that does not verify is not tried again for failMemory.
+	maxTries   = 3
+	failMemory = 24 * time.Hour
+	// releaseTimeout bounds the fetch of a release (a host that drips).
+	releaseTimeout = 45 * time.Minute
+	// spare is the room left beside a release being fetched.
+	spare = 64 << 20
+)
+
+// errUnverified marks a release that does not verify (signature, names,
+// sizes, hashes), as against one the network failed to bring or whose
+// assets are not all up yet.
+var errUnverified = errors.New("does not verify")
+
+func unverified(format string, a ...any) error {
+	return fmt.Errorf("%w: %s", errUnverified, fmt.Sprintf(format, a...))
 }
 
 var (
@@ -44,6 +66,13 @@ var (
 
 func validTag(tag string) bool { return tagRe.MatchString(tag) && semverValid(tag) }
 
+// isPre: a pre-release tag (v1.39.0-rc1), as the client's release
+// workflow marks them on GitHub.
+func isPre(tag string) bool {
+	core, _, _ := strings.Cut(tag, "+")
+	return strings.Contains(core, "-")
+}
+
 func validName(name string) bool {
 	return nameRe.MatchString(name) && name != "." && name != ".." && name != manifestName
 }
@@ -52,18 +81,21 @@ func (m *Mirror) client() *http.Client {
 	if m.HTTP != nil {
 		return m.HTTP
 	}
-	return &http.Client{
-		// A file a minute at the least; the context bounds a release.
-		Timeout: 30 * time.Minute,
-		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
-			TLSHandshakeTimeout:   30 * time.Second,
-			ResponseHeaderTimeout: 60 * time.Second,
-			ForceAttemptHTTP2:     true,
-		},
-		CheckRedirect: m.redirect,
-	}
+	m.clientOnce.Do(func() {
+		m.ownClient = &http.Client{
+			Timeout: 30 * time.Minute, // a file; releaseTimeout bounds a release
+			Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				DialContext:           (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
+				TLSHandshakeTimeout:   30 * time.Second,
+				ResponseHeaderTimeout: 60 * time.Second,
+				IdleConnTimeout:       90 * time.Second,
+				ForceAttemptHTTP2:     true,
+			},
+			CheckRedirect: m.redirect,
+		}
+	})
+	return m.ownClient
 }
 
 // redirect follows GitHub's redirects to its asset hosts, over HTTPS only
@@ -72,19 +104,28 @@ func (m *Mirror) redirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 5 {
 		return errors.New("too many redirects")
 	}
-	if !m.scheme(req.URL.Scheme) {
-		return fmt.Errorf("redirect to %s", req.URL.Scheme)
+	if !m.urlOK(req.URL) {
+		return fmt.Errorf("redirect to %s://%s", req.URL.Scheme, req.URL.Host)
 	}
 	return nil
 }
 
-func (m *Mirror) scheme(s string) bool { return s == "https" || m.AllowHTTP && s == "http" }
+// urlOK: GitHub's hosts over HTTPS; a test source (API set) any host, plain
+// HTTP too with AllowHTTP.
+func (m *Mirror) urlOK(u *url.URL) bool {
+	if u.Scheme != "https" && (!m.AllowHTTP || u.Scheme != "http") {
+		return false
+	}
+	if m.API != "" {
+		return true
+	}
+	h := u.Hostname()
+	return h == "github.com" || strings.HasSuffix(h, ".githubusercontent.com")
+}
 
-// Sync brings the mirror to the newest releases (app-update-v1 §3): those
-// it holds stay, a new one is fetched and verified whole before it takes
-// the place of the one before it; a release that fails leaves the one it
-// was to replace.
+// Sync brings the mirror to the newest releases (app-update-v1 §3).
 func (m *Mirror) Sync(ctx context.Context) error {
+	defer m.client().CloseIdleConnections()
 	list, err := m.list(ctx)
 	if err == nil {
 		err = m.syncWith(ctx, list)
@@ -99,34 +140,48 @@ func (m *Mirror) Sync(ctx context.Context) error {
 	return err
 }
 
+// syncWith keeps, of each kind, the held release unless a newer one
+// verifies: never an older one in its place (a release deleted or hidden on
+// GitHub), nothing dropped for a list without candidates, and a newer one
+// that fails leaves the held one. A pre-release stays only while it is
+// newer than the stable release kept.
 func (m *Mirror) syncWith(ctx context.Context, list []ghRelease) error {
-	stable, pre := choose(list)
 	m.mu.Lock()
 	held := slices.Clone(m.held)
 	m.mu.Unlock()
-	var next []Release
-	var errs []error
-	take := func(gr *ghRelease, prerelease bool) {
-		if gr == nil {
-			return
+	var heldStable, heldPre *Release
+	for i := range held {
+		if held[i].Prerelease {
+			heldPre = &held[i]
+		} else {
+			heldStable = &held[i]
 		}
-		if i := slices.IndexFunc(held, func(r Release) bool { return r.Tag == gr.Tag }); i >= 0 {
-			next = append(next, held[i])
-			return
-		}
-		r, err := m.fetch(ctx, *gr, prerelease)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", gr.Tag, err))
-			if i := slices.IndexFunc(held, func(r Release) bool { return r.Prerelease == prerelease }); i >= 0 {
-				next = append(next, held[i])
-			}
-			return
-		}
-		m.log().Info("client release mirrored", "app", App, "tag", r.Tag, "files", len(r.Files), "bytes", r.Bytes())
-		next = append(next, r)
 	}
-	take(stable, false)
-	take(pre, true)
+	var stables, pres []ghRelease
+	for _, r := range list {
+		switch {
+		case r.Draft || !validTag(r.Tag):
+		case isPre(r.Tag):
+			pres = append(pres, r)
+		default:
+			stables = append(stables, r)
+		}
+	}
+	newest := func(a, b ghRelease) int { return semverCompare(b.Tag, a.Tag) }
+	slices.SortStableFunc(stables, newest)
+	slices.SortStableFunc(pres, newest)
+	var errs []error
+	stable := m.newest(ctx, stables, heldStable, &errs)
+	if stable != nil {
+		pres = slices.DeleteFunc(pres, func(r ghRelease) bool { return semverCompare(r.Tag, stable.Tag) <= 0 })
+	}
+	pre := m.newest(ctx, pres, heldPre, &errs)
+	var next []Release
+	for _, r := range []*Release{stable, pre} {
+		if r != nil {
+			next = append(next, *r)
+		}
+	}
 	next = pick(next)
 	m.mu.Lock()
 	m.held = next
@@ -135,26 +190,54 @@ func (m *Mirror) syncWith(ctx context.Context, list []ghRelease) error {
 	return errors.Join(errs...)
 }
 
-// choose is the newest stable release and the newest pre-release newer
-// than it, among those whose tags are semver; drafts are left.
-func choose(list []ghRelease) (stable, pre *ghRelease) {
-	for i := range list {
-		r := &list[i]
-		if r.Draft || !validTag(r.Tag) {
+// newest is the newest release of a kind the mirror can hold: the held
+// one, unless one of the candidates newer than it (newest first) verifies.
+func (m *Mirror) newest(ctx context.Context, cands []ghRelease, held *Release, errs *[]error) *Release {
+	tries := 0
+	for _, c := range cands {
+		if held != nil && semverCompare(c.Tag, held.Tag) <= 0 {
+			break
+		}
+		if m.failedLately(c.Tag) {
 			continue
 		}
-		if r.Prerelease {
-			if pre == nil || semverCompare(r.Tag, pre.Tag) > 0 {
-				pre = r
+		if tries == maxTries || ctx.Err() != nil {
+			break
+		}
+		tries++
+		r, err := m.fetch(ctx, c)
+		if err != nil {
+			*errs = append(*errs, fmt.Errorf("%s: %w", c.Tag, err))
+			if errors.Is(err, errUnverified) {
+				m.remember(c.Tag)
 			}
-		} else if stable == nil || semverCompare(r.Tag, stable.Tag) > 0 {
-			stable = r
+			continue
+		}
+		m.log().Info("client release mirrored", "app", App, "tag", r.Tag, "files", len(r.Files), "bytes", r.Bytes())
+		return &r
+	}
+	return held
+}
+
+func (m *Mirror) failedLately(tag string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.failed[tag]
+	return ok && time.Since(t) < failMemory
+}
+
+func (m *Mirror) remember(tag string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failed == nil {
+		m.failed = map[string]time.Time{}
+	}
+	for t, at := range m.failed {
+		if time.Since(at) >= failMemory {
+			delete(m.failed, t)
 		}
 	}
-	if pre != nil && stable != nil && semverCompare(pre.Tag, stable.Tag) <= 0 {
-		pre = nil
-	}
-	return stable, pre
+	m.failed[tag] = time.Now()
 }
 
 // list asks GitHub for the client's latest releases, unauthenticated (the
@@ -164,7 +247,7 @@ func (m *Mirror) list(ctx context.Context) ([]ghRelease, error) {
 	if api == "" {
 		api = "https://api.github.com"
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, api+"/repos/"+Repo+"/releases?per_page=30", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, api+"/repos/"+Repo+"/releases?per_page=100", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +262,7 @@ func (m *Mirror) list(ctx context.Context) ([]ghRelease, error) {
 		return nil, fmt.Errorf("the client's releases: %s", resp.Status)
 	}
 	var list []ghRelease
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&list); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&list); err != nil {
 		return nil, fmt.Errorf("the client's releases: %w", err)
 	}
 	return list, nil
@@ -187,7 +270,9 @@ func (m *Mirror) list(ctx context.Context) ([]ghRelease, error) {
 
 // fetch downloads a release into a directory of its own, verifies it whole
 // and only then moves it into place.
-func (m *Mirror) fetch(ctx context.Context, gr ghRelease, prerelease bool) (Release, error) {
+func (m *Mirror) fetch(ctx context.Context, gr ghRelease) (Release, error) {
+	ctx, cancel := context.WithTimeout(ctx, releaseTimeout)
+	defer cancel()
 	assets := map[string]ghAsset{}
 	for _, a := range gr.Assets {
 		assets[a.Name] = a
@@ -201,40 +286,47 @@ func (m *Mirror) fetch(ctx context.Context, gr ghRelease, prerelease bool) (Rele
 		return Release{}, err
 	}
 	if err := m.verify(gr.Tag, sums, sig); err != nil {
-		return Release{}, err
+		return Release{}, fmt.Errorf("%w: %w", errUnverified, err)
 	}
 	listed, err := parseSums(sums)
 	if err != nil {
-		return Release{}, err
+		return Release{}, fmt.Errorf("%w: %w", errUnverified, err)
 	}
 	var total int64
 	for _, f := range listed {
 		a, ok := assets[f.Name]
 		switch {
 		case !ok:
+			// Not remembered: the assets of a new release may still be
+			// going up.
 			return Release{}, fmt.Errorf("%s is listed but not in the release", f.Name)
 		case a.Size <= 0 || a.Size > MaxFile:
-			return Release{}, fmt.Errorf("%s: %d bytes (at most %d)", f.Name, a.Size, MaxFile)
+			return Release{}, unverified("%s: %d bytes (at most %d)", f.Name, a.Size, MaxFile)
 		}
 		total += a.Size
 	}
 	if total > MaxRelease {
-		return Release{}, fmt.Errorf("%d bytes in all (at most %d)", total, MaxRelease)
+		return Release{}, unverified("%d bytes in all (at most %d)", total, MaxRelease)
 	}
 	if err := os.MkdirAll(m.appDir(), 0o700); err != nil {
 		return Release{}, err
+	}
+	if free, err := freeBytes(m.appDir()); err != nil {
+		return Release{}, err
+	} else if free < uint64(total)+spare {
+		return Release{}, fmt.Errorf("%d MiB free in %s, the release takes %d MiB", free>>20, m.appDir(), total>>20)
 	}
 	stage, err := os.MkdirTemp(m.appDir(), ".fetch-")
 	if err != nil {
 		return Release{}, err
 	}
 	defer func() { _ = os.RemoveAll(stage) }()
-	r := Release{Tag: gr.Tag, Prerelease: prerelease}
+	r := Release{Tag: gr.Tag, Prerelease: isPre(gr.Tag)}
 	for _, f := range []struct {
 		name string
 		b    []byte
 	}{{sumsName, sums}, {sigName, sig}} {
-		if err := os.WriteFile(filepath.Join(stage, f.name), f.b, 0o600); err != nil {
+		if err := writeSynced(filepath.Join(stage, f.name), f.b); err != nil {
 			return Release{}, err
 		}
 		sum := sha256.Sum256(f.b)
@@ -252,7 +344,10 @@ func (m *Mirror) fetch(ctx context.Context, gr ghRelease, prerelease bool) (Rele
 	if err != nil {
 		return Release{}, err
 	}
-	if err := os.WriteFile(filepath.Join(stage, manifestName), b, 0o600); err != nil {
+	if err := writeSynced(filepath.Join(stage, manifestName), b); err != nil {
+		return Release{}, err
+	}
+	if err := syncDir(stage); err != nil {
 		return Release{}, err
 	}
 	final := filepath.Join(m.appDir(), r.Tag)
@@ -262,14 +357,37 @@ func (m *Mirror) fetch(ctx context.Context, gr ghRelease, prerelease bool) (Rele
 	if err := os.Rename(stage, final); err != nil {
 		return Release{}, err
 	}
-	return r, nil
+	return r, syncDir(m.appDir())
+}
+
+// writeSynced writes a new file and flushes it to the disk: a release is
+// whole on the disk before it is moved into place.
+func writeSynced(path string, b []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: a checked name in rayd's staging directory
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(b)
+	if err == nil {
+		err = f.Sync()
+	}
+	return cmp.Or(err, f.Close())
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir) //nolint:gosec // G304: rayd's own directory
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	return cmp.Or(err, d.Close())
 }
 
 // small downloads a release's small file into memory.
 func (m *Mirror) small(ctx context.Context, assets map[string]ghAsset, name string, limit int64) ([]byte, error) {
 	a, ok := assets[name]
 	if !ok {
-		return nil, fmt.Errorf("no %s in the release", name)
+		return nil, fmt.Errorf("no %s in the release (yet)", name)
 	}
 	var buf bytes.Buffer
 	if err := m.get(ctx, a.URL, limit, &buf); err != nil {
@@ -288,6 +406,9 @@ func (m *Mirror) download(ctx context.Context, a ghAsset, path, want string) err
 	h := sha256.New()
 	cw := &countWriter{w: io.MultiWriter(f, h)}
 	err = m.get(ctx, a.URL, a.Size, cw)
+	if err == nil {
+		err = f.Sync()
+	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -295,9 +416,9 @@ func (m *Mirror) download(ctx context.Context, a ghAsset, path, want string) err
 	case err != nil:
 		return err
 	case cw.n != a.Size:
-		return fmt.Errorf("%d bytes, the release says %d", cw.n, a.Size)
+		return unverified("%d bytes, the release says %d", cw.n, a.Size)
 	case hex.EncodeToString(h.Sum(nil)) != want:
-		return errors.New("SHA-256 differs from SHA256SUMS")
+		return unverified("SHA-256 differs from SHA256SUMS")
 	}
 	return nil
 }
@@ -313,10 +434,10 @@ func (c *countWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// get copies at most limit bytes of an HTTPS URL to w; more is an error.
+// get copies at most limit bytes of a URL to w; more is an error.
 func (m *Mirror) get(ctx context.Context, raw string, limit int64, w io.Writer) error {
 	u, err := url.Parse(raw)
-	if err != nil || !m.scheme(u.Scheme) {
+	if err != nil || !m.urlOK(u) {
 		return fmt.Errorf("asset URL %q", raw)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
@@ -337,7 +458,7 @@ func (m *Mirror) get(ctx context.Context, raw string, limit int64, w io.Writer) 
 		return err
 	}
 	if n > limit {
-		return fmt.Errorf("more than %d bytes", limit)
+		return unverified("more than %d bytes", limit)
 	}
 	return nil
 }

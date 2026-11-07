@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/blake2b"
 
@@ -84,7 +85,7 @@ func newGitHub(t *testing.T) *fakeGitHub {
 
 // release publishes a release: its files, SHA256SUMS signed with
 // trusted, and the assets; mutate may spoil it before it goes up.
-func (g *fakeGitHub) release(k testKey, tag string, pre bool, files map[string][]byte, trusted string, mutate func(sums []byte, assets map[string][]byte) []byte) {
+func (g *fakeGitHub) release(k testKey, tag string, files map[string][]byte, trusted string, mutate func(sums []byte, assets map[string][]byte) []byte) {
 	names := slices.Sorted(func(yield func(string) bool) {
 		for n := range files {
 			if !yield(n) {
@@ -110,13 +111,41 @@ func (g *fakeGitHub) release(k testKey, tag string, pre bool, files map[string][
 	assets[sigName] = k.sign(sb, trusted)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	rel := ghRelease{Tag: tag, Prerelease: pre}
+	rel := ghRelease{Tag: tag}
 	for n, b := range assets {
 		p := "/dl/" + tag + "/" + n
 		g.blob[p] = b
 		rel.Assets = append(rel.Assets, ghAsset{Name: n, Size: int64(len(b)), URL: g.srv.URL + p})
 	}
 	g.rels = append(g.rels, rel)
+}
+
+// hit counts the requests for an asset.
+func (g *fakeGitHub) hit(tag, name string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.hits["/dl/"+tag+"/"+name]
+}
+
+// unlist takes releases off the listing (deleted, or hidden from it).
+func (g *fakeGitHub) unlist(tags ...string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.rels = slices.DeleteFunc(g.rels, func(r ghRelease) bool { return slices.Contains(tags, r.Tag) })
+}
+
+// upload adds an asset to a listed release, as its workflow does after
+// creating it.
+func (g *fakeGitHub) upload(tag, name string, b []byte) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	p := "/dl/" + tag + "/" + name
+	g.blob[p] = b
+	for i := range g.rels {
+		if g.rels[i].Tag == tag {
+			g.rels[i].Assets = append(g.rels[i].Assets, ghAsset{Name: name, Size: int64(len(b)), URL: g.srv.URL + p})
+		}
+	}
 }
 
 func newMirror(t *testing.T, g *fakeGitHub, k testKey) *Mirror {
@@ -149,10 +178,10 @@ func TestSync(t *testing.T) {
 	ctx := context.Background()
 	k := newKey(t)
 	g := newGitHub(t)
-	g.release(k, "v1.37.0", false, apks("v1.37.0"), "", nil)
-	g.release(k, "v1.38.0", false, apks("v1.38.0"), "", nil)
-	g.release(k, "v1.39.0-rc1", true, apks("v1.39.0-rc1"), "", nil)
-	g.release(k, "v1.38.0-rc2", true, apks("v1.38.0-rc2"), "", nil) // older than the stable
+	g.release(k, "v1.37.0", apks("v1.37.0"), "", nil)
+	g.release(k, "v1.38.0", apks("v1.38.0"), "", nil)
+	g.release(k, "v1.39.0-rc1", apks("v1.39.0-rc1"), "", nil)
+	g.release(k, "v1.38.0-rc2", apks("v1.38.0-rc2"), "", nil) // older than the stable
 	g.mu.Lock()
 	g.rels = append(g.rels, ghRelease{Tag: "v1.40.0", Draft: true}, ghRelease{Tag: "nightly"})
 	g.mu.Unlock()
@@ -203,7 +232,7 @@ func TestSync(t *testing.T) {
 
 	// A stable release newer than the pre-release: the pre-release goes,
 	// its directory too; another rayd finds the new set on the disk.
-	g.release(k, "v1.39.0", false, apks("v1.39.0"), "", nil)
+	g.release(k, "v1.39.0", apks("v1.39.0"), "", nil)
 	if err := m.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -237,28 +266,28 @@ func TestSyncRefuses(t *testing.T) {
 		pub  func(g *fakeGitHub)
 		want string
 	}{
-		{"other key", func(g *fakeGitHub) { g.release(other, "v2.0.0", false, apks("v2.0.0"), "", nil) }, "another key"},
+		{"other key", func(g *fakeGitHub) { g.release(other, "v2.0.0", apks("v2.0.0"), "", nil) }, "another key"},
 		{"trusted comment of another tag", func(g *fakeGitHub) {
-			g.release(k, "v2.0.0", false, apks("v2.0.0"), "niko v1.0.0", nil)
+			g.release(k, "v2.0.0", apks("v2.0.0"), "niko v1.0.0", nil)
 		}, "trusted comment"},
 		{"a file changed after signing", func(g *fakeGitHub) {
-			g.release(k, "v2.0.0", false, apks("v2.0.0"), "", func(sums []byte, assets map[string][]byte) []byte {
+			g.release(k, "v2.0.0", apks("v2.0.0"), "", func(sums []byte, assets map[string][]byte) []byte {
 				assets["niko-v2.0.0-armeabi-v7a.apk"] = []byte("arm v2.0.0 changed")
 				return sums
 			})
 		}, "SHA-256"},
 		{"a name that walks out", func(g *fakeGitHub) {
-			g.release(k, "v2.0.0", false, apks("v2.0.0"), "", func(sums []byte, assets map[string][]byte) []byte {
+			g.release(k, "v2.0.0", apks("v2.0.0"), "", func(sums []byte, assets map[string][]byte) []byte {
 				return append(sums, []byte(strings.Repeat("ab", 32)+"  ../../rayd.db\n")...)
 			})
 		}, "name"},
 		{"listed but not in the release", func(g *fakeGitHub) {
-			g.release(k, "v2.0.0", false, apks("v2.0.0"), "", func(sums []byte, assets map[string][]byte) []byte {
+			g.release(k, "v2.0.0", apks("v2.0.0"), "", func(sums []byte, assets map[string][]byte) []byte {
 				return append(sums, []byte(strings.Repeat("ab", 32)+"  niko-x86.apk\n")...)
 			})
 		}, "not in the release"},
 		{"too large", func(g *fakeGitHub) {
-			g.release(k, "v2.0.0", false, apks("v2.0.0"), "", nil)
+			g.release(k, "v2.0.0", apks("v2.0.0"), "", nil)
 			g.mu.Lock()
 			for i := range g.rels {
 				for j := range g.rels[i].Assets {
@@ -273,7 +302,7 @@ func TestSyncRefuses(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			g := newGitHub(t)
-			g.release(k, "v1.0.0", false, apks("v1.0.0"), "", nil)
+			g.release(k, "v1.0.0", apks("v1.0.0"), "", nil)
 			m := newMirror(t, g, k)
 			if err := m.Sync(ctx); err != nil {
 				t.Fatal(err)
@@ -290,6 +319,179 @@ func TestSyncRefuses(t *testing.T) {
 			entries, _ := os.ReadDir(filepath.Join(m.Dir, App))
 			if len(entries) != 1 || entries[0].Name() != "v1.0.0" {
 				t.Errorf("on disk: %v", entries)
+			}
+		})
+	}
+}
+
+// What a check keeps (app-update-v1 §3): a newer release only once it
+// verifies, and then the newest that does; never an older one in place of
+// what is held; a tag that did not verify is not fetched again for a while,
+// one whose assets are not all up yet is.
+func TestSyncSelection(t *testing.T) {
+	ctx := context.Background()
+	k, other := newKey(t), newKey(t)
+	g := newGitHub(t)
+	g.release(k, "v1.38.0", apks("v1.38.0"), "", nil)
+	g.release(k, "v1.39.0-rc1", apks("v1.39.0-rc1"), "", nil)
+	m := newMirror(t, g, k)
+	check := func(wantErr string, want ...string) {
+		t.Helper()
+		err := m.Sync(ctx)
+		if wantErr == "" && err != nil || wantErr != "" && (err == nil || !strings.Contains(err.Error(), wantErr)) {
+			t.Fatalf("err %v, want %q", err, wantErr)
+		}
+		if got := tags(m.Status(ctx).Releases); !slices.Equal(got, want) {
+			t.Fatalf("held %v, want %v", got, want)
+		}
+		entries, _ := os.ReadDir(filepath.Join(m.Dir, App))
+		var dirs []string
+		for _, e := range entries {
+			dirs = append(dirs, e.Name())
+		}
+		if !slices.Equal(dirs, want) {
+			t.Fatalf("on disk %v, want %v", dirs, want)
+		}
+	}
+	check("", "v1.38.0", "v1.39.0-rc1")
+
+	// A newer stable release that does not verify: both stay, and it is
+	// not fetched again.
+	g.release(other, "v1.39.0", apks("v1.39.0"), "", nil)
+	check("v1.39.0: does not verify", "v1.38.0", "v1.39.0-rc1")
+	sigs := g.hit("v1.39.0", sigName)
+	check("", "v1.38.0", "v1.39.0-rc1")
+	if g.hit("v1.39.0", sigName) != sigs {
+		t.Error("a release that did not verify fetched again")
+	}
+
+	// A tag far ahead that does not verify does not hold the mirror: the
+	// newest that does is taken (and the pre-release older than it goes).
+	g.release(other, "v99.0.0", apks("v99.0.0"), "", nil)
+	g.release(k, "v1.40.0", apks("v1.40.0"), "", nil)
+	check("v99.0.0", "v1.40.0")
+
+	// GitHub lists only older releases (the newest deleted or hidden), or
+	// none: what is held stays.
+	g.unlist("v1.40.0", "v99.0.0")
+	check("", "v1.40.0")
+	g.unlist("v1.38.0", "v1.39.0", "v1.39.0-rc1")
+	check("", "v1.40.0")
+
+	// A release whose assets are still going up: taken on the next check.
+	g.release(k, "v1.41.0", apks("v1.41.0"), "", func(sums []byte, assets map[string][]byte) []byte {
+		delete(assets, "niko-v1.41.0-armeabi-v7a.apk")
+		return sums
+	})
+	check("not in the release", "v1.40.0")
+	g.upload("v1.41.0", "niko-v1.41.0-armeabi-v7a.apk", apks("v1.41.0")["niko-v1.41.0-armeabi-v7a.apk"])
+	check("", "v1.41.0")
+
+	// At most maxTries newer releases a check: a host that fails them all
+	// costs a bounded check, and the older one waits for the next.
+	for _, tag := range []string{"v2.0.0", "v2.1.0", "v2.2.0"} {
+		g.release(k, tag, apks(tag), "", nil)
+		g.mu.Lock()
+		delete(g.blob, "/dl/"+tag+"/"+sumsName)
+		g.mu.Unlock()
+	}
+	g.release(k, "v1.42.0", apks("v1.42.0"), "", nil)
+	check("404", "v1.41.0")
+	if n := g.hit("v1.42.0", sumsName); n != 0 {
+		t.Errorf("a fourth release fetched in one check: %d", n)
+	}
+}
+
+// A release a previous rayd left is taken only whole and as signed: a file
+// a crash tore, a manifest that is not SHA256SUMS's, and it goes; the other
+// release stays.
+func TestLoad(t *testing.T) {
+	ctx := context.Background()
+	apk := "niko-v1.38.0-armeabi-v7a.apk"
+	manifest := func(t *testing.T, dir string, edit func(r *Release)) {
+		t.Helper()
+		p := filepath.Join(dir, manifestName)
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var r Release
+		if err := json.Unmarshal(b, &r); err != nil {
+			t.Fatal(err)
+		}
+		edit(&r)
+		if b, err = json.Marshal(r); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name  string
+		spoil func(t *testing.T, dir string)
+	}{
+		{"nothing", func(*testing.T, string) {}},
+		{"a torn file", func(t *testing.T, dir string) {
+			if err := os.Truncate(filepath.Join(dir, apk), 3); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a file the manifest vouches for, not SHA256SUMS", func(t *testing.T, dir string) {
+			b := []byte("arm v1.38.0 changed")
+			if err := os.WriteFile(filepath.Join(dir, apk), b, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			h := sha256.Sum256(b)
+			manifest(t, dir, func(r *Release) {
+				for i := range r.Files {
+					if r.Files[i].Name == apk {
+						r.Files[i].Size, r.Files[i].SHA256 = int64(len(b)), hex.EncodeToString(h[:])
+					}
+				}
+			})
+		}},
+		{"a file more in the manifest", func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "x.apk"), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			h := sha256.Sum256([]byte("x"))
+			manifest(t, dir, func(r *Release) {
+				r.Files = append(r.Files, File{Name: "x.apk", Size: 1, SHA256: hex.EncodeToString(h[:])})
+			})
+		}},
+		{"a stable release called a pre-release", func(t *testing.T, dir string) {
+			manifest(t, dir, func(r *Release) { r.Prerelease = true })
+		}},
+		{"the signature gone", func(t *testing.T, dir string) {
+			if err := os.Remove(filepath.Join(dir, sigName)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			k := newKey(t)
+			g := newGitHub(t)
+			g.release(k, "v1.38.0", apks("v1.38.0"), "", nil)
+			g.release(k, "v1.39.0-rc1", apks("v1.39.0-rc1"), "", nil)
+			m := newMirror(t, g, k)
+			if err := m.Sync(ctx); err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(m.Dir, App, "v1.38.0")
+			c.spoil(t, dir)
+			m2 := &Mirror{Store: m.Store, Dir: m.Dir, PubKey: k.pub}
+			m2.load()
+			want := []string{"v1.39.0-rc1"}
+			if c.name == "nothing" {
+				want = []string{"v1.38.0", "v1.39.0-rc1"}
+			}
+			if got := tags(m2.Status(ctx).Releases); !slices.Equal(got, want) {
+				t.Fatalf("loaded %v, want %v", got, want)
+			}
+			if _, err := os.Stat(dir); (err == nil) != (len(want) == 2) {
+				t.Errorf("v1.38.0 on disk: %v", err)
 			}
 		})
 	}
@@ -339,7 +541,7 @@ func TestHandler(t *testing.T) {
 	ctx := context.Background()
 	k := newKey(t)
 	g := newGitHub(t)
-	g.release(k, "v1.38.0", false, apks("v1.38.0"), "", nil)
+	g.release(k, "v1.38.0", apks("v1.38.0"), "", nil)
 	m := newMirror(t, g, k)
 	if err := m.Sync(ctx); err != nil {
 		t.Fatal(err)
@@ -405,6 +607,10 @@ func TestHandler(t *testing.T) {
 	if resp, b = get("HEAD", path, "d1", nil); resp.StatusCode != 200 || len(b) != 0 || resp.ContentLength != int64(len(body)) {
 		t.Errorf("HEAD: %d %d", resp.StatusCode, resp.ContentLength)
 	}
+	// Several ranges: the whole file (one range a response, §2).
+	if resp, b = get("GET", path, "d1", map[string]string{"Range": "bytes=0-1,5-6"}); resp.StatusCode != 200 || string(b) != string(body) {
+		t.Errorf("two ranges: %d %q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
 	for _, p := range []string{Path + "niko/v1.38.0/" + sumsName, Path + "niko/v1.38.0/" + sigName} {
 		if resp, _ := get("GET", p, "d1", nil); resp.StatusCode != 200 {
 			t.Errorf("%s: %d", p, resp.StatusCode)
@@ -426,6 +632,10 @@ func TestHandler(t *testing.T) {
 	if resp, _ := get("GET", path, "d1", nil); resp.StatusCode != 429 || resp.Header.Get("Retry-After") == "" {
 		t.Errorf("second of a device: %d", resp.StatusCode)
 	}
+	// HEAD takes no place.
+	if resp, _ := get("HEAD", path, "d1", nil); resp.StatusCode != 200 {
+		t.Errorf("HEAD during a download: %d", resp.StatusCode)
+	}
 	if resp, _ := get("GET", path, "d2", nil); resp.StatusCode != 200 {
 		t.Errorf("another device: %d", resp.StatusCode)
 	}
@@ -435,9 +645,25 @@ func TestHandler(t *testing.T) {
 	if resp, _ := get("GET", path, "d2", nil); resp.StatusCode != 429 {
 		t.Errorf("over the node's: %d", resp.StatusCode)
 	}
+	if resp, _ := get("HEAD", path, "d2", nil); resp.StatusCode != 200 {
+		t.Errorf("HEAD with the node's places taken: %d", resp.StatusCode)
+	}
 	m.end("d1")
 	if resp, _ := get("GET", path, "d2", nil); resp.StatusCode != 200 {
 		t.Errorf("after one ended: %d", resp.StatusCode)
+	}
+}
+
+// No download lasts past MaxDownload: the client resumes it with a range.
+func TestStallWriterUntil(t *testing.T) {
+	rec := httptest.NewRecorder()
+	s := &stallWriter{ResponseWriter: rec, rc: http.NewResponseController(rec), stall: Stall, until: time.Now().Add(time.Hour)}
+	if n, err := s.Write([]byte("ab")); n != 2 || err != nil {
+		t.Fatalf("before: %d %v", n, err)
+	}
+	s.until = time.Now().Add(-time.Second)
+	if _, err := s.Write([]byte("c")); !errors.Is(err, errTooLong) || rec.Body.String() != "ab" {
+		t.Fatalf("after: %v, body %q", err, rec.Body.String())
 	}
 }
 
@@ -469,7 +695,7 @@ func TestAllowHTTP(t *testing.T) {
 	g := newGitHub(t)
 	plain := httptest.NewServer(g.srv.Config.Handler)
 	t.Cleanup(plain.Close)
-	g.release(k, "v1.0.0", false, apks("v1.0.0"), "", nil)
+	g.release(k, "v1.0.0", apks("v1.0.0"), "", nil)
 	g.mu.Lock()
 	for i := range g.rels {
 		for j := range g.rels[i].Assets {

@@ -34,8 +34,8 @@ func semverCompare(a, b string) int {
 	}
 	xa, xb := strings.Split(pa, "."), strings.Split(pb, ".")
 	for i := 0; i < len(xa) && i < len(xb); i++ {
-		na, ea := strconv.Atoi(xa[i])
-		nb, eb := strconv.Atoi(xb[i])
+		na, ea := number(xa[i])
+		nb, eb := number(xb[i])
 		switch {
 		case ea == nil && eb == nil:
 			if c := cmpInt(na, nb); c != 0 {
@@ -52,6 +52,14 @@ func semverCompare(a, b string) int {
 		}
 	}
 	return cmpInt(len(xa), len(xb))
+}
+
+// number reads a numeric identifier: digits only ("-1" is a word).
+func number(s string) (int, error) {
+	if strings.Trim(s, "0123456789") != "" {
+		return 0, strconv.ErrSyntax
+	}
+	return strconv.Atoi(s)
 }
 
 func cmpInt(a, b int) int {

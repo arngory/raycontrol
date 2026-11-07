@@ -214,7 +214,7 @@ func cmdServe(args []string) error {
 	srv.DNSCheck.Checker.Private = *dnsCheckPrivate
 	// The client's releases (spec/app-update-v1.md), beside the database:
 	// only while the administrator has the mirror on (rayctl app-mirror).
-	srv.AppMirror = &appmirror.Mirror{Store: st, Dir: filepath.Join(filepath.Dir(*db), "app"), Log: log}
+	srv.AppMirror = &appmirror.Mirror{Store: st, Dir: filepath.Join(filepath.Dir(*db), "app"), Conn: probe.Conn, Log: log}
 	// Interop (the client's CI): releases from a server of the test's,
 	// signed with its key. Never on a node in use: anything that key signs
 	// would go to its devices.

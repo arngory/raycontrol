@@ -1,6 +1,7 @@
 package sub
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -69,7 +70,9 @@ type Server struct {
 	// (spec/app-update-v1.md) and lists them in the subscription while
 	// the administrator has the mirror on (appmirror.Mirror).
 	App AppFiles
-	now func() time.Time
+	// Stall: appmirror.Stall when zero (a test seam).
+	Stall time.Duration
+	now   func() time.Time
 
 	mu sync.Mutex // serialises seq
 }
@@ -119,6 +122,11 @@ func (s *Server) Serve(ctx context.Context, addr string, tlsCfg *tls.Config) err
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      20 * time.Second,
 		ErrorLog:          slog.NewLogLogger(s.Log.Handler(), slog.LevelDebug),
+		// A connection that takes no byte for so long goes. Over HTTP/2 a
+		// stream's write deadline only queues a reset behind the frame a
+		// stalled socket holds: a client that stopped reading kept its
+		// download's place until rayd restarted (review).
+		HTTP2: &http.HTTP2Config{WriteByteTimeout: cmp.Or(s.Stall, appmirror.Stall)},
 	}
 	go func() {
 		<-ctx.Done()
