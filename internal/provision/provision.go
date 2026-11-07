@@ -850,7 +850,8 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 				return svc, err
 			}
 			for _, o := range others {
-				if o.ID == svc.ID || !DNSTunnel(o.Kind) {
+				// slipstream signs v2 whatever dnsauth.v says: not one of them.
+				if o.ID == svc.ID || !DNSTunnel(o.Kind) || o.Kind == "slipstream" {
 					continue
 				}
 				if h := DNSAuthHint(o); (value == "required" && h == "off") || (value == "off" && h == "required") {

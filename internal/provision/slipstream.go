@@ -70,14 +70,9 @@ func slipstreamService(ctx context.Context, st *store.Store, all []store.Service
 			return fmt.Errorf("%w: slipstream takes no %s (spec/slipstream-v1.md: dnsauth-v2 required, one zone; the ALPN and name are its own)", store.ErrInvalid, k)
 		}
 	}
-	// A client signs one dnsauth version for all of a user's tunnels
-	// (dnsauth.v), and slipstream's is 2: a tunnel that takes v1 only
-	// would refuse them.
-	for _, o := range all {
-		if DNSTunnel(o.Kind) && o.Kind != "slipstream" && DNSAuthHint(o) == "off" {
-			return fmt.Errorf("%w: %s has auth_hint off (dnsauth v1 only), and slipstream takes v2 only: a client signs one version for all the tunnels (set it to optional first)", store.ErrInvalid, o.Name)
-		}
-	}
+	// Clients sign slipstream's queries with v2 whatever the subscription's
+	// dnsauth.v says, which is for dnstt and masterdns alone (Niko 1.37):
+	// a tunnel beside it with auth_hint=off is no conflict.
 	if z, ok := settings["zone"]; !ok {
 		zone, err := newZone(ctx, st, all)
 		if err != nil {

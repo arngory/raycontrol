@@ -149,8 +149,9 @@ func TestSlipstreamZones(t *testing.T) {
 	}
 }
 
-// A client signs one dnsauth version for all of a user's tunnels, and
-// slipstream takes v2 only: no tunnel beside it takes v1 only.
+// Clients sign slipstream's queries with v2 whatever dnsauth.v says, which
+// is for dnstt and masterdns alone: slipstream's required v2 is no
+// conflict with a tunnel that takes v1 only, either way round.
 func TestSlipstreamAuthHint(t *testing.T) {
 	ctx, st := slipStore(t, "example.com")
 	if _, err := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns", Enabled: true}); err != nil {
@@ -159,18 +160,26 @@ func TestSlipstreamAuthHint(t *testing.T) {
 	if _, err := SetServiceOption(ctx, st, "dns", "auth_hint", "off"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CreateService(ctx, st, store.Service{Kind: "slipstream", Name: "slip", Enabled: true}); !errors.Is(err, store.ErrInvalid) ||
-		!strings.Contains(err.Error(), "auth_hint off") {
+	if _, err := CreateService(ctx, st, store.Service{Kind: "slipstream", Name: "slip", Enabled: true}); err != nil {
 		t.Fatalf("beside auth_hint off: %v", err)
 	}
-	if _, err := SetServiceOption(ctx, st, "dns", "auth_hint", "optional"); err != nil {
+	for _, v := range []string{"optional", "off", "optional"} {
+		if _, err := SetServiceOption(ctx, st, "dns", "auth_hint", v); err != nil {
+			t.Errorf("auth_hint %s beside slipstream: %v", v, err)
+		}
+	}
+	// Between dnstt and masterdns the rule holds as before.
+	if _, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "mdns", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CreateService(ctx, st, store.Service{Kind: "slipstream", Name: "slip", Enabled: true}); err != nil {
+	if _, err := SetServiceOption(ctx, st, "dns", "auth", "required"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SetServiceOption(ctx, st, "dns", "auth_hint", "off"); !errors.Is(err, store.ErrInvalid) || !strings.Contains(err.Error(), "slip") {
-		t.Errorf("auth_hint off beside slipstream: %v", err)
+	if _, err := SetServiceOption(ctx, st, "mdns", "auth_hint", "off"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetServiceOption(ctx, st, "dns", "auth_hint", "required"); !errors.Is(err, store.ErrInvalid) || !strings.Contains(err.Error(), "mdns") {
+		t.Errorf("required beside masterdns off: %v", err)
 	}
 }
 

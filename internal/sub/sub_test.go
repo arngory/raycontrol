@@ -1007,8 +1007,9 @@ func TestBuildForPartialAndModes(t *testing.T) {
 }
 
 // A slipstream profile (spec/slipstream-v1.md §4): the link with its pin,
-// ALPN and name; dnsauth v2 alone, beside a dnstt service that takes both;
-// the probe key, which the front answers in its zone too; no relay.
+// ALPN and name. dnsauth.v and the probe key are dnstt's and masterdns's:
+// clients sign slipstream with v2 always and probe dnstt's resolvers only
+// (Niko 1.37). No relay.
 func TestSlipstreamInSubscription(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
@@ -1033,8 +1034,7 @@ func TestSlipstreamInSubscription(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := build()
-	if len(p.Profiles) != 1 || p.DNSAuth == nil || !slices.Equal(p.DNSAuth.V, []int{2}) || p.DNSProbe == nil ||
-		!slices.Contains(sub.ProbeTunnels, "slipstream") {
+	if len(p.Profiles) != 1 || p.DNSAuth != nil || p.DNSProbe != nil || !slices.Contains(sub.ProbeTunnels, "slipstream") {
 		t.Fatalf("payload %+v", p)
 	}
 	u, err := url.Parse(p.Profiles[0].Link)
@@ -1051,13 +1051,20 @@ func TestSlipstreamInSubscription(t *testing.T) {
 		!strings.HasPrefix(q.Get("encryption"), "mlkem768x25519plus.") || q.Has("niko-dns-spare") || q.Has("niko-dnskey") || q.Has("niko-dnsseal") {
 		t.Errorf("link %s", p.Profiles[0].Link)
 	}
-	// Beside dnstt (auth_hint optional): one version for both, 2.
+	// Beside dnstt, its versions alone: with auth_hint=off, 1 (its clients
+	// sign v1 there, v2 for slipstream all the same).
 	dns, _ := f.st.ServiceByName(ctx, "dns")
 	if err := f.st.SetUserServices(ctx, "alice", []int64{slip.ID, dns.ID}); err != nil {
 		t.Fatal(err)
 	}
-	if p := build(); len(p.Profiles) != 2 || !slices.Equal(p.DNSAuth.V, []int{2}) {
-		t.Errorf("beside dnstt: %d profiles, dnsauth %+v", len(p.Profiles), p.DNSAuth)
+	if p := build(); len(p.Profiles) != 2 || p.DNSAuth == nil || !slices.Equal(p.DNSAuth.V, []int{1, 2}) || p.DNSProbe == nil {
+		t.Errorf("beside dnstt: %d profiles, dnsauth %+v, probe %+v", len(p.Profiles), p.DNSAuth, p.DNSProbe)
+	}
+	if _, err := provision.SetServiceOption(ctx, f.st, "dns", "auth_hint", "off"); err != nil {
+		t.Fatal(err)
+	}
+	if p := build(); len(p.Profiles) != 2 || !slices.Equal(p.DNSAuth.V, []int{1}) {
+		t.Errorf("beside dnstt with auth_hint off: dnsauth %+v", p.DNSAuth)
 	}
 	if sub.RelayKinds("slipstream") {
 		t.Error("slipstream through a relay")

@@ -230,12 +230,13 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 	if err := s.addRelays(ctx, &p, m); err != nil {
 		return Envelope{}, err
 	}
-	// dnsprobe-v1: for a user with a dnstt or slipstream profile, the
-	// zones the front answers probes in (masterdns answers look
-	// otherwise).
+	// dnsprobe-v1: for a user with a dnstt profile, the zones the front
+	// answers probes in (masterdns answers look otherwise). Not for
+	// slipstream, though the front answers them in its zone too: clients
+	// probe resolvers for dnstt only (Niko 1.37).
 	if len(m.DNSProbeKey) == 32 && slices.ContainsFunc(profiles, func(pr Profile) bool {
 		return slices.ContainsFunc(m.Services, func(svc render.Service) bool {
-			return uint16(svc.ID) == pr.Svc && (svc.Kind == "dnstt" || svc.Kind == "slipstream")
+			return uint16(svc.ID) == pr.Svc && svc.Kind == "dnstt"
 		})
 	}) {
 		p.DNSProbe = &DNSProbeHint{V: 1, Key: base64.RawURLEncoding.EncodeToString(m.DNSProbeKey)}
@@ -346,15 +347,17 @@ func (s *Server) nextSeq(ctx context.Context, now time.Time) (uint64, error) {
 	return seq, s.Store.SetSetting(ctx, settingSeq, []byte(strconv.FormatUint(seq, 10)))
 }
 
-// dnsAuthVersions is what the user's DNS tunnels that check tags take
-// (spec/dnsauth-v2.md §4): 1 unless one of them takes v2 only
+// dnsAuthVersions is what the user's dnstt and masterdns tunnels that check
+// tags take (spec/dnsauth-v2.md §4): 1 unless one of them takes v2 only
 // (auth_hint=required), 2 unless one of them takes no v2 (auth_hint=off).
 // The field is one for all of them: when they disagree both ways, 2,
 // where the tunnels go.
 func dnsAuthVersions(m render.Model, profiles []Profile) *DNSAuthVersions {
 	v1, v2, any := true, true, false
 	for _, svc := range m.Services {
-		if !provision.DNSTunnel(svc.Kind) || render.DNSAuthMode(svc.Service) == "off" ||
+		// slipstream signs v2 always, whatever this says (Niko 1.37): a [2]
+		// for it would turn a dnstt with auth_hint=off to v2 as well.
+		if (svc.Kind != "dnstt" && svc.Kind != "masterdns") || render.DNSAuthMode(svc.Service) == "off" ||
 			!slices.ContainsFunc(profiles, func(pr Profile) bool { return pr.Svc == uint16(svc.ID) }) {
 			continue
 		}
