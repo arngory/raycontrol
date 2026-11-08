@@ -48,6 +48,19 @@ func YggdrasilKey(uuid string) ed25519.PrivateKey {
 	return ed25519.NewKeyFromSeed(seed[:])
 }
 
+// YggdrasilDeviceKey is one device's key in the mesh, from the user's inner
+// UUID and the device: each device its own address. Two devices sharing a
+// key take each other's links, and both lose their connections. Without a
+// device it is the user's key (YggdrasilKey): exported links, and
+// subscriptions before v0.20.1.
+func YggdrasilDeviceKey(uuid, device string) ed25519.PrivateKey {
+	if device == "" {
+		return YggdrasilKey(uuid)
+	}
+	seed := sha256.Sum256([]byte("raycontrol-yggdrasil-device-v1\x00" + uuid + "\x00" + device))
+	return ed25519.NewKeyFromSeed(seed[:])
+}
+
 // YggdrasilNode returns a Yggdrasil service's settings and the node's public
 // key in the mesh.
 func YggdrasilNode(s Service) (YggdrasilSettings, ed25519.PublicKey, error) {
@@ -96,20 +109,28 @@ func yggdrasilUsers(m Model, s Service, inner Service) []map[string]any {
 		now = time.Now()
 	}
 	keys := map[string]string{}
-	add := func(name, uuid string) {
-		keys[name] = hex.EncodeToString(YggdrasilKey(uuid).Public().(ed25519.PublicKey))
-	}
 	for _, u := range m.Users {
 		if !slices.Contains(u.Services, s.ID) || m.Inner[u.ID] == "" {
 			continue
 		}
-		add(InnerEmail(u.ID), m.Inner[u.ID])
+		// The user's key (exported links, older subscriptions) and each
+		// device's, for every UUID of the rotation.
+		uuids := map[string]string{"": m.Inner[u.ID]}
 		set := m.Sets[inner.ID][u.ID]
 		if set.Next != "" {
-			add(InnerEmail(u.ID)+"-n", set.Next)
+			uuids["-n"] = set.Next
 		}
 		if set.Prev != "" && now.Before(set.PrevUntil) {
-			add(InnerEmail(u.ID)+"-p", set.Prev)
+			uuids["-p"] = set.Prev
+		}
+		for suffix, uuid := range uuids {
+			for _, d := range append([]string{""}, m.Devices[u.ID]...) {
+				name := InnerEmail(u.ID)
+				if d != "" {
+					name += "-" + d
+				}
+				keys[name+suffix] = hex.EncodeToString(YggdrasilDeviceKey(uuid, d).Public().(ed25519.PublicKey))
+			}
 		}
 	}
 	users := []map[string]any{}

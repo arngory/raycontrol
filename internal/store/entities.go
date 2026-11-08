@@ -565,6 +565,26 @@ func (s *Store) CreateDevice(ctx context.Context, userName, name, role string) (
 	return d, key, err
 }
 
+// ActiveDeviceIDs maps user ID to the IDs of the user's devices not
+// revoked, in order.
+func (s *Store) ActiveDeviceIDs(ctx context.Context) (map[int64][]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT user_id, id FROM devices WHERE revoked_at IS NULL ORDER BY user_id, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64][]string{}
+	for rows.Next() {
+		var user int64
+		var id string
+		if err := rows.Scan(&user, &id); err != nil {
+			return nil, err
+		}
+		out[user] = append(out[user], id)
+	}
+	return out, rows.Err()
+}
+
 // ListDevices returns devices, optionally of one user.
 func (s *Store) ListDevices(ctx context.Context, userName string) ([]Device, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT d.id, u.name, d.name, d.role, d.created_at, d.revoked_at, coalesce(d.cert_pin, '')

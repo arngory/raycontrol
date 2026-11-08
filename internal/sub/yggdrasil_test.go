@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"path"
@@ -203,6 +205,130 @@ func TestYggdrasilService(t *testing.T) {
 	nextKey := hex.EncodeToString(ed25519.NewKeyFromSeed(nextSeed).Public().(ed25519.PublicKey))
 	if keys := usersKeys(); keys[render.InnerEmail(u.ID)+"-n"] != nextKey || nextKey == userKey {
 		t.Fatalf("users while rotating %v", keys)
+	}
+}
+
+// Each device of a user has its own key in the mesh, which the node lets
+// in; the user's own key stays for exported links and older subscriptions.
+// Two devices with one key would take each other's links.
+func TestYggdrasilDeviceKeys(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "reality", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	y, err := provision.CreateService(ctx, st, store.Service{Kind: "yggdrasil", Name: "ygg", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings render.YggdrasilSettings
+	json.Unmarshal([]byte(y.Settings), &settings)
+	site, _ := st.ServiceByName(ctx, "site")
+	keyDER, certDER, _ := provision.SelfSigned(settings.SNI)
+	st.SetServiceSecret(ctx, site.ID, provision.SecretTLSChain, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}))
+	st.SetServiceSecret(ctx, site.ID, provision.SecretTLSKey, keyDER)
+	u, _ := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+	st.SetUserServices(ctx, "alice", []int64{y.ID})
+	phone, phoneKey, _ := st.CreateDevice(ctx, "alice", "phone", "user")
+	laptop, _, _ := st.CreateDevice(ctx, "alice", "laptop", "user")
+
+	nodeKeys := func() map[string]string {
+		m, err := render.CollectForRender(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, _, err := render.Render(m, render.Paths{Rendered: "/r", Run: "/run/niko"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var f struct {
+			Users []struct {
+				Name      string
+				Yggdrasil struct {
+					PublicKey string `json:"public_key"`
+				}
+			}
+		}
+		for _, file := range files {
+			if file.Path == path.Join("/r/ygg", render.YggdrasilUsers) {
+				json.Unmarshal(file.Content, &f)
+			}
+		}
+		out := map[string]string{}
+		for _, u := range f.Users {
+			out[u.Name] = u.Yggdrasil.PublicKey
+		}
+		return out
+	}
+	linkKey := func(device string) string {
+		m, _ := render.Collect(ctx, st)
+		profiles, err := sub.DeviceProfiles(m, m.Users[0], device)
+		if err != nil || len(profiles) != 1 {
+			t.Fatalf("profiles %+v %v", profiles, err)
+		}
+		link, _ := url.Parse(profiles[0].Link)
+		_, keyHex, _ := strings.Cut(link.Query().Get("niko-ygg"), ";")
+		seed, _ := hex.DecodeString(keyHex)
+		return hex.EncodeToString(ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey))
+	}
+	user, ph, lp := linkKey(""), linkKey(phone.ID), linkKey(laptop.ID)
+	if user == ph || user == lp || ph == lp {
+		t.Fatal("devices share a key")
+	}
+	// The subscription a device fetches carries its own key.
+	keys0, err := provision.LoadNodeKeys(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &sub.Server{Store: st, Keys: keys0, Log: slog.New(slog.DiscardHandler)}
+	req := httptest.NewRequest("GET", sub.Path, nil)
+	req.Header.Set(sub.DeviceHeader, phone.ID)
+	req.Header.Set("Authorization", sub.AuthToken(phoneKey, time.Now().Unix()/60))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	var env sub.Envelope
+	json.NewDecoder(rec.Body).Decode(&env)
+	payload, err := sub.Verify(env, keys0.PublicJSON())
+	if err != nil || len(payload.Profiles) != 1 {
+		t.Fatalf("subscription: %v %+v", err, payload)
+	}
+	got, _ := url.Parse(payload.Profiles[0].Link)
+	_, gotHex, _ := strings.Cut(got.Query().Get("niko-ygg"), ";")
+	gotSeed, _ := hex.DecodeString(gotHex)
+	if hex.EncodeToString(ed25519.NewKeyFromSeed(gotSeed).Public().(ed25519.PublicKey)) != ph {
+		t.Fatal("the phone's subscription has another key than the phone's")
+	}
+	name := render.InnerEmail(u.ID)
+	keys := nodeKeys()
+	if len(keys) != 3 || keys[name] != user || keys[name+"-"+phone.ID] != ph || keys[name+"-"+laptop.ID] != lp {
+		t.Fatalf("node keys %v", keys)
+	}
+	// A revoked device's key goes.
+	if err := st.RevokeDevice(ctx, laptop.ID); err != nil {
+		t.Fatal(err)
+	}
+	if keys := nodeKeys(); len(keys) != 2 || keys[name+"-"+laptop.ID] != "" {
+		t.Fatalf("after revoking: %v", keys)
+	}
+	// Rotation: each device's next key too.
+	day := 24 * time.Hour
+	r := store.Rotation{Period: 30 * day, Lead: 3 * day, Grace: 2 * day}
+	if n, err := st.RotateCredentials(ctx, time.Now().Add(28*day), r, render.NewUUID); err != nil || n == 0 {
+		t.Fatalf("publish: %d %v", n, err)
+	}
+	m, _ := render.Collect(ctx, st)
+	profiles, _ := sub.DeviceProfiles(m, m.Users[0], phone.ID)
+	nl, _ := url.Parse(profiles[0].Next.Link)
+	_, nextHex, _ := strings.Cut(nl.Query().Get("niko-ygg"), ";")
+	nextSeed, _ := hex.DecodeString(nextHex)
+	next := hex.EncodeToString(ed25519.NewKeyFromSeed(nextSeed).Public().(ed25519.PublicKey))
+	if keys := nodeKeys(); keys[name+"-"+phone.ID+"-n"] != next || next == ph {
+		t.Fatalf("rotation: %v", keys)
 	}
 }
 
