@@ -47,7 +47,6 @@ type Server struct {
 
 	uot     uotLimits
 	uotIdle time.Duration // uotIdle when 0 (tests make it short)
-	warn    resolverWarn
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -109,8 +108,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	out, err := dial(dctx, "tcp", target)
 	cancel()
 	if err != nil {
-		s.Log.Debug("naive: destination unreachable", "err", err)
-		s.warn.note(s.Log, err)
+		s.Log.Debug("naive: destination unreachable") // not where: no destination in the log
 		panic(http.ErrAbortHandler)
 	}
 	defer out.Close()
@@ -375,28 +373,102 @@ func (p *paddedStream) Write(b []byte) (int, error) {
 // name would fail.
 var resolvers = []string{"1.1.1.1:53", "9.9.9.9:53", "[2606:4700:4700::1111]:53"}
 
-// PublicResolver asks the public resolvers, one after another on each
-// attempt, whatever the host's resolv.conf names (its options still apply).
-func PublicResolver() *net.Resolver {
-	var next atomic.Uint32
-	return &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-		var d net.Dialer
-		var err error
-		for range resolvers {
-			addr := resolvers[next.Add(1)%uint32(len(resolvers))]
-			c, derr := d.DialContext(ctx, network, addr)
-			if derr == nil {
-				return c, nil
-			}
-			err = derr
-		}
-		return nil, err
-	}}
+// resolverWait is the longest a query waits for a resolver before the next
+// one is asked (resolv.conf's 5 s would hold each connection that long).
+// Tests shorten it.
+var resolverWait = 2 * time.Second
+
+// publicDNS is naive's one resolver, for TCP's destinations and UDP's.
+var publicDNS = newPublicDNS(resolvers)
+
+// PublicResolver asks the public resolvers, whatever the host's resolv.conf
+// names: the one that answered last first, the next one when it does not
+// answer within resolverWait.
+func PublicResolver() *net.Resolver { return publicDNS.r }
+
+// SetResolverLog is where a resolver that does not answer is told.
+func SetResolverLog(log *slog.Logger) { publicDNS.log.Store(log) }
+
+type pubDNS struct {
+	addrs []string
+	cur   atomic.Uint32 // the one asked first
+	r     *net.Resolver
+	log   atomic.Pointer[slog.Logger]
+	warn  resolverWarn
 }
 
-// resolverWarn says, at most once a minute, that names could not be
-// looked up: a node-wide problem (the resolvers out of reach), unlike a
-// destination that does not exist or does not answer. No destination
+func newPublicDNS(addrs []string) *pubDNS {
+	p := &pubDNS{addrs: addrs}
+	p.r = &net.Resolver{PreferGo: true, Dial: p.dial}
+	return p
+}
+
+func (p *pubDNS) dial(ctx context.Context, network, _ string) (net.Conn, error) {
+	var d net.Dialer
+	var err error
+	for range p.addrs {
+		i := p.cur.Load() % uint32(len(p.addrs)) //nolint:gosec // G115: a handful of resolvers
+		c, derr := d.DialContext(ctx, network, p.addrs[i])
+		if derr == nil {
+			rc := &resolverConn{Conn: c, p: p, i: i}
+			if _, ok := c.(net.PacketConn); ok {
+				// Go frames queries by what Dial returns: a stream would
+				// get TCP's length prefix over UDP.
+				return resolverPacketConn{rc}, nil
+			}
+			return rc, nil
+		}
+		p.failed(i, derr)
+		err = derr
+	}
+	return nil, err
+}
+
+// failed passes resolver i over, unless a query has already, and says so.
+func (p *pubDNS) failed(i uint32, err error) {
+	p.cur.CompareAndSwap(i, (i+1)%uint32(len(p.addrs))) //nolint:gosec // G115: a handful of resolvers
+	p.warn.note(p.log.Load(), p.addrs[i], err)
+}
+
+// resolverConn is a query's connection to one resolver: one that times out
+// or refuses fails the resolver; one cancelled by its caller does not.
+type resolverConn struct {
+	net.Conn
+	p    *pubDNS
+	i    uint32
+	done atomic.Bool
+}
+
+func (c *resolverConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	var errno syscall.Errno
+	if err != nil && (errors.Is(err, os.ErrDeadlineExceeded) || errors.As(err, &errno)) && c.done.CompareAndSwap(false, true) {
+		c.p.failed(c.i, err)
+	}
+	return n, err
+}
+
+// resolverPacketConn is a resolverConn over UDP, a PacketConn as its
+// socket is.
+type resolverPacketConn struct{ *resolverConn }
+
+func (c resolverPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	return c.Conn.(net.PacketConn).ReadFrom(b)
+}
+
+func (c resolverPacketConn) WriteTo(b []byte, a net.Addr) (int, error) {
+	return c.Conn.(net.PacketConn).WriteTo(b, a)
+}
+
+func (c *resolverConn) SetDeadline(t time.Time) error {
+	if limit := time.Now().Add(resolverWait); t.IsZero() || t.After(limit) {
+		t = limit
+	}
+	return c.Conn.SetDeadline(t)
+}
+
+// resolverWarn says, at most once a minute, that a public resolver does not
+// answer: a node-wide problem, unlike a name that does not exist. No name
 // goes in the log.
 type resolverWarn struct {
 	mu     sync.Mutex
@@ -404,17 +476,13 @@ type resolverWarn struct {
 	missed int
 }
 
-func (w *resolverWarn) note(log *slog.Logger, err error) {
-	var de *net.DNSError
-	if !errors.As(err, &de) || de.IsNotFound {
-		return
-	}
+func (w *resolverWarn) note(log *slog.Logger, resolver string, err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.missed++
-	if time.Since(w.last) < time.Minute {
+	if log == nil || time.Since(w.last) < time.Minute {
 		return
 	}
-	log.Warn("naive: names not resolved", "count", w.missed, "resolver", de.Server, "err", de.Err)
+	log.Warn("naive: a public resolver does not answer", "count", w.missed, "resolver", resolver, "err", err)
 	w.last, w.missed = time.Now(), 0
 }

@@ -1,6 +1,7 @@
 package naive
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -14,7 +15,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -449,8 +452,22 @@ func TestUoTLimits(t *testing.T) {
 		l.put(a)
 	}
 	l.put(b)
-	if l.total != 0 || len(l.users) != 0 {
-		t.Fatalf("left: %d %v", l.total, l.users)
+	if l.total != 0 {
+		t.Fatalf("left: %d", l.total)
+	}
+	// A user's tokens stay until they refill: closing streams gives none
+	// back.
+	if !l.take(a) || !l.newPeer(a) {
+		t.Fatal("a user back")
+	}
+	l.put(a)
+	l.sweep(time.Now())
+	if l.users[a] == nil || l.users[b] != nil {
+		t.Fatalf("swept: a kept %v (spent a token), b kept %v (spent none)", l.users[a] != nil, l.users[b] != nil)
+	}
+	l.sweep(time.Now().Add(time.Minute))
+	if len(l.users) != 0 {
+		t.Fatalf("not forgotten: %d", len(l.users))
 	}
 	for i := range uotPerService {
 		if !l.take([32]byte{byte(i), byte(i >> 8), 7}) {
@@ -459,6 +476,155 @@ func TestUoTLimits(t *testing.T) {
 	}
 	if l.take([32]byte{9, 9, 9}) {
 		t.Fatal("over the service's limit")
+	}
+}
+
+// A user's new destinations and lookups are paced, across streams and
+// after they end; a stream keeps 4096 destinations, the unused go first.
+func TestUoTPacing(t *testing.T) {
+	looked := 0
+	s := &Server{Allow: func(netip.Addr) bool { return true }, Resolve: func(context.Context, string) ([]netip.Addr, error) {
+		looked++
+		return []netip.Addr{netip.MustParseAddr("192.0.2.1")}, nil
+	}}
+	user := [32]byte{1}
+	stream := func() *uotStream {
+		if !s.uot.take(user) {
+			t.Fatal("no slot")
+		}
+		return &uotStream{s: s, ctx: context.Background(), user: user, names: map[string]uotResolved{}, peers: map[netip.AddrPort]int64{}}
+	}
+	dest := func(i int) netip.AddrPort {
+		return netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 0, 2, byte(i)}), uint16(1000+i/256)) //nolint:gosec // test
+	}
+	u := stream()
+	sent := 0
+	for i := range 3 * uotPeerBurst {
+		if u.mayReach(dest(i)) {
+			sent++
+		}
+	}
+	if sent != uotPeerBurst {
+		t.Fatalf("new destinations: %d, want the burst %d", sent, uotPeerBurst)
+	}
+	if !u.mayReach(dest(0)) {
+		t.Fatal("a destination it sent to")
+	}
+	// Another stream of the same user, after this one ended: no new tokens.
+	s.uot.put(user)
+	if v := stream(); v.mayReach(dest(5000)) {
+		t.Fatal("a new stream got new tokens")
+	}
+	// The cap per stream, with tokens to spare.
+	w := stream()
+	for i := range uotPeers + 100 {
+		s.uot.users[user].peers = bucket{uotPeerBurst, time.Now()}
+		w.mayReach(netip.AddrPortFrom(netip.AddrFrom4([4]byte{198, 51, byte(i >> 8), byte(i)}), 9)) //nolint:gosec // test
+	}
+	if len(w.peers) != uotPeers {
+		t.Fatalf("destinations kept: %d", len(w.peers))
+	}
+	// Those not used for a while go when a new one comes.
+	for p := range w.peers {
+		w.peers[p] = time.Now().Add(-2 * uotPeerAge).UnixNano()
+	}
+	w.pruned = time.Time{} // at most once a second
+	s.uot.users[user].peers = bucket{uotPeerBurst, time.Now()}
+	if !w.mayReach(dest(77)) || len(w.peers) != 1 {
+		t.Fatalf("stale destinations kept: %d", len(w.peers))
+	}
+	// Lookups: the burst, then none; a name looked up is kept.
+	n := 0
+	for i := range 2 * uotLookupBurst {
+		if _, ok := w.resolve(uotAddr{name: fmt.Sprintf("n%d.test", i), port: 53}); ok {
+			n++
+		}
+	}
+	if n != uotLookupBurst || looked != uotLookupBurst {
+		t.Fatalf("lookups: %d resolved, %d asked, want %d", n, looked, uotLookupBurst)
+	}
+	if _, ok := w.resolve(uotAddr{name: "n0.test", port: 53}); !ok || looked != uotLookupBurst {
+		t.Fatal("a kept name looked up again")
+	}
+}
+
+// isConnect = 1 spends a new destination too: with none left, a reset.
+func TestUoTConnectedPaced(t *testing.T) {
+	echo := udpEcho(t)
+	h, connect := uotServer(t, time.Minute)
+	_, s, done := connect(UoTName + ":0")
+	_, _ = s.Write(append([]byte{1}, socksAddr(echo)...))
+	if _, err := s.Write(packet(nil, []byte("a"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, got := readPacket(t, s, true); string(got) != "a" {
+		t.Fatalf("connected: %q", got)
+	}
+	h.uot.mu.Lock()
+	for _, u := range h.uot.users {
+		u.peers = bucket{0, time.Now()}
+	}
+	h.uot.mu.Unlock()
+	_, s2, done2 := connect(UoTName + ":0")
+	_, _ = s2.Write(append([]byte{1}, socksAddr(echo)...))
+	if !reset(t, s2) {
+		t.Error("connected without a token: not reset")
+	}
+	done2()
+	done()
+}
+
+// A connected socket hears "port unreachable" and goes on: the destination
+// may open the port later.
+func TestUoTICMPError(t *testing.T) {
+	pc, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:0")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := pc.LocalAddr().(*net.UDPAddr).AddrPort()
+	pc.Close()
+	_, connect := uotServer(t, time.Minute)
+	_, s, done := connect(UoTName + ":0")
+	defer done()
+	_, _ = s.Write(append([]byte{1}, socksAddr(dest)...))
+	if _, err := s.Write(packet(nil, []byte("nobody"))); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond) // the ICMP error comes back
+	pc, err = net.ListenUDP("udp", net.UDPAddrFromAddrPort(dest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	go func() {
+		buf := make([]byte, 100)
+		n, from, err := pc.ReadFromUDPAddrPort(buf)
+		if err == nil {
+			_, _ = pc.WriteToUDPAddrPort(buf[:n], from)
+		}
+	}()
+	if _, err := s.Write(packet(nil, []byte("now"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, got := readPacket(t, s, true); string(got) != "now" {
+		t.Fatalf("after port unreachable: %q", got)
+	}
+}
+
+// The sockets serveUoT makes, connected or not, do not broadcast.
+func TestUoTSocket(t *testing.T) {
+	for _, to := range []netip.AddrPort{{}, netip.MustParseAddrPort("127.0.0.1:9")} {
+		c, err := uotSocket(context.Background(), to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := c.SyscallConn()
+		v := -1
+		_ = raw.Control(func(fd uintptr) { v, _ = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST) })
+		c.Close()
+		if v != 0 {
+			t.Errorf("socket to %v: SO_BROADCAST %d", to, v)
+		}
 	}
 }
 
@@ -478,5 +644,61 @@ func TestUoTNoBroadcast(t *testing.T) {
 	}
 	if err := send(net.ListenConfig{Control: noBroadcast}); !errors.Is(err, syscall.EACCES) {
 		t.Fatalf("broadcast with noBroadcast: %v", err)
+	}
+}
+
+// Reading a packet's address and length allocates nothing (names aside).
+func TestUoTReadAllocs(t *testing.T) {
+	one := packet([]byte{0x00, 192, 0, 2, 1, 0, 53}, []byte("x"))
+	r := bufio.NewReaderSize(bytes.NewReader(bytes.Repeat(one, 1000)), 4<<10)
+	allocs := testing.AllocsPerRun(500, func() {
+		if _, err := readAddr(r, false); err != nil {
+			t.Fatal(err)
+		}
+		l, err := next(r, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = r.Discard(int(binary.BigEndian.Uint16(l)))
+	})
+	if allocs != 0 {
+		t.Fatalf("allocations per packet: %v", allocs)
+	}
+}
+
+// stuckStream is a client that sends and never reads: its writes wait for
+// the write deadline.
+type stuckStream struct {
+	io.Reader
+	deadline chan struct{}
+	once     sync.Once
+}
+
+func (s *stuckStream) Write([]byte) (int, error) {
+	<-s.deadline
+	return 0, os.ErrDeadlineExceeded
+}
+func (s *stuckStream) SetReadDeadline(time.Time) error { return nil }
+func (s *stuckStream) SetWriteDeadline(time.Time) error {
+	s.once.Do(func() { close(s.deadline) })
+	return nil
+}
+
+// A stream whose client stopped reading is reset, not ended: HTTP/3 would
+// otherwise close it cleanly after the forced deadline.
+func TestUoTStuckReset(t *testing.T) {
+	echo := udpEcho(t)
+	s := &Server{Allow: func(a netip.Addr) bool { return a == echo.Addr() }, uotIdle: 200 * time.Millisecond}
+	user := [32]byte{3}
+	s.uot.take(user)
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	go func() {
+		_, _ = pw.Write(append([]byte{0}, socksAddr(netip.MustParseAddrPort("0.0.0.0:0"))...))
+		_, _ = pw.Write(packet(append([]byte{0x00}, binary.BigEndian.AppendUint16(echo.Addr().AsSlice(), echo.Port())...), []byte("x")))
+	}()
+	st := &stuckStream{Reader: pr, deadline: make(chan struct{})}
+	if err := s.serveUoT(context.Background(), user, st, st); !errors.Is(err, errRefused) {
+		t.Fatalf("a stuck stream ended with %v, not a reset", err)
 	}
 }

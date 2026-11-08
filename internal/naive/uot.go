@@ -51,11 +51,13 @@ const (
 var errRefused = errors.New("naive: refused")
 
 // uotLimits counts the UoT streams, per user and in all, and paces each
-// user's new destinations and name lookups.
+// user's new destinations and name lookups. A user's tokens outlive their
+// last stream until they have refilled: closing streams gives none back.
 type uotLimits struct {
 	mu    sync.Mutex
 	total int
 	users map[[32]byte]*uotUser
+	swept time.Time
 }
 
 type uotUser struct {
@@ -66,6 +68,10 @@ type uotUser struct {
 func (l *uotLimits) take(user [32]byte) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	now := time.Now()
+	if now.Sub(l.swept) > 10*time.Second {
+		l.sweep(now)
+	}
 	u := l.users[user]
 	if l.total >= uotPerService || (u != nil && u.streams >= uotPerUser) {
 		return false
@@ -74,7 +80,6 @@ func (l *uotLimits) take(user [32]byte) bool {
 		if l.users == nil {
 			l.users = map[[32]byte]*uotUser{}
 		}
-		now := time.Now()
 		u = &uotUser{peers: bucket{uotPeerBurst, now}, lookups: bucket{uotLookupBurst, now}}
 		l.users[user] = u
 	}
@@ -86,13 +91,19 @@ func (l *uotLimits) take(user [32]byte) bool {
 func (l *uotLimits) put(user [32]byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	u := l.users[user]
-	if u == nil {
-		return
+	if u := l.users[user]; u != nil && u.streams > 0 {
+		l.total--
+		u.streams--
 	}
-	l.total--
-	if u.streams--; u.streams <= 0 {
-		delete(l.users, user)
+}
+
+// sweep forgets the users without streams whose tokens have refilled.
+func (l *uotLimits) sweep(now time.Time) {
+	l.swept = now
+	for k, u := range l.users {
+		if u.streams == 0 && u.peers.full(now, uotPeerRate, uotPeerBurst) && u.lookups.full(now, uotLookupRate, uotLookupBurst) {
+			delete(l.users, k)
+		}
 	}
 }
 
@@ -116,6 +127,10 @@ func (l *uotLimits) spend(user [32]byte, which func(*uotUser) *bucket, rate, bur
 type bucket struct {
 	tokens float64
 	at     time.Time
+}
+
+func (b *bucket) full(now time.Time, rate, burst float64) bool {
+	return b.tokens+now.Sub(b.at).Seconds()*rate >= burst
 }
 
 func (b *bucket) take(now time.Time, rate, burst float64) bool {
@@ -156,39 +171,50 @@ func readAddr(r *bufio.Reader, socks bool) (uotAddr, error) {
 	var a uotAddr
 	switch t {
 	case v4:
-		var b [4]byte
-		if _, err := io.ReadFull(r, b[:]); err != nil {
+		b, err := next(r, 4)
+		if err != nil {
 			return a, err
 		}
-		a.ip = netip.AddrFrom4(b)
+		a.ip = netip.AddrFrom4([4]byte(b))
 	case v6:
-		var b [16]byte
-		if _, err := io.ReadFull(r, b[:]); err != nil {
+		b, err := next(r, 16)
+		if err != nil {
 			return a, err
 		}
-		a.ip = netip.AddrFrom16(b).Unmap()
+		a.ip = netip.AddrFrom16([16]byte(b)).Unmap()
 	case name:
 		n, err := r.ReadByte()
 		if err != nil {
 			return a, err
 		}
-		b := make([]byte, n)
-		if _, err := io.ReadFull(r, b); err != nil {
-			return a, err
-		}
 		if n == 0 {
 			return a, fmt.Errorf("%w: an empty name", errRefused)
+		}
+		b, err := next(r, int(n))
+		if err != nil {
+			return a, err
 		}
 		a.name = string(b)
 	default:
 		return a, fmt.Errorf("%w: address type %#x", errRefused, t)
 	}
-	var p [2]byte
-	if _, err := io.ReadFull(r, p[:]); err != nil {
+	p, err := next(r, 2)
+	if err != nil {
 		return a, err
 	}
-	a.port = binary.BigEndian.Uint16(p[:])
+	a.port = binary.BigEndian.Uint16(p)
 	return a, nil
+}
+
+// next is the reader's next n bytes, valid until it reads again: nothing is
+// allocated per packet.
+func next(r *bufio.Reader, n int) ([]byte, error) {
+	b, err := r.Peek(n)
+	if err != nil {
+		return nil, err
+	}
+	_, _ = r.Discard(n)
+	return b, nil
 }
 
 // appendAddr writes an answer's source in UoT's form.
@@ -307,15 +333,8 @@ func (s *Server) resolve(ctx context.Context, name string) ([]netip.Addr, error)
 	if s.Resolve != nil {
 		return s.Resolve(ctx, name)
 	}
-	ips, err := uotResolver.LookupNetIP(ctx, "ip", name)
-	if err != nil {
-		s.warn.note(s.Log, err)
-	}
-	return ips, err
+	return PublicResolver().LookupNetIP(ctx, "ip", name)
 }
-
-// uotResolver looks UDP destinations up as TCP's are (PublicResolver).
-var uotResolver = PublicResolver()
 
 // deadlines are the stream's, as http.ResponseController sets them.
 type deadlines interface {
@@ -354,25 +373,20 @@ func (s *Server) serveUoT(ctx context.Context, user [32]byte, stream io.ReadWrit
 	u := &uotStream{s: s, ctx: ctx, user: user, names: map[string]uotResolved{}, peers: map[netip.AddrPort]int64{}}
 	u.touch()
 
-	var conn *net.UDPConn
+	// The errors say why, never where: no destination in the log.
+	var to netip.AddrPort
 	if connect == 1 {
-		to, ok := u.resolve(dest)
-		if !ok {
-			return fmt.Errorf("%w: %s", errRefused, dest)
+		var ok bool
+		if to, ok = u.resolve(dest); !ok {
+			return fmt.Errorf("%w: the destination is not allowed", errRefused)
 		}
-		d := net.Dialer{Control: noBroadcast}
-		c, err := d.DialContext(ctx, "udp", to.String())
-		if err != nil {
-			return fmt.Errorf("%w: %w", errRefused, err)
+		if !u.s.uot.newPeer(user) {
+			return fmt.Errorf("%w: too many new destinations", errRefused)
 		}
-		conn = c.(*net.UDPConn)
-	} else {
-		lc := net.ListenConfig{Control: noBroadcast}
-		c, err := lc.ListenPacket(ctx, "udp", ":0")
-		if err != nil {
-			return fmt.Errorf("%w: %w", errRefused, err)
-		}
-		conn = c.(*net.UDPConn)
+	}
+	conn, err := uotSocket(ctx, to)
+	if err != nil {
+		return fmt.Errorf("%w: no socket", errRefused)
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -414,8 +428,29 @@ loop:
 	case <-time.After(time.Second):
 		_ = dl.SetWriteDeadline(time.Now())
 		<-down
+		// Reset, not ended: HTTP/3 would close the stream cleanly.
+		result = fmt.Errorf("%w: the client does not read", errRefused)
 	}
 	return result
+}
+
+// uotSocket is a stream's UDP socket: connected to to, or unconnected when
+// to is not valid. Never with SO_BROADCAST.
+func uotSocket(ctx context.Context, to netip.AddrPort) (*net.UDPConn, error) {
+	if to.IsValid() {
+		d := net.Dialer{Control: noBroadcast}
+		c, err := d.DialContext(ctx, "udp", to.String())
+		if err != nil {
+			return nil, err
+		}
+		return c.(*net.UDPConn), nil
+	}
+	lc := net.ListenConfig{Control: noBroadcast}
+	c, err := lc.ListenPacket(ctx, "udp", ":0")
+	if err != nil {
+		return nil, err
+	}
+	return c.(*net.UDPConn), nil
 }
 
 // noBroadcast takes SO_BROADCAST, which Go sets on every UDP socket, off:
@@ -444,16 +479,16 @@ func (u *uotStream) upstream(r *bufio.Reader, conn *net.UDPConn, connected bool)
 				return err
 			}
 		}
-		var l [2]byte
-		if _, err := io.ReadFull(r, l[:]); err != nil {
+		l, err := next(r, 2)
+		if err != nil {
 			return err
 		}
-		n := int(binary.BigEndian.Uint16(l[:]))
+		n := int(binary.BigEndian.Uint16(l))
 		if n > uotMaxPayload {
 			return fmt.Errorf("%w: a packet of %d bytes", errRefused, n)
 		}
 		buf := uotBufs.Get().(*[uotMaxPayload]byte)
-		err := u.send(r, conn, connected, dest, buf[:n])
+		err = u.send(r, conn, connected, dest, buf[:n])
 		uotBufs.Put(buf)
 		if err != nil {
 			return err

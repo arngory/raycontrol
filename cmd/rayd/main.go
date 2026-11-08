@@ -1268,6 +1268,7 @@ func cmdNaive(args []string) error {
 	if err != nil {
 		return err
 	}
+	naive.SetResolverLog(log)
 	ns := &naive.Server{Users: &naive.Users{Path: *users}, Answer: handler, Log: log}
 	// Channel probes through the tunnel (R4-16): the probe name, and only
 	// it, leads to the endpoint; the rest to public addresses.
