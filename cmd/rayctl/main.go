@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	"golang.org/x/sys/unix"
@@ -30,6 +31,7 @@ import (
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1/devicev1connect"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
+	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -190,12 +192,12 @@ func main() {
 	defer cancel()
 	if *remote != "" && (fs.Arg(0) != "remote" || fs.Arg(1) != "enroll") {
 		if err := c.useRemote(ctx, *remote, fs.Arg(0)); err != nil {
-			fmt.Fprintln(os.Stderr, "rayctl:", err)
+			fmt.Fprintln(os.Stderr, "rayctl:", printableError(err))
 			os.Exit(1)
 		}
 	}
 	if err := c.run(ctx, fs.Args()); err != nil {
-		fmt.Fprintln(os.Stderr, "rayctl:", err)
+		fmt.Fprintln(os.Stderr, "rayctl:", printableError(err))
 		if errors.Is(err, errUsage) {
 			fmt.Fprint(os.Stderr, usageText)
 			os.Exit(2)
@@ -205,6 +207,29 @@ func main() {
 }
 
 var errUsage = errors.New("bad usage")
+
+// maxErrorText bounds an error as rayctl prints it.
+const maxErrorText = 512
+
+// printableError is err's text as rayctl prints it: a node's answers, a
+// remote node's, files and names reach it, so nothing a terminal acts on
+// (nodeupdate.Printable, line by line: rayctl's own errors may have
+// several), and maxErrorText bytes at most (second review, A).
+func printableError(err error) string {
+	lines := strings.Split(err.Error(), "\n")
+	for i, l := range lines {
+		lines[i] = nodeupdate.Printable(l)
+	}
+	s := strings.Join(lines, "\n")
+	if len(s) <= maxErrorText {
+		return s
+	}
+	n := maxErrorText
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
+}
 
 func need(args []string, n int) error {
 	if len(args) < n {

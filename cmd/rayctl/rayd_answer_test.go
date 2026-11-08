@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 
@@ -87,5 +88,39 @@ func TestRaydWarningsCapped(t *testing.T) {
 	}
 	if n != deploy.MaxWarnings || !strings.Contains(strings.Join(p.Warnings, "\n"), "50 more of rayd's warnings not shown") {
 		t.Errorf("%d of rayd's warnings: %q", n, p.Warnings[len(p.Warnings)-1])
+	}
+}
+
+// A database past Backup's limit (256 MiB, from 1 GiB: second review, D)
+// is refused, and rayctl says why.
+func TestBackupTooLarge(t *testing.T) {
+	saved := needRoot
+	needRoot = func() error { return nil }
+	t.Cleanup(func() { needRoot = saved })
+	// The answer's length says it all: nothing of it is read.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/proto")
+		w.Header().Set("Content-Length", fmt.Sprint(api.MaxBackupAnswer+1<<20))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	c := &cli{c: untouched{}, backupClient: api.NewNodeClient(srv.Client(), srv.URL, api.MaxBackupAnswer)}
+	err := c.backup(context.Background(), []string{"-o", t.TempDir() + "/b.rcbak", "-passphrase-file", "/nonexistent"})
+	if err == nil || !strings.Contains(err.Error(), "unusually large") || connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Errorf("a database past the limit: %v", err)
+	}
+	if api.MaxBackupAnswer != 256<<20 {
+		t.Errorf("Backup's limit: %d MiB", api.MaxBackupAnswer>>20)
+	}
+}
+
+// What rayctl prints of an error: nothing a terminal acts on, its own
+// lines kept, 512 bytes at most (second review, A).
+func TestPrintableError(t *testing.T) {
+	err := fmt.Errorf("first\nsecond \x1b]0;owned\x07\x1b[2J\r%s", strings.Repeat("é", 400))
+	s := printableError(err)
+	if strings.ContainsFunc(s, func(r rune) bool { return r != '\n' && (r < 0x20 || r == 0x7f) }) || !strings.HasPrefix(s, "first\nsecond ?]0;owned??[2J?") ||
+		len(s) > maxErrorText+len("…") || !strings.HasSuffix(s, "…") || !utf8.ValidString(s) {
+		t.Errorf("printed as %q", s)
 	}
 }

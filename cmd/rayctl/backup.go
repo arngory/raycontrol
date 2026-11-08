@@ -41,6 +41,9 @@ func (c *cli) backup(ctx context.Context, args []string) error {
 		client = c.backupClient
 	}
 	resp, err := client.Backup(ctx, connect.NewRequest(&nodev1.BackupRequest{}))
+	if connect.CodeOf(err) == connect.CodeResourceExhausted {
+		return fmt.Errorf("the database is unusually large, more than rayctl takes (%d MiB): %w", api.MaxBackupAnswer>>20, err)
+	}
 	if err != nil {
 		return err
 	}
