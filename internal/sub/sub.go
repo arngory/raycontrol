@@ -456,8 +456,9 @@ func serviceProfile(m render.Model, u render.User, s render.Service, inner *rend
 
 // YggdrasilLink is a user's Yggdrasil profile (spec/subscription-v1.md §4):
 // VLESS with ML-KEM-768 to inner at the node's mesh address and exit port,
-// carried by Yggdrasil with one peer, the node itself, over a TLS link
-// under the service's name. niko-ygg is "<peer URI>;<the user's key>", the
+// carried by Yggdrasil with one peer, the node itself, over a TLS link to
+// the node's address under the service's name (sni): the client knows the
+// node by its address (SPA goes there) and resolves no name, as for naive. niko-ygg is "<peer URI>;<the user's key>", the
 // key (a 32-byte ed25519 seed, hex) derived from the same inner UUID; each
 // niko-ygg-via is a public peer of the node, when it has them.
 func YggdrasilLink(m render.Model, s, inner render.Service, uuid string) (string, error) {
@@ -469,7 +470,7 @@ func YggdrasilLink(m render.Model, s, inner render.Service, uuid string) (string
 	if err != nil {
 		return "", err
 	}
-	peer := url.URL{Scheme: "tls", Host: net.JoinHostPort(st.SNI, "443"),
+	peer := url.URL{Scheme: "tls", Host: net.JoinHostPort(m.Host, "443"),
 		RawQuery: url.Values{"sni": {st.SNI}, "key": {hex.EncodeToString(nodeKey)}}.Encode()}
 	q := url.Values{}
 	q.Set("type", "raw")
