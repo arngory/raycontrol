@@ -140,6 +140,8 @@ const (
 	NodeServiceSetDebugProcedure = "/raycontrol.node.v1.NodeService/SetDebug"
 	// NodeServiceSetNodeNameProcedure is the fully-qualified name of the NodeService's SetNodeName RPC.
 	NodeServiceSetNodeNameProcedure = "/raycontrol.node.v1.NodeService/SetNodeName"
+	// NodeServiceSetNodeNoteProcedure is the fully-qualified name of the NodeService's SetNodeNote RPC.
+	NodeServiceSetNodeNoteProcedure = "/raycontrol.node.v1.NodeService/SetNodeNote"
 	// NodeServiceGetDeploymentProcedure is the fully-qualified name of the NodeService's GetDeployment
 	// RPC.
 	NodeServiceGetDeploymentProcedure = "/raycontrol.node.v1.NodeService/GetDeployment"
@@ -253,6 +255,9 @@ type NodeServiceClient interface {
 	// SetNodeName names the node, or takes its name away with "": clients
 	// show it with the node's address (subscription-v1 §3, field name).
 	SetNodeName(context.Context, *connect.Request[v1.SetNodeNameRequest]) (*connect.Response[v1.SetNodeNameResponse], error)
+	// SetNodeNote sets the node's note for its users, or takes it away with
+	// "": clients show it with the node (subscription-v1 §3, field note).
+	SetNodeNote(context.Context, *connect.Request[v1.SetNodeNoteRequest]) (*connect.Response[v1.SetNodeNoteResponse], error)
 	// GetDeployment returns what root must install for the current services:
 	// system users, unit files and other files. rayctl apply writes them.
 	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
@@ -515,6 +520,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("SetNodeName")),
 			connect.WithClientOptions(opts...),
 		),
+		setNodeNote: connect.NewClient[v1.SetNodeNoteRequest, v1.SetNodeNoteResponse](
+			httpClient,
+			baseURL+NodeServiceSetNodeNoteProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetNodeNote")),
+			connect.WithClientOptions(opts...),
+		),
 		getDeployment: connect.NewClient[v1.GetDeploymentRequest, v1.GetDeploymentResponse](
 			httpClient,
 			baseURL+NodeServiceGetDeploymentProcedure,
@@ -567,6 +578,7 @@ type nodeServiceClient struct {
 	getUpdateStatus   *connect.Client[v1.GetUpdateStatusRequest, v1.GetUpdateStatusResponse]
 	setDebug          *connect.Client[v1.SetDebugRequest, v1.SetDebugResponse]
 	setNodeName       *connect.Client[v1.SetNodeNameRequest, v1.SetNodeNameResponse]
+	setNodeNote       *connect.Client[v1.SetNodeNoteRequest, v1.SetNodeNoteResponse]
 	getDeployment     *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
 }
 
@@ -775,6 +787,11 @@ func (c *nodeServiceClient) SetNodeName(ctx context.Context, req *connect.Reques
 	return c.setNodeName.CallUnary(ctx, req)
 }
 
+// SetNodeNote calls raycontrol.node.v1.NodeService.SetNodeNote.
+func (c *nodeServiceClient) SetNodeNote(ctx context.Context, req *connect.Request[v1.SetNodeNoteRequest]) (*connect.Response[v1.SetNodeNoteResponse], error) {
+	return c.setNodeNote.CallUnary(ctx, req)
+}
+
 // GetDeployment calls raycontrol.node.v1.NodeService.GetDeployment.
 func (c *nodeServiceClient) GetDeployment(ctx context.Context, req *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {
 	return c.getDeployment.CallUnary(ctx, req)
@@ -888,6 +905,9 @@ type NodeServiceHandler interface {
 	// SetNodeName names the node, or takes its name away with "": clients
 	// show it with the node's address (subscription-v1 §3, field name).
 	SetNodeName(context.Context, *connect.Request[v1.SetNodeNameRequest]) (*connect.Response[v1.SetNodeNameResponse], error)
+	// SetNodeNote sets the node's note for its users, or takes it away with
+	// "": clients show it with the node (subscription-v1 §3, field note).
+	SetNodeNote(context.Context, *connect.Request[v1.SetNodeNoteRequest]) (*connect.Response[v1.SetNodeNoteResponse], error)
 	// GetDeployment returns what root must install for the current services:
 	// system users, unit files and other files. rayctl apply writes them.
 	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
@@ -1146,6 +1166,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("SetNodeName")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceSetNodeNoteHandler := connect.NewUnaryHandler(
+		NodeServiceSetNodeNoteProcedure,
+		svc.SetNodeNote,
+		connect.WithSchema(nodeServiceMethods.ByName("SetNodeNote")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceGetDeploymentHandler := connect.NewUnaryHandler(
 		NodeServiceGetDeploymentProcedure,
 		svc.GetDeployment,
@@ -1236,6 +1262,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceSetDebugHandler.ServeHTTP(w, r)
 		case NodeServiceSetNodeNameProcedure:
 			nodeServiceSetNodeNameHandler.ServeHTTP(w, r)
+		case NodeServiceSetNodeNoteProcedure:
+			nodeServiceSetNodeNoteHandler.ServeHTTP(w, r)
 		case NodeServiceGetDeploymentProcedure:
 			nodeServiceGetDeploymentHandler.ServeHTTP(w, r)
 		default:
@@ -1409,6 +1437,10 @@ func (UnimplementedNodeServiceHandler) SetDebug(context.Context, *connect.Reques
 
 func (UnimplementedNodeServiceHandler) SetNodeName(context.Context, *connect.Request[v1.SetNodeNameRequest]) (*connect.Response[v1.SetNodeNameResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetNodeName is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetNodeNote(context.Context, *connect.Request[v1.SetNodeNoteRequest]) (*connect.Response[v1.SetNodeNoteResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetNodeNote is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {

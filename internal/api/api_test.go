@@ -762,6 +762,41 @@ func TestNodeName(t *testing.T) {
 	}
 }
 
+// The node's note: set as kept, in the status, audited without its text;
+// refused notes leave it as it was; "" takes it away.
+func TestNodeNote(t *testing.T) {
+	_, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	note := func() string {
+		t.Helper()
+		st, err := c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st.Msg.Note
+	}
+	r, err := c.SetNodeNote(ctx, connect.NewRequest(&nodev1.SetNodeNoteRequest{Note: "  до 1 Гбит/с 🚀  "}))
+	if err != nil || r.Msg.Note != "до 1 Гбит/с 🚀" || note() != "до 1 Гбит/с 🚀" {
+		t.Fatalf("set: %+v %v, status %q", r, err, note())
+	}
+	for _, bad := range []string{"x\u202Ey", "a\nb", strings.Repeat("n", 201)} {
+		if _, err := c.SetNodeNote(ctx, connect.NewRequest(&nodev1.SetNodeNoteRequest{Note: bad})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Fatalf("%+q: %v", bad, err)
+		}
+	}
+	if n := note(); n != "до 1 Гбит/с 🚀" {
+		t.Fatalf("after refused notes: %q", n)
+	}
+	audit, _ := c.ListAudit(ctx, connect.NewRequest(&nodev1.ListAuditRequest{}))
+	if !slices.ContainsFunc(audit.Msg.Entries, func(e *nodev1.AuditEntry) bool { return e.Action == "node note" && e.Target == "13 characters" }) {
+		t.Fatalf("audit: %+v", audit.Msg.Entries)
+	}
+	if r, err := c.SetNodeNote(ctx, connect.NewRequest(&nodev1.SetNodeNoteRequest{})); err != nil || r.Msg.Note != "" || note() != "" {
+		t.Fatalf("remove: %+v %v, status %q", r, err, note())
+	}
+}
+
 // Over the remote API (no peer of the node's socket), CheckDNSZones takes
 // only named resolvers and public addresses on port 53 (review 7).
 func TestCheckDNSZonesRemoteResolvers(t *testing.T) {

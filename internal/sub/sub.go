@@ -62,7 +62,11 @@ type Payload struct {
 	NodeID string `json:"node_id"`
 	// Name is the node's name (rayctl node name), for the client to show
 	// with its address; checked by node.CleanName. None: no field.
-	Name     string    `json:"name,omitempty"`
+	Name string `json:"name,omitempty"`
+	// Note is what the node's owner tells its users (rayctl node note): one
+	// line of plain text, at most 200 code points, checked by
+	// node.CleanNote. None: no field.
+	Note     string    `json:"note,omitempty"`
 	Seq      uint64    `json:"seq"`
 	Time     int64     `json:"time"`
 	Issued   int64     `json:"issued"`

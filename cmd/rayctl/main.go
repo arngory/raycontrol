@@ -38,6 +38,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
 
   status
   node name [NAME | ""]                     show, set or remove the node's name, which clients show
+  node note [TEXT | ""]                     show, set or remove the note clients show their users (200 characters, one line)
                                             with its address (at most 48 characters)
   user list
   user add [NAME] [-services a,b] [-expires 2026-12-31|30d] [-limit 50G] [-note TEXT]
@@ -312,6 +313,9 @@ func (c *cli) status(ctx context.Context) error {
 // nodeCmd: rayctl node name [NAME]. Without NAME it shows the name; ""
 // removes it.
 func (c *cli) nodeCmd(ctx context.Context, sub string, args []string) error {
+	if sub == "note" && len(args) <= 1 {
+		return c.nodeNote(ctx, args)
+	}
 	if sub != "name" || len(args) > 1 {
 		return errUsage
 	}
@@ -338,6 +342,36 @@ func (c *cli) nodeCmd(ctx context.Context, sub string, args []string) error {
 			return
 		}
 		fmt.Fprintf(w, "the node is %q now; clients show it from their next subscription\n", r.Msg.Name)
+	})
+}
+
+// nodeNote: rayctl node note [TEXT]. The note goes on a line of its own,
+// never into a table: wide characters and emoji would push columns apart.
+func (c *cli) nodeNote(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		r, err := c.c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
+		if err != nil {
+			return err
+		}
+		return c.print(&nodev1.SetNodeNoteResponse{Note: r.Msg.Note}, func(w *tabwriter.Writer) {
+			if r.Msg.Note == "" {
+				fmt.Fprintln(w, "no note (rayctl node note TEXT)")
+				return
+			}
+			fmt.Fprintln(w, r.Msg.Note)
+		})
+	}
+	r, err := c.c.SetNodeNote(ctx, connect.NewRequest(&nodev1.SetNodeNoteRequest{Note: args[0]}))
+	if err != nil {
+		return err
+	}
+	return c.print(r.Msg, func(w *tabwriter.Writer) {
+		if r.Msg.Note == "" {
+			fmt.Fprintln(w, "the node has no note now; clients drop it from their next subscription")
+			return
+		}
+		fmt.Fprintln(w, "clients show this from their next subscription:")
+		fmt.Fprintln(w, r.Msg.Note)
 	})
 }
 

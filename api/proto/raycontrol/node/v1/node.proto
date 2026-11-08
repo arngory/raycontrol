@@ -124,6 +124,9 @@ service NodeService {
   // SetNodeName names the node, or takes its name away with "": clients
   // show it with the node's address (subscription-v1 §3, field name).
   rpc SetNodeName(SetNodeNameRequest) returns (SetNodeNameResponse);
+  // SetNodeNote sets the node's note for its users, or takes it away with
+  // "": clients show it with the node (subscription-v1 §3, field note).
+  rpc SetNodeNote(SetNodeNoteRequest) returns (SetNodeNoteResponse);
 
   // GetDeployment returns what root must install for the current services:
   // system users, unit files and other files. rayctl apply writes them.
@@ -324,6 +327,7 @@ message GetStatusResponse {
   int64 debug_until = 9;
   // The node's name (rayctl node name); empty: none.
   string name = 10;
+  string note = 11;
 }
 
 message SetNodeNameRequest {
@@ -332,6 +336,15 @@ message SetNodeNameRequest {
 }
 message SetNodeNameResponse {
   string name = 1; // as kept
+}
+
+message SetNodeNoteRequest {
+  // At most 200 characters (code points) on one line; runs of spaces
+  // become one. Empty removes it.
+  string note = 1;
+}
+message SetNodeNoteResponse {
+  string note = 1; // as kept
 }
 
 message LoopHealth {
