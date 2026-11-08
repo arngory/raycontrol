@@ -403,6 +403,25 @@ docker run --rm --network "$net" -v "$bin:/opt/rc:ro" "$image" sh -ec '
 [[ $(x rayctl audit) == *"alice/console (remote)"* ]] || fail "the remote admin is not in the audit log"
 [[ $(x rayctl device list alice) == *registered* ]] || fail "the remote device is not listed as registered"
 
+# The egress policy (spec/egress-policy-v1.md): this system's nft takes the
+# rules (the kernel is the runner's), rayspa puts them in force, and they
+# come back with the table after the reloads below.
+egress_in_force() {
+	for _ in $(seq 20); do
+		if x rayctl egress | grep -Eq '^in force +yes'; then
+			return 0
+		fi
+		sleep 0.5
+	done
+	fail "the egress policy is not in force after $1: $(x rayctl egress 2>&1)"
+}
+log "$distro: the egress policy"
+x rayctl egress block bittorrent || fail "rayctl egress block bittorrent"
+x rayctl egress block smtp >/dev/null || fail "rayctl egress block smtp"
+egress_in_force "rayctl egress block"
+x nft list chain inet raycontrol egress | grep -q 'comment "bittorrent-tcp"' || fail "no BitTorrent rule in the egress chain"
+[[ $(x rayctl status) == *"egress"*"blocked: bittorrent, smtp"* ]] || fail "rayctl status does not show the egress policy"
+
 log "$distro: host firewall reloads and flush ruleset"
 case $distro in
 debian*) x systemctl restart nftables.service && wait_table "nftables restart" ;;
@@ -413,6 +432,7 @@ client "$laptop" >/dev/null || fail "probe after the firewall reload"
 x nft flush ruleset
 wait_table "nft flush ruleset"
 client "$laptop" >/dev/null || fail "probe after flush ruleset"
+egress_in_force "nft flush ruleset"
 # Warnings reach journald at warning priority: journalctl -p warning, as the
 # guide says, shows rayspa's note about the restored table.
 # (Where journald itself runs: some container hosts cannot start it.)
