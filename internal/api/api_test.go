@@ -841,3 +841,99 @@ func TestAppMirrorAPI(t *testing.T) {
 		t.Errorf("audit %+v %v", entries, err)
 	}
 }
+
+// rayctl egress (spec/egress-policy-v1.md): root changes it on the node,
+// each change audited and sent to rayspa at once; the group sees it; the
+// remote API has neither; the perimeter snapshot carries it, with rayd's
+// UID where it runs the data plane itself.
+func TestEgressAPI(t *testing.T) {
+	srv, sock, changes := startServer(t)
+	ctx := context.Background()
+	as := func(uid uint32) context.Context {
+		return context.WithValue(context.WithValue(ctx, peerKey{}, &unix.Ucred{Uid: uid}), actorKey{}, "test")
+	}
+	remote := context.WithValue(ctx, actorKey{}, "admin/laptop (remote)")
+	on, off := true, false
+	set := func(ctx context.Context, bittorrent, smtp *bool) (*nodev1.Egress, error) {
+		r, err := srv.SetEgress(ctx, connect.NewRequest(&nodev1.SetEgressRequest{Bittorrent: bittorrent, Smtp: smtp}))
+		if err != nil {
+			return nil, err
+		}
+		return r.Msg.Egress, nil
+	}
+
+	// A new node: nothing blocked, for the group too.
+	r, err := srv.GetEgress(as(1000), connect.NewRequest(&nodev1.GetEgressRequest{}))
+	if err != nil || r.Msg.Egress.Bittorrent || r.Msg.Egress.Smtp || r.Msg.Uids != nil {
+		t.Fatalf("a new node: %+v %v", r, err)
+	}
+	refused := map[string]context.Context{"the group": as(1000), "remote": remote}
+	if os.Getuid() != 0 {
+		refused["rayd's own user"] = as(uint32(os.Getuid()))
+	}
+	for name, ctx := range refused {
+		if _, err := set(ctx, &on, nil); connect.CodeOf(err) != connect.CodePermissionDenied {
+			t.Errorf("%s changes it: %v", name, err)
+		}
+	}
+	if _, err := srv.GetEgress(remote, connect.NewRequest(&nodev1.GetEgressRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("remote sees it: %v", err)
+	}
+	if _, err := set(as(0), nil, nil); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("nothing to change: %v", err)
+	}
+	if e, _ := srv.Store.Egress(ctx); e != (store.Egress{}) {
+		t.Fatalf("changed by a refused call: %+v", e)
+	}
+
+	before := changes.Load()
+	if e, err := set(as(0), &on, nil); err != nil || !e.Bittorrent || e.Smtp {
+		t.Fatalf("block bittorrent: %+v %v", e, err)
+	}
+	if changes.Load() == before {
+		t.Fatal("rayspa not told")
+	}
+	if e, err := set(as(0), &off, &on); err != nil || e.Bittorrent || !e.Smtp {
+		t.Fatalf("allow bittorrent, block smtp: %+v %v", e, err)
+	}
+	entries, _ := srv.Store.ListAudit(ctx, 10)
+	for _, want := range []string{"block bittorrent", "allow bittorrent, block smtp"} {
+		if !slices.ContainsFunc(entries, func(e store.AuditEntry) bool {
+			return e.Action == "egress.set" && e.Target == want && e.Result == "ok" && e.Actor == "test"
+		}) {
+			t.Errorf("%q not audited: %+v", want, entries)
+		}
+	}
+	if slices.ContainsFunc(entries, func(e store.AuditEntry) bool { return e.Action == "egress.set" && e.Result != "ok" }) {
+		t.Errorf("refused calls audited as changes: %+v", entries)
+	}
+
+	// The status on the node's socket; not through the remote API.
+	st, err := NewUnixClient(sock).GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
+	if err != nil || st.Msg.Egress == nil || !st.Msg.Egress.Smtp || st.Msg.Egress.Bittorrent {
+		t.Fatalf("status: %+v %v", st.Msg.GetEgress(), err)
+	}
+	if st, err := srv.GetStatus(remote, connect.NewRequest(&nodev1.GetStatusRequest{})); err != nil || st.Msg.Egress != nil {
+		t.Fatalf("remote status: %+v %v", st.Msg.GetEgress(), err)
+	}
+
+	p := &PerimeterServer{Server: srv, DefaultTTL: 10 * time.Minute, MaxTTL: time.Hour}
+	snap, err := p.snapshot(ctx)
+	if err != nil || !snap.Egress.GetSmtp() || snap.Egress.GetBittorrent() || snap.Egress.Uids != nil {
+		t.Fatalf("snapshot: %+v %v", snap.GetEgress(), err)
+	}
+	// rayd serve -supervise: the data plane runs as rayd.
+	srv.Paths.Supervised = true
+	if snap, err = p.snapshot(ctx); err != nil || !slices.Equal(snap.Egress.GetUids(), []uint32{uint32(os.Getuid())}) {
+		t.Fatalf("supervised snapshot: %+v %v", snap.GetEgress(), err)
+	}
+	if r, err := srv.GetEgress(as(0), connect.NewRequest(&nodev1.GetEgressRequest{})); err != nil ||
+		!slices.Equal(r.Msg.Uids, []uint32{uint32(os.Getuid())}) {
+		t.Fatalf("supervised: %+v %v", r, err)
+	}
+	// Turned off, it reaches rayspa as such.
+	set(as(0), nil, &off)
+	if snap, err = p.snapshot(ctx); err != nil || snap.Egress == nil || snap.Egress.Smtp || snap.Egress.Bittorrent {
+		t.Fatalf("off: %+v %v", snap.GetEgress(), err)
+	}
+}

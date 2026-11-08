@@ -267,6 +267,14 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 		resp.Loops = append(resp.Loops, &nodev1.LoopHealth{Name: l.Name, LastOk: unixOf(l.LastOK), LastError: unixOf(l.LastErr),
 			Error: l.Err, Runs: l.Runs, Errors: l.Errors, Failing: l.Failing(), Detail: l.Detail})
 	}
+	// The egress policy, as GetEgress: on the node's socket only.
+	if isLocal(ctx) {
+		e, err := s.Store.Egress(ctx)
+		if err != nil {
+			return nil, toConnect(err)
+		}
+		resp.Egress = egressPB(e)
+	}
 	return connect.NewResponse(resp), nil
 }
 
