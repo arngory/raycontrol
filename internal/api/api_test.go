@@ -380,8 +380,8 @@ func TestPerimeterFeed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dep.Msg.Units) != 7 || len(dep.Msg.Warnings) != 0 || len(dep.Msg.HostPorts) == 0 {
-		t.Fatalf("deployment units %v warnings %v host ports %v", dep.Msg.Units, dep.Msg.Warnings, dep.Msg.HostPorts)
+	if len(dep.Msg.Units) != 7 || len(dep.Msg.Warnings) != 0 || len(dep.Msg.HostPorts) == 0 || dep.Msg.Icmp {
+		t.Fatalf("deployment units %v warnings %v host ports %v icmp %v", dep.Msg.Units, dep.Msg.Warnings, dep.Msg.HostPorts, dep.Msg.Icmp)
 	} // From outside the ACME window is TCP 80 (no DNS provider here); the
 	// rest is the same.
 	has := func(rs []*nodev1.PortRange, proto string, port uint32) bool {
@@ -412,6 +412,33 @@ func TestPerimeterFeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	check()
+}
+
+// naive's ICMP on (spec/icmp-v1.md): the deployment says so, and rayctl
+// apply lets the data plane's groups open ICMP sockets.
+func TestDeploymentICMP(t *testing.T) {
+	_, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	for _, kind := range []string{"reality", "naive"} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: kind, Name: kind})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, on := range []bool{false, true} {
+		if on {
+			if _, err := c.SetServiceOption(ctx, connect.NewRequest(&nodev1.SetServiceOptionRequest{Name: "naive", Key: "icmp", Value: "on"})); err != nil {
+				t.Fatal(err)
+			}
+		}
+		dep, err := c.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dep.Msg.Icmp != on {
+			t.Errorf("icmp on %v: deployment says %v", on, dep.Msg.Icmp)
+		}
+	}
 }
 
 func TestPerimeterFeedDenied(t *testing.T) {

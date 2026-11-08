@@ -74,6 +74,9 @@ type Options struct {
 	// the rest first): it is not a failure, nor are the ports its Xray and
 	// Hysteria2 hold.
 	AllowV0 bool
+	// ICMP: a naive service carries ping and traceroute (icmp=on,
+	// spec/icmp-v1.md): its group must be allowed ICMP sockets.
+	ICMP bool
 }
 
 // Host is what the checks look at; System is this machine, tests replace
@@ -322,6 +325,14 @@ func (h *Host) Check(ctx context.Context, o Options) []Result {
 	}
 	if p := deploy.SandboxResolverProblem(h.Root); p != "" {
 		adv("resolver in the sandbox", false, p, "Hysteria2 and Yggdrasil's peers look names up from units that deny loopback and private ranges, all but systemd-resolved's stub")
+	}
+	if o.ICMP {
+		// The kernel lets a process open ICMP datagram sockets when one of
+		// its groups is in the range: naive's is the service's own.
+		groups := strings.Join(strings.Fields(h.read("/proc/sys/net/ipv4/ping_group_range")), " ")
+		_, ok := deploy.PingGroups(groups)
+		adv("ICMP sockets", ok, deploy.PingGroupRange+" "+groups,
+			"naive carries ICMP (icmp=on), and its sockets do not open without its group in the range: rayctl apply widens it to the data plane's groups, 9100-9179")
 	}
 	addrs, _ := h.Addrs()
 	v6 := slices.ContainsFunc(addrs, func(a netip.Addr) bool { return a.Is6() && a.IsGlobalUnicast() && !a.IsPrivate() })

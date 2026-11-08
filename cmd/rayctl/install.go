@@ -632,7 +632,7 @@ func (c *cli) deploy(ctx context.Context, h *deploy.Host, keep ...string) error 
 	if err != nil {
 		return err
 	}
-	plan := deploy.Plan{Units: resp.Msg.Units, Warnings: resp.Msg.Warnings, FrontDNS: resp.Msg.FrontDns}
+	plan := deploy.Plan{Units: resp.Msg.Units, Warnings: resp.Msg.Warnings, FrontDNS: resp.Msg.FrontDns, ICMP: resp.Msg.Icmp}
 	for _, r := range resp.Msg.HostPorts {
 		plan.HostPorts = append(plan.HostPorts, deploy.PortRange{Proto: r.Proto, From: uint16(r.From), To: uint16(r.To)})
 	}

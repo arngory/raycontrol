@@ -176,7 +176,7 @@ https://<имя>/dns-query/<токен>?niko-node=<node_id>&niko-svc=<id>#doh
 ### Профиль naive (R2)
 
 ```
-naive+https://niko:<пароль>@<адрес ноды>:443?sni=<имя>&niko-node=<node_id>&niko-svc=<id>&uot=2#naive
+naive+https://niko:<пароль>@<адрес ноды>:443?sni=<имя>&niko-node=<node_id>&niko-svc=<id>&uot=2[&icmp=1]#naive
 ```
 
 - В хосте — адрес ноды, как у `hysteria2://` и `vless://`; `<имя>` — поддомен ноды под её сертификатом, он идёт в
@@ -190,6 +190,9 @@ naive+https://niko:<пароль>@<адрес ноды>:443?sni=<имя>&niko-no
 - `uot=2` (с v0.20.0) — сервер несёт UDP поверх потока, UDP-over-TCP v2 из sing-box
   ([naive-uot-v1](naive-uot-v1.md)). Без параметра клиент UDP через naive не шлёт. Недоступное назначение
   сбрасывает поток, а не закрывает его чисто.
+- `icmp=1` (с v0.21.0) — сервер несёт ping и трассировку: поток к `icmp.niko.arpa`, echo шлёт нода со своих
+  ICMP-сокетов ([icmp-v1](icmp-v1.md)). Только когда на сервисе `rayctl service set <naive> icmp=on`; по умолчанию
+  параметра нет, и клиент ICMP на ноду не шлёт.
 - naive-quic: тот же адрес по UDP 443 (HTTP/3, QUIC v1 с `X25519MLKEM768`), те же имя и пароль — `naive+quic://` с
   теми же параметрами; фронт отдаёт по имени из QUIC Initial (R3-5).
 
