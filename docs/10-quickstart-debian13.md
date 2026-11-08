@@ -616,6 +616,7 @@ journalctl -u rayd -p warning --since -1h
 |---|---|
 | Нет строки `certificate stored`, в `rayctl status` — `acme site FAILED` | `journalctl -u rayd \| grep -i certif`. С Cloudflare — права токена (§1) и `rayctl dns`. Без него — записи A и TCP 80 у провайдера. Неудачу нода повторяет через час, потом через 2, 4… до суток. Пауза живёт в памяти rayd. Если ошибка была на самой ноде (`does not resolve`, `lookup … on [::1]:53`, токен) и вы её исправили — `systemctl restart rayd`, и выпуск пойдёт сразу: Let's Encrypt о такой неудаче не знает. С v0.11.1 то же делают `rayctl dns cloudflare` и `rayctl dns sync`, не чаще раза в 15 минут на сайт. Если отказал сам Let's Encrypt (`urn:ietf:params:acme:error:…`), ради этого не перезапускайте: лимит — 5 неудач в час на имя |
 | `lookup … on [::1]:53` или `127.0.0.1:53`: `connection refused`; `resolver FAILED` в `rayctl status` (v0.11.1) | службы не могут прочитать `/etc/resolv.conf` или в нём нет `nameserver` (§2): `ls -lL /etc/resolv.conf` — нужно 0644, `rayctl apply` ставит это сам (v0.11.1) |
+| `rayctl update`: `unexpected "slipstream-server" in the archive` | на ноде `rayctl` старше v0.15.0: он принимает только знакомые ему файлы. Обновитесь через ступень: `rayctl update -version v0.15.0`, затем `rayctl update` (§17). С v0.10 перед этим — `umask 022` |
 | `Failed at step EXEC … Permission denied` у `niko-*` | установка до v0.11.0 под строгим umask: `rayctl apply` из v0.11.0 открывает каталоги и бинарники. Перед `rayctl update` с v0.10 — `umask 022` (§17) |
 | `port53 FAILED` в `rayctl status` | UDP 53 рядом с фронтом занял другой DNS-сервер: `ss -lunp 'sport = :53'` |
 | `warning: service doh (doh) is not deployed by this version` (v0.11.0) | ложное предупреждение: DoH обслуживает сам rayd, своего юнита у него нет. Уйдёт в следующем релизе |
@@ -851,6 +852,9 @@ rayctl -remote laptop.rcdev device invite alice phone      # приглашен�
   `rayctl update -rollback` — вернуть её вручную.
   - Обновление делает уже установленный `rayctl`. До v0.11.0 он клал бинарники по umask оболочки, поэтому с v0.10
     перед обновлением — `umask 022`.
+  - С v0.10–v0.14 — в два шага: `rayctl update -version v0.15.0`, затем `rayctl update`. `rayctl` до v0.15.0
+    принимает в архиве только знакомые файлы, а с v0.16.0 там есть `slipstream-server` ([RELEASE.md](RELEASE.md),
+    «Со старых версий: ступени»).
   - На хосте relay `rayctl update` отказывает: его обновляет `bootstrap.sh -relay`.
 - `rayctl service rotate reality` — новые ключи и имя REALITY раньше срока; с `-now` — сразу.
 - `rayctl service rotate dns` — новый ключ печати dnstt (dnsseal-v1) сразу; прежний принимается ещё `-cred-grace`, с `-now` — нет.

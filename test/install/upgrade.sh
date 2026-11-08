@@ -9,20 +9,35 @@
 # the payload's fields), values aside. A difference is a configuration
 # that only a fresh install gets right.
 #
-#   test/install/upgrade.sh DISTRO BIN_DIR OLD_DIR
+#   test/install/upgrade.sh DISTRO BIN_DIR OLD_DIR [STEP_DIR]
 #
 # BIN_DIR as for run.sh, with slipstream-server (the archive has it since
 # v0.16.0). OLD_DIR holds the previous release's binaries (rayd, rayspa,
 # rayctl, niko-server, xray) and its install/ directory.
+#
+# STEP_DIR, when given, holds a release as published (SHA256SUMS, its
+# signature, the archive: previous.sh RELEASE_DIR) that OLD_DIR's rayctl
+# updates to first (rayctl update -from: the archive verified and
+# extracted by that old rayctl, as from GitHub), and whose rayctl then
+# updates to this build. That is the path docs/RELEASE.md gives a node
+# whose rayctl cannot take the latest archive itself (before v0.15.0:
+# names it does not know, slipstream-server since v0.16.0).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/install/lib.sh
 . "$here/lib.sh"
 
-usage="usage: upgrade.sh DISTRO BIN_DIR OLD_DIR"
+usage="usage: upgrade.sh DISTRO BIN_DIR OLD_DIR [STEP_DIR]"
 distro=${1:?$usage}
 bin="$(cd "${2:?$usage}" && pwd)"
 old="$(cd "${3:?$usage}" && pwd)"
+step=""
+if [[ -n ${4:-} ]]; then
+	step="$(cd "$4" && pwd)"
+	for f in SHA256SUMS SHA256SUMS.minisig raycontrol-linux-amd64.tar.gz; do
+		[[ -f $step/$f ]] || die "$step/$f is missing"
+	done
+fi
 image="raycontrol-test:$distro"
 net="rc-upgrade-$distro"
 for f in rayd rayspa rayctl niko-server xray; do
@@ -67,7 +82,8 @@ boot() {
 	fi
 	docker run -d --name "$node" --hostname node --privileged --cgroupns=private --network "$net" \
 		--tmpfs /run --tmpfs /run/lock "${cgroup[@]}" \
-		-v "$bin:/opt/rc:ro" -v "$old:/opt/old:ro" -v "$here/../../install:/opt/install:ro" "$image" /sbin/init >/dev/null
+		-v "$bin:/opt/rc:ro" -v "$old:/opt/old:ro" -v "$here/../../install:/opt/install:ro" \
+		-v "${step:-$old}:/opt/step:ro" "$image" /sbin/init >/dev/null
 	for _ in $(seq 90); do
 		state="$(x systemctl is-system-running 2>/dev/null || true)"
 		if [[ $state == running || $state == degraded ]]; then
@@ -167,6 +183,13 @@ boot "rc-upgraded-$distro"
 install_node /opt/old
 probe "previous release"
 
+if [[ -n $step ]]; then
+	log "$distro: rayctl update -from the stepping-stone release, by the old release's rayctl"
+	x /usr/local/bin/rayctl update -from /opt/step -yes || fail "rayctl update to the stepping-stone release"
+	wait_active rayd.service rayspa.service niko-inner.service niko-dns.service niko-mdns.service niko-hy2o.service niko-front.service
+	x rayctl status | grep -m1 "^version" || true
+	probe "stepping-stone release"
+fi
 log "$distro: rayctl update by the previous release's rayctl"
 x /usr/local/bin/rayctl update -local /opt/rc -yes || fail "rayctl update"
 for b in rayd rayspa rayctl; do

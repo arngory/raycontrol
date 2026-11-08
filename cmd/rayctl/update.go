@@ -248,7 +248,10 @@ func installBinaries(stage string) error {
 		if _, err := os.Stat(src); err != nil {
 			continue
 		}
-		if name == "xray" || name == "niko-server" || name == "slipstream-server" {
+		// The data plane's (deploy.DataPlaneDir): by the host, with its
+		// owner and mode. A new transport's binary is one more entry in
+		// nodeBinaries (TestArchiveMembersInstalled).
+		if filepath.Dir(dst) == deploy.DataPlaneDir {
 			if _, err := h.InstallBinary(src, dst); err != nil {
 				return err
 			}
