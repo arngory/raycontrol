@@ -604,6 +604,9 @@ func (c *cli) apply(ctx context.Context, _ []string) error {
 	if err := needRoot(); err != nil {
 		return err
 	}
+	if err := takeUpdateLock("apply", 0); err != nil {
+		return err
+	}
 	// During an update the rayctl that ran it gives the release's files:
 	// those it did not know how to install, this one does.
 	if stage := os.Getenv(updateStageEnv); stage != "" {

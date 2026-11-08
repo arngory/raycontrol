@@ -322,7 +322,7 @@ func cmdServe(args []string) error {
 		f := &release.Fetcher{}
 		latest := func(ctx context.Context) (string, error) { return f.Latest(ctx, release.PubKey) }
 		a := &autoUpdater{st: st, running: version, latest: latest, seen: &latestSeen, request: nodeupdate.RequestFile,
-			status: nodeupdate.StatusFile, policy: nodeupdate.PolicyFile, now: time.Now, tick: 10 * time.Minute, hb: hb, log: log}
+			status: nodeupdate.StatusFile, policy: nodeupdate.PolicyFile, now: nodeupdate.LocalNow, tick: 10 * time.Minute, hb: hb, log: log}
 		go a.run(ctx)
 	}
 	frontUID := render.FrontUID

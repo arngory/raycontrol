@@ -116,10 +116,24 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 	case *requestEnded:
 		return markInterrupted(nodeupdate.StatusFile)
 	case *request:
+		// One at a time; a request waits a while for a manual update or
+		// apply to end (the unit gives it 50 minutes in all).
+		if err := takeUpdateLock("update by request", 10*time.Minute); err != nil {
+			return err
+		}
 		return nodeRequests().run()
 	}
 	if err := updatable(deploy.DB, deploy.RelayBundle); err != nil {
 		return err
+	}
+	if !*check {
+		what := "update"
+		if *rollback {
+			what = "rollback"
+		}
+		if err := takeUpdateLock(what, 0); err != nil {
+			return err
+		}
 	}
 	if *rollback {
 		carry := carryMust

@@ -63,7 +63,7 @@ func (u *NodeUpdate) latest() string {
 
 func (u *NodeUpdate) now() time.Time {
 	if u == nil || u.Now == nil {
-		return time.Now()
+		return nodeupdate.LocalNow() // the zone as it is now, not as rayd started
 	}
 	return u.Now()
 }
