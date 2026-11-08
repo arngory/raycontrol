@@ -23,6 +23,11 @@
 # is the path docs/RELEASE.md gives a node whose rayctl cannot take the
 # latest archive itself (before v0.15.0: names it does not know,
 # slipstream-server since v0.16.0): v0.15.0, then the latest release.
+#
+# The handoff (test/install/handoff-release.sh): TEST_RELEASE_KEY is the
+# key a releasetest build of rayctl checks the steps with;
+# EXPECT_HANDOFF=1 wants each step done by the release's own rayctl;
+# STEPS_ONLY=1 ends with the steps, BIN_DIR being the last one.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/install/lib.sh
@@ -57,6 +62,8 @@ work=""
 node=""
 
 x() { docker exec "$node" "$@"; }
+# xk runs a command with the test release key, if any.
+xk() { docker exec ${TEST_RELEASE_KEY:+-e "RAYCONTROL_TEST_RELEASE_KEY=$TEST_RELEASE_KEY"} "$node" "$@"; }
 
 fail() {
 	echo "FAIL ($distro, upgrade): $*" >&2
@@ -192,12 +199,18 @@ probe "previous release"
 
 for d in "${steps[@]}"; do
 	log "$distro: rayctl update -from the release in $d, by the rayctl on the node ($(x rayctl status | grep -m1 '^version' || true))"
-	x /usr/local/bin/rayctl update -from "/opt/step/$d" -yes || fail "rayctl update to the release in $d"
+	out="$(xk /usr/local/bin/rayctl update -from "/opt/step/$d" -yes 2>&1)" || fail "rayctl update to the release in $d: $out"
+	echo "$out" | grep -E '^(release|raycontrol|installed|rolling|update)' || true
+	if [[ -n ${EXPECT_HANDOFF:-} ]] && ! grep -q 'its own rayctl updates the node' <<<"$out"; then
+		fail "the update to the release in $d was not handed to its rayctl"
+	fi
 	wait_active rayd.service rayspa.service niko-inner.service niko-dns.service niko-mdns.service niko-hy2o.service niko-front.service
 	probe "after the release in $d"
 done
-log "$distro: rayctl update by the previous release's rayctl"
-x /usr/local/bin/rayctl update -local /opt/rc -yes || fail "rayctl update"
+if [[ -z ${STEPS_ONLY:-} ]]; then
+	log "$distro: rayctl update by the previous release's rayctl"
+	x /usr/local/bin/rayctl update -local /opt/rc -yes || fail "rayctl update"
+fi
 for b in rayd rayspa rayctl; do
 	x cmp -s "/opt/rc/$b" "/usr/local/bin/$b" || fail "$b is not this build's after the update"
 done

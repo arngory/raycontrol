@@ -209,6 +209,10 @@ func (f *Fetcher) Get(ctx context.Context, version, file string, limit int64) ([
 type Release struct {
 	Version string
 	Archive []byte // raycontrol-linux-<arch>.tar.gz
+	// Sums and Sig are SHA256SUMS and its signature as verified: with the
+	// archive, a directory the release's own rayctl verifies again
+	// (rayctl update -from: the update handed to it).
+	Sums, Sig []byte
 }
 
 // Archive is the archive name of an architecture.
@@ -293,7 +297,7 @@ func check(version, arch, pubKey string, sums, sig []byte, archiveOf func(signed
 	if got := sha256.Sum256(archive); !strings.EqualFold(hex.EncodeToString(got[:]), want) {
 		return Release{}, fmt.Errorf("%s: checksum mismatch", Archive(arch))
 	}
-	return Release{Version: signed, Archive: archive}, nil
+	return Release{Version: signed, Archive: archive, Sums: sums, Sig: sig}, nil
 }
 
 func sumOf(sums []byte, name string) (string, error) {
@@ -362,5 +366,48 @@ func Extract(archive []byte, dir string) ([]string, error) {
 			return names, err
 		}
 		names = append(names, name)
+	}
+}
+
+// ExtractFile writes the one regular file name of the archive's top level
+// to dst and skips everything else, whatever it is: directories, names
+// this version does not know, any number of files. An update reads the
+// release's own rayctl so (rayctl update hands the update to it), and
+// that rayctl reads the rest: the archive may take another layout from one
+// release to the next. Only the archive's name, its gzip and tar, rayctl
+// at its top level and the signature of SHA256SUMS stay as they are
+// (docs/RELEASE.md).
+func ExtractFile(archive []byte, name, dst string) error {
+	zr, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		return err
+	}
+	tr := tar.NewReader(zr)
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return fmt.Errorf("no %s in the archive", name)
+		}
+		if err != nil {
+			return err
+		}
+		if h.Typeflag != tar.TypeReg || filepath.Clean(h.Name) != name {
+			continue
+		}
+		out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755) //nolint:gosec // G302,G304: the caller's temp dir
+		if err != nil {
+			return err
+		}
+		n, err := io.Copy(out, io.LimitReader(tr, 256<<20+1))
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+		if err == nil && n > 256<<20 {
+			err = fmt.Errorf("%s: larger than 256 MiB", name)
+		}
+		if err != nil {
+			_ = os.Remove(dst)
+		}
+		return err
 	}
 }

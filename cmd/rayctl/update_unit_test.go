@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"os"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/arngory/raycontrol/internal/release"
 )
 
 // After an update, each data-plane unit that ran before must run again
@@ -128,5 +131,72 @@ func TestWeakerModes(t *testing.T) {
 		if got := weakerModes(c.kind, c.settings); len(got) != c.n {
 			t.Errorf("%s %s: %q", c.kind, c.settings, got)
 		}
+	}
+}
+
+// The rayctl on the node hands a newer release's update to that release's
+// rayctl; not a downgrade, the same version, its own version, a child, or
+// with -no-handoff.
+func TestHandsOff(t *testing.T) {
+	saved := version
+	t.Cleanup(func() { version = saved })
+	version = "v0.19.0"
+	t.Setenv(handoffEnv, "")
+	for _, c := range []struct {
+		refused           bool
+		target, installed string
+		want              bool
+	}{
+		{false, "v0.19.1", "v0.19.0", true},
+		{false, "v0.20.0", "v0.19.0", true},
+		{true, "v0.19.1", "v0.19.0", false},  // -no-handoff
+		{false, "v0.19.0", "v0.19.0", false}, // -force, same version
+		{false, "v0.18.1", "v0.19.0", false}, // going back: this rayctl knows the newer node
+		{false, "v0.19.0", "v0.18.1", false}, // the target is this rayctl
+	} {
+		if got := handsOff(c.refused, c.target, c.installed); got != c.want {
+			t.Errorf("handsOff(%v, %s, %s) = %v", c.refused, c.target, c.installed, got)
+		}
+	}
+	t.Setenv(handoffEnv, "1") // the child: never again
+	if handsOff(false, "v0.20.0", "v0.19.0") {
+		t.Error("a handed-over update handed over again")
+	}
+}
+
+// The child compares with, and records for a rollback, the version it
+// updates from, not its own.
+func TestInstalledVersion(t *testing.T) {
+	saved := version
+	t.Cleanup(func() { version = saved })
+	version = "v0.20.0"
+	t.Setenv(handoffEnv, "")
+	t.Setenv(updateFromEnv, "v0.19.0")
+	if v := installedVersion(); v != "v0.20.0" {
+		t.Errorf("not handed over: %s", v)
+	}
+	t.Setenv(handoffEnv, "1")
+	if v := installedVersion(); v != "v0.19.0" {
+		t.Errorf("handed over: %s", v)
+	}
+	for _, bad := range []string{"", "v0.19.0\nVERSION", "../../x", strings.Repeat("v", 41)} {
+		t.Setenv(updateFromEnv, bad)
+		if v := installedVersion(); v != "v0.20.0" {
+			t.Errorf("from %q: %s", bad, v)
+		}
+	}
+}
+
+// No release build has the test key (testkey.go, build tag releasetest).
+func TestReleaseBuildHasNoTestKey(t *testing.T) {
+	wf, err := os.ReadFile("../../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wf), "releasetest") {
+		t.Fatal("release.yml builds with the releasetest tag: its rayctl would take a release key from the environment")
+	}
+	if releaseKey != release.PubKey {
+		t.Fatalf("releaseKey %s in a test without the tag", releaseKey)
 	}
 }
