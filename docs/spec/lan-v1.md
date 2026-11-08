@@ -1,7 +1,7 @@
 # lan-v1: локальная сеть устройств пользователя через Yggdrasil
 
 Статус: **черновик** (2026-11-08). Идея одобрена владельцем, предложение — от клиента Niko. Сервер — raycontrol
-v0.22.0 и niko-server v0.16.0 (номера предварительные: v0.21.0 и v0.15.0 заняты
+v0.23.0 и niko-server v0.16.0 (номера предварительные: v0.22.0 и v0.15.0 заняты
 [traffic-limit-v1](traffic-limit-v1.md)), плюс коммит форка yggdrasil-go. Клиент — Niko. Как всё новое, выключено
 по умолчанию.
 
@@ -241,7 +241,7 @@ v0.22.0 и niko-server v0.16.0 (номера предварительные: v0.
 
 ## 6. Что где меняется. Версии
 
-- **raycontrol v0.22.0** (предварительно):
+- **raycontrol v0.23.0** (предварительно):
   - store — `users.lan`, `devices.lan`, секрет `lan_key`, миграция; отзыв устройства обновляет `lan_key`;
   - sub — заголовок (`internal/sub/server.go:156-214`), поле `lan` в `Payload` (`internal/sub/sub.go:60-100`);
   - render — группа `lan` в `yggdrasilUsers` (`internal/render/yggdrasil.go:129-134`), `lan_relay_mbps` в options

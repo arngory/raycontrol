@@ -147,15 +147,19 @@ vless://<uuid>@<host>:443?type=raw&security=reality&flow=xtls-rprx-vision&encryp
 Стандартная ссылка Hysteria2 с параметрами Niko:
 
 ```
-hysteria2://<пароль>@<host>:<порт>/?sni=<имя>&niko-node=<node_id>&niko-svc=<id>#hy2-masq
+hysteria2://<пароль>@<host>:<порт>/?sni=<имя>&niko-node=<node_id>&niko-svc=<id>&niko-ack=1#hy2-masq
 hysteria2://<пароль>@<host>:<порт>/?sni=<имя>&obfs=salamander&obfs-password=<пароль salamander>
-  &niko-pin=<SPKI SHA-256, base64url>&pinSHA256=<SHA-256 сертификата, hex>&niko-node=<node_id>&niko-svc=<id>#hy2-obfs
+  &niko-pin=<SPKI SHA-256, base64url>&pinSHA256=<SHA-256 сертификата, hex>&niko-node=<node_id>&niko-svc=<id>&niko-ack=1#hy2-obfs
 ```
 
 - `hy2-masq`: UDP 443, сертификат от CA на `sni` (поддомен ноды); проверка обычная.
 - `hy2-obfs`: тоже UDP 443 (фронт отличает его по salamander, R3-4), самоподписанный сертификат на `sni` (имя вне DNS). Niko пинит ключ по
   `niko-pin`; `pinSHA256` — для сторонних клиентов.
 - TLS 1.3, только `X25519MLKEM768`. Пароль — учётные данные пользователя с ротацией: новый приходит в `next`.
+- `niko-ack=1` (с v0.21.0, niko-server v0.14.1): нода отвечает на TCP-поток сразу после dial, не дожидаясь первых байт
+  назначения, а при неудаче — с причиной (refused, no route, no such host, lookup failed, not allowed, timeout,
+  unreachable). Клиент может держать SYN-ACK приложению до ответа ноды. Без параметра так делать нельзя: старая нода
+  ждёт данных назначения, а приложение, где первым говорит клиент (HTTP, TLS), ждёт SYN-ACK.
 - У обоих сервисов ротация UDP-портов: `services[].port_key` в пакете регистрации, как у остальных сервисов на UDP.
 
 ### Профиль DoH (R3)
