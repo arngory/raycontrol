@@ -245,8 +245,17 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 			fmt.Print(string(b))
 		}
 	}
+	// Services the new plan leaves out, before anything changes (review of
+	// apply-plan-v1): said with -check, refused without -force.
+	names := c.misnamed(ctx)
 	if *check {
+		if len(names) > 0 {
+			fmt.Println("warning:", strings.Join(names, ", ")+":", misnamedAdvice)
+		}
 		return nil
+	}
+	if err := misnamedUpdate(os.Stdout, names, *force); err != nil {
+		return err
 	}
 	if !*yes {
 		fmt.Printf("Update raycontrol %s to %s? rayd, rayspa and the data plane restart; clients reconnect and send SPA again. Type yes to go on: ",

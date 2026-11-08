@@ -38,7 +38,7 @@ func (c *cli) check(ctx context.Context, args []string) error {
 		return errUsage
 	}
 	return hostCheck(ctx, os.Stdout, hostcheck.Options{Host: *host, Domain: *domain, Services: splitList(*services), AllowV0: *allowV0,
-		ICMP: c.icmpOn(ctx)}, false, c.json, c.internetChecks(ctx)...)
+		ICMP: c.icmpOn(ctx)}, false, c.json, append(c.internetChecks(ctx), misnamedResults(c.misnamed(ctx))...)...)
 }
 
 // icmpOn reports whether rayd has a naive service that carries ICMP

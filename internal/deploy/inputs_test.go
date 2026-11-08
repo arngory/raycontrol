@@ -136,6 +136,28 @@ func TestBuildFromInputs(t *testing.T) {
 	}
 }
 
+// A service named as before v0.10.1 allowed (-api, -in): the plan before
+// Inputs deployed it, the plan now leaves it out and says so (the review's
+// case; rayctl check and update warn first).
+func TestBuildOldName(t *testing.T) {
+	m, _ := buildModel(t, render.DefaultPaths, [][3]string{{"hy2-masq", "edge", ""}}, nil)
+	for i := range m.Services {
+		if m.Services[i].Name == "edge" {
+			m.Services[i].Name = "edge-api"
+		}
+	}
+	files, _, err := render.Render(m, render.DefaultPaths)
+	if err != nil && !render.Partial(err) {
+		t.Fatal(err)
+	}
+	old := deploy.LegacyBuild(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	p := deploy.Build(deploy.InputsOf(m, files, render.DefaultPaths), render.DefaultPaths, deploy.DefaultBinaries)
+	if !slices.Contains(old.Units, "niko-edge-api.service") || slices.Contains(p.Units, "niko-edge-api.service") ||
+		!strings.Contains(strings.Join(p.Warnings, "\n"), `"edge-api"`) {
+		t.Errorf("old units %v, new %v, warnings %q", old.Units, p.Units, p.Warnings)
+	}
+}
+
 // A REALITY service without the front binds TCP 443 itself: Collect sets
 // FrontTCP for every node now, so the model is made by hand.
 func TestBuildFromInputsWithoutFront(t *testing.T) {
