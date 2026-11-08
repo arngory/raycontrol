@@ -97,6 +97,9 @@ type TCPCarrier struct {
 	mu        sync.Mutex
 	listeners map[uint16]net.Listener
 	busy      chan struct{} // bounds connections being read at once
+	// failing are the ports whose listen failed, since when: Reconcile
+	// runs each second, and says so once per streak.
+	failing map[uint16]time.Time
 }
 
 // maxInFlight caps concurrent TCP carrier connections; the firewall already
@@ -110,6 +113,7 @@ func (c *TCPCarrier) Reconcile(ports []uint16) {
 	if c.listeners == nil {
 		c.listeners = map[uint16]net.Listener{}
 		c.busy = make(chan struct{}, maxInFlight)
+		c.failing = map[uint16]time.Time{}
 	}
 	want := map[uint16]bool{}
 	for _, p := range ports {
@@ -119,8 +123,20 @@ func (c *TCPCarrier) Reconcile(ports []uint16) {
 		}
 		ln, err := net.Listen("tcp", ":"+strconv.Itoa(int(p)))
 		if err != nil {
-			c.Log.Warn("spa tcp listen", "port", p, "err", err)
+			// Once per port and streak, then at debug: an outgoing
+			// connection that holds the port (where it is not reserved,
+			// rayctl apply) may keep it a while.
+			if _, ok := c.failing[p]; ok {
+				c.Log.Debug("spa tcp listen", "port", p, "err", err)
+			} else {
+				c.failing[p] = time.Now()
+				c.Log.Warn("spa tcp listen", "port", p, "err", err, "next", "retried each second, said again at debug")
+			}
 			continue
+		}
+		if since, ok := c.failing[p]; ok {
+			c.Log.Info("spa tcp listen", "port", p, "after", time.Since(since).Round(time.Second))
+			delete(c.failing, p)
 		}
 		c.listeners[p] = ln
 		go c.serve(ln)
@@ -129,6 +145,11 @@ func (c *TCPCarrier) Reconcile(ports []uint16) {
 		if !want[p] {
 			ln.Close()
 			delete(c.listeners, p)
+		}
+	}
+	for p := range c.failing {
+		if !want[p] {
+			delete(c.failing, p)
 		}
 	}
 }
