@@ -52,11 +52,8 @@ func (q requests) run() error {
 		return nil
 	}
 	// The releases the auto update leaves alone go on from status to status.
-	st := nodeupdate.Status{ID: r.ID, From: version, To: r.Version, Target: r.Version, By: r.By, Kind: r.Kind, Requested: r.At, Started: now.UTC(),
-		Held: nodeupdate.ReadStatus(q.status).Held}
-	if nodeupdate.ValidVersion(r.Version) && r.Version != "latest" {
-		st.Release = r.Version
-	}
+	st := nodeupdate.Status{ID: r.ID, From: version, To: r.Version, Target: r.Version, Release: r.Tried(), By: r.By, Kind: r.Kind,
+		Requested: r.At, Started: now.UTC(), Held: nodeupdate.ReadStatus(q.status).Holding()}
 	if err == nil {
 		err = r.Check(version, now)
 	}
@@ -264,6 +261,9 @@ func (c *cli) updateStatus(ctx context.Context) error {
 		fmt.Printf("latest     %s\n", p(m.Latest))
 	}
 	fmt.Printf("remote     %s\nauto       %s (window %s, %s)\n", p(m.Remote), p(m.Auto), p(m.Window), p(m.Timezone))
+	if len(m.Held) > 0 {
+		fmt.Printf("held       %s (did not hold: the auto update leaves them; rayctl update -version V by hand)\n", p(strings.Join(m.Held, ", ")))
+	}
 	s := m.Status
 	if s == nil || s.State == nodeupdate.Idle {
 		fmt.Println("last       none")

@@ -104,8 +104,8 @@ bootstrap. Версию он читает из подписанного комм
 `rayctl` на верхнем уровне, подпись minisign над `SHA256SUMS` с `raycontrol vX.Y.Z`, команда
 `update -from DIR -version V [-yes]` и две переменные. Для обновления по запросу
 ([spec/node-update-v1.md](spec/node-update-v1.md)) ещё `RAYCONTROL_UPDATE_RESULT=<файл>`: `rayctl`, который сделал
-обновление, пишет туда JSON `{"state": "done"|"rolled_back"|"failed", "version", "error", "untouched"}`
-(`untouched` — сбой до того, как на ноде что-то поменялось). Тоже между версиями: файлы
+обновление, пишет туда JSON `{"state": "done"|"rolled_back"|"failed", "version", "release", "error", "untouched"}`
+(`release` — релиз, который ставили; `untouched` — сбой до того, как на ноде что-то поменялось). Тоже между версиями: файлы
 `/var/lib/raycontrol-update/status.json` (`id`, `state`, `from`, `to`, `target`, `release`, `by`, `kind`, `error`,
 `untouched`, `held`, `requested`, `started`, `ended`: итог пишет `rayctl` прежней версии, читает rayd новой) и
 `policy.json` (`remote`, `auto`, `window`), флаги юнита `update -request` и `update -request-ended`. Всё остальное (раскладка, имена, число файлов, новые

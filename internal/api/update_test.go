@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"golang.org/x/sys/unix"
 
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/nodeupdate"
@@ -38,6 +39,13 @@ func TestStartUpdate(t *testing.T) {
 		}
 	}
 	want(start(""), connect.CodeFailedPrecondition, "remote updates are off")
+	// On the node's socket it is root's: the raycontrol group may not.
+	as := func(uid uint32) context.Context {
+		return context.WithValue(context.WithValue(ctx, peerKey{}, &unix.Ucred{Uid: uid}), actorKey{}, "test")
+	}
+	if _, err := srv.StartUpdate(as(1000), connect.NewRequest(&nodev1.StartUpdateRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("a member of the group: %v", err)
+	}
 	// rayd's own settings do not turn it on.
 	srv.Store.SetSetting(ctx, "update_remote", []byte("on"))
 	want(start(""), connect.CodeFailedPrecondition, "remote updates are off")
@@ -60,7 +68,8 @@ func TestStartUpdate(t *testing.T) {
 		t.Fatalf("start: %+v %v", r, err)
 	}
 	req, ok := nodeupdate.PeekRequest(srv.NodeUpdate.Request)
-	if !ok || req.Kind != nodeupdate.Remote || req.Version != "v0.19.1" || req.ID != r.Msg.Status.Id || req.Check("v0.19.0", time.Now()) != nil {
+	if !ok || req.Kind != nodeupdate.Remote || req.Version != "v0.19.1" || req.ID != r.Msg.Status.Id || req.Check("v0.19.0", time.Now()) != nil ||
+		req.Tried() != "v0.19.1" {
 		t.Fatalf("the request %+v %v", req, ok)
 	}
 	want(start(""), connect.CodeFailedPrecondition, "requested already")
@@ -82,6 +91,10 @@ func TestStartUpdate(t *testing.T) {
 	}
 	if err := start("latest"); err != nil {
 		t.Fatalf("the next one: %v", err)
+	}
+	// latest names the release rayd saw, for the auto update to hold.
+	if w, _ := nodeupdate.PeekRequest(srv.NodeUpdate.Request); w.Version != "latest" || w.Release != "v0.19.2" || w.Tried() != "v0.19.2" {
+		t.Fatalf("latest: %+v", w)
 	}
 
 	// A run whose runner died with no word is no longer under way.

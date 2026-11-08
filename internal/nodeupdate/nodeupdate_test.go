@@ -1,9 +1,11 @@
 package nodeupdate
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -218,6 +220,9 @@ func TestStatusFile(t *testing.T) {
 	if err := WriteStatus(path, s); err != nil {
 		t.Fatal(err)
 	}
+	if raw, _ := os.ReadFile(path); bytes.Contains(raw, []byte(`\u00`)) || bytes.Contains(raw, []byte(`\u2028`)) || len(raw) > maxFile {
+		t.Errorf("escapes in the status, %d bytes", len(raw))
+	}
 	got := ReadStatus(path)
 	if got.State != Failed || !utf8.ValidString(got.Error) || strings.ContainsRune(got.Error, 0x1b) || strings.ContainsRune(got.To, 0) {
 		t.Errorf("long fields: %+v", got)
@@ -307,6 +312,30 @@ func TestPatchAndWindow(t *testing.T) {
 			t.Errorf("Left(%s, %s) = %v, want %v", c.t.Format("15:04"), c.w, got, c.want)
 		}
 	}
+	// Whatever the zone and the day, a window is never open longer than it
+	// is long: the night the clock goes forward and back included.
+	for _, zone := range []string{"Europe/Berlin", "America/New_York", "Australia/Lord_Howe"} {
+		loc, err := time.LoadLocation(zone)
+		if err != nil {
+			continue
+		}
+		for _, day := range []time.Time{time.Date(2026, 3, 8, 0, 0, 0, 0, loc), time.Date(2026, 3, 29, 0, 0, 0, 0, loc),
+			time.Date(2026, 10, 25, 0, 0, 0, 0, loc), time.Date(2026, 11, 1, 0, 0, 0, 0, loc), time.Date(2026, 4, 5, 0, 0, 0, 0, loc)} {
+			for _, w := range []string{"02:00-03:00", "02:30-03:30", "01:30-02:30", "01:00-02:00", "23:30-02:30", "03:00-05:00"} {
+				from, to, _ := ParseWindow(w)
+				long := time.Duration((to-from+24*60)%(24*60)) * time.Minute
+				var open time.Duration
+				for m := time.Duration(0); m < 26*time.Hour; m += time.Minute {
+					if at := day.Add(m); InWindow(at, w) && at.Sub(day) < 24*time.Hour {
+						open += time.Minute
+					}
+				}
+				if open > long+time.Hour {
+					t.Errorf("%s %s %s: open %v", zone, day.Format("2006-01-02"), w, open)
+				}
+			}
+		}
+	}
 	// The night the clock goes forward (Berlin, 2026-03-29, 02:00 → 03:00):
 	// the window 01:30-02:30 ends an hour of real time after it opened.
 	if berlin, err := time.LoadLocation("Europe/Berlin"); err == nil {
@@ -320,5 +349,31 @@ func TestPatchAndWindow(t *testing.T) {
 		if InWindow(t0.Add(time.Hour), "01:30-02:30") {
 			t.Errorf("spring forward: in the window at %s", t0.Add(time.Hour).Format("15:04"))
 		}
+	}
+}
+
+// What a request goes for, and what the next status holds.
+func TestTriedAndHolding(t *testing.T) {
+	for _, c := range []struct {
+		r    Request
+		want string
+	}{
+		{Request{Version: "v0.19.2"}, "v0.19.2"},
+		{Request{Version: "latest", Release: "v0.19.3"}, "v0.19.3"},
+		{Request{Version: "latest"}, ""},
+		{Request{Version: "latest", Release: "../x"}, ""},
+	} {
+		if got := c.r.Tried(); got != c.want {
+			t.Errorf("%+v: %q", c.r, got)
+		}
+	}
+	if h := (Status{State: Running, Release: "v0.19.3", Held: []string{"v0.19.1"}}).Holding(); !slices.Equal(h, []string{"v0.19.1", "v0.19.3"}) {
+		t.Errorf("a run that never ended: %v", h)
+	}
+	if h := (Status{State: Done, Release: "v0.19.3", Held: []string{"v0.19.1"}}).Holding(); !slices.Equal(h, []string{"v0.19.1"}) {
+		t.Errorf("done: %v", h)
+	}
+	if err := (Request{ID: NewID(), Kind: Remote, Version: "latest", Release: "v1", By: "x", At: time.Now()}).Check("v0.19.0", time.Now()); err == nil {
+		t.Error("a release hint that is no release")
 	}
 }

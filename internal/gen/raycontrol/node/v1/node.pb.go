@@ -5848,14 +5848,17 @@ func (*GetUpdateStatusRequest) Descriptor() ([]byte, []int) {
 }
 
 type GetUpdateStatusResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Status        *UpdateStatus          `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
-	Installed     string                 `protobuf:"bytes,2,opt,name=installed,proto3" json:"installed,omitempty"` // the node's version
-	Latest        string                 `protobuf:"bytes,3,opt,name=latest,proto3" json:"latest,omitempty"`       // the latest release rayd's checks saw; "" when none
-	Remote        string                 `protobuf:"bytes,4,opt,name=remote,proto3" json:"remote,omitempty"`       // "on" or "off": StartUpdate is taken
-	Auto          string                 `protobuf:"bytes,5,opt,name=auto,proto3" json:"auto,omitempty"`           // "off" or "patch"
-	Window        string                 `protobuf:"bytes,6,opt,name=window,proto3" json:"window,omitempty"`       // the auto update's window, "HH:MM-HH:MM" in the node's time
-	Timezone      string                 `protobuf:"bytes,7,opt,name=timezone,proto3" json:"timezone,omitempty"`   // the node's time zone now: abbreviation and offset ("CET +01:00", "UTC +00:00")
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Status    *UpdateStatus          `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	Installed string                 `protobuf:"bytes,2,opt,name=installed,proto3" json:"installed,omitempty"` // the node's version
+	Latest    string                 `protobuf:"bytes,3,opt,name=latest,proto3" json:"latest,omitempty"`       // the latest release rayd's checks saw; "" when none
+	Remote    string                 `protobuf:"bytes,4,opt,name=remote,proto3" json:"remote,omitempty"`       // "on" or "off": StartUpdate is taken
+	Auto      string                 `protobuf:"bytes,5,opt,name=auto,proto3" json:"auto,omitempty"`           // "off" or "patch"
+	Window    string                 `protobuf:"bytes,6,opt,name=window,proto3" json:"window,omitempty"`       // the auto update's window, "HH:MM-HH:MM" in the node's time
+	Timezone  string                 `protobuf:"bytes,7,opt,name=timezone,proto3" json:"timezone,omitempty"`   // the node's time zone now: abbreviation and offset ("CET +01:00", "UTC +00:00")
+	// Releases whose update rolled back or broke on the way: the auto update
+	// leaves them alone.
+	Held          []string `protobuf:"bytes,8,rep,name=held,proto3" json:"held,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5937,6 +5940,13 @@ func (x *GetUpdateStatusResponse) GetTimezone() string {
 		return x.Timezone
 	}
 	return ""
+}
+
+func (x *GetUpdateStatusResponse) GetHeld() []string {
+	if x != nil {
+		return x.Held
+	}
+	return nil
 }
 
 // UpdateStatus is the last update by request, or the one under way.
@@ -6497,7 +6507,7 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\aversion\x18\x01 \x01(\tR\aversion\"O\n" +
 	"\x13StartUpdateResponse\x128\n" +
 	"\x06status\x18\x01 \x01(\v2 .raycontrol.node.v1.UpdateStatusR\x06status\"\x18\n" +
-	"\x16GetUpdateStatusRequest\"\xe9\x01\n" +
+	"\x16GetUpdateStatusRequest\"\xfd\x01\n" +
 	"\x17GetUpdateStatusResponse\x128\n" +
 	"\x06status\x18\x01 \x01(\v2 .raycontrol.node.v1.UpdateStatusR\x06status\x12\x1c\n" +
 	"\tinstalled\x18\x02 \x01(\tR\tinstalled\x12\x16\n" +
@@ -6505,7 +6515,8 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x06remote\x18\x04 \x01(\tR\x06remote\x12\x12\n" +
 	"\x04auto\x18\x05 \x01(\tR\x04auto\x12\x16\n" +
 	"\x06window\x18\x06 \x01(\tR\x06window\x12\x1a\n" +
-	"\btimezone\x18\a \x01(\tR\btimezone\"\xa1\x02\n" +
+	"\btimezone\x18\a \x01(\tR\btimezone\x12\x12\n" +
+	"\x04held\x18\b \x03(\tR\x04held\"\xa1\x02\n" +
 	"\fUpdateStatus\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12\x12\n" +

@@ -155,3 +155,47 @@ func TestNextWait(t *testing.T) {
 		}
 	}
 }
+
+// One look of the loop: it waits for its moment only while it has one in
+// this window; given up, busy or past the window it waits a whole tick.
+func TestAutoStep(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	reqFile, statFile, polFile := filepath.Join(dir, "update-request"), filepath.Join(dir, "status.json"), filepath.Join(dir, "policy.json")
+	nodeupdate.WritePolicy(polFile, nodeupdate.Policy{Remote: "off", Auto: "patch", Window: "03:00-05:00"})
+	a := &autoUpdater{st: st, running: "v0.19.0", latest: func(context.Context) (string, error) { return "v0.19.1", nil }, seen: &atomic.Value{},
+		request: reqFile, status: statFile, policy: polFile, now: time.Now, tick: 10 * time.Minute, hb: &health.Board{},
+		log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	at := func(h, m int) time.Time { return time.Date(2026, 11, 8, h, m, 0, 0, time.Local) }
+
+	var s autoState
+	if a.step(ctx, &s, at(2, 0)) || !s.due.IsZero() {
+		t.Fatalf("before the window: %+v", s)
+	}
+	if !a.step(ctx, &s, at(3, 0)) || s.due.Before(at(3, 0)) || !s.due.Before(at(5, 0)) {
+		t.Fatalf("in the window: a moment in it, waited for: %+v", s)
+	}
+	if !a.step(ctx, &s, s.due.Add(-time.Second)) {
+		t.Fatal("just before the moment: not waited for")
+	}
+	// The moment passed while the release was given up: no wait for it.
+	nodeupdate.WriteStatus(statFile, nodeupdate.Status{State: nodeupdate.RolledBack, Target: "latest", Release: "v0.19.1", Held: []string{"v0.19.1"}})
+	if a.step(ctx, &s, s.due.Add(time.Minute)) || !s.due.IsZero() {
+		t.Fatalf("given up: %+v", s)
+	}
+	if _, err := os.Stat(reqFile); !os.IsNotExist(err) {
+		t.Fatal("a held release asked for")
+	}
+	// Busy: likewise.
+	os.Remove(statFile)
+	a.step(ctx, &s, at(3, 10))
+	nodeupdate.WriteRequest(reqFile, nodeupdate.Request{ID: "0a", Kind: nodeupdate.Remote, Version: "latest", By: "x", At: time.Now()}, time.Now())
+	if a.step(ctx, &s, s.due.Add(time.Minute)) || !s.due.IsZero() {
+		t.Fatalf("busy: %+v", s)
+	}
+}

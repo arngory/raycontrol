@@ -40,83 +40,91 @@ type autoUpdater struct {
 	log                     *slog.Logger
 }
 
+// autoState is what the loop keeps from one look to the next.
+type autoState struct {
+	last    string // the latest release seen
+	lerr    error  // why last is not known
+	checked time.Time
+	due     time.Time // the moment in this window, once in it
+}
+
 func (a *autoUpdater) run(ctx context.Context) {
-	var (
-		last    string
-		lerr    error // why last is not known
-		checked time.Time
-		due     time.Time // the moment in this window, once in it
-	)
+	var s autoState
 	for {
-		p := nodeupdate.ReadPolicy(a.policy)
 		t := a.now()
-		soon := false // waits for due
-		switch {
-		case p.Auto != "patch":
-			a.hb.Retain("auto-update", nil)
-			due = time.Time{}
-		case !release.IsRelease(a.running):
-			a.hb.Report("auto-update", "on, but this build is no release ("+a.running+"): it updates by hand", nil)
-		default:
-			if checked.IsZero() || t.Sub(checked) > jitter(autoCheck, 10) {
-				cctx, cancel := context.WithTimeout(ctx, time.Minute)
-				v, err := a.latest(cctx)
-				cancel()
-				checked, lerr = t, err
-				if err == nil {
-					last = v
-					a.seen.Store(v)
-				}
-			}
-			// The request first: root writes the status before it
-			// removes the request.
-			req, waiting := nodeupdate.PeekRequest(a.request)
-			stat := nodeupdate.Settled(nodeupdate.ReadStatus(a.status), t)
-			switch {
-			case last == "" && lerr != nil:
-				a.hb.Report("auto-update", "patch: the latest release not known: "+lerr.Error(), nil)
-				due = time.Time{}
-			case last == "" || !nodeupdate.Patch(last, a.running):
-				a.hb.Report("auto-update", "patch, window "+p.Window+": up to date ("+a.running+")", nil)
-				due = time.Time{}
-			case gaveUp(stat, last, t):
-				a.hb.Report("auto-update", "patch: the update to "+last+" did not hold; not again by itself (rayctl update status)", nil)
-				due = time.Time{}
-			case !nodeupdate.InWindow(t, p.Window):
-				a.hb.Report("auto-update", "patch: "+last+" waits for the window "+p.Window, nil)
-				due = time.Time{}
-			case nodeupdate.Busy(stat, req, waiting, t):
-				a.hb.Report("auto-update", "patch: an update is under way", nil)
-				due = time.Time{}
-			case due.IsZero():
-				due, soon = t, true
-				if span := min(nodeupdate.Spread, nodeupdate.Left(t, p.Window)-time.Minute); span > 0 {
-					due = t.Add(time.Duration(mrand.Int64N(int64(span)))) //nolint:gosec // a moment, not a secret
-				}
-				a.hb.Report("auto-update", "patch: "+last+" at "+due.Format("15:04"), nil)
-			case t.Before(due):
-				soon = true
-			default:
-				r := nodeupdate.Request{ID: nodeupdate.NewID(), Kind: nodeupdate.Auto, Version: last, By: "auto", At: t.UTC()}
-				switch err := nodeupdate.WriteRequest(a.request, r, t); {
-				case errors.Is(err, nodeupdate.ErrWaiting):
-					a.hb.Report("auto-update", "patch: an update is under way", nil)
-				case err != nil:
-					a.hb.Report("auto-update", "patch: the request for "+last+" not written", err)
-				default:
-					a.log.Info("auto update requested", "version", last, "running", a.running)
-					_ = a.st.Audit(ctx, "auto", "update.start "+last, "node", "ok")
-					a.hb.Report("auto-update", "patch: "+last+" requested", nil)
-				}
-				due = time.Time{}
-			}
-		}
+		soon := a.step(ctx, &s, t)
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(nextWait(a.tick, due, t, soon)):
+		case <-time.After(nextWait(a.tick, s.due, t, soon)):
 		}
 	}
+}
+
+// step is one look at t; soon reports that it waits for its moment.
+func (a *autoUpdater) step(ctx context.Context, s *autoState, t time.Time) (soon bool) {
+	p := nodeupdate.ReadPolicy(a.policy)
+	switch {
+	case p.Auto != "patch":
+		a.hb.Retain("auto-update", nil)
+		s.due = time.Time{}
+	case !release.IsRelease(a.running):
+		a.hb.Report("auto-update", "on, but this build is no release ("+a.running+"): it updates by hand", nil)
+	default:
+		if s.checked.IsZero() || t.Sub(s.checked) > jitter(autoCheck, 10) {
+			cctx, cancel := context.WithTimeout(ctx, time.Minute)
+			v, err := a.latest(cctx)
+			cancel()
+			s.checked, s.lerr = t, err
+			if err == nil {
+				s.last = v
+				a.seen.Store(v)
+			}
+		}
+		// The request first: root writes the status before it
+		// removes the request.
+		req, waiting := nodeupdate.PeekRequest(a.request)
+		stat := nodeupdate.Settled(nodeupdate.ReadStatus(a.status), t)
+		switch {
+		case s.last == "" && s.lerr != nil:
+			a.hb.Report("auto-update", "patch: the latest release not known: "+s.lerr.Error(), nil)
+			s.due = time.Time{}
+		case s.last == "" || !nodeupdate.Patch(s.last, a.running):
+			a.hb.Report("auto-update", "patch, window "+p.Window+": up to date ("+a.running+")", nil)
+			s.due = time.Time{}
+		case gaveUp(stat, s.last, t):
+			a.hb.Report("auto-update", "patch: the update to "+s.last+" did not hold; not again by itself (rayctl update status)", nil)
+			s.due = time.Time{}
+		case !nodeupdate.InWindow(t, p.Window):
+			a.hb.Report("auto-update", "patch: "+s.last+" waits for the window "+p.Window, nil)
+			s.due = time.Time{}
+		case nodeupdate.Busy(stat, req, waiting, t):
+			a.hb.Report("auto-update", "patch: an update is under way", nil)
+			s.due = time.Time{}
+		case s.due.IsZero():
+			s.due, soon = t, true
+			if span := min(nodeupdate.Spread, nodeupdate.Left(t, p.Window)-time.Minute); span > 0 {
+				s.due = t.Add(time.Duration(mrand.Int64N(int64(span)))) //nolint:gosec // a moment, not a secret
+			}
+			a.hb.Report("auto-update", "patch: "+s.last+" at "+s.due.Format("15:04"), nil)
+		case t.Before(s.due):
+			soon = true
+		default:
+			r := nodeupdate.Request{ID: nodeupdate.NewID(), Kind: nodeupdate.Auto, Version: s.last, By: "auto", At: t.UTC()}
+			switch err := nodeupdate.WriteRequest(a.request, r, t); {
+			case errors.Is(err, nodeupdate.ErrWaiting):
+				a.hb.Report("auto-update", "patch: an update is under way", nil)
+			case err != nil:
+				a.hb.Report("auto-update", "patch: the request for "+s.last+" not written", err)
+			default:
+				a.log.Info("auto update requested", "version", s.last, "running", a.running)
+				_ = a.st.Audit(ctx, "auto", "update.start "+s.last, "node", "ok")
+				a.hb.Report("auto-update", "patch: "+s.last+" requested", nil)
+			}
+			s.due = time.Time{}
+		}
+	}
+	return soon
 }
 
 // nextWait is how long the loop sleeps: a tick, or until the moment it

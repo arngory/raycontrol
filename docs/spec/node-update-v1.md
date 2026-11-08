@@ -56,6 +56,7 @@ rayctl update status                           # политика, послед�
 - `installed` — версия ноды;
 - `latest` — последний релиз, который видели проверки rayd (`""`, если не видели);
 - `remote`, `auto`, `window` — политика root;
+- `held` — релизы, обновление на которые откатилось или сломалось: auto их не просит;
 - `timezone` — пояс ноды сейчас: сокращение и смещение (`"CET +01:00"`).
 
 `status.state`:
@@ -84,7 +85,8 @@ rayctl update status                           # политика, послед�
 
 rayd работает без привилегий (`User=rayd`). Поэтому он только записывает запрос, а ставит обновление root:
 
-1. rayd пишет `/var/lib/raycontrol/update-request` (JSON: `id`, `kind` remote|auto, `version`, `by`, `at`). Файл
+1. rayd пишет `/var/lib/raycontrol/update-request` (JSON: `id`, `kind` remote|auto, `version`, `by`, `at`; для
+   `latest` ещё `release` — последний релиз, который rayd видел, только для `held`, если итога не будет). Файл
    создаётся атомарно и не заменяет чужой запрос, пока тот не старше часа.
 2. `raycontrol-update.path` (`PathExists=`) запускает `raycontrol-update.service`. Это oneshot от root, без песочницы,
    после `rayd.service`: он ставит ноду. Запускает `rayctl update -request`.

@@ -94,10 +94,14 @@ var ErrWaiting = errors.New("an update is requested already")
 
 // Request is an update asked for.
 type Request struct {
-	ID      string    `json:"id"`
-	Kind    string    `json:"kind"`    // Remote or Auto
-	Version string    `json:"version"` // "latest" or vX.Y.Z
-	By      string    `json:"by"`      // who: "alice/phone (remote)", "auto"
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`    // Remote or Auto
+	Version string `json:"version"` // "latest" or vX.Y.Z
+	// Release is what latest was as rayd saw it, for latest: the release
+	// the auto update then leaves alone if this update does not hold and
+	// says nothing (only rayd's own auto update follows it).
+	Release string    `json:"release,omitempty"`
+	By      string    `json:"by"` // who: "alice/phone (remote)", "auto"
 	At      time.Time `json:"at"`
 }
 
@@ -159,6 +163,8 @@ func (r Request) Check(installed string, now time.Time) error {
 		return fmt.Errorf("a request of kind %q", Printable(r.Kind))
 	case !ValidVersion(r.Version):
 		return fmt.Errorf("version %q: latest or vX.Y.Z", Printable(r.Version))
+	case r.Release != "" && !release.IsRelease(r.Release):
+		return fmt.Errorf("release %q: vX.Y.Z", Printable(r.Release))
 	case r.By == "" || len(r.By) > maxField || Printable(r.By) != r.By:
 		return fmt.Errorf("the request names no one who asked (%q)", Printable(r.By))
 	case now.Sub(r.At) > Stale || r.At.Sub(now) > time.Minute:
@@ -256,6 +262,27 @@ func WriteStatus(path string, s Status) error {
 		return err
 	}
 	return writeRoot(path, b)
+}
+
+// Tried is the release r goes for, as far as it is known before it runs.
+func (r Request) Tried() string {
+	if r.Version != "latest" && release.IsRelease(r.Version) {
+		return r.Version
+	}
+	if release.IsRelease(r.Release) {
+		return r.Release
+	}
+	return ""
+}
+
+// Holding is what s holds, and its own release when it is a run that
+// never ended (a power cut: no word, no stop hook): what the next status
+// carries over.
+func (s Status) Holding() []string {
+	if s.State == Running {
+		return Hold(s.Held, s.Release)
+	}
+	return s.Held
 }
 
 // Hold adds release v to held: the auto update leaves it alone.
@@ -481,10 +508,11 @@ func Left(t time.Time, w string) time.Duration {
 	}
 	y, m, d := t.Date()
 	at := func(day, min int) time.Time { return time.Date(y, m, d+day, min/60, min%60, 0, 0, t.Location()) }
-	// The window that holds t, if any, opened today or yesterday.
+	// The window that holds t, if any, opened today or yesterday. One
+	// that falls into the hour the clock skips is empty that day.
 	for _, day := range []int{0, -1} {
 		start, end := at(day, from), at(day, to)
-		if !end.After(start) { // past midnight
+		if to <= from { // past midnight
 			end = at(day+1, to)
 		}
 		if !t.Before(start) && t.Before(end) {

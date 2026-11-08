@@ -636,6 +636,9 @@ message GetUpdateStatusResponse {
   string auto = 5;      // "off" or "patch"
   string window = 6;    // the auto update's window, "HH:MM-HH:MM" in the node's time
   string timezone = 7;  // the node's time zone now: abbreviation and offset ("CET +01:00", "UTC +00:00")
+  // Releases whose update rolled back or broke on the way: the auto update
+  // leaves them alone.
+  repeated string held = 8;
 }
 // UpdateStatus is the last update by request, or the one under way.
 message UpdateStatus {

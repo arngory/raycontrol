@@ -115,6 +115,9 @@ func (s *Server) StartUpdate(ctx context.Context, req *connect.Request[nodev1.St
 		return fail(connect.CodeFailedPrecondition, fmt.Errorf("an update is %s already", state))
 	}
 	r := nodeupdate.Request{ID: nodeupdate.NewID(), Kind: nodeupdate.Remote, Version: v, By: actorFrom(ctx), At: now.UTC()}
+	if latest := u.latest(); v == "latest" && release.IsRelease(latest) {
+		r.Release = latest
+	}
 	switch err := nodeupdate.WriteRequest(u.request(), r, now); {
 	case errors.Is(err, nodeupdate.ErrWaiting):
 		return fail(connect.CodeFailedPrecondition, err)
@@ -142,6 +145,7 @@ func (s *Server) GetUpdateStatus(_ context.Context, _ *connect.Request[nodev1.Ge
 		Auto:      p.Auto,
 		Window:    p.Window,
 		Timezone:  now.Format("MST -07:00"),
+		Held:      st.Held,
 	}
 	if waiting && r.ID != st.ID {
 		out.Status = requestedPB(r, s.Version)
@@ -154,12 +158,8 @@ func (s *Server) GetUpdateStatus(_ context.Context, _ *connect.Request[nodev1.Ge
 }
 
 func requestedPB(r nodeupdate.Request, from string) *nodev1.UpdateStatus {
-	st := &nodev1.UpdateStatus{Id: r.ID, State: nodeupdate.Requested, From: from, To: r.Version, Target: r.Version, By: r.By, Kind: r.Kind,
-		RequestedAt: unixOf(r.At)}
-	if r.Version != "latest" {
-		st.Release = r.Version
-	}
-	return st
+	return &nodev1.UpdateStatus{Id: r.ID, State: nodeupdate.Requested, From: from, To: r.Version, Target: r.Version, Release: r.Tried(), By: r.By,
+		Kind: r.Kind, RequestedAt: unixOf(r.At)}
 }
 
 func statusPB(st nodeupdate.Status) *nodev1.UpdateStatus {

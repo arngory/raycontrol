@@ -203,6 +203,7 @@ for d in "${steps[@]}"; do
 	# rayctl tells how it ended in the result file (docs/RELEASE.md).
 	res=()
 	[[ -n ${EXPECT_HANDOFF:-} ]] && res=(env RAYCONTROL_UPDATE_RESULT=/root/update-result.json)
+	x rm -f /root/update-result.json
 	out="$(xk "${res[@]}" /usr/local/bin/rayctl update -from "/opt/step/$d" -yes 2>&1)" || fail "rayctl update to the release in $d: $out"
 	echo "$out" | grep -E '^(release|raycontrol|installed|rolling|update)' || true
 	if [[ -n ${EXPECT_HANDOFF:-} ]]; then
