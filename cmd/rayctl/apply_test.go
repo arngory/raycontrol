@@ -124,7 +124,7 @@ func TestApplyBuildsItsOwnPlan(t *testing.T) {
 		t.Error("asked rayd for its plan")
 	}
 	b, _ := os.ReadFile(filepath.Join(root, "/etc/systemd/system/niko-dns.service"))
-	if !strings.Contains(string(b), "ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/dns/noise.key niko-dns /run/niko/dns/noise.key\n") {
+	if !strings.Contains(string(b), "ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/dns/noise.key rayd niko-dns /run/niko/dns/noise.key\n") {
 		t.Errorf("dns unit:\n%s", b)
 	}
 }

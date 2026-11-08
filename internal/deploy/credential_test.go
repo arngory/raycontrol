@@ -20,6 +20,7 @@ import (
 // runtime directories (run, root's, as /run/niko; run/svc, the service's).
 type credHost struct {
 	anchor, rel, src, run, dst string
+	owner                      int // whose the source must be: rayd's, here this test's user
 }
 
 func newCredHost(t *testing.T) credHost {
@@ -38,11 +39,11 @@ func newCredHost(t *testing.T) credHost {
 		t.Fatal(err)
 	}
 	os.Chmod(filepath.Join(run, "svc"), 0o710)
-	return credHost{anchor: anchor, rel: rel, src: src, run: run, dst: filepath.Join(run, "svc", "key.pem")}
+	return credHost{anchor: anchor, rel: rel, src: src, run: run, dst: filepath.Join(run, "svc", "key.pem"), owner: os.Getuid()}
 }
 
 func (h credHost) copy() error {
-	return deploy.CopyCredential(h.anchor, h.rel, h.dst, os.Getuid(), os.Getgid())
+	return deploy.CopyCredential(h.anchor, h.rel, h.owner, h.dst, os.Getuid(), os.Getgid())
 }
 
 // copied checks the copy at dst, and that no temporary file is left.

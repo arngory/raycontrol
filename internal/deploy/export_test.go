@@ -20,6 +20,14 @@ func NoOpenat2() func() {
 	return func() { openat2 = saved }
 }
 
+// Openat2Err makes openat2 fail with err until the returned func: EPERM
+// is a container's seccomp filter, ELOOP or ENOENT a refusal of the path.
+func Openat2Err(err error) func() {
+	saved := openat2
+	openat2 = func(int, string, *unix.OpenHow) (int, error) { return -1, err }
+	return func() { openat2 = saved }
+}
+
 // SetOwnAddrs makes the host's addresses these, until the returned func.
 func SetOwnAddrs(m map[netip.Addr]bool) func() {
 	saved := ownAddrs

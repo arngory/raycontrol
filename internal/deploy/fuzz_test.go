@@ -68,13 +68,13 @@ func FuzzBuild(f *testing.F) {
 // oracle of its own, apart from Plan.Check's templates.
 var rootLine = regexp.MustCompile(`^(Exec[A-Za-z]*=[+!@:-]|Exec(Stop|StopPost|Reload|Condition|StartPost)=|(User|Group)=(root|0|[^n]|n[^i])|` +
 	`(Environment|EnvironmentFile|BindPaths|BindReadOnlyPaths|RootDirectory|RootImage|LoadCredential|SetCredential|PAMName|DynamicUser|` +
-	`PermissionsStartOnly|Type|KillMode|Delegate|DevicePolicy|DeviceAllow|NotifyAccess|OOMScoreAdjust|Nice)=|.*(CAP_SYS|CAP_DAC|CAP_SETUID|CAP_CHOWN|CAP_FOWNER)|.*[%\\])`)
+	`PermissionsStartOnly|Type|KillMode|Delegate|DevicePolicy|DeviceAllow|NotifyAccess|OOMScoreAdjust|Nice)=|.*(CAP_SYS|CAP_DAC|CAP_SETUID|CAP_CHOWN|CAP_FOWNER)|.*[%\\]|Exec[A-Za-z]*=.*[;'"$])`)
 
 // FuzzPlanCheck: a line put into any file of a plan rayctl makes, or a
 // mode, is refused, or else it gives nothing of rootLine.
 func FuzzPlanCheck(f *testing.F) {
 	for _, l := range []string{"User=root", "ExecStartPre=+/bin/sh -c id", "Z /etc 0777 rayd rayd -", "kernel.core_pattern = |/x",
-		"ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/dns/noise.key niko-dns /run/niko/dns/x",
+		"ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/dns/noise.key rayd niko-dns /run/niko/dns/x",
 		"Description=x", "After=niko-dns.service", "d /run/niko/x-in 2750 niko-x niko-front -", "NoNewPrivileges=no"} {
 		f.Add(uint8(3), uint16(5), l, uint32(0o644))
 	}

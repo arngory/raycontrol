@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode"
@@ -162,6 +163,37 @@ func unitDirs(unit string) (runtime, state string) {
 	return strings.TrimPrefix(path.Join(render.DefaultPaths.Run, strings.TrimSuffix(strings.TrimPrefix(unit, "niko-"), ".service")), "/run/"), ""
 }
 
+// unitCommand is the kind of command a unit runs (commands).
+func unitCommand(unit string) string {
+	switch {
+	case unit == "niko-front.service":
+		return "front"
+	case strings.HasPrefix(unit, "niko-"):
+		return "service"
+	}
+	return unit
+}
+
+// commands are the binaries and subcommands each kind of unit may start
+// (ExecStart's first two words), as Build and RelayPlan write them.
+var commands = map[string][]string{
+	"rayd.service":   {DefaultBinaries.Rayd + " serve"},
+	"rayspa.service": {DefaultBinaries.Rayspa + " run"},
+	RelayProbeUnit:   {DefaultBinaries.Rayd + " relay"},
+	"front":          {DefaultBinaries.NikoServer + " front"},
+	"service": {DefaultBinaries.Xray + " run", DefaultBinaries.Rayd + " site", DefaultBinaries.Rayd + " naive",
+		DefaultBinaries.NikoServer + " backend", DefaultBinaries.Slipstream + " --front-socket"},
+}
+
+// execWord is a word of a command line: what systemd would neither split
+// nor expand (no ;, quotes, $, \, %).
+var execWord = regexp.MustCompile(`^[A-Za-z0-9_./:,=+@-]+$`)
+
+// words reports whether each of f is one execWord.
+func words(f []string) bool {
+	return !slices.ContainsFunc(f, func(w string) bool { return !execWord.MatchString(w) })
+}
+
 // hardeningLines are the hardening block's settings, each wanted once in
 // every unit, with its value.
 var hardeningLines = func() map[string]string {
@@ -185,7 +217,7 @@ func checkUnit(unit, content string, users map[string]bool) error {
 	user := unitUser(unit)
 	runtimeDir, stateDir := unitDirs(unit)
 	isNiko := strings.HasPrefix(unit, "niko-")
-	bins := []string{DefaultBinaries.Rayd, DefaultBinaries.Rayspa, DefaultBinaries.NikoServer, DefaultBinaries.Xray, DefaultBinaries.Slipstream}
+	service := strings.TrimSuffix(strings.TrimPrefix(unit, "niko-"), ".service")
 	rendered := render.DefaultPaths.Rendered
 	oneOf := func(v string, ok ...string) bool { return slices.Contains(ok, v) }
 	fieldsOf := func(v string, ok func(string) bool) bool {
@@ -215,23 +247,38 @@ func checkUnit(unit, content string, users map[string]bool) error {
 			"User":                func(v string) bool { return v == user },
 			"Group":               func(v string) bool { return v == user },
 			"SupplementaryGroups": func(v string) bool { return fieldsOf(v, group) },
+			// The unit's command, by its binary and subcommand; words only
+			// (no ;, quotes, $ or \ for systemd to split or expand).
 			"ExecStart": func(v string) bool {
 				f := strings.Split(v, " ")
-				return slices.Contains(bins, f[0]) && !slices.Contains(f, "")
+				return len(f) >= 2 && slices.Contains(commands[unitCommand(unit)], f[0]+" "+f[1]) && words(f)
 			},
+			// Only rayd's credential copy: from the unit's own rendered
+			// directory (rayd's files), or the relay's bundle (root's) for
+			// the relay's two units.
 			"ExecStartPre": func(v string) bool {
 				f := strings.Split(v, " ")
-				if len(f) != 6 || f[0] != "+"+DefaultBinaries.Rayd || f[1] != CredentialCommand {
+				if len(f) != 7 || f[0] != "+"+DefaultBinaries.Rayd || f[1] != CredentialCommand || !words(f) {
 					return false
 				}
-				anchor, rel, dst := f[2], f[3], f[5]
+				anchor, rel, owner, dst := f[2], f[3], f[4], f[6]
 				src := path.Join(anchor, rel)
-				// A file rayd rendered, or the relay's bundle (root's).
-				from := anchor == renderedAnchor(render.DefaultPaths) && under(src, rendered) || anchor == path.Dir(RelayBundle) && src == RelayBundle
-				if !from || path.IsAbs(rel) || path.Clean(rel) != rel || strings.HasPrefix(rel, "../") {
+				if path.IsAbs(rel) || path.Clean(rel) != rel || strings.HasPrefix(rel, "../") {
 					return false
 				}
-				copies = append(copies, [2]string{f[4], dst})
+				switch anchor {
+				case renderedAnchor(render.DefaultPaths):
+					if !isNiko || owner != renderedOwner || path.Dir(src) != path.Join(rendered, service) {
+						return false
+					}
+				case path.Dir(RelayBundle):
+					if unit != "rayspa.service" && unit != RelayProbeUnit || owner != bundleOwner || src != RelayBundle {
+						return false
+					}
+				default:
+					return false
+				}
+				copies = append(copies, [2]string{f[5], dst})
 				return true
 			},
 			"RuntimeDirectory":      func(v string) bool { return v == runtimeDir },

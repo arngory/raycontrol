@@ -41,7 +41,7 @@ func RelayPlan(bin Binaries) Plan {
 		service: []string{
 			"User=rayspa", "Group=rayspa",
 			"RuntimeDirectory=rayspa", "RuntimeDirectoryMode=0700",
-			copyIn(bin.Rayd, path.Dir(RelayBundle), "rayspa", RelayBundle, relayBundleCopy),
+			copyIn(bin.Rayd, path.Dir(RelayBundle), bundleOwner, "rayspa", RelayBundle, relayBundleCopy),
 			"ExecStart=" + bin.Rayspa + " run -relay " + relayBundleCopy + " -state " + RayspaState,
 			// The last snapshot: the relay's SPA keys and the admin addresses.
 			"StateDirectory=rayspa", "StateDirectoryMode=0700",
@@ -65,7 +65,7 @@ func RelayPlan(bin Binaries) Plan {
 		service: []string{
 			"User=rayd", "Group=rayd",
 			"RuntimeDirectory=rayd-relay", "RuntimeDirectoryMode=0700",
-			copyIn(bin.Rayd, path.Dir(RelayBundle), "rayd", RelayBundle, relayProbeBundleCopy),
+			copyIn(bin.Rayd, path.Dir(RelayBundle), bundleOwner, "rayd", RelayBundle, relayProbeBundleCopy),
 			"ExecStart=" + bin.Rayd + " relay -bundle " + relayProbeBundleCopy + " -state " + RelayProbeState,
 			// The devices of the last snapshot, for a start while the exit
 			// is away (their K_relay: rayd's only).

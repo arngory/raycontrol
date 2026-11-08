@@ -122,32 +122,47 @@ func TestPlanCheck(t *testing.T) {
 		"no user":                 set(dns, "User=niko-dns\n", ""),
 		"a second user":           set(dns, "Group=niko-dns\n", "Group=niko-dns\nUser=root\n"),
 		"ExecStartPre=+/bin/sh":   set(dns, "ExecStart=", "ExecStartPre=+/bin/sh -c id\nExecStart="),
-		"ExecStartPre=!":          set(dns, "ExecStart=", "ExecStartPre=!/usr/local/bin/rayd credential /var/lib raycontrol/rendered/dns/noise.key niko-dns /run/niko/dns/noise.key\nExecStart="),
+		"ExecStartPre=!":          set(dns, "ExecStart=", "ExecStartPre=!/usr/local/bin/rayd credential /var/lib raycontrol/rendered/dns/noise.key rayd niko-dns /run/niko/dns/noise.key\nExecStart="),
 		"ExecStartPost":           set(dns, "ExecStart=", "ExecStartPost=/bin/true\nExecStart="),
 		"another binary":          set(dns, "ExecStart=/usr/local/libexec/raycontrol/niko-server", "ExecStart=/bin/sh"),
 		"a prefix on ExecStart":   set(dns, "ExecStart=/usr/local/libexec/raycontrol/niko-server", "ExecStart=+/usr/local/libexec/raycontrol/niko-server"),
 		"a copy of /etc/shadow":   set(dns, "credential /var/lib raycontrol/rendered/dns/noise.key", "credential /etc shadow"),
 		"a copy out of rendered":  set(dns, "raycontrol/rendered/dns/noise.key", "raycontrol/rayd.db"),
 		"a copy by ..":            set(dns, "raycontrol/rendered/dns/noise.key", "raycontrol/rendered/../rayd.db"),
-		"a copy for another":      set(dns, "noise.key niko-dns /run/niko/dns/", "noise.key root /run/niko/dns/"),
+		"a copy for another":      set(dns, "noise.key rayd niko-dns /run/niko/dns/", "noise.key rayd root /run/niko/dns/"),
 		"a copy elsewhere":        set(dns, "niko-dns /run/niko/dns/noise.key", "niko-dns /etc/shadow"),
 		"a copy into the front's": set(dns, "niko-dns /run/niko/dns/noise.key", "niko-dns /run/niko/front/noise.key"),
-		"EnvironmentFile":         set(dns, "UMask=0007\n", "UMask=0007\nEnvironmentFile=/var/lib/raycontrol/env\n"),
-		"BindPaths":               set(dns, "UMask=0007\n", "UMask=0007\nBindPaths=/etc\n"),
-		"a continuation":          set(dns, "UMask=0007\n", "UMask=0007 \\\n"),
-		"a specifier":             set(dns, "ExecStart=/usr/local/libexec/raycontrol/niko-server backend", "ExecStart=/usr/local/libexec/raycontrol/niko-server %h"),
-		"a carriage return":       set(dns, "UMask=0007\n", "UMask=0007\r\nUser=root\n"),
-		"hardening off":           set(dns, "NoNewPrivileges=yes\n", "NoNewPrivileges=no\n"),
-		"hardening twice":         set(dns, "NoNewPrivileges=yes\n", "NoNewPrivileges=yes\nNoNewPrivileges=no\n"),
-		"hardening gone":          set(dns, "ProtectSystem=strict\n", ""),
-		"CAP_SYS_ADMIN":           set(front, "CapabilityBoundingSet=CAP_NET_BIND_SERVICE", "CapabilityBoundingSet=CAP_SYS_ADMIN"),
-		"CAP_NET_ADMIN for niko":  set(front, "AmbientCapabilities=CAP_NET_BIND_SERVICE", "AmbientCapabilities=CAP_NET_ADMIN"),
-		"a group not niko":        set(dns, "SupplementaryGroups=niko-inner", "SupplementaryGroups=niko-inner disk"),
-		"ReadWritePaths /etc":     set(dns, "ReadWritePaths=/run/niko/dns-in", "ReadWritePaths=/etc"),
-		"another runtime dir":     set(dns, "RuntimeDirectory=niko/dns", "RuntimeDirectory=niko/front"),
-		"a section of its own":    set(dns, "[Install]", "[Socket]\nListenStream=/run/x\n[Install]"),
-		"a port out of range":     func(p *deploy.Plan) { p.HostPorts[0].From = 0 },
-		"a protocol":              func(p *deploy.Plan) { p.HostPorts[0].Proto = "sctp" },
+		// The review's probes: a second command after ;, words systemd
+		// would unquote or expand, a command not the unit's, copies from
+		// elsewhere.
+		"a second command after ;":      set(dns, "ExecStart=/usr/local/libexec/raycontrol/niko-server ", "ExecStart=/usr/local/libexec/raycontrol/niko-server ; +/bin/sh -c id ; "),
+		"a quoted word":                 set(dns, "ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c ", "ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c '/etc/shadow' "),
+		"a variable":                    set(dns, "ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c ", "ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c $HOME "),
+		"rayd credential as ExecStart":  set(dns, "ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c /var/lib/raycontrol/rendered/dns/backend.json", "ExecStart=/usr/local/bin/rayd credential /etc shadow rayd niko-dns /run/niko/dns/x"),
+		"rayd serve as a service":       set(dns, "ExecStart=/usr/local/libexec/raycontrol/niko-server backend", "ExecStart=/usr/local/bin/rayd serve"),
+		"the front's command elsewhere": set(dns, "ExecStart=/usr/local/libexec/raycontrol/niko-server backend", "ExecStart=/usr/local/libexec/raycontrol/niko-server front"),
+		"a quoted copy destination":     set(dns, "niko-dns /run/niko/dns/noise.key", "niko-dns /run/niko/dns/'..'"),
+		"another service's secret":      set(dns, "raycontrol/rendered/dns/noise.key rayd niko-dns", "raycontrol/rendered/inner/xray.json rayd niko-dns"),
+		"the front from a service's":    set(front, "raycontrol/rendered/front/dnsprobe.key", "raycontrol/rendered/dns/noise.key"),
+		"a copy from below its dir":     set(dns, "raycontrol/rendered/dns/noise.key", "raycontrol/rendered/dns/sub/noise.key"),
+		"a rendered file of root's":     set(dns, "noise.key rayd niko-dns", "noise.key root niko-dns"),
+		"the relay's bundle to niko":    set(dns, "credential /var/lib raycontrol/rendered/dns/noise.key rayd niko-dns", "credential /etc/raycontrol relay.bundle root niko-dns"),
+		"EnvironmentFile":               set(dns, "UMask=0007\n", "UMask=0007\nEnvironmentFile=/var/lib/raycontrol/env\n"),
+		"BindPaths":                     set(dns, "UMask=0007\n", "UMask=0007\nBindPaths=/etc\n"),
+		"a continuation":                set(dns, "UMask=0007\n", "UMask=0007 \\\n"),
+		"a specifier":                   set(dns, "ExecStart=/usr/local/libexec/raycontrol/niko-server backend", "ExecStart=/usr/local/libexec/raycontrol/niko-server %h"),
+		"a carriage return":             set(dns, "UMask=0007\n", "UMask=0007\r\nUser=root\n"),
+		"hardening off":                 set(dns, "NoNewPrivileges=yes\n", "NoNewPrivileges=no\n"),
+		"hardening twice":               set(dns, "NoNewPrivileges=yes\n", "NoNewPrivileges=yes\nNoNewPrivileges=no\n"),
+		"hardening gone":                set(dns, "ProtectSystem=strict\n", ""),
+		"CAP_SYS_ADMIN":                 set(front, "CapabilityBoundingSet=CAP_NET_BIND_SERVICE", "CapabilityBoundingSet=CAP_SYS_ADMIN"),
+		"CAP_NET_ADMIN for niko":        set(front, "AmbientCapabilities=CAP_NET_BIND_SERVICE", "AmbientCapabilities=CAP_NET_ADMIN"),
+		"a group not niko":              set(dns, "SupplementaryGroups=niko-inner", "SupplementaryGroups=niko-inner disk"),
+		"ReadWritePaths /etc":           set(dns, "ReadWritePaths=/run/niko/dns-in", "ReadWritePaths=/etc"),
+		"another runtime dir":           set(dns, "RuntimeDirectory=niko/dns", "RuntimeDirectory=niko/front"),
+		"a section of its own":          set(dns, "[Install]", "[Socket]\nListenStream=/run/x\n[Install]"),
+		"a port out of range":           func(p *deploy.Plan) { p.HostPorts[0].From = 0 },
+		"a protocol":                    func(p *deploy.Plan) { p.HostPorts[0].Proto = "sctp" },
 	} {
 		p := clonePlan(good)
 		f(&p)
@@ -174,6 +189,25 @@ func TestPlanCheck(t *testing.T) {
 	// The good plan is untouched by the cases above.
 	if err := good.Check(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The relay's units copy the bundle, root's, and nothing else.
+func TestPlanCheckRelay(t *testing.T) {
+	good := deploy.RelayPlan(deploy.DefaultBinaries)
+	unit := "/etc/systemd/system/rayspa.service"
+	for name, c := range map[string][2]string{
+		"the bundle as rayd's":   {"relay.bundle root rayspa", "relay.bundle rayd rayspa"},
+		"a rendered file":        {"credential /etc/raycontrol relay.bundle root rayspa", "credential /var/lib raycontrol/rendered/front/dnsprobe.key rayd rayspa"},
+		"another file of /etc":   {"credential /etc/raycontrol relay.bundle", "credential /etc/raycontrol shadow"},
+		"to another unit's dir":  {"rayspa /run/rayspa/relay.bundle", "rayspa /run/rayd-relay/relay.bundle"},
+		"a second command after": {"ExecStart=/usr/local/bin/rayspa run ", "ExecStart=/usr/local/bin/rayspa run ; /bin/sh ; "},
+	} {
+		p := clonePlan(good)
+		edit(t, &p, unit, c[0], c[1])
+		if err := p.Check(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }
 

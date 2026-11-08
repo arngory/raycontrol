@@ -135,7 +135,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 			needs:       path.Join(dir, render.SiteChain),
 			service: []string{
 				"User=" + g, "Group=" + g,
-				copyIn(bin.Rayd, anchor, g, path.Join(dir, render.SiteKey), key),
+				copyIn(bin.Rayd, anchor, renderedOwner, g, path.Join(dir, render.SiteKey), key),
 				"ExecStart=" + bin.Rayd + args + " -chain " + path.Join(dir, render.SiteChain) +
 					" -key " + key + " -socket " + p.SiteSocket(s.Name),
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
@@ -188,10 +188,10 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 		raydGroups = append(raydGroups, g)
 		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID})
 		dir := path.Join(p.Rendered, s.Name)
-		creds := []string{copyIn(bin.Rayd, anchor,
+		creds := []string{copyIn(bin.Rayd, anchor, renderedOwner,
 			g, path.Join(dir, render.HysteriaKey), p.Credential(s.Name, render.HysteriaKey))}
 		if s.Kind == "hy2-obfs" {
-			creds = append(creds, copyIn(bin.Rayd, anchor,
+			creds = append(creds, copyIn(bin.Rayd, anchor, renderedOwner,
 				g, path.Join(dir, render.HysteriaObfs), p.Credential(s.Name, render.HysteriaObfs)))
 		}
 		units = append(units, unit{
@@ -247,7 +247,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 			needs:       path.Join(dir, render.NaiveChain),
 			service: []string{
 				"User=" + g, "Group=" + g,
-				copyIn(bin.Rayd, anchor, g, path.Join(dir, render.NaiveKey), key),
+				copyIn(bin.Rayd, anchor, renderedOwner, g, path.Join(dir, render.NaiveKey), key),
 				"ExecStart=" + bin.Rayd + " naive -answer " + answer + " -users " + path.Join(dir, render.NaiveUsers) +
 					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name) +
 					" -quic-socket " + p.NaiveQUICSocket(s.Name) + probeArg + frontUID + icmp,
@@ -295,7 +295,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 		if s.Kind == "slipstream" {
 			secret = render.SlipstreamKey
 		}
-		creds := []string{copyIn(bin.Rayd, anchor,
+		creds := []string{copyIn(bin.Rayd, anchor, renderedOwner,
 			g, path.Join(p.Rendered, s.Name, secret), p.Credential(s.Name, secret))}
 		after := []string{}
 		if inner != nil {
@@ -337,7 +337,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID, ExtraGroups: extra})
 		var creds []string
 		for _, name := range []string{render.YggdrasilTLSKey, render.YggdrasilNodeKey} {
-			creds = append(creds, copyIn(bin.Rayd, anchor,
+			creds = append(creds, copyIn(bin.Rayd, anchor, renderedOwner,
 				g, path.Join(dir, name), p.Credential(s.Name, name)))
 		}
 		var after []string
@@ -404,7 +404,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 		var frontCreds []string
 		cred := func(src, dst string) {
 			if rendered[src] {
-				frontCreds = append(frontCreds, copyIn(bin.Rayd, anchor, "niko-front", src, dst))
+				frontCreds = append(frontCreds, copyIn(bin.Rayd, anchor, renderedOwner, "niko-front", src, dst))
 			}
 		}
 		cred(path.Join(p.Rendered, "front", render.DNSProbeKeyFile), p.FrontDNSProbe())

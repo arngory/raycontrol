@@ -28,16 +28,23 @@ const CredentialCommand = "credential"
 // bytes, a relay's bundle a few kilobytes.
 const MaxCredential = 1 << 20
 
+// The owners of the files credentials are copied from: rendered files are
+// rayd's (it writes them), the relay's bundle root's.
+const (
+	renderedOwner = "rayd"
+	bundleOwner   = "root"
+)
+
 // copyIn is the unit line that copies the credential src in for user
 // before the start: rayd's credential command, as root. anchor is a
-// directory rayd cannot change, src a file below it: no link is followed
-// from anchor down.
-func copyIn(rayd, anchor, user, src, dst string) string {
+// directory rayd cannot change, src a file below it (no link is followed
+// from anchor down), owner the user src must belong to.
+func copyIn(rayd, anchor, owner, user, src, dst string) string {
 	rel, err := filepath.Rel(anchor, src)
 	if err != nil {
 		rel = src
 	}
-	return "ExecStartPre=+" + rayd + " " + CredentialCommand + " " + anchor + " " + rel + " " + user + " " + dst
+	return "ExecStartPre=+" + rayd + " " + CredentialCommand + " " + anchor + " " + rel + " " + owner + " " + user + " " + dst
 }
 
 // renderedAnchor is the directory a rendered credential is opened from:
@@ -49,37 +56,40 @@ func renderedAnchor(p render.Paths) string { return path.Dir(path.Dir(p.Rendered
 // (Process.Copies).
 func copyOf(line string) (src, dst string, ok bool) {
 	f := strings.Fields(line)
-	if len(f) != 6 || !strings.HasPrefix(f[0], "+") || f[1] != CredentialCommand {
+	if len(f) != 7 || !strings.HasPrefix(f[0], "+") || f[1] != CredentialCommand {
 		return "", "", false
 	}
-	return path.Join(f[2], f[3]), f[5], true
+	return path.Join(f[2], f[3]), f[6], true
 }
 
 // openat2 is unix.Openat2; tests take it away, as an old kernel or a
 // container's seccomp filter does.
 var openat2 = unix.Openat2
 
-// CopyCredential copies the file rel below the directory anchor to dst,
-// for uid and gid, mode 0400. systemd runs it as root before a service
-// starts (rayd credential, ExecStartPre=+). rayd writes the files it
-// copies and owns the directories they are in; a link there could turn
-// root's read to any file, a FIFO hang the start, a device do what opening
-// it does. So:
+// CopyCredential copies the file rel below the directory anchor, which
+// must belong to owner, to dst, for uid and gid, mode 0400. systemd runs
+// it as root before a service starts (rayd credential, ExecStartPre=+).
+// rayd writes the files it copies and owns the directories they are in; a
+// link there could turn root's read to any file, a FIFO hang the start, a
+// device do what opening it does. So:
 //
 //   - anchor must be root's alone (root's, not writable by its group or
 //     others). Below it no link is followed, in any component, and nothing
 //     leads out of it (openat2 RESOLVE_NO_SYMLINKS, RESOLVE_BENEATH).
-//   - Only a regular file with one link (not one rayd linked to a file of
-//     root's), MaxCredential bytes at most. It is opened without blocking
-//     (O_NONBLOCK, so a FIFO does not hang the start), and its type is
-//     checked on what was opened.
+//   - The file is opened O_PATH first, which opens nothing (no FIFO waits,
+//     no device acts). Only a regular file of owner's with one link goes
+//     on: one rayd linked to a file of root's is root's, whatever its
+//     links by the time it is looked at. Then it is opened for reading
+//     through that descriptor (/proc/self/fd), the same file, checked
+//     again; MaxCredential bytes at most.
 //   - dst's directory, the service's runtime directory, must be root's or
 //     the service user's, and no one else's to write in. The copy is made
 //     in its parent, root's alone, as a new file (O_EXCL, no link
 //     followed), given its owner and mode through its descriptor, then
-//     renamed over dst: a link put at dst is replaced, never followed.
-func CopyCredential(anchor, rel, dst string, uid, gid int) error {
-	b, err := readCredential(anchor, rel)
+//     renamed over dst: a link put at dst is replaced, never followed. A
+//     copy left there by a run that was killed goes at the next.
+func CopyCredential(anchor, rel string, owner int, dst string, uid, gid int) error {
+	b, err := readCredential(anchor, rel, owner)
 	if err != nil {
 		return fmt.Errorf("credential %s: %w", path.Join(anchor, rel), err)
 	}
@@ -89,8 +99,9 @@ func CopyCredential(anchor, rel, dst string, uid, gid int) error {
 	return nil
 }
 
-// readCredential reads rel below anchor (CopyCredential).
-func readCredential(anchor, rel string) ([]byte, error) {
+// readCredential reads rel below anchor, a file of owner's
+// (CopyCredential).
+func readCredential(anchor, rel string, owner int) ([]byte, error) {
 	if !filepath.IsAbs(anchor) || rel == "" || path.IsAbs(rel) || path.Clean(rel) != rel || rel == ".." || strings.HasPrefix(rel, "../") {
 		return nil, errors.New("not a path below a directory")
 	}
@@ -102,23 +113,40 @@ func readCredential(anchor, rel string) ([]byte, error) {
 	if err := ownedDir(a, 0, os.Geteuid()); err != nil {
 		return nil, fmt.Errorf("%s: %w", anchor, err)
 	}
-	fd, err := openBeneath(a, rel)
+	// O_PATH: nothing is opened yet; what it names is looked at first.
+	pfd, err := openBeneath(a, rel)
 	if err != nil {
 		return nil, err
 	}
-	f := os.NewFile(uintptr(fd), rel)
-	defer f.Close()
+	defer func() { _ = unix.Close(pfd) }()
 	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
+	if err := unix.Fstat(pfd, &st); err != nil {
 		return nil, err
 	}
 	switch {
 	case st.Mode&unix.S_IFMT != unix.S_IFREG:
 		return nil, fmt.Errorf("not a regular file (mode %o)", st.Mode)
+	case int(st.Uid) != owner:
+		return nil, fmt.Errorf("owned by UID %d, not %d", st.Uid, owner)
 	case st.Nlink != 1:
 		return nil, fmt.Errorf("%d links to it", st.Nlink)
 	case st.Size > MaxCredential:
 		return nil, fmt.Errorf("%d bytes, at most %d", st.Size, MaxCredential)
+	}
+	// The same file, opened for reading through the descriptor whatever its
+	// name is by now.
+	fd, err := unix.Open(fmt.Sprintf("/proc/self/fd/%d", pfd), unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("reopening it: %w", err)
+	}
+	f := os.NewFile(uintptr(fd), rel)
+	defer f.Close()
+	var again unix.Stat_t
+	if err := unix.Fstat(fd, &again); err != nil {
+		return nil, err
+	}
+	if again.Dev != st.Dev || again.Ino != st.Ino || again.Mode&unix.S_IFMT != unix.S_IFREG {
+		return nil, errors.New("not the file looked at")
 	}
 	b, err := io.ReadAll(io.LimitReader(f, MaxCredential+1))
 	if err != nil {
@@ -130,15 +158,16 @@ func readCredential(anchor, rel string) ([]byte, error) {
 	return b, nil
 }
 
-// openBeneath opens rel below the directory dir, following no link in any
-// component and never leaving dir: openat2 (Linux 5.6). Where it is
-// missing (an older kernel, a container's seccomp filter), one component
-// at a time, each opened without following a link.
+// openBeneath opens rel below the directory dir as an O_PATH descriptor,
+// following no link in any component and never leaving dir: openat2
+// (Linux 5.6). Where it does not answer (ENOSYS on an older kernel, EPERM
+// from a container's seccomp filter, anything but a refusal of the path),
+// one component at a time, each opened without following a link.
 func openBeneath(dir int, rel string) (int, error) {
-	const file = unix.O_RDONLY | unix.O_NONBLOCK | unix.O_NOCTTY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	const file = unix.O_PATH | unix.O_NOFOLLOW | unix.O_CLOEXEC
 	fd, err := openat2(dir, rel, &unix.OpenHow{Flags: file,
 		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS})
-	if !errors.Is(err, unix.ENOSYS) {
+	if err == nil || errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EXDEV) || errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) {
 		return fd, err
 	}
 	parts := strings.Split(rel, "/")
@@ -188,11 +217,16 @@ func writeCredential(dst string, b []byte, uid, gid int) error {
 	if err := ownedDir(d, 0, os.Geteuid(), uid); err != nil {
 		return fmt.Errorf("%s: %w", dir, err)
 	}
+	// The copy's name is this runtime directory's and this file's: one
+	// left by a run that was killed half way is this unit's to remove
+	// (systemd runs one start of a unit at a time).
+	prefix := "." + filepath.Base(dir) + "." + name + ".raycontrol-"
+	sweep(p, prefix)
 	var r [8]byte
 	if _, err := rand.Read(r[:]); err != nil {
 		return err
 	}
-	tmp := "." + name + ".raycontrol-" + hex.EncodeToString(r[:])
+	tmp := prefix + hex.EncodeToString(r[:])
 	fd, err := unix.Openat(p, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o400)
 	if err != nil {
 		return err
@@ -220,6 +254,23 @@ func writeCredential(dst string, b []byte, uid, gid int) error {
 	}
 	done = true
 	return nil
+}
+
+// sweep removes the entries of the directory dir (root's alone) whose
+// names start with prefix: copies a killed run left.
+func sweep(dir int, prefix string) {
+	d, err := unix.Dup(dir)
+	if err != nil {
+		return
+	}
+	f := os.NewFile(uintptr(d), "")
+	names, _ := f.Readdirnames(-1)
+	f.Close()
+	for _, n := range names {
+		if strings.HasPrefix(n, prefix) {
+			_ = unix.Unlinkat(dir, n, 0)
+		}
+	}
 }
 
 // ownedDir checks that fd is a directory of one of owners that no one
