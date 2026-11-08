@@ -334,9 +334,12 @@ dnsauth и смена ключа masterdns; R длиннее в mdseal пока 
   секунду на пользователя), а TCP через naive, Xray и Hysteria2 — нет: каждое соединение — запись conntrack и, по
   имени, запрос к общему резолверу. Один пользователь может забить conntrack ноды. Нужен предел на пользователя во
   всех процессах или общий в ядре (по UID процесса, не по пользователю).
-- **Лимит трафика** и **единая политика выхода** (BitTorrent, SMTP 25) — по желанию, выключены по умолчанию:
-  [`spec/traffic-limit-v1.md`](spec/traffic-limit-v1.md), [`spec/egress-policy-v1.md`](spec/egress-policy-v1.md)
-  (черновики).
+- **Лимит трафика** — по желанию, выключен по умолчанию: [`spec/traffic-limit-v1.md`](spec/traffic-limit-v1.md)
+  (черновик).
+- ~~**Единая политика выхода** (BitTorrent, SMTP 25).~~ Сделано (v0.21.0): цепочка `egress` в ядре для UID data
+  plane (и UID rayd на supervised-ноде), `rayctl egress block|allow bittorrent|smtp` только у root, у Xray больше нет
+  сниффинга и своего правила BitTorrent; нода с сервисами Xray после обновления держит BitTorrent закрытым
+  ([`spec/egress-policy-v1.md`](spec/egress-policy-v1.md)).
 - **Трассировка с ноды** для mtr из двух половин ([`15-traffic.md`](15-traffic.md) §4) — ждёт решения владельца.
 - **ICMP через naive** (ping и mtr через туннель, одобрено владельцем): [`spec/icmp-v1.md`](spec/icmp-v1.md) — в работе
   к v0.21.0.
