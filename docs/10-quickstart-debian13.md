@@ -473,7 +473,8 @@ rayctl user add -services reality,dns,mdns -expires 90d
 Команда выдаст непрозрачное имя вида `u-k3f9-x2qa`.
 - Все сервисы из §8: `-services reality,hy2-masq,hy2-obfs,naive,doh,dns,mdns,ygg`.
 - Поменять потом — `rayctl user services NAME a,b`.
-- Срок — `-expires`, лимит трафика — `-limit 50G`.
+- Срок — `-expires`. Лимит трафика `-limit 50G` пока только записывается: байты пользователя никто не считает
+  ([15-traffic.md](15-traffic.md) §5).
 
 Ссылки на протоколы клиент получает сам, из подписанной подписки. При ротации ключей и имён (UUID раз в 30 дней,
 REALITY раз в 90) новые приходят туда же заранее.
