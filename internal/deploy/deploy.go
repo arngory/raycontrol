@@ -371,7 +371,9 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	}
 
 	// Hysteria2 behind udpmux (R3-4): niko-server backends on the front's
-	// datagrams; they go out to public addresses only.
+	// datagrams; they go out to public addresses only. They look names up
+	// with the host's resolver: systemd-resolved's stub on loopback stays
+	// in reach (stubAllow; the perimeter lets port 53 only through there).
 	for _, s := range hysteria {
 		g := render.GroupName(s.Name)
 		raydGroups = append(raydGroups, g)
@@ -398,6 +400,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
 				"IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7",
 				probeAllow, // the probe name's address (R4-16); the process checks the rest
+				stubAllow,
 			}, creds...),
 		})
 	}
@@ -532,6 +535,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			network = []string{
 				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
 				"IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7",
+				stubAllow, // peers by name
 			}
 		}
 		units = append(units, unit{
@@ -718,6 +722,16 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	}
 	return plan
 }
+
+// stubAllow lets a unit that denies loopback reach systemd-resolved's stub
+// (127.0.0.53, and 127.0.0.54 without its DNSSEC and search handling), where
+// /etc/resolv.conf points on most hosts: niko-server resolves with the
+// host's resolver. A provider's resolver in a private range stays out of
+// reach (on some clouds it is the metadata server):
+// deploy.SandboxResolverProblem warns. naive and Xray ask public resolvers
+// themselves. Whatever else listens on any address answers there too: the
+// perimeter's output chain lets the data plane reach port 53 only.
+const stubAllow = "IPAddressAllow=127.0.0.53 127.0.0.54"
 
 // ResolvedDropIn is where installs before v0.11 turned systemd-resolved's
 // stub off for the DNS tunnels; Apply removes it (giveBackStub).

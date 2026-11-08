@@ -382,7 +382,7 @@ func (c *cli) user(ctx context.Context, sub string, args []string) error {
 		fs := flag.NewFlagSet("user add", flag.ContinueOnError)
 		services := fs.String("services", "", "comma-separated service names")
 		expires := fs.String("expires", "", "expiry date (2006-01-02) or duration (30d, 12h)")
-		limit := fs.String("limit", "", "traffic limit (e.g. 50G)")
+		limit := fs.String("limit", "", "traffic limit (e.g. 50G): recorded, not enforced yet")
 		note := fs.String("note", "", "free text")
 		// Without a name the user gets an opaque handle: nothing personal
 		// on the node, in its logs or reports (docs/09-observability.md).
@@ -402,6 +402,10 @@ func (c *cli) user(ctx context.Context, sub string, args []string) error {
 		}
 		if req.TrafficLimitBytes, err = parseBytes(*limit); err != nil {
 			return err
+		}
+		if req.TrafficLimitBytes > 0 {
+			// No profile counts a user's bytes yet (docs/15-traffic.md §5).
+			fmt.Fprintln(os.Stderr, "rayctl: the traffic limit is recorded, not enforced yet: no profile counts a user's bytes")
 		}
 		r, err := c.c.CreateUser(ctx, connect.NewRequest(req))
 		if err != nil {

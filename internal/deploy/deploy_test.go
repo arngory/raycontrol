@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -672,7 +673,9 @@ func TestBuildHysteria(t *testing.T) {
 	// key (and salamander) copied in by root, out to public addresses only.
 	for name, u := range map[string]string{"masq": masq, "obfs": obfs} {
 		for _, want := range []string{"ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c /var/lib/raycontrol/rendered/hy2-",
-			"ExecStartPre=+install -m 0400 -o niko-hy2-", "CapabilityBoundingSet=\n", "IPAddressDeny=localhost"} {
+			"ExecStartPre=+install -m 0400 -o niko-hy2-", "CapabilityBoundingSet=\n", "IPAddressDeny=localhost",
+			// The host's resolver, when it is systemd-resolved's stub.
+			"IPAddressAllow=127.0.0.53 127.0.0.54\n"} {
 			if !strings.Contains(u, want) {
 				t.Errorf("%s unit lacks %q:\n%s", name, want, u)
 			}
@@ -1145,6 +1148,46 @@ func TestResolverProblem(t *testing.T) {
 	os.Chmod(stub, 0o644)
 	if p := deploy.ResolverProblem(root); p != "" {
 		t.Errorf("link: %q", p)
+	}
+}
+
+// Hysteria2 and Yggdrasil's peers resolve from units that deny loopback and
+// the private ranges, all but resolved's stub: one server they reach is
+// enough.
+func TestSandboxResolverProblem(t *testing.T) {
+	t.Cleanup(deploy.SetOwnAddrs(map[netip.Addr]bool{netip.MustParseAddr("203.0.113.5"): true}))
+	root := t.TempDir()
+	conf := filepath.Join(root, deploy.ResolvConf)
+	os.MkdirAll(filepath.Dir(conf), 0o755)
+	if p := deploy.SandboxResolverProblem(root); p != "" {
+		t.Errorf("no resolv.conf (ResolverProblem says it): %q", p)
+	}
+	for conf2, bad := range map[string]bool{
+		"nameserver 127.0.0.53\noptions edns0\n":         false,
+		"nameserver 127.0.0.54\n":                        false,
+		"nameserver 1.1.1.1\n":                           false,
+		"nameserver 2606:4700:4700::1111\n":              false,
+		"nameserver 10.0.0.2\nnameserver 9.9.9.9\n":      false,
+		"nameserver 10.0.0.2\n":                          true,
+		"nameserver 169.254.169.254\n":                   true,
+		"nameserver 127.0.0.1\nnameserver ::1\n":         true,
+		"nameserver 100.100.100.100\n":                   true,
+		"nameserver fd00::53\nnameserver fe80::1%eth0\n": true,
+		"nameserver 192.168.1.1\n# nameserver 1.1.1.1\n": true,
+		"search example.com\n":                           false,
+		// Only the first three count.
+		"nameserver 10.0.0.1\nnameserver 10.0.0.2\nnameserver 10.0.0.3\nnameserver 1.1.1.1\n": true,
+		// The node's own address: the perimeter keeps the data plane from it.
+		"nameserver 203.0.113.5\n": true,
+	} {
+		os.WriteFile(conf, []byte(conf2), 0o644)
+		if p := deploy.SandboxResolverProblem(root); (p != "") != bad {
+			t.Errorf("%q: %q", conf2, p)
+		}
+	}
+	os.WriteFile(conf, []byte("nameserver 10.0.0.2\nnameserver 172.16.0.2\n"), 0o644)
+	if p := deploy.SandboxResolverProblem(root); !strings.Contains(p, "10.0.0.2, 172.16.0.2") {
+		t.Errorf("the servers named: %q", p)
 	}
 }
 

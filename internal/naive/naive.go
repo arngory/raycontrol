@@ -21,6 +21,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -38,20 +39,37 @@ type Server struct {
 	// Probe is where the probe name leads (the subscription endpoint on
 	// loopback, R4-16); that name and no other address reaches it.
 	Probe string
-	Log   *slog.Logger
+	// Allow says which addresses UDP over TCP may reach (Public when nil);
+	// Resolve looks its names up (the system's resolver when nil).
+	Allow   func(netip.Addr) bool
+	Resolve func(ctx context.Context, name string) ([]netip.Addr, error)
+	Log     *slog.Logger
+
+	uot     uotLimits
+	uotIdle time.Duration // uotIdle when 0 (tests make it short)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// HTTP/2 (TCP) or HTTP/3 (QUIC); naive never speaks HTTP/1 to a server.
-	if r.Method != http.MethodConnect || r.ProtoMajor < 2 || r.Header.Get("Padding") == "" || !s.authorized(r) {
+	if r.Method != http.MethodConnect || r.ProtoMajor < 2 || r.Header.Get("Padding") == "" {
+		s.Answer.ServeHTTP(w, r)
+		return
+	}
+	user, ok := s.authorized(r)
+	if !ok {
 		s.Answer.ServeHTTP(w, r)
 		return
 	}
 	target := r.Host
-	if _, _, err := net.SplitHostPort(target); err != nil {
+	host, _, err := net.SplitHostPort(target)
+	if err != nil {
 		s.Answer.ServeHTTP(w, r)
 		return
 	}
+	// 200 before the destination answers: waiting for it would cost each
+	// connection up to a round trip more. A destination that cannot be
+	// reached resets the stream (spec/naive-uot-v1.md §4): the client sees
+	// an error, not an empty answer.
 	w.Header().Set("Padding", paddingHeader())
 	w.WriteHeader(http.StatusOK)
 	flusher, ok := w.(http.Flusher)
@@ -59,10 +77,28 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flusher.Flush()
+	in := &paddedStream{r: r.Body, w: w, f: flusher}
+
+	switch host {
+	case UoTName:
+		if !s.uot.take(user) {
+			s.Log.Debug("naive: too many UDP streams")
+			panic(http.ErrAbortHandler)
+		}
+		defer s.uot.put(user)
+		err := s.serveUoT(r.Context(), user, in, http.NewResponseController(w))
+		if err != nil {
+			s.Log.Debug("naive: UDP refused", "err", err)
+			panic(http.ErrAbortHandler)
+		}
+		return
+	case uotLegacyName:
+		panic(http.ErrAbortHandler)
+	}
 
 	dial := s.Dial
 	if dial == nil {
-		dial = PublicDialer().DialContext
+		dial = dialPublic
 	}
 	if host, _, _ := net.SplitHostPort(target); s.Probe != "" && host == probe.Name {
 		var d net.Dialer
@@ -72,12 +108,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	out, err := dial(dctx, "tcp", target)
 	cancel()
 	if err != nil {
-		s.Log.Debug("naive: destination unreachable", "err", err)
-		return
+		s.Log.Debug("naive: destination unreachable") // not where: no destination in the log
+		panic(http.ErrAbortHandler)
 	}
 	defer out.Close()
-
-	in := &paddedStream{r: r.Body, w: w, f: flusher}
 	// The client's end of the upload only half-closes the destination; the
 	// tunnel lasts until the destination is done sending, or the stream
 	// ends. Nothing writes to w once this returns.
@@ -101,19 +135,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // authorized checks Proxy-Authorization: Basic, any user name, the password
-// being one of the users' credentials.
-func (s *Server) authorized(r *http.Request) bool {
+// being one of the users' credentials; the user is the password's hash.
+func (s *Server) authorized(r *http.Request) (user [32]byte, ok bool) {
 	h := r.Header.Get("Proxy-Authorization")
 	scheme, b64, ok := strings.Cut(h, " ")
 	if !ok || !strings.EqualFold(scheme, "Basic") {
-		return false
+		return user, false
 	}
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
 	if err != nil {
-		return false
+		return user, false
 	}
 	_, password, ok := strings.Cut(string(raw), ":")
-	return ok && s.Users.Accepts(password)
+	if !ok || !s.Users.Accepts(password) {
+		return user, false
+	}
+	return sha256.Sum256([]byte(password)), true
 }
 
 // Users are the accepted passwords, as SHA-256 hashes in a JSON file that
@@ -175,8 +212,9 @@ func readUsers(path string) (map[[32]byte]bool, error) {
 // PublicDialer reaches public unicast addresses only: not the node itself,
 // not loopback, private, link-local, CGNAT or multicast ranges. A client
 // may not use naive to get at what only the node's own address reaches.
+// Names are looked up with the public resolvers.
 func PublicDialer() *net.Dialer {
-	return &net.Dialer{Timeout: 10 * time.Second, Control: func(_, address string, _ syscall.RawConn) error {
+	return &net.Dialer{Timeout: 10 * time.Second, Resolver: PublicResolver(), Control: func(_, address string, _ syscall.RawConn) error {
 		ap, err := netip.ParseAddrPort(address)
 		if err != nil {
 			return err
@@ -190,6 +228,10 @@ func PublicDialer() *net.Dialer {
 
 var (
 	cgnat = netip.MustParsePrefix("100.64.0.0/10")
+	// IPv6 prefixes that carry IPv4 addresses (NAT64, 6to4, IPv4-compatible):
+	// 64:ff9b::a9fe:a9fe is 169.254.169.254 where NAT64 is routed.
+	carriesV4 = []netip.Prefix{netip.MustParsePrefix("64:ff9b::/96"), netip.MustParsePrefix("64:ff9b:1::/48"),
+		netip.MustParsePrefix("2002::/16"), netip.MustParsePrefix("::/96")}
 	local struct {
 		once  sync.Once
 		addrs map[netip.Addr]bool
@@ -202,6 +244,11 @@ func Public(a netip.Addr) bool {
 	a = a.Unmap()
 	if !a.IsGlobalUnicast() || a.IsPrivate() || cgnat.Contains(a) {
 		return false
+	}
+	for _, p := range carriesV4 {
+		if p.Contains(a) {
+			return false
+		}
 	}
 	local.once.Do(func() {
 		local.addrs = map[netip.Addr]bool{}
@@ -317,4 +364,240 @@ func (p *paddedStream) Write(b []byte) (int, error) {
 		b = b[len(chunk):]
 	}
 	return written, nil
+}
+
+// resolvers are where naive looks names up: public ones, as Xray does
+// (render: DoH to 1.1.1.1 and 9.9.9.9). The host's resolver may be
+// systemd-resolved's stub on loopback or a provider's in a private range,
+// which the unit's IPAddressDeny keeps out of reach: every destination by
+// name would fail.
+var resolvers = []string{"1.1.1.1:53", "9.9.9.9:53", "[2606:4700:4700::1111]:53"}
+
+// resolverWait is the longest a query waits for a resolver before the next
+// one is asked (resolv.conf's 5 s would hold each connection that long).
+const resolverWait = 2 * time.Second
+
+// publicDNS is naive's one resolver, for TCP's destinations and UDP's.
+var publicDNS = newPublicDNS(resolvers, resolverWait)
+
+// PublicResolver asks the public resolvers, whatever the host's resolv.conf
+// names: the one that answered last first, the next one when it does not
+// answer within resolverWait.
+func PublicResolver() *net.Resolver { return publicDNS.r }
+
+// SetResolverLog is where a resolver that does not answer is told.
+func SetResolverLog(log *slog.Logger) { publicDNS.log.Store(log) }
+
+type pubDNS struct {
+	addrs []string
+	wait  time.Duration
+	cur   atomic.Uint32  // the one asked first
+	good  []atomic.Int64 // when each one last answered well (mono)
+	moves atomic.Int32   // resolvers passed over since any answered well
+	r     *net.Resolver
+	log   atomic.Pointer[slog.Logger]
+	warn  resolverWarn
+}
+
+// mono is a monotonic time in nanoseconds: the wall clock may step back.
+func mono() int64 { return int64(time.Since(monoStart)) }
+
+var monoStart = time.Now()
+
+func newPublicDNS(addrs []string, wait time.Duration) *pubDNS {
+	p := &pubDNS{addrs: addrs, wait: wait, good: make([]atomic.Int64, len(addrs))}
+	p.r = &net.Resolver{PreferGo: true, Dial: p.dial}
+	return p
+}
+
+func (p *pubDNS) dial(ctx context.Context, network, _ string) (net.Conn, error) {
+	d := net.Dialer{Timeout: p.wait}
+	var err error
+	for range p.addrs {
+		i := p.cur.Load() % uint32(len(p.addrs)) //nolint:gosec // G115: a handful of resolvers
+		since := mono()
+		c, derr := d.DialContext(ctx, network, p.addrs[i])
+		if derr == nil {
+			rc := &resolverConn{Conn: c, p: p, i: i}
+			rc.sent.Store(since)
+			if _, ok := c.(net.PacketConn); ok {
+				// Go frames queries by what Dial returns: a stream would
+				// get TCP's length prefix over UDP.
+				rc.packet = true
+				return resolverPacketConn{rc}, nil
+			}
+			return rc, nil
+		}
+		// The caller gave up (Go's own per-query timeout is a deadline,
+		// not a cancel): no resolver's fault.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return nil, derr
+		}
+		p.failed(i, since, derr)
+		err = derr
+	}
+	return nil, err
+}
+
+func (p *pubDNS) answered(i uint32) {
+	m := mono()
+	p.good[i].Store(m)
+	p.moves.Store(0)
+}
+
+// failed passes resolver i over, unless it has answered well since this
+// query went to it (the query's trouble, a broken domain say, not the
+// resolver's) or another query has passed it over already. One resolver
+// passed over is the next one's work, not the operator's: only when none
+// has answered well through a whole round is it warned about. On a quiet
+// node a single broken name may still move the choice on: harmless, the
+// next resolver answers as well.
+func (p *pubDNS) failed(i uint32, since int64, err error) {
+	if p.good[i].Load() > since {
+		return
+	}
+	if !p.cur.CompareAndSwap(i, (i+1)%uint32(len(p.addrs))) { //nolint:gosec // G115: a handful of resolvers
+		return
+	}
+	log := p.log.Load()
+	if p.moves.Add(1) >= int32(len(p.addrs)) { //nolint:gosec // G115: a handful of resolvers
+		p.warn.note(log, p.addrs[i], err)
+	} else if log != nil {
+		log.Debug("naive: a public resolver passed over", "resolver", p.addrs[i], "err", err)
+	}
+}
+
+// resolverConn is a query's connection to one resolver. A resolver that
+// times out, refuses, or cannot be sent to fails; so does one answering
+// SERVFAIL or REFUSED (Go would ask it again on every retry), unless it has
+// answered others well meanwhile. A query its caller gave up on fails none.
+type resolverConn struct {
+	net.Conn
+	p      *pubDNS
+	i      uint32
+	packet bool
+	sent   atomic.Int64  // when the query went (mono)
+	id     atomic.Uint32 // the query's ID, with 1<<16 once known
+	// Over TCP the answer's head comes after Go's 2-byte length, in as
+	// many reads as it takes: kept until it is whole.
+	head [6]byte
+	got  int
+}
+
+// fail passes the resolver over; failed's compare-and-swap moves on once
+// however many queries to it fail.
+func (c *resolverConn) fail(err error) {
+	c.p.failed(c.i, c.sent.Load(), err)
+}
+
+// transport is an error of the way to the resolver, not of the caller.
+func transport(err error) bool {
+	var errno syscall.Errno
+	return errors.Is(err, os.ErrDeadlineExceeded) || errors.As(err, &errno)
+}
+
+func (c *resolverConn) Write(b []byte) (int, error) {
+	c.sent.Store(mono())
+	if msg := b; c.packet || len(b) >= 4 {
+		if !c.packet {
+			msg = b[2:] // after the length
+		}
+		if len(msg) >= 2 {
+			c.id.Store(uint32(binary.BigEndian.Uint16(msg)) | 1<<16)
+		}
+	}
+	n, err := c.Conn.Write(b)
+	if err != nil && transport(err) {
+		c.fail(err)
+	}
+	return n, err
+}
+
+func (c *resolverConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	switch {
+	case err != nil && transport(err):
+		c.fail(err)
+	case c.packet && n >= 4:
+		c.answer(b[:4])
+	case !c.packet && n > 0 && c.got < len(c.head):
+		c.got += copy(c.head[c.got:], b[:n])
+		if c.got == len(c.head) {
+			c.answer(c.head[2:])
+		}
+	}
+	return n, err
+}
+
+// answer weighs an answer's head (ID, flags): an answer to this query,
+// good or failing.
+func (c *resolverConn) answer(h []byte) {
+	if h[2]&0x80 == 0 || c.id.Load() != uint32(binary.BigEndian.Uint16(h))|1<<16 {
+		return // not an answer to this query
+	}
+	switch h[3] & 0x0f {
+	case 0, 3: // NOERROR, NXDOMAIN
+		c.p.answered(c.i)
+	case 2, 5: // SERVFAIL, REFUSED
+		c.fail(errors.New("answers SERVFAIL or REFUSED"))
+	}
+}
+
+// resolverPacketConn is a resolverConn over UDP, a PacketConn as its
+// socket is.
+type resolverPacketConn struct{ *resolverConn }
+
+func (c resolverPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	return c.Conn.(net.PacketConn).ReadFrom(b)
+}
+
+func (c resolverPacketConn) WriteTo(b []byte, a net.Addr) (int, error) {
+	return c.Conn.(net.PacketConn).WriteTo(b, a)
+}
+
+func (c *resolverConn) SetDeadline(t time.Time) error {
+	if limit := time.Now().Add(c.p.wait); t.IsZero() || t.After(limit) {
+		t = limit
+	}
+	return c.Conn.SetDeadline(t)
+}
+
+// fqdn is a name with its final dot, so that the host's search domains,
+// which are not the client's, never go to the public resolvers; an
+// address stays as it is.
+func fqdn(host string) string {
+	if host == "" || strings.HasSuffix(host, ".") {
+		return host
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return host
+	}
+	return host + "."
+}
+
+// dialPublic is PublicDialer's dial, a name as fully qualified.
+func dialPublic(ctx context.Context, network, address string) (net.Conn, error) {
+	if host, port, err := net.SplitHostPort(address); err == nil {
+		address = net.JoinHostPort(fqdn(host), port)
+	}
+	return PublicDialer().DialContext(ctx, network, address)
+}
+
+// resolverWarn says, at most once a minute, that no public resolver
+// answers: names cannot be looked up on the node. No name goes in the log.
+type resolverWarn struct {
+	mu     sync.Mutex
+	last   time.Time
+	missed int
+}
+
+func (w *resolverWarn) note(log *slog.Logger, resolver string, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.missed++
+	if log == nil || time.Since(w.last) < time.Minute {
+		return
+	}
+	log.Warn("naive: no public resolver answers", "count", w.missed, "last", resolver, "err", err)
+	w.last, w.missed = time.Now(), 0
 }

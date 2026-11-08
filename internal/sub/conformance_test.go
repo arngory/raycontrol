@@ -253,6 +253,10 @@ func strictProblems(kind, link string) []string {
 		if q.Get("sni") == "" {
 			out = append(out, "naive without sni")
 		}
+		// UDP over TCP v2 (naive-uot-v1 §1): the node carries it.
+		if q.Get("uot") != "2" {
+			out = append(out, "naive without uot=2")
+		}
 		// The client ignores these; the node must not rely on them.
 		for _, key := range []string{"cert", "extra-headers"} {
 			if q.Has(key) {

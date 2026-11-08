@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/user"
@@ -248,6 +250,66 @@ func ResolverProblem(root string) string {
 		}
 	}
 	return ResolvConf + " names no nameserver, so Go asks localhost:53: add a nameserver line"
+}
+
+// SandboxResolverProblem says why niko-server's backends that go out
+// (Hysteria2, Yggdrasil's peers) could not resolve names with the host's
+// resolv.conf, or "" when they can: their units deny loopback and the
+// private ranges, all but systemd-resolved's stub (stubAllow). One server
+// they reach is enough. root is the host's root, "" for this host.
+func SandboxResolverProblem(root string) string {
+	at := func(p string) string { return filepath.Join(root, p) }
+	b, err := os.ReadFile(at(resolvTarget(at, ResolvConf))) //nolint:gosec // G304: the host's resolv.conf
+	if err != nil {
+		return "" // ResolverProblem says it
+	}
+	var out []string
+	own := ownAddrs()
+	n := 0
+	for line := range strings.Lines(string(b)) {
+		f := strings.Fields(line)
+		if len(f) < 2 || f[0] != "nameserver" {
+			continue
+		}
+		a, err := netip.ParseAddr(f[1])
+		if err != nil {
+			continue
+		}
+		// Go and glibc ask the first three only.
+		if n++; n > 3 {
+			break
+		}
+		if a = a.Unmap(); sandboxReaches(a) && !own[a] {
+			return ""
+		}
+		out = append(out, a.String())
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s names %s, which Hysteria2 and Yggdrasil's peers may not reach (their units deny loopback and private ranges): "+
+		"the names their clients ask for fail; use systemd-resolved (its stub is let through) or a public resolver", ResolvConf, strings.Join(out, ", "))
+}
+
+// ownAddrs are the host's addresses: the perimeter keeps the data plane
+// from them (S-2), a resolver there included. Tests replace it.
+var ownAddrs = func() map[netip.Addr]bool {
+	m := map[netip.Addr]bool{}
+	addrs, _ := net.InterfaceAddrs()
+	for _, x := range addrs {
+		if p, err := netip.ParsePrefix(x.String()); err == nil {
+			m[p.Addr().Unmap()] = true
+		}
+	}
+	return m
+}
+
+// sandboxReaches reports whether a unit with stubAllow reaches a's port 53.
+func sandboxReaches(a netip.Addr) bool {
+	if a == netip.MustParseAddr("127.0.0.53") || a == netip.MustParseAddr("127.0.0.54") {
+		return true
+	}
+	return a.IsGlobalUnicast() && !a.IsPrivate() && !netip.MustParsePrefix("100.64.0.0/10").Contains(a)
 }
 
 // resolvTarget is the file a resolv.conf link leads to through up to 8

@@ -245,10 +245,18 @@ table inet %[1]s {
 	# block list, systemd's IPAddressDeny): the channel probe goes there.
 	# A local destination always leaves through lo, so every other packet
 	# stops at the first, cheapest match; the FIB lookup comes last.
+	# A subnet's broadcast address looks public to the processes and
+	# reaches the node and its neighbours: refused too, looked up only for
+	# UDP the conntrack has not seen answered (broadcast never is).
+	# systemd-resolved's stub, which units that resolve may reach
+	# (IPAddressAllow), answers on 53 only: whatever else listens on any
+	# address does not take the data plane there.
 	chain output {
 		type filter hook output priority 0; policy accept;
 		oif "lo" meta skuid %[7]s ip daddr != 127.0.0.0/8 fib daddr type local jump to_node
 		oif "lo" meta skuid %[7]s ip6 daddr != ::1 fib daddr type local jump to_node
+		meta nfproto ipv4 meta l4proto udp ct state != established meta skuid %[7]s fib daddr type broadcast jump to_node
+		oif "lo" meta skuid %[7]s ip daddr { 127.0.0.53, 127.0.0.54 } meta l4proto { tcp, udp } th dport != 53 jump to_node
 	}
 	chain to_node {
 		counter comment "data-plane-to-node"
