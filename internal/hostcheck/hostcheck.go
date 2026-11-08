@@ -214,6 +214,21 @@ func (h *Host) Check(ctx context.Context, o Options) []Result {
 		req("nftables", err == nil, map[bool]string{true: "the perimeter table loads in kernel " + kernel,
 			false: "kernel " + kernel + " cannot load the perimeter table: " + firstLines(out, 3)}[err == nil],
 			"kernel 5.2 or newer with nftables (NAT, sets, NFLOG); in a container its host must load the modules")
+		if err == nil {
+			// The egress policy whole (rayctl egress block): the node works
+			// without it, so advised.
+			doff, err := perimeter.CheckEgress(perimeter.Egress{SMTP: true, BitTorrent: true}, func(script string) ([]byte, error) {
+				return h.Run(ctx, script, "nft", "-c", "-f", "-")
+			})
+			detail := "the BitTorrent and SMTP filter loads (rayctl egress)"
+			if doff {
+				detail += "; no @ih in this kernel: the handshake by the TCP header's length"
+			}
+			if err != nil {
+				detail = "kernel " + kernel + " cannot load the BitTorrent and SMTP filter: " + err.Error()
+			}
+			adv("egress policy", err == nil, detail, "a newer kernel with nftables' raw payload matches: without it rayctl egress block refuses")
+		}
 	}
 	if h.Sandbox && systemd && !slices.Contains(missing, "systemd-run") {
 		ok, detail := h.sandbox(ctx)
