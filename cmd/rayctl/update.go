@@ -469,10 +469,12 @@ func (c *cli) restartNode(ctx context.Context, want, stage string, before []stri
 	restarts := map[string]string{} // each data-plane unit's restarts once restarted
 	var units []string
 	// The deployment's units too: one a new service brings that fails at
-	// once is in auto-restart, not active, when listed (review).
+	// once is in auto-restart, not active, when listed (review). From the
+	// plan as root builds it, not rayd's; after a rollback to a rayd before
+	// GetDeployInputs, the units that run are all there is.
 	now := activeDataPlane()
-	if d, err := c.c.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{})); err == nil {
-		for _, u := range d.Msg.Units {
+	if plan, _, err := c.deployPlan(ctx); err == nil {
+		for _, u := range plan.Units {
 			if !strings.HasPrefix(u, "niko-") {
 				continue
 			}

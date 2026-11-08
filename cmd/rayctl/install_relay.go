@@ -135,6 +135,9 @@ func installRelay(bundlePath, packages string) error {
 	// The host's commands too run apart from the terminal's Ctrl-C.
 	h.Run = func(name string, args ...string) ([]byte, error) { return commandApart(name, args...).CombinedOutput() }
 	plan := deploy.RelayPlan(deploy.DefaultBinaries)
+	if err := plan.Check(); err != nil {
+		return err
+	}
 	unitFile := "/etc/systemd/system/" + relayUnit
 	var forwardFile deploy.File
 	var files []deploy.File
