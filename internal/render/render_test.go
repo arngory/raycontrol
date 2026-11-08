@@ -924,3 +924,78 @@ func renderZoneHoldsNSName(t *testing.T, name, nsFormat string) {
 		t.Fatal("no front config for the others")
 	}
 }
+
+// Xray's routing goes by the destination the client names: no sniffing,
+// and no BitTorrent rule, which is the egress policy's in the kernel for
+// every profile (spec/egress-policy-v1.md §1). The private networks stay
+// out, the probe name goes to the subscription endpoint, and the configs
+// are the same whatever the policy: changing it restarts no Xray.
+func TestXrayNoSniffing(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true,
+		Settings: `{"target":"www.example.org:443"}`}); err != nil {
+		t.Fatal(err)
+	}
+	xray := func() map[string][]byte {
+		t.Helper()
+		m, err := render.CollectForRender(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, _, err := render.Render(m, render.DefaultPaths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string][]byte{}
+		for _, f := range files {
+			if strings.HasSuffix(f.Path, "/xray.json") {
+				out[f.Path] = f.Content
+			}
+		}
+		return out
+	}
+	before := xray()
+	if len(before) != 2 {
+		t.Fatalf("xray configs: %v", slices.Collect(maps.Keys(before)))
+	}
+	for path, b := range before {
+		var cfg struct {
+			Inbounds []map[string]any `json:"inbounds"`
+			Routing  struct {
+				Rules []map[string]any `json:"rules"`
+			} `json:"routing"`
+		}
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		for _, in := range cfg.Inbounds {
+			if _, ok := in["sniffing"]; ok {
+				t.Errorf("%s: inbound %v sniffs", path, in["tag"])
+			}
+		}
+		var private, probe bool
+		for _, r := range cfg.Routing.Rules {
+			if _, ok := r["protocol"]; ok {
+				t.Errorf("%s: a rule by sniffed protocol: %v", path, r)
+			}
+			ips, _ := r["ip"].([]any)
+			domains, _ := r["domain"].([]any)
+			private = private || r["outboundTag"] == "block" && slices.Contains(ips, any("10.0.0.0/8"))
+			probe = probe || r["outboundTag"] == "probe" && slices.Equal(domains, []any{"full:" + render.ProbeName})
+		}
+		if !private || !probe || len(cfg.Routing.Rules) != 2 {
+			t.Errorf("%s: rules %v", path, cfg.Routing.Rules)
+		}
+		if bytes.Contains(b, []byte("bittorrent")) || bytes.Contains(b, []byte("sniff")) {
+			t.Errorf("%s:\n%s", path, b)
+		}
+	}
+	on := true
+	if _, err := st.SetEgress(ctx, &on, &on); err != nil {
+		t.Fatal(err)
+	}
+	if after := xray(); !maps.EqualFunc(before, after, bytes.Equal) {
+		t.Error("the Xray configs follow the egress policy")
+	}
+}
