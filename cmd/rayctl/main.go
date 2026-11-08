@@ -152,8 +152,11 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
 var version = "dev"
 
 type cli struct {
-	c    nodev1connect.NodeServiceClient
-	json bool
+	c nodev1connect.NodeServiceClient
+	// backupClient is c for Backup, whose answer is the whole database
+	// (nil: c).
+	backupClient nodev1connect.NodeServiceClient
+	json         bool
 	// With -remote: the device and its DeviceService client.
 	identity *remoteIdentity
 	dev      devicev1connect.DeviceServiceClient
@@ -176,7 +179,7 @@ func main() {
 	if os.Geteuid() == 0 {
 		syscall.Umask(0o022)
 	}
-	c := &cli{c: api.NewUnixClient(*socket), json: *asJSON}
+	c := &cli{c: api.NewUnixClient(*socket), backupClient: api.NewUnixBackupClient(*socket), json: *asJSON}
 	// An update downloads ~50 MB, maybe through slow mirrors; its restart
 	// and rollback have their own time (Q-2).
 	timeout := 5 * time.Minute

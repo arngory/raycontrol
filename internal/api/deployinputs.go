@@ -39,6 +39,9 @@ func DeployInputs(r *nodev1.GetDeployInputsResponse) (deploy.Inputs, error) {
 	}
 	in := deploy.Inputs{FrontTCP: r.GetFrontTcp(), Front: r.GetFrontRendered(), FrontDNS: r.GetFrontDns(), DNSProbeKey: r.GetDnsProbeKey(),
 		SubscriptionPort: int(r.GetSubscriptionPort()), Warnings: r.GetWarnings()}
+	if n := len(in.Warnings); n > deploy.MaxWarnings {
+		in.Warnings = append(in.Warnings[:deploy.MaxWarnings:deploy.MaxWarnings], fmt.Sprintf("%d more of rayd's warnings not shown", n-deploy.MaxWarnings))
+	}
 	var err error
 	if in.HostPorts, err = portsOf(r.GetHostPorts()); err != nil {
 		return deploy.Inputs{}, fmt.Errorf("host ports: %w", err)

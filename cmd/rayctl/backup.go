@@ -36,7 +36,11 @@ func (c *cli) backup(ctx context.Context, args []string) error {
 	if err := needRoot(); err != nil {
 		return err
 	}
-	resp, err := c.c.Backup(ctx, connect.NewRequest(&nodev1.BackupRequest{}))
+	client := c.c
+	if c.backupClient != nil {
+		client = c.backupClient
+	}
+	resp, err := client.Backup(ctx, connect.NewRequest(&nodev1.BackupRequest{}))
 	if err != nil {
 		return err
 	}

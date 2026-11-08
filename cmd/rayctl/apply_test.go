@@ -51,7 +51,7 @@ func (f *fakeRayd) client(t *testing.T) nodev1connect.NodeServiceClient {
 	}
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return nodev1connect.NewNodeServiceClient(srv.Client(), srv.URL)
+	return api.NewNodeClient(srv.Client(), srv.URL, api.MaxAnswer)
 }
 
 // testHost is a host in a directory, its commands recorded.

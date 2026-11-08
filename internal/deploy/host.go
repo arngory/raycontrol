@@ -455,7 +455,7 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 	}
 	// Some are rayd's (its database's): without what a terminal acts on.
 	for i, w := range plan.Warnings {
-		if i == maxWarnings {
+		if i == MaxWarnings {
 			fmt.Fprintf(h.Out, "warning: %d more not shown\n", len(plan.Warnings)-i)
 			break
 		}
@@ -464,8 +464,9 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 	return nil
 }
 
-// maxWarnings bounds the warnings Apply prints.
-const maxWarnings = 100
+// MaxWarnings bounds the warnings Apply prints, and rayd's that rayctl takes
+// (api.DeployInputs).
+const MaxWarnings = 100
 
 // EnableNow enables and starts a unit, noting it for uninstall.
 func (h *Host) EnableNow(unit string) error {
