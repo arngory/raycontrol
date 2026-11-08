@@ -226,8 +226,9 @@ func checkUnit(unit, content string, users map[string]bool) error {
 				}
 				anchor, rel, dst := f[2], f[3], f[5]
 				src := path.Join(anchor, rel)
-				if path.IsAbs(rel) || path.Clean(rel) != rel || strings.HasPrefix(rel, "../") ||
-					!(anchor == renderedAnchor(render.DefaultPaths) && under(src, rendered) || anchor == path.Dir(RelayBundle) && src == RelayBundle) {
+				// A file rayd rendered, or the relay's bundle (root's).
+				from := anchor == renderedAnchor(render.DefaultPaths) && under(src, rendered) || anchor == path.Dir(RelayBundle) && src == RelayBundle
+				if !from || path.IsAbs(rel) || path.Clean(rel) != rel || strings.HasPrefix(rel, "../") {
 					return false
 				}
 				copies = append(copies, [2]string{f[4], dst})

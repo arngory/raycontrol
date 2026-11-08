@@ -190,14 +190,14 @@ func (u unit) process() Process {
 	pr := Process{Unit: u.name, Needs: u.needs}
 	for _, l := range u.service {
 		k, v, _ := strings.Cut(l, "=")
-		switch {
-		case k == "ExecStart":
+		switch k {
+		case "ExecStart":
 			pr.Args = strings.Fields(v)
-		case k == "ExecStartPre":
+		case "ExecStartPre":
 			if src, dst, ok := copyOf(v); ok {
 				pr.Copies = append(pr.Copies, [2]string{src, dst})
 			}
-		case k == "RuntimeDirectory":
+		case "RuntimeDirectory":
 			// Relative to /run, unless the paths are elsewhere.
 			if !path.IsAbs(v) {
 				v = path.Join("/run", v)

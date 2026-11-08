@@ -98,7 +98,7 @@ func readCredential(anchor, rel string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", anchor, err)
 	}
-	defer unix.Close(a)
+	defer func() { _ = unix.Close(a) }()
 	if err := ownedDir(a, 0, os.Geteuid()); err != nil {
 		return nil, fmt.Errorf("%s: %w", anchor, err)
 	}
@@ -154,7 +154,7 @@ func openBeneath(dir int, rel string) (int, error) {
 			fd, err = unix.Openat(at, part, flags, 0)
 		}
 		if at != dir {
-			unix.Close(at)
+			_ = unix.Close(at)
 		}
 		if err != nil {
 			return -1, err
@@ -176,7 +176,7 @@ func writeCredential(dst string, b []byte, uid, gid int) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", parent, err)
 	}
-	defer unix.Close(p)
+	defer func() { _ = unix.Close(p) }()
 	if err := ownedDir(p, 0, os.Geteuid()); err != nil {
 		return fmt.Errorf("%s: %w", parent, err)
 	}
@@ -184,7 +184,7 @@ func writeCredential(dst string, b []byte, uid, gid int) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", dir, err)
 	}
-	defer unix.Close(d)
+	defer func() { _ = unix.Close(d) }()
 	if err := ownedDir(d, 0, os.Geteuid(), uid); err != nil {
 		return fmt.Errorf("%s: %w", dir, err)
 	}
