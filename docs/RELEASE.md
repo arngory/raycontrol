@@ -102,8 +102,9 @@ CI проходит оба пути: job `upgrade (latest)` — с послед�
 - **Новый транспорт** со своим бинарником — новый файл в архиве (`tar` в `release.yml`) и строка в `nodeBinaries`
   (`cmd/rayctl/update.go`; бинарник data plane ставится в `/usr/local/libexec/raycontrol`). `rayctl` v0.15.0+ сам
   кладёт незнакомые ему файлы во временный каталог, а `rayctl apply` нового релиза их ставит (`RAYCONTROL_UPDATE_STAGE`).
-  `TestArchiveMembersInstalled` не даст выпустить файл, который `rayctl update` не ставит;
-  `TestArchiveStepping` требует записать новый файл и релиз, где он появился (для таблицы ступеней).
+  `TestArchiveMembersInstalled` (cmd/rayctl) не даст выпустить файл, который `rayctl update` не ставит;
+  `TestArchiveFiles` (internal/release) требует записать новый файл в `release.FilesSince` с релизом, где он
+  появился, а в заметках этого релиза — «v0.15.0 first» для нод старше v0.15.0.
 - **Формат не меняется**: архив плоский, обычные файлы, простые имена, не больше 64, `rayctl` и `VERSIONS` всегда
   есть, имя `raycontrol-linux-<arch>.tar.gz`, подпись — minisign над `SHA256SUMS` с trusted comment
   `raycontrol vX.Y.Z`. Это читают все `rayctl` с v0.15.0 и `bootstrap.sh`.
