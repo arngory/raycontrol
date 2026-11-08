@@ -263,7 +263,9 @@ func checkUnit(unit, content string, users map[string]bool) error {
 				}
 				anchor, rel, owner, dst := f[2], f[3], f[4], f[6]
 				src := path.Join(anchor, rel)
-				if path.IsAbs(rel) || path.Clean(rel) != rel || strings.HasPrefix(rel, "../") {
+				// Clean paths only: a destination ending in /.. or /. is
+				// refused here, not at the start (rayd credential would).
+				if path.IsAbs(rel) || path.Clean(rel) != rel || strings.HasPrefix(rel, "../") || path.Clean(anchor) != anchor || path.Clean(dst) != dst {
 					return false
 				}
 				switch anchor {
