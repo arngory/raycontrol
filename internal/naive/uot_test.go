@@ -374,7 +374,8 @@ func TestUoT(t *testing.T) {
 	eventually(t, "streams still counted", func() bool { return h.uot.count() == 0 })
 }
 
-// A user's streams: 64 at most, the next one reset; their slots come back.
+// A user's streams: uotPerUser at most, the next one reset; their slots
+// come back.
 func TestUoTStreamLimit(t *testing.T) {
 	h, connect := uotServer(t, time.Minute)
 	var dones []func()
@@ -415,8 +416,8 @@ func TestUoTStuckClient(t *testing.T) {
 	defer done()
 	go func() {
 		_, _ = s.Write(append([]byte{0}, socksAddr(netip.MustParseAddrPort("0.0.0.0:0"))...))
-		p := packet(append([]byte{0x00}, binary.BigEndian.AppendUint16(echo.Addr().AsSlice(), echo.Port())...), bytes.Repeat([]byte("z"), 4000))
-		for range 200 { // far more than the client's window
+		p := packet(append([]byte{0x00}, binary.BigEndian.AppendUint16(echo.Addr().AsSlice(), echo.Port())...), bytes.Repeat([]byte("z"), uotMaxAnswer))
+		for range 1000 { // far more than the client's window
 			if _, err := s.Write(p); err != nil {
 				return
 			}

@@ -26,11 +26,13 @@ const (
 	uotIdle       = 2 * time.Minute
 	uotMaxPayload = 65507 // a client's packet
 	// uotMaxAnswer bounds the answers passed on: sing reads a UoT packet
-	// into its UDP buffer (16 KiB, 8 KiB in with_low_memory builds, less
-	// the headroom), and a longer one ends the client's whole stream. Longer
-	// answers are dropped, as a path would drop them.
-	uotMaxAnswer  = 8000
-	uotPerUser    = 64
+	// into its copy buffer, the TUN's MTU and headroom (Niko: 1500 or 9000),
+	// and a longer one ends the client's whole stream. Longer answers are
+	// dropped, as a path with that MTU would drop them.
+	uotMaxAnswer = 1500
+	// One stream per UDP socket of an app (a browser holds tens), for all
+	// the devices that share the user's password.
+	uotPerUser    = 256
 	uotPerService = 4096
 	uotNames      = 64 // names resolved per stream, kept
 	uotNameMiss   = 30 * time.Second
