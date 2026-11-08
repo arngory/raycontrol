@@ -205,13 +205,14 @@ func writeCredential(dst string, b []byte, uid, gid int) error {
 			_ = unix.Unlinkat(p, tmp, 0)
 		}
 	}()
-	if err := unix.Fchown(fd, uid, gid); err != nil {
+	// Written and its mode set while it is root's; the service user's last.
+	if _, err := f.Write(b); err != nil {
 		return err
 	}
 	if err := unix.Fchmod(fd, 0o400); err != nil {
 		return err
 	}
-	if _, err := f.Write(b); err != nil {
+	if err := unix.Fchown(fd, uid, gid); err != nil {
 		return err
 	}
 	if err := unix.Renameat(p, tmp, d, name); err != nil {
