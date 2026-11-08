@@ -1,7 +1,7 @@
 # egress-policy-v1: BitTorrent и SMTP (порт 25) — одна политика на ноду
 
 Статус: **согласован с владельцем** (2026-11-08), решения — §9. Сервер — raycontrol v0.21.0 (номер предварительный: v0.20.0 занята naive UoT).
-niko-server (v0.14.0), форк Xray (`a4a3dff`) и Niko не меняются.
+niko-server, форк Xray и Niko ради неё не меняются (в том же выпуске v0.21.0 закреплены niko-server v0.14.1 и Xray `88b1d7b` — по другим причинам).
 
 Зачем:
 - Сейчас BitTorrent режет только выход Xray, по сниффингу открытого рукопожатия (`internal/render/render.go:1215`).
@@ -208,7 +208,7 @@ naive, niko-server и форк Xray — без изменений, у Xray ме�
 
 - raycontrol v0.21.0 (номер предварительный): `rayctl egress`, цепочка `egress`, `Snapshot.egress`, Xray без
   сниффинга и правила BitTorrent, миграция `egress_bittorrent=on` для нод с Xray, метрики §6.
-- niko-server v0.14.0, Xray `a4a3dff`, Niko — без изменений.
+- niko-server, Xray, Niko — ради политики без изменений.
 - Нода до v0.21.0: `rayctl egress` нет, BitTorrent режет только Xray, как в [15-traffic](../15-traffic.md).
 
 ## 9. Решения владельца
