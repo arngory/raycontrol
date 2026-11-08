@@ -345,8 +345,12 @@ func (h *Host) Check(ctx context.Context, o Options) []Result {
 		// The kernel lets a process open ICMP datagram sockets when one of
 		// its groups is in the range: naive's is the service's own.
 		groups := strings.Join(strings.Fields(h.read("/proc/sys/net/ipv4/ping_group_range")), " ")
-		_, ok := deploy.PingGroups(groups)
-		adv("ICMP sockets", ok, deploy.PingGroupRange+" "+groups,
+		detail := deploy.PingGroupRange + " " + groups
+		_, ok, err := deploy.PingGroups(groups)
+		if err != nil {
+			detail = err.Error() + ": whether naive's ICMP sockets open cannot be told"
+		}
+		adv("ICMP sockets", ok, detail,
 			"naive carries ICMP (icmp=on), and its sockets do not open without its group in the range: rayctl apply widens it to the data plane's groups, 9100-9179")
 	}
 	addrs, _ := h.Addrs()
