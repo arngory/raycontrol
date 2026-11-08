@@ -91,7 +91,8 @@ func TestBuild(t *testing.T) {
 	}
 	if !strings.Contains(path, "PathExists=/var/lib/raycontrol/update-request") ||
 		!strings.Contains(svc, "ExecStart=/usr/local/bin/rayctl update -request") || strings.Contains(svc, "User=") ||
-		!strings.Contains(svc, "Type=oneshot") || strings.Contains(svc, "[Install]") {
+		!strings.Contains(svc, "Type=oneshot") || strings.Contains(svc, "[Install]") ||
+		!strings.Contains(svc, "ExecStopPost=-/usr/local/bin/rayctl update -request-ended") || !strings.Contains(svc, "After=network-online.target rayd.service") {
 		t.Fatalf("update units:\n%s\n%s", path, svc)
 	}
 	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "olc") {

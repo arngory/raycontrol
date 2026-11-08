@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -15,92 +16,120 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/nodeupdate"
 )
 
-// updateRequest runs an update the node asked for (spec/node-update-v1.md
-// §3): the root unit raycontrol-update.service starts it when rayd has
-// written a request. The request is checked again here, rayd being the
-// unprivileged side: well formed, signed releases only, never back, and
-// its kind allowed by the policy now. The update itself is rayctl update's,
-// by the rayctl installed (which hands it to the release's own); its
-// outcome goes to the status file rayd reads.
-func (c *cli) updateRequest(ctx context.Context, requestFile, statusFile, rayctl string) error {
-	r, ok, err := nodeupdate.TakeRequest(requestFile)
+// requests is where rayctl update -request finds what it runs; the node's
+// is nodeRequests.
+type requests struct {
+	request, status, policy, result string
+	rayctl                          string       // the installed rayctl: it does the update
+	ready                           func() error // whether the node can be updated
+	nodeVersion                     func() string
+}
+
+func nodeRequests() requests {
+	return requests{request: nodeupdate.RequestFile, status: nodeupdate.StatusFile, policy: nodeupdate.PolicyFile, result: nodeupdate.ResultFile,
+		rayctl: "/usr/local/bin/rayctl", ready: func() error { return updatable(deploy.DB, deploy.RelayBundle) }, nodeVersion: raydVersion}
+}
+
+// run is an update the node asked for (spec/node-update-v1.md §3): the
+// root unit raycontrol-update.service starts it when rayd has written a
+// request. rayd being the unprivileged side, the request is checked again
+// here: well formed and fresh, never back, auto only a patch, and its kind
+// allowed by root's own policy file, which rayd cannot write. Its status
+// is written before the request goes, so that rayd never sees neither.
+// The update itself is rayctl update's, by the rayctl installed (which
+// hands it to the release's own); the outcome it writes
+// (nodeupdate.ResultEnv) goes to the status file rayd reads.
+func (q requests) run() error {
+	now := time.Now()
+	r, ok, err := nodeupdate.ReadRequest(q.request)
 	if !ok {
 		fmt.Println("no update request")
 		return nil
 	}
-	st := nodeupdate.Status{ID: r.ID, From: version, To: r.Version, Target: r.Version, By: r.By, Kind: r.Kind, Requested: r.At, Started: time.Now().UTC()}
-	refuse := func(err error) error {
-		st.State, st.Error, st.Ended = nodeupdate.Failed, err.Error(), time.Now().UTC()
-		if werr := nodeupdate.WriteStatus(statusFile, st); werr != nil {
-			return errors.Join(err, werr)
-		}
-		return err
+	st := nodeupdate.Status{ID: r.ID, From: version, To: r.Version, Target: r.Version, By: r.By, Kind: r.Kind, Requested: r.At, Started: now.UTC()}
+	if err == nil {
+		err = r.Check(version, now)
+	}
+	if err == nil {
+		err = nodeupdate.ReadPolicy(q.policy).Allows(r, now)
+	}
+	if err == nil {
+		err = q.ready()
 	}
 	if err != nil {
-		return refuse(err)
+		st.State, st.Error, st.Ended, st.Untouched = nodeupdate.Failed, err.Error(), now.UTC(), true
+	} else {
+		st.State = nodeupdate.Running
 	}
-	if err := r.Check(version); err != nil {
-		return refuse(err)
+	werr := nodeupdate.WriteStatus(q.status, st)
+	if rerr := nodeupdate.RemoveRequest(q.request); werr == nil {
+		werr = rerr
 	}
-	// The policy as rayd has it now: a request written before root turned
-	// it off does not run.
-	pol, err := c.c.GetUpdateStatus(ctx, connect.NewRequest(&nodev1.GetUpdateStatusRequest{}))
 	if err != nil {
-		return refuse(fmt.Errorf("rayd: %w", err))
+		return errors.Join(err, werr)
 	}
-	switch {
-	case r.Kind == nodeupdate.Remote && pol.Msg.Remote != "on":
-		return refuse(errors.New("remote updates are off on this node"))
-	case r.Kind == nodeupdate.Auto && pol.Msg.Auto != "patch":
-		return refuse(errors.New("auto updates are off on this node"))
-	}
-	st.State = nodeupdate.Running
-	if err := nodeupdate.WriteStatus(statusFile, st); err != nil {
-		return err
+	if werr != nil {
+		return werr
 	}
 	fmt.Printf("update to %s asked for by %s (%s)\n", r.Version, r.By, r.Kind)
+
+	_ = os.Remove(q.result)
 	tail := &tailWriter{max: 40}
-	cmd := exec.Command(rayctl, "update", "-yes", "-version", r.Version) //nolint:gosec // G204: the installed rayctl
+	cmd := exec.Command(q.rayctl, "update", "-yes", "-version", r.Version) //nolint:gosec // G204: the installed rayctl
 	cmd.Stdout, cmd.Stderr = io.MultiWriter(os.Stdout, tail), io.MultiWriter(os.Stderr, tail)
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), nodeupdate.ResultEnv+"="+q.result)
 	runErr := cmd.Run()
 	st.Ended = time.Now().UTC()
-	if v := c.nodeVersion(ctx); v != "" {
-		st.To = v
+	if res, ok := nodeupdate.ReadResult(q.result); ok {
+		st.State, st.Error, st.Untouched = res.State, res.Error, res.Untouched
+		st.To = cmp.Or(res.Version, q.nodeVersion())
+	} else {
+		// No word from the update (a rayctl that died): its exit and its
+		// last lines.
+		switch {
+		case runErr == nil:
+			st.State = nodeupdate.Done
+		case tail.has("the previous version runs again"):
+			st.State, st.Error = nodeupdate.RolledBack, tail.reason(runErr)
+		default:
+			st.State, st.Error = nodeupdate.Failed, tail.reason(runErr)
+		}
+		st.To = q.nodeVersion()
 	}
-	switch {
-	case runErr == nil:
-		st.State = nodeupdate.Done
-	case tail.has("the previous version runs again"):
-		st.State, st.Error = nodeupdate.RolledBack, tail.reason(runErr)
-	default:
-		st.State, st.Error = nodeupdate.Failed, tail.reason(runErr)
-	}
-	if err := nodeupdate.WriteStatus(statusFile, st); err != nil {
+	_ = os.Remove(q.result)
+	if err := nodeupdate.WriteStatus(q.status, st); err != nil {
 		return errors.Join(runErr, err)
 	}
 	return runErr
 }
 
-// nodeVersion is the version rayd reports once it answers again, "" if it
-// does not within a minute.
-func (c *cli) nodeVersion(ctx context.Context) string {
-	for range 60 {
-		st, err := c.c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
-		if err == nil {
-			return st.Msg.Version
-		}
-		select {
-		case <-ctx.Done():
-			return ""
-		case <-time.After(time.Second):
-		}
+// raydVersion is the version of the rayd installed, "" when it does not
+// say.
+func raydVersion() string {
+	out, err := exec.Command(deploy.DefaultBinaries.Rayd, "version").Output() //nolint:gosec // G204: a fixed path
+	v := strings.TrimSpace(string(out))
+	if err != nil || len(v) > 40 || nodeupdate.Printable(v) != v {
+		return ""
 	}
-	return ""
+	return v
+}
+
+// markInterrupted is the update unit's ExecStopPost: an update whose
+// runner did not get to write how it ended (killed by the unit's timeout,
+// a shutdown) failed.
+func markInterrupted(statusFile string) error {
+	st := nodeupdate.ReadStatus(statusFile)
+	if st.State != nodeupdate.Running {
+		return nil
+	}
+	st.State, st.Ended = nodeupdate.Failed, time.Now().UTC()
+	st.Error = "interrupted (" + cmp.Or(os.Getenv("SERVICE_RESULT"), "killed") + "): journalctl -u " + nodeupdate.ServiceUnit
+	return nodeupdate.WriteStatus(statusFile, st)
 }
 
 // tailWriter keeps the last lines written.
@@ -158,37 +187,55 @@ func (t *tailWriter) reason(err error) string {
 	return err.Error()
 }
 
-// updatePolicy is rayctl update remote|auto|status.
+// updatePolicy is rayctl update remote|auto|status. The policy is a file
+// of root's (nodeupdate.PolicyFile) that rayd reads and cannot change.
 func (c *cli) updatePolicy(ctx context.Context, args []string) error {
-	switch args[0] {
-	case "status":
+	return c.updatePolicyAt(ctx, args, nodeupdate.PolicyFile, "/etc/systemd/system/"+nodeupdate.PathUnit, needRoot)
+}
+
+func (c *cli) updatePolicyAt(ctx context.Context, args []string, policyFile, unit string, root func() error) error {
+	if args[0] == "status" {
+		if len(args) != 1 {
+			return errUsage
+		}
 		return c.updateStatus(ctx)
+	}
+	p := nodeupdate.ReadPolicy(policyFile)
+	switch args[0] {
 	case "remote":
 		if len(args) != 2 || (args[1] != "on" && args[1] != "off") {
 			return errUsage
 		}
-		if _, err := c.c.SetUpdatePolicy(ctx, connect.NewRequest(&nodev1.SetUpdatePolicyRequest{Remote: args[1]})); err != nil {
-			return err
-		}
-		if args[1] == "on" {
-			fmt.Println("admin devices may now update this node to a signed release, not an older one (rayctl update remote off)")
-		}
-		return nil
+		p.Remote = args[1]
 	case "auto":
 		fs := flag.NewFlagSet("update auto", flag.ContinueOnError)
-		window := fs.String("window", "", "HH:MM-HH:MM in the node's time (default "+nodeupdate.DefaultWindow+")")
+		window := fs.String("window", "", "HH:MM-HH:MM in the node's time, 30 min at least (default "+nodeupdate.DefaultWindow+")")
 		if len(args) < 2 || (args[1] != "off" && args[1] != "patch") || fs.Parse(args[2:]) != nil || fs.NArg() != 0 {
 			return errUsage
 		}
-		if _, err := c.c.SetUpdatePolicy(ctx, connect.NewRequest(&nodev1.SetUpdatePolicyRequest{Auto: args[1], Window: *window})); err != nil {
-			return err
+		p.Auto = args[1]
+		if *window != "" {
+			p.Window = *window
 		}
-		if args[1] == "patch" {
-			fmt.Println("rayd checks GitHub for releases every ~6 h and updates to a newer patch release of this minor version in the window (rayctl update status)")
-		}
-		return nil
+	default:
+		return errUsage
 	}
-	return errUsage
+	if err := root(); err != nil {
+		return err
+	}
+	if err := nodeupdate.WritePolicy(policyFile, p); err != nil {
+		return err
+	}
+	switch {
+	case args[0] == "remote" && p.Remote == "on":
+		fmt.Println("admin devices may now update this node to a signed release newer than it (rayctl update remote off)")
+	case args[0] == "auto" && p.Auto == "patch":
+		fmt.Printf("rayd checks GitHub for releases every ~6 h and updates to a newer patch release of this minor version in the window %s, node time (rayctl update status)\n", p.Window)
+	}
+	if _, err := os.Stat(unit); err != nil && (p.Remote == "on" || p.Auto == "patch") {
+		fmt.Println("the update unit is not installed yet: rayctl apply")
+	}
+	return nil
 }
 
 func (c *cli) updateStatus(ctx context.Context) error {
@@ -200,17 +247,20 @@ func (c *cli) updateStatus(ctx context.Context) error {
 	if c.json {
 		return c.print(m, nil)
 	}
-	fmt.Printf("installed  %s\n", m.Installed)
+	// What rayd says, shown as text: no control characters reach the
+	// terminal.
+	p := nodeupdate.Printable
+	fmt.Printf("installed  %s\n", p(m.Installed))
 	if m.Latest != "" {
-		fmt.Printf("latest     %s\n", m.Latest)
+		fmt.Printf("latest     %s\n", p(m.Latest))
 	}
-	fmt.Printf("remote     %s\nauto       %s (window %s, %s)\n", m.Remote, m.Auto, m.Window, m.Timezone)
+	fmt.Printf("remote     %s\nauto       %s (window %s, %s)\n", p(m.Remote), p(m.Auto), p(m.Window), p(m.Timezone))
 	s := m.Status
 	if s == nil || s.State == nodeupdate.Idle {
 		fmt.Println("last       none")
 		return nil
 	}
-	line := fmt.Sprintf("last       %s: %s → %s, by %s", s.State, s.From, s.To, s.By)
+	line := fmt.Sprintf("last       %s: %s → %s, by %s", p(s.State), p(s.From), p(cmp.Or(s.To, "?")), p(s.By))
 	if s.EndedAt != 0 {
 		line += ", " + time.Unix(s.EndedAt, 0).UTC().Format(time.RFC3339)
 	} else if s.RequestedAt != 0 {
@@ -218,7 +268,7 @@ func (c *cli) updateStatus(ctx context.Context) error {
 	}
 	fmt.Println(line)
 	if s.Error != "" {
-		fmt.Printf("error      %s\n", s.Error)
+		fmt.Printf("error      %s\n", p(s.Error))
 	}
 	return nil
 }

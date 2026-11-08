@@ -201,7 +201,7 @@ for d in "${steps[@]}"; do
 	log "$distro: rayctl update -from the release in $d, by the rayctl on the node ($(x rayctl status | grep -m1 '^version' || true))"
 	out="$(xk /usr/local/bin/rayctl update -from "/opt/step/$d" -yes 2>&1)" || fail "rayctl update to the release in $d: $out"
 	echo "$out" | grep -E '^(release|raycontrol|installed|rolling|update)' || true
-	if [[ -n ${EXPECT_HANDOFF:-} ]] && ! grep -q 'its own rayctl updates the node' <<<"$out"; then
+	if [[ -n ${EXPECT_HANDOFF:-} ]] && ! grep -q 'updates the node, handed over by the rayctl of' <<<"$out"; then
 		fail "the update to the release in $d was not handed to its rayctl"
 	fi
 	wait_active rayd.service rayspa.service niko-inner.service niko-dns.service niko-mdns.service niko-hy2o.service niko-front.service

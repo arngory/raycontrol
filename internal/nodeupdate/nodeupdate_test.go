@@ -1,16 +1,19 @@
 package nodeupdate
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestRequestCheck(t *testing.T) {
-	ok := Request{ID: NewID(), Kind: Remote, Version: "v0.19.1", By: "alice/phone (remote)"}
-	if err := ok.Check("v0.19.0"); err != nil {
+	now := time.Now()
+	ok := Request{ID: NewID(), Kind: Remote, Version: "v0.19.1", By: "alice/phone (remote)", At: now.Add(-time.Second)}
+	if err := ok.Check("v0.19.0", now); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {
@@ -25,53 +28,161 @@ func TestRequestCheck(t *testing.T) {
 		{func(r Request) Request { r.Version = "v0.19.0"; return r }, "never goes back"},
 		{func(r Request) Request { r.Kind = Auto; r.Version = "v0.20.0"; return r }, "patch releases"},
 		{func(r Request) Request { r.Kind = Auto; r.Version = "latest"; return r }, "patch releases"},
+		{func(r Request) Request { r.By = ""; return r }, "no one"},
+		{func(r Request) Request { r.By = "alice\nraycontrol v9.9.9 is running"; return r }, "no one"},
+		{func(r Request) Request { r.By = "\x1b[2Jalice"; return r }, "no one"},
+		{func(r Request) Request { r.By = strings.Repeat("a", maxField+1); return r }, "no one"},
+		{func(r Request) Request { r.At = now.Add(-Stale - time.Minute); return r }, "too old"},
+		{func(r Request) Request { r.At = now.Add(time.Hour); return r }, "too old"},
 	} {
-		if err := c.r(ok).Check("v0.19.0"); err == nil || !strings.Contains(err.Error(), c.want) {
+		if err := c.r(ok).Check("v0.19.0", now); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%+v: %v, want %q", c.r(ok), err, c.want)
 		}
 	}
-	if err := (Request{ID: NewID(), Kind: Remote, Version: "latest"}).Check("v0.19.0"); err != nil {
+	if err := (Request{ID: NewID(), Kind: Remote, Version: "latest", By: "alice/phone (remote)", At: now}).Check("v0.19.0", now); err != nil {
 		t.Errorf("latest: %v", err)
 	}
-	if err := (Request{ID: NewID(), Kind: Auto, Version: "v0.19.4"}).Check("v0.19.0"); err != nil {
+	if err := (Request{ID: NewID(), Kind: Auto, Version: "v0.19.4", By: "auto", At: now}).Check("v0.19.0", now); err != nil {
 		t.Errorf("a patch: %v", err)
 	}
 }
 
+// Root's policy, not rayd's word: off unless root's file says on, an
+// auto update in the window only.
+func TestPolicy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sub", "policy.json")
+	if p := ReadPolicy(path); p != DefaultPolicy() {
+		t.Fatalf("no file: %+v", p)
+	}
+	at := time.Date(2026, 11, 8, 3, 10, 0, 0, time.UTC)
+	remote, auto := Request{Kind: Remote}, Request{Kind: Auto}
+	if DefaultPolicy().Allows(remote, at) == nil || DefaultPolicy().Allows(auto, at) == nil {
+		t.Fatal("the default allows")
+	}
+	for _, bad := range []Policy{{"yes", "off", DefaultWindow}, {"on", "minor", DefaultWindow}, {"on", "off", "3-5"}, {"on", "off", "03:00-03:10"}} {
+		if err := WritePolicy(path, bad); err == nil {
+			t.Errorf("%+v written", bad)
+		}
+	}
+	p := Policy{Remote: "on", Auto: "patch", Window: "23:30-01:00"}
+	if err := WritePolicy(path, p); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadPolicy(path); got != p {
+		t.Fatalf("read %+v", got)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o644 {
+		t.Errorf("mode %v", fi.Mode())
+	}
+	if err := p.Allows(remote, at); err != nil {
+		t.Error(err)
+	}
+	if err := p.Allows(auto, at); err == nil {
+		t.Error("auto outside the window")
+	}
+	night := time.Date(2026, 11, 8, 0, 30, 0, 0, time.UTC)
+	if err := p.Allows(auto, night); err != nil {
+		t.Error(err)
+	}
+	if err := p.Allows(auto, time.Date(2026, 11, 8, 1, 3, 0, 0, time.UTC)); err != nil {
+		t.Errorf("written at the end of the window: %v", err)
+	}
+	os.WriteFile(path, []byte(`{"remote":"on","auto":"patch","window":"nope"}`), 0o644)
+	if got := ReadPolicy(path); got != DefaultPolicy() {
+		t.Errorf("a broken file: %+v", got)
+	}
+}
+
 // The request lives in rayd's directory: root reads it without following
-// a link, takes it away, and refuses what is no regular file.
+// a link and refuses what is no regular file; whatever is there goes.
 func TestRequestFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "update-request")
-	r := Request{ID: NewID(), Kind: Remote, Version: "latest", By: "alice/phone", At: time.Now().UTC().Truncate(time.Second)}
-	if err := WriteRequest(path, r); err != nil {
+	now := time.Now().UTC().Truncate(time.Second)
+	r := Request{ID: NewID(), Kind: Remote, Version: "latest", By: "alice/phone", At: now}
+	if err := WriteRequest(path, r, now); err != nil {
 		t.Fatal(err)
 	}
 	if got, ok := PeekRequest(path); !ok || got != r {
 		t.Fatalf("peek %+v %v", got, ok)
 	}
-	got, ok, err := TakeRequest(path)
-	if err != nil || !ok || got != r {
-		t.Fatalf("take %+v %v %v", got, ok, err)
+	// One waits: another does not replace it; a stale one is replaced.
+	other := Request{ID: NewID(), Kind: Auto, Version: "v0.19.1", By: "auto", At: now}
+	if err := WriteRequest(path, other, now); !errors.Is(err, ErrWaiting) {
+		t.Fatalf("over a waiting one: %v", err)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("the request stays after it was taken")
+	if err := WriteRequest(path, other, now.Add(Stale)); err != nil {
+		t.Fatalf("over a stale one: %v", err)
 	}
-	if _, ok, err := TakeRequest(path); ok || err != nil {
+	if got, _ := PeekRequest(path); got != other {
+		t.Fatalf("after %+v", got)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, ".update-request.*")); len(left) != 0 {
+		t.Errorf("temporary files left: %v", left)
+	}
+	got, ok, err := ReadRequest(path)
+	if err != nil || !ok || got != other {
+		t.Fatalf("read %+v %v %v", got, ok, err)
+	}
+	if err := RemoveRequest(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := ReadRequest(path); ok || err != nil {
 		t.Errorf("none: %v %v", ok, err)
 	}
 	secret := filepath.Join(dir, "secret")
 	os.WriteFile(secret, []byte(`{"id":"0a","kind":"remote","version":"latest"}`), 0o600)
 	os.Symlink(secret, path)
-	if _, ok, err := TakeRequest(path); !ok || err == nil {
+	if _, ok, err := ReadRequest(path); !ok || err == nil {
 		t.Errorf("a link followed: %v %v", ok, err)
 	}
+	RemoveRequest(path)
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Error("the link stays")
 	}
+	if _, err := os.Stat(secret); err != nil {
+		t.Error("the link's target went")
+	}
 	os.WriteFile(path, []byte(strings.Repeat("x", maxFile+1)), 0o600)
-	if _, _, err := TakeRequest(path); err == nil {
+	if _, _, err := ReadRequest(path); err == nil {
 		t.Error("a huge request taken")
+	}
+	os.Remove(path)
+	// A directory planted there goes too, or the path unit would fire
+	// until systemd gives up on it.
+	os.MkdirAll(filepath.Join(path, "a"), 0o700)
+	os.Symlink(secret, filepath.Join(path, "a", "l"))
+	if _, ok, err := ReadRequest(path); !ok || err == nil {
+		t.Errorf("a directory: %v %v", ok, err)
+	}
+	if err := RemoveRequest(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Error("the directory stays")
+	}
+	if _, err := os.Stat(secret); err != nil {
+		t.Error("a link's target in it went")
+	}
+}
+
+func TestResultFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "result.json")
+	if _, ok := ReadResult(path); ok {
+		t.Fatal("no file")
+	}
+	r := Result{State: RolledBack, Version: "v0.19.0", Error: strings.Repeat("e", 2*maxError)}
+	if err := WriteResult(path, r); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := ReadResult(path)
+	if !ok || got.State != RolledBack || got.Version != "v0.19.0" || len(got.Error) > maxError+len("…") {
+		t.Fatalf("read %+v %v", got, ok)
+	}
+	os.WriteFile(path, []byte(`{"state":"great"}`), 0o600)
+	if _, ok := ReadResult(path); ok {
+		t.Error("an unknown state taken")
 	}
 }
 
@@ -98,6 +209,14 @@ func TestStatusFile(t *testing.T) {
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o644 {
 		t.Errorf("mode %v", fi.Mode())
 	}
+	// However long the error, rayd reads the status back.
+	s.State, s.Error, s.By = Failed, strings.Repeat("é", maxFile), strings.Repeat("b", maxFile)
+	if err := WriteStatus(path, s); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadStatus(path); got.State != Failed || !utf8.ValidString(got.Error) {
+		t.Errorf("a long error: %+v", got)
+	}
 }
 
 func TestBusy(t *testing.T) {
@@ -108,8 +227,15 @@ func TestBusy(t *testing.T) {
 	if !Busy(Status{State: Running, Started: now.Add(-time.Minute)}, Request{}, false, now) {
 		t.Error("running is not busy")
 	}
-	if Busy(Status{State: Running, Started: now.Add(-3 * time.Hour)}, Request{}, false, now) {
+	dead := Status{State: Running, Started: now.Add(-Stale)}
+	if Busy(dead, Request{}, false, now) {
 		t.Error("a dead run is busy")
+	}
+	if s := Settled(dead, now); s.State != Failed || !strings.Contains(s.Error, "interrupted") {
+		t.Errorf("a dead run: %+v", s)
+	}
+	if s := Settled(Status{State: Running, Started: now}, now); s.State != Running {
+		t.Errorf("a run: %+v", s)
 	}
 	if !Busy(Status{State: Idle}, Request{At: now}, true, now) {
 		t.Error("a waiting request is not busy")
@@ -147,9 +273,27 @@ func TestPatchAndWindow(t *testing.T) {
 		{"23:30-01:00", at(1, 0), false},
 		{"3:00-5:00", at(3, 30), false},
 		{"03:00-03:00", at(3, 0), false},
+		{"03:00-03:20", at(3, 10), false}, // shorter than MinWindow
+		{"23:50-00:20", at(0, 10), true},
 	} {
 		if got := InWindow(c.t, c.w); got != c.want {
 			t.Errorf("InWindow(%s, %s) = %v", c.t.Format("15:04"), c.w, got)
+		}
+	}
+	for _, c := range []struct {
+		w    string
+		t    time.Time
+		want time.Duration
+	}{
+		{"03:00-05:00", at(3, 0), 2 * time.Hour},
+		{"03:00-05:00", at(4, 30), 30 * time.Minute},
+		{"03:00-05:00", at(5, 0), 0},
+		{"23:30-01:00", at(23, 30), 90 * time.Minute},
+		{"23:30-01:00", at(0, 45), 15 * time.Minute},
+		{"23:30-01:00", at(22, 0), 0},
+	} {
+		if got := Left(c.t, c.w); got != c.want {
+			t.Errorf("Left(%s, %s) = %v, want %v", c.t.Format("15:04"), c.w, got, c.want)
 		}
 	}
 }

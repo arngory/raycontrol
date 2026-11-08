@@ -112,13 +112,11 @@ service NodeService {
   // go).
   rpc SetAppMirror(SetAppMirrorRequest) returns (SetAppMirrorResponse);
   // The node's update by request (spec/node-update-v1.md): an admin asks
-  // for a signed release, not older than the node, while root has turned
-  // remote updates on (rayctl update remote on); a root unit runs it.
+  // for a signed release, newer than the node, while root has turned
+  // remote updates on (rayctl update remote on, a file of root's that rayd
+  // only reads); a root unit runs it.
   rpc StartUpdate(StartUpdateRequest) returns (StartUpdateResponse);
   rpc GetUpdateStatus(GetUpdateStatusRequest) returns (GetUpdateStatusResponse);
-  // Root on the node only: remote updates, the auto update of patch
-  // releases and its window.
-  rpc SetUpdatePolicy(SetUpdatePolicyRequest) returns (SetUpdatePolicyResponse);
   // SetDebug opens the debug window for a while or closes it: rayd, rayspa
   // and niko-server log at debug level until it ends by itself
   // (docs/09-observability.md §3). Root on the node only.
@@ -637,13 +635,14 @@ message GetUpdateStatusResponse {
   string remote = 4;    // "on" or "off": StartUpdate is taken
   string auto = 5;      // "off" or "patch"
   string window = 6;    // the auto update's window, "HH:MM-HH:MM" in the node's time
-  string timezone = 7;  // the node's time zone ("UTC", "Europe/Berlin")
+  string timezone = 7;  // the node's time zone now: abbreviation and offset ("CET +01:00", "UTC +00:00")
 }
 // UpdateStatus is the last update by request, or the one under way.
 message UpdateStatus {
   string id = 1;
   // idle, requested, running, done, rolled_back (it failed, the previous
-  // version runs), failed (refused, or failed without a rollback).
+  // version runs), failed (refused, failed without a rollback, or
+  // interrupted: no outcome within an hour).
   string state = 2;
   string from = 3;
   string to = 4;    // the version asked for ("latest" until it runs), then installed
@@ -655,9 +654,3 @@ message UpdateStatus {
   int64 ended_at = 10;
   string target = 11; // the version asked for: "latest" or vX.Y.Z
 }
-message SetUpdatePolicyRequest {
-  string remote = 1; // "on" or "off"; empty leaves it
-  string auto = 2;   // "off" or "patch"; empty leaves it
-  string window = 3; // "HH:MM-HH:MM"; empty leaves it
-}
-message SetUpdatePolicyResponse {}

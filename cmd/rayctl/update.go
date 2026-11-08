@@ -87,7 +87,7 @@ var nodeBinaries = map[string]string{
 // update replaces the node's binaries with a verified release, restarts
 // what runs them and applies the new version's deployment; if the node does
 // not come back healthy, the previous binaries return (R4-12).
-func (c *cli) update(ctx context.Context, args []string) error {
+func (c *cli) update(ctx context.Context, args []string) (err error) {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	want := fs.String("version", "latest", "release to install: latest or vX.Y.Z (an older one only when named)")
 	check := fs.Bool("check", false, "only say whether a newer release exists")
@@ -99,6 +99,7 @@ func (c *cli) update(ctx context.Context, args []string) error {
 	local := fs.String("local", "", "binaries from this directory, not verified: for tests only")
 	noHandoff := fs.Bool("no-handoff", false, "update with this rayctl, not the release's own (when the new one cannot run here)")
 	request := fs.Bool("request", false, "run the update the node asked for (raycontrol-update.service: spec/node-update-v1.md)")
+	requestEnded := fs.Bool("request-ended", false, "mark an update by request whose runner was killed as failed (the unit's ExecStopPost)")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
@@ -109,18 +110,44 @@ func (c *cli) update(ctx context.Context, args []string) error {
 	if err := needRoot(); err != nil {
 		return err
 	}
+	// The request goes whatever this node is (rayd's word is checked
+	// there): left in place, the path unit would fire again and again.
+	switch {
+	case *requestEnded:
+		return markInterrupted(nodeupdate.StatusFile)
+	case *request:
+		return nodeRequests().run()
+	}
 	if err := updatable(deploy.DB, deploy.RelayBundle); err != nil {
 		return err
-	}
-	if *request {
-		return c.updateRequest(ctx, nodeupdate.RequestFile, nodeupdate.StatusFile, "/usr/local/bin/rayctl")
 	}
 	if *rollback {
 		carry := carryMust
 		if *noCarry {
 			carry = carrySkip
 		}
-		return c.rollbackUpdate(ctx, *yes, carry)
+		to, _ := os.ReadFile(filepath.Join(previousDir, "VERSION")) //nolint:gosec // G304: a fixed path
+		if err := c.rollbackUpdate(ctx, *yes, carry); err != nil {
+			return err
+		}
+		noteRollback(nodeupdate.StatusFile, installed, strings.TrimSpace(string(to)))
+		return nil
+	}
+	if os.Getenv(handoffEnv) == "1" {
+		fmt.Printf("rayctl %s updates the node, handed over by the rayctl of %s\n", version, installed)
+	}
+	// For an update by request: how it ended, in the file the runner
+	// gave (frozen, docs/RELEASE.md), unless the release's rayctl did it.
+	var (
+		newVersion      string
+		touched, handed bool
+	)
+	if res := os.Getenv(nodeupdate.ResultEnv); res != "" && !*check {
+		defer func() {
+			if !handed {
+				writeResult(res, err, touched, installed, newVersion)
+			}
+		}()
 	}
 
 	if err := os.MkdirAll(deploy.JournalDir, 0o700); err != nil {
@@ -133,7 +160,6 @@ func (c *cli) update(ctx context.Context, args []string) error {
 	defer func() { _ = os.RemoveAll(stage) }()
 
 	// The release: verified, or (tests) taken as it is.
-	var newVersion string
 	switch {
 	case *local != "":
 		for name := range nodeBinaries {
@@ -152,7 +178,25 @@ func (c *cli) update(ctx context.Context, args []string) error {
 			r, err = release.Local(*from, arch, releaseKey)
 		} else {
 			f := &release.Fetcher{Mirrors: mirrors(), Log: func(format string, a ...any) { fmt.Printf(format+"\n", a...) }}
-			r, err = f.Fetch(ctx, *want, arch, releaseKey)
+			v := *want
+			// Which release latest is first, from its signed SHA256SUMS:
+			// no archive downloaded for nothing.
+			if v == "latest" && !*force {
+				if l, lerr := f.Latest(ctx, releaseKey); lerr == nil {
+					switch {
+					case l == installed:
+						fmt.Printf("raycontrol %s is installed, the newest release\n", installed)
+						return nil
+					case release.Newer(installed, l):
+						return fmt.Errorf("installed %s is newer than the latest release %s; rayctl update -version %s goes back", installed, l, l)
+					case *check:
+						fmt.Printf("installed %s, release %s available: rayctl update\n", installed, l)
+						return nil
+					}
+					v = l
+				}
+			}
+			r, err = f.Fetch(ctx, v, arch, releaseKey)
 		}
 		if err != nil {
 			return err
@@ -173,11 +217,12 @@ func (c *cli) update(ctx context.Context, args []string) error {
 		// or the same version again, stays with this one: it knows the
 		// newer state of the node.
 		if handsOff(*noHandoff, newVersion, installed) {
-			handed, err := handoff(r, stage, installed, *yes)
-			if handed {
-				return err
+			h, herr := handoff(r, stage, installed, *yes)
+			if h {
+				handed = true
+				return herr
 			}
-			fmt.Printf("the release's rayctl does not run here (%v): this rayctl updates instead\n", err)
+			fmt.Printf("the release's rayctl does not run here (%v): this rayctl updates instead\n", herr)
 		}
 		if _, err := release.Extract(r.Archive, stage); err != nil {
 			return err
@@ -223,6 +268,7 @@ func (c *cli) update(ctx context.Context, args []string) error {
 	// The database too, as it is with rayd stopped: the new version may
 	// migrate it, and the old one must not run on the new schema (Q-2). The
 	// data plane runs on meanwhile; the perimeter keeps its table.
+	touched = true
 	if err := run("systemctl", "stop", "rayd.service"); err != nil {
 		return err
 	}
@@ -296,22 +342,29 @@ func weakerModes(kind, settings string) []string {
 //
 // The child is not bound to this command's context: the time the download
 // had must not cut its restart or its rollback. Ctrl-C reaches it as part
-// of the terminal's process group, and it handles that itself.
+// of the terminal's process group and stops it as it would stop this one;
+// this one stays to clean up.
 func handoff(r release.Release, stage, installed string, yes bool) (handed bool, err error) {
+	// A directory of its own: if the release's rayctl does not run, this
+	// one extracts the release into the stage.
+	dir := filepath.Join(stage, "handoff")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return false, err
+	}
 	files := map[string][]byte{"SHA256SUMS": r.Sums, "SHA256SUMS.minisig": r.Sig, release.Archive(runtime.GOARCH): r.Archive}
 	for name, b := range files {
 		if len(b) == 0 {
 			return false, fmt.Errorf("no %s", name)
 		}
-		if err := os.WriteFile(filepath.Join(stage, name), b, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil {
 			return false, err
 		}
 	}
-	bin := filepath.Join(stage, "rayctl")
+	bin := filepath.Join(dir, "rayctl")
 	if err := release.ExtractFile(r.Archive, "rayctl", bin); err != nil {
 		return false, err
 	}
-	args := []string{"update", "-from", stage, "-version", r.Version}
+	args := []string{"update", "-from", dir, "-version", r.Version}
 	if yes {
 		args = append(args, "-yes")
 	}
@@ -500,7 +553,49 @@ func (c *cli) failUpdate(ctx context.Context, cause error, before []string) erro
 	if err := c.rollback(ctx, "the update failed", true, carryTry, before...); err != nil {
 		return fmt.Errorf("%w; rollback failed too: %w", cause, err)
 	}
-	return fmt.Errorf("update failed, the previous version runs again: %w", cause)
+	return rolledBack{cause}
+}
+
+// rolledBack is an update that failed and was undone.
+type rolledBack struct{ cause error }
+
+func (e rolledBack) Error() string {
+	return "update failed, the previous version runs again: " + e.cause.Error()
+}
+func (e rolledBack) Unwrap() error { return e.cause }
+
+// writeResult tells the runner of an update by request how it ended
+// (nodeupdate.ResultEnv): done, rolled back, or failed, and then whether
+// the node was touched at all.
+func writeResult(path string, err error, touched bool, installed, newVersion string) {
+	r := nodeupdate.Result{State: nodeupdate.Done, Version: installed}
+	var rb rolledBack
+	switch {
+	case err == nil && touched:
+		r.Version = newVersion
+	case errors.As(err, &rb):
+		r.State, r.Error = nodeupdate.RolledBack, rb.cause.Error()
+	case err != nil:
+		r.State, r.Error, r.Untouched = nodeupdate.Failed, err.Error(), !touched
+		if touched {
+			r.Version = "" // half way: rayd says, once it answers
+		}
+	}
+	if werr := nodeupdate.WriteResult(path, r); werr != nil {
+		fmt.Fprintln(os.Stderr, "rayctl: the update's result:", werr)
+	}
+}
+
+// noteRollback: a rollback by hand is an update that did not hold; the
+// auto update does not ask for the version rolled back from again. On a
+// node that runs updates by request only.
+func noteRollback(statusFile, from, to string) {
+	if _, err := os.Stat(filepath.Dir(statusFile)); err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	_ = nodeupdate.WriteStatus(statusFile, nodeupdate.Status{ID: nodeupdate.NewID(), State: nodeupdate.RolledBack, From: from, To: to, Target: from,
+		By: "root (rayctl update -rollback)", Kind: "local", Error: "rolled back by hand", Requested: now, Started: now, Ended: now})
 }
 
 // rollbackUpdate installs the binaries the last update kept aside, asked

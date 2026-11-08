@@ -321,7 +321,9 @@ func cmdServe(args []string) error {
 	if !*supervise {
 		f := &release.Fetcher{}
 		latest := func(ctx context.Context) (string, error) { return f.Latest(ctx, release.PubKey) }
-		go autoUpdate(ctx, st, version, latest, &latestSeen, nodeupdate.RequestFile, nodeupdate.StatusFile, time.Now, 10*time.Minute, hb, log)
+		a := &autoUpdater{st: st, running: version, latest: latest, seen: &latestSeen, request: nodeupdate.RequestFile,
+			status: nodeupdate.StatusFile, policy: nodeupdate.PolicyFile, now: time.Now, tick: 10 * time.Minute, hb: hb, log: log}
+		go a.run(ctx)
 	}
 	frontUID := render.FrontUID
 	if *supervise {

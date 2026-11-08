@@ -15,16 +15,18 @@ import (
 )
 
 // The update by request (spec/node-update-v1.md §2): taken once root has
-// remote updates on, for a release newer than the node, one at a time;
-// the request lands where the root unit looks.
+// remote updates on (root's file, not rayd's database), for a release
+// newer than the node, one at a time; the request lands where the root
+// unit looks.
 func TestStartUpdate(t *testing.T) {
 	srv, sock, _ := startServer(t)
 	ctx := context.Background()
 	c := NewUnixClient(sock)
 	dir := t.TempDir()
 	unit := filepath.Join(dir, "raycontrol-update.path")
-	srv.NodeUpdate = &NodeUpdate{Request: filepath.Join(dir, "update-request"), Status: filepath.Join(dir, "status.json"), Unit: unit,
-		Latest: func() string { return "v0.19.2" }}
+	latest := "v0.19.2"
+	srv.NodeUpdate = &NodeUpdate{Request: filepath.Join(dir, "update-request"), Status: filepath.Join(dir, "status.json"),
+		Policy: filepath.Join(dir, "policy.json"), Unit: unit, Latest: func() string { return latest }}
 	start := func(v string) error {
 		_, err := c.StartUpdate(ctx, connect.NewRequest(&nodev1.StartUpdateRequest{Version: v}))
 		return err
@@ -36,7 +38,10 @@ func TestStartUpdate(t *testing.T) {
 		}
 	}
 	want(start(""), connect.CodeFailedPrecondition, "remote updates are off")
-	if _, err := c.SetUpdatePolicy(ctx, connect.NewRequest(&nodev1.SetUpdatePolicyRequest{Remote: "on"})); err != nil {
+	// rayd's own settings do not turn it on.
+	srv.Store.SetSetting(ctx, "update_remote", []byte("on"))
+	want(start(""), connect.CodeFailedPrecondition, "remote updates are off")
+	if err := nodeupdate.WritePolicy(srv.NodeUpdate.Policy, nodeupdate.Policy{Remote: "on", Auto: "off", Window: nodeupdate.DefaultWindow}); err != nil {
 		t.Fatal(err)
 	}
 	want(start(""), connect.CodeFailedPrecondition, "not a release") // Version "test"
@@ -46,13 +51,16 @@ func TestStartUpdate(t *testing.T) {
 	want(start("v0.19"), connect.CodeInvalidArgument, "latest or vX.Y.Z")
 	want(start("v0.18.1"), connect.CodeInvalidArgument, "never goes back")
 	want(start("v0.19.0"), connect.CodeInvalidArgument, "never goes back")
+	latest = "v0.19.0"
+	want(start("latest"), connect.CodeFailedPrecondition, "the latest release")
+	latest = "v0.19.2"
 
 	r, err := c.StartUpdate(ctx, connect.NewRequest(&nodev1.StartUpdateRequest{Version: "v0.19.1"}))
 	if err != nil || r.Msg.Status.State != nodeupdate.Requested || r.Msg.Status.Target != "v0.19.1" || r.Msg.Status.From != "v0.19.0" {
 		t.Fatalf("start: %+v %v", r, err)
 	}
 	req, ok := nodeupdate.PeekRequest(srv.NodeUpdate.Request)
-	if !ok || req.Kind != nodeupdate.Remote || req.Version != "v0.19.1" || req.ID != r.Msg.Status.Id || req.Check("v0.19.0") != nil {
+	if !ok || req.Kind != nodeupdate.Remote || req.Version != "v0.19.1" || req.ID != r.Msg.Status.Id || req.Check("v0.19.0", time.Now()) != nil {
 		t.Fatalf("the request %+v %v", req, ok)
 	}
 	want(start(""), connect.CodeFailedPrecondition, "requested already")
@@ -76,24 +84,24 @@ func TestStartUpdate(t *testing.T) {
 		t.Fatalf("the next one: %v", err)
 	}
 
-	// The policy: checked, kept, audited.
-	for _, bad := range []*nodev1.SetUpdatePolicyRequest{{Remote: "yes"}, {Auto: "minor"}, {Window: "3-5"}, {Window: "03:00-03:00"}} {
-		if _, err := c.SetUpdatePolicy(ctx, connect.NewRequest(bad)); connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Errorf("%+v: %v", bad, err)
-		}
+	// A run whose runner died with no word is no longer under way.
+	os.Remove(srv.NodeUpdate.Request)
+	s.State, s.Started, s.Ended = nodeupdate.Running, time.Now().Add(-nodeupdate.Stale), time.Time{}
+	nodeupdate.WriteStatus(srv.NodeUpdate.Status, s)
+	if st, _ := c.GetUpdateStatus(ctx, connect.NewRequest(&nodev1.GetUpdateStatusRequest{})); st.Msg.Status.State != nodeupdate.Failed ||
+		!strings.Contains(st.Msg.Status.Error, "interrupted") {
+		t.Fatalf("a dead run: %+v", st.Msg.Status)
 	}
-	if _, err := c.SetUpdatePolicy(ctx, connect.NewRequest(&nodev1.SetUpdatePolicyRequest{Auto: "patch", Window: "23:30-01:00"})); err != nil {
-		t.Fatal(err)
+	if err := start(""); err != nil {
+		t.Fatalf("after a dead run: %v", err)
 	}
-	if st, _ := c.GetUpdateStatus(ctx, connect.NewRequest(&nodev1.GetUpdateStatusRequest{})); st.Msg.Auto != "patch" || st.Msg.Window != "23:30-01:00" || st.Msg.Remote != "on" {
-		t.Fatalf("policy %+v", st.Msg)
-	}
+
 	entries, _ := srv.Store.ListAudit(ctx, 30)
 	var actions []string
 	for _, e := range entries {
 		actions = append(actions, e.Action+" "+e.Result)
 	}
-	if !strings.Contains(strings.Join(actions, "\n"), "update.start v0.19.1 ok") || !strings.Contains(strings.Join(actions, "\n"), "update.policy ok") {
+	if all := strings.Join(actions, "\n"); !strings.Contains(all, "update.start v0.19.1 ok") || !strings.Contains(all, "update.start error: remote updates are off") {
 		t.Fatalf("audit %v", actions)
 	}
 }
