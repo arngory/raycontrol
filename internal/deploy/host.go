@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -263,6 +264,8 @@ func SandboxResolverProblem(root string) string {
 		return "" // ResolverProblem says it
 	}
 	var out []string
+	own := ownAddrs()
+	n := 0
 	for line := range strings.Lines(string(b)) {
 		f := strings.Fields(line)
 		if len(f) < 2 || f[0] != "nameserver" {
@@ -272,7 +275,11 @@ func SandboxResolverProblem(root string) string {
 		if err != nil {
 			continue
 		}
-		if a = a.Unmap(); sandboxReaches(a) {
+		// Go and glibc ask the first three only.
+		if n++; n > 3 {
+			break
+		}
+		if a = a.Unmap(); sandboxReaches(a) && !own[a] {
 			return ""
 		}
 		out = append(out, a.String())
@@ -282,6 +289,19 @@ func SandboxResolverProblem(root string) string {
 	}
 	return fmt.Sprintf("%s names %s, which Hysteria2 and Yggdrasil's peers may not reach (their units deny loopback and private ranges): "+
 		"the names their clients ask for fail; use systemd-resolved (its stub is let through) or a public resolver", ResolvConf, strings.Join(out, ", "))
+}
+
+// ownAddrs are the host's addresses: the perimeter keeps the data plane
+// from them (S-2), a resolver there included. Tests replace it.
+var ownAddrs = func() map[netip.Addr]bool {
+	m := map[netip.Addr]bool{}
+	addrs, _ := net.InterfaceAddrs()
+	for _, x := range addrs {
+		if p, err := netip.ParsePrefix(x.String()); err == nil {
+			m[p.Addr().Unmap()] = true
+		}
+	}
+	return m
 }
 
 // sandboxReaches reports whether a unit with stubAllow reaches a's port 53.

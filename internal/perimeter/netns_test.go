@@ -780,7 +780,7 @@ func TestNetnsDataPlaneToNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer fw.Teardown()
-	if err := fw.SetPublic([]Port{{"tcp", 18999}}); err != nil {
+	if err := fw.SetPublic([]Port{{"tcp", 18999}, {"tcp", 53}}); err != nil { // lo is filtered here, open in production
 		t.Fatal(err)
 	}
 	for _, addr := range []string{"192.0.2.9:18999", "192.0.2.10:18999", "127.0.0.1:18999"} {
@@ -815,6 +815,36 @@ func TestNetnsDataPlaneToNode(t *testing.T) {
 		err := dialAs(c.uid, c.addr, 18999)
 		if (err == nil) != c.want {
 			t.Errorf("uid %d to %v: %v, want reachable=%v", c.uid, c.addr, err, c.want)
+		}
+	}
+	// systemd-resolved's stub: port 53, nothing else of the node.
+	for _, port := range []int{53, 18999} {
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.53:%d", port))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		go func() {
+			for {
+				c, err := l.Accept()
+				if err != nil {
+					return
+				}
+				c.Close()
+			}
+		}()
+	}
+	for _, c := range []struct {
+		uid, port int
+		want      bool
+	}{
+		{9110, 53, true},
+		{9110, 18999, false},
+		{0, 18999, true},
+	} {
+		err := dialAs(c.uid, [4]byte{127, 0, 0, 53}, c.port)
+		if (err == nil) != c.want {
+			t.Errorf("uid %d to the stub's port %d: %v, want reachable=%v", c.uid, c.port, err, c.want)
 		}
 	}
 	// The subnet's broadcast address: the node and its neighbours.

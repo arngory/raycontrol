@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1154,6 +1155,7 @@ func TestResolverProblem(t *testing.T) {
 // the private ranges, all but resolved's stub: one server they reach is
 // enough.
 func TestSandboxResolverProblem(t *testing.T) {
+	t.Cleanup(deploy.SetOwnAddrs(map[netip.Addr]bool{netip.MustParseAddr("203.0.113.5"): true}))
 	root := t.TempDir()
 	conf := filepath.Join(root, deploy.ResolvConf)
 	os.MkdirAll(filepath.Dir(conf), 0o755)
@@ -1173,6 +1175,10 @@ func TestSandboxResolverProblem(t *testing.T) {
 		"nameserver fd00::53\nnameserver fe80::1%eth0\n": true,
 		"nameserver 192.168.1.1\n# nameserver 1.1.1.1\n": true,
 		"search example.com\n":                           false,
+		// Only the first three count.
+		"nameserver 10.0.0.1\nnameserver 10.0.0.2\nnameserver 10.0.0.3\nnameserver 1.1.1.1\n": true,
+		// The node's own address: the perimeter keeps the data plane from it.
+		"nameserver 203.0.113.5\n": true,
 	} {
 		os.WriteFile(conf, []byte(conf2), 0o644)
 		if p := deploy.SandboxResolverProblem(root); (p != "") != bad {

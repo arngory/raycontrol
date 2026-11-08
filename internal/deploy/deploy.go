@@ -373,7 +373,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	// Hysteria2 behind udpmux (R3-4): niko-server backends on the front's
 	// datagrams; they go out to public addresses only. They look names up
 	// with the host's resolver: systemd-resolved's stub on loopback stays
-	// in reach (stubAllow; nothing else listens there).
+	// in reach (stubAllow; the perimeter lets port 53 only through there).
 	for _, s := range hysteria {
 		g := render.GroupName(s.Name)
 		raydGroups = append(raydGroups, g)
@@ -729,7 +729,8 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 // host's resolver. A provider's resolver in a private range stays out of
 // reach (on some clouds it is the metadata server):
 // deploy.SandboxResolverProblem warns. naive and Xray ask public resolvers
-// themselves.
+// themselves. Whatever else listens on any address answers there too: the
+// perimeter's output chain lets the data plane reach port 53 only.
 const stubAllow = "IPAddressAllow=127.0.0.53 127.0.0.54"
 
 // ResolvedDropIn is where installs before v0.11 turned systemd-resolved's
