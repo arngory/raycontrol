@@ -293,6 +293,26 @@ func TestPlanCheckAcceptsOurs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The reserved ports' sysctl file is root's own too: Check does not
+	// see it, and a second apply (removeStale) neither refuses nor
+	// removes it.
+	{
+		s := &sysctlHost{root: t.TempDir()}
+		h := s.host(t)
+		p := plans["naive with ICMP"]
+		p.HostPorts = ports("tcp/42000-43023", "udp/42000-43023", "tcp/443")
+		for range 2 {
+			if err := h.Apply(p, "rayd.service"); err != nil {
+				t.Fatal(err)
+			}
+			if b, err := os.ReadFile(filepath.Join(s.root, deploy.PortsSysctl)); err != nil || !strings.Contains(string(b), deploy.ReservedPortsKey+" = 42000-43023\n") {
+				t.Fatalf("%s: %q %v", deploy.PortsSysctl, b, err)
+			}
+		}
+		if err := p.Check(); err != nil || slices.ContainsFunc(p.Files, func(f deploy.File) bool { return f.Path == deploy.PortsSysctl }) {
+			t.Fatalf("the plan: %v", err)
+		}
+	}
 	// The relay's plan goes through Apply too.
 	root := t.TempDir()
 	os.MkdirAll(filepath.Join(root, "/etc"), 0o755)

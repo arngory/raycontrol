@@ -151,10 +151,13 @@ log "$distro: bootstrap"
 x timeout 120 systemctl is-system-running --wait >/dev/null || true
 # shellcheck disable=SC2016 # expands in the container
 x sh -c 'if systemctl is-enabled -q firewalld 2>/dev/null; then for i in $(seq 60); do firewall-cmd --state >/dev/null 2>&1 && break; sleep 1; done; fi'
-# The sysctl keys raycontrol sets, from its source, for the snapshots.
+# The sysctl keys raycontrol sets, from its source, for the snapshots; and
+# the reserved ports (deploy.ReservePorts), which uninstall puts back.
 # shellcheck disable=SC2016 # backticks of the Go source, not a command
-sed -n '/^const sysctl = `/,/^`/p' "$here/../../internal/deploy/deploy.go" | grep -o '^net\.[a-z0-9_.]*' |
-	docker exec -i "$node" sh -c 'cat > /root/sysctl.keys'
+{
+	sed -n '/^const sysctl = `/,/^`/p' "$here/../../internal/deploy/deploy.go" | grep -o '^net\.[a-z0-9_.]*'
+	echo net.ipv4.ip_local_reserved_ports
+} | docker exec -i "$node" sh -c 'cat > /root/sysctl.keys'
 snapshot /root/before.snap
 
 log "$distro: host check (R4-24)"
@@ -223,6 +226,14 @@ wait_table "rayspa start"
 if x grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then
 	[[ $(x sysctl -n net.ipv4.tcp_congestion_control) == bbr ]] || fail "sysctl not applied at install"
 fi
+# The ports the node listens on (SPA's slots, the services') are reserved:
+# outgoing connections do not take them (in CI rayspa could not listen on
+# a slot one held). rayctl check compares them with rayd's.
+reserved() {
+	[[ $(x rayctl check 2>&1) == *"ok    reserved ports"* ]] ||
+		fail "the node's ports are not reserved $1: $(x sysctl -n net.ipv4.ip_local_reserved_ports 2>&1)"
+}
+reserved "at install"
 
 dataplane=(niko-inner.service niko-dns.service niko-mdns.service niko-front.service)
 # slipstream (docs/spec/slipstream-v1.md) when BIN_DIR has its server.
@@ -468,6 +479,7 @@ boot
 wait_active rayd.service rayspa.service "${dataplane[@]}"
 ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$node")"
 client -addr "$ip" "$laptop" >/dev/null || fail "probe after reboot"
+reserved "after the reboot (systemd-sysctl, its file)"
 
 log "$distro: report"
 x /usr/local/bin/rayctl report -logs info -o /root/report.txt > /dev/null || fail "rayctl report"

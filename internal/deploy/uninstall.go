@@ -83,7 +83,9 @@ func (h *Host) Uninstall(j *Journal, opts UninstallOptions) error {
 	// Only values that differ now: a container may not let raycontrol set
 	// global keys (net.core.*) in the first place, nor set them back.
 	for _, c := range of(ChangeSysctl) {
-		if c.Value == "" {
+		// An empty value is no value, but for the reserved ports: none
+		// were (ReservePorts journals it).
+		if c.Value == "" && c.Name != ReservedPortsKey {
 			continue
 		}
 		if out, err := h.Run("sysctl", "-n", c.Name); err == nil && strings.Join(strings.Fields(string(out)), " ") == strings.Join(strings.Fields(c.Value), " ") {
@@ -223,6 +225,7 @@ var knownFiles = []string{
 	"/etc/polkit-1/rules.d/50-raycontrol.rules",
 	"/etc/sysctl.d/90-raycontrol.conf",
 	PingSysctl,
+	PortsSysctl,
 	ResolvedDropIn,
 	FirewalldService,
 	UFWProfile,

@@ -173,12 +173,14 @@ shape() {
 	echo "== active"; systemctl list-units "niko-*" "ray*" --state=active --no-legend --plain | awk "{print \$1}" | sort
 	echo "== users"; getent passwd | awk -F: "\$1 ~ /^(niko|ray)/ {print \$1, \$6, \$7}" | sort
 	echo "== groups"; getent group | awk -F: "\$1 ~ /^(niko|ray)/ {print \$1, \$4}" | sort
-	# Units and settings in full, ports and UIDs (4 digits and more) aside;
+	# Units and settings in full, ports and UIDs (4 digits and more) aside,
+	# and the reserved ports, whose order and merges the random ones make;
 	# binaries by their hash.
 	for f in /etc/systemd/system/niko-* /etc/systemd/system/ray* /etc/sysctl.d/*raycontrol* /etc/tmpfiles.d/raycontrol.conf \
 		/etc/systemd/resolved.conf.d/raycontrol.conf; do
 		[ -e "$f" ] || continue
-		echo "== $(stat -c "%n %a %U %G" "$f")"; sed -E "s/[0-9]{4,}/N/g" "$f"
+		echo "== $(stat -c "%n %a %U %G" "$f")"
+		sed -E "s/^(# reserved by raycontrol: |net\.ipv4\.ip_local_reserved_ports = ).*/\1PORTS/; s/[0-9]{4,}/N/g" "$f"
 	done
 	echo "== binaries"
 	for f in /usr/local/bin/ray* /usr/local/libexec/raycontrol/*; do

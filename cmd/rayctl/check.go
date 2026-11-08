@@ -8,10 +8,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"time"
 
 	"connectrpc.com/connect"
 
+	"github.com/arngory/raycontrol/internal/api"
+	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/hostcheck"
 	"github.com/arngory/raycontrol/internal/provision"
@@ -38,7 +41,7 @@ func (c *cli) check(ctx context.Context, args []string) error {
 		return errUsage
 	}
 	return hostCheck(ctx, os.Stdout, hostcheck.Options{Host: *host, Domain: *domain, Services: splitList(*services), AllowV0: *allowV0,
-		ICMP: c.icmpOn(ctx)}, false, c.json, append(c.internetChecks(ctx), misnamedResults(c.misnamed(ctx))...)...)
+		ICMP: c.icmpOn(ctx)}, false, c.json, slices.Concat(c.internetChecks(ctx), misnamedResults(c.misnamed(ctx)), c.reservedResults(ctx))...)
 }
 
 // icmpOn reports whether rayd has a naive service that carries ICMP
@@ -57,6 +60,42 @@ func (c *cli) icmpOn(ctx context.Context) bool {
 		}
 	}
 	return false
+}
+
+// reservedPortsFile is where the kernel says which ports are reserved.
+var reservedPortsFile = "/proc/sys/net/ipv4/ip_local_reserved_ports"
+
+// reservedResults says whether the node's ports (rayd's deploy inputs)
+// are reserved (deploy.ReservePorts): one that is not, an outgoing
+// connection may take, and the listen on it fails while it holds it. None
+// when rayd does not answer (before the install).
+func (c *cli) reservedResults(ctx context.Context) []hostcheck.Result {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	r, err := c.c.GetDeployInputs(ctx, connect.NewRequest(&nodev1.GetDeployInputsRequest{}))
+	if err != nil {
+		return nil
+	}
+	in, err := api.DeployInputs(r.Msg)
+	if err != nil {
+		return nil
+	}
+	res := hostcheck.Result{Level: hostcheck.Advised, Name: "reserved ports", OK: true, Detail: "SPA's and the services' ports are kept from outgoing connections"}
+	live, err := os.ReadFile(reservedPortsFile)
+	missing := ""
+	if err == nil {
+		missing, err = deploy.MissingReserved(string(live), in.HostPorts)
+	}
+	switch {
+	case err != nil:
+		res.OK, res.Detail = false, err.Error()
+	case missing != "":
+		res.OK, res.Detail = false, fmt.Sprintf("%s lacks %s: an outgoing connection may hold one, and the listen on it fails meanwhile", deploy.ReservedPortsKey, missing)
+	}
+	if !res.OK {
+		res.Fix = "rayctl apply reserves them (" + deploy.PortsSysctl + "); a sysctl file that sorts after it must not set " + deploy.ReservedPortsKey
+	}
+	return []hostcheck.Result{res}
 }
 
 // internetChecks is rayd's last check of the DNS zones as results of the
