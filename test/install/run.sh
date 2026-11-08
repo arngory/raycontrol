@@ -275,10 +275,10 @@ if [[ -n $slip ]]; then
 	[[ $(x stat -c '%a %U %G' /run/niko/slip-in/packet.sock) == "660 niko-slip niko-front" ]] || fail "slipstream socket: $(x ls -l /run/niko/slip-in)"
 	[[ $(x stat -c '%a %G' /var/lib/raycontrol/rendered/front/slip.auth.keys) == "640 niko-front" ]] || fail "the front's slipstream keys file"
 	for _ in $(seq 20); do
-		x journalctl -u niko-slip.service --no-pager | grep -q 'Front connected' && break
+		[[ $(x journalctl -u niko-slip.service --no-pager) == *'Front connected'* ]] && break
 		sleep 0.5
 	done
-	x journalctl -u niko-slip.service --no-pager | grep -q 'Front connected' || fail "the front did not connect to slipstream"
+	[[ $(x journalctl -u niko-slip.service --no-pager) == *'Front connected'* ]] || fail "the front did not connect to slipstream"
 	[[ $(x rayctl service list) == *"slip"*"pinned key"* ]] || fail "rayctl service list: $(x rayctl service list)"
 fi
 
@@ -419,7 +419,7 @@ log "$distro: the egress policy"
 x rayctl egress block bittorrent || fail "rayctl egress block bittorrent"
 x rayctl egress block smtp >/dev/null || fail "rayctl egress block smtp"
 egress_in_force "rayctl egress block"
-x nft list chain inet raycontrol egress | grep -q 'comment "bittorrent-tcp"' || fail "no BitTorrent rule in the egress chain"
+[[ $(x nft list chain inet raycontrol egress) == *'comment "bittorrent-tcp"'* ]] || fail "no BitTorrent rule in the egress chain"
 [[ $(x rayctl status) == *"egress"*"blocked: bittorrent, smtp"* ]] || fail "rayctl status does not show the egress policy"
 
 log "$distro: host firewall reloads and flush ruleset"
@@ -433,11 +433,13 @@ x nft flush ruleset
 wait_table "nft flush ruleset"
 client "$laptop" >/dev/null || fail "probe after flush ruleset"
 egress_in_force "nft flush ruleset"
+# Output is captured before matching: under pipefail, `x … | grep -q` fails
+# when grep exits early and docker exec dies of SIGPIPE (141).
 # Warnings reach journald at warning priority: journalctl -p warning, as the
 # guide says, shows rayspa's note about the restored table.
 # (Where journald itself runs: some container hosts cannot start it.)
 if x systemctl is-active --quiet systemd-journald; then
-	x journalctl -u rayspa -p warning --no-pager | grep -q "table was removed" || fail "rayspa's warning is not at warning priority"
+	[[ $(x journalctl -u rayspa -p warning --no-pager) == *"table was removed"* ]] || fail "rayspa's warning is not at warning priority"
 fi
 
 # rayspa starting while rayd is down takes its saved snapshot: the admin
@@ -450,7 +452,7 @@ x test -s /var/lib/rayspa/snapshot.pb || fail "rayspa saved no snapshot"
 # The table comes up empty first; the saved snapshot follows right after.
 restored=0
 for _ in $(seq 20); do
-	if x nft list set inet raycontrol admin4 | grep -q 192.0.2.1; then
+	if [[ $(x nft list set inet raycontrol admin4) == *192.0.2.1* ]]; then
 		restored=1
 		break
 	fi
