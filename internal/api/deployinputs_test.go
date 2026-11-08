@@ -238,6 +238,8 @@ func TestDeployInputsRoundTrip(t *testing.T) {
 func TestDeployInputsNumbers(t *testing.T) {
 	for _, r := range []*nodev1.GetDeployInputsResponse{
 		{HostPorts: []*nodev1.PortRange{{Proto: "tcp", From: 65536 + 22, To: 65536 + 22}}},
+		{HostPorts: []*nodev1.PortRange{{Proto: "tcp", From: 65536 + 22, To: 22}}},
+		{HostPorts: []*nodev1.PortRange{{Proto: "tcp", From: 22, To: 65536 + 22}}},
 		{OutsidePorts: []*nodev1.PortRange{{Proto: "tcp", From: 1, To: 1 << 20}}},
 		{Services: make([]*nodev1.DeployService, deploy.MaxInputServices+1)},
 	} {

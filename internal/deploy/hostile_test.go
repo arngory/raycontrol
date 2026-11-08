@@ -40,10 +40,16 @@ func TestBuildHostileInputs(t *testing.T) {
 	slip := func(ss provision.SlipstreamSettings) deploy.ServiceInput {
 		return deploy.ServiceInput{Kind: "slipstream", Name: "slip", UID: 9120, Slipstream: ss}
 	}
+	// Why, where more than one check would refuse it.
+	says := map[string]string{
+		"REALITY site into usermod": "its site: ", "UID without a process": "no process", "kind unknown": "not known",
+		"kind unknown, no UID": "not known",
+	}
 	for name, c := range map[string]struct {
 		s    deploy.ServiceInput
 		left string // the service left out
 	}{
+		"kind unknown, no UID":      {deploy.ServiceInput{Kind: "evil", Name: "e"}, ""},
 		"answer with a line":        {deploy.ServiceInput{Kind: "site", Name: "s2", UID: 9120, Answer: "404\n" + inject}, "niko-s2.service"},
 		"answer not one of them":    {deploy.ServiceInput{Kind: "site", Name: "s2", UID: 9120, Answer: "teapot"}, "niko-s2.service"},
 		"doh name into tmpfiles":    {deploy.ServiceInput{Kind: "doh", Name: "x 0755 root root -\nZ /etc 0777 rayd rayd -\nd /run/niko/y", UID: 9120}, ""},
@@ -71,7 +77,7 @@ func TestBuildHostileInputs(t *testing.T) {
 		in := goodInputs()
 		in.Services = append(in.Services, c.s)
 		p := deploy.Build(in, render.DefaultPaths, deploy.DefaultBinaries)
-		if len(p.Warnings) != 1 {
+		if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], says[name]) {
 			t.Errorf("%s: warnings %q", name, p.Warnings)
 		}
 		if c.left != "" && slices.Contains(p.Units, c.left) {
@@ -116,6 +122,25 @@ func TestBuildHostileInputs(t *testing.T) {
 	}
 	if slices.Contains(p.Units, "niko-reality.service") || slices.Contains(p.Units, "niko-site.service") || len(p.Warnings) != 2 {
 		t.Errorf("REALITY without its site: %v, warnings %q", p.Units, p.Warnings)
+	}
+}
+
+// The last check of each line (step 2) holds whatever reaches it: paths
+// with a line break leave their units and tmpfiles lines out.
+func TestBuildBrokenLines(t *testing.T) {
+	p := deploy.Build(goodInputs(), render.Paths{Rendered: "/var/lib/raycontrol/rendered\nExecStartPre=+/bin/sh -c id", Run: "/run/niko"},
+		deploy.DefaultBinaries)
+	for _, f := range p.Files {
+		if strings.Contains(string(f.Content), "/bin/sh") {
+			t.Errorf("%s:\n%s", f.Path, f.Content)
+		}
+	}
+	if slices.Contains(p.Units, "niko-dns.service") || slices.Contains(p.Units, "rayd.service") || len(p.Warnings) == 0 {
+		t.Errorf("units %v, warnings %q", p.Units, p.Warnings)
+	}
+	p = deploy.Build(goodInputs(), render.Paths{Rendered: "/var/lib/raycontrol/rendered", Run: "/run/niko x\nZ /etc 0777 rayd rayd -"}, deploy.DefaultBinaries)
+	if tmp := file(p, "/etc/tmpfiles.d/raycontrol.conf"); strings.Contains(tmp, "Z /etc") || len(p.Dirs) != 0 {
+		t.Errorf("tmpfiles:\n%s", tmp)
 	}
 }
 

@@ -21,10 +21,12 @@ func TestLinesUnbroken(t *testing.T) {
 		"description with a return": func(u *unit) { u.description = "x\rUser=root" },
 		"needs with a space":        func(u *unit) { u.needs = "/var/lib/a b" },
 		"after with a line":         func(u *unit) { u.after = []string{"a\nb"} },
-		"a value with a line":       func(u *unit) { u.service[1] = "ExecStart=/usr/local/bin/rayd site -answer 404\nExecStartPre=+/bin/sh -c id" },
-		"a path with a space":       func(u *unit) { u.service[2] = "ReadWritePaths=/run/niko/x-in /etc" },
-		"a user with a space":       func(u *unit) { u.service[0] = "User=niko-x root" },
-		"a line without a key":      func(u *unit) { u.service = append(u.service, "[Service]") },
+		"a value with a line": func(u *unit) {
+			u.service[1] = "ExecStart=/usr/local/bin/rayd site -answer 404\nExecStartPre=+/bin/sh -c id"
+		},
+		"a path with a space":  func(u *unit) { u.service[2] = "ReadWritePaths=/run/niko/x-in /etc" },
+		"a user with a space":  func(u *unit) { u.service[0] = "User=niko-x root" },
+		"a line without a key": func(u *unit) { u.service = append(u.service, "[Service]") },
 	} {
 		u := good
 		u.after, u.service = append([]string(nil), good.after...), append([]string(nil), good.service...)

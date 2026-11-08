@@ -9,6 +9,9 @@ import (
 // LegacyBuild is Build before Inputs (legacy_build_test.go).
 var LegacyBuild = legacyBuild
 
+// OpenBeneath is openBeneath.
+var OpenBeneath = openBeneath
+
 // NoOpenat2 makes openat2 missing, as on a kernel before 5.6, until the
 // returned func.
 func NoOpenat2() func() {

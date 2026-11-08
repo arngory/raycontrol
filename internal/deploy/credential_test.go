@@ -128,6 +128,27 @@ func TestCopyCredential(t *testing.T) {
 			}
 			h.refused(t, "a link at "+at, "")
 		}
+		// A link that stays below the anchor: to another state directory
+		// there, as /var/lib/rayspa (SPA keys) beside /var/lib/raycontrol.
+		h = newCredHost(t)
+		os.MkdirAll(filepath.Join(h.anchor, "rayspa"), 0o700)
+		os.WriteFile(filepath.Join(h.anchor, "rayspa", "snapshot.pb"), []byte("rayspa's\n"), 0o600)
+		os.Remove(h.src)
+		if err := os.Symlink("../../../rayspa/snapshot.pb", h.src); err != nil {
+			t.Fatal(err)
+		}
+		h.refused(t, "a link below the anchor", "")
+		// The same for a directory: rendered/svc to another directory
+		// below /var/lib that has a file of the key's name (a key.pem of
+		// other software's).
+		h = newCredHost(t)
+		os.MkdirAll(filepath.Join(h.anchor, "other"), 0o700)
+		os.WriteFile(filepath.Join(h.anchor, "other", "key.pem"), []byte("another's key\n"), 0o600)
+		os.RemoveAll(filepath.Dir(h.src))
+		if err := os.Symlink("../../other", filepath.Dir(h.src)); err != nil {
+			t.Fatal(err)
+		}
+		h.refused(t, "a directory link below the anchor", "")
 		// Out of the anchor, by name.
 		for _, rel := range []string{"../x", "raycontrol/../../x", "/etc/shadow", "", "raycontrol//rendered/svc/key.pem"} {
 			h := newCredHost(t)
@@ -184,7 +205,7 @@ func TestCopyCredential(t *testing.T) {
 		// Too big.
 		h = newCredHost(t)
 		os.Truncate(h.src, deploy.MaxCredential+1)
-		h.refused(t, "too big", "bytes")
+		h.refused(t, "too big", "bytes, at most") // seen before it is read
 
 		// Directories others may write in: the anchor, the runtime
 		// directory's parent (the copy is made there), the runtime
@@ -232,6 +253,34 @@ func TestCopyCredential(t *testing.T) {
 		if b, _ := os.ReadFile(elsewhere); !bytes.Equal(b, []byte("root's\n")) {
 			t.Errorf("written through the link at the destination: %q", b)
 		}
+	}
+}
+
+// openBeneath never leaves its directory, by ".." either, whatever checked
+// the path before it.
+func TestOpenBeneath(t *testing.T) {
+	for _, openat2 := range []bool{true, false} {
+		if !openat2 {
+			t.Cleanup(deploy.NoOpenat2())
+		}
+		top := t.TempDir()
+		os.MkdirAll(filepath.Join(top, "anchor", "a"), 0o700)
+		os.WriteFile(filepath.Join(top, "secret"), []byte("x"), 0o600)
+		os.WriteFile(filepath.Join(top, "anchor", "a", "f"), []byte("x"), 0o600)
+		dir, err := unix.Open(filepath.Join(top, "anchor"), unix.O_RDONLY|unix.O_DIRECTORY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rel, ok := range map[string]bool{"a/f": true, "a/../../secret": false, "../secret": false, "a/./f": openat2} {
+			fd, err := deploy.OpenBeneath(dir, rel)
+			if (err == nil) != ok {
+				t.Errorf("openat2 %v, %s: %v", openat2, rel, err)
+			}
+			if err == nil {
+				unix.Close(fd)
+			}
+		}
+		unix.Close(dir)
 	}
 }
 
