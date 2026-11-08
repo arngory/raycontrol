@@ -710,7 +710,7 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 	plan.Dirs = tmp.dirs
 	plan.Warnings = append(plan.Warnings, tmp.warnings...)
 	plan.Files = append(plan.Files,
-		File{Path: "/etc/tmpfiles.d/raycontrol.conf", Mode: 0o644, Content: []byte(tmp.String())},
+		File{Path: tmpfilesConf, Mode: 0o644, Content: []byte(tmp.String())},
 		File{Path: "/etc/polkit-1/rules.d/50-raycontrol.rules", Mode: 0o644, Content: []byte(polkitRule)},
 		File{Path: HardeningSysctl, Mode: 0o644, Content: []byte(sysctl)},
 	)

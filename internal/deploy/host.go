@@ -352,7 +352,11 @@ const (
 // Apply installs the plan: users, files, units. It enables the units whose
 // executables exist, in plan order, and restarts those whose files changed.
 // Units listed in keep are left alone (rayctl install starts rayspa last).
+// A plan that is not one raycontrol makes (Plan.Check) changes nothing.
 func (h *Host) Apply(plan Plan, keep ...string) error {
+	if err := plan.Check(); err != nil {
+		return fmt.Errorf("the deployment is not one raycontrol makes, nothing was changed: %w", err)
+	}
 	h.repairModes()
 	for _, u := range plan.Users {
 		if err := h.EnsureUser(u); err != nil {
@@ -446,11 +450,19 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 			}
 		}
 	}
-	for _, w := range plan.Warnings {
-		fmt.Fprintln(h.Out, "warning:", w)
+	// Some are rayd's (its database's): without what a terminal acts on.
+	for i, w := range plan.Warnings {
+		if i == maxWarnings {
+			fmt.Fprintf(h.Out, "warning: %d more not shown\n", len(plan.Warnings)-i)
+			break
+		}
+		fmt.Fprintln(h.Out, "warning:", PrintableWarning(w))
 	}
 	return nil
 }
+
+// maxWarnings bounds the warnings Apply prints.
+const maxWarnings = 100
 
 // EnableNow enables and starts a unit, noting it for uninstall.
 func (h *Host) EnableNow(unit string) error {
