@@ -15,13 +15,14 @@
 # v0.16.0). OLD_DIR holds the previous release's binaries (rayd, rayspa,
 # rayctl, niko-server, xray) and its install/ directory.
 #
-# STEP_DIR, when given, holds a release as published (SHA256SUMS, its
-# signature, the archive: previous.sh RELEASE_DIR) that OLD_DIR's rayctl
-# updates to first (rayctl update -from: the archive verified and
-# extracted by that old rayctl, as from GitHub), and whose rayctl then
-# updates to this build. That is the path docs/RELEASE.md gives a node
-# whose rayctl cannot take the latest archive itself (before v0.15.0:
-# names it does not know, slipstream-server since v0.16.0).
+# STEP_DIR, when given, holds releases as published, one a subdirectory
+# (SHA256SUMS, its signature, the archive: previous.sh RELEASE_DIR), taken
+# in the order of their names: the node's rayctl updates to each in turn
+# (rayctl update -from: verified and extracted by the rayctl on the node,
+# as from GitHub), and the last one's rayctl updates to this build. That
+# is the path docs/RELEASE.md gives a node whose rayctl cannot take the
+# latest archive itself (before v0.15.0: names it does not know,
+# slipstream-server since v0.16.0): v0.15.0, then the latest release.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/install/lib.sh
@@ -32,11 +33,17 @@ distro=${1:?$usage}
 bin="$(cd "${2:?$usage}" && pwd)"
 old="$(cd "${3:?$usage}" && pwd)"
 step=""
+steps=()
 if [[ -n ${4:-} ]]; then
 	step="$(cd "$4" && pwd)"
-	for f in SHA256SUMS SHA256SUMS.minisig raycontrol-linux-amd64.tar.gz; do
-		[[ -f $step/$f ]] || die "$step/$f is missing"
+	for d in "$step"/*/; do
+		d=$(basename "$d")
+		for f in SHA256SUMS SHA256SUMS.minisig raycontrol-linux-amd64.tar.gz; do
+			[[ -f $step/$d/$f ]] || die "$step/$d/$f is missing"
+		done
+		steps+=("$d")
 	done
+	((${#steps[@]} > 0)) || die "no releases in $step"
 fi
 image="raycontrol-test:$distro"
 net="rc-upgrade-$distro"
@@ -183,13 +190,12 @@ boot "rc-upgraded-$distro"
 install_node /opt/old
 probe "previous release"
 
-if [[ -n $step ]]; then
-	log "$distro: rayctl update -from the stepping-stone release, by the old release's rayctl"
-	x /usr/local/bin/rayctl update -from /opt/step -yes || fail "rayctl update to the stepping-stone release"
+for d in "${steps[@]}"; do
+	log "$distro: rayctl update -from the release in $d, by the rayctl on the node ($(x rayctl status | grep -m1 '^version' || true))"
+	x /usr/local/bin/rayctl update -from "/opt/step/$d" -yes || fail "rayctl update to the release in $d"
 	wait_active rayd.service rayspa.service niko-inner.service niko-dns.service niko-mdns.service niko-hy2o.service niko-front.service
-	x rayctl status | grep -m1 "^version" || true
-	probe "stepping-stone release"
-fi
+	probe "after the release in $d"
+done
 log "$distro: rayctl update by the previous release's rayctl"
 x /usr/local/bin/rayctl update -local /opt/rc -yes || fail "rayctl update"
 for b in rayd rayspa rayctl; do

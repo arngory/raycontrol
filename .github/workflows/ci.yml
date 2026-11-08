@@ -194,10 +194,11 @@ jobs:
     # install of this build gives, subscription included. And from the
     # oldest release bootstrap.sh installs (MIN_VERSION) along the path
     # docs/RELEASE.md gives it: its rayctl takes no archive with names it
-    # does not know (before v0.15.0), so v0.15.0 first, verified and
-    # extracted by that old rayctl as from GitHub, then this build. Only
-    # the latest release was tested before: "unexpected slipstream-server"
-    # on a v0.10 node went unseen.
+    # does not know (before v0.15.0), so v0.15.0 first, then the latest
+    # release, each verified and extracted by the rayctl on the node as
+    # from GitHub, then this build. Only the latest release was tested
+    # before, with -local, which skips the archive: "unexpected
+    # slipstream-server" on a v0.10 node went unseen.
     name: upgrade (${{ matrix.from }})
     needs: xray
     runs-on: ubuntu-24.04
@@ -230,9 +231,11 @@ jobs:
           chmod +x bin/*
       - name: The release to update from
         run: test/install/previous.sh old "${{ matrix.from }}"
-      - name: The stepping-stone release
+      - name: The stepping-stone release, then the latest
         if: matrix.step != ''
-        run: test/install/previous.sh step-bin "${{ matrix.step }}" step
+        run: |
+          test/install/previous.sh step-bin "${{ matrix.step }}" step/1
+          test/install/previous.sh latest-bin latest step/2
       - name: Bootstrap dependencies on the bare image
         run: test/install/deps.sh debian13
       - name: Prepare the systemd image
