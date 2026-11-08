@@ -1,7 +1,7 @@
 # Шпаргалка
 
 Все команды — на ноде, от root или от члена группы `raycontrol`; `install`, `apply`, `update`, `uninstall`,
-`backup` и `restore` — только root.
+`backup`, `restore` и `egress block|allow` — только root.
 `-json` перед командой даёт машинный вывод (`rayctl -json status`). Пошаговая установка —
 [10-quickstart-debian13.md](10-quickstart-debian13.md).
 
@@ -39,15 +39,18 @@
 |---|---|
 | `rayctl node name "Амстердам"` (`""` — убрать) | имя ноды: клиенты показывают его рядом с адресом со следующей подписки; до 48 символов, без управляющих и невидимых. При установке — `bootstrap.sh … -name "Амстердам"` |
 | `rayctl node note "До 1 Гбит/с, торренты нельзя 🙏"` (`""` — убрать) | описание ноды для пользователей: клиенты показывают его со следующей подписки; одна строка, до 200 символов, эмодзи и любые письменности, без управляющих, невидимых и символов смены направления |
-| `rayctl status` | версия, нода (и её имя), число пользователей, сервисов, устройств, порты SPA сейчас; циклы rayd, `dns-zone <сервис>` — самопроверка зоны туннеля |
+| `rayctl status` | версия, нода (и её имя), число пользователей, сервисов, устройств, порты SPA сейчас, политика выхода (`egress`); циклы rayd, `dns-zone <сервис>` — самопроверка зоны туннеля |
 | `rayctl service list` | сервисы; для REALITY — когда сменились ключи и когда следующая смена |
 | `rayctl audit [-n 50]` | журнал действий администратора |
 | `rayctl debug on [-for 30m]` / `off` / `show` | окно отладки: rayd, rayspa и data plane пишут подробно, с адресами клиентов; закрывается само (до суток); службы data plane перезапускаются |
+| `rayctl egress` | политика выхода ноды (с v0.21): что закрыто, для кого, действует ли; root видит и счётчики правил |
+| `rayctl egress block\|allow bittorrent` | только root, на ноде: закрыть или открыть BitTorrent на всех профилях сразу, в ядре (рукопожатие, uTP, UDP-трекеры, DHT; зашифрованный по TCP проходит). Действует через 1–2 с, data plane не перезапускается. Нода, где были сервисы Xray, после обновления держит BitTorrent закрытым ([`spec/egress-policy-v1.md`](spec/egress-policy-v1.md)) |
+| `rayctl egress block\|allow smtp` | только root, на ноде: закрыть или открыть TCP 25 на всех профилях; 465 и 587 (почта в телефоне) открыты. По умолчанию открыт |
 | `rayctl report [-o F] [-logs warning\|info\|debug\|none] [-since 24h] [-id ID]` | очищенный отчёт для issue, ничего не отправляет; `-logs debug` — со строками `-debug`, один `-id` на прогон |
 | `rayctl probe [-carrier udp\|tls\|tcp\|auto] [-redact] @bundle` | проверить ноду снаружи, как клиент; `auto` — UDP, ClientHello, голый TCP |
 | `journalctl -u rayd -u rayspa -u 'niko-*' -f` | журналы ноды |
 | `systemctl status rayd rayspa 'niko-*'` | состояние юнитов |
-| `nft list table inet raycontrol` | периметр; цепочка `early` — отброшенное до сборки фрагментов |
+| `nft list table inet raycontrol` | периметр; цепочка `early` — отброшенное до сборки фрагментов, `egress` — политика выхода |
 | `rayctl metrics [-o /var/lib/node_exporter/textfile/raycontrol.prom]` | счётчики в формате Prometheus: только числа, без имён и адресов |
 
 ## Сводка от клиентов (необязательно, R4-21)

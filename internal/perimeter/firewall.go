@@ -48,6 +48,9 @@ type Firewall interface {
 	// SetACME opens the ACME window: TCP 80 from anyone to port, for ttl.
 	// The elements expire by themselves; ttl 0 closes the window now.
 	SetACME(port uint16, ttl time.Duration) error
+	// SetEgress replaces the node's egress policy (spec/egress-policy-v1.md)
+	// in one transaction (no-op when the host is a relay).
+	SetEgress(e Egress) error
 	Allow(addr netip.Addr, ports []Port, ttl time.Duration) error
 	Deny(addr netip.Addr, ports []Port) error
 	Teardown() error
@@ -76,7 +79,8 @@ type NFT struct {
 	// grant, masqueraded. Invalid: not a relay.
 	RelayTo netip.Addr
 
-	destroy bool // nft and kernel support "destroy element"
+	destroy    bool // nft and kernel support "destroy element"
+	egressDoff bool // the kernel has no @ih: the egress policy's TCP rule by tcp doff
 }
 
 func (n *NFT) run(script string) error {
@@ -164,6 +168,7 @@ table inet %[1]s {
 	set acme_in { type inet_service; flags timeout; }
 	set rate4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set rate6 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
+	set egress_uid { type uid; }
 
 	# Before defragmentation and conntrack (priority -400 and -200): what the
 	# kernel never has to parse for anyone, packets to the node itself only
@@ -250,18 +255,35 @@ table inet %[1]s {
 	# UDP the conntrack has not seen answered (broadcast never is).
 	# systemd-resolved's stub, which units that resolve may reach
 	# (IPAddressAllow), answers on 53 only: whatever else listens on any
-	# address does not take the data plane there.
+	# address does not take the data plane there. What passes, the data
+	# plane's way to the internet, goes through the egress policy.
 	chain output {
 		type filter hook output priority 0; policy accept;
 		oif "lo" meta skuid %[7]s ip daddr != 127.0.0.0/8 fib daddr type local jump to_node
 		oif "lo" meta skuid %[7]s ip6 daddr != ::1 fib daddr type local jump to_node
 		meta nfproto ipv4 meta l4proto udp ct state != established meta skuid %[7]s fib daddr type broadcast jump to_node
 		oif "lo" meta skuid %[7]s ip daddr { 127.0.0.53, 127.0.0.54 } meta l4proto { tcp, udp } th dport != 53 jump to_node
+		meta skuid %[7]s jump egress
+		meta skuid @egress_uid jump egress
 	}
 	chain to_node {
 		counter comment "data-plane-to-node"
 		meta l4proto tcp reject with tcp reset
 		reject with icmpx admin-prohibited
+	}
+
+	# The node's egress policy (spec/egress-policy-v1.md): what the data
+	# plane may not send to the internet, whoever the user. Empty here:
+	# SetEgress writes these chains whole, egress_uid with them (rayd's UID
+	# where it runs the data plane itself). A kernel that refuses the policy
+	# holds back nothing of the table.
+	chain egress {
+	}
+	chain bt_tracker {
+	}
+	chain bt_utp {
+	}
+	chain bt_dht {
 	}%[8]s
 }
 `, Table, limit, n.NflogGroup, lo, loNAT, lo, guard, relay, relayMark)
@@ -524,13 +546,19 @@ type Drops struct {
 // EarlyDrops reads the counters of the early chain by reason (the rule's
 // comment) for local metrics.
 func (n *NFT) EarlyDrops() (map[string]Drops, error) {
+	return n.counters("early")
+}
+
+// counters reads the counters of a chain's rules by their comment; rules
+// with one comment add up.
+func (n *NFT) counters(chain string) (map[string]Drops, error) {
 	bin := n.Bin
 	if bin == "" {
 		bin = "nft"
 	}
-	out, err := exec.Command(bin, "-j", "list", "chain", "inet", Table, "early").Output() //nolint:gosec // G204: see run
+	out, err := exec.Command(bin, "-j", "list", "chain", "inet", Table, chain).Output() //nolint:gosec // G204: see run
 	if err != nil {
-		return nil, fmt.Errorf("nft list chain early: %w", err)
+		return nil, fmt.Errorf("nft list chain %s: %w", chain, err)
 	}
 	var doc struct {
 		Nftables []struct {
@@ -541,7 +569,7 @@ func (n *NFT) EarlyDrops() (map[string]Drops, error) {
 		} `json:"nftables"`
 	}
 	if err := json.Unmarshal(out, &doc); err != nil {
-		return nil, fmt.Errorf("nft list chain early: %w", err)
+		return nil, fmt.Errorf("nft list chain %s: %w", chain, err)
 	}
 	drops := map[string]Drops{}
 	for _, o := range doc.Nftables {

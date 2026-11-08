@@ -99,6 +99,10 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             (spec/app-update-v1.md; off by default)
   debug [show] | on [-for 30m] | off        the debug window: rayd, rayspa and niko-server log at debug
                                             level (client addresses too) until it closes by itself; root
+  egress [show]                             the node's egress policy on every profile, whether it is in
+                                            force and (root) what it blocked
+  egress block|allow bittorrent|smtp        block or allow BitTorrent, or SMTP (TCP 25), on every
+                                            profile (spec/egress-policy-v1.md; root, on the node)
 
   check [-host ADDR] [-domain D] [-services a,b]
                                               whether this host can run a node: what is required (install
@@ -251,6 +255,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.appMirror(ctx, sub)
 	case "debug":
 		return c.debug(ctx, sub, rest)
+	case "egress":
+		return c.egress(ctx, args[1:])
 	case "remote":
 		return c.remoteCmd(ctx, sub, rest)
 	case "backup":
@@ -304,6 +310,9 @@ func (c *cli) status(ctx context.Context) error {
 			m.Host, m.Users, m.Services, m.ActiveDevices, m.SpaPorts)
 		if m.DebugUntil != 0 {
 			fmt.Fprintf(w, "debug\topen until %s (rayctl debug off)\n", clock(m.DebugUntil))
+		}
+		if m.Egress != nil {
+			fmt.Fprintf(w, "egress\t%s\n", egressLine(m.Egress))
 		}
 		// rayd's loops: the last round of each (O-2).
 		for _, l := range m.Loops {

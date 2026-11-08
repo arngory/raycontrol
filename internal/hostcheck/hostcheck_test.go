@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -347,5 +348,47 @@ func TestInternetLevel(t *testing.T) {
 	}
 	if j, err := json.Marshal(rs[1]); err != nil || !strings.Contains(string(j), `"level":"internet"`) {
 		t.Fatalf("json %s %v", j, err)
+	}
+}
+
+// The egress policy (rayctl egress) through the kernel's dry run, after the
+// table: advised, so a kernel that refuses it holds back no install; the
+// refusal says why. Without @ih, the TCP rule by tcp doff.
+func TestEgressPolicyCheck(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name   string
+		refuse string // nft -c refuses the scripts with this
+		ok     bool
+		detail string
+	}{
+		{"kernel takes it", "", true, "the BitTorrent and SMTP filter loads (rayctl egress)"},
+		{"no @ih", "@ih", true, "no @ih in this kernel"},
+		{"refused", "udp length 38", false, "cannot load the BitTorrent and SMTP filter: exit status 1: Error: Could not process rule: Operation not supported"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, _, _ := fakeHost(t)
+			run := h.Run
+			h.Run = func(ctx context.Context, stdin, name string, args ...string) ([]byte, error) {
+				if name == "nft" && slices.Equal(args, []string{"-c", "-f", "-"}) && c.refuse != "" && strings.Contains(stdin, c.refuse) {
+					return []byte("Error: Could not process rule: Operation not supported\n"), errors.New("exit status 1")
+				}
+				return run(ctx, stdin, name, args...)
+			}
+			rs := h.Check(ctx, Options{Host: "203.0.113.7"})
+			r, ok := find(rs, Advised, "egress policy")
+			if !ok || r.OK != c.ok || !strings.Contains(r.Detail, c.detail) || !c.ok && r.Fix == "" {
+				t.Fatalf("%+v", r)
+			}
+			if f := Failed(rs); len(f) != 0 {
+				t.Fatalf("required checks failed: %+v", f)
+			}
+		})
+	}
+	// No egress check where the table itself does not load.
+	h, _, out := fakeHost(t)
+	out["nft"] = "Error: Could not process rule: No such file or directory\n"
+	if _, ok := find(h.Check(ctx, Options{Host: "203.0.113.7"}), Advised, "egress policy"); ok {
+		t.Fatal("egress checked without the table")
 	}
 }

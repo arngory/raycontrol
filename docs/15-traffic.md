@@ -20,9 +20,10 @@
   (Xray — правило `privateNets`, `internal/render/render.go:1157`; niko-server и naive — проверка адреса и
   `IPAddressDeny=` юнита). Broadcast своей подсети закрыт периметром для UDP всех профилей; IPv6 с IPv4 внутри (NAT64,
   6to4) — у Xray и naive;
-- портов не фильтрует никто, 25 (SMTP) тоже;
-- BitTorrent режет только выход Xray, и только по сниффингу открытого рукопожатия (`render.go:1213`). Hysteria2 и naive
-  его пропускают, зашифрованный BitTorrent (MSE) не ловит никто.
+- портов не фильтрует никто; 25 (SMTP) — только политика выхода ноды, если её включили;
+- BitTorrent и SMTP (25) с v0.21.0 закрывает политика выхода ноды: в ядре, для всех профилей сразу, по умолчанию
+  выключена (`rayctl egress`, [egress-policy-v1](spec/egress-policy-v1.md)). Нода, где были сервисы Xray, после
+  обновления держит BitTorrent закрытым, как раньше держал Xray. Зашифрованный BitTorrent по TCP (MSE) не ловит никто.
 
 ## 2. UDP: в каком виде
 
