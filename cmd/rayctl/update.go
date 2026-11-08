@@ -445,9 +445,7 @@ func (c *cli) restartNode(ctx context.Context, want, stage string, before []stri
 	// The rayctl now installed applies: its deployment may differ.
 	apply := exec.CommandContext(ctx, "/usr/local/bin/rayctl", "apply")
 	apply.Stdout, apply.Stderr = os.Stdout, os.Stderr
-	if stage != "" {
-		apply.Env = append(os.Environ(), updateStageEnv+"="+stage)
-	}
+	apply.Env = applyEnv(stage)
 	if err := apply.Run(); err != nil {
 		return fmt.Errorf("rayctl apply: %w", err)
 	}
@@ -556,6 +554,20 @@ func (c *cli) failUpdate(ctx context.Context, cause error, before []string) erro
 	return rolledBack{cause}
 }
 
+// applyEnv is the environment of the apply an update runs: the update's
+// own variables stay with the update, and the stage, when there is one,
+// goes to the new rayctl.
+func applyEnv(stage string) []string {
+	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		name, _, _ := strings.Cut(kv, "=")
+		return name == nodeupdate.ResultEnv || name == handoffEnv || name == updateFromEnv || name == updateStageEnv
+	})
+	if stage != "" {
+		env = append(env, updateStageEnv+"="+stage)
+	}
+	return env
+}
+
 // rolledBack is an update that failed and was undone.
 type rolledBack struct{ cause error }
 
@@ -569,6 +581,9 @@ func (e rolledBack) Unwrap() error { return e.cause }
 // the node was touched at all.
 func writeResult(path string, err error, touched bool, installed, newVersion string) {
 	r := nodeupdate.Result{State: nodeupdate.Done, Version: installed}
+	if release.IsRelease(newVersion) {
+		r.Release = newVersion
+	}
 	var rb rolledBack
 	switch {
 	case err == nil && touched:
@@ -595,7 +610,8 @@ func noteRollback(statusFile, from, to string) {
 	}
 	now := time.Now().UTC()
 	_ = nodeupdate.WriteStatus(statusFile, nodeupdate.Status{ID: nodeupdate.NewID(), State: nodeupdate.RolledBack, From: from, To: to, Target: from,
-		By: "root (rayctl update -rollback)", Kind: "local", Error: "rolled back by hand", Requested: now, Started: now, Ended: now})
+		Release: from, By: "root (rayctl update -rollback)", Kind: "local", Error: "rolled back by hand", Requested: now, Started: now, Ended: now,
+		Held: nodeupdate.Hold(nodeupdate.ReadStatus(statusFile).Held, from)})
 }
 
 // rollbackUpdate installs the binaries the last update kept aside, asked

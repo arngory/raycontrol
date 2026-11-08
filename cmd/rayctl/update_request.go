@@ -51,7 +51,12 @@ func (q requests) run() error {
 		fmt.Println("no update request")
 		return nil
 	}
-	st := nodeupdate.Status{ID: r.ID, From: version, To: r.Version, Target: r.Version, By: r.By, Kind: r.Kind, Requested: r.At, Started: now.UTC()}
+	// The releases the auto update leaves alone go on from status to status.
+	st := nodeupdate.Status{ID: r.ID, From: version, To: r.Version, Target: r.Version, By: r.By, Kind: r.Kind, Requested: r.At, Started: now.UTC(),
+		Held: nodeupdate.ReadStatus(q.status).Held}
+	if nodeupdate.ValidVersion(r.Version) && r.Version != "latest" {
+		st.Release = r.Version
+	}
 	if err == nil {
 		err = r.Check(version, now)
 	}
@@ -87,7 +92,7 @@ func (q requests) run() error {
 	st.Ended = time.Now().UTC()
 	if res, ok := nodeupdate.ReadResult(q.result); ok {
 		st.State, st.Error, st.Untouched = res.State, res.Error, res.Untouched
-		st.To = cmp.Or(res.Version, q.nodeVersion())
+		st.To, st.Release = cmp.Or(res.Version, q.nodeVersion()), cmp.Or(res.Release, st.Release)
 	} else {
 		// No word from the update (a rayctl that died): its exit and its
 		// last lines.
@@ -100,6 +105,9 @@ func (q requests) run() error {
 			st.State, st.Error = nodeupdate.Failed, tail.reason(runErr)
 		}
 		st.To = q.nodeVersion()
+	}
+	if st.State == nodeupdate.RolledBack || (st.State == nodeupdate.Failed && !st.Untouched) {
+		st.Held = nodeupdate.Hold(st.Held, st.Release)
 	}
 	_ = os.Remove(q.result)
 	if err := nodeupdate.WriteStatus(q.status, st); err != nil {
@@ -129,6 +137,7 @@ func markInterrupted(statusFile string) error {
 	}
 	st.State, st.Ended = nodeupdate.Failed, time.Now().UTC()
 	st.Error = "interrupted (" + cmp.Or(os.Getenv("SERVICE_RESULT"), "killed") + "): journalctl -u " + nodeupdate.ServiceUnit
+	st.Held = nodeupdate.Hold(st.Held, st.Release)
 	return nodeupdate.WriteStatus(statusFile, st)
 }
 

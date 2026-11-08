@@ -199,10 +199,17 @@ probe "previous release"
 
 for d in "${steps[@]}"; do
 	log "$distro: rayctl update -from the release in $d, by the rayctl on the node ($(x rayctl status | grep -m1 '^version' || true))"
-	out="$(xk /usr/local/bin/rayctl update -from "/opt/step/$d" -yes 2>&1)" || fail "rayctl update to the release in $d: $out"
+	# With the handoff, as an update by request runs it: the release's
+	# rayctl tells how it ended in the result file (docs/RELEASE.md).
+	res=()
+	[[ -n ${EXPECT_HANDOFF:-} ]] && res=(env RAYCONTROL_UPDATE_RESULT=/root/update-result.json)
+	out="$(xk "${res[@]}" /usr/local/bin/rayctl update -from "/opt/step/$d" -yes 2>&1)" || fail "rayctl update to the release in $d: $out"
 	echo "$out" | grep -E '^(release|raycontrol|installed|rolling|update)' || true
-	if [[ -n ${EXPECT_HANDOFF:-} ]] && ! grep -q 'updates the node, handed over by the rayctl of' <<<"$out"; then
-		fail "the update to the release in $d was not handed to its rayctl"
+	if [[ -n ${EXPECT_HANDOFF:-} ]]; then
+		grep -q 'updates the node, handed over by the rayctl of' <<<"$out" || fail "the update to the release in $d was not handed to its rayctl"
+		result="$(x cat /root/update-result.json)" || fail "no update result"
+		grep -q '"state":"done"' <<<"$result" || fail "update result: $result"
+		echo "result: $result"
 	fi
 	wait_active rayd.service rayspa.service niko-inner.service niko-dns.service niko-mdns.service niko-hy2o.service niko-front.service
 	probe "after the release in $d"

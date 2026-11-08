@@ -112,18 +112,46 @@ func TestAutoUpdate(t *testing.T) {
 
 func TestGaveUp(t *testing.T) {
 	now := time.Now()
+	v := "v0.19.3"
 	for _, c := range []struct {
 		s    nodeupdate.Status
 		want bool
 	}{
-		{nodeupdate.Status{State: nodeupdate.Done}, false},
-		{nodeupdate.Status{State: nodeupdate.RolledBack, Ended: now.Add(-48 * time.Hour)}, true},
-		{nodeupdate.Status{State: nodeupdate.Failed, Ended: now.Add(-48 * time.Hour)}, true},
-		{nodeupdate.Status{State: nodeupdate.Failed, Untouched: true, Ended: now.Add(-time.Hour)}, true},
-		{nodeupdate.Status{State: nodeupdate.Failed, Untouched: true, Ended: now.Add(-25 * time.Hour)}, false},
+		{nodeupdate.Status{State: nodeupdate.Done, Target: v}, false},
+		{nodeupdate.Status{State: nodeupdate.RolledBack, Target: v, Ended: now.Add(-48 * time.Hour)}, true},
+		{nodeupdate.Status{State: nodeupdate.Failed, Target: v, Ended: now.Add(-48 * time.Hour)}, true},
+		{nodeupdate.Status{State: nodeupdate.Failed, Target: v, Untouched: true, Ended: now.Add(-time.Hour)}, true},
+		{nodeupdate.Status{State: nodeupdate.Failed, Target: v, Untouched: true, Ended: now.Add(-25 * time.Hour)}, false},
+		// An admin's latest that rolled back: the release it went for.
+		{nodeupdate.Status{State: nodeupdate.RolledBack, Target: "latest", Release: v}, true},
+		{nodeupdate.Status{State: nodeupdate.RolledBack, Target: "latest", Release: "v0.19.2"}, false},
+		// Whatever came since, a release held stays alone.
+		{nodeupdate.Status{State: nodeupdate.Failed, Untouched: true, Target: "latest", Held: []string{"v0.19.1", v}}, true},
 	} {
-		if got := gaveUp(c.s, now); got != c.want {
+		if got := gaveUp(c.s, v, now); got != c.want {
 			t.Errorf("%+v: %v", c.s, got)
+		}
+	}
+}
+
+// The loop sleeps a tick, but no longer than to the moment it waits for;
+// past a moment it does not wait for, a whole tick (no spin).
+func TestNextWait(t *testing.T) {
+	now := time.Now()
+	tick := 10 * time.Minute
+	for _, c := range []struct {
+		due  time.Time
+		soon bool
+		want time.Duration
+	}{
+		{time.Time{}, false, tick},
+		{now.Add(3 * time.Minute), true, 3 * time.Minute},
+		{now.Add(time.Hour), true, tick},
+		{now.Add(-time.Minute), true, time.Second},
+		{now.Add(-time.Hour), false, tick},
+	} {
+		if got := nextWait(tick, c.due, now, c.soon); got != c.want {
+			t.Errorf("due %v soon %v: %v, want %v", c.due.Sub(now), c.soon, got, c.want)
 		}
 	}
 }

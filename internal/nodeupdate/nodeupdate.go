@@ -8,6 +8,7 @@
 package nodeupdate
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -64,9 +66,11 @@ const (
 	// (the download, say) is asked for again this much later.
 	RetryAfter = 24 * time.Hour
 
-	maxFile  = 4 << 10
-	maxField = 128
-	maxError = 512
+	maxFile   = 4 << 10  // a request, the policy
+	maxStatus = 16 << 10 // the status, the result
+	maxField  = 128
+	maxError  = 512
+	maxHeld   = 8
 )
 
 // Kinds of request.
@@ -99,15 +103,19 @@ type Request struct {
 
 // Status is an update's outcome, or its progress.
 type Status struct {
-	ID        string    `json:"id"`
-	State     string    `json:"state"`
-	From      string    `json:"from"`
-	To        string    `json:"to"`     // the version asked for until it ran, then the node's
-	Target    string    `json:"target"` // the version asked for
-	By        string    `json:"by"`
-	Kind      string    `json:"kind"`
-	Error     string    `json:"error,omitempty"`
-	Untouched bool      `json:"untouched,omitempty"` // failed before anything on the node changed
+	ID        string `json:"id"`
+	State     string `json:"state"`
+	From      string `json:"from"`
+	To        string `json:"to"`                // the version asked for until it ran, then the node's
+	Target    string `json:"target"`            // the version asked for
+	Release   string `json:"release,omitempty"` // the release it went for, once known
+	By        string `json:"by"`
+	Kind      string `json:"kind"`
+	Error     string `json:"error,omitempty"`
+	Untouched bool   `json:"untouched,omitempty"` // failed before anything on the node changed
+	// Held are releases whose update rolled back or broke on the way: the
+	// auto update leaves them alone. Each status carries them over.
+	Held      []string  `json:"held,omitempty"`
 	Requested time.Time `json:"requested"`
 	Started   time.Time `json:"started"`
 	Ended     time.Time `json:"ended"`
@@ -125,6 +133,7 @@ type Policy struct {
 type Result struct {
 	State     string `json:"state"`             // Done, RolledBack or Failed
 	Version   string `json:"version,omitempty"` // the node's version after it, when known
+	Release   string `json:"release,omitempty"` // the release it went for, once known
 	Error     string `json:"error,omitempty"`
 	Untouched bool   `json:"untouched,omitempty"` // failed before anything on the node changed
 }
@@ -231,24 +240,36 @@ func PeekRequest(path string) (Request, bool) {
 	return r, true
 }
 
-// WriteStatus is root's, in its own directory. Fields are cut to fit what
-// ReadStatus takes.
+// WriteStatus is root's, in its own directory. Fields are made printable
+// and cut, so that ReadStatus takes the file back whatever they held.
 func WriteStatus(path string, s Status) error {
-	for _, f := range []*string{&s.ID, &s.State, &s.From, &s.To, &s.Target, &s.By, &s.Kind} {
-		*f = clip(*f, maxField)
+	for _, f := range []*string{&s.ID, &s.State, &s.From, &s.To, &s.Target, &s.Release, &s.By, &s.Kind} {
+		*f = clip(Printable(*f), maxField)
 	}
-	s.Error = clip(s.Error, maxError)
-	b, err := json.MarshalIndent(s, "", "  ")
+	s.Error = clip(Printable(s.Error), maxError)
+	s.Held = slices.DeleteFunc(slices.Clone(s.Held), func(v string) bool { return !release.IsRelease(v) || len(v) > maxField })
+	if len(s.Held) > maxHeld {
+		s.Held = s.Held[len(s.Held)-maxHeld:]
+	}
+	b, err := marshal(s)
 	if err != nil {
 		return err
 	}
-	return writeRoot(path, append(b, '\n'))
+	return writeRoot(path, b)
+}
+
+// Hold adds release v to held: the auto update leaves it alone.
+func Hold(held []string, v string) []string {
+	if !release.IsRelease(v) || slices.Contains(held, v) {
+		return held
+	}
+	return append(slices.Clone(held), v)
 }
 
 // ReadStatus is the last status, Idle when there is none.
 func ReadStatus(path string) Status {
 	var s Status
-	b, err := readNoFollow(path)
+	b, err := readLimit(path, maxStatus)
 	if err != nil || json.Unmarshal(b, &s) != nil || s.State == "" {
 		return Status{State: Idle}
 	}
@@ -313,8 +334,8 @@ func WritePolicy(path string, p Policy) error {
 
 // WriteResult is the updating rayctl's, to the file ResultEnv names.
 func WriteResult(path string, r Result) error {
-	r.Version, r.Error = clip(r.Version, maxField), clip(r.Error, maxError)
-	b, err := json.Marshal(r)
+	r.Version, r.Release, r.Error = clip(Printable(r.Version), maxField), clip(Printable(r.Release), maxField), clip(Printable(r.Error), maxError)
+	b, err := marshal(r)
 	if err != nil {
 		return err
 	}
@@ -324,7 +345,7 @@ func WriteResult(path string, r Result) error {
 // ReadResult is the runner's: the outcome the update wrote, if it did.
 func ReadResult(path string) (Result, bool) {
 	var r Result
-	b, err := readNoFollow(path)
+	b, err := readLimit(path, maxStatus)
 	if err != nil || json.Unmarshal(b, &r) != nil {
 		return r, false
 	}
@@ -333,6 +354,16 @@ func ReadResult(path string) (Result, bool) {
 		return r, true
 	}
 	return r, false
+}
+
+// marshal is v as one line of JSON, with no HTML escapes: printable
+// fields grow by their quotes and backslashes at most.
+func marshal(v any) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	err := enc.Encode(v)
+	return b.Bytes(), err
 }
 
 // Printable is s with what a terminal or a journal would act on (control
@@ -396,7 +427,9 @@ func writeAtomic(path string, b []byte, mode os.FileMode) error {
 	return nil
 }
 
-func readNoFollow(path string) ([]byte, error) {
+func readNoFollow(path string) ([]byte, error) { return readLimit(path, maxFile) }
+
+func readLimit(path string, limit int) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) //nolint:gosec // G304: fixed paths
 	if err != nil {
 		return nil, err
@@ -405,9 +438,9 @@ func readNoFollow(path string) ([]byte, error) {
 	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s: not a regular file", path)
 	}
-	b, err := io.ReadAll(io.LimitReader(f, maxFile+1))
-	if err == nil && len(b) > maxFile {
-		err = fmt.Errorf("%s: larger than %d bytes", path, maxFile)
+	b, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
+	if err == nil && len(b) > limit {
+		err = fmt.Errorf("%s: larger than %d bytes", path, limit)
 	}
 	return b, err
 }
@@ -439,25 +472,26 @@ func ParseWindow(w string) (from, to int, err error) {
 	return from, to, nil
 }
 
-// Left is how long the window still runs at t (in t's location), 0 when t
-// is outside it.
+// Left is how long the window still runs at t (in t's location: its
+// clock, daylight saving time included), 0 when t is outside it.
 func Left(t time.Time, w string) time.Duration {
 	from, to, err := ParseWindow(w)
 	if err != nil {
 		return 0
 	}
-	day := time.Duration(t.Hour())*time.Hour + time.Duration(t.Minute())*time.Minute + time.Duration(t.Second())*time.Second
-	start, end := time.Duration(from)*time.Minute, time.Duration(to)*time.Minute
-	if end <= start { // past midnight
-		end += 24 * time.Hour
+	y, m, d := t.Date()
+	at := func(day, min int) time.Time { return time.Date(y, m, d+day, min/60, min%60, 0, 0, t.Location()) }
+	// The window that holds t, if any, opened today or yesterday.
+	for _, day := range []int{0, -1} {
+		start, end := at(day, from), at(day, to)
+		if !end.After(start) { // past midnight
+			end = at(day+1, to)
+		}
+		if !t.Before(start) && t.Before(end) {
+			return end.Sub(t)
+		}
 	}
-	if day < start {
-		day += 24 * time.Hour
-	}
-	if day >= end {
-		return 0
-	}
-	return end - day
+	return 0
 }
 
 // InWindow reports whether t (in its own location) falls in the window.

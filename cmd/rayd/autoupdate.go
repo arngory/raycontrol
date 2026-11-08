@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	mrand "math/rand/v2"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -42,12 +43,14 @@ type autoUpdater struct {
 func (a *autoUpdater) run(ctx context.Context) {
 	var (
 		last    string
+		lerr    error // why last is not known
 		checked time.Time
 		due     time.Time // the moment in this window, once in it
 	)
 	for {
 		p := nodeupdate.ReadPolicy(a.policy)
 		t := a.now()
+		soon := false // waits for due
 		switch {
 		case p.Auto != "patch":
 			a.hb.Retain("auto-update", nil)
@@ -59,34 +62,41 @@ func (a *autoUpdater) run(ctx context.Context) {
 				cctx, cancel := context.WithTimeout(ctx, time.Minute)
 				v, err := a.latest(cctx)
 				cancel()
-				checked = t
-				if err != nil {
-					a.hb.Report("auto-update", "patch: the latest release not known: "+err.Error(), nil)
-				} else {
+				checked, lerr = t, err
+				if err == nil {
 					last = v
 					a.seen.Store(v)
 				}
 			}
-			stat := nodeupdate.Settled(nodeupdate.ReadStatus(a.status), t)
+			// The request first: root writes the status before it
+			// removes the request.
 			req, waiting := nodeupdate.PeekRequest(a.request)
+			stat := nodeupdate.Settled(nodeupdate.ReadStatus(a.status), t)
 			switch {
+			case last == "" && lerr != nil:
+				a.hb.Report("auto-update", "patch: the latest release not known: "+lerr.Error(), nil)
+				due = time.Time{}
 			case last == "" || !nodeupdate.Patch(last, a.running):
 				a.hb.Report("auto-update", "patch, window "+p.Window+": up to date ("+a.running+")", nil)
 				due = time.Time{}
-			case stat.Target == last && gaveUp(stat, t):
-				a.hb.Report("auto-update", "patch: the update to "+last+" failed ("+stat.Error+"); not again by itself", nil)
+			case gaveUp(stat, last, t):
+				a.hb.Report("auto-update", "patch: the update to "+last+" did not hold; not again by itself (rayctl update status)", nil)
+				due = time.Time{}
 			case !nodeupdate.InWindow(t, p.Window):
 				a.hb.Report("auto-update", "patch: "+last+" waits for the window "+p.Window, nil)
 				due = time.Time{}
 			case nodeupdate.Busy(stat, req, waiting, t):
 				a.hb.Report("auto-update", "patch: an update is under way", nil)
+				due = time.Time{}
 			case due.IsZero():
-				due = t
+				due, soon = t, true
 				if span := min(nodeupdate.Spread, nodeupdate.Left(t, p.Window)-time.Minute); span > 0 {
 					due = t.Add(time.Duration(mrand.Int64N(int64(span)))) //nolint:gosec // a moment, not a secret
 				}
 				a.hb.Report("auto-update", "patch: "+last+" at "+due.Format("15:04"), nil)
-			case !t.Before(due):
+			case t.Before(due):
+				soon = true
+			default:
 				r := nodeupdate.Request{ID: nodeupdate.NewID(), Kind: nodeupdate.Auto, Version: last, By: "auto", At: t.UTC()}
 				switch err := nodeupdate.WriteRequest(a.request, r, t); {
 				case errors.Is(err, nodeupdate.ErrWaiting):
@@ -101,24 +111,34 @@ func (a *autoUpdater) run(ctx context.Context) {
 				due = time.Time{}
 			}
 		}
-		// Waiting for the moment, not a whole tick past it: the window
-		// may close in between.
-		wait := a.tick
-		if !due.IsZero() {
-			wait = min(wait, max(due.Sub(t), time.Second))
-		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(wait):
+		case <-time.After(nextWait(a.tick, due, t, soon)):
 		}
 	}
 }
 
-// gaveUp reports whether the auto update leaves the version of s alone:
-// its update rolled back, or failed; one that failed before it changed
-// anything on the node is tried again after nodeupdate.RetryAfter.
-func gaveUp(s nodeupdate.Status, now time.Time) bool {
+// nextWait is how long the loop sleeps: a tick, or until the moment it
+// waits for, not a whole tick past it (the window may close in between).
+func nextWait(tick time.Duration, due, now time.Time, soon bool) time.Duration {
+	if !soon {
+		return tick
+	}
+	return min(tick, max(due.Sub(now), time.Second))
+}
+
+// gaveUp reports whether the auto update leaves release v alone: an update
+// to it rolled back or broke on the way (held, whatever came since), or it
+// is the one that just failed before it changed anything on the node, tried
+// again after nodeupdate.RetryAfter.
+func gaveUp(s nodeupdate.Status, v string, now time.Time) bool {
+	if slices.Contains(s.Held, v) {
+		return true
+	}
+	if s.Release != v && s.Target != v {
+		return false
+	}
 	switch s.State {
 	case nodeupdate.RolledBack:
 		return true

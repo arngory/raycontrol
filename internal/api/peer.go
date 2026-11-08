@@ -102,6 +102,13 @@ func isLocal(ctx context.Context) bool {
 	return cred != nil
 }
 
+// isOwner reports a caller on the node's socket that is root or the
+// daemon's own user, not a member of the group the policy lets in.
+func isOwner(ctx context.Context) bool {
+	cred, _ := ctx.Value(peerKey{}).(*unix.Ucred)
+	return cred != nil && (cred.Uid == 0 || int(cred.Uid) == os.Getuid())
+}
+
 // isRoot reports a caller with UID 0.
 func isRoot(ctx context.Context) bool {
 	cred, _ := ctx.Value(peerKey{}).(*unix.Ucred)

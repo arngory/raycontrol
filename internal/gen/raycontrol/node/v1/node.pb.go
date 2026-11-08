@@ -5955,7 +5955,8 @@ type UpdateStatus struct {
 	RequestedAt   int64  `protobuf:"varint,8,opt,name=requested_at,json=requestedAt,proto3" json:"requested_at,omitempty"` // unix seconds; 0: not yet
 	StartedAt     int64  `protobuf:"varint,9,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
 	EndedAt       int64  `protobuf:"varint,10,opt,name=ended_at,json=endedAt,proto3" json:"ended_at,omitempty"`
-	Target        string `protobuf:"bytes,11,opt,name=target,proto3" json:"target,omitempty"` // the version asked for: "latest" or vX.Y.Z
+	Target        string `protobuf:"bytes,11,opt,name=target,proto3" json:"target,omitempty"`   // the version asked for: "latest" or vX.Y.Z
+	Release       string `protobuf:"bytes,12,opt,name=release,proto3" json:"release,omitempty"` // the release the update went for, once known (vX.Y.Z)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6063,6 +6064,13 @@ func (x *UpdateStatus) GetEndedAt() int64 {
 func (x *UpdateStatus) GetTarget() string {
 	if x != nil {
 		return x.Target
+	}
+	return ""
+}
+
+func (x *UpdateStatus) GetRelease() string {
+	if x != nil {
+		return x.Release
 	}
 	return ""
 }
@@ -6497,7 +6505,7 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x06remote\x18\x04 \x01(\tR\x06remote\x12\x12\n" +
 	"\x04auto\x18\x05 \x01(\tR\x04auto\x12\x16\n" +
 	"\x06window\x18\x06 \x01(\tR\x06window\x12\x1a\n" +
-	"\btimezone\x18\a \x01(\tR\btimezone\"\x87\x02\n" +
+	"\btimezone\x18\a \x01(\tR\btimezone\"\xa1\x02\n" +
 	"\fUpdateStatus\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12\x12\n" +
@@ -6511,7 +6519,8 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"started_at\x18\t \x01(\x03R\tstartedAt\x12\x19\n" +
 	"\bended_at\x18\n" +
 	" \x01(\x03R\aendedAt\x12\x16\n" +
-	"\x06target\x18\v \x01(\tR\x06target2\x92 \n" +
+	"\x06target\x18\v \x01(\tR\x06target\x12\x18\n" +
+	"\arelease\x18\f \x01(\tR\arelease2\x92 \n" +
 	"\vNodeService\x12X\n" +
 	"\tGetStatus\x12$.raycontrol.node.v1.GetStatusRequest\x1a%.raycontrol.node.v1.GetStatusResponse\x12X\n" +
 	"\tListUsers\x12$.raycontrol.node.v1.ListUsersRequest\x1a%.raycontrol.node.v1.ListUsersResponse\x12[\n" +

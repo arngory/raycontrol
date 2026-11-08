@@ -69,9 +69,11 @@ func (u *NodeUpdate) now() time.Time {
 }
 
 // current is the last status as it stands now, and the request waiting.
+// The request first: root writes the status before it removes the
+// request, so one of the two shows an update taken.
 func (u *NodeUpdate) current(now time.Time) (st nodeupdate.Status, req nodeupdate.Request, waiting bool) {
-	st = nodeupdate.Settled(nodeupdate.ReadStatus(u.status()), now)
 	req, waiting = nodeupdate.PeekRequest(u.request())
+	st = nodeupdate.Settled(nodeupdate.ReadStatus(u.status()), now)
 	return st, req, waiting
 }
 
@@ -81,6 +83,10 @@ func (s *Server) StartUpdate(ctx context.Context, req *connect.Request[nodev1.St
 	fail := func(code connect.Code, err error) (*connect.Response[nodev1.StartUpdateResponse], error) {
 		_ = s.Store.Audit(ctx, actorFrom(ctx), "update.start", "node", "error: "+err.Error())
 		return nil, connect.NewError(code, err)
+	}
+	if isLocal(ctx) && !isOwner(ctx) {
+		// On the node it is root's rayctl update; the group may not.
+		return fail(connect.CodePermissionDenied, errors.New("on the node: rayctl update, as root"))
 	}
 	if u.policy().Remote != "on" {
 		return fail(connect.CodeFailedPrecondition, errors.New("remote updates are off on this node (root on it: rayctl update remote on)"))
@@ -139,16 +145,24 @@ func (s *Server) GetUpdateStatus(_ context.Context, _ *connect.Request[nodev1.Ge
 	}
 	if waiting && r.ID != st.ID {
 		out.Status = requestedPB(r, s.Version)
+		if now.Sub(r.At) >= nodeupdate.Stale {
+			out.Status.State = nodeupdate.Failed
+			out.Status.Error = "not taken within " + nodeupdate.Stale.String() + ": the update unit does not run (systemctl status " + nodeupdate.PathUnit + ")"
+		}
 	}
 	return connect.NewResponse(out), nil
 }
 
 func requestedPB(r nodeupdate.Request, from string) *nodev1.UpdateStatus {
-	return &nodev1.UpdateStatus{Id: r.ID, State: nodeupdate.Requested, From: from, To: r.Version, Target: r.Version, By: r.By, Kind: r.Kind,
+	st := &nodev1.UpdateStatus{Id: r.ID, State: nodeupdate.Requested, From: from, To: r.Version, Target: r.Version, By: r.By, Kind: r.Kind,
 		RequestedAt: unixOf(r.At)}
+	if r.Version != "latest" {
+		st.Release = r.Version
+	}
+	return st
 }
 
 func statusPB(st nodeupdate.Status) *nodev1.UpdateStatus {
-	return &nodev1.UpdateStatus{Id: st.ID, State: st.State, From: st.From, To: st.To, Target: st.Target, By: st.By, Kind: st.Kind, Error: st.Error,
-		RequestedAt: unixOf(st.Requested), StartedAt: unixOf(st.Started), EndedAt: unixOf(st.Ended)}
+	return &nodev1.UpdateStatus{Id: st.ID, State: st.State, From: st.From, To: st.To, Target: st.Target, Release: st.Release, By: st.By, Kind: st.Kind,
+		Error: st.Error, RequestedAt: unixOf(st.Requested), StartedAt: unixOf(st.Started), EndedAt: unixOf(st.Ended)}
 }

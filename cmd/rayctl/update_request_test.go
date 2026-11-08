@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -115,27 +116,37 @@ echo '{"state":"done","version":"v0.19.1"}' > "$RAYCONTROL_UPDATE_RESULT"`)
 		strings.TrimSpace(string(b)) != "update -yes -version latest" || st.Ended.IsZero() || st.Untouched {
 		t.Fatalf("done: %+v %v %q", st, err, b)
 	}
-	// Rolled back: the cause from the result, whatever was printed last.
-	back := fake(`echo '{"state":"rolled_back","version":"v0.19.0","error":"niko-front.service exited"}' > "$RAYCONTROL_UPDATE_RESULT"
-echo "rayctl: the update by the rayctl of v0.19.1: exit status 1" >&2; exit 1`)
-	st, err = run(req(nodeupdate.Remote, "v0.19.1"), back)
-	if err == nil || st.State != nodeupdate.RolledBack || st.Error != "niko-front.service exited" || st.To != "v0.19.0" || st.Target != "v0.19.1" {
+	// Rolled back: the cause from the result, whatever was printed last;
+	// the release it went for (an admin's latest) held from now on.
+	back := fake(`echo '{"state":"rolled_back","version":"v0.19.0","release":"v0.19.3","error":"niko-front.service exited"}' > "$RAYCONTROL_UPDATE_RESULT"
+echo "rayctl: the update by the rayctl of v0.19.3: exit status 1" >&2; exit 1`)
+	st, err = run(req(nodeupdate.Remote, "latest"), back)
+	if err == nil || st.State != nodeupdate.RolledBack || st.Error != "niko-front.service exited" || st.To != "v0.19.0" || st.Target != "latest" ||
+		st.Release != "v0.19.3" || len(st.Held) != 1 || st.Held[0] != "v0.19.3" {
 		t.Fatalf("rolled back: %+v %v", st, err)
 	}
 	// Failed before it changed anything: untouched, the auto update may
 	// try again.
 	dl := fake(`echo '{"state":"failed","version":"v0.19.0","error":"downloading SHA256SUMS: timeout","untouched":true}' > "$RAYCONTROL_UPDATE_RESULT"; exit 1`)
-	if st, _ = run(req(nodeupdate.Remote, "v0.19.1"), dl); st.State != nodeupdate.Failed || !st.Untouched || st.Error != "downloading SHA256SUMS: timeout" {
-		t.Fatalf("download: %+v", st)
+	if st, _ = run(req(nodeupdate.Remote, "v0.19.1"), dl); st.State != nodeupdate.Failed || !st.Untouched || st.Error != "downloading SHA256SUMS: timeout" ||
+		st.Release != "v0.19.1" || len(st.Held) != 1 {
+		t.Fatalf("download (not held; v0.19.3 still is): %+v", st)
 	}
+	// A refusal later does not forget what is held.
+	policy("off", "off", nodeupdate.DefaultWindow)
+	if st, _ = run(req(nodeupdate.Remote, "latest"), never); st.State != nodeupdate.Failed || len(st.Held) != 1 || st.Held[0] != "v0.19.3" {
+		t.Fatalf("a refusal: %+v", st)
+	}
+	policy("on", "off", nodeupdate.DefaultWindow)
 	// No result (a rayctl that died): its last words.
 	died := fake(`echo "update failed: niko-front.service exited"; echo "rayctl: update failed, the previous version runs again: niko-front.service exited" >&2; exit 1`)
 	if st, _ = run(req(nodeupdate.Remote, "v0.19.1"), died); st.State != nodeupdate.RolledBack || st.Error != "niko-front.service exited" || st.To != "v0.19.0" {
 		t.Fatalf("no result, rolled back: %+v", st)
 	}
 	broken := fake(`echo "rayctl: SHA256SUMS: minisign: signed with another key" >&2; exit 1`)
-	if st, _ = run(req(nodeupdate.Remote, "v0.19.1"), broken); st.State != nodeupdate.Failed || st.Error != "SHA256SUMS: minisign: signed with another key" || st.Untouched {
-		t.Fatalf("no result, failed: %+v", st)
+	if st, _ = run(req(nodeupdate.Remote, "v0.19.1"), broken); st.State != nodeupdate.Failed || st.Error != "SHA256SUMS: minisign: signed with another key" || st.Untouched ||
+		!slices.Equal(st.Held, []string{"v0.19.3", "v0.19.1"}) {
+		t.Fatalf("no result, failed (held: it may have changed the node): %+v", st)
 	}
 	if fi, err := os.Stat(q.status); err != nil || fi.Mode().Perm() != 0o644 {
 		t.Fatalf("status file %v %v", fi, err)
@@ -155,10 +166,51 @@ func TestMarkInterrupted(t *testing.T) {
 	if st := nodeupdate.ReadStatus(path); st.State != nodeupdate.Done {
 		t.Fatalf("done: %+v", st)
 	}
-	nodeupdate.WriteStatus(path, nodeupdate.Status{ID: "0a", State: nodeupdate.Running, Target: "v0.19.1"})
+	nodeupdate.WriteStatus(path, nodeupdate.Status{ID: "0a", State: nodeupdate.Running, Target: "v0.19.1", Release: "v0.19.1"})
 	markInterrupted(path)
-	if st := nodeupdate.ReadStatus(path); st.State != nodeupdate.Failed || !strings.Contains(st.Error, "interrupted (timeout)") || st.Ended.IsZero() || st.Untouched {
+	if st := nodeupdate.ReadStatus(path); st.State != nodeupdate.Failed || !strings.Contains(st.Error, "interrupted (timeout)") || st.Ended.IsZero() || st.Untouched ||
+		len(st.Held) != 1 {
 		t.Fatalf("running: %+v", st)
+	}
+}
+
+// A rollback by hand: the release rolled back from is held, what was held
+// stays.
+func TestNoteRollback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status.json")
+	nodeupdate.WriteStatus(path, nodeupdate.Status{ID: "0a", State: nodeupdate.Done, Held: []string{"v0.19.2"}})
+	noteRollback(path, "v0.19.3", "v0.19.1")
+	st := nodeupdate.ReadStatus(path)
+	if st.State != nodeupdate.RolledBack || st.Release != "v0.19.3" || st.To != "v0.19.1" || len(st.Held) != 2 || st.Held[1] != "v0.19.3" {
+		t.Fatalf("%+v", st)
+	}
+	none := filepath.Join(t.TempDir(), "none", "status.json")
+	noteRollback(none, "v0.19.3", "v0.19.1")
+	if _, err := os.Stat(filepath.Dir(none)); !os.IsNotExist(err) {
+		t.Error("a status where updates by request never ran")
+	}
+}
+
+// The apply an update runs does not get the update's own variables.
+func TestApplyEnv(t *testing.T) {
+	t.Setenv(nodeupdate.ResultEnv, "/x")
+	t.Setenv(handoffEnv, "1")
+	t.Setenv(updateFromEnv, "v0.19.0")
+	t.Setenv(updateStageEnv, "/old")
+	for _, stage := range []string{"", "/var/lib/raycontrol-install/update-1"} {
+		var got []string
+		for _, kv := range applyEnv(stage) {
+			if strings.HasPrefix(kv, "RAYCONTROL_UPDATE") {
+				got = append(got, kv)
+			}
+		}
+		want := 0
+		if stage != "" {
+			want = 1
+		}
+		if len(got) != want || (want == 1 && got[0] != updateStageEnv+"="+stage) {
+			t.Errorf("stage %q: %v", stage, got)
+		}
 	}
 }
 
@@ -170,11 +222,11 @@ func TestWriteResult(t *testing.T) {
 		touched bool
 		want    nodeupdate.Result
 	}{
-		{nil, false, nodeupdate.Result{State: nodeupdate.Done, Version: "v0.19.0"}}, // the newest is installed
-		{nil, true, nodeupdate.Result{State: nodeupdate.Done, Version: "v0.19.1"}},
-		{rolledBack{errors.New("niko-front.service exited")}, true, nodeupdate.Result{State: nodeupdate.RolledBack, Version: "v0.19.0", Error: "niko-front.service exited"}},
-		{errors.New("downloading"), false, nodeupdate.Result{State: nodeupdate.Failed, Version: "v0.19.0", Error: "downloading", Untouched: true}},
-		{errors.New("x; rollback failed too: y"), true, nodeupdate.Result{State: nodeupdate.Failed, Error: "x; rollback failed too: y"}},
+		{nil, false, nodeupdate.Result{State: nodeupdate.Done, Version: "v0.19.0", Release: "v0.19.1"}}, // the newest is installed
+		{nil, true, nodeupdate.Result{State: nodeupdate.Done, Version: "v0.19.1", Release: "v0.19.1"}},
+		{rolledBack{errors.New("niko-front.service exited")}, true, nodeupdate.Result{State: nodeupdate.RolledBack, Version: "v0.19.0", Release: "v0.19.1", Error: "niko-front.service exited"}},
+		{errors.New("downloading"), false, nodeupdate.Result{State: nodeupdate.Failed, Version: "v0.19.0", Release: "v0.19.1", Error: "downloading", Untouched: true}},
+		{errors.New("x; rollback failed too: y"), true, nodeupdate.Result{State: nodeupdate.Failed, Release: "v0.19.1", Error: "x; rollback failed too: y"}},
 	} {
 		writeResult(path, c.err, c.touched, "v0.19.0", "v0.19.1")
 		if got, ok := nodeupdate.ReadResult(path); !ok || got != c.want {

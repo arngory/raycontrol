@@ -149,8 +149,8 @@ func TestRequestFile(t *testing.T) {
 		t.Error("a huge request taken")
 	}
 	os.Remove(path)
-	// A directory planted there goes too, or the path unit would fire
-	// until systemd gives up on it.
+	// A directory planted there goes too: one request that cannot be
+	// removed would keep the path unit firing.
 	os.MkdirAll(filepath.Join(path, "a"), 0o700)
 	os.Symlink(secret, filepath.Join(path, "a", "l"))
 	if _, ok, err := ReadRequest(path); !ok || err == nil {
@@ -209,13 +209,24 @@ func TestStatusFile(t *testing.T) {
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o644 {
 		t.Errorf("mode %v", fi.Mode())
 	}
-	// However long the error, rayd reads the status back.
-	s.State, s.Error, s.By = Failed, strings.Repeat("é", maxFile), strings.Repeat("b", maxFile)
+	// However long the fields, and whatever JSON escapes in them, rayd
+	// reads the status back.
+	s.State, s.Error = Failed, strings.Repeat("é\x1b<&\"\\", maxFile)
+	s.ID, s.From, s.To, s.Target, s.Release, s.By, s.Kind = strings.Repeat("<\\", maxFile), strings.Repeat("\"", maxFile), strings.Repeat("\x00", maxFile),
+		strings.Repeat(">", maxFile), strings.Repeat("&", maxFile), strings.Repeat("<", maxFile), strings.Repeat("\u2028", maxFile)
+	s.Held = []string{"v0.19.1", "v0.19.2", "v0.19.3", "v0.19.4", "v0.19.5", "v0.19.6", "v0.19.7", "v0.19.8", "v0.19.9", "not one", strings.Repeat("x", maxFile)}
 	if err := WriteStatus(path, s); err != nil {
 		t.Fatal(err)
 	}
-	if got := ReadStatus(path); got.State != Failed || !utf8.ValidString(got.Error) {
-		t.Errorf("a long error: %+v", got)
+	got := ReadStatus(path)
+	if got.State != Failed || !utf8.ValidString(got.Error) || strings.ContainsRune(got.Error, 0x1b) || strings.ContainsRune(got.To, 0) {
+		t.Errorf("long fields: %+v", got)
+	}
+	if len(got.Held) != maxHeld || got.Held[maxHeld-1] != "v0.19.9" {
+		t.Errorf("held %v", got.Held)
+	}
+	if h := Hold(Hold(Hold(nil, "v0.19.1"), "v0.19.1"), "latest"); len(h) != 1 {
+		t.Errorf("hold %v", h)
 	}
 }
 
@@ -294,6 +305,20 @@ func TestPatchAndWindow(t *testing.T) {
 	} {
 		if got := Left(c.t, c.w); got != c.want {
 			t.Errorf("Left(%s, %s) = %v, want %v", c.t.Format("15:04"), c.w, got, c.want)
+		}
+	}
+	// The night the clock goes forward (Berlin, 2026-03-29, 02:00 → 03:00):
+	// the window 01:30-02:30 ends an hour of real time after it opened.
+	if berlin, err := time.LoadLocation("Europe/Berlin"); err == nil {
+		t0 := time.Date(2026, 3, 29, 1, 45, 0, 0, berlin)
+		if got := Left(t0, "01:30-02:30"); got > 45*time.Minute || got <= 0 {
+			t.Errorf("spring forward: %v left at 01:45", got)
+		}
+		if at := t0.Add(30 * time.Minute); !InWindow(at, "01:30-02:30") { // 03:15 on the clock
+			t.Errorf("spring forward: not in the window at %s, a moment picked at 01:45", at.Format("15:04"))
+		}
+		if InWindow(t0.Add(time.Hour), "01:30-02:30") {
+			t.Errorf("spring forward: in the window at %s", t0.Add(time.Hour).Format("15:04"))
 		}
 	}
 }

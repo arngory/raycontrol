@@ -95,6 +95,20 @@ func TestStartUpdate(t *testing.T) {
 	if err := start(""); err != nil {
 		t.Fatalf("after a dead run: %v", err)
 	}
+	// A request the unit never took (its path unit stopped): failed after
+	// an hour, and the next one is taken.
+	w, _ := nodeupdate.PeekRequest(srv.NodeUpdate.Request)
+	srv.NodeUpdate.Now = func() time.Time { return w.At.Add(nodeupdate.Stale) }
+	if st, _ := c.GetUpdateStatus(ctx, connect.NewRequest(&nodev1.GetUpdateStatusRequest{})); st.Msg.Status.State != nodeupdate.Failed ||
+		st.Msg.Status.Id != w.ID || !strings.Contains(st.Msg.Status.Error, "not taken") {
+		t.Fatalf("a request never taken: %+v", st.Msg.Status)
+	}
+	if err := start("v0.19.2"); err != nil {
+		t.Fatalf("after a request never taken: %v", err)
+	}
+	if st, _ := c.GetUpdateStatus(ctx, connect.NewRequest(&nodev1.GetUpdateStatusRequest{})); st.Msg.Status.Release != "v0.19.2" {
+		t.Fatalf("the release asked for: %+v", st.Msg.Status)
+	}
 
 	entries, _ := srv.Store.ListAudit(ctx, 30)
 	var actions []string
