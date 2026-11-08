@@ -209,7 +209,17 @@ for d in "${steps[@]}"; do
 done
 if [[ -z ${STEPS_ONLY:-} ]]; then
 	log "$distro: rayctl update by the previous release's rayctl"
-	x /usr/local/bin/rayctl update -local /opt/rc -yes || fail "rayctl update"
+	out="$(x /usr/local/bin/rayctl update -local /opt/rc -yes 2>&1)" || fail "rayctl update: $out"
+	echo "$out" | grep -E '^(raycontrol|service|rolling|update)' || true
+	# A node from far back keeps its services' weaker modes (an update
+	# leaves them: their clients may not do more yet), and the update says
+	# what a new service has. The operator's step, then the node is a
+	# fresh install's.
+	while read -r name kv; do
+		[[ -n $name ]] || continue
+		log "$distro: as the update advises: rayctl service set $name $kv"
+		x rayctl service set "$name" "$kv" >/dev/null || fail "rayctl service set $name $kv"
+	done < <(sed -nE 's/^service ([a-z0-9-]+): .*\(rayctl service set <name> ([a-z_]+=[a-z]+).*$/\1 \2/p' <<<"$out")
 fi
 for b in rayd rayspa rayctl; do
 	x cmp -s "/opt/rc/$b" "/usr/local/bin/$b" || fail "$b is not this build's after the update"
@@ -218,6 +228,8 @@ for b in niko-server xray slipstream-server; do
 	x cmp -s "/opt/rc/$b" "/usr/local/libexec/raycontrol/$b" || fail "$b is not this build's after the update"
 done
 wait_active rayd.service rayspa.service niko-inner.service niko-dns.service niko-mdns.service niko-hy2o.service niko-front.service
+# rayd renders what the settings changed by itself; give it a moment.
+sleep 3
 # This build's apply has nothing left to change: the update applied it.
 again="$(x rayctl apply)" || fail "rayctl apply after the update"
 if grep -E '^(wrote|restarting)' <<<"$again"; then

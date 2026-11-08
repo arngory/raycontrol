@@ -364,6 +364,19 @@ func TestRemoteAPI(t *testing.T) {
 	if _, err := admin.node.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r", Address: "198.51.100.20"})); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("a remote relay: %v", err)
 	}
+	// Whether admins may update the node is root's (node-update-v1); the
+	// status they may read, and an update they ask for is refused while
+	// remote updates are off.
+	if _, err := admin.node.SetUpdatePolicy(ctx, connect.NewRequest(&nodev1.SetUpdatePolicyRequest{Remote: "on"})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("a remote admin turned remote updates on: %v", err)
+	}
+	if r, err := admin.node.GetUpdateStatus(ctx, connect.NewRequest(&nodev1.GetUpdateStatusRequest{})); err != nil || r.Msg.Remote != "off" {
+		t.Fatalf("the update status: %v %v", r, err)
+	}
+	if _, err := admin.node.StartUpdate(ctx, connect.NewRequest(&nodev1.StartUpdateRequest{})); connect.CodeOf(err) != connect.CodeFailedPrecondition ||
+		!strings.Contains(err.Error(), "remote updates are off") {
+		t.Fatalf("an update with remote updates off: %v", err)
+	}
 	audit, err := c.ListAudit(ctx, connect.NewRequest(&nodev1.ListAuditRequest{Limit: 5}))
 	if err != nil {
 		t.Fatal(err)

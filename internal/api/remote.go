@@ -220,6 +220,8 @@ var nodeOnly = map[string]bool{
 	nodev1connect.NodeServiceRemoveRelayProcedure: true,
 	// Client addresses go to the journal, which only root reads.
 	nodev1connect.NodeServiceSetDebugProcedure: true,
+	// Whether admins may update the node at all is root's (node-update-v1).
+	nodev1connect.NodeServiceSetUpdatePolicyProcedure: true,
 }
 
 // adminOnly lets admin devices call NodeService; the audit log names them.

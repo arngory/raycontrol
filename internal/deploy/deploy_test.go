@@ -74,8 +74,25 @@ func TestBuild(t *testing.T) {
 		!slices.Equal(users["rayd"].ExtraGroups, []string{"niko-dns", "niko-front", "niko-inner", "niko-reality"}) {
 		t.Fatalf("groups: %+v", users)
 	}
-	if !slices.Equal(p.Units, []string{"rayd.service", "rayspa.service", "niko-inner.service", "niko-reality.service", "niko-dns.service", "niko-front.service"}) {
+	if !slices.Equal(p.Units, []string{"rayd.service", "rayspa.service", "niko-inner.service", "niko-reality.service", "niko-dns.service", "niko-front.service",
+		"raycontrol-update.path"}) {
 		t.Fatalf("units %v", p.Units)
+	}
+	// The update by request: the path unit watches rayd's request; the
+	// service, root and unsandboxed, is no unit apply starts.
+	var path, svc string
+	for _, f := range p.Files {
+		switch f.Path {
+		case "/etc/systemd/system/raycontrol-update.path":
+			path = string(f.Content)
+		case "/etc/systemd/system/raycontrol-update.service":
+			svc = string(f.Content)
+		}
+	}
+	if !strings.Contains(path, "PathExists=/var/lib/raycontrol/update-request") ||
+		!strings.Contains(svc, "ExecStart=/usr/local/bin/rayctl update -request") || strings.Contains(svc, "User=") ||
+		!strings.Contains(svc, "Type=oneshot") || strings.Contains(svc, "[Install]") {
+		t.Fatalf("update units:\n%s\n%s", path, svc)
 	}
 	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "olc") {
 		t.Fatalf("warnings %v", p.Warnings)
@@ -131,7 +148,7 @@ func TestBuild(t *testing.T) {
 	for _, pr := range p.Processes {
 		units = append(units, pr.Unit)
 	}
-	if !slices.Equal(units, p.Units[2:]) {
+	if !slices.Equal(units, p.Units[2:len(p.Units)-1]) {
 		t.Fatalf("processes %v, units %v", units, p.Units)
 	}
 	d := p.Processes[2]
@@ -1224,7 +1241,7 @@ func TestBuildSlipstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
-	if !slices.Equal(p.Units, []string{"rayd.service", "rayspa.service", "niko-inner.service", "niko-slip.service", "niko-front.service"}) || len(p.Warnings) != 0 {
+	if !slices.Equal(p.Units, []string{"rayd.service", "rayspa.service", "niko-inner.service", "niko-slip.service", "niko-front.service", "raycontrol-update.path"}) || len(p.Warnings) != 0 {
 		t.Fatalf("units %v, warnings %v", p.Units, p.Warnings)
 	}
 	i := slices.IndexFunc(p.Users, func(u deploy.SystemUser) bool { return u.Name == "niko-slip" })

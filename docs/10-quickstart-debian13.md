@@ -857,6 +857,9 @@ rayctl -remote laptop.rcdev device invite alice phone      # приглашен�
     принимает в архиве только знакомые файлы, а с v0.16.0 там есть `slipstream-server` ([RELEASE.md](RELEASE.md),
     «Со старых версий: ступени»).
   - На хосте relay `rayctl update` отказывает: его обновляет `bootstrap.sh -relay`.
+  - Без SSH (v0.19.0): `rayctl update remote on` — обновлять ноду из админ-панели клиента; `rayctl update auto patch` —
+    нода сама ставит патч-версии ночью (03:00–05:00 по её времени, `-window` — своё окно). Оба по умолчанию выключены,
+    ставятся только подписанные релизы и никогда не старее установленного ([spec](spec/node-update-v1.md)).
 - `rayctl service rotate reality` — новые ключи и имя REALITY раньше срока; с `-now` — сразу.
 - `rayctl service rotate dns` — новый ключ печати dnstt (dnsseal-v1) сразу; прежний принимается ещё `-cred-grace`, с `-now` — нет.
 - `rayctl service set site answer=silent` — сайт вместо 404 молчит до таймаута; `rayctl apply` после.

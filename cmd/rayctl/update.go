@@ -24,6 +24,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/release"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -97,8 +98,12 @@ func (c *cli) update(ctx context.Context, args []string) error {
 	noCarry := fs.Bool("no-carry", false, "with -rollback: put the database copy back as it is, without what was revoked since (when the current database cannot be read)")
 	local := fs.String("local", "", "binaries from this directory, not verified: for tests only")
 	noHandoff := fs.Bool("no-handoff", false, "update with this rayctl, not the release's own (when the new one cannot run here)")
+	request := fs.Bool("request", false, "run the update the node asked for (raycontrol-update.service: spec/node-update-v1.md)")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
+	}
+	if fs.NArg() > 0 {
+		return c.updatePolicy(ctx, fs.Args())
 	}
 	installed := installedVersion()
 	if err := needRoot(); err != nil {
@@ -106,6 +111,9 @@ func (c *cli) update(ctx context.Context, args []string) error {
 	}
 	if err := updatable(deploy.DB, deploy.RelayBundle); err != nil {
 		return err
+	}
+	if *request {
+		return c.updateRequest(ctx, nodeupdate.RequestFile, nodeupdate.StatusFile, "/usr/local/bin/rayctl")
 	}
 	if *rollback {
 		carry := carryMust
