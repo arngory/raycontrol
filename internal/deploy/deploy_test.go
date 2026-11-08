@@ -123,7 +123,7 @@ func TestBuild(t *testing.T) {
 	dns := file(p, "/etc/systemd/system/niko-dns.service")
 	for _, want := range []string{
 		"User=niko-dns", "SupplementaryGroups=niko-inner", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX\n",
-		"ExecStartPre=+install -m 0400 -o niko-dns -g niko-dns /var/lib/raycontrol/rendered/dns/noise.key /run/niko/dns/noise.key\n", "RuntimeDirectory=niko/dns", "CapabilityBoundingSet=\n",
+		"ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/dns/noise.key niko-dns /run/niko/dns/noise.key\n", "RuntimeDirectory=niko/dns", "CapabilityBoundingSet=\n",
 		"ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c /var/lib/raycontrol/rendered/dns/backend.json",
 		"InaccessiblePaths=-/var/lib/raycontrol/rendered/inner\n",
 	} {
@@ -135,7 +135,7 @@ func TestBuild(t *testing.T) {
 	if !strings.Contains(front, "AmbientCapabilities=CAP_NET_BIND_SERVICE") || strings.Contains(front, "SupplementaryGroups") ||
 		!strings.Contains(front, "After=network-online.target niko-dns.service niko-reality.service") ||
 		// dnsprobe-v1: the key copied in by root, for the front alone.
-		!strings.Contains(front, "ExecStartPre=+install -m 0400 -o niko-front -g niko-front /var/lib/raycontrol/rendered/front/dnsprobe.key /run/niko/front/dnsprobe.key") {
+		!strings.Contains(front, "ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/front/dnsprobe.key niko-front /run/niko/front/dnsprobe.key\n") {
 		t.Errorf("front unit:\n%s", front)
 	}
 	if !strings.Contains(file(p, "/etc/systemd/system/rayspa.service"), "AmbientCapabilities=CAP_NET_ADMIN") {
@@ -394,7 +394,7 @@ func TestBuildSelfSteal(t *testing.T) {
 	site := file(p, "/etc/systemd/system/niko-site.service")
 	for _, want := range []string{
 		"ConditionPathExists=/var/lib/raycontrol/rendered/site/chain.pem\n",
-		"ExecStartPre=+install -m 0400 -o niko-site -g niko-site /var/lib/raycontrol/rendered/site/key.pem /run/niko/site/key.pem\n",
+		"ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/site/key.pem niko-site /run/niko/site/key.pem\n",
 		// The default answer: 404 to everything, no content directory (R4-8).
 		"ExecStart=/usr/local/bin/rayd site -answer 404 -chain /var/lib/raycontrol/rendered/site/chain.pem -key /run/niko/site/key.pem -socket /run/niko/site/tls.sock\n",
 		"PrivateNetwork=yes\n", "RestrictAddressFamilies=AF_UNIX\n",
@@ -679,7 +679,7 @@ func TestBuildHysteria(t *testing.T) {
 	// key (and salamander) copied in by root, out to public addresses only.
 	for name, u := range map[string]string{"masq": masq, "obfs": obfs} {
 		for _, want := range []string{"ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c /var/lib/raycontrol/rendered/hy2-",
-			"ExecStartPre=+install -m 0400 -o niko-hy2-", "CapabilityBoundingSet=\n", "IPAddressDeny=localhost",
+			"ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/hy2-", "CapabilityBoundingSet=\n", "IPAddressDeny=localhost",
 			// The host's resolver, when it is systemd-resolved's stub.
 			"IPAddressAllow=127.0.0.53 127.0.0.54\n"} {
 			if !strings.Contains(u, want) {
@@ -698,7 +698,7 @@ func TestBuildHysteria(t *testing.T) {
 		t.Errorf("the front is in the backends' groups (S-1):\n%s", front)
 	}
 	for _, want := range []string{
-		"ExecStartPre=+install -m 0400 -o niko-front -g niko-front /var/lib/raycontrol/rendered/front/hy2-obfs.salamander /run/niko/front/hy2-obfs.salamander",
+		"ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/front/hy2-obfs.salamander niko-front /run/niko/front/hy2-obfs.salamander\n",
 		"RuntimeDirectory=niko/front\n", "AmbientCapabilities=CAP_NET_BIND_SERVICE"} {
 		if !strings.Contains(front, want) {
 			t.Errorf("front unit lacks %q:\n%s", want, front)
@@ -731,7 +731,7 @@ func TestBuildNaive(t *testing.T) {
 	u := file(p, "/etc/systemd/system/niko-naive.service")
 	for _, want := range []string{
 		"ExecStart=/usr/local/bin/rayd naive -answer 404 -users /var/lib/raycontrol/rendered/naive/users.json",
-		"-socket /run/niko/naive-in/naive.sock", "ExecStartPre=+install -m 0400 -o niko-naive",
+		"-socket /run/niko/naive-in/naive.sock", "ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/naive/",
 		"IPAddressDeny=localhost link-local multicast 10.0.0.0/8", "CapabilityBoundingSet=\n",
 	} {
 		if !strings.Contains(u, want) {
@@ -772,8 +772,8 @@ func TestBuildDNSKeyWithoutRender(t *testing.T) {
 	others := slices.DeleteFunc(files, func(f render.File) bool { return f.Service == "dnstt" || f.Service == "masterdns" })
 	p := build(m, others, render.DefaultPaths)
 	for name, key := range map[string]string{"dnstt": "noise.key", "masterdns": "encryption.key"} {
-		want := "ExecStartPre=+install -m 0400 -o niko-" + name + " -g niko-" + name +
-			" /var/lib/raycontrol/rendered/" + name + "/" + key + " /run/niko/" + name + "/" + key
+		want := "ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/" + name + "/" + key +
+			" niko-" + name + " /run/niko/" + name + "/" + key + "\n"
 		if u := file(p, "/etc/systemd/system/niko-"+name+".service"); !strings.Contains(u, want) {
 			t.Errorf("%s unit lacks %q:\n%s", name, want, u)
 		}
@@ -791,7 +791,7 @@ func TestRelayPlan(t *testing.T) {
 	// rayd relay: no privileges, its own copy of the bundle (relay-v1 §9.1).
 	probe := file(p, "/etc/systemd/system/"+deploy.RelayProbeUnit)
 	for _, want := range []string{
-		"ExecStartPre=+install -m 0400 -o rayd -g rayd /etc/raycontrol/relay.bundle /run/rayd-relay/relay.bundle",
+		"ExecStartPre=+/usr/local/bin/rayd credential /etc/raycontrol relay.bundle rayd /run/rayd-relay/relay.bundle\n",
 		"ExecStart=/usr/local/bin/rayd relay -bundle /run/rayd-relay/relay.bundle -state /var/lib/rayd-relay/devices.json",
 		"StateDirectory=rayd-relay\n", "StateDirectoryMode=0700",
 		"User=rayd", "CapabilityBoundingSet=\n", "After=network-online.target rayspa.service",
@@ -803,7 +803,7 @@ func TestRelayPlan(t *testing.T) {
 	}
 	u := file(p, "/etc/systemd/system/rayspa.service")
 	for _, want := range []string{
-		"ExecStartPre=+install -m 0400 -o rayspa -g rayspa /etc/raycontrol/relay.bundle /run/rayspa/relay.bundle",
+		"ExecStartPre=+/usr/local/bin/rayd credential /etc/raycontrol relay.bundle rayspa /run/rayspa/relay.bundle\n",
 		"ExecStart=/usr/local/bin/rayspa run -relay /run/rayspa/relay.bundle -state /var/lib/rayspa/snapshot.pb",
 		"User=rayspa", "CapabilityBoundingSet=CAP_NET_ADMIN\n", "RuntimeDirectoryMode=0700",
 	} {
@@ -1202,12 +1202,12 @@ func TestSandboxResolverProblem(t *testing.T) {
 // missing file would keep the whole front down (Q-1).
 func TestFrontCredentialsOnlyRendered(t *testing.T) {
 	m, files := plan2(t, render.DefaultPaths)
-	key := "/var/lib/raycontrol/rendered/front/dnsprobe.key"
-	if !strings.Contains(file(build(m, files, render.DefaultPaths), "/etc/systemd/system/niko-front.service"), key) {
+	key, line := "/var/lib/raycontrol/rendered/front/dnsprobe.key", " /var/lib raycontrol/rendered/front/dnsprobe.key "
+	if !strings.Contains(file(build(m, files, render.DefaultPaths), "/etc/systemd/system/niko-front.service"), line) {
 		t.Fatal("the rendered key is not installed")
 	}
 	partial := slices.DeleteFunc(slices.Clone(files), func(f render.File) bool { return f.Path == key })
-	if front := file(build(m, partial, render.DefaultPaths), "/etc/systemd/system/niko-front.service"); front == "" || strings.Contains(front, key) {
+	if front := file(build(m, partial, render.DefaultPaths), "/etc/systemd/system/niko-front.service"); front == "" || strings.Contains(front, "dnsprobe.key") {
 		t.Fatalf("a key not rendered is installed:\n%s", front)
 	}
 }
@@ -1306,7 +1306,7 @@ func TestBuildSlipstream(t *testing.T) {
 		"Description=slipstream server slip", "ConditionPathExists=/var/lib/raycontrol/rendered/slip/cert.pem\n",
 		"User=niko-slip", "Group=niko-slip", "SupplementaryGroups=niko-inner", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX\n",
 		"ExecStart=/usr/local/libexec/raycontrol/slipstream-server " + args + "\n",
-		"ExecStartPre=+install -m 0400 -o niko-slip -g niko-slip /var/lib/raycontrol/rendered/slip/key.pem /run/niko/slip/key.pem\n",
+		"ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/slip/key.pem niko-slip /run/niko/slip/key.pem\n",
 		"RuntimeDirectory=niko/slip", "ReadWritePaths=/run/niko/slip-in", "UMask=0007", "CapabilityBoundingSet=\n", "MemoryDenyWriteExecute=yes",
 		// In inner's group for its socket, not for its config (review).
 		"InaccessiblePaths=-/var/lib/raycontrol/rendered/inner\n",

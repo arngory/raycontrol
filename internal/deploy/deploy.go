@@ -105,7 +105,7 @@ type Process struct {
 	Needs string   // ConditionPathExists: not started until it exists
 	Dir   string   // RuntimeDirectory: created empty at each start
 	// Copies are the credentials root copies in before the start
-	// (ExecStartPre=+install), source and destination.
+	// (ExecStartPre=+rayd credential), source and destination.
 	Copies [][2]string
 }
 
@@ -193,9 +193,9 @@ func (u unit) process() Process {
 		switch {
 		case k == "ExecStart":
 			pr.Args = strings.Fields(v)
-		case k == "ExecStartPre" && strings.HasPrefix(v, "+install "):
-			if f := strings.Fields(v); len(f) >= 3 {
-				pr.Copies = append(pr.Copies, [2]string{f[len(f)-2], f[len(f)-1]})
+		case k == "ExecStartPre":
+			if src, dst, ok := copyOf(v); ok {
+				pr.Copies = append(pr.Copies, [2]string{src, dst})
 			}
 		case k == "RuntimeDirectory":
 			// Relative to /run, unless the paths are elsewhere.
@@ -271,6 +271,9 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 		return false
 	})
 	hasFront := in.Front
+	// Credentials are copied in from rendered files by root, from a
+	// directory rayd cannot change (copyIn).
+	anchor := renderedAnchor(p)
 
 	var raydGroups []string
 	var units []unit
@@ -334,7 +337,7 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 			needs:       path.Join(dir, render.SiteChain),
 			service: []string{
 				"User=" + g, "Group=" + g,
-				fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s", g, g, path.Join(dir, render.SiteKey), key),
+				copyIn(bin.Rayd, anchor, g, path.Join(dir, render.SiteKey), key),
 				"ExecStart=" + bin.Rayd + args + " -chain " + path.Join(dir, render.SiteChain) +
 					" -key " + key + " -socket " + p.SiteSocket(s.Name),
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
@@ -385,11 +388,11 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 		raydGroups = append(raydGroups, g)
 		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID})
 		dir := path.Join(p.Rendered, s.Name)
-		creds := []string{fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
-			g, g, path.Join(dir, render.HysteriaKey), p.Credential(s.Name, render.HysteriaKey))}
+		creds := []string{copyIn(bin.Rayd, anchor,
+			g, path.Join(dir, render.HysteriaKey), p.Credential(s.Name, render.HysteriaKey))}
 		if s.Kind == "hy2-obfs" {
-			creds = append(creds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
-				g, g, path.Join(dir, render.HysteriaObfs), p.Credential(s.Name, render.HysteriaObfs)))
+			creds = append(creds, copyIn(bin.Rayd, anchor,
+				g, path.Join(dir, render.HysteriaObfs), p.Credential(s.Name, render.HysteriaObfs)))
 		}
 		units = append(units, unit{
 			name:        render.UnitName(s.Name),
@@ -404,7 +407,7 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 				"UMask=0007",
 				"CapabilityBoundingSet=",
 				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
-				"IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7",
+				denyLocal,
 				probeAllow, // the probe name's address (R4-16); the process checks the rest
 				stubAllow,
 			}, creds...),
@@ -437,7 +440,7 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 			needs:       path.Join(dir, render.NaiveChain),
 			service: []string{
 				"User=" + g, "Group=" + g,
-				fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s", g, g, path.Join(dir, render.NaiveKey), key),
+				copyIn(bin.Rayd, anchor, g, path.Join(dir, render.NaiveKey), key),
 				"ExecStart=" + bin.Rayd + " naive -answer " + answer + " -users " + path.Join(dir, render.NaiveUsers) +
 					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name) +
 					" -quic-socket " + p.NaiveQUICSocket(s.Name) + probeArg + frontUID,
@@ -447,7 +450,7 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 				"UMask=0007",
 				"CapabilityBoundingSet=",
 				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
-				"IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7",
+				denyLocal,
 				probeAllow,
 			},
 		})
@@ -485,8 +488,8 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 		if s.Kind == "slipstream" {
 			secret = render.SlipstreamKey
 		}
-		creds := []string{fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
-			g, g, path.Join(p.Rendered, s.Name, secret), p.Credential(s.Name, secret))}
+		creds := []string{copyIn(bin.Rayd, anchor,
+			g, path.Join(p.Rendered, s.Name, secret), p.Credential(s.Name, secret))}
 		after := []string{}
 		if inner != nil {
 			after = append(after, render.UnitName(inner.Name))
@@ -527,8 +530,8 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID, ExtraGroups: extra})
 		var creds []string
 		for _, name := range []string{render.YggdrasilTLSKey, render.YggdrasilNodeKey} {
-			creds = append(creds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
-				g, g, path.Join(dir, name), p.Credential(s.Name, name)))
+			creds = append(creds, copyIn(bin.Rayd, anchor,
+				g, path.Join(dir, name), p.Credential(s.Name, name)))
 		}
 		var after []string
 		if inner != nil {
@@ -540,7 +543,7 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 		if s.PublicPeers {
 			network = []string{
 				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
-				"IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7",
+				denyLocal,
 				stubAllow, // peers by name
 			}
 		}
@@ -590,7 +593,7 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 		var frontCreds []string
 		cred := func(rendered bool, src, dst string) {
 			if rendered {
-				frontCreds = append(frontCreds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o niko-front -g niko-front %s %s", src, dst))
+				frontCreds = append(frontCreds, copyIn(bin.Rayd, anchor, "niko-front", src, dst))
 			}
 		}
 		cred(in.DNSProbeKey, path.Join(p.Rendered, "front", render.DNSProbeKeyFile), p.FrontDNSProbe())
@@ -798,6 +801,10 @@ func (u unit) check() error {
 // themselves. Whatever else listens on any address answers there too: the
 // perimeter's output chain lets the data plane reach port 53 only.
 const stubAllow = "IPAddressAllow=127.0.0.53 127.0.0.54"
+
+// denyLocal keeps a unit that goes out from the node itself and from local
+// networks: the internet only.
+const denyLocal = "IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7"
 
 // ResolvedDropIn is where installs before v0.11 turned systemd-resolved's
 // stub off for the DNS tunnels; Apply removes it (giveBackStub).

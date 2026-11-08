@@ -102,6 +102,9 @@ func main() {
 		err = cmdNaive(os.Args[2:])
 	case "relay":
 		err = cmdRelay(os.Args[2:])
+	case deploy.CredentialCommand:
+		// Not in the usage: systemd runs it, as root, from the units.
+		err = cmdCredential(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:

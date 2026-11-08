@@ -17,8 +17,10 @@ import (
 // legacyBuild is Build as it was before Inputs (v0.20.1), kept as the
 // oracle of TestBuildFromInputs: the plan rayctl now builds from rayd's
 // inputs must be the plan rayd built from its model, byte for byte, so
-// that nothing changes on a node. Remove it with GetDeployment's files
-// (spec/apply-plan-v1.md §4.1, step 8).
+// that nothing changes on a node. One change only, made in both on
+// purpose: the credentials are copied in by rayd's credential command,
+// not by install(1) (copyIn, spec/apply-plan-v1.md §6, 3). Remove it with
+// GetDeployment's files (§4.1, step 8).
 func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binaries) Plan {
 	var plan Plan
 	var inner *render.Service
@@ -67,6 +69,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 	// that failed to render still refreshes its keys file there (review).
 	frontConfig := path.Join(p.Rendered, "front", "front.json")
 	hasFront := slices.ContainsFunc(files, func(f render.File) bool { return f.Path == frontConfig })
+	anchor := renderedAnchor(p) // decision 3, the one change since v0.20.1
 
 	var raydGroups []string
 	var units []unit
@@ -131,7 +134,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 			needs:       path.Join(dir, render.SiteChain),
 			service: []string{
 				"User=" + g, "Group=" + g,
-				fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s", g, g, path.Join(dir, render.SiteKey), key),
+				copyIn(bin.Rayd, anchor, g, path.Join(dir, render.SiteKey), key),
 				"ExecStart=" + bin.Rayd + args + " -chain " + path.Join(dir, render.SiteChain) +
 					" -key " + key + " -socket " + p.SiteSocket(s.Name),
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
@@ -184,11 +187,11 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 		raydGroups = append(raydGroups, g)
 		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID})
 		dir := path.Join(p.Rendered, s.Name)
-		creds := []string{fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
-			g, g, path.Join(dir, render.HysteriaKey), p.Credential(s.Name, render.HysteriaKey))}
+		creds := []string{copyIn(bin.Rayd, anchor,
+			g, path.Join(dir, render.HysteriaKey), p.Credential(s.Name, render.HysteriaKey))}
 		if s.Kind == "hy2-obfs" {
-			creds = append(creds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
-				g, g, path.Join(dir, render.HysteriaObfs), p.Credential(s.Name, render.HysteriaObfs)))
+			creds = append(creds, copyIn(bin.Rayd, anchor,
+				g, path.Join(dir, render.HysteriaObfs), p.Credential(s.Name, render.HysteriaObfs)))
 		}
 		units = append(units, unit{
 			name:        render.UnitName(s.Name),
@@ -236,7 +239,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 			needs:       path.Join(dir, render.NaiveChain),
 			service: []string{
 				"User=" + g, "Group=" + g,
-				fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s", g, g, path.Join(dir, render.NaiveKey), key),
+				copyIn(bin.Rayd, anchor, g, path.Join(dir, render.NaiveKey), key),
 				"ExecStart=" + bin.Rayd + " naive -answer " + answer + " -users " + path.Join(dir, render.NaiveUsers) +
 					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name) +
 					" -quic-socket " + p.NaiveQUICSocket(s.Name) + probeArg + frontUID,
@@ -284,8 +287,8 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 		if s.Kind == "slipstream" {
 			secret = render.SlipstreamKey
 		}
-		creds := []string{fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
-			g, g, path.Join(p.Rendered, s.Name, secret), p.Credential(s.Name, secret))}
+		creds := []string{copyIn(bin.Rayd, anchor,
+			g, path.Join(p.Rendered, s.Name, secret), p.Credential(s.Name, secret))}
 		after := []string{}
 		if inner != nil {
 			after = append(after, render.UnitName(inner.Name))
@@ -326,8 +329,8 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID, ExtraGroups: extra})
 		var creds []string
 		for _, name := range []string{render.YggdrasilTLSKey, render.YggdrasilNodeKey} {
-			creds = append(creds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s",
-				g, g, path.Join(dir, name), p.Credential(s.Name, name)))
+			creds = append(creds, copyIn(bin.Rayd, anchor,
+				g, path.Join(dir, name), p.Credential(s.Name, name)))
 		}
 		var after []string
 		if inner != nil {
@@ -393,7 +396,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 		var frontCreds []string
 		cred := func(src, dst string) {
 			if rendered[src] {
-				frontCreds = append(frontCreds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o niko-front -g niko-front %s %s", src, dst))
+				frontCreds = append(frontCreds, copyIn(bin.Rayd, anchor, "niko-front", src, dst))
 			}
 		}
 		cred(path.Join(p.Rendered, "front", render.DNSProbeKeyFile), p.FrontDNSProbe())
