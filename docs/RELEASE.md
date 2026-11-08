@@ -108,7 +108,9 @@ bootstrap. Версию он читает из подписанного комм
 (`release` — релиз, который ставили; `untouched` — сбой до того, как на ноде что-то поменялось). Тоже между версиями: файлы
 `/var/lib/raycontrol-update/status.json` (`id`, `state`, `from`, `to`, `target`, `release`, `by`, `kind`, `error`,
 `untouched`, `held`, `requested`, `started`, `ended`: итог пишет `rayctl` прежней версии, читает rayd новой) и
-`policy.json` (`remote`, `auto`, `window`), флаги юнита `update -request` и `update -request-ended`. Всё остальное (раскладка, имена, число файлов, новые
+`policy.json` (`remote`, `auto`, `window`), флаги юнита `update -request` и `update -request-ended`. И `units` в ответе
+`GetDeployment`: `rayctl` без передачи (`-no-handoff`, `rayctl` релиза не запустился) берёт оттуда юниты после
+обновления; `files` и `users` уйдут из ответа (apply-plan-v1, решение 2). Всё остальное (раскладка, имена, число файлов, новые
 транспорты, способ установки) с v0.19.0 можно менять без ступеней. CI проверяет передачу строкой `upgrade (handoff)`:
 это дерево как v0.0.1 обновляется до себя же как v0.0.2, подписанного одноразовым ключом (сборка с тегом
 `releasetest` берёт ключ из `RAYCONTROL_TEST_RELEASE_KEY`; в Release-workflow тега нет —

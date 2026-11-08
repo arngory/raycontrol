@@ -557,7 +557,7 @@ rayctl device invite u-k3f9-x2qa admin-phone -role admin -ttl 30m -qr
   - `rayctl apply`: юниты и системные пользователи. Нужен после добавления naive, Yggdrasil и других сервисов со
     своими процессами;
   - `backup`, `update`, `uninstall`, `service cert`;
-  - `GetDeployment` — в нём все закрытые ключи ноды.
+  - `GetDeployment` и `GetDeployInputs`: из них root строит план `apply`.
 - Администратор видит всех пользователей и может выгрузить их ссылки (`export`). Давайте роль только тем, кому
   доверяете ноду целиком.
 
