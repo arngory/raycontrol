@@ -173,7 +173,7 @@ func TestYggdrasilService(t *testing.T) {
 	seed, _ := hex.DecodeString(keyHex)
 	if link.Scheme != "vless" || link.User.Username() != m.Inner[u.ID] || link.Hostname() != render.YggdrasilAddress(nodeKey).String() ||
 		link.Port() != strconv.Itoa(settings.ExitPort) || q.Get("type") != "raw" || !strings.HasPrefix(q.Get("encryption"), "mlkem768x25519plus.") ||
-		peer.Scheme != "tls" || peer.Host != settings.SNI+":443" || peer.Query().Get("sni") != settings.SNI ||
+		peer.Scheme != "tls" || peer.Host != "203.0.113.7:443" || peer.Query().Get("sni") != settings.SNI ||
 		peer.Query().Get("key") != hex.EncodeToString(nodeKey) || len(seed) != 32 {
 		t.Fatalf("link %s", profiles[0].Link)
 	}
