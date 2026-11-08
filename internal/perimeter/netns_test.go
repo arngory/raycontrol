@@ -764,6 +764,9 @@ func TestNetnsDataPlaneToNode(t *testing.T) {
 	for _, args := range [][]string{
 		{"link", "add", "rc-va", "type", "veth", "peer", "name", "rc-vb"},
 		{"addr", "add", "192.0.2.10/24", "dev", "rc-va"},
+		// A subnet of its own, as the provider's segment (lo:9 above makes
+		// all of 192.0.2.0/24 local).
+		{"addr", "add", "198.51.100.10/24", "dev", "rc-va"},
 		{"link", "set", "rc-va", "up"},
 		{"link", "set", "rc-vb", "up"},
 	} {
@@ -814,6 +817,39 @@ func TestNetnsDataPlaneToNode(t *testing.T) {
 			t.Errorf("uid %d to %v: %v, want reachable=%v", c.uid, c.addr, err, c.want)
 		}
 	}
+	// The subnet's broadcast address: the node and its neighbours.
+	for _, c := range []struct {
+		uid  int
+		addr [4]byte
+		want bool
+	}{
+		{0, [4]byte{198, 51, 100, 255}, true},
+		{9110, [4]byte{198, 51, 100, 255}, false},
+		{9110, [4]byte{198, 51, 100, 77}, true}, // a neighbour's unicast address: not the output chain's
+	} {
+		err := sendUDPAs(c.uid, c.addr, 18999)
+		if (err == nil) != c.want {
+			t.Errorf("UDP, uid %d to %v: %v, want sent=%v", c.uid, c.addr, err, c.want)
+		}
+	}
+}
+
+// sendUDPAs sends one datagram from a socket owned by uid, with
+// SO_BROADCAST on: only the perimeter decides.
+func sendUDPAs(uid int, addr [4]byte, port int) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	unix.Setfsuid(uid)
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+	unix.Setfsuid(0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_BROADCAST, 1); err != nil {
+		return err
+	}
+	return unix.Sendto(fd, []byte("x"), 0, &unix.SockaddrInet4{Port: port, Addr: addr})
 }
 
 // dialAs connects over TCP from a socket owned by uid: the socket takes the
