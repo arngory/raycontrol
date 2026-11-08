@@ -333,7 +333,7 @@ func (s *Server) resolve(ctx context.Context, name string) ([]netip.Addr, error)
 	if s.Resolve != nil {
 		return s.Resolve(ctx, name)
 	}
-	return PublicResolver().LookupNetIP(ctx, "ip", name)
+	return PublicResolver().LookupNetIP(ctx, "ip", fqdn(name))
 }
 
 // deadlines are the stream's, as http.ResponseController sets them.

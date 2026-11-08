@@ -98,7 +98,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	dial := s.Dial
 	if dial == nil {
-		dial = PublicDialer().DialContext
+		dial = dialPublic
 	}
 	if host, _, _ := net.SplitHostPort(target); s.Probe != "" && host == probe.Name {
 		var d net.Dialer
@@ -391,26 +391,29 @@ func SetResolverLog(log *slog.Logger) { publicDNS.log.Store(log) }
 type pubDNS struct {
 	addrs []string
 	wait  time.Duration
-	cur   atomic.Uint32 // the one asked first
+	cur   atomic.Uint32  // the one asked first
+	good  []atomic.Int64 // unix nanoseconds of each one's last good answer
 	r     *net.Resolver
 	log   atomic.Pointer[slog.Logger]
 	warn  resolverWarn
 }
 
 func newPublicDNS(addrs []string, wait time.Duration) *pubDNS {
-	p := &pubDNS{addrs: addrs, wait: wait}
+	p := &pubDNS{addrs: addrs, wait: wait, good: make([]atomic.Int64, len(addrs))}
 	p.r = &net.Resolver{PreferGo: true, Dial: p.dial}
 	return p
 }
 
 func (p *pubDNS) dial(ctx context.Context, network, _ string) (net.Conn, error) {
-	var d net.Dialer
+	d := net.Dialer{Timeout: p.wait}
 	var err error
 	for range p.addrs {
 		i := p.cur.Load() % uint32(len(p.addrs)) //nolint:gosec // G115: a handful of resolvers
+		since := time.Now()
 		c, derr := d.DialContext(ctx, network, p.addrs[i])
 		if derr == nil {
 			rc := &resolverConn{Conn: c, p: p, i: i}
+			rc.sent.Store(since.UnixNano())
 			if _, ok := c.(net.PacketConn); ok {
 				// Go frames queries by what Dial returns: a stream would
 				// get TCP's length prefix over UDP.
@@ -419,47 +422,86 @@ func (p *pubDNS) dial(ctx context.Context, network, _ string) (net.Conn, error) 
 			}
 			return rc, nil
 		}
-		if ctx.Err() != nil {
-			return nil, derr // the caller gave up: no resolver's fault
+		// The caller gave up (Go's own per-query timeout is a deadline,
+		// not a cancel): no resolver's fault.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return nil, derr
 		}
-		p.failed(i, derr, true)
+		p.failed(i, since, derr, !unreachable(derr))
 		err = derr
 	}
 	return nil, err
 }
 
-// failed passes resolver i over, unless a query has already, and says so
-// when it did not answer.
-func (p *pubDNS) failed(i uint32, err error, silent bool) {
-	p.cur.CompareAndSwap(i, (i+1)%uint32(len(p.addrs))) //nolint:gosec // G115: a handful of resolvers
-	if silent {
+// unreachable is a resolver the host has no way to: its family or network
+// (an IPv6 resolver on a host without IPv6). Passed over, not warned about.
+func unreachable(err error) bool {
+	return errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EADDRNOTAVAIL)
+}
+
+// failed passes resolver i over, and says so when warn, unless it has
+// answered well since this query went to it (the query's trouble, a broken
+// domain say, not the resolver's) or another query has passed it over
+// already.
+func (p *pubDNS) failed(i uint32, since time.Time, err error, warn bool) {
+	if p.good[i].Load() > since.UnixNano() {
+		return
+	}
+	if p.cur.CompareAndSwap(i, (i+1)%uint32(len(p.addrs))) && warn { //nolint:gosec // G115: a handful of resolvers
 		p.warn.note(p.log.Load(), p.addrs[i], err)
 	}
 }
 
-// resolverConn is a query's connection to one resolver: one that times out
-// or refuses fails the resolver, and so does an answer of SERVFAIL or
-// REFUSED (Go would ask the same one again); a query its caller gave up on
-// does not.
+// resolverConn is a query's connection to one resolver. A resolver that
+// times out, refuses, or cannot be sent to fails; so does one answering
+// SERVFAIL or REFUSED (Go would ask it again on every retry), unless it has
+// answered others well meanwhile. A query its caller gave up on fails none.
 type resolverConn struct {
 	net.Conn
 	p      *pubDNS
 	i      uint32
 	packet bool
-	done   atomic.Bool
+	sent   atomic.Int64  // unix nanoseconds the query went
+	id     atomic.Uint32 // the query's ID, with 1<<16 once known
+}
+
+// fail passes the resolver over; failed's compare-and-swap moves on once
+// however many queries to it fail.
+func (c *resolverConn) fail(err error, warn bool) {
+	c.p.failed(c.i, time.Unix(0, c.sent.Load()), err, warn)
+}
+
+// transport is an error of the way to the resolver, not of the caller.
+func transport(err error) bool {
+	var errno syscall.Errno
+	return errors.Is(err, os.ErrDeadlineExceeded) || errors.As(err, &errno)
+}
+
+func (c *resolverConn) Write(b []byte) (int, error) {
+	c.sent.Store(time.Now().UnixNano())
+	if c.packet && len(b) >= 2 {
+		c.id.Store(uint32(binary.BigEndian.Uint16(b)) | 1<<16)
+	}
+	n, err := c.Conn.Write(b)
+	if err != nil && transport(err) {
+		c.fail(err, true)
+	}
+	return n, err
 }
 
 func (c *resolverConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
-	var errno syscall.Errno
 	switch {
-	case err != nil && (errors.Is(err, os.ErrDeadlineExceeded) || errors.As(err, &errno)):
-		if c.done.CompareAndSwap(false, true) {
-			c.p.failed(c.i, err, true)
-		}
-	case c.packet && n >= 4 && (b[3]&0x0f == 2 || b[3]&0x0f == 5): // SERVFAIL, REFUSED
-		if c.done.CompareAndSwap(false, true) {
-			c.p.failed(c.i, nil, false)
+	case err != nil && transport(err):
+		c.fail(err, true)
+	case !c.packet && n > 0:
+		c.p.good[c.i].Store(time.Now().UnixNano()) // over TCP, an answer is an answer
+	case n >= 4 && b[2]&0x80 != 0 && c.id.Load() == uint32(binary.BigEndian.Uint16(b))|1<<16: // an answer to this query
+		switch b[3] & 0x0f {
+		case 0, 3: // NOERROR, NXDOMAIN
+			c.p.good[c.i].Store(time.Now().UnixNano())
+		case 2, 5: // SERVFAIL, REFUSED
+			c.fail(nil, false)
 		}
 	}
 	return n, err
@@ -482,6 +524,27 @@ func (c *resolverConn) SetDeadline(t time.Time) error {
 		t = limit
 	}
 	return c.Conn.SetDeadline(t)
+}
+
+// fqdn is a name with its final dot, so that the host's search domains,
+// which are not the client's, never go to the public resolvers; an
+// address stays as it is.
+func fqdn(host string) string {
+	if host == "" || strings.HasSuffix(host, ".") {
+		return host
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return host
+	}
+	return host + "."
+}
+
+// dialPublic is PublicDialer's dial, a name as fully qualified.
+func dialPublic(ctx context.Context, network, address string) (net.Conn, error) {
+	if host, port, err := net.SplitHostPort(address); err == nil {
+		address = net.JoinHostPort(fqdn(host), port)
+	}
+	return PublicDialer().DialContext(ctx, network, address)
 }
 
 // resolverWarn says, at most once a minute, that a public resolver does not
