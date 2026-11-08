@@ -519,6 +519,9 @@ func NaiveLink(m render.Model, s render.Service, password string) string {
 	q.Set("sni", st.SNI)
 	q.Set("niko-node", m.NodeID)
 	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
+	// UDP over TCP v2 (spec/naive-uot-v1.md): without it the client sends
+	// no UDP through naive.
+	q.Set("uot", "2")
 	return "naive+https://" + url.UserPassword("niko", password).String() + "@" + net.JoinHostPort(m.Host, "443") + "?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
 

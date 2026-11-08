@@ -38,20 +38,37 @@ type Server struct {
 	// Probe is where the probe name leads (the subscription endpoint on
 	// loopback, R4-16); that name and no other address reaches it.
 	Probe string
-	Log   *slog.Logger
+	// Allow says which addresses UDP over TCP may reach (Public when nil);
+	// Resolve looks its names up (the system's resolver when nil).
+	Allow   func(netip.Addr) bool
+	Resolve func(ctx context.Context, name string) ([]netip.Addr, error)
+	Log     *slog.Logger
+
+	uot     uotLimits
+	uotIdle time.Duration // uotIdle when 0 (tests make it short)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// HTTP/2 (TCP) or HTTP/3 (QUIC); naive never speaks HTTP/1 to a server.
-	if r.Method != http.MethodConnect || r.ProtoMajor < 2 || r.Header.Get("Padding") == "" || !s.authorized(r) {
+	if r.Method != http.MethodConnect || r.ProtoMajor < 2 || r.Header.Get("Padding") == "" {
+		s.Answer.ServeHTTP(w, r)
+		return
+	}
+	user, ok := s.authorized(r)
+	if !ok {
 		s.Answer.ServeHTTP(w, r)
 		return
 	}
 	target := r.Host
-	if _, _, err := net.SplitHostPort(target); err != nil {
+	host, _, err := net.SplitHostPort(target)
+	if err != nil {
 		s.Answer.ServeHTTP(w, r)
 		return
 	}
+	// 200 before the destination answers: waiting for it would cost each
+	// connection up to a round trip more. A destination that cannot be
+	// reached resets the stream (spec/naive-uot-v1.md §4): the client sees
+	// an error, not an empty answer.
 	w.Header().Set("Padding", paddingHeader())
 	w.WriteHeader(http.StatusOK)
 	flusher, ok := w.(http.Flusher)
@@ -59,6 +76,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flusher.Flush()
+	in := &paddedStream{r: r.Body, w: w, f: flusher}
+
+	switch host {
+	case UoTName:
+		if !s.uot.take(user) {
+			s.Log.Debug("naive: too many UDP streams")
+			panic(http.ErrAbortHandler)
+		}
+		err := s.serveUoT(r.Context(), in)
+		s.uot.put(user)
+		if err != nil {
+			s.Log.Debug("naive: UDP refused", "err", err)
+			panic(http.ErrAbortHandler)
+		}
+		return
+	case uotLegacyName:
+		panic(http.ErrAbortHandler)
+	}
 
 	dial := s.Dial
 	if dial == nil {
@@ -73,11 +108,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cancel()
 	if err != nil {
 		s.Log.Debug("naive: destination unreachable", "err", err)
-		return
+		panic(http.ErrAbortHandler)
 	}
 	defer out.Close()
-
-	in := &paddedStream{r: r.Body, w: w, f: flusher}
 	// The client's end of the upload only half-closes the destination; the
 	// tunnel lasts until the destination is done sending, or the stream
 	// ends. Nothing writes to w once this returns.
@@ -101,19 +134,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // authorized checks Proxy-Authorization: Basic, any user name, the password
-// being one of the users' credentials.
-func (s *Server) authorized(r *http.Request) bool {
+// being one of the users' credentials; the user is the password's hash.
+func (s *Server) authorized(r *http.Request) (user [32]byte, ok bool) {
 	h := r.Header.Get("Proxy-Authorization")
 	scheme, b64, ok := strings.Cut(h, " ")
 	if !ok || !strings.EqualFold(scheme, "Basic") {
-		return false
+		return user, false
 	}
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
 	if err != nil {
-		return false
+		return user, false
 	}
 	_, password, ok := strings.Cut(string(raw), ":")
-	return ok && s.Users.Accepts(password)
+	if !ok || !s.Users.Accepts(password) {
+		return user, false
+	}
+	return sha256.Sum256([]byte(password)), true
 }
 
 // Users are the accepted passwords, as SHA-256 hashes in a JSON file that
