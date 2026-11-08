@@ -204,8 +204,15 @@ func (s *Server) resolve(ctx context.Context, name string) ([]netip.Addr, error)
 	if s.Resolve != nil {
 		return s.Resolve(ctx, name)
 	}
-	return net.DefaultResolver.LookupNetIP(ctx, "ip", name)
+	ips, err := uotResolver.LookupNetIP(ctx, "ip", name)
+	if err != nil {
+		s.warn.note(s.Log, err)
+	}
+	return ips, err
 }
+
+// uotResolver looks UDP destinations up as TCP's are (PublicResolver).
+var uotResolver = PublicResolver()
 
 // serveUoT carries the stream's UDP until the client ends it, the idle time
 // runs out or ctx is done; errRefused when the stream must be reset. Only

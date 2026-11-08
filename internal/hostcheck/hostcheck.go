@@ -320,6 +320,9 @@ func (h *Host) Check(ctx context.Context, o Options) []Result {
 	} else {
 		adv("resolver", true, "", "")
 	}
+	if p := deploy.SandboxResolverProblem(h.Root); p != "" {
+		adv("resolver in the sandbox", false, p, "Hysteria2 and Yggdrasil's peers look names up from units that deny loopback and private ranges, all but systemd-resolved's stub")
+	}
 	addrs, _ := h.Addrs()
 	v6 := slices.ContainsFunc(addrs, func(a netip.Addr) bool { return a.Is6() && a.IsGlobalUnicast() && !a.IsPrivate() })
 	adv("IPv6", v6, map[bool]string{true: "a public address", false: "none"}[v6], "an IPv6 address reaches clients on networks without IPv4 more directly")

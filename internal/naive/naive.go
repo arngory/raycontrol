@@ -21,6 +21,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -46,6 +47,7 @@ type Server struct {
 
 	uot     uotLimits
 	uotIdle time.Duration // uotIdle when 0 (tests make it short)
+	warn    resolverWarn
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -108,6 +110,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cancel()
 	if err != nil {
 		s.Log.Debug("naive: destination unreachable", "err", err)
+		s.warn.note(s.Log, err)
 		panic(http.ErrAbortHandler)
 	}
 	defer out.Close()
@@ -211,8 +214,9 @@ func readUsers(path string) (map[[32]byte]bool, error) {
 // PublicDialer reaches public unicast addresses only: not the node itself,
 // not loopback, private, link-local, CGNAT or multicast ranges. A client
 // may not use naive to get at what only the node's own address reaches.
+// Names are looked up with the public resolvers.
 func PublicDialer() *net.Dialer {
-	return &net.Dialer{Timeout: 10 * time.Second, Control: func(_, address string, _ syscall.RawConn) error {
+	return &net.Dialer{Timeout: 10 * time.Second, Resolver: PublicResolver(), Control: func(_, address string, _ syscall.RawConn) error {
 		ap, err := netip.ParseAddrPort(address)
 		if err != nil {
 			return err
@@ -353,4 +357,55 @@ func (p *paddedStream) Write(b []byte) (int, error) {
 		b = b[len(chunk):]
 	}
 	return written, nil
+}
+
+// resolvers are where naive looks names up: public ones, as Xray does
+// (render: DoH to 1.1.1.1 and 9.9.9.9). The host's resolver may be
+// systemd-resolved's stub on loopback or a provider's in a private range,
+// which the unit's IPAddressDeny keeps out of reach: every destination by
+// name would fail.
+var resolvers = []string{"1.1.1.1:53", "9.9.9.9:53", "[2606:4700:4700::1111]:53"}
+
+// PublicResolver asks the public resolvers, one after another on each
+// attempt, whatever the host's resolv.conf names (its options still apply).
+func PublicResolver() *net.Resolver {
+	var next atomic.Uint32
+	return &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		var err error
+		for range resolvers {
+			addr := resolvers[next.Add(1)%uint32(len(resolvers))]
+			c, derr := d.DialContext(ctx, network, addr)
+			if derr == nil {
+				return c, nil
+			}
+			err = derr
+		}
+		return nil, err
+	}}
+}
+
+// resolverWarn says, at most once a minute, that names could not be
+// looked up: a node-wide problem (the resolvers out of reach), unlike a
+// destination that does not exist or does not answer. No destination
+// goes in the log.
+type resolverWarn struct {
+	mu     sync.Mutex
+	last   time.Time
+	missed int
+}
+
+func (w *resolverWarn) note(log *slog.Logger, err error) {
+	var de *net.DNSError
+	if !errors.As(err, &de) || de.IsNotFound {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.missed++
+	if time.Since(w.last) < time.Minute {
+		return
+	}
+	log.Warn("naive: names not resolved", "count", w.missed, "resolver", de.Server, "err", de.Err)
+	w.last, w.missed = time.Now(), 0
 }

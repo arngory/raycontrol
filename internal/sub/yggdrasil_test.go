@@ -329,7 +329,8 @@ func TestYggdrasilPeers(t *testing.T) {
 	}
 
 	bp, unit, via := state()
-	if bp != nil || via != nil || !strings.Contains(unit, "PrivateNetwork=yes") || !strings.Contains(unit, "RestrictAddressFamilies=AF_UNIX\n") {
+	if bp != nil || via != nil || !strings.Contains(unit, "PrivateNetwork=yes") || !strings.Contains(unit, "RestrictAddressFamilies=AF_UNIX\n") ||
+		strings.Contains(unit, "IPAddressAllow") {
 		t.Fatalf("peers by default: %v %v\n%s", bp, via, unit)
 	}
 	if _, err := provision.SetServiceOption(ctx, st, "ygg", "peers", "tls://ygg.example.net:443?key=00ff,quic://203.0.113.9:443"); err != nil {
@@ -338,7 +339,8 @@ func TestYggdrasilPeers(t *testing.T) {
 	bp, unit, via = state()
 	want := []string{"tls://ygg.example.net:443?key=00ff", "quic://203.0.113.9:443"}
 	if !slices.Equal(bp, want) || !slices.Equal(via, want) || strings.Contains(unit, "PrivateNetwork") ||
-		!strings.Contains(unit, "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6") || !strings.Contains(unit, "IPAddressDeny=localhost link-local") {
+		!strings.Contains(unit, "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6") || !strings.Contains(unit, "IPAddressDeny=localhost link-local") ||
+		!strings.Contains(unit, "IPAddressAllow=127.0.0.53 127.0.0.54") {
 		t.Fatalf("with peers: %v %v\n%s", bp, via, unit)
 	}
 	if _, err := provision.SetServiceOption(ctx, st, "ygg", "peers", "tls://127.0.0.1:443"); err == nil {

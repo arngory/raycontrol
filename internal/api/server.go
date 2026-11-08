@@ -869,6 +869,21 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 	for _, r := range outside {
 		resp.OutsidePorts = append(resp.OutsidePorts, &nodev1.PortRange{Proto: r.Proto, From: uint32(r.From), To: uint32(r.To)})
 	}
+	// niko-server's backends that go out resolve with the host's resolver,
+	// which their sandbox may keep out of reach.
+	for _, svc := range m.Services {
+		out := svc.Kind == "hy2-masq" || svc.Kind == "hy2-obfs"
+		if svc.Kind == "yggdrasil" {
+			st, _, _ := render.YggdrasilNode(svc)
+			out = len(st.Peers) > 0
+		}
+		if out {
+			if p := deploy.SandboxResolverProblem(""); p != "" {
+				resp.Warnings = append(resp.Warnings, p)
+			}
+			break
+		}
+	}
 	if ignored, err := node.AdminAccessIgnored(ctx, s.Store); err == nil {
 		for _, p := range ignored {
 			resp.Warnings = append(resp.Warnings, fmt.Sprintf("admin address %s is ignored: wider than /%d (rayctl admin to set it again)", p, node.MinAdminBits(p.Addr())))
