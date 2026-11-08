@@ -151,6 +151,28 @@ echo "rayctl: the update by the rayctl of v0.19.3: exit status 1" >&2; exit 1`)
 	if fi, err := os.Stat(q.status); err != nil || fi.Mode().Perm() != 0o644 {
 		t.Fatalf("status file %v %v", fi, err)
 	}
+
+	// An admin's latest that dies with no result: held is the release it
+	// said it verified, else what rayd saw as latest.
+	os.Remove(q.status)
+	l := req(nodeupdate.Remote, "latest")
+	l.Release = "v0.19.4"
+	diedQuiet := fake(`echo "rayctl: killed" >&2; exit 1`)
+	if st, _ = run(l, diedQuiet); st.State != nodeupdate.Failed || st.Release != "v0.19.4" || !slices.Equal(st.Held, []string{"v0.19.4"}) {
+		t.Fatalf("latest, no result, the hint: %+v", st)
+	}
+	l = req(nodeupdate.Remote, "latest")
+	l.Release = "v0.19.4"
+	diedLoud := fake(`echo "release v0.19.5 verified: its own rayctl updates the node"; echo "rayctl: killed" >&2; exit 1`)
+	if st, _ = run(l, diedLoud); st.Release != "v0.19.5" || !slices.Equal(st.Held, []string{"v0.19.4", "v0.19.5"}) {
+		t.Fatalf("latest, no result, the release verified: %+v", st)
+	}
+	// A run that never ended (a power cut: no result, no stop hook): the
+	// next run holds its release.
+	nodeupdate.WriteStatus(q.status, nodeupdate.Status{ID: "0a", State: nodeupdate.Running, Target: "latest", Release: "v0.19.6", Started: time.Now().Add(-2 * time.Hour)})
+	if st, _ = run(req(nodeupdate.Remote, "v0.19.1"), ok); st.State != nodeupdate.Done || !slices.Contains(st.Held, "v0.19.6") {
+		t.Fatalf("after a run that never ended: %+v", st)
+	}
 }
 
 // A runner killed on the way (the unit's timeout, a shutdown): its status

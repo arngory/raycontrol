@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	_ "time/tzdata" // the zones of TestWindowAcrossClockChanges, wherever it runs
 	"unicode/utf8"
 )
 
@@ -312,44 +313,6 @@ func TestPatchAndWindow(t *testing.T) {
 			t.Errorf("Left(%s, %s) = %v, want %v", c.t.Format("15:04"), c.w, got, c.want)
 		}
 	}
-	// Whatever the zone and the day, a window is never open longer than it
-	// is long: the night the clock goes forward and back included.
-	for _, zone := range []string{"Europe/Berlin", "America/New_York", "Australia/Lord_Howe"} {
-		loc, err := time.LoadLocation(zone)
-		if err != nil {
-			continue
-		}
-		for _, day := range []time.Time{time.Date(2026, 3, 8, 0, 0, 0, 0, loc), time.Date(2026, 3, 29, 0, 0, 0, 0, loc),
-			time.Date(2026, 10, 25, 0, 0, 0, 0, loc), time.Date(2026, 11, 1, 0, 0, 0, 0, loc), time.Date(2026, 4, 5, 0, 0, 0, 0, loc)} {
-			for _, w := range []string{"02:00-03:00", "02:30-03:30", "01:30-02:30", "01:00-02:00", "23:30-02:30", "03:00-05:00"} {
-				from, to, _ := ParseWindow(w)
-				long := time.Duration((to-from+24*60)%(24*60)) * time.Minute
-				var open time.Duration
-				for m := time.Duration(0); m < 26*time.Hour; m += time.Minute {
-					if at := day.Add(m); InWindow(at, w) && at.Sub(day) < 24*time.Hour {
-						open += time.Minute
-					}
-				}
-				if open > long+time.Hour {
-					t.Errorf("%s %s %s: open %v", zone, day.Format("2006-01-02"), w, open)
-				}
-			}
-		}
-	}
-	// The night the clock goes forward (Berlin, 2026-03-29, 02:00 → 03:00):
-	// the window 01:30-02:30 ends an hour of real time after it opened.
-	if berlin, err := time.LoadLocation("Europe/Berlin"); err == nil {
-		t0 := time.Date(2026, 3, 29, 1, 45, 0, 0, berlin)
-		if got := Left(t0, "01:30-02:30"); got > 45*time.Minute || got <= 0 {
-			t.Errorf("spring forward: %v left at 01:45", got)
-		}
-		if at := t0.Add(30 * time.Minute); !InWindow(at, "01:30-02:30") { // 03:15 on the clock
-			t.Errorf("spring forward: not in the window at %s, a moment picked at 01:45", at.Format("15:04"))
-		}
-		if InWindow(t0.Add(time.Hour), "01:30-02:30") {
-			t.Errorf("spring forward: in the window at %s", t0.Add(time.Hour).Format("15:04"))
-		}
-	}
 }
 
 // What a request goes for, and what the next status holds.
@@ -375,5 +338,68 @@ func TestTriedAndHolding(t *testing.T) {
 	}
 	if err := (Request{ID: NewID(), Kind: Remote, Version: "latest", Release: "v1", By: "x", At: time.Now()}).Check("v0.19.0", time.Now()); err == nil {
 		t.Error("a release hint that is no release")
+	}
+}
+
+// On the nights the clock moves the window is what the node's clock reads,
+// and Left is real time: every moment before t+Left(t) is in the window,
+// t+Left(t) is not, and no window runs longer than it is long plus the
+// shift (an hour). rayd picks its moment that way and root checks it the
+// same way: they agree.
+func TestWindowAcrossClockChanges(t *testing.T) {
+	windows := []string{"02:00-03:00", "02:00-02:30", "02:30-03:30", "01:30-02:30", "01:00-02:00", "23:30-02:30", "22:00-00:00", "23:00-00:30", "03:00-05:00"}
+	for zone, days := range map[string][]string{
+		"Europe/Berlin":       {"2026-03-29", "2026-10-25"},
+		"America/New_York":    {"2026-03-08", "2026-11-01"},
+		"America/Santiago":    {"2026-04-05", "2026-09-06"},
+		"Australia/Lord_Howe": {"2026-04-05", "2026-10-04"},
+	} {
+		loc, err := time.LoadLocation(zone)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, day := range days {
+			d, _ := time.ParseInLocation("2006-01-02", day, loc)
+			for _, w := range windows {
+				from, to, _ := ParseWindow(w)
+				long := time.Duration((to-from+24*60)%(24*60)) * time.Minute
+				for at := d.Add(-24 * time.Hour); at.Before(d.Add(48 * time.Hour)); at = at.Add(time.Minute) {
+					left := Left(at, w)
+					if !InWindow(at, w) {
+						if left != 0 {
+							t.Fatalf("%s %s %s at %s: outside, %v left", zone, day, w, at, left)
+						}
+						continue
+					}
+					if left <= 0 || left > long+time.Hour {
+						t.Fatalf("%s %s %s at %s: %v left", zone, day, w, at, left)
+					}
+					for x := time.Duration(0); x < left; x += time.Minute {
+						if !InWindow(at.Add(x), w) {
+							t.Fatalf("%s %s %s: at %s with %v left, %s is outside", zone, day, w, at, left, at.Add(x))
+						}
+					}
+					if InWindow(at.Add(left), w) {
+						t.Fatalf("%s %s %s: at %s, still in the window after %v", zone, day, w, at, left)
+					}
+				}
+			}
+		}
+	}
+	// The night the clock goes forward in Berlin (02:00 → 03:00): at 01:45
+	// the window 01:30-02:30 has a quarter of an hour left, a moment picked
+	// then is in it for root too.
+	berlin, _ := time.LoadLocation("Europe/Berlin")
+	at := time.Date(2026, 3, 29, 1, 45, 0, 0, berlin)
+	if got := Left(at, "01:30-02:30"); got != 15*time.Minute {
+		t.Errorf("spring forward: %v left at 01:45", got)
+	}
+	if err := (Policy{Remote: "off", Auto: "patch", Window: "01:30-02:30"}).Allows(Request{Kind: Auto}, at.Add(14*time.Minute)); err != nil {
+		t.Errorf("spring forward, a moment rayd may pick: %v", err)
+	}
+	// In New York the hour before the jump is there: 01:00-02:00 runs.
+	ny, _ := time.LoadLocation("America/New_York")
+	if got := Left(time.Date(2026, 3, 8, 1, 0, 0, 0, ny), "01:00-02:00"); got != time.Hour {
+		t.Errorf("New York, spring forward: %v left at 01:00", got)
 	}
 }

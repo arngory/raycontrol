@@ -191,11 +191,23 @@ func TestAutoStep(t *testing.T) {
 	if _, err := os.Stat(reqFile); !os.IsNotExist(err) {
 		t.Fatal("a held release asked for")
 	}
-	// Busy: likewise.
+	// Busy (an update runs): likewise, and nothing asked for.
 	os.Remove(statFile)
 	a.step(ctx, &s, at(3, 10))
-	nodeupdate.WriteRequest(reqFile, nodeupdate.Request{ID: "0a", Kind: nodeupdate.Remote, Version: "latest", By: "x", At: time.Now()}, time.Now())
+	nodeupdate.WriteStatus(statFile, nodeupdate.Status{State: nodeupdate.Running, Target: "latest", Started: s.due})
 	if a.step(ctx, &s, s.due.Add(time.Minute)) || !s.due.IsZero() {
 		t.Fatalf("busy: %+v", s)
+	}
+	if _, err := os.Stat(reqFile); !os.IsNotExist(err) {
+		t.Fatal("asked for while an update runs")
+	}
+	// Its moment come, nothing in the way: asked for.
+	os.Remove(statFile)
+	a.step(ctx, &s, at(3, 20))
+	if a.step(ctx, &s, s.due) || !s.due.IsZero() {
+		t.Fatalf("the moment: %+v", s)
+	}
+	if r, ok := nodeupdate.PeekRequest(reqFile); !ok || r.Version != "v0.19.1" || r.Kind != nodeupdate.Auto {
+		t.Fatalf("the request: %+v %v", r, ok)
 	}
 }

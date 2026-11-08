@@ -499,28 +499,31 @@ func ParseWindow(w string) (from, to int, err error) {
 	return from, to, nil
 }
 
-// Left is how long the window still runs at t (in t's location: its
-// clock, daylight saving time included), 0 when t is outside it.
-func Left(t time.Time, w string) time.Duration {
+// InWindow reports whether t's clock (in t's location) reads a time in
+// the window: on the night the clock goes forward a window may be shorter
+// or not come at all, on the night it goes back longer.
+func InWindow(t time.Time, w string) bool {
 	from, to, err := ParseWindow(w)
 	if err != nil {
-		return 0
+		return false
 	}
-	y, m, d := t.Date()
-	at := func(day, min int) time.Time { return time.Date(y, m, d+day, min/60, min%60, 0, 0, t.Location()) }
-	// The window that holds t, if any, opened today or yesterday. One
-	// that falls into the hour the clock skips is empty that day.
-	for _, day := range []int{0, -1} {
-		start, end := at(day, from), at(day, to)
-		if to <= from { // past midnight
-			end = at(day+1, to)
-		}
-		if !t.Before(start) && t.Before(end) {
-			return end.Sub(t)
-		}
+	m := t.Hour()*60 + t.Minute()
+	if from < to {
+		return m >= from && m < to
 	}
-	return 0
+	return m >= from || m < to
 }
 
-// InWindow reports whether t (in its own location) falls in the window.
-func InWindow(t time.Time, w string) bool { return Left(t, w) > 0 }
+// Left is how long the window still runs at t in real time, 0 when t is
+// outside it: counted a minute at a time, since the clock may jump in
+// between.
+func Left(t time.Time, w string) time.Duration {
+	if !InWindow(t, w) {
+		return 0
+	}
+	start := t.Truncate(time.Minute)
+	d := time.Minute
+	for ; d < 24*time.Hour && InWindow(start.Add(d), w); d += time.Minute {
+	}
+	return start.Add(d).Sub(t)
+}

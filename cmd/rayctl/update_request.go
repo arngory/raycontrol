@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -102,6 +103,9 @@ func (q requests) run() error {
 			st.State, st.Error = nodeupdate.Failed, tail.reason(runErr)
 		}
 		st.To = q.nodeVersion()
+		// The release verified, if it said: rayd's hint for latest may be
+		// hours old.
+		st.Release = cmp.Or(tail.verified(), st.Release)
 	}
 	if st.State == nodeupdate.RolledBack || (st.State == nodeupdate.Failed && !st.Untouched) {
 		st.Held = nodeupdate.Hold(st.Held, st.Release)
@@ -138,12 +142,24 @@ func markInterrupted(statusFile string) error {
 	return nodeupdate.WriteStatus(statusFile, st)
 }
 
-// tailWriter keeps the last lines written.
+// tailWriter keeps the last lines written, and the release an update said
+// it verified.
 type tailWriter struct {
-	mu    sync.Mutex
-	max   int
-	lines []string
-	part  []byte
+	mu      sync.Mutex
+	max     int
+	lines   []string
+	part    []byte
+	release string
+}
+
+// verifiedLine is what rayctl update prints once it verified a release
+// it hands over (handoff).
+var verifiedLine = regexp.MustCompile(`^release (v\d+\.\d+\.\d+) verified`)
+
+func (t *tailWriter) verified() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.release
 }
 
 func (t *tailWriter) Write(p []byte) (int, error) {
@@ -155,7 +171,11 @@ func (t *tailWriter) Write(p []byte) (int, error) {
 		if i < 0 {
 			break
 		}
-		t.lines = append(t.lines, string(t.part[:i]))
+		line := string(t.part[:i])
+		if m := verifiedLine.FindStringSubmatch(line); m != nil && t.release == "" {
+			t.release = m[1]
+		}
+		t.lines = append(t.lines, line)
 		t.part = t.part[i+1:]
 		if len(t.lines) > t.max {
 			t.lines = t.lines[len(t.lines)-t.max:]
