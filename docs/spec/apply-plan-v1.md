@@ -1,0 +1,221 @@
+# apply-plan-v1: план `rayctl apply` строит root
+
+Статус: **принят** (2026-11-08), решения — §6. Реализация — v0.21.0. Задача из [`04-roadmap.md`](../04-roadmap.md) «После v0.19.0»,
+[`12-review.md`](../12-review.md) S-7 и [`node-update-v1.md`](node-update-v1.md) §3 «Чего этот путь не меняет».
+
+Зачем: root ставит то, что ему отдал непривилегированный rayd (`User=rayd`). Взломанный rayd получает root при
+ближайшем `rayctl apply`, `rayctl install` поверх или `rayctl update`. С `remote on` или `auto patch` он ещё и выбирает
+момент сам. Пометка «(вывод)» — не проверено ни кодом, ни тестом.
+
+## 1. Как сейчас
+
+1. `rayctl apply` от root берёт замок обновления и зовёт `deploy` (`cmd/rayctl/install.go:603-625`).
+2. `deploy` берёт `GetDeployment` и собирает `deploy.Plan` из ответа как есть: пользователи, файлы (путь, режим,
+   содержимое), юниты, порты, предупреждения (`install.go:630-644`).
+3. rayd строит ответ так: `render.CollectForRender` → `render.Render` → `deploy.Build` → порты хоста и файлы
+   firewalld/ufw (`internal/api/server.go:853-918`). Пути — из флагов самого rayd (`cmd/rayd/main.go:149-155`, `205-207`).
+4. `deploy.Host.Apply` ставит план (`internal/deploy/host.go:355-453`):
+   - `groupadd`/`useradd` каждого пользователя, затем `usermod --groups` ровно по плану (`host.go:98-113`, `357-369`);
+   - пишет каждый файл по его пути и режиму (`host.go:127-147`, `375-397`); юнит, sysctl, tmpfiles узнаются по префиксу;
+   - `systemd-tmpfiles --create`, `sysctl -p` каждого файла из `/etc/sysctl.d/` (`host.go:400-407`, `465-477`);
+   - `systemctl enable --now` каждого юнита из `Units`, `try-restart` изменённых (`host.go:424-448`);
+   - печатает предупреждения как есть (`host.go:449-451`).
+5. То же делает `rayctl install` (`install.go:448`). Обновление запускает `/usr/local/bin/rayctl apply` после
+   рестарта rayd (`cmd/rayctl/update.go:452-466`), потом ещё раз берёт `GetDeployment` ради списка юнитов
+   (`update.go:474-490`).
+
+План без rayd root уже строит: базовый при установке (`install.go:352`, пустая модель) и на хосте relay
+(`internal/deploy/relay.go:30-84`, `cmd/rayctl/install_relay.go:137`).
+
+## 2. Модель угроз
+
+### 2.1. Что у взломанного rayd
+
+- Ответы по сокету: любой `GetDeploymentResponse`.
+- База `/var/lib/raycontrol/rayd.db` и её WAL: каталог его (`StateDirectory=raycontrol`, `deploy.go:633`;
+  `install.go:373`). Схема значения не ограничивает: у `services` нет `CHECK` на `kind`, `name`, `settings_json`
+  (`internal/store/migrations/0001_init.sql:21-28`) и `uid` (`0002_credentials.sql:6-7`). Проверки есть только при
+  записи (`internal/store/entities.go:183-207`, `internal/provision/provision.go:418-425`, `805-807`). `ListServices`
+  читает строки как есть (`entities.go:487-505`).
+- Файлы в своих каталогах: `rendered/<сервис>/` (`internal/live/live.go:271-276`), файл запроса обновления. Ссылки и
+  FIFO там ставит он.
+- Отрисованные конфиги data plane: что читают Xray, niko-server, `rayd site` и `rayd naive`.
+- Рестарт `niko-*.service` через polkit (`deploy.go:776-787`), а с ним и момент `ExecStartPre=+install` (§5).
+- Снимок периметра для rayspa (`deploy.go:651`): порты он открывает и без apply.
+
+### 2.2. Чего root не ставит по слову rayd
+
+- Юнит с чужим `ExecStart`/`ExecStartPre`, `User=root`, префиксами `+`/`!`, другим бинарником, группами вне `niko-*`.
+- Файл вне закрытого списка путей. Режим не `0644`, биты setuid/setgid. Сейчас режим из плана идёт в `os.FileMode` как
+  есть (`host.go:140`, `143`): `0x8001ed` (`os.ModeSetuid|0755`) даёт setuid-файл root с содержимым от rayd
+  (проверено; `0o4755` бит теряет).
+- sysctl вне набора `HardeningSysctl` (`deploy.go:789-812`): `kernel.core_pattern = |…` или `kernel.modprobe` — root.
+- Строки tmpfiles кроме `d` под `/run/niko` (`Z /etc 0777 rayd rayd -` — root).
+- Правило polkit кроме своего (`deploy.go:776-787`).
+- Пользователи кроме `rayd`, `rayspa`, `niko-*`; UID кроме фиксированных (`internal/render/render.go:39-43`) и диапазона
+  `9110-9179` (`internal/store/ports.go:55-59`); группы вне `niko-*`. Сейчас `usermod --groups` идёт для любого имени
+  из плана (`host.go:365-369`): `rayd` в `docker` или `disk`, оператор без `sudo`.
+- Юниты не из своего плана (`debug-shell.service`, чужие сервисы): сейчас `enable --now` любого имени (`host.go:424-441`).
+- Пакеты: apply их не ставит и не должен начать.
+
+### 2.3. Враждебная база даёт root и без лжи rayd (проверено)
+
+Проверено тестом `deploy.Build` на копии дерева в `/tmp/claude-0/applyplan` (в репозиторий не входит). Неважно, кто
+строит план: `Build` не проверяет то, что подставляет.
+
+| Значение из базы | Куда попадает | Итог |
+|---|---|---|
+| `answer` сайта (`settings_json`) | `ExecStart` юнитов `niko-<site>` и `niko-<naive>` (`deploy.go:316-330`, `421-435`); при чтении не проверяется (`provision.go:980-989`) | `"404\nExecStartPre=+/bin/sh -c …"` — команда root при `try-restart` |
+| имя сервиса `doh` | строка tmpfiles (`deploy.go:685-688`); пользователя у `doh` нет (`deploy.go:237-239`) | `"x 0755 root root -\nZ /etc 0777 rayd rayd -\n…"` — `systemd-tmpfiles` от root (`host.go:401`) |
+| имя сервиса с процессом | путь юнита (`deploy.go:183`; `/` уводит из каталога, `host.go:67`), `User=`, пути в `ExecStart` и `+install`, tmpfiles, `SupplementaryGroups` юнита rayd (`deploy.go:631`) | перевод строки — любые строки юнита. Сейчас держит только `groupadd`/`useradd`: он отвергает имя до записи файлов (`host.go:357-361`; вывод: зависит от shadow-utils) |
+| `site` у REALITY | `ExtraGroups` (`deploy.go:345-351`) → `usermod --groups` | `"front,disk"`: пользователь REALITY в группе `disk` |
+| `uid` | `useradd --uid` (`host.go:111`) | любой UID вне диапазона (0 и занятые отвергнет `useradd`) |
+| имя и вид неизвестного сервиса | предупреждение (`deploy.go:240-241`) | управляющие символы в терминал root (`host.go:449-451`) |
+
+При чтении проверены: порты (`ParsePort`, `store/ports.go:20-27`), настройки slipstream (`ParseSlipstream`,
+`provision/slipstream.go:83-103`), порт подписки (число, `deploy.go:368-371`), пиры Yggdrasil (да/нет, `deploy.go:534`).
+Та же база приходит и честному rayd: восстановление из чужой копии (`rayctl backup restore`). Значит, проверка входа
+`Build` нужна в любом варианте.
+
+## 3. Варианты
+
+### 3.1. (A) rayctl строит план из базы
+
+rayctl открывает базу на чтение и зовёт тот же код: `CollectForRender` → `Render` → `Build`.
+
+- База — враждебный вход: все значения из §2.3 проверять при чтении.
+- `Collect` пишет: ключ печати dnstt (`render.go:200`), ключ dnsprobe (`render.go:215`), недостающие UUID
+  (`render.go:251`, `263`), ключ проверки DNS (`render.go:316`). Нужен отдельный сбор без записи.
+- `store.Open` мигрирует (`internal/store/store.go:37-62`). На чтение есть только `store.Schema` (`store.go:137`).
+- Целостная копия живой базы: `copyDB` и `rootCopy` рассчитаны на остановленный rayd (`update.go:731-813`). Живой
+  снимок даёт `Backup`, то есть сам rayd (`internal/api/backup.go:17-21`). Остановить rayd на время apply нельзя:
+  apply ждёт его отрисовку (`install.go:645-651`). rayd из пути не уходит.
+- `Render` нужен ради трёх флагов (`deploy.go:263-264`, `584-599`, `712-722`), а тянет в root все секреты и разбор ключей.
+- root разбирает враждебный SQLite при каждом apply; сейчас только при откате (`store/carry.go:33-44`).
+  modernc.org/sqlite — C, переведённый в Go (вывод: безопасность памяти не гарантирована).
+
+### 3.2. (B) план от rayd, белый список
+
+rayctl берёт `GetDeployment` и пропускает только известное:
+- пути из закрытого списка: юниты `rayd`, `rayspa`, `niko-<имя>`, `raycontrol-update.{path,service}`;
+  `tmpfiles.d/raycontrol.conf`; правило polkit; два файла sysctl; два файла файрвола;
+- режим `0644`; пользователи и UID — §2.2; юниты — только те, чьи файлы есть в плане;
+- содержимое юнитов, tmpfiles, polkit, sysctl rayctl **генерирует сам и сравнивает**.
+
+Последнее и решает. Без своей генерации пришлось бы разбирать синтаксис systemd: продолжения строк `\`,
+спецификаторы `%`, `EnvironmentFile=`, `BindPaths=`, префиксы `+ ! - @ :` у `Exec*`. Это хрупко (вывод). А для
+генерации rayctl нужны те же входы, что и `Build`, — это уже (C).
+
+### 3.3. (C) rayd даёт входы, rayctl строит и проверяет
+
+- rayd отдаёт не план, а **входы `Build`**: короткий типизированный список. На сервис: вид, имя, UID; `answer` у
+  сайта, `site` у REALITY, настройки slipstream, «есть публичные пиры» у Yggdrasil, порт подписки. На ноду: отрисован
+  ли фронт, его ключи (dnsprobe, salamander у `hy2-obfs`), `FrontDNS`, порты хоста и снаружи, предупреждения.
+- rayctl проверяет входы правилами записи `store`: `processNameRE`, запрет `front`, `*-in`, `*-api`; UID в диапазоне и
+  без повторов; вид из списка; `answer` из `site.Answers`; `site` — имя сайта из этих же входов; `ParseSlipstream`;
+  порты 1–65535; не больше 70 сервисов (весь диапазон UID). Сервис с плохим значением пропускается с предупреждением,
+  как сломанный у `Render` (Q-1).
+- План строит свой `deploy.Build` со своими `render.DefaultPaths` и `deploy.DefaultBinaries`, не с путями rayd.
+- Последний барьер — `Plan.Check` (список из (B)) на **своём** плане перед `Apply`: ловит ошибку `Build`, а не rayd.
+
+### 3.4. Сравнение
+
+| | (A) база | (B) белый список | (C) входы и проверка |
+|---|---|---|---|
+| Работа | большая: сбор без записи, копия живой базы, `Render` в root | средняя, но сравнение требует генерации | средняя: `deploy.Inputs`, RPC, `Inputs.Check`, `Plan.Check` |
+| Что разбирает root | SQLite, секреты, ключи | proto и синтаксис systemd | только proto |
+| Что остаётся | §5 и разбор SQLite | всё, что не выразить списком | §5 |
+| Новый вид сервиса | правка проверок чтения | правка списка, иначе отказ | правка `Inputs.Check` рядом с `Build` |
+
+(C) даёт то же, что (A), но вход в десятки раз уже, без SQLite и записи в базу. (B) остаётся страховкой: `Plan.Check`.
+
+### 3.5. Версии и передача
+
+- В обычном пути версии совпадают. Обновление ставит бинарники, перезапускает rayd, ждёт его версию
+  (`update.go:533-551`) и только потом запускает `/usr/local/bin/rayctl apply` — уже новый (`update.go:458-462`). Если
+  `rayctl` релиза не запустился, бинарники ставит старый (`update.go:239`), но apply всё равно новый. Откат ставит
+  старые бинарники до рестарта (`update.go:688-728`): старый с старым.
+- Новый rayctl, старый rayd (бинарники заменены руками, `update -local`): нового RPC нет — **отказ** с советом
+  перезапустить rayd. Без отката к `GetDeployment`: иначе взломанный rayd просто притворится старым.
+- Старый rayctl, новый rayd: только при `-no-handoff` или незапустившемся `rayctl` релиза. Там старый берёт из
+  `GetDeployment` список юнитов (`update.go:474-490`). Значит, `GetDeployment` (минимум `units`) новый rayd оставляет.
+- Новый вид в релизе знают оба сразу. Незнакомый вид rayctl пропускает с предупреждением, как `Build` (`deploy.go:240-241`).
+- Обновление по запросу: apply после него идёт уже этим путём. Момент rayd выбирает, но root от этого не получает.
+
+### 3.6. Relay
+
+На хосте relay apply не спрашивает rayd: план — `RelayPlan` самого rayctl, сокета там нет. `+install` копирует файл
+root (`relay.go:38`, `62`). Меняется одно: `Plan.Check` должен принимать `RelayPlan` (`rayd-relay.service`,
+`RelaySysctl`) — нужен тест.
+
+## 4. Рекомендация: (C)
+
+### 4.1. Шаги
+
+1. **Проверка входа `Build`** (не ждёт остального): `deploy.CheckService` — имя, вид, UID, `answer`, `site`. Не прошёл —
+   сервис пропускается с предупреждением. Правила общие со `store` (экспорт `processNameRE` и занятых имён). Закрывает
+   §2.3 для rayd, `-supervise` и восстановления из копии.
+2. **Без перевода строки.** `unit.file()` и строки tmpfiles не выводят значение с `\n`, `\r` или пробелом (в путях и
+   именах): сервис пропускается, в тестах — падение.
+3. **`Plan.Check`** по списку §2.2 в начале `Host.Apply`, до первого изменения. Режим — только `0644`/`0755`, без
+   `os.ModeSetuid`, `ModeSetgid`, `ModeSticky`.
+4. **`deploy.Inputs`**: `Build(in Inputs, p, bin)`; rayd считает `InputsOf(model, files)`. `GetDeployment` и
+   `-supervise` строят план через него, поведение прежнее.
+5. **RPC `GetDeployInputs`**: права как у `GetDeployment`, в `nodeOnly` удалённого API (`internal/api/remote.go:209-221`).
+   Поля — §3.3.
+6. **`rayctl apply` и `install`** берут входы, проверяют, строят план сами, `Plan.Check`, `Apply`. `restartNode`
+   берёт юниты из своего плана, не из `GetDeployment`.
+7. **Предупреждения** rayd печатаются без управляющих символов и с пределом длины (как `by`, `node-update-v1.md` §3).
+8. **Позже** — `GetDeployment` без `files` и `users` (вопрос 2).
+
+### 4.2. Тесты
+
+- Враждебная база (`internal/api`): строки `services` пишутся сырым SQL мимо `store`: значения §2.3, имя `a/../x`,
+  UID 0 и 9180, повтор UID, 71 сервис. `GetDeployInputs` отдаёт их как есть; `Inputs.Check` и `Build` их не пускают;
+  остальные сервисы в плане.
+- Враждебные входы (`internal/deploy`): те же значения таблицей прямо в `Inputs`. `FuzzBuild`: любые входы, прошедшие
+  `Check`, дают план, который проходит `Plan.Check`, и каждая строка юнита есть в шаблоне.
+- Враждебный план: `Plan.Check` отвергает `/etc/sudoers.d/x`, `/etc/systemd/system/../cron.d/x`,
+  `ModeSetuid|0755`, `kernel.core_pattern`, строку `Z` в tmpfiles, чужой polkit, пользователя `root`, `rayd` в
+  `docker`, юнит `debug-shell.service`. Принимает `Build` любой тестовой модели и `RelayPlan`.
+- Равенство: на моделях из `deploy_test.go` план из `Inputs` побайтно равен прежнему — на ноде ничего не меняется.
+- `cmd/rayctl`: подставной сервер отвечает `Unimplemented` — apply отказывает и ничего не пишет (`Host.Root` во
+  временный каталог); отвечает чужим `GetDeployment` с `files` — apply его не читает.
+- CI: `upgrade (latest)`, `upgrade (v0.10.2)`, `upgrade (handoff)` проходят без изменений.
+
+### 4.3. Документы
+
+- `docs/spec/node-update-v1.md` §3, «Чего этот путь не меняет»: apply больше не ставит план rayd.
+- `docs/04-roadmap.md` «После v0.19.0», `docs/12-review.md` S-7: сделано, ссылка сюда.
+- `docs/08-decisions.md`: R1-9 («кто что пишет») — план строит root; новая строка решения про (C).
+- `docs/02-security-model.md`, «Zero trust между компонентами»: строка `rayd` → `rayctl apply`.
+- `docs/RELEASE.md`: `GetDeployment.units` — в замороженное (старый rayctl при `-no-handoff`).
+- Комментарий `nodeOnly` (`remote.go:209-210`) и `docs/spec/api-v1.md`: ключей в ответе `GetDeployment` нет
+  (вывод: в `plan.Files` их нет), причину запрета уточнить.
+
+## 5. Что остаётся после (C)
+
+- rayd выбирает, какие сервисы известных видов есть: до 70 пользователей `niko-*` и юнитов с известными бинарниками
+  и песочницей. Это не root (вывод: если песочница и бинарники держат).
+- Конфиги data plane пишет rayd, как и прежде.
+- **`ExecStartPre=+install` читает файлы rayd от root по ссылкам** (`deploy.go:329`, `382-386`, `434`, `482-483`,
+  `524-525`). Источник — в `rendered/<сервис>/`, каталоге rayd. `install` идёт по ссылке, FIFO его повесит. Это
+  случается при каждом рестарте, а рестарт rayd делает сам через polkit, без apply. Копия ложится 0400 пользователю
+  сервиса; утечёт ли — зависит от процесса (вывод, не проверено). Нужна копия без перехода по ссылкам: свой помощник
+  root с `O_NOFOLLOW` или `LoadCredential=`, где он работает.
+- Порты хоста в firewalld и ufw — от rayd. Решает всё равно rayspa (`firewall.go:17-19`), а его снимок и так от rayd.
+- Отказ в обслуживании: rayd может сломать apply или убрать свои юниты (`removeStale`, `host.go:553-570`).
+
+## 6. Решения
+
+Вопросы технические, владельца не ждут:
+1. **Плохой сервис во входах** пропускается с предупреждением, как у `Render` (Q-1). Плохие общие поля (порты хоста,
+   флаги ноды) — отказ всего apply до первого изменения.
+2. **`files` и `users` уходят из `GetDeployment`** в следующем минорном выпуске после этого: старому rayctl остаются
+   `units`. До тех пор старый rayctl, запущенный руками, ставит план rayd — это в заметках к релизу.
+3. **`+install` по ссылкам (§5) — в этом же выпуске.** Вместо `install` root копирует файл помощником без перехода по
+   ссылкам: `openat2` с `RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS` от каталога `rendered/`, только обычный файл, предел
+   размера; FIFO и устройства — отказ. `openat2` есть с Linux 5.6 (Debian 12, Ubuntu 24.04, Rocky 9 — да).
+4. **Apply без rayd не нужен:** rayd не стартует — сначала чинят его (`rayctl update -rollback`, восстановление).
+5. **Порты хоста от rayd** — любые 1–65535, как сейчас: решает rayspa, и его снимок всё равно от rayd.
+6. **Выпуск** — минорный, v0.21.0, со всеми шагами §4.1 (кроме 8). Старых веток нет: одна линия выпусков.
