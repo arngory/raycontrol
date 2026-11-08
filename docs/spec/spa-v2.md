@@ -38,6 +38,7 @@ port(slot) = port_base + (BE64(HMAC-SHA256(port_key, "raycontrol-spa-v2 port" �
 ```
 
 `BE64` — 8 байт big-endian. Сервер держит открытыми порты слотов `slot−1`, `slot`, `slot+1`.
+Диапазон `port_base` пересекается с эфемерными портами ядра (32768–60999): `rayctl apply` резервирует его (`net.ipv4.ip_local_reserved_ports`, `/etc/sysctl.d/90-raycontrol-ports.conf`), иначе исходящее соединение ноды занимает порт слота и TCP-носитель на нём не слушает.
 Клиент шлёт на порт **текущего** слота по своим часам.
 
 ## 4. Ключ эпохи
