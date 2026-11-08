@@ -212,7 +212,8 @@ func readProc(pid int) (proc, bool) {
 	return p, true
 }
 
-func needRoot() error {
+// needRoot refuses a user other than root; tests replace it.
+var needRoot = func() error {
 	if os.Geteuid() != 0 {
 		return errors.New("must run as root")
 	}
@@ -263,6 +264,11 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 	}
 	if *relay != "" {
 		return installRelay(*relay, *packages)
+	}
+	// Before anything changes: over a running node, install restarts rayd
+	// and applies, as an update does.
+	if err := takeUpdateLock("install", 0); err != nil {
+		return err
 	}
 	if *host == "" {
 		return errors.New("-host is required")

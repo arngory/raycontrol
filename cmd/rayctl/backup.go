@@ -89,6 +89,12 @@ func (c *cli) restore(ctx context.Context, args []string) error {
 	if err := needRoot(); err != nil {
 		return err
 	}
+	// Before anything changes: it stops rayd, swaps the database and
+	// restarts the node, as an update does (its rayctl apply inherits the
+	// lock).
+	if err := takeUpdateLock("restore", 0); err != nil {
+		return err
+	}
 	if _, err := os.Stat(deploy.DB); err != nil {
 		return fmt.Errorf("no node here (%w): rayctl install first, then restore", err)
 	}
@@ -114,15 +120,14 @@ func (c *cli) restore(ctx context.Context, args []string) error {
 	}
 
 	// The copy goes next to the database, checked by the installed rayd
-	// (migrations, the new address) before anything is replaced.
+	// (migrations, the new address) before anything is replaced. The
+	// directory is rayd's: written as copyDB writes, never through a link
+	// rayd put at that name, and rayd's through the descriptor.
 	tmp := deploy.DB + ".restore"
-	if err := os.WriteFile(tmp, db, 0o600); err != nil {
+	if err := placeDB(tmp, db); err != nil {
 		return err
 	}
 	defer removeDB(tmp)
-	if err := run("chown", "rayd:rayd", tmp); err != nil {
-		return err
-	}
 	initArgs := []string{"-u", "rayd", "--", deploy.DefaultBinaries.Rayd, "init", "-db", tmp}
 	if *host != "" {
 		initArgs = append(initArgs, "-host", *host)

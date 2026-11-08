@@ -740,15 +740,13 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 // it does not follow it). The stale WAL and shared memory go first, so a
 // crash never leaves the new database next to the old one's WAL.
 func copyDB(src, dst string) error {
-	dir := filepath.Dir(dst)
-	di, err := os.Lstat(dir)
+	di, err := os.Lstat(filepath.Dir(dst))
 	if err != nil {
 		return err
 	}
 	if !di.IsDir() {
-		return fmt.Errorf("%s is not a directory", dir)
+		return fmt.Errorf("%s is not a directory", filepath.Dir(dst))
 	}
-	owner, _ := di.Sys().(*syscall.Stat_t)
 	for _, stale := range []string{dst + "-wal", dst + "-shm"} {
 		if err := os.Remove(stale); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -762,37 +760,58 @@ func copyDB(src, dst string) error {
 		if err != nil {
 			return err
 		}
-		f, err := os.CreateTemp(dir, filepath.Base(dst+suffix)+".*.tmp")
-		if err != nil {
+		if err := placeDB(dst+suffix, b); err != nil {
 			return err
 		}
-		tmp := f.Name()
-		werr := func() error {
-			if _, err := f.Write(b); err != nil {
-				return err
-			}
-			if err := f.Chmod(0o600); err != nil {
-				return err
-			}
-			if owner != nil {
-				if err := f.Chown(int(owner.Uid), int(owner.Gid)); err != nil {
-					return err
-				}
-			}
-			if err := f.Sync(); err != nil {
-				return err
-			}
-			return f.Close()
-		}()
-		if werr != nil {
-			f.Close()
-			os.Remove(tmp)
-			return werr
-		}
-		if err := os.Rename(tmp, dst+suffix); err != nil {
-			os.Remove(tmp)
+	}
+	return nil
+}
+
+// placeDB puts b at dst, mode 0600, the owner of dst's directory's: a new
+// file there (os.CreateTemp: O_EXCL, never through a link), its mode and
+// owner set through its descriptor, then renamed over dst. The directory
+// may be rayd's: a link it put at dst is replaced, never written through
+// or given away (copyDB, restore).
+func placeDB(dst string, b []byte) error {
+	dir := filepath.Dir(dst)
+	di, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !di.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	owner, _ := di.Sys().(*syscall.Stat_t)
+	f, err := os.CreateTemp(dir, filepath.Base(dst)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	werr := func() error {
+		if _, err := f.Write(b); err != nil {
 			return err
 		}
+		if err := f.Chmod(0o600); err != nil {
+			return err
+		}
+		if owner != nil {
+			if err := f.Chown(int(owner.Uid), int(owner.Gid)); err != nil {
+				return err
+			}
+		}
+		if err := f.Sync(); err != nil {
+			return err
+		}
+		return f.Close()
+	}()
+	if werr != nil {
+		f.Close()
+		os.Remove(tmp)
+		return werr
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return err
 	}
 	return nil
 }
