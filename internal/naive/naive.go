@@ -375,11 +375,10 @@ var resolvers = []string{"1.1.1.1:53", "9.9.9.9:53", "[2606:4700:4700::1111]:53"
 
 // resolverWait is the longest a query waits for a resolver before the next
 // one is asked (resolv.conf's 5 s would hold each connection that long).
-// Tests shorten it.
-var resolverWait = 2 * time.Second
+const resolverWait = 2 * time.Second
 
 // publicDNS is naive's one resolver, for TCP's destinations and UDP's.
-var publicDNS = newPublicDNS(resolvers)
+var publicDNS = newPublicDNS(resolvers, resolverWait)
 
 // PublicResolver asks the public resolvers, whatever the host's resolv.conf
 // names: the one that answered last first, the next one when it does not
@@ -391,14 +390,15 @@ func SetResolverLog(log *slog.Logger) { publicDNS.log.Store(log) }
 
 type pubDNS struct {
 	addrs []string
+	wait  time.Duration
 	cur   atomic.Uint32 // the one asked first
 	r     *net.Resolver
 	log   atomic.Pointer[slog.Logger]
 	warn  resolverWarn
 }
 
-func newPublicDNS(addrs []string) *pubDNS {
-	p := &pubDNS{addrs: addrs}
+func newPublicDNS(addrs []string, wait time.Duration) *pubDNS {
+	p := &pubDNS{addrs: addrs, wait: wait}
 	p.r = &net.Resolver{PreferGo: true, Dial: p.dial}
 	return p
 }
@@ -414,36 +414,53 @@ func (p *pubDNS) dial(ctx context.Context, network, _ string) (net.Conn, error) 
 			if _, ok := c.(net.PacketConn); ok {
 				// Go frames queries by what Dial returns: a stream would
 				// get TCP's length prefix over UDP.
+				rc.packet = true
 				return resolverPacketConn{rc}, nil
 			}
 			return rc, nil
 		}
-		p.failed(i, derr)
+		if ctx.Err() != nil {
+			return nil, derr // the caller gave up: no resolver's fault
+		}
+		p.failed(i, derr, true)
 		err = derr
 	}
 	return nil, err
 }
 
-// failed passes resolver i over, unless a query has already, and says so.
-func (p *pubDNS) failed(i uint32, err error) {
+// failed passes resolver i over, unless a query has already, and says so
+// when it did not answer.
+func (p *pubDNS) failed(i uint32, err error, silent bool) {
 	p.cur.CompareAndSwap(i, (i+1)%uint32(len(p.addrs))) //nolint:gosec // G115: a handful of resolvers
-	p.warn.note(p.log.Load(), p.addrs[i], err)
+	if silent {
+		p.warn.note(p.log.Load(), p.addrs[i], err)
+	}
 }
 
 // resolverConn is a query's connection to one resolver: one that times out
-// or refuses fails the resolver; one cancelled by its caller does not.
+// or refuses fails the resolver, and so does an answer of SERVFAIL or
+// REFUSED (Go would ask the same one again); a query its caller gave up on
+// does not.
 type resolverConn struct {
 	net.Conn
-	p    *pubDNS
-	i    uint32
-	done atomic.Bool
+	p      *pubDNS
+	i      uint32
+	packet bool
+	done   atomic.Bool
 }
 
 func (c *resolverConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	var errno syscall.Errno
-	if err != nil && (errors.Is(err, os.ErrDeadlineExceeded) || errors.As(err, &errno)) && c.done.CompareAndSwap(false, true) {
-		c.p.failed(c.i, err)
+	switch {
+	case err != nil && (errors.Is(err, os.ErrDeadlineExceeded) || errors.As(err, &errno)):
+		if c.done.CompareAndSwap(false, true) {
+			c.p.failed(c.i, err, true)
+		}
+	case c.packet && n >= 4 && (b[3]&0x0f == 2 || b[3]&0x0f == 5): // SERVFAIL, REFUSED
+		if c.done.CompareAndSwap(false, true) {
+			c.p.failed(c.i, nil, false)
+		}
 	}
 	return n, err
 }
@@ -461,7 +478,7 @@ func (c resolverPacketConn) WriteTo(b []byte, a net.Addr) (int, error) {
 }
 
 func (c *resolverConn) SetDeadline(t time.Time) error {
-	if limit := time.Now().Add(resolverWait); t.IsZero() || t.After(limit) {
+	if limit := time.Now().Add(c.p.wait); t.IsZero() || t.After(limit) {
 		t = limit
 	}
 	return c.Conn.SetDeadline(t)
