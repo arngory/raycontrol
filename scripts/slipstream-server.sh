@@ -21,7 +21,8 @@ base="$SLIPSTREAM_SERVER_RELEASES/download/$SLIPSTREAM_SERVER_TAG"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 for f in "slipstream-server-linux-$arch" SHA256SUMS; do
-	curl -fsSL --retry 3 --retry-delay 2 -o "$tmp/$f" "$base/$f"
+	# GitHub's release storage has outages of minutes: wait them out.
+	curl -fsSL --retry 8 --retry-delay 15 --retry-all-errors --retry-max-time 900 --connect-timeout 30 -o "$tmp/$f" "$base/$f"
 done
 (cd "$tmp" && grep " slipstream-server-linux-$arch\$" SHA256SUMS | sha256sum -c - >/dev/null)
 echo "$want  $tmp/slipstream-server-linux-$arch" | sha256sum -c - >/dev/null || {

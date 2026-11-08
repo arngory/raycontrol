@@ -25,7 +25,7 @@ if [[ $want != latest ]]; then
 	base="https://github.com/$REPO/releases/download/$want"
 fi
 for f in raycontrol-linux-amd64.tar.gz SHA256SUMS SHA256SUMS.minisig; do
-	curl -fsSL --retry 3 -o "$tmp/$f" "$base/$f"
+	curl -fsSL --retry 8 --retry-delay 15 --retry-all-errors --retry-max-time 900 --connect-timeout 30 -o "$tmp/$f" "$base/$f"
 done
 verify_minisig "$tmp/SHA256SUMS" "$tmp/SHA256SUMS.minisig" "$PUBKEY" || die "the release's signature does not verify"
 (cd "$tmp" && grep ' raycontrol-linux-amd64.tar.gz$' SHA256SUMS | sha256sum -c --quiet -) || die "the archive's checksum does not match"
