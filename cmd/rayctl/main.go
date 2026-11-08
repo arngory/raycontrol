@@ -38,8 +38,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
 
   status
   node name [NAME | ""]                     show, set or remove the node's name, which clients show
-  node note [TEXT | ""]                     show, set or remove the note clients show their users (200 characters, one line)
                                             with its address (at most 48 characters)
+  node note [TEXT | ""]                     show, set or remove the note clients show their users (200 characters, one line)
   user list
   user add [NAME] [-services a,b] [-expires 2026-12-31|30d] [-limit 50G] [-note TEXT]
                                             without NAME: an opaque handle such as u-k3f9-x2qa

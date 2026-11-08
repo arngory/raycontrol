@@ -1,7 +1,10 @@
 package nodeupdate
 
 import (
+	"bytes"
 	"cmp"
+	"errors"
+	"io/fs"
 	"os"
 	"sync"
 	"time"
@@ -21,8 +24,7 @@ var zone zoneCache
 
 type zoneCache struct {
 	mu    sync.Mutex
-	mod   time.Time
-	size  int64
+	data  []byte // the zone file as last read
 	loc   *time.Location
 	since time.Time
 }
@@ -33,29 +35,30 @@ func (z *zoneCache) get() *time.Location {
 	}
 	z.mu.Lock()
 	defer z.mu.Unlock()
-	// A look at the file at most once a second; its content only when it
-	// changed (a new link is a new file to Stat).
+	// The file at most once a second. Its bytes, not its mtime and size,
+	// tell a change: timedatectl swaps a link between files of one tzdata
+	// package, which share the mtime and often the size (Asia/Yekaterinburg
+	// and Asia/Irkutsk are both 1243 bytes). A zone file is 1-3 KB.
 	if z.loc != nil && time.Since(z.since) < time.Second {
 		return z.loc
 	}
 	z.since = time.Now()
-	fi, err := os.Stat(localtime)
-	if err != nil {
-		// No zone file: UTC, as Go takes it.
-		z.loc, z.mod, z.size = time.UTC, time.Time{}, -1
-		return z.loc
-	}
-	if z.loc != nil && fi.ModTime().Equal(z.mod) && fi.Size() == z.size {
-		return z.loc
-	}
 	data, err := os.ReadFile(localtime) //nolint:gosec // G304: a fixed path
+	if errors.Is(err, fs.ErrNotExist) {
+		// No zone file: UTC, as Go takes it.
+		z.loc, z.data = time.UTC, nil
+		return z.loc
+	}
 	if err != nil {
 		return cmp.Or(z.loc, time.Local)
+	}
+	if z.loc != nil && z.data != nil && bytes.Equal(data, z.data) {
+		return z.loc
 	}
 	loc, err := time.LoadLocationFromTZData("Local", data)
 	if err != nil {
 		return cmp.Or(z.loc, time.Local)
 	}
-	z.loc, z.mod, z.size = loc, fi.ModTime(), fi.Size()
+	z.loc, z.data = loc, data
 	return loc
 }

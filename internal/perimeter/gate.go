@@ -1,6 +1,7 @@
 package perimeter
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -450,8 +451,8 @@ func (g *Gate) denyLocked() error {
 // the table as it is. It stands apart from the rest of the snapshot: a
 // kernel that refuses the policy holds back neither the snapshot
 // (ErrPending) nor a restore of the table (catchUpLocked's backoff). It is
-// tried again on its own, less and less often (1 s doubling to 30 s), and
-// each refusal is logged.
+// tried again on its own, less and less often (1 s doubling to 30 s); the
+// first refusal of a streak is a warning, the rest go to debug.
 func (g *Gate) egressLocked(now time.Time) {
 	if !g.egressSeen || g.egressOn || g.restoring || now.Before(g.egressRetryAt) {
 		return
@@ -460,8 +461,14 @@ func (g *Gate) egressLocked(now time.Time) {
 		g.egressFailures++
 		wait := min(30*time.Second, time.Second<<min(g.egressFailures-1, 5))
 		g.egressRetryAt = now.Add(wait)
-		g.log.Warn("egress policy not in force, trying again", "smtp", g.egress.SMTP, "bittorrent", g.egress.BitTorrent,
-			"err", err, "in", wait)
+		// Warn once per streak of refusals, then quietly: a kernel that never
+		// takes the policy would otherwise log about 2,900 lines a day.
+		level := slog.LevelDebug
+		if g.egressFailures == 1 {
+			level = slog.LevelWarn
+		}
+		g.log.Log(context.Background(), level, "egress policy not in force, trying again", "smtp", g.egress.SMTP,
+			"bittorrent", g.egress.BitTorrent, "err", err, "in", wait)
 		return
 	}
 	g.egressOn, g.egressFailures, g.egressRetryAt = true, 0, time.Time{}
