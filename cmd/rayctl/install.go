@@ -349,7 +349,7 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 		}
 	}
 	// Control plane only: rayd and rayspa units, tmpfiles, polkit, sysctl.
-	base := deploy.Build(render.Model{}, nil, render.DefaultPaths, deploy.DefaultBinaries)
+	base := deploy.Build(deploy.Inputs{}, render.DefaultPaths, deploy.DefaultBinaries)
 	for _, u := range base.Users {
 		if err := h.EnsureUser(u); err != nil {
 			return err

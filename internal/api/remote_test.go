@@ -355,8 +355,12 @@ func TestRemoteAPI(t *testing.T) {
 	if _, err := admin.node.Backup(ctx, connect.NewRequest(&nodev1.BackupRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("a remote backup: %v", err)
 	}
+	// What root builds the deployment from: root's on the node, as apply.
 	if _, err := admin.node.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("the rendered keys through the remote API: %v", err)
+		t.Fatalf("the deployment through the remote API: %v", err)
+	}
+	if _, err := admin.node.GetDeployInputs(ctx, connect.NewRequest(&nodev1.GetDeployInputsRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("the deployment's inputs through the remote API: %v", err)
 	}
 	// Client addresses in the journal: root on the node only.
 	if _, err := admin.node.SetDebug(ctx, connect.NewRequest(&nodev1.SetDebugRequest{Seconds: 60})); connect.CodeOf(err) != connect.CodePermissionDenied {

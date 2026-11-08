@@ -465,7 +465,7 @@ func TestYggdrasilPeers(t *testing.T) {
 				backendPeers = b.Options.Peers
 			}
 		}
-		for _, f := range deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries).Files {
+		for _, f := range deploy.Build(deploy.InputsOf(m, files, render.DefaultPaths), render.DefaultPaths, deploy.DefaultBinaries).Files {
 			if strings.HasSuffix(f.Path, "/niko-ygg.service") {
 				unit = string(f.Content)
 			}

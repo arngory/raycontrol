@@ -850,29 +850,24 @@ func (s *Server) hostPorts(ctx context.Context) (host, outside []deploy.PortRang
 	return deploy.MergePorts(ports), deploy.MergePorts(outside), nil
 }
 
-func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.GetDeploymentRequest]) (*connect.Response[nodev1.GetDeploymentResponse], error) {
+// deployInputs are what the deployment is built from: the rendered
+// model's inputs, the host's ports, and rayd's warnings. rayctl apply
+// builds it itself from them (GetDeployInputs), as root, with its own
+// paths and binaries; GetDeployment builds it here.
+func (s *Server) deployInputs(ctx context.Context) (deploy.Inputs, error) {
 	m, err := render.CollectForRender(ctx, s.Store)
 	if err != nil {
-		return nil, toConnect(err)
+		return deploy.Inputs{}, toConnect(err)
 	}
 	// A broken service is named in the warnings; the rest is deployed (Q-1).
 	files, skipped, rerr := render.Render(m, s.Paths)
 	if rerr != nil && !render.Partial(rerr) {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, rerr)
+		return deploy.Inputs{}, connect.NewError(connect.CodeFailedPrecondition, rerr)
 	}
-	plan := deploy.Build(m, files, s.Paths, s.Binaries)
-	var outside []deploy.PortRange
-	plan.HostPorts, outside, err = s.hostPorts(ctx)
+	in := deploy.InputsOf(m, files, s.Paths)
+	in.HostPorts, in.OutsidePorts, err = s.hostPorts(ctx)
 	if err != nil {
-		return nil, toConnect(err)
-	}
-	plan.Files = append(plan.Files, deploy.FirewallFiles(plan.HostPorts)...)
-	resp := &nodev1.GetDeploymentResponse{Units: plan.Units, Warnings: plan.Warnings, FrontDns: plan.FrontDNS}
-	for _, r := range plan.HostPorts {
-		resp.HostPorts = append(resp.HostPorts, &nodev1.PortRange{Proto: r.Proto, From: uint32(r.From), To: uint32(r.To)})
-	}
-	for _, r := range outside {
-		resp.OutsidePorts = append(resp.OutsidePorts, &nodev1.PortRange{Proto: r.Proto, From: uint32(r.From), To: uint32(r.To)})
+		return deploy.Inputs{}, toConnect(err)
 	}
 	// niko-server's backends that go out resolve with the host's resolver,
 	// which their sandbox may keep out of reach.
@@ -884,14 +879,14 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 		}
 		if out {
 			if p := deploy.SandboxResolverProblem(""); p != "" {
-				resp.Warnings = append(resp.Warnings, p)
+				in.Warnings = append(in.Warnings, p)
 			}
 			break
 		}
 	}
 	if ignored, err := node.AdminAccessIgnored(ctx, s.Store); err == nil {
 		for _, p := range ignored {
-			resp.Warnings = append(resp.Warnings, fmt.Sprintf("admin address %s is ignored: wider than /%d (rayctl admin to set it again)", p, node.MinAdminBits(p.Addr())))
+			in.Warnings = append(in.Warnings, fmt.Sprintf("admin address %s is ignored: wider than /%d (rayctl admin to set it again)", p, node.MinAdminBits(p.Addr())))
 		}
 	}
 	ssh := map[store.Port]string{}
@@ -906,24 +901,50 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 	for _, svc := range m.Services {
 		ports, err := svc.Ports()
 		if err != nil {
-			resp.Warnings = append(resp.Warnings, "closed in the perimeter: "+err.Error())
+			in.Warnings = append(in.Warnings, "closed in the perimeter: "+err.Error())
 			continue
 		}
 		for _, p := range ports {
 			if name, ok := ssh[p]; ok && svc.Kind != "ssh" {
-				resp.Warnings = append(resp.Warnings, fmt.Sprintf("closed in the perimeter: port %s of %s is %s's", p, svc.Name, name))
+				in.Warnings = append(in.Warnings, fmt.Sprintf("closed in the perimeter: port %s of %s is %s's", p, svc.Name, name))
 			}
 		}
 	}
 	for _, name := range skipped {
-		resp.Warnings = append(resp.Warnings, "not rendered yet: "+name)
+		in.Warnings = append(in.Warnings, "not rendered yet: "+name)
 	}
 	var broken render.ServiceErrors
 	if errors.As(rerr, &broken) {
 		for _, e := range broken {
-			resp.Warnings = append(resp.Warnings, "not rendered: "+e.Error())
+			in.Warnings = append(in.Warnings, "not rendered: "+e.Error())
 		}
 	}
+	return in, nil
+}
+
+// GetDeployInputs returns what root builds the deployment from
+// (spec/apply-plan-v1.md): rayctl apply checks them and builds the plan
+// itself.
+func (s *Server) GetDeployInputs(ctx context.Context, _ *connect.Request[nodev1.GetDeployInputsRequest]) (*connect.Response[nodev1.GetDeployInputsResponse], error) {
+	in, err := s.deployInputs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(DeployInputsProto(in)), nil
+}
+
+// GetDeployment returns the deployment as rayd builds it: what rayctl
+// before v0.21.0 installs (and takes its units from after an update).
+func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.GetDeploymentRequest]) (*connect.Response[nodev1.GetDeploymentResponse], error) {
+	in, err := s.deployInputs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	plan := deploy.Build(in, s.Paths, s.Binaries)
+	plan.HostPorts = in.HostPorts
+	plan.Files = append(plan.Files, deploy.FirewallFiles(plan.HostPorts)...)
+	resp := &nodev1.GetDeploymentResponse{Units: plan.Units, Warnings: plan.Warnings, FrontDns: plan.FrontDNS,
+		HostPorts: portRanges(plan.HostPorts), OutsidePorts: portRanges(in.OutsidePorts)}
 	for _, u := range plan.Users {
 		resp.Users = append(resp.Users, &nodev1.SystemUser{Name: u.Name, Uid: uint32(u.UID), ExtraGroups: u.ExtraGroups})
 	}

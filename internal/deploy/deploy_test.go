@@ -21,7 +21,13 @@ import (
 func plan(t *testing.T) (deploy.Plan, render.Model) {
 	t.Helper()
 	m, files := plan2(t, render.DefaultPaths)
-	return deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries), m
+	return build(m, files, render.DefaultPaths), m
+}
+
+// build is the plan for a rendered model, from its inputs as rayd reports
+// them.
+func build(m render.Model, files []render.File, p render.Paths) deploy.Plan {
+	return deploy.Build(deploy.InputsOf(m, files, p), p, deploy.DefaultBinaries)
 }
 
 // plan2 renders the test node's services for the paths.
@@ -166,7 +172,7 @@ func TestBuild(t *testing.T) {
 	// Paths outside /run stay where they are.
 	other := render.Paths{Rendered: "/tmp/r", Run: "/tmp/run"}
 	m, files := plan2(t, other)
-	q := deploy.Build(m, files, other, deploy.DefaultBinaries)
+	q := build(m, files, other)
 	if q.Processes[0].Dir != "/tmp/run/inner" || !slices.Contains(q.Dirs, "/tmp/run/inner-api") {
 		t.Errorf("inner process %+v, dirs %v", q.Processes[0], q.Dirs)
 	}
@@ -376,7 +382,7 @@ func TestBuildSelfSteal(t *testing.T) {
 	if len(skipped) != 2 {
 		t.Fatalf("skipped %v", skipped)
 	}
-	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	p := build(m, files, render.DefaultPaths)
 	if p.FrontDNS {
 		t.Error("the front answers DNS on a node without DNS tunnels")
 	}
@@ -667,7 +673,7 @@ func TestBuildHysteria(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	p := build(m, files, render.DefaultPaths)
 	masq, obfs := file(p, "/etc/systemd/system/niko-hy2-masq.service"), file(p, "/etc/systemd/system/niko-hy2-obfs.service")
 	// niko-server backends behind the UDP front (R3-4): no capability, the
 	// key (and salamander) copied in by root, out to public addresses only.
@@ -721,7 +727,7 @@ func TestBuildNaive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	p := build(m, files, render.DefaultPaths)
 	u := file(p, "/etc/systemd/system/niko-naive.service")
 	for _, want := range []string{
 		"ExecStart=/usr/local/bin/rayd naive -answer 404 -users /var/lib/raycontrol/rendered/naive/users.json",
@@ -764,7 +770,7 @@ func TestBuildDNSKeyWithoutRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	others := slices.DeleteFunc(files, func(f render.File) bool { return f.Service == "dnstt" || f.Service == "masterdns" })
-	p := deploy.Build(m, others, render.DefaultPaths, deploy.DefaultBinaries)
+	p := build(m, others, render.DefaultPaths)
 	for name, key := range map[string]string{"dnstt": "noise.key", "masterdns": "encryption.key"} {
 		want := "ExecStartPre=+install -m 0400 -o niko-" + name + " -g niko-" + name +
 			" /var/lib/raycontrol/rendered/" + name + "/" + key + " /run/niko/" + name + "/" + key
@@ -1197,11 +1203,11 @@ func TestSandboxResolverProblem(t *testing.T) {
 func TestFrontCredentialsOnlyRendered(t *testing.T) {
 	m, files := plan2(t, render.DefaultPaths)
 	key := "/var/lib/raycontrol/rendered/front/dnsprobe.key"
-	if !strings.Contains(file(deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries), "/etc/systemd/system/niko-front.service"), key) {
+	if !strings.Contains(file(build(m, files, render.DefaultPaths), "/etc/systemd/system/niko-front.service"), key) {
 		t.Fatal("the rendered key is not installed")
 	}
 	partial := slices.DeleteFunc(slices.Clone(files), func(f render.File) bool { return f.Path == key })
-	if front := file(deploy.Build(m, partial, render.DefaultPaths, deploy.DefaultBinaries), "/etc/systemd/system/niko-front.service"); front == "" || strings.Contains(front, key) {
+	if front := file(build(m, partial, render.DefaultPaths), "/etc/systemd/system/niko-front.service"); front == "" || strings.Contains(front, key) {
 		t.Fatalf("a key not rendered is installed:\n%s", front)
 	}
 }
@@ -1233,7 +1239,7 @@ func TestProbeKeyBeforeDNSTT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unit := file(deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries), "/etc/systemd/system/niko-front.service")
+	unit := file(build(m, files, render.DefaultPaths), "/etc/systemd/system/niko-front.service")
 	if !strings.Contains(unit, "/run/niko/front/dnsprobe.key") {
 		t.Fatalf("the front's unit does not install the probe key:\n%s", unit)
 	}
@@ -1284,7 +1290,7 @@ func TestBuildSlipstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	p := build(m, files, render.DefaultPaths)
 	if !slices.Equal(p.Units, []string{"rayd.service", "rayspa.service", "niko-inner.service", "niko-slip.service", "niko-front.service", "raycontrol-update.path"}) || len(p.Warnings) != 0 {
 		t.Fatalf("units %v, warnings %v", p.Units, p.Warnings)
 	}
@@ -1327,7 +1333,7 @@ func TestBuildSlipstream(t *testing.T) {
 	}
 	m, _ = render.CollectForRender(ctx, st)
 	files, _, _ = render.Render(m, render.DefaultPaths)
-	p = deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	p = build(m, files, render.DefaultPaths)
 	if slices.Contains(p.Units, "niko-slip.service") || len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "quic_alpn") ||
 		strings.Contains(file(p, "/etc/tmpfiles.d/raycontrol.conf"), "slip-in") {
 		t.Errorf("broken: units %v, warnings %v", p.Units, p.Warnings)

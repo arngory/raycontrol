@@ -373,7 +373,7 @@ func supervisor(paths render.Paths, bins deploy.Binaries, st *store.Store, log *
 			return deploy.Plan{}, err
 		}
 		// The applier reports the broken services; the rest runs (Q-1).
-		return deploy.Build(m, files, paths, bins), nil
+		return deploy.Build(deploy.InputsOf(m, files, paths), paths, bins), nil
 	}}, nil
 }
 

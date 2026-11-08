@@ -206,11 +206,16 @@ func (r *Remote) device(ctx context.Context) (store.Device, error) {
 	return d, nil
 }
 
-// nodeOnly are the calls for root on the node itself: what they return
-// holds every private key (the rendered files, the database).
+// nodeOnly are the calls for root on the node itself.
 var nodeOnly = map[string]bool{
-	nodev1connect.NodeServiceGetDeploymentProcedure: true,
-	nodev1connect.NodeServiceBackupProcedure:        true,
+	// What rayctl apply builds the deployment from, and rayd's own plan:
+	// no keys (units and system files, the services' names and ports), but
+	// changing the host is root's on the node (R3-3), and nothing off it
+	// needs them (spec/apply-plan-v1.md).
+	nodev1connect.NodeServiceGetDeploymentProcedure:   true,
+	nodev1connect.NodeServiceGetDeployInputsProcedure: true,
+	// The database holds every private key.
+	nodev1connect.NodeServiceBackupProcedure: true,
 	// A relay's bundle holds its private key.
 	nodev1connect.NodeServiceIssueRelayBundleProcedure: true,
 	// The site's private key stays off the network.

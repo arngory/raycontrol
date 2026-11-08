@@ -145,6 +145,9 @@ const (
 	// NodeServiceGetDeploymentProcedure is the fully-qualified name of the NodeService's GetDeployment
 	// RPC.
 	NodeServiceGetDeploymentProcedure = "/raycontrol.node.v1.NodeService/GetDeployment"
+	// NodeServiceGetDeployInputsProcedure is the fully-qualified name of the NodeService's
+	// GetDeployInputs RPC.
+	NodeServiceGetDeployInputsProcedure = "/raycontrol.node.v1.NodeService/GetDeployInputs"
 )
 
 // NodeServiceClient is a client for the raycontrol.node.v1.NodeService service.
@@ -258,9 +261,16 @@ type NodeServiceClient interface {
 	// SetNodeNote sets the node's note for its users, or takes it away with
 	// "": clients show it with the node (subscription-v1 §3, field note).
 	SetNodeNote(context.Context, *connect.Request[v1.SetNodeNoteRequest]) (*connect.Response[v1.SetNodeNoteResponse], error)
-	// GetDeployment returns what root must install for the current services:
-	// system users, unit files and other files. rayctl apply writes them.
+	// GetDeployment returns the deployment rayd builds for the current
+	// services: system users, unit files and other files. rayctl before
+	// v0.21.0 installs it as it is; rayctl since builds its own from
+	// GetDeployInputs and takes nothing from here. Root on the node only.
 	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
+	// GetDeployInputs returns what root builds the deployment from
+	// (docs/spec/apply-plan-v1.md §3.3): the services and the node's facts,
+	// which rayctl apply checks before it builds anything. No keys, no file
+	// contents. Root on the node only.
+	GetDeployInputs(context.Context, *connect.Request[v1.GetDeployInputsRequest]) (*connect.Response[v1.GetDeployInputsResponse], error)
 }
 
 // NewNodeServiceClient constructs a client for the raycontrol.node.v1.NodeService service. By
@@ -532,6 +542,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("GetDeployment")),
 			connect.WithClientOptions(opts...),
 		),
+		getDeployInputs: connect.NewClient[v1.GetDeployInputsRequest, v1.GetDeployInputsResponse](
+			httpClient,
+			baseURL+NodeServiceGetDeployInputsProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetDeployInputs")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -580,6 +596,7 @@ type nodeServiceClient struct {
 	setNodeName       *connect.Client[v1.SetNodeNameRequest, v1.SetNodeNameResponse]
 	setNodeNote       *connect.Client[v1.SetNodeNoteRequest, v1.SetNodeNoteResponse]
 	getDeployment     *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
+	getDeployInputs   *connect.Client[v1.GetDeployInputsRequest, v1.GetDeployInputsResponse]
 }
 
 // GetStatus calls raycontrol.node.v1.NodeService.GetStatus.
@@ -797,6 +814,11 @@ func (c *nodeServiceClient) GetDeployment(ctx context.Context, req *connect.Requ
 	return c.getDeployment.CallUnary(ctx, req)
 }
 
+// GetDeployInputs calls raycontrol.node.v1.NodeService.GetDeployInputs.
+func (c *nodeServiceClient) GetDeployInputs(ctx context.Context, req *connect.Request[v1.GetDeployInputsRequest]) (*connect.Response[v1.GetDeployInputsResponse], error) {
+	return c.getDeployInputs.CallUnary(ctx, req)
+}
+
 // NodeServiceHandler is an implementation of the raycontrol.node.v1.NodeService service.
 type NodeServiceHandler interface {
 	GetStatus(context.Context, *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error)
@@ -908,9 +930,16 @@ type NodeServiceHandler interface {
 	// SetNodeNote sets the node's note for its users, or takes it away with
 	// "": clients show it with the node (subscription-v1 §3, field note).
 	SetNodeNote(context.Context, *connect.Request[v1.SetNodeNoteRequest]) (*connect.Response[v1.SetNodeNoteResponse], error)
-	// GetDeployment returns what root must install for the current services:
-	// system users, unit files and other files. rayctl apply writes them.
+	// GetDeployment returns the deployment rayd builds for the current
+	// services: system users, unit files and other files. rayctl before
+	// v0.21.0 installs it as it is; rayctl since builds its own from
+	// GetDeployInputs and takes nothing from here. Root on the node only.
 	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
+	// GetDeployInputs returns what root builds the deployment from
+	// (docs/spec/apply-plan-v1.md §3.3): the services and the node's facts,
+	// which rayctl apply checks before it builds anything. No keys, no file
+	// contents. Root on the node only.
+	GetDeployInputs(context.Context, *connect.Request[v1.GetDeployInputsRequest]) (*connect.Response[v1.GetDeployInputsResponse], error)
 }
 
 // NewNodeServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -1178,6 +1207,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("GetDeployment")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceGetDeployInputsHandler := connect.NewUnaryHandler(
+		NodeServiceGetDeployInputsProcedure,
+		svc.GetDeployInputs,
+		connect.WithSchema(nodeServiceMethods.ByName("GetDeployInputs")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/raycontrol.node.v1.NodeService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case NodeServiceGetStatusProcedure:
@@ -1266,6 +1301,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceSetNodeNoteHandler.ServeHTTP(w, r)
 		case NodeServiceGetDeploymentProcedure:
 			nodeServiceGetDeploymentHandler.ServeHTTP(w, r)
+		case NodeServiceGetDeployInputsProcedure:
+			nodeServiceGetDeployInputsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1445,4 +1482,8 @@ func (UnimplementedNodeServiceHandler) SetNodeNote(context.Context, *connect.Req
 
 func (UnimplementedNodeServiceHandler) GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetDeployment is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetDeployInputs(context.Context, *connect.Request[v1.GetDeployInputsRequest]) (*connect.Response[v1.GetDeployInputsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetDeployInputs is not implemented"))
 }

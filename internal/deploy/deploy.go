@@ -11,11 +11,13 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/site"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 // Binaries are the executables the units start.
@@ -213,15 +215,21 @@ func groups(gs []string) string {
 	return "SupplementaryGroups=" + strings.Join(gs, " ")
 }
 
-// Build returns the deployment for the rendered model.
-func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Plan {
+// Build returns the deployment for the inputs: in from InputsOf on rayd's
+// side, or from rayd through GetDeployInputs on root's (rayctl apply),
+// where p and bin are root's own. A service that fails its checks
+// (CheckService) is left out with a warning; what remains goes into the
+// units from the templates below and nothing else.
+func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 	var plan Plan
-	var inner *render.Service
-	var dns, reality, sites, hysteria, naives, yggs []render.Service
-	for i, s := range m.Services {
+	services, warnings := in.checked()
+	plan.Warnings = warnings
+	var inner *ServiceInput
+	var dns, reality, sites, hysteria, naives, yggs []ServiceInput
+	for i, s := range services {
 		switch {
 		case s.Kind == "inner":
-			inner = &m.Services[i]
+			inner = &services[i]
 		case s.Kind == "site":
 			sites = append(sites, s)
 		case provision.DNSTunnel(s.Kind):
@@ -244,7 +252,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	// A slipstream server takes its settings as arguments: without them,
 	// or without the inner stage, it has no unit (Render leaves it out of
 	// the front too).
-	dns = slices.DeleteFunc(dns, func(s render.Service) bool {
+	dns = slices.DeleteFunc(dns, func(s ServiceInput) bool {
 		if s.Kind != "slipstream" {
 			return false
 		}
@@ -252,22 +260,23 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("service %s (slipstream) needs the inner stage", s.Name))
 			return true
 		}
-		if _, err := render.SlipstreamArgs(s, inner.Name, p); err != nil {
+		if s.SlipstreamError != "" {
+			plan.Warnings = append(plan.Warnings, s.SlipstreamError)
+			return true
+		}
+		if _, err := slipstreamArgs(s, inner.Name, p); err != nil {
 			plan.Warnings = append(plan.Warnings, err.Error())
 			return true
 		}
 		return false
 	})
-	// The front's config, not any file of the front's: a slipstream service
-	// that failed to render still refreshes its keys file there (review).
-	frontConfig := path.Join(p.Rendered, "front", "front.json")
-	hasFront := slices.ContainsFunc(files, func(f render.File) bool { return f.Path == frontConfig })
+	hasFront := in.Front
 
 	var raydGroups []string
 	var units []unit
 	// frontIn lets a service write its sockets for the front (ProtectSystem
 	// makes /run read-only past RuntimeDirectory).
-	frontIn := func(s render.Service) string { return "ReadWritePaths=" + p.FrontDir(s.Name) }
+	frontIn := func(s ServiceInput) string { return "ReadWritePaths=" + p.FrontDir(s.Name) }
 	// innerHidden: the tunnels into inner are in its group for its socket,
 	// not for its config, which holds its decryption seed and every user's
 	// credential (review).
@@ -280,7 +289,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 
 	// Xray processes: the inner stage and REALITY. The API socket lives
 	// apart: only rayd may reach it (tmpfiles below).
-	xrayUnit := func(s render.Service, description string, caps string) unit {
+	xrayUnit := func(s ServiceInput, description string, caps string) unit {
 		g := render.GroupName(s.Name)
 		return unit{
 			name:        render.UnitName(s.Name),
@@ -299,7 +308,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 			},
 		}
 	}
-	var xrays []render.Service
+	var xrays []ServiceInput
 	if inner != nil {
 		g := render.GroupName(inner.Name)
 		raydGroups = append(raydGroups, g)
@@ -315,9 +324,8 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID})
 		dir := path.Join(p.Rendered, s.Name)
 		key := p.Credential(s.Name, render.SiteKey)
-		answer := provision.SiteAnswer(s.Service)
-		args := " site -answer " + answer
-		if answer == site.AnswerPages {
+		args := " site -answer " + s.Answer
+		if s.Answer == site.AnswerPages {
 			args += " -root " + path.Join(dir, render.SiteRoot)
 		}
 		units = append(units, unit{
@@ -342,19 +350,17 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	for _, s := range reality {
 		g := render.GroupName(s.Name)
 		raydGroups = append(raydGroups, g)
-		var rs render.RealitySettings
-		_ = json.Unmarshal([]byte(s.Settings), &rs)
 		var extra []string
-		if rs.Site != "" {
-			extra = []string{render.GroupName(rs.Site)} // reaches the site socket
+		if s.Site != "" {
+			extra = []string{render.GroupName(s.Site)} // reaches the site socket
 		}
 		plan.Users = append(plan.Users, SystemUser{Name: g, UID: s.UID, ExtraGroups: extra})
 		caps := ""
-		if !m.FrontTCP {
+		if !in.FrontTCP {
 			caps = "AmbientCapabilities=CAP_NET_BIND_SERVICE" // binds TCP 443 itself (R2-7)
 		}
 		u := xrayUnit(s, "raycontrol REALITY "+s.Name+" (Xray, VLESS + REALITY + Vision, ML-KEM-768)", caps)
-		if m.FrontTCP {
+		if in.FrontTCP {
 			u.service = append(u.service, frontIn(s)) // the front connects to reality.sock
 		}
 		units = append(units, u)
@@ -365,7 +371,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	// leads to the subscription endpoint on loopback, its port only (checked
 	// in the process; systemd lets loopback through for it).
 	probeArg, probeAllow := "", ""
-	if port := m.SubscriptionPort(); port != 0 {
+	if port := in.SubscriptionPort; port > 0 && port <= 65535 {
 		probeArg = fmt.Sprintf(" -probe 127.0.0.1:%d", port)
 		probeAllow = "IPAddressAllow=127.0.0.1"
 	}
@@ -419,10 +425,10 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		dir := path.Join(p.Rendered, s.Name)
 		key := p.Credential(s.Name, render.NaiveKey)
 		answer := site.Answer404
-		for _, x := range m.Services {
+		for _, x := range sites {
 			// The site's answer, except pages: their files are the site's own.
-			if x.Kind == "site" && x.Name == provision.SiteOf(s.Service) && provision.SiteAnswer(x.Service) != site.AnswerPages {
-				answer = provision.SiteAnswer(x.Service)
+			if x.Name == s.Site && x.Answer != site.AnswerPages {
+				answer = x.Answer
 			}
 		}
 		units = append(units, unit{
@@ -456,7 +462,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		exec := bin.NikoServer + " backend -c " + needs
 		description := "niko-server backend " + s.Name + " (" + s.Kind + ")"
 		if s.Kind == "slipstream" {
-			args, _ := render.SlipstreamArgs(s, inner.Name, p) // checked above
+			args, _ := slipstreamArgs(s, inner.Name, p) // checked above
 			needs = path.Join(p.Rendered, s.Name, render.SlipstreamCert)
 			exec = bin.Slipstream + " " + strings.Join(args, " ")
 			description = "slipstream server " + s.Name + " (behind the DNS front)"
@@ -531,7 +537,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		// With public peers (P-14, R4-18) the core dials them: the internet
 		// only, like the other backends that go out; otherwise no network.
 		network := []string{"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX"}
-		if st, _, err := render.YggdrasilNode(s); err == nil && len(st.Peers) > 0 {
+		if s.PublicPeers {
 			network = []string{
 				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
 				"IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7",
@@ -565,7 +571,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		for _, s := range dns {
 			after = append(after, render.UnitName(s.Name))
 		}
-		if m.FrontTCP {
+		if in.FrontTCP {
 			for _, s := range reality {
 				after = append(after, render.UnitName(s.Name))
 			}
@@ -581,20 +587,16 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 		// hy2-obfs. Only what this render wrote: a service that could not
 		// be rendered leaves none, and an install of a missing file would
 		// keep the whole front down (Q-1).
-		rendered := map[string]bool{}
-		for _, f := range files {
-			rendered[f.Path] = true
-		}
 		var frontCreds []string
-		cred := func(src, dst string) {
-			if rendered[src] {
+		cred := func(rendered bool, src, dst string) {
+			if rendered {
 				frontCreds = append(frontCreds, fmt.Sprintf("ExecStartPre=+install -m 0400 -o niko-front -g niko-front %s %s", src, dst))
 			}
 		}
-		cred(path.Join(p.Rendered, "front", render.DNSProbeKeyFile), p.FrontDNSProbe())
+		cred(in.DNSProbeKey, path.Join(p.Rendered, "front", render.DNSProbeKeyFile), p.FrontDNSProbe())
 		for _, s := range hysteria {
 			if s.Kind == "hy2-obfs" {
-				cred(path.Join(p.Rendered, "front", s.Name+".salamander"), p.FrontSalamander(s.Name))
+				cred(s.Salamander, path.Join(p.Rendered, "front", s.Name+".salamander"), p.FrontSalamander(s.Name))
 			}
 		}
 		units = append(units, unit{
@@ -659,6 +661,12 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	}
 	for i, u := range append(control, units...) {
 		u.service = slices.DeleteFunc(u.service, func(s string) bool { return s == "" })
+		// What the checks above let through cannot break the unit's lines;
+		// if Build ever let something through, the unit stays out.
+		if err := u.check(); err != nil {
+			plan.Warnings = append(plan.Warnings, err.Error())
+			continue
+		}
 		plan.Files = append(plan.Files, u.file())
 		plan.Units = append(plan.Units, u.name)
 		if i >= len(control) {
@@ -674,34 +682,32 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	)
 	plan.Units = append(plan.Units, nodeupdate.PathUnit)
 
-	tmp := "# Generated by raycontrol.\nd " + p.Run + " 0755 root root -\n"
+	var tmp tmpfiles
+	tmp.dir(p.Run, "0755", "root", "root")
 	for _, s := range xrays {
 		// setgid: the API socket Xray creates inherits the rayd group.
-		tmp += fmt.Sprintf("d %s 2750 %s rayd -\n", path.Dir(p.APISocket(s.Name)), render.GroupName(s.Name))
+		tmp.dir(path.Dir(p.APISocket(s.Name)), "2750", render.GroupName(s.Name), "rayd")
 	}
 	// Sockets the front passes connections and datagrams to (R2-15), each
 	// in a directory of the service user and the front's group: the front
 	// reaches them and nothing else of the services (S-1).
-	for _, s := range m.Services {
+	for _, s := range services {
 		if s.Kind == "doh" {
-			tmp += fmt.Sprintf("d %s 2750 rayd %s -\n", path.Dir(p.DoHSocket(s.Name)), render.GroupName("front"))
+			tmp.dir(path.Dir(p.DoHSocket(s.Name)), "2750", "rayd", render.GroupName("front"))
 		}
 	}
 	for _, s := range slices.Concat(naives, dns, hysteria, yggs) {
-		tmp += fmt.Sprintf("d %s 2750 %s %s -\n", p.FrontDir(s.Name), render.GroupName(s.Name), render.GroupName("front"))
+		tmp.dir(p.FrontDir(s.Name), "2750", render.GroupName(s.Name), render.GroupName("front"))
 	}
-	if m.FrontTCP {
+	if in.FrontTCP {
 		for _, s := range reality {
-			tmp += fmt.Sprintf("d %s 2750 %s %s -\n", p.FrontDir(s.Name), render.GroupName(s.Name), render.GroupName("front"))
+			tmp.dir(p.FrontDir(s.Name), "2750", render.GroupName(s.Name), render.GroupName("front"))
 		}
 	}
-	for _, l := range strings.Split(tmp, "\n") {
-		if f := strings.Fields(l); len(f) >= 2 && f[0] == "d" {
-			plan.Dirs = append(plan.Dirs, f[1])
-		}
-	}
+	plan.Dirs = tmp.dirs
+	plan.Warnings = append(plan.Warnings, tmp.warnings...)
 	plan.Files = append(plan.Files,
-		File{Path: "/etc/tmpfiles.d/raycontrol.conf", Mode: 0o644, Content: []byte(tmp)},
+		File{Path: "/etc/tmpfiles.d/raycontrol.conf", Mode: 0o644, Content: []byte(tmp.String())},
 		File{Path: "/etc/polkit-1/rules.d/50-raycontrol.rules", Mode: 0o644, Content: []byte(polkitRule)},
 		File{Path: HardeningSysctl, Mode: 0o644, Content: []byte(sysctl)},
 	)
@@ -709,18 +715,78 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 	// stub, which keeps 127.0.0.53 and 127.0.0.54 (niko-server v0.8.2): when
 	// its rendered config listens there (a tunnel that did not render is
 	// not there).
-	front := path.Join(p.Rendered, "front", "front.json")
-	for _, f := range files {
-		if f.Path == front {
-			var c struct {
-				DNS *struct {
-					Listen []string `json:"listen"`
-				} `json:"dns"`
-			}
-			plan.FrontDNS = json.Unmarshal(f.Content, &c) == nil && c.DNS != nil && len(c.DNS.Listen) > 0
+	plan.FrontDNS = in.Front && in.FrontDNS
+	// rayd's own warnings last, as GetDeployment always gave them.
+	plan.Warnings = append(plan.Warnings, in.Warnings...)
+	return plan
+}
+
+// slipstreamArgs are a slipstream server's arguments from its settings,
+// checked again (render.SlipstreamArgs reads them from the service's
+// JSON).
+func slipstreamArgs(s ServiceInput, inner string, p render.Paths) ([]string, error) {
+	settings, err := json.Marshal(s.Slipstream)
+	if err != nil {
+		return nil, err
+	}
+	return render.SlipstreamArgs(render.Service{Service: store.Service{Kind: s.Kind, Name: s.Name, Settings: string(settings)}}, inner, p)
+}
+
+// tmpfiles is the tmpfiles.d file of the plan, and the directories it makes.
+type tmpfiles struct {
+	strings.Builder
+	dirs     []string
+	warnings []string
+}
+
+// dir adds a directory: d PATH MODE USER GROUP. A field that would break
+// the line (white space, a control character) leaves it out, said.
+func (t *tmpfiles) dir(p, mode, user, group string) {
+	if t.Len() == 0 {
+		t.WriteString("# Generated by raycontrol.\n")
+	}
+	for _, f := range []string{p, mode, user, group} {
+		if strings.ContainsFunc(f, spaceOrControl) {
+			t.warnings = append(t.warnings, fmt.Sprintf("tmpfiles line for %q left out: a field would break it", p))
+			return
 		}
 	}
-	return plan
+	fmt.Fprintf(t, "d %s %s %s %s -\n", p, mode, user, group)
+	t.dirs = append(t.dirs, p)
+}
+
+// token reports whether s is one field of a line: not empty, no white
+// space or control characters.
+func token(s string) bool { return s != "" && !strings.ContainsFunc(s, spaceOrControl) }
+
+func spaceOrControl(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }
+
+// tokenKeys are the unit settings whose value is one field (a name, a
+// path, a mode): white space there would split it.
+var tokenKeys = map[string]bool{
+	"User": true, "Group": true, "ConditionPathExists": true, "ReadWritePaths": true, "InaccessiblePaths": true,
+	"RuntimeDirectory": true, "RuntimeDirectoryMode": true, "StateDirectory": true, "StateDirectoryMode": true,
+	"UMask": true, "PartOf": true, "Requisite": true,
+}
+
+// check refuses a unit whose values would break its lines
+// (spec/apply-plan-v1.md §4.1, step 2): a line break or another control
+// character anywhere, white space in a name or a path. The services are
+// checked before (CheckService): this catches Build itself.
+func (u unit) check() error {
+	bad := func(s string) bool { return strings.ContainsFunc(s, unicode.IsControl) }
+	ok := token(u.name) && !bad(u.description) && (u.needs == "" || token(u.needs)) && (u.wantedBy == "" || token(u.wantedBy))
+	for _, a := range u.after {
+		ok = ok && token(a)
+	}
+	for _, l := range slices.Concat(u.unitLines, u.service) {
+		k, v, found := strings.Cut(l, "=")
+		ok = ok && found && token(k) && !bad(v) && (!tokenKeys[k] || v == "" || token(v))
+	}
+	if !ok {
+		return fmt.Errorf("unit %q left out: a value would break its lines", u.name)
+	}
+	return nil
 }
 
 // stubAllow lets a unit that denies loopback reach systemd-resolved's stub
