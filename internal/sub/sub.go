@@ -527,6 +527,11 @@ func NaiveLink(m render.Model, s render.Service, password string) string {
 	// UDP over TCP v2 (spec/naive-uot-v1.md): without it the client sends
 	// no UDP through naive.
 	q.Set("uot", "2")
+	// ping and traceroute (spec/icmp-v1.md): only where the node carries
+	// them; without it the client sends no ICMP to the node.
+	if provision.NaiveICMP(s.Service) {
+		q.Set("icmp", "1")
+	}
 	return "naive+https://" + url.UserPassword("niko", password).String() + "@" + net.JoinHostPort(m.Host, "443") + "?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
 

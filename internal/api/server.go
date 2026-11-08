@@ -862,7 +862,7 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 		return nil, toConnect(err)
 	}
 	plan.Files = append(plan.Files, deploy.FirewallFiles(plan.HostPorts)...)
-	resp := &nodev1.GetDeploymentResponse{Units: plan.Units, Warnings: plan.Warnings, FrontDns: plan.FrontDNS}
+	resp := &nodev1.GetDeploymentResponse{Units: plan.Units, Warnings: plan.Warnings, FrontDns: plan.FrontDNS, Icmp: plan.ICMP}
 	for _, r := range plan.HostPorts {
 		resp.HostPorts = append(resp.HostPorts, &nodev1.PortRange{Proto: r.Proto, From: uint32(r.From), To: uint32(r.To)})
 	}

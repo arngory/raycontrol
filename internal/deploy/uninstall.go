@@ -222,6 +222,7 @@ var knownFiles = []string{
 	"/etc/tmpfiles.d/raycontrol.conf",
 	"/etc/polkit-1/rules.d/50-raycontrol.rules",
 	"/etc/sysctl.d/90-raycontrol.conf",
+	PingSysctl,
 	ResolvedDropIn,
 	FirewalldService,
 	UFWProfile,

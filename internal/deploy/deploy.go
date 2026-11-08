@@ -87,6 +87,10 @@ type Plan struct {
 	HostPorts []PortRange
 	// FrontDNS: the front answers DNS tunnels on UDP 53.
 	FrontDNS bool
+	// ICMP: a naive service carries ping and traceroute (icmp=on,
+	// spec/icmp-v1.md); the data plane's groups must be in
+	// net.ipv4.ping_group_range (Host.Apply widens it).
+	ICMP bool
 	// Processes are the data-plane units as plain processes, in start
 	// order, and Dirs the directories they share: what rayd serve
 	// -supervise runs where there is no systemd (tests, containers).
@@ -425,6 +429,13 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 				answer = provision.SiteAnswer(x.Service)
 			}
 		}
+		icmp := ""
+		if provision.NaiveICMP(s.Service) {
+			// ping and traceroute (spec/icmp-v1.md): ICMP datagram sockets,
+			// which AF_INET and AF_INET6 cover; apply lets the group open them.
+			icmp = " -icmp"
+			plan.ICMP = true
+		}
 		units = append(units, unit{
 			name:        render.UnitName(s.Name),
 			description: "raycontrol naive " + s.Name + " (HTTP/2 and HTTP/3, X25519MLKEM768)",
@@ -434,7 +445,7 @@ func Build(m render.Model, files []render.File, p render.Paths, bin Binaries) Pl
 				fmt.Sprintf("ExecStartPre=+install -m 0400 -o %s -g %s %s %s", g, g, path.Join(dir, render.NaiveKey), key),
 				"ExecStart=" + bin.Rayd + " naive -answer " + answer + " -users " + path.Join(dir, render.NaiveUsers) +
 					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name) +
-					" -quic-socket " + p.NaiveQUICSocket(s.Name) + probeArg + frontUID,
+					" -quic-socket " + p.NaiveQUICSocket(s.Name) + probeArg + frontUID + icmp,
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
 				"ReadWritePaths=" + path.Dir(p.NaiveSocket(s.Name)),

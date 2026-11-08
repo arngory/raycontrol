@@ -483,6 +483,11 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 				settings["ports"] = []string{"tcp/443"}
 			}
 		}
+		if v, ok := settings["icmp"]; ok && svc.Kind == "naive" {
+			if _, ok := v.(bool); !ok {
+				return svc, fmt.Errorf(`%w naive icmp: true or false (rayctl service set <naive> icmp=on|off)`, store.ErrInvalid)
+			}
+		}
 		if svc.Kind == "yggdrasil" {
 			if peers, ok := settings["peers"]; ok {
 				list, _ := peers.([]any)
@@ -802,6 +807,17 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			return svc, fmt.Errorf("%w: %w", store.ErrInvalid, err)
 		}
 		v = n
+	case svc.Kind == "naive" && key == "icmp":
+		// ping and traceroute through naive (spec/icmp-v1.md): off by
+		// default; the node sends the clients' echoes itself.
+		switch value {
+		case "on":
+			v = true
+		case "off":
+			v = 0
+		default:
+			return svc, fmt.Errorf("%w icmp: on or off", store.ErrInvalid)
+		}
 	case svc.Kind == "site" && key == "answer":
 		if !slices.Contains(site.Answers, value) {
 			return svc, fmt.Errorf("%w site answer %q: want one of %s", store.ErrInvalid, value, strings.Join(site.Answers, ", "))
@@ -907,7 +923,7 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			v = 0
 		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; yggdrasil: peers; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; naive: icmp; yggdrasil: peers; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
@@ -986,6 +1002,16 @@ func SiteAnswer(svc store.Service) string {
 		return site.Answer404
 	}
 	return s.Answer
+}
+
+// NaiveICMP reports whether a naive service carries ping and traceroute
+// (spec/icmp-v1.md): off unless rayctl service set <naive> icmp=on.
+func NaiveICMP(svc store.Service) bool {
+	var s struct {
+		ICMP bool `json:"icmp"`
+	}
+	_ = json.Unmarshal([]byte(svc.Settings), &s)
+	return svc.Kind == "naive" && s.ICMP
 }
 
 // SiteName returns the server name of a decoy site.

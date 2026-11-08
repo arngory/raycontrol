@@ -51,6 +51,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service enable|disable|del NAME
   service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false;
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
+                                            naive: icmp=on|off (ping and traceroute through it, then
+                                            rayctl apply);
                                             yggdrasil: peers=URI,URI|none (public peers, then rayctl apply);
                                             dnstt, masterdns: auth=, auth_hint=, seal=off|optional|required
                                             (auth_hint: dnsauth-v2 tags; required needs auth=required),
@@ -558,6 +560,11 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 				fmt.Fprintln(w, "run rayctl apply to restart the site with it")
 			case "yggdrasil":
 				fmt.Fprintln(w, "run rayctl apply: the unit gets network access with public peers, and loses it without")
+			case "naive":
+				if key == "icmp" {
+					fmt.Fprintln(w, "run rayctl apply: naive restarts with ICMP "+value+" (with it on, apply lets its group open ICMP sockets);\n"+
+						"until then clients that see icmp=1 in the link get their ICMP streams reset")
+				}
 			}
 		})
 	case "cert":

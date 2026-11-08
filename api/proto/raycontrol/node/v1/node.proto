@@ -288,6 +288,9 @@ message GetDeploymentResponse {
   repeated PortRange outside_ports = 6;
   // The front answers DNS tunnels on UDP 53 (beside systemd-resolved's stub).
   bool front_dns = 7;
+  // A naive service carries ICMP (icmp=on, spec/icmp-v1.md): the data
+  // plane's groups must be in net.ipv4.ping_group_range.
+  bool icmp = 8;
 }
 
 message PortRange {

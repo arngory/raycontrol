@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -737,6 +738,133 @@ func TestBuildNaive(t *testing.T) {
 	}
 	if len(p.Warnings) != 0 {
 		t.Errorf("warnings %v", p.Warnings)
+	}
+	// ICMP (spec/icmp-v1.md): off unless set; on, naive gets -icmp and
+	// apply the ping groups.
+	if strings.Contains(u, "-icmp") || p.ICMP {
+		t.Errorf("ICMP on by default:\n%s", u)
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "naive", "icmp", "on"); err != nil {
+		t.Fatal(err)
+	}
+	if m, err = render.CollectForRender(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	p = deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	if u := file(p, "/etc/systemd/system/niko-naive.service"); !strings.Contains(u, " -icmp\n") || !p.ICMP ||
+		!strings.Contains(u, "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n") {
+		t.Errorf("ICMP on: plan %v, unit\n%s", p.ICMP, u)
+	}
+}
+
+// The ping groups hold the data plane's (render.FrontUID to
+// store.LastServiceUID); a range without them is widened, never narrowed.
+func TestPingGroups(t *testing.T) {
+	first, last := render.FrontUID, store.LastServiceUID
+	for value, want := range map[string]string{
+		"0 2147483647": "", "100 10000": "", fmt.Sprintf("%d %d", first, last): "",
+		"1 0": "9100 9179", "1\t0": "9100 9179", "": "9100 9179", "x y": "9100 9179",
+		"0 0": "0 9179", "9101 9179": "9100 9179", "9100 9178": "9100 9179", "10000 20000": "9100 20000",
+	} {
+		wide, ok := deploy.PingGroups(value)
+		if ok != (want == "") || (want != "" && wide != want) {
+			t.Errorf("%q: %q %v, want %q", value, wide, ok, want)
+		}
+	}
+	if _, ok := deploy.PingGroups(fmt.Sprintf("%d %d", first+1, last)); ok {
+		t.Error("the front's group left out")
+	}
+	if _, ok := deploy.PingGroups(fmt.Sprintf("%d %d", first, last-1)); ok {
+		t.Error("the last service's group left out")
+	}
+}
+
+// apply with naive's ICMP on: the range widened in a file of its own and
+// loaded, the old value kept for uninstall; a range that holds the groups
+// left alone; a warning where the host does not let it change.
+func TestApplyPingGroups(t *testing.T) {
+	for _, c := range []struct {
+		before, after string
+		locked        bool // a container: the value does not change
+	}{
+		{"1 0", "9100 9179", false},
+		{"0 0", "0 9179", false},
+		{"0 2147483647", "", false},
+		{"1 0", "9100 9179", true},
+	} {
+		root := t.TempDir()
+		value := c.before
+		var out bytes.Buffer
+		var cmds []string
+		h := &deploy.Host{Root: root, Out: &out,
+			Run: func(name string, args ...string) ([]byte, error) {
+				cmd := name + " " + strings.Join(args, " ")
+				cmds = append(cmds, cmd)
+				switch {
+				case cmd == "sysctl -n "+deploy.PingGroupRange:
+					return []byte(strings.ReplaceAll(value, " ", "\t") + "\n"), nil
+				case cmd == "sysctl -q -e -p "+deploy.PingSysctl && !c.locked:
+					b, _ := os.ReadFile(filepath.Join(root, deploy.PingSysctl))
+					for _, l := range strings.Split(string(b), "\n") {
+						if v, ok := strings.CutPrefix(l, deploy.PingGroupRange+" = "); ok {
+							value = v
+						}
+					}
+				case strings.HasPrefix(cmd, "sysctl -q -w "+deploy.PingGroupRange+"=") && !c.locked:
+					// As sysctl -n printed it, with a tab: the kernel reads any space.
+					value = strings.Join(strings.Fields(strings.TrimPrefix(cmd, "sysctl -q -w "+deploy.PingGroupRange+"=")), " ")
+				}
+				return nil, nil
+			},
+			LookPath: func(string) (string, error) { return "", errors.New("not found") },
+		}
+		j, err := deploy.OpenJournal(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.Journal = j
+		if err := h.Apply(deploy.Plan{ICMP: true}); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(filepath.Join(root, deploy.PingSysctl))
+		warned := strings.Contains(out.String(), "warning: naive carries ICMP")
+		switch {
+		case c.after == "":
+			if err == nil || value != c.before || out.Len() != 0 {
+				t.Errorf("%s: changed: %q, now %s, said %q", c.before, b, value, out.String())
+			}
+			continue
+		case !strings.Contains(string(b), deploy.PingGroupRange+" = "+c.after+"\n"):
+			t.Errorf("%s: file %q", c.before, b)
+		case c.locked != warned || (!c.locked && value != c.after):
+			t.Errorf("%s (locked %v): now %s, said %q", c.before, c.locked, value, out.String())
+		case !j.Has(deploy.ChangeSysctl, "", deploy.PingGroupRange):
+			t.Errorf("%s: the old value not journaled", c.before)
+		}
+		if c.locked {
+			continue
+		}
+		// Uninstall: the file goes, the value comes back.
+		cmds = nil
+		if err := h.Uninstall(j, deploy.UninstallOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(root, deploy.PingSysctl)); !os.IsNotExist(err) || value != c.before {
+			t.Errorf("%s: after uninstall %v, value %s", c.before, err, value)
+		}
+	}
+	// ICMP off: the range is not even read.
+	var cmds []string
+	h := &deploy.Host{Root: t.TempDir(), Out: &bytes.Buffer{}, LookPath: func(string) (string, error) { return "", errors.New("not found") },
+		Run: func(name string, args ...string) ([]byte, error) {
+			cmds = append(cmds, name+" "+strings.Join(args, " "))
+			return nil, nil
+		}}
+	if err := h.Apply(deploy.Plan{}); err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(cmds, func(c string) bool { return strings.Contains(c, deploy.PingGroupRange) }) {
+		t.Errorf("ICMP off, the range touched: %v", cmds)
 	}
 }
 
