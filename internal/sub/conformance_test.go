@@ -248,6 +248,10 @@ func strictProblems(kind, link string) []string {
 		if q.Get("obfs") != "" && q.Get("niko-pin") == "" {
 			out = append(out, "hy2 with obfs but no niko-pin")
 		}
+		// The pinned niko-server answers right after the dial (§4).
+		if q.Get("niko-ack") != "1" {
+			out = append(out, "hy2 without niko-ack=1")
+		}
 	case "naive+https", "naive+quic":
 		// The node's address in the host: the name goes in sni.
 		if q.Get("sni") == "" {

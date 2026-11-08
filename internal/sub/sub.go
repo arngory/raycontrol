@@ -568,6 +568,11 @@ func HysteriaLink(m render.Model, s render.Service, password string) string {
 	}
 	q.Set("niko-node", m.NodeID)
 	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
+	// niko-server >= v0.14.1 sends a stream's TCP response right after the
+	// dial, before the destination speaks, so the client may hold the app's
+	// SYN-ACK until then (subscription-v1 §4). TestNikoAckPin keeps the
+	// pinned niko-server at that version or later.
+	q.Set("niko-ack", "1")
 	host := net.JoinHostPort(m.Host, strconv.Itoa(port))
 	return "hysteria2://" + url.PathEscape(password) + "@" + host + "/?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
