@@ -82,6 +82,12 @@ func installRelay(bundlePath, packages string) error {
 	if _, err := os.Stat(deploy.DefaultBinaries.Rayspa); err != nil {
 		return fmt.Errorf("%s is missing: install/bootstrap.sh -relay installs it", deploy.DefaultBinaries.Rayspa)
 	}
+	// Not only for the probe endpoint: rayspa's unit copies the bundle in
+	// with rayd's credential command (spec/apply-plan-v1.md §6, 3).
+	if _, err := os.Stat(deploy.DefaultBinaries.Rayd); err != nil {
+		return fmt.Errorf("%s is missing: install/bootstrap.sh -relay installs it (rayspa's unit copies the bundle in with it)",
+			deploy.DefaultBinaries.Rayd)
+	}
 	// One install at a time: two would share the guard.
 	installLock, err := takeInstallLock(relayInstallLock)
 	if err != nil {
