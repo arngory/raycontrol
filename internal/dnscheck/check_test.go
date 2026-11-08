@@ -93,7 +93,7 @@ func TestCheckHealthy(t *testing.T) {
 			t.Errorf("%s parent %+v", z.Zone.Name, z.Parent)
 		}
 	}
-	if d.Front.State != OK || d.Front.Detail != "SOA and probe on 203.0.113.7:53" {
+	if d.Front.State != OK || d.Front.Detail != "SOA and probe on 127.0.0.1:53" {
 		t.Errorf("front %+v", d.Front)
 	}
 	if d.Backend.State != OK || !strings.HasPrefix(d.Backend.Detail, "sealed poll answered in") {
@@ -132,7 +132,7 @@ func TestCheckSlipstream(t *testing.T) {
 	z := w.zones()[0]
 	z.Service, z.Kind, z.Seal, z.SealKey, z.Auth = "slip", "slipstream", "", nil, ""
 	s := w.check(t, []Zone{z}).Zones[0]
-	if s.State() != OK || s.Front.Detail != "SOA and probe on 203.0.113.7:53" || s.Backend.State != Skip {
+	if s.State() != OK || s.Front.Detail != "SOA and probe on 127.0.0.1:53" || s.Backend.State != Skip {
 		t.Errorf("with the key: front %+v, backend %+v, state %v", s.Front, s.Backend, s.State())
 	}
 	for _, addr := range []string{"8.8.8.8", "1.1.1.1", "9.9.9.9"} {
@@ -143,7 +143,7 @@ func TestCheckSlipstream(t *testing.T) {
 
 	z.ProbeKey, z.NS = nil, ""
 	s = w.check(t, []Zone{z}).Zones[0]
-	if s.State() != OK || !strings.HasPrefix(s.Front.Detail, "answers on 203.0.113.7:53") {
+	if s.State() != OK || !strings.HasPrefix(s.Front.Detail, "answers on 127.0.0.1:53") {
 		t.Errorf("without the key: front %+v, state %v", s.Front, s.State())
 	}
 	for _, addr := range []string{"8.8.8.8", "1.1.1.1", "9.9.9.9"} {
@@ -362,7 +362,7 @@ func TestCheckNode(t *testing.T) {
 		w := newWorld(t)
 		delete(w.front.zones, dnsttZone)
 		zr := w.check(t, w.zones()[:1]).Zones[0]
-		if zr.Front.State != Fail || zr.Front.Detail != "REFUSED on 203.0.113.7:53: t3x.example.com is not among the front's zones" {
+		if zr.Front.State != Fail || zr.Front.Detail != "REFUSED on 127.0.0.1:53: t3x.example.com is not among the front's zones" {
 			t.Fatalf("front %+v", zr.Front)
 		}
 	})
@@ -377,14 +377,15 @@ func TestCheckNode(t *testing.T) {
 			t.Fatalf("err %v", err)
 		}
 	})
+	// Over loopback, never the node's public address: the perimeter
+	// refuses the front's answer to a local address (S-2), and every node
+	// with its address on an interface saw no answer.
 	t.Run("the front on loopback", func(t *testing.T) {
 		w := newWorld(t)
-		w.checker.Local = func(netip.Addr) bool { return false } // behind 1:1 NAT
-		loop := netip.MustParseAddrPort("127.0.0.1:53")
-		w.net.handle(loop, w.front.handle)
+		w.net.handle(netip.AddrPortFrom(nodeAddr, 53), func(string, netip.Addr, []byte) []byte { return nil })
 		zr := w.check(t, w.zones()[:1]).Zones[0]
-		if zr.Front.Detail != "SOA and probe on 127.0.0.1:53" || len(w.net.sent(loop.Addr())) == 0 {
-			t.Fatalf("front %+v", zr.Front)
+		if zr.Front.Detail != "SOA and probe on 127.0.0.1:53" || len(w.net.sent(nodeFront.Addr())) == 0 || len(w.net.sent(nodeAddr)) != 0 {
+			t.Fatalf("front %+v, %d queries to the public address", zr.Front, len(w.net.sent(nodeAddr)))
 		}
 	})
 	t.Run("backend down", func(t *testing.T) {

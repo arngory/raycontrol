@@ -239,7 +239,7 @@ func TestSupervisedNode(t *testing.T) {
 	}
 	// A new dnstt service seals for the clients that ask (seal=optional),
 	// and the node's own poll asks.
-	if want := "SOA and probe on " + net.JoinHostPort(ip.String(), "53"); zone.Front.Detail != want || zone.Backend.State != dnscheck.OK ||
+	if want := "SOA and probe on 127.0.0.1:53"; zone.Front.Detail != want || zone.Backend.State != dnscheck.OK ||
 		!strings.HasPrefix(zone.Backend.Detail, "sealed poll answered in") {
 		t.Fatalf("the node's check of its zone: front %+v, backend %+v", zone.Front, zone.Backend)
 	}
