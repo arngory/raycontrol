@@ -181,7 +181,7 @@ func (s *Server) handle(r *http.Request) (Envelope, error) {
 	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
 		addr = ap.Addr().Unmap()
 	}
-	return s.BuildFor(ctx, dev.UserName, addr, now)
+	return s.BuildForDevice(ctx, dev.UserName, key[:], addr, now)
 }
 
 // Build returns the signed subscription of a user.
@@ -192,6 +192,12 @@ func (s *Server) Build(ctx context.Context, userName string, now time.Time) (Env
 // BuildFor returns the signed subscription of a user asking from addr: with
 // the hint for that network, when there is one.
 func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr, now time.Time) (Envelope, error) {
+	return s.BuildForDevice(ctx, userName, nil, addr, now)
+}
+
+// BuildForDevice is BuildFor for one of the user's devices, given by its
+// SPA key: its own links where they differ by device (Yggdrasil's key).
+func (s *Server) BuildForDevice(ctx context.Context, userName string, device []byte, addr netip.Addr, now time.Time) (Envelope, error) {
 	m, err := render.Collect(ctx, s.Store)
 	if err != nil {
 		return Envelope{}, err
@@ -205,7 +211,7 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 	if user == nil {
 		return Envelope{}, errors.New("user not active")
 	}
-	profiles, err := Profiles(m, *user)
+	profiles, err := DeviceProfiles(m, *user, device)
 	// Not the links of a DNS tunnel the front leaves out for its zones
 	// (rayd logs why; zones v0.13 took that nest): they would fail every
 	// client that tries them.

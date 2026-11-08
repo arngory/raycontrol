@@ -2,6 +2,7 @@ package render
 
 import (
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -46,6 +47,21 @@ type YggdrasilSettings struct {
 func YggdrasilKey(uuid string) ed25519.PrivateKey {
 	seed := sha256.Sum256([]byte("raycontrol-yggdrasil-v1\x00" + uuid))
 	return ed25519.NewKeyFromSeed(seed[:])
+}
+
+// YggdrasilDeviceKey is one device's key in the mesh, from the device's
+// SPA key (which only it and the node hold) and the user's inner UUID:
+// each device its own address, which neither a sibling nor anyone holding
+// the UUID can take. Two devices sharing a key take each other's links,
+// and both lose their connections. Without a device it is the user's key
+// (YggdrasilKey): exported links, and subscriptions before v0.20.1.
+func YggdrasilDeviceKey(uuid string, device []byte) ed25519.PrivateKey {
+	if len(device) == 0 {
+		return YggdrasilKey(uuid)
+	}
+	m := hmac.New(sha256.New, device)
+	m.Write([]byte("raycontrol-yggdrasil-device-v1\x00" + uuid))
+	return ed25519.NewKeyFromSeed(m.Sum(nil))
 }
 
 // YggdrasilNode returns a Yggdrasil service's settings and the node's public
@@ -96,20 +112,25 @@ func yggdrasilUsers(m Model, s Service, inner Service) []map[string]any {
 		now = time.Now()
 	}
 	keys := map[string]string{}
-	add := func(name, uuid string) {
-		keys[name] = hex.EncodeToString(YggdrasilKey(uuid).Public().(ed25519.PublicKey))
-	}
 	for _, u := range m.Users {
 		if !slices.Contains(u.Services, s.ID) || m.Inner[u.ID] == "" {
 			continue
 		}
-		add(InnerEmail(u.ID), m.Inner[u.ID])
+		// The user's key (exported links, older subscriptions) and each
+		// device's, for every UUID of the rotation.
+		uuids := map[string]string{"": m.Inner[u.ID]}
 		set := m.Sets[inner.ID][u.ID]
 		if set.Next != "" {
-			add(InnerEmail(u.ID)+"-n", set.Next)
+			uuids["-n"] = set.Next
 		}
 		if set.Prev != "" && now.Before(set.PrevUntil) {
-			add(InnerEmail(u.ID)+"-p", set.Prev)
+			uuids["-p"] = set.Prev
+		}
+		for suffix, uuid := range uuids {
+			keys[InnerEmail(u.ID)+suffix] = hex.EncodeToString(YggdrasilKey(uuid).Public().(ed25519.PublicKey))
+			for _, d := range m.Devices[u.ID] {
+				keys[InnerEmail(u.ID)+"-"+d.ID+suffix] = hex.EncodeToString(YggdrasilDeviceKey(uuid, d.Key[:]).Public().(ed25519.PublicKey))
+			}
 		}
 	}
 	users := []map[string]any{}

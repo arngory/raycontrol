@@ -115,6 +115,10 @@ type Model struct {
 	// devices allowed on it (spec/dnsauth-v1.md): "<device id> <hex>".
 	// Only CollectForRender fills it.
 	DNSAuth map[int64][]string
+	// Devices maps user ID to the user's devices not revoked: each has its
+	// own key in the Yggdrasil mesh, from its SPA key. Only CollectForRender
+	// fills it, and only with a Yggdrasil service.
+	Devices map[int64][]store.DeviceSecret
 	// DNSProbeKey is the node's dnsprobe-v1 key (docs/spec/dnsprobe-v1.md)
 	// when it has a DNS tunnel: the front answers resolver checks with it.
 	DNSProbeKey []byte
@@ -320,6 +324,11 @@ func CollectForRender(ctx context.Context, st *store.Store) (Model, error) {
 			lines = append(lines, provision.DNSCheckDevice+" "+hex.EncodeToString(k[:]))
 		}
 		m.DNSAuth[svc.ID] = lines
+	}
+	if slices.ContainsFunc(m.Services, func(s Service) bool { return s.Kind == "yggdrasil" }) {
+		if m.Devices, err = st.ActiveDeviceSecrets(ctx); err != nil {
+			return m, err
+		}
 	}
 	return m, nil
 }
