@@ -164,6 +164,27 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 		}()
 	}
 
+	// Services the new version leaves out, before anything changes and
+	// before the handoff: the operator's -force is this rayctl's to give,
+	// and it passes it on (review of apply-plan-v1). Said with -check.
+	handedFrom := ""
+	if os.Getenv(handoffEnv) == "1" {
+		handedFrom = installed
+	}
+	misnamedFirst := func(to string) error {
+		if !leavesOut(to) {
+			return nil
+		}
+		names := c.misnamed(ctx)
+		if *check {
+			if len(names) > 0 {
+				fmt.Println("warning:", strings.Join(names, ", ")+":", misnamedAdvice)
+			}
+			return nil
+		}
+		return misnamedUpdate(os.Stdout, names, *force, os.Getenv(nodeupdate.ResultEnv) != "", handedFrom)
+	}
+
 	if err := os.MkdirAll(deploy.JournalDir, 0o700); err != nil {
 		return err
 	}
@@ -185,6 +206,9 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 		}
 		newVersion = "local"
 		fmt.Println("binaries from", *local, "without verification (test mode)")
+		if err := misnamedFirst(newVersion); err != nil || *check {
+			return err
+		}
 	default:
 		var r release.Release
 		arch := runtime.GOARCH
@@ -205,7 +229,7 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 						return fmt.Errorf("installed %s is newer than the latest release %s; rayctl update -version %s goes back", installed, l, l)
 					case *check:
 						fmt.Printf("installed %s, release %s available: rayctl update\n", installed, l)
-						return nil
+						return misnamedFirst(l)
 					}
 					v = l
 				}
@@ -225,13 +249,16 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 		}
 		if *check {
 			fmt.Printf("installed %s, release %s available: rayctl update\n", installed, newVersion)
-			return nil
+			return misnamedFirst(newVersion)
+		}
+		if err := misnamedFirst(newVersion); err != nil {
+			return err
 		}
 		// A newer release updates the node with its own rayctl. Going back,
 		// or the same version again, stays with this one: it knows the
 		// newer state of the node.
 		if handsOff(*noHandoff, newVersion, installed) {
-			h, herr := handoff(r, stage, installed, *yes)
+			h, herr := handoff(r, stage, installed, *yes, *force)
 			if h {
 				handed = true
 				return herr
@@ -244,18 +271,6 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 		if b, err := os.ReadFile(filepath.Join(stage, "VERSIONS")); err == nil { //nolint:gosec // G304: our staging directory
 			fmt.Print(string(b))
 		}
-	}
-	// Services the new plan leaves out, before anything changes (review of
-	// apply-plan-v1): said with -check, refused without -force.
-	names := c.misnamed(ctx)
-	if *check {
-		if len(names) > 0 {
-			fmt.Println("warning:", strings.Join(names, ", ")+":", misnamedAdvice)
-		}
-		return nil
-	}
-	if err := misnamedUpdate(os.Stdout, names, *force); err != nil {
-		return err
 	}
 	if !*yes {
 		fmt.Printf("Update raycontrol %s to %s? rayd, rayspa and the data plane restart; clients reconnect and send SPA again. Type yes to go on: ",
@@ -361,13 +376,15 @@ func weakerModes(kind, settings string) []string {
 // rayctl updates from there (update -from: it verifies the release again,
 // with its own key, and reads the archive with its own code). handed is
 // false when the new rayctl did not start at all (a noexec mount, another
-// architecture): the caller updates as before.
+// architecture): the caller updates as before. yes and force are the
+// operator's, passed on (force: misnamed services, the only thing it
+// changes for a newer release).
 //
 // The child is not bound to this command's context: the time the download
 // had must not cut its restart or its rollback. Ctrl-C reaches it as part
 // of the terminal's process group and stops it as it would stop this one;
 // this one stays to clean up.
-func handoff(r release.Release, stage, installed string, yes bool) (handed bool, err error) {
+func handoff(r release.Release, stage, installed string, yes, force bool) (handed bool, err error) {
 	// A directory of its own: if the release's rayctl does not run, this
 	// one extracts the release into the stage.
 	dir := filepath.Join(stage, "handoff")
@@ -390,6 +407,9 @@ func handoff(r release.Release, stage, installed string, yes bool) (handed bool,
 	args := []string{"update", "-from", dir, "-version", r.Version}
 	if yes {
 		args = append(args, "-yes")
+	}
+	if force {
+		args = append(args, "-force")
 	}
 	cmd := exec.Command(bin, args...) //nolint:gosec // G204: the verified release's rayctl
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
