@@ -39,14 +39,23 @@ type Server struct {
 	// Probe is where the probe name leads (the subscription endpoint on
 	// loopback, R4-16); that name and no other address reaches it.
 	Probe string
-	// Allow says which addresses UDP over TCP may reach (Public when nil);
-	// Resolve looks its names up (the system's resolver when nil).
+	// Allow says which addresses UDP over TCP and ICMP may reach (Public
+	// when nil); Resolve looks UDP's names up (the system's resolver when
+	// nil).
 	Allow   func(netip.Addr) bool
 	Resolve func(ctx context.Context, name string) ([]netip.Addr, error)
-	Log     *slog.Logger
+	// ICMP carries ping and traceroute through ICMPName (spec/icmp-v1.md):
+	// off unless the service has icmp=on.
+	ICMP bool
+	Log  *slog.Logger
 
 	uot     uotLimits
 	uotIdle time.Duration // uotIdle when 0 (tests make it short)
+
+	icmp     icmpLimits
+	icmpIdle time.Duration                   // icmpIdle when 0
+	icmpOpen func(v6 bool) (icmpConn, error) // openPing when nil
+	icmpWarn icmpWarn
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -94,6 +103,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case uotLegacyName:
 		panic(http.ErrAbortHandler)
+	case ICMPName:
+		if !s.ICMP {
+			s.Log.Debug("naive: ICMP is off")
+			panic(http.ErrAbortHandler)
+		}
+		if !s.icmp.take(user) {
+			s.Log.Debug("naive: too many ICMP streams")
+			panic(http.ErrAbortHandler)
+		}
+		defer s.icmp.put(user)
+		if err := s.serveICMP(r.Context(), user, in, http.NewResponseController(w)); err != nil {
+			s.Log.Debug("naive: ICMP refused", "err", err)
+			panic(http.ErrAbortHandler)
+		}
+		return
 	}
 
 	dial := s.Dial

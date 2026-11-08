@@ -190,6 +190,12 @@ func TestPlanCheckAcceptsOurs(t *testing.T) {
 	without := goodInputs()
 	without.FrontTCP, without.Front = false, false
 	plans["REALITY on TCP 443 itself"] = deploy.Build(without, render.DefaultPaths, deploy.DefaultBinaries)
+	icmp := goodInputs()
+	icmp.Services[4].ICMP = true
+	plans["naive with ICMP"] = deploy.Build(icmp, render.DefaultPaths, deploy.DefaultBinaries)
+	if p := plans["naive with ICMP"]; !p.ICMP || !strings.Contains(file(p, "/etc/systemd/system/niko-naive.service"), " -icmp\n") {
+		t.Fatal("naive with ICMP: no -icmp")
+	}
 	for name, services := range map[string][][3]string{
 		"self-steal":      {{"reality", "r", ""}, {"doh", "doh", ""}},
 		"hysteria":        {{"hy2-masq", "hy2-masq", ""}, {"hy2-obfs", "hy2-obfs", ""}},
@@ -198,6 +204,7 @@ func TestPlanCheckAcceptsOurs(t *testing.T) {
 		"yggdrasil":       {{"reality", "reality", ""}, {"yggdrasil", "ygg", ""}},
 		"every kind":      {{"reality", "reality", ""}, {"naive", "naive", ""}, {"doh", "doh", ""}, {"yggdrasil", "ygg", ""}, {"hy2-masq", "hm", ""}, {"hy2-obfs", "ho", ""}, {"dnstt", "dns", ""}, {"masterdns", "mdns", ""}, {"slipstream", "slip", ""}, {"api", "api", ""}, {"ssh", "ssh", ""}, {"olcrtc", "olc", ""}},
 		"masterdns alone": {{"masterdns", "mdns", ""}},
+		"naive, ICMP":     {{"reality", "reality", ""}, {"naive", "naive", `{"icmp":true}`}},
 	} {
 		m, files := buildModel(t, render.DefaultPaths, services, nil)
 		plans[name] = build(m, files, render.DefaultPaths)
@@ -205,6 +212,34 @@ func TestPlanCheckAcceptsOurs(t *testing.T) {
 	for name, p := range plans {
 		if err := p.Check(); err != nil {
 			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// naive's ICMP: the ping groups' sysctl file is root's own, not the
+	// plan's (spec/icmp-v1.md §3): Check does not see it, and a second
+	// apply neither refuses nor removes it.
+	{
+		root := t.TempDir()
+		value := "1 0"
+		h := &deploy.Host{Root: root, Out: &bytes.Buffer{},
+			Run: func(name string, args ...string) ([]byte, error) {
+				if name+" "+strings.Join(args, " ") == "sysctl -n "+deploy.PingGroupRange {
+					return []byte(value + "\n"), nil
+				}
+				return nil, nil
+			},
+			LookupUser: func(string) (int, error) { return 0, errors.New("unknown") }, LookupGroup: func(string) (int, error) { return 0, errors.New("unknown") },
+			LookPath: func(string) (string, error) { return "", errors.New("none") }}
+		p := plans["naive with ICMP"]
+		for range 2 {
+			if err := h.Apply(p, "rayd.service"); err != nil {
+				t.Fatal(err)
+			}
+			if b, err := os.ReadFile(filepath.Join(root, deploy.PingSysctl)); err != nil || !strings.Contains(string(b), deploy.PingGroupRange+" = 9100 9179") {
+				t.Fatalf("%s: %q %v", deploy.PingSysctl, b, err)
+			}
+		}
+		if err := p.Check(); err != nil {
+			t.Fatal(err)
 		}
 	}
 	// The relay's plan goes through Apply too.

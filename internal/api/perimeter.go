@@ -194,6 +194,13 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 			}
 		}
 	}
+	// The egress policy (spec/egress-policy-v1.md): always there, so that a
+	// policy turned off reaches rayspa as such.
+	egress, err := p.Store.Egress(ctx)
+	if err != nil {
+		return nil, err
+	}
+	snap.Egress = &perimeterv1.Egress{Smtp: egress.SMTP, Bittorrent: egress.BitTorrent, Uids: p.egressUIDs()}
 	return snap, nil
 }
 

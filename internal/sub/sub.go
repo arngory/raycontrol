@@ -531,6 +531,11 @@ func NaiveLink(m render.Model, s render.Service, password string) string {
 	// UDP over TCP v2 (spec/naive-uot-v1.md): without it the client sends
 	// no UDP through naive.
 	q.Set("uot", "2")
+	// ping and traceroute (spec/icmp-v1.md): only where the node carries
+	// them; without it the client sends no ICMP to the node.
+	if provision.NaiveICMP(s.Service) {
+		q.Set("icmp", "1")
+	}
 	return "naive+https://" + url.UserPassword("niko", password).String() + "@" + net.JoinHostPort(m.Host, "443") + "?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
 
@@ -568,6 +573,11 @@ func HysteriaLink(m render.Model, s render.Service, password string) string {
 	}
 	q.Set("niko-node", m.NodeID)
 	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
+	// niko-server >= v0.14.1 sends a stream's TCP response right after the
+	// dial, before the destination speaks, so the client may hold the app's
+	// SYN-ACK until then (subscription-v1 §4). TestNikoAckPin keeps the
+	// pinned niko-server at that version or later.
+	q.Set("niko-ack", "1")
 	host := net.JoinHostPort(m.Host, strconv.Itoa(port))
 	return "hysteria2://" + url.PathEscape(password) + "@" + host + "/?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }

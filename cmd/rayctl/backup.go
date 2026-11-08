@@ -210,6 +210,22 @@ func (c *cli) metrics(ctx context.Context, args []string) error {
 			}
 			text += m.String()
 		}
+		// The egress policy's counters (spec/egress-policy-v1.md §6): by
+		// rule, never where to or whose; a rule not in force has none.
+		if blocks, err := (&perimeter.NFT{}).EgressBlocks(); err == nil {
+			var m api.Metrics
+			for _, rule := range perimeter.EgressRules {
+				d, ok := blocks[rule]
+				if !ok {
+					continue
+				}
+				m.Add("raycontrol_egress_blocked_packets_total",
+					"Packets of the data plane the egress policy blocked (rayctl egress): about one a try over TCP, a datagram over UDP.",
+					float64(d.Packets), "rule", rule)
+				m.Add("raycontrol_egress_blocked_bytes_total", "Bytes of those packets.", float64(d.Bytes), "rule", rule)
+			}
+			text += m.String()
+		}
 	}
 	if *out == "" {
 		fmt.Print(text)

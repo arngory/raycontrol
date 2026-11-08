@@ -40,6 +40,7 @@ func TestLinksForStrictClient(t *testing.T) {
 		{"hy2-masq", "hy2", ""},
 		{"hy2-obfs", "hy2o", ""},
 		{"naive", "naive", ""},
+		{"naive", "naive-icmp", `{"icmp":true}`},
 		{"doh", "doh", ""},
 		{"dnstt", "dns", ""},
 		{"dnstt", "dns-spare", `{"spare_zones":2}`},
@@ -120,6 +121,15 @@ func TestLinksForStrictClient(t *testing.T) {
 			}
 			for _, problem := range strictProblems(k.kind, link) {
 				t.Errorf("%s (%s): %s\n  %s", k.name, k.kind, problem, link)
+			}
+		}
+	}
+	// ICMP (icmp-v1 §1): icmp=1 on the naive that carries it, and only there.
+	for name, want := range map[string]bool{"naive": false, "naive-icmp": true} {
+		for _, link := range []string{byName[name].Link, nextLink(byName[name])} {
+			u, _ := url.Parse(link)
+			if u.Query().Has("icmp") != want {
+				t.Errorf("%s: icmp=1 %v, want %v: %s", name, u.Query().Has("icmp"), want, link)
 			}
 		}
 	}
@@ -248,6 +258,10 @@ func strictProblems(kind, link string) []string {
 		if q.Get("obfs") != "" && q.Get("niko-pin") == "" {
 			out = append(out, "hy2 with obfs but no niko-pin")
 		}
+		// The pinned niko-server answers right after the dial (§4).
+		if q.Get("niko-ack") != "1" {
+			out = append(out, "hy2 without niko-ack=1")
+		}
 	case "naive+https", "naive+quic":
 		// The node's address in the host: the name goes in sni.
 		if q.Get("sni") == "" {
@@ -256,6 +270,10 @@ func strictProblems(kind, link string) []string {
 		// UDP over TCP v2 (naive-uot-v1 §1): the node carries it.
 		if q.Get("uot") != "2" {
 			out = append(out, "naive without uot=2")
+		}
+		// ICMP (icmp-v1 §1): 1 or absent.
+		if q.Has("icmp") && q.Get("icmp") != "1" {
+			out = append(out, "naive with icmp="+q.Get("icmp")+", not 1")
 		}
 		// The client ignores these; the node must not rely on them.
 		for _, key := range []string{"cert", "extra-headers"} {

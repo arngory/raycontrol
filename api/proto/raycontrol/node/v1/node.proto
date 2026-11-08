@@ -127,6 +127,13 @@ service NodeService {
   // SetNodeNote sets the node's note for its users, or takes it away with
   // "": clients show it with the node (subscription-v1 §3, field note).
   rpc SetNodeNote(SetNodeNoteRequest) returns (SetNodeNoteResponse);
+  // GetEgress returns the node's egress policy (spec/egress-policy-v1.md):
+  // what the data plane may not send, on every profile. On the node's
+  // socket only.
+  rpc GetEgress(GetEgressRequest) returns (GetEgressResponse);
+  // SetEgress blocks or allows BitTorrent and SMTP (TCP 25); rayspa applies
+  // it within a second or two. Root on the node only.
+  rpc SetEgress(SetEgressRequest) returns (SetEgressResponse);
 
   // GetDeployment returns the deployment rayd builds for the current
   // services: system users, unit files and other files. rayctl before
@@ -298,6 +305,9 @@ message GetDeploymentResponse {
   repeated PortRange outside_ports = 6;
   // The front answers DNS tunnels on UDP 53 (beside systemd-resolved's stub).
   bool front_dns = 7;
+  // A naive service carries ICMP (icmp=on, spec/icmp-v1.md): the data
+  // plane's groups must be in net.ipv4.ping_group_range.
+  bool icmp = 8;
 }
 
 message PortRange {
@@ -344,6 +354,7 @@ message DeployService {
   bool public_peers = 6; // yggdrasil: it dials public peers
   bool salamander = 7;   // hy2-obfs: the front's copy of its salamander password is rendered
   DeploySlipstream slipstream = 8;
+  bool icmp = 9;         // naive: it carries ping and traceroute (icmp=on, spec/icmp-v1.md)
 }
 
 // DeploySlipstream are a slipstream service's settings
@@ -374,6 +385,33 @@ message GetStatusResponse {
   // The node's name (rayctl node name); empty: none.
   string name = 10;
   string note = 11;
+  // The node's egress policy (rayctl egress); on the node's socket only,
+  // absent through the remote API.
+  Egress egress = 12;
+}
+
+// Egress is what the data plane may not send, whoever the user
+// (spec/egress-policy-v1.md).
+message Egress {
+  bool bittorrent = 1; // the handshake, uTP SYN, UDP tracker connect, DHT queries
+  bool smtp = 2;       // TCP to port 25
+}
+
+message GetEgressRequest {}
+message GetEgressResponse {
+  Egress egress = 1;
+  // Processes it covers besides the data plane (UIDs 9100-9179): rayd's own
+  // where the data plane runs as its children (rayd serve -supervise).
+  repeated uint32 uids = 2;
+}
+
+message SetEgressRequest {
+  // Only the parts given change.
+  optional bool bittorrent = 1;
+  optional bool smtp = 2;
+}
+message SetEgressResponse {
+  Egress egress = 1; // as kept
 }
 
 message SetNodeNameRequest {

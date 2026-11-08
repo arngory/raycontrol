@@ -31,13 +31,9 @@ import (
 // echo.test for 127.0.0.1.
 func uotServer(t *testing.T, idle time.Duration, opts ...func(*http.Transport)) (*Server, func(host string) (*http.Response, *paddedStream, func())) {
 	t.Helper()
-	users := filepath.Join(t.TempDir(), "users.json")
-	writeUsers(t, users, "secret-one")
-	answer, _ := site.Responder(site.Answer404, "")
-	var d net.Dialer
-	h := &Server{Users: &Users{Path: users}, Answer: answer, Dial: d.DialContext, Log: slog.New(slog.DiscardHandler),
-		Allow: func(a netip.Addr) bool { return a == netip.MustParseAddr("127.0.0.1") || a == netip.IPv6Loopback() },
-		Resolve: func(_ context.Context, name string) ([]netip.Addr, error) {
+	return tunnelServer(t, func(h *Server) {
+		h.Allow = func(a netip.Addr) bool { return a == netip.MustParseAddr("127.0.0.1") || a == netip.IPv6Loopback() }
+		h.Resolve = func(_ context.Context, name string) ([]netip.Addr, error) {
 			switch name {
 			case "echo.test":
 				return []netip.Addr{netip.MustParseAddr("127.0.0.2"), netip.MustParseAddr("127.0.0.1")}, nil
@@ -45,8 +41,21 @@ func uotServer(t *testing.T, idle time.Duration, opts ...func(*http.Transport)) 
 				return []netip.Addr{netip.MustParseAddr("127.0.0.2")}, nil
 			}
 			return nil, errors.New("no such name")
-		},
-		uotIdle: idle}
+		}
+		h.uotIdle = idle
+	}, opts...)
+}
+
+// tunnelServer is a naive server over HTTP/2 for the user secret-one, set
+// up before it serves; connect opens a stream to host.
+func tunnelServer(t *testing.T, setup func(*Server), opts ...func(*http.Transport)) (*Server, func(host string) (*http.Response, *paddedStream, func())) {
+	t.Helper()
+	users := filepath.Join(t.TempDir(), "users.json")
+	writeUsers(t, users, "secret-one")
+	answer, _ := site.Responder(site.Answer404, "")
+	var d net.Dialer
+	h := &Server{Users: &Users{Path: users}, Answer: answer, Dial: d.DialContext, Log: slog.New(slog.DiscardHandler)}
+	setup(h)
 	srv := httptest.NewUnstartedServer(h)
 	srv.EnableHTTP2 = true
 	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}}

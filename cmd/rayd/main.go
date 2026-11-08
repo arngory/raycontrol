@@ -1249,6 +1249,8 @@ func cmdNaive(args []string) error {
 	quicSocket := fs.String("quic-socket", "", "SOCK_SEQPACKET socket the front sends QUIC datagrams to (naive-quic; IPC mode packet)")
 	frontUID := fs.Int("front-uid", render.FrontUID, "UID of the niko-server front, the only peer accepted")
 	probeAddr := fs.String("probe", "", "where the probe name leads (the subscription endpoint on loopback, R4-16)")
+	icmp := fs.Bool("icmp", false, "carry ping and traceroute through "+naive.ICMPName+" (spec/icmp-v1.md): echoes from ICMP datagram sockets, "+
+		"which need the process's group in net.ipv4.ping_group_range")
 	fs.Parse(args)
 	if *users == "" || *chain == "" || *key == "" || *socket == "" {
 		return errors.New("naive needs -users, -chain, -key and -socket")
@@ -1272,7 +1274,7 @@ func cmdNaive(args []string) error {
 		return err
 	}
 	naive.SetResolverLog(log)
-	ns := &naive.Server{Users: &naive.Users{Path: *users}, Answer: handler, Log: log}
+	ns := &naive.Server{Users: &naive.Users{Path: *users}, Answer: handler, ICMP: *icmp, Log: log}
 	// Channel probes through the tunnel (R4-16): the probe name, and only
 	// it, leads to the endpoint; the rest to public addresses.
 	ns.Probe = *probeAddr
@@ -1300,7 +1302,7 @@ func cmdNaive(args []string) error {
 		<-ctx.Done()
 		_ = srv.Close()
 	}()
-	log.Info("serving naive", "socket", *socket, "answer", *answer)
+	log.Info("serving naive", "socket", *socket, "answer", *answer, "icmp", *icmp)
 	if err := srv.ServeTLS(ln, "", ""); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

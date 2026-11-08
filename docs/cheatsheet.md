@@ -1,7 +1,7 @@
 # Шпаргалка
 
 Все команды — на ноде, от root или от члена группы `raycontrol`; `install`, `apply`, `update`, `uninstall`,
-`backup` и `restore` — только root.
+`backup`, `restore` и `egress block|allow` — только root.
 `-json` перед командой даёт машинный вывод (`rayctl -json status`). Пошаговая установка —
 [10-quickstart-debian13.md](10-quickstart-debian13.md).
 
@@ -39,15 +39,18 @@
 |---|---|
 | `rayctl node name "Амстердам"` (`""` — убрать) | имя ноды: клиенты показывают его рядом с адресом со следующей подписки; до 48 символов, без управляющих и невидимых. При установке — `bootstrap.sh … -name "Амстердам"` |
 | `rayctl node note "До 1 Гбит/с, торренты нельзя 🙏"` (`""` — убрать) | описание ноды для пользователей: клиенты показывают его со следующей подписки; одна строка, до 200 символов, эмодзи и любые письменности, без управляющих, невидимых и символов смены направления |
-| `rayctl status` | версия, нода (и её имя), число пользователей, сервисов, устройств, порты SPA сейчас; циклы rayd, `dns-zone <сервис>` — самопроверка зоны туннеля |
+| `rayctl status` | версия, нода (и её имя), число пользователей, сервисов, устройств, порты SPA сейчас, политика выхода (`egress`); циклы rayd, `dns-zone <сервис>` — самопроверка зоны туннеля |
 | `rayctl service list` | сервисы; для REALITY — когда сменились ключи и когда следующая смена |
 | `rayctl audit [-n 50]` | журнал действий администратора |
 | `rayctl debug on [-for 30m]` / `off` / `show` | окно отладки: rayd, rayspa и data plane пишут подробно, с адресами клиентов; закрывается само (до суток); службы data plane перезапускаются |
+| `rayctl egress` | политика выхода ноды (с v0.21): что закрыто, для кого, действует ли; root видит и счётчики правил |
+| `rayctl egress block\|allow bittorrent` | только root, на ноде: закрыть или открыть BitTorrent на всех профилях сразу, в ядре (рукопожатие, uTP, UDP-трекеры, DHT; зашифрованный по TCP проходит). Действует через 1–2 с, data plane не перезапускается. Нода, где были сервисы Xray, после обновления держит BitTorrent закрытым ([`spec/egress-policy-v1.md`](spec/egress-policy-v1.md)) |
+| `rayctl egress block\|allow smtp` | только root, на ноде: закрыть или открыть TCP 25 на всех профилях; 465 и 587 (почта в телефоне) открыты. По умолчанию открыт |
 | `rayctl report [-o F] [-logs warning\|info\|debug\|none] [-since 24h] [-id ID]` | очищенный отчёт для issue, ничего не отправляет; `-logs debug` — со строками `-debug`, один `-id` на прогон |
 | `rayctl probe [-carrier udp\|tls\|tcp\|auto] [-redact] @bundle` | проверить ноду снаружи, как клиент; `auto` — UDP, ClientHello, голый TCP |
 | `journalctl -u rayd -u rayspa -u 'niko-*' -f` | журналы ноды |
 | `systemctl status rayd rayspa 'niko-*'` | состояние юнитов |
-| `nft list table inet raycontrol` | периметр; цепочка `early` — отброшенное до сборки фрагментов |
+| `nft list table inet raycontrol` | периметр; цепочка `early` — отброшенное до сборки фрагментов, `egress` — политика выхода |
 | `rayctl metrics [-o /var/lib/node_exporter/textfile/raycontrol.prom]` | счётчики в формате Prometheus: только числа, без имён и адресов |
 
 ## Сводка от клиентов (необязательно, R4-21)
@@ -103,6 +106,7 @@
 | `rayctl service enable\|disable\|del NAME` | включить, выключить, удалить |
 | `rayctl service set site answer=404\|403\|silent\|pages` | что сайт отвечает тем, кого отклонил REALITY; потом `rayctl apply` |
 | `rayctl service set reality rotate_sni=false` | не менять имя REALITY при ротации |
+| `rayctl service set naive icmp=on\|off` → `rayctl apply` | ping и трассировка через naive (с v0.21, [`spec/icmp-v1.md`](spec/icmp-v1.md)): echo клиента шлёт нода со своих ICMP-сокетов; в ссылке `icmp=1`. По умолчанию выключено. `apply` перезапускает naive и, если `net.ipv4.ping_group_range` не покрывает группы data plane (9100–9179), расширяет его (`/etc/sysctl.d/90-raycontrol-icmp.conf`); `rayctl check` предупреждает, если сокеты не откроются |
 | `rayctl service set hy2-masq up_mbps=500` | потолок серверного Brutal на соединение: нода шлёт клиенту не быстрее min(500 Мбит/с, темп клиента); `down_mbps` — потолок отдачи клиента; `0` — без потолка |
 | `rayctl service set dns auth=optional\|required\|off` | dnsauth-v1: метка устройства в каждом запросе dnstt ([`spec/dnsauth-v1.md`](spec/dnsauth-v1.md)); `required` — только когда все клиенты её ставят (Niko 1.27+). Новый dnstt-сервис создаётся с `required` (v0.13.0), прежние остаются как были — `rayctl service list` показывает `auth … (open: …)`. Без `required` ключ не нужен: любой, кто знает зону (она видна в делегировании), а при `seal=required` — любой со ссылкой, может занять места рукопожатий dnstt (128), и новые сессии будут ждать; память нода держит в пределах и так (niko-server v0.10.0, нагрузочный тест) |
 | `rayctl service set dns seal=optional\|required\|off` | dnsseal-v1: обвязка dnstt запечатана ключом зоны ([`spec/dnsseal-v1.md`](spec/dnsseal-v1.md)); ключ уходит в ссылку; `optional` берёт и открытые запросы, `required` — только когда все клиенты запечатывают (с v0.13, Niko 1.35+). Новый dnstt-сервис с v0.14 создаётся с `optional` |

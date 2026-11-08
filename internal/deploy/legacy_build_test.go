@@ -14,7 +14,8 @@ import (
 	"github.com/arngory/raycontrol/internal/site"
 )
 
-// legacyBuild is Build as it was before Inputs (v0.20.1), kept as the
+// legacyBuild is Build as it was before Inputs (v0.20.1, with naive's
+// ICMP of spec/icmp-v1.md, which came beside Inputs), kept as the
 // oracle of TestBuildFromInputs: the plan rayctl now builds from rayd's
 // inputs must be the plan rayd built from its model, byte for byte, so
 // that nothing changes on a node. One change only, made in both on
@@ -233,6 +234,13 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 				answer = provision.SiteAnswer(x.Service)
 			}
 		}
+		icmp := ""
+		if provision.NaiveICMP(s.Service) {
+			// ping and traceroute (spec/icmp-v1.md): ICMP datagram sockets,
+			// which AF_INET and AF_INET6 cover; apply lets the group open them.
+			icmp = " -icmp"
+			plan.ICMP = true
+		}
 		units = append(units, unit{
 			name:        render.UnitName(s.Name),
 			description: "raycontrol naive " + s.Name + " (HTTP/2 and HTTP/3, X25519MLKEM768)",
@@ -242,7 +250,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 				copyIn(bin.Rayd, anchor, g, path.Join(dir, render.NaiveKey), key),
 				"ExecStart=" + bin.Rayd + " naive -answer " + answer + " -users " + path.Join(dir, render.NaiveUsers) +
 					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name) +
-					" -quic-socket " + p.NaiveQUICSocket(s.Name) + probeArg + frontUID,
+					" -quic-socket " + p.NaiveQUICSocket(s.Name) + probeArg + frontUID + icmp,
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
 				"ReadWritePaths=" + path.Dir(p.NaiveSocket(s.Name)),

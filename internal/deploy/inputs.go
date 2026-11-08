@@ -59,6 +59,9 @@ type ServiceInput struct {
 	// Salamander: the front's copy of a hy2-obfs service's salamander
 	// password was rendered.
 	Salamander bool
+	// ICMP: a naive service carries ping and traceroute (icmp=on,
+	// spec/icmp-v1.md). naive's only.
+	ICMP bool
 }
 
 // MaxInputServices bounds the services of Inputs: the 70 UIDs of the
@@ -100,8 +103,11 @@ func InputsOf(m render.Model, files []render.File, p render.Paths) Inputs {
 		switch s.Kind {
 		case "site":
 			si.Answer = provision.SiteAnswer(s.Service)
-		case "reality", "naive":
+		case "reality":
 			si.Site = provision.SiteOf(s.Service)
+		case "naive":
+			si.Site = provision.SiteOf(s.Service)
+			si.ICMP = provision.NaiveICMP(s.Service)
 		case "slipstream":
 			ss, err := provision.ParseSlipstream(s.Service)
 			if err != nil {
@@ -218,6 +224,13 @@ func (in Inputs) Check() error {
 	for _, r := range slices.Concat(in.HostPorts, in.OutsidePorts) {
 		if err := r.Check(); err != nil {
 			return err
+		}
+	}
+	// ICMP is naive's: no database gives it to another kind (NaiveICMP),
+	// only a rayd that does not report what it has.
+	for _, s := range in.Services {
+		if s.ICMP && s.Kind != "naive" {
+			return fmt.Errorf("service %q (%q) with ICMP: naive's only", s.Name, s.Kind)
 		}
 	}
 	return nil

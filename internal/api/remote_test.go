@@ -366,6 +366,18 @@ func TestRemoteAPI(t *testing.T) {
 	if _, err := admin.node.SetDebug(ctx, connect.NewRequest(&nodev1.SetDebugRequest{Seconds: 60})); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("a remote debug window: %v", err)
 	}
+	// The egress policy: root on the node only (egress-policy-v1 §9), not
+	// even to read, and not in the status.
+	block := true
+	if _, err := admin.node.SetEgress(ctx, connect.NewRequest(&nodev1.SetEgressRequest{Bittorrent: &block})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("a remote egress policy: %v", err)
+	}
+	if _, err := admin.node.GetEgress(ctx, connect.NewRequest(&nodev1.GetEgressRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("the egress policy read remotely: %v", err)
+	}
+	if st.Msg.Egress != nil {
+		t.Fatalf("the egress policy in a remote status: %v", st.Msg.Egress)
+	}
 	// A relay opens the service ports to an address: root on the node only.
 	if _, err := admin.node.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r", Address: "198.51.100.20"})); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("a remote relay: %v", err)

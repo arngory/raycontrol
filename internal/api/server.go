@@ -267,6 +267,14 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 		resp.Loops = append(resp.Loops, &nodev1.LoopHealth{Name: l.Name, LastOk: unixOf(l.LastOK), LastError: unixOf(l.LastErr),
 			Error: l.Err, Runs: l.Runs, Errors: l.Errors, Failing: l.Failing(), Detail: l.Detail})
 	}
+	// The egress policy, as GetEgress: on the node's socket only.
+	if isLocal(ctx) {
+		e, err := s.Store.Egress(ctx)
+		if err != nil {
+			return nil, toConnect(err)
+		}
+		resp.Egress = egressPB(e)
+	}
 	return connect.NewResponse(resp), nil
 }
 
@@ -943,7 +951,7 @@ func (s *Server) GetDeployment(ctx context.Context, _ *connect.Request[nodev1.Ge
 	plan := deploy.Build(in, s.Paths, s.Binaries)
 	plan.HostPorts = in.HostPorts
 	plan.Files = append(plan.Files, deploy.FirewallFiles(plan.HostPorts)...)
-	resp := &nodev1.GetDeploymentResponse{Units: plan.Units, Warnings: plan.Warnings, FrontDns: plan.FrontDNS,
+	resp := &nodev1.GetDeploymentResponse{Units: plan.Units, Warnings: plan.Warnings, FrontDns: plan.FrontDNS, Icmp: plan.ICMP,
 		HostPorts: portRanges(plan.HostPorts), OutsidePorts: portRanges(in.OutsidePorts)}
 	for _, u := range plan.Users {
 		resp.Users = append(resp.Users, &nodev1.SystemUser{Name: u.Name, Uid: uint32(u.UID), ExtraGroups: u.ExtraGroups})

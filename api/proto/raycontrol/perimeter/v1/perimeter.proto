@@ -73,6 +73,21 @@ message Snapshot {
   // The debug window (rayctl debug): until then, unix seconds, rayspa logs
   // every SPA access and refusal. 0 or past: none.
   int64 debug_until = 11;
+  // The node's egress policy (spec/egress-policy-v1.md): rayspa writes it
+  // into the chain the data plane's packets pass on their way out. Absent
+  // (an older rayd, a relay's feed): nothing blocked.
+  Egress egress = 12;
+}
+
+// Egress is what the data plane may not send, whoever the user.
+message Egress {
+  bool smtp = 1;       // TCP to port 25
+  bool bittorrent = 2; // the handshake, uTP SYN, UDP tracker connect, DHT queries
+  // Processes it covers besides the data plane (UIDs 9100-9179): rayd's own
+  // where the data plane runs as its children (rayd serve -supervise). The
+  // guard of the node's own addresses does not take them: rayd reaches the
+  // node itself.
+  repeated uint32 uids = 3;
 }
 
 message AcmeWindow {

@@ -84,6 +84,7 @@ HTTPS-трекеров почти не находят пиров; торрент
 chain output {
 	...                                         # to_node, как сейчас (firewall.go:253-255)
 	meta skuid 9100-9179 jump egress            # GuardUIDs
+	meta skuid @egress_uid jump egress          # UID rayd на supervised-ноде; иначе набор пуст
 }
 chain egress {                                  # rayspa пишет целиком: flush + правила политики
 	tcp dport 25 counter reject with tcp reset comment "smtp"
@@ -91,9 +92,17 @@ chain egress {                                  # rayspa пишет целико
 	meta l4proto udp @th,64,8 vmap { 0x00 : jump bt_tracker, 0x41 : jump bt_utp, 0x64 : jump bt_dht }
 }
 chain bt_tracker { @th,64,64 0x41727101980 @th,128,32 0 counter drop comment "bittorrent-tracker"; }
-chain bt_utp { udp length { 28, 38 } @th,128,32 0 counter drop comment "bittorrent-utp"; }
+chain bt_utp {                                  # и байт расширения, как в проверке форка Xray
+	udp length 28 @th,72,8 0 @th,128,32 0 counter drop comment "bittorrent-utp"
+	udp length 38 @th,72,8 2 @th,128,32 0 @th,224,16 8 counter drop comment "bittorrent-utp"
+}
 chain bt_dht { @th,64,96 0x64313a6164323a696432303a counter drop comment "bittorrent-dht"; }
 ```
+
+Реализация (v0.21.0): набор `egress_uid`, цепочки и правила rayspa меняет одной транзакцией nft; если ядро её не
+берёт, прежняя политика остаётся, а таблица и снимок применяются без неё. Без проверки байта расширения
+(`udp length { 28, 38 }` и только `timestamp_difference`) правило ловило бы 20-байтный DNS без EDNS с любым ID
+`0x41xx`, то есть 1/256 таких запросов, а не 1/65 536.
 
 - **Без `ct state new`.** Первое же сравнение (`tcp dport 25`) отпускает все прочие пакеты, conntrack не нужен.
   `ct state new` лишь оставил бы жить соединения на 25, открытые до включения, а «включено» значит «сразу».

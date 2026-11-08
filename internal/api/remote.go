@@ -225,6 +225,9 @@ var nodeOnly = map[string]bool{
 	nodev1connect.NodeServiceRemoveRelayProcedure: true,
 	// Client addresses go to the journal, which only root reads.
 	nodev1connect.NodeServiceSetDebugProcedure: true,
+	// The egress policy is root's on the node (spec/egress-policy-v1.md §9).
+	nodev1connect.NodeServiceGetEgressProcedure: true,
+	nodev1connect.NodeServiceSetEgressProcedure: true,
 	// Whether admins may update the node at all is root's (node-update-v1).
 }
 

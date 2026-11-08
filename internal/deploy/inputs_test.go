@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/arngory/raycontrol/internal/deploy"
@@ -79,6 +80,11 @@ func TestBuildFromInputs(t *testing.T) {
 			tweak: setOption("site", "answer", "403")},
 		"the site's pages": {p: render.DefaultPaths, services: [][3]string{{"reality", "reality", ""}, {"naive", "naive", ""}},
 			tweak: setOption("site", "answer", "pages")},
+		"naive with ICMP": {p: render.DefaultPaths, services: [][3]string{{"reality", "reality", ""}, {"naive", "naive", ""}},
+			tweak: setOption("naive", "icmp", "on")},
+		"naive with ICMP, supervised": {p: supervised, services: [][3]string{{"reality", "reality", ""}, {"naive", "naive", `{"icmp":true}`}}},
+		"naive with ICMP off again": {p: render.DefaultPaths, services: [][3]string{{"reality", "reality", ""}, {"naive", "naive", `{"icmp":true}`}},
+			tweak: setOption("naive", "icmp", "off")},
 		"TestBuildDNSKeyWithoutRender": {p: render.DefaultPaths, services: [][3]string{{"dnstt", "dnstt", ""}, {"masterdns", "masterdns", ""}},
 			drop: func(f render.File) bool { return f.Service == "dnstt" || f.Service == "masterdns" }},
 		"TestFrontCredentialsOnlyRendered": {p: render.DefaultPaths, services: plan2Services,
@@ -112,6 +118,11 @@ func TestBuildFromInputs(t *testing.T) {
 		got := deploy.Build(deploy.InputsOf(m, files, c.p), c.p, deploy.DefaultBinaries)
 		if len(want.Files) == 0 || len(want.Units) == 0 {
 			t.Fatalf("%s: an empty plan", name)
+		}
+		// The ICMP models do have it (spec/icmp-v1.md): -icmp and Plan.ICMP.
+		if icmp := strings.Contains(name, "ICMP") && !strings.Contains(name, "off"); want.ICMP != icmp ||
+			strings.Contains(file(want, "/etc/systemd/system/niko-naive.service"), " -icmp\n") != icmp {
+			t.Errorf("%s: ICMP %v", name, want.ICMP)
 		}
 		for i := range max(len(want.Files), len(got.Files)) {
 			if i >= len(want.Files) || i >= len(got.Files) || want.Files[i].Path != got.Files[i].Path ||
