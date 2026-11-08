@@ -3,6 +3,7 @@ package naive
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -16,7 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 	"golang.org/x/sys/unix"
@@ -25,15 +25,15 @@ import (
 // ping and traceroute through naive (spec/icmp-v1.md): a stream to
 // ICMPName carries the client's echoes; the node sends them from its own
 // unprivileged ICMP sockets with the client's TTL and passes back the
-// replies, time exceeded and unreachable.
+// replies, time exceeded, unreachable and packet too big.
 const (
 	ICMPName    = "icmp.niko.arpa"
 	icmpVersion = 1
 
 	icmpIdle = 2 * time.Minute
 	// The longest echo data the node sends; a longer echo is answered
-	// "too big" with the largest IP packet it sends (the client's ping -s
-	// 1472 finds the MTU that way).
+	// "packet too big" with the largest IP packet it sends (the client's
+	// ping -s 1472 finds the MTU that way).
 	icmpMaxPayload = 1452
 	icmpMTU4       = icmpMaxPayload + 8 + 20
 	icmpMTU6       = icmpMaxPayload + 8 + 40
@@ -55,12 +55,12 @@ const (
 	icmpEcho         = 1 // the client's
 	icmpReply        = 1
 	icmpTimeExceeded = 2
-	icmpUnreachable  = 3
+	icmpUnreachable  = 3 // with the ICMP or ICMPv6 code as it came
+	icmpTooBig       = 4 // packet too big: the data is the MTU, u16
+	icmpMTUSize      = 2
 
-	icmpTooBig        = 4  // fragmentation needed; the client makes a v6 one Packet Too Big
-	icmpProhibited4   = 13 // communication administratively prohibited
-	icmpProhibited6   = 1  // the same in ICMPv6
-	icmpTooBigPayload = 2  // the MTU, u16
+	icmpProhibited4 = 13 // communication administratively prohibited
+	icmpProhibited6 = 1  // the same in ICMPv6
 )
 
 // icmpHead is room for the longest head of a server frame: kind, code, af,
@@ -68,8 +68,8 @@ const (
 // b[icmpHead:], and the head goes right before it.
 const icmpHead = 1 + 1 + 1 + 16 + 2 + 2 + 2
 
-// icmpLimits counts the ICMP streams, per user and in all, and paces each
-// user's echoes. Tokens outlive a user's last stream until they refill.
+// icmpLimits counts the ICMP streams, per user and in all. The service's
+// map is for a stream's start and end only: a stream keeps its user.
 type icmpLimits struct {
 	mu    sync.Mutex
 	total int
@@ -77,22 +77,28 @@ type icmpLimits struct {
 	swept time.Time
 }
 
+// icmpUser is a user's ICMP streams and echo tokens, under a lock of its
+// own: each echo takes it, and nothing else. It is not swept while it has
+// streams, and its tokens outlive the last one until they refill.
 type icmpUser struct {
+	mu      sync.Mutex
 	streams int
 	echoes  bucket
 }
 
-func (l *icmpLimits) take(user [32]byte) bool {
+// take is the user's for a new stream; nil over the user's or the
+// service's limit.
+func (l *icmpLimits) take(user [32]byte) *icmpUser {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
 	if now.Sub(l.swept) > 10*time.Second {
 		l.sweep(now)
 	}
-	u := l.users[user]
-	if l.total >= icmpPerService || (u != nil && u.streams >= icmpPerUser) {
-		return false
+	if l.total >= icmpPerService {
+		return nil
 	}
+	u := l.users[user]
 	if u == nil {
 		if l.users == nil {
 			l.users = map[[32]byte]*icmpUser{}
@@ -100,17 +106,24 @@ func (l *icmpLimits) take(user [32]byte) bool {
 		u = &icmpUser{echoes: bucket{icmpBurst, now}}
 		l.users[user] = u
 	}
-	l.total++
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.streams >= icmpPerUser {
+		return nil
+	}
 	u.streams++
-	return true
+	l.total++
+	return u
 }
 
-func (l *icmpLimits) put(user [32]byte) {
+func (l *icmpLimits) put(u *icmpUser) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if u := l.users[user]; u != nil && u.streams > 0 {
-		l.total--
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.streams > 0 {
 		u.streams--
+		l.total--
 	}
 }
 
@@ -118,30 +131,39 @@ func (l *icmpLimits) put(user [32]byte) {
 func (l *icmpLimits) sweep(now time.Time) {
 	l.swept = now
 	for k, u := range l.users {
-		if u.streams == 0 && u.echoes.full(now, icmpRate, icmpBurst) {
+		u.mu.Lock()
+		idle := u.streams == 0 && u.echoes.full(now, icmpRate, icmpBurst)
+		u.mu.Unlock()
+		if idle {
 			delete(l.users, k)
 		}
 	}
 }
 
 // echo takes one of the user's tokens: false when there is none.
-func (l *icmpLimits) echo(user [32]byte) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	u := l.users[user]
-	return u != nil && u.echoes.take(time.Now(), icmpRate, icmpBurst)
+func (u *icmpUser) echo() bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.echoes.take(time.Now(), icmpRate, icmpBurst)
 }
 
 // icmpConn is a stream's ICMP socket of one family: pingSocket on the node,
 // a fake in tests.
 type icmpConn interface {
-	// send sends an echo request to dst with the node's seq, ttl hops out.
+	// send sends an echo request to dst with the node's seq, ttl hops out;
+	// errTooBig when the path does not take it whole.
 	send(dst netip.Addr, ttl int, seq uint16, payload []byte) error
 	// recv reads what comes next: a reply's data lands at b[icmpHead:]. An
 	// event of kind 0 is nothing to pass on.
 	recv(b []byte) (icmpEvent, error)
 	Close() error
 }
+
+// errTooBig is an echo larger than the path takes: the node does not
+// fragment. mtu is the path's, as the kernel knows it.
+type errTooBig struct{ mtu int }
+
+func (e errTooBig) Error() string { return fmt.Sprintf("message too long for the path MTU %d", e.mtu) }
 
 // icmpEvent is a reply or an error, as the node's socket got it.
 type icmpEvent struct {
@@ -150,6 +172,7 @@ type icmpEvent struct {
 	dst        netip.Addr // the echo's destination
 	seq        uint16     // the node's
 	n          int        // the reply's data, at b[icmpHead:]
+	mtu        uint32     // packet too big: the router's next-hop MTU
 }
 
 // icmpPend is an echo waiting for its answer: whose it was and where to.
@@ -162,9 +185,9 @@ type icmpPend struct {
 // icmpStream is one ICMP stream's state.
 type icmpStream struct {
 	s    *Server
-	user [32]byte
-	w    io.Writer // the client's side: one frame per write
-	last atomic.Int64
+	user *icmpUser
+	w    io.Writer    // the client's side: one frame per write
+	last atomic.Int64 // mono: the last frame either way
 
 	echoes, answers, dropped atomic.Int64 // for the log: counts only
 
@@ -176,12 +199,22 @@ type icmpStream struct {
 	seq     uint16              // the node's last
 }
 
-func (st *icmpStream) touch() { st.last.Store(time.Now().UnixNano()) }
+func newICMPStream(s *Server, user *icmpUser, w io.Writer) *icmpStream {
+	st := &icmpStream{s: s, user: user, w: w, pending: map[uint16]icmpPend{}}
+	// The node's seqs start anywhere: a stranger guesses none.
+	var b [2]byte
+	_, _ = rand.Read(b[:])
+	st.seq = binary.BigEndian.Uint16(b[:])
+	st.touch()
+	return st
+}
+
+func (st *icmpStream) touch() { st.last.Store(mono()) }
 
 // serveICMP carries the stream's echoes until the client ends it, the idle
 // time runs out or ctx is done; errRefused when the stream must be reset.
 // Nothing writes to the stream once this returns.
-func (s *Server) serveICMP(ctx context.Context, user [32]byte, stream io.ReadWriter, dl deadlines) error {
+func (s *Server) serveICMP(ctx context.Context, user *icmpUser, stream io.ReadWriter, dl deadlines) error {
 	idle := s.icmpIdle
 	if idle == 0 {
 		idle = icmpIdle
@@ -198,8 +231,7 @@ func (s *Server) serveICMP(ctx context.Context, user [32]byte, stream io.ReadWri
 		return fmt.Errorf("%w: ICMP version %d", errRefused, v)
 	}
 	_ = dl.SetReadDeadline(time.Time{})
-	st := &icmpStream{s: s, user: user, w: stream, pending: map[uint16]icmpPend{}}
-	st.touch()
+	st := newICMPStream(s, user, stream)
 
 	up := make(chan error, 1)
 	go func() { up <- st.upstream(r) }()
@@ -217,7 +249,7 @@ loop:
 		case <-ctx.Done():
 			break loop
 		case <-tick.C:
-			if time.Since(time.Unix(0, st.last.Load())) > idle {
+			if mono()-st.last.Load() > int64(idle) {
 				break loop
 			}
 		}
@@ -315,11 +347,11 @@ func (st *icmpStream) upstream(r *bufio.Reader) error {
 }
 
 // echo sends one echo, or answers it in the node's name: a destination not
-// allowed is prohibited, an echo longer than the node sends is too big.
-// Each first takes one of the user's tokens, so that no answer outpaces
-// the echoes. An error only when the stream cannot be written.
+// allowed is prohibited, an echo longer than the node or the path takes is
+// too big. Each first takes one of the user's tokens, so that no answer
+// outpaces the echoes. An error only when the stream cannot be written.
 func (st *icmpStream) echo(dst netip.Addr, ttl int, id, seq uint16, payload []byte, big bool) error {
-	if !st.s.icmp.echo(st.user) {
+	if !st.user.echo() {
 		st.dropped.Add(1)
 		return nil
 	}
@@ -333,13 +365,11 @@ func (st *icmpStream) echo(dst netip.Addr, ttl int, id, seq uint16, payload []by
 		return st.answer(b[:], icmpUnreachable, code, dst, id, seq, 0)
 	}
 	if big {
-		mtu := uint16(icmpMTU4)
+		mtu := icmpMTU4
 		if dst.Is6() {
 			mtu = icmpMTU6
 		}
-		var b [icmpHead + icmpTooBigPayload]byte
-		binary.BigEndian.PutUint16(b[icmpHead:], mtu)
-		return st.answer(b[:], icmpUnreachable, icmpTooBig, dst, id, seq, icmpTooBigPayload)
+		return st.tooBig(dst, id, seq, mtu)
 	}
 	c := st.conn(dst.Is6())
 	if c == nil {
@@ -352,13 +382,26 @@ func (st *icmpStream) echo(dst netip.Addr, ttl int, id, seq uint16, payload []by
 		return nil
 	}
 	if err := c.send(dst, ttl, ours, payload); err != nil {
-		// No route, a closed socket: the client times out, as it would.
 		st.forget(ours)
+		// Larger than the path: the node does not fragment, the client
+		// learns the MTU (ping -M do).
+		var tb errTooBig
+		if errors.As(err, &tb) {
+			return st.tooBig(dst, id, seq, tb.mtu)
+		}
+		// No route, a closed socket: the client times out, as it would.
 		st.dropped.Add(1)
 		return nil
 	}
 	st.echoes.Add(1)
 	return nil
+}
+
+// tooBig answers "packet too big" with the MTU.
+func (st *icmpStream) tooBig(from netip.Addr, id, seq uint16, mtu int) error {
+	var b [icmpHead + icmpMTUSize]byte
+	binary.BigEndian.PutUint16(b[icmpHead:], uint16(min(max(mtu, 0), 0xffff))) //nolint:gosec // G115: clamped
+	return st.answer(b[:], icmpTooBig, 0, from, id, seq, icmpMTUSize)
 }
 
 // answer writes a frame whose data is at b[icmpHead:icmpHead+n], its head
@@ -481,18 +524,28 @@ func (st *icmpStream) downstream(c icmpConn) {
 		if err != nil {
 			var errno syscall.Errno
 			if errors.As(err, &errno) {
-				continue // a socket error the error queue tells better
+				continue
 			}
 			return
 		}
-		if ev.kind == 0 || ev.n > icmpMaxPayload || (ev.kind != icmpReply && ev.n != 0) {
+		switch {
+		case ev.kind == 0 || ev.n > icmpMaxPayload || (ev.kind != icmpReply && ev.n != 0):
+			continue
+		case ev.kind != icmpReply && !st.s.allowed(ev.from):
+			// A router with a private address, the node itself: silent,
+			// as the destinations they stand for would be.
 			continue
 		}
 		p, ok := st.answered(ev)
 		if !ok {
 			continue
 		}
-		if err := st.answer(buf, ev.kind, ev.code, ev.from, p.id, p.seq, ev.n); err != nil {
+		n := ev.n
+		if ev.kind == icmpTooBig {
+			binary.BigEndian.PutUint16(buf[icmpHead:], uint16(min(ev.mtu, 0xffff))) //nolint:gosec // G115: clamped
+			n = icmpMTUSize
+		}
+		if err := st.answer(buf, ev.kind, ev.code, ev.from, p.id, p.seq, n); err != nil {
 			return
 		}
 	}
@@ -530,17 +583,27 @@ func (w *icmpWarn) note(log *slog.Logger, err error) {
 // but the process's group must be in net.ipv4.ping_group_range (IPv6
 // too). The kernel puts its own ID in each echo (the socket's port) and
 // passes it only the replies with that ID; errors come to the error queue.
+// One goroutine sends, another receives: each has its own fields.
 type pingSocket struct {
 	v6  bool
 	c   *net.UDPConn
 	raw syscall.RawConn
-	p4  *ipv4.PacketConn
-	p6  *ipv6.PacketConn
-	ttl int // the last one set
 
-	// recv's buffers: the error queue's control data and the echo it
-	// quotes (the kernel's ID and the node's seq are in its first 8 bytes).
-	oob   [256]byte
+	// send's: the echo as it goes (its header, then the data), the TTL
+	// set last and the one to set.
+	out          [8 + icmpMaxPayload]byte
+	ttl, nextTTL int
+	setTTL       func(fd uintptr) // made once: no closure per echo
+	ttlErr       error
+
+	// recv's: the read made once, where it reads to and what it found;
+	// the error queue's control data, and the echo it quotes (the
+	// kernel's ID and the node's seq are in its first 8 bytes).
+	read  func(fd uintptr) bool
+	rb    []byte
+	ev    icmpEvent
+	rerr  error
+	oob   [128]byte
 	quote [8]byte
 }
 
@@ -548,21 +611,26 @@ type pingSocket struct {
 // ("udp4", "udp6"), but kept as a *net.UDPConn: the error queue needs the
 // descriptor, which icmp.PacketConn does not give.
 func openPing(v6 bool) (icmpConn, error) {
-	family, proto, level, recverr := unix.AF_INET, unix.IPPROTO_ICMP, unix.IPPROTO_IP, unix.IP_RECVERR
+	family, proto, level := unix.AF_INET, unix.IPPROTO_ICMP, unix.IPPROTO_IP
+	recverr, pmtu, dontFrag := unix.IP_RECVERR, unix.IP_MTU_DISCOVER, unix.IP_PMTUDISC_DO
 	var bound unix.Sockaddr = &unix.SockaddrInet4{}
 	if v6 {
-		family, proto, level, recverr = unix.AF_INET6, unix.IPPROTO_ICMPV6, unix.IPPROTO_IPV6, unix.IPV6_RECVERR
+		family, proto, level = unix.AF_INET6, unix.IPPROTO_ICMPV6, unix.IPPROTO_IPV6
+		recverr, pmtu, dontFrag = unix.IPV6_RECVERR, unix.IPV6_MTU_DISCOVER, unix.IPV6_PMTUDISC_DO
 		bound = &unix.SockaddrInet6{}
 	}
 	fd, err := unix.Socket(family, unix.SOCK_DGRAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, proto)
 	if err != nil {
 		return nil, os.NewSyscallError("socket", err)
 	}
-	// Errors to the error queue: time exceeded and unreachable come there,
-	// quoting the echo. Never broadcast: a subnet's broadcast address looks
-	// public. Bound: the kernel picks the socket's ID now.
+	// Errors to the error queue: time exceeded, unreachable and packet too
+	// big come there, quoting the echo. Never fragmented: an echo larger
+	// than the path fails, and the client learns the MTU. Never broadcast:
+	// a subnet's broadcast address looks public. Bound: the kernel picks
+	// the socket's ID now.
 	if err := errors.Join(
 		os.NewSyscallError("setsockopt", unix.SetsockoptInt(fd, level, recverr, 1)),
+		os.NewSyscallError("setsockopt", unix.SetsockoptInt(fd, level, pmtu, dontFrag)),
 		os.NewSyscallError("setsockopt", unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_BROADCAST, 0)),
 		os.NewSyscallError("bind", unix.Bind(fd, bound)),
 	); err != nil {
@@ -586,73 +654,113 @@ func openPing(v6 bool) (icmpConn, error) {
 		return nil, err
 	}
 	p := &pingSocket{v6: v6, c: c, raw: raw}
+	p.setTTL, p.read = p.setTTLOn, p.readOn
+	p.out[0] = byte(ipv4.ICMPTypeEcho)
 	if v6 {
-		p.p6 = ipv6.NewPacketConn(c)
-	} else {
-		p.p4 = ipv4.NewPacketConn(c)
+		p.out[0] = byte(ipv6.ICMPTypeEchoRequest)
 	}
 	return p, nil
 }
 
 func (p *pingSocket) Close() error { return p.c.Close() }
 
+func (p *pingSocket) setTTLOn(fd uintptr) {
+	if p.v6 {
+		p.ttlErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_UNICAST_HOPS, p.nextTTL)
+	} else {
+		p.ttlErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_TTL, p.nextTTL)
+	}
+}
+
 // send sets the TTL (hop limit) when it changes, then sends: one goroutine
-// sends on a socket, so the option holds for its echo.
+// sends on a socket, so the option holds for its echo. The kernel sets the
+// echo's ID and checksum.
 func (p *pingSocket) send(dst netip.Addr, ttl int, seq uint16, payload []byte) error {
 	if ttl != p.ttl {
-		var err error
-		if p.v6 {
-			err = p.p6.SetHopLimit(ttl)
-		} else {
-			err = p.p4.SetTTL(ttl)
-		}
-		if err != nil {
+		p.nextTTL = ttl
+		if err := p.raw.Control(p.setTTL); err != nil {
 			return err
+		}
+		if p.ttlErr != nil {
+			return os.NewSyscallError("setsockopt", p.ttlErr)
 		}
 		p.ttl = ttl
 	}
-	m := icmp.Message{Type: ipv4.ICMPTypeEcho, Body: &icmp.Echo{Seq: int(seq), Data: payload}}
-	if p.v6 {
-		m.Type = ipv6.ICMPTypeEchoRequest
+	b := p.out[:8+len(payload)]
+	binary.BigEndian.PutUint16(b[6:8], seq)
+	copy(b[8:], payload)
+	to := netip.AddrPortFrom(dst, 0)
+	_, err := p.c.WriteToUDPAddrPort(b, to)
+	// An ICMP error the socket got fails the next send with its errno
+	// (sk_err), once: that send took it, so one more tells a real failure
+	// (no route, too big) from it.
+	var errno syscall.Errno
+	if errors.As(err, &errno) && errno != unix.EAGAIN && errno != unix.ENOBUFS {
+		_, err = p.c.WriteToUDPAddrPort(b, to)
 	}
-	// The kernel sets the ID and the checksum.
-	b, err := m.Marshal(nil)
-	if err != nil {
-		return err
+	if errors.Is(err, unix.EMSGSIZE) {
+		if mtu, merr := pathMTU(p.v6, dst); merr == nil {
+			return errTooBig{mtu}
+		}
 	}
-	_, err = p.c.WriteToUDPAddrPort(b, netip.AddrPortFrom(dst, 0))
 	return err
 }
 
-// recv reads the error queue first, then a reply: an error wakes a reader
-// too (POLLERR). A socket error a reply read returns (the queued error's
-// errno) comes back as it is: the queue holds the error itself.
+// pathMTU is the path MTU to dst as the kernel knows it, a router's "too
+// big" learned: IP_MTU (IPV6_MTU) of a UDP socket connected there, which
+// sends nothing. The ping socket does not tell it: it is not connected.
+func pathMTU(v6 bool, dst netip.Addr) (int, error) {
+	family, level, opt := unix.AF_INET, unix.IPPROTO_IP, unix.IP_MTU
+	var to unix.Sockaddr = &unix.SockaddrInet4{Port: 9, Addr: dst.As4()}
+	if v6 {
+		family, level, opt = unix.AF_INET6, unix.IPPROTO_IPV6, unix.IPV6_MTU
+		to = &unix.SockaddrInet6{Port: 9, Addr: dst.As16()}
+	}
+	fd, err := unix.Socket(family, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, unix.IPPROTO_UDP)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	if err := unix.Connect(fd, to); err != nil {
+		return 0, err
+	}
+	return unix.GetsockoptInt(fd, level, opt)
+}
+
+// recv reads a reply, or else an error from the error queue, before it
+// waits: an error wakes a reader too (POLLERR), and one that came while a
+// send or a reply read took its errno is still in the queue.
 func (p *pingSocket) recv(b []byte) (icmpEvent, error) {
-	var ev icmpEvent
-	var rerr error
-	err := p.raw.Read(func(fd uintptr) bool {
-		n, oobn, _, to, err := unix.Recvmsg(int(fd), p.quote[:], p.oob[:], unix.MSG_ERRQUEUE|unix.MSG_DONTWAIT)
-		if err == nil {
-			ev = parseICMPError(p.v6, p.quote[:n], p.oob[:oobn], to)
-			return true
-		}
-		// The data's place: right after the frame's head, past the ICMP
-		// header (type, code, checksum, ID, seq).
-		n, _, flags, from, err := unix.Recvmsg(int(fd), b[icmpHead-8:], nil, unix.MSG_DONTWAIT)
-		switch {
-		case errors.Is(err, unix.EAGAIN):
-			return false
-		case err != nil:
-			rerr = err
-		case flags&unix.MSG_TRUNC == 0:
-			ev = parseICMPReply(p.v6, b[icmpHead-8:icmpHead-8+n], from)
+	p.rb, p.ev, p.rerr = b, icmpEvent{}, nil
+	if err := p.raw.Read(p.read); err != nil {
+		return icmpEvent{}, err
+	}
+	return p.ev, p.rerr
+}
+
+func (p *pingSocket) readOn(fd uintptr) bool {
+	// The data's place: right after the frame's head, past the ICMP
+	// header (type, code, checksum, ID, seq).
+	m := p.rb[icmpHead-8:]
+	n, _, flags, from, err := unix.Recvmsg(int(fd), m, nil, unix.MSG_DONTWAIT)
+	if err == nil {
+		if flags&unix.MSG_TRUNC == 0 {
+			p.ev = parseICMPReply(p.v6, m[:n], from)
 		}
 		return true
-	})
-	if err != nil {
-		return ev, err
 	}
-	return ev, rerr
+	// EAGAIN, or the errno of an ICMP error whose message is queued: the
+	// error queue either way.
+	n, oobn, _, to, err := unix.Recvmsg(int(fd), p.quote[:], p.oob[:], unix.MSG_ERRQUEUE|unix.MSG_DONTWAIT)
+	switch {
+	case err == nil:
+		p.ev = parseICMPError(p.v6, p.quote[:n], p.oob[:oobn], to)
+	case errors.Is(err, unix.EAGAIN):
+		return false
+	default:
+		p.rerr = err
+	}
+	return true
 }
 
 // parseICMPReply reads an echo reply as a ping socket gives it: the ICMP
@@ -670,17 +778,16 @@ func parseICMPReply(v6 bool, m []byte, from unix.Sockaddr) icmpEvent {
 }
 
 // parseICMPError reads an error from the error queue: the ICMP error in
-// the control data (sock_extended_err, then SO_EE_OFFENDER, the router's
-// address), the echo it quotes in the data, and the echo's destination as
-// the source address.
+// the control data (sock_extended_err: its type, code and info, the
+// next-hop MTU of a "too big"; then SO_EE_OFFENDER, the router's address),
+// the echo it quotes in the data, and the echo's destination as the source
+// address.
 func parseICMPError(v6 bool, quote, oob []byte, to unix.Sockaddr) icmpEvent {
 	level, typ, origin := unix.IPPROTO_IP, unix.IP_RECVERR, byte(unix.SO_EE_ORIGIN_ICMP)
 	echo := byte(ipv4.ICMPTypeEcho)
-	exceeded, unreachable := byte(ipv4.ICMPTypeTimeExceeded), byte(ipv4.ICMPTypeDestinationUnreachable)
 	if v6 {
 		level, typ, origin = unix.IPPROTO_IPV6, unix.IPV6_RECVERR, byte(unix.SO_EE_ORIGIN_ICMP6)
 		echo = byte(ipv6.ICMPTypeEchoRequest)
-		exceeded, unreachable = byte(ipv6.ICMPTypeTimeExceeded), byte(ipv6.ICMPTypeDestinationUnreachable)
 	}
 	if len(quote) < 8 || quote[0] != echo {
 		return icmpEvent{}
@@ -697,22 +804,43 @@ func parseICMPError(v6 bool, quote, oob []byte, to unix.Sockaddr) icmpEvent {
 		if int(h.Level) != level || int(h.Type) != typ || len(data) < 16 || data[4] != origin {
 			continue
 		}
-		var kind byte
-		switch data[5] {
-		case exceeded:
-			kind = icmpTimeExceeded
-		case unreachable:
-			kind = icmpUnreachable
-		default:
-			continue // packet too big, parameter problem: not for the client
+		ev := icmpEvent{code: data[6], dst: dst, seq: binary.BigEndian.Uint16(quote[6:8])}
+		ev.kind = icmpKind(v6, data[5], data[6])
+		if ev.kind == icmpTooBig {
+			ev.code, ev.mtu = 0, binary.NativeEndian.Uint32(data[8:12])
 		}
-		from := offender(data[16:])
-		if !from.IsValid() || !dst.IsValid() {
+		ev.from = offender(data[16:])
+		if ev.kind == 0 || !ev.from.IsValid() || !dst.IsValid() {
 			continue
 		}
-		return icmpEvent{kind: kind, code: data[6], from: from, dst: dst, seq: binary.BigEndian.Uint16(quote[6:8])}
+		return ev
 	}
 	return icmpEvent{}
+}
+
+// icmpKind is the frame kind of an ICMP (ICMPv6) error: 0 for one the
+// client does not get (parameter problem, source quench, redirect).
+func icmpKind(v6 bool, typ, code byte) byte {
+	if v6 {
+		switch typ {
+		case byte(ipv6.ICMPTypeTimeExceeded):
+			return icmpTimeExceeded
+		case byte(ipv6.ICMPTypeDestinationUnreachable):
+			return icmpUnreachable
+		case byte(ipv6.ICMPTypePacketTooBig):
+			return icmpTooBig
+		}
+		return 0
+	}
+	switch {
+	case typ == byte(ipv4.ICMPTypeTimeExceeded):
+		return icmpTimeExceeded
+	case typ == byte(ipv4.ICMPTypeDestinationUnreachable) && code == 4: // fragmentation needed
+		return icmpTooBig
+	case typ == byte(ipv4.ICMPTypeDestinationUnreachable):
+		return icmpUnreachable
+	}
+	return 0
 }
 
 // offender reads SO_EE_OFFENDER: a sockaddr_in or sockaddr_in6.

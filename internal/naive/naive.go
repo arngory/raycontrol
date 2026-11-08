@@ -108,12 +108,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.Log.Debug("naive: ICMP is off")
 			panic(http.ErrAbortHandler)
 		}
-		if !s.icmp.take(user) {
+		u := s.icmp.take(user)
+		if u == nil {
 			s.Log.Debug("naive: too many ICMP streams")
 			panic(http.ErrAbortHandler)
 		}
-		defer s.icmp.put(user)
-		if err := s.serveICMP(r.Context(), user, in, http.NewResponseController(w)); err != nil {
+		defer s.icmp.put(u)
+		if err := s.serveICMP(r.Context(), u, in, http.NewResponseController(w)); err != nil {
 			s.Log.Debug("naive: ICMP refused", "err", err)
 			panic(http.ErrAbortHandler)
 		}

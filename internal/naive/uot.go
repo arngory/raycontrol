@@ -235,7 +235,7 @@ type uotStream struct {
 	ctx   context.Context
 	user  [32]byte
 	names map[string]uotResolved
-	last  atomic.Int64 // unix nanoseconds of the last packet either way
+	last  atomic.Int64 // mono: the last packet either way
 
 	mu     sync.Mutex
 	peers  map[netip.AddrPort]int64 // where the client sent, and when: answers come from these only
@@ -248,7 +248,7 @@ type uotResolved struct {
 	until time.Time
 }
 
-func (u *uotStream) touch() { u.last.Store(time.Now().UnixNano()) }
+func (u *uotStream) touch() { u.last.Store(mono()) }
 
 // mayReach reports whether the client may send to ap: a destination it sent
 // to before, or a new one while the stream has room and the user tokens.
@@ -414,7 +414,7 @@ loop:
 		case <-ctx.Done():
 			break loop
 		case <-tick.C:
-			if time.Since(time.Unix(0, u.last.Load())) > idle {
+			if mono()-u.last.Load() > int64(idle) {
 				break loop
 			}
 		}

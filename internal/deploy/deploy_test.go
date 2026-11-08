@@ -764,24 +764,35 @@ func TestBuildNaive(t *testing.T) {
 }
 
 // The ping groups hold the data plane's (render.FrontUID to
-// store.LastServiceUID); a range without them is widened, never narrowed.
+// store.LastServiceUID); a range without them is widened, never narrowed;
+// what does not read as a range tells nothing.
 func TestPingGroups(t *testing.T) {
 	first, last := render.FrontUID, store.LastServiceUID
 	for value, want := range map[string]string{
 		"0 2147483647": "", "100 10000": "", fmt.Sprintf("%d %d", first, last): "",
-		"1 0": "9100 9179", "1\t0": "9100 9179", "": "9100 9179", "x y": "9100 9179",
+		"1 0": "9100 9179", "1\t0": "9100 9179",
 		"0 0": "0 9179", "9101 9179": "9100 9179", "9100 9178": "9100 9179", "10000 20000": "9100 20000",
 	} {
-		wide, ok := deploy.PingGroups(value)
-		if ok != (want == "") || (want != "" && wide != want) {
-			t.Errorf("%q: %q %v, want %q", value, wide, ok, want)
+		wide, ok, err := deploy.PingGroups(value)
+		if err != nil || ok != (want == "") || (want != "" && wide != want) {
+			t.Errorf("%q: %q %v %v, want %q", value, wide, ok, err, want)
 		}
 	}
-	if _, ok := deploy.PingGroups(fmt.Sprintf("%d %d", first+1, last)); ok {
+	for _, value := range []string{"", "x y", "1", "1 2 3", "0 x", "-"} {
+		if wide, ok, err := deploy.PingGroups(value); err == nil || ok || wide != "" {
+			t.Errorf("%q: %q %v %v, want nothing told", value, wide, ok, err)
+		}
+	}
+	if _, ok, _ := deploy.PingGroups(fmt.Sprintf("%d %d", first+1, last)); ok {
 		t.Error("the front's group left out")
 	}
-	if _, ok := deploy.PingGroups(fmt.Sprintf("%d %d", first, last-1)); ok {
+	if _, ok, _ := deploy.PingGroups(fmt.Sprintf("%d %d", first, last-1)); ok {
 		t.Error("the last service's group left out")
+	}
+	// The file sorts before the distribution's and the administrator's:
+	// theirs win at boot.
+	if name := filepath.Base(deploy.PingSysctl); name >= "50-default.conf" || name >= "90-raycontrol.conf" || filepath.Dir(deploy.PingSysctl) != "/etc/sysctl.d" {
+		t.Errorf("%s sorts after others", deploy.PingSysctl)
 	}
 }
 
@@ -797,6 +808,7 @@ func TestApplyPingGroups(t *testing.T) {
 		{"0 0", "0 9179", false},
 		{"0 2147483647", "", false},
 		{"1 0", "9100 9179", true},
+		{"garbled", "?", false}, // nothing told: a warning, nothing written
 	} {
 		root := t.TempDir()
 		value := c.before
@@ -838,6 +850,11 @@ func TestApplyPingGroups(t *testing.T) {
 		case c.after == "":
 			if err == nil || value != c.before || out.Len() != 0 {
 				t.Errorf("%s: changed: %q, now %s, said %q", c.before, b, value, out.String())
+			}
+			continue
+		case c.after == "?":
+			if err == nil || value != c.before || !strings.Contains(out.String(), "cannot be told") {
+				t.Errorf("%s: written %q, now %s, said %q", c.before, b, value, out.String())
 			}
 			continue
 		case !strings.Contains(string(b), deploy.PingGroupRange+" = "+c.after+"\n"):
