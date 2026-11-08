@@ -392,11 +392,17 @@ type pubDNS struct {
 	addrs []string
 	wait  time.Duration
 	cur   atomic.Uint32  // the one asked first
-	good  []atomic.Int64 // unix nanoseconds of each one's last good answer
+	good  []atomic.Int64 // when each one last answered well (mono)
+	moves atomic.Int32   // resolvers passed over since any answered well
 	r     *net.Resolver
 	log   atomic.Pointer[slog.Logger]
 	warn  resolverWarn
 }
+
+// mono is a monotonic time in nanoseconds: the wall clock may step back.
+func mono() int64 { return int64(time.Since(monoStart)) }
+
+var monoStart = time.Now()
 
 func newPublicDNS(addrs []string, wait time.Duration) *pubDNS {
 	p := &pubDNS{addrs: addrs, wait: wait, good: make([]atomic.Int64, len(addrs))}
@@ -409,11 +415,11 @@ func (p *pubDNS) dial(ctx context.Context, network, _ string) (net.Conn, error) 
 	var err error
 	for range p.addrs {
 		i := p.cur.Load() % uint32(len(p.addrs)) //nolint:gosec // G115: a handful of resolvers
-		since := time.Now()
+		since := mono()
 		c, derr := d.DialContext(ctx, network, p.addrs[i])
 		if derr == nil {
 			rc := &resolverConn{Conn: c, p: p, i: i}
-			rc.sent.Store(since.UnixNano())
+			rc.sent.Store(since)
 			if _, ok := c.(net.PacketConn); ok {
 				// Go frames queries by what Dial returns: a stream would
 				// get TCP's length prefix over UDP.
@@ -427,28 +433,37 @@ func (p *pubDNS) dial(ctx context.Context, network, _ string) (net.Conn, error) 
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return nil, derr
 		}
-		p.failed(i, since, derr, !unreachable(derr))
+		p.failed(i, since, derr)
 		err = derr
 	}
 	return nil, err
 }
 
-// unreachable is a resolver the host has no way to: its family or network
-// (an IPv6 resolver on a host without IPv6). Passed over, not warned about.
-func unreachable(err error) bool {
-	return errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EADDRNOTAVAIL)
+func (p *pubDNS) answered(i uint32) {
+	m := mono()
+	p.good[i].Store(m)
+	p.moves.Store(0)
 }
 
-// failed passes resolver i over, and says so when warn, unless it has
-// answered well since this query went to it (the query's trouble, a broken
-// domain say, not the resolver's) or another query has passed it over
-// already.
-func (p *pubDNS) failed(i uint32, since time.Time, err error, warn bool) {
-	if p.good[i].Load() > since.UnixNano() {
+// failed passes resolver i over, unless it has answered well since this
+// query went to it (the query's trouble, a broken domain say, not the
+// resolver's) or another query has passed it over already. One resolver
+// passed over is the next one's work, not the operator's: only when none
+// has answered well through a whole round is it warned about. On a quiet
+// node a single broken name may still move the choice on: harmless, the
+// next resolver answers as well.
+func (p *pubDNS) failed(i uint32, since int64, err error) {
+	if p.good[i].Load() > since {
 		return
 	}
-	if p.cur.CompareAndSwap(i, (i+1)%uint32(len(p.addrs))) && warn { //nolint:gosec // G115: a handful of resolvers
-		p.warn.note(p.log.Load(), p.addrs[i], err)
+	if !p.cur.CompareAndSwap(i, (i+1)%uint32(len(p.addrs))) { //nolint:gosec // G115: a handful of resolvers
+		return
+	}
+	log := p.log.Load()
+	if p.moves.Add(1) >= int32(len(p.addrs)) { //nolint:gosec // G115: a handful of resolvers
+		p.warn.note(log, p.addrs[i], err)
+	} else if log != nil {
+		log.Debug("naive: a public resolver passed over", "resolver", p.addrs[i], "err", err)
 	}
 }
 
@@ -461,14 +476,18 @@ type resolverConn struct {
 	p      *pubDNS
 	i      uint32
 	packet bool
-	sent   atomic.Int64  // unix nanoseconds the query went
+	sent   atomic.Int64  // when the query went (mono)
 	id     atomic.Uint32 // the query's ID, with 1<<16 once known
+	// Over TCP the answer's head comes after Go's 2-byte length, in as
+	// many reads as it takes: kept until it is whole.
+	head [6]byte
+	got  int
 }
 
 // fail passes the resolver over; failed's compare-and-swap moves on once
 // however many queries to it fail.
-func (c *resolverConn) fail(err error, warn bool) {
-	c.p.failed(c.i, time.Unix(0, c.sent.Load()), err, warn)
+func (c *resolverConn) fail(err error) {
+	c.p.failed(c.i, c.sent.Load(), err)
 }
 
 // transport is an error of the way to the resolver, not of the caller.
@@ -478,13 +497,18 @@ func transport(err error) bool {
 }
 
 func (c *resolverConn) Write(b []byte) (int, error) {
-	c.sent.Store(time.Now().UnixNano())
-	if c.packet && len(b) >= 2 {
-		c.id.Store(uint32(binary.BigEndian.Uint16(b)) | 1<<16)
+	c.sent.Store(mono())
+	if msg := b; c.packet || len(b) >= 4 {
+		if !c.packet {
+			msg = b[2:] // after the length
+		}
+		if len(msg) >= 2 {
+			c.id.Store(uint32(binary.BigEndian.Uint16(msg)) | 1<<16)
+		}
 	}
 	n, err := c.Conn.Write(b)
 	if err != nil && transport(err) {
-		c.fail(err, true)
+		c.fail(err)
 	}
 	return n, err
 }
@@ -493,18 +517,30 @@ func (c *resolverConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	switch {
 	case err != nil && transport(err):
-		c.fail(err, true)
-	case !c.packet && n > 0:
-		c.p.good[c.i].Store(time.Now().UnixNano()) // over TCP, an answer is an answer
-	case n >= 4 && b[2]&0x80 != 0 && c.id.Load() == uint32(binary.BigEndian.Uint16(b))|1<<16: // an answer to this query
-		switch b[3] & 0x0f {
-		case 0, 3: // NOERROR, NXDOMAIN
-			c.p.good[c.i].Store(time.Now().UnixNano())
-		case 2, 5: // SERVFAIL, REFUSED
-			c.fail(nil, false)
+		c.fail(err)
+	case c.packet && n >= 4:
+		c.answer(b[:4])
+	case !c.packet && n > 0 && c.got < len(c.head):
+		c.got += copy(c.head[c.got:], b[:n])
+		if c.got == len(c.head) {
+			c.answer(c.head[2:])
 		}
 	}
 	return n, err
+}
+
+// answer weighs an answer's head (ID, flags): an answer to this query,
+// good or failing.
+func (c *resolverConn) answer(h []byte) {
+	if h[2]&0x80 == 0 || c.id.Load() != uint32(binary.BigEndian.Uint16(h))|1<<16 {
+		return // not an answer to this query
+	}
+	switch h[3] & 0x0f {
+	case 0, 3: // NOERROR, NXDOMAIN
+		c.p.answered(c.i)
+	case 2, 5: // SERVFAIL, REFUSED
+		c.fail(errors.New("answers SERVFAIL or REFUSED"))
+	}
 }
 
 // resolverPacketConn is a resolverConn over UDP, a PacketConn as its
@@ -547,9 +583,8 @@ func dialPublic(ctx context.Context, network, address string) (net.Conn, error) 
 	return PublicDialer().DialContext(ctx, network, address)
 }
 
-// resolverWarn says, at most once a minute, that a public resolver does not
-// answer: a node-wide problem, unlike a name that does not exist. No name
-// goes in the log.
+// resolverWarn says, at most once a minute, that no public resolver
+// answers: names cannot be looked up on the node. No name goes in the log.
 type resolverWarn struct {
 	mu     sync.Mutex
 	last   time.Time
@@ -563,6 +598,6 @@ func (w *resolverWarn) note(log *slog.Logger, resolver string, err error) {
 	if log == nil || time.Since(w.last) < time.Minute {
 		return
 	}
-	log.Warn("naive: a public resolver does not answer", "count", w.missed, "resolver", resolver, "err", err)
+	log.Warn("naive: no public resolver answers", "count", w.missed, "last", resolver, "err", err)
 	w.last, w.missed = time.Now(), 0
 }
