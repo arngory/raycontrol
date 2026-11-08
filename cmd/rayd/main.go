@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -44,6 +45,7 @@ import (
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/nikoipc"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/pprofx"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
@@ -215,6 +217,10 @@ func cmdServe(args []string) error {
 	// The client's releases (spec/app-update-v1.md), beside the database:
 	// only while the administrator has the mirror on (rayctl app-mirror).
 	srv.AppMirror = &appmirror.Mirror{Store: st, Dir: filepath.Join(filepath.Dir(*db), "app"), Conn: probe.Conn, Log: log}
+	// The update by request (spec/node-update-v1.md): the latest release
+	// rayd's checks saw, for GetUpdateStatus.
+	var latestSeen atomic.Value
+	srv.NodeUpdate = &api.NodeUpdate{Latest: func() string { v, _ := latestSeen.Load().(string); return v }}
 	// Interop (the client's CI): releases from a server of the test's,
 	// signed with its key. Never on a node in use: anything that key signs
 	// would go to its devices.
@@ -297,11 +303,27 @@ func cmdServe(args []string) error {
 			// GitHub only: a mirror would learn the node's address too,
 			// for a question the operator can ask by hand.
 			f := &release.Fetcher{}
-			latest := func(ctx context.Context) (string, error) { return f.Latest(ctx, release.PubKey) }
+			latest := func(ctx context.Context) (string, error) {
+				v, err := f.Latest(ctx, release.PubKey)
+				if err == nil {
+					latestSeen.Store(v)
+				}
+				return v, err
+			}
 			go checkUpdates(ctx, latest, version, *updateCheck, hb, log)
 		} else {
 			log.Info("no update check: this build is no release", "version", version)
 		}
+	}
+	// The auto update of patch releases, once root turns it on (rayctl
+	// update auto patch); a root unit runs what it asks for, which a node
+	// without systemd does not have.
+	if !*supervise {
+		f := &release.Fetcher{}
+		latest := func(ctx context.Context) (string, error) { return f.Latest(ctx, release.PubKey) }
+		a := &autoUpdater{st: st, running: version, latest: latest, seen: &latestSeen, request: nodeupdate.RequestFile,
+			status: nodeupdate.StatusFile, policy: nodeupdate.PolicyFile, now: time.Now, tick: 10 * time.Minute, hb: hb, log: log}
+		go a.run(ctx)
 	}
 	frontUID := render.FrontUID
 	if *supervise {

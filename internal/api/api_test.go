@@ -380,7 +380,7 @@ func TestPerimeterFeed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dep.Msg.Units) != 6 || len(dep.Msg.Warnings) != 0 || len(dep.Msg.HostPorts) == 0 {
+	if len(dep.Msg.Units) != 7 || len(dep.Msg.Warnings) != 0 || len(dep.Msg.HostPorts) == 0 {
 		t.Fatalf("deployment units %v warnings %v host ports %v", dep.Msg.Units, dep.Msg.Warnings, dep.Msg.HostPorts)
 	} // From outside the ACME window is TCP 80 (no DNS provider here); the
 	// rest is the same.

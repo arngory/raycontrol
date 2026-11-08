@@ -27,7 +27,7 @@ type UninstallOptions struct {
 // /var/lib/rayspa holds the perimeter's copy of its last snapshot, and
 // /var/lib/rayd-relay a relay's probe endpoint's devices: nothing that is
 // not the exit's, and gone with them.
-var runtimeDirs = []string{"/run/niko", "/run/raycontrol", "/var/lib/rayspa", "/var/lib/rayd-relay"}
+var runtimeDirs = []string{"/run/niko", "/run/raycontrol", "/var/lib/rayspa", "/var/lib/rayd-relay", "/var/lib/raycontrol-update"}
 
 // Uninstall reverts what the journal records, newest first within each
 // step: units off, perimeter table gone, sysctl values back, files restored

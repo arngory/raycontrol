@@ -327,3 +327,50 @@ func TestArchiveFiles(t *testing.T) {
 		}
 	}
 }
+
+// The update's handoff reads only rayctl from an archive, whatever else
+// it holds: directories, names nobody knows yet, more files than Extract
+// takes.
+func TestExtractFile(t *testing.T) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	add := func(h *tar.Header, body string) {
+		h.Size = int64(len(body))
+		if h.Typeflag == tar.TypeDir {
+			h.Size = 0
+		}
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag != tar.TypeDir {
+			tw.Write([]byte(body))
+		}
+	}
+	add(&tar.Header{Name: "bin/", Typeflag: tar.TypeDir, Mode: 0o755}, "")
+	add(&tar.Header{Name: "bin/rayctl", Typeflag: tar.TypeReg, Mode: 0o755}, "not this one")
+	for i := range 80 {
+		add(&tar.Header{Name: fmt.Sprintf("transport-%d", i), Typeflag: tar.TypeReg, Mode: 0o755}, "x")
+	}
+	add(&tar.Header{Name: "rayctl-link", Typeflag: tar.TypeSymlink, Linkname: "/etc/shadow"}, "")
+	add(&tar.Header{Name: "./rayctl", Typeflag: tar.TypeReg, Mode: 0o755}, "the new rayctl")
+	tw.Close()
+	zw.Close()
+
+	if _, err := Extract(buf.Bytes(), t.TempDir()); err == nil {
+		t.Fatal("Extract took a layout of the future")
+	}
+	dst := filepath.Join(t.TempDir(), "rayctl")
+	if err := ExtractFile(buf.Bytes(), "rayctl", dst); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(dst); string(b) != "the new rayctl" {
+		t.Fatalf("got %q", b)
+	}
+	if err := ExtractFile(buf.Bytes(), "rayd", filepath.Join(t.TempDir(), "rayd")); err == nil || !strings.Contains(err.Error(), "no rayd") {
+		t.Fatalf("a missing file: %v", err)
+	}
+	if err := ExtractFile([]byte("not gzip"), "rayctl", filepath.Join(t.TempDir(), "x")); err == nil {
+		t.Fatal("garbage taken")
+	}
+}

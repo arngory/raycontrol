@@ -66,6 +66,9 @@ type Server struct {
 	// AppMirror keeps the client's releases (spec/app-update-v1.md); nil:
 	// the setting alone (tests).
 	AppMirror *appmirror.Mirror
+	// NodeUpdate is the update by request (spec/node-update-v1.md); nil:
+	// the node's paths.
+	NodeUpdate *NodeUpdate
 
 	// Wrong invite PINs, and the invites the last of them withdrew, since
 	// rayd started (rayctl metrics).

@@ -191,10 +191,28 @@ jobs:
   upgrade:
     # The update from the latest release, by its own rayctl, to this build
     # (test/install/upgrade.sh): the node it gives must be the one a fresh
-    # install of this build gives, subscription included.
+    # install of this build gives, subscription included. And from the
+    # oldest release bootstrap.sh installs (MIN_VERSION) along the path
+    # docs/RELEASE.md gives it: its rayctl takes no archive with names it
+    # does not know (before v0.15.0), so v0.15.0 first, then the latest
+    # release, each verified and extracted by the rayctl on the node as
+    # from GitHub, then this build. Only the latest release was tested
+    # before, with -local, which skips the archive: "unexpected
+    # slipstream-server" on a v0.10 node went unseen.
+    name: upgrade (${{ matrix.from }})
     needs: xray
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - from: latest
+          - from: v0.10.2
+            step: v0.15.0
+          # The handoff (docs/RELEASE.md): this tree as v0.0.1 updates to
+          # itself as a signed v0.0.2, by v0.0.2's own rayctl.
+          - from: handoff
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -214,14 +232,31 @@ jobs:
           scripts/niko-server.sh amd64 bin/niko-server
           scripts/slipstream-server.sh amd64 bin/slipstream-server
           chmod +x bin/*
-      - name: The latest release
-        run: test/install/previous.sh old
+      - name: The release to update from
+        if: matrix.from != 'handoff'
+        run: test/install/previous.sh old "${{ matrix.from }}"
+      - name: The stepping-stone release, then the latest
+        if: matrix.step != ''
+        run: |
+          test/install/previous.sh step-bin "${{ matrix.step }}" step/1
+          test/install/previous.sh latest-bin latest step/2
       - name: Bootstrap dependencies on the bare image
         run: test/install/deps.sh debian13
       - name: Prepare the systemd image
         run: test/install/prepare.sh debian13
       - name: Update and compare with a fresh install
-        run: test/install/upgrade.sh debian13 bin old
+        if: matrix.from != 'handoff'
+        run: test/install/upgrade.sh debian13 bin old ${{ matrix.step && 'step' || '' }}
+      - name: The handoff's two builds and signed release
+        if: matrix.from == 'handoff'
+        run: |
+          sudo apt-get install -y minisign
+          test/install/handoff-release.sh bin hand
+      - name: Update by the release's own rayctl and compare with a fresh install
+        if: matrix.from == 'handoff'
+        run: |
+          TEST_RELEASE_KEY="$(cat hand/key.pub)" EXPECT_HANDOFF=1 STEPS_ONLY=1 \
+            test/install/upgrade.sh debian13 hand/new hand/old hand/step
 
   supervise:
     # A node without systemd (rayd serve -supervise) in a plain container,

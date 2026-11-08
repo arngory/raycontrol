@@ -131,6 +131,11 @@ const (
 	// NodeServiceSetAppMirrorProcedure is the fully-qualified name of the NodeService's SetAppMirror
 	// RPC.
 	NodeServiceSetAppMirrorProcedure = "/raycontrol.node.v1.NodeService/SetAppMirror"
+	// NodeServiceStartUpdateProcedure is the fully-qualified name of the NodeService's StartUpdate RPC.
+	NodeServiceStartUpdateProcedure = "/raycontrol.node.v1.NodeService/StartUpdate"
+	// NodeServiceGetUpdateStatusProcedure is the fully-qualified name of the NodeService's
+	// GetUpdateStatus RPC.
+	NodeServiceGetUpdateStatusProcedure = "/raycontrol.node.v1.NodeService/GetUpdateStatus"
 	// NodeServiceSetDebugProcedure is the fully-qualified name of the NodeService's SetDebug RPC.
 	NodeServiceSetDebugProcedure = "/raycontrol.node.v1.NodeService/SetDebug"
 	// NodeServiceSetNodeNameProcedure is the fully-qualified name of the NodeService's SetNodeName RPC.
@@ -235,6 +240,12 @@ type NodeServiceClient interface {
 	// SetAppMirror turns it on (with 1 GiB free for it) or off (its files
 	// go).
 	SetAppMirror(context.Context, *connect.Request[v1.SetAppMirrorRequest]) (*connect.Response[v1.SetAppMirrorResponse], error)
+	// The node's update by request (spec/node-update-v1.md): an admin asks
+	// for a signed release, newer than the node, while root has turned
+	// remote updates on (rayctl update remote on, a file of root's that rayd
+	// only reads); a root unit runs it.
+	StartUpdate(context.Context, *connect.Request[v1.StartUpdateRequest]) (*connect.Response[v1.StartUpdateResponse], error)
+	GetUpdateStatus(context.Context, *connect.Request[v1.GetUpdateStatusRequest]) (*connect.Response[v1.GetUpdateStatusResponse], error)
 	// SetDebug opens the debug window for a while or closes it: rayd, rayspa
 	// and niko-server log at debug level until it ends by itself
 	// (docs/09-observability.md §3). Root on the node only.
@@ -480,6 +491,18 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("SetAppMirror")),
 			connect.WithClientOptions(opts...),
 		),
+		startUpdate: connect.NewClient[v1.StartUpdateRequest, v1.StartUpdateResponse](
+			httpClient,
+			baseURL+NodeServiceStartUpdateProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("StartUpdate")),
+			connect.WithClientOptions(opts...),
+		),
+		getUpdateStatus: connect.NewClient[v1.GetUpdateStatusRequest, v1.GetUpdateStatusResponse](
+			httpClient,
+			baseURL+NodeServiceGetUpdateStatusProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetUpdateStatus")),
+			connect.WithClientOptions(opts...),
+		),
 		setDebug: connect.NewClient[v1.SetDebugRequest, v1.SetDebugResponse](
 			httpClient,
 			baseURL+NodeServiceSetDebugProcedure,
@@ -540,6 +563,8 @@ type nodeServiceClient struct {
 	setSummary        *connect.Client[v1.SetSummaryRequest, v1.SetSummaryResponse]
 	getAppMirror      *connect.Client[v1.GetAppMirrorRequest, v1.GetAppMirrorResponse]
 	setAppMirror      *connect.Client[v1.SetAppMirrorRequest, v1.SetAppMirrorResponse]
+	startUpdate       *connect.Client[v1.StartUpdateRequest, v1.StartUpdateResponse]
+	getUpdateStatus   *connect.Client[v1.GetUpdateStatusRequest, v1.GetUpdateStatusResponse]
 	setDebug          *connect.Client[v1.SetDebugRequest, v1.SetDebugResponse]
 	setNodeName       *connect.Client[v1.SetNodeNameRequest, v1.SetNodeNameResponse]
 	getDeployment     *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
@@ -730,6 +755,16 @@ func (c *nodeServiceClient) SetAppMirror(ctx context.Context, req *connect.Reque
 	return c.setAppMirror.CallUnary(ctx, req)
 }
 
+// StartUpdate calls raycontrol.node.v1.NodeService.StartUpdate.
+func (c *nodeServiceClient) StartUpdate(ctx context.Context, req *connect.Request[v1.StartUpdateRequest]) (*connect.Response[v1.StartUpdateResponse], error) {
+	return c.startUpdate.CallUnary(ctx, req)
+}
+
+// GetUpdateStatus calls raycontrol.node.v1.NodeService.GetUpdateStatus.
+func (c *nodeServiceClient) GetUpdateStatus(ctx context.Context, req *connect.Request[v1.GetUpdateStatusRequest]) (*connect.Response[v1.GetUpdateStatusResponse], error) {
+	return c.getUpdateStatus.CallUnary(ctx, req)
+}
+
 // SetDebug calls raycontrol.node.v1.NodeService.SetDebug.
 func (c *nodeServiceClient) SetDebug(ctx context.Context, req *connect.Request[v1.SetDebugRequest]) (*connect.Response[v1.SetDebugResponse], error) {
 	return c.setDebug.CallUnary(ctx, req)
@@ -840,6 +875,12 @@ type NodeServiceHandler interface {
 	// SetAppMirror turns it on (with 1 GiB free for it) or off (its files
 	// go).
 	SetAppMirror(context.Context, *connect.Request[v1.SetAppMirrorRequest]) (*connect.Response[v1.SetAppMirrorResponse], error)
+	// The node's update by request (spec/node-update-v1.md): an admin asks
+	// for a signed release, newer than the node, while root has turned
+	// remote updates on (rayctl update remote on, a file of root's that rayd
+	// only reads); a root unit runs it.
+	StartUpdate(context.Context, *connect.Request[v1.StartUpdateRequest]) (*connect.Response[v1.StartUpdateResponse], error)
+	GetUpdateStatus(context.Context, *connect.Request[v1.GetUpdateStatusRequest]) (*connect.Response[v1.GetUpdateStatusResponse], error)
 	// SetDebug opens the debug window for a while or closes it: rayd, rayspa
 	// and niko-server log at debug level until it ends by itself
 	// (docs/09-observability.md §3). Root on the node only.
@@ -1081,6 +1122,18 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("SetAppMirror")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceStartUpdateHandler := connect.NewUnaryHandler(
+		NodeServiceStartUpdateProcedure,
+		svc.StartUpdate,
+		connect.WithSchema(nodeServiceMethods.ByName("StartUpdate")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceGetUpdateStatusHandler := connect.NewUnaryHandler(
+		NodeServiceGetUpdateStatusProcedure,
+		svc.GetUpdateStatus,
+		connect.WithSchema(nodeServiceMethods.ByName("GetUpdateStatus")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceSetDebugHandler := connect.NewUnaryHandler(
 		NodeServiceSetDebugProcedure,
 		svc.SetDebug,
@@ -1175,6 +1228,10 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceGetAppMirrorHandler.ServeHTTP(w, r)
 		case NodeServiceSetAppMirrorProcedure:
 			nodeServiceSetAppMirrorHandler.ServeHTTP(w, r)
+		case NodeServiceStartUpdateProcedure:
+			nodeServiceStartUpdateHandler.ServeHTTP(w, r)
+		case NodeServiceGetUpdateStatusProcedure:
+			nodeServiceGetUpdateStatusHandler.ServeHTTP(w, r)
 		case NodeServiceSetDebugProcedure:
 			nodeServiceSetDebugHandler.ServeHTTP(w, r)
 		case NodeServiceSetNodeNameProcedure:
@@ -1336,6 +1393,14 @@ func (UnimplementedNodeServiceHandler) GetAppMirror(context.Context, *connect.Re
 
 func (UnimplementedNodeServiceHandler) SetAppMirror(context.Context, *connect.Request[v1.SetAppMirrorRequest]) (*connect.Response[v1.SetAppMirrorResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetAppMirror is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) StartUpdate(context.Context, *connect.Request[v1.StartUpdateRequest]) (*connect.Response[v1.StartUpdateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.StartUpdate is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetUpdateStatus(context.Context, *connect.Request[v1.GetUpdateStatusRequest]) (*connect.Response[v1.GetUpdateStatusResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetUpdateStatus is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) SetDebug(context.Context, *connect.Request[v1.SetDebugRequest]) (*connect.Response[v1.SetDebugResponse], error) {

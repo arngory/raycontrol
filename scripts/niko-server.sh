@@ -20,7 +20,8 @@ base="$NIKO_SERVER_RELEASES/download/$NIKO_SERVER_TAG"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 for f in "niko-server-linux-$arch" SHA256SUMS; do
-	curl -fsSL --retry 3 --retry-delay 2 -o "$tmp/$f" "$base/$f"
+	# GitHub's release storage has outages of minutes: wait them out.
+	curl -fsSL --retry 8 --retry-delay 15 --retry-all-errors --retry-max-time 900 --connect-timeout 30 -o "$tmp/$f" "$base/$f"
 done
 (cd "$tmp" && grep " niko-server-linux-$arch\$" SHA256SUMS | sha256sum -c - >/dev/null)
 echo "$want  $tmp/niko-server-linux-$arch" | sha256sum -c - >/dev/null || {
