@@ -80,7 +80,7 @@ Data plane описан в спецификации niko-server
 | dnstt, masterdns | dns, UDP 53 открыт | DNS | DNS-запросы | KCP/smux, ARQ | ключ туннеля → `inner` | через `inner` |
 | olcrtc | rendezvous | WebRTC | видеозвонок | smux | PSK → `inner` | через `inner` |
 | openflux | rendezvous | документы | правки документов | своя | ключ → `inner` | через `inner` |
-| yggdrasil | direct, TCP 443 за SPA | TLS 1.3 | сайт (пустой `404` не-линку) | Yggdrasil → `inner` | ключ из UUID `inner` | линк X25519MLKEM768, трафик — через `inner` (R4-15) |
+| yggdrasil | direct, TCP 443 за SPA | TLS 1.3 | сайт (пустой `404` не-линку) | Yggdrasil → `inner` | ключ устройства (SPA-ключ и UUID `inner`) | линк X25519MLKEM768, трафик — через `inner` (R4-15) |
 
 ## Control plane
 

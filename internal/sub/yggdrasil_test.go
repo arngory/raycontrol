@@ -235,13 +235,18 @@ func TestYggdrasilDeviceKeys(t *testing.T) {
 	u, _ := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
 	st.SetUserServices(ctx, "alice", []int64{y.ID})
 	phone, phoneKey, _ := st.CreateDevice(ctx, "alice", "phone", "user")
-	laptop, _, _ := st.CreateDevice(ctx, "alice", "laptop", "user")
+	laptop, laptopKey, _ := st.CreateDevice(ctx, "alice", "laptop", "user")
+	// Another user's device: under that user only.
+	bobUser, _ := st.CreateUser(ctx, store.User{Name: "bob", Enabled: true})
+	st.SetUserServices(ctx, "bob", []int64{y.ID})
+	bobPhone, _, _ := st.CreateDevice(ctx, "bob", "phone", "user")
 
-	nodeKeys := func() map[string]string {
+	nodeKeysAt := func(at time.Time) map[string]string {
 		m, err := render.CollectForRender(ctx, st)
 		if err != nil {
 			t.Fatal(err)
 		}
+		m.Now = at
 		files, _, err := render.Render(m, render.Paths{Rendered: "/r", Run: "/run/niko"})
 		if err != nil {
 			t.Fatal(err)
@@ -265,7 +270,8 @@ func TestYggdrasilDeviceKeys(t *testing.T) {
 		}
 		return out
 	}
-	linkKey := func(device string) string {
+	nodeKeys := func() map[string]string { return nodeKeysAt(time.Time{}) }
+	linkKey := func(device []byte) string {
 		m, _ := render.Collect(ctx, st)
 		profiles, err := sub.DeviceProfiles(m, m.Users[0], device)
 		if err != nil || len(profiles) != 1 {
@@ -276,9 +282,15 @@ func TestYggdrasilDeviceKeys(t *testing.T) {
 		seed, _ := hex.DecodeString(keyHex)
 		return hex.EncodeToString(ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey))
 	}
-	user, ph, lp := linkKey(""), linkKey(phone.ID), linkKey(laptop.ID)
+	user, ph, lp := linkKey(nil), linkKey(phoneKey[:]), linkKey(laptopKey[:])
 	if user == ph || user == lp || ph == lp {
 		t.Fatal("devices share a key")
+	}
+	// The key comes from the device's secret, not from what a sibling
+	// knows (the user's UUID and the device's ID).
+	m0, _ := render.Collect(ctx, st)
+	if guess := hex.EncodeToString(render.YggdrasilDeviceKey(m0.Inner[u.ID], []byte(phone.ID)).Public().(ed25519.PublicKey)); guess == ph {
+		t.Fatal("a device's key follows from its ID")
 	}
 	// The subscription a device fetches carries its own key.
 	keys0, err := provision.LoadNodeKeys(ctx, st)
@@ -303,32 +315,44 @@ func TestYggdrasilDeviceKeys(t *testing.T) {
 	if hex.EncodeToString(ed25519.NewKeyFromSeed(gotSeed).Public().(ed25519.PublicKey)) != ph {
 		t.Fatal("the phone's subscription has another key than the phone's")
 	}
-	name := render.InnerEmail(u.ID)
+	name, bob := render.InnerEmail(u.ID), render.InnerEmail(bobUser.ID)
 	keys := nodeKeys()
-	if len(keys) != 3 || keys[name] != user || keys[name+"-"+phone.ID] != ph || keys[name+"-"+laptop.ID] != lp {
+	if len(keys) != 5 || keys[name] != user || keys[name+"-"+phone.ID] != ph || keys[name+"-"+laptop.ID] != lp ||
+		keys[bob+"-"+bobPhone.ID] == "" || keys[name+"-"+bobPhone.ID] != "" || keys[bob+"-"+phone.ID] != "" {
 		t.Fatalf("node keys %v", keys)
 	}
 	// A revoked device's key goes.
 	if err := st.RevokeDevice(ctx, laptop.ID); err != nil {
 		t.Fatal(err)
 	}
-	if keys := nodeKeys(); len(keys) != 2 || keys[name+"-"+laptop.ID] != "" {
+	if keys := nodeKeys(); len(keys) != 4 || keys[name+"-"+laptop.ID] != "" {
 		t.Fatalf("after revoking: %v", keys)
 	}
-	// Rotation: each device's next key too.
+	// Rotation: each device's next key, then its previous one for the
+	// grace only.
 	day := 24 * time.Hour
+	t0 := time.Now()
 	r := store.Rotation{Period: 30 * day, Lead: 3 * day, Grace: 2 * day}
-	if n, err := st.RotateCredentials(ctx, time.Now().Add(28*day), r, render.NewUUID); err != nil || n == 0 {
+	if n, err := st.RotateCredentials(ctx, t0.Add(28*day), r, render.NewUUID); err != nil || n == 0 {
 		t.Fatalf("publish: %d %v", n, err)
 	}
 	m, _ := render.Collect(ctx, st)
-	profiles, _ := sub.DeviceProfiles(m, m.Users[0], phone.ID)
+	profiles, _ := sub.DeviceProfiles(m, m.Users[0], phoneKey[:])
 	nl, _ := url.Parse(profiles[0].Next.Link)
 	_, nextHex, _ := strings.Cut(nl.Query().Get("niko-ygg"), ";")
 	nextSeed, _ := hex.DecodeString(nextHex)
 	next := hex.EncodeToString(ed25519.NewKeyFromSeed(nextSeed).Public().(ed25519.PublicKey))
 	if keys := nodeKeys(); keys[name+"-"+phone.ID+"-n"] != next || next == ph {
 		t.Fatalf("rotation: %v", keys)
+	}
+	if n, err := st.RotateCredentials(ctx, t0.Add(31*day), r, render.NewUUID); err != nil || n == 0 {
+		t.Fatalf("switch: %d %v", n, err)
+	}
+	if keys := nodeKeysAt(t0.Add(31 * day)); keys[name+"-"+phone.ID] != next || keys[name+"-"+phone.ID+"-p"] != ph {
+		t.Fatalf("after the switch: %v", keys)
+	}
+	if keys := nodeKeysAt(t0.Add(40 * day)); keys[name+"-"+phone.ID+"-p"] != "" {
+		t.Fatalf("after the grace: %v", keys)
 	}
 }
 

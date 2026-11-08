@@ -565,22 +565,31 @@ func (s *Store) CreateDevice(ctx context.Context, userName, name, role string) (
 	return d, key, err
 }
 
-// ActiveDeviceIDs maps user ID to the IDs of the user's devices not
-// revoked, in order.
-func (s *Store) ActiveDeviceIDs(ctx context.Context) (map[int64][]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT user_id, id FROM devices WHERE revoked_at IS NULL ORDER BY user_id, id`)
+// DeviceSecret is a device and its SPA key, which only it and the node
+// hold.
+type DeviceSecret struct {
+	ID  string
+	Key [spa.KeySize]byte
+}
+
+// ActiveDeviceSecrets maps user ID to the user's devices not revoked, in
+// order.
+func (s *Store) ActiveDeviceSecrets(ctx context.Context) (map[int64][]DeviceSecret, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT user_id, id, spa_key FROM devices WHERE revoked_at IS NULL ORDER BY user_id, id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[int64][]string{}
+	out := map[int64][]DeviceSecret{}
 	for rows.Next() {
 		var user int64
-		var id string
-		if err := rows.Scan(&user, &id); err != nil {
+		var d DeviceSecret
+		var key []byte
+		if err := rows.Scan(&user, &d.ID, &key); err != nil {
 			return nil, err
 		}
-		out[user] = append(out[user], id)
+		copy(d.Key[:], key)
+		out[user] = append(out[user], d)
 	}
 	return out, rows.Err()
 }

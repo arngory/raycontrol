@@ -269,12 +269,12 @@ func CheckAuth(header string, deviceKey [spa.KeySize]byte, now time.Time) bool {
 // Profiles builds the profiles of a user from the rendered model: those
 // that could be made, and an error naming each service whose profile could
 // not. One service's broken settings do not take the user's others away.
-func Profiles(m render.Model, u render.User) ([]Profile, error) { return DeviceProfiles(m, u, "") }
+func Profiles(m render.Model, u render.User) ([]Profile, error) { return DeviceProfiles(m, u, nil) }
 
-// DeviceProfiles are the profiles of a user's device: links that differ by
-// device (Yggdrasil's key) are that device's. Without a device they are the
-// user's (rayctl user export).
-func DeviceProfiles(m render.Model, u render.User, device string) ([]Profile, error) {
+// DeviceProfiles are the profiles of a user's device, given by its SPA key:
+// links that differ by device (Yggdrasil's key) are that device's. Without
+// a device they are the user's (rayctl user export).
+func DeviceProfiles(m render.Model, u render.User, device []byte) ([]Profile, error) {
 	var inner *render.Service
 	for i := range m.Services {
 		if m.Services[i].Kind == "inner" {
@@ -300,7 +300,7 @@ func DeviceProfiles(m render.Model, u render.User, device string) ([]Profile, er
 
 // serviceProfile is a user's profile of one service, nil when the user has
 // none there (no credential yet, no inner stage).
-func serviceProfile(m render.Model, u render.User, s render.Service, inner *render.Service, device string) (*Profile, error) {
+func serviceProfile(m render.Model, u render.User, s render.Service, inner *render.Service, device []byte) (*Profile, error) {
 	switch s.Kind {
 	case "dnstt", "masterdns", "slipstream":
 		if inner == nil || m.Inner[u.ID] == "" {
@@ -466,7 +466,7 @@ func serviceProfile(m render.Model, u render.User, s render.Service, inner *rend
 // node by its address (SPA goes there) and resolves no name, as for naive. niko-ygg is "<peer URI>;<the user's key>", the
 // key (a 32-byte ed25519 seed, hex) derived from the same inner UUID; each
 // niko-ygg-via is a public peer of the node, when it has them.
-func YggdrasilLink(m render.Model, s, inner render.Service, uuid, device string) (string, error) {
+func YggdrasilLink(m render.Model, s, inner render.Service, uuid string, device []byte) (string, error) {
 	st, nodeKey, err := render.YggdrasilNode(s)
 	if err != nil {
 		return "", err

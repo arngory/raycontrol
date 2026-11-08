@@ -181,7 +181,7 @@ func (s *Server) handle(r *http.Request) (Envelope, error) {
 	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
 		addr = ap.Addr().Unmap()
 	}
-	return s.BuildForDevice(ctx, dev.UserName, dev.ID, addr, now)
+	return s.BuildForDevice(ctx, dev.UserName, key[:], addr, now)
 }
 
 // Build returns the signed subscription of a user.
@@ -192,12 +192,12 @@ func (s *Server) Build(ctx context.Context, userName string, now time.Time) (Env
 // BuildFor returns the signed subscription of a user asking from addr: with
 // the hint for that network, when there is one.
 func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr, now time.Time) (Envelope, error) {
-	return s.BuildForDevice(ctx, userName, "", addr, now)
+	return s.BuildForDevice(ctx, userName, nil, addr, now)
 }
 
-// BuildForDevice is BuildFor for one of the user's devices: its own links
-// where they differ by device (Yggdrasil's key).
-func (s *Server) BuildForDevice(ctx context.Context, userName, device string, addr netip.Addr, now time.Time) (Envelope, error) {
+// BuildForDevice is BuildFor for one of the user's devices, given by its
+// SPA key: its own links where they differ by device (Yggdrasil's key).
+func (s *Server) BuildForDevice(ctx context.Context, userName string, device []byte, addr netip.Addr, now time.Time) (Envelope, error) {
 	m, err := render.Collect(ctx, s.Store)
 	if err != nil {
 		return Envelope{}, err
