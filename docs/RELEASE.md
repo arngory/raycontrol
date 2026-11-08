@@ -90,7 +90,7 @@ bootstrap. Версию он читает из подписанного комм
 2. из архива достаётся один `rayctl` (`release.ExtractFile`: остальное пропускается, будь то каталоги, незнакомые
    имена или сколько угодно файлов); рядом в свой подкаталог каталога обновления
    (`/var/lib/raycontrol-install/update-*/handoff`, 0700) ложатся `SHA256SUMS`, подпись и архив;
-3. `<каталог>/rayctl update -from <каталог> -version vX [-yes]` с `RAYCONTROL_UPDATE_FROM=<версия ноды>` и
+3. `<каталог>/rayctl update -from <каталог> -version vX [-yes] [-force]` с `RAYCONTROL_UPDATE_FROM=<версия ноды>` и
    `RAYCONTROL_UPDATE_HANDOFF=1`; вопрос «Type yes» задаёт уже он. Он проверяет релиз ещё раз своим ключом,
    распаковывает архив своим кодом, ставит, применяет, ждёт data plane и при сбое откатывается; для отката
    записывает версию ноды, а не свою.
@@ -102,13 +102,16 @@ bootstrap. Версию он читает из подписанного комм
 
 **Что заморожено** — на это полагаются все `rayctl` с передачей: имя архива `raycontrol-linux-<arch>.tar.gz`, tar+gzip,
 `rayctl` на верхнем уровне, подпись minisign над `SHA256SUMS` с `raycontrol vX.Y.Z`, команда
-`update -from DIR -version V [-yes]` и две переменные. Для обновления по запросу
+`update -from DIR -version V [-yes] [-force]` и две переменные (`-force` передаётся с v0.21.0, если его дал оператор). Для обновления по запросу
 ([spec/node-update-v1.md](spec/node-update-v1.md)) ещё `RAYCONTROL_UPDATE_RESULT=<файл>`: `rayctl`, который сделал
 обновление, пишет туда JSON `{"state": "done"|"rolled_back"|"failed", "version", "release", "error", "untouched"}`
 (`release` — релиз, который ставили; `untouched` — сбой до того, как на ноде что-то поменялось). Тоже между версиями: файлы
 `/var/lib/raycontrol-update/status.json` (`id`, `state`, `from`, `to`, `target`, `release`, `by`, `kind`, `error`,
 `untouched`, `held`, `requested`, `started`, `ended`: итог пишет `rayctl` прежней версии, читает rayd новой) и
-`policy.json` (`remote`, `auto`, `window`), флаги юнита `update -request` и `update -request-ended`. Всё остальное (раскладка, имена, число файлов, новые
+`policy.json` (`remote`, `auto`, `window`), флаги юнита `update -request` и `update -request-ended`. И `units` в ответе
+`GetDeployment`: `rayctl` без передачи (`-no-handoff`, `rayctl` релиза не запустился) берёт оттуда юниты после
+обновления; `files` и `users` уйдут из ответа (apply-plan-v1, решение 2). Откат ниже v0.21.0 запускает apply старого
+`rayctl`, а тот ставит план rayd как есть: иного apply у старой версии нет (apply-plan-v1 §3.5). Всё остальное (раскладка, имена, число файлов, новые
 транспорты, способ установки) с v0.19.0 можно менять без ступеней. CI проверяет передачу строкой `upgrade (handoff)`:
 это дерево как v0.0.1 обновляется до себя же как v0.0.2, подписанного одноразовым ключом (сборка с тегом
 `releasetest` берёт ключ из `RAYCONTROL_TEST_RELEASE_KEY`; в Release-workflow тега нет —

@@ -116,10 +116,24 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 	case *requestEnded:
 		return markInterrupted(nodeupdate.StatusFile)
 	case *request:
+		// One at a time; a request waits a while for a manual update or
+		// apply to end (the unit gives it 50 minutes in all).
+		if err := takeUpdateLock("update by request", 10*time.Minute); err != nil {
+			return err
+		}
 		return nodeRequests().run()
 	}
 	if err := updatable(deploy.DB, deploy.RelayBundle); err != nil {
 		return err
+	}
+	if !*check {
+		what := "update"
+		if *rollback {
+			what = "rollback"
+		}
+		if err := takeUpdateLock(what, 0); err != nil {
+			return err
+		}
 	}
 	if *rollback {
 		carry := carryMust
@@ -150,6 +164,27 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 		}()
 	}
 
+	// Services the new version leaves out, before anything changes and
+	// before the handoff: the operator's -force is this rayctl's to give,
+	// and it passes it on (review of apply-plan-v1). Said with -check.
+	handedFrom := ""
+	if os.Getenv(handoffEnv) == "1" {
+		handedFrom = installed
+	}
+	misnamedFirst := func(to string) error {
+		if !leavesOut(to) {
+			return nil
+		}
+		names := c.misnamed(ctx)
+		if *check {
+			if len(names) > 0 {
+				fmt.Println("warning:", strings.Join(names, ", ")+":", misnamedAdvice)
+			}
+			return nil
+		}
+		return misnamedUpdate(os.Stdout, names, *force, os.Getenv(nodeupdate.ResultEnv) != "", handedFrom)
+	}
+
 	if err := os.MkdirAll(deploy.JournalDir, 0o700); err != nil {
 		return err
 	}
@@ -171,6 +206,9 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 		}
 		newVersion = "local"
 		fmt.Println("binaries from", *local, "without verification (test mode)")
+		if err := misnamedFirst(newVersion); err != nil || *check {
+			return err
+		}
 	default:
 		var r release.Release
 		arch := runtime.GOARCH
@@ -191,7 +229,7 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 						return fmt.Errorf("installed %s is newer than the latest release %s; rayctl update -version %s goes back", installed, l, l)
 					case *check:
 						fmt.Printf("installed %s, release %s available: rayctl update\n", installed, l)
-						return nil
+						return misnamedFirst(l)
 					}
 					v = l
 				}
@@ -211,13 +249,16 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 		}
 		if *check {
 			fmt.Printf("installed %s, release %s available: rayctl update\n", installed, newVersion)
-			return nil
+			return misnamedFirst(newVersion)
+		}
+		if err := misnamedFirst(newVersion); err != nil {
+			return err
 		}
 		// A newer release updates the node with its own rayctl. Going back,
 		// or the same version again, stays with this one: it knows the
 		// newer state of the node.
 		if handsOff(*noHandoff, newVersion, installed) {
-			h, herr := handoff(r, stage, installed, *yes)
+			h, herr := handoff(r, stage, installed, *yes, *force)
 			if h {
 				handed = true
 				return herr
@@ -230,9 +271,6 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 		if b, err := os.ReadFile(filepath.Join(stage, "VERSIONS")); err == nil { //nolint:gosec // G304: our staging directory
 			fmt.Print(string(b))
 		}
-	}
-	if *check {
-		return nil
 	}
 	if !*yes {
 		fmt.Printf("Update raycontrol %s to %s? rayd, rayspa and the data plane restart; clients reconnect and send SPA again. Type yes to go on: ",
@@ -338,13 +376,15 @@ func weakerModes(kind, settings string) []string {
 // rayctl updates from there (update -from: it verifies the release again,
 // with its own key, and reads the archive with its own code). handed is
 // false when the new rayctl did not start at all (a noexec mount, another
-// architecture): the caller updates as before.
+// architecture): the caller updates as before. yes and force are the
+// operator's, passed on (force: misnamed services, the only thing it
+// changes for a newer release).
 //
 // The child is not bound to this command's context: the time the download
 // had must not cut its restart or its rollback. Ctrl-C reaches it as part
 // of the terminal's process group and stops it as it would stop this one;
 // this one stays to clean up.
-func handoff(r release.Release, stage, installed string, yes bool) (handed bool, err error) {
+func handoff(r release.Release, stage, installed string, yes, force bool) (handed bool, err error) {
 	// A directory of its own: if the release's rayctl does not run, this
 	// one extracts the release into the stage.
 	dir := filepath.Join(stage, "handoff")
@@ -367,6 +407,9 @@ func handoff(r release.Release, stage, installed string, yes bool) (handed bool,
 	args := []string{"update", "-from", dir, "-version", r.Version}
 	if yes {
 		args = append(args, "-yes")
+	}
+	if force {
+		args = append(args, "-force")
 	}
 	cmd := exec.Command(bin, args...) //nolint:gosec // G204: the verified release's rayctl
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -455,10 +498,12 @@ func (c *cli) restartNode(ctx context.Context, want, stage string, before []stri
 	restarts := map[string]string{} // each data-plane unit's restarts once restarted
 	var units []string
 	// The deployment's units too: one a new service brings that fails at
-	// once is in auto-restart, not active, when listed (review).
+	// once is in auto-restart, not active, when listed (review). From the
+	// plan as root builds it, not rayd's; after a rollback to a rayd before
+	// GetDeployInputs, the units that run are all there is.
 	now := activeDataPlane()
-	if d, err := c.c.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{})); err == nil {
-		for _, u := range d.Msg.Units {
+	if plan, _, err := c.deployPlan(ctx); err == nil {
+		for _, u := range plan.Units {
 			if !strings.HasPrefix(u, "niko-") {
 				continue
 			}
@@ -724,15 +769,13 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 // it does not follow it). The stale WAL and shared memory go first, so a
 // crash never leaves the new database next to the old one's WAL.
 func copyDB(src, dst string) error {
-	dir := filepath.Dir(dst)
-	di, err := os.Lstat(dir)
+	di, err := os.Lstat(filepath.Dir(dst))
 	if err != nil {
 		return err
 	}
 	if !di.IsDir() {
-		return fmt.Errorf("%s is not a directory", dir)
+		return fmt.Errorf("%s is not a directory", filepath.Dir(dst))
 	}
-	owner, _ := di.Sys().(*syscall.Stat_t)
 	for _, stale := range []string{dst + "-wal", dst + "-shm"} {
 		if err := os.Remove(stale); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -746,37 +789,58 @@ func copyDB(src, dst string) error {
 		if err != nil {
 			return err
 		}
-		f, err := os.CreateTemp(dir, filepath.Base(dst+suffix)+".*.tmp")
-		if err != nil {
+		if err := placeDB(dst+suffix, b); err != nil {
 			return err
 		}
-		tmp := f.Name()
-		werr := func() error {
-			if _, err := f.Write(b); err != nil {
-				return err
-			}
-			if err := f.Chmod(0o600); err != nil {
-				return err
-			}
-			if owner != nil {
-				if err := f.Chown(int(owner.Uid), int(owner.Gid)); err != nil {
-					return err
-				}
-			}
-			if err := f.Sync(); err != nil {
-				return err
-			}
-			return f.Close()
-		}()
-		if werr != nil {
-			f.Close()
-			os.Remove(tmp)
-			return werr
-		}
-		if err := os.Rename(tmp, dst+suffix); err != nil {
-			os.Remove(tmp)
+	}
+	return nil
+}
+
+// placeDB puts b at dst, mode 0600, the owner of dst's directory's: a new
+// file there (os.CreateTemp: O_EXCL, never through a link), its mode and
+// owner set through its descriptor, then renamed over dst. The directory
+// may be rayd's: a link it put at dst is replaced, never written through
+// or given away (copyDB, restore).
+func placeDB(dst string, b []byte) error {
+	dir := filepath.Dir(dst)
+	di, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !di.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	owner, _ := di.Sys().(*syscall.Stat_t)
+	f, err := os.CreateTemp(dir, filepath.Base(dst)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	werr := func() error {
+		if _, err := f.Write(b); err != nil {
 			return err
 		}
+		if err := f.Chmod(0o600); err != nil {
+			return err
+		}
+		if owner != nil {
+			if err := f.Chown(int(owner.Uid), int(owner.Gid)); err != nil {
+				return err
+			}
+		}
+		if err := f.Sync(); err != nil {
+			return err
+		}
+		return f.Close()
+	}()
+	if werr != nil {
+		f.Close()
+		os.Remove(tmp)
+		return werr
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return err
 	}
 	return nil
 }

@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	"golang.org/x/sys/unix"
@@ -30,6 +31,7 @@ import (
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1/devicev1connect"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
+	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -39,6 +41,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   status
   node name [NAME | ""]                     show, set or remove the node's name, which clients show
                                             with its address (at most 48 characters)
+  node note [TEXT | ""]                     show, set or remove the note clients show their users (200 characters, one line)
   user list
   user add [NAME] [-services a,b] [-expires 2026-12-31|30d] [-limit 50G] [-note TEXT]
                                             without NAME: an opaque handle such as u-k3f9-x2qa
@@ -51,6 +54,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service enable|disable|del NAME
   service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false;
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
+                                            naive: icmp=on|off (ping and traceroute through it, then
+                                            rayctl apply);
                                             yggdrasil: peers=URI,URI|none (public peers, then rayctl apply);
                                             dnstt, masterdns: auth=, auth_hint=, seal=off|optional|required
                                             (auth_hint: dnsauth-v2 tags; required needs auth=required),
@@ -96,6 +101,10 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             (spec/app-update-v1.md; off by default)
   debug [show] | on [-for 30m] | off        the debug window: rayd, rayspa and niko-server log at debug
                                             level (client addresses too) until it closes by itself; root
+  egress [show]                             the node's egress policy on every profile, whether it is in
+                                            force and (root) what it blocked
+  egress block|allow bittorrent|smtp        block or allow BitTorrent, or SMTP (TCP 25), on every
+                                            profile (spec/egress-policy-v1.md; root, on the node)
 
   check [-host ADDR] [-domain D] [-services a,b]
                                               whether this host can run a node: what is required (install
@@ -145,8 +154,11 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
 var version = "dev"
 
 type cli struct {
-	c    nodev1connect.NodeServiceClient
-	json bool
+	c nodev1connect.NodeServiceClient
+	// backupClient is c for Backup, whose answer is the whole database
+	// (nil: c).
+	backupClient nodev1connect.NodeServiceClient
+	json         bool
 	// With -remote: the device and its DeviceService client.
 	identity *remoteIdentity
 	dev      devicev1connect.DeviceServiceClient
@@ -169,7 +181,7 @@ func main() {
 	if os.Geteuid() == 0 {
 		syscall.Umask(0o022)
 	}
-	c := &cli{c: api.NewUnixClient(*socket), json: *asJSON}
+	c := &cli{c: api.NewUnixClient(*socket), backupClient: api.NewUnixBackupClient(*socket), json: *asJSON}
 	// An update downloads ~50 MB, maybe through slow mirrors; its restart
 	// and rollback have their own time (Q-2).
 	timeout := 5 * time.Minute
@@ -180,12 +192,12 @@ func main() {
 	defer cancel()
 	if *remote != "" && (fs.Arg(0) != "remote" || fs.Arg(1) != "enroll") {
 		if err := c.useRemote(ctx, *remote, fs.Arg(0)); err != nil {
-			fmt.Fprintln(os.Stderr, "rayctl:", err)
+			fmt.Fprintln(os.Stderr, "rayctl:", printableError(err))
 			os.Exit(1)
 		}
 	}
 	if err := c.run(ctx, fs.Args()); err != nil {
-		fmt.Fprintln(os.Stderr, "rayctl:", err)
+		fmt.Fprintln(os.Stderr, "rayctl:", printableError(err))
 		if errors.Is(err, errUsage) {
 			fmt.Fprint(os.Stderr, usageText)
 			os.Exit(2)
@@ -195,6 +207,29 @@ func main() {
 }
 
 var errUsage = errors.New("bad usage")
+
+// maxErrorText bounds an error as rayctl prints it.
+const maxErrorText = 512
+
+// printableError is err's text as rayctl prints it: a node's answers, a
+// remote node's, files and names reach it, so nothing a terminal acts on
+// (nodeupdate.Printable, line by line: rayctl's own errors may have
+// several), and maxErrorText bytes at most (second review, A).
+func printableError(err error) string {
+	lines := strings.Split(err.Error(), "\n")
+	for i, l := range lines {
+		lines[i] = nodeupdate.Printable(l)
+	}
+	s := strings.Join(lines, "\n")
+	if len(s) <= maxErrorText {
+		return s
+	}
+	n := maxErrorText
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
+}
 
 func need(args []string, n int) error {
 	if len(args) < n {
@@ -248,6 +283,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.appMirror(ctx, sub)
 	case "debug":
 		return c.debug(ctx, sub, rest)
+	case "egress":
+		return c.egress(ctx, args[1:])
 	case "remote":
 		return c.remoteCmd(ctx, sub, rest)
 	case "backup":
@@ -302,6 +339,9 @@ func (c *cli) status(ctx context.Context) error {
 		if m.DebugUntil != 0 {
 			fmt.Fprintf(w, "debug\topen until %s (rayctl debug off)\n", clock(m.DebugUntil))
 		}
+		if m.Egress != nil {
+			fmt.Fprintf(w, "egress\t%s\n", egressLine(m.Egress))
+		}
 		// rayd's loops: the last round of each (O-2).
 		for _, l := range m.Loops {
 			fmt.Fprintf(w, "%s\t%s\n", l.Name, loopState(l, time.Now()))
@@ -312,6 +352,9 @@ func (c *cli) status(ctx context.Context) error {
 // nodeCmd: rayctl node name [NAME]. Without NAME it shows the name; ""
 // removes it.
 func (c *cli) nodeCmd(ctx context.Context, sub string, args []string) error {
+	if sub == "note" && len(args) <= 1 {
+		return c.nodeNote(ctx, args)
+	}
 	if sub != "name" || len(args) > 1 {
 		return errUsage
 	}
@@ -338,6 +381,36 @@ func (c *cli) nodeCmd(ctx context.Context, sub string, args []string) error {
 			return
 		}
 		fmt.Fprintf(w, "the node is %q now; clients show it from their next subscription\n", r.Msg.Name)
+	})
+}
+
+// nodeNote: rayctl node note [TEXT]. The note goes on a line of its own,
+// never into a table: wide characters and emoji would push columns apart.
+func (c *cli) nodeNote(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		r, err := c.c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
+		if err != nil {
+			return err
+		}
+		return c.print(&nodev1.SetNodeNoteResponse{Note: r.Msg.Note}, func(w *tabwriter.Writer) {
+			if r.Msg.Note == "" {
+				fmt.Fprintln(w, "no note (rayctl node note TEXT)")
+				return
+			}
+			fmt.Fprintln(w, r.Msg.Note)
+		})
+	}
+	r, err := c.c.SetNodeNote(ctx, connect.NewRequest(&nodev1.SetNodeNoteRequest{Note: args[0]}))
+	if err != nil {
+		return err
+	}
+	return c.print(r.Msg, func(w *tabwriter.Writer) {
+		if r.Msg.Note == "" {
+			fmt.Fprintln(w, "the node has no note now; clients drop it from their next subscription")
+			return
+		}
+		fmt.Fprintln(w, "clients show this from their next subscription:")
+		fmt.Fprintln(w, r.Msg.Note)
 	})
 }
 
@@ -558,6 +631,11 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 				fmt.Fprintln(w, "run rayctl apply to restart the site with it")
 			case "yggdrasil":
 				fmt.Fprintln(w, "run rayctl apply: the unit gets network access with public peers, and loses it without")
+			case "naive":
+				if key == "icmp" {
+					fmt.Fprintln(w, "run rayctl apply: naive restarts with ICMP "+value+" (with it on, apply lets its group open ICMP sockets);\n"+
+						"until then clients that see icmp=1 in the link get their ICMP streams reset")
+				}
 			}
 		})
 	case "cert":

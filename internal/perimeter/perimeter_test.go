@@ -44,7 +44,8 @@ type fakeFW struct {
 	failAllow  int            // the Allow call that fails (1-based), 0: none
 	denies     int            // Deny calls
 	failing    map[string]int // SetPublic, SetRelays, SetForward, SetACME calls still to fail
-	calls      []string       // Setup, SetAdmin, SetRelays, Allow, SetSPAPorts, in order
+	calls      []string       // Setup, SetAdmin, SetRelays, Allow, SetSPAPorts, SetEgress, in order
+	egress     *Egress        // the egress policy in force; nil: none, as in a new table
 }
 
 func (f *fakeFW) SetACME(port uint16, ttl time.Duration) error {
@@ -68,7 +69,7 @@ func (f *fakeFW) Setup() error {
 	f.calls = append(f.calls, "Setup")
 	// A new table: nothing of the old one, grants included.
 	f.udp, f.tcp, f.public, f.admin, f.adminPorts, f.rot, f.open = nil, nil, nil, nil, nil, nil, nil
-	f.relays, f.relayPorts, f.forward = nil, nil, nil
+	f.relays, f.relayPorts, f.forward, f.egress = nil, nil, nil, nil
 	return nil
 }
 func (f *fakeFW) Present() (bool, error) {
@@ -83,10 +84,20 @@ func (f *fakeFW) flush() {
 	defer f.mu.Unlock()
 	f.gone = true
 	f.udp, f.tcp, f.public, f.admin, f.adminPorts, f.rot, f.open = nil, nil, nil, nil, nil, nil, nil
-	f.relays, f.relayPorts, f.forward = nil, nil, nil
+	f.relays, f.relayPorts, f.forward, f.egress = nil, nil, nil, nil
 	f.acmePort, f.acmeTTL = 0, 0
 }
 func (f *fakeFW) Teardown() error { return nil }
+func (f *fakeFW) SetEgress(e Egress) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "SetEgress")
+	if f.fails("SetEgress") {
+		return errors.New("nft: Operation not supported")
+	}
+	f.egress = &e
+	return nil
+}
 func (f *fakeFW) SetSPAPorts(udp, tcp []uint16) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -102,6 +102,9 @@ func main() {
 		err = cmdNaive(os.Args[2:])
 	case "relay":
 		err = cmdRelay(os.Args[2:])
+	case deploy.CredentialCommand:
+		// Not in the usage: systemd runs it, as root, from the units.
+		err = cmdCredential(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:
@@ -322,7 +325,7 @@ func cmdServe(args []string) error {
 		f := &release.Fetcher{}
 		latest := func(ctx context.Context) (string, error) { return f.Latest(ctx, release.PubKey) }
 		a := &autoUpdater{st: st, running: version, latest: latest, seen: &latestSeen, request: nodeupdate.RequestFile,
-			status: nodeupdate.StatusFile, policy: nodeupdate.PolicyFile, now: time.Now, tick: 10 * time.Minute, hb: hb, log: log}
+			status: nodeupdate.StatusFile, policy: nodeupdate.PolicyFile, now: nodeupdate.LocalNow, tick: 10 * time.Minute, hb: hb, log: log}
 		go a.run(ctx)
 	}
 	frontUID := render.FrontUID
@@ -373,7 +376,7 @@ func supervisor(paths render.Paths, bins deploy.Binaries, st *store.Store, log *
 			return deploy.Plan{}, err
 		}
 		// The applier reports the broken services; the rest runs (Q-1).
-		return deploy.Build(m, files, paths, bins), nil
+		return deploy.Build(deploy.InputsOf(m, files, paths), paths, bins), nil
 	}}, nil
 }
 
@@ -1246,6 +1249,8 @@ func cmdNaive(args []string) error {
 	quicSocket := fs.String("quic-socket", "", "SOCK_SEQPACKET socket the front sends QUIC datagrams to (naive-quic; IPC mode packet)")
 	frontUID := fs.Int("front-uid", render.FrontUID, "UID of the niko-server front, the only peer accepted")
 	probeAddr := fs.String("probe", "", "where the probe name leads (the subscription endpoint on loopback, R4-16)")
+	icmp := fs.Bool("icmp", false, "carry ping and traceroute through "+naive.ICMPName+" (spec/icmp-v1.md): echoes from ICMP datagram sockets, "+
+		"which need the process's group in net.ipv4.ping_group_range")
 	fs.Parse(args)
 	if *users == "" || *chain == "" || *key == "" || *socket == "" {
 		return errors.New("naive needs -users, -chain, -key and -socket")
@@ -1269,7 +1274,7 @@ func cmdNaive(args []string) error {
 		return err
 	}
 	naive.SetResolverLog(log)
-	ns := &naive.Server{Users: &naive.Users{Path: *users}, Answer: handler, Log: log}
+	ns := &naive.Server{Users: &naive.Users{Path: *users}, Answer: handler, ICMP: *icmp, Log: log}
 	// Channel probes through the tunnel (R4-16): the probe name, and only
 	// it, leads to the endpoint; the rest to public addresses.
 	ns.Probe = *probeAddr
@@ -1297,7 +1302,7 @@ func cmdNaive(args []string) error {
 		<-ctx.Done()
 		_ = srv.Close()
 	}()
-	log.Info("serving naive", "socket", *socket, "answer", *answer)
+	log.Info("serving naive", "socket", *socket, "answer", *answer, "icmp", *icmp)
 	if err := srv.ServeTLS(ln, "", ""); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

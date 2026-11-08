@@ -140,9 +140,18 @@ const (
 	NodeServiceSetDebugProcedure = "/raycontrol.node.v1.NodeService/SetDebug"
 	// NodeServiceSetNodeNameProcedure is the fully-qualified name of the NodeService's SetNodeName RPC.
 	NodeServiceSetNodeNameProcedure = "/raycontrol.node.v1.NodeService/SetNodeName"
+	// NodeServiceSetNodeNoteProcedure is the fully-qualified name of the NodeService's SetNodeNote RPC.
+	NodeServiceSetNodeNoteProcedure = "/raycontrol.node.v1.NodeService/SetNodeNote"
+	// NodeServiceGetEgressProcedure is the fully-qualified name of the NodeService's GetEgress RPC.
+	NodeServiceGetEgressProcedure = "/raycontrol.node.v1.NodeService/GetEgress"
+	// NodeServiceSetEgressProcedure is the fully-qualified name of the NodeService's SetEgress RPC.
+	NodeServiceSetEgressProcedure = "/raycontrol.node.v1.NodeService/SetEgress"
 	// NodeServiceGetDeploymentProcedure is the fully-qualified name of the NodeService's GetDeployment
 	// RPC.
 	NodeServiceGetDeploymentProcedure = "/raycontrol.node.v1.NodeService/GetDeployment"
+	// NodeServiceGetDeployInputsProcedure is the fully-qualified name of the NodeService's
+	// GetDeployInputs RPC.
+	NodeServiceGetDeployInputsProcedure = "/raycontrol.node.v1.NodeService/GetDeployInputs"
 )
 
 // NodeServiceClient is a client for the raycontrol.node.v1.NodeService service.
@@ -253,9 +262,26 @@ type NodeServiceClient interface {
 	// SetNodeName names the node, or takes its name away with "": clients
 	// show it with the node's address (subscription-v1 §3, field name).
 	SetNodeName(context.Context, *connect.Request[v1.SetNodeNameRequest]) (*connect.Response[v1.SetNodeNameResponse], error)
-	// GetDeployment returns what root must install for the current services:
-	// system users, unit files and other files. rayctl apply writes them.
+	// SetNodeNote sets the node's note for its users, or takes it away with
+	// "": clients show it with the node (subscription-v1 §3, field note).
+	SetNodeNote(context.Context, *connect.Request[v1.SetNodeNoteRequest]) (*connect.Response[v1.SetNodeNoteResponse], error)
+	// GetEgress returns the node's egress policy (spec/egress-policy-v1.md):
+	// what the data plane may not send, on every profile. On the node's
+	// socket only.
+	GetEgress(context.Context, *connect.Request[v1.GetEgressRequest]) (*connect.Response[v1.GetEgressResponse], error)
+	// SetEgress blocks or allows BitTorrent and SMTP (TCP 25); rayspa applies
+	// it within a second or two. Root on the node only.
+	SetEgress(context.Context, *connect.Request[v1.SetEgressRequest]) (*connect.Response[v1.SetEgressResponse], error)
+	// GetDeployment returns the deployment rayd builds for the current
+	// services: system users, unit files and other files. rayctl before
+	// v0.21.0 installs it as it is; rayctl since builds its own from
+	// GetDeployInputs and takes nothing from here. Root on the node only.
 	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
+	// GetDeployInputs returns what root builds the deployment from
+	// (docs/spec/apply-plan-v1.md §3.3): the services and the node's facts,
+	// which rayctl apply checks before it builds anything. No keys, no file
+	// contents. Root on the node only.
+	GetDeployInputs(context.Context, *connect.Request[v1.GetDeployInputsRequest]) (*connect.Response[v1.GetDeployInputsResponse], error)
 }
 
 // NewNodeServiceClient constructs a client for the raycontrol.node.v1.NodeService service. By
@@ -515,10 +541,34 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("SetNodeName")),
 			connect.WithClientOptions(opts...),
 		),
+		setNodeNote: connect.NewClient[v1.SetNodeNoteRequest, v1.SetNodeNoteResponse](
+			httpClient,
+			baseURL+NodeServiceSetNodeNoteProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetNodeNote")),
+			connect.WithClientOptions(opts...),
+		),
+		getEgress: connect.NewClient[v1.GetEgressRequest, v1.GetEgressResponse](
+			httpClient,
+			baseURL+NodeServiceGetEgressProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetEgress")),
+			connect.WithClientOptions(opts...),
+		),
+		setEgress: connect.NewClient[v1.SetEgressRequest, v1.SetEgressResponse](
+			httpClient,
+			baseURL+NodeServiceSetEgressProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetEgress")),
+			connect.WithClientOptions(opts...),
+		),
 		getDeployment: connect.NewClient[v1.GetDeploymentRequest, v1.GetDeploymentResponse](
 			httpClient,
 			baseURL+NodeServiceGetDeploymentProcedure,
 			connect.WithSchema(nodeServiceMethods.ByName("GetDeployment")),
+			connect.WithClientOptions(opts...),
+		),
+		getDeployInputs: connect.NewClient[v1.GetDeployInputsRequest, v1.GetDeployInputsResponse](
+			httpClient,
+			baseURL+NodeServiceGetDeployInputsProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetDeployInputs")),
 			connect.WithClientOptions(opts...),
 		),
 	}
@@ -567,7 +617,11 @@ type nodeServiceClient struct {
 	getUpdateStatus   *connect.Client[v1.GetUpdateStatusRequest, v1.GetUpdateStatusResponse]
 	setDebug          *connect.Client[v1.SetDebugRequest, v1.SetDebugResponse]
 	setNodeName       *connect.Client[v1.SetNodeNameRequest, v1.SetNodeNameResponse]
+	setNodeNote       *connect.Client[v1.SetNodeNoteRequest, v1.SetNodeNoteResponse]
+	getEgress         *connect.Client[v1.GetEgressRequest, v1.GetEgressResponse]
+	setEgress         *connect.Client[v1.SetEgressRequest, v1.SetEgressResponse]
 	getDeployment     *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
+	getDeployInputs   *connect.Client[v1.GetDeployInputsRequest, v1.GetDeployInputsResponse]
 }
 
 // GetStatus calls raycontrol.node.v1.NodeService.GetStatus.
@@ -775,9 +829,29 @@ func (c *nodeServiceClient) SetNodeName(ctx context.Context, req *connect.Reques
 	return c.setNodeName.CallUnary(ctx, req)
 }
 
+// SetNodeNote calls raycontrol.node.v1.NodeService.SetNodeNote.
+func (c *nodeServiceClient) SetNodeNote(ctx context.Context, req *connect.Request[v1.SetNodeNoteRequest]) (*connect.Response[v1.SetNodeNoteResponse], error) {
+	return c.setNodeNote.CallUnary(ctx, req)
+}
+
+// GetEgress calls raycontrol.node.v1.NodeService.GetEgress.
+func (c *nodeServiceClient) GetEgress(ctx context.Context, req *connect.Request[v1.GetEgressRequest]) (*connect.Response[v1.GetEgressResponse], error) {
+	return c.getEgress.CallUnary(ctx, req)
+}
+
+// SetEgress calls raycontrol.node.v1.NodeService.SetEgress.
+func (c *nodeServiceClient) SetEgress(ctx context.Context, req *connect.Request[v1.SetEgressRequest]) (*connect.Response[v1.SetEgressResponse], error) {
+	return c.setEgress.CallUnary(ctx, req)
+}
+
 // GetDeployment calls raycontrol.node.v1.NodeService.GetDeployment.
 func (c *nodeServiceClient) GetDeployment(ctx context.Context, req *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {
 	return c.getDeployment.CallUnary(ctx, req)
+}
+
+// GetDeployInputs calls raycontrol.node.v1.NodeService.GetDeployInputs.
+func (c *nodeServiceClient) GetDeployInputs(ctx context.Context, req *connect.Request[v1.GetDeployInputsRequest]) (*connect.Response[v1.GetDeployInputsResponse], error) {
+	return c.getDeployInputs.CallUnary(ctx, req)
 }
 
 // NodeServiceHandler is an implementation of the raycontrol.node.v1.NodeService service.
@@ -888,9 +962,26 @@ type NodeServiceHandler interface {
 	// SetNodeName names the node, or takes its name away with "": clients
 	// show it with the node's address (subscription-v1 §3, field name).
 	SetNodeName(context.Context, *connect.Request[v1.SetNodeNameRequest]) (*connect.Response[v1.SetNodeNameResponse], error)
-	// GetDeployment returns what root must install for the current services:
-	// system users, unit files and other files. rayctl apply writes them.
+	// SetNodeNote sets the node's note for its users, or takes it away with
+	// "": clients show it with the node (subscription-v1 §3, field note).
+	SetNodeNote(context.Context, *connect.Request[v1.SetNodeNoteRequest]) (*connect.Response[v1.SetNodeNoteResponse], error)
+	// GetEgress returns the node's egress policy (spec/egress-policy-v1.md):
+	// what the data plane may not send, on every profile. On the node's
+	// socket only.
+	GetEgress(context.Context, *connect.Request[v1.GetEgressRequest]) (*connect.Response[v1.GetEgressResponse], error)
+	// SetEgress blocks or allows BitTorrent and SMTP (TCP 25); rayspa applies
+	// it within a second or two. Root on the node only.
+	SetEgress(context.Context, *connect.Request[v1.SetEgressRequest]) (*connect.Response[v1.SetEgressResponse], error)
+	// GetDeployment returns the deployment rayd builds for the current
+	// services: system users, unit files and other files. rayctl before
+	// v0.21.0 installs it as it is; rayctl since builds its own from
+	// GetDeployInputs and takes nothing from here. Root on the node only.
 	GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error)
+	// GetDeployInputs returns what root builds the deployment from
+	// (docs/spec/apply-plan-v1.md §3.3): the services and the node's facts,
+	// which rayctl apply checks before it builds anything. No keys, no file
+	// contents. Root on the node only.
+	GetDeployInputs(context.Context, *connect.Request[v1.GetDeployInputsRequest]) (*connect.Response[v1.GetDeployInputsResponse], error)
 }
 
 // NewNodeServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -1146,10 +1237,34 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("SetNodeName")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceSetNodeNoteHandler := connect.NewUnaryHandler(
+		NodeServiceSetNodeNoteProcedure,
+		svc.SetNodeNote,
+		connect.WithSchema(nodeServiceMethods.ByName("SetNodeNote")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceGetEgressHandler := connect.NewUnaryHandler(
+		NodeServiceGetEgressProcedure,
+		svc.GetEgress,
+		connect.WithSchema(nodeServiceMethods.ByName("GetEgress")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceSetEgressHandler := connect.NewUnaryHandler(
+		NodeServiceSetEgressProcedure,
+		svc.SetEgress,
+		connect.WithSchema(nodeServiceMethods.ByName("SetEgress")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceGetDeploymentHandler := connect.NewUnaryHandler(
 		NodeServiceGetDeploymentProcedure,
 		svc.GetDeployment,
 		connect.WithSchema(nodeServiceMethods.ByName("GetDeployment")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceGetDeployInputsHandler := connect.NewUnaryHandler(
+		NodeServiceGetDeployInputsProcedure,
+		svc.GetDeployInputs,
+		connect.WithSchema(nodeServiceMethods.ByName("GetDeployInputs")),
 		connect.WithHandlerOptions(opts...),
 	)
 	return "/raycontrol.node.v1.NodeService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1236,8 +1351,16 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceSetDebugHandler.ServeHTTP(w, r)
 		case NodeServiceSetNodeNameProcedure:
 			nodeServiceSetNodeNameHandler.ServeHTTP(w, r)
+		case NodeServiceSetNodeNoteProcedure:
+			nodeServiceSetNodeNoteHandler.ServeHTTP(w, r)
+		case NodeServiceGetEgressProcedure:
+			nodeServiceGetEgressHandler.ServeHTTP(w, r)
+		case NodeServiceSetEgressProcedure:
+			nodeServiceSetEgressHandler.ServeHTTP(w, r)
 		case NodeServiceGetDeploymentProcedure:
 			nodeServiceGetDeploymentHandler.ServeHTTP(w, r)
+		case NodeServiceGetDeployInputsProcedure:
+			nodeServiceGetDeployInputsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1411,6 +1534,22 @@ func (UnimplementedNodeServiceHandler) SetNodeName(context.Context, *connect.Req
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetNodeName is not implemented"))
 }
 
+func (UnimplementedNodeServiceHandler) SetNodeNote(context.Context, *connect.Request[v1.SetNodeNoteRequest]) (*connect.Response[v1.SetNodeNoteResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetNodeNote is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetEgress(context.Context, *connect.Request[v1.GetEgressRequest]) (*connect.Response[v1.GetEgressResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetEgress is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetEgress(context.Context, *connect.Request[v1.SetEgressRequest]) (*connect.Response[v1.SetEgressResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetEgress is not implemented"))
+}
+
 func (UnimplementedNodeServiceHandler) GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetDeployment is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetDeployInputs(context.Context, *connect.Request[v1.GetDeployInputsRequest]) (*connect.Response[v1.GetDeployInputsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetDeployInputs is not implemented"))
 }

@@ -182,13 +182,33 @@ type Service struct {
 // processNameRE keeps "niko-<name>" a valid system user name (32 chars).
 var processNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,26}$`)
 
+// CheckServiceName checks the name of a service as CreateService does.
+func CheckServiceName(name string) error { return checkName("service", name) }
+
+// CheckProcessName checks the name of a service with a process of its own
+// (HasProcess) as CreateService does. The name goes into its user, its
+// unit and its runtime directories: rayctl apply checks the services rayd
+// reports with it too (spec/apply-plan-v1.md).
+func CheckProcessName(name string) error {
+	if !processNameRE.MatchString(name) {
+		return fmt.Errorf("%w service name %q: services with a process need 1-27 of a-z 0-9 -", ErrInvalid, name)
+	}
+	// A process's runtime directories are <name>, <name>-in (what the front
+	// passes) and <name>-api (Xray's API), its user niko-<name>: "x-in"
+	// would take x's, "front" the front's.
+	if name == "front" || strings.HasSuffix(name, "-in") || strings.HasSuffix(name, "-api") {
+		return fmt.Errorf("%w service name %q: front and names ending in -in or -api are taken", ErrInvalid, name)
+	}
+	return nil
+}
+
 // CreateService inserts svc. IDs are never reused: clients refer to them
 // in SPA scopes, so a deleted ID must not start meaning another service.
 func (s *Store) CreateService(ctx context.Context, svc Service) (Service, error) {
 	if !slices.Contains(ServiceKinds, svc.Kind) {
 		return svc, fmt.Errorf("%w service kind %q", ErrInvalid, svc.Kind)
 	}
-	if err := checkName("service", svc.Name); err != nil {
+	if err := CheckServiceName(svc.Name); err != nil {
 		return svc, err
 	}
 	if svc.Settings == "" {
@@ -197,14 +217,10 @@ func (s *Store) CreateService(ctx context.Context, svc Service) (Service, error)
 	if _, err := svc.Ports(); err != nil {
 		return svc, err
 	}
-	if HasProcess(svc.Kind) && !processNameRE.MatchString(svc.Name) {
-		return svc, fmt.Errorf("%w service name %q: services with a process need 1-27 of a-z 0-9 -", ErrInvalid, svc.Name)
-	}
-	// A process's runtime directories are <name>, <name>-in (what the front
-	// passes) and <name>-api (Xray's API), its user niko-<name>: "x-in"
-	// would take x's, "front" the front's.
-	if HasProcess(svc.Kind) && (svc.Name == "front" || strings.HasSuffix(svc.Name, "-in") || strings.HasSuffix(svc.Name, "-api")) {
-		return svc, fmt.Errorf("%w service name %q: front and names ending in -in or -api are taken", ErrInvalid, svc.Name)
+	if HasProcess(svc.Kind) {
+		if err := CheckProcessName(svc.Name); err != nil {
+			return svc, err
+		}
 	}
 	svc.CreatedAt = s.now().Truncate(time.Second)
 	err := s.tx(ctx, func(tx *sql.Tx) error {

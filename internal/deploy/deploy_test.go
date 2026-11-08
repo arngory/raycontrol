@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -21,7 +22,13 @@ import (
 func plan(t *testing.T) (deploy.Plan, render.Model) {
 	t.Helper()
 	m, files := plan2(t, render.DefaultPaths)
-	return deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries), m
+	return build(m, files, render.DefaultPaths), m
+}
+
+// build is the plan for a rendered model, from its inputs as rayd reports
+// them.
+func build(m render.Model, files []render.File, p render.Paths) deploy.Plan {
+	return deploy.Build(deploy.InputsOf(m, files, p), p, deploy.DefaultBinaries)
 }
 
 // plan2 renders the test node's services for the paths.
@@ -117,7 +124,7 @@ func TestBuild(t *testing.T) {
 	dns := file(p, "/etc/systemd/system/niko-dns.service")
 	for _, want := range []string{
 		"User=niko-dns", "SupplementaryGroups=niko-inner", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX\n",
-		"ExecStartPre=+install -m 0400 -o niko-dns -g niko-dns /var/lib/raycontrol/rendered/dns/noise.key /run/niko/dns/noise.key\n", "RuntimeDirectory=niko/dns", "CapabilityBoundingSet=\n",
+		"ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/dns/noise.key rayd niko-dns /run/niko/dns/noise.key\n", "RuntimeDirectory=niko/dns", "CapabilityBoundingSet=\n",
 		"ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c /var/lib/raycontrol/rendered/dns/backend.json",
 		"InaccessiblePaths=-/var/lib/raycontrol/rendered/inner\n",
 	} {
@@ -129,7 +136,7 @@ func TestBuild(t *testing.T) {
 	if !strings.Contains(front, "AmbientCapabilities=CAP_NET_BIND_SERVICE") || strings.Contains(front, "SupplementaryGroups") ||
 		!strings.Contains(front, "After=network-online.target niko-dns.service niko-reality.service") ||
 		// dnsprobe-v1: the key copied in by root, for the front alone.
-		!strings.Contains(front, "ExecStartPre=+install -m 0400 -o niko-front -g niko-front /var/lib/raycontrol/rendered/front/dnsprobe.key /run/niko/front/dnsprobe.key") {
+		!strings.Contains(front, "ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/front/dnsprobe.key rayd niko-front /run/niko/front/dnsprobe.key\n") {
 		t.Errorf("front unit:\n%s", front)
 	}
 	if !strings.Contains(file(p, "/etc/systemd/system/rayspa.service"), "AmbientCapabilities=CAP_NET_ADMIN") {
@@ -166,7 +173,7 @@ func TestBuild(t *testing.T) {
 	// Paths outside /run stay where they are.
 	other := render.Paths{Rendered: "/tmp/r", Run: "/tmp/run"}
 	m, files := plan2(t, other)
-	q := deploy.Build(m, files, other, deploy.DefaultBinaries)
+	q := build(m, files, other)
 	if q.Processes[0].Dir != "/tmp/run/inner" || !slices.Contains(q.Dirs, "/tmp/run/inner-api") {
 		t.Errorf("inner process %+v, dirs %v", q.Processes[0], q.Dirs)
 	}
@@ -376,7 +383,7 @@ func TestBuildSelfSteal(t *testing.T) {
 	if len(skipped) != 2 {
 		t.Fatalf("skipped %v", skipped)
 	}
-	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	p := build(m, files, render.DefaultPaths)
 	if p.FrontDNS {
 		t.Error("the front answers DNS on a node without DNS tunnels")
 	}
@@ -388,7 +395,7 @@ func TestBuildSelfSteal(t *testing.T) {
 	site := file(p, "/etc/systemd/system/niko-site.service")
 	for _, want := range []string{
 		"ConditionPathExists=/var/lib/raycontrol/rendered/site/chain.pem\n",
-		"ExecStartPre=+install -m 0400 -o niko-site -g niko-site /var/lib/raycontrol/rendered/site/key.pem /run/niko/site/key.pem\n",
+		"ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/site/key.pem rayd niko-site /run/niko/site/key.pem\n",
 		// The default answer: 404 to everything, no content directory (R4-8).
 		"ExecStart=/usr/local/bin/rayd site -answer 404 -chain /var/lib/raycontrol/rendered/site/chain.pem -key /run/niko/site/key.pem -socket /run/niko/site/tls.sock\n",
 		"PrivateNetwork=yes\n", "RestrictAddressFamilies=AF_UNIX\n",
@@ -667,13 +674,13 @@ func TestBuildHysteria(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	p := build(m, files, render.DefaultPaths)
 	masq, obfs := file(p, "/etc/systemd/system/niko-hy2-masq.service"), file(p, "/etc/systemd/system/niko-hy2-obfs.service")
 	// niko-server backends behind the UDP front (R3-4): no capability, the
 	// key (and salamander) copied in by root, out to public addresses only.
 	for name, u := range map[string]string{"masq": masq, "obfs": obfs} {
 		for _, want := range []string{"ExecStart=/usr/local/libexec/raycontrol/niko-server backend -c /var/lib/raycontrol/rendered/hy2-",
-			"ExecStartPre=+install -m 0400 -o niko-hy2-", "CapabilityBoundingSet=\n", "IPAddressDeny=localhost",
+			"ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/hy2-", "CapabilityBoundingSet=\n", "IPAddressDeny=localhost",
 			// The host's resolver, when it is systemd-resolved's stub.
 			"IPAddressAllow=127.0.0.53 127.0.0.54\n"} {
 			if !strings.Contains(u, want) {
@@ -692,7 +699,7 @@ func TestBuildHysteria(t *testing.T) {
 		t.Errorf("the front is in the backends' groups (S-1):\n%s", front)
 	}
 	for _, want := range []string{
-		"ExecStartPre=+install -m 0400 -o niko-front -g niko-front /var/lib/raycontrol/rendered/front/hy2-obfs.salamander /run/niko/front/hy2-obfs.salamander",
+		"ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/front/hy2-obfs.salamander rayd niko-front /run/niko/front/hy2-obfs.salamander\n",
 		"RuntimeDirectory=niko/front\n", "AmbientCapabilities=CAP_NET_BIND_SERVICE"} {
 		if !strings.Contains(front, want) {
 			t.Errorf("front unit lacks %q:\n%s", want, front)
@@ -721,11 +728,11 @@ func TestBuildNaive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	p := build(m, files, render.DefaultPaths)
 	u := file(p, "/etc/systemd/system/niko-naive.service")
 	for _, want := range []string{
 		"ExecStart=/usr/local/bin/rayd naive -answer 404 -users /var/lib/raycontrol/rendered/naive/users.json",
-		"-socket /run/niko/naive-in/naive.sock", "ExecStartPre=+install -m 0400 -o niko-naive",
+		"-socket /run/niko/naive-in/naive.sock", "ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/naive/",
 		"IPAddressDeny=localhost link-local multicast 10.0.0.0/8", "CapabilityBoundingSet=\n",
 	} {
 		if !strings.Contains(u, want) {
@@ -737,6 +744,150 @@ func TestBuildNaive(t *testing.T) {
 	}
 	if len(p.Warnings) != 0 {
 		t.Errorf("warnings %v", p.Warnings)
+	}
+	// ICMP (spec/icmp-v1.md): off unless set; on, naive gets -icmp and
+	// apply the ping groups.
+	if strings.Contains(u, "-icmp") || p.ICMP {
+		t.Errorf("ICMP on by default:\n%s", u)
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "naive", "icmp", "on"); err != nil {
+		t.Fatal(err)
+	}
+	if m, err = render.CollectForRender(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	p = build(m, files, render.DefaultPaths)
+	if u := file(p, "/etc/systemd/system/niko-naive.service"); !strings.Contains(u, " -icmp\n") || !p.ICMP ||
+		!strings.Contains(u, "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n") {
+		t.Errorf("ICMP on: plan %v, unit\n%s", p.ICMP, u)
+	}
+}
+
+// The ping groups hold the data plane's (render.FrontUID to
+// store.LastServiceUID); a range without them is widened, never narrowed;
+// what does not read as a range tells nothing.
+func TestPingGroups(t *testing.T) {
+	first, last := render.FrontUID, store.LastServiceUID
+	for value, want := range map[string]string{
+		"0 2147483647": "", "100 10000": "", fmt.Sprintf("%d %d", first, last): "",
+		"1 0": "9100 9179", "1\t0": "9100 9179",
+		"0 0": "0 9179", "9101 9179": "9100 9179", "9100 9178": "9100 9179", "10000 20000": "9100 20000",
+	} {
+		wide, ok, err := deploy.PingGroups(value)
+		if err != nil || ok != (want == "") || (want != "" && wide != want) {
+			t.Errorf("%q: %q %v %v, want %q", value, wide, ok, err, want)
+		}
+	}
+	for _, value := range []string{"", "x y", "1", "1 2 3", "0 x", "-"} {
+		if wide, ok, err := deploy.PingGroups(value); err == nil || ok || wide != "" {
+			t.Errorf("%q: %q %v %v, want nothing told", value, wide, ok, err)
+		}
+	}
+	if _, ok, _ := deploy.PingGroups(fmt.Sprintf("%d %d", first+1, last)); ok {
+		t.Error("the front's group left out")
+	}
+	if _, ok, _ := deploy.PingGroups(fmt.Sprintf("%d %d", first, last-1)); ok {
+		t.Error("the last service's group left out")
+	}
+	// The file sorts before the distribution's and the administrator's:
+	// theirs win at boot.
+	if name := filepath.Base(deploy.PingSysctl); name >= "50-default.conf" || name >= "90-raycontrol.conf" || filepath.Dir(deploy.PingSysctl) != "/etc/sysctl.d" {
+		t.Errorf("%s sorts after others", deploy.PingSysctl)
+	}
+}
+
+// apply with naive's ICMP on: the range widened in a file of its own and
+// loaded, the old value kept for uninstall; a range that holds the groups
+// left alone; a warning where the host does not let it change.
+func TestApplyPingGroups(t *testing.T) {
+	for _, c := range []struct {
+		before, after string
+		locked        bool // a container: the value does not change
+	}{
+		{"1 0", "9100 9179", false},
+		{"0 0", "0 9179", false},
+		{"0 2147483647", "", false},
+		{"1 0", "9100 9179", true},
+		{"garbled", "?", false}, // nothing told: a warning, nothing written
+	} {
+		root := t.TempDir()
+		value := c.before
+		var out bytes.Buffer
+		var cmds []string
+		h := &deploy.Host{Root: root, Out: &out,
+			Run: func(name string, args ...string) ([]byte, error) {
+				cmd := name + " " + strings.Join(args, " ")
+				cmds = append(cmds, cmd)
+				switch {
+				case cmd == "sysctl -n "+deploy.PingGroupRange:
+					return []byte(strings.ReplaceAll(value, " ", "\t") + "\n"), nil
+				case cmd == "sysctl -q -e -p "+deploy.PingSysctl && !c.locked:
+					b, _ := os.ReadFile(filepath.Join(root, deploy.PingSysctl))
+					for _, l := range strings.Split(string(b), "\n") {
+						if v, ok := strings.CutPrefix(l, deploy.PingGroupRange+" = "); ok {
+							value = v
+						}
+					}
+				case strings.HasPrefix(cmd, "sysctl -q -w "+deploy.PingGroupRange+"=") && !c.locked:
+					// As sysctl -n printed it, with a tab: the kernel reads any space.
+					value = strings.Join(strings.Fields(strings.TrimPrefix(cmd, "sysctl -q -w "+deploy.PingGroupRange+"=")), " ")
+				}
+				return nil, nil
+			},
+			LookPath: func(string) (string, error) { return "", errors.New("not found") },
+		}
+		j, err := deploy.OpenJournal(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.Journal = j
+		if err := h.Apply(deploy.Plan{ICMP: true}); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(filepath.Join(root, deploy.PingSysctl))
+		warned := strings.Contains(out.String(), "warning: naive carries ICMP")
+		switch {
+		case c.after == "":
+			if err == nil || value != c.before || out.Len() != 0 {
+				t.Errorf("%s: changed: %q, now %s, said %q", c.before, b, value, out.String())
+			}
+			continue
+		case c.after == "?":
+			if err == nil || value != c.before || !strings.Contains(out.String(), "cannot be told") {
+				t.Errorf("%s: written %q, now %s, said %q", c.before, b, value, out.String())
+			}
+			continue
+		case !strings.Contains(string(b), deploy.PingGroupRange+" = "+c.after+"\n"):
+			t.Errorf("%s: file %q", c.before, b)
+		case c.locked != warned || (!c.locked && value != c.after):
+			t.Errorf("%s (locked %v): now %s, said %q", c.before, c.locked, value, out.String())
+		case !j.Has(deploy.ChangeSysctl, "", deploy.PingGroupRange):
+			t.Errorf("%s: the old value not journaled", c.before)
+		}
+		if c.locked {
+			continue
+		}
+		// Uninstall: the file goes, the value comes back.
+		cmds = nil
+		if err := h.Uninstall(j, deploy.UninstallOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(root, deploy.PingSysctl)); !os.IsNotExist(err) || value != c.before {
+			t.Errorf("%s: after uninstall %v, value %s", c.before, err, value)
+		}
+	}
+	// ICMP off: the range is not even read.
+	var cmds []string
+	h := &deploy.Host{Root: t.TempDir(), Out: &bytes.Buffer{}, LookPath: func(string) (string, error) { return "", errors.New("not found") },
+		Run: func(name string, args ...string) ([]byte, error) {
+			cmds = append(cmds, name+" "+strings.Join(args, " "))
+			return nil, nil
+		}}
+	if err := h.Apply(deploy.Plan{}); err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(cmds, func(c string) bool { return strings.Contains(c, deploy.PingGroupRange) }) {
+		t.Errorf("ICMP off, the range touched: %v", cmds)
 	}
 }
 
@@ -764,10 +915,10 @@ func TestBuildDNSKeyWithoutRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	others := slices.DeleteFunc(files, func(f render.File) bool { return f.Service == "dnstt" || f.Service == "masterdns" })
-	p := deploy.Build(m, others, render.DefaultPaths, deploy.DefaultBinaries)
+	p := build(m, others, render.DefaultPaths)
 	for name, key := range map[string]string{"dnstt": "noise.key", "masterdns": "encryption.key"} {
-		want := "ExecStartPre=+install -m 0400 -o niko-" + name + " -g niko-" + name +
-			" /var/lib/raycontrol/rendered/" + name + "/" + key + " /run/niko/" + name + "/" + key
+		want := "ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/" + name + "/" + key +
+			" rayd niko-" + name + " /run/niko/" + name + "/" + key + "\n"
 		if u := file(p, "/etc/systemd/system/niko-"+name+".service"); !strings.Contains(u, want) {
 			t.Errorf("%s unit lacks %q:\n%s", name, want, u)
 		}
@@ -785,7 +936,7 @@ func TestRelayPlan(t *testing.T) {
 	// rayd relay: no privileges, its own copy of the bundle (relay-v1 §9.1).
 	probe := file(p, "/etc/systemd/system/"+deploy.RelayProbeUnit)
 	for _, want := range []string{
-		"ExecStartPre=+install -m 0400 -o rayd -g rayd /etc/raycontrol/relay.bundle /run/rayd-relay/relay.bundle",
+		"ExecStartPre=+/usr/local/bin/rayd credential /etc/raycontrol relay.bundle root rayd /run/rayd-relay/relay.bundle\n",
 		"ExecStart=/usr/local/bin/rayd relay -bundle /run/rayd-relay/relay.bundle -state /var/lib/rayd-relay/devices.json",
 		"StateDirectory=rayd-relay\n", "StateDirectoryMode=0700",
 		"User=rayd", "CapabilityBoundingSet=\n", "After=network-online.target rayspa.service",
@@ -797,7 +948,7 @@ func TestRelayPlan(t *testing.T) {
 	}
 	u := file(p, "/etc/systemd/system/rayspa.service")
 	for _, want := range []string{
-		"ExecStartPre=+install -m 0400 -o rayspa -g rayspa /etc/raycontrol/relay.bundle /run/rayspa/relay.bundle",
+		"ExecStartPre=+/usr/local/bin/rayd credential /etc/raycontrol relay.bundle root rayspa /run/rayspa/relay.bundle\n",
 		"ExecStart=/usr/local/bin/rayspa run -relay /run/rayspa/relay.bundle -state /var/lib/rayspa/snapshot.pb",
 		"User=rayspa", "CapabilityBoundingSet=CAP_NET_ADMIN\n", "RuntimeDirectoryMode=0700",
 	} {
@@ -1196,12 +1347,12 @@ func TestSandboxResolverProblem(t *testing.T) {
 // missing file would keep the whole front down (Q-1).
 func TestFrontCredentialsOnlyRendered(t *testing.T) {
 	m, files := plan2(t, render.DefaultPaths)
-	key := "/var/lib/raycontrol/rendered/front/dnsprobe.key"
-	if !strings.Contains(file(deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries), "/etc/systemd/system/niko-front.service"), key) {
+	key, line := "/var/lib/raycontrol/rendered/front/dnsprobe.key", " /var/lib raycontrol/rendered/front/dnsprobe.key "
+	if !strings.Contains(file(build(m, files, render.DefaultPaths), "/etc/systemd/system/niko-front.service"), line) {
 		t.Fatal("the rendered key is not installed")
 	}
 	partial := slices.DeleteFunc(slices.Clone(files), func(f render.File) bool { return f.Path == key })
-	if front := file(deploy.Build(m, partial, render.DefaultPaths, deploy.DefaultBinaries), "/etc/systemd/system/niko-front.service"); front == "" || strings.Contains(front, key) {
+	if front := file(build(m, partial, render.DefaultPaths), "/etc/systemd/system/niko-front.service"); front == "" || strings.Contains(front, "dnsprobe.key") {
 		t.Fatalf("a key not rendered is installed:\n%s", front)
 	}
 }
@@ -1233,7 +1384,7 @@ func TestProbeKeyBeforeDNSTT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unit := file(deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries), "/etc/systemd/system/niko-front.service")
+	unit := file(build(m, files, render.DefaultPaths), "/etc/systemd/system/niko-front.service")
 	if !strings.Contains(unit, "/run/niko/front/dnsprobe.key") {
 		t.Fatalf("the front's unit does not install the probe key:\n%s", unit)
 	}
@@ -1284,7 +1435,7 @@ func TestBuildSlipstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	p := build(m, files, render.DefaultPaths)
 	if !slices.Equal(p.Units, []string{"rayd.service", "rayspa.service", "niko-inner.service", "niko-slip.service", "niko-front.service", "raycontrol-update.path"}) || len(p.Warnings) != 0 {
 		t.Fatalf("units %v, warnings %v", p.Units, p.Warnings)
 	}
@@ -1300,7 +1451,7 @@ func TestBuildSlipstream(t *testing.T) {
 		"Description=slipstream server slip", "ConditionPathExists=/var/lib/raycontrol/rendered/slip/cert.pem\n",
 		"User=niko-slip", "Group=niko-slip", "SupplementaryGroups=niko-inner", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX\n",
 		"ExecStart=/usr/local/libexec/raycontrol/slipstream-server " + args + "\n",
-		"ExecStartPre=+install -m 0400 -o niko-slip -g niko-slip /var/lib/raycontrol/rendered/slip/key.pem /run/niko/slip/key.pem\n",
+		"ExecStartPre=+/usr/local/bin/rayd credential /var/lib raycontrol/rendered/slip/key.pem rayd niko-slip /run/niko/slip/key.pem\n",
 		"RuntimeDirectory=niko/slip", "ReadWritePaths=/run/niko/slip-in", "UMask=0007", "CapabilityBoundingSet=\n", "MemoryDenyWriteExecute=yes",
 		// In inner's group for its socket, not for its config (review).
 		"InaccessiblePaths=-/var/lib/raycontrol/rendered/inner\n",
@@ -1327,7 +1478,7 @@ func TestBuildSlipstream(t *testing.T) {
 	}
 	m, _ = render.CollectForRender(ctx, st)
 	files, _, _ = render.Render(m, render.DefaultPaths)
-	p = deploy.Build(m, files, render.DefaultPaths, deploy.DefaultBinaries)
+	p = build(m, files, render.DefaultPaths)
 	if slices.Contains(p.Units, "niko-slip.service") || len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "quic_alpn") ||
 		strings.Contains(file(p, "/etc/tmpfiles.d/raycontrol.conf"), "slip-in") {
 		t.Errorf("broken: units %v, warnings %v", p.Units, p.Warnings)

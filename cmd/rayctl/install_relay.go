@@ -82,6 +82,12 @@ func installRelay(bundlePath, packages string) error {
 	if _, err := os.Stat(deploy.DefaultBinaries.Rayspa); err != nil {
 		return fmt.Errorf("%s is missing: install/bootstrap.sh -relay installs it", deploy.DefaultBinaries.Rayspa)
 	}
+	// Not only for the probe endpoint: rayspa's unit copies the bundle in
+	// with rayd's credential command (spec/apply-plan-v1.md §6, 3).
+	if _, err := os.Stat(deploy.DefaultBinaries.Rayd); err != nil {
+		return fmt.Errorf("%s is missing: install/bootstrap.sh -relay installs it (rayspa's unit copies the bundle in with it)",
+			deploy.DefaultBinaries.Rayd)
+	}
 	// One install at a time: two would share the guard.
 	installLock, err := takeInstallLock(relayInstallLock)
 	if err != nil {
@@ -135,6 +141,9 @@ func installRelay(bundlePath, packages string) error {
 	// The host's commands too run apart from the terminal's Ctrl-C.
 	h.Run = func(name string, args ...string) ([]byte, error) { return commandApart(name, args...).CombinedOutput() }
 	plan := deploy.RelayPlan(deploy.DefaultBinaries)
+	if err := plan.Check(); err != nil {
+		return err
+	}
 	unitFile := "/etc/systemd/system/" + relayUnit
 	var forwardFile deploy.File
 	var files []deploy.File
@@ -265,6 +274,15 @@ func installRelay(bundlePath, packages string) error {
 	fmt.Printf("relay %s up: knocks with K_relay open the exit's services through here (exit %s).\n"+
 		"This host's SSH (port %d) is reachable from %s, the relay's own admin addresses (rayctl relay set on the exit).\n",
 		b.Name, b.Exit, port, strings.Join(snap.AdminPrefixes, ", "))
+	var probePort uint16
+	if b.Probe != nil {
+		probePort = b.Probe.Port
+	}
+	// The ports this relay listens on, now that its snapshot says which
+	// are SPA's: rayspa's TCP carrier and the probe endpoint. rayspa
+	// listens again each second, so a slot an outgoing connection held
+	// comes back once it is reserved.
+	h.ReservePorts(deploy.RelayPorts(snap.GetSpa().GetPortBase(), snap.GetSpa().GetPortRange(), probePort))
 	// The relay's probe endpoint (relay-v1 §9.1), once the relay is up: it
 	// is the relay's extra, and the relay works without it.
 	probe := relayProbe{
@@ -290,10 +308,6 @@ func installRelay(bundlePath, packages string) error {
 		fmt.Fprintln(os.Stderr, "warning:", err)
 	} else if note != "" {
 		fmt.Println(note)
-	}
-	var probePort uint16
-	if b.Probe != nil {
-		probePort = b.Probe.Port
 	}
 	h.WarnRelayDropChains(probePort)
 	return nil

@@ -621,6 +621,16 @@ func TestNodeNameInSubscription(t *testing.T) {
 	if p, _ := build(); p.Name != "" {
 		t.Fatalf("removed name still sent: %+q", p.Name)
 	}
+	// The owner's note: none, none in the payload; set, sent as kept.
+	if p, raw := build(); p.Note != "" || strings.Contains(raw, `"note"`) {
+		t.Fatalf("a node without a note: %q in %s", p.Note, raw)
+	}
+	if _, err := node.SetNote(ctx, f.st, "  до 1 Гбит/с, 👨\u200D👩\u200D👧  "); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := build(); p.Note != "до 1 Гбит/с, 👨\u200D👩\u200D👧" {
+		t.Fatalf("note %+q", p.Note)
+	}
 }
 
 // dnsauth in the subscription (spec/dnsauth-v2.md §4): both versions with

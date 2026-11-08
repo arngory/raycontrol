@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -279,6 +280,40 @@ func TestAdvised(t *testing.T) {
 	}
 }
 
+// naive's ICMP on (spec/icmp-v1.md): advised that the range holds the data
+// plane's groups; not looked at otherwise.
+func TestICMPSockets(t *testing.T) {
+	h, root, _ := fakeHost(t)
+	path := filepath.Join(root, "/proc/sys/net/ipv4/ping_group_range")
+	for _, c := range []struct {
+		value string
+		on    bool
+		ok    bool
+	}{
+		{"0\t2147483647\n", true, true},
+		{"1\t0\n", true, false},
+		{"9100\t9178\n", true, false},
+		{"1\t0\n", false, true}, // off: no such check
+		{"", true, false},       // not read: cannot tell, not good
+	} {
+		os.WriteFile(path, []byte(c.value), 0o644)
+		rs := h.Check(context.Background(), Options{Host: "203.0.113.7", ICMP: c.on})
+		r, found := find(rs, Advised, "ICMP sockets")
+		if found != c.on || (found && r.OK != c.ok) {
+			t.Errorf("%q, icmp %v: found %v, %+v", c.value, c.on, found, r)
+		}
+		if c.value == "" {
+			if !strings.Contains(r.Detail, "cannot be told") {
+				t.Errorf("unread: %+v", r)
+			}
+			continue
+		}
+		if found && !r.OK && (!strings.Contains(r.Detail, "net.ipv4.ping_group_range "+strings.Join(strings.Fields(c.value), " ")) || !strings.Contains(r.Fix, "rayctl apply")) {
+			t.Errorf("%q: %+v", c.value, r)
+		}
+	}
+}
+
 func TestParseHexAddr(t *testing.T) {
 	for in, want := range map[string]string{
 		"0100007F:01BB":                         "127.0.0.1:443",
@@ -320,5 +355,47 @@ func TestInternetLevel(t *testing.T) {
 	}
 	if j, err := json.Marshal(rs[1]); err != nil || !strings.Contains(string(j), `"level":"internet"`) {
 		t.Fatalf("json %s %v", j, err)
+	}
+}
+
+// The egress policy (rayctl egress) through the kernel's dry run, after the
+// table: advised, so a kernel that refuses it holds back no install; the
+// refusal says why. Without @ih, the TCP rule by tcp doff.
+func TestEgressPolicyCheck(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name   string
+		refuse string // nft -c refuses the scripts with this
+		ok     bool
+		detail string
+	}{
+		{"kernel takes it", "", true, "the BitTorrent and SMTP filter loads (rayctl egress)"},
+		{"no @ih", "@ih", true, "no @ih in this kernel"},
+		{"refused", "udp length 38", false, "cannot load the BitTorrent and SMTP filter: exit status 1: Error: Could not process rule: Operation not supported"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, _, _ := fakeHost(t)
+			run := h.Run
+			h.Run = func(ctx context.Context, stdin, name string, args ...string) ([]byte, error) {
+				if name == "nft" && slices.Equal(args, []string{"-c", "-f", "-"}) && c.refuse != "" && strings.Contains(stdin, c.refuse) {
+					return []byte("Error: Could not process rule: Operation not supported\n"), errors.New("exit status 1")
+				}
+				return run(ctx, stdin, name, args...)
+			}
+			rs := h.Check(ctx, Options{Host: "203.0.113.7"})
+			r, ok := find(rs, Advised, "egress policy")
+			if !ok || r.OK != c.ok || !strings.Contains(r.Detail, c.detail) || !c.ok && r.Fix == "" {
+				t.Fatalf("%+v", r)
+			}
+			if f := Failed(rs); len(f) != 0 {
+				t.Fatalf("required checks failed: %+v", f)
+			}
+		})
+	}
+	// No egress check where the table itself does not load.
+	h, _, out := fakeHost(t)
+	out["nft"] = "Error: Could not process rule: No such file or directory\n"
+	if _, ok := find(h.Check(ctx, Options{Host: "203.0.113.7"}), Advised, "egress policy"); ok {
+		t.Fatal("egress checked without the table")
 	}
 }

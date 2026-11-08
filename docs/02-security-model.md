@@ -109,10 +109,11 @@ plaintext: версия (1 байт), время (8 байт, unix-секунд�
 | `rayctl` → `rayd` | unix socket `0660 root:raycontrol` | `SO_PEERCRED` |
 | Клиент → подписка и API | HTTPS за SPA, `X25519MLKEM768` | подписка — токен устройства; API — mTLS-сертификат устройства + роль |
 | `rayd` → `rayspa` | unix socket | `SO_PEERCRED` (только UID `rayd`) |
+| `rayd` → `rayctl apply` (root) | unix socket, `GetDeployInputs` | root ответу не верит: проверяет входы, план строит сам, затем `Plan.Check` ([apply-plan-v1](spec/apply-plan-v1.md)) |
 | `niko-front` → бэкенд | unix-сокет бэкенда | права на сокет только у UID фронта; бэкенд проверяет `SO_PEERCRED` |
 | `rayd` → Xray API | unix socket или loopback | только UID `rayd` (nftables `skuid`) |
 | Движок белых списков → `inner` | unix socket | права только у UID движка; пользователь — по VLESS внутри туннеля |
-| Процессы → секреты | `LoadCredential=` | каждый получает только свои |
+| Процессы → секреты | копия root в `RuntimeDirectory` (`rayd credential`, без перехода по ссылкам; R2-9) | каждый получает только свои |
 
 Изоляция процессов: отдельные системные пользователи с фиксированными UID, `ProtectSystem=strict`,
 `NoNewPrivileges`, минимальные `CapabilityBoundingSet`, `RestrictAddressFamilies`, `SystemCallFilter=@system-service`.

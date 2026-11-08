@@ -288,15 +288,18 @@ func (c *cli) remoteRotate(ctx context.Context) error {
 	id := *c.identity
 	id.cert = next
 	if err := id.save(false); err != nil {
+		// The key goes out as it is: an error's text is cleaned and cut
+		// when printed (printableError).
 		pemBytes, _ := api.EncodeClientCertificate(next)
-		return fmt.Errorf("the node took the new key, but %s was not rewritten: %w; the new key:\n%s", id.path, err, pemBytes)
+		fmt.Fprintf(os.Stderr, "the new key:\n%s", pemBytes)
+		return fmt.Errorf("the node took the new key, but %s was not rewritten: %w; the new key is above", id.path, err)
 	}
 	fmt.Println("new client key in", id.path)
 	return nil
 }
 
 // localOnly lists the commands that act on this host, not through an API.
-var localOnly = []string{"install", "apply", "update", "uninstall", "backup", "restore", "report", "probe"}
+var localOnly = []string{"install", "apply", "update", "uninstall", "backup", "restore", "report", "probe", "egress"}
 
 func isLocalOnly(cmd string) bool {
 	return slices.Contains(localOnly, cmd) || strings.HasPrefix(cmd, "-")

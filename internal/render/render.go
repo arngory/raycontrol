@@ -1204,16 +1204,16 @@ func innerConfig(s Service, m Model, p Paths) (File, error) {
 		"listen":   p.InnerSocket(s.Name) + ",0660",
 		"protocol": "vless",
 		"settings": map[string]any{"clients": clients, "decryption": decryption},
-		// Sniffing only for routing: the BitTorrent rule needs it.
-		"sniffing": sniffing,
 	})
 }
 
-var sniffing = map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}, "routeOnly": true}
-
 // xrayFile is the config of an Xray exit: one inbound, the API on its own
-// unix socket, DoH, and routing that keeps private networks and BitTorrent
-// out.
+// unix socket, DoH, and routing that keeps private networks out. No
+// sniffing: the routing goes by the destination the client names (the
+// probe name included), and BitTorrent is the egress policy's, in the
+// kernel for every profile (spec/egress-policy-v1.md). Sniffing would
+// also hold every dial up to 200 ms for the client's first bytes, which
+// never come where the server speaks first (SMTP 587, IMAP, POP3).
 func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, error) {
 	outbounds := []map[string]any{
 		{"tag": "direct", "protocol": "freedom", "streamSettings": map[string]any{"sockopt": map[string]string{"domainStrategy": "UseIP"}}},
@@ -1221,7 +1221,6 @@ func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, er
 	}
 	rules := []map[string]any{
 		{"ip": privateNets, "outboundTag": "block"},
-		{"protocol": []string{"bittorrent"}, "outboundTag": "block"},
 	}
 	// Channel probes through the tunnel (R4-16): the probe name goes to the
 	// subscription endpoint on loopback, TCP and UDP alike, before the rule
@@ -1446,7 +1445,6 @@ func realityInbound(s Service, tag, sni, target string, clients []map[string]str
 		"tag":      tag,
 		"protocol": "vless",
 		"settings": map[string]any{"clients": clients, "decryption": decryption},
-		"sniffing": sniffing,
 		"streamSettings": map[string]any{
 			"network":  "raw",
 			"security": "reality",

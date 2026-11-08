@@ -211,6 +211,28 @@ func TestSiteAnswer(t *testing.T) {
 	if _, err := SetServiceOption(ctx, st, "r8443", "open", "false"); err != nil {
 		t.Fatalf("open=false off tcp/443: %v", err)
 	}
+	// naive's ICMP (spec/icmp-v1.md): off unless set, on|off only.
+	n, err := CreateService(ctx, st, store.Service{Kind: "naive", Name: "naive", Enabled: true})
+	if err != nil || NaiveICMP(n) {
+		t.Fatalf("a new naive: %v, icmp %v", err, NaiveICMP(n))
+	}
+	if n, err = SetServiceOption(ctx, st, "naive", "icmp", "on"); err != nil || !NaiveICMP(n) {
+		t.Fatalf("icmp=on: %v %s", err, n.Settings)
+	}
+	if n, err = SetServiceOption(ctx, st, "naive", "icmp", "off"); err != nil || NaiveICMP(n) || strings.Contains(n.Settings, "icmp") {
+		t.Fatalf("icmp=off: %v %s", err, n.Settings)
+	}
+	for _, c := range [][3]string{{"naive", "icmp", "true"}, {"naive", "icmp", "1"}, {"r", "icmp", "on"}, {"site", "icmp", "on"}} {
+		if _, err := SetServiceOption(ctx, st, c[0], c[1], c[2]); !errors.Is(err, store.ErrInvalid) {
+			t.Errorf("%s %s=%s: %v", c[0], c[1], c[2], err)
+		}
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "naive", Name: "naive2", Enabled: true, Settings: `{"icmp":"on"}`}); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf(`naive with "icmp":"on": %v`, err)
+	}
+	if n, err := CreateService(ctx, st, store.Service{Kind: "naive", Name: "naive3", Enabled: true, Settings: `{"icmp":true}`}); err != nil || !NaiveICMP(n) {
+		t.Fatalf(`naive with "icmp":true: %v`, err)
+	}
 	// SSH shares no port: a grant for the other service would reach sshd.
 	if _, err := CreateService(ctx, st, store.Service{Kind: "ssh", Name: "ssh", Enabled: true}); err != nil {
 		t.Fatal(err)

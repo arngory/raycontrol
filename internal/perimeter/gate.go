@@ -1,6 +1,7 @@
 package perimeter
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -72,6 +73,14 @@ type Gate struct {
 	// ACME window as last applied.
 	acmePort  uint16
 	acmeUntil time.Time
+	// The egress policy of the last snapshot (egressSeen: there was one),
+	// whether the table has it (egressOn), and its own backoff: a policy
+	// the kernel refuses holds back neither a snapshot nor a restore.
+	egress         Egress
+	egressSeen     bool
+	egressOn       bool
+	egressFailures int
+	egressRetryAt  time.Time
 }
 
 // NewGate returns a gate that drives fw.
@@ -169,13 +178,17 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		params: params, devices: devices, allowed: allowed, services: services, local: local, rotations: rotations,
 		public: public, admin: admin, adminPorts: adminPorts, relays: relays, relayPorts: relayPorts,
 		defTTL: time.Duration(sp.DefaultTtlS) * time.Second, maxTTL: time.Duration(sp.MaxTtlS) * time.Second,
-		tcpCarrier: sp.TcpCarrier, acme: snap.GetAcme(),
+		tcpCarrier: sp.TcpCarrier, acme: snap.GetAcme(), egress: egressOf(snap.GetEgress()),
 	}
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.pending = u
-	if err := g.catchUpLocked(g.now()); err != nil {
+	err = g.catchUpLocked(g.now())
+	// Into the table as it is, apart from the rest: its failure is logged
+	// and tried again by Tick.
+	g.egressLocked(g.now())
+	if err != nil {
 		return fmt.Errorf("%w: %w", ErrPending, err)
 	}
 	return nil
@@ -218,6 +231,7 @@ type update struct {
 	defTTL, maxTTL     time.Duration
 	tcpCarrier         bool
 	acme               *perimeterv1.AcmeWindow
+	egress             Egress
 }
 
 // catchUpLocked finishes a restore of the table, then applies the snapshot
@@ -341,6 +355,11 @@ func (g *Gate) adoptLocked(u *update) {
 	g.params, g.tcpCarrier = u.params, u.tcpCarrier
 	g.defaultTTL, g.maxTTL = u.defTTL, u.maxTTL
 	g.services, g.allowed, g.rotations = u.services, u.allowed, u.rotations
+	if !g.egressSeen || !u.egress.Equal(g.egress) {
+		// A new policy goes in at once, whatever the backoff of the old.
+		g.egress, g.egressSeen, g.egressOn = u.egress, true, false
+		g.egressFailures, g.egressRetryAt = 0, time.Time{}
+	}
 	now := g.now()
 	for key, devs := range g.holders {
 		revoked := false
@@ -426,6 +445,34 @@ func (g *Gate) denyLocked() error {
 		g.log.Debug("revoked", "addr", key.addr, "port", key.port)
 	}
 	return errors.Join(errs...)
+}
+
+// egressLocked puts the egress policy of the last snapshot in force, into
+// the table as it is. It stands apart from the rest of the snapshot: a
+// kernel that refuses the policy holds back neither the snapshot
+// (ErrPending) nor a restore of the table (catchUpLocked's backoff). It is
+// tried again on its own, less and less often (1 s doubling to 30 s); the
+// first refusal of a streak is a warning, the rest go to debug.
+func (g *Gate) egressLocked(now time.Time) {
+	if !g.egressSeen || g.egressOn || g.restoring || now.Before(g.egressRetryAt) {
+		return
+	}
+	if err := g.fw.SetEgress(g.egress); err != nil {
+		g.egressFailures++
+		wait := min(30*time.Second, time.Second<<min(g.egressFailures-1, 5))
+		g.egressRetryAt = now.Add(wait)
+		// Warn once per streak of refusals, then quietly: a kernel that never
+		// takes the policy would otherwise log about 2,900 lines a day.
+		level := slog.LevelDebug
+		if g.egressFailures == 1 {
+			level = slog.LevelWarn
+		}
+		g.log.Log(context.Background(), level, "egress policy not in force, trying again", "smtp", g.egress.SMTP,
+			"bittorrent", g.egress.BitTorrent, "err", err, "in", wait)
+		return
+	}
+	g.egressOn, g.egressFailures, g.egressRetryAt = true, 0, time.Time{}
+	g.log.Info("egress policy", "smtp", g.egress.SMTP, "bittorrent", g.egress.BitTorrent, "uids", g.egress.UIDs)
 }
 
 // acmeLocked opens, moves or closes the ACME window.
@@ -537,6 +584,8 @@ func (g *Gate) Tick() ([]uint16, error) {
 			return nil, behind
 		}
 	}
+	// After a restore, or a refusal: on its own (egressLocked).
+	g.egressLocked(g.now())
 	if g.verifier == nil {
 		return nil, ErrNotReady
 	}
@@ -572,6 +621,9 @@ func (g *Gate) restoreLocked() error {
 		return err
 	}
 	g.revoking, g.regrant = nil, nil // a new table: grants come back at their longest
+	// Its egress chains are empty: the policy goes in once the restore is
+	// done (egressLocked), at once.
+	g.egressOn, g.egressFailures, g.egressRetryAt = false, 0, time.Time{}
 	if len(g.public) > 0 {
 		if err := g.fw.SetPublic(g.public); err != nil {
 			return err

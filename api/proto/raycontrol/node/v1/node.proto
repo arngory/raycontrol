@@ -124,10 +124,27 @@ service NodeService {
   // SetNodeName names the node, or takes its name away with "": clients
   // show it with the node's address (subscription-v1 §3, field name).
   rpc SetNodeName(SetNodeNameRequest) returns (SetNodeNameResponse);
+  // SetNodeNote sets the node's note for its users, or takes it away with
+  // "": clients show it with the node (subscription-v1 §3, field note).
+  rpc SetNodeNote(SetNodeNoteRequest) returns (SetNodeNoteResponse);
+  // GetEgress returns the node's egress policy (spec/egress-policy-v1.md):
+  // what the data plane may not send, on every profile. On the node's
+  // socket only.
+  rpc GetEgress(GetEgressRequest) returns (GetEgressResponse);
+  // SetEgress blocks or allows BitTorrent and SMTP (TCP 25); rayspa applies
+  // it within a second or two. Root on the node only.
+  rpc SetEgress(SetEgressRequest) returns (SetEgressResponse);
 
-  // GetDeployment returns what root must install for the current services:
-  // system users, unit files and other files. rayctl apply writes them.
+  // GetDeployment returns the deployment rayd builds for the current
+  // services: system users, unit files and other files. rayctl before
+  // v0.21.0 installs it as it is; rayctl since builds its own from
+  // GetDeployInputs and takes nothing from here. Root on the node only.
   rpc GetDeployment(GetDeploymentRequest) returns (GetDeploymentResponse);
+  // GetDeployInputs returns what root builds the deployment from
+  // (docs/spec/apply-plan-v1.md §3.3): the services and the node's facts,
+  // which rayctl apply checks before it builds anything. No keys, no file
+  // contents. Root on the node only.
+  rpc GetDeployInputs(GetDeployInputsRequest) returns (GetDeployInputsResponse);
 }
 
 message SetDNSProviderRequest {
@@ -288,6 +305,9 @@ message GetDeploymentResponse {
   repeated PortRange outside_ports = 6;
   // The front answers DNS tunnels on UDP 53 (beside systemd-resolved's stub).
   bool front_dns = 7;
+  // A naive service carries ICMP (icmp=on, spec/icmp-v1.md): the data
+  // plane's groups must be in net.ipv4.ping_group_range.
+  bool icmp = 8;
 }
 
 message PortRange {
@@ -308,6 +328,46 @@ message DeployFile {
   bytes content = 3;
 }
 
+message GetDeployInputsRequest {}
+message GetDeployInputsResponse {
+  repeated DeployService services = 1; // the enabled services
+  bool front_tcp = 2;                  // TCP 443 is behind the front (tcpmux)
+  bool front_rendered = 3;             // the front's config is rendered
+  bool front_dns = 4;                  // the front answers DNS tunnels on UDP 53
+  bool dns_probe_key = 5;              // the front's dnsprobe-v1 key is rendered
+  // The subscription endpoint's port, 0 without one: the channel probes of
+  // naive and Hysteria2 go there.
+  uint32 subscription_port = 6;
+  repeated PortRange host_ports = 7;    // as in GetDeploymentResponse
+  repeated PortRange outside_ports = 8; // as in GetDeploymentResponse
+  repeated string warnings = 9;         // rayd's: what it could not render, and why
+}
+
+// DeployService is a service as root builds its units: what of its
+// settings goes into them, nothing else.
+message DeployService {
+  string kind = 1;
+  string name = 2;
+  uint32 uid = 3;        // the user of its process, 0 without one
+  string answer = 4;     // site: what it answers
+  string site = 5;       // reality, naive: the node's site it relies on
+  bool public_peers = 6; // yggdrasil: it dials public peers
+  bool salamander = 7;   // hy2-obfs: the front's copy of its salamander password is rendered
+  DeploySlipstream slipstream = 8;
+  bool icmp = 9;         // naive: it carries ping and traceroute (icmp=on, spec/icmp-v1.md)
+}
+
+// DeploySlipstream are a slipstream service's settings
+// (spec/slipstream-v1.md §3), or why rayd could not read them.
+message DeploySlipstream {
+  string zone = 1;
+  string quic_alpn = 2;
+  string quic_sni = 3;
+  uint32 max_connections = 4;    // 0: the default
+  uint32 device_connections = 5; // 0: the default
+  string error = 6;              // not empty: the service is left out, with this warning
+}
+
 message GetStatusRequest {}
 message GetStatusResponse {
   string version = 1;
@@ -324,6 +384,34 @@ message GetStatusResponse {
   int64 debug_until = 9;
   // The node's name (rayctl node name); empty: none.
   string name = 10;
+  string note = 11;
+  // The node's egress policy (rayctl egress); on the node's socket only,
+  // absent through the remote API.
+  Egress egress = 12;
+}
+
+// Egress is what the data plane may not send, whoever the user
+// (spec/egress-policy-v1.md).
+message Egress {
+  bool bittorrent = 1; // the handshake, uTP SYN, UDP tracker connect, DHT queries
+  bool smtp = 2;       // TCP to port 25
+}
+
+message GetEgressRequest {}
+message GetEgressResponse {
+  Egress egress = 1;
+  // Processes it covers besides the data plane (UIDs 9100-9179): rayd's own
+  // where the data plane runs as its children (rayd serve -supervise).
+  repeated uint32 uids = 2;
+}
+
+message SetEgressRequest {
+  // Only the parts given change.
+  optional bool bittorrent = 1;
+  optional bool smtp = 2;
+}
+message SetEgressResponse {
+  Egress egress = 1; // as kept
 }
 
 message SetNodeNameRequest {
@@ -332,6 +420,15 @@ message SetNodeNameRequest {
 }
 message SetNodeNameResponse {
   string name = 1; // as kept
+}
+
+message SetNodeNoteRequest {
+  // At most 200 characters (code points) on one line; runs of spaces
+  // become one. Empty removes it.
+  string note = 1;
+}
+message SetNodeNoteResponse {
+  string note = 1; // as kept
 }
 
 message LoopHealth {

@@ -50,6 +50,11 @@ jobs:
       # rayd relay (the relay's probe endpoint, relay-v1 §9).
       - run: go test -c -o api.test ./internal/api && go build -o rayspa ./cmd/rayspa && go build -o rayd ./cmd/rayd
       - run: sudo test/relay/e2e.sh ./api.test ./rayspa ./rayd
+      # rayd credential as root, the runtime directory a mount of its own as
+      # in the unit's mount namespace; the reserved ports in a network
+      # namespace of their own (the test job runs them unprivileged).
+      - run: go test -c -o deploy.test ./internal/deploy
+      - run: sudo ./deploy.test -test.run 'TestCopyCredential|TestOpenBeneath|TestReservedPortsNetns' -test.v
 
   xray:
     # The rendered inner stage, REALITY and Hysteria2 on a real Xray from the

@@ -355,12 +355,28 @@ func TestRemoteAPI(t *testing.T) {
 	if _, err := admin.node.Backup(ctx, connect.NewRequest(&nodev1.BackupRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("a remote backup: %v", err)
 	}
+	// What root builds the deployment from: root's on the node, as apply.
 	if _, err := admin.node.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("the rendered keys through the remote API: %v", err)
+		t.Fatalf("the deployment through the remote API: %v", err)
+	}
+	if _, err := admin.node.GetDeployInputs(ctx, connect.NewRequest(&nodev1.GetDeployInputsRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("the deployment's inputs through the remote API: %v", err)
 	}
 	// Client addresses in the journal: root on the node only.
 	if _, err := admin.node.SetDebug(ctx, connect.NewRequest(&nodev1.SetDebugRequest{Seconds: 60})); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("a remote debug window: %v", err)
+	}
+	// The egress policy: root on the node only (egress-policy-v1 §9), not
+	// even to read, and not in the status.
+	block := true
+	if _, err := admin.node.SetEgress(ctx, connect.NewRequest(&nodev1.SetEgressRequest{Bittorrent: &block})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("a remote egress policy: %v", err)
+	}
+	if _, err := admin.node.GetEgress(ctx, connect.NewRequest(&nodev1.GetEgressRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("the egress policy read remotely: %v", err)
+	}
+	if st.Msg.Egress != nil {
+		t.Fatalf("the egress policy in a remote status: %v", st.Msg.Egress)
 	}
 	// A relay opens the service ports to an address: root on the node only.
 	if _, err := admin.node.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r", Address: "198.51.100.20"})); connect.CodeOf(err) != connect.CodePermissionDenied {

@@ -82,7 +82,7 @@ func TestBytes(t *testing.T) {
 }
 
 func TestOutsidePorts(t *testing.T) {
-	got := outsidePorts([]*nodev1.PortRange{{Proto: "tcp", From: 443, To: 443}, {Proto: "udp", From: 20100, To: 20611},
+	got := outsidePorts([]deploy.PortRange{{Proto: "tcp", From: 443, To: 443}, {Proto: "udp", From: 20100, To: 20611},
 		{Proto: "tcp", From: 22, To: 22}, {Proto: "udp", From: 443, To: 443}, {Proto: "tcp", From: 20100, To: 20611}})
 	if got != "tcp 22, tcp+udp 443, tcp+udp 20100-20611" {
 		t.Errorf("%q", got)

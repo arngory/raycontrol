@@ -274,7 +274,7 @@ func TestHandoffFallback(t *testing.T) {
 	zw.Close()
 	r := release.Release{Version: "v0.19.1", Archive: buf.Bytes(), Sums: []byte("sums"), Sig: []byte("sig")}
 	stage := t.TempDir()
-	handed, err := handoff(r, stage, "v0.19.0", true)
+	handed, err := handoff(r, stage, "v0.19.0", true, false)
 	if handed || err == nil {
 		t.Fatalf("a rayctl that cannot run was handed the update: %v %v", handed, err)
 	}

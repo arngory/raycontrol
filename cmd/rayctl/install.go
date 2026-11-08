@@ -19,6 +19,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/arngory/raycontrol/internal/api"
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/hostcheck"
@@ -211,7 +212,8 @@ func readProc(pid int) (proc, bool) {
 	return p, true
 }
 
-func needRoot() error {
+// needRoot refuses a user other than root; tests replace it.
+var needRoot = func() error {
 	if os.Geteuid() != 0 {
 		return errors.New("must run as root")
 	}
@@ -262,6 +264,11 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 	}
 	if *relay != "" {
 		return installRelay(*relay, *packages)
+	}
+	// Before anything changes: over a running node, install restarts rayd
+	// and applies, as an update does.
+	if err := takeUpdateLock("install", 0); err != nil {
+		return err
 	}
 	if *host == "" {
 		return errors.New("-host is required")
@@ -349,7 +356,10 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 		}
 	}
 	// Control plane only: rayd and rayspa units, tmpfiles, polkit, sysctl.
-	base := deploy.Build(render.Model{}, nil, render.DefaultPaths, deploy.DefaultBinaries)
+	base := deploy.Build(deploy.Inputs{}, render.DefaultPaths, deploy.DefaultBinaries)
+	if err := base.Check(); err != nil {
+		return err
+	}
 	for _, u := range base.Users {
 		if err := h.EnsureUser(u); err != nil {
 			return err
@@ -445,7 +455,18 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 		}
 	}
 
-	if err := c.deploy(ctx, h, "rayspa.service"); err != nil {
+	err = c.deploy(ctx, h, "rayspa.service")
+	if errors.Is(err, errOldRayd) {
+		// An install over a node: the rayd that answers is the one from
+		// before the bootstrap put this release's binaries in place.
+		fmt.Println("rayd runs the binary from before: restarting it")
+		if err = run("systemctl", "restart", "rayd.service"); err == nil {
+			if err = c.waitRayd(ctx, ""); err == nil {
+				err = c.deploy(ctx, h, "rayspa.service")
+			}
+		}
+	}
+	if err != nil {
 		return err
 	}
 	if err := h.EnableNow("rayspa.service"); err != nil {
@@ -604,6 +625,9 @@ func (c *cli) apply(ctx context.Context, _ []string) error {
 	if err := needRoot(); err != nil {
 		return err
 	}
+	if err := takeUpdateLock("apply", 0); err != nil {
+		return err
+	}
 	// During an update the rayctl that ran it gives the release's files:
 	// those it did not know how to install, this one does.
 	if stage := os.Getenv(updateStageEnv); stage != "" {
@@ -621,23 +645,49 @@ func (c *cli) apply(ctx context.Context, _ []string) error {
 	return c.deploy(ctx, h)
 }
 
-// deploy applies the deployment from rayd, leaving the units in keep alone.
-// rayd comes first: when its unit changed (new service groups) it restarts
-// and renders the files of the new services before their units start.
+// errOldRayd: rayd does not offer GetDeployInputs. Its binary is older
+// than this rayctl's: replaced by hand, or rayd not restarted since.
+var errOldRayd = errors.New("rayd does not give the deployment's inputs (GetDeployInputs): it runs an older version than this rayctl. " +
+	"Nothing was changed. Restart it (systemctl restart rayd) and run this again; if /usr/local/bin/rayd is older too, " +
+	"put rayd and rayctl of one release in place (rayctl update)")
+
+// deployPlan is the deployment root installs (spec/apply-plan-v1.md): what
+// rayd reports it is made from, checked, built with this rayctl's own
+// paths and binaries, checked again. Nothing of the plan rayd builds
+// (GetDeployment) is taken, and there is no going back to it: a rayd that
+// broke in would only have to look old. The outside ports are for the
+// operator to read.
+func (c *cli) deployPlan(ctx context.Context) (deploy.Plan, []deploy.PortRange, error) {
+	resp, err := c.c.GetDeployInputs(ctx, connect.NewRequest(&nodev1.GetDeployInputsRequest{}))
+	if connect.CodeOf(err) == connect.CodeUnimplemented {
+		return deploy.Plan{}, nil, errOldRayd
+	}
+	if err != nil {
+		return deploy.Plan{}, nil, err
+	}
+	in, err := api.DeployInputs(resp.Msg)
+	if err == nil {
+		err = in.Check()
+	}
+	if err != nil {
+		return deploy.Plan{}, nil, fmt.Errorf("rayd's deployment inputs: %w; nothing was changed", err)
+	}
+	plan := deploy.Build(in, render.DefaultPaths, deploy.DefaultBinaries)
+	plan.HostPorts = in.HostPorts
+	plan.Files = append(plan.Files, deploy.FirewallFiles(plan.HostPorts)...)
+	if err := plan.Check(); err != nil {
+		return deploy.Plan{}, nil, fmt.Errorf("the deployment: %w; nothing was changed", err)
+	}
+	return plan, in.OutsidePorts, nil
+}
+
+// deploy applies the deployment, leaving the units in keep alone. rayd
+// comes first: when its unit changed (new service groups) it restarts and
+// renders the files of the new services before their units start.
 func (c *cli) deploy(ctx context.Context, h *deploy.Host, keep ...string) error {
-	resp, err := c.c.GetDeployment(ctx, connect.NewRequest(&nodev1.GetDeploymentRequest{}))
+	plan, outside, err := c.deployPlan(ctx)
 	if err != nil {
 		return err
-	}
-	plan := deploy.Plan{Units: resp.Msg.Units, Warnings: resp.Msg.Warnings, FrontDNS: resp.Msg.FrontDns}
-	for _, r := range resp.Msg.HostPorts {
-		plan.HostPorts = append(plan.HostPorts, deploy.PortRange{Proto: r.Proto, From: uint16(r.From), To: uint16(r.To)})
-	}
-	for _, u := range resp.Msg.Users {
-		plan.Users = append(plan.Users, deploy.SystemUser{Name: u.Name, UID: int(u.Uid), ExtraGroups: u.ExtraGroups})
-	}
-	for _, f := range resp.Msg.Files {
-		plan.Files = append(plan.Files, deploy.File{Path: f.Path, Mode: f.Mode, Content: f.Content})
 	}
 	h.Ready = func(unit string) error {
 		if unit == "rayd.service" {
@@ -649,16 +699,16 @@ func (c *cli) deploy(ctx context.Context, h *deploy.Host, keep ...string) error 
 	if err := h.Apply(plan, keep...); err != nil {
 		return err
 	}
-	if len(resp.Msg.OutsidePorts) > 0 {
+	if len(outside) > 0 {
 		fmt.Println("a firewall of the provider in front of the host (security group, cloud firewall) must let in:",
-			outsidePorts(resp.Msg.OutsidePorts))
+			outsidePorts(outside))
 	}
 	return nil
 }
 
 // outsidePorts lists port ranges for a person: "tcp+udp 443, tcp 22".
-func outsidePorts(rs []*nodev1.PortRange) string {
-	type span struct{ from, to uint32 }
+func outsidePorts(rs []deploy.PortRange) string {
+	type span struct{ from, to uint16 }
 	var order []span
 	protos := map[span][]string{}
 	for _, r := range rs {

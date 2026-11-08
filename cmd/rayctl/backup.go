@@ -36,7 +36,14 @@ func (c *cli) backup(ctx context.Context, args []string) error {
 	if err := needRoot(); err != nil {
 		return err
 	}
-	resp, err := c.c.Backup(ctx, connect.NewRequest(&nodev1.BackupRequest{}))
+	client := c.c
+	if c.backupClient != nil {
+		client = c.backupClient
+	}
+	resp, err := client.Backup(ctx, connect.NewRequest(&nodev1.BackupRequest{}))
+	if connect.CodeOf(err) == connect.CodeResourceExhausted {
+		return fmt.Errorf("the database is unusually large, more than rayctl takes (%d MiB): %w", api.MaxBackupAnswer>>20, err)
+	}
 	if err != nil {
 		return err
 	}
@@ -85,6 +92,12 @@ func (c *cli) restore(ctx context.Context, args []string) error {
 	if err := needRoot(); err != nil {
 		return err
 	}
+	// Before anything changes: it stops rayd, swaps the database and
+	// restarts the node, as an update does (its rayctl apply inherits the
+	// lock).
+	if err := takeUpdateLock("restore", 0); err != nil {
+		return err
+	}
 	if _, err := os.Stat(deploy.DB); err != nil {
 		return fmt.Errorf("no node here (%w): rayctl install first, then restore", err)
 	}
@@ -110,15 +123,14 @@ func (c *cli) restore(ctx context.Context, args []string) error {
 	}
 
 	// The copy goes next to the database, checked by the installed rayd
-	// (migrations, the new address) before anything is replaced.
+	// (migrations, the new address) before anything is replaced. The
+	// directory is rayd's: written as copyDB writes, never through a link
+	// rayd put at that name, and rayd's through the descriptor.
 	tmp := deploy.DB + ".restore"
-	if err := os.WriteFile(tmp, db, 0o600); err != nil {
+	if err := placeDB(tmp, db); err != nil {
 		return err
 	}
 	defer removeDB(tmp)
-	if err := run("chown", "rayd:rayd", tmp); err != nil {
-		return err
-	}
 	initArgs := []string{"-u", "rayd", "--", deploy.DefaultBinaries.Rayd, "init", "-db", tmp}
 	if *host != "" {
 		initArgs = append(initArgs, "-host", *host)
@@ -207,6 +219,22 @@ func (c *cli) metrics(ctx context.Context, args []string) error {
 				m.Add("raycontrol_early_drops_packets_total", "Packets to the node dropped before reassembly and conntrack.",
 					float64(drops[reason].Packets), "reason", reason)
 				m.Add("raycontrol_early_drops_bytes_total", "Bytes of those packets.", float64(drops[reason].Bytes), "reason", reason)
+			}
+			text += m.String()
+		}
+		// The egress policy's counters (spec/egress-policy-v1.md §6): by
+		// rule, never where to or whose; a rule not in force has none.
+		if blocks, err := (&perimeter.NFT{}).EgressBlocks(); err == nil {
+			var m api.Metrics
+			for _, rule := range perimeter.EgressRules {
+				d, ok := blocks[rule]
+				if !ok {
+					continue
+				}
+				m.Add("raycontrol_egress_blocked_packets_total",
+					"Packets of the data plane the egress policy blocked (rayctl egress): about one a try over TCP, a datagram over UDP.",
+					float64(d.Packets), "rule", rule)
+				m.Add("raycontrol_egress_blocked_bytes_total", "Bytes of those packets.", float64(d.Bytes), "rule", rule)
 			}
 			text += m.String()
 		}
