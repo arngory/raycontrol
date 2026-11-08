@@ -479,7 +479,11 @@ boot
 wait_active rayd.service rayspa.service "${dataplane[@]}"
 ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$node")"
 client -addr "$ip" "$laptop" >/dev/null || fail "probe after reboot"
-reserved "after the reboot (systemd-sysctl, its file)"
+# From its file at boot, where systemd-sysctl applies /etc/sysctl.d (the
+# Rocky images here have none; a Rocky host has).
+if x systemctl cat systemd-sysctl.service >/dev/null 2>&1; then
+	reserved "after the reboot (systemd-sysctl, its file)"
+fi
 
 log "$distro: report"
 x /usr/local/bin/rayctl report -logs info -o /root/report.txt > /dev/null || fail "rayctl report"
