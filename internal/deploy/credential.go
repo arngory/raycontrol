@@ -82,12 +82,17 @@ var openat2 = unix.Openat2
 //     links by the time it is looked at. Then it is opened for reading
 //     through that descriptor (/proc/self/fd), the same file, checked
 //     again; MaxCredential bytes at most.
-//   - dst's directory, the service's runtime directory, must be root's or
-//     the service user's, and no one else's to write in. The copy is made
-//     in its parent, root's alone, as a new file (O_EXCL, no link
-//     followed), given its owner and mode through its descriptor, then
-//     renamed over dst: a link put at dst is replaced, never followed. A
-//     copy left there by a run that was killed goes at the next.
+//   - dst's directory, the service's runtime directory, is opened from
+//     its parent, root's alone, without following a link, and must be
+//     root's or the service user's, and no one else's to write in. The
+//     copy is made in it as a new file under a random name (O_EXCL, no
+//     link followed), given its owner and mode through its descriptor,
+//     then renamed over dst in the same directory: a link put at dst is
+//     replaced, never followed. Not in the parent: in the unit's mount
+//     namespace, where ExecStartPre=+ runs too, the runtime directory is a
+//     mount of its own (ProtectSystem=strict), and a rename into it from
+//     outside fails (EXDEV). A copy left by a run that was killed goes at
+//     the next.
 func CopyCredential(anchor, rel string, owner int, dst string, uid, gid int) error {
 	b, err := readCredential(anchor, rel, owner)
 	if err != nil {
@@ -217,17 +222,19 @@ func writeCredential(dst string, b []byte, uid, gid int) error {
 	if err := ownedDir(d, 0, os.Geteuid(), uid); err != nil {
 		return fmt.Errorf("%s: %w", dir, err)
 	}
-	// The copy's name is this runtime directory's and this file's: one
-	// left by a run that was killed half way is this unit's to remove
-	// (systemd runs one start of a unit at a time).
-	prefix := "." + filepath.Base(dir) + "." + name + ".raycontrol-"
-	sweep(p, prefix)
+	// The copy's name is this file's: one left by a run that was killed
+	// half way is this unit's to remove (systemd runs one start of a unit
+	// at a time). The directory is the service user's too: what it puts
+	// under that name is removed, never followed, and a name it took makes
+	// O_EXCL fail.
+	prefix := "." + name + ".raycontrol-"
+	sweep(d, prefix)
 	var r [8]byte
 	if _, err := rand.Read(r[:]); err != nil {
 		return err
 	}
 	tmp := prefix + hex.EncodeToString(r[:])
-	fd, err := unix.Openat(p, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o400)
+	fd, err := unix.Openat(d, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o400)
 	if err != nil {
 		return err
 	}
@@ -236,7 +243,7 @@ func writeCredential(dst string, b []byte, uid, gid int) error {
 	defer func() {
 		f.Close()
 		if !done {
-			_ = unix.Unlinkat(p, tmp, 0)
+			_ = unix.Unlinkat(d, tmp, 0)
 		}
 	}()
 	// Written and its mode set while it is root's; the service user's last.
@@ -249,15 +256,17 @@ func writeCredential(dst string, b []byte, uid, gid int) error {
 	if err := unix.Fchown(fd, uid, gid); err != nil {
 		return err
 	}
-	if err := unix.Renameat(p, tmp, d, name); err != nil {
+	// Within one directory: never across mounts.
+	if err := unix.Renameat(d, tmp, d, name); err != nil {
 		return err
 	}
 	done = true
 	return nil
 }
 
-// sweep removes the entries of the directory dir (root's alone) whose
-// names start with prefix: copies a killed run left.
+// sweep removes the entries of the directory dir whose names start with
+// prefix: copies a killed run left. unlinkat follows no link and removes
+// no directory.
 func sweep(dir int, prefix string) {
 	d, err := unix.Dup(dir)
 	if err != nil {

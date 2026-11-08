@@ -61,14 +61,20 @@ func (h credHost) copied(t *testing.T, want string) {
 	h.clean(t)
 }
 
-// clean checks that no temporary file is left beside the runtime
-// directory.
+// clean checks that no temporary file is left in the runtime directory,
+// and nothing beside it.
 func (h credHost) clean(t *testing.T) {
 	t.Helper()
 	left, _ := os.ReadDir(h.run)
 	for _, e := range left {
 		if e.Name() != "svc" {
 			t.Errorf("left in the runtime directory's parent: %s", e.Name())
+		}
+	}
+	left, _ = os.ReadDir(filepath.Dir(h.dst))
+	for _, e := range left {
+		if strings.Contains(e.Name(), ".raycontrol-") {
+			t.Errorf("left in the runtime directory: %s", e.Name())
 		}
 	}
 }
@@ -209,7 +215,7 @@ func TestCopyCredential(t *testing.T) {
 		h.refused(t, "too big", "bytes, at most") // seen before it is read
 
 		// Directories others may write in: the anchor, the runtime
-		// directory's parent (the copy is made there), the runtime
+		// directory's parent (it is opened from there), the runtime
 		// directory itself.
 		for _, dir := range []func(credHost) string{
 			func(h credHost) string { return h.anchor },

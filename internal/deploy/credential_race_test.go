@@ -1,6 +1,8 @@
 package deploy_test
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -132,24 +134,103 @@ func TestCopyCredentialOpenat2Errors(t *testing.T) {
 	}
 }
 
-// A copy a killed run left beside the runtime directory goes at the next
-// run of the same unit; another unit's stays.
+// A copy a killed run left in the runtime directory goes at the next run
+// of the same unit, a link under its name too (removed, not followed);
+// another file's stays.
 func TestCopyCredentialSweep(t *testing.T) {
 	h := newCredHost(t)
-	stale := filepath.Join(h.run, ".svc.key.pem.raycontrol-0123456789abcdef")
-	other := filepath.Join(h.run, ".other.key.pem.raycontrol-0123456789abcdef")
+	run := filepath.Dir(h.dst)
+	stale := filepath.Join(run, ".key.pem.raycontrol-0123456789abcdef")
+	link := filepath.Join(run, ".key.pem.raycontrol-fedcba9876543210")
+	other := filepath.Join(run, ".cert.pem.raycontrol-0123456789abcdef")
 	for _, p := range []string{stale, other} {
 		if err := os.WriteFile(p, []byte("half"), 0o400); err != nil {
 			t.Fatal(err)
 		}
 	}
+	target := filepath.Join(t.TempDir(), "target")
+	os.WriteFile(target, []byte("kept\n"), 0o600)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
 	if err := h.copy(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
-		t.Errorf("the stale copy stays: %v", err)
+	for _, p := range []string{stale, link} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Errorf("%s stays: %v", filepath.Base(p), err)
+		}
+	}
+	if b, err := os.ReadFile(target); err != nil || string(b) != "kept\n" {
+		t.Errorf("the link's target: %q, %v", b, err)
 	}
 	if _, err := os.Lstat(other); err != nil {
-		t.Errorf("another unit's copy went: %v", err)
+		t.Errorf("another file's copy went: %v", err)
+	}
+	os.Remove(other)
+	h.copied(t, "secret\n")
+}
+
+// In a systemd unit with ProtectSystem=strict, ExecStartPre=+ runs in the
+// unit's mount namespace, where the runtime directory is a bind mount of
+// its own: a copy made in /run/niko and renamed into it failed with EXDEV
+// (systemd 257, CI). Here the runtime directory is made a mount of its own
+// in a private mount namespace; root only.
+func TestCopyCredentialRuntimeDirMount(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root: a mount namespace")
+	}
+	for _, how := range []string{"bind", "tmpfs"} {
+		h := newCredHost(t)
+		run := filepath.Dir(h.dst)
+		errc := make(chan error, 1)
+		go func() {
+			// The thread is never unlocked: it ends with this goroutine,
+			// and its namespace with it.
+			runtime.LockOSThread()
+			if err := unix.Unshare(unix.CLONE_NEWNS); err != nil {
+				errc <- errSkip{err}
+				return
+			}
+			if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
+				errc <- errSkip{err}
+				return
+			}
+			var err error
+			if how == "bind" {
+				err = unix.Mount(run, run, "", unix.MS_BIND, "")
+			} else {
+				err = unix.Mount("tmpfs", run, "tmpfs", 0, "mode=0710")
+			}
+			if err != nil {
+				errc <- errSkip{err}
+				return
+			}
+			if err := h.copy(); err != nil {
+				errc <- err
+				return
+			}
+			b, err := os.ReadFile(h.dst)
+			if err == nil && string(b) != "secret\n" {
+				err = fmt.Errorf("the copy in the mount: %q", b)
+			}
+			errc <- err
+		}()
+		err := <-errc
+		var skip errSkip
+		if errors.As(err, &skip) {
+			t.Skip(skip.err)
+		}
+		if err != nil {
+			t.Errorf("%s mount on the runtime directory: %v", how, err)
+		}
+		// No temporary file beside the runtime directory or under it (the
+		// mount is gone with its namespace).
+		h.clean(t)
 	}
 }
+
+// errSkip is a mount namespace this test cannot have.
+type errSkip struct{ err error }
+
+func (e errSkip) Error() string { return e.err.Error() }
