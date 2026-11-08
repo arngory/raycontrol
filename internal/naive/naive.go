@@ -86,8 +86,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.Log.Debug("naive: too many UDP streams")
 			panic(http.ErrAbortHandler)
 		}
-		err := s.serveUoT(r.Context(), in)
-		s.uot.put(user)
+		defer s.uot.put(user)
+		err := s.serveUoT(r.Context(), user, in, http.NewResponseController(w))
 		if err != nil {
 			s.Log.Debug("naive: UDP refused", "err", err)
 			panic(http.ErrAbortHandler)
@@ -230,6 +230,10 @@ func PublicDialer() *net.Dialer {
 
 var (
 	cgnat = netip.MustParsePrefix("100.64.0.0/10")
+	// IPv6 prefixes that carry IPv4 addresses (NAT64, 6to4, IPv4-compatible):
+	// 64:ff9b::a9fe:a9fe is 169.254.169.254 where NAT64 is routed.
+	carriesV4 = []netip.Prefix{netip.MustParsePrefix("64:ff9b::/96"), netip.MustParsePrefix("64:ff9b:1::/48"),
+		netip.MustParsePrefix("2002::/16"), netip.MustParsePrefix("::/96")}
 	local struct {
 		once  sync.Once
 		addrs map[netip.Addr]bool
@@ -242,6 +246,11 @@ func Public(a netip.Addr) bool {
 	a = a.Unmap()
 	if !a.IsGlobalUnicast() || a.IsPrivate() || cgnat.Contains(a) {
 		return false
+	}
+	for _, p := range carriesV4 {
+		if p.Contains(a) {
+			return false
+		}
 	}
 	local.once.Do(func() {
 		local.addrs = map[netip.Addr]bool{}

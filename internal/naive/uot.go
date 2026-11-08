@@ -24,45 +24,106 @@ const (
 	uotLegacyName = "sp.udp-over-tcp.arpa" // v1: not served
 
 	uotIdle       = 2 * time.Minute
-	uotMaxPayload = 65507
+	uotMaxPayload = 65507 // a client's packet
+	// uotMaxAnswer bounds the answers passed on: sing reads a UoT packet
+	// into its UDP buffer (16 KiB, 8 KiB in with_low_memory builds, less
+	// the headroom), and a longer one ends the client's whole stream. Longer
+	// answers are dropped, as a path would drop them.
+	uotMaxAnswer  = 8000
 	uotPerUser    = 64
 	uotPerService = 4096
-	uotNames      = 64   // names resolved per stream, kept
+	uotNames      = 64 // names resolved per stream, kept
+	uotNameMiss   = 30 * time.Second
 	uotPeers      = 4096 // addresses a stream sent to, whose answers come back
+	uotPeerAge    = 2 * time.Minute
+
+	// A user's new destinations and name lookups, all streams together:
+	// each destination is a conntrack entry the perimeter keeps, each name
+	// a query to the resolvers TCP shares.
+	uotPeerRate, uotPeerBurst     = 100, 200
+	uotLookupRate, uotLookupBurst = 20, 50
 )
 
 // errRefused ends a stream with a reset: the client sees an error, not an
 // empty answer.
 var errRefused = errors.New("naive: refused")
 
-// uotLimits counts the UoT streams, per user and in all.
+// uotLimits counts the UoT streams, per user and in all, and paces each
+// user's new destinations and name lookups.
 type uotLimits struct {
 	mu    sync.Mutex
 	total int
-	users map[[32]byte]int
+	users map[[32]byte]*uotUser
+}
+
+type uotUser struct {
+	streams        int
+	peers, lookups bucket
 }
 
 func (l *uotLimits) take(user [32]byte) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.total >= uotPerService || l.users[user] >= uotPerUser {
+	u := l.users[user]
+	if l.total >= uotPerService || (u != nil && u.streams >= uotPerUser) {
 		return false
 	}
-	if l.users == nil {
-		l.users = map[[32]byte]int{}
+	if u == nil {
+		if l.users == nil {
+			l.users = map[[32]byte]*uotUser{}
+		}
+		now := time.Now()
+		u = &uotUser{peers: bucket{uotPeerBurst, now}, lookups: bucket{uotLookupBurst, now}}
+		l.users[user] = u
 	}
 	l.total++
-	l.users[user]++
+	u.streams++
 	return true
 }
 
 func (l *uotLimits) put(user [32]byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	u := l.users[user]
+	if u == nil {
+		return
+	}
 	l.total--
-	if l.users[user]--; l.users[user] <= 0 {
+	if u.streams--; u.streams <= 0 {
 		delete(l.users, user)
 	}
+}
+
+// newPeer and lookup take one of the user's tokens: false when there is none.
+func (l *uotLimits) newPeer(user [32]byte) bool {
+	return l.spend(user, func(u *uotUser) *bucket { return &u.peers }, uotPeerRate, uotPeerBurst)
+}
+
+func (l *uotLimits) lookup(user [32]byte) bool {
+	return l.spend(user, func(u *uotUser) *bucket { return &u.lookups }, uotLookupRate, uotLookupBurst)
+}
+
+func (l *uotLimits) spend(user [32]byte, which func(*uotUser) *bucket, rate, burst float64) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	u := l.users[user]
+	return u != nil && which(u).take(time.Now(), rate, burst)
+}
+
+// bucket is a token bucket: rate tokens a second, up to burst.
+type bucket struct {
+	tokens float64
+	at     time.Time
+}
+
+func (b *bucket) take(now time.Time, rate, burst float64) bool {
+	b.tokens = min(burst, b.tokens+now.Sub(b.at).Seconds()*rate)
+	b.at = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
 }
 
 // uotAddr is a destination as the client names it: an address or a name.
@@ -144,27 +205,55 @@ func appendAddr(b []byte, ap netip.AddrPort) []byte {
 type uotStream struct {
 	s     *Server
 	ctx   context.Context
-	names map[string]netip.Addr
+	user  [32]byte
+	names map[string]uotResolved
 	last  atomic.Int64 // unix nanoseconds of the last packet either way
 
-	mu    sync.Mutex
-	peers map[netip.AddrPort]bool // where the client sent: answers come from these only
+	mu     sync.Mutex
+	peers  map[netip.AddrPort]int64 // where the client sent, and when: answers come from these only
+	pruned time.Time
+}
+
+// uotResolved is a name's first allowed address, or none until a moment.
+type uotResolved struct {
+	ip    netip.Addr
+	until time.Time
 }
 
 func (u *uotStream) touch() { u.last.Store(time.Now().UnixNano()) }
 
-func (u *uotStream) sent(ap netip.AddrPort) {
+// mayReach reports whether the client may send to ap: a destination it sent
+// to before, or a new one while the stream has room and the user tokens.
+func (u *uotStream) mayReach(ap netip.AddrPort) bool {
+	now := time.Now()
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if len(u.peers) < uotPeers {
-		u.peers[ap] = true
+	if _, ok := u.peers[ap]; ok {
+		u.peers[ap] = now.UnixNano()
+		return true
 	}
+	if len(u.peers) >= uotPeers && now.Sub(u.pruned) > time.Second {
+		// Those the client has not sent to for a while go, as conntrack
+		// forgets them.
+		u.pruned = now
+		for p, at := range u.peers {
+			if now.Sub(time.Unix(0, at)) > uotPeerAge {
+				delete(u.peers, p)
+			}
+		}
+	}
+	if len(u.peers) >= uotPeers || !u.s.uot.newPeer(u.user) {
+		return false
+	}
+	u.peers[ap] = now.UnixNano()
+	return true
 }
 
 func (u *uotStream) answers(ap netip.AddrPort) bool {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.peers[netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())]
+	_, ok := u.peers[netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())]
+	return ok
 }
 
 // resolve is the address a destination may be reached at: its own, or the
@@ -173,24 +262,36 @@ func (u *uotStream) resolve(a uotAddr) (netip.AddrPort, bool) {
 	if a.name == "" {
 		return netip.AddrPortFrom(a.ip, a.port), a.port != 0 && u.s.allowed(a.ip)
 	}
-	if ip, ok := u.names[a.name]; ok {
-		return netip.AddrPortFrom(ip, a.port), a.port != 0
+	if a.port == 0 {
+		return netip.AddrPort{}, false
 	}
+	if n, ok := u.names[a.name]; ok && (n.ip.IsValid() || time.Now().Before(n.until)) {
+		return netip.AddrPortFrom(n.ip, a.port), n.ip.IsValid()
+	}
+	if !u.s.uot.lookup(u.user) {
+		return netip.AddrPort{}, false
+	}
+	ip := u.lookup(a.name)
+	if _, ok := u.names[a.name]; ok || len(u.names) < uotNames {
+		u.names[a.name] = uotResolved{ip: ip, until: time.Now().Add(uotNameMiss)} // until: a miss only
+	}
+	return netip.AddrPortFrom(ip, a.port), ip.IsValid()
+}
+
+// lookup is the first allowed address of a name, or none.
+func (u *uotStream) lookup(name string) netip.Addr {
 	ctx, cancel := context.WithTimeout(u.ctx, 5*time.Second)
-	ips, err := u.s.resolve(ctx, a.name)
+	ips, err := u.s.resolve(ctx, name)
 	cancel()
 	if err != nil {
-		return netip.AddrPort{}, false
+		return netip.Addr{}
 	}
 	for _, ip := range ips {
 		if ip = ip.Unmap(); u.s.allowed(ip) {
-			if len(u.names) < uotNames {
-				u.names[a.name] = ip
-			}
-			return netip.AddrPortFrom(ip, a.port), a.port != 0
+			return ip
 		}
 	}
-	return netip.AddrPort{}, false
+	return netip.Addr{}
 }
 
 func (s *Server) allowed(ip netip.Addr) bool {
@@ -214,12 +315,25 @@ func (s *Server) resolve(ctx context.Context, name string) ([]netip.Addr, error)
 // uotResolver looks UDP destinations up as TCP's are (PublicResolver).
 var uotResolver = PublicResolver()
 
+// deadlines are the stream's, as http.ResponseController sets them.
+type deadlines interface {
+	SetReadDeadline(time.Time) error
+	SetWriteDeadline(time.Time) error
+}
+
 // serveUoT carries the stream's UDP until the client ends it, the idle time
 // runs out or ctx is done; errRefused when the stream must be reset. Only
 // this goroutine's helper writes to the stream, and it is done when this
 // returns.
-func (s *Server) serveUoT(ctx context.Context, stream io.ReadWriter) error {
-	r := bufio.NewReaderSize(stream, 64<<10)
+func (s *Server) serveUoT(ctx context.Context, user [32]byte, stream io.ReadWriter, dl deadlines) error {
+	idle := s.uotIdle
+	if idle == 0 {
+		idle = uotIdle
+	}
+	// Small: a packet's data is read past the buffer.
+	r := bufio.NewReaderSize(stream, 4<<10)
+	// A client that does not say where to holds no slot past the idle time.
+	_ = dl.SetReadDeadline(time.Now().Add(idle))
 	connect, err := r.ReadByte()
 	if err != nil {
 		return nil
@@ -234,7 +348,8 @@ func (s *Server) serveUoT(ctx context.Context, stream io.ReadWriter) error {
 		}
 		return nil
 	}
-	u := &uotStream{s: s, ctx: ctx, names: map[string]netip.Addr{}, peers: map[netip.AddrPort]bool{}}
+	_ = dl.SetReadDeadline(time.Time{})
+	u := &uotStream{s: s, ctx: ctx, user: user, names: map[string]uotResolved{}, peers: map[netip.AddrPort]int64{}}
 	u.touch()
 
 	var conn *net.UDPConn
@@ -243,11 +358,19 @@ func (s *Server) serveUoT(ctx context.Context, stream io.ReadWriter) error {
 		if !ok {
 			return fmt.Errorf("%w: %s", errRefused, dest)
 		}
-		if conn, err = net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(to)); err != nil {
+		d := net.Dialer{Control: noBroadcast}
+		c, err := d.DialContext(ctx, "udp", to.String())
+		if err != nil {
 			return fmt.Errorf("%w: %w", errRefused, err)
 		}
-	} else if conn, err = net.ListenUDP("udp", nil); err != nil {
-		return fmt.Errorf("%w: %w", errRefused, err)
+		conn = c.(*net.UDPConn)
+	} else {
+		lc := net.ListenConfig{Control: noBroadcast}
+		c, err := lc.ListenPacket(ctx, "udp", ":0")
+		if err != nil {
+			return fmt.Errorf("%w: %w", errRefused, err)
+		}
+		conn = c.(*net.UDPConn)
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -259,10 +382,6 @@ func (s *Server) serveUoT(ctx context.Context, stream io.ReadWriter) error {
 		u.downstream(conn, stream, connect == 1)
 	}()
 
-	idle := s.uotIdle
-	if idle == 0 {
-		idle = uotIdle
-	}
 	tick := time.NewTicker(idle / 8)
 	defer tick.Stop()
 	var result error
@@ -285,15 +404,36 @@ loop:
 		}
 	}
 	// The socket goes: the helpers stop; nothing writes to the stream once
-	// this returns.
+	// this returns. A write the client does not take (flow control) would
+	// hold the stream and its slot: past a second it fails.
 	_ = conn.Close()
-	<-down
+	select {
+	case <-down:
+	case <-time.After(time.Second):
+		_ = dl.SetWriteDeadline(time.Now())
+		<-down
+	}
 	return result
 }
 
+// noBroadcast takes SO_BROADCAST, which Go sets on every UDP socket, off:
+// a subnet's broadcast address looks public and would reach the node and
+// its neighbours.
+func noBroadcast(_, _ string, c syscall.RawConn) error {
+	var serr error
+	if err := c.Control(func(fd uintptr) {
+		serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 0)
+	}); err != nil {
+		return err
+	}
+	return serr
+}
+
+// uotBufs hold a client's packet while it is sent.
+var uotBufs = sync.Pool{New: func() any { return new([uotMaxPayload]byte) }}
+
 // upstream sends the client's packets; errRefused for a stream to reset.
 func (u *uotStream) upstream(r *bufio.Reader, conn *net.UDPConn, connected bool) error {
-	buf := make([]byte, uotMaxPayload)
 	for {
 		var dest uotAddr
 		if !connected {
@@ -310,53 +450,65 @@ func (u *uotStream) upstream(r *bufio.Reader, conn *net.UDPConn, connected bool)
 		if n > uotMaxPayload {
 			return fmt.Errorf("%w: a packet of %d bytes", errRefused, n)
 		}
-		if _, err := io.ReadFull(r, buf[:n]); err != nil {
-			return err
-		}
-		u.touch()
-		if connected {
-			// A destination that answers "unreachable" fails a write or
-			// two: the stream lives on, as UDP would.
-			if _, err := conn.Write(buf[:n]); errors.Is(err, net.ErrClosed) {
-				return err
-			}
-			continue
-		}
-		to, ok := u.resolve(dest)
-		if !ok {
-			continue // not allowed, or no address: dropped
-		}
-		u.sent(to)
-		if _, err := conn.WriteToUDPAddrPort(buf[:n], to); errors.Is(err, net.ErrClosed) {
+		buf := uotBufs.Get().(*[uotMaxPayload]byte)
+		err := u.send(r, conn, connected, dest, buf[:n])
+		uotBufs.Put(buf)
+		if err != nil {
 			return err
 		}
 	}
 }
 
+// send reads one packet's data into b and sends it; an error ends the stream.
+func (u *uotStream) send(r *bufio.Reader, conn *net.UDPConn, connected bool, dest uotAddr, b []byte) error {
+	if _, err := io.ReadFull(r, b); err != nil {
+		return err
+	}
+	u.touch()
+	var err error
+	if connected {
+		// A destination that answers "unreachable" fails a write or two:
+		// the stream lives on, as UDP would.
+		_, err = conn.Write(b)
+	} else if to, ok := u.resolve(dest); ok && u.mayReach(to) {
+		_, err = conn.WriteToUDPAddrPort(b, to)
+	} // else not allowed, no address or no room: dropped
+	if errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
+}
+
+// headRoom is the most an answer's head takes: an IPv6 source and the length.
+const headRoom = 1 + 16 + 2 + 2
+
 // downstream passes the answers on, each in one write (one padded frame
 // while naive pads).
 func (u *uotStream) downstream(conn *net.UDPConn, w io.Writer, connected bool) {
-	buf := make([]byte, uotMaxPayload)
-	out := make([]byte, 0, uotMaxPayload+32)
+	// One more than an answer may take: a longer one fills it, and goes.
+	buf := make([]byte, headRoom+uotMaxAnswer+1)
+	var head [headRoom]byte
 	for {
-		n, from, err := conn.ReadFromUDPAddrPort(buf)
-		if errors.Is(err, syscall.ECONNREFUSED) {
-			continue // the destination's port is closed: UDP goes on
-		}
+		n, from, err := conn.ReadFromUDPAddrPort(buf[headRoom:])
 		if err != nil {
+			var errno syscall.Errno
+			if errors.As(err, &errno) {
+				continue // an ICMP error on a connected socket: UDP goes on
+			}
 			return
 		}
-		if !connected && !u.answers(from) {
+		if n > uotMaxAnswer || (!connected && !u.answers(from)) {
 			continue
 		}
 		u.touch()
-		out = out[:0]
+		h := head[:0]
 		if !connected {
-			out = appendAddr(out, from)
+			h = appendAddr(h, from)
 		}
-		out = binary.BigEndian.AppendUint16(out, uint16(n)) //nolint:gosec // G115: n ≤ uotMaxPayload
-		out = append(out, buf[:n]...)
-		if _, err := w.Write(out); err != nil {
+		h = binary.BigEndian.AppendUint16(h, uint16(n)) //nolint:gosec // G115: n ≤ uotMaxAnswer
+		start := headRoom - len(h)
+		copy(buf[start:headRoom], h)
+		if _, err := w.Write(buf[start : headRoom+n]); err != nil {
 			return
 		}
 	}

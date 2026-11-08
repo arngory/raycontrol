@@ -18,7 +18,8 @@
 Везде:
 - назначение — только публичный unicast: частные сети, loopback, link-local, CGNAT, multicast и сама нода закрыты
   (Xray — правило `privateNets`, `internal/render/render.go:1157`; niko-server и naive — проверка адреса и
-  `IPAddressDeny=` юнита);
+  `IPAddressDeny=` юнита). Broadcast своей подсети закрыт периметром для UDP всех профилей; IPv6 с IPv4 внутри (NAT64,
+  6to4) — у Xray и naive;
 - портов не фильтрует никто, 25 (SMTP) тоже;
 - BitTorrent режет только выход Xray, и только по сниффингу открытого рукопожатия (`render.go:1213`). Hysteria2 и naive
   его пропускают, зашифрованный BitTorrent (MSE) не ловит никто.
