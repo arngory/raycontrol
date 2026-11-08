@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/netip"
 	"strings"
 	"sync"
@@ -41,8 +40,8 @@ type Zone struct {
 	// Host is the node's public address (or a name of it): the delegation
 	// must lead there.
 	Host string
-	// Front is where the front is asked on the node; zero: the host's
-	// address when it is this host's, else 127.0.0.1:53.
+	// Front is where the front is asked on the node; zero: 127.0.0.1:53
+	// (frontAddr).
 	Front    netip.AddrPort
 	ProbeKey Key    // dnsprobe-v1 (dnstt, slipstream: the front answers it)
 	Seal     string // dnsseal-v1 mode (dnstt): off, optional or required
@@ -131,8 +130,6 @@ type Report struct {
 type Checker struct {
 	Net    Exchanger        // nil: Net{}
 	System []netip.AddrPort // recursive resolvers that find the parents; nil: the host's (SystemResolvers)
-	// Local reports an address of this host; nil: its interfaces.
-	Local func(netip.Addr) bool
 	// Private lets the walk ask a parent's server at an address no public
 	// server has (PublicAddr): tests, and labs (rayd -dns-check-private).
 	// Off, such servers are not asked, wherever a zone's DNS points.
@@ -190,22 +187,6 @@ func (c *Checker) asker(network string, addr netip.AddrPort, budget int) *asker 
 	return &asker{c: c, net: network, addr: addr, budget: budget}
 }
 
-func (c *Checker) local(a netip.Addr) bool {
-	if c.Local != nil {
-		return c.Local(a)
-	}
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return false
-	}
-	for _, ia := range addrs {
-		if p, err := netip.ParsePrefix(ia.String()); err == nil && p.Addr().Unmap() == a.Unmap() {
-			return true
-		}
-	}
-	return false
-}
-
 // Check checks the zones in one round: the parents first; then, only for
 // zones the parent delegates to the node, the resolvers, while the front
 // and the backend are asked on the node. parentOnly stops after the
@@ -241,7 +222,7 @@ func (c *Checker) Check(ctx context.Context, zones []Zone, resolvers []Resolver,
 	// On the node: the front, and the backend behind it.
 	for i, z := range zones {
 		wg.Go(func() {
-			front := c.frontAddr(z, nodes[i])
+			front := frontAddr(z)
 			rep.Zones[i].Front = c.front(ctx, z, front)
 			if z.Kind == "dnstt" {
 				rep.Zones[i].Backend = c.backend(ctx, z, front)
@@ -268,17 +249,16 @@ func (c *Checker) Check(ctx context.Context, zones []Zone, resolvers []Resolver,
 	return rep
 }
 
-// frontAddr is where the front is asked: the host's address when it is
-// this host's (another server bound to it would take the zone's queries),
-// else loopback, which the front listens on too.
-func (c *Checker) frontAddr(z Zone, node []netip.Addr) netip.AddrPort {
+// frontAddr is where the front is asked: over loopback, which it
+// listens on too (0.0.0.0:53). Not the node's public address: the front's
+// answer to it would go over lo to a local address, which the perimeter
+// refuses to the data plane (S-2): every node with its address on an
+// interface saw "no answer" there, its clients' tunnels working. A DNS
+// server holding the public address beside the front is rayd's port53
+// check.
+func frontAddr(z Zone) netip.AddrPort {
 	if z.Front.IsValid() {
 		return z.Front
-	}
-	for _, a := range node {
-		if c.local(a) {
-			return netip.AddrPortFrom(a, 53)
-		}
 	}
 	return netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 53)
 }

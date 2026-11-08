@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/arngory/raycontrol/internal/dnscheck"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/spa"
 )
@@ -830,4 +831,80 @@ func dialAs(uid int, addr [4]byte, port int) error {
 	tv := unix.Timeval{Sec: 2}
 	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_SNDTIMEO, &tv)
 	return unix.Connect(fd, &unix.SockaddrInet4{Port: port, Addr: addr})
+}
+
+// The node's own check of its DNS zones (dnscheck) under the real ruleset:
+// the front (uid 9100, data plane) on 0.0.0.0:53 answers over loopback,
+// while its answer to the node's public address goes over lo to a local
+// address, which the output chain refuses to the data plane (S-2). A
+// v0.13.0-v0.18.0 node asked there and saw "no answer in 5s (last ok
+// never)" for every zone, its clients' tunnels working.
+func TestNetnsNodeChecksItsFront(t *testing.T) {
+	if os.Getenv("RAYCONTROL_NETNS_TEST") != "1" {
+		t.Skip("set RAYCONTROL_NETNS_TEST=1 and run as root under unshare -n")
+	}
+	loUp(t)
+	for _, args := range [][]string{
+		{"link", "add", "rc-fa", "type", "veth", "peer", "name", "rc-fb"},
+		{"addr", "add", "192.0.2.20/24", "dev", "rc-fa"},
+		{"link", "set", "rc-fa", "up"},
+		{"link", "set", "rc-fb", "up"},
+	} {
+		if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
+			t.Fatalf("ip %v: %v %s", args, err, out)
+		}
+	}
+	defer exec.Command("ip", "link", "del", "rc-fa").Run() //nolint:errcheck
+	fw := &NFT{NflogGroup: 7}
+	if err := fw.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Teardown()
+	if err := fw.SetPublic([]Port{{"udp", 53}}); err != nil {
+		t.Fatal(err)
+	}
+	// The front: NXDOMAIN to every query, from a socket of uid 9100.
+	runtime.LockOSThread()
+	unix.Setfsuid(9100)
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+	unix.Setfsuid(0)
+	runtime.UnlockOSThread()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Bind(fd, &unix.SockaddrInet4{Port: 53}); err != nil {
+		t.Fatal(err)
+	}
+	pc, err := net.FilePacketConn(os.NewFile(uintptr(fd), "front"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	go func() {
+		b := make([]byte, 1500)
+		for {
+			n, from, err := pc.ReadFrom(b)
+			if err != nil {
+				return
+			}
+			if n >= 12 {
+				b[2] |= 0x80                   // QR
+				b[3] = b[3]&0xf0 | 3           // NXDOMAIN
+				_, _ = pc.WriteTo(b[:n], from) // refused by the kernel to a local address
+			}
+		}
+	}()
+
+	z := dnscheck.Zone{Service: "mdns", Kind: "masterdns", Name: "t.example.com", Host: "192.0.2.20"}
+	c := &dnscheck.Checker{System: []netip.AddrPort{netip.MustParseAddrPort("127.0.0.1:9")}, Retry: 200 * time.Millisecond,
+		GiveUp: time.Second, Round: 5 * time.Second}
+	front := c.Check(context.Background(), []dnscheck.Zone{z}, nil, false).Zones[0].Front
+	if front.State != dnscheck.OK || !strings.HasPrefix(front.Detail, "answers on 127.0.0.1:53") {
+		t.Errorf("the node's check of its front: %+v", front)
+	}
+	// Why not the public address: the answer does not come back.
+	z.Front = netip.MustParseAddrPort("192.0.2.20:53")
+	if front := c.Check(context.Background(), []dnscheck.Zone{z}, nil, false).Zones[0].Front; front.State != dnscheck.Fail {
+		t.Errorf("the front's answer to the node's public address passed the output chain: %+v", front)
+	}
 }

@@ -130,7 +130,7 @@ func TestCheckDNSZones(t *testing.T) {
 	resolvers, _ := dnscheck.ParseResolvers(dnscheck.DefaultResolvers)
 	mon := dnsMonitor(ctx, st, resolvers, hb, log)
 	mon.Checker = &dnscheck.Checker{Net: fake, System: []netip.AddrPort{netip.MustParseAddrPort("192.0.2.53:53")},
-		Local: func(netip.Addr) bool { return false }, Private: true, Retry: 5 * time.Millisecond, GiveUp: 20 * time.Millisecond}
+		Private: true, Retry: 5 * time.Millisecond, GiveUp: 20 * time.Millisecond}
 	var mu sync.Mutex
 	wake := make(chan struct{})
 	changes := func() <-chan struct{} {
@@ -258,7 +258,7 @@ func TestCheckDNSZonesChangeDuringError(t *testing.T) {
 	resolvers, _ := dnscheck.ParseResolvers(dnscheck.DefaultResolvers)
 	mon := dnsMonitor(ctx, st, resolvers, hb, log)
 	mon.Checker = &dnscheck.Checker{Net: fake, System: []netip.AddrPort{netip.MustParseAddrPort("192.0.2.53:53")},
-		Local: func(netip.Addr) bool { return false }, Private: true, Retry: 5 * time.Millisecond, GiveUp: 20 * time.Millisecond}
+		Private: true, Retry: 5 * time.Millisecond, GiveUp: 20 * time.Millisecond}
 	var mu sync.Mutex
 	wake := make(chan struct{})
 	changes := func() <-chan struct{} { mu.Lock(); defer mu.Unlock(); return wake }

@@ -27,7 +27,7 @@ import (
 
 var (
 	nodeAddr   = netip.MustParseAddr("203.0.113.7")
-	nodeFront  = netip.AddrPortFrom(nodeAddr, 53)
+	nodeFront  = netip.MustParseAddrPort("127.0.0.1:53") // the front, asked over loopback
 	systemAddr = netip.MustParseAddrPort("192.0.2.53:53")
 	parentIPs  = []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2"), netip.MustParseAddr("192.0.2.3")}
 	elsewhere  = netip.MustParseAddr("198.51.100.9")
@@ -694,7 +694,7 @@ func newWorld(t *testing.T) *world {
 	w.resolver("8.8.8.8", &resolverSim{egress: netip.MustParseAddr("172.253.0.1"), edns: 1400, case20: true})
 	w.resolver("1.1.1.1", &resolverSim{egress: netip.MustParseAddr("162.158.0.1"), edns: 1232})
 	w.resolver("9.9.9.9", &resolverSim{egress: netip.MustParseAddr("74.63.16.1"), edns: 1232, minimise: true})
-	w.checker = &Checker{Net: w.net, System: []netip.AddrPort{systemAddr}, Local: func(a netip.Addr) bool { return a == nodeAddr }, Private: true,
+	w.checker = &Checker{Net: w.net, System: []netip.AddrPort{systemAddr}, Private: true,
 		Retry: 40 * time.Millisecond, GiveUp: 150 * time.Millisecond, Round: 5 * time.Second}
 	return w
 }
