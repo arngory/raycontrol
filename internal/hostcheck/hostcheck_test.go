@@ -294,12 +294,19 @@ func TestICMPSockets(t *testing.T) {
 		{"1\t0\n", true, false},
 		{"9100\t9178\n", true, false},
 		{"1\t0\n", false, true}, // off: no such check
+		{"", true, false},       // not read: cannot tell, not good
 	} {
 		os.WriteFile(path, []byte(c.value), 0o644)
 		rs := h.Check(context.Background(), Options{Host: "203.0.113.7", ICMP: c.on})
 		r, found := find(rs, Advised, "ICMP sockets")
 		if found != c.on || (found && r.OK != c.ok) {
 			t.Errorf("%q, icmp %v: found %v, %+v", c.value, c.on, found, r)
+		}
+		if c.value == "" {
+			if !strings.Contains(r.Detail, "cannot be told") {
+				t.Errorf("unread: %+v", r)
+			}
+			continue
 		}
 		if found && !r.OK && (!strings.Contains(r.Detail, "net.ipv4.ping_group_range "+strings.Join(strings.Fields(c.value), " ")) || !strings.Contains(r.Fix, "rayctl apply")) {
 			t.Errorf("%q: %+v", c.value, r)
