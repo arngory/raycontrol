@@ -788,7 +788,10 @@ func (s *Store) RevokeDevice(ctx context.Context, id string) error {
 // devices registered through it (they have a client certificate), and the
 // user's enabled services while the user is Active: one over the traffic
 // limit keeps the subscription and the API, no data service
-// (traffic-limit-v1 §3.1). Active invites pass too, to the API only (R3-3).
+// (traffic-limit-v1 §3.1). Active invites pass too, to the API only (R3-3),
+// and so do invites used less than InviteReplayWindow ago while their
+// device is not revoked: a client that lost Register's answer asks again
+// with the invite (api-v1 §4.1).
 func (s *Store) SPADevices(ctx context.Context) ([]spa.Device, error) {
 	now := s.now()
 	users, err := s.ListUsers(ctx)
@@ -833,8 +836,9 @@ func (s *Store) SPADevices(ctx context.Context) ([]spa.Device, error) {
 		FROM devices d WHERE d.revoked_at IS NULL
 		UNION ALL
 		SELECT i.id, i.spa_key, i.user_id, 0, 1
-		FROM invites i WHERE i.used_at IS NULL AND i.expires_at > ?
-		ORDER BY 1`, now.Unix())
+		FROM invites i WHERE (i.used_at IS NULL AND i.expires_at > ?)
+			OR (i.used_at > ? AND EXISTS (SELECT 1 FROM devices d WHERE d.id = i.device_id AND d.revoked_at IS NULL))
+		ORDER BY 1`, now.Unix(), now.Add(-InviteReplayWindow).Unix())
 	if err != nil {
 		return nil, err
 	}

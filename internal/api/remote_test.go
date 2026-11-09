@@ -338,7 +338,8 @@ func TestRemoteAPI(t *testing.T) {
 	if _, err := newRemoteDevice(t, addr, pin).register(ctx, code, now); connect.CodeOf(err) != connect.CodeNotFound {
 		t.Fatalf("an invite used twice: %v", err)
 	}
-	if scope(inv.DeviceID) != nil || !slices.Contains(scope(reg.DeviceId), inv.Services[0].ID) {
+	// The used invite keeps the API for the replay window (api-v1 §4.1).
+	if !slices.Equal(scope(inv.DeviceID), []uint16{inv.Services[0].ID}) || !slices.Contains(scope(reg.DeviceId), inv.Services[0].ID) {
 		t.Fatalf("after registration: invite %v, device %v", scope(inv.DeviceID), scope(reg.DeviceId))
 	}
 

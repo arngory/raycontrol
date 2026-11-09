@@ -154,7 +154,8 @@ RCINV2:<base32 RFC 4648, верхний регистр, без '='>
      `"raycontrol-invite-pin-v1"` ‖ PIN ASCII-цифрами, без пробелов).
 6. Ответ: `bundle` — полный `rcdev1:` нового устройства (новый ключ SPA, `node_keys`, `sub`, сервисы пользователя, а
    для роли `admin` ещё `api` и сервис `api`), `device_id`, `role`. Клиент импортирует пакет как обычно.
-7. Приглашение израсходовано. Его доступы SPA закрываются, поэтому дальше клиент проходит SPA уже ключом из пакета.
+7. Приглашение израсходовано. Его доступы SPA закрываются (через 15 минут, см. §4.1), поэтому дальше клиент проходит
+   SPA уже ключом из пакета.
 
 Любой отказ — `not_found` без подробностей: приглашение неизвестно, использовано, истекло или отозвано; неверный
 `mac`; часы расходятся больше чем на 2 минуты; этот клиентский ключ уже принадлежит другому устройству.
@@ -167,6 +168,27 @@ RCINV2:<base32 RFC 4648, верхний регистр, без '='>
 - Сравнение за постоянное время. Если свежее
 приглашение отклонено, его мог использовать кто-то другой: клиенту стоит сказать пользователю, чтобы администратор
 проверил `rayctl device list` и отозвал лишнее.
+
+### 4.1 Repeated Register (raycontrol v0.24.0)
+
+A client that lost Register's answer (timeout, dropped connection) may send it again; before v0.24.0 the retry got
+`not_found`, as for any used invite, and the client was left with neither a device nor an invite.
+
+- The node answers a repeated `Register` for an invite (`rcinv1:` and `RCINV2:` alike) already used **by the same
+  client certificate** (the TLS client key's `pin`, which the MAC covers) **within 15 minutes of its first use** with
+  the first answer: the same `device_id` and `role`, and a `bundle` built again from the node's current state for that
+  same device (same SPA key; the rest equal to the first one unless the admin changed the node or the user in between).
+  No new user, device or key is made; the audit log gets `device.register-replay:<role>`, not a second
+  `device.register`.
+- The proofs are checked again as in §4: `minute` within ±2, `mac` for this certificate, and for an invite with a PIN
+  the right `pin_proof`. A wrong or missing `pin_proof` on a repeat is `not_found` and spends no try (whoever gets this
+  far already holds the device's key).
+- For those 15 minutes the invite's SPA key still opens the API port (scope `[api]`, as before use), so the retry goes
+  the way the first request did: SPA with the invite key, TLS with the same client certificate, `Register` with the
+  same invite. The client keeps the certificate key per invite for at least that long.
+- Everything else is unchanged `not_found`: another certificate, more than 15 minutes after the first use, the device
+  revoked or its certificate rotated, the user disabled or expired.
+- Duplicates sent at the same time all get the one device.
 
 ## 5. Роли
 

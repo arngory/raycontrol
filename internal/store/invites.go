@@ -207,6 +207,48 @@ func (s *Store) UseInvite(ctx context.Context, id, certPin string) (Device, [spa
 	return d, key, err
 }
 
+// InviteReplayWindow is how long after its use an invite still answers a
+// repeated Register from the same client certificate with the same
+// device (api-v1 §4.1): the client lost the first answer.
+const InviteReplayWindow = 15 * time.Minute
+
+// ReplayInvite returns what UseInvite gave for an invite used less than
+// InviteReplayWindow ago by the client certificate certPin: the invite
+// with its key (to check the request's proofs again) and the device it
+// became with its SPA key, read back from the store, nothing new. The
+// device must still be active and still have that certificate; otherwise,
+// as for any other certificate or a later time, it is ErrNotFound.
+func (s *Store) ReplayInvite(ctx context.Context, id, certPin string) (Invite, [spa.KeySize]byte, Device, [spa.KeySize]byte, error) {
+	var inv Invite
+	var key, devKey [spa.KeySize]byte
+	var d Device
+	if certPin == "" {
+		return inv, key, d, devKey, fmt.Errorf("invite %q: %w", id, ErrNotFound)
+	}
+	var raw []byte
+	var created, expires, used int64
+	err := s.db.QueryRowContext(ctx, `SELECT i.id, u.name, i.name, i.role, i.spa_key, i.created_at, i.expires_at, i.used_at,
+			i.device_id, i.pin_proof, i.pin_tries
+		FROM invites i JOIN users u ON u.id = i.user_id JOIN devices d ON d.id = i.device_id
+		WHERE i.id = ? AND i.used_at > ? AND d.cert_pin = ?`,
+		id, s.now().Add(-InviteReplayWindow).Unix(), certPin).Scan(&inv.ID, &inv.UserName, &inv.Name, &inv.Role, &raw,
+		&created, &expires, &used, &inv.DeviceID, &inv.PinProof, &inv.PinTries)
+	if errors.Is(err, sql.ErrNoRows) {
+		return inv, key, d, devKey, fmt.Errorf("invite %q: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return inv, key, d, devKey, err
+	}
+	copy(key[:], raw)
+	u := time.Unix(used, 0)
+	inv.CreatedAt, inv.ExpiresAt, inv.UsedAt = time.Unix(created, 0), time.Unix(expires, 0), &u
+	if d, devKey, err = s.ActiveDevice(ctx, inv.DeviceID); err != nil {
+		return inv, key, d, devKey, err
+	}
+	d.CertPin = certPin
+	return inv, key, d, devKey, nil
+}
+
 // DeviceByCertPin returns the active device registered with the client
 // certificate key.
 func (s *Store) DeviceByCertPin(ctx context.Context, pin string) (Device, error) {

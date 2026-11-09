@@ -266,12 +266,9 @@ func (r *Remote) Register(ctx context.Context, req *connect.Request[devicev1.Reg
 	pin := pinFrom(ctx)
 	inv, key, err := s.Store.ActiveInvite(ctx, req.Msg.InviteId)
 	if err != nil {
-		return nil, errInvite
+		return r.replayRegister(ctx, req.Msg, pin)
 	}
-	if d := r.clock().Unix()/60 - req.Msg.Minute; d < -2 || d > 2 {
-		return nil, errInvite
-	}
-	if !hmac.Equal(req.Msg.Mac, RegisterMAC(key, req.Msg.Minute, pin)) {
+	if !r.registerProved(req.Msg, key, pin) {
 		return nil, errInvite
 	}
 	ctx = context.WithValue(ctx, actorKey{}, "invite "+inv.ID)
@@ -298,6 +295,11 @@ func (r *Remote) Register(ctx context.Context, req *connect.Request[devicev1.Reg
 		}
 	}
 	d, devKey, err := s.Store.UseInvite(ctx, inv.ID, pin)
+	if errors.Is(err, store.ErrNotFound) {
+		// Used since ActiveInvite: by a duplicate of this request, which
+		// gets the same answer, or by another certificate, which not.
+		return r.replayRegister(ctx, req.Msg, pin)
+	}
 	var bundle string
 	if err == nil {
 		bundle, err = s.bundle(ctx, d, devKey)
@@ -305,6 +307,40 @@ func (r *Remote) Register(ctx context.Context, req *connect.Request[devicev1.Reg
 	if err := s.done(ctx, "device.register:"+inv.Role, inv.UserName+"/"+inv.Name, err); err != nil {
 		r.Log.Debug("register", "err", err)
 		return nil, errInvite
+	}
+	return connect.NewResponse(&devicev1.RegisterResponse{Bundle: bundle, DeviceId: d.ID, Role: d.Role}), nil
+}
+
+// registerProved checks a Register's minute and MAC against an invite key
+// and the connection's certificate.
+func (r *Remote) registerProved(msg *devicev1.RegisterRequest, key [spa.KeySize]byte, pin string) bool {
+	if d := r.clock().Unix()/60 - msg.Minute; d < -2 || d > 2 {
+		return false
+	}
+	return hmac.Equal(msg.Mac, RegisterMAC(key, msg.Minute, pin))
+}
+
+// replayRegister answers a Register for an invite already used (api-v1
+// §4.1): the same certificate within store.InviteReplayWindow gets the
+// same device and a bundle rebuilt from the store, after the same proofs
+// (minute, MAC, PIN); nothing new is made, and no PIN try is spent. Any
+// other case is the usual errInvite.
+func (r *Remote) replayRegister(ctx context.Context, msg *devicev1.RegisterRequest, pin string) (*connect.Response[devicev1.RegisterResponse], error) {
+	s := r.Server
+	inv, key, d, devKey, err := s.Store.ReplayInvite(ctx, msg.InviteId, pin)
+	if err != nil || !r.registerProved(msg, key, pin) {
+		return nil, errInvite
+	}
+	if inv.PinProof != nil && !hmac.Equal(msg.PinProof, inv.PinProof) {
+		return nil, errInvite
+	}
+	bundle, err := s.bundle(ctx, d, devKey)
+	if err != nil {
+		r.Log.Debug("register replay", "err", err)
+		return nil, errInvite
+	}
+	if aerr := s.Store.Audit(ctx, "invite "+inv.ID, "device.register-replay:"+inv.Role, inv.UserName+"/"+inv.Name, "ok"); aerr != nil {
+		r.Log.Debug("register replay audit", "err", aerr)
 	}
 	return connect.NewResponse(&devicev1.RegisterResponse{Bundle: bundle, DeviceId: d.ID, Role: d.Role}), nil
 }
