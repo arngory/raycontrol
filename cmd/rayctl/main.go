@@ -119,8 +119,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             profile (spec/egress-policy-v1.md; root, on the node)
   conn-limit [show]                         the connection limits: on or off, their numbers, the
                                             conntrack table, the guard, users at a limit in 15 min
-  conn-limit on|off                         per-user limits (naive) and the per-address limit on new
-                                            inbound connections (spec/conn-limit-v1.md; root, on the node)
+  conn-limit on|off                         per-user limits (naive, Hysteria2, Xray) and the
+                                            per-address limit on new inbound connections
+                                            (spec/conn-limit-v1.md; root, on the node)
 
   check [-host ADDR] [-domain D] [-services a,b]
                                               whether this host can run a node: what is required (install

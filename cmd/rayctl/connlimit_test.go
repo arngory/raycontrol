@@ -82,7 +82,8 @@ func TestConnLimitCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"limits  ", "on (rayctl conn-limit off)", "58100 of 65536 (88%)", "3 connections dropped in 15 min",
-		"ON for 2m", "u5 (nv: 1340 in 15 min)", "refused nv", "tcp 1340", "only root sees it", "TCP 1024 at once"} {
+		"ON for 2m", "u5 (nv: 1340 in 15 min)", "refused nv", "tcp 1340", "only root sees it", "TCP 1024 at once",
+		"naive, Xray (REALITY, the inner stage); Hysteria2 " + hysteriaLimits(), "naive, Hysteria2 and Xray process", "lookups 20/s"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("show lacks %q:\n%s", want, out)
 		}
@@ -99,7 +100,8 @@ func TestConnLimitCommand(t *testing.T) {
 	}
 	if out, err = captureStdout(t, func() error { return c.connLimit(ctx, []string{"off"}) }); err != nil || len(n.sets) != 1 || !n.sets[0] ||
 		!strings.Contains(out, "connection limits off within seconds") || !strings.Contains(out, "the guard stay") ||
-		!strings.Contains(out, "relays from v0.24.0") || !strings.Contains(out, "bootstrap.sh -relay") {
+		!strings.Contains(out, "relays from v0.24.0") || !strings.Contains(out, "bootstrap.sh -relay") ||
+		!strings.Contains(out, "of naive (its UDP limits from before") || !strings.Contains(out, "Xray\n(REALITY, the inner stage) restarts once") {
 		t.Fatalf("off: %v %v\n%s", err, n.sets, out)
 	}
 	if out, _ = captureStdout(t, func() error { return c.connLimit(ctx, nil) }); !strings.Contains(out, "off (rayctl conn-limit on)") || strings.Contains(out, "TCP 1024") {
