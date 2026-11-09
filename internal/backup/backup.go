@@ -71,8 +71,11 @@ func Open(file []byte, passphrase string) ([]byte, error) {
 	if len(file) < head+chacha20poly1305.Overhead || string(file[:len(Magic)]) != Magic {
 		return nil, errors.New("backup: not a raycontrol backup")
 	}
+	// The cost is paid before the tag is checked: at most what Seal writes
+	// (and has since R4-13) with a step of margin, 128 MiB and two
+	// passes, so a crafted header cannot ask for gigabytes or minutes.
 	n, rr, pp := file[len(Magic)], file[len(Magic)+1], file[len(Magic)+2]
-	if n < 10 || n > 22 || rr == 0 || rr > 32 || pp == 0 || pp > 16 {
+	if n < 10 || n > logN+1 || rr == 0 || rr > r || pp == 0 || pp > p+1 {
 		return nil, errors.New("backup: unsupported key parameters")
 	}
 	salt := file[len(Magic)+3 : len(Magic)+19]
