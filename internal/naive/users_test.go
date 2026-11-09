@@ -330,10 +330,10 @@ func TestRotationSwitchKeepsStreams(t *testing.T) {
 }
 
 // The names rayd gives from v0.23.0: each credential its own, for its whole
-// life (u1-<fingerprint>). The update renames every password once, from
-// its role's name to its own: the same user's, no stream is cut. A switch
-// then leaves the file's names as they were; the grace's end takes the
-// previous one, and its stream, away.
+// life (u1-<fingerprint>). A password renamed within its user, from its
+// role's name to its own or back (a rollback), is the same user's: no
+// stream is cut. A switch leaves the file's names as they were; the
+// grace's end takes the previous one, and its stream, away.
 func TestStableNamesKeepStreams(t *testing.T) {
 	const oldName, newName = "u1-0123456789abcdef", "u1-fedcba9876543210"
 	path := filepath.Join(t.TempDir(), "users.json")
@@ -355,10 +355,17 @@ func TestStableNamesKeepStreams(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 		u.Accepts("x") // a request reads the file
 	}
-	// The update: names by role become the credentials' own.
-	step(map[string]string{"old": oldName, "new": newName, "bob": "u12-00000000000000ff"})
-	if onOld.ctx.Err() != nil || onNew.ctx.Err() != nil || onBob.ctx.Err() != nil {
-		t.Fatalf("the update cut streams: %v, %v, %v", context.Cause(onOld.ctx), context.Cause(onNew.ctx), context.Cause(onBob.ctx))
+	// Names by role become the credentials' own, and back (a rollback),
+	// and own again.
+	for i, names := range []map[string]string{
+		{"old": oldName, "new": newName, "bob": "u12-00000000000000ff"},
+		{"old": "u1-p", "new": "u1", "bob": "u12"},
+		{"old": oldName, "new": newName, "bob": "u12-00000000000000ff"},
+	} {
+		step(names)
+		if onOld.ctx.Err() != nil || onNew.ctx.Err() != nil || onBob.ctx.Err() != nil {
+			t.Fatalf("rename %d cut streams: %v, %v, %v", i, context.Cause(onOld.ctx), context.Cause(onNew.ctx), context.Cause(onBob.ctx))
+		}
 	}
 	// The switch: nothing in the file changes.
 	step(map[string]string{"old": oldName, "new": newName, "bob": "u12-00000000000000ff"})

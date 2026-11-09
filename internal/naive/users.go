@@ -233,10 +233,11 @@ func (u *Users) reload() {
 	for hash, ss := range u.live {
 		// A password that stays with its user keeps its streams: a
 		// credential keeps its name through a switch, and a name that
-		// changes but stays the user's is the same user's (u5 becoming
-		// u5-<fingerprint> at the update to v0.23.0; after a rollback, the
-		// names by role, which move at a switch: u5-n becomes u5, u5 becomes
-		// u5-p). Its streams count on under the name they came in with.
+		// changes but stays the user's is the same user's (u5-<fingerprint>
+		// becoming u5 when a rollback brings back a rayd before v0.23.0,
+		// whose names go by the role and move at a switch: u5-n becomes u5,
+		// u5 becomes u5-p). Its streams count on under the name they came in
+		// with.
 		if name, ok := next[hash]; ok && baseName(name) == baseName(u.byHash[hash]) {
 			continue
 		}
