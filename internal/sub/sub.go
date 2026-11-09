@@ -100,6 +100,10 @@ type Payload struct {
 	// Traffic is the user's traffic limit and its count
 	// (spec/traffic-limit-v1.md §4): only for a user with a limit.
 	Traffic *TrafficHint `json:"traffic,omitempty"`
+	// LAN is the user's devices over Yggdrasil (spec/lan-v1.md §1.2): only
+	// for a user the administrator lets have it, with a Yggdrasil profile;
+	// its password and devices only for a device that shows itself.
+	LAN *LAN `json:"lan,omitempty"`
 }
 
 // TrafficHint is a user's traffic limit: Used bytes (up + down, as the

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/netip"
@@ -390,18 +391,19 @@ func TestRotationInSubscription(t *testing.T) {
 		t.Fatalf("profile %+v", p)
 	}
 	_, users := render.XrayUsers(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })])
-	if len(users) != 2 || users["u"+strconv.FormatInt(u.ID, 10)+"-n"] != next {
+	if len(users) != 2 || users[store.CredentialName(u.ID, next)] != next || users[store.CredentialName(u.ID, first)] != first {
 		t.Fatalf("server accepts %v while rotating", users)
 	}
 
-	// After the switch the old UUID stays accepted for the grace period.
+	// After the switch the old UUID stays accepted for the grace period,
+	// under its name: the server's users are the same as before.
 	if _, err := st.RotateCredentials(ctx, time.Now().Add(31*day), r, render.NewUUID); err != nil {
 		t.Fatal(err)
 	}
 	m, _ = render.Collect(ctx, st)
-	_, users = render.XrayUsers(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })])
-	if m.Creds[svc.ID][u.ID] != next || users["u"+strconv.FormatInt(u.ID, 10)+"-p"] != first {
-		t.Fatalf("after the switch: current %s, users %v", m.Creds[svc.ID][u.ID], users)
+	_, after := render.XrayUsers(m, m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == svc.ID })])
+	if m.Creds[svc.ID][u.ID] != next || !maps.Equal(after, users) {
+		t.Fatalf("after the switch: current %s, users %v, before %v", m.Creds[svc.ID][u.ID], after, users)
 	}
 	if profiles, _ = sub.Profiles(m, m.Users[0]); profiles[0].Next != nil {
 		t.Fatalf("next after the switch: %+v", profiles[0].Next)

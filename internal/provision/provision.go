@@ -864,6 +864,16 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			}
 			v = peers
 		}
+	case svc.Kind == "yggdrasil" && key == "lan_relay":
+		// The ceiling of LAN traffic through the node (lan-v1 §4.4), Mbit/s
+		// a user, its bytes in the traffic limit; 0: the devices meet
+		// directly in one Wi-Fi only. Kept as set, 0 too (a number, not a
+		// removal): unset is niko-server's LANRelayDefault.
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 || n > 100000 {
+			return svc, fmt.Errorf("%w lan_relay: Mbit/s a user, 0 to 100000 (0: directly in one Wi-Fi only; %d unless set)", store.ErrInvalid, LANRelayDefault)
+		}
+		v = json.Number(strconv.Itoa(n))
 	case (svc.Kind == "dnstt" || svc.Kind == "masterdns") && key == "auth_hint":
 		// dnsauth-v2 (spec/dnsauth-v2.md §4): optional finds a v2 tag by
 		// its hint and still scans for v1; required takes no v1 tag at
@@ -923,7 +933,7 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			v = 0
 		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; naive: icmp; yggdrasil: peers; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; naive: icmp; yggdrasil: peers, lan_relay; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
@@ -932,7 +942,7 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 	also[key] = v
 	for k, x := range also {
 		settings[k] = x
-		if x == 0 {
+		if x == 0 { // the int 0 only: json.Number("0") is kept
 			delete(settings, k)
 		}
 	}
@@ -945,6 +955,32 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 	}
 	svc.Settings = string(b)
 	return svc, nil
+}
+
+// LANRelayDefault is niko-server's ceiling of LAN traffic through the node
+// (lan-v1 §4.4), Mbit/s a user, when a Yggdrasil backend's options leave
+// lan_relay_mbps out.
+const LANRelayDefault = 20
+
+// LANRelay is a Yggdrasil service's ceiling of device-to-device traffic
+// through the node, Mbit/s a user (rayctl service set NAME lan_relay=N):
+// LANRelayDefault unless set; 0: none, directly in one Wi-Fi only.
+func LANRelay(s store.Service) int {
+	r, _ := LANRelaySet(s)
+	return r
+}
+
+// LANRelaySet is LANRelay, and whether the administrator set it: render
+// writes a set value as it is, the default too, so that the node keeps
+// what was set whatever niko-server's own default.
+func LANRelaySet(s store.Service) (int, bool) {
+	var st struct {
+		Relay *int `json:"lan_relay"`
+	}
+	if json.Unmarshal([]byte(s.Settings), &st) != nil || st.Relay == nil || *st.Relay < 0 {
+		return LANRelayDefault, false
+	}
+	return *st.Relay, true
 }
 
 // MaxYggdrasilPeers bounds the public peers of a Yggdrasil service.

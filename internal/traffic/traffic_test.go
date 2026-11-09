@@ -32,8 +32,9 @@ type node struct {
 	mu       sync.Mutex
 	readings map[string]Reading // by source key; missing: the read fails
 	reads    int
-	delay    time.Duration // each read takes this long
-	gone     string        // this source's socket is not there
+	delay    time.Duration    // each read takes this long
+	gone     string           // this source's socket is not there
+	fails    map[string]error // these sources' reads fail so
 	// The kernel's boot, as Xray's run names carry it; "": a kernel whose
 	// clock rayd cannot read, the run told by the wall clock.
 	kernel string
@@ -78,6 +79,9 @@ func (n *node) accountant() *Accountant {
 					n.reads++
 					if key == n.gone {
 						return Reading{}, &fs.PathError{Op: "dial", Path: key, Err: fs.ErrNotExist}
+					}
+					if err := n.fails[key]; err != nil {
+						return Reading{}, err
 					}
 					r, ok := n.readings[key]
 					if !ok {
@@ -933,5 +937,107 @@ func TestSlowSources(t *testing.T) {
 	a.Round(n.ctx, "", true)
 	if d := time.Since(start); d > 1100*time.Millisecond || n.reads != 3 {
 		t.Fatalf("a round of 3 slow sources took %v (%d reads)", d, n.reads)
+	}
+}
+
+// A credential's rotation through the processes that count, as they count
+// it (R4-1): each credential has its own name for its whole life
+// (store.CredentialName). The next one published is a new name, from
+// zero; the switch renames nothing, and the streams on the old credential
+// count on under its name; the grace's end removes the name from the
+// process, which keeps its counter, the bytes since the last poll in it,
+// until it restarts. Every byte is counted once: none twice, none lost.
+func TestCredentialSwitchCounting(t *testing.T) {
+	n := newNode(t)
+	n.user("alice", 1<<40, "hy", "nv", "dns")
+	a := n.accountant()
+	cur, next := store.CredentialName(1, "uuid-a"), store.CredentialName(1, "uuid-b")
+	up := time.Hour // inner's Xray has run an hour
+	poll := func(force bool, c ...any) {
+		t.Helper()
+		n.tick(Every)
+		up += Every
+		n.set("hy2:hy", "b1", c...)
+		n.set("naive:nv", "n1", c...)
+		n.setXray(up, c...)
+		a.Round(n.ctx, "", force)
+	}
+	// Counted from the first poll (the limit came before it).
+	poll(true, cur, 500, 5000)
+	n.wantUsed("alice", 0, 0)
+	poll(false, cur, 600, 6000)
+	// Published: the new name at zero, or with what its first streams did.
+	poll(false, cur, 700, 7000, next, 0, 0)
+	poll(false, cur, 800, 8000, next, 10, 100)
+	// The switch: the same names; the old credential's streams go on.
+	poll(false, cur, 900, 9000, next, 20, 200)
+	// Its grace ends: Xray and niko-server drop the name, its counter
+	// stays (with 50/500 since the last poll); the new name goes on.
+	poll(false, cur, 950, 9500, next, 30, 300)
+	for range 10 {
+		poll(false, cur, 950, 9500, next, 30, 300)
+	}
+	poll(true, cur, 950, 9500, next, 40, 400)
+	// Three processes, each (950 - 500) + 40 up and (9500 - 5000) + 400
+	// down.
+	n.wantUsed("alice", 3*490, 3*4900)
+
+	// The next round: a third name, new to the processes, from zero.
+	third := store.CredentialName(1, "uuid-c")
+	poll(true, cur, 950, 9500, next, 50, 500, third, 1, 10)
+	n.wantUsed("alice", 3*501, 3*5010)
+}
+
+// The update from v0.22.0 renames every credential once, from its role's
+// name (u1, u1-n) to its own. The processes run on until the update
+// restarts them: under the old names they hold the bytes since the old
+// rayd's last poll, which the new rayd counts from the old rayd's marks;
+// the new names count whole. Then the update restarts them: every counter
+// from zero, under the new names only. Nothing twice, nothing lost.
+func TestUpdateRenamesOnce(t *testing.T) {
+	n := newNode(t)
+	n.user("alice", 1<<40, "hy", "dns")
+	old := n.accountant() // rayd v0.22.0, the names by role
+	up := time.Hour
+	poll := func(a *Accountant, force bool, c ...any) {
+		t.Helper()
+		n.tick(Every)
+		up += Every
+		n.set("hy2:hy", "b1", c...)
+		n.setXray(up, c...)
+		a.Round(n.ctx, "", force)
+	}
+	poll(old, true, "u1", 100, 1000, "u1-n", 0, 0)
+	poll(old, true, "u1", 200, 2000, "u1-n", 5, 50)
+	n.wantUsed("alice", 2*105, 2*1050)
+
+	// The update: the new rayd, from the store; the processes still run,
+	// with 30/300 under u1 since the old rayd's last poll, and the names
+	// moved to the credentials' own: the reconnected streams count there.
+	n.st.Close()
+	n.open()
+	a := n.accountant()
+	cur, next := store.CredentialName(1, "uuid-a"), store.CredentialName(1, "uuid-b")
+	poll(a, true, "u1", 230, 2300, "u1-n", 5, 50, cur, 7, 70, next, 1, 10)
+	n.wantUsed("alice", 2*(105+30+8), 2*(1050+300+80))
+	poll(a, true, "u1", 230, 2300, "u1-n", 5, 50, cur, 9, 90, next, 1, 10)
+	n.wantUsed("alice", 2*(105+30+10), 2*(1050+300+100))
+
+	// The update restarts them: new runs, the new names only, from zero.
+	up = 2 * time.Second
+	n.tick(Every)
+	n.set("hy2:hy", "b2", cur, 4, 40)
+	n.setXray(up, cur, 4, 40)
+	a.Round(n.ctx, "", true)
+	n.wantUsed("alice", 2*(105+30+10+4), 2*(1050+300+100+40))
+	// And the marks hold the new names only.
+	srcs, err := n.st.TrafficSources(n.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"hy2:hy", "xray:inner"} {
+		if m := srcs[key].Marks; len(m) != 1 || m[cur] != (store.TrafficCounter{Up: 4, Down: 40}) {
+			t.Fatalf("%s marks %v", key, m)
+		}
 	}
 }

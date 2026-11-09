@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -280,6 +281,84 @@ func TestApplyBrokenKeepsRevoking(t *testing.T) {
 	a.Apply(ctx)
 	if _, err := os.Stat(keys); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("keys file made for a broken service: %v", err)
+	}
+}
+
+// A credential rotation as apply carries it out (R4-1): the next credential
+// published is one user added to inner (no restart) and to the Hysteria2
+// users file (read again by the process); the switch changes no file and
+// syncs nothing, so no connection is cut; the grace's end removes the
+// previous credential only.
+func TestApplyCredentialSwitch(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	dns, err := provision.CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns", Enabled: true})
+	must(t, err)
+	hy, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-obfs", Name: "hy2", Enabled: true})
+	must(t, err)
+	u, err := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+	must(t, err)
+	must(t, st.SetUserServices(ctx, "alice", []int64{dns.ID, hy.ID}))
+
+	var restarted []string
+	inner := &fakeInner{}
+	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: "/run/niko"}
+	a := &Applier{
+		Store: st, Paths: paths, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Restart: func(_ context.Context, verb, unit string) error {
+			restarted = append(restarted, verb+" "+unit)
+			return nil
+		},
+		Inner: func(string) InnerAPI { return inner },
+	}
+	must(t, a.Apply(ctx))
+	usersFile := filepath.Join(paths.Rendered, "hy2", render.HysteriaUsers)
+	read := func() string {
+		t.Helper()
+		b, err := os.ReadFile(usersFile)
+		must(t, err)
+		return string(b)
+	}
+	step := func(at time.Duration) (calls []map[string]string, file string) {
+		t.Helper()
+		restarted, inner.calls = nil, nil
+		r := store.Rotation{Period: 30 * 24 * time.Hour, Lead: 3 * 24 * time.Hour, Grace: 2 * 24 * time.Hour}
+		if _, err := st.RotateCredentials(ctx, time.Now().Add(at), r, render.NewUUID); err != nil {
+			t.Fatal(err)
+		}
+		must(t, a.Apply(ctx))
+		if len(restarted) != 0 {
+			t.Fatalf("after %v: restarted %v", at, restarted)
+		}
+		return inner.calls, read()
+	}
+	day := 24 * time.Hour
+	before := read()
+	calls, published := step(28 * day)
+	if len(calls) != 1 || len(calls[0]) != 2 || published == before {
+		t.Fatalf("published: inner %v, users file the same %v", calls, published == before)
+	}
+	if calls, switched := step(31 * day); len(calls) != 0 || switched != published {
+		t.Fatalf("the switch: inner %v, users file changed %v", calls, switched != published)
+	}
+	calls, ended := step(34 * day)
+	if len(calls) != 1 || len(calls[0]) != 1 || ended == published || strings.Count(ended, `"name"`) != 1 {
+		t.Fatalf("the grace's end: inner %v, users file\n%s", calls, ended)
+	}
+	// What stays is the credential that was next, under the name it was
+	// published with.
+	innerSvc, err := st.ServiceByName(ctx, "inner")
+	must(t, err)
+	sets, err := st.CredentialSets(ctx, innerSvc.ID, nil, nil)
+	must(t, err)
+	if name := store.CredentialName(u.ID, sets[u.ID].Current); calls[0][name] != sets[u.ID].Current {
+		t.Fatalf("inner keeps %v, want %s", calls[0], name)
 	}
 }
 

@@ -1,7 +1,9 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -277,5 +279,97 @@ func TestCarryInvitePINTries(t *testing.T) {
 	back, _, err := r.ActiveInvite(ctx, inv.ID)
 	if err != nil || back.PinTries != 1 {
 		t.Fatalf("after the rollback: %d tries left (%v), want 1", back.PinTries, err)
+	}
+}
+
+// LAN through a rollback (lan-v1 §4.2): a consent taken back since the copy
+// stays taken back, and the user's key is the current one, which a
+// revocation renewed: the revoked device knows the one before. A consent
+// given since is lost with the rest. A copy from before v0.23.0, without
+// the columns, takes nothing of it.
+func TestCarryLAN(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	saved, current := filepath.Join(dir, "saved.db"), filepath.Join(dir, "current.db")
+	s, err := Open(ctx, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, alices := lanUser(t, s, "alice", "phone", "laptop")
+	lanUser(t, s, "bob")
+	_, carols := lanUser(t, s, "carol", "phone")
+	if _, err := s.CreateUser(ctx, User{Name: "dave", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	ygg, _ := s.ServiceByName(ctx, "ygg")
+	must(t, s.SetUserServices(ctx, "dave", []int64{ygg.ID}))
+	for _, d := range append(alices, carols...) {
+		if _, err := s.SetDeviceLAN(ctx, d.ID, true, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	carolKey := s.lanKey(t, "carol")
+	s.Close()
+	copyFile(t, current, saved)
+	old := filepath.Join(dir, "old.db")
+	copyFile(t, current, old)
+
+	s, err = Open(ctx, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, s.RevokeDevice(ctx, alices[0].ID))
+	aliceKey := s.lanKey(t, "alice")
+	if _, err := s.SetUserLAN(ctx, "bob", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetDeviceLAN(ctx, carols[0].ID, false, LANShowEvery); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetUserLAN(ctx, "dave", true); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	must(t, CarryRevocations(ctx, saved, current))
+	r, err := Open(ctx, saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if !bytes.Equal(r.lanKey(t, "alice"), aliceKey) {
+		t.Error("alice's key is the one the revoked phone knows")
+	}
+	alice, _ := r.UserByName(ctx, "alice")
+	if _, list, _ := r.LANDevices(ctx, alice.ID); len(list) != 1 || list[0].ID != alices[1].ID {
+		t.Errorf("alice's devices %+v", list)
+	}
+	if bob, _ := r.UserByName(ctx, "bob"); bob.LAN || r.lanKey(t, "bob") != nil {
+		t.Errorf("bob's LAN is back: %+v", bob)
+	}
+	if devs, _ := r.ListDevices(ctx, "carol"); len(devs) != 1 || devs[0].LAN {
+		t.Errorf("carol's phone shows itself again: %+v", devs)
+	}
+	if !bytes.Equal(r.lanKey(t, "carol"), carolKey) {
+		t.Error("carol's key changed")
+	}
+	if dave, _ := r.UserByName(ctx, "dave"); dave.LAN || r.lanKey(t, "dave") != nil {
+		t.Errorf("dave's LAN, given since, came along: %+v", dave)
+	}
+
+	// A copy from v0.22.0.
+	db, err := sql.Open("sqlite", "file:"+old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`ALTER TABLE users DROP COLUMN lan`, `ALTER TABLE users DROP COLUMN lan_key`,
+		`ALTER TABLE devices DROP COLUMN lan`, `ALTER TABLE devices DROP COLUMN lan_at`, `DELETE FROM schema_migrations WHERE version = 13`} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	if err := CarryRevocations(ctx, old, current); err != nil {
+		t.Fatalf("a copy without LAN: %v", err)
 	}
 }

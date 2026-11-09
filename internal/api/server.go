@@ -298,7 +298,7 @@ func (s *Server) userPB(ctx context.Context, u store.User) (*nodev1.User, error)
 	}
 	pb := &nodev1.User{
 		Id: u.ID, Name: u.Name, Enabled: u.Enabled, ExpiresAt: unixOrZero(u.ExpiresAt),
-		Note: u.Note, CreatedAt: u.CreatedAt.Unix(),
+		Note: u.Note, CreatedAt: u.CreatedAt.Unix(), Lan: u.LAN,
 	}
 	if u.TrafficLimit != nil {
 		// The count at this moment: a period that reset since rayd last
@@ -428,6 +428,24 @@ func (s *Server) SetUserTraffic(ctx context.Context, req *connect.Request[nodev1
 		return nil, toConnect(err)
 	}
 	return connect.NewResponse(&nodev1.SetUserTrafficResponse{User: pb}), nil
+}
+
+// SetUserLAN gives or takes back the administrator's consent to a user's
+// LAN (lan-v1 §1.1), audited as user.lan=on|off (lan-v1 §4.3).
+func (s *Server) SetUserLAN(ctx context.Context, req *connect.Request[nodev1.SetUserLANRequest]) (*connect.Response[nodev1.SetUserLANResponse], error) {
+	u, err := s.Store.SetUserLAN(ctx, req.Msg.Name, req.Msg.Lan)
+	state := "off"
+	if req.Msg.Lan {
+		state = "on"
+	}
+	if err := s.done(ctx, "user.lan="+state, req.Msg.Name, err); err != nil {
+		return nil, err
+	}
+	pb, err := s.userPB(ctx, u)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	return connect.NewResponse(&nodev1.SetUserLANResponse{User: pb}), nil
 }
 
 func (s *Server) DeleteUser(ctx context.Context, req *connect.Request[nodev1.DeleteUserRequest]) (*connect.Response[nodev1.DeleteUserResponse], error) {
@@ -598,7 +616,7 @@ func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.
 
 func devicePB(d store.Device) *nodev1.Device {
 	return &nodev1.Device{Id: d.ID, User: d.UserName, Name: d.Name, Role: d.Role,
-		CreatedAt: d.CreatedAt.Unix(), RevokedAt: unixOrZero(d.RevokedAt), Registered: d.CertPin != ""}
+		CreatedAt: d.CreatedAt.Unix(), RevokedAt: unixOrZero(d.RevokedAt), Registered: d.CertPin != "", Lan: d.LAN}
 }
 
 func invitePB(inv store.Invite) *nodev1.Invite {

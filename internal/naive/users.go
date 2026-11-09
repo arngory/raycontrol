@@ -21,7 +21,9 @@ import (
 // Users are the accepted passwords, as SHA-256 hashes in a JSON file that
 // rayd rewrites when credentials rotate and users come and go:
 // {"<hash>": "<name>"}, the name the bytes of that password count under
-// (u<id>, u<id>-n, u<id>-p; docs/spec/traffic-limit-v1.md §2.3). rayd
+// (u<id>-<fingerprint>, the credential's own name for its whole life;
+// u<id>, u<id>-n and u<id>-p from rayd before v0.23.0;
+// docs/spec/traffic-limit-v1.md §2.3). rayd
 // before v0.22.0 wrote a list of the hashes, read too: no name, nothing
 // counted. The file is read again when it changes, without a restart; a
 // hash it no longer has, or gives another name, loses its live streams:
@@ -29,8 +31,9 @@ import (
 // Hysteria2 does on a reload.
 //
 // The counters are by name, up (sent to the destinations) and down
-// (received from them), since the process started, the names gone from
-// the file too: nothing of destinations, addresses or times. Neither they
+// (received from them), since the process started; a name gone from the
+// file keeps them while it has streams and staleAfter after the last one
+// (prune): nothing of destinations, addresses or times. Neither they
 // nor destinations go to the log.
 type Users struct {
 	Path string
@@ -44,7 +47,15 @@ type Users struct {
 	live    map[[32]byte]map[*session]bool
 	traffic map[string]*Traffic
 	boot    string
+	stale   time.Duration // staleAfter when 0 (tests make it short)
 }
+
+// staleAfter is how long the counters of a name gone from the file stay
+// readable once its last stream has ended: rayd reads them every 15 s, so
+// it has their last bytes long before (traffic-limit-v1 §2.3). Without
+// it every credential rotation would leave a name for good, and a process
+// running for months would answer with more names than rayd reads.
+const staleAfter = 5 * time.Minute
 
 // reloadEvery is how often the file is looked at: by Watch, and by a
 // request when Watch does not run.
@@ -60,8 +71,14 @@ func HashPassword(p string) string {
 }
 
 // Traffic are a name's bytes at the destinations' side. Nil counts for
-// nobody.
-type Traffic struct{ upN, downN atomic.Int64 }
+// nobody. streams and gone (under Users.mu) tell when the counters of a
+// name the file no longer has may go: none of its streams left, and gone
+// staleAfter ago.
+type Traffic struct {
+	upN, downN atomic.Int64
+	streams    int
+	gone       time.Time
+}
 
 func (t *Traffic) addUp(n int) {
 	if t != nil && n > 0 {
@@ -166,6 +183,10 @@ func (u *Users) admit(parent context.Context, password string) (admitted, bool) 
 		u.live[hash] = map[*session]bool{}
 	}
 	u.live[hash][s] = true
+	t := u.trafficOf(name)
+	if t != nil {
+		t.streams++
+	}
 	leave := func() {
 		cancel(nil)
 		u.mu.Lock()
@@ -174,8 +195,11 @@ func (u *Users) admit(parent context.Context, password string) (admitted, bool) 
 		if len(u.live[hash]) == 0 {
 			delete(u.live, hash)
 		}
+		if t != nil {
+			t.streams--
+		}
 	}
-	return admitted{user: hash, traffic: u.trafficOf(name), ctx: ctx, leave: leave}, true
+	return admitted{user: hash, traffic: t, ctx: ctx, leave: leave}, true
 }
 
 // trafficOf is a name's counters, made at first sight and kept until the
@@ -217,6 +241,7 @@ func (u *Users) period() time.Duration {
 // read leaves the table as it was. Under u.mu.
 func (u *Users) reload() {
 	u.checked = time.Now()
+	defer u.prune(u.checked)
 	st, err := os.Stat(u.Path)
 	if err != nil {
 		return
@@ -229,9 +254,13 @@ func (u *Users) reload() {
 		return
 	}
 	for hash, ss := range u.live {
-		// A credential switch moves the names (u5-n becomes u5, u5 becomes
-		// u5-p) while both passwords stay good: the same user, kept. Its
-		// streams count on under the name they came in with, the user's.
+		// A password that stays with its user keeps its streams: a
+		// credential keeps its name through a switch, and a name that
+		// changes but stays the user's is the same user's (u5-<fingerprint>
+		// becoming u5 when a rollback brings back a rayd before v0.23.0,
+		// whose names go by the role and move at a switch: u5-n becomes u5,
+		// u5 becomes u5-p). Its streams count on under the name they came in
+		// with.
 		if name, ok := next[hash]; ok && baseName(name) == baseName(u.byHash[hash]) {
 			continue
 		}
@@ -246,16 +275,39 @@ func (u *Users) reload() {
 	}
 }
 
-// baseName is the user a name stands for: u5 for u5, u5-n and u5-p (the
-// rotating credentials, R4-1).
+// prune drops the counters of the names the file no longer has, their
+// last stream ended staleAfter ago or more. A name back in the file is
+// kept. Under u.mu.
+func (u *Users) prune(now time.Time) {
+	if !u.loaded {
+		return
+	}
+	in := make(map[string]bool, len(u.byHash))
+	for _, name := range u.byHash {
+		in[name] = true
+	}
+	stale := u.stale
+	if stale <= 0 {
+		stale = staleAfter
+	}
+	for name, t := range u.traffic {
+		switch {
+		case in[name] || t.streams > 0:
+			t.gone = time.Time{}
+		case t.gone.IsZero():
+			t.gone = now
+		case now.Sub(t.gone) >= stale:
+			delete(u.traffic, name)
+		}
+	}
+}
+
+// baseName is the user a name stands for: u5 for u5 and for the names of
+// its credentials, u5-<fingerprint> (rayd v0.23.0), and u5-n and u5-p (by
+// the role, before).
 func baseName(name string) string {
-	if b, ok := strings.CutSuffix(name, "-n"); ok {
-		return b
-	}
-	if b, ok := strings.CutSuffix(name, "-p"); ok {
-		return b
-	}
-	return name
+	b, _, _ := strings.Cut(name, "-")
+	return b
 }
 
 // Watch reads the file every reloadEvery until ctx ends, so that a user
@@ -276,7 +328,7 @@ func (u *Users) Watch(ctx context.Context) {
 }
 
 // maxUsersFile bounds the users file: 4096 users with three credentials
-// each take ~400 KiB.
+// each take ~1.2 MiB.
 const maxUsersFile = 8 << 20
 
 // readUsers reads the users file: an object of hash to name, or the list

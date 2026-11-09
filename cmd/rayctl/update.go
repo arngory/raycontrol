@@ -697,7 +697,8 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool, carry carry) error {
 	restoreDB := now > then
 	if restoreDB {
 		kept := "What was taken away since stays taken away: revoked devices, disabled or deleted users and relays,\n" +
-			"services taken from users or disabled, replaced certificates, the admin addresses.\n"
+			"services taken from users or disabled, replaced certificates, the admin addresses; and where the\n" +
+			"previous version has the LAN (v0.23.0 and later), a LAN turned off and the users' LAN keys as they are now.\n"
 		if carry == carrySkip {
 			kept = "-no-carry: what was revoked since comes back too.\n"
 		}

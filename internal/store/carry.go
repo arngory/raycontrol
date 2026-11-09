@@ -15,6 +15,8 @@ import (
 //     replaced stays replaced;
 //   - a user disabled or deleted stays disabled, an earlier expiry stays,
 //     and a service taken from a user stays taken;
+//   - a user's or a device's LAN consent taken back stays taken back, and
+//     a user's LAN key is the current one (a revocation renews it);
 //   - a service disabled or deleted stays disabled, a REALITY no longer open
 //     is not open, and a DNS tunnel keeps the stricter dnsauth mode;
 //   - an unused invite withdrawn stays withdrawn, a relay removed stays
@@ -88,6 +90,17 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 		  WHERE EXISTS (SELECT 1 FROM cur.invites c WHERE c.id = invites.id AND c.pin_tries < invites.pin_tries)`},
 		{"devices", "cert_pin", `UPDATE devices SET cert_pin = (SELECT c.cert_pin FROM cur.devices c WHERE c.id = devices.id)
 		  WHERE EXISTS (SELECT 1 FROM cur.devices c WHERE c.id = devices.id AND c.cert_pin IS NOT devices.cert_pin)`},
+		// LAN (lan-v1): a consent taken back stays taken back, the
+		// administrator's and a device's, and the user's LAN key is the
+		// current one: a revocation since made it new, and the revoked
+		// device knows the one before.
+		{"users", "lan", `UPDATE users SET lan = 0, lan_key = NULL
+		  WHERE lan = 1 AND NOT EXISTS (SELECT 1 FROM cur.users c WHERE ` + sameUser + ` AND c.lan = 1)`},
+		{"users", "lan_key", `UPDATE users SET lan_key = (SELECT c.lan_key FROM cur.users c WHERE ` + sameUser + `)
+		  WHERE lan = 1 AND EXISTS (SELECT 1 FROM cur.users c WHERE ` + sameUser + `
+		                            AND c.lan_key IS NOT NULL AND c.lan_key IS NOT users.lan_key)`},
+		{"devices", "lan", `UPDATE devices SET lan = 0
+		  WHERE lan = 1 AND NOT EXISTS (SELECT 1 FROM cur.devices c WHERE c.id = devices.id AND c.lan = 1)`},
 		{"relays", "", `DELETE FROM relays
 		  WHERE NOT EXISTS (SELECT 1 FROM cur.relays c
 		                    WHERE c.id = relays.id AND c.address = relays.address AND c.created_at = relays.created_at)`},

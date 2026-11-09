@@ -28,6 +28,7 @@ import (
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
+	"github.com/arngory/raycontrol/internal/traffic"
 )
 
 // yggMeta is the start of a Yggdrasil link (yggdrasil-go 0.5, no password):
@@ -78,8 +79,20 @@ func TestYggdrasilWithNikoServer(t *testing.T) {
 	st.SetServiceSecret(ctx, siteSvc.ID, provision.SecretTLSKey, keyDER)
 	st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
 	st.SetUserServices(ctx, "alice", []int64{y.ID})
+	// LAN (lan-v1): a phone that shows itself, its key in the users file
+	// with alice's group, which niko-server before v0.16.0 ignores.
+	if _, err := st.SetUserLAN(ctx, "alice", true); err != nil {
+		t.Fatal(err)
+	}
+	phone, phoneKey, err := st.CreateDevice(ctx, "alice", "phone", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetDeviceLAN(ctx, phone.ID, true, store.LANShowEvery); err != nil {
+		t.Fatal(err)
+	}
 
-	m, err := render.Collect(ctx, st)
+	m, err := render.CollectForRender(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +168,31 @@ func TestYggdrasilWithNikoServer(t *testing.T) {
 	_, stranger, _ := ed25519.GenerateKey(rand.Reader)
 	if reply, err := link1(stranger); err == nil {
 		t.Fatalf("a key that is not a user's got %x", reply)
+	}
+	// The phone's key, with alice's LAN group in the users file: let in.
+	users, _ := os.ReadFile(filepath.Join(paths.Rendered, "ygg", render.YggdrasilUsers))
+	if !bytes.Contains(users, []byte(`"lan": "`+render.LANGroup(m.Users[0].ID)+`"`)) {
+		t.Fatalf("no group in the users file:\n%s", users)
+	}
+	devProfiles, err := sub.DeviceProfiles(m, m.Users[0], phoneKey[:])
+	if err != nil || len(devProfiles) != 1 {
+		t.Fatalf("the phone's profiles %+v %v", devProfiles, err)
+	}
+	devLink, _ := url.Parse(devProfiles[0].Link)
+	_, devHex, _ := strings.Cut(devLink.Query().Get("niko-ygg"), ";")
+	devSeed, _ := hex.DecodeString(devHex)
+	if reply, err := link1(ed25519.NewKeyFromSeed(devSeed)); err != nil || !bytes.HasPrefix(reply, []byte("meta")) {
+		t.Fatalf("the phone's link, with a group: %x %v", reply, err)
+	}
+	// Its stats socket: the pinned niko-server (v0.16.0 or later) gives
+	// the users' LAN bytes by group, the phone's group among them from the
+	// file's first reading.
+	r, err := traffic.ReadYggdrasil(ctx, paths.StatsSocket("ygg"))
+	if err != nil {
+		t.Fatalf("the Yggdrasil stats socket: %v", err)
+	}
+	if _, ok := r.Users["u1"]; !ok || r.Boot == "" {
+		t.Fatalf("the Yggdrasil stats socket: boot %q, groups %v", r.Boot, r.Users)
 	}
 
 	// Not a link: the site's empty 404, h2.

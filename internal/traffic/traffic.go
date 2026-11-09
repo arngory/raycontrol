@@ -1,7 +1,8 @@
 // Package traffic counts each user's bytes for the traffic limit
 // (docs/spec/traffic-limit-v1.md §2.4): rayd reads the counters of the
 // processes that carry users (Xray's inner and REALITY, niko-server's
-// Hysteria2, rayd naive) every 15 s, keeps what it last read from each
+// Hysteria2, rayd naive, and niko-server's Yggdrasil for the LAN traffic
+// through the node, lan-v1 §4.4) every 15 s, keeps what it last read from each
 // (marks, by name), and adds what grew since to the users' periods. A user
 // who reaches the limit is taken off every profile (store.User.Active):
 // the loop writes at once and wakes apply.
@@ -43,17 +44,27 @@ const youngSlack = time.Second
 
 // Source is a process that counts a service's users.
 type Source struct {
-	Key     string // "xray:<service>", "hy2:<service>", "naive:<service>"
+	Key     string // "xray:<service>", "hy2:<service>", "naive:<service>", "ygg:<service>"
 	Service string
 	Read    func(ctx context.Context, now time.Time) (Reading, error)
 	// Counts reports whether a user's bytes may count here: the user has
 	// the service (for inner, a service behind it). A process cannot add
 	// bytes to a user it does not carry.
 	Counts func(u store.User) bool
+	// NoCounters is what the loop says of a process too old to count
+	// (ErrNoCounters) where that leaves nothing uncounted: Yggdrasil before
+	// niko-server v0.16.0 passes no LAN traffic to count. "": the loop
+	// fails (a Hysteria2 that gives no counters leaves its users' bytes
+	// out).
+	NoCounters string
 }
 
+// yggNoCounters is the state of a Yggdrasil backend from before LAN.
+const yggNoCounters = "no LAN counters (niko-server before v0.16.0, which relays no LAN to count)"
+
 // Processes are the sources of a node: each enabled Xray, Hysteria2 and
-// naive service, read at its socket under paths.
+// naive service, read at its socket under paths, and each Yggdrasil one,
+// which counts its users' LAN traffic through the node (lan-v1 §4.4).
 func Processes(paths render.Paths) func(services []store.Service) []Source {
 	return func(services []store.Service) []Source {
 		byID := map[int64]store.Service{}
@@ -92,6 +103,14 @@ func Processes(paths render.Paths) func(services []store.Service) []Source {
 				out = append(out, Source{Key: prefix + name, Service: name,
 					Read: func(ctx context.Context, _ time.Time) (Reading, error) {
 						return ReadLine(ctx, paths.StatsSocket(name))
+					},
+					Counts: has(svc.ID)})
+			case svc.Kind == "yggdrasil":
+				// The bytes of frames between a user's devices, by the
+				// user's group u<id>; the rest of Yggdrasil counts at inner.
+				out = append(out, Source{Key: "ygg:" + name, Service: name, NoCounters: yggNoCounters,
+					Read: func(ctx context.Context, _ time.Time) (Reading, error) {
+						return ReadYggdrasil(ctx, paths.StatsSocket(name))
 					},
 					Counts: has(svc.ID)})
 			}
@@ -358,6 +377,12 @@ func (a *Accountant) Round(ctx context.Context, only string, force bool) {
 			a.Health.Report("traffic "+src.Service, "not running", nil)
 			continue
 		}
+		if errors.Is(err, ErrNoCounters) && src.NoCounters != "" {
+			// Running, and too old to count what this source counts: it
+			// carries none of it either.
+			a.Health.Report("traffic "+src.Service, src.NoCounters, nil)
+			continue
+		}
 		if err != nil {
 			a.Health.Report("traffic "+src.Service, "", err)
 			continue
@@ -473,7 +498,10 @@ func (a *Accountant) write(ctx context.Context, w store.TrafficWrite, now time.T
 
 // take reads a source's counters against its marks: the bytes each user
 // gained since the last poll, and the new marks. For each name of a user
-// with a limit (store.TrafficNames):
+// with a limit (store.TrafficUser: u<id> and its credentials' names, which
+// a credential keeps for its whole life and no other secret takes; a
+// process keeps the counter of a name gone until it restarts, so a mark
+// follows it to the end of the run):
 //   - a user whose limit was set after the source's last poll is counted
 //     from this one (the mark is the value), unless the process started
 //     after the limit (Xray says when): all its counters are since then;

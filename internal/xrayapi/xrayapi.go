@@ -115,8 +115,10 @@ type Stats struct {
 }
 
 // statsMaxBytes bounds an answer: ~100 bytes a counter, two a name, three
-// names a user while credentials rotate. The process is not trusted to
-// send a sane one.
+// names a user while credentials rotate, and one more a user each credential
+// period the process runs (Xray keeps a removed name's counters until it
+// restarts: 40 000 names fit). The process is not trusted to send a sane
+// one.
 const statsMaxBytes = 8 << 20
 
 // DialStats returns a stats client for the API socket.
