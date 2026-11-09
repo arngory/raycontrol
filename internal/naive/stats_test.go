@@ -42,6 +42,10 @@ func TestStatsSocket(t *testing.T) {
 	if len(r.Boot) != 16 || len(r.Users) != 2 || r.Users["u3"] != (store.TrafficCounter{}) {
 		t.Fatalf("%+v", r)
 	}
+	// How long the process has run: rayd tells a new one by it.
+	if !r.AgeKnown || r.Age > time.Hour {
+		t.Fatalf("age %v %v", r.Age, r.AgeKnown)
+	}
 	again, err := traffic.ReadLine(t.Context(), sock)
 	if err != nil || again.Boot != r.Boot {
 		t.Fatalf("again: %+v %v", again, err)

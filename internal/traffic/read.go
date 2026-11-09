@@ -42,6 +42,12 @@ type Reading struct {
 	// and kind since the process started (spec/conn-limit-v1.md §2): rayd
 	// naive from v0.24.0 gives them with its bytes; nil from the others.
 	Limits map[string]map[string]int64
+	// Age is how long the process has run, in whole seconds, as it says
+	// (rayd naive from v0.24.0: "uptime"); AgeKnown false where it does
+	// not. rayd's view of the refusals tells a process started since its
+	// last round by it (internal/connlimit).
+	Age      time.Duration
+	AgeKnown bool
 }
 
 // monoStart anchors Mono where the kernel's clock cannot be read:
@@ -167,7 +173,8 @@ func parseLine(body []byte) (Reading, error) {
 			Up   int64 `json:"up"`
 			Down int64 `json:"down"`
 		} `json:"users"`
-		Limit map[string]map[string]int64 `json:"limit"`
+		Limit  map[string]map[string]int64 `json:"limit"`
+		Uptime *int64                      `json:"uptime"`
 	}
 	// The decoder's error is not passed on: it may quote the answer (a
 	// key's path), and it goes to rayctl status.
@@ -185,6 +192,9 @@ func parseLine(body []byte) (Reading, error) {
 		return Reading{}, fmt.Errorf("%d names, at most %d", len(a.Users), maxNames)
 	}
 	r := Reading{Boot: a.Boot, Users: make(map[string]store.TrafficCounter, len(a.Users))}
+	if a.Uptime != nil && *a.Uptime >= 0 && *a.Uptime < 1<<40 {
+		r.Age, r.AgeKnown = time.Duration(*a.Uptime)*time.Second, true
+	}
 	for name, c := range a.Users {
 		r.Users[name] = store.TrafficCounter{Up: max(c.Up, 0), Down: max(c.Down, 0)}
 	}

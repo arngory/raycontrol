@@ -1433,9 +1433,9 @@ func connLimitSources(st *store.Store, paths render.Paths) func(ctx context.Cont
 				continue
 			}
 			socket := paths.StatsSocket(svc.Name)
-			out = append(out, connlimit.Source{Service: svc.Name, Read: func(ctx context.Context) (string, map[string]map[string]int64, error) {
+			out = append(out, connlimit.Source{Service: svc.Name, Read: func(ctx context.Context) (connlimit.Reading, error) {
 				r, err := traffic.ReadLine(ctx, socket)
-				return r.Boot, r.Limits, err
+				return connlimit.Reading{Boot: r.Boot, Age: r.Age, AgeKnown: r.AgeKnown, Limits: r.Limits}, err
 			}})
 		}
 		return out, nil

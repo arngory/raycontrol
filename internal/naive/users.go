@@ -398,6 +398,10 @@ type TrafficSnapshot struct {
 	// since the start (spec/conn-limit-v1.md §2), only names with some: a
 	// field rayd before v0.24.0 does not read.
 	Limit map[string]map[string]int64 `json:"limit,omitempty"`
+	// Uptime is how long the process has run, in whole seconds: rayd tells
+	// a process started since its last round by it, whose refusals are new
+	// (a field rayd before v0.24.0 does not read).
+	Uptime int64 `json:"uptime"`
 }
 
 // UserTraffic are a name's bytes at the destinations' side.
@@ -415,7 +419,7 @@ func (u *Users) Snapshot() TrafficSnapshot {
 		_, _ = rand.Read(b[:])
 		u.boot = hex.EncodeToString(b[:])
 	}
-	s := TrafficSnapshot{V: 1, Boot: u.boot, Users: make(map[string]UserTraffic, len(u.traffic))}
+	s := TrafficSnapshot{V: 1, Boot: u.boot, Users: make(map[string]UserTraffic, len(u.traffic)), Uptime: int64(time.Since(monoStart) / time.Second)}
 	for name, t := range u.traffic {
 		s.Users[name] = UserTraffic{Up: t.upN.Load(), Down: t.downN.Load()}
 	}

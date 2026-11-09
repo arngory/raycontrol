@@ -62,10 +62,11 @@ func TestMonitor(t *testing.T) {
 	m := &Monitor{
 		Sources: func(context.Context) ([]Source, error) {
 			return []Source{
-				{Service: "nv", Read: func(context.Context) (string, map[string]map[string]int64, error) { return boot, limits, nil }},
-				{Service: "down", Read: func(context.Context) (string, map[string]map[string]int64, error) {
-					return "", nil, errors.New("not running")
+				// Started with rayd: its refusals are new.
+				{Service: "nv", Read: func(context.Context) (Reading, error) {
+					return Reading{Boot: boot, Age: 5 * time.Second, AgeKnown: true, Limits: limits}, nil
 				}},
+				{Service: "down", Read: func(context.Context) (Reading, error) { return Reading{}, errors.New("not running") }},
 			}, nil
 		},
 		Off:    func(context.Context) (bool, error) { return off, nil },
@@ -129,6 +130,74 @@ func TestMonitor(t *testing.T) {
 		if l.Name == "conn-limit" && !strings.HasPrefix(l.Detail, "off") {
 			t.Fatalf("off: %q", l.Detail)
 		}
+	}
+}
+
+// A rayd started anew, or one round whose services could not be listed,
+// does not count a process's old refusals again: the first reading of a
+// service is a baseline (unless the process itself is new), and a failed
+// listing keeps the marks and the metrics' services.
+func TestMonitorBaseline(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	proc := t.TempDir()
+	fakeProc(t, proc, 1000, 65536)
+	var logs bytes.Buffer
+	age := 3 * time.Hour
+	limits := map[string]map[string]int64{"u5": {"tcp": 1340}}
+	var listErr error
+	hb := &health.Board{Now: func() time.Time { return now }}
+	m := &Monitor{
+		Sources: func(context.Context) ([]Source, error) {
+			if listErr != nil {
+				return nil, listErr
+			}
+			return []Source{{Service: "nv", Read: func(context.Context) (Reading, error) {
+				return Reading{Boot: "b1", Age: age, AgeKnown: true, Limits: limits}, nil
+			}}}, nil
+		},
+		Health: hb, Log: slog.New(slog.NewTextHandler(&logs, nil)), Proc: proc, Now: func() time.Time { return now },
+	}
+	m.Round(context.Background())
+	if s := m.Snapshot(); len(s.Users) != 0 || s.Refused[[2]string{"nv", "tcp"}] != 0 || len(s.Services) != 1 {
+		t.Fatalf("a process of 3 h read first: %+v", s)
+	}
+	limits = map[string]map[string]int64{"u5": {"tcp": 1341}}
+	now, age = now.Add(Every), age+Every
+	m.Round(context.Background())
+	if s := m.Snapshot(); s.Refused[[2]string{"nv", "tcp"}] != 1 || len(s.Users) != 1 || s.Users[0].Refused != 1 {
+		t.Fatalf("after the baseline: %+v", s)
+	}
+	// The services cannot be listed: health hears, nothing else moves.
+	listErr = errors.New("database is locked")
+	now = now.Add(Every)
+	m.Round(context.Background())
+	s := m.Snapshot()
+	if len(s.Services) != 1 || s.Refused[[2]string{"nv", "tcp"}] != 1 {
+		t.Fatalf("a failed listing: %+v", s)
+	}
+	failed := false
+	for _, l := range hb.Loops() {
+		failed = failed || l.Name == "conn-limit" && l.Err != ""
+	}
+	if !failed {
+		t.Fatalf("health not told: %+v", hb.Loops())
+	}
+	listErr = nil
+	limits = map[string]map[string]int64{"u5": {"tcp": 1342}}
+	now = now.Add(Every)
+	m.Round(context.Background())
+	if s := m.Snapshot(); s.Refused[[2]string{"nv", "tcp"}] != 2 {
+		t.Fatalf("after a failed listing, counted again whole: %+v", s.Refused)
+	}
+	// A process that started since the last round: its refusals count.
+	m2 := &Monitor{Sources: func(context.Context) ([]Source, error) {
+		return []Source{{Service: "nv", Read: func(context.Context) (Reading, error) {
+			return Reading{Boot: "b2", Age: 12 * time.Second, AgeKnown: true, Limits: limits}, nil
+		}}}, nil
+	}, Proc: proc, Now: func() time.Time { return now }}
+	m2.Round(context.Background())
+	if s := m2.Snapshot(); s.Refused[[2]string{"nv", "tcp"}] != 1342 {
+		t.Fatalf("a fresh process: %+v", s.Refused)
 	}
 }
 

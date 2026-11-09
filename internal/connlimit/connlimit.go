@@ -38,13 +38,26 @@ const (
 	// guardDay: the conntrack line shows a guard that was on this recently.
 	guardDay = 24 * time.Hour
 	first    = 5 * time.Second
+	// freshWithin: a process that has run no longer than this when a
+	// service is first read started since the last round could have read
+	// it; its refusals are new. One that has run longer had them before.
+	freshWithin = Every + 5*time.Second
 )
 
-// Source is a process that counts refusals: Read gives its run (a boot,
-// random at each start) and each name's refusals by kind since then.
+// Source is a process that counts refusals.
 type Source struct {
 	Service string
-	Read    func(ctx context.Context) (boot string, limits map[string]map[string]int64, err error)
+	Read    func(ctx context.Context) (Reading, error)
+}
+
+// Reading is what a source gave at one poll: its run (a boot, random at
+// each start), how long it has run where it says (AgeKnown), and each
+// name's refusals by kind since it started.
+type Reading struct {
+	Boot     string
+	Age      time.Duration
+	AgeKnown bool
+	Limits   map[string]map[string]int64
 }
 
 // Guard is rayspa's guard of the conntrack table, as it last reported.
@@ -183,16 +196,15 @@ func (m *Monitor) Round(ctx context.Context) {
 		sources, err = m.Sources(ctx)
 	}
 	type result struct {
-		boot   string
-		limits map[string]map[string]int64
-		err    error
+		r   Reading
+		err error
 	}
 	results := make([]result, len(sources))
 	var wg sync.WaitGroup
 	for i, src := range sources {
 		wg.Go(func() {
-			boot, limits, err := src.Read(ctx)
-			results[i] = result{boot, limits, err}
+			r, err := src.Read(ctx)
+			results[i] = result{r, err}
 		})
 	}
 	wg.Wait()
@@ -211,22 +223,27 @@ func (m *Monitor) Round(ctx context.Context) {
 	if m.marks == nil {
 		m.marks, m.totals, m.lastHit = map[string]mark{}, map[[2]string]uint64{}, map[int64]time.Time{}
 	}
-	var services []string
-	for i, src := range sources {
-		services = append(services, src.Service)
-		r := results[i]
-		if r.err != nil {
-			continue // not running, or too old to count: nothing new
+	// The services unknown this round (the store failed): the marks and the
+	// metrics' services stay as they were, nothing is counted; a service
+	// read anew would count its process's refusals since it started again.
+	if err == nil {
+		var services []string
+		for i, src := range sources {
+			services = append(services, src.Service)
+			r := results[i]
+			if r.err != nil {
+				continue // not running, or too old to count: nothing new
+			}
+			m.take(src.Service, r.r, now)
 		}
-		m.take(src.Service, r.boot, r.limits, now)
-	}
-	for svc := range m.marks {
-		if !slices.Contains(services, svc) {
-			delete(m.marks, svc)
+		for svc := range m.marks {
+			if !slices.Contains(services, svc) {
+				delete(m.marks, svc)
+			}
 		}
+		slices.Sort(services)
+		m.services = services
 	}
-	slices.Sort(services)
-	m.services = services
 	m.events = slices.DeleteFunc(m.events, func(e event) bool { return now.Sub(e.at) >= Window })
 	if ctErr == nil {
 		m.drops = append(m.drops, dropSample{now, ct.Dropped})
@@ -263,10 +280,20 @@ func (m *Monitor) proc() string {
 }
 
 // take counts what a source's counters grew by since the last reading of
-// the same run; a new run counts whole.
-func (m *Monitor) take(service, boot string, limits map[string]map[string]int64, now time.Time) {
+// the same run; a new run counts whole. A service with no reading before
+// (rayd started anew, or the service is new to it) is a baseline, not
+// counted: its counters are since its process started, which may be long
+// before. Unless that process has run no longer than freshWithin: then
+// its refusals are new.
+func (m *Monitor) take(service string, r Reading, now time.Time) {
+	boot, limits := r.Boot, r.Limits
 	prev, ok := m.marks[service]
 	same := ok && prev.boot == boot
+	fresh := !ok && r.AgeKnown && r.Age <= freshWithin
+	if !ok && !fresh {
+		m.marks[service] = mark{boot: boot, counts: limits}
+		return
+	}
 	for name, kinds := range limits {
 		id, ok := store.TrafficUser(name)
 		if !ok || name != "u"+strconv.FormatInt(id, 10) {
