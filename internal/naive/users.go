@@ -37,9 +37,6 @@ import (
 // nor destinations go to the log.
 type Users struct {
 	Path string
-	// Refused gives the refusals of the connection limits by base name and
-	// kind (Server.Refused), for the stats socket; nil: none.
-	Refused func() map[string]map[string]int64
 
 	every   time.Duration // reloadEvery when 0 (tests make it short)
 	mu      sync.Mutex
@@ -51,6 +48,17 @@ type Users struct {
 	traffic map[string]*Traffic
 	boot    string
 	stale   time.Duration // staleAfter when 0 (tests make it short)
+	// refused gives the refusals of the connection limits (SetRefused).
+	refused func() map[string]map[string]int64
+}
+
+// SetRefused sets where the stats socket's answer gets the refusals of the
+// connection limits by base name and kind (Server.Refused); nil: none. It
+// may be set while the socket answers.
+func (u *Users) SetRefused(f func() map[string]map[string]int64) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.refused = f
 }
 
 // staleAfter is how long the counters of a name gone from the file stay
@@ -411,8 +419,8 @@ func (u *Users) Snapshot() TrafficSnapshot {
 	for name, t := range u.traffic {
 		s.Users[name] = UserTraffic{Up: t.upN.Load(), Down: t.downN.Load()}
 	}
-	if u.Refused != nil {
-		if r := u.Refused(); len(r) > 0 {
+	if u.refused != nil {
+		if r := u.refused(); len(r) > 0 {
 			s.Limit = r
 		}
 	}

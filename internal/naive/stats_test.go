@@ -73,3 +73,37 @@ func TestStatsSocket(t *testing.T) {
 		}
 	}
 }
+
+// The refusals may be set while the socket answers (rayd sets them as the
+// process starts): no race, and the next answer has them.
+func TestStatsRefusedLate(t *testing.T) {
+	dir := t.TempDir()
+	users := filepath.Join(dir, "users.json")
+	b, _ := json.Marshal(map[string]string{naive.HashPassword("pw"): "u3"})
+	if err := os.WriteFile(users, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	u := &naive.Users{Path: users}
+	sock := filepath.Join(dir, "stats.sock")
+	if err := u.ServeStats(t.Context(), sock, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatal(err)
+	}
+	read := make(chan error)
+	go func() {
+		defer close(read)
+		for range 20 {
+			if _, err := traffic.ReadLine(t.Context(), sock); err != nil {
+				read <- err
+				return
+			}
+		}
+	}()
+	u.SetRefused(func() map[string]map[string]int64 { return map[string]map[string]int64{"u3": {"tcp": 2}} })
+	if err := <-read; err != nil {
+		t.Fatal(err)
+	}
+	r, err := traffic.ReadLine(t.Context(), sock)
+	if err != nil || r.Limits["u3"]["tcp"] != 2 {
+		t.Fatalf("%+v %v", r.Limits, err)
+	}
+}

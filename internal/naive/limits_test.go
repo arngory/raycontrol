@@ -618,7 +618,7 @@ func TestLimitsByBaseName(t *testing.T) {
 		t.Errorf("reported: %v", got)
 	}
 	s := &Server{}
-	nu.Refused = s.Refused
+	nu.SetRefused(s.Refused)
 	s.lim.refuse("u6", refusedRate)
 	if snap := nu.Snapshot(); snap.Limit["u6"][refusedRate] != 1 {
 		t.Errorf("stats snapshot: %v", snap.Limit)

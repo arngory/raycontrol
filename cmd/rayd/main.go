@@ -1308,14 +1308,15 @@ func cmdNaive(args []string) error {
 	// The users file is watched: a user taken off it (disabled, expired,
 	// over the traffic limit) loses the live streams (traffic-limit-v1 §3.2).
 	go nu.Watch(ctx)
+	ns := &naive.Server{Users: nu, Answer: handler, ICMP: *icmp, Log: log}
+	// The refusals of the connection limits go out with the bytes: set
+	// before the stats socket answers.
+	nu.SetRefused(ns.Refused)
 	if *statsSocket != "" {
 		if err := nu.ServeStats(ctx, *statsSocket, log); err != nil {
 			return err
 		}
 	}
-	ns := &naive.Server{Users: nu, Answer: handler, ICMP: *icmp, Log: log}
-	// The refusals of the connection limits go out with the bytes.
-	nu.Refused = ns.Refused
 	if *connLimit != "" {
 		ns.SetConnLimit(true)
 		go ns.WatchConnLimit(ctx, *connLimit)
