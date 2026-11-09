@@ -215,6 +215,76 @@ func TestApplyReload(t *testing.T) {
 	}
 }
 
+// rayctl conn-limit off and on (spec/conn-limit-v1.md §8): naive and the
+// Hysteria2 backends (from niko-server v0.17.0) read their conn-limit file
+// again, never a restart, so nothing open through them is cut; each Xray
+// (inner, REALITY) restarts once, with its limits gone or back.
+func TestApplyConnLimitSwitch(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	for _, k := range []string{"dnstt", "reality", "naive", "hy2-obfs"} {
+		if _, err := provision.CreateService(ctx, st, store.Service{Kind: k, Name: k, Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	site, err := st.ServiceByName(ctx, "site")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, cert, err := provision.SelfSigned("site.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetServiceSecret(ctx, site.ID, provision.SecretTLSKey, key)
+	st.SetServiceSecret(ctx, site.ID, provision.SecretTLSChain, cert)
+	var restarted []string
+	rendered := filepath.Join(dir, "rendered")
+	a := &Applier{
+		Store: st, Paths: render.Paths{Rendered: rendered, Run: "/run/niko"},
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Restart: func(_ context.Context, verb, unit string) error {
+			restarted = append(restarted, verb+" "+unit)
+			return nil
+		},
+		Inner: func(string) InnerAPI { return &fakeInner{} },
+	}
+	if err := a.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	hyFile := render.NikoServerAtLeast(render.NikoConnLimitFrom)
+	for _, off := range []bool{true, false} {
+		if _, err := st.SetConnLimitOff(ctx, off); err != nil {
+			t.Fatal(err)
+		}
+		restarted = nil
+		if err := a.Apply(ctx); err != nil {
+			t.Fatal(err)
+		}
+		slices.Sort(restarted)
+		if !slices.Equal(restarted, []string{"try-restart niko-inner.service", "try-restart niko-reality.service"}) {
+			t.Errorf("off %v: restarted %v", off, restarted)
+		}
+		want := map[bool]string{true: "off\n", false: "on\n"}[off]
+		if b, err := os.ReadFile(filepath.Join(rendered, "naive", render.NaiveConnLimit)); err != nil || string(b) != want {
+			t.Errorf("off %v: naive's switch %q %v", off, b, err)
+		}
+		b, err := os.ReadFile(filepath.Join(rendered, "hy2-obfs", render.HysteriaConnLimit))
+		if hyFile && (err != nil || string(b) != want) || !hyFile && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("off %v: Hysteria2's switch %q %v (niko-server from v0.17.0: %v)", off, b, err, hyFile)
+		}
+		x, _ := os.ReadFile(filepath.Join(rendered, "reality", "xray.json"))
+		if strings.Contains(string(x), `"limits"`) == off {
+			t.Errorf("off %v: REALITY's config:\n%s", off, x)
+		}
+	}
+}
+
 // A service that fails to render keeps its process (Q-1), but who may
 // connect to it still follows the database: a revoked device's key leaves
 // its keys file, reread without a restart. A file that is not there is not

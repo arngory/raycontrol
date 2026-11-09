@@ -142,6 +142,16 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(paths.Rendered, "ygg", render.YggdrasilUsers)); !strings.Contains(string(b), `"lan": "u`) {
 		t.Fatalf("no LAN group in the ygg users file:\n%s", b)
 	}
+	// The connection limits' switch of the Hysteria2 backends
+	// (spec/conn-limit-v1.md §3.2), with a pin of niko-server v0.17.0 or
+	// later only: the check below has the pinned one take it.
+	for _, hy := range []string{"hy2o", "hy2m"} {
+		b, _ := os.ReadFile(filepath.Join(paths.Rendered, hy, "backend.json"))
+		limit := filepath.Join(paths.Rendered, hy, render.HysteriaConnLimit)
+		if has := strings.Contains(string(b), `"conn_limit_file": "`+limit+`"`); has != render.NikoServerAtLeast(render.NikoConnLimitFrom) {
+			t.Errorf("%s backend.json, conn_limit_file %v:\n%s", hy, has, b)
+		}
+	}
 	// The front (its routes take naive and DoH to rayd), and a backend for
 	// each of the others.
 	for _, want := range []string{"front", "hy2o", "hy2m", "ygg", "dns", "mdns"} {
