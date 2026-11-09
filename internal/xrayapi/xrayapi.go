@@ -67,9 +67,11 @@ func socketID(path string) [2]uint64 {
 }
 
 func unixHTTP(socket string) *http.Client {
-	id := socketID(socket)
+	// The socket is looked at under the lock: a caller with an older look
+	// would replace the client another just made.
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
+	id := socketID(socket)
 	if p := pool.clients[socket]; p != nil {
 		if p.id == id && id != ([2]uint64{}) {
 			return p.client

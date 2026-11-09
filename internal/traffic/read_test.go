@@ -157,6 +157,11 @@ func TestNotRunning(t *testing.T) {
 	}
 }
 
+const (
+	bootA = "6c0b4e8e-8f7a-4f4e-9d2c-1a2b3c4d5e6f"
+	bootB = "0d1e2f3a-4b5c-4d6e-8f70-8192a3b4c5d6"
+)
+
 func TestSameBoot(t *testing.T) {
 	for _, c := range []struct {
 		a, b string
@@ -170,6 +175,18 @@ func TestSameBoot(t *testing.T) {
 		{"xray:1767225600", "1767225600", false},
 		{"xray:-9223372036854775808", "xray:9223372036854775807", false},
 		{"xray:x", "xray:y", false},
+		// With the kernel's boot: the monotonic start decides, the wall
+		// one (stepped) does not; another boot is another run.
+		{"xray:1767225600:" + bootA + ":3600", "xray:1767232800:" + bootA + ":3604", true},
+		{"xray:1767225600:" + bootA + ":3600", "xray:1767225600:" + bootA + ":3606", false},
+		{"xray:1767225600:" + bootA + ":3600", "xray:1767225600:" + bootB + ":3600", false},
+		// One without it: the wall clock, as before.
+		{"xray:1767225600:" + bootA + ":3600", "xray:1767225603", true},
+		{"xray:1767225600:" + bootA + ":3600", "xray:1767232800", false},
+		{"xray:1767225600::3600", "xray:1767225600::3601", false}, // no boot: unreadable
+		{"xray:1767225600:" + bootA, "xray:1767225600:" + bootA + ":1", false},
+		{"xray:1767225600:" + bootA + ":-1", "xray:1767225600:" + bootA + ":0", false},
+		{"xray:1767225600:" + bootA + ":1:2", "xray:1767225600:" + bootA + ":1", false},
 	} {
 		if got := SameBoot(c.a, c.b); got != c.same {
 			t.Errorf("SameBoot(%s, %s) = %v", c.a, c.b, got)

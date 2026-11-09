@@ -7,10 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/xrayapi"
@@ -35,10 +39,32 @@ type Reading struct {
 	Users  map[string]store.TrafficCounter
 }
 
-// monoStart anchors Mono: time.Since keeps to the monotonic clock.
+// monoStart anchors Mono where the kernel's clock cannot be read:
+// time.Since keeps to the monotonic clock.
 var monoStart = time.Now()
 
-func monoNow() time.Duration { return time.Since(monoStart) }
+// monoNow is the kernel's monotonic clock (CLOCK_MONOTONIC), the one
+// Xray's uptime runs on, and whether it is that: one clock for every
+// process of this boot, so a rayd started anew still tells an Xray's run
+// by its start on it. Else this process's own monotonic time.
+func monoNow() (time.Duration, bool) {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return time.Since(monoStart), false
+	}
+	return time.Duration(ts.Nano()), true
+}
+
+// bootID is the kernel's boot (/proc/sys/kernel/random/boot_id), "" when
+// it cannot be read: the monotonic clock counts from that boot.
+var bootID = sync.OnceValue(func() string {
+	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	id := strings.TrimSpace(string(b))
+	if err != nil || len(id) != 36 || strings.Trim(id, "0123456789abcdef-") != "" {
+		return ""
+	}
+	return id
+})
 
 // Answers from the processes are bounded: a data-plane process is not
 // trusted to send a sane one (traffic-limit-v1 §6).
@@ -138,7 +164,8 @@ const bootSlack = 5 * time.Second
 func ReadXray(ctx context.Context, socket string) (Reading, error) {
 	ctx, cancel := context.WithTimeout(ctx, readWait)
 	defer cancel()
-	at, mono := time.Now(), monoNow()
+	at := time.Now()
+	mono, kernel := monoNow()
 	users, uptime, err := xrayapi.DialStats(socket).Users(ctx)
 	if err != nil {
 		return Reading{}, err
@@ -147,7 +174,11 @@ func ReadXray(ctx context.Context, socket string) (Reading, error) {
 		return Reading{}, fmt.Errorf("%d names, at most %d", len(users), maxNames)
 	}
 	start := at.Add(-uptime).Truncate(time.Second)
-	r := Reading{Boot: xrayBoot + strconv.FormatInt(start.Unix(), 10), Start: start, Uptime: uptime, Mono: mono,
+	boot := xrayBoot + strconv.FormatInt(start.Unix(), 10)
+	if id := bootID(); kernel && id != "" {
+		boot = xrayRun(start, id, mono-uptime)
+	}
+	r := Reading{Boot: boot, Start: start, Uptime: uptime, Mono: mono,
 		Users: make(map[string]store.TrafficCounter, len(users))}
 	for name, c := range users {
 		r.Users[name] = store.TrafficCounter{Up: c.Up, Down: c.Down}
@@ -155,19 +186,64 @@ func ReadXray(ctx context.Context, socket string) (Reading, error) {
 	return r, nil
 }
 
+// xrayRun names an Xray's run: "xray:", its start by the wall clock (Unix
+// seconds), the kernel's boot and its start on the monotonic clock of
+// that boot (seconds). A step of the wall clock moves the first, never the
+// last two.
+func xrayRun(start time.Time, boot string, mono time.Duration) string {
+	return xrayBoot + strconv.FormatInt(start.Unix(), 10) + ":" + boot + ":" + strconv.FormatInt(int64(mono/time.Second), 10)
+}
+
+// xrayStart reads a run's name: the wall start, and the kernel's boot and
+// the monotonic start when it has them (kernel).
+func xrayStart(b string) (wall int64, boot string, mono int64, kernel, ok bool) {
+	rest, ok := strings.CutPrefix(b, xrayBoot)
+	if !ok {
+		return 0, "", 0, false, false
+	}
+	parts := strings.Split(rest, ":")
+	sane := func(v int64, err error) bool { return err == nil && v >= 0 && v < 1<<40 }
+	wall, err := strconv.ParseInt(parts[0], 10, 64)
+	switch {
+	case !sane(wall, err):
+		return 0, "", 0, false, false
+	case len(parts) == 1:
+		return wall, "", 0, false, true
+	case len(parts) != 3 || parts[1] == "":
+		return 0, "", 0, false, false
+	}
+	mono, err = strconv.ParseInt(parts[2], 10, 64)
+	if !sane(mono, err) {
+		return 0, "", 0, false, false
+	}
+	return wall, parts[1], mono, true, true
+}
+
 // SameBoot reports whether two boots are one run of a process: equal, or
-// two readings of an Xray's start within bootSlack.
+// two readings of an Xray's start within bootSlack. Both with the kernel's
+// boot: the same boot and the same start on its monotonic clock, whatever
+// the wall clock did between them (a run never outlives its kernel's
+// boot). Else by the wall clock.
 func SameBoot(a, b string) bool {
 	if a == b {
 		return true
 	}
-	x, okA := strings.CutPrefix(a, xrayBoot)
-	y, okB := strings.CutPrefix(b, xrayBoot)
-	if !okA || !okB {
+	s, idA, ms, kA, okA := xrayStart(a)
+	t, idB, mt, kB, okB := xrayStart(b)
+	slack := int64(bootSlack / time.Second)
+	switch {
+	case !okA || !okB:
 		return false
+	case kA && kB:
+		return idA == idB && max(ms-mt, mt-ms) <= slack
 	}
-	s, err1 := strconv.ParseInt(x, 10, 64)
-	t, err2 := strconv.ParseInt(y, 10, 64)
-	sane := func(v int64) bool { return v >= 0 && v < 1<<40 }
-	return err1 == nil && err2 == nil && sane(s) && sane(t) && max(s-t, t-s) <= int64(bootSlack/time.Second)
+	return max(s-t, t-s) <= slack
+}
+
+// knownRun reports whether two Xray boots both carry the kernel's boot:
+// then SameBoot tells their runs apart without the wall clock.
+func knownRun(a, b string) bool {
+	_, _, _, kA, okA := xrayStart(a)
+	_, _, _, kB, okB := xrayStart(b)
+	return okA && okB && kA && kB
 }

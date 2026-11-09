@@ -34,12 +34,16 @@ type node struct {
 	reads    int
 	delay    time.Duration // each read takes this long
 	gone     string        // this source's socket is not there
+	// The kernel's boot, as Xray's run names carry it; "": a kernel whose
+	// clock rayd cannot read, the run told by the wall clock.
+	kernel string
 }
 
 func newNode(t *testing.T) *node {
 	t.Helper()
 	n := &node{t: t, ctx: context.Background(), path: filepath.Join(t.TempDir(), "node.db"), hb: &health.Board{},
-		now: time.Date(2026, 11, 8, 12, 0, 0, 123456789, time.UTC), mono: time.Hour, readings: map[string]Reading{}}
+		now: time.Date(2026, 11, 8, 12, 0, 0, 123456789, time.UTC), mono: time.Hour, readings: map[string]Reading{},
+		kernel: bootA}
 	n.open()
 	for _, s := range []store.Service{{Kind: "hy2-masq", Name: "hy"}, {Kind: "naive", Name: "nv"}, {Kind: "inner", Name: "inner"}, {Kind: "dnstt", Name: "dns"}} {
 		s.Enabled = true
@@ -130,11 +134,15 @@ func (n *node) set(key, boot string, counters ...any) {
 }
 
 // setXray makes inner's Xray read these counters with this uptime, as
-// ReadXray gives them: its start from the wall clock, the read's
-// monotonic time.
+// ReadXray gives them: its start from the wall clock and on the kernel's
+// monotonic clock, the read's monotonic time.
 func (n *node) setXray(uptime time.Duration, counters ...any) {
 	start := n.now.Add(-uptime).Truncate(time.Second)
-	n.set("xray:inner", xrayBoot+strconv.FormatInt(start.Unix(), 10), counters...)
+	boot := xrayBoot + strconv.FormatInt(start.Unix(), 10)
+	if n.kernel != "" {
+		boot = xrayRun(start, n.kernel, n.mono-uptime)
+	}
+	n.set("xray:inner", boot, counters...)
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	r := n.readings["xray:inner"]
@@ -577,7 +585,14 @@ func TestXrayStart(t *testing.T) {
 // uptime grew with the monotonic clock, so it is the same run, whatever
 // its start reads as now. A restart is still one.
 func TestXrayClockStep(t *testing.T) {
+	for _, kernel := range []string{bootA, ""} {
+		t.Run("kernel="+strconv.FormatBool(kernel != ""), func(t *testing.T) { xrayClockStep(t, kernel) })
+	}
+}
+
+func xrayClockStep(t *testing.T, kernel string) {
 	n := newNode(t)
+	n.kernel = kernel
 	n.user("alice", 1<<40, "dns")
 	a := n.accountant()
 	up := time.Hour
@@ -644,6 +659,39 @@ func TestXrayClockStep(t *testing.T) {
 	n.setXray(4*time.Second+2*Every, "u1", 111, 112)
 	c.Round(n.ctx, "", true)
 	n.wantUsed("alice", u1+188, d1+201)
+}
+
+// rayd restarts while the wall clock steps forward by more than a young
+// Xray's age: by the wall clock (no kernel's clock) the run reads as new
+// and its marks count again; by the kernel's monotonic clock it is the
+// same run. A reboot is a new run whatever the clocks say.
+func TestXrayRestartStepYoung(t *testing.T) {
+	n := newNode(t)
+	n.user("alice", 1<<50, "dns")
+	a := n.accountant()
+	up := 20 * time.Second
+	n.setXray(up, "u1", 3<<30, 3<<30)
+	a.Round(n.ctx, "", true)
+	n.tick(Every)
+	up += Every
+	n.setXray(up, "u1", 4<<30, 4<<30)
+	a.Round(n.ctx, "", true) // written: marks of 4 GiB at an uptime of 35 s
+	u0, d0 := n.used("alice")
+	n.tick(10 * time.Second)
+	up += 10 * time.Second
+	n.step(2 * time.Minute) // NTP steps while rayd restarts
+	n.setXray(up, "u1", 4<<30+7, 4<<30+9)
+	n.accountant().Round(n.ctx, "", true)
+	n.wantUsed("alice", u0+7, d0+9)
+
+	// The node reboots: a new kernel's boot, its monotonic clock from
+	// zero; an Xray whose start reads the same on it as the stored one's,
+	// its counters past the old marks, is still new: counted whole.
+	n.tick(Every)
+	n.kernel, n.mono = bootB, n.mono-Every-up+3*time.Second
+	n.setXray(3*time.Second, "u1", 4<<30+100, 4<<30+200)
+	n.accountant().Round(n.ctx, "", true)
+	n.wantUsed("alice", u0+7+4<<30+100, d0+9+4<<30+200)
 }
 
 // A source that fails gives nothing and keeps its marks; one whose service

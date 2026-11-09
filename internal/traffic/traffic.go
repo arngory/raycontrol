@@ -136,9 +136,12 @@ type sourceState struct {
 // sameRun reports whether a reading comes from the run of the process the
 // state was taken from. Xray (a reading with a start): its uptime grew at
 // least by the monotonic time between the two reads, less bootSlack; with
-// no reading of this rayd's yet, by the wall time since the stored poll;
-// with no poll stored, its start is the stored one within bootSlack. A
-// step of the wall clock between two reads of one rayd changes nothing.
+// no reading of this rayd's yet, its start on the kernel's monotonic clock
+// is the stored one (same kernel boot) within bootSlack, or, where either
+// lacks the kernel's clock, its uptime covers the wall time since the
+// stored poll; with no poll stored, its start is the stored one within
+// bootSlack. A step of the wall clock between two reads of one rayd, or
+// while rayd is down, changes nothing where the kernel's clock is known.
 // The others: the same boot.
 func sameRun(prev *sourceState, r Reading, now time.Time) bool {
 	switch {
@@ -148,6 +151,8 @@ func sameRun(prev *sourceState, r Reading, now time.Time) bool {
 		return prev.boot == r.Boot
 	case prev.mono:
 		return r.Uptime+bootSlack >= prev.uptime+(r.Mono-prev.monoAt)
+	case knownRun(prev.boot, r.Boot):
+		return SameBoot(prev.boot, r.Boot)
 	case !prev.polled.IsZero():
 		return strings.HasPrefix(prev.boot, xrayBoot) && r.Uptime+bootSlack >= now.Sub(prev.polled)
 	}
