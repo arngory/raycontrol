@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -49,7 +50,7 @@ func cpu(drop, early int) string {
 
 // The refusals by user and service: deltas within a run, whole for a new
 // run; at a limit for 15 minutes; logged once per user after an hour
-// without; the metrics' totals; the status lines; nothing but u<id>.
+// without, at the end of the quarter hour; the metrics' totals; the status lines; nothing but u<id>.
 func TestMonitor(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	proc := t.TempDir()
@@ -80,8 +81,11 @@ func TestMonitor(t *testing.T) {
 	if s.Refused[[2]string{"nv", "tcp"}] != 3 || s.Conntrack == nil || s.Conntrack.Count != 1000 {
 		t.Fatalf("snapshot %+v", s)
 	}
-	if !strings.Contains(logs.String(), "conn-limit: u5 at the limit (nv)") || strings.Count(logs.String(), "at the limit") != 1 {
-		t.Fatalf("log:\n%s", logs.String())
+	// The log names users at a quarter hour's end only (1_700_000_000 is
+	// 800 s into one): not yet.
+	lines := func() int { return strings.Count(logs.String(), "conn-limit: at a limit in the last 15 min") }
+	if lines() != 0 {
+		t.Fatalf("logged within the quarter hour:\n%s", logs.String())
 	}
 	// The same run: only what grew.
 	limits = map[string]map[string]int64{"u5": {"tcp": 5, "rate": 1}}
@@ -90,8 +94,8 @@ func TestMonitor(t *testing.T) {
 	if s := m.Snapshot(); s.Refused[[2]string{"nv", "tcp"}] != 5 || s.Refused[[2]string{"nv", "rate"}] != 1 || s.Users[0].Refused != 6 {
 		t.Fatalf("deltas: %+v", s)
 	}
-	if strings.Count(logs.String(), "at the limit") != 1 {
-		t.Fatalf("logged again within the hour:\n%s", logs.String())
+	if lines() != 0 {
+		t.Fatalf("logged within the quarter hour:\n%s", logs.String())
 	}
 	// A new run of the process: whole.
 	boot, limits = "b2", map[string]map[string]int64{"u5": {"tcp": 2}}
@@ -109,16 +113,22 @@ func TestMonitor(t *testing.T) {
 	if line != "at a limit in 15 min: u5 (nv: 8)" {
 		t.Fatalf("status line %q", line)
 	}
-	// 15 minutes on: nobody at a limit; after an hour, logged again.
+	// 15 minutes on: nobody at a limit; the quarter hour's line, once.
 	now = now.Add(Window)
 	m.Round(context.Background())
 	if s := m.Snapshot(); len(s.Users) != 0 {
 		t.Fatalf("still at a limit: %+v", s.Users)
 	}
+	if lines() != 1 || !strings.Contains(logs.String(), "conn-limit: at a limit in the last 15 min: u5 (nv)") {
+		t.Fatalf("the quarter hour's line:\n%s", logs.String())
+	}
+	// After an hour without: in the next quarter hour's line.
 	now = now.Add(time.Hour)
 	limits = map[string]map[string]int64{"u5": {"tcp": 3}}
 	m.Round(context.Background())
-	if strings.Count(logs.String(), "at the limit") != 2 {
+	now = now.Add(Window)
+	m.Round(context.Background())
+	if lines() != 2 {
 		t.Fatalf("not logged after an hour:\n%s", logs.String())
 	}
 	if strings.Contains(logs.String(), "#0011") || strings.Contains(logs.String(), "u7-ab12") {
@@ -130,6 +140,68 @@ func TestMonitor(t *testing.T) {
 		if l.Name == "conn-limit" && !strings.HasPrefix(l.Detail, "off") {
 			t.Fatalf("off: %q", l.Detail)
 		}
+	}
+}
+
+// The users newly at a limit go to the log in one line when a quarter hour
+// of the wall clock ends (the first round after it), never in the round of
+// their refusal: the log tells no time finer than 15 minutes. A user is
+// named once an hour at most, with every service of its quarter hour.
+func TestMonitorLogQuarter(t *testing.T) {
+	q := time.Unix(1_700_000_100, 0) // a quarter hour's start (1_700_000_100 = 1_888_889 * 900)
+	if !q.Truncate(Window).Equal(q) {
+		t.Fatal("not a quarter hour")
+	}
+	now := q.Add(2 * time.Minute)
+	proc := t.TempDir()
+	fakeProc(t, proc, 1000, 65536)
+	var logs bytes.Buffer
+	counts := map[string]map[string]map[string]int64{"nv": {}, "nv2": {}}
+	read := func(svc string) func(context.Context) (Reading, error) {
+		return func(context.Context) (Reading, error) {
+			// A new answer each time, as a socket's.
+			limits := map[string]map[string]int64{}
+			for name, kinds := range counts[svc] {
+				limits[name] = maps.Clone(kinds)
+			}
+			return Reading{Boot: "b", Age: time.Second, AgeKnown: true, Limits: limits}, nil
+		}
+	}
+	m := &Monitor{Sources: func(context.Context) ([]Source, error) {
+		return []Source{{Service: "nv", Read: read("nv")}, {Service: "nv2", Read: read("nv2")}}, nil
+	}, Log: slog.New(slog.NewTextHandler(&logs, nil)), Proc: proc, Now: func() time.Time { return now }}
+	round := func(at time.Duration) {
+		now = q.Add(at)
+		m.Round(context.Background())
+	}
+	round(2 * time.Minute)
+	counts["nv"]["u9"] = map[string]int64{"tcp": 1}
+	counts["nv"]["u5"] = map[string]int64{"rate": 2}
+	round(3 * time.Minute)
+	counts["nv2"]["u5"] = map[string]int64{"udp": 1}
+	round(14*time.Minute + 45*time.Second)
+	if logs.Len() != 0 {
+		t.Fatalf("logged within the quarter hour:\n%s", logs.String())
+	}
+	// The next quarter hour's first round: one line; u7's refusal in this
+	// very round waits for the next one.
+	counts["nv"]["u7"] = map[string]int64{"tcp": 1}
+	round(15*time.Minute + 10*time.Second)
+	want := "conn-limit: at a limit in the last 15 min: u5 (nv, nv2), u9 (nv)"
+	if strings.Count(logs.String(), "conn-limit:") != 1 || !strings.Contains(logs.String(), want) {
+		t.Fatalf("want %q:\n%s", want, logs.String())
+	}
+	logs.Reset()
+	counts["nv"]["u5"] = map[string]int64{"rate": 9} // still at it: not again within the hour
+	round(20 * time.Minute)
+	round(30*time.Minute + 5*time.Second)
+	if got := logs.String(); !strings.Contains(got, "conn-limit: at a limit in the last 15 min: u7 (nv)\"") || strings.Contains(got, "u5") {
+		t.Fatalf("the second quarter hour:\n%s", got)
+	}
+	logs.Reset()
+	round(45*time.Minute + 5*time.Second)
+	if logs.Len() != 0 {
+		t.Fatalf("a quarter hour with no one new:\n%s", logs.String())
 	}
 }
 

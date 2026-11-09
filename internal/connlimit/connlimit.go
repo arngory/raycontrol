@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -31,8 +32,11 @@ const (
 	// Window is how far back "at the limit" looks.
 	Window = 15 * time.Minute
 	// quietBefore: a user's first refusal after this long without one is
-	// logged (rayd at info).
+	// logged (rayd at info), with the others of its quarter hour in one
+	// line at the quarter hour's end: no time finer than Window (§12, 3).
 	quietBefore = time.Hour
+	// logMax bounds the users one line names.
+	logMax = 50
 	// warnEvery bounds the warnings that the table was full.
 	warnEvery = 10 * time.Minute
 	// guardDay: the conntrack line shows a guard that was on this recently.
@@ -109,11 +113,15 @@ type Monitor struct {
 	Proc string
 	Now  func() time.Time
 
-	mu       sync.Mutex
-	marks    map[string]mark // by service
-	totals   map[[2]string]uint64
-	events   []event
-	lastHit  map[int64]time.Time
+	mu      sync.Mutex
+	marks   map[string]mark // by service
+	totals  map[[2]string]uint64
+	events  []event
+	lastHit map[int64]time.Time
+	// pending are the users newly at a limit since the last quarter hour,
+	// by number, with their services; flushed is that quarter hour.
+	pending  map[int64]map[string]bool
+	flushed  time.Time
 	guard    *Guard
 	ct       *Conntrack
 	drops    []dropSample
@@ -222,7 +230,10 @@ func (m *Monitor) Round(ctx context.Context) {
 	m.off = off
 	if m.marks == nil {
 		m.marks, m.totals, m.lastHit = map[string]mark{}, map[[2]string]uint64{}, map[int64]time.Time{}
+		m.pending = map[int64]map[string]bool{}
 	}
+	// Before this round's: those of the quarter hour that ended.
+	m.flushLocked(now)
 	// The services unknown this round (the store failed): the marks and the
 	// metrics' services stay as they were, nothing is counted; a service
 	// read anew would count its process's refusals since it started again.
@@ -319,8 +330,11 @@ func (m *Monitor) take(service string, r Reading, now time.Time) {
 			continue
 		}
 		m.events = append(m.events, event{at: now, user: id, service: service, n: n})
-		if last, ok := m.lastHit[id]; !ok || now.Sub(last) >= quietBefore {
-			m.log().Info(fmt.Sprintf("conn-limit: u%d at the limit (%s)", id, service))
+		if last, ok := m.lastHit[id]; !ok || now.Sub(last) >= quietBefore || m.pending[id] != nil {
+			if m.pending[id] == nil {
+				m.pending[id] = map[string]bool{}
+			}
+			m.pending[id][service] = true
 		}
 		m.lastHit[id] = now
 	}
@@ -330,6 +344,31 @@ func (m *Monitor) take(service string, r Reading, now time.Time) {
 		}
 	}
 	m.marks[service] = mark{boot: boot, counts: limits}
+}
+
+// flushLocked logs the users newly at a limit, in one line, once a quarter
+// hour of the wall clock (Window) has ended: the line names users and
+// services, never when within it. Under mu.
+func (m *Monitor) flushLocked(now time.Time) {
+	q := now.Truncate(Window)
+	if !q.After(m.flushed) {
+		return
+	}
+	m.flushed = q
+	if len(m.pending) == 0 {
+		return
+	}
+	ids := slices.Sorted(maps.Keys(m.pending))
+	parts := make([]string, 0, min(len(ids), logMax+1))
+	for i, id := range ids {
+		if i == logMax {
+			parts = append(parts, fmt.Sprintf("%d more", len(ids)-i))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("u%d (%s)", id, strings.Join(slices.Sorted(maps.Keys(m.pending[id])), ", ")))
+	}
+	m.log().Info("conn-limit: at a limit in the last 15 min: " + strings.Join(parts, ", "))
+	clear(m.pending)
 }
 
 // users are those at a limit in the window, by ID then service. Under mu.
