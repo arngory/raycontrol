@@ -329,6 +329,76 @@ func TestRotationSwitchKeepsStreams(t *testing.T) {
 	}
 }
 
+// The names rayd gives from v0.23.0: each credential its own, for its whole
+// life (u1-<fingerprint>). A password renamed within its user, from its
+// role's name to its own or back (a rollback), is the same user's: no
+// stream is cut. A switch leaves the file's names as they were; the
+// grace's end takes the previous one, and its stream, away.
+func TestStableNamesKeepStreams(t *testing.T) {
+	const oldName, newName = "u1-0123456789abcdef", "u1-fedcba9876543210"
+	path := filepath.Join(t.TempDir(), "users.json")
+	writeNamed(t, path, map[string]string{"old": "u1", "new": "u1-n", "bob": "u12"})
+	u := &Users{Path: path, every: time.Nanosecond}
+	onOld, ok1 := u.admit(t.Context(), "old")
+	onNew, ok2 := u.admit(t.Context(), "new")
+	onBob, ok3 := u.admit(t.Context(), "bob")
+	if !ok1 || !ok2 || !ok3 {
+		t.Fatal("not admitted")
+	}
+	defer onOld.leave()
+	defer onNew.leave()
+	defer onBob.leave()
+	step := func(names map[string]string) {
+		t.Helper()
+		time.Sleep(2 * time.Millisecond)
+		writeNamed(t, path, names)
+		time.Sleep(2 * time.Millisecond)
+		u.Accepts("x") // a request reads the file
+	}
+	// Names by role become the credentials' own, and back (a rollback),
+	// and own again.
+	for i, names := range []map[string]string{
+		{"old": oldName, "new": newName, "bob": "u12-00000000000000ff"},
+		{"old": "u1-p", "new": "u1", "bob": "u12"},
+		{"old": oldName, "new": newName, "bob": "u12-00000000000000ff"},
+	} {
+		step(names)
+		if onOld.ctx.Err() != nil || onNew.ctx.Err() != nil || onBob.ctx.Err() != nil {
+			t.Fatalf("rename %d cut streams: %v, %v, %v", i, context.Cause(onOld.ctx), context.Cause(onNew.ctx), context.Cause(onBob.ctx))
+		}
+	}
+	// The switch: nothing in the file changes.
+	step(map[string]string{"old": oldName, "new": newName, "bob": "u12-00000000000000ff"})
+	if onOld.ctx.Err() != nil || onNew.ctx.Err() != nil {
+		t.Fatal("the switch cut streams")
+	}
+	// A new one published for bob: his stream stays.
+	step(map[string]string{"old": oldName, "new": newName, "bob": "u12-00000000000000ff", "bob2": "u12-0000000000000100"})
+	if onBob.ctx.Err() != nil || !u.Accepts("bob2") {
+		t.Fatal("a published credential cut the user's stream")
+	}
+	// The grace's end: the previous one goes, with its stream.
+	step(map[string]string{"new": newName, "bob": "u12-00000000000000ff", "bob2": "u12-0000000000000100"})
+	if onOld.ctx.Err() == nil || onNew.ctx.Err() != nil || onBob.ctx.Err() != nil {
+		t.Fatalf("the grace's end: %v, %v, %v", context.Cause(onOld.ctx), context.Cause(onNew.ctx), context.Cause(onBob.ctx))
+	}
+	// A password whose name moves to another user is cut: u1-… is not
+	// u12-… (a prefix of the digits is another number).
+	step(map[string]string{"new": "u12-fedcba9876543210", "bob": "u12-00000000000000ff"})
+	if onNew.ctx.Err() == nil || onBob.ctx.Err() != nil {
+		t.Fatalf("moved to another user: %v, %v", context.Cause(onNew.ctx), context.Cause(onBob.ctx))
+	}
+}
+
+func TestBaseName(t *testing.T) {
+	for name, want := range map[string]string{"u5": "u5", "u5-n": "u5", "u5-p": "u5", "u5-0123456789abcdef": "u5",
+		"u51-0123456789abcdef": "u51", "": ""} {
+		if got := baseName(name); got != want {
+			t.Errorf("%q: %q, want %q", name, got, want)
+		}
+	}
+}
+
 // A password that stays but counts under another user's name now is
 // another user's: its streams go too, as niko-server's do (a name given
 // another password).

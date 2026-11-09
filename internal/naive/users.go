@@ -21,7 +21,9 @@ import (
 // Users are the accepted passwords, as SHA-256 hashes in a JSON file that
 // rayd rewrites when credentials rotate and users come and go:
 // {"<hash>": "<name>"}, the name the bytes of that password count under
-// (u<id>, u<id>-n, u<id>-p; docs/spec/traffic-limit-v1.md §2.3). rayd
+// (u<id>-<fingerprint>, the credential's own name for its whole life;
+// u<id>, u<id>-n and u<id>-p from rayd before v0.23.0;
+// docs/spec/traffic-limit-v1.md §2.3). rayd
 // before v0.22.0 wrote a list of the hashes, read too: no name, nothing
 // counted. The file is read again when it changes, without a restart; a
 // hash it no longer has, or gives another name, loses its live streams:
@@ -229,9 +231,13 @@ func (u *Users) reload() {
 		return
 	}
 	for hash, ss := range u.live {
-		// A credential switch moves the names (u5-n becomes u5, u5 becomes
-		// u5-p) while both passwords stay good: the same user, kept. Its
-		// streams count on under the name they came in with, the user's.
+		// A password that stays with its user keeps its streams: a
+		// credential keeps its name through a switch, and a name that
+		// changes but stays the user's is the same user's (u5-<fingerprint>
+		// becoming u5 when a rollback brings back a rayd before v0.23.0,
+		// whose names go by the role and move at a switch: u5-n becomes u5,
+		// u5 becomes u5-p). Its streams count on under the name they came in
+		// with.
 		if name, ok := next[hash]; ok && baseName(name) == baseName(u.byHash[hash]) {
 			continue
 		}
@@ -246,16 +252,12 @@ func (u *Users) reload() {
 	}
 }
 
-// baseName is the user a name stands for: u5 for u5, u5-n and u5-p (the
-// rotating credentials, R4-1).
+// baseName is the user a name stands for: u5 for u5 and for the names of
+// its credentials, u5-<fingerprint> (rayd v0.23.0), and u5-n and u5-p (by
+// the role, before).
 func baseName(name string) string {
-	if b, ok := strings.CutSuffix(name, "-n"); ok {
-		return b
-	}
-	if b, ok := strings.CutSuffix(name, "-p"); ok {
-		return b
-	}
-	return name
+	b, _, _ := strings.Cut(name, "-")
+	return b
 }
 
 // Watch reads the file every reloadEvery until ctx ends, so that a user
@@ -276,7 +278,7 @@ func (u *Users) Watch(ctx context.Context) {
 }
 
 // maxUsersFile bounds the users file: 4096 users with three credentials
-// each take ~400 KiB.
+// each take ~1.2 MiB.
 const maxUsersFile = 8 << 20
 
 // readUsers reads the users file: an object of hash to name, or the list

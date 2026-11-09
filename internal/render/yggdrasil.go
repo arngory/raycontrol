@@ -106,6 +106,10 @@ func YggdrasilAddress(key ed25519.PublicKey) netip.Addr {
 
 // yggdrasilUsers are the keys of the users of a Yggdrasil service: from the
 // current inner UUID of each, and the next and previous while they rotate.
+// Their names are labels, by the role (-n, -p): niko-server keeps a link
+// while its key is in the file, whatever the name, so a switch cuts none
+// here; the traffic behind them counts at inner, by the inner credential's
+// own name (XrayUsers).
 func yggdrasilUsers(m Model, s Service, inner Service) []map[string]any {
 	now := m.Now
 	if now.IsZero() {

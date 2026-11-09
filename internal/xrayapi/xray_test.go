@@ -105,14 +105,13 @@ func TestInnerWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if users["u7"] != m.Inner[7] {
+	if len(users) != 1 || users[store.CredentialName(7, m.Inner[7])] != m.Inner[7] {
 		t.Fatalf("users from config: %v", users)
 	}
 
-	want := map[string]string{
-		"u7": "6f1c2a3b-0000-4000-8000-000000000077", // rotated
-		"u8": "6f1c2a3b-0000-4000-8000-000000000008", // new
-	}
+	// Each credential under its own name.
+	const rotated, fresh = "6f1c2a3b-0000-4000-8000-000000000077", "6f1c2a3b-0000-4000-8000-000000000008"
+	want := map[string]string{store.CredentialName(7, rotated): rotated, store.CredentialName(8, fresh): fresh}
 	added, removed, err := c.SyncVLESS(ctx, render.InnerTag, "", want)
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +137,7 @@ func TestInnerWithXray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxyThroughInner(t, bin, files[0].Content, encryption, want["u8"])
+	proxyThroughInner(t, bin, files[0].Content, encryption, fresh)
 }
 
 // proxyThroughInner runs a copy of the inner config on TCP (Xray clients
@@ -309,7 +308,7 @@ func TestRealityWithXray(t *testing.T) {
 	api := paths.APISocket("reality")
 	waitFile(t, api)
 	newID := "6f1c2a3b-0000-4000-8000-000000000009"
-	want := map[string]string{render.InnerEmail(user.ID): m.Creds[svc.ID][user.ID], "u9": newID}
+	want := map[string]string{store.CredentialName(user.ID, m.Creds[svc.ID][user.ID]): m.Creds[svc.ID][user.ID], "u9": newID}
 	if added, removed, err := xrayapi.Dial(api).SyncVLESS(ctx, render.RealityTag, render.RealityFlow, want); err != nil || added != 1 || removed != 0 {
 		t.Fatalf("sync: +%d -%d %v", added, removed, err)
 	}
@@ -1072,12 +1071,13 @@ func TestHysteriaWithXray(t *testing.T) {
 		}
 		// The user's bytes on the stats socket (niko-server v0.15.0,
 		// traffic-limit-v1 §2.2), as rayd's traffic loop reads them: the
-		// request up, the page down, under the users file's name.
+		// request up, the page down, under the users file's name: the
+		// credential's own.
 		r, err := traffic.ReadLine(ctx, paths.StatsSocket(svc.Name))
 		if err != nil {
 			t.Fatalf("%s: the traffic line: %v", svc.Name, err)
 		}
-		c := r.Users[render.InnerEmail(m.Users[0].ID)]
+		c := r.Users[store.CredentialName(m.Users[0].ID, m.Creds[svc.ID][m.Users[0].ID])]
 		if len(r.Boot) != 16 || c.Up == 0 || c.Down < int64(len("through reality")) {
 			t.Fatalf("%s: the traffic line %+v", svc.Name, r)
 		}

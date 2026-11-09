@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -464,6 +466,33 @@ func (c Credential) Accepted(now time.Time) []string {
 		out = append(out, c.Prev)
 	}
 	return out
+}
+
+// credentialPrint is the bytes of a credential's fingerprint in its name.
+const credentialPrint = 8
+
+// CredentialName is the name a credential goes by in the data plane: the
+// email of an Xray user (inner, REALITY), the name in the users files of
+// Hysteria2 and naive. The processes count bytes by it (traffic-limit-v1
+// §1), and Xray and niko-server cut the connections of a name that goes
+// or changes its secret. It is the user's u<id>, a dash and a fingerprint
+// of the secret: 16 hex digits of a SHA-256 under a label of its own, so
+// it tells nothing of the secret. The secret is the credential for its
+// whole life, current, next and previous alike, so its name stays when
+// the roles move at a switch, and nothing is cut (rayd before v0.23.0
+// named them by the role, u5, u5-n and u5-p, and every switch renamed
+// two). A different secret of the user never gets the name, unless 64
+// bits of SHA-256 collide; another user's name has another u<id>. Nothing
+// is stored: rollback and the store need no new column.
+func CredentialName(userID int64, secret string) string {
+	sum := sha256.Sum256([]byte("raycontrol credential name\x00" + secret))
+	return "u" + strconv.FormatInt(userID, 10) + "-" + hex.EncodeToString(sum[:credentialPrint])
+}
+
+// isCredentialPrint reports whether s is a fingerprint as CredentialName
+// writes it: 16 lowercase hex digits.
+func isCredentialPrint(s string) bool {
+	return len(s) == 2*credentialPrint && strings.Trim(s, "0123456789abcdef") == ""
 }
 
 // CredentialSets is Credentials with the rotation state.

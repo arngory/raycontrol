@@ -210,12 +210,13 @@ func TestRender(t *testing.T) {
 	}
 
 	inner := string(byPath["/var/lib/raycontrol/rendered/inner/xray.json"].Content)
-	for _, want := range []string{`"mlkem768x25519plus.native.600s.`, `"/run/niko/inner/vless.sock,0660"`, `"/run/niko/inner-api/api.sock"`, `"10.0.0.0/8"`, `"u1"`} {
+	for _, want := range []string{`"mlkem768x25519plus.native.600s.`, `"/run/niko/inner/vless.sock,0660"`, `"/run/niko/inner-api/api.sock"`, `"10.0.0.0/8"`,
+		`"` + store.CredentialName(1, m.Inner[1]) + `"`} {
 		if !strings.Contains(inner, want) {
 			t.Errorf("inner config lacks %s", want)
 		}
 	}
-	if strings.Contains(inner, `"u2"`) {
+	if strings.Contains(inner, `"u2`) {
 		t.Error("bob has no tunnel but got an inner user")
 	}
 }
@@ -1040,8 +1041,13 @@ func TestTrafficStats(t *testing.T) {
 	}
 	cfg, clients := inner()
 	policy, _ := json.Marshal(cfg["policy"])
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := cfg["stats"]; !ok || string(policy) != `{"levels":{"0":{"statsUserDownlink":true,"statsUserUplink":true}}}` ||
-		fmt.Sprint(cfg["api"].(map[string]any)["services"]) != "[HandlerService StatsService]" || !slices.Equal(clients, []string{"u1"}) {
+		fmt.Sprint(cfg["api"].(map[string]any)["services"]) != "[HandlerService StatsService]" ||
+		!slices.Equal(clients, []string{store.CredentialName(1, m.Inner[1])}) {
 		t.Fatalf("stats %v policy %s api %v clients %v", cfg["stats"], policy, cfg["api"], clients)
 	}
 	// Alice over her limit: off the inner stage, counting stays.
@@ -1055,7 +1061,7 @@ func TestTrafficStats(t *testing.T) {
 	if cfg, clients = inner(); cfg["stats"] == nil || len(clients) != 0 {
 		t.Fatalf("over the limit: clients %v", clients)
 	}
-	m, err := render.Collect(ctx, st)
+	m, err = render.Collect(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1092,10 +1098,210 @@ func TestNaiveUsersFile(t *testing.T) {
 		}
 	}
 	want := map[string]string{}
-	for pw, name := range map[string]string{"pw-5": "u5", "pw-5-next": "u5-n", "pw-6": "u6", "pw-6-prev": "u6-p"} {
-		want[naive.HashPassword(pw)] = name
+	for pw, user := range map[string]int64{"pw-5": 5, "pw-5-next": 5, "pw-6": 6, "pw-6-prev": 6} {
+		want[naive.HashPassword(pw)] = store.CredentialName(user, pw)
 	}
 	if !maps.Equal(got, want) {
 		t.Fatalf("users file %v, want %v", got, want)
+	}
+}
+
+// userSets are the users of each process as rendered, name -> secret (for
+// naive, the password's hash): Xray's inner and REALITY clients (every
+// inbound alike), the users files of Hysteria2 and naive; and the rendered
+// files they come from.
+func userSets(t *testing.T, ctx context.Context, st *store.Store) (map[string]map[string]string, map[string][]byte) {
+	t.Helper()
+	m, err := render.CollectForRender(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _, err := render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sets, raw := map[string]map[string]string{}, map[string][]byte{}
+	for _, f := range files {
+		name := strings.TrimPrefix(f.Path, render.DefaultPaths.Rendered+"/")
+		set := map[string]string{}
+		switch name {
+		case "inner/xray.json", "r/xray.json":
+			var cfg struct {
+				Inbounds []struct {
+					Settings struct {
+						Clients []struct{ ID, Email string }
+					}
+				}
+			}
+			if err := json.Unmarshal(f.Content, &cfg); err != nil {
+				t.Fatal(err)
+			}
+			for i, in := range cfg.Inbounds {
+				each := map[string]string{}
+				for _, c := range in.Settings.Clients {
+					each[c.Email] = c.ID
+				}
+				if i > 0 && !maps.Equal(each, set) {
+					t.Fatalf("%s: inbounds with other users: %v, %v", name, each, set)
+				}
+				set = each
+			}
+		case "hy/" + render.HysteriaUsers:
+			var file struct {
+				Users []struct {
+					Name string
+					Hy2  struct{ Password string }
+				}
+			}
+			if err := json.Unmarshal(f.Content, &file); err != nil {
+				t.Fatal(err)
+			}
+			for _, u := range file.Users {
+				set[u.Name] = u.Hy2.Password
+			}
+		case "nv/" + render.NaiveUsers:
+			var byHash map[string]string
+			if err := json.Unmarshal(f.Content, &byHash); err != nil {
+				t.Fatal(err)
+			}
+			for hash, n := range byHash {
+				set[n] = hash
+			}
+		default:
+			continue
+		}
+		sets[name], raw[name] = set, f.Content
+	}
+	if len(sets) != 4 {
+		t.Fatalf("rendered %v", slices.Sorted(maps.Keys(sets)))
+	}
+	return sets, raw
+}
+
+// A credential keeps its name through its rotation (R4-1): the next one
+// published adds a name, the switch changes nothing in any process's users
+// (the files come out byte for byte the same, and live has nothing to
+// sync), and the grace's end takes only the previous one's name away. A
+// name never stands for two secrets, and the next round's names are new.
+func TestCredentialNamesAcrossRotation(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	for _, s := range []store.Service{
+		{Kind: "reality", Name: "r"}, // self-steal: naive shares the site
+		{Kind: "hy2-obfs", Name: "hy"},
+		{Kind: "naive", Name: "nv"},
+	} {
+		s.Enabled = true
+		if _, err := provision.CreateService(ctx, st, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	site, err := st.ServiceByName(ctx, "site")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.UpdateService(ctx, site.ID, store.ServiceUpdate{Set: map[string][]byte{provision.SecretTLSChain: []byte("chain"), provision.SecretTLSKey: []byte("key")}})
+	var ids []int64
+	for _, name := range []string{"r", "hy", "nv", "dns"} {
+		s, _ := st.ServiceByName(ctx, name)
+		ids = append(ids, s.ID)
+	}
+	st.SetUserServices(ctx, "alice", ids)
+	st.SetUserServices(ctx, "bob", ids[:3])
+
+	ever := map[string]string{} // every name seen, and its secret
+	seen := func(sets map[string]map[string]string) {
+		t.Helper()
+		for proc, set := range sets {
+			for name, secret := range set {
+				id, ok := store.TrafficUser(name)
+				if !ok || !strings.HasPrefix(name, fmt.Sprintf("u%d-", id)) {
+					t.Fatalf("%s: name %q", proc, name)
+				}
+				if s, ok := ever[name]; ok && s != secret {
+					t.Fatalf("%s: %s names %s and %s", proc, name, s, secret)
+				}
+				ever[name] = secret
+			}
+		}
+	}
+	// diff is what b has that a has not (as name -> secret), and the
+	// names a has that b has not; a name in both keeps its secret.
+	diff := func(a, b map[string]string) (added map[string]string, gone []string) {
+		t.Helper()
+		added = map[string]string{}
+		for name, secret := range b {
+			if s, ok := a[name]; !ok {
+				added[name] = secret
+			} else if s != secret {
+				t.Fatalf("%s: %s, then %s", name, s, secret)
+			}
+		}
+		for name := range a {
+			if _, ok := b[name]; !ok {
+				gone = append(gone, name)
+			}
+		}
+		return added, gone
+	}
+	users := map[string]int{"inner/xray.json": 1, "r/xray.json": 2, "hy/users.json": 2, "nv/users.json": 2}
+
+	t0 := time.Now()
+	r := store.Rotation{Period: 30 * 24 * time.Hour, Lead: 3 * 24 * time.Hour, Grace: 2 * 24 * time.Hour}
+	day := 24 * time.Hour
+	s0, _ := userSets(t, ctx, st)
+	seen(s0)
+	for proc, set := range s0 {
+		if len(set) != users[proc] {
+			t.Fatalf("%s: %v", proc, set)
+		}
+	}
+	for round := range 2 {
+		at := t0.Add(time.Duration(round) * 30 * day)
+		// Published: one name more a user, the others as they were.
+		if _, err := st.RotateCredentials(ctx, at.Add(28*day), r, render.NewUUID); err != nil {
+			t.Fatal(err)
+		}
+		s1, s1raw := userSets(t, ctx, st)
+		for proc := range s0 {
+			added, gone := diff(s0[proc], s1[proc])
+			if len(added) != users[proc] || len(gone) != 0 {
+				t.Fatalf("round %d, published, %s: added %v, gone %v", round, proc, added, gone)
+			}
+			for name := range added {
+				if _, ok := ever[name]; ok {
+					t.Fatalf("round %d, %s: %s again", round, proc, name)
+				}
+			}
+		}
+		seen(s1)
+		// The switch: the next one current, the current one previous; the
+		// users of every process as they were, the files the same.
+		if n, err := st.RotateCredentials(ctx, at.Add(31*day), r, render.NewUUID); err != nil || n == 0 {
+			t.Fatalf("switch: %d %v", n, err)
+		}
+		s2, s2raw := userSets(t, ctx, st)
+		for proc := range s1 {
+			if !maps.Equal(s1[proc], s2[proc]) || !bytes.Equal(s1raw[proc], s2raw[proc]) {
+				t.Fatalf("round %d, the switch changed %s: %v, then %v", round, proc, s1[proc], s2[proc])
+			}
+		}
+		// The grace's end: the previous one's name goes, nothing else.
+		if n, err := st.RotateCredentials(ctx, at.Add(34*day), r, render.NewUUID); err != nil || n == 0 {
+			t.Fatalf("grace: %d %v", n, err)
+		}
+		s3, _ := userSets(t, ctx, st)
+		for proc := range s2 {
+			added, gone := diff(s2[proc], s3[proc])
+			if len(added) != 0 || len(gone) != users[proc] {
+				t.Fatalf("round %d, grace's end, %s: added %v, gone %v", round, proc, added, gone)
+			}
+			for _, name := range gone {
+				if _, ok := s0[proc][name]; !ok {
+					t.Fatalf("round %d, %s: %s went, not the previous one", round, proc, name)
+				}
+			}
+		}
+		s0 = s3
 	}
 }

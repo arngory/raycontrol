@@ -8,7 +8,7 @@ from the previous release and one installed afresh.
 Each JSON file and the payload become their key paths with the kind of
 each value. Strings that read as an enum (short, lower case: modes, names
 the test gives) and small numbers (counts, limits) stay; keys, ports,
-addresses and times become their kind. A list's elements merge into one
+addresses and times become their kind, a credential's name its user. A list's elements merge into one
 shape, with the list's length. Links become their scheme and parameter
 names, with the parameters' values as for strings.
 """
@@ -21,6 +21,9 @@ from urllib.parse import parse_qsl, urlsplit
 ENUM = re.compile(r"^[a-z][a-z0-9_.-]{0,23}$")
 # A name with random labels (zones, SNI): its first label goes.
 NAME = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")
+# A credential's name (store.CredentialName): the user stays, the
+# fingerprint of the secret goes.
+CRED = re.compile(r"^(u[1-9][0-9]*)-[0-9a-f]{16}$")
 
 
 def scalar(v):
@@ -37,6 +40,8 @@ def scalar(v):
             return link(v)
         if NAME.match(v):
             return "name:*." + v.split(".", 1)[1]
+        if m := CRED.match(v):
+            return f"credential:{m.group(1)}-*"
         return f"str:{v}" if ENUM.match(v) else ("str:" if v == "" else "str")
     return type(v).__name__
 
