@@ -127,6 +127,36 @@ func TestReadLine(t *testing.T) {
 	}
 }
 
+// A process that does not run is told apart from one that answers wrong:
+// no socket, or a socket nobody listens on.
+func TestNotRunning(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	if _, err := ReadLine(ctx, filepath.Join(dir, "none.sock")); !notRunning(err) {
+		t.Errorf("no socket: %v", err)
+	}
+	if _, err := ReadXray(ctx, filepath.Join(dir, "none.sock"), time.Now()); !notRunning(err) {
+		t.Errorf("no Xray: %v", err)
+	}
+	stale := filepath.Join(dir, "stale.sock")
+	ln, err := net.Listen("unix", stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	ln.Close()
+	if _, err := ReadLine(ctx, stale); !notRunning(err) {
+		t.Errorf("a stale socket: %v", err)
+	}
+	if _, err := ReadXray(ctx, stale, time.Now()); !notRunning(err) {
+		t.Errorf("a stale Xray socket: %v", err)
+	}
+	old := serve(t, func(net.Conn, string) {})
+	if _, err := ReadLine(ctx, old); err == nil || notRunning(err) {
+		t.Errorf("an old niko-server: %v", err)
+	}
+}
+
 func TestSameBoot(t *testing.T) {
 	for _, c := range []struct {
 		a, b string

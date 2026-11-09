@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -31,6 +32,7 @@ type node struct {
 	readings map[string]Reading // by source key; missing: the read fails
 	reads    int
 	delay    time.Duration // each read takes this long
+	gone     string        // this source's socket is not there
 }
 
 func newNode(t *testing.T) *node {
@@ -69,6 +71,9 @@ func (n *node) accountant() *Accountant {
 					n.mu.Lock()
 					defer n.mu.Unlock()
 					n.reads++
+					if key == n.gone {
+						return Reading{}, &fs.PathError{Op: "dial", Path: key, Err: fs.ErrNotExist}
+					}
 					r, ok := n.readings[key]
 					if !ok {
 						return Reading{}, errors.New("not running")
@@ -577,6 +582,20 @@ func TestSourcesComeAndGo(t *testing.T) {
 	if !failing {
 		t.Fatalf("loops %+v", n.hb.Loops())
 	}
+	// A process that does not run (no socket) is no failure of the count.
+	n.mu.Lock()
+	n.gone = "naive:nv"
+	n.mu.Unlock()
+	n.tick(Every)
+	a.Round(n.ctx, "", true)
+	for _, l := range n.hb.Loops() {
+		if l.Name == "traffic nv" && (l.Failing() || l.Detail != "not running") {
+			t.Fatalf("not running: %+v", l)
+		}
+	}
+	n.mu.Lock()
+	n.gone = ""
+	n.mu.Unlock()
 	n.set("hy2:hy", "b1", "u1", 5, 5)
 	n.tick(Every)
 	a.Round(n.ctx, "", true)

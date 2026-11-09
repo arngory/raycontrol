@@ -54,13 +54,15 @@ func (c *cli) userLimit(ctx context.Context, args []string) error {
 	if req.LimitBytes == nil && req.Period == nil && req.ResetDay == nil {
 		return errUsage
 	}
+	var note string
 	if req.LimitBytes != nil {
-		c.warnCounting(ctx, req.Name, *req.LimitBytes > 0)
+		note = c.countingWarning(ctx, req.Name, *req.LimitBytes > 0)
 	}
 	r, err := c.c.SetUserTraffic(ctx, connect.NewRequest(req))
 	if err != nil {
 		return err
 	}
+	warn(note)
 	u := r.Msg.User
 	return c.print(r.Msg, func(w *tabwriter.Writer) {
 		if u.TrafficLimitBytes == 0 {
@@ -110,13 +112,14 @@ func (c *cli) userUsage(ctx context.Context, args []string) error {
 	})
 }
 
-// warnCounting says what the first limit, or the last one going, does to
+// countingWarning is what the first limit, or the last one going, does to
 // the node: Xray's inner and REALITY count users' bytes only while some
-// user has a limit, and restart once when that changes (§5).
-func (c *cli) warnCounting(ctx context.Context, name string, setting bool) {
+// user has a limit, and restart once when that changes (§5). Asked before
+// the change, said after it went through ("" for nothing to say).
+func (c *cli) countingWarning(ctx context.Context, name string, setting bool) string {
 	r, err := c.c.ListUsers(ctx, connect.NewRequest(&nodev1.ListUsersRequest{}))
 	if err != nil {
-		return
+		return ""
 	}
 	limited, others := 0, 0 // users with a limit, and of them not this one
 	for _, u := range r.Msg.Users {
@@ -129,7 +132,7 @@ func (c *cli) warnCounting(ctx context.Context, name string, setting bool) {
 	}
 	s, err := c.c.ListServices(ctx, connect.NewRequest(&nodev1.ListServicesRequest{}))
 	if err != nil {
-		return
+		return ""
 	}
 	xray := false
 	for _, svc := range s.Msg.Services {
@@ -138,9 +141,17 @@ func (c *cli) warnCounting(ctx context.Context, name string, setting bool) {
 	switch {
 	case !xray:
 	case setting && limited == 0:
-		fmt.Fprintln(os.Stderr, "rayctl: the first traffic limit turns counting on: inner and REALITY restart once, and their connections drop")
+		return "the first traffic limit turns counting on: inner and REALITY restart once, and their connections drop"
 	case !setting && limited == 1 && others == 0:
-		fmt.Fprintln(os.Stderr, "rayctl: the last traffic limit goes, and counting with it: inner and REALITY restart once, and their connections drop")
+		return "the last traffic limit went, and counting with it: inner and REALITY restart once, and their connections drop"
+	}
+	return ""
+}
+
+// warn tells the operator on standard error.
+func warn(msg string) {
+	if msg != "" {
+		fmt.Fprintln(os.Stderr, "rayctl: "+msg)
 	}
 }
 

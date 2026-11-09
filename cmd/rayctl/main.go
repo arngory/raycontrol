@@ -481,13 +481,15 @@ func (c *cli) user(ctx context.Context, sub string, args []string) error {
 		if req.TrafficLimitBytes, err = parseBytes(*limit); err != nil {
 			return err
 		}
+		var counting string
 		if req.TrafficLimitBytes > 0 {
-			c.warnCounting(ctx, name, true)
+			counting = c.countingWarning(ctx, name, true)
 		}
 		r, err := c.c.CreateUser(ctx, connect.NewRequest(req))
 		if err != nil {
 			return err
 		}
+		warn(counting)
 		return c.print(r.Msg, func(w *tabwriter.Writer) { fmt.Fprintf(w, "user %s created\n", r.Msg.User.Name) })
 	case "limit":
 		return c.userLimit(ctx, args)

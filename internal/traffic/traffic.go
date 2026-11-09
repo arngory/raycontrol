@@ -12,11 +12,14 @@ package traffic
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/health"
@@ -303,6 +306,14 @@ func (a *Accountant) Round(ctx context.Context, only string, force bool) {
 		if !results[i].read {
 			continue
 		}
+		if notRunning(err) {
+			// No socket, or no one at it: the process does not run (a
+			// service waiting for its site's certificate, one stopped).
+			// It carries nothing, so nothing goes uncounted; its marks
+			// stay for when it is back with the same run.
+			a.Health.Report("traffic "+src.Service, "not running", nil)
+			continue
+		}
 		if err != nil {
 			a.Health.Report("traffic "+src.Service, "", err)
 			continue
@@ -472,6 +483,12 @@ func (a *Accountant) take(src Source, r Reading, limited map[int64]store.User, n
 	}
 	a.sources[src.Key] = next
 	return out
+}
+
+// notRunning reports whether a read failed for want of the process: its
+// socket is not there, or nothing listens on it.
+func notRunning(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // addCapped adds two counts (neither below zero) without wrapping: counts
