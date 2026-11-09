@@ -664,6 +664,11 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 					break
 				}
 				fmt.Fprintln(w, "run rayctl apply: the unit gets network access with public peers, and loses it without")
+				if key == "peers" && value != "" && value != "none" {
+					fmt.Fprintln(w, "warning: with public peers a modified client can carry data through the node's Yggdrasil\n"+
+						"core past the LAN ceiling and the users' traffic limits (docs/spec/lan-v1.md §2.3);\n"+
+						"keep them off on a node with LAN or traffic limits")
+				}
 			case "naive":
 				if key == "icmp" {
 					fmt.Fprintln(w, "run rayctl apply: naive restarts with ICMP "+value+" (with it on, apply lets its group open ICMP sockets);\n"+
