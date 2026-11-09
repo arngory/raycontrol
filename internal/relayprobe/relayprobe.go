@@ -77,7 +77,7 @@ func New(b node.RelayBundle, daily int64, log *slog.Logger) (*Server, *tls.Confi
 	if err != nil {
 		return nil, nil, fmt.Errorf("relay bundle probe certificate: %w", err)
 	}
-	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: api.PinnedTLS(b.API.Pin, &cert), ForceAttemptHTTP2: true}}
+	hc := api.RemoteHTTPClient(b.API.Pin, cert)
 	s := &Server{
 		Name: b.Name,
 		ID:   api.CertPin(cert.Leaf),

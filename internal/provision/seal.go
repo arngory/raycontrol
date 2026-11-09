@@ -95,10 +95,27 @@ func SealKeys(svc store.Service, secrets map[string][]byte) [][]byte {
 	return keys
 }
 
+// checkGrace refuses a switch with a grace while the previous key is still
+// in its own: the switch would make the current key the previous one and
+// drop that key for every client still on it, with no grace at all. A
+// switch at once (immediately, or no grace) means to drop it; force does
+// the switch anyway.
+func checkGrace(name, what string, hasPrev bool, prevUntil int64, now time.Time, grace time.Duration, immediately, force bool) error {
+	if !hasPrev || prevUntil == 0 || now.Unix() >= prevUntil || immediately || grace <= 0 || force {
+		return nil
+	}
+	return fmt.Errorf("%w: %s: its previous %s key is still accepted until %s (clients that have not fetched their "+
+		"subscription since the last switch use it); another switch now would drop it at once: switch after that, "+
+		"or anyway with force (rayctl service rotate %s -force)",
+		store.ErrPrecondition, name, what, time.Unix(prevUntil, 0).UTC().Format(time.RFC3339), name)
+}
+
 // RotateSealKey gives a dnstt service a new seal key at now; the previous
 // one is accepted for grace more, or not at all when immediately is set or
-// grace is zero. It returns the new state.
-func RotateSealKey(ctx context.Context, st *store.Store, name string, now time.Time, grace time.Duration, immediately bool) (SealState, error) {
+// grace is zero. While the previous key is in its grace, a switch with a
+// grace is store.ErrPrecondition unless force (checkGrace). It returns the
+// new state.
+func RotateSealKey(ctx context.Context, st *store.Store, name string, now time.Time, grace time.Duration, immediately, force bool) (SealState, error) {
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
 	svc, err := st.ServiceByName(ctx, name)
@@ -110,6 +127,9 @@ func RotateSealKey(ctx context.Context, st *store.Store, name string, now time.T
 	}
 	secrets, err := st.ServiceSecrets(ctx, svc.ID)
 	if err != nil {
+		return SealState{}, err
+	}
+	if err := checkGrace(name, "seal", len(secrets[PrevSecret(SecretSealKey)]) > 0, ParseSealState(svc).PrevUntil, now, grace, immediately, force); err != nil {
 		return SealState{}, err
 	}
 	key := make([]byte, 32)

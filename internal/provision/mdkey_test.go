@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -41,7 +42,7 @@ func TestRotateMasterDNSKey(t *testing.T) {
 		t.Fatalf("a new service's keys %q", first)
 	}
 	now := time.Unix(1_800_000_000, 0)
-	state, err := RotateMasterDNSKey(ctx, st, "mdns", now, 48*time.Hour, false)
+	state, err := RotateMasterDNSKey(ctx, st, "mdns", now, 48*time.Hour, false, false)
 	if err != nil || state.PrevUntil != now.Add(48*time.Hour).Unix() || state.RotatedAt != now.Unix() {
 		t.Fatalf("rotate: %+v %v", state, err)
 	}
@@ -49,8 +50,18 @@ func TestRotateMasterDNSKey(t *testing.T) {
 	if len(second) != 2 || bytes.Equal(second[0], first[0]) || !bytes.Equal(second[1], first[0]) || len(second[0]) != 32 {
 		t.Fatalf("after a switch: %q", second)
 	}
-	// A second switch within the grace: the key before the previous goes.
-	RotateMasterDNSKey(ctx, st, "mdns", now.Add(time.Hour), 48*time.Hour, false)
+	// A second switch within the grace (a retry): refused, nothing changes,
+	// since it would drop the first key for clients still on it.
+	if _, err := RotateMasterDNSKey(ctx, st, "mdns", now.Add(time.Hour), 48*time.Hour, false, false); !errors.Is(err, store.ErrPrecondition) {
+		t.Fatalf("a second switch within the grace: %v", err)
+	}
+	if again := keys(); !slices.EqualFunc(again, second, bytes.Equal) {
+		t.Fatalf("after a refused switch: %q, before %q", again, second)
+	}
+	// Forced: the key before the previous goes.
+	if _, err := RotateMasterDNSKey(ctx, st, "mdns", now.Add(time.Hour), 48*time.Hour, false, true); err != nil {
+		t.Fatal(err)
+	}
 	if third := keys(); len(third) != 2 || !bytes.Equal(third[1], second[0]) {
 		t.Fatalf("after a second switch: %q", third)
 	}
@@ -63,14 +74,14 @@ func TestRotateMasterDNSKey(t *testing.T) {
 		t.Fatalf("after the grace: %q", k)
 	}
 	// -now: none taken but the new one.
-	if state, _ := RotateMasterDNSKey(ctx, st, "mdns", now.Add(51*time.Hour), 48*time.Hour, true); state.PrevUntil != 0 || len(keys()) != 1 {
+	if state, _ := RotateMasterDNSKey(ctx, st, "mdns", now.Add(51*time.Hour), 48*time.Hour, true, false); state.PrevUntil != 0 || len(keys()) != 1 {
 		t.Fatalf("-now: %+v, %d keys", state, len(keys()))
 	}
-	if _, err := RotateMasterDNSKey(ctx, st, "nope", now, time.Hour, false); err == nil {
+	if _, err := RotateMasterDNSKey(ctx, st, "nope", now, time.Hour, false, false); err == nil {
 		t.Fatal("an unknown service")
 	}
 	dns, _ := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns", Enabled: true})
-	if _, err := RotateMasterDNSKey(ctx, st, dns.Name, now, time.Hour, false); !errors.Is(err, store.ErrInvalid) {
+	if _, err := RotateMasterDNSKey(ctx, st, dns.Name, now, time.Hour, false, false); !errors.Is(err, store.ErrInvalid) {
 		t.Fatalf("a dnstt service: %v", err)
 	}
 	_ = svc

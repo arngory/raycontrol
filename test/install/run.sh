@@ -151,12 +151,22 @@ log "$distro: bootstrap"
 x timeout 120 systemctl is-system-running --wait >/dev/null || true
 # shellcheck disable=SC2016 # expands in the container
 x sh -c 'if systemctl is-enabled -q firewalld 2>/dev/null; then for i in $(seq 60); do firewall-cmd --state >/dev/null 2>&1 && break; sleep 1; done; fi'
-# The sysctl keys raycontrol sets, from its source, for the snapshots; and
-# the reserved ports (deploy.ReservePorts), which uninstall puts back.
+# The administrator's own shorter TIME_WAIT (spec/conn-limit-v1.md §6.1):
+# raycontrol lowers the conntrack times, never raises one, and leaves this
+# one as it is, at apply and at uninstall. Its own file, as an
+# administrator would have it, so a reboot keeps it.
+# A minimal image may have no /etc/sysctl.d yet (rocky9's has none).
+x sh -c 'mkdir -p /etc/sysctl.d &&
+	echo "net.netfilter.nf_conntrack_tcp_timeout_time_wait = 20" > /etc/sysctl.d/80-admin-conntrack.conf &&
+	sysctl -q -p /etc/sysctl.d/80-admin-conntrack.conf' || fail "the administrator's conntrack time"
+# The sysctl keys raycontrol sets, from its source, for the snapshots; the
+# reserved ports (deploy.ReservePorts) and the conntrack table's keys
+# (deploy.Conntrack), which uninstall puts back.
 # shellcheck disable=SC2016 # backticks of the Go source, not a command
 {
 	sed -n '/^const sysctl = `/,/^`/p' "$here/../../internal/deploy/deploy.go" | grep -o '^net\.[a-z0-9_.]*'
 	echo net.ipv4.ip_local_reserved_ports
+	printf 'net.netfilter.nf_conntrack_%s\n' max buckets tcp_timeout_syn_sent tcp_timeout_fin_wait tcp_timeout_time_wait
 } | docker exec -i "$node" sh -c 'cat > /root/sysctl.keys'
 snapshot /root/before.snap
 
@@ -234,6 +244,23 @@ reserved() {
 		fail "the node's ports are not reserved $1: $(x sysctl -n net.ipv4.ip_local_reserved_ports 2>&1)"
 }
 reserved "at install"
+# The conntrack table (spec/conn-limit-v1.md §6.1): the module at boot, the
+# times lowered, the administrator's shorter TIME_WAIT kept; the size is
+# the host's in a container, and rayctl check says so.
+conntrack_times() {
+	[[ $(x sysctl -n net.netfilter.nf_conntrack_tcp_timeout_syn_sent net.netfilter.nf_conntrack_tcp_timeout_fin_wait \
+		net.netfilter.nf_conntrack_tcp_timeout_time_wait | tr '\n' ' ') == "30 30 20 " ]] ||
+		fail "the conntrack times $1: $(x sysctl -a 2>/dev/null | grep 'nf_conntrack_tcp_timeout_\(syn_sent\|fin_wait\|time_wait\)')"
+}
+x grep -qx nf_conntrack /etc/modules-load.d/raycontrol.conf || fail "no nf_conntrack in modules-load.d"
+x grep -q 'nf_conntrack_tcp_timeout_syn_sent = 30' /etc/sysctl.d/90-raycontrol-conntrack.conf || fail "no conntrack sysctl file"
+if x grep -q time_wait /etc/sysctl.d/90-raycontrol-conntrack.conf; then fail "raycontrol's file sets the administrator's TIME_WAIT"; fi
+conntrack_times "at install"
+out="$(x rayctl check 2>&1)" || true
+# Big enough already (a host with the memory for it), or the container's
+# warning: only the host may change it.
+[[ $out == *"ok    conntrack table: "* || $out == *"warn  conntrack table: "*"cannot be changed here"* ]] ||
+	fail "rayctl check on the conntrack table: $out"
 
 dataplane=(niko-inner.service niko-dns.service niko-mdns.service niko-front.service)
 # slipstream (docs/spec/slipstream-v1.md) when BIN_DIR has its server.
@@ -453,6 +480,42 @@ egress_in_force "rayctl egress block"
 [[ $(x nft list chain inet raycontrol egress) == *'comment "bittorrent-tcp"'* ]] || fail "no BitTorrent rule in the egress chain"
 [[ $(x rayctl status) == *"egress"*"blocked: bittorrent, smtp"* ]] || fail "rayctl status does not show the egress policy"
 
+# The connection limits (spec/conn-limit-v1.md §8): on by default; off takes
+# the per-address limit out of the table within seconds, and naive's
+# limits with the file it rereads; the DNS tunnels' port skips conntrack;
+# the guard reports to rayd; status and metrics show it all.
+in_rate() {
+	local got
+	for _ in $(seq 20); do
+		got=false
+		if [[ $(x nft list chain inet raycontrol in_rate) == *'comment "in-rate"'* ]]; then got=true; fi
+		if [[ $got == "$1" ]]; then return 0; fi
+		sleep 0.5
+	done
+	fail "the per-address limit is not $2: $(x nft list chain inet raycontrol in_rate 2>&1)"
+}
+log "$distro: the connection limits"
+[[ $(x rayctl conn-limit) == *"limits"*"on (rayctl conn-limit off)"* ]] || fail "rayctl conn-limit: $(x rayctl conn-limit)"
+in_rate true "on by default"
+[[ $(x nft list set inet raycontrol dns_ports) == *"53"* ]] || fail "the DNS tunnels' port is not past conntrack"
+x rayctl conn-limit off >/dev/null || fail "rayctl conn-limit off"
+in_rate false "off"
+[[ $(x rayctl conn-limit) == *"off (rayctl conn-limit on)"* ]] || fail "rayctl conn-limit after off: $(x rayctl conn-limit)"
+[[ $(x rayctl audit -n 1) == *conn_limit.set* ]] || fail "rayctl conn-limit off is not audited"
+x rayctl conn-limit on >/dev/null || fail "rayctl conn-limit on"
+in_rate true "on again"
+# rayspa reports the guard once a minute, rayd reads the table every 15 s.
+for _ in $(seq 70); do
+	[[ $(x rayctl conn-limit) == *"guard"*"off;"* ]] && break
+	sleep 1
+done
+[[ $(x rayctl conn-limit) == *"guard"*"off;"* ]] || fail "no guard report: $(x rayctl conn-limit)"
+[[ $(x rayctl status) == *"conn-limit"*"on; nobody at a limit in 15 min"* ]] || fail "rayctl status: $(x rayctl status)"
+metrics="$(x /usr/local/bin/rayctl metrics)" || fail "rayctl metrics"
+for m in raycontrol_conntrack_max raycontrol_conn_guard_on 'raycontrol_conn_inbound_dropped_packets_total{proto="tcp"}'; do
+	[[ $metrics == *"$m"* ]] || fail "metrics lack $m"
+done
+
 log "$distro: host firewall reloads and flush ruleset"
 case $distro in
 debian*) x systemctl restart nftables.service && wait_table "nftables restart" ;;
@@ -496,14 +559,24 @@ wait_active rayd.service rayspa.service "${dataplane[@]}"
 log "$distro: reboot"
 docker restart "$node" >/dev/null
 boot
+# The container comes back in a new network namespace with the kernel's
+# own conntrack times; a host's systemd-sysctl applies /etc/sysctl.d at
+# boot (the administrator's file, raycontrol's). The Rocky images here
+# have no systemd-sysctl.service (a Rocky host has): do its work, or the
+# administrator's TIME_WAIT is lost at this reboot, and the next apply,
+# seeing the kernel's 120, lowers it to 60 and journals 120 for uninstall
+# to put back, which is right on a host and wrong for this comparison.
+# Like systemd-sysctl, it goes on past a key the container may not set
+# (net.core.*: "Operation not permitted").
+x sh -c 'systemctl cat systemd-sysctl.service >/dev/null 2>&1 || sysctl -e -q --system >/dev/null || true'
 wait_active rayd.service rayspa.service "${dataplane[@]}"
 ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$node")"
 client -addr "$ip" "$laptop" >/dev/null || fail "probe after reboot"
-# From its file at boot, where systemd-sysctl applies /etc/sysctl.d (the
-# Rocky images here have none; a Rocky host has).
+# From its file at boot.
 if x systemctl cat systemd-sysctl.service >/dev/null 2>&1; then
 	reserved "after the reboot (systemd-sysctl, its file)"
 fi
+conntrack_times "after the reboot (modules-load.d, then systemd-sysctl)"
 
 log "$distro: report"
 x /usr/local/bin/rayctl report -logs info -o /root/report.txt > /dev/null || fail "rayctl report"

@@ -49,9 +49,10 @@ func newMasterDNSKey() ([]byte, error) {
 // RotateMasterDNSKey gives a masterdns service a new key at now (§2): it goes
 // out with subscriptions from then on, and the previous one is taken for
 // grace more, or not at all when immediately is set or grace is zero (its
-// sessions then close at once). A second switch within the grace drops the
-// key before the previous one.
-func RotateMasterDNSKey(ctx context.Context, st *store.Store, name string, now time.Time, grace time.Duration, immediately bool) (MasterDNSKeyState, error) {
+// sessions then close at once). A second switch with a grace within the
+// grace is store.ErrPrecondition: it would drop the key before the previous
+// one with no grace; force does it anyway (checkGrace).
+func RotateMasterDNSKey(ctx context.Context, st *store.Store, name string, now time.Time, grace time.Duration, immediately, force bool) (MasterDNSKeyState, error) {
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
 	svc, err := st.ServiceByName(ctx, name)
@@ -63,6 +64,9 @@ func RotateMasterDNSKey(ctx context.Context, st *store.Store, name string, now t
 	}
 	secrets, err := st.ServiceSecrets(ctx, svc.ID)
 	if err != nil {
+		return MasterDNSKeyState{}, err
+	}
+	if err := checkGrace(name, "service", len(secrets[PrevSecret(SecretMasterDNSKey)]) > 0, ParseMasterDNSKeyState(svc).PrevUntil, now, grace, immediately, force); err != nil {
 		return MasterDNSKeyState{}, err
 	}
 	key, err := newMasterDNSKey()

@@ -81,6 +81,12 @@ type Gate struct {
 	egressOn       bool
 	egressFailures int
 	egressRetryAt  time.Time
+	// The per-address limit on new inbound flows (spec/conn-limit-v1.md
+	// §6.2): off as the last snapshot says (inLimitOff), and as the table
+	// has it (inLimitTableOff; a new table has it on).
+	inLimitOff, inLimitTableOff bool
+	// guard is the conntrack table's guard (§6.3); nil: none (a relay).
+	guard *Guard
 }
 
 // NewGate returns a gate that drives fw.
@@ -179,6 +185,7 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		public: public, admin: admin, adminPorts: adminPorts, relays: relays, relayPorts: relayPorts,
 		defTTL: time.Duration(sp.DefaultTtlS) * time.Second, maxTTL: time.Duration(sp.MaxTtlS) * time.Second,
 		tcpCarrier: sp.TcpCarrier, acme: snap.GetAcme(), egress: egressOf(snap.GetEgress()),
+		connLimitOff: snap.GetConnLimitOff(),
 	}
 
 	g.mu.Lock()
@@ -232,6 +239,7 @@ type update struct {
 	tcpCarrier         bool
 	acme               *perimeterv1.AcmeWindow
 	egress             Egress
+	connLimitOff       bool
 }
 
 // catchUpLocked finishes a restore of the table, then applies the snapshot
@@ -337,8 +345,22 @@ func (g *Gate) applyLocked(u *update) error {
 			g.forward = forward
 		}
 	}
-	errs = append(errs, g.acmeLocked(u.acme), g.slotsLocked())
+	errs = append(errs, g.acmeLocked(u.acme), g.inLimitLocked(), g.slotsLocked())
 	return errors.Join(errs...)
+}
+
+// inLimitLocked puts the per-address limit into the table as the last
+// snapshot has it, on or off.
+func (g *Gate) inLimitLocked() error {
+	if g.inLimitOff == g.inLimitTableOff {
+		return nil
+	}
+	if err := g.fw.SetInLimit(!g.inLimitOff); err != nil {
+		return err
+	}
+	g.inLimitTableOff = g.inLimitOff
+	g.log.Info("per-address limit on new inbound connections", "on", !g.inLimitOff)
+	return nil
 }
 
 // adoptLocked takes the devices, their scopes and the SPA parameters of u,
@@ -355,6 +377,7 @@ func (g *Gate) adoptLocked(u *update) {
 	g.params, g.tcpCarrier = u.params, u.tcpCarrier
 	g.defaultTTL, g.maxTTL = u.defTTL, u.maxTTL
 	g.services, g.allowed, g.rotations = u.services, u.allowed, u.rotations
+	g.inLimitOff = u.connLimitOff
 	if !g.egressSeen || !u.egress.Equal(g.egress) {
 		// A new policy goes in at once, whatever the backoff of the old.
 		g.egress, g.egressSeen, g.egressOn = u.egress, true, false
@@ -586,6 +609,9 @@ func (g *Gate) Tick() ([]uint16, error) {
 	}
 	// After a restore, or a refusal: on its own (egressLocked).
 	g.egressLocked(g.now())
+	// The conntrack guard, whatever the snapshot (spec/conn-limit-v1.md
+	// §6.3): it guards the node while rayd is away too.
+	g.guardLocked(g.now())
 	if g.verifier == nil {
 		return nil, ErrNotReady
 	}
@@ -624,6 +650,15 @@ func (g *Gate) restoreLocked() error {
 	// Its egress chains are empty: the policy goes in once the restore is
 	// done (egressLocked), at once.
 	g.egressOn, g.egressFailures, g.egressRetryAt = false, 0, time.Time{}
+	// The per-address limit is on in a new table, the guard off: the
+	// guard goes back at the next tick (guardLocked).
+	g.inLimitTableOff = false
+	if g.guard != nil {
+		g.guard.applied = false
+	}
+	if err := g.inLimitLocked(); err != nil {
+		return err
+	}
 	if len(g.public) > 0 {
 		if err := g.fw.SetPublic(g.public); err != nil {
 			return err

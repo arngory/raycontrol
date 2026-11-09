@@ -24,6 +24,189 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type ReportGuardRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Guard         *Guard                 `protobuf:"bytes,1,opt,name=guard,proto3" json:"guard,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReportGuardRequest) Reset() {
+	*x = ReportGuardRequest{}
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportGuardRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportGuardRequest) ProtoMessage() {}
+
+func (x *ReportGuardRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportGuardRequest.ProtoReflect.Descriptor instead.
+func (*ReportGuardRequest) Descriptor() ([]byte, []int) {
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *ReportGuardRequest) GetGuard() *Guard {
+	if x != nil {
+		return x.Guard
+	}
+	return nil
+}
+
+type ReportGuardResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReportGuardResponse) Reset() {
+	*x = ReportGuardResponse{}
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportGuardResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportGuardResponse) ProtoMessage() {}
+
+func (x *ReportGuardResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportGuardResponse.ProtoReflect.Descriptor instead.
+func (*ReportGuardResponse) Descriptor() ([]byte, []int) {
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{1}
+}
+
+// Guard is rayspa's guard of the conntrack table: on above 85 % of
+// nf_conntrack_max, off below 70 % and not before 2 minutes.
+type Guard struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	On       bool                   `protobuf:"varint,1,opt,name=on,proto3" json:"on,omitempty"`
+	Since    int64                  `protobuf:"varint,2,opt,name=since,proto3" json:"since,omitempty"`                 // unix seconds: the last switch, on or off
+	LastOn   int64                  `protobuf:"varint,3,opt,name=last_on,json=lastOn,proto3" json:"last_on,omitempty"` // unix seconds: the last switch on; 0: never
+	Switches uint64                 `protobuf:"varint,4,opt,name=switches,proto3" json:"switches,omitempty"`
+	Refused  uint64                 `protobuf:"varint,5,opt,name=refused,proto3" json:"refused,omitempty"` // new data-plane flows refused, since rayspa started
+	// Entries swept for want of a socket (outbound UDP and TCP, inbound TCP).
+	SweptUdp      uint64 `protobuf:"varint,6,opt,name=swept_udp,json=sweptUdp,proto3" json:"swept_udp,omitempty"`
+	SweptTcpOut   uint64 `protobuf:"varint,7,opt,name=swept_tcp_out,json=sweptTcpOut,proto3" json:"swept_tcp_out,omitempty"`
+	SweptTcpIn    uint64 `protobuf:"varint,8,opt,name=swept_tcp_in,json=sweptTcpIn,proto3" json:"swept_tcp_in,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Guard) Reset() {
+	*x = Guard{}
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Guard) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Guard) ProtoMessage() {}
+
+func (x *Guard) ProtoReflect() protoreflect.Message {
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Guard.ProtoReflect.Descriptor instead.
+func (*Guard) Descriptor() ([]byte, []int) {
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *Guard) GetOn() bool {
+	if x != nil {
+		return x.On
+	}
+	return false
+}
+
+func (x *Guard) GetSince() int64 {
+	if x != nil {
+		return x.Since
+	}
+	return 0
+}
+
+func (x *Guard) GetLastOn() int64 {
+	if x != nil {
+		return x.LastOn
+	}
+	return 0
+}
+
+func (x *Guard) GetSwitches() uint64 {
+	if x != nil {
+		return x.Switches
+	}
+	return 0
+}
+
+func (x *Guard) GetRefused() uint64 {
+	if x != nil {
+		return x.Refused
+	}
+	return 0
+}
+
+func (x *Guard) GetSweptUdp() uint64 {
+	if x != nil {
+		return x.SweptUdp
+	}
+	return 0
+}
+
+func (x *Guard) GetSweptTcpOut() uint64 {
+	if x != nil {
+		return x.SweptTcpOut
+	}
+	return 0
+}
+
+func (x *Guard) GetSweptTcpIn() uint64 {
+	if x != nil {
+		return x.SweptTcpIn
+	}
+	return 0
+}
+
 type WatchRelayRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The feed of rayd relay, the relay's probe endpoint (relay-v1 §9.1), not
@@ -35,7 +218,7 @@ type WatchRelayRequest struct {
 
 func (x *WatchRelayRequest) Reset() {
 	*x = WatchRelayRequest{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[0]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -47,7 +230,7 @@ func (x *WatchRelayRequest) String() string {
 func (*WatchRelayRequest) ProtoMessage() {}
 
 func (x *WatchRelayRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[0]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -60,7 +243,7 @@ func (x *WatchRelayRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchRelayRequest.ProtoReflect.Descriptor instead.
 func (*WatchRelayRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{0}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *WatchRelayRequest) GetProbe() bool {
@@ -83,7 +266,7 @@ type ReportRequest struct {
 
 func (x *ReportRequest) Reset() {
 	*x = ReportRequest{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[1]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -95,7 +278,7 @@ func (x *ReportRequest) String() string {
 func (*ReportRequest) ProtoMessage() {}
 
 func (x *ReportRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[1]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -108,7 +291,7 @@ func (x *ReportRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportRequest.ProtoReflect.Descriptor instead.
 func (*ReportRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{1}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ReportRequest) GetDevice() string {
@@ -140,7 +323,7 @@ type ReportResponse struct {
 
 func (x *ReportResponse) Reset() {
 	*x = ReportResponse{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[2]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -152,7 +335,7 @@ func (x *ReportResponse) String() string {
 func (*ReportResponse) ProtoMessage() {}
 
 func (x *ReportResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[2]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -165,7 +348,7 @@ func (x *ReportResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportResponse.ProtoReflect.Descriptor instead.
 func (*ReportResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{2}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{5}
 }
 
 type WatchRelayResponse struct {
@@ -177,7 +360,7 @@ type WatchRelayResponse struct {
 
 func (x *WatchRelayResponse) Reset() {
 	*x = WatchRelayResponse{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[3]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -189,7 +372,7 @@ func (x *WatchRelayResponse) String() string {
 func (*WatchRelayResponse) ProtoMessage() {}
 
 func (x *WatchRelayResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[3]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -202,7 +385,7 @@ func (x *WatchRelayResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchRelayResponse.ProtoReflect.Descriptor instead.
 func (*WatchRelayResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{3}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *WatchRelayResponse) GetSnapshot() *Snapshot {
@@ -220,7 +403,7 @@ type WatchPerimeterRequest struct {
 
 func (x *WatchPerimeterRequest) Reset() {
 	*x = WatchPerimeterRequest{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[4]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -232,7 +415,7 @@ func (x *WatchPerimeterRequest) String() string {
 func (*WatchPerimeterRequest) ProtoMessage() {}
 
 func (x *WatchPerimeterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[4]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -245,7 +428,7 @@ func (x *WatchPerimeterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchPerimeterRequest.ProtoReflect.Descriptor instead.
 func (*WatchPerimeterRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{4}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{7}
 }
 
 type WatchPerimeterResponse struct {
@@ -257,7 +440,7 @@ type WatchPerimeterResponse struct {
 
 func (x *WatchPerimeterResponse) Reset() {
 	*x = WatchPerimeterResponse{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[5]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -269,7 +452,7 @@ func (x *WatchPerimeterResponse) String() string {
 func (*WatchPerimeterResponse) ProtoMessage() {}
 
 func (x *WatchPerimeterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[5]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -282,7 +465,7 @@ func (x *WatchPerimeterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchPerimeterResponse.ProtoReflect.Descriptor instead.
 func (*WatchPerimeterResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{5}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *WatchPerimeterResponse) GetSnapshot() *Snapshot {
@@ -317,14 +500,17 @@ type Snapshot struct {
 	// The node's egress policy (spec/egress-policy-v1.md): rayspa writes it
 	// into the chain the data plane's packets pass on their way out. Absent
 	// (an older rayd, a relay's feed): nothing blocked.
-	Egress        *Egress `protobuf:"bytes,12,opt,name=egress,proto3" json:"egress,omitempty"`
+	Egress *Egress `protobuf:"bytes,12,opt,name=egress,proto3" json:"egress,omitempty"`
+	// The per-address limit on new inbound connections is off (rayctl
+	// conn-limit off, spec/conn-limit-v1.md §8). Absent (an older rayd): on.
+	ConnLimitOff  bool `protobuf:"varint,13,opt,name=conn_limit_off,json=connLimitOff,proto3" json:"conn_limit_off,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Snapshot) Reset() {
 	*x = Snapshot{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[6]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -336,7 +522,7 @@ func (x *Snapshot) String() string {
 func (*Snapshot) ProtoMessage() {}
 
 func (x *Snapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[6]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -349,7 +535,7 @@ func (x *Snapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Snapshot.ProtoReflect.Descriptor instead.
 func (*Snapshot) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{6}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Snapshot) GetRevision() uint64 {
@@ -436,6 +622,13 @@ func (x *Snapshot) GetEgress() *Egress {
 	return nil
 }
 
+func (x *Snapshot) GetConnLimitOff() bool {
+	if x != nil {
+		return x.ConnLimitOff
+	}
+	return false
+}
+
 // Egress is what the data plane may not send, whoever the user.
 type Egress struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
@@ -452,7 +645,7 @@ type Egress struct {
 
 func (x *Egress) Reset() {
 	*x = Egress{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[7]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -464,7 +657,7 @@ func (x *Egress) String() string {
 func (*Egress) ProtoMessage() {}
 
 func (x *Egress) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[7]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -477,7 +670,7 @@ func (x *Egress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Egress.ProtoReflect.Descriptor instead.
 func (*Egress) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{7}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Egress) GetSmtp() bool {
@@ -511,7 +704,7 @@ type AcmeWindow struct {
 
 func (x *AcmeWindow) Reset() {
 	*x = AcmeWindow{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[8]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -523,7 +716,7 @@ func (x *AcmeWindow) String() string {
 func (*AcmeWindow) ProtoMessage() {}
 
 func (x *AcmeWindow) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[8]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -536,7 +729,7 @@ func (x *AcmeWindow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcmeWindow.ProtoReflect.Descriptor instead.
 func (*AcmeWindow) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{8}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *AcmeWindow) GetPort() uint32 {
@@ -572,7 +765,7 @@ type SPAParams struct {
 
 func (x *SPAParams) Reset() {
 	*x = SPAParams{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[9]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -584,7 +777,7 @@ func (x *SPAParams) String() string {
 func (*SPAParams) ProtoMessage() {}
 
 func (x *SPAParams) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[9]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -597,7 +790,7 @@ func (x *SPAParams) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SPAParams.ProtoReflect.Descriptor instead.
 func (*SPAParams) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{9}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SPAParams) GetNodeId() []byte {
@@ -688,7 +881,7 @@ type Device struct {
 
 func (x *Device) Reset() {
 	*x = Device{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[10]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -700,7 +893,7 @@ func (x *Device) String() string {
 func (*Device) ProtoMessage() {}
 
 func (x *Device) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[10]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -713,7 +906,7 @@ func (x *Device) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Device.ProtoReflect.Descriptor instead.
 func (*Device) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{10}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Device) GetId() string {
@@ -753,7 +946,7 @@ type Service struct {
 
 func (x *Service) Reset() {
 	*x = Service{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[11]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -765,7 +958,7 @@ func (x *Service) String() string {
 func (*Service) ProtoMessage() {}
 
 func (x *Service) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[11]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -778,7 +971,7 @@ func (x *Service) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Service.ProtoReflect.Descriptor instead.
 func (*Service) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{11}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Service) GetId() uint32 {
@@ -821,7 +1014,7 @@ type Rotation struct {
 
 func (x *Rotation) Reset() {
 	*x = Rotation{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[12]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -833,7 +1026,7 @@ func (x *Rotation) String() string {
 func (*Rotation) ProtoMessage() {}
 
 func (x *Rotation) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[12]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -846,7 +1039,7 @@ func (x *Rotation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Rotation.ProtoReflect.Descriptor instead.
 func (*Rotation) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{12}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Rotation) GetPortKey() []byte {
@@ -887,7 +1080,7 @@ type Port struct {
 
 func (x *Port) Reset() {
 	*x = Port{}
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[13]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -899,7 +1092,7 @@ func (x *Port) String() string {
 func (*Port) ProtoMessage() {}
 
 func (x *Port) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[13]
+	mi := &file_raycontrol_perimeter_v1_perimeter_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -912,7 +1105,7 @@ func (x *Port) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Port.ProtoReflect.Descriptor instead.
 func (*Port) Descriptor() ([]byte, []int) {
-	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{13}
+	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Port) GetProto() string {
@@ -933,7 +1126,20 @@ var File_raycontrol_perimeter_v1_perimeter_proto protoreflect.FileDescriptor
 
 const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"\n" +
-	"'raycontrol/perimeter/v1/perimeter.proto\x12\x17raycontrol.perimeter.v1\")\n" +
+	"'raycontrol/perimeter/v1/perimeter.proto\x12\x17raycontrol.perimeter.v1\"J\n" +
+	"\x12ReportGuardRequest\x124\n" +
+	"\x05guard\x18\x01 \x01(\v2\x1e.raycontrol.perimeter.v1.GuardR\x05guard\"\x15\n" +
+	"\x13ReportGuardResponse\"\xdf\x01\n" +
+	"\x05Guard\x12\x0e\n" +
+	"\x02on\x18\x01 \x01(\bR\x02on\x12\x14\n" +
+	"\x05since\x18\x02 \x01(\x03R\x05since\x12\x17\n" +
+	"\alast_on\x18\x03 \x01(\x03R\x06lastOn\x12\x1a\n" +
+	"\bswitches\x18\x04 \x01(\x04R\bswitches\x12\x18\n" +
+	"\arefused\x18\x05 \x01(\x04R\arefused\x12\x1b\n" +
+	"\tswept_udp\x18\x06 \x01(\x04R\bsweptUdp\x12\"\n" +
+	"\rswept_tcp_out\x18\a \x01(\x04R\vsweptTcpOut\x12 \n" +
+	"\fswept_tcp_in\x18\b \x01(\x04R\n" +
+	"sweptTcpIn\")\n" +
 	"\x11WatchRelayRequest\x12\x14\n" +
 	"\x05probe\x18\x01 \x01(\bR\x05probe\"U\n" +
 	"\rReportRequest\x12\x16\n" +
@@ -945,7 +1151,7 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"\bsnapshot\x18\x01 \x01(\v2!.raycontrol.perimeter.v1.SnapshotR\bsnapshot\"\x17\n" +
 	"\x15WatchPerimeterRequest\"W\n" +
 	"\x16WatchPerimeterResponse\x12=\n" +
-	"\bsnapshot\x18\x01 \x01(\v2!.raycontrol.perimeter.v1.SnapshotR\bsnapshot\"\xf8\x04\n" +
+	"\bsnapshot\x18\x01 \x01(\v2!.raycontrol.perimeter.v1.SnapshotR\bsnapshot\"\x9e\x05\n" +
 	"\bSnapshot\x12\x1a\n" +
 	"\brevision\x18\x01 \x01(\x04R\brevision\x124\n" +
 	"\x03spa\x18\x02 \x01(\v2\".raycontrol.perimeter.v1.SPAParamsR\x03spa\x129\n" +
@@ -962,7 +1168,8 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"relayPorts\x12\x1f\n" +
 	"\vdebug_until\x18\v \x01(\x03R\n" +
 	"debugUntil\x127\n" +
-	"\x06egress\x18\f \x01(\v2\x1f.raycontrol.perimeter.v1.EgressR\x06egress\"P\n" +
+	"\x06egress\x18\f \x01(\v2\x1f.raycontrol.perimeter.v1.EgressR\x06egress\x12$\n" +
+	"\x0econn_limit_off\x18\r \x01(\bR\fconnLimitOff\"P\n" +
 	"\x06Egress\x12\x12\n" +
 	"\x04smtp\x18\x01 \x01(\bR\x04smtp\x12\x1e\n" +
 	"\n" +
@@ -1007,9 +1214,10 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"targetPort\"0\n" +
 	"\x04Port\x12\x14\n" +
 	"\x05proto\x18\x01 \x01(\tR\x05proto\x12\x12\n" +
-	"\x04port\x18\x02 \x01(\rR\x04port2\x87\x01\n" +
+	"\x04port\x18\x02 \x01(\rR\x04port2\xf1\x01\n" +
 	"\x10PerimeterService\x12s\n" +
-	"\x0eWatchPerimeter\x12..raycontrol.perimeter.v1.WatchPerimeterRequest\x1a/.raycontrol.perimeter.v1.WatchPerimeterResponse0\x012\xd2\x01\n" +
+	"\x0eWatchPerimeter\x12..raycontrol.perimeter.v1.WatchPerimeterRequest\x1a/.raycontrol.perimeter.v1.WatchPerimeterResponse0\x01\x12h\n" +
+	"\vReportGuard\x12+.raycontrol.perimeter.v1.ReportGuardRequest\x1a,.raycontrol.perimeter.v1.ReportGuardResponse2\xd2\x01\n" +
 	"\fRelayService\x12g\n" +
 	"\n" +
 	"WatchRelay\x12*.raycontrol.perimeter.v1.WatchRelayRequest\x1a+.raycontrol.perimeter.v1.WatchRelayResponse0\x01\x12Y\n" +
@@ -1027,47 +1235,53 @@ func file_raycontrol_perimeter_v1_perimeter_proto_rawDescGZIP() []byte {
 	return file_raycontrol_perimeter_v1_perimeter_proto_rawDescData
 }
 
-var file_raycontrol_perimeter_v1_perimeter_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_raycontrol_perimeter_v1_perimeter_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_raycontrol_perimeter_v1_perimeter_proto_goTypes = []any{
-	(*WatchRelayRequest)(nil),      // 0: raycontrol.perimeter.v1.WatchRelayRequest
-	(*ReportRequest)(nil),          // 1: raycontrol.perimeter.v1.ReportRequest
-	(*ReportResponse)(nil),         // 2: raycontrol.perimeter.v1.ReportResponse
-	(*WatchRelayResponse)(nil),     // 3: raycontrol.perimeter.v1.WatchRelayResponse
-	(*WatchPerimeterRequest)(nil),  // 4: raycontrol.perimeter.v1.WatchPerimeterRequest
-	(*WatchPerimeterResponse)(nil), // 5: raycontrol.perimeter.v1.WatchPerimeterResponse
-	(*Snapshot)(nil),               // 6: raycontrol.perimeter.v1.Snapshot
-	(*Egress)(nil),                 // 7: raycontrol.perimeter.v1.Egress
-	(*AcmeWindow)(nil),             // 8: raycontrol.perimeter.v1.AcmeWindow
-	(*SPAParams)(nil),              // 9: raycontrol.perimeter.v1.SPAParams
-	(*Device)(nil),                 // 10: raycontrol.perimeter.v1.Device
-	(*Service)(nil),                // 11: raycontrol.perimeter.v1.Service
-	(*Rotation)(nil),               // 12: raycontrol.perimeter.v1.Rotation
-	(*Port)(nil),                   // 13: raycontrol.perimeter.v1.Port
+	(*ReportGuardRequest)(nil),     // 0: raycontrol.perimeter.v1.ReportGuardRequest
+	(*ReportGuardResponse)(nil),    // 1: raycontrol.perimeter.v1.ReportGuardResponse
+	(*Guard)(nil),                  // 2: raycontrol.perimeter.v1.Guard
+	(*WatchRelayRequest)(nil),      // 3: raycontrol.perimeter.v1.WatchRelayRequest
+	(*ReportRequest)(nil),          // 4: raycontrol.perimeter.v1.ReportRequest
+	(*ReportResponse)(nil),         // 5: raycontrol.perimeter.v1.ReportResponse
+	(*WatchRelayResponse)(nil),     // 6: raycontrol.perimeter.v1.WatchRelayResponse
+	(*WatchPerimeterRequest)(nil),  // 7: raycontrol.perimeter.v1.WatchPerimeterRequest
+	(*WatchPerimeterResponse)(nil), // 8: raycontrol.perimeter.v1.WatchPerimeterResponse
+	(*Snapshot)(nil),               // 9: raycontrol.perimeter.v1.Snapshot
+	(*Egress)(nil),                 // 10: raycontrol.perimeter.v1.Egress
+	(*AcmeWindow)(nil),             // 11: raycontrol.perimeter.v1.AcmeWindow
+	(*SPAParams)(nil),              // 12: raycontrol.perimeter.v1.SPAParams
+	(*Device)(nil),                 // 13: raycontrol.perimeter.v1.Device
+	(*Service)(nil),                // 14: raycontrol.perimeter.v1.Service
+	(*Rotation)(nil),               // 15: raycontrol.perimeter.v1.Rotation
+	(*Port)(nil),                   // 16: raycontrol.perimeter.v1.Port
 }
 var file_raycontrol_perimeter_v1_perimeter_proto_depIdxs = []int32{
-	6,  // 0: raycontrol.perimeter.v1.WatchRelayResponse.snapshot:type_name -> raycontrol.perimeter.v1.Snapshot
-	6,  // 1: raycontrol.perimeter.v1.WatchPerimeterResponse.snapshot:type_name -> raycontrol.perimeter.v1.Snapshot
-	9,  // 2: raycontrol.perimeter.v1.Snapshot.spa:type_name -> raycontrol.perimeter.v1.SPAParams
-	10, // 3: raycontrol.perimeter.v1.Snapshot.devices:type_name -> raycontrol.perimeter.v1.Device
-	11, // 4: raycontrol.perimeter.v1.Snapshot.services:type_name -> raycontrol.perimeter.v1.Service
-	13, // 5: raycontrol.perimeter.v1.Snapshot.public_ports:type_name -> raycontrol.perimeter.v1.Port
-	13, // 6: raycontrol.perimeter.v1.Snapshot.admin_ports:type_name -> raycontrol.perimeter.v1.Port
-	8,  // 7: raycontrol.perimeter.v1.Snapshot.acme:type_name -> raycontrol.perimeter.v1.AcmeWindow
-	13, // 8: raycontrol.perimeter.v1.Snapshot.relay_ports:type_name -> raycontrol.perimeter.v1.Port
-	7,  // 9: raycontrol.perimeter.v1.Snapshot.egress:type_name -> raycontrol.perimeter.v1.Egress
-	13, // 10: raycontrol.perimeter.v1.Service.ports:type_name -> raycontrol.perimeter.v1.Port
-	12, // 11: raycontrol.perimeter.v1.Service.rotation:type_name -> raycontrol.perimeter.v1.Rotation
-	4,  // 12: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:input_type -> raycontrol.perimeter.v1.WatchPerimeterRequest
-	0,  // 13: raycontrol.perimeter.v1.RelayService.WatchRelay:input_type -> raycontrol.perimeter.v1.WatchRelayRequest
-	1,  // 14: raycontrol.perimeter.v1.RelayService.Report:input_type -> raycontrol.perimeter.v1.ReportRequest
-	5,  // 15: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:output_type -> raycontrol.perimeter.v1.WatchPerimeterResponse
-	3,  // 16: raycontrol.perimeter.v1.RelayService.WatchRelay:output_type -> raycontrol.perimeter.v1.WatchRelayResponse
-	2,  // 17: raycontrol.perimeter.v1.RelayService.Report:output_type -> raycontrol.perimeter.v1.ReportResponse
-	15, // [15:18] is the sub-list for method output_type
-	12, // [12:15] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	2,  // 0: raycontrol.perimeter.v1.ReportGuardRequest.guard:type_name -> raycontrol.perimeter.v1.Guard
+	9,  // 1: raycontrol.perimeter.v1.WatchRelayResponse.snapshot:type_name -> raycontrol.perimeter.v1.Snapshot
+	9,  // 2: raycontrol.perimeter.v1.WatchPerimeterResponse.snapshot:type_name -> raycontrol.perimeter.v1.Snapshot
+	12, // 3: raycontrol.perimeter.v1.Snapshot.spa:type_name -> raycontrol.perimeter.v1.SPAParams
+	13, // 4: raycontrol.perimeter.v1.Snapshot.devices:type_name -> raycontrol.perimeter.v1.Device
+	14, // 5: raycontrol.perimeter.v1.Snapshot.services:type_name -> raycontrol.perimeter.v1.Service
+	16, // 6: raycontrol.perimeter.v1.Snapshot.public_ports:type_name -> raycontrol.perimeter.v1.Port
+	16, // 7: raycontrol.perimeter.v1.Snapshot.admin_ports:type_name -> raycontrol.perimeter.v1.Port
+	11, // 8: raycontrol.perimeter.v1.Snapshot.acme:type_name -> raycontrol.perimeter.v1.AcmeWindow
+	16, // 9: raycontrol.perimeter.v1.Snapshot.relay_ports:type_name -> raycontrol.perimeter.v1.Port
+	10, // 10: raycontrol.perimeter.v1.Snapshot.egress:type_name -> raycontrol.perimeter.v1.Egress
+	16, // 11: raycontrol.perimeter.v1.Service.ports:type_name -> raycontrol.perimeter.v1.Port
+	15, // 12: raycontrol.perimeter.v1.Service.rotation:type_name -> raycontrol.perimeter.v1.Rotation
+	7,  // 13: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:input_type -> raycontrol.perimeter.v1.WatchPerimeterRequest
+	0,  // 14: raycontrol.perimeter.v1.PerimeterService.ReportGuard:input_type -> raycontrol.perimeter.v1.ReportGuardRequest
+	3,  // 15: raycontrol.perimeter.v1.RelayService.WatchRelay:input_type -> raycontrol.perimeter.v1.WatchRelayRequest
+	4,  // 16: raycontrol.perimeter.v1.RelayService.Report:input_type -> raycontrol.perimeter.v1.ReportRequest
+	8,  // 17: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:output_type -> raycontrol.perimeter.v1.WatchPerimeterResponse
+	1,  // 18: raycontrol.perimeter.v1.PerimeterService.ReportGuard:output_type -> raycontrol.perimeter.v1.ReportGuardResponse
+	6,  // 19: raycontrol.perimeter.v1.RelayService.WatchRelay:output_type -> raycontrol.perimeter.v1.WatchRelayResponse
+	5,  // 20: raycontrol.perimeter.v1.RelayService.Report:output_type -> raycontrol.perimeter.v1.ReportResponse
+	17, // [17:21] is the sub-list for method output_type
+	13, // [13:17] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_raycontrol_perimeter_v1_perimeter_proto_init() }
@@ -1081,7 +1295,7 @@ func file_raycontrol_perimeter_v1_perimeter_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_raycontrol_perimeter_v1_perimeter_proto_rawDesc), len(file_raycontrol_perimeter_v1_perimeter_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   14,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

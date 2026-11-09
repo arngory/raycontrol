@@ -5,6 +5,7 @@ package live
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -46,8 +47,24 @@ type Applier struct {
 	// the traffic loop reads its counters, which start again with it
 	// (traffic-limit-v1 §2.4).
 	BeforeRestart func(ctx context.Context, service string)
+	// SyncTimeout bounds each Xray API call that syncs an inbound's users
+	// (0: DefaultSyncTimeout): a process that stopped answering would
+	// otherwise hold the apply loop, and every later change, for good. A
+	// call that runs out restarts the process as any failed sync does.
+	SyncTimeout time.Duration
 
 	skipped []string // the waiting services last logged
+}
+
+// DefaultSyncTimeout is SyncTimeout's default: a sync of thousands of
+// users over the local socket takes well under a second.
+const DefaultSyncTimeout = 30 * time.Second
+
+// syncVLESS is api.SyncVLESS within SyncTimeout.
+func (a *Applier) syncVLESS(ctx context.Context, api InnerAPI, tag, flow string, want map[string]string) (int, int, error) {
+	ctx, cancel := context.WithTimeout(ctx, cmp.Or(a.SyncTimeout, DefaultSyncTimeout))
+	defer cancel()
+	return api.SyncVLESS(ctx, tag, flow, want)
 }
 
 func (a *Applier) restart(ctx context.Context, verb, unit string) error {
@@ -167,7 +184,7 @@ func (a *Applier) Apply(ctx context.Context) error {
 			var added, removed int
 			var err error
 			for _, tag := range render.XrayTags(svc) {
-				a1, r1, e := api.SyncVLESS(ctx, tag, flow, want)
+				a1, r1, e := a.syncVLESS(ctx, api, tag, flow, want)
 				added, removed, err = added+a1, removed+r1, errors.Join(err, e)
 			}
 			if err == nil {

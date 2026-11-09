@@ -22,6 +22,7 @@ import (
 	"connectrpc.com/connect"
 
 	"github.com/arngory/raycontrol/internal/appmirror"
+	"github.com/arngory/raycontrol/internal/connlimit"
 	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/dnscheck"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
@@ -69,6 +70,9 @@ type Server struct {
 	// NodeUpdate is the update by request (spec/node-update-v1.md); nil:
 	// the node's paths.
 	NodeUpdate *NodeUpdate
+	// ConnLimit keeps the refusals, the table and the guard
+	// (spec/conn-limit-v1.md §7); nil shows nothing of them.
+	ConnLimit *connlimit.Monitor
 
 	// Wrong invite PINs, and the invites the last of them withdrew, since
 	// rayd started (rayctl metrics).
@@ -134,7 +138,7 @@ var _ nodev1connect.NodeServiceHandler = (*Server)(nil)
 
 // Handler returns the HTTP handler for the service.
 func (s *Server) Handler(policy PeerPolicy) (string, http.Handler) {
-	return nodev1connect.NewNodeServiceHandler(s, connect.WithInterceptors(policy.interceptor()))
+	return nodev1connect.NewNodeServiceHandler(s, connect.WithInterceptors(policy.interceptor()), readLimit())
 }
 
 // ServeUnix serves the API on a unix socket until ctx ends. Every local user
@@ -186,6 +190,8 @@ func toConnect(err error) error {
 		return connect.NewError(connect.CodeNotFound, err)
 	case errors.Is(err, store.ErrInvalid):
 		return connect.NewError(connect.CodeInvalidArgument, err)
+	case errors.Is(err, store.ErrPrecondition):
+		return connect.NewError(connect.CodeFailedPrecondition, err)
 	case strings.Contains(err.Error(), "UNIQUE constraint failed"):
 		return connect.NewError(connect.CodeAlreadyExists, err)
 	case strings.Contains(err.Error(), "FOREIGN KEY constraint failed"):
@@ -278,10 +284,17 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 	return connect.NewResponse(resp), nil
 }
 
-// serviceIDs resolves service names to IDs.
+// serviceIDs resolves service names to IDs, each once: a name given twice
+// would otherwise fail the one write as "already exists", which a retry
+// takes for "the first try worked".
 func (s *Server) serviceIDs(ctx context.Context, names []string) ([]int64, error) {
 	ids := make([]int64, 0, len(names))
+	seen := make(map[string]bool, len(names))
 	for _, n := range names {
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
 		svc, err := s.Store.ServiceByName(ctx, n)
 		if err != nil {
 			return nil, err
@@ -355,11 +368,10 @@ func (s *Server) CreateUser(ctx context.Context, req *connect.Request[nodev1.Cre
 	}
 	ids, err := s.serviceIDs(ctx, m.Services)
 	if err == nil {
-		u, err = s.Store.CreateUser(ctx, u)
-	}
-	if err == nil && len(ids) > 0 {
-		err = s.Store.SetUserServices(ctx, u.Name, ids)
+		// One write: a user without the services asked for would make
+		// the retry "already exists".
 		u.Services = ids
+		u, err = s.Store.CreateUser(ctx, u)
 	}
 	if err := s.done(ctx, "user.create", m.Name, err); err != nil {
 		return nil, err
@@ -586,7 +598,7 @@ func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.
 	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "masterdns" {
 		// masterdns-key-rotation §2: the new key at once, in subscriptions
 		// from now; the previous one for the grace (its sessions go on).
-		state, err := provision.RotateMasterDNSKey(ctx, s.Store, req.Msg.Name, now, s.CredGrace, req.Msg.Now)
+		state, err := provision.RotateMasterDNSKey(ctx, s.Store, req.Msg.Name, now, s.CredGrace, req.Msg.Now, req.Msg.Force)
 		if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
 			return nil, err
 		}
@@ -594,7 +606,7 @@ func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.
 	}
 	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "dnstt" {
 		// dnsseal-v1 §8: the new key at once, the previous one for the grace.
-		state, err := provision.RotateSealKey(ctx, s.Store, req.Msg.Name, now, s.CredGrace, req.Msg.Now)
+		state, err := provision.RotateSealKey(ctx, s.Store, req.Msg.Name, now, s.CredGrace, req.Msg.Now, req.Msg.Force)
 		if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
 			return nil, err
 		}

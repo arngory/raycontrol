@@ -36,6 +36,7 @@ import (
 	"github.com/arngory/raycontrol/internal/asn"
 	"github.com/arngory/raycontrol/internal/certs"
 	"github.com/arngory/raycontrol/internal/cloudflare"
+	"github.com/arngory/raycontrol/internal/connlimit"
 	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/dnscheck"
 	"github.com/arngory/raycontrol/internal/doh"
@@ -238,6 +239,10 @@ func cmdServe(args []string) error {
 		log.Warn("UNSAFE: the client's releases are checked with a test key, not the client's", "key", key)
 	}
 	go srv.AppMirror.Run(ctx, func() time.Duration { return mrand.N(appmirror.Jitter) }) //nolint:gosec // G404: when to look, no secret
+	// The connection limits (spec/conn-limit-v1.md §7): naive's refusals by
+	// user every 15 s, the conntrack table, the guard as rayspa reports it.
+	srv.ConnLimit = &connlimit.Monitor{Sources: connLimitSources(st, paths), Off: st.ConnLimitOff, Health: hb, Log: log}
+	go srv.ConnLimit.Run(ctx)
 	per := &api.PerimeterServer{Server: srv, RayspaUID: -1, DefaultTTL: *spaTTL, MaxTTL: *spaMaxTTL, TCPCarrier: *spaTCP, Refresh: time.Minute}
 	policy := api.PeerPolicy{Group: *group}
 	if u, err := user.Lookup(*rayspaUser); err == nil {
@@ -698,7 +703,8 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 		hb.Done("reality-rotation", err)
 		if err != nil {
 			log.Error("REALITY rotation", "err", err)
-		} else if n > 0 {
+		}
+		if n > 0 { // the services that rotated, with or without another's error
 			notify()
 			if cm != nil {
 				cm.Wake()
@@ -1272,6 +1278,8 @@ func cmdNaive(args []string) error {
 	quicSocket := fs.String("quic-socket", "", "SOCK_SEQPACKET socket the front sends QUIC datagrams to (naive-quic; IPC mode packet)")
 	frontUID := fs.Int("front-uid", render.FrontUID, "UID of the niko-server front, the only peer accepted")
 	probeAddr := fs.String("probe", "", "where the probe name leads (the subscription endpoint on loopback, R4-16)")
+	connLimit := fs.String("conn-limit", "", "file that turns the per-user connection limits off with \"off\" (spec/conn-limit-v1.md §3.1), "+
+		"read again when it changes; empty or absent: on")
 	icmp := fs.Bool("icmp", false, "carry ping and traceroute through "+naive.ICMPName+" (spec/icmp-v1.md): echoes from ICMP datagram sockets, "+
 		"which need the process's group in net.ipv4.ping_group_range")
 	fs.Parse(args)
@@ -1301,12 +1309,19 @@ func cmdNaive(args []string) error {
 	// The users file is watched: a user taken off it (disabled, expired,
 	// over the traffic limit) loses the live streams (traffic-limit-v1 §3.2).
 	go nu.Watch(ctx)
+	ns := &naive.Server{Users: nu, Answer: handler, ICMP: *icmp, Log: log}
+	// The refusals of the connection limits go out with the bytes: set
+	// before the stats socket answers.
+	nu.SetRefused(ns.Refused)
 	if *statsSocket != "" {
 		if err := nu.ServeStats(ctx, *statsSocket, log); err != nil {
 			return err
 		}
 	}
-	ns := &naive.Server{Users: nu, Answer: handler, ICMP: *icmp, Log: log}
+	if *connLimit != "" {
+		ns.SetConnLimit(true)
+		go ns.WatchConnLimit(ctx, *connLimit)
+	}
 	// Channel probes through the tunnel (R4-16): the probe name, and only
 	// it, leads to the endpoint; the rest to public addresses.
 	ns.Probe = *probeAddr
@@ -1334,7 +1349,7 @@ func cmdNaive(args []string) error {
 		<-ctx.Done()
 		_ = srv.Close()
 	}()
-	log.Info("serving naive", "socket", *socket, "answer", *answer, "icmp", *icmp)
+	log.Info("serving naive", "socket", *socket, "answer", *answer, "icmp", *icmp, "conn_limit", ns.ConnLimitOn())
 	if err := srv.ServeTLS(ln, "", ""); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
@@ -1402,4 +1417,28 @@ func serveHTTP3(ctx context.Context, pc net.PacketConn, cert tls.Certificate, h 
 		return err
 	}
 	return nil
+}
+
+// connLimitSources are the processes that count refusals of the connection
+// limits (spec/conn-limit-v1.md §2): each enabled naive service, read at its
+// stats socket with the traffic line. niko-server and Xray follow.
+func connLimitSources(st *store.Store, paths render.Paths) func(ctx context.Context) ([]connlimit.Source, error) {
+	return func(ctx context.Context) ([]connlimit.Source, error) {
+		services, err := st.ListServices(ctx)
+		if err != nil {
+			return nil, err
+		}
+		var out []connlimit.Source
+		for _, svc := range services {
+			if !svc.Enabled || svc.Kind != "naive" {
+				continue
+			}
+			socket := paths.StatsSocket(svc.Name)
+			out = append(out, connlimit.Source{Service: svc.Name, Read: func(ctx context.Context) (connlimit.Reading, error) {
+				r, err := traffic.ReadLine(ctx, socket)
+				return connlimit.Reading{Boot: r.Boot, Age: r.Age, AgeKnown: r.AgeKnown, Limits: r.Limits}, err
+			}})
+		}
+		return out, nil
+	}
 }

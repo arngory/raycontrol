@@ -299,7 +299,7 @@ func (c *cli) remoteRotate(ctx context.Context) error {
 }
 
 // localOnly lists the commands that act on this host, not through an API.
-var localOnly = []string{"install", "apply", "update", "uninstall", "backup", "restore", "report", "probe", "egress"}
+var localOnly = []string{"install", "apply", "update", "uninstall", "backup", "restore", "report", "probe", "egress", "conn-limit"}
 
 func isLocalOnly(cmd string) bool {
 	return slices.Contains(localOnly, cmd) || strings.HasPrefix(cmd, "-")

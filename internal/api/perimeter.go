@@ -38,12 +38,11 @@ var _ perimeterv1connect.PerimeterServiceHandler = (*PerimeterServer)(nil)
 
 // Handler returns the HTTP handler for the perimeter service.
 func (p *PerimeterServer) Handler() (string, http.Handler) {
-	return perimeterv1connect.NewPerimeterServiceHandler(p)
+	return perimeterv1connect.NewPerimeterServiceHandler(p, readLimit())
 }
 
 func (p *PerimeterServer) WatchPerimeter(ctx context.Context, _ *connect.Request[perimeterv1.WatchPerimeterRequest], stream *connect.ServerStream[perimeterv1.WatchPerimeterResponse]) error {
-	cred, _ := ctx.Value(peerKey{}).(*unix.Ucred)
-	if cred == nil || (cred.Uid != 0 && int(cred.Uid) != p.RayspaUID) {
+	if !p.rayspaPeer(ctx) {
 		return connect.NewError(connect.CodePermissionDenied, errors.New("only rayspa may watch the perimeter"))
 	}
 	var last []byte
@@ -71,6 +70,12 @@ func (p *PerimeterServer) WatchPerimeter(ctx context.Context, _ *connect.Request
 		case <-time.After(p.Refresh):
 		}
 	}
+}
+
+// rayspaPeer reports whether the caller is the rayspa user or root.
+func (p *PerimeterServer) rayspaPeer(ctx context.Context) bool {
+	cred, _ := ctx.Value(peerKey{}).(*unix.Ucred)
+	return cred != nil && (cred.Uid == 0 || int(cred.Uid) == p.RayspaUID)
 }
 
 // snapshot builds the perimeter state from the store. Revision is left 0 so
@@ -201,6 +206,10 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 		return nil, err
 	}
 	snap.Egress = &perimeterv1.Egress{Smtp: egress.SMTP, Bittorrent: egress.BitTorrent, Uids: p.egressUIDs()}
+	// The per-address limit on new inbound connections (conn-limit-v1 §8).
+	if snap.ConnLimitOff, err = p.Store.ConnLimitOff(ctx); err != nil {
+		return nil, err
+	}
 	return snap, nil
 }
 
@@ -273,6 +282,11 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 	}
 	snap.AdminPrefixes = slices.Clone(relay.Admin)
 	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: uint32(relay.SSHPort)}}
+	// The per-address limit holds on the node's relays too (conn-limit-v1
+	// §6.2, §8): one switch for both.
+	if snap.ConnLimitOff, err = p.Store.ConnLimitOff(ctx); err != nil {
+		return nil, err
+	}
 	return snap, nil
 }
 

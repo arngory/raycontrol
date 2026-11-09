@@ -294,8 +294,9 @@ func TestLANDevicesAndRevocation(t *testing.T) {
 	if !bytes.Equal(bobKey, s.lanKey(t, "bob")) {
 		t.Fatal("another user's key changed")
 	}
-	// A revocation of one already revoked, or of none: nothing changes.
-	if err := s.RevokeDevice(ctx, devs[1].ID); !errors.Is(err, ErrNotFound) {
+	// A revocation of one already revoked (a retry: no error), or of none:
+	// nothing changes.
+	if err := s.RevokeDevice(ctx, devs[1].ID); err != nil {
 		t.Fatalf("again: %v", err)
 	}
 	if err := s.RevokeDevice(ctx, "0000000000000000"); !errors.Is(err, ErrNotFound) {

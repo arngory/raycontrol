@@ -135,8 +135,12 @@ func TestUsersServicesDevices(t *testing.T) {
 	if err := s.RevokeDevice(ctx, phone.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RevokeDevice(ctx, phone.ID); !errors.Is(err, ErrNotFound) {
+	// A retry: done already, no error.
+	if err := s.RevokeDevice(ctx, phone.ID); err != nil {
 		t.Fatalf("second revoke: %v", err)
+	}
+	if err := s.RevokeDevice(ctx, "0000000000000000"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoke of no device: %v", err)
 	}
 	if devs, _ = s.SPADevices(ctx); len(devs) != 0 {
 		t.Fatalf("revoked device still passes SPA: %+v", devs)

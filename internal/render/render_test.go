@@ -694,7 +694,7 @@ func TestRenderSeal(t *testing.T) {
 		return ""
 	}
 	now := time.Now()
-	if _, err := provision.RotateSealKey(ctx, st, dns.Name, now, time.Hour, false); err != nil {
+	if _, err := provision.RotateSealKey(ctx, st, dns.Name, now, time.Hour, false, false); err != nil {
 		t.Fatal(err)
 	}
 	rotated, _ := st.ServiceSecrets(ctx, dns.ID)
@@ -1103,6 +1103,27 @@ func TestNaiveUsersFile(t *testing.T) {
 	}
 	if !maps.Equal(got, want) {
 		t.Fatalf("users file %v, want %v", got, want)
+	}
+	// The connection limits' switch (spec/conn-limit-v1.md §8): read again
+	// by naive, never a restart.
+	for off, want := range map[bool]string{false: "on\n", true: "off\n"} {
+		m.ConnLimitOff = off
+		files, _, err := render.Render(m, render.DefaultPaths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, f := range files {
+			if f.Path == "/var/lib/raycontrol/rendered/nv/"+render.NaiveConnLimit {
+				found = true
+				if string(f.Content) != want || !f.Reload || f.Group != "niko-nv" || f.Mode != 0o640 {
+					t.Errorf("off %v: %q reload %v group %s mode %o", off, f.Content, f.Reload, f.Group, f.Mode)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("off %v: no switch file", off)
+		}
 	}
 }
 

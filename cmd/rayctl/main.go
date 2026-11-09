@@ -76,11 +76,12 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             (0: the defaults, 256 and 4; the server restarts)
   service cert SITE -chain F -key F         a certificate of your own for the site and the services under
                                             it, in place of ACME's (on the node only)
-  service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
+  service rotate NAME [-now] [-force]       new REALITY keys (and server name, self-steal) ahead of
                                             schedule: after the lead time, or at once with -now;
                                             dnstt: a new seal key at once, masterdns: a new service key
                                             at once; the previous one accepted for -cred-grace (with
-                                            -now: not at all)
+                                            -now: not at all); refused while the key before is still
+                                            in its grace, unless -force (that key then goes at once)
   device list [USER]
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
@@ -116,6 +117,10 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             force and (root) what it blocked
   egress block|allow bittorrent|smtp        block or allow BitTorrent, or SMTP (TCP 25), on every
                                             profile (spec/egress-policy-v1.md; root, on the node)
+  conn-limit [show]                         the connection limits: on or off, their numbers, the
+                                            conntrack table, the guard, users at a limit in 15 min
+  conn-limit on|off                         per-user limits (naive) and the per-address limit on new
+                                            inbound connections (spec/conn-limit-v1.md; root, on the node)
 
   check [-host ADDR] [-domain D] [-services a,b]
                                               whether this host can run a node: what is required (install
@@ -296,6 +301,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.debug(ctx, sub, rest)
 	case "egress":
 		return c.egress(ctx, args[1:])
+	case "conn-limit":
+		return c.connLimit(ctx, args[1:])
 	case "remote":
 		return c.remoteCmd(ctx, sub, rest)
 	case "backup":
@@ -709,13 +716,14 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 	case "rotate":
 		fs := flag.NewFlagSet("service rotate", flag.ContinueOnError)
 		now := fs.Bool("now", false, "switch at once; clients that have not fetched their subscription since lose this profile until they do")
+		force := fs.Bool("force", false, "dnstt, masterdns: switch even while the previous key is in its grace, which drops it at once")
 		if err := need(args, 1); err != nil {
 			return err
 		}
 		if err := fs.Parse(args[1:]); err != nil {
 			return errUsage
 		}
-		r, err := c.c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: args[0], Now: *now}))
+		r, err := c.c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: args[0], Now: *now, Force: *force}))
 		if err != nil {
 			return err
 		}

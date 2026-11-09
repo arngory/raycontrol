@@ -13,6 +13,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/arngory/raycontrol/internal/connlimit"
 	"github.com/arngory/raycontrol/internal/dnsstats"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/provision"
@@ -280,7 +281,52 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 		}
 		addFrontStats(&m, front, owner)
 	}
+	if s.ConnLimit != nil {
+		addConnLimit(&m, s.ConnLimit.Snapshot())
+	}
 	return m.String(), nil
+}
+
+// addConnLimit adds the connection limits, the table and the guard
+// (spec/conn-limit-v1.md §7): numbers only, never users.
+func addConnLimit(m *Metrics, s connlimit.Snapshot) {
+	for _, svc := range s.Services {
+		for _, kind := range connlimit.Kinds {
+			m.Add("raycontrol_conn_limit_refused_total", "Connections, streams and packets refused by a per-user limit, by service and kind.",
+				float64(s.Refused[[2]string{svc, kind}]), "service", svc, "kind", kind)
+		}
+	}
+	at := map[string]int{}
+	for _, svc := range s.Services {
+		at[svc] = 0
+	}
+	for _, u := range s.Users {
+		at[u.Service]++
+	}
+	for _, svc := range sortedKeys(at) {
+		m.Add("raycontrol_conn_limit_users", "Users who met a per-user limit in the last 15 minutes, by service.", float64(at[svc]), "service", svc)
+	}
+	if ct := s.Conntrack; ct != nil {
+		m.Add("raycontrol_conntrack_entries", "Entries in the conntrack table.", float64(ct.Count))
+		m.Add("raycontrol_conntrack_max", "The conntrack table's size (nf_conntrack_max).", float64(ct.Max))
+		m.Add("raycontrol_conntrack_dropped_total", "New connections the kernel dropped: the table was full.", float64(ct.Dropped))
+		m.Add("raycontrol_conntrack_early_dropped_total", "Unconfirmed entries the kernel pushed out for new ones.", float64(ct.EarlyDropped))
+	}
+	if g := s.Guard; g != nil {
+		on := 0.0
+		if g.On {
+			on = 1
+		}
+		m.Add("raycontrol_conn_guard_on", "1 while the conntrack guard refuses new data-plane connections.", on)
+		m.Add("raycontrol_conn_guard_switches_total", "Times the guard switched, on or off, since rayspa started.", float64(g.Switches))
+		m.Add("raycontrol_conn_guard_refused_total", "New data-plane connections the guard refused since rayspa started.", float64(g.Refused))
+		for _, k := range []struct {
+			kind string
+			v    uint64
+		}{{"udp", g.SweptUDP}, {"tcp-out", g.SweptTCPOut}, {"tcp-in", g.SweptTCPIn}} {
+			m.Add("raycontrol_conn_guard_swept_total", "Conntrack entries without a socket the guard removed, by kind.", float64(k.v), "kind", k.kind)
+		}
+	}
 }
 
 // addDNSTTStats adds a dnstt service's counters, labelled by service.

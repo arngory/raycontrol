@@ -149,10 +149,10 @@ func RemoteTLSConfig(certDER, keyDER []byte) (*tls.Config, error) {
 // gets a plain 404.
 func (r *Remote) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle(nodev1connect.NewNodeServiceHandler(r.Server, connect.WithInterceptors(r.adminOnly())))
-	mux.Handle(devicev1connect.NewDeviceServiceHandler(r))
+	mux.Handle(nodev1connect.NewNodeServiceHandler(r.Server, connect.WithInterceptors(r.adminOnly()), readLimit()))
+	mux.Handle(devicev1connect.NewDeviceServiceHandler(r, readLimit()))
 	if r.Perimeter != nil {
-		mux.Handle(perimeterv1connect.NewRelayServiceHandler(&relayFeed{r}))
+		mux.Handle(perimeterv1connect.NewRelayServiceHandler(&relayFeed{r}, readLimit()))
 	}
 	// No redirects: Niko takes a 3xx for an error (RAYCONTROL.md §22).
 	return httpx.NoRedirect(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -206,6 +206,20 @@ func (r *Remote) device(ctx context.Context) (store.Device, error) {
 	return d, nil
 }
 
+// adminDevice is the caller's device if it is an admin's (api-v1 §5): a
+// user device reaches the API port only to repeat its Register, for the
+// invite's 15 minutes, and may then ask who it is, not change its key.
+func (r *Remote) adminDevice(ctx context.Context) (store.Device, error) {
+	d, err := r.device(ctx)
+	if err != nil {
+		return d, err
+	}
+	if d.Role != "admin" {
+		return d, connect.NewError(connect.CodePermissionDenied, errors.New("not an admin device"))
+	}
+	return d, nil
+}
+
 // nodeOnly are the calls for root on the node itself.
 var nodeOnly = map[string]bool{
 	// What rayctl apply builds the deployment from, and rayd's own plan:
@@ -228,6 +242,9 @@ var nodeOnly = map[string]bool{
 	// The egress policy is root's on the node (spec/egress-policy-v1.md §9).
 	nodev1connect.NodeServiceGetEgressProcedure: true,
 	nodev1connect.NodeServiceSetEgressProcedure: true,
+	// So are the connection limits (spec/conn-limit-v1.md §8).
+	nodev1connect.NodeServiceGetConnLimitProcedure: true,
+	nodev1connect.NodeServiceSetConnLimitProcedure: true,
 	// Whether admins may update the node at all is root's (node-update-v1).
 }
 
@@ -266,12 +283,9 @@ func (r *Remote) Register(ctx context.Context, req *connect.Request[devicev1.Reg
 	pin := pinFrom(ctx)
 	inv, key, err := s.Store.ActiveInvite(ctx, req.Msg.InviteId)
 	if err != nil {
-		return nil, errInvite
+		return r.replayRegister(ctx, req.Msg, pin)
 	}
-	if d := r.clock().Unix()/60 - req.Msg.Minute; d < -2 || d > 2 {
-		return nil, errInvite
-	}
-	if !hmac.Equal(req.Msg.Mac, RegisterMAC(key, req.Msg.Minute, pin)) {
+	if !r.registerProved(req.Msg, key, pin) {
 		return nil, errInvite
 	}
 	ctx = context.WithValue(ctx, actorKey{}, "invite "+inv.ID)
@@ -298,6 +312,11 @@ func (r *Remote) Register(ctx context.Context, req *connect.Request[devicev1.Reg
 		}
 	}
 	d, devKey, err := s.Store.UseInvite(ctx, inv.ID, pin)
+	if errors.Is(err, store.ErrNotFound) {
+		// Used since ActiveInvite: by a duplicate of this request, which
+		// gets the same answer, or by another certificate, which not.
+		return r.replayRegister(ctx, req.Msg, pin)
+	}
 	var bundle string
 	if err == nil {
 		bundle, err = s.bundle(ctx, d, devKey)
@@ -305,6 +324,40 @@ func (r *Remote) Register(ctx context.Context, req *connect.Request[devicev1.Reg
 	if err := s.done(ctx, "device.register:"+inv.Role, inv.UserName+"/"+inv.Name, err); err != nil {
 		r.Log.Debug("register", "err", err)
 		return nil, errInvite
+	}
+	return connect.NewResponse(&devicev1.RegisterResponse{Bundle: bundle, DeviceId: d.ID, Role: d.Role}), nil
+}
+
+// registerProved checks a Register's minute and MAC against an invite key
+// and the connection's certificate.
+func (r *Remote) registerProved(msg *devicev1.RegisterRequest, key [spa.KeySize]byte, pin string) bool {
+	if d := r.clock().Unix()/60 - msg.Minute; d < -2 || d > 2 {
+		return false
+	}
+	return hmac.Equal(msg.Mac, RegisterMAC(key, msg.Minute, pin))
+}
+
+// replayRegister answers a Register for an invite already used (api-v1
+// §4.1): the same certificate within store.InviteReplayWindow gets the
+// same device and a bundle rebuilt from the store, after the same proofs
+// (minute, MAC, PIN); nothing new is made, and no PIN try is spent. Any
+// other case is the usual errInvite.
+func (r *Remote) replayRegister(ctx context.Context, msg *devicev1.RegisterRequest, pin string) (*connect.Response[devicev1.RegisterResponse], error) {
+	s := r.Server
+	inv, key, d, devKey, err := s.Store.ReplayInvite(ctx, msg.InviteId, pin)
+	if err != nil || !r.registerProved(msg, key, pin) {
+		return nil, errInvite
+	}
+	if inv.PinProof != nil && !hmac.Equal(msg.PinProof, inv.PinProof) {
+		return nil, errInvite
+	}
+	bundle, err := s.bundle(ctx, d, devKey)
+	if err != nil {
+		r.Log.Debug("register replay", "err", err)
+		return nil, errInvite
+	}
+	if aerr := s.Store.Audit(ctx, "invite "+inv.ID, "device.register-replay:"+inv.Role, inv.UserName+"/"+inv.Name, "ok"); aerr != nil {
+		r.Log.Debug("register replay audit", "err", aerr)
 	}
 	return connect.NewResponse(&devicev1.RegisterResponse{Bundle: bundle, DeviceId: d.ID, Role: d.Role}), nil
 }
@@ -323,7 +376,7 @@ func RotateMessage(oldPin, newPin string) []byte {
 }
 
 func (r *Remote) RotateCertificate(ctx context.Context, req *connect.Request[devicev1.RotateCertificateRequest]) (*connect.Response[devicev1.RotateCertificateResponse], error) {
-	d, err := r.device(ctx)
+	d, err := r.adminDevice(ctx)
 	if err != nil {
 		return nil, err
 	}
