@@ -497,9 +497,13 @@ func TestRotateService(t *testing.T) {
 	}
 	// Again within the grace (a retry): failed_precondition, keys as they
 	// were; with force it switches and the first key goes.
+	// The client reads the time out of the message by these words (it
+	// asks the admin whether to switch anyway): the first answer's
+	// PrevUntil, RFC 3339 in UTC.
+	until := "still accepted until " + time.Unix(r.Msg.PrevUntil, 0).UTC().Format(time.RFC3339) + " "
 	if _, err := c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "dns"})); connect.CodeOf(err) != connect.CodeFailedPrecondition ||
-		!strings.Contains(err.Error(), "still accepted until") || !strings.Contains(err.Error(), "-force") {
-		t.Fatalf("a second smooth switch within the grace: %v", err)
+		!strings.Contains(err.Error(), until) || !strings.HasSuffix(strings.TrimSuffix(until, " "), "Z") || !strings.Contains(err.Error(), "-force") {
+		t.Fatalf("a second smooth switch within the grace: %v, want %q in it", err, until)
 	}
 	if again, _ := srv.Store.ServiceSecrets(ctx, dns.ID); !bytes.Equal(again[provision.SecretSealKey], after[provision.SecretSealKey]) ||
 		!bytes.Equal(again[provision.PrevSecret(provision.SecretSealKey)], before[provision.SecretSealKey]) {

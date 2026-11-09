@@ -1030,6 +1030,10 @@ func TestTrafficStats(t *testing.T) {
 		}
 		return cfg, clients
 	}
+	// The connection limits off: their stats go too (TestXrayConnLimits).
+	if _, err := st.SetConnLimitOff(ctx, true); err != nil {
+		t.Fatal(err)
+	}
 	cfg, _ := inner()
 	if _, ok := cfg["stats"]; ok || cfg["policy"] != nil || fmt.Sprint(cfg["api"].(map[string]any)["services"]) != "[HandlerService]" {
 		t.Fatalf("stats without a limit: %v %v %v", cfg["stats"], cfg["policy"], cfg["api"])
@@ -1067,6 +1071,100 @@ func TestTrafficStats(t *testing.T) {
 	}
 	if !m.Traffic || slices.ContainsFunc(m.Users, func(u render.User) bool { return u.Name == "alice" }) {
 		t.Fatalf("model %+v", m.Users)
+	}
+}
+
+// The per-user connection limits in every Xray config (spec/conn-limit-v1.md
+// §3.3, §5): the fork's policy.levels.0.limits with the numbers of naive and
+// niko-server, the stats and StatsService for their refusals; switched off,
+// no limits, and no stats unless a traffic limit wants the bytes.
+func TestXrayConnLimits(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true,
+		Settings: `{"target":"www.example.org:443"}`}); err != nil {
+		t.Fatal(err)
+	}
+	type config struct {
+		Stats  *struct{} `json:"stats"`
+		Policy *struct {
+			Levels map[string]json.RawMessage `json:"levels"`
+		} `json:"policy"`
+		API struct {
+			Services []string `json:"services"`
+		} `json:"api"`
+	}
+	xray := func() map[string]config {
+		t.Helper()
+		m, err := render.CollectForRender(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, _, err := render.Render(m, render.DefaultPaths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]config{}
+		for _, f := range files {
+			if strings.HasSuffix(f.Path, "/xray.json") {
+				var c config
+				if err := json.Unmarshal(f.Content, &c); err != nil {
+					t.Fatal(err)
+				}
+				out[filepath.Base(filepath.Dir(f.Path))] = c
+			}
+		}
+		if len(out) != 2 {
+			t.Fatalf("xray configs: %v", slices.Collect(maps.Keys(out)))
+		}
+		return out
+	}
+	compact := func(raw json.RawMessage) string {
+		var b bytes.Buffer
+		_ = json.Compact(&b, raw)
+		return b.String()
+	}
+	const limits = `{"limits":{"connections":1024,"rate":30,"burst":600,"failedRate":5,"failedBurst":100,` +
+		`"udpSessions":256,"udpRate":100,"udpBurst":200,"udpLive":1024,"lookupRate":20,"lookupBurst":100,"foldAt":"-"}}`
+	for name, c := range xray() {
+		if c.Stats == nil || c.Policy == nil || compact(c.Policy.Levels["0"]) != limits || len(c.Policy.Levels) != 1 ||
+			!slices.Equal(c.API.Services, []string{"HandlerService", "StatsService"}) {
+			t.Errorf("%s on: stats %v policy %+v api %v", name, c.Stats, c.Policy, c.API.Services)
+		}
+	}
+	// With a traffic limit: the bytes beside the limits.
+	limit := int64(1000)
+	if _, err := st.SetUserTraffic(ctx, "bob", store.TrafficChange{Limit: &limit}); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range xray() {
+		var level map[string]json.RawMessage
+		if c.Policy != nil {
+			_ = json.Unmarshal(c.Policy.Levels["0"], &level)
+		}
+		if c.Stats == nil || string(level["statsUserUplink"]) != "true" || string(level["statsUserDownlink"]) != "true" ||
+			level["limits"] == nil {
+			t.Errorf("%s with traffic: %v", name, level)
+		}
+	}
+	// Off: the bytes only, no limits.
+	if _, err := st.SetConnLimitOff(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range xray() {
+		if c.Stats == nil || c.Policy == nil || compact(c.Policy.Levels["0"]) != `{"statsUserDownlink":true,"statsUserUplink":true}` {
+			t.Errorf("%s off with traffic: %+v", name, c.Policy)
+		}
+	}
+	// Off and no traffic limit: no stats at all.
+	var none int64
+	if _, err := st.SetUserTraffic(ctx, "bob", store.TrafficChange{Limit: &none}); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range xray() {
+		if c.Stats != nil || c.Policy != nil || !slices.Equal(c.API.Services, []string{"HandlerService"}) {
+			t.Errorf("%s off: stats %v policy %+v api %v", name, c.Stats, c.Policy, c.API.Services)
+		}
 	}
 }
 

@@ -40,12 +40,15 @@ type Reading struct {
 	Users  map[string]store.TrafficCounter
 	// Limits are the refusals of the connection limits by base name (u5)
 	// and kind since the process started (spec/conn-limit-v1.md §2): rayd
-	// naive from v0.24.0 gives them with its bytes; nil from the others.
+	// naive from v0.24.0, niko-server's Hysteria2 from v0.17.0 ("limit")
+	// and the Xray fork from 5648b7a (user>>>u5>>>limit>>>tcp) give them
+	// with their bytes; nil from the others, or with no refusal yet.
 	Limits map[string]map[string]int64
 	// Age is how long the process has run, in whole seconds, as it says
-	// (rayd naive from v0.24.0: "uptime"); AgeKnown false where it does
-	// not. rayd's view of the refusals tells a process started since its
-	// last round by it (internal/connlimit).
+	// (rayd naive from v0.24.0 and Hysteria2 from niko-server v0.17.0:
+	// "uptime"; Xray: its uptime); AgeKnown false where it does not.
+	// rayd's view of the refusals tells a process started since its last
+	// round by it (internal/connlimit).
 	Age      time.Duration
 	AgeKnown bool
 }
@@ -92,7 +95,8 @@ var ErrNoCounters = errors.New("no byte counters (niko-server before v0.15.0?)")
 
 // ReadLine asks a stats socket for its users' bytes: the line "traffic",
 // answered by one JSON line {"v": 1, "boot": "...", "users": {"u5": {"up":
-// N, "down": N}}} (niko-server v0.15.0's Hysteria2 backends, rayd naive).
+// N, "down": N}}} (niko-server v0.15.0's Hysteria2 backends, rayd naive),
+// with "limit" and "uptime" from rayd naive v0.24.0 and niko-server v0.17.0.
 func ReadLine(ctx context.Context, path string) (Reading, error) {
 	body, err := ask(ctx, path)
 	if err != nil {
@@ -232,19 +236,24 @@ const bootSlack = 5 * time.Second
 // ReadXray reads an Xray's users' bytes through its API socket (inner,
 // REALITY): QueryStats "user>>>" without a reset, and the uptime, which
 // tells its run (traffic-limit-v1 §2.1). A reset would lose the bytes of
-// a rayd that falls between the read and the write. The clocks are read
-// right before the call.
+// a rayd that falls between the read and the write. The same query gives
+// the refusals of the connection limits (Limits), and the uptime is the
+// process's Age. The clocks are read right before the call.
 func ReadXray(ctx context.Context, socket string) (Reading, error) {
 	ctx, cancel := context.WithTimeout(ctx, readWait)
 	defer cancel()
 	at := time.Now()
 	mono, kernel := monoNow()
-	users, uptime, err := xrayapi.DialStats(socket).Users(ctx)
+	sr, err := xrayapi.DialStats(socket).Read(ctx)
 	if err != nil {
 		return Reading{}, err
 	}
+	users, uptime := sr.Users, sr.Uptime
 	if len(users) > maxNames {
 		return Reading{}, fmt.Errorf("%d names, at most %d", len(users), maxNames)
+	}
+	if len(sr.Limits) > maxNames {
+		return Reading{}, fmt.Errorf("%d names with refusals, at most %d", len(sr.Limits), maxNames)
 	}
 	start := at.Add(-uptime).Truncate(time.Second)
 	boot := xrayBoot + strconv.FormatInt(start.Unix(), 10)
@@ -252,7 +261,7 @@ func ReadXray(ctx context.Context, socket string) (Reading, error) {
 		boot = xrayRun(start, id, mono-uptime)
 	}
 	r := Reading{Boot: boot, Start: start, Uptime: uptime, Mono: mono,
-		Users: make(map[string]store.TrafficCounter, len(users))}
+		Users: make(map[string]store.TrafficCounter, len(users)), Limits: sr.Limits, Age: uptime, AgeKnown: true}
 	for name, c := range users {
 		r.Users[name] = store.TrafficCounter{Up: c.Up, Down: c.Down}
 	}

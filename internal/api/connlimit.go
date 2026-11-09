@@ -52,8 +52,9 @@ func (s *Server) GetConnLimit(ctx context.Context, _ *connect.Request[nodev1.Get
 
 // SetConnLimit turns the limits on or off: root on the node only, each
 // change in the audit log. rayspa takes the per-address limit from the
-// next perimeter snapshot, naive its limits from its rendered file, both
-// within seconds.
+// next perimeter snapshot, naive and Hysteria2 (niko-server v0.17.0) their
+// limits from their rendered file, all within seconds; the Xray configs
+// change, and live restarts each Xray once.
 func (s *Server) SetConnLimit(ctx context.Context, req *connect.Request[nodev1.SetConnLimitRequest]) (*connect.Response[nodev1.SetConnLimitResponse], error) {
 	if !isRoot(ctx) {
 		return nil, connect.NewError(connect.CodePermissionDenied, errors.New("the connection limits: root on the node only"))

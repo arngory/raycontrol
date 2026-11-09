@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"fmt"
+	"maps"
 	"net/netip"
 	"os"
 	"slices"
@@ -129,6 +131,71 @@ func TestConnLimitAPI(t *testing.T) {
 		}
 	}
 	if strings.Contains(text, `user="`) || strings.Contains(text, "u5") {
+		t.Error("a user in the metrics")
+	}
+}
+
+// The refusals of Hysteria2 and Xray reach GetConnLimit, the status line
+// and the metrics as naive's: users by number and service, the metrics by
+// service and kind only, with zeros for a service that refused nothing.
+func TestConnLimitHysteriaXray(t *testing.T) {
+	srv, _, _ := startServer(t)
+	ctx := context.WithValue(context.WithValue(context.Background(), peerKey{}, &unix.Ucred{Uid: 0}), actorKey{}, "test")
+	now := time.Now()
+	limits := map[string]map[string]map[string]int64{"nv": {}, "ho": {"u5": {"tcp": 10}}, "r": {"u9": {"dest": 1}}}
+	read := func(svc string) func(context.Context) (connlimit.Reading, error) {
+		return func(context.Context) (connlimit.Reading, error) {
+			// A new answer each time, as a process's.
+			out := map[string]map[string]int64{}
+			for name, kinds := range limits[svc] {
+				out[name] = maps.Clone(kinds)
+			}
+			return connlimit.Reading{Boot: "b-" + svc, Age: time.Hour, AgeKnown: true, Limits: out}, nil
+		}
+	}
+	hb := &health.Board{}
+	srv.ConnLimit = &connlimit.Monitor{Health: hb, Now: func() time.Time { return now }, Proc: t.TempDir(),
+		Sources: func(context.Context) ([]connlimit.Source, error) {
+			return []connlimit.Source{{Service: "nv", Read: read("nv")}, {Service: "ho", Read: read("ho")}, {Service: "r", Read: read("r")}}, nil
+		}}
+	srv.ConnLimit.Round(ctx) // a baseline: the processes ran for an hour
+	limits["ho"]["u5"]["tcp"], limits["r"]["u9"]["dest"] = 13, 5
+	limits["r"]["u5"] = map[string]int64{"tcp": 2}
+	now = now.Add(connlimit.Every)
+	srv.ConnLimit.Round(ctx)
+	r, err := srv.GetConnLimit(ctx, connect.NewRequest(&nodev1.GetConnLimitRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var users []string
+	for _, u := range r.Msg.Users {
+		users = append(users, fmt.Sprintf("u%d %s %d", u.Id, u.Service, u.Refused))
+	}
+	if !slices.Equal(users, []string{"u5 ho 3", "u5 r 2", "u9 r 4"}) {
+		t.Fatalf("users %v", users)
+	}
+	var line string
+	for _, l := range hb.Loops() {
+		if l.Name == "conn-limit" {
+			line = l.Detail
+		}
+	}
+	if line != "at a limit in 15 min: u5 (ho: 3), u5 (r: 2), u9 (r: 4)" {
+		t.Fatalf("status %q", line)
+	}
+	text, err := srv.metrics(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`raycontrol_conn_limit_refused_total{service="ho",kind="tcp"} 3`,
+		`raycontrol_conn_limit_refused_total{service="r",kind="dest"} 4`, `raycontrol_conn_limit_refused_total{service="r",kind="tcp"} 2`,
+		`raycontrol_conn_limit_refused_total{service="nv",kind="tcp"} 0`, `raycontrol_conn_limit_users{service="r"} 2`,
+		`raycontrol_conn_limit_users{service="nv"} 0`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("metrics lack %s", want)
+		}
+	}
+	if strings.Contains(text, "u5") || strings.Contains(text, "u9") {
 		t.Error("a user in the metrics")
 	}
 }

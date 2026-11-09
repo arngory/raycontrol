@@ -11,8 +11,10 @@ import (
 
 	"connectrpc.com/connect"
 
+	pins "github.com/arngory/raycontrol/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/perimeter"
+	"github.com/arngory/raycontrol/internal/render"
 )
 
 // What rayctl conn-limit asks of the host; tests replace them.
@@ -44,22 +46,37 @@ func (c *cli) connLimitSet(ctx context.Context, off bool) error {
 	}
 	return c.print(r.Msg, func(w *tabwriter.Writer) {
 		if off {
-			fmt.Fprintln(w, "connection limits off within seconds: naive's per-user limits (its UDP limits from before stay),")
-			fmt.Fprintln(w, "and the per-address limit on new inbound TCP and UDP, here and on the node's relays from v0.24.0;")
+			fmt.Fprintln(w, "connection limits off within seconds: the per-user limits of naive (its UDP limits from before")
+			fmt.Fprintln(w, "stay), Hysteria2 and Xray, and the per-address limit on new inbound TCP and UDP, here and on the")
+			fmt.Fprintln(w, "node's relays from v0.24.0;")
 		} else {
-			fmt.Fprintln(w, "connection limits on within seconds: naive's per-user limits, and the per-address limit on")
-			fmt.Fprintln(w, "new inbound TCP and UDP, here and on the node's relays from v0.24.0;")
+			fmt.Fprintln(w, "connection limits on within seconds: the per-user limits of naive, Hysteria2 and Xray, and the")
+			fmt.Fprintln(w, "per-address limit on new inbound TCP and UDP, here and on the node's relays from v0.24.0;")
 		}
-		fmt.Fprintln(w, "naive reads it without a restart. A relay gets v0.24.0 (the per-address limit, its table's size)")
-		fmt.Fprintln(w, "with install/bootstrap.sh -relay: rayctl update does not update relays. The conntrack table's")
-		fmt.Fprintln(w, "size, DNS tunnels without conntrack and the guard stay either way (spec/conn-limit-v1.md §8)")
+		fmt.Fprintln(w, "naive and Hysteria2 read it without a restart (Hysteria2 "+hysteriaLimits()+"); each Xray")
+		fmt.Fprintln(w, "(REALITY, the inner stage) restarts once, which cuts the connections open through it.")
+		fmt.Fprintln(w, "A relay gets v0.24.0 (the per-address limit, its table's size) with install/bootstrap.sh -relay:")
+		fmt.Fprintln(w, "rayctl update does not update relays. The conntrack table's size, DNS tunnels without conntrack")
+		fmt.Fprintln(w, "and the guard stay either way (spec/conn-limit-v1.md §8)")
 	})
+}
+
+// hysteriaLimits says whether the niko-server of this release limits
+// Hysteria2's users: from v0.17.0 on, and render gives its backends the
+// switch only then (render.NikoConnLimitFrom).
+func hysteriaLimits() string {
+	v := render.NikoConnLimitFrom
+	if render.NikoServerAtLeast(v) {
+		return fmt.Sprintf("from niko-server v%d.%d.%d", v[0], v[1], v[2])
+	}
+	return fmt.Sprintf("not yet: from niko-server v%d.%d.%d, this release has %s", v[0], v[1], v[2], pins.NikoServerTag)
 }
 
 // The limits' numbers (spec/conn-limit-v1.md §5), for the operator.
 var connLimitNumbers = [][2]string{
-	{"per user", "naive: TCP 1024 at once, 30 new/s (burst 600, waits 0.5 s), failed dials 5/s (100, in debt);"},
-	{"", "UDP 256 streams (the quietest gives way), 100 new destinations/s (200), 1024 pairs, lookups 20/s (100)"},
+	{"per user", "in each naive, Hysteria2 and Xray process: TCP 1024 at once, 30 new/s (burst 600, waits 0.5 s),"},
+	{"", "failed dials 5/s (100, in debt); UDP 256 sessions (the quietest gives way), 100 new destinations/s"},
+	{"", "(200), 1024 pairs, lookups 20/s (100)"},
 	{"per address", "new inbound TCP 50/s (1000) from an IPv4 address or a /64, 800/s (16000) from a /48;"},
 	{"", "UDP 20/s (200), 320/s (3200) from a /48; admin addresses not counted"},
 	{"guard", "new data-plane connections refused above 85 % of the table, again from 70 % after 2 min at least"},
@@ -77,11 +94,13 @@ func (c *cli) connLimitShow(ctx context.Context) error {
 			fmt.Fprintln(w, "limits\toff (rayctl conn-limit on): no per-user or per-address limits")
 		} else {
 			fmt.Fprintln(w, "limits\ton (rayctl conn-limit off)")
-			for _, n := range connLimitNumbers[:4] {
+			fmt.Fprintf(w, "covers\tnaive, Xray (REALITY, the inner stage); Hysteria2 %s\n", hysteriaLimits())
+			for _, n := range connLimitNumbers[:len(connLimitNumbers)-1] {
 				fmt.Fprintf(w, "%s\t%s\n", n[0], n[1])
 			}
 		}
-		fmt.Fprintf(w, "%s\t%s\n", connLimitNumbers[4][0], connLimitNumbers[4][1])
+		guard := connLimitNumbers[len(connLimitNumbers)-1]
+		fmt.Fprintf(w, "%s\t%s\n", guard[0], guard[1])
 		fmt.Fprintf(w, "conntrack\t%s\n", conntrackLine(m.Conntrack))
 		fmt.Fprintf(w, "guard\t%s\n", guardLine(m.Guard, now))
 		if len(m.Users) == 0 {

@@ -122,6 +122,7 @@ func (a *Applier) Apply(ctx context.Context) error {
 	type change struct {
 		old, new []byte
 		reload   bool // the process reads it again by itself
+		rereads  bool // a file the process rereads: none of its units waits for it
 	}
 	changed := map[string][]change{} // service -> changed files
 	failed := map[string]bool{}
@@ -141,9 +142,9 @@ func (a *Applier) Apply(ctx context.Context) error {
 				errs = append(errs, fmt.Errorf("service %s: %s: %w", f.Service, f.Path, err))
 			case fixed && f.Refresh:
 				// A broken service's users: reread, never a restart (Q-1).
-				changed[f.Service] = append(changed[f.Service], change{old, f.Content, true})
+				changed[f.Service] = append(changed[f.Service], change{old, f.Content, true, f.Reload})
 			case fixed:
-				changed[f.Service] = append(changed[f.Service], change{nil, f.Content, false})
+				changed[f.Service] = append(changed[f.Service], change{nil, f.Content, false, f.Reload})
 			}
 			continue
 		}
@@ -160,7 +161,7 @@ func (a *Applier) Apply(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("service %s: %s: %w", f.Service, f.Path, err))
 			continue
 		}
-		changed[f.Service] = append(changed[f.Service], change{old, f.Content, f.Reload && old != nil})
+		changed[f.Service] = append(changed[f.Service], change{old, f.Content, f.Reload && old != nil, f.Reload})
 	}
 
 	for service, cs := range changed {
@@ -195,9 +196,11 @@ func (a *Applier) Apply(ctx context.Context) error {
 		}
 		// Files that were not there before: the unit waited for them
 		// (ConditionPathExists) and starts now. Otherwise only a running
-		// process restarts, so a unit stopped on purpose stays stopped.
+		// process restarts, so a unit stopped on purpose stays stopped. A
+		// new file the process rereads (the conn-limit switch) gates no
+		// unit: it starts nothing.
 		verb := "try-restart"
-		if slices.ContainsFunc(cs, func(c change) bool { return c.old == nil }) {
+		if slices.ContainsFunc(cs, func(c change) bool { return c.old == nil && !c.rereads }) {
 			verb = "restart"
 		}
 		if a.BeforeRestart != nil {

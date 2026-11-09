@@ -26,6 +26,7 @@ import (
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 	"golang.org/x/sys/unix"
 
+	pins "github.com/arngory/raycontrol/deploy"
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/probe"
@@ -96,7 +97,8 @@ type Model struct {
 	Users    []User    // active: enabled, not expired, not over the traffic limit
 	// Traffic: some user has a traffic limit (traffic-limit-v1 §5): the
 	// Xray processes count each user's bytes and give them on their API.
-	// Without it their configs have no stats at all.
+	// Without it, and with the connection limits off, their configs have
+	// no stats at all.
 	Traffic bool
 	// Inner maps user ID to the VLESS UUID at the inner stage.
 	Inner map[int64]string
@@ -138,7 +140,10 @@ type Model struct {
 	// destinations.
 	Debug bool
 	// ConnLimitOff: the per-user connection limits are off (rayctl
-	// conn-limit off, spec/conn-limit-v1.md §8).
+	// conn-limit off, spec/conn-limit-v1.md §8): naive and Hysteria2 (from
+	// niko-server v0.17.0) read it from their conn-limit file without a
+	// restart; the Xray configs lose their limits, and the processes
+	// restart.
 	ConnLimitOff bool
 }
 
@@ -1271,12 +1276,24 @@ func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, er
 		"outbounds": outbounds,
 		"routing":   map[string]any{"domainStrategy": "IPOnDemand", "rules": rules},
 	}
+	// Level 0, as every user here.
+	level := map[string]any{}
 	if m.Traffic {
-		// Each user's bytes (traffic-limit-v1 §2.1): two counters a user
-		// (level 0, as every user here), read by rayd on the same API
-		// socket. Counters only: nothing of destinations.
+		// Each user's bytes (traffic-limit-v1 §2.1): two counters a user,
+		// read by rayd on the same API socket. Counters only: nothing of
+		// destinations.
+		level["statsUserUplink"], level["statsUserDownlink"] = true, true
+	}
+	if !m.ConnLimitOff {
+		// The per-user connection limits (spec/conn-limit-v1.md §3.3, the
+		// fork's policy.levels.N.limits). Their refusals are counters of
+		// the stats (user>>>u5>>>limit>>>tcp, made at the first one), which
+		// rayd reads with the bytes. Off: no limiter at all.
+		level["limits"] = XrayConnLimits
+	}
+	if len(level) > 0 {
 		cfg["stats"] = map[string]any{}
-		cfg["policy"] = map[string]any{"levels": map[string]any{"0": map[string]bool{"statsUserUplink": true, "statsUserDownlink": true}}}
+		cfg["policy"] = map[string]any{"levels": map[string]any{"0": level}}
 		cfg["api"] = map[string]any{"tag": "api", "listen": p.APISocket(s.Name), "services": []string{"HandlerService", "StatsService"}}
 	}
 	b, err := jsonFile(cfg)
@@ -1284,6 +1301,35 @@ func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, er
 		return File{}, err
 	}
 	return File{Path: path.Join(p.Rendered, s.Name, "xray.json"), Mode: 0o640, Group: GroupName(s.Name), Content: b, Service: s.Name}, nil
+}
+
+// XrayLimits are the per-user connection limits of a policy level in the
+// Xray fork (its infra/conf/policy_limits.go); a number left out or zero
+// turns its limit off.
+type XrayLimits struct {
+	Connections int    `json:"connections"`
+	Rate        int    `json:"rate"`
+	Burst       int    `json:"burst"`
+	FailedRate  int    `json:"failedRate"`
+	FailedBurst int    `json:"failedBurst"`
+	UDPSessions int    `json:"udpSessions"`
+	UDPRate     int    `json:"udpRate"`
+	UDPBurst    int    `json:"udpBurst"`
+	UDPLive     int    `json:"udpLive"`
+	LookupRate  int    `json:"lookupRate"`
+	LookupBurst int    `json:"lookupBurst"`
+	FoldAt      string `json:"foldAt"`
+}
+
+// XrayConnLimits are the numbers of spec/conn-limit-v1.md §5, those of
+// naive and niko-server, for every Xray process (inner, REALITY). A user is
+// the base name of the email: a credential's name u5-<fingerprint>
+// (store.CredentialName) folds at the first dash into u5, so a rotation
+// does not multiply the budget.
+var XrayConnLimits = XrayLimits{
+	Connections: 1024, Rate: 30, Burst: 600, FailedRate: 5, FailedBurst: 100,
+	UDPSessions: 256, UDPRate: 100, UDPBurst: 200, UDPLive: 1024,
+	LookupRate: 20, LookupBurst: 100, FoldAt: "-",
 }
 
 // RealityTag is the inbound tag of a REALITY service (Xray API target);
@@ -1510,13 +1556,46 @@ func tcpPort(s Service) (int, error) {
 // Hysteria2 files (R3-4): the backend's config, its users (read again by
 // the backend when they change), the certificate chain, the key and for
 // hy2-obfs the salamander password, which systemd copies for the backend;
-// the front gets its own copy of that password to recognise the flows.
+// the front gets its own copy of that password to recognise the flows;
+// from niko-server v0.17.0 the switch of the connection limits (on or off,
+// as naive's NaiveConnLimit), read again by the backend.
 const (
-	HysteriaChain = "chain.pem"
-	HysteriaKey   = "key.pem"
-	HysteriaUsers = "users.json"
-	HysteriaObfs  = "salamander"
+	HysteriaChain     = "chain.pem"
+	HysteriaKey       = "key.pem"
+	HysteriaUsers     = "users.json"
+	HysteriaObfs      = "salamander"
+	HysteriaConnLimit = "conn-limit"
 )
+
+// nikoServerTag is the niko-server release raycontrol ships with
+// (deploy/versions.env): render writes only what that one reads. Its
+// configs are read strictly, and an older one refuses an option it does
+// not know, and with it the whole backend. Tests set another.
+var nikoServerTag = pins.NikoServerTag
+
+// NikoConnLimitFrom is the first niko-server whose Hysteria2 backends take
+// options.conn_limit_file (its v0.17.0 release notes).
+var NikoConnLimitFrom = [3]int{0, 17, 0}
+
+// NikoServerAtLeast reports whether the niko-server raycontrol ships is v
+// or later; a tag that is not vX.Y.Z (a suffix after a dash aside) is
+// older than anything.
+func NikoServerAtLeast(v [3]int) bool {
+	var have [3]int
+	parts := strings.SplitN(strings.TrimPrefix(nikoServerTag, "v"), ".", 3)
+	if len(parts) != 3 || !strings.HasPrefix(nikoServerTag, "v") {
+		return false
+	}
+	for i, p := range parts {
+		p, _, _ = strings.Cut(p, "-")
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return false
+		}
+		have[i] = n
+	}
+	return slices.Compare(have[:], v[:]) >= 0
+}
 
 // DNSProbeKeyFile is the dnsprobe-v1 key's file among the front's.
 const DNSProbeKeyFile = "dnsprobe.key"
@@ -1605,6 +1684,17 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 		"options": options,
 	}
 	var files []File
+	if NikoServerAtLeast(NikoConnLimitFrom) {
+		// The per-user connection limits' switch (spec/conn-limit-v1.md §3.2,
+		// §8), as naive's: the backend reads the file every 5 s and on
+		// SIGHUP, so a switch neither restarts it nor cuts what is open. It
+		// stays in the rendered directory, not a credential's copy (made
+		// once, at the start): the service's group reads it there, as it
+		// does the users file. A missing file is on.
+		limit := path.Join(dir, HysteriaConnLimit)
+		options["conn_limit_file"] = limit
+		files = append(files, File{Path: limit, Mode: 0o640, Group: GroupName(s.Name), Content: connLimitFile(m), Service: s.Name, Reload: true})
+	}
 	if s.Kind == "hy2-obfs" {
 		options["obfs_password_file"] = p.Credential(s.Name, HysteriaObfs)
 		pw := s.Secrets[provision.SecretObfsPassword]
