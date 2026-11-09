@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"sync"
 	"syscall"
 	"time"
@@ -33,8 +34,9 @@ const (
 	// the devices that share the user's password.
 	uotPerUser    = 256
 	uotPerService = 4096
-	uotNames      = 64 // names resolved per stream, kept
+	uotNames      = 64 // names a stream keeps (uotResolved)
 	uotNameMiss   = 30 * time.Second
+	uotLookupWait = 5 * time.Second // a packet's wait for its name
 	uotPeers      = 4096 // addresses a stream sent to, whose answers come back
 
 	// A user's new destinations, all streams together: each is a conntrack
@@ -205,8 +207,15 @@ func (u *uotStream) heard(ap netip.AddrPort) bool {
 	return ok
 }
 
-// uotResolved is a name the stream does not look up again until a moment.
+// uotResolved is what a stream knows of a name until a moment, so that
+// its packets to it neither wait nor take the process's cache's lock: an
+// allowed address, until the shared cache's answer expires; or (ip not
+// valid) a lookup that timed out or got SERVFAIL, which the shared cache
+// does not keep (spec/conn-limit-v1.md §10.1, 8), for uotNameMiss.
+// Anything else (no such name, no allowed address, no lookup token) is the
+// shared cache's to know, or no one's.
 type uotResolved struct {
+	ip    netip.Addr
 	until time.Time
 }
 
@@ -263,33 +272,97 @@ func (u *uotStream) resolve(a uotAddr) (netip.AddrPort, bool) {
 	if a.port == 0 {
 		return netip.AddrPort{}, false
 	}
-	// A miss the shared cache does not keep (a timeout, SERVFAIL) is kept
-	// here, for the stream alone: its next packets do not ask again.
-	if n, ok := u.names[a.name]; ok && u.s.lim.clock().Before(n.until) {
-		return netip.AddrPort{}, false
+	now := u.s.lim.clock()
+	if n, ok := u.names[a.name]; ok && now.Before(n.until) {
+		if n.ip.IsValid() {
+			return netip.AddrPortFrom(n.ip, a.port), true
+		}
+		// A failure of the stream's own: the shared cache may know the name
+		// since, no lookup otherwise.
+		ip, until, ok := u.cachedName(a.name, now)
+		if !ok {
+			return netip.AddrPort{}, false
+		}
+		delete(u.names, a.name)
+		if !until.IsZero() {
+			u.remember(a.name, uotResolved{ip, until}, now)
+		}
+		return netip.AddrPortFrom(ip, a.port), ip.IsValid()
 	}
-	ip := u.lookup(a.name)
-	if !ip.IsValid() && len(u.names) < uotNames {
-		u.names[a.name] = uotResolved{until: u.s.lim.clock().Add(uotNameMiss)}
+	ip, until, ok := u.cachedName(a.name, now)
+	if !ok {
+		ip, until = u.lookup(a.name, now)
+	}
+	if !until.IsZero() {
+		u.remember(a.name, uotResolved{ip, until}, now)
 	}
 	return netip.AddrPortFrom(ip, a.port), ip.IsValid()
 }
 
-// lookup is the first allowed address of a name, or none: through the
-// process's cache, a miss paying the user's lookup token.
-func (u *uotStream) lookup(name string) netip.Addr {
-	ctx, cancel := context.WithTimeout(u.ctx, 5*time.Second)
-	ips, err := u.s.lookupName(ctx, u.slot.user, name, false)
-	cancel()
-	if err != nil {
-		return netip.Addr{}
+// cachedName is a name's first allowed address in the process's cache, and
+// until when the stream may keep it (zero: not); ok false when the cache
+// does not know the name.
+func (u *uotStream) cachedName(name string, now time.Time) (netip.Addr, time.Time, bool) {
+	addrs, until, err, ok := u.s.names.get(name, now)
+	if !ok {
+		return netip.Addr{}, time.Time{}, false
 	}
-	for _, ip := range ips {
+	ip, until := u.firstAllowed(addrs, until, err)
+	return ip, until, true
+}
+
+// lookup looks a name up through the process's cache, a miss paying the
+// user's lookup token: its first allowed address, and until when the
+// stream may keep what came of it (zero: not).
+func (u *uotStream) lookup(name string, now time.Time) (netip.Addr, time.Time) {
+	if !domainName(name) {
+		return netip.Addr{}, time.Time{}
+	}
+	ctx, cancel := context.WithTimeout(u.ctx, uotLookupWait)
+	addrs, until, err := u.s.lookupNameUntil(ctx, u.slot.user, name, false)
+	cancel()
+	if err != nil && lookupFailed(err) {
+		return netip.Addr{}, now.Add(uotNameMiss)
+	}
+	return u.firstAllowed(addrs, until, err)
+}
+
+func (u *uotStream) firstAllowed(addrs []netip.Addr, until time.Time, err error) (netip.Addr, time.Time) {
+	if err != nil {
+		return netip.Addr{}, time.Time{}
+	}
+	for _, ip := range addrs {
 		if ip = ip.Unmap(); u.s.allowed(ip) {
-			return ip
+			return ip, until
 		}
 	}
-	return netip.Addr{}
+	return netip.Addr{}, time.Time{}
+}
+
+// remember keeps what the stream knows of a name: within uotNames, those
+// expired going first.
+func (u *uotStream) remember(name string, r uotResolved, now time.Time) {
+	if _, ok := u.names[name]; !ok && len(u.names) >= uotNames {
+		for n, x := range u.names {
+			if !now.Before(x.until) {
+				delete(u.names, n)
+			}
+		}
+		if len(u.names) >= uotNames {
+			return
+		}
+	}
+	u.names[name] = r
+}
+
+// lookupFailed reports whether a lookup timed out or got SERVFAIL: what the
+// shared cache does not keep and a stream does, for itself.
+func lookupFailed(err error) bool {
+	var d *net.DNSError
+	if errors.As(err, &d) {
+		return !d.IsNotFound && (d.IsTimeout || d.IsTemporary)
+	}
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded)
 }
 
 func (s *Server) allowed(ip netip.Addr) bool {

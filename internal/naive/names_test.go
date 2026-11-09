@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -197,5 +198,111 @@ func TestNameCacheInFlight(t *testing.T) {
 	}
 	if got := h.Refused()["u5"][refusedLookup]; got != 0 {
 		t.Fatalf("refused %d lookups", got)
+	}
+}
+
+// A UoT stream's packets to a name it resolved neither allocate nor take
+// the process's cache's lock until the shared answer expires; then the
+// name is looked up again.
+func TestUoTNameKept(t *testing.T) {
+	var asked atomic.Int32
+	s := &Server{Allow: func(netip.Addr) bool { return true }, Resolve: func(context.Context, string) ([]netip.Addr, error) {
+		asked.Add(1)
+		return []netip.Addr{netip.MustParseAddr("192.0.2.7")}, nil
+	}}
+	c := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	s.lim.now = c.now
+	_, u := slotWith(t, s, "u5")
+	a := uotAddr{name: "ok.test", port: 53}
+	if to, ok := u.resolve(a); !ok || to.Addr() != netip.MustParseAddr("192.0.2.7") {
+		t.Fatalf("resolved %v %v", to, ok)
+	}
+	// The cache's lock held: a packet that takes it waits, one that does
+	// not passes.
+	s.names.mu.Lock()
+	done := make(chan bool, 1)
+	go func() { _, ok := u.resolve(a); done <- ok }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Error("refused")
+		}
+	case <-time.After(time.Second):
+		s.names.mu.Unlock()
+		t.Fatal("a packet to a kept name took the cache's lock")
+	}
+	s.names.mu.Unlock()
+	if n := testing.AllocsPerRun(100, func() { u.resolve(a) }); n != 0 {
+		t.Fatalf("%v allocations a packet", n)
+	}
+	c.t = c.t.Add(nameHit)
+	if _, ok := u.resolve(a); !ok || asked.Load() != 2 {
+		t.Fatalf("after the shared answer expired: %v, asked %d", ok, asked.Load())
+	}
+}
+
+// A stream remembers for itself only a lookup that timed out or got
+// SERVFAIL, which the shared cache does not keep: no token, no such name or
+// no allowed address are the shared cache's to know (or no one's). Kept
+// names past their time make room for new ones.
+func TestUoTNameFailures(t *testing.T) {
+	var asked atomic.Int32
+	answer := map[string]error{
+		"slow.test":     &net.DNSError{Err: "i/o timeout", IsTimeout: true, IsTemporary: true},
+		"servfail.test": &net.DNSError{Err: "server misbehaving", IsTemporary: true},
+		"nx.test":       &net.DNSError{Err: "no such host", IsNotFound: true},
+	}
+	s := &Server{Allow: func(a netip.Addr) bool { return a.Is4() }, Resolve: func(_ context.Context, name string) ([]netip.Addr, error) {
+		asked.Add(1)
+		if err := answer[name]; err != nil {
+			return nil, err
+		}
+		if name == "v6.test" {
+			return []netip.Addr{netip.MustParseAddr("2001:db8::1")}, nil
+		}
+		return []netip.Addr{netip.MustParseAddr("192.0.2.7")}, nil
+	}}
+	c := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	s.lim.now = c.now
+	_, u := slotWith(t, s, "u5")
+	for _, n := range []string{"slow.test", "servfail.test"} {
+		u.resolve(uotAddr{name: n, port: 53})
+		u.resolve(uotAddr{name: n, port: 53})
+	}
+	if asked.Load() != 2 {
+		t.Fatalf("a timeout or SERVFAIL looked up again within 30 s: %d", asked.Load())
+	}
+	for _, n := range []string{"nx.test", "v6.test"} {
+		u.resolve(uotAddr{name: n, port: 53})
+		if r, ok := u.names[n]; ok && !r.ip.IsValid() {
+			t.Errorf("%s remembered as a failure of the stream's", n)
+		}
+	}
+	// No token: not remembered; with one again, looked up at once.
+	s.lim.mu.Lock()
+	s.lim.users["u5"].lookups = bucket{0, c.t}
+	s.lim.mu.Unlock()
+	before := asked.Load()
+	if _, ok := u.resolve(uotAddr{name: "later.test", port: 53}); ok || asked.Load() != before {
+		t.Fatal("looked up without a token")
+	}
+	s.lim.mu.Lock()
+	s.lim.users["u5"].lookups = bucket{1, c.t}
+	s.lim.mu.Unlock()
+	if _, ok := u.resolve(uotAddr{name: "later.test", port: 53}); !ok {
+		t.Fatal("a refused token remembered by the stream")
+	}
+	// Full of failures; 30 s on, they make room.
+	clear(u.names)
+	for i := range uotNames {
+		u.names[fmt.Sprintf("f%d.test", i)] = uotResolved{until: c.t.Add(uotNameMiss)}
+	}
+	c.t = c.t.Add(uotNameMiss)
+	s.lim.mu.Lock()
+	s.lim.users["u5"].lookups = bucket{lookupBurst, c.t}
+	s.lim.mu.Unlock()
+	u.resolve(uotAddr{name: "slow.test", port: 53})
+	if r, ok := u.names["slow.test"]; !ok || r.ip.IsValid() || len(u.names) != 1 {
+		t.Fatalf("expired names not pruned: %d kept", len(u.names))
 	}
 }
