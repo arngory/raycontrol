@@ -75,7 +75,15 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
-        run: go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o dist/ ./cmd/...
+        run: |
+          go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o dist/ ./cmd/...
+          # The binaries are built on the toolchain go.mod names, not on an
+          # older Go a runner or setup-go happens to have.
+          want=$(go mod edit -json | jq -r '.Toolchain // ("go" + .Go)')
+          for b in dist/rayd dist/rayctl dist/rayspa; do
+            got=$(go version "$b" | awk '{print $2}')
+            [ "$got" = "$want" ] || { echo "$b built with $got, go.mod names $want"; exit 1; }
+          done
       - name: niko-server
         run: scripts/niko-server.sh ${{ matrix.goarch }} dist/niko-server
       - name: slipstream-server
