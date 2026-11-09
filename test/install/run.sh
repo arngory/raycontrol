@@ -155,7 +155,9 @@ x sh -c 'if systemctl is-enabled -q firewalld 2>/dev/null; then for i in $(seq 6
 # raycontrol lowers the conntrack times, never raises one, and leaves this
 # one as it is, at apply and at uninstall. Its own file, as an
 # administrator would have it, so a reboot keeps it.
-x sh -c 'echo "net.netfilter.nf_conntrack_tcp_timeout_time_wait = 20" > /etc/sysctl.d/80-admin-conntrack.conf &&
+# A minimal image may have no /etc/sysctl.d yet (rocky9's has none).
+x sh -c 'mkdir -p /etc/sysctl.d &&
+	echo "net.netfilter.nf_conntrack_tcp_timeout_time_wait = 20" > /etc/sysctl.d/80-admin-conntrack.conf &&
 	sysctl -q -p /etc/sysctl.d/80-admin-conntrack.conf' || fail "the administrator's conntrack time"
 # The sysctl keys raycontrol sets, from its source, for the snapshots; the
 # reserved ports (deploy.ReservePorts) and the conntrack table's keys
