@@ -57,11 +57,11 @@ func (s *Store) SetUserLAN(ctx context.Context, name string, on bool) (User, err
 		if on {
 			var ygg bool
 			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM user_services us JOIN services s ON s.id = us.service_id
-				WHERE us.user_id = ? AND s.kind = 'yggdrasil')`, id).Scan(&ygg); err != nil {
+				WHERE us.user_id = ? AND s.kind = 'yggdrasil' AND s.enabled = 1)`, id).Scan(&ygg); err != nil {
 				return err
 			}
 			if !ygg {
-				return fmt.Errorf("%w: user %q has no Yggdrasil service, where the LAN runs (rayctl user services)", ErrInvalid, name)
+				return fmt.Errorf("%w: user %q has no enabled Yggdrasil service, where the LAN runs (rayctl user services)", ErrInvalid, name)
 			}
 		}
 		_, err := tx.ExecContext(ctx, `UPDATE users SET lan = ?, lan_key = ? WHERE id = ?`, on, key, id)
@@ -102,30 +102,43 @@ type LANDevice struct {
 // LANDevices returns a user's LAN key (nil: LAN off) and the user's devices
 // that show themselves and are not revoked, in the order they were added
 // (lan-v1 §1.3: a label taken goes to the device added first).
+//
+// The key and the devices are read in one transaction: a revocation renews
+// the key in the same transaction as it revokes (RevokeDevice), so a reader
+// never pairs the new key with a list that still has the revoked device,
+// whose password the new key would then give it.
 func (s *Store) LANDevices(ctx context.Context, userID int64) ([]byte, []LANDevice, error) {
 	var key []byte
-	if err := s.db.QueryRowContext(ctx, `SELECT lan_key FROM users WHERE id = ? AND lan = 1`, userID).Scan(&key); errors.Is(err, sql.ErrNoRows) {
-		return nil, nil, nil
-	} else if err != nil {
-		return nil, nil, err
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, spa_key, created_at FROM devices
-		WHERE user_id = ? AND lan = 1 AND revoked_at IS NULL ORDER BY created_at, id`, userID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer rows.Close()
 	var out []LANDevice
-	for rows.Next() {
-		var d LANDevice
-		var raw []byte
-		var created int64
-		if err := rows.Scan(&d.ID, &d.Name, &raw, &created); err != nil {
-			return nil, nil, err
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		key, out = nil, nil
+		if err := tx.QueryRowContext(ctx, `SELECT lan_key FROM users WHERE id = ? AND lan = 1`, userID).Scan(&key); errors.Is(err, sql.ErrNoRows) {
+			key = nil
+			return nil
+		} else if err != nil {
+			return err
 		}
-		copy(d.Key[:], raw)
-		d.CreatedAt = time.Unix(created, 0)
-		out = append(out, d)
+		rows, err := tx.QueryContext(ctx, `SELECT id, name, spa_key, created_at FROM devices
+			WHERE user_id = ? AND lan = 1 AND revoked_at IS NULL ORDER BY created_at, id`, userID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var d LANDevice
+			var raw []byte
+			var created int64
+			if err := rows.Scan(&d.ID, &d.Name, &raw, &created); err != nil {
+				return err
+			}
+			copy(d.Key[:], raw)
+			d.CreatedAt = time.Unix(created, 0)
+			out = append(out, d)
+		}
+		return rows.Err()
+	})
+	if err != nil || key == nil {
+		return nil, nil, err
 	}
-	return key, out, rows.Err()
+	return key, out, nil
 }

@@ -129,6 +129,22 @@ func TestSetUserLAN(t *testing.T) {
 	if _, err := s.SetUserLAN(ctx, "nobody", true); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("nobody: %v", err)
 	}
+	// A Yggdrasil service that is disabled carries no LAN.
+	ygg, err := s.CreateService(ctx, Service{Kind: "yggdrasil", Name: "ygg-off", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, s.SetUserServices(ctx, "bob", []int64{hy.ID, ygg.ID}))
+	must(t, s.SetServiceEnabled(ctx, "ygg-off", false))
+	if _, err := s.SetUserLAN(ctx, "bob", true); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("on with a disabled Yggdrasil: %v", err)
+	}
+	must(t, s.SetServiceEnabled(ctx, "ygg-off", true))
+	if u, err := s.SetUserLAN(ctx, "bob", true); err != nil || !u.LAN {
+		t.Fatalf("on with an enabled Yggdrasil: %+v %v", u, err)
+	}
+	must(t, s.SetUserServices(ctx, "bob", []int64{hy.ID}))
+	must(t, s.DeleteService(ctx, "ygg-off"))
 
 	u, _ := lanUser(t, s, "alice", "phone")
 	if !u.LAN {

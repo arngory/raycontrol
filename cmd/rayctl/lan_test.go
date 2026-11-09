@@ -93,7 +93,7 @@ func TestLANCommands(t *testing.T) {
 	if out, err := run("user", "lan", "alice"); err != nil || out != "alice: LAN on\n" {
 		t.Fatalf("show: %q %v", out, err)
 	}
-	if _, err := run("user", "lan", "bob", "on"); err == nil || !strings.Contains(err.Error(), "no Yggdrasil service") {
+	if _, err := run("user", "lan", "bob", "on"); err == nil || !strings.Contains(err.Error(), "no enabled Yggdrasil service") {
 		t.Fatalf("bob without Yggdrasil: %v", err)
 	}
 	for _, args := range [][]string{{"user", "lan"}, {"user", "lan", "alice", "yes"}, {"user", "lan", "alice", "on", "now"}} {
