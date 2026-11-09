@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"connectrpc.com/connect"
@@ -51,7 +52,8 @@ func (c *cli) check(ctx context.Context, args []string) error {
 // conntrackPaths are where conntrackResults looks (tests give their own).
 type conntrackPaths struct {
 	max, meminfo string
-	modprobe     []string // globs of modprobe.d files
+	modprobe     []string   // globs of modprobe.d files
+	euid         func() int // os.Geteuid when nil
 }
 
 // conntrackResults says whether the conntrack table has the size raycontrol
@@ -83,11 +85,21 @@ func conntrackResults(p conntrackPaths) []hostcheck.Result {
 		res.Detail = fmt.Sprintf("%s %d (raycontrol's for %d MiB: %d)", deploy.ConntrackMaxKey, live, mem>>10, want)
 	default:
 		// Opening it for writing changes nothing and tells whether it may
-		// change here.
+		// change here: as root (anyone else may not write it anywhere), or
+		// on a read-only /proc/sys.
 		f, werr := os.OpenFile(p.max, os.O_WRONLY, 0)
 		if werr == nil {
 			f.Close()
 			res.Detail = fmt.Sprintf("%s %d: rayctl apply raises it to %d for %d MiB", deploy.ConntrackMaxKey, live, want, mem>>10)
+			break
+		}
+		euid := p.euid
+		if euid == nil {
+			euid = os.Geteuid
+		}
+		if euid() != 0 && !errors.Is(werr, syscall.EROFS) {
+			res.Detail = fmt.Sprintf("%s %d: rayctl apply raises it to %d for %d MiB if it may change here (in a container it may not): "+
+				"run rayctl check as root to know", deploy.ConntrackMaxKey, live, want, mem>>10)
 			break
 		}
 		res.OK = false

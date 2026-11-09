@@ -39,6 +39,13 @@ func TestConntrackCheck(t *testing.T) {
 			}
 		}
 	}
+	// Not root: a key it may not write says nothing of a container.
+	if _, err := os.Stat("/proc/sys/kernel/ngroups_max"); err == nil {
+		r := conntrackResults(conntrackPaths{max: "/proc/sys/kernel/ngroups_max", meminfo: mem, euid: func() int { return 1000 }})
+		if !r[0].OK || strings.Contains(r[0].Detail, "container:") || !strings.Contains(r[0].Detail, "run rayctl check as root") {
+			t.Errorf("not root: %+v", r)
+		}
+	}
 	write("nf.conf", "# tuned\noptions nf_conntrack hashsize=4096 expect_hashsize=64\n")
 	r := conntrackResults(conntrackPaths{max: big, meminfo: mem, modprobe: []string{filepath.Join(dir, "*.conf")}})
 	if len(r) != 2 || r[1].OK || !strings.Contains(r[1].Detail, "8 × hashsize") {
