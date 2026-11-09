@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"connectrpc.com/connect"
@@ -29,12 +32,50 @@ type Client struct {
 }
 
 // Dial returns a client for the API socket. gRPC needs HTTP/2; over a unix
-// socket it runs without TLS.
+// socket it runs without TLS. Clients of one socket share its connection.
 func Dial(socket string) *Client {
 	return &Client{c: commandconnect.NewHandlerServiceClient(unixHTTP(socket), "http://xray", connect.WithGRPC())}
 }
 
+// pool keeps one HTTP/2 client per API socket, and with it one
+// connection: a transport made per call left its connection open on both
+// sides, a goroutine in rayd and a file and buffers in Xray for every
+// poll. A socket made anew (Xray restarted) gets a new client, and the
+// old one's connections are closed.
+var pool struct {
+	mu      sync.Mutex
+	clients map[string]*pooled
+}
+
+type pooled struct {
+	client *http.Client
+	tr     *http.Transport
+	id     [2]uint64 // the socket's device and inode when made; zero: not there
+}
+
+// socketID names the file at path: device and inode, zero when it is not
+// there.
+func socketID(path string) [2]uint64 {
+	st, err := os.Stat(path)
+	if err != nil {
+		return [2]uint64{}
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+		return [2]uint64{uint64(sys.Dev), sys.Ino} //nolint:unconvert // Dev's type differs by platform
+	}
+	return [2]uint64{}
+}
+
 func unixHTTP(socket string) *http.Client {
+	id := socketID(socket)
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if p := pool.clients[socket]; p != nil {
+		if p.id == id && id != ([2]uint64{}) {
+			return p.client
+		}
+		p.tr.CloseIdleConnections()
+	}
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
@@ -43,7 +84,22 @@ func unixHTTP(socket string) *http.Client {
 		Protocols: new(http.Protocols),
 	}
 	tr.Protocols.SetUnencryptedHTTP2(true)
-	return &http.Client{Transport: tr}
+	if pool.clients == nil {
+		pool.clients = map[string]*pooled{}
+	}
+	p := &pooled{client: &http.Client{Transport: tr}, tr: tr, id: id}
+	pool.clients[socket] = p
+	return p.client
+}
+
+// Close closes the connections of every API client: rayd stops.
+func Close() {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	for socket, p := range pool.clients {
+		p.tr.CloseIdleConnections()
+		delete(pool.clients, socket)
+	}
 }
 
 // Stats reads the users' byte counters of one Xray instance, on the same
