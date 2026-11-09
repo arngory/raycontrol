@@ -42,6 +42,11 @@ type YggdrasilSettings struct {
 	Peers []string `json:"peers,omitempty"`
 }
 
+// LANGroup is a user's group in the Yggdrasil users file (lan-v1 §2.2), the
+// user's base name u<id>: niko-server passes frames between keys of one
+// group, and counts their bytes under it.
+func LANGroup(userID int64) string { return InnerEmail(userID) }
+
 // YggdrasilKey is a user's Yggdrasil key, derived from their inner UUID: it
 // rotates with it (R4-1), and one link carries both.
 func YggdrasilKey(uuid string) ed25519.PrivateKey {
@@ -109,13 +114,20 @@ func YggdrasilAddress(key ed25519.PublicKey) netip.Addr {
 // Their names are labels, by the role (-n, -p): niko-server keeps a link
 // while its key is in the file, whatever the name, so a switch cuts none
 // here; the traffic behind them counts at inner, by the inner credential's
-// own name (XrayUsers).
+// own name (XrayUsers). The keys of the devices that show themselves in
+// their user's LAN, with the administrator's consent, carry the user's
+// group (lan-v1 §2.2), for every UUID of the rotation: niko-server passes
+// frames between the keys of one group, and none between the others.
 func yggdrasilUsers(m Model, s Service, inner Service) []map[string]any {
 	now := m.Now
 	if now.IsZero() {
 		now = time.Now()
 	}
-	keys := map[string]string{}
+	type entry struct {
+		PublicKey string `json:"public_key"`
+		LAN       string `json:"lan,omitempty"`
+	}
+	keys := map[string]entry{}
 	for _, u := range m.Users {
 		if !slices.Contains(u.Services, s.ID) || m.Inner[u.ID] == "" {
 			continue
@@ -131,15 +143,19 @@ func yggdrasilUsers(m Model, s Service, inner Service) []map[string]any {
 			uuids["-p"] = set.Prev
 		}
 		for suffix, uuid := range uuids {
-			keys[InnerEmail(u.ID)+suffix] = hex.EncodeToString(YggdrasilKey(uuid).Public().(ed25519.PublicKey))
+			keys[InnerEmail(u.ID)+suffix] = entry{PublicKey: hex.EncodeToString(YggdrasilKey(uuid).Public().(ed25519.PublicKey))}
 			for _, d := range m.Devices[u.ID] {
-				keys[InnerEmail(u.ID)+"-"+d.ID+suffix] = hex.EncodeToString(YggdrasilDeviceKey(uuid, d.Key[:]).Public().(ed25519.PublicKey))
+				e := entry{PublicKey: hex.EncodeToString(YggdrasilDeviceKey(uuid, d.Key[:]).Public().(ed25519.PublicKey))}
+				if u.LAN && d.LAN {
+					e.LAN = LANGroup(u.ID)
+				}
+				keys[InnerEmail(u.ID)+"-"+d.ID+suffix] = e
 			}
 		}
 	}
 	users := []map[string]any{}
 	for _, name := range slices.Sorted(maps.Keys(keys)) {
-		users = append(users, map[string]any{"name": name, "enabled": true, "yggdrasil": map[string]string{"public_key": keys[name]}})
+		users = append(users, map[string]any{"name": name, "enabled": true, "yggdrasil": keys[name]})
 	}
 	return users
 }
@@ -163,10 +179,20 @@ func yggdrasilFiles(s Service, m Model, inner Service, p Paths) ([]File, error) 
 	if len(st.Peers) > 0 {
 		options["peers"] = st.Peers
 	}
+	// The ceiling of LAN traffic through the node (lan-v1 §4.4): only when
+	// it is not niko-server's own default. niko-server before v0.16.0
+	// refuses the option, and with it the whole backend.
+	if r := provision.LANRelay(s.Service); r != provision.LANRelayDefault {
+		options["lan_relay_mbps"] = r
+	}
 	b, err := jsonFile(map[string]any{
 		"schema": Schema, "role": "backend", "kind": "yggdrasil", "log": map[string]string{"level": m.nikoLevel()},
 		"socket": p.FrontSocket(s.Name, "fd"), "front_uid": p.PeerUID(FrontUID),
-		"users_file": path.Join(dir, YggdrasilUsers),
+		// Its counters (niko-server v0.15.0) and the users' LAN bytes
+		// through the node, by group (the traffic line, v0.16.0): in its
+		// runtime directory, which rayd's group may pass through.
+		"stats_socket": p.StatsSocket(s.Name),
+		"users_file":   path.Join(dir, YggdrasilUsers),
 		"tls": map[string]any{
 			"certificate_file": path.Join(dir, YggdrasilChain),
 			"key_file":         p.Credential(s.Name, YggdrasilTLSKey),

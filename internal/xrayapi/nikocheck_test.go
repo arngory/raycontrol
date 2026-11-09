@@ -92,33 +92,55 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	st.SetUserServices(ctx, "alice", ids)
-	if _, _, err := st.CreateDevice(ctx, "alice", "phone", "user"); err != nil {
+	phone, _, err := st.CreateDevice(ctx, "alice", "phone", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// LAN on (lan-v1), the phone shown: its key has a group in the
+	// Yggdrasil users file; the backend's options stay as they were while
+	// lan_relay is not set.
+	if _, err := st.SetUserLAN(ctx, "alice", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetDeviceLAN(ctx, phone.ID, true, store.LANShowEvery); err != nil {
 		t.Fatal(err)
 	}
 
-	m, err := render.CollectForRender(ctx, st)
-	if err != nil {
-		t.Fatal(err)
-	}
 	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run")}
-	files, skipped, err := render.Render(m, paths)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(skipped) != 0 {
-		t.Fatalf("skipped: %v", skipped)
-	}
-	var configs []string
-	for _, f := range files {
-		if err := os.MkdirAll(filepath.Dir(f.Path), 0o755); err != nil {
+	write := func() []string {
+		t.Helper()
+		m, err := render.CollectForRender(ctx, st)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(f.Path, f.Content, 0o600); err != nil {
+		files, skipped, err := render.Render(m, paths)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if base := filepath.Base(f.Path); base == "front.json" || base == "backend.json" {
-			configs = append(configs, f.Path)
+		if len(skipped) != 0 {
+			t.Fatalf("skipped: %v", skipped)
 		}
+		var configs []string
+		for _, f := range files {
+			if err := os.MkdirAll(filepath.Dir(f.Path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f.Path, f.Content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if base := filepath.Base(f.Path); base == "front.json" || base == "backend.json" {
+				configs = append(configs, f.Path)
+			}
+		}
+		return configs
+	}
+	configs := write()
+	yggBackend := filepath.Join(paths.Rendered, "ygg", "backend.json")
+	if b, _ := os.ReadFile(yggBackend); strings.Contains(string(b), "lan_relay_mbps") || !strings.Contains(string(b), `"stats_socket"`) {
+		t.Fatalf("ygg backend.json:\n%s", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(paths.Rendered, "ygg", render.YggdrasilUsers)); !strings.Contains(string(b), `"lan": "u`) {
+		t.Fatalf("no LAN group in the ygg users file:\n%s", b)
 	}
 	// The front (its routes take naive and DoH to rayd), and a backend for
 	// each of the others.
@@ -132,5 +154,20 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 		if err != nil || strings.TrimSpace(string(out)) != "ok" {
 			t.Errorf("niko-server check %s: %v\n%s", strings.TrimPrefix(c, dir), err, out)
 		}
+	}
+
+	// lan_relay set (lan-v1 §4.4): lan_relay_mbps in the backend's options,
+	// which niko-server v0.16.0 takes and an older one refuses: until the
+	// pin is v0.16.0, rayctl service set ygg lan_relay= is not for nodes.
+	if _, err := provision.SetServiceOption(ctx, st, "ygg", "lan_relay", "0"); err != nil {
+		t.Fatal(err)
+	}
+	write()
+	out, err := exec.Command(niko, "check", "-c", yggBackend).CombinedOutput()
+	switch {
+	case err != nil && strings.Contains(string(out), `unknown field "lan_relay_mbps"`):
+		t.Logf("niko-server before v0.16.0 refuses lan_relay_mbps: %s", strings.TrimSpace(string(out)))
+	case err != nil || strings.TrimSpace(string(out)) != "ok":
+		t.Errorf("niko-server check ygg with lan_relay=0: %v\n%s", err, out)
 	}
 }

@@ -32,8 +32,9 @@ type node struct {
 	mu       sync.Mutex
 	readings map[string]Reading // by source key; missing: the read fails
 	reads    int
-	delay    time.Duration // each read takes this long
-	gone     string        // this source's socket is not there
+	delay    time.Duration    // each read takes this long
+	gone     string           // this source's socket is not there
+	fails    map[string]error // these sources' reads fail so
 	// The kernel's boot, as Xray's run names carry it; "": a kernel whose
 	// clock rayd cannot read, the run told by the wall clock.
 	kernel string
@@ -78,6 +79,9 @@ func (n *node) accountant() *Accountant {
 					n.reads++
 					if key == n.gone {
 						return Reading{}, &fs.PathError{Op: "dial", Path: key, Err: fs.ErrNotExist}
+					}
+					if err := n.fails[key]; err != nil {
+						return Reading{}, err
 					}
 					r, ok := n.readings[key]
 					if !ok {

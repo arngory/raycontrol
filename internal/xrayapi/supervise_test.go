@@ -24,9 +24,12 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"golang.org/x/net/dns/dnsmessage"
 
+	"github.com/arngory/raycontrol/internal/api"
 	"github.com/arngory/raycontrol/internal/dnscheck"
+	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -271,6 +274,23 @@ func TestSupervisedNode(t *testing.T) {
 	// The traffic loop's first round (5 s after rayd's start) has read
 	// the processes before alice sends anything: what follows is hers.
 	time.Sleep(time.Until(started.Add(7 * time.Second)))
+	// Yggdrasil's stats socket is one of them (lan-v1 §4.4): niko-server
+	// before v0.16.0 has no LAN counters, which fails nothing.
+	status, err := api.NewUnixClient(filepath.Join(run, "rayd.sock")).GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loops := map[string]*nodev1.LoopHealth{}
+	for _, l := range status.Msg.Loops {
+		loops[l.Name] = l
+	}
+	if l := loops["traffic ygg"]; l == nil || l.Failing || (l.Detail != "" && !strings.HasPrefix(l.Detail, "no LAN counters")) {
+		t.Fatalf("the traffic loop of ygg: %+v", l)
+	}
+	if l := loops["traffic hy2o"]; l == nil || l.Failing {
+		t.Fatalf("the traffic loop of hy2o: %+v", l)
+	}
+	t.Logf("traffic ygg: %q", loops["traffic ygg"].Detail)
 
 	// Through REALITY (self-steal on the site) into inner.
 	port, stop := realitySocks(t, bin, linkOf("reality"), "")

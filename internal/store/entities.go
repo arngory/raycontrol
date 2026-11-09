@@ -60,6 +60,10 @@ type User struct {
 	// TrafficCountedFrom is when the limit was set: rayd counts the bytes
 	// of the processes it read after that, not before.
 	TrafficCountedFrom time.Time
+	// LAN: the administrator lets the user's devices see each other over
+	// Yggdrasil (lan-v1 §1.1); each device decides for itself too
+	// (Device.LAN).
+	LAN bool
 }
 
 // CreateUser inserts u and returns it with its ID. A limit counts from now.
@@ -98,7 +102,7 @@ func (s *Store) CreateUser(ctx context.Context, u User) (User, error) {
 
 // userSelect reads users with their count, in scanUser's order.
 const userSelect = `SELECT u.id, u.name, u.enabled, u.expires_at, u.traffic_limit_bytes, u.note, u.created_at,
-	u.traffic_period, u.traffic_reset_day, t.period_start, t.counted_from, coalesce(t.up, 0), coalesce(t.down, 0)
+	u.traffic_period, u.traffic_reset_day, t.period_start, t.counted_from, coalesce(t.up, 0), coalesce(t.down, 0), u.lan
 	FROM users u LEFT JOIN user_traffic t ON t.user_id = u.id`
 
 func scanUser(row interface{ Scan(...any) error }) (User, error) {
@@ -106,7 +110,7 @@ func scanUser(row interface{ Scan(...any) error }) (User, error) {
 	var exp, limit, start, from sql.NullInt64
 	var created int64
 	if err := row.Scan(&u.ID, &u.Name, &u.Enabled, &exp, &limit, &u.Note, &created,
-		&u.TrafficPeriod, &u.TrafficResetDay, &start, &from, &u.TrafficUp, &u.TrafficDown); err != nil {
+		&u.TrafficPeriod, &u.TrafficResetDay, &start, &from, &u.TrafficUp, &u.TrafficDown, &u.LAN); err != nil {
 		return u, err
 	}
 	u.ExpiresAt = timePtr(exp)
@@ -647,6 +651,9 @@ type Device struct {
 	CreatedAt time.Time
 	RevokedAt *time.Time
 	CertPin   string // TLS client key of a device registered through the API
+	// LAN: the device shows itself to the user's other devices, as its
+	// X-Raycontrol-LAN header last said (lan-v1 §1.1).
+	LAN bool
 }
 
 // CreateDevice enrolls a device for a user and returns its fresh SPA key.
@@ -680,12 +687,14 @@ func (s *Store) CreateDevice(ctx context.Context, userName, name, role string) (
 type DeviceSecret struct {
 	ID  string
 	Key [spa.KeySize]byte
+	// LAN: the device shows itself (Device.LAN).
+	LAN bool
 }
 
 // ActiveDeviceSecrets maps user ID to the user's devices not revoked, in
 // order.
 func (s *Store) ActiveDeviceSecrets(ctx context.Context) (map[int64][]DeviceSecret, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT user_id, id, spa_key FROM devices WHERE revoked_at IS NULL ORDER BY user_id, id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT user_id, id, spa_key, lan FROM devices WHERE revoked_at IS NULL ORDER BY user_id, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -695,7 +704,7 @@ func (s *Store) ActiveDeviceSecrets(ctx context.Context) (map[int64][]DeviceSecr
 		var user int64
 		var d DeviceSecret
 		var key []byte
-		if err := rows.Scan(&user, &d.ID, &key); err != nil {
+		if err := rows.Scan(&user, &d.ID, &key, &d.LAN); err != nil {
 			return nil, err
 		}
 		copy(d.Key[:], key)
@@ -706,7 +715,7 @@ func (s *Store) ActiveDeviceSecrets(ctx context.Context) (map[int64][]DeviceSecr
 
 // ListDevices returns devices, optionally of one user.
 func (s *Store) ListDevices(ctx context.Context, userName string) ([]Device, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT d.id, u.name, d.name, d.role, d.created_at, d.revoked_at, coalesce(d.cert_pin, '')
+	rows, err := s.db.QueryContext(ctx, `SELECT d.id, u.name, d.name, d.role, d.created_at, d.revoked_at, coalesce(d.cert_pin, ''), d.lan
 		FROM devices d JOIN users u ON u.id = d.user_id
 		WHERE ? = '' OR u.name = ? ORDER BY u.name, d.name`, userName, userName)
 	if err != nil {
@@ -718,7 +727,7 @@ func (s *Store) ListDevices(ctx context.Context, userName string) ([]Device, err
 		var d Device
 		var created int64
 		var revoked sql.NullInt64
-		if err := rows.Scan(&d.ID, &d.UserName, &d.Name, &d.Role, &created, &revoked, &d.CertPin); err != nil {
+		if err := rows.Scan(&d.ID, &d.UserName, &d.Name, &d.Role, &created, &revoked, &d.CertPin, &d.LAN); err != nil {
 			return nil, err
 		}
 		d.CreatedAt, d.RevokedAt = time.Unix(created, 0), timePtr(revoked)
@@ -749,9 +758,28 @@ func (s *Store) ActiveDevice(ctx context.Context, id string) (Device, [spa.KeySi
 	return d, key, nil
 }
 
-// RevokeDevice marks a device revoked. Revocation is permanent.
+// RevokeDevice marks a device revoked. Revocation is permanent. The user's
+// LAN key, when there is one, is new with it (lan-v1 §3): the multicast
+// password the device knew is no longer the user's, both at once.
 func (s *Store) RevokeDevice(ctx context.Context, id string) error {
-	return s.affectOne(ctx, "device", id, `UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, s.now().Unix(), id)
+	key, err := newLANKey()
+	if err != nil {
+		return err
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, s.now().Unix(), id)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n == 0 {
+			return fmt.Errorf("device %q: %w", id, ErrNotFound)
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE users SET lan_key = ? WHERE lan_key IS NOT NULL
+			AND id = (SELECT user_id FROM devices WHERE id = ?)`, key, id)
+		return err
+	})
 }
 
 // SPADevices returns the devices that may currently pass SPA: not revoked,
