@@ -11,6 +11,19 @@ permissions:
   contents: read
 
 jobs:
+  # Known vulnerabilities reachable from our code, in the standard library of
+  # the toolchain go.mod names and in the modules. v0.23.0 shipped on go1.26.0
+  # with 37 of them reachable (HTTP/2 and TLS servers on public ports). The
+  # Release workflow runs this job too, so a release cannot ship with one.
+  govulncheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
   test:
     runs-on: ubuntu-24.04
     steps:

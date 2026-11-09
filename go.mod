@@ -2,6 +2,8 @@ module github.com/arngory/raycontrol
 
 go 1.26.0
 
+toolchain go1.26.10
+
 require (
 	connectrpc.com/connect v1.18.1
 	github.com/cloudflare/circl v1.6.5
