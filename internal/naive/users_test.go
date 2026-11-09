@@ -429,3 +429,70 @@ func TestRenamedCut(t *testing.T) {
 		c.leave()
 	}
 }
+
+// The counters of a name gone from the file stay while it has a stream and
+// for the stale time after its last one ends (rayd reads them every 15 s),
+// then go: a process running through many rotations does not keep a name
+// for each credential it ever had. A name still in the file stays.
+func TestGoneNamesPruned(t *testing.T) {
+	const stale = 40 * time.Millisecond
+	path := filepath.Join(t.TempDir(), "users.json")
+	writeNamed(t, path, map[string]string{"cur": "u1-aaaaaaaaaaaaaaaa", "prev": "u1-bbbbbbbbbbbbbbbb", "bob": "u2-cccccccccccccccc"})
+	u := &Users{Path: path, every: time.Nanosecond, stale: stale}
+	onPrev, ok := u.admit(t.Context(), "prev")
+	if !ok {
+		t.Fatal("not admitted")
+	}
+	onPrev.traffic.addUp(7)
+	// A rollback renames a password within its user: its stream lives on
+	// under the old name, which the file no longer has.
+	onBob, ok := u.admit(t.Context(), "bob")
+	if !ok {
+		t.Fatal("not admitted")
+	}
+	defer onBob.leave()
+	time.Sleep(2 * time.Millisecond)
+	writeNamed(t, path, map[string]string{"cur": "u1-aaaaaaaaaaaaaaaa", "bob": "u2"})
+	u.Accepts("cur")
+	has := func(name string) bool {
+		u.mu.Lock()
+		defer u.mu.Unlock()
+		_, ok := u.traffic[name]
+		return ok
+	}
+	if onPrev.ctx.Err() == nil {
+		t.Fatal("the previous credential's stream not cut")
+	}
+	if !has("u1-bbbbbbbbbbbbbbbb") {
+		t.Fatal("a gone name's counters dropped at once: rayd has not read its last bytes")
+	}
+	// Its stream has not left yet: kept however long.
+	time.Sleep(2 * stale)
+	u.Accepts("cur")
+	if !has("u1-bbbbbbbbbbbbbbbb") {
+		t.Fatal("dropped while a stream still counts on it")
+	}
+	onPrev.leave()
+	for range 3 { // several looks within the stale time
+		time.Sleep(time.Millisecond)
+		u.Accepts("cur")
+	}
+	if !has("u1-bbbbbbbbbbbbbbbb") {
+		t.Fatal("dropped before the stale time after its last stream left")
+	}
+	time.Sleep(2 * stale)
+	u.Accepts("cur")
+	u.Accepts("cur")
+	if has("u1-bbbbbbbbbbbbbbbb") {
+		t.Fatal("a gone name kept past the stale time")
+	}
+	if !has("u1-aaaaaaaaaaaaaaaa") || !has("u2") {
+		t.Fatal("a name in the file dropped")
+	}
+	if !has("u2-cccccccccccccccc") || onBob.ctx.Err() != nil {
+		t.Fatal("a renamed password's live stream lost its counters or was cut")
+	}
+	if snap := u.Snapshot(); snap.Users["u1-bbbbbbbbbbbbbbbb"] != (UserTraffic{}) {
+		t.Fatalf("the snapshot still has the dropped name: %+v", snap.Users)
+	}
+}

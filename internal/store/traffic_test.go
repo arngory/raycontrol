@@ -306,6 +306,11 @@ func TestTrafficUser(t *testing.T) {
 func TestCredentialName(t *testing.T) {
 	const secret = "6f1c2a3b-0000-4000-8000-000000000007"
 	n := CredentialName(5, secret)
+	// Pinned: a change of the derivation would rename every credential at
+	// the next update (one cut for everyone, every mark anew).
+	if n != "u5-d327c8f46b8fca2b" {
+		t.Fatalf("CredentialName(5, %q) = %q, the derivation changed", secret, n)
+	}
 	if !strings.HasPrefix(n, "u5-") || len(n) != len("u5-")+16 || !isCredentialPrint(n[3:]) {
 		t.Fatalf("name %q", n)
 	}

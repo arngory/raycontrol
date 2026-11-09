@@ -31,8 +31,9 @@ import (
 // Hysteria2 does on a reload.
 //
 // The counters are by name, up (sent to the destinations) and down
-// (received from them), since the process started, the names gone from
-// the file too: nothing of destinations, addresses or times. Neither they
+// (received from them), since the process started; a name gone from the
+// file keeps them while it has streams and staleAfter after the last one
+// (prune): nothing of destinations, addresses or times. Neither they
 // nor destinations go to the log.
 type Users struct {
 	Path string
@@ -46,7 +47,15 @@ type Users struct {
 	live    map[[32]byte]map[*session]bool
 	traffic map[string]*Traffic
 	boot    string
+	stale   time.Duration // staleAfter when 0 (tests make it short)
 }
+
+// staleAfter is how long the counters of a name gone from the file stay
+// readable once its last stream has ended: rayd reads them every 15 s, so
+// it has their last bytes long before (traffic-limit-v1 §2.3). Without
+// it every credential rotation would leave a name for good, and a process
+// running for months would answer with more names than rayd reads.
+const staleAfter = 5 * time.Minute
 
 // reloadEvery is how often the file is looked at: by Watch, and by a
 // request when Watch does not run.
@@ -62,8 +71,14 @@ func HashPassword(p string) string {
 }
 
 // Traffic are a name's bytes at the destinations' side. Nil counts for
-// nobody.
-type Traffic struct{ upN, downN atomic.Int64 }
+// nobody. streams and gone (under Users.mu) tell when the counters of a
+// name the file no longer has may go: none of its streams left, and gone
+// staleAfter ago.
+type Traffic struct {
+	upN, downN atomic.Int64
+	streams    int
+	gone       time.Time
+}
 
 func (t *Traffic) addUp(n int) {
 	if t != nil && n > 0 {
@@ -168,6 +183,10 @@ func (u *Users) admit(parent context.Context, password string) (admitted, bool) 
 		u.live[hash] = map[*session]bool{}
 	}
 	u.live[hash][s] = true
+	t := u.trafficOf(name)
+	if t != nil {
+		t.streams++
+	}
 	leave := func() {
 		cancel(nil)
 		u.mu.Lock()
@@ -176,8 +195,11 @@ func (u *Users) admit(parent context.Context, password string) (admitted, bool) 
 		if len(u.live[hash]) == 0 {
 			delete(u.live, hash)
 		}
+		if t != nil {
+			t.streams--
+		}
 	}
-	return admitted{user: hash, traffic: u.trafficOf(name), ctx: ctx, leave: leave}, true
+	return admitted{user: hash, traffic: t, ctx: ctx, leave: leave}, true
 }
 
 // trafficOf is a name's counters, made at first sight and kept until the
@@ -219,6 +241,7 @@ func (u *Users) period() time.Duration {
 // read leaves the table as it was. Under u.mu.
 func (u *Users) reload() {
 	u.checked = time.Now()
+	defer u.prune(u.checked)
 	st, err := os.Stat(u.Path)
 	if err != nil {
 		return
@@ -249,6 +272,33 @@ func (u *Users) reload() {
 	u.byHash, u.file, u.loaded = next, st, true
 	for _, name := range next {
 		u.trafficOf(name) // listed from the start, as niko-server's
+	}
+}
+
+// prune drops the counters of the names the file no longer has, their
+// last stream ended staleAfter ago or more. A name back in the file is
+// kept. Under u.mu.
+func (u *Users) prune(now time.Time) {
+	if !u.loaded {
+		return
+	}
+	in := make(map[string]bool, len(u.byHash))
+	for _, name := range u.byHash {
+		in[name] = true
+	}
+	stale := u.stale
+	if stale <= 0 {
+		stale = staleAfter
+	}
+	for name, t := range u.traffic {
+		switch {
+		case in[name] || t.streams > 0:
+			t.gone = time.Time{}
+		case t.gone.IsZero():
+			t.gone = now
+		case now.Sub(t.gone) >= stale:
+			delete(u.traffic, name)
+		}
 	}
 }
 
