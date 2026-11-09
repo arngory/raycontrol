@@ -96,7 +96,8 @@ type Model struct {
 	Users    []User    // active: enabled, not expired, not over the traffic limit
 	// Traffic: some user has a traffic limit (traffic-limit-v1 §5): the
 	// Xray processes count each user's bytes and give them on their API.
-	// Without it their configs have no stats at all.
+	// Without it, and with the connection limits off, their configs have
+	// no stats at all.
 	Traffic bool
 	// Inner maps user ID to the VLESS UUID at the inner stage.
 	Inner map[int64]string
@@ -138,7 +139,9 @@ type Model struct {
 	// destinations.
 	Debug bool
 	// ConnLimitOff: the per-user connection limits are off (rayctl
-	// conn-limit off, spec/conn-limit-v1.md §8).
+	// conn-limit off, spec/conn-limit-v1.md §8): naive and Hysteria2 read
+	// it from their conn-limit file without a restart; the Xray configs
+	// lose their limits, and the processes restart.
 	ConnLimitOff bool
 }
 
@@ -1271,12 +1274,24 @@ func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, er
 		"outbounds": outbounds,
 		"routing":   map[string]any{"domainStrategy": "IPOnDemand", "rules": rules},
 	}
+	// Level 0, as every user here.
+	level := map[string]any{}
 	if m.Traffic {
-		// Each user's bytes (traffic-limit-v1 §2.1): two counters a user
-		// (level 0, as every user here), read by rayd on the same API
-		// socket. Counters only: nothing of destinations.
+		// Each user's bytes (traffic-limit-v1 §2.1): two counters a user,
+		// read by rayd on the same API socket. Counters only: nothing of
+		// destinations.
+		level["statsUserUplink"], level["statsUserDownlink"] = true, true
+	}
+	if !m.ConnLimitOff {
+		// The per-user connection limits (spec/conn-limit-v1.md §3.3, the
+		// fork's policy.levels.N.limits). Their refusals are counters of
+		// the stats (user>>>u5>>>limit>>>tcp, made at the first one), which
+		// rayd reads with the bytes. Off: no limiter at all.
+		level["limits"] = XrayConnLimits
+	}
+	if len(level) > 0 {
 		cfg["stats"] = map[string]any{}
-		cfg["policy"] = map[string]any{"levels": map[string]any{"0": map[string]bool{"statsUserUplink": true, "statsUserDownlink": true}}}
+		cfg["policy"] = map[string]any{"levels": map[string]any{"0": level}}
 		cfg["api"] = map[string]any{"tag": "api", "listen": p.APISocket(s.Name), "services": []string{"HandlerService", "StatsService"}}
 	}
 	b, err := jsonFile(cfg)
@@ -1284,6 +1299,35 @@ func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, er
 		return File{}, err
 	}
 	return File{Path: path.Join(p.Rendered, s.Name, "xray.json"), Mode: 0o640, Group: GroupName(s.Name), Content: b, Service: s.Name}, nil
+}
+
+// XrayLimits are the per-user connection limits of a policy level in the
+// Xray fork (its infra/conf/policy_limits.go); a number left out or zero
+// turns its limit off.
+type XrayLimits struct {
+	Connections int    `json:"connections"`
+	Rate        int    `json:"rate"`
+	Burst       int    `json:"burst"`
+	FailedRate  int    `json:"failedRate"`
+	FailedBurst int    `json:"failedBurst"`
+	UDPSessions int    `json:"udpSessions"`
+	UDPRate     int    `json:"udpRate"`
+	UDPBurst    int    `json:"udpBurst"`
+	UDPLive     int    `json:"udpLive"`
+	LookupRate  int    `json:"lookupRate"`
+	LookupBurst int    `json:"lookupBurst"`
+	FoldAt      string `json:"foldAt"`
+}
+
+// XrayConnLimits are the numbers of spec/conn-limit-v1.md §5, those of
+// naive and niko-server, for every Xray process (inner, REALITY). A user is
+// the base name of the email: a credential's name u5-<fingerprint>
+// (store.CredentialName) folds at the first dash into u5, so a rotation
+// does not multiply the budget.
+var XrayConnLimits = XrayLimits{
+	Connections: 1024, Rate: 30, Burst: 600, FailedRate: 5, FailedBurst: 100,
+	UDPSessions: 256, UDPRate: 100, UDPBurst: 200, UDPLive: 1024,
+	LookupRate: 20, LookupBurst: 100, FoldAt: "-",
 }
 
 // RealityTag is the inbound tag of a REALITY service (Xray API target);
