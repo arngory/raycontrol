@@ -2,10 +2,12 @@ package perimeter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -23,10 +25,8 @@ type fakeTable struct {
 }
 
 type dumpArgs struct {
-	family       uint8
-	value, mask  uint32
-	proto        uint8
-	unsupportedF bool
+	family      uint8
+	value, mask uint32
 }
 
 func (f *fakeTable) dump(family uint8, value, mask uint32) ([]ctEntry, error) {
@@ -96,5 +96,23 @@ func TestSweepSocketsAfterDump(t *testing.T) {
 	}
 	if r.UDP != 1 || len(table.deleted) != 1 || table.deleted[0].Orig.Src.Port() != 40001 {
 		t.Fatalf("swept %+v: %+v", r, table.deleted)
+	}
+}
+
+// Failed deletions are counted, with the first error: not one line of
+// every failure.
+func TestSweepDeleteFailures(t *testing.T) {
+	dir := t.TempDir()
+	procNet(t, dir)
+	table := &fakeTable{failWith: errors.New("netlink receive: operation not permitted")}
+	for p := range uint16(500) {
+		table.entries = append(table.entries, udpOut(40000+p))
+	}
+	r, err := sweeperOn(dir, table).Sweep(context.Background())
+	if err == nil || r.UDP != 0 {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if msg := err.Error(); len(msg) > 200 || !strings.Contains(msg, "500") || strings.Count(msg, "not permitted") != 1 {
+		t.Fatalf("the error: %q", msg)
 	}
 }

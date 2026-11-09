@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -68,7 +69,8 @@ type sockets struct {
 	tcpQuads           map[[2]netip.AddrPort]bool // local, remote
 }
 
-// Sweep removes the entries without a socket.
+// Sweep removes the entries without a socket. Failed deletions are
+// counted, with the first one's error: a table of failures is one line.
 func (s *Sweeper) Sweep(ctx context.Context) (SweepResult, error) {
 	var r SweepResult
 	local, err := s.local()
@@ -81,6 +83,7 @@ func (s *Sweeper) Sweep(ctx context.Context) (SweepResult, error) {
 	}
 	defer func() { _ = c.Close() }()
 	var errs []error
+	failed, firstFailure := 0, error(nil)
 	for _, family := range []uint8{unix.AF_INET, unix.AF_INET6} {
 		for _, marked := range []bool{true, false} {
 			if ctx.Err() != nil {
@@ -106,7 +109,9 @@ func (s *Sweeper) Sweep(ctx context.Context) (SweepResult, error) {
 					continue
 				}
 				if err := c.delete(e); err != nil {
-					errs = append(errs, err)
+					if failed++; firstFailure == nil {
+						firstFailure = err
+					}
 					continue
 				}
 				switch kind {
@@ -119,6 +124,9 @@ func (s *Sweeper) Sweep(ctx context.Context) (SweepResult, error) {
 				}
 			}
 		}
+	}
+	if failed > 0 {
+		errs = append(errs, fmt.Errorf("%d entries not removed, the first: %w", failed, firstFailure))
 	}
 	return r, errors.Join(errs...)
 }
