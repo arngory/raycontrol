@@ -100,6 +100,11 @@ func SealKeys(svc store.Service, secrets map[string][]byte) [][]byte {
 // drop that key for every client still on it, with no grace at all. A
 // switch at once (immediately, or no grace) means to drop it; force does
 // the switch anyway.
+//
+// The message is part of the API: Niko reads the time by "still accepted
+// until <RFC 3339, UTC, Z>" to ask the admin whether to switch anyway
+// (dnsseal-v1 §4, api_test pins it). Change the words around it freely,
+// not these.
 func checkGrace(name, what string, hasPrev bool, prevUntil int64, now time.Time, grace time.Duration, immediately, force bool) error {
 	if !hasPrev || prevUntil == 0 || now.Unix() >= prevUntil || immediately || grace <= 0 || force {
 		return nil
