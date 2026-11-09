@@ -229,7 +229,10 @@ func (u *Users) reload() {
 		return
 	}
 	for hash, ss := range u.live {
-		if name, ok := next[hash]; ok && name == u.byHash[hash] {
+		// A credential switch moves the names (u5-n becomes u5, u5 becomes
+		// u5-p) while both passwords stay good: the same user, kept. Its
+		// streams count on under the name they came in with, the user's.
+		if name, ok := next[hash]; ok && baseName(name) == baseName(u.byHash[hash]) {
 			continue
 		}
 		for s := range ss {
@@ -241,6 +244,18 @@ func (u *Users) reload() {
 	for _, name := range next {
 		u.trafficOf(name) // listed from the start, as niko-server's
 	}
+}
+
+// baseName is the user a name stands for: u5 for u5, u5-n and u5-p (the
+// rotating credentials, R4-1).
+func baseName(name string) string {
+	if b, ok := strings.CutSuffix(name, "-n"); ok {
+		return b
+	}
+	if b, ok := strings.CutSuffix(name, "-p"); ok {
+		return b
+	}
+	return name
 }
 
 // Watch reads the file every reloadEvery until ctx ends, so that a user

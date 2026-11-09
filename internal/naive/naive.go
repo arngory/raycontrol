@@ -166,7 +166,15 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) {
 	case <-down:
 	case <-ctx.Done():
 		_ = out.Close()
-		<-down
+		// A client that does not read holds the download in a write
+		// (flow control), and with it the stream of a revoked user: past
+		// a second it fails, as UoT's and ICMP's.
+		select {
+		case <-down:
+		case <-time.After(time.Second):
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now())
+			<-down
+		}
 	}
 }
 

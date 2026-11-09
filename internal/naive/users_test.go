@@ -2,6 +2,7 @@ package naive
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -163,6 +165,50 @@ func TestTrafficCounted(t *testing.T) {
 	eventually(t, "too big not counted", func() bool { return counts() == UserTraffic{Up: 4416, Down: 3011} })
 }
 
+// A revoked CONNECT whose client stops reading: the download is stuck in a
+// write the client never takes (flow control); within a couple of seconds
+// the stream is reset all the same and its handler gone.
+func TestRevokedCutClientNotReading(t *testing.T) {
+	// A destination that sends as fast as it can.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		buf := make([]byte, 64<<10)
+		for {
+			if _, err := c.Write(buf); err != nil {
+				return
+			}
+		}
+	}()
+	h, connect := uotServer(t, time.Minute)
+	h.Users.every = 20 * time.Millisecond
+	path := h.Users.Path
+	writeNamed(t, path, map[string]string{"secret-one": "u1"})
+	go h.Users.Watch(t.Context())
+	_, _, done := connect(ln.Addr().String())
+	defer done()
+	tunnels := func() int {
+		buf := make([]byte, 4<<20)
+		return strings.Count(string(buf[:runtime.Stack(buf, true)]), "naive.(*Server).tunnel(")
+	}
+	eventually(t, "no tunnel", func() bool { return tunnels() == 1 })
+	time.Sleep(300 * time.Millisecond) // the windows fill: the client reads nothing
+	writeNamed(t, path, map[string]string{"secret-two": "u2"})
+	start := time.Now()
+	eventually(t, "the revoked CONNECT is held by a client that does not read", func() bool { return tunnels() == 0 })
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("held %v", d)
+	}
+}
+
 // A password gone from the users file loses its live streams: a TCP
 // tunnel, UDP over TCP and ICMP are reset, not ended; another user's stay.
 func TestRevokedCut(t *testing.T) {
@@ -247,9 +293,45 @@ func TestRevokedCut(t *testing.T) {
 
 func hashOf(pw string) [32]byte { return sha256.Sum256([]byte(pw)) }
 
-// A password that stays but counts under another name now is another
-// user's: its streams go too, as niko-server's do (a name given another
-// password).
+// A credential switch (R4-1): the next secret becomes the current one
+// (u1-n to u1) and the current one the previous (u1 to u1-p), both still
+// good. The same user: no stream is cut, and each counts on under the name
+// it came in with, the user's.
+func TestRotationSwitchKeepsStreams(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "users.json")
+	writeNamed(t, path, map[string]string{"old": "u1", "new": "u1-n"})
+	u := &Users{Path: path, every: time.Nanosecond}
+	onOld, ok1 := u.admit(t.Context(), "old")
+	onNew, ok2 := u.admit(t.Context(), "new")
+	if !ok1 || !ok2 {
+		t.Fatal("not admitted")
+	}
+	defer onOld.leave()
+	defer onNew.leave()
+	time.Sleep(2 * time.Millisecond)
+	writeNamed(t, path, map[string]string{"new": "u1", "old": "u1-p"})
+	time.Sleep(2 * time.Millisecond)
+	if !u.Accepts("old") || !u.Accepts("new") {
+		t.Fatal("a credential refused after the switch")
+	}
+	if onOld.ctx.Err() != nil || onNew.ctx.Err() != nil {
+		t.Fatalf("a switch cut streams of good credentials: %v, %v", context.Cause(onOld.ctx), context.Cause(onNew.ctx))
+	}
+	if onOld.traffic != u.traffic["u1"] || onNew.traffic != u.traffic["u1-n"] {
+		t.Fatal("the streams count under other names than they came in with")
+	}
+	// The grace ends: the previous one goes, and its stream with it.
+	writeNamed(t, path, map[string]string{"new": "u1"})
+	time.Sleep(2 * time.Millisecond)
+	u.Accepts("new")
+	if onOld.ctx.Err() == nil || onNew.ctx.Err() != nil {
+		t.Fatalf("the grace's end: %v, %v", context.Cause(onOld.ctx), context.Cause(onNew.ctx))
+	}
+}
+
+// A password that stays but counts under another user's name now is
+// another user's: its streams go too, as niko-server's do (a name given
+// another password).
 func TestRenamedCut(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "users.json")
 	writeNamed(t, path, map[string]string{"pw": "u1", "other": "u2"})
