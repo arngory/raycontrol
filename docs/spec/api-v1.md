@@ -238,7 +238,7 @@ A client that lost Register's answer (timeout, dropped connection) may send it a
 | `unauthenticated` | клиентский ключ не принадлежит активному устройству: не зарегистрирован, отозван, пользователь отключён или истёк |
 | `permission_denied` | устройство не `admin`, или вызов только для root на ноде; `Register`: PIN не прислан или неверный, деталь `PinTries{left}` (§4) |
 | `invalid_argument` | неверные данные: подпись при смене ключа, имя, срок приглашения, период или день сброса лимита, пустой `SetUserTraffic` |
-| `failed_precondition` | `ExportUser`: пользователь отключён, истёк или сверх лимита трафика |
+| `failed_precondition` | `ExportUser`: пользователь отключён, истёк или сверх лимита трафика; `RotateService` dnstt или masterdns без `now` и `force`, пока прежний ключ ещё в своём сроке (dnsseal-v1 §8) |
 
 ## 8. Что проверить клиенту
 

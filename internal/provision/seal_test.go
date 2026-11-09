@@ -58,7 +58,7 @@ func TestRotateSealKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := RotateSealKey(ctx, st, "dns", now, grace, false)
+	state, err := RotateSealKey(ctx, st, "dns", now, grace, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,6 +81,15 @@ func TestRotateSealKey(t *testing.T) {
 		t.Fatalf("seal=required lost the rotation state: %s", svc.Settings)
 	}
 
+	// Another switch within the grace (a retry) is refused and changes
+	// nothing: it would drop the first key for clients still on it.
+	if _, err := RotateSealKey(ctx, st, "dns", now.Add(time.Hour), grace, false, false); !errors.Is(err, store.ErrPrecondition) {
+		t.Fatalf("a second switch within the grace: %v", err)
+	}
+	if _, again, k2 := keys(); !bytes.Equal(again[SecretSealKey], s1[SecretSealKey]) || len(k2) != 2 || !bytes.Equal(k2[1], first) {
+		t.Fatalf("keys after a refused switch: %x", k2)
+	}
+
 	// Within the grace nothing goes; after it the previous key does.
 	if n, err := ExpireSealKeys(ctx, st, now.Add(grace-time.Second), log); n != 0 || err != nil {
 		t.Fatalf("expire within the grace: %d %v", n, err)
@@ -101,17 +110,17 @@ func TestRotateSealKey(t *testing.T) {
 
 	// At once: no previous key, even with a grace.
 	later := now.Add(72 * time.Hour)
-	if state, err = RotateSealKey(ctx, st, "dns", later, grace, false); err != nil || state.PrevUntil == 0 {
+	if state, err = RotateSealKey(ctx, st, "dns", later, grace, false, false); err != nil || state.PrevUntil == 0 {
 		t.Fatalf("second switch: %+v %v", state, err)
 	}
-	if state, err = RotateSealKey(ctx, st, "dns", later.Add(time.Minute), grace, true); err != nil || state.PrevUntil != 0 {
+	if state, err = RotateSealKey(ctx, st, "dns", later.Add(time.Minute), grace, true, false); err != nil || state.PrevUntil != 0 {
 		t.Fatalf("switch at once: %+v %v", state, err)
 	}
 	if svc, s3, k := keys(); len(k) != 1 || s3[PrevSecret(SecretSealKey)] != nil || ParseSealState(svc).PrevUntil != 0 {
 		t.Fatalf("keys after a switch at once: %x, state %s", k, svc.Settings)
 	}
 	// A zero grace keeps nothing either.
-	if state, err = RotateSealKey(ctx, st, "dns", later.Add(2*time.Minute), 0, false); err != nil || state.PrevUntil != 0 {
+	if state, err = RotateSealKey(ctx, st, "dns", later.Add(2*time.Minute), 0, false, false); err != nil || state.PrevUntil != 0 {
 		t.Fatalf("switch with no grace: %+v %v", state, err)
 	}
 
@@ -119,10 +128,10 @@ func TestRotateSealKey(t *testing.T) {
 	if _, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "mdns", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RotateSealKey(ctx, st, "mdns", now, grace, false); !errors.Is(err, store.ErrInvalid) {
+	if _, err := RotateSealKey(ctx, st, "mdns", now, grace, false, false); !errors.Is(err, store.ErrInvalid) {
 		t.Fatalf("masterdns: %v", err)
 	}
-	if _, err := RotateSealKey(ctx, st, "nope", now, grace, false); !errors.Is(err, store.ErrNotFound) {
+	if _, err := RotateSealKey(ctx, st, "nope", now, grace, false, false); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("no such service: %v", err)
 	}
 }
@@ -145,7 +154,7 @@ func TestSealKeysAndOptionsRace(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	now := time.Unix(1_800_000_000, 0)
 	for i := range 20 {
-		if _, err := RotateSealKey(ctx, st, "dns", now, time.Hour, false); err != nil {
+		if _, err := RotateSealKey(ctx, st, "dns", now, time.Hour, false, true); err != nil {
 			t.Fatal(err)
 		}
 		mode := []string{"optional", "required"}[i%2]

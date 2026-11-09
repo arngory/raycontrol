@@ -31,6 +31,10 @@ var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // ErrInvalid wraps validation failures.
 var ErrInvalid = errors.New("store: invalid")
 
+// ErrPrecondition wraps a change refused in the current state, which the
+// caller may wait out or force.
+var ErrPrecondition = errors.New("not now")
+
 func checkName(kind, name string) error {
 	if !nameRE.MatchString(name) {
 		return fmt.Errorf("%w %s name %q: use 1-64 of a-z 0-9 . _ - starting with a letter or digit", ErrInvalid, kind, name)

@@ -186,6 +186,8 @@ func toConnect(err error) error {
 		return connect.NewError(connect.CodeNotFound, err)
 	case errors.Is(err, store.ErrInvalid):
 		return connect.NewError(connect.CodeInvalidArgument, err)
+	case errors.Is(err, store.ErrPrecondition):
+		return connect.NewError(connect.CodeFailedPrecondition, err)
 	case strings.Contains(err.Error(), "UNIQUE constraint failed"):
 		return connect.NewError(connect.CodeAlreadyExists, err)
 	case strings.Contains(err.Error(), "FOREIGN KEY constraint failed"):
@@ -586,7 +588,7 @@ func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.
 	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "masterdns" {
 		// masterdns-key-rotation §2: the new key at once, in subscriptions
 		// from now; the previous one for the grace (its sessions go on).
-		state, err := provision.RotateMasterDNSKey(ctx, s.Store, req.Msg.Name, now, s.CredGrace, req.Msg.Now)
+		state, err := provision.RotateMasterDNSKey(ctx, s.Store, req.Msg.Name, now, s.CredGrace, req.Msg.Now, req.Msg.Force)
 		if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
 			return nil, err
 		}
@@ -594,7 +596,7 @@ func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.
 	}
 	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "dnstt" {
 		// dnsseal-v1 §8: the new key at once, the previous one for the grace.
-		state, err := provision.RotateSealKey(ctx, s.Store, req.Msg.Name, now, s.CredGrace, req.Msg.Now)
+		state, err := provision.RotateSealKey(ctx, s.Store, req.Msg.Name, now, s.CredGrace, req.Msg.Now, req.Msg.Force)
 		if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
 			return nil, err
 		}

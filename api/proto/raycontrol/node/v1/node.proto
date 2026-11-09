@@ -603,6 +603,11 @@ message SetCertificateResponse {
 message RotateServiceRequest {
   string name = 1;
   bool now = 2;
+  // dnstt and masterdns: a switch with a grace (now unset) while the
+  // previous key is still in its grace is failed_precondition (it would
+  // drop that key for clients still on it); force switches anyway and
+  // drops it, as before raycontrol v0.24.0.
+  bool force = 3;
 }
 message RotateServiceResponse {
   int64 switch_at = 1; // unix seconds; later if a new server name waits for its certificate
