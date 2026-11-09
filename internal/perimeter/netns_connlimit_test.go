@@ -172,7 +172,7 @@ func entries(t *testing.T, family uint8, marked bool) []ctEntry {
 	if marked {
 		v = dataPlaneMarkBit
 	}
-	es, err := c.dump(family, v, dataPlaneMarkBit)
+	es, err := c.dump(family, v, dataPlaneMarkBit, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -879,5 +879,59 @@ func TestNetnsGuardSweep(t *testing.T) {
 	}
 	if !byPeerPort(unmarked, in80) {
 		t.Error("the redirected (dnat) entry swept")
+	}
+}
+
+// TestNetnsDumpFilter: a dump asked for TCP alone gets TCP's entries and no
+// UDP's from the kernel (CTA_FILTER), as the sweep's unmarked dumps ask.
+func TestNetnsDumpFilter(t *testing.T) {
+	netnsOnly(t)
+	fw := &NFT{NflogGroup: 7}
+	if err := fw.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Teardown()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	tcpAt := c.LocalAddr().(*net.TCPAddr).AddrPort()
+	u, err := net.Dial("udp", "127.0.0.1:9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.Close()
+	_, _ = u.Write([]byte("hi"))
+	udpAt := u.LocalAddr().(*net.UDPAddr).AddrPort()
+	at := func(ap netip.AddrPort) func(ctEntry) bool {
+		return func(e ctEntry) bool { return unmapAP(e.Orig.Src) == ap }
+	}
+	ct, err := dialConntrack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ct.Close()
+	all, err := ct.dump(unix.AF_INET, 0, dataPlaneMarkBit, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := findEntry(all, at(udpAt)); !ok {
+		t.Fatal("no UDP entry to leave out")
+	}
+	tcp, err := ct.dump(unix.AF_INET, 0, dataPlaneMarkBit, unix.IPPROTO_TCP)
+	if err != nil || ct.noFilter {
+		t.Fatalf("the filter refused: %v", err)
+	}
+	if _, ok := findEntry(tcp, at(tcpAt)); !ok {
+		t.Fatalf("the TCP entry left out: %+v", tcp)
+	}
+	if _, ok := findEntry(tcp, func(e ctEntry) bool { return e.Orig.Proto != unix.IPPROTO_TCP }); ok {
+		t.Fatalf("not TCP in a TCP dump: %+v", tcp)
 	}
 }

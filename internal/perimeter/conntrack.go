@@ -28,6 +28,11 @@ const (
 	ctaID        = 12
 	ctaZone      = 18
 	ctaMarkMask  = 21
+	ctaFilter    = 25 // Linux 5.8
+
+	ctaFilterOrigFlags = 1
+	// ctaFilterProtoNum: the filter matches the original tuple's protocol.
+	ctaFilterProtoNum = 1 << 3
 
 	ctaTupleIP    = 1
 	ctaTupleProto = 2
@@ -83,14 +88,19 @@ type ctEntry struct {
 }
 
 // ctConn is a ctnetlink socket.
-type ctConn struct{ c *netlink.Conn }
+type ctConn struct {
+	c *netlink.Conn
+	// noFilter: the kernel refused the protocol's filter; dumps go
+	// without it.
+	noFilter bool
+}
 
 func dialConntrack() (*ctConn, error) {
 	c, err := netlink.Dial(unix.NETLINK_NETFILTER, nil)
 	if err != nil {
 		return nil, fmt.Errorf("ctnetlink: %w", err)
 	}
-	return &ctConn{c}, nil
+	return &ctConn{c: c}, nil
 }
 
 func (c *ctConn) Close() error { return c.c.Close() }
@@ -98,21 +108,19 @@ func (c *ctConn) Close() error { return c.c.Close() }
 // nfgen is the nfnetlink header: the family, version 0, resource 0.
 func nfgen(family uint8) []byte { return []byte{family, unix.NFNETLINK_V0, 0, 0} }
 
-// dump lists the entries of a family whose mark, masked, is value: the
-// kernel filters (ctnetlink_filter_match).
-func (c *ctConn) dump(family uint8, value, mask uint32) ([]ctEntry, error) {
-	ae := netlink.NewAttributeEncoder()
-	ae.ByteOrder = binary.BigEndian
-	ae.Uint32(ctaMark, value)
-	ae.Uint32(ctaMarkMask, mask)
-	attrs, err := ae.Encode()
-	if err != nil {
-		return nil, err
+// dump lists the entries of a family whose mark, masked, is value, and of
+// protocol proto (0: any): the kernel filters (ctnetlink_filter_match).
+// The protocol's filter (CTA_FILTER) is Linux 5.8's: an older kernel
+// ignores it and one that refuses it is asked again without; the caller
+// looks at the protocol itself all the same. The whole dump is in memory
+// at once (the library gathers a multipart answer): the filter keeps it to
+// what the sweep may remove.
+func (c *ctConn) dump(family uint8, value, mask uint32, proto uint8) ([]ctEntry, error) {
+	msgs, err := c.dumpMsgs(family, value, mask, proto)
+	if err != nil && proto != 0 && !c.noFilter && (errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EOPNOTSUPP)) {
+		c.noFilter = true
+		msgs, err = c.dumpMsgs(family, value, mask, proto)
 	}
-	msgs, err := c.c.Execute(netlink.Message{
-		Header: netlink.Header{Type: netlink.HeaderType(nfnlSubsysCTNetlink<<8 | ctMsgGet), Flags: netlink.Request | netlink.Dump},
-		Data:   append(nfgen(family), attrs...),
-	})
 	if err != nil {
 		return nil, fmt.Errorf("ctnetlink dump: %w", err)
 	}
@@ -125,6 +133,35 @@ func (c *ctConn) dump(family uint8, value, mask uint32) ([]ctEntry, error) {
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+func (c *ctConn) dumpMsgs(family uint8, value, mask uint32, proto uint8) ([]netlink.Message, error) {
+	ae := netlink.NewAttributeEncoder()
+	ae.ByteOrder = binary.BigEndian
+	ae.Uint32(ctaMark, value)
+	ae.Uint32(ctaMarkMask, mask)
+	if proto != 0 && !c.noFilter {
+		ae.Nested(ctaTupleOrig, func(nae *netlink.AttributeEncoder) error {
+			nae.Nested(ctaTupleProto, func(pae *netlink.AttributeEncoder) error {
+				pae.Uint8(ctaProtoNum, proto)
+				return nil
+			})
+			return nil
+		})
+		ae.Nested(ctaFilter, func(nae *netlink.AttributeEncoder) error {
+			// The flags in the host's order (nla_get_u32), not the network's.
+			nae.Bytes(ctaFilterOrigFlags, binary.NativeEndian.AppendUint32(nil, ctaFilterProtoNum))
+			return nil
+		})
+	}
+	attrs, err := ae.Encode()
+	if err != nil {
+		return nil, err
+	}
+	return c.c.Execute(netlink.Message{
+		Header: netlink.Header{Type: netlink.HeaderType(nfnlSubsysCTNetlink<<8 | ctMsgGet), Flags: netlink.Request | netlink.Dump},
+		Data:   append(nfgen(family), attrs...),
+	})
 }
 
 // delete removes an entry by its original tuple, and only that one: the

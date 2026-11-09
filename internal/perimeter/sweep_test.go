@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -27,16 +28,17 @@ type fakeTable struct {
 type dumpArgs struct {
 	family      uint8
 	value, mask uint32
+	proto       uint8
 }
 
-func (f *fakeTable) dump(family uint8, value, mask uint32) ([]ctEntry, error) {
-	f.dumps = append(f.dumps, dumpArgs{family: family, value: value, mask: mask})
+func (f *fakeTable) dump(family uint8, value, mask uint32, proto uint8) ([]ctEntry, error) {
+	f.dumps = append(f.dumps, dumpArgs{family, value, mask, proto})
 	if f.onDump != nil {
 		f.onDump()
 	}
 	var out []ctEntry
 	for _, e := range f.entries {
-		if e.Family == family && e.Mark&mask == value {
+		if e.Family == family && e.Mark&mask == value && (proto == 0 || e.Orig.Proto == proto) {
 			out = append(out, e)
 		}
 	}
@@ -114,5 +116,23 @@ func TestSweepDeleteFailures(t *testing.T) {
 	}
 	if msg := err.Error(); len(msg) > 200 || !strings.Contains(msg, "500") || strings.Count(msg, "not permitted") != 1 {
 		t.Fatalf("the error: %q", msg)
+	}
+}
+
+// The unmarked dumps ask the kernel for TCP alone: only inbound TCP may be
+// swept there. The marked ones take every protocol (UDP and TCP out).
+func TestSweepDumps(t *testing.T) {
+	dir := t.TempDir()
+	procNet(t, dir)
+	table := &fakeTable{}
+	if _, err := sweeperOn(dir, table).Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []dumpArgs{
+		{unix.AF_INET, dataPlaneMarkBit, dataPlaneMarkBit, 0}, {unix.AF_INET, 0, dataPlaneMarkBit, unix.IPPROTO_TCP},
+		{unix.AF_INET6, dataPlaneMarkBit, dataPlaneMarkBit, 0}, {unix.AF_INET6, 0, dataPlaneMarkBit, unix.IPPROTO_TCP},
+	}
+	if !slices.Equal(table.dumps, want) {
+		t.Fatalf("dumps %+v, want %+v", table.dumps, want)
 	}
 }

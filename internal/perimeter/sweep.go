@@ -51,7 +51,7 @@ type Sweeper struct {
 
 // ctTable is the conntrack table as the sweep uses it.
 type ctTable interface {
-	dump(family uint8, value, mask uint32) ([]ctEntry, error)
+	dump(family uint8, value, mask uint32, proto uint8) ([]ctEntry, error)
 	delete(e ctEntry) error
 	Close() error
 }
@@ -89,11 +89,13 @@ func (s *Sweeper) Sweep(ctx context.Context) (SweepResult, error) {
 			if ctx.Err() != nil {
 				return r, ctx.Err()
 			}
-			value := uint32(0)
+			// Unmarked, only TCP may be swept (inbound, closing): the
+			// kernel leaves the rest out of the dump (inbound QUIC, say).
+			value, proto := uint32(0), uint8(unix.IPPROTO_TCP)
 			if marked {
-				value = dataPlaneMarkBit
+				value, proto = dataPlaneMarkBit, 0
 			}
-			entries, err := c.dump(family, value, dataPlaneMarkBit)
+			entries, err := c.dump(family, value, dataPlaneMarkBit, proto)
 			if err != nil {
 				errs = append(errs, err)
 				continue
