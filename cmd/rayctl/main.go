@@ -43,10 +43,16 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             with its address (at most 48 characters)
   node note [TEXT | ""]                     show, set or remove the note clients show their users (200 characters, one line)
   user list
-  user add [NAME] [-services a,b] [-expires 2026-12-31|30d] [-limit 50G] [-note TEXT]
+  user add [NAME] [-services a,b] [-expires 2026-12-31|30d] [-limit 50G [-period monthly|none] [-reset-day 1]] [-note TEXT]
                                             without NAME: an opaque handle such as u-k3f9-x2qa
   user enable|disable|del NAME
   user services NAME a,b
+  user limit NAME 50G|off [-period monthly|none] [-reset-day N]
+                                            the traffic limit, up + down a period (monthly from day N,
+                                            00:00 UTC, or none: the user's whole time); over it the
+                                            user is off every profile until the reset or a higher limit
+  user usage [NAME]                         the users' counts against their limits
+  user reset-usage NAME                     the current period's count from zero, now
   user export NAME [-o FILE]                the user's links, as in the subscription (they hold credentials)
   service list
   service add KIND NAME [-settings JSON]    slipstream: -settings '{"zone":"s.example.net"}' for a zone
@@ -442,20 +448,18 @@ func (c *cli) user(ctx context.Context, sub string, args []string) error {
 			return err
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
-			fmt.Fprintln(w, "NAME\tENABLED\tEXPIRES\tLIMIT\tSERVICES\tNOTE")
+			fmt.Fprintln(w, "NAME\tENABLED\tEXPIRES\tUSED\tSERVICES\tNOTE")
 			for _, u := range r.Msg.Users {
-				limit := "-"
-				if u.TrafficLimitBytes > 0 {
-					limit = formatBytes(u.TrafficLimitBytes)
-				}
-				fmt.Fprintf(w, "%s\t%v\t%s\t%s\t%s\t%s\n", u.Name, u.Enabled, when(u.ExpiresAt), limit, strings.Join(u.Services, ","), u.Note)
+				fmt.Fprintf(w, "%s\t%v\t%s\t%s\t%s\t%s\n", u.Name, u.Enabled, when(u.ExpiresAt), usedOf(u), strings.Join(u.Services, ","), u.Note)
 			}
 		})
 	case "add":
 		fs := flag.NewFlagSet("user add", flag.ContinueOnError)
 		services := fs.String("services", "", "comma-separated service names")
 		expires := fs.String("expires", "", "expiry date (2006-01-02) or duration (30d, 12h)")
-		limit := fs.String("limit", "", "traffic limit (e.g. 50G): recorded, not enforced yet")
+		limit := fs.String("limit", "", "traffic limit, up + down a period (e.g. 50G): over it the user is off every profile")
+		period := fs.String("period", "", "the limit's period: monthly (default) or none (the user's whole time)")
+		resetDay := fs.Int("reset-day", 0, "monthly: the day of the month the count starts again, 00:00 UTC, 1 to 28 (default 1)")
 		note := fs.String("note", "", "free text")
 		// Without a name the user gets an opaque handle: nothing personal
 		// on the node, in its logs or reports (docs/09-observability.md).
@@ -468,7 +472,8 @@ func (c *cli) user(ctx context.Context, sub string, args []string) error {
 		if err := fs.Parse(args); err != nil {
 			return errUsage
 		}
-		req := &nodev1.CreateUserRequest{Name: name, Note: *note, Services: splitList(*services)}
+		req := &nodev1.CreateUserRequest{Name: name, Note: *note, Services: splitList(*services), TrafficPeriod: *period,
+			TrafficResetDay: int32(*resetDay)} //nolint:gosec // G115: checked by rayd, 1..28
 		var err error
 		if req.ExpiresAt, err = parseExpiry(*expires, time.Now()); err != nil {
 			return err
@@ -477,14 +482,28 @@ func (c *cli) user(ctx context.Context, sub string, args []string) error {
 			return err
 		}
 		if req.TrafficLimitBytes > 0 {
-			// No profile counts a user's bytes yet (docs/15-traffic.md §5).
-			fmt.Fprintln(os.Stderr, "rayctl: the traffic limit is recorded, not enforced yet: no profile counts a user's bytes")
+			c.warnCounting(ctx, name, true)
 		}
 		r, err := c.c.CreateUser(ctx, connect.NewRequest(req))
 		if err != nil {
 			return err
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) { fmt.Fprintf(w, "user %s created\n", r.Msg.User.Name) })
+	case "limit":
+		return c.userLimit(ctx, args)
+	case "usage":
+		return c.userUsage(ctx, args)
+	case "reset-usage":
+		if err := need(args, 1); err != nil {
+			return err
+		}
+		r, err := c.c.SetUserTraffic(ctx, connect.NewRequest(&nodev1.SetUserTrafficRequest{Name: args[0], ResetUsage: true}))
+		if err != nil {
+			return err
+		}
+		return c.print(r.Msg, func(w *tabwriter.Writer) {
+			fmt.Fprintf(w, "%s: the count starts again from zero now; back on the profiles within seconds if it was over\n", args[0])
+		})
 	case "enable", "disable":
 		if err := need(args, 1); err != nil {
 			return err

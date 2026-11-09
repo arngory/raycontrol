@@ -739,7 +739,7 @@ func TestICMPStuckReset(t *testing.T) {
 		_, _ = pw.Write(append([]byte{icmpVersion}, echoFrame(netip.MustParseAddr("10.0.0.1"), 64, 1, 1, nil)...))
 	}()
 	st := &stuckStream{Reader: pr, deadline: make(chan struct{})}
-	if err := s.serveICMP(context.Background(), u, st, st); !errors.Is(err, errRefused) {
+	if err := s.serveICMP(context.Background(), u, nil, st, st); !errors.Is(err, errRefused) {
 		t.Fatalf("a stuck stream ended with %v, not a reset", err)
 	}
 }

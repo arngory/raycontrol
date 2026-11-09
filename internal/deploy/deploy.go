@@ -452,9 +452,11 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 			service: []string{
 				"User=" + g, "Group=" + g,
 				copyIn(bin.Rayd, anchor, renderedOwner, g, path.Join(dir, render.NaiveKey), key),
+				// The stats socket (traffic-limit-v1 §2.3) in the runtime
+				// directory, as Hysteria2's: rayd's group passes through.
 				"ExecStart=" + bin.Rayd + " naive -answer " + answer + " -users " + path.Join(dir, render.NaiveUsers) +
 					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name) +
-					" -quic-socket " + p.NaiveQUICSocket(s.Name) + probeArg + frontUID + icmp,
+					" -quic-socket " + p.NaiveQUICSocket(s.Name) + " -stats-socket " + p.StatsSocket(s.Name) + probeArg + frontUID + icmp,
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
 				"ReadWritePaths=" + path.Dir(p.NaiveSocket(s.Name)),

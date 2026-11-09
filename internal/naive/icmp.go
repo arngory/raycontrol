@@ -184,10 +184,11 @@ type icmpPend struct {
 
 // icmpStream is one ICMP stream's state.
 type icmpStream struct {
-	s    *Server
-	user *icmpUser
-	w    io.Writer    // the client's side: one frame per write
-	last atomic.Int64 // mono: the last frame either way
+	s       *Server
+	user    *icmpUser
+	traffic *Traffic     // echo and reply data count (nil: for nobody)
+	w       io.Writer    // the client's side: one frame per write
+	last    atomic.Int64 // mono: the last frame either way
 
 	echoes, answers, dropped atomic.Int64 // for the log: counts only
 
@@ -214,7 +215,7 @@ func (st *icmpStream) touch() { st.last.Store(mono()) }
 // serveICMP carries the stream's echoes until the client ends it, the idle
 // time runs out or ctx is done; errRefused when the stream must be reset.
 // Nothing writes to the stream once this returns.
-func (s *Server) serveICMP(ctx context.Context, user *icmpUser, stream io.ReadWriter, dl deadlines) error {
+func (s *Server) serveICMP(ctx context.Context, user *icmpUser, traffic *Traffic, stream io.ReadWriter, dl deadlines) error {
 	idle := s.icmpIdle
 	if idle == 0 {
 		idle = icmpIdle
@@ -232,6 +233,7 @@ func (s *Server) serveICMP(ctx context.Context, user *icmpUser, stream io.ReadWr
 	}
 	_ = dl.SetReadDeadline(time.Time{})
 	st := newICMPStream(s, user, stream)
+	st.traffic = traffic
 
 	up := make(chan error, 1)
 	go func() { up <- st.upstream(r) }()
@@ -394,6 +396,7 @@ func (st *icmpStream) echo(dst netip.Addr, ttl int, id, seq uint16, payload []by
 		return nil
 	}
 	st.echoes.Add(1)
+	st.traffic.addUp(len(payload)) // the echo's data, as it went out
 	return nil
 }
 
@@ -547,6 +550,9 @@ func (st *icmpStream) downstream(c icmpConn) {
 		}
 		if err := st.answer(buf, ev.kind, ev.code, ev.from, p.id, p.seq, n); err != nil {
 			return
+		}
+		if ev.kind == icmpReply {
+			st.traffic.addDown(n) // a reply's data, as it came back
 		}
 	}
 }

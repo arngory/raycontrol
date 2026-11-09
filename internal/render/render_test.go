@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/naive"
 	nodepkg "github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -997,5 +998,104 @@ func TestXrayNoSniffing(t *testing.T) {
 	}
 	if after := xray(); !maps.EqualFunc(before, after, bytes.Equal) {
 		t.Error("the Xray configs follow the egress policy")
+	}
+}
+
+// While a user has a traffic limit the Xray processes count users' bytes
+// and give them on the API (traffic-limit-v1 §2.1, §5); without one their
+// configs have no stats at all. A user over the limit is in no config.
+func TestTrafficStats(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	inner := func() (cfg map[string]any, clients []string) {
+		t.Helper()
+		m, err := render.CollectForRender(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, _, err := render.Render(m, render.DefaultPaths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if strings.HasSuffix(f.Path, "/inner/xray.json") {
+				if err := json.Unmarshal(f.Content, &cfg); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		for _, c := range cfg["inbounds"].([]any)[0].(map[string]any)["settings"].(map[string]any)["clients"].([]any) {
+			clients = append(clients, c.(map[string]any)["email"].(string))
+		}
+		return cfg, clients
+	}
+	cfg, _ := inner()
+	if _, ok := cfg["stats"]; ok || cfg["policy"] != nil || fmt.Sprint(cfg["api"].(map[string]any)["services"]) != "[HandlerService]" {
+		t.Fatalf("stats without a limit: %v %v %v", cfg["stats"], cfg["policy"], cfg["api"])
+	}
+	// A limit on a user of no service: counting on, on every Xray.
+	limit := int64(1000)
+	if _, err := st.SetUserTraffic(ctx, "bob", store.TrafficChange{Limit: &limit}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, clients := inner()
+	policy, _ := json.Marshal(cfg["policy"])
+	if _, ok := cfg["stats"]; !ok || string(policy) != `{"levels":{"0":{"statsUserDownlink":true,"statsUserUplink":true}}}` ||
+		fmt.Sprint(cfg["api"].(map[string]any)["services"]) != "[HandlerService StatsService]" || !slices.Equal(clients, []string{"u1"}) {
+		t.Fatalf("stats %v policy %s api %v clients %v", cfg["stats"], policy, cfg["api"], clients)
+	}
+	// Alice over her limit: off the inner stage, counting stays.
+	if _, err := st.SetUserTraffic(ctx, "alice", store.TrafficChange{Limit: &limit}); err != nil {
+		t.Fatal(err)
+	}
+	alice, _ := st.UserByName(ctx, "alice")
+	if err := st.WriteTraffic(ctx, store.TrafficWrite{Adds: []store.TrafficAdd{{UserID: alice.ID, Start: alice.TrafficStart, Up: 999, Down: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, clients = inner(); cfg["stats"] == nil || len(clients) != 0 {
+		t.Fatalf("over the limit: clients %v", clients)
+	}
+	m, err := render.Collect(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.Traffic || slices.ContainsFunc(m.Users, func(u render.User) bool { return u.Name == "alice" }) {
+		t.Fatalf("model %+v", m.Users)
+	}
+}
+
+// naive's users file names each password's hash with the name its bytes
+// count under, the rotating credentials too (traffic-limit-v1 §2.3).
+func TestNaiveUsersFile(t *testing.T) {
+	m := render.Model{FrontTCP: true, FrontUDP: true, Now: time.Unix(1767225600, 0),
+		Services: []render.Service{
+			{Service: store.Service{ID: 1, Kind: "site", Name: "www", Enabled: true, Settings: `{}`},
+				Secrets: map[string][]byte{provision.SecretTLSChain: []byte("chain"), provision.SecretTLSKey: []byte("key")}},
+			{Service: store.Service{ID: 2, Kind: "naive", Name: "nv", Enabled: true, Settings: `{"site":"www","sni":"n.example.com"}`}},
+		},
+		Creds: map[int64]map[int64]string{2: {5: "pw-5", 6: "pw-6"}},
+		Sets: map[int64]map[int64]store.Credential{2: {
+			5: {Current: "pw-5", Next: "pw-5-next"},
+			6: {Current: "pw-6", Prev: "pw-6-prev", PrevUntil: time.Unix(1767225600, 0).Add(time.Hour)},
+		}},
+	}
+	files, _, err := render.Render(m, render.DefaultPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]string
+	for _, f := range files {
+		if f.Path == "/var/lib/raycontrol/rendered/nv/"+render.NaiveUsers {
+			if err := json.Unmarshal(f.Content, &got); err != nil || !f.Reload {
+				t.Fatalf("%s: %v reload %v", f.Content, err, f.Reload)
+			}
+		}
+	}
+	want := map[string]string{}
+	for pw, name := range map[string]string{"pw-5": "u5", "pw-5-next": "u5-n", "pw-6": "u6", "pw-6-prev": "u6-p"} {
+		want[naive.HashPassword(pw)] = name
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("users file %v, want %v", got, want)
 	}
 }

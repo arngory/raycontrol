@@ -97,6 +97,51 @@ type Payload struct {
 	// (spec/app-update-v1.md §1): only while the administrator has the
 	// mirror on and it holds a verified release.
 	App *appmirror.Hint `json:"app,omitempty"`
+	// Traffic is the user's traffic limit and its count
+	// (spec/traffic-limit-v1.md §4): only for a user with a limit.
+	Traffic *TrafficHint `json:"traffic,omitempty"`
+}
+
+// TrafficHint is a user's traffic limit: Used bytes (up + down, as the
+// node last wrote them, a minute behind at most) of Limit since Since
+// (Unix seconds), the next reset at Reset (0: none, the period is the
+// user's whole time). Exhausted: the node took the user off its profiles
+// for the limit (the node decides; the answer has no profiles then).
+type TrafficHint struct {
+	V         int   `json:"v"`
+	Used      int64 `json:"used"`
+	Limit     int64 `json:"limit"`
+	Since     int64 `json:"since"`
+	Reset     int64 `json:"reset"`
+	Exhausted bool  `json:"exhausted,omitempty"`
+}
+
+// ExhaustedJitter spreads the clients of a user over the limit after the
+// reset (spec/traffic-limit-v1.md §4).
+const (
+	ExhaustedJitter   = 10 * time.Minute
+	exhaustedLifetime = time.Hour
+)
+
+// ExhaustedExpiry is when the answer to a user over the limit expires: an
+// hour on at most, and no later than the next reset (zero: none) plus
+// jitter, so that the client learns of the reset, or a raised limit, by
+// itself.
+func ExhaustedExpiry(now, reset time.Time, jitter time.Duration) time.Time {
+	exp := now.Add(exhaustedLifetime)
+	if !reset.IsZero() {
+		if r := reset.Add(min(max(jitter, 0), ExhaustedJitter)); r.Before(exp) {
+			exp = r
+		}
+	}
+	return exp
+}
+
+func unixOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
 }
 
 // DNSAuthVersions lists dnsauth versions: 1, 2 or both.

@@ -51,6 +51,9 @@ const (
 	NodeServiceSetUserServicesProcedure = "/raycontrol.node.v1.NodeService/SetUserServices"
 	// NodeServiceDeleteUserProcedure is the fully-qualified name of the NodeService's DeleteUser RPC.
 	NodeServiceDeleteUserProcedure = "/raycontrol.node.v1.NodeService/DeleteUser"
+	// NodeServiceSetUserTrafficProcedure is the fully-qualified name of the NodeService's
+	// SetUserTraffic RPC.
+	NodeServiceSetUserTrafficProcedure = "/raycontrol.node.v1.NodeService/SetUserTraffic"
 	// NodeServiceExportUserProcedure is the fully-qualified name of the NodeService's ExportUser RPC.
 	NodeServiceExportUserProcedure = "/raycontrol.node.v1.NodeService/ExportUser"
 	// NodeServiceListServicesProcedure is the fully-qualified name of the NodeService's ListServices
@@ -162,6 +165,12 @@ type NodeServiceClient interface {
 	SetUserEnabled(context.Context, *connect.Request[v1.SetUserEnabledRequest]) (*connect.Response[v1.SetUserEnabledResponse], error)
 	SetUserServices(context.Context, *connect.Request[v1.SetUserServicesRequest]) (*connect.Response[v1.SetUserServicesResponse], error)
 	DeleteUser(context.Context, *connect.Request[v1.DeleteUserRequest]) (*connect.Response[v1.DeleteUserResponse], error)
+	// SetUserTraffic sets or removes a user's traffic limit, its period and
+	// reset day, or zeroes the current period's count
+	// (docs/spec/traffic-limit-v1.md §3.6). A user at or over the limit is
+	// taken off every profile, as an expired one, until the period resets
+	// or the limit is raised. A request that changes nothing is invalid.
+	SetUserTraffic(context.Context, *connect.Request[v1.SetUserTrafficRequest]) (*connect.Response[v1.SetUserTrafficResponse], error)
 	// ExportUser returns a user's profiles: the links of their subscription
 	// (docs/spec/subscription-v1.md §4), each with the next one while a
 	// switch is pending (P-10). They hold the user's credentials, so the
@@ -329,6 +338,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			httpClient,
 			baseURL+NodeServiceDeleteUserProcedure,
 			connect.WithSchema(nodeServiceMethods.ByName("DeleteUser")),
+			connect.WithClientOptions(opts...),
+		),
+		setUserTraffic: connect.NewClient[v1.SetUserTrafficRequest, v1.SetUserTrafficResponse](
+			httpClient,
+			baseURL+NodeServiceSetUserTrafficProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetUserTraffic")),
 			connect.WithClientOptions(opts...),
 		),
 		exportUser: connect.NewClient[v1.ExportUserRequest, v1.ExportUserResponse](
@@ -582,6 +597,7 @@ type nodeServiceClient struct {
 	setUserEnabled    *connect.Client[v1.SetUserEnabledRequest, v1.SetUserEnabledResponse]
 	setUserServices   *connect.Client[v1.SetUserServicesRequest, v1.SetUserServicesResponse]
 	deleteUser        *connect.Client[v1.DeleteUserRequest, v1.DeleteUserResponse]
+	setUserTraffic    *connect.Client[v1.SetUserTrafficRequest, v1.SetUserTrafficResponse]
 	exportUser        *connect.Client[v1.ExportUserRequest, v1.ExportUserResponse]
 	listServices      *connect.Client[v1.ListServicesRequest, v1.ListServicesResponse]
 	createService     *connect.Client[v1.CreateServiceRequest, v1.CreateServiceResponse]
@@ -652,6 +668,11 @@ func (c *nodeServiceClient) SetUserServices(ctx context.Context, req *connect.Re
 // DeleteUser calls raycontrol.node.v1.NodeService.DeleteUser.
 func (c *nodeServiceClient) DeleteUser(ctx context.Context, req *connect.Request[v1.DeleteUserRequest]) (*connect.Response[v1.DeleteUserResponse], error) {
 	return c.deleteUser.CallUnary(ctx, req)
+}
+
+// SetUserTraffic calls raycontrol.node.v1.NodeService.SetUserTraffic.
+func (c *nodeServiceClient) SetUserTraffic(ctx context.Context, req *connect.Request[v1.SetUserTrafficRequest]) (*connect.Response[v1.SetUserTrafficResponse], error) {
+	return c.setUserTraffic.CallUnary(ctx, req)
 }
 
 // ExportUser calls raycontrol.node.v1.NodeService.ExportUser.
@@ -862,6 +883,12 @@ type NodeServiceHandler interface {
 	SetUserEnabled(context.Context, *connect.Request[v1.SetUserEnabledRequest]) (*connect.Response[v1.SetUserEnabledResponse], error)
 	SetUserServices(context.Context, *connect.Request[v1.SetUserServicesRequest]) (*connect.Response[v1.SetUserServicesResponse], error)
 	DeleteUser(context.Context, *connect.Request[v1.DeleteUserRequest]) (*connect.Response[v1.DeleteUserResponse], error)
+	// SetUserTraffic sets or removes a user's traffic limit, its period and
+	// reset day, or zeroes the current period's count
+	// (docs/spec/traffic-limit-v1.md §3.6). A user at or over the limit is
+	// taken off every profile, as an expired one, until the period resets
+	// or the limit is raised. A request that changes nothing is invalid.
+	SetUserTraffic(context.Context, *connect.Request[v1.SetUserTrafficRequest]) (*connect.Response[v1.SetUserTrafficResponse], error)
 	// ExportUser returns a user's profiles: the links of their subscription
 	// (docs/spec/subscription-v1.md §4), each with the next one while a
 	// switch is pending (P-10). They hold the user's credentials, so the
@@ -1025,6 +1052,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		NodeServiceDeleteUserProcedure,
 		svc.DeleteUser,
 		connect.WithSchema(nodeServiceMethods.ByName("DeleteUser")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceSetUserTrafficHandler := connect.NewUnaryHandler(
+		NodeServiceSetUserTrafficProcedure,
+		svc.SetUserTraffic,
+		connect.WithSchema(nodeServiceMethods.ByName("SetUserTraffic")),
 		connect.WithHandlerOptions(opts...),
 	)
 	nodeServiceExportUserHandler := connect.NewUnaryHandler(
@@ -1281,6 +1314,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceSetUserServicesHandler.ServeHTTP(w, r)
 		case NodeServiceDeleteUserProcedure:
 			nodeServiceDeleteUserHandler.ServeHTTP(w, r)
+		case NodeServiceSetUserTrafficProcedure:
+			nodeServiceSetUserTrafficHandler.ServeHTTP(w, r)
 		case NodeServiceExportUserProcedure:
 			nodeServiceExportUserHandler.ServeHTTP(w, r)
 		case NodeServiceListServicesProcedure:
@@ -1392,6 +1427,10 @@ func (UnimplementedNodeServiceHandler) SetUserServices(context.Context, *connect
 
 func (UnimplementedNodeServiceHandler) DeleteUser(context.Context, *connect.Request[v1.DeleteUserRequest]) (*connect.Response[v1.DeleteUserResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.DeleteUser is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetUserTraffic(context.Context, *connect.Request[v1.SetUserTrafficRequest]) (*connect.Response[v1.SetUserTrafficResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetUserTraffic is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) ExportUser(context.Context, *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error) {

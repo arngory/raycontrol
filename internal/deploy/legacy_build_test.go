@@ -18,10 +18,11 @@ import (
 // ICMP of spec/icmp-v1.md, which came beside Inputs), kept as the
 // oracle of TestBuildFromInputs: the plan rayctl now builds from rayd's
 // inputs must be the plan rayd built from its model, byte for byte, so
-// that nothing changes on a node. One change only, made in both on
+// that nothing changes on a node. Two changes only, made in both on
 // purpose: the credentials are copied in by rayd's credential command,
-// not by install(1) (copyIn, spec/apply-plan-v1.md §6, 3). Remove it with
-// GetDeployment's files (§4.1, step 8).
+// not by install(1) (copyIn, spec/apply-plan-v1.md §6, 3), and naive
+// gives its users' bytes on a stats socket (traffic-limit-v1 §2.3).
+// Remove it with GetDeployment's files (§4.1, step 8).
 func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binaries) Plan {
 	var plan Plan
 	var inner *render.Service
@@ -250,7 +251,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 				copyIn(bin.Rayd, anchor, renderedOwner, g, path.Join(dir, render.NaiveKey), key),
 				"ExecStart=" + bin.Rayd + " naive -answer " + answer + " -users " + path.Join(dir, render.NaiveUsers) +
 					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name) +
-					" -quic-socket " + p.NaiveQUICSocket(s.Name) + probeArg + frontUID + icmp,
+					" -quic-socket " + p.NaiveQUICSocket(s.Name) + " -stats-socket " + p.StatsSocket(s.Name) + probeArg + frontUID + icmp,
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
 				"ReadWritePaths=" + path.Dir(p.NaiveSocket(s.Name)),

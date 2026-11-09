@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -45,34 +46,75 @@ type User struct {
 	Note         string
 	CreatedAt    time.Time
 	Services     []int64 // allowed service IDs
+	// The limit's period (traffic-limit-v1 §3.4): PeriodMonthly from
+	// TrafficResetDay, or PeriodNone; kept whether or not there is a limit.
+	TrafficPeriod   string
+	TrafficResetDay int
+	// The current period's count as rayd last wrote it, with a limit only:
+	// its start (zero without a limit) and its bytes at the destinations'
+	// side. Used and the methods beside it read them at a moment.
+	TrafficStart           time.Time
+	TrafficUp, TrafficDown int64
+	// TrafficCountedFrom is when the limit was set: rayd counts the bytes
+	// of the processes it read after that, not before.
+	TrafficCountedFrom time.Time
 }
 
-// CreateUser inserts u and returns it with its ID.
+// CreateUser inserts u and returns it with its ID. A limit counts from now.
 func (s *Store) CreateUser(ctx context.Context, u User) (User, error) {
 	if err := checkName("user", u.Name); err != nil {
 		return u, err
 	}
-	u.CreatedAt = s.now().Truncate(time.Second)
-	res, err := s.db.ExecContext(ctx, `INSERT INTO users (name, enabled, expires_at, traffic_limit_bytes, note, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		u.Name, u.Enabled, nullTime(u.ExpiresAt), u.TrafficLimit, u.Note, u.CreatedAt.Unix())
-	if err != nil {
+	u.TrafficPeriod = cmp.Or(u.TrafficPeriod, PeriodMonthly)
+	u.TrafficResetDay = cmp.Or(u.TrafficResetDay, 1)
+	if err := CheckTrafficPeriod(u.TrafficPeriod, u.TrafficResetDay); err != nil {
 		return u, err
 	}
-	u.ID, err = res.LastInsertId()
+	if u.TrafficLimit != nil && *u.TrafficLimit <= 0 {
+		return u, fmt.Errorf("%w traffic limit %d: more than 0 bytes, or none", ErrInvalid, *u.TrafficLimit)
+	}
+	u.CreatedAt = s.now().Truncate(time.Second)
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `INSERT INTO users (name, enabled, expires_at, traffic_limit_bytes, note, created_at, traffic_period, traffic_reset_day)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			u.Name, u.Enabled, nullTime(u.ExpiresAt), u.TrafficLimit, u.Note, u.CreatedAt.Unix(), u.TrafficPeriod, u.TrafficResetDay)
+		if err != nil {
+			return err
+		}
+		if u.ID, err = res.LastInsertId(); err != nil {
+			return err
+		}
+		if u.TrafficLimit != nil {
+			u.TrafficStart, u.TrafficCountedFrom = u.CreatedAt, u.CreatedAt
+			_, err = tx.ExecContext(ctx, `INSERT INTO user_traffic (user_id, period_start, counted_from) VALUES (?, ?, ?)`,
+				u.ID, u.CreatedAt.Unix(), u.CreatedAt.Unix())
+		}
+		return err
+	})
 	return u, err
 }
 
-const userCols = `id, name, enabled, expires_at, traffic_limit_bytes, note, created_at`
+// userSelect reads users with their count, in scanUser's order.
+const userSelect = `SELECT u.id, u.name, u.enabled, u.expires_at, u.traffic_limit_bytes, u.note, u.created_at,
+	u.traffic_period, u.traffic_reset_day, t.period_start, t.counted_from, coalesce(t.up, 0), coalesce(t.down, 0)
+	FROM users u LEFT JOIN user_traffic t ON t.user_id = u.id`
 
 func scanUser(row interface{ Scan(...any) error }) (User, error) {
 	var u User
-	var exp, limit sql.NullInt64
+	var exp, limit, start, from sql.NullInt64
 	var created int64
-	if err := row.Scan(&u.ID, &u.Name, &u.Enabled, &exp, &limit, &u.Note, &created); err != nil {
+	if err := row.Scan(&u.ID, &u.Name, &u.Enabled, &exp, &limit, &u.Note, &created,
+		&u.TrafficPeriod, &u.TrafficResetDay, &start, &from, &u.TrafficUp, &u.TrafficDown); err != nil {
 		return u, err
 	}
 	u.ExpiresAt = timePtr(exp)
-	if limit.Valid {
+	switch {
+	case !limit.Valid:
+		u.TrafficUp, u.TrafficDown = 0, 0
+	case start.Valid:
+		u.TrafficLimit = &limit.Int64
+		u.TrafficStart, u.TrafficCountedFrom = time.Unix(start.Int64, 0), time.Unix(from.Int64, 0)
+	default:
 		u.TrafficLimit = &limit.Int64
 	}
 	u.CreatedAt = time.Unix(created, 0)
@@ -81,7 +123,7 @@ func scanUser(row interface{ Scan(...any) error }) (User, error) {
 
 // UserByName returns a user with its allowed services.
 func (s *Store) UserByName(ctx context.Context, name string) (User, error) {
-	u, err := scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE name = ?`, name))
+	u, err := scanUser(s.db.QueryRowContext(ctx, userSelect+` WHERE u.name = ?`, name))
 	if errors.Is(err, sql.ErrNoRows) {
 		return u, fmt.Errorf("user %q: %w", name, ErrNotFound)
 	}
@@ -94,7 +136,7 @@ func (s *Store) UserByName(ctx context.Context, name string) (User, error) {
 
 // ListUsers returns all users ordered by name.
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+userCols+` FROM users ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, userSelect+` ORDER BY u.name`)
 	if err != nil {
 		return nil, err
 	}
@@ -661,50 +703,88 @@ func (s *Store) RevokeDevice(ctx context.Context, id string) error {
 }
 
 // SPADevices returns the devices that may currently pass SPA: not revoked,
-// owned by an enabled and unexpired user, with that user's enabled services
-// plus the subscription service, which every device may reach, and the API
-// for admin devices registered through it (they have a client certificate).
-// Active invites pass too, to the API only (R3-3).
+// owned by an enabled and unexpired user (User.Live), with the
+// subscription service, which every device may reach, the API for admin
+// devices registered through it (they have a client certificate), and the
+// user's enabled services while the user is Active: one over the traffic
+// limit keeps the subscription and the API, no data service
+// (traffic-limit-v1 §3.1). Active invites pass too, to the API only (R3-3).
 func (s *Store) SPADevices(ctx context.Context) ([]spa.Device, error) {
-	now := s.now().Unix()
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT d.id, d.spa_key, sv.id
-		FROM devices d
-		JOIN users u ON u.id = d.user_id
-		JOIN services sv ON sv.enabled = 1 AND (sv.kind = 'subscription'
-			OR (sv.kind = 'api' AND d.role = 'admin' AND d.cert_pin IS NOT NULL)
-			OR sv.id IN (SELECT service_id FROM user_services WHERE user_id = u.id))
-		WHERE d.revoked_at IS NULL AND u.enabled = 1
-		  AND (u.expires_at IS NULL OR u.expires_at > ?)
-		UNION ALL
-		SELECT i.id, i.spa_key, sv.id
-		FROM invites i
-		JOIN users u ON u.id = i.user_id
-		JOIN services sv ON sv.enabled = 1 AND sv.kind = 'api'
-		WHERE i.used_at IS NULL AND i.expires_at > ? AND u.enabled = 1
-		  AND (u.expires_at IS NULL OR u.expires_at > ?)
-		ORDER BY 1, 3`, now, now, now)
+	now := s.now()
+	users, err := s.ListUsers(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []spa.Device
+	byID := make(map[int64]User, len(users))
+	for _, u := range users {
+		byID[u.ID] = u
+	}
+	services, err := s.ListServices(ctx) // by ID
+	if err != nil {
+		return nil, err
+	}
+	// allowed is a device's scope, sorted.
+	allowed := func(u User, admin, invite bool) []uint16 {
+		var ids []uint16
+		for _, svc := range services {
+			switch {
+			case !svc.Enabled:
+			case invite:
+				if svc.Kind == "api" {
+					ids = append(ids, uint16(svc.ID)) //nolint:gosec // G115: service IDs fit (CHECK)
+				}
+			case svc.Kind == "subscription", svc.Kind == "api" && admin,
+				u.Active(now) && slices.Contains(u.Services, svc.ID):
+				ids = append(ids, uint16(svc.ID)) //nolint:gosec // G115: service IDs fit (CHECK)
+			}
+		}
+		return ids
+	}
+	type row struct {
+		id     string
+		key    []byte
+		user   int64
+		admin  bool
+		invite bool
+	}
+	var list []row
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT d.id, d.spa_key, d.user_id, d.role = 'admin' AND d.cert_pin IS NOT NULL, 0
+		FROM devices d WHERE d.revoked_at IS NULL
+		UNION ALL
+		SELECT i.id, i.spa_key, i.user_id, 0, 1
+		FROM invites i WHERE i.used_at IS NULL AND i.expires_at > ?
+		ORDER BY 1`, now.Unix())
+	if err != nil {
+		return nil, err
+	}
 	for rows.Next() {
-		var id string
-		var key []byte
-		var svc uint16
-		if err := rows.Scan(&id, &key, &svc); err != nil {
+		var r row
+		if err := rows.Scan(&r.id, &r.key, &r.user, &r.admin, &r.invite); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		if len(out) == 0 || out[len(out)-1].ID != id {
-			d := spa.Device{ID: id}
-			copy(d.Key[:], key)
-			out = append(out, d)
-		}
-		last := &out[len(out)-1]
-		last.Allowed = append(last.Allowed, svc)
+		list = append(list, r)
 	}
-	return out, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []spa.Device
+	for _, r := range list {
+		u, ok := byID[r.user]
+		if !ok || !u.Live(now) {
+			continue
+		}
+		ids := allowed(u, r.admin, r.invite)
+		if len(ids) == 0 {
+			continue
+		}
+		d := spa.Device{ID: r.id, Allowed: ids}
+		copy(d.Key[:], r.key)
+		out = append(out, d)
+	}
+	return out, nil
 }
 
 func (s *Store) affectOne(ctx context.Context, kind, ref, query string, args ...any) error {

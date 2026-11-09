@@ -1,5 +1,6 @@
 // Package xrayapi manages users of an Xray inbound through Xray's gRPC
-// HandlerService on a unix socket, without restarting Xray.
+// HandlerService on a unix socket, without restarting Xray, and reads the
+// users' byte counters through its StatsService.
 package xrayapi
 
 import (
@@ -7,12 +8,16 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/arngory/raycontrol/internal/gen/xray/app/proxyman/command"
 	"github.com/arngory/raycontrol/internal/gen/xray/app/proxyman/command/commandconnect"
+	statscmd "github.com/arngory/raycontrol/internal/gen/xray/app/stats/command"
+	statsconnect "github.com/arngory/raycontrol/internal/gen/xray/app/stats/command/commandconnect"
 	"github.com/arngory/raycontrol/internal/gen/xray/common/protocol"
 	"github.com/arngory/raycontrol/internal/gen/xray/common/serial"
 	"github.com/arngory/raycontrol/internal/gen/xray/proxy/vless"
@@ -26,6 +31,10 @@ type Client struct {
 // Dial returns a client for the API socket. gRPC needs HTTP/2; over a unix
 // socket it runs without TLS.
 func Dial(socket string) *Client {
+	return &Client{c: commandconnect.NewHandlerServiceClient(unixHTTP(socket), "http://xray", connect.WithGRPC())}
+}
+
+func unixHTTP(socket string) *http.Client {
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
@@ -34,7 +43,61 @@ func Dial(socket string) *Client {
 		Protocols: new(http.Protocols),
 	}
 	tr.Protocols.SetUnencryptedHTTP2(true)
-	return &Client{c: commandconnect.NewHandlerServiceClient(&http.Client{Transport: tr}, "http://xray", connect.WithGRPC())}
+	return &http.Client{Transport: tr}
+}
+
+// Stats reads the users' byte counters of one Xray instance, on the same
+// API socket (StatsService, rendered while a user has a traffic limit:
+// docs/spec/traffic-limit-v1.md §2.1).
+type Stats struct {
+	c statsconnect.StatsServiceClient
+}
+
+// statsMaxBytes bounds an answer: ~100 bytes a counter, two a name, three
+// names a user while credentials rotate. The process is not trusted to
+// send a sane one.
+const statsMaxBytes = 8 << 20
+
+// DialStats returns a stats client for the API socket.
+func DialStats(socket string) *Stats {
+	return &Stats{c: statsconnect.NewStatsServiceClient(unixHTTP(socket), "http://xray", connect.WithGRPC(),
+		connect.WithReadMaxBytes(statsMaxBytes))}
+}
+
+// Counter is a user's bytes: Up from the client to destinations
+// (uplink), Down back (downlink).
+type Counter struct{ Up, Down int64 }
+
+// Users returns each user's counters by email, as they are (reading
+// resets nothing), and the process's uptime: a counter is from the
+// process's start or the user's first connection since. Counters with
+// other names, and negative values, are left out.
+func (s *Stats) Users(ctx context.Context) (map[string]Counter, time.Duration, error) {
+	sys, err := s.c.GetSysStats(ctx, connect.NewRequest(&statscmd.SysStatsRequest{}))
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := s.c.QueryStats(ctx, connect.NewRequest(&statscmd.QueryStatsRequest{Pattern: "user>>>", Reset_: false}))
+	if err != nil {
+		return nil, 0, err
+	}
+	out := map[string]Counter{}
+	for _, st := range resp.Msg.Stat {
+		rest, ok := strings.CutPrefix(st.Name, "user>>>")
+		if !ok || st.Value < 0 {
+			continue
+		}
+		if email, ok := strings.CutSuffix(rest, ">>>traffic>>>uplink"); ok {
+			c := out[email]
+			c.Up = st.Value
+			out[email] = c
+		} else if email, ok := strings.CutSuffix(rest, ">>>traffic>>>downlink"); ok {
+			c := out[email]
+			c.Down = st.Value
+			out[email] = c
+		}
+	}
+	return out, time.Duration(sys.Msg.Uptime) * time.Second, nil
 }
 
 func typed(m proto.Message) (*serial.TypedMessage, error) {

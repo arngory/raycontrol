@@ -231,11 +231,12 @@ func appendAddr(b []byte, ap netip.AddrPort) []byte {
 
 // uotStream is one UoT stream's state.
 type uotStream struct {
-	s     *Server
-	ctx   context.Context
-	user  [32]byte
-	names map[string]uotResolved
-	last  atomic.Int64 // mono: the last packet either way
+	s       *Server
+	ctx     context.Context
+	user    [32]byte
+	traffic *Traffic // the payloads sent and passed back count (nil: for nobody)
+	names   map[string]uotResolved
+	last    atomic.Int64 // mono: the last packet either way
 
 	mu     sync.Mutex
 	peers  map[netip.AddrPort]int64 // where the client sent, and when: answers come from these only
@@ -346,7 +347,7 @@ type deadlines interface {
 // runs out or ctx is done; errRefused when the stream must be reset. Only
 // this goroutine's helper writes to the stream, and it is done when this
 // returns.
-func (s *Server) serveUoT(ctx context.Context, user [32]byte, stream io.ReadWriter, dl deadlines) error {
+func (s *Server) serveUoT(ctx context.Context, user [32]byte, traffic *Traffic, stream io.ReadWriter, dl deadlines) error {
 	idle := s.uotIdle
 	if idle == 0 {
 		idle = uotIdle
@@ -370,7 +371,7 @@ func (s *Server) serveUoT(ctx context.Context, user [32]byte, stream io.ReadWrit
 		return nil
 	}
 	_ = dl.SetReadDeadline(time.Time{})
-	u := &uotStream{s: s, ctx: ctx, user: user, names: map[string]uotResolved{}, peers: map[netip.AddrPort]int64{}}
+	u := &uotStream{s: s, ctx: ctx, user: user, traffic: traffic, names: map[string]uotResolved{}, peers: map[netip.AddrPort]int64{}}
 	u.touch()
 
 	// The errors say why, never where: no destination in the log.
@@ -503,13 +504,17 @@ func (u *uotStream) send(r *bufio.Reader, conn *net.UDPConn, connected bool, des
 	}
 	u.touch()
 	var err error
+	n := 0
 	if connected {
 		// A destination that answers "unreachable" fails a write or two:
 		// the stream lives on, as UDP would.
-		_, err = conn.Write(b)
+		n, err = conn.Write(b)
 	} else if to, ok := u.resolve(dest); ok && u.mayReach(to) {
-		_, err = conn.WriteToUDPAddrPort(b, to)
+		n, err = conn.WriteToUDPAddrPort(b, to)
 	} // else not allowed, no address or no room: dropped
+	if err == nil {
+		u.traffic.addUp(n) // the payload, as it went to the destination
+	}
 	if errors.Is(err, net.ErrClosed) {
 		return err
 	}
@@ -548,5 +553,6 @@ func (u *uotStream) downstream(conn *net.UDPConn, w io.Writer, connected bool) {
 		if _, err := w.Write(buf[start : headRoom+n]); err != nil {
 			return
 		}
+		u.traffic.addDown(n) // the payload, as it came from the destination
 	}
 }
