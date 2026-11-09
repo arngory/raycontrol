@@ -408,7 +408,11 @@ func IsHysteria(kind string) bool { return kind == "hy2-masq" || kind == "hy2-ob
 func IsXray(kind string) bool { return slices.Contains(XrayKinds, kind) }
 
 // XrayUsers returns the inbound tag and the users (email -> UUID) of an Xray
-// service, as rayd syncs them through the API.
+// service, as rayd syncs them through the API; the same names and secrets
+// go into the users files of Hysteria2 and naive. Each credential goes by
+// its own name for its whole life (store.CredentialName): a switch, the
+// next becoming current and the current previous, leaves the set as it
+// was, and only a credential published or past its grace comes or goes.
 func XrayUsers(m Model, s Service) (tag string, users map[string]string) {
 	creds := m.Inner
 	tag = InnerTag
@@ -426,15 +430,15 @@ func XrayUsers(m Model, s Service) (tag string, users map[string]string) {
 	}
 	users = make(map[string]string, len(creds))
 	for id, uuid := range creds {
-		users[InnerEmail(id)] = uuid
+		users[store.CredentialName(id, uuid)] = uuid
 		// While a credential rotates, the next UUID (and for a grace period
 		// the previous one) gets in too.
 		if set, ok := m.Sets[s.ID][id]; ok {
 			if set.Next != "" {
-				users[InnerEmail(id)+"-n"] = set.Next
+				users[store.CredentialName(id, set.Next)] = set.Next
 			}
 			if set.Prev != "" && now.Before(set.PrevUntil) {
-				users[InnerEmail(id)+"-p"] = set.Prev
+				users[store.CredentialName(id, set.Prev)] = set.Prev
 			}
 		}
 	}
@@ -1196,7 +1200,10 @@ func (m Model) SubscriptionPort() int {
 // InnerTag is the inbound tag of the inner stage (Xray API target).
 const InnerTag = "inner"
 
-// InnerEmail is the Xray user identifier of a raycontrol user.
+// InnerEmail is a raycontrol user's base name, u<id>: each of the user's
+// credentials goes by it, a dash and the credential's fingerprint
+// (store.CredentialName), and niko-server's session stats take it for all
+// of them (u<id>-*). The Yggdrasil users file labels keys by it.
 func InnerEmail(userID int64) string { return fmt.Sprintf("u%d", userID) }
 
 func innerConfig(s Service, m Model, p Paths) (File, error) {
@@ -1525,8 +1532,9 @@ func (p Paths) FrontSalamander(service string) string {
 // like the site; hy2-obfs with a self-signed certificate clients pin,
 // inside salamander.
 // hysteriaUsers is a Hysteria2 backend's users file: the current credential
-// of each, and the next and previous while they rotate (R4-1), under
-// distinct names.
+// of each, and the next and previous while they rotate (R4-1), each under
+// its own name (store.CredentialName). niko-server keeps the connections
+// of a name whose password stays: a switch cuts none.
 func hysteriaUsers(m Model, s Service) ([]byte, error) {
 	_, creds := XrayUsers(m, s)
 	type user struct {
@@ -1669,7 +1677,7 @@ const (
 // when they rotate.
 // naiveUsers is a naive process's users file: the hash of each credential
 // and the name its bytes are counted under (traffic-limit-v1 §2.3), the
-// names as Xray's and Hysteria2's (u<id>, u<id>-n, u<id>-p). rayd naive
+// names as Xray's and Hysteria2's (store.CredentialName). rayd naive
 // before v0.22.0 read a list of the hashes; this one reads both.
 func naiveUsers(m Model, s Service) ([]byte, error) {
 	_, users := XrayUsers(m, s)

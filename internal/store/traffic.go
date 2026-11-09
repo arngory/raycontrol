@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -235,21 +236,22 @@ func (s *Store) SetUserTraffic(ctx context.Context, name string, c TrafficChange
 	return s.UserByName(ctx, name)
 }
 
-// TrafficNames are the names a user's counters go by in the data plane:
-// u<id>, and u<id>-n and u<id>-p while a credential rotates.
-func TrafficNames(id int64) []string {
-	n := "u" + strconv.FormatInt(id, 10)
-	return []string{n, n + "-n", n + "-p"}
-}
+// maxTrafficName bounds a counter's name: u, an ID of up to 19 digits, a
+// dash and a credential's fingerprint (CredentialName).
+const maxTrafficName = 1 + 19 + 1 + 2*credentialPrint
 
-// TrafficUser is the user a counter's name belongs to (TrafficNames).
+// TrafficUser is the user a counter's name belongs to: u<id> and the
+// names of the user's credentials, u<id>-<fingerprint> (CredentialName).
+// u<id>-n and u<id>-p are the names rayd before v0.23.0 gave the next and
+// the previous credential: a process that runs across the update counts
+// under them, and under u<id>, until it restarts.
 func TrafficUser(name string) (int64, bool) {
-	if len(name) < 2 || len(name) > 24 || name[0] != 'u' {
+	if len(name) < 2 || len(name) > maxTrafficName || name[0] != 'u' {
 		return 0, false
 	}
-	digits := name[1:]
-	if n := len(digits); n > 2 && digits[n-2] == '-' && (digits[n-1] == 'n' || digits[n-1] == 'p') {
-		digits = digits[:n-2]
+	digits, suffix, dashed := strings.Cut(name[1:], "-")
+	if dashed && suffix != "n" && suffix != "p" && !isCredentialPrint(suffix) {
+		return 0, false
 	}
 	if digits == "" || digits[0] == '0' {
 		return 0, false
@@ -263,9 +265,12 @@ func TrafficUser(name string) (int64, bool) {
 	return id, err == nil
 }
 
+// deleteMarks forgets the marks of every name of a user: u<id> and
+// u<id>-<anything> (marks are kept only of names TrafficUser reads, so
+// these are the user's own).
 func deleteMarks(ctx context.Context, tx *sql.Tx, user int64) error {
-	n := TrafficNames(user)
-	_, err := tx.ExecContext(ctx, `DELETE FROM traffic_marks WHERE name IN (?, ?, ?)`, n[0], n[1], n[2])
+	n := "u" + strconv.FormatInt(user, 10)
+	_, err := tx.ExecContext(ctx, `DELETE FROM traffic_marks WHERE name = ? OR name GLOB ?`, n, n+"-*")
 	return err
 }
 

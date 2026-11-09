@@ -219,7 +219,7 @@ func TestTrafficWithXray(t *testing.T) {
 	if err != nil || uptime > time.Minute {
 		t.Fatalf("stats: %v %v", users, err)
 	}
-	if c := users[render.InnerEmail(u.ID)]; c.Up != upload || c.Down != 3*upload {
+	if c := users[store.CredentialName(u.ID, id)]; c.Up != upload || c.Down != 3*upload {
 		t.Fatalf("Xray counted %+v, want %d/%d", c, upload, 3*upload)
 	}
 	round()

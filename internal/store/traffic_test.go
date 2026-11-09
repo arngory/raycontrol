@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -173,9 +175,17 @@ func TestSetUserTraffic(t *testing.T) {
 	if u, err = s.SetUserTraffic(ctx, "alice", TrafficChange{ResetUsage: true}); err != nil || u.Used(now) != 0 || !u.TrafficStart.Equal(now) {
 		t.Fatalf("reset: %v, used %d since %v", err, u.Used(now), u.TrafficStart)
 	}
-	// Off: the count and the marks of the user's names go.
-	if err := s.WriteTraffic(ctx, TrafficWrite{Sources: map[string]TrafficSource{"hy2:h": {Boot: "b", Polled: now,
-		Marks: map[string]TrafficCounter{"u1": {1, 2}, "u1-n": {3, 4}, "u10": {5, 6}}}}}); err != nil {
+	// Off: the count and the marks of the user's names go, the names by
+	// role from before v0.23.0 and its credentials' names, at every source;
+	// u10's stay.
+	if u.ID != 1 {
+		t.Fatalf("alice is user %d", u.ID)
+	}
+	if err := s.WriteTraffic(ctx, TrafficWrite{Sources: map[string]TrafficSource{
+		"hy2:h": {Boot: "b", Polled: now, Marks: map[string]TrafficCounter{"u1": {1, 2}, "u1-n": {3, 4}, "u1-p": {3, 4}, "u10": {5, 6},
+			CredentialName(1, "a"): {7, 8}, CredentialName(10, "a"): {9, 10}}},
+		"xray:x": {Boot: "b", Polled: now, Marks: map[string]TrafficCounter{CredentialName(1, "b"): {7, 8}}},
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	off := int64(0)
@@ -192,7 +202,10 @@ func TestSetUserTraffic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m := srcs["hy2:h"].Marks; len(m) != 1 || m["u10"] != (TrafficCounter{5, 6}) {
+	if m := srcs["hy2:h"].Marks; len(m) != 2 || m["u10"] != (TrafficCounter{5, 6}) || m[CredentialName(10, "a")] != (TrafficCounter{9, 10}) {
+		t.Fatalf("marks %v", m)
+	}
+	if m := srcs["xray:x"].Marks; len(m) != 0 {
 		t.Fatalf("marks %v", m)
 	}
 	var rows int
@@ -261,22 +274,58 @@ func TestWriteTrafficGuards(t *testing.T) {
 }
 
 func TestTrafficUser(t *testing.T) {
-	for name, want := range map[string]int64{"u1": 1, "u5-n": 5, "u17-p": 17, "u123456789": 123456789} {
+	for name, want := range map[string]int64{"u1": 1, "u5-n": 5, "u17-p": 17, "u123456789": 123456789,
+		"u5-0123456789abcdef": 5, "u9223372036854775807-ffffffffffffffff": 1<<63 - 1} {
 		if id, ok := TrafficUser(name); !ok || id != want {
 			t.Errorf("%s: %d %v", name, id, ok)
 		}
 	}
-	for _, name := range []string{"", "u", "u0", "u01", "u-n", "u5-x", "u5-", "x5", "u5n", "u 5", "u+5", "u99999999999999999999", "probe", "u5-n-n"} {
+	for _, name := range []string{"", "u", "u0", "u01", "u-n", "u5-x", "u5-", "x5", "u5n", "u 5", "u+5", "u99999999999999999999", "probe", "u5-n-n",
+		"u5-0123456789abcde", "u5-0123456789abcdef0", "u5-0123456789ABCDEF", "u5-0123456789abcdeg", "u-0123456789abcdef",
+		"u05-0123456789abcdef", "u5-0123456789abcdef-n", "u5-n-0123456789abcdef", "u5--0123456789abcdef", "u5_0123456789abcdef",
+		"u0-0123456789abcdef", "u99999999999999999999-0123456789abcdef"} {
 		if id, ok := TrafficUser(name); ok {
 			t.Errorf("%q: %d", name, id)
 		}
 	}
-	for _, id := range []int64{1, 9, 4242} {
-		for _, n := range TrafficNames(id) {
+	// Every credential's name folds to its user, whatever the secret.
+	for _, id := range []int64{1, 9, 4242, 1<<63 - 1} {
+		for _, secret := range []string{"", "6f1c2a3b-0000-4000-8000-000000000007", "pw", strings.Repeat("x", 300)} {
+			n := CredentialName(id, secret)
 			if got, ok := TrafficUser(n); !ok || got != id {
-				t.Errorf("%s: %d", n, got)
+				t.Errorf("%s: %d %v", n, got, ok)
 			}
 		}
+	}
+}
+
+// A credential's name: the user's, a dash and 16 hex digits of the secret's
+// fingerprint. The same secret has the same name, always; another secret,
+// of the same user or another's, another name; and the name does not carry
+// the secret.
+func TestCredentialName(t *testing.T) {
+	const secret = "6f1c2a3b-0000-4000-8000-000000000007"
+	n := CredentialName(5, secret)
+	if !strings.HasPrefix(n, "u5-") || len(n) != len("u5-")+16 || !isCredentialPrint(n[3:]) {
+		t.Fatalf("name %q", n)
+	}
+	if CredentialName(5, secret) != n || CredentialName(6, secret) != "u6-"+n[3:] || CredentialName(5, secret+" ") == n {
+		t.Fatalf("not one name per secret: %q", n)
+	}
+	for _, part := range strings.Split(secret, "-") {
+		if strings.Contains(n, part) {
+			t.Fatalf("the name %q carries the secret", n)
+		}
+	}
+	// Many secrets, as rotation makes them: never one name twice.
+	seen := map[string]string{}
+	for i := range 20000 {
+		s := fmt.Sprintf("6f1c2a3b-0000-4000-8000-%012d", i)
+		name := CredentialName(5, s)
+		if other, ok := seen[name]; ok {
+			t.Fatalf("%q and %q both named %s", other, s, name)
+		}
+		seen[name] = s
 	}
 }
 

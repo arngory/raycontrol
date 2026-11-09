@@ -140,7 +140,7 @@ func TestRevokeCutsXrayConnections(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	c := xrayapi.Dial(paths.APISocket("inner"))
-	if _, removed, err := c.SyncVLESS(ctx, render.InnerTag, "", map[string]string{"u7": kept}); err != nil || removed != 1 {
+	if _, removed, err := c.SyncVLESS(ctx, render.InnerTag, "", map[string]string{store.CredentialName(7, kept): kept}); err != nil || removed != 1 {
 		t.Fatalf("sync: removed %d, %v", removed, err)
 	}
 	cut := time.Now()

@@ -473,7 +473,10 @@ func (a *Accountant) write(ctx context.Context, w store.TrafficWrite, now time.T
 
 // take reads a source's counters against its marks: the bytes each user
 // gained since the last poll, and the new marks. For each name of a user
-// with a limit (store.TrafficNames):
+// with a limit (store.TrafficUser: u<id> and its credentials' names, which
+// a credential keeps for its whole life and no other secret takes; a
+// process keeps the counter of a name gone until it restarts, so a mark
+// follows it to the end of the run):
 //   - a user whose limit was set after the source's last poll is counted
 //     from this one (the mark is the value), unless the process started
 //     after the limit (Xray says when): all its counters are since then;

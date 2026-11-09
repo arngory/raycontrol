@@ -768,8 +768,9 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 			}
 			return out
 		},
-		// The device's user as the Hysteria2 users file names it: link then
-		// lists that user's own sessions one by one (niko-server v0.7).
+		// The device's user's base name, u<id>: niko-server lists the
+		// sessions of every name under it, u<id>-*, the user's credentials
+		// in the Hysteria2 users file, one by one (niko-server v0.7).
 		Account: func(ctx context.Context, device string) (string, error) {
 			d, _, err := st.ActiveDevice(ctx, device)
 			if err != nil {
