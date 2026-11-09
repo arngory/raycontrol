@@ -205,8 +205,7 @@ func (s *Store) SetUserTraffic(ctx context.Context, name string, c TrafficChange
 					u.ID, now.Unix(), now.Unix()); err != nil {
 					return err
 				}
-				hadRow = false // a fresh period: nothing below moves it
-				u.TrafficStart = now
+				u.TrafficStart = now // a fresh period: nothing below moves it (hadRow is false)
 			}
 		}
 		if !limited {
