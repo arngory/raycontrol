@@ -57,7 +57,9 @@ func (gg *guardGate) tick(t *testing.T, d time.Duration) {
 // The guard switches on at 85 % of the stand-in max, off at 70 % but not
 // before two minutes; the table follows, a restore puts it back; it
 // reports each switch and once a minute; its warnings come a line in ten
-// minutes at most, the next telling the switches between.
+// minutes at most, the next telling the switches between; switches only
+// counted get their line once the ten minutes are past, with no switch
+// of their own.
 func TestGuardSwitches(t *testing.T) {
 	gg := newGuardGate(t)
 	gg.count = 849
@@ -125,6 +127,28 @@ func TestGuardSwitches(t *testing.T) {
 	if out := gg.log.String(); !strings.Contains(out, "conntrack guard off") || !strings.Contains(out, "was_on=11m0s") ||
 		!strings.Contains(out, "entries=650") || !strings.Contains(out, "refused=") {
 		t.Errorf("the off line lacks numbers:\n%s", out)
+	}
+	// On and off again within ten minutes of that line: only counted; the
+	// first tick past the ten minutes tells the guard is off.
+	gg.log.Reset()
+	gg.count = 900
+	gg.tick(t, time.Minute)
+	gg.count = 600
+	gg.tick(t, 2*time.Minute)
+	gg.tick(t, time.Minute)
+	if out := gg.log.String(); out != "" {
+		t.Errorf("logged within ten minutes:\n%s", out)
+	}
+	gg.tick(t, 7*time.Minute)
+	out = gg.log.String()
+	if strings.Count(out, "conntrack guard off") != 1 || !strings.Contains(out, "switches_since_last_line=2") ||
+		!strings.Contains(out, "was_on=2m0s") || !strings.Contains(out, "entries=600") {
+		t.Errorf("the off line after the ten minutes:\n%s", out)
+	}
+	gg.log.Reset()
+	gg.tick(t, 11*time.Minute)
+	if out := gg.log.String(); out != "" {
+		t.Errorf("a line with nothing new:\n%s", out)
 	}
 }
 

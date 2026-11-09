@@ -22,7 +22,9 @@ const (
 	guardOffPct = 70
 	guardHold   = 2 * time.Minute
 	// guardLogEvery bounds the guard's warnings: a switch logged, the next
-	// within this only counted, and told with the next line.
+	// within this only counted, and told with the next line: the next
+	// switch's, or past this the next tick's, with the state as it is then
+	// (else a guard that went off within it would never say so).
 	guardLogEvery = 10 * time.Minute
 	// guardReportEvery: the state goes to rayd at each switch and this
 	// often, so a rayd started anew knows within it.
@@ -127,6 +129,11 @@ func (g *Gate) guardLocked(now time.Time) {
 	}
 	if switched {
 		gd.switches++
+		g.guardLogLocked(now, count, max, onFor)
+	} else if gd.unlogged > 0 && now.Sub(gd.logged) >= guardLogEvery {
+		if !gd.on {
+			onFor = gd.since.Sub(gd.lastOn)
+		}
 		g.guardLogLocked(now, count, max, onFor)
 	}
 	g.guardApplyLocked(now)
