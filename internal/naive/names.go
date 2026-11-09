@@ -40,7 +40,22 @@ type names struct {
 	// The entries in the order they expire, answers and misses apart; one
 	// replaced since is passed over when its turn comes.
 	hits, misses expiries
+	// flights are the lookups under way: another miss of the same name
+	// waits for its answer, without a token or a query of its own.
+	flights map[string]*flight
 }
+
+// flight is one lookup under way, and its answer once done is closed.
+type flight struct {
+	done  chan struct{}
+	addrs []netip.Addr
+	until time.Time
+	err   error
+}
+
+// lookupTimeout bounds a lookup; each waiter for it gives up with its own
+// context.
+const lookupTimeout = 10 * time.Second
 
 type cachedName struct {
 	addrs []netip.Addr // none: a name that does not exist, or has no address
@@ -212,26 +227,73 @@ func (x *expiries) drop(m map[string]cachedName, gone func(expiry) bool) {
 // lookupName gives a name's addresses through the cache. A miss of the
 // cache pays a lookup token of the user's, unless paid already (TCP pays
 // before the 200, to answer 429): none left, no lookup. A host that is no
-// domain name is refused before either.
+// domain name is refused before either. Misses of one name at once share
+// one lookup: only the first pays.
 func (s *Server) lookupName(ctx context.Context, user, name string, paid bool) ([]netip.Addr, error) {
-	if !domainName(name) {
-		return nil, errBadName
-	}
-	now := s.lim.clock()
-	if addrs, _, err, ok := s.names.get(name, now); ok {
-		return addrs, err
-	}
-	if !paid && !s.lim.lookup(user) {
-		return nil, errors.New("naive: too many lookups")
-	}
-	addrs, err := s.resolve(ctx, name)
-	s.names.put(name, addrs, err, s.lim.clock())
-	return addrs[:min(len(addrs), nameAddrs)], err
+	addrs, _, err := s.lookupNameUntil(ctx, user, name, paid)
+	return addrs, err
 }
 
-// cached reports whether the cache knows a name now (TCP's check before
-// the 200).
+// errLookups is a miss without a lookup token.
+var errLookups = errors.New("naive: too many lookups")
+
+// lookupNameUntil is lookupName, with when the cache's answer expires
+// (zero: not kept).
+func (s *Server) lookupNameUntil(ctx context.Context, user, name string, paid bool) ([]netip.Addr, time.Time, error) {
+	if !domainName(name) {
+		return nil, time.Time{}, errBadName
+	}
+	c := &s.names
+	c.mu.Lock()
+	if addrs, until, err, ok := c.getLocked(name, s.lim.clock()); ok {
+		c.mu.Unlock()
+		return addrs, until, err
+	}
+	f := c.flights[name]
+	if f == nil {
+		if !paid && !s.lim.lookup(user) {
+			c.mu.Unlock()
+			return nil, time.Time{}, errLookups
+		}
+		f = &flight{done: make(chan struct{})}
+		if c.flights == nil {
+			c.flights = map[string]*flight{}
+		}
+		c.flights[name] = f
+		// Its own context: the first one's client may leave, the others
+		// still wait for the answer.
+		go s.fly(context.WithoutCancel(ctx), name, f)
+	}
+	c.mu.Unlock()
+	select {
+	case <-f.done:
+		return f.addrs, f.until, f.err
+	case <-ctx.Done():
+		return nil, time.Time{}, ctx.Err()
+	}
+}
+
+// fly looks a name up for its flight, keeps the answer and lets the
+// flight's waiters have it.
+func (s *Server) fly(ctx context.Context, name string, f *flight) {
+	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	addrs, err := s.resolve(ctx, name)
+	cancel()
+	c := &s.names
+	c.mu.Lock()
+	f.until = c.putLocked(name, addrs, err, s.lim.clock())
+	f.addrs, f.err = addrs[:min(len(addrs), nameAddrs)], err
+	delete(c.flights, name)
+	c.mu.Unlock()
+	close(f.done)
+}
+
+// cached reports whether the cache knows a name now, or a lookup of it is
+// under way (TCP's check before the 200: either needs no token).
 func (s *Server) cached(name string) bool {
-	_, _, _, ok := s.names.get(name, s.lim.clock())
-	return ok
+	c := &s.names
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, _, _, ok := c.getLocked(name, s.lim.clock())
+	return ok || c.flights[name] != nil
 }

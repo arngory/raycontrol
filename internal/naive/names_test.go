@@ -146,3 +146,56 @@ func TestNameCacheExpiry(t *testing.T) {
 		t.Fatal("full: h2 should have gone")
 	}
 }
+
+// Misses of one name at once share one lookup: only the first pays a token
+// (none left for the others, they are not refused), and the first one's
+// client leaving does not end the others' wait. A name under way needs no
+// token before the 200.
+func TestNameCacheInFlight(t *testing.T) {
+	var asked atomic.Int32
+	release := make(chan struct{})
+	h, connect := limitServer(t, nil)
+	h.Resolve = func(context.Context, string) ([]netip.Addr, error) {
+		asked.Add(1)
+		<-release
+		return []netip.Addr{netip.MustParseAddr("192.0.2.7")}, nil
+	}
+	h.Allow = func(netip.Addr) bool { return false } // no dial
+	h.lim.lookupBurst = 1
+	lctx, leave := context.WithCancel(context.Background())
+	first := make(chan error, 1)
+	go func() {
+		_, err := h.lookupName(lctx, "u5", "slow.test", false)
+		first <- err
+	}()
+	eventually(t, "not looked up", func() bool { return asked.Load() == 1 })
+	errs := make(chan error, 9)
+	for range cap(errs) {
+		go func() {
+			_, err := h.lookupName(context.Background(), "u5", "slow.test", false)
+			errs <- err
+		}()
+	}
+	// u5 has no token left: under way, the name needs none before the 200.
+	resp, err := connect("pw", "slow.test:443")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("a name under way: %v %v", resp, err)
+	}
+	time.Sleep(50 * time.Millisecond) // the others wait
+	leave()
+	if err := <-first; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the first one, gone: %v", err)
+	}
+	close(release)
+	for range cap(errs) {
+		if err := <-errs; err != nil {
+			t.Fatalf("a miss under way: %v", err)
+		}
+	}
+	if asked.Load() != 1 {
+		t.Fatalf("looked up %d times", asked.Load())
+	}
+	if got := h.Refused()["u5"][refusedLookup]; got != 0 {
+		t.Fatalf("refused %d lookups", got)
+	}
+}
