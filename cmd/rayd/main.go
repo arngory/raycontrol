@@ -239,8 +239,9 @@ func cmdServe(args []string) error {
 		log.Warn("UNSAFE: the client's releases are checked with a test key, not the client's", "key", key)
 	}
 	go srv.AppMirror.Run(ctx, func() time.Duration { return mrand.N(appmirror.Jitter) }) //nolint:gosec // G404: when to look, no secret
-	// The connection limits (spec/conn-limit-v1.md §7): naive's refusals by
-	// user every 15 s, the conntrack table, the guard as rayspa reports it.
+	// The connection limits (spec/conn-limit-v1.md §7): the refusals of
+	// naive, Hysteria2 and Xray by user every 15 s, the conntrack table,
+	// the guard as rayspa reports it.
 	srv.ConnLimit = &connlimit.Monitor{Sources: connLimitSources(st, paths), Off: st.ConnLimitOff, Health: hb, Log: log}
 	go srv.ConnLimit.Run(ctx)
 	per := &api.PerimeterServer{Server: srv, RayspaUID: -1, DefaultTTL: *spaTTL, MaxTTL: *spaMaxTTL, TCPCarrier: *spaTCP, Refresh: time.Minute}
@@ -1420,9 +1421,16 @@ func serveHTTP3(ctx context.Context, pc net.PacketConn, cert tls.Certificate, h 
 }
 
 // connLimitSources are the processes that count refusals of the connection
-// limits (spec/conn-limit-v1.md §2): each enabled naive service, read at its
-// stats socket with the traffic line. niko-server and Xray follow.
+// limits (spec/conn-limit-v1.md §2, §7), each enabled service's: naive and
+// the Hysteria2 backends (niko-server v0.17.0) at their stats socket with
+// the traffic line, the Xray processes (inner, REALITY) through their
+// API's StatsService, with the bytes. A process too old to count, or an
+// Xray whose config has no stats (the limits off, no traffic limit), fails
+// its read: nothing new from it.
 func connLimitSources(st *store.Store, paths render.Paths) func(ctx context.Context) ([]connlimit.Source, error) {
+	of := func(r traffic.Reading, err error) (connlimit.Reading, error) {
+		return connlimit.Reading{Boot: r.Boot, Age: r.Age, AgeKnown: r.AgeKnown, Limits: r.Limits}, err
+	}
 	return func(ctx context.Context) ([]connlimit.Source, error) {
 		services, err := st.ListServices(ctx)
 		if err != nil {
@@ -1430,14 +1438,20 @@ func connLimitSources(st *store.Store, paths render.Paths) func(ctx context.Cont
 		}
 		var out []connlimit.Source
 		for _, svc := range services {
-			if !svc.Enabled || svc.Kind != "naive" {
-				continue
+			switch {
+			case !svc.Enabled:
+			case svc.Kind == "naive" || render.IsHysteria(svc.Kind):
+				socket := paths.StatsSocket(svc.Name)
+				out = append(out, connlimit.Source{Service: svc.Name, Read: func(ctx context.Context) (connlimit.Reading, error) {
+					return of(traffic.ReadLine(ctx, socket))
+				}})
+			case render.IsXray(svc.Kind):
+				socket := paths.APISocket(svc.Name)
+				out = append(out, connlimit.Source{Service: svc.Name, SameRun: traffic.SameBoot,
+					Read: func(ctx context.Context) (connlimit.Reading, error) {
+						return of(traffic.ReadXray(ctx, socket))
+					}})
 			}
-			socket := paths.StatsSocket(svc.Name)
-			out = append(out, connlimit.Source{Service: svc.Name, Read: func(ctx context.Context) (connlimit.Reading, error) {
-				r, err := traffic.ReadLine(ctx, socket)
-				return connlimit.Reading{Boot: r.Boot, Age: r.Age, AgeKnown: r.AgeKnown, Limits: r.Limits}, err
-			}})
 		}
 		return out, nil
 	}

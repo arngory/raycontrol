@@ -52,15 +52,21 @@ const (
 	freshWithin = Every + 5*time.Second
 )
 
-// Source is a process that counts refusals.
+// Source is a process that counts refusals: naive, a Hysteria2 backend
+// (niko-server v0.17.0), an Xray (the fork's limits).
 type Source struct {
 	Service string
 	Read    func(ctx context.Context) (Reading, error)
+	// SameRun reports whether two boots are one run of the process; nil
+	// is equality. Xray's boot is its start, from its uptime in whole
+	// seconds, and two readings of one run may differ by a second
+	// (traffic.SameBoot).
+	SameRun func(a, b string) bool
 }
 
 // Reading is what a source gave at one poll: its run (a boot, random at
-// each start), how long it has run where it says (AgeKnown), and each
-// name's refusals by kind since it started.
+// each start, or Xray's start), how long it has run where it says
+// (AgeKnown), and each name's refusals by kind since it started.
 type Reading struct {
 	Boot     string
 	Age      time.Duration
@@ -107,8 +113,8 @@ type Snapshot struct {
 
 // Monitor reads and keeps it all.
 type Monitor struct {
-	// Sources are the processes to read (naive services); Off says whether
-	// the limits are off (the store's setting).
+	// Sources are the processes to read (naive, Hysteria2, Xray); Off
+	// says whether the limits are off (the store's setting).
 	Sources func(ctx context.Context) ([]Source, error)
 	Off     func(ctx context.Context) (bool, error)
 	Health  *health.Board
@@ -249,7 +255,7 @@ func (m *Monitor) Round(ctx context.Context) {
 			if r.err != nil {
 				continue // not running, or too old to count: nothing new
 			}
-			m.take(src.Service, r.r, now)
+			m.take(src, r.r, now)
 		}
 		for svc := range m.marks {
 			if !slices.Contains(services, svc) {
@@ -300,10 +306,13 @@ func (m *Monitor) proc() string {
 // counted: its counters are since its process started, which may be long
 // before. Unless that process has run no longer than freshWithin: then
 // its refusals are new.
-func (m *Monitor) take(service string, r Reading, now time.Time) {
-	boot, limits := r.Boot, r.Limits
+func (m *Monitor) take(src Source, r Reading, now time.Time) {
+	service, boot, limits := src.Service, r.Boot, r.Limits
 	prev, ok := m.marks[service]
 	same := ok && prev.boot == boot
+	if ok && !same && src.SameRun != nil {
+		same = src.SameRun(prev.boot, boot)
+	}
 	fresh := !ok && r.AgeKnown && r.Age <= freshWithin
 	if !ok && !fresh {
 		m.marks[service] = mark{boot: boot, counts: limits}
