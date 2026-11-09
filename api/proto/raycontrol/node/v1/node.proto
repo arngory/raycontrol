@@ -22,6 +22,12 @@ service NodeService {
   // taken off every profile, as an expired one, until the period resets
   // or the limit is raised. A request that changes nothing is invalid.
   rpc SetUserTraffic(SetUserTrafficRequest) returns (SetUserTrafficResponse);
+  // SetUserLAN gives or takes back the administrator's consent to a user's
+  // LAN (docs/spec/lan-v1.md §1.1): the user's devices see each other over
+  // Yggdrasil, each that shows itself (X-Raycontrol-LAN in its subscription
+  // request). On needs a Yggdrasil service of the user's, and gives the
+  // user a new multicast password every time.
+  rpc SetUserLAN(SetUserLANRequest) returns (SetUserLANResponse);
   // ExportUser returns a user's profiles: the links of their subscription
   // (docs/spec/subscription-v1.md §4), each with the next one while a
   // switch is pending (P-10). They hold the user's credentials, so the
@@ -41,7 +47,8 @@ service NodeService {
   rpc RotateService(RotateServiceRequest) returns (RotateServiceResponse);
   // SetServiceOption changes one of the few settings that may change after
   // creation: a site's answer, whether REALITY moves its server name,
-  // Hysteria2's Brutal ceilings, Yggdrasil's public peers.
+  // Hysteria2's Brutal ceilings, Yggdrasil's public peers and its ceiling
+  // of LAN traffic through the node (lan_relay, docs/spec/lan-v1.md §4.4).
   rpc SetServiceOption(SetServiceOptionRequest) returns (SetServiceOptionResponse);
   // SetCertificate puts the operator's own certificate on a site, in place
   // of one from ACME, for every service under it (REALITY self-steal,
@@ -469,6 +476,10 @@ message User {
   // unexpired user whose used reached it (as the subscription's
   // exhausted). The node decides, not a comparison of the two fields.
   bool traffic_exhausted = 14;
+  // The administrator lets the user's devices see each other over
+  // Yggdrasil (docs/spec/lan-v1.md §1.1); each device decides for itself
+  // too (Device.lan).
+  bool lan = 15;
 }
 
 message ListUsersRequest {}
@@ -498,6 +509,12 @@ message SetUserTrafficRequest {
   bool reset_usage = 5;
 }
 message SetUserTrafficResponse { User user = 1; }
+
+message SetUserLANRequest {
+  string name = 1;
+  bool lan = 2;
+}
+message SetUserLANResponse { User user = 1; }
 
 message SetUserEnabledRequest {
   string name = 1;
@@ -605,6 +622,10 @@ message Device {
   int64 created_at = 5;
   int64 revoked_at = 6; // 0 = active
   bool registered = 7; // through the remote API, with a client certificate
+  // The device shows itself in its user's LAN, as its X-Raycontrol-LAN
+  // header last said (docs/spec/lan-v1.md §1.1); it is in the LAN when its
+  // user's lan is on too.
+  bool lan = 8;
 }
 
 // Invite is an invite not yet used.

@@ -51,6 +51,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             the traffic limit, up + down a period (monthly from day N,
                                             00:00 UTC, or none: the user's whole time); over it the
                                             user is off every profile until the reset or a higher limit
+  user lan NAME [on|off]                    the user's devices see each other over Yggdrasil (LAN), each that
+                                            shows itself in the client (needs a Yggdrasil service); on again:
+                                            a new password; without on|off: show it
   user usage [NAME]                         the users' counts against their limits
   user reset-usage NAME                     the current period's count from zero, now
   user export NAME [-o FILE]                the user's links, as in the subscription (they hold credentials)
@@ -62,7 +65,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
                                             naive: icmp=on|off (ping and traceroute through it, then
                                             rayctl apply);
-                                            yggdrasil: peers=URI,URI|none (public peers, then rayctl apply);
+                                            yggdrasil: peers=URI,URI|none (public peers, then rayctl apply),
+                                            lan_relay=N (LAN through the node, Mbit/s a user, 20 unless set;
+                                            0: in one Wi-Fi only);
                                             dnstt, masterdns: auth=, auth_hint=, seal=off|optional|required
                                             (auth_hint: dnsauth-v2 tags; required needs auth=required),
                                             spare_zones=N|ZONE,ZONE|none (spare zones, made up or your own),
@@ -493,6 +498,8 @@ func (c *cli) user(ctx context.Context, sub string, args []string) error {
 		return c.print(r.Msg, func(w *tabwriter.Writer) { fmt.Fprintf(w, "user %s created\n", r.Msg.User.Name) })
 	case "limit":
 		return c.userLimit(ctx, args)
+	case "lan":
+		return c.userLAN(ctx, args)
 	case "usage":
 		return c.userUsage(ctx, args)
 	case "reset-usage":
@@ -651,6 +658,11 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 			case "site":
 				fmt.Fprintln(w, "run rayctl apply to restart the site with it")
 			case "yggdrasil":
+				if key == "lan_relay" {
+					fmt.Fprintln(w, "rayd restarts the backend with it: LAN traffic through the node up to "+value+
+						" Mbit/s a user (0: between devices in one Wi-Fi only), in the users' traffic limits")
+					break
+				}
 				fmt.Fprintln(w, "run rayctl apply: the unit gets network access with public peers, and loses it without")
 			case "naive":
 				if key == "icmp" {
@@ -824,13 +836,15 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 			return err
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
-			fmt.Fprintln(w, "ID\tUSER\tNAME\tROLE\tCREATED\tREVOKED\tAPI")
+			fmt.Fprintln(w, "ID\tUSER\tNAME\tROLE\tCREATED\tREVOKED\tLAN\tAPI")
 			for _, d := range r.Msg.Devices {
 				api := "-"
 				if d.Registered {
 					api = "registered"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", d.Id, d.User, d.Name, d.Role, when(d.CreatedAt), when(d.RevokedAt), api)
+				// The device's own LAN consent (lan-v1 §1.1); it is in the
+				// LAN when its user's is on too (rayctl user lan).
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", d.Id, d.User, d.Name, d.Role, when(d.CreatedAt), when(d.RevokedAt), onOff(d.Lan), api)
 			}
 			for _, inv := range r.Msg.Invites {
 				state := "invite until " + when(inv.ExpiresAt)
@@ -840,7 +854,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 				if inv.PinTries > 0 {
 					state += fmt.Sprintf(", PIN (%d tries)", inv.PinTries)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t-\t%s\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.CreatedAt), state)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t-\t-\t%s\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.CreatedAt), state)
 			}
 		})
 	case "invite":

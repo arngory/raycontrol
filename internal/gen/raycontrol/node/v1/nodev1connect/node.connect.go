@@ -54,6 +54,8 @@ const (
 	// NodeServiceSetUserTrafficProcedure is the fully-qualified name of the NodeService's
 	// SetUserTraffic RPC.
 	NodeServiceSetUserTrafficProcedure = "/raycontrol.node.v1.NodeService/SetUserTraffic"
+	// NodeServiceSetUserLANProcedure is the fully-qualified name of the NodeService's SetUserLAN RPC.
+	NodeServiceSetUserLANProcedure = "/raycontrol.node.v1.NodeService/SetUserLAN"
 	// NodeServiceExportUserProcedure is the fully-qualified name of the NodeService's ExportUser RPC.
 	NodeServiceExportUserProcedure = "/raycontrol.node.v1.NodeService/ExportUser"
 	// NodeServiceListServicesProcedure is the fully-qualified name of the NodeService's ListServices
@@ -171,6 +173,12 @@ type NodeServiceClient interface {
 	// taken off every profile, as an expired one, until the period resets
 	// or the limit is raised. A request that changes nothing is invalid.
 	SetUserTraffic(context.Context, *connect.Request[v1.SetUserTrafficRequest]) (*connect.Response[v1.SetUserTrafficResponse], error)
+	// SetUserLAN gives or takes back the administrator's consent to a user's
+	// LAN (docs/spec/lan-v1.md §1.1): the user's devices see each other over
+	// Yggdrasil, each that shows itself (X-Raycontrol-LAN in its subscription
+	// request). On needs a Yggdrasil service of the user's, and gives the
+	// user a new multicast password every time.
+	SetUserLAN(context.Context, *connect.Request[v1.SetUserLANRequest]) (*connect.Response[v1.SetUserLANResponse], error)
 	// ExportUser returns a user's profiles: the links of their subscription
 	// (docs/spec/subscription-v1.md §4), each with the next one while a
 	// switch is pending (P-10). They hold the user's credentials, so the
@@ -189,7 +197,8 @@ type NodeServiceClient interface {
 	RotateService(context.Context, *connect.Request[v1.RotateServiceRequest]) (*connect.Response[v1.RotateServiceResponse], error)
 	// SetServiceOption changes one of the few settings that may change after
 	// creation: a site's answer, whether REALITY moves its server name,
-	// Hysteria2's Brutal ceilings, Yggdrasil's public peers.
+	// Hysteria2's Brutal ceilings, Yggdrasil's public peers and its ceiling
+	// of LAN traffic through the node (lan_relay, docs/spec/lan-v1.md §4.4).
 	SetServiceOption(context.Context, *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error)
 	// SetCertificate puts the operator's own certificate on a site, in place
 	// of one from ACME, for every service under it (REALITY self-steal,
@@ -344,6 +353,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			httpClient,
 			baseURL+NodeServiceSetUserTrafficProcedure,
 			connect.WithSchema(nodeServiceMethods.ByName("SetUserTraffic")),
+			connect.WithClientOptions(opts...),
+		),
+		setUserLAN: connect.NewClient[v1.SetUserLANRequest, v1.SetUserLANResponse](
+			httpClient,
+			baseURL+NodeServiceSetUserLANProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetUserLAN")),
 			connect.WithClientOptions(opts...),
 		),
 		exportUser: connect.NewClient[v1.ExportUserRequest, v1.ExportUserResponse](
@@ -598,6 +613,7 @@ type nodeServiceClient struct {
 	setUserServices   *connect.Client[v1.SetUserServicesRequest, v1.SetUserServicesResponse]
 	deleteUser        *connect.Client[v1.DeleteUserRequest, v1.DeleteUserResponse]
 	setUserTraffic    *connect.Client[v1.SetUserTrafficRequest, v1.SetUserTrafficResponse]
+	setUserLAN        *connect.Client[v1.SetUserLANRequest, v1.SetUserLANResponse]
 	exportUser        *connect.Client[v1.ExportUserRequest, v1.ExportUserResponse]
 	listServices      *connect.Client[v1.ListServicesRequest, v1.ListServicesResponse]
 	createService     *connect.Client[v1.CreateServiceRequest, v1.CreateServiceResponse]
@@ -673,6 +689,11 @@ func (c *nodeServiceClient) DeleteUser(ctx context.Context, req *connect.Request
 // SetUserTraffic calls raycontrol.node.v1.NodeService.SetUserTraffic.
 func (c *nodeServiceClient) SetUserTraffic(ctx context.Context, req *connect.Request[v1.SetUserTrafficRequest]) (*connect.Response[v1.SetUserTrafficResponse], error) {
 	return c.setUserTraffic.CallUnary(ctx, req)
+}
+
+// SetUserLAN calls raycontrol.node.v1.NodeService.SetUserLAN.
+func (c *nodeServiceClient) SetUserLAN(ctx context.Context, req *connect.Request[v1.SetUserLANRequest]) (*connect.Response[v1.SetUserLANResponse], error) {
+	return c.setUserLAN.CallUnary(ctx, req)
 }
 
 // ExportUser calls raycontrol.node.v1.NodeService.ExportUser.
@@ -889,6 +910,12 @@ type NodeServiceHandler interface {
 	// taken off every profile, as an expired one, until the period resets
 	// or the limit is raised. A request that changes nothing is invalid.
 	SetUserTraffic(context.Context, *connect.Request[v1.SetUserTrafficRequest]) (*connect.Response[v1.SetUserTrafficResponse], error)
+	// SetUserLAN gives or takes back the administrator's consent to a user's
+	// LAN (docs/spec/lan-v1.md §1.1): the user's devices see each other over
+	// Yggdrasil, each that shows itself (X-Raycontrol-LAN in its subscription
+	// request). On needs a Yggdrasil service of the user's, and gives the
+	// user a new multicast password every time.
+	SetUserLAN(context.Context, *connect.Request[v1.SetUserLANRequest]) (*connect.Response[v1.SetUserLANResponse], error)
 	// ExportUser returns a user's profiles: the links of their subscription
 	// (docs/spec/subscription-v1.md §4), each with the next one while a
 	// switch is pending (P-10). They hold the user's credentials, so the
@@ -907,7 +934,8 @@ type NodeServiceHandler interface {
 	RotateService(context.Context, *connect.Request[v1.RotateServiceRequest]) (*connect.Response[v1.RotateServiceResponse], error)
 	// SetServiceOption changes one of the few settings that may change after
 	// creation: a site's answer, whether REALITY moves its server name,
-	// Hysteria2's Brutal ceilings, Yggdrasil's public peers.
+	// Hysteria2's Brutal ceilings, Yggdrasil's public peers and its ceiling
+	// of LAN traffic through the node (lan_relay, docs/spec/lan-v1.md §4.4).
 	SetServiceOption(context.Context, *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error)
 	// SetCertificate puts the operator's own certificate on a site, in place
 	// of one from ACME, for every service under it (REALITY self-steal,
@@ -1058,6 +1086,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		NodeServiceSetUserTrafficProcedure,
 		svc.SetUserTraffic,
 		connect.WithSchema(nodeServiceMethods.ByName("SetUserTraffic")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceSetUserLANHandler := connect.NewUnaryHandler(
+		NodeServiceSetUserLANProcedure,
+		svc.SetUserLAN,
+		connect.WithSchema(nodeServiceMethods.ByName("SetUserLAN")),
 		connect.WithHandlerOptions(opts...),
 	)
 	nodeServiceExportUserHandler := connect.NewUnaryHandler(
@@ -1316,6 +1350,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceDeleteUserHandler.ServeHTTP(w, r)
 		case NodeServiceSetUserTrafficProcedure:
 			nodeServiceSetUserTrafficHandler.ServeHTTP(w, r)
+		case NodeServiceSetUserLANProcedure:
+			nodeServiceSetUserLANHandler.ServeHTTP(w, r)
 		case NodeServiceExportUserProcedure:
 			nodeServiceExportUserHandler.ServeHTTP(w, r)
 		case NodeServiceListServicesProcedure:
@@ -1431,6 +1467,10 @@ func (UnimplementedNodeServiceHandler) DeleteUser(context.Context, *connect.Requ
 
 func (UnimplementedNodeServiceHandler) SetUserTraffic(context.Context, *connect.Request[v1.SetUserTrafficRequest]) (*connect.Response[v1.SetUserTrafficResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetUserTraffic is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetUserLAN(context.Context, *connect.Request[v1.SetUserLANRequest]) (*connect.Response[v1.SetUserLANResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetUserLAN is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) ExportUser(context.Context, *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error) {
