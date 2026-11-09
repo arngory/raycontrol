@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // fakeClock is a clock that moves only when told, and a sleep that moves it.
@@ -311,6 +312,62 @@ func TestLimitsPairJournal(t *testing.T) {
 	s.lim.mu.Unlock()
 	if left != 0 {
 		t.Fatalf("pairs left in the process: %d", left)
+	}
+}
+
+// wallStepped is t with its wall clock moved by d and its monotonic reading
+// kept, as after an NTP step: time.Time's layout (wall: hasMonotonic, 33
+// bits of seconds since 1885, 30 of nanoseconds; ext: the monotonic
+// reading), checked below.
+func wallStepped(t *testing.T, at time.Time, d time.Duration) time.Time {
+	t.Helper()
+	type layout struct {
+		wall uint64
+		ext  int64
+		loc  *time.Location
+	}
+	if d%time.Second != 0 {
+		t.Fatal("whole seconds only")
+	}
+	out := at
+	l := (*layout)(unsafe.Pointer(&out))         //nolint:gosec // G103: a test's clock step
+	l.wall += uint64(int64(d/time.Second)) << 30 //nolint:gosec // G115: a step back wraps as it should
+	if out.Unix() != at.Unix()+int64(d/time.Second) || out.Sub(at) != 0 {
+		t.Fatalf("time.Time's layout changed: %v, %v", out.Unix()-at.Unix(), out.Sub(at))
+	}
+	return out
+}
+
+// A step back of the wall clock (NTP) holds no pair: pairs age by the
+// monotonic clock, in the live stream and in the journal.
+func TestLimitsPairsWallStep(t *testing.T) {
+	s := &Server{}
+	base := time.Now()
+	now := base
+	s.lim.now = func() time.Time { return now }
+	s.lim.ctMax = func() (uint64, error) { return 1 << 20, nil }
+	slot, u := slotWith(t, s, "u5")
+	for i := range pairsPerUser {
+		refillDest(s, "u5")
+		if !u.mayReach(dest(i)) {
+			t.Fatalf("pair %d refused", i)
+		}
+	}
+	// 31 s on by the monotonic clock, an hour back by the wall's.
+	now = wallStepped(t, base.Add(31*time.Second), -time.Hour)
+	refillDest(s, "u5")
+	if !u.mayReach(dest(5000)) {
+		t.Fatal("after a step back of the wall clock, pairs 30 s old still held")
+	}
+	// The journal too.
+	s.lim.uotPut(slot)
+	now = wallStepped(t, base.Add(62*time.Second), -2*time.Hour)
+	s.lim.mu.Lock()
+	s.lim.sweepLocked(now)
+	left := s.lim.pairs
+	s.lim.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("pairs left in the journal: %d", left)
 	}
 }
 

@@ -547,7 +547,7 @@ func TestUoTPacing(t *testing.T) {
 	}
 	// Those whose time ran out go when a new one comes.
 	for p := range w.peers {
-		w.peers[p] = pairTimes{sent: time.Now().Add(-2 * pairAnswered).UnixNano()}
+		w.peers[p] = pairTimes{sent: mono() - int64(2*pairAnswered)}
 	}
 	w.pruned = time.Time{} // at most once a second
 	s.lim.users[user].peers = bucket{uotPeerBurst, time.Now()}

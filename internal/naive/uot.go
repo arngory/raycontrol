@@ -37,7 +37,7 @@ const (
 	uotNames      = 64 // names a stream keeps (uotResolved)
 	uotNameMiss   = 30 * time.Second
 	uotLookupWait = 5 * time.Second // a packet's wait for its name
-	uotPeers      = 4096 // addresses a stream sent to, whose answers come back
+	uotPeers      = 4096            // addresses a stream sent to, whose answers come back
 
 	// A user's new destinations, all streams together: each is a conntrack
 	// entry the perimeter keeps. Name lookups are limits' (TCP's too).
@@ -150,8 +150,9 @@ type uotStream struct {
 	aged   time.Time
 }
 
-// pairTimes are a pair's last packet sent, last either way (unix
-// nanoseconds), and whether an answer came.
+// pairTimes are a pair's last packet sent, last either way (monoAt: the
+// wall clock may step back, and a step back would hold every pair), and
+// whether an answer came.
 type pairTimes struct {
 	sent, any int64
 	answered  bool
@@ -159,11 +160,11 @@ type pairTimes struct {
 
 // end is when conntrack lets the pair go: 30 s after the last packet sent
 // while unanswered, 120 s after the last either way once answered.
-func (p pairTimes) end() time.Time {
+func (p pairTimes) end() int64 {
 	if p.answered {
-		return time.Unix(0, p.any).Add(pairAnswered)
+		return p.any + int64(pairAnswered)
 	}
-	return time.Unix(0, p.sent).Add(pairUnanswered)
+	return p.sent + int64(pairUnanswered)
 }
 
 // age drops the pairs whose time ran out, once a second at most, and says
@@ -173,8 +174,9 @@ func (u *uotStream) age(now time.Time) int {
 	defer u.mu.Unlock()
 	if now.Sub(u.aged) >= ageEvery {
 		u.aged = now
+		m := monoAt(now)
 		for p, t := range u.peers {
-			if !now.Before(t.end()) {
+			if m >= t.end() {
 				delete(u.peers, p)
 			}
 		}
@@ -183,10 +185,10 @@ func (u *uotStream) age(now time.Time) int {
 }
 
 // ends are when the stream's pairs end, for the user's journal.
-func (u *uotStream) ends() []time.Time {
+func (u *uotStream) ends() []int64 {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	out := make([]time.Time, 0, len(u.peers))
+	out := make([]int64, 0, len(u.peers))
 	for _, t := range u.peers {
 		out = append(out, t.end())
 	}
@@ -196,7 +198,7 @@ func (u *uotStream) ends() []time.Time {
 // heard notes an answer from a pair, and reports whether it is one.
 func (u *uotStream) heard(ap netip.AddrPort) bool {
 	ap = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
-	now := u.s.lim.clock().UnixNano()
+	now := monoAt(u.s.lim.clock())
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	t, ok := u.peers[ap]
@@ -238,7 +240,8 @@ func (u *uotStream) sent(ap netip.AddrPort, now int64) bool {
 // let it (limits.newPair).
 func (u *uotStream) mayReach(ap netip.AddrPort) bool {
 	now := u.s.lim.clock()
-	if u.sent(ap, now.UnixNano()) {
+	m := monoAt(now)
+	if u.sent(ap, m) {
 		return true
 	}
 	u.mu.Lock()
@@ -246,7 +249,7 @@ func (u *uotStream) mayReach(ap netip.AddrPort) bool {
 		// Those whose time ran out go, as conntrack forgets them.
 		u.pruned = now
 		for p, t := range u.peers {
-			if !now.Before(t.end()) {
+			if m >= t.end() {
 				delete(u.peers, p)
 			}
 		}
@@ -258,7 +261,7 @@ func (u *uotStream) mayReach(ap netip.AddrPort) bool {
 		return false
 	}
 	u.mu.Lock()
-	u.peers[ap] = pairTimes{sent: now.UnixNano(), any: now.UnixNano()}
+	u.peers[ap] = pairTimes{sent: m, any: m}
 	u.mu.Unlock()
 	return true
 }

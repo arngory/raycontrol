@@ -98,8 +98,8 @@ type limUser struct {
 	// attempts, failures (in debt below zero), new UDP destinations,
 	// lookups.
 	attempts, failed, peers, lookups bucket
-	journal                          []time.Time // the ends of ended streams' pairs
-	pairs                            int         // counted: live streams' and the journal's
+	journal                          []int64 // the ends of ended streams' pairs (monoAt)
+	pairs                            int     // counted: live streams' and the journal's
 	aged                             time.Time
 }
 
@@ -513,7 +513,8 @@ func (l *limits) ageLocked(u *limUser, now time.Time, force bool) {
 // recountLocked counts a user's pairs from the streams and the journal.
 func (l *limits) recountLocked(u *limUser, now time.Time) {
 	u.aged = now
-	u.journal = slices.DeleteFunc(u.journal, func(t time.Time) bool { return !now.Before(t) })
+	m := monoAt(now)
+	u.journal = slices.DeleteFunc(u.journal, func(end int64) bool { return m >= end })
 	n := len(u.journal)
 	for s := range u.slots {
 		s.pairs = 0

@@ -421,6 +421,10 @@ type pubDNS struct {
 // mono is a monotonic time in nanoseconds: the wall clock may step back.
 func mono() int64 { return int64(time.Since(monoStart)) }
 
+// monoAt is mono at t: t's monotonic reading where it has one (time.Now's),
+// its wall time otherwise (a test's fake clock).
+func monoAt(t time.Time) int64 { return int64(t.Sub(monoStart)) }
+
 var monoStart = time.Now()
 
 func newPublicDNS(addrs []string, wait time.Duration) *pubDNS {
