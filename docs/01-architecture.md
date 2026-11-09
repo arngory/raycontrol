@@ -88,14 +88,15 @@ Data plane описан в спецификации niko-server
 
 ```
 node            id, name, public_key, created_at
-users           id, name, enabled, expires_at, traffic_limit_bytes, note, created_at
+users           id, name, enabled, expires_at, traffic_limit_bytes, traffic_period, traffic_reset_day, note, created_at
 devices         id, user_id, name, role(user|admin), spa_key_ref, api_cert_fingerprint, scopes, last_seen, revoked_at
 services        id, kind, enabled, settings_json                     — бэкенды и движки
 credentials     id, user_id, service_id, secret_ref, valid_from, valid_to, revoked_at  — с перекрытием при ротации
 rotations       id, kind, scope, current_ref, next_ref, switch_at, retire_at   — расписание ротации
 platform_accts  id, service_id, mode(node|client), secret_ref, status, last_checked
 grants          id, device_id, src_ip, scope, expires_at             — журнал SPA-доступов
-traffic         user_id, service_id, period, up, down
+user_traffic    user_id, period_start, counted_from, up, down       — счёт периода, только с лимитом (traffic-limit-v1)
+traffic_sources source, boot, polled_at; traffic_marks source, name, up, down — что rayd последним прочёл у процессов
 audit_log       ts, actor, action, target, result
 settings        key, value                                           — включая случайные параметры установки
 ```

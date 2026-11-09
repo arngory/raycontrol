@@ -89,13 +89,20 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	byState := map[string]int{"active": 0, "disabled": 0, "expired": 0}
+	// One state each, in this order: active is store.User.Active.
+	byState := map[string]int{"active": 0, "disabled": 0, "expired": 0, "over_limit": 0}
+	limited := 0
 	for _, u := range users {
+		if u.Limited() {
+			limited++
+		}
 		switch {
 		case !u.Enabled:
 			byState["disabled"]++
-		case u.ExpiresAt != nil && !u.ExpiresAt.After(now):
+		case !u.Live(now):
 			byState["expired"]++
+		case !u.Active(now):
+			byState["over_limit"]++
 		default:
 			byState["active"]++
 		}
@@ -103,6 +110,8 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 	for _, k := range sortedKeys(byState) {
 		m.Add("raycontrol_users", "Users by state.", float64(byState[k]), "state", k)
 	}
+	// Numbers only (traffic-limit-v1 §6): how many users have a limit.
+	m.Add("raycontrol_users_limited", "Users with a traffic limit.", float64(limited))
 
 	devices, err := s.Store.ListDevices(ctx, "")
 	if err != nil {

@@ -56,6 +56,8 @@ import (
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
 	"github.com/arngory/raycontrol/internal/summary"
+	"github.com/arngory/raycontrol/internal/traffic"
+	"github.com/arngory/raycontrol/internal/xrayapi"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -248,8 +250,13 @@ func cmdServe(args []string) error {
 	if *supervise && !*liveApply {
 		return errors.New("-supervise needs -live: the processes read the rendered files")
 	}
+	// Each user's bytes for the traffic limit (traffic-limit-v1 §2.4),
+	// read from the processes while a user has a limit; one wakes apply
+	// when it crosses it.
+	acct := &traffic.Accountant{Store: st, Sources: traffic.Processes(paths), Health: hb, Log: log, Notify: srv.Notify}
 	if *liveApply {
-		applier := &live.Applier{Store: st, Paths: paths, Log: log, Report: func(err error) { hb.Done("apply", err) }}
+		applier := &live.Applier{Store: st, Paths: paths, Log: log, Report: func(err error) { hb.Done("apply", err) },
+			BeforeRestart: acct.Flush}
 		var sup *live.Supervisor
 		if *supervise {
 			sup, err = supervisor(paths, deploy.Binaries{Xray: *xrayBin, NikoServer: *nikoBin, Slipstream: *slipBin}, st, log)
@@ -266,10 +273,13 @@ func cmdServe(args []string) error {
 			log.Error("apply", "err", err)
 		}
 		if sup != nil {
+			// The processes run on a context of their own: they stop after
+			// the traffic loop's last round has read them (its deferred wait
+			// below runs first), and before rayd returns.
+			supCtx, supStop := context.WithCancel(context.WithoutCancel(ctx))
 			done := make(chan struct{})
-			go func() { sup.Run(ctx); close(done) }()
-			// Stopped before rayd returns.
-			defer func() { stop(); <-done }()
+			go func() { sup.Run(supCtx); close(done) }()
+			defer func() { supStop(); <-done }()
 		}
 		go applier.Run(ctx, srv.Changes)
 	}
@@ -335,6 +345,14 @@ func cmdServe(args []string) error {
 	go checkPort53(ctx, st, &deploy.Host{}, frontUID, hb, log)
 	// The DNS path's events (dnstt's counters, an hour of them).
 	go watchDNSTT(ctx, st, paths, hb)
+	// The traffic loop writes its last poll as rayd stops: before the
+	// database closes, and before the supervised processes stop (their
+	// context ends in a deferred call made earlier, which runs after this
+	// one). The Xray API's connections close after the last round.
+	defer xrayapi.Close()
+	trafficDone := make(chan struct{})
+	go func() { acct.Run(ctx); close(trafficDone) }()
+	defer func() { stop(); <-trafficDone }()
 	go checkResolver(ctx, hb, log)
 	go followDebug(ctx, st, level, *debug, srv.Changes, srv.Notify, log)
 	go serveDoH(ctx, st, paths, srv.Changes, log)
@@ -599,8 +617,9 @@ func serveRemote(ctx context.Context, r *api.Remote, changes func() <-chan struc
 	}
 }
 
-// dohTokens are the credentials DoH accepts now: those of enabled users
-// with access to the service, with their rotation (R4-1).
+// dohTokens are the credentials DoH accepts now: those of active users
+// (store.User.Active: over the traffic limit is out too) with access to
+// the service, with their rotation (R4-1).
 func dohTokens(ctx context.Context, st *store.Store, service int64) (map[string]bool, error) {
 	users, err := st.ListUsers(ctx)
 	if err != nil {
@@ -613,7 +632,7 @@ func dohTokens(ctx context.Context, st *store.Store, service int64) (map[string]
 	now := time.Now()
 	out := map[string]bool{}
 	for _, u := range users {
-		if !u.Enabled || (u.ExpiresAt != nil && !u.ExpiresAt.After(now)) || !slices.Contains(u.Services, service) {
+		if !u.Active(now) || !slices.Contains(u.Services, service) {
 			continue
 		}
 		for _, t := range sets[u.ID].Accepted(now) {
@@ -1242,7 +1261,9 @@ func cmdSite(args []string) error {
 func cmdNaive(args []string) error {
 	fs := flag.NewFlagSet("naive", flag.ExitOnError)
 	answer := fs.String("answer", site.Answer404, "what other requests get: 404, 403 or silent")
-	users := fs.String("users", "", "JSON list of SHA-256 hashes of the passwords, read again when it changes")
+	users := fs.String("users", "", "JSON object of the passwords' SHA-256 hashes and the names their bytes count under (or a list of hashes), "+
+		"read again when it changes: a password it no longer has loses its streams")
+	statsSocket := fs.String("stats-socket", "", "unix socket where the line \"traffic\" gets each name's bytes (traffic-limit-v1 §2.3), for rayd")
 	chain := fs.String("chain", "", "certificate chain (PEM, leaf first)")
 	key := fs.String("key", "", "private key (PEM)")
 	socket := fs.String("socket", "", "SOCK_SEQPACKET socket the front passes connections to (niko-server IPC, mode fd)")
@@ -1274,7 +1295,16 @@ func cmdNaive(args []string) error {
 		return err
 	}
 	naive.SetResolverLog(log)
-	ns := &naive.Server{Users: &naive.Users{Path: *users}, Answer: handler, ICMP: *icmp, Log: log}
+	nu := &naive.Users{Path: *users}
+	// The users file is watched: a user taken off it (disabled, expired,
+	// over the traffic limit) loses the live streams (traffic-limit-v1 §3.2).
+	go nu.Watch(ctx)
+	if *statsSocket != "" {
+		if err := nu.ServeStats(ctx, *statsSocket, log); err != nil {
+			return err
+		}
+	}
+	ns := &naive.Server{Users: nu, Answer: handler, ICMP: *icmp, Log: log}
 	// Channel probes through the tunnel (R4-16): the probe name, and only
 	// it, leads to the endpoint; the rest to public addresses.
 	ns.Probe = *probeAddr

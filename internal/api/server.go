@@ -301,7 +301,16 @@ func (s *Server) userPB(ctx context.Context, u store.User) (*nodev1.User, error)
 		Note: u.Note, CreatedAt: u.CreatedAt.Unix(),
 	}
 	if u.TrafficLimit != nil {
+		// The count at this moment: a period that reset since rayd last
+		// wrote reads as zero (traffic-limit-v1 §3.6).
+		now := time.Now()
 		pb.TrafficLimitBytes = *u.TrafficLimit
+		pb.TrafficUsedBytes = u.Used(now)
+		pb.TrafficPeriodStart = unixOf(u.PeriodStart(now))
+		pb.TrafficPeriod = u.TrafficPeriod
+		pb.TrafficResetDay = int32(u.TrafficResetDay) //nolint:gosec // G115: 1..28
+		pb.TrafficNextReset = unixOf(u.NextResetAt(now))
+		pb.TrafficExhausted = u.Live(now) && u.OverLimit(now) // as the subscription: disabled and expired are not "exhausted"
 	}
 	for _, id := range u.Services {
 		for _, svc := range all {
@@ -331,13 +340,18 @@ func (s *Server) ListUsers(ctx context.Context, _ *connect.Request[nodev1.ListUs
 
 func (s *Server) CreateUser(ctx context.Context, req *connect.Request[nodev1.CreateUserRequest]) (*connect.Response[nodev1.CreateUserResponse], error) {
 	m := req.Msg
-	u := store.User{Name: m.Name, Enabled: true, Note: m.Note}
+	u := store.User{Name: m.Name, Enabled: true, Note: m.Note, TrafficPeriod: m.TrafficPeriod, TrafficResetDay: int(m.TrafficResetDay)}
 	if m.ExpiresAt != 0 {
 		t := time.Unix(m.ExpiresAt, 0)
 		u.ExpiresAt = &t
 	}
 	if m.TrafficLimitBytes != 0 {
 		u.TrafficLimit = &m.TrafficLimitBytes
+	}
+	// The period's text is the admin's: checked before it can reach any
+	// error, and so the audit (as SetUserTraffic).
+	if m.TrafficPeriod != "" && store.CheckTrafficPeriod(m.TrafficPeriod, 1) != nil {
+		return nil, s.done(ctx, "user.create", m.Name, fmt.Errorf("%w traffic period: use monthly or none", store.ErrInvalid))
 	}
 	ids, err := s.serviceIDs(ctx, m.Services)
 	if err == nil {
@@ -374,6 +388,46 @@ func (s *Server) SetUserServices(ctx context.Context, req *connect.Request[nodev
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.SetUserServicesResponse{}), nil
+}
+
+// SetUserTraffic changes a user's traffic limit, its period or reset day,
+// or zeroes the count (traffic-limit-v1 §3.6), audited as user.traffic
+// with what was asked.
+func (s *Server) SetUserTraffic(ctx context.Context, req *connect.Request[nodev1.SetUserTrafficRequest]) (*connect.Response[nodev1.SetUserTrafficResponse], error) {
+	m := req.Msg
+	var c store.TrafficChange
+	var asked []string
+	if m.LimitBytes != nil {
+		c.Limit = m.LimitBytes
+		asked = append(asked, "limit="+strconv.FormatInt(*m.LimitBytes, 10))
+	}
+	if m.Period != nil {
+		c.Period = m.Period
+		asked = append(asked, "period="+*m.Period)
+	}
+	if m.ResetDay != nil {
+		day := int(*m.ResetDay)
+		c.ResetDay = &day
+		asked = append(asked, "reset-day="+strconv.Itoa(day))
+	}
+	if m.ResetUsage {
+		c.ResetUsage = true
+		asked = append(asked, "reset-usage")
+	}
+	// What was asked goes to the audit as text the node checked: a period
+	// that is not one is refused before, and its words never logged.
+	if m.Period != nil && store.CheckTrafficPeriod(*m.Period, 1) != nil {
+		return nil, s.done(ctx, "user.traffic", m.Name, fmt.Errorf("%w traffic period: use monthly or none", store.ErrInvalid))
+	}
+	u, err := s.Store.SetUserTraffic(ctx, m.Name, c)
+	if err := s.done(ctx, "user.traffic "+strings.Join(asked, " "), m.Name, err); err != nil {
+		return nil, err
+	}
+	pb, err := s.userPB(ctx, u)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	return connect.NewResponse(&nodev1.SetUserTrafficResponse{User: pb}), nil
 }
 
 func (s *Server) DeleteUser(ctx context.Context, req *connect.Request[nodev1.DeleteUserRequest]) (*connect.Response[nodev1.DeleteUserResponse], error) {
@@ -413,7 +467,7 @@ func (s *Server) ExportUser(ctx context.Context, req *connect.Request[nodev1.Exp
 	return connect.NewResponse(resp), nil
 }
 
-var errUserInactive = errors.New("user is disabled or expired")
+var errUserInactive = errors.New("user is disabled, expired or over the traffic limit")
 
 func (s *Server) export(ctx context.Context, name string) ([]sub.Profile, error) {
 	if _, err := s.Store.UserByName(ctx, name); err != nil {

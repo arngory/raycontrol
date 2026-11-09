@@ -42,6 +42,10 @@ type Applier struct {
 	Inner func(socket string) InnerAPI
 	// Report, if set, gets the outcome of every Apply in Run (O-2).
 	Report func(error)
+	// BeforeRestart, if set, runs before a service's process is restarted:
+	// the traffic loop reads its counters, which start again with it
+	// (traffic-limit-v1 §2.4).
+	BeforeRestart func(ctx context.Context, service string)
 
 	skipped []string // the waiting services last logged
 }
@@ -178,6 +182,9 @@ func (a *Applier) Apply(ctx context.Context) error {
 		verb := "try-restart"
 		if slices.ContainsFunc(cs, func(c change) bool { return c.old == nil }) {
 			verb = "restart"
+		}
+		if a.BeforeRestart != nil {
+			a.BeforeRestart(ctx, service)
 		}
 		if err := a.restart(ctx, verb, unit); err != nil {
 			a.Log.Warn("restart failed (is the node deployed? run rayctl apply)", "unit", unit, "err", err)

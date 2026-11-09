@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/netip"
@@ -202,16 +203,27 @@ func (s *Server) BuildForDevice(ctx context.Context, userName string, device []b
 	if err != nil {
 		return Envelope{}, err
 	}
+	u, err := s.Store.UserByName(ctx, userName)
+	if err != nil {
+		return Envelope{}, err
+	}
 	var user *render.User
 	for i := range m.Users {
 		if m.Users[i].Name == userName {
 			user = &m.Users[i]
 		}
 	}
-	if user == nil {
+	// Over the traffic limit (traffic-limit-v1 §4): the subscription goes
+	// on, with no profiles and the marker, so that the client keeps the
+	// node's rows and says why. Disabled and expired: none (404).
+	exhausted := user == nil && u.Live(now) && u.OverLimit(now)
+	if user == nil && !exhausted {
 		return Envelope{}, errors.New("user not active")
 	}
-	profiles, err := DeviceProfiles(m, *user, device)
+	profiles := []Profile{}
+	if !exhausted {
+		profiles, err = DeviceProfiles(m, *user, device)
+	}
 	// Not the links of a DNS tunnel the front leaves out for its zones
 	// (rayd logs why; zones v0.13 took that nest): they would fail every
 	// client that tries them.
@@ -242,6 +254,13 @@ func (s *Server) BuildForDevice(ctx context.Context, userName string, device []b
 		V: 1, NodeID: m.NodeID, Name: name, Note: note, Seq: seq, Time: now.Unix(), Issued: now.Unix(),
 		Expires: now.Add(Lifetime).Unix(), Profiles: profiles,
 		SPA: &SPAHint{Carriers: []string{"udp"}},
+	}
+	if u.Limited() {
+		p.Traffic = &TrafficHint{V: 1, Used: u.Used(now), Limit: *u.TrafficLimit, Since: u.PeriodStart(now).Unix(),
+			Reset: unixOrZero(u.NextResetAt(now)), Exhausted: exhausted}
+		if exhausted {
+			p.Expires = ExhaustedExpiry(now, u.NextResetAt(now), mrand.N(ExhaustedJitter)).Unix() //nolint:gosec // G404: when to ask, no secret
+		}
 	}
 	if s.TCPCarrier {
 		// In the order to try: the ClientHello before bare TCP, which a

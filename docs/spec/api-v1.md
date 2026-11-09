@@ -183,6 +183,14 @@ RCINV2:<base32 RFC 4648, верхний регистр, без '='>
   новых сервисов), `update`, `uninstall`, `restore`, `backup`. Сервис, добавленный через API, начнёт работать после
   `rayctl apply` на ноде, если ему нужен свой процесс или порт в хост-файрволе.
 - Журнал аудита записывает такие действия от имени `<пользователь>/<устройство> (remote)`.
+- Лимит трафика (raycontrol v0.22.0, [traffic-limit-v1.md](traffic-limit-v1.md) §3.6) — как весь `NodeService`:
+  `SetUserTraffic {name; optional limit_bytes (0 — снять); optional period ("monthly" | "none"); optional reset_day
+  (1–28); reset_usage}` меняет заданное, пустой запрос — `invalid_argument`, в аудите `user.traffic` с тем, что
+  просили. `CreateUser` берёт ещё `traffic_period` и `traffic_reset_day`. У `User` — `traffic_used_bytes` (`up + down`
+  периода, отстаёт до минуты), `traffic_period_start`, `traffic_period`, `traffic_reset_day`, `traffic_next_reset`
+  (`0` — нет) и `traffic_exhausted` (снят по лимиту: включён, не истёк и сверх него); без лимита — нули.
+  Admin-устройство пользователя сверх лимита сохраняет SPA до подписки и API (без сервисов данных) и может поднять
+  лимит себе само.
 
 ## 6. Смена клиентского ключа
 
@@ -202,7 +210,8 @@ RCINV2:<base32 RFC 4648, верхний регистр, без '='>
 | `not_found` | `Register`: любой отказ (§4) |
 | `unauthenticated` | клиентский ключ не принадлежит активному устройству: не зарегистрирован, отозван, пользователь отключён или истёк |
 | `permission_denied` | устройство не `admin`, или вызов только для root на ноде; `Register`: PIN не прислан или неверный, деталь `PinTries{left}` (§4) |
-| `invalid_argument` | неверные данные: подпись при смене ключа, имя, срок приглашения |
+| `invalid_argument` | неверные данные: подпись при смене ключа, имя, срок приглашения, период или день сброса лимита, пустой `SetUserTraffic` |
+| `failed_precondition` | `ExportUser`: пользователь отключён, истёк или сверх лимита трафика |
 
 ## 8. Что проверить клиенту
 

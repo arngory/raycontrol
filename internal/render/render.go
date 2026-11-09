@@ -89,7 +89,11 @@ type Model struct {
 	Host     string
 	Domain   string
 	Services []Service // enabled only
-	Users    []User    // enabled and not expired
+	Users    []User    // active: enabled, not expired, not over the traffic limit
+	// Traffic: some user has a traffic limit (traffic-limit-v1 §5): the
+	// Xray processes count each user's bytes and give them on their API.
+	// Without it their configs have no stats at all.
+	Traffic bool
 	// Inner maps user ID to the VLESS UUID at the inner stage.
 	Inner map[int64]string
 	// IPv6 is false on hosts without IPv6 sockets (ipv6.disable=1): the
@@ -226,7 +230,9 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 	now := time.Now()
 	var needInner []int64
 	for _, u := range users {
-		if !u.Enabled || (u.ExpiresAt != nil && !u.ExpiresAt.After(now)) {
+		m.Traffic = m.Traffic || u.Limited()
+		// Disabled, expired and over the limit alike: off every profile.
+		if !u.Active(now) {
 			continue
 		}
 		m.Users = append(m.Users, User{ID: u.ID, Name: u.Name, Services: u.Services})
@@ -1233,7 +1239,7 @@ func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, er
 				"finalRules": []map[string]any{{"action": "allow", "network": "tcp,udp", "ip": []string{"127.0.0.1/32"}, "port": strconv.Itoa(port)}}}})
 		rules = append([]map[string]any{{"domain": []string{"full:" + ProbeName}, "outboundTag": "probe"}}, rules...)
 	}
-	b, err := jsonFile(map[string]any{
+	cfg := map[string]any{
 		// Warning even in the debug window: at info Xray logs where every
 		// connection goes, the users' destinations.
 		"log": map[string]string{"loglevel": "warning", "access": "none"},
@@ -1247,7 +1253,16 @@ func xrayFile(s Service, m Model, p Paths, inbounds ...map[string]any) (File, er
 		"inbounds":  inbounds,
 		"outbounds": outbounds,
 		"routing":   map[string]any{"domainStrategy": "IPOnDemand", "rules": rules},
-	})
+	}
+	if m.Traffic {
+		// Each user's bytes (traffic-limit-v1 §2.1): two counters a user
+		// (level 0, as every user here), read by rayd on the same API
+		// socket. Counters only: nothing of destinations.
+		cfg["stats"] = map[string]any{}
+		cfg["policy"] = map[string]any{"levels": map[string]any{"0": map[string]bool{"statsUserUplink": true, "statsUserDownlink": true}}}
+		cfg["api"] = map[string]any{"tag": "api", "listen": p.APISocket(s.Name), "services": []string{"HandlerService", "StatsService"}}
+	}
+	b, err := jsonFile(cfg)
 	if err != nil {
 		return File{}, err
 	}
@@ -1608,7 +1623,9 @@ const (
 )
 
 // StatsSocket is where a Hysteria2 backend answers for the sessions of a
-// client address; the directory lets the service's group (rayd) in.
+// client address, and Hysteria2 and naive give their users' bytes
+// (traffic-limit-v1 §2.2, §2.3); the directory lets the service's group
+// (rayd) in.
 func (p Paths) StatsSocket(service string) string { return p.socket(service, "stats") }
 
 // DoHSocket is where rayd serves a DoH service for the site to pass it on.
@@ -1650,16 +1667,17 @@ const (
 // naiveFiles are the site's certificate (naive answers for a name under
 // it) and the hashes of the users' passwords, which the process reads again
 // when they rotate.
-// naiveUsers is a naive process's users file: the hashes of the
-// credentials, sorted.
+// naiveUsers is a naive process's users file: the hash of each credential
+// and the name its bytes are counted under (traffic-limit-v1 §2.3), the
+// names as Xray's and Hysteria2's (u<id>, u<id>-n, u<id>-p). rayd naive
+// before v0.22.0 read a list of the hashes; this one reads both.
 func naiveUsers(m Model, s Service) ([]byte, error) {
 	_, users := XrayUsers(m, s)
-	hashes := make([]string, 0, len(users))
-	for _, email := range slices.Sorted(maps.Keys(users)) {
-		hashes = append(hashes, naive.HashPassword(users[email]))
+	byHash := make(map[string]string, len(users))
+	for email, secret := range users {
+		byHash[naive.HashPassword(secret)] = email
 	}
-	slices.Sort(hashes)
-	return jsonFile(hashes)
+	return jsonFile(byHash) // keys sorted
 }
 
 func naiveFiles(s Service, m Model, p Paths) ([]File, error) {

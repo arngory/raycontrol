@@ -109,6 +109,19 @@ func (c *cli) report(ctx context.Context, args []string) error {
 	} else {
 		p("users\t%d\nservices\t%d\nactive devices\t%d\n", st.Msg.Users, st.Msg.Services, st.Msg.ActiveDevices)
 	}
+	// The traffic limits: numbers only, no user (traffic-limit-v1 §6).
+	if us, err := c.c.ListUsers(ctx, connect.NewRequest(&nodev1.ListUsersRequest{})); err == nil {
+		limited, over := 0, 0
+		for _, u := range us.Msg.Users {
+			if u.TrafficLimitBytes > 0 {
+				limited++
+			}
+			if u.TrafficExhausted {
+				over++
+			}
+		}
+		p("traffic limits\t%d users, %d over\n", limited, over)
+	}
 	if svcErr == nil {
 		kinds := map[string]int{}
 		for _, s := range services.Msg.Services {
