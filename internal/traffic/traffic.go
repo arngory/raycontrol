@@ -73,7 +73,7 @@ func Processes(paths render.Paths) func(services []store.Service) []Source {
 			case svc.Kind == "inner":
 				out = append(out, Source{Key: "xray:" + name, Service: name,
 					Read: func(ctx context.Context, now time.Time) (Reading, error) {
-						return ReadXray(ctx, paths.APISocket(name), now)
+						return ReadXray(ctx, paths.APISocket(name))
 					},
 					Counts: func(u store.User) bool {
 						return slices.ContainsFunc(u.Services, func(id int64) bool { return provision.NeedsInner(byID[id].Kind) })
@@ -81,7 +81,7 @@ func Processes(paths render.Paths) func(services []store.Service) []Source {
 			case svc.Kind == "reality":
 				out = append(out, Source{Key: "xray:" + name, Service: name,
 					Read: func(ctx context.Context, now time.Time) (Reading, error) {
-						return ReadXray(ctx, paths.APISocket(name), now)
+						return ReadXray(ctx, paths.APISocket(name))
 					},
 					Counts: has(svc.ID)})
 			case render.IsHysteria(svc.Kind), svc.Kind == "naive":
@@ -124,9 +124,34 @@ type Accountant struct {
 
 type sourceState struct {
 	boot   string
-	polled time.Time
+	polled time.Time // whole seconds, as the store keeps it and counted_from
 	marks  map[string]store.TrafficCounter
 	fresh  bool // polled since the last write
+	// Xray's uptime and the monotonic time of the read, kept in memory
+	// only: set once this rayd has read the process (mono).
+	uptime, monoAt time.Duration
+	mono           bool
+}
+
+// sameRun reports whether a reading comes from the run of the process the
+// state was taken from. Xray (a reading with a start): its uptime grew at
+// least by the monotonic time between the two reads, less bootSlack; with
+// no reading of this rayd's yet, by the wall time since the stored poll;
+// with no poll stored, its start is the stored one within bootSlack. A
+// step of the wall clock between two reads of one rayd changes nothing.
+// The others: the same boot.
+func sameRun(prev *sourceState, r Reading, now time.Time) bool {
+	switch {
+	case prev == nil:
+		return false
+	case r.Start.IsZero():
+		return prev.boot == r.Boot
+	case prev.mono:
+		return r.Uptime+bootSlack >= prev.uptime+(r.Mono-prev.monoAt)
+	case !prev.polled.IsZero():
+		return strings.HasPrefix(prev.boot, xrayBoot) && r.Uptime+bootSlack >= now.Sub(prev.polled)
+	}
+	return SameBoot(prev.boot, r.Boot)
 }
 
 type pendingBytes struct {
@@ -223,6 +248,20 @@ func (a *Accountant) Round(ctx context.Context, only string, force bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.now()
+	// No limit, and nothing kept of one: one query and done (most nodes,
+	// every 15 s).
+	if a.loaded && len(a.sources) == 0 && len(a.pending) == 0 {
+		limits, err := a.Store.HasTrafficLimits(ctx)
+		if err != nil {
+			a.Health.Done("traffic", err)
+			return
+		}
+		if !limits {
+			a.over = map[int64]bool{}
+			a.Health.Retain("traffic", nil)
+			return
+		}
+	}
 	users, err := a.Store.ListUsers(ctx)
 	if err == nil {
 		err = a.load(ctx, users)
@@ -443,14 +482,18 @@ func (a *Accountant) take(src Source, r Reading, limited map[int64]store.User, n
 	var polled time.Time
 	var marks map[string]store.TrafficCounter
 	boot := r.Boot
-	same := false
-	if prev := a.sources[src.Key]; prev != nil {
+	prev := a.sources[src.Key]
+	same := sameRun(prev, r, now)
+	if prev != nil {
 		polled, marks = prev.polled, prev.marks
-		if same = SameBoot(prev.boot, r.Boot); same {
+		if same {
 			boot = prev.boot // one run: its first reading names it
 		}
 	}
-	next := &sourceState{boot: boot, polled: now, marks: map[string]store.TrafficCounter{}, fresh: true}
+	// The poll's time in whole seconds, as counted_from: a limit set in
+	// the same second as this poll, after it, must not read as set before.
+	next := &sourceState{boot: boot, polled: now.Truncate(time.Second), marks: map[string]store.TrafficCounter{}, fresh: true,
+		uptime: r.Uptime, monoAt: r.Mono, mono: !r.Start.IsZero()}
 	out := map[int64]store.TrafficCounter{}
 	for name, v := range r.Users {
 		id, ok := store.TrafficUser(name)

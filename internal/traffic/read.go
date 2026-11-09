@@ -20,13 +20,25 @@ import (
 // bytes since then (or since the name's first sight).
 type Reading struct {
 	// Boot names the process's run: random at each start (niko-server,
-	// rayd naive), or Xray's start ("xray:" and Unix seconds), which
-	// SameBoot compares with a tolerance.
+	// rayd naive), or Xray's start ("xray:" and Unix seconds, for the
+	// store and a rayd that has no reading of its own yet).
 	Boot string
-	// Start is the process's start when it says (Xray), else zero.
+	// Start is the process's start when it says (Xray: the wall clock at
+	// the read less the uptime), else zero.
 	Start time.Time
-	Users map[string]store.TrafficCounter
+	// Xray's uptime, and the monotonic time of the read (Mono, taken right
+	// before it): one run of Xray is told by its uptime growing with the
+	// time between two reads, which a step of the wall clock does not
+	// touch.
+	Uptime time.Duration
+	Mono   time.Duration
+	Users  map[string]store.TrafficCounter
 }
+
+// monoStart anchors Mono: time.Since keeps to the monotonic clock.
+var monoStart = time.Now()
+
+func monoNow() time.Duration { return time.Since(monoStart) }
 
 // Answers from the processes are bounded: a data-plane process is not
 // trusted to send a sane one (traffic-limit-v1 §6).
@@ -112,17 +124,21 @@ func checkBoot(b string) error {
 // xrayBoot prefixes an Xray process's start.
 const xrayBoot = "xray:"
 
-// bootSlack is how far two readings of an Xray's start may differ and be
-// one run: its uptime comes in whole seconds.
+// bootSlack is how far an Xray's uptime may fall behind the time between
+// two reads and still be one run (its uptime comes in whole seconds, and
+// a read waits up to readWait), and how far two readings of its start
+// may differ.
 const bootSlack = 5 * time.Second
 
 // ReadXray reads an Xray's users' bytes through its API socket (inner,
 // REALITY): QueryStats "user>>>" without a reset, and the uptime, which
-// gives its start (traffic-limit-v1 §2.1). A reset would lose the bytes
-// of a rayd that falls between the read and the write.
-func ReadXray(ctx context.Context, socket string, now time.Time) (Reading, error) {
+// tells its run (traffic-limit-v1 §2.1). A reset would lose the bytes of
+// a rayd that falls between the read and the write. The clocks are read
+// right before the call.
+func ReadXray(ctx context.Context, socket string) (Reading, error) {
 	ctx, cancel := context.WithTimeout(ctx, readWait)
 	defer cancel()
+	at, mono := time.Now(), monoNow()
 	users, uptime, err := xrayapi.DialStats(socket).Users(ctx)
 	if err != nil {
 		return Reading{}, err
@@ -130,8 +146,9 @@ func ReadXray(ctx context.Context, socket string, now time.Time) (Reading, error
 	if len(users) > maxNames {
 		return Reading{}, fmt.Errorf("%d names, at most %d", len(users), maxNames)
 	}
-	start := now.Add(-uptime).Truncate(time.Second)
-	r := Reading{Boot: xrayBoot + strconv.FormatInt(start.Unix(), 10), Start: start, Users: make(map[string]store.TrafficCounter, len(users))}
+	start := at.Add(-uptime).Truncate(time.Second)
+	r := Reading{Boot: xrayBoot + strconv.FormatInt(start.Unix(), 10), Start: start, Uptime: uptime, Mono: mono,
+		Users: make(map[string]store.TrafficCounter, len(users))}
 	for name, c := range users {
 		r.Users[name] = store.TrafficCounter{Up: c.Up, Down: c.Down}
 	}

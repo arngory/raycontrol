@@ -24,7 +24,8 @@ type node struct {
 	ctx   context.Context
 	path  string
 	st    *store.Store
-	now   time.Time
+	now   time.Time     // the wall clock: never on a whole second, as the real one
+	mono  time.Duration // the monotonic clock: a step of the wall clock leaves it
 	hb    *health.Board
 	woken int
 
@@ -38,7 +39,7 @@ type node struct {
 func newNode(t *testing.T) *node {
 	t.Helper()
 	n := &node{t: t, ctx: context.Background(), path: filepath.Join(t.TempDir(), "node.db"), hb: &health.Board{},
-		now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC), readings: map[string]Reading{}}
+		now: time.Date(2026, 11, 8, 12, 0, 0, 123456789, time.UTC), mono: time.Hour, readings: map[string]Reading{}}
 	n.open()
 	for _, s := range []store.Service{{Kind: "hy2-masq", Name: "hy"}, {Kind: "naive", Name: "nv"}, {Kind: "inner", Name: "inner"}, {Kind: "dnstt", Name: "dns"}} {
 		s.Enabled = true
@@ -77,6 +78,9 @@ func (n *node) accountant() *Accountant {
 					r, ok := n.readings[key]
 					if !ok {
 						return Reading{}, errors.New("not running")
+					}
+					if !r.Start.IsZero() {
+						r.Mono = n.mono // Xray's: the clock at the read
 					}
 					return r, nil
 				}
@@ -122,10 +126,20 @@ func (n *node) set(key, boot string, counters ...any) {
 	for i := 0; i+2 < len(counters); i += 3 {
 		r.Users[counters[i].(string)] = store.TrafficCounter{Up: int64(counters[i+1].(int)), Down: int64(counters[i+2].(int))}
 	}
-	if old, ok := n.readings[key]; ok {
-		r.Start = old.Start
-	}
 	n.readings[key] = r
+}
+
+// setXray makes inner's Xray read these counters with this uptime, as
+// ReadXray gives them: its start from the wall clock, the read's
+// monotonic time.
+func (n *node) setXray(uptime time.Duration, counters ...any) {
+	start := n.now.Add(-uptime).Truncate(time.Second)
+	n.set("xray:inner", xrayBoot+strconv.FormatInt(start.Unix(), 10), counters...)
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	r := n.readings["xray:inner"]
+	r.Start, r.Uptime = start, uptime
+	n.readings["xray:inner"] = r
 }
 
 func (n *node) stop(key string) {
@@ -134,7 +148,9 @@ func (n *node) stop(key string) {
 	delete(n.readings, key)
 }
 
-func (n *node) tick(d time.Duration) { n.now = n.now.Add(d) }
+// tick moves both clocks; step only the wall clock (NTP).
+func (n *node) tick(d time.Duration) { n.now, n.mono = n.now.Add(d), n.mono+d }
+func (n *node) step(d time.Duration) { n.now = n.now.Add(d) }
 
 // used is a user's count as stored.
 func (n *node) used(name string) (up, down int64) {
@@ -430,7 +446,7 @@ func TestPeriodNone(t *testing.T) {
 		t.Fatal(err)
 	}
 	u, _ = n.st.UserByName(n.ctx, "alice")
-	if u.OverLimit(n.now) || !u.TrafficStart.Equal(n.now) {
+	if u.OverLimit(n.now) || !u.TrafficStart.Equal(n.now.Truncate(time.Second)) {
 		t.Fatalf("over %v since %v", u.OverLimit(n.now), u.TrafficStart)
 	}
 }
@@ -538,28 +554,96 @@ func TestXrayStart(t *testing.T) {
 	n := newNode(t)
 	n.user("bob", 1<<30, "dns")
 	a := n.accountant()
-	start := n.now.Add(2 * time.Second)
+	// Xray started 2 s after the limit (the first limit restarts it).
 	n.tick(10 * time.Second)
-	n.readings["xray:inner"] = Reading{Boot: "xray:" + itoa(start.Unix()), Start: start,
-		Users: map[string]store.TrafficCounter{"u1": {Up: 30, Down: 40}}}
+	n.setXray(8*time.Second, "u1", 30, 40)
 	a.Round(n.ctx, "", true)
 	n.wantUsed("bob", 30, 40)
-	// Read again a second later, the uptime rounded the other way: the
-	// same run.
+	// Read again, the uptime a second short of the time between (whole
+	// seconds): the same run.
 	n.tick(Every)
-	start2 := start.Add(time.Second)
-	n.readings["xray:inner"] = Reading{Boot: "xray:" + itoa(start2.Unix()), Start: start2,
-		Users: map[string]store.TrafficCounter{"u1": {Up: 35, Down: 45}}}
+	n.setXray(8*time.Second+Every-time.Second, "u1", 35, 45)
 	a.Round(n.ctx, "", true)
 	n.wantUsed("bob", 35, 45)
 	// A process that started before the limit: from the first poll.
 	n2 := newNode(t)
 	n2.user("bob", 1<<30, "dns")
-	early := n2.now.Add(-time.Hour)
-	n2.readings["xray:inner"] = Reading{Boot: "xray:" + itoa(early.Unix()), Start: early,
-		Users: map[string]store.TrafficCounter{"u1": {Up: 30, Down: 40}}}
+	n2.setXray(time.Hour, "u1", 30, 40)
 	n2.accountant().Round(n2.ctx, "", true)
 	n2.wantUsed("bob", 0, 0)
+}
+
+// The wall clock steps between two reads of one Xray run (NTP): its
+// uptime grew with the monotonic clock, so it is the same run, whatever
+// its start reads as now. A restart is still one.
+func TestXrayClockStep(t *testing.T) {
+	n := newNode(t)
+	n.user("alice", 1<<40, "dns")
+	a := n.accountant()
+	up := time.Hour
+	n.setXray(up, "u1", 1000, 1000)
+	a.Round(n.ctx, "", true)
+	n.tick(Every)
+	up += Every
+	n.setXray(up, "u1", 30<<30, 30<<30)
+	a.Round(n.ctx, "", true)
+	u1, d1 := n.used("alice")
+	val := 30 << 30
+	for _, step := range []time.Duration{10 * time.Second, -40 * time.Second} {
+		n.step(step)
+		n.tick(Every)
+		up += Every
+		val += 5
+		n.setXray(up, "u1", val, val)
+		a.Round(n.ctx, "", true)
+		if u2, d2 := n.used("alice"); u2 != u1+5 || d2 != d1+5 {
+			t.Fatalf("a step of %v: +%d/+%d, want +5/+5", step, u2-u1, d2-d1)
+		}
+		u1, d1 = u1+5, d1+5
+	}
+	// Xray restarts: its uptime is less than the time since the last read.
+	n.tick(Every)
+	n.setXray(3*time.Second, "u1", 7, 9)
+	a.Round(n.ctx, "", true)
+	n.wantUsed("alice", u1+7, d1+9)
+
+	// After rayd's restart (no reading of its own): the stored poll and
+	// the uptime. The same run, though the wall clock stepped since...
+	n.tick(Every)
+	b := n.accountant()
+	n.step(-30 * time.Second)
+	n.setXray(3*time.Second+Every, "u1", 17, 19)
+	b.Round(n.ctx, "", true)
+	n.wantUsed("alice", u1+17, d1+19)
+	// ...and a restart while rayd was away, its new counters past the
+	// old marks: whole, not the difference.
+	n.tick(Every)
+	c := n.accountant()
+	n.tick(time.Minute)
+	n.setXray(20*time.Second, "u1", 40, 50)
+	c.Round(n.ctx, "", true)
+	n.wantUsed("alice", u1+57, d1+69)
+
+	// A restart this rayd sees, its new counters past the old marks.
+	n.tick(Every)
+	n.setXray(20*time.Second+Every, "u1", 60, 70)
+	c.Round(n.ctx, "", true)
+	n.wantUsed("alice", u1+77, d1+89)
+	n.tick(Every)
+	n.setXray(4*time.Second, "u1", 100, 100)
+	c.Round(n.ctx, "", true)
+	n.wantUsed("alice", u1+177, d1+189)
+
+	// A young process and a step of the wall clock longer than its
+	// uptime: still one run.
+	n.tick(Every)
+	n.setXray(4*time.Second+Every, "u1", 110, 110)
+	c.Round(n.ctx, "", true)
+	n.step(2 * time.Hour)
+	n.tick(Every)
+	n.setXray(4*time.Second+2*Every, "u1", 111, 112)
+	c.Round(n.ctx, "", true)
+	n.wantUsed("alice", u1+188, d1+201)
 }
 
 // A source that fails gives nothing and keeps its marks; one whose service
@@ -724,12 +808,63 @@ func TestLimitWithoutCount(t *testing.T) {
 	n.set("hy2:hy", "b1", "u1", 500, 500)
 	a.Round(n.ctx, "", false)
 	u, _ := n.st.UserByName(n.ctx, "alice")
-	if !u.TrafficStart.Equal(n.now) || !u.TrafficCountedFrom.Equal(n.now) || u.Used(n.now) != 0 {
+	if sec := n.now.Truncate(time.Second); !u.TrafficStart.Equal(sec) || !u.TrafficCountedFrom.Equal(sec) || u.Used(n.now) != 0 {
 		t.Fatalf("count %+v", u)
 	}
 	n.tick(Every)
 	n.set("hy2:hy", "b1", "u1", 510, 520)
 	a.Round(n.ctx, "", false) // the baseline: the limit is from the round before
+	n.tick(time.Minute)
+	n.set("hy2:hy", "b1", "u1", 515, 530)
+	a.Round(n.ctx, "", false)
+	n.wantUsed("alice", 5, 10)
+}
+
+// A limit set in the same second as a poll, after it: counted_from is in
+// whole seconds, so the poll's time is too, or the limit would read as set
+// before the poll and the process's whole counter would count.
+func TestLimitSameSecondAfterPoll(t *testing.T) {
+	n := newNode(t)
+	n.user("alice", 0, "hy")   // no limit yet
+	n.user("bob", 1<<40, "hy") // someone has one: the loop polls
+	n.now = n.now.Truncate(time.Second).Add(300 * time.Millisecond)
+	a := n.accountant()
+	// Hysteria2 has carried 50 GiB of alice's, before any limit.
+	n.set("hy2:hy", "b1", "u2", 0, 0, "u1", 10<<30, 40<<30)
+	a.Round(n.ctx, "", true) // at hh:mm:ss.300
+	n.now = n.now.Add(400 * time.Millisecond)
+	limit := int64(100 << 30)
+	if _, err := n.st.SetUserTraffic(n.ctx, "alice", store.TrafficChange{Limit: &limit}); err != nil { // at .700
+		t.Fatal(err)
+	}
+	n.tick(Every)
+	n.set("hy2:hy", "b1", "u2", 0, 0, "u1", 10<<30+1, 40<<30+1)
+	a.Round(n.ctx, "", true) // the baseline
+	n.tick(Every)
+	n.set("hy2:hy", "b1", "u2", 0, 0, "u1", 10<<30+3, 40<<30+4)
+	a.Round(n.ctx, "", true)
+	n.wantUsed("alice", 2, 3)
+}
+
+// TestLimitWithoutCount with the poll a fraction into its second.
+func TestLimitWithoutCountSubSecond(t *testing.T) {
+	n := newNode(t)
+	n.user("alice", 1<<30, "hy")
+	db, err := sql.Open("sqlite", "file:"+n.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(n.ctx, `DELETE FROM user_traffic`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	n.now = n.now.Truncate(time.Second).Add(400 * time.Millisecond)
+	a := n.accountant()
+	n.set("hy2:hy", "b1", "u1", 500, 500)
+	a.Round(n.ctx, "", false) // makes the count, from this second
+	n.tick(Every)
+	n.set("hy2:hy", "b1", "u1", 510, 520)
+	a.Round(n.ctx, "", false) // the baseline
 	n.tick(time.Minute)
 	n.set("hy2:hy", "b1", "u1", 515, 530)
 	a.Round(n.ctx, "", false)

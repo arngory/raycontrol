@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -25,14 +28,15 @@ import (
 // TestTrafficWithXray: the inner config rendered with counting on
 // (traffic-limit-v1 §2.1) makes a real Xray count a user's bytes through
 // VLESS, and rayd's traffic loop reads them from its API socket, adds them
-// to the user's period and takes the user off once over the limit. Set
+// to the user's period, leaves no connection behind its reads, tells a
+// restart of Xray, and takes the user off once over the limit. Set
 // XRAY_BIN.
 func TestTrafficWithXray(t *testing.T) {
 	bin := os.Getenv("XRAY_BIN")
 	if bin == "" {
 		t.Skip("set XRAY_BIN to an Xray built from arngory/xray-core")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	dir := t.TempDir()
 	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
@@ -92,45 +96,61 @@ func TestTrafficWithXray(t *testing.T) {
 	delete(cfg, "routing")
 	cfg["outbounds"] = []map[string]any{{"protocol": "freedom", "settings": map[string]any{
 		"finalRules": []map[string]any{{"action": "allow", "ip": []string{"127.0.0.0/8"}}}}}}
-	start := func(c string) {
+	start := func(c string) *exec.Cmd {
 		cmd := exec.Command(bin, "run", "-c", c)
 		cmd.Stderr = os.Stderr
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+		return cmd
 	}
-	start(writeJSON(t, cfg))
-	waitFile(t, paths.APISocket("inner"))
+	serverCfg := writeJSON(t, cfg)
+	server := start(serverCfg)
+	api := paths.APISocket("inner")
+	waitFile(t, api)
 
 	// The loop over the store, its source the real process.
 	hb := &health.Board{}
 	woken := 0
 	acct := &traffic.Accountant{Store: st, Sources: traffic.Processes(paths), Health: hb, Notify: func() { woken++ }}
-	acct.Round(ctx, "", true)
-	for _, l := range hb.Loops() {
-		if l.Failing() {
-			t.Fatalf("loop %s: %s", l.Name, l.Err)
+	round := func() {
+		t.Helper()
+		acct.Round(ctx, "", true)
+		for _, l := range hb.Loops() {
+			if l.Failing() {
+				t.Fatalf("loop %s: %s", l.Name, l.Err)
+			}
 		}
 	}
+	round()
 
-	// A target that takes what comes and answers three times as much.
-	const upload, download = 100 << 10, 300 << 10
+	// A target that takes as many bytes as the client says in its first
+	// four and answers three times as many.
 	target, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer target.Close()
 	go func() {
-		c, err := target.Accept()
-		if err != nil {
-			return
+		for {
+			c, err := target.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				var n [4]byte
+				if _, err := io.ReadFull(c, n[:]); err != nil {
+					return
+				}
+				size := int64(binary.BigEndian.Uint32(n[:]))
+				if _, err := io.CopyN(io.Discard, c, size-4); err != nil {
+					return
+				}
+				_, _ = c.Write(bytes.Repeat([]byte("d"), int(3*size)))
+			}()
 		}
-		defer c.Close()
-		if _, err := io.CopyN(io.Discard, c, upload); err != nil {
-			return
-		}
-		_, _ = c.Write(bytes.Repeat([]byte("d"), download))
 	}()
 	_, encryption, err := render.VLESSEncryption(seed)
 	if err != nil {
@@ -144,55 +164,117 @@ func TestTrafficWithXray(t *testing.T) {
 			"vnext": []map[string]any{{"address": "127.0.0.1", "port": serverPort,
 				"users": []map[string]string{{"id": id, "encryption": encryption}}}}}}},
 	}))
-	tp := target.Addr().(*net.TCPAddr).Port
-	var conn net.Conn
-	for i := 0; i < 50 && conn == nil; i++ {
-		c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), time.Second)
-		if err != nil {
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		req := []byte{5, 1, 0, 5, 1, 0, 1, 127, 0, 0, 1, byte(tp >> 8), byte(tp)}
-		buf := make([]byte, 12)
-		c.SetDeadline(time.Now().Add(5 * time.Second))
-		if _, err = c.Write(req); err == nil {
-			if _, err = io.ReadFull(c, buf); err == nil && buf[1] == 0 && buf[3] == 0 {
-				conn = c
-				break
+	// try sends up bytes through inner and takes three times as many back.
+	try := func(up int) error {
+		tp := target.Addr().(*net.TCPAddr).Port
+		var conn net.Conn
+		for i := 0; i < 50 && conn == nil; i++ {
+			c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), time.Second)
+			if err != nil {
+				time.Sleep(100 * time.Millisecond)
+				continue
 			}
+			req := []byte{5, 1, 0, 5, 1, 0, 1, 127, 0, 0, 1, byte(tp >> 8), byte(tp)}
+			buf := make([]byte, 12)
+			c.SetDeadline(time.Now().Add(5 * time.Second))
+			if _, err = c.Write(req); err == nil {
+				if _, err = io.ReadFull(c, buf); err == nil && buf[1] == 0 && buf[3] == 0 {
+					conn = c
+					break
+				}
+			}
+			c.Close()
+			time.Sleep(100 * time.Millisecond)
 		}
-		c.Close()
-		time.Sleep(100 * time.Millisecond)
+		if conn == nil {
+			return errors.New("no stream through inner")
+		}
+		defer conn.Close()
+		msg := bytes.Repeat([]byte("u"), up)
+		binary.BigEndian.PutUint32(msg, uint32(up)) //nolint:gosec // G115: a test's size
+		if _, err := conn.Write(msg); err != nil {
+			return err
+		}
+		_, err := io.ReadFull(conn, make([]byte, 3*up))
+		return err
 	}
-	if conn == nil {
-		t.Fatal("no stream through inner")
-	}
-	defer conn.Close()
-	if _, err := conn.Write(bytes.Repeat([]byte("u"), upload)); err != nil {
+	transfer := func(up int) {
+		t.Helper()
+		// The client's first connection to a restarted Xray fails (its
+		// 0-RTT ticket is the old process's): the next one goes.
+		var err error
+		for range 5 {
+			if err = try(up); err == nil {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
 		t.Fatal(err)
 	}
-	if _, err := io.ReadFull(conn, make([]byte, download)); err != nil {
-		t.Fatal(err)
-	}
+	const upload = 100 << 10
+	transfer(upload)
 
 	// Xray's counters: the payload each way, at the destination's side.
-	users, uptime, err := xrayapi.DialStats(paths.APISocket("inner")).Users(ctx)
+	users, uptime, err := xrayapi.DialStats(api).Users(ctx)
 	if err != nil || uptime > time.Minute {
 		t.Fatalf("stats: %v %v", users, err)
 	}
-	if c := users[render.InnerEmail(u.ID)]; c.Up != upload || c.Down != download {
-		t.Fatalf("Xray counted %+v, want %d/%d", c, upload, download)
+	if c := users[render.InnerEmail(u.ID)]; c.Up != upload || c.Down != 3*upload {
+		t.Fatalf("Xray counted %+v, want %d/%d", c, upload, 3*upload)
 	}
-	acct.Round(ctx, "", true)
+	round()
 	got, _ := st.UserByName(ctx, "alice")
-	if got.TrafficUp != upload || got.TrafficDown != download || got.OverLimit(time.Now()) {
+	if got.TrafficUp != upload || got.TrafficDown != 3*upload || got.OverLimit(time.Now()) {
 		t.Fatalf("the loop counted %d/%d", got.TrafficUp, got.TrafficDown)
 	}
-	// Read again: nothing twice.
-	acct.Round(ctx, "", true)
-	if again, _ := st.UserByName(ctx, "alice"); again.TrafficUp != upload || again.TrafficDown != download {
+
+	// Read again, many times: nothing twice, and no connection left open
+	// by a read, in rayd or in Xray.
+	fds := func() int {
+		e, _ := os.ReadDir("/proc/" + strconv.Itoa(server.Process.Pid) + "/fd")
+		return len(e)
+	}
+	runtime.GC()
+	g0, f0 := runtime.NumGoroutine(), fds()
+	for range 300 {
+		if _, err := traffic.ReadXray(ctx, api); err != nil {
+			t.Fatal(err)
+		}
+		round()
+	}
+	time.Sleep(200 * time.Millisecond)
+	if g, f := runtime.NumGoroutine(), fds(); g > g0+5 || f > f0+5 {
+		t.Fatalf("after 600 reads: goroutines %d -> %d, Xray's files %d -> %d", g0, g, f0, f)
+	}
+	if again, _ := st.UserByName(ctx, "alice"); again.TrafficUp != upload || again.TrafficDown != 3*upload {
 		t.Fatalf("again %d/%d", again.TrafficUp, again.TrafficDown)
 	}
+
+	// Xray restarts (a new socket, counters from zero): the loop reaches
+	// it again and counts its new counters whole.
+	server.Process.Kill()
+	server.Wait()
+	_ = os.Remove(api)
+	server = start(serverCfg)
+	waitFile(t, api)
+	for i := 0; ; i++ { // its inbound up
+		c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(serverPort), time.Second)
+		if err == nil {
+			c.Close()
+			break
+		}
+		if i == 50 {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	const again = 10 << 10
+	transfer(again)
+	round()
+	if got, _ = st.UserByName(ctx, "alice"); got.TrafficUp != upload+again || got.TrafficDown != 3*(upload+again) {
+		t.Fatalf("after Xray's restart %d/%d, want %d/%d", got.TrafficUp, got.TrafficDown, upload+again, 3*(upload+again))
+	}
+
 	// A limit under the count: off at the next poll, apply woken.
 	low := int64(200 << 10)
 	if _, err := st.SetUserTraffic(ctx, "alice", store.TrafficChange{Limit: &low}); err != nil {

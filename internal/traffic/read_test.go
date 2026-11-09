@@ -135,7 +135,7 @@ func TestNotRunning(t *testing.T) {
 	if _, err := ReadLine(ctx, filepath.Join(dir, "none.sock")); !notRunning(err) {
 		t.Errorf("no socket: %v", err)
 	}
-	if _, err := ReadXray(ctx, filepath.Join(dir, "none.sock"), time.Now()); !notRunning(err) {
+	if _, err := ReadXray(ctx, filepath.Join(dir, "none.sock")); !notRunning(err) {
 		t.Errorf("no Xray: %v", err)
 	}
 	stale := filepath.Join(dir, "stale.sock")
@@ -148,7 +148,7 @@ func TestNotRunning(t *testing.T) {
 	if _, err := ReadLine(ctx, stale); !notRunning(err) {
 		t.Errorf("a stale socket: %v", err)
 	}
-	if _, err := ReadXray(ctx, stale, time.Now()); !notRunning(err) {
+	if _, err := ReadXray(ctx, stale); !notRunning(err) {
 		t.Errorf("a stale Xray socket: %v", err)
 	}
 	old := serve(t, func(net.Conn, string) {})
