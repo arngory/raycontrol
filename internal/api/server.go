@@ -357,11 +357,10 @@ func (s *Server) CreateUser(ctx context.Context, req *connect.Request[nodev1.Cre
 	}
 	ids, err := s.serviceIDs(ctx, m.Services)
 	if err == nil {
-		u, err = s.Store.CreateUser(ctx, u)
-	}
-	if err == nil && len(ids) > 0 {
-		err = s.Store.SetUserServices(ctx, u.Name, ids)
+		// One write: a user without the services asked for would make
+		// the retry "already exists".
 		u.Services = ids
+		u, err = s.Store.CreateUser(ctx, u)
 	}
 	if err := s.done(ctx, "user.create", m.Name, err); err != nil {
 		return nil, err

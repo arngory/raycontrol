@@ -48,7 +48,8 @@ func newID() (string, error) {
 }
 
 // CreateInvite makes a one-time invite for a device of a user and returns
-// its SPA key.
+// its SPA key. It replaces an unused invite for the same device: a retry
+// leaves one.
 //
 // With pin, the invite also needs a PIN (api-v1 §3): pin makes the proof
 // from the key, and the invite takes InvitePinTries wrong ones.
@@ -67,13 +68,6 @@ func (s *Store) CreateInvite(ctx context.Context, userName, name, role string, t
 	if err != nil {
 		return Invite{}, key, err
 	}
-	var taken int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM devices WHERE user_id = ? AND name = ?`, u.ID, name).Scan(&taken); err != nil {
-		return Invite{}, key, err
-	}
-	if taken > 0 {
-		return Invite{}, key, fmt.Errorf("%w device %q of %s: the name is taken", ErrInvalid, name, u.Name)
-	}
 	id, err := newID()
 	if err != nil {
 		return Invite{}, key, err
@@ -86,9 +80,25 @@ func (s *Store) CreateInvite(ctx context.Context, userName, name, role string, t
 	if len(pin) > 0 && pin[0] != nil {
 		inv.PinProof, inv.PinTries = pin[0](key), InvitePinTries
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO invites (id, user_id, name, role, spa_key, created_at, expires_at, pin_proof, pin_tries)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		inv.ID, u.ID, inv.Name, inv.Role, key[:], now.Unix(), inv.ExpiresAt.Unix(), inv.PinProof, inv.PinTries)
+	err = s.tx(ctx, func(tx *sql.Tx) error {
+		var taken int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM devices WHERE user_id = ? AND name = ?`, u.ID, name).Scan(&taken); err != nil {
+			return err
+		}
+		if taken > 0 {
+			return fmt.Errorf("%w device %q of %s: the name is taken", ErrInvalid, name, u.Name)
+		}
+		// An unused invite for the same device is replaced: only one of
+		// them could ever register (the name), and the earlier one is
+		// usually a retry's whose answer was lost.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM invites WHERE user_id = ? AND name = ? AND used_at IS NULL`, u.ID, name); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO invites (id, user_id, name, role, spa_key, created_at, expires_at, pin_proof, pin_tries)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			inv.ID, u.ID, inv.Name, inv.Role, key[:], now.Unix(), inv.ExpiresAt.Unix(), inv.PinProof, inv.PinTries)
+		return err
+	})
 	return inv, key, err
 }
 

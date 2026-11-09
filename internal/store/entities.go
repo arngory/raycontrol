@@ -70,7 +70,8 @@ type User struct {
 	LAN bool
 }
 
-// CreateUser inserts u and returns it with its ID. A limit counts from now.
+// CreateUser inserts u with its services (u.Services, IDs), all or
+// nothing, and returns it with its ID. A limit counts from now.
 func (s *Store) CreateUser(ctx context.Context, u User) (User, error) {
 	if err := checkName("user", u.Name); err != nil {
 		return u, err
@@ -93,6 +94,11 @@ func (s *Store) CreateUser(ctx context.Context, u User) (User, error) {
 		}
 		if u.ID, err = res.LastInsertId(); err != nil {
 			return err
+		}
+		for _, id := range u.Services {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO user_services (user_id, service_id) VALUES (?, ?)`, u.ID, id); err != nil {
+				return fmt.Errorf("service %d: %w", id, err)
+			}
 		}
 		if u.TrafficLimit != nil {
 			u.TrafficStart, u.TrafficCountedFrom = u.CreatedAt, u.CreatedAt
@@ -764,7 +770,9 @@ func (s *Store) ActiveDevice(ctx context.Context, id string) (Device, [spa.KeySi
 
 // RevokeDevice marks a device revoked. Revocation is permanent. The user's
 // LAN key, when there is one, is new with it (lan-v1 §3): the multicast
-// password the device knew is no longer the user's, both at once.
+// password the device knew is no longer the user's, both at once. A device
+// revoked already is no error and changes nothing; an unknown one is
+// ErrNotFound.
 func (s *Store) RevokeDevice(ctx context.Context, id string) error {
 	key, err := newLANKey()
 	if err != nil {
@@ -778,6 +786,11 @@ func (s *Store) RevokeDevice(ctx context.Context, id string) error {
 		if n, err := res.RowsAffected(); err != nil {
 			return err
 		} else if n == 0 {
+			// Revoked already (a retry): done, nothing changes.
+			var known int
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM devices WHERE id = ?`, id).Scan(&known); err != nil || known > 0 {
+				return err
+			}
 			return fmt.Errorf("device %q: %w", id, ErrNotFound)
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE users SET lan_key = ? WHERE lan_key IS NOT NULL
