@@ -22,6 +22,26 @@ func TestParseLine(t *testing.T) {
 		r.Users["u5-n"] != (store.TrafficCounter{Up: 0, Down: 4}) {
 		t.Fatalf("%+v", r)
 	}
+	// The connection limits' refusals (rayd naive from v0.24.0): beside
+	// the bytes; a reading without them has none.
+	r, err = parseLine([]byte(`{"v":1,"boot":"b","users":{"u5-ab":{"up":1,"down":2}},"limit":{"u5":{"tcp":3,"lookup":1}}}`))
+	if err != nil || r.Limits["u5"]["tcp"] != 3 || r.Limits["u5"]["lookup"] != 1 || len(r.Users) != 1 {
+		t.Fatalf("limits: %+v %v", r, err)
+	}
+	if r, _ := parseLine([]byte(`{"v":1,"boot":"b","users":{}}`)); r.Limits != nil || r.AgeKnown {
+		t.Fatalf("no limits, no uptime: %+v", r)
+	}
+	// How long the process has run (rayd naive from v0.24.0), in seconds;
+	// 0 is known, a negative one is not.
+	for line, want := range map[string]time.Duration{`"uptime":0`: 0, `"uptime":95`: 95 * time.Second, `"uptime":-1`: -1} {
+		r, err := parseLine([]byte(`{"v":1,"boot":"b","users":{},` + line + `}`))
+		if err != nil || (want >= 0) != r.AgeKnown || want >= 0 && r.Age != want {
+			t.Errorf("%s: %+v %v", line, r, err)
+		}
+	}
+	if _, err := parseLine([]byte(`{"v":1,"boot":"b","users":{},"limit":{"u5":{"a":1,"b":1,"c":1,"d":1,"e":1,"f":1,"g":1,"h":1,"i":1,"j":1,"k":1,"l":1,"m":1,"n":1,"o":1,"p":1,"q":1}}}`)); err == nil {
+		t.Error("too many kinds accepted")
+	}
 	// No users yet: an empty reading, not an error.
 	if r, err := parseLine([]byte(`{"v":1,"boot":"b","users":{}}`)); err != nil || len(r.Users) != 0 {
 		t.Fatalf("%+v %v", r, err)

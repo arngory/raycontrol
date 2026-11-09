@@ -93,6 +93,9 @@ type Plan struct {
 	// spec/icmp-v1.md); the data plane's groups must be in
 	// net.ipv4.ping_group_range (Host.Apply widens it).
 	ICMP bool
+	// Conntrack: Host.Apply sizes the conntrack table and shortens its
+	// times (spec/conn-limit-v1.md §6.1). A node's plan has it.
+	Conntrack bool
 	// Processes are the data-plane units as plain processes, in start
 	// order, and Dirs the directories they share: what rayd serve
 	// -supervise runs where there is no systemd (tests, containers).
@@ -225,7 +228,7 @@ func groups(gs []string) string {
 // (CheckService) is left out with a warning; what remains goes into the
 // units from the templates below and nothing else.
 func Build(in Inputs, p render.Paths, bin Binaries) Plan {
-	var plan Plan
+	plan := Plan{Conntrack: true}
 	services, warnings := in.checked()
 	plan.Warnings = warnings
 	var inner *ServiceInput
@@ -456,7 +459,8 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 				// directory, as Hysteria2's: rayd's group passes through.
 				"ExecStart=" + bin.Rayd + " naive -answer " + answer + " -users " + path.Join(dir, render.NaiveUsers) +
 					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name) +
-					" -quic-socket " + p.NaiveQUICSocket(s.Name) + " -stats-socket " + p.StatsSocket(s.Name) + probeArg + frontUID + icmp,
+					" -quic-socket " + p.NaiveQUICSocket(s.Name) + " -stats-socket " + p.StatsSocket(s.Name) +
+					" -conn-limit " + path.Join(dir, render.NaiveConnLimit) + probeArg + frontUID + icmp,
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
 				"ReadWritePaths=" + path.Dir(p.NaiveSocket(s.Name)),

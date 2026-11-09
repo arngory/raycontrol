@@ -22,6 +22,7 @@ import (
 	"connectrpc.com/connect"
 
 	"github.com/arngory/raycontrol/internal/appmirror"
+	"github.com/arngory/raycontrol/internal/connlimit"
 	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/dnscheck"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
@@ -69,6 +70,9 @@ type Server struct {
 	// NodeUpdate is the update by request (spec/node-update-v1.md); nil:
 	// the node's paths.
 	NodeUpdate *NodeUpdate
+	// ConnLimit keeps the refusals, the table and the guard
+	// (spec/conn-limit-v1.md §7); nil shows nothing of them.
+	ConnLimit *connlimit.Monitor
 
 	// Wrong invite PINs, and the invites the last of them withdrew, since
 	// rayd started (rayctl metrics).

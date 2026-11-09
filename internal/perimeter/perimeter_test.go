@@ -3,6 +3,7 @@ package perimeter
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -46,6 +47,8 @@ type fakeFW struct {
 	failing    map[string]int // SetPublic, SetRelays, SetForward, SetACME calls still to fail
 	calls      []string       // Setup, SetAdmin, SetRelays, Allow, SetSPAPorts, SetEgress, in order
 	egress     *Egress        // the egress policy in force; nil: none, as in a new table
+	inLimitOff bool           // the per-address limit is off (a new table has it on)
+	guard      bool           // the guard refuses (a new table: not)
 }
 
 func (f *fakeFW) SetACME(port uint16, ttl time.Duration) error {
@@ -70,6 +73,7 @@ func (f *fakeFW) Setup() error {
 	// A new table: nothing of the old one, grants included.
 	f.udp, f.tcp, f.public, f.admin, f.adminPorts, f.rot, f.open = nil, nil, nil, nil, nil, nil, nil
 	f.relays, f.relayPorts, f.forward, f.egress = nil, nil, nil, nil
+	f.inLimitOff, f.guard = false, false
 	return nil
 }
 func (f *fakeFW) Present() (bool, error) {
@@ -86,6 +90,7 @@ func (f *fakeFW) flush() {
 	f.udp, f.tcp, f.public, f.admin, f.adminPorts, f.rot, f.open = nil, nil, nil, nil, nil, nil, nil
 	f.relays, f.relayPorts, f.forward, f.egress = nil, nil, nil, nil
 	f.acmePort, f.acmeTTL = 0, 0
+	f.inLimitOff, f.guard = false, false
 }
 func (f *fakeFW) Teardown() error { return nil }
 func (f *fakeFW) SetEgress(e Egress) error {
@@ -96,6 +101,26 @@ func (f *fakeFW) SetEgress(e Egress) error {
 		return errors.New("nft: Operation not supported")
 	}
 	f.egress = &e
+	return nil
+}
+func (f *fakeFW) SetInLimit(on bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, fmt.Sprintf("SetInLimit %v", on))
+	if f.fails("SetInLimit") {
+		return errors.New("nft: busy")
+	}
+	f.inLimitOff = !on
+	return nil
+}
+func (f *fakeFW) SetGuard(on bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, fmt.Sprintf("SetGuard %v", on))
+	if f.fails("SetGuard") {
+		return errors.New("nft: busy")
+	}
+	f.guard = on
 	return nil
 }
 func (f *fakeFW) SetSPAPorts(udp, tcp []uint16) error {

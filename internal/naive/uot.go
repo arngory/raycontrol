@@ -9,8 +9,8 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -34,114 +34,19 @@ const (
 	// the devices that share the user's password.
 	uotPerUser    = 256
 	uotPerService = 4096
-	uotNames      = 64 // names resolved per stream, kept
+	uotNames      = 64 // names a stream keeps (uotResolved)
 	uotNameMiss   = 30 * time.Second
-	uotPeers      = 4096 // addresses a stream sent to, whose answers come back
-	uotPeerAge    = 2 * time.Minute
+	uotLookupWait = 5 * time.Second // a packet's wait for its name
+	uotPeers      = 4096            // addresses a stream sent to, whose answers come back
 
-	// A user's new destinations and name lookups, all streams together:
-	// each destination is a conntrack entry the perimeter keeps, each name
-	// a query to the resolvers TCP shares.
-	uotPeerRate, uotPeerBurst     = 100, 200
-	uotLookupRate, uotLookupBurst = 20, 50
+	// A user's new destinations, all streams together: each is a conntrack
+	// entry the perimeter keeps. Name lookups are limits' (TCP's too).
+	uotPeerRate, uotPeerBurst = 100, 200
 )
 
 // errRefused ends a stream with a reset: the client sees an error, not an
 // empty answer.
 var errRefused = errors.New("naive: refused")
-
-// uotLimits counts the UoT streams, per user and in all, and paces each
-// user's new destinations and name lookups. A user's tokens outlive their
-// last stream until they have refilled: closing streams gives none back.
-type uotLimits struct {
-	mu    sync.Mutex
-	total int
-	users map[[32]byte]*uotUser
-	swept time.Time
-}
-
-type uotUser struct {
-	streams        int
-	peers, lookups bucket
-}
-
-func (l *uotLimits) take(user [32]byte) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	now := time.Now()
-	if now.Sub(l.swept) > 10*time.Second {
-		l.sweep(now)
-	}
-	u := l.users[user]
-	if l.total >= uotPerService || (u != nil && u.streams >= uotPerUser) {
-		return false
-	}
-	if u == nil {
-		if l.users == nil {
-			l.users = map[[32]byte]*uotUser{}
-		}
-		u = &uotUser{peers: bucket{uotPeerBurst, now}, lookups: bucket{uotLookupBurst, now}}
-		l.users[user] = u
-	}
-	l.total++
-	u.streams++
-	return true
-}
-
-func (l *uotLimits) put(user [32]byte) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if u := l.users[user]; u != nil && u.streams > 0 {
-		l.total--
-		u.streams--
-	}
-}
-
-// sweep forgets the users without streams whose tokens have refilled.
-func (l *uotLimits) sweep(now time.Time) {
-	l.swept = now
-	for k, u := range l.users {
-		if u.streams == 0 && u.peers.full(now, uotPeerRate, uotPeerBurst) && u.lookups.full(now, uotLookupRate, uotLookupBurst) {
-			delete(l.users, k)
-		}
-	}
-}
-
-// newPeer and lookup take one of the user's tokens: false when there is none.
-func (l *uotLimits) newPeer(user [32]byte) bool {
-	return l.spend(user, func(u *uotUser) *bucket { return &u.peers }, uotPeerRate, uotPeerBurst)
-}
-
-func (l *uotLimits) lookup(user [32]byte) bool {
-	return l.spend(user, func(u *uotUser) *bucket { return &u.lookups }, uotLookupRate, uotLookupBurst)
-}
-
-func (l *uotLimits) spend(user [32]byte, which func(*uotUser) *bucket, rate, burst float64) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	u := l.users[user]
-	return u != nil && which(u).take(time.Now(), rate, burst)
-}
-
-// bucket is a token bucket: rate tokens a second, up to burst.
-type bucket struct {
-	tokens float64
-	at     time.Time
-}
-
-func (b *bucket) full(now time.Time, rate, burst float64) bool {
-	return b.tokens+now.Sub(b.at).Seconds()*rate >= burst
-}
-
-func (b *bucket) take(now time.Time, rate, burst float64) bool {
-	b.tokens = min(burst, b.tokens+now.Sub(b.at).Seconds()*rate)
-	b.at = now
-	if b.tokens < 1 {
-		return false
-	}
-	b.tokens--
-	return true
-}
 
 // uotAddr is a destination as the client names it: an address or a name.
 type uotAddr struct {
@@ -233,56 +138,132 @@ func appendAddr(b []byte, ap netip.AddrPort) []byte {
 type uotStream struct {
 	s       *Server
 	ctx     context.Context
-	user    [32]byte
+	slot    *uotSlot
 	traffic *Traffic // the payloads sent and passed back count (nil: for nobody)
 	names   map[string]uotResolved
-	last    atomic.Int64 // mono: the last packet either way
 
-	mu     sync.Mutex
-	peers  map[netip.AddrPort]int64 // where the client sent, and when: answers come from these only
+	mu sync.Mutex
+	// peers are where the client sent, and the pair's times: answers come
+	// from these only, and each is a conntrack entry until it ends.
+	peers  map[netip.AddrPort]pairTimes
 	pruned time.Time
+	aged   time.Time
 }
 
-// uotResolved is a name's first allowed address, or none until a moment.
+// pairTimes are a pair's last packet sent, last either way (monoAt: the
+// wall clock may step back, and a step back would hold every pair), and
+// whether an answer came.
+type pairTimes struct {
+	sent, any int64
+	answered  bool
+}
+
+// end is when conntrack lets the pair go: 30 s after the last packet sent
+// while unanswered, 120 s after the last either way once answered.
+func (p pairTimes) end() int64 {
+	if p.answered {
+		return p.any + int64(pairAnswered)
+	}
+	return p.sent + int64(pairUnanswered)
+}
+
+// age drops the pairs whose time ran out, once a second at most, and says
+// how many are left.
+func (u *uotStream) age(now time.Time) int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if now.Sub(u.aged) >= ageEvery {
+		u.aged = now
+		m := monoAt(now)
+		for p, t := range u.peers {
+			if m >= t.end() {
+				delete(u.peers, p)
+			}
+		}
+	}
+	return len(u.peers)
+}
+
+// ends are when the stream's pairs end, for the user's journal.
+func (u *uotStream) ends() []int64 {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	out := make([]int64, 0, len(u.peers))
+	for _, t := range u.peers {
+		out = append(out, t.end())
+	}
+	return out
+}
+
+// heard notes an answer from a pair, and reports whether it is one.
+func (u *uotStream) heard(ap netip.AddrPort) bool {
+	ap = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+	now := monoAt(u.s.lim.clock())
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	t, ok := u.peers[ap]
+	if ok {
+		t.any, t.answered = now, true
+		u.peers[ap] = t
+	}
+	return ok
+}
+
+// uotResolved is what a stream knows of a name until a moment, so that
+// its packets to it neither wait nor take the process's cache's lock: an
+// allowed address, until the shared cache's answer expires; or (ip not
+// valid) a lookup that timed out or got SERVFAIL, which the shared cache
+// does not keep (spec/conn-limit-v1.md §10.1, 8), for uotNameMiss.
+// Anything else (no such name, no allowed address, no lookup token) is the
+// shared cache's to know, or no one's.
 type uotResolved struct {
 	ip    netip.Addr
 	until time.Time
 }
 
-func (u *uotStream) touch() { u.last.Store(mono()) }
+func (u *uotStream) touch() { u.slot.last.Store(mono()) }
 
-// mayReach reports whether the client may send to ap: a destination it sent
-// to before, or a new one while the stream has room and the user tokens.
-func (u *uotStream) mayReach(ap netip.AddrPort) bool {
-	now := time.Now()
+// sent notes a packet sent to a pair the stream has.
+func (u *uotStream) sent(ap netip.AddrPort, now int64) bool {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if _, ok := u.peers[ap]; ok {
-		u.peers[ap] = now.UnixNano()
+	t, ok := u.peers[ap]
+	if ok {
+		t.sent, t.any = now, now
+		u.peers[ap] = t
+	}
+	return ok
+}
+
+// mayReach reports whether the client may send to ap: a destination it sent
+// to before, or a new one while the stream has room and the user's limits
+// let it (limits.newPair).
+func (u *uotStream) mayReach(ap netip.AddrPort) bool {
+	now := u.s.lim.clock()
+	m := monoAt(now)
+	if u.sent(ap, m) {
 		return true
 	}
+	u.mu.Lock()
 	if len(u.peers) >= uotPeers && now.Sub(u.pruned) > time.Second {
-		// Those the client has not sent to for a while go, as conntrack
-		// forgets them.
+		// Those whose time ran out go, as conntrack forgets them.
 		u.pruned = now
-		for p, at := range u.peers {
-			if now.Sub(time.Unix(0, at)) > uotPeerAge {
+		for p, t := range u.peers {
+			if m >= t.end() {
 				delete(u.peers, p)
 			}
 		}
 	}
-	if len(u.peers) >= uotPeers || !u.s.uot.newPeer(u.user) {
+	full := len(u.peers) >= uotPeers
+	u.mu.Unlock()
+	// Not under u.mu: limits ages the user's streams under its own lock.
+	if full || !u.s.lim.newPair(u.slot) {
 		return false
 	}
-	u.peers[ap] = now.UnixNano()
-	return true
-}
-
-func (u *uotStream) answers(ap netip.AddrPort) bool {
 	u.mu.Lock()
-	defer u.mu.Unlock()
-	_, ok := u.peers[netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())]
-	return ok
+	u.peers[ap] = pairTimes{sent: m, any: m}
+	u.mu.Unlock()
+	return true
 }
 
 // resolve is the address a destination may be reached at: its own, or the
@@ -294,33 +275,97 @@ func (u *uotStream) resolve(a uotAddr) (netip.AddrPort, bool) {
 	if a.port == 0 {
 		return netip.AddrPort{}, false
 	}
-	if n, ok := u.names[a.name]; ok && (n.ip.IsValid() || time.Now().Before(n.until)) {
-		return netip.AddrPortFrom(n.ip, a.port), n.ip.IsValid()
+	now := u.s.lim.clock()
+	if n, ok := u.names[a.name]; ok && now.Before(n.until) {
+		if n.ip.IsValid() {
+			return netip.AddrPortFrom(n.ip, a.port), true
+		}
+		// A failure of the stream's own: the shared cache may know the name
+		// since, no lookup otherwise.
+		ip, until, ok := u.cachedName(a.name, now)
+		if !ok {
+			return netip.AddrPort{}, false
+		}
+		delete(u.names, a.name)
+		if !until.IsZero() {
+			u.remember(a.name, uotResolved{ip, until}, now)
+		}
+		return netip.AddrPortFrom(ip, a.port), ip.IsValid()
 	}
-	if !u.s.uot.lookup(u.user) {
-		return netip.AddrPort{}, false
+	ip, until, ok := u.cachedName(a.name, now)
+	if !ok {
+		ip, until = u.lookup(a.name, now)
 	}
-	ip := u.lookup(a.name)
-	if _, ok := u.names[a.name]; ok || len(u.names) < uotNames {
-		u.names[a.name] = uotResolved{ip: ip, until: time.Now().Add(uotNameMiss)} // until: a miss only
+	if !until.IsZero() {
+		u.remember(a.name, uotResolved{ip, until}, now)
 	}
 	return netip.AddrPortFrom(ip, a.port), ip.IsValid()
 }
 
-// lookup is the first allowed address of a name, or none.
-func (u *uotStream) lookup(name string) netip.Addr {
-	ctx, cancel := context.WithTimeout(u.ctx, 5*time.Second)
-	ips, err := u.s.resolve(ctx, name)
-	cancel()
-	if err != nil {
-		return netip.Addr{}
+// cachedName is a name's first allowed address in the process's cache, and
+// until when the stream may keep it (zero: not); ok false when the cache
+// does not know the name.
+func (u *uotStream) cachedName(name string, now time.Time) (netip.Addr, time.Time, bool) {
+	addrs, until, err, ok := u.s.names.get(name, now)
+	if !ok {
+		return netip.Addr{}, time.Time{}, false
 	}
-	for _, ip := range ips {
+	ip, until := u.firstAllowed(addrs, until, err)
+	return ip, until, true
+}
+
+// lookup looks a name up through the process's cache, a miss paying the
+// user's lookup token: its first allowed address, and until when the
+// stream may keep what came of it (zero: not).
+func (u *uotStream) lookup(name string, now time.Time) (netip.Addr, time.Time) {
+	if !domainName(name) {
+		return netip.Addr{}, time.Time{}
+	}
+	ctx, cancel := context.WithTimeout(u.ctx, uotLookupWait)
+	addrs, until, err := u.s.lookupNameUntil(ctx, u.slot.user, name, false)
+	cancel()
+	if err != nil && lookupFailed(err) {
+		return netip.Addr{}, now.Add(uotNameMiss)
+	}
+	return u.firstAllowed(addrs, until, err)
+}
+
+func (u *uotStream) firstAllowed(addrs []netip.Addr, until time.Time, err error) (netip.Addr, time.Time) {
+	if err != nil {
+		return netip.Addr{}, time.Time{}
+	}
+	for _, ip := range addrs {
 		if ip = ip.Unmap(); u.s.allowed(ip) {
-			return ip
+			return ip, until
 		}
 	}
-	return netip.Addr{}
+	return netip.Addr{}, time.Time{}
+}
+
+// remember keeps what the stream knows of a name: within uotNames, those
+// expired going first.
+func (u *uotStream) remember(name string, r uotResolved, now time.Time) {
+	if _, ok := u.names[name]; !ok && len(u.names) >= uotNames {
+		for n, x := range u.names {
+			if !now.Before(x.until) {
+				delete(u.names, n)
+			}
+		}
+		if len(u.names) >= uotNames {
+			return
+		}
+	}
+	u.names[name] = r
+}
+
+// lookupFailed reports whether a lookup timed out or got SERVFAIL: what the
+// shared cache does not keep and a stream does, for itself.
+func lookupFailed(err error) bool {
+	var d *net.DNSError
+	if errors.As(err, &d) {
+		return !d.IsNotFound && (d.IsTimeout || d.IsTemporary)
+	}
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded)
 }
 
 func (s *Server) allowed(ip netip.Addr) bool {
@@ -347,7 +392,7 @@ type deadlines interface {
 // runs out or ctx is done; errRefused when the stream must be reset. Only
 // this goroutine's helper writes to the stream, and it is done when this
 // returns.
-func (s *Server) serveUoT(ctx context.Context, user [32]byte, traffic *Traffic, stream io.ReadWriter, dl deadlines) error {
+func (s *Server) serveUoT(ctx context.Context, slot *uotSlot, traffic *Traffic, stream io.ReadWriter, dl deadlines) error {
 	idle := s.uotIdle
 	if idle == 0 {
 		idle = uotIdle
@@ -371,8 +416,9 @@ func (s *Server) serveUoT(ctx context.Context, user [32]byte, traffic *Traffic, 
 		return nil
 	}
 	_ = dl.SetReadDeadline(time.Time{})
-	u := &uotStream{s: s, ctx: ctx, user: user, traffic: traffic, names: map[string]uotResolved{}, peers: map[netip.AddrPort]int64{}}
+	u := &uotStream{s: s, ctx: ctx, slot: slot, traffic: traffic, names: map[string]uotResolved{}, peers: map[netip.AddrPort]pairTimes{}}
 	u.touch()
+	s.lim.uotRun(slot, u)
 
 	// The errors say why, never where: no destination in the log.
 	var to netip.AddrPort
@@ -381,7 +427,7 @@ func (s *Server) serveUoT(ctx context.Context, user [32]byte, traffic *Traffic, 
 		if to, ok = u.resolve(dest); !ok {
 			return fmt.Errorf("%w: the destination is not allowed", errRefused)
 		}
-		if !u.s.uot.newPeer(user) {
+		if !u.mayReach(to) {
 			return fmt.Errorf("%w: too many new destinations", errRefused)
 		}
 	}
@@ -392,11 +438,11 @@ func (s *Server) serveUoT(ctx context.Context, user [32]byte, traffic *Traffic, 
 	defer func() { _ = conn.Close() }()
 
 	up := make(chan error, 1)
-	go func() { up <- u.upstream(r, conn, connect == 1) }()
+	go func() { up <- u.upstream(r, conn, to) }()
 	down := make(chan struct{})
 	go func() {
 		defer close(down)
-		u.downstream(conn, stream, connect == 1)
+		u.downstream(conn, stream, to)
 	}()
 
 	tick := time.NewTicker(idle / 8)
@@ -415,7 +461,7 @@ loop:
 		case <-ctx.Done():
 			break loop
 		case <-tick.C:
-			if mono()-u.last.Load() > int64(idle) {
+			if mono()-slot.last.Load() > int64(idle) {
 				break loop
 			}
 		}
@@ -471,7 +517,9 @@ func noBroadcast(_, _ string, c syscall.RawConn) error {
 var uotBufs = sync.Pool{New: func() any { return new([uotMaxPayload]byte) }}
 
 // upstream sends the client's packets; errRefused for a stream to reset.
-func (u *uotStream) upstream(r *bufio.Reader, conn *net.UDPConn, connected bool) error {
+// to is the destination of a connected stream, invalid otherwise.
+func (u *uotStream) upstream(r *bufio.Reader, conn *net.UDPConn, to netip.AddrPort) error {
+	connected := to.IsValid()
 	for {
 		var dest uotAddr
 		if !connected {
@@ -489,7 +537,7 @@ func (u *uotStream) upstream(r *bufio.Reader, conn *net.UDPConn, connected bool)
 			return fmt.Errorf("%w: a packet of %d bytes", errRefused, n)
 		}
 		buf := uotBufs.Get().(*[uotMaxPayload]byte)
-		err = u.send(r, conn, connected, dest, buf[:n])
+		err = u.send(r, conn, to, dest, buf[:n])
 		uotBufs.Put(buf)
 		if err != nil {
 			return err
@@ -498,17 +546,20 @@ func (u *uotStream) upstream(r *bufio.Reader, conn *net.UDPConn, connected bool)
 }
 
 // send reads one packet's data into b and sends it; an error ends the stream.
-func (u *uotStream) send(r *bufio.Reader, conn *net.UDPConn, connected bool, dest uotAddr, b []byte) error {
+func (u *uotStream) send(r *bufio.Reader, conn *net.UDPConn, connectedTo netip.AddrPort, dest uotAddr, b []byte) error {
 	if _, err := io.ReadFull(r, b); err != nil {
 		return err
 	}
 	u.touch()
 	var err error
 	n := 0
-	if connected {
+	if connectedTo.IsValid() {
 		// A destination that answers "unreachable" fails a write or two:
-		// the stream lives on, as UDP would.
-		n, err = conn.Write(b)
+		// the stream lives on, as UDP would. A pair whose time ran out is a
+		// new one, as conntrack's entry is.
+		if u.mayReach(connectedTo) {
+			n, err = conn.Write(b)
+		}
 	} else if to, ok := u.resolve(dest); ok && u.mayReach(to) {
 		n, err = conn.WriteToUDPAddrPort(b, to)
 	} // else not allowed, no address or no room: dropped
@@ -526,7 +577,8 @@ const headRoom = 1 + 16 + 2 + 2
 
 // downstream passes the answers on, each in one write (one padded frame
 // while naive pads).
-func (u *uotStream) downstream(conn *net.UDPConn, w io.Writer, connected bool) {
+func (u *uotStream) downstream(conn *net.UDPConn, w io.Writer, connectedTo netip.AddrPort) {
+	connected := connectedTo.IsValid()
 	// One more than an answer may take: a longer one fills it, and goes.
 	buf := make([]byte, headRoom+uotMaxAnswer+1)
 	var head [headRoom]byte
@@ -539,7 +591,10 @@ func (u *uotStream) downstream(conn *net.UDPConn, w io.Writer, connected bool) {
 			}
 			return
 		}
-		if n > uotMaxAnswer || (!connected && !u.answers(from)) {
+		if connected {
+			from = connectedTo
+		}
+		if !u.heard(from) || n > uotMaxAnswer {
 			continue
 		}
 		u.touch()

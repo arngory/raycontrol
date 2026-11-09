@@ -228,6 +228,9 @@ var nodeOnly = map[string]bool{
 	// The egress policy is root's on the node (spec/egress-policy-v1.md §9).
 	nodev1connect.NodeServiceGetEgressProcedure: true,
 	nodev1connect.NodeServiceSetEgressProcedure: true,
+	// So are the connection limits (spec/conn-limit-v1.md §8).
+	nodev1connect.NodeServiceGetConnLimitProcedure: true,
+	nodev1connect.NodeServiceSetConnLimitProcedure: true,
 	// Whether admins may update the node at all is root's (node-update-v1).
 }
 

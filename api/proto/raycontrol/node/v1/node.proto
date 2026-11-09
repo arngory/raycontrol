@@ -147,6 +147,14 @@ service NodeService {
   // SetEgress blocks or allows BitTorrent and SMTP (TCP 25); rayspa applies
   // it within a second or two. Root on the node only.
   rpc SetEgress(SetEgressRequest) returns (SetEgressResponse);
+  // GetConnLimit says whether the per-user connection limits and the
+  // per-address limit on new inbound connections are on
+  // (spec/conn-limit-v1.md §8), with the conntrack table, the guard and the
+  // users at a limit in the last 15 minutes. On the node's socket only.
+  rpc GetConnLimit(GetConnLimitRequest) returns (GetConnLimitResponse);
+  // SetConnLimit turns those limits on or off; the table's size, notrack and
+  // the guard stay. Root on the node only.
+  rpc SetConnLimit(SetConnLimitRequest) returns (SetConnLimitResponse);
 
   // GetDeployment returns the deployment rayd builds for the current
   // services: system users, unit files and other files. rayctl before
@@ -425,6 +433,64 @@ message SetEgressRequest {
 }
 message SetEgressResponse {
   Egress egress = 1; // as kept
+}
+
+message GetConnLimitRequest {}
+message GetConnLimitResponse {
+  // The limits are off (rayctl conn-limit off); absent setting: on.
+  bool off = 1;
+  // The node's conntrack table, as rayd reads it; absent where it cannot.
+  Conntrack conntrack = 2;
+  // The guard as rayspa last reported it (spec/conn-limit-v1.md §6.3);
+  // absent before its first report since rayd started.
+  ConnGuard guard = 3;
+  // Users who met a limit in the last 15 minutes, by number and service.
+  repeated ConnLimitUser users = 4;
+  // Refusals since rayd started reading them, by service and kind (tcp,
+  // rate, failed, udp, evicted, dest, live, lookup).
+  repeated ConnLimitRefused refused = 5;
+}
+
+// Conntrack is the kernel's connection table.
+message Conntrack {
+  uint64 count = 1;
+  uint64 max = 2;
+  uint64 dropped = 3;       // "drop", summed over CPUs: the table was full
+  uint64 early_dropped = 4; // "early_drop": entries pushed out for new ones
+  // Drops in the last 15 minutes, as rayd saw them.
+  uint64 dropped_recent = 5;
+}
+
+// ConnGuard is rayspa's guard of the conntrack table.
+message ConnGuard {
+  bool on = 1;
+  int64 since = 2;    // unix seconds: the last switch, on or off
+  int64 last_on = 3;  // unix seconds: the last switch on; 0: never
+  uint64 switches = 4;
+  uint64 refused = 5; // new data-plane flows it refused
+  uint64 swept_udp = 6;
+  uint64 swept_tcp_out = 7;
+  uint64 swept_tcp_in = 8;
+  int64 reported = 9; // unix seconds: rayspa's report
+}
+
+message ConnLimitUser {
+  int64 id = 1;
+  string service = 2;
+  uint64 refused = 3; // refusals in the last 15 minutes
+}
+
+message ConnLimitRefused {
+  string service = 1;
+  string kind = 2;
+  uint64 total = 3;
+}
+
+message SetConnLimitRequest {
+  bool off = 1;
+}
+message SetConnLimitResponse {
+  bool off = 1; // as kept
 }
 
 message SetNodeNameRequest {

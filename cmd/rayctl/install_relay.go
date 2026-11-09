@@ -283,6 +283,9 @@ func installRelay(bundlePath, packages string) error {
 	// listens again each second, so a slot an outgoing connection held
 	// comes back once it is reserved.
 	h.ReservePorts(deploy.RelayPorts(snap.GetSpa().GetPortBase(), snap.GetSpa().GetPortRange(), probePort))
+	// Every forwarded flow is an entry of this host's conntrack table
+	// (spec/conn-limit-v1.md §6.1): sized by memory, shorter times.
+	h.Conntrack()
 	// The relay's probe endpoint (relay-v1 §9.1), once the relay is up: it
 	// is the relay's extra, and the relay works without it.
 	probe := relayProbe{

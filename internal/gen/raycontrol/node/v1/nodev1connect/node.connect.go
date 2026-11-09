@@ -151,6 +151,12 @@ const (
 	NodeServiceGetEgressProcedure = "/raycontrol.node.v1.NodeService/GetEgress"
 	// NodeServiceSetEgressProcedure is the fully-qualified name of the NodeService's SetEgress RPC.
 	NodeServiceSetEgressProcedure = "/raycontrol.node.v1.NodeService/SetEgress"
+	// NodeServiceGetConnLimitProcedure is the fully-qualified name of the NodeService's GetConnLimit
+	// RPC.
+	NodeServiceGetConnLimitProcedure = "/raycontrol.node.v1.NodeService/GetConnLimit"
+	// NodeServiceSetConnLimitProcedure is the fully-qualified name of the NodeService's SetConnLimit
+	// RPC.
+	NodeServiceSetConnLimitProcedure = "/raycontrol.node.v1.NodeService/SetConnLimit"
 	// NodeServiceGetDeploymentProcedure is the fully-qualified name of the NodeService's GetDeployment
 	// RPC.
 	NodeServiceGetDeploymentProcedure = "/raycontrol.node.v1.NodeService/GetDeployment"
@@ -290,6 +296,14 @@ type NodeServiceClient interface {
 	// SetEgress blocks or allows BitTorrent and SMTP (TCP 25); rayspa applies
 	// it within a second or two. Root on the node only.
 	SetEgress(context.Context, *connect.Request[v1.SetEgressRequest]) (*connect.Response[v1.SetEgressResponse], error)
+	// GetConnLimit says whether the per-user connection limits and the
+	// per-address limit on new inbound connections are on
+	// (spec/conn-limit-v1.md §8), with the conntrack table, the guard and the
+	// users at a limit in the last 15 minutes. On the node's socket only.
+	GetConnLimit(context.Context, *connect.Request[v1.GetConnLimitRequest]) (*connect.Response[v1.GetConnLimitResponse], error)
+	// SetConnLimit turns those limits on or off; the table's size, notrack and
+	// the guard stay. Root on the node only.
+	SetConnLimit(context.Context, *connect.Request[v1.SetConnLimitRequest]) (*connect.Response[v1.SetConnLimitResponse], error)
 	// GetDeployment returns the deployment rayd builds for the current
 	// services: system users, unit files and other files. rayctl before
 	// v0.21.0 installs it as it is; rayctl since builds its own from
@@ -589,6 +603,18 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("SetEgress")),
 			connect.WithClientOptions(opts...),
 		),
+		getConnLimit: connect.NewClient[v1.GetConnLimitRequest, v1.GetConnLimitResponse](
+			httpClient,
+			baseURL+NodeServiceGetConnLimitProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetConnLimit")),
+			connect.WithClientOptions(opts...),
+		),
+		setConnLimit: connect.NewClient[v1.SetConnLimitRequest, v1.SetConnLimitResponse](
+			httpClient,
+			baseURL+NodeServiceSetConnLimitProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetConnLimit")),
+			connect.WithClientOptions(opts...),
+		),
 		getDeployment: connect.NewClient[v1.GetDeploymentRequest, v1.GetDeploymentResponse](
 			httpClient,
 			baseURL+NodeServiceGetDeploymentProcedure,
@@ -652,6 +678,8 @@ type nodeServiceClient struct {
 	setNodeNote       *connect.Client[v1.SetNodeNoteRequest, v1.SetNodeNoteResponse]
 	getEgress         *connect.Client[v1.GetEgressRequest, v1.GetEgressResponse]
 	setEgress         *connect.Client[v1.SetEgressRequest, v1.SetEgressResponse]
+	getConnLimit      *connect.Client[v1.GetConnLimitRequest, v1.GetConnLimitResponse]
+	setConnLimit      *connect.Client[v1.SetConnLimitRequest, v1.SetConnLimitResponse]
 	getDeployment     *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
 	getDeployInputs   *connect.Client[v1.GetDeployInputsRequest, v1.GetDeployInputsResponse]
 }
@@ -886,6 +914,16 @@ func (c *nodeServiceClient) SetEgress(ctx context.Context, req *connect.Request[
 	return c.setEgress.CallUnary(ctx, req)
 }
 
+// GetConnLimit calls raycontrol.node.v1.NodeService.GetConnLimit.
+func (c *nodeServiceClient) GetConnLimit(ctx context.Context, req *connect.Request[v1.GetConnLimitRequest]) (*connect.Response[v1.GetConnLimitResponse], error) {
+	return c.getConnLimit.CallUnary(ctx, req)
+}
+
+// SetConnLimit calls raycontrol.node.v1.NodeService.SetConnLimit.
+func (c *nodeServiceClient) SetConnLimit(ctx context.Context, req *connect.Request[v1.SetConnLimitRequest]) (*connect.Response[v1.SetConnLimitResponse], error) {
+	return c.setConnLimit.CallUnary(ctx, req)
+}
+
 // GetDeployment calls raycontrol.node.v1.NodeService.GetDeployment.
 func (c *nodeServiceClient) GetDeployment(ctx context.Context, req *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {
 	return c.getDeployment.CallUnary(ctx, req)
@@ -1027,6 +1065,14 @@ type NodeServiceHandler interface {
 	// SetEgress blocks or allows BitTorrent and SMTP (TCP 25); rayspa applies
 	// it within a second or two. Root on the node only.
 	SetEgress(context.Context, *connect.Request[v1.SetEgressRequest]) (*connect.Response[v1.SetEgressResponse], error)
+	// GetConnLimit says whether the per-user connection limits and the
+	// per-address limit on new inbound connections are on
+	// (spec/conn-limit-v1.md §8), with the conntrack table, the guard and the
+	// users at a limit in the last 15 minutes. On the node's socket only.
+	GetConnLimit(context.Context, *connect.Request[v1.GetConnLimitRequest]) (*connect.Response[v1.GetConnLimitResponse], error)
+	// SetConnLimit turns those limits on or off; the table's size, notrack and
+	// the guard stay. Root on the node only.
+	SetConnLimit(context.Context, *connect.Request[v1.SetConnLimitRequest]) (*connect.Response[v1.SetConnLimitResponse], error)
 	// GetDeployment returns the deployment rayd builds for the current
 	// services: system users, unit files and other files. rayctl before
 	// v0.21.0 installs it as it is; rayctl since builds its own from
@@ -1322,6 +1368,18 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("SetEgress")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceGetConnLimitHandler := connect.NewUnaryHandler(
+		NodeServiceGetConnLimitProcedure,
+		svc.GetConnLimit,
+		connect.WithSchema(nodeServiceMethods.ByName("GetConnLimit")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceSetConnLimitHandler := connect.NewUnaryHandler(
+		NodeServiceSetConnLimitProcedure,
+		svc.SetConnLimit,
+		connect.WithSchema(nodeServiceMethods.ByName("SetConnLimit")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceGetDeploymentHandler := connect.NewUnaryHandler(
 		NodeServiceGetDeploymentProcedure,
 		svc.GetDeployment,
@@ -1428,6 +1486,10 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceGetEgressHandler.ServeHTTP(w, r)
 		case NodeServiceSetEgressProcedure:
 			nodeServiceSetEgressHandler.ServeHTTP(w, r)
+		case NodeServiceGetConnLimitProcedure:
+			nodeServiceGetConnLimitHandler.ServeHTTP(w, r)
+		case NodeServiceSetConnLimitProcedure:
+			nodeServiceSetConnLimitHandler.ServeHTTP(w, r)
 		case NodeServiceGetDeploymentProcedure:
 			nodeServiceGetDeploymentHandler.ServeHTTP(w, r)
 		case NodeServiceGetDeployInputsProcedure:
@@ -1623,6 +1685,14 @@ func (UnimplementedNodeServiceHandler) GetEgress(context.Context, *connect.Reque
 
 func (UnimplementedNodeServiceHandler) SetEgress(context.Context, *connect.Request[v1.SetEgressRequest]) (*connect.Response[v1.SetEgressResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetEgress is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetConnLimit(context.Context, *connect.Request[v1.GetConnLimitRequest]) (*connect.Response[v1.GetConnLimitResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetConnLimit is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetConnLimit(context.Context, *connect.Request[v1.SetConnLimitRequest]) (*connect.Response[v1.SetConnLimitResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetConnLimit is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) GetDeployment(context.Context, *connect.Request[v1.GetDeploymentRequest]) (*connect.Response[v1.GetDeploymentResponse], error) {

@@ -137,6 +137,9 @@ type Model struct {
 	// debug level. Xray stays at warning: at info it logs the users'
 	// destinations.
 	Debug bool
+	// ConnLimitOff: the per-user connection limits are off (rayctl
+	// conn-limit off, spec/conn-limit-v1.md §8).
+	ConnLimitOff bool
 }
 
 // nikoLevel is niko-server's log level for the model.
@@ -181,6 +184,9 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 	m.Debug = time.Now().Before(st.DebugUntil(ctx))
 	params, err := node.LoadParams(ctx, st)
 	if err != nil {
+		return m, err
+	}
+	if m.ConnLimitOff, err = st.ConnLimitOff(ctx); err != nil {
 		return m, err
 	}
 	m.NodeID = hex.EncodeToString(params.NodeID[:])
@@ -1675,6 +1681,10 @@ const (
 	NaiveUsers = "users.json"
 	NaiveChain = "chain.pem"
 	NaiveKey   = "key.pem"
+	// NaiveConnLimit holds "on" or "off": the per-user connection limits
+	// (spec/conn-limit-v1.md §3.1, §8). naive reads it again when it
+	// changes, without a restart; absent, the limits are on.
+	NaiveConnLimit = "conn-limit"
 )
 
 // naiveFiles are the site's certificate (naive answers for a name under
@@ -1712,9 +1722,18 @@ func naiveFiles(s Service, m Model, p Paths) ([]File, error) {
 	key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 	return []File{
 		{Path: path.Join(dir, NaiveUsers), Mode: 0o640, Group: GroupName(s.Name), Content: u, Service: s.Name, Reload: true},
+		{Path: path.Join(dir, NaiveConnLimit), Mode: 0o640, Group: GroupName(s.Name), Content: connLimitFile(m), Service: s.Name, Reload: true},
 		{Path: path.Join(dir, NaiveChain), Mode: 0o640, Group: GroupName(s.Name), Content: chain, Service: s.Name},
 		{Path: path.Join(dir, NaiveKey), Mode: 0o600, Content: key, Service: s.Name},
 	}, nil
+}
+
+// connLimitFile is NaiveConnLimit's content.
+func connLimitFile(m Model) []byte {
+	if m.ConnLimitOff {
+		return []byte("off\n")
+	}
+	return []byte("on\n")
 }
 
 // hasCert reports whether the site service has its certificate yet.
