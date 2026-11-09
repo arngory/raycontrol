@@ -38,7 +38,7 @@ const (
 // CheckTrafficPeriod checks a period and its reset day.
 func CheckTrafficPeriod(period string, day int) error {
 	if period != PeriodMonthly && period != PeriodNone {
-		return fmt.Errorf("%w traffic period %q: use monthly or none", ErrInvalid, period)
+		return fmt.Errorf("%w traffic period: use monthly or none", ErrInvalid) // not echoed: it reaches the audit
 	}
 	if day < 1 || day > MaxResetDay {
 		return fmt.Errorf("%w reset day %d: use 1 to %d (29 to 31 are not in every month)", ErrInvalid, day, MaxResetDay)

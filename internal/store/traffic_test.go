@@ -31,6 +31,13 @@ func TestResetMaths(t *testing.T) {
 		{utc(2026, 3, 1, 0).Add(-time.Second), 1, utc(2026, 2, 1, 0), utc(2026, 3, 1, 0)},
 		// Another zone: the day is UTC's.
 		{time.Date(2026, 12, 1, 1, 0, 0, 0, time.FixedZone("UTC+3", 3*3600)), 1, utc(2026, 11, 1, 0), utc(2026, 12, 1, 0)},
+		{time.Date(2027, 3, 1, 0, 0, 0, 0, time.FixedZone("UTC+3", 3*3600)), 1, utc(2027, 2, 1, 0), utc(2027, 3, 1, 0)},
+		// A year without 29 February, across a year back.
+		{utc(2027, 2, 28, 0), 28, utc(2027, 2, 28, 0), utc(2027, 3, 28, 0)},
+		{utc(2027, 2, 28, 0).Add(-time.Second), 28, utc(2027, 1, 28, 0), utc(2027, 2, 28, 0)},
+		{utc(2027, 1, 1, 0), 1, utc(2027, 1, 1, 0), utc(2027, 2, 1, 0)},
+		{utc(2027, 1, 1, 0).Add(-time.Second), 1, utc(2026, 12, 1, 0), utc(2027, 1, 1, 0)},
+		{utc(2027, 1, 5, 0), 10, utc(2026, 12, 10, 0), utc(2027, 1, 10, 0)},
 	} {
 		if got := LastReset(c.now, c.day); !got.Equal(c.last) {
 			t.Errorf("LastReset(%v, %d) = %v, want %v", c.now, c.day, got, c.last)
@@ -115,6 +122,9 @@ func TestSetUserTraffic(t *testing.T) {
 	if _, err := s.SetUserTraffic(ctx, "alice", TrafficChange{ResetDay: &day29}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("day 29: %v", err)
 	}
+	if any, err := s.HasTrafficLimits(ctx); err != nil || any {
+		t.Fatalf("limits before any: %v %v", any, err)
+	}
 	// A first limit counts from now: the first period is shorter.
 	limit := int64(1 << 30)
 	u, err := s.SetUserTraffic(ctx, "alice", TrafficChange{Limit: &limit})
@@ -169,8 +179,14 @@ func TestSetUserTraffic(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := int64(0)
+	if any, err := s.HasTrafficLimits(ctx); err != nil || !any {
+		t.Fatalf("limits with one: %v %v", any, err)
+	}
 	if u, err = s.SetUserTraffic(ctx, "alice", TrafficChange{Limit: &off}); err != nil || u.Limited() || !u.TrafficStart.IsZero() {
 		t.Fatalf("off: %v %+v", err, u)
+	}
+	if any, err := s.HasTrafficLimits(ctx); err != nil || any {
+		t.Fatalf("limits after off: %v %v", any, err)
 	}
 	srcs, err := s.TrafficSources(ctx)
 	if err != nil {

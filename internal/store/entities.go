@@ -153,12 +153,35 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// Every user's services in one query, not one a user: rayd lists the
+	// users at every apply and every traffic round.
+	byID := make(map[int64]int, len(out))
 	for i := range out {
-		if out[i].Services, err = s.userServices(ctx, out[i].ID); err != nil {
+		byID[out[i].ID] = i
+	}
+	rows, err = s.db.QueryContext(ctx, `SELECT user_id, service_id FROM user_services ORDER BY user_id, service_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var user, svc int64
+		if err := rows.Scan(&user, &svc); err != nil {
 			return nil, err
 		}
+		if i, ok := byID[user]; ok {
+			out[i].Services = append(out[i].Services, svc)
+		}
 	}
-	return out, nil
+	return out, rows.Err()
+}
+
+// HasTrafficLimits reports whether some user has a traffic limit: the
+// traffic loop reads nothing otherwise.
+func (s *Store) HasTrafficLimits(ctx context.Context) (bool, error) {
+	var any bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE traffic_limit_bytes IS NOT NULL)`).Scan(&any)
+	return any, err
 }
 
 func (s *Store) userServices(ctx context.Context, userID int64) ([]int64, error) {
