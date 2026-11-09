@@ -91,6 +91,13 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 		s.Answer.ServeHTTP(w, r)
 		return false
 	}
+	// A host that is neither an address nor a domain name (a megabyte's
+	// :authority, say) is a bad target too: nothing of it is looked up,
+	// kept or charged.
+	if _, err := netip.ParseAddr(host); err != nil && !domainName(host) {
+		s.Answer.ServeHTTP(w, r)
+		return false
+	}
 	// TCP's limits come before the 200 (spec/conn-limit-v1.md §3.1): a
 	// place, a token for the attempt (waiting while the client is there),
 	// no debt of failed dials, and a lookup token for a name the cache
