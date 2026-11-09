@@ -559,15 +559,22 @@ wait_active rayd.service rayspa.service "${dataplane[@]}"
 log "$distro: reboot"
 docker restart "$node" >/dev/null
 boot
+# The container comes back in a new network namespace with the kernel's
+# own conntrack times; a host's systemd-sysctl applies /etc/sysctl.d at
+# boot (the administrator's file, raycontrol's). The Rocky images here
+# have no systemd-sysctl.service (a Rocky host has): do its work, or the
+# administrator's TIME_WAIT is lost at this reboot, and the next apply,
+# seeing the kernel's 120, lowers it to 60 and journals 120 for uninstall
+# to put back, which is right on a host and wrong for this comparison.
+x sh -c 'systemctl cat systemd-sysctl.service >/dev/null 2>&1 || sysctl -e -q --system >/dev/null'
 wait_active rayd.service rayspa.service "${dataplane[@]}"
 ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$node")"
 client -addr "$ip" "$laptop" >/dev/null || fail "probe after reboot"
-# From its file at boot, where systemd-sysctl applies /etc/sysctl.d (the
-# Rocky images here have none; a Rocky host has).
+# From its file at boot.
 if x systemctl cat systemd-sysctl.service >/dev/null 2>&1; then
 	reserved "after the reboot (systemd-sysctl, its file)"
-	conntrack_times "after the reboot (modules-load.d, then systemd-sysctl)"
 fi
+conntrack_times "after the reboot (modules-load.d, then systemd-sysctl)"
 
 log "$distro: report"
 x /usr/local/bin/rayctl report -logs info -o /root/report.txt > /dev/null || fail "rayctl report"
