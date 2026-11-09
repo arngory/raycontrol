@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -41,7 +44,79 @@ func (c *cli) check(ctx context.Context, args []string) error {
 		return errUsage
 	}
 	return hostCheck(ctx, os.Stdout, hostcheck.Options{Host: *host, Domain: *domain, Services: splitList(*services), AllowV0: *allowV0,
-		ICMP: c.icmpOn(ctx)}, false, c.json, slices.Concat(c.internetChecks(ctx), misnamedResults(c.misnamed(ctx)), c.reservedResults(ctx))...)
+		ICMP: c.icmpOn(ctx)}, false, c.json, slices.Concat(c.internetChecks(ctx), misnamedResults(c.misnamed(ctx)), c.reservedResults(ctx),
+		conntrackResults(conntrackPaths{}))...)
+}
+
+// conntrackPaths are where conntrackResults looks (tests give their own).
+type conntrackPaths struct {
+	max, meminfo string
+	modprobe     []string // globs of modprobe.d files
+}
+
+// conntrackResults says whether the conntrack table has the size raycontrol
+// gives it for this host's memory (spec/conn-limit-v1.md §6.1), or why it
+// cannot: a container, where only the host sets it, or an "options
+// nf_conntrack hashsize=" line, with which the kernel takes 8 × hashsize at
+// the module's load (apply leaves the line alone).
+func conntrackResults(p conntrackPaths) []hostcheck.Result {
+	if p.max == "" {
+		p = conntrackPaths{max: "/proc/sys/net/netfilter/nf_conntrack_max", meminfo: "/proc/meminfo",
+			modprobe: []string{"/etc/modprobe.d/*.conf", "/run/modprobe.d/*.conf", "/usr/lib/modprobe.d/*.conf", "/lib/modprobe.d/*.conf"}}
+	}
+	res := hostcheck.Result{Level: hostcheck.Advised, Name: "conntrack table", OK: true}
+	var mem uint64
+	if b, err := os.ReadFile(p.meminfo); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			if f := strings.Fields(line); len(f) >= 2 && f[0] == "MemTotal:" {
+				mem, _ = strconv.ParseUint(f[1], 10, 64)
+			}
+		}
+	}
+	want := deploy.ConntrackSize(mem)
+	b, err := os.ReadFile(p.max)
+	live, perr := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	switch {
+	case err != nil || perr != nil:
+		res.Detail = "nf_conntrack is not loaded yet: rayctl apply loads it at boot (" + deploy.ModulesLoad + ") and sizes the table"
+	case live >= want:
+		res.Detail = fmt.Sprintf("%s %d (raycontrol's for %d MiB: %d)", deploy.ConntrackMaxKey, live, mem>>10, want)
+	default:
+		// Opening it for writing changes nothing and tells whether it may
+		// change here.
+		f, werr := os.OpenFile(p.max, os.O_WRONLY, 0)
+		if werr == nil {
+			f.Close()
+			res.Detail = fmt.Sprintf("%s %d: rayctl apply raises it to %d for %d MiB", deploy.ConntrackMaxKey, live, want, mem>>10)
+			break
+		}
+		res.OK = false
+		res.Detail = fmt.Sprintf("%s is %d and cannot be changed here (a container: only the host sets it); raycontrol would set %d for %d MiB. "+
+			"One user can fill %d entries (spec/conn-limit-v1.md §1.2); the guard refuses the data plane's new connections from 85 %%",
+			deploy.ConntrackMaxKey, live, want, mem>>10, live)
+		res.Fix = "ask the host's provider for a bigger nf_conntrack_max, or run the node on a VM"
+	}
+	for _, g := range p.modprobe {
+		files, _ := filepath.Glob(g)
+		for _, f := range files {
+			b, err := os.ReadFile(f) //nolint:gosec // G304: modprobe.d
+			if err != nil {
+				continue
+			}
+			for _, line := range strings.Split(string(b), "\n") {
+				fl := strings.Fields(line)
+				if len(fl) >= 3 && fl[0] == "options" && fl[1] == "nf_conntrack" && slices.ContainsFunc(fl[2:], func(o string) bool {
+					return strings.HasPrefix(o, "hashsize=")
+				}) {
+					return append([]hostcheck.Result{res}, hostcheck.Result{Level: hostcheck.Advised, Name: "conntrack hashsize", OK: false,
+						Detail: f + " sets the module's hashsize: the kernel then takes nf_conntrack_max = 8 × hashsize at boot, " +
+							"and raycontrol's size of the table may not hold (it leaves the line alone)",
+						Fix: "remove the line, or set " + deploy.ConntrackMaxKey + " yourself in a sysctl file that sorts after " + deploy.ConntrackSysctl})
+				}
+			}
+		}
+	}
+	return []hostcheck.Result{res}
 }
 
 // icmpOn reports whether rayd has a naive service that carries ICMP

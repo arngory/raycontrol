@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -81,8 +82,19 @@ func (h *Host) Uninstall(j *Journal, opts UninstallOptions) error {
 	_, _ = h.Run("nft", "delete", "table", "inet", rayspaTable)
 
 	// Only values that differ now: a container may not let raycontrol set
-	// global keys (net.core.*) in the first place, nor set them back.
+	// global keys (net.core.*) in the first place, nor set them back. The
+	// conntrack keys only while they are raycontrol's still: in its file,
+	// with its value (a shorter time or a bigger table the administrator
+	// set since stays).
+	ours := h.fileKeys(ConntrackSysctl)
 	for _, c := range of(ChangeSysctl) {
+		if conntrackKey(c.Name) {
+			out, err := h.Run("sysctl", "-n", c.Name)
+			v, ok := ours[c.Name]
+			if !ok || err != nil || strings.TrimSpace(string(out)) != strconv.FormatUint(v, 10) {
+				continue
+			}
+		}
 		// An empty value is no value, but for the reserved ports: none
 		// were (ReservePorts journals it).
 		if c.Value == "" && c.Name != ReservedPortsKey {
@@ -226,6 +238,8 @@ var knownFiles = []string{
 	"/etc/sysctl.d/90-raycontrol.conf",
 	PingSysctl,
 	PortsSysctl,
+	ConntrackSysctl,
+	ModulesLoad,
 	ResolvedDropIn,
 	FirewalldService,
 	UFWProfile,

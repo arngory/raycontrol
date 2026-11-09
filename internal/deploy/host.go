@@ -412,6 +412,9 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 	if plan.ICMP {
 		h.pingGroups()
 	}
+	if plan.Conntrack {
+		h.Conntrack()
+	}
 	// Before the units (re)start: the ports they listen on are not given
 	// to outgoing connections meanwhile.
 	h.ReservePorts(plan.HostPorts)

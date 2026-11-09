@@ -24,7 +24,7 @@ import (
 // gives its users' bytes on a stats socket (traffic-limit-v1 §2.3).
 // Remove it with GetDeployment's files (§4.1, step 8).
 func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binaries) Plan {
-	var plan Plan
+	plan := Plan{Conntrack: true}
 	var inner *render.Service
 	var dns, reality, sites, hysteria, naives, yggs []render.Service
 	for i, s := range m.Services {
