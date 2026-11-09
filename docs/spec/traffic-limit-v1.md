@@ -27,6 +27,7 @@ Niko после 1.40. Где код разошёлся с черновиком, 
 | dnstt, masterdns, slipstream, Yggdrasil | Xray `inner` | те же: UUID в `inner` у пользователя свой |
 | Hysteria2 | niko-server | имя из users-файла, те же `u<id>-<отпечаток>` (`render.go:1538`) |
 | naive (HTTP/2, HTTP/3, UoT) | процесс `rayd naive` | хеш пароля → имя (§2.3) |
+| LAN через ноду (Yggdrasil, с v0.23.0, [lan-v1](lan-v1.md) §4.4) | бэкенд Yggdrasil niko-server v0.16.0: строка `traffic` его сокета статистики, источник `ygg:<сервис>`; длина кадра один раз, в `up` | группа пользователя `u<id>`; v0.15.0 строки не знает — «no LAN counters», не ошибка: LAN через ноду он не пересылает |
 
 **Личность за `inner` сохраняется** (проверено по коду):
 - клиент DNS-туннеля и Yggdrasil идёт в `inner` по VLESS со своим UUID `inner` (`internal/sub/sub.go:369`, `:378`);
