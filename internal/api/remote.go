@@ -149,10 +149,10 @@ func RemoteTLSConfig(certDER, keyDER []byte) (*tls.Config, error) {
 // gets a plain 404.
 func (r *Remote) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle(nodev1connect.NewNodeServiceHandler(r.Server, connect.WithInterceptors(r.adminOnly())))
-	mux.Handle(devicev1connect.NewDeviceServiceHandler(r))
+	mux.Handle(nodev1connect.NewNodeServiceHandler(r.Server, connect.WithInterceptors(r.adminOnly()), readLimit()))
+	mux.Handle(devicev1connect.NewDeviceServiceHandler(r, readLimit()))
 	if r.Perimeter != nil {
-		mux.Handle(perimeterv1connect.NewRelayServiceHandler(&relayFeed{r}))
+		mux.Handle(perimeterv1connect.NewRelayServiceHandler(&relayFeed{r}, readLimit()))
 	}
 	// No redirects: Niko takes a 3xx for an error (RAYCONTROL.md §22).
 	return httpx.NoRedirect(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {

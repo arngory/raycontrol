@@ -134,7 +134,7 @@ var _ nodev1connect.NodeServiceHandler = (*Server)(nil)
 
 // Handler returns the HTTP handler for the service.
 func (s *Server) Handler(policy PeerPolicy) (string, http.Handler) {
-	return nodev1connect.NewNodeServiceHandler(s, connect.WithInterceptors(policy.interceptor()))
+	return nodev1connect.NewNodeServiceHandler(s, connect.WithInterceptors(policy.interceptor()), readLimit())
 }
 
 // ServeUnix serves the API on a unix socket until ctx ends. Every local user
