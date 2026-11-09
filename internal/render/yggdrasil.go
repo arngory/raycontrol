@@ -179,10 +179,12 @@ func yggdrasilFiles(s Service, m Model, inner Service, p Paths) ([]File, error) 
 	if len(st.Peers) > 0 {
 		options["peers"] = st.Peers
 	}
-	// The ceiling of LAN traffic through the node (lan-v1 §4.4): only when
-	// it is not niko-server's own default. niko-server before v0.16.0
-	// refuses the option, and with it the whole backend.
-	if r := provision.LANRelay(s.Service); r != provision.LANRelayDefault {
+	// The ceiling of LAN traffic through the node (lan-v1 §4.4), when the
+	// administrator set it, the default included; unset, niko-server's own
+	// default (20). niko-server before v0.16.0 refuses the option, and with
+	// it the whole backend: TestLANRelayPin keeps the pin at v0.16.0 or
+	// later.
+	if r, set := provision.LANRelaySet(s.Service); set {
 		options["lan_relay_mbps"] = r
 	}
 	b, err := jsonFile(map[string]any{

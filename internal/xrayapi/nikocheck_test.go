@@ -157,17 +157,15 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 	}
 
 	// lan_relay set (lan-v1 §4.4): lan_relay_mbps in the backend's options,
-	// which niko-server v0.16.0 takes and an older one refuses: until the
-	// pin is v0.16.0, rayctl service set ygg lan_relay= is not for nodes.
-	if _, err := provision.SetServiceOption(ctx, st, "ygg", "lan_relay", "0"); err != nil {
-		t.Fatal(err)
-	}
-	write()
-	out, err := exec.Command(niko, "check", "-c", yggBackend).CombinedOutput()
-	switch {
-	case err != nil && strings.Contains(string(out), `unknown field "lan_relay_mbps"`):
-		t.Logf("niko-server before v0.16.0 refuses lan_relay_mbps: %s", strings.TrimSpace(string(out)))
-	case err != nil || strings.TrimSpace(string(out)) != "ok":
-		t.Errorf("niko-server check ygg with lan_relay=0: %v\n%s", err, out)
+	// which the pinned niko-server (v0.16.0 or later) takes.
+	for _, v := range []string{"0", "20", "100000"} {
+		if _, err := provision.SetServiceOption(ctx, st, "ygg", "lan_relay", v); err != nil {
+			t.Fatal(err)
+		}
+		write()
+		out, err := exec.Command(niko, "check", "-c", yggBackend).CombinedOutput()
+		if err != nil || strings.TrimSpace(string(out)) != "ok" {
+			t.Errorf("niko-server check ygg with lan_relay=%s: %v\n%s", v, err, out)
+		}
 	}
 }

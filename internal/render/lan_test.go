@@ -205,8 +205,8 @@ func TestYggdrasilLANGroups(t *testing.T) {
 	}
 }
 
-// lan_relay (lan-v1 §4.4): in the backend's options only when it is not
-// niko-server's default of 20, which niko-server before v0.16.0 refuses.
+// lan_relay (lan-v1 §4.4): in the backend's options when it was set, 20
+// too; unset, left out (niko-server's own default).
 // The stats socket is the backend's, as for Hysteria2.
 func TestYggdrasilLANRelay(t *testing.T) {
 	ctx := context.Background()
@@ -226,7 +226,7 @@ func TestYggdrasilLANRelay(t *testing.T) {
 	for _, c := range []struct {
 		value string
 		want  any // nil: left out
-	}{{"0", 0.0}, {"20", nil}, {"100", 100.0}, {"100000", 100000.0}, {"5", 5.0}} {
+	}{{"0", 0.0}, {"20", 20.0}, {"100", 100.0}, {"100000", 100000.0}, {"5", 5.0}} {
 		svc, err := provision.SetServiceOption(ctx, st, "ygg", "lan_relay", c.value)
 		if err != nil {
 			t.Fatalf("%s: %v", c.value, err)

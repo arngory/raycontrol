@@ -1,9 +1,8 @@
 # lan-v1: локальная сеть устройств пользователя через Yggdrasil
 
-Статус: **реализовано в raycontrol v0.23.0, ждёт niko-server v0.16.0** (2026-11-09; черновик с ответами клиента —
+Статус: **реализовано: raycontrol v0.23.0, niko-server v0.16.0 (`d3e05bb`, закреплён)** (2026-11-09; черновик с ответами клиента —
 2026-11-08). Идея одобрена владельцем, предложение — от клиента Niko. Сервер — raycontrol v0.23.0 и niko-server
-v0.16.0, плюс коммит форка yggdrasil-go. Клиент — Niko. Как всё новое, выключено по умолчанию. Что в raycontrol и что
-ждёт пина niko-server v0.16.0 — §6.
+v0.16.0, плюс коммит форка yggdrasil-go. Клиент — Niko. Как всё новое, выключено по умолчанию. Что где — §6.
 
 Зачем: устройства одного пользователя видят друг друга по адресам Yggdrasil — через ноду или напрямую в одной Wi-Fi.
 Без NAT и IP forwarding, со сквозным шифрованием. С v0.20.1 каждое устройство — свой узел mesh со своим ключом
@@ -306,12 +305,11 @@ v0.16.0, плюс коммит форка yggdrasil-go. Клиент — Niko. �
   - rayctl и API — `user lan NAME [on|off]` (`SetUserLAN`, аудит `user.lan=on|off`), `User.lan`, `Device.lan`,
     столбец `LAN` в `device list`, `service set ygg lan_relay=N` (0–100000);
   - доки — subscription-v1 §2–3, решение R4-34, cheatsheet.
-  - **Ждёт пина niko-server v0.16.0** (`deploy/versions.env`). niko-server v0.15.0 (проверено настоящим бинарником)
-    принимает `lan` в users-файле и не замечает его: ни пересылки соседям по группе, ни ведра, ни счёта; на строку
-    `traffic` сокета статистики отвечает своими счётчиками (`{"started":…,"dropped_frames":…}`) без байтов LAN; а
-    `lan_relay_mbps` отвергает (`unknown field`) вместе со всем бэкендом — `TestRenderedConfigsWithNikoServer` это
-    проверяет. До пина `rayctl service set ygg lan_relay=` на ноде не трогать. Подписка `lan` отдаёт уже сейчас: через
-    ноду соседи друг друга не увидят, в одной Wi-Fi — по multicast, когда это умеет клиент.
+  - **Пин niko-server v0.16.0** (`deploy/versions.env`, `d3e05bb`). niko-server v0.15.0 принимал `lan` в users-файле
+    и не замечал его, а `lan_relay_mbps` отвергал вместе со всем бэкендом: `render.TestLANRelayPin` держит пин не ниже
+    v0.16.0, `TestRenderedConfigsWithNikoServer` требует `ok` с `lan_relay` 0, 20 и 100000, `lan_relay` пишется, когда
+    задан (и 20). Пустой ответ на строку `traffic` — ошибка; снимок v0.15.0 — «no LAN counters» лишь на секунды
+    обновления, пока старый бэкенд не перезапущен.
 - **niko-server v0.16.0:** `yggdrasil.lan` в `UsersFile` (`niko:nikoserver/hysteria.go:46-48`); ключ → группа в
   `readYggUsers` (`niko:nikoserver/yggdrasil.go:204-225`); фильтр по кадрам в `serve` (`:358-386`); `DebugPrivacy`
   в setup (`:112-115`); ведро и счётчики. Тест на настоящих ядрах: соседи проходят; кадры между пользователями и из

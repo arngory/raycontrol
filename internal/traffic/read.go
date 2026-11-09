@@ -96,11 +96,17 @@ func ReadLine(ctx context.Context, path string) (Reading, error) {
 // ReadLine, from niko-server v0.16.0 on. niko-server v0.15.0 answers any
 // connection at once with its own counters ({"started": ...,
 // "dropped_frames": ...}, no "v"), without reading the line, and closes:
-// no counters (ErrNoCounters), as an answer with nothing.
+// no counters (ErrNoCounters), for the seconds of an update that has not
+// restarted it yet. The pin is v0.16.0 or later, which always answers: an
+// empty answer is a failure, not "no counters", lest a backend that
+// resets before it answers leave the LAN bytes uncounted unseen.
 func ReadYggdrasil(ctx context.Context, path string) (Reading, error) {
 	body, err := ask(ctx, path)
 	if err != nil {
 		return Reading{}, err
+	}
+	if len(body) == 0 {
+		return Reading{}, errors.New("an empty answer to the traffic line")
 	}
 	var head struct {
 		V, Started json.RawMessage // there or not

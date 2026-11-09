@@ -60,7 +60,7 @@ func TestReadYggdrasil(t *testing.T) {
 			t.Fatalf("v0.15.0: %v", err)
 		}
 	}
-	if _, err := ReadYggdrasil(ctx, atOnce(t, "")); !errors.Is(err, ErrNoCounters) {
+	if _, err := ReadYggdrasil(ctx, atOnce(t, "")); err == nil || errors.Is(err, ErrNoCounters) || notRunning(err) {
 		t.Fatalf("nothing: %v", err)
 	}
 	for name, answer := range map[string]string{

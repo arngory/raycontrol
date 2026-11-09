@@ -966,13 +966,21 @@ const LANRelayDefault = 20
 // through the node, Mbit/s a user (rayctl service set NAME lan_relay=N):
 // LANRelayDefault unless set; 0: none, directly in one Wi-Fi only.
 func LANRelay(s store.Service) int {
+	r, _ := LANRelaySet(s)
+	return r
+}
+
+// LANRelaySet is LANRelay, and whether the administrator set it: render
+// writes a set value as it is, the default too, so that the node keeps
+// what was set whatever niko-server's own default.
+func LANRelaySet(s store.Service) (int, bool) {
 	var st struct {
 		Relay *int `json:"lan_relay"`
 	}
 	if json.Unmarshal([]byte(s.Settings), &st) != nil || st.Relay == nil || *st.Relay < 0 {
-		return LANRelayDefault
+		return LANRelayDefault, false
 	}
-	return *st.Relay
+	return *st.Relay, true
 }
 
 // MaxYggdrasilPeers bounds the public peers of a Yggdrasil service.

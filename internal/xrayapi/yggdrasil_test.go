@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -185,22 +184,15 @@ func TestYggdrasilWithNikoServer(t *testing.T) {
 	if reply, err := link1(ed25519.NewKeyFromSeed(devSeed)); err != nil || !bytes.HasPrefix(reply, []byte("meta")) {
 		t.Fatalf("the phone's link, with a group: %x %v", reply, err)
 	}
-	// Its stats socket: niko-server v0.16.0 gives the users' LAN bytes by
-	// group; v0.15.0 its own counters only, which the traffic loop takes
-	// for no counters, not an error, however the close falls.
-	var r traffic.Reading
-	for range 30 {
-		if r, err = traffic.ReadYggdrasil(ctx, paths.StatsSocket("ygg")); err != nil && !errors.Is(err, traffic.ErrNoCounters) {
-			break
-		}
-	}
-	switch {
-	case errors.Is(err, traffic.ErrNoCounters):
-		t.Log("the Yggdrasil stats socket has no LAN counters (niko-server before v0.16.0)")
-	case err != nil:
+	// Its stats socket: the pinned niko-server (v0.16.0 or later) gives
+	// the users' LAN bytes by group, the phone's group among them from the
+	// file's first reading.
+	r, err := traffic.ReadYggdrasil(ctx, paths.StatsSocket("ygg"))
+	if err != nil {
 		t.Fatalf("the Yggdrasil stats socket: %v", err)
-	default:
-		t.Logf("the Yggdrasil stats socket: boot %s, %d groups", r.Boot, len(r.Users))
+	}
+	if _, ok := r.Users["u1"]; !ok || r.Boot == "" {
+		t.Fatalf("the Yggdrasil stats socket: boot %q, groups %v", r.Boot, r.Users)
 	}
 
 	// Not a link: the site's empty 404, h2.
