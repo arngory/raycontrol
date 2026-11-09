@@ -82,6 +82,9 @@ func unixHTTP(socket string) *http.Client {
 			return d.DialContext(ctx, "unix", socket)
 		},
 		Protocols: new(http.Protocols),
+		// A connection left behind (its transport replaced while a call
+		// was on it) closes itself; the 15 s poll keeps the live one.
+		IdleConnTimeout: 2 * time.Minute,
 	}
 	tr.Protocols.SetUnencryptedHTTP2(true)
 	if pool.clients == nil {
@@ -129,6 +132,23 @@ type Counter struct{ Up, Down int64 }
 // process's start or the user's first connection since. Counters with
 // other names, and negative values, are left out.
 func (s *Stats) Users(ctx context.Context) (map[string]Counter, time.Duration, error) {
+	users, uptime, err := s.users(ctx)
+	if again(ctx, err) {
+		users, uptime, err = s.users(ctx)
+	}
+	return users, uptime, err
+}
+
+// again reports whether a read that failed in transport is worth one more
+// try: Xray restarted, and its new socket came back at the same path with
+// the same inode (ext4 reuses them), so the call went out on the dead
+// process's connection before the transport saw it close. The transport
+// drops a connection that failed and dials the socket again.
+func again(ctx context.Context, err error) bool {
+	return err != nil && ctx.Err() == nil && connect.CodeOf(err) == connect.CodeUnavailable
+}
+
+func (s *Stats) users(ctx context.Context) (map[string]Counter, time.Duration, error) {
 	sys, err := s.c.GetSysStats(ctx, connect.NewRequest(&statscmd.SysStatsRequest{}))
 	if err != nil {
 		return nil, 0, err
@@ -208,6 +228,9 @@ func vlessCodec(flow string) codec {
 
 func (c *Client) users(ctx context.Context, tag string, cd codec) (map[string]string, error) {
 	resp, err := c.c.GetInboundUsers(ctx, connect.NewRequest(&command.GetInboundUserRequest{Tag: tag}))
+	if again(ctx, err) {
+		resp, err = c.c.GetInboundUsers(ctx, connect.NewRequest(&command.GetInboundUserRequest{Tag: tag}))
+	}
 	if err != nil {
 		return nil, err
 	}
