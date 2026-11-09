@@ -31,7 +31,10 @@ import (
 //
 // NATed entries (a relay's, the ACME window's, UDP rotation's) are never
 // touched: their socket has another tuple. A port taken again by another
-// socket counts as live: the look-up by port errs that way.
+// socket counts as live: the look-up by port errs that way. The sockets are
+// read after each dump: a socket made before the dump was read, whose entry
+// the dump has, is in them (read before, a connection opened in between
+// would lose its entry: the sweep never touches a live one).
 
 // Sweeper sweeps the table of the network namespace it runs in.
 type Sweeper struct {
@@ -41,6 +44,22 @@ type Sweeper struct {
 	Net string
 	// Local are the node's addresses; the interfaces' when nil.
 	Local func() (map[netip.Addr]bool, error)
+	// table opens the conntrack table: ctnetlink when nil (tests: a fake).
+	table func() (ctTable, error)
+}
+
+// ctTable is the conntrack table as the sweep uses it.
+type ctTable interface {
+	dump(family uint8, value, mask uint32) ([]ctEntry, error)
+	delete(e ctEntry) error
+	Close() error
+}
+
+func (s *Sweeper) open() (ctTable, error) {
+	if s.table != nil {
+		return s.table()
+	}
+	return dialConntrack()
 }
 
 // sockets are the sockets of the namespace as the sweep looks them up.
@@ -52,15 +71,11 @@ type sockets struct {
 // Sweep removes the entries without a socket.
 func (s *Sweeper) Sweep(ctx context.Context) (SweepResult, error) {
 	var r SweepResult
-	socks, err := s.sockets()
-	if err != nil {
-		return r, err
-	}
 	local, err := s.local()
 	if err != nil {
 		return r, err
 	}
-	c, err := dialConntrack()
+	c, err := s.open()
 	if err != nil {
 		return r, err
 	}
@@ -79,6 +94,11 @@ func (s *Sweeper) Sweep(ctx context.Context) (SweepResult, error) {
 			if err != nil {
 				errs = append(errs, err)
 				continue
+			}
+			// After the dump: every socket whose entry it has is here.
+			socks, err := s.sockets()
+			if err != nil {
+				return r, err
 			}
 			for _, e := range entries {
 				kind := orphan(e, socks, local)
@@ -173,8 +193,8 @@ func (s *Sweeper) local() (map[netip.Addr]bool, error) {
 	return out, nil
 }
 
-// sockets reads the namespace's sockets: before the dump, so a socket
-// made meanwhile only keeps an entry that is its own.
+// sockets reads the namespace's sockets: after a dump, so that a socket
+// made before the dump returned, whose entry it may have, is among them.
 func (s *Sweeper) sockets() (sockets, error) {
 	socks := sockets{udpPorts: map[uint16]bool{}, tcpPorts: map[uint16]bool{}, tcpQuads: map[[2]netip.AddrPort]bool{}}
 	for _, name := range []string{"udp", "udp6", "tcp", "tcp6"} {
