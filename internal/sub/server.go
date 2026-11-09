@@ -73,7 +73,11 @@ type Server struct {
 	App AppFiles
 	// Stall: appmirror.Stall when zero (a test seam).
 	Stall time.Duration
-	now   func() time.Time
+	// Changed, when set, is told that a request changed what the node
+	// renders: a device's LAN consent (lan-v1 §1.1), which the Yggdrasil
+	// users files carry. rayd wakes apply with it.
+	Changed func()
+	now     func() time.Time
 
 	mu sync.Mutex // serialises seq
 }
@@ -182,7 +186,20 @@ func (s *Server) handle(r *http.Request) (Envelope, error) {
 	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
 		addr = ap.Addr().Unmap()
 	}
-	return s.BuildForDevice(ctx, dev.UserName, key[:], addr, now)
+	// The device's LAN consent (lan-v1 §1.1, §4.4): written when it
+	// changes, before the answer, which follows it. Not logged: it is the
+	// device's activity (09-observability §1); rayctl device list shows
+	// the state.
+	if on, said := lanConsent(r.Header); said {
+		changed, err := s.Store.SetDeviceLAN(ctx, dev.ID, on, store.LANShowEvery)
+		if err != nil {
+			return Envelope{}, err
+		}
+		if changed && s.Changed != nil {
+			s.Changed()
+		}
+	}
+	return s.build(ctx, dev.UserName, dev.ID, key[:], addr, now)
 }
 
 // Build returns the signed subscription of a user.
@@ -198,7 +215,14 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 
 // BuildForDevice is BuildFor for one of the user's devices, given by its
 // SPA key: its own links where they differ by device (Yggdrasil's key).
+// Its lan field is that of a device that does not show itself.
 func (s *Server) BuildForDevice(ctx context.Context, userName string, device []byte, addr netip.Addr, now time.Time) (Envelope, error) {
+	return s.build(ctx, userName, "", device, addr, now)
+}
+
+// build is the subscription of a user's device, given by its ID (for its
+// lan field) and its SPA key; neither for the user's own.
+func (s *Server) build(ctx context.Context, userName, deviceID string, device []byte, addr netip.Addr, now time.Time) (Envelope, error) {
 	m, err := render.Collect(ctx, s.Store)
 	if err != nil {
 		return Envelope{}, err
@@ -298,6 +322,9 @@ func (s *Server) BuildForDevice(ctx context.Context, userName string, device []b
 		p.DNSProbe = &DNSProbeHint{V: 1, Key: base64.RawURLEncoding.EncodeToString(m.DNSProbeKey)}
 	}
 	p.DNSAuth = dnsAuthVersions(m, profiles)
+	if p.LAN, err = s.lanHint(ctx, m, u, profiles, deviceID, name); err != nil {
+		return Envelope{}, err
+	}
 	// Through a relay the address is the relay's: its network's hints are
 	// not the client's (relay-v1 §9.3).
 	if s.Hints != nil && addr.IsValid() && !addr.IsLoopback() && !s.FromRelay(ctx, addr) {
