@@ -62,6 +62,7 @@ type Guard struct {
 	Log     *slog.Logger
 
 	on, applied        bool
+	released           bool // rayspa is ending: no tick switches the table again
 	since, lastOn      time.Time
 	switches           uint64
 	logged             time.Time
@@ -103,7 +104,7 @@ func (g *Gate) EnableGuard(gd *Guard) {
 // starts a sweep. Under g.mu.
 func (g *Gate) guardLocked(now time.Time) {
 	gd := g.guard
-	if gd == nil || g.restoring {
+	if gd == nil || g.restoring || gd.released {
 		return
 	}
 	read := gd.Read
@@ -233,14 +234,16 @@ func (g *Gate) sweepLocked(now time.Time) {
 
 // ReleaseGuard takes the guard's refusal out of the table, as rayspa ends
 // gracefully: the table stays (the node fails closed), but no one would
-// turn the guard off, and the data plane would stay refused new flows. A
-// tick after it puts the refusal back if the guard is on.
+// turn the guard off, and the data plane would stay refused new flows.
+// No tick after it switches the table again: a tick racing the exit (the
+// snapshot watcher's) would otherwise put the refusal back.
 func (g *Gate) ReleaseGuard() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.guard == nil {
 		return nil
 	}
+	g.guard.released = true
 	if err := g.fw.SetGuard(false); err != nil {
 		return err
 	}

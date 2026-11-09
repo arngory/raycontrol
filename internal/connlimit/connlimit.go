@@ -41,7 +41,11 @@ const (
 	warnEvery = 10 * time.Minute
 	// guardDay: the conntrack line shows a guard that was on this recently.
 	guardDay = 24 * time.Hour
-	first    = 5 * time.Second
+	// guardStale: rayspa reports at least once a minute; a report older
+	// than this says nothing of the guard now (rayspa stopped, and takes
+	// its refusal out of the table as it ends).
+	guardStale = 3 * time.Minute
+	first      = 5 * time.Second
 	// freshWithin: a process that has run no longer than this when a
 	// service is first read started since the last round could have read
 	// it; its refusals are new. One that has run longer had them before.
@@ -429,6 +433,8 @@ func (m *Monitor) conntrackLine(now time.Time) string {
 		b.WriteString("table not read")
 	}
 	switch {
+	case g != nil && g.On && now.Sub(g.Reported) > guardStale:
+		fmt.Fprintf(&b, ": guard on at rayspa's last report %s ago (no report since: is rayspa running?)", now.Sub(g.Reported).Round(time.Second))
 	case g != nil && g.On:
 		fmt.Fprintf(&b, ": guard on %s — new data-plane connections refused", now.Sub(g.Since).Round(time.Second))
 	case guardDay:

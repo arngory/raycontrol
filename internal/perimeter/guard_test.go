@@ -153,7 +153,8 @@ func TestGuardSwitches(t *testing.T) {
 }
 
 // As rayspa ends, the guard's refusal leaves the table: a stopped rayspa
-// would never turn it off. A tick after it (none comes, but) puts it back.
+// would never turn it off. A tick racing the exit (the snapshot watcher's)
+// does not put it back.
 func TestGuardRelease(t *testing.T) {
 	gg := newGuardGate(t)
 	gg.count = 900
@@ -168,8 +169,8 @@ func TestGuardRelease(t *testing.T) {
 		t.Fatal("the refusal left in the table")
 	}
 	gg.tick(t, time.Second)
-	if !gg.fw.guard {
-		t.Fatal("not put back by a tick")
+	if gg.fw.guard {
+		t.Fatal("a tick after the release put the refusal back")
 	}
 	// No guard (a relay): nothing.
 	g := NewGate(&fakeFW{}, slog.New(slog.DiscardHandler))

@@ -314,6 +314,17 @@ func TestMonitorConntrack(t *testing.T) {
 	if !strings.Contains(logs.String(), "the table was full") {
 		t.Fatalf("no warning:\n%s", logs.String())
 	}
+	// rayspa stopped while the guard was on (it takes the refusal out as
+	// it ends): after three minutes without a report the line says so
+	// instead of "refused".
+	saved := now
+	now = now.Add(4 * time.Minute)
+	m.Round(context.Background())
+	if l, _ := line(); !strings.Contains(l, "guard on at rayspa's last report 4m") || strings.Contains(l, "refused") {
+		t.Fatalf("a stale report: %q", l)
+	}
+	now = saved
+	m.SetGuard(Guard{On: true, Since: now.Add(-2 * time.Minute), LastOn: now.Add(-2 * time.Minute)})
 	fakeProc(t, proc, 8900, 10000, cpu(205, 1), cpu(5, 1))
 	now = now.Add(Every)
 	m.Round(context.Background())
