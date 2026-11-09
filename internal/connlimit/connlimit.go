@@ -59,8 +59,11 @@ type Source struct {
 	Read    func(ctx context.Context) (Reading, error)
 	// SameRun reports whether two boots are one run of the process; nil
 	// is equality. Xray's boot is its start, from its uptime in whole
-	// seconds, and two readings of one run may differ by a second
-	// (traffic.SameBoot).
+	// seconds, so two readings of one run may differ a little;
+	// traffic.SameBoot takes starts within its bootSlack (5 s) as one run.
+	// A run that ended within 5 s of starting and was read in that time
+	// is then taken for the next one: its refusals go uncounted, never
+	// counted twice.
 	SameRun func(a, b string) bool
 }
 

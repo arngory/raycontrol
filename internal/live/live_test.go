@@ -213,6 +213,19 @@ func TestApplyReload(t *testing.T) {
 	if string(before) == string(after) || slices.Contains(restarted, "try-restart niko-naive.service") {
 		t.Fatalf("users %s -> %s, restarted %v", before, after, restarted)
 	}
+	// A file the process rereads that was not there (the conn-limit switch
+	// new in an update) gates no unit: a running naive restarts, one
+	// stopped on purpose stays stopped (try-restart, not restart).
+	restarted = nil
+	if err := os.Remove(filepath.Join(dir, "rendered", "naive", render.NaiveConnLimit)); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(restarted, []string{"try-restart niko-naive.service"}) {
+		t.Fatalf("a new conn-limit file restarted %v", restarted)
+	}
 }
 
 // rayctl conn-limit off and on (spec/conn-limit-v1.md §8): naive and the
