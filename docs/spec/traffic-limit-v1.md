@@ -62,7 +62,8 @@ Niko после 1.40. Где код разошёлся с черновиком, 
 
 ### 2.2 niko-server (Hysteria2)
 
-Сокет статистики сейчас отдаёт только RTT и потери (`niko:nikoserver/hystats.go`). В v0.15.0:
+До v0.15.0 сокет статистики отдавал только RTT и потери (`niko:nikoserver/hystats.go`). В v0.15.0 (пин raycontrol с
+v0.21.0; строку `traffic` настоящего бинарника читает `internal/xrayapi` `TestHysteriaWithXray`):
 - байты по пользователю: потоки — в `outbound.NewConnectionEx` (`niko:nikoserver/hysteria.go:204`), датаграммы — в
   `relayUDP` (`:238`). Имя — `auth.UserFromContext[string](ctx)`, его кладёт sing-quic (так же берёт sing-box,
   `protocol/hysteria2/inbound.go:239` форка);
