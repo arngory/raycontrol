@@ -94,7 +94,8 @@ var settingsMu sync.Mutex
 // RotateReality advances the key rotation of every enabled REALITY service
 // at now and returns how many changed. resolves checks that a name points
 // to the node; nil keeps the server names. With a zero period only the
-// switches the operator asks for happen.
+// switches the operator asks for happen. A service that fails is skipped:
+// the error names it, and the others still rotate.
 func RotateReality(ctx context.Context, st *store.Store, now time.Time, e RealityEpoch,
 	resolves func(ctx context.Context, name string) error, log *slog.Logger) (int, error) {
 	settingsMu.Lock()
@@ -106,20 +107,25 @@ func RotateReality(ctx context.Context, st *store.Store, now time.Time, e Realit
 	if err != nil {
 		return 0, err
 	}
+	// One service that fails does not hold the others' rotation back
+	// (review Q-4): its error is returned with the count of those that
+	// changed.
 	changed := 0
+	var errs []error
 	for _, svc := range all {
 		if svc.Kind != "reality" || !svc.Enabled {
 			continue
 		}
 		ok, err := rotateOne(ctx, st, all, svc, now, e, resolves, log)
 		if err != nil {
-			return changed, fmt.Errorf("reality %s: %w", svc.Name, err)
+			errs = append(errs, fmt.Errorf("reality %s: %w", svc.Name, err))
+			continue
 		}
 		if ok {
 			changed++
 		}
 	}
-	return changed, nil
+	return changed, errors.Join(errs...)
 }
 
 func rotateOne(ctx context.Context, st *store.Store, all []store.Service, svc store.Service, now time.Time, e RealityEpoch,

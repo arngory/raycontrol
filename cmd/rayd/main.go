@@ -698,7 +698,8 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 		hb.Done("reality-rotation", err)
 		if err != nil {
 			log.Error("REALITY rotation", "err", err)
-		} else if n > 0 {
+		}
+		if n > 0 { // the services that rotated, with or without another's error
 			notify()
 			if cm != nil {
 				cm.Wake()
