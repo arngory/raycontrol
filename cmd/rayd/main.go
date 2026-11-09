@@ -36,6 +36,7 @@ import (
 	"github.com/arngory/raycontrol/internal/asn"
 	"github.com/arngory/raycontrol/internal/certs"
 	"github.com/arngory/raycontrol/internal/cloudflare"
+	"github.com/arngory/raycontrol/internal/connlimit"
 	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/dnscheck"
 	"github.com/arngory/raycontrol/internal/doh"
@@ -238,6 +239,10 @@ func cmdServe(args []string) error {
 		log.Warn("UNSAFE: the client's releases are checked with a test key, not the client's", "key", key)
 	}
 	go srv.AppMirror.Run(ctx, func() time.Duration { return mrand.N(appmirror.Jitter) }) //nolint:gosec // G404: when to look, no secret
+	// The connection limits (spec/conn-limit-v1.md §7): naive's refusals by
+	// user every 15 s, the conntrack table, the guard as rayspa reports it.
+	srv.ConnLimit = &connlimit.Monitor{Sources: connLimitSources(st, paths), Off: st.ConnLimitOff, Health: hb, Log: log}
+	go srv.ConnLimit.Run(ctx)
 	per := &api.PerimeterServer{Server: srv, RayspaUID: -1, DefaultTTL: *spaTTL, MaxTTL: *spaMaxTTL, TCPCarrier: *spaTCP, Refresh: time.Minute}
 	policy := api.PeerPolicy{Group: *group}
 	if u, err := user.Lookup(*rayspaUser); err == nil {
@@ -1402,4 +1407,28 @@ func serveHTTP3(ctx context.Context, pc net.PacketConn, cert tls.Certificate, h 
 		return err
 	}
 	return nil
+}
+
+// connLimitSources are the processes that count refusals of the connection
+// limits (spec/conn-limit-v1.md §2): each enabled naive service, read at its
+// stats socket with the traffic line. niko-server and Xray follow.
+func connLimitSources(st *store.Store, paths render.Paths) func(ctx context.Context) ([]connlimit.Source, error) {
+	return func(ctx context.Context) ([]connlimit.Source, error) {
+		services, err := st.ListServices(ctx)
+		if err != nil {
+			return nil, err
+		}
+		var out []connlimit.Source
+		for _, svc := range services {
+			if !svc.Enabled || svc.Kind != "naive" {
+				continue
+			}
+			socket := paths.StatsSocket(svc.Name)
+			out = append(out, connlimit.Source{Service: svc.Name, Read: func(ctx context.Context) (string, map[string]map[string]int64, error) {
+				r, err := traffic.ReadLine(ctx, socket)
+				return r.Boot, r.Limits, err
+			}})
+		}
+		return out, nil
+	}
 }

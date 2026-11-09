@@ -238,6 +238,17 @@ func (c *cli) metrics(ctx context.Context, args []string) error {
 			}
 			text += m.String()
 		}
+		// The per-address limit on new inbound connections
+		// (spec/conn-limit-v1.md §7): by protocol, never from where.
+		if drops, err := (&perimeter.NFT{}).InboundDrops(); err == nil {
+			var m api.Metrics
+			for _, proto := range []string{"tcp", "udp"} {
+				m.Add("raycontrol_conn_inbound_dropped_packets_total",
+					"New inbound connections dropped over the per-address limit (SYNs, first UDP packets).",
+					float64(drops[proto].Packets), "proto", proto)
+			}
+			text += m.String()
+		}
 	}
 	if *out == "" {
 		fmt.Print(text)

@@ -6,9 +6,11 @@ package perimeter
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,6 +53,12 @@ type Firewall interface {
 	// SetEgress replaces the node's egress policy (spec/egress-policy-v1.md)
 	// in one transaction (no-op when the host is a relay).
 	SetEgress(e Egress) error
+	// SetInLimit turns the per-address limit on new inbound connections on
+	// or off (spec/conn-limit-v1.md §6.2, §8); Setup makes it on.
+	SetInLimit(on bool) error
+	// SetGuard turns the conntrack guard's refusal on or off (§6.3); Setup
+	// makes it off.
+	SetGuard(on bool) error
 	Allow(addr netip.Addr, ports []Port, ttl time.Duration) error
 	Deny(addr netip.Addr, ports []Port) error
 	Teardown() error
@@ -78,6 +86,10 @@ type NFT struct {
 	// (SetForward) go to this exit by DNAT, only from addresses with an SPA
 	// grant, masqueraded. Invalid: not a relay.
 	RelayTo netip.Addr
+
+	// inDiv divides the per-address limit's numbers: tests in a network
+	// namespace send tens of packets, not thousands. 0 is 1.
+	inDiv int
 
 	destroy    bool // nft and kernel support "destroy element"
 	egressDoff bool // the kernel has no @ih: the egress policy's TCP rule by tcp doff
@@ -123,8 +135,22 @@ func (n *NFT) Ruleset() string {
 	if guard == "" {
 		guard = DataPlaneUIDs
 	}
+	// The guard of the conntrack table (spec/conn-limit-v1.md §6.3): every
+	// new data-plane flow gets the mark, and leaving the node it passes
+	// conn_guard, empty until the guard is on (SetGuard). Never UID 0, nor
+	// lo. A relay runs no data plane: neither.
+	guardRules := fmt.Sprintf(`
+		meta skuid %[1]s ct state new ct mark set ct mark | %[2]s
+		meta skuid @egress_uid meta skuid != 0 ct state new ct mark set ct mark | %[2]s
+		oif != "lo" meta skuid %[1]s ct state new jump conn_guard
+		oif != "lo" meta skuid @egress_uid meta skuid != 0 ct state new jump conn_guard
+	}
+	chain conn_guard {`, guard, dataPlaneMark)
 	relay := ""
 	if to := n.RelayTo.Unmap(); to.IsValid() {
+		guardRules = `
+	}
+	chain conn_guard {`
 		family, nfproto, saddr, set := "ip", "ipv4", "ip saddr", "@allow4"
 		if to.Is6() {
 			family, nfproto, saddr, set = "ip6", "ipv6", "ip6 saddr", "@allow6"
@@ -140,14 +166,23 @@ func (n *NFT) Ruleset() string {
 	chain relay_forward {
 		type filter hook forward priority 0; policy drop;
 		ct state established,related accept
-		ct status dnat %[1]s daddr %[2]s %[3]s . meta l4proto . th dport %[4]s accept
+		ct status dnat %[1]s daddr %[2]s %[3]s . meta l4proto . th dport %[4]s jump in_limit_fwd
 		ct status dnat %[1]s daddr %[2]s counter drop comment "relay-no-grant"
 		counter comment "relay-not-forwarded"
 	}
+	# The per-address limit, after the grant (spec/conn-limit-v1.md §6.2):
+	# no admin or untracked exemption here, neither reaches the forward
+	# hook. SetInLimit fills in_rate_fwd.
+	chain in_limit_fwd {
+		jump in_rate_fwd
+		accept
+	}
+	chain in_rate_fwd {
+%[6]s	}
 	chain relay_snat {
 		type nat hook postrouting priority srcnat; policy accept;
 		ct status dnat %[1]s daddr %[2]s masquerade
-	}`, family, to, saddr, set, nfproto)
+	}`, family, to, saddr, set, nfproto, inRateRules(true, "\t\t", "relay-", n.inDiv))
 	}
 	return fmt.Sprintf(`table inet %[1]s {}
 delete table inet %[1]s
@@ -169,6 +204,29 @@ table inet %[1]s {
 	set rate4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set rate6 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set egress_uid { type uid; }
+	# The DNS tunnels' UDP ports (the public UDP ports), past conntrack.
+	set dns_ports { type inet_service; }
+	# New inbound flows by source: IPv4 address, /64 and /48 (§6.2).
+	set in4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
+	set in64 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
+	set in48 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
+	set inu4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
+	set inu64 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
+	set inu48 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
+	counter conn_guard { }
+
+	# The DNS tunnels' queries and answers skip conntrack (spec/conn-limit-v1.md
+	# §6.2): a public resolver sends each query from a new port, and each
+	# would hold a table entry for 30 s. Only to the node's own addresses,
+	# only the front's (uid %[11]d) answers; the stub on lo is not touched.
+	chain notrack_in {
+		type filter hook prerouting priority -300; policy accept;
+		iif != "lo" udp dport @dns_ports fib daddr type local notrack
+	}
+	chain notrack_out {
+		type filter hook output priority -300; policy accept;
+		oif != "lo" udp sport @dns_ports meta skuid %[11]d notrack
+	}
 
 	# Before defragmentation and conntrack (priority -400 and -200): what the
 	# kernel never has to parse for anyone, packets to the node itself only
@@ -226,12 +284,27 @@ table inet %[1]s {
 		ip6 saddr @relay6 meta l4proto . th dport @relay_ports ct mark set ct mark | %[9]s accept
 		tcp dport @spa_tcp accept
 		tcp dport @acme_in accept
-		meta l4proto . th dport @public accept
+		meta l4proto . th dport @public jump in_limit
 		ip saddr @admin4 meta l4proto . th dport @admin_ports accept
 		ip6 saddr @admin6 meta l4proto . th dport @admin_ports accept
-		ip saddr . meta l4proto . th dport @allow4 accept
-		ip6 saddr . meta l4proto . th dport @allow6 accept
+		ip saddr . meta l4proto . th dport @allow4 jump in_limit
+		ip6 saddr . meta l4proto . th dport @allow6 jump in_limit
 	}
+
+	# The per-address limit on new inbound flows (spec/conn-limit-v1.md
+	# §6.2): only what admit lets in comes here, so SYNs to closed ports
+	# are not counted. The admin addresses and the DNS tunnels (untracked)
+	# pass; in_rate holds the limits while they are on (SetInLimit). A
+	# packet dropped here leaves no entry: it is confirmed only past input.
+	chain in_limit {
+		ip saddr @admin4 accept
+		ip6 saddr @admin6 accept
+		ct state untracked accept
+		jump in_rate
+		accept
+	}
+	chain in_rate {
+%[10]s	}
 
 	# A flow a relay opened goes on only while something still lets it in
 	# (admit): a relay removed, or a service no longer forwarded, loses
@@ -264,7 +337,7 @@ table inet %[1]s {
 		meta nfproto ipv4 meta l4proto udp ct state != established meta skuid %[7]s fib daddr type broadcast jump to_node
 		oif "lo" meta skuid %[7]s ip daddr { 127.0.0.53, 127.0.0.54 } meta l4proto { tcp, udp } th dport != 53 jump to_node
 		meta skuid %[7]s jump egress
-		meta skuid @egress_uid jump egress
+		meta skuid @egress_uid jump egress%[12]s
 	}
 	chain to_node {
 		counter comment "data-plane-to-node"
@@ -286,7 +359,7 @@ table inet %[1]s {
 	chain bt_dht {
 	}%[8]s
 }
-`, Table, limit, n.NflogGroup, lo, loNAT, lo, guard, relay, relayMark)
+`, Table, limit, n.NflogGroup, lo, loNAT, lo, guard, relay, relayMark, inRateRules(true, "\t\t", "", n.inDiv), frontUID, guardRules)
 }
 
 // Setup installs the table and detects whether "destroy element" works.
@@ -345,14 +418,198 @@ func (n *NFT) SetSPAPorts(udp, tcp []uint16) error {
 	return n.run(b.String())
 }
 
-// SetPublic replaces the ports open to everyone.
+// SetPublic replaces the ports open to everyone, and with them the DNS
+// tunnels' ports that skip conntrack: the public UDP ports are theirs
+// (store's public kinds), in the same transaction.
 func (n *NFT) SetPublic(ports []Port) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "flush set inet %s public\n", Table)
+	fmt.Fprintf(&b, "flush set inet %s public\nflush set inet %s dns_ports\n", Table, Table)
 	if len(ports) > 0 {
 		fmt.Fprintf(&b, "add element inet %s public { %s }\n", Table, strings.Join(portElems(ports), ", "))
 	}
+	if dns := DNSPorts(ports); len(dns) > 0 {
+		fmt.Fprintf(&b, "add element inet %s dns_ports { %s }\n", Table, joinPorts(dns))
+	}
 	return n.run(b.String())
+}
+
+// DNSPorts are the DNS tunnels' ports among the public ones: the UDP ports
+// (spec/conn-limit-v1.md §6.2). Only DNS tunnels are public over UDP;
+// REALITY's "open" makes TCP 443 public, never UDP.
+func DNSPorts(public []Port) []uint16 {
+	var out []uint16
+	for _, p := range public {
+		if p.Proto == "udp" && !slices.Contains(out, p.Num) {
+			out = append(out, p.Num)
+		}
+	}
+	return out
+}
+
+// frontUID is the front's UID (render.FrontUID): the DNS tunnels' answers
+// come from its socket.
+const frontUID = 9100
+
+// dataPlaneMark is the conntrack mark bit of the data plane's new flows
+// (spec/conn-limit-v1.md §6.3), beside relayMark: the guard's sweep finds
+// their entries by it.
+const (
+	dataPlaneMark    = "0x00800000"
+	dataPlaneMarkBit = 0x00800000
+)
+
+// The per-address limit on new inbound flows (spec/conn-limit-v1.md §5,
+// §6.2): per IPv4 address or IPv6 /64, and per /48 with 16 times the room.
+const (
+	inTCPRate, inTCPBurst     = 50, 1000
+	inTCP48Rate, inTCP48Burst = 800, 16000
+	inUDPRate, inUDPBurst     = 20, 200
+	inUDP48Rate, inUDP48Burst = 320, 3200
+)
+
+// InboundRules are the comments of the per-address limit's rules (the
+// relay's with "relay-" before): TCP and UDP.
+var InboundRules = map[string]string{"in-rate": "tcp", "in-rate-udp": "udp", "relay-in-rate": "tcp", "relay-in-rate-udp": "udp"}
+
+// inRateRules are the rules of in_rate (in_rate_fwd on a relay, comments
+// with prefix), each on its own line after indent; none when off. div
+// divides the numbers (tests; 0 is 1).
+func inRateRules(on bool, indent, prefix string, div int) string {
+	if !on {
+		return ""
+	}
+	div = max(div, 1)
+	limit := func(rate, burst int) string {
+		return fmt.Sprintf("limit rate over %d/second burst %d packets", max(1, rate/div), max(1, burst/div))
+	}
+	tcp, udp := fmt.Sprintf(`counter drop comment "%sin-rate"`, prefix), fmt.Sprintf(`counter drop comment "%sin-rate-udp"`, prefix)
+	rules := []string{
+		fmt.Sprintf("tcp flags syn update @in4 { ip saddr %s } %s", limit(inTCPRate, inTCPBurst), tcp),
+		fmt.Sprintf("tcp flags syn update @in64 { ip6 saddr & ffff:ffff:ffff:ffff:: %s } %s", limit(inTCPRate, inTCPBurst), tcp),
+		fmt.Sprintf("tcp flags syn update @in48 { ip6 saddr & ffff:ffff:ffff:: %s } %s", limit(inTCP48Rate, inTCP48Burst), tcp),
+		fmt.Sprintf("meta l4proto udp update @inu4 { ip saddr %s } %s", limit(inUDPRate, inUDPBurst), udp),
+		fmt.Sprintf("meta l4proto udp update @inu64 { ip6 saddr & ffff:ffff:ffff:ffff:: %s } %s", limit(inUDPRate, inUDPBurst), udp),
+		fmt.Sprintf("meta l4proto udp update @inu48 { ip6 saddr & ffff:ffff:ffff:: %s } %s", limit(inUDP48Rate, inUDP48Burst), udp),
+	}
+	var b strings.Builder
+	for _, r := range rules {
+		b.WriteString(indent + r + "\n")
+	}
+	return b.String()
+}
+
+// InLimitScript is the transaction that turns the per-address limit on or
+// off: in_rate (and a relay's in_rate_fwd) flushed and, when on, filled.
+func InLimitScript(on, relay bool) string { return inLimitScript(on, relay, 1) }
+
+func inLimitScript(on, relay bool, div int) string {
+	var b strings.Builder
+	chains := []struct{ name, prefix string }{{"in_rate", ""}}
+	if relay {
+		chains = append(chains, struct{ name, prefix string }{"in_rate_fwd", "relay-"})
+	}
+	for _, c := range chains {
+		fmt.Fprintf(&b, "flush chain inet %s %s\n", Table, c.name)
+		for _, r := range strings.Split(strings.TrimSpace(inRateRules(on, "", c.prefix, div)), "\n") {
+			if r != "" {
+				fmt.Fprintf(&b, "add rule inet %s %s %s\n", Table, c.name, r)
+			}
+		}
+	}
+	return b.String()
+}
+
+// SetInLimit turns the per-address limit on or off in one transaction.
+func (n *NFT) SetInLimit(on bool) error {
+	return n.run(inLimitScript(on, n.RelayTo.IsValid(), n.inDiv))
+}
+
+// GuardScript is the transaction that turns the guard's refusal on or off:
+// conn_guard flushed and, when on, its one rule. No route: TCP gets
+// ENETUNREACH at once and UDP EPERM, which no limit counts as a failed
+// dial (a reset would read as the destination's ECONNREFUSED); the refused
+// packet leaves no entry. The named counter outlives the switches.
+func GuardScript(on bool) string {
+	s := fmt.Sprintf("flush chain inet %s conn_guard\n", Table)
+	if on {
+		s += fmt.Sprintf("add rule inet %s conn_guard counter name \"conn_guard\" reject with icmpx no-route\n", Table)
+	}
+	return s
+}
+
+// SetGuard turns the guard's refusal on or off; nothing on a relay.
+func (n *NFT) SetGuard(on bool) error {
+	if n.RelayTo.IsValid() {
+		return nil
+	}
+	return n.run(GuardScript(on))
+}
+
+// GuardRefused reads the guard's named counter: the packets it refused
+// since the table was made.
+func (n *NFT) GuardRefused() (uint64, error) {
+	bin := n.Bin
+	if bin == "" {
+		bin = "nft"
+	}
+	out, err := exec.Command(bin, "-j", "list", "counter", "inet", Table, "conn_guard").Output() //nolint:gosec // G204: see run
+	if err != nil {
+		return 0, fmt.Errorf("nft list counter conn_guard: %w", err)
+	}
+	var doc struct {
+		Nftables []struct {
+			Counter *struct {
+				Packets uint64 `json:"packets"`
+			} `json:"counter"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		return 0, fmt.Errorf("nft list counter conn_guard: %w", err)
+	}
+	for _, o := range doc.Nftables {
+		if o.Counter != nil {
+			return o.Counter.Packets, nil
+		}
+	}
+	return 0, errors.New("nft list counter conn_guard: no counter")
+}
+
+// InboundDrops reads the per-address limit's counters by protocol ("tcp",
+// "udp") for local metrics: packets dropped, never from where. On a relay
+// its forwarded flows' too.
+func (n *NFT) InboundDrops() (map[string]Drops, error) {
+	out := map[string]Drops{}
+	chains := []string{"in_rate"}
+	if ok, _ := n.hasChain("in_rate_fwd"); ok {
+		chains = append(chains, "in_rate_fwd")
+	}
+	for _, c := range chains {
+		counts, err := n.counters(c)
+		if err != nil {
+			return nil, err
+		}
+		for rule, d := range counts {
+			proto, ok := InboundRules[rule]
+			if !ok {
+				continue
+			}
+			sum := out[proto]
+			sum.Packets += d.Packets
+			sum.Bytes += d.Bytes
+			out[proto] = sum
+		}
+	}
+	return out, nil
+}
+
+// hasChain reports whether the table has the chain.
+func (n *NFT) hasChain(chain string) (bool, error) {
+	bin := n.Bin
+	if bin == "" {
+		bin = "nft"
+	}
+	err := exec.Command(bin, "list", "chain", "inet", Table, chain).Run() //nolint:gosec // G204: see run
+	return err == nil, err
 }
 
 // SetAdmin replaces the admin prefixes and ports in one transaction.

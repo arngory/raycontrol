@@ -7,6 +7,7 @@ require (
 	github.com/cloudflare/circl v1.6.5
 	github.com/florianl/go-nflog/v2 v2.3.0
 	github.com/maxmind/mmdbwriter v1.2.0
+	github.com/mdlayher/netlink v1.9.1-0.20260312172110-2a932c0fc1ae
 	github.com/oschwald/maxminddb-golang/v2 v2.8.0
 	github.com/quic-go/quic-go v0.64.1
 	golang.org/x/crypto v0.58.0
@@ -23,7 +24,6 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
-	github.com/mdlayher/netlink v1.9.1-0.20260312172110-2a932c0fc1ae // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/ncruces/go-strftime v1.1.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect

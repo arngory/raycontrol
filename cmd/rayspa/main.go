@@ -124,6 +124,12 @@ func run(args []string) error {
 		return err
 	}
 	gate := perimeter.NewGate(fw, log)
+	if *relayBundle == "" {
+		// The conntrack table's guard (spec/conn-limit-v1.md §6.3): on the
+		// node only, a relay runs no data plane. Its state goes to rayd.
+		gate.EnableGuard(&perimeter.Guard{Sweep: (&perimeter.Sweeper{}).Sweep, Refused: fw.GuardRefused,
+			Report: guardReporter(ctx, *socket, log), Log: log})
+	}
 	handle := func(src netip.Addr, pkt []byte) {
 		g, err := gate.Handle(src, pkt)
 		if err != nil {
@@ -170,6 +176,52 @@ func run(args []string) error {
 			}
 		}
 	}
+}
+
+// guardReporter sends the guard's state to rayd (PerimeterService.
+// ReportGuard), apart from the tick: the newest state replaces one not sent
+// yet, and a rayd away loses nothing but a report (the next comes within a
+// minute).
+func guardReporter(ctx context.Context, socket string, log *slog.Logger) func(perimeter.GuardState) {
+	client := perimeterv1connect.NewPerimeterServiceClient(api.UnixHTTPClient(socket), api.BaseURL)
+	next := make(chan perimeter.GuardState, 1)
+	go func() {
+		for {
+			var st perimeter.GuardState
+			select {
+			case <-ctx.Done():
+				return
+			case st = <-next:
+			}
+			rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_, err := client.ReportGuard(rctx, connect.NewRequest(&perimeterv1.ReportGuardRequest{Guard: guardPB(st)}))
+			cancel()
+			if err != nil {
+				log.Debug("guard report to rayd", "err", err)
+			}
+		}
+	}()
+	return func(st perimeter.GuardState) {
+		select {
+		case <-next: // an older one not sent yet
+		default:
+		}
+		select {
+		case next <- st:
+		default:
+		}
+	}
+}
+
+func guardPB(st perimeter.GuardState) *perimeterv1.Guard {
+	unix := func(t time.Time) int64 {
+		if t.IsZero() {
+			return 0
+		}
+		return t.Unix()
+	}
+	return &perimeterv1.Guard{On: st.On, Since: unix(st.Since), LastOn: unix(st.LastOn), Switches: st.Switches, Refused: st.Refused,
+		SweptUdp: st.SweptUDP, SweptTcpOut: st.SweptTCPOut, SweptTcpIn: st.SweptTCPIn}
 }
 
 // restore applies the snapshot saved in file, if there is one.

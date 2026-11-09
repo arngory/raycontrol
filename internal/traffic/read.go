@@ -38,6 +38,10 @@ type Reading struct {
 	Uptime time.Duration
 	Mono   time.Duration
 	Users  map[string]store.TrafficCounter
+	// Limits are the refusals of the connection limits by base name (u5)
+	// and kind since the process started (spec/conn-limit-v1.md §2): rayd
+	// naive from v0.24.0 gives them with its bytes; nil from the others.
+	Limits map[string]map[string]int64
 }
 
 // monoStart anchors Mono where the kernel's clock cannot be read:
@@ -163,6 +167,7 @@ func parseLine(body []byte) (Reading, error) {
 			Up   int64 `json:"up"`
 			Down int64 `json:"down"`
 		} `json:"users"`
+		Limit map[string]map[string]int64 `json:"limit"`
 	}
 	// The decoder's error is not passed on: it may quote the answer (a
 	// key's path), and it goes to rayctl status.
@@ -182,6 +187,18 @@ func parseLine(body []byte) (Reading, error) {
 	r := Reading{Boot: a.Boot, Users: make(map[string]store.TrafficCounter, len(a.Users))}
 	for name, c := range a.Users {
 		r.Users[name] = store.TrafficCounter{Up: max(c.Up, 0), Down: max(c.Down, 0)}
+	}
+	if len(a.Limit) > maxNames {
+		return Reading{}, fmt.Errorf("%d names with refusals, at most %d", len(a.Limit), maxNames)
+	}
+	if len(a.Limit) > 0 {
+		r.Limits = make(map[string]map[string]int64, len(a.Limit))
+		for name, kinds := range a.Limit {
+			if len(kinds) > 16 {
+				return Reading{}, errors.New("too many kinds of refusals")
+			}
+			r.Limits[name] = kinds
+		}
 	}
 	return r, nil
 }

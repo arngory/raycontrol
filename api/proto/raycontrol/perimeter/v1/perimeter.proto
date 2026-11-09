@@ -10,6 +10,29 @@ service PerimeterService {
   // WatchPerimeter sends the current snapshot at once and a new one after
   // every change that affects SPA access.
   rpc WatchPerimeter(WatchPerimeterRequest) returns (stream WatchPerimeterResponse);
+  // ReportGuard tells rayd the state of the conntrack guard
+  // (spec/conn-limit-v1.md §6.3): at each switch and once a minute.
+  rpc ReportGuard(ReportGuardRequest) returns (ReportGuardResponse);
+}
+
+message ReportGuardRequest {
+  Guard guard = 1;
+}
+
+message ReportGuardResponse {}
+
+// Guard is rayspa's guard of the conntrack table: on above 85 % of
+// nf_conntrack_max, off below 70 % and not before 2 minutes.
+message Guard {
+  bool on = 1;
+  int64 since = 2;    // unix seconds: the last switch, on or off
+  int64 last_on = 3;  // unix seconds: the last switch on; 0: never
+  uint64 switches = 4;
+  uint64 refused = 5; // new data-plane flows refused, since rayspa started
+  // Entries swept for want of a socket (outbound UDP and TCP, inbound TCP).
+  uint64 swept_udp = 6;
+  uint64 swept_tcp_out = 7;
+  uint64 swept_tcp_in = 8;
 }
 
 // RelayService is the perimeter feed of a relay in front of this node
@@ -77,6 +100,9 @@ message Snapshot {
   // into the chain the data plane's packets pass on their way out. Absent
   // (an older rayd, a relay's feed): nothing blocked.
   Egress egress = 12;
+  // The per-address limit on new inbound connections is off (rayctl
+  // conn-limit off, spec/conn-limit-v1.md §8). Absent (an older rayd): on.
+  bool conn_limit_off = 13;
 }
 
 // Egress is what the data plane may not send, whoever the user.
