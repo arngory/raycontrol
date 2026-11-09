@@ -566,7 +566,9 @@ boot
 # administrator's TIME_WAIT is lost at this reboot, and the next apply,
 # seeing the kernel's 120, lowers it to 60 and journals 120 for uninstall
 # to put back, which is right on a host and wrong for this comparison.
-x sh -c 'systemctl cat systemd-sysctl.service >/dev/null 2>&1 || sysctl -e -q --system >/dev/null'
+# Like systemd-sysctl, it goes on past a key the container may not set
+# (net.core.*: "Operation not permitted").
+x sh -c 'systemctl cat systemd-sysctl.service >/dev/null 2>&1 || sysctl -e -q --system >/dev/null || true'
 wait_active rayd.service rayspa.service "${dataplane[@]}"
 ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$node")"
 client -addr "$ip" "$laptop" >/dev/null || fail "probe after reboot"
