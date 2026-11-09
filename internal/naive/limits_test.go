@@ -371,6 +371,79 @@ func TestLimitsPairsWallStep(t *testing.T) {
 	}
 }
 
+// The count of users with pairs (the fair share's divisor at the ceiling)
+// is kept as pairs come and go, never by walking the users: it matches the
+// users through new pairs, aging, streams' ends, the journal, the sweep and
+// the switch.
+func TestLimitsWithPairs(t *testing.T) {
+	s := &Server{}
+	c := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	s.lim.now, s.lim.sleep = c.now, c.sleep
+	s.lim.ctMax = func() (uint64, error) { return 400, nil } // a ceiling of 100
+	check := func(what string) {
+		t.Helper()
+		s.lim.mu.Lock()
+		defer s.lim.mu.Unlock()
+		n, pairs := 0, 0
+		for _, u := range s.lim.users {
+			if u.pairs > 0 {
+				n++
+			}
+			pairs += u.pairs
+		}
+		if s.lim.withPairs != n || s.lim.pairs != pairs {
+			t.Fatalf("%s: with pairs %d, counted %d; pairs %d, counted %d", what, s.lim.withPairs, n, s.lim.pairs, pairs)
+		}
+	}
+	var slots []*uotSlot
+	for i := range 30 {
+		user := fmt.Sprintf("u%d", i)
+		slot, u := slotWith(t, s, user)
+		slots = append(slots, slot)
+		for j := range 2 + i%5 { // 120 asked: the ceiling refuses some
+			refillDest(s, user)
+			u.mayReach(dest(i*8 + j))
+		}
+	}
+	check("new pairs")
+	live := int64(0)
+	for _, kinds := range s.lim.Refused() {
+		live += kinds[refusedLive]
+	}
+	if live == 0 {
+		t.Fatal("the ceiling refused no one above the share")
+	}
+	// At the ceiling: refused above the share, admitted below it.
+	_, u := slotWith(t, s, "u99")
+	refillDest(s, "u99")
+	if !u.mayReach(dest(4000)) {
+		t.Fatal("a user without pairs refused at the ceiling")
+	}
+	check("at the ceiling")
+	for i, slot := range slots {
+		if i%2 == 0 {
+			s.lim.uotPut(slot)
+		}
+	}
+	check("streams ended")
+	c.t = c.t.Add(31 * time.Second)
+	s.lim.mu.Lock()
+	s.lim.sweepLocked(c.t)
+	s.lim.mu.Unlock()
+	check("aged and swept")
+	if s.lim.withPairs != 0 {
+		t.Fatalf("unanswered pairs 31 s old: %d users with pairs", s.lim.withPairs)
+	}
+	refillDest(s, "u1")
+	_, v := slotWith(t, s, "u1")
+	v.mayReach(dest(5000))
+	s.lim.off.Store(true)
+	s.lim.mu.Lock()
+	s.lim.sweepLocked(c.t)
+	s.lim.mu.Unlock()
+	check("off")
+}
+
 // The process's ceiling, a quarter of nf_conntrack_max: at it, a new pair
 // is refused only to those above the fair share; the others get theirs.
 func TestLimitsCeiling(t *testing.T) {

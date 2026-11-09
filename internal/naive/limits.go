@@ -87,6 +87,7 @@ type limits struct {
 	ceiling     int
 	ceilingAt   time.Time
 	pairs       int // counted pairs of all users
+	withPairs   int // users with pairs counted: the fair share's divisor
 	agedAll     time.Time
 	lookupBurst float64 // tests
 }
@@ -442,7 +443,7 @@ func (l *limits) newPair(s *uotSlot) bool {
 					l.ageLocked(x, now, true)
 				}
 			}
-			if l.pairs >= c && u.pairs > c/max(1, l.withPairsLocked()) {
+			if l.pairs >= c && u.pairs > c/max(1, l.withPairs) {
 				l.refuseLocked(s.user, refusedLive)
 				return false
 			}
@@ -453,23 +454,25 @@ func (l *limits) newPair(s *uotSlot) bool {
 		return false
 	}
 	if !l.off.Load() {
-		u.pairs++
 		s.pairs++
-		l.pairs++
+		l.setPairsLocked(u, u.pairs+1)
 	}
 	return true
 }
 
-// withPairsLocked is how many users have pairs: the fair share of the
-// ceiling is the ceiling over them.
-func (l *limits) withPairsLocked() int {
-	n := 0
-	for _, u := range l.users {
-		if u.pairs > 0 {
-			n++
-		}
+// setPairsLocked sets a user's count of pairs, and the process's counts:
+// its pairs, and how many users have some (the fair share of the ceiling
+// is the ceiling over them; counted as it goes, not by walking the users
+// at each new pair).
+func (l *limits) setPairsLocked(u *limUser, n int) {
+	switch {
+	case u.pairs == 0 && n > 0:
+		l.withPairs++
+	case u.pairs > 0 && n == 0:
+		l.withPairs--
 	}
-	return n
+	l.pairs += n - u.pairs
+	u.pairs = n
 }
 
 // ceilingLocked is the process's ceiling of pairs: a quarter of the live
@@ -526,8 +529,7 @@ func (l *limits) recountLocked(u *limUser, now time.Time) {
 	if l.off.Load() {
 		n = 0
 	}
-	l.pairs += n - u.pairs
-	u.pairs = n
+	l.setPairsLocked(u, n)
 }
 
 // Refused are the refusals of the connection limits by base name and kind
