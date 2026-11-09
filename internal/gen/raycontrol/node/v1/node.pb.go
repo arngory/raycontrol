@@ -3254,8 +3254,9 @@ type User struct {
 	TrafficPeriod      string `protobuf:"bytes,11,opt,name=traffic_period,json=trafficPeriod,proto3" json:"traffic_period,omitempty"`                   // monthly | none
 	TrafficResetDay    int32  `protobuf:"varint,12,opt,name=traffic_reset_day,json=trafficResetDay,proto3" json:"traffic_reset_day,omitempty"`          // 1..28, monthly only
 	TrafficNextReset   int64  `protobuf:"varint,13,opt,name=traffic_next_reset,json=trafficNextReset,proto3" json:"traffic_next_reset,omitempty"`       // unix seconds, 0 = none
-	// The node took the user off its profiles for the limit: used reached
-	// it. The node decides, not a comparison of the two fields.
+	// The node took the user off its profiles for the limit: an enabled,
+	// unexpired user whose used reached it (as the subscription's
+	// exhausted). The node decides, not a comparison of the two fields.
 	TrafficExhausted bool `protobuf:"varint,14,opt,name=traffic_exhausted,json=trafficExhausted,proto3" json:"traffic_exhausted,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache

@@ -465,8 +465,9 @@ message User {
   string traffic_period = 11;      // monthly | none
   int32 traffic_reset_day = 12;    // 1..28, monthly only
   int64 traffic_next_reset = 13;   // unix seconds, 0 = none
-  // The node took the user off its profiles for the limit: used reached
-  // it. The node decides, not a comparison of the two fields.
+  // The node took the user off its profiles for the limit: an enabled,
+  // unexpired user whose used reached it (as the subscription's
+  // exhausted). The node decides, not a comparison of the two fields.
   bool traffic_exhausted = 14;
 }
 

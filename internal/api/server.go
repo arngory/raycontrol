@@ -310,7 +310,7 @@ func (s *Server) userPB(ctx context.Context, u store.User) (*nodev1.User, error)
 		pb.TrafficPeriod = u.TrafficPeriod
 		pb.TrafficResetDay = int32(u.TrafficResetDay) //nolint:gosec // G115: 1..28
 		pb.TrafficNextReset = unixOf(u.NextResetAt(now))
-		pb.TrafficExhausted = u.OverLimit(now)
+		pb.TrafficExhausted = u.Live(now) && u.OverLimit(now) // as the subscription: disabled and expired are not "exhausted"
 	}
 	for _, id := range u.Services {
 		for _, svc := range all {
@@ -347,6 +347,11 @@ func (s *Server) CreateUser(ctx context.Context, req *connect.Request[nodev1.Cre
 	}
 	if m.TrafficLimitBytes != 0 {
 		u.TrafficLimit = &m.TrafficLimitBytes
+	}
+	// The period's text is the admin's: checked before it can reach any
+	// error, and so the audit (as SetUserTraffic).
+	if m.TrafficPeriod != "" && store.CheckTrafficPeriod(m.TrafficPeriod, 1) != nil {
+		return nil, s.done(ctx, "user.create", m.Name, fmt.Errorf("%w traffic period: use monthly or none", store.ErrInvalid))
 	}
 	ids, err := s.serviceIDs(ctx, m.Services)
 	if err == nil {

@@ -175,14 +175,16 @@ func periodOf(u *nodev1.User) string {
 	return u.TrafficPeriod
 }
 
+// stateOf is a user's state in the order of rayd's metrics: disabled,
+// expired, over the limit (exhausted: rayd says so of live users only).
 func stateOf(u *nodev1.User, now time.Time) string {
 	switch {
-	case u.TrafficExhausted:
-		return "exhausted"
 	case !u.Enabled:
 		return "disabled"
 	case u.ExpiresAt != 0 && u.ExpiresAt <= now.Unix():
 		return "expired"
+	case u.TrafficExhausted:
+		return "exhausted"
 	}
 	return "active"
 }

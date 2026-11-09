@@ -34,7 +34,7 @@ func TestSetUserTraffic(t *testing.T) {
 	}
 	for name, req := range map[string]*nodev1.CreateUserRequest{
 		"day 29":         {Name: "b1", TrafficLimitBytes: 1, TrafficResetDay: 29},
-		"weekly":         {Name: "b2", TrafficLimitBytes: 1, TrafficPeriod: "weekly"},
+		"weekly":         {Name: "b2", TrafficLimitBytes: 1, TrafficPeriod: "weekly; DROP TABLE"},
 		"a negative one": {Name: "b3", TrafficLimitBytes: -1},
 	} {
 		if _, err := c.CreateUser(ctx, connect.NewRequest(req)); connect.CodeOf(err) != connect.CodeInvalidArgument {
@@ -79,6 +79,18 @@ func TestSetUserTraffic(t *testing.T) {
 	list, err := c.ListUsers(ctx, connect.NewRequest(&nodev1.ListUsersRequest{}))
 	if err != nil || len(list.Msg.Users) != 1 || list.Msg.Users[0].TrafficUsedBytes != 1000 || !list.Msg.Users[0].TrafficExhausted {
 		t.Fatalf("list %+v %v", list.Msg.GetUsers(), err)
+	}
+	// Disabled, the user is off for that, not for the limit: not
+	// exhausted, as the subscription and the metrics have it.
+	if _, err := c.SetUserEnabled(ctx, connect.NewRequest(&nodev1.SetUserEnabledRequest{Name: "alice"})); err != nil {
+		t.Fatal(err)
+	}
+	list, err = c.ListUsers(ctx, connect.NewRequest(&nodev1.ListUsersRequest{}))
+	if err != nil || list.Msg.Users[0].TrafficExhausted || list.Msg.Users[0].TrafficUsedBytes != 1000 {
+		t.Fatalf("disabled: %+v %v", list.Msg.GetUsers(), err)
+	}
+	if _, err := c.SetUserEnabled(ctx, connect.NewRequest(&nodev1.SetUserEnabledRequest{Name: "alice", Enabled: true})); err != nil {
+		t.Fatal(err)
 	}
 
 	// Raised, then off: back, and no count.

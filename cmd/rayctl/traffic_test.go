@@ -26,7 +26,13 @@ func TestTrafficColumns(t *testing.T) {
 	if usedOf(u) != "12.0G/50G (over)" || stateOf(u, now) != "exhausted" {
 		t.Fatalf("%q %q", usedOf(u), stateOf(u, now))
 	}
-	u.TrafficExhausted, u.Enabled = false, false
+	// Disabled first, as rayd's metrics (an older rayd also said
+	// exhausted of a disabled user over the limit).
+	u.Enabled = false
+	if stateOf(u, now) != "disabled" {
+		t.Fatal(stateOf(u, now))
+	}
+	u.TrafficExhausted = false
 	if stateOf(u, now) != "disabled" {
 		t.Fatal(stateOf(u, now))
 	}

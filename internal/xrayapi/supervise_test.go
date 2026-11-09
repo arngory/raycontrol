@@ -124,7 +124,9 @@ func TestSupervisedNode(t *testing.T) {
 	if _, err := provision.SetCertificate(ctx, st, "site", ca.ChainPEM, ca.KeyPEM, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+	// A traffic limit: rayd counts alice's bytes (traffic-limit-v1).
+	limit := int64(1 << 40)
+	st.CreateUser(ctx, store.User{Name: "alice", Enabled: true, TrafficLimit: &limit})
 	st.SetUserServices(ctx, "alice", []int64{reality.ID, hy.ID})
 	dev, key, err := st.CreateDevice(ctx, "alice", "laptop", "user")
 	if err != nil {
@@ -177,6 +179,7 @@ func TestSupervisedNode(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	started := time.Now()
 	defer func() {
 		cmd.Process.Signal(syscall.SIGTERM)
 		done := make(chan struct{})
@@ -265,6 +268,10 @@ func TestSupervisedNode(t *testing.T) {
 		}
 	}
 
+	// The traffic loop's first round (5 s after rayd's start) has read
+	// the processes before alice sends anything: what follows is hers.
+	time.Sleep(time.Until(started.Add(7 * time.Second)))
+
 	// Through REALITY (self-steal on the site) into inner.
 	port, stop := realitySocks(t, bin, linkOf("reality"), "")
 	probeVia("REALITY", port)
@@ -290,6 +297,27 @@ func TestSupervisedNode(t *testing.T) {
 	raw := ls.Hysteria2[strconv.FormatInt(hy.ID, 10)]
 	if err := json.Unmarshal(raw, &stats); err != nil || stats.Connections < 1 || len(stats.Own) < 1 || stats.Own[0].RTTus == 0 {
 		t.Fatalf("link from %s: %s (%+v, %v)", ls.Address, raw, stats, err)
+	}
+
+	// rayd stops at once: its last traffic round reads the processes
+	// before the supervisor stops them, and writes alice's two probes,
+	// 1 MiB down each, through REALITY and Hysteria2.
+	stop()
+	cmd.Process.Signal(syscall.SIGTERM)
+	waited := make(chan struct{})
+	go func() { cmd.Wait(); close(waited) }()
+	select {
+	case <-waited:
+	case <-time.After(15 * time.Second):
+		t.Fatal("rayd did not stop on SIGTERM")
+	}
+	if st, err = store.Open(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	alice, err := st.UserByName(ctx, "alice")
+	if err != nil || alice.TrafficDown < 2<<20 || alice.TrafficUp == 0 {
+		t.Fatalf("alice's count after rayd stopped: %d up, %d down (want 2 MiB down at least), %v", alice.TrafficUp, alice.TrafficDown, err)
 	}
 }
 

@@ -57,6 +57,7 @@ import (
 	"github.com/arngory/raycontrol/internal/sub"
 	"github.com/arngory/raycontrol/internal/summary"
 	"github.com/arngory/raycontrol/internal/traffic"
+	"github.com/arngory/raycontrol/internal/xrayapi"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -272,10 +273,13 @@ func cmdServe(args []string) error {
 			log.Error("apply", "err", err)
 		}
 		if sup != nil {
+			// The processes run on a context of their own: they stop after
+			// the traffic loop's last round has read them (its deferred wait
+			// below runs first), and before rayd returns.
+			supCtx, supStop := context.WithCancel(context.WithoutCancel(ctx))
 			done := make(chan struct{})
-			go func() { sup.Run(ctx); close(done) }()
-			// Stopped before rayd returns.
-			defer func() { stop(); <-done }()
+			go func() { sup.Run(supCtx); close(done) }()
+			defer func() { supStop(); <-done }()
 		}
 		go applier.Run(ctx, srv.Changes)
 	}
@@ -342,8 +346,10 @@ func cmdServe(args []string) error {
 	// The DNS path's events (dnstt's counters, an hour of them).
 	go watchDNSTT(ctx, st, paths, hb)
 	// The traffic loop writes its last poll as rayd stops: before the
-	// database closes, and before the supervised processes stop (the
-	// deferred calls run last first).
+	// database closes, and before the supervised processes stop (their
+	// context ends in a deferred call made earlier, which runs after this
+	// one). The Xray API's connections close after the last round.
+	defer xrayapi.Close()
 	trafficDone := make(chan struct{})
 	go func() { acct.Run(ctx); close(trafficDone) }()
 	defer func() { stop(); <-trafficDone }()
