@@ -206,6 +206,20 @@ func (r *Remote) device(ctx context.Context) (store.Device, error) {
 	return d, nil
 }
 
+// adminDevice is the caller's device if it is an admin's (api-v1 §5): a
+// user device reaches the API port only to repeat its Register, for the
+// invite's 15 minutes, and may then ask who it is, not change its key.
+func (r *Remote) adminDevice(ctx context.Context) (store.Device, error) {
+	d, err := r.device(ctx)
+	if err != nil {
+		return d, err
+	}
+	if d.Role != "admin" {
+		return d, connect.NewError(connect.CodePermissionDenied, errors.New("not an admin device"))
+	}
+	return d, nil
+}
+
 // nodeOnly are the calls for root on the node itself.
 var nodeOnly = map[string]bool{
 	// What rayctl apply builds the deployment from, and rayd's own plan:
@@ -359,7 +373,7 @@ func RotateMessage(oldPin, newPin string) []byte {
 }
 
 func (r *Remote) RotateCertificate(ctx context.Context, req *connect.Request[devicev1.RotateCertificateRequest]) (*connect.Response[devicev1.RotateCertificateResponse], error) {
-	d, err := r.device(ctx)
+	d, err := r.adminDevice(ctx)
 	if err != nil {
 		return nil, err
 	}

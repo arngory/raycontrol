@@ -280,10 +280,17 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 	return connect.NewResponse(resp), nil
 }
 
-// serviceIDs resolves service names to IDs.
+// serviceIDs resolves service names to IDs, each once: a name given twice
+// would otherwise fail the one write as "already exists", which a retry
+// takes for "the first try worked".
 func (s *Server) serviceIDs(ctx context.Context, names []string) ([]int64, error) {
 	ids := make([]int64, 0, len(names))
+	seen := make(map[string]bool, len(names))
 	for _, n := range names {
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
 		svc, err := s.Store.ServiceByName(ctx, n)
 		if err != nil {
 			return nil, err

@@ -82,7 +82,8 @@ func TestEnrollAndPassSPA(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"reality", "dns", "hy2"}})); err != nil {
+	// A service named twice is one service, not "already exists".
+	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"reality", "dns", "hy2", "dns"}})); err != nil {
 		t.Fatal(err)
 	}
 	dev, err := c.CreateDevice(ctx, connect.NewRequest(&nodev1.CreateDeviceRequest{User: "alice", Name: "phone"}))

@@ -189,8 +189,12 @@ A client that lost Register's answer (timeout, dropped connection) may send it a
 - For those 15 minutes the invite's SPA key still opens the API port (scope `[api]`, as before use), so the retry goes
   the way the first request did: SPA with the invite key, TLS with the same client certificate, `Register` with the
   same invite. The client keeps the certificate key per invite for at least that long.
-- Everything else is unchanged `not_found`: another certificate, more than 15 minutes after the first use, the device
-  revoked or its certificate rotated, the user disabled or expired.
+- Everything else is unchanged `not_found`: a certificate other than the device's current one (after
+  `RotateCertificate` the new one is the device's, the first one no longer is), more than 15 minutes after the first
+  use, the device revoked, the user disabled or expired.
+- During those 15 minutes a `user` device reaches the API port by the invite's SPA key, but besides `Register` it may
+  only ask `GetSelf` (about itself); `RotateCertificate` is for `admin` devices (§5) and answers `permission_denied`
+  to a `user` device, as `NodeService` does.
 - Duplicates sent at the same time all get the one device.
 
 ## 5. Роли
