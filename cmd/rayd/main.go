@@ -1277,6 +1277,8 @@ func cmdNaive(args []string) error {
 	quicSocket := fs.String("quic-socket", "", "SOCK_SEQPACKET socket the front sends QUIC datagrams to (naive-quic; IPC mode packet)")
 	frontUID := fs.Int("front-uid", render.FrontUID, "UID of the niko-server front, the only peer accepted")
 	probeAddr := fs.String("probe", "", "where the probe name leads (the subscription endpoint on loopback, R4-16)")
+	connLimit := fs.String("conn-limit", "", "file that turns the per-user connection limits off with \"off\" (spec/conn-limit-v1.md §3.1), "+
+		"read again when it changes; empty or absent: on")
 	icmp := fs.Bool("icmp", false, "carry ping and traceroute through "+naive.ICMPName+" (spec/icmp-v1.md): echoes from ICMP datagram sockets, "+
 		"which need the process's group in net.ipv4.ping_group_range")
 	fs.Parse(args)
@@ -1312,6 +1314,12 @@ func cmdNaive(args []string) error {
 		}
 	}
 	ns := &naive.Server{Users: nu, Answer: handler, ICMP: *icmp, Log: log}
+	// The refusals of the connection limits go out with the bytes.
+	nu.Refused = ns.Refused
+	if *connLimit != "" {
+		ns.SetConnLimit(true)
+		go ns.WatchConnLimit(ctx, *connLimit)
+	}
 	// Channel probes through the tunnel (R4-16): the probe name, and only
 	// it, leads to the endpoint; the rest to public addresses.
 	ns.Probe = *probeAddr
@@ -1339,7 +1347,7 @@ func cmdNaive(args []string) error {
 		<-ctx.Done()
 		_ = srv.Close()
 	}()
-	log.Info("serving naive", "socket", *socket, "answer", *answer, "icmp", *icmp)
+	log.Info("serving naive", "socket", *socket, "answer", *answer, "icmp", *icmp, "conn_limit", ns.ConnLimitOn())
 	if err := srv.ServeTLS(ln, "", ""); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

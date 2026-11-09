@@ -251,7 +251,8 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 				copyIn(bin.Rayd, anchor, renderedOwner, g, path.Join(dir, render.NaiveKey), key),
 				"ExecStart=" + bin.Rayd + " naive -answer " + answer + " -users " + path.Join(dir, render.NaiveUsers) +
 					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name) +
-					" -quic-socket " + p.NaiveQUICSocket(s.Name) + " -stats-socket " + p.StatsSocket(s.Name) + probeArg + frontUID + icmp,
+					" -quic-socket " + p.NaiveQUICSocket(s.Name) + " -stats-socket " + p.StatsSocket(s.Name) +
+					" -conn-limit " + path.Join(dir, render.NaiveConnLimit) + probeArg + frontUID + icmp,
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
 				"ReadWritePaths=" + path.Dir(p.NaiveSocket(s.Name)),

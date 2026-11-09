@@ -46,7 +46,10 @@ type Server struct {
 	ICMP bool
 	Log  *slog.Logger
 
-	uot     uotLimits
+	// lim are the per-user limits (spec/conn-limit-v1.md §3.1), names the
+	// process's cache of names.
+	lim     limits
+	names   names
 	uotIdle time.Duration // uotIdle when 0 (tests make it short)
 
 	icmp     icmpLimits
@@ -68,7 +71,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer a.leave()
-	s.tunnel(w, r, a)
+	if !s.tunnel(w, r, a) {
+		return
+	}
 	// The user left the users file (disabled, expired, over the traffic
 	// limit, a credential past its grace): the stream is reset, not ended.
 	if errors.Is(context.Cause(a.ctx), errRevoked) {
@@ -76,14 +81,41 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// tunnel serves an authenticated CONNECT until it ends or a.ctx is done.
-func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) {
+// tunnel serves an authenticated CONNECT until it ends or a.ctx is done;
+// false when it answered without a tunnel (the site's answer, 429).
+func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool {
 	user, ctx := a.user, a.ctx
 	target := r.Host
 	host, _, err := net.SplitHostPort(target)
 	if err != nil {
 		s.Answer.ServeHTTP(w, r)
-		return
+		return false
+	}
+	// TCP's limits come before the 200 (spec/conn-limit-v1.md §3.1): a
+	// place, a token for the attempt (waiting while the client is there),
+	// no debt of failed dials, and a lookup token for a name the cache
+	// does not know. A refusal is 429: the client's log says why.
+	tcp := host != UoTName && host != uotLegacyName && host != ICMPName
+	// With the limits off a lookup takes no token: paid from the start.
+	paid := s.lim.off.Load()
+	if tcp {
+		done, kind := s.lim.tcpStart(r.Context(), a.key)
+		if kind == "" && !s.lim.off.Load() && s.Dial == nil && (s.Probe == "" || host != probe.Name) {
+			if _, err := netip.ParseAddr(host); err != nil && !s.cached(host) {
+				if !s.lim.lookup(a.key) {
+					done()
+					kind = refusedLookup
+				}
+				paid = true
+			}
+		}
+		if kind != "" {
+			// Not who or where: no user and no destination in the log.
+			s.Log.Debug("naive: too many connections", "limit", kind)
+			w.WriteHeader(http.StatusTooManyRequests)
+			return false
+		}
+		defer done()
 	}
 	// 200 before the destination answers: waiting for it would cost each
 	// connection up to a round trip more. A destination that cannot be
@@ -93,24 +125,27 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) {
 	w.WriteHeader(http.StatusOK)
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return
+		return true
 	}
 	flusher.Flush()
 	in := &paddedStream{r: r.Body, w: w, f: flusher}
 
 	switch host {
 	case UoTName:
-		if !s.uot.take(user) {
+		uctx, cancel := context.WithCancelCause(ctx)
+		defer cancel(nil)
+		slot, _ := s.lim.uotTake(a.key, cancel)
+		if slot == nil {
 			s.Log.Debug("naive: too many UDP streams")
 			panic(http.ErrAbortHandler)
 		}
-		defer s.uot.put(user)
-		err := s.serveUoT(ctx, user, a.traffic, in, http.NewResponseController(w))
+		defer s.lim.uotPut(slot)
+		err := s.serveUoT(uctx, slot, a.traffic, in, http.NewResponseController(w))
 		if err != nil {
 			s.Log.Debug("naive: UDP refused", "err", err)
 			panic(http.ErrAbortHandler)
 		}
-		return
+		return true
 	case uotLegacyName:
 		panic(http.ErrAbortHandler)
 	case ICMPName:
@@ -128,19 +163,11 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) {
 			s.Log.Debug("naive: ICMP refused", "err", err)
 			panic(http.ErrAbortHandler)
 		}
-		return
+		return true
 	}
 
-	dial := s.Dial
-	if dial == nil {
-		dial = dialPublic
-	}
-	if host, _, _ := net.SplitHostPort(target); s.Probe != "" && host == probe.Name {
-		var d net.Dialer
-		dial, target = d.DialContext, s.Probe
-	}
 	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	out, err := dial(dctx, "tcp", target)
+	out, err := s.dialUser(dctx, a.key, target, paid)
 	cancel()
 	if err != nil {
 		s.Log.Debug("naive: destination unreachable") // not where: no destination in the log
@@ -176,6 +203,7 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) {
 			<-down
 		}
 	}
+	return true
 }
 
 // password is Proxy-Authorization's: Basic, any user name.
@@ -557,14 +585,6 @@ func fqdn(host string) string {
 		return host
 	}
 	return host + "."
-}
-
-// dialPublic is PublicDialer's dial, a name as fully qualified.
-func dialPublic(ctx context.Context, network, address string) (net.Conn, error) {
-	if host, port, err := net.SplitHostPort(address); err == nil {
-		address = net.JoinHostPort(fqdn(host), port)
-	}
-	return PublicDialer().DialContext(ctx, network, address)
 }
 
 // resolverWarn says, at most once a minute, that no public resolver

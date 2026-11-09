@@ -170,7 +170,7 @@ func eventually(t *testing.T, what string, cond func() bool) {
 	}
 }
 
-func (l *uotLimits) count() int {
+func (l *limits) count() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.total
@@ -383,7 +383,7 @@ func TestUoT(t *testing.T) {
 	if n := trapped(); n != 0 {
 		t.Errorf("%d packets reached an address not allowed", n)
 	}
-	eventually(t, "streams still counted", func() bool { return h.uot.count() == 0 })
+	eventually(t, "streams still counted", func() bool { return h.lim.count() == 0 })
 }
 
 // A user's streams: uotPerUser at most, the next one reset; their slots
@@ -395,7 +395,7 @@ func TestUoTStreamLimit(t *testing.T) {
 		_, _, done := connect(UoTName + ":0")
 		dones = append(dones, done)
 	}
-	eventually(t, "streams not counted", func() bool { return h.uot.count() == uotPerUser })
+	eventually(t, "streams not counted", func() bool { return h.lim.count() == uotPerUser })
 	_, s, done := connect(UoTName + ":0")
 	if !reset(t, s) {
 		t.Error("over the user's limit: not reset")
@@ -404,7 +404,7 @@ func TestUoTStreamLimit(t *testing.T) {
 	for _, done := range dones {
 		done()
 	}
-	eventually(t, "slots not given back", func() bool { return h.uot.count() == 0 })
+	eventually(t, "slots not given back", func() bool { return h.lim.count() == 0 })
 }
 
 // A client that never says where to does not hold its slot past the idle
@@ -413,8 +413,8 @@ func TestUoTSilentClient(t *testing.T) {
 	h, connect := uotServer(t, 300*time.Millisecond)
 	_, _, done := connect(UoTName + ":0")
 	defer done()
-	eventually(t, "stream not counted", func() bool { return h.uot.count() == 1 })
-	eventually(t, "a silent stream held its slot", func() bool { return h.uot.count() == 0 })
+	eventually(t, "stream not counted", func() bool { return h.lim.count() == 1 })
+	eventually(t, "a silent stream held its slot", func() bool { return h.lim.count() == 0 })
 }
 
 // A client that stops reading does not hold its stream past the idle time:
@@ -435,55 +435,63 @@ func TestUoTStuckClient(t *testing.T) {
 			}
 		}
 	}()
-	eventually(t, "answers not sent", func() bool { return h.uot.count() == 1 })
-	eventually(t, "a stuck stream held its slot", func() bool { return h.uot.count() == 0 })
+	eventually(t, "answers not sent", func() bool { return h.lim.count() == 1 })
+	eventually(t, "a stuck stream held its slot", func() bool { return h.lim.count() == 0 })
 }
 
 func TestUoTLimits(t *testing.T) {
-	var l uotLimits
-	a, b := [32]byte{1}, [32]byte{2}
+	var l limits
+	a, b := "u1", "u2"
+	var slots []*uotSlot
 	for range uotPerUser {
-		if !l.take(a) {
+		s, _ := l.uotTake(a, func(error) {})
+		if s == nil {
 			t.Fatal("under the user's limit")
 		}
+		slots = append(slots, s)
 	}
-	if l.take(a) {
+	// None quiet: the next one is refused.
+	if s, kind := l.uotTake(a, func(error) {}); s != nil || kind != refusedUDP {
 		t.Fatal("over the user's limit")
 	}
-	if !l.take(b) {
+	sb, _ := l.uotTake(b, func(error) {})
+	if sb == nil {
 		t.Fatal("another user")
 	}
-	l.put(a)
-	if !l.take(a) {
+	l.uotPut(slots[0])
+	if s, _ := l.uotTake(a, func(error) {}); s == nil {
 		t.Fatal("after one ended")
+	} else {
+		slots[0] = s
 	}
-	for range uotPerUser {
-		l.put(a)
+	for _, s := range slots {
+		l.uotPut(s)
 	}
-	l.put(b)
+	l.uotPut(sb)
 	if l.total != 0 {
 		t.Fatalf("left: %d", l.total)
 	}
 	// A user's tokens stay until they refill: closing streams gives none
 	// back.
-	if !l.take(a) || !l.newPeer(a) {
+	s, _ := l.uotTake(a, func(error) {})
+	if s == nil || !l.newPair(s) {
 		t.Fatal("a user back")
 	}
-	l.put(a)
-	l.sweep(time.Now())
+	l.uotPut(s)
+	l.sweepLocked(time.Now())
 	if l.users[a] == nil || l.users[b] != nil {
 		t.Fatalf("swept: a kept %v (spent a token), b kept %v (spent none)", l.users[a] != nil, l.users[b] != nil)
 	}
-	l.sweep(time.Now().Add(time.Minute))
+	l.sweepLocked(time.Now().Add(time.Minute))
 	if len(l.users) != 0 {
 		t.Fatalf("not forgotten: %d", len(l.users))
 	}
 	for i := range uotPerService {
-		if !l.take([32]byte{byte(i), byte(i >> 8), 7}) {
+		if s, _ := l.uotTake(fmt.Sprintf("u%d", 1000+i), func(error) {}); s == nil {
 			t.Fatal("under the service's limit")
 		}
 	}
-	if l.take([32]byte{9, 9, 9}) {
+	if s, _ := l.uotTake("u9", func(error) {}); s != nil {
 		t.Fatal("over the service's limit")
 	}
 }
@@ -496,12 +504,16 @@ func TestUoTPacing(t *testing.T) {
 		looked++
 		return []netip.Addr{netip.MustParseAddr("192.0.2.1")}, nil
 	}}
-	user := [32]byte{1}
+	s.lim.off.Store(true) // the destinations' pacing alone, as before the pairs
+	user := "u1"
+	var slot *uotSlot
 	stream := func() *uotStream {
-		if !s.uot.take(user) {
+		if slot, _ = s.lim.uotTake(user, func(error) {}); slot == nil {
 			t.Fatal("no slot")
 		}
-		return &uotStream{s: s, ctx: context.Background(), user: user, names: map[string]uotResolved{}, peers: map[netip.AddrPort]int64{}}
+		u := &uotStream{s: s, ctx: context.Background(), slot: slot, names: map[string]uotResolved{}, peers: map[netip.AddrPort]pairTimes{}}
+		s.lim.uotRun(slot, u)
+		return u
 	}
 	dest := func(i int) netip.AddrPort {
 		return netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 0, 2, byte(i)}), uint16(1000+i/256)) //nolint:gosec // test
@@ -520,39 +532,39 @@ func TestUoTPacing(t *testing.T) {
 		t.Fatal("a destination it sent to")
 	}
 	// Another stream of the same user, after this one ended: no new tokens.
-	s.uot.put(user)
+	s.lim.uotPut(slot)
 	if v := stream(); v.mayReach(dest(5000)) {
 		t.Fatal("a new stream got new tokens")
 	}
 	// The cap per stream, with tokens to spare.
 	w := stream()
 	for i := range uotPeers + 100 {
-		s.uot.users[user].peers = bucket{uotPeerBurst, time.Now()}
+		s.lim.users[user].peers = bucket{uotPeerBurst, time.Now()}
 		w.mayReach(netip.AddrPortFrom(netip.AddrFrom4([4]byte{198, 51, byte(i >> 8), byte(i)}), 9)) //nolint:gosec // test
 	}
 	if len(w.peers) != uotPeers {
 		t.Fatalf("destinations kept: %d", len(w.peers))
 	}
-	// Those not used for a while go when a new one comes.
+	// Those whose time ran out go when a new one comes.
 	for p := range w.peers {
-		w.peers[p] = time.Now().Add(-2 * uotPeerAge).UnixNano()
+		w.peers[p] = pairTimes{sent: time.Now().Add(-2 * pairAnswered).UnixNano()}
 	}
 	w.pruned = time.Time{} // at most once a second
-	s.uot.users[user].peers = bucket{uotPeerBurst, time.Now()}
+	s.lim.users[user].peers = bucket{uotPeerBurst, time.Now()}
 	if !w.mayReach(dest(77)) || len(w.peers) != 1 {
 		t.Fatalf("stale destinations kept: %d", len(w.peers))
 	}
 	// Lookups: the burst, then none; a name looked up is kept.
 	n := 0
-	for i := range 2 * uotLookupBurst {
+	for i := range 2 * lookupBurstOff {
 		if _, ok := w.resolve(uotAddr{name: fmt.Sprintf("n%d.test", i), port: 53}); ok {
 			n++
 		}
 	}
-	if n != uotLookupBurst || looked != uotLookupBurst {
-		t.Fatalf("lookups: %d resolved, %d asked, want %d", n, looked, uotLookupBurst)
+	if n != lookupBurstOff || looked != lookupBurstOff {
+		t.Fatalf("lookups: %d resolved, %d asked, want %d", n, looked, lookupBurstOff)
 	}
-	if _, ok := w.resolve(uotAddr{name: "n0.test", port: 53}); !ok || looked != uotLookupBurst {
+	if _, ok := w.resolve(uotAddr{name: "n0.test", port: 53}); !ok || looked != lookupBurstOff {
 		t.Fatal("a kept name looked up again")
 	}
 }
@@ -569,11 +581,11 @@ func TestUoTConnectedPaced(t *testing.T) {
 	if _, got := readPacket(t, s, true); string(got) != "a" {
 		t.Fatalf("connected: %q", got)
 	}
-	h.uot.mu.Lock()
-	for _, u := range h.uot.users {
+	h.lim.mu.Lock()
+	for _, u := range h.lim.users {
 		u.peers = bucket{0, time.Now()}
 	}
-	h.uot.mu.Unlock()
+	h.lim.mu.Unlock()
 	_, s2, done2 := connect(UoTName + ":0")
 	_, _ = s2.Write(append([]byte{1}, socksAddr(echo)...))
 	if !reset(t, s2) {
@@ -698,8 +710,7 @@ func (s *stuckStream) SetWriteDeadline(time.Time) error {
 func TestUoTStuckReset(t *testing.T) {
 	echo := udpEcho(t)
 	s := &Server{Allow: func(a netip.Addr) bool { return a == echo.Addr() }, uotIdle: 200 * time.Millisecond}
-	user := [32]byte{3}
-	s.uot.take(user)
+	slot, _ := s.lim.uotTake("u3", func(error) {})
 	pr, pw := io.Pipe()
 	defer pw.Close()
 	go func() {
@@ -707,7 +718,7 @@ func TestUoTStuckReset(t *testing.T) {
 		_, _ = pw.Write(packet(append([]byte{0x00}, binary.BigEndian.AppendUint16(echo.Addr().AsSlice(), echo.Port())...), []byte("x")))
 	}()
 	st := &stuckStream{Reader: pr, deadline: make(chan struct{})}
-	if err := s.serveUoT(context.Background(), user, nil, st, st); !errors.Is(err, errRefused) {
+	if err := s.serveUoT(context.Background(), slot, nil, st, st); !errors.Is(err, errRefused) {
 		t.Fatalf("a stuck stream ended with %v, not a reset", err)
 	}
 }

@@ -718,9 +718,9 @@ func TestICMPSeqStart(t *testing.T) {
 // The idle times go by the monotonic clock: the wall clock may step.
 func TestIdleClock(t *testing.T) {
 	st, _, _ := icmpTestStream(t)
-	u := &uotStream{}
+	u := &uotStream{slot: &uotSlot{}}
 	u.touch()
-	for name, last := range map[string]int64{"ICMP": st.last.Load(), "UoT": u.last.Load()} {
+	for name, last := range map[string]int64{"ICMP": st.last.Load(), "UoT": u.slot.last.Load()} {
 		if d := mono() - last; d < 0 || d > int64(time.Minute) {
 			t.Errorf("%s: last %d, mono %d", name, last, mono())
 		}

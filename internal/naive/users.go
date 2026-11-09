@@ -37,6 +37,9 @@ import (
 // nor destinations go to the log.
 type Users struct {
 	Path string
+	// Refused gives the refusals of the connection limits by base name and
+	// kind (Server.Refused), for the stats socket; nil: none.
+	Refused func() map[string]map[string]int64
 
 	every   time.Duration // reloadEvery when 0 (tests make it short)
 	mu      sync.Mutex
@@ -141,7 +144,11 @@ type session struct{ cancel context.CancelCauseFunc }
 // the counters of the name, a context that ends when the password leaves
 // the users file, and leave, which takes the stream out when it ends.
 type admitted struct {
-	user    [32]byte
+	user [32]byte
+	// key is whose limits it takes (spec/conn-limit-v1.md §2): the base
+	// name, u5 for u5 and its credentials' names; a password without a
+	// name is its own user.
+	key     string
 	traffic *Traffic
 	ctx     context.Context
 	leave   func()
@@ -199,7 +206,11 @@ func (u *Users) admit(parent context.Context, password string) (admitted, bool) 
 			t.streams--
 		}
 	}
-	return admitted{user: hash, traffic: t, ctx: ctx, leave: leave}, true
+	key := baseName(name)
+	if name == "" {
+		key = "#" + hex.EncodeToString(hash[:8])
+	}
+	return admitted{user: hash, key: key, traffic: t, ctx: ctx, leave: leave}, true
 }
 
 // trafficOf is a name's counters, made at first sight and kept until the
@@ -375,6 +386,10 @@ type TrafficSnapshot struct {
 	V     int                    `json:"v"`
 	Boot  string                 `json:"boot"`
 	Users map[string]UserTraffic `json:"users"`
+	// Limit are the connection limits' refusals by base name (u5) and kind
+	// since the start (spec/conn-limit-v1.md §2), only names with some: a
+	// field rayd before v0.24.0 does not read.
+	Limit map[string]map[string]int64 `json:"limit,omitempty"`
 }
 
 // UserTraffic are a name's bytes at the destinations' side.
@@ -395,6 +410,11 @@ func (u *Users) Snapshot() TrafficSnapshot {
 	s := TrafficSnapshot{V: 1, Boot: u.boot, Users: make(map[string]UserTraffic, len(u.traffic))}
 	for name, t := range u.traffic {
 		s.Users[name] = UserTraffic{Up: t.upN.Load(), Down: t.downN.Load()}
+	}
+	if u.Refused != nil {
+		if r := u.Refused(); len(r) > 0 {
+			s.Limit = r
+		}
 	}
 	return s
 }
