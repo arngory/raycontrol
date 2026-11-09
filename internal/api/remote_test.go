@@ -338,7 +338,8 @@ func TestRemoteAPI(t *testing.T) {
 	if _, err := newRemoteDevice(t, addr, pin).register(ctx, code, now); connect.CodeOf(err) != connect.CodeNotFound {
 		t.Fatalf("an invite used twice: %v", err)
 	}
-	if scope(inv.DeviceID) != nil || !slices.Contains(scope(reg.DeviceId), inv.Services[0].ID) {
+	// The used invite keeps the API for the replay window (api-v1 §4.1).
+	if !slices.Equal(scope(inv.DeviceID), []uint16{inv.Services[0].ID}) || !slices.Contains(scope(reg.DeviceId), inv.Services[0].ID) {
 		t.Fatalf("after registration: invite %v, device %v", scope(inv.DeviceID), scope(reg.DeviceId))
 	}
 
@@ -417,6 +418,15 @@ func TestRemoteAPI(t *testing.T) {
 	}
 	if _, err := phone.node.ListUsers(ctx, connect.NewRequest(&nodev1.ListUsersRequest{})); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("a user device administers: %v", err)
+	}
+	// Nor does it change its key: it reaches the API only to repeat its
+	// Register, for the invite's 15 minutes (api-v1 §4.1).
+	pnext, err := NewClientCertificate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := phone.dev.RotateCertificate(ctx, connect.NewRequest(&devicev1.RotateCertificateRequest{Certificate: pnext.Certificate[0]})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("a user device rotates its key: %v", err)
 	}
 
 	// The admin device moves to a new key; the old one stops working.

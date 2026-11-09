@@ -694,7 +694,7 @@ func TestRenderSeal(t *testing.T) {
 		return ""
 	}
 	now := time.Now()
-	if _, err := provision.RotateSealKey(ctx, st, dns.Name, now, time.Hour, false); err != nil {
+	if _, err := provision.RotateSealKey(ctx, st, dns.Name, now, time.Hour, false, false); err != nil {
 		t.Fatal(err)
 	}
 	rotated, _ := st.ServiceSecrets(ctx, dns.ID)

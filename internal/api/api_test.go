@@ -82,7 +82,8 @@ func TestEnrollAndPassSPA(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"reality", "dns", "hy2"}})); err != nil {
+	// A service named twice is one service, not "already exists".
+	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"reality", "dns", "hy2", "dns"}})); err != nil {
 		t.Fatal(err)
 	}
 	dev, err := c.CreateDevice(ctx, connect.NewRequest(&nodev1.CreateDeviceRequest{User: "alice", Name: "phone"}))
@@ -493,6 +494,22 @@ func TestRotateService(t *testing.T) {
 	if bytes.Equal(after[provision.SecretSealKey], before[provision.SecretSealKey]) ||
 		!bytes.Equal(after[provision.PrevSecret(provision.SecretSealKey)], before[provision.SecretSealKey]) {
 		t.Fatal("the seal key did not switch, or the previous one is not kept")
+	}
+	// Again within the grace (a retry): failed_precondition, keys as they
+	// were; with force it switches and the first key goes.
+	if _, err := c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "dns"})); connect.CodeOf(err) != connect.CodeFailedPrecondition ||
+		!strings.Contains(err.Error(), "still accepted until") || !strings.Contains(err.Error(), "-force") {
+		t.Fatalf("a second smooth switch within the grace: %v", err)
+	}
+	if again, _ := srv.Store.ServiceSecrets(ctx, dns.ID); !bytes.Equal(again[provision.SecretSealKey], after[provision.SecretSealKey]) ||
+		!bytes.Equal(again[provision.PrevSecret(provision.SecretSealKey)], before[provision.SecretSealKey]) {
+		t.Fatal("a refused switch changed the keys")
+	}
+	if r, err = c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "dns", Force: true})); err != nil || r.Msg.PrevUntil == 0 {
+		t.Fatalf("a forced switch within the grace: %v %v", r, err)
+	}
+	if forced, _ := srv.Store.ServiceSecrets(ctx, dns.ID); !bytes.Equal(forced[provision.PrevSecret(provision.SecretSealKey)], after[provision.SecretSealKey]) {
+		t.Fatal("a forced switch kept the first key")
 	}
 	r, err = c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "dns", Now: true}))
 	if err != nil || !r.Msg.Seal || r.Msg.PrevUntil != 0 {

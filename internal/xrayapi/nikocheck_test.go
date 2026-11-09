@@ -77,7 +77,7 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 		}
 	}
 	// A switched seal key: the file holds two.
-	if _, err := provision.RotateSealKey(ctx, st, "dns", time.Now(), time.Hour, false); err != nil {
+	if _, err := provision.RotateSealKey(ctx, st, "dns", time.Now(), time.Hour, false, false); err != nil {
 		t.Fatal(err)
 	}
 	ca, err := testca.New([]string{"*.example.test", "example.test"}, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))

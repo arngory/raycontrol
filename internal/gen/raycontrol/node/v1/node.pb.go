@@ -5454,9 +5454,14 @@ func (x *SetCertificateResponse) GetMissingNext() []string {
 }
 
 type RotateServiceRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Now           bool                   `protobuf:"varint,2,opt,name=now,proto3" json:"now,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Now   bool                   `protobuf:"varint,2,opt,name=now,proto3" json:"now,omitempty"`
+	// dnstt and masterdns: a switch with a grace (now unset) while the
+	// previous key is still in its grace is failed_precondition (it would
+	// drop that key for clients still on it); force switches anyway and
+	// drops it, as before raycontrol v0.24.0.
+	Force         bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5501,6 +5506,13 @@ func (x *RotateServiceRequest) GetName() string {
 func (x *RotateServiceRequest) GetNow() bool {
 	if x != nil {
 		return x.Now
+	}
+	return false
+}
+
+func (x *RotateServiceRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
 	}
 	return false
 }
@@ -7997,10 +8009,11 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x16SetCertificateResponse\x12\x14\n" +
 	"\x05names\x18\x01 \x03(\tR\x05names\x12\x1b\n" +
 	"\tnot_after\x18\x02 \x01(\x03R\bnotAfter\x12!\n" +
-	"\fmissing_next\x18\x03 \x03(\tR\vmissingNext\"<\n" +
+	"\fmissing_next\x18\x03 \x03(\tR\vmissingNext\"R\n" +
 	"\x14RotateServiceRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
-	"\x03now\x18\x02 \x01(\bR\x03now\"y\n" +
+	"\x03now\x18\x02 \x01(\bR\x03now\x12\x14\n" +
+	"\x05force\x18\x03 \x01(\bR\x05force\"y\n" +
 	"\x15RotateServiceResponse\x12\x1b\n" +
 	"\tswitch_at\x18\x01 \x01(\x03R\bswitchAt\x12\x12\n" +
 	"\x04seal\x18\x02 \x01(\bR\x04seal\x12\x1d\n" +

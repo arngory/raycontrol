@@ -76,11 +76,12 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             (0: the defaults, 256 and 4; the server restarts)
   service cert SITE -chain F -key F         a certificate of your own for the site and the services under
                                             it, in place of ACME's (on the node only)
-  service rotate NAME [-now]                new REALITY keys (and server name, self-steal) ahead of
+  service rotate NAME [-now] [-force]       new REALITY keys (and server name, self-steal) ahead of
                                             schedule: after the lead time, or at once with -now;
                                             dnstt: a new seal key at once, masterdns: a new service key
                                             at once; the previous one accepted for -cred-grace (with
-                                            -now: not at all)
+                                            -now: not at all); refused while the key before is still
+                                            in its grace, unless -force (that key then goes at once)
   device list [USER]
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
@@ -715,13 +716,14 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 	case "rotate":
 		fs := flag.NewFlagSet("service rotate", flag.ContinueOnError)
 		now := fs.Bool("now", false, "switch at once; clients that have not fetched their subscription since lose this profile until they do")
+		force := fs.Bool("force", false, "dnstt, masterdns: switch even while the previous key is in its grace, which drops it at once")
 		if err := need(args, 1); err != nil {
 			return err
 		}
 		if err := fs.Parse(args[1:]); err != nil {
 			return errUsage
 		}
-		r, err := c.c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: args[0], Now: *now}))
+		r, err := c.c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: args[0], Now: *now, Force: *force}))
 		if err != nil {
 			return err
 		}

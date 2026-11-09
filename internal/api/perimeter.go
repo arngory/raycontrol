@@ -38,7 +38,7 @@ var _ perimeterv1connect.PerimeterServiceHandler = (*PerimeterServer)(nil)
 
 // Handler returns the HTTP handler for the perimeter service.
 func (p *PerimeterServer) Handler() (string, http.Handler) {
-	return perimeterv1connect.NewPerimeterServiceHandler(p)
+	return perimeterv1connect.NewPerimeterServiceHandler(p, readLimit())
 }
 
 func (p *PerimeterServer) WatchPerimeter(ctx context.Context, _ *connect.Request[perimeterv1.WatchPerimeterRequest], stream *connect.ServerStream[perimeterv1.WatchPerimeterResponse]) error {

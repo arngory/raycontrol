@@ -31,6 +31,10 @@ var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // ErrInvalid wraps validation failures.
 var ErrInvalid = errors.New("store: invalid")
 
+// ErrPrecondition wraps a change refused in the current state, which the
+// caller may wait out or force.
+var ErrPrecondition = errors.New("not now")
+
 func checkName(kind, name string) error {
 	if !nameRE.MatchString(name) {
 		return fmt.Errorf("%w %s name %q: use 1-64 of a-z 0-9 . _ - starting with a letter or digit", ErrInvalid, kind, name)
@@ -66,7 +70,8 @@ type User struct {
 	LAN bool
 }
 
-// CreateUser inserts u and returns it with its ID. A limit counts from now.
+// CreateUser inserts u with its services (u.Services, IDs), all or
+// nothing, and returns it with its ID. A limit counts from now.
 func (s *Store) CreateUser(ctx context.Context, u User) (User, error) {
 	if err := checkName("user", u.Name); err != nil {
 		return u, err
@@ -89,6 +94,11 @@ func (s *Store) CreateUser(ctx context.Context, u User) (User, error) {
 		}
 		if u.ID, err = res.LastInsertId(); err != nil {
 			return err
+		}
+		for _, id := range u.Services {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO user_services (user_id, service_id) VALUES (?, ?)`, u.ID, id); err != nil {
+				return fmt.Errorf("service %d: %w", id, err)
+			}
 		}
 		if u.TrafficLimit != nil {
 			u.TrafficStart, u.TrafficCountedFrom = u.CreatedAt, u.CreatedAt
@@ -760,7 +770,9 @@ func (s *Store) ActiveDevice(ctx context.Context, id string) (Device, [spa.KeySi
 
 // RevokeDevice marks a device revoked. Revocation is permanent. The user's
 // LAN key, when there is one, is new with it (lan-v1 §3): the multicast
-// password the device knew is no longer the user's, both at once.
+// password the device knew is no longer the user's, both at once. A device
+// revoked already is no error and changes nothing; an unknown one is
+// ErrNotFound.
 func (s *Store) RevokeDevice(ctx context.Context, id string) error {
 	key, err := newLANKey()
 	if err != nil {
@@ -774,6 +786,11 @@ func (s *Store) RevokeDevice(ctx context.Context, id string) error {
 		if n, err := res.RowsAffected(); err != nil {
 			return err
 		} else if n == 0 {
+			// Revoked already (a retry): done, nothing changes.
+			var known int
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM devices WHERE id = ?`, id).Scan(&known); err != nil || known > 0 {
+				return err
+			}
 			return fmt.Errorf("device %q: %w", id, ErrNotFound)
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE users SET lan_key = ? WHERE lan_key IS NOT NULL
@@ -788,7 +805,10 @@ func (s *Store) RevokeDevice(ctx context.Context, id string) error {
 // devices registered through it (they have a client certificate), and the
 // user's enabled services while the user is Active: one over the traffic
 // limit keeps the subscription and the API, no data service
-// (traffic-limit-v1 §3.1). Active invites pass too, to the API only (R3-3).
+// (traffic-limit-v1 §3.1). Active invites pass too, to the API only (R3-3),
+// and so do invites used less than InviteReplayWindow ago while their
+// device is not revoked: a client that lost Register's answer asks again
+// with the invite (api-v1 §4.1).
 func (s *Store) SPADevices(ctx context.Context) ([]spa.Device, error) {
 	now := s.now()
 	users, err := s.ListUsers(ctx)
@@ -833,8 +853,9 @@ func (s *Store) SPADevices(ctx context.Context) ([]spa.Device, error) {
 		FROM devices d WHERE d.revoked_at IS NULL
 		UNION ALL
 		SELECT i.id, i.spa_key, i.user_id, 0, 1
-		FROM invites i WHERE i.used_at IS NULL AND i.expires_at > ?
-		ORDER BY 1`, now.Unix())
+		FROM invites i WHERE (i.used_at IS NULL AND i.expires_at > ?)
+			OR (i.used_at > ? AND EXISTS (SELECT 1 FROM devices d WHERE d.id = i.device_id AND d.revoked_at IS NULL))
+		ORDER BY 1`, now.Unix(), now.Add(-InviteReplayWindow).Unix())
 	if err != nil {
 		return nil, err
 	}
