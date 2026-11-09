@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -75,31 +76,70 @@ const (
 )
 
 // ErrNoCounters: the process closed the stats socket without an answer, as
-// niko-server before v0.15.0 does to the traffic line.
+// niko-server before v0.15.0 does to the traffic line (Hysteria2), or gave
+// its counters without the users' bytes (Yggdrasil before v0.16.0).
 var ErrNoCounters = errors.New("no byte counters (niko-server before v0.15.0?)")
 
 // ReadLine asks a stats socket for its users' bytes: the line "traffic",
 // answered by one JSON line {"v": 1, "boot": "...", "users": {"u5": {"up":
 // N, "down": N}}} (niko-server v0.15.0's Hysteria2 backends, rayd naive).
 func ReadLine(ctx context.Context, path string) (Reading, error) {
+	body, err := ask(ctx, path)
+	if err != nil {
+		return Reading{}, err
+	}
+	return parseLine(body)
+}
+
+// ReadYggdrasil asks a Yggdrasil backend's stats socket for its users' LAN
+// bytes through the node, by group (lan-v1 §4.4): the traffic line, as
+// ReadLine, from niko-server v0.16.0 on. niko-server v0.15.0 answers any
+// connection at once with its own counters ({"started": ...,
+// "dropped_frames": ...}, no "v"), without reading the line, and closes:
+// no counters (ErrNoCounters), as an answer with nothing.
+func ReadYggdrasil(ctx context.Context, path string) (Reading, error) {
+	body, err := ask(ctx, path)
+	if err != nil {
+		return Reading{}, err
+	}
+	var head struct {
+		V, Started json.RawMessage // there or not
+	}
+	if json.Unmarshal(body, &head) == nil && head.V == nil && head.Started != nil {
+		return Reading{}, ErrNoCounters
+	}
+	return parseLine(body)
+}
+
+// ask sends a stats socket the traffic line and reads the answer to its
+// end. A process that answers without reading the line (an older one) and
+// closes may reset the connection under the line or after its answer:
+// what it sent is the answer.
+func ask(ctx context.Context, path string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, readWait)
 	defer cancel()
 	c, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
 	if err != nil {
-		return Reading{}, err
+		return nil, err
 	}
 	defer c.Close()
 	if d, ok := ctx.Deadline(); ok {
 		_ = c.SetDeadline(d)
 	}
-	if _, err := io.WriteString(c, "traffic\n"); err != nil {
-		return Reading{}, err
+	if _, err := io.WriteString(c, "traffic\n"); err != nil && !closedEarly(err) {
+		return nil, err
 	}
 	body, err := io.ReadAll(io.LimitReader(c, maxAnswer+1))
-	if err != nil {
-		return Reading{}, err
+	if err != nil && !closedEarly(err) {
+		return nil, err
 	}
-	return parseLine(body)
+	return body, nil
+}
+
+// closedEarly reports whether the other end closed the connection with the
+// line unread.
+func closedEarly(err error) bool {
+	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
 }
 
 // parseLine checks and reads a stats socket's answer.
