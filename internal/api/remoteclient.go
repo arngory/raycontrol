@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"time"
 
@@ -108,9 +109,36 @@ func PinnedTLS(pin string, cert *tls.Certificate) *tls.Config {
 	return cfg
 }
 
-func remoteHTTP(pin string, cert tls.Certificate) *http.Client {
-	return &http.Client{Transport: &http.Transport{TLSClientConfig: PinnedTLS(pin, &cert), ForceAttemptHTTP2: true}}
+// Timeouts of a remote API connection (RemoteHTTPClient): variables for
+// tests.
+var (
+	remoteDialTimeout = 30 * time.Second
+	// remoteHandshakeTimeout bounds the TLS handshake, which SPA's grant
+	// may let through to a peer that never answers it.
+	remoteHandshakeTimeout = 30 * time.Second
+	// remotePingAfter is how long an HTTP/2 connection may be silent
+	// before it is pinged; remotePingTimeout how long the ping may take
+	// before the connection is dropped. Streams (a relay's feed) last
+	// for hours, and an exit gone without a FIN would otherwise hold
+	// them until TCP gives up.
+	remotePingAfter   = 30 * time.Second
+	remotePingTimeout = 15 * time.Second
+)
+
+// RemoteHTTPClient is an HTTP/2 client for the remote API: the node's
+// certificate pinned, cert as the client's, and every stage of a
+// connection bounded in time.
+func RemoteHTTPClient(pin string, cert tls.Certificate) *http.Client {
+	return &http.Client{Transport: &http.Transport{
+		TLSClientConfig:     PinnedTLS(pin, &cert),
+		DialContext:         (&net.Dialer{Timeout: remoteDialTimeout}).DialContext,
+		TLSHandshakeTimeout: remoteHandshakeTimeout,
+		ForceAttemptHTTP2:   true,
+		HTTP2:               &http.HTTP2Config{SendPingTimeout: remotePingAfter, PingTimeout: remotePingTimeout},
+	}}
 }
+
+func remoteHTTP(pin string, cert tls.Certificate) *http.Client { return RemoteHTTPClient(pin, cert) }
 
 // NewRemoteClients returns the node and device API clients for the remote
 // API at addr (host:port).

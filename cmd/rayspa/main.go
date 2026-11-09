@@ -10,7 +10,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -258,7 +257,7 @@ func relayFeed(b node.RelayBundle) (openFeed, error) {
 	if err != nil {
 		return nil, fmt.Errorf("relay bundle certificate: %w", err)
 	}
-	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: api.PinnedTLS(b.API.Pin, &cert), ForceAttemptHTTP2: true}}
+	hc := api.RemoteHTTPClient(b.API.Pin, cert)
 	base := "https://" + netip.AddrPortFrom(b.Exit, b.API.Port).String()
 	client := perimeterv1connect.NewRelayServiceClient(hc, base)
 	return func(ctx context.Context) (snapshots, error) {
