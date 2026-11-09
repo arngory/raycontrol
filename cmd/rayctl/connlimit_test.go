@@ -82,7 +82,7 @@ func TestConnLimitCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"limits  ", "on (rayctl conn-limit off)", "58100 of 65536 (88%)", "3 connections dropped in 15 min",
-		"ON for 2m0s", "u5 (nv: 1340 in 15 min)", "refused nv", "tcp 1340", "only root sees it", "TCP 1024 at once"} {
+		"ON for 2m", "u5 (nv: 1340 in 15 min)", "refused nv", "tcp 1340", "only root sees it", "TCP 1024 at once"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("show lacks %q:\n%s", want, out)
 		}
