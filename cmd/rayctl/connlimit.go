@@ -45,13 +45,14 @@ func (c *cli) connLimitSet(ctx context.Context, off bool) error {
 	return c.print(r.Msg, func(w *tabwriter.Writer) {
 		if off {
 			fmt.Fprintln(w, "connection limits off within seconds: naive's per-user limits (its UDP limits from before stay),")
-			fmt.Fprintln(w, "and the per-address limit on new inbound TCP and UDP, here and on the node's relays;")
+			fmt.Fprintln(w, "and the per-address limit on new inbound TCP and UDP, here and on the node's relays from v0.24.0;")
 		} else {
 			fmt.Fprintln(w, "connection limits on within seconds: naive's per-user limits, and the per-address limit on")
-			fmt.Fprintln(w, "new inbound TCP and UDP, here and on the node's relays;")
+			fmt.Fprintln(w, "new inbound TCP and UDP, here and on the node's relays from v0.24.0;")
 		}
-		fmt.Fprintln(w, "naive reads it without a restart. The conntrack table's size, DNS tunnels without conntrack")
-		fmt.Fprintln(w, "and the guard stay either way (spec/conn-limit-v1.md §8)")
+		fmt.Fprintln(w, "naive reads it without a restart. A relay gets v0.24.0 (the per-address limit, its table's size)")
+		fmt.Fprintln(w, "with install/bootstrap.sh -relay: rayctl update does not update relays. The conntrack table's")
+		fmt.Fprintln(w, "size, DNS tunnels without conntrack and the guard stay either way (spec/conn-limit-v1.md §8)")
 	})
 }
 

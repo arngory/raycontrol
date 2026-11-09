@@ -98,7 +98,8 @@ func TestConnLimitCommand(t *testing.T) {
 		t.Errorf("root's counters:\n%s", out)
 	}
 	if out, err = captureStdout(t, func() error { return c.connLimit(ctx, []string{"off"}) }); err != nil || len(n.sets) != 1 || !n.sets[0] ||
-		!strings.Contains(out, "connection limits off within seconds") || !strings.Contains(out, "the guard stay") {
+		!strings.Contains(out, "connection limits off within seconds") || !strings.Contains(out, "the guard stay") ||
+		!strings.Contains(out, "relays from v0.24.0") || !strings.Contains(out, "bootstrap.sh -relay") {
 		t.Fatalf("off: %v %v\n%s", err, n.sets, out)
 	}
 	if out, _ = captureStdout(t, func() error { return c.connLimit(ctx, nil) }); !strings.Contains(out, "off (rayctl conn-limit on)") || strings.Contains(out, "TCP 1024") {
