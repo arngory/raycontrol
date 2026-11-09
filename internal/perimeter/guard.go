@@ -231,6 +231,23 @@ func (g *Gate) sweepLocked(now time.Time) {
 	}()
 }
 
+// ReleaseGuard takes the guard's refusal out of the table, as rayspa ends
+// gracefully: the table stays (the node fails closed), but no one would
+// turn the guard off, and the data plane would stay refused new flows. A
+// tick after it puts the refusal back if the guard is on.
+func (g *Gate) ReleaseGuard() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.guard == nil {
+		return nil
+	}
+	if err := g.fw.SetGuard(false); err != nil {
+		return err
+	}
+	g.guard.applied = false
+	return nil
+}
+
 // GuardOn reports whether the guard is on (tests, status).
 func (g *Gate) GuardOn() bool {
 	g.mu.Lock()

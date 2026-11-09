@@ -165,6 +165,12 @@ func run(args []string) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// The table stays, but the guard's refusal goes: no one would
+			// turn it off, and the data plane would stay refused new flows
+			// until rayspa runs again.
+			if err := gate.ReleaseGuard(); err != nil {
+				log.Warn("conntrack guard not switched off at exit", "err", err)
+			}
 			return nil
 		case <-tick.C:
 			ports, err := gate.Tick()

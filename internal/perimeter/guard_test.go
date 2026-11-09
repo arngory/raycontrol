@@ -152,6 +152,32 @@ func TestGuardSwitches(t *testing.T) {
 	}
 }
 
+// As rayspa ends, the guard's refusal leaves the table: a stopped rayspa
+// would never turn it off. A tick after it (none comes, but) puts it back.
+func TestGuardRelease(t *testing.T) {
+	gg := newGuardGate(t)
+	gg.count = 900
+	gg.tick(t, time.Second)
+	if !gg.fw.guard {
+		t.Fatal("not on")
+	}
+	if err := gg.g.ReleaseGuard(); err != nil {
+		t.Fatal(err)
+	}
+	if gg.fw.guard {
+		t.Fatal("the refusal left in the table")
+	}
+	gg.tick(t, time.Second)
+	if !gg.fw.guard {
+		t.Fatal("not put back by a tick")
+	}
+	// No guard (a relay): nothing.
+	g := NewGate(&fakeFW{}, slog.New(slog.DiscardHandler))
+	if err := g.ReleaseGuard(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A switch the firewall refuses is tried again at the next tick; no table
 // size (no conntrack) does nothing.
 func TestGuardRetry(t *testing.T) {
