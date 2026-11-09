@@ -35,7 +35,12 @@ func (f *fakeXray) GetSysStats(context.Context, *connect.Request[statscmd.SysSta
 
 func (f *fakeXray) QueryStats(context.Context, *connect.Request[statscmd.QueryStatsRequest]) (*connect.Response[statscmd.QueryStatsResponse], error) {
 	return connect.NewResponse(&statscmd.QueryStatsResponse{Stat: []*statscmd.Stat{
-		{Name: "user>>>u1>>>traffic>>>uplink", Value: 5}, {Name: "user>>>u1>>>traffic>>>downlink", Value: 6}}}), nil
+		{Name: "user>>>u1>>>traffic>>>uplink", Value: 5}, {Name: "user>>>u1>>>traffic>>>downlink", Value: 6},
+		// The fork's refusals (TestStatsLimits), and names that are none.
+		{Name: "user>>>u1>>>limit>>>tcp", Value: 3}, {Name: "user>>>u1>>>limit>>>rate", Value: 2},
+		{Name: "user>>>u7>>>limit>>>udp", Value: 1}, {Name: "user>>>>>>limit>>>tcp", Value: 4},
+		{Name: "user>>>u2>>>limit>>>", Value: 4}, {Name: "user>>>u2>>>limit>>>a>>>b", Value: 4},
+		{Name: "user>>>u3>>>limit>>>tcp", Value: -1}, {Name: "inbound>>>x>>>limit>>>tcp", Value: 4}}}), nil
 }
 
 func (f *fakeXray) GetInboundUsers(context.Context, *connect.Request[proxyman.GetInboundUserRequest]) (*connect.Response[proxyman.GetInboundUserResponse], error) {

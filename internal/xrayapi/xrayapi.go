@@ -108,8 +108,9 @@ func Close() {
 }
 
 // Stats reads the users' byte counters of one Xray instance, on the same
-// API socket (StatsService, rendered while a user has a traffic limit:
-// docs/spec/traffic-limit-v1.md §2.1).
+// API socket (StatsService, rendered while a user has a traffic limit,
+// docs/spec/traffic-limit-v1.md §2.1, or the connection limits are on),
+// and the refusals of the connection limits (spec/conn-limit-v1.md §3.3).
 type Stats struct {
 	c statsconnect.StatsServiceClient
 }
@@ -136,11 +137,33 @@ type Counter struct{ Up, Down int64 }
 // process's start or the user's first connection since. Counters with
 // other names, and negative values, are left out.
 func (s *Stats) Users(ctx context.Context) (map[string]Counter, time.Duration, error) {
-	users, uptime, err := s.users(ctx)
+	r, err := s.Read(ctx)
+	return r.Users, r.Uptime, err
+}
+
+// StatsReading is one read of an Xray's counters.
+type StatsReading struct {
+	// Users are the users' bytes by email.
+	Users map[string]Counter
+	// Limits are the refusals of the fork's per-user connection limits
+	// (spec/conn-limit-v1.md §3.3) by base name and kind
+	// (user>>>u5>>>limit>>>tcp), since the process started: a counter is
+	// made at its first refusal. Kinds are left as Xray names them.
+	Limits map[string]map[string]int64
+	// Uptime is the process's: its stats service starts with it.
+	Uptime time.Duration
+}
+
+// limitKinds bounds the kinds of refusals a name may have; the fork has 8.
+const limitKinds = 16
+
+// Read reads the users' bytes and refusals, and the uptime, in one query.
+func (s *Stats) Read(ctx context.Context) (StatsReading, error) {
+	r, err := s.read(ctx)
 	if again(ctx, err) {
-		users, uptime, err = s.users(ctx)
+		r, err = s.read(ctx)
 	}
-	return users, uptime, err
+	return r, err
 }
 
 // again reports whether a read that failed in transport is worth one more
@@ -152,32 +175,42 @@ func again(ctx context.Context, err error) bool {
 	return err != nil && ctx.Err() == nil && connect.CodeOf(err) == connect.CodeUnavailable
 }
 
-func (s *Stats) users(ctx context.Context) (map[string]Counter, time.Duration, error) {
+func (s *Stats) read(ctx context.Context) (StatsReading, error) {
 	sys, err := s.c.GetSysStats(ctx, connect.NewRequest(&statscmd.SysStatsRequest{}))
 	if err != nil {
-		return nil, 0, err
+		return StatsReading{}, err
 	}
 	resp, err := s.c.QueryStats(ctx, connect.NewRequest(&statscmd.QueryStatsRequest{Pattern: "user>>>", Reset_: false}))
 	if err != nil {
-		return nil, 0, err
+		return StatsReading{}, err
 	}
-	out := map[string]Counter{}
+	out := StatsReading{Users: map[string]Counter{}, Uptime: time.Duration(sys.Msg.Uptime) * time.Second}
 	for _, st := range resp.Msg.Stat {
 		rest, ok := strings.CutPrefix(st.Name, "user>>>")
 		if !ok || st.Value < 0 {
 			continue
 		}
 		if email, ok := strings.CutSuffix(rest, ">>>traffic>>>uplink"); ok {
-			c := out[email]
+			c := out.Users[email]
 			c.Up = st.Value
-			out[email] = c
+			out.Users[email] = c
 		} else if email, ok := strings.CutSuffix(rest, ">>>traffic>>>downlink"); ok {
-			c := out[email]
+			c := out.Users[email]
 			c.Down = st.Value
-			out[email] = c
+			out.Users[email] = c
+		} else if name, kind, ok := strings.Cut(rest, ">>>limit>>>"); ok && name != "" && kind != "" && !strings.Contains(kind, ">>>") {
+			if out.Limits == nil {
+				out.Limits = map[string]map[string]int64{}
+			}
+			if out.Limits[name] == nil {
+				out.Limits[name] = map[string]int64{}
+			}
+			if len(out.Limits[name]) < limitKinds {
+				out.Limits[name][kind] = st.Value
+			}
 		}
 	}
-	return out, time.Duration(sys.Msg.Uptime) * time.Second, nil
+	return out, nil
 }
 
 func typed(m proto.Message) (*serial.TypedMessage, error) {
