@@ -180,7 +180,15 @@ func TestAutoStep(t *testing.T) {
 	if !a.step(ctx, &s, at(3, 0)) || s.due.Before(at(3, 0)) || !s.due.Before(at(5, 0)) {
 		t.Fatalf("in the window: a moment in it, waited for: %+v", s)
 	}
-	if !a.step(ctx, &s, s.due.Add(-time.Second)) {
+	// Just before the moment, but in the window: the moment is t plus a
+	// random span from 0 up to 30 minutes, so it falls in the window's
+	// first second once in 1,800 runs, and a second before it would be
+	// before the window.
+	just := s.due.Add(-time.Second)
+	if just.Before(at(3, 0)) {
+		just = at(3, 0)
+	}
+	if !a.step(ctx, &s, just) {
 		t.Fatal("just before the moment: not waited for")
 	}
 	// The moment passed while the release was given up: no wait for it.
