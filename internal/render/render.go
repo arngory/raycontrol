@@ -26,6 +26,7 @@ import (
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 	"golang.org/x/sys/unix"
 
+	pins "github.com/arngory/raycontrol/deploy"
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/probe"
@@ -139,9 +140,10 @@ type Model struct {
 	// destinations.
 	Debug bool
 	// ConnLimitOff: the per-user connection limits are off (rayctl
-	// conn-limit off, spec/conn-limit-v1.md §8): naive and Hysteria2 read
-	// it from their conn-limit file without a restart; the Xray configs
-	// lose their limits, and the processes restart.
+	// conn-limit off, spec/conn-limit-v1.md §8): naive and Hysteria2 (from
+	// niko-server v0.17.0) read it from their conn-limit file without a
+	// restart; the Xray configs lose their limits, and the processes
+	// restart.
 	ConnLimitOff bool
 }
 
@@ -1554,13 +1556,46 @@ func tcpPort(s Service) (int, error) {
 // Hysteria2 files (R3-4): the backend's config, its users (read again by
 // the backend when they change), the certificate chain, the key and for
 // hy2-obfs the salamander password, which systemd copies for the backend;
-// the front gets its own copy of that password to recognise the flows.
+// the front gets its own copy of that password to recognise the flows;
+// from niko-server v0.17.0 the switch of the connection limits (on or off,
+// as naive's NaiveConnLimit), read again by the backend.
 const (
-	HysteriaChain = "chain.pem"
-	HysteriaKey   = "key.pem"
-	HysteriaUsers = "users.json"
-	HysteriaObfs  = "salamander"
+	HysteriaChain     = "chain.pem"
+	HysteriaKey       = "key.pem"
+	HysteriaUsers     = "users.json"
+	HysteriaObfs      = "salamander"
+	HysteriaConnLimit = "conn-limit"
 )
+
+// nikoServerTag is the niko-server release raycontrol ships with
+// (deploy/versions.env): render writes only what that one reads. Its
+// configs are read strictly, and an older one refuses an option it does
+// not know, and with it the whole backend. Tests set another.
+var nikoServerTag = pins.NikoServerTag
+
+// NikoConnLimitFrom is the first niko-server whose Hysteria2 backends take
+// options.conn_limit_file (its v0.17.0 release notes).
+var NikoConnLimitFrom = [3]int{0, 17, 0}
+
+// NikoServerAtLeast reports whether the niko-server raycontrol ships is v
+// or later; a tag that is not vX.Y.Z (a suffix after a dash aside) is
+// older than anything.
+func NikoServerAtLeast(v [3]int) bool {
+	var have [3]int
+	parts := strings.SplitN(strings.TrimPrefix(nikoServerTag, "v"), ".", 3)
+	if len(parts) != 3 || !strings.HasPrefix(nikoServerTag, "v") {
+		return false
+	}
+	for i, p := range parts {
+		p, _, _ = strings.Cut(p, "-")
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return false
+		}
+		have[i] = n
+	}
+	return slices.Compare(have[:], v[:]) >= 0
+}
 
 // DNSProbeKeyFile is the dnsprobe-v1 key's file among the front's.
 const DNSProbeKeyFile = "dnsprobe.key"
@@ -1649,6 +1684,17 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 		"options": options,
 	}
 	var files []File
+	if NikoServerAtLeast(NikoConnLimitFrom) {
+		// The per-user connection limits' switch (spec/conn-limit-v1.md §3.2,
+		// §8), as naive's: the backend reads the file every 5 s and on
+		// SIGHUP, so a switch neither restarts it nor cuts what is open. It
+		// stays in the rendered directory, not a credential's copy (made
+		// once, at the start): the service's group reads it there, as it
+		// does the users file. A missing file is on.
+		limit := path.Join(dir, HysteriaConnLimit)
+		options["conn_limit_file"] = limit
+		files = append(files, File{Path: limit, Mode: 0o640, Group: GroupName(s.Name), Content: connLimitFile(m), Service: s.Name, Reload: true})
+	}
 	if s.Kind == "hy2-obfs" {
 		options["obfs_password_file"] = p.Credential(s.Name, HysteriaObfs)
 		pw := s.Secrets[provision.SecretObfsPassword]
