@@ -44,6 +44,7 @@ import (
 	"github.com/arngory/raycontrol/internal/site"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
+	"github.com/arngory/raycontrol/internal/traffic"
 	"github.com/arngory/raycontrol/internal/xrayapi"
 )
 
@@ -1068,6 +1069,17 @@ func TestHysteriaWithXray(t *testing.T) {
 		}
 		if err := tryHysteria(t, bin, link, "wrong", rootFile, page.URL, 3); err == nil {
 			t.Fatalf("%s: a wrong password got through", svc.Name)
+		}
+		// The user's bytes on the stats socket (niko-server v0.15.0,
+		// traffic-limit-v1 §2.2), as rayd's traffic loop reads them: the
+		// request up, the page down, under the users file's name.
+		r, err := traffic.ReadLine(ctx, paths.StatsSocket(svc.Name))
+		if err != nil {
+			t.Fatalf("%s: the traffic line: %v", svc.Name, err)
+		}
+		c := r.Users[render.InnerEmail(m.Users[0].ID)]
+		if len(r.Boot) != 16 || c.Up == 0 || c.Down < int64(len("through reality")) {
+			t.Fatalf("%s: the traffic line %+v", svc.Name, r)
 		}
 	}
 

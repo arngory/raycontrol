@@ -16,6 +16,12 @@ service NodeService {
   rpc SetUserEnabled(SetUserEnabledRequest) returns (SetUserEnabledResponse);
   rpc SetUserServices(SetUserServicesRequest) returns (SetUserServicesResponse);
   rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+  // SetUserTraffic sets or removes a user's traffic limit, its period and
+  // reset day, or zeroes the current period's count
+  // (docs/spec/traffic-limit-v1.md §3.6). A user at or over the limit is
+  // taken off every profile, as an expired one, until the period resets
+  // or the limit is raised. A request that changes nothing is invalid.
+  rpc SetUserTraffic(SetUserTrafficRequest) returns (SetUserTrafficResponse);
   // ExportUser returns a user's profiles: the links of their subscription
   // (docs/spec/subscription-v1.md §4), each with the next one while a
   // switch is pending (P-10). They hold the user's credentials, so the
@@ -451,6 +457,17 @@ message User {
   string note = 6;
   int64 created_at = 7;
   repeated string services = 8;  // service names
+  // The traffic limit's count (docs/spec/traffic-limit-v1.md §3.6); all
+  // zero without a limit. used is up + down of the current period, as the
+  // node last wrote it (a minute behind at most).
+  int64 traffic_used_bytes = 9;
+  int64 traffic_period_start = 10; // unix seconds
+  string traffic_period = 11;      // monthly | none
+  int32 traffic_reset_day = 12;    // 1..28, monthly only
+  int64 traffic_next_reset = 13;   // unix seconds, 0 = none
+  // The node took the user off its profiles for the limit: used reached
+  // it. The node decides, not a comparison of the two fields.
+  bool traffic_exhausted = 14;
 }
 
 message ListUsersRequest {}
@@ -462,8 +479,24 @@ message CreateUserRequest {
   int64 traffic_limit_bytes = 3;
   string note = 4;
   repeated string services = 5;
+  string traffic_period = 6;    // monthly (default) | none
+  int32 traffic_reset_day = 7;  // 1..28, default 1
 }
 message CreateUserResponse { User user = 1; }
+
+// SetUserTrafficRequest changes what is set and leaves the rest:
+// limit_bytes 0 removes the limit (and its count); a first limit counts
+// from now. period and reset_day apply to the next periods: a change does
+// not zero the count. reset_usage zeroes the current period's count from
+// now.
+message SetUserTrafficRequest {
+  string name = 1;
+  optional int64 limit_bytes = 2;
+  optional string period = 3;
+  optional int32 reset_day = 4;
+  bool reset_usage = 5;
+}
+message SetUserTrafficResponse { User user = 1; }
 
 message SetUserEnabledRequest {
   string name = 1;

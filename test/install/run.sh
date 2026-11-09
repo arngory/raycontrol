@@ -397,6 +397,26 @@ units="$(x systemctl cat niko-naive.service)" || fail "no unit for naive"
 wait_active niko-hy2o.service niko-front.service
 [[ $(x ss -Hulpn 'sport = :443') == *niko-server* ]] || fail "the front does not listen on UDP 443"
 [[ $(x stat -c '%a %U' /run/niko/front/hy2o.salamander) == "400 niko-front" ]] || fail "the front's salamander copy is not 0400 niko-front"
+# The traffic limit (spec/traffic-limit-v1.md): the first limit turns
+# counting on; inner's Xray gives its users' bytes on its API, the
+# Hysteria2 backend on its stats socket, and rayd reads both (the loops
+# "traffic <service>"); naive's unit has a stats socket of its own.
+log "$distro: traffic limit"
+x rayctl user limit alice 50G >/dev/null 2>&1 || fail "rayctl user limit"
+usage="$(x rayctl user usage alice)"
+[[ $usage == *alice*50G*"monthly, day 1"*active* ]] || fail "rayctl user usage: $usage"
+[[ $(x systemctl cat niko-naive.service) == *" -stats-socket /run/niko/naive/stats.sock"* ]] || fail "naive has no stats socket"
+for i in $(seq 60); do
+	status="$(x rayctl status)"
+	if grep -Eq '^traffic inner +ok ' <<<"$status" && grep -Eq '^traffic hy2o +ok ' <<<"$status"; then
+		break
+	fi
+	[[ $i == 60 ]] && fail "rayd does not read the counters: $status"
+	sleep 1
+done
+x grep -q StatsService /var/lib/raycontrol/rendered/inner/xray.json || fail "inner's Xray does not count"
+x rayctl user limit alice off >/dev/null 2>&1 || fail "rayctl user limit off"
+[[ $(x rayctl user usage) == *"no user has a traffic limit"* ]] || fail "a limit left after off"
 invite="$(x rayctl device invite alice console -role admin | grep -o 'RCINV2:[A-Z2-7]*')" || fail "no invite"
 # From the client's container: register a device from the invite, then
 # administer the node through the API with it, and give it a new key.

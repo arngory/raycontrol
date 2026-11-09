@@ -144,7 +144,9 @@ install_node() {
 	x rayctl service add yggdrasil ygg >/dev/null || fail "service add yggdrasil"
 	x rayctl apply >/dev/null || fail "rayctl apply"
 	wait_active niko-inner.service niko-dns.service niko-mdns.service niko-hy2o.service niko-front.service
-	x rayctl user add alice -services dns,mdns,hy2o >/dev/null || fail "user add"
+	# A traffic limit, only recorded before v0.22.0: enforced after the
+	# update as on a fresh node (spec/traffic-limit-v1.md §8, 2).
+	x rayctl user add alice -services dns,mdns,hy2o -limit 50G >/dev/null 2>&1 || fail "user add"
 	x rayctl device add alice laptop | grep '^rcdev1:' >"$work/$node.bundle" || fail "device add"
 }
 
@@ -244,6 +246,10 @@ sleep 3
 again="$(x rayctl apply)" || fail "rayctl apply after the update"
 if grep -E '^(wrote|restarting)' <<<"$again"; then
 	fail "the update left changes to apply"
+fi
+if [[ -z ${STEPS_ONLY:-} ]]; then
+	usage="$(x rayctl user usage alice)"
+	[[ $usage == *alice*50G*"monthly, day 1"*active* ]] || fail "the limit recorded before the update does not hold: $usage"
 fi
 probe "updated"
 shape

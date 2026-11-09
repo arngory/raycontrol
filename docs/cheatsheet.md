@@ -70,8 +70,11 @@
 
 | Команда | Что делает |
 |---|---|
-| `rayctl user add [NAME] -services a,b [-expires 30d\|2026-12-31] [-limit 50G]` | без имени — непрозрачный `u-xxxx-xxxx`; `-limit` пока только записывается, не применяется |
-| `rayctl user list` | пользователи |
+| `rayctl user add [NAME] -services a,b [-expires 30d\|2026-12-31] [-limit 50G [-period monthly\|none] [-reset-day 1]]` | без имени — непрозрачный `u-xxxx-xxxx`; `-limit` — лимит трафика (ниже) |
+| `rayctl user list` | пользователи; `USED` — расход периода из лимита (`12.0G/50G`, `(over)` — снят) |
+| `rayctl user limit NAME 50G\|off [-period monthly\|none] [-reset-day N]` | лимит трафика (с v0.22): `up + down` на стороне назначений за период — месяц с дня N (1–28, 00:00 UTC) или `none` (всё время пользователя). Достиг — снят со всех профилей, как просроченный, до сброса или поднятого лимита; подписка остаётся (`profiles: []`, `exhausted`). Первый лимит на ноде включает счёт: `inner` и REALITY перезапустятся один раз ([`spec/traffic-limit-v1.md`](spec/traffic-limit-v1.md)) |
+| `rayctl user usage [NAME]` | расход, лимит, период, начало, сброс, состояние (отстаёт до минуты) |
+| `rayctl user reset-usage NAME` | обнулить текущий период сейчас; снятый вернётся в течение секунд |
 | `rayctl user services NAME a,b` | какие сервисы доступны |
 | `rayctl user export NAME [-o F]` | ссылки пользователя, как в подписке (и следующие, если ждёт смена); в них учётные данные, вызов попадает в аудит; работают только с адреса, который открыл SPA |
 | `rayctl user enable\|disable\|del NAME` | включить, отключить, удалить |

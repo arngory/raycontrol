@@ -707,7 +707,7 @@ func TestUoTStuckReset(t *testing.T) {
 		_, _ = pw.Write(packet(append([]byte{0x00}, binary.BigEndian.AppendUint16(echo.Addr().AsSlice(), echo.Port())...), []byte("x")))
 	}()
 	st := &stuckStream{Reader: pr, deadline: make(chan struct{})}
-	if err := s.serveUoT(context.Background(), user, st, st); !errors.Is(err, errRefused) {
+	if err := s.serveUoT(context.Background(), user, nil, st, st); !errors.Is(err, errRefused) {
 		t.Fatalf("a stuck stream ended with %v, not a reset", err)
 	}
 }

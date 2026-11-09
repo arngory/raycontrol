@@ -50,15 +50,28 @@ func TestApply(t *testing.T) {
 			restarted = append(restarted, verb+" "+unit)
 			return nil
 		},
+		// The traffic loop reads a process right before its restart
+		// (traffic-limit-v1 §2.4): the hook comes just before it.
+		BeforeRestart: func(_ context.Context, service string) {
+			restarted = append(restarted, "before "+render.UnitName(service))
+		},
 		Inner: func(string) InnerAPI { return inner },
 	}
 	if err := a.Apply(ctx); err != nil {
 		t.Fatal(err)
 	}
+	for i := 0; i < len(restarted); i += 2 {
+		if !strings.HasPrefix(restarted[i], "before ") || i+1 >= len(restarted) ||
+			strings.TrimPrefix(restarted[i], "before ") != strings.TrimPrefix(restarted[i+1], "restart ") {
+			t.Fatalf("not read before the restart: %v", restarted)
+		}
+	}
+	restarted = slices.DeleteFunc(restarted, func(s string) bool { return strings.HasPrefix(s, "before ") })
 	slices.Sort(restarted)
 	if !slices.Equal(restarted, []string{"restart niko-dns.service", "restart niko-front.service", "restart niko-inner.service"}) {
 		t.Fatalf("first apply restarted %v", restarted)
 	}
+	a.BeforeRestart = nil
 	if fi, err := os.Stat(paths.Rendered); err != nil || fi.Mode().Perm() != 0o711 {
 		t.Fatalf("rendered dir must let service users through: %v %v", fi, err)
 	}

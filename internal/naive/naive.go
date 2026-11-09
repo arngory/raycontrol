@@ -7,11 +7,8 @@ package naive
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -64,11 +61,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.Answer.ServeHTTP(w, r)
 		return
 	}
-	user, ok := s.authorized(r)
+	pw, _ := password(r)
+	a, ok := s.Users.admit(r.Context(), pw)
 	if !ok {
 		s.Answer.ServeHTTP(w, r)
 		return
 	}
+	defer a.leave()
+	s.tunnel(w, r, a)
+	// The user left the users file (disabled, expired, over the traffic
+	// limit, a credential past its grace): the stream is reset, not ended.
+	if errors.Is(context.Cause(a.ctx), errRevoked) {
+		panic(http.ErrAbortHandler)
+	}
+}
+
+// tunnel serves an authenticated CONNECT until it ends or a.ctx is done.
+func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) {
+	user, ctx := a.user, a.ctx
 	target := r.Host
 	host, _, err := net.SplitHostPort(target)
 	if err != nil {
@@ -95,7 +105,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			panic(http.ErrAbortHandler)
 		}
 		defer s.uot.put(user)
-		err := s.serveUoT(r.Context(), user, in, http.NewResponseController(w))
+		err := s.serveUoT(ctx, user, a.traffic, in, http.NewResponseController(w))
 		if err != nil {
 			s.Log.Debug("naive: UDP refused", "err", err)
 			panic(http.ErrAbortHandler)
@@ -114,7 +124,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			panic(http.ErrAbortHandler)
 		}
 		defer s.icmp.put(u)
-		if err := s.serveICMP(r.Context(), u, in, http.NewResponseController(w)); err != nil {
+		if err := s.serveICMP(ctx, u, a.traffic, in, http.NewResponseController(w)); err != nil {
 			s.Log.Debug("naive: ICMP refused", "err", err)
 			panic(http.ErrAbortHandler)
 		}
@@ -129,7 +139,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var d net.Dialer
 		dial, target = d.DialContext, s.Probe
 	}
-	dctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	out, err := dial(dctx, "tcp", target)
 	cancel()
 	if err != nil {
@@ -139,99 +149,40 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer out.Close()
 	// The client's end of the upload only half-closes the destination; the
 	// tunnel lasts until the destination is done sending, or the stream
-	// ends. Nothing writes to w once this returns.
+	// ends. Nothing writes to w once this returns. The bytes count at the
+	// destination's side, as each write goes (traffic-limit-v1 §2.3).
 	go func() {
-		_, _ = io.Copy(out, in)
+		_, _ = io.Copy(countWriter{out, a.traffic.up()}, in)
 		if cw, ok := out.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
 	}()
 	down := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(in, out)
+		_, _ = io.Copy(in, countReader{out, a.traffic.down()})
 		close(down)
 	}()
 	select {
 	case <-down:
-	case <-r.Context().Done():
+	case <-ctx.Done():
 		_ = out.Close()
 		<-down
 	}
 }
 
-// authorized checks Proxy-Authorization: Basic, any user name, the password
-// being one of the users' credentials; the user is the password's hash.
-func (s *Server) authorized(r *http.Request) (user [32]byte, ok bool) {
+// password is Proxy-Authorization's: Basic, any user name.
+func password(r *http.Request) (string, bool) {
 	h := r.Header.Get("Proxy-Authorization")
 	scheme, b64, ok := strings.Cut(h, " ")
 	if !ok || !strings.EqualFold(scheme, "Basic") {
-		return user, false
+		return "", false
 	}
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
 	if err != nil {
-		return user, false
+		return "", false
 	}
-	_, password, ok := strings.Cut(string(raw), ":")
-	if !ok || !s.Users.Accepts(password) {
-		return user, false
-	}
-	return sha256.Sum256([]byte(password)), true
-}
-
-// Users are the accepted passwords, as SHA-256 hashes in a JSON file that
-// rayd rewrites when credentials rotate; the file is read again when it
-// changes, without a restart.
-type Users struct {
-	Path string
-
-	mu      sync.Mutex
-	checked time.Time
-	mtime   time.Time
-	hashes  map[[32]byte]bool
-}
-
-// HashPassword is how the users file names a password.
-func HashPassword(p string) string {
-	sum := sha256.Sum256([]byte(p))
-	return hex.EncodeToString(sum[:])
-}
-
-// Accepts reports whether the password is a current credential.
-func (u *Users) Accepts(password string) bool {
-	if password == "" {
-		return false
-	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if time.Since(u.checked) > 5*time.Second || u.hashes == nil {
-		u.checked = time.Now()
-		if st, err := os.Stat(u.Path); err == nil && !st.ModTime().Equal(u.mtime) {
-			if h, err := readUsers(u.Path); err == nil {
-				u.hashes, u.mtime = h, st.ModTime()
-			}
-		}
-	}
-	return u.hashes[sha256.Sum256([]byte(password))]
-}
-
-func readUsers(path string) (map[[32]byte]bool, error) {
-	b, err := os.ReadFile(path) //nolint:gosec // G304: the unit's own file
-	if err != nil {
-		return nil, err
-	}
-	var list []string
-	if err := json.Unmarshal(b, &list); err != nil {
-		return nil, err
-	}
-	out := make(map[[32]byte]bool, len(list))
-	for _, h := range list {
-		raw, err := hex.DecodeString(h)
-		if err != nil || len(raw) != 32 {
-			return nil, errors.New("naive: bad hash in the users file")
-		}
-		out[[32]byte(raw)] = true
-	}
-	return out, nil
+	_, pw, ok := strings.Cut(string(raw), ":")
+	return pw, ok
 }
 
 // PublicDialer reaches public unicast addresses only: not the node itself,
