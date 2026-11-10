@@ -48,7 +48,7 @@ jobs:
           test "$(stat -c %s ipinfo_lite.mmdb)" -gt 1000000
           tail -c 131072 ipinfo_lite.mmdb | grep -qa 'MaxMind.com'
           sha256sum ipinfo_lite.mmdb
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ipinfo-lite
           path: ipinfo_lite.mmdb
@@ -60,8 +60,8 @@ jobs:
       matrix:
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: Tag
@@ -93,7 +93,7 @@ jobs:
           . deploy/versions.env
           git clone --filter=blob:none "$XRAY_REPOSITORY" xray
           git -C xray checkout -q "$XRAY_COMMIT"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: xray/go.mod
       - name: Build Xray
@@ -103,7 +103,7 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
         run: go build -trimpath -ldflags "-s -w -buildid=" -o ../dist/xray ./main
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ipinfo-lite
           path: dist
@@ -121,7 +121,7 @@ jobs:
             echo "ipinfo-lite $(sha256sum dist/ipinfo_lite.mmdb | cut -d' ' -f1) $(date -u +%Y-%m-%d)"
           } > dist/VERSIONS
           tar -czf "raycontrol-linux-${GOARCH}.tar.gz" -C dist rayd rayspa rayctl xray niko-server slipstream-server VERSIONS ipinfo_lite.mmdb NOTICE
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: raycontrol-${{ matrix.goarch }}
           path: raycontrol-linux-*.tar.gz
@@ -132,8 +132,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: raycontrol-*
           merge-multiple: true
