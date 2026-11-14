@@ -1016,8 +1016,7 @@ usermod -aG raycontrol ИМЯ
 
 - заменить адреса администратора (`rayctl admin`) — то есть открыть SSH своему адресу и закрыть вашему;
 - добавить, перенастроить и убрать relay (`relay add`, `relay set`, `relay remove`);
-- добавлять, выключать и удалять сервисы, в том числе служебные (§8), и подменить сертификат сайта
-  (`service cert`);
+- добавлять, выключать и удалять сервисы, в том числе служебные (§8);
 - удалить записи ноды из DNS и отвязать Cloudflare (`dns remove`);
 - выгрузить ссылки любого пользователя с его учётными данными (`user export`);
 - выдать приглашение с ролью `admin` и получить управление нодой с другого устройства.
@@ -1025,7 +1024,8 @@ usermod -aG raycontrol ИМЯ
 Добавляйте в группу только тех, кому доверяете ноду целиком. То же относится к admin-устройствам (§10.3).
 
 Только root: `install`, `apply`, `update` (и `update remote|auto`), `uninstall`, `backup`, `restore`,
-`debug on|off`, `egress block|allow`, `conn-limit on|off`, `relay bundle`, `summary db`.
+`debug on|off`, `egress block|allow`, `conn-limit on|off`, `relay bundle`, `service cert`, `service rotate САЙТ`,
+`summary db`.
 
 ## 7. Порты и доступ к серверу
 

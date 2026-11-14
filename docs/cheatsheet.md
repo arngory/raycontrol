@@ -2,7 +2,7 @@
 
 Все команды — на ноде, от root или от члена группы `raycontrol`; `install`, `apply`, `update` (и `update
 remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|allow`, `conn-limit on|off`,
-`relay bundle` и `summary db` — только root.
+`relay bundle`, `service cert`, `service rotate САЙТ` и `summary db` — только root.
 `-json` перед командой даёт машинный вывод (`rayctl -json status`). Пошаговая установка —
 [10-quickstart-debian13.md](10-quickstart-debian13.md).
 
