@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/arngory/raycontrol/internal/dnscheck"
@@ -209,12 +208,6 @@ func readToken(file string) (string, error) {
 	return strings.TrimSpace(t), nil
 }
 
-// terminal reports whether f is a terminal.
-func terminal(f *os.File) bool {
-	_, err := unix.IoctlGetTermios(int(f.Fd()), unix.TCGETS)
-	return err == nil
-}
-
 // readSecret reads a secret from a file, or from the terminal without echo
 // (twice with confirm), never from the command line (shell history, ps).
 // Only the line end is cut off.
@@ -227,17 +220,13 @@ func readSecret(prompt, file string, confirm bool) (string, error) {
 		return strings.TrimRight(string(b), "\r\n"), nil
 	}
 	in := bufio.NewReader(os.Stdin)
-	fd := int(os.Stdin.Fd())
-	old, err := unix.IoctlGetTermios(fd, unix.TCGETS)
-	terminal := err == nil
+	tty, terminal := ttyOf(os.Stdin)
 	ask := func(prompt string) (string, error) {
 		if terminal {
 			fmt.Fprint(os.Stderr, prompt)
-			quiet := *old
-			quiet.Lflag &^= unix.ECHO
-			if err := unix.IoctlSetTermios(fd, unix.TCSETS, &quiet); err == nil {
+			if err := tty.echoOff(); err == nil {
 				defer func() {
-					_ = unix.IoctlSetTermios(fd, unix.TCSETS, old)
+					tty.restore()
 					fmt.Fprintln(os.Stderr)
 				}()
 			}

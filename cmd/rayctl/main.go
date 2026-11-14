@@ -23,7 +23,6 @@ import (
 	"unicode/utf8"
 
 	"connectrpc.com/connect"
-	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
@@ -1031,7 +1030,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 			// takes both (review 8): it comes once the QR is wiped. What
 			// was typed ahead (a pasted blank line) does not wipe it
 			// unseen; Ctrl-C says how to withdraw the invite.
-			_ = unix.IoctlSetInt(int(os.Stdin.Fd()), unix.TCFLSH, unix.TCIFLUSH)
+			flushInput(os.Stdin)
 			fmt.Print("\nOnce the QR is scanned or sent, Enter wipes it and shows the PIN.")
 			stop := make(chan os.Signal, 1)
 			signal.Notify(stop, os.Interrupt)
