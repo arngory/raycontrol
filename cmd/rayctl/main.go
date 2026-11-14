@@ -171,13 +171,15 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   knock [-carrier udp|tls|tcp|auto] [-addr A] [-ttl 10m] BUNDLE|@FILE
       SPA only: open the device's services to this address for a while; with
       the emergency bundle, SSH (then ssh as usual)
-  probe [-carrier udp|tls|tcp|auto] [-addr A] [-links] [-redact] [-channel] BUNDLE|@FILE|-
+  probe [-carrier udp|tls|tcp|auto] [-addr A] [-links] [-payload] [-redact] [-channel] [-report JSON|@FILE]
+        [-dns [-resolver system,google,udp:IP,…]] BUNDLE|@FILE|-
       check a node from outside like a client: SPA, then the subscription
       (pin, both signatures). Needs only the device bundle. -channel then
-      measures the channel (TCP down and up, UDP echo; probe-v1).
+      measures the channel (TCP down and up, UDP echo; probe-v1); -dns checks
+      the subscription's DNS tunnel zones from this machine.
 
   From another machine, through the node's remote API (admin devices):
-  remote enroll [-o FILE] [-carrier udp|tls|tcp|auto] [-addr A] INVITE|@FILE|-
+  remote enroll [-o FILE] [-carrier udp|tls|tcp|auto] [-addr A] [-pin PIN] INVITE|@FILE|-
       register a device from an invite (RCINV2:... or rcinv1:...): a new client
       key, SPA, then the API; writes the device file (bundle and key, mode 0600)
   -remote FILE <command>                    status, node, user, service, device, audit, admin, dns, metrics, summary,

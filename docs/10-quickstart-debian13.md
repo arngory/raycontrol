@@ -1090,7 +1090,7 @@ tar -xzf raycontrol-linux-amd64.tar.gz rayctl
 Что вы должны увидеть:
 
 ```
-open: 203.0.113.7 lets this address reach device … services for the node's default time (10 min unless set otherwise); for SSH, connect now (ssh root@203.0.113.7)
+open: 203.0.113.7 lets this address reach device …'s services for the node's default time (10 min unless set otherwise); for SSH, connect now (ssh root@203.0.113.7)
 ```
 
 ```bash
@@ -1200,8 +1200,9 @@ xattr -d com.apple.quarantine rayctl
   `status`, `node`, `user`, `service`, `device` (в том числе приглашение с QR в терминале), `audit`, `admin`, `dns`,
   `summary`, `app-mirror`, `metrics`, `debug`, `version`. Что из этого нода разрешает удалённому устройству, решает она сама
   (§10.4): так, окно отладки открывает и закрывает только root на ноде, через `-remote` работает лишь `debug show`.
-- `knock`, `probe` и `remote enroll` с `-remote` не запускаются, а отвечают одной строкой, например
+- `knock` и `probe` с `-remote` не запускаются, а отвечают одной строкой, например
   `knock takes no -remote: it works from this machine with the bundle on its command line (run it without -remote)`.
+  `remote enroll` флаг `-remote` пропускает: файл устройства он пишет сам (`-o`).
   Неизвестная команда с `-remote` — ошибка использования: файл устройства не читается, в ноду никто не стучит.
 
 **Что не работает:** всё, что действует на самом сервере, — `install`, `apply`, `update`, `uninstall`, `backup`,
@@ -2787,7 +2788,7 @@ rayctl update
 rayctl status
 ```
 
-В первой строке `version              v0.26.0`, строк `FAILED` нет. Если в строке `apply` стоит `FAILED` с текстом
+В первой строке, `version`, — `v0.26.0`; строк `FAILED` нет. Если в строке `apply` стоит `FAILED` с текстом
 `… failed, its process runs with the files of before` — см. таблицу в конце раздела.
 
 ```bash
@@ -2949,7 +2950,7 @@ rayctl update status
 | `rayctl: device file laptop.rcdev is mode -rw-r--r--: it holds a private key, make it 0600: …` | `-remote` не читает файл, открытый группе или остальным | `chmod 600 laptop.rcdev`; на файловой системе без прав (FAT, SMB) — скопировать файл в домашний каталог и сделать `chmod 600` копии |
 | `rayctl: device file … belongs to uid …, not to you (uid …): …` | файл другого пользователя | своя копия файла с `chmod 600`, или запуск от root |
 | `rayctl: permission_denied: a site's certificate: root on the node only` | `rayctl service cert` не от root | от root на ноде |
-| `rayctl: failed_precondition: the links of naive, hy2-masq and DoH under site carry the pins of the node's keys, and this certificate has another key: …` | шаг 4 не сделан, а пины уже ушли клиентам; сертификат с другим ключом | поставить сертификат с ключом, который сейчас в работе, без `-force`; или с `-force`, если клиенты могут подождать новой подписки |
+| `rayctl: failed_precondition: not now: the links of naive, hy2-masq and DoH under site carry the pins of the node's keys, and this certificate has another key: …` | шаг 4 не сделан, а пины уже ушли клиентам; сертификат с другим ключом | поставить сертификат с ключом, который сейчас в работе, без `-force`; или с `-force`, если клиенты могут подождать новой подписки |
 | на relay: `rayctl: this host is a relay: install/bootstrap.sh -relay with its bundle takes a new release` | на relay ещё v0.25.1 | шаг 6 |
 | на relay: `rayctl: an update of this relay from … to … was interrupted: rayctl update -rollback puts … back` | прошлое `rayctl update` на relay оборвалось | `rayctl update -rollback`, затем снова `rayctl update` (§12.4) |
 | после отката на v0.25.1 клиенты не проходят naive, `hy2-masq` или DoH | v0.25.1 продлил сертификат на новый ключ, а у клиентов пины ключа v0.26.0 | на ноде ничего: клиенты снимут пины с новой подпиской (выше, «Если нужно вернуться») |
@@ -3132,7 +3133,7 @@ journalctl -u rayd --since -1h | grep -i certif
 | `this host is a relay: remote and automatic updates do not apply …` | `rayctl update remote` или `auto` на хосте relay | relay обновляется только `rayctl update` на его хосте, §12.4 |
 | `… not from the relay's admin addresses …, then rayctl update again` | SSH-сессия не с адреса администратора relay | на ноде `rayctl relay set -admin …`, затем `rayctl update` на relay, §12.4 |
 | `an update of this relay … was interrupted: rayctl update -rollback …` | прошлое обновление relay оборвалось | `rayctl update -rollback` на relay, §12.4 |
-| `the last update or rollback of this relay left it open …` | прежняя версия не поднялась, хост открыт без пересылки | `rayctl update -rollback` или повторная установка с пакетом, §12.4 |
+| `the last update or rollback of this relay did not bring it back (open and not forwarding, unless its rayspa still runs) …` | прежняя версия не поднялась, хост открыт без пересылки, если `rayspa` удалось остановить | `rayctl update -rollback` или повторная установка с пакетом, §12.4 |
 | `permission_denied: a site's certificate: root on the node only` | `rayctl service cert` не от root: с v0.26.0 импорт — только root на ноде | от root на ноде; автоматику, которая импортирует от группы `raycontrol`, перевести на root |
 | `device file … is mode …: it holds a private key, make it 0600: …` | `rayctl` v0.26.0 не читает файл устройства, открытый группе или остальным | `chmod 600 ФАЙЛ` (§10.4) |
 | `rayctl status`: `apply FAILED …: service …: … of niko-….service failed, its process runs with the files of before …` | перезапуск после смены файлов не удался; он остаётся в долгу и повторяется при каждом `apply` | `journalctl -u niko-ИМЯ -n 50` — почему юнит не стартует; исправить, затем `rayctl apply` |
