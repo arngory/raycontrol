@@ -207,7 +207,7 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 
 	dctx, cancel := context.WithTimeout(ctx, s.dialTimeout())
 	out, err := s.dialUser(dctx, a.key, target, paid)
-	expired := errors.Is(dctx.Err(), context.DeadlineExceeded) // the dial had its whole time
+	ranOut := expired(dctx) // the dial had its whole time
 	cancel()
 	if err != nil {
 		// With niko-ack the dial's outcome is the answer, and nothing is
@@ -215,7 +215,7 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 		// meanwhile, gets the reset. Not where: no destination in the log,
 		// and none in the answer.
 		if ack && ctx.Err() == nil {
-			status, reason := ackRefusal(err, expired)
+			status, reason := ackRefusal(err, ranOut)
 			refuse(w, status, reason)
 			s.Log.Debug("naive: destination unreachable", "status", status)
 			return false

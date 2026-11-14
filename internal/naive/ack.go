@@ -126,6 +126,17 @@ func refuse(w http.ResponseWriter, status int, reason string) {
 	w.WriteHeader(status)
 }
 
+// expired reports whether the dial's time is over: by its deadline, not by
+// ctx.Err(). The dialer ends a connect on the socket's deadline, the same
+// instant, and can return its "i/o timeout" before the context's timer has
+// run: Err() was still nil then, and a destination silent for the whole
+// time got 502 instead of 504. A parent cancelled early (the client went
+// away) is not expired.
+func expired(ctx context.Context) bool {
+	d, ok := ctx.Deadline()
+	return ok && !time.Now().Before(d)
+}
+
 // timedOut reports whether a dial ended because its time ran out.
 func timedOut(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {

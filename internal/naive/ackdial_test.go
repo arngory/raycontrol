@@ -75,6 +75,9 @@ func TestAckDialRank(t *testing.T) {
 	const (
 		silent4, refused4, noRoute4, denied4 = "198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.4"
 		refused6, denied6                    = "2001:db8::2", "2001:db8::4"
+		// Silent too, as the real dialer has it: the connect ends on the
+		// socket's deadline, and returns without waiting for ctx.Done().
+		timeout4 = "198.51.100.5"
 	)
 	names := map[string][]string{
 		"silent-refused.test":   {silent4, refused4},
@@ -85,6 +88,8 @@ func TestAckDialRank(t *testing.T) {
 		"denied-denied6.test":   {denied4, denied6},
 		"denied-noroute.test":   {denied4, noRoute4},
 		"one-token.test":        {silent4, refused4},
+		"timeout.test":          {timeout4},
+		"timeout-timeout.test":  {timeout4, timeout4},
 	}
 	var mu sync.Mutex
 	dialed := map[string]int{}
@@ -110,6 +115,11 @@ func TestAckDialRank(t *testing.T) {
 					return nil, op(os.ErrDeadlineExceeded) // "i/o timeout", as the dialer says it
 				}
 				return nil, op(ctx.Err())
+			case timeout4:
+				if d, ok := ctx.Deadline(); ok {
+					time.Sleep(time.Until(d))
+				}
+				return nil, op(os.ErrDeadlineExceeded)
 			case refused4, refused6:
 				return nil, sys(syscall.ECONNREFUSED)
 			case noRoute4:
@@ -132,6 +142,8 @@ func TestAckDialRank(t *testing.T) {
 		{"silent, then refused", "silent-refused.test", http.StatusBadGateway, ackRefused, false},
 		{"silent, then no route", "silent-noroute.test", http.StatusBadGateway, ackUnreachable, false},
 		{"silent twice", "silent-silent.test", http.StatusGatewayTimeout, "", true},
+		{"silent to the socket's deadline", "timeout.test", http.StatusGatewayTimeout, "", true},
+		{"silent to the socket's deadline twice", "timeout-timeout.test", http.StatusGatewayTimeout, "", true},
 		{"stopped by the rules, then no route", "denied-noroute.test", http.StatusBadGateway, ackUnreachable, false},
 		// Two families: the first family's error was the dial's answer.
 		{"no route, the other family refused", "noroute-refused6.test", http.StatusBadGateway, ackRefused, false},
@@ -212,5 +224,40 @@ func TestAckEarlyDataBound(t *testing.T) {
 	p.mu.Unlock()
 	if back != 0 || ended != "" {
 		t.Errorf("16 dials under way: %d bytes of the window given back, the connection ended %q", back, ended)
+	}
+}
+
+// deadlineCtx is a dial's context whose time is over while its Err() is
+// still nil: the context's timer has not run yet.
+type deadlineCtx struct {
+	context.Context
+	deadline time.Time
+	err      error
+}
+
+func (c deadlineCtx) Deadline() (time.Time, bool) { return c.deadline, true }
+func (c deadlineCtx) Err() error                  { return c.err }
+
+// The dial expired by its deadline, not by ctx.Err(): the real dialer's
+// "i/o timeout" comes on the socket's deadline, the same instant, and can
+// come before the context's timer has run. A destination silent for the
+// whole time got 502 unreachable then, one or two dials in a hundred. A
+// client gone before the time is over is not expired.
+func TestDialExpired(t *testing.T) {
+	now := time.Now()
+	for _, c := range []struct {
+		what string
+		ctx  context.Context
+		want bool
+	}{
+		{"over, the timer not run yet", deadlineCtx{context.Background(), now.Add(-time.Millisecond), nil}, true},
+		{"over at this instant", deadlineCtx{context.Background(), now, nil}, true},
+		{"over", deadlineCtx{context.Background(), now.Add(-time.Second), context.DeadlineExceeded}, true},
+		{"the client went away", deadlineCtx{context.Background(), now.Add(time.Hour), context.Canceled}, false},
+		{"no deadline", context.Background(), false},
+	} {
+		if got := expired(c.ctx); got != c.want {
+			t.Errorf("%s: expired %v", c.what, got)
+		}
 	}
 }
