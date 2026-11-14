@@ -200,6 +200,10 @@ type NodeServiceClient interface {
 	// service it switches the seal key at once (spec/dnsseal-v1.md §8), for
 	// a masterdns one its service key (spec/masterdns-key-rotation.md §2):
 	// the previous one stays accepted for the credential grace, unless now.
+	// For a site it asks for the next key of its certificate
+	// (spec/cert-pin-v1.md §5): rayd orders a certificate with it at once and
+	// switches when it is stored. Root on the node only; failed_precondition
+	// unless that key has been in subscriptions for the lead, or force.
 	RotateService(context.Context, *connect.Request[v1.RotateServiceRequest]) (*connect.Response[v1.RotateServiceResponse], error)
 	// SetServiceOption changes one of the few settings that may change after
 	// creation: a site's answer, whether REALITY moves its server name,
@@ -209,7 +213,9 @@ type NodeServiceClient interface {
 	// SetCertificate puts the operator's own certificate on a site, in place
 	// of one from ACME, for every service under it (REALITY self-steal,
 	// hy2-masq, naive, DoH, Yggdrasil). With ACME on, rayd renews it when it
-	// is due. On the node only: it carries the private key.
+	// is due. On the node only: it carries the private key. While it is on
+	// the site, the lines of naive, hy2-masq and DoH carry no niko-pin
+	// (spec/cert-pin-v1.md §7).
 	SetCertificate(context.Context, *connect.Request[v1.SetCertificateRequest]) (*connect.Response[v1.SetCertificateResponse], error)
 	ListDevices(context.Context, *connect.Request[v1.ListDevicesRequest]) (*connect.Response[v1.ListDevicesResponse], error)
 	// CreateDevice returns the device bundle with the device key. The key is
@@ -969,6 +975,10 @@ type NodeServiceHandler interface {
 	// service it switches the seal key at once (spec/dnsseal-v1.md §8), for
 	// a masterdns one its service key (spec/masterdns-key-rotation.md §2):
 	// the previous one stays accepted for the credential grace, unless now.
+	// For a site it asks for the next key of its certificate
+	// (spec/cert-pin-v1.md §5): rayd orders a certificate with it at once and
+	// switches when it is stored. Root on the node only; failed_precondition
+	// unless that key has been in subscriptions for the lead, or force.
 	RotateService(context.Context, *connect.Request[v1.RotateServiceRequest]) (*connect.Response[v1.RotateServiceResponse], error)
 	// SetServiceOption changes one of the few settings that may change after
 	// creation: a site's answer, whether REALITY moves its server name,
@@ -978,7 +988,9 @@ type NodeServiceHandler interface {
 	// SetCertificate puts the operator's own certificate on a site, in place
 	// of one from ACME, for every service under it (REALITY self-steal,
 	// hy2-masq, naive, DoH, Yggdrasil). With ACME on, rayd renews it when it
-	// is due. On the node only: it carries the private key.
+	// is due. On the node only: it carries the private key. While it is on
+	// the site, the lines of naive, hy2-masq and DoH carry no niko-pin
+	// (spec/cert-pin-v1.md §7).
 	SetCertificate(context.Context, *connect.Request[v1.SetCertificateRequest]) (*connect.Response[v1.SetCertificateResponse], error)
 	ListDevices(context.Context, *connect.Request[v1.ListDevicesRequest]) (*connect.Response[v1.ListDevicesResponse], error)
 	// CreateDevice returns the device bundle with the device key. The key is

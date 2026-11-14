@@ -5397,7 +5397,12 @@ type SetCertificateResponse struct {
 	NotAfter int64                  `protobuf:"varint,2,opt,name=not_after,json=notAfter,proto3" json:"not_after,omitempty"` // unix seconds
 	// Names REALITY moves to at its next key switch that the certificate
 	// does not cover: the switch waits for a certificate that does.
-	MissingNext   []string `protobuf:"bytes,3,rep,name=missing_next,json=missingNext,proto3" json:"missing_next,omitempty"`
+	MissingNext []string `protobuf:"bytes,3,rep,name=missing_next,json=missingNext,proto3" json:"missing_next,omitempty"`
+	// The lines of the services under the site carried the pins of the
+	// node's keys (niko-pin, spec/cert-pin-v1.md §7), and this certificate
+	// has another key: clients fail their pin until they get their
+	// subscription again, whose lines carry none now.
+	Unpinned      bool `protobuf:"varint,4,opt,name=unpinned,proto3" json:"unpinned,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5453,6 +5458,13 @@ func (x *SetCertificateResponse) GetMissingNext() []string {
 	return nil
 }
 
+func (x *SetCertificateResponse) GetUnpinned() bool {
+	if x != nil {
+		return x.Unpinned
+	}
+	return false
+}
+
 type RotateServiceRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -5460,7 +5472,10 @@ type RotateServiceRequest struct {
 	// dnstt and masterdns: a switch with a grace (now unset) while the
 	// previous key is still in its grace is failed_precondition (it would
 	// drop that key for clients still on it); force switches anyway and
-	// drops it, as before raycontrol v0.24.0.
+	// drops it, as before raycontrol v0.24.0. A site: the switch to the next
+	// certificate key before that key has been in subscriptions for the lead
+	// is failed_precondition (clients that do not hold its pin yet would be
+	// cut off); force switches anyway. now means nothing for a site.
 	Force         bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5524,7 +5539,9 @@ type RotateServiceResponse struct {
 	PrevUntil int64                  `protobuf:"varint,3,opt,name=prev_until,json=prevUntil,proto3" json:"prev_until,omitempty"` // the previous seal key is accepted until then (unix seconds); 0: no longer
 	// The key that switched at once: "seal" (dnstt, seal set too), "service"
 	// (masterdns, spec/masterdns-key-rotation.md; seal set too, for rayctl
-	// before v0.15.0); empty for REALITY's scheduled switch.
+	// before v0.15.0); "tls" for a site, whose certificate with the next key
+	// rayd orders from switch_at on (spec/cert-pin-v1.md §5); empty for
+	// REALITY's scheduled switch.
 	Key           string `protobuf:"bytes,4,opt,name=key,proto3" json:"key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -8005,11 +8022,12 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x15SetCertificateRequest\x12\x18\n" +
 	"\aservice\x18\x01 \x01(\tR\aservice\x12\x1b\n" +
 	"\tchain_pem\x18\x02 \x01(\fR\bchainPem\x12\x17\n" +
-	"\akey_pem\x18\x03 \x01(\fR\x06keyPem\"n\n" +
+	"\akey_pem\x18\x03 \x01(\fR\x06keyPem\"\x8a\x01\n" +
 	"\x16SetCertificateResponse\x12\x14\n" +
 	"\x05names\x18\x01 \x03(\tR\x05names\x12\x1b\n" +
 	"\tnot_after\x18\x02 \x01(\x03R\bnotAfter\x12!\n" +
-	"\fmissing_next\x18\x03 \x03(\tR\vmissingNext\"R\n" +
+	"\fmissing_next\x18\x03 \x03(\tR\vmissingNext\x12\x1a\n" +
+	"\bunpinned\x18\x04 \x01(\bR\bunpinned\"R\n" +
 	"\x14RotateServiceRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03now\x18\x02 \x01(\bR\x03now\x12\x14\n" +

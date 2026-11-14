@@ -75,13 +75,17 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             slipstream: max_connections=16..1024, device_connections=1..16
                                             (0: the defaults, 256 and 4; the server restarts)
   service cert SITE -chain F -key F         a certificate of your own for the site and the services under
-                                            it, in place of ACME's (on the node only)
+                                            it, in place of ACME's (on the node only); the links under
+                                            it then carry no niko-pin
   service rotate NAME [-now] [-force]       new REALITY keys (and server name, self-steal) ahead of
                                             schedule: after the lead time, or at once with -now;
                                             dnstt: a new seal key at once, masterdns: a new service key
                                             at once; the previous one accepted for -cred-grace (with
                                             -now: not at all); refused while the key before is still
-                                            in its grace, unless -force (that key then goes at once)
+                                            in its grace, unless -force (that key then goes at once);
+                                            a site (root): its certificate moves to the next key, the
+                                            one clients already pin; refused until that key has been
+                                            in subscriptions for -site-key-lead, unless -force
   device list [USER]
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
@@ -713,11 +717,19 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 				fmt.Fprintf(w, "it does not cover %s, the name REALITY moves to next: that switch waits for a certificate that does\n",
 					strings.Join(r.Msg.MissingNext, ", "))
 			}
+			// spec/cert-pin-v1.md §7: the node pins only keys of its own.
+			fmt.Fprintln(w, "with a certificate of your own the links of naive, hy2-masq and DoH under it carry no niko-pin:\n"+
+				"clients check its chain only, as before pins")
+			if r.Msg.Unpinned {
+				fmt.Fprintln(w, "warning: these links carried the pins of the node's keys, and this certificate has another key:\n"+
+					"clients refuse it (Niko 1.45.0: on hy2-masq) until they fetch their subscription")
+			}
 		})
 	case "rotate":
 		fs := flag.NewFlagSet("service rotate", flag.ContinueOnError)
 		now := fs.Bool("now", false, "switch at once; clients that have not fetched their subscription since lose this profile until they do")
-		force := fs.Bool("force", false, "dnstt, masterdns: switch even while the previous key is in its grace, which drops it at once")
+		force := fs.Bool("force", false, "dnstt, masterdns: switch even while the previous key is in its grace, which drops it at once; "+
+			"a site: switch to the next certificate key before clients have had its pin for the lead")
 		if err := need(args, 1); err != nil {
 			return err
 		}
@@ -731,6 +743,11 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
 			what := cmp.Or(r.Msg.Key, "seal")
 			switch {
+			case r.Msg.Key == "tls":
+				// spec/cert-pin-v1.md §5: the switch is an issuance.
+				fmt.Fprintf(w, "%s: rayd orders a certificate with the next key now and switches to it when it is stored\n"+
+					"(rayctl status: acme %s); the processes that keep the key restart once (naive, the site, hy2-masq, Yggdrasil),\n"+
+					"and the key after it is in subscriptions from then\n", args[0], args[0])
 			case r.Msg.Seal && r.Msg.PrevUntil != 0:
 				fmt.Fprintf(w, "%s has a new %s key, in subscriptions from now; the previous one is accepted until %s\n",
 					args[0], what, time.Unix(r.Msg.PrevUntil, 0).UTC().Format(time.RFC3339))
@@ -747,7 +764,8 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 
 // keyState says when a REALITY service last switched keys and when the
 // published next switch is (R4-7); for a DNS tunnel, its dnsauth and seal
-// modes.
+// modes; for a site, since when its certificate's keys are in use and
+// pinned (spec/cert-pin-v1.md).
 func keyState(s *nodev1.Service) string {
 	day := func(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04") }
 	if s.Kind == "slipstream" {
@@ -795,6 +813,22 @@ func keyState(s *nodev1.Service) string {
 			out += ", previous key until " + day(st.PrevUntil)
 		}
 		return out + spareZones(s)
+	}
+	if s.Kind == "site" {
+		// The certificate's keys (spec/cert-pin-v1.md): pinned in the links
+		// of naive, hy2-masq and DoH once the next key is there.
+		st := provision.ParseSiteKeyState(store.Service{Kind: s.Kind, Settings: s.SettingsJson})
+		switch {
+		case st.Imported:
+			return "certificate of your own: no pins"
+		case st.NextAt == 0:
+			return ""
+		}
+		out := "key since " + day(st.KeyAt) + ", next key pinned since " + day(st.NextAt)
+		if st.RotateAt != 0 {
+			out += ", switch to it ordered"
+		}
+		return out
 	}
 	if s.Kind != "reality" {
 		return ""

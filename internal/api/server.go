@@ -56,6 +56,13 @@ type Server struct {
 	// CredGrace is how long a previous dnstt seal key stays accepted after
 	// the operator switched it (rayd -cred-grace); zero: not at all.
 	CredGrace time.Duration
+	// SiteKeyLead is how long a site's next certificate key must have been
+	// in subscriptions before the operator's switch to it (rayd
+	// -site-key-lead, spec/cert-pin-v1.md §5). Certificates says rayd
+	// issues the sites' certificates (ACME on): the switch is an issuance,
+	// and without it nothing would make it.
+	SiteKeyLead  time.Duration
+	Certificates bool
 	// DNSChanged runs after the operator changed the DNS provider or its
 	// records: the certificates are tried again (certs.Manager.Retry).
 	DNSChanged func()
@@ -590,11 +597,39 @@ func (s *Server) SetCertificate(ctx context.Context, req *connect.Request[nodev1
 	if err := s.done(ctx, "service.cert", req.Msg.Service, err); err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(&nodev1.SetCertificateResponse{Names: c.Names, NotAfter: c.NotAfter.Unix(), MissingNext: c.MissingNext}), nil
+	return connect.NewResponse(&nodev1.SetCertificateResponse{Names: c.Names, NotAfter: c.NotAfter.Unix(), MissingNext: c.MissingNext,
+		Unpinned: c.Unpinned}), nil
+}
+
+// rotateSiteKey asks for a site's next certificate key (spec/cert-pin-v1.md
+// §5): root on the node only, as the site's own certificate is; the
+// certificate manager, woken by the change, orders with that key at once.
+func (s *Server) rotateSiteKey(ctx context.Context, name string, force bool, now time.Time) (*connect.Response[nodev1.RotateServiceResponse], error) {
+	if !isRoot(ctx) {
+		return nil, connect.NewError(connect.CodePermissionDenied, errors.New("a site's certificate key: root on the node only"))
+	}
+	var err error
+	if !s.Certificates {
+		err = fmt.Errorf("%w: rayd issues no certificates here (-acme-directory is empty): the key of %s changes with the certificate you import "+
+			"(rayctl service cert)", store.ErrPrecondition, name)
+	} else {
+		err = provision.RequestSiteKeyRotation(ctx, s.Store, name, now, s.SiteKeyLead, force)
+	}
+	action := "service.rotate"
+	if force {
+		action += " force"
+	}
+	if err := s.done(ctx, action, name, err); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Key: "tls"}), nil
 }
 
 func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.RotateServiceRequest]) (*connect.Response[nodev1.RotateServiceResponse], error) {
 	now := time.Now()
+	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "site" {
+		return s.rotateSiteKey(ctx, req.Msg.Name, req.Msg.Force, now)
+	}
 	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "masterdns" {
 		// masterdns-key-rotation §2: the new key at once, in subscriptions
 		// from now; the previous one for the grace (its sessions go on).

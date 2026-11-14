@@ -44,6 +44,10 @@ service NodeService {
   // service it switches the seal key at once (spec/dnsseal-v1.md §8), for
   // a masterdns one its service key (spec/masterdns-key-rotation.md §2):
   // the previous one stays accepted for the credential grace, unless now.
+  // For a site it asks for the next key of its certificate
+  // (spec/cert-pin-v1.md §5): rayd orders a certificate with it at once and
+  // switches when it is stored. Root on the node only; failed_precondition
+  // unless that key has been in subscriptions for the lead, or force.
   rpc RotateService(RotateServiceRequest) returns (RotateServiceResponse);
   // SetServiceOption changes one of the few settings that may change after
   // creation: a site's answer, whether REALITY moves its server name,
@@ -53,7 +57,9 @@ service NodeService {
   // SetCertificate puts the operator's own certificate on a site, in place
   // of one from ACME, for every service under it (REALITY self-steal,
   // hy2-masq, naive, DoH, Yggdrasil). With ACME on, rayd renews it when it
-  // is due. On the node only: it carries the private key.
+  // is due. On the node only: it carries the private key. While it is on
+  // the site, the lines of naive, hy2-masq and DoH carry no niko-pin
+  // (spec/cert-pin-v1.md §7).
   rpc SetCertificate(SetCertificateRequest) returns (SetCertificateResponse);
 
   rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
@@ -664,6 +670,11 @@ message SetCertificateResponse {
   // Names REALITY moves to at its next key switch that the certificate
   // does not cover: the switch waits for a certificate that does.
   repeated string missing_next = 3;
+  // The lines of the services under the site carried the pins of the
+  // node's keys (niko-pin, spec/cert-pin-v1.md §7), and this certificate
+  // has another key: clients fail their pin until they get their
+  // subscription again, whose lines carry none now.
+  bool unpinned = 4;
 }
 
 message RotateServiceRequest {
@@ -672,7 +683,10 @@ message RotateServiceRequest {
   // dnstt and masterdns: a switch with a grace (now unset) while the
   // previous key is still in its grace is failed_precondition (it would
   // drop that key for clients still on it); force switches anyway and
-  // drops it, as before raycontrol v0.24.0.
+  // drops it, as before raycontrol v0.24.0. A site: the switch to the next
+  // certificate key before that key has been in subscriptions for the lead
+  // is failed_precondition (clients that do not hold its pin yet would be
+  // cut off); force switches anyway. now means nothing for a site.
   bool force = 3;
 }
 message RotateServiceResponse {
@@ -681,7 +695,9 @@ message RotateServiceResponse {
   int64 prev_until = 3; // the previous seal key is accepted until then (unix seconds); 0: no longer
   // The key that switched at once: "seal" (dnstt, seal set too), "service"
   // (masterdns, spec/masterdns-key-rotation.md; seal set too, for rayctl
-  // before v0.15.0); empty for REALITY's scheduled switch.
+  // before v0.15.0); "tls" for a site, whose certificate with the next key
+  // rayd orders from switch_at on (spec/cert-pin-v1.md §5); empty for
+  // REALITY's scheduled switch.
   string key = 4;
 }
 

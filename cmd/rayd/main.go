@@ -166,6 +166,8 @@ func cmdServe(args []string) error {
 	credGrace := fs.Duration("cred-grace", 2*24*time.Hour, "the previous credential (and REALITY key set) is accepted this long after the switch (12h at least)")
 	realityPeriod := fs.Duration("reality-period", 90*24*time.Hour, "how long REALITY keys stay current; their next set is published -cred-lead ahead (0: no rotation)")
 	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new REALITY server name may wait for its certificate")
+	siteKeyPeriod := fs.Duration("site-key-period", provision.DefaultSiteKeyPeriod, "how long the key of a site's certificate stays in use: at an issuance after that the next key takes over (0: only by rayctl service rotate SITE)")
+	siteKeyLead := fs.Duration("site-key-lead", provision.DefaultSiteKeyLead, "the next key of a site's certificate is in the subscription (niko-pin) this long before a switch to it")
 	debug := fs.Bool("debug", false, "log at debug level: refused subscription requests with their addresses (personal data: turn it off after use)")
 	updateCheck := fs.Duration("update-check", 0, "look for a newer raycontrol release this often, an hour or more, ±10 % (0: never; release builds only): the node fetches the latest SHA256SUMS and its signature from github.com, which sees the node's address; rayctl status says what it found")
 	dnsCheck := fs.Duration("dns-check", time.Hour, "check the DNS tunnel zones from the node this often, ±10 %: the delegation, the front and the backend, the zones through public resolvers (0: only on demand, rayctl dns check -now)")
@@ -177,6 +179,11 @@ func cmdServe(args []string) error {
 	epoch := provision.RealityEpoch{Period: *realityPeriod, Lead: *credLead, Prepare: *realityPrepare, Grace: *credGrace}
 	if err := epoch.Check(); err != nil {
 		return err
+	}
+	// The keys of the sites' certificates (spec/cert-pin-v1.md §5).
+	siteKeys := provision.SiteKeyPolicy{Period: *siteKeyPeriod, Lead: *siteKeyLead}
+	if err := siteKeys.Check(); err != nil {
+		return fmt.Errorf("-site-key-period, -site-key-lead: %w", err)
 	}
 	dnsResolvers, err := dnscheck.ParseResolvers([]string{*dnsCheckResolvers})
 	if err != nil {
@@ -211,7 +218,7 @@ func cmdServe(args []string) error {
 	paths := render.Paths{Rendered: *rendered, Run: *run, Supervised: *supervise}
 	rotateNow := make(chan struct{}, 1)
 	srv := &api.Server{Store: st, Params: params, Version: version, Paths: paths, Binaries: deploy.DefaultBinaries,
-		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead, CredGrace: *credGrace, Health: hb,
+		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead, CredGrace: *credGrace, SiteKeyLead: *siteKeyLead, Health: hb,
 		Rotate: func() {
 			select {
 			case rotateNow <- struct{}{}:
@@ -307,7 +314,7 @@ func cmdServe(args []string) error {
 	var cm *certs.Manager
 	var is *certs.Issuer
 	if *acmeDir != "" {
-		if cm, is, err = startCertificates(ctx, st, srv, *acmeDir, hb, log); err != nil {
+		if cm, is, err = startCertificates(ctx, st, srv, *acmeDir, siteKeys, hb, log); err != nil {
 			log.Error("certificates not managed", "err", err)
 		}
 	}
@@ -405,8 +412,11 @@ func supervisor(paths render.Paths, bins deploy.Binaries, st *store.Store, log *
 }
 
 // startCertificates issues and renews the sites' certificates through ACME
-// HTTP-01, opening the perimeter window for each order (R2-11).
-func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, directory string, hb *health.Board, log *slog.Logger) (*certs.Manager, *certs.Issuer, error) {
+// HTTP-01, opening the perimeter window for each order (R2-11). A site
+// keeps its key from one certificate to the next and changes it by keys or
+// when root asks (spec/cert-pin-v1.md §4, §5).
+func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, directory string, keys provision.SiteKeyPolicy,
+	hb *health.Board, log *slog.Logger) (*certs.Manager, *certs.Issuer, error) {
 	key, err := certs.AccountKey(ctx, st)
 	if err != nil {
 		return nil, nil, err
@@ -430,7 +440,7 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 		}
 		return &cloudflare.Solver{Client: c, Zone: zone}, nil
 	}
-	m := &certs.Manager{Store: st, Issue: is.Issue, Notify: srv.Notify, Log: log,
+	m := &certs.Manager{Store: st, Issue: is.Issue, Keys: keys, Notify: srv.Notify, Log: log,
 		Report: func(site string, err error) { hb.Done("acme "+site, err) },
 		Wildcard: func(ctx context.Context) string {
 			if c, _, err := provision.Cloudflare(ctx, st); err != nil || c == nil {
@@ -441,6 +451,8 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 		}}
 	// The operator's DNS change may be the fix of a failure: try now.
 	srv.DNSChanged = m.Retry
+	// A site's switch to its next key is an order of this manager's.
+	srv.Certificates = true
 	go m.Run(ctx)
 	// A new site (rayctl service add reality) gets its certificate now, not
 	// at the next hourly check; failures keep their back-off.

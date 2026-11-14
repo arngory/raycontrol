@@ -234,6 +234,22 @@ func TestKeyStateDNS(t *testing.T) {
 	}
 }
 
+// rayctl service list: a site's certificate keys (spec/cert-pin-v1.md), once
+// its links carry pins; the operator's own certificate has none.
+func TestKeyStateSite(t *testing.T) {
+	for _, c := range []struct{ settings, want string }{
+		{`{"sni":"a.example.com"}`, ""}, // no certificate of the node's yet, or no ACME
+		{`{"tls_key_at":1767225600,"tls_next_at":1767312000}`, "key since 2026-01-01 00:00, next key pinned since 2026-01-02 00:00"},
+		{`{"tls_key_at":1767225600,"tls_next_at":1767312000,"tls_rotate_at":1768000000}`,
+			"key since 2026-01-01 00:00, next key pinned since 2026-01-02 00:00, switch to it ordered"},
+		{`{"tls_key_at":1767225600,"tls_next_at":1767312000,"tls_imported":true}`, "certificate of your own: no pins"},
+	} {
+		if got := keyState(&nodev1.Service{Kind: "site", SettingsJson: c.settings}); got != c.want {
+			t.Errorf("site %s: %q", c.settings, got)
+		}
+	}
+}
+
 // inviteNode makes invites as a node does, the short form when it has one,
 // and keeps the IDs of those withdrawn.
 type inviteNode struct {
