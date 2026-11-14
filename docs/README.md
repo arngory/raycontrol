@@ -22,6 +22,7 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [15-traffic.md](15-traffic.md) | Какой трафик несёт каждый профиль (TCP, UDP, DNS, ICMP) и в каком виде; mtr через туннель. |
 | [16-cronet-build.md](16-cronet-build.md) | Своя сборка libcronet и naive: что собирается, замеры, раннер с пределами по потокам и памяти, диск, ccache. |
 | [17-naive-default.md](17-naive-default.md) | naive как профиль по умолчанию: разбор ноды и клиента, дефекты, UDP и не-TCP трафик, порядок работ, решения владельца. |
+| [18-platforms-and-hosts.md](18-platforms-and-hosts.md) | `rayctl` и нода вне Linux, LXC и OpenVZ, нода без публичного адреса, порты при установке, слой абстракции платформы: факты, варианты, цена. |
 | [cheatsheet.md](cheatsheet.md) | Все команды `rayctl` на одной странице. |
 | [spec/spa-v2.md](spec/spa-v2.md) | Формат SPA v2 и пакета регистрации устройства (заморожен). |
 | [spec/subscription-v1.md](spec/subscription-v1.md) | Подписка: запрос, подписи, ссылки с параметрами `niko-*` (заморожена). |
