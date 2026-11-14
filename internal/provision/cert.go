@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/site"
@@ -17,13 +18,27 @@ type Certificate struct {
 	Names       []string // the site's names in use, all covered
 	NotAfter    time.Time
 	MissingNext []string // names of REALITY's next switch it does not cover
+	// Unpinned: the lines of the services under the site carried the pins
+	// of the node's keys (SiteKeyPins), and this certificate has another
+	// key. Clients fail their pin until they get their subscription again,
+	// whose lines carry none now (spec/cert-pin-v1.md §7).
+	Unpinned bool
 }
 
 // SetCertificate puts the operator's own certificate on a site in place of
 // one from ACME: a CA of their own, another ACME client, a test CA. It must
 // pair with the key, be valid now, cover every name the site serves and be
 // long enough for REALITY (R2-8), as the site process checks it.
+//
+// The site is marked as having the operator's certificate: the node cannot
+// promise the key of the one after it, so the lines of naive, hy2-masq and
+// DoH under the site carry no pins from now (spec/cert-pin-v1.md §7), and a
+// key change the operator asked for is off. The next key stays: the
+// certificate manager takes it when it issues for the site again
+// (PlanSiteIssue).
 func SetCertificate(ctx context.Context, st *store.Store, name string, chainPEM, keyPEM []byte, now time.Time) (Certificate, error) {
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
 	var out Certificate
 	svc, err := st.ServiceByName(ctx, name)
 	if err != nil {
@@ -69,12 +84,22 @@ func SetCertificate(ctx context.Context, st *store.Store, name string, chainPEM,
 			return out, err
 		}
 	}
+	secrets, err := st.ServiceSecrets(ctx, svc.ID)
+	if err != nil {
+		return out, err
+	}
+	pinned := SiteKeyPins(svc, secrets)
+	settings, err := setFields(svc.Settings, map[string]any{"tls_imported": true, "tls_rotate_at": nil})
+	if err != nil {
+		return out, err
+	}
 	// Together, as the certificate manager stores them.
-	if err := st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Set: map[string][]byte{
+	if err := st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: settings, Set: map[string][]byte{
 		SecretTLSKey: keyDER, SecretTLSChain: chain.Bytes(),
 	}}); err != nil {
 		return out, err
 	}
 	out.Names, out.NotAfter = names, leaf.NotAfter
+	out.Unpinned = len(pinned) > 0 && !slices.Contains(pinned, leafPin(leaf))
 	return out, nil
 }

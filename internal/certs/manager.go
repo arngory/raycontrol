@@ -7,7 +7,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -53,10 +52,18 @@ func AccountKey(ctx context.Context, st *store.Store) (crypto.Signer, error) {
 
 // Manager keeps the certificates of the node's sites: issued when missing
 // or when the name changed, renewed with a third of the lifetime left.
+//
+// A site keeps its key from one certificate to the next, and has the key
+// after it ready (spec/cert-pin-v1.md): the lines of naive, hy2-masq and
+// DoH pin both. The key changes only to that next one, when the operator
+// asks or by Keys (provision.PlanSiteIssue).
 type Manager struct {
 	Store *store.Store
-	// Issue gets a chain for names (Issuer.Issue).
+	// Issue gets a chain for names and the key (Issuer.Issue).
 	Issue func(ctx context.Context, names []string, key crypto.Signer) ([][]byte, error)
+	// Keys is when a site's key changes by itself, at an issuance; zero:
+	// only when the operator asks.
+	Keys provision.SiteKeyPolicy
 	// Notify runs after a certificate is stored (rayd re-renders).
 	Notify func()
 	// Report, if set, gets each order's outcome per site (O-2).
@@ -164,7 +171,18 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 	}
 	stored := 0
 	for _, svc := range services {
-		if svc.Kind != "site" || !svc.Enabled || now.Before(m.next[svc.Name]) {
+		if svc.Kind != "site" || !svc.Enabled {
+			continue
+		}
+		// The key after the one in use (cert-pin-v1 §4): a site from before
+		// it gets it at the first check, and its pins go into subscriptions.
+		// Whatever the back-off: no order is made for it.
+		if made, err := provision.EnsureSiteNextKey(ctx, m.Store, svc.ID, now); err != nil {
+			m.log().Error("certificates: next key", "service", svc.Name, "err", err)
+		} else if made {
+			m.log().Info("next certificate key made; its pin is in subscriptions from now", "service", svc.Name)
+		}
+		if now.Before(m.next[svc.Name]) {
 			continue
 		}
 		// The names in use and those REALITY moves to at its next switch
@@ -177,7 +195,10 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 		}
 		chain := secrets[provision.SecretTLSChain]
 		want := append(slices.Clone(names), next...)
-		if !due(chain, want, now) {
+		// Due, or the operator asked for the next key (rayctl service
+		// rotate SITE): the switch is an issuance with it.
+		rotate := provision.ParseSiteKeyState(svc).RotateAt != 0
+		if !due(chain, want, now) && !rotate {
 			continue
 		}
 		order := want
@@ -186,10 +207,16 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 				order = []string{"*." + d}
 			}
 		}
-		err = m.issue(ctx, svc, order)
-		if err != nil && len(next) > 0 && len(order) == len(want) && due(chain, names, now) {
+		err = m.issue(ctx, svc, order, now)
+		if err != nil && !errors.Is(err, provision.ErrSiteChanged) && len(next) > 0 && len(order) == len(want) && (rotate || due(chain, names, now)) {
 			m.log().Warn("certificate with the next name not issued, renewing without it", "service", svc.Name, "err", err)
-			err = m.issue(ctx, svc, names)
+			err = m.issue(ctx, svc, names, now)
+		}
+		if errors.Is(err, provision.ErrSiteChanged) {
+			// The operator's certificate came during the order: theirs
+			// stays, and the next check looks at it. No failure.
+			m.log().Info("certificate not stored: the site changed during the order", "service", svc.Name)
+			continue
 		}
 		if m.Report != nil {
 			m.Report(svc.Name, err)
@@ -244,13 +271,14 @@ func underWildcard(names []string, domain string) bool {
 	return len(names) > 0
 }
 
-func (m *Manager) issue(ctx context.Context, svc store.Service, names []string) error {
-	// RSA: its longer chain fits REALITY with ML-DSA-65 (R2-8, R2-12).
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+// issue orders a certificate for names with the site's key (the one in use,
+// unless it is time for the next: provision.PlanSiteIssue) and stores it.
+func (m *Manager) issue(ctx context.Context, svc store.Service, names []string, now time.Time) error {
+	plan, err := provision.PlanSiteIssue(ctx, m.Store, svc.ID, now, m.Keys)
 	if err != nil {
 		return err
 	}
-	chain, err := m.Issue(ctx, names, key)
+	chain, err := m.Issue(ctx, names, plan.Key)
 	if err != nil {
 		return err
 	}
@@ -260,16 +288,10 @@ func (m *Manager) issue(ctx context.Context, svc store.Service, names []string) 
 			return err
 		}
 	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
+	if err := provision.StoreSiteCertificate(ctx, m.Store, svc.ID, pemChain.Bytes(), plan, now); err != nil {
 		return err
 	}
-	// Together: a render between the two would pair a key with another chain.
-	if err := m.Store.UpdateService(ctx, svc.ID, store.ServiceUpdate{Set: map[string][]byte{
-		provision.SecretTLSKey: keyDER, provision.SecretTLSChain: pemChain.Bytes(),
-	}}); err != nil {
-		return err
-	}
-	m.log().Info("certificate stored", "service", svc.Name, "names", len(names))
+	// Which key, never the key or its pin.
+	m.log().Info("certificate stored", "service", svc.Name, "names", len(names), "key", plan.What)
 	return nil
 }
