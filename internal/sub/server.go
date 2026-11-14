@@ -59,6 +59,11 @@ type Server struct {
 	// tls_next_at) reach no line before ClockSeqAfter, for the same
 	// rollback (spec/cert-pin-v1.md §8). rayd: its start. Zero: none held.
 	PinsSince time.Time
+	// PinsAfter, when set, is when those pins reach the lines instead of
+	// ClockSeqAfter: rayd's test stand (RAYCONTROL_UNSAFE_SITE_KEY_SETTLE_NOW)
+	// lets them through seconds after its start, its seq still keeping to
+	// the stored count for ClockSeqAfter.
+	PinsAfter time.Time
 	// Probe, when set, serves the channel probes (spec/probe-v1.md) on the
 	// same endpoint, and the subscription says so.
 	Probe *probe.Server
@@ -232,7 +237,10 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 		return Envelope{}, err
 	}
 	m.Now = now // what depends on the time (a pin of an hour) follows the subscription's
-	m.PinsSince, m.PinsAfter = s.PinsSince, s.ClockSeqAfter
+	m.PinsSince, m.PinsAfter = s.PinsSince, s.PinsAfter
+	if m.PinsAfter.IsZero() {
+		m.PinsAfter = s.ClockSeqAfter
+	}
 	u, err := s.Store.UserByName(ctx, userName)
 	if err != nil {
 		return Envelope{}, err

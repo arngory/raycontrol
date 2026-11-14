@@ -208,12 +208,8 @@ func cmdServe(args []string) error {
 	// Interop (the client's CI): a stand that walks through a switch to the
 	// next key and a fresh one in minutes. Only without systemd, where no
 	// node in use runs.
-	if os.Getenv("RAYCONTROL_UNSAFE_SITE_KEY_FORCE_ANY_AGE") != "" {
-		if !*supervise {
-			return errors.New("RAYCONTROL_UNSAFE_SITE_KEY_FORCE_ANY_AGE is for a test stand (-supervise) only")
-		}
-		provision.UnsafeForceSwitchAtAnyAge()
-		log.Warn("UNSAFE: a forced switch of a site's key is taken at any age of the key in use")
+	if err := unsafeStand(*supervise, os.Getenv, log); err != nil {
+		return err
 	}
 
 	st, err := store.Open(ctx, *db)
@@ -460,7 +456,7 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 	m := &certs.Manager{Store: st, Issue: is.Issue, Keys: keys, Notify: srv.Notify, Log: log,
 		// No pins from a node that may still roll its update back, and no
 		// certificate the site process would refuse to load.
-		NextKeyFrom: time.Now().Add(settleAfterStart),
+		NextKeyFrom: time.Now().Add(pinSettle),
 		Check:       func(chainPEM, keyPEM []byte) error { _, err := siteCertificate(chainPEM, keyPEM); return err },
 		Report:      func(site string, err error) { hb.Done("acme "+site, err) },
 		Wildcard: func(ctx context.Context) string {
@@ -819,7 +815,7 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 		return err
 	}
 	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier, RelayProbe: relayProbe,
-		ClockSeqAfter: time.Now().Add(settleAfterStart), PinsSince: processStart, App: app, Changed: changed}
+		ClockSeqAfter: time.Now().Add(settleAfterStart), PinsSince: processStart, PinsAfter: time.Now().Add(pinSettle), App: app, Changed: changed}
 	port := int(ports[0].Num)
 	addr := ":" + strconv.Itoa(port)
 	// Channel probes (R4-16) on the same endpoint, and their UDP echo on

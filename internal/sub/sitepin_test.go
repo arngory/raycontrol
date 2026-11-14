@@ -444,6 +444,19 @@ func TestSubscriptionHoldsPinsOfTheFirstMinutes(t *testing.T) {
 	if got := pins(start.Add(10 * time.Minute)); got != want {
 		t.Fatalf("at the settle time: niko-pin %q", got)
 	}
+	// A test stand's PinsAfter (RAYCONTROL_UNSAFE_SITE_KEY_SETTLE_NOW):
+	// the pins come at it, the seq's clock keeps ClockSeqAfter.
+	srv.PinsAfter = start.Add(10 * time.Second)
+	if got := pins(start.Add(9 * time.Second)); got != "" {
+		t.Fatalf("before the stand's settle time: niko-pin %q", got)
+	}
+	if got := pins(start.Add(10 * time.Second)); got != want {
+		t.Fatalf("at the stand's settle time: niko-pin %q", got)
+	}
+	if srv.ClockSeqAfter != start.Add(10*time.Minute) {
+		t.Fatal("PinsAfter moved the seq's clock")
+	}
+	srv.PinsAfter = time.Time{}
 	// Without a start (tests, a server of no rayd), nothing is held.
 	srv.PinsSince = time.Time{}
 	if got := pins(start.Add(5 * time.Second)); got != want {
