@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/arngory/raycontrol/internal/deploy"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
@@ -131,13 +135,15 @@ func relayBefore(sshd func() ([]int, error), listening func(int) bool, sess sess
 }
 
 // relayKept is what an update keeps of the relay before it changes it, in
-// previousDir beside the binaries: the files of the relay's plan (or that
-// one was not there), whether rayspa's last snapshot was kept, and its
-// units' states. Written last: its presence says the copy is whole.
+// previousDir beside the binaries: the files the relay install writes (or
+// that one was not there), whether rayspa's last snapshot was kept and
+// whether it had services, and its units' states. Written last: its
+// presence says the copy is whole.
 type relayKept struct {
 	Version  string             `json:"version"`
 	Files    map[string]bool    `json:"files"`
 	Snapshot bool               `json:"snapshot"`
+	Services bool               `json:"services"`
 	Units    map[string]unitWas `json:"units"`
 }
 
@@ -149,15 +155,48 @@ type unitWas struct {
 
 const relayKeptFile = "relay.json"
 
+// relayMark is relayMarkFile: an update from From to To that has changed
+// the relay and not ended checked ("updating"), or a relay that an update
+// or a rollback left open ("open"). rayctl update refuses while it is
+// there and says how to recover (advice).
+type relayMark struct {
+	State string `json:"state"`
+	From  string `json:"from,omitempty"`
+	To    string `json:"to,omitempty"`
+}
+
+func (m relayMark) advice() string {
+	if m.State == "open" {
+		return fmt.Sprintf("the last update or rollback of this relay left it open and not forwarding: rayctl update -rollback "+
+			"tries %s again, or bash bootstrap.sh -relay %s installs the relay anew", cmp.Or(m.From, "the kept version"), deploy.RelayBundle)
+	}
+	return fmt.Sprintf("an update of this relay from %s to %s was interrupted: rayctl update -rollback puts %s back",
+		m.From, m.To, m.From)
+}
+
+// relayFiles are the files a relay install writes: its plan's (units,
+// sysctl), and those it writes once the relay is up (deploy.Host's
+// Conntrack and ReservePorts). The install's journal is not among them:
+// it only grows, and rayctl uninstall takes back what it records.
+func relayFiles() []string {
+	var files []string
+	for _, f := range deploy.RelayPlan(deploy.DefaultBinaries).Files {
+		files = append(files, f.Path)
+	}
+	return append(files, deploy.ConntrackSysctl, deploy.ModulesLoad, deploy.PortsSysctl)
+}
+
 // relayOps are the relay host's parts an update keeps and puts back, with
 // the host's operations given so that a test can follow them.
 type relayOps struct {
 	dir       string            // previousDir
 	bins      map[string]string // relayBinaries
-	files     []string          // the relay plan's files
+	files     []string          // relayFiles
+	sysctlDir string            // where of them are sysctl's, applied again after a restore
 	snapshot  string            // rayspa's last snapshot
 	units     []string          // rayspa's unit, then the probe's (Requisite on rayspa)
 	state     func(unit string) unitWas
+	loaded    func(unit string) bool
 	run       func(name string, args ...string) error
 	place     func(src, dst string) error // placeBinary
 	disarm    func()                      // the install's guard timer off, if one is left
@@ -189,7 +228,7 @@ func (o relayOps) keep(version string) (relayKept, error) {
 		}
 	}
 	for _, f := range o.files {
-		b, err := os.ReadFile(f) //nolint:gosec // G304: the relay plan's files
+		b, err := os.ReadFile(f) //nolint:gosec // G304: the relay's files
 		switch {
 		case errors.Is(err, os.ErrNotExist):
 			k.Files[f] = false
@@ -208,7 +247,8 @@ func (o relayOps) keep(version string) (relayKept, error) {
 		if err := os.WriteFile(filepath.Join(o.dir, "snapshot.pb"), b, 0o600); err != nil {
 			return k, err
 		}
-		k.Snapshot = true
+		snap := &perimeterv1.Snapshot{}
+		k.Snapshot, k.Services = true, proto.Unmarshal(b, snap) == nil && len(snap.Services) > 0
 	case !errors.Is(err, os.ErrNotExist):
 		return k, fmt.Errorf("rayspa's snapshot: %w", err)
 	}
@@ -235,10 +275,34 @@ func (o relayOps) kept() (relayKept, error) {
 	return k, json.Unmarshal(b, &k)
 }
 
-// restore puts the kept relay back: binaries, files (one that was not
-// there goes), rayspa's snapshot when withSnapshot, and the units enabled
-// and started as they were. rayspa starts from the snapshot it had, so the
-// relay comes back with the perimeter it had, the exit reachable or not.
+// mark writes relayMarkFile; unmark removes it; readMark reads it.
+func (o relayOps) mark(m relayMark) error {
+	j, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(o.dir, relayMarkFile), j, 0o600)
+}
+
+func (o relayOps) unmark() { _ = os.Remove(filepath.Join(o.dir, relayMarkFile)) }
+
+func (o relayOps) readMark() (relayMark, bool) {
+	var m relayMark
+	b, err := os.ReadFile(filepath.Join(o.dir, relayMarkFile)) //nolint:gosec // G304: root's directory
+	if err != nil {
+		return m, false
+	}
+	if json.Unmarshal(b, &m) != nil || m.State == "" {
+		m.State = "updating" // there, whatever it says
+	}
+	return m, true
+}
+
+// restore puts the kept relay back: binaries (one already as kept stays),
+// files (one that was not there goes), rayspa's snapshot when
+// withSnapshot, and the units enabled and started as they were. rayspa
+// starts from the snapshot it had, so the relay comes back with the
+// perimeter it had, the exit reachable or not.
 func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 	k, err := o.kept()
 	if err != nil {
@@ -246,12 +310,25 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 	}
 	fmt.Printf("putting the relay back as it ran on %s\n", k.Version)
 	o.disarm()
+	// Stopped for sure: a rayspa that runs on would keep the new binary
+	// and its table, and the check after would look at it.
 	stop := slices.Clone(o.units)
 	slices.Reverse(stop)
-	_ = o.run("systemctl", append([]string{"stop"}, stop...)...)
+	for _, u := range stop {
+		if !o.loaded(u) {
+			continue
+		}
+		if err := o.run("systemctl", "stop", u); err != nil {
+			return k, fmt.Errorf("stopping %s: %w", u, err)
+		}
+	}
 	for _, name := range sortedKeys(o.bins) {
 		src := filepath.Join(o.dir, name)
-		if _, err := os.Stat(src); err != nil {
+		b, err := os.ReadFile(src) //nolint:gosec // G304: root's directory
+		if err != nil {
+			continue
+		}
+		if now, err := os.ReadFile(o.bins[name]); err == nil && bytes.Equal(now, b) {
 			continue
 		}
 		if err := o.place(src, o.bins[name]); err != nil {
@@ -273,7 +350,7 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 		if err := writeAtomic(f, b, 0o644); err != nil {
 			return k, err
 		}
-		if strings.HasPrefix(f, "/etc/sysctl.d/") {
+		if strings.HasPrefix(f, o.sysctlDir) {
 			sysctl = append(sysctl, f)
 		}
 	}
@@ -294,8 +371,8 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 	if err := o.run("systemctl", "daemon-reload"); err != nil {
 		return k, err
 	}
-	// Forwarding first, the hardening after: writing net.ipv4.ip_forward
-	// resets accept_redirects (unforwardAt).
+	// Forwarding first (91-), the hardening after (90-raycontrol.conf):
+	// writing net.ipv4.ip_forward resets accept_redirects (unforwardAt).
 	slices.Reverse(sysctl)
 	for _, f := range sysctl {
 		if err := o.run("sysctl", "-q", "-p", f); err != nil {
@@ -303,13 +380,11 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 		}
 	}
 	for _, u := range o.units {
-		w := k.Units[u]
-		switch {
-		case w.Enabled:
+		if k.Units[u].Enabled {
 			if err := o.run("systemctl", "enable", u); err != nil {
 				return k, err
 			}
-		default:
+		} else {
 			_ = o.run("systemctl", "disable", u) // perhaps no such unit
 		}
 	}
@@ -325,8 +400,11 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 
 // open takes rayspa down and its table off: the relay forwards nothing,
 // and its host is open. The last way to keep the admin in, when the relay
-// does not come back at all.
+// does not come back at all. The mark says so to the next rayctl update.
 func (o relayOps) open() error {
+	m, _ := o.readMark()
+	m.State = "open"
+	_ = o.mark(m)
 	stop := slices.Clone(o.units)
 	slices.Reverse(stop)
 	disable := o.run("systemctl", append([]string{"disable", "--now"}, stop...)...)
@@ -362,6 +440,37 @@ func writeAtomic(path string, b []byte, mode os.FileMode) error {
 		_ = os.Remove(tmp)
 	}
 	return err
+}
+
+// placeRelayBinaries puts the staged relay binaries in place; renamed
+// says whether any was, so that a failure before the first changes
+// nothing to undo.
+func placeRelayBinaries(stage string, bins map[string]string, place func(src, dst string) error) (renamed bool, err error) {
+	for _, name := range sortedKeys(bins) {
+		src := filepath.Join(stage, name)
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		if err := place(src, bins[name]); err != nil {
+			return renamed, err
+		}
+		renamed = true
+	}
+	return renamed, nil
+}
+
+// relayInstallCommand is rayctl install -relay with the stored bundle, by
+// the rayctl the update put in place: the update's own variables stay
+// with the update, and the install lock it holds goes on as fd 3.
+func relayInstallCommand(rayctl, bundle string, lock *os.File) *exec.Cmd {
+	cmd := exec.Command(rayctl, "install", "-relay", bundle) //nolint:gosec // G204: the rayctl the update put in place
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.Env = applyEnv("")
+	if lock != nil {
+		cmd.ExtraFiles = []*os.File{lock}
+		cmd.Env = append(cmd.Env, relayLockEnv+"=3")
+	}
+	return cmd
 }
 
 // relayHealth is the check of a relay after its update or its rollback:
@@ -441,25 +550,37 @@ func waitHealthy(ctx context.Context, check func() error, limit, settle, every t
 // relayUpdate is a relay's update once the release is staged, its steps
 // given so that a test can follow them.
 type relayUpdate struct {
-	keep      func() error // the relay as it runs, aside
-	place     func() error // the release's binaries in place
-	install   func() error // rayctl install -relay with the stored bundle, by the rayctl now in place
-	check     func() error // relayHealth, of the new version
-	restore   func() error // the kept relay back
-	checkBack func() error // relayHealth, of the previous version
-	open      func() error // rayspa down, table off
+	keep      func() error         // the relay as it runs, aside
+	mark      func() error         // relayMarkFile: changes begin
+	place     func() (bool, error) // the release's binaries in place; whether any was
+	install   func() error         // rayctl install -relay with the stored bundle, by the rayctl now in place
+	check     func() error         // relayHealth, of the new version
+	restore   func() error         // the kept relay back
+	checkBack func() error         // relayHealth, of the previous version
+	open      func() error         // rayspa down, table off
+	unmark    func()               // the relay is checked: the mark goes
 }
 
-// run updates the relay. Nothing changes before the copy is whole. Once
-// anything changed, a failure brings the relay back as it ran; only if it
-// does not come back is the host left open (rayspa stopped and disabled,
-// its table off, no forwarding), so that its admin is never shut out.
+// run updates the relay. Nothing changes before the copy is whole and the
+// mark is written; a failure to place the first binary changes nothing
+// either. Once anything changed, a failure brings the relay back as it
+// ran; only if it does not come back is the host left open (rayspa
+// stopped and disabled, its table off, no forwarding), so that its admin
+// is never shut out. The mark goes once the relay is checked, updated or
+// back.
 func (u relayUpdate) run() error {
 	if err := u.keep(); err != nil {
 		return fmt.Errorf("keeping the relay as it runs: %w (nothing changed)", err)
 	}
-	var err error
-	if err = u.place(); err != nil {
+	if err := u.mark(); err != nil {
+		return fmt.Errorf("marking the update as begun: %w (nothing changed)", err)
+	}
+	renamed, err := u.place()
+	if err != nil && !renamed {
+		u.unmark()
+		return fmt.Errorf("installing: %w (nothing changed: the relay runs as it did)", err)
+	}
+	if err != nil {
 		err = fmt.Errorf("installing: %w", err)
 	} else if err = u.install(); err != nil {
 		err = fmt.Errorf("the relay install: %w", err)
@@ -467,10 +588,15 @@ func (u relayUpdate) run() error {
 		err = fmt.Errorf("after the install: %w", err)
 	}
 	if err == nil {
+		u.unmark()
 		return nil
 	}
 	fmt.Println("update failed:", err)
-	return backOrOpen(err, u.restore, u.checkBack, u.open)
+	err = backOrOpen(err, u.restore, u.checkBack, u.open)
+	if rb := (rolledBack{}); errors.As(err, &rb) {
+		u.unmark()
+	}
+	return err
 }
 
 // backOrOpen brings the previous relay back after cause; if it does not
@@ -492,22 +618,217 @@ func backOrOpen(cause error, restore, checkBack, open func() error) error {
 		"left open and not forwarding; bash bootstrap.sh -relay %s installs the relay again", cause, berr, deploy.RelayBundle)
 }
 
-// realRelayOps are relayOps on this host.
-func realRelayOps() relayOps {
-	var files []string
-	for _, f := range deploy.RelayPlan(deploy.DefaultBinaries).Files {
-		files = append(files, f.Path)
+// healthWant is what a check after a change expects: the version, the
+// probe endpoint if it ran, sshd's port, this session's address, the
+// relay's name.
+type healthWant struct {
+	want         string
+	probeRan     bool
+	port         int
+	client, name string
+}
+
+// relayEnv is rayctl update on a relay with its host given: its paths and
+// commands, so that a test runs the whole of it on directories of its
+// own.
+type relayEnv struct {
+	bundle      string
+	ops         relayOps
+	session     session
+	before      func(name string) (port int, warning string, err error) // relayBefore
+	sshPort     func() int                                              // sshd's one port, 0 if it cannot be told
+	hostOpen    func() bool                                             // rayspa not running, or its table gone
+	lock        func(what string) error                                 // the update lock
+	installLock func() (*os.File, error)                                // the relay install's
+	newStage    func() (string, error)
+	stage       func(ctx context.Context, o updateOpts, stage, installed string) (staged, error)
+	place       func(stage string) (bool, error)
+	install     func(lock *os.File) error
+	health      func(healthWant) func() error
+	confirm     func(prompt string) bool
+	signals     func() (stop func()) // from the point of no return
+}
+
+// updateRelay is rayctl update on this relay host.
+func (c *cli) updateRelay(ctx context.Context, o updateOpts, rollback bool, installed string) error {
+	return c.relayEnvHere(ctx).update(ctx, o, rollback, installed)
+}
+
+func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, installed string) error {
+	o.host = "relay"
+	b, err := relayBundleAt(e.bundle)
+	if err != nil {
+		return err
 	}
-	return relayOps{
-		dir: previousDir, bins: relayBinaries, files: files, snapshot: relaySnapshot,
+	if rollback {
+		return e.rollback(o.yes, b.Name)
+	}
+	if !o.check {
+		if err := e.lock("update"); err != nil {
+			return err
+		}
+	}
+	// An update that did not end: one way back, said before anything
+	// else, never "installed, the newest release".
+	if m, marked := e.ops.readMark(); marked {
+		if !o.check {
+			return errors.New(m.advice())
+		}
+		fmt.Println("warning:", m.advice())
+	}
+	port, warning, err := e.before(b.Name)
+	switch {
+	case err != nil && o.check:
+		fmt.Println("warning: the update would refuse:", err)
+	case err != nil:
+		return err
+	case warning != "":
+		fmt.Fprintln(os.Stderr, "warning:", warning)
+	}
+	if os.Getenv(handoffEnv) == "1" {
+		fmt.Printf("rayctl %s updates the relay, handed over by the rayctl of %s\n", version, installed)
+	}
+	st, err := e.newStage()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(st) }()
+	s, err := e.stage(ctx, o, st, installed)
+	if o.check && !s.handed {
+		fmt.Println("this host is a relay " + b.Name + ": rayctl update here updates it; remote and automatic updates do not apply to a relay")
+	}
+	if err != nil || s.done {
+		return err
+	}
+	// Here, not before the handoff: the release's rayctl takes it. Held
+	// from the first change through the install, which takes it on.
+	il, err := e.installLock()
+	if err != nil {
+		return fmt.Errorf("%w (nothing changed)", err)
+	}
+	defer il.Close()
+	if !o.yes && !e.confirm(fmt.Sprintf("Update relay %s from %s to %s? rayspa restarts: forwarding stops, usually for under a minute, "+
+		"at most about 5 minutes (the exit's first snapshot, then a rollback if it fails); clients reconnect. Type yes to go on: ",
+		b.Name, installed, s.version)) {
+		return errors.New("not confirmed")
+	}
+	// From here the update goes to its end: Ctrl-C, a closed SSH
+	// connection or SIGTERM reach the install (its process group is the
+	// terminal's), which stops as on any failure, and this rayctl takes the
+	// relay back; a reader of its output gone does not stop it either.
+	defer e.signals()()
+
+	var k relayKept
+	u := relayUpdate{
+		keep:    func() (err error) { k, err = e.ops.keep(installed); return err },
+		mark:    func() error { return e.ops.mark(relayMark{State: "updating", From: installed, To: s.version}) },
+		place:   func() (bool, error) { return e.place(st) },
+		install: func() error { return e.install(il) },
+		check: func() error {
+			return e.health(healthWant{s.version, k.Units[deploy.RelayProbeUnit].Active, port, e.session.addr, b.Name})()
+		},
+		restore:   func() error { _, err := e.ops.restore(true); return err },
+		checkBack: func() error { return relayBack(k, e.health, port, e.session.addr, b.Name) },
+		open:      e.ops.open,
+		unmark:    e.ops.unmark,
+	}
+	if err := u.run(); err != nil {
+		return err
+	}
+	fmt.Printf("relay %s runs raycontrol %s; the previous binaries are kept for rayctl update -rollback\n", b.Name, s.version)
+	return nil
+}
+
+// relayBack checks the relay put back as kept: as relayHealth if rayspa
+// ran before, else nothing (it was not running, and is not).
+func relayBack(k relayKept, health func(healthWant) func() error, port int, client, name string) error {
+	if !k.Units[relayUnit].Active {
+		return nil
+	}
+	return health(healthWant{k.Version, k.Units[deploy.RelayProbeUnit].Active, port, client, name})()
+}
+
+// rollback is rayctl update -rollback on a relay: the kept relay back.
+// rayspa's snapshot comes back too after an update that did not end, or
+// when the host is open (the install removes it); else it stays the one
+// rayspa has now (the exit's latest perimeter, which let this session
+// in). A host that is open is not checked against its perimeter first:
+// there is none, and nothing to lose by restoring one.
+func (e relayEnv) rollback(yes bool, name string) error {
+	if err := e.lock("rollback"); err != nil {
+		return err
+	}
+	il, err := e.installLock()
+	if err != nil {
+		return fmt.Errorf("%w: once it has ended, rayctl update -rollback (nothing changed)", err)
+	}
+	defer il.Close()
+	k, err := e.ops.kept()
+	if err != nil {
+		return err
+	}
+	_, marked := e.ops.readMark()
+	open := e.hostOpen()
+	var port int
+	if open {
+		port = e.sshPort()
+		fmt.Println("the relay is open now (rayspa is not running or holds no table): this session is not checked against a perimeter first")
+	} else {
+		p, warning, err := e.before(name)
+		if err != nil {
+			return err
+		}
+		if warning != "" {
+			fmt.Fprintln(os.Stderr, "warning:", warning)
+		}
+		port = p
+	}
+	if !yes && !e.confirm(fmt.Sprintf("Roll the relay back to %s? rayspa restarts: forwarding stops for a moment. Type yes to go on: ", k.Version)) {
+		return errors.New("not confirmed")
+	}
+	defer e.signals()()
+	err = backOrOpen(errors.New("asked for"), func() error { _, err := e.ops.restore(marked || open); return err },
+		func() error { return relayBack(k, e.health, port, e.session.addr, name) }, e.ops.open)
+	if rb := (rolledBack{}); errors.As(err, &rb) {
+		e.ops.unmark()
+		fmt.Printf("the relay runs %s again\n", k.Version)
+		return nil
+	}
+	return err
+}
+
+// catchSignals takes, until stop, what would end rayctl halfway: Ctrl-C,
+// Ctrl-\, SIGHUP, SIGTERM, and SIGPIPE (a write to a reader gone, such as
+// tee after the SSH connection dropped, fails instead). Caught, not
+// ignored: the install it starts gets them as usual.
+func catchSignals() (stop func()) {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGQUIT, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGPIPE)
+	return func() { signal.Stop(sigs) }
+}
+
+// askYes asks prompt on the terminal; yes is the only yes.
+func askYes(prompt string) bool {
+	fmt.Print(prompt)
+	answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	return strings.TrimSpace(answer) == "yes"
+}
+
+// relayEnvHere is relayEnv on this host.
+func (c *cli) relayEnvHere(ctx context.Context) relayEnv {
+	sess := sshSession()
+	hctx := context.WithoutCancel(ctx) // the checks after a change have their own time
+	ops := relayOps{
+		dir: previousDir, bins: relayBinaries, files: relayFiles(), sysctlDir: "/etc/sysctl.d/", snapshot: relaySnapshot,
 		units: []string{relayUnit, deploy.RelayProbeUnit},
 		state: func(u string) unitWas {
 			en, _ := commandApart("systemctl", "is-enabled", u).Output()
 			st, _ := unitState(u)()
 			return unitWas{Enabled: strings.TrimSpace(string(en)) == "enabled", Active: running(st)}
 		},
-		run:   runApart,
-		place: placeBinary,
+		loaded: unitLoaded,
+		run:    runApart,
+		place:  placeBinary,
 		disarm: func() {
 			if l, err := os.OpenFile(guardLock, os.O_RDWR|os.O_CREATE, 0o600); err == nil { //nolint:gosec // G304: a fixed path
 				// Under the guard's lock: it has gone off, or it never will.
@@ -533,12 +854,44 @@ func realRelayOps() relayOps {
 		tableGone: tableGone,
 		rayspa:    deploy.DefaultBinaries.Rayspa,
 	}
+	return relayEnv{
+		bundle: deploy.RelayBundle, ops: ops, session: sess,
+		before: func(name string) (int, string, error) {
+			return relayBefore(sshdPorts, listening, sess, func() (*perimeterv1.Snapshot, error) { return readSnapshot(relaySnapshot) }, name)
+		},
+		sshPort: func() int {
+			if p, err := sshdPorts(); err == nil && len(p) == 1 {
+				return p[0]
+			}
+			return 0
+		},
+		hostOpen: func() bool {
+			st, _ := showUnit()
+			return !running(st) || tableGone()
+		},
+		lock:        func(what string) error { return takeUpdateLock(what, 0) },
+		installLock: func() (*os.File, error) { return takeInstallLock(relayInstallLock) },
+		newStage:    newStage,
+		stage: func(ctx context.Context, o updateOpts, stage, installed string) (staged, error) {
+			return c.stageRelease(ctx, o, stage, installed, relayBinaries, relayTarget)
+		},
+		place: func(stage string) (bool, error) { return placeRelayBinaries(stage, relayBinaries, placeBinary) },
+		install: func(lock *os.File) error {
+			return relayInstallCommand("/usr/local/bin/rayctl", deploy.RelayBundle, lock).Run()
+		},
+		health: func(w healthWant) func() error {
+			h := realHealth(w)
+			return func() error { return waitHealthy(hctx, h.check, 30*time.Second, 3*time.Second, time.Second) }
+		},
+		confirm: askYes,
+		signals: catchSignals,
+	}
 }
 
 // realHealth is relayHealth on this host.
-func realHealth(want string, probeRan bool, port int, client, name string) relayHealth {
+func realHealth(w healthWant) relayHealth {
 	return relayHealth{
-		rayspa: showUnit, probe: unitState(deploy.RelayProbeUnit), probeRan: probeRan,
+		rayspa: showUnit, probe: unitState(deploy.RelayProbeUnit), probeRan: w.probeRan,
 		tableGone:  tableGone,
 		forwarding: func() ([]byte, error) { return os.ReadFile(procForward) },
 		snapshot:   func() (*perimeterv1.Snapshot, error) { return readSnapshot(relaySnapshot) },
@@ -546,157 +899,13 @@ func realHealth(want string, probeRan bool, port int, client, name string) relay
 			out, _ := exec.Command(deploy.DefaultBinaries.Rayspa, "version").Output() //nolint:gosec // G204: a fixed path
 			return strings.TrimSpace(string(out))
 		},
-		want: want, port: port, client: client, name: name,
+		want: w.want, port: w.port, client: w.client, name: w.name,
 	}
-}
-
-// updateRelay is rayctl update on a relay host.
-func (c *cli) updateRelay(ctx context.Context, o updateOpts, rollback bool, installed string) error {
-	o.host = "relay"
-	b, err := relayBundleAt(deploy.RelayBundle)
-	if err != nil {
-		return err
-	}
-	if !o.check {
-		what := "update"
-		if rollback {
-			what = "rollback"
-		}
-		if err := takeUpdateLock(what, 0); err != nil {
-			return err
-		}
-	}
-	sess := sshSession()
-	port, warning, err := relayBefore(sshdPorts, listening, sess, func() (*perimeterv1.Snapshot, error) { return readSnapshot(relaySnapshot) }, b.Name)
-	switch {
-	case err != nil && o.check:
-		fmt.Println("warning: the update would refuse:", err)
-	case err != nil:
-		return err
-	case warning != "":
-		fmt.Fprintln(os.Stderr, "warning:", warning)
-	}
-	ops := realRelayOps()
-	// The checks after a change have their own time, whatever the download
-	// took.
-	hctx := context.WithoutCancel(ctx)
-	health := func(want string, probeRan bool) func() error {
-		h := realHealth(want, probeRan, port, sess.addr, b.Name)
-		return func() error { return waitHealthy(hctx, h.check, 30*time.Second, 3*time.Second, time.Second) }
-	}
-	if rollback {
-		return rollbackRelay(o.yes, ops, health)
-	}
-	if os.Getenv(handoffEnv) == "1" {
-		fmt.Printf("rayctl %s updates the relay, handed over by the rayctl of %s\n", version, installed)
-	}
-	stage, err := newStage()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.RemoveAll(stage) }()
-	s, err := c.stageRelease(ctx, o, stage, installed, relayBinaries, relayTarget)
-	if o.check && !s.handed {
-		fmt.Println("this host is a relay " + b.Name + ": rayctl update here updates it; remote and automatic updates do not apply to a relay")
-	}
-	if err != nil || s.done {
-		return err
-	}
-	if !o.yes {
-		fmt.Printf("Update relay %s from %s to %s? rayspa restarts: forwarding stops for up to a minute, clients reconnect. Type yes to go on: ",
-			b.Name, installed, s.version)
-		answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-		if strings.TrimSpace(answer) != "yes" {
-			return errors.New("not confirmed")
-		}
-	}
-	// From here the update goes to its end: Ctrl-C or a closed SSH
-	// connection reach the install (its process group is the terminal's),
-	// which stops as on any failure, and this rayctl takes the relay back.
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGHUP, syscall.SIGQUIT)
-	defer signal.Stop(sigs)
-
-	var k relayKept
-	u := relayUpdate{
-		keep: func() (err error) { k, err = ops.keep(installed); return err },
-		place: func() error {
-			// Not under a relay install running (bootstrap.sh -relay):
-			// the lock is the install's again once the binaries are in.
-			l, err := takeInstallLock(relayInstallLock)
-			if err != nil {
-				return err
-			}
-			defer l.Close()
-			for _, name := range sortedKeys(relayBinaries) {
-				src := filepath.Join(stage, name)
-				if _, err := os.Stat(src); err != nil {
-					continue
-				}
-				if err := placeBinary(src, relayBinaries[name]); err != nil {
-					return err
-				}
-			}
-			return nil
-		},
-		install: func() error {
-			cmd := exec.Command("/usr/local/bin/rayctl", "install", "-relay", deploy.RelayBundle) //nolint:gosec // G204: the rayctl the update put in place
-			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-			cmd.Env = applyEnv("")
-			return cmd.Run()
-		},
-		check:     func() error { return health(s.version, k.Units[deploy.RelayProbeUnit].Active)() },
-		restore:   func() error { _, err := ops.restore(true); return err },
-		checkBack: func() error { return relayBack(k, health) },
-		open:      ops.open,
-	}
-	if err := u.run(); err != nil {
-		return err
-	}
-	fmt.Printf("relay %s runs raycontrol %s; the previous binaries are kept for rayctl update -rollback\n", b.Name, s.version)
-	return nil
-}
-
-// relayBack checks the relay put back as kept: as relayHealth if rayspa
-// ran before, else nothing (it was not running, and is not).
-func relayBack(k relayKept, health func(string, bool) func() error) error {
-	if !k.Units[relayUnit].Active {
-		return nil
-	}
-	return health(k.Version, k.Units[deploy.RelayProbeUnit].Active)()
-}
-
-// rollbackRelay is rayctl update -rollback on a relay: the binaries and
-// files the last update replaced come back; rayspa's snapshot stays the
-// one it has now (the exit's latest perimeter, which let this session in).
-func rollbackRelay(yes bool, ops relayOps, health func(string, bool) func() error) error {
-	k, err := ops.kept()
-	if err != nil {
-		return err
-	}
-	if !yes {
-		fmt.Printf("Roll the relay back to %s? rayspa restarts: forwarding stops for a moment. Type yes to go on: ", k.Version)
-		answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-		if strings.TrimSpace(answer) != "yes" {
-			return errors.New("not confirmed")
-		}
-	}
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGHUP, syscall.SIGQUIT)
-	defer signal.Stop(sigs)
-	err = backOrOpen(errors.New("asked for"), func() error { _, err := ops.restore(false); return err },
-		func() error { return relayBack(k, health) }, ops.open)
-	var rb rolledBack
-	if errors.As(err, &rb) {
-		fmt.Printf("the relay runs %s again\n", k.Version)
-		return nil
-	}
-	return err
 }
 
 // relayPolicy is rayctl update status|remote|auto on a relay: no policy,
 // since a relay has no rayd API for devices; status says what is
-// installed and what the last update kept.
+// installed, what the last update kept, and whether one did not end.
 func (c *cli) relayPolicy(args []string, dir string) error {
 	switch {
 	case args[0] == "status" && len(args) == 1:
@@ -716,9 +925,13 @@ func (c *cli) relayPolicy(args []string, dir string) error {
 			previous = k.Version
 		}
 	}
+	m, marked := relayOps{dir: dir}.readMark()
 	if c.json {
-		j, err := json.MarshalIndent(map[string]any{"host": "relay", "installed": version, "rayspa": rayspa, "previous": previous,
-			"remote": "n/a", "auto": "n/a"}, "", "  ")
+		st := map[string]any{"host": "relay", "installed": version, "rayspa": rayspa, "previous": previous, "remote": "n/a", "auto": "n/a"}
+		if marked {
+			st["unfinished"] = m.advice()
+		}
+		j, err := json.MarshalIndent(st, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -731,6 +944,9 @@ func (c *cli) relayPolicy(args []string, dir string) error {
 	}
 	if previous != "" {
 		fmt.Printf("previous   %s (rayctl update -rollback)\n", previous)
+	}
+	if marked {
+		fmt.Printf("unfinished %s\n", m.advice())
 	}
 	fmt.Println("latest     rayctl update -check asks GitHub")
 	fmt.Println("remote     does not apply to a relay (no rayd API for devices)")

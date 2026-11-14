@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/blake2b"
+	"google.golang.org/protobuf/proto"
 
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/node"
@@ -140,39 +141,55 @@ func TestRelayBefore(t *testing.T) {
 	}
 }
 
-// The update's steps and its way back: a failing install or check brings
-// the previous relay back; only a relay that does not come back is left
-// open, and the error says so.
+// The update's steps and its way back: a failure to place the first binary
+// changes nothing; a failing install or check brings the previous relay
+// back; only a relay that does not come back is left open, and the error
+// says so. The mark goes once the relay is checked, and stays when it is
+// left open.
 func TestRelayUpdateRun(t *testing.T) {
 	boom := errors.New("boom")
 	for name, c := range map[string]struct {
-		fail     string // the step that fails
+		fail     string // the steps that fail; "place0": before the first binary
 		calls    []string
 		contains string
 		back     bool // rolledBack
 	}{
-		"done":            {"", []string{"keep", "place", "install", "check"}, "", false},
+		"done":            {"", []string{"keep", "mark", "place", "install", "check", "unmark"}, "", false},
 		"keep":            {"keep", []string{"keep"}, "nothing changed", false},
-		"place":           {"place", []string{"keep", "place", "restore", "checkBack"}, "installing: boom", true},
-		"install":         {"install", []string{"keep", "place", "install", "restore", "checkBack"}, "the relay install: boom", true},
-		"check":           {"check", []string{"keep", "place", "install", "check", "restore", "checkBack"}, "after the install: boom", true},
-		"restore":         {"install,restore", []string{"keep", "place", "install", "restore", "open"}, "host left open", false},
-		"checkBack":       {"check,checkBack", []string{"keep", "place", "install", "check", "restore", "checkBack", "open"}, "host left open", false},
-		"open fails":      {"install,checkBack,open", []string{"keep", "place", "install", "restore", "checkBack", "open"}, "could NOT be taken down", false},
+		"mark":            {"mark", []string{"keep", "mark"}, "nothing changed", false},
+		"nothing placed":  {"place0", []string{"keep", "mark", "place", "unmark"}, "nothing changed: the relay runs as it did", false},
+		"place":           {"place", []string{"keep", "mark", "place", "restore", "checkBack", "unmark"}, "installing: boom", true},
+		"install":         {"install", []string{"keep", "mark", "place", "install", "restore", "checkBack", "unmark"}, "the relay install: boom", true},
+		"check":           {"check", []string{"keep", "mark", "place", "install", "check", "restore", "checkBack", "unmark"}, "after the install: boom", true},
+		"restore":         {"install,restore", []string{"keep", "mark", "place", "install", "restore", "open"}, "host left open", false},
+		"checkBack":       {"check,checkBack", []string{"keep", "mark", "place", "install", "check", "restore", "checkBack", "open"}, "host left open", false},
+		"open fails":      {"install,checkBack,open", []string{"keep", "mark", "place", "install", "restore", "checkBack", "open"}, "could NOT be taken down", false},
 		"the words stand": {"install", nil, "the previous version runs again", true},
 	} {
 		var calls []string
+		fails := strings.Split(c.fail, ",")
 		step := func(n string) func() error {
 			return func() error {
 				calls = append(calls, n)
-				if slices.Contains(strings.Split(c.fail, ","), n) {
+				if slices.Contains(fails, n) {
 					return boom
 				}
 				return nil
 			}
 		}
-		u := relayUpdate{keep: step("keep"), place: step("place"), install: step("install"), check: step("check"),
-			restore: step("restore"), checkBack: step("checkBack"), open: step("open")}
+		u := relayUpdate{keep: step("keep"), mark: step("mark"), install: step("install"), check: step("check"),
+			restore: step("restore"), checkBack: step("checkBack"), open: step("open"),
+			unmark: func() { calls = append(calls, "unmark") },
+			place: func() (bool, error) {
+				calls = append(calls, "place")
+				switch {
+				case slices.Contains(fails, "place0"):
+					return false, boom
+				case slices.Contains(fails, "place"):
+					return true, boom
+				}
+				return true, nil
+			}}
 		var err error
 		_, _ = captureStdout(t, func() error { err = u.run(); return nil })
 		var rb rolledBack
@@ -256,68 +273,175 @@ func TestRelayHealth(t *testing.T) {
 	}
 }
 
-// keep and restore on files of a test's own: the binaries, the plan's
-// files (one added by the update goes again), rayspa's snapshot, the units
-// enabled and started as they were.
-func TestRelayKeepRestore(t *testing.T) {
-	dir := t.TempDir()
-	at := func(p string) string { return filepath.Join(dir, p) }
-	for _, d := range []string{"bin", "etc", "state"} {
-		os.Mkdir(at(d), 0o755)
+// fakeRelay is a relay host on a test's own directories: rayspa, rayctl
+// and rayd, rayspa's unit, the sysctl files, its snapshot (with a
+// service), the stored bundle; systemctl and the rest recorded, and the
+// steps rayctl update cannot run here (the release, the install, the
+// check of a running relay) given.
+type fakeRelay struct {
+	t      *testing.T
+	dir    string
+	ran    []string
+	wants  []string         // the versions each check after a change expected
+	bad    map[string]error // a check of that version fails
+	before error            // relayBefore's refusal
+	asked  int              // relayBefore called
+	open   bool             // hostOpen
+	yes    bool             // the answer to the prompt
+	prompt string
+	inst   func() error // the install
+	placeF func(src, dst string) error
+	env    relayEnv
+}
+
+func (f *fakeRelay) at(p string) string { return filepath.Join(f.dir, p) }
+
+func (f *fakeRelay) write(p, s string) {
+	f.t.Helper()
+	if err := os.WriteFile(f.at(p), []byte(s), 0o644); err != nil {
+		f.t.Fatal(err)
 	}
-	write := func(p, s string) {
-		if err := os.WriteFile(at(p), []byte(s), 0o644); err != nil {
-			t.Fatal(err)
-		}
+}
+
+func (f *fakeRelay) read(p string) string {
+	b, err := os.ReadFile(f.at(p))
+	if err != nil {
+		return "<none>"
 	}
-	read := func(p string) string {
-		b, err := os.ReadFile(at(p))
-		if err != nil {
-			return "<none>"
-		}
-		return string(b)
+	return string(b)
+}
+
+func (f *fakeRelay) record(s string) { f.ran = append(f.ran, s) }
+
+// snapshotWith is a snapshot that lets 203.0.113.9 in on port 22, with a
+// service if services.
+func snapshotWith(t *testing.T, services bool) string {
+	t.Helper()
+	snap := &perimeterv1.Snapshot{AdminPrefixes: []string{"203.0.113.9/32"}, AdminPorts: []*perimeterv1.Port{{Proto: "tcp", Port: 22}}}
+	if services {
+		snap.Services = []*perimeterv1.Service{{Id: 1}}
 	}
-	write("bin/rayspa", "old rayspa")
-	write("bin/rayctl", "old rayctl")
-	write("etc/rayspa.service", "old unit")
-	write("etc/91-relay.conf", "net.ipv4.ip_forward = 1\n")
-	write("state/snapshot.pb", "old snapshot")
-	var ran []string
+	b, err := proto.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func newFakeRelay(t *testing.T) *fakeRelay {
+	f := &fakeRelay{t: t, dir: t.TempDir(), bad: map[string]error{}, yes: true}
+	for _, d := range []string{"bin", "etc", "etc/sysctl", "state"} {
+		os.Mkdir(f.at(d), 0o755)
+	}
+	f.write("bin/rayspa", "rayspa v0.26.0")
+	f.write("bin/rayctl", "rayctl v0.26.0")
+	f.write("bin/rayd", "rayd v0.26.0")
+	f.write("etc/rayspa.service", "old unit")
+	f.write("etc/sysctl/90-raycontrol.conf", "hardening\n")
+	f.write("etc/sysctl/91-raycontrol-relay.conf", "net.ipv4.ip_forward = 1\n")
+	f.write("state/snapshot.pb", snapshotWith(t, true))
+	if err := os.WriteFile(f.at("relay.bundle"), []byte(testRelayBundle(t)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	ops := relayOps{
-		dir: at("previous"), bins: map[string]string{"rayspa": at("bin/rayspa"), "rayctl": at("bin/rayctl"), "rayd": at("bin/rayd")},
-		files: []string{at("etc/rayspa.service"), at("etc/rayd-relay.service"), at("etc/91-relay.conf")}, snapshot: at("state/snapshot.pb"),
-		units: []string{"rayspa.service", "rayd-relay.service"},
-		state: func(u string) unitWas { return unitWas{Enabled: u == "rayspa.service", Active: u == "rayspa.service"} },
+		dir: f.at("previous"), bins: map[string]string{"rayspa": f.at("bin/rayspa"), "rayctl": f.at("bin/rayctl"), "rayd": f.at("bin/rayd")},
+		files: []string{f.at("etc/rayspa.service"), f.at("etc/rayd-relay.service"),
+			f.at("etc/sysctl/90-raycontrol.conf"), f.at("etc/sysctl/91-raycontrol-relay.conf")},
+		sysctlDir: f.at("etc/sysctl") + "/", snapshot: f.at("state/snapshot.pb"),
+		units:  []string{"rayspa.service", "rayd-relay.service"},
+		state:  func(u string) unitWas { return unitWas{Enabled: true, Active: true} },
+		loaded: func(string) bool { return true },
 		run: func(name string, args ...string) error {
-			ran = append(ran, strings.Join(append([]string{name}, args...), " "))
+			f.record(strings.Join(append([]string{name}, args...), " "))
 			return nil
 		},
 		place: func(src, dst string) error {
+			if f.placeF != nil {
+				if err := f.placeF(src, dst); err != nil {
+					return err
+				}
+			}
+			f.record("place " + filepath.Base(dst))
 			b, err := os.ReadFile(src)
 			if err != nil {
 				return err
 			}
 			return os.WriteFile(dst, b, 0o755)
 		},
-		disarm: func() { ran = append(ran, "disarm") }, unforward: func() {}, tableGone: func() bool { return true },
+		disarm: func() { f.record("disarm") }, unforward: func() { f.record("unforward") },
+		tableGone: func() bool { return true }, rayspa: "rayspa",
 	}
+	f.env = relayEnv{
+		bundle: f.at("relay.bundle"), ops: ops, session: session{"203.0.113.9", 22},
+		before: func(string) (int, string, error) {
+			f.asked++
+			return 22, "", f.before
+		},
+		sshPort:     func() int { return 22 },
+		hostOpen:    func() bool { return f.open },
+		lock:        func(what string) error { f.record("lock " + what); return nil },
+		installLock: func() (*os.File, error) { return os.Open(f.at("relay.bundle")) },
+		newStage:    func() (string, error) { return os.MkdirTemp(f.dir, "stage-") },
+		stage: func(_ context.Context, o updateOpts, stage, installed string) (staged, error) {
+			if o.check {
+				fmt.Printf("installed %s, release v0.26.1 available: rayctl update\n", installed)
+				return staged{version: "v0.26.1", done: true}, nil
+			}
+			for _, n := range []string{"rayspa", "rayctl", "rayd"} {
+				os.WriteFile(filepath.Join(stage, n), []byte(n+" v0.26.1"), 0o755)
+			}
+			return staged{version: "v0.26.1"}, nil
+		},
+		place: func(stage string) (bool, error) { return placeRelayBinaries(stage, ops.bins, ops.place) },
+		install: func(*os.File) error {
+			f.record("install")
+			if f.inst != nil {
+				return f.inst()
+			}
+			return nil
+		},
+		health: func(w healthWant) func() error {
+			return func() error { f.wants = append(f.wants, w.want); return f.bad[w.want] }
+		},
+		confirm: func(p string) bool { f.prompt = p; return f.yes },
+		signals: func() func() { f.record("signals"); return func() {} },
+	}
+	return f
+}
+
+func (f *fakeRelay) update(o updateOpts) (string, error) {
+	return captureStdout(f.t, func() error { return f.env.update(context.Background(), o, false, "v0.26.0") })
+}
+
+func (f *fakeRelay) rollback(yes bool) (string, error) {
+	return captureStdout(f.t, func() error { return f.env.update(context.Background(), updateOpts{yes: yes}, true, "v0.26.1") })
+}
+
+// keep and restore on files of a test's own: the binaries (one already as
+// kept is not placed again), the files (one added by the update goes),
+// rayspa's snapshot, the sysctl files forwarding first, the units stopped
+// for sure, enabled and started as they were.
+func TestRelayKeepRestore(t *testing.T) {
+	f := newFakeRelay(t)
+	ops := f.env.ops
+	ops.state = func(u string) unitWas { return unitWas{Enabled: u == "rayspa.service", Active: u == "rayspa.service"} }
 	k, err := ops.keep("v0.26.0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !k.Snapshot || !k.Files[at("etc/rayspa.service")] || k.Files[at("etc/rayd-relay.service")] || !k.Units["rayspa.service"].Active {
+	if !k.Snapshot || !k.Services || !k.Files[f.at("etc/rayspa.service")] || k.Files[f.at("etc/rayd-relay.service")] || !k.Units["rayspa.service"].Active {
 		t.Fatalf("kept %+v", k)
 	}
-	// The update: new binaries, a new unit, the old one rewritten, rayd
-	// added, the snapshot gone (the install removes it), forwarding off.
-	write("bin/rayspa", "new rayspa")
-	write("bin/rayctl", "new rayctl")
-	write("bin/rayd", "new rayd")
-	write("etc/rayspa.service", "new unit")
-	write("etc/rayd-relay.service", "new probe unit")
-	os.Remove(at("etc/91-relay.conf"))
-	os.Remove(at("state/snapshot.pb"))
-	ran = nil
+	// The update: new rayspa and rayd, rayctl as it was, a new unit, the
+	// old one rewritten, the snapshot gone (the install removes it),
+	// forwarding's file gone (a failed install's unforward).
+	f.write("bin/rayspa", "rayspa v0.26.1")
+	f.write("bin/rayd", "rayd v0.26.1")
+	f.write("etc/rayspa.service", "new unit")
+	f.write("etc/rayd-relay.service", "new probe unit")
+	os.Remove(f.at("etc/sysctl/91-raycontrol-relay.conf"))
+	os.Remove(f.at("state/snapshot.pb"))
+	f.ran = nil
 	var back relayKept
 	if _, err := captureStdout(t, func() (err error) { back, err = ops.restore(true); return err }); err != nil {
 		t.Fatal(err)
@@ -326,41 +450,264 @@ func TestRelayKeepRestore(t *testing.T) {
 		t.Errorf("version %q", back.Version)
 	}
 	for p, want := range map[string]string{
-		"bin/rayspa": "old rayspa", "bin/rayctl": "old rayctl", "bin/rayd": "new rayd", // none before: none kept
-		"etc/rayspa.service": "old unit", "etc/rayd-relay.service": "<none>", "etc/91-relay.conf": "net.ipv4.ip_forward = 1\n",
-		"state/snapshot.pb": "old snapshot",
+		"bin/rayspa": "rayspa v0.26.0", "bin/rayctl": "rayctl v0.26.0", "bin/rayd": "rayd v0.26.0",
+		"etc/rayspa.service": "old unit", "etc/rayd-relay.service": "<none>",
+		"etc/sysctl/91-raycontrol-relay.conf": "net.ipv4.ip_forward = 1\n", "state/snapshot.pb": snapshotWith(t, true),
 	} {
-		if got := read(p); got != want {
+		if got := f.read(p); got != want {
 			t.Errorf("%s: %q, want %q", p, got, want)
 		}
 	}
-	want := []string{"disarm", "systemctl stop rayd-relay.service rayspa.service", "systemctl daemon-reload",
+	want := []string{"disarm", "systemctl stop rayd-relay.service", "systemctl stop rayspa.service", "place rayd", "place rayspa",
+		"systemctl daemon-reload",
+		"sysctl -q -p " + f.at("etc/sysctl/91-raycontrol-relay.conf"), "sysctl -q -p " + f.at("etc/sysctl/90-raycontrol.conf"),
 		"systemctl enable rayspa.service", "systemctl disable rayd-relay.service", "systemctl start rayspa.service"}
-	if !slices.Equal(ran, want) {
-		t.Errorf("ran %q\nwant %q", ran, want)
+	if !slices.Equal(f.ran, want) {
+		t.Errorf("ran %q\nwant %q", f.ran, want)
 	}
-	// A manual rollback keeps rayspa's snapshot as it is now.
-	write("state/snapshot.pb", "the exit's latest")
+	// A rollback by hand keeps rayspa's snapshot as it is now.
+	f.write("state/snapshot.pb", "the exit's latest")
 	if _, err := captureStdout(t, func() error { _, err := ops.restore(false); return err }); err != nil {
 		t.Fatal(err)
 	}
-	if got := read("state/snapshot.pb"); got != "the exit's latest" {
+	if got := f.read("state/snapshot.pb"); got != "the exit's latest" {
 		t.Errorf("snapshot %q after a rollback by hand", got)
 	}
+	// A unit that does not stop: no restore under a rayspa that runs on.
+	run := ops.run
+	ops.run = func(name string, args ...string) error {
+		if len(args) > 0 && args[0] == "stop" {
+			return errors.New("timed out")
+		}
+		return run(name, args...)
+	}
+	f.ran = nil
+	if _, err := captureStdout(t, func() error { _, err := ops.restore(true); return err }); err == nil || !strings.Contains(err.Error(), "stopping") {
+		t.Errorf("a unit that did not stop: %v", err)
+	}
+	if slices.ContainsFunc(f.ran, func(s string) bool { return strings.HasPrefix(s, "place") }) {
+		t.Errorf("binaries placed under a running rayspa: %q", f.ran)
+	}
+	ops.run = run
 	// Nothing kept: nothing to roll back to.
-	ops.dir = at("none")
-	if _, err := ops.restore(true); err == nil || !strings.Contains(err.Error(), "nothing to roll back to") {
+	none := ops
+	none.dir = f.at("none")
+	if _, err := none.restore(true); err == nil || !strings.Contains(err.Error(), "nothing to roll back to") {
 		t.Errorf("no copy: %v", err)
 	}
-	// open: rayspa down; a table that stays is said.
-	ran = nil
-	ops.rayspa = "rayspa"
-	if err := ops.open(); err != nil || !slices.Equal(ran, []string{"systemctl disable --now rayd-relay.service rayspa.service", "rayspa teardown"}) {
-		t.Errorf("open: %v %q", err, ran)
+	// open: rayspa down, forwarding off, the mark says so; a table that
+	// stays is said.
+	f.ran = nil
+	if err := ops.open(); err != nil || !slices.Equal(f.ran, []string{"systemctl disable --now rayd-relay.service rayspa.service", "rayspa teardown", "unforward"}) {
+		t.Errorf("open: %v %q", err, f.ran)
+	}
+	if m, ok := ops.readMark(); !ok || m.State != "open" {
+		t.Errorf("open left the mark %+v %v", m, ok)
 	}
 	ops.tableGone = func() bool { return false }
 	if err := ops.open(); err == nil {
 		t.Error("a table left was not said")
+	}
+}
+
+// The copy is whole or not there: a keep that fails halfway leaves no
+// relay.json to restore from.
+func TestRelayKeepWholeOrNothing(t *testing.T) {
+	f := newFakeRelay(t)
+	os.Remove(f.at("state/snapshot.pb"))
+	os.Mkdir(f.at("state/snapshot.pb"), 0o700) // not a regular file
+	if _, err := f.env.ops.keep("v0.26.0"); err == nil {
+		t.Fatal("kept a snapshot that is a directory")
+	}
+	if _, err := os.Stat(filepath.Join(f.env.ops.dir, relayKeptFile)); !os.IsNotExist(err) {
+		t.Errorf("relay.json after a keep that failed: %v", err)
+	}
+	if _, err := f.env.ops.kept(); err == nil {
+		t.Error("a rollback would restore from a copy that is not whole")
+	}
+}
+
+// rayctl update on a relay, the whole of it on a fake host.
+func TestRelayUpdateWhole(t *testing.T) {
+	// Done: the check expects the new version, the copy and nothing else
+	// stays, the signals are caught from the point of no return.
+	f := newFakeRelay(t)
+	if _, err := f.update(updateOpts{want: "latest"}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.wants, []string{"v0.26.1"}) {
+		t.Errorf("checked %v", f.wants)
+	}
+	if f.read("bin/rayspa") != "rayspa v0.26.1" || !strings.Contains(f.prompt, "at most about 5 minutes") {
+		t.Errorf("rayspa %q, prompt %q", f.read("bin/rayspa"), f.prompt)
+	}
+	if k, err := f.env.ops.kept(); err != nil || k.Version != "v0.26.0" || !k.Snapshot {
+		t.Errorf("kept %+v %v", k, err)
+	}
+	if _, marked := f.env.ops.readMark(); marked {
+		t.Error("a mark after an update that ended checked")
+	}
+	if !slices.Contains(f.ran, "lock update") || !slices.Contains(f.ran, "signals") {
+		t.Errorf("ran %q", f.ran)
+	}
+
+	// The install fails having removed the snapshot and rewritten the
+	// unit: the relay comes back as it ran, its snapshot too.
+	f = newFakeRelay(t)
+	f.inst = func() error {
+		os.Remove(f.at("state/snapshot.pb"))
+		f.write("etc/rayspa.service", "new unit")
+		return errors.New("the relay took no perimeter from its exit")
+	}
+	_, err := f.update(updateOpts{want: "latest", yes: true})
+	if rb := (rolledBack{}); !errors.As(err, &rb) {
+		t.Fatalf("not rolled back: %v", err)
+	}
+	if f.read("state/snapshot.pb") != snapshotWith(t, true) || f.read("etc/rayspa.service") != "old unit" || f.read("bin/rayspa") != "rayspa v0.26.0" {
+		t.Errorf("not back as it ran: %q %q %q", f.read("state/snapshot.pb"), f.read("etc/rayspa.service"), f.read("bin/rayspa"))
+	}
+	if !slices.Equal(f.wants, []string{"v0.26.0"}) {
+		t.Errorf("checked %v", f.wants)
+	}
+	if _, marked := f.env.ops.readMark(); marked {
+		t.Error("a mark after a rollback that ended checked")
+	}
+
+	// The previous relay does not pass its check either: the host is
+	// left open, forwarding off, and the next update says how to recover.
+	f = newFakeRelay(t)
+	f.inst = func() error { return errors.New("boom") }
+	f.bad["v0.26.0"] = errors.New("rayspa is inactive/dead")
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err == nil || !strings.Contains(err.Error(), "host left open") {
+		t.Fatalf("not open: %v", err)
+	}
+	if !slices.Contains(f.ran, "unforward") || !slices.Contains(f.ran, "systemctl disable --now rayd-relay.service rayspa.service") {
+		t.Errorf("ran %q", f.ran)
+	}
+	text, err := f.update(updateOpts{want: "latest", yes: true, force: true})
+	if err == nil || !strings.Contains(err.Error(), "rayctl update -rollback") || strings.Contains(text, "newest") {
+		t.Errorf("after the host was left open: %q %v", text, err)
+	}
+	if text, err := f.update(updateOpts{want: "latest", check: true}); err != nil || !strings.Contains(text, "warning: the last update or rollback") {
+		t.Errorf("-check: %q %v", text, err)
+	}
+	if text, err := captureStdout(t, func() error { return (&cli{}).relayPolicy([]string{"status"}, f.env.ops.dir) }); err != nil ||
+		!strings.Contains(text, "unfinished the last update or rollback") {
+		t.Errorf("status: %q %v", text, err)
+	}
+
+	// relayBefore refuses: nothing is kept, placed or marked.
+	f = newFakeRelay(t)
+	f.before = errors.New("this SSH session comes from 198.51.100.7, not from the relay's admin addresses")
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err == nil || !strings.Contains(err.Error(), "admin addresses") {
+		t.Fatalf("refusal: %v", err)
+	}
+	if _, err := f.env.ops.kept(); err == nil || f.read("bin/rayspa") != "rayspa v0.26.0" {
+		t.Errorf("changed after a refusal: %q", f.read("bin/rayspa"))
+	}
+
+	// The first binary cannot be placed (a full disk): nothing to undo, no
+	// unit stopped, no mark.
+	f = newFakeRelay(t)
+	f.placeF = func(string, string) error { return errors.New("no space left on device") }
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err == nil || !strings.Contains(err.Error(), "nothing changed") {
+		t.Fatalf("full disk: %v", err)
+	}
+	if slices.ContainsFunc(f.ran, func(s string) bool { return strings.Contains(s, "stop") || s == "disarm" }) {
+		t.Errorf("a relay that ran was touched: %q", f.ran)
+	}
+	if _, marked := f.env.ops.readMark(); marked {
+		t.Error("a mark after nothing changed")
+	}
+
+	// Not confirmed: nothing changes.
+	f = newFakeRelay(t)
+	f.yes = false
+	if _, err := f.update(updateOpts{want: "latest"}); err == nil || f.read("bin/rayspa") != "rayspa v0.26.0" {
+		t.Errorf("not confirmed: %v", err)
+	}
+}
+
+// rayctl update -rollback on a relay: asked first; after an update that
+// was interrupted with the host left open (the install removed the
+// snapshot), it restores the kept snapshot without asking a perimeter
+// there is none of to let this session in.
+func TestRelayRollbackWhole(t *testing.T) {
+	f := newFakeRelay(t)
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err != nil {
+		t.Fatal(err)
+	}
+	f.yes = false
+	if _, err := f.rollback(false); err == nil || !strings.Contains(err.Error(), "not confirmed") || f.read("bin/rayspa") != "rayspa v0.26.1" {
+		t.Errorf("not confirmed: %v, rayspa %q", err, f.read("bin/rayspa"))
+	}
+	// By hand after a good update: the snapshot stays the exit's latest.
+	f.write("state/snapshot.pb", "the exit's latest")
+	f.yes = true
+	if _, err := f.rollback(false); err != nil {
+		t.Fatal(err)
+	}
+	if f.read("bin/rayspa") != "rayspa v0.26.0" || f.read("state/snapshot.pb") != "the exit's latest" || f.asked == 0 {
+		t.Errorf("rollback by hand: %q %q, asked %d", f.read("bin/rayspa"), f.read("state/snapshot.pb"), f.asked)
+	}
+
+	// Interrupted: kept and marked, the new binaries in place, the install
+	// opened the host and removed the snapshot; relayBefore would refuse.
+	f = newFakeRelay(t)
+	if _, err := f.env.ops.keep("v0.26.0"); err != nil {
+		t.Fatal(err)
+	}
+	f.env.ops.mark(relayMark{State: "updating", From: "v0.26.0", To: "v0.26.1"})
+	f.write("bin/rayspa", "rayspa v0.26.1")
+	os.Remove(f.at("state/snapshot.pb"))
+	f.open = true
+	f.before = errors.New("the relay's perimeter cannot be read")
+	text, err := f.update(updateOpts{want: "latest", yes: true})
+	if err == nil || !strings.Contains(err.Error(), "was interrupted: rayctl update -rollback puts v0.26.0 back") || strings.Contains(text, "newest") {
+		t.Errorf("update after an interrupted one: %q %v", text, err)
+	}
+	if _, err := f.rollback(true); err != nil {
+		t.Fatalf("rollback of an open host: %v", err)
+	}
+	if f.read("bin/rayspa") != "rayspa v0.26.0" || f.read("state/snapshot.pb") != snapshotWith(t, true) || f.asked != 0 {
+		t.Errorf("after: %q %q, asked %d", f.read("bin/rayspa"), f.read("state/snapshot.pb"), f.asked)
+	}
+	if _, marked := f.env.ops.readMark(); marked {
+		t.Error("the mark stays after a rollback that ended checked")
+	}
+	// Marked, the host not open (killed between place and install): the
+	// kept snapshot comes back too, and this session is checked first.
+	f = newFakeRelay(t)
+	f.env.ops.keep("v0.26.0")
+	f.env.ops.mark(relayMark{State: "updating", From: "v0.26.0", To: "v0.26.1"})
+	f.write("state/snapshot.pb", "a snapshot the update's install took")
+	if _, err := f.rollback(true); err != nil || f.read("state/snapshot.pb") != snapshotWith(t, true) || f.asked != 1 {
+		t.Errorf("marked, not open: %v %q, asked %d", err, f.read("state/snapshot.pb"), f.asked)
+	}
+}
+
+// The install that the update runs has none of the update's own
+// variables (the handoff's above all: it would take the install for an
+// update), and gets the install lock as fd 3.
+func TestRelayInstallCommand(t *testing.T) {
+	t.Setenv(handoffEnv, "1")
+	t.Setenv(updateFromEnv, "v0.26.0")
+	lock, err := os.CreateTemp(t.TempDir(), "lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	cmd := relayInstallCommand("/usr/local/bin/rayctl", "/etc/raycontrol/relay.bundle", lock)
+	if !slices.Equal(cmd.Args, []string{"/usr/local/bin/rayctl", "install", "-relay", "/etc/raycontrol/relay.bundle"}) {
+		t.Errorf("args %q", cmd.Args)
+	}
+	if slices.ContainsFunc(cmd.Env, func(kv string) bool {
+		return strings.HasPrefix(kv, handoffEnv+"=") || strings.HasPrefix(kv, updateFromEnv+"=")
+	}) || !slices.Contains(cmd.Env, relayLockEnv+"=3") {
+		t.Errorf("env %q", cmd.Env)
+	}
+	if len(cmd.ExtraFiles) != 1 || cmd.ExtraFiles[0] != lock {
+		t.Errorf("extra files %v", cmd.ExtraFiles)
 	}
 }
 
@@ -539,6 +886,11 @@ func TestStageReleaseRelay(t *testing.T) {
 	}
 	if s, _, text, err := stage(updateOpts{want: "latest", check: true}, "v0.26.0"); err != nil || !s.done || !strings.Contains(text, "release v0.26.1 available") {
 		t.Errorf("latest, -check: %+v %q %v", s, text, err)
+	}
+	// The relay's floor holds on the way that reads latest first, -check too.
+	files = signedRelease(t, k, "v0.25.2", out)
+	if _, _, _, err := stage(updateOpts{want: "latest", check: true}, "v0.25.1"); err == nil || !strings.Contains(err.Error(), "bootstrap.sh -relay") {
+		t.Errorf("latest below the floor, -check: %v", err)
 	}
 }
 
