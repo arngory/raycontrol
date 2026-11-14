@@ -1,0 +1,138 @@
+//go:build unix
+
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/arngory/raycontrol/internal/api"
+	"github.com/arngory/raycontrol/internal/node"
+)
+
+// deviceFile writes an admin device's file as rayctl remote enroll does.
+func deviceFile(t *testing.T) remoteIdentity {
+	t.Helper()
+	cert, err := api.NewClientCertificate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := node.Bundle{Version: 1, Host: "192.0.2.1", DeviceID: "d-test", DeviceKey: strings.Repeat("00", 32),
+		API: &node.BundleSub{Port: 8443, Pin: "pin"}}
+	id := remoteIdentity{path: filepath.Join(t.TempDir(), "node-d-test.rcdev"), bundle: b, cert: cert}
+	if id.raw, err = b.Encode(); err != nil {
+		t.Fatal(err)
+	}
+	if err := id.save(true); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// A device file is read only while it is the user's own and closed to
+// everyone else; the refusal names the file, its mode and the fix.
+func TestDeviceFileMode(t *testing.T) {
+	id := deviceFile(t)
+	fi, err := os.Stat(id.path)
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("the file as written: %v, %v", fi.Mode(), err)
+	}
+	got, err := loadIdentity(id.path)
+	if err != nil || got.raw != id.raw || got.bundle.DeviceID != "d-test" {
+		t.Fatalf("the file as written: %v", err)
+	}
+	// What remote rotate writes over it stays closed.
+	if err := id.save(false); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(id.path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("the file as rewritten: %v, %v", fi.Mode(), err)
+	}
+	for _, mode := range []os.FileMode{0o600, 0o400, 0o700} {
+		if err := os.Chmod(id.path, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadIdentity(id.path); err != nil {
+			t.Errorf("mode %v: %v", mode, err)
+		}
+	}
+	for _, mode := range []os.FileMode{0o640, 0o604, 0o644, 0o620, 0o602, 0o610, 0o601, 0o666, 0o660, 0o444} {
+		if err := os.Chmod(id.path, mode); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadIdentity(id.path)
+		if err == nil {
+			t.Errorf("mode %v: read", mode)
+			continue
+		}
+		for _, want := range []string{"device file " + id.path, mode.String(), "it holds a private key, make it 0600", "chmod 600 " + id.path} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("mode %v: %q lacks %q", mode, err, want)
+			}
+		}
+		if strings.Contains(err.Error(), "\n") {
+			t.Errorf("mode %v: more than a line: %q", mode, err)
+		}
+	}
+	// Through a link it is the file that counts, not the link.
+	if err := os.Chmod(id.path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link.rcdev")
+	if err := os.Symlink(id.path, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadIdentity(link); err == nil || !strings.Contains(err.Error(), "chmod 600") {
+		t.Errorf("an open file through a link: %v", err)
+	}
+	if err := os.Chmod(id.path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadIdentity(link); err != nil {
+		t.Errorf("a closed file through a link: %v", err)
+	}
+	// A file that is not there is the read's to report, as before.
+	if _, err := loadIdentity(filepath.Join(t.TempDir(), "missing.rcdev")); err == nil || !strings.HasPrefix(err.Error(), "open ") {
+		t.Errorf("a missing file: %v", err)
+	}
+}
+
+// Another user's file is refused whatever its mode: its owner can change
+// the node it trusts.
+func TestDeviceFileOwner(t *testing.T) {
+	for _, c := range []struct {
+		mode      os.FileMode
+		owner, me int
+		want      string // "": read
+	}{
+		{0o600, 1000, 1000, ""},
+		{0o600, 0, 0, ""},
+		{0o600, -1, 1000, ""}, // the system does not say whose
+		{0o644, -1, 1000, "chmod 600"},
+		{0o600, 1001, 1000, "belongs to uid 1001, not to you (uid 1000)"},
+		{0o644, 1001, 1000, "belongs to uid 1001, not to you (uid 1000)"},
+		{0o600, 1000, 0, "belongs to uid 1000, not to you (uid 0)"}, // root with a user's file
+		{0o600, 0, 1000, "belongs to uid 0, not to you (uid 1000)"},
+	} {
+		err := deviceFileProblem("f.rcdev", c.mode, c.owner, c.me)
+		switch {
+		case c.want == "" && err != nil:
+			t.Errorf("%+v: %v", c, err)
+		case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "device file f.rcdev") ||
+			strings.Contains(err.Error(), "\n")):
+			t.Errorf("%+v: %v", c, err)
+		}
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("giving a file away needs root")
+	}
+	id := deviceFile(t)
+	if err := os.Chown(id.path, 65534, -1); err != nil {
+		t.Skipf("chown: %v", err)
+	}
+	if _, err := loadIdentity(id.path); err == nil || !strings.Contains(err.Error(), "belongs to uid 65534, not to you (uid 0)") {
+		t.Errorf("another user's file: %v", err)
+	}
+}

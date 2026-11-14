@@ -42,8 +42,13 @@ type remoteIdentity struct {
 	cert   tls.Certificate
 }
 
+// loadIdentity reads a device file, which must be the user's own and
+// closed to everyone else (checkDeviceFile).
 func loadIdentity(path string) (remoteIdentity, error) {
 	id := remoteIdentity{path: path}
+	if err := checkDeviceFile(path); err != nil {
+		return id, err
+	}
 	b, err := os.ReadFile(path) //nolint:gosec // G304: the operator's file
 	if err != nil {
 		return id, err
