@@ -114,7 +114,7 @@
 |---|---|---|
 | Процессор | 1 vCPU | 2 vCPU и больше |
 | Память | 1 ГиБ | 2 ГиБ |
-| Диск | 10 ГБ | 20 ГБ |
+| Диск | 10 ГБ; `/var` и `/var/lib` — на локальном диске, не на NFS или iSCSI | 20 ГБ |
 | Виртуализация | KVM или другая с собственным ядром | — |
 | Архитектура | amd64 или arm64 | — |
 | Сеть | статический публичный IPv4; входящий UDP не режется | плюс IPv6 |
@@ -147,6 +147,9 @@
 - **Каталог состояния** `/var/lib/raycontrol` нельзя делать ссылкой на другой диск: ключи сервисов root копирует,
   не переходя по ссылкам, и сервисы не стартуют. Другой диск подключают через bind mount — строкой в `/etc/fstab`:
   `/data/raycontrol /var/lib/raycontrol none bind 0 0`.
+- **`/var` и `/var/lib` по сети не годятся.** Хост, у которого они на NFS или iSCSI (сетевой диск), для ноды не
+  поддерживается: периметр стартует до сети, а его состояние лежит в `/var/lib`, и при загрузке получается цикл
+  порядка запуска. Другой диск для `/var/lib/raycontrol` — только локальный.
 
 ### Что проверить у провайдера до покупки
 
@@ -398,8 +401,9 @@ ls -lL /etc/resolv.conf
 - Если в первых трёх строках `nameserver` только частный резолвер (10.0.0.2, 169.254.169.254 у части облаков),
   локальный (127.0.0.1) или адрес самой ноды, то Hysteria2 и пиры Yggdrasil не найдут имён: их юниты не пускают в
   частные сети, а с v0.27.0 их для всего data plane закрывает и периметр (§9, «Политика выхода»). Заглушка
-  systemd-resolved (127.0.0.53, 127.0.0.54) им открыта, публичный резолвер тоже подходит. Проверка хоста об этом
-  предупредит.
+  systemd-resolved (127.0.0.53, 127.0.0.54) им открыта, резолвер платформы Azure (168.63.129.16) — на порту 53,
+  публичный резолвер тоже подходит. Проверка хоста (`rayctl check`) предупреждает, если резолвер хоста data plane
+  недоступен.
 
 ### 2.6. SSH
 
@@ -1562,6 +1566,7 @@ channel udp: 50 sent, 50 back; lost up 0, down 0; rtt min/avg/max 46.9/48.3/55.0
   | `rayctl service set site answer=404\|403\|silent\|pages` | `404` | что сайт отвечает тем, кого отклонил REALITY: пустой 404, пустой 403, молчание до обрыва или сгенерированный сайт. Затем `rayctl apply` |
   | `rayctl service set reality rotate_sni=false` | `true` | не менять имя сервера при плановой смене ключей |
   | `rayctl service set reality open=true` | выключено | TCP 443 открыт всем, без SPA (§9) |
+  | `rayctl service set reality target=АДРЕС:ПОРТ` | своя цель при создании | сменить чужую цель (ниже, «Чужая цель»); ключи не меняются. С v0.27.0 |
   | `rayctl service rotate reality [-now]` | — | сменить ключи раньше срока (§12.7) |
   | `rayctl service cert site -chain F -key F [-force]` | ACME | только root: свой сертификат вместо Let's Encrypt; должен покрывать все имена сайта. Ссылки под ним идут без пина (ниже) |
   | `rayctl service rotate site [-force \| -fresh]` | — | только root: сменить ключ сертификата сайта (ниже) |
@@ -1571,12 +1576,17 @@ channel udp: 50 sent, 50 back; lost up 0, down 0; rtt min/avg/max 46.9/48.3/55.0
   `yggdrasil` при этом недоступны: им нужен свой сайт.
   - **Цель в локальной сети ноды** (свой веб-сервер на `127.0.0.1:8443`, сервер в частной сети VPS) задавайте
     адресом и с `sni` — именем, на которое у цели сертификат:
-    `-settings '{"target":"127.0.0.1:8443","sni":"www.example.org"}'`. Запрет локальных сетей (§9) пропускает её
-    только процессу этого сервиса: строка `local exempt` в `rayctl egress`.
-  - **Имя, которое разрешается в локальный адрес,** с v0.27.0 не проходит проверку цели: `service add` отказывает,
-    а у работающего сервиса строка `reality-target` в `rayctl status` — `FAILED … give the address as the target
-    (…) with the sni`. Исключения такой цели нет: что открыть, решал бы DNS.
-  - Цель задаётся только при `service add`: у `rayctl service set` такой настройки нет.
+    `-settings '{"target":"127.0.0.1:8443","sni":"www.example.org"}'`. Имя `localhost:ПОРТ` считается loopback
+    и тоже годится. Запрет локальных сетей (§9) пропускает такую цель только процессу этого сервиса: строка
+    `local exempt` в `rayctl egress`.
+  - **Свой веб-сервер — только через loopback.** Цель на собственном адресе ноды (не loopback) или на `0.0.0.0`
+    нода не принимает: задайте `127.0.0.1:ПОРТ`.
+  - **Другое имя, которое разрешается в локальный адрес,** с v0.27.0 не работает: исключения такой цели нет — что
+    открыть, решал бы DNS. О ней предупреждают `rayctl check`, `rayctl status` (строка `reality-target`) и
+    `rayctl update` до обновления.
+  - **Сменить цель** работающего сервиса: `rayctl service set reality target=127.0.0.1:8443` — цель проверяется так
+    же, как при `service add`; ключи, shortId и имена сервера не меняются. Для всей ноды сразу — `rayctl egress
+    allow local` (§9).
 
 ### Сертификат сайта и пины (`niko-pin`)
 
@@ -1939,7 +1949,8 @@ rayctl egress
 **Локальные сети** (с v0.27.0) закрыты с самого начала, в отличие от BitTorrent и SMTP: loopback, частные сети,
 link-local и адрес метаданных облака, CGNAT, multicast, ULA и 168.63.129.16 (Azure). Новые соединения data plane
 туда ядро отвергает: TCP — сбросом сразу, UDP и ICMP — отказом. Пропущены только заглушка systemd-resolved на
-порту 53, проба канала и цели REALITY из строк `local exempt`. Через прокси эти сети закрыты и проверками самих
+порту 53, резолвер Azure 168.63.129.16 на порту 53 (остальные его порты закрыты), проба канала и цели REALITY из
+строк `local exempt`. Через прокси эти сети закрыты и проверками самих
 процессов (naive, Xray, Hysteria2); ядро — страховка на случай их ошибки. Подробно —
 [spec/egress-policy-v1.md](spec/egress-policy-v1.md) §10.
 
@@ -3097,6 +3108,22 @@ rayctl device list
 
 Это пользователи, у которых хотя бы у одного устройства в столбце `REVOKED` стоит дата, а не `-`.
 
+**Цель REALITY.** Только если у REALITY чужая цель (§8, «Чужая цель»); с сайтом самой ноды (так ставит установка)
+это вас не касается. С v0.27.0 data plane не ходит в локальные сети, и цель, заданная именем, которое разрешается в
+локальный адрес, перестаёт работать (`localhost:ПОРТ` и цель-адрес работают). Проверьте до обновления проверкой
+хоста v0.27.0: скачайте и проверьте архив релиза, как в §3.4, и в том же каталоге
+
+```bash
+tar -xzf raycontrol-linux-amd64.tar.gz rayctl
+```
+
+```bash
+./rayctl check
+```
+
+Если она предупреждает о цели REALITY, запомните сервис: исправить цель можно сразу после обновления (шаг 7), у
+v0.26.0 нужных настроек нет. То же предупреждение `rayctl update` выводит до вопроса `Type yes to go on`.
+
 **Шаг 4. Обновить.**
 
 ```bash
@@ -3171,7 +3198,8 @@ rayctl check -domain example.com
 В разделе `Advised` должна быть строка `ok    Let's Encrypt: reachable`. Строка
 `warn  Let's Encrypt: … x509: certificate signed by unknown authority (the node trusts its embedded root list: rayctl roots)`
 — нода за прокси, который вскрывает TLS: шаг 2. С Cloudflare проверьте ещё `rayctl dns sync`: строк `problem:` и
-ошибок нет.
+ошибок нет. Предупреждение о резолвере — в `/etc/resolv.conf` резолвер, до которого data plane теперь не доходит:
+§2.5. Предупреждение о цели REALITY — шаг 7.
 
 ```bash
 rayctl update status
@@ -3222,28 +3250,29 @@ blocked local   0 packets, 0 bytes
 - **Что это значит.** Новые соединения data plane к loopback, частным сетям, link-local и адресу метаданных облака,
   CGNAT, multicast, ULA и адресу 168.63.129.16 (Azure) теперь отвергает ядро: TCP получает сброс сразу, UDP и ICMP
   — отказ. Через прокси эти сети не открывались и раньше — их закрывали сами процессы; теперь их держит и периметр.
-  Исключения: заглушка systemd-resolved на порту 53, проба канала и цель REALITY, заданная локальным адресом.
+  Исключения: заглушка systemd-resolved на порту 53, резолвер Azure 168.63.129.16 на порту 53, проба канала и цель
+  REALITY, заданная локальным адресом или именем `localhost`.
 - **REALITY с сайтом самой ноды** (так ставит установка) — ничего делать не нужно.
-- **REALITY с чужой целью на локальном адресе** (`127.0.0.1:8443`, `10.0.0.5:443`; §8, «Чужая цель») — работает
-  как раньше. В `rayctl egress` для неё строка `local exempt`:
+- **REALITY с чужой целью на локальном адресе** (`127.0.0.1:8443`, `localhost:8443`, `10.0.0.5:443`; §8, «Чужая
+  цель») — работает как раньше. В `rayctl egress` для неё строка `local exempt`:
 
   ```
   local exempt    tcp 127.0.0.1:8443: REALITY reality's target, for its process only (uid …); anyone reaching reality's port without its keys reaches it through REALITY
   ```
 
   Этот адрес и порт открыты только процессу этого сервиса REALITY, не пользователям туннеля.
-- **REALITY с чужой целью, заданной именем, которое разрешается в локальный адрес,** перестаёт работать. В
-  `rayctl status`:
+- **REALITY с чужой целью, заданной другим именем, которое разрешается в локальный адрес,** перестаёт работать: для
+  такой цели исключения нет. О ней предупреждают `rayctl check`, строка `reality-target` в `rayctl status` и
+  `rayctl update` (шаг 3). Задайте цель адресом, на который разрешается имя:
 
-  ```
-  reality-target reality  FAILED …: reality target www.example.org:443 resolves to 10.0.0.5, a local address: the data plane reaches no local network by a name while local networks are blocked (the default, R4-38); give the address as the target (10.0.0.5:443) with the sni (last ok …)
+  ```bash
+  rayctl service set reality target=10.0.0.5:443
   ```
 
-  Нужна цель-адрес с `sni` — именем, на которое у цели сертификат:
-  `-settings '{"target":"10.0.0.5:443","sni":"www.example.org"}'` (§8, «Чужая цель»). У `rayctl service set`
-  такой настройки нет: цель задаётся только при `rayctl service add`. Прежнее поведение ядра возвращает
-  `rayctl egress allow local` (ниже); строка `reality-target` при этом остаётся `FAILED`: проверка цели-имени от
-  политики не зависит.
+  Вместо `reality` — имя вашего сервиса. Цель проверяется так же, как при `service add`; ключи, shortId и имена
+  сервера не меняются, клиентам ничего делать не надо. Цель на собственном адресе ноды (не loopback) или на
+  `0.0.0.0` нода не примет: свой веб-сервер задавайте как `127.0.0.1:ПОРТ`. Другой путь — `rayctl egress allow
+  local` (ниже), прежнее поведение для всей ноды.
 - **DNS-туннели** не отвечают на запросы с локальных адресов, пока локальные сети закрыты: например, от резолвера в
   частной сети самой ноды. Запросы с публичных резолверов это не задевает.
 - **Вернуть прежнее:**
@@ -3412,7 +3441,7 @@ Type yes to go on:
 | `update failed, the previous version runs again: rayspa did not bring the perimeter back: …` | новый `rayspa` не поставил свою таблицу за 30 секунд | `journalctl -u rayspa -b -p warning`; приложите `rayctl report` к обращению |
 | `rayctl status`: `tls-roots FAILED …`, `acme site FAILED` или `dns FAILED` с `… (the node trusts its embedded root list: rayctl roots)` | нода за прокси, который вскрывает TLS, или с частным ACME-УЦ | шаг 2 |
 | `rayctl status`: `perimeter FAILED …` или `perimeter unknown …` | `rayspa` не следит за `rayd`, его таблица не стоит или он старее `rayd` | шаг 8, таблица |
-| `rayctl status`: `reality-target … FAILED …: … resolves to …, a local address: …` | цель REALITY — имя, которое разрешается в локальный адрес | шаг 7: цель-адрес с `sni` |
+| `rayctl check`, `rayctl status` (строка `reality-target`) или `rayctl update` предупреждают о цели REALITY в локальной сети | цель REALITY — имя (не `localhost`), которое разрешается в локальный адрес | шаг 7: `rayctl service set ИМЯ target=АДРЕС:ПОРТ` |
 | у устройства перестал работать DoH ноды, остальное работает | устройство не брало подписку больше 72 часов после обновления или взяло её на v0.27.0, а нода откатилась | устройству — взять подписку заново: Niko берёт её и при подключении (§10.7), так что достаточно переподключиться |
 | у человека отвалились все устройства сразу после обновления | ему сменены учётные данные (строка шага 4, шаг 6) | ничего: Niko сам берёт подписку через 15–30 секунд; устройство, которое так и не подключилось, — переподключить в Niko |
 | `rayctl: failed_precondition: not now: rayctl service disable ssh -force does it anyway (rayctl before v0.27.0 has no -force): …` | это последний включённый сервис `ssh` | шаг 10; не выключайте его, если нет другого входа |
@@ -3571,13 +3600,13 @@ journalctl -u rayd --since -1h | grep -i certif
 | после `rayctl restore` не пускает по SSH или отозванные снова работают | восстановление вернуло адреса администратора из копии; устройства, отозванные после копии, возвращаются, только если база этой ноды о них не знает (новый сервер), копия новее базы или был `-no-carry` | §12.2: `rayctl admin`; устройства из предупреждения `restore` — отозвать снова |
 | naive, `hy2-masq` и DoH перестали проходить у клиентов, остальные профили работают | пин не сошёлся: ключ сайта сменён `rayctl service rotate site -force` или `-fresh`, поставлен свой сертификат с `-force` или нода откатилась ниже v0.26.0 и продлила сертификат на новый ключ | ничего на ноде: клиент с этим рабочим профилем сам перезапросит подписку через 15–30 с, остальные — при очередном запросе (§8, «Сертификат сайта и пины») |
 | `niko-*` перезапускается по кругу | конфиг не принят или занят порт | `journalctl -u niko-ИМЯ -n 50`; `ss -ltnup 'sport = :443'` |
-| REALITY с чужой целью перестал работать после обновления до v0.27.0; `rayctl status`: `reality-target … FAILED …: reality target … resolves to …, a local address: … give the address as the target (…) with the sni` | цель задана именем, которое разрешается в локальный адрес: такой цели запрет локальных сетей исключения не даёт | цель-адрес с `sni` (§8, «Чужая цель»); прежнее поведение ядра — `rayctl egress allow local`, строка `reality-target` при этом остаётся `FAILED` (§12.5, шаг 7) |
+| REALITY с чужой целью перестал работать после обновления до v0.27.0; `rayctl check` и строка `reality-target` в `rayctl status` предупреждают о цели | цель задана именем (не `localhost`), которое разрешается в локальный адрес: такой цели запрет локальных сетей исключения не даёт | `rayctl service set ИМЯ target=АДРЕС:ПОРТ` — ключи не меняются (§8, «Чужая цель»); для всей ноды — `rayctl egress allow local` (§12.5, шаг 7) |
 | сервис в локальной сети ноды недоступен через прокси (`10.x`, `192.168.x`, `127.0.0.1` ноды, адрес метаданных провайдера); naive отвечает `denied` | так задумано: data plane не ходит в собственные и локальные сети ноды — ни процессы (naive, Xray, Hysteria2, `IPAddressDeny`), ни периметр (часть `local` политики выхода, с v0.27.0); иначе любой пользователь достал бы службы ноды, API метаданных и соседей в частной сети VPS | не открывать. `rayctl egress allow local` снимает только правило периметра, проверки процессов остаются; к своим сервисам ходите по SSH или поднимите их на публичном адресе. Подробно — [egress-policy-v1](spec/egress-policy-v1.md) §10 |
 | ничего не открывается после `nft flush ruleset` или перезапуска firewalld | снесена таблица периметра | `rayspa` возвращает её за секунды сам; если нет — `systemctl restart rayspa` |
 | `rayctl status`: `perimeter table FAILED perimeter down: the host is open` | таблицы периметра нет: `rayspa` не поднялся после загрузки или его таблицу не берёт ядро; хост открыт, SSH пускает без стука | `journalctl -u rayspa -b -p warning` — почему; исправить, `systemctl restart rayspa` |
 | `rayctl status`: `perimeter FAILED … rayspa has not followed the perimeter …` | `rayspa` не связан с `rayd` дольше 90 с: остановлен или перезапускается по кругу | `systemctl status rayspa`; строка `perimeter table` от root скажет, открыт ли хост |
 | `rayctl status`: `perimeter FAILED … rayspa follows the perimeter, but its table is not in …` | `rayspa` получает снимки, но ядро не берёт его таблицу дольше 90 с: хост открыт (или стоит замороженная таблица прежнего `rayspa`, тогда стук не работает) | `journalctl -u rayspa -b -p warning` — почему; `systemctl status rayspa` показывает то же в строке `Status:` |
-| `journalctl -b`: `Found ordering cycle` с `rayspa.service`, после загрузки нет сети или cloud-init не отработал | юнит `rayspa` с `Before=network-pre.target` и умолчаниями systemd: так его писали промежуточные сборки перед v0.27.0, в выпуск он не попал; или юнит правили руками. Он идёт до `network-pre.target`, а сетевая стадия cloud-init — до `sysinit.target` | `rayctl apply` пишет юнит v0.27.0 с `DefaultDependencies=no`; проверка: `systemd-analyze verify /etc/systemd/system/rayspa.service` без `ordering cycle` |
+| `journalctl -b`: `Found ordering cycle` с `rayspa.service`, после загрузки нет сети или cloud-init не отработал | юнит `rayspa` с `Before=network-pre.target` и умолчаниями systemd: так его писали промежуточные сборки перед v0.27.0, в выпуск он не попал; или юнит правили руками. Он идёт до `network-pre.target`, а сетевая стадия cloud-init — до `sysinit.target`. Или `/var` либо `/var/lib` на NFS или iSCSI: так нода не поддерживается (§0, «Требования к VPS») | `rayctl apply` пишет юнит v0.27.0 с `DefaultDependencies=no`; проверка: `systemd-analyze verify /etc/systemd/system/rayspa.service` без `ordering cycle` |
 | `rayctl status`: `perimeter unknown …: rayspa follows the perimeter, its table is not reported …` | `rayspa` старее `rayd` (бинарник ставили руками) и о своей таблице не сообщает | `rayctl status` от root (строка `perimeter table`) скажет, стоит ли таблица; `rayctl update -force` ставит все бинарники релиза заново, `rayspa` тоже (простой `rayctl update` при той же версии ничего не делает) |
 | Загрузка висит ~30 с на «A start job is running for raycontrol perimeter», затем сеть поднимается, `rayspa` перезапускается | `rayspa` не прислал systemd «готов»: бинарник старой версии под новым юнитом (`Type=notify`) | `journalctl -u rayspa -b`: строка `sd_notify: READY not sent` или её отсутствие у старого бинарника; `rayctl update -rollback` или `rayctl update -force` ставят бинарник и юнит вместе |
 
