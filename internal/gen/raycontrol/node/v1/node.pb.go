@@ -7609,7 +7609,12 @@ type GetUpdateStatusResponse struct {
 	Timezone  string                 `protobuf:"bytes,7,opt,name=timezone,proto3" json:"timezone,omitempty"`   // the node's time zone now: abbreviation and offset ("CET +01:00", "UTC +00:00")
 	// Releases whose update rolled back or broke on the way: the auto update
 	// leaves them alone.
-	Held          []string `protobuf:"bytes,8,rep,name=held,proto3" json:"held,omitempty"`
+	Held []string `protobuf:"bytes,8,rep,name=held,proto3" json:"held,omitempty"`
+	// The newest patch release of the installed minor version newer than
+	// it, as rayd's checks saw it (the auto update's target): latest when
+	// that is one; after a newer minor version, the one rayd found by asking
+	// for the next patch numbers. "" when none, or not checked.
+	LatestPatch   string `protobuf:"bytes,9,opt,name=latest_patch,json=latestPatch,proto3" json:"latest_patch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -7698,6 +7703,13 @@ func (x *GetUpdateStatusResponse) GetHeld() []string {
 		return x.Held
 	}
 	return nil
+}
+
+func (x *GetUpdateStatusResponse) GetLatestPatch() string {
+	if x != nil {
+		return x.LatestPatch
+	}
+	return ""
 }
 
 // UpdateStatus is the last update by request, or the one under way.
@@ -8398,7 +8410,7 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\aversion\x18\x01 \x01(\tR\aversion\"O\n" +
 	"\x13StartUpdateResponse\x128\n" +
 	"\x06status\x18\x01 \x01(\v2 .raycontrol.node.v1.UpdateStatusR\x06status\"\x18\n" +
-	"\x16GetUpdateStatusRequest\"\xfd\x01\n" +
+	"\x16GetUpdateStatusRequest\"\xa0\x02\n" +
 	"\x17GetUpdateStatusResponse\x128\n" +
 	"\x06status\x18\x01 \x01(\v2 .raycontrol.node.v1.UpdateStatusR\x06status\x12\x1c\n" +
 	"\tinstalled\x18\x02 \x01(\tR\tinstalled\x12\x16\n" +
@@ -8407,7 +8419,8 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x04auto\x18\x05 \x01(\tR\x04auto\x12\x16\n" +
 	"\x06window\x18\x06 \x01(\tR\x06window\x12\x1a\n" +
 	"\btimezone\x18\a \x01(\tR\btimezone\x12\x12\n" +
-	"\x04held\x18\b \x03(\tR\x04held\"\xa1\x02\n" +
+	"\x04held\x18\b \x03(\tR\x04held\x12!\n" +
+	"\flatest_patch\x18\t \x01(\tR\vlatestPatch\"\xa1\x02\n" +
 	"\fUpdateStatus\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12\x12\n" +

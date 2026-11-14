@@ -16,22 +16,29 @@ import (
 )
 
 // autoCheck is how often the auto update asks GitHub for the latest
-// release, give or take 10 %.
+// release (and, after a newer minor version, for the patch releases of the
+// running one), give or take 10 %.
 const autoCheck = 6 * time.Hour
 
 // autoUpdater is the node's own update to a patch release
 // (spec/node-update-v1.md §1), while root's policy has it on (rayctl update
 // auto patch): it asks for the latest release every ~6 h, and once in the
 // window, at a moment of its own (nodes in one zone do not all update at
-// its start) still in it, writes a request for a newer patch release of
-// this minor version; root's unit does the update. A version whose update
+// its start) still in it, writes a request for the newest patch release of
+// this minor version; root's unit does the update. That one is the latest
+// release, or, once a newer minor version is out (which it only tells of),
+// what patch finds. A version whose update
 // failed is not asked for again, but for a failure that left the node as
 // it was (the download, say), a day later; a newer one, or root, moves on.
 type autoUpdater struct {
 	st      *store.Store
 	running string
 	latest  func(context.Context) (string, error)
-	seen    *atomic.Value // the latest release, for GetUpdateStatus
+	// patch finds the newest patch release of running newer than it
+	// (release.Fetcher.NewestPatch); nil: none looked for.
+	patch     func(context.Context) (string, error)
+	seen      *atomic.Value // the latest release, for GetUpdateStatus
+	seenPatch *atomic.Value // the newest patch release of running; nil: not kept
 
 	request, status, policy string // nodeupdate.RequestFile, StatusFile, PolicyFile
 	now                     func() time.Time
@@ -44,6 +51,8 @@ type autoUpdater struct {
 type autoState struct {
 	last    string // the latest release seen
 	lerr    error  // why last is not known
+	patch   string // the newest patch release of running seen, "" when none
+	perr    error  // why patch may not be known, after a newer minor version
 	checked time.Time
 	due     time.Time // the moment in this window, once in it
 }
@@ -74,12 +83,16 @@ func (a *autoUpdater) step(ctx context.Context, s *autoState, t time.Time) (soon
 		if s.checked.IsZero() || t.Sub(s.checked) > jitter(autoCheck, 10) {
 			cctx, cancel := context.WithTimeout(ctx, time.Minute)
 			v, err := a.latest(cctx)
-			cancel()
 			s.checked, s.lerr = t, err
 			if err == nil {
 				s.last = v
 				a.seen.Store(v)
+				s.patch, s.perr = newestPatch(cctx, v, a.running, a.patch)
+				if a.seenPatch != nil {
+					a.seenPatch.Store(s.patch)
+				}
 			}
+			cancel()
 		}
 		// The request first: root writes the status before it
 		// removes the request.
@@ -89,20 +102,24 @@ func (a *autoUpdater) step(ctx context.Context, s *autoState, t time.Time) (soon
 		case s.last == "" && s.lerr != nil:
 			a.hb.Report("auto-update", "patch: the latest release not known: "+s.lerr.Error(), nil)
 			s.due = time.Time{}
-		case nodeupdate.Step(s.last, a.running) != "":
+		case s.patch == "" && nodeupdate.Step(s.last, a.running) != "":
 			// Not taken (the policy is patch releases), but said: the
 			// operator would not learn of it otherwise.
-			a.hb.Report("auto-update", "patch, window "+p.Window+": "+s.last+" is out, a new "+nodeupdate.Step(s.last, a.running)+
-				" version, which it leaves: this node runs "+a.running+"; rayctl update takes it (or an admin's phone, with remote updates on)", nil)
+			d := "patch, window " + p.Window + ": " + s.last + " is out, a new " + nodeupdate.Step(s.last, a.running) +
+				" version, which it leaves: this node runs " + a.running + "; rayctl update takes it (or an admin's phone, with remote updates on)"
+			if s.perr != nil {
+				d += "; newer patch releases of " + a.running + " not known: " + s.perr.Error()
+			}
+			a.hb.Report("auto-update", d, nil)
 			s.due = time.Time{}
-		case s.last == "" || !nodeupdate.Patch(s.last, a.running):
+		case s.patch == "":
 			a.hb.Report("auto-update", "patch, window "+p.Window+": up to date ("+a.running+")", nil)
 			s.due = time.Time{}
-		case gaveUp(stat, s.last, t):
-			a.hb.Report("auto-update", "patch: the update to "+s.last+" did not hold; not again by itself (rayctl update status)", nil)
+		case gaveUp(stat, s.patch, t):
+			a.hb.Report("auto-update", "patch: the update to "+s.patch+" did not hold; not again by itself (rayctl update status)", nil)
 			s.due = time.Time{}
 		case !nodeupdate.InWindow(t, p.Window):
-			a.hb.Report("auto-update", "patch: "+s.last+" waits for the window "+p.Window, nil)
+			a.hb.Report("auto-update", "patch: "+s.patch+" waits for the window "+p.Window, nil)
 			s.due = time.Time{}
 		case nodeupdate.Busy(stat, req, waiting, t):
 			a.hb.Report("auto-update", "patch: an update is under way", nil)
@@ -112,25 +129,39 @@ func (a *autoUpdater) step(ctx context.Context, s *autoState, t time.Time) (soon
 			if span := min(nodeupdate.Spread, nodeupdate.Left(t, p.Window)-time.Minute); span > 0 {
 				s.due = t.Add(time.Duration(mrand.Int64N(int64(span)))) //nolint:gosec // a moment, not a secret
 			}
-			a.hb.Report("auto-update", "patch: "+s.last+" at "+s.due.Format("15:04"), nil)
+			a.hb.Report("auto-update", "patch: "+s.patch+" at "+s.due.Format("15:04"), nil)
 		case t.Before(s.due):
 			soon = true
 		default:
-			r := nodeupdate.Request{ID: nodeupdate.NewID(), Kind: nodeupdate.Auto, Version: s.last, By: "auto", At: t.UTC()}
+			r := nodeupdate.Request{ID: nodeupdate.NewID(), Kind: nodeupdate.Auto, Version: s.patch, By: "auto", At: t.UTC()}
 			switch err := nodeupdate.WriteRequest(a.request, r, t); {
 			case errors.Is(err, nodeupdate.ErrWaiting):
 				a.hb.Report("auto-update", "patch: an update is under way", nil)
 			case err != nil:
-				a.hb.Report("auto-update", "patch: the request for "+s.last+" not written", err)
+				a.hb.Report("auto-update", "patch: the request for "+s.patch+" not written", err)
 			default:
-				a.log.Info("auto update requested", "version", s.last, "running", a.running)
-				_ = a.st.Audit(ctx, "auto", "update.start "+s.last, "node", "ok")
-				a.hb.Report("auto-update", "patch: "+s.last+" requested", nil)
+				a.log.Info("auto update requested", "version", s.patch, "running", a.running)
+				_ = a.st.Audit(ctx, "auto", "update.start "+s.patch, "node", "ok")
+				a.hb.Report("auto-update", "patch: "+s.patch+" requested", nil)
 			}
 			s.due = time.Time{}
 		}
 	}
 	return soon
+}
+
+// newestPatch is the newest patch release of running newer than it, with
+// latest the latest release: latest itself when it is one; after a newer
+// minor or major version, what probe finds (it asks GitHub again; nil:
+// none); "" otherwise.
+func newestPatch(ctx context.Context, latest, running string, probe func(context.Context) (string, error)) (string, error) {
+	switch {
+	case nodeupdate.Patch(latest, running):
+		return latest, nil
+	case nodeupdate.Step(latest, running) != "" && probe != nil:
+		return probe(ctx)
+	}
+	return "", nil
 }
 
 // nextWait is how long the loop sleeps: a tick, or until the moment it

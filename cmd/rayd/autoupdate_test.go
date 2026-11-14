@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -272,5 +273,76 @@ func TestAutoStepNewerMinor(t *testing.T) {
 		if d := detail(); !strings.Contains(d, want) {
 			t.Errorf("latest %s: %q", v, d)
 		}
+	}
+}
+
+// Once a newer minor version is out, the auto update takes the newest
+// patch release of the running one (what patch finds), and keeps it for
+// GetUpdateStatus; without one it tells of the minor version as before,
+// and of why the patch releases are not known. patch is asked only after
+// a newer minor version: a patch latest is the newest patch already.
+func TestAutoNewestPatch(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	reqFile, statFile, polFile := filepath.Join(dir, "update-request"), filepath.Join(dir, "status.json"), filepath.Join(dir, "policy.json")
+	nodeupdate.WritePolicy(polFile, nodeupdate.Policy{Remote: "off", Auto: "patch", Window: "03:00-05:00"})
+	latest, patch, probed := "v0.27.0", "v0.26.2", 0
+	var perr error
+	hb := &health.Board{}
+	var seen, seenPatch atomic.Value
+	a := &autoUpdater{st: st, running: "v0.26.0", latest: func(context.Context) (string, error) { return latest, nil },
+		patch: func(context.Context) (string, error) { probed++; return patch, perr }, seen: &seen, seenPatch: &seenPatch,
+		request: reqFile, status: statFile, policy: polFile, now: time.Now, tick: 10 * time.Minute, hb: hb,
+		log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	detail := func() string {
+		for _, l := range hb.Loops() {
+			if l.Name == "auto-update" {
+				return l.Detail
+			}
+		}
+		return ""
+	}
+	var s autoState
+	at := time.Date(2026, 11, 8, 3, 10, 0, 0, time.Local)
+	if !a.step(ctx, &s, at) || s.due.IsZero() {
+		t.Fatalf("no moment for v0.26.2: %+v %q", s, detail())
+	}
+	if v, _ := seenPatch.Load().(string); v != "v0.26.2" || probed != 1 {
+		t.Errorf("seen patch %q, probed %d", v, probed)
+	}
+	a.step(ctx, &s, s.due)
+	r, ok := nodeupdate.PeekRequest(reqFile)
+	if !ok || r.Version != "v0.26.2" || r.Kind != nodeupdate.Auto || r.Check("v0.26.0", r.At) != nil {
+		t.Fatalf("request %+v %v: %q", r, ok, detail())
+	}
+	os.Remove(reqFile)
+
+	// None found, or the search failed: the minor version is told of.
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{nil, "patch, window 03:00-05:00: v0.27.0 is out, a new minor version, which it leaves: this node runs v0.26.0; " +
+			"rayctl update takes it (or an admin's phone, with remote updates on)"},
+		{errors.New("down"), "patch, window 03:00-05:00: v0.27.0 is out, a new minor version, which it leaves: this node runs v0.26.0; " +
+			"rayctl update takes it (or an admin's phone, with remote updates on); newer patch releases of v0.26.0 not known: down"},
+	} {
+		patch, perr, s = "", c.err, autoState{}
+		if a.step(ctx, &s, at) || !s.due.IsZero() {
+			t.Fatalf("waits with no patch release: %+v", s)
+		}
+		if d := detail(); d != c.want {
+			t.Errorf("detail %q\nwant   %q", d, c.want)
+		}
+	}
+	// A patch latest: taken, no search.
+	latest, probed, s = "v0.26.1", 0, autoState{}
+	if !a.step(ctx, &s, at) || probed != 0 || !strings.Contains(detail(), "v0.26.1 at ") {
+		t.Errorf("patch latest: probed %d, %q", probed, detail())
 	}
 }

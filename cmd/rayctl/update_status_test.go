@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -43,12 +44,45 @@ func TestUpdateStatusNewer(t *testing.T) {
 			t.Fatal(err)
 		}
 		lines := strings.Split(out, "\n")
-		next := lines[1]
-		if c.latest != "" {
-			next = lines[2]
-		}
+		next := lines[2]
 		if got := strings.HasPrefix(next, "newer"); got != (c.want != "") || (c.want != "" && next != c.want) {
 			t.Errorf("latest %q auto %s remote %s:\n%s", c.latest, c.auto, c.remote, out)
+		}
+	}
+}
+
+// With a new minor version out, rayctl update status names the newest
+// patch release of the node's own (latest_patch) and what takes it;
+// without a check, it says that nothing was checked, never a release.
+func TestUpdateStatusPatch(t *testing.T) {
+	for _, c := range []struct {
+		latest, patch, auto string
+		want                []string // the lines after installed
+	}{
+		{"v0.27.0", "v0.26.2", "patch", []string{"latest     v0.27.0",
+			"patch      v0.26.2, the newest patch release of v0.26.0: the auto update takes it in its window",
+			"newer      v0.27.0 is a new minor version: the auto update takes patch releases only; rayctl update takes it"}},
+		{"v0.27.0", "v0.26.2", "off", []string{"latest     v0.27.0",
+			"patch      v0.26.2, the newest patch release of v0.26.0: rayctl update -version v0.26.2 takes it",
+			"newer      v0.27.0 is a new minor version: rayctl update takes it"}},
+		// The latest release is the patch: one line for it.
+		{"v0.26.2", "v0.26.2", "patch", []string{"latest     v0.26.2", "remote     off"}},
+		// A patch line from a stale answer, older than the node: none.
+		{"v0.27.0", "v0.25.9", "off", []string{"latest     v0.27.0", "newer      v0.27.0 is a new minor version: rayctl update takes it"}},
+		{"", "", "off", []string{"latest     not checked: rayd asks GitHub only with rayctl update auto patch or rayd -update-check; rayctl update -check asks now",
+			"remote     off"}},
+		{"", "", "patch", []string{"latest     not known yet: rayd asks GitHub every ~6 h (rayctl status, loop auto-update, says why not); rayctl update -check asks now",
+			"remote     off"}},
+	} {
+		m := &nodev1.GetUpdateStatusResponse{Installed: "v0.26.0", Latest: c.latest, LatestPatch: c.patch, Auto: c.auto, Remote: "off",
+			Window: "03:00-05:00", Timezone: "UTC +00:00"}
+		out, err := captureStdout(t, func() error { return (&cli{c: updateNode{m: m}}).updateStatus(context.Background()) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(out, "\n")
+		if len(lines) < 1+len(c.want) || !slices.Equal(lines[1:1+len(c.want)], c.want) {
+			t.Errorf("latest %q patch %q auto %s:\n%s", c.latest, c.patch, c.auto, out)
 		}
 	}
 }

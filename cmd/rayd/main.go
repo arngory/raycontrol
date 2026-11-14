@@ -245,9 +245,11 @@ func cmdServe(args []string) error {
 	// only while the administrator has the mirror on (rayctl app-mirror).
 	srv.AppMirror = &appmirror.Mirror{Store: st, Dir: filepath.Join(filepath.Dir(*db), "app"), Conn: probe.Conn, Log: log}
 	// The update by request (spec/node-update-v1.md): the latest release
-	// rayd's checks saw, for GetUpdateStatus.
-	var latestSeen atomic.Value
-	srv.NodeUpdate = &api.NodeUpdate{Latest: func() string { v, _ := latestSeen.Load().(string); return v }}
+	// rayd's checks saw, and the newest patch release of this version, for
+	// GetUpdateStatus.
+	var latestSeen, patchSeen atomic.Value
+	srv.NodeUpdate = &api.NodeUpdate{Latest: func() string { v, _ := latestSeen.Load().(string); return v },
+		LatestPatch: func() string { v, _ := patchSeen.Load().(string); return v }}
 	// Interop (the client's CI): releases from a server of the test's,
 	// signed with its key. Never on a node in use: anything that key signs
 	// would go to its devices.
@@ -350,7 +352,12 @@ func cmdServe(args []string) error {
 				}
 				return v, err
 			}
-			go checkUpdates(ctx, latest, version, *updateCheck, hb, log)
+			patch := func(ctx context.Context) (string, error) {
+				v, err := f.NewestPatch(ctx, release.PubKey, version)
+				patchSeen.Store(v)
+				return v, err
+			}
+			go checkUpdates(ctx, latest, patch, version, *updateCheck, hb, log)
 		} else {
 			log.Info("no update check: this build is no release", "version", version)
 		}
@@ -361,7 +368,8 @@ func cmdServe(args []string) error {
 	if !*supervise {
 		f := &release.Fetcher{}
 		latest := func(ctx context.Context) (string, error) { return f.Latest(ctx, release.PubKey) }
-		a := &autoUpdater{st: st, running: version, latest: latest, seen: &latestSeen, request: nodeupdate.RequestFile,
+		patch := func(ctx context.Context) (string, error) { return f.NewestPatch(ctx, release.PubKey, version) }
+		a := &autoUpdater{st: st, running: version, latest: latest, patch: patch, seen: &latestSeen, seenPatch: &patchSeen, request: nodeupdate.RequestFile,
 			status: nodeupdate.StatusFile, policy: nodeupdate.PolicyFile, now: nodeupdate.LocalNow, tick: 10 * time.Minute, hb: hb, log: log}
 		go a.run(ctx)
 	}
@@ -1211,12 +1219,17 @@ func checkDNSZones(ctx context.Context, mon *dnscheck.Monitor, st *store.Store, 
 // -update-check, off unless asked: github.com or a mirror sees the node's
 // address). The loop "update" in rayctl status says what it found; a
 // check that fails is said there too, never as a failure of the node, and
-// a new release goes to the log once.
-func checkUpdates(ctx context.Context, fetch func(context.Context) (string, error), running string, period time.Duration, hb *health.Board, log *slog.Logger) {
+// a new release goes to the log once. After a newer minor version patch
+// (nil: none) looks for the newest patch release of the running one.
+func checkUpdates(ctx context.Context, fetch, patch func(context.Context) (string, error), running string, period time.Duration, hb *health.Board, log *slog.Logger) {
 	said := ""
 	for {
 		cctx, cancel := context.WithTimeout(ctx, time.Minute)
 		latest, err := fetch(cctx)
+		newest := ""
+		if err == nil && nodeupdate.Step(latest, running) != "" {
+			newest, _ = newestPatch(cctx, latest, running, patch)
+		}
 		cancel()
 		switch {
 		case ctx.Err() != nil:
@@ -1224,7 +1237,11 @@ func checkUpdates(ctx context.Context, fetch func(context.Context) (string, erro
 		case err != nil:
 			hb.Report("update", "not checked: "+err.Error(), nil)
 		case release.Newer(latest, running):
-			hb.Report("update", latest+" is out, this node runs "+running+": rayctl update", nil)
+			d := latest + " is out, this node runs " + running + ": rayctl update"
+			if newest != "" {
+				d += " (" + newest + ", a patch release of this minor version: rayctl update -version " + newest + ")"
+			}
+			hb.Report("update", d, nil)
 			if latest != said {
 				said = latest
 				log.Info("a newer release is out", "latest", latest, "running", running)

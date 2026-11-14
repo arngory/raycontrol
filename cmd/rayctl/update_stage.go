@@ -8,6 +8,7 @@ import (
 	"runtime"
 
 	"github.com/arngory/raycontrol/internal/deploy"
+	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/release"
 )
 
@@ -87,6 +88,13 @@ func (c *cli) stageRelease(ctx context.Context, o updateOpts, stage, installed s
 					return s, fmt.Errorf("installed %s is newer than the latest release %s; rayctl update -version %s goes back", installed, l, l)
 				case o.check:
 					fmt.Printf("installed %s, release %s available: rayctl update\n", installed, l)
+					// A new minor version: a patch release of this one may be
+					// out too (release.Fetcher.NewestPatch, a few requests).
+					if nodeupdate.Step(l, installed) != "" {
+						if p, _ := f.NewestPatch(ctx, releaseKey, installed); p != "" {
+							fmt.Printf("release %s, the newest patch release of %s, available: rayctl update -version %s\n", p, installed, p)
+						}
+					}
 					s.done = true
 					return s, first(l)
 				}

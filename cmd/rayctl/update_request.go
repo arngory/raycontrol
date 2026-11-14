@@ -286,6 +286,20 @@ func newerLine(m *nodev1.GetUpdateStatusResponse) string {
 	return fmt.Sprintf("newer      %s is a new %s version: %s", m.Latest, step, take)
 }
 
+// patchLine names the newest patch release of the node's minor version
+// when it is not the latest release (a newer minor version is out), and
+// what takes it; "" otherwise.
+func patchLine(m *nodev1.GetUpdateStatusResponse) string {
+	if m.LatestPatch == "" || m.LatestPatch == m.Latest || !nodeupdate.Patch(m.LatestPatch, m.Installed) {
+		return ""
+	}
+	take := "rayctl update -version " + m.LatestPatch + " takes it"
+	if m.Auto == "patch" {
+		take = "the auto update takes it in its window"
+	}
+	return fmt.Sprintf("patch      %s, the newest patch release of %s: %s", nodeupdate.Printable(m.LatestPatch), nodeupdate.Printable(m.Installed), take)
+}
+
 func (c *cli) updateStatus(ctx context.Context) error {
 	r, err := c.c.GetUpdateStatus(ctx, connect.NewRequest(&nodev1.GetUpdateStatusRequest{}))
 	if err != nil {
@@ -299,8 +313,18 @@ func (c *cli) updateStatus(ctx context.Context) error {
 	// terminal.
 	p := nodeupdate.Printable
 	fmt.Printf("installed  %s\n", p(m.Installed))
-	if m.Latest != "" {
+	// Never a check of its own: a request to GitHub shows it the node's
+	// address, root's to decide (rayctl update -check).
+	switch {
+	case m.Latest != "":
 		fmt.Printf("latest     %s\n", p(m.Latest))
+	case m.Auto == "patch":
+		fmt.Println("latest     not known yet: rayd asks GitHub every ~6 h (rayctl status, loop auto-update, says why not); rayctl update -check asks now")
+	default:
+		fmt.Println("latest     not checked: rayd asks GitHub only with rayctl update auto patch or rayd -update-check; rayctl update -check asks now")
+	}
+	if line := patchLine(m); line != "" {
+		fmt.Println(line)
 	}
 	if line := newerLine(m); line != "" {
 		fmt.Println(line)

@@ -20,9 +20,11 @@ import (
 type NodeUpdate struct {
 	Request, Status, Policy string // nodeupdate.RequestFile, StatusFile, PolicyFile
 	Unit                    string // the path unit's file: the node runs requests
-	// Latest is the latest release rayd's checks saw ("" when none).
-	Latest func() string
-	Now    func() time.Time
+	// Latest is the latest release rayd's checks saw ("" when none);
+	// LatestPatch the newest patch release of the running minor version
+	// they found after a newer minor version ("" when none).
+	Latest, LatestPatch func() string
+	Now                 func() time.Time
 }
 
 func (u *NodeUpdate) request() string {
@@ -59,6 +61,22 @@ func (u *NodeUpdate) latest() string {
 		return ""
 	}
 	return u.Latest()
+}
+
+// latestPatch is the newest patch release of installed newer than it that
+// rayd's checks saw: the latest release when it is one, else what they
+// found past it.
+func (u *NodeUpdate) latestPatch(installed string) string {
+	if latest := u.latest(); nodeupdate.Patch(latest, installed) {
+		return latest
+	}
+	if u == nil || u.LatestPatch == nil {
+		return ""
+	}
+	if v := u.LatestPatch(); nodeupdate.Patch(v, installed) {
+		return v
+	}
+	return ""
 }
 
 func (u *NodeUpdate) now() time.Time {
@@ -146,6 +164,8 @@ func (s *Server) GetUpdateStatus(_ context.Context, _ *connect.Request[nodev1.Ge
 		Window:    p.Window,
 		Timezone:  now.Format("MST -07:00"),
 		Held:      st.Held,
+		// After Latest: a field for clients, set from the same checks.
+		LatestPatch: u.latestPatch(s.Version),
 	}
 	if waiting && r.ID != st.ID {
 		out.Status = requestedPB(r, s.Version)

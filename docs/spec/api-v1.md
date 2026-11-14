@@ -233,6 +233,11 @@ A client that lost Register's answer (timeout, dropped connection) may send it a
   закрыт для всех со следующего снимка периметра. Новое поле `force` (`SetServiceEnabledRequest.force = 3`,
   `DeleteServiceRequest.force = 2`) делает это всё равно; в аудите тогда `service.enable=false force` и
   `service.delete force`. Нода до этого поля его не читает и выключает или удаляет без вопросов.
+- Обновление ноды ([node-update-v1.md](node-update-v1.md) §2): с raycontrol v0.27.0 у `GetUpdateStatusResponse`
+  поле `latest_patch = 9` — самый новый патч минорной версии ноды, новее неё, который видели проверки rayd (`""` —
+  нет такого или проверок не было). `latest` значит то же, что раньше: самый новый релиз вообще. Клиенту:
+  `StartUpdate {version: latest_patch}`, когда поле не пусто и не равно `latest`, обновляет без смены минорной;
+  кнопка с пустым `version` — как раньше, на `latest`.
 
 ## 5a. Отзыв устройства меняет учётные данные пользователя (raycontrol v0.27.0)
 

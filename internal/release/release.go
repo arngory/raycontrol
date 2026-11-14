@@ -194,6 +194,8 @@ func (f *Fetcher) Get(ctx context.Context, version, file string, limit int64) ([
 		switch {
 		case err != nil:
 			errs = append(errs, err)
+		case resp.StatusCode == http.StatusNotFound:
+			errs = append(errs, fmt.Errorf("%s: %s: %w", prefix+url, resp.Status, ErrNotFound))
 		case resp.StatusCode != http.StatusOK:
 			errs = append(errs, fmt.Errorf("%s: %s", prefix+url, resp.Status))
 		case int64(len(b)) > limit:

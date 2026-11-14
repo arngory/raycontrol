@@ -933,6 +933,11 @@ message GetUpdateStatusResponse {
   // Releases whose update rolled back or broke on the way: the auto update
   // leaves them alone.
   repeated string held = 8;
+  // The newest patch release of the installed minor version newer than
+  // it, as rayd's checks saw it (the auto update's target): latest when
+  // that is one; after a newer minor version, the one rayd found by asking
+  // for the next patch numbers. "" when none, or not checked.
+  string latest_patch = 9;
 }
 // UpdateStatus is the last update by request, or the one under way.
 message UpdateStatus {

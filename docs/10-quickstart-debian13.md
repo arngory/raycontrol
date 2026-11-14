@@ -2549,24 +2549,35 @@ rayd checks GitHub for releases every ~6 h and updates to a newer patch release 
 ```
 
 - Ставятся только **патч-версии** той же минорной: v0.26.0 → v0.26.2, но не v0.27.0. Минорные обновления — руками.
-- **Нода смотрит только на один релиз — самый последний.** Как только последним релизом стала новая минорная
-  версия (v0.27.0), автообновление перестаёт ставить что-либо: патчи вашей минорной (v0.26.3), вышедшие до или
-  после неё, оно не ищет. Ноду на такой версии ставит `rayctl update` или обновление с телефона (ниже). Что
-  вышла новая минорная, нода говорит сама: в строке `auto-update` в `rayctl status` после `ok … ago:` —
+- **Самая новая патч-версия вашей минорной** — с v0.27.0. Нода спрашивает у GitHub последний релиз. Если это
+  патч вашей минорной, она его и ставит. Если последний релиз — уже новая минорная (v0.27.0), нода по очереди
+  спрашивает следующие номера своей: v0.26.1, v0.26.2 и так далее, пока не встретит два пропущенных номера подряд,
+  и ставит самый старший найденный. Один пропущенный номер (релиз сняли, а следом вышел исправленный) она
+  переступает. За одну проверку — не больше 8 номеров, то есть не больше 18 запросов к GitHub. Без новой
+  минорной запросов 2, как раньше; с новой минорной и без патчей — 4. Каждый найденный релиз проверяется подписью, как при обновлении: версия берётся из подписи
+  и должна совпасть с номером.
+- Новую минорную нода не ставит, но говорит о ней: в строке `auto-update` в `rayctl status` после `ok … ago:` —
 
   ```
   patch, window 03:00-05:00: v0.27.0 is out, a new minor version, which it leaves: this node runs v0.26.0; rayctl update takes it (or an admin's phone, with remote updates on)
   ```
 
-  и в `rayctl update status` строка после `latest`:
+  и в `rayctl update status`, вместе с найденным патчем, если он есть:
 
   ```
+  latest     v0.27.0
+  patch      v0.26.2, the newest patch release of v0.26.0: the auto update takes it in its window
   newer      v0.27.0 is a new minor version: the auto update takes patch releases only; rayctl update takes it
   ```
 
-  Так — с версии после v0.26.0. Нода на v0.26.0 и раньше в этом случае пишет в строке `auto-update`
-  `up to date`, хотя отстала; заметить это можно только в `rayctl update status`, где `latest` новее
-  `installed`, или по `rayctl update -check`.
+  Строку `auto-update` о новой минорной ноды пишут после v0.26.0. Нода на v0.26.x патчи своей минорной после
+  выхода v0.27.0 сама не найдёт: её обновляет `rayctl update -version v0.26.N` или `rayctl update`.
+- `rayctl update -check` при новой минорной называет и самый новый патч вашей (с v0.27.0):
+
+  ```
+  installed v0.26.0, release v0.27.0 available: rayctl update
+  release v0.26.2, the newest patch release of v0.26.0, available: rayctl update -version v0.26.2
+  ```
 - Окно — по часам сервера, не короче 30 минут; без `-window` — 03:00–05:00.
 - Ставятся только подписанные релизы и никогда не старее установленного.
 - Версию, обновление на которую откатилось, нода больше сама не ставит.
@@ -2589,10 +2600,22 @@ rayctl update status
 
 ```
 installed  v0.26.0
+latest     v0.26.0
 remote     off
 auto       patch (window 03:00-05:00, CET +01:00)
 last       none
 ```
+
+- `latest` — то, что видела последняя проверка самой ноды. Сам `rayctl update status` к GitHub не ходит: запрос
+  показывает GitHub адрес ноды, а решает это root (`rayctl update -check`). Нода проверяет, только если включено
+  автообновление или `rayd -update-check`. Иначе строка такая:
+
+  ```
+  latest     not checked: rayd asks GitHub only with rayctl update auto patch or rayd -update-check; rayctl update -check asks now
+  ```
+
+  Сразу после включения автообновления, до первой проверки, — `latest     not known yet: …`. Так с v0.27.0;
+  раньше строки `latest` в этих случаях не было вовсе.
 
 Журнал обновлений, запущенных нодой или с телефона, — `journalctl -u raycontrol-update`.
 
