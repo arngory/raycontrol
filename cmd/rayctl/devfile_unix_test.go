@@ -187,3 +187,53 @@ func TestDeviceFileFixLine(t *testing.T) {
 		}
 	}
 }
+
+// The check is made on the file that is read, not on its path again: a
+// file put in its place after the open counts for nothing, either way.
+func TestDeviceFileOpened(t *testing.T) {
+	id := deviceFile(t)
+	want, err := os.ReadFile(id.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replace := func(mode os.FileMode, content string) {
+		t.Helper()
+		other := filepath.Join(filepath.Dir(id.path), "other")
+		if err := os.WriteFile(other, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(other, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(other, id.path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Closed when opened, open in its place afterwards.
+	f, err := os.Open(id.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	replace(0o644, "rcdev1:other\n")
+	b, err := readDeviceFile(id.path, f)
+	if err != nil || string(b) != string(want) {
+		t.Errorf("the opened file: %v; read %q", err, b)
+	}
+	if got, err := decodeIdentity(id.path, b); err != nil || got.raw != id.raw {
+		t.Errorf("the opened file decoded: %v", err)
+	}
+	if _, err := loadIdentity(id.path); err == nil || !strings.Contains(err.Error(), "chmod 600") {
+		t.Errorf("the file in its place: %v", err)
+	}
+	// Open when opened, closed in its place afterwards.
+	g, err := os.Open(id.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	replace(0o600, string(want))
+	if _, err := readDeviceFile(id.path, g); err == nil || !strings.Contains(err.Error(), "is mode -rw-r--r--") {
+		t.Errorf("an open file, closed after the open: %v", err)
+	}
+}

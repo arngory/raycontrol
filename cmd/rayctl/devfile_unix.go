@@ -15,12 +15,9 @@ import (
 // rayctl writes it mode 0600; a copy by scp or from a synced folder often
 // is not. As OpenSSH does for a private key: root may use anyone's file
 // (sudo rayctl -remote ~/n.rcdev), the mode counts for everyone. As
-// rayspa does for a relay's bundle (node.ReadRelayBundle).
-func checkDeviceFile(path string) error {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return nil // the read says what is wrong with the path, as before
-	}
+// rayspa does for a relay's bundle (node.ReadRelayBundle). fi is the
+// open file's (readDeviceFile).
+func checkDeviceFile(path string, fi os.FileInfo) error {
 	owner := -1
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
 		owner = int(st.Uid)

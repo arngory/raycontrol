@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -42,20 +43,43 @@ type remoteIdentity struct {
 	cert   tls.Certificate
 }
 
-// loadIdentity reads a device file, which must be the user's own and
-// closed to everyone else (checkDeviceFile).
+// loadIdentity reads a device file, which must be closed to everyone else
+// and, but for root, the user's own (checkDeviceFile).
 func loadIdentity(path string) (remoteIdentity, error) {
 	id := remoteIdentity{path: path}
-	if err := checkDeviceFile(path); err != nil {
-		return id, err
+	f, err := os.Open(path) //nolint:gosec // G304: the operator's file
+	if err != nil {
+		return id, err // the read's error, as before the check
 	}
-	b, err := os.ReadFile(path) //nolint:gosec // G304: the operator's file
+	defer f.Close()
+	b, err := readDeviceFile(path, f)
 	if err != nil {
 		return id, err
 	}
-	if id.raw, err = readArg("@" + path); err != nil {
-		return id, err
+	return decodeIdentity(path, b)
+}
+
+// maxDeviceFile bounds a device file as read; one is about 1 KiB.
+const maxDeviceFile = 64 << 10
+
+// readDeviceFile is the open device file f at path, checked
+// (checkDeviceFile) on the descriptor and read once: what is checked is
+// what is read, and the bundle and the key come from the same bytes.
+func readDeviceFile(path string, f *os.File) ([]byte, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
 	}
+	if err := checkDeviceFile(path, fi); err != nil {
+		return nil, err
+	}
+	return io.ReadAll(io.LimitReader(f, maxDeviceFile))
+}
+
+// decodeIdentity is the device file at path whose content is b.
+func decodeIdentity(path string, b []byte) (remoteIdentity, error) {
+	id := remoteIdentity{path: path, raw: argToken(string(b))}
+	var err error
 	if id.bundle, err = node.DecodeBundle(id.raw); err != nil {
 		return id, fmt.Errorf("%s: %w", path, err)
 	}
