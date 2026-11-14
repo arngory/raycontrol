@@ -179,9 +179,10 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                               take back everything install and apply changed (root)
   backup [-o FILE] [-passphrase-file F]       the node's state sealed with a passphrase (root):
                                               users, keys, services, certificates
-  restore -i FILE [-passphrase-file F] [-host ADDR] [-yes]
+  restore -i FILE [-passphrase-file F] [-host ADDR] [-no-carry] [-yes]
                                               put a backup in place and bring the node up on it,
-                                              here or on a new host after install (root)
+                                              here or on a new host after install (root); -no-carry
+                                              brings back the backup's credentials and revocations
   metrics [-o FILE]                           counts and times in the Prometheus text format; with
                                               -o for a collector's textfile directory
 
