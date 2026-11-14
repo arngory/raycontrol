@@ -194,22 +194,23 @@ func relayFiles() []string {
 // relayOps are the relay host's parts an update keeps and puts back, with
 // the host's operations given so that a test can follow them.
 type relayOps struct {
-	dir       string            // previousDir
-	bins      map[string]string // relayBinaries
-	files     []string          // relayFiles
-	sysctlDir string            // where of them are sysctl's, applied again after a restore
-	snapshot  string            // rayspa's last snapshot
-	units     []string          // rayspa's unit, then the probe's (Requisite on rayspa)
-	state     func(unit string) unitWas
-	loaded    func(unit string) bool
-	run       func(name string, args ...string) error
-	place     func(src, dst string) error // placeBinary
-	disarm    func()                      // the install's guard timer off, if one is left
-	unforward func()                      // our forwarding file gone, the value before raycontrol back
-	tableGone func() bool
-	rayspa    string                              // its binary, for teardown
-	settle    time.Duration                       // how long open waits to look at the table again
-	rename    func(oldpath, newpath string) error // keep's renames; os.Rename when nil
+	dir         string            // previousDir
+	bins        map[string]string // relayBinaries
+	files       []string          // relayFiles
+	sysctlDir   string            // where of them are sysctl's, applied again after a restore
+	snapshot    string            // rayspa's last snapshot
+	units       []string          // rayspa's unit, then the probe's (Requisite on rayspa)
+	state       func(unit string) unitWas
+	loaded      func(unit string) bool
+	run         func(name string, args ...string) error
+	place       func(src, dst string) error // placeBinary
+	disarm      func()                      // the install's guard timer off, if one is left
+	unforward   func()                      // our forwarding file gone, the value before raycontrol back
+	tableGone   func() bool
+	rayspa      string                              // its binary, for teardown
+	settle      time.Duration                       // how long open waits to look at the table again
+	rename      func(oldpath, newpath string) error // keep's renames; os.Rename when nil
+	sysctlValue func(key string) (string, error)    // sysctl -n: a restore reads back what it loaded
 }
 
 // savedName is a file's name among the kept ones.
@@ -380,6 +381,7 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 		}
 	}
 	var sysctl []string
+	content := map[string][]byte{} // of the sysctl files, read back after they load
 	for _, f := range sortedKeys(k.Files) {
 		if !k.Files[f] {
 			if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -395,7 +397,7 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 			return k, err
 		}
 		if strings.HasPrefix(f, o.sysctlDir) {
-			sysctl = append(sysctl, f)
+			sysctl, content[f] = append(sysctl, f), b
 		}
 	}
 	if withSnapshot && k.Snapshot {
@@ -425,6 +427,19 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 	for _, f := range sysctl {
 		if err := o.run("sysctl", "-q", "-e", "-p", f); err != nil {
 			fmt.Println("warning:", err)
+		}
+	}
+	// Read back, as the install does (deploy.Host's checkSysctl): a key
+	// another file overrides, or one the host does not let change (a
+	// container), is said, never a failure. Forwarding is the check's.
+	if o.sysctlValue != nil {
+		for _, f := range sysctl {
+			for _, u := range deploy.SysctlUnset(content[f], o.sysctlValue) {
+				if u.Key != forwardKey {
+					fmt.Printf("warning: after the restore %s is %s, not %s: another sysctl file overrides %s, or the host does not "+
+						"let it change (a container)\n", u.Key, u.Got, u.Want, f)
+				}
+			}
 		}
 	}
 	for _, u := range o.units {
@@ -987,6 +1002,10 @@ func (c *cli) relayEnvHere(ctx context.Context) relayEnv {
 		tableGone: tableGone,
 		rayspa:    deploy.DefaultBinaries.Rayspa,
 		settle:    2 * time.Second,
+		sysctlValue: func(key string) (string, error) {
+			out, err := commandApart("sysctl", "-n", key).Output()
+			return string(out), err
+		},
 	}
 	return relayEnv{
 		bundle: deploy.RelayBundle, ops: ops, session: sess,

@@ -734,6 +734,46 @@ func TestRelayRestoreSysctlWarns(t *testing.T) {
 	}
 }
 
+// After a restore loads the sysctl files it reads them back, as the
+// install does: a hardening key that did not take is said, a warning and
+// no failure; one the host has not (sysctl -e skipped it) is not, nor is
+// forwarding, which the check after reads.
+func TestRelayRestoreSysctlReadBack(t *testing.T) {
+	f := newFakeRelay(t)
+	f.write("etc/sysctl/90-raycontrol.conf", "# hardening\nnet.ipv4.conf.all.accept_redirects = 0\nnet.ipv6.conf.all.accept_ra = 0\n"+
+		"net.ipv4.tcp_syncookies = 1\n")
+	ops := f.env.ops
+	if _, err := ops.keep("v0.26.0"); err != nil {
+		t.Fatal(err)
+	}
+	var read []string
+	ops.sysctlValue = func(key string) (string, error) {
+		read = append(read, key)
+		switch key {
+		case "net.ipv4.conf.all.accept_redirects":
+			return "1\n", nil
+		case "net.ipv6.conf.all.accept_ra":
+			return "", errors.New("sysctl: cannot stat /proc/sys/net/ipv6/conf/all/accept_ra")
+		case "net.ipv4.ip_forward":
+			return "0\n", nil
+		}
+		return "1\n", nil
+	}
+	text, err := captureStdout(t, func() error { _, err := ops.restore(true); return err })
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "warning: after the restore net.ipv4.conf.all.accept_redirects is 1, not 0: another sysctl file overrides " +
+		f.at("etc/sysctl/90-raycontrol.conf") + ", or the host does not let it change (a container)\n"
+	if strings.Count(text, "warning:") != 1 || !strings.Contains(text, want) {
+		t.Errorf("output %q", text)
+	}
+	if !slices.Equal(read, []string{"net.ipv4.ip_forward", "net.ipv4.conf.all.accept_redirects", "net.ipv6.conf.all.accept_ra",
+		"net.ipv4.tcp_syncookies"}) {
+		t.Errorf("read back %q", read)
+	}
+}
+
 // The copy is whole or not there: a keep that fails halfway leaves no
 // relay.json to restore from.
 func TestRelayKeepWholeOrNothing(t *testing.T) {

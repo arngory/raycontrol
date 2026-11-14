@@ -252,7 +252,9 @@ func installRelay(bundlePath, packages string) (err error) {
 					c, ok := h.Journal.Original(deploy.ChangeSysctl, "", forwardKey)
 					return c.Value, ok
 				},
-				func() { _ = runApart("sysctl", "-q", "-p", deploy.HardeningSysctl) })
+				// -e, as ApplySysctl loads it: a key this host has not
+				// (net.ipv6.* with IPv6 off) is skipped, not an error.
+				func() { _ = runApart("sysctl", "-q", "-e", "-p", deploy.HardeningSysctl) })
 		},
 		// Past RestartSec (2 s): a rayspa that dies after its snapshot has
 		// restarted by then.

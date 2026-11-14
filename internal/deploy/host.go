@@ -611,19 +611,36 @@ func (h *Host) checkSysctl(files []File) {
 		if !strings.HasPrefix(f.Path, "/etc/sysctl.d/") {
 			continue
 		}
-		for _, line := range strings.Split(string(f.Content), "\n") {
-			key, want, ok := strings.Cut(line, "=")
-			key, want = strings.TrimSpace(key), strings.TrimSpace(want)
-			if !ok || key == "" || strings.HasPrefix(key, "#") {
-				continue
-			}
+		for _, u := range SysctlUnset(f.Content, func(key string) (string, error) {
 			out, err := h.Run("sysctl", "-n", key)
-			if got := strings.Join(strings.Fields(string(out)), " "); err == nil && got != want {
-				fmt.Fprintf(h.Out, "warning: %s is %s, not %s: another sysctl file overrides %s, or the host does not let it change (a container)\n",
-					key, got, want, f.Path)
-			}
+			return string(out), err
+		}) {
+			fmt.Fprintf(h.Out, "warning: %s is %s, not %s: another sysctl file overrides %s, or the host does not let it change (a container)\n",
+				u.Key, u.Got, u.Want, f.Path)
 		}
 	}
+}
+
+// Unset is a key of a sysctl file whose value in the kernel is another.
+type Unset struct{ Key, Got, Want string }
+
+// SysctlUnset lists the keys of a sysctl file's content whose value, as
+// read gives it (sysctl -n), is not the file's. A key read fails on (the
+// host has none, which sysctl -e skipped) is not among them.
+func SysctlUnset(content []byte, read func(key string) (string, error)) []Unset {
+	var out []Unset
+	for _, line := range strings.Split(string(content), "\n") {
+		key, want, ok := strings.Cut(line, "=")
+		key, want = strings.TrimSpace(key), strings.TrimSpace(want)
+		if !ok || key == "" || strings.HasPrefix(key, "#") {
+			continue
+		}
+		v, err := read(key)
+		if got := strings.Join(strings.Fields(v), " "); err == nil && got != want {
+			out = append(out, Unset{Key: key, Got: got, Want: want})
+		}
+	}
+	return out
 }
 
 // relabel restores the SELinux labels of written files (RHEL family), so
