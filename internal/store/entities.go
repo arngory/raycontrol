@@ -510,9 +510,12 @@ func isCredentialPrint(s string) bool {
 }
 
 // CredentialSets is Credentials with the rotation state.
+// With no userIDs it only reads: no transaction, nothing made.
 func (s *Store) CredentialSets(ctx context.Context, serviceID int64, userIDs []int64, gen func() (string, error)) (map[int64]Credential, error) {
-	if _, err := s.Credentials(ctx, serviceID, userIDs, gen); err != nil {
-		return nil, err
+	if len(userIDs) > 0 {
+		if _, err := s.Credentials(ctx, serviceID, userIDs, gen); err != nil {
+			return nil, err
+		}
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT user_id, secret, coalesce(next_secret, ''), coalesce(next_from, 0),
 		coalesce(prev_secret, ''), coalesce(prev_until, 0) FROM credentials WHERE service_id = ?`, serviceID)

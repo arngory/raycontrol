@@ -30,6 +30,7 @@ type Store struct {
 	db   *sql.DB
 	now  func() time.Time
 	path string
+	doh  dohCache // DoHTokens' HMACs (doh.go)
 }
 
 // Open opens (creating if needed) the database at path and applies pending

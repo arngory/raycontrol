@@ -8,9 +8,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -59,16 +59,13 @@ func DoHDeviceToken(secret string, device []byte) string {
 // previous in its grace). In the shared window the user's secrets are
 // tokens too, unless a device of the user was revoked since the window
 // began: that device knew them (docs/08-decisions.md, R4-37).
+//
+// One load reads the users of the service, then its credentials with the
+// devices not revoked of their users in one query, and makes only the
+// HMACs it did not make at the last load (dohCache): rayd loads every 30 s
+// and after each change of the node's state.
 func (s *Store) DoHTokens(ctx context.Context, service int64, now time.Time) (map[string]bool, error) {
-	users, err := s.ListUsers(ctx)
-	if err != nil {
-		return nil, err
-	}
-	sets, err := s.CredentialSets(ctx, service, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	devices, err := s.ActiveDeviceSecrets(ctx)
+	active, err := s.activeUsersOf(ctx, service, now)
 	if err != nil {
 		return nil, err
 	}
@@ -83,28 +80,117 @@ func (s *Store) DoHTokens(ctx context.Context, service int64, now time.Time) (ma
 			return nil, err
 		}
 	}
-	out := make(map[string]bool, len(devices)*2)
-	for _, u := range users {
-		if !u.Active(now) || !slices.Contains(u.Services, service) {
+	rows, err := s.db.QueryContext(ctx, `SELECT c.user_id, c.secret, coalesce(c.next_secret, ''), coalesce(c.prev_secret, ''),
+		coalesce(c.prev_until, 0), d.spa_key
+		FROM credentials c LEFT JOIN devices d ON d.user_id = c.user_id AND d.revoked_at IS NULL
+		WHERE c.service_id = ? ORDER BY c.user_id`, service)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]bool, 2*len(active))
+	tok := s.doh.round(service)
+	defer tok.done()
+	var cur, next, prev, key sql.RawBytes
+	var last int64 = -1
+	for rows.Next() {
+		var user, prevUntil int64
+		if err := rows.Scan(&user, &cur, &next, &prev, &prevUntil, &key); err != nil {
+			return nil, err
+		}
+		if !active[user] {
 			continue
 		}
-		set, ok := sets[u.ID]
-		if !ok {
-			continue
+		// The secrets the rotation accepts (Credential.Accepted).
+		secrets := [3]sql.RawBytes{cur, next}
+		if now.Before(time.Unix(prevUntil, 0)) {
+			secrets[2] = prev
 		}
-		for _, secret := range set.Accepted(now) {
-			if secret == "" {
+		var device [32]byte
+		copy(device[:], key)
+		for _, secret := range secrets {
+			if len(secret) == 0 {
 				continue
 			}
-			for _, d := range devices[u.ID] {
-				out[DoHDeviceToken(secret, d.Key[:])] = true
+			if key != nil {
+				out[tok.token(secret, device)] = true
 			}
-			if shared && !revokedSince[u.ID] {
-				out[secret] = true
+			if shared && user != last && !revokedSince[user] {
+				out[string(secret)] = true
 			}
 		}
+		last = user
 	}
-	return out, nil
+	return out, rows.Err()
+}
+
+// activeUsersOf are the users with the service that are active at now
+// (User.Active).
+func (s *Store) activeUsersOf(ctx context.Context, service int64, now time.Time) (map[int64]bool, error) {
+	rows, err := s.db.QueryContext(ctx, userSelect+`
+		WHERE EXISTS (SELECT 1 FROM user_services us WHERE us.user_id = u.id AND us.service_id = ?)`, service)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		u, err := scanUser(rows)
+		if err != nil {
+			return nil, err
+		}
+		if u.Active(now) {
+			out[u.ID] = true
+		}
+	}
+	return out, rows.Err()
+}
+
+// dohCache keeps the DoH tokens DoHTokens made last, per service, by the
+// secret and the device's key: a load makes again only the HMACs of what
+// changed since (a new device, a rotation), not every device's. Each load
+// keeps only what it used, so the cache is the size of the last answer.
+type dohCache struct {
+	mu   sync.Mutex
+	last map[int64]map[string]dohCached // by the secret, NUL, the device key
+}
+
+type dohCached struct{ key, token string }
+
+// dohRound is one DoHTokens' use of the cache.
+type dohRound struct {
+	c       *dohCache
+	service int64
+	old     map[string]dohCached
+	next    map[string]dohCached
+	buf     []byte
+}
+
+func (c *dohCache) round(service int64) *dohRound {
+	c.mu.Lock()
+	old := c.last[service]
+	c.mu.Unlock()
+	return &dohRound{c: c, service: service, old: old, next: make(map[string]dohCached, len(old))}
+}
+
+func (r *dohRound) token(secret []byte, device [32]byte) string {
+	r.buf = append(append(append(r.buf[:0], secret...), 0), device[:]...)
+	e, ok := r.old[string(r.buf)] // no allocation for the lookup
+	if !ok {
+		e = dohCached{string(r.buf), DoHDeviceToken(string(secret), device[:])}
+	}
+	r.next[e.key] = e
+	return e.token
+}
+
+// done keeps what the round used.
+func (r *dohRound) done() {
+	r.c.mu.Lock()
+	defer r.c.mu.Unlock()
+	if r.c.last == nil {
+		r.c.last = map[int64]map[string]dohCached{}
+	}
+	r.c.last[r.service] = r.next
 }
 
 // doHShared reads the shared window; none is 0, 0.
