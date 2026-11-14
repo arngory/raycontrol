@@ -414,6 +414,12 @@ type File struct {
 	// process has it from its next start on (naive-quic's key of stateless
 	// resets, which is of use only after a restart).
 	AtStart bool
+	// Pair is the path of a file listed after this one (a key's chain) that
+	// is written with it when this one changes: both are made as temporary
+	// files first, then renamed, this one first. A full disk leaves both
+	// as they were; only a stop between the two renames leaves this one
+	// new and the other old (spec/cert-pin-v1.md §6).
+	Pair string
 }
 
 // UnitName is the systemd unit of a service's process.
@@ -1852,9 +1858,11 @@ func naiveFiles(s Service, m Model, p Paths) ([]File, error) {
 		// The chain is read again by the process (certfile, spec/cert-pin-v1.md
 		// §6): a renewal, which keeps the key, restarts nothing and cuts no
 		// tunnel. The key is a copy systemd makes at the start: a new key
-		// (the site's next one) restarts the unit, as before.
+		// (the site's next one) restarts the unit, as before. The key comes
+		// first and takes the chain with it (Pair): a switch cut off half
+		// way leaves the running process the chain of the key it holds.
+		{Path: path.Join(dir, NaiveKey), Mode: 0o600, Content: key, Service: s.Name, Pair: path.Join(dir, NaiveChain)},
 		{Path: path.Join(dir, NaiveChain), Mode: 0o640, Group: GroupName(s.Name), Content: chain, Service: s.Name, Reload: true, Needed: true},
-		{Path: path.Join(dir, NaiveKey), Mode: 0o600, Content: key, Service: s.Name},
 	}
 	// The key of QUIC stateless resets, as dnstt's seal key goes: a file of
 	// the service's group (its process and rayd, no one else), not a copied
@@ -1915,10 +1923,11 @@ func siteFiles(s Service, m Model, p Paths) ([]File, error) {
 	}
 	key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: s.Secrets[provision.SecretTLSKey]})
 	files = append(files,
-		// The chain is read again by the site process, as naive's.
+		// The chain is read again by the site process, and goes with the
+		// key, as naive's.
+		File{Path: path.Join(dir, SiteKey), Mode: 0o600, Content: key, Service: s.Name, Pair: path.Join(dir, SiteChain)},
 		File{Path: path.Join(dir, SiteChain), Mode: 0o640, Group: GroupName(s.Name), Content: s.Secrets[provision.SecretTLSChain], Service: s.Name,
 			Reload: true, Needed: true},
-		File{Path: path.Join(dir, SiteKey), Mode: 0o600, Content: key, Service: s.Name},
 	)
 	return files, nil
 }

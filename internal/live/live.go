@@ -281,7 +281,15 @@ func (a *Applier) Apply(ctx context.Context) error {
 			} else {
 				err = nil
 			}
-			if err == nil {
+			switch {
+			case err == nil && f.Pair != "":
+				// A key and its chain, the key's restart written down
+				// first: the chain then needs no change of its own. The
+				// key renamed and the chain not: its restart stays owed.
+				var first bool
+				first, err = writePair(f, files)
+				wrote[f.Service] = wrote[f.Service] || first
+			case err == nil:
 				err = writeFile(f)
 			}
 		}
@@ -459,6 +467,55 @@ func fixMeta(f render.File) (bool, error) {
 // writeFile writes atomically with the file's mode and group. The group is
 // set only if it exists (it does once the node is deployed).
 func writeFile(f render.File) error {
+	tmp, err := stageFile(f)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp)
+	return os.Rename(tmp, f.Path)
+}
+
+// writePair writes f and, if its content changed, the file of f.Pair in
+// files: both staged first, then renamed back to back, f first. A key and
+// its chain: a full disk or a failed write leaves both as they were, and
+// only a stop between the renames leaves the new key with the old chain,
+// which the running process, holding the old key, does not see as a
+// change.
+func writePair(f render.File, files []render.File) (wroteF bool, err error) {
+	i := slices.IndexFunc(files, func(p render.File) bool { return p.Path == f.Pair })
+	var pair *render.File
+	if i >= 0 {
+		if old, err := os.ReadFile(files[i].Path); err != nil || !bytes.Equal(old, files[i].Content) {
+			pair = &files[i]
+		}
+	}
+	tmp, err := stageFile(f)
+	if err != nil {
+		return false, err
+	}
+	defer os.Remove(tmp)
+	var tmpPair string
+	if pair != nil {
+		if tmpPair, err = stageFile(*pair); err != nil {
+			return false, err
+		}
+		defer os.Remove(tmpPair)
+	}
+	if err := os.Rename(tmp, f.Path); err != nil {
+		return false, err
+	}
+	if pair == nil {
+		return true, nil
+	}
+	return true, renamePair(tmpPair, pair.Path)
+}
+
+// renamePair is the second rename of writePair (tests: one that fails).
+var renamePair = os.Rename
+
+// stageFile writes f's content to a temporary file beside it, with its
+// mode and group, and returns its path; the caller renames or removes it.
+func stageFile(f render.File) (string, error) {
 	dir := filepath.Dir(f.Path)
 	gid := -1
 	if f.Group != "" {
@@ -467,35 +524,31 @@ func writeFile(f render.File) error {
 		}
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return err
+		return "", err
 	}
 	if gid >= 0 {
 		// The directory must let the group in; the files decide the rest.
 		if err := os.Chown(dir, -1, gid); err != nil {
-			return err
+			return "", err
 		}
 	}
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
-		return err
+		return "", err
 	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(f.Content); err != nil {
-		tmp.Close()
-		return err
+	_, err = tmp.Write(f.Content)
+	err = errors.Join(err, tmp.Close())
+	if err == nil && gid >= 0 {
+		err = os.Chown(tmp.Name(), -1, gid)
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	if err == nil {
+		err = os.Chmod(tmp.Name(), os.FileMode(f.Mode))
 	}
-	if gid >= 0 {
-		if err := os.Chown(tmp.Name(), -1, gid); err != nil {
-			return err
-		}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", err
 	}
-	if err := os.Chmod(tmp.Name(), os.FileMode(f.Mode)); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), f.Path)
+	return tmp.Name(), nil
 }
 
 // Run applies now, after every change signalled on changes and every minute
