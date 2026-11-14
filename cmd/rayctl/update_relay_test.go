@@ -231,9 +231,9 @@ const relayTable = `table inet raycontrol {
 `
 
 // After the update and after its rollback: rayspa runs, the one started
-// from the binary on disk, its table applied a perimeter with the admin
-// addresses and, when the one before had services, the forwarding to the
-// exit; the kernel forwards, SSH from the admin addresses, the version
+// from the binary on disk, its table applied the perimeter of the snapshot
+// it runs from: the admin addresses and, when that snapshot has services
+// the relay forwards, the forwarding to the exit; the kernel forwards, SSH from the admin addresses, the version
 // wanted, the probe endpoint if it ran before.
 func TestRelayHealth(t *testing.T) {
 	up := map[string]string{"ActiveState": "active", "SubState": "running"}
@@ -243,7 +243,7 @@ func TestRelayHealth(t *testing.T) {
 	good := func() relayHealth {
 		return relayHealth{
 			rayspa: func() (map[string]string, error) { return up, nil }, probe: func() (map[string]string, error) { return up, nil },
-			probeRan: true, services: true, exe: func() error { return nil },
+			probeRan: true, exe: func() error { return nil },
 			nft:        func(...string) (string, error) { return relayTable, nil },
 			forwarding: func() ([]byte, error) { return []byte("1\n"), nil },
 			snapshot:   func() (*perimeterv1.Snapshot, error) { return snap, nil },
@@ -274,10 +274,9 @@ func TestRelayHealth(t *testing.T) {
 		"no DNAT": {func(h *relayHealth) {
 			h.nft = table(strings.Replace(relayTable, "dnat ip to 203.0.113.7", "counter", 1))
 		}, "forwards no service"},
-		"a perimeter without services": {func(h *relayHealth) {
-			empty := &perimeterv1.Snapshot{AdminPrefixes: snap.AdminPrefixes, AdminPorts: snap.AdminPorts, Services: relayServices(false)}
-			h.snapshot = func() (*perimeterv1.Snapshot, error) { return empty, nil }
-		}, "has no services"},
+		"no snapshot": {func(h *relayHealth) {
+			h.snapshot = func() (*perimeterv1.Snapshot, error) { return nil, os.ErrNotExist }
+		}, "perimeter cannot be read"},
 		"no forwarding":   {func(h *relayHealth) { h.forwarding = func() ([]byte, error) { return []byte("0\n"), nil } }, "does not forward"},
 		"session outside": {func(h *relayHealth) { h.client = "198.51.100.7" }, "rayctl relay set -admin"},
 		"old version":     {func(h *relayHealth) { h.version = func() string { return "v0.26.0" } }, `"v0.26.0", not v0.26.1`},
@@ -289,10 +288,11 @@ func TestRelayHealth(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	// A relay that forwarded no service before (none given to it yet) is
-	// not asked to now; no probe before, a local build.
+	// A perimeter with no service to forward (none given to the relay
+	// yet, or the exit's admin took them away since the update kept the
+	// relay): relay_fwd is empty and must be, its own SSH and the probe
+	// are served here; no probe before, a local build.
 	h := good()
-	h.services = false
 	h.nft = table(strings.Replace(relayTable, "elements = { tcp . 443, udp . 443 }", "", 1))
 	h.snapshot = func() (*perimeterv1.Snapshot, error) {
 		return &perimeterv1.Snapshot{AdminPrefixes: snap.AdminPrefixes, AdminPorts: snap.AdminPorts, Services: relayServices(false)}, nil
@@ -519,7 +519,7 @@ func TestRelayKeepRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !k.Snapshot || !k.Services || !k.Files[f.at("etc/rayspa.service")] || k.Files[f.at("etc/rayd-relay.service")] || !k.Units["rayspa.service"].Active {
+	if !k.Snapshot || !k.Files[f.at("etc/rayspa.service")] || k.Files[f.at("etc/rayd-relay.service")] || !k.Units["rayspa.service"].Active {
 		t.Fatalf("kept %+v", k)
 	}
 	// The update: new rayspa and rayd, rayctl as it was, a new unit, the
@@ -600,17 +600,58 @@ func TestRelayKeepRestore(t *testing.T) {
 	}
 }
 
-// A relay that forwards nothing still has its own SSH and the probe in
-// its snapshot (Local, served there, never in relay_fwd): kept, it had no
-// services to forward, and the check does not ask its table for any.
-func TestRelayKeepLocalOnly(t *testing.T) {
-	for _, forwarded := range []bool{false, true} {
-		f := newFakeRelay(t)
-		f.write("state/snapshot.pb", snapshotWith(t, forwarded))
-		k, err := f.env.ops.keep("v0.26.0")
-		if err != nil || k.Services != forwarded {
-			t.Errorf("forwarded %v: kept services %v %v", forwarded, k.Services, err)
+// The check after a change judges the table by the snapshot rayspa runs
+// from, not by the one kept before the change: a relay that forwards
+// nothing (its snapshot has only its own SSH and the probe, served there)
+// passes with relay_fwd empty, before and after the exit's admin took its
+// services away, and so does -rollback, which keeps the snapshot as it is
+// now; one whose snapshot has a service to forward and whose table has
+// none does not, nor does its rollback, and only then is the host opened.
+func TestRelayCheckBySnapshotRun(t *testing.T) {
+	up := map[string]string{"ActiveState": "active", "SubState": "running"}
+	empty := strings.Replace(relayTable, "elements = { tcp . 443, udp . 443 }", "", 1)
+	checked := func(f *fakeRelay, table string) {
+		f.env.health = func(w healthWant) func() error {
+			h := relayHealth{
+				rayspa: func() (map[string]string, error) { return up, nil }, probe: func() (map[string]string, error) { return up, nil },
+				probeRan: w.probeRan, exe: func() error { return nil },
+				nft:        func(...string) (string, error) { return table, nil },
+				forwarding: func() ([]byte, error) { return []byte("1\n"), nil },
+				snapshot:   func() (*perimeterv1.Snapshot, error) { return readSnapshot(f.at("state/snapshot.pb")) },
+				version:    func() string { return w.want }, want: w.want, port: w.port, client: w.client, name: w.name,
+			}
+			return func() error { f.wants = append(f.wants, w.want); return h.check() }
 		}
+	}
+	opened := func(f *fakeRelay) bool {
+		return slices.ContainsFunc(f.ran, func(s string) bool { return strings.Contains(s, "disable --now") })
+	}
+
+	// Nothing to forward from the start.
+	f := newFakeRelay(t)
+	f.write("state/snapshot.pb", snapshotWith(t, false))
+	checked(f, empty)
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err != nil || opened(f) {
+		t.Errorf("a relay with nothing to forward: %v %q", err, f.ran)
+	}
+
+	// Kept with a service; the exit's admin takes it away, the new version
+	// takes the new snapshot: the update passes, and -rollback after it.
+	f = newFakeRelay(t)
+	checked(f, empty)
+	f.inst = func() error { f.write("state/snapshot.pb", snapshotWith(t, false)); return nil }
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err != nil || opened(f) {
+		t.Fatalf("services taken away during the update: %v %q", err, f.ran)
+	}
+	if _, err := f.rollback(true); err != nil || opened(f) || f.read("bin/rayspa") != "rayspa v0.26.0" {
+		t.Errorf("-rollback after the services were taken away: %v %q", err, f.ran)
+	}
+
+	// A service to forward and a table that forwards none.
+	f = newFakeRelay(t)
+	checked(f, empty)
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err == nil || !strings.Contains(err.Error(), "forwards no service") || !opened(f) {
+		t.Errorf("a table that does not forward: %v %q", err, f.ran)
 	}
 }
 

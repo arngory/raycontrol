@@ -18,8 +18,6 @@ import (
 	"syscall"
 	"time"
 
-	"google.golang.org/protobuf/proto"
-
 	"github.com/arngory/raycontrol/internal/deploy"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/node"
@@ -137,14 +135,12 @@ func relayBefore(sshd func() ([]int, error), listening func(int) bool, sess sess
 
 // relayKept is what an update keeps of the relay before it changes it, in
 // previousDir beside the binaries: the files the relay install writes (or
-// that one was not there), whether rayspa's last snapshot was kept and
-// whether it had services to forward (perimeter.Forwarded), and its
-// units' states. Written last: its presence says the copy is whole.
+// that one was not there), whether rayspa's last snapshot was kept, and
+// its units' states. Written last: its presence says the copy is whole.
 type relayKept struct {
 	Version  string             `json:"version"`
 	Files    map[string]bool    `json:"files"`
 	Snapshot bool               `json:"snapshot"`
-	Services bool               `json:"services"`
 	Units    map[string]unitWas `json:"units"`
 }
 
@@ -248,8 +244,7 @@ func (o relayOps) keep(version string) (relayKept, error) {
 		if err := os.WriteFile(filepath.Join(o.dir, "snapshot.pb"), b, 0o600); err != nil {
 			return k, err
 		}
-		snap := &perimeterv1.Snapshot{}
-		k.Snapshot, k.Services = true, proto.Unmarshal(b, snap) == nil && len(perimeter.Forwarded(snap.Services)) > 0
+		k.Snapshot = true
 	case !errors.Is(err, os.ErrNotExist):
 		return k, fmt.Errorf("rayspa's snapshot: %w", err)
 	}
@@ -482,9 +477,12 @@ func relayInstallCommand(rayctl, bundle string, lock *os.File) *exec.Cmd {
 //   - rayspa runs, and the rayspa that runs is the binary on disk (started
 //     again since it was placed: a process left running from before is not
 //     the version checked);
-//   - its table has applied a perimeter: admin addresses, and, when the
-//     perimeter before the change had services, the forwarding to the exit
-//     (relay_dnat's DNAT, relay_fwd's ports) and services in the snapshot;
+//   - its table has applied the perimeter rayspa runs from (its snapshot,
+//     the exit's latest or the one a rollback put back, not the one from
+//     before the change: the exit's admin may have changed it since):
+//     admin addresses, and, when that snapshot has services the relay
+//     forwards (perimeter.Forwarded), the forwarding to the exit
+//     (relay_dnat's DNAT, relay_fwd's ports);
 //   - the kernel forwards;
 //   - the perimeter lets SSH in from the admin addresses (this session
 //     among them, when it is known);
@@ -495,7 +493,6 @@ type relayHealth struct {
 	probeRan      bool
 	exe           func() error                         // the running rayspa is the binary on disk
 	nft           func(args ...string) (string, error) // nft's output
-	services      bool                                 // the perimeter before had services
 	forwarding    func() ([]byte, error)
 	snapshot      func() (*perimeterv1.Snapshot, error)
 	version       func() string // rayspa version
@@ -539,6 +536,10 @@ func (h relayHealth) check() error {
 	if err := h.exe(); err != nil {
 		return err
 	}
+	snap, err := h.snapshot()
+	if err != nil {
+		return fmt.Errorf("rayspa's perimeter cannot be read: %w", err)
+	}
 	table, err := h.nft("list", "table", "inet", perimeter.Table)
 	if err != nil {
 		return fmt.Errorf("rayspa holds no perimeter table (%v): journalctl -u rayspa says why", strings.TrimSpace(err.Error()))
@@ -546,21 +547,17 @@ func (h relayHealth) check() error {
 	if !hasElements(table, "admin4") && !hasElements(table, "admin6") {
 		return errors.New("rayspa's table lets no admin address in: it has applied no perimeter (journalctl -u rayspa)")
 	}
-	if h.services {
+	// relay_fwd's elements are there from the snapshot on, not from a
+	// client's knock; none to forward, none there (relay_dnat's rule is).
+	if len(perimeter.Forwarded(snap.Services)) > 0 {
 		dnat := slices.ContainsFunc(nftBlock(table, "chain relay_dnat"), func(l string) bool { return strings.Contains(l, " dnat ") })
 		if !dnat || !hasElements(table, "relay_fwd") {
-			return errors.New("rayspa's table forwards no service to the exit (relay_dnat, relay_fwd): journalctl -u rayspa says why")
+			return errors.New("rayspa's table forwards no service to the exit (relay_dnat, relay_fwd), its perimeter has some: " +
+				"journalctl -u rayspa says why")
 		}
 	}
 	if v, err := h.forwarding(); err != nil || strings.TrimSpace(string(v)) != "1" {
 		return fmt.Errorf("the relay does not forward (net.ipv4.ip_forward %q)", strings.TrimSpace(string(v)))
-	}
-	snap, err := h.snapshot()
-	if err != nil {
-		return fmt.Errorf("rayspa's perimeter cannot be read: %w", err)
-	}
-	if h.services && len(perimeter.Forwarded(snap.Services)) == 0 {
-		return errors.New("the exit's perimeter for this relay has no services, the one before had: rayctl relay list on the exit")
 	}
 	if _, err := checkRelaySSH(snap, h.port, h.client, h.name, "rayctl update again"); err != nil {
 		return err
@@ -699,7 +696,6 @@ func backOrOpen(cause error, restore, checkBack, open func() error) error {
 type healthWant struct {
 	want         string
 	probeRan     bool
-	services     bool // the perimeter before the change had services
 	port         int
 	client, name string
 }
@@ -801,7 +797,7 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 		place:   func() (bool, error) { return e.place(st) },
 		install: func() error { return e.install(il) },
 		check: func() error {
-			return e.health(healthWant{want: s.version, probeRan: k.Units[deploy.RelayProbeUnit].Active, services: k.Services, port: port, client: e.session.addr, name: b.Name})()
+			return e.health(healthWant{want: s.version, probeRan: k.Units[deploy.RelayProbeUnit].Active, port: port, client: e.session.addr, name: b.Name})()
 		},
 		restore:   func() error { _, err := e.ops.restore(true); return err },
 		checkBack: func() error { return relayBack(k, e.health, port, e.session.addr, b.Name) },
@@ -821,7 +817,7 @@ func relayBack(k relayKept, health func(healthWant) func() error, port int, clie
 	if !k.Units[relayUnit].Active {
 		return nil
 	}
-	return health(healthWant{want: k.Version, probeRan: k.Units[deploy.RelayProbeUnit].Active, services: k.Services, port: port, client: client, name: name})()
+	return health(healthWant{want: k.Version, probeRan: k.Units[deploy.RelayProbeUnit].Active, port: port, client: client, name: name})()
 }
 
 // rollback is rayctl update -rollback on a relay: the kept relay back.
@@ -972,7 +968,6 @@ func realHealth(w healthWant) relayHealth {
 			out, _ := commandApart("systemctl", "show", "-p", "MainPID", "--value", unit).Output()
 			return strings.TrimSpace(string(out))
 		}),
-		services: w.services,
 		nft: func(args ...string) (string, error) {
 			out, err := commandApart("nft", args...).Output()
 			return string(out), err
