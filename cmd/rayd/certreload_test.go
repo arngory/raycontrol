@@ -40,8 +40,15 @@ import (
 // unit does: the tests below start it as a process of its own.
 const testCommand = "RAYD_TEST_COMMAND"
 
+// testUnpairedAfter shortens, in such a process, the wait for the restart
+// of a key switch (certUnpairedAfter, 30 s on a node).
+const testUnpairedAfter = "RAYD_TEST_UNPAIRED_AFTER"
+
 func TestMain(m *testing.M) {
 	if cmd := os.Getenv(testCommand); cmd != "" {
+		if d, err := time.ParseDuration(os.Getenv(testUnpairedAfter)); err == nil {
+			certUnpairedAfter = d
+		}
 		var err error
 		switch cmd {
 		case "naive":
@@ -538,5 +545,69 @@ func TestSiteCertificate(t *testing.T) {
 	replaceFile(t, chainFile, pem.EncodeToMemory(block))
 	if changed, err := l.Reload(); changed || err == nil || len(l.Current().Certificate) != 3 {
 		t.Fatalf("a leaf alone at a reload: changed %v, %v", changed, err)
+	}
+}
+
+// A key switch whose restart was lost (spec/cert-pin-v1.md §6): the chain
+// file holds the chain of the new key, the process the copy of the old one
+// made at its start. It used to serve the old leaf for good while
+// subscriptions pinned the new key. It exits now, non-zero, once the
+// restart has had its time, and its unit (Restart=always, the key copied
+// before every start) or rayd serve -supervise starts it again: with the
+// new key it serves the new chain.
+func TestSiteExitsForALostKeySwitch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	old, next := newSiteKeyPair(t), newSiteKeyPair(t)
+	chainPEM, _ := issueChain(t, old)
+	chainFile, keyFile, socket := filepath.Join(dir, "chain.pem"), filepath.Join(dir, "key.pem"), filepath.Join(dir, "site.sock")
+	replaceFile(t, chainFile, chainPEM)
+	replaceFile(t, keyFile, old.pem)
+	start := func() (*exec.Cmd, *output, chan error) {
+		cmd := exec.Command(os.Args[0], "-chain", chainFile, "-key", keyFile, "-socket", socket)
+		cmd.Env = append(os.Environ(), testCommand+"=site", testUnpairedAfter+"=1s")
+		out := &output{}
+		cmd.Stdout, cmd.Stderr = out, out
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		exited := make(chan error, 1)
+		go func() { exited <- cmd.Wait() }()
+		t.Cleanup(func() { _ = cmd.Process.Signal(syscall.SIGTERM) })
+		return cmd, out, exited
+	}
+	_, out, exited := start()
+	waitSocket(t, socket, out)
+
+	// rayd's apply wrote the chain of the new key; its restart never came,
+	// so the key file the process reads is still the old copy.
+	nextChain, nextLeaf := issueChain(t, next)
+	replaceFile(t, chainFile, nextChain)
+	select {
+	case err := <-exited:
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+			t.Fatalf("the process ended with %v, want exit status 1:\n%s", err, out)
+		}
+	case <-time.After(certfile.DefaultEvery + 20*time.Second):
+		t.Fatalf("the process still runs with the old key:\n%s", out)
+	}
+	if !strings.Contains(out.String(), "another key") {
+		t.Fatalf("the exit is not explained in the log:\n%s", out)
+	}
+	// The unit's next start: the key copied anew.
+	replaceFile(t, keyFile, next.pem)
+	if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	_, out, _ = start()
+	waitSocket(t, socket, out)
+	c, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "unix", socket, clientTLS(t, "http/1.1"))
+	if err != nil {
+		t.Fatalf("after the restart: %v\n%s", err, out)
+	}
+	defer c.Close()
+	if !bytes.Equal(c.ConnectionState().PeerCertificates[0].Raw, nextLeaf) {
+		t.Fatal("after the restart the process does not serve the chain of the new key")
 	}
 }

@@ -360,3 +360,97 @@ func TestLoaderLoad(t *testing.T) {
 		t.Fatal("Parse's refusal was not kept")
 	}
 }
+
+// Handshakes from many clients while the certificate changes twenty times:
+// each gets a certificate that verifies, and the race detector sees the
+// reloads with them.
+func TestLoaderConcurrentHandshakes(t *testing.T) {
+	n := newNode(t)
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				c, err := tls.Dial("tcp", n.addr, &tls.Config{RootCAs: n.roots, ServerName: "site.example.test"})
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				c.Close()
+			}
+		}()
+	}
+	for i := range 20 {
+		write(t, n.chain, n.issue(n.key))
+		if changed, err := n.l.Reload(); !changed || err != nil {
+			t.Fatalf("reload %d: %v %v", i, changed, err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// A key switch whose restart was lost: the chain file holds a chain for
+// key B, the process a copy of key A. It can never serve that chain, and
+// it used to keep the old leaf for good, having said so once. Watch now
+// calls Unpaired after UnpairedAfter (rayd exits there, to be started with
+// the new key) and returns. Files that make no certificate for another
+// reason, and a chain for another key that is replaced in time, do not
+// count.
+func TestLoaderUnpaired(t *testing.T) {
+	other, _ := newKey(t)
+	watch := func(n *node) (called chan struct{}, stop func()) {
+		called = make(chan struct{})
+		n.l.Every, n.l.UnpairedAfter = 10*time.Millisecond, 300*time.Millisecond
+		n.l.Unpaired = func() { close(called) }
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { n.l.Watch(ctx); close(done) }()
+		return called, func() { cancel(); <-done }
+	}
+
+	n := newNode(t)
+	called, stop := watch(n)
+	_, before := n.dial()
+	start := time.Now()
+	write(t, n.chain, n.issue(other))
+	select {
+	case <-called:
+		if d := time.Since(start); d < 300*time.Millisecond {
+			t.Fatalf("Unpaired after %v, before the restart had its time", d)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a chain for another key stayed for good: Unpaired was not called")
+	}
+	stop() // Watch has returned by itself
+	// Until then the old certificate is served.
+	if _, leaf := n.dial(); !bytes.Equal(leaf, before) {
+		t.Fatal("the chain for another key replaced the certificate in use")
+	}
+
+	// Not for garbage, a cut-off chain or a missing file; and not when the
+	// chain for another key gives way to a good one in time.
+	n = newNode(t)
+	called, stop = watch(n)
+	defer stop()
+	good := n.issue(n.key)
+	for _, content := range [][]byte{[]byte("garbage"), good[:len(good)/2], n.issue(other), good} {
+		write(t, n.chain, content)
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err := os.Remove(n.chain); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-called:
+		t.Fatal("Unpaired for files that are no chain for another key, or for one replaced in time")
+	case <-time.After(600 * time.Millisecond):
+	}
+}

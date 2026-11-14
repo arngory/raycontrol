@@ -10,7 +10,9 @@ package certfile
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -67,9 +69,55 @@ type Loader struct {
 	Log   *slog.Logger
 	// Every is the interval of Watch; 0 is DefaultEvery.
 	Every time.Duration
+	// Unpaired, if set, is called by Watch, which then returns, when the
+	// chain file has held for UnpairedAfter a whole chain that parses and
+	// is for another key than the key file's. The process holds a copy of
+	// the key made at its start, so this is a key switch whose restart did
+	// not come: the process can never serve that chain, while clients are
+	// given the pins of its key. rayd naive and rayd site exit there: their
+	// unit starts them again with a new copy of the key (Restart=always,
+	// and the copy is made before every start). Nil: the certificate in
+	// use stays, as for any file that makes no certificate.
+	Unpaired func()
+	// UnpairedAfter is how long the restart may take to come by itself; 0
+	// is DefaultUnpairedAfter.
+	UnpairedAfter time.Duration
 
-	seen    [sha256.Size]byte // the contents last tried
-	lastErr string            // the read error last logged
+	seen     [sha256.Size]byte // the contents last tried
+	lastErr  string            // the read error last logged
+	unpaired time.Time         // since when the chain is for another key; zero: it is not
+}
+
+// DefaultUnpairedAfter is Loader.UnpairedAfter's default: rayd's apply
+// writes the chain and restarts the unit within a second or two.
+const DefaultUnpairedAfter = 30 * time.Second
+
+// otherKey reports a chain and a key that each parse and do not belong
+// together: the leaf's public key is not the key's.
+func otherKey(chainPEM, keyPEM []byte) bool {
+	c, _ := pem.Decode(chainPEM)
+	k, _ := pem.Decode(keyPEM)
+	if c == nil || k == nil {
+		return false
+	}
+	leaf, err := x509.ParseCertificate(c.Bytes)
+	if err != nil {
+		return false
+	}
+	var key any
+	if key, err = x509.ParsePKCS8PrivateKey(k.Bytes); err != nil {
+		if key, err = x509.ParsePKCS1PrivateKey(k.Bytes); err != nil {
+			if key, err = x509.ParseECPrivateKey(k.Bytes); err != nil {
+				return false
+			}
+		}
+	}
+	signer, ok := key.(crypto.Signer)
+	if !ok {
+		return false
+	}
+	pub, ok := signer.Public().(interface{ Equal(crypto.PublicKey) bool })
+	return ok && !pub.Equal(leaf.PublicKey)
 }
 
 func readFile(path string) ([]byte, error) {
@@ -170,8 +218,12 @@ func (l *Loader) Reload() (bool, error) {
 		return false, nil
 	}
 	l.seen = sum
+	l.unpaired = time.Time{}
 	cert, err := l.parse(chain, key)
 	if err != nil {
+		if whole("chain", chain) == nil && otherKey(chain, key) {
+			l.unpaired = time.Now()
+		}
 		return false, err
 	}
 	l.Set(cert)
@@ -193,6 +245,10 @@ func (l *Loader) Watch(ctx context.Context) {
 		case <-t.C:
 		}
 		changed, err := l.Reload()
+		if after := cmp.Or(l.UnpairedAfter, DefaultUnpairedAfter); l.Unpaired != nil && !l.unpaired.IsZero() && time.Since(l.unpaired) >= after {
+			l.Unpaired()
+			return
+		}
 		if l.Log == nil {
 			continue
 		}
