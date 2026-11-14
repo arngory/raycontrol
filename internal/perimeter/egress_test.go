@@ -139,7 +139,7 @@ func TestEgressOf(t *testing.T) {
 func TestRulesetLocal(t *testing.T) {
 	rs := (&NFT{}).Ruleset()
 	for _, want := range []string{
-		"set local4 { type ipv4_addr; flags interval; elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, " +
+		"set local4 { type ipv4_addr; flags interval; elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 168.63.129.16/32, 169.254.0.0/16, " +
 			"172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 }; }",
 		"set local6 { type ipv6_addr; flags interval; elements = { ::/96, fc00::/7, fe80::/10, ff00::/8, 64:ff9b::/96, 64:ff9b:1::/48, 2002::/16 }; }",
 		"chain egress_local {\n\t}",
@@ -161,12 +161,13 @@ func TestRulesetLocal(t *testing.T) {
 		}
 	}
 	// The metadata address, in both of its spellings.
-	for _, a := range []string{"169.254.169.254", "64:ff9b::a9fe:a9fe", "fd00:ec2::254", "127.0.0.1", "::1", "100.64.0.1", "255.255.255.255"} {
+	for _, a := range []string{"169.254.169.254", "64:ff9b::a9fe:a9fe", "fd00:ec2::254", "127.0.0.1", "::1", "100.64.0.1", "255.255.255.255",
+		"168.63.129.16", "169.254.169.253", "fd00:ec2::253", "fd20:ce::254", "100.100.100.200", "fe80::a9fe:a9fe"} {
 		if !slices.ContainsFunc(LocalNets, func(n string) bool { return netip.MustParsePrefix(n).Contains(netip.MustParseAddr(a)) }) {
 			t.Errorf("%s is not local", a)
 		}
 	}
-	for _, a := range []string{"1.1.1.1", "2606:4700:4700::1111", "200::1", "198.51.100.1"} {
+	for _, a := range []string{"1.1.1.1", "2606:4700:4700::1111", "200::1", "198.51.100.1", "168.63.129.15", "168.63.129.17"} {
 		if slices.ContainsFunc(LocalNets, func(n string) bool { return netip.MustParsePrefix(n).Contains(netip.MustParseAddr(a)) }) {
 			t.Errorf("%s is local", a)
 		}

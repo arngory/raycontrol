@@ -335,7 +335,9 @@ var (
 		// and the perimeter's local sets have them (R4-38): "this network",
 		// IETF protocol assignments, benchmarking, reserved.
 		netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("192.0.0.0/24"),
-		netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("240.0.0.0/4")}
+		netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("240.0.0.0/4"),
+		// Azure's platform address (WireServer), public but the host's.
+		netip.MustParsePrefix("168.63.129.16/32")}
 	local struct {
 		once  sync.Once
 		addrs map[netip.Addr]bool

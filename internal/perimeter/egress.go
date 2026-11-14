@@ -64,8 +64,23 @@ func egressOf(e *perimeterv1.Egress) Egress {
 // 6to4, IPv4-compatible): 64:ff9b::a9fe:a9fe is 169.254.169.254 where
 // NAT64 is routed. Xray's routing keeps the same list out of the inner
 // stage and REALITY (render.privateNets).
+//
+// The clouds' platform addresses are in these ranges, but for Azure's
+// WireServer, 168.63.129.16, a public address that answers only inside
+// Azure (DHCP, DNS, health probes, the guest agent's channel to the
+// host): https://learn.microsoft.com/en-us/azure/virtual-network/what-is-ip-address-168-63-129-16
+// The others: AWS's IMDS 169.254.169.254 and fd00:ec2::254, its resolver
+// 169.254.169.253 and fd00:ec2::253 (link-local, ULA:
+// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html,
+// https://docs.aws.amazon.com/vpc/latest/userguide/AmazonDNS-concepts.html);
+// GCP's 169.254.169.254 and fd20:ce::254 (ULA:
+// https://cloud.google.com/compute/docs/metadata/querying-metadata);
+// Alibaba's 100.100.100.200 (CGNAT:
+// https://www.alibabacloud.com/help/en/ecs/user-guide/view-instance-metadata);
+// Oracle's and OpenStack's 169.254.169.254, OpenStack's fe80::a9fe:a9fe
+// (https://docs.openstack.org/nova/latest/user/metadata.html).
 var LocalNets = []string{
-	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "168.63.129.16/32", "169.254.0.0/16", "172.16.0.0/12",
 	"192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
 	"::/96", "fc00::/7", "fe80::/10", "ff00::/8", "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16",
 }

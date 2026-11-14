@@ -195,6 +195,9 @@ func TestPublicNotLocal(t *testing.T) {
 			}
 		}
 		for _, a := range []netip.Addr{p.Addr(), p.Addr().Next(), last} {
+			if !p.Contains(a) {
+				continue // a /32 has one address
+			}
 			if Public(a) {
 				t.Errorf("%s (%s) is public to naive", a, n)
 			}
