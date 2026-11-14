@@ -114,7 +114,7 @@ func DecodeHandoff(msg []byte) (Handoff, error) {
 // connections are the sockets the front passes, the front's prefetch
 // read first and RemoteAddr the client's.
 type Listener struct {
-	ln       *net.UnixListener
+	ln       *socket
 	frontUID int
 	log      *slog.Logger
 
@@ -127,6 +127,35 @@ type Listener struct {
 // directory decides who reaches it), and takes passed sockets from the
 // front only: the peer's UID must be frontUID.
 func ListenFD(path string, frontUID int, log *slog.Logger) (*Listener, error) {
+	ln, err := listen(path)
+	if err != nil {
+		return nil, err
+	}
+	l := &Listener{ln: ln, frontUID: frontUID, log: log, conns: make(chan net.Conn), closed: make(chan struct{})}
+	go l.acceptLoop()
+	return l, nil
+}
+
+// paths orders the sockets' files of this process: a socket made at a
+// path, and a socket's file removed when it closes.
+var paths sync.Mutex
+
+// socket is a listening SOCK_SEQPACKET socket and its file. Close removes
+// the file only while it is still this socket's: a service stopped and
+// started again makes a new socket at the same path, and the old one,
+// closed late (serveHTTP3 waits for its requests first), removed the new
+// one's file, which no one made again until rayd restarted.
+type socket struct {
+	*net.UnixListener
+	path string
+	file os.FileInfo
+}
+
+// listen makes the socket at path, mode 0660 (its directory decides who
+// reaches it), in place of whatever was there.
+func listen(path string) (*socket, error) {
+	paths.Lock()
+	defer paths.Unlock()
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
@@ -134,13 +163,29 @@ func ListenFD(path string, frontUID int, log *slog.Logger) (*Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(path, 0o660); err != nil { //nolint:gosec // G302: the front connects through the directory's group
+	ln.SetUnlinkOnClose(false) // Close's, below
+	fi, err := os.Lstat(path)
+	if err == nil {
+		err = os.Chmod(path, 0o660) //nolint:gosec // G302: the front connects through the directory's group
+	}
+	if err != nil {
 		_ = ln.Close()
+		_ = os.Remove(path)
 		return nil, err
 	}
-	l := &Listener{ln: ln, frontUID: frontUID, log: log, conns: make(chan net.Conn), closed: make(chan struct{})}
-	go l.acceptLoop()
-	return l, nil
+	return &socket{UnixListener: ln, path: path, file: fi}, nil
+}
+
+// Close closes the socket, and removes its file if the file is still its
+// own: before the socket closes, while its file's inode cannot be
+// another's.
+func (s *socket) Close() error {
+	paths.Lock()
+	defer paths.Unlock()
+	if fi, err := os.Lstat(s.path); err == nil && os.SameFile(fi, s.file) {
+		_ = os.Remove(s.path)
+	}
+	return s.UnixListener.Close()
 }
 
 func (l *Listener) acceptLoop() {

@@ -49,7 +49,7 @@ func decodePacket(msg []byte) (client, local netip.AddrPort, payload []byte, err
 // peers are the clients the front saw. QUIC servers run on it as on a
 // UDP socket.
 type PacketConn struct {
-	ln       *net.UnixListener
+	ln       *socket
 	frontUID int
 	log      *slog.Logger
 
@@ -78,15 +78,8 @@ type datagram struct {
 // ListenPacket creates the SOCK_SEQPACKET socket at path (mode 0660) and
 // takes datagrams from the front only.
 func ListenPacket(path string, frontUID int, log *slog.Logger) (*PacketConn, error) {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	ln, err := net.ListenUnix("unixpacket", &net.UnixAddr{Name: path, Net: "unixpacket"})
+	ln, err := listen(path)
 	if err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(path, 0o660); err != nil { //nolint:gosec // G302: the front connects through the directory's group
-		_ = ln.Close()
 		return nil, err
 	}
 	c := &PacketConn{ln: ln, frontUID: frontUID, log: log, in: make(chan datagram, 4096), closed: make(chan struct{}),

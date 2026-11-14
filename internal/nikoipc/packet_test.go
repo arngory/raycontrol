@@ -128,3 +128,43 @@ func unixPair() (*net.UnixConn, *net.UnixConn, error) {
 	}
 	return conns[0], conns[1], nil
 }
+
+// A service stopped and started again makes its socket anew at the same
+// path while the old one may still be open: serveHTTP3 closes DoH3's only
+// after its requests are done, up to the upstream's 5 s. That late close
+// removed the new socket's file, and DoH3 was dead until rayd restarted.
+// A socket's file goes with it only while it is its own; the same for
+// mode fd.
+func TestSocketLateCloseKeepsTheNewFile(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	for what, listen := range map[string]func(string) (interface{ Close() error }, error){
+		"packet": func(p string) (interface{ Close() error }, error) { return ListenPacket(p, os.Getuid(), log) },
+		"fd":     func(p string) (interface{ Close() error }, error) { return ListenFD(p, os.Getuid(), log) },
+	} {
+		sock := filepath.Join(t.TempDir(), "doh3.sock")
+		old, err := listen(sock) // start
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Stopped and started: the new socket, the old one not closed yet.
+		cur, err := listen(sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := old.Close(); err != nil { // the late close
+			t.Fatal(err)
+		}
+		c, err := net.DialUnix("unixpacket", nil, &net.UnixAddr{Name: sock, Net: "unixpacket"})
+		if err != nil {
+			t.Fatalf("%s: the new socket after the old one's late close: %v", what, err)
+		}
+		c.Close()
+		// Its own file goes with it.
+		if err := cur.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(sock); !os.IsNotExist(err) {
+			t.Errorf("%s: the socket's file stays after its close: %v", what, err)
+		}
+	}
+}
