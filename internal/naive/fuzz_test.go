@@ -1,0 +1,399 @@
+package naive
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
+	"io"
+	"net/netip"
+	"runtime/metrics"
+	"strings"
+	"testing"
+	"testing/iotest"
+)
+
+// The three parsers of what a client sends naive, before any of it goes
+// anywhere (docs/17-naive-default.md §3): the padded first frames of every
+// tunnel (paddedStream.Read), the request and packets of a UoT v2 stream
+// (readRequest, readPacketHead), and the echo frames of an ICMP stream
+// (readEcho). Each target checks more than "no panic": what a length field
+// may make the parser allocate, that it reads no byte past the frame it
+// parses, that it ends on a truncated input, and the round trip where
+// there is an encoder.
+
+// heapAllocated is the bytes the process has allocated so far (cheaper
+// than runtime.ReadMemStats, which stops the world).
+func heapAllocated() uint64 {
+	s := []metrics.Sample{{Name: "/gc/heap/allocs:bytes"}}
+	metrics.Read(s)
+	return s[0].Value.Uint64()
+}
+
+// allocBound fails t when f allocated more than limit bytes: no length
+// field of an input may make a parser allocate past the bounds of the
+// spec. The fuzzing engine's own work runs beside it in the process, and
+// its allocations count too: hence the slack, and f run again (it must
+// start afresh each time) before an input is said to break the bound. A
+// parser's own allocation is the same at every run.
+func allocBound(t *testing.T, limit uint64, f func()) {
+	t.Helper()
+	const slack = 64 << 10
+	var got uint64
+	for range 3 {
+		before := heapAllocated()
+		f()
+		if got = heapAllocated() - before; got <= limit+slack {
+			return
+		}
+	}
+	t.Fatalf("%d bytes allocated for an input, the bound is %d", got, limit)
+}
+
+// splitReader gives its input in reads of the sizes cuts says, in turn
+// (1 to 256 bytes each), as the network may.
+type splitReader struct {
+	b    []byte
+	cuts []byte
+	i    int
+}
+
+func (s *splitReader) Read(p []byte) (int, error) {
+	if len(s.b) == 0 {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if len(s.cuts) > 0 {
+		n = min(n, int(s.cuts[s.i%len(s.cuts)])+1)
+		s.i++
+	}
+	n = copy(p, s.b[:min(n, len(s.b))])
+	s.b = s.b[n:]
+	return n, nil
+}
+
+// unpad is the padded stream as upstream's framer reads it
+// (naive_padding_framer.cc, NaivePaddingFramer::Read), on the whole input
+// at once: the payload, and whether the input ended inside a frame.
+func unpad(in []byte) (payload []byte, truncated bool) {
+	for frame := 0; frame < paddingFrames; frame++ {
+		if len(in) == 0 {
+			return payload, false
+		}
+		if len(in) < paddedHeader {
+			return payload, true
+		}
+		n, pad := int(binary.BigEndian.Uint16(in)), int(in[2])
+		in = in[paddedHeader:]
+		if len(in) < n {
+			return append(payload, in...), true
+		}
+		payload, in = append(payload, in[:n]...), in[n:]
+		if len(in) < pad {
+			return payload, true
+		}
+		in = in[pad:]
+	}
+	return append(payload, in...), false
+}
+
+// FuzzPaddedStream: whatever a peer sends, paddedStream reads what
+// upstream's framer reads from it, in reads of any size, and fails (does
+// not end cleanly) on an input cut inside a frame; it allocates nothing for
+// a length field. What it writes reads back as it was written, with frames
+// of at most 64 KiB.
+func FuzzPaddedStream(f *testing.F) {
+	golden, _ := hex.DecodeString("0001006100050368656c6c6f000000000400" + "6162636400")
+	f.Add(golden, []byte{0, 3}, []byte("payload"))
+	f.Add([]byte{0, 0, 255}, []byte{}, []byte{})
+	f.Add([]byte{0xff, 0xff, 0xff, 1, 2, 3}, []byte{1}, bytes.Repeat([]byte{7}, 70000))
+	f.Add(bytes.Repeat([]byte{0, 1, 0, 'x'}, 12), []byte{0}, []byte(strings.Repeat("ab", 9)))
+	f.Fuzz(func(t *testing.T, in, cuts, payload []byte) {
+		want, truncated := unpad(in)
+		got := make([]byte, 0, len(in))
+		buf := make([]byte, 4096)
+		var err error
+		allocBound(t, 0, func() {
+			got = got[:0]
+			s := &paddedStream{r: &splitReader{b: in, cuts: cuts}}
+			for range len(in) + 2 { // each read takes a byte at least, or ends
+				var n int
+				n, err = s.Read(buf[:1+len(got)%len(buf)])
+				got = append(got, buf[:n]...)
+				if err != nil {
+					break
+				}
+			}
+		})
+		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("the read did not end: %v", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("read %x, upstream's framer reads %x", got, want)
+		}
+		if truncated != errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("an input cut inside a frame %v, the read's end %v", truncated, err)
+		}
+
+		// The round trip: payload written in pieces as cuts say, each
+		// frame with the padding cuts gives, read back.
+		var wire bytes.Buffer
+		pads := append([]byte{0}, cuts...)
+		i := 0
+		w := &paddedStream{w: &wire, pad: func() byte { i++; return pads[i%len(pads)] }}
+		for rest, j := payload, 0; len(rest) > 0; j++ {
+			n := min(len(rest), 1+int(pads[j%len(pads)])*300)
+			if _, err := w.Write(rest[:n]); err != nil {
+				t.Fatal(err)
+			}
+			rest = rest[n:]
+		}
+		frames := wire.Bytes()
+		for k := 0; k < paddingFrames && len(frames) > 0; k++ {
+			size := paddedHeader + int(binary.BigEndian.Uint16(frames)) + int(frames[2])
+			if size > paddedFrameMax {
+				t.Fatalf("a frame of %d bytes", size)
+			}
+			frames = frames[size:]
+		}
+		back, err := io.ReadAll(&paddedStream{r: &splitReader{b: wire.Bytes(), cuts: cuts}})
+		if err != nil || !bytes.Equal(back, payload) {
+			t.Fatalf("wrote %d bytes, read back %d (%v)", len(payload), len(back), err)
+		}
+	})
+}
+
+// readCount counts what its reader gave.
+type readCount struct {
+	r io.Reader
+	n int
+}
+
+func (c *readCount) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
+// addrLen is the length of an address of type t in its form (SOCKS or
+// UoT's), name being its name.
+func addrLen(t byte, socks bool, name string) int {
+	v4, v6 := byte(0x00), byte(0x01)
+	if socks {
+		v4, v6 = 0x01, 0x04
+	}
+	switch t {
+	case v4:
+		return 1 + 4 + 2
+	case v6:
+		return 1 + 16 + 2
+	}
+	return 1 + 1 + len(name) + 2
+}
+
+// encodeAddr is a in its form, IPv4 as IPv4.
+func encodeAddr(b []byte, a uotAddr, socks bool) []byte {
+	v4, v6, name := byte(0x00), byte(0x01), byte(0x02)
+	if socks {
+		v4, v6, name = 0x01, 0x04, 0x03
+	}
+	switch {
+	case a.name != "":
+		b = append(append(b, name, byte(len(a.name))), a.name...)
+	case a.ip.Is4():
+		b = append(append(b, v4), a.ip.AsSlice()...)
+	default:
+		b = append(append(b, v6), a.ip.AsSlice()...)
+	}
+	return binary.BigEndian.AppendUint16(b, a.port)
+}
+
+type uotParsed struct {
+	request bool // read whole
+	connect bool
+	dest    uotAddr
+	packets []uotPacket
+	err     error
+}
+
+type uotPacket struct {
+	dest uotAddr
+	data string
+}
+
+// parseUoT reads a stream as serveUoT and upstream do: the request, then
+// packets until an error. It checks, item by item, that the parser read
+// exactly the item's bytes and no more.
+func parseUoT(t *testing.T, in []byte) uotParsed {
+	t.Helper()
+	c := &readCount{r: bytes.NewReader(in)}
+	r := bufio.NewReaderSize(c, 4<<10)
+	consumed := func() int { return c.n - r.Buffered() }
+	var p uotParsed
+	var typ byte
+	if b, err := r.Peek(2); err == nil {
+		typ = b[1]
+	}
+	if p.connect, p.dest, p.err = readRequest(r); p.err != nil {
+		return p
+	}
+	p.request = true
+	if n := consumed(); n != 1+addrLen(typ, true, p.dest.name) {
+		t.Fatalf("the request took %d bytes, it has %d", n, 1+addrLen(typ, true, p.dest.name))
+	}
+	buf := make([]byte, uotMaxPayload)
+	for range len(in) + 1 { // each packet takes two bytes at least, or ends
+		start := consumed()
+		if b, err := r.Peek(1); err == nil {
+			typ = b[0]
+		}
+		dest, n, err := readPacketHead(r, p.connect)
+		if err != nil {
+			p.err = err
+			return p
+		}
+		if n > uotMaxPayload {
+			t.Fatalf("a packet of %d bytes taken", n)
+		}
+		if _, err := io.ReadFull(r, buf[:n]); err != nil {
+			p.err = err
+			return p
+		}
+		want := 2 + n
+		if !p.connect {
+			want += addrLen(typ, false, dest.name)
+		}
+		if got := consumed() - start; got != want {
+			t.Fatalf("a packet took %d bytes, it has %d", got, want)
+		}
+		p.packets = append(p.packets, uotPacket{dest, string(buf[:n])})
+	}
+	t.Fatal("the packets did not end")
+	return p
+}
+
+// FuzzUoT: whatever a client sends on a UoT stream, the request and the
+// packets are read item by item, each to its last byte and not past it; a
+// packet longer than a client may send is refused before its data is
+// read, so nothing is ever allocated past the one pooled packet buffer; an
+// address type or isConnect it does not know is refused, a cut input is
+// not. What was read, written again, reads the same.
+func FuzzUoT(f *testing.F) {
+	echo := netip.MustParseAddrPort("127.0.0.1:5353")
+	f.Add(append(append([]byte{0}, socksAddr(netip.MustParseAddrPort("0.0.0.0:0"))...),
+		packet(append([]byte{0x00}, binary.BigEndian.AppendUint16(echo.Addr().AsSlice(), echo.Port())...), []byte("one"))...))
+	f.Add(append(append([]byte{1}, socksName("echo.test", 53)...), packet(nil, []byte("a"))...))
+	f.Add(append(append([]byte{0}, socksAddr(echo)...), packet(uotName("echo.test", 53), []byte("named"))...))
+	f.Add(append(append([]byte{0}, socksAddr(echo)...), packet(v6(netip.MustParseAddrPort("[::ffff:127.0.0.1]:9")), nil)...))
+	f.Add(append(append([]byte{1}, socksAddr(echo)...), 0xff, 0xff))
+	f.Add([]byte{2, 0x01, 0, 0, 0, 0, 0, 0})
+	f.Add([]byte{0, 0x09})
+	f.Add([]byte{0, 0x03, 0})
+	f.Fuzz(func(t *testing.T, in []byte) {
+		var p uotParsed
+		// The packet buffer, and copies of what was read: no more.
+		allocBound(t, uotMaxPayload+16*uint64(len(in)), func() { p = parseUoT(t, in) })
+		if p.err == nil {
+			t.Fatal("a stream read without an end")
+		}
+		// Refused: what the format does not have. Anything else is the
+		// input's end, and only that.
+		refused := errors.Is(p.err, errRefused)
+		if !refused && !errors.Is(p.err, io.EOF) && !errors.Is(p.err, io.ErrUnexpectedEOF) && !errors.Is(p.err, bufio.ErrBufferFull) {
+			t.Fatalf("ended with %v", p.err)
+		}
+		// The round trip of what was read whole.
+		if !p.request {
+			return
+		}
+		again := []byte{0}
+		if p.connect {
+			again[0] = 1
+		}
+		again = encodeAddr(again, p.dest, true)
+		for _, pk := range p.packets {
+			if !p.connect {
+				again = encodeAddr(again, pk.dest, false)
+			}
+			again = binary.BigEndian.AppendUint16(again, uint16(len(pk.data))) //nolint:gosec // G115: under uotMaxPayload
+			again = append(again, pk.data...)
+		}
+		q := parseUoT(t, again)
+		if q.connect != p.connect || q.dest != p.dest || len(q.packets) != len(p.packets) || errors.Is(q.err, errRefused) {
+			t.Fatalf("read again: %+v, first %+v", q, p)
+		}
+		for i := range p.packets {
+			if q.packets[i] != p.packets[i] {
+				t.Fatalf("packet %d read again: %+v, first %+v", i, q.packets[i], p.packets[i])
+			}
+		}
+	})
+}
+
+// FuzzICMP: whatever a client sends on an ICMP stream, each echo frame is
+// read to its last byte and not past it: its data into the stream's one
+// buffer of icmpMaxPayload, a longer echo read past without a byte kept;
+// a kind or a family it does not know is refused, a cut input is not.
+// What was read, written again (echoFrame), reads the same.
+func FuzzICMP(f *testing.F) {
+	f.Add(echoFrame(netip.MustParseAddr("192.0.2.1"), 1, 7, 1, []byte("ping")))
+	f.Add(append(echoFrame(netip.MustParseAddr("2001:db8::1"), 64, 7, 2, nil), echoFrame(netip.MustParseAddr("192.0.2.1"), 0, 1, 1, []byte{1})...))
+	f.Add(echoFrame(netip.MustParseAddr("192.0.2.1"), 1, 7, 3, make([]byte, icmpMaxPayload+1)))
+	f.Add([]byte{1, 4, 192, 0, 2, 1, 1, 0, 1, 0, 1, 0xff, 0xff})
+	f.Add([]byte{2, 4})
+	f.Add([]byte{1, 5})
+	f.Fuzz(func(t *testing.T, in []byte) {
+		type frame struct {
+			e    icmpEchoFrame
+			data string
+		}
+		var frames []frame
+		var err error
+		// The payload buffer, and copies of what was read: no more.
+		allocBound(t, icmpMaxPayload+16*uint64(len(in)), func() {
+			frames = nil
+			c := &readCount{r: bytes.NewReader(in)}
+			r := bufio.NewReaderSize(c, 4<<10)
+			payload := make([]byte, icmpMaxPayload)
+			for range len(in) + 1 { // each frame takes a byte at least, or ends
+				start := c.n - r.Buffered()
+				var e icmpEchoFrame
+				if e, err = readEcho(r, payload); err != nil {
+					return
+				}
+				n := len(e.data)
+				if e.big {
+					n = int(binary.BigEndian.Uint16(in[start+len(e.dst.AsSlice())+7:]))
+					if n <= icmpMaxPayload || len(e.data) != 0 {
+						t.Fatalf("a big echo of %d bytes, %d kept", n, len(e.data))
+					}
+				}
+				if got, want := c.n-r.Buffered()-start, 2+len(e.dst.AsSlice())+7+n; got != want {
+					t.Fatalf("a frame took %d bytes, it has %d", got, want)
+				}
+				frames = append(frames, frame{e, string(e.data)})
+			}
+			t.Fatal("the frames did not end")
+		})
+		if !errors.Is(err, errRefused) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, bufio.ErrBufferFull) {
+			t.Fatalf("ended with %v", err)
+		}
+		var again []byte
+		for _, f := range frames {
+			data := []byte(f.data)
+			if f.e.big {
+				data = make([]byte, icmpMaxPayload+1)
+			}
+			again = append(again, echoFrame(f.e.dst, byte(f.e.ttl), f.e.id, f.e.seq, data)...) //nolint:gosec // G115: a byte read
+		}
+		r := bufio.NewReader(iotest.HalfReader(bytes.NewReader(again)))
+		payload := make([]byte, icmpMaxPayload)
+		for i, f := range frames {
+			e, err := readEcho(r, payload)
+			if err != nil || e.dst != f.e.dst || e.ttl != f.e.ttl || e.id != f.e.id || e.seq != f.e.seq || e.big != f.e.big || string(e.data) != f.data {
+				t.Fatalf("frame %d read again: %+v (%v), first %+v", i, e, err, f.e)
+			}
+		}
+	})
+}
