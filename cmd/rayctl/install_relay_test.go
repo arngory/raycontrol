@@ -616,6 +616,46 @@ func TestRelayInstallBegin(t *testing.T) {
 	}
 }
 
+// A crash between keep's renames leaves the earlier copy as previous.old
+// (and the new one as previous.new): an install that passes outside an
+// update removes those too, or the next update's keep would take
+// previous.old back as previous. Only relay copies, with relay.json.
+func TestRelayInstallDropsSwapCopies(t *testing.T) {
+	dir := t.TempDir()
+	lock, previous := filepath.Join(dir, "lock"), filepath.Join(dir, "previous")
+	for _, d := range []string{previous + ".old", previous + ".new"} {
+		os.MkdirAll(d, 0o700)
+		os.WriteFile(filepath.Join(d, relayKeptFile), []byte(`{"version":"v0.25.9"}`), 0o600)
+		os.WriteFile(filepath.Join(d, "rayspa"), []byte("rayspa v0.25.9"), 0o600)
+	}
+	_, done, err := relayInstallBegin(lock, previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done(nil)
+	for _, d := range []string{previous, previous + ".old", previous + ".new"} {
+		if _, err := os.Lstat(d); !os.IsNotExist(err) {
+			t.Errorf("%s after an install that passed: %v", filepath.Base(d), err)
+		}
+	}
+	// The next update has nothing to take back.
+	ops := relayOps{dir: previous}
+	if _, err := ops.kept(); err == nil {
+		t.Error("a copy from before the install is kept")
+	}
+	// Without relay.json: not a relay's copy, it stays.
+	os.MkdirAll(previous+".old", 0o700)
+	os.WriteFile(filepath.Join(previous+".old", "VERSION"), []byte("v0.26.0\n"), 0o600)
+	_, done, err = relayInstallBegin(lock, previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done(nil)
+	if _, err := os.Stat(filepath.Join(previous+".old", "VERSION")); err != nil {
+		t.Errorf("a directory without relay.json removed: %v", err)
+	}
+}
+
 // What systemctl says, or does not: rayspa counts as enabled and running
 // unless systemd says it is not.
 func TestSystemctlAnswers(t *testing.T) {

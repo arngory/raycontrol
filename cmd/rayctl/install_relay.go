@@ -441,8 +441,15 @@ func relayInstallBegin(path, dir string) (lock *os.File, done func(error), err e
 // dropRelayCopy removes what an earlier update kept of the relay in dir
 // (previousDir), its mark with it. Only a relay's copy, the one with
 // relay.json: a node's has none (and installRelay refuses a node's host);
-// without one, the mark alone goes.
+// without one, the mark alone goes. The copies keep swaps through (dir.new,
+// dir.old) go too when they hold relay.json: one left by a crash between
+// keep's renames would come back as dir at the next update.
 func dropRelayCopy(dir string) {
+	for _, d := range []string{dir + ".new", dir + ".old"} {
+		if _, err := os.Lstat(filepath.Join(d, relayKeptFile)); err == nil {
+			_ = os.RemoveAll(d)
+		}
+	}
 	if _, err := os.Lstat(filepath.Join(dir, relayKeptFile)); err == nil {
 		_ = os.RemoveAll(dir)
 		return
