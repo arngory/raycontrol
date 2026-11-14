@@ -508,6 +508,20 @@ func (s *Server) ExportUser(ctx context.Context, req *connect.Request[nodev1.Exp
 	return connect.NewResponse(resp), nil
 }
 
+// RenewUser gives a user new credentials at once (R4-36). The audit says
+// how many, never what they are.
+func (s *Server) RenewUser(ctx context.Context, req *connect.Request[nodev1.RenewUserRequest]) (*connect.Response[nodev1.RenewUserResponse], error) {
+	n, err := s.Store.RenewUser(ctx, req.Msg.Name)
+	target := req.Msg.Name
+	if err == nil {
+		target += fmt.Sprintf(": %d credentials new", n)
+	}
+	if err := s.done(ctx, "user.renew", target, err); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&nodev1.RenewUserResponse{Name: req.Msg.Name, Credentials: uint32(n)}), nil //nolint:gosec // G115: one a service
+}
+
 var errUserInactive = errors.New("user is disabled, expired or over the traffic limit")
 
 func (s *Server) export(ctx context.Context, name string) ([]sub.Profile, error) {

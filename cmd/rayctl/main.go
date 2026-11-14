@@ -59,6 +59,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   user usage [NAME]                         the users' counts against their limits
   user reset-usage NAME                     the current period's count from zero, now
   user export NAME [-o FILE]                the user's links, as in the subscription (they hold credentials)
+  user renew NAME                           new credentials for the user at once, no overlap, as a device
+                                            revocation gives them; the user's devices are cut until they
+                                            fetch their subscription (15 to 30 s)
   service list
   service add KIND NAME [-settings JSON]    slipstream: -settings '{"zone":"s.example.net"}' for a zone
                                             of your own (20 characters at most), else one is made up
@@ -578,8 +581,30 @@ func (c *cli) user(ctx context.Context, sub string, args []string) error {
 		return err
 	case "export":
 		return c.exportUser(ctx, args)
+	case "renew":
+		if err := need(args, 1); err != nil {
+			return err
+		}
+		r, err := c.c.RenewUser(ctx, connect.NewRequest(&nodev1.RenewUserRequest{Name: args[0]}))
+		if connect.CodeOf(err) == connect.CodeUnimplemented {
+			return errors.New("the node is older than v0.27.0: it cannot renew a user's credentials")
+		}
+		if err != nil {
+			return err
+		}
+		return c.print(r.Msg, func(w *tabwriter.Writer) { fmt.Fprint(w, renewText(r.Msg)) })
 	}
 	return errUsage
+}
+
+// renewText says what rayctl user renew did (R4-36).
+func renewText(r *nodev1.RenewUserResponse) string {
+	if r.Credentials == 0 {
+		return fmt.Sprintf("%s has no credentials yet: nothing to renew\n", r.Name)
+	}
+	return fmt.Sprintf("%s's credentials are new (%d credentials): the old ones stop working once rayd has applied\n"+
+		"them, in seconds. %s's devices are cut until they fetch their subscription: Niko does it by\n"+
+		"itself after 15 to 30 s, its keys still open the subscription.\n", r.Name, r.Credentials, r.Name)
 }
 
 // exportUser prints the links of a user's subscription (P-10), or writes
@@ -1147,7 +1172,8 @@ func revokeText(id string, r *nodev1.RevokeDeviceResponse) string {
 		// A node before v0.27.0: it said nothing, and changed no credentials.
 		return fmt.Sprintf("device %s revoked (the node is older than v0.27.0: the user's credentials stay as they were)\n", id)
 	case r.Already:
-		return fmt.Sprintf("device %s (%s/%s) was revoked already: nothing changed\n", id, r.User, r.Device)
+		return fmt.Sprintf("device %s (%s/%s) was revoked already: nothing changed (rayctl user renew %s gives the user\n"+
+			"other credentials at once)\n", id, r.User, r.Device, r.User)
 	case r.Credentials == 0:
 		return fmt.Sprintf("device %s (%s/%s) revoked; %s has no credentials yet\n", id, r.User, r.Device, r.User)
 	}

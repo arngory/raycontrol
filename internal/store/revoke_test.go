@@ -275,3 +275,45 @@ func TestCarryRevocationsRenewsCredentials(t *testing.T) {
 		t.Fatalf("the phone is back: %v", err)
 	}
 }
+
+// rayctl user renew: every credential of the user new at once, no next,
+// no previous, a new LAN key; nobody else's changes (R4-36).
+func TestRenewUser(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	svc, _ := s.CreateService(ctx, Service{Kind: "reality", Name: "reality", Enabled: true, Settings: "{}"})
+	alice, _ := s.CreateUser(ctx, User{Name: "alice", Enabled: true, Services: []int64{svc.ID}})
+	bob, _ := s.CreateUser(ctx, User{Name: "bob", Enabled: true, Services: []int64{svc.ID}})
+	if _, err := s.Credentials(ctx, svc.ID, []int64{alice.ID, bob.ID}, NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE credentials SET next_secret = 'n', next_from = 1, prev_secret = 'p', prev_until = 9999999999`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE users SET lan_key = x'01'`); err != nil {
+		t.Fatal(err)
+	}
+	before, bobBefore := creds(t, s, alice.ID)[svc.ID], creds(t, s, bob.ID)
+	if n, err := s.RenewUser(ctx, "alice"); err != nil || n != 1 {
+		t.Fatalf("renew: %d %v", n, err)
+	}
+	if c := creds(t, s, alice.ID)[svc.ID]; c[0] == before[0] || !isUUID(c[0]) || c[1] != "" || c[2] != "" || c[3] != "" {
+		t.Errorf("alice's credential %v, was %v", c, before)
+	}
+	if got := creds(t, s, bob.ID); got[svc.ID] != bobBefore[svc.ID] {
+		t.Errorf("bob's changed")
+	}
+	var a, b []byte
+	_ = s.db.QueryRow(`SELECT lan_key FROM users WHERE id = ?`, alice.ID).Scan(&a)
+	_ = s.db.QueryRow(`SELECT lan_key FROM users WHERE id = ?`, bob.ID).Scan(&b)
+	if len(a) != LANKeySize || string(b) != "\x01" {
+		t.Errorf("LAN keys %x %x", a, b)
+	}
+	if _, err := s.RenewUser(ctx, "nobody"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an unknown user: %v", err)
+	}
+}

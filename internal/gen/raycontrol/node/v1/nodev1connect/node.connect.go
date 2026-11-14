@@ -58,6 +58,8 @@ const (
 	NodeServiceSetUserLANProcedure = "/raycontrol.node.v1.NodeService/SetUserLAN"
 	// NodeServiceExportUserProcedure is the fully-qualified name of the NodeService's ExportUser RPC.
 	NodeServiceExportUserProcedure = "/raycontrol.node.v1.NodeService/ExportUser"
+	// NodeServiceRenewUserProcedure is the fully-qualified name of the NodeService's RenewUser RPC.
+	NodeServiceRenewUserProcedure = "/raycontrol.node.v1.NodeService/RenewUser"
 	// NodeServiceListServicesProcedure is the fully-qualified name of the NodeService's ListServices
 	// RPC.
 	NodeServiceListServicesProcedure = "/raycontrol.node.v1.NodeService/ListServices"
@@ -190,6 +192,12 @@ type NodeServiceClient interface {
 	// switch is pending (P-10). They hold the user's credentials, so the
 	// call is audited. They work only from an address SPA has opened.
 	ExportUser(context.Context, *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error)
+	// RenewUser gives a user new credentials at once, as a revocation of one
+	// of the user's devices does (docs/08-decisions.md, R4-36): each a fresh
+	// secret with no next and no previous one, and a new LAN password when
+	// the user has the LAN. The user's devices are cut until they fetch
+	// their subscription. Since v0.27.0; an older node answers unimplemented.
+	RenewUser(context.Context, *connect.Request[v1.RenewUserRequest]) (*connect.Response[v1.RenewUserResponse], error)
 	ListServices(context.Context, *connect.Request[v1.ListServicesRequest]) (*connect.Response[v1.ListServicesResponse], error)
 	CreateService(context.Context, *connect.Request[v1.CreateServiceRequest]) (*connect.Response[v1.CreateServiceResponse], error)
 	SetServiceEnabled(context.Context, *connect.Request[v1.SetServiceEnabledRequest]) (*connect.Response[v1.SetServiceEnabledResponse], error)
@@ -390,6 +398,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			httpClient,
 			baseURL+NodeServiceExportUserProcedure,
 			connect.WithSchema(nodeServiceMethods.ByName("ExportUser")),
+			connect.WithClientOptions(opts...),
+		),
+		renewUser: connect.NewClient[v1.RenewUserRequest, v1.RenewUserResponse](
+			httpClient,
+			baseURL+NodeServiceRenewUserProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("RenewUser")),
 			connect.WithClientOptions(opts...),
 		),
 		listServices: connect.NewClient[v1.ListServicesRequest, v1.ListServicesResponse](
@@ -652,6 +666,7 @@ type nodeServiceClient struct {
 	setUserTraffic    *connect.Client[v1.SetUserTrafficRequest, v1.SetUserTrafficResponse]
 	setUserLAN        *connect.Client[v1.SetUserLANRequest, v1.SetUserLANResponse]
 	exportUser        *connect.Client[v1.ExportUserRequest, v1.ExportUserResponse]
+	renewUser         *connect.Client[v1.RenewUserRequest, v1.RenewUserResponse]
 	listServices      *connect.Client[v1.ListServicesRequest, v1.ListServicesResponse]
 	createService     *connect.Client[v1.CreateServiceRequest, v1.CreateServiceResponse]
 	setServiceEnabled *connect.Client[v1.SetServiceEnabledRequest, v1.SetServiceEnabledResponse]
@@ -738,6 +753,11 @@ func (c *nodeServiceClient) SetUserLAN(ctx context.Context, req *connect.Request
 // ExportUser calls raycontrol.node.v1.NodeService.ExportUser.
 func (c *nodeServiceClient) ExportUser(ctx context.Context, req *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error) {
 	return c.exportUser.CallUnary(ctx, req)
+}
+
+// RenewUser calls raycontrol.node.v1.NodeService.RenewUser.
+func (c *nodeServiceClient) RenewUser(ctx context.Context, req *connect.Request[v1.RenewUserRequest]) (*connect.Response[v1.RenewUserResponse], error) {
+	return c.renewUser.CallUnary(ctx, req)
 }
 
 // ListServices calls raycontrol.node.v1.NodeService.ListServices.
@@ -970,6 +990,12 @@ type NodeServiceHandler interface {
 	// switch is pending (P-10). They hold the user's credentials, so the
 	// call is audited. They work only from an address SPA has opened.
 	ExportUser(context.Context, *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error)
+	// RenewUser gives a user new credentials at once, as a revocation of one
+	// of the user's devices does (docs/08-decisions.md, R4-36): each a fresh
+	// secret with no next and no previous one, and a new LAN password when
+	// the user has the LAN. The user's devices are cut until they fetch
+	// their subscription. Since v0.27.0; an older node answers unimplemented.
+	RenewUser(context.Context, *connect.Request[v1.RenewUserRequest]) (*connect.Response[v1.RenewUserResponse], error)
 	ListServices(context.Context, *connect.Request[v1.ListServicesRequest]) (*connect.Response[v1.ListServicesResponse], error)
 	CreateService(context.Context, *connect.Request[v1.CreateServiceRequest]) (*connect.Response[v1.CreateServiceResponse], error)
 	SetServiceEnabled(context.Context, *connect.Request[v1.SetServiceEnabledRequest]) (*connect.Response[v1.SetServiceEnabledResponse], error)
@@ -1166,6 +1192,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		NodeServiceExportUserProcedure,
 		svc.ExportUser,
 		connect.WithSchema(nodeServiceMethods.ByName("ExportUser")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceRenewUserHandler := connect.NewUnaryHandler(
+		NodeServiceRenewUserProcedure,
+		svc.RenewUser,
+		connect.WithSchema(nodeServiceMethods.ByName("RenewUser")),
 		connect.WithHandlerOptions(opts...),
 	)
 	nodeServiceListServicesHandler := connect.NewUnaryHandler(
@@ -1434,6 +1466,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceSetUserLANHandler.ServeHTTP(w, r)
 		case NodeServiceExportUserProcedure:
 			nodeServiceExportUserHandler.ServeHTTP(w, r)
+		case NodeServiceRenewUserProcedure:
+			nodeServiceRenewUserHandler.ServeHTTP(w, r)
 		case NodeServiceListServicesProcedure:
 			nodeServiceListServicesHandler.ServeHTTP(w, r)
 		case NodeServiceCreateServiceProcedure:
@@ -1559,6 +1593,10 @@ func (UnimplementedNodeServiceHandler) SetUserLAN(context.Context, *connect.Requ
 
 func (UnimplementedNodeServiceHandler) ExportUser(context.Context, *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.ExportUser is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) RenewUser(context.Context, *connect.Request[v1.RenewUserRequest]) (*connect.Response[v1.RenewUserResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.RenewUser is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) ListServices(context.Context, *connect.Request[v1.ListServicesRequest]) (*connect.Response[v1.ListServicesResponse], error) {

@@ -190,7 +190,7 @@ func subCommands(t *testing.T) map[string][]string {
 // their command does: places has no line for them.
 var apiSubs = map[string][]string{
 	"node":       {"name", "note"},
-	"user":       {"add", "del", "disable", "enable", "export", "lan", "limit", "list", "reset-usage", "services", "usage"},
+	"user":       {"add", "del", "disable", "enable", "export", "lan", "limit", "list", "renew", "reset-usage", "services", "usage"},
 	"service":    {"add", "del", "disable", "enable", "list", "rotate", "set"},
 	"device":     {"add", "invite", "list", "revoke"},
 	"relay":      {"add", "list", "remove", "set"},

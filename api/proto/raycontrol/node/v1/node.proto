@@ -33,6 +33,12 @@ service NodeService {
   // switch is pending (P-10). They hold the user's credentials, so the
   // call is audited. They work only from an address SPA has opened.
   rpc ExportUser(ExportUserRequest) returns (ExportUserResponse);
+  // RenewUser gives a user new credentials at once, as a revocation of one
+  // of the user's devices does (docs/08-decisions.md, R4-36): each a fresh
+  // secret with no next and no previous one, and a new LAN password when
+  // the user has the LAN. The user's devices are cut until they fetch
+  // their subscription. Since v0.27.0; an older node answers unimplemented.
+  rpc RenewUser(RenewUserRequest) returns (RenewUserResponse);
 
   rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
   rpc CreateService(CreateServiceRequest) returns (CreateServiceResponse);
@@ -609,6 +615,14 @@ message DeleteUserRequest { string name = 1; }
 message DeleteUserResponse {}
 
 message ExportUserRequest { string name = 1; }
+
+message RenewUserRequest { string name = 1; }
+message RenewUserResponse {
+  string name = 1;
+  // credentials: how many of the user's credentials are new (one a
+  // service the user has had, the inner one of REALITY's included).
+  uint32 credentials = 2;
+}
 message ExportUserResponse {
   repeated Profile profiles = 1;
 }

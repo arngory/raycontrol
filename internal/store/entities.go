@@ -817,16 +817,104 @@ func (s *Store) RevokeDevice(ctx context.Context, id string) (Revocation, error)
 		if _, err := tx.ExecContext(ctx, `UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, now, id); err != nil {
 			return err
 		}
-		if r.Credentials, err = renewCredentials(ctx, tx, user, now); err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE users SET lan_key = ? WHERE lan_key IS NOT NULL AND id = ?`, key, user)
+		r.Credentials, err = renewUser(ctx, tx, user, now, key)
 		return err
 	})
 	if err != nil {
 		return Revocation{}, err
 	}
 	return r, nil
+}
+
+// renewUser is what a revocation does to the device's user: every
+// credential new (renewCredentials) and the LAN key, when there is one,
+// replaced by key. It returns how many credentials there were.
+func renewUser(ctx context.Context, tx *sql.Tx, user, now int64, key []byte) (int, error) {
+	n, err := renewCredentials(ctx, tx, user, now)
+	if err != nil {
+		return 0, err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE users SET lan_key = ? WHERE lan_key IS NOT NULL AND id = ?`, key, user)
+	return n, err
+}
+
+// RenewUser gives a user new credentials at once, as a revocation of one
+// of the user's devices does (RevokeDevice): each a fresh secret with no
+// next and no previous one, and a new LAN key when the user has one. For
+// a device revoked by a node that left the credentials as they were, or
+// a credential that leaked otherwise (rayctl user renew). It returns how
+// many credentials are new.
+func (s *Store) RenewUser(ctx context.Context, name string) (int, error) {
+	key, err := newLANKey()
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	err = s.tx(ctx, func(tx *sql.Tx) error {
+		var user int64
+		err := tx.QueryRowContext(ctx, `SELECT id FROM users WHERE name = ?`, name).Scan(&user)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("user %q: %w", name, ErrNotFound)
+		}
+		if err != nil {
+			return err
+		}
+		n, err = renewUser(ctx, tx, user, s.now().Unix(), key)
+		return err
+	})
+	return n, err
+}
+
+// renewRevokedUsers is the step of schema 14 (v0.27.0, R4-36): every user
+// with a device revoked gets new credentials once, as a revocation now
+// gives them. A revocation before schema 14 left them as they were, and
+// the revoked device may hold them still. Every revocation in a database
+// at schema 13 is one of those: no raycontrol that renews wrote one. When
+// the credentials rotated since says nothing safe: the current secret was
+// in the subscriptions as the next one for the lead before its switch,
+// the previous one stays accepted for the grace after it, and the store
+// keeps neither the lead nor when a secret was first shown. Each user so
+// renewed has an audit line of its own, without the secrets.
+func renewRevokedUsers(ctx context.Context, tx *sql.Tx, now int64) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id, name FROM users u
+		WHERE EXISTS (SELECT 1 FROM devices d WHERE d.user_id = u.id AND d.revoked_at IS NOT NULL)
+		ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	type user struct {
+		id   int64
+		name string
+	}
+	var users []user
+	for rows.Next() {
+		var u user
+		if err := rows.Scan(&u.id, &u.name); err != nil {
+			rows.Close()
+			return err
+		}
+		users = append(users, u)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, u := range users {
+		key, err := newLANKey()
+		if err != nil {
+			return err
+		}
+		n, err := renewUser(ctx, tx, u.id, now, key)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO audit_log (ts, actor, action, target, result) VALUES (?, ?, ?, ?, ?)`,
+			now, "rayd (schema 14)", "user.renew:revoked-before",
+			fmt.Sprintf("%s: %d credentials new, a device of the user was revoked before v0.27.0", u.name, n), "ok"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // renewCredentials gives every credential of a user a fresh secret, with
