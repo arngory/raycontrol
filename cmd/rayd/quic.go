@@ -37,7 +37,9 @@ const (
 	quicConnIDLen = 8
 
 	// h3HeaderTimeout is how long a request stream has for its header, as
-	// ReadHeaderTimeout gives an HTTP/2 connection.
+	// ReadHeaderTimeout gives a TLS handshake and an HTTP/1 request over
+	// TCP. Not an HTTP/2 one: net/http does not apply it there, and a
+	// header block left without END_HEADERS waits for the idle time.
 	h3HeaderTimeout = 10 * time.Second
 )
 

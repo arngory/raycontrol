@@ -47,6 +47,10 @@ const (
 // a number of the node's own there would be its signature. idle closes a
 // connection that has had no request for that long. TLS and the error log
 // are the caller's.
+//
+// The 10 s of ReadHeaderTimeout bound the TLS handshake and an HTTP/1
+// request's header only. net/http applies no timeout to an HTTP/2 header
+// block: one left without END_HEADERS keeps its connection until idle.
 func HTTPServer(h http.Handler, idle time.Duration) *http.Server {
 	return &http.Server{
 		Handler:           h,
