@@ -134,7 +134,7 @@ func TestRulesetLocal(t *testing.T) {
 			"172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 }; }",
 		"set local6 { type ipv6_addr; flags interval; elements = { ::/96, fc00::/7, fe80::/10, ff00::/8, 64:ff9b::/96, 64:ff9b:1::/48, 2002::/16 }; }",
 		"chain egress_local {\n\t}",
-		"\t\tmeta skuid " + DataPlaneUIDs + " ct state new jump egress_local\n\t\tmeta skuid " + DataPlaneUIDs + " jump egress\n\t\tmeta skuid @egress_uid jump egress\n",
+		"\t\tmeta skuid " + DataPlaneUIDs + " ct state new,untracked jump egress_local\n\t\tmeta skuid " + DataPlaneUIDs + " jump egress\n\t\tmeta skuid @egress_uid jump egress\n",
 	} {
 		if !strings.Contains(rs, want) {
 			t.Errorf("ruleset lacks %q", want)
@@ -143,7 +143,7 @@ func TestRulesetLocal(t *testing.T) {
 	if strings.Index(rs, "jump egress_local") < strings.LastIndex(rs, "jump to_node") {
 		t.Error("egress_local before the guards of the node's own addresses")
 	}
-	if strings.Contains(rs, "@egress_uid ct state new jump egress_local") {
+	if strings.Contains(rs, "@egress_uid ct state new,untracked jump egress_local") {
 		t.Error("the extra UIDs take the local part")
 	}
 	for _, n := range LocalNets {

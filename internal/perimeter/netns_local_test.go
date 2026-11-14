@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
 	"syscall"
 	"testing"
 	"time"
@@ -123,6 +124,82 @@ func TestNetnsLocal(t *testing.T) {
 	policy(&perimeterv1.Egress{Local: &perimeterv1.Local{Allow: true}})
 	if err := reach(dataPlane, service); err != nil {
 		t.Errorf("allowed: %v", err)
+	}
+}
+
+// TestNetnsLocalUntracked: the front's DNS answers skip conntrack
+// (notrack_out: UID 9100, source port a DNS tunnel's), and an untracked
+// packet is never "ct state new": the jump to egress_local takes untracked
+// ones too. From the front's DNS port a datagram to a local network (an
+// SNMP agent on the LAN, the metadata address) is refused, EPERM; to the
+// internet it goes; to the stub on 53 it goes (on lo, tracked, the stub's
+// exception).
+func TestNetnsLocalUntracked(t *testing.T) {
+	if os.Getenv("RAYCONTROL_NETNS_TEST") != "1" {
+		t.Skip("set RAYCONTROL_NETNS_TEST=1 and run as root under unshare -n")
+	}
+	loUp(t)
+	for _, args := range [][]string{
+		{"link", "add", "rc-lu", "type", "veth", "peer", "name", "rc-lv"}, {"addr", "add", "10.1.2.1/24", "dev", "rc-lu"},
+		{"link", "set", "rc-lu", "up"}, {"link", "set", "rc-lv", "up"},
+		{"route", "add", "169.254.0.0/16", "dev", "rc-lu"}, {"route", "add", "198.51.100.0/24", "dev", "rc-lu"},
+	} {
+		if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
+			t.Fatalf("ip %v: %v %s", args, err, out)
+		}
+	}
+	defer exec.Command("ip", "link", "del", "rc-lu").Run()
+	fw := &NFT{NflogGroup: 7}
+	if err := fw.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Teardown()
+	if err := fw.SetPublic([]Port{{"udp", 5353}}); err != nil {
+		t.Fatal(err)
+	}
+	send := func(uid, sport int, dst netip.AddrPort) error {
+		t.Helper()
+		family, sa := sockaddr(dst)
+		fd, err := socketAs(uid, family, unix.SOCK_DGRAM)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(fd)
+		_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
+		if err := unix.Bind(fd, &unix.SockaddrInet4{Port: sport}); err != nil {
+			t.Fatal(err)
+		}
+		return unix.Sendto(fd, []byte("x"), 0, sa)
+	}
+	lan, metadata := netip.MustParseAddrPort("10.1.2.3:161"), netip.MustParseAddrPort("169.254.169.254:53")
+	internet, stub := netip.MustParseAddrPort("198.51.100.7:53"), netip.MustParseAddrPort("127.0.0.53:53")
+
+	// No policy yet: everything goes, the front's too.
+	for _, dst := range []netip.AddrPort{lan, metadata, internet} {
+		if err := send(frontUID, 5353, dst); err != nil {
+			t.Fatalf("no policy, the front to %v: %v", dst, err)
+		}
+	}
+	if err := fw.SetEgress(Egress{Local: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, dst := range []netip.AddrPort{lan, metadata} {
+		if err := send(frontUID, 5353, dst); !errors.Is(err, syscall.EPERM) {
+			t.Errorf("the front's untracked UDP to %v: %v, want EPERM", dst, err)
+		}
+		// Tracked, from any other port: refused as before.
+		if err := send(frontUID, 40001, dst); !errors.Is(err, syscall.EPERM) {
+			t.Errorf("the front's UDP to %v from another port: %v, want EPERM", dst, err)
+		}
+	}
+	for _, dst := range []netip.AddrPort{internet, stub} {
+		if err := send(frontUID, 5353, dst); err != nil {
+			t.Errorf("the front's UDP to %v: %v", dst, err)
+		}
+	}
+	// Root's (the node's own query from the DNS port) is not the data plane's.
+	if err := send(0, 5353, lan); err != nil {
+		t.Errorf("root to %v: %v", lan, err)
 	}
 }
 

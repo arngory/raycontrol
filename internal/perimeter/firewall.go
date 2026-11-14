@@ -338,14 +338,17 @@ table inet %[1]s {
 	# egress_local, apart from these guards: a new flow only (ct state
 	# before the set lookup, so an established packet pays a compare),
 	# which passes egress next, with return. Replies to clients on a local
-	# network are established, never new: they pass.
+	# network are established, never new: they pass. Untracked packets too
+	# (the front's DNS answers, notrack_out): never "new", they would pass
+	# by it to any local address; so the DNS tunnels do not answer a query
+	# from a local network either. new,untracked is a mask, one compare.
 	chain output {
 		type filter hook output priority 0; policy accept;
 		oif "lo" meta skuid %[7]s ip daddr != 127.0.0.0/8 fib daddr type local jump to_node
 		oif "lo" meta skuid %[7]s ip6 daddr != ::1 fib daddr type local jump to_node
 		meta nfproto ipv4 meta l4proto udp ct state != established meta skuid %[7]s fib daddr type broadcast jump to_node
 		oif "lo" meta skuid %[7]s ip daddr { 127.0.0.53, 127.0.0.54 } meta l4proto { tcp, udp } th dport != 53 jump to_node
-		meta skuid %[7]s ct state new jump egress_local
+		meta skuid %[7]s ct state new,untracked jump egress_local
 		meta skuid %[7]s jump egress
 		meta skuid @egress_uid jump egress%[12]s
 	}
