@@ -270,195 +270,201 @@ const (
 // own answers (prohibited, too big), what is not passed on (private
 // routers among it), resets, idle time.
 func TestICMP(t *testing.T) {
-	google, quad9, refused := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9"), netip.MustParseAddr("1.1.1.1")
-	cf := netip.MustParseAddr("2606:4700:4700::1111")
-	small, narrow, narrow6 := netip.MustParseAddr("9.9.9.10"), netip.MustParseAddr("9.9.9.11"), netip.MustParseAddr("2606:4700:4700::1001")
-	h, fake, connect := icmpServer(t, time.Second)
-	fake.hops[google], fake.hops[quad9], fake.hops[cf] = 10, 10, 8
-	fake.hops[small], fake.hops[narrow], fake.hops[narrow6] = 10, 10, 10
-	fake.unreach[refused] = 1
-	fake.pathMTU[small] = 1300
-	fake.narrow[narrow], fake.narrow[narrow6] = 1400, 1280
+	overProtos(t, func(t *testing.T) {
+		google, quad9, refused := netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("9.9.9.9"), netip.MustParseAddr("1.1.1.1")
+		cf := netip.MustParseAddr("2606:4700:4700::1111")
+		small, narrow, narrow6 := netip.MustParseAddr("9.9.9.10"), netip.MustParseAddr("9.9.9.11"), netip.MustParseAddr("2606:4700:4700::1001")
+		h, fake, connect := icmpServer(t, time.Second)
+		fake.hops[google], fake.hops[quad9], fake.hops[cf] = 10, 10, 8
+		fake.hops[small], fake.hops[narrow], fake.hops[narrow6] = 10, 10, 10
+		fake.unreach[refused] = 1
+		fake.pathMTU[small] = 1300
+		fake.narrow[narrow], fake.narrow[narrow6] = 1400, 1280
 
-	_, s, done := connect(ICMPName + ":0")
-	defer done()
-	write := func(b []byte) {
-		t.Helper()
-		if _, err := s.Write(b); err != nil {
-			t.Fatal(err)
-		}
-	}
-	expect := func(what string, want serverFrame) {
-		t.Helper()
-		if got := readFrame(t, s); got != want {
-			t.Fatalf("%s:\n got %s\nwant %s", what, got, want)
-		}
-	}
-	write([]byte{icmpVersion})
-
-	write(echoFrame(google, 0, 0x1234, 1, []byte("ping")))
-	expect("reply", serverFrame{wireReply, 0, google, 0x1234, 1, "ping"})
-	write(echoFrame(google, 200, 0x1234, 2, nil))
-	expect("reply with TTL 200", serverFrame{wireReply, 0, google, 0x1234, 2, ""})
-	write(echoFrame(google, 3, 0x1234, 3, []byte("trace")))
-	expect("time exceeded", serverFrame{wireExceeded, 0, router(false, 3), 0x1234, 3, ""})
-	write(echoFrame(refused, 30, 7, 4, nil))
-	expect("unreachable", serverFrame{wireUnreachable, 1, router(false, 1), 7, 4, ""})
-	write(echoFrame(cf, 64, 9, 5, []byte("six")))
-	expect("IPv6 reply", serverFrame{wireReply, 0, cf, 9, 5, "six"})
-	write(echoFrame(cf, 2, 9, 6, nil))
-	expect("IPv6 time exceeded", serverFrame{wireExceeded, 0, router(true, 2), 9, 6, ""})
-	// The longest echo goes; a longer one is too big, with the largest IP
-	// packet the node sends; the stream lives on.
-	long := strings.Repeat("x", icmpMaxPayload)
-	write(echoFrame(google, 64, 1, 7, []byte(long)))
-	expect("the longest echo", serverFrame{wireReply, 0, google, 1, 7, long})
-	write(echoFrame(google, 64, 1, 8, bytes.Repeat([]byte("y"), 1472)))
-	expect("too big", serverFrame{wireTooBig, 0, google, 1, 8, mtu(1480)})
-	write(echoFrame(cf, 64, 1, 9, bytes.Repeat([]byte("y"), 65535)))
-	expect("IPv6 too big", serverFrame{wireTooBig, 0, cf, 1, 9, mtu(1500)})
-	// Larger than the node's path: too big with its MTU, from the
-	// destination; a router's too big: from the router, with its MTU.
-	write(echoFrame(small, 64, 1, 10, bytes.Repeat([]byte("p"), 1300)))
-	expect("path too small", serverFrame{wireTooBig, 0, small, 1, 10, mtu(1300)})
-	write(echoFrame(narrow, 64, 1, 11, bytes.Repeat([]byte("p"), 1400)))
-	expect("a router's too big", serverFrame{wireTooBig, 0, router(false, 2), 1, 11, mtu(1400)})
-	write(echoFrame(narrow6, 64, 1, 12, bytes.Repeat([]byte("p"), 1300)))
-	expect("a router's IPv6 too big", serverFrame{wireTooBig, 0, router(true, 2), 1, 12, mtu(1280)})
-	write(echoFrame(narrow, 64, 1, 13, []byte("fits")))
-	expect("small enough", serverFrame{wireReply, 0, narrow, 1, 13, "fits"})
-	// Not public: prohibited, in the destination's name; nothing sent.
-	for i, dst := range []string{"10.0.0.1", "127.0.0.1", "100.64.0.1", "192.168.1.1", "169.254.169.254", "255.255.255.255", "224.0.0.1", "0.0.0.0",
-		"::1", "fe80::1", "fc00::1", "ff02::1", "64:ff9b::808:808", "2002:808:808::1", "::ffff:8.8.8.8", "::808:808"} {
-		a := netip.MustParseAddr(dst)
-		code := byte(wireProhibited4)
-		if a.Is6() {
-			code = wireProhibited6
-		}
-		write(echoFrame(a, 64, 2, uint16(i), []byte("no")))
-		expect(dst, serverFrame{wireUnreachable, code, a, 2, uint16(i), ""})
-		// Too big as well: prohibited first.
-		write(echoFrame(a, 64, 2, uint16(i), bytes.Repeat([]byte("z"), 2000)))
-		expect(dst+", too big", serverFrame{wireUnreachable, code, a, 2, uint16(i), ""})
-	}
-	type sent struct {
-		dst string
-		ttl int
-		v6  bool
-	}
-	var got []sent
-	seqs := map[uint16]bool{}
-	for _, e := range fake.echoes() {
-		got = append(got, sent{e.dst.String(), e.ttl, e.v6})
-		seqs[e.seq] = true
-	}
-	want := []sent{{"8.8.8.8", 64, false}, {"8.8.8.8", 64, false}, {"8.8.8.8", 3, false}, {"1.1.1.1", 30, false},
-		{cf.String(), 64, true}, {cf.String(), 2, true}, {"8.8.8.8", 64, false},
-		{"9.9.9.11", 64, false}, {narrow6.String(), 64, true}, {"9.9.9.11", 64, false}}
-	if !slices.Equal(got, want) || len(seqs) != len(want) {
-		t.Fatalf("sent %v (%d seqs), want %v", got, len(seqs), want)
-	}
-
-	// The same seq of two ids, answered the other way round: each answer
-	// to its own echo. The kernel puts its own ID in each echo: only the
-	// node's seq tells them apart.
-	fake.setHold()
-	write(echoFrame(google, 64, 1, 7, []byte("a")))
-	write(echoFrame(quad9, 64, 2, 7, []byte("b")))
-	eventually(t, "echoes not sent", func() bool { return len(fake.echoes()) == len(want)+2 })
-	fake.release()
-	expect("the later echo first", serverFrame{wireReply, 0, quad9, 2, 7, "b"})
-	expect("the earlier echo", serverFrame{wireReply, 0, google, 1, 7, "a"})
-
-	// What answers no echo of the stream is not passed on: another
-	// source, an error about another destination, an unknown seq, the
-	// other family. Nor is an error from a router the node may not reach
-	// (a private address, the node's loopback): such hops stay silent.
-	// Nor an answer that came already.
-	fake.setHold()
-	write(echoFrame(google, 64, 3, 30, []byte("late")))
-	eventually(t, "echo not sent", func() bool { return len(fake.echoes()) == len(want)+3 })
-	ours := fake.echoes()[len(want)+2].seq
-	fake.inject(false, icmpEvent{kind: icmpReply, from: quad9, dst: quad9, seq: ours}, []byte("spoof"))
-	fake.inject(false, icmpEvent{kind: icmpTimeExceeded, from: router(false, 1), dst: quad9, seq: ours}, nil)
-	fake.inject(false, icmpEvent{kind: icmpReply, from: google, dst: google, seq: ours + 1000}, nil)
-	fake.inject(true, icmpEvent{kind: icmpReply, from: cf, dst: cf, seq: ours}, nil)
-	for _, private := range []string{"10.1.2.3", "100.64.0.1", "192.168.0.1", "127.0.0.1"} {
-		from := netip.MustParseAddr(private)
-		fake.inject(false, icmpEvent{kind: icmpTimeExceeded, from: from, dst: google, seq: ours}, nil)
-		fake.inject(false, icmpEvent{kind: icmpUnreachable, code: 1, from: from, dst: google, seq: ours}, nil)
-		fake.inject(false, icmpEvent{kind: icmpTooBig, from: from, dst: google, seq: ours, mtu: 1400}, nil)
-	}
-	fake.release()
-	expect("the real answer", serverFrame{wireReply, 0, google, 3, 30, "late"})
-	fake.inject(false, icmpEvent{kind: icmpReply, from: google, dst: google, seq: ours}, []byte("dup"))
-	write(echoFrame(google, 64, 3, 31, []byte("next")))
-	expect("after the strays", serverFrame{wireReply, 0, google, 3, 31, "next"})
-
-	// Idle: the stream ends by itself, cleanly.
-	if reset(t, s) {
-		t.Fatal("an idle stream was reset")
-	}
-	done()
-
-	// Resets: another version, a frame that cannot be read as one.
-	for name, send := range map[string][]byte{
-		"version 0": {0},
-		"version 2": {2},
-		"kind 2":    append([]byte{1}, append([]byte{2}, echoFrame(google, 64, 1, 1, nil)[1:]...)...),
-		"af 5":      {1, icmpEcho, 5, 8, 8, 8, 8, 64, 0, 1, 0, 1, 0, 0},
-		"af 0":      {1, icmpEcho, 0},
-	} {
 		_, s, done := connect(ICMPName + ":0")
-		_, _ = s.Write(send)
-		if !reset(t, s) {
-			t.Errorf("%s: not reset", name)
+		defer done()
+		write := func(b []byte) {
+			t.Helper()
+			if _, err := s.Write(b); err != nil {
+				t.Fatal(err)
+			}
+		}
+		expect := func(what string, want serverFrame) {
+			t.Helper()
+			if got := readFrame(t, s); got != want {
+				t.Fatalf("%s:\n got %s\nwant %s", what, got, want)
+			}
+		}
+		write([]byte{icmpVersion})
+
+		write(echoFrame(google, 0, 0x1234, 1, []byte("ping")))
+		expect("reply", serverFrame{wireReply, 0, google, 0x1234, 1, "ping"})
+		write(echoFrame(google, 200, 0x1234, 2, nil))
+		expect("reply with TTL 200", serverFrame{wireReply, 0, google, 0x1234, 2, ""})
+		write(echoFrame(google, 3, 0x1234, 3, []byte("trace")))
+		expect("time exceeded", serverFrame{wireExceeded, 0, router(false, 3), 0x1234, 3, ""})
+		write(echoFrame(refused, 30, 7, 4, nil))
+		expect("unreachable", serverFrame{wireUnreachable, 1, router(false, 1), 7, 4, ""})
+		write(echoFrame(cf, 64, 9, 5, []byte("six")))
+		expect("IPv6 reply", serverFrame{wireReply, 0, cf, 9, 5, "six"})
+		write(echoFrame(cf, 2, 9, 6, nil))
+		expect("IPv6 time exceeded", serverFrame{wireExceeded, 0, router(true, 2), 9, 6, ""})
+		// The longest echo goes; a longer one is too big, with the largest IP
+		// packet the node sends; the stream lives on.
+		long := strings.Repeat("x", icmpMaxPayload)
+		write(echoFrame(google, 64, 1, 7, []byte(long)))
+		expect("the longest echo", serverFrame{wireReply, 0, google, 1, 7, long})
+		write(echoFrame(google, 64, 1, 8, bytes.Repeat([]byte("y"), 1472)))
+		expect("too big", serverFrame{wireTooBig, 0, google, 1, 8, mtu(1480)})
+		write(echoFrame(cf, 64, 1, 9, bytes.Repeat([]byte("y"), 65535)))
+		expect("IPv6 too big", serverFrame{wireTooBig, 0, cf, 1, 9, mtu(1500)})
+		// Larger than the node's path: too big with its MTU, from the
+		// destination; a router's too big: from the router, with its MTU.
+		write(echoFrame(small, 64, 1, 10, bytes.Repeat([]byte("p"), 1300)))
+		expect("path too small", serverFrame{wireTooBig, 0, small, 1, 10, mtu(1300)})
+		write(echoFrame(narrow, 64, 1, 11, bytes.Repeat([]byte("p"), 1400)))
+		expect("a router's too big", serverFrame{wireTooBig, 0, router(false, 2), 1, 11, mtu(1400)})
+		write(echoFrame(narrow6, 64, 1, 12, bytes.Repeat([]byte("p"), 1300)))
+		expect("a router's IPv6 too big", serverFrame{wireTooBig, 0, router(true, 2), 1, 12, mtu(1280)})
+		write(echoFrame(narrow, 64, 1, 13, []byte("fits")))
+		expect("small enough", serverFrame{wireReply, 0, narrow, 1, 13, "fits"})
+		// Not public: prohibited, in the destination's name; nothing sent.
+		for i, dst := range []string{"10.0.0.1", "127.0.0.1", "100.64.0.1", "192.168.1.1", "169.254.169.254", "255.255.255.255", "224.0.0.1", "0.0.0.0",
+			"::1", "fe80::1", "fc00::1", "ff02::1", "64:ff9b::808:808", "2002:808:808::1", "::ffff:8.8.8.8", "::808:808"} {
+			a := netip.MustParseAddr(dst)
+			code := byte(wireProhibited4)
+			if a.Is6() {
+				code = wireProhibited6
+			}
+			write(echoFrame(a, 64, 2, uint16(i), []byte("no")))
+			expect(dst, serverFrame{wireUnreachable, code, a, 2, uint16(i), ""})
+			// Too big as well: prohibited first.
+			write(echoFrame(a, 64, 2, uint16(i), bytes.Repeat([]byte("z"), 2000)))
+			expect(dst+", too big", serverFrame{wireUnreachable, code, a, 2, uint16(i), ""})
+		}
+		type sent struct {
+			dst string
+			ttl int
+			v6  bool
+		}
+		var got []sent
+		seqs := map[uint16]bool{}
+		for _, e := range fake.echoes() {
+			got = append(got, sent{e.dst.String(), e.ttl, e.v6})
+			seqs[e.seq] = true
+		}
+		want := []sent{{"8.8.8.8", 64, false}, {"8.8.8.8", 64, false}, {"8.8.8.8", 3, false}, {"1.1.1.1", 30, false},
+			{cf.String(), 64, true}, {cf.String(), 2, true}, {"8.8.8.8", 64, false},
+			{"9.9.9.11", 64, false}, {narrow6.String(), 64, true}, {"9.9.9.11", 64, false}}
+		if !slices.Equal(got, want) || len(seqs) != len(want) {
+			t.Fatalf("sent %v (%d seqs), want %v", got, len(seqs), want)
+		}
+
+		// The same seq of two ids, answered the other way round: each answer
+		// to its own echo. The kernel puts its own ID in each echo: only the
+		// node's seq tells them apart.
+		fake.setHold()
+		write(echoFrame(google, 64, 1, 7, []byte("a")))
+		write(echoFrame(quad9, 64, 2, 7, []byte("b")))
+		eventually(t, "echoes not sent", func() bool { return len(fake.echoes()) == len(want)+2 })
+		fake.release()
+		expect("the later echo first", serverFrame{wireReply, 0, quad9, 2, 7, "b"})
+		expect("the earlier echo", serverFrame{wireReply, 0, google, 1, 7, "a"})
+
+		// What answers no echo of the stream is not passed on: another
+		// source, an error about another destination, an unknown seq, the
+		// other family. Nor is an error from a router the node may not reach
+		// (a private address, the node's loopback): such hops stay silent.
+		// Nor an answer that came already.
+		fake.setHold()
+		write(echoFrame(google, 64, 3, 30, []byte("late")))
+		eventually(t, "echo not sent", func() bool { return len(fake.echoes()) == len(want)+3 })
+		ours := fake.echoes()[len(want)+2].seq
+		fake.inject(false, icmpEvent{kind: icmpReply, from: quad9, dst: quad9, seq: ours}, []byte("spoof"))
+		fake.inject(false, icmpEvent{kind: icmpTimeExceeded, from: router(false, 1), dst: quad9, seq: ours}, nil)
+		fake.inject(false, icmpEvent{kind: icmpReply, from: google, dst: google, seq: ours + 1000}, nil)
+		fake.inject(true, icmpEvent{kind: icmpReply, from: cf, dst: cf, seq: ours}, nil)
+		for _, private := range []string{"10.1.2.3", "100.64.0.1", "192.168.0.1", "127.0.0.1"} {
+			from := netip.MustParseAddr(private)
+			fake.inject(false, icmpEvent{kind: icmpTimeExceeded, from: from, dst: google, seq: ours}, nil)
+			fake.inject(false, icmpEvent{kind: icmpUnreachable, code: 1, from: from, dst: google, seq: ours}, nil)
+			fake.inject(false, icmpEvent{kind: icmpTooBig, from: from, dst: google, seq: ours, mtu: 1400}, nil)
+		}
+		fake.release()
+		expect("the real answer", serverFrame{wireReply, 0, google, 3, 30, "late"})
+		fake.inject(false, icmpEvent{kind: icmpReply, from: google, dst: google, seq: ours}, []byte("dup"))
+		write(echoFrame(google, 64, 3, 31, []byte("next")))
+		expect("after the strays", serverFrame{wireReply, 0, google, 3, 31, "next"})
+
+		// Idle: the stream ends by itself, cleanly.
+		if reset(t, s) {
+			t.Fatal("an idle stream was reset")
 		}
 		done()
-	}
-	eventually(t, "streams still counted", func() bool { return h.icmp.count() == 0 })
 
-	// ICMP off: the name resets the stream.
-	_, off := tunnelServer(t, func(*Server) {})
-	_, s, done = off(ICMPName + ":0")
-	_, _ = s.Write(append([]byte{icmpVersion}, echoFrame(google, 64, 1, 1, nil)...))
-	if !reset(t, s) {
-		t.Error("ICMP off: not reset")
-	}
-	done()
+		// Resets: another version, a frame that cannot be read as one.
+		for name, send := range map[string][]byte{
+			"version 0": {0},
+			"version 2": {2},
+			"kind 2":    append([]byte{1}, append([]byte{2}, echoFrame(google, 64, 1, 1, nil)[1:]...)...),
+			"af 5":      {1, icmpEcho, 5, 8, 8, 8, 8, 64, 0, 1, 0, 1, 0, 0},
+			"af 0":      {1, icmpEcho, 0},
+		} {
+			_, s, done := connect(ICMPName + ":0")
+			_, _ = s.Write(send)
+			if !reset(t, s) {
+				t.Errorf("%s: not reset", name)
+			}
+			done()
+		}
+		eventually(t, "streams still counted", func() bool { return h.icmp.count() == 0 })
+
+		// ICMP off: the name resets the stream.
+		_, off := tunnelServer(t, func(*Server) {})
+		_, s, done = off(ICMPName + ":0")
+		_, _ = s.Write(append([]byte{icmpVersion}, echoFrame(google, 64, 1, 1, nil)...))
+		if !reset(t, s) {
+			t.Error("ICMP off: not reset")
+		}
+		done()
+	})
 }
 
 // A user's streams: icmpPerUser at most, the next one reset; their slots
 // come back.
 func TestICMPStreamLimit(t *testing.T) {
-	h, _, connect := icmpServer(t, time.Minute)
-	var dones []func()
-	for range icmpPerUser {
+	overProtos(t, func(t *testing.T) {
+		h, _, connect := icmpServer(t, time.Minute)
+		var dones []func()
+		for range icmpPerUser {
+			_, s, done := connect(ICMPName + ":0")
+			_, _ = s.Write([]byte{icmpVersion})
+			dones = append(dones, done)
+		}
+		eventually(t, "streams not counted", func() bool { return h.icmp.count() == icmpPerUser })
 		_, s, done := connect(ICMPName + ":0")
 		_, _ = s.Write([]byte{icmpVersion})
-		dones = append(dones, done)
-	}
-	eventually(t, "streams not counted", func() bool { return h.icmp.count() == icmpPerUser })
-	_, s, done := connect(ICMPName + ":0")
-	_, _ = s.Write([]byte{icmpVersion})
-	if !reset(t, s) {
-		t.Error("over the user's limit: not reset")
-	}
-	done()
-	for _, done := range dones {
+		if !reset(t, s) {
+			t.Error("over the user's limit: not reset")
+		}
 		done()
-	}
-	eventually(t, "slots not given back", func() bool { return h.icmp.count() == 0 })
+		for _, done := range dones {
+			done()
+		}
+		eventually(t, "slots not given back", func() bool { return h.icmp.count() == 0 })
+	})
 }
 
 // A client that never says its version does not hold its slot past the
 // idle time.
 func TestICMPSilentClient(t *testing.T) {
-	h, _, connect := icmpServer(t, 300*time.Millisecond)
-	_, _, done := connect(ICMPName + ":0")
-	defer done()
-	eventually(t, "stream not counted", func() bool { return h.icmp.count() == 1 })
-	eventually(t, "a silent stream held its slot", func() bool { return h.icmp.count() == 0 })
+	overProtos(t, func(t *testing.T) {
+		h, _, connect := icmpServer(t, 300*time.Millisecond)
+		_, _, done := connect(ICMPName + ":0")
+		defer done()
+		eventually(t, "stream not counted", func() bool { return h.icmp.count() == 1 })
+		eventually(t, "a silent stream held its slot", func() bool { return h.icmp.count() == 0 })
+	})
 }
 
 func TestICMPLimits(t *testing.T) {

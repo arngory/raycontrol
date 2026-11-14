@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -13,7 +12,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -26,10 +24,10 @@ import (
 	"github.com/arngory/raycontrol/internal/site"
 )
 
-// uotServer is a naive server over HTTP/2 whose UDP may reach loopback (and
-// 127.0.0.1 only: 127.0.0.2 stands for what is not allowed), with the name
-// echo.test for 127.0.0.1.
-func uotServer(t *testing.T, idle time.Duration, opts ...func(*http.Transport)) (*Server, func(host string) (*http.Response, *paddedStream, func())) {
+// uotServer is a naive server whose UDP may reach loopback (and 127.0.0.1
+// only: 127.0.0.2 stands for what is not allowed), with the name echo.test
+// for 127.0.0.1; over HTTP/2, or the test's transport (overProtos).
+func uotServer(t *testing.T, idle time.Duration, o ...clientOpts) (*Server, func(host string) (*http.Response, *paddedStream, func())) {
 	t.Helper()
 	return tunnelServer(t, func(h *Server) {
 		h.Allow = func(a netip.Addr) bool { return a == netip.MustParseAddr("127.0.0.1") || a == netip.IPv6Loopback() }
@@ -43,12 +41,13 @@ func uotServer(t *testing.T, idle time.Duration, opts ...func(*http.Transport)) 
 			return nil, errors.New("no such name")
 		}
 		h.uotIdle = idle
-	}, opts...)
+	}, o...)
 }
 
-// tunnelServer is a naive server over HTTP/2 for the user secret-one, set
-// up before it serves; connect opens a stream to host.
-func tunnelServer(t *testing.T, setup func(*Server), opts ...func(*http.Transport)) (*Server, func(host string) (*http.Response, *paddedStream, func())) {
+// tunnelServer is a naive server for the user secret-one, set up before it
+// serves, over HTTP/2 or the test's transport (overProtos); connect opens a
+// stream to host.
+func tunnelServer(t *testing.T, setup func(*Server), o ...clientOpts) (*Server, func(host string) (*http.Response, *paddedStream, func())) {
 	t.Helper()
 	users := filepath.Join(t.TempDir(), "users.json")
 	writeUsers(t, users, "secret-one")
@@ -56,30 +55,17 @@ func tunnelServer(t *testing.T, setup func(*Server), opts ...func(*http.Transpor
 	var d net.Dialer
 	h := &Server{Users: &Users{Path: users}, Answer: answer, Dial: d.DialContext, Log: slog.New(slog.DiscardHandler)}
 	setup(h)
-	srv := httptest.NewUnstartedServer(h)
-	srv.Config = h.HTTPServer() // the limits of a connection as the service has them
-	srv.EnableHTTP2 = true
-	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}}
-	srv.StartTLS()
-	t.Cleanup(srv.Close)
-	tr := &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // G402: the test's own server
-		CurvePreferences:   []tls.CurveID{tls.X25519MLKEM768}, NextProtos: []string{"h2"},
-	}}
-	for _, o := range opts {
-		o(tr)
-	}
-	t.Cleanup(tr.CloseIdleConnections)
+	url, tr := serveOver(t, h, o...)
 	connect := func(host string) (*http.Response, *paddedStream, func()) {
 		t.Helper()
 		pr, pw := io.Pipe()
-		req, _ := http.NewRequest(http.MethodConnect, srv.URL, pr)
+		req, _ := http.NewRequest(http.MethodConnect, url, pr)
 		req.Host = host
 		req.Header.Set("Padding", paddingHeader())
 		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("niko:secret-one")))
 		resp, err := tr.RoundTrip(req)
 		if err != nil {
-			t.Fatal(err)
+			resp = resetBeforeAnswer(t, err)
 		}
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("CONNECT %s: %s", host, resp.Status)
@@ -263,181 +249,187 @@ func reset(t *testing.T, r io.Reader) bool {
 // UDP over TCP v2 (spec/naive-uot-v1.md): both modes, names, what is not
 // allowed, answers from strangers, resets, idle time, limits.
 func TestUoT(t *testing.T) {
-	echo := udpEcho(t)
-	// 127.0.0.2 is not allowed: nothing may reach it, whatever the form.
-	trap, trapped := udpTrap(t, "127.0.0.2:0")
-	h, connect := uotServer(t, 300*time.Millisecond)
-	v4 := func(ap netip.AddrPort) []byte {
-		b := append([]byte{0x00}, ap.Addr().AsSlice()...)
-		return binary.BigEndian.AppendUint16(b, ap.Port())
-	}
+	overProtos(t, func(t *testing.T) {
+		echo := udpEcho(t)
+		// 127.0.0.2 is not allowed: nothing may reach it, whatever the form.
+		trap, trapped := udpTrap(t, "127.0.0.2:0")
+		h, connect := uotServer(t, 300*time.Millisecond)
+		v4 := func(ap netip.AddrPort) []byte {
+			b := append([]byte{0x00}, ap.Addr().AsSlice()...)
+			return binary.BigEndian.AppendUint16(b, ap.Port())
+		}
 
-	// isConnect = 0: each packet its own address.
-	_, s, done := connect(UoTName + ":0")
-	if _, err := s.Write(append([]byte{0}, socksAddr(netip.MustParseAddrPort("0.0.0.0:0"))...)); err != nil {
-		t.Fatal(err)
-	}
-	for i, data := range [][]byte{[]byte("one"), bytes.Repeat([]byte("x"), uotMaxAnswer), {}} {
-		if _, err := s.Write(packet(v4(echo), data)); err != nil {
+		// isConnect = 0: each packet its own address.
+		_, s, done := connect(UoTName + ":0")
+		if _, err := s.Write(append([]byte{0}, socksAddr(netip.MustParseAddrPort("0.0.0.0:0"))...)); err != nil {
 			t.Fatal(err)
 		}
-		// The stranger's packet first, never passed on: the echo is the
-		// first that comes.
-		from, got := readPacket(t, s, false)
-		if from != echo || !bytes.Equal(got, data) {
-			t.Fatalf("packet %d: from %s, %d bytes", i, from, len(got))
-		}
-	}
-	// The longest a client may send goes out; its answer, longer than a
-	// client takes, does not come back; the stream lives on.
-	if _, err := s.Write(packet(v4(echo), bytes.Repeat([]byte("y"), uotMaxPayload))); err != nil {
-		t.Fatal(err)
-	}
-	// By name: the first allowed address (127.0.0.2 is not).
-	if _, err := s.Write(packet(uotName("echo.test", echo.Port()), []byte("named"))); err != nil {
-		t.Fatal(err)
-	}
-	if from, got := readPacket(t, s, false); from != echo || string(got) != "named" {
-		t.Fatalf("by name: %s %q", from, got)
-	}
-	// IPv4 in IPv6 is IPv4.
-	mapped := netip.AddrPortFrom(netip.AddrFrom16(echo.Addr().As16()), echo.Port())
-	if _, err := s.Write(packet(v6(mapped), []byte("mapped"))); err != nil {
-		t.Fatal(err)
-	}
-	if from, got := readPacket(t, s, false); from != echo || string(got) != "mapped" {
-		t.Fatalf("mapped: %s %q", from, got)
-	}
-	// Not allowed (as such, mapped, by name), no such name, port 0:
-	// dropped, the stream lives on.
-	for _, addr := range [][]byte{v4(trap), v6(netip.AddrPortFrom(netip.AddrFrom16(trap.Addr().As16()), trap.Port())),
-		uotName("trap.test", trap.Port()), uotName("nowhere.test", 53), v4(netip.AddrPortFrom(echo.Addr(), 0))} {
-		if _, err := s.Write(packet(addr, []byte("dropped"))); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := s.Write(packet(v4(echo), []byte("still"))); err != nil {
-		t.Fatal(err)
-	}
-	if _, got := readPacket(t, s, false); string(got) != "still" {
-		t.Fatalf("after the dropped: %q", got)
-	}
-	// Idle: the stream ends by itself, cleanly.
-	if reset(t, s) {
-		t.Fatal("an idle stream was reset")
-	}
-	done()
-
-	// An IPv6 destination, its answer's source as 0x01.
-	if echo6 := udpEchoAt(t, netip.IPv6Loopback()); echo6.IsValid() {
-		_, s, done = connect(UoTName + ":0")
-		_, _ = s.Write(append([]byte{0}, socksAddr(netip.MustParseAddrPort("0.0.0.0:0"))...))
-		if _, err := s.Write(packet(v6(echo6), []byte("six"))); err != nil {
-			t.Fatal(err)
-		}
-		if from, got := readPacket(t, s, false); from != echo6 || string(got) != "six" {
-			t.Fatalf("IPv6: %s %q", from, got)
-		}
-		done()
-	}
-
-	// isConnect = 1: one destination, no addresses in the packets; by
-	// address and by name.
-	for _, dest := range [][]byte{socksAddr(echo), socksName("echo.test", echo.Port())} {
-		_, s, done = connect(UoTName + ":443")
-		if _, err := s.Write(append([]byte{1}, dest...)); err != nil {
-			t.Fatal(err)
-		}
-		for _, data := range []string{"a", "bb", "ccc"} {
-			if _, err := s.Write(packet(nil, []byte(data))); err != nil {
+		for i, data := range [][]byte{[]byte("one"), bytes.Repeat([]byte("x"), uotMaxAnswer), {}} {
+			if _, err := s.Write(packet(v4(echo), data)); err != nil {
 				t.Fatal(err)
 			}
-			if _, got := readPacket(t, s, true); string(got) != data {
-				t.Fatalf("connected: %q", got)
+			// The stranger's packet first, never passed on: the echo is the
+			// first that comes.
+			from, got := readPacket(t, s, false)
+			if from != echo || !bytes.Equal(got, data) {
+				t.Fatalf("packet %d: from %s, %d bytes", i, from, len(got))
 			}
 		}
-		done()
-	}
-
-	// Resets: a destination not allowed, a packet too long, a bad request,
-	// v1, a TCP destination that does not answer.
-	for name, c := range map[string]struct {
-		host string
-		send []byte
-	}{
-		"connected, not allowed":          {UoTName + ":0", append([]byte{1}, socksAddr(trap)...)},
-		"connected, by name, not allowed": {UoTName + ":0", append([]byte{1}, socksName("trap.test", trap.Port())...)},
-		"too long": {UoTName + ":0", append(append([]byte{0}, socksAddr(netip.MustParseAddrPort("0.0.0.0:0"))...),
-			binary.BigEndian.AppendUint16(v4(echo), uotMaxPayload+1)...)},
-		"isConnect 2":      {UoTName + ":0", []byte{2, 0x01, 0, 0, 0, 0, 0, 0}},
-		"address type":     {UoTName + ":0", []byte{0, 0x09}},
-		"v1":               {uotLegacyName + ":0", []byte("x")},
-		"tcp, no listener": {"127.0.0.1:1", []byte("x")},
-	} {
-		_, s, done := connect(c.host)
-		_, _ = s.Write(c.send)
-		if !reset(t, s) {
-			t.Errorf("%s: not reset", name)
+		// The longest a client may send goes out; its answer, longer than a
+		// client takes, does not come back; the stream lives on.
+		if _, err := s.Write(packet(v4(echo), bytes.Repeat([]byte("y"), uotMaxPayload))); err != nil {
+			t.Fatal(err)
+		}
+		// By name: the first allowed address (127.0.0.2 is not).
+		if _, err := s.Write(packet(uotName("echo.test", echo.Port()), []byte("named"))); err != nil {
+			t.Fatal(err)
+		}
+		if from, got := readPacket(t, s, false); from != echo || string(got) != "named" {
+			t.Fatalf("by name: %s %q", from, got)
+		}
+		// IPv4 in IPv6 is IPv4.
+		mapped := netip.AddrPortFrom(netip.AddrFrom16(echo.Addr().As16()), echo.Port())
+		if _, err := s.Write(packet(v6(mapped), []byte("mapped"))); err != nil {
+			t.Fatal(err)
+		}
+		if from, got := readPacket(t, s, false); from != echo || string(got) != "mapped" {
+			t.Fatalf("mapped: %s %q", from, got)
+		}
+		// Not allowed (as such, mapped, by name), no such name, port 0:
+		// dropped, the stream lives on.
+		for _, addr := range [][]byte{v4(trap), v6(netip.AddrPortFrom(netip.AddrFrom16(trap.Addr().As16()), trap.Port())),
+			uotName("trap.test", trap.Port()), uotName("nowhere.test", 53), v4(netip.AddrPortFrom(echo.Addr(), 0))} {
+			if _, err := s.Write(packet(addr, []byte("dropped"))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := s.Write(packet(v4(echo), []byte("still"))); err != nil {
+			t.Fatal(err)
+		}
+		if _, got := readPacket(t, s, false); string(got) != "still" {
+			t.Fatalf("after the dropped: %q", got)
+		}
+		// Idle: the stream ends by itself, cleanly.
+		if reset(t, s) {
+			t.Fatal("an idle stream was reset")
 		}
 		done()
-	}
-	if n := trapped(); n != 0 {
-		t.Errorf("%d packets reached an address not allowed", n)
-	}
-	eventually(t, "streams still counted", func() bool { return h.lim.count() == 0 })
+
+		// An IPv6 destination, its answer's source as 0x01.
+		if echo6 := udpEchoAt(t, netip.IPv6Loopback()); echo6.IsValid() {
+			_, s, done = connect(UoTName + ":0")
+			_, _ = s.Write(append([]byte{0}, socksAddr(netip.MustParseAddrPort("0.0.0.0:0"))...))
+			if _, err := s.Write(packet(v6(echo6), []byte("six"))); err != nil {
+				t.Fatal(err)
+			}
+			if from, got := readPacket(t, s, false); from != echo6 || string(got) != "six" {
+				t.Fatalf("IPv6: %s %q", from, got)
+			}
+			done()
+		}
+
+		// isConnect = 1: one destination, no addresses in the packets; by
+		// address and by name.
+		for _, dest := range [][]byte{socksAddr(echo), socksName("echo.test", echo.Port())} {
+			_, s, done = connect(UoTName + ":443")
+			if _, err := s.Write(append([]byte{1}, dest...)); err != nil {
+				t.Fatal(err)
+			}
+			for _, data := range []string{"a", "bb", "ccc"} {
+				if _, err := s.Write(packet(nil, []byte(data))); err != nil {
+					t.Fatal(err)
+				}
+				if _, got := readPacket(t, s, true); string(got) != data {
+					t.Fatalf("connected: %q", got)
+				}
+			}
+			done()
+		}
+
+		// Resets: a destination not allowed, a packet too long, a bad request,
+		// v1, a TCP destination that does not answer.
+		for name, c := range map[string]struct {
+			host string
+			send []byte
+		}{
+			"connected, not allowed":          {UoTName + ":0", append([]byte{1}, socksAddr(trap)...)},
+			"connected, by name, not allowed": {UoTName + ":0", append([]byte{1}, socksName("trap.test", trap.Port())...)},
+			"too long": {UoTName + ":0", append(append([]byte{0}, socksAddr(netip.MustParseAddrPort("0.0.0.0:0"))...),
+				binary.BigEndian.AppendUint16(v4(echo), uotMaxPayload+1)...)},
+			"isConnect 2":      {UoTName + ":0", []byte{2, 0x01, 0, 0, 0, 0, 0, 0}},
+			"address type":     {UoTName + ":0", []byte{0, 0x09}},
+			"v1":               {uotLegacyName + ":0", []byte("x")},
+			"tcp, no listener": {"127.0.0.1:1", []byte("x")},
+		} {
+			_, s, done := connect(c.host)
+			_, _ = s.Write(c.send)
+			if !reset(t, s) {
+				t.Errorf("%s: not reset", name)
+			}
+			done()
+		}
+		if n := trapped(); n != 0 {
+			t.Errorf("%d packets reached an address not allowed", n)
+		}
+		eventually(t, "streams still counted", func() bool { return h.lim.count() == 0 })
+	})
 }
 
 // A user's streams: uotPerUser at most, the next one reset; their slots
 // come back.
 func TestUoTStreamLimit(t *testing.T) {
-	h, connect := uotServer(t, time.Minute)
-	var dones []func()
-	for range uotPerUser {
-		_, _, done := connect(UoTName + ":0")
-		dones = append(dones, done)
-	}
-	eventually(t, "streams not counted", func() bool { return h.lim.count() == uotPerUser })
-	_, s, done := connect(UoTName + ":0")
-	if !reset(t, s) {
-		t.Error("over the user's limit: not reset")
-	}
-	done()
-	for _, done := range dones {
+	overProtos(t, func(t *testing.T) {
+		h, connect := uotServer(t, time.Minute)
+		var dones []func()
+		for range uotPerUser {
+			_, _, done := connect(UoTName + ":0")
+			dones = append(dones, done)
+		}
+		eventually(t, "streams not counted", func() bool { return h.lim.count() == uotPerUser })
+		_, s, done := connect(UoTName + ":0")
+		if !reset(t, s) {
+			t.Error("over the user's limit: not reset")
+		}
 		done()
-	}
-	eventually(t, "slots not given back", func() bool { return h.lim.count() == 0 })
+		for _, done := range dones {
+			done()
+		}
+		eventually(t, "slots not given back", func() bool { return h.lim.count() == 0 })
+	})
 }
 
 // A client that never says where to does not hold its slot past the idle
 // time either.
 func TestUoTSilentClient(t *testing.T) {
-	h, connect := uotServer(t, 300*time.Millisecond)
-	_, _, done := connect(UoTName + ":0")
-	defer done()
-	eventually(t, "stream not counted", func() bool { return h.lim.count() == 1 })
-	eventually(t, "a silent stream held its slot", func() bool { return h.lim.count() == 0 })
+	overProtos(t, func(t *testing.T) {
+		h, connect := uotServer(t, 300*time.Millisecond)
+		_, _, done := connect(UoTName + ":0")
+		defer done()
+		eventually(t, "stream not counted", func() bool { return h.lim.count() == 1 })
+		eventually(t, "a silent stream held its slot", func() bool { return h.lim.count() == 0 })
+	})
 }
 
 // A client that stops reading does not hold its stream past the idle time:
 // the write that waits on it fails.
 func TestUoTStuckClient(t *testing.T) {
-	echo := udpEcho(t)
-	h, connect := uotServer(t, 300*time.Millisecond, func(tr *http.Transport) {
-		tr.HTTP2 = &http.HTTP2Config{MaxReceiveBufferPerStream: 64 << 10, MaxReceiveBufferPerConnection: 64 << 10}
-	})
-	_, s, done := connect(UoTName + ":0")
-	defer done()
-	go func() {
-		_, _ = s.Write(append([]byte{0}, socksAddr(netip.MustParseAddrPort("0.0.0.0:0"))...))
-		p := packet(append([]byte{0x00}, binary.BigEndian.AppendUint16(echo.Addr().AsSlice(), echo.Port())...), bytes.Repeat([]byte("z"), uotMaxAnswer))
-		for range 1000 { // far more than the client's window
-			if _, err := s.Write(p); err != nil {
-				return
+	overProtos(t, func(t *testing.T) {
+		echo := udpEcho(t)
+		h, connect := uotServer(t, 300*time.Millisecond, clientOpts{window: 64 << 10})
+		_, s, done := connect(UoTName + ":0")
+		defer done()
+		go func() {
+			_, _ = s.Write(append([]byte{0}, socksAddr(netip.MustParseAddrPort("0.0.0.0:0"))...))
+			p := packet(append([]byte{0x00}, binary.BigEndian.AppendUint16(echo.Addr().AsSlice(), echo.Port())...), bytes.Repeat([]byte("z"), uotMaxAnswer))
+			for range 1000 { // far more than the client's window
+				if _, err := s.Write(p); err != nil {
+					return
+				}
 			}
-		}
-	}()
-	eventually(t, "answers not sent", func() bool { return h.lim.count() == 1 })
-	eventually(t, "a stuck stream held its slot", func() bool { return h.lim.count() == 0 })
+		}()
+		eventually(t, "answers not sent", func() bool { return h.lim.count() == 1 })
+		eventually(t, "a stuck stream held its slot", func() bool { return h.lim.count() == 0 })
+	})
 }
 
 func TestUoTLimits(t *testing.T) {
@@ -572,65 +564,69 @@ func TestUoTPacing(t *testing.T) {
 
 // isConnect = 1 spends a new destination too: with none left, a reset.
 func TestUoTConnectedPaced(t *testing.T) {
-	echo := udpEcho(t)
-	h, connect := uotServer(t, time.Minute)
-	_, s, done := connect(UoTName + ":0")
-	_, _ = s.Write(append([]byte{1}, socksAddr(echo)...))
-	if _, err := s.Write(packet(nil, []byte("a"))); err != nil {
-		t.Fatal(err)
-	}
-	if _, got := readPacket(t, s, true); string(got) != "a" {
-		t.Fatalf("connected: %q", got)
-	}
-	h.lim.mu.Lock()
-	for _, u := range h.lim.users {
-		u.peers = bucket{0, time.Now()}
-	}
-	h.lim.mu.Unlock()
-	_, s2, done2 := connect(UoTName + ":0")
-	_, _ = s2.Write(append([]byte{1}, socksAddr(echo)...))
-	if !reset(t, s2) {
-		t.Error("connected without a token: not reset")
-	}
-	done2()
-	done()
+	overProtos(t, func(t *testing.T) {
+		echo := udpEcho(t)
+		h, connect := uotServer(t, time.Minute)
+		_, s, done := connect(UoTName + ":0")
+		_, _ = s.Write(append([]byte{1}, socksAddr(echo)...))
+		if _, err := s.Write(packet(nil, []byte("a"))); err != nil {
+			t.Fatal(err)
+		}
+		if _, got := readPacket(t, s, true); string(got) != "a" {
+			t.Fatalf("connected: %q", got)
+		}
+		h.lim.mu.Lock()
+		for _, u := range h.lim.users {
+			u.peers = bucket{0, time.Now()}
+		}
+		h.lim.mu.Unlock()
+		_, s2, done2 := connect(UoTName + ":0")
+		_, _ = s2.Write(append([]byte{1}, socksAddr(echo)...))
+		if !reset(t, s2) {
+			t.Error("connected without a token: not reset")
+		}
+		done2()
+		done()
+	})
 }
 
 // A connected socket hears "port unreachable" and goes on: the destination
 // may open the port later.
 func TestUoTICMPError(t *testing.T) {
-	pc, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:0")))
-	if err != nil {
-		t.Fatal(err)
-	}
-	dest := pc.LocalAddr().(*net.UDPAddr).AddrPort()
-	pc.Close()
-	_, connect := uotServer(t, time.Minute)
-	_, s, done := connect(UoTName + ":0")
-	defer done()
-	_, _ = s.Write(append([]byte{1}, socksAddr(dest)...))
-	if _, err := s.Write(packet(nil, []byte("nobody"))); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(100 * time.Millisecond) // the ICMP error comes back
-	pc, err = net.ListenUDP("udp", net.UDPAddrFromAddrPort(dest))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pc.Close()
-	go func() {
-		buf := make([]byte, 100)
-		n, from, err := pc.ReadFromUDPAddrPort(buf)
-		if err == nil {
-			_, _ = pc.WriteToUDPAddrPort(buf[:n], from)
+	overProtos(t, func(t *testing.T) {
+		pc, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:0")))
+		if err != nil {
+			t.Fatal(err)
 		}
-	}()
-	if _, err := s.Write(packet(nil, []byte("now"))); err != nil {
-		t.Fatal(err)
-	}
-	if _, got := readPacket(t, s, true); string(got) != "now" {
-		t.Fatalf("after port unreachable: %q", got)
-	}
+		dest := pc.LocalAddr().(*net.UDPAddr).AddrPort()
+		pc.Close()
+		_, connect := uotServer(t, time.Minute)
+		_, s, done := connect(UoTName + ":0")
+		defer done()
+		_, _ = s.Write(append([]byte{1}, socksAddr(dest)...))
+		if _, err := s.Write(packet(nil, []byte("nobody"))); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond) // the ICMP error comes back
+		pc, err = net.ListenUDP("udp", net.UDPAddrFromAddrPort(dest))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pc.Close()
+		go func() {
+			buf := make([]byte, 100)
+			n, from, err := pc.ReadFromUDPAddrPort(buf)
+			if err == nil {
+				_, _ = pc.WriteToUDPAddrPort(buf[:n], from)
+			}
+		}()
+		if _, err := s.Write(packet(nil, []byte("now"))); err != nil {
+			t.Fatal(err)
+		}
+		if _, got := readPacket(t, s, true); string(got) != "now" {
+			t.Fatalf("after port unreachable: %q", got)
+		}
+	})
 }
 
 // The sockets serveUoT makes, connected or not, do not broadcast.

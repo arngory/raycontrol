@@ -3,7 +3,6 @@ package naive
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"io"
@@ -186,97 +185,94 @@ func TestPaddingType(t *testing.T) {
 // Padding-Type-Request gets what it always got. A stranger gets the
 // site's answer, with neither header.
 func TestPaddingReply(t *testing.T) {
-	echo := echoServer(t)
-	users := filepath.Join(t.TempDir(), "users.json")
-	writeUsersNamed(t, users, map[string]string{"pw": "u5-ab12"})
-	answer, _ := site.Responder(site.Answer404, "")
-	var d net.Dialer
-	h := &Server{Users: &Users{Path: users}, Answer: answer, Dial: d.DialContext, ICMP: true, icmpOpen: newFakeNet().open,
-		Log: slog.New(slog.DiscardHandler)}
-	url := serveNaive(t, h)
-	tr := &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // G402: the test's own server
-		CurvePreferences:   []tls.CurveID{tls.X25519MLKEM768}, NextProtos: []string{"h2"},
-	}}
-	t.Cleanup(tr.CloseIdleConnections)
-	connect := func(target, password, request string, header ...string) (*http.Response, *paddedStream) {
-		t.Helper()
-		pr, pw := io.Pipe()
-		t.Cleanup(func() { pw.Close() })
-		req, _ := http.NewRequestWithContext(context.Background(), http.MethodConnect, url, pr)
-		req.Host = target
-		req.Header.Set("Padding", paddingHeader())
-		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("niko:"+password)))
-		if request != "" {
-			req.Header.Set(PaddingTypeRequest, request)
-		}
-		for i := 0; i+1 < len(header); i += 2 {
-			req.Header.Set(header[i], header[i+1])
-		}
-		resp, err := tr.RoundTrip(req)
-		if err != nil {
-			t.Fatalf("CONNECT %s: %v", target, err)
-		}
-		t.Cleanup(func() { resp.Body.Close() })
-		return resp, &paddedStream{r: resp.Body, w: pw}
-	}
-	for _, c := range []struct {
-		request, reply string
-		padded         bool
-	}{{"", "", true}, {"1, 0", "1", true}, {"0, 1", "0", false}, {"3", "", true}} {
-		resp, s := connect(echo, "pw", c.request)
-		if resp.StatusCode != http.StatusOK || resp.Header.Get("Padding") == "" || resp.Header.Get(PaddingTypeReply) != c.reply {
-			t.Fatalf("%q: %s, padding %q, reply %q, want 200 with %q", c.request, resp.Status, resp.Header.Get("Padding"),
-				resp.Header.Get(PaddingTypeReply), c.reply)
-		}
-		if !c.padded {
-			s.unpadded()
-		}
-		// More writes than padded frames, each echoed whole before the
-		// next: a framing the server does not share would garble them.
-		for i := range 10 {
-			msg := bytes.Repeat([]byte{byte('a' + i)}, 1+i*500)
-			if _, err := s.Write(msg); err != nil {
-				t.Fatal(err)
+	overProtos(t, func(t *testing.T) {
+		echo := echoServer(t)
+		users := filepath.Join(t.TempDir(), "users.json")
+		writeUsersNamed(t, users, map[string]string{"pw": "u5-ab12"})
+		answer, _ := site.Responder(site.Answer404, "")
+		var d net.Dialer
+		h := &Server{Users: &Users{Path: users}, Answer: answer, Dial: d.DialContext, ICMP: true, icmpOpen: newFakeNet().open,
+			Log: slog.New(slog.DiscardHandler)}
+		url, tr := serveOver(t, h)
+		connect := func(target, password, request string, header ...string) (*http.Response, *paddedStream) {
+			t.Helper()
+			pr, pw := io.Pipe()
+			t.Cleanup(func() { pw.Close() })
+			req, _ := http.NewRequestWithContext(context.Background(), http.MethodConnect, url, pr)
+			req.Host = target
+			req.Header.Set("Padding", paddingHeader())
+			req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("niko:"+password)))
+			if request != "" {
+				req.Header.Set(PaddingTypeRequest, request)
 			}
-			got := make([]byte, len(msg))
-			if _, err := io.ReadFull(s, got); err != nil || !bytes.Equal(got, msg) {
-				t.Fatalf("%q: echo %d: %q (%v)", c.request, i, got, err)
+			for i := 0; i+1 < len(header); i += 2 {
+				req.Header.Set(header[i], header[i+1])
+			}
+			resp, err := tr.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("CONNECT %s: %v", target, err)
+			}
+			t.Cleanup(func() { resp.Body.Close() })
+			return resp, &paddedStream{r: resp.Body, w: pw}
+		}
+		for _, c := range []struct {
+			request, reply string
+			padded         bool
+		}{{"", "", true}, {"1, 0", "1", true}, {"0, 1", "0", false}, {"3", "", true}} {
+			resp, s := connect(echo, "pw", c.request)
+			if resp.StatusCode != http.StatusOK || resp.Header.Get("Padding") == "" || resp.Header.Get(PaddingTypeReply) != c.reply {
+				t.Fatalf("%q: %s, padding %q, reply %q, want 200 with %q", c.request, resp.Status, resp.Header.Get("Padding"),
+					resp.Header.Get(PaddingTypeReply), c.reply)
+			}
+			if !c.padded {
+				s.unpadded()
+			}
+			// More writes than padded frames, each echoed whole before the
+			// next: a framing the server does not share would garble them.
+			for i := range 10 {
+				msg := bytes.Repeat([]byte{byte('a' + i)}, 1+i*500)
+				if _, err := s.Write(msg); err != nil {
+					t.Fatal(err)
+				}
+				got := make([]byte, len(msg))
+				if _, err := io.ReadFull(s, got); err != nil || !bytes.Equal(got, msg) {
+					t.Fatalf("%q: echo %d: %q (%v)", c.request, i, got, err)
+				}
 			}
 		}
-	}
-	// Streams without a dial take the same reply.
-	for _, host := range []string{UoTName + ":0", ICMPName + ":0"} {
-		if resp, _ := connect(host, "pw", "0, 1"); resp.StatusCode != http.StatusOK || resp.Header.Get(PaddingTypeReply) != "0" {
-			t.Errorf("%s: %s, reply %q", host, resp.Status, resp.Header.Get(PaddingTypeReply))
+		// Streams without a dial take the same reply.
+		for _, host := range []string{UoTName + ":0", ICMPName + ":0"} {
+			if resp, _ := connect(host, "pw", "0, 1"); resp.StatusCode != http.StatusOK || resp.Header.Get(PaddingTypeReply) != "0" {
+				t.Errorf("%s: %s, reply %q", host, resp.Status, resp.Header.Get(PaddingTypeReply))
+			}
 		}
-	}
-	// The refusals.
-	gone, _ := net.Listen("tcp", "127.0.0.1:0")
-	dead := gone.Addr().String()
-	gone.Close()
-	resp, _ := connect(dead, "pw", "1, 0", AckHeader, "1")
-	if resp.StatusCode != http.StatusBadGateway || resp.Header.Get("Padding") == "" || resp.Header.Get(PaddingTypeReply) != "1" {
-		t.Errorf("a refused destination: %s, reply %q", resp.Status, resp.Header.Get(PaddingTypeReply))
-	}
-	resp, _ = connect("no-port.test", "pw", "0", AckHeader, "1")
-	if resp.StatusCode != http.StatusBadGateway || resp.Header.Get(PaddingTypeReply) != "0" {
-		t.Errorf("a bad target with niko-ack: %s, reply %q", resp.Status, resp.Header.Get(PaddingTypeReply))
-	}
-	// The user's 1024 places taken (as 1024 tunnels would).
-	for range tcpPerUser {
-		h.lim.mu.Lock()
-		h.lim.userLocked("u5", time.Now()).tcp++
-		h.lim.mu.Unlock()
-	}
-	resp, _ = connect(echo, "pw", "1, 0")
-	if resp.StatusCode != http.StatusTooManyRequests || resp.Header.Get("Padding") == "" || resp.Header.Get(PaddingTypeReply) != "1" {
-		t.Errorf("over the limit: %s, reply %q", resp.Status, resp.Header.Get(PaddingTypeReply))
-	}
-	resp, _ = connect(echo, "wrong", "1, 0")
-	if resp.StatusCode != http.StatusNotFound || resp.Header.Get("Padding") != "" || resp.Header.Get(PaddingTypeReply) != "" {
-		t.Errorf("a stranger: %s, padding %q, reply %q", resp.Status, resp.Header.Get("Padding"), resp.Header.Get(PaddingTypeReply))
-	}
+		// The refusals.
+		gone, _ := net.Listen("tcp", "127.0.0.1:0")
+		dead := gone.Addr().String()
+		gone.Close()
+		resp, _ := connect(dead, "pw", "1, 0", AckHeader, "1")
+		if resp.StatusCode != http.StatusBadGateway || resp.Header.Get("Padding") == "" || resp.Header.Get(PaddingTypeReply) != "1" {
+			t.Errorf("a refused destination: %s, reply %q", resp.Status, resp.Header.Get(PaddingTypeReply))
+		}
+		resp, _ = connect("no-port.test", "pw", "0", AckHeader, "1")
+		if resp.StatusCode != http.StatusBadGateway || resp.Header.Get(PaddingTypeReply) != "0" {
+			t.Errorf("a bad target with niko-ack: %s, reply %q", resp.Status, resp.Header.Get(PaddingTypeReply))
+		}
+		// The user's 1024 places taken (as 1024 tunnels would).
+		for range tcpPerUser {
+			h.lim.mu.Lock()
+			h.lim.userLocked("u5", time.Now()).tcp++
+			h.lim.mu.Unlock()
+		}
+		resp, _ = connect(echo, "pw", "1, 0")
+		if resp.StatusCode != http.StatusTooManyRequests || resp.Header.Get("Padding") == "" || resp.Header.Get(PaddingTypeReply) != "1" {
+			t.Errorf("over the limit: %s, reply %q", resp.Status, resp.Header.Get(PaddingTypeReply))
+		}
+		resp, _ = connect(echo, "wrong", "1, 0")
+		if resp.StatusCode != http.StatusNotFound || resp.Header.Get("Padding") != "" || resp.Header.Get(PaddingTypeReply) != "" {
+			t.Errorf("a stranger: %s, padding %q, reply %q", resp.Status, resp.Header.Get("Padding"), resp.Header.Get(PaddingTypeReply))
+		}
+	})
 }
 
 // echoServer is a TCP destination that sends back what it gets.

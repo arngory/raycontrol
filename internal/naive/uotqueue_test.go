@@ -366,3 +366,75 @@ func TestUoTQueueMemory(t *testing.T) {
 		t.Fatal("the stream did not end")
 	}
 }
+
+// The drop of the oldest answers end to end, over each transport: a
+// client that does not read for a while gets, once it reads, the answers
+// its windows held and then the newest the queue kept, in order and up to
+// the last one sent; the rest were dropped, not delivered late.
+func TestUoTDropOldestOver(t *testing.T) {
+	overProtos(t, func(t *testing.T) {
+		src, heard := uotSource(t)
+		dst := src.LocalAddr().(*net.UDPAddr).AddrPort()
+		_, connect := tunnelServer(t, func(h *Server) {
+			h.Allow = func(a netip.Addr) bool { return a == dst.Addr() }
+		}, clientOpts{window: 64 << 10})
+		_, s, done := connect(UoTName + ":0")
+		defer done()
+		if _, err := s.Write(uotRequest(dst)); err != nil {
+			t.Fatal(err)
+		}
+		stream := heard()
+		const sent, size = 3000, 1000
+		payload := make([]byte, size)
+		for seq := 1; seq <= sent; seq++ {
+			binary.BigEndian.PutUint32(payload, uint32(seq)) //nolint:gosec // G115: a test's count
+			if _, err := src.WriteToUDPAddrPort(payload, stream); err != nil {
+				t.Fatal(err)
+			}
+			if seq%50 == 0 {
+				time.Sleep(2 * time.Millisecond) // not past the socket's buffer
+			}
+		}
+		time.Sleep(300 * time.Millisecond) // all read off the socket, the stream's writes stuck
+		got := make(chan int, sent)
+		go func() {
+			defer close(got)
+			for {
+				var l [2]byte
+				if _, err := io.ReadFull(s, l[:]); err != nil {
+					return
+				}
+				b := make([]byte, binary.BigEndian.Uint16(l[:]))
+				if _, err := io.ReadFull(s, b); err != nil || len(b) != size {
+					return
+				}
+				got <- int(binary.BigEndian.Uint32(b))
+			}
+		}()
+		var seqs []int
+	read:
+		for {
+			select {
+			case seq, ok := <-got:
+				if !ok {
+					break read
+				}
+				seqs = append(seqs, seq)
+			case <-time.After(time.Second):
+				break read
+			}
+		}
+		if len(seqs) <= uotQueued || len(seqs) >= sent || seqs[len(seqs)-1] != sent {
+			t.Fatalf("%d answers of %d came, the last %v: want the newest, and fewer than were sent", len(seqs), sent, seqs[max(0, len(seqs)-1):])
+		}
+		for i := 1; i < len(seqs); i++ {
+			if seqs[i] <= seqs[i-1] {
+				t.Fatalf("answer %d came after %d", seqs[i], seqs[i-1])
+			}
+		}
+		// The queue's answers are the newest uotQueued, without a gap.
+		if tail := seqs[len(seqs)-uotQueued:]; tail[0] != sent-uotQueued+1 {
+			t.Fatalf("the last %d answers start at %d, want %d", uotQueued, tail[0], sent-uotQueued+1)
+		}
+	})
+}
