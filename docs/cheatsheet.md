@@ -12,7 +12,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 |---|---|
 | `bash bootstrap.sh -remove-v0 -host IP …` · `rayctl legacy [-remove]` | убрать прежний raycontrol (v0, `ray.sh`) перед установкой: копия в `/root`, затем только его следы; `-purge-v0-packages` — и его пакеты (R4-26) |
 | `rayctl knock @bundle` | только SPA: открыть службы устройства своему адресу; с аварийным пакетом — SSH, затем `ssh` (R4-27) |
-| `rayctl check [-host A] [-domain D] [-services a,b]` · `bash bootstrap.sh -check …` | годится ли хост: обязательное (без него установка откажет) и желательное; ничего не меняет (R4-24) |
+| `rayctl check [-host A] [-domain D] [-services a,b]` · `bash bootstrap.sh -check …` | годится ли хост: обязательное (без него установка откажет) и желательное; ничего не меняет (R4-24). На установленной ноде от root — ещё `ssh port`: совпадают ли порты sshd (`sshd -T`) с портами сервисов `ssh`, на которых периметр пускает SSH (то же — строка `ssh port` в `rayctl status`) |
 | `bash bootstrap.sh -host IP -domain D -cloudflare-token-file F [-services reality,dnstt,masterdns,slipstream]` | поставить ноду: зависимости, подписанный релиз с data plane, `rayctl install`, сервисы |
 | `rayctl install -host IP [-domain D] [-name NAME] [-admin A] [-cloudflare-token-file F] [-services …\|none] [-dataplane DIR]` | то же без bootstrap; `-dataplane` — каталог с проверенными `xray` и `niko-server` |
 | `rayctl apply` | поставить то, что нужно новым сервисам: пользователи, юниты, файлы |

@@ -1226,7 +1226,15 @@ admin-устройства — удалённый доступ админист�
 ### Сменить порт sshd на установленной ноде
 
 Установка прочитала порт sshd один раз. Просто перенести sshd на другой порт нельзя: периметр о новом порте не
-знает и закроет его для всех. Порядок ниже следует из кода — периметр открывает адресам администратора порты
+знает и закроет его для всех. Сам за sshd нода не следит. Что порты разошлись, говорят `rayctl check` и
+`rayctl status` от root на ноде: они сравнивают порты из `sshd -T` с портами сервисов `ssh`. Разошлись — в
+`rayctl check` строка
+
+```
+  warn  ssh port: sshd is configured for 2222, which the perimeter does not admit (it admits SSH on 22 (ssh)): once sshd runs as configured, SSH from the admin addresses and after a knock is closed to everyone
+```
+
+а под ней команды шага 1; в `rayctl status` — строка `ssh port` с тем же текстом после `WARNING`. Порядок ниже следует из кода — периметр открывает адресам администратора порты
 всех сервисов вида `ssh`, — но целиком на сервере он не проверялся. Держите текущую сессию открытой до конца и
 убедитесь заранее, что у вас есть консоль провайдера.
 
@@ -3048,6 +3056,7 @@ rayctl uninstall
 | `warn  updates: … asks for a reboot` или `kernel … is installed but … is running` | обновление поставило ядро, а сервер не перезагружен | `reboot`, затем `rayctl check` |
 | `no admin address: pass -admin …` | установка запущена из tmux, screen или с консоли | добавить `-admin` со своим адресом |
 | после установки не пускает по SSH | адрес администратора не ваш: вы заходили через VPN или сменился адрес | `rayctl knock @emergency.bundle` (§7); с консоли провайдера — `rayctl admin <адрес>` |
+| после смены `Port` в `sshd_config` и перезапуска sshd не пускает по SSH; `rayctl check`: `warn  ssh port: sshd is configured for …, which the perimeter does not admit` | периметр пускает SSH только на порты сервисов `ssh`, а их порт установка прочитала один раз | с консоли провайдера вернуть прежний `Port` и перезапустить sshd; затем по шагам §7, «Сменить порт sshd на установленной ноде» |
 
 ### Сертификат не выпускается
 

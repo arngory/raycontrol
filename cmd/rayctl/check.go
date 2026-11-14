@@ -46,7 +46,7 @@ func (c *cli) check(ctx context.Context, args []string) error {
 	}
 	return hostCheck(ctx, os.Stdout, hostcheck.Options{Host: *host, Domain: *domain, Services: splitList(*services), AllowV0: *allowV0,
 		ICMP: c.icmpOn(ctx)}, false, c.json, slices.Concat(c.internetChecks(ctx), misnamedResults(c.misnamed(ctx)), c.reservedResults(ctx),
-		conntrackResults(conntrackPaths{}))...)
+		c.sshPortResults(ctx), conntrackResults(conntrackPaths{}))...)
 }
 
 // conntrackPaths are where conntrackResults looks (tests give their own).

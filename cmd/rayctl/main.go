@@ -30,6 +30,7 @@ import (
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1/devicev1connect"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
+	"github.com/arngory/raycontrol/internal/hostcheck"
 	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/store"
@@ -372,6 +373,11 @@ func (c *cli) status(ctx context.Context) error {
 		return err
 	}
 	m := r.Msg
+	// sshd's ports against the perimeter's: root on the node only (sshd -T).
+	var ssh []hostcheck.Result
+	if !c.json && c.identity == nil && thisOS == nodeOS && os.Geteuid() == 0 {
+		ssh = c.sshPortResults(ctx)
+	}
 	return c.print(m, func(w *tabwriter.Writer) {
 		fmt.Fprintf(w, "version\t%s\nnode\t%s\n", m.Version, m.NodeId)
 		if m.Name != "" {
@@ -388,6 +394,11 @@ func (c *cli) status(ctx context.Context) error {
 		// rayd's loops: the last round of each (O-2).
 		for _, l := range m.Loops {
 			fmt.Fprintf(w, "%s\t%s\n", l.Name, loopState(l, time.Now()))
+		}
+		for _, r := range ssh {
+			if !r.OK {
+				fmt.Fprintf(w, "ssh port\tWARNING %s: %s\n", r.Detail, r.Fix)
+			}
 		}
 	})
 }
