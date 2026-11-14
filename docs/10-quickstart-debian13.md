@@ -984,6 +984,9 @@ credential-rotation  ok 2m30s ago
 dns                  ok 2m5s ago
 dns-zone dns         ok 1m50s ago: …
 …
+perimeter            ok 5s ago: rayspa follows the perimeter, its table is in (rayspa v0.27.0)
+…
+perimeter table      ok: rayspa runs, its table is in
 ```
 
 **Как читать.**
@@ -1003,6 +1006,8 @@ dns-zone dns         ok 1m50s ago: …
 | `port53` | UDP 53 рядом с нодой никто не занял |
 | `resolver` | `/etc/resolv.conf` читается службами |
 | `reality-target <сервис>` | чужая цель REALITY жива (только если вы её задали) |
+| `perimeter` | `rayspa` следит за снимками `rayd` и его таблица стоит (так говорит сам `rayspa`); `unknown` — `rayspa` старее `rayd` и о таблице не сообщает |
+| `perimeter table` | таблица в ядре, как её читает `nft` (только от root на ноде) |
 | `traffic`, `traffic <сервис>` | счёт трафика пользователей |
 | `conn-limit`, `conntrack` | пределы соединений и таблица соединений |
 | `credential-rotation`, `reality-rotation`, `prune` | плановые смены ключей и чистка |
@@ -3326,6 +3331,9 @@ journalctl -u rayd --since -1h | grep -i certif
 | ничего не открывается после `nft flush ruleset` или перезапуска firewalld | снесена таблица периметра | `rayspa` возвращает её за секунды сам; если нет — `systemctl restart rayspa` |
 | `rayctl status`: `perimeter table FAILED perimeter down: the host is open` | таблицы периметра нет: `rayspa` не поднялся после загрузки или его таблицу не берёт ядро; хост открыт, SSH пускает без стука | `journalctl -u rayspa -b -p warning` — почему; исправить, `systemctl restart rayspa` |
 | `rayctl status`: `perimeter FAILED … rayspa has not followed the perimeter …` | `rayspa` не связан с `rayd` дольше 90 с: остановлен или перезапускается по кругу | `systemctl status rayspa`; строка `perimeter table` от root скажет, открыт ли хост |
+| `rayctl status`: `perimeter FAILED … rayspa follows the perimeter, but its table is not in …` | `rayspa` получает снимки, но ядро не берёт его таблицу дольше 90 с: хост открыт (или стоит замороженная таблица прежнего `rayspa`, тогда стук не работает) | `journalctl -u rayspa -b -p warning` — почему; `systemctl status rayspa` показывает то же в строке `Status:` |
+| `rayctl status`: `perimeter unknown …` | `rayspa` старее `rayd` (после отката, обновления вручную) и о своей таблице не сообщает | `rayctl status` от root (строка `perimeter table`); поставить `rayspa` той же версии — `rayctl update` |
+| Загрузка висит ~30 с на «A start job is running for raycontrol perimeter», затем сеть поднимается, `rayspa` перезапускается | `rayspa` не прислал systemd «готов»: бинарник старой версии под новым юнитом (`Type=notify`) | `journalctl -u rayspa -b`: строка `sd_notify: READY not sent` или её отсутствие у старого бинарника; `rayctl update -rollback` или `rayctl update` ставят бинарник и юнит вместе |
 
 ### DNS-туннели
 

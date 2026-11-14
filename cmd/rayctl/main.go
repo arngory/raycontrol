@@ -428,7 +428,7 @@ func (c *cli) status(ctx context.Context) error {
 		}
 		// rayd's loops: the last round of each (O-2).
 		for _, l := range m.Loops {
-			fmt.Fprintf(w, "%s\t%s\n", l.Name, loopState(l, time.Now()))
+			fmt.Fprintf(w, "%s\t%s\n", l.Name, perimeterLoopState(l, time.Now()))
 		}
 		for _, r := range ssh {
 			if !r.OK {

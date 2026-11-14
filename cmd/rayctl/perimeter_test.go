@@ -6,6 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/arngory/raycontrol/internal/api"
+	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 )
 
 // rayctl status and check say when the perimeter is down (R4-40): no table
@@ -46,5 +50,24 @@ func TestPerimeterResult(t *testing.T) {
 	user.euid = func() int { return 1000 }
 	if rs := perimeterResult(user); !rs[0].OK || !strings.Contains(rs[0].Detail, "needs root") {
 		t.Errorf("not root: %v", rs)
+	}
+}
+
+// rayd's perimeter loop when rayspa reports nothing of its table: unknown,
+// neither ok nor FAILED; every other loop, and that loop otherwise, as
+// loopState says.
+func TestPerimeterLoopState(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	l := &nodev1.LoopHealth{Name: api.RayspaLoop, LastOk: now.Add(-12 * time.Second).Unix(), Detail: api.RayspaUnknown + "rayspa follows the perimeter, its table is not reported"}
+	if got := perimeterLoopState(l, now); got != "unknown 12s ago: rayspa follows the perimeter, its table is not reported" {
+		t.Errorf("unknown: %q", got)
+	}
+	l.Detail = "rayspa follows the perimeter, its table is in (rayspa v0.27.1)"
+	if got := perimeterLoopState(l, now); got != "ok 12s ago: "+l.Detail {
+		t.Errorf("up: %q", got)
+	}
+	other := &nodev1.LoopHealth{Name: "apply", LastOk: l.LastOk, Detail: api.RayspaUnknown + "x"}
+	if got := perimeterLoopState(other, now); !strings.HasPrefix(got, "ok ") {
+		t.Errorf("another loop: %q", got)
 	}
 }

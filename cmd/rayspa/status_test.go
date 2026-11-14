@@ -55,6 +55,18 @@ func TestStartStatus(t *testing.T) {
 	}
 }
 
+// The report to rayd (ReportGate): each state by the name rayd takes, the
+// process, nothing else.
+func TestGatePB(t *testing.T) {
+	for st, want := range map[perimeter.GateState]string{perimeter.GateUp: "up", perimeter.GateBehind: "behind",
+		perimeter.GateNotIn: "not_in", perimeter.GateNoSnapshot: "no_snapshot"} {
+		g := gatePB(stateNow{state: st, leftOver: true, fromRayd: true, pid: 9})
+		if g.State != want || !g.LeftOver || !g.FromRayd || g.Pid != 9 || g.Version != version {
+			t.Errorf("%v: %v", st, g)
+		}
+	}
+}
+
 // A READY that cannot be sent is an error to log.
 func TestNotifyError(t *testing.T) {
 	t.Setenv("NOTIFY_SOCKET", t.TempDir()+"/none")

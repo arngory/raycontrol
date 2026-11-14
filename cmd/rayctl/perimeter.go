@@ -5,7 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
+	"github.com/arngory/raycontrol/internal/api"
+	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/hostcheck"
 	"github.com/arngory/raycontrol/internal/perimeter"
 )
@@ -79,6 +82,17 @@ func perimeterResult(h perimeterHost) []hostcheck.Result {
 		res.Detail = "rayspa runs, its table is in"
 	}
 	return []hostcheck.Result{res}
+}
+
+// perimeterLoopState is loopState, but for rayd's perimeter loop when
+// rayspa follows the feed and reports nothing of its table (a rayspa
+// older than rayd): "unknown", not "ok" (R4-40).
+func perimeterLoopState(l *nodev1.LoopHealth, now time.Time) string {
+	s := loopState(l, now)
+	if rest, ok := strings.CutPrefix(l.Detail, api.RayspaUnknown); ok && l.Name == api.RayspaLoop && strings.HasPrefix(s, "ok ") {
+		return "unknown " + strings.TrimSuffix(strings.TrimPrefix(s, "ok "), ": "+l.Detail) + ": " + rest
+	}
+	return s
 }
 
 // perimeterLine is perimeterResult in rayctl status: FAILED when the host

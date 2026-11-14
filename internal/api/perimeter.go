@@ -46,7 +46,7 @@ func (p *PerimeterServer) WatchPerimeter(ctx context.Context, _ *connect.Request
 	if !p.rayspaPeer(ctx) {
 		return connect.NewError(connect.CodePermissionDenied, errors.New("only rayspa may watch the perimeter"))
 	}
-	p.watch.start()
+	p.watch.start(time.Now())
 	defer func() { p.watch.end(time.Now()) }()
 	var last []byte
 	for {

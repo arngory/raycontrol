@@ -179,7 +179,16 @@ func run(args []string) error {
 		log.Error("sd_notify: READY not sent; under Type=notify systemd stops rayspa 30 s after its start (TimeoutStartSec) "+
 			"and starts it again (journalctl -u rayspa)", "err", err)
 	}
-	go watch(ctx, open, *state, gate, carrier, dl, &st.fromRayd, log)
+	// rayd learns where the table stands (R4-40): at each change, after
+	// each feed's first snapshot, and every 30 s. Not a relay's: its feed
+	// is the exit's.
+	report := func(stateNow) {}
+	if *relayBundle == "" {
+		report = gateReporter(ctx, *socket, log)
+	}
+	report(cur)
+	fed := make(chan struct{}, 1)
+	go watch(ctx, open, *state, gate, carrier, dl, &st.fromRayd, fed, log)
 	go func() {
 		if err := perimeter.ReadNFLOG(ctx, uint16(*group), handle, log); err != nil {
 			log.Error("nflog", "err", err)
@@ -202,6 +211,8 @@ func run(args []string) error {
 				log.Warn("conntrack guard not switched off at exit", "err", err)
 			}
 			return nil
+		case <-fed:
+			report(st.now())
 		case <-tick.C:
 			ports, err := gate.Tick()
 			if err != nil && !errors.Is(err, perimeter.ErrNotReady) {
@@ -234,6 +245,7 @@ func run(args []string) error {
 			if err := notify("STATUS=" + cur.status()); err != nil {
 				log.Debug("sd_notify", "err", err)
 			}
+			report(cur)
 		}
 	}
 }
@@ -336,6 +348,56 @@ func guardReporter(ctx context.Context, socket string, log *slog.Logger) func(pe
 		default:
 		}
 	}
+}
+
+// gateReporter sends where the table stands to rayd (PerimeterService.
+// ReportGate): each state given, the newest replacing one not sent yet,
+// and the last again every 30 s, so that rayd knows a report it holds is
+// still this rayspa's. A rayd away, or one older than ReportGate, loses
+// nothing but the report.
+func gateReporter(ctx context.Context, socket string, log *slog.Logger) func(stateNow) {
+	client := perimeterv1connect.NewPerimeterServiceClient(api.UnixHTTPClient(socket), api.BaseURL)
+	next := make(chan stateNow, 1)
+	go func() {
+		var last *perimeterv1.Gate
+		every := time.NewTicker(30 * time.Second)
+		defer every.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case n := <-next:
+				last = gatePB(n)
+			case <-every.C:
+				if last == nil {
+					continue
+				}
+			}
+			rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_, err := client.ReportGate(rctx, connect.NewRequest(&perimeterv1.ReportGateRequest{Gate: last}))
+			cancel()
+			if err != nil {
+				log.Debug("gate report to rayd", "err", err)
+			}
+		}
+	}()
+	return func(n stateNow) {
+		select {
+		case <-next: // an older one not sent yet
+		default:
+		}
+		select {
+		case next <- n:
+		default:
+		}
+	}
+}
+
+// gatePB is the report of a state: no address, no error text.
+func gatePB(n stateNow) *perimeterv1.Gate {
+	state := map[perimeter.GateState]string{perimeter.GateUp: "up", perimeter.GateBehind: "behind",
+		perimeter.GateNotIn: "not_in", perimeter.GateNoSnapshot: "no_snapshot"}[n.state]
+	return &perimeterv1.Gate{State: state, LeftOver: n.leftOver, FromRayd: n.fromRayd, Version: version, Pid: uint32(n.pid)} //nolint:gosec // G115: a pid
 }
 
 func guardPB(st perimeter.GuardState) *perimeterv1.Guard {
@@ -483,13 +545,15 @@ func (d *debugLevel) until(t int64) {
 	})
 }
 
-// fromRayd is set once a snapshot of the feed is the gate's (STATUS).
+// fromRayd is set once a snapshot of the feed is the gate's (STATUS); fed
+// gets word of each feed's first snapshot.
 func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, dl *debugLevel,
-	fromRayd *atomic.Bool, log *slog.Logger) {
+	fromRayd *atomic.Bool, fed chan<- struct{}, log *slog.Logger) {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		stream, err := open(ctx)
 		if err == nil {
+			first := true
 			for stream.Receive() {
 				backoff = time.Second
 				snap := stream.Snapshot()
@@ -505,6 +569,13 @@ func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gat
 					log.Info("snapshot applied", "revision", snap.GetRevision(), "devices", len(snap.Devices))
 				}
 				fromRayd.Store(true)
+				if first {
+					first = false
+					select {
+					case fed <- struct{}{}:
+					default:
+					}
+				}
 				if ports, _ := gate.Tick(); ports != nil {
 					carrier.Reconcile(ports)
 				}

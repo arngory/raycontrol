@@ -13,6 +13,36 @@ service PerimeterService {
   // ReportGuard tells rayd the state of the conntrack guard
   // (spec/conn-limit-v1.md §6.3): at each switch and once a minute.
   rpc ReportGuard(ReportGuardRequest) returns (ReportGuardResponse);
+  // ReportGate tells rayd where rayspa's own table stands
+  // (docs/08-decisions.md, R4-40): at each change and every 30 s. rayd
+  // cannot read the kernel's table; a rayspa that follows the feed but
+  // cannot put its table in leaves the host open. An older rayspa sends
+  // none (rayd: unknown).
+  rpc ReportGate(ReportGateRequest) returns (ReportGateResponse);
+}
+
+message ReportGateRequest {
+  Gate gate = 1;
+}
+
+message ReportGateResponse {}
+
+// Gate is rayspa's table as rayspa knows it. Never an address, nor the
+// kernel's error text (which may carry one).
+message Gate {
+  // "up": the table in, with all of the last snapshot; "behind": the
+  // table in, the last snapshot only in part; "not_in": a snapshot, but
+  // its table is not in (refused, or removed and not back): the host is
+  // open, or closed by a table an earlier rayspa left (left_over);
+  // "no_snapshot": none yet, so no table of this rayspa's.
+  string state = 1;
+  // Not up, and a table an earlier rayspa left (one with its input
+  // chain) is in force.
+  bool left_over = 2;
+  // The snapshot in force came from rayd's feed, not from the saved one.
+  bool from_rayd = 3;
+  string version = 4; // rayspa's
+  uint32 pid = 5;
 }
 
 message ReportGuardRequest {
