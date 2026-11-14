@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"io"
 	"log/slog"
@@ -117,6 +118,124 @@ func TestPaddedTruncated(t *testing.T) {
 		if err == nil {
 			t.Errorf("%s: read to its end without an error", in)
 		}
+	}
+}
+
+// rawFrame is a padded frame as a client builds it, whatever its length.
+func rawFrame(payload []byte, pad int) []byte {
+	f := make([]byte, paddedHeader+len(payload)+pad)
+	binary.BigEndian.PutUint16(f, uint16(len(payload))) //nolint:gosec // G115: the cases' payloads fit
+	f[2] = byte(pad)
+	copy(f[paddedHeader:], payload)
+	return f
+}
+
+// The largest frames each real client sends pass through the real
+// listeners, both ways: cronet-go's (naive_conn.go, maxPaddingChunkSize
+// 65535 and padding of up to 255, so 65793 bytes, past upstream's 64 KiB
+// buffer) and Chromium's (NaivePaddingFramer::Write: payload and padding
+// within kMaxBufferSize, with padding or none). The echo comes back whole,
+// in frames of the server's of 64 KiB at most.
+func TestLargestClientFrames(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		payload, pad int
+	}{
+		{"cronet-go", 65535, 255},
+		{"chromium", upstreamMaxBuffer - upstreamFrameHeader - upstreamMaxPadding, upstreamMaxPadding},
+		{"chromium unpadded", upstreamMaxBuffer - upstreamFrameHeader, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			overProtos(t, func(t *testing.T) {
+				echo := echoServer(t)
+				_, connect := tunnelServer(t, func(*Server) {})
+				resp, s, done := connect(echo)
+				defer done()
+				var want []byte
+				for i := range paddingFrames {
+					want = append(want, bytes.Repeat([]byte{byte('a' + i)}, c.payload)...)
+				}
+				want = append(want, "tail"...)
+				go func() {
+					for i := range paddingFrames {
+						if _, err := s.w.Write(rawFrame(bytes.Repeat([]byte{byte('a' + i)}, c.payload), c.pad)); err != nil {
+							return
+						}
+					}
+					_, _ = s.w.Write([]byte("tail")) // bare past the padded frames
+				}()
+				// The server's frames, read raw to see their size.
+				var got []byte
+				for frame := 0; frame < paddingFrames && len(got) < len(want); frame++ {
+					var h [paddedHeader]byte
+					if _, err := io.ReadFull(resp.Body, h[:]); err != nil {
+						t.Fatalf("frame %d: %v", frame, err)
+					}
+					n, pad := int(binary.BigEndian.Uint16(h[:2])), int(h[2])
+					if paddedHeader+n+pad > paddedFrameMax {
+						t.Fatalf("a frame of the server's of %d bytes", paddedHeader+n+pad)
+					}
+					b := make([]byte, n+pad)
+					if _, err := io.ReadFull(resp.Body, b); err != nil {
+						t.Fatalf("frame %d: %v", frame, err)
+					}
+					got = append(got, b[:n]...)
+				}
+				rest := make([]byte, len(want)-len(got))
+				if _, err := io.ReadFull(resp.Body, rest); err != nil {
+					t.Fatalf("%d bytes past the frames: %v", len(rest), err)
+				}
+				if got = append(got, rest...); !bytes.Equal(got, want) {
+					t.Fatalf("the echo differs: %d bytes, want %d", len(got), len(want))
+				}
+			})
+		})
+	}
+}
+
+// The client's end of its upload inside the padded frames, between two
+// frames or inside one, is a clean end: the destination's side is closed
+// for writing, what it echoes still comes back, and the stream ends
+// without a reset.
+func TestFinInsidePaddedFrames(t *testing.T) {
+	for name, cut := range map[string]bool{"between frames": false, "inside a frame": true} {
+		t.Run(name, func(t *testing.T) {
+			overProtos(t, func(t *testing.T) {
+				echo := echoServer(t)
+				_, connect := tunnelServer(t, func(*Server) {})
+				_, s, done := connect(echo)
+				defer done()
+				want := ""
+				for i := range 3 {
+					w := []byte{byte('a' + i), 'x'}
+					if _, err := s.Write(w); err != nil {
+						t.Fatal(err)
+					}
+					want += string(w)
+				}
+				if cut {
+					// A frame of 10 bytes, 2 of them sent.
+					_, _ = s.w.Write([]byte{0, 10, 0, 'z', 'z'})
+					want += "zz"
+				}
+				_ = s.w.(io.Closer).Close()
+				end := make(chan error, 1)
+				var got []byte
+				go func() {
+					var err error
+					got, err = io.ReadAll(s)
+					end <- err
+				}()
+				select {
+				case err := <-end:
+					if err != nil || string(got) != want {
+						t.Fatalf("read %q (%v), want %q and a clean end", got, err, want)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("the stream did not end")
+				}
+			})
+		})
 	}
 }
 
