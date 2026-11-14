@@ -37,6 +37,17 @@ const (
 	// TCP. Not an HTTP/2 one: net/http does not apply it there, and a
 	// header block left without END_HEADERS waits for the idle time.
 	HeaderTimeout = 10 * time.Second
+
+	// MaxPacketSize bounds the server's datagrams (the UDP payload): what
+	// Chrome sends and what the servers it talks to send it. A session of
+	// Chrome's is not a proxy's (SessionUsage::kDestination) and takes
+	// 1250 bytes; captures of Chrome 157 against Google's and Cloudflare's
+	// servers saw none longer either way (spec/naive-udp-v1.md §5.1). With
+	// quic-go's own 1280, and with its search of the path's MTU upward,
+	// which runs where the socket can set DF (to 1452), the node's packets
+	// were longer than any a real server sends a browser, and the probes
+	// break on tunnels that drop what does not fit.
+	MaxPacketSize = 1250
 )
 
 // Options are what a server takes of its caller.
@@ -59,9 +70,11 @@ type Options struct {
 	MaxHeaderBytes int
 }
 
-// Config is the QUIC side of a server.
+// Config is the QUIC side of a server: packets of MaxPacketSize, no
+// search of the path's MTU.
 func Config(o Options) *quic.Config {
-	return &quic.Config{MaxIdleTimeout: o.Idle, KeepAlivePeriod: 0, MaxIncomingStreams: o.MaxStreams}
+	return &quic.Config{MaxIdleTimeout: o.Idle, KeepAlivePeriod: 0, MaxIncomingStreams: o.MaxStreams,
+		InitialPacketSize: MaxPacketSize, DisablePathMTUDiscovery: true}
 }
 
 // pending are the request streams of one QUIC connection that have no
