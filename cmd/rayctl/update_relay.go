@@ -152,10 +152,13 @@ type unitWas struct {
 
 const relayKeptFile = "relay.json"
 
-// relayMark is relayMarkFile: an update from From to To that has changed
-// the relay and not ended checked ("updating"), or a relay that an update
-// or a rollback left open ("open"). rayctl update refuses while it is
-// there and says how to recover (advice).
+// relayMark is relayMarkFile. Its states, the only two written:
+// "updating", by an update from From to To once its copy is whole and
+// before its first change, gone once the relay is checked, updated or
+// back (or when nothing was placed); "open", by open, when an update or a
+// rollback did not bring the relay back. A mark that does not read counts
+// as "updating" (readMark). rayctl update refuses while it is there and
+// says how to recover (advice).
 type relayMark struct {
 	State string `json:"state"`
 	From  string `json:"from,omitempty"`
