@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -173,7 +172,7 @@ func (l *icmpLimits) count() int {
 
 // icmpServer is a naive server with ICMP on, over the fake network; Public
 // says which destinations and routers are allowed, as on a node.
-func icmpServer(t *testing.T, idle time.Duration) (*Server, *fakeNet, func(host string) (*http.Response, *paddedStream, func())) {
+func icmpServer(t *testing.T, idle time.Duration) (*Server, *fakeNet, connectFunc) {
 	t.Helper()
 	fake := newFakeNet()
 	h, connect := tunnelServer(t, func(s *Server) {
@@ -410,7 +409,7 @@ func TestICMP(t *testing.T) {
 			"af 5":      {1, icmpEcho, 5, 8, 8, 8, 8, 64, 0, 1, 0, 1, 0, 0},
 			"af 0":      {1, icmpEcho, 0},
 		} {
-			_, s, done := connect(ICMPName + ":0")
+			_, s, done := connect(ICMPName+":0", mayReset(true))
 			_, _ = s.Write(send)
 			if !reset(t, s) {
 				t.Errorf("%s: not reset", name)
@@ -421,7 +420,7 @@ func TestICMP(t *testing.T) {
 
 		// ICMP off: the name resets the stream.
 		_, off := tunnelServer(t, func(*Server) {})
-		_, s, done = off(ICMPName + ":0")
+		_, s, done = off(ICMPName+":0", mayReset(true))
 		_, _ = s.Write(append([]byte{icmpVersion}, echoFrame(google, 64, 1, 1, nil)...))
 		if !reset(t, s) {
 			t.Error("ICMP off: not reset")
@@ -442,7 +441,7 @@ func TestICMPStreamLimit(t *testing.T) {
 			dones = append(dones, done)
 		}
 		eventually(t, "streams not counted", func() bool { return h.icmp.count() == icmpPerUser })
-		_, s, done := connect(ICMPName + ":0")
+		_, s, done := connect(ICMPName+":0", mayReset(true))
 		_, _ = s.Write([]byte{icmpVersion})
 		if !reset(t, s) {
 			t.Error("over the user's limit: not reset")

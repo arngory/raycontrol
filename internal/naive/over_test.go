@@ -127,24 +127,43 @@ func serveOver(t *testing.T, h *Server, opts ...clientOpts) (string, http.RoundT
 // after it: over HTTP/3 the reset may overtake the answer (RESET_STREAM
 // drops what the stream has not delivered, spec/naive-uot-v1.md §4), and
 // the client sees the request fail, not a 200 and a read that fails. The
-// body gives the error. Over HTTP/2 the answer always comes first: the
-// error fails the test.
+// body gives the error. Only the server's own reset is that (serverReset);
+// any other error fails the test, and so does any error over HTTP/2,
+// where the answer always comes first. Only tests that expect the stream
+// reset take it (mayReset).
 func resetBeforeAnswer(t *testing.T, err error) *http.Response {
 	t.Helper()
-	var h3err *http3.Error
-	if protoOf(t) != "h3" || !errors.As(err, &h3err) {
+	if protoOf(t) != "h3" || !serverReset(t, err) {
 		t.Fatal(err)
 	}
 	return &http.Response{StatusCode: http.StatusOK, Status: "200 OK (reset before it)", Body: io.NopCloser(iotest.ErrReader(err))}
 }
 
-// roundTrip is tr.RoundTrip(req), with the 200 of resetBeforeAnswer for an
-// HTTP/3 stream reset before its answer came.
-func roundTrip(t *testing.T, tr http.RoundTripper, req *http.Request) (*http.Response, error) {
+// serverReset reports whether err is a stream that the server reset as
+// naive resets one (http.ErrAbortHandler): H3_INTERNAL_ERROR from the
+// peer over HTTP/3, what http3 sends for a handler that aborts, and
+// INTERNAL_ERROR over HTTP/2 (net/http's handlerPanicRST), which Go's
+// client says only in the error's text.
+func serverReset(t *testing.T, err error) bool {
+	t.Helper()
+	if err == nil {
+		return false
+	}
+	if protoOf(t) != "h3" {
+		return strings.Contains(err.Error(), "INTERNAL_ERROR; received from peer")
+	}
+	var h3err *http3.Error
+	return errors.As(err, &h3err) && h3err.Remote && h3err.ErrorCode == http3.ErrCodeInternalError
+}
+
+// roundTrip is tr.RoundTrip(req). Given mayReset(true), for a request that
+// the server may reset right after its answer, an HTTP/3 stream that the
+// server reset before its answer came is the 200 of resetBeforeAnswer.
+func roundTrip(t *testing.T, tr http.RoundTripper, req *http.Request, r ...mayReset) (*http.Response, error) {
 	t.Helper()
 	resp, err := tr.RoundTrip(req)
 	var h3err *http3.Error
-	if err != nil && protoOf(t) == "h3" && errors.As(err, &h3err) {
+	if err != nil && len(r) > 0 && bool(r[0]) && protoOf(t) == "h3" && errors.As(err, &h3err) {
 		return resetBeforeAnswer(t, err), nil
 	}
 	return resp, err

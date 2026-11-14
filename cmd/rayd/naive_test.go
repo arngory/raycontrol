@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -252,11 +253,15 @@ func TestNaiveHTTP3DestinationEnd(t *testing.T) {
 		}
 		close(told)
 		rest, err := io.ReadAll(s)
+		var h3err *http3.Error
 		switch {
 		case len(rest) != 0:
 			t.Errorf("%s: %q after the destination was done", name, rest)
 		case reset && err == nil:
 			t.Errorf("%s: the stream ended cleanly: the client cannot tell a reset from the destination's end", name)
+		case reset && (!errors.As(err, &h3err) || !h3err.Remote || h3err.ErrorCode != http3.ErrCodeInternalError):
+			// naive's reset (http.ErrAbortHandler), not one of the client's.
+			t.Errorf("%s: the stream failed with %v, want the server's H3_INTERNAL_ERROR", name, err)
 		case !reset && err != nil:
 			t.Errorf("%s: the stream failed with %v after a clean end", name, err)
 		}

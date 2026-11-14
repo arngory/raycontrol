@@ -27,7 +27,7 @@ import (
 // uotServer is a naive server whose UDP may reach loopback (and 127.0.0.1
 // only: 127.0.0.2 stands for what is not allowed), with the name echo.test
 // for 127.0.0.1; over HTTP/2, or the test's transport (overProtos).
-func uotServer(t *testing.T, idle time.Duration, o ...clientOpts) (*Server, func(host string) (*http.Response, *paddedStream, func())) {
+func uotServer(t *testing.T, idle time.Duration, o ...clientOpts) (*Server, connectFunc) {
 	t.Helper()
 	return tunnelServer(t, func(h *Server) {
 		h.Allow = func(a netip.Addr) bool { return a == netip.MustParseAddr("127.0.0.1") || a == netip.IPv6Loopback() }
@@ -44,10 +44,19 @@ func uotServer(t *testing.T, idle time.Duration, o ...clientOpts) (*Server, func
 	}, o...)
 }
 
+// mayReset tells connect that the server may reset the stream right after
+// its 200, which over HTTP/3 may overtake it (resetBeforeAnswer).
+type mayReset bool
+
+// connectFunc opens a tunnel to host: its answer, its padded stream, and
+// what ends it.
+type connectFunc func(host string, r ...mayReset) (*http.Response, *paddedStream, func())
+
 // tunnelServer is a naive server for the user secret-one, set up before it
 // serves, over HTTP/2 or the test's transport (overProtos); connect opens a
-// stream to host.
-func tunnelServer(t *testing.T, setup func(*Server), o ...clientOpts) (*Server, func(host string) (*http.Response, *paddedStream, func())) {
+// stream to host, and fails the test on any error of the request unless
+// it is given mayReset(true).
+func tunnelServer(t *testing.T, setup func(*Server), o ...clientOpts) (*Server, connectFunc) {
 	t.Helper()
 	users := filepath.Join(t.TempDir(), "users.json")
 	writeUsers(t, users, "secret-one")
@@ -56,7 +65,7 @@ func tunnelServer(t *testing.T, setup func(*Server), o ...clientOpts) (*Server, 
 	h := &Server{Users: &Users{Path: users}, Answer: answer, Dial: d.DialContext, Log: slog.New(slog.DiscardHandler)}
 	setup(h)
 	url, tr := serveOver(t, h, o...)
-	connect := func(host string) (*http.Response, *paddedStream, func()) {
+	connect := func(host string, r ...mayReset) (*http.Response, *paddedStream, func()) {
 		t.Helper()
 		pr, pw := io.Pipe()
 		req, _ := http.NewRequest(http.MethodConnect, url, pr)
@@ -65,6 +74,9 @@ func tunnelServer(t *testing.T, setup func(*Server), o ...clientOpts) (*Server, 
 		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("niko:secret-one")))
 		resp, err := tr.RoundTrip(req)
 		if err != nil {
+			if len(r) == 0 || !r[0] {
+				t.Fatalf("CONNECT %s: %v", host, err)
+			}
 			resp = resetBeforeAnswer(t, err)
 		}
 		if resp.StatusCode != http.StatusOK {
@@ -239,7 +251,7 @@ func reset(t *testing.T, r io.Reader) bool {
 	go func() { _, err := io.Copy(io.Discard, r); done <- err }()
 	select {
 	case err := <-done:
-		return err != nil
+		return serverReset(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("the stream did not end")
 		return false
@@ -361,7 +373,7 @@ func TestUoT(t *testing.T) {
 			"v1":               {uotLegacyName + ":0", []byte("x")},
 			"tcp, no listener": {"127.0.0.1:1", []byte("x")},
 		} {
-			_, s, done := connect(c.host)
+			_, s, done := connect(c.host, mayReset(true))
 			_, _ = s.Write(c.send)
 			if !reset(t, s) {
 				t.Errorf("%s: not reset", name)
@@ -386,7 +398,7 @@ func TestUoTStreamLimit(t *testing.T) {
 			dones = append(dones, done)
 		}
 		eventually(t, "streams not counted", func() bool { return h.lim.count() == uotPerUser })
-		_, s, done := connect(UoTName + ":0")
+		_, s, done := connect(UoTName+":0", mayReset(true))
 		if !reset(t, s) {
 			t.Error("over the user's limit: not reset")
 		}

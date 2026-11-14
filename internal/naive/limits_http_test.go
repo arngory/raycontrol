@@ -22,14 +22,14 @@ import (
 // limitServer is a naive server (over HTTP/2, or the test's transport:
 // overProtos) whose dials go to dial, and a
 // CONNECT to it with a password ("" none).
-func limitServer(t *testing.T, dial func(ctx context.Context, network, addr string) (net.Conn, error)) (*Server, func(password, target string) (*http.Response, error)) {
+func limitServer(t *testing.T, dial func(ctx context.Context, network, addr string) (net.Conn, error)) (*Server, func(password, target string, r ...mayReset) (*http.Response, error)) {
 	t.Helper()
 	users := filepath.Join(t.TempDir(), "users.json")
 	writeUsersNamed(t, users, map[string]string{"pw": "u5-ab12", "other": "u6"})
 	answer, _ := site.Responder(site.Answer404, "")
 	h := &Server{Users: &Users{Path: users}, Answer: answer, Dial: dial, Log: slog.New(slog.DiscardHandler)}
 	url, tr := serveOver(t, h)
-	return h, func(password, target string) (*http.Response, error) {
+	return h, func(password, target string, r ...mayReset) (*http.Response, error) {
 		pr, pw := io.Pipe()
 		t.Cleanup(func() { pw.Close() })
 		req, err := http.NewRequest(http.MethodConnect, url, pr)
@@ -41,7 +41,7 @@ func limitServer(t *testing.T, dial func(ctx context.Context, network, addr stri
 		if password != "" {
 			req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("niko:"+password)))
 		}
-		resp, err := roundTrip(t, tr, req)
+		resp, err := roundTrip(t, tr, req, r...)
 		if err == nil {
 			t.Cleanup(func() { resp.Body.Close() })
 		}
@@ -125,7 +125,7 @@ func TestNaiveFailedDebt(t *testing.T) {
 			return nil, &net.OpError{Op: "dial", Err: ctx.Err()}
 		})
 		for range failBurst + 5 {
-			if _, err := connect("pw", "192.0.2.1:443"); err != nil {
+			if _, err := connect("pw", "192.0.2.1:443", mayReset(true)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -141,7 +141,7 @@ func TestNaiveFailedDebt(t *testing.T) {
 		h.lim.mu.Lock()
 		h.lim.users["u5"].failed = bucket{0, time.Now()}
 		h.lim.mu.Unlock()
-		if _, err := connect("pw", "192.0.2.1:443"); err != nil {
+		if _, err := connect("pw", "192.0.2.1:443", mayReset(true)); err != nil {
 			t.Fatal(err)
 		}
 		// The 200 comes before the dial: the charge follows it.
@@ -179,7 +179,7 @@ func TestNaiveLookupToken(t *testing.T) {
 			t.Fatalf("on, no token: %v %v, %d lookups", resp, err, looked.Load())
 		}
 		h.SetConnLimit(false)
-		resp, err = connect("pw", "example.test:443")
+		resp, err = connect("pw", "example.test:443", mayReset(true))
 		if err != nil || resp.StatusCode != http.StatusOK {
 			t.Fatalf("off: %v %v", resp, err)
 		}

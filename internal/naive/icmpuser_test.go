@@ -24,7 +24,7 @@ func TestICMPLimitsByUser(t *testing.T) {
 		h := &Server{Users: &Users{Path: users}, Answer: answer, ICMP: true, icmpOpen: newFakeNet().open, Log: slog.New(slog.DiscardHandler)}
 		url, tr := serveOver(t, h)
 		// open is an ICMP stream of the password's, its version said.
-		open := func(password string) *paddedStream {
+		open := func(password string, r ...mayReset) *paddedStream {
 			t.Helper()
 			pr, pw := io.Pipe()
 			req, _ := http.NewRequest(http.MethodConnect, url, pr)
@@ -33,6 +33,9 @@ func TestICMPLimitsByUser(t *testing.T) {
 			req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("niko:"+password)))
 			resp, err := tr.RoundTrip(req)
 			if err != nil {
+				if len(r) == 0 || !r[0] {
+					t.Fatalf("CONNECT: %v", err)
+				}
 				resp = resetBeforeAnswer(t, err)
 			}
 			if resp.StatusCode != http.StatusOK {
@@ -49,7 +52,7 @@ func TestICMPLimitsByUser(t *testing.T) {
 		}
 		eventually(t, "streams not counted", func() bool { return h.icmp.count() == icmpPerUser })
 		for _, password := range []string{"pw-a", "pw-b"} {
-			if !reset(t, open(password)) {
+			if !reset(t, open(password, mayReset(true))) {
 				t.Errorf("a stream past the user's %d was served for %s: each credential has limits of its own", icmpPerUser, password)
 			}
 		}

@@ -21,7 +21,7 @@ import (
 // ackServer is a naive server over HTTP/2 for the user u5 (password pw),
 // with ICMP on, and a CONNECT to it: with niko-ack: 1 or without, early
 // being what the client sends before it has the answer.
-func ackServer(t *testing.T, setup func(*Server)) (*Server, func(target string, ack bool, early []byte) (*http.Response, *paddedStream)) {
+func ackServer(t *testing.T, setup func(*Server)) (*Server, func(target string, ack bool, early []byte, r ...mayReset) (*http.Response, *paddedStream)) {
 	t.Helper()
 	users := filepath.Join(t.TempDir(), "users.json")
 	writeUsersNamed(t, users, map[string]string{"pw": "u5-ab12"})
@@ -31,7 +31,7 @@ func ackServer(t *testing.T, setup func(*Server)) (*Server, func(target string, 
 	url, tr := serveOver(t, h)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return h, func(target string, ack bool, early []byte) (*http.Response, *paddedStream) {
+	return h, func(target string, ack bool, early []byte, r ...mayReset) (*http.Response, *paddedStream) {
 		t.Helper()
 		pr, pw := io.Pipe()
 		t.Cleanup(func() { pw.Close() })
@@ -46,7 +46,7 @@ func ackServer(t *testing.T, setup func(*Server)) (*Server, func(target string, 
 		if early != nil {
 			go func() { _, _ = s.Write(early) }()
 		}
-		resp, err := roundTrip(t, tr, req)
+		resp, err := roundTrip(t, tr, req, r...)
 		if err != nil {
 			t.Fatalf("CONNECT %s: %v", target, err)
 		}
