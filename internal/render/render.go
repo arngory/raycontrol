@@ -225,7 +225,12 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 	if m.Domain, err = provision.Domain(ctx, st); err != nil {
 		return m, err
 	}
-	services, err := st.ListServices(ctx)
+	// Settings and secrets as one read: a subscription built across a
+	// change of both (the operator's certificate replacing the node's)
+	// must not pair the settings of before with the chain of after, and
+	// publish the pins of a certificate marked as not the node's own
+	// (spec/cert-pin-v1.md §7).
+	services, allSecrets, err := st.ServicesWithSecrets(ctx)
 	if err != nil {
 		return m, err
 	}
@@ -234,10 +239,7 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 		if !s.Enabled {
 			continue
 		}
-		secrets, err := st.ServiceSecrets(ctx, s.ID)
-		if err != nil {
-			return m, err
-		}
+		secrets := allSecrets[s.ID]
 		// dnsseal-v1: a dnstt service from before it gets its key now.
 		if s.Kind == "dnstt" {
 			if secrets[provision.SecretSealKey], err = provision.EnsureSealKey(ctx, st, s, secrets); err != nil {
