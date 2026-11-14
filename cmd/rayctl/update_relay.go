@@ -162,11 +162,18 @@ type relayMark struct {
 	To    string `json:"to,omitempty"`
 }
 
-func (m relayMark) advice() string {
+// advice is what to do about m; whole says whether a whole copy of the
+// relay from before is there to roll back to. Without one, -rollback has
+// nothing to put back: the relay's own bootstrap.sh installs it anew, and
+// ends the mark.
+func (m relayMark) advice(whole bool) string {
+	if !whole {
+		return fmt.Sprintf("an update or rollback of this relay did not end, and no whole copy of the relay from before it "+
+			"is left to roll back to: bash bootstrap.sh -relay %s installs the relay anew", deploy.RelayBundle)
+	}
 	if m.State == "shutdown" {
-		return fmt.Sprintf("the system shut down during an update or rollback of this relay (from %s to %s): rayspa was left "+
-			"enabled to start at boot as it was; rayctl update -rollback puts %s back", cmp.Or(m.From, "?"), cmp.Or(m.To, "?"),
-			cmp.Or(m.From, "the kept version"))
+		return fmt.Sprintf("the system shut down during an update or rollback of this relay: rayspa was left enabled to start "+
+			"at boot as it was; rayctl update -rollback puts %s back", cmp.Or(m.From, "the kept version"))
 	}
 	if m.State == "open" {
 		return fmt.Sprintf("the last update or rollback of this relay left it open and not forwarding: rayctl update -rollback "+
@@ -304,6 +311,12 @@ func (o relayOps) kept() (relayKept, error) {
 		return k, errors.New("no copy of the relay from before an update: nothing to roll back to")
 	}
 	return k, json.Unmarshal(b, &k)
+}
+
+// adviceOf is m's advice, as the copy kept is.
+func (o relayOps) adviceOf(m relayMark) string {
+	_, err := o.kept()
+	return m.advice(err == nil)
 }
 
 // mark writes relayMarkFile; unmark removes it; readMark reads it.
@@ -815,9 +828,9 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 	// else, never "installed, the newest release".
 	if m, marked := e.ops.readMark(); marked {
 		if !o.check {
-			return errors.New(m.advice())
+			return errors.New(e.ops.adviceOf(m))
 		}
-		fmt.Println("warning:", m.advice())
+		fmt.Println("warning:", e.ops.adviceOf(m))
 	}
 	port, warning, err := e.before(b.Name)
 	switch {
@@ -907,11 +920,14 @@ func (e relayEnv) rollback(yes bool, name string) error {
 		return fmt.Errorf("%w: once it has ended, rayctl update -rollback (nothing changed)", err)
 	}
 	defer il.Close()
+	m, marked := e.ops.readMark()
 	k, err := e.ops.kept()
+	if err != nil && marked {
+		return errors.New(m.advice(false))
+	}
 	if err != nil {
 		return err
 	}
-	_, marked := e.ops.readMark()
 	open := e.hostOpen()
 	var port int
 	if open {
@@ -1081,11 +1097,12 @@ func (c *cli) relayPolicy(args []string, dir string) error {
 			previous = k.Version
 		}
 	}
-	m, marked := relayOps{dir: dir}.readMark()
+	ops := relayOps{dir: dir}
+	m, marked := ops.readMark()
 	if c.json {
 		st := map[string]any{"host": "relay", "installed": version, "rayspa": rayspa, "previous": previous, "remote": "n/a", "auto": "n/a"}
 		if marked {
-			st["unfinished"] = m.advice()
+			st["unfinished"] = ops.adviceOf(m)
 		}
 		j, err := json.MarshalIndent(st, "", "  ")
 		if err != nil {
@@ -1102,7 +1119,7 @@ func (c *cli) relayPolicy(args []string, dir string) error {
 		fmt.Printf("previous   %s (rayctl update -rollback)\n", previous)
 	}
 	if marked {
-		fmt.Printf("unfinished %s\n", m.advice())
+		fmt.Printf("unfinished %s\n", ops.adviceOf(m))
 	}
 	fmt.Println("latest     rayctl update -check asks GitHub")
 	fmt.Println("remote     does not apply to a relay (no rayd API for devices)")

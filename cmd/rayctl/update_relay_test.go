@@ -954,6 +954,31 @@ func TestRelayUpdateWhole(t *testing.T) {
 	}
 }
 
+// A mark with no whole copy beside it (only by hand: the copy is whole
+// before the mark is written) is no dead end: rayctl update, -rollback
+// and status name the relay's bootstrap.sh, not -rollback.
+func TestRelayMarkWithoutCopy(t *testing.T) {
+	f := newFakeRelay(t)
+	os.MkdirAll(f.env.ops.dir, 0o700)
+	f.env.ops.mark(relayMark{State: "updating", From: "v0.26.0", To: "v0.26.1"})
+	want := "bash bootstrap.sh -relay " + deploy.RelayBundle + " installs the relay anew"
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("update: %v", err)
+	}
+	if _, err := f.rollback(true); err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("-rollback: %v", err)
+	}
+	if text, err := captureStdout(t, func() error { return (&cli{}).relayPolicy([]string{"status"}, f.env.ops.dir) }); err != nil ||
+		!strings.Contains(text, want) {
+		t.Errorf("status: %q %v", text, err)
+	}
+	// Unmarked, nothing kept: nothing to roll back to, as ever.
+	f = newFakeRelay(t)
+	if _, err := f.rollback(true); err == nil || !strings.Contains(err.Error(), "nothing to roll back to") {
+		t.Errorf("-rollback unmarked: %v", err)
+	}
+}
+
 // rayctl update -rollback on a relay: asked first; after an update that
 // was interrupted with the host left open (the install removed the
 // snapshot), it restores the kept snapshot without asking a perimeter
