@@ -252,7 +252,7 @@ func installFlags(fs *flag.FlagSet) installOptions {
 	host := fs.String("host", "", "public address clients use (required)")
 	domain := fs.String("domain", "", "base domain (needed for DNS tunnels)")
 	name := fs.String("name", "", "the node's name, which clients show with its address (at most 48 characters; rayctl node name later)")
-	admin := fs.String("admin", sshClient(), "addresses that reach SSH without SPA (comma-separated; default: this SSH session)")
+	admin := fs.String("admin", sshClient(), "addresses or networks that reach SSH without SPA, IPv4 or IPv6 (comma-separated, /16 or /48 at the widest; default: this SSH session; rayctl admin later)")
 	packages := fs.String("packages", "", "packages the bootstrap installed, as manager:name,name (recorded for uninstall)")
 	cfToken := fs.String("cloudflare-token-file", "", "Cloudflare API token file: DNS records and wildcard certificates (needs -domain)")
 	dataplane := fs.String("dataplane", "", "directory with the xray and niko-server the bootstrap verified, installed to "+deploy.DataPlaneDir)
@@ -490,6 +490,7 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 
 	fmt.Printf("\nraycontrol is installed. The perimeter is up: every port is closed except\n"+
 		"SPA, public services and SSH (tcp/%d) from %s.\n", port, *admin)
+	fmt.Println("More admin addresses or networks (IPv4 /16 or IPv6 /48 at the widest): rayctl admin with all of them, the list is replaced whole.")
 	if bundle != "" {
 		fmt.Printf("\nEmergency device (SSH only). Store it offline, it is shown once:\n\n%s\n", bundle)
 	}
