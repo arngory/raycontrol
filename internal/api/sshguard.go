@@ -34,11 +34,13 @@ func lastSSH(ctx context.Context, st *store.Store, name, verb string, force bool
 	if !last {
 		return nil
 	}
-	return fmt.Errorf("%w: service %s is the only enabled one of kind ssh, and the perimeter lets SSH in on its ports only (from "+
-		"the admin addresses, and after a knock). With it %s, SSH to this node is closed to everyone from the perimeter's next "+
-		"snapshot: sessions open now go on, a new one does not get in, and only the provider's console is left. Add another ssh "+
-		"service first (rayctl service add ssh ssh-2222 -settings '{\"ports\":[\"tcp/2222\"]}'), or %s it anyway: "+
-		"rayctl service %s %s -force", store.ErrPrecondition, name, verbed[verb], verb, verbCmd[verb], name)
+	// rayctl prints 512 bytes of it (deploy.PrintableWarning): the command
+	// at its end must fit.
+	return fmt.Errorf("%w: service %s is the only enabled ssh service, and the perimeter lets SSH in (from the admin "+
+		"addresses, after a knock) on its ports only. With it %s, SSH to this node is closed to everyone from the next "+
+		"snapshot: open sessions go on, new ones do not get in. Add another ssh service first (rayctl service add ssh "+
+		"ssh-2222 -settings '{\"ports\":[\"tcp/2222\"]}'), or %s it anyway: rayctl service %s %s -force (a rayctl "+
+		"before v0.27.0 has no -force: update it)", store.ErrPrecondition, name, verbed[verb], verb, verbCmd[verb], name)
 }
 
 var (

@@ -33,7 +33,7 @@ func TestLastSSHService(t *testing.T) {
 	refused := func(what string, err error, flag string) {
 		t.Helper()
 		if connect.CodeOf(err) != connect.CodeFailedPrecondition || !strings.Contains(err.Error(), "closed to everyone") ||
-			!strings.Contains(err.Error(), flag) {
+			!strings.Contains(err.Error(), flag) || !strings.HasSuffix(err.Error(), "-force (a rayctl before v0.27.0 has no -force: update it)") {
 			t.Errorf("%s: %v", what, err)
 		}
 	}

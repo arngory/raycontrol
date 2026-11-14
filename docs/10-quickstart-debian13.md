@@ -1294,11 +1294,12 @@ admin-устройства — удалённый доступ админист�
   `rayctl service disable ssh` и `rayctl service del ssh` не трогают и отвечают
 
   ```
-  rayctl: failed_precondition: not now: service ssh is the only enabled one of kind ssh, and the perimeter lets SSH in on its ports only (from the admin addresses, and after a knock). With it disabled, SSH to this node is closed to everyone …
+  rayctl: failed_precondition: not now: service ssh is the only enabled ssh service, and the perimeter lets SSH in (from the admin addresses, after a knock) on its ports only. With it disabled, SSH to this node is closed to everyone …
   ```
 
   Строка кончается командой с `-force`, которая сделает это всё равно. То же отвечает нода и на запрос через API, с
-  телефона или `-remote`. Не трогайте служебные сервисы:
+  телефона или `-remote`. У `rayctl` старше v0.27.0 флага `-force` нет: обновите его или возьмите `rayctl` на
+  самой ноде. Не трогайте служебные сервисы:
 
   | Команда | Что она сломает |
   |---|---|
