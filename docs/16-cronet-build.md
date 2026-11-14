@@ -361,6 +361,26 @@ Workflow выпуска на раннерах GitHub отличается тре
   переходе на новую версию Chromium список расхождений пересчитывается и передаётся клиенту вместе с библиотекой.
   Нода для своих соединений встраивает пересечение `chrome.go` и `mozilla.go` ядра по ключу корня, 91 корень
   (`internal/roots/roots.pem`, генератор `scripts/roots`; [08-decisions.md](08-decisions.md), R4-41).
+- **Набор пинов «по списку центров» — это корни и промежуточные-якоря** (находка клиента, Niko 1.50.0: профиль naive
+  к `www.gstatic.com` с пинами 92 корней получил `ERR_SSL_PINNED_KEY_NOT_IN_CERT_CHAIN`). В хранилище Chromium 158
+  (версия 43) якорей TLS 114: 99 корней (`trust_anchors`, `root_store.certs`) и 15 промежуточных с
+  `tls_trust_anchor: true` из `additional_certs` (`additional.certs`): WR1–WR4 от GTS Root R1; WE1–WE4 и AE1 от GTS
+  Root R4; R12–R14 от ISRG Root X1; E7–E9 от ISRG Root X2. Остальные 144 записи `additional_certs` — список ЕС для
+  QWAC, якорями TLS не служат. Код: `net/cert/internal/trust_store_chrome.cc:259-274` и `:406-427`. Путь проверки
+  кончается на первом сертификате-якоре, а пин сверяется с ключами пути от листа до якоря
+  (`net/cert/cert_verify_proc_builtin.cc:332-338`), поэтому за промежуточным-якорем корня в пути нет. От цепочки,
+  которую прислал сервер, это не зависит. Набор пинов, который значит «эти центры», состоит из ключей их корней и
+  промежуточных-якорей с тем же `crs_root_id`.
+  Таблица якорей собранной версии лежит в пакете: `cronet.ChromeRootStoreAnchors()` и
+  `cronet.ChromeRootStoreVersion` (cronet-go `1dc803d`, файлы `chrome_root_store.go` и
+  `chrome_root_store_generated.go`; генератор `go run ./cmd/build-naive generate-root-store`, в CI с `--check`).
+  Сборка `go-158-20261114-5` → `5f3ef3f83e0fef33316401a677f99cc9340b75cd`, `v0.0.0-20261114220259-5f3ef3f83e0f`;
+  библиотеки в ней те же, что в `-3` и `-4` (деревья `lib` и `include` совпадают). Таблицу берут из той же версии
+  модуля, что и библиотеки: с каждой версией хранилища список промежуточных меняется, а расхождение даёт отказ.
+  Проверка: `test/public_site_pins_test.go` в cronet-go (Linux, cgo и purego, run 43645424516) — NaiveClient к
+  настоящим сайтам, хэши из NetLog. `www.gstatic.com` (лист ← WE2): пины корней — отказ, пины всех якорей —
+  проходит. `valid-isrgrootx1.letsencrypt.org` (лист ← YR1 ← Root YR ← ISRG Root X1) и `www.digicert.com` проходят
+  с обоими наборами.
 
 ## 9. Чего не удалось проверить
 
