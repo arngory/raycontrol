@@ -114,6 +114,7 @@ func Responder(mode, root string) (http.Handler, error) {
 	case AnswerSilent:
 		held := make(chan struct{}, silentMax)
 		return http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			giveUpBody(r)
 			select {
 			case held <- struct{}{}:
 				defer func() { <-held }()
@@ -136,6 +137,23 @@ func Responder(mode, root string) (http.Handler, error) {
 		return Handler(root), nil
 	}
 	return nil, fmt.Errorf("site answer %q: want one of %s", mode, strings.Join(Answers, ", "))
+}
+
+// giveUpBody lets go of a request's body before the request is held: an
+// answer of the site's never reads one, and one it holds unread is the
+// client's flow-control window of the process's memory (ConnWindow a
+// connection over HTTP/2, for SilentHold) at no cost to a client without a
+// password. The other answers return at once, which lets go of it too.
+//
+// Over HTTP/2 what came is dropped and what comes is not kept: the
+// connection's window goes back as it comes, the stream's does not, so the
+// client can send a stream's window and no more. Over HTTP/3 the client is
+// told to stop sending. An HTTP/1 body is not read at all: it waits in the
+// socket, and closing it would read it.
+func giveUpBody(r *http.Request) {
+	if r.ProtoMajor >= 2 && r.Body != nil {
+		_ = r.Body.Close()
+	}
 }
 
 // Handler serves the site's files: no directory listings, its own 404 page
