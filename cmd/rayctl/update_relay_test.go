@@ -786,6 +786,45 @@ func TestRelayKeepWholeOrNothing(t *testing.T) {
 	}
 }
 
+// The swap of a whole new copy for the earlier one: if the new copy cannot
+// take its place, the earlier one goes back to it; if the earlier one
+// cannot be moved aside, it stays. Either way the keep fails, the earlier
+// copy is the one kept, and nothing is left beside it.
+func TestRelayKeepRenameFails(t *testing.T) {
+	for _, fails := range []string{"previous.new", "previous"} {
+		f := newFakeRelay(t)
+		if _, err := f.env.ops.keep("v0.25.9"); err != nil {
+			t.Fatal(err)
+		}
+		var renamed []string
+		f.env.ops.rename = func(from, to string) error {
+			renamed = append(renamed, filepath.Base(from)+" "+filepath.Base(to))
+			if from == f.at(fails) {
+				return errors.New("no space left on device")
+			}
+			return os.Rename(from, to)
+		}
+		if _, err := f.env.ops.keep("v0.26.0"); err == nil || !strings.Contains(err.Error(), "no space") {
+			t.Fatalf("%s not renamed: keep %v", fails, err)
+		}
+		if k, err := f.env.ops.kept(); err != nil || k.Version != "v0.25.9" || f.read("previous/VERSION") != "v0.25.9\n" {
+			t.Errorf("%s not renamed: kept %+v %v", fails, k, err)
+		}
+		for _, d := range []string{"previous.new", "previous.old"} {
+			if _, err := os.Lstat(f.at(d)); !os.IsNotExist(err) {
+				t.Errorf("%s not renamed: %s left (%v)", fails, d, err)
+			}
+		}
+		want := []string{"previous previous.old", "previous.new previous", "previous.old previous"}
+		if fails == "previous" {
+			want = want[:1]
+		}
+		if !slices.Equal(renamed, want) {
+			t.Errorf("%s not renamed: renames %q", fails, renamed)
+		}
+	}
+}
+
 // rayctl update on a relay, the whole of it on a fake host.
 func TestRelayUpdateWhole(t *testing.T) {
 	// Done: the check expects the new version, the copy and nothing else

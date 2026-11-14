@@ -207,8 +207,9 @@ type relayOps struct {
 	disarm    func()                      // the install's guard timer off, if one is left
 	unforward func()                      // our forwarding file gone, the value before raycontrol back
 	tableGone func() bool
-	rayspa    string        // its binary, for teardown
-	settle    time.Duration // how long open waits to look at the table again
+	rayspa    string                              // its binary, for teardown
+	settle    time.Duration                       // how long open waits to look at the table again
+	rename    func(oldpath, newpath string) error // keep's renames; os.Rename when nil
 }
 
 // savedName is a file's name among the kept ones.
@@ -221,8 +222,12 @@ func savedName(path string) string {
 // only once whole: a keep that fails leaves that one as it was.
 func (o relayOps) keep(version string) (relayKept, error) {
 	next, old := o.dir+".new", o.dir+".old"
+	rename := o.rename
+	if rename == nil {
+		rename = os.Rename
+	}
 	if _, err := os.Lstat(o.dir); errors.Is(err, os.ErrNotExist) {
-		_ = os.Rename(old, o.dir) // cut off between the renames below
+		_ = rename(old, o.dir) // cut off between the renames below
 	}
 	for _, d := range []string{next, old} {
 		if err := os.RemoveAll(d); err != nil {
@@ -231,13 +236,13 @@ func (o relayOps) keep(version string) (relayKept, error) {
 	}
 	k, err := o.keepIn(next, version)
 	if err == nil {
-		if err = os.Rename(o.dir, old); errors.Is(err, os.ErrNotExist) {
+		if err = rename(o.dir, old); errors.Is(err, os.ErrNotExist) {
 			err = nil
 		}
 	}
 	if err == nil {
-		if err = os.Rename(next, o.dir); err != nil {
-			_ = os.Rename(old, o.dir)
+		if err = rename(next, o.dir); err != nil {
+			_ = rename(old, o.dir)
 		}
 	}
 	if err != nil {
