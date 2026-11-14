@@ -2,7 +2,7 @@ module github.com/arngory/raycontrol
 
 go 1.26.0
 
-toolchain go1.26.10
+toolchain go1.26.11
 
 require (
 	connectrpc.com/connect v1.18.1
