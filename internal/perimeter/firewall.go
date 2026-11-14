@@ -377,13 +377,45 @@ table inet %[1]s {
 }
 
 // Setup installs the table and detects whether "destroy element" works.
-func (n *NFT) Setup() error {
-	if err := n.run(n.Ruleset()); err != nil {
+func (n *NFT) Setup() error { return n.SetupWith(TableContents{}) }
+
+// SetupWith installs the table with its contents in one transaction
+// (docs/08-decisions.md R4-40): the admin addresses, the public ports, the
+// slots and the grants are in from the table's first packet, or, refused,
+// nothing changes and an earlier table stays. Then it detects whether
+// "destroy element" works.
+func (n *NFT) SetupWith(c TableContents) error {
+	if err := n.run(n.SetupScript(c)); err != nil {
 		return err
 	}
 	probe := fmt.Sprintf("destroy element inet %s allow4 { 192.0.2.1 . tcp . 1 }\n", Table)
 	n.destroy = n.run(probe) == nil
 	return nil
+}
+
+// SetupScript is the transaction of SetupWith: the table (Ruleset) and
+// what goes into it, each part as its setter writes it.
+func (n *NFT) SetupScript(c TableContents) string {
+	var b strings.Builder
+	b.WriteString(n.Ruleset())
+	if c.InLimitOff {
+		b.WriteString(inLimitScript(false, n.RelayTo.IsValid(), n.inDiv))
+	}
+	b.WriteString(publicScript(c.Public))
+	b.WriteString(adminScript(c.Admin, c.AdminPorts))
+	if n.RelayTo.IsValid() {
+		b.WriteString(forwardScript(c.Forward))
+	}
+	if c.ACMEPort != 0 {
+		b.WriteString(acmeScript(c.ACMEPort, c.ACMETTL))
+	}
+	b.WriteString(grantsScript(c.Grants))
+	if c.Relayed {
+		b.WriteString(relaysScript(c.Relays, c.RelayPorts))
+	}
+	b.WriteString(rotationScript(c.Rotation))
+	b.WriteString(spaPortsScript(c.SPAUDP, c.SPATCP))
+	return b.String()
 }
 
 // HoldForwardScript is the table a relay host has until its first snapshot
@@ -442,7 +474,9 @@ func joinPorts(ports []uint16) string {
 }
 
 // SetSPAPorts replaces the slot ports in one transaction.
-func (n *NFT) SetSPAPorts(udp, tcp []uint16) error {
+func (n *NFT) SetSPAPorts(udp, tcp []uint16) error { return n.run(spaPortsScript(udp, tcp)) }
+
+func spaPortsScript(udp, tcp []uint16) string {
 	var b strings.Builder
 	for _, set := range []struct {
 		name  string
@@ -453,13 +487,15 @@ func (n *NFT) SetSPAPorts(udp, tcp []uint16) error {
 			fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set.name, joinPorts(set.ports))
 		}
 	}
-	return n.run(b.String())
+	return b.String()
 }
 
 // SetPublic replaces the ports open to everyone, and with them the DNS
 // tunnels' ports that skip conntrack: the public UDP ports are theirs
 // (store's public kinds), in the same transaction.
-func (n *NFT) SetPublic(ports []Port) error {
+func (n *NFT) SetPublic(ports []Port) error { return n.run(publicScript(ports)) }
+
+func publicScript(ports []Port) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "flush set inet %s public\nflush set inet %s dns_ports\n", Table, Table)
 	if len(ports) > 0 {
@@ -468,7 +504,7 @@ func (n *NFT) SetPublic(ports []Port) error {
 	if dns := DNSPorts(ports); len(dns) > 0 {
 		fmt.Fprintf(&b, "add element inet %s dns_ports { %s }\n", Table, joinPorts(dns))
 	}
-	return n.run(b.String())
+	return b.String()
 }
 
 // DNSPorts are the DNS tunnels' ports among the public ones: the UDP ports
@@ -652,6 +688,10 @@ func (n *NFT) hasChain(chain string) (bool, error) {
 
 // SetAdmin replaces the admin prefixes and ports in one transaction.
 func (n *NFT) SetAdmin(prefixes []netip.Prefix, ports []Port) error {
+	return n.run(adminScript(prefixes, ports))
+}
+
+func adminScript(prefixes []netip.Prefix, ports []Port) string {
 	var v4, v6 []string
 	for _, p := range prefixes {
 		if p.Addr().Is4() {
@@ -670,7 +710,7 @@ func (n *NFT) SetAdmin(prefixes []netip.Prefix, ports []Port) error {
 			fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set.name, strings.Join(set.elems, ", "))
 		}
 	}
-	return n.run(b.String())
+	return b.String()
 }
 
 // SetForward replaces the ports a relay forwards (relay-v1 §3.1).
@@ -678,12 +718,16 @@ func (n *NFT) SetForward(ports []Port) error {
 	if !n.RelayTo.IsValid() {
 		return nil
 	}
+	return n.run(forwardScript(ports))
+}
+
+func forwardScript(ports []Port) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "flush set inet %s relay_fwd\n", Table)
 	if elems := portElems(ports); len(elems) > 0 {
 		fmt.Fprintf(&b, "add element inet %s relay_fwd { %s }\n", Table, strings.Join(elems, ", "))
 	}
-	return n.run(b.String())
+	return b.String()
 }
 
 // relayMark is the conntrack mark bit of flows a relay opened (admit,
@@ -696,6 +740,10 @@ const relayMark = "0x00400000"
 // reach, and turns relay_check on: the flows a relay opened end when
 // nothing lets them in any more.
 func (n *NFT) SetRelays(addrs []netip.Prefix, ports []Port) error {
+	return n.run(relaysScript(addrs, ports))
+}
+
+func relaysScript(addrs []netip.Prefix, ports []Port) string {
 	var v4, v6 []string
 	for _, p := range addrs {
 		if p.Addr().Is4() {
@@ -720,11 +768,13 @@ func (n *NFT) SetRelays(addrs []netip.Prefix, ports []Port) error {
 		"add rule inet %[1]s relay_check counter comment \"relay-removed\"\n"+
 		"add rule inet %[1]s relay_check meta l4proto tcp reject with tcp reset\n"+
 		"add rule inet %[1]s relay_check drop\n", Table)
-	return n.run(b.String())
+	return b.String()
 }
 
 // SetRotation replaces the rotation map in one transaction.
-func (n *NFT) SetRotation(udp map[uint16]uint16) error {
+func (n *NFT) SetRotation(udp map[uint16]uint16) error { return n.run(rotationScript(udp)) }
+
+func rotationScript(udp map[uint16]uint16) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "flush map inet %s rot_udp\n", Table)
 	if len(udp) > 0 {
@@ -739,11 +789,13 @@ func (n *NFT) SetRotation(udp map[uint16]uint16) error {
 		}
 		fmt.Fprintf(&b, "add element inet %s rot_udp { %s }\n", Table, strings.Join(elems, ", "))
 	}
-	return n.run(b.String())
+	return b.String()
 }
 
 // SetACME replaces the ACME window in one transaction.
-func (n *NFT) SetACME(port uint16, ttl time.Duration) error {
+func (n *NFT) SetACME(port uint16, ttl time.Duration) error { return n.run(acmeScript(port, ttl)) }
+
+func acmeScript(port uint16, ttl time.Duration) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "flush map inet %s acme_redirect\nflush set inet %s acme_in\n", Table, Table)
 	if port != 0 && ttl > 0 {
@@ -751,7 +803,7 @@ func (n *NFT) SetACME(port uint16, ttl time.Duration) error {
 		fmt.Fprintf(&b, "add element inet %s acme_redirect { 80 timeout %ds : %d }\n", Table, secs, port)
 		fmt.Fprintf(&b, "add element inet %s acme_in { %d timeout %ds }\n", Table, port, secs)
 	}
-	return n.run(b.String())
+	return b.String()
 }
 
 func portElems(ports []Port) []string {
@@ -813,15 +865,19 @@ type Grant struct {
 // AllowAll opens the grants in one transaction, on a table just made
 // (Setup): there is nothing of theirs to replace.
 func (n *NFT) AllowAll(grants []Grant) error {
+	if s := grantsScript(grants); s != "" {
+		return n.run(s)
+	}
+	return nil
+}
+
+func grantsScript(grants []Grant) string {
 	var b strings.Builder
 	for _, gr := range grants {
 		set, elems := elements(gr.Addr, []Port{gr.Port}, gr.TTL)
 		fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set, elems)
 	}
-	if b.Len() == 0 {
-		return nil
-	}
-	return n.run(b.String())
+	return b.String()
 }
 
 // Deny closes ports for addr now, in one transaction; an error is real.

@@ -73,6 +73,39 @@ func TestGateFirstSetupFails(t *testing.T) {
 	}
 }
 
+// The first table is up only with all of its snapshot: a firewall that
+// takes the table and refuses the admin addresses leaves the gate down
+// (GateNotIn), not up with an empty admin set; and a later snapshot taken
+// in part leaves it behind (GateBehind), the table in, not up.
+func TestGateUpOnlyWhole(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	fw := &fakeFW{gone: true, adminFails: 1}
+	g := NewGate(fw, quiet)
+	g.now = func() time.Time { return now }
+	g.SetupAtFirstSnapshot()
+	snap := testSnapshot()
+	snap.AdminPrefixes = []string{"198.51.100.0/24"}
+	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 22}}
+	if err := g.Update(snap); !errors.Is(err, ErrPending) || g.Up() || g.State() != GateNotIn {
+		t.Fatalf("admin refused in the first table: %v, up %v, state %v", err, g.Up(), g.State())
+	}
+	now = now.Add(2 * time.Second)
+	if _, err := g.Tick(); err != nil || !g.Up() || len(fw.admin) != 1 {
+		t.Fatalf("the next tick: %v, up %v, admin %v", err, g.Up(), fw.admin)
+	}
+	next := testSnapshot()
+	next.AdminPrefixes = []string{"203.0.113.0/24"}
+	next.AdminPorts = snap.AdminPorts
+	fw.adminFails = 1
+	if err := g.Update(next); !errors.Is(err, ErrPending) || g.State() != GateBehind || g.Up() {
+		t.Fatalf("a later snapshot in part: %v, state %v", err, g.State())
+	}
+	now = now.Add(2 * time.Second)
+	if _, err := g.Tick(); err != nil || !g.Up() || fw.admin[0].String() != "203.0.113.0/24" {
+		t.Fatalf("caught up: %v, up %v, admin %v", err, g.Up(), fw.admin)
+	}
+}
+
 // A snapshot that does not apply (from a later version, damaged) changes
 // nothing in the kernel: the gate stays without a table.
 func TestGateBadFirstSnapshot(t *testing.T) {

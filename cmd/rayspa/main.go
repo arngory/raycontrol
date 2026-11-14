@@ -207,9 +207,12 @@ func run(args []string) error {
 			}
 			if now := gate.Up(); now != up {
 				up = now
-				if up {
+				switch st := gate.State(); {
+				case up:
 					log.Info("perimeter up", "table", perimeter.Table)
-				} else {
+				case st == perimeter.GateBehind:
+					log.Warn("perimeter behind its snapshot: the table is in, a part of the snapshot is not yet", "table", perimeter.Table)
+				default:
 					log.Error("perimeter down: its table went and is not back yet; the host is open meanwhile", "table", perimeter.Table)
 				}
 				notify("STATUS=" + perimeterStatus(up, false))
