@@ -82,7 +82,7 @@ func (s *Store) CreateInvite(ctx context.Context, userName, name, role string, t
 	}
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		var taken int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM devices WHERE user_id = ? AND name = ?`, u.ID, name).Scan(&taken); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM devices WHERE user_id = ? AND name = ? AND revoked_at IS NULL`, u.ID, name).Scan(&taken); err != nil {
 			return err
 		}
 		if taken > 0 {

@@ -457,8 +457,9 @@ func TestRemoteAPI(t *testing.T) {
 	}
 
 	// Revocation ends it.
-	if _, err := c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: reg.DeviceId})); err != nil {
-		t.Fatal(err)
+	rev, err := c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: reg.DeviceId}))
+	if err != nil || rev.Msg.User != "alice" || rev.Msg.Device != "laptop" || rev.Msg.Already || rev.Msg.Invite {
+		t.Fatalf("revoke: %v %v", rev, err)
 	}
 	if _, err := fresh.node.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{})); connect.CodeOf(err) != connect.CodeUnauthenticated {
 		t.Fatalf("revoked: %v", err)
@@ -479,8 +480,9 @@ func TestRemoteAPI(t *testing.T) {
 	if scope(spare.DeviceID) != nil {
 		t.Fatal("a withdrawn invite passes SPA")
 	}
-	if _, err := c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{User: "alice", Name: "laptop"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Fatalf("an invite for a taken name: %v", err)
+	// The revoked laptop's name is free again (R4-36).
+	if _, err := c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{User: "alice", Name: "laptop"})); err != nil {
+		t.Fatalf("an invite for a revoked device's name: %v", err)
 	}
 	if _, err := c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{User: "alice", Name: "x", TtlSeconds: 30 * 24 * 3600})); connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("an invite for a month: %v", err)
