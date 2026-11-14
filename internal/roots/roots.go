@@ -94,16 +94,53 @@ func WriteExtra(path string, cs []*x509.Certificate) error {
 	return writeFile(path, b.Bytes())
 }
 
-// writeFile writes a file of root's, readable by all, by rename.
+// writeFile writes a file of root's by rename, mode 0644 whatever root's
+// umask (027 would leave it 0640 root:root, which rayd, user rayd, cannot
+// read: it would stay on the embedded list while rayctl said done). The
+// files hold public certificates and two settings, nothing secret.
 func writeFile(path string, b []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // G301: /etc/raycontrol, read by rayd
+	if err := openDir(filepath.Dir(path)); err != nil {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil { //nolint:gosec // G306: roots, no secret; rayd reads them
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644) //nolint:gosec // G302,G304: roots, no secret; rayd reads them
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(b)
+	if cerr := f.Chmod(0o644); err == nil {
+		err = cerr
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// openDir makes dir 0755 whatever the umask, or, when it exists, gives it
+// the search bits rayd needs (0o011) and nothing else: an existing
+// /etc/raycontrol may hold a relay's bundle (0600 itself, so the bundle
+// does not rely on the directory), and a listing root closed stays closed.
+func openDir(dir string) error {
+	fi, err := os.Stat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: /etc/raycontrol, read by rayd
+			return err
+		}
+		return os.Chmod(dir, 0o755) //nolint:gosec // G302: as above
+	case err != nil:
+		return err
+	case !fi.IsDir():
+		return fmt.Errorf("%s is not a directory", dir)
+	case fi.Mode().Perm()&0o011 != 0o011:
+		return os.Chmod(dir, fi.Mode().Perm()|0o011)
+	}
+	return nil
 }
 
 // Embedded is the embedded list.

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -212,8 +213,12 @@ func TestSystemFallback(t *testing.T) {
 	}
 }
 
-// TestSettingsFile: what rayctl roots writes, ReadSettings reads.
+// TestSettingsFile: what rayctl roots writes, ReadSettings reads; the
+// files are 0644 and a new directory 0755 under root's umask of 027, and
+// an existing closed directory gets the search bits only.
 func TestSettingsFile(t *testing.T) {
+	old := syscall.Umask(0o027)
+	t.Cleanup(func() { syscall.Umask(old) })
 	p := filepath.Join(t.TempDir(), "sub", "tls-roots.json")
 	if s, err := roots.ReadSettings(p); err != nil || s != (roots.Settings{}) {
 		t.Fatalf("missing: %+v %v", s, err)
@@ -228,5 +233,59 @@ func TestSettingsFile(t *testing.T) {
 	fi, _ := os.Stat(p)
 	if fi.Mode().Perm() != 0o644 {
 		t.Fatalf("mode %v: rayd reads it", fi.Mode())
+	}
+	if fi, _ := os.Stat(filepath.Dir(p)); fi.Mode().Perm() != 0o755 {
+		t.Fatalf("directory mode %v: rayd goes through it", fi.Mode())
+	}
+	extra := filepath.Join(filepath.Dir(p), "tls-roots.pem")
+	if err := roots.WriteExtra(extra, roots.Embedded()[:1]); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(extra); fi.Mode().Perm() != 0o644 {
+		t.Fatalf("extra file mode %v", fi.Mode())
+	}
+	// A directory root closed: entered, not listed.
+	_ = os.Chmod(filepath.Dir(p), 0o700)
+	if err := roots.WriteSettings(p, want); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(filepath.Dir(p)); fi.Mode().Perm() != 0o711 {
+		t.Fatalf("closed directory now %v, want 0711", fi.Mode())
+	}
+}
+
+// TestUnreadable: the modes a user other than the owner needs, file and
+// directories above it.
+func TestUnreadable(t *testing.T) {
+	top := t.TempDir()
+	_ = os.Chmod(top, 0o755)
+	_ = os.Chmod(filepath.Dir(top), 0o755)
+	dir := filepath.Join(top, "etc")
+	_ = os.Mkdir(dir, 0o755)
+	f := filepath.Join(dir, "tls-roots.json")
+	_ = os.WriteFile(f, []byte("{}"), 0o644)
+	_ = os.Chmod(f, 0o644)
+	const other = 4242
+	if err := roots.Unreadable(f, other, []int{other}); err != nil {
+		t.Fatalf("0644 in 0755: %v", err)
+	}
+	_ = os.Chmod(f, 0o640)
+	if err := roots.Unreadable(f, other, []int{other}); err == nil || !strings.Contains(err.Error(), f+" is mode -rw-r-----") || !strings.Contains(err.Error(), "no read for uid 4242") {
+		t.Fatalf("0640 root's: %v", err)
+	}
+	if err := roots.Unreadable(f, other, []int{other, os.Getegid()}); err != nil {
+		t.Fatalf("0640, in the group: %v", err)
+	}
+	if err := roots.Unreadable(f, os.Geteuid(), nil); err != nil {
+		t.Fatalf("its owner: %v", err)
+	}
+	_ = os.Chmod(f, 0o644)
+	_ = os.Chmod(dir, 0o750)
+	if err := roots.Unreadable(f, other, []int{other}); err == nil || !strings.Contains(err.Error(), dir+" is mode -rwxr-x---") || !strings.Contains(err.Error(), "no search") {
+		t.Fatalf("in a 0750 directory: %v", err)
+	}
+	_ = os.Chmod(dir, 0o711)
+	if err := roots.Unreadable(f, other, []int{other}); err != nil {
+		t.Fatalf("0711 directory: %v", err)
 	}
 }
