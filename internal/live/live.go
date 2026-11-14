@@ -122,7 +122,7 @@ func (a *Applier) Apply(ctx context.Context) error {
 	type change struct {
 		old, new []byte
 		reload   bool // the process reads it again by itself
-		rereads  bool // a file the process rereads: none of its units waits for it
+		rereads  bool // a file the process rereads and none of its units waits for
 	}
 	changed := map[string][]change{} // service -> changed files
 	failed := map[string]bool{}
@@ -130,6 +130,9 @@ func (a *Applier) Apply(ctx context.Context) error {
 		if failed[f.Service] {
 			continue
 		}
+		// A certificate chain is reread too (spec/cert-pin-v1.md §6), but
+		// its unit waits for it: new, it starts the unit (File.Needed).
+		rereads := f.Reload && !f.Needed
 		old, err := os.ReadFile(f.Path)
 		if err == nil && bytes.Equal(old, f.Content) {
 			// Same content, but the group may have appeared since the file was
@@ -142,9 +145,9 @@ func (a *Applier) Apply(ctx context.Context) error {
 				errs = append(errs, fmt.Errorf("service %s: %s: %w", f.Service, f.Path, err))
 			case fixed && f.Refresh:
 				// A broken service's users: reread, never a restart (Q-1).
-				changed[f.Service] = append(changed[f.Service], change{old, f.Content, true, f.Reload})
+				changed[f.Service] = append(changed[f.Service], change{old, f.Content, true, rereads})
 			case fixed:
-				changed[f.Service] = append(changed[f.Service], change{nil, f.Content, false, f.Reload})
+				changed[f.Service] = append(changed[f.Service], change{nil, f.Content, false, rereads})
 			}
 			continue
 		}
@@ -161,7 +164,7 @@ func (a *Applier) Apply(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("service %s: %s: %w", f.Service, f.Path, err))
 			continue
 		}
-		changed[f.Service] = append(changed[f.Service], change{old, f.Content, f.Reload && old != nil, f.Reload})
+		changed[f.Service] = append(changed[f.Service], change{old, f.Content, f.Reload && old != nil, rereads})
 	}
 
 	for service, cs := range changed {

@@ -64,10 +64,17 @@ func chainLen(chain [][]byte) int {
 // with modern suites for the rest: a probe that REALITY hands to the site
 // meets a server like most others, not one that refuses TLS 1.2.
 func TLSConfig(cert tls.Certificate) *tls.Config {
+	return TLSConfigFor(func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil })
+}
+
+// TLSConfigFor is TLSConfig with the certificate get gives at each
+// handshake: one that changes under the running site, when it is renewed
+// (certfile.Loader).
+func TLSConfigFor(get func(*tls.ClientHelloInfo) (*tls.Certificate, error)) *tls.Config {
 	return &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"h2", "http/1.1"},
+		MinVersion:     tls.VersionTLS12,
+		GetCertificate: get,
+		NextProtos:     []string{"h2", "http/1.1"},
 	}
 }
 
@@ -172,9 +179,16 @@ func Handler(root string) http.Handler {
 
 // Serve serves the site with TLS on ln until ctx ends.
 func Serve(ctx context.Context, ln net.Listener, h http.Handler, cert tls.Certificate, log *slog.Logger) error {
+	return ServeCertificates(ctx, ln, h, func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil }, log)
+}
+
+// ServeCertificates is Serve with the certificate get gives at each
+// handshake (TLSConfigFor).
+func ServeCertificates(ctx context.Context, ln net.Listener, h http.Handler, get func(*tls.ClientHelloInfo) (*tls.Certificate, error),
+	log *slog.Logger) error {
 	srv := &http.Server{
 		Handler:           h,
-		TLSConfig:         TLSConfig(cert),
+		TLSConfig:         TLSConfigFor(get),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelDebug),

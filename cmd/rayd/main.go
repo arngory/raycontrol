@@ -34,6 +34,7 @@ import (
 	"github.com/arngory/raycontrol/internal/api"
 	"github.com/arngory/raycontrol/internal/appmirror"
 	"github.com/arngory/raycontrol/internal/asn"
+	"github.com/arngory/raycontrol/internal/certfile"
 	"github.com/arngory/raycontrol/internal/certs"
 	"github.com/arngory/raycontrol/internal/cloudflare"
 	"github.com/arngory/raycontrol/internal/connlimit"
@@ -474,12 +475,16 @@ type dohListener struct {
 	srv  *http.Server
 	h3   context.CancelFunc // DoH3
 	cert [32]byte
+	// certs is what its handshakes answer with, TCP and QUIC.
+	certs *certfile.Holder
 }
 
 // serveDoH keeps rayd's TLS listener on the socket of every enabled DoH
 // service whose site has a certificate (R3-2); the front passes the
-// connections for the DoH name to it (R2-15). A new certificate restarts the
-// listener.
+// connections for the DoH name to it (R2-15). A new certificate (a
+// renewal, the site's next key) goes to the listener as it runs: new
+// handshakes get it, the connections that are open go on
+// (spec/cert-pin-v1.md §6). One that does not parse leaves the one in use.
 func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func() <-chan struct{}, log *slog.Logger) {
 	running := map[string]*dohListener{}
 	stop := func(name string) {
@@ -515,16 +520,24 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 			}
 			want[svc.Name] = true
 			sum := sha256.Sum256(append(slices.Clone(secrets[provision.SecretTLSChain]), secrets[provision.SecretTLSKey]...))
-			if l := running[svc.Name]; l != nil && l.cert == sum {
+			l := running[svc.Name]
+			if l != nil && l.cert == sum {
 				continue
 			}
-			stop(svc.Name)
 			keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: secrets[provision.SecretTLSKey]})
 			cert, err := tls.X509KeyPair(secrets[provision.SecretTLSChain], keyPEM)
 			if err != nil {
 				log.Error("doh certificate", "service", svc.Name, "err", err)
 				continue
 			}
+			if l != nil {
+				l.certs.Set(cert)
+				l.cert = sum
+				log.Info("doh certificate reloaded", "service", svc.Name)
+				continue
+			}
+			certs := &certfile.Holder{}
+			certs.Set(cert)
 			// The front passes the sockets of the DoH name here (R2-15).
 			ln, err := nikoipc.ListenFD(p.DoHSocket(svc.Name), p.PeerUID(render.FrontUID), log)
 			if err != nil {
@@ -536,7 +549,7 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 			srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute,
 				ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelDebug),
 				TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
-					Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}}}
+					GetCertificate: certs.GetCertificate, NextProtos: []string{"h2", "http/1.1"}}}
 			go func() { _ = srv.ServeTLS(ln, "", "") }()
 			// DoH3: the same handler over QUIC, datagrams from the front (R3-5).
 			h3ctx, h3stop := context.WithCancel(ctx)
@@ -544,12 +557,12 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 				log.Error("doh3 socket", "service", svc.Name, "err", err)
 			} else {
 				go func() {
-					if err := serveHTTP3(h3ctx, pc, cert, h); err != nil {
+					if err := serveHTTP3(h3ctx, pc, certs.GetCertificate, h); err != nil {
 						log.Error("doh3", "service", svc.Name, "err", err)
 					}
 				}()
 			}
-			running[svc.Name] = &dohListener{srv: srv, h3: h3stop, cert: sum}
+			running[svc.Name] = &dohListener{srv: srv, h3: h3stop, cert: sum, certs: certs}
 			log.Info("doh serving", "service", svc.Name)
 		}
 		for name := range running {
@@ -1251,20 +1264,13 @@ func cmdSite(args []string) error {
 		return err
 	}
 	log := logx.New(os.Stderr, slog.LevelInfo)
-	chainPEM, err := os.ReadFile(*chain)
-	if err != nil {
-		return err
-	}
-	keyPEM, err := os.ReadFile(*key)
-	if err != nil {
-		return err
-	}
-	cert, err := site.LoadCertificate(chainPEM, keyPEM, provision.RealityChainMin(), nil)
+	certs, err := loadCertificate(*chain, *key, siteCertificate, log)
 	if err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go certs.Watch(ctx)
 	_ = os.Remove(*socket)
 	ln, err := net.Listen("unix", *socket)
 	if err != nil {
@@ -1273,8 +1279,8 @@ func cmdSite(args []string) error {
 	if err := os.Chmod(*socket, 0o660); err != nil { //nolint:gosec // G302: the REALITY process connects through the group
 		return err
 	}
-	log.Info("serving the site", "socket", *socket, "chain", len(cert.Certificate), "answer", *answer)
-	return site.Serve(ctx, ln, handler, cert, log)
+	log.Info("serving the site", "socket", *socket, "chain", len(certs.Current().Certificate), "answer", *answer)
+	return site.ServeCertificates(ctx, ln, handler, certs.GetCertificate, log)
 }
 
 // cmdNaive serves NaiveProxy (R2-14): TLS 1.3 with X25519MLKEM768 only and
@@ -1306,13 +1312,14 @@ func cmdNaive(args []string) error {
 	if err != nil {
 		return err
 	}
-	cert, err := tls.LoadX509KeyPair(*chain, *key)
+	log := logx.New(os.Stderr, slog.LevelInfo)
+	certs, err := loadCertificate(*chain, *key, nil, log)
 	if err != nil {
 		return err
 	}
-	log := logx.New(os.Stderr, slog.LevelInfo)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go certs.Watch(ctx)
 	ln, err := nikoipc.ListenFD(*socket, *frontUID, log)
 	if err != nil {
 		return err
@@ -1345,7 +1352,7 @@ func cmdNaive(args []string) error {
 			return err
 		}
 		go func() {
-			if err := serveHTTP3(ctx, pc, cert, ns); err != nil {
+			if err := serveHTTP3(ctx, pc, certs.GetCertificate, ns); err != nil {
 				log.Error("naive-quic", "err", err)
 			}
 		}()
@@ -1356,7 +1363,7 @@ func cmdNaive(args []string) error {
 		IdleTimeout:       5 * time.Minute,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelDebug),
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
-			Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}},
+			GetCertificate: certs.GetCertificate, NextProtos: []string{"h2", "http/1.1"}},
 	}
 	go func() {
 		<-ctx.Done()
@@ -1411,10 +1418,11 @@ func cmdRelay(args []string) error {
 }
 
 // serveHTTP3 serves h on QUIC over the front's datagrams until ctx ends:
-// TLS 1.3 with X25519MLKEM768 only, ALPN h3.
-func serveHTTP3(ctx context.Context, pc net.PacketConn, cert tls.Certificate, h http.Handler) error {
+// TLS 1.3 with X25519MLKEM768 only, ALPN h3, the certificate cert gives at
+// each handshake (certfile.Holder).
+func serveHTTP3(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), h http.Handler) error {
 	tlsConf := http3.ConfigureTLSConfig(&tls.Config{MinVersion: tls.VersionTLS13,
-		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, Certificates: []tls.Certificate{cert}})
+		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, GetCertificate: cert})
 	ln, err := quic.ListenEarly(pc, tlsConf, &quic.Config{MaxIdleTimeout: 2 * time.Minute, KeepAlivePeriod: 0})
 	if err != nil {
 		return err
