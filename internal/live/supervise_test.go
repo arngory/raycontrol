@@ -131,3 +131,46 @@ func processAlive(pid int) bool {
 	f := strings.Fields(string(b))
 	return len(f) > 2 && f[2] != "Z"
 }
+
+// A process that exits by itself, as rayd naive and rayd site do when the
+// chain is for another key than the copy they hold (spec/cert-pin-v1.md
+// §6), is started again by the supervisor as by its unit: after
+// RestartSec, with its credentials copied anew.
+func TestSupervisorCopiesKeyAgainAfterExit(t *testing.T) {
+	dir := t.TempDir()
+	run := filepath.Join(dir, "run")
+	secret := filepath.Join(dir, "key")
+	os.WriteFile(secret, []byte("old"), 0o600)
+	d := filepath.Join(run, "a")
+	// It writes down the key it was started with; with the old one it
+	// exits 1 a moment later, with the new one it stays.
+	plan := deploy.Plan{Processes: []deploy.Process{{Unit: "niko-a.service", Dir: d,
+		Args:   []string{"/bin/sh", "-c", `k=$(cat ` + d + `/key); echo "$k" >> ` + dir + `/started; [ "$k" = old ] && sleep 0.2 && exit 1; exec sleep 60`},
+		Copies: [][2]string{{secret, filepath.Join(d, "key")}}}}}
+	var out syncBuffer
+	s := &Supervisor{Log: slog.New(slog.NewTextHandler(&out, nil)), Output: &out,
+		Plan: func(context.Context) (deploy.Plan, error) { return plan, nil }}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	started := func() string {
+		b, _ := os.ReadFile(filepath.Join(dir, "started"))
+		return strings.Join(strings.Fields(string(b)), " ")
+	}
+	for i := 0; started() != "old"; i++ {
+		if i == 200 {
+			t.Fatalf("not started: %q\n%s", started(), out.String())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	// The key changes while the process runs; it exits; the next start
+	// finds the new one.
+	os.WriteFile(secret, []byte("new"), 0o600)
+	for i := 0; !strings.HasSuffix(started(), " new"); i++ {
+		if i == 400 {
+			t.Fatalf("not started again with the new key: %q\n%s", started(), out.String())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
