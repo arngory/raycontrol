@@ -935,9 +935,16 @@ func TestRayspaEarly(t *testing.T) {
 	node := deploy.Build(deploy.Inputs{}, render.DefaultPaths, deploy.DefaultBinaries)
 	for name, p := range map[string]deploy.Plan{"node": node, "relay": deploy.RelayPlan(deploy.DefaultBinaries)} {
 		u := file(p, "/etc/systemd/system/rayspa.service")
+		// No default dependencies (After=sysinit.target basic.target): with
+		// them the unit closes an ordering cycle through cloud-init's
+		// network stage (TestRayspaNoOrderingCycle), and none of what it
+		// is ordered after brings sysinit.target back.
 		head := "[Unit]\nDescription=" + strings.SplitN(strings.SplitN(u, "Description=", 2)[1], "\n", 2)[0] + "\n" +
-			"Wants=network-pre.target\nBefore=network-pre.target\nAfter=nftables.service firewalld.service ufw.service\nStartLimitIntervalSec=0\n\n[Service]\n"
-		if !strings.Contains(u, head) || strings.Contains(u, "network-online") || strings.Contains(u, "rayd.service") {
+			"DefaultDependencies=no\nWants=network-pre.target\nBefore=network-pre.target shutdown.target\nConflicts=shutdown.target\n" +
+			"After=local-fs.target systemd-tmpfiles-setup.service systemd-sysctl.service nftables.service ufw.service\n" +
+			"StartLimitIntervalSec=0\n\n[Service]\n"
+		if !strings.Contains(u, head) || strings.Contains(u, "network-online") || strings.Contains(u, "rayd.service") ||
+			strings.Contains(u, "firewalld") || strings.Contains(u, "sysinit") || strings.Contains(u, "basic.target") {
 			t.Errorf("%s: rayspa's [Unit]:\n%s", name, u)
 		}
 		for _, want := range []string{"Type=notify\n", "NotifyAccess=main\n", "TimeoutStartSec=30s\n", "[Install]\nWantedBy=multi-user.target\n"} {
@@ -947,6 +954,26 @@ func TestRayspaEarly(t *testing.T) {
 		}
 		if err := p.Check(); err != nil {
 			t.Errorf("%s: %v", name, err)
+		}
+		// Its ordering is these lines exactly: one more unit after which
+		// it starts (firewalld keeps its default dependencies), or the
+		// defaults back, fails the check.
+		for _, bad := range [][2]string{
+			{"ufw.service\n", "ufw.service firewalld.service\n"},
+			{"ufw.service\n", "ufw.service sysinit.target\n"},
+			{"DefaultDependencies=no\n", ""},
+			{"DefaultDependencies=no\n", "DefaultDependencies=yes\n"},
+		} {
+			q := p
+			q.Files = slices.Clone(p.Files)
+			for i, f := range q.Files {
+				if f.Path == "/etc/systemd/system/rayspa.service" {
+					q.Files[i].Content = []byte(strings.Replace(string(f.Content), bad[0], bad[1], 1))
+				}
+			}
+			if err := q.Check(); err == nil {
+				t.Errorf("%s: rayspa's unit with %q for %q passed the check", name, bad[1], bad[0])
+			}
 		}
 	}
 	// The rest stay after the network, and may not take rayspa's lines.
@@ -958,6 +985,7 @@ func TestRayspaEarly(t *testing.T) {
 			continue
 		}
 		for l, after := range map[string]string{"Before=network-pre.target": "StartLimitIntervalSec=0\n",
+			"DefaultDependencies=no": "StartLimitIntervalSec=0\n", "Conflicts=shutdown.target": "StartLimitIntervalSec=0\n",
 			"Type=notify": "[Service]\n", "TimeoutStartSec=30s": "[Service]\n"} {
 			bad := node
 			bad.Files = slices.Clone(node.Files)

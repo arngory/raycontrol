@@ -39,6 +39,11 @@ jobs:
         run: shellcheck -x scripts/*.sh install/*.sh test/install/*.sh test/supervise/*.sh test/relay/*.sh test/dns53/*.sh
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+      # rayspa's unit at boot (R4-40): no ordering cycle with cloud-init, the
+      # network managers, sshd and the host firewalls, by systemd-analyze
+      # verify; here it fails instead of skipping without it.
+      - name: rayspa's ordering at boot
+        run: RAYCONTROL_REQUIRE_SYSTEMD_ANALYZE=1 go test -count=1 -run TestRayspaNoOrderingCycle -v ./internal/deploy
       # Built from source with the module's Go: prebuilt binaries made with an
       # older Go refuse to lint a go 1.26 module.
       - name: golangci-lint

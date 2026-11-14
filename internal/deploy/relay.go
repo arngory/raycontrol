@@ -41,7 +41,7 @@ func RelayPlan(bin Binaries) Plan {
 		// is on from sysctl.d by then, and the relay's table, or until its
 		// first snapshot a forward chain that drops (HoldForward), is in.
 		early: true,
-		after: []string{"nftables.service", "firewalld.service", "ufw.service"},
+		after: rayspaAfter,
 		service: append([]string{
 			"User=rayspa", "Group=rayspa",
 			"RuntimeDirectory=rayspa", "RuntimeDirectoryMode=0700",
