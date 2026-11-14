@@ -99,6 +99,14 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl -remote laptop.rcdev remote rotate` | новый клиентский ключ, старый перестаёт работать |
 | `rayctl -remote laptop.rcdev remote whoami` | какое это устройство: ID, пользователь, имя, роль, нода |
 
+`rayctl` для своей машины: Linux — из архива ноды; macOS и FreeBSD — архивы `rayctl-darwin-arm64`,
+`rayctl-darwin-amd64` и `rayctl-freebsd-amd64` (`.tar.gz`) с первого релиза после v0.25.1, под той же подписью
+`SHA256SUMS`. Там работают `remote enroll`, всё с `-remote`, `knock` и `probe`; команды самого сервера (`install`,
+`apply`, `update`, `backup`, `report`, `check`, `debug`, `egress`, `conn-limit`, `service cert`, `relay bundle` и
+другие) отвечают `… works on a Linux node only`. С того же релиза `-remote` не читает файл устройства, открытый
+группе или остальным либо чужой: `chmod 600 ФАЙЛ` (и на Linux). Подробно —
+[10-quickstart-debian13.md](10-quickstart-debian13.md), §7.
+
 ## Сервисы
 
 | Команда | Что делает |

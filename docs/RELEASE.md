@@ -37,7 +37,8 @@ variables → Actions. Без секрета релиз не собираетс�
      существующий тег он не перезаписывает;
    - **тегом**: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. Workflow прогоняет весь CI (`ci.yml`) на этом коммите и собирает `raycontrol-linux-{amd64,arm64}.tar.gz` (`rayd`,
-   `rayspa`, `rayctl`, `xray`, `niko-server`, `slipstream-server`, `ipinfo_lite.mmdb`, `NOTICE`, `VERSIONS`), считает
+   `rayspa`, `rayctl`, `xray`, `niko-server`, `slipstream-server`, `ipinfo_lite.mmdb`, `NOTICE`, `VERSIONS`) и, с
+   первого релиза после v0.25.1, три архива с одним `rayctl` для машины администратора (ниже), считает
    `SHA256SUMS`, подписывает его (trusted comment `raycontrol vX.Y.Z` — по нему `rayctl update` узнаёт версию) и
    публикует релиз с этими файлами и `SHA256SUMS.minisig`. Пока CI не зелёный, ничего не публикуется: v0.16.0 вышел
    по зелёному прогону пулл-реквеста, а CI на `main`, шедший рядом с релизом, был красным.
@@ -60,6 +61,31 @@ variables → Actions. Без секрета релиз не собираетс�
 minisign -Vm SHA256SUMS -P <публичный ключ>
 sha256sum -c SHA256SUMS --ignore-missing
 ```
+
+## `rayctl` для macOS и FreeBSD
+
+С первого релиза после v0.25.1 релиз несёт ещё три архива: `rayctl-darwin-arm64.tar.gz`,
+`rayctl-darwin-amd64.tar.gz` и `rayctl-freebsd-amd64.tar.gz`. В каждом — `rayctl` и `VERSIONS` (тег и коммит): это
+`rayctl` для машины администратора — удалённое управление (`-remote`), `knock`, `probe`. Нода остаётся на Linux;
+команды, которые действуют на самом сервере, там отказывают одной строкой (таблица — `cmd/rayctl/where.go`).
+
+- **Сборка.** Job `rayctl` Release-workflow: кросс-компиляция с Linux, без cgo, тем же toolchain из `go.mod`. Тот же
+  набор на каждом коммите собирает job `rayctl` в CI: там же `go vet` и компиляция тестов `rayctl` и пакетов, которые
+  он импортирует, под darwin (под freebsd — только тесты самого `rayctl`). Собранное под macOS и FreeBSD в этих job
+  не запускается.
+- **Запуск на macOS.** Job `rayctl (macOS, run)` в CI собирает и запускает `rayctl` на runner с macOS и гоняет
+  тесты отказов, прав файла устройства и терминала. Он справочный (`continue-on-error`), пока его не видели
+  зелёным: релиз его не ждёт. На FreeBSD `rayctl` не запускается нигде.
+- **Подпись.** Те же `SHA256SUMS` и подпись minisign, что у архивов ноды: проверяется теми же двумя командами
+  (на macOS — `shasum -a 256 --ignore-missing -c SHA256SUMS`). Бинарник для macOS не подписан сертификатом Apple и
+  не нотаризован; что с этим делать пользователю — в [руководстве](10-quickstart-debian13.md), §7.
+- **Ноды лишних строк не замечают.** `rayctl update` берёт из `SHA256SUMS` строку с полным именем своего архива,
+  `bootstrap.sh` ищет её `grep`-ом; оба куска кода одинаковы во всех релизах с v0.2.0, а сам файл остаётся намного
+  меньше 64 КиБ, которые читает `rayctl`. Проверяют это `TestSumsOfOtherArchives` (`internal/release`),
+  `test/install/minisig.sh` (строка из самого `bootstrap.sh`) и строка CI `upgrade (handoff)`, чей подписанный
+  релиз тоже перечисляет архивы `rayctl`. Имена архивов ноды заморожены по-прежнему (ниже).
+- **Список архивов** — переменная `ARCHIVES` в job `release`: суммы и публикация идут по ней, а не по шаблону
+  имён, так что релиз без одного из архивов не выйдет.
 
 ## Data plane
 
