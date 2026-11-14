@@ -214,13 +214,14 @@ sudo bash bootstrap.sh -relay msk.bundle   # rayspa, пересылка ядро
 journalctl -u rayd-relay                   # точка замера relay: поток от выхода, отчёты
 ```
 
-Обновление relay с v0.26.0 — на его хосте, от root:
+Обновление relay с v0.26.0 — на его хосте, от root. **На настоящем хосте relay оно ни разу не запускалось**
+(только модульные тесты): держите доступ к консоли провайдера.
 
 ```
 sudo rayctl update -check   # версии; откажет ли обновление (SSH-сессия не с адреса администратора relay)
 sudo rayctl update          # релиз проверяется как на ноде; установка relay с /etc/raycontrol/relay.bundle;
                             # не поднялся — откат к прежней версии с прежним снимком периметра
-sudo rayctl update -rollback   # вернуть версию до последнего обновления
+sudo rayctl update -rollback   # вернуть версию до последнего обновления; и после оборванного обновления
 ```
 
 `rayctl update remote|auto` на relay отказывает: у relay нет API rayd для устройств. Relay до v0.26.0 и запасной
