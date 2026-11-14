@@ -79,7 +79,25 @@ func (c *cli) stageRelease(ctx context.Context, o updateOpts, stage, installed s
 		// archive downloaded for nothing.
 		if v == "latest" && !o.force {
 			if l, lerr := f.Latest(ctx, releaseKey); lerr == nil {
+				// Unless latest is a patch release of this one, a patch
+				// release may be out beside it: after a new minor version,
+				// and after a latest that is not newer (GitHub's latest may
+				// be a backport of an older minor version; one request when
+				// latest is this version: release.Fetcher.NewestPatch).
+				p := ""
+				if release.IsRelease(installed) && !nodeupdate.Patch(l, installed) && (o.check || !release.Newer(l, installed)) {
+					p, _ = f.NewestPatch(ctx, releaseKey, installed, l)
+				}
 				switch {
+				case p != "" && !release.Newer(l, installed):
+					// The newest release there is for this node.
+					fmt.Printf("release %s, a patch release of %s, is out; GitHub's latest, %s, is not newer\n", p, installed, l)
+					if o.check {
+						fmt.Printf("installed %s, release %s available: rayctl update\n", installed, p)
+						s.done = true
+						return s, first(p)
+					}
+					l = p
 				case l == installed:
 					fmt.Printf("raycontrol %s is installed, the newest release\n", installed)
 					s.done = true
@@ -88,12 +106,8 @@ func (c *cli) stageRelease(ctx context.Context, o updateOpts, stage, installed s
 					return s, fmt.Errorf("installed %s is newer than the latest release %s; rayctl update -version %s goes back", installed, l, l)
 				case o.check:
 					fmt.Printf("installed %s, release %s available: rayctl update\n", installed, l)
-					// A new minor version: a patch release of this one may be
-					// out too (release.Fetcher.NewestPatch, a few requests).
-					if nodeupdate.Step(l, installed) != "" {
-						if p, _ := f.NewestPatch(ctx, releaseKey, installed); p != "" {
-							fmt.Printf("release %s, the newest patch release of %s, available: rayctl update -version %s\n", p, installed, p)
-						}
+					if p != "" {
+						fmt.Printf("release %s, the newest patch release of %s, available: rayctl update -version %s\n", p, installed, p)
 					}
 					s.done = true
 					return s, first(l)

@@ -381,8 +381,8 @@ func cmdServe(args []string) error {
 				}
 				return v, err
 			}
-			patch := func(ctx context.Context) (string, error) {
-				v, err := f.NewestPatch(ctx, release.PubKey, version)
+			patch := func(ctx context.Context, latest string) (string, error) {
+				v, err := f.NewestPatch(ctx, release.PubKey, version, latest)
 				patchSeen.Store(v)
 				return v, err
 			}
@@ -397,7 +397,9 @@ func cmdServe(args []string) error {
 	if !*supervise {
 		f := &release.Fetcher{Log: fetchLog(log)}
 		latest := func(ctx context.Context) (string, error) { return f.Latest(ctx, release.PubKey) }
-		patch := func(ctx context.Context) (string, error) { return f.NewestPatch(ctx, release.PubKey, version) }
+		patch := func(ctx context.Context, latest string) (string, error) {
+			return f.NewestPatch(ctx, release.PubKey, version, latest)
+		}
 		a := &autoUpdater{st: st, running: version, latest: latest, patch: patch, seen: &latestSeen, seenPatch: &patchSeen, request: nodeupdate.RequestFile,
 			status: nodeupdate.StatusFile, policy: nodeupdate.PolicyFile, now: nodeupdate.LocalNow, tick: 10 * time.Minute, hb: hb, log: log}
 		go a.run(ctx)
@@ -1250,15 +1252,17 @@ func checkDNSZones(ctx context.Context, mon *dnscheck.Monitor, st *store.Store, 
 // -update-check, off unless asked: github.com or a mirror sees the node's
 // address). The loop "update" in rayctl status says what it found; a
 // check that fails is said there too, never as a failure of the node, and
-// a new release goes to the log once. After a newer minor version patch
-// (nil: none) looks for the newest patch release of the running one.
-func checkUpdates(ctx context.Context, fetch, patch func(context.Context) (string, error), running string, period time.Duration, hb *health.Board, log *slog.Logger) {
+// a new release goes to the log once. Unless latest is a patch release of
+// the running one, patch (nil: none) looks for the newest one (newestPatch:
+// latest may be a backport of an older minor version).
+func checkUpdates(ctx context.Context, fetch func(context.Context) (string, error), patch func(context.Context, string) (string, error),
+	running string, period time.Duration, hb *health.Board, log *slog.Logger) {
 	said := ""
 	for {
 		cctx, cancel := context.WithTimeout(ctx, time.Minute)
 		latest, err := fetch(cctx)
 		newest := ""
-		if err == nil && nodeupdate.Step(latest, running) != "" {
+		if err == nil && !nodeupdate.Patch(latest, running) {
 			newest, _ = newestPatch(cctx, latest, running, patch)
 		}
 		cancel()
@@ -1276,6 +1280,12 @@ func checkUpdates(ctx context.Context, fetch, patch func(context.Context) (strin
 			if latest != said {
 				said = latest
 				log.Info("a newer release is out", "latest", latest, "running", running)
+			}
+		case newest != "":
+			hb.Report("update", newest+" is out, a patch release of "+running+" (GitHub's latest, "+latest+", is not newer): rayctl update -version "+newest, nil)
+			if newest != said {
+				said = newest
+				log.Info("a newer release is out", "patch", newest, "latest", latest, "running", running)
 			}
 		default:
 			hb.Report("update", "up to date ("+running+")", nil)

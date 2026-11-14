@@ -27,17 +27,28 @@ const MaxPatchProbes = 8
 // One missing number is stepped over (a release taken down, its fix
 // after it); two in a row end the search, and so does MaxPatchProbes.
 // An error other than a missing release ends it too, with what it found.
-func (f *Fetcher) NewestPatch(ctx context.Context, pubKey, installed string) (string, error) {
+//
+// latest is GitHub's latest release as Latest read it, "" when not
+// known. GitHub's "latest" is not always the highest version: a release
+// can be marked so by hand, and a backport (v0.25.5 after v0.26.1) was
+// marked latest by every release before the workflow chose (RELEASE.md).
+// So the search runs whatever latest is; when latest is installed itself,
+// the common case, only the next number is asked for (one request when
+// there is none): a newer patch with a later fix would be latest.
+func (f *Fetcher) NewestPatch(ctx context.Context, pubKey, installed, latest string) (string, error) {
 	p := parts(installed)
 	if p == nil {
 		return "", fmt.Errorf("%q is not a release", installed)
 	}
-	newest, missed := "", 0
+	newest, missed, gap := "", 0, 2
+	if latest == installed {
+		gap = 1
+	}
 	for n := p[2] + 1; n <= p[2]+MaxPatchProbes; n++ {
 		v := "v" + strconv.Itoa(p[0]) + "." + strconv.Itoa(p[1]) + "." + strconv.Itoa(n)
 		switch err := f.signed(ctx, v, pubKey); {
 		case errors.Is(err, ErrNotFound):
-			if missed++; missed == 2 {
+			if missed++; missed == gap {
 				return newest, nil
 			}
 		case err != nil:

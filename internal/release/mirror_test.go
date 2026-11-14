@@ -138,6 +138,8 @@ func TestCheckRequests(t *testing.T) {
 		want            string
 		github, mirrors int
 	}{
+		{"no new release", []string{"v0.26.0"}, "v0.26.0", false, "", 2 + 1, 0},
+		{"a backport marked latest", []string{"v0.25.5", "v0.26.1"}, "v0.25.5", false, "v0.26.1", 2 + 2 + 1 + 1, 0},
 		{"new minor, no patches", []string{"v0.27.0"}, "v0.27.0", false, "", 2 + 1 + 1, 0},
 		{"new minor, two patches", []string{"v0.26.1", "v0.26.2", "v0.27.0"}, "v0.27.0", false, "v0.26.2", 2 + 2 + 2 + 1 + 1, 0},
 		{"GitHub unreachable", []string{"v0.27.0"}, "v0.27.0", true, "", 0, 2 + 1 + 1},
@@ -149,7 +151,7 @@ func TestCheckRequests(t *testing.T) {
 		if err != nil || latest != c.latest {
 			t.Fatalf("%s: latest %q %v", c.name, latest, err)
 		}
-		got, err := f.NewestPatch(ctx, k.pub, "v0.26.0")
+		got, err := f.NewestPatch(ctx, k.pub, "v0.26.0", latest)
 		if err != nil || got != c.want {
 			t.Errorf("%s: newest patch %q %v, want %q", c.name, got, err, c.want)
 		}

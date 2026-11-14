@@ -279,8 +279,9 @@ func TestAutoStepNewerMinor(t *testing.T) {
 // Once a newer minor version is out, the auto update takes the newest
 // patch release of the running one (what patch finds), and keeps it for
 // GetUpdateStatus; without one it tells of the minor version as before,
-// and of why the patch releases are not known. patch is asked only after
-// a newer minor version: a patch latest is the newest patch already.
+// and of why the patch releases are not known. patch is asked whenever
+// latest is not a patch release of the running one, with that latest:
+// after a newer minor version, and after a latest that is a backport.
 func TestAutoNewestPatch(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -291,12 +292,12 @@ func TestAutoNewestPatch(t *testing.T) {
 	defer st.Close()
 	reqFile, statFile, polFile := filepath.Join(dir, "update-request"), filepath.Join(dir, "status.json"), filepath.Join(dir, "policy.json")
 	nodeupdate.WritePolicy(polFile, nodeupdate.Policy{Remote: "off", Auto: "patch", Window: "03:00-05:00"})
-	latest, patch, probed := "v0.27.0", "v0.26.2", 0
+	latest, patch, probed, asked := "v0.27.0", "v0.26.2", 0, ""
 	var perr error
 	hb := &health.Board{}
 	var seen, seenPatch atomic.Value
 	a := &autoUpdater{st: st, running: "v0.26.0", latest: func(context.Context) (string, error) { return latest, nil },
-		patch: func(context.Context) (string, error) { probed++; return patch, perr }, seen: &seen, seenPatch: &seenPatch,
+		patch: func(_ context.Context, l string) (string, error) { probed++; asked = l; return patch, perr }, seen: &seen, seenPatch: &seenPatch,
 		request: reqFile, status: statFile, policy: polFile, now: time.Now, tick: 10 * time.Minute, hb: hb,
 		log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	detail := func() string {
@@ -344,5 +345,25 @@ func TestAutoNewestPatch(t *testing.T) {
 	latest, probed, s = "v0.26.1", 0, autoState{}
 	if !a.step(ctx, &s, at) || probed != 0 || !strings.Contains(detail(), "v0.26.1 at ") {
 		t.Errorf("patch latest: probed %d, %q", probed, detail())
+	}
+	// A backport marked latest (v0.25.5 after v0.26.1), older than the
+	// node: the search runs all the same, and v0.26.1 is taken.
+	latest, patch, perr, probed, s = "v0.25.5", "v0.26.1", nil, 0, autoState{}
+	if !a.step(ctx, &s, at) || probed != 1 || asked != "v0.25.5" || !strings.Contains(detail(), "v0.26.1 at ") {
+		t.Errorf("backport latest: probed %d with %q, %q", probed, asked, detail())
+	}
+	// Latest is the running version: asked (the next number only, in
+	// NewestPatch); nothing found, up to date; a failure is said.
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{nil, "patch, window 03:00-05:00: up to date (v0.26.0)"},
+		{errors.New("down"), "patch, window 03:00-05:00: no newer release known (v0.26.0; the latest is v0.26.0); newer patch releases of v0.26.0 not known: down"},
+	} {
+		latest, patch, perr, probed, s = "v0.26.0", "", c.err, 0, autoState{}
+		if a.step(ctx, &s, at) || probed != 1 || asked != "v0.26.0" || detail() != c.want {
+			t.Errorf("latest is running: probed %d with %q, %q", probed, asked, detail())
+		}
 	}
 }

@@ -12,7 +12,8 @@ import (
 // rayctl update -check on a node of v0.26.0 with v0.26.1, v0.26.2 and
 // v0.27.0 published, v0.27.0 the latest: it names v0.27.0 and the newest
 // patch release of v0.26, signed as such; a v0.26 that has none gets the
-// one line it always had.
+// one line it always had; a backport marked latest does not hide the
+// node's own patch release.
 func TestStageCheckPatch(t *testing.T) {
 	k := newSigner(t)
 	saved := releaseKey
@@ -22,16 +23,17 @@ func TestStageCheckPatch(t *testing.T) {
 	t.Setenv("RAYCONTROL_MIRRORS", "")
 	out := filepath.Join(t.TempDir(), "handed")
 	published := map[string]map[string][]byte{}
-	for _, v := range []string{"v0.26.1", "v0.26.2", "v0.27.0"} {
+	for _, v := range []string{"v0.25.5", "v0.26.1", "v0.26.2", "v0.27.0"} {
 		published[v] = signedRelease(t, k, v, out)
 	}
 	var hits []string
+	latest := "v0.27.0"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits = append(hits, r.URL.Path)
 		dir, name := filepath.Split(r.URL.Path)
 		v := filepath.Base(dir)
 		if strings.HasSuffix(dir, "/latest/download/") {
-			v = "v0.27.0"
+			v = latest
 		}
 		if b, ok := published[v][name]; ok {
 			w.Write(b)
@@ -69,5 +71,18 @@ func TestStageCheckPatch(t *testing.T) {
 	}
 	if text := check("v0.26.2"); text != "installed v0.26.2, release v0.27.0 available: rayctl update\n" {
 		t.Errorf("v0.26.2:\n%s", text)
+	}
+	// The latest is this version: one request more, for the next number.
+	hits = nil
+	if text := check("v0.27.0"); text != "raycontrol v0.27.0 is installed, the newest release\n" || len(hits) != 3 {
+		t.Errorf("v0.27.0, %d requests %q:\n%s", len(hits), hits, text)
+	}
+	// A backport marked latest, older than the node: the node's own patch
+	// release is named, not "newer than the latest".
+	latest = "v0.25.5"
+	want = "release v0.26.2, a patch release of v0.26.0, is out; GitHub's latest, v0.25.5, is not newer\n" +
+		"installed v0.26.0, release v0.26.2 available: rayctl update\n"
+	if text := check("v0.26.0"); text != want {
+		t.Errorf("backport latest:\n%s\nwant\n%s", text, want)
 	}
 }

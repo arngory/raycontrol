@@ -16,8 +16,8 @@ import (
 )
 
 // autoCheck is how often the auto update asks GitHub for the latest
-// release (and, after a newer minor version, for the patch releases of the
-// running one), give or take 10 %.
+// release (and, unless it is a patch release of the running one, for the
+// patch releases of that), give or take 10 %.
 const autoCheck = 6 * time.Hour
 
 // autoUpdater is the node's own update to a patch release
@@ -26,17 +26,20 @@ const autoCheck = 6 * time.Hour
 // window, at a moment of its own (nodes in one zone do not all update at
 // its start) still in it, writes a request for the newest patch release of
 // this minor version; root's unit does the update. That one is the latest
-// release, or, once a newer minor version is out (which it only tells of),
-// what patch finds. A version whose update
+// release when it is a patch release of this one, otherwise what patch
+// finds: after a newer minor version (which it only tells of), and after a
+// latest that is not newer (GitHub's latest may be a backport of an older
+// minor version). A version whose update
 // failed is not asked for again, but for a failure that left the node as
 // it was (the download, say), a day later; a newer one, or root, moves on.
 type autoUpdater struct {
 	st      *store.Store
 	running string
 	latest  func(context.Context) (string, error)
-	// patch finds the newest patch release of running newer than it
-	// (release.Fetcher.NewestPatch); nil: none looked for.
-	patch     func(context.Context) (string, error)
+	// patch finds the newest patch release of running newer than it,
+	// given the latest release (release.Fetcher.NewestPatch); nil: none
+	// looked for.
+	patch     func(ctx context.Context, latest string) (string, error)
 	seen      *atomic.Value // the latest release, for GetUpdateStatus
 	seenPatch *atomic.Value // the newest patch release of running; nil: not kept
 
@@ -52,7 +55,7 @@ type autoState struct {
 	last    string // the latest release seen
 	lerr    error  // why last is not known
 	patch   string // the newest patch release of running seen, "" when none
-	perr    error  // why patch may not be known, after a newer minor version
+	perr    error  // why patch may not be known
 	checked time.Time
 	due     time.Time // the moment in this window, once in it
 }
@@ -112,6 +115,10 @@ func (a *autoUpdater) step(ctx context.Context, s *autoState, t time.Time) (soon
 			}
 			a.hb.Report("auto-update", d, nil)
 			s.due = time.Time{}
+		case s.patch == "" && s.perr != nil:
+			a.hb.Report("auto-update", "patch, window "+p.Window+": no newer release known ("+a.running+"; the latest is "+s.last+
+				"); newer patch releases of "+a.running+" not known: "+s.perr.Error(), nil)
+			s.due = time.Time{}
 		case s.patch == "":
 			a.hb.Report("auto-update", "patch, window "+p.Window+": up to date ("+a.running+")", nil)
 			s.due = time.Time{}
@@ -151,15 +158,18 @@ func (a *autoUpdater) step(ctx context.Context, s *autoState, t time.Time) (soon
 }
 
 // newestPatch is the newest patch release of running newer than it, with
-// latest the latest release: latest itself when it is one; after a newer
-// minor or major version, what probe finds (it asks GitHub again; nil:
-// none); "" otherwise.
-func newestPatch(ctx context.Context, latest, running string, probe func(context.Context) (string, error)) (string, error) {
+// latest the latest release: latest itself when it is one; otherwise what
+// probe finds (it asks GitHub again; nil: none), after a newer minor or
+// major version and after a latest that is not newer than running alike:
+// GitHub's latest may be a backport (v0.25.5 published after v0.26.1),
+// and a node of v0.26.0 would never see v0.26.1. With latest == running
+// probe asks for one number only (release.Fetcher.NewestPatch).
+func newestPatch(ctx context.Context, latest, running string, probe func(context.Context, string) (string, error)) (string, error) {
 	switch {
 	case nodeupdate.Patch(latest, running):
 		return latest, nil
-	case nodeupdate.Step(latest, running) != "" && probe != nil:
-		return probe(ctx)
+	case probe != nil:
+		return probe(ctx, latest)
 	}
 	return "", nil
 }
