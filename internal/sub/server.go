@@ -55,6 +55,10 @@ type Server struct {
 	// counts on from the old seq: a client that took the clock's from the
 	// new rayd meanwhile would refuse every answer of the old one (review).
 	ClockSeqAfter time.Time
+	// PinsSince: pins made from then on (a site's next key or a switch,
+	// tls_next_at) reach no line before ClockSeqAfter, for the same
+	// rollback (spec/cert-pin-v1.md §8). rayd: its start. Zero: none held.
+	PinsSince time.Time
 	// Probe, when set, serves the channel probes (spec/probe-v1.md) on the
 	// same endpoint, and the subscription says so.
 	Probe *probe.Server
@@ -227,6 +231,8 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 	if err != nil {
 		return Envelope{}, err
 	}
+	m.Now = now // what depends on the time (a pin of an hour) follows the subscription's
+	m.PinsSince, m.PinsAfter = s.PinsSince, s.ClockSeqAfter
 	u, err := s.Store.UserByName(ctx, userName)
 	if err != nil {
 		return Envelope{}, err
@@ -406,6 +412,25 @@ func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) erro
 			}
 			p.Profiles[i].Via = via
 		}
+	}
+	return nil
+}
+
+// SeqToClock moves the stored seq up to the clock in milliseconds, so that
+// the next answer is above every one a client has seen. For a database put
+// back by rayctl restore: it holds the count of the day of the backup, and
+// rayd keeps to the stored count for its first minutes (ClockSeqAfter),
+// where clients would drop its answers (subscription-v1 §3). Not for an
+// update's rollback: there the old count is the right one.
+func SeqToClock(ctx context.Context, st *store.Store, now time.Time) error {
+	var seq uint64
+	if b, err := st.GetSetting(ctx, settingSeq); err == nil {
+		seq, _ = strconv.ParseUint(string(b), 10, 64)
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	if clock := uint64(max(now.UnixMilli(), 0)); clock > seq {
+		return st.SetSetting(ctx, settingSeq, []byte(strconv.FormatUint(clock, 10)))
 	}
 	return nil
 }

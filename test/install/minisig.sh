@@ -91,6 +91,46 @@ version_lt v0.9.0 v0.10.0 || { echo "FAIL v0.9.0 < v0.10.0"; failures=$((failure
 ! version_lt v0.10.0 v0.9.0 || { echo "FAIL v0.10.0 > v0.9.0"; failures=$((failures + 1)); }
 ! version_lt v1.0.0 v1.0.0 || { echo "FAIL v1.0.0 == v1.0.0"; failures=$((failures + 1)); }
 
+# A release lists more archives than a node takes: the other architecture's
+# and rayctl for other systems (rayctl-darwin-*, rayctl-freebsd-*), in the
+# one signed SHA256SUMS. bootstrap.sh checks its archive against its own
+# line, wherever it stands. The check is bootstrap.sh's own line, run as it
+# is written there (the same in every release since v0.2.0).
+pick="$(grep -F 'SHA256SUMS | sha256sum -c -' "$here/../../install/bootstrap.sh")"
+[[ $(grep -c . <<<"$pick") -eq 1 ]] || die "bootstrap.sh's checksum line was not found"
+pick="${pick%%|| die*}"
+archives=(raycontrol-linux-amd64.tar.gz raycontrol-linux-arm64.tar.gz
+	rayctl-darwin-arm64.tar.gz rayctl-darwin-amd64.tar.gz rayctl-freebsd-amd64.tar.gz)
+mkdir release
+for f in "${archives[@]}"; do
+	printf 'the archive %s\n' "$f" >"release/$f"
+done
+(cd release && sha256sum "${archives[@]}" >SHA256SUMS)
+sums() {
+	local want=$1 name=$2 tmp=$3 tarball=$4 got
+	# shellcheck disable=SC2034 # tmp and tarball are read by bootstrap.sh's line
+	if eval "$pick" >/dev/null 2>&1; then got=pass; else got=fail; fi
+	if [[ $got == "$want" ]]; then
+		echo "ok   $name: $got"
+	else
+		echo "FAIL $name: $got, want $want"
+		failures=$((failures + 1))
+	fi
+}
+sums pass "amd64 among five archives" release raycontrol-linux-amd64.tar.gz
+sums pass "arm64 among five archives" release raycontrol-linux-arm64.tar.gz
+cp -r release last && tac release/SHA256SUMS >last/SHA256SUMS
+sums pass "the node's line last" last raycontrol-linux-amd64.tar.gz
+cp -r release other && printf 'x' >>other/rayctl-darwin-arm64.tar.gz && rm other/rayctl-freebsd-amd64.tar.gz
+sums pass "another archive changed, one not there" other raycontrol-linux-amd64.tar.gz
+cp -r release changed-archive && printf 'x' >>changed-archive/raycontrol-linux-amd64.tar.gz
+sums fail "the node's archive changed" changed-archive raycontrol-linux-amd64.tar.gz
+sums pass "the other architecture's is not" changed-archive raycontrol-linux-arm64.tar.gz
+cp -r release swapped && cp release/rayctl-darwin-amd64.tar.gz swapped/raycontrol-linux-amd64.tar.gz
+sums fail "another archive under the node's name" swapped raycontrol-linux-amd64.tar.gz
+cp -r release none && grep ' rayctl-' release/SHA256SUMS >none/SHA256SUMS
+sums fail "no line for the node's archive" none raycontrol-linux-amd64.tar.gz
+
 [[ $failures -eq 0 ]] || die "$failures checks failed"
 echo "minisign verification: all checks passed"
 

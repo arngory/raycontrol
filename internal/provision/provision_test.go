@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
@@ -349,5 +350,38 @@ func TestDoHService(t *testing.T) {
 	}
 	if _, ok := ServiceRotation(tcpOnly); ok || strings.Contains(tcpOnly.Settings, "udp_rotation") || len(tcpOnly.Secrets[SecretPortKey]) != 0 {
 		t.Errorf("a TCP-only service has a UDP schedule: %s", tcpOnly.Settings)
+	}
+	// DoH3 has a key of QUIC stateless resets as naive-quic has: made with
+	// the service, given once to a service from before the key, the same
+	// from then on. REALITY, which serves no QUIC of ours, has none.
+	resetKey := func(name string) []byte {
+		t.Helper()
+		svc, err := st.ServiceByName(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		secrets, err := st.ServiceSecrets(ctx, svc.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		k, err := EnsureQUICResetKey(ctx, st, svc, secrets)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	made := resetKey("doh")
+	if len(made) != 32 || !bytes.Equal(made, resetKey("doh")) || bytes.Equal(made, resetKey("naive")) {
+		t.Fatalf("a new DoH service's key of stateless resets: %d bytes", len(made))
+	}
+	if err := st.UpdateService(ctx, d.ID, store.ServiceUpdate{Delete: []string{SecretQUICReset}}); err != nil {
+		t.Fatal(err)
+	}
+	given := resetKey("doh")
+	if len(given) != 32 || bytes.Equal(given, made) || !bytes.Equal(given, resetKey("doh")) {
+		t.Fatalf("an old DoH service's key of stateless resets: %d bytes", len(given))
+	}
+	if k := resetKey("reality"); k != nil {
+		t.Fatal("REALITY has a key of QUIC stateless resets")
 	}
 }

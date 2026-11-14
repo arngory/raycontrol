@@ -64,10 +64,17 @@ func chainLen(chain [][]byte) int {
 // with modern suites for the rest: a probe that REALITY hands to the site
 // meets a server like most others, not one that refuses TLS 1.2.
 func TLSConfig(cert tls.Certificate) *tls.Config {
+	return TLSConfigFor(func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil })
+}
+
+// TLSConfigFor is TLSConfig with the certificate get gives at each
+// handshake: one that changes under the running site, when it is renewed
+// (certfile.Loader).
+func TLSConfigFor(get func(*tls.ClientHelloInfo) (*tls.Certificate, error)) *tls.Config {
 	return &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"h2", "http/1.1"},
+		MinVersion:     tls.VersionTLS12,
+		GetCertificate: get,
+		NextProtos:     []string{"h2", "http/1.1"},
 	}
 }
 
@@ -107,6 +114,7 @@ func Responder(mode, root string) (http.Handler, error) {
 	case AnswerSilent:
 		held := make(chan struct{}, silentMax)
 		return http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			giveUpBody(r)
 			select {
 			case held <- struct{}{}:
 				defer func() { <-held }()
@@ -129,6 +137,23 @@ func Responder(mode, root string) (http.Handler, error) {
 		return Handler(root), nil
 	}
 	return nil, fmt.Errorf("site answer %q: want one of %s", mode, strings.Join(Answers, ", "))
+}
+
+// giveUpBody lets go of a request's body before the request is held: an
+// answer of the site's never reads one, and one it holds unread is the
+// client's flow-control window of the process's memory (ConnWindow a
+// connection over HTTP/2, for SilentHold) at no cost to a client without a
+// password. The other answers return at once, which lets go of it too.
+//
+// Over HTTP/2 what came is dropped and what comes is not kept: the
+// connection's window goes back as it comes, the stream's does not, so the
+// client can send a stream's window and no more. Over HTTP/3 the client is
+// told to stop sending. An HTTP/1 body is not read at all: it waits in the
+// socket, and closing it would read it.
+func giveUpBody(r *http.Request) {
+	if r.ProtoMajor >= 2 && r.Body != nil {
+		_ = r.Body.Close()
+	}
 }
 
 // Handler serves the site's files: no directory listings, its own 404 page
@@ -172,13 +197,16 @@ func Handler(root string) http.Handler {
 
 // Serve serves the site with TLS on ln until ctx ends.
 func Serve(ctx context.Context, ln net.Listener, h http.Handler, cert tls.Certificate, log *slog.Logger) error {
-	srv := &http.Server{
-		Handler:           h,
-		TLSConfig:         TLSConfig(cert),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelDebug),
-	}
+	return ServeCertificates(ctx, ln, h, func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil }, log)
+}
+
+// ServeCertificates is Serve with the certificate get gives at each
+// handshake (TLSConfigFor).
+func ServeCertificates(ctx context.Context, ln net.Listener, h http.Handler, get func(*tls.ClientHelloInfo) (*tls.Certificate, error),
+	log *slog.Logger) error {
+	srv := HTTPServer(h, IdleTimeout)
+	srv.TLSConfig = TLSConfigFor(get)
+	srv.ErrorLog = slog.NewLogLogger(log.Handler(), slog.LevelDebug)
 	go func() {
 		<-ctx.Done()
 		_ = srv.Close()

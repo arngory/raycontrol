@@ -136,7 +136,7 @@ func TestHandoffForce(t *testing.T) {
 	for _, force := range []bool{false, true} {
 		argsFile := filepath.Join(t.TempDir(), "args")
 		t.Setenv("RAYCTL_TEST_ARGS", argsFile)
-		handed, err := handoff(r, t.TempDir(), "v0.21.0", true, force)
+		handed, err := handoff(r, t.TempDir(), "v0.21.0", "", true, force)
 		if !handed || err != nil {
 			t.Fatalf("force %v: %v %v", force, handed, err)
 		}

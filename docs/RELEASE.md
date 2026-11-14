@@ -37,7 +37,8 @@ variables → Actions. Без секрета релиз не собираетс�
      существующий тег он не перезаписывает;
    - **тегом**: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. Workflow прогоняет весь CI (`ci.yml`) на этом коммите и собирает `raycontrol-linux-{amd64,arm64}.tar.gz` (`rayd`,
-   `rayspa`, `rayctl`, `xray`, `niko-server`, `slipstream-server`, `ipinfo_lite.mmdb`, `NOTICE`, `VERSIONS`), считает
+   `rayspa`, `rayctl`, `xray`, `niko-server`, `slipstream-server`, `ipinfo_lite.mmdb`, `NOTICE`, `VERSIONS`) и, с
+   v0.26.0, три архива с одним `rayctl` для машины администратора (ниже), считает
    `SHA256SUMS`, подписывает его (trusted comment `raycontrol vX.Y.Z` — по нему `rayctl update` узнаёт версию) и
    публикует релиз с этими файлами и `SHA256SUMS.minisig`. Пока CI не зелёный, ничего не публикуется: v0.16.0 вышел
    по зелёному прогону пулл-реквеста, а CI на `main`, шедший рядом с релизом, был красным.
@@ -61,13 +62,41 @@ minisign -Vm SHA256SUMS -P <публичный ключ>
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 
+## `rayctl` для macOS и FreeBSD
+
+С v0.26.0 релиз несёт ещё три архива: `rayctl-darwin-arm64.tar.gz`,
+`rayctl-darwin-amd64.tar.gz` и `rayctl-freebsd-amd64.tar.gz`. В каждом — `rayctl` и `VERSIONS` (тег и коммит): это
+`rayctl` для машины администратора — удалённое управление (`-remote`), `knock`, `probe`. Нода остаётся на Linux;
+команды, которые действуют на самом сервере, там отказывают одной строкой (таблица — `cmd/rayctl/where.go`).
+
+- **Сборка.** Job `rayctl` Release-workflow: кросс-компиляция с Linux, без cgo, тем же toolchain из `go.mod`. Тот же
+  набор на каждом коммите собирает job `rayctl` в CI: там же `go vet` и компиляция тестов `rayctl` и пакетов, которые
+  он импортирует, под darwin (под freebsd — только тесты самого `rayctl`). Собранное под macOS и FreeBSD в этих job
+  не запускается.
+- **Запуск на macOS.** Job `rayctl (macOS, run)` в CI собирает и запускает `rayctl` на runner с macOS и гоняет
+  тесты отказов, прав файла устройства и терминала. Он справочный (`continue-on-error`, не дольше 15 минут); на
+  ветке перед v0.26.0 он зелёный (macOS arm64, 1 мин 19 с). Release-workflow его не запускает, так что релиз не ждёт
+  runner с macOS: у job стоит `if: github.workflow != 'Release'`, а вызванный workflow видит в `github.workflow` имя
+  вызвавшего. На FreeBSD `rayctl` не запускается нигде.
+- **Подпись.** Те же `SHA256SUMS` и подпись minisign, что у архивов ноды: проверяется теми же двумя командами
+  (на macOS — `shasum -a 256 --ignore-missing -c SHA256SUMS`). Бинарник для macOS не подписан сертификатом Apple и
+  не нотаризован; что с этим делать пользователю — в [руководстве](10-quickstart-debian13.md), §7.
+- **Ноды лишних строк не замечают.** `rayctl update` берёт из `SHA256SUMS` строку с полным именем своего архива,
+  `bootstrap.sh` ищет её `grep`-ом; оба куска кода одинаковы во всех релизах с v0.2.0, а сам файл остаётся намного
+  меньше 64 КиБ, которые читает `rayctl`. Проверяют это `TestSumsOfOtherArchives` (`internal/release`),
+  `test/install/minisig.sh` (строка из самого `bootstrap.sh`) и строка CI `upgrade (handoff)`, чей подписанный
+  релиз тоже перечисляет архивы `rayctl`. Имена архивов ноды заморожены по-прежнему (ниже).
+- **Список архивов** — переменная `ARCHIVES` в job `release`: суммы и публикация идут по ней, а не по шаблону
+  имён, так что релиз без одного из архивов не выйдет.
+
 ## Data plane
 
 Релиз raycontrol несёт data plane в том же архиве и под той же подписью: Xray, собранный из закреплённого коммита
-форка, и niko-server из релиза `vX.Y.Z` в [`arngory/niko-server`](https://github.com/arngory/niko-server/releases) (сейчас `v0.11.0`). niko-server
-сверяется с SHA-256, закреплёнными в `deploy/versions.env` (`scripts/niko-server.sh`). Версии и коммиты компонентов —
-в файле `VERSIONS` архива. `rayctl install -dataplane` кладёт их в `/usr/local/libexec/raycontrol/` через журнал
-установки. Обновление версий — отдельный коммит в `deploy/versions.env` (новые хеши) и новый релиз.
+форка, и niko-server из релиза в [`arngory/niko-server`](https://github.com/arngory/niko-server/releases); его тег —
+`NIKO_SERVER_TAG` в `deploy/versions.env`. niko-server сверяется с SHA-256, закреплёнными там же
+(`scripts/niko-server.sh`). Версии и коммиты компонентов — в файле `VERSIONS` архива. `rayctl install -dataplane`
+кладёт их в `/usr/local/libexec/raycontrol/` через журнал установки. Обновление версий — отдельный коммит в
+`deploy/versions.env` (новые хеши) и новый релиз.
 
 ## Обновление ноды
 

@@ -17,9 +17,12 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [07-questions.md](07-questions.md) | Вопросы перед реализацией (история; все закрыты). |
 | [08-decisions.md](08-decisions.md) | **Принятые решения** — главнее остальных документов при расхождении. |
 | [09-observability.md](09-observability.md) | Логи, телеметрия (её нет), отчёт для issue, QA, обезличенные идентификаторы. |
-| [10-quickstart-debian13.md](10-quickstart-debian13.md) | Нода с нуля на Debian 13 с Cloudflare и выдача подписки клиенту. |
+| [10-quickstart-debian13.md](10-quickstart-debian13.md) | Полное руководство по развёртыванию на Debian 13: требования, проверка релиза и хоста, установка, сервисы, что выключено по умолчанию, пользователи и приглашения, ping через VPN, эксплуатация (обновление, relay, копии), неполадки, чек-лист. |
 | [11-asn-sources.md](11-asn-sources.md) | Источники IP → ASN для сводки клиентов: базы и API, их лицензии и условия. |
 | [15-traffic.md](15-traffic.md) | Какой трафик несёт каждый профиль (TCP, UDP, DNS, ICMP) и в каком виде; mtr через туннель. |
+| [16-cronet-build.md](16-cronet-build.md) | Своя сборка libcronet и naive: что собирается, замеры, раннер с пределами по потокам и памяти, диск, ccache. |
+| [17-naive-default.md](17-naive-default.md) | naive как профиль по умолчанию: разбор ноды и клиента, дефекты, UDP и не-TCP трафик, порядок работ, решения владельца. |
+| [18-platforms-and-hosts.md](18-platforms-and-hosts.md) | `rayctl` и нода вне Linux, LXC и OpenVZ, нода без публичного адреса, порты при установке, слой абстракции платформы: факты, варианты, цена. |
 | [cheatsheet.md](cheatsheet.md) | Все команды `rayctl` на одной странице. |
 | [spec/spa-v2.md](spec/spa-v2.md) | Формат SPA v2 и пакета регистрации устройства (заморожен). |
 | [spec/subscription-v1.md](spec/subscription-v1.md) | Подписка: запрос, подписи, ссылки с параметрами `niko-*` (заморожена). |

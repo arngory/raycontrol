@@ -8,7 +8,6 @@ package probe
 import (
 	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -24,8 +23,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/sys/unix"
 
 	"github.com/arngory/raycontrol/internal/summary"
 )
@@ -459,30 +456,6 @@ func ConnContext(ctx context.Context, c net.Conn) context.Context {
 func Conn(ctx context.Context) net.Conn {
 	c, _ := ctx.Value(connKey{}).(net.Conn)
 	return c
-}
-
-func tcpInfo(ctx context.Context) *TCPInfo {
-	c, _ := ctx.Value(connKey{}).(net.Conn)
-	if tc, ok := c.(*tls.Conn); ok {
-		c = tc.NetConn()
-	}
-	tcp, ok := c.(*net.TCPConn)
-	if !ok {
-		return nil
-	}
-	raw, err := tcp.SyscallConn()
-	if err != nil {
-		return nil
-	}
-	var info *unix.TCPInfo
-	_ = raw.Control(func(fd uintptr) {
-		info, err = unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
-	})
-	if err != nil || info == nil {
-		return nil
-	}
-	return &TCPInfo{RTTus: info.Rtt, RTTVarus: info.Rttvar, MinRTTus: info.Min_rtt, Retrans: info.Total_retrans,
-		DeliveryBps: info.Delivery_rate * 8, Cwnd: info.Snd_cwnd, PMTU: info.Pmtu}
 }
 
 // report takes a client's summary of the network it asks from: directly,

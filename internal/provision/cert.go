@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/site"
@@ -17,13 +18,32 @@ type Certificate struct {
 	Names       []string // the site's names in use, all covered
 	NotAfter    time.Time
 	MissingNext []string // names of REALITY's next switch it does not cover
+	// Unpinned: the lines of the services under the site carried the pins
+	// of the node's keys (SiteKeyPins), and this certificate has another
+	// key. Clients fail their pin until they get their subscription again,
+	// whose lines carry none now (spec/cert-pin-v1.md §7). Only with force:
+	// without it such a certificate is refused.
+	Unpinned bool
 }
 
 // SetCertificate puts the operator's own certificate on a site in place of
 // one from ACME: a CA of their own, another ACME client, a test CA. It must
 // pair with the key, be valid now, cover every name the site serves and be
 // long enough for REALITY (R2-8), as the site process checks it.
-func SetCertificate(ctx context.Context, st *store.Store, name string, chainPEM, keyPEM []byte, now time.Time) (Certificate, error) {
+//
+// The site is marked as having the operator's certificate: the node cannot
+// promise the key of the one after it, so the lines of naive, hy2-masq and
+// DoH under the site carry no pins from now (spec/cert-pin-v1.md §7), and a
+// key change the operator asked for is off. The next key stays: the
+// certificate manager takes it when it issues for the site again
+// (PlanSiteIssue).
+//
+// A certificate whose key is neither the one in use nor the next one, on a
+// site whose lines carry pins, would cut every client that holds them until
+// it fetches its subscription: store.ErrPrecondition unless force.
+func SetCertificate(ctx context.Context, st *store.Store, name string, chainPEM, keyPEM []byte, now time.Time, force bool) (Certificate, error) {
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
 	var out Certificate
 	svc, err := st.ServiceByName(ctx, name)
 	if err != nil {
@@ -69,8 +89,27 @@ func SetCertificate(ctx context.Context, st *store.Store, name string, chainPEM,
 			return out, err
 		}
 	}
+	svc, secrets, err := st.ServiceWithSecrets(ctx, svc.ID)
+	if err != nil {
+		return out, err
+	}
+	// The keys clients were promised: the one in use and the next. Not the
+	// one before, which is in the lists of an hour only.
+	pinned := SiteKeyPins(svc, secrets, now)
+	out.Unpinned = len(pinned) > 0 && !slices.Contains(pinned[:2], leafPin(leaf))
+	if out.Unpinned && !force {
+		return Certificate{}, fmt.Errorf("%w: the links of naive, hy2-masq and DoH under %s carry the pins of the node's keys, and this "+
+			"certificate has another key: every client that holds them would refuse it until it fetches its subscription again "+
+			"(a client that goes through one of these profiles notices by itself, after minutes; the others when they next fetch). "+
+			"Import it anyway with -force (rayctl service cert %s -chain F -key F -force)", store.ErrPrecondition, name, name)
+	}
+	settings, err := setFields(svc.Settings, map[string]any{"tls_imported": true, "tls_rotate_at": nil, "tls_rotate_pin": nil,
+		"tls_rotate_how": nil, "tls_prev_pin": nil, "tls_prev_until": nil})
+	if err != nil {
+		return out, err
+	}
 	// Together, as the certificate manager stores them.
-	if err := st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Set: map[string][]byte{
+	if err := st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: settings, Set: map[string][]byte{
 		SecretTLSKey: keyDER, SecretTLSChain: chain.Bytes(),
 	}}); err != nil {
 		return out, err

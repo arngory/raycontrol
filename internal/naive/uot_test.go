@@ -57,6 +57,7 @@ func tunnelServer(t *testing.T, setup func(*Server), opts ...func(*http.Transpor
 	h := &Server{Users: &Users{Path: users}, Answer: answer, Dial: d.DialContext, Log: slog.New(slog.DiscardHandler)}
 	setup(h)
 	srv := httptest.NewUnstartedServer(h)
+	srv.Config = h.HTTPServer() // the limits of a connection as the service has them
 	srv.EnableHTTP2 = true
 	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}}
 	srv.StartTLS()

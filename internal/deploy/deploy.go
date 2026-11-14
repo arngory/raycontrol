@@ -460,7 +460,10 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 				"ExecStart=" + bin.Rayd + " naive -answer " + answer + " -users " + path.Join(dir, render.NaiveUsers) +
 					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name) +
 					" -quic-socket " + p.NaiveQUICSocket(s.Name) + " -stats-socket " + p.StatsSocket(s.Name) +
-					" -conn-limit " + path.Join(dir, render.NaiveConnLimit) + probeArg + frontUID + icmp,
+					" -conn-limit " + path.Join(dir, render.NaiveConnLimit) +
+					// The key of QUIC stateless resets, read at the start
+					// from the service's own file; naive starts without it.
+					" -reset-key " + path.Join(dir, render.NaiveQUICReset) + probeArg + frontUID + icmp,
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
 				"ReadWritePaths=" + path.Dir(p.NaiveSocket(s.Name)),

@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
-	"golang.org/x/sys/unix"
 
 	pins "github.com/arngory/raycontrol/deploy"
 	"github.com/arngory/raycontrol/internal/naive"
@@ -45,6 +44,30 @@ const (
 
 // Schema is the niko-server config schema version raycontrol writes.
 const Schema = 1
+
+// The idle times of QUIC behind the front, from one number: the front
+// routes a flow's datagrams by the client's address only while it remembers
+// the flow, and what comes after it forgot one (no Initial with a name in
+// it) is dropped without a word.
+const (
+	// QUICIdle is how long rayd's own QUIC servers (DoH3, naive-quic) keep
+	// a connection that neither side sends on; they send no keepalive of
+	// their own. Two minutes, as it has been: a connection's idle time is
+	// the lesser of this and the client's own (Chromium asks for 30 s), so
+	// clients see no change.
+	QUICIdle = 2 * time.Minute
+	// FrontUDPIdle is how long the front remembers a flow with no datagram
+	// either way. It must be longer than any QUIC idle time behind it, or
+	// a connection quiet for the time between the two is alive at both
+	// ends and lost in the middle: the client's next packets go nowhere
+	// until its own idle time ends. Longer by frontUDPMargin: a client that
+	// sends just before its idle time ends still finds the flow, its
+	// retransmissions too. (Hysteria2's QUIC idle is niko-server's, 60 s.)
+	// A flow costs the front a map entry, and only a classified Initial
+	// makes one. niko-server takes 5 s to 10 min here.
+	FrontUDPIdle   = QUICIdle + frontUDPMargin
+	frontUDPMargin = 30 * time.Second
+)
 
 // Paths are the directories the renderer refers to.
 type Paths struct {
@@ -113,6 +136,11 @@ type Model struct {
 	Sets map[int64]map[int64]store.Credential
 	// Now dates the generated site; zero is the time of rendering.
 	Now time.Time
+	// PinsSince and PinsAfter hold back new pins (sub.Server.PinsSince):
+	// a site whose pins changed at PinsSince or later (its tls_next_at)
+	// gives its lines no niko-pin before PinsAfter. Zero PinsSince: none
+	// held.
+	PinsSince, PinsAfter time.Time
 	// FrontTCP puts TCP 443 behind the niko-server front (tcpmux, v0.2,
 	// docs/08-decisions.md R2-15): REALITY on a unix socket with PROXY v2,
 	// DoH and naive as passed sockets. Collect sets it; without it REALITY
@@ -172,16 +200,6 @@ func DNSAuthHint(s store.Service) string { return provision.DNSAuthHint(s) }
 // DNSAuthKeys is the file name of a DNS tunnel's device keys.
 const DNSAuthKeys = "auth.keys"
 
-// HostIPv6 reports whether this host can open IPv6 sockets.
-func HostIPv6() bool {
-	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
-	if err != nil {
-		return false
-	}
-	_ = unix.Close(fd)
-	return true
-}
-
 // Collect reads the model from the store and creates missing inner
 // credentials for users who reach a service behind the inner stage.
 func Collect(ctx context.Context, st *store.Store) (Model, error) {
@@ -201,7 +219,12 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 	if m.Domain, err = provision.Domain(ctx, st); err != nil {
 		return m, err
 	}
-	services, err := st.ListServices(ctx)
+	// Settings and secrets as one read: a subscription built across a
+	// change of both (the operator's certificate replacing the node's)
+	// must not pair the settings of before with the chain of after, and
+	// publish the pins of a certificate marked as not the node's own
+	// (spec/cert-pin-v1.md §7).
+	services, allSecrets, err := st.ServicesWithSecrets(ctx)
 	if err != nil {
 		return m, err
 	}
@@ -210,13 +233,17 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 		if !s.Enabled {
 			continue
 		}
-		secrets, err := st.ServiceSecrets(ctx, s.ID)
-		if err != nil {
-			return m, err
-		}
+		secrets := allSecrets[s.ID]
 		// dnsseal-v1: a dnstt service from before it gets its key now.
 		if s.Kind == "dnstt" {
 			if secrets[provision.SecretSealKey], err = provision.EnsureSealKey(ctx, st, s, secrets); err != nil {
+				return m, err
+			}
+		}
+		// A naive service from before its key of QUIC stateless resets
+		// gets it now.
+		if s.Kind == "naive" {
+			if secrets[provision.SecretQUICReset], err = provision.EnsureQUICResetKey(ctx, st, s, secrets); err != nil {
 				return m, err
 			}
 		}
@@ -378,10 +405,26 @@ type File struct {
 	// Reload: the process reads the file again by itself when it changes
 	// (users of naive), so a change needs no restart.
 	Reload bool
+	// Needed: the service's unit waits for the file (ConditionPathExists).
+	// Only with Reload does it say anything: a new file the process rereads
+	// starts no unit unless the unit waited for it (the certificate chain
+	// of naive and of the site).
+	Needed bool
 	// Refresh: only replaces the file if it is there. The users of a
 	// service that failed to render (Q-1) still go out, so a revocation
 	// reaches its running process; nothing new is made for it.
 	Refresh bool
+	// AtStart: the process reads the file once, at its start, and serves
+	// without it; no unit waits for it. Writing it restarts nothing: the
+	// process has it from its next start on (naive-quic's key of stateless
+	// resets, which is of use only after a restart).
+	AtStart bool
+	// Pair is the path of a file listed after this one (a key's chain) that
+	// is written with it when this one changes: both are made as temporary
+	// files first, then renamed, this one first. A full disk leaves both
+	// as they were; only a stop between the two renames leaves this one
+	// new and the other old (spec/cert-pin-v1.md §6).
+	Pair string
 }
 
 // UnitName is the systemd unit of a service's process.
@@ -803,7 +846,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if m.IPv6 {
 				listen = append(listen, "[::]:443")
 			}
-			front["udp"] = map[string]any{"listen": listen, "idle": "60s", "routes": udpRoutes}
+			front["udp"] = map[string]any{"listen": listen, "idle": FrontUDPIdle.String(), "routes": udpRoutes}
 		}
 		b, err := jsonFile(front)
 		if err != nil {
@@ -1775,6 +1818,10 @@ const (
 	// (spec/conn-limit-v1.md §3.1, §8). naive reads it again when it
 	// changes, without a restart; absent, the limits are on.
 	NaiveConnLimit = "conn-limit"
+	// NaiveQUICReset holds the key of naive-quic's stateless resets
+	// (provision.EnsureQUICResetKey): 32 bytes, hex. naive reads it at its
+	// start; absent, it sends no stateless resets.
+	NaiveQUICReset = "quic-reset.key"
 )
 
 // naiveFiles are the site's certificate (naive answers for a name under
@@ -1810,12 +1857,33 @@ func naiveFiles(s Service, m Model, p Paths) ([]File, error) {
 	}
 	dir := path.Join(p.Rendered, s.Name)
 	key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
-	return []File{
+	files := []File{
 		{Path: path.Join(dir, NaiveUsers), Mode: 0o640, Group: GroupName(s.Name), Content: u, Service: s.Name, Reload: true},
 		{Path: path.Join(dir, NaiveConnLimit), Mode: 0o640, Group: GroupName(s.Name), Content: connLimitFile(m), Service: s.Name, Reload: true},
-		{Path: path.Join(dir, NaiveChain), Mode: 0o640, Group: GroupName(s.Name), Content: chain, Service: s.Name},
-		{Path: path.Join(dir, NaiveKey), Mode: 0o600, Content: key, Service: s.Name},
-	}, nil
+		// The chain is read again by the process (certfile, spec/cert-pin-v1.md
+		// §6): a renewal, which keeps the key, restarts nothing and cuts no
+		// tunnel. The key is a copy systemd makes at the start: a new key
+		// (the site's next one) restarts the unit, as before. The key comes
+		// first and takes the chain with it (Pair): a switch cut off half
+		// way leaves the running process the chain of the key it holds.
+		{Path: path.Join(dir, NaiveKey), Mode: 0o600, Content: key, Service: s.Name, Pair: path.Join(dir, NaiveChain)},
+		{Path: path.Join(dir, NaiveChain), Mode: 0o640, Group: GroupName(s.Name), Content: chain, Service: s.Name, Reload: true, Needed: true},
+	}
+	// The key of QUIC stateless resets, as dnstt's seal key goes: a file of
+	// the service's group (its process and rayd, no one else), not a copied
+	// credential, whose missing source keeps a unit down. The key never
+	// changes and the process reads it at its start only (AtStart): its
+	// coming restarts nothing. At the update that brings it rayd writes the
+	// file when it starts, before rayctl applies the unit that names it
+	// and restarts the data plane: one restart the less for every tunnel
+	// of the node, and the process that starts then has the key. A process
+	// started without it (the file came later) serves without stateless
+	// resets until its next start, as every naive did before the key.
+	if k := s.Secrets[provision.SecretQUICReset]; len(k) == 32 {
+		files = append(files, File{Path: path.Join(dir, NaiveQUICReset), Mode: 0o640, Group: GroupName(s.Name),
+			Content: []byte(hex.EncodeToString(k) + "\n"), Service: s.Name, AtStart: true})
+	}
+	return files, nil
 }
 
 // connLimitFile is NaiveConnLimit's content.
@@ -1860,8 +1928,11 @@ func siteFiles(s Service, m Model, p Paths) ([]File, error) {
 	}
 	key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: s.Secrets[provision.SecretTLSKey]})
 	files = append(files,
-		File{Path: path.Join(dir, SiteChain), Mode: 0o640, Group: GroupName(s.Name), Content: s.Secrets[provision.SecretTLSChain], Service: s.Name},
-		File{Path: path.Join(dir, SiteKey), Mode: 0o600, Content: key, Service: s.Name},
+		// The chain is read again by the site process, and goes with the
+		// key, as naive's.
+		File{Path: path.Join(dir, SiteKey), Mode: 0o600, Content: key, Service: s.Name, Pair: path.Join(dir, SiteChain)},
+		File{Path: path.Join(dir, SiteChain), Mode: 0o640, Group: GroupName(s.Name), Content: s.Secrets[provision.SecretTLSChain], Service: s.Name,
+			Reload: true, Needed: true},
 	)
 	return files, nil
 }

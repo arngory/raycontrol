@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"os/user"
@@ -52,6 +53,9 @@ type Applier struct {
 	// otherwise hold the apply loop, and every later change, for good. A
 	// call that runs out restarts the process as any failed sync does.
 	SyncTimeout time.Duration
+	// Pending is the directory of the restarts owed (owe); empty: "restarts"
+	// beside the rendered directory, in rayd's state directory.
+	Pending string
 
 	skipped []string // the waiting services last logged
 }
@@ -73,9 +77,98 @@ func (a *Applier) restart(ctx context.Context, verb, unit string) error {
 	}
 	out, err := exec.CommandContext(ctx, "systemctl", verb, unit).CombinedOutput() //nolint:gosec // G204: verb is one of two constants
 	if err != nil {
+		if bytes.Contains(out, []byte("not found")) || bytes.Contains(out, []byte("not loaded")) {
+			err = errors.Join(errNoUnit, err)
+		}
 		return fmt.Errorf("systemctl %s %s: %w: %s", verb, unit, err, bytes.TrimSpace(out))
 	}
 	return nil
+}
+
+// errNoUnit: the unit is not installed (the node is not deployed yet, or
+// the service is new and rayctl apply has not run). No process runs with
+// the files of before, and rayctl apply starts the unit with the ones
+// there: nothing is owed.
+var errNoUnit = errors.New("no such unit")
+
+// A restart owed to a service is written down before the file that calls
+// for it changes, and struck only when systemctl has done it. Without the
+// record a restart that did not happen was lost for good: rayd stopped or
+// killed between the write and systemctl, or systemctl failing, and every
+// later apply found the files equal to what it would write and restarted
+// nothing. After a switch of a site's key that left naive, the site and
+// the Hysteria2 backends on the old key while subscriptions pinned the new
+// one (spec/cert-pin-v1.md §6).
+//
+// One file a service, named by it, holding the verb. rayd's own directory:
+// nobody else writes there.
+
+func (a *Applier) pendingDir() string {
+	if a.Pending != "" {
+		return a.Pending
+	}
+	return filepath.Join(filepath.Dir(a.Paths.Rendered), "restarts")
+}
+
+// owed reads the restarts written down and not done: service to verb.
+func (a *Applier) owed() map[string]string {
+	out := map[string]string{}
+	entries, err := os.ReadDir(a.pendingDir())
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		b, err := os.ReadFile(filepath.Join(a.pendingDir(), e.Name()))
+		if err != nil || e.IsDir() {
+			continue
+		}
+		verb := "try-restart"
+		if string(bytes.TrimSpace(b)) == "restart" {
+			verb = "restart"
+		}
+		out[e.Name()] = verb
+	}
+	return out
+}
+
+// owe writes down that service's unit needs verb; "restart" (the unit
+// waited for a file) stays over "try-restart".
+func (a *Applier) owe(service, verb string, have map[string]string) error {
+	if have[service] == verb || have[service] == "restart" {
+		return nil
+	}
+	if err := os.MkdirAll(a.pendingDir(), 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(a.pendingDir(), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(verb + "\n"); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), filepath.Join(a.pendingDir(), service)); err != nil {
+		return err
+	}
+	have[service] = verb
+	return nil
+}
+
+// settle strikes a restart done, or found unnecessary.
+func (a *Applier) settle(service string, have map[string]string) {
+	if _, ok := have[service]; !ok {
+		return
+	}
+	if err := os.Remove(filepath.Join(a.pendingDir(), service)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		a.Log.Warn("a restart done stays written down; it will be made once more", "service", service, "err", err)
+		return
+	}
+	delete(have, service)
 }
 
 func (a *Applier) inner(socket string) InnerAPI {
@@ -122,14 +215,23 @@ func (a *Applier) Apply(ctx context.Context) error {
 	type change struct {
 		old, new []byte
 		reload   bool // the process reads it again by itself
-		rereads  bool // a file the process rereads: none of its units waits for it
+		rereads  bool // a file the process rereads and none of its units waits for
 	}
 	changed := map[string][]change{} // service -> changed files
 	failed := map[string]bool{}
+	// The restarts owed from before this apply, and those it writes down.
+	owed := a.owed()
+	before := maps.Clone(owed)
+	rendered := map[string]bool{}
+	wrote := map[string]bool{}
 	for _, f := range files {
+		rendered[f.Service] = true
 		if failed[f.Service] {
 			continue
 		}
+		// A certificate chain is reread too (spec/cert-pin-v1.md §6), but
+		// its unit waits for it: new, it starts the unit (File.Needed).
+		rereads := f.Reload && !f.Needed
 		old, err := os.ReadFile(f.Path)
 		if err == nil && bytes.Equal(old, f.Content) {
 			// Same content, but the group may have appeared since the file was
@@ -140,11 +242,23 @@ func (a *Applier) Apply(ctx context.Context) error {
 			case err != nil:
 				failed[f.Service] = true
 				errs = append(errs, fmt.Errorf("service %s: %s: %w", f.Service, f.Path, err))
+			case fixed && f.AtStart:
+				// Read at the process's next start: no restart for it.
 			case fixed && f.Refresh:
 				// A broken service's users: reread, never a restart (Q-1).
-				changed[f.Service] = append(changed[f.Service], change{old, f.Content, true, f.Reload})
+				changed[f.Service] = append(changed[f.Service], change{old, f.Content, true, rereads})
 			case fixed:
-				changed[f.Service] = append(changed[f.Service], change{nil, f.Content, false, f.Reload})
+				changed[f.Service] = append(changed[f.Service], change{nil, f.Content, false, rereads})
+				// After the fact: whether the group was missing shows only
+				// in fixing it. rayctl apply, which makes the groups, starts
+				// the units itself.
+				verb := "try-restart"
+				if !rereads {
+					verb = "restart"
+				}
+				if err := a.owe(f.Service, verb, owed); err != nil {
+					a.Log.Warn("restart not written down", "service", f.Service, "err", err)
+				}
 			}
 			continue
 		}
@@ -152,28 +266,66 @@ func (a *Applier) Apply(ctx context.Context) error {
 			continue // a broken service's users: only replaced, never made (Q-1)
 		}
 		if err == nil || errors.Is(err, os.ErrNotExist) {
-			err = writeFile(f)
+			// A change the process does not take by itself: its restart is
+			// written down first. A file that cannot be written down is
+			// not written either: the next apply finds the change again.
+			// Nor one it takes at its next start, whenever that is.
+			if f.AtStart {
+				err = nil
+			} else if !f.Reload || old == nil {
+				verb := "try-restart"
+				if old == nil && !rereads {
+					verb = "restart"
+				}
+				err = a.owe(f.Service, verb, owed)
+			} else {
+				err = nil
+			}
+			switch {
+			case err == nil && f.Pair != "":
+				// A key and its chain, the key's restart written down
+				// first: the chain then needs no change of its own. The
+				// key renamed and the chain not: its restart stays owed.
+				var first bool
+				first, err = writePair(f, files)
+				wrote[f.Service] = wrote[f.Service] || first
+			case err == nil:
+				err = writeFile(f)
+			}
 		}
 		if err != nil {
 			// E.g. the service group exists but rayd is not in it yet: rayctl
 			// apply restarts rayd with its new groups.
 			failed[f.Service] = true
 			errs = append(errs, fmt.Errorf("service %s: %s: %w", f.Service, f.Path, err))
+			// Nothing of the service changed: nothing is owed for it.
+			if _, was := before[f.Service]; !was && !wrote[f.Service] {
+				a.settle(f.Service, owed)
+			}
 			continue
 		}
-		changed[f.Service] = append(changed[f.Service], change{old, f.Content, f.Reload && old != nil, f.Reload})
+		wrote[f.Service] = true
+		if f.AtStart {
+			continue // nothing to restart, nothing reloaded
+		}
+		changed[f.Service] = append(changed[f.Service], change{old, f.Content, f.Reload && old != nil, rereads})
 	}
 
+	// What to restart: the services whose files changed, and those owed a
+	// restart from an apply that did not get to it.
+	todo := map[string]string{}
 	for service, cs := range changed {
 		if failed[service] {
 			continue
 		}
-		unit := render.UnitName(service)
+		_, late := before[service]
 		if !slices.ContainsFunc(cs, func(c change) bool { return !c.reload }) {
 			a.Log.Info("reloaded without a restart", "service", service)
 			continue
 		}
-		if svc, ok := xrayService(m, service); ok && len(cs) == 1 && cs[0].old != nil && sameExceptClients(cs[0].old, cs[0].new) {
+		// Not for a service owed a restart from before: its process has
+		// more to take than the users.
+		if svc, ok := xrayService(m, service); ok && !late && len(cs) == 1 && cs[0].old != nil && sameExceptClients(cs[0].old, cs[0].new) {
 			_, want := render.XrayUsers(m, svc)
 			api := a.inner(a.Paths.APISocket(service))
 			flow := ""
@@ -190,6 +342,7 @@ func (a *Applier) Apply(ctx context.Context) error {
 			}
 			if err == nil {
 				a.Log.Info("xray users synced", "service", service, "added", added, "removed", removed)
+				a.settle(service, owed)
 				continue
 			}
 			a.Log.Warn("xray API sync failed, restarting", "service", service, "err", err)
@@ -203,13 +356,39 @@ func (a *Applier) Apply(ctx context.Context) error {
 		if slices.ContainsFunc(cs, func(c change) bool { return c.old == nil && !c.rereads }) {
 			verb = "restart"
 		}
+		todo[service] = verb
+	}
+	for service, verb := range owed {
+		switch {
+		case !rendered[service]:
+			// The service is gone or off: its unit must not be started for
+			// a file it once waited for.
+			a.settle(service, owed)
+		case failed[service]:
+			// Half-written: the next apply.
+		case verb == "restart" || todo[service] == "":
+			todo[service] = verb
+		}
+	}
+	for _, service := range slices.Sorted(maps.Keys(todo)) {
+		verb, unit := todo[service], render.UnitName(service)
 		if a.BeforeRestart != nil {
 			a.BeforeRestart(ctx, service)
 		}
-		if err := a.restart(ctx, verb, unit); err != nil {
+		_, late := before[service]
+		switch err := a.restart(ctx, verb, unit); {
+		case err == nil:
+			a.settle(service, owed)
+			a.Log.Info("restarted after config change", "unit", unit, "late", late)
+		case errors.Is(err, errNoUnit):
+			a.settle(service, owed)
 			a.Log.Warn("restart failed (is the node deployed? run rayctl apply)", "unit", unit, "err", err)
-		} else {
-			a.Log.Info("restarted after config change", "unit", unit)
+		default:
+			// The process runs with the files of before, a key among them
+			// maybe: said through the apply's error, so that rayctl status
+			// shows it, and made again at every apply until it works.
+			a.Log.Warn("restart failed; it stays owed and is made again at the next apply", "unit", unit, "err", err)
+			errs = append(errs, fmt.Errorf("service %s: %s of %s failed, its process runs with the files of before: %w", service, verb, unit, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -288,6 +467,55 @@ func fixMeta(f render.File) (bool, error) {
 // writeFile writes atomically with the file's mode and group. The group is
 // set only if it exists (it does once the node is deployed).
 func writeFile(f render.File) error {
+	tmp, err := stageFile(f)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp)
+	return os.Rename(tmp, f.Path)
+}
+
+// writePair writes f and, if its content changed, the file of f.Pair in
+// files: both staged first, then renamed back to back, f first. A key and
+// its chain: a full disk or a failed write leaves both as they were, and
+// only a stop between the renames leaves the new key with the old chain,
+// which the running process, holding the old key, does not see as a
+// change.
+func writePair(f render.File, files []render.File) (wroteF bool, err error) {
+	i := slices.IndexFunc(files, func(p render.File) bool { return p.Path == f.Pair })
+	var pair *render.File
+	if i >= 0 {
+		if old, err := os.ReadFile(files[i].Path); err != nil || !bytes.Equal(old, files[i].Content) {
+			pair = &files[i]
+		}
+	}
+	tmp, err := stageFile(f)
+	if err != nil {
+		return false, err
+	}
+	defer os.Remove(tmp)
+	var tmpPair string
+	if pair != nil {
+		if tmpPair, err = stageFile(*pair); err != nil {
+			return false, err
+		}
+		defer os.Remove(tmpPair)
+	}
+	if err := os.Rename(tmp, f.Path); err != nil {
+		return false, err
+	}
+	if pair == nil {
+		return true, nil
+	}
+	return true, renamePair(tmpPair, pair.Path)
+}
+
+// renamePair is the second rename of writePair (tests: one that fails).
+var renamePair = os.Rename
+
+// stageFile writes f's content to a temporary file beside it, with its
+// mode and group, and returns its path; the caller renames or removes it.
+func stageFile(f render.File) (string, error) {
 	dir := filepath.Dir(f.Path)
 	gid := -1
 	if f.Group != "" {
@@ -296,35 +524,31 @@ func writeFile(f render.File) error {
 		}
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return err
+		return "", err
 	}
 	if gid >= 0 {
 		// The directory must let the group in; the files decide the rest.
 		if err := os.Chown(dir, -1, gid); err != nil {
-			return err
+			return "", err
 		}
 	}
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
-		return err
+		return "", err
 	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(f.Content); err != nil {
-		tmp.Close()
-		return err
+	_, err = tmp.Write(f.Content)
+	err = errors.Join(err, tmp.Close())
+	if err == nil && gid >= 0 {
+		err = os.Chown(tmp.Name(), -1, gid)
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	if err == nil {
+		err = os.Chmod(tmp.Name(), os.FileMode(f.Mode))
 	}
-	if gid >= 0 {
-		if err := os.Chown(tmp.Name(), -1, gid); err != nil {
-			return err
-		}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", err
 	}
-	if err := os.Chmod(tmp.Name(), os.FileMode(f.Mode)); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), f.Path)
+	return tmp.Name(), nil
 }
 
 // Run applies now, after every change signalled on changes and every minute

@@ -11,7 +11,6 @@ import (
 	"strconv"
 
 	"connectrpc.com/connect"
-	"golang.org/x/sys/unix"
 )
 
 type peerKey struct{}
@@ -28,10 +27,10 @@ func connContext(ctx context.Context, c net.Conn) context.Context {
 	if err != nil {
 		return ctx
 	}
-	var cred *unix.Ucred
+	var cred *ucred
 	var credErr error
 	if err := raw.Control(func(fd uintptr) {
-		cred, credErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+		cred, credErr = peerCred(fd)
 	}); err != nil || credErr != nil {
 		return ctx
 	}
@@ -48,7 +47,7 @@ type PeerPolicy struct {
 }
 
 func (p PeerPolicy) actor(ctx context.Context) (string, error) {
-	cred, _ := ctx.Value(peerKey{}).(*unix.Ucred)
+	cred, _ := ctx.Value(peerKey{}).(*ucred)
 	if cred == nil {
 		return "", errors.New("no peer credentials")
 	}
@@ -98,19 +97,19 @@ func actorFrom(ctx context.Context) string {
 
 // isLocal reports a caller on the node's own socket, not the remote API.
 func isLocal(ctx context.Context) bool {
-	cred, _ := ctx.Value(peerKey{}).(*unix.Ucred)
+	cred, _ := ctx.Value(peerKey{}).(*ucred)
 	return cred != nil
 }
 
 // isOwner reports a caller on the node's socket that is root or the
 // daemon's own user, not a member of the group the policy lets in.
 func isOwner(ctx context.Context) bool {
-	cred, _ := ctx.Value(peerKey{}).(*unix.Ucred)
+	cred, _ := ctx.Value(peerKey{}).(*ucred)
 	return cred != nil && (cred.Uid == 0 || int(cred.Uid) == os.Getuid())
 }
 
 // isRoot reports a caller with UID 0.
 func isRoot(ctx context.Context) bool {
-	cred, _ := ctx.Value(peerKey{}).(*unix.Ucred)
+	cred, _ := ctx.Value(peerKey{}).(*ucred)
 	return cred != nil && cred.Uid == 0
 }

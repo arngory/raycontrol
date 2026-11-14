@@ -23,7 +23,6 @@ import (
 	"unicode/utf8"
 
 	"connectrpc.com/connect"
-	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
@@ -74,14 +73,25 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             zone=SPARE (a spare becomes the main zone, the main one leaves);
                                             slipstream: max_connections=16..1024, device_connections=1..16
                                             (0: the defaults, 256 and 4; the server restarts)
-  service cert SITE -chain F -key F         a certificate of your own for the site and the services under
-                                            it, in place of ACME's (on the node only)
-  service rotate NAME [-now] [-force]       new REALITY keys (and server name, self-steal) ahead of
+  service cert SITE -chain F -key F [-force]
+                                            a certificate of your own for the site and the services under
+                                            it, in place of ACME's (root on the node only); the links
+                                            under it then carry no niko-pin. Refused, unless -force, when
+                                            they carry the node's pins and its key is another: clients
+                                            that hold them are cut off until they fetch their subscription
+  service rotate NAME [-now] [-force] [-fresh]
+                                            new REALITY keys (and server name, self-steal) ahead of
                                             schedule: after the lead time, or at once with -now;
                                             dnstt: a new seal key at once, masterdns: a new service key
                                             at once; the previous one accepted for -cred-grace (with
                                             -now: not at all); refused while the key before is still
-                                            in its grace, unless -force (that key then goes at once)
+                                            in its grace, unless -force (that key then goes at once);
+                                            a site (root): its certificate moves to the next key, the
+                                            one clients already pin; refused until that key has been
+                                            in subscriptions for -site-key-lead, unless -force (the
+                                            key in use leaked; not twice within 72 h); -fresh: to a
+                                            key made now, the next key replaced too (the store
+                                            leaked): every pinned client is cut off until it fetches
   device list [USER]
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
@@ -133,10 +143,13 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   apply                                       install what the current services need (root)
   update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-no-handoff] [-rollback [-no-carry]]
                                               the newest verified release in place, back to the
-                                              previous binaries if the node does not come back (root)
+                                              previous binaries if the node does not come back (root);
+                                              on a relay host the relay, with its stored bundle
+                                              (not yet run on a real relay host); -check and
+                                              -rollback do not go together
   update status | remote on|off | auto off|patch [-window HH:MM-HH:MM]
                                               updates by request: admin devices over the API, rayd's
-                                              own to patch releases in the window (root)
+                                              own to patch releases in the window (root; not on a relay)
   uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]
                                               take back everything install and apply changed (root)
   backup [-o FILE] [-passphrase-file F]       the node's state sealed with a passphrase (root):
@@ -192,6 +205,10 @@ func main() {
 		fs.Usage()
 		os.Exit(2)
 	}
+	if err := misplaced(fs); err != nil {
+		fmt.Fprintln(os.Stderr, "rayctl:", err)
+		os.Exit(1)
+	}
 
 	// Root's umask may be 027 or 077 (hardened images): what rayctl puts in
 	// place for the services (directories, binaries) must not follow it.
@@ -207,13 +224,14 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	var err error
 	if *remote != "" && (fs.Arg(0) != "remote" || fs.Arg(1) != "enroll") {
-		if err := c.useRemote(ctx, *remote, fs.Arg(0)); err != nil {
-			fmt.Fprintln(os.Stderr, "rayctl:", printableError(err))
-			os.Exit(1)
-		}
+		err = c.useRemote(ctx, *remote, fs.Args())
 	}
-	if err := c.run(ctx, fs.Args()); err != nil {
+	if err == nil {
+		err = c.run(ctx, fs.Args())
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "rayctl:", printableError(err))
 		if errors.Is(err, errUsage) {
 			fmt.Fprint(os.Stderr, usageText)
@@ -688,6 +706,8 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 		fs := flag.NewFlagSet("service cert", flag.ContinueOnError)
 		chain := fs.String("chain", "", "certificate chain, PEM, leaf first")
 		key := fs.String("key", "", "private key, PEM")
+		force := fs.Bool("force", false, "import it although the links under the site carry the pins of the node's keys and this "+
+			"certificate has another key: clients that hold them refuse it until they fetch their subscription")
 		if err := need(args, 1); err != nil {
 			return err
 		}
@@ -702,7 +722,8 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 		if err != nil {
 			return err
 		}
-		r, err := c.c.SetCertificate(ctx, connect.NewRequest(&nodev1.SetCertificateRequest{Service: args[0], ChainPem: chainPEM, KeyPem: keyPEM}))
+		r, err := c.c.SetCertificate(ctx, connect.NewRequest(&nodev1.SetCertificateRequest{Service: args[0], ChainPem: chainPEM, KeyPem: keyPEM,
+			Force: *force}))
 		if err != nil {
 			return err
 		}
@@ -713,24 +734,53 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 				fmt.Fprintf(w, "it does not cover %s, the name REALITY moves to next: that switch waits for a certificate that does\n",
 					strings.Join(r.Msg.MissingNext, ", "))
 			}
+			// spec/cert-pin-v1.md §7: the node pins only keys of its own.
+			fmt.Fprintln(w, "with a certificate of your own the links of naive, hy2-masq and DoH under it carry no niko-pin:\n"+
+				"clients check its chain only, as before pins")
+			if r.Msg.Unpinned {
+				fmt.Fprintln(w, "warning: these links carried the pins of the node's keys, and this certificate has another key:\n"+
+					"clients refuse it (Niko 1.45.0: on hy2-masq) until they fetch their subscription. A client whose\n"+
+					"working profile is one of these notices by itself after 15 to 30 s at the earliest; the others\n"+
+					"when they next fetch, within the subscription's 72 hours")
+			}
 		})
 	case "rotate":
 		fs := flag.NewFlagSet("service rotate", flag.ContinueOnError)
 		now := fs.Bool("now", false, "switch at once; clients that have not fetched their subscription since lose this profile until they do")
-		force := fs.Bool("force", false, "dnstt, masterdns: switch even while the previous key is in its grace, which drops it at once")
+		force := fs.Bool("force", false, "dnstt, masterdns: switch even while the previous key is in its grace, which drops it at once; "+
+			"a site: switch to the next certificate key before clients have had its pin for the lead (the key in use leaked)")
+		fresh := fs.Bool("fresh", false, "a site: move its certificate to a key made now and replace the next key too (the node's store "+
+			"leaked, both keys with it); no client holds its pin, all refuse the site's services until they fetch their subscription")
 		if err := need(args, 1); err != nil {
 			return err
 		}
 		if err := fs.Parse(args[1:]); err != nil {
 			return errUsage
 		}
-		r, err := c.c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: args[0], Now: *now, Force: *force}))
+		r, err := c.c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: args[0], Now: *now, Force: *force, Fresh: *fresh}))
 		if err != nil {
 			return err
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
 			what := cmp.Or(r.Msg.Key, "seal")
 			switch {
+			case r.Msg.Key == "tls":
+				// spec/cert-pin-v1.md §5: the switch is an issuance, and
+				// nothing changes until the certificate is stored.
+				which := "the next key"
+				if *fresh {
+					which = "a key made for it"
+				}
+				fmt.Fprintf(w, "%s: asked. rayd orders a certificate with %s: one try now, whatever its back-off (asked again the same\n"+
+					"way: 15 minutes after the last try at the earliest), and if that fails again after the back-off (an hour,\n"+
+					"doubling to a day; rayctl status: acme %s). The key in use serves until\n"+
+					"the certificate is stored. Then the processes that keep the key restart once (naive, the site, hy2-masq,\n"+
+					"Yggdrasil), and the key after it is in subscriptions from then\n", args[0], which, args[0])
+				if *fresh {
+					fmt.Fprintln(w, "no client holds the pin of that key: from the switch on all of them refuse naive, hy2-masq and DoH\n"+
+						"under this site until they fetch their subscription (by themselves after 15 to 30 s at the earliest,\n"+
+						"when one of these is their working profile; otherwise when they next fetch)")
+				}
 			case r.Msg.Seal && r.Msg.PrevUntil != 0:
 				fmt.Fprintf(w, "%s has a new %s key, in subscriptions from now; the previous one is accepted until %s\n",
 					args[0], what, time.Unix(r.Msg.PrevUntil, 0).UTC().Format(time.RFC3339))
@@ -747,7 +797,8 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 
 // keyState says when a REALITY service last switched keys and when the
 // published next switch is (R4-7); for a DNS tunnel, its dnsauth and seal
-// modes.
+// modes; for a site, since when its certificate's keys are in use and
+// pinned (spec/cert-pin-v1.md).
 func keyState(s *nodev1.Service) string {
 	day := func(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04") }
 	if s.Kind == "slipstream" {
@@ -795,6 +846,28 @@ func keyState(s *nodev1.Service) string {
 			out += ", previous key until " + day(st.PrevUntil)
 		}
 		return out + spareZones(s)
+	}
+	if s.Kind == "site" {
+		// The certificate's keys (spec/cert-pin-v1.md): pinned in the links
+		// of naive, hy2-masq and DoH once the next key is there.
+		st := provision.ParseSiteKeyState(store.Service{Kind: s.Kind, Settings: s.SettingsJson})
+		switch {
+		case st.Imported:
+			return "certificate of your own: no pins"
+		case st.NextAt == 0:
+			return ""
+		}
+		out := "key since " + day(st.KeyAt) + ", next key pinned since " + day(st.NextAt)
+		switch {
+		case st.RotateAt != 0 && st.RotateHow == provision.SiteSwitchFresh:
+			out += ", switch to a fresh key asked"
+		case st.RotateAt != 0:
+			out += ", switch to it asked"
+		}
+		if st.PrevPin != "" && time.Now().Unix() < st.PrevUntil {
+			out += ", previous key pinned until " + day(st.PrevUntil)
+		}
+		return out
 	}
 	if s.Kind != "reality" {
 		return ""
@@ -966,7 +1039,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 			// takes both (review 8): it comes once the QR is wiped. What
 			// was typed ahead (a pasted blank line) does not wipe it
 			// unseen; Ctrl-C says how to withdraw the invite.
-			_ = unix.IoctlSetInt(int(os.Stdin.Fd()), unix.TCFLSH, unix.TCIFLUSH)
+			flushInput(os.Stdin)
 			fmt.Print("\nOnce the QR is scanned or sent, Enter wipes it and shows the PIN.")
 			stop := make(chan os.Signal, 1)
 			signal.Notify(stop, os.Interrupt)

@@ -150,9 +150,14 @@ REALITY, Hysteria2 и naive остаются сквозными от клиен�
        Трафик не проходит через userspace.
      - Снимок relay — от выхода (`RelayService`); `rayctl relay bundle`.
      - Проверено целиком в трёх пространствах имён: `test/relay/e2e.sh`.
-     - `bootstrap.sh -relay <пакет>` → `rayctl install -relay`: только `rayspa` и `rayctl`, пакет у root (0600), копия
-       для `rayspa` при каждом старте, `net.ipv4.ip_forward = 1`, всё в журнале для `rayctl uninstall`. Если за 45 с
-       первый снимок не пришёл, `rayspa` останавливается и таблица снимается: relay без выхода не запирает SSH.
+     - `bootstrap.sh -relay <пакет>` → `rayctl install -relay`: бинарники `rayspa`, `rayctl` и, с v0.11.0, `rayd` (точка
+       замера `rayd relay`, §9.1; его командой юниты `rayspa` и `rayd-relay` копируют пакет себе при старте). Пакет у
+       root (0600), копия для `rayspa` при каждом старте, `net.ipv4.ip_forward = 1`, всё в журнале для
+       `rayctl uninstall`. Если за 45 с первый снимок не пришёл, `rayspa` останавливается и таблица снимается: relay без
+       выхода не запирает SSH.
+     - Обновление relay — с v0.26.0 `rayctl update` на его хосте: та же установка с сохранённым пакетом, проверка и
+       откат к прежнему relay ([node-update-v1.md](node-update-v1.md) §5). Relay до v0.26.0 обновляется повторным
+       `bootstrap.sh -relay /etc/raycontrol/relay.bundle`.
      - SSH самого relay открыт с его собственных адресов администратора (`rayctl relay set` на выходе, без нового пакета).
        Выход не видит sshd хоста relay, поэтому `relay set -ssh-port` с ним не сверяется.
      - `rayctl install -relay` до записи файлов и запуска `rayspa` требует порт sshd:

@@ -57,6 +57,7 @@ func TestNaive(t *testing.T) {
 	var d net.Dialer
 	h := &Server{Users: &Users{Path: users}, Answer: answer, Dial: d.DialContext, Log: slog.New(slog.DiscardHandler)}
 	srv := httptest.NewUnstartedServer(h)
+	srv.Config = h.HTTPServer() // the limits of a connection as the service has them
 	srv.EnableHTTP2 = true
 	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}}
 	srv.StartTLS()
@@ -230,6 +231,7 @@ func TestProbeName(t *testing.T) {
 	answer, _ := site.Responder(site.Answer404, "")
 	h := &Server{Users: &Users{Path: users}, Answer: answer, Probe: echo.Addr().String(), Log: slog.New(slog.DiscardHandler)}
 	srv := httptest.NewUnstartedServer(h)
+	srv.Config = h.HTTPServer() // the limits of a connection as the service has them
 	srv.EnableHTTP2 = true
 	srv.StartTLS()
 	defer srv.Close()

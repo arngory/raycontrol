@@ -7,10 +7,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -53,10 +53,29 @@ func AccountKey(ctx context.Context, st *store.Store) (crypto.Signer, error) {
 
 // Manager keeps the certificates of the node's sites: issued when missing
 // or when the name changed, renewed with a third of the lifetime left.
+//
+// A site keeps its key from one certificate to the next, and has the key
+// after it ready (spec/cert-pin-v1.md): the lines of naive, hy2-masq and
+// DoH pin both. The key changes only to that next one, when the operator
+// asks or by Keys (provision.PlanSiteIssue).
 type Manager struct {
 	Store *store.Store
-	// Issue gets a chain for names (Issuer.Issue).
+	// Issue gets a chain for names and the key (Issuer.Issue).
 	Issue func(ctx context.Context, names []string, key crypto.Signer) ([][]byte, error)
+	// Keys is when a site's key changes by itself, at an issuance; zero:
+	// only when the operator asks.
+	Keys provision.SiteKeyPolicy
+	// NextKeyFrom: a site that has a certificate and no next key (a node
+	// just updated to cert-pin-v1) gets one only from then on (rayd: ten
+	// minutes after its start, as the subscription's seq takes the clock).
+	// An update that fails in its first minutes goes back to a version
+	// that knows no pins: none must have reached a client by then.
+	NextKeyFrom time.Time
+	// Check, if set, refuses a certificate before it is stored: rayd gives
+	// what the site process checks when it loads one (a chain long enough
+	// for REALITY). Stored unchecked, the site would keep the old
+	// certificate until it expired while the others served the new one.
+	Check func(chainPEM, keyPEM []byte) error
 	// Notify runs after a certificate is stored (rayd re-renders).
 	Notify func()
 	// Report, if set, gets each order's outcome per site (O-2).
@@ -72,9 +91,20 @@ type Manager struct {
 	once  sync.Once
 	fails map[string]int
 	next  map[string]time.Time
-	last  map[string]time.Time // the last failed try of a site
+	last  map[string]time.Time   // the last failed try of a site
+	asked map[string]askedSwitch // the operator's switch that got its try past the back-off
 	wake  chan struct{}
 	retry atomic.Bool
+
+	mu    sync.Mutex
+	again map[string]bool // RetrySite's sites, for the next Once
+}
+
+// askedSwitch names a request for a site's switch: its time and how. An
+// upgrade (-force, then -fresh) keeps the time and is a request of its own.
+type askedSwitch struct {
+	at  int64
+	how string
 }
 
 // Wake makes Run check now, as when a site needs a new name; failures keep
@@ -100,6 +130,20 @@ func backoff(fails int) time.Duration { return min(time.Hour<<min(fails-1, 5), 2
 // that fails again waits longer.
 func (m *Manager) Retry() {
 	m.retry.Store(true)
+	m.Wake()
+}
+
+// RetrySite makes Run try one site now, as Retry does for all: RetryGap
+// after its last failed try at the earliest. The API runs it after a
+// switch is asked again while a request as strong waits: that request had
+// its try past the back-off, and a repeat must not wait out a day.
+func (m *Manager) RetrySite(name string) {
+	m.mu.Lock()
+	if m.again == nil {
+		m.again = map[string]bool{}
+	}
+	m.again[name] = true
+	m.mu.Unlock()
 	m.Wake()
 }
 
@@ -140,6 +184,10 @@ func (m *Manager) wait(every time.Duration, now time.Time) time.Duration {
 			every = max(d, time.Second)
 		}
 	}
+	// The first next keys of an updated node: then, not an interval later.
+	if d := m.NextKeyFrom.Sub(now); d > 0 && d < every {
+		every = max(d, time.Second)
+	}
 	return every
 }
 
@@ -148,13 +196,22 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 	if m.fails == nil {
 		m.fails, m.next, m.last = map[string]int{}, map[string]time.Time{}, map[string]time.Time{}
 	}
+	if m.asked == nil {
+		m.asked = map[string]askedSwitch{}
+	}
+	m.mu.Lock()
+	again := m.again
+	m.again = nil
+	m.mu.Unlock()
 	// From the last try, not from next: changes in a row (a cron job) keep
 	// the gap however many there are.
-	if m.retry.Swap(false) {
-		for name, next := range m.next {
-			if soon := m.last[name].Add(RetryGap); soon.Before(next) {
-				m.next[name] = soon
-			}
+	all := m.retry.Swap(false)
+	for name, next := range m.next {
+		if !all && !again[name] {
+			continue
+		}
+		if soon := m.last[name].Add(RetryGap); soon.Before(next) {
+			m.next[name] = soon
 		}
 	}
 	services, err := m.Store.ListServices(ctx)
@@ -164,7 +221,30 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 	}
 	stored := 0
 	for _, svc := range services {
-		if svc.Kind != "site" || !svc.Enabled || now.Before(m.next[svc.Name]) {
+		if svc.Kind != "site" || !svc.Enabled {
+			continue
+		}
+		// The key after the one in use (cert-pin-v1 §4): a site from before
+		// it gets it at the first check from NextKeyFrom on, and its pins go
+		// into subscriptions. Whatever the back-off: no order is made for it.
+		if !now.Before(m.NextKeyFrom) {
+			if made, err := provision.EnsureSiteNextKey(ctx, m.Store, svc.ID, now); err != nil {
+				m.log().Error("certificates: next key", "service", svc.Name, "err", err)
+			} else if made {
+				m.log().Info("next certificate key made; its pin is in subscriptions from now", "service", svc.Name)
+			}
+		}
+		// The operator's switch (rayctl service rotate SITE) is an order
+		// with another key, and it gets one try now whatever the back-off
+		// of earlier failures: a leaked key must not serve a day longer
+		// because a renewal failed last week. One try a request; if it
+		// fails too, the back-off goes on. An upgrade (-force, then -fresh)
+		// is another request; the same one again is RetrySite's.
+		state := provision.ParseSiteKeyState(svc)
+		rotate := state.RotateAt != 0
+		if ask := (askedSwitch{state.RotateAt, state.RotateHow}); rotate && m.asked[svc.Name] != ask {
+			m.asked[svc.Name] = ask
+		} else if now.Before(m.next[svc.Name]) {
 			continue
 		}
 		// The names in use and those REALITY moves to at its next switch
@@ -177,7 +257,9 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 		}
 		chain := secrets[provision.SecretTLSChain]
 		want := append(slices.Clone(names), next...)
-		if !due(chain, want, now) {
+		// Due, or the operator asked for another key: the switch is an
+		// issuance with it.
+		if !due(chain, want, now) && !rotate {
 			continue
 		}
 		order := want
@@ -186,10 +268,18 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 				order = []string{"*." + d}
 			}
 		}
-		err = m.issue(ctx, svc, order)
-		if err != nil && len(next) > 0 && len(order) == len(want) && due(chain, names, now) {
+		err = m.issue(ctx, svc, order, now)
+		if err != nil && !errors.Is(err, provision.ErrSiteChanged) && len(next) > 0 && len(order) == len(want) && (rotate || due(chain, names, now)) {
 			m.log().Warn("certificate with the next name not issued, renewing without it", "service", svc.Name, "err", err)
-			err = m.issue(ctx, svc, names)
+			err = m.issue(ctx, svc, names, now)
+		}
+		if errors.Is(err, provision.ErrSiteChanged) {
+			// The operator's certificate came during the order: theirs
+			// stays, and the next check looks at it. No failure.
+			m.log().Info("certificate not stored: the site changed during the order", "service", svc.Name)
+			delete(m.asked, svc.Name) // a request that came meanwhile gets its try
+			m.Wake()
+			continue
 		}
 		if m.Report != nil {
 			m.Report(svc.Name, err)
@@ -206,9 +296,13 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 		delete(m.next, svc.Name)
 		delete(m.last, svc.Name)
 		stored++
-	}
-	if stored > 0 && m.Notify != nil {
-		m.Notify()
+		// At once, not after the other sites' orders, which take their
+		// time: subscriptions carry this certificate's pins from the
+		// moment it is stored, and the processes take it only when rayd
+		// renders it.
+		if m.Notify != nil {
+			m.Notify()
+		}
 	}
 	return stored
 }
@@ -244,13 +338,14 @@ func underWildcard(names []string, domain string) bool {
 	return len(names) > 0
 }
 
-func (m *Manager) issue(ctx context.Context, svc store.Service, names []string) error {
-	// RSA: its longer chain fits REALITY with ML-DSA-65 (R2-8, R2-12).
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+// issue orders a certificate for names with the site's key (the one in use,
+// unless it is time for the next: provision.PlanSiteIssue) and stores it.
+func (m *Manager) issue(ctx context.Context, svc store.Service, names []string, now time.Time) error {
+	plan, err := provision.PlanSiteIssue(ctx, m.Store, svc.ID, now, m.Keys)
 	if err != nil {
 		return err
 	}
-	chain, err := m.Issue(ctx, names, key)
+	chain, err := m.Issue(ctx, names, plan.Key)
 	if err != nil {
 		return err
 	}
@@ -260,16 +355,19 @@ func (m *Manager) issue(ctx context.Context, svc store.Service, names []string) 
 			return err
 		}
 	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
+	if m.Check != nil {
+		keyDER, err := x509.MarshalPKCS8PrivateKey(plan.Key)
+		if err != nil {
+			return err
+		}
+		if err := m.Check(pemChain.Bytes(), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})); err != nil {
+			return fmt.Errorf("the certificate is not one the site can serve: %w", err)
+		}
+	}
+	if err := provision.StoreSiteCertificate(ctx, m.Store, svc.ID, pemChain.Bytes(), plan, now); err != nil {
 		return err
 	}
-	// Together: a render between the two would pair a key with another chain.
-	if err := m.Store.UpdateService(ctx, svc.ID, store.ServiceUpdate{Set: map[string][]byte{
-		provision.SecretTLSKey: keyDER, provision.SecretTLSChain: pemChain.Bytes(),
-	}}); err != nil {
-		return err
-	}
-	m.log().Info("certificate stored", "service", svc.Name, "names", len(names))
+	// Which key, never the key or its pin.
+	m.log().Info("certificate stored", "service", svc.Name, "names", len(names), "key", plan.What)
 	return nil
 }

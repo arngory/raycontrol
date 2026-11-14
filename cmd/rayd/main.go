@@ -29,11 +29,11 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
 
 	"github.com/arngory/raycontrol/internal/api"
 	"github.com/arngory/raycontrol/internal/appmirror"
 	"github.com/arngory/raycontrol/internal/asn"
+	"github.com/arngory/raycontrol/internal/certfile"
 	"github.com/arngory/raycontrol/internal/certs"
 	"github.com/arngory/raycontrol/internal/cloudflare"
 	"github.com/arngory/raycontrol/internal/connlimit"
@@ -124,6 +124,8 @@ func cmdInit(args []string) error {
 	db := fs.String("db", defaultDB, "database path")
 	host := fs.String("host", "", "public address clients use (IP or domain)")
 	domain := fs.String("domain", "", "base domain for service subdomains and DNS tunnel zones")
+	seqClock := fs.Bool("seq-clock", false, "the subscription's seq goes on from the clock at once (rayctl restore: the database is older than "+
+		"what clients have seen, and they drop answers with a lower seq)")
 	fs.Parse(args)
 
 	ctx := context.Background()
@@ -135,6 +137,11 @@ func cmdInit(args []string) error {
 	p, err := provision.Init(ctx, st, provision.Options{Host: *host, Domain: *domain})
 	if err != nil {
 		return err
+	}
+	if *seqClock {
+		if err := sub.SeqToClock(ctx, st, time.Now()); err != nil {
+			return err
+		}
 	}
 	fmt.Printf("node %x initialised in %s\n", p.NodeID, *db)
 	return nil
@@ -166,6 +173,8 @@ func cmdServe(args []string) error {
 	credGrace := fs.Duration("cred-grace", 2*24*time.Hour, "the previous credential (and REALITY key set) is accepted this long after the switch (12h at least)")
 	realityPeriod := fs.Duration("reality-period", 90*24*time.Hour, "how long REALITY keys stay current; their next set is published -cred-lead ahead (0: no rotation)")
 	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new REALITY server name may wait for its certificate")
+	siteKeyPeriod := fs.Duration("site-key-period", provision.DefaultSiteKeyPeriod, "how long the key of a site's certificate stays in use: at an issuance after that the next key takes over (0: only by rayctl service rotate SITE)")
+	siteKeyLead := fs.Duration("site-key-lead", provision.DefaultSiteKeyLead, "the next key of a site's certificate is in the subscription (niko-pin) this long before a switch to it")
 	debug := fs.Bool("debug", false, "log at debug level: refused subscription requests with their addresses (personal data: turn it off after use)")
 	updateCheck := fs.Duration("update-check", 0, "look for a newer raycontrol release this often, an hour or more, ±10 % (0: never; release builds only): the node fetches the latest SHA256SUMS and its signature from github.com, which sees the node's address; rayctl status says what it found")
 	dnsCheck := fs.Duration("dns-check", time.Hour, "check the DNS tunnel zones from the node this often, ±10 %: the delegation, the front and the backend, the zones through public resolvers (0: only on demand, rayctl dns check -now)")
@@ -177,6 +186,11 @@ func cmdServe(args []string) error {
 	epoch := provision.RealityEpoch{Period: *realityPeriod, Lead: *credLead, Prepare: *realityPrepare, Grace: *credGrace}
 	if err := epoch.Check(); err != nil {
 		return err
+	}
+	// The keys of the sites' certificates (spec/cert-pin-v1.md §5).
+	siteKeys := provision.SiteKeyPolicy{Period: *siteKeyPeriod, Lead: *siteKeyLead}
+	if err := siteKeys.Check(); err != nil {
+		return fmt.Errorf("-site-key-period, -site-key-lead: %w", err)
 	}
 	dnsResolvers, err := dnscheck.ParseResolvers([]string{*dnsCheckResolvers})
 	if err != nil {
@@ -191,6 +205,16 @@ func cmdServe(args []string) error {
 		level.Set(slog.LevelDebug)
 	}
 	log := logx.New(os.Stderr, level)
+	// Interop (the client's CI): a stand that walks through a switch to the
+	// next key and a fresh one in minutes. Only without systemd, where no
+	// node in use runs.
+	if os.Getenv("RAYCONTROL_UNSAFE_SITE_KEY_FORCE_ANY_AGE") != "" {
+		if !*supervise {
+			return errors.New("RAYCONTROL_UNSAFE_SITE_KEY_FORCE_ANY_AGE is for a test stand (-supervise) only")
+		}
+		provision.UnsafeForceSwitchAtAnyAge()
+		log.Warn("UNSAFE: a forced switch of a site's key is taken at any age of the key in use")
+	}
 
 	st, err := store.Open(ctx, *db)
 	if err != nil {
@@ -211,7 +235,7 @@ func cmdServe(args []string) error {
 	paths := render.Paths{Rendered: *rendered, Run: *run, Supervised: *supervise}
 	rotateNow := make(chan struct{}, 1)
 	srv := &api.Server{Store: st, Params: params, Version: version, Paths: paths, Binaries: deploy.DefaultBinaries,
-		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead, CredGrace: *credGrace, Health: hb,
+		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead, CredGrace: *credGrace, SiteKeyLead: *siteKeyLead, Health: hb,
 		Rotate: func() {
 			select {
 			case rotateNow <- struct{}{}:
@@ -307,7 +331,7 @@ func cmdServe(args []string) error {
 	var cm *certs.Manager
 	var is *certs.Issuer
 	if *acmeDir != "" {
-		if cm, is, err = startCertificates(ctx, st, srv, *acmeDir, hb, log); err != nil {
+		if cm, is, err = startCertificates(ctx, st, srv, *acmeDir, siteKeys, hb, log); err != nil {
 			log.Error("certificates not managed", "err", err)
 		}
 	}
@@ -405,8 +429,11 @@ func supervisor(paths render.Paths, bins deploy.Binaries, st *store.Store, log *
 }
 
 // startCertificates issues and renews the sites' certificates through ACME
-// HTTP-01, opening the perimeter window for each order (R2-11).
-func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, directory string, hb *health.Board, log *slog.Logger) (*certs.Manager, *certs.Issuer, error) {
+// HTTP-01, opening the perimeter window for each order (R2-11). A site
+// keeps its key from one certificate to the next and changes it by keys or
+// when root asks (spec/cert-pin-v1.md §4, §5).
+func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, directory string, keys provision.SiteKeyPolicy,
+	hb *health.Board, log *slog.Logger) (*certs.Manager, *certs.Issuer, error) {
 	key, err := certs.AccountKey(ctx, st)
 	if err != nil {
 		return nil, nil, err
@@ -430,8 +457,12 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 		}
 		return &cloudflare.Solver{Client: c, Zone: zone}, nil
 	}
-	m := &certs.Manager{Store: st, Issue: is.Issue, Notify: srv.Notify, Log: log,
-		Report: func(site string, err error) { hb.Done("acme "+site, err) },
+	m := &certs.Manager{Store: st, Issue: is.Issue, Keys: keys, Notify: srv.Notify, Log: log,
+		// No pins from a node that may still roll its update back, and no
+		// certificate the site process would refuse to load.
+		NextKeyFrom: time.Now().Add(settleAfterStart),
+		Check:       func(chainPEM, keyPEM []byte) error { _, err := siteCertificate(chainPEM, keyPEM); return err },
+		Report:      func(site string, err error) { hb.Done("acme "+site, err) },
 		Wildcard: func(ctx context.Context) string {
 			if c, _, err := provision.Cloudflare(ctx, st); err != nil || c == nil {
 				return ""
@@ -441,6 +472,9 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 		}}
 	// The operator's DNS change may be the fix of a failure: try now.
 	srv.DNSChanged = m.Retry
+	srv.SiteKeyAsked = m.RetrySite
+	// A site's switch to its next key is an order of this manager's.
+	srv.Certificates = true
 	go m.Run(ctx)
 	// A new site (rayctl service add reality) gets its certificate now, not
 	// at the next hourly check; failures keep their back-off.
@@ -462,12 +496,16 @@ type dohListener struct {
 	srv  *http.Server
 	h3   context.CancelFunc // DoH3
 	cert [32]byte
+	// certs is what its handshakes answer with, TCP and QUIC.
+	certs *certfile.Holder
 }
 
 // serveDoH keeps rayd's TLS listener on the socket of every enabled DoH
 // service whose site has a certificate (R3-2); the front passes the
-// connections for the DoH name to it (R2-15). A new certificate restarts the
-// listener.
+// connections for the DoH name to it (R2-15). A new certificate (a
+// renewal, the site's next key) goes to the listener as it runs: new
+// handshakes get it, the connections that are open go on
+// (spec/cert-pin-v1.md §6). One that does not parse leaves the one in use.
 func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func() <-chan struct{}, log *slog.Logger) {
 	running := map[string]*dohListener{}
 	stop := func(name string) {
@@ -503,16 +541,24 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 			}
 			want[svc.Name] = true
 			sum := sha256.Sum256(append(slices.Clone(secrets[provision.SecretTLSChain]), secrets[provision.SecretTLSKey]...))
-			if l := running[svc.Name]; l != nil && l.cert == sum {
+			l := running[svc.Name]
+			if l != nil && l.cert == sum {
 				continue
 			}
-			stop(svc.Name)
 			keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: secrets[provision.SecretTLSKey]})
 			cert, err := tls.X509KeyPair(secrets[provision.SecretTLSChain], keyPEM)
 			if err != nil {
 				log.Error("doh certificate", "service", svc.Name, "err", err)
 				continue
 			}
+			if l != nil {
+				l.certs.Set(cert)
+				l.cert = sum
+				log.Info("doh certificate reloaded", "service", svc.Name)
+				continue
+			}
+			certs := &certfile.Holder{}
+			certs.Set(cert)
 			// The front passes the sockets of the DoH name here (R2-15).
 			ln, err := nikoipc.ListenFD(p.DoHSocket(svc.Name), p.PeerUID(render.FrontUID), log)
 			if err != nil {
@@ -521,23 +567,33 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 			}
 			id := svc.ID
 			h := &doh.Handler{Tokens: func(ctx context.Context) (map[string]bool, error) { return dohTokens(ctx, st, id) }}
-			srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute,
-				ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelDebug),
-				TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
-					Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}}}
+			srv := dohHTTPServer(h, certs.GetCertificate, log)
 			go func() { _ = srv.ServeTLS(ln, "", "") }()
 			// DoH3: the same handler over QUIC, datagrams from the front (R3-5).
 			h3ctx, h3stop := context.WithCancel(ctx)
 			if pc, err := nikoipc.ListenPacket(p.DoH3Socket(svc.Name), p.PeerUID(render.FrontUID), log); err != nil {
 				log.Error("doh3 socket", "service", svc.Name, "err", err)
 			} else {
+				// The service's key of stateless resets, as naive-quic has
+				// its own (provision.EnsureQUICResetKey): after rayd starts
+				// anew a DoH3 client learns at its next packet that its
+				// connection is gone. Without the key the service serves
+				// as it did before it had one; why is said, the key never.
+				var o quicOptions
+				if own, err := st.ServiceSecrets(ctx, svc.ID); err != nil {
+					log.Warn("doh3: no key of stateless resets; serving without them", "service", svc.Name, "err", err)
+				} else if key, err := provision.EnsureQUICResetKey(ctx, st, svc, own); err != nil || len(key) != len(quic.StatelessResetKey{}) {
+					log.Warn("doh3: no key of stateless resets; serving without them", "service", svc.Name, "err", err)
+				} else {
+					o.resetKey = (*quic.StatelessResetKey)(key)
+				}
 				go func() {
-					if err := serveHTTP3(h3ctx, pc, cert, h); err != nil {
+					if err := serveHTTP3(h3ctx, pc, certs.GetCertificate, h, o); err != nil {
 						log.Error("doh3", "service", svc.Name, "err", err)
 					}
 				}()
 			}
-			running[svc.Name] = &dohListener{srv: srv, h3: h3stop, cert: sum}
+			running[svc.Name] = &dohListener{srv: srv, h3: h3stop, cert: sum, certs: certs}
 			log.Info("doh serving", "service", svc.Name)
 		}
 		for name := range running {
@@ -756,7 +812,7 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 		return err
 	}
 	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier, RelayProbe: relayProbe,
-		ClockSeqAfter: time.Now().Add(10 * time.Minute), App: app, Changed: changed}
+		ClockSeqAfter: time.Now().Add(settleAfterStart), PinsSince: processStart, App: app, Changed: changed}
 	port := int(ports[0].Num)
 	addr := ":" + strconv.Itoa(port)
 	// Channel probes (R4-16) on the same endpoint, and their UDP echo on
@@ -1239,20 +1295,13 @@ func cmdSite(args []string) error {
 		return err
 	}
 	log := logx.New(os.Stderr, slog.LevelInfo)
-	chainPEM, err := os.ReadFile(*chain)
-	if err != nil {
-		return err
-	}
-	keyPEM, err := os.ReadFile(*key)
-	if err != nil {
-		return err
-	}
-	cert, err := site.LoadCertificate(chainPEM, keyPEM, provision.RealityChainMin(), nil)
+	certs, err := loadCertificate(*chain, *key, siteCertificate, log)
 	if err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go certs.Watch(ctx)
 	_ = os.Remove(*socket)
 	ln, err := net.Listen("unix", *socket)
 	if err != nil {
@@ -1261,8 +1310,8 @@ func cmdSite(args []string) error {
 	if err := os.Chmod(*socket, 0o660); err != nil { //nolint:gosec // G302: the REALITY process connects through the group
 		return err
 	}
-	log.Info("serving the site", "socket", *socket, "chain", len(cert.Certificate), "answer", *answer)
-	return site.Serve(ctx, ln, handler, cert, log)
+	log.Info("serving the site", "socket", *socket, "chain", len(certs.Current().Certificate), "answer", *answer)
+	return site.ServeCertificates(ctx, ln, handler, certs.GetCertificate, log)
 }
 
 // cmdNaive serves NaiveProxy (R2-14): TLS 1.3 with X25519MLKEM768 only and
@@ -1283,6 +1332,8 @@ func cmdNaive(args []string) error {
 		"read again when it changes; empty or absent: on")
 	icmp := fs.Bool("icmp", false, "carry ping and traceroute through "+naive.ICMPName+" (spec/icmp-v1.md): echoes from ICMP datagram sockets, "+
 		"which need the process's group in net.ipv4.ping_group_range")
+	resetKey := fs.String("reset-key", "", "file with the key of naive-quic's stateless resets (32 bytes, hex), the same at every start: "+
+		"a client whose connection the process no longer knows is told at once; empty or absent: no stateless resets")
 	fs.Parse(args)
 	if *users == "" || *chain == "" || *key == "" || *socket == "" {
 		return errors.New("naive needs -users, -chain, -key and -socket")
@@ -1294,13 +1345,14 @@ func cmdNaive(args []string) error {
 	if err != nil {
 		return err
 	}
-	cert, err := tls.LoadX509KeyPair(*chain, *key)
+	log := logx.New(os.Stderr, slog.LevelInfo)
+	certs, err := loadCertificate(*chain, *key, nil, log)
 	if err != nil {
 		return err
 	}
-	log := logx.New(os.Stderr, slog.LevelInfo)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go certs.Watch(ctx)
 	ln, err := nikoipc.ListenFD(*socket, *frontUID, log)
 	if err != nil {
 		return err
@@ -1332,20 +1384,22 @@ func cmdNaive(args []string) error {
 		if err != nil {
 			return err
 		}
+		var o quicOptions
+		if *resetKey != "" {
+			// Without the key the service is as it was before it had
+			// one: clients wait out their idle time after a restart. Why
+			// it is missing is said, the file's content never.
+			if o.resetKey, err = readResetKey(*resetKey); err != nil {
+				log.Warn("naive-quic: no key of stateless resets; serving without them", "err", err)
+			}
+		}
 		go func() {
-			if err := serveHTTP3(ctx, pc, cert, ns); err != nil {
+			if err := serveHTTP3(ctx, pc, certs.GetCertificate, ns, o); err != nil {
 				log.Error("naive-quic", "err", err)
 			}
 		}()
 	}
-	srv := &http.Server{
-		Handler:           ns,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       5 * time.Minute,
-		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelDebug),
-		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
-			Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}},
-	}
+	srv := naiveHTTPServer(ns, certs.GetCertificate, log)
 	go func() {
 		<-ctx.Done()
 		_ = srv.Close()
@@ -1398,26 +1452,25 @@ func cmdRelay(args []string) error {
 	return s.Serve(ctx, ln, pc, tlsCfg)
 }
 
-// serveHTTP3 serves h on QUIC over the front's datagrams until ctx ends:
-// TLS 1.3 with X25519MLKEM768 only, ALPN h3.
-func serveHTTP3(ctx context.Context, pc net.PacketConn, cert tls.Certificate, h http.Handler) error {
-	tlsConf := http3.ConfigureTLSConfig(&tls.Config{MinVersion: tls.VersionTLS13,
-		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, Certificates: []tls.Certificate{cert}})
-	ln, err := quic.ListenEarly(pc, tlsConf, &quic.Config{MaxIdleTimeout: 2 * time.Minute, KeepAlivePeriod: 0})
-	if err != nil {
-		return err
-	}
-	srv := &http3.Server{Handler: h, IdleTimeout: 2 * time.Minute}
-	go func() {
-		<-ctx.Done()
-		_ = srv.Close()
-		_ = ln.Close()
-		_ = pc.Close()
-	}()
-	if err := srv.ServeListener(ln); err != nil && ctx.Err() == nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, quic.ErrServerClosed) {
-		return err
-	}
-	return nil
+// dohHTTPServer is the HTTP/2 side of a DoH service: TLS 1.3 with
+// X25519MLKEM768 only, and the HTTP server every name of the node's address
+// has (site.HTTPServer).
+func dohHTTPServer(h http.Handler, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), log *slog.Logger) *http.Server {
+	srv := site.HTTPServer(h, site.IdleTimeout)
+	srv.ErrorLog = slog.NewLogLogger(log.Handler(), slog.LevelDebug)
+	srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+		GetCertificate: cert, NextProtos: []string{"h2", "http/1.1"}}
+	return srv
+}
+
+// naiveHTTPServer is the HTTP/2 side of a naive service: TLS 1.3 with
+// X25519MLKEM768 only, and the same HTTP server (naive.Server.HTTPServer).
+func naiveHTTPServer(ns *naive.Server, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), log *slog.Logger) *http.Server {
+	srv := ns.HTTPServer()
+	srv.ErrorLog = slog.NewLogLogger(log.Handler(), slog.LevelDebug)
+	srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+		GetCertificate: cert, NextProtos: []string{"h2", "http/1.1"}}
+	return srv
 }
 
 // connLimitSources are the processes that count refusals of the connection

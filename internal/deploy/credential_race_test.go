@@ -1,3 +1,5 @@
+//go:build linux
+
 package deploy_test
 
 import (

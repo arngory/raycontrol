@@ -44,11 +44,11 @@ func TestSetCertificate(t *testing.T) {
 		{"other names", "site", other.ChainPEM, other.KeyPEM, "does not cover"},
 		{"expired", "site", expired.ChainPEM, expired.KeyPEM, "not now"},
 	} {
-		if _, err := SetCertificate(ctx, st, c.svc, c.chain, c.key, now); !errors.Is(err, store.ErrInvalid) || !strings.Contains(err.Error(), c.want) {
+		if _, err := SetCertificate(ctx, st, c.svc, c.chain, c.key, now, false); !errors.Is(err, store.ErrInvalid) || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v", c.name, err)
 		}
 	}
-	got, err := SetCertificate(ctx, st, "site", good.ChainPEM, good.KeyPEM, now)
+	got, err := SetCertificate(ctx, st, "site", good.ChainPEM, good.KeyPEM, now, false)
 	if err != nil {
 		t.Fatal(err)
 	}

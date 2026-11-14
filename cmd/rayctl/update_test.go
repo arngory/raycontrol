@@ -106,8 +106,8 @@ func TestCopyDBFIFO(t *testing.T) {
 	}
 }
 
-// A relay host has rayd too, but no node database: rayctl update is not
-// for it.
+// A relay host has rayd too, but no node database: updates by request are
+// not for it (rayctl update on its host is, update_relay.go).
 func TestUpdatable(t *testing.T) {
 	dir := t.TempDir()
 	db, bundle := filepath.Join(dir, "rayd.db"), filepath.Join(dir, "relay.bundle")

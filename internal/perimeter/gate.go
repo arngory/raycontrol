@@ -94,6 +94,27 @@ func NewGate(fw Firewall, log *slog.Logger) *Gate {
 	return &Gate{fw: fw, log: log, now: time.Now, holders: map[grantKey]map[string]time.Time{}}
 }
 
+// Forwarded are the ports a relay's table forwards to its exit (relay_fwd)
+// for these services of its snapshot: every port of a service not served
+// here (Local: a relay's own SSH, the probe), once, in order. They are in
+// the set from the snapshot on, before any client's knock (a knock's grant
+// goes to allow4 or allow6). None: relay_dnat's DNAT rule matches nothing.
+func Forwarded(services []*perimeterv1.Service) []Port {
+	var forward []Port
+	for _, s := range services {
+		if s.Local {
+			continue // served here
+		}
+		for _, p := range portsOf(s.Ports) {
+			if !slices.Contains(forward, p) {
+				forward = append(forward, p)
+			}
+		}
+	}
+	slices.SortFunc(forward, func(a, b Port) int { return strings.Compare(a.String(), b.String()) })
+	return forward
+}
+
 func portsOf(ps []*perimeterv1.Port) []Port {
 	out := make([]Port, 0, len(ps))
 	for _, p := range ps {
@@ -141,11 +162,9 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		allowed[d.Id] = sd.Allowed
 	}
 	services := make(map[uint16][]Port, len(snap.Services))
-	local := map[uint16]bool{}
 	var rotations []rotation
 	for _, s := range snap.Services {
 		services[uint16(s.Id)] = portsOf(s.Ports)
-		local[uint16(s.Id)] = s.Local
 		if r := s.Rotation; r != nil {
 			if len(r.PortKey) != spa.KeySize || r.PortRange == 0 || r.PortBase+r.PortRange > 65536 {
 				return fmt.Errorf("perimeter: bad rotation of service %d", s.Id)
@@ -181,7 +200,7 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 	relayPorts := portsOf(snap.RelayPorts)
 	sp := snap.Spa
 	u := &update{
-		params: params, devices: devices, allowed: allowed, services: services, local: local, rotations: rotations,
+		params: params, devices: devices, allowed: allowed, services: services, forward: Forwarded(snap.Services), rotations: rotations,
 		public: public, admin: admin, adminPorts: adminPorts, relays: relays, relayPorts: relayPorts,
 		defTTL: time.Duration(sp.DefaultTtlS) * time.Second, maxTTL: time.Duration(sp.MaxTtlS) * time.Second,
 		tcpCarrier: sp.TcpCarrier, acme: snap.GetAcme(), egress: egressOf(snap.GetEgress()),
@@ -230,7 +249,7 @@ type update struct {
 	devices            []spa.Device
 	allowed            map[string][]uint16
 	services           map[uint16][]Port
-	local              map[uint16]bool
+	forward            []Port // Forwarded
 	rotations          []rotation
 	public, adminPorts []Port
 	relayPorts         []Port
@@ -326,19 +345,7 @@ func (g *Gate) applyLocked(u *update) error {
 			g.relays, g.relayPorts, g.relaysSet = u.relays, relayPorts, true
 		}
 	}
-	var forward []Port
-	for id, ps := range u.services {
-		if u.local[id] {
-			continue // served here: a relay's own SSH
-		}
-		for _, p := range ps {
-			if !slices.Contains(forward, p) {
-				forward = append(forward, p)
-			}
-		}
-	}
-	slices.SortFunc(forward, func(a, b Port) int { return strings.Compare(a.String(), b.String()) })
-	if !slices.Equal(forward, g.forward) {
+	if forward := u.forward; !slices.Equal(forward, g.forward) {
 		if err := g.fw.SetForward(forward); err != nil {
 			errs = append(errs, err)
 		} else {

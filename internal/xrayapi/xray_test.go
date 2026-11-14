@@ -1239,7 +1239,27 @@ func probeThroughHysteria(t *testing.T, ctx context.Context, st *store.Store, m 
 	srv.Probe = &probe.Server{Auth: srv.Device, Log: srv.Log}
 	sctx, stop := context.WithCancel(ctx)
 	defer stop()
-	go srv.Serve(sctx, "127.0.0.1:"+strconv.Itoa(m.SubscriptionPort()), tlsCfg)
+	// The endpoint listens before the tunnel is asked for it: a port that
+	// is taken says so here, not as thirty EOFs through Hysteria2.
+	subAddr := "127.0.0.1:" + strconv.Itoa(m.SubscriptionPort())
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(sctx, subAddr, tlsCfg) }()
+	for i := 0; ; i++ {
+		c, err := net.DialTimeout("tcp", subAddr, time.Second)
+		if err == nil {
+			c.Close()
+			break
+		}
+		select {
+		case err := <-served:
+			t.Fatalf("the subscription endpoint on %s: %v", subAddr, err)
+		default:
+		}
+		if i == 50 {
+			t.Fatalf("the subscription endpoint on %s does not listen: %v", subAddr, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	dev, key, err := st.CreateDevice(ctx, m.Users[0].Name, "probe", "user")
 	if err != nil {
 		t.Fatal(err)
@@ -1260,7 +1280,19 @@ func probeThroughHysteria(t *testing.T, ctx context.Context, st *store.Store, m 
 		time.Sleep(200 * time.Millisecond)
 	}
 	if err != nil || down.Server.Bytes != 1<<20 {
-		t.Fatalf("probe through Hysteria2: %+v %v", down, err)
+		// Which half failed: the endpoint asked directly, without the tunnel.
+		direct := "answers a TCP connection directly"
+		if c, derr := net.DialTimeout("tcp", subAddr, time.Second); derr != nil {
+			direct = "asked directly: " + derr.Error()
+		} else {
+			c.Close()
+		}
+		select {
+		case serr := <-served:
+			direct += fmt.Sprintf("; its Serve returned %v", serr)
+		default:
+		}
+		t.Fatalf("probe through Hysteria2: %+v %v (the endpoint %s)", down, err, direct)
 	}
 	// The backend's session stats for this address (niko-server v0.6):
 	// the client above is one of its sessions. Asked with the user's name

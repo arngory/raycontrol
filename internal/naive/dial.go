@@ -52,7 +52,7 @@ func (s *Server) dialUser(ctx context.Context, user, target string, paid bool) (
 		addrs = []netip.Addr{a}
 	} else {
 		if addrs, err = s.lookupName(ctx, user, host, paid); err != nil {
-			return nil, err
+			return nil, lookupError{err}
 		}
 	}
 	var public []netip.AddrPort
@@ -62,14 +62,24 @@ func (s *Server) dialUser(ctx context.Context, user, target string, paid bool) (
 		}
 	}
 	if len(public) == 0 {
-		return nil, errors.New("naive: destination not public")
+		return nil, errNotPublic
 	}
 	return s.dialRace(ctx, user, public)
 }
 
+// errAttempts is a dial that tried no address: it had no token for one.
+var errAttempts = errors.New("naive: too many attempts")
+
+// errNoTime is a dial that tried no address: its time was over when the
+// addresses came (a lookup that answered at the deadline). Not a timeout:
+// no attempt waited, so it is no 504 (ackRefusal).
+var errNoTime = errors.New("naive: no time left for an attempt")
+
 // dialRace dials the addresses of the first one's family in turn, and
 // those of the other family from fallbackDelay on (or once the first
-// family failed), as Go's dialer does: the first connection wins.
+// family failed), as Go's dialer does: the first connection wins. A dial
+// that failed returns how each of its attempts ended (attemptErrors): what
+// it means is ackRefusal's to say, over all of them.
 func (s *Server) dialRace(ctx context.Context, user string, addrs []netip.AddrPort) (net.Conn, error) {
 	var primary, fallback []netip.AddrPort
 	for _, a := range addrs {
@@ -80,38 +90,51 @@ func (s *Server) dialRace(ctx context.Context, user string, addrs []netip.AddrPo
 		}
 	}
 	var first atomic.Bool // the first attempt was paid before the 200
+	dctx := ctx           // the dial's own, not the race's
+	failed := func(errs []error) error {
+		switch {
+		case len(errs) > 0:
+			return attemptErrors(errs)
+		case dctx.Err() != nil || expired(dctx):
+			return errNoTime
+		}
+		return errAttempts
+	}
 	if len(fallback) == 0 {
-		return s.dialSerial(ctx, user, primary, &first)
+		c, errs := s.dialSerial(ctx, user, primary, &first)
+		if c != nil {
+			return c, nil
+		}
+		return nil, failed(errs)
 	}
 	type result struct {
-		c       net.Conn
-		err     error
-		primary bool
+		c    net.Conn
+		errs []error
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan result, 2)
-	start := func(list []netip.AddrPort, primary bool) {
+	start := func(list []netip.AddrPort) {
 		go func() {
-			c, err := s.dialSerial(ctx, user, list, &first)
-			results <- result{c, err, primary}
+			c, errs := s.dialSerial(ctx, user, list, &first)
+			results <- result{c, errs}
 		}()
 	}
-	start(primary, true)
+	start(primary)
 	timer := time.NewTimer(fallbackDelay)
 	defer timer.Stop()
-	var firstErr error
+	var errs []error
 	started, done := 1, 0
 	for {
 		select {
 		case <-timer.C:
 			if started == 1 {
-				start(fallback, false)
+				start(fallback)
 				started++
 			}
 		case r := <-results:
 			done++
-			if r.err == nil {
+			if r.c != nil {
 				// The other one, if it comes, is closed.
 				go func(left int) {
 					for range left {
@@ -122,15 +145,13 @@ func (s *Server) dialRace(ctx context.Context, user string, addrs []netip.AddrPo
 				}(started - done)
 				return r.c, nil
 			}
-			if firstErr == nil || r.primary {
-				firstErr = r.err
-			}
+			errs = append(errs, r.errs...)
 			if started == 1 {
 				timer.Stop()
-				start(fallback, false)
+				start(fallback)
 				started++
 			} else if done == started {
-				return nil, firstErr
+				return nil, failed(errs)
 			}
 		}
 	}
@@ -138,30 +159,38 @@ func (s *Server) dialRace(ctx context.Context, user string, addrs []netip.AddrPo
 
 // dialSerial tries the addresses in turn, each within its share of the
 // time left: the first attempt of the dial is paid, every other takes a
-// token now or ends the dial.
-func (s *Server) dialSerial(ctx context.Context, user string, addrs []netip.AddrPort, first *atomic.Bool) (net.Conn, error) {
-	var firstErr error
+// token now or ends the dial. It returns the connection, or how each
+// attempt it made ended: none for an address it did not try.
+func (s *Server) dialSerial(ctx context.Context, user string, addrs []netip.AddrPort, first *atomic.Bool) (net.Conn, []error) {
+	dial := s.dialAddr
+	if dial == nil {
+		dial = func(ctx context.Context, a netip.AddrPort) (net.Conn, error) {
+			return PublicDialer().DialContext(ctx, "tcp", a.String())
+		}
+	}
+	least := s.minAttempt
+	if least == 0 {
+		least = minAttempt
+	}
+	var errs []error
 	for i, a := range addrs {
 		if ctx.Err() != nil {
 			break
 		}
 		if !first.CompareAndSwap(false, true) && !s.lim.attempt(user) {
-			if firstErr == nil {
-				firstErr = errors.New("naive: too many attempts")
-			}
 			break
 		}
 		actx := ctx
 		if d, ok := ctx.Deadline(); ok {
 			share := time.Until(d) / time.Duration(len(addrs)-i)
-			if share < minAttempt {
-				share = min(minAttempt, time.Until(d))
+			if share < least {
+				share = min(least, time.Until(d))
 			}
 			var cancel context.CancelFunc
 			actx, cancel = context.WithTimeout(ctx, share)
 			defer cancel()
 		}
-		c, err := PublicDialer().DialContext(actx, "tcp", a.String())
+		c, err := dial(actx, a)
 		if err == nil {
 			return c, nil
 		}
@@ -170,12 +199,7 @@ func (s *Server) dialSerial(ctx context.Context, user string, addrs []netip.Addr
 		if !errors.Is(ctx.Err(), context.Canceled) {
 			s.lim.failedDial(user, err)
 		}
-		if firstErr == nil {
-			firstErr = err
-		}
+		errs = append(errs, err)
 	}
-	if firstErr == nil {
-		firstErr = ctx.Err()
-	}
-	return nil, firstErr
+	return nil, errs
 }

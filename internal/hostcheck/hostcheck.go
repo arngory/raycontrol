@@ -21,7 +21,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/deploy"
@@ -108,13 +107,7 @@ func System() *Host {
 		},
 		LookPath: func(name string) error { _, err := exec.LookPath(name); return err },
 		Euid:     os.Geteuid,
-		Free: func(path string) (uint64, error) {
-			var st syscall.Statfs_t
-			if err := syscall.Statfs(path, &st); err != nil {
-				return 0, err
-			}
-			return st.Bavail * uint64(st.Bsize), nil //nolint:gosec // G115: block sizes are positive
-		},
+		Free:     statfsFree,
 		Addrs: func() ([]netip.Addr, error) {
 			as, err := net.InterfaceAddrs()
 			var out []netip.Addr

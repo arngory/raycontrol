@@ -57,7 +57,7 @@ func guardCommand(flock, rayspa string) []string {
 // and every other way out, a signal too, stops it, disables it and removes
 // its table, so that a relay that cannot reach its exit does not lock its
 // admin out, now or at the next boot.
-func installRelay(bundlePath, packages string) error {
+func installRelay(bundlePath, packages string) (err error) {
 	// Before the journal: a node's records are its own.
 	if _, err := os.Stat(deploy.DB); err == nil {
 		return fmt.Errorf("this host is a node (%s): a relay goes on a host of its own", deploy.DB)
@@ -70,14 +70,9 @@ func installRelay(bundlePath, packages string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", bundlePath, err)
 	}
-	for _, tool := range []string{"nft", "systemctl", "systemd-run", "install"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			return fmt.Errorf("%s is missing: a relay needs nftables and systemd", tool)
-		}
-	}
-	flock, err := exec.LookPath("flock")
+	flock, err := relayTools()
 	if err != nil {
-		return errors.New("flock is missing (util-linux): the install's guard timer needs it")
+		return err
 	}
 	if _, err := os.Stat(deploy.DefaultBinaries.Rayspa); err != nil {
 		return fmt.Errorf("%s is missing: install/bootstrap.sh -relay installs it", deploy.DefaultBinaries.Rayspa)
@@ -88,12 +83,13 @@ func installRelay(bundlePath, packages string) error {
 		return fmt.Errorf("%s is missing: install/bootstrap.sh -relay installs it (rayspa's unit copies the bundle in with it)",
 			deploy.DefaultBinaries.Rayd)
 	}
-	// One install at a time: two would share the guard.
-	installLock, err := takeInstallLock(relayInstallLock)
+	// One install at a time: two would share the guard. Under rayctl
+	// update, the update's own lock, held from before its first change.
+	_, done, err := relayInstallBegin(relayInstallLock, previousDir)
 	if err != nil {
 		return err
 	}
-	defer installLock.Close()
+	defer func() { done(err) }()
 	sshd, err := sshdPorts()
 	if err != nil {
 		return fmt.Errorf("a relay closes all but its SSH port, and sshd's cannot be told (%w): fix sshd first", err)
@@ -229,7 +225,7 @@ func installRelay(bundlePath, packages string) error {
 		},
 		readSnapshot: func() (*perimeterv1.Snapshot, error) { return readSnapshot(relaySnapshot) },
 		check: func(snap *perimeterv1.Snapshot) (string, error) {
-			return checkRelaySSH(snap, port, sess.addr, b.Name)
+			return checkRelaySSH(snap, port, sess.addr, b.Name, "install again")
 		},
 		forward: func() error {
 			// The value before raycontrol first: once our file is there, a
@@ -316,6 +312,21 @@ func installRelay(bundlePath, packages string) error {
 	return nil
 }
 
+// relayTools checks the commands a relay install runs, and finds flock
+// for its guard timer.
+func relayTools() (flock string, err error) {
+	for _, tool := range []string{"nft", "systemctl", "systemd-run", "install"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			return "", fmt.Errorf("%s is missing: a relay needs nftables and systemd", tool)
+		}
+	}
+	flock, err = exec.LookPath("flock")
+	if err != nil {
+		return "", errors.New("flock is missing (util-linux): the install's guard timer needs it")
+	}
+	return flock, nil
+}
+
 // relayProbe starts rayd relay, the relay's probe endpoint, on a relay that
 // is up.
 type relayProbe struct {
@@ -394,6 +405,78 @@ func startGuarded(lock, armed string, run func(string, ...string) error) error {
 
 // relayInstallLock keeps two relay installs from running at once.
 const relayInstallLock = "/run/raycontrol-relay-install.lock"
+
+// relayLockEnv tells rayctl install -relay that rayctl update, its parent,
+// holds the install lock and passes it on as fd 3: the lock stays held
+// from the update's first change through the install, so a bootstrap.sh
+// -relay cannot slip in between.
+const relayLockEnv = "RAYCONTROL_RELAY_LOCK_FD"
+
+// relayMarkFile, in previousDir, says that an update or a rollback of the
+// relay did not end well (update_relay.go). A relay installed anew and
+// checked by rayctl install -relay outside an update has no such past.
+const relayMarkFile = "relay.unfinished"
+
+// relayInstallBegin takes the install lock (relayInstallLockFor); done,
+// given the install's outcome, lets it go. A relay installed anew and
+// checked outside an update has no past: an update that did not end is
+// over (relayMarkFile), and what an earlier update kept of the relay
+// would roll it back to a version from before this install (dropRelayCopy).
+// Under an update, the update keeps and says.
+func relayInstallBegin(path, dir string) (lock *os.File, done func(error), err error) {
+	lock, underUpdate, err := relayInstallLockFor(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return lock, func(err error) {
+		if err == nil && !underUpdate {
+			dropRelayCopy(dir)
+		}
+		_ = lock.Close()
+	}, nil
+}
+
+// dropRelayCopy removes what an earlier update kept of the relay in dir
+// (previousDir), its mark with it. Only a relay's copy, the one with
+// relay.json: a node's has none (and installRelay refuses a node's host);
+// without one, the mark alone goes.
+func dropRelayCopy(dir string) {
+	if _, err := os.Lstat(filepath.Join(dir, relayKeptFile)); err == nil {
+		_ = os.RemoveAll(dir)
+		return
+	}
+	_ = os.Remove(filepath.Join(dir, relayMarkFile))
+}
+
+// relayInstallLockFor takes the install lock, or the one an update passed
+// on (underUpdate): fd 3 must be that very file and hold its lock.
+func relayInstallLockFor(path string) (f *os.File, underUpdate bool, err error) {
+	if os.Getenv(relayLockEnv) == "3" {
+		_ = os.Unsetenv(relayLockEnv)
+		if inheritedLock(path, 3) {
+			return os.NewFile(3, path), true, nil
+		}
+	}
+	f, err = takeInstallLock(path)
+	return f, false, err
+}
+
+// inheritedLock tells whether fd is the lock file at path and its lock
+// this process's: an open file description shared with the parent that
+// took it, on which taking it again succeeds at once. fd is looked at, not
+// wrapped, until it is known to be that file.
+func inheritedLock(path string, fd int) bool {
+	var st, pt syscall.Stat_t
+	if syscall.Fstat(fd, &st) != nil || syscall.Stat(path, &pt) != nil || st.Dev != pt.Dev || st.Ino != pt.Ino {
+		return false
+	}
+	if syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return false
+	}
+	// Not passed on further: the install's own commands do not hold it.
+	syscall.CloseOnExec(fd)
+	return true
+}
 
 // takeInstallLock takes the install lock or says another install has it.
 func takeInstallLock(path string) (*os.File, error) {
@@ -856,8 +939,8 @@ func relaySSHPort(sshd []int, listening func(int) bool, session int) (int, error
 // checkRelaySSH tells whether the relay's perimeter lets SSH in: on sshd's
 // port, from the relay's admin addresses, this session's address among
 // them (client, empty: not known). What it cannot check comes back as a
-// warning.
-func checkRelaySSH(snap *perimeterv1.Snapshot, port int, client, relay string) (string, error) {
+// warning. again is what the operator runs once the exit lets them in.
+func checkRelaySSH(snap *perimeterv1.Snapshot, port int, client, relay, again string) (string, error) {
 	if len(snap.AdminPrefixes) == 0 || !slices.ContainsFunc(snap.AdminPorts, func(p *perimeterv1.Port) bool { return p.Proto == "tcp" && int(p.Port) == port }) {
 		return "", fmt.Errorf("the relay's perimeter would not let SSH in here: sshd listens on %d, the relay's SSH port is %v, "+
 			"its admin addresses %v; on the exit: rayctl relay set -ssh-port %d -admin <your address> %s",
@@ -875,8 +958,8 @@ func checkRelaySSH(snap *perimeterv1.Snapshot, port int, client, relay string) (
 		// The next connection would be refused. relay set replaces the
 		// list: the one it has, and this address.
 		return "", fmt.Errorf("this SSH session comes from %s, not from the relay's admin addresses %v: the next one would be "+
-			"refused; on the exit: rayctl relay set -admin %s %s, then install again",
-			client, snap.AdminPrefixes, strings.Join(append(slices.Clone(snap.AdminPrefixes), client), ","), relay)
+			"refused; on the exit: rayctl relay set -admin %s %s, then %s",
+			client, snap.AdminPrefixes, strings.Join(append(slices.Clone(snap.AdminPrefixes), client), ","), relay, again)
 	}
 	return "", nil
 }
@@ -894,9 +977,11 @@ func adminIncludes(prefixes []string, addr string) bool {
 	})
 }
 
-// readSnapshot reads the perimeter rayspa saved.
+// readSnapshot reads the perimeter rayspa saved. rayspa owns its
+// directory: root reads the file without following a link and does not
+// wait on a FIFO there (readRegular).
 func readSnapshot(path string) (*perimeterv1.Snapshot, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: rayspa's state
+	raw, err := readRegular(path)
 	if err != nil {
 		return nil, err
 	}

@@ -56,9 +56,20 @@ type Server struct {
 	// CredGrace is how long a previous dnstt seal key stays accepted after
 	// the operator switched it (rayd -cred-grace); zero: not at all.
 	CredGrace time.Duration
+	// SiteKeyLead is how long a site's next certificate key must have been
+	// in subscriptions before the operator's switch to it (rayd
+	// -site-key-lead, spec/cert-pin-v1.md §5). Certificates says rayd
+	// issues the sites' certificates (ACME on): the switch is an issuance,
+	// and without it nothing would make it.
+	SiteKeyLead  time.Duration
+	Certificates bool
 	// DNSChanged runs after the operator changed the DNS provider or its
 	// records: the certificates are tried again (certs.Manager.Retry).
 	DNSChanged func()
+	// SiteKeyAsked runs after a site's switch was asked, again too
+	// (certs.Manager.RetrySite): the same request again gets a try
+	// RetryGap after its last failed one, not after the back-off.
+	SiteKeyAsked func(name string)
 	// Health is where rayd's loops report (O-2): status and metrics.
 	Health *health.Board
 	// DNSCheck checks the DNS tunnel zones from the node (CheckDNSZones);
@@ -585,16 +596,71 @@ func (s *Server) SetServiceOption(ctx context.Context, req *connect.Request[node
 	return connect.NewResponse(&nodev1.SetServiceOptionResponse{Service: servicePB(svc)}), nil
 }
 
+// SetCertificate puts the operator's certificate on a site: root on the
+// node only, as Backup. The request carries a private key, and the call
+// replaces the key the clients pin and takes the pins off the lines
+// (spec/cert-pin-v1.md §7): a member of the API group must not do what
+// rotateSiteKey keeps to root.
 func (s *Server) SetCertificate(ctx context.Context, req *connect.Request[nodev1.SetCertificateRequest]) (*connect.Response[nodev1.SetCertificateResponse], error) {
-	c, err := provision.SetCertificate(ctx, s.Store, req.Msg.Service, req.Msg.ChainPem, req.Msg.KeyPem, time.Now())
-	if err := s.done(ctx, "service.cert", req.Msg.Service, err); err != nil {
+	if !isRoot(ctx) {
+		return nil, connect.NewError(connect.CodePermissionDenied, errors.New("a site's certificate: root on the node only"))
+	}
+	c, err := provision.SetCertificate(ctx, s.Store, req.Msg.Service, req.Msg.ChainPem, req.Msg.KeyPem, time.Now(), req.Msg.Force)
+	action := "service.cert"
+	if req.Msg.Force {
+		action += " force"
+	}
+	if err := s.done(ctx, action, req.Msg.Service, err); err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(&nodev1.SetCertificateResponse{Names: c.Names, NotAfter: c.NotAfter.Unix(), MissingNext: c.MissingNext}), nil
+	return connect.NewResponse(&nodev1.SetCertificateResponse{Names: c.Names, NotAfter: c.NotAfter.Unix(), MissingNext: c.MissingNext,
+		Unpinned: c.Unpinned}), nil
+}
+
+// rotateSiteKey asks for another key of a site's certificate
+// (spec/cert-pin-v1.md §5): root on the node only, as the site's own
+// certificate is. The certificate manager, woken by the change, gives the
+// order one try at once, whatever its back-off, and goes on by the
+// back-off if that fails; an upgrade (-force, then -fresh) is a request of
+// its own. The same request again gets a try RetryGap (15 minutes) after
+// the last failed one at the earliest. how is one of provision's
+// SiteSwitch values; each is audited under its own action.
+func (s *Server) rotateSiteKey(ctx context.Context, name, how string, now time.Time) (*connect.Response[nodev1.RotateServiceResponse], error) {
+	if !isRoot(ctx) {
+		return nil, connect.NewError(connect.CodePermissionDenied, errors.New("a site's certificate key: root on the node only"))
+	}
+	var err error
+	if !s.Certificates {
+		err = fmt.Errorf("%w: rayd issues no certificates here (-acme-directory is empty): the key of %s changes with the certificate you import "+
+			"(rayctl service cert)", store.ErrPrecondition, name)
+	} else {
+		err = provision.RequestSiteKeyRotation(ctx, s.Store, name, now, s.SiteKeyLead, how)
+	}
+	action := "service.rotate"
+	if how != provision.SiteSwitchLead {
+		action += " " + how
+	}
+	if err := s.done(ctx, action, name, err); err != nil {
+		return nil, err
+	}
+	if s.SiteKeyAsked != nil {
+		s.SiteKeyAsked(name)
+	}
+	return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Key: "tls"}), nil
 }
 
 func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.RotateServiceRequest]) (*connect.Response[nodev1.RotateServiceResponse], error) {
 	now := time.Now()
+	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "site" {
+		how := provision.SiteSwitchLead
+		switch {
+		case req.Msg.Fresh:
+			how = provision.SiteSwitchFresh
+		case req.Msg.Force:
+			how = provision.SiteSwitchForce
+		}
+		return s.rotateSiteKey(ctx, req.Msg.Name, how, now)
+	}
 	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "masterdns" {
 		// masterdns-key-rotation §2: the new key at once, in subscriptions
 		// from now; the previous one for the grace (its sessions go on).

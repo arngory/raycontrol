@@ -295,14 +295,19 @@ func readArg(s string) (string, error) {
 	default:
 		return s, nil
 	}
+	return argToken(text), nil
+}
+
+// argToken is the bundle or the invite in text, as readArg finds it.
+func argToken(text string) string {
 	n := len(node.InvitePrefix2)
 	for _, f := range strings.Fields(text) {
 		if strings.HasPrefix(f, node.BundlePrefix) || strings.HasPrefix(f, node.InvitePrefix) ||
 			len(f) > n && strings.EqualFold(f[:n], node.InvitePrefix2) {
-			return f, nil
+			return f
 		}
 	}
-	return strings.TrimSpace(text), nil
+	return strings.TrimSpace(text)
 }
 
 func resolve(ctx context.Context, host string) (netip.Addr, error) {

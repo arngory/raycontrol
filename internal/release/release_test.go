@@ -291,9 +291,11 @@ func TestArchiveFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The node's archive: the workflow packs rayctl alone for other systems
+	// too (rayctl-<os>-<arch>.tar.gz), which no node takes.
 	var packed []string
 	for _, line := range strings.Split(string(wf), "\n") {
-		if _, rest, ok := strings.Cut(line, "tar -czf "); ok {
+		if _, rest, ok := strings.Cut(line, `tar -czf "raycontrol-linux-`); ok {
 			f := strings.Fields(rest)
 			for i, w := range f {
 				if w == "-C" && i+2 < len(f) {
@@ -303,7 +305,7 @@ func TestArchiveFiles(t *testing.T) {
 		}
 	}
 	if len(packed) == 0 {
-		t.Fatal("no tar -czf ... -C dist <files> in release.yml")
+		t.Fatal("no tar -czf \"raycontrol-linux-...\" -C dist <files> in release.yml")
 	}
 	for _, name := range packed {
 		if !slices.Contains(Files, name) {
@@ -372,5 +374,149 @@ func TestExtractFile(t *testing.T) {
 	}
 	if err := ExtractFile([]byte("not gzip"), "rayctl", filepath.Join(t.TempDir(), "x")); err == nil {
 		t.Fatal("garbage taken")
+	}
+}
+
+// releaseArchives are the archives of a release as the Release workflow
+// names them (ARCHIVES), in the order of its SHA256SUMS.
+func releaseArchives(t *testing.T) []string {
+	t.Helper()
+	wf := readFile(t, "../../.github/workflows/release.yml")
+	_, rest, ok := strings.Cut(wf, "\n      ARCHIVES: >-\n")
+	if !ok {
+		t.Fatal("no ARCHIVES in release.yml")
+	}
+	var names []string
+	for _, line := range strings.Split(rest, "\n") {
+		if !strings.HasPrefix(line, "        ") {
+			break
+		}
+		names = append(names, strings.Fields(line)...)
+	}
+	// The checksums and the upload are of that list, not of a pattern that
+	// would leave one out or take one more.
+	for _, want := range []string{`sha256sum "${archives[@]}" > SHA256SUMS`, `"${archives[@]}" SHA256SUMS SHA256SUMS.minisig`} {
+		if !strings.Contains(wf, want) {
+			t.Errorf("release.yml lacks %q", want)
+		}
+	}
+	if n := strings.Count(wf, `read -ra archives <<< "$ARCHIVES"`); n != 2 {
+		t.Errorf("release.yml reads ARCHIVES %d times, want 2 (the checksums, the upload)", n)
+	}
+	return names
+}
+
+// A release lists more than a node takes: the other architecture's archive
+// and rayctl for other systems (rayctl-darwin-*, rayctl-freebsd-*), all in
+// the one signed SHA256SUMS. A node reads its own line by its whole name,
+// wherever it stands; the other lines are nothing to it. sumOf has not
+// changed since v0.2.0 (nor has the 64 KiB bound on SHA256SUMS), so what
+// holds here holds for the rayctl of every release; bootstrap.sh's line is
+// test/install/minisig.sh's.
+func TestSumsOfOtherArchives(t *testing.T) {
+	names := releaseArchives(t)
+	for _, want := range []string{Archive("amd64"), Archive("arm64"), "rayctl-darwin-arm64.tar.gz", "rayctl-darwin-amd64.tar.gz", "rayctl-freebsd-amd64.tar.gz"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("release.yml's ARCHIVES lacks %s: %v", want, names)
+		}
+	}
+	for _, n := range names {
+		if !strings.HasPrefix(n, "raycontrol-linux-") && !strings.HasPrefix(n, "rayctl-") {
+			t.Errorf("release.yml's ARCHIVES has %s", n)
+		}
+	}
+	k := newKey(t)
+	archives := map[string][]byte{}
+	for _, n := range names {
+		archives[n] = archive(t, map[string]string{"rayctl": n})
+	}
+	sums := func(order []string, mark string) []byte {
+		var b []byte
+		for _, n := range order {
+			sum := sha256.Sum256(archives[n])
+			b = append(b, hex.EncodeToString(sum[:])+" "+mark+n+"\n"...)
+		}
+		return b
+	}
+	local := func(sums []byte, arch string, files map[string][]byte) (Release, error) {
+		dir := t.TempDir()
+		for n, b := range files {
+			os.WriteFile(filepath.Join(dir, n), b, 0o644)
+		}
+		os.WriteFile(filepath.Join(dir, "SHA256SUMS"), sums, 0o644)
+		os.WriteFile(filepath.Join(dir, "SHA256SUMS.minisig"), k.sign(sums, "raycontrol v0.26.0", false), 0o644)
+		return Local(dir, arch, k.pub)
+	}
+	reversed := slices.Clone(names)
+	slices.Reverse(reversed)
+	for name, s := range map[string][]byte{
+		"as the workflow writes it": sums(names, " "),
+		"rayctl's lines first":      sums(reversed, " "),
+		"binary mode":               sums(names, "*"),
+	} {
+		if len(s) > 1<<16 {
+			t.Fatalf("%s: SHA256SUMS of %d bytes, over what rayctl update reads", name, len(s))
+		}
+		for _, arch := range []string{"amd64", "arm64"} {
+			// As a node has them (rayctl update -from DIR): the three files.
+			r, err := local(s, arch, map[string][]byte{Archive(arch): archives[Archive(arch)]})
+			if err != nil || r.Version != "v0.26.0" || !bytes.Equal(r.Archive, archives[Archive(arch)]) {
+				t.Errorf("%s, %s: %v %v", name, arch, r.Version, err)
+			}
+			for _, n := range names {
+				want, err := sumOf(s, n)
+				if got := sha256.Sum256(archives[n]); err != nil || want != hex.EncodeToString(got[:]) {
+					t.Errorf("%s: the line of %s: %q, %v", name, n, want, err)
+				}
+			}
+		}
+	}
+	// A node's archive is checked against its own line, not another's: a
+	// rayctl archive in its place fails, and so does a release without it.
+	s := sums(names, " ")
+	if _, err := local(s, "amd64", map[string][]byte{Archive("amd64"): archives["rayctl-darwin-amd64.tar.gz"]}); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Errorf("another archive under the node's name: %v", err)
+	}
+	var clients []string
+	for _, n := range names {
+		if strings.HasPrefix(n, "rayctl-") {
+			clients = append(clients, n)
+		}
+	}
+	if _, err := local(sums(clients, " "), "amd64", map[string][]byte{Archive("amd64"): archives[Archive("amd64")]}); err == nil ||
+		!strings.Contains(err.Error(), "SHA256SUMS has no "+Archive("amd64")) {
+		t.Errorf("no line for the node: %v", err)
+	}
+	for _, n := range []string{"rayctl-linux-amd64.tar.gz", "linux-amd64.tar.gz", "raycontrol-linux-amd64.tar.gz.sig", "rayctl-darwin-arm64"} {
+		if got, err := sumOf(s, n); err == nil {
+			t.Errorf("a line for %s: %s", n, got)
+		}
+	}
+
+	// And fetched, as rayctl update takes the latest release.
+	files := map[string][]byte{"SHA256SUMS": s, "SHA256SUMS.minisig": k.sign(s, "raycontrol v0.26.0", false)}
+	for n, b := range archives {
+		files[n] = b
+	}
+	var fetched []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		fetched = append(fetched, name)
+		if b, ok := files[name]; ok {
+			w.Write(b)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	f := &Fetcher{Base: srv.URL}
+	for _, arch := range []string{"amd64", "arm64"} {
+		r, err := f.Fetch(context.Background(), "latest", arch, k.pub)
+		if err != nil || r.Version != "v0.26.0" || !bytes.Equal(r.Archive, archives[Archive(arch)]) {
+			t.Fatalf("fetched, %s: %v %v", arch, r.Version, err)
+		}
+	}
+	if slices.ContainsFunc(fetched, func(n string) bool { return strings.HasPrefix(n, "rayctl-") }) {
+		t.Errorf("a node fetched rayctl's archives: %v", fetched)
 	}
 }

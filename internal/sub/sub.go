@@ -549,6 +549,45 @@ func YggdrasilLink(m render.Model, s, inner render.Service, uuid string, device 
 	return "vless://" + uuid + "@" + host + "?" + q.Encode() + "#" + url.PathEscape(s.Name), nil
 }
 
+// setSitePins adds niko-pin to the line of a service that answers with its
+// site's certificate (spec/cert-pin-v1.md §2): the pins of the key of the
+// leaf in use, of the next key and, for an hour after a switch, of the key
+// before, from what the store holds. The client takes a leaf with one of
+// these keys only, whatever CA signed it. No parameter
+// where the node cannot promise the key of the next certificate
+// (provision.SiteKeyPins): the operator's own certificate, no certificate
+// manager. None either, for its first minutes, where this rayd changed the
+// site's pins (pinsHeld).
+func setSitePins(q url.Values, m render.Model, s render.Service) {
+	// The key before the last switch is in the list for an hour: by the
+	// subscription's time when it gives one (Server.build).
+	now := m.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	for _, x := range m.Services {
+		if x.Kind == "site" && x.Name == provision.SiteOf(s.Service) && !pinsHeld(m, x, now) {
+			if pins := provision.SiteKeyPins(x.Service, x.Secrets, now); len(pins) > 0 {
+				q.Set("niko-pin", strings.Join(pins, ","))
+			}
+		}
+	}
+}
+
+// pinsHeld reports a site whose pins this rayd changed (a next key made,
+// a switch stored: tls_next_at from m.PinsSince on) before the settle
+// time m.PinsAfter (spec/cert-pin-v1.md §8). An update rolled back in its
+// first minutes puts back the database of before its start: pins made
+// since are gone from it, and a client that took them would refuse the
+// node's leaf. Pins the database had at the start are in that copy too
+// and go out as before: a restart that is no update loses none.
+func pinsHeld(m render.Model, site render.Service, now time.Time) bool {
+	if m.PinsSince.IsZero() || !now.Before(m.PinsAfter) {
+		return false
+	}
+	return provision.ParseSiteKeyState(site.Service).NextAt >= m.PinsSince.Unix()
+}
+
 // DoHLink is the DoH endpoint of a user (spec/subscription-v1.md §4): the
 // standard https://<name>/dns-query/<token> with the Niko parameters, which
 // the client drops before it asks.
@@ -560,6 +599,7 @@ func DoHLink(m render.Model, s render.Service, token string) string {
 	q := url.Values{}
 	q.Set("niko-node", m.NodeID)
 	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
+	setSitePins(q, m, s)
 	return "https://" + st.SNI + "/dns-query/" + url.PathEscape(token) + "?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
 
@@ -585,6 +625,10 @@ func NaiveLink(m render.Model, s render.Service, password string) string {
 	if provision.NaiveICMP(s.Service) {
 		q.Set("icmp", "1")
 	}
+	// rayd naive answers a CONNECT with the header niko-ack: 1 after the
+	// dial, with its outcome (spec/naive-uot-v1.md §4), as Hysteria2 does.
+	q.Set("niko-ack", "1")
+	setSitePins(q, m, s)
 	return "naive+https://" + url.UserPassword("niko", password).String() + "@" + net.JoinHostPort(m.Host, "443") + "?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
 
@@ -619,6 +663,11 @@ func HysteriaLink(m render.Model, s render.Service, password string) string {
 		}
 		sum := sha256.Sum256(cert)
 		q.Set("pinSHA256", hex.EncodeToString(sum[:]))
+	} else {
+		// hy2-masq: the site's certificate, its keys pinned (cert-pin-v1);
+		// no pinSHA256, which names one certificate and would break at
+		// every renewal.
+		setSitePins(q, m, s)
 	}
 	q.Set("niko-node", m.NodeID)
 	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))

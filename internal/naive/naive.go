@@ -48,9 +48,16 @@ type Server struct {
 
 	// lim are the per-user limits (spec/conn-limit-v1.md §3.1), names the
 	// process's cache of names.
-	lim     limits
-	names   names
-	uotIdle time.Duration // uotIdle when 0 (tests make it short)
+	lim      limits
+	names    names
+	uotIdle  time.Duration // uotIdle when 0 (tests make it short)
+	dialWait time.Duration // dialTimeout when 0 (tests make it short)
+	// dialAddr dials one address of a destination; the public dialer when
+	// nil (tests have their own, under the server's own choice of
+	// addresses). minAttempt is the least time an address gets; the
+	// constant when 0.
+	dialAddr   func(ctx context.Context, addr netip.AddrPort) (net.Conn, error)
+	minAttempt time.Duration
 
 	icmp     icmpLimits
 	icmpIdle time.Duration                   // icmpIdle when 0
@@ -82,19 +89,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // tunnel serves an authenticated CONNECT until it ends or a.ctx is done;
-// false when it answered without a tunnel (the site's answer, 429).
+// false when it answered without a tunnel (the site's answer, 429, the
+// honest connect's 502 and 504).
 func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool {
-	user, ctx := a.user, a.ctx
+	ctx := a.ctx
 	target := r.Host
+	// A target that is no host and port, or whose host is neither an
+	// address nor a domain name (a megabyte's :authority, say), is a bad
+	// target: nothing of it is looked up, kept or charged. It gets the
+	// site's answer; but a client that asked for the dial's outcome
+	// (niko-ack, ack.go) and whose password was taken must not read the
+	// site's 404 as that password refused: it gets the honest connect's
+	// refusal, as for any target the node will not dial.
 	host, _, err := net.SplitHostPort(target)
-	if err != nil {
-		s.Answer.ServeHTTP(w, r)
-		return false
+	if err == nil {
+		if _, perr := netip.ParseAddr(host); perr != nil && !domainName(host) {
+			err = errBadName
+		}
 	}
-	// A host that is neither an address nor a domain name (a megabyte's
-	// :authority, say) is a bad target too: nothing of it is looked up,
-	// kept or charged.
-	if _, err := netip.ParseAddr(host); err != nil && !domainName(host) {
+	if err != nil {
+		if r.Header.Get(AckHeader) == "1" {
+			refuse(w, http.StatusBadGateway, ackDenied)
+			return false
+		}
 		s.Answer.ServeHTTP(w, r)
 		return false
 	}
@@ -119,7 +136,7 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 		if kind != "" {
 			// Not who or where: no user and no destination in the log.
 			s.Log.Debug("naive: too many connections", "limit", kind)
-			w.WriteHeader(http.StatusTooManyRequests)
+			refuse(w, http.StatusTooManyRequests, "")
 			return false
 		}
 		defer done()
@@ -127,15 +144,25 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 	// 200 before the destination answers: waiting for it would cost each
 	// connection up to a round trip more. A destination that cannot be
 	// reached resets the stream (spec/naive-uot-v1.md §4): the client sees
-	// an error, not an empty answer.
-	w.Header().Set("Padding", paddingHeader())
-	w.WriteHeader(http.StatusOK)
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	// an error, not an empty answer. A client that asked for the dial's
+	// outcome (niko-ack, ack.go) gets its answer after the dial instead; a
+	// UoT or an ICMP stream has none to wait for.
+	ack := tcp && r.Header.Get(AckHeader) == "1"
+	var in *paddedStream
+	accept := func() bool {
+		w.Header().Set("Padding", paddingHeader())
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return false
+		}
+		flusher.Flush()
+		in = &paddedStream{r: r.Body, w: w, f: flusher}
 		return true
 	}
-	flusher.Flush()
-	in := &paddedStream{r: r.Body, w: w, f: flusher}
+	if !ack && !accept() {
+		return true
+	}
 
 	switch host {
 	case UoTName:
@@ -147,6 +174,8 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 			panic(http.ErrAbortHandler)
 		}
 		defer s.lim.uotPut(slot)
+		// Datagrams on the connection: its socket holds little unsent.
+		defer datagramStream(ctx)()
 		err := s.serveUoT(uctx, slot, a.traffic, in, http.NewResponseController(w))
 		if err != nil {
 			s.Log.Debug("naive: UDP refused", "err", err)
@@ -160,12 +189,15 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 			s.Log.Debug("naive: ICMP is off")
 			panic(http.ErrAbortHandler)
 		}
-		u := s.icmp.take(user)
+		// The user's streams and echoes, whichever of the user's
+		// credentials opened the stream.
+		u := s.icmp.take(a.key)
 		if u == nil {
 			s.Log.Debug("naive: too many ICMP streams")
 			panic(http.ErrAbortHandler)
 		}
 		defer s.icmp.put(u)
+		defer datagramStream(ctx)()
 		if err := s.serveICMP(ctx, u, a.traffic, in, http.NewResponseController(w)); err != nil {
 			s.Log.Debug("naive: ICMP refused", "err", err)
 			panic(http.ErrAbortHandler)
@@ -173,14 +205,28 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 		return true
 	}
 
-	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	dctx, cancel := context.WithTimeout(ctx, s.dialTimeout())
 	out, err := s.dialUser(dctx, a.key, target, paid)
+	ranOut := expired(dctx) // the dial had its whole time
 	cancel()
 	if err != nil {
-		s.Log.Debug("naive: destination unreachable") // not where: no destination in the log
+		// With niko-ack the dial's outcome is the answer, and nothing is
+		// written after it; a client that is gone, or a user revoked
+		// meanwhile, gets the reset. Not where: no destination in the log,
+		// and none in the answer.
+		if ack && ctx.Err() == nil {
+			status, reason := ackRefusal(err, ranOut)
+			refuse(w, status, reason)
+			s.Log.Debug("naive: destination unreachable", "status", status)
+			return false
+		}
+		s.Log.Debug("naive: destination unreachable")
 		panic(http.ErrAbortHandler)
 	}
 	defer out.Close()
+	if ack && !accept() {
+		return true
+	}
 	// The client's end of the upload only half-closes the destination; the
 	// tunnel lasts until the destination is done sending, or the stream
 	// ends. Nothing writes to w once this returns. The bytes count at the
@@ -191,13 +237,26 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 			_ = cw.CloseWrite()
 		}
 	}()
-	down := make(chan struct{})
+	// down gets how the destination's side ended: nil for its end (FIN),
+	// and for a download the client's side stopped; its error when it
+	// broke off (a reset, its path's timeout).
+	down := make(chan error, 1)
 	go func() {
-		_, _ = io.Copy(in, countReader{out, a.traffic.down()})
-		close(down)
+		from := &brokenReader{r: countReader{out, a.traffic.down()}}
+		_, _ = io.Copy(in, from)
+		down <- from.err
 	}()
 	select {
-	case <-down:
+	case err := <-down:
+		// A destination that broke off resets the stream, as one that
+		// could not be reached does (spec/naive-uot-v1.md §4): ended
+		// cleanly, the client took what came for all there was. Only the
+		// destination's end is the stream's end. What broke is not said:
+		// the error names the destination.
+		if err != nil {
+			s.Log.Debug("naive: destination broke off")
+			panic(http.ErrAbortHandler)
+		}
 	case <-ctx.Done():
 		_ = out.Close()
 		// A client that does not read holds the download in a write
@@ -211,6 +270,21 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 		}
 	}
 	return true
+}
+
+// brokenReader keeps the error its reader ended with, if it was not its
+// end: what a copy does not tell apart from the writer's errors.
+type brokenReader struct {
+	r   io.Reader
+	err error
+}
+
+func (b *brokenReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err != nil && err != io.EOF {
+		b.err = err
+	}
+	return n, err
 }
 
 // password is Proxy-Authorization's: Basic, any user name.
@@ -233,13 +307,13 @@ func password(r *http.Request) (string, bool) {
 // may not use naive to get at what only the node's own address reaches.
 // Names are looked up with the public resolvers.
 func PublicDialer() *net.Dialer {
-	return &net.Dialer{Timeout: 10 * time.Second, Resolver: PublicResolver(), Control: func(_, address string, _ syscall.RawConn) error {
+	return &net.Dialer{Timeout: dialTimeout, Resolver: PublicResolver(), Control: func(_, address string, _ syscall.RawConn) error {
 		ap, err := netip.ParseAddrPort(address)
 		if err != nil {
 			return err
 		}
 		if !Public(ap.Addr()) {
-			return errors.New("naive: destination not public")
+			return errNotPublic
 		}
 		return nil
 	}}

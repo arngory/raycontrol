@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -42,15 +43,43 @@ type remoteIdentity struct {
 	cert   tls.Certificate
 }
 
+// loadIdentity reads a device file, which must be closed to everyone else
+// and, but for root, the user's own (checkDeviceFile).
 func loadIdentity(path string) (remoteIdentity, error) {
 	id := remoteIdentity{path: path}
-	b, err := os.ReadFile(path) //nolint:gosec // G304: the operator's file
+	f, err := os.Open(path) //nolint:gosec // G304: the operator's file
+	if err != nil {
+		return id, err // the read's error, as before the check
+	}
+	defer f.Close()
+	b, err := readDeviceFile(path, f)
 	if err != nil {
 		return id, err
 	}
-	if id.raw, err = readArg("@" + path); err != nil {
-		return id, err
+	return decodeIdentity(path, b)
+}
+
+// maxDeviceFile bounds a device file as read; one is about 1 KiB.
+const maxDeviceFile = 64 << 10
+
+// readDeviceFile is the open device file f at path, checked
+// (checkDeviceFile) on the descriptor and read once: what is checked is
+// what is read, and the bundle and the key come from the same bytes.
+func readDeviceFile(path string, f *os.File) ([]byte, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
 	}
+	if err := checkDeviceFile(path, fi); err != nil {
+		return nil, err
+	}
+	return io.ReadAll(io.LimitReader(f, maxDeviceFile))
+}
+
+// decodeIdentity is the device file at path whose content is b.
+func decodeIdentity(path string, b []byte) (remoteIdentity, error) {
+	id := remoteIdentity{path: path, raw: argToken(string(b))}
+	var err error
 	if id.bundle, err = node.DecodeBundle(id.raw); err != nil {
 		return id, fmt.Errorf("%s: %w", path, err)
 	}
@@ -299,16 +328,25 @@ func (c *cli) remoteRotate(ctx context.Context) error {
 }
 
 // localOnly lists the commands that act on this host, not through an API.
-var localOnly = []string{"install", "apply", "update", "uninstall", "backup", "restore", "report", "probe", "egress", "conn-limit"}
+var localOnly = []string{"install", "apply", "update", "uninstall", "backup", "restore", "report", "egress", "conn-limit"}
 
 func isLocalOnly(cmd string) bool {
-	return slices.Contains(localOnly, cmd) || strings.HasPrefix(cmd, "-")
+	return slices.Contains(localOnly, cmd)
 }
 
-// useRemote points the CLI at the node's remote API.
-func (c *cli) useRemote(ctx context.Context, path, cmd string) error {
-	if isLocalOnly(cmd) {
-		return fmt.Errorf("%s works on the node itself, not through -remote", cmd)
+// useRemote points the CLI at the node's remote API for the command line
+// args. What run does not know is its usage, and what needs no node here
+// (knock, probe) takes no -remote: both before the device file is read
+// and the node knocked on.
+func (c *cli) useRemote(ctx context.Context, path string, args []string) error {
+	p, name, ok := placeOf(args)
+	switch {
+	case !ok:
+		return errUsage
+	case p == anywhere:
+		return fmt.Errorf("%s takes no -remote: it works from this machine with the bundle on its command line (run it without -remote)", name)
+	case isLocalOnly(args[0]):
+		return fmt.Errorf("%s works on the node itself, not through -remote", args[0])
 	}
 	id, err := loadIdentity(path)
 	if err != nil {

@@ -207,7 +207,9 @@ A client that lost Register's answer (timeout, dropped connection) may send it a
 - `Backup` — только root на самой ноде: в базе все закрытые ключи ноды (R4-13). `GetDeployment` и `GetDeployInputs` —
   тоже. Ключей в них нет (юниты и системные файлы, имена, UID и порты сервисов), но из них root строит план `apply`
   на ноде, а снаружи они не нужны ([apply-plan-v1.md](apply-plan-v1.md)). `SetCertificate` — тоже: в запросе закрытый
-  ключ сайта (R4-23). Через API они отвечают `permission_denied`.
+  ключ сайта (R4-23), и он заменяет ключ, закреплённый у клиентов; на сокете ноды его принимают только от root, не
+  от группы ([cert-pin-v1.md](cert-pin-v1.md) §7). Через API они отвечают `permission_denied`. Так же отвечает
+  `RotateService` для сервиса вида `site`: смена ключа сертификата сайта — только root на ноде (cert-pin-v1 §5).
 - То, что меняет сам хост, через API не делается: `rayctl apply` (юниты, пользователи, порты хост-файрвола для
   новых сервисов), `update`, `uninstall`, `restore`, `backup`. Сервис, добавленный через API, начнёт работать после
   `rayctl apply` на ноде, если ему нужен свой процесс или порт в хост-файрволе.
@@ -245,7 +247,7 @@ A client that lost Register's answer (timeout, dropped connection) may send it a
 | `unauthenticated` | клиентский ключ не принадлежит активному устройству: не зарегистрирован, отозван, пользователь отключён или истёк |
 | `permission_denied` | устройство не `admin`, или вызов только для root на ноде; `Register`: PIN не прислан или неверный, деталь `PinTries{left}` (§4) |
 | `invalid_argument` | неверные данные: подпись при смене ключа, имя, срок приглашения, период или день сброса лимита, пустой `SetUserTraffic` |
-| `failed_precondition` | `ExportUser`: пользователь отключён, истёк или сверх лимита трафика; `RotateService` dnstt или masterdns без `now` и `force`, пока прежний ключ ещё в своём сроке (dnsseal-v1 §8) |
+| `failed_precondition` | `ExportUser`: пользователь отключён, истёк или сверх лимита трафика; `RotateService` dnstt или masterdns без `now` и `force`, пока прежний ключ ещё в своём сроке (dnsseal-v1 §8). Только root на ноде: `RotateService` сайта, пока следующий ключ не пробыл срок публикации (без `force`) или ключу в работе меньше 72 часов (с `force`, без `fresh`); `SetCertificate` без `force`, когда он отрезал бы клиентов с пинами (cert-pin-v1 §5, §7) |
 
 ## 8. Что проверить клиенту
 

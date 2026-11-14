@@ -226,6 +226,28 @@ func TestApplyReload(t *testing.T) {
 	if !slices.Equal(restarted, []string{"try-restart niko-naive.service"}) {
 		t.Fatalf("a new conn-limit file restarted %v", restarted)
 	}
+	// A file the process reads at its start only (the key of naive-quic's
+	// stateless resets, new in an update) restarts nothing when it comes:
+	// the update restarts the data plane after rayd wrote it, and a restart
+	// for the file alone would cut every tunnel of the node once more.
+	restarted = nil
+	resetKey := filepath.Join(dir, "rendered", "naive", render.NaiveQUICReset)
+	made, err := os.ReadFile(resetKey)
+	if err != nil || len(made) != 65 {
+		t.Fatalf("the key of stateless resets: %d bytes, %v", len(made), err)
+	}
+	if err := os.Remove(resetKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := os.ReadFile(resetKey); err != nil || string(again) != string(made) || len(restarted) != 0 {
+		t.Fatalf("the key's file came back %v (%v), and restarted %v", string(again) == string(made), err, restarted)
+	}
+	if owed := a.owed(); len(owed) != 0 {
+		t.Fatalf("restarts owed for the key's file: %v", owed)
+	}
 }
 
 // rayctl conn-limit off and on (spec/conn-limit-v1.md §8): naive and the

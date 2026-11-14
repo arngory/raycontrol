@@ -226,10 +226,9 @@ func (m *Mirror) SetEnabled(ctx context.Context, on bool) error {
 // parent: the directory comes with the first release).
 func freeBytes(dir string) (uint64, error) {
 	for {
-		var st unix.Statfs_t
-		err := unix.Statfs(dir, &st)
+		free, err := statfsFree(dir)
 		if err == nil {
-			return st.Bavail * uint64(st.Frsize), nil
+			return free, nil
 		}
 		parent := filepath.Dir(dir)
 		if !errors.Is(err, unix.ENOENT) || parent == dir {

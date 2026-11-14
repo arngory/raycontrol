@@ -18,10 +18,14 @@ import (
 // ICMP of spec/icmp-v1.md, which came beside Inputs), kept as the
 // oracle of TestBuildFromInputs: the plan rayctl now builds from rayd's
 // inputs must be the plan rayd built from its model, byte for byte, so
-// that nothing changes on a node. Two changes only, made in both on
-// purpose: the credentials are copied in by rayd's credential command,
-// not by install(1) (copyIn, spec/apply-plan-v1.md §6, 3), and naive
-// gives its users' bytes on a stats socket (traffic-limit-v1 §2.3).
+// that nothing changes on a node. Three changes, made in both on purpose:
+// the credentials are copied in by rayd's credential command, not by
+// install(1) (copyIn, spec/apply-plan-v1.md §6, 3), naive gives its
+// users' bytes on a stats socket (traffic-limit-v1 §2.3), and naive is
+// told where its key of QUIC stateless resets is (-reset-key). The last
+// one changes naive's unit, so the update that brings it restarts naive:
+// once, with the rest of the data plane (the key's file itself restarts
+// nothing, render.File.AtStart).
 // Remove it with GetDeployment's files (§4.1, step 8).
 func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binaries) Plan {
 	plan := Plan{Conntrack: true}
@@ -252,7 +256,8 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 				"ExecStart=" + bin.Rayd + " naive -answer " + answer + " -users " + path.Join(dir, render.NaiveUsers) +
 					" -chain " + path.Join(dir, render.NaiveChain) + " -key " + key + " -socket " + p.NaiveSocket(s.Name) +
 					" -quic-socket " + p.NaiveQUICSocket(s.Name) + " -stats-socket " + p.StatsSocket(s.Name) +
-					" -conn-limit " + path.Join(dir, render.NaiveConnLimit) + probeArg + frontUID + icmp,
+					" -conn-limit " + path.Join(dir, render.NaiveConnLimit) +
+					" -reset-key " + path.Join(dir, render.NaiveQUICReset) + probeArg + frontUID + icmp,
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
 				"ReadWritePaths=" + path.Dir(p.NaiveSocket(s.Name)),

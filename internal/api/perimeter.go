@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
@@ -74,7 +73,7 @@ func (p *PerimeterServer) WatchPerimeter(ctx context.Context, _ *connect.Request
 
 // rayspaPeer reports whether the caller is the rayspa user or root.
 func (p *PerimeterServer) rayspaPeer(ctx context.Context) bool {
-	cred, _ := ctx.Value(peerKey{}).(*unix.Ucred)
+	cred, _ := ctx.Value(peerKey{}).(*ucred)
 	return cred != nil && (cred.Uid == 0 || int(cred.Uid) == p.RayspaUID)
 }
 

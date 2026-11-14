@@ -131,7 +131,12 @@ func (c *cli) restore(ctx context.Context, args []string) error {
 		return err
 	}
 	defer removeDB(tmp)
-	initArgs := []string{"-u", "rayd", "--", deploy.DefaultBinaries.Rayd, "init", "-db", tmp}
+	// -seq-clock: the backup's seq is of the day it was made, below what
+	// clients have seen since, and they drop answers with a lower one. rayd
+	// keeps to the stored seq for its first ten minutes (an update that
+	// rolls back needs that), so the restored one is moved to the clock
+	// here, before rayd starts on it.
+	initArgs := []string{"-u", "rayd", "--", deploy.DefaultBinaries.Rayd, "init", "-db", tmp, "-seq-clock"}
 	if *host != "" {
 		initArgs = append(initArgs, "-host", *host)
 	}

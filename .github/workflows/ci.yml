@@ -18,8 +18,8 @@ jobs:
   govulncheck:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
@@ -27,8 +27,8 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: Generated code is up to date
@@ -50,8 +50,8 @@ jobs:
     # Real nftables, NFLOG and TCP in a fresh network namespace.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - run: sudo apt-get install -y nftables
@@ -74,20 +74,20 @@ jobs:
     # pinned fork, REALITY, DoH and naive behind the pinned niko-server front.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Fetch Xray
         run: |
           . deploy/versions.env
           git clone --filter=blob:none "$XRAY_REPOSITORY" xray
           git -C xray checkout -q "$XRAY_COMMIT"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: xray/go.mod
           cache: false
       - name: Build Xray
         working-directory: xray
         run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/xray" ./main
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       # The pinned niko-server release: REALITY, DoH and naive through its
@@ -99,7 +99,7 @@ jobs:
       - name: Slipstream client commit
         id: slipclient
         run: . deploy/versions.env && echo "commit=$SLIPSTREAM_CLIENT_COMMIT" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: slipcache
         with:
           path: ${{ runner.temp }}/slipstream-client
@@ -125,7 +125,7 @@ jobs:
       # UDP 53 (niko-server v0.8.2), the stub binds again when resolved
       # restarts beside the front.
       - run: sudo test/dns53/resolved.sh "$RUNNER_TEMP/niko-server"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: xray
           path: ${{ runner.temp }}/xray
@@ -139,8 +139,8 @@ jobs:
     env:
       PEBBLE: github.com/letsencrypt/pebble/v2@v2.10.1
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: Start Pebble
@@ -159,8 +159,8 @@ jobs:
     # update (Go) against signatures made by minisign itself.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - run: sudo apt-get install -y minisign
@@ -179,8 +179,8 @@ jobs:
       matrix:
         distro: [debian12, debian13, ubuntu2404, rocky9, rocky10]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: Build raycontrol
@@ -190,7 +190,7 @@ jobs:
           go run ./test/install/asndb -o bin/asn-test.mmdb 0.0.0.0/0
           # Holds port 443 for the refusal of the host check.
           CGO_ENABLED=0 go build -o bin/listen ./test/install/listen
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: xray
           path: bin
@@ -232,13 +232,13 @@ jobs:
           # itself as a signed v0.0.2, by v0.0.2's own rayctl.
           - from: handoff
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: Build raycontrol
         run: for c in rayd rayspa rayctl; do CGO_ENABLED=0 go build -trimpath -o bin/$c ./cmd/$c; done
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: xray
           path: bin
@@ -283,13 +283,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: Build raycontrol
         run: for c in rayd rayctl; do CGO_ENABLED=0 go build -trimpath -o bin/$c ./cmd/$c; done
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: xray
           path: bin
@@ -298,6 +298,104 @@ jobs:
           scripts/niko-server.sh amd64 bin/niko-server
           chmod +x bin/*
       - run: test/supervise/run.sh bin debian:13
+
+  rayctl:
+    # rayctl for the administrator's own machine: macOS and FreeBSD, built
+    # from Linux as the Release workflow builds them (docs/18, §2). The node
+    # stays Linux; what is Linux's alone sits in *_linux.go, and this job is
+    # what keeps the other files building. Nothing runs here: the tests are
+    # vetted, compiled and linked, not run (-exec true). On FreeBSD only
+    # rayctl's own: internal/api's tests name unix.Ucred, which x/sys has
+    # for Linux and macOS.
+    name: rayctl (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: darwin, goarch: arm64, tests: imports}
+          - {goos: darwin, goarch: amd64, tests: imports}
+          - {goos: freebsd, goarch: amd64, tests: own}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::12}" -o dist/rayctl ./cmd/rayctl
+          file dist/rayctl
+      - name: Vet and compile the tests
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          TESTS: ${{ matrix.tests }}
+        run: |
+          pkgs=(./cmd/rayctl)
+          if [ "$TESTS" = imports ]; then
+            mapfile -t pkgs < <(go list -deps ./cmd/rayctl | grep '^github.com/arngory/raycontrol')
+          fi
+          go vet "${pkgs[@]}"
+          go test -count=1 -run '^$' -exec true "${pkgs[@]}"
+
+  rayctl-macos:
+    # The same rayctl where it can run: built on a Mac, started, and the
+    # tests of what it does there differently from a node (where each
+    # command works, the device file's mode, the terminal without one).
+    # Not the whole suite: most of it is the node's. Advisory and bounded;
+    # not run by the Release workflow at all, so that a release never waits
+    # for a Mac runner (a called workflow sees its caller's name in
+    # github.workflow).
+    name: rayctl (macOS, run)
+    if: github.workflow != 'Release'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Build and start
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o rayctl ./cmd/rayctl
+          file rayctl
+          # expect CODE TEXT ARGS: rayctl's exit code and a line of its
+          # standard error.
+          expect() {
+            local code=$1 text=$2 status=0
+            shift 2
+            ./rayctl "$@" 2>err.txt || status=$?
+            cat err.txt
+            [ "$status" = "$code" ] || { echo "rayctl $*: exit $status, want $code"; exit 1; }
+            grep -q -e "$text" err.txt || { echo "rayctl $*: no \"$text\""; exit 1; }
+          }
+          expect 2 '^usage: rayctl'
+          # A node's command refuses in one line, before anything. With a
+          # -remote file that is not there: should the refusal ever be
+          # missing, install stops at "not through -remote" and touches
+          # nothing (bare, it would take the update lock as root first).
+          expect 1 '^rayctl: install works on a Linux node only, and this is darwin' -remote nofile.rcdev install -host 192.0.2.1
+          [ "$(grep -c . err.txt)" = 1 ] || { echo "more than a line"; exit 1; }
+          # A command for rayd says how to reach a node from here.
+          expect 1 'rayctl -remote FILE status' status
+          # A device file others can read is refused with the fix; closed to
+          # them it is read, and this one is no device file.
+          echo 'rcdev1:x' > open.rcdev
+          chmod 644 open.rcdev
+          expect 1 'chmod 600 open.rcdev' -remote open.rcdev status
+          chmod 600 open.rcdev
+          expect 1 '^rayctl: open.rcdev: ' -remote open.rcdev status
+      - name: Tests
+        run: >-
+          go test -count=1 -v
+          -run 'TestPlaces|TestSubPlaces|TestRefusal|TestMisplaced|TestMainRefuses|TestDeviceFile|TestTerminalNot|TestFlushInputPipe|TestReadSecretNoTerminal|TestOnEndSignal'
+          ./cmd/rayctl
 
   build:
     # The release archive as the Release workflow makes it, without the
@@ -308,8 +406,8 @@ jobs:
       matrix:
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - name: Build
@@ -327,7 +425,7 @@ jobs:
           . deploy/versions.env
           git clone --filter=blob:none "$XRAY_REPOSITORY" xray
           git -C xray checkout -q "$XRAY_COMMIT"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: xray/go.mod
       - name: Build Xray

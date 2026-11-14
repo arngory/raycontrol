@@ -3,8 +3,9 @@
 # (docs/RELEASE.md): this tree twice, as v0.0.1 (the node's) and v0.0.2
 # (a release), both with the releasetest tag (rayctl takes the release key
 # from RAYCONTROL_TEST_RELEASE_KEY), and v0.0.2 as a release is published:
-# the archive, SHA256SUMS signed with a throwaway minisign key, trusted
-# comment "raycontrol v0.0.2". The data plane comes from BIN_DIR.
+# the archive, rayctl's archives for other systems beside it, SHA256SUMS
+# of them all signed with a throwaway minisign key, trusted comment
+# "raycontrol v0.0.2". The data plane comes from BIN_DIR.
 #
 #   test/install/handoff-release.sh BIN_DIR OUT_DIR
 #
@@ -36,7 +37,15 @@ build "$out/new" v0.0.2
 rel="$out/step/1"
 mkdir -p "$rel"
 tar -czf "$rel/raycontrol-linux-amd64.tar.gz" -C "$out/new" rayd rayspa rayctl xray niko-server slipstream-server VERSIONS
-(cd "$rel" && sha256sum raycontrol-linux-amd64.tar.gz >SHA256SUMS)
+# As the Release workflow lists them: rayctl for other systems in the same
+# signed SHA256SUMS. The node's rayctl and the release's read their own
+# line among these.
+for target in darwin/arm64 darwin/amd64 freebsd/amd64; do
+	mkdir -p "$out/client"
+	(cd "$root" && CGO_ENABLED=0 GOOS=${target%/*} GOARCH=${target#*/} go build -trimpath -ldflags "-X main.version=v0.0.2" -o "$out/client/rayctl" ./cmd/rayctl)
+	tar -czf "$rel/rayctl-${target%/*}-${target#*/}.tar.gz" -C "$out/client" rayctl
+done
+(cd "$rel" && sha256sum raycontrol-linux-amd64.tar.gz rayctl-*.tar.gz >SHA256SUMS)
 keys="$(mktemp -d)"
 trap 'rm -rf "$keys"' EXIT
 minisign -G -W -p "$keys/k.pub" -s "$keys/k.key" >/dev/null
