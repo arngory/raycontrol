@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +69,15 @@ func TestLinksForStrictClient(t *testing.T) {
 	}
 	st.SetServiceSecret(ctx, site.ID, provision.SecretTLSChain, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}))
 	st.SetServiceSecret(ctx, site.ID, provision.SecretTLSKey, keyDER)
+	// And the key after it, as the certificate manager makes it: the lines
+	// under the site carry the pins of both (cert-pin-v1 §2).
+	if made, err := provision.EnsureSiteNextKey(ctx, st, site.ID, time.Now()); err != nil || !made {
+		t.Fatalf("next key: %v %v", made, err)
+	}
+	sitePin, err := provision.SPKIPin(certDER)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -130,6 +140,30 @@ func TestLinksForStrictClient(t *testing.T) {
 			u, _ := url.Parse(link)
 			if u.Query().Has("icmp") != want {
 				t.Errorf("%s: icmp=1 %v, want %v: %s", name, u.Query().Has("icmp"), want, link)
+			}
+		}
+	}
+	// cert-pin-v1 §2: the lines served with the site's certificate carry
+	// its two pins, the leaf's first, the current link and the next one
+	// alike; hy2-obfs keeps its one pin and pinSHA256; no other line has
+	// niko-pin.
+	pinned := map[string]int{"hy2": 2, "naive": 2, "naive-icmp": 2, "doh": 2, "hy2o": 1}
+	for _, k := range kinds {
+		for _, link := range []string{byName[k.name].Link, nextLink(byName[k.name])} {
+			u, _ := url.Parse(link)
+			pins := strings.Split(u.Query().Get("niko-pin"), ",")
+			if !u.Query().Has("niko-pin") {
+				pins = nil
+			}
+			if len(pins) != pinned[k.name] {
+				t.Errorf("%s (%s): %d pins, want %d: %s", k.name, k.kind, len(pins), pinned[k.name], link)
+				continue
+			}
+			if len(pins) == 2 && pins[0] != sitePin {
+				t.Errorf("%s (%s): the first pin %s is not the leaf's %s", k.name, k.kind, pins[0], sitePin)
+			}
+			if u.Query().Has("pinSHA256") != (k.kind == "hy2-obfs") {
+				t.Errorf("%s (%s): pinSHA256 present %v: %s", k.name, k.kind, u.Query().Has("pinSHA256"), link)
 			}
 		}
 	}
@@ -285,7 +319,71 @@ func strictProblems(kind, link string) []string {
 	if q.Get("niko-node") == "" || q.Get("niko-svc") == "" {
 		out = append(out, "no niko-node or niko-svc")
 	}
+	out = append(out, pinProblems(kind, q)...)
 	return append(out, dnsProblems(kind, q)...)
+}
+
+// pinProblems lists what the client holds against niko-pin
+// (subscription-v1 §4, cert-pin-v1 §2): only on lines whose TLS the client
+// checks itself (Hysteria2, naive, DoH); a list through "," of base64url
+// without padding, 32 bytes each, no pin twice; one pin for hy2-obfs, two
+// at most elsewhere (the leaf's key and the next one). hy2-masq has no
+// pinSHA256: that names one certificate, and the site's is renewed.
+func pinProblems(kind string, q url.Values) []string {
+	var out []string
+	if q.Has("pinSHA256") && kind != "hy2-obfs" {
+		out = append(out, "pinSHA256 on a "+kind+" line")
+	}
+	if !q.Has("niko-pin") {
+		return out
+	}
+	if !slices.Contains([]string{"hy2-masq", "hy2-obfs", "naive", "doh"}, kind) {
+		return append(out, "niko-pin on a "+kind+" line")
+	}
+	pins := strings.Split(q.Get("niko-pin"), ",")
+	if most := map[bool]int{true: 1, false: 2}[kind == "hy2-obfs"]; len(pins) > most {
+		out = append(out, "niko-pin with "+strconv.Itoa(len(pins))+" pins")
+	}
+	var seen []string
+	for _, p := range pins {
+		if b, err := base64.RawURLEncoding.DecodeString(p); err != nil || len(b) != 32 || slices.Contains(seen, p) {
+			out = append(out, "niko-pin "+q.Get("niko-pin"))
+			break
+		}
+		seen = append(seen, p)
+	}
+	return out
+}
+
+// The pin's rules catch what the client would drop.
+func TestPinProblems(t *testing.T) {
+	a := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	b := base64.RawURLEncoding.EncodeToString(append(make([]byte, 31), 1))
+	for _, c := range []struct {
+		kind, pin string
+		bad       bool
+	}{
+		{"naive", a + "," + b, false},
+		{"hy2-masq", a + "," + b, false},
+		{"doh", a, false},
+		{"hy2-obfs", a, false},
+		{"hy2-obfs", a + "," + b, true},
+		{"naive", a + "," + a, true},
+		{"naive", a + "," + b + "," + base64.RawURLEncoding.EncodeToString(append(make([]byte, 31), 2)), true},
+		{"naive", a + ",", true},
+		{"naive", a + "=", true},
+		{"naive", base64.StdEncoding.EncodeToString(append(make([]byte, 31), 0xfb)), true}, // padded, and not the URL alphabet
+		{"naive", base64.RawURLEncoding.EncodeToString(make([]byte, 20)), true},
+		{"reality", a, true},
+		{"yggdrasil", a, true},
+	} {
+		if p := pinProblems(c.kind, url.Values{"niko-pin": {c.pin}}); (len(p) != 0) != c.bad {
+			t.Errorf("%s niko-pin=%s: %v", c.kind, c.pin, p)
+		}
+	}
+	if p := pinProblems("hy2-masq", url.Values{"niko-pin": {a}, "pinSHA256": {"00"}}); len(p) == 0 {
+		t.Error("pinSHA256 on hy2-masq passed")
+	}
 }
 
 // dnsProblems lists what the client holds against a DNS tunnel's
