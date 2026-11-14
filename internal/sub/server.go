@@ -208,7 +208,21 @@ func (s *Server) handle(r *http.Request) (Envelope, error) {
 			s.Changed()
 		}
 	}
-	return s.build(ctx, dev.UserName, dev.ID, key[:], addr, now)
+	env, err := s.build(ctx, dev.UserName, dev.ID, key[:], addr, now)
+	if err != nil {
+		return Envelope{}, err
+	}
+	// The device once more, after the last read of what the subscription
+	// carries: a revocation that commits after the check above gives the
+	// user new credentials and a new LAN key in the same transaction
+	// (store.RevokeDevice), and build reads them in statements of their
+	// own. Whatever of that build saw, this read sees the revocation too
+	// (the store's one connection: each statement after the commits
+	// before it), and the device gets what a revoked one gets.
+	if _, _, err := s.Store.ActiveDevice(ctx, dev.ID); err != nil {
+		return Envelope{}, err
+	}
+	return env, nil
 }
 
 // Build returns the signed subscription of a user.
