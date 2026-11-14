@@ -157,14 +157,14 @@ func TestNaiveStatelessReset(t *testing.T) {
 		reset   bool
 	}{
 		{"the service's key", func() quicOptions {
-			o := naiveQUIC()
+			o := quicOptions{}
 			var err error
 			if o.resetKey, err = readResetKey(keyFile); err != nil {
 				t.Fatal(err)
 			}
 			return o
 		}, true},
-		{"no key", naiveQUIC, false},
+		{"no key", func() quicOptions { return quicOptions{} }, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ns, cert := naiveTest(t, sink)
@@ -190,7 +190,7 @@ func TestNaiveStatelessReset(t *testing.T) {
 					}
 				}
 			}
-			first := naiveQUIC()
+			first := quicOptions{}
 			var err error
 			if first.resetKey, err = readResetKey(keyFile); err != nil {
 				t.Fatal(err)

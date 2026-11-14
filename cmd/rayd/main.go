@@ -3,12 +3,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -29,9 +27,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
 
 	"github.com/arngory/raycontrol/internal/api"
 	"github.com/arngory/raycontrol/internal/appmirror"
@@ -569,10 +564,7 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 			}
 			id := svc.ID
 			h := &doh.Handler{Tokens: func(ctx context.Context) (map[string]bool, error) { return dohTokens(ctx, st, id) }}
-			srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute,
-				ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelDebug),
-				TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
-					GetCertificate: certs.GetCertificate, NextProtos: []string{"h2", "http/1.1"}}}
+			srv := dohHTTPServer(h, certs.GetCertificate, log)
 			go func() { _ = srv.ServeTLS(ln, "", "") }()
 			// DoH3: the same handler over QUIC, datagrams from the front (R3-5).
 			h3ctx, h3stop := context.WithCancel(ctx)
@@ -1376,7 +1368,7 @@ func cmdNaive(args []string) error {
 		if err != nil {
 			return err
 		}
-		o := naiveQUIC()
+		var o quicOptions
 		if *resetKey != "" {
 			// Without the key the service is as it was before it had
 			// one: clients wait out their idle time after a restart. Why
@@ -1444,87 +1436,25 @@ func cmdRelay(args []string) error {
 	return s.Serve(ctx, ln, pc, tlsCfg)
 }
 
-// naiveHTTPServer is the HTTP/2 side of a naive service: TLS 1.3 with
-// X25519MLKEM768 only, the limits of a connection naive's own.
-func naiveHTTPServer(ns *naive.Server, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), log *slog.Logger) *http.Server {
-	srv := ns.HTTPServer()
+// dohHTTPServer is the HTTP/2 side of a DoH service: TLS 1.3 with
+// X25519MLKEM768 only, and the HTTP server every name of the node's address
+// has (site.HTTPServer).
+func dohHTTPServer(h http.Handler, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), log *slog.Logger) *http.Server {
+	srv := site.HTTPServer(h, site.IdleTimeout)
 	srv.ErrorLog = slog.NewLogLogger(log.Handler(), slog.LevelDebug)
 	srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
 		GetCertificate: cert, NextProtos: []string{"h2", "http/1.1"}}
 	return srv
 }
 
-// quicOptions are what one of rayd's QUIC servers sets apart from the
-// other; the zero value leaves quic-go's and net/http's defaults (DoH3).
-type quicOptions struct {
-	// maxStreams is how many requests a connection holds at once (100
-	// when 0), maxHeaderBytes the most a request's header takes (1 MiB
-	// when 0).
-	maxStreams     int64
-	maxHeaderBytes int
-	// resetKey makes the tokens of stateless resets (RFC 9000 §10.3); nil:
-	// none are sent. With the same key at every start, a client whose
-	// connection the process does not know (it started anew) gets a reset
-	// it believes at its next packet, not silence until its idle time.
-	resetKey *quic.StatelessResetKey
-}
-
-// readResetKey reads the key of stateless resets: 32 bytes, hex
-// (render.NaiveQUICReset). Its errors say what is wrong with the file, and
-// nothing of what is in it.
-func readResetKey(file string) (*quic.StatelessResetKey, error) {
-	b, err := os.ReadFile(file) //nolint:gosec // G304: the unit's own file
-	if err != nil {
-		return nil, err
-	}
-	var key quic.StatelessResetKey
-	text := bytes.TrimSpace(b)
-	if hex.DecodedLen(len(text)) != len(key) {
-		return nil, fmt.Errorf("%s: not %d bytes in hex", file, len(key))
-	}
-	if _, err := hex.Decode(key[:], text); err != nil {
-		return nil, fmt.Errorf("%s: not hex", file)
-	}
-	return &key, nil
-}
-
-// naiveQUIC are the limits of a naive connection over HTTP/3, the same as
-// over HTTP/2 (naive.Server.HTTPServer).
-func naiveQUIC() quicOptions {
-	return quicOptions{maxStreams: naive.MaxStreams, maxHeaderBytes: naive.MaxHeaderBytes}
-}
-
-// config is the QUIC side: no keepalive of the server's, and an idle time
-// the front outlasts (render.QUICIdle, render.FrontUDPIdle).
-func (o quicOptions) config() *quic.Config {
-	return &quic.Config{MaxIdleTimeout: render.QUICIdle, KeepAlivePeriod: 0, MaxIncomingStreams: o.maxStreams}
-}
-
-// serveHTTP3 serves h on QUIC over the front's datagrams until ctx ends:
-// TLS 1.3 with X25519MLKEM768 only, ALPN h3, the certificate cert gives at
-// each handshake (certfile.Holder).
-func serveHTTP3(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), h http.Handler, o quicOptions) error {
-	tlsConf := http3.ConfigureTLSConfig(&tls.Config{MinVersion: tls.VersionTLS13,
-		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, GetCertificate: cert})
-	tr := &quic.Transport{Conn: pc, StatelessResetKey: o.resetKey}
-	ln, err := tr.ListenEarly(tlsConf, o.config())
-	if err != nil {
-		return err
-	}
-	// A connection without a request goes after the same time as a silent
-	// one.
-	srv := &http3.Server{Handler: h, IdleTimeout: render.QUICIdle, MaxHeaderBytes: o.maxHeaderBytes}
-	go func() {
-		<-ctx.Done()
-		_ = srv.Close()
-		_ = ln.Close()
-		_ = tr.Close()
-		_ = pc.Close()
-	}()
-	if err := srv.ServeListener(ln); err != nil && ctx.Err() == nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, quic.ErrServerClosed) {
-		return err
-	}
-	return nil
+// naiveHTTPServer is the HTTP/2 side of a naive service: TLS 1.3 with
+// X25519MLKEM768 only, and the same HTTP server (naive.Server.HTTPServer).
+func naiveHTTPServer(ns *naive.Server, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), log *slog.Logger) *http.Server {
+	srv := ns.HTTPServer()
+	srv.ErrorLog = slog.NewLogLogger(log.Handler(), slog.LevelDebug)
+	srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+		GetCertificate: cert, NextProtos: []string{"h2", "http/1.1"}}
+	return srv
 }
 
 // connLimitSources are the processes that count refusals of the connection

@@ -173,15 +173,15 @@ func TestUploadWindows(t *testing.T) {
 	p := newH2Peer(t, serveNaive(t, h))
 
 	eventually(t, "no SETTINGS", func() bool { _, ok := p.setting(http2.SettingInitialWindowSize); return ok })
-	if got, _ := p.setting(http2.SettingInitialWindowSize); got != h2StreamWindow {
-		t.Fatalf("a stream's window is %d, want %d", got, h2StreamWindow)
+	if got, _ := p.setting(http2.SettingInitialWindowSize); got != site.StreamWindow {
+		t.Fatalf("a stream's window is %d, want %d", got, site.StreamWindow)
 	}
 	// A connection's window starts at 65535 whatever the settings say; the
 	// server raises it at once.
 	const initial = 65535
 	eventually(t, "the connection's window was not raised", func() bool { return p.window(0) > 0 })
-	if got := p.window(0) + initial; got != h2ConnWindow {
-		t.Fatalf("a connection's window is %d, want %d", got, h2ConnWindow)
+	if got := p.window(0) + initial; got != site.ConnWindow {
+		t.Fatalf("a connection's window is %d, want %d", got, site.ConnWindow)
 	}
 
 	p.connect(t, 1, "192.0.2.1:443", "pw")
@@ -191,7 +191,7 @@ func TestUploadWindows(t *testing.T) {
 	}
 	// All a stream's window lets through, to a destination that reads
 	// nothing.
-	up := &paddedStream{w: &h2Data{p: p, stream: 1, room: h2StreamWindow}}
+	up := &paddedStream{w: &h2Data{p: p, stream: 1, room: site.StreamWindow}}
 	chunk := make([]byte, 60<<10)
 	for {
 		if _, err := up.Write(chunk); err != nil {
@@ -208,7 +208,7 @@ func TestUploadWindows(t *testing.T) {
 	if got := p.window(1); got > 2*copyBuffer {
 		t.Fatalf("%d bytes of the stream's window came back with the destination stalled: the server read ahead of it", got)
 	}
-	if got := p.window(0) + initial - h2ConnWindow; got > 2*copyBuffer {
+	if got := p.window(0) + initial - site.ConnWindow; got > 2*copyBuffer {
 		t.Fatalf("%d bytes of the connection's window came back with the destination stalled", got)
 	}
 	p.mu.Lock()
@@ -220,5 +220,5 @@ func TestUploadWindows(t *testing.T) {
 	// The destination reads: the rest comes back (Go keeps updates under
 	// 4 KiB for later).
 	close(reads)
-	eventually(t, "the stream's window did not come back", func() bool { return p.window(1) >= h2StreamWindow-4<<10 })
+	eventually(t, "the stream's window did not come back", func() bool { return p.window(1) >= site.StreamWindow-4<<10 })
 }

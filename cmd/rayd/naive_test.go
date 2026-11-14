@@ -19,7 +19,6 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
-	"golang.org/x/net/http2"
 
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/provision"
@@ -122,44 +121,10 @@ func serveNaiveH3(t *testing.T, ns *naive.Server, cert tls.Certificate, o quicOp
 	return tr
 }
 
-// The HTTP/2 server tells its clients naive's limits of a connection, not
-// Go's defaults (250 streams, 1 MiB of header).
-func TestNaiveHTTP2Settings(t *testing.T) {
-	ns, cert := naiveTest(t, sink)
-	c, err := tls.Dial("tcp", serveNaiveH2(t, ns, cert), naiveClientTLS("h2"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
-	if _, err := io.WriteString(c, http2.ClientPreface); err != nil {
-		t.Fatal(err)
-	}
-	fr := http2.NewFramer(c, c)
-	if err := fr.WriteSettings(); err != nil {
-		t.Fatal(err)
-	}
-	settings := map[http2.SettingID]uint32{}
-	for len(settings) == 0 {
-		f, err := fr.ReadFrame()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if s, ok := f.(*http2.SettingsFrame); ok && !s.IsAck() {
-			_ = s.ForeachSetting(func(x http2.Setting) error { settings[x.ID] = x.Val; return nil })
-		}
-	}
-	if got := settings[http2.SettingMaxConcurrentStreams]; got != naive.MaxStreams {
-		t.Errorf("MAX_CONCURRENT_STREAMS %d, want %d", got, naive.MaxStreams)
-	}
-	// Go adds 320 bytes to MaxHeaderBytes for the fields' overhead.
-	if got := settings[http2.SettingMaxHeaderListSize]; got < naive.MaxHeaderBytes || got > naive.MaxHeaderBytes+1024 {
-		t.Errorf("MAX_HEADER_LIST_SIZE %d, want about %d", got, naive.MaxHeaderBytes)
-	}
-}
-
-// A header past the limit is not the handler's to read, over either
-// transport: nothing of it is kept past MaxHeaderBytes.
+// Over HTTP/3 a header past naive.MaxHeaderBytes is not the handler's to
+// read: nothing of it is kept, and nothing is dialled. Over HTTP/2 the
+// limit is Go's own, as the site's is (TestNamesLookAlike), and the same
+// request is served.
 func TestNaiveHeaderLimit(t *testing.T) {
 	var dials atomic.Int32
 	ns, cert := naiveTest(t, func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -168,12 +133,13 @@ func TestNaiveHeaderLimit(t *testing.T) {
 	})
 	h2 := &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: naiveClientTLS("h2")}
 	t.Cleanup(h2.CloseIdleConnections)
-	h3 := serveNaiveH3(t, ns, cert, naiveQUIC())
+	h3 := serveNaiveH3(t, ns, cert, quicOptions{})
 	for _, c := range []struct {
-		name string
-		rt   http.RoundTripper
-		url  string
-	}{{"h2", h2, "https://" + serveNaiveH2(t, ns, cert)}, {"h3", h3, "https://naive.test"}} {
+		name   string
+		rt     http.RoundTripper
+		url    string
+		served bool
+	}{{"h2", h2, "https://" + serveNaiveH2(t, ns, cert), true}, {"h3", h3, "https://naive.test", false}} {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		req, _ := naiveConnect(ctx, t, c.url, "192.0.2.1:443")
 		resp, err := c.rt.RoundTrip(req)
@@ -184,28 +150,29 @@ func TestNaiveHeaderLimit(t *testing.T) {
 		req, _ = naiveConnect(ctx, t, c.url, "192.0.2.1:443")
 		req.Header.Set("X-Filler", strings.Repeat("x", 2*naive.MaxHeaderBytes))
 		resp, err = c.rt.RoundTrip(req)
+		served := err == nil && resp.StatusCode == http.StatusOK
 		if err == nil {
 			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				t.Fatalf("%s: a CONNECT with a header of %d bytes was served", c.name, 2*naive.MaxHeaderBytes)
-			}
+		}
+		if served != c.served {
+			t.Fatalf("%s: a CONNECT with a header of %d bytes: served %v (%v)", c.name, 2*naive.MaxHeaderBytes, served, err)
 		}
 		cancel()
 	}
-	if n := dials.Load(); n != 2 {
-		t.Fatalf("%d dials, want one for each transport", n)
+	if n := dials.Load(); n != 3 {
+		t.Fatalf("%d dials, want two over HTTP/2 and one over HTTP/3", n)
 	}
 }
 
-// A QUIC connection carries all a user may hold, as an HTTP/2 one does
-// (naive's TestConnectionCarriesUserLimits): more tunnels at once than
-// quic-go's default of 100 streams, none of them waiting for a stream.
+// A QUIC connection carries all a user may hold: more tunnels at once than
+// quic-go's default of 100 streams, and more than may be without a header
+// at once (naive.PendingStreams), none of them waiting for a stream.
 func TestNaiveHTTP3Streams(t *testing.T) {
-	if got := naiveQUIC().config().MaxIncomingStreams; got != naive.MaxStreams {
+	if got := quicConfig().MaxIncomingStreams; got != naive.MaxStreams {
 		t.Fatalf("MaxIncomingStreams %d, want %d", got, naive.MaxStreams)
 	}
 	ns, cert := naiveTest(t, sink)
-	tr := serveNaiveH3(t, ns, cert, naiveQUIC())
+	tr := serveNaiveH3(t, ns, cert, quicOptions{})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	// Under the burst of TCP attempts (600): the limits refuse none.
@@ -237,14 +204,12 @@ func TestNaiveHTTP3Streams(t *testing.T) {
 // its flow (render.FrontUDPIdle, which render's own test holds above
 // render.QUICIdle), and keep none alive themselves.
 func TestQUICIdleUnderFront(t *testing.T) {
-	for name, o := range map[string]quicOptions{"naive": naiveQUIC(), "doh3": {}} {
-		c := o.config()
-		if c.MaxIdleTimeout != render.QUICIdle || c.MaxIdleTimeout >= render.FrontUDPIdle {
-			t.Errorf("%s: QUIC idle %v, the front's flow idle %v", name, c.MaxIdleTimeout, render.FrontUDPIdle)
-		}
-		if c.KeepAlivePeriod != 0 {
-			t.Errorf("%s: the server keeps connections alive every %v", name, c.KeepAlivePeriod)
-		}
+	c := quicConfig() // naive-quic's and DoH3's
+	if c.MaxIdleTimeout != render.QUICIdle || c.MaxIdleTimeout >= render.FrontUDPIdle {
+		t.Errorf("QUIC idle %v, the front's flow idle %v", c.MaxIdleTimeout, render.FrontUDPIdle)
+	}
+	if c.KeepAlivePeriod != 0 {
+		t.Errorf("the server keeps connections alive every %v", c.KeepAlivePeriod)
 	}
 }
 
@@ -254,7 +219,7 @@ func TestQUICIdleUnderFront(t *testing.T) {
 func TestNaiveHTTP3DestinationEnd(t *testing.T) {
 	var d net.Dialer
 	ns, cert := naiveTest(t, d.DialContext)
-	tr := serveNaiveH3(t, ns, cert, naiveQUIC())
+	tr := serveNaiveH3(t, ns, cert, quicOptions{})
 	for name, reset := range map[string]bool{"reset": true, "end": false} {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -335,7 +300,7 @@ func TestNaiveHTTP3AckConnect(t *testing.T) {
 		}
 		return d.DialContext(ctx, network, addr)
 	})
-	tr := serveNaiveH3(t, ns, cert, naiveQUIC())
+	tr := serveNaiveH3(t, ns, cert, quicOptions{})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

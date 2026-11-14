@@ -63,9 +63,7 @@ func TestNaiveBadName(t *testing.T) {
 		asked.Add(1)
 		return nil, nil
 	}
-	// The longest is as long as a header may be (MaxHeaderBytes): a longer
-	// one never comes to the handler.
-	for _, host := range []string{strings.Repeat("a", MaxHeaderBytes/2) + ".test", "a..b", "a-.test"} {
+	for _, host := range []string{strings.Repeat("a", 64<<10) + ".test", "a..b", "a-.test"} {
 		resp, err := connect("pw", host+":443")
 		if err != nil {
 			t.Fatalf("%.20q: %v", host, err)

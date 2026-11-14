@@ -92,9 +92,9 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 		s.Answer.ServeHTTP(w, r)
 		return false
 	}
-	// A host that is neither an address nor a domain name (kilobytes of
-	// :authority, say: MaxHeaderBytes lets them in) is a bad target too:
-	// nothing of it is looked up, kept or charged.
+	// A host that is neither an address nor a domain name (a megabyte's
+	// :authority, say) is a bad target too: nothing of it is looked up,
+	// kept or charged.
 	if _, err := netip.ParseAddr(host); err != nil && !domainName(host) {
 		s.Answer.ServeHTTP(w, r)
 		return false

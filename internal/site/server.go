@@ -186,13 +186,9 @@ func Serve(ctx context.Context, ln net.Listener, h http.Handler, cert tls.Certif
 // handshake (TLSConfigFor).
 func ServeCertificates(ctx context.Context, ln net.Listener, h http.Handler, get func(*tls.ClientHelloInfo) (*tls.Certificate, error),
 	log *slog.Logger) error {
-	srv := &http.Server{
-		Handler:           h,
-		TLSConfig:         TLSConfigFor(get),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelDebug),
-	}
+	srv := HTTPServer(h, IdleTimeout)
+	srv.TLSConfig = TLSConfigFor(get)
+	srv.ErrorLog = slog.NewLogLogger(log.Handler(), slog.LevelDebug)
 	go func() {
 		<-ctx.Done()
 		_ = srv.Close()
