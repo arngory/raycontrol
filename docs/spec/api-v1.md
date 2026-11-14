@@ -207,7 +207,8 @@ A client that lost Register's answer (timeout, dropped connection) may send it a
 - `Backup` — только root на самой ноде: в базе все закрытые ключи ноды (R4-13). `GetDeployment` и `GetDeployInputs` —
   тоже. Ключей в них нет (юниты и системные файлы, имена, UID и порты сервисов), но из них root строит план `apply`
   на ноде, а снаружи они не нужны ([apply-plan-v1.md](apply-plan-v1.md)). `SetCertificate` — тоже: в запросе закрытый
-  ключ сайта (R4-23). Через API они отвечают `permission_denied`.
+  ключ сайта (R4-23). Через API они отвечают `permission_denied`. Так же отвечает `RotateService` для сервиса вида
+  `site`: смена ключа сертификата сайта — только root на ноде ([cert-pin-v1.md](cert-pin-v1.md) §5).
 - То, что меняет сам хост, через API не делается: `rayctl apply` (юниты, пользователи, порты хост-файрвола для
   новых сервисов), `update`, `uninstall`, `restore`, `backup`. Сервис, добавленный через API, начнёт работать после
   `rayctl apply` на ноде, если ему нужен свой процесс или порт в хост-файрволе.
