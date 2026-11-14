@@ -214,6 +214,16 @@ sudo bash bootstrap.sh -relay msk.bundle   # rayspa, пересылка ядро
 journalctl -u rayd-relay                   # точка замера relay: поток от выхода, отчёты
 ```
 
-Обновление relay — тот же запуск ещё раз, с пакетом, который установка оставила на хосте relay:
-`sudo bash bootstrap.sh -relay /etc/raycontrol/relay.bundle`. `rayctl update` на хосте relay отказывает
-([10-quickstart-debian13.md](10-quickstart-debian13.md) §12.4).
+Обновление relay с v0.26.0 — на его хосте, от root:
+
+```
+sudo rayctl update -check   # версии; откажет ли обновление (SSH-сессия не с адреса администратора relay)
+sudo rayctl update          # релиз проверяется как на ноде; установка relay с /etc/raycontrol/relay.bundle;
+                            # не поднялся — откат к прежней версии с прежним снимком периметра
+sudo rayctl update -rollback   # вернуть версию до последнего обновления
+```
+
+`rayctl update remote|auto` на relay отказывает: у relay нет API rayd для устройств. Relay до v0.26.0 и запасной
+путь — тот же запуск ещё раз, с пакетом, который установка оставила на хосте relay:
+`sudo bash bootstrap.sh -relay /etc/raycontrol/relay.bundle`
+([10-quickstart-debian13.md](10-quickstart-debian13.md) §12.4, [spec/node-update-v1.md](spec/node-update-v1.md) §5).

@@ -37,8 +37,8 @@
 > - **CI, остальное:** туннели на настоящих Xray, niko-server и slipstream (`xray`); сертификаты на Pebble,
 >   тестовом CA Let's Encrypt, через HTTP-01 и DNS-01 (`acme`); подпись релиза против настоящего minisign
 >   (`bootstrap`); периметр и relay в сетевых пространствах имён (`perimeter`); обновление с прежних релизов на
->   Debian 13 (`upgrade`). Cloudflare — на имитации его API. Установка relay скриптом на хост с systemd в CI не
->   запускается (§12.4).
+>   Debian 13 (`upgrade`). Cloudflare — на имитации его API. Установка relay скриптом на хост с systemd и
+>   обновление relay (`rayctl update`) в CI не запускаются (§12.4).
 > - **Interop с клиентом Niko:** тест клиента против ноды без systemd (`rayd serve -supervise`) на Linux, без
 >   телефона. По записи в [handoff/SYNC.md](handoff/SYNC.md) (строка T15.1) он зелёный на v0.25.1.
 > - **Проверено при написании:** подпись и контрольная сумма опубликованного релиза v0.25.1 (§3); вывод команд
@@ -2499,13 +2499,50 @@ This host's SSH (port 22) is reachable from 198.51.100.50, the relay's own admin
 - Снять установку с хоста relay — на нём: `rayctl uninstall`. Команда возвращает всё, что меняла установка
   relay, и хост снова открыт.
 
-**Обновление relay сегодня.** `rayctl update` relay **не обновляет**. На хосте relay он отвечает:
+**Обновление relay с v0.26.0: `rayctl update` на хосте relay.** От root, из обычной SSH-сессии с адреса
+администратора relay:
+
+```bash
+rayctl update -check
+```
+
+```bash
+rayctl update
+```
+
+- Релиз берётся и проверяется так же, как на ноде (§12.3): подпись, версия из подписи, назад — только с
+  `-version`, `-from DIR` для хоста без доступа к GitHub. Релиз новее установленного ставит `rayctl` самого релиза.
+- Дальше — то же, что повторная установка с сохранённым пакетом (ниже): новые `rayspa`, `rayd` и `rayctl`, затем
+  `rayctl install -relay /etc/raycontrol/relay.bundle` новой версии. Новый пакет с ноды не нужен.
+- До любых изменений `rayctl update` проверяет пакет relay и вашу SSH-сессию: sshd на одном порту, сессия на нём,
+  её адрес в списке администратора relay. Если адреса нет в списке, обновление отказывает и подсказывает команду для
+  ноды: `rayctl relay set -admin <список>,<ваш адрес> msk`, затем `rayctl update` снова. Из tmux или с консоли
+  адрес неизвестен: будет только предупреждение.
+- После установки проверяется, что `rayspa` работает и держит таблицу, пересылка включена, SSH открыт с адресов
+  администратора, точка замера работает, если работала до обновления. Не прошло — relay возвращается к прежней
+  версии с прежними юнитами и снимком периметра:
+
+  ```
+  rayctl: update failed, the previous version runs again: …
+  ```
+
+  Если не поднимается и прежняя, `rayctl` снимает периметр и оставляет хост открытым, без пересылки, и так и пишет:
+  запереть вас relay не может. Тогда — повторная установка (ниже).
+- `rayctl update -rollback` — вернуть версию до последнего обновления вручную.
+- `rayctl update status` на relay: установленная версия и сохранённая для отката. Автообновления и обновления с
+  телефона у relay нет: `rayctl update remote` и `auto` на нём отказывают — у relay нет API rayd для устройств.
+- На время обновления пересылка прерывается на десятки секунд, клиенты переподключаются.
+- **Что проверено.** Модульные тесты: выбор и проверка релиза, общие с нодой, передача `rayctl` релиза, проверка
+  сессии до изменений, откат при сбое установки и при сбое проверки. На настоящем хосте relay с systemd
+  `rayctl update` **ни разу не запускался**, в CI его нет.
+
+**Relay до v0.26.0 и запасной путь.** `rayctl` relay старше v0.26.0 отказывает:
 
 ```
 rayctl: this host is a relay: install/bootstrap.sh -relay with its bundle takes a new release
 ```
 
-Автообновление и обновление с телефона на relay тоже не работают. Новый релиз relay получает повторной установкой
+Такой relay, а также relay, который `rayctl update` оставил открытым, получает новый релиз повторной установкой
 поверх — теми же двумя командами на хосте relay:
 
 ```bash
@@ -2516,7 +2553,8 @@ curl -fsSL https://raw.githubusercontent.com/arngory/raycontrol/v0.25.1/install/
 bash bootstrap.sh -relay /etc/raycontrol/relay.bundle
 ```
 
-Скрипт ставит последний опубликованный релиз; тег в адресе — версия самого скрипта (§3.1).
+Скрипт ставит последний опубликованный релиз; тег в адресе — версия самого скрипта (§3.1). После такого запуска
+relay на v0.26.0 или новее, и дальше его обновляет `rayctl update`.
 
 - `/etc/raycontrol/relay.bundle` — копия пакета relay, которую установка оставила на его хосте. Новый пакет relay
   с ноды для обновления не нужен. Если на ноде с тех пор выполняли `rayctl relay bundle`, прежний уже не действует:
@@ -2696,7 +2734,9 @@ journalctl -u rayd --since -1h | grep -i certif
 | Признак | Причина | Что делать |
 |---|---|---|
 | `update failed, the previous version runs again: …` | новая версия не поднялась; откат выполнен | нода работает на прежней версии; причина — в строке; приложите `rayctl report` к обращению |
-| `this host is a relay: …` | `rayctl update` запущен на хосте relay | §12.4 |
+| `this host is a relay: install/bootstrap.sh -relay …` | `rayctl update` relay старше v0.26.0 | повторная установка с пакетом, §12.4 |
+| `this host is a relay: remote and automatic updates do not apply …` | `rayctl update remote` или `auto` на хосте relay | relay обновляется только `rayctl update` на его хосте, §12.4 |
+| `… not from the relay's admin addresses …, then rayctl update again` | SSH-сессия не с адреса администратора relay | на ноде `rayctl relay set -admin …`, затем `rayctl update` на relay, §12.4 |
 | `unexpected "slipstream-server" in the archive` | на ноде `rayctl` старше v0.15.0 | `rayctl update -version v0.15.0`, затем `rayctl update` |
 | `rayd does not give the deployment's inputs (GetDeployInputs)` | бинарник `rayctl` новее работающего `rayd` | `systemctl restart rayd`, затем `rayctl apply` |
 | `another … is running` | идёт другое обновление или `apply` | дождаться |
