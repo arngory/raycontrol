@@ -48,9 +48,14 @@ func allocated(f func()) uint64 {
 // empty f is taken off, and the fuzzing engine's own work may run beside
 // f: f runs again (it must start afresh each time) before an input is
 // said to break the bound. A parser's own allocation is the same at every
-// run.
+// run. Under the race detector f only runs: the pools give nothing back
+// there (raceDetector), and the bound failed one run in six.
 func allocBound(t *testing.T, limit uint64, f func()) {
 	t.Helper()
+	if raceDetector {
+		f()
+		return
+	}
 	if got, base, over := allocOver(limit, f); over {
 		t.Fatalf("%d bytes allocated for an input (the harness's own %d), the bound is %d", got, base, limit)
 	}
@@ -73,6 +78,9 @@ var allocSink []byte
 // allocBound sees one allocation of a length field's size, and one of a
 // few bytes past its limit, where its slack of 64 KiB let either through.
 func TestAllocBound(t *testing.T) {
+	if raceDetector {
+		t.Skip("no bound on allocations under the race detector")
+	}
 	for _, c := range []struct {
 		size, limit int
 		over        bool
