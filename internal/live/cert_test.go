@@ -19,9 +19,10 @@ import (
 // manager keeps it. rayd naive and rayd site read the chain again, so
 // their units are not restarted and no connection is cut; DoH is rayd's
 // own. The niko-server backends that answer with the same certificate
-// (hy2-masq, Yggdrasil) do not reread it: they still restart. A new key
-// restarts every one of them: the processes get the key as a copy made at
-// the start.
+// (hy2-masq, Yggdrasil) still restart. The pinned niko-server takes a new
+// chain by itself (xrayapi's TestRenewedChainWithNikoServer), but live does
+// not rely on it yet (§12). A new key restarts every one of them: the
+// processes get the key as a copy made at the start.
 func TestApplyCertificateRenewal(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -88,7 +89,7 @@ func TestApplyCertificateRenewal(t *testing.T) {
 			t.Errorf("the renewal restarted %s: %v", unit, got)
 		}
 	}
-	// niko-server keeps the certificate it started with.
+	// The niko-server backends, and nothing else.
 	if want := []string{"try-restart niko-hy2-masq.service", "try-restart niko-yggdrasil.service"}; !slices.Equal(got, want) {
 		t.Errorf("the renewal restarted %v, want %v", got, want)
 	}

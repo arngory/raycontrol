@@ -169,7 +169,8 @@ rayctl service rotate <сайт> [-force]
 - **`hy2-masq` и Yggdrasil** — бэкенды niko-server, здесь не меняются. На изменение `chain.pem` `apply` по-прежнему
   делает `systemctl try-restart niko-<сервис>.service`: процесс бэкенда стартует заново, все сессии QUIC (у
   Yggdrasil — линки) этого сервиса рвутся, клиенты переподключаются. Счётчики трафика `rayd` снимает перед
-  перезапуском. Чтобы и они переживали продление, перечитывать цепочку должен niko-server (§12).
+  перезапуском. Сам закреплённый niko-server новую цепочку берёт и без перезапуска; raycontrol этим пока не
+  пользуется (§12).
 
 ## 7. Свой сертификат оператора
 
@@ -283,14 +284,19 @@ https://d3x8.example.com/dns-query/f3b1c0de-0000-4000-8000-000000000003?niko-nod
 | настоящие `rayd naive` и `rayd site`: продление без перезапуска, открытое соединение живо | `cmd/rayd` `TestNaiveReloadsCertificate`, `TestSiteReloadsCertificate` |
 | DoH из базы, в том числе новый ключ; HTTP/3 | `TestDoHReloadsCertificate`, `TestHTTP3ReloadsCertificate` |
 | `apply` на продление не перезапускает naive и сайт; на новый ключ — перезапускает | `internal/live` `TestApplyCertificateRenewal` |
+| закреплённый niko-server: `hy2-masq` и Yggdrasil берут продлённую цепочку без перезапуска (`NIKO_SERVER_BIN`) | `internal/xrayapi` `TestRenewedChainWithNikoServer` |
 
 ## 12. Не сделано и не проверено
 
 - **Сквозной прогон с клиентом** не делался: проверены только строки (строгий разбор, векторы) и поведение ноды.
-- **niko-server** (`hy2-masq`, Yggdrasil) при продлении перезапускается (§6). По коду сертификат он читает при старте
-  (`niko:nikoserver/hysteria.go`, `yggdrasil.go`); запуском не проверено, дойдёт ли новая цепочка до новых рукопожатий
-  без перезапуска. Когда niko-server станет перечитывать цепочку, её файл у этих сервисов помечается перечитываемым,
-  как у naive.
+- **niko-server** (`hy2-masq`, Yggdrasil) при продлении перезапускается (§6): так решает `apply`, а не сам бэкенд.
+  Бэкенд берёт сертификат через TLS-конфиг sing-box (`niko:nikoserver/hysteria.go`, `yggdrasil.go`), а тот следит за
+  файлами сертификата и ключа и подменяет пару для новых рукопожатий. Проверено запуском закреплённого niko-server
+  v0.17.0 (`internal/xrayapi` `TestRenewedChainWithNikoServer`, нужен `NIKO_SERVER_BIN`): после замены файла цепочки
+  переименованием оба бэкенда, `hy2-masq` по QUIC и Yggdrasil по TLS, отдают новый лист новым рукопожатиям из того же
+  процесса. В SPEC niko-server такого обещания нет, и в юните под systemd это не проверялось. Следующий шаг —
+  пометить файл цепочки этих сервисов перечитываемым, как у naive, и записать поведение в SPEC niko-server: тогда
+  продление не рвёт и их сессии. Здесь не сделано.
 - **Стенд с пинами.** Тестовые стенды ставят сертификат через `rayctl service cert` и пинов не получают (§7): для
   прогона с пинами стенду нужен ACME (например, Pebble) в `-acme-directory`.
 - **Метрик** по ключам сайта нет: состояние видно в `rayctl service list` и в журнале `rayd` (`certificate stored`,
