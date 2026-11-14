@@ -483,18 +483,28 @@ func carryUsers(ctx context.Context, tx *sql.Tx) ([]carryUser, error) {
 	if err != nil {
 		return nil, err
 	}
-	mainLAN, curLAN := "0", "0"
-	if lan {
-		mainLAN = "u.lan_key IS NOT NULL"
-		curLAN = `coalesce((SELECT c.lan_key IS NOT NULL FROM cur.users c
-			WHERE c.id = u.id AND c.name = u.name AND c.created_at = u.created_at), 0)`
-	}
-	rows, err := tx.QueryContext(ctx, `SELECT u.id, u.name,
+	// The copy may be older than the LAN (schema 13): no key there.
+	const (
+		withLAN = `SELECT u.id, u.name,
 		EXISTS (SELECT 1 FROM cur.users c WHERE c.id = u.id AND c.name = u.name AND c.created_at = u.created_at),
 		EXISTS (SELECT 1 FROM cur.users c WHERE c.name = u.name),
-		`+mainLAN+`, `+curLAN+`,
+		u.lan_key IS NOT NULL,
+		coalesce((SELECT c.lan_key IS NOT NULL FROM cur.users c
+		          WHERE c.id = u.id AND c.name = u.name AND c.created_at = u.created_at), 0),
 		EXISTS (SELECT 1 FROM main.devices d WHERE d.user_id = u.id AND d.revoked_at IS NOT NULL)
-		FROM main.users u ORDER BY u.name`)
+		FROM main.users u ORDER BY u.name`
+		withoutLAN = `SELECT u.id, u.name,
+		EXISTS (SELECT 1 FROM cur.users c WHERE c.id = u.id AND c.name = u.name AND c.created_at = u.created_at),
+		EXISTS (SELECT 1 FROM cur.users c WHERE c.name = u.name),
+		0, 0,
+		EXISTS (SELECT 1 FROM main.devices d WHERE d.user_id = u.id AND d.revoked_at IS NOT NULL)
+		FROM main.users u ORDER BY u.name`
+	)
+	q := withoutLAN
+	if lan {
+		q = withLAN
+	}
+	rows, err := tx.QueryContext(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("store: carrying credentials: %w", err)
 	}
