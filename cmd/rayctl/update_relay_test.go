@@ -150,7 +150,7 @@ func TestRelayBefore(t *testing.T) {
 func TestRelayUpdateRun(t *testing.T) {
 	boom := errors.New("boom")
 	for name, c := range map[string]struct {
-		fail     string // the steps that fail; "place0": before the first binary
+		fail     string // the steps that fail; "place0": before the first binary; "forBoot": the system shuts down
 		calls    []string
 		contains string
 		back     bool // rolledBack
@@ -162,9 +162,10 @@ func TestRelayUpdateRun(t *testing.T) {
 		"place":           {"place", []string{"keep", "mark", "place", "restore", "checkBack", "unmark"}, "installing: boom", true},
 		"install":         {"install", []string{"keep", "mark", "place", "install", "restore", "checkBack", "unmark"}, "the relay install: boom", true},
 		"check":           {"check", []string{"keep", "mark", "place", "install", "check", "restore", "checkBack", "unmark"}, "after the install: boom", true},
-		"restore":         {"install,restore", []string{"keep", "mark", "place", "install", "restore", "open"}, "host left open", false},
-		"checkBack":       {"check,checkBack", []string{"keep", "mark", "place", "install", "check", "restore", "checkBack", "open"}, "host left open", false},
-		"open fails":      {"install,checkBack,open", []string{"keep", "mark", "place", "install", "restore", "checkBack", "open"}, "could NOT be taken down", false},
+		"restore":         {"install,restore", []string{"keep", "mark", "place", "install", "restore", "forBoot", "open"}, "host left open", false},
+		"checkBack":       {"check,checkBack", []string{"keep", "mark", "place", "install", "check", "restore", "checkBack", "forBoot", "open"}, "host left open", false},
+		"open fails":      {"install,checkBack,open", []string{"keep", "mark", "place", "install", "restore", "checkBack", "forBoot", "open"}, "could NOT be taken down", false},
+		"shutdown":        {"install,restore,forBoot", []string{"keep", "mark", "place", "install", "restore", "forBoot"}, "the system is shutting down", false},
 		"the words stand": {"install", nil, "the previous version runs again", true},
 	} {
 		var calls []string
@@ -180,7 +181,8 @@ func TestRelayUpdateRun(t *testing.T) {
 		}
 		u := relayUpdate{keep: step("keep"), mark: step("mark"), install: step("install"), check: step("check"),
 			restore: step("restore"), checkBack: step("checkBack"), open: step("open"),
-			unmark: func() { calls = append(calls, "unmark") },
+			unmark:  func() { calls = append(calls, "unmark") },
+			forBoot: func() bool { calls = append(calls, "forBoot"); return slices.Contains(fails, "forBoot") },
 			place: func() (bool, error) {
 				calls = append(calls, "place")
 				switch {
@@ -365,6 +367,7 @@ type fakeRelay struct {
 	asked  int              // relayBefore called
 	open   bool             // hostOpen
 	down   bool             // the units disabled --now and not started since
+	stops  bool             // the system is shutting down
 	yes    bool             // the answer to the prompt
 	prompt string
 	inst   func() error // the install
@@ -466,7 +469,7 @@ func newFakeRelay(t *testing.T) *fakeRelay {
 			return os.WriteFile(dst, b, 0o755)
 		},
 		disarm: func() { f.record("disarm") }, unforward: func() { f.record("unforward") },
-		tableGone: func() bool { return true }, rayspa: "rayspa",
+		tableGone: func() bool { return true }, rayspa: "rayspa", stopping: func() bool { return f.stops },
 	}
 	f.env = relayEnv{
 		bundle: f.at("relay.bundle"), ops: ops, session: session{"203.0.113.9", 22},
@@ -720,6 +723,81 @@ func TestRelayRestoreSysctlWarns(t *testing.T) {
 	f.bad["v0.26.0"] = errors.New(`the relay does not forward (net.ipv4.ip_forward "0")`)
 	if _, err := f.update(updateOpts{want: "latest", yes: true}); err == nil || !strings.Contains(err.Error(), "host left open") || !opened(f) {
 		t.Errorf("not opened: %v", err)
+	}
+}
+
+// At a shutdown logind's SIGTERM ends the install too, and systemd
+// refuses the restore's start: the relay is not opened then but left to
+// start at boot from what the restore put back, rayspa enabled, and the
+// mark says so to the next rayctl update, whose -rollback after the boot
+// ends it. Without rayspa enabled or a snapshot to start from, the host is
+// opened as ever.
+func TestRelayShutdownLeftForBoot(t *testing.T) {
+	shutdown := func(f *fakeRelay) {
+		f.stops = true
+		f.inst = func() error { return errors.New("signal: terminated") }
+		run := f.env.ops.run
+		f.env.ops.run = func(name string, args ...string) error {
+			if err := run(name, args...); err != nil {
+				return err
+			}
+			if f.stops && len(args) > 0 && args[0] == "start" {
+				return errors.New("Transaction for rayspa.service/start is destructive (shutdown.target has 'start' job queued)")
+			}
+			return nil
+		}
+	}
+	opened := func(f *fakeRelay) bool {
+		return slices.ContainsFunc(f.ran, func(s string) bool { return strings.Contains(s, "disable --now") })
+	}
+	f := newFakeRelay(t)
+	shutdown(f)
+	_, err := f.update(updateOpts{want: "latest", yes: true})
+	if err == nil || !strings.Contains(err.Error(), "the system is shutting down") || opened(f) {
+		t.Fatalf("at a shutdown: %v %q", err, f.ran)
+	}
+	if f.read("bin/rayspa") != "rayspa v0.26.0" || !slices.Contains(f.ran, "systemctl enable rayspa.service") {
+		t.Errorf("not as the restore leaves it: %q %q", f.read("bin/rayspa"), f.ran)
+	}
+	m, marked := f.env.ops.readMark()
+	if !marked || m.State != "shutdown" {
+		t.Fatalf("mark %+v %v", m, marked)
+	}
+	// After the boot: the next update says what happened, -rollback ends it.
+	f.stops = false
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err == nil ||
+		!strings.Contains(err.Error(), "the system shut down during an update") || !strings.Contains(err.Error(), "-rollback puts v0.26.0 back") {
+		t.Errorf("after the boot: %v", err)
+	}
+	if _, err := f.rollback(true); err != nil {
+		t.Errorf("-rollback after the boot: %v", err)
+	}
+	if _, marked := f.env.ops.readMark(); marked {
+		t.Error("the mark stays after the -rollback")
+	}
+
+	// rayspa not enabled (the install disabled it, the restore did not get
+	// to enable it): opened.
+	f = newFakeRelay(t)
+	shutdown(f)
+	f.env.ops.state = func(string) unitWas { return unitWas{Enabled: false, Active: !f.down} }
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err == nil || !strings.Contains(err.Error(), "host left open") || !opened(f) {
+		t.Errorf("rayspa not enabled: %v", err)
+	}
+	// No snapshot to start from: opened.
+	f = newFakeRelay(t)
+	shutdown(f)
+	os.Remove(f.at("state/snapshot.pb"))
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err == nil || !strings.Contains(err.Error(), "host left open") || !opened(f) {
+		t.Errorf("no snapshot: %v", err)
+	}
+	// Not shutting down: opened, as ever.
+	f = newFakeRelay(t)
+	shutdown(f)
+	f.stops = false
+	f.bad["v0.26.0"] = errors.New("rayspa is inactive/dead")
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err == nil || !strings.Contains(err.Error(), "host left open") {
+		t.Errorf("not shutting down: %v", err)
 	}
 }
 

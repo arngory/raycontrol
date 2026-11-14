@@ -163,6 +163,11 @@ type relayMark struct {
 }
 
 func (m relayMark) advice() string {
+	if m.State == "shutdown" {
+		return fmt.Sprintf("the system shut down during an update or rollback of this relay (from %s to %s): rayspa was left "+
+			"enabled to start at boot as it was; rayctl update -rollback puts %s back", cmp.Or(m.From, "?"), cmp.Or(m.To, "?"),
+			cmp.Or(m.From, "the kept version"))
+	}
 	if m.State == "open" {
 		return fmt.Sprintf("the last update or rollback of this relay left it open and not forwarding: rayctl update -rollback "+
 			"tries %s again, or bash bootstrap.sh -relay %s installs the relay anew", cmp.Or(m.From, "the kept version"), deploy.RelayBundle)
@@ -201,6 +206,7 @@ type relayOps struct {
 	tableGone func() bool
 	rayspa    string        // its binary, for teardown
 	settle    time.Duration // how long open waits to look at the table again
+	stopping  func() bool   // the system is shutting down (systemctl is-system-running)
 }
 
 // savedName is a file's name among the kept ones.
@@ -427,6 +433,26 @@ func (o relayOps) open() error {
 	return nil
 }
 
+// forBoot leaves the relay to the next boot instead of opening it, when
+// the system is shutting down: logind's SIGTERM ended the install, and
+// systemd refuses the restore's start (or the check finds rayspa down),
+// so the previous relay "did not come back" only for now. With rayspa
+// enabled and a snapshot there, the relay starts at boot from what the
+// restore got to put back, its admin let in by that snapshot: better than
+// a host that boots open. Not so, false: the host is opened as ever. The
+// mark ("shutdown") says what happened to the next rayctl update.
+func (o relayOps) forBoot() bool {
+	if o.stopping == nil || !o.stopping() || !o.state(o.units[0]).Enabled {
+		return false
+	}
+	if _, err := readRegular(o.snapshot); err != nil {
+		return false
+	}
+	m, _ := o.readMark()
+	m.State = "shutdown"
+	return o.mark(m) == nil
+}
+
 // sortedKeys are a map's keys in order.
 func sortedKeys[V any](m map[string]V) []string { return slices.Sorted(maps.Keys(m)) }
 
@@ -641,6 +667,7 @@ type relayUpdate struct {
 	restore   func() error         // the kept relay back
 	checkBack func() error         // relayHealth, of the previous version
 	open      func() error         // rayspa down, table off
+	forBoot   func() bool          // the system shuts down: the relay left to its boot, not opened
 	unmark    func()               // the relay is checked: the mark goes
 }
 
@@ -675,7 +702,7 @@ func (u relayUpdate) run() error {
 		return nil
 	}
 	fmt.Println("update failed:", err)
-	err = backOrOpen(err, u.restore, u.checkBack, u.open)
+	err = backOrOpen(err, u.restore, u.checkBack, u.open, u.forBoot)
 	if rb := (rolledBack{}); errors.As(err, &rb) {
 		u.unmark()
 	}
@@ -683,14 +710,19 @@ func (u relayUpdate) run() error {
 }
 
 // backOrOpen brings the previous relay back after cause; if it does not
-// come back, it opens the host and says so.
-func backOrOpen(cause error, restore, checkBack, open func() error) error {
+// come back, it opens the host and says so, unless the system is shutting
+// down and forBoot leaves the relay to the boot.
+func backOrOpen(cause error, restore, checkBack, open func() error, forBoot func() bool) error {
 	berr := restore()
 	if berr == nil {
 		berr = checkBack()
 	}
 	if berr == nil {
 		return rolledBack{cause}
+	}
+	if forBoot != nil && forBoot() {
+		return fmt.Errorf("%w; the previous relay did not come back (%v): the system is shutting down, so the host is not "+
+			"opened and rayspa stays enabled to start at boot; once it is up, rayctl update -rollback", cause, berr)
 	}
 	if oerr := open(); oerr != nil {
 		return fmt.Errorf("%w; the previous relay did not come back either (%v), and rayspa could NOT be taken down (%v): "+
@@ -813,6 +845,7 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 		restore:   func() error { _, err := e.ops.restore(true); return err },
 		checkBack: func() error { return relayBack(k, e.health, port, e.session.addr, b.Name) },
 		open:      e.ops.open,
+		forBoot:   e.ops.forBoot,
 		unmark:    e.ops.unmark,
 	}
 	if err := u.run(); err != nil {
@@ -871,7 +904,7 @@ func (e relayEnv) rollback(yes bool, name string) error {
 	}
 	defer e.signals()()
 	err = backOrOpen(errors.New("asked for"), func() error { _, err := e.ops.restore(marked || open); return err },
-		func() error { return relayBack(k, e.health, port, e.session.addr, name) }, e.ops.open)
+		func() error { return relayBack(k, e.health, port, e.session.addr, name) }, e.ops.open, e.ops.forBoot)
 	if rb := (rolledBack{}); errors.As(err, &rb) {
 		e.ops.unmark()
 		fmt.Printf("the relay runs %s again\n", k.Version)
@@ -937,6 +970,10 @@ func (c *cli) relayEnvHere(ctx context.Context) relayEnv {
 		tableGone: tableGone,
 		rayspa:    deploy.DefaultBinaries.Rayspa,
 		settle:    2 * time.Second,
+		stopping: func() bool {
+			out, _ := commandApart("systemctl", "is-system-running").Output()
+			return strings.TrimSpace(string(out)) == "stopping"
+		},
 	}
 	return relayEnv{
 		bundle: deploy.RelayBundle, ops: ops, session: sess,
