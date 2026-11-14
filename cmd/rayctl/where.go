@@ -44,6 +44,7 @@ var places = map[string]place{
 	"summary db":   onNode, // a file put in rayd's directory
 	"app-mirror":   viaAPI,
 	"metrics":      viaAPI,
+	"debug":        viaAPI, // GetStatus and SetDebug; the window is root's on the node (rayd says so)
 
 	"remote":        viaAPI,
 	"remote whoami": viaAPI, // the device of -remote FILE
@@ -61,7 +62,6 @@ var places = map[string]place{
 	"backup":     onNode,
 	"restore":    onNode,
 	"report":     onNode,
-	"debug":      onNode,
 	"egress":     onNode,
 	"conn-limit": onNode,
 }

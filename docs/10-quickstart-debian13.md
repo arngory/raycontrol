@@ -1192,11 +1192,12 @@ xattr -d com.apple.quarantine rayctl
 - `remote enroll` — регистрация по приглашению (§10.4), PIN спрашивается без показа на экране;
 - с файлом устройства, `-remote ФАЙЛ`: `remote whoami`, `remote rotate` и то же, что через `-remote` на Linux, —
   `status`, `node`, `user`, `service`, `device` (в том числе приглашение с QR в терминале), `audit`, `admin`, `dns`,
-  `summary`, `app-mirror`, `metrics`. Что из этого нода разрешает удалённому устройству, решает она сама (§10.4).
+  `summary`, `app-mirror`, `metrics`, `debug`. Что из этого нода разрешает удалённому устройству, решает она сама
+  (§10.4): так, окно отладки открывает и закрывает только root на ноде, через `-remote` работает лишь `debug show`.
 
 **Что не работает:** всё, что действует на самом сервере, — `install`, `apply`, `update`, `uninstall`, `backup`,
-`restore`, `report`, `check`, `legacy`, `debug`, `egress`, `conn-limit`, `service cert`, `relay bundle`,
-`summary db`. Такая команда ничего не делает и отвечает одной строкой с кодом выхода 1:
+`restore`, `report`, `check`, `legacy`, `egress`, `conn-limit`, `service cert`, `relay bundle`, `summary db`. Такая
+команда ничего не делает и отвечает одной строкой с кодом выхода 1:
 
 ```
 rayctl: install works on a Linux node only, and this is darwin: run it on the node (here: -remote FILE, remote enroll, knock, probe)

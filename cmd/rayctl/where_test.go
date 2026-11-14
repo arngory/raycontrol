@@ -101,10 +101,10 @@ func TestPlaces(t *testing.T) {
 // that says so, whatever the flags; the rest of the table does not.
 func TestRefusal(t *testing.T) {
 	node := []string{"install", "apply", "update", "uninstall", "backup", "restore", "report", "egress", "conn-limit",
-		"check", "legacy", "relay bundle", "service cert", "debug", "summary db"}
+		"check", "legacy", "relay bundle", "service cert", "summary db"}
 	api := []string{"status", "node", "user", "service", "device", "audit", "relay", "admin", "dns", "summary",
 		"app-mirror", "metrics", "remote whoami", "remote rotate", "service rotate", "relay list", "summary show",
-		"device invite"}
+		"device invite", "debug", "debug on"}
 	free := []string{"knock", "probe", "remote enroll"}
 	for _, c := range runCommands(t) {
 		if !slices.Contains(node, c) && !slices.Contains(api, c) && !slices.Contains(free, c) && c != "remote" {
@@ -243,7 +243,8 @@ func TestMainRefuses(t *testing.T) {
 	}{
 		{"darwin", []string{"-remote", missing, "install", "-host", "192.0.2.1"}, 1, "rayctl: install works on a Linux node only, and this is darwin", 1},
 		{"darwin", []string{"-remote", missing, "backup"}, 1, "rayctl: backup works on a Linux node only", 1},
-		{"freebsd", []string{"-socket", noSocket, "debug"}, 1, "rayctl: debug works on a Linux node only, and this is freebsd", 1},
+		{"freebsd", []string{"-socket", noSocket, "debug"}, 1, "rayctl: unavailable: ", 1},
+		{"freebsd", []string{"debug", "on"}, 1, "rayctl: debug asks a node, and there is none on freebsd: rayctl -remote FILE debug", 1},
 		{"darwin", []string{"-remote", missing, "service", "cert", "site", "-chain", missing, "-key", missing}, 1, "rayctl: service cert works on a Linux node only", 1},
 		{"darwin", []string{"status"}, 1, "rayctl: status asks a node, and there is none on darwin: rayctl -remote FILE status", 1},
 		{"darwin", []string{"-remote", missing, "status"}, 1, "rayctl: open " + missing, 1},
