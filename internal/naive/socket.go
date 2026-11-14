@@ -5,8 +5,6 @@ import (
 	"net"
 	"sync"
 	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
 // notSentLowat bounds what the kernel holds of an HTTP/2 connection that it
@@ -83,10 +81,10 @@ func (c *connSocket) add(n int) {
 	_ = c.rc.Control(func(fd uintptr) {
 		switch {
 		case was == 0 && c.datagrams > 0:
-			c.own, _ = unix.GetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_NOTSENT_LOWAT)
-			_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_NOTSENT_LOWAT, notSentLowat)
+			c.own, _ = lowat(fd)
+			_ = setLowat(fd, notSentLowat)
 		case was > 0 && c.datagrams == 0:
-			_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_NOTSENT_LOWAT, c.own)
+			_ = setLowat(fd, c.own)
 		}
 	})
 }
