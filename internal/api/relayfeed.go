@@ -22,6 +22,18 @@ type relayFeed struct{ r *Remote }
 
 var errNotRelay = connect.NewError(connect.CodeNotFound, errors.New("not found"))
 
+// relayLookup is the answer to a relay whose record could not be read:
+// "not found" only when the store says there is no such relay. A store that
+// failed for a moment (locked, or rayd starting during an update) is the
+// exit being away, not the relay removed: on "not found" the relay forgets
+// its devices and refuses them all until the next snapshot (relayprobe).
+func relayLookup(err error) error {
+	if errors.Is(err, store.ErrNotFound) {
+		return errNotRelay
+	}
+	return connect.NewError(connect.CodeUnavailable, errors.New("try again"))
+}
+
 // maxRelayStreams bounds the WatchRelay streams of one relay at once: its
 // rayspa and its rayd relay (relay-v1 §9.1).
 const maxRelayStreams = 2
@@ -34,7 +46,7 @@ const maxRelayReports = 4
 func (f *relayFeed) relayFrom(ctx context.Context, peer string) (store.Relay, error) {
 	relay, err := f.r.Perimeter.Store.RelayByCertPin(ctx, pinFrom(ctx))
 	if err != nil {
-		return store.Relay{}, errNotRelay
+		return store.Relay{}, relayLookup(err)
 	}
 	from, err := netip.ParseAddrPort(peer)
 	if err != nil || from.Addr().Unmap() != relay.Address {
@@ -161,7 +173,9 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 	var last []byte
 	for {
 		rev, wake := p.changes()
-		if r, err := p.Store.RelayByCertPin(ctx, pin); err != nil || r.Name != relay.Name {
+		if r, err := p.Store.RelayByCertPin(ctx, pin); err != nil {
+			return relayLookup(err)
+		} else if r.Name != relay.Name {
 			return errNotRelay
 		}
 		snap, err := p.RelaySnapshot(ctx, relay.Name)
