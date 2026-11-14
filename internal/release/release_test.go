@@ -247,8 +247,8 @@ func TestFetchRoots(t *testing.T) {
 	if r, err := f.Fetch(ctx, "latest", "amd64", k.pub); err != nil || r.Version != "v0.3.0" {
 		t.Fatalf("through the system store: %v", err)
 	}
-	if len(logged) == 0 || !strings.Contains(logged[0], "warning: 127.0.0.1: ") || tr.Status().Refused == 0 {
-		t.Fatalf("logged %q, refused %d", logged, tr.Status().Refused)
+	if st := tr.Status(); len(logged) == 0 || !strings.Contains(logged[0], "warning: 127.0.0.1: ") || st.Rescued == 0 || st.Refused != 0 {
+		t.Fatalf("logged %q, status %+v", logged, tr.Status())
 	}
 	logged = nil
 	rootstest.Use(t, roots.Settings{File: rootstest.File(t, srv.Certificate())})

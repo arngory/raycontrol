@@ -251,6 +251,7 @@ func cmdServe(args []string) error {
 	rr := &rootsReporter{hb: hb, log: log}
 	roots.Node.Path, roots.Node.Report = *tlsRoots, rr.report
 	roots.Node.Status() // builds the pool: reported
+	go rr.run(ctx, roots.Node)
 	go pruneAudit(ctx, st, hb, log)
 	paths := render.Paths{Rendered: *rendered, Run: *run, Supervised: *supervise}
 	rotateNow := make(chan struct{}, 1)

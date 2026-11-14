@@ -20,12 +20,14 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"sync"
+	"syscall"
 
 	"crypto/x509"
 )
@@ -55,7 +57,7 @@ type Settings struct {
 // ReadSettings reads a settings file; a missing file is the default.
 func ReadSettings(path string) (Settings, error) {
 	var s Settings
-	b, err := os.ReadFile(path) //nolint:gosec // G304: root's settings file
+	b, err := readRegular(path, 1<<16)
 	if errors.Is(err, fs.ErrNotExist) {
 		return s, nil
 	}
@@ -66,6 +68,29 @@ func ReadSettings(path string) (Settings, error) {
 		return Settings{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return s, nil
+}
+
+// readRegular reads a regular file of at most limit bytes. A FIFO, a
+// device or a directory is refused without being read: opened without
+// waiting for a writer, then checked.
+func readRegular(path string, limit int64) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // G304: root's file
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is no regular file (%v)", path, fi.Mode().Type())
+	}
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err == nil && int64(len(b)) > limit {
+		err = fmt.Errorf("%s is larger than %d bytes", path, limit)
+	}
+	return b, err
 }
 
 // WriteSettings writes a settings file (0644, by rename); the default
@@ -200,6 +225,11 @@ func ReadExtra(path string) ([]*x509.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
+	return extraOf(path, b)
+}
+
+// extraOf is ReadExtra's check of a file's content.
+func extraOf(path string, b []byte) ([]*x509.Certificate, error) {
 	cs, err := ParsePEM(b)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -247,7 +277,12 @@ func Build(s Settings, system func() (*x509.CertPool, error)) *Pool {
 		}
 	}
 	if s.File != "" && p.Err == nil {
-		cs, err := ReadExtra(s.File)
+		// A regular file only: a FIFO there must not hold the build.
+		b, err := readRegular(s.File, 4<<20)
+		var cs []*x509.Certificate
+		if err == nil {
+			cs, err = extraOf(s.File, b)
+		}
 		if err != nil {
 			p.Err = err
 		}

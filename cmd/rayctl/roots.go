@@ -15,7 +15,7 @@ import (
 
 // rootsCmd: rayctl roots [show] | system on|off | file PEM|none. The
 // roots the node's own outbound TLS trusts (R4-41) are root's file in
-// /etc: rayd reads it at its next connection, rayctl update when it runs,
+// /etc: rayd reads it within a second, rayctl update when it runs,
 // before rayd is up if need be.
 func rootsCmd(out io.Writer, settingsFile, extraFile string, args []string) error {
 	s, err := roots.ReadSettings(settingsFile)
@@ -81,7 +81,7 @@ func rootsCmd(out io.Writer, settingsFile, extraFile string, args []string) erro
 		return fmt.Errorf("written, but %w", err)
 	}
 	fmt.Fprintf(out, "the node's outbound TLS trusts: %s\n", p)
-	fmt.Fprintln(out, "rayd follows from its next connection, rayctl update when it runs; no restart")
+	fmt.Fprintln(out, "rayd follows within a second, rayctl update when it runs; no restart")
 	if s.System {
 		fmt.Fprintln(out, "with the system store a root installed in this image (by its maker, a provider or an intruder)\n"+
 			"may read the node's connections: ACME, Cloudflare's token, IPinfo's, the DoH upstreams")

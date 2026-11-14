@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -140,27 +141,60 @@ func TestBuild(t *testing.T) {
 	}
 }
 
+// waitPool waits for the trust's pool to be one ok says yes to: the files
+// are looked at by a goroutine of their own, every tr.Every.
+func waitPool(t *testing.T, tr *roots.Trust, what string, ok func(*roots.Pool) bool) *roots.Pool {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		p := tr.Pool()
+		if ok(p) {
+			return p
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: the pool stays %v", what, p)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestTransport: a server under a root not in the list is refused, and
 // counted with its host; the extra file lets it through; the settings
-// file is read again when it changes.
+// file is read again when it changes, and a new pool starts with no
+// refusal.
 func TestTransport(t *testing.T) {
 	srv, cert := tlsServer(t)
 	dir := t.TempDir()
 	settings := filepath.Join(dir, "tls-roots.json")
 	var mu sync.Mutex
 	var seen []roots.Status
-	tr := &roots.Trust{Path: settings, Report: func(s roots.Status) { mu.Lock(); seen = append(seen, s); mu.Unlock() }}
+	tr := &roots.Trust{Path: settings, Every: 5 * time.Millisecond, Report: func(s roots.Status) { mu.Lock(); seen = append(seen, s); mu.Unlock() }}
 	c := tr.Client(0)
-	err := get(c, srv.URL)
+	err := get(c, srv.URL+"/dns-query?dns=a-users-question")
 	if err == nil || !roots.Verification(err) || !strings.Contains(err.Error(), "rayctl roots") {
 		t.Fatalf("refused: %v", err)
 	}
 	st := tr.Status()
-	if st.Refused != 1 || st.LastHost != "127.0.0.1" || !strings.Contains(st.LastErr, "unknown authority") {
+	if st.Refused != 1 || st.Total != 1 || st.LastHost != "127.0.0.1" || !strings.Contains(st.LastErr, "unknown authority") {
 		t.Fatalf("status %+v", st)
+	}
+	// The peer's host only: nothing of the request.
+	mu.Lock()
+	for _, s := range seen {
+		if s.Event != nil && (s.Event.Host != "127.0.0.1" || strings.Contains(s.Event.Err, "question") || strings.Contains(s.Event.Err, "dns-query")) {
+			t.Errorf("event %+v", s.Event)
+		}
+	}
+	mu.Unlock()
+	if strings.Contains(fmt.Sprintf("%+v", st), "question") {
+		t.Errorf("the request in the status: %+v", st)
 	}
 	if err := roots.WriteSettings(settings, roots.Settings{File: rootstest.File(t, cert)}); err != nil {
 		t.Fatal(err)
+	}
+	waitPool(t, tr, "with the file", func(p *roots.Pool) bool { return p.Extra == 1 })
+	if st := tr.Status(); st.Refused != 0 || st.Total != 1 {
+		t.Fatalf("a new pool keeps the old one's refusals: %+v", st)
 	}
 	if err := get(c, srv.URL); err != nil {
 		t.Fatalf("with the file: %v", err)
@@ -171,6 +205,7 @@ func TestTransport(t *testing.T) {
 	if _, err := os.Stat(settings); !os.IsNotExist(err) {
 		t.Fatalf("the default is no file: %v", err)
 	}
+	waitPool(t, tr, "back to the default", func(p *roots.Pool) bool { return p.Settings.File == "" })
 	c.CloseIdleConnections()
 	if err := get(c, srv.URL); err == nil {
 		t.Fatal("back to the default: accepted")
@@ -178,19 +213,62 @@ func TestTransport(t *testing.T) {
 	mu.Lock()
 	n, last := len(seen), seen[len(seen)-1]
 	mu.Unlock()
-	if n < 4 || last.Refused != 2 {
+	if n < 4 || last.Refused != 1 || last.Total != 2 {
 		t.Fatalf("%d reports, the last %+v", n, last)
 	}
 	// A settings file that does not parse: the embedded list, said so.
 	_ = os.WriteFile(settings, []byte("{"), 0o600)
-	if p := tr.Pool(); p.Err == nil || !strings.Contains(p.String(), "not followed") {
-		t.Fatalf("bad settings: %v", p)
+	waitPool(t, tr, "bad settings", func(p *roots.Pool) bool { return p.Err != nil && strings.Contains(p.String(), "not followed") })
+}
+
+// TestRefusalsClear: a refusal keeps the trust failing for RefusalWindow
+// at most; a connection the pool lets through to the same host clears it
+// at once, one to another host does not.
+func TestRefusalsClear(t *testing.T) {
+	srv, cert := tlsServer(t)
+	now := time.Now()
+	tr := &roots.Trust{Fixed: &roots.Settings{}, Now: func() time.Time { return now }}
+	other := errors.New("x509: certificate signed by unknown authority")
+	tr.Refused("api.cloudflare.com", other)
+	tr.Refused("127.0.0.1", other)
+	if st := tr.Status(); st.Refused != 2 {
+		t.Fatalf("two refusals: %+v", st)
+	}
+	now = now.Add(time.Minute)
+	tr.Refused("127.0.0.1", other)
+	if st := tr.Status(); st.Refused != 3 || st.LastHost != "127.0.0.1" {
+		t.Fatalf("again: %+v", st)
+	}
+	// The server's root is now trusted (the system store of a pool that
+	// has it): the same host is reached.
+	ok := &roots.Trust{Fixed: &roots.Settings{System: true}, System: func() (*x509.CertPool, error) {
+		p := x509.NewCertPool()
+		p.AddCert(cert)
+		return p, nil
+	}, Now: tr.Now}
+	ok.Refused("127.0.0.1", other)
+	ok.Refused("api.cloudflare.com", other)
+	if err := get(ok.Client(0), srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if st := ok.Status(); st.Refused != 1 || st.LastHost != "api.cloudflare.com" || st.Total != 2 {
+		t.Fatalf("reached 127.0.0.1: %+v", st)
+	}
+	// Aged out.
+	now = now.Add(roots.RefusalWindow - time.Minute + time.Second)
+	if st := tr.Status(); st.Refused != 2 || st.LastHost != "127.0.0.1" {
+		t.Fatalf("the first two aged out, not the third: %+v", st)
+	}
+	now = now.Add(time.Minute)
+	if st := tr.Status(); st.Refused != 0 || st.Total != 3 {
+		t.Fatalf("all aged out: %+v", st)
 	}
 }
 
 // TestSystemFallback: a download whose content is signed may go on with
 // the system store when the embedded list refuses its host, with a
-// warning; without the option, or for any other client, it may not.
+// warning, and counted as rescued, not refused; without the option, or
+// for any other client, it may not.
 func TestSystemFallback(t *testing.T) {
 	srv, cert := tlsServer(t)
 	tr := rootstest.Use(t, roots.Settings{}, cert)
@@ -202,14 +280,69 @@ func TestSystemFallback(t *testing.T) {
 	if err := get(c, srv.URL); err != nil {
 		t.Fatalf("fallback: %v", err)
 	}
-	if len(warned) != 1 || !strings.HasPrefix(warned[0], "127.0.0.1: ") || tr.Status().Refused != 2 {
-		t.Fatalf("warned %q, refused %d", warned, tr.Status().Refused)
+	st := tr.Status()
+	if len(warned) != 1 || !strings.HasPrefix(warned[0], "127.0.0.1: ") || st.Refused != 0 || st.Rescued != 1 || st.RescuedHost != "127.0.0.1" || st.Total != 2 {
+		t.Fatalf("warned %q, status %+v", warned, st)
 	}
 	// A fallback that does not help either is still refused.
-	rootstest.Use(t, roots.Settings{})
+	tr = rootstest.Use(t, roots.Settings{})
 	c = roots.Node.Client(0, roots.SystemFallback(nil))
 	if err := get(c, srv.URL); err == nil || !roots.Verification(err) {
 		t.Fatalf("fallback without the root: %v", err)
+	}
+	if st := tr.Status(); st.Refused != 1 || st.Rescued != 0 {
+		t.Fatalf("not rescued: %+v", st)
+	}
+}
+
+// TestHungSettings: settings that do not answer (a hung mount; here the
+// system store) leave the embedded list in force, said so, and hold no
+// caller: the first one waits 2 s, the next none; once they answer, the
+// pool follows them.
+func TestHungSettings(t *testing.T) {
+	release := make(chan struct{})
+	tr := &roots.Trust{Fixed: &roots.Settings{System: true}, Every: time.Millisecond, System: func() (*x509.CertPool, error) {
+		<-release
+		return x509.NewCertPool(), nil
+	}}
+	start := time.Now()
+	p := tr.Pool()
+	if p.Err == nil || !strings.Contains(p.Err.Error(), "did not answer") || time.Since(start) > 4*time.Second {
+		t.Fatalf("first pool %v after %v", p, time.Since(start))
+	}
+	time.Sleep(5 * time.Millisecond)
+	start = time.Now()
+	for range 1000 {
+		tr.Pool()
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("1000 pools in %v, the look hung", d)
+	}
+	close(release)
+	waitPool(t, tr, "answered", func(p *roots.Pool) bool { return p.Err == nil && p.Settings.System })
+}
+
+// TestSettingsNotAFile: a settings file or extra file that is a FIFO
+// (or anything but a regular file) is refused, not waited on: the
+// embedded list, said so, and no connection held.
+func TestSettingsNotAFile(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "tls-roots.json")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Skip(err)
+	}
+	done := make(chan *roots.Pool, 1)
+	go func() { done <- (&roots.Trust{Path: fifo}).Pool() }()
+	select {
+	case p := <-done:
+		if p.Err == nil || !strings.Contains(p.Err.Error(), "no regular file") {
+			t.Fatalf("a FIFO as settings: %v", p)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pool waits for the FIFO")
+	}
+	if p := roots.Build(roots.Settings{File: fifo}, nil); p.Err == nil || !strings.Contains(p.Err.Error(), "no regular file") {
+		t.Fatalf("a FIFO as extra file: %v", p)
 	}
 }
 
