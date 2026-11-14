@@ -85,20 +85,11 @@ func installRelay(bundlePath, packages string) (err error) {
 	}
 	// One install at a time: two would share the guard. Under rayctl
 	// update, the update's own lock, held from before its first change.
-	installLock, underUpdate, err := relayInstallLockFor(relayInstallLock)
+	_, done, err := relayInstallBegin(relayInstallLock, previousDir)
 	if err != nil {
 		return err
 	}
-	defer installLock.Close()
-	if !underUpdate {
-		// Installed anew and checked below: an update that did not end
-		// is over (relayMarkFile). Under an update, the update says.
-		defer func() {
-			if err == nil {
-				_ = os.Remove(filepath.Join(previousDir, relayMarkFile))
-			}
-		}()
-	}
+	defer func() { done(err) }()
 	sshd, err := sshdPorts()
 	if err != nil {
 		return fmt.Errorf("a relay closes all but its SSH port, and sshd's cannot be told (%w): fix sshd first", err)
@@ -425,6 +416,37 @@ const relayLockEnv = "RAYCONTROL_RELAY_LOCK_FD"
 // relay did not end well (update_relay.go). A relay installed anew and
 // checked by rayctl install -relay outside an update has no such past.
 const relayMarkFile = "relay.unfinished"
+
+// relayInstallBegin takes the install lock (relayInstallLockFor); done,
+// given the install's outcome, lets it go. A relay installed anew and
+// checked outside an update has no past: an update that did not end is
+// over (relayMarkFile), and what an earlier update kept of the relay
+// would roll it back to a version from before this install (dropRelayCopy).
+// Under an update, the update keeps and says.
+func relayInstallBegin(path, dir string) (lock *os.File, done func(error), err error) {
+	lock, underUpdate, err := relayInstallLockFor(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return lock, func(err error) {
+		if err == nil && !underUpdate {
+			dropRelayCopy(dir)
+		}
+		_ = lock.Close()
+	}, nil
+}
+
+// dropRelayCopy removes what an earlier update kept of the relay in dir
+// (previousDir), its mark with it. Only a relay's copy, the one with
+// relay.json: a node's has none (and installRelay refuses a node's host);
+// without one, the mark alone goes.
+func dropRelayCopy(dir string) {
+	if _, err := os.Lstat(filepath.Join(dir, relayKeptFile)); err == nil {
+		_ = os.RemoveAll(dir)
+		return
+	}
+	_ = os.Remove(filepath.Join(dir, relayMarkFile))
+}
 
 // relayInstallLockFor takes the install lock, or the one an update passed
 // on (underUpdate): fd 3 must be that very file and hold its lock.

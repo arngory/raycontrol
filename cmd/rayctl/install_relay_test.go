@@ -500,6 +500,122 @@ func TestInheritedInstallLock(t *testing.T) {
 	}
 }
 
+// End to end through exec, as rayctl update runs the install: the update
+// takes the lock and passes it on (relayInstallCommand); the install
+// takes it as inherited, it is close-on-exec there afterwards (a command
+// the install runs does not hold it), the install passing under the
+// update leaves the update's mark and copy, and while the update holds
+// the lock no other install gets it.
+func TestInstallLockPassedOn(t *testing.T) {
+	if lock := os.Getenv("RAYCTL_TEST_INSTALL_LOCK"); lock != "" {
+		installLockChild(lock, os.Getenv("RAYCTL_TEST_PREVIOUS"))
+		return
+	}
+	dir := t.TempDir()
+	path, previous := filepath.Join(dir, "lock"), filepath.Join(dir, "previous")
+	os.MkdirAll(previous, 0o700)
+	os.WriteFile(filepath.Join(previous, relayKeptFile), []byte("{}"), 0o600)
+	os.WriteFile(filepath.Join(previous, relayMarkFile), []byte(`{"state":"updating"}`), 0o600)
+	il, err := takeInstallLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer il.Close()
+	cmd := relayInstallCommand(os.Args[0], "relay.bundle", il)
+	cmd.Args = []string{os.Args[0], "-test.run=^TestInstallLockPassedOn$"}
+	cmd.Env = append(cmd.Env, "RAYCTL_TEST_INSTALL_LOCK="+path, "RAYCTL_TEST_PREVIOUS="+previous)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "install: under the update, fd 3 close-on-exec, not passed on") {
+		t.Fatalf("the install: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(previous, relayMarkFile)); err != nil {
+		t.Errorf("the install under the update took its mark: %v", err)
+	}
+	if other, err := takeInstallLock(path); err == nil {
+		other.Close()
+		t.Error("another install got the lock while the update holds it")
+	}
+}
+
+// installLockChild is the install's side of TestInstallLockPassedOn.
+func installLockChild(path, previous string) {
+	fail := func(format string, a ...any) {
+		fmt.Printf("install: "+format+"\n", a...)
+		os.Exit(1)
+	}
+	_, done, err := relayInstallBegin(path, previous)
+	if err != nil {
+		fail("%v", err)
+	}
+	if os.Getenv(relayLockEnv) != "" {
+		fail("%s goes on", relayLockEnv)
+	}
+	flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, 3, syscall.F_GETFD, 0)
+	if errno != 0 || flags&syscall.FD_CLOEXEC == 0 {
+		fail("fd 3 not close-on-exec (%v)", errno)
+	}
+	if out, err := exec.Command("sh", "-c", "test -e /proc/self/fd/3 && echo held || echo none").Output(); err != nil ||
+		strings.TrimSpace(string(out)) != "none" {
+		fail("a command the install runs holds fd 3: %q %v", out, err)
+	}
+	done(nil)
+	fmt.Println("install: under the update, fd 3 close-on-exec, not passed on")
+	os.Exit(0)
+}
+
+// Outside an update, an install that passes ends what an earlier update
+// left: its mark, and the copy it kept (a rollback to a version from
+// before this install); a node's previous, which has no relay.json, keeps
+// all but a mark. One that fails leaves both. The lock goes either way.
+func TestRelayInstallBegin(t *testing.T) {
+	dir := t.TempDir()
+	lock, previous := filepath.Join(dir, "lock"), filepath.Join(dir, "previous")
+	write := func(name, s string) { os.WriteFile(filepath.Join(previous, name), []byte(s), 0o600) }
+	there := func(name string) bool { _, err := os.Lstat(filepath.Join(previous, name)); return err == nil }
+	os.MkdirAll(previous, 0o700)
+	write(relayKeptFile, `{"version":"v0.26.0"}`)
+	write(relayMarkFile, `{"state":"open"}`)
+	write("rayspa", "rayspa v0.26.0")
+	_, done, err := relayInstallBegin(lock, previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := takeInstallLock(lock); err == nil {
+		t.Error("the lock not held")
+	}
+	done(errors.New("the relay took no perimeter from its exit"))
+	if !there(relayKeptFile) || !there(relayMarkFile) {
+		t.Error("an install that failed removed the copy or the mark")
+	}
+	_, done, err = relayInstallBegin(lock, previous)
+	if err != nil {
+		t.Fatalf("the lock after an install that failed: %v", err)
+	}
+	done(nil)
+	if _, err := os.Lstat(previous); !os.IsNotExist(err) {
+		t.Errorf("the relay's copy after an install that passed: %v", err)
+	}
+	// A node's previous: only a mark goes.
+	os.MkdirAll(previous, 0o700)
+	write("VERSION", "v0.26.0\n")
+	write("rayd.db", "db")
+	write(relayMarkFile, `{"state":"updating"}`)
+	_, done, err = relayInstallBegin(lock, previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done(nil)
+	if !there("VERSION") || !there("rayd.db") || there(relayMarkFile) {
+		t.Errorf("a previous without relay.json: VERSION %v rayd.db %v mark %v", there("VERSION"), there("rayd.db"), there(relayMarkFile))
+	}
+	if l, err := takeInstallLock(lock); err != nil {
+		t.Errorf("the lock after done: %v", err)
+	} else {
+		l.Close()
+	}
+}
+
 // What systemctl says, or does not: rayspa counts as enabled and running
 // unless systemd says it is not.
 func TestSystemctlAnswers(t *testing.T) {
