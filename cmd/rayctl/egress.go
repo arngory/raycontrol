@@ -12,6 +12,8 @@ import (
 
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/perimeter"
+	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 // What rayctl egress asks of the host; tests replace them.
@@ -97,11 +99,22 @@ func (c *cli) egressShow(ctx context.Context) error {
 		return err
 	}
 	e := r.Msg.GetEgress()
+	// The REALITY targets on a local address the local part lets through
+	// (spec/egress-policy-v1.md §10): as rayd puts them in the snapshot.
+	var exempt []string
+	if e.GetLocal() {
+		if svcs, err := c.c.ListServices(ctx, connect.NewRequest(&nodev1.ListServicesRequest{})); err == nil {
+			exempt = localExemptLines(svcs.Msg.Services)
+		}
+	}
 	return c.print(r.Msg, func(w *tabwriter.Writer) {
 		state := map[bool]string{true: "blocked", false: "allowed"}
 		fmt.Fprintf(w, "bittorrent\t%s\n", state[e.GetBittorrent()])
 		fmt.Fprintf(w, "smtp (tcp 25)\t%s\n", state[e.GetSmtp()])
 		fmt.Fprintf(w, "local networks\t%s\n", state[e.GetLocal()])
+		for _, x := range exempt {
+			fmt.Fprintf(w, "local exempt\t%s\n", x)
+		}
 		fmt.Fprintf(w, "covers\tevery profile: the data plane's processes, UIDs %s\n", perimeter.DataPlaneUIDs)
 		for _, uid := range r.Msg.Uids {
 			// rayd serve -supervise: the data plane runs as rayd.
@@ -119,6 +132,21 @@ func (c *cli) egressShow(ctx context.Context) error {
 			}
 		}
 	})
+}
+
+// localExemptLines say what the local part lets through for REALITY
+// targets on a local address: the destination, to whom, why.
+func localExemptLines(services []*nodev1.Service) []string {
+	var out []string
+	for _, s := range services {
+		ap, ok := provision.RealityLocalTarget(store.Service{Kind: s.Kind, Enabled: s.Enabled, Settings: s.SettingsJson})
+		if !ok || s.Uid == 0 {
+			continue
+		}
+		out = append(out, fmt.Sprintf("tcp %s: REALITY %s's target, for its process only (uid %d); "+
+			"anyone reaching %s's port without its keys reaches it through REALITY", ap, s.Name, s.Uid, s.Name))
+	}
+	return out
 }
 
 // egressInForce says whether the rules in the table are the policy's.

@@ -159,6 +159,20 @@ message Local {
   // Ports on 127.0.0.1 the data plane reaches all the same: the channel
   // probe's endpoint (the subscription's port, spec/probe-v1.md).
   repeated Port loopback = 2;
+  // Exact destinations one process of the data plane reaches all the
+  // same: a REALITY target the operator set on a local address (the
+  // host's own web server on 127.0.0.1:8443, a server on the private
+  // network), from that REALITY service's process only. Absent (an older
+  // rayd): none.
+  repeated LocalExempt exempt = 3;
+}
+
+// LocalExempt is one destination the local part lets through, by its
+// exact address, protocol and port, for one UID.
+message LocalExempt {
+  string addr = 1; // one IP address
+  Port port = 2;
+  uint32 uid = 3;  // the service's process (9110-9179)
 }
 
 message AcmeWindow {

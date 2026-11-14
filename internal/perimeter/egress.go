@@ -3,6 +3,7 @@ package perimeter
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -27,12 +28,32 @@ type Egress struct {
 	// ports on 127.0.0.1 it reaches all the same (the channel probe).
 	Local    bool
 	Loopback []Port
+	// Exempt are exact destinations one data-plane process reaches all
+	// the same: a REALITY service's target on a local address, from that
+	// service's UID only (spec/egress-policy-v1.md §10).
+	Exempt []LocalExempt
 }
+
+// LocalExempt is a destination by its exact address, protocol and port,
+// for one UID.
+type LocalExempt struct {
+	Addr netip.Addr
+	Port Port
+	UID  uint32
+}
+
+func (x LocalExempt) String() string {
+	return fmt.Sprintf("%s %s from uid %d", x.Port.Proto, netip.AddrPortFrom(x.Addr, x.Port.Num), x.UID)
+}
+
+// exemptUIDs are the UIDs an exemption may name: a service's process
+// (store.FirstServiceUID to store.LastServiceUID), never the front's.
+const exemptFirstUID, exemptLastUID = 9110, 9179
 
 // Equal reports whether two policies are the same.
 func (e Egress) Equal(o Egress) bool {
 	return e.SMTP == o.SMTP && e.BitTorrent == o.BitTorrent && slices.Equal(e.UIDs, o.UIDs) &&
-		e.Local == o.Local && slices.Equal(e.Loopback, o.Loopback)
+		e.Local == o.Local && slices.Equal(e.Loopback, o.Loopback) && slices.Equal(e.Exempt, o.Exempt)
 }
 
 func egressOf(e *perimeterv1.Egress) Egress {
@@ -52,6 +73,21 @@ func egressOf(e *perimeterv1.Egress) Egress {
 			}
 		}
 		slices.SortFunc(out.Loopback, func(a, b Port) int { return strings.Compare(a.String(), b.String()) })
+		// One address, TCP or UDP, a port, a service's UID: anything else
+		// of a later rayd is left out, never widened.
+		for _, x := range l.GetExempt() {
+			a, err := netip.ParseAddr(x.GetAddr())
+			p := Port{x.GetPort().GetProto(), uint16(x.GetPort().GetPort())} //nolint:gosec // G115: checked below
+			if err != nil || a.Zone() != "" || (p.Proto != "tcp" && p.Proto != "udp") || p.Num == 0 || x.GetPort().GetPort() > 65535 ||
+				x.GetUid() < exemptFirstUID || x.GetUid() > exemptLastUID {
+				continue
+			}
+			ex := LocalExempt{Addr: a.Unmap(), Port: p, UID: x.GetUid()}
+			if !slices.Contains(out.Exempt, ex) {
+				out.Exempt = append(out.Exempt, ex)
+			}
+		}
+		slices.SortFunc(out.Exempt, func(a, b LocalExempt) int { return strings.Compare(a.String(), b.String()) })
 	}
 	return out
 }
@@ -202,6 +238,15 @@ func EgressLocalScript(e Egress) string {
 		// an honest connect "denied" from their own check before it comes
 		// to this.
 		rule("egress_local", "meta l4proto { tcp, udp } ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 return")
+		// An operator's REALITY target on a local address: that address,
+		// protocol and port, from that service's process only.
+		for _, x := range e.Exempt {
+			family := "ip"
+			if x.Addr.Is6() {
+				family = "ip6"
+			}
+			rule("egress_local", fmt.Sprintf("meta skuid %d %s daddr %s meta l4proto %s th dport %d return", x.UID, family, x.Addr, x.Port.Proto, x.Port.Num))
+		}
 		if len(e.Loopback) > 0 {
 			rule("egress_local", fmt.Sprintf("ip daddr 127.0.0.1 meta l4proto . th dport { %s } return", strings.Join(portElems(e.Loopback), ", ")))
 		}

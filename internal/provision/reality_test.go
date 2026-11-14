@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 func target(t *testing.T, pad int, cfg func(*tls.Config)) string {
@@ -73,6 +75,49 @@ func TestCheckRealityTarget(t *testing.T) {
 	}
 	if err := CheckRealityTarget(ctx, "/run/niko/site/site.sock", "x.example.com"); err != nil {
 		t.Fatalf("unix target: %v", err)
+	}
+}
+
+// A REALITY target on a local address (R4-38, spec/egress-policy-v1.md
+// §10): by its address and port it is the data plane's exemption; by a
+// name it is none, and the check says so instead of passing on rayd's
+// path, which the data plane's dial would not take.
+func TestRealityLocalTarget(t *testing.T) {
+	svc := func(settings string) store.Service {
+		return store.Service{Kind: "reality", Enabled: true, Settings: settings, UID: 9120}
+	}
+	for settings, want := range map[string]string{
+		`{"target":"127.0.0.1:8443","sni":"www.example.org"}`: "127.0.0.1:8443",
+		`{"target":"[::1]:8443","sni":"www.example.org"}`:     "[::1]:8443",
+		`{"target":"10.0.0.7:443","sni":"www.example.org"}`:   "10.0.0.7:443",
+		`{"target":"168.63.129.16:443","sni":"x.example"}`:    "168.63.129.16:443",
+		`{"target":"www.example.org:443"}`:                    "",
+		`{"target":"localhost:8443","sni":"www.example.org"}`: "",
+		`{"target":"1.1.1.1:443","sni":"one.one.one.one"}`:    "",
+		`{"target":"/run/x.sock","sni":"www.example.org"}`:    "",
+		`{"site":"site","sni":"www.example.org"}`:             "",
+		`{"target":"127.0.0.1:0","sni":"www.example.org"}`:    "",
+	} {
+		ap, ok := RealityLocalTarget(svc(settings))
+		if got := map[bool]string{true: ap.String(), false: ""}[ok]; got != want {
+			t.Errorf("%s: %q, want %q", settings, got, want)
+		}
+	}
+	off := svc(`{"target":"127.0.0.1:8443","sni":"www.example.org"}`)
+	off.Enabled = false
+	if _, ok := RealityLocalTarget(off); ok {
+		t.Error("a disabled service")
+	}
+	off.Enabled, off.Kind = true, "naive"
+	if _, ok := RealityLocalTarget(off); ok {
+		t.Error("not REALITY")
+	}
+
+	addr := target(t, 4096, nil) // 127.0.0.1:port
+	_, port, _ := strings.Cut(addr, ":")
+	err := CheckRealityTarget(context.Background(), "localhost:"+port, "target.test")
+	if err == nil || !strings.Contains(err.Error(), "a local address") || !strings.Contains(err.Error(), ":"+port+")") {
+		t.Fatalf("a name for a local address: %v", err)
 	}
 }
 

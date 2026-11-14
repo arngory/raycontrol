@@ -209,7 +209,7 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 		return nil, err
 	}
 	snap.Egress = &perimeterv1.Egress{Smtp: egress.SMTP, Bittorrent: egress.BitTorrent, Uids: p.egressUIDs(),
-		Local: &perimeterv1.Local{Allow: !egress.Local, Loopback: probeLoopback(services)}}
+		Local: &perimeterv1.Local{Allow: !egress.Local, Loopback: probeLoopback(services), Exempt: localExempt(services)}}
 	// The per-address limit on new inbound connections (conn-limit-v1 §8).
 	if snap.ConnLimitOff, err = p.Store.ConnLimitOff(ctx); err != nil {
 		return nil, err
@@ -371,6 +371,25 @@ func realityOpen(svc store.Service) bool {
 	}
 	_ = json.Unmarshal([]byte(svc.Settings), &st)
 	return st.Open
+}
+
+// localExempt are the REALITY targets the operator set on a local
+// address (provision.RealityLocalTarget): the data plane's local part lets
+// each through by its address, TCP and port, from its service's process
+// only (spec/egress-policy-v1.md §10). On a supervised node the services
+// run as rayd, which the local part does not cover: there they change
+// nothing.
+func localExempt(services []store.Service) []*perimeterv1.LocalExempt {
+	var out []*perimeterv1.LocalExempt
+	for _, svc := range services {
+		ap, ok := provision.RealityLocalTarget(svc)
+		if !ok || svc.UID < store.FirstServiceUID || svc.UID > store.LastServiceUID {
+			continue
+		}
+		out = append(out, &perimeterv1.LocalExempt{Addr: ap.Addr().String(),
+			Port: &perimeterv1.Port{Proto: "tcp", Port: uint32(ap.Port())}, Uid: uint32(svc.UID)}) //nolint:gosec // G115: checked above
+	}
+	return out
 }
 
 // probeLoopback are the ports on 127.0.0.1 the data plane reaches with

@@ -121,6 +121,34 @@ func TestNetnsLocal(t *testing.T) {
 		t.Errorf("counter: %v %v", bl, err)
 	}
 
+	// An operator's REALITY target on 127.0.0.1 (the host's own web
+	// server): its exact address, TCP and port, from that service's
+	// process only. Its port + 1 is refused, and so is the same target
+	// from another data-plane process.
+	const reality = 9120
+	steal, next := ap("127.0.0.1", 17004), ap("127.0.0.1", 17005)
+	for _, a := range []netip.AddrPort{steal, next} {
+		peer := listenTCP(t, a)
+		go func() {
+			for range peer {
+			}
+		}()
+	}
+	policy(&perimeterv1.Egress{Local: &perimeterv1.Local{Exempt: []*perimeterv1.LocalExempt{
+		{Addr: "127.0.0.1", Port: &perimeterv1.Port{Proto: "tcp", Port: 17004}, Uid: reality}}}})
+	if err := reach(reality, steal); err != nil {
+		t.Errorf("REALITY to its target: %v", err)
+	}
+	if err := reach(reality, next); !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Errorf("REALITY to its target's port + 1: %v, want ECONNREFUSED", err)
+	}
+	if err := sendAs(reality, steal, []byte("x")); !errors.Is(err, syscall.EPERM) {
+		t.Errorf("REALITY's UDP to its TCP target: %v, want EPERM", err)
+	}
+	if err := reach(dataPlane, steal); !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Errorf("another process to the REALITY target: %v, want ECONNREFUSED", err)
+	}
+
 	policy(&perimeterv1.Egress{Local: &perimeterv1.Local{Allow: true}})
 	if err := reach(dataPlane, service); err != nil {
 		t.Errorf("allowed: %v", err)

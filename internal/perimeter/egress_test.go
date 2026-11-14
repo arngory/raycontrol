@@ -130,6 +130,43 @@ func TestEgressOf(t *testing.T) {
 	if e = egressOf(&perimeterv1.Egress{Local: &perimeterv1.Local{Allow: true, Loopback: []*perimeterv1.Port{{Proto: "tcp", Port: 8443}}}}); e.Local || e.Loopback != nil {
 		t.Errorf("allowed: %+v", e)
 	}
+
+	// A REALITY target on a local address: one address, TCP or UDP, a
+	// port, a service's UID; anything else is left out, never widened.
+	tcp := func(p uint32) *perimeterv1.Port { return &perimeterv1.Port{Proto: "tcp", Port: p} }
+	e = egressOf(&perimeterv1.Egress{Local: &perimeterv1.Local{Exempt: []*perimeterv1.LocalExempt{
+		{Addr: "127.0.0.1", Port: tcp(8443), Uid: 9120},
+		{Addr: "127.0.0.1", Port: tcp(8443), Uid: 9120},
+		{Addr: "::ffff:10.0.0.7", Port: tcp(443), Uid: 9121},
+		{Addr: "10.0.0.0/8", Port: tcp(443), Uid: 9121},
+		{Addr: "127.0.0.1", Port: tcp(8443), Uid: frontUID},
+		{Addr: "127.0.0.1", Port: tcp(8443), Uid: 0},
+		{Addr: "127.0.0.1", Port: tcp(0), Uid: 9120},
+		{Addr: "127.0.0.1", Port: tcp(70000), Uid: 9120},
+		{Addr: "127.0.0.1", Port: &perimeterv1.Port{Proto: "sctp", Port: 1}, Uid: 9120},
+		{Addr: "fe80::1%eth0", Port: tcp(443), Uid: 9120},
+	}}})
+	want := []LocalExempt{{netip.MustParseAddr("10.0.0.7"), Port{"tcp", 443}, 9121}, {netip.MustParseAddr("127.0.0.1"), Port{"tcp", 8443}, 9120}}
+	if !slices.Equal(e.Exempt, want) {
+		t.Errorf("exempt: %v, want %v", e.Exempt, want)
+	}
+	if e.Equal(Egress{Local: true}) {
+		t.Error("Equal without the exemptions")
+	}
+	s := EgressLocalScript(e)
+	for _, r := range []string{"meta skuid 9120 ip daddr 127.0.0.1 meta l4proto tcp th dport 8443 return",
+		"meta skuid 9121 ip daddr 10.0.0.7 meta l4proto tcp th dport 443 return"} {
+		if i, j := strings.Index(s, r), strings.Index(s, "@local4"); i < 0 || i > j {
+			t.Errorf("lacks %q before the refusals:\n%s", r, s)
+		}
+	}
+	v6 := Egress{Local: true, Exempt: []LocalExempt{{netip.MustParseAddr("fd00::7"), Port{"tcp", 443}, 9122}}}
+	if !strings.Contains(EgressLocalScript(v6), "meta skuid 9122 ip6 daddr fd00::7 meta l4proto tcp th dport 443 return") {
+		t.Errorf("IPv6:\n%s", EgressLocalScript(v6))
+	}
+	if strings.Contains(EgressLocalScript(Egress{Exempt: v6.Exempt}), "skuid") {
+		t.Error("an exemption with local allowed")
+	}
 }
 
 // The table's part of R4-38: the sets of LocalNets, and the output
