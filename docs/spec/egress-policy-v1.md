@@ -16,9 +16,11 @@ niko-server, форк Xray и Niko ради неё не меняются (в т�
 
 ```
 rayctl egress                          # политика, где действует, счётчики (root)
-rayctl egress block bittorrent|smtp
-rayctl egress allow bittorrent|smtp
+rayctl egress block bittorrent|smtp|local
+rayctl egress allow bittorrent|smtp|local
 ```
+
+`local` — собственные и локальные сети ноды, с v0.27.0: в отличие от двух других закрыты по умолчанию, §10.
 
 - **Одна на ноду, не на пользователя.** Ядро не знает пользователя: все пользователи профиля идут через один процесс
   и его UID. И жалоба, и чёрный список приходят на адрес ноды.
@@ -220,3 +222,77 @@ naive, niko-server и форк Xray — без изменений, у Xray ме�
    (`rayctl node note`, [subscription-v1](subscription-v1.md) §3) и может сказать там о политике сам.
 4. **Supervised-ноды** охвачены через UID rayd (§1).
 5. **Порты:** в v1 только 25.
+
+## 10. Локальные сети ноды (`local`, v0.27.0, R4-38)
+
+Зачем: пользователь прокси может попросить ноду соединиться с 127.0.0.1, с её собственными адресами, с частными
+сетями, link-local и адресом метаданных облака (169.254.169.254, `fd00:ec2::254`). Так он достаёт локальные службы
+`rayd`, API метаданных провайдера (там бывают ключи и токены машины) и соседей ноды в частной сети VPS.
+
+Что закрывало это до v0.27.0, по слоям:
+
+| Слой | Что закрыто | Где |
+|---|---|---|
+| naive | всё, кроме публичного unicast, и собственные адреса ноды; отказ — `502 niko-ack: denied` | `internal/naive/naive.go` `Public`, `dial.go` |
+| Xray (inner, REALITY) | `privateNets`: тот же список, что в периметре ниже | `internal/render/render.go`, правило routing → `block` |
+| niko-server (Hysteria2, Yggdrasil) | своя проверка назначения (`NIKO_SERVER_UNSAFE_ANY_DESTINATION` снимает её в тестах) | niko-server |
+| systemd | `IPAddressDeny=localhost link-local multicast 10/8 172.16/12 192.168/16 100.64/10 fc00::/7` у naive, Hysteria2 и Yggdrasil с публичными пирами; разрешены 127.0.0.53/54 (заглушка) и 127.0.0.1 (проба). У Xray — нет | `internal/deploy/deploy.go` `denyLocal` |
+| периметр, `to_node` | собственные адреса ноды, кроме loopback (заход к своему 443 тоже), широковещательный адрес подсети, порты заглушки кроме 53 | `internal/perimeter/firewall.go`, цепочка `output` |
+
+Дыры: Xray и rayd под `-supervise` — без `IPAddressDeny`; `IPAddressDeny` нужен cgroup BPF, и в контейнере
+(LXC) он может не действовать; loopback, частные сети и метаданные в ядре не закрывал никто. Ошибка в одном процессе
+открывала их.
+
+Стало: в политике есть третья часть, `local`, **закрытая по умолчанию** (единственная такая: открыть их значило бы
+ослабить ноду, а не включить новый запрет). В таблице периметра:
+
+```
+set local4 { type ipv4_addr; flags interval; elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8,
+	169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 }; }
+set local6 { type ipv6_addr; flags interval; elements = { ::/96, fc00::/7, fe80::/10, ff00::/8, 64:ff9b::/96,
+	64:ff9b:1::/48, 2002::/16 }; }
+chain output {
+	...                                             # to_node, как прежде
+	meta skuid 9100-9179 ct state new jump egress_local
+	meta skuid 9100-9179 jump egress
+	meta skuid @egress_uid jump egress
+}
+chain egress_local {                                # rayspa пишет целиком вместе с egress (§3)
+	meta l4proto { tcp, udp } ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 return
+	ip daddr 127.0.0.1 meta l4proto . th dport { tcp . 8443, udp . 8443 } return   # порт подписки: проба
+	ip daddr @local4 counter reject with icmpx admin-prohibited comment "local"
+	ip6 daddr @local6 counter reject with icmpx admin-prohibited comment "local"
+}
+```
+
+- **Список** — тот же, что `privateNets` у Xray (тест сверяет оба), с IPv6-префиксами, которые несут IPv4: NAT64
+  `64:ff9b::a9fe:a9fe` — это 169.254.169.254. naive получил недостающие 0/8, 192.0.0.0/24, 198.18/15, 240/4.
+  Yggdrasil (`200::/7`) в списке нет: локальная сеть пользователя ([lan-v1](lan-v1.md)) идёт внутри ядра Yggdrasil в
+  niko-server и через unix-сокет в `inner`, мимо сокетов ядра, и не меняется. DNS-туннели и Yggdrasil тоже ходят в
+  `inner` через unix-сокеты.
+- **Только новые потоки.** `ct state new` проверяется до набора: пакет установленного соединения платит одно
+  сравнение UID и одно сравнение состояния, без поиска в наборе. Ответы клиентам, пришедшим с частных адресов (relay
+  в той же частной сети, тест в LAN), — не новые потоки и проходят. Соединения, открытые до включения, живут до конца.
+- **Только UID 9100–9179.** UID rayd на supervised-ноде (`egress_uid`) сюда не попадает, как и в `to_node`: rayd
+  сам ходит к локальным адресам (DNS, проба). Там остаются только проверки процессов.
+- **Исключения:** заглушка systemd-resolved на 53 (niko-server разрешает имена системным резолвером; остальные её
+  порты по-прежнему закрывает `to_node`) и порт подписки на 127.0.0.1, TCP и UDP: туда ведёт имя пробы канала
+  ([probe-v1](probe-v1.md)). Порт приходит в снимке (`Egress.local.loopback`). Частный резолвер провайдера из
+  `/etc/resolv.conf` закрыт, как и раньше для `IPAddressDeny` (rayctl check об этом предупреждает).
+- **Отказ быстрый и без ожидания:** TCP получает EHOSTUNREACH сразу, UDP и ICMP — EPERM на sendto. Сброс TCP
+  выглядел бы как ECONNREFUSED назначения, а drop держал бы connect до тайм-аута. Первая линия — проверки процессов:
+  naive отвечает `502 niko-ack: denied` ещё до пакета; ядро — страховка на случай, если процесс ошибся.
+- **Счётчик** `raycontrol_egress_blocked_packets_total{rule="local"}`, без адресов, как §6.
+
+Выключатель — `rayctl egress allow local` (root, на ноде, аудит `egress.set: allow local`): ключ `egress_local =
+allow` в `settings`; `block local` удаляет ключ. Он снимает только правило периметра. Проверки процессов (naive,
+Xray, niko-server, `IPAddressDeny`) остаются: выключателя у них нет, и через прокси локальные сети всё равно не
+открываются. Выключатель нужен на случай, когда ядро или правило мешают сами (например, ядро не берёт правило).
+
+Совместимость: в снимке `Egress.local` есть всегда (новый `rayd`); снимок без него (старый `rayd`) rayspa читает
+как «не закрывать», как было. Старый `rayctl` с новым `rayd` не видит части `local`, а новый со старым показывает
+её открытой — так и есть.
+
+Тесты: модульные — правила (`TestEgressScript`, `TestRulesetLocal`), список у Xray и naive
+(`TestPrivateNetsArePerimeters`, `TestPublicNotLocal`), хранилище, API, `rayctl egress`; в CI `perimeter` —
+`TestNetnsLocal` (loopback как локальная сеть: отказы, исключения, ответы клиенту, выключатель).

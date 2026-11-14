@@ -50,7 +50,7 @@ func TestEgressMigration(t *testing.T) {
 			}
 			defer s.Close()
 			e, err := s.Egress(ctx)
-			if err != nil || e.BitTorrent != c.want || e.SMTP {
+			if err != nil || e.BitTorrent != c.want || e.SMTP || !e.Local {
 				t.Fatalf("after the update: %+v %v, want bittorrent %v", e, err, c.want)
 			}
 		})
@@ -64,28 +64,47 @@ func TestSetEgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	// A node has its own and local networks blocked from the start (R4-38).
+	if e, err := s.Egress(ctx); err != nil || e != (Egress{Local: true}) {
+		t.Fatalf("a new node: %+v %v", e, err)
+	}
 	on, off := true, false
 	for _, c := range []struct {
-		bittorrent, smtp *bool
-		want             Egress
+		bittorrent, smtp, local *bool
+		want                    Egress
 	}{
-		{&on, nil, Egress{BitTorrent: true}},
-		{nil, &on, Egress{BitTorrent: true, SMTP: true}},
-		{&off, nil, Egress{SMTP: true}},
-		{nil, nil, Egress{SMTP: true}},
-		{&on, &off, Egress{BitTorrent: true}},
+		{&on, nil, nil, Egress{BitTorrent: true, Local: true}},
+		{nil, &on, nil, Egress{BitTorrent: true, SMTP: true, Local: true}},
+		{&off, nil, nil, Egress{SMTP: true, Local: true}},
+		{nil, nil, nil, Egress{SMTP: true, Local: true}},
+		{&on, &off, nil, Egress{BitTorrent: true, Local: true}},
+		{nil, nil, &off, Egress{BitTorrent: true}},
+		{nil, &on, nil, Egress{BitTorrent: true, SMTP: true}},
+		{nil, nil, &on, Egress{BitTorrent: true, SMTP: true, Local: true}},
+		{nil, nil, &off, Egress{BitTorrent: true, SMTP: true}},
 	} {
-		got, err := s.SetEgress(ctx, c.bittorrent, c.smtp)
+		got, err := s.SetEgress(ctx, c.bittorrent, c.smtp, c.local)
 		if err != nil || got != c.want {
-			t.Fatalf("set %v %v: %+v %v, want %+v", c.bittorrent, c.smtp, got, err, c.want)
+			t.Fatalf("set %v %v %v: %+v %v, want %+v", c.bittorrent, c.smtp, c.local, got, err, c.want)
 		}
 		if stored, _ := s.Egress(ctx); stored != c.want {
 			t.Fatalf("stored %+v, want %+v", stored, c.want)
 		}
 	}
-	// Allowed is no setting at all, blocked is "on".
-	if _, err := s.GetSetting(ctx, settingEgressSMTP); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("smtp allowed: %v", err)
+	// Allowed is no setting at all, blocked is "on"; local the other way.
+	if _, err := s.GetSetting(ctx, settingEgressSMTP); err != nil {
+		t.Fatalf("smtp blocked: %v", err)
+	}
+	if v, _ := s.GetSetting(ctx, settingEgressLocal); string(v) != "allow" {
+		t.Fatalf("local allowed: %q", v)
+	}
+	if _, err := s.SetEgress(ctx, nil, &off, &on); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{settingEgressSMTP, settingEgressLocal} {
+		if _, err := s.GetSetting(ctx, k); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("%s at its default: %v", k, err)
+		}
 	}
 	if v, _ := s.GetSetting(ctx, settingEgressBitTorrent); string(v) != "on" {
 		t.Fatalf("bittorrent blocked: %q", v)

@@ -326,10 +326,16 @@ func PublicDialer() *net.Dialer {
 
 var (
 	cgnat = netip.MustParsePrefix("100.64.0.0/10")
-	// IPv6 prefixes that carry IPv4 addresses (NAT64, 6to4, IPv4-compatible):
+	// Not the internet, apart from the private ranges: IPv6 prefixes that
+	// carry IPv4 addresses (NAT64, 6to4, IPv4-compatible):
 	// 64:ff9b::a9fe:a9fe is 169.254.169.254 where NAT64 is routed.
-	carriesV4 = []netip.Prefix{netip.MustParsePrefix("64:ff9b::/96"), netip.MustParsePrefix("64:ff9b:1::/48"),
-		netip.MustParsePrefix("2002::/16"), netip.MustParsePrefix("::/96")}
+	notPublic = []netip.Prefix{netip.MustParsePrefix("64:ff9b::/96"), netip.MustParsePrefix("64:ff9b:1::/48"),
+		netip.MustParsePrefix("2002::/16"), netip.MustParsePrefix("::/96"),
+		// Not private to Go, but not the internet either, as Xray's routing
+		// and the perimeter's local sets have them (R4-38): "this network",
+		// IETF protocol assignments, benchmarking, reserved.
+		netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("192.0.0.0/24"),
+		netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("240.0.0.0/4")}
 	local struct {
 		once  sync.Once
 		addrs map[netip.Addr]bool
@@ -343,7 +349,7 @@ func Public(a netip.Addr) bool {
 	if !a.IsGlobalUnicast() || a.IsPrivate() || cgnat.Contains(a) {
 		return false
 	}
-	for _, p := range carriesV4 {
+	for _, p := range notPublic {
 		if p.Contains(a) {
 			return false
 		}

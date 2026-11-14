@@ -135,6 +135,7 @@ func (n *NFT) Ruleset() string {
 	if guard == "" {
 		guard = DataPlaneUIDs
 	}
+	local4, local6 := localSets()
 	// The guard of the conntrack table (spec/conn-limit-v1.md §6.3): every
 	// new data-plane flow gets the mark, and leaving the node it passes
 	// conn_guard, empty until the guard is on (SetGuard). Never UID 0, nor
@@ -204,6 +205,9 @@ table inet %[1]s {
 	set rate4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set rate6 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set egress_uid { type uid; }
+	# The node's own and local networks (R4-38, LocalNets).
+	set local4 { type ipv4_addr; flags interval; elements = { %[13]s }; }
+	set local6 { type ipv6_addr; flags interval; elements = { %[14]s }; }
 	# The DNS tunnels' UDP ports (the public UDP ports), past conntrack.
 	set dns_ports { type inet_service; }
 	# New inbound flows by source: IPv4 address, /64 and /48 (§6.2).
@@ -319,8 +323,8 @@ table inet %[1]s {
 	# Users' traffic does not reach the node itself (S-2): a proxy exit
 	# connecting to one of the node's own addresses would come in on lo,
 	# past SPA and the admin addresses, to SSH, the API and the
-	# subscription. Loopback stays with the processes' own rules (Xray's
-	# block list, systemd's IPAddressDeny): the channel probe goes there.
+	# subscription. 127.0.0.0/8 and ::1 are not looked at here: the
+	# channel probe goes there (egress_local below lets its port only).
 	# A local destination always leaves through lo, so every other packet
 	# stops at the first, cheapest match; the FIB lookup comes last.
 	# A subnet's broadcast address looks public to the processes and
@@ -330,12 +334,18 @@ table inet %[1]s {
 	# (IPAddressAllow), answers on 53 only: whatever else listens on any
 	# address does not take the data plane there. What passes, the data
 	# plane's way to the internet, goes through the egress policy.
+	# Loopback and the local networks (R4-38) are the policy's part
+	# egress_local, apart from these guards: a new flow only (ct state
+	# before the set lookup, so an established packet pays a compare),
+	# which passes egress next, with return. Replies to clients on a local
+	# network are established, never new: they pass.
 	chain output {
 		type filter hook output priority 0; policy accept;
 		oif "lo" meta skuid %[7]s ip daddr != 127.0.0.0/8 fib daddr type local jump to_node
 		oif "lo" meta skuid %[7]s ip6 daddr != ::1 fib daddr type local jump to_node
 		meta nfproto ipv4 meta l4proto udp ct state != established meta skuid %[7]s fib daddr type broadcast jump to_node
 		oif "lo" meta skuid %[7]s ip daddr { 127.0.0.53, 127.0.0.54 } meta l4proto { tcp, udp } th dport != 53 jump to_node
+		meta skuid %[7]s ct state new jump egress_local
 		meta skuid %[7]s jump egress
 		meta skuid @egress_uid jump egress%[12]s
 	}
@@ -357,9 +367,13 @@ table inet %[1]s {
 	chain bt_utp {
 	}
 	chain bt_dht {
+	}
+	# The data plane's new flows to the node's own and local networks
+	# (R4-38): empty until SetEgress, as the policy's other chains.
+	chain egress_local {
 	}%[8]s
 }
-`, Table, limit, n.NflogGroup, lo, loNAT, lo, guard, relay, relayMark, inRateRules(true, "\t\t", "", n.inDiv), frontUID, guardRules)
+`, Table, limit, n.NflogGroup, lo, loNAT, lo, guard, relay, relayMark, inRateRules(true, "\t\t", "", n.inDiv), frontUID, guardRules, local4, local6)
 }
 
 // Setup installs the table and detects whether "destroy element" works.

@@ -602,7 +602,7 @@ Required: without these the node does not work
   ok    port udp 443: free
   ok    port udp 53: free
 Advised: the node works without them, worse
-  ok    egress policy: the BitTorrent and SMTP filter loads (rayctl egress)
+  ok    egress policy: the BitTorrent, SMTP and local networks filter loads (rayctl egress)
   ok    virtualization: kvm
   ok    system: debian 13
   ok    memory: 1967 MiB
@@ -970,7 +970,7 @@ users                1
 services             9
 active devices       1
 spa ports            [27441 28500 27844]
-egress               nothing blocked (rayctl egress)
+egress               blocked: local networks (rayctl egress)
 acme site            ok 2m10s ago
 apply                ok 40s ago
 conn-limit           ok 8s ago: on; nobody at a limit in 15 min
@@ -1840,9 +1840,10 @@ only`. Ссылки под своим сертификатом идут без `
 rayctl egress
 ```
 
-В выводе четыре строки и, у root, счётчики:
+В выводе пять строк и, у root, счётчики:
 
-- `bittorrent` и `smtp (tcp 25)` — `blocked` или `allowed`: что записано в политике;
+- `bittorrent`, `smtp (tcp 25)` и `local networks` — `blocked` или `allowed`: что записано в политике. `local networks`
+  (собственные и локальные сети ноды, с v0.27.0) закрыты с самого начала, §13;
 - `covers` — на кого она действует: все процессы data plane;
 - `in force` — `yes`, когда `rayspa` уже применил её в ядре. `not yet: …` дольше нескольких секунд — смотрите
   `journalctl -u rayspa`;
@@ -3252,6 +3253,7 @@ journalctl -u rayd --since -1h | grep -i certif
 | после `rayctl restore` не пускает по SSH или отозванные снова работают | восстановление вернуло адреса администратора из копии; устройства, отозванные после копии, возвращаются, только если база этой ноды о них не знает (новый сервер) или был `-no-carry` | §12.2: `rayctl admin`; устройства из предупреждения `restore` — отозвать снова |
 | naive, `hy2-masq` и DoH перестали проходить у клиентов, остальные профили работают | пин не сошёлся: ключ сайта сменён `rayctl service rotate site -force` или `-fresh`, поставлен свой сертификат с `-force` или нода откатилась ниже v0.26.0 и продлила сертификат на новый ключ | ничего на ноде: клиент с этим рабочим профилем сам перезапросит подписку через 15–30 с, остальные — при очередном запросе (§8, «Сертификат сайта и пины») |
 | `niko-*` перезапускается по кругу | конфиг не принят или занят порт | `journalctl -u niko-ИМЯ -n 50`; `ss -ltnup 'sport = :443'` |
+| сервис в локальной сети ноды недоступен через прокси (`10.x`, `192.168.x`, `127.0.0.1` ноды, адрес метаданных провайдера); naive отвечает `denied` | так задумано: data plane не ходит в собственные и локальные сети ноды — ни процессы (naive, Xray, Hysteria2, `IPAddressDeny`), ни периметр (часть `local` политики выхода, с v0.27.0); иначе любой пользователь достал бы службы ноды, API метаданных и соседей в частной сети VPS | не открывать. `rayctl egress allow local` снимает только правило периметра, проверки процессов остаются; к своим сервисам ходите по SSH или поднимите их на публичном адресе. Подробно — [egress-policy-v1](spec/egress-policy-v1.md) §10 |
 | ничего не открывается после `nft flush ruleset` или перезапуска firewalld | снесена таблица периметра | `rayspa` возвращает её за секунды сам; если нет — `systemctl restart rayspa` |
 | `rayctl status`: `perimeter table FAILED perimeter down: the host is open` | таблицы периметра нет: `rayspa` не поднялся после загрузки или его таблицу не берёт ядро; хост открыт, SSH пускает без стука | `journalctl -u rayspa -b -p warning` — почему; исправить, `systemctl restart rayspa` |
 | `rayctl status`: `perimeter FAILED … rayspa has not followed the perimeter …` | `rayspa` не связан с `rayd` дольше 90 с: остановлен или перезапускается по кругу | `systemctl status rayspa`; строка `perimeter table` от root скажет, открыт ли хост |

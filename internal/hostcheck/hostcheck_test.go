@@ -389,9 +389,9 @@ func TestEgressPolicyCheck(t *testing.T) {
 		ok     bool
 		detail string
 	}{
-		{"kernel takes it", "", true, "the BitTorrent and SMTP filter loads (rayctl egress)"},
+		{"kernel takes it", "", true, "the BitTorrent, SMTP and local networks filter loads (rayctl egress)"},
 		{"no @ih", "@ih", true, "no @ih in this kernel"},
-		{"refused", "udp length 38", false, "cannot load the BitTorrent and SMTP filter: exit status 1: Error: Could not process rule: Operation not supported"},
+		{"refused", "udp length 38", false, "cannot load the BitTorrent, SMTP and local networks filter: exit status 1: Error: Could not process rule: Operation not supported"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h, _, _ := fakeHost(t)

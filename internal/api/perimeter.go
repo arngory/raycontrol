@@ -208,7 +208,8 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 	if err != nil {
 		return nil, err
 	}
-	snap.Egress = &perimeterv1.Egress{Smtp: egress.SMTP, Bittorrent: egress.BitTorrent, Uids: p.egressUIDs()}
+	snap.Egress = &perimeterv1.Egress{Smtp: egress.SMTP, Bittorrent: egress.BitTorrent, Uids: p.egressUIDs(),
+		Local: &perimeterv1.Local{Allow: !egress.Local, Loopback: probeLoopback(services)}}
 	// The per-address limit on new inbound connections (conn-limit-v1 §8).
 	if snap.ConnLimitOff, err = p.Store.ConnLimitOff(ctx); err != nil {
 		return nil, err
@@ -370,4 +371,25 @@ func realityOpen(svc store.Service) bool {
 	}
 	_ = json.Unmarshal([]byte(svc.Settings), &st)
 	return st.Open
+}
+
+// probeLoopback are the ports on 127.0.0.1 the data plane reaches with
+// the node's own and local networks blocked (R4-38): the subscription's,
+// where the channel probes through the tunnels go (spec/probe-v1.md;
+// naive and Hysteria2 dial TCP, Xray's probe outbound TCP and UDP).
+func probeLoopback(services []store.Service) []*perimeterv1.Port {
+	var out []*perimeterv1.Port
+	for _, svc := range services {
+		if !svc.Enabled || svc.Kind != "subscription" {
+			continue
+		}
+		ports, err := svc.Ports()
+		if err != nil || len(ports) == 0 {
+			continue
+		}
+		for _, proto := range []string{"tcp", "udp"} {
+			out = append(out, &perimeterv1.Port{Proto: proto, Port: uint32(ports[0].Num)})
+		}
+	}
+	return out
 }

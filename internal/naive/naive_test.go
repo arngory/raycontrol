@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/perimeter"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/site"
 )
@@ -181,6 +182,26 @@ func TestNaive(t *testing.T) {
 	}
 }
 
+// naive's own check is the first line (R4-38): whatever the perimeter
+// refuses as local it refuses itself, at once and as "denied", before a
+// packet goes.
+func TestPublicNotLocal(t *testing.T) {
+	for _, n := range perimeter.LocalNets {
+		p := netip.MustParsePrefix(n)
+		last := p.Addr()
+		for range 3 {
+			if next := last.Next(); p.Contains(next) {
+				last = next
+			}
+		}
+		for _, a := range []netip.Addr{p.Addr(), p.Addr().Next(), last} {
+			if Public(a) {
+				t.Errorf("%s (%s) is public to naive", a, n)
+			}
+		}
+	}
+}
+
 func TestPublic(t *testing.T) {
 	for addr, want := range map[string]bool{
 		"1.1.1.1": true, "2606:4700:4700::1111": true,
@@ -189,6 +210,10 @@ func TestPublic(t *testing.T) {
 		"::ffff:127.0.0.1": false,
 		// IPv6 that carries IPv4: NAT64, 6to4, IPv4-compatible.
 		"64:ff9b::a9fe:a9fe": false, "64:ff9b:1::a00:1": false, "2002:a00:1::1": false, "::a9fe:a9fe": false,
+		// What Xray's routing and the perimeter's local sets hold too (R4-38):
+		// "this network", IETF protocol assignments, benchmarking, reserved.
+		"0.1.2.3": false, "192.0.0.8": false, "198.18.0.1": false, "198.19.255.1": false, "240.0.0.1": false,
+		"255.255.255.255": false, "192.0.1.1": true, "198.20.0.1": true,
 	} {
 		if got := Public(netip.MustParseAddr(addr)); got != want {
 			t.Errorf("Public(%s) = %v", addr, got)

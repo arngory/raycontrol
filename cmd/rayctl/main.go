@@ -138,7 +138,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             level (client addresses too) until it closes by itself; root
   egress [show]                             the node's egress policy on every profile, whether it is in
                                             force and (root) what it blocked
-  egress block|allow bittorrent|smtp        block or allow BitTorrent, or SMTP (TCP 25), on every
+  egress block|allow bittorrent|smtp|local  block or allow BitTorrent, SMTP (TCP 25), or the node's own
+                                            and local networks (blocked by default), on every
                                             profile (spec/egress-policy-v1.md; root, on the node)
   conn-limit [show]                         the connection limits: on or off, their numbers, the
                                             conntrack table, the guard, users at a limit in 15 min

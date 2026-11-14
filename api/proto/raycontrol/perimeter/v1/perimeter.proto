@@ -114,6 +114,21 @@ message Egress {
   // guard of the node's own addresses does not take them: rayd reaches the
   // node itself.
   repeated uint32 uids = 3;
+  // The node's own and local networks (docs/08-decisions.md, R4-38):
+  // loopback, private, link-local, CGNAT, multicast, the metadata address.
+  // Absent (an older rayd): rayspa does not hold them back, as before.
+  Local local = 4;
+}
+
+// Local is the egress policy's part for the node's own and local networks.
+message Local {
+  // The data plane may reach them (rayctl egress allow local); false, the
+  // default: refused, but for systemd-resolved's stub on port 53 and the
+  // ports below.
+  bool allow = 1;
+  // Ports on 127.0.0.1 the data plane reaches all the same: the channel
+  // probe's endpoint (the subscription's port, spec/probe-v1.md).
+  repeated Port loopback = 2;
 }
 
 message AcmeWindow {

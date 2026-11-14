@@ -26,7 +26,8 @@ func (s *Server) GetEgress(ctx context.Context, _ *connect.Request[nodev1.GetEgr
 	return connect.NewResponse(&nodev1.GetEgressResponse{Egress: egressPB(e), Uids: s.egressUIDs()}), nil
 }
 
-// SetEgress blocks or allows BitTorrent and SMTP on every profile: root on
+// SetEgress blocks or allows BitTorrent, SMTP and the node's own and
+// local networks (R4-38) on every profile: root on
 // the node only, each change in the audit log. rayspa takes it from the
 // next perimeter snapshot, sent at once.
 func (s *Server) SetEgress(ctx context.Context, req *connect.Request[nodev1.SetEgressRequest]) (*connect.Response[nodev1.SetEgressResponse], error) {
@@ -37,15 +38,15 @@ func (s *Server) SetEgress(ctx context.Context, req *connect.Request[nodev1.SetE
 	for _, p := range []struct {
 		name  string
 		block *bool
-	}{{"bittorrent", req.Msg.Bittorrent}, {"smtp", req.Msg.Smtp}} {
+	}{{"bittorrent", req.Msg.Bittorrent}, {"smtp", req.Msg.Smtp}, {"local", req.Msg.Local}} {
 		if p.block != nil {
 			change = append(change, map[bool]string{true: "block ", false: "allow "}[*p.block]+p.name)
 		}
 	}
 	if len(change) == 0 {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("nothing to change: bittorrent or smtp"))
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("nothing to change: bittorrent, smtp or local"))
 	}
-	e, err := s.Store.SetEgress(ctx, req.Msg.Bittorrent, req.Msg.Smtp)
+	e, err := s.Store.SetEgress(ctx, req.Msg.Bittorrent, req.Msg.Smtp, req.Msg.Local)
 	if err := s.done(ctx, "egress.set", strings.Join(change, ", "), err); err != nil {
 		return nil, err
 	}
@@ -53,7 +54,7 @@ func (s *Server) SetEgress(ctx context.Context, req *connect.Request[nodev1.SetE
 }
 
 func egressPB(e store.Egress) *nodev1.Egress {
-	return &nodev1.Egress{Bittorrent: e.BitTorrent, Smtp: e.SMTP}
+	return &nodev1.Egress{Bittorrent: e.BitTorrent, Smtp: e.SMTP, Local: e.Local}
 }
 
 // egressUIDs are the processes the egress policy covers besides the data

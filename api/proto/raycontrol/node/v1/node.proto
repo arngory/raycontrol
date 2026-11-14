@@ -461,6 +461,10 @@ message GetStatusResponse {
 message Egress {
   bool bittorrent = 1; // the handshake, uTP SYN, UDP tracker connect, DHT queries
   bool smtp = 2;       // TCP to port 25
+  // The node's own and local networks (R4-38): blocked unless the
+  // administrator allowed them. False from an older rayd, which does not
+  // block them in the perimeter.
+  bool local = 3;
 }
 
 message GetEgressRequest {}
@@ -475,6 +479,7 @@ message SetEgressRequest {
   // Only the parts given change.
   optional bool bittorrent = 1;
   optional bool smtp = 2;
+  optional bool local = 3;
 }
 message SetEgressResponse {
   Egress egress = 1; // as kept

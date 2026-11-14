@@ -520,12 +520,12 @@ func (g *Gate) egressLocked(now time.Time) {
 		if g.egressFailures == 1 {
 			level = slog.LevelWarn
 		}
-		g.log.Log(context.Background(), level, "egress policy not in force, trying again", "smtp", g.egress.SMTP,
+		g.log.Log(context.Background(), level, "egress policy not in force, trying again", "smtp", g.egress.SMTP, "local", g.egress.Local,
 			"bittorrent", g.egress.BitTorrent, "err", err, "in", wait)
 		return
 	}
 	g.egressOn, g.egressFailures, g.egressRetryAt = true, 0, time.Time{}
-	g.log.Info("egress policy", "smtp", g.egress.SMTP, "bittorrent", g.egress.BitTorrent, "uids", g.egress.UIDs)
+	g.log.Info("egress policy", "smtp", g.egress.SMTP, "bittorrent", g.egress.BitTorrent, "local", g.egress.Local, "uids", g.egress.UIDs)
 }
 
 // acmeLocked opens, moves or closes the ACME window.

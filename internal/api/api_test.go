@@ -910,9 +910,10 @@ func TestEgressAPI(t *testing.T) {
 		return r.Msg.Egress, nil
 	}
 
-	// A new node: nothing blocked, for the group too.
+	// A new node: nothing blocked but the local networks (R4-38), for the
+	// group too.
 	r, err := srv.GetEgress(as(1000), connect.NewRequest(&nodev1.GetEgressRequest{}))
-	if err != nil || r.Msg.Egress.Bittorrent || r.Msg.Egress.Smtp || r.Msg.Uids != nil {
+	if err != nil || r.Msg.Egress.Bittorrent || r.Msg.Egress.Smtp || !r.Msg.Egress.Local || r.Msg.Uids != nil {
 		t.Fatalf("a new node: %+v %v", r, err)
 	}
 	refused := map[string]context.Context{"the group": as(1000), "remote": remote}
@@ -930,7 +931,7 @@ func TestEgressAPI(t *testing.T) {
 	if _, err := set(as(0), nil, nil); connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Errorf("nothing to change: %v", err)
 	}
-	if e, _ := srv.Store.Egress(ctx); e != (store.Egress{}) {
+	if e, _ := srv.Store.Egress(ctx); e != (store.Egress{Local: true}) {
 		t.Fatalf("changed by a refused call: %+v", e)
 	}
 
@@ -983,5 +984,39 @@ func TestEgressAPI(t *testing.T) {
 	set(as(0), nil, &off)
 	if snap, err = p.snapshot(ctx); err != nil || snap.Egress == nil || snap.Egress.Smtp || snap.Egress.Bittorrent {
 		t.Fatalf("off: %+v %v", snap.GetEgress(), err)
+	}
+
+	// The local networks: blocked in every snapshot (Local there, so that
+	// rayspa tells this rayd from an older one), allowed by root, audited.
+	if l := snap.Egress.GetLocal(); l == nil || l.Allow || len(l.Loopback) != 2 {
+		t.Fatalf("local blocked: %+v", l)
+	}
+	if r, err := srv.SetEgress(as(0), connect.NewRequest(&nodev1.SetEgressRequest{Local: &off})); err != nil || r.Msg.Egress.Local {
+		t.Fatalf("allow local: %+v %v", r, err)
+	}
+	if snap, err = p.snapshot(ctx); err != nil || !snap.Egress.GetLocal().GetAllow() {
+		t.Fatalf("local allowed: %+v %v", snap.GetEgress(), err)
+	}
+	if entries, _ := srv.Store.ListAudit(ctx, 10); !slices.ContainsFunc(entries, func(e store.AuditEntry) bool {
+		return e.Action == "egress.set" && e.Target == "allow local"
+	}) {
+		t.Errorf("allow local not audited: %+v", entries)
+	}
+}
+
+// The channel probe's port on loopback (R4-38): the enabled subscription's,
+// TCP and UDP; none without one.
+func TestProbeLoopback(t *testing.T) {
+	sub := store.Service{Kind: "subscription", Name: "sub", Enabled: true, Settings: `{"ports":["tcp/8443"]}`}
+	if got := probeLoopback([]store.Service{{Kind: "ssh", Name: "ssh", Enabled: true}}); got != nil {
+		t.Fatalf("no subscription: %v", got)
+	}
+	got := probeLoopback([]store.Service{sub})
+	if len(got) != 2 || got[0].Proto != "tcp" || got[1].Proto != "udp" || got[0].Port != 8443 || got[1].Port != 8443 {
+		t.Fatalf("subscription: %v", got)
+	}
+	sub.Enabled = false
+	if got := probeLoopback([]store.Service{sub}); got != nil {
+		t.Fatalf("disabled: %v", got)
 	}
 }

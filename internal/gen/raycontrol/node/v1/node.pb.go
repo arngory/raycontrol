@@ -2908,9 +2908,13 @@ func (x *GetStatusResponse) GetEgress() *Egress {
 // Egress is what the data plane may not send, whoever the user
 // (spec/egress-policy-v1.md).
 type Egress struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Bittorrent    bool                   `protobuf:"varint,1,opt,name=bittorrent,proto3" json:"bittorrent,omitempty"` // the handshake, uTP SYN, UDP tracker connect, DHT queries
-	Smtp          bool                   `protobuf:"varint,2,opt,name=smtp,proto3" json:"smtp,omitempty"`             // TCP to port 25
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Bittorrent bool                   `protobuf:"varint,1,opt,name=bittorrent,proto3" json:"bittorrent,omitempty"` // the handshake, uTP SYN, UDP tracker connect, DHT queries
+	Smtp       bool                   `protobuf:"varint,2,opt,name=smtp,proto3" json:"smtp,omitempty"`             // TCP to port 25
+	// The node's own and local networks (R4-38): blocked unless the
+	// administrator allowed them. False from an older rayd, which does not
+	// block them in the perimeter.
+	Local         bool `protobuf:"varint,3,opt,name=local,proto3" json:"local,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2955,6 +2959,13 @@ func (x *Egress) GetBittorrent() bool {
 func (x *Egress) GetSmtp() bool {
 	if x != nil {
 		return x.Smtp
+	}
+	return false
+}
+
+func (x *Egress) GetLocal() bool {
+	if x != nil {
+		return x.Local
 	}
 	return false
 }
@@ -3054,6 +3065,7 @@ type SetEgressRequest struct {
 	// Only the parts given change.
 	Bittorrent    *bool `protobuf:"varint,1,opt,name=bittorrent,proto3,oneof" json:"bittorrent,omitempty"`
 	Smtp          *bool `protobuf:"varint,2,opt,name=smtp,proto3,oneof" json:"smtp,omitempty"`
+	Local         *bool `protobuf:"varint,3,opt,name=local,proto3,oneof" json:"local,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3098,6 +3110,13 @@ func (x *SetEgressRequest) GetBittorrent() bool {
 func (x *SetEgressRequest) GetSmtp() bool {
 	if x != nil && x.Smtp != nil {
 		return *x.Smtp
+	}
+	return false
+}
+
+func (x *SetEgressRequest) GetLocal() bool {
+	if x != nil && x.Local != nil {
+		return *x.Local
 	}
 	return false
 }
@@ -8246,23 +8265,26 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x04name\x18\n" +
 	" \x01(\tR\x04name\x12\x12\n" +
 	"\x04note\x18\v \x01(\tR\x04note\x122\n" +
-	"\x06egress\x18\f \x01(\v2\x1a.raycontrol.node.v1.EgressR\x06egress\"<\n" +
+	"\x06egress\x18\f \x01(\v2\x1a.raycontrol.node.v1.EgressR\x06egress\"R\n" +
 	"\x06Egress\x12\x1e\n" +
 	"\n" +
 	"bittorrent\x18\x01 \x01(\bR\n" +
 	"bittorrent\x12\x12\n" +
-	"\x04smtp\x18\x02 \x01(\bR\x04smtp\"\x12\n" +
+	"\x04smtp\x18\x02 \x01(\bR\x04smtp\x12\x14\n" +
+	"\x05local\x18\x03 \x01(\bR\x05local\"\x12\n" +
 	"\x10GetEgressRequest\"[\n" +
 	"\x11GetEgressResponse\x122\n" +
 	"\x06egress\x18\x01 \x01(\v2\x1a.raycontrol.node.v1.EgressR\x06egress\x12\x12\n" +
-	"\x04uids\x18\x02 \x03(\rR\x04uids\"h\n" +
+	"\x04uids\x18\x02 \x03(\rR\x04uids\"\x8d\x01\n" +
 	"\x10SetEgressRequest\x12#\n" +
 	"\n" +
 	"bittorrent\x18\x01 \x01(\bH\x00R\n" +
 	"bittorrent\x88\x01\x01\x12\x17\n" +
-	"\x04smtp\x18\x02 \x01(\bH\x01R\x04smtp\x88\x01\x01B\r\n" +
+	"\x04smtp\x18\x02 \x01(\bH\x01R\x04smtp\x88\x01\x01\x12\x19\n" +
+	"\x05local\x18\x03 \x01(\bH\x02R\x05local\x88\x01\x01B\r\n" +
 	"\v_bittorrentB\a\n" +
-	"\x05_smtp\"G\n" +
+	"\x05_smtpB\b\n" +
+	"\x06_local\"G\n" +
 	"\x11SetEgressResponse\x122\n" +
 	"\x06egress\x18\x01 \x01(\v2\x1a.raycontrol.node.v1.EgressR\x06egress\"\x15\n" +
 	"\x13GetConnLimitRequest\"\x93\x02\n" +

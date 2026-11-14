@@ -61,7 +61,15 @@ func TestEgressScript(t *testing.T) {
 			`tcp doff 8 @th,256,8 0x13 @th,264,128 0x426974546f7272656e742070726f746f @th,392,24 0x636f6c counter reject with tcp reset comment "bittorrent-tcp"`,
 		}, []string{"@ih"}},
 		{"supervised", Egress{SMTP: true, UIDs: []uint32{0, 4242}}, false,
-			[]string{"add element inet raycontrol egress_uid { 0, 4242 }\n"}, nil},
+			[]string{"add element inet raycontrol egress_uid { 0, 4242 }\n"}, []string{"egress_local meta", "egress_local ip"}},
+		{"local", Egress{Local: true, Loopback: []Port{{"tcp", 8443}, {"udp", 8443}}}, false, []string{
+			"flush chain inet raycontrol egress_local\n" +
+				"add rule inet raycontrol egress_local meta l4proto { tcp, udp } ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 return\n" +
+				"add rule inet raycontrol egress_local ip daddr 127.0.0.1 meta l4proto . th dport { tcp . 8443, udp . 8443 } return\n" +
+				`add rule inet raycontrol egress_local ip daddr @local4 counter reject with icmpx admin-prohibited comment "local"` + "\n" +
+				`add rule inet raycontrol egress_local ip6 daddr @local6 counter reject with icmpx admin-prohibited comment "local"` + "\n",
+		}, []string{"dport 25", "bittorrent"}},
+		{"local, no probe", Egress{Local: true}, false, []string{"@local4", "@local6", "127.0.0.53"}, []string{"127.0.0.1"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := EgressScript(c.e, c.doff)
@@ -94,6 +102,63 @@ func TestEgressOf(t *testing.T) {
 	}
 	if e.Equal(Egress{SMTP: true, UIDs: []uint32{0}}) || !e.Equal(Egress{SMTP: true, UIDs: []uint32{0, 9190}}) {
 		t.Error("Equal")
+	}
+	// The local networks (R4-38): refused unless allowed; a rayd from
+	// before them sends no Local, and gets the policy it had.
+	if e.Local {
+		t.Error("an older rayd's snapshot refuses the local networks")
+	}
+	e = egressOf(&perimeterv1.Egress{Local: &perimeterv1.Local{Loopback: []*perimeterv1.Port{
+		{Proto: "udp", Port: 8443}, {Proto: "tcp", Port: 8443}, {Proto: "tcp", Port: 8443}, {Proto: "sctp", Port: 1}, {Proto: "tcp"}}}})
+	if !e.Local || !slices.Equal(e.Loopback, []Port{{"tcp", 8443}, {"udp", 8443}}) {
+		t.Errorf("local: %+v", e)
+	}
+	if e.Equal(Egress{Local: true}) {
+		t.Error("Equal without the probe's ports")
+	}
+	if e = egressOf(&perimeterv1.Egress{Local: &perimeterv1.Local{Allow: true, Loopback: []*perimeterv1.Port{{Proto: "tcp", Port: 8443}}}}); e.Local || e.Loopback != nil {
+		t.Errorf("allowed: %+v", e)
+	}
+}
+
+// The table's part of R4-38: the sets of LocalNets, and the output
+// chain's jump for the data plane's new flows, after the guards of the
+// node's own addresses and before the rest of the policy; the extra UIDs
+// (rayd's, supervised) do not take it.
+func TestRulesetLocal(t *testing.T) {
+	rs := (&NFT{}).Ruleset()
+	for _, want := range []string{
+		"set local4 { type ipv4_addr; flags interval; elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, " +
+			"172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 }; }",
+		"set local6 { type ipv6_addr; flags interval; elements = { ::/96, fc00::/7, fe80::/10, ff00::/8, 64:ff9b::/96, 64:ff9b:1::/48, 2002::/16 }; }",
+		"chain egress_local {\n\t}",
+		"\t\tmeta skuid " + DataPlaneUIDs + " ct state new jump egress_local\n\t\tmeta skuid " + DataPlaneUIDs + " jump egress\n\t\tmeta skuid @egress_uid jump egress\n",
+	} {
+		if !strings.Contains(rs, want) {
+			t.Errorf("ruleset lacks %q", want)
+		}
+	}
+	if strings.Index(rs, "jump egress_local") < strings.LastIndex(rs, "jump to_node") {
+		t.Error("egress_local before the guards of the node's own addresses")
+	}
+	if strings.Contains(rs, "@egress_uid ct state new jump egress_local") {
+		t.Error("the extra UIDs take the local part")
+	}
+	for _, n := range LocalNets {
+		if _, err := netip.ParsePrefix(n); err != nil {
+			t.Errorf("%s: %v", n, err)
+		}
+	}
+	// The metadata address, in both of its spellings.
+	for _, a := range []string{"169.254.169.254", "64:ff9b::a9fe:a9fe", "fd00:ec2::254", "127.0.0.1", "::1", "100.64.0.1", "255.255.255.255"} {
+		if !slices.ContainsFunc(LocalNets, func(n string) bool { return netip.MustParsePrefix(n).Contains(netip.MustParseAddr(a)) }) {
+			t.Errorf("%s is not local", a)
+		}
+	}
+	for _, a := range []string{"1.1.1.1", "2606:4700:4700::1111", "200::1", "198.51.100.1"} {
+		if slices.ContainsFunc(LocalNets, func(n string) bool { return netip.MustParsePrefix(n).Contains(netip.MustParseAddr(a)) }) {
+			t.Errorf("%s is local", a)
+		}
 	}
 }
 

@@ -222,15 +222,17 @@ func (h *Host) Check(ctx context.Context, o Options) []Result {
 		if err == nil {
 			// The egress policy whole (rayctl egress block): the node works
 			// without it, so advised.
-			doff, err := perimeter.CheckEgress(perimeter.Egress{SMTP: true, BitTorrent: true}, func(script string) ([]byte, error) {
+			// The local networks with the probe's port, as rayd sends them (R4-38).
+			all := perimeter.Egress{SMTP: true, BitTorrent: true, Local: true, Loopback: []perimeter.Port{{Proto: "tcp", Num: 1}, {Proto: "udp", Num: 1}}}
+			doff, err := perimeter.CheckEgress(all, func(script string) ([]byte, error) {
 				return h.Run(ctx, script, "nft", "-c", "-f", "-")
 			})
-			detail := "the BitTorrent and SMTP filter loads (rayctl egress)"
+			detail := "the BitTorrent, SMTP and local networks filter loads (rayctl egress)"
 			if doff {
 				detail += "; no @ih in this kernel: the handshake by the TCP header's length"
 			}
 			if err != nil {
-				detail = "kernel " + kernel + " cannot load the BitTorrent and SMTP filter: " + err.Error()
+				detail = "kernel " + kernel + " cannot load the BitTorrent, SMTP and local networks filter: " + err.Error()
 			}
 			adv("egress policy", err == nil, detail, "a newer kernel with nftables' raw payload matches: without it rayctl egress block refuses")
 		}

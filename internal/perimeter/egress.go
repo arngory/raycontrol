@@ -20,11 +20,18 @@ type Egress struct {
 	// UIDs are processes it covers besides GuardUIDs: rayd's own where the
 	// data plane runs as its children (rayd serve -supervise).
 	UIDs []uint32
+	// Local refuses the data plane's new flows to the node's own and local
+	// networks (R4-38, LocalNets): GuardUIDs only, not UIDs, as the guard
+	// of the node's addresses (rayd reaches them itself). Loopback are the
+	// ports on 127.0.0.1 it reaches all the same (the channel probe).
+	Local    bool
+	Loopback []Port
 }
 
 // Equal reports whether two policies are the same.
 func (e Egress) Equal(o Egress) bool {
-	return e.SMTP == o.SMTP && e.BitTorrent == o.BitTorrent && slices.Equal(e.UIDs, o.UIDs)
+	return e.SMTP == o.SMTP && e.BitTorrent == o.BitTorrent && slices.Equal(e.UIDs, o.UIDs) &&
+		e.Local == o.Local && slices.Equal(e.Loopback, o.Loopback)
 }
 
 func egressOf(e *perimeterv1.Egress) Egress {
@@ -33,15 +40,54 @@ func egressOf(e *perimeterv1.Egress) Egress {
 	}
 	uids := slices.Clone(e.Uids)
 	slices.Sort(uids)
-	return Egress{SMTP: e.Smtp, BitTorrent: e.Bittorrent, UIDs: slices.Compact(uids)}
+	out := Egress{SMTP: e.Smtp, BitTorrent: e.Bittorrent, UIDs: slices.Compact(uids)}
+	// No Local: a rayd from before R4-38, which leaves local networks to
+	// the processes, as then.
+	if l := e.GetLocal(); l != nil && !l.Allow {
+		out.Local = true
+		for _, p := range portsOf(l.Loopback) {
+			if (p.Proto == "tcp" || p.Proto == "udp") && p.Num != 0 && !slices.Contains(out.Loopback, p) {
+				out.Loopback = append(out.Loopback, p)
+			}
+		}
+		slices.SortFunc(out.Loopback, func(a, b Port) int { return strings.Compare(a.String(), b.String()) })
+	}
+	return out
+}
+
+// LocalNets are the node's own and local networks the data plane does not
+// reach (R4-38): loopback, "this network", private (RFC 1918, ULA),
+// CGNAT, link-local with the cloud metadata address 169.254.169.254,
+// IETF protocol assignments, benchmarking, multicast, reserved and
+// broadcast; and the IPv6 prefixes that carry IPv4 addresses (NAT64,
+// 6to4, IPv4-compatible): 64:ff9b::a9fe:a9fe is 169.254.169.254 where
+// NAT64 is routed. Xray's routing keeps the same list out of the inner
+// stage and REALITY (render.privateNets).
+var LocalNets = []string{
+	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+	"192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
+	"::/96", "fc00::/7", "fe80::/10", "ff00::/8", "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16",
+}
+
+// localSets are the sets of LocalNets in the table, IPv4 and IPv6.
+func localSets() (v4, v6 string) {
+	var a, b []string
+	for _, n := range LocalNets {
+		if strings.Contains(n, ":") {
+			b = append(b, n)
+		} else {
+			a = append(a, n)
+		}
+	}
+	return strings.Join(a, ", "), strings.Join(b, ", ")
 }
 
 // EgressRules are the comments of the policy's rules, the label values of
 // its metrics (spec/egress-policy-v1.md §6).
-var EgressRules = []string{"smtp", "bittorrent-tcp", "bittorrent-utp", "bittorrent-tracker", "bittorrent-dht"}
+var EgressRules = []string{"smtp", "bittorrent-tcp", "bittorrent-utp", "bittorrent-tracker", "bittorrent-dht", "local"}
 
 // egressChains are the policy's chains: SetEgress writes them whole.
-var egressChains = []string{"egress", "bt_tracker", "bt_utp", "bt_dht"}
+var egressChains = []string{"egress", "bt_tracker", "bt_utp", "bt_dht", "egress_local"}
 
 // The start of the BitTorrent handshake (BEP 3): the length byte 19, then
 // "BitTorrent protocol". A raw payload match takes 16 bytes at most, so
@@ -105,6 +151,21 @@ func EgressScript(e Egress, doff bool) string {
 		rule("bt_utp", `udp length 38 @th,72,8 2 @th,128,32 0 @th,224,16 8 counter drop comment "bittorrent-utp"`)
 		// BEP 5: a query, "d1:ad2:id20:" (bencode sorts the keys).
 		rule("bt_dht", `@th,64,96 0x64313a6164323a696432303a counter drop comment "bittorrent-dht"`)
+	}
+	if e.Local {
+		// Only the data plane's new flows come here (the output chain):
+		// the node's own and local networks are refused, but for
+		// systemd-resolved's stub on 53 (to_node refuses its other ports
+		// before) and the channel probe on 127.0.0.1. A refusal the socket
+		// sees at once, as the guard's: TCP EHOSTUNREACH, UDP and ICMP
+		// EPERM; naive and Hysteria2 answer an honest connect "denied"
+		// from their own check before it comes to this.
+		rule("egress_local", "meta l4proto { tcp, udp } ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 return")
+		if len(e.Loopback) > 0 {
+			rule("egress_local", fmt.Sprintf("ip daddr 127.0.0.1 meta l4proto . th dport { %s } return", strings.Join(portElems(e.Loopback), ", ")))
+		}
+		rule("egress_local", `ip daddr @local4 counter reject with icmpx admin-prohibited comment "local"`)
+		rule("egress_local", `ip6 daddr @local6 counter reject with icmpx admin-prohibited comment "local"`)
 	}
 	return b.String()
 }
@@ -177,6 +238,11 @@ func firstLines(b []byte, n int) string {
 func (n *NFT) EgressBlocks() (map[string]Drops, error) {
 	out := map[string]Drops{}
 	for _, c := range egressChains {
+		if c == "egress_local" {
+			if ok, _ := n.hasChain(c); !ok {
+				continue // a table from before R4-38
+			}
+		}
 		counts, err := n.counters(c)
 		if err != nil {
 			return nil, err
