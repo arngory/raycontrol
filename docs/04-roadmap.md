@@ -190,7 +190,7 @@ systemd-юниты, хранение секретов через systemd credent
 
 ## Бэклог после первой установки на VPS (v0.11.0)
 
-По строке на задачу. Подробности — [10-quickstart-debian13.md](10-quickstart-debian13.md) §11 и `handoff/SYNC.md`.
+По строке на задачу. Подробности — [10-quickstart-debian13.md](10-quickstart-debian13.md) §13 и `handoff/SYNC.md`.
 
 - [x] v0.11.1: install и apply открывают `/etc/resolv.conf` (и цель ссылки) до 0644, как `repairModes`.
 - [x] v0.11.1: `rayctl check` и здоровье rayd (`resolver`) — нечитаемый resolv.conf или без `nameserver`.

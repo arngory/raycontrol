@@ -1,7 +1,8 @@
 # Шпаргалка
 
-Все команды — на ноде, от root или от члена группы `raycontrol`; `install`, `apply`, `update`, `uninstall`,
-`backup`, `restore`, `egress block|allow` и `conn-limit on|off` — только root.
+Все команды — на ноде, от root или от члена группы `raycontrol`; `install`, `apply`, `update` (и `update
+remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|allow`, `conn-limit on|off`,
+`relay bundle` и `summary db` — только root.
 `-json` перед командой даёт машинный вывод (`rayctl -json status`). Пошаговая установка —
 [10-quickstart-debian13.md](10-quickstart-debian13.md).
 
@@ -13,10 +14,10 @@
 | `rayctl knock @bundle` | только SPA: открыть службы устройства своему адресу; с аварийным пакетом — SSH, затем `ssh` (R4-27) |
 | `rayctl check [-host A] [-domain D] [-services a,b]` · `bash bootstrap.sh -check …` | годится ли хост: обязательное (без него установка откажет) и желательное; ничего не меняет (R4-24) |
 | `bash bootstrap.sh -host IP -domain D -cloudflare-token-file F [-services reality,dnstt,masterdns,slipstream]` | поставить ноду: зависимости, подписанный релиз с data plane, `rayctl install`, сервисы |
-| `rayctl install -host IP [-domain D] [-admin A] [-cloudflare-token-file F] [-services …\|none] [-dataplane DIR]` | то же без bootstrap; `-dataplane` — каталог с проверенными `xray` и `niko-server` |
+| `rayctl install -host IP [-domain D] [-name NAME] [-admin A] [-cloudflare-token-file F] [-services …\|none] [-dataplane DIR]` | то же без bootstrap; `-dataplane` — каталог с проверенными `xray` и `niko-server` |
 | `rayctl apply` | поставить то, что нужно новым сервисам: пользователи, юниты, файлы |
-| `rayctl update [-check] [-version vX.Y.Z] [-from DIR] [-yes]` | обновить ноду до проверенного релиза; при сбое — сам откат. С v0.15.0: юниты data plane, которые работали до обновления, должны заработать снова (иначе откат); файлы релиза, которых прежняя версия не знает, ставит новый rayctl; в конце — DNS-туннели, у которых режимы слабее, чем у нового сервиса |
-| `rayctl update -rollback` | вернуть бинарники, которые заменило последнее обновление |
+| `rayctl update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-no-handoff]` | обновить ноду до проверенного релиза; при сбое — сам откат. С v0.19: обновление делает `rayctl` самого релиза (`-no-handoff` — этим `rayctl`, если новый здесь не запускается). С v0.15.0: юниты data plane, которые работали до обновления, должны заработать снова (иначе откат); файлы релиза, которых прежняя версия не знает, ставит новый rayctl; в конце — DNS-туннели, у которых режимы слабее, чем у нового сервиса |
+| `rayctl update -rollback [-no-carry]` | вернуть бинарники, которые заменило последнее обновление; базу — только если обновление сдвинуло её схему, с вопросом. `-no-carry` — вернуть копию базы как есть, без отозванного с тех пор (когда нынешнюю базу не прочитать) |
 | `rayctl update remote on\|off` | с v0.19, только root: admin-устройства могут обновлять ноду через API (StartUpdate) — только на подписанный релиз новее ноды; по умолчанию выкл. Политика — файл root `/var/lib/raycontrol-update/policy.json`, rayd его только читает ([`spec/node-update-v1.md`](spec/node-update-v1.md)) |
 | `rayctl update auto patch [-window 03:00-05:00]` / `auto off` | с v0.19, только root: rayd сам обновляется на патч-версии своей минорной в окне (время ноды, окно не короче 30 мин); раз в ~6 ч спрашивает GitHub; по умолчанию выкл. После отката эту версию больше не просит; после сбоя до изменений на ноде (скачивание) — через сутки |
 | `rayctl update status` | политика обновлений, последний релиз, последнее обновление по запросу; журнал самого обновления — `journalctl -u raycontrol-update` |
@@ -49,7 +50,7 @@
 | `rayctl conn-limit` | пределы соединений (с v0.24): включены ли, где действуют (naive, Xray с v0.25, Hysteria2 с niko-server v0.17.0), их числа, таблица conntrack (занято, `max`, отбросы), страж (включён ли, переключения, отказы, вычищено), кто упёрся за 15 мин и отказы по сервису и виду; root видит и отброшенное пределом на адрес |
 | `rayctl conn-limit on\|off` | только root, на ноде: пределы на пользователя в каждом процессе naive, Hysteria2 (с niko-server v0.17.0) и Xray (REALITY, `inner`; с v0.25) — TCP: 1024 сразу, 30 новых/с, неудачные dial в долг; UDP: 256 сессий, журнал пар; резолвы; отказ naive — ответ `429`, Hysteria2 — `too many connections` — и предел новых входящих TCP и UDP на адрес, здесь и на relay ноды. По умолчанию включены. Действует за секунды; naive и Hysteria2 перечитывают файл и не перезапускаются, каждый Xray перезапускается один раз — открытые через него соединения рвутся. Размер таблицы, `notrack` DNS-туннелей и страж остаются всегда ([`spec/conn-limit-v1.md`](spec/conn-limit-v1.md)) |
 | `rayctl report [-o F] [-logs warning\|info\|debug\|none] [-since 24h] [-id ID]` | очищенный отчёт для issue, ничего не отправляет; `-logs debug` — со строками `-debug`, один `-id` на прогон |
-| `rayctl probe [-carrier udp\|tls\|tcp\|auto] [-redact] @bundle` | проверить ноду снаружи, как клиент; `auto` — UDP, ClientHello, голый TCP |
+| `rayctl probe [-carrier udp\|tls\|tcp\|auto] [-addr A] [-links] [-redact] [-channel] @bundle` | проверить ноду снаружи, как клиент; `auto` — UDP, ClientHello, голый TCP; `-channel` — ещё и замер канала (TCP в обе стороны, эхо UDP); `-links` — со ссылками профилей (в них учётные данные) |
 | `journalctl -u rayd -u rayspa -u 'niko-*' -f` | журналы ноды |
 | `systemctl status rayd rayspa 'niko-*'` | состояние юнитов |
 | `nft list table inet raycontrol` | периметр; цепочка `early` — отброшенное до сборки фрагментов, `egress` — политика выхода, `in_rate` — предел новых входящих на адрес, `conn_guard` — страж conntrack (пуста, пока он выключен) |
@@ -73,7 +74,7 @@
 
 | Команда | Что делает |
 |---|---|
-| `rayctl user add [NAME] -services a,b [-expires 30d\|2026-12-31] [-limit 50G [-period monthly\|none] [-reset-day 1]]` | без имени — непрозрачный `u-xxxx-xxxx`; `-limit` — лимит трафика (ниже) |
+| `rayctl user add [NAME] -services a,b [-expires 30d\|2026-12-31] [-limit 50G [-period monthly\|none] [-reset-day 1]] [-note TEXT]` | без имени — непрозрачный `u-xxxx-xxxx`; `-services` — имена сервисов (`dns`, не `dnstt`); `-limit` — лимит трафика (ниже); `-note` — заметка для себя |
 | `rayctl user list` | пользователи; `USED` — расход периода из лимита (`12.0G/50G`, `(over)` — снят) |
 | `rayctl user limit NAME 50G\|off [-period monthly\|none] [-reset-day N]` | лимит трафика (с v0.22): `up + down` на стороне назначений за период — месяц с дня N (1–28, 00:00 UTC) или `none` (всё время пользователя). Достиг — снят со всех профилей, как просроченный, до сброса или поднятого лимита; подписка остаётся (`profiles: []`, `exhausted`). Первый лимит на ноде включает счёт: `inner` и REALITY перезапустятся один раз ([`spec/traffic-limit-v1.md`](spec/traffic-limit-v1.md)) |
 | `rayctl user usage [NAME]` | расход, лимит, период, начало, сброс, состояние (отстаёт до минуты) |
@@ -93,9 +94,10 @@
 |---|---|
 | `rayctl service add api api` → `rayctl apply` | включить удалённый API: свой порт за SPA, mTLS |
 | `rayctl device invite admin laptop -role admin` | на ноде: приглашение для устройства администратора |
-| `rayctl remote enroll -o laptop.rcdev rcinv1:…` | на своей машине: новый ключ, SPA, регистрация; файл устройства 0600 |
-| `rayctl -remote laptop.rcdev status` | любая команда `status`, `user`, `service`, `device`, `audit`, `admin`, `dns`, `metrics` через API |
+| `rayctl remote enroll -o laptop.rcdev [-pin 123456] 'RCINV2:…'` | на своей машине: новый ключ, SPA, регистрация; файл устройства 0600. Берёт и `rcinv1:…`; PIN без `-pin` спрашивается без показа на экране |
+| `rayctl -remote laptop.rcdev status` | любая команда `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `dns`, `summary`, `app-mirror`, `metrics` через API |
 | `rayctl -remote laptop.rcdev remote rotate` | новый клиентский ключ, старый перестаёт работать |
+| `rayctl -remote laptop.rcdev remote whoami` | какое это устройство: ID, пользователь, имя, роль, нода |
 
 ## Сервисы
 
@@ -108,7 +110,7 @@
 | `rayctl service add yggdrasil ygg` | Yggdrasil: прямой TLS-линк на TCP 443 за фронтом (после REALITY), трафик идёт в `inner`; потом `rayctl apply` |
 | `rayctl service add dnstt dns` · `rayctl service add masterdns mdns` | DNS-туннели (резервный канал) |
 | `rayctl service add slipstream slip [-settings '{"zone":"s.example.net"}']` → `rayctl apply` | slipstream (с v0.16, [`spec/slipstream-v1.md`](spec/slipstream-v1.md)): DNS-туннель поверх QUIC с multipath, за DNS-фронтом. Зона — до 20 символов (иначе пакет QUIC Initial не влезет в запрос): своя — `zone`, без неё — случайная в домене ноды (если домен длиннее 16 символов, задайте свою). Каждый запрос несёт метку dnsauth-v2 устройства, фронт проверяет её до сервера; опций нет, ключ сервера (P-256) клиенты закрепляют, ротации нет. Ссылку берут Niko 1.37+, более старые пропускают строку |
-| `rayctl service set slip max_connections=512` · `device_connections=2` | пределы slipstream (с v0.17): соединений на сервис (16–1024, по умолчанию 256) и на одно устройство (1–16, по умолчанию 4; сверх любого из пределов уступает соединение устройства, молчащее дольше 5 с). `0` — по умолчанию. Сервер перезапускается. Сколько это людей — [`14-capacity.md`](14-capacity.md) |
+| `rayctl service set slip max_connections=512` · `device_connections=2` → `rayctl apply` | пределы slipstream (с v0.17): соединений на сервис (16–1024, по умолчанию 256) и на одно устройство (1–16, по умолчанию 4; сверх любого из пределов уступает соединение устройства, молчащее дольше 5 с). `0` — по умолчанию. Пределы — аргументы сервера в его юните: действуют после `rayctl apply`, который перезапускает сервер. Сколько это людей — [`14-capacity.md`](14-capacity.md) |
 | `rayctl service add api api` | удалённый API для устройств-администраторов и регистрации по приглашениям |
 | `rayctl service enable\|disable\|del NAME` | включить, выключить, удалить |
 | `rayctl service set site answer=404\|403\|silent\|pages` | что сайт отвечает тем, кого отклонил REALITY; потом `rayctl apply` |
@@ -166,6 +168,9 @@ shred -u /root/phone.bundle
 
 ## Сроки ротации (флаги `rayd serve`)
 
+Команды для этих флагов нет: юнит `rayd.service` пишет `rayctl apply`, и в нём только `-db`, `-socket` и `-rendered`.
+Ниже — значения, с которыми работает нода.
+
 | Флаг | По умолчанию | Что |
 |---|---|---|
 | `-cred-period` / `-cred-lead` / `-cred-grace` | 30 д / 3 д / 2 д | UUID пользователей: срок, публикация заранее, приём старого; `-cred-grace` — и приём прежних ключей REALITY (R4-19) |
@@ -174,6 +179,8 @@ shred -u /root/phone.bundle
 | `-acme-directory` | Let's Encrypt | CA; пусто — без сертификатов |
 | `-dns-check` · `-dns-check-resolvers` | 1 ч ±10 % · `google,cloudflare,quad9` | самопроверка DNS-зон с ноды; `0` — только `rayctl dns check -now` |
 | `-update-check` | `0` (выкл.) | искать новый релиз так часто, не чаще раза в час (±10 %): нода берёт подписанный SHA256SUMS последнего релиза только с github.com — он видит адрес ноды (зеркала — только у `rayctl update`); итог — строка `update` в `rayctl status`, новая версия — один раз в журнал. Только у релизных сборок (vX.Y.Z), независимо от `-dns-check` |
+| `-spa-ttl` / `-spa-max-ttl` | 10 мин / 1 ч | доступ по SPA, когда пакет просит срок по умолчанию; самый долгий доступ, который пакет может попросить |
+| `-probe-daily-mib` | 1024 | замеры канала: МиБ на устройство за сутки UTC, в обе стороны |
 | `-run` | `/run/niko` | каталог сокетов и копий секретов data plane |
 | `-supervise` · `-xray` · `-niko-server` | выкл. | без systemd (CI, контейнеры): data plane — дочерние процессы rayd под его пользователем; не для ноды (R4-22, `test/supervise/run.sh`) |
 
@@ -196,3 +203,7 @@ sudo bash bootstrap.sh -relay msk.bundle   # rayspa, пересылка ядро
                                            # rayd relay — точка замера relay (если её нет, relay работает и без неё)
 journalctl -u rayd-relay                   # точка замера relay: поток от выхода, отчёты
 ```
+
+Обновление relay — тот же запуск ещё раз, с пакетом, который установка оставила на хосте relay:
+`sudo bash bootstrap.sh -relay /etc/raycontrol/relay.bundle`. `rayctl update` на хосте relay отказывает
+([10-quickstart-debian13.md](10-quickstart-debian13.md) §12.4).
