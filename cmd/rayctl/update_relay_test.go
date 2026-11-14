@@ -480,7 +480,7 @@ func newFakeRelay(t *testing.T) *fakeRelay {
 		sshPort:     func() int { return 22 },
 		hostOpen:    func() bool { return f.open },
 		lock:        func(what string) error { f.record("lock " + what); return nil },
-		installLock: func() (*os.File, error) { return os.Open(f.at("relay.bundle")) },
+		installLock: func() (*os.File, error) { return takeInstallLock(f.at("install.lock")) },
 		newStage:    func() (string, error) { return os.MkdirTemp(f.dir, "stage-") },
 		stage: func(_ context.Context, o updateOpts, stage, installed string) (staged, error) {
 			if o.check {
@@ -493,8 +493,19 @@ func newFakeRelay(t *testing.T) *fakeRelay {
 			return staged{version: "v0.26.1"}, nil
 		},
 		place: func(stage string) (bool, error) { return placeRelayBinaries(stage, ops.bins, ops.place) },
-		install: func(*os.File) error {
+		install: func(lock *os.File) error {
 			f.record("install")
+			// The lock the update took goes on to the install, held.
+			if lock == nil {
+				return errors.New("no install lock passed on")
+			}
+			if _, err := lock.Stat(); err != nil {
+				return fmt.Errorf("the install lock passed on is closed: %w", err)
+			}
+			if other, err := takeInstallLock(f.at("install.lock")); err == nil {
+				other.Close()
+				return errors.New("the install lock is not held through the install")
+			}
 			if f.inst != nil {
 				return f.inst()
 			}
@@ -951,6 +962,39 @@ func TestRelayUpdateWhole(t *testing.T) {
 	f.yes = false
 	if _, err := f.update(updateOpts{want: "latest"}); err == nil || f.read("bin/rayspa") != "rayspa v0.26.0" {
 		t.Errorf("not confirmed: %v", err)
+	}
+}
+
+// While another install has the relay install lock (bootstrap.sh -relay,
+// or the install of an update that was killed), neither an update nor a
+// -rollback changes anything.
+func TestRelayInstallLockHeld(t *testing.T) {
+	f := newFakeRelay(t)
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err != nil {
+		t.Fatal(err)
+	}
+	other, err := takeInstallLock(f.at("install.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	f.ran = nil
+	if _, err := f.rollback(true); err == nil || !strings.Contains(err.Error(), "another rayctl install -relay") ||
+		f.read("bin/rayspa") != "rayspa v0.26.1" || slices.ContainsFunc(f.ran, func(s string) bool { return strings.HasPrefix(s, "systemctl") }) {
+		t.Errorf("-rollback: %v, rayspa %q, ran %q", err, f.read("bin/rayspa"), f.ran)
+	}
+	f = newFakeRelay(t)
+	held, err := takeInstallLock(f.at("install.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err == nil || !strings.Contains(err.Error(), "nothing changed") ||
+		f.read("bin/rayspa") != "rayspa v0.26.0" {
+		t.Errorf("update: %v, rayspa %q", err, f.read("bin/rayspa"))
+	}
+	if _, marked := f.env.ops.readMark(); marked {
+		t.Error("marked")
 	}
 }
 
