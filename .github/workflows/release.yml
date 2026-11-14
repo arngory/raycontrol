@@ -9,6 +9,9 @@ name: Release
 # the release then creates the tag on the commit it was run from.
 # The archives also carry IPinfo Lite, the AS database of the client
 # summaries (R4-21, CC BY-SA 4.0, attribution in NOTICE).
+# Beside the node's archives, rayctl alone for the administrator's own
+# machine (rayctl-darwin-*, rayctl-freebsd-*), in the same signed SHA256SUMS:
+# a node and bootstrap.sh read their own line of it by name.
 # Needs the repository secrets MINISIGN_SECRET_KEY and IPINFO_TOKEN
 # (docs/RELEASE.md).
 on:
@@ -126,16 +129,63 @@ jobs:
           name: raycontrol-${{ matrix.goarch }}
           path: raycontrol-linux-*.tar.gz
 
+  rayctl:
+    # rayctl for macOS and FreeBSD: the remote administration and the probe
+    # from the administrator's own machine (docs/18, §2). Built here from
+    # Linux, without cgo, as CI's rayctl job builds them on every commit. Not
+    # notarised by Apple and never run in this workflow.
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - {goos: darwin, goarch: arm64}
+          - {goos: darwin, goarch: amd64}
+          - {goos: freebsd, goarch: amd64}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad tag $TAG"; exit 1; }
+          go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o client/rayctl ./cmd/rayctl
+          want=$(go mod edit -json | jq -r '.Toolchain // ("go" + .Go)')
+          got=$(go version client/rayctl | awk '{print $2}')
+          [ "$got" = "$want" ] || { echo "rayctl built with $got, go.mod names $want"; exit 1; }
+          file client/rayctl
+          echo "raycontrol ${TAG} ${GITHUB_SHA}" > client/VERSIONS
+          tar -czf "rayctl-${GOOS}-${GOARCH}.tar.gz" -C client rayctl VERSIONS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rayctl-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: rayctl-*.tar.gz
+
   release:
-    needs: [ci, build]
+    needs: [ci, build, rayctl]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      # Every archive of a release, by name: one that is missing stops the
+      # release at the checksums. The node's first; their names are frozen
+      # (docs/RELEASE.md).
+      ARCHIVES: >-
+        raycontrol-linux-amd64.tar.gz raycontrol-linux-arm64.tar.gz
+        rayctl-darwin-arm64.tar.gz rayctl-darwin-amd64.tar.gz rayctl-freebsd-amd64.tar.gz
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: raycontrol-*
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: rayctl-*
           merge-multiple: true
       - name: Release notes exist
         run: test -s ".github/release-notes/${TAG}.md"
@@ -145,7 +195,9 @@ jobs:
         run: |
           test -n "$MINISIGN_SECRET_KEY" || { echo "MINISIGN_SECRET_KEY is not set"; exit 1; }
           sudo apt-get install -y -q minisign
-          sha256sum raycontrol-linux-*.tar.gz > SHA256SUMS
+          read -ra archives <<< "$ARCHIVES"
+          sha256sum "${archives[@]}" > SHA256SUMS
+          cat SHA256SUMS
           umask 077
           printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
           minisign -S -s "$RUNNER_TEMP/minisign.key" -m SHA256SUMS -t "raycontrol ${TAG}"
@@ -154,6 +206,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          read -ra archives <<< "$ARCHIVES"
           gh release create "$TAG" --target "$GITHUB_SHA" --title "raycontrol ${TAG}" \
             --notes-file ".github/release-notes/${TAG}.md" \
-            raycontrol-linux-*.tar.gz SHA256SUMS SHA256SUMS.minisig
+            "${archives[@]}" SHA256SUMS SHA256SUMS.minisig
