@@ -3,6 +3,8 @@ package perimeter
 import (
 	"errors"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -75,9 +77,16 @@ func TestEgressScript(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := EgressScript(c.e, c.doff)
+			// Two transactions (SetEgress): local, then the rest; each
+			// flushes what it writes, and only that.
+			local, rest := EgressLocalScript(c.e), EgressOptionalScript(c.e, c.doff)
+			if s != local+rest || !strings.HasPrefix(local, "flush chain inet raycontrol egress_local\n") ||
+				strings.Count(local, "flush ") != 1 || strings.Contains(rest, "egress_local") {
+				t.Errorf("not local, then the rest:\n%s\n--\n%s", local, rest)
+			}
 			for _, f := range flushes {
-				if !strings.HasPrefix(s, flushes[0]) || !strings.Contains(s, f) {
-					t.Errorf("lacks %q, or not first:\n%s", f, s)
+				if !strings.HasPrefix(rest, flushes[0]) || !strings.Contains(rest, f) || strings.Contains(local, f) {
+					t.Errorf("lacks %q, or not first:\n%s", f, rest)
 				}
 			}
 			for _, w := range c.want {
@@ -284,5 +293,66 @@ func TestGateEgress(t *testing.T) {
 	snap.Egress = &perimeterv1.Egress{Bittorrent: true}
 	if err := g.Update(snap); err != nil || !fw.egress.Equal(Egress{BitTorrent: true}) || !g.egressOn {
 		t.Fatalf("a new policy: %+v %v", fw.egress, err)
+	}
+}
+
+// fakeNFT is an nft that refuses any script with one of refuse in it and
+// keeps the scripts it took, one file each, in dir/took.
+func fakeNFT(t *testing.T, refuse ...string) (bin string, took func() []string) {
+	t.Helper()
+	dir := t.TempDir()
+	var check strings.Builder
+	for _, r := range refuse {
+		check.WriteString("if printf '%s\\n' \"$in\" | grep -qF -- '" + r + "'; then echo 'Error: refused (test)' >&2; exit 1; fi\n")
+	}
+	script := "#!/bin/sh\nin=$(cat)\n" + check.String() +
+		"n=$(ls " + dir + "/took 2>/dev/null | wc -l)\nmkdir -p " + dir + "/took\nprintf '%s\\n' \"$in\" > " + dir + "/took/$((n+1000))\n"
+	bin = filepath.Join(dir, "nft")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil { //nolint:gosec // G306: an executable
+		t.Fatal(err)
+	}
+	return bin, func() []string {
+		entries, _ := os.ReadDir(filepath.Join(dir, "took"))
+		var out []string
+		for _, e := range entries {
+			b, _ := os.ReadFile(filepath.Join(dir, "took", e.Name()))
+			out = append(out, string(b))
+		}
+		return out
+	}
+}
+
+// local is a transaction of its own, first (R4-38): a kernel that refuses
+// both BitTorrent variants (@ih and tcp doff) keeps the local block, and
+// one that refuses the local block keeps SMTP and BitTorrent.
+func TestSetEgressLocalApart(t *testing.T) {
+	e := Egress{SMTP: true, BitTorrent: true, Local: true}
+	bin, took := fakeNFT(t, "@ih", "tcp doff")
+	err := (&NFT{Bin: bin}).SetEgress(e)
+	if err == nil || !strings.Contains(err.Error(), "smtp, bittorrent") || strings.Contains(err.Error(), "local:") {
+		t.Fatalf("BitTorrent refused: %v", err)
+	}
+	if got := took(); len(got) != 1 || !strings.Contains(got[0], `egress_local ip daddr @local4`) || strings.Contains(got[0], "bittorrent") {
+		t.Fatalf("BitTorrent refused, taken: %q", got)
+	}
+
+	bin, took = fakeNFT(t, "egress_local ip daddr @local4")
+	err = (&NFT{Bin: bin}).SetEgress(e)
+	if err == nil || !strings.Contains(err.Error(), "local:") || strings.Contains(err.Error(), "smtp, bittorrent") {
+		t.Fatalf("local refused: %v", err)
+	}
+	if got := took(); len(got) != 1 || !strings.Contains(got[0], "bittorrent-tcp") || !strings.Contains(got[0], "dport 25") ||
+		strings.Contains(got[0], "egress_local") {
+		t.Fatalf("local refused, taken: %q", got)
+	}
+
+	// Both taken: two transactions, local first.
+	bin, took = fakeNFT(t)
+	if err := (&NFT{Bin: bin}).SetEgress(e); err != nil {
+		t.Fatal(err)
+	}
+	if got := took(); len(got) != 2 || !strings.HasPrefix(got[0], "flush chain inet raycontrol egress_local\n") ||
+		!strings.Contains(got[1], "bittorrent") {
+		t.Fatalf("taken: %q", got)
 	}
 }

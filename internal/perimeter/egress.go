@@ -1,6 +1,7 @@
 package perimeter
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"slices"
@@ -89,6 +90,11 @@ var EgressRules = []string{"smtp", "bittorrent-tcp", "bittorrent-utp", "bittorre
 // egressChains are the policy's chains: SetEgress writes them whole.
 var egressChains = []string{"egress", "bt_tracker", "bt_utp", "bt_dht", "egress_local"}
 
+// optionalChains are the parts but local, in a transaction of their own
+// (EgressOptionalScript): a kernel that refuses them does not take local
+// away, nor the reverse.
+var optionalChains = []string{"egress", "bt_tracker", "bt_utp", "bt_dht"}
+
 // The start of the BitTorrent handshake (BEP 3): the length byte 19, then
 // "BitTorrent protocol". A raw payload match takes 16 bytes at most, so
 // the 20 bytes go as 1 + 16 + 3.
@@ -108,6 +114,12 @@ const (
 // Every rule counts what it blocks; none logs: a log line would carry the
 // destination (spec/egress-policy-v1.md §6).
 func EgressScript(e Egress, doff bool) string {
+	return EgressLocalScript(e) + EgressOptionalScript(e, doff)
+}
+
+// EgressOptionalScript is the transaction of the policy's parts but
+// local: the extra UIDs, SMTP and BitTorrent.
+func EgressOptionalScript(e Egress, doff bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "flush set inet %s egress_uid\n", Table)
 	if len(e.UIDs) > 0 {
@@ -117,7 +129,7 @@ func EgressScript(e Egress, doff bool) string {
 		}
 		fmt.Fprintf(&b, "add element inet %s egress_uid { %s }\n", Table, strings.Join(uids, ", "))
 	}
-	for _, c := range egressChains {
+	for _, c := range optionalChains {
 		fmt.Fprintf(&b, "flush chain inet %s %s\n", Table, c)
 	}
 	rule := func(chain, r string) { fmt.Fprintf(&b, "add rule inet %s %s %s\n", Table, chain, r) }
@@ -152,6 +164,17 @@ func EgressScript(e Egress, doff bool) string {
 		// BEP 5: a query, "d1:ad2:id20:" (bencode sorts the keys).
 		rule("bt_dht", `@th,64,96 0x64313a6164323a696432303a counter drop comment "bittorrent-dht"`)
 	}
+	return b.String()
+}
+
+// EgressLocalScript is the transaction of the policy's local part
+// (R4-38): egress_local flushed and, when on, filled. It goes first and on
+// its own (SetEgress): closed by default, it must not depend on a kernel
+// taking the BitTorrent rules.
+func EgressLocalScript(e Egress) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "flush chain inet %s egress_local\n", Table)
+	rule := func(chain, r string) { fmt.Fprintf(&b, "add rule inet %s %s %s\n", Table, chain, r) }
 	if e.Local {
 		// Only the data plane's new flows come here (the output chain):
 		// the node's own and local networks are refused, but for
@@ -175,22 +198,35 @@ func EgressScript(e Egress, doff bool) string {
 	return b.String()
 }
 
-// SetEgress puts the egress policy in force in one transaction: a refusal
-// leaves it as it was, and nothing else of the table changes. A kernel
-// without the inner header base (@ih) gets the TCP handshake by the TCP
-// header's length. On a relay it does nothing: no data plane runs there.
+// SetEgress puts the egress policy in force in two transactions: local
+// first (EgressLocalScript), then the rest (EgressOptionalScript). A
+// refusal of one leaves that one as it was and takes nothing of the other
+// or of the table; an error says which. A kernel without the inner header
+// base (@ih) gets the TCP handshake by the TCP header's length. On a relay
+// it does nothing: no data plane runs there.
 func (n *NFT) SetEgress(e Egress) error {
 	if n.RelayTo.IsValid() {
 		return nil
 	}
-	if !e.BitTorrent || n.egressDoff {
-		return n.run(EgressScript(e, n.egressDoff))
+	var errs []error
+	if err := n.run(EgressLocalScript(e)); err != nil {
+		errs = append(errs, fmt.Errorf("local: %w", err))
 	}
-	err := n.run(EgressScript(e, false))
+	if err := n.setOptional(e); err != nil {
+		errs = append(errs, fmt.Errorf("smtp, bittorrent: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
+func (n *NFT) setOptional(e Egress) error {
+	if !e.BitTorrent || n.egressDoff {
+		return n.run(EgressOptionalScript(e, n.egressDoff))
+	}
+	err := n.run(EgressOptionalScript(e, false))
 	if err == nil {
 		return nil
 	}
-	if n.run(EgressScript(e, true)) == nil {
+	if n.run(EgressOptionalScript(e, true)) == nil {
 		n.egressDoff = true
 		return nil
 	}
