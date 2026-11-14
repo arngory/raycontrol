@@ -33,7 +33,7 @@ func TestLastSSHService(t *testing.T) {
 	refused := func(what string, err error, flag string) {
 		t.Helper()
 		if connect.CodeOf(err) != connect.CodeFailedPrecondition || !strings.Contains(err.Error(), "closed to everyone") ||
-			!strings.Contains(err.Error(), flag) || !strings.HasSuffix(err.Error(), "-force (a rayctl before v0.27.0 has no -force: update it)") {
+			!strings.HasPrefix(err.Error(), "failed_precondition: not now: "+flag+" does it anyway (rayctl before v0.27.0 has no -force)") {
 			t.Errorf("%s: %v", what, err)
 		}
 	}
@@ -125,6 +125,34 @@ func TestLastSSHServiceAtOnce(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+		}
+	}
+}
+
+// The refusal as rayctl gets it, for a name of 64 bytes (the longest):
+// well inside the 512 bytes rayctl prints, the command first with the
+// name once, and nothing cut at the end.
+func TestLastSSHMessageLength(t *testing.T) {
+	_, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	name := strings.Repeat("s", 64)
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "ssh", Name: name, SettingsJson: `{"ports":["tcp/22"]}`})); err != nil {
+		t.Fatal(err)
+	}
+	_, errDisable := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: name, Enabled: false}))
+	_, errDelete := c.DeleteService(ctx, connect.NewRequest(&nodev1.DeleteServiceRequest{Name: name}))
+	for verb, err := range map[string]error{"disable": errDisable, "del": errDelete} {
+		if err == nil {
+			t.Fatalf("%s: not refused", verb)
+		}
+		msg := err.Error()
+		if len(msg) > 300 {
+			t.Errorf("%s: %d bytes: %s", verb, len(msg), msg)
+		}
+		if !strings.Contains(msg, "rayctl service "+verb+" "+name+" -force does it anyway") || strings.Count(msg, name) != 1 ||
+			!strings.HasSuffix(msg, "open sessions go on") {
+			t.Errorf("%s: %s", verb, msg)
 		}
 	}
 }
