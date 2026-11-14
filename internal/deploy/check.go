@@ -235,8 +235,13 @@ func checkUnit(unit, content string, users map[string]bool) error {
 	var copies [][2]string // user, destination of each copy
 	check := map[string]map[string]func(string) bool{
 		"[Unit]": {
-			"Description":           func(string) bool { return true },
-			"Wants":                 func(v string) bool { return v == "network-online.target" },
+			"Description": func(string) bool { return true },
+			// rayspa before the interfaces come up (R4-40), every other
+			// unit after the network.
+			"Wants": func(v string) bool {
+				return v == map[bool]string{true: "network-pre.target", false: "network-online.target"}[unit == "rayspa.service"]
+			},
+			"Before":                func(v string) bool { return unit == "rayspa.service" && v == "network-pre.target" },
 			"After":                 func(v string) bool { return fieldsOf(v, afterUnit) },
 			"StartLimitIntervalSec": func(v string) bool { return v == "0" },
 			"ConditionPathExists":   func(v string) bool { return under(v, rendered) },
@@ -298,6 +303,10 @@ func checkUnit(unit, content string, users map[string]bool) error {
 			"IPAddressDeny":  func(v string) bool { return v == strings.TrimPrefix(denyLocal, "IPAddressDeny=") },
 			"IPAddressAllow": func(v string) bool { return oneOf(v, "127.0.0.1", strings.TrimPrefix(stubAllow, "IPAddressAllow=")) },
 			"PrivateNetwork": func(v string) bool { return v == "yes" },
+			// rayspa's ready (rayspaReady).
+			"Type":            func(v string) bool { return unit == "rayspa.service" && v == "notify" },
+			"NotifyAccess":    func(v string) bool { return unit == "rayspa.service" && v == "main" },
+			"TimeoutStartSec": func(v string) bool { return unit == "rayspa.service" && v == "30s" },
 		},
 		"[Install]": {
 			"WantedBy": func(v string) bool {

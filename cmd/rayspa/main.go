@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -119,10 +120,23 @@ func run(args []string) error {
 				"(rayctl install -relay turns it on once the relay is checked; sysctl -w net.ipv4.ip_forward=1)")
 		}
 	}
-	if err := fw.Setup(); err != nil {
-		return err
-	}
+	// The table goes in with the first snapshot (R4-40): the saved one
+	// below, or rayd's. Before it the kernel stays as it is: an earlier
+	// rayspa's table (a restart) or none (a boot), never an empty table
+	// that would shut the administrator out until rayd answers.
 	gate := perimeter.NewGate(fw, log)
+	gate.SetupAtFirstSnapshot()
+	leftOver, presentErr := fw.Present()
+	if presentErr != nil {
+		return presentErr // no nft: nothing here can work
+	}
+	if *relayBundle != "" && !leftOver {
+		// A boot: forwarding is on from sysctl.d, nothing forwards until
+		// the table is in.
+		if err := fw.HoldForward(); err != nil {
+			log.Error("forwarding not held: the relay forwards whatever the kernel routes until its table is in", "err", err)
+		}
+	}
 	if *relayBundle == "" {
 		// The conntrack table's guard (spec/conn-limit-v1.md §6.3): on the
 		// node only, a relay runs no data plane. Its state goes to rayd.
@@ -148,6 +162,18 @@ func run(args []string) error {
 	if *state != "" {
 		restore(*state, gate, carrier, log)
 	}
+	up := gate.Up()
+	switch {
+	case up:
+	case leftOver:
+		log.Warn("no saved snapshot applied: the table an earlier rayspa left stays in force until rayd answers", "table", perimeter.Table)
+	default:
+		// Loud: the journal at error, and systemctl status.
+		log.Error("perimeter down: the host is open until rayd answers (no saved snapshot applied; rayctl status)", "table", perimeter.Table)
+	}
+	// Ready once the start's table is in, or known not to be: the unit is
+	// ordered before network-pre.target, so interfaces come up after this.
+	notify(fmt.Sprintf("READY=1\nSTATUS=%s", perimeterStatus(up, leftOver)))
 	go watch(ctx, open, *state, gate, carrier, dl, log)
 	go func() {
 		if err := perimeter.ReadNFLOG(ctx, uint16(*group), handle, log); err != nil {
@@ -160,7 +186,7 @@ func run(args []string) error {
 	// firewalld reload) removed the table, it is back within a second.
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
-	log.Info("perimeter up", "table", perimeter.Table, "version", version)
+	log.Info("rayspa running", "table", perimeter.Table, "version", version, "up", up)
 	for {
 		select {
 		case <-ctx.Done():
@@ -179,8 +205,44 @@ func run(args []string) error {
 			if ports != nil {
 				carrier.Reconcile(ports)
 			}
+			if now := gate.Up(); now != up {
+				up = now
+				if up {
+					log.Info("perimeter up", "table", perimeter.Table)
+				} else {
+					log.Error("perimeter down: its table went and is not back yet; the host is open meanwhile", "table", perimeter.Table)
+				}
+				notify("STATUS=" + perimeterStatus(up, false))
+			}
 		}
 	}
+}
+
+// perimeterStatus is rayspa's line in systemctl status.
+func perimeterStatus(up, leftOver bool) string {
+	switch {
+	case up:
+		return "perimeter up"
+	case leftOver:
+		return "waiting for rayd: the table an earlier rayspa left is in force"
+	}
+	return "PERIMETER DOWN: the host is open until rayd answers"
+}
+
+// notify sends state to systemd (sd_notify), when the unit asked for it
+// (Type=notify): nothing otherwise, and nothing if it fails.
+func notify(state string) {
+	addr := os.Getenv("NOTIFY_SOCKET")
+	if addr == "" {
+		return
+	}
+	// A leading "@" is an abstract socket, as the net package reads it.
+	c, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: addr, Net: "unixgram"})
+	if err != nil {
+		return
+	}
+	defer func() { _ = c.Close() }()
+	_, _ = c.Write([]byte(state))
 }
 
 // guardReporter sends the guard's state to rayd (PerimeterService.

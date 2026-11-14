@@ -925,6 +925,50 @@ func TestBuildDNSKeyWithoutRender(t *testing.T) {
 	}
 }
 
+// rayspa's unit, on a node and on a relay, starts before the interfaces
+// come up and is ready once its saved table is in (R4-40): before
+// network-pre.target, after the host firewalls only (rayd comes after the
+// network: After=rayd.service would be a cycle), Type=notify with a bound
+// on how long it may hold the network. Root's check takes the lines; no
+// other unit may have them.
+func TestRayspaEarly(t *testing.T) {
+	node := deploy.Build(deploy.Inputs{}, render.DefaultPaths, deploy.DefaultBinaries)
+	for name, p := range map[string]deploy.Plan{"node": node, "relay": deploy.RelayPlan(deploy.DefaultBinaries)} {
+		u := file(p, "/etc/systemd/system/rayspa.service")
+		head := "[Unit]\nDescription=" + strings.SplitN(strings.SplitN(u, "Description=", 2)[1], "\n", 2)[0] + "\n" +
+			"Wants=network-pre.target\nBefore=network-pre.target\nAfter=nftables.service firewalld.service ufw.service\nStartLimitIntervalSec=0\n\n[Service]\n"
+		if !strings.Contains(u, head) || strings.Contains(u, "network-online") || strings.Contains(u, "rayd.service") {
+			t.Errorf("%s: rayspa's [Unit]:\n%s", name, u)
+		}
+		for _, want := range []string{"Type=notify\n", "NotifyAccess=main\n", "TimeoutStartSec=30s\n", "[Install]\nWantedBy=multi-user.target\n"} {
+			if !strings.Contains(u, want) {
+				t.Errorf("%s: rayspa's unit lacks %q", name, want)
+			}
+		}
+		if err := p.Check(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// The rest stay after the network, and may not take rayspa's lines.
+	if !strings.Contains(file(node, "/etc/systemd/system/rayd.service"), "Wants=network-online.target\nAfter=network-online.target\n") {
+		t.Error("rayd's ordering")
+	}
+	for i, f := range node.Files {
+		if f.Path != "/etc/systemd/system/rayd.service" {
+			continue
+		}
+		for l, after := range map[string]string{"Before=network-pre.target": "StartLimitIntervalSec=0\n",
+			"Type=notify": "[Service]\n", "TimeoutStartSec=30s": "[Service]\n"} {
+			bad := node
+			bad.Files = slices.Clone(node.Files)
+			bad.Files[i].Content = []byte(strings.Replace(string(f.Content), after, after+l+"\n", 1))
+			if err := bad.Check(); err == nil {
+				t.Errorf("rayd's unit with %q passed the check", l)
+			}
+		}
+	}
+}
+
 // A relay host (relay-v1 §3.1): rayspa alone, with the bundle root copies in
 // for it at each start, and forwarding on.
 func TestRelayPlan(t *testing.T) {

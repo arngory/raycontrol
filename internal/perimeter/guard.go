@@ -244,6 +244,11 @@ func (g *Gate) ReleaseGuard() error {
 		return nil
 	}
 	g.guard.released = true
+	if g.restoring {
+		// No table of the gate's (none yet, or gone): a new one has the
+		// guard off, and one left by an earlier rayspa is not this one's.
+		return nil
+	}
 	if err := g.fw.SetGuard(false); err != nil {
 		return err
 	}

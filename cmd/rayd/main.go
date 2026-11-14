@@ -290,6 +290,11 @@ func cmdServe(args []string) error {
 		log.Warn("rayspa user not found; only root receives the perimeter feed", "user", *rayspaUser)
 	}
 
+	if !*supervise {
+		// rayspa away: rayctl status's "perimeter" line, and the journal
+		// at error (R4-40). A supervised node has no rayspa.
+		go per.MonitorRayspa(ctx, log)
+	}
 	if *supervise && !*liveApply {
 		return errors.New("-supervise needs -live: the processes read the rendered files")
 	}

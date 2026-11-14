@@ -372,6 +372,30 @@ func (n *NFT) Setup() error {
 	return nil
 }
 
+// HoldForwardScript is the table a relay host has until its first snapshot
+// (docs/08-decisions.md R4-40): forwarding on (sysctl.d, at boot) and
+// nothing forwarded, as relay_forward drops by default. It has no input
+// chain: it never shuts the administrator out. Setup replaces it, in one
+// transaction, as any table of the name.
+func HoldForwardScript() string {
+	return fmt.Sprintf(`table inet %s {
+	chain relay_forward {
+		type filter hook forward priority 0; policy drop;
+		ct state established,related accept
+	}
+}
+`, Table)
+}
+
+// HoldForward puts HoldForwardScript in force where the host has no
+// perimeter table yet; a table there (an earlier rayspa's) is left alone.
+func (n *NFT) HoldForward() error {
+	if ok, err := n.Present(); err != nil || ok {
+		return err
+	}
+	return n.run(HoldForwardScript())
+}
+
 // Present looks the table up in "nft list tables".
 func (n *NFT) Present() (bool, error) {
 	bin := n.Bin

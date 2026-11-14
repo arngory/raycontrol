@@ -94,6 +94,29 @@ func NewGate(fw Firewall, log *slog.Logger) *Gate {
 	return &Gate{fw: fw, log: log, now: time.Now, holders: map[grantKey]map[string]time.Time{}}
 }
 
+// SetupAtFirstSnapshot makes the gate take the table only with its first
+// snapshot (rayspa's start, docs/08-decisions.md R4-40): Update then makes
+// the table and fills it in one go, and until then the gate leaves the
+// kernel as it is. A table an earlier rayspa left there (a restart) stays
+// in force, its admin addresses with it; with none (a boot without a saved
+// snapshot, or with one that does not apply) the host stays as open as the
+// rest of the ruleset leaves it. An empty table would close it to everyone,
+// the administrator included, until rayd answers, and rayd may not.
+func (g *Gate) SetupAtFirstSnapshot() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.restoring = true
+}
+
+// Up reports whether the gate's table is in the kernel with a snapshot in
+// it: false before the first snapshot, and while a table that went is
+// being restored.
+func (g *Gate) Up() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.verifier != nil && !g.restoring
+}
+
 // Forwarded are the ports a relay's table forwards to its exit (relay_fwd)
 // for these services of its snapshot: every port of a service not served
 // here (Local: a relay's own SSH, the probe), once, in order. They are in
@@ -599,6 +622,11 @@ func (g *Gate) Tick() ([]uint16, error) {
 	if !present && !g.restoring {
 		g.restoring = true
 		g.log.Warn("nftables table was removed (flush ruleset? nftables or firewalld reload?), restoring", "table", Table)
+	}
+	if g.verifier == nil {
+		// No snapshot yet: nothing to put into a table, and an empty one
+		// would shut the administrator out (SetupAtFirstSnapshot).
+		return nil, ErrNotReady
 	}
 	var behind error
 	if g.restoring || g.pending != nil {

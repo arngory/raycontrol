@@ -31,6 +31,8 @@ type PerimeterServer struct {
 	// Refresh re-reads the store this often even without changes, so that
 	// expiring users drop out on time.
 	Refresh time.Duration
+
+	watch rayspaWatch // whether rayspa follows the feed (MonitorRayspa)
 }
 
 var _ perimeterv1connect.PerimeterServiceHandler = (*PerimeterServer)(nil)
@@ -44,6 +46,8 @@ func (p *PerimeterServer) WatchPerimeter(ctx context.Context, _ *connect.Request
 	if !p.rayspaPeer(ctx) {
 		return connect.NewError(connect.CodePermissionDenied, errors.New("only rayspa may watch the perimeter"))
 	}
+	p.watch.start()
+	defer func() { p.watch.end(time.Now()) }()
 	var last []byte
 	for {
 		rev, wake := p.changes()

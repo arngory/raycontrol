@@ -386,13 +386,22 @@ func when(unix int64) string {
 func (c *cli) status(ctx context.Context) error {
 	r, err := c.c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
 	if err != nil {
+		// rayd away (a boot it did not come up in): the perimeter all the
+		// same, which does not need it.
+		if c.identity == nil && thisOS == nodeOS && os.Geteuid() == 0 {
+			for _, r := range perimeterResult(defaultPerimeterHost) {
+				fmt.Fprintf(os.Stderr, "perimeter table: %s\n", perimeterLine(r))
+			}
+		}
 		return err
 	}
 	m := r.Msg
 	// sshd's ports against the perimeter's: root on the node only (sshd -T).
-	var ssh []hostcheck.Result
+	var ssh, per []hostcheck.Result
 	if !c.json && c.identity == nil && thisOS == nodeOS && os.Geteuid() == 0 {
 		ssh = c.sshPortResults(ctx)
+		// The table in the kernel, as rayd cannot see it (R4-40).
+		per = perimeterResult(defaultPerimeterHost)
 	}
 	return c.print(m, func(w *tabwriter.Writer) {
 		fmt.Fprintf(w, "version\t%s\nnode\t%s\n", m.Version, m.NodeId)
@@ -415,6 +424,9 @@ func (c *cli) status(ctx context.Context) error {
 			if !r.OK {
 				fmt.Fprintf(w, "ssh port\tWARNING %s: %s\n", r.Detail, r.Fix)
 			}
+		}
+		for _, r := range per {
+			fmt.Fprintf(w, "perimeter table\t%s\n", perimeterLine(r))
 		}
 	})
 }
