@@ -18,7 +18,7 @@ func TestRevokeText(t *testing.T) {
 		want, none string
 	}{
 		{&nodev1.RevokeDeviceResponse{User: "alice", Device: "phone", Credentials: 3},
-			"alice's credentials are new (3 services)", ""},
+			"alice's credentials are new (3 credentials)", "services"},
 		{&nodev1.RevokeDeviceResponse{User: "alice", Device: "phone", Credentials: 3},
 			"other devices are cut too, until they fetch", ""},
 		{&nodev1.RevokeDeviceResponse{User: "alice", Device: "phone", Already: true}, "revoked already: nothing changed", "are new"},

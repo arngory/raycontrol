@@ -2081,7 +2081,7 @@ rayctl device revoke ID
 ```
 
 ```
-device 3f0c9a1e5b7d2468 (u-k3f9-x2qa/phone) revoked. u-k3f9-x2qa's credentials are new (4 services): ...
+device 3f0c9a1e5b7d2468 (u-k3f9-x2qa/phone) revoked. u-k3f9-x2qa's credentials are new (4 credentials): ...
 ```
 
 - **Что закрывается сразу:** SPA, подписка и API для этого устройства; его метка в dnstt с `auth=required` и в

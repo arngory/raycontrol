@@ -1177,7 +1177,7 @@ func revokeText(id string, r *nodev1.RevokeDeviceResponse) string {
 	case r.Credentials == 0:
 		return fmt.Sprintf("device %s (%s/%s) revoked; %s has no credentials yet\n", id, r.User, r.Device, r.User)
 	}
-	return fmt.Sprintf("device %s (%s/%s) revoked. %s's credentials are new (%d services): what the device kept stops\n"+
+	return fmt.Sprintf("device %s (%s/%s) revoked. %s's credentials are new (%d credentials): what the device kept stops\n"+
 		"working once rayd has applied them, in seconds. %s's other devices are cut too, until they fetch\n"+
 		"their subscription: Niko does it by itself after 15 to 30 s, its keys still open the subscription.\n",
 		id, r.User, r.Device, r.User, r.Credentials, r.User)

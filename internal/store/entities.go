@@ -774,8 +774,10 @@ type Revocation struct {
 	Device string // the device's name
 	// Already: the device was revoked before, and nothing changed.
 	Already bool
-	// Credentials is how many of the user's credentials are new (one a
-	// service the user has a credential on).
+	// Credentials is how many of the user's credentials are new: every
+	// row the user has, one for each service the user has or had a
+	// credential on (inner's included). A count of credentials, not of
+	// the services the user has now.
 	Credentials int
 }
 

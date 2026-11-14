@@ -4699,8 +4699,9 @@ func (x *RenewUserRequest) GetName() string {
 type RenewUserResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// credentials: how many of the user's credentials are new (one a
-	// service the user has had, the inner one of REALITY's included).
+	// credentials: how many of the user's credentials are new: one for
+	// each service the user has or had a credential on, the inner one
+	// behind the DNS tunnels and Yggdrasil included.
 	Credentials   uint32 `protobuf:"varint,2,opt,name=credentials,proto3" json:"credentials,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -6211,8 +6212,9 @@ type RevokeDeviceResponse struct {
 	// user and device: whose device it is, and its name.
 	User   string `protobuf:"bytes,3,opt,name=user,proto3" json:"user,omitempty"`
 	Device string `protobuf:"bytes,4,opt,name=device,proto3" json:"device,omitempty"`
-	// credentials: how many of the user's credentials are new (one a
-	// service); 0 for a user with none yet.
+	// credentials: how many of the user's credentials are new, as
+	// RenewUserResponse counts them, not services; 0 for a user with none
+	// yet.
 	Credentials   uint32 `protobuf:"varint,5,opt,name=credentials,proto3" json:"credentials,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

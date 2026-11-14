@@ -619,8 +619,9 @@ message ExportUserRequest { string name = 1; }
 message RenewUserRequest { string name = 1; }
 message RenewUserResponse {
   string name = 1;
-  // credentials: how many of the user's credentials are new (one a
-  // service the user has had, the inner one of REALITY's included).
+  // credentials: how many of the user's credentials are new: one for
+  // each service the user has or had a credential on, the inner one
+  // behind the DNS tunnels and Yggdrasil included.
   uint32 credentials = 2;
 }
 message ExportUserResponse {
@@ -795,8 +796,9 @@ message RevokeDeviceResponse {
   // user and device: whose device it is, and its name.
   string user = 3;
   string device = 4;
-  // credentials: how many of the user's credentials are new (one a
-  // service); 0 for a user with none yet.
+  // credentials: how many of the user's credentials are new, as
+  // RenewUserResponse counts them, not services; 0 for a user with none
+  // yet.
   uint32 credentials = 5;
 }
 
