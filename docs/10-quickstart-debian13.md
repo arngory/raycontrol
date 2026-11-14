@@ -397,8 +397,9 @@ ls -lL /etc/resolv.conf
   `nameserver` за вас не напишут.
 - Если в первых трёх строках `nameserver` только частный резолвер (10.0.0.2, 169.254.169.254 у части облаков),
   локальный (127.0.0.1) или адрес самой ноды, то Hysteria2 и пиры Yggdrasil не найдут имён: их юниты не пускают в
-  частные сети. Заглушка systemd-resolved (127.0.0.53, 127.0.0.54) им открыта, публичный резолвер тоже подходит.
-  Проверка хоста об этом предупредит.
+  частные сети, а с v0.27.0 их для всего data plane закрывает и периметр (§9, «Политика выхода»). Заглушка
+  systemd-resolved (127.0.0.53, 127.0.0.54) им открыта, публичный резолвер тоже подходит. Проверка хоста об этом
+  предупредит.
 
 ### 2.6. SSH
 
@@ -1147,7 +1148,7 @@ usermod -aG raycontrol ИМЯ
 Добавляйте в группу только тех, кому доверяете ноду целиком. То же относится к admin-устройствам (§10.3).
 
 Только root: `install`, `apply`, `update` (и `update remote|auto`), `uninstall`, `backup`, `restore`,
-`debug on|off`, `egress block|allow`, `conn-limit on|off`, `relay bundle`, `service cert`, `service rotate САЙТ`,
+`debug on|off`, `egress block|allow`, `conn-limit on|off`, `roots system|file`, `relay bundle`, `service cert`, `service rotate САЙТ`,
 `summary db`. `service cert` — только root с v0.26.0; раньше её могли и члены группы.
 
 ## 7. Порты и доступ к серверу
@@ -1334,8 +1335,8 @@ xattr -d com.apple.quarantine rayctl
 - `version` — версия `rayctl`; с `-remote ФАЙЛ` — и версия ноды;
 - `remote enroll` — регистрация по приглашению (§10.4), PIN спрашивается без показа на экране;
 - с файлом устройства, `-remote ФАЙЛ`: `remote whoami`, `remote rotate` и то же, что через `-remote` на Linux, —
-  `status`, `node`, `user`, `service`, `device` (в том числе приглашение с QR в терминале), `audit`, `admin`, `dns`,
-  `summary`, `app-mirror`, `metrics`, `debug`, `version`. Что из этого нода разрешает удалённому устройству, решает она сама
+  `status`, `node`, `user`, `service`, `device` (в том числе приглашение с QR в терминале), `audit`, `admin`, `ports`,
+  `dns`, `summary`, `app-mirror`, `metrics`, `debug`, `version`. Что из этого нода разрешает удалённому устройству, решает она сама
   (§10.4): так, окно отладки открывает и закрывает только root на ноде, через `-remote` работает лишь `debug show`.
 - `knock` и `probe` с `-remote` не запускаются, а отвечают одной строкой, например
   `knock takes no -remote: it works from this machine with the bundle on its command line (run it without -remote)`.
@@ -1343,7 +1344,7 @@ xattr -d com.apple.quarantine rayctl
   Неизвестная команда с `-remote` — ошибка использования: файл устройства не читается, в ноду никто не стучит.
 
 **Что не работает:** всё, что действует на самом сервере, — `install`, `apply`, `update`, `uninstall`, `backup`,
-`restore`, `report`, `check`, `legacy`, `egress`, `conn-limit`, `service cert`, `relay bundle`, `summary db`. Такая
+`restore`, `report`, `check`, `legacy`, `egress`, `conn-limit`, `roots`, `service cert`, `relay bundle`, `summary db`. Такая
 команда ничего не делает и отвечает одной строкой с кодом выхода 1:
 
 ```
@@ -2051,7 +2052,8 @@ rayctl user services u-k3f9-x2qa reality,hy2-masq,naive,dns,ygg
 ```
 
 Список сервисов заменяется целиком. При успехе команда ничего не печатает — как и `user enable`, `user disable`,
-`user del`, `device revoke`, `service enable`, `service disable` и `service del`: проверяйте результат списком.
+`user del`, `service enable`, `service disable` и `service del`: проверяйте результат списком. `device revoke` с
+v0.27.0 говорит, что сделал (§10.6).
 
 ### 10.2. Устройство по приглашению с QR (рекомендуется)
 
@@ -2211,10 +2213,10 @@ checked: rayctl -remote laptop.rcdev status
   ```
   rayctl: device file laptop.rcdev is mode -rw-r--r--: it holds a private key, make it 0600: chmod 600 laptop.rcdev (if its filesystem keeps no modes: copy it to your home directory, chmod 600 the copy)
   ```
-- Через `-remote` работают `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `dns`, `summary`,
-  `app-mirror`, `metrics` и `debug show`. Остальное отвечает отказом одного из трёх видов:
+- Через `-remote` работают `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `ports`, `dns`,
+  `summary`, `app-mirror`, `metrics`, `debug show` и `version`. Остальное отвечает отказом одного из трёх видов:
   - `… works on the node itself, not through -remote` — у `install`, `apply`, `update`, `uninstall`, `backup`,
-    `restore`, `report`, `egress`, `conn-limit`;
+    `restore`, `report`, `egress`, `conn-limit`, `roots`;
   - `… takes no -remote` — у `knock` и `probe`: им нужен только пакет на командной строке, запускайте их без
     `-remote`;
   - `… on the node only (rayctl as root)` — у отдельных действий внутри разрешённых команд: `service cert`,
@@ -3446,7 +3448,7 @@ Type yes to go on:
 
 | Что | Как меняется сейчас | Команда досрочной смены |
 |---|---|---|
-| учётные данные пользователей (UUID, пароли) | сами, раз в 30 дней, с перекрытием (§10.7) | нет: чтобы отнять доступ, отзовите устройство или отключите пользователя |
+| учётные данные пользователей (UUID, пароли) | сами, раз в 30 дней, с перекрытием (§10.7); с v0.27.0 — и при каждом отзыве устройства, сразу | `rayctl user renew ИМЯ` — сразу, без перекрытия (с v0.27.0, §10.6) |
 | ключи REALITY и имя его сервера | сами, раз в 90 дней | `rayctl service rotate reality` — через 3 дня, с публикацией заранее; `-now` — сразу |
 | ключ печати dnstt | только по команде | `rayctl service rotate dns` |
 | ключ сервиса masterdns | только по команде | `rayctl service rotate mdns` |
@@ -3661,7 +3663,8 @@ journalctl -u rayd --since -1h | grep -i certif
 
 **Правила и запас**
 
-- [ ] Вы решили про торренты и SMTP (`rayctl egress`), лимиты трафика и сроки пользователей (§9).
+- [ ] Вы решили про торренты и SMTP (`rayctl egress`; локальные сети там `blocked` — так и оставьте), лимиты
+      трафика и сроки пользователей (§9).
 - [ ] `rayctl node name` и, если нужно, `rayctl node note` заданы: люди видят их в приложении.
 - [ ] Резервная копия сделана, лежит вне сервера, фраза записана отдельно (§12.2).
 - [ ] Вы знаете, как обновлять ноду (§12.3), и решили, включать ли автообновление.
