@@ -271,3 +271,98 @@ func TestUoTStuckClientBusyDestination(t *testing.T) {
 		t.Fatal("a destination that keeps sending held the stream of a client that does not read")
 	}
 }
+
+// What a stream's queue holds follows what the destination sends: an
+// answer of a few bytes waits in a small buffer, not in one for a full
+// packet (128 answers of one byte held 224 KiB of a stream), and the bound
+// of a queue is the one uotAnswer's comment states.
+func TestUoTQueueMemory(t *testing.T) {
+	src, heard := uotSource(t)
+	dst := src.LocalAddr().(*net.UDPAddr).AddrPort()
+	s := &Server{Allow: func(a netip.Addr) bool { return a == dst.Addr() }}
+	slot, _ := s.lim.uotTake("u3", func(error) {})
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	go func() { _, _ = pw.Write(uotRequest(dst)) }()
+	st := &gatedStream{Reader: pr, gate: make(chan struct{}), waiting: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- s.serveUoT(ctx, slot, nil, st, st) }()
+	stream := heard()
+	// The first answer waits in the client's write, which never ends here.
+	if _, err := src.WriteToUDPAddrPort([]byte{0}, stream); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-st.waiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first answer was not passed on")
+	}
+	s.lim.mu.Lock()
+	q := &slot.stream.answers
+	s.lim.mu.Unlock()
+	// held is what the queue holds once it has taken `in` answers: the
+	// entries and their buffers, as Go's size classes round them.
+	held := func(in int64) (n, bytes int) {
+		t.Helper()
+		eventually(t, "the answers were not read off the socket", func() bool {
+			q.mu.Lock()
+			defer q.mu.Unlock()
+			return q.in == in
+		})
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		for i := range q.n {
+			a := q.ring[(q.head+i)%len(q.ring)]
+			class := map[int]int{uotSmallBuf: 256, uotFullBuf: 1536}[cap(a.buf)]
+			if class == 0 || a.end-a.start > len(a.buf) {
+				t.Fatalf("an answer of %d bytes in a buffer of %d", a.end-a.start, cap(a.buf))
+			}
+			bytes += 48 + class
+		}
+		return q.n, bytes
+	}
+	send := func(count, size int) {
+		t.Helper()
+		b := make([]byte, size)
+		for range count {
+			if _, err := src.WriteToUDPAddrPort(b, stream); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// A queue of one-byte answers, then of the largest small ones.
+	send(uotQueued, 1)
+	if n, bytes := held(1 + uotQueued); n != uotQueued || bytes > 38<<10 {
+		t.Errorf("%d answers of one byte hold %d bytes of the stream, want %d answers in 38 KiB", n, bytes, uotQueued)
+	}
+	send(uotQueued, uotSmallData)
+	if n, bytes := held(1 + 2*uotQueued); n != uotQueued || bytes > 38<<10 {
+		t.Errorf("%d answers of %d bytes hold %d bytes of the stream, want 38 KiB at most", n, uotSmallData, bytes)
+	}
+	// Full packets: the bound of a queue. In two halves, each read off the
+	// socket before the next: this is about the queue, not the kernel's
+	// buffer.
+	send(uotQueued/2, uotMaxAnswer)
+	held(1 + 2*uotQueued + uotQueued/2)
+	send(uotQueued/2, uotMaxAnswer)
+	if n, bytes := held(1 + 3*uotQueued); n != uotQueued || bytes <= 38<<10 || bytes > 198<<10 {
+		t.Errorf("%d full answers hold %d bytes of the stream, want 198 KiB at most", n, bytes)
+	}
+	// And they come to the client whole, whatever they waited in.
+	close(st.gate)
+	want := 1 + 2 + uotQueued*(2+uotMaxAnswer)
+	eventually(t, "the queued answers were not passed on", func() bool {
+		got := 0
+		for _, w := range st.taken() {
+			got += len(w)
+		}
+		return got == want
+	})
+	cancel()
+	select {
+	case <-served:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream did not end")
+	}
+}

@@ -595,14 +595,46 @@ const headRoom = 1 + 16 + 2 + 2
 const uotQueued = 128
 
 // uotAnswer is an answer framed for the stream at buf[start:end], its head
-// right before its data. One byte more than an answer may take: a longer
-// one fills it, and goes.
+// right before its data (which begins at buf[headRoom]).
+//
+// Its buffer is one of two sizes, so that what a queue holds follows what
+// the destination sends. A full one takes any answer, and one byte more
+// than an answer may be: a longer one fills it, and goes. The socket is
+// read into those. A small one takes an answer of uotSmallData bytes at
+// most (a DNS answer, a QUIC acknowledgement, a packet of a call or a
+// game): such an answer is copied into it and waits there, and the full
+// buffer is read into again.
+//
+// The bound of a stream's queue is uotQueued answers and, with Go's size
+// classes (the entry 48 bytes, the buffers 256 and 1536), 38 KiB when all
+// of them are small and 198 KiB when all are full; while every answer had a
+// full buffer inside its entry it was 224 KiB, for 128 answers of one byte
+// too. A user's 256 streams: 9.5 to 49.5 MiB, with destinations that send
+// as fast as they can to a client that reads nothing.
 type uotAnswer struct {
-	buf        [headRoom + uotMaxAnswer + 1]byte
+	buf        []byte
 	start, end int
 }
 
-var uotAnswers = sync.Pool{New: func() any { return new(uotAnswer) }}
+const (
+	uotFullBuf   = headRoom + uotMaxAnswer + 1
+	uotSmallBuf  = 256
+	uotSmallData = uotSmallBuf - headRoom
+)
+
+var (
+	uotAnswers = sync.Pool{New: func() any { return &uotAnswer{buf: make([]byte, uotFullBuf)} }}
+	uotSmalls  = sync.Pool{New: func() any { return &uotAnswer{buf: make([]byte, uotSmallBuf)} }}
+)
+
+// free gives an answer's buffer back for the next one of its size.
+func (a *uotAnswer) free() {
+	if len(a.buf) == uotSmallBuf {
+		uotSmalls.Put(a)
+	} else {
+		uotAnswers.Put(a)
+	}
+}
 
 // uotQueue holds a stream's answers between the socket and the stream:
 // the newest uotQueued, in order. When the client's path takes them slower
@@ -627,7 +659,7 @@ func (q *uotQueue) put(a *uotAnswer) {
 	q.mu.Lock()
 	if q.closed {
 		q.mu.Unlock()
-		uotAnswers.Put(a)
+		a.free()
 		return
 	}
 	var old *uotAnswer
@@ -642,7 +674,7 @@ func (q *uotQueue) put(a *uotAnswer) {
 	q.in++
 	q.mu.Unlock()
 	if old != nil {
-		uotAnswers.Put(old)
+		old.free()
 	}
 	select {
 	case q.wake <- struct{}{}:
@@ -683,7 +715,7 @@ func (q *uotQueue) close() {
 	q.mu.Lock()
 	q.closed = true
 	for q.n > 0 {
-		uotAnswers.Put(q.ring[q.head])
+		q.ring[q.head].free()
 		q.ring[q.head] = nil
 		q.head = (q.head + 1) % len(q.ring)
 		q.n--
@@ -711,7 +743,7 @@ func (u *uotStream) receive(conn *net.UDPConn, connectedTo netip.AddrPort) {
 			if errors.As(err, &errno) {
 				continue // an ICMP error on a connected socket: UDP goes on
 			}
-			uotAnswers.Put(a)
+			a.free()
 			return
 		}
 		if connected {
@@ -727,6 +759,15 @@ func (u *uotStream) receive(conn *net.UDPConn, connectedTo netip.AddrPort) {
 		h = binary.BigEndian.AppendUint16(h, uint16(n)) //nolint:gosec // G115: n ≤ uotMaxAnswer
 		a.start, a.end = headRoom-len(h), headRoom+n
 		copy(a.buf[a.start:headRoom], h)
+		if n <= uotSmallData {
+			// A small answer waits in a small buffer; the full one takes
+			// the next read.
+			small := uotSmalls.Get().(*uotAnswer)
+			small.start, small.end = a.start, a.end
+			copy(small.buf[small.start:small.end], a.buf[a.start:a.end])
+			u.answers.put(small)
+			continue
+		}
 		u.answers.put(a)
 		a = uotAnswers.Get().(*uotAnswer)
 	}
@@ -770,7 +811,7 @@ func (u *uotStream) deliver(w io.Writer) {
 		n := 0
 		for i, a := range batch {
 			n += a.end - headRoom
-			uotAnswers.Put(a)
+			a.free()
 			room[i] = nil
 		}
 		if err != nil {
