@@ -66,7 +66,9 @@ func TestEgressScript(t *testing.T) {
 			"flush chain inet raycontrol egress_local\n" +
 				"add rule inet raycontrol egress_local meta l4proto { tcp, udp } ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 return\n" +
 				"add rule inet raycontrol egress_local ip daddr 127.0.0.1 meta l4proto . th dport { tcp . 8443, udp . 8443 } return\n" +
+				`add rule inet raycontrol egress_local ip daddr @local4 meta l4proto tcp counter reject with tcp reset comment "local"` + "\n" +
 				`add rule inet raycontrol egress_local ip daddr @local4 counter reject with icmpx admin-prohibited comment "local"` + "\n" +
+				`add rule inet raycontrol egress_local ip6 daddr @local6 meta l4proto tcp counter reject with tcp reset comment "local"` + "\n" +
 				`add rule inet raycontrol egress_local ip6 daddr @local6 counter reject with icmpx admin-prohibited comment "local"` + "\n",
 		}, []string{"dport 25", "bittorrent"}},
 		{"local, no probe", Egress{Local: true}, false, []string{"@local4", "@local6", "127.0.0.53"}, []string{"127.0.0.1"}},

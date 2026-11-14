@@ -97,7 +97,7 @@ func TestEgressCommand(t *testing.T) {
 		t.Fatalf("allow local: %v, asked %v, dry runs %d", err, n.sets, len(scripts))
 	}
 	if err := c.egress(ctx, []string{"block", "local"}); err != nil || len(n.sets) != 4 || !*n.sets[3].Local || !n.egress.Local ||
-		len(scripts) != 1 || !strings.Contains(scripts[0], `egress_local ip daddr @local4 counter reject with icmpx admin-prohibited comment "local"`) {
+		len(scripts) != 1 || !strings.Contains(scripts[0], `egress_local ip daddr @local4 meta l4proto tcp counter reject with tcp reset comment "local"`) {
 		t.Fatalf("block local: %v, asked %v, dry run %q", err, n.sets, scripts)
 	}
 	if !isLocalOnly("egress") {

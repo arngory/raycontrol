@@ -157,15 +157,20 @@ func EgressScript(e Egress, doff bool) string {
 		// the node's own and local networks are refused, but for
 		// systemd-resolved's stub on 53 (to_node refuses its other ports
 		// before) and the channel probe on 127.0.0.1. A refusal the socket
-		// sees at once, as the guard's: TCP EHOSTUNREACH, UDP and ICMP
-		// EPERM; naive and Hysteria2 answer an honest connect "denied"
-		// from their own check before it comes to this.
+		// sees at once, as to_node's: TCP a reset (ECONNREFUSED), UDP and
+		// ICMP EPERM. An ICMP error to a connect comes while connect holds
+		// the socket, counts as a soft error, and the refusal waits for the
+		// SYN's first retransmission, a second. naive and Hysteria2 answer
+		// an honest connect "denied" from their own check before it comes
+		// to this.
 		rule("egress_local", "meta l4proto { tcp, udp } ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 return")
 		if len(e.Loopback) > 0 {
 			rule("egress_local", fmt.Sprintf("ip daddr 127.0.0.1 meta l4proto . th dport { %s } return", strings.Join(portElems(e.Loopback), ", ")))
 		}
-		rule("egress_local", `ip daddr @local4 counter reject with icmpx admin-prohibited comment "local"`)
-		rule("egress_local", `ip6 daddr @local6 counter reject with icmpx admin-prohibited comment "local"`)
+		for _, set := range []string{"ip daddr @local4", "ip6 daddr @local6"} {
+			rule("egress_local", set+` meta l4proto tcp counter reject with tcp reset comment "local"`)
+			rule("egress_local", set+` counter reject with icmpx admin-prohibited comment "local"`)
+		}
 	}
 	return b.String()
 }

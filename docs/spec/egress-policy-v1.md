@@ -260,7 +260,9 @@ chain output {
 chain egress_local {                                # rayspa пишет целиком вместе с egress (§3)
 	meta l4proto { tcp, udp } ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 return
 	ip daddr 127.0.0.1 meta l4proto . th dport { tcp . 8443, udp . 8443 } return   # порт подписки: проба
+	ip daddr @local4 meta l4proto tcp counter reject with tcp reset comment "local"
 	ip daddr @local4 counter reject with icmpx admin-prohibited comment "local"
+	ip6 daddr @local6 meta l4proto tcp counter reject with tcp reset comment "local"
 	ip6 daddr @local6 counter reject with icmpx admin-prohibited comment "local"
 }
 ```
@@ -279,8 +281,10 @@ chain egress_local {                                # rayspa пишет цели
   порты по-прежнему закрывает `to_node`) и порт подписки на 127.0.0.1, TCP и UDP: туда ведёт имя пробы канала
   ([probe-v1](probe-v1.md)). Порт приходит в снимке (`Egress.local.loopback`). Частный резолвер провайдера из
   `/etc/resolv.conf` закрыт, как и раньше для `IPAddressDeny` (rayctl check об этом предупреждает).
-- **Отказ быстрый и без ожидания:** TCP получает EHOSTUNREACH сразу, UDP и ICMP — EPERM на sendto. Сброс TCP
-  выглядел бы как ECONNREFUSED назначения, а drop держал бы connect до тайм-аута. Первая линия — проверки процессов:
+- **Отказ быстрый и без ожидания:** TCP получает сброс (ECONNREFUSED) сразу, как в `to_node` и в правиле `smtp`;
+  UDP и ICMP — EPERM на sendto. Ошибка ICMP на connect тут не годится: она приходит, пока connect держит сокет,
+  ядро считает её мягкой, и отказ ждёт первой повторной отправки SYN — секунду (проверено тестом в netns). Drop
+  держал бы connect до тайм-аута. Первая линия — проверки процессов:
   naive отвечает `502 niko-ack: denied` ещё до пакета; ядро — страховка на случай, если процесс ошибся.
 - **Счётчик** `raycontrol_egress_blocked_packets_total{rule="local"}`, без адресов, как §6.
 

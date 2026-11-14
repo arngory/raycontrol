@@ -21,7 +21,7 @@ import (
 // TestNetnsEgress, with loopback as the local network (all a namespace
 // has; 127.0.0.0/8 is in local4, and to_node does not look at it):
 //   - off (an older rayd: no Local), the data plane reaches loopback;
-//   - on, its new TCP flows get EHOSTUNREACH at once, UDP EPERM; the stub's
+//   - on, its new TCP flows are reset at once (ECONNREFUSED), UDP EPERM; the stub's
 //     port 53 and the probe's port pass; root and the extra UIDs pass;
 //   - a client's connection to a data-plane listener on loopback (a client
 //     on a local network) is answered: replies are not new flows;
@@ -76,8 +76,8 @@ func TestNetnsLocal(t *testing.T) {
 	}
 
 	policy(&perimeterv1.Egress{Uids: []uint32{rayd}, Local: &perimeterv1.Local{Loopback: []*perimeterv1.Port{{Proto: "tcp", Port: 17002}}}})
-	if err := reach(dataPlane, service); !errors.Is(err, syscall.EHOSTUNREACH) {
-		t.Errorf("data plane to loopback: %v, want EHOSTUNREACH", err)
+	if err := reach(dataPlane, service); !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Errorf("data plane to loopback: %v, want ECONNREFUSED", err)
 	}
 	if err := sendAs(dataPlane, service, []byte("x")); !errors.Is(err, syscall.EPERM) {
 		t.Errorf("data plane's UDP to loopback: %v, want EPERM", err)
