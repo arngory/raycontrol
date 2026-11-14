@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"flag"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -200,6 +205,76 @@ func TestMisplaced(t *testing.T) {
 		err := misplaced(parse(c.args...))
 		if want := c.refused && !linux; (err != nil) != want {
 			t.Errorf("%v on %s: %v, want refused %v", c.args, runtime.GOOS, err, want)
+		}
+	}
+}
+
+// TestRunMain is rayctl's main as a process, for TestMainRefuses: the
+// command line after "--", on the system RAYCTL_TEST_OS names.
+func TestRunMain(t *testing.T) {
+	goos := os.Getenv("RAYCTL_TEST_OS")
+	if goos == "" {
+		t.Skip("run by TestMainRefuses")
+	}
+	thisOS = goos
+	os.Args = append([]string{"rayctl"}, flag.Args()...)
+	main()
+}
+
+// rayctl as it starts off a node: a command of the node's host stops at
+// the refusal, before the device file is looked at; one for rayd goes on
+// to the device file, which must be closed to others. The commands here
+// do no harm where the refusal is missing: they fail on a file or a socket
+// that is not there.
+func TestMainRefuses(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing.rcdev")
+	open := filepath.Join(dir, "open.rcdev")
+	if err := os.WriteFile(open, []byte("rcdev1:x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	noSocket := filepath.Join(dir, "rayd.sock")
+	for _, c := range []struct {
+		goos   string
+		args   []string
+		code   int
+		stderr string // a line of standard error starts with it
+		lines  int    // of standard error; 0: not counted
+	}{
+		{"darwin", []string{"-remote", missing, "install", "-host", "192.0.2.1"}, 1, "rayctl: install works on a Linux node only, and this is darwin", 1},
+		{"darwin", []string{"-remote", missing, "backup"}, 1, "rayctl: backup works on a Linux node only", 1},
+		{"freebsd", []string{"-socket", noSocket, "debug"}, 1, "rayctl: debug works on a Linux node only, and this is freebsd", 1},
+		{"darwin", []string{"-remote", missing, "service", "cert", "site", "-chain", missing, "-key", missing}, 1, "rayctl: service cert works on a Linux node only", 1},
+		{"darwin", []string{"status"}, 1, "rayctl: status asks a node, and there is none on darwin: rayctl -remote FILE status", 1},
+		{"darwin", []string{"-remote", missing, "status"}, 1, "rayctl: open " + missing, 1},
+		{"darwin", []string{"-remote", open, "status"}, 1, "rayctl: device file " + open + " is mode -rw-r--r--: it holds a private key, make it 0600: chmod 600 " + open, 1},
+		{"darwin", []string{"-socket", noSocket, "status"}, 1, "rayctl: unavailable: ", 1},
+		{"darwin", []string{"knock"}, 2, "usage: rayctl", 0},
+		{"darwin", []string{"nonsense"}, 2, "rayctl: bad usage", 0},
+		// On a node the check is silent: the socket is asked, the device
+		// file read, -remote refuses what it always did.
+		{"linux", []string{"-socket", noSocket, "status"}, 1, "rayctl: unavailable: ", 1},
+		{"linux", []string{"-socket", noSocket, "debug"}, 1, "rayctl: unavailable: ", 1},
+		{"linux", []string{"-remote", missing, "backup"}, 1, "rayctl: backup works on the node itself, not through -remote", 1},
+		{"linux", []string{"-remote", open, "status"}, 1, "rayctl: device file " + open + " is mode -rw-r--r--", 1},
+	} {
+		cmd := exec.Command(os.Args[0], append([]string{"-test.run", "^TestRunMain$", "--"}, c.args...)...)
+		cmd.Env = append(os.Environ(), "RAYCTL_TEST_OS="+c.goos)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		code := 0
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			code = exit.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n")
+		if code != c.code || !slices.ContainsFunc(lines, func(l string) bool { return strings.HasPrefix(l, c.stderr) }) ||
+			(c.lines != 0 && len(lines) != c.lines) {
+			t.Errorf("%s, rayctl %s: exit %d, want %d, and a line %q of %d; standard error:\n%s",
+				c.goos, strings.Join(c.args, " "), code, c.code, c.stderr, c.lines, stderr.String())
 		}
 	}
 }

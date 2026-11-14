@@ -66,8 +66,11 @@ var places = map[string]place{
 	"conn-limit": onNode,
 }
 
-// nodeOS is the system a node runs on.
+// nodeOS is the system a node runs on; thisOS the one rayctl runs on (a
+// test says otherwise).
 const nodeOS = "linux"
+
+var thisOS = runtime.GOOS
 
 // placeOf is where the command line args works, and the command as the
 // table names it; false for a command the table does not have (run then
@@ -113,5 +116,5 @@ func misplaced(fs *flag.FlagSet) error {
 		remote = remote || f.Name == "remote" && f.Value.String() != ""
 		socket = socket || f.Name == "socket"
 	})
-	return refusal(runtime.GOOS, remote, socket, fs.Args())
+	return refusal(thisOS, remote, socket, fs.Args())
 }
