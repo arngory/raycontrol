@@ -61,7 +61,14 @@ type PacketConn struct {
 	front    *net.UnixConn
 	locals   map[netip.AddrPort]netip.AddrPort
 	deadline time.Time
+	// The buffers of the front's connection, this one and the next:
+	// frontBuffer unless SetReadBuffer or SetWriteBuffer asked for more.
+	readBuffer, writeBuffer int
 }
+
+// frontBuffer is the least the front's connection gets for its datagrams
+// each way.
+const frontBuffer = 4 << 20
 
 type datagram struct {
 	client  netip.AddrPort
@@ -106,13 +113,41 @@ func (c *PacketConn) acceptLoop() {
 			_ = conn.Close()
 			continue
 		}
-		_ = conn.SetReadBuffer(4 << 20)
-		_ = conn.SetWriteBuffer(4 << 20)
 		c.mu.Lock()
+		_ = conn.SetReadBuffer(max(frontBuffer, c.readBuffer))
+		_ = conn.SetWriteBuffer(max(frontBuffer, c.writeBuffer))
 		c.front = conn
 		c.mu.Unlock()
 		go c.readLoop(conn)
 	}
+}
+
+// SetReadBuffer asks for a receive buffer of at least bytes on the
+// socket the datagrams come by: the front's connection, now and after it
+// connects again. A QUIC server asks at its start, as it would a UDP
+// socket (quic-go: 7 MiB), and takes a PacketConn without this method for
+// one that cannot be sized: it then warns in the log at every start that
+// this is no UDP socket. The kernel grants what the host allows
+// (net.core.rmem_max), as it does a UDP socket.
+func (c *PacketConn) SetReadBuffer(bytes int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.readBuffer = bytes
+	if c.front != nil {
+		_ = c.front.SetReadBuffer(max(frontBuffer, bytes))
+	}
+	return nil
+}
+
+// SetWriteBuffer is SetReadBuffer for the datagrams that go.
+func (c *PacketConn) SetWriteBuffer(bytes int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writeBuffer = bytes
+	if c.front != nil {
+		_ = c.front.SetWriteBuffer(max(frontBuffer, bytes))
+	}
+	return nil
 }
 
 func (c *PacketConn) readLoop(conn *net.UnixConn) {

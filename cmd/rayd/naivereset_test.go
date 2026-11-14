@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
 	"errors"
+	stdlog "log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -104,12 +106,43 @@ func (f *testFront) cut() {
 	}
 }
 
+// lockedBuffer collects what several goroutines write.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
 // A naive process started anew tells a client of the one before it that
 // its connection is gone, at the client's next packet: the stateless reset
 // carries the token the first process gave, as both have the service's key
 // (-reset-key). Without the key the client hears nothing and waits out its
 // idle time.
 func TestNaiveStatelessReset(t *testing.T) {
+	// What quic-go has to say of a connection whose buffers it cannot size
+	// goes to the standard log, once a process and at every start of one:
+	// over the front's datagrams (nikoipc.PacketConn) there is nothing to
+	// say. These are the first QUIC servers of the tests that are on no
+	// UDP socket.
+	var said lockedBuffer
+	stdlog.SetOutput(&said)
+	t.Cleanup(func() {
+		stdlog.SetOutput(os.Stderr)
+		if s := said.String(); strings.Contains(s, "buffer") {
+			t.Errorf("quic-go warns of the front's datagram socket: %s", s)
+		}
+	})
 	keyFile := filepath.Join(t.TempDir(), "quic-reset.key")
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
