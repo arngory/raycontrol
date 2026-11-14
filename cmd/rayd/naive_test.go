@@ -23,6 +23,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/site"
 )
 
@@ -232,8 +233,17 @@ func TestNaiveHTTP3Streams(t *testing.T) {
 	}
 }
 
-// fixedCert gives cert at every handshake, as a server whose certificate
-// never changes.
-func fixedCert(cert tls.Certificate) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-	return func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil }
+// rayd's QUIC servers give a silent connection up before the front forgets
+// its flow (render.FrontUDPIdle, which render's own test holds above
+// render.QUICIdle), and keep none alive themselves.
+func TestQUICIdleUnderFront(t *testing.T) {
+	for name, o := range map[string]quicOptions{"naive": naiveQUIC(), "doh3": {}} {
+		c := o.config()
+		if c.MaxIdleTimeout != render.QUICIdle || c.MaxIdleTimeout >= render.FrontUDPIdle {
+			t.Errorf("%s: QUIC idle %v, the front's flow idle %v", name, c.MaxIdleTimeout, render.FrontUDPIdle)
+		}
+		if c.KeepAlivePeriod != 0 {
+			t.Errorf("%s: the server keeps connections alive every %v", name, c.KeepAlivePeriod)
+		}
+	}
 }

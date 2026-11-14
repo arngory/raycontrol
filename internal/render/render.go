@@ -46,6 +46,30 @@ const (
 // Schema is the niko-server config schema version raycontrol writes.
 const Schema = 1
 
+// The idle times of QUIC behind the front, from one number: the front
+// routes a flow's datagrams by the client's address only while it remembers
+// the flow, and what comes after it forgot one (no Initial with a name in
+// it) is dropped without a word.
+const (
+	// QUICIdle is how long rayd's own QUIC servers (DoH3, naive-quic) keep
+	// a connection that neither side sends on; they send no keepalive of
+	// their own. Two minutes, as it has been: a connection's idle time is
+	// the lesser of this and the client's own (Chromium asks for 30 s), so
+	// clients see no change.
+	QUICIdle = 2 * time.Minute
+	// FrontUDPIdle is how long the front remembers a flow with no datagram
+	// either way. It must be longer than any QUIC idle time behind it, or
+	// a connection quiet for the time between the two is alive at both
+	// ends and lost in the middle: the client's next packets go nowhere
+	// until its own idle time ends. Longer by frontUDPMargin: a client that
+	// sends just before its idle time ends still finds the flow, its
+	// retransmissions too. (Hysteria2's QUIC idle is niko-server's, 60 s.)
+	// A flow costs the front a map entry, and only a classified Initial
+	// makes one. niko-server takes 5 s to 10 min here.
+	FrontUDPIdle   = QUICIdle + frontUDPMargin
+	frontUDPMargin = 30 * time.Second
+)
+
 // Paths are the directories the renderer refers to.
 type Paths struct {
 	Rendered string // written by rayd
@@ -808,7 +832,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if m.IPv6 {
 				listen = append(listen, "[::]:443")
 			}
-			front["udp"] = map[string]any{"listen": listen, "idle": "60s", "routes": udpRoutes}
+			front["udp"] = map[string]any{"listen": listen, "idle": FrontUDPIdle.String(), "routes": udpRoutes}
 		}
 		b, err := jsonFile(front)
 		if err != nil {

@@ -1436,8 +1436,10 @@ func naiveQUIC() quicOptions {
 	return quicOptions{maxStreams: naive.MaxStreams, maxHeaderBytes: naive.MaxHeaderBytes}
 }
 
+// config is the QUIC side: no keepalive of the server's, and an idle time
+// the front outlasts (render.QUICIdle, render.FrontUDPIdle).
 func (o quicOptions) config() *quic.Config {
-	return &quic.Config{MaxIdleTimeout: 2 * time.Minute, KeepAlivePeriod: 0, MaxIncomingStreams: o.maxStreams}
+	return &quic.Config{MaxIdleTimeout: render.QUICIdle, KeepAlivePeriod: 0, MaxIncomingStreams: o.maxStreams}
 }
 
 // serveHTTP3 serves h on QUIC over the front's datagrams until ctx ends:
@@ -1450,7 +1452,9 @@ func serveHTTP3(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHel
 	if err != nil {
 		return err
 	}
-	srv := &http3.Server{Handler: h, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: o.maxHeaderBytes}
+	// A connection without a request goes after the same time as a silent
+	// one.
+	srv := &http3.Server{Handler: h, IdleTimeout: render.QUICIdle, MaxHeaderBytes: o.maxHeaderBytes}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Close()
