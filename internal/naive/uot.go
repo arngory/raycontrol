@@ -141,6 +141,7 @@ type uotStream struct {
 	slot    *uotSlot
 	traffic *Traffic // the payloads sent and passed back count (nil: for nobody)
 	names   map[string]uotResolved
+	answers uotQueue // on their way to the client
 
 	mu sync.Mutex
 	// peers are where the client sent, and the pair's times: answers come
@@ -439,10 +440,19 @@ func (s *Server) serveUoT(ctx context.Context, slot *uotSlot, traffic *Traffic, 
 
 	up := make(chan error, 1)
 	go func() { up <- u.upstream(r, conn, to) }()
+	// The answers: one helper takes them off the socket as they come, the
+	// other writes them to the stream as the client takes them, and between
+	// the two the newest ones wait (uotQueue).
+	u.answers.wake = make(chan struct{}, 1)
+	heard := make(chan struct{})
+	go func() {
+		defer close(heard)
+		u.receive(conn, to)
+	}()
 	down := make(chan struct{})
 	go func() {
 		defer close(down)
-		u.downstream(conn, stream, to)
+		u.deliver(stream)
 	}()
 
 	tick := time.NewTicker(idle / 8)
@@ -466,10 +476,12 @@ loop:
 			}
 		}
 	}
-	// The socket goes: the helpers stop; nothing writes to the stream once
-	// this returns. A write the client does not take (flow control) would
-	// hold the stream and its slot: past a second it fails.
+	// The socket goes: the helpers stop (the one that reads it closes the
+	// queue of the one that writes); nothing writes to the stream once this
+	// returns. A write the client does not take (flow control) would hold
+	// the stream and its slot: past a second it fails.
 	_ = conn.Close()
+	<-heard
 	select {
 	case <-down:
 	case <-time.After(time.Second):
@@ -575,20 +587,131 @@ func (u *uotStream) send(r *bufio.Reader, conn *net.UDPConn, connectedTo netip.A
 // headRoom is the most an answer's head takes: an IPv6 source and the length.
 const headRoom = 1 + 16 + 2 + 2
 
-// downstream passes the answers on, each in one write (one padded frame
-// while naive pads).
-func (u *uotStream) downstream(conn *net.UDPConn, w io.Writer, connectedTo netip.AddrPort) {
-	connected := connectedTo.IsValid()
-	// One more than an answer may take: a longer one fills it, and goes.
-	buf := make([]byte, headRoom+uotMaxAnswer+1)
-	var head [headRoom]byte
+// uotQueued is how many answers a stream holds for a client that takes
+// them slower than they come: about what the socket's receive buffer held
+// of full packets (some 90 of 212 KiB) when the answers waited there, and a
+// burst of a QUIC or a video sender. Behind a path of 10 Mbit/s that is
+// 0.15 s of full packets.
+const uotQueued = 128
+
+// uotAnswer is an answer framed for the stream at buf[start:end], its head
+// right before its data. One byte more than an answer may take: a longer
+// one fills it, and goes.
+type uotAnswer struct {
+	buf        [headRoom + uotMaxAnswer + 1]byte
+	start, end int
+}
+
+var uotAnswers = sync.Pool{New: func() any { return new(uotAnswer) }}
+
+// uotQueue holds a stream's answers between the socket and the stream:
+// the newest uotQueued, in order. When the client's path takes them slower
+// than they come (its connection is congested, or it does not read), the
+// oldest one goes for each new one. Waiting in the kernel's buffers instead,
+// every answer came late by all that waited before it, without a bound that
+// meant anything; UDP that is dropped is what its senders are made for, and
+// of two answers the later one is worth more.
+type uotQueue struct {
+	wake chan struct{} // one place: there are answers, or none will come
+
+	mu      sync.Mutex
+	ring    [uotQueued]*uotAnswer
+	head, n int
+	closed  bool
+	in      int64 // answers put
+	dropped int64 // of them, the ones that gave way
+}
+
+// put adds an answer, the oldest giving way to it in a full queue.
+func (q *uotQueue) put(a *uotAnswer) {
+	q.mu.Lock()
+	if q.closed {
+		q.mu.Unlock()
+		uotAnswers.Put(a)
+		return
+	}
+	var old *uotAnswer
+	if q.n == len(q.ring) {
+		old = q.ring[q.head]
+		q.head = (q.head + 1) % len(q.ring)
+		q.n--
+		q.dropped++
+	}
+	q.ring[(q.head+q.n)%len(q.ring)] = a
+	q.n++
+	q.in++
+	q.mu.Unlock()
+	if old != nil {
+		uotAnswers.Put(old)
+	}
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+// take takes the oldest answers into batch, waiting for one: the first,
+// and those after it that fit a write of room bytes with it. nil once the
+// queue is closed.
+func (q *uotQueue) take(batch []*uotAnswer, room int) []*uotAnswer {
 	for {
-		n, from, err := conn.ReadFromUDPAddrPort(buf[headRoom:])
+		q.mu.Lock()
+		for q.n > 0 {
+			a := q.ring[q.head]
+			if room -= a.end - a.start; room < 0 && len(batch) > 0 {
+				break
+			}
+			batch = append(batch, a)
+			q.ring[q.head] = nil
+			q.head = (q.head + 1) % len(q.ring)
+			q.n--
+		}
+		closed := q.closed
+		q.mu.Unlock()
+		if len(batch) > 0 {
+			return batch
+		}
+		if closed {
+			return nil
+		}
+		<-q.wake
+	}
+}
+
+// close ends the queue: what waits in it goes, get gives nil.
+func (q *uotQueue) close() {
+	q.mu.Lock()
+	q.closed = true
+	for q.n > 0 {
+		uotAnswers.Put(q.ring[q.head])
+		q.ring[q.head] = nil
+		q.head = (q.head + 1) % len(q.ring)
+		q.n--
+	}
+	q.mu.Unlock()
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+// receive takes the answers off the socket as they come and queues them
+// for the stream, framed; it closes the queue when the socket ends. It
+// never waits for the client: the socket's buffer stays empty, and what the
+// client is late for is dropped in the queue, oldest first.
+func (u *uotStream) receive(conn *net.UDPConn, connectedTo netip.AddrPort) {
+	defer u.answers.close()
+	connected := connectedTo.IsValid()
+	var head [headRoom]byte
+	a := uotAnswers.Get().(*uotAnswer)
+	for {
+		n, from, err := conn.ReadFromUDPAddrPort(a.buf[headRoom:])
 		if err != nil {
 			var errno syscall.Errno
 			if errors.As(err, &errno) {
 				continue // an ICMP error on a connected socket: UDP goes on
 			}
+			uotAnswers.Put(a)
 			return
 		}
 		if connected {
@@ -597,17 +720,63 @@ func (u *uotStream) downstream(conn *net.UDPConn, w io.Writer, connectedTo netip
 		if !u.heard(from) || n > uotMaxAnswer {
 			continue
 		}
-		u.touch()
 		h := head[:0]
 		if !connected {
 			h = appendAddr(h, from)
 		}
 		h = binary.BigEndian.AppendUint16(h, uint16(n)) //nolint:gosec // G115: n ≤ uotMaxAnswer
-		start := headRoom - len(h)
-		copy(buf[start:headRoom], h)
-		if _, err := w.Write(buf[start : headRoom+n]); err != nil {
+		a.start, a.end = headRoom-len(h), headRoom+n
+		copy(a.buf[a.start:headRoom], h)
+		u.answers.put(a)
+		a = uotAnswers.Get().(*uotAnswer)
+	}
+}
+
+// uotBatch is the most one write to the stream carries: HTTP/2's largest
+// frame unless the client asks for larger ones. The answers that wait
+// together go in one write, one after another as the stream has them
+// anyway (spec/naive-uot-v1.md §2: packets in a stream of bytes). HTTP/2
+// gives each stream of a connection a frame in turn: a stream that sent an
+// answer a turn had one packet for each 16 KiB of a download beside it.
+const uotBatch = 16 << 10
+
+var uotBatches = sync.Pool{New: func() any { return new([uotBatch]byte) }}
+
+// deliver passes the queued answers on until the queue is closed or the
+// stream takes no more: an answer alone in a write of its own (one padded
+// frame while naive pads), those that waited together in one write of
+// uotBatch at most. An answer counts, for the stream's idle time and for
+// the user's bytes, when the client's side took it: one that only came
+// does not keep the stream of a client that stopped reading.
+func (u *uotStream) deliver(w io.Writer) {
+	var room [uotQueued]*uotAnswer
+	for {
+		batch := u.answers.take(room[:0], uotBatch)
+		if batch == nil {
 			return
 		}
-		u.traffic.addDown(n) // the payload, as it came from the destination
+		var err error
+		if len(batch) == 1 {
+			_, err = w.Write(batch[0].buf[batch[0].start:batch[0].end])
+		} else {
+			b := uotBatches.Get().(*[uotBatch]byte)
+			n := 0
+			for _, a := range batch {
+				n += copy(b[n:], a.buf[a.start:a.end])
+			}
+			_, err = w.Write(b[:n])
+			uotBatches.Put(b)
+		}
+		n := 0
+		for i, a := range batch {
+			n += a.end - headRoom
+			uotAnswers.Put(a)
+			room[i] = nil
+		}
+		if err != nil {
+			return
+		}
+		u.touch()
+		u.traffic.addDown(n) // the payloads, as they came from the destination
 	}
 }

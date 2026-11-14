@@ -147,6 +147,8 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 			panic(http.ErrAbortHandler)
 		}
 		defer s.lim.uotPut(slot)
+		// Datagrams on the connection: its socket holds little unsent.
+		defer datagramStream(ctx)()
 		err := s.serveUoT(uctx, slot, a.traffic, in, http.NewResponseController(w))
 		if err != nil {
 			s.Log.Debug("naive: UDP refused", "err", err)
@@ -166,6 +168,7 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 			panic(http.ErrAbortHandler)
 		}
 		defer s.icmp.put(u)
+		defer datagramStream(ctx)()
 		if err := s.serveICMP(ctx, u, a.traffic, in, http.NewResponseController(w)); err != nil {
 			s.Log.Debug("naive: ICMP refused", "err", err)
 			panic(http.ErrAbortHandler)

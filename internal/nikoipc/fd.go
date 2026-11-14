@@ -272,6 +272,17 @@ func (c *Conn) CloseWrite() error {
 	return nil
 }
 
+// SyscallConn is the passed socket's, for its options: the socket is the
+// backend's alone once passed. Reads go through Read, which has the
+// front's prefetch.
+func (c *Conn) SyscallConn() (syscall.RawConn, error) {
+	sc, ok := c.Conn.(syscall.Conn)
+	if !ok {
+		return nil, errors.ErrUnsupported
+	}
+	return sc.SyscallConn()
+}
+
 // Pass plays the front: it sends conn's socket and the handoff to the
 // backend at path (tests, and a reference for the protocol).
 func Pass(backend *net.UnixConn, conn *net.TCPConn, h Handoff) error {

@@ -58,13 +58,15 @@ const (
 )
 
 // HTTPServer is the HTTP/2 server of a naive service, with the limits of
-// one connection set. TLS and the error log are the caller's.
+// one connection set and each connection's socket known to its streams
+// (datagramStream). TLS and the error log are the caller's.
 func (s *Server) HTTPServer() *http.Server {
 	return &http.Server{
 		Handler:           s,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       h2Idle,
 		MaxHeaderBytes:    MaxHeaderBytes,
+		ConnContext:       connContext,
 		HTTP2: &http.HTTP2Config{
 			MaxConcurrentStreams:          MaxStreams,
 			MaxReceiveBufferPerStream:     h2StreamWindow,
