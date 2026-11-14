@@ -104,7 +104,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 `SHA256SUMS`. Там работают `remote enroll`, всё с `-remote`, `knock` и `probe`; команды самого сервера (`install`,
 `apply`, `update`, `backup`, `report`, `check`, `debug`, `egress`, `conn-limit`, `service cert`, `relay bundle` и
 другие) отвечают `… works on a Linux node only`. С того же релиза `-remote` не читает файл устройства, открытый
-группе или остальным либо чужой: `chmod 600 ФАЙЛ` (и на Linux). Подробно —
+группе или остальным либо чужой (кроме root): `chmod 600 ФАЙЛ` (и на Linux). Подробно —
 [10-quickstart-debian13.md](10-quickstart-debian13.md), §7.
 
 ## Сервисы

@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -99,8 +100,9 @@ func TestDeviceFileMode(t *testing.T) {
 	}
 }
 
-// Another user's file is refused whatever its mode: its owner can change
-// the node it trusts.
+// Another user's file is refused whatever its mode, but to root: its
+// owner can change the node it trusts, and root can anyway (as OpenSSH
+// has it for a private key). The mode counts for root too.
 func TestDeviceFileOwner(t *testing.T) {
 	for _, c := range []struct {
 		mode      os.FileMode
@@ -113,7 +115,10 @@ func TestDeviceFileOwner(t *testing.T) {
 		{0o644, -1, 1000, "chmod 600"},
 		{0o600, 1001, 1000, "belongs to uid 1001, not to you (uid 1000)"},
 		{0o644, 1001, 1000, "belongs to uid 1001, not to you (uid 1000)"},
-		{0o600, 1000, 0, "belongs to uid 1000, not to you (uid 0)"}, // root with a user's file
+		{0o600, 1000, 0, ""}, // sudo rayctl -remote ~/n.rcdev
+		{0o400, 1000, 0, ""},
+		{0o644, 1000, 0, "is mode -rw-r--r--"},
+		{0o640, 1000, 0, "chmod 600"},
 		{0o600, 0, 1000, "belongs to uid 0, not to you (uid 1000)"},
 	} {
 		err := deviceFileProblem("f.rcdev", c.mode, c.owner, c.me)
@@ -132,7 +137,53 @@ func TestDeviceFileOwner(t *testing.T) {
 	if err := os.Chown(id.path, 65534, -1); err != nil {
 		t.Skipf("chown: %v", err)
 	}
-	if _, err := loadIdentity(id.path); err == nil || !strings.Contains(err.Error(), "belongs to uid 65534, not to you (uid 0)") {
-		t.Errorf("another user's file: %v", err)
+	if _, err := loadIdentity(id.path); err != nil {
+		t.Errorf("root, another user's closed file: %v", err)
+	}
+	if err := os.Chmod(id.path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadIdentity(id.path); err == nil || !strings.Contains(err.Error(), "chmod 600") {
+		t.Errorf("root, another user's open file: %v", err)
+	}
+}
+
+// The fix the refusal prints works when pasted into a shell, whatever
+// the file's name; a filesystem without modes has its advice too.
+func TestDeviceFileFixLine(t *testing.T) {
+	for path, want := range map[string]string{
+		"n.rcdev":                "n.rcdev",
+		"/home/a/node-d_1.rcdev": "/home/a/node-d_1.rcdev",
+		"a b/n.rcdev":            "'a b/n.rcdev'",
+		"it's.rcdev":             `'it'\''s.rcdev'`,
+		"-n.rcdev":               "./-n.rcdev",
+		"~/n.rcdev":              "'~/n.rcdev'",
+		"$HOME/`x`;*.rcdev":      "'$HOME/`x`;*.rcdev'",
+	} {
+		if got := shellWord(path); got != want {
+			t.Errorf("shellWord(%q) = %s, want %s", path, got, want)
+		}
+	}
+	err := deviceFileProblem("a b/n.rcdev", 0o644, -1, 1000)
+	if err == nil || !strings.Contains(err.Error(), "chmod 600 'a b/n.rcdev' (if its filesystem keeps no modes: copy it to your home directory") {
+		t.Errorf("the fix: %v", err)
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	dir := t.TempDir()
+	for _, name := range []string{"a b.rcdev", "it's.rcdev", "-n.rcdev", "$x `y` \"z\" ;*.rcdev", "~n.rcdev"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(sh, "-c", "chmod 600 "+shellWord(name))
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("%q: %v: %s", name, err, out)
+		}
+		if fi, err := os.Stat(filepath.Join(dir, name)); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("%q after the fix: %v", name, err)
+		}
 	}
 }

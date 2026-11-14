@@ -1929,12 +1929,14 @@ checked: rayctl -remote laptop.rcdev status
 
 - Файл `laptop.rcdev` — ключ устройства: права 0600, храните как SSH-ключ.
 - **С первого релиза после v0.25.1 `-remote` проверяет права файла** — на любой системе, и на Linux тоже. Файл,
-  который может читать или менять группа или остальные, и файл другого пользователя он не читает и называет
-  исправление. В v0.25.1 права при чтении не проверяются. `rayctl` сам пишет файл с правами 0600; открытым он
-  обычно становится после копирования.
+  который может читать или менять группа или остальные, он не читает и называет исправление; файл другого
+  пользователя тоже, но root он читать может (`sudo rayctl -remote ~/laptop.rcdev …`), как OpenSSH читает ключ.
+  В v0.25.1 права при чтении не проверяются. `rayctl` сам пишет файл с правами 0600; открытым он обычно становится
+  после копирования. На файловой системе без прав (FAT, exFAT, SMB, `/mnt/c` в WSL) `chmod` не поможет: скопируйте
+  файл в домашний каталог.
 
   ```
-  rayctl: device file laptop.rcdev is mode -rw-r--r--: it holds a private key, make it 0600: chmod 600 laptop.rcdev
+  rayctl: device file laptop.rcdev is mode -rw-r--r--: it holds a private key, make it 0600: chmod 600 laptop.rcdev (if its filesystem keeps no modes: copy it to your home directory, chmod 600 the copy)
   ```
 - Через `-remote` работают `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `dns`, `summary`,
   `app-mirror`, `metrics`. Остальное отвечает отказом одного из двух видов:
