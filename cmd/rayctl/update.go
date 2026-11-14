@@ -228,6 +228,9 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 			}
 		}
 	}
+	if err := keepRayspaUnit(previousDir); err != nil {
+		return err
+	}
 	if err := os.WriteFile(filepath.Join(previousDir, "VERSION"), []byte(installed+"\n"), 0o600); err != nil {
 		return err
 	}
@@ -249,6 +252,9 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 		return fmt.Errorf("keeping the database: %w", err)
 	}
 
+	if err := stageRayspaUnit(stage); err != nil {
+		return c.failUpdate(ctx, fmt.Errorf("staging rayspa's unit: %w", err), before)
+	}
 	if err := installBinaries(stage); err != nil {
 		return c.failUpdate(ctx, fmt.Errorf("installing: %w", err), before)
 	}
@@ -432,7 +438,55 @@ func installBinaries(stage string) error {
 			return err
 		}
 	}
+	// rayspa's unit with its binary: the update stages the new one, the
+	// rollback has the one the update replaced. Without it a restart that
+	// fails before rayctl apply would leave a rayspa of one version under
+	// the unit of another: an old one under Type=notify never says it is
+	// ready, is stopped after 30 s and starts again, its first table
+	// (empty, in that version) each time taking every grant with it.
+	if b, err := os.ReadFile(filepath.Join(stage, rayspaUnitName)); err == nil { //nolint:gosec // G304: our staging directory
+		f := deploy.File{Path: rayspaUnitPath, Mode: 0o644, Content: b}
+		changed, err := h.WriteFile(f)
+		if err != nil {
+			return err
+		}
+		if changed {
+			fmt.Println("installed", f.Path)
+			if err := run("systemctl", "daemon-reload"); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+// rayspaUnitName is rayspa's unit in a staging directory and in
+// previousDir; rayspaUnitPath is where it runs from.
+const (
+	rayspaUnitName = "rayspa.service"
+	rayspaUnitPath = "/etc/systemd/system/rayspa.service"
+)
+
+// stageRayspaUnit puts the unit of the rayspa staged into dir, from the
+// deployment of this rayctl (the release's), when the node has a rayspa
+// (not rayd serve -supervise). keepRayspaUnit keeps the one in place for a
+// rollback the same way.
+func stageRayspaUnit(dir string) error {
+	if _, err := os.Stat(rayspaUnitPath); err != nil {
+		return nil
+	}
+	return os.WriteFile(filepath.Join(dir, rayspaUnitName), deploy.RayspaUnit(deploy.DefaultBinaries).Content, 0o600)
+}
+
+func keepRayspaUnit(dir string) error {
+	b, err := os.ReadFile(rayspaUnitPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, rayspaUnitName), b, 0o600)
 }
 
 // placeBinary puts the binary src at dst: written next to it, then renamed

@@ -152,6 +152,34 @@ func Sandbox() []string {
 	return append(out, "PrivateNetwork=yes")
 }
 
+// rayspaUnit is the node's rayspa.service.
+func rayspaUnit(bin Binaries) unit {
+	return unit{
+		name:        "rayspa.service",
+		description: "raycontrol perimeter (nftables, SPA v2)",
+		// Before the interfaces come up (R4-40), from its saved
+		// snapshot: not after rayd, which comes after the network and
+		// which rayspa waits for on its own.
+		early: true,
+		after: rayspaAfter,
+		service: append([]string{
+			"User=rayspa", "Group=rayspa",
+			"ExecStart=" + bin.Rayspa + " run -socket " + Socket + " -state " + RayspaState,
+			// The last snapshot: SPA keys and the admin addresses, rayspa's only.
+			"StateDirectory=rayspa", "StateDirectoryMode=0700",
+			"AmbientCapabilities=CAP_NET_ADMIN",
+			"CapabilityBoundingSet=CAP_NET_ADMIN",
+			"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+		}, rayspaReady...),
+	}
+}
+
+// RayspaUnit is the node's rayspa.service as Build writes it: rayctl
+// update puts it in place with the binaries, so that a rayspa never runs
+// under a unit of another version (Type=notify for one that never says
+// it is ready, or the reverse) when the restart fails before rayctl apply.
+func RayspaUnit(bin Binaries) File { return rayspaUnit(bin).file() }
+
 // rayspaAfter are the host firewalls rayspa starts after: their start may
 // flush the ruleset (Debian's nftables.service loads /etc/nftables.conf,
 // which begins with "flush ruleset"). Both have no default dependencies
@@ -709,24 +737,7 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
 			},
 		},
-		{
-			name:        "rayspa.service",
-			description: "raycontrol perimeter (nftables, SPA v2)",
-			// Before the interfaces come up (R4-40), from its saved
-			// snapshot: not after rayd, which comes after the network and
-			// which rayspa waits for on its own.
-			early: true,
-			after: rayspaAfter,
-			service: append([]string{
-				"User=rayspa", "Group=rayspa",
-				"ExecStart=" + bin.Rayspa + " run -socket " + Socket + " -state " + RayspaState,
-				// The last snapshot: SPA keys and the admin addresses, rayspa's only.
-				"StateDirectory=rayspa", "StateDirectoryMode=0700",
-				"AmbientCapabilities=CAP_NET_ADMIN",
-				"CapabilityBoundingSet=CAP_NET_ADMIN",
-				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
-			}, rayspaReady...),
-		},
+		rayspaUnit(bin),
 	}
 	for i, u := range append(control, units...) {
 		u.service = slices.DeleteFunc(u.service, func(s string) bool { return s == "" })
