@@ -409,7 +409,7 @@ func placeBinary(src, dst string) error {
 		return err
 	}
 	if _, err := exec.LookPath("restorecon"); err == nil {
-		_ = exec.Command("restorecon", dst).Run() //nolint:gosec // G204: a fixed path
+		_ = commandApart("restorecon", dst).Run() // apart from the terminal, as a rollback runs it
 	}
 	fmt.Println("installed", dst)
 	return nil
@@ -882,8 +882,10 @@ func waitsForFile(st map[string]string) bool {
 	return st["ActiveState"] == "inactive" && st["ConditionResult"] == "no" && (st["Job"] == "" || st["Job"] == "0")
 }
 
-// unitLoaded reports whether systemd has a unit file for unit.
+// unitLoaded reports whether systemd has a unit file for unit; asked apart
+// from the terminal, so that a second Ctrl-C during a relay's rollback does
+// not make a unit look unloaded (and its stop skipped).
 func unitLoaded(unit string) bool {
-	out, err := exec.Command("systemctl", "show", "-p", "LoadState", "--value", unit).Output() //nolint:gosec // G204: a unit name systemd listed
+	out, err := commandApart("systemctl", "show", "-p", "LoadState", "--value", unit).Output()
 	return err == nil && strings.TrimSpace(string(out)) == "loaded"
 }

@@ -975,7 +975,7 @@ func realHealth(w healthWant) relayHealth {
 		forwarding: func() ([]byte, error) { return os.ReadFile(procForward) },
 		snapshot:   func() (*perimeterv1.Snapshot, error) { return readSnapshot(relaySnapshot) },
 		version: func() string {
-			out, _ := exec.Command(deploy.DefaultBinaries.Rayspa, "version").Output() //nolint:gosec // G204: a fixed path
+			out, _ := commandApart(deploy.DefaultBinaries.Rayspa, "version").Output()
 			return strings.TrimSpace(string(out))
 		},
 		want: w.want, port: w.port, client: w.client, name: w.name,
