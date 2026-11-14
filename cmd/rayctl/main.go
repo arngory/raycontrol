@@ -222,13 +222,14 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	var err error
 	if *remote != "" && (fs.Arg(0) != "remote" || fs.Arg(1) != "enroll") {
-		if err := c.useRemote(ctx, *remote, fs.Arg(0)); err != nil {
-			fmt.Fprintln(os.Stderr, "rayctl:", printableError(err))
-			os.Exit(1)
-		}
+		err = c.useRemote(ctx, *remote, fs.Args())
 	}
-	if err := c.run(ctx, fs.Args()); err != nil {
+	if err == nil {
+		err = c.run(ctx, fs.Args())
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "rayctl:", printableError(err))
 		if errors.Is(err, errUsage) {
 			fmt.Fprint(os.Stderr, usageText)

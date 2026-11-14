@@ -85,14 +85,10 @@ func TestPlaces(t *testing.T) {
 		}
 	}
 	// What works on the node itself and not through -remote (localOnly)
-	// acts on its host, but for the probe, which needs no node here at all.
+	// acts on its host.
 	for _, c := range localOnly {
-		want := onNode
-		if c == "probe" {
-			want = anywhere
-		}
-		if places[c] != want {
-			t.Errorf("%s: place %d, want %d (it is in localOnly)", c, places[c], want)
+		if places[c] != onNode {
+			t.Errorf("%s: place %d, want %d (it is in localOnly)", c, places[c], onNode)
 		}
 	}
 }
@@ -398,6 +394,13 @@ func TestMainRefuses(t *testing.T) {
 		{"linux", []string{"-socket", noSocket, "debug"}, 1, "rayctl: unavailable: ", 1},
 		{"linux", []string{"-remote", missing, "backup"}, 1, "rayctl: backup works on the node itself, not through -remote", 1},
 		{"linux", []string{"-remote", open, "status"}, 1, "rayctl: device file " + open + " is mode -rw-r--r--", 1},
+		// What needs no node here takes no -remote, and what run does not
+		// know is its usage: anywhere, before the device file is read.
+		{"linux", []string{"-remote", open, "probe", "-channel", "x"}, 1, "rayctl: probe takes no -remote: it works from this machine", 1},
+		{"darwin", []string{"-remote", open, "probe", "x"}, 1, "rayctl: probe takes no -remote", 1},
+		{"freebsd", []string{"-remote", open, "knock", "x"}, 1, "rayctl: knock takes no -remote", 1},
+		{"linux", []string{"-remote", open, "nonsense"}, 2, "rayctl: bad usage", 0},
+		{"darwin", []string{"-remote", missing, "nonsense", "x"}, 2, "rayctl: bad usage", 0},
 	} {
 		cmd := exec.Command(os.Args[0], append([]string{"-test.run", "^TestRunMain$", "--"}, c.args...)...)
 		cmd.Env = append(os.Environ(), "RAYCTL_TEST_OS="+c.goos)
@@ -416,6 +419,9 @@ func TestMainRefuses(t *testing.T) {
 			(c.lines != 0 && len(lines) != c.lines) {
 			t.Errorf("%s, rayctl %s: exit %d, want %d, and a line %q of %d; standard error:\n%s",
 				c.goos, strings.Join(c.args, " "), code, c.code, c.stderr, c.lines, stderr.String())
+		}
+		if c.code == 2 && strings.Contains(stderr.String(), dir) {
+			t.Errorf("%s, rayctl %s: the usage after the device file: %s", c.goos, strings.Join(c.args, " "), stderr.String())
 		}
 	}
 }

@@ -328,16 +328,25 @@ func (c *cli) remoteRotate(ctx context.Context) error {
 }
 
 // localOnly lists the commands that act on this host, not through an API.
-var localOnly = []string{"install", "apply", "update", "uninstall", "backup", "restore", "report", "probe", "egress", "conn-limit"}
+var localOnly = []string{"install", "apply", "update", "uninstall", "backup", "restore", "report", "egress", "conn-limit"}
 
 func isLocalOnly(cmd string) bool {
-	return slices.Contains(localOnly, cmd) || strings.HasPrefix(cmd, "-")
+	return slices.Contains(localOnly, cmd)
 }
 
-// useRemote points the CLI at the node's remote API.
-func (c *cli) useRemote(ctx context.Context, path, cmd string) error {
-	if isLocalOnly(cmd) {
-		return fmt.Errorf("%s works on the node itself, not through -remote", cmd)
+// useRemote points the CLI at the node's remote API for the command line
+// args. What run does not know is its usage, and what needs no node here
+// (knock, probe) takes no -remote: both before the device file is read
+// and the node knocked on.
+func (c *cli) useRemote(ctx context.Context, path string, args []string) error {
+	p, name, ok := placeOf(args)
+	switch {
+	case !ok:
+		return errUsage
+	case p == anywhere:
+		return fmt.Errorf("%s takes no -remote: it works from this machine with the bundle on its command line (run it without -remote)", name)
+	case isLocalOnly(args[0]):
+		return fmt.Errorf("%s works on the node itself, not through -remote", args[0])
 	}
 	id, err := loadIdentity(path)
 	if err != nil {

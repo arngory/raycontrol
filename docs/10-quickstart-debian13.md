@@ -1940,12 +1940,14 @@ checked: rayctl -remote laptop.rcdev status
   rayctl: device file laptop.rcdev is mode -rw-r--r--: it holds a private key, make it 0600: chmod 600 laptop.rcdev (if its filesystem keeps no modes: copy it to your home directory, chmod 600 the copy)
   ```
 - Через `-remote` работают `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `dns`, `summary`,
-  `app-mirror`, `metrics`. Остальное отвечает отказом одного из двух видов:
+  `app-mirror`, `metrics`. Остальное отвечает отказом одного из трёх видов:
   - `… works on the node itself, not through -remote` — у `install`, `apply`, `update`, `uninstall`, `backup`,
-    `restore`, `report`, `probe`, `egress`, `conn-limit`;
+    `restore`, `report`, `egress`, `conn-limit`;
+  - `… takes no -remote` — у `knock` и `probe`: им нужен только пакет на командной строке, запускайте их без
+    `-remote`;
   - `… on the node only (rayctl as root)` — у отдельных действий внутри разрешённых команд: `service cert`,
     `relay add`, `relay remove`, `debug on`.
-- На macOS и FreeBSD команды самого сервера отказывают ещё до обращения к ноде, третьим видом строки:
+- На macOS и FreeBSD команды самого сервера отказывают ещё до обращения к ноде, своим видом строки:
   `… works on a Linux node only` (§7, «`rayctl` на своей машине»).
 - Новый ключ устройству: `rayctl -remote laptop.rcdev remote rotate`.
 
