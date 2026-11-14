@@ -47,7 +47,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl service list` | сервисы; для REALITY — когда сменились ключи и когда следующая смена |
 | `rayctl audit [-n 50]` | журнал действий администратора |
 | `rayctl debug on [-for 30m]` / `off` / `show` | окно отладки: rayd, rayspa и data plane пишут подробно, с адресами клиентов; закрывается само (до суток); службы data plane перезапускаются |
-| `rayctl egress` | политика выхода ноды (с v0.21): что закрыто, для кого, действует ли; root видит и счётчики правил |
+| `rayctl egress` | политика выхода ноды (с v0.21): что закрыто, для кого, действует ли; root видит и счётчики правил; `local exempt` — цель REALITY на локальном адресе, которую пропускает только процессу её сервиса |
 | `rayctl egress block\|allow bittorrent` | только root, на ноде: закрыть или открыть BitTorrent на всех профилях сразу, в ядре (рукопожатие, uTP, UDP-трекеры, DHT; зашифрованный по TCP проходит). Действует через 1–2 с, data plane не перезапускается. Нода, где были сервисы Xray, после обновления держит BitTorrent закрытым ([`spec/egress-policy-v1.md`](spec/egress-policy-v1.md)) |
 | `rayctl egress block\|allow smtp` | только root, на ноде: закрыть или открыть TCP 25 на всех профилях; 465 и 587 (почта в телефоне) открыты. По умолчанию открыт |
 | `rayctl egress block\|allow local` | только root, на ноде: собственные и локальные сети ноды (loopback, частные, link-local с адресом метаданных, CGNAT, multicast) для новых соединений data plane, в ядре (с v0.27). По умолчанию закрыты; `allow` снимает только правило периметра, проверки naive, Xray и Hysteria2 остаются ([`spec/egress-policy-v1.md`](spec/egress-policy-v1.md) §10) |
@@ -57,7 +57,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl report [-o F] [-logs warning\|info\|debug\|none] [-since 24h] [-id ID]` | очищенный отчёт для issue, ничего не отправляет; `-logs debug` — со строками `-debug`, один `-id` на прогон |
 | `rayctl probe [-carrier udp\|tls\|tcp\|auto] [-addr A] [-links] [-redact] [-channel] @bundle` | проверить ноду снаружи, как клиент; `auto` — UDP, ClientHello, голый TCP; `-channel` — ещё и замер канала (TCP в обе стороны, эхо UDP); `-links` — со ссылками профилей (в них учётные данные) |
 | `journalctl -u rayd -u rayspa -u 'niko-*' -f` | журналы ноды |
-| `systemctl status rayd rayspa 'niko-*'` | состояние юнитов |
+| `systemctl status rayd rayspa 'niko-*'` | состояние юнитов; у `rayspa` строка `Status:` — где его таблица (`perimeter up: rayd's snapshot; rayspa V, pid N` — своя, со снимком `rayd`) |
 | `nft list table inet raycontrol` | периметр; цепочка `early` — отброшенное до сборки фрагментов, `egress` — политика выхода, `in_rate` — предел новых входящих на адрес, `conn_guard` — страж conntrack (пуста, пока он выключен) |
 | `sysctl net.netfilter.nf_conntrack_count net.netfilter.nf_conntrack_max` | таблица conntrack: `apply` ставит размер по памяти (65 536–262 144) и сроки SYN_SENT 30 с, FIN_WAIT 30 с, TIME_WAIT 60 с — только больше размер и только меньше сроки, чем были (`/etc/sysctl.d/90-raycontrol-conntrack.conf`) |
 | `rayctl metrics [-o /var/lib/node_exporter/textfile/raycontrol.prom]` | счётчики в формате Prometheus: только числа, без имён и адресов |
