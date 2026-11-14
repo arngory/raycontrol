@@ -27,11 +27,10 @@ func heapInUse() uint64 {
 // site.SilentHold and reads no body: before it gave the body up, a peer
 // that sent a connection's window (8 MiB) on a few requests held that much
 // of the process for a minute, on each of its connections. Now what it
-// sends is dropped as it comes and the connection's window goes back.
+// sends is dropped as it comes and the connection's window goes back. The
+// requests are held for the whole of the test: the hold ends with the
+// test's server.
 func TestSilentAnswerKeepsNoBody(t *testing.T) {
-	old := site.SilentHold
-	site.SilentHold = 4 * time.Second
-	defer func() { site.SilentHold = old }()
 	users := filepath.Join(t.TempDir(), "users.json")
 	writeUsersNamed(t, users, map[string]string{"pw": "u5-ab12"})
 	answer, _ := site.Responder(site.AnswerSilent, "")

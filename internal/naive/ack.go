@@ -113,9 +113,11 @@ func ackRefusal(err error, expired bool) (status int, reason string) {
 
 // refuse answers an authenticated CONNECT that gets no tunnel: the status
 // and, for the honest connect's 502, the reason. With naive's Padding
-// header, as a 200 has it: a naive client takes each answer of a proxy for
-// what the proxy speaks, and one without the header for a server that does
-// not pad, on the streams it opens next.
+// header, as a 200 has it: a naive client keeps one padding type for a
+// proxy, sets it anew from each answer (one without the header: a server
+// that does not pad), and a tunnel takes it once its own CONNECT is done.
+// An answer without the header that came in between left a tunnel beside
+// it unpadded, to a server that strips padding.
 func refuse(w http.ResponseWriter, status int, reason string) {
 	w.Header().Set("Padding", paddingHeader())
 	if reason != "" {
