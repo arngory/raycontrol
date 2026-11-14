@@ -364,6 +364,7 @@ type fakeRelay struct {
 	before error            // relayBefore's refusal
 	asked  int              // relayBefore called
 	open   bool             // hostOpen
+	down   bool             // the units disabled --now and not started since
 	yes    bool             // the answer to the prompt
 	prompt string
 	inst   func() error // the install
@@ -439,10 +440,16 @@ func newFakeRelay(t *testing.T) *fakeRelay {
 			f.at("etc/sysctl/90-raycontrol.conf"), f.at("etc/sysctl/91-raycontrol-relay.conf")},
 		sysctlDir: f.at("etc/sysctl") + "/", snapshot: f.at("state/snapshot.pb"),
 		units:  []string{"rayspa.service", "rayd-relay.service"},
-		state:  func(u string) unitWas { return unitWas{Enabled: true, Active: true} },
+		state:  func(u string) unitWas { return unitWas{Enabled: !f.down, Active: !f.down} },
 		loaded: func(string) bool { return true },
 		run: func(name string, args ...string) error {
 			f.record(strings.Join(append([]string{name}, args...), " "))
+			switch {
+			case len(args) > 1 && args[0] == "disable" && args[1] == "--now":
+				f.down = true
+			case len(args) > 0 && args[0] == "start":
+				f.down = false
+			}
 			return nil
 		},
 		place: func(src, dst string) error {
@@ -586,13 +593,25 @@ func TestRelayKeepRestore(t *testing.T) {
 		t.Errorf("no copy: %v", err)
 	}
 	// open: rayspa down, forwarding off, the mark says so; a table that
-	// stays is said.
+	// stays is said, and so is a rayspa that does not stop and puts its
+	// table back a moment later: the host is not open then.
+	ops.state = f.env.ops.state
 	f.ran = nil
 	if err := ops.open(); err != nil || !slices.Equal(f.ran, []string{"systemctl disable --now rayd-relay.service rayspa.service", "rayspa teardown", "unforward"}) {
 		t.Errorf("open: %v %q", err, f.ran)
 	}
 	if m, ok := ops.readMark(); !ok || m.State != "open" {
 		t.Errorf("open left the mark %+v %v", m, ok)
+	}
+	looked := 0
+	ops.tableGone = func() bool { looked++; return looked == 1 }
+	if err := ops.open(); err == nil || !strings.Contains(err.Error(), "the host is NOT open") || looked != 2 {
+		t.Errorf("a table back a moment later: %v, looked %d", err, looked)
+	}
+	ops.tableGone = func() bool { return true }
+	ops.state = func(string) unitWas { return unitWas{Enabled: true, Active: true} }
+	if err := ops.open(); err == nil || !strings.Contains(err.Error(), "rayspa still runs") {
+		t.Errorf("a rayspa that did not stop: %v", err)
 	}
 	ops.tableGone = func() bool { return false }
 	if err := ops.open(); err == nil {

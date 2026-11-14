@@ -199,7 +199,8 @@ type relayOps struct {
 	disarm    func()                      // the install's guard timer off, if one is left
 	unforward func()                      // our forwarding file gone, the value before raycontrol back
 	tableGone func() bool
-	rayspa    string // its binary, for teardown
+	rayspa    string        // its binary, for teardown
+	settle    time.Duration // how long open waits to look at the table again
 }
 
 // savedName is a file's name among the kept ones.
@@ -401,6 +402,8 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 // open takes rayspa down and its table off: the relay forwards nothing,
 // and its host is open. The last way to keep the admin in, when the relay
 // does not come back at all. The mark says so to the next rayctl update.
+// An error says the host may not be open: whether SSH from an address
+// outside the relay's admin addresses gets in.
 func (o relayOps) open() error {
 	m, _ := o.readMark()
 	m.State = "open"
@@ -412,6 +415,14 @@ func (o relayOps) open() error {
 	o.unforward()
 	if !o.tableGone() {
 		return fmt.Errorf("its table is still there%s", paren(disable, tear))
+	}
+	// A rayspa that did not stop (systemctl stop ends in a SIGKILL, so
+	// that is systemd or D-Bus not answering) puts its table back within a
+	// second: looked at again a moment later.
+	time.Sleep(o.settle)
+	if o.state(o.units[0]).Active || !o.tableGone() {
+		return fmt.Errorf("rayspa still runs and puts its table back%s: the host is NOT open, SSH gets in only from the "+
+			"relay's admin addresses", paren(disable, tear))
 	}
 	return nil
 }
@@ -925,6 +936,7 @@ func (c *cli) relayEnvHere(ctx context.Context) relayEnv {
 		},
 		tableGone: tableGone,
 		rayspa:    deploy.DefaultBinaries.Rayspa,
+		settle:    2 * time.Second,
 	}
 	return relayEnv{
 		bundle: deploy.RelayBundle, ops: ops, session: sess,
