@@ -507,12 +507,17 @@ message RelayUpdateStatus {
   string reason = 6;     // §3.6
   string error = 7;      // short text, redacted, at most 200 bytes
   int64 changed_at = 8;  // unix seconds, the node's clock: when state became what it is
-  int64 seen_at = 9;     // the relay's last word, the node's clock; 0 never
+  int64 seen_at = 9;     // when the node last heard the relay at all (a feed stream, a report), the node's clock; 0 never
   bool remote = 10;      // the relay takes the node's word (root on it: rayctl update remote on)
 }
 ```
 
-Все времена — по часам выхода: он ставит их при приёме доклада. Время из доклада (`RelayUpdate.at`) телефону не
+Все времена — unix-секунды, как `UpdateStatus.ended_at`, по часам выхода: он ставит их при приёме доклада.
+`seen_at` — когда выход последний раз слышал relay вообще: открытый поток фида (`WatchRelay`) или доклад любого
+вида (`Report`, `ReportUpdate`), а не только по обновлению; по нему телефон показывает «давно не на связи» отдельно
+от `state`. `reason` — машинный код из §3.6 (его клиент переводит сам), `error` — короткий текст для человека, на
+английском; новых кодов и состояний старое приложение не ломает, оно показывает их как есть (сверено с клиентом
+2026-11-14). Время из доклада (`RelayUpdate.at`) телефону не
 нужно: часы relay могут идти иначе.
 
 ### 8.2. Состояние для телефона
@@ -530,14 +535,15 @@ message RelayUpdateStatus {
 
 Клиенту: после `StartUpdate` опрашивать `GetUpdateStatus`, как сейчас (node-update §2), пока свой `status` не итог
 **или** хоть один relay в `waiting`, `offered`, `requested`, `running`. Строка relay — имя, версия, состояние, время
-`changed_at`, причина. Без поля `relays` (старая нода) — как раньше. Согласовать с клиентом до выпуска (`docs/handoff/`).
+`changed_at`, причина. Без поля `relays` (старая нода) — как раньше. С клиентом согласовано 2026-11-14: поля §8.1 как
+есть, времена в секундах, `seen_at` — любая связь, `reason` — код, `error` — текст.
 
 ### 8.3. Хранение на выходе
 
 Последний доклад каждого relay — в таблице `settings` (`internal/store/store.go:180-195`, `217`), ключ
 `relay-update/<имя>`, JSON полей §8.1 без `state` (оно сводится при чтении). Без миграции схемы: откат ноды не
 должен возвращать базу из-за этой волны (node-update §3, «Откат и база»). Пишется только при изменении; `seen_at` —
-в памяти и в базе не чаще раза в 10 мин. `RemoveRelay` (`internal/api/relays.go:62-68`) удаляет и ключ.
+в памяти и в базе не чаще раза в 10 мин (поток фида держит его свежим, пока открыт). `RemoveRelay` (`internal/api/relays.go:62-68`) удаляет и ключ.
 
 ## 9. `rayctl`
 
@@ -615,8 +621,9 @@ relay      r4: unknown: no word (a relay before vW, or its rayd relay does not r
 в дальнейшем если мы займёмся оркестрированием и кубером в какой-то мере, мб ansible - могли бы при объединении нод
 транслировать контент в выделенной полосе для служебных нужд 4) любую новее».
 
-1. **Relay идут и за ручным `rayctl update` на ноде.** Ручное обновление пишет `status.json` с видом `local` (как
-   `noteRollback`, `update.go:633-641`), и выход называет эту версию, как после `remote` и `auto`. Исключение —
+1. **Relay идут и за ручным `rayctl update` на ноде.** Ручное обновление пишет `status.json` с видом `local` и
+   `by: "rayctl on the node"` (как `noteRollback`, `update.go:633-641`; клиент выводит `by` в строке «кем», пустым его
+   оставлять нельзя), и выход называет эту версию, как после `remote` и `auto`. Исключение —
    `rayctl update -no-relays`: статус пишется с `relays: false`, предложения нет. Цена принята: `GetUpdateStatus.status`
    показывает и ручные обновления (клиенту сообщено 2026-11-14). Откат (`-rollback`) relay не трогает: `rolled_back`
    не `done` (§3.3).
