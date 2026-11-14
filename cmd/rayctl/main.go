@@ -202,6 +202,10 @@ func main() {
 		fs.Usage()
 		os.Exit(2)
 	}
+	if err := misplaced(fs); err != nil {
+		fmt.Fprintln(os.Stderr, "rayctl:", err)
+		os.Exit(1)
+	}
 
 	// Root's umask may be 027 or 077 (hardened images): what rayctl puts in
 	// place for the services (directories, binaries) must not follow it.
