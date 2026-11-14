@@ -23,6 +23,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/perimeter"
 	"github.com/arngory/raycontrol/internal/release"
 )
 
@@ -474,14 +475,23 @@ func relayInstallCommand(rayctl, bundle string, lock *os.File) *exec.Cmd {
 }
 
 // relayHealth is the check of a relay after its update or its rollback:
-// rayspa runs and holds its table, the kernel forwards, the perimeter
-// lets SSH in from the admin addresses (this session among them, when it
-// is known), rayspa is the version wanted, and the probe endpoint runs if
-// it ran before.
+//   - rayspa runs, and the rayspa that runs is the binary on disk (started
+//     again since it was placed: a process left running from before is not
+//     the version checked);
+//   - its table has applied a perimeter: admin addresses, and, when the
+//     perimeter before the change had services, the forwarding to the exit
+//     (relay_dnat's DNAT, relay_fwd's ports) and services in the snapshot;
+//   - the kernel forwards;
+//   - the perimeter lets SSH in from the admin addresses (this session
+//     among them, when it is known);
+//   - rayspa is the version wanted, and the probe endpoint runs if it ran
+//     before.
 type relayHealth struct {
 	rayspa, probe func() (map[string]string, error)
 	probeRan      bool
-	tableGone     func() bool
+	exe           func() error                         // the running rayspa is the binary on disk
+	nft           func(args ...string) (string, error) // nft's output
+	services      bool                                 // the perimeter before had services
 	forwarding    func() ([]byte, error)
 	snapshot      func() (*perimeterv1.Snapshot, error)
 	version       func() string // rayspa version
@@ -494,12 +504,49 @@ func running(st map[string]string) bool {
 	return st["ActiveState"] == "active" && st["SubState"] == "running"
 }
 
+// nftBlock is the lines of one set or chain ("set admin4") of an nft
+// listing, trimmed; nil if it is not there.
+func nftBlock(listing, head string) []string {
+	var block []string
+	in := false
+	for _, l := range strings.Split(listing, "\n") {
+		l = strings.TrimSpace(l)
+		switch {
+		case !in && l == head+" {":
+			in, block = true, []string{}
+		case in && l == "}":
+			return block
+		case in:
+			block = append(block, l)
+		}
+	}
+	return block
+}
+
+// hasElements tells whether a set of a listing has elements.
+func hasElements(listing, set string) bool {
+	return slices.ContainsFunc(nftBlock(listing, "set "+set), func(l string) bool { return strings.HasPrefix(l, "elements = ") })
+}
+
 func (h relayHealth) check() error {
 	if st, err := h.rayspa(); err != nil || !running(st) {
 		return fmt.Errorf("rayspa is %s/%s: journalctl -u rayspa says why", st["ActiveState"], st["SubState"])
 	}
-	if h.tableGone() {
-		return errors.New("rayspa holds no perimeter table: journalctl -u rayspa says why")
+	if err := h.exe(); err != nil {
+		return err
+	}
+	table, err := h.nft("list", "table", "inet", perimeter.Table)
+	if err != nil {
+		return fmt.Errorf("rayspa holds no perimeter table (%v): journalctl -u rayspa says why", strings.TrimSpace(err.Error()))
+	}
+	if !hasElements(table, "admin4") && !hasElements(table, "admin6") {
+		return errors.New("rayspa's table lets no admin address in: it has applied no perimeter (journalctl -u rayspa)")
+	}
+	if h.services {
+		dnat := slices.ContainsFunc(nftBlock(table, "chain relay_dnat"), func(l string) bool { return strings.Contains(l, " dnat ") })
+		if !dnat || !hasElements(table, "relay_fwd") {
+			return errors.New("rayspa's table forwards no service to the exit (relay_dnat, relay_fwd): journalctl -u rayspa says why")
+		}
 	}
 	if v, err := h.forwarding(); err != nil || strings.TrimSpace(string(v)) != "1" {
 		return fmt.Errorf("the relay does not forward (net.ipv4.ip_forward %q)", strings.TrimSpace(string(v)))
@@ -507,6 +554,9 @@ func (h relayHealth) check() error {
 	snap, err := h.snapshot()
 	if err != nil {
 		return fmt.Errorf("rayspa's perimeter cannot be read: %w", err)
+	}
+	if h.services && len(snap.Services) == 0 {
+		return errors.New("the exit's perimeter for this relay has no services, the one before had: rayctl relay list on the exit")
 	}
 	if _, err := checkRelaySSH(snap, h.port, h.client, h.name, "rayctl update again"); err != nil {
 		return err
@@ -523,6 +573,27 @@ func (h relayHealth) check() error {
 		}
 	}
 	return nil
+}
+
+// runningBinary checks that the unit's main process runs bin as it is on
+// disk now (/proc/PID/exe is the file it was started from, renamed over
+// or not). mainPID is systemd's MainPID of the unit.
+func runningBinary(unit, bin string, mainPID func(unit string) string) func() error {
+	return func() error {
+		pid := mainPID(unit)
+		if pid == "" || pid == "0" {
+			return fmt.Errorf("%s has no main process", unit)
+		}
+		run, rerr := os.Stat("/proc/" + pid + "/exe")
+		disk, derr := os.Stat(bin)
+		if rerr != nil || derr != nil {
+			return fmt.Errorf("which binary %s runs cannot be told: %w", unit, errors.Join(rerr, derr))
+		}
+		if !os.SameFile(run, disk) {
+			return fmt.Errorf("the %s that runs (pid %s) is not %s as it is now: it was not started again", unit, pid, bin)
+		}
+		return nil
+	}
 }
 
 // waitHealthy waits until check passes, within limit, and checks again a
@@ -624,6 +695,7 @@ func backOrOpen(cause error, restore, checkBack, open func() error) error {
 type healthWant struct {
 	want         string
 	probeRan     bool
+	services     bool // the perimeter before the change had services
 	port         int
 	client, name string
 }
@@ -725,7 +797,7 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 		place:   func() (bool, error) { return e.place(st) },
 		install: func() error { return e.install(il) },
 		check: func() error {
-			return e.health(healthWant{s.version, k.Units[deploy.RelayProbeUnit].Active, port, e.session.addr, b.Name})()
+			return e.health(healthWant{want: s.version, probeRan: k.Units[deploy.RelayProbeUnit].Active, services: k.Services, port: port, client: e.session.addr, name: b.Name})()
 		},
 		restore:   func() error { _, err := e.ops.restore(true); return err },
 		checkBack: func() error { return relayBack(k, e.health, port, e.session.addr, b.Name) },
@@ -745,7 +817,7 @@ func relayBack(k relayKept, health func(healthWant) func() error, port int, clie
 	if !k.Units[relayUnit].Active {
 		return nil
 	}
-	return health(healthWant{k.Version, k.Units[deploy.RelayProbeUnit].Active, port, client, name})()
+	return health(healthWant{want: k.Version, probeRan: k.Units[deploy.RelayProbeUnit].Active, services: k.Services, port: port, client: client, name: name})()
 }
 
 // rollback is rayctl update -rollback on a relay: the kept relay back.
@@ -892,7 +964,15 @@ func (c *cli) relayEnvHere(ctx context.Context) relayEnv {
 func realHealth(w healthWant) relayHealth {
 	return relayHealth{
 		rayspa: showUnit, probe: unitState(deploy.RelayProbeUnit), probeRan: w.probeRan,
-		tableGone:  tableGone,
+		exe: runningBinary(relayUnit, deploy.DefaultBinaries.Rayspa, func(unit string) string {
+			out, _ := commandApart("systemctl", "show", "-p", "MainPID", "--value", unit).Output()
+			return strings.TrimSpace(string(out))
+		}),
+		services: w.services,
+		nft: func(args ...string) (string, error) {
+			out, err := commandApart("nft", args...).Output()
+			return string(out), err
+		},
 		forwarding: func() ([]byte, error) { return os.ReadFile(procForward) },
 		snapshot:   func() (*perimeterv1.Snapshot, error) { return readSnapshot(relaySnapshot) },
 		version: func() string {

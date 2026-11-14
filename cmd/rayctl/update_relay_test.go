@@ -206,17 +206,44 @@ func TestRelayUpdateRun(t *testing.T) {
 	}
 }
 
-// After the update and after its rollback: rayspa runs and holds its
-// table, the kernel forwards, SSH from the admin addresses, the version
+// relayTable is an nft listing of a relay's table as rayspa leaves it:
+// the admin set filled, the forwarding to the exit with its ports.
+const relayTable = `table inet raycontrol {
+	set admin4 {
+		type ipv4_addr
+		flags interval
+		elements = { 203.0.113.9 }
+	}
+	set admin6 {
+		type ipv6_addr
+		flags interval
+	}
+	set relay_fwd {
+		type inet_proto . inet_service
+		elements = { tcp . 443, udp . 443 }
+	}
+	chain relay_dnat {
+		type nat hook prerouting priority dstnat - 1; policy accept;
+		meta nfproto ipv4 fib daddr type local meta l4proto . th dport @relay_fwd dnat ip to 203.0.113.7
+	}
+}
+`
+
+// After the update and after its rollback: rayspa runs, the one started
+// from the binary on disk, its table applied a perimeter with the admin
+// addresses and, when the one before had services, the forwarding to the
+// exit; the kernel forwards, SSH from the admin addresses, the version
 // wanted, the probe endpoint if it ran before.
 func TestRelayHealth(t *testing.T) {
 	up := map[string]string{"ActiveState": "active", "SubState": "running"}
 	down := map[string]string{"ActiveState": "inactive", "SubState": "dead"}
-	snap := &perimeterv1.Snapshot{AdminPrefixes: []string{"203.0.113.9/32"}, AdminPorts: []*perimeterv1.Port{{Proto: "tcp", Port: 22}}}
+	snap := &perimeterv1.Snapshot{AdminPrefixes: []string{"203.0.113.9/32"}, AdminPorts: []*perimeterv1.Port{{Proto: "tcp", Port: 22}},
+		Services: []*perimeterv1.Service{{Id: 1}}}
 	good := func() relayHealth {
 		return relayHealth{
 			rayspa: func() (map[string]string, error) { return up, nil }, probe: func() (map[string]string, error) { return up, nil },
-			probeRan: true, tableGone: func() bool { return false },
+			probeRan: true, services: true, exe: func() error { return nil },
+			nft:        func(...string) (string, error) { return relayTable, nil },
 			forwarding: func() ([]byte, error) { return []byte("1\n"), nil },
 			snapshot:   func() (*perimeterv1.Snapshot, error) { return snap, nil },
 			version:    func() string { return "v0.26.1" }, want: "v0.26.1", port: 22, client: "203.0.113.9", name: "msk",
@@ -225,12 +252,31 @@ func TestRelayHealth(t *testing.T) {
 	if err := good().check(); err != nil {
 		t.Fatal(err)
 	}
+	table := func(s string) func(...string) (string, error) {
+		return func(...string) (string, error) { return s, nil }
+	}
 	for name, c := range map[string]struct {
 		break_   func(*relayHealth)
 		contains string
 	}{
-		"rayspa down":     {func(h *relayHealth) { h.rayspa = func() (map[string]string, error) { return down, nil } }, "rayspa is inactive/dead"},
-		"no table":        {func(h *relayHealth) { h.tableGone = func() bool { return true } }, "no perimeter table"},
+		"rayspa down":    {func(h *relayHealth) { h.rayspa = func() (map[string]string, error) { return down, nil } }, "rayspa is inactive/dead"},
+		"an old process": {func(h *relayHealth) { h.exe = func() error { return errors.New("it was not started again") } }, "not started again"},
+		"no table": {func(h *relayHealth) {
+			h.nft = func(...string) (string, error) { return "", errors.New("No such file or directory") }
+		}, "no perimeter table"},
+		"no admin set": {func(h *relayHealth) {
+			h.nft = table(strings.Replace(relayTable, "elements = { 203.0.113.9 }", "", 1))
+		}, "no admin address"},
+		"no forwarded ports": {func(h *relayHealth) {
+			h.nft = table(strings.Replace(relayTable, "elements = { tcp . 443, udp . 443 }", "", 1))
+		}, "forwards no service"},
+		"no DNAT": {func(h *relayHealth) {
+			h.nft = table(strings.Replace(relayTable, "dnat ip to 203.0.113.7", "counter", 1))
+		}, "forwards no service"},
+		"a perimeter without services": {func(h *relayHealth) {
+			empty := &perimeterv1.Snapshot{AdminPrefixes: snap.AdminPrefixes, AdminPorts: snap.AdminPorts}
+			h.snapshot = func() (*perimeterv1.Snapshot, error) { return empty, nil }
+		}, "has no services"},
 		"no forwarding":   {func(h *relayHealth) { h.forwarding = func() ([]byte, error) { return []byte("0\n"), nil } }, "does not forward"},
 		"session outside": {func(h *relayHealth) { h.client = "198.51.100.7" }, "rayctl relay set -admin"},
 		"old version":     {func(h *relayHealth) { h.version = func() string { return "v0.26.0" } }, `"v0.26.0", not v0.26.1`},
@@ -242,12 +288,18 @@ func TestRelayHealth(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
+	// A relay that forwarded no service before (none given to it yet) is
+	// not asked to now; no probe before, a local build.
 	h := good()
+	h.services = false
+	h.nft = table(strings.Replace(relayTable, "elements = { tcp . 443, udp . 443 }", "", 1))
+	h.snapshot = func() (*perimeterv1.Snapshot, error) {
+		return &perimeterv1.Snapshot{AdminPrefixes: snap.AdminPrefixes, AdminPorts: snap.AdminPorts}, nil
+	}
 	h.probeRan, h.probe = false, func() (map[string]string, error) { return down, nil }
-	h.want = "local"
-	h.version = func() string { return "dev" }
+	h.want, h.version = "local", func() string { return "dev" }
 	if err := h.check(); err != nil {
-		t.Errorf("no probe before, a local build: %v", err)
+		t.Errorf("nothing forwarded before, no probe, a local build: %v", err)
 	}
 	// Waiting: a rayspa that comes up passes; one that dies at once does not.
 	n := 0
@@ -270,6 +322,30 @@ func TestRelayHealth(t *testing.T) {
 	}
 	if err := waitHealthy(ctx, dies, time.Second, time.Millisecond, time.Millisecond); err == nil {
 		t.Error("a rayspa that died after its start passed")
+	}
+}
+
+// runningBinary: the process's binary is the file on disk, or it is not
+// (renamed over since it started). This test's own process stands in.
+func TestRunningBinary(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Skip(err)
+	}
+	if _, err := os.Stat("/proc/self/exe"); err != nil {
+		t.Skip("no /proc")
+	}
+	pid := func(string) string { return fmt.Sprint(os.Getpid()) }
+	if err := runningBinary("rayspa.service", self, pid)(); err != nil {
+		t.Errorf("the binary it runs: %v", err)
+	}
+	other := filepath.Join(t.TempDir(), "rayspa")
+	os.WriteFile(other, []byte("another binary"), 0o755)
+	if err := runningBinary("rayspa.service", other, pid)(); err == nil || !strings.Contains(err.Error(), "not started again") {
+		t.Errorf("another binary: %v", err)
+	}
+	if err := runningBinary("rayspa.service", self, func(string) string { return "0" })(); err == nil || !strings.Contains(err.Error(), "no main process") {
+		t.Errorf("no process: %v", err)
 	}
 }
 
