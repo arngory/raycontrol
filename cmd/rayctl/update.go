@@ -639,14 +639,14 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool, carry carry) error {
 		kept := "What was taken away since stays taken away: revoked devices, disabled or deleted users and relays,\n" +
 			"services taken from users or disabled, replaced certificates, the admin addresses; and where the\n" +
 			"previous version has the LAN (v0.23.0 and later), a LAN turned off and the users' LAN keys as they are now.\n" +
-			"The users of devices revoked since get new credentials once more: their other devices reconnect after\n" +
-			"their next subscription fetch.\n"
+			"Credentials stay as they are now, those renewed or rotated since included: no secret a renewal retired\n" +
+			"comes back. The users of devices revoked since get new credentials once more: their other devices\n" +
+			"reconnect after their next subscription fetch.\n"
 		if carry == carrySkip {
-			kept = "-no-carry: what was revoked since comes back too.\n"
+			kept = "-no-carry: what was revoked since comes back too, and the credentials of then, those renewed since included.\n"
 		}
 		fmt.Printf("The update moved the database to schema %d; the previous version runs on %d.\n"+
-			"The database goes back to its copy from %s: users, devices and settings added or changed since are lost,\n"+
-			"credentials rotated since come back. %s",
+			"The database goes back to its copy from %s: users, devices and settings added or changed since are lost.\n%s",
 			now, then, fi.ModTime().Format(time.DateTime), kept)
 		if !yes {
 			fmt.Print("Type yes to go on: ")

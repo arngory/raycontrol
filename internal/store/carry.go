@@ -26,11 +26,19 @@ import (
 //     endpoint stay as now;
 //   - the settings named in keep (the admin addresses) take current's value.
 //
+// And credentials do not go back: every credential saved and current both
+// have, of the same user and the same service, takes current's values
+// (carryCredentials), and the users of devices revoked since get new ones
+// on top. A renewal since the copy (rayctl user renew, the step of schema
+// 14) left no next and no previous secret, so the copy's would be the very
+// ones it retired; and an ordinary rotation since is no worse kept than
+// undone, its secrets being those the clients fetched.
+//
 // Users and relays are matched by ID, name or address, and creation time:
 // SQLite reuses the ID of a deleted row. What was added or changed since
-// otherwise, credentials rotated included, is lost with the rest (but for
-// the users of devices revoked since, whose credentials are new). Neither
-// database may be open elsewhere.
+// otherwise is lost with the rest: a user or a credential made since is
+// not in saved and does not come into it. Neither database may be open
+// elsewhere.
 func CarryRevocations(ctx context.Context, saved, current string, keep ...string) error {
 	if strings.ContainsAny(current, "?#") {
 		return fmt.Errorf("store: database path %q", current)
@@ -55,6 +63,9 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 	defer tx.Rollback() //nolint:errcheck // after Commit it does nothing
 	// The same user in both: a deleted user's ID may have gone to another.
 	const sameUser = `c.id = users.id AND c.name = users.name AND c.created_at = users.created_at`
+	if _, err := carryCredentials(ctx, tx, false); err != nil {
+		return err
+	}
 	if _, err := carryDevices(ctx, tx, true); err != nil {
 		return err
 	}
@@ -161,63 +172,213 @@ type CarriedDevice struct {
 	ID, User, Name string
 }
 
-// CarryDeviceRevocations is CarryRevocations for rayctl restore, which
-// replaces the node's state with a backup on purpose (a user, a service
-// or a setting back as it was is what it is for): only the devices
-// revoked in current since the backup stay revoked in saved, and their
-// users get new credentials and a new LAN key there, as the revocation
-// gave them (R4-36). It returns those devices, and the devices active in
-// saved that current has no record of (unknown). Devices are matched by
-// their random ID: a current database of another node (a new host)
-// matches none, all of saved's are unknown, and what was revoked after
-// the backup cannot be known; a device current does not know stays as
-// the backup has it. Neither database may be open elsewhere.
+// Restored is what CarryRestore carried into a backup from the node's
+// database.
+type Restored struct {
+	// Carried are the devices revoked in current since the backup: revoked
+	// in it too, their users with new credentials and a new LAN key.
+	Carried []CarriedDevice
+	// Unknown are the devices active in the backup that current has no
+	// record of: whether one was revoked since cannot be known.
+	Unknown []CarriedDevice
+	// Renewed are the other users of the backup whose credentials current
+	// renewed since: by rayctl user renew or the step of schema 14 (they
+	// take current's credentials and LAN key), or by revoking a device made
+	// since the backup (they get new ones).
+	Renewed []string
+}
+
+// CarryDeviceRevocations is CarryRestore for a caller that reports only
+// the devices: the users renewed are carried all the same.
 func CarryDeviceRevocations(ctx context.Context, saved, current string) (carried, unknown []CarriedDevice, err error) {
+	r, err := CarryRestore(ctx, saved, current)
+	return r.Carried, r.Unknown, err
+}
+
+// CarryRestore is CarryRevocations for rayctl restore, which replaces the
+// node's state with a backup on purpose (a user, a service or a setting
+// back as it was is what it is for): only what retired a secret since the
+// backup carries into saved, as it was given (R4-36):
+//   - a device revoked in current since stays revoked in saved, and its
+//     user gets new credentials and a new LAN key (carryDevices);
+//   - a user renewed since (an audit line user.renew or
+//     user.renew:revoked-before in current that the backup does not have)
+//     takes current's credentials and LAN key, those its clients fetched;
+//   - a user with a device in current made and revoked since the backup
+//     gets new credentials and a new LAN key: the device may have had the
+//     backup's.
+//
+// Devices are matched by their random ID, users by ID, name and creation
+// time: a current database of another node (a new host) matches none, all
+// of saved's devices are Unknown, and what was revoked or renewed after
+// the backup cannot be known; a device current does not know stays as the
+// backup has it. A renewal with no audit line (rayd stopped between the
+// two) is not seen. Neither database may be open elsewhere.
+func CarryRestore(ctx context.Context, saved, current string) (Restored, error) {
+	var r Restored
 	if strings.ContainsAny(current, "?#") {
-		return nil, nil, fmt.Errorf("store: database path %q", current)
+		return r, fmt.Errorf("store: database path %q", current)
 	}
 	db, err := sql.Open("sqlite", "file:"+saved+"?_pragma=busy_timeout(5000)")
 	if err != nil {
-		return nil, nil, err
+		return r, err
 	}
 	defer db.Close()
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return nil, nil, err
+		return r, err
 	}
 	defer conn.Close() //nolint:errcheck // returns the connection to the pool
 	if _, err := conn.ExecContext(ctx, `ATTACH DATABASE ? AS cur`, "file:"+current+"?mode=ro"); err != nil {
-		return nil, nil, fmt.Errorf("store: opening %s: %w", current, err)
+		return r, fmt.Errorf("store: opening %s: %w", current, err)
 	}
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, nil, err
+		return r, err
 	}
 	defer tx.Rollback() //nolint:errcheck // after Commit it does nothing
-	carried, err = carryDevices(ctx, tx, false)
+	took, err := carryCredentials(ctx, tx, true)
 	if err != nil {
-		return nil, nil, err
+		return r, err
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE users AS u SET lan_key = c.lan_key
+		FROM cur.users c WHERE c.id = u.id AND c.name = u.name AND c.created_at = u.created_at
+		  AND u.lan_key IS NOT NULL AND c.lan_key IS NOT NULL AND c.lan_key IS NOT u.lan_key AND `+renewedSince); err != nil {
+		return r, fmt.Errorf("store: carrying renewals: %w", err)
+	}
+	// Then the revocations: new credentials for their users, over current's.
+	if r.Carried, err = carryDevices(ctx, tx, false); err != nil {
+		return r, err
+	}
+	carried := func(name string) bool {
+		return slices.ContainsFunc(r.Carried, func(d CarriedDevice) bool { return d.User == name })
+	}
+	for _, n := range took {
+		if !carried(n) {
+			r.Renewed = append(r.Renewed, n)
+		}
+	}
+	// A device made and revoked since: the backup's credentials of its
+	// user may be those it had.
+	rows, err := tx.QueryContext(ctx, `SELECT u.id, u.name FROM main.users u
+		JOIN cur.users c ON c.id = u.id AND c.name = u.name AND c.created_at = u.created_at
+		WHERE EXISTS (SELECT 1 FROM cur.devices d WHERE d.user_id = c.id AND d.revoked_at IS NOT NULL
+		              AND NOT EXISTS (SELECT 1 FROM main.devices m WHERE m.id = d.id))
+		ORDER BY u.name`)
+	if err != nil {
+		return r, fmt.Errorf("store: carrying revocations: %w", err)
+	}
+	type user struct {
+		id   int64
+		name string
+	}
+	var made []user
+	for rows.Next() {
+		var u user
+		if err := rows.Scan(&u.id, &u.name); err != nil {
+			rows.Close()
+			return r, err
+		}
+		if !carried(u.name) {
+			made = append(made, u)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return r, err
+	}
+	now := time.Now().Unix()
+	for _, u := range made {
+		key, err := newLANKey()
+		if err != nil {
+			return r, err
+		}
+		if _, err := renewUser(ctx, tx, u.id, now, key); err != nil {
+			return r, fmt.Errorf("store: carrying revocations: %w", err)
+		}
+		if !slices.Contains(r.Renewed, u.name) {
+			r.Renewed = append(r.Renewed, u.name)
+		}
+	}
+	slices.Sort(r.Renewed)
 	// What current cannot tell: the active devices it has no record of.
-	rows, err := tx.QueryContext(ctx, `SELECT d.id, u.name, d.name FROM devices d JOIN users u ON u.id = d.user_id
+	rows, err = tx.QueryContext(ctx, `SELECT d.id, u.name, d.name FROM devices d JOIN users u ON u.id = d.user_id
 		WHERE d.revoked_at IS NULL AND NOT EXISTS (SELECT 1 FROM cur.devices c WHERE c.id = d.id)
 		ORDER BY u.name, d.name`)
 	if err != nil {
-		return nil, nil, err
+		return r, err
 	}
 	for rows.Next() {
 		var d CarriedDevice
 		if err := rows.Scan(&d.ID, &d.User, &d.Name); err != nil {
 			rows.Close()
-			return nil, nil, err
+			return r, err
 		}
-		unknown = append(unknown, d)
+		r.Unknown = append(r.Unknown, d)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, nil, err
+		return r, err
 	}
-	return carried, unknown, tx.Commit()
+	return r, tx.Commit()
+}
+
+// renewedSince holds for a user u of main whom cur renewed since main was
+// copied, by cur's audit: a renewal's line, its target the user's name
+// and a colon (a name has none), that main does not have.
+const renewedSince = `u.name IN (SELECT substr(a.target, 1, instr(a.target, ':') - 1) FROM cur.audit_log a
+		WHERE a.action IN ('user.renew', 'user.renew:revoked-before') AND a.result = 'ok' AND instr(a.target, ':') > 1
+		  AND NOT EXISTS (SELECT 1 FROM main.audit_log m
+		                  WHERE m.id = a.id AND m.ts = a.ts AND m.action = a.action AND m.target = a.target))`
+
+// carryCredentials gives each credential in main (with renewed, only of
+// the users renewedSince), that cur has too, of the same user (ID, name
+// and creation time) and the same service (ID and kind: service IDs are
+// never reused), cur's secrets and rotation where they differ. Only rows
+// main has change: a credential or a user made since is not made, one
+// gone since is not dropped. The columns are those of schema 3, which no
+// migration since changed, so an older rayd reads them as its own. It
+// returns the names of the users whose credentials changed.
+func carryCredentials(ctx context.Context, tx *sql.Tx, renewed bool) ([]string, error) {
+	has, err := hasColumn(ctx, tx, "main", "credentials", "rotated_at")
+	if err != nil || !has {
+		return nil, err // before schema 3 there is no rotation to carry
+	}
+	const match = `FROM cur.credentials c
+		JOIN main.users u ON u.id = c.user_id
+		JOIN cur.users cu ON cu.id = u.id AND cu.name = u.name AND cu.created_at = u.created_at
+		JOIN main.services s ON s.id = c.service_id
+		JOIN cur.services cs ON cs.id = s.id AND cs.kind = s.kind
+		WHERE c.user_id = mc.user_id AND c.service_id = mc.service_id AND (NOT ?1 OR ` + renewedSince + `)
+		  AND (c.secret IS NOT mc.secret OR c.next_secret IS NOT mc.next_secret OR c.next_from IS NOT mc.next_from
+		       OR c.prev_secret IS NOT mc.prev_secret OR c.prev_until IS NOT mc.prev_until OR c.rotated_at IS NOT mc.rotated_at)`
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT mu.name FROM main.credentials mc JOIN main.users mu ON mu.id = mc.user_id
+		WHERE EXISTS (SELECT 1 `+match+`) ORDER BY mu.name`, renewed)
+	if err != nil {
+		return nil, fmt.Errorf("store: carrying credentials: %w", err)
+	}
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(names) == 0 {
+		return nil, nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE credentials AS mc SET secret = c.secret, next_secret = c.next_secret,
+		    next_from = c.next_from, prev_secret = c.prev_secret, prev_until = c.prev_until, rotated_at = c.rotated_at
+		`+match, renewed); err != nil {
+		return nil, fmt.Errorf("store: carrying credentials: %w", err)
+	}
+	return names, nil
 }
 
 // carryDevices revokes in main the devices active there and revoked in

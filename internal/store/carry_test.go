@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -375,5 +377,216 @@ func TestCarryLAN(t *testing.T) {
 	db.Close()
 	if err := CarryRevocations(ctx, old, current); err != nil {
 		t.Fatalf("a copy without LAN: %v", err)
+	}
+}
+
+// A rollback after the update to schema 14 (R4-36): the copy is at 13,
+// and the step renewed in current the users with a device revoked before
+// it. No credential goes back: every one the copy and current both have
+// is current's in the copy, so no old secret of a renewed user is left in
+// any slot (those the revoked devices know), a renewal since by rayctl
+// user renew stays, and an ordinary rotation since stays too. A user or a
+// credential made since does not come into the copy, a user deleted since
+// is disabled there, and the copy is still a database of schema 13.
+func TestCarryRevocationsAfterRenewal(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	saved, current := filepath.Join(dir, "saved.db"), filepath.Join(dir, "current.db")
+	schemaAt(t, saved, 13, matrix13()...)
+	copyFile(t, saved, current)
+	s, err := Open(ctx, current) // the step renews alice, carol, dave, frank
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RenewUser(ctx, "bob"); err != nil { // for a leak, after the update
+		t.Fatal(err)
+	}
+	// erin's ordinary rotation since: e1n current, e1 in its grace.
+	if _, err := s.db.Exec(`UPDATE credentials SET secret = 'e1n', next_secret = NULL, next_from = NULL,
+		prev_secret = 'e1', prev_until = 9999999999, rotated_at = 99 WHERE user_id = 5`); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := s.CreateService(ctx, Service{Kind: "naive", Name: "naive2", Enabled: true, Settings: "{}"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, s.SetUserServices(ctx, "bob", []int64{1, 2, svc.ID}))
+	zed, err := s.CreateUser(ctx, User{Name: "zed", Enabled: true, Services: []int64{1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Credentials(ctx, 1, []int64{2, zed.ID}, NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Credentials(ctx, svc.ID, []int64{2}, NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	must(t, s.DeleteUser(ctx, "dave"))
+	now := credsByRow(t, s.db)
+	nowLAN := lanKeys(t, s.db)
+	s.Close()
+
+	must(t, CarryRevocations(ctx, saved, current))
+	db, err := sql.Open("sqlite", "file:"+saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	got := credsByRow(t, db)
+	if len(got) != 8 {
+		t.Errorf("credentials in the copy: %v", got)
+	}
+	for k, v := range got {
+		if v != now[k] {
+			t.Errorf("credential %s in the copy %q, current %q", k, v, now[k])
+		}
+		if strings.HasPrefix(k, "5/") {
+			continue // erin's rotation: its previous, e1, is accepted now too
+		}
+		for _, old := range matrixSecrets {
+			if slices.Contains(strings.Fields(v), old) {
+				t.Errorf("credential %s holds the copy's %s: %q", k, old, v)
+			}
+		}
+	}
+	keys := lanKeys(t, db)
+	for _, id := range []int{1, 2, 3, 5, 6} {
+		if keys[id] != nowLAN[id] {
+			t.Errorf("user %d's LAN key %s, current %s", id, keys[id], nowLAN[id])
+		}
+	}
+	if u := rows(t, db, `SELECT name, enabled FROM users ORDER BY id`); u != "alice 1\nbob 1\ncarol 1\ndave 0\nerin 0\nfrank 0\n" {
+		t.Errorf("users in the copy:\n%s", u)
+	}
+	// Still schema 13, as the older rayd that opens it made it.
+	fresh := filepath.Join(dir, "fresh13.db")
+	schemaAt(t, fresh, 13)
+	fdb, err := sql.Open("sqlite", "file:"+fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fdb.Close()
+	const schema = `SELECT type, name, coalesce(sql, '') FROM sqlite_master ORDER BY type, name`
+	if a, b := rows(t, db, schema), rows(t, fdb, schema); a != b {
+		t.Errorf("the copy's schema:\n%s\nschema 13:\n%s", a, b)
+	}
+	if v := rows(t, db, `SELECT max(version) FROM schema_migrations`); v != "13\n" {
+		t.Errorf("the copy's version %q", v)
+	}
+	if ic := rows(t, db, `PRAGMA integrity_check`); ic != "ok\n" {
+		t.Errorf("integrity %q", ic)
+	}
+}
+
+// rayctl restore of a backup made before a renewal on this node: a user
+// renewed since (an audit line user.renew the backup has not) takes
+// current's credentials and LAN key; a user with a device made and
+// revoked since gets new ones; a device revoked since is carried as
+// before. A rotation since, a failed renewal and a renewal before the
+// backup change nothing. Against another node's database nothing is
+// renewed.
+func TestCarryRestoreRenewals(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	current, saved := filepath.Join(dir, "rayd.db"), filepath.Join(dir, "backup.db")
+	s, err := Open(ctx, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := s.CreateService(ctx, Service{Kind: "reality", Name: "reality", Enabled: true, Settings: "{}"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]int64{}
+	var all []int64
+	for _, n := range []string{"alice", "bob", "carol", "dave", "erin"} {
+		u, err := s.CreateUser(ctx, User{Name: n, Enabled: true, Services: []int64{svc.ID}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[n] = u.ID
+		all = append(all, u.ID)
+	}
+	if _, err := s.Credentials(ctx, svc.ID, all, NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE users SET lan = 1, lan_key = randomblob(?) WHERE name = 'alice'`, LANKeySize); err != nil {
+		t.Fatal(err)
+	}
+	davePhone, _, _ := s.CreateDevice(ctx, "dave", "phone", "user")
+	if _, err := s.RenewUser(ctx, "erin"); err != nil {
+		t.Fatal(err)
+	}
+	must(t, s.Audit(ctx, "test", "user.renew", "erin: 1 credentials new", "ok"))
+	backup := map[string]string{}
+	for n, id := range ids {
+		backup[n] = creds(t, s, id)[svc.ID][0]
+	}
+	aliceKey := s.lanKey(t, "alice")
+	s.Close()
+	copyFile(t, current, saved)
+
+	s, err = Open(ctx, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RenewUser(ctx, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	must(t, s.Audit(ctx, "test", "user.renew", "alice: 1 credentials new", "ok"))
+	must(t, s.Audit(ctx, "test", "user.renew", "bob: x", "error: injected")) // failed: not a renewal
+	for _, n := range []string{"bob", "erin"} {
+		if _, err := s.db.Exec(`UPDATE credentials SET prev_secret = secret, secret = ?, prev_until = 9999999999 WHERE user_id = ?`,
+			fmt.Sprintf("00000000-0000-4000-8000-%012d", ids[n]), ids[n]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	watch, _, _ := s.CreateDevice(ctx, "carol", "watch", "user")
+	if _, err := s.RevokeDevice(ctx, watch.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RevokeDevice(ctx, davePhone.ID); err != nil {
+		t.Fatal(err)
+	}
+	aliceNow, aliceKeyNow := creds(t, s, ids["alice"])[svc.ID], s.lanKey(t, "alice")
+	s.Close()
+
+	r, err := CarryRestore(ctx, saved, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Carried) != 1 || r.Carried[0].ID != davePhone.ID || len(r.Unknown) != 0 || !slices.Equal(r.Renewed, []string{"alice", "carol"}) {
+		t.Fatalf("carried %+v, unknown %+v, renewed %v", r.Carried, r.Unknown, r.Renewed)
+	}
+	b, err := Open(ctx, saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := creds(t, b, ids["alice"])[svc.ID]; got != aliceNow {
+		t.Errorf("alice's credential %v, current %v", got, aliceNow)
+	}
+	if got := b.lanKey(t, "alice"); !bytes.Equal(got, aliceKeyNow) || bytes.Equal(got, aliceKey) {
+		t.Errorf("alice's LAN key %x, current %x, the backup's %x", got, aliceKeyNow, aliceKey)
+	}
+	for n, want := range map[string]bool{"bob": true, "erin": true, "carol": false, "dave": false} {
+		got := creds(t, b, ids[n])[svc.ID][0]
+		if (got == backup[n]) != want || !isUUID(got) {
+			t.Errorf("%s's credential %s, the backup's %s", n, got, backup[n])
+		}
+	}
+	b.Close()
+
+	// Another node's database (a new host): it can tell nothing.
+	other := filepath.Join(dir, "other.db")
+	o, err := Open(ctx, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, o.Audit(ctx, "test", "user.renew", "alice: 1 credentials new", "ok"))
+	o.Close()
+	fresh := filepath.Join(dir, "fresh.db")
+	copyFile(t, saved, fresh)
+	if r, err := CarryRestore(ctx, fresh, other); err != nil || len(r.Renewed) != 0 || len(r.Carried) != 0 {
+		t.Fatalf("against another node: %+v %v", r, err)
 	}
 }
