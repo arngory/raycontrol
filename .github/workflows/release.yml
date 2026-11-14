@@ -34,6 +34,7 @@ jobs:
     # The whole CI on the commit being released: nothing is published unless
     # it is green. v0.16.0 went out from a green pull request while CI on
     # main, run beside the release, was red.
+    # Its job rayctl (macOS, run) skips itself under this workflow's name.
     uses: ./.github/workflows/ci.yml
 
   asn:

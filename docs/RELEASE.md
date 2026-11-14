@@ -74,8 +74,10 @@ sha256sum -c SHA256SUMS --ignore-missing
   он импортирует, под darwin (под freebsd — только тесты самого `rayctl`). Собранное под macOS и FreeBSD в этих job
   не запускается.
 - **Запуск на macOS.** Job `rayctl (macOS, run)` в CI собирает и запускает `rayctl` на runner с macOS и гоняет
-  тесты отказов, прав файла устройства и терминала. Он справочный (`continue-on-error`), пока его не видели
-  зелёным: релиз его не ждёт. На FreeBSD `rayctl` не запускается нигде.
+  тесты отказов, прав файла устройства и терминала. Он справочный (`continue-on-error`, не дольше 15 минут); на
+  ветке перед v0.26.0 он зелёный (macOS arm64, 1 мин 19 с). Release-workflow его не запускает, так что релиз не ждёт
+  runner с macOS: у job стоит `if: github.workflow != 'Release'`, а вызванный workflow видит в `github.workflow` имя
+  вызвавшего. На FreeBSD `rayctl` не запускается нигде.
 - **Подпись.** Те же `SHA256SUMS` и подпись minisign, что у архивов ноды: проверяется теми же двумя командами
   (на macOS — `shasum -a 256 --ignore-missing -c SHA256SUMS`). Бинарник для macOS не подписан сертификатом Apple и
   не нотаризован; что с этим делать пользователю — в [руководстве](10-quickstart-debian13.md), §7.

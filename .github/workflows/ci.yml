@@ -347,10 +347,12 @@ jobs:
     # The same rayctl where it can run: built on a Mac, started, and the
     # tests of what it does there differently from a node (where each
     # command works, the device file's mode, the terminal without one).
-    # Not the whole suite: most of it is the node's. Advisory until it has
-    # been seen green (it was written without a Mac to run it on), and
-    # bounded, so that it cannot hold a release.
+    # Not the whole suite: most of it is the node's. Advisory and bounded;
+    # not run by the Release workflow at all, so that a release never waits
+    # for a Mac runner (a called workflow sees its caller's name in
+    # github.workflow).
     name: rayctl (macOS, run)
+    if: github.workflow != 'Release'
     runs-on: macos-latest
     timeout-minutes: 15
     continue-on-error: true
