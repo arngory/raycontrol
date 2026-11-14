@@ -464,6 +464,42 @@ func TestInstallLock(t *testing.T) {
 	}
 }
 
+// The lock rayctl update holds and passes on is the install's: the same
+// open file, its lock taken again at once. Another open of the file, or
+// another file, is not; fd 3 that is not the lock leaves the install to
+// take the lock itself.
+func TestInheritedInstallLock(t *testing.T) {
+	path := t.TempDir() + "/lock"
+	held, err := takeInstallLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if !inheritedLock(path, int(held.Fd())) {
+		t.Error("the update's own lock was not taken as the install's")
+	}
+	other, _ := os.Open(path)
+	defer other.Close()
+	if inheritedLock(path, int(other.Fd())) {
+		t.Error("another open of the lock file passed for the update's lock")
+	}
+	elsewhere, _ := os.CreateTemp(t.TempDir(), "x")
+	defer elsewhere.Close()
+	if inheritedLock(path, int(elsewhere.Fd())) {
+		t.Error("another file passed for the lock")
+	}
+	t.Setenv(relayLockEnv, "3")
+	free := t.TempDir() + "/lock"
+	f, under, err := relayInstallLockFor(free)
+	if err != nil || under {
+		t.Fatalf("fd 3 is not the lock: %v %v", under, err)
+	}
+	f.Close()
+	if os.Getenv(relayLockEnv) != "" {
+		t.Error("the variable goes on to the install's own commands")
+	}
+}
+
 // What systemctl says, or does not: rayspa counts as enabled and running
 // unless systemd says it is not.
 func TestSystemctlAnswers(t *testing.T) {

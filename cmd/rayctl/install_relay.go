@@ -57,7 +57,7 @@ func guardCommand(flock, rayspa string) []string {
 // and every other way out, a signal too, stops it, disables it and removes
 // its table, so that a relay that cannot reach its exit does not lock its
 // admin out, now or at the next boot.
-func installRelay(bundlePath, packages string) error {
+func installRelay(bundlePath, packages string) (err error) {
 	// Before the journal: a node's records are its own.
 	if _, err := os.Stat(deploy.DB); err == nil {
 		return fmt.Errorf("this host is a node (%s): a relay goes on a host of its own", deploy.DB)
@@ -83,12 +83,22 @@ func installRelay(bundlePath, packages string) error {
 		return fmt.Errorf("%s is missing: install/bootstrap.sh -relay installs it (rayspa's unit copies the bundle in with it)",
 			deploy.DefaultBinaries.Rayd)
 	}
-	// One install at a time: two would share the guard.
-	installLock, err := takeInstallLock(relayInstallLock)
+	// One install at a time: two would share the guard. Under rayctl
+	// update, the update's own lock, held from before its first change.
+	installLock, underUpdate, err := relayInstallLockFor(relayInstallLock)
 	if err != nil {
 		return err
 	}
 	defer installLock.Close()
+	if !underUpdate {
+		// Installed anew and checked below: an update that did not end
+		// is over (relayMarkFile). Under an update, the update says.
+		defer func() {
+			if err == nil {
+				_ = os.Remove(filepath.Join(previousDir, relayMarkFile))
+			}
+		}()
+	}
 	sshd, err := sshdPorts()
 	if err != nil {
 		return fmt.Errorf("a relay closes all but its SSH port, and sshd's cannot be told (%w): fix sshd first", err)
@@ -404,6 +414,47 @@ func startGuarded(lock, armed string, run func(string, ...string) error) error {
 
 // relayInstallLock keeps two relay installs from running at once.
 const relayInstallLock = "/run/raycontrol-relay-install.lock"
+
+// relayLockEnv tells rayctl install -relay that rayctl update, its parent,
+// holds the install lock and passes it on as fd 3: the lock stays held
+// from the update's first change through the install, so a bootstrap.sh
+// -relay cannot slip in between.
+const relayLockEnv = "RAYCONTROL_RELAY_LOCK_FD"
+
+// relayMarkFile, in previousDir, says that an update or a rollback of the
+// relay did not end well (update_relay.go). A relay installed anew and
+// checked by rayctl install -relay outside an update has no such past.
+const relayMarkFile = "relay.unfinished"
+
+// relayInstallLockFor takes the install lock, or the one an update passed
+// on (underUpdate): fd 3 must be that very file and hold its lock.
+func relayInstallLockFor(path string) (f *os.File, underUpdate bool, err error) {
+	if os.Getenv(relayLockEnv) == "3" {
+		_ = os.Unsetenv(relayLockEnv)
+		if inheritedLock(path, 3) {
+			return os.NewFile(3, path), true, nil
+		}
+	}
+	f, err = takeInstallLock(path)
+	return f, false, err
+}
+
+// inheritedLock tells whether fd is the lock file at path and its lock
+// this process's: an open file description shared with the parent that
+// took it, on which taking it again succeeds at once. fd is looked at, not
+// wrapped, until it is known to be that file.
+func inheritedLock(path string, fd int) bool {
+	var st, pt syscall.Stat_t
+	if syscall.Fstat(fd, &st) != nil || syscall.Stat(path, &pt) != nil || st.Dev != pt.Dev || st.Ino != pt.Ino {
+		return false
+	}
+	if syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return false
+	}
+	// Not passed on further: the install's own commands do not hold it.
+	syscall.CloseOnExec(fd)
+	return true
+}
 
 // takeInstallLock takes the install lock or says another install has it.
 func takeInstallLock(path string) (*os.File, error) {
