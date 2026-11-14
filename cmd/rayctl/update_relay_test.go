@@ -27,6 +27,7 @@ import (
 	"golang.org/x/crypto/blake2b"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/arngory/raycontrol/internal/deploy"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/release"
@@ -1030,6 +1031,32 @@ func TestUpdateCheckRollbackRefused(t *testing.T) {
 	for _, args := range [][]string{{"-check", "-rollback"}, {"-rollback", "-check", "-yes"}} {
 		if err := c.update(context.Background(), args); !errors.Is(err, errUsage) {
 			t.Errorf("%v: %v", args, err)
+		}
+	}
+}
+
+// From the point of no return SIGTERM (a shutdown, logind) and SIGHUP (the
+// SSH connection gone) do not end the rayctl that would roll back: were
+// they not caught, this test's process would die here.
+func TestCatchSignals(t *testing.T) {
+	stop := catchSignals()
+	defer stop()
+	for _, s := range []syscall.Signal{syscall.SIGTERM, syscall.SIGHUP} {
+		if err := syscall.Kill(os.Getpid(), s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+}
+
+// What a relay install writes and an update keeps: the plan's files and
+// those written once the relay is up.
+func TestRelayFiles(t *testing.T) {
+	files := relayFiles()
+	for _, f := range []string{"/etc/systemd/system/rayspa.service", "/etc/systemd/system/" + deploy.RelayProbeUnit,
+		deploy.HardeningSysctl, deploy.RelaySysctl, deploy.ConntrackSysctl, deploy.ModulesLoad, deploy.PortsSysctl} {
+		if !slices.Contains(files, f) {
+			t.Errorf("%s is not kept", f)
 		}
 	}
 }
