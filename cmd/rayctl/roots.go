@@ -35,6 +35,7 @@ func rootsCmd(out io.Writer, settingsFile, extraFile string, args []string) erro
 	}
 	dir := filepath.Dir(settingsFile)
 	before, _ := os.Stat(dir)
+	removeExtra := false
 	switch args[0] {
 	case "system":
 		if args[1] != "on" && args[1] != "off" {
@@ -43,10 +44,9 @@ func rootsCmd(out io.Writer, settingsFile, extraFile string, args []string) erro
 		s.System = args[1] == "on"
 	case "file":
 		if args[1] == "none" {
-			s.File = ""
-			if err := os.Remove(extraFile); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
+			// Removed once the settings no longer name it: a write that
+			// fails leaves them naming a file that is still there.
+			s.File, removeExtra = "", true
 			break
 		}
 		cs, err := roots.ReadExtra(args[1])
@@ -64,6 +64,11 @@ func rootsCmd(out io.Writer, settingsFile, extraFile string, args []string) erro
 	}
 	if err := roots.WriteSettings(settingsFile, s); err != nil {
 		return err
+	}
+	if removeExtra {
+		if err := os.Remove(extraFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	if after, err := os.Stat(dir); err == nil && before != nil && after.Mode() != before.Mode() {
 		fmt.Fprintf(out, "%s was mode %v, closed to rayd: now %v\n", dir, before.Mode().Perm(), after.Mode().Perm())

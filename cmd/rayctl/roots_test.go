@@ -55,6 +55,15 @@ func TestRootsCmd(t *testing.T) {
 	if out, _ = run("show"); !strings.Contains(out, "added (rayctl roots system off)") || !strings.Contains(out, extra+" (rayctl roots file none), its roots:") {
 		t.Fatalf("show: %s", out)
 	}
+	// The settings cannot be written: the file they name stays.
+	_ = os.Mkdir(settings+".tmp", 0o700)
+	if _, err = run("file", "none"); err == nil {
+		t.Fatal("file none: the settings were not written")
+	}
+	if _, err := os.Stat(extra); err != nil {
+		t.Fatalf("the file the settings name went: %v", err)
+	}
+	_ = os.Remove(settings + ".tmp")
 	if _, err = run("system", "off"); err != nil {
 		t.Fatal(err)
 	}
