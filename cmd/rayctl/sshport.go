@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -119,8 +123,14 @@ func (c *cli) sshPortResults(ctx context.Context) []hostcheck.Result {
 	if err != nil {
 		return nil
 	}
-	sshd, err := sshdPorts()
+	bin := sshdBinary()
+	sshd, err := sshdPortsOf(bin)
 	switch {
+	case err != nil && noOpenSSH(bin, err):
+		// Nothing to compare, and nothing wrong: status says nothing,
+		// check one line.
+		return []hostcheck.Result{{Level: hostcheck.Advised, Name: "ssh port", OK: true,
+			Detail: "no OpenSSH sshd here (sshd -T cannot be run, or the sshd is another server): its ports are not compared with the perimeter's"}}
 	case err != nil && os.Geteuid() != 0:
 		return []hostcheck.Result{{Level: hostcheck.Advised, Name: "ssh port", OK: true,
 			Detail: "sshd's ports are read with sshd -T, which needs root: run rayctl check as root to compare them with the perimeter's"}}
@@ -128,5 +138,44 @@ func (c *cli) sshPortResults(ctx context.Context) []hostcheck.Result {
 		return []hostcheck.Result{{Level: hostcheck.Advised, Name: "ssh port", OK: false, Detail: err.Error(),
 			Fix: "sshd -T must read its configuration: fix it before sshd restarts"}}
 	}
-	return []hostcheck.Result{sshPortResult(sshd, sshAdmitted(r.Msg.Services))}
+	res := sshPortResult(sshd, sshAdmitted(r.Msg.Services))
+	res.Detail += sshSocketNote(sshSocketLinks)
+	return []hostcheck.Result{res}
+}
+
+// noOpenSSH reports whether sshd -T of bin failed for want of OpenSSH's
+// sshd: no such program, or another server under its name (Dropbear's
+// compatibility link, a stub). OpenSSH's sshd names itself in its answer
+// to -V, and an older one, which does not know -V, in the usage it prints
+// then. An OpenSSH sshd whose configuration does not read is not this.
+func noOpenSSH(bin string, err error) bool {
+	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return false
+	}
+	out, _ := exec.Command(bin, "-V").CombinedOutput() //nolint:gosec // G204: the host's sshd
+	return !strings.Contains(string(out), "OpenSSH")
+}
+
+// sshSocketLinks are where an enabled socket unit of sshd links, Debian's
+// and Ubuntu's name and that of others.
+var sshSocketLinks = []string{
+	"/etc/systemd/system/sockets.target.wants/ssh.socket",
+	"/etc/systemd/system/sockets.target.wants/sshd.socket",
+}
+
+// sshSocketNote is what to add when sshd is started by an enabled socket
+// unit: then the unit's ListenStream is where SSH is taken, which sshd -T
+// does not show and this check does not read.
+func sshSocketNote(links []string) string {
+	for _, l := range links {
+		if _, err := os.Lstat(l); err == nil {
+			return "; " + filepath.Base(l) + " is enabled: SSH is taken on its ListenStream ports, which this check does not read " +
+				"(systemctl cat " + filepath.Base(l) + ")"
+		}
+	}
+	return ""
 }

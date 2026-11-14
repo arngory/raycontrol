@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -56,5 +58,54 @@ func TestSSHPortResult(t *testing.T) {
 	r = sshPortResult([]int{22}, map[int][]string{})
 	if r.OK || !strings.Contains(r.Detail, "admits SSH on no port") || !strings.Contains(r.Fix, "rayctl service list") {
 		t.Errorf("none: %+v", r)
+	}
+}
+
+// No OpenSSH sshd to ask: none at all, or another server under its name
+// (Dropbear's), is a quiet state; an OpenSSH sshd whose sshd -T fails (a
+// configuration that does not read, no root) is not.
+func TestNoOpenSSH(t *testing.T) {
+	dir := t.TempDir()
+	for _, c := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"dropbear", `echo "dropbear: unknown option" >&2; exit 1`, true},
+		{"openssh", `case "$1" in -V) echo "OpenSSH_9.6p1, OpenSSL 3.0.13" >&2; exit 0;; esac
+echo "/etc/ssh/sshd_config: line 3: Bad configuration option" >&2; exit 255`, false},
+		{"openssh-old", `case "$1" in -V) echo "unknown option -- V" >&2; echo "OpenSSH_8.4p1, OpenSSL 1.1.1w" >&2; exit 1;; esac
+exit 255`, false},
+	} {
+		bin := filepath.Join(dir, c.name)
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+c.body+"\n"), 0o700); err != nil { //nolint:gosec // G306: a test's script
+			t.Fatal(err)
+		}
+		_, err := sshdPortsOf(bin)
+		if err == nil {
+			t.Fatalf("%s: sshd -T passed", c.name)
+		}
+		if got := noOpenSSH(bin, err); got != c.want {
+			t.Errorf("%s: %v (%v)", c.name, got, err)
+		}
+	}
+	missing := filepath.Join(dir, "none")
+	if _, err := sshdPortsOf(missing); !noOpenSSH(missing, err) {
+		t.Errorf("no sshd at all: %v", err)
+	}
+}
+
+// sshd started by a socket unit: the check says it does not see the
+// unit's ports.
+func TestSSHSocketNote(t *testing.T) {
+	dir := t.TempDir()
+	links := []string{filepath.Join(dir, "ssh.socket"), filepath.Join(dir, "sshd.socket")}
+	if n := sshSocketNote(links); n != "" {
+		t.Errorf("no socket unit: %q", n)
+	}
+	if err := os.Symlink("/lib/systemd/system/ssh.socket", links[0]); err != nil {
+		t.Fatal(err)
+	}
+	if n := sshSocketNote(links); !strings.Contains(n, "ssh.socket is enabled") || !strings.Contains(n, "does not read") {
+		t.Errorf("an enabled socket unit (a dangling link here): %q", n)
 	}
 }

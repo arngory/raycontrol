@@ -1235,7 +1235,10 @@ admin-устройства — удалённый доступ админист�
   warn  ssh port: sshd is configured for 2222, which the perimeter does not admit (it admits SSH on 22 (ssh)): once sshd runs as configured, SSH from the admin addresses and after a knock is closed to everyone
 ```
 
-а под ней команды шага 1; в `rayctl status` — строка `ssh port` с тем же текстом после `WARNING`. Порядок ниже следует из кода — периметр открывает адресам администратора порты
+а под ней команды шага 1; в `rayctl status` — строка `ssh port` с тем же текстом после `WARNING`. Нет OpenSSH
+(sshd нет совсем или это другой сервер, например Dropbear) — сравнивать нечего: `status` молчит, `check` пишет одну
+строку об этом. sshd запускает сокет (`ssh.socket` включён) — SSH принимается на портах его `ListenStream`, а не
+там, где говорит `sshd -T`; эти порты проверка не читает и так и пишет (`systemctl cat ssh.socket`). Порядок ниже следует из кода — периметр открывает адресам администратора порты
 всех сервисов вида `ssh`, — но целиком на сервере он не проверялся. Держите текущую сессию открытой до конца и
 убедитесь заранее, что у вас есть консоль провайдера.
 

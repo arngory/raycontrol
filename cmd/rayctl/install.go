@@ -29,11 +29,19 @@ import (
 
 // sshdPorts reads the ports sshd is configured to listen on (sshd -T):
 // those of its listen addresses, which say them all.
-func sshdPorts() ([]int, error) {
+func sshdPorts() ([]int, error) { return sshdPortsOf(sshdBinary()) }
+
+// sshdBinary is the host's sshd.
+func sshdBinary() string {
 	bin, err := exec.LookPath("sshd")
 	if err != nil {
 		bin = "/usr/sbin/sshd" // su without -: sbin is not in PATH
 	}
+	return bin
+}
+
+// sshdPortsOf is sshdPorts with the sshd at bin.
+func sshdPortsOf(bin string) ([]int, error) {
 	out, err := exec.Command(bin, "-T").Output() //nolint:gosec // G204: the host's sshd
 	if err != nil {
 		return nil, fmt.Errorf("sshd -T: %w", err)
