@@ -21,6 +21,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/perimeter"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 const passphrasePrompt = "Backup passphrase (12 characters at least; without it the backup cannot be opened): " //nolint:gosec // G101: a prompt, not a credential
@@ -86,6 +87,8 @@ func (c *cli) restore(ctx context.Context, args []string) error {
 	passFile := fs.String("passphrase-file", "", "file with the passphrase (default: asked for, not echoed)")
 	host := fs.String("host", "", "the node's public address, when it moved (devices then need new bundles)")
 	yes := fs.Bool("yes", false, "do not ask")
+	noCarry := fs.Bool("no-carry", false, "do not keep the revocations made here since the backup: the devices come back with their "+
+		"users' credentials of then (when this node's database cannot be read)")
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 || *in == "" {
 		return errUsage
 	}
@@ -152,6 +155,21 @@ func (c *cli) restore(ctx context.Context, args []string) error {
 	if err := run("systemctl", "stop", "rayd.service"); err != nil {
 		return err
 	}
+	// A revocation is for good, and changed its user's credentials (R4-36):
+	// the devices revoked here since the backup stay revoked in it, with
+	// new credentials for their users. With rayd stopped, so that none is
+	// missed.
+	if *noCarry {
+		fmt.Println("-no-carry: devices revoked since the backup come back, and with them their users' credentials of then")
+	} else {
+		carried, unknown, err := carryRestore(ctx, tmp)
+		if err != nil {
+			_ = run("systemctl", "start", "rayd.service")
+			return fmt.Errorf("keeping the revocations made since the backup: %w; nothing changed "+
+				"(rayctl restore -no-carry restores the backup as it is, revoked devices and old credentials included)", err)
+		}
+		fmt.Print(restoreCarryText(carried, unknown, meta.CreatedAt))
+	}
 	aside := deploy.DB + ".before-restore"
 	if err := swapDB(tmp, deploy.DB, aside); err != nil {
 		_ = run("systemctl", "start", "rayd.service")
@@ -172,6 +190,56 @@ func (c *cli) restore(ctx context.Context, args []string) error {
 		fmt.Println("The address changed: enrolled devices need new bundles (rayctl device add).")
 	}
 	return c.status(ctx)
+}
+
+// carryRestore brings into the restored copy at tmp (rayd's, checked by
+// rayd init) the revocations of the node's database since the backup: on
+// root's copies of both, then the result back over tmp as copyDB writes.
+func carryRestore(ctx context.Context, tmp string) (carried, unknown []store.CarriedDevice, err error) {
+	current, doneCur, err := rootCopy(deploy.DB)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer doneCur()
+	work, doneWork, err := rootCopy(tmp)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer doneWork()
+	if carried, unknown, err = store.CarryDeviceRevocations(ctx, work, current); err != nil {
+		return nil, nil, err
+	}
+	if len(carried) > 0 {
+		if err := copyDB(work, tmp); err != nil {
+			return nil, nil, err
+		}
+	}
+	return carried, unknown, nil
+}
+
+// restoreCarryText says what the restore kept of the revocations, and
+// what it cannot know: the audit log is in the backup too, so a device
+// this node's database has no record of (a new host) may have been
+// revoked after the backup.
+func restoreCarryText(carried, unknown []store.CarriedDevice, made time.Time) string {
+	var b strings.Builder
+	if len(carried) > 0 {
+		fmt.Fprintf(&b, "revoked here since the backup, so revoked in it too; their users' credentials are new, and the users'\n"+
+			"other devices reconnect after their next subscription fetch:\n")
+		for _, d := range carried {
+			fmt.Fprintf(&b, "  %s  %s/%s\n", d.ID, d.User, d.Name)
+		}
+	}
+	if len(unknown) > 0 {
+		fmt.Fprintf(&b, "warning: this node's database has no record of %d devices the backup has active (a new host, or users\n"+
+			"deleted here since): whether any of them was revoked after %s cannot be known here. Revoke again\n"+
+			"those that must stay out (rayctl device revoke ID: their users' credentials change with it):\n",
+			len(unknown), made.Format(time.RFC3339))
+		for _, d := range unknown {
+			fmt.Fprintf(&b, "  %s  %s/%s\n", d.ID, d.User, d.Name)
+		}
+	}
+	return b.String()
 }
 
 // swapDB puts the database next in place of db, which moves to aside with
