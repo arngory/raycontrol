@@ -2937,29 +2937,103 @@ bash bootstrap.sh -relay /etc/raycontrol/relay.bundle
   `/etc/raycontrol/relay.bundle` следует из кода: установка читает пакет relay до любых изменений и не переписывает
   файл с тем же содержимым.
 
-### 12.5. Обновление с v0.25.1 на v0.26.0
+### 12.5. Обновление с v0.26.0 на v0.27.0
 
-Для ноды, которая сейчас работает на v0.25.1. Раздел можно пройти, не читая остальные: ссылки на них — только за
-подробностями. Что меняется в v0.26.0, коротко:
+Для ноды, которая сейчас работает на v0.26.0. Раздел можно пройти, не читая остальные: ссылки на них — только за
+подробностями. Что меняется в v0.27.0, коротко:
 
-- в ссылках naive, `hy2-masq` и DoH появляется пин ключа сертификата сайта (§8, «Сертификат сайта и пины»);
-- naive отвечает клиенту после соединения с адресатом и называет причину отказа (§8, «naive»);
-- relay обновляется командой `rayctl update` на своём хосте (§12.4);
-- `rayctl` есть для macOS и FreeBSD (§7), а `-remote` не читает файл устройства, открытый другим.
+- отзыв устройства сразу даёт его пользователю новые учётные данные (§10.6); при обновлении это один раз
+  делается за прошлые отзывы;
+- у DoH — свой токен у каждого устройства (§8, «DoH»);
+- data plane больше не ходит в локальные сети ноды (§9, «Политика выхода»);
+- `rayspa` ставит периметр до того, как поднимется сеть (§12.6);
+- собственные соединения ноды проверяются по встроенному списку корней, а не по хранилищу системы (§6.4);
+- автообновление берёт патчи своей минорной версии и после выхода новой (§12.3);
+- новые команды: `rayctl user renew`, `rayctl ports`, `rayctl version`, `rayctl roots`.
 
 **Что произойдёт само и что нет.**
 
-- **Автообновление v0.26.0 не поставит.** `rayctl update auto patch` ставит только патчи вашей минорной версии, а
-  v0.26.0 — новая минорная. Нода на v0.25.1 об этом не скажет: строка `auto-update` в `rayctl status` говорит
-  `up to date`. Что v0.26.0 вышла, видно в `rayctl update status` (`latest  v0.26.0`) и в `rayctl update -check`
-  (шаг 1). Ноды новее v0.26.0 о новой минорной версии говорят сами (§12.3).
-- **Обновить можно двумя способами:** `rayctl update` на ноде (шаги 1–2) или с телефона администратора, если на
-  ноде включено `rayctl update remote on` (§12.3). Шаги 3–7 нужны в обоих случаях.
-- **Клиентам ничего делать не надо.** Пины и новые ссылки они получат с подпиской.
-- **Relay сам не обновится,** и его `rayctl` v0.25.1 обновлять relay не умеет: шаг 6.
-- **Машины администраторов:** шаг 7.
+- **Автообновление v0.27.0 не поставит:** это новая минорная версия. Нода на v0.26.0 об этом не скажет: строка
+  `auto-update` в `rayctl status` говорит `up to date`. Что v0.27.0 вышла, видно в `rayctl update status`
+  (`latest  v0.27.0`) и в `rayctl update -check` (шаг 3).
+- **Обновить можно двумя способами:** `rayctl update` на ноде (шаги 3–4) или с телефона администратора, если на
+  ноде включено `rayctl update remote on` (§12.3). Шаги 1–2 и 5–12 нужны в обоих случаях.
+- **Клиентам ничего делать не надо.** Новые учётные данные и токены DoH они получат с подпиской.
+- **Relay сам не обновится:** шаг 12.
+- **Машины администраторов:** шаг 11.
 
-**Шаг 1. Убедиться, что релиз есть.** На ноде, от root:
+**Шаг 1. Резервная копия.** На ноде, от root:
+
+```bash
+rayctl backup -o /root/node-before-v0.27.0.rcbak
+```
+
+Команда дважды спросит фразу, не короче 12 символов. Что вы должны увидеть:
+
+```
+wrote /root/node-before-v0.27.0.rcbak (… bytes): every key of the node, sealed with the passphrase.
+Keep it off the node and the passphrase apart from it; rayctl restore puts it back.
+```
+
+Заберите файл на свою машину (`scp`, как в §12.2) и храните фразу отдельно от него. Проверить, что копия
+открывается вашей фразой:
+
+```bash
+rayctl restore -i /root/node-before-v0.27.0.rcbak
+```
+
+Введите фразу. Строка `backup of node …, made … by raycontrol v0.26.0` значит, что копия читается. На следующий
+вопрос, `… Type yes to go on:`, **не вводите `yes`**, а просто нажмите Enter: команда ответит
+`rayctl: not confirmed` и ничего не изменит. Ошибка вместо строки `backup of node` — фраза не та или файл
+повреждён: сделайте копию заново.
+
+- **Зачем, если у обновления есть откат.** Обновление само держит копию базы для отката (ниже, «Если нужно
+  вернуться»), но только на этом сервере и только до следующего обновления. База переходит на схему 15, и
+  v0.26.0 на ней не работает.
+
+**Шаг 2. Только если нода за перехватывающим TLS прокси или с частным УЦ для ACME.** Остальным — к шагу 3.
+
+С v0.27.0 нода проверяет свои соединения (Let's Encrypt, GitHub, Cloudflare, IPinfo, вышестоящие DoH) по
+встроенному списку корней, а не по хранилищу системы (§6.4). Корня прокси, который вскрывает TLS, или частного
+ACME-УЦ в этом списке нет. Пока вы его не дадите:
+
+- заказы сертификатов отказывают (`acme site FAILED`), Cloudflare не правит записи (`dns FAILED`), IPinfo (если
+  включён `rayctl summary api ipinfo`), пересылка DoH к вышестоящим резолверам, зеркало приложения и проверка
+  обновлений самой ноды не работают;
+- в ошибках — `x509: certificate signed by unknown authority … (the node trusts its embedded root list: rayctl
+  roots)`, а в `rayctl status` — строка `tls-roots FAILED`;
+- сам `rayctl update` работает: загрузку релиза, которую отклонил список, он повторяет с хранилищем системы и
+  предупреждает.
+
+Ваш ли это случай:
+
+- **Обычный VPS** — нет: его исходящий HTTPS никто не вскрывает. Шаг пропустите.
+- **Прокси, который вскрывает TLS** (корпоративная сеть), вы бы знали: его корень вы когда-то добавляли в
+  хранилище системы сервера.
+- **Частный ACME-УЦ** — только если вы сами задавали `rayd serve -acme-directory`. Проверка:
+  `systemctl cat rayd | grep -- -acme-directory` — пустой ответ значит Let's Encrypt, шаг не нужен.
+- **Не уверены** — проверьте после обновления, в шаге 5: строка `Let's Encrypt` в `rayctl check` скажет.
+
+Что сделать — дать ноде этот корень одним файлом PEM:
+
+```bash
+rayctl roots file /root/proxy-root.pem
+```
+
+или верить всему хранилищу системы, как до v0.27.0: `rayctl roots system on`. Цена второго: корень, который в
+образ положили сборщик, провайдер или взломщик, снова может читать соединения ноды.
+
+У `rayctl` v0.26.0 команды `roots` нет. Поэтому либо выполните её сразу после шага 4, либо уже сейчас — `rayctl`
+из архива v0.27.0, скачанного и проверенного, как в §3.4 (`tar -xzf raycontrol-linux-amd64.tar.gz rayctl`, затем
+`./rayctl roots file /root/proxy-root.pem`): он только пишет файлы в `/etc/raycontrol`, а v0.27.0 прочитает их,
+когда запустится. Что вы должны увидеть:
+
+```
+the node's outbound TLS trusts: embedded 91 roots of 2026-11-14; system store not added; extra file /etc/raycontrol/tls-roots.pem (1 root)
+rayd follows within a second, rayctl update when it runs; no restart
+```
+
+**Шаг 3. Убедиться, что релиз есть.**
 
 ```bash
 rayctl update -check
@@ -2968,19 +3042,21 @@ rayctl update -check
 Что вы должны увидеть:
 
 ```
-installed v0.25.1, release v0.26.0 available: rayctl update
+installed v0.26.0, release v0.27.0 available: rayctl update
 ```
 
-Если вместо v0.26.0 назван более новый релиз — шаги те же, но вывод может отличаться. Если ответ
-`raycontrol v0.25.1 is installed, the newest release` — v0.26.0 ещё не опубликован.
+Если вместо v0.27.0 назван более новый релиз — шаги те же, но вывод может отличаться. Если ответ
+`raycontrol v0.26.0 is installed, the newest release` — v0.27.0 ещё не опубликован.
 
-Перед обновлением сделайте резервную копию и заберите её с сервера (§12.2):
+Кому обновление даст новые учётные данные (шаг 6), видно заранее:
 
 ```bash
-rayctl backup -o /root/node-before-v0.26.0.rcbak
+rayctl device list
 ```
 
-**Шаг 2. Обновить.**
+Это пользователи, у которых хотя бы у одного устройства в столбце `REVOKED` стоит дата, а не `-`.
+
+**Шаг 4. Обновить.**
 
 ```bash
 rayctl update
@@ -2988,43 +3064,79 @@ rayctl update
 
 Что вы должны увидеть, по порядку:
 
-1. `release v0.26.0 verified: its own rayctl updates the node` — подпись и сумма сошлись, дальше работает `rayctl`
+1. `release v0.27.0 verified: its own rayctl updates the node` — подпись и сумма сошлись, дальше работает `rayctl`
    из нового релиза.
-2. `rayctl v0.26.0 updates the node, handed over by the rayctl of v0.25.1`.
+2. `rayctl v0.27.0 updates the node, handed over by the rayctl of v0.26.0`, затем состав релиза (файл `VERSIONS`).
 3. Вопрос:
 
    ```
-   Update raycontrol v0.25.1 to v0.26.0? rayd, rayspa and the data plane restart; clients reconnect and send SPA again. Type yes to go on:
+   Update raycontrol v0.26.0 to v0.27.0? rayd, rayspa and the data plane restart; clients reconnect and send SPA again. Type yes to go on:
    ```
 
    Введите `yes`.
-4. Строки `installed /usr/local/…` — по одной на бинарник, и в конце:
+4. Строки `installed /usr/local/…` — по одной на бинарник, `installed /etc/systemd/system/rayspa.service` — новый
+   юнит `rayspa` (шаг 8), вывод `rayctl apply` и в конце:
 
    ```
-   raycontrol v0.26.0 is running; the previous binaries are kept for rayctl update -rollback
+   raycontrol v0.27.0 is running; the previous binaries are kept for rayctl update -rollback
    ```
 
-Что перезапускается: `rayd`, `rayspa` и data plane, как при любом обновлении. Xray — новый форк; фронт — у него
-меняется конфигурация; naive — в его юните появляется `-reset-key`; бэкенды niko-server. Клиенты переподключаются
-сами, перерыв — около минуты.
+5. Если у кого-то из пользователей было отозвано устройство, ещё две строки:
+
+   ```
+   3 users have new credentials: each had a device revoked before v0.27.0 (audit user.renew:revoked-before).
+   Their other devices reconnect by themselves within 15-30 s.
+   ```
+
+   Число у вас своё (у одного пользователя — `1 user has`). Что это значит — шаг 6. Строки нет — никому данные не
+   меняли.
+
+Что при этом происходит:
+
+- **База переходит на схему 15** (миграции 0014 и 0015): имя отозванного устройства становится свободным, а для
+  DoH записывается 72-часовое окно прежнего токена (шаг 6). Прежняя копия базы и бинарники уходят в
+  `/var/lib/raycontrol-install/previous/` — для отката.
+- **Перезапускаются** `rayd`, `rayspa` и data plane, как при любом обновлении. Клиенты переподключаются сами,
+  перерыв — около минуты.
+- **Периметр.** Обновление ждёт, пока новый `rayspa` поставит свою таблицу по снимку нового `rayd`. Не поставил за
+  30 секунд — обновление откатывается.
 
 Если обновление не поднялось, оно откатывается само и заканчивается строкой
-`update failed, the previous version runs again: <причина>`. Нода тогда работает на v0.25.1; причина — в строке.
+`update failed, the previous version runs again: <причина>`. Нода тогда работает на v0.26.0; причина — в строке.
 
-**Шаг 3. Проверить ноду.**
+**Шаг 5. Проверить ноду.**
 
 ```bash
 rayctl status
 ```
 
-В первой строке, `version`, — `v0.26.0`; строк `FAILED` нет. Если в строке `apply` стоит `FAILED` с текстом
-`… failed, its process runs with the files of before` — см. таблицу в конце раздела.
+- В первой строке, `version`, — `v0.27.0`; строк `FAILED` нет.
+- Новые строки (пример — §6.2): `perimeter ok … (rayspa v0.27.0)` — `rayspa` получает снимки и его таблица стоит;
+  `tls-roots ok …: embedded 91 roots of 2026-11-14; …` — корни своих соединений ноды; от root на ноде в конце —
+  `perimeter table ok: rayspa runs, its table is in with rayd's snapshot`. Первые секунд двадцать строки
+  `perimeter` может не быть: подождите и повторите.
+- Строка `egress` теперь `blocked: local networks (rayctl egress)` — шаг 7.
+- Строка `ssh port WARNING …` — порты sshd разошлись с портами сервисов `ssh` (§7, «Сменить порт sshd»). Так было и
+  раньше, v0.27.0 только стал это говорить.
+- `tls-roots FAILED` — шаг 2.
+
+Своих соединений нода сразу после старта делает немного, так что `tls-roots ok` ещё не доказывает, что корни
+подходят. Проверить сейчас — проверка хоста с вашим доменом:
+
+```bash
+rayctl check -domain example.com
+```
+
+В разделе `Advised` должна быть строка `ok    Let's Encrypt: reachable`. Строка
+`warn  Let's Encrypt: … x509: certificate signed by unknown authority (the node trusts its embedded root list: rayctl roots)`
+— нода за прокси, который вскрывает TLS: шаг 2. С Cloudflare проверьте ещё `rayctl dns sync`: строк `problem:` и
+ошибок нет.
 
 ```bash
 rayctl update status
 ```
 
-Первая строка — `installed  v0.26.0`; `remote` и `auto` — как были до обновления.
+Первая строка — `installed  v0.27.0`; `remote` и `auto` — как были до обновления.
 
 ```bash
 systemctl --no-pager list-units --all 'niko-*' rayd.service rayspa.service
@@ -3032,159 +3144,239 @@ systemctl --no-pager list-units --all 'niko-*' rayd.service rayspa.service
 
 У каждой службы `active` и `running`.
 
-**Через десять минут после обновления** посмотрите ключ сайта:
+**Шаг 6. Пользователи, устройства и DoH.**
+
+- **Новые учётные данные после обновления.** Пользователи из строки шага 4 — те, у кого до v0.27.0 отзывали
+  устройство. Тогда отзыв данные не менял, и отозванное устройство могло их ещё знать (§10.6). Теперь они новые,
+  без перекрытия: устройства этих людей теряют связь, пока не возьмут подписку, — Niko делает это сам через 15–30
+  секунд. Телефон, который был без сети, переподключится, когда она появится. Кто это, показывает журнал действий:
+  `rayctl audit -n 200 | grep user.renew:revoked-before` — по строке на пользователя. Повторно, при следующих
+  стартах `rayd`, это не делается.
+- **DoH.** Каждое устройство получает свой токен DoH при следующем получении подписки (§8, «DoH»). Прежний общий
+  токен пользователя нода принимает ещё 72 часа после обновления: за это время подписку берёт каждое включённое
+  устройство. Устройство, которое не выходило на связь дольше, со старым токеном резолвер ноды не получит; его
+  подписка к этому времени тоже истекла (она живёт 72 часа), и, взяв новую, оно получает и свой токен. Если в эти 72
+  часа отозвать устройство человека, его общий токен закрывается сразу: остальные его устройства получают на него
+  быстрый `404` и сами берут подписку.
+- **`rayctl user export`** строк DoH больше не выдаёт: токен бывает только у устройства.
+- **Что замечают люди:** один перерыв около минуты во время обновления; те, кому сменили данные, — ещё 15–30 секунд.
+
+**Шаг 7. Локальные сети ноды.**
 
 ```bash
-rayctl service list
+rayctl egress
 ```
 
-В строке `site`, в столбце `KEYS`, должно быть `key since ДАТА, next key pinned since ДАТА`. Первая дата — начало
-срока нынешнего сертификата, вторая — примерно десять минут после обновления. С этого момента пины идут в подписки.
+Что вы должны увидеть (строки `bittorrent` и `smtp` — как были у вас до обновления):
 
-- **В `KEYS` пусто** — следующего ключа ещё нет: подождите несколько минут и посмотрите снова. Пока пусто, пинов в
-  подписках нет.
-- **`certificate of your own: no pins`** — на сайте свой сертификат, импортированный уже на v0.26.0. Шаг 4 сделан.
-- **`key since …` при своём сертификате, импортированном до v0.26.0,** — шаг 4 обязателен.
+```
+bittorrent      allowed
+smtp (tcp 25)   allowed
+local networks  blocked
+covers          every profile: the data plane's processes, UIDs 9100-9179
+in force        yes
+blocked local   0 packets, 0 bytes
+```
 
-**Шаг 4. Только если у вас свой сертификат.** Это нужно, если вы когда-либо ставили сертификат командой
-`rayctl service cert` (в этом руководстве она нигде не требуется) и на ноде включён ACME, как ставит установка.
-Такую ноду v0.26.0 считает выпустившей сертификат сама и через десять минут после обновления начинает отдавать пины
-ключа вашего сертификата. Тогда следующий импорт с другим ключом (certbot по умолчанию делает новый ключ при каждом
-продлении) без `-force` будет отклонён.
+- **Что это значит.** Новые соединения data plane к loopback, частным сетям, link-local и адресу метаданных облака,
+  CGNAT, multicast, ULA и адресу 168.63.129.16 (Azure) теперь отвергает ядро: TCP получает сброс сразу, UDP и ICMP
+  — отказ. Через прокси эти сети не открывались и раньше — их закрывали сами процессы; теперь их держит и периметр.
+  Исключения: заглушка systemd-resolved на порту 53, проба канала и цель REALITY, заданная локальным адресом.
+- **REALITY с сайтом самой ноды** (так ставит установка) — ничего делать не нужно.
+- **REALITY с чужой целью на локальном адресе** (`127.0.0.1:8443`, `10.0.0.5:443`; §8, «Чужая цель») — работает
+  как раньше. В `rayctl egress` для неё строка `local exempt`:
 
-Сразу после обновления, от root на ноде, поставьте ещё раз тот сертификат, что стоит сейчас, — те же файлы цепочки и
-ключа, без `-force`:
+  ```
+  local exempt    tcp 127.0.0.1:8443: REALITY reality's target, for its process only (uid …); anyone reaching reality's port without its keys reaches it through REALITY
+  ```
+
+  Этот адрес и порт открыты только процессу этого сервиса REALITY, не пользователям туннеля.
+- **REALITY с чужой целью, заданной именем, которое разрешается в локальный адрес,** перестаёт работать. В
+  `rayctl status`:
+
+  ```
+  reality-target reality  FAILED …: reality target www.example.org:443 resolves to 10.0.0.5, a local address: the data plane reaches no local network by a name while local networks are blocked (the default, R4-38); give the address as the target (10.0.0.5:443) with the sni (last ok …)
+  ```
+
+  Нужна цель-адрес с `sni` — именем, на которое у цели сертификат:
+  `-settings '{"target":"10.0.0.5:443","sni":"www.example.org"}'` (§8, «Чужая цель»). У `rayctl service set`
+  такой настройки нет: цель задаётся только при `rayctl service add`. Прежнее поведение ядра возвращает
+  `rayctl egress allow local` (ниже); строка `reality-target` при этом остаётся `FAILED`: проверка цели-имени от
+  политики не зависит.
+- **DNS-туннели** не отвечают на запросы с локальных адресов, пока локальные сети закрыты: например, от резолвера в
+  частной сети самой ноды. Запросы с публичных резолверов это не задевает.
+- **Вернуть прежнее:**
+
+  ```bash
+  rayctl egress allow local
+  ```
+
+  ```
+  the perimeter no longer blocks the node's own and local networks; the processes' own checks still do
+  (Xray's routing, naive, systemd's IPAddressDeny): spec/egress-policy-v1.md §10
+  ```
+
+  Это поведение v0.26.0: проверки процессов остаются, через прокси локальные сети по-прежнему не открываются.
+  Закрыть снова — `rayctl egress block local`.
+
+**Шаг 8. Первая перезагрузка.** Обновление поставило новый юнит `rayspa`: со следующей загрузки он стартует раньше
+сети и ставит таблицу из сохранённого снимка, так что SSH с адресов администратора и стук работают ещё до `rayd`.
+Порядок загрузки при этом меняется, поэтому перезагрузите ноду один раз в удобное время, пока под рукой консоль
+провайдера. Сначала проверьте юнит:
 
 ```bash
-rayctl service cert site -chain /root/site-chain.pem -key /root/site-key.pem
+systemd-analyze verify /etc/systemd/system/rayspa.service
 ```
 
-Пути подставьте свои. Что вы должны увидеть:
+В выводе не должно быть `ordering cycle`. Затем:
 
-```
-certificate on site until … for …
-with a certificate of your own the links of naive, hy2-masq and DoH under it carry no niko-pin:
-clients check its chain only, as before pins
+```bash
+reboot
 ```
 
-После этого в `rayctl service list` у `site` — `certificate of your own: no pins`, и ссылки идут без пина, как
-раньше. Не помните, ставили ли свой сертификат, — посмотрите журнал действий: `rayctl audit -n 1000 | grep
-service.cert`. Пустой ответ ничего не доказывает, если импорт был давно и запись уже ушла из журнала.
+После загрузки, от root:
 
-**Шаг 5. Подписки и приложение.**
+```bash
+rayctl status
+```
 
-- **Пины** появляются в подписках через десять минут после обновления. Клиенты берут их при очередном запросе
-  подписки; подписка живёт 72 часа.
-- **Что проверяет пин.** Niko 1.46.0 и новее: в naive — пин и цепочку, в `hy2-masq` и DoH — пин вместо цепочки.
-  Niko 1.45.0 проверяет пин только в `hy2-masq`; в naive и DoH более ранние версии его не читают. Сертификат ноды не
-  меняется, поэтому ни одна версия Niko после обновления не перестаёт подключаться.
-- **Честный connect** naive: Niko 1.46.0 показывает причину отказа (`refused`, `unreachable`, `denied`, молчание
-  адресата), только когда в нём включён эксперимент «Честный connect»; по умолчанию он выключен. Без него всё как
-  раньше.
-- **Что замечают люди:** один перерыв около минуты во время обновления.
+Должны быть строки `perimeter ok …: rayspa follows the perimeter, its table is in (rayspa v0.27.0)` и
+`perimeter table ok: rayspa runs, its table is in with rayd's snapshot`. То же говорит сам `rayspa`:
 
-**Если нужно вернуться на v0.25.1:**
+```bash
+systemctl status rayspa
+```
+
+Строка `Status:` — `"perimeter up: rayd's snapshot; rayspa v0.27.0, pid …"`.
+
+| Что вы видите | Что это значит | Что делать |
+|---|---|---|
+| `Status: "perimeter up: the saved snapshot, until rayd answers; …"` | таблица стоит по сохранённому снимку, `rayd` ещё не поднялся | подождите минуту и посмотрите снова |
+| `Status: "PERIMETER DOWN: the host is open until rayd answers; …"` | сохранённого снимка не было (испорчен файл состояния): хост открыт, пока не ответит `rayd` | дождитесь `rayd` (`systemctl status rayd`); `journalctl -u rayspa -b -p warning` — почему снимка нет |
+| `rayctl status`: `perimeter FAILED …: rayspa has not followed the perimeter for …` | `rayspa` не связан с `rayd` дольше 90 секунд: остановлен или перезапускается по кругу. Стук не открывает порты; если `rayspa` не поднялся с загрузки, хост открыт | `systemctl status rayspa`, `journalctl -u rayspa -b -p warning`; строка `perimeter table` (от root) скажет, открыт ли хост; исправив причину, `systemctl restart rayspa` |
+| `rayctl status`: `perimeter FAILED …: rayspa follows the perimeter, but its table … for …` | `rayspa` получает снимки, но его таблица не стоит дольше 90 секунд: хост открыт или действует замороженная таблица прежнего `rayspa`, и стук не работает | `journalctl -u rayspa -b -p warning` — почему ядро не берёт таблицу; `systemctl restart rayspa` |
+| `rayctl status`: `perimeter unknown …: rayspa follows the perimeter, its table is not reported …` | `rayspa` старее `rayd` (ставили руками) и о своей таблице не сообщает | строка `perimeter table` от root скажет, стоит ли таблица; `rayctl update -force` ставит все бинарники релиза заново, `rayspa` тоже |
+| загрузка висит ~30 с на «A start job is running for raycontrol perimeter» | под новым юнитом работает старый бинарник `rayspa` | §13, «Клиенты не подключаются» |
+
+**Шаг 9. Автообновление.** Если оно включено (`rayctl update auto patch`), с v0.27.0 нода ставит самый новый патч
+своей минорной версии и тогда, когда уже вышла следующая минорная (§12.3). Что она нашла, показывает
+`rayctl update status`: строка `patch` — патч, который она поставит в своё окно, строка `newer` — новая минорная,
+которую она не ставит. Телефон администратора получает найденный патч в поле `latest_patch`
+(`GetUpdateStatusResponse`); показывает ли его приложение, решает клиент.
+
+**Шаг 10. Что ещё нового на ноде.**
+
+- `rayctl user renew ИМЯ` — новые учётные данные человеку без отзыва устройства, например если ссылки из
+  `rayctl user export` ушли дальше, чем нужно (§10.6).
+- `rayctl ports` — все порты ноды для файрвола провайдера (§6.1). Строка `must let in` после `rayctl apply` теперь
+  называет и диапазоны ротации UDP: если файрвол у провайдера открыт по прежней строке, откройте и их.
+- `rayctl version` — версия `rayctl` и установленная (§12.3).
+- `rayctl roots` — каким корням верят соединения ноды (§6.4).
+- **Последний сервис `ssh`.** `rayctl service disable` и `service del` последнего включённого сервиса вида `ssh`
+  нода без `-force` отклоняет: без него SSH закрыт для всех (§8, «Общие правила»). Телефон и `rayctl` старше
+  v0.27.0 флага `-force` не шлют и получают `failed_precondition`; если это действительно нужно — новым `rayctl`.
+- Отозванное устройство больше не занимает своё имя: новое можно назвать так же (§10.2).
+
+**Шаг 11. Машины администраторов.** Поставьте новый `rayctl` на каждую машину, где вы пользуетесь `-remote`:
+Linux — `rayctl` из архива ноды v0.27.0, macOS и FreeBSD — архивы `rayctl-darwin-arm64.tar.gz`,
+`rayctl-darwin-amd64.tar.gz` и `rayctl-freebsd-amd64.tar.gz` (они есть с v0.26.0). Проверяются они тем же
+`SHA256SUMS` с подписью тем же ключом, командами из §7. Старый `rayctl` с новой нодой работает, но:
+
+- не знает `user renew`, `ports` и `version`: на них он отвечает `rayctl: bad usage` и печатает справку;
+- флаг `-force` не передаёт: для последнего сервиса `ssh` нода отвечает ему `failed_precondition`;
+- после `device revoke` ничего не печатает, хотя учётные данные человека нода сменила.
+
+**Шаг 12. Relay.** Нода в v0.27.0 relay не обновляет (§15): обновите каждый хост relay сами. На хосте relay, от
+root, из SSH-сессии с адреса администратора relay:
+
+```bash
+rayctl update -check
+```
+
+```
+installed v0.26.0, release v0.27.0 available: rayctl update
+this host is a relay msk: rayctl update here updates it; remote and automatic updates do not apply to a relay
+```
+
+```bash
+rayctl update
+```
+
+Что вы должны увидеть:
+
+1. `release v0.27.0 verified: its own rayctl updates the relay`;
+2. `rayctl v0.27.0 updates the relay, handed over by the rayctl of v0.26.0`;
+3. вопрос `Update relay msk from v0.26.0 to v0.27.0? rayspa restarts: forwarding stops, usually for under a minute,
+   at most about 5 minutes (the exit's first snapshot, then a rollback if it fails); clients reconnect. Type yes to
+   go on:` — введите `yes`;
+4. в конце `relay msk runs raycontrol v0.27.0; the previous binaries are kept for rayctl update -rollback`.
+
+Проверка — `rayctl update status` на хосте relay: первые строки `host       relay` и `installed  v0.27.0 (rayctl)`.
+Подробно, с отказами и откатом relay, — §12.4. Relay на v0.25.1 и старше `rayctl update` не обновляет: его путь —
+повторная установка (§12.4, «Relay до v0.26.0 и запасной путь»).
+
+> **Не проверено на настоящем хосте.** `rayctl update` на relay не запускается в CI и ни разу не запускался на
+> настоящем relay (§12.4). Держите доступ к консоли провайдера relay, пока обновляете.
+
+**Если нужно вернуться на v0.26.0:**
 
 ```bash
 rayctl update -rollback
 ```
 
-Команда печатает `rolling back to v0.25.1 (asked for)` и перезапускает ноду на прежних бинарниках. Схему базы v0.26.0
-не меняет, поэтому база остаётся как есть и подтверждения команда не спрашивает. Не добавляйте `-check`:
+Обновление сдвинуло схему базы, поэтому команда сначала говорит, что будет, и спрашивает:
+
+```
+The update moved the database to schema 15; the previous version runs on 13.
+The database goes back to its copy from …: users, devices and settings added or changed since are lost.
+What was taken away since stays taken away: revoked devices, disabled or deleted users and relays,
+services taken from users or disabled, replaced certificates, the admin addresses; and where the
+previous version has the LAN (v0.23.0 and later), a LAN turned off and the users' LAN keys as they are now.
+Credentials stay as they are now, those renewed or rotated since included: no secret a renewal retired
+comes back. The users of devices revoked since get new credentials once more: their other devices
+reconnect after their next subscription fetch.
+DoH: the devices that fetched their subscription since the update have DoH tokens of their own,
+which the previous version does not take: they lose the node's resolver until their next subscription fetch.
+Type yes to go on:
+```
+
+Введите `yes`. Дальше — `rolling back to v0.26.0 (asked for)`, `database put back from
+/var/lib/raycontrol-install/previous/rayd.db` и перезапуск ноды на прежних бинарниках. Не добавляйте `-check`:
 `rayctl update -check -rollback` — ошибка использования.
 
-Цена отката для клиентов:
-
-- **Откат в первые десять минут** после обновления ничего не стоит: пинов клиенты ещё не получили.
-- **Откат позже.** v0.25.1 пинов не отдаёт, и клиенты, которые обновят подписку, их снимут. Но клиент, который уже
-  взял пины и не обновлял подписку, держит их. Ключ сертификата при этом прежний, и пока всё работает. При следующем
-  продлении v0.25.1 сделает новый ключ, и такие клиенты не пройдут naive, `hy2-masq` и DoH, пока не обновят
-  подписку. Клиент, у которого один из этих профилей рабочий, перезапрашивает её сам, не раньше чем через 15–30
-  секунд; остальные — при очередном запросе.
-
-**Шаг 6. Relay.** Делается на каждом хосте relay, один раз.
-
-> **Не проверено на настоящем хосте.** Ни `bootstrap.sh -relay` на хосте с systemd, ни `rayctl update` на relay не
-> запускались в CI и ни разу не запускались на настоящем relay: обновление relay проверено только модульными
-> тестами. Держите доступ к консоли провайдера relay, пока обновляете.
-
-`rayctl` v0.25.1 на relay обновлять его не умеет и отвечает
-`rayctl: this host is a relay: install/bootstrap.sh -relay with its bundle takes a new release`. Поэтому последний
-раз relay обновляется повторной установкой с его пакетом. На хосте relay, от root, из SSH-сессии с адреса
-администратора relay:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/arngory/raycontrol/v0.26.0/install/bootstrap.sh -o bootstrap.sh
-```
-
-```bash
-sha256sum bootstrap.sh
-```
-
-Сумма должна быть `627dede2e62fce85ab576b0ab5ce903388be53597a2f74fe0dd19b2bbe7dadce`, как в §3.1. Другая — не
-запускайте.
-
-```bash
-bash bootstrap.sh -relay /etc/raycontrol/relay.bundle
-```
-
-Успех — те же две строки, что при установке relay (§12.4):
-
-```
-relay msk up: knocks with K_relay open the exit's services through here (exit 203.0.113.7).
-This host's SSH (port 22) is reachable from 198.51.100.50, the relay's own admin addresses (rayctl relay set on the exit).
-```
-
-- `/etc/raycontrol/relay.bundle` — копия пакета relay, которую оставила установка. Если на ноде с тех пор выполняли
-  `rayctl relay bundle`, этот пакет уже не действует: перенесите новый и укажите его.
-- Пересылка на время установки прерывается, клиенты переподключаются.
-- Не перезагружайте и не выключайте хост relay во время установки и во время `rayctl update`. Если это случилось
-  при `rayctl update`, после загрузки relay может быть открытым и без пересылки: выполните `rayctl update -rollback`
-  (или `bash bootstrap.sh -relay /etc/raycontrol/relay.bundle`); `rayctl update status` говорит, прервано ли
-  обновление.
-
-Проверить версию relay:
-
-```bash
-rayctl update status
-```
-
-Первые строки — `host       relay` и `installed  v0.26.0 (rayctl)`.
-
-Дальше relay обновляется на своём хосте командами `rayctl update -check` и `rayctl update` (§12.4). Автообновления и
-обновления с телефона у relay нет.
-
-**Шаг 7. Машины администраторов.**
-
-- **Файлы устройств.** `rayctl` v0.26.0 не читает файл устройства (`.rcdev`), который может читать или менять группа
-  или остальные, — и на Linux тоже. На каждой машине, где вы пользуетесь `-remote`:
-
-  ```bash
-  chmod 600 laptop.rcdev
-  ```
-
-  Файл должен принадлежать тому, кто запускает `rayctl`; чужой файл может взять только root. Старый `rayctl` права
-  не проверял, так что до замены `rayctl` на своей машине ничего не ломается.
-- **Новый `rayctl` на своей машине.** Linux — `rayctl` из архива ноды v0.26.0 (§7). macOS и FreeBSD — новые архивы
-  `rayctl-darwin-arm64.tar.gz`, `rayctl-darwin-amd64.tar.gz` и `rayctl-freebsd-amd64.tar.gz`, если они вам нужны.
-  Проверяются они тем же `SHA256SUMS` с подписью тем же ключом minisign
-  (`RWQBergjLoDHqeme5vyIuIRXJLjTj1EF3jR1nlWBVJO3rWxgy9SZj4bD`), командами из §7.
-- **Автоматика,** которая ставила сертификат командой `rayctl service cert` от члена группы `raycontrol`, теперь
-  получает `permission_denied`: переведите её на root.
+- **Что возвращается.** Копия базы, снятая при обновлении, и в неё перенесено нынешнее: учётные данные
+  пользователей — все, какие есть сейчас (новые после обновления, после `rayctl user renew` и после ротации), ключи
+  LAN, отзывы устройств. Пользователи устройств, отозванных после обновления, получают новые данные ещё раз. Что
+  перенесено, записано в журнал действий возвращённой базы: `rayctl audit -n 20` — строки `user.carry:rollback`,
+  `user.renew:rollback`, `device.revoke:rollback`. Возвращается и прежний юнит `rayspa`.
+- **Что пропадает.** Пользователи, устройства и настройки, добавленные или изменённые после обновления (кроме
+  отнятого — оно остаётся отнятым). Устройства, взявшие подписку на v0.27.0, теряют DoH ноды до следующей
+  подписки: v0.26.0 токенов устройств не знает. Исчезают и запрет локальных сетей в ядре, встроенный список корней,
+  строки `perimeter` и `tls-roots` в `rayctl status` и команды v0.27.0.
+- **Если нынешнюю базу не прочитать,** откат отказывает и оставляет `rayd` остановленным:
+  `keeping the revocations made since the update: … (rayd is stopped; rayctl update -rollback -no-carry puts the copy back as it is)`.
+  Тогда `rayctl update -rollback -no-carry` возвращает копию как есть: устройства, отозванные после обновления,
+  снова работают, у пользователей — данные того времени. Отзовите эти устройства ещё раз.
+- **Новое обновление после отката** не меняет данные второй раз тем, кому их сменило первое: новые получат только
+  пользователи устройств, отозванных на v0.26.0 уже после отката.
 
 **Если что-то пошло не так.**
 
 | Что вы видите | Причина | Что делать |
 |---|---|---|
-| `rayctl: device file laptop.rcdev is mode -rw-r--r--: it holds a private key, make it 0600: …` | `-remote` не читает файл, открытый группе или остальным | `chmod 600 laptop.rcdev`; на файловой системе без прав (FAT, SMB) — скопировать файл в домашний каталог и сделать `chmod 600` копии |
-| `rayctl: device file … belongs to uid …, not to you (uid …): …` | файл другого пользователя | своя копия файла с `chmod 600`, или запуск от root |
-| `rayctl: permission_denied: a site's certificate: root on the node only` | `rayctl service cert` не от root | от root на ноде |
-| `rayctl: failed_precondition: not now: the links of naive, hy2-masq and DoH under site carry the pins of the node's keys, and this certificate has another key: …` | шаг 4 не сделан, а пины уже ушли клиентам; сертификат с другим ключом | поставить сертификат с ключом, который сейчас в работе, без `-force`; или с `-force`, если клиенты могут подождать новой подписки |
-| на relay: `rayctl: this host is a relay: install/bootstrap.sh -relay with its bundle takes a new release` | на relay ещё v0.25.1 | шаг 6 |
-| на relay: `rayctl: an update of this relay from … to … was interrupted: rayctl update -rollback puts … back` | прошлое `rayctl update` на relay оборвалось | `rayctl update -rollback`, затем снова `rayctl update` (§12.4) |
-| после отката на v0.25.1 клиенты не проходят naive, `hy2-masq` или DoH | v0.25.1 продлил сертификат на новый ключ, а у клиентов пины ключа v0.26.0 | на ноде ничего: клиенты снимут пины с новой подпиской (выше, «Если нужно вернуться») |
+| `update failed, the previous version runs again: …` | v0.27.0 не поднялась, откат выполнен | нода на v0.26.0; причина — в строке; приложите `rayctl report` к обращению |
+| `update failed, the previous version runs again: rayspa did not bring the perimeter back: …` | новый `rayspa` не поставил свою таблицу за 30 секунд | `journalctl -u rayspa -b -p warning`; приложите `rayctl report` к обращению |
+| `rayctl status`: `tls-roots FAILED …`, `acme site FAILED` или `dns FAILED` с `… (the node trusts its embedded root list: rayctl roots)` | нода за прокси, который вскрывает TLS, или с частным ACME-УЦ | шаг 2 |
+| `rayctl status`: `perimeter FAILED …` или `perimeter unknown …` | `rayspa` не следит за `rayd`, его таблица не стоит или он старее `rayd` | шаг 8, таблица |
+| `rayctl status`: `reality-target … FAILED …: … resolves to …, a local address: …` | цель REALITY — имя, которое разрешается в локальный адрес | шаг 7: цель-адрес с `sni` |
+| у устройства перестал работать DoH ноды, остальное работает | устройство не брало подписку больше 72 часов после обновления или взяло её на v0.27.0, а нода откатилась | устройству — взять подписку заново: Niko берёт её и при подключении (§10.7), так что достаточно переподключиться |
+| у человека отвалились все устройства сразу после обновления | ему сменены учётные данные (строка шага 4, шаг 6) | ничего: Niko сам берёт подписку через 15–30 секунд; устройство, которое так и не подключилось, — переподключить в Niko |
+| `rayctl: failed_precondition: not now: rayctl service disable ssh -force does it anyway (rayctl before v0.27.0 has no -force): …` | это последний включённый сервис `ssh` | шаг 10; не выключайте его, если нет другого входа |
+| `rayctl: bad usage` на `user renew`, `ports`, `version`, `roots` | `rayctl` старше v0.27.0 | шаг 11 |
+| `rayctl: keeping the revocations made since the update: … -no-carry …` | откат не прочитал нынешнюю базу | выше, «Если нужно вернуться» |
 | `rayctl status`: `apply FAILED …: service …: … of niko-….service failed, its process runs with the files of before …` | перезапуск службы после смены её файлов не удался; он остаётся в долгу и повторяется при каждом `apply` | `journalctl -u niko-ИМЯ -n 50` — почему юнит не стартует; исправить, затем `rayctl apply` |
-| `update failed, the previous version runs again: …` | v0.26.0 не поднялась, откат выполнен | нода на v0.25.1; причина — в строке; приложите `rayctl report` к обращению |
+| на relay: `rayctl: this host is a relay: install/bootstrap.sh -relay with its bundle takes a new release` | на relay v0.25.1 или старше | повторная установка, §12.4 |
+| на relay: `rayctl: an update of this relay from … to … was interrupted: rayctl update -rollback puts … back` | прошлое `rayctl update` на relay оборвалось | `rayctl update -rollback`, затем снова `rayctl update` (§12.4) |
 
 ### 12.6. Перезагрузка
 
