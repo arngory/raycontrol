@@ -555,17 +555,32 @@ func (c *cli) restartNode(ctx context.Context, want, stage string, before []stri
 		st, _ := unitState(u)()
 		units, restarts[u] = append(units, u), st["NRestarts"]
 	}
-	for i := 0; ; i++ {
-		if exec.Command("systemctl", "is-active", "--quiet", "rayspa.service").Run() == nil &&
-			exec.Command("nft", "list", "table", "inet", "raycontrol").Run() == nil {
-			break
-		}
-		if i == 30 {
-			return errors.New("rayspa did not bring the perimeter back (journalctl -u rayspa)")
-		}
-		time.Sleep(time.Second)
+	// The new rayspa's own table, with the new rayd's snapshot: rayspa
+	// leaves an earlier table in place until its first snapshot (R4-40),
+	// so a table in the kernel and a running rayspa are true at once with
+	// the old table, frozen, if the new rayspa cannot put its own in.
+	if err := waitPerimeter(ctx, func() error {
+		return rayspaUpdated(showRayspa, exec.Command("nft", "list", "table", "inet", "raycontrol").Run)
+	}, 30, time.Second); err != nil {
+		return err
 	}
 	return waitDataPlane(ctx, units, restarts, unitState, 3*time.Second, 30*time.Second, 500*time.Millisecond)
+}
+
+// waitPerimeter waits for check to pass, tries times every so long.
+func waitPerimeter(ctx context.Context, check func() error, tries int, every time.Duration) error {
+	var err error
+	for range tries {
+		if err = check(); err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return errInterrupted
+		case <-time.After(every):
+		}
+	}
+	return fmt.Errorf("rayspa did not bring the perimeter back: %w (journalctl -u rayspa)", err)
 }
 
 // waitDataPlane waits for each data-plane unit that ran before the update

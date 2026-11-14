@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -20,6 +21,81 @@ type perimeterHost struct {
 	input    func() (bool, error) // the table's input chain is in the kernel
 	euid     func() int           // os.Geteuid when nil
 	look     func(string) error   // the nft binary is there
+	// show is systemctl show of rayspa.service: ActiveState, MainPID and
+	// StatusText (rayspa's STATUS); nil, or an error: not known.
+	show func() (map[string]string, error)
+}
+
+// showRayspa is systemctl show of rayspa.service, the properties
+// ownTable reads.
+func showRayspa() (map[string]string, error) {
+	out, err := exec.Command("systemctl", "show", "-p", "ActiveState,MainPID,StatusText", "rayspa.service").Output()
+	st := map[string]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			st[k] = strings.TrimSpace(v)
+		}
+	}
+	return st, err
+}
+
+// tableOwn is what rayspa's STATUS says of its table.
+type tableOwn int
+
+const (
+	// ownUnknown: a STATUS that names no process (a rayspa before it did,
+	// or none yet): only the kernel's table can be looked at.
+	ownUnknown tableOwn = iota
+	// ownUp: the running rayspa (its pid, MainPID) has its table in with
+	// a snapshot of rayd's.
+	ownUp
+	// ownNot: the running rayspa says its table is not in, not whole, or
+	// not from rayd yet; or the STATUS is another process's.
+	ownNot
+)
+
+// ownTable reads rayspa's STATUS (cmd/rayspa, stateNow.status): "perimeter
+// up: rayd's snapshot; rayspa V, pid N" from the process systemd runs now
+// is the one state that a table an earlier rayspa left cannot give. An
+// older rayspa's STATUS (no pid) is ownUnknown.
+func ownTable(st map[string]string) (tableOwn, string) {
+	text := st["StatusText"]
+	i := strings.LastIndex(text, ", pid ")
+	if i < 0 || !strings.Contains(text, "; rayspa ") {
+		return ownUnknown, text
+	}
+	if pid := text[i+len(", pid "):]; pid != st["MainPID"] || pid == "0" {
+		return ownNot, text + " (from pid " + pid + ", not the running " + st["MainPID"] + ")"
+	}
+	if strings.HasPrefix(text, "perimeter up: rayd's snapshot;") {
+		return ownUp, text
+	}
+	return ownNot, text
+}
+
+// rayspaUpdated is the update's check of the perimeter after rayspa's
+// restart (rayctl update, restartNode): the new rayspa has its own table
+// in, with the new rayd's snapshot (it starts after rayd). A rayspa whose
+// STATUS names no process (a rollback to a version before it) is checked
+// as before: running, and a table in the kernel.
+func rayspaUpdated(show func() (map[string]string, error), table func() error) error {
+	st, err := show()
+	if err != nil {
+		return fmt.Errorf("systemctl show rayspa: %w", err)
+	}
+	if st["ActiveState"] != "active" {
+		return fmt.Errorf("rayspa.service is %s", st["ActiveState"])
+	}
+	switch own, text := ownTable(st); own {
+	case ownUp:
+		return nil
+	case ownNot:
+		return fmt.Errorf("rayspa: %s", text)
+	}
+	if err := table(); err != nil {
+		return fmt.Errorf("no table inet %s: %w", perimeter.Table, err)
+	}
+	return nil
 }
 
 var defaultPerimeterHost = perimeterHost{
@@ -39,6 +115,7 @@ var defaultPerimeterHost = perimeterHost{
 		return err == nil, err
 	},
 	look: func(name string) error { _, err := exec.LookPath(name); return err },
+	show: showRayspa,
 }
 
 // perimeterResult says whether the perimeter is up (docs/08-decisions.md,
@@ -80,6 +157,24 @@ func perimeterResult(h perimeterHost) []hostcheck.Result {
 		res.Fix = "systemctl start rayspa; journalctl -u rayspa -b -p warning says why it stopped"
 	default:
 		res.Detail = "rayspa runs, its table is in"
+		if h.show == nil {
+			break
+		}
+		st, err := h.show()
+		if err != nil {
+			break
+		}
+		// The table in the kernel may be an earlier rayspa's (frozen: its
+		// slots stop, no knock is answered after one), or this one's
+		// behind its snapshot: rayspa's STATUS says (R4-40).
+		switch own, text := ownTable(st); own {
+		case ownUp:
+			res.Detail = "rayspa runs, its table is in with rayd's snapshot"
+		case ownNot:
+			res.OK = false
+			res.Detail = "a table is in, but rayspa says: " + text
+			res.Fix = "journalctl -u rayspa -b -p warning says why its own table is not in; systemctl restart rayspa"
+		}
 	}
 	return []hostcheck.Result{res}
 }
