@@ -165,6 +165,8 @@ const (
 	// NodeServiceGetDeployInputsProcedure is the fully-qualified name of the NodeService's
 	// GetDeployInputs RPC.
 	NodeServiceGetDeployInputsProcedure = "/raycontrol.node.v1.NodeService/GetDeployInputs"
+	// NodeServiceGetPortsProcedure is the fully-qualified name of the NodeService's GetPorts RPC.
+	NodeServiceGetPortsProcedure = "/raycontrol.node.v1.NodeService/GetPorts"
 )
 
 // NodeServiceClient is a client for the raycontrol.node.v1.NodeService service.
@@ -333,6 +335,10 @@ type NodeServiceClient interface {
 	// which rayctl apply checks before it builds anything. No keys, no file
 	// contents. Root on the node only.
 	GetDeployInputs(context.Context, *connect.Request[v1.GetDeployInputsRequest]) (*connect.Response[v1.GetDeployInputsResponse], error)
+	// GetPorts lists every port the node uses or admits, for a provider's
+	// firewall or a NAT (rayctl ports): no keys, the current port of each
+	// rotating range.
+	GetPorts(context.Context, *connect.Request[v1.GetPortsRequest]) (*connect.Response[v1.GetPortsResponse], error)
 }
 
 // NewNodeServiceClient constructs a client for the raycontrol.node.v1.NodeService service. By
@@ -652,6 +658,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("GetDeployInputs")),
 			connect.WithClientOptions(opts...),
 		),
+		getPorts: connect.NewClient[v1.GetPortsRequest, v1.GetPortsResponse](
+			httpClient,
+			baseURL+NodeServiceGetPortsProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetPorts")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -708,6 +720,7 @@ type nodeServiceClient struct {
 	setConnLimit      *connect.Client[v1.SetConnLimitRequest, v1.SetConnLimitResponse]
 	getDeployment     *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
 	getDeployInputs   *connect.Client[v1.GetDeployInputsRequest, v1.GetDeployInputsResponse]
+	getPorts          *connect.Client[v1.GetPortsRequest, v1.GetPortsResponse]
 }
 
 // GetStatus calls raycontrol.node.v1.NodeService.GetStatus.
@@ -965,6 +978,11 @@ func (c *nodeServiceClient) GetDeployInputs(ctx context.Context, req *connect.Re
 	return c.getDeployInputs.CallUnary(ctx, req)
 }
 
+// GetPorts calls raycontrol.node.v1.NodeService.GetPorts.
+func (c *nodeServiceClient) GetPorts(ctx context.Context, req *connect.Request[v1.GetPortsRequest]) (*connect.Response[v1.GetPortsResponse], error) {
+	return c.getPorts.CallUnary(ctx, req)
+}
+
 // NodeServiceHandler is an implementation of the raycontrol.node.v1.NodeService service.
 type NodeServiceHandler interface {
 	GetStatus(context.Context, *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error)
@@ -1131,6 +1149,10 @@ type NodeServiceHandler interface {
 	// which rayctl apply checks before it builds anything. No keys, no file
 	// contents. Root on the node only.
 	GetDeployInputs(context.Context, *connect.Request[v1.GetDeployInputsRequest]) (*connect.Response[v1.GetDeployInputsResponse], error)
+	// GetPorts lists every port the node uses or admits, for a provider's
+	// firewall or a NAT (rayctl ports): no keys, the current port of each
+	// rotating range.
+	GetPorts(context.Context, *connect.Request[v1.GetPortsRequest]) (*connect.Response[v1.GetPortsResponse], error)
 }
 
 // NewNodeServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -1446,6 +1468,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("GetDeployInputs")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceGetPortsHandler := connect.NewUnaryHandler(
+		NodeServiceGetPortsProcedure,
+		svc.GetPorts,
+		connect.WithSchema(nodeServiceMethods.ByName("GetPorts")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/raycontrol.node.v1.NodeService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case NodeServiceGetStatusProcedure:
@@ -1550,6 +1578,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceGetDeploymentHandler.ServeHTTP(w, r)
 		case NodeServiceGetDeployInputsProcedure:
 			nodeServiceGetDeployInputsHandler.ServeHTTP(w, r)
+		case NodeServiceGetPortsProcedure:
+			nodeServiceGetPortsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1761,4 +1791,8 @@ func (UnimplementedNodeServiceHandler) GetDeployment(context.Context, *connect.R
 
 func (UnimplementedNodeServiceHandler) GetDeployInputs(context.Context, *connect.Request[v1.GetDeployInputsRequest]) (*connect.Response[v1.GetDeployInputsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetDeployInputs is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetPorts(context.Context, *connect.Request[v1.GetPortsRequest]) (*connect.Response[v1.GetPortsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetPorts is not implemented"))
 }

@@ -127,15 +127,29 @@ func cmdInit(args []string) error {
 	domain := fs.String("domain", "", "base domain for service subdomains and DNS tunnel zones")
 	seqClock := fs.Bool("seq-clock", false, "the subscription's seq goes on from the clock at once (rayctl restore: the database is older than "+
 		"what clients have seen, and they drop answers with a lower seq)")
+	ports := fs.String("ports", "", "ports chosen at the node's first install (rayctl install -ports): spa=A-B,sub=N,api=N,rotation=A-B|off")
+	checkPorts := fs.Bool("check-ports", false, "only check -ports against the node in -db, changing nothing")
 	fs.Parse(args)
 
+	choice, err := provision.ParsePorts(*ports)
+	if err != nil {
+		return err
+	}
 	ctx := context.Background()
+	if *checkPorts {
+		if _, err := os.Stat(*db); errors.Is(err, os.ErrNotExist) {
+			return nil // a new node: any choice
+		}
+	}
 	st, err := store.Open(ctx, *db)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	p, err := provision.Init(ctx, st, provision.Options{Host: *host, Domain: *domain})
+	if *checkPorts {
+		return provision.CheckPorts(ctx, st, choice)
+	}
+	p, err := provision.Init(ctx, st, provision.Options{Host: *host, Domain: *domain, Ports: choice})
 	if err != nil {
 		return err
 	}

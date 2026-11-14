@@ -183,6 +183,34 @@ service NodeService {
   // which rayctl apply checks before it builds anything. No keys, no file
   // contents. Root on the node only.
   rpc GetDeployInputs(GetDeployInputsRequest) returns (GetDeployInputsResponse);
+  // GetPorts lists every port the node uses or admits, for a provider's
+  // firewall or a NAT (rayctl ports): no keys, the current port of each
+  // rotating range.
+  rpc GetPorts(GetPortsRequest) returns (GetPortsResponse);
+}
+
+message GetPortsRequest {}
+message GetPortsResponse {
+  repeated NodePort ports = 1;
+}
+// NodePort is a port, or a range of them, of the node.
+message NodePort {
+  // "spa", "sub", "api", "acme", or the service's name; a service's UDP
+  // rotation range is "<name> rotation".
+  string name = 1;
+  repeated string protos = 2; // "tcp", "udp"
+  uint32 from = 3;
+  uint32 to = 4; // from for one port
+  // "fixed" (443, 53, 80), "random" (drawn by the node), "chosen"
+  // (rayctl install -ports) or "sshd" (where sshd listened at install).
+  string source = 5;
+  // Who reaches it: "everyone" (SPA itself, the DNS tunnels, an open
+  // REALITY), "spa" (an address after its knock), "admin" (the admin
+  // addresses, and after a knock a device allowed SSH), "acme" (TCP 80
+  // while a certificate is issued without a DNS provider).
+  string access = 6;
+  uint32 current = 7;      // a rotating range: the port of this slot (the slots on either side are open too)
+  int64 current_until = 8; // unix seconds: when current changes
 }
 
 message SetDNSProviderRequest {

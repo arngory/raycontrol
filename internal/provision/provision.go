@@ -73,6 +73,9 @@ const RealityShortIDs = 4
 type Options struct {
 	Host   string // address clients use
 	Domain string // base domain for service subdomains; may be empty
+	// Ports chosen at the first install (rayctl install -ports); a node
+	// that exists takes only its own again (CheckPorts).
+	Ports PortChoice
 }
 
 // NodeKeys are the node's signing keys (subscription signatures).
@@ -93,8 +96,18 @@ func (k NodeKeys) PublicJSON() map[string]string {
 // Init prepares a node: SPA parameters, signing keys, the subscription
 // service. Repeating it keeps everything already created.
 func Init(ctx context.Context, st *store.Store, o Options) (spa.Params, error) {
-	params, err := node.Init(ctx, st, o.Host)
+	if err := CheckPorts(ctx, st, o.Ports); err != nil {
+		return spa.Params{}, err
+	}
+	params, err := node.InitWith(ctx, st, o.Host, func() (spa.Params, error) { return initPorts(o.Ports) })
 	if err != nil {
+		return params, err
+	}
+	if _, err := st.GetSetting(ctx, settingPorts); errors.Is(err, store.ErrNotFound) && !o.Ports.Zero() {
+		if err := st.SetSetting(ctx, settingPorts, []byte(o.Ports.String())); err != nil {
+			return params, err
+		}
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return params, err
 	}
 	if o.Domain != "" {
@@ -123,7 +136,7 @@ func Init(ctx context.Context, st *store.Store, o Options) (spa.Params, error) {
 		if err != nil {
 			return params, err
 		}
-		svc, err := subscriptionService(params, host)
+		svc, err := subscriptionService(params, host, o.Ports)
 		if err != nil {
 			return params, err
 		}
@@ -169,18 +182,18 @@ func randInt(lo, hi int) (int, error) {
 	return lo + int(n.Int64()), nil
 }
 
-// subscriptionService picks a random port outside the SPA range and a
-// self-signed certificate; clients pin its key (spec/subscription-v1.md).
-func subscriptionService(p spa.Params, host string) (store.Service, error) {
-	var port int
-	for {
+// subscriptionService takes the chosen port, or picks a random one outside
+// the SPA range and the other chosen ports, and a self-signed certificate;
+// clients pin its key (spec/subscription-v1.md).
+func subscriptionService(p spa.Params, host string, c PortChoice) (store.Service, error) {
+	port := int(c.Sub)
+	for port == 0 {
 		n, err := randInt(20000, 60999)
 		if err != nil {
 			return store.Service{}, err
 		}
-		if n < int(p.PortBase) || n >= int(p.PortBase)+int(p.PortRange) {
+		if (n < int(p.PortBase) || n >= int(p.PortBase)+int(p.PortRange)) && !inReserved([]Span{{c.API, 1}, c.Rotation}, n) {
 			port = n
-			break
 		}
 	}
 	key, cert, err := selfSigned(host)
@@ -546,9 +559,16 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		}
 		svc.Secrets[SecretTLSKey], svc.Secrets[SecretTLSCert] = key, cert
 		if _, ok := settings["ports"]; !ok {
-			port, err := freePort(ctx, st, all)
+			// Chosen at install (-ports api=N), else random.
+			c, err := Ports(ctx, st)
 			if err != nil {
 				return svc, err
+			}
+			port := int(c.API)
+			if port == 0 {
+				if port, err = freePort(ctx, st, all); err != nil {
+					return svc, err
+				}
 			}
 			settings["ports"] = []string{fmt.Sprintf("tcp/%d", port)}
 		}
@@ -600,7 +620,13 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		if err != nil {
 			return svc, err
 		}
-		if _, ok := settings["udp_rotation"]; !ok && hasUDP(store.Service{Kind: svc.Kind, Settings: string(b)}) {
+		c, err := Ports(ctx, st)
+		if err != nil {
+			return svc, err
+		}
+		// rotation=off at install: none (the service stays on its own
+		// port, spa-v2 §11).
+		if _, ok := settings["udp_rotation"]; !ok && !c.NoRotate && hasUDP(store.Service{Kind: svc.Kind, Settings: string(b)}) {
 			rot, key, err := newRotation(ctx, st, append(slices.Clone(all), store.Service{Kind: svc.Kind, Settings: string(b)}))
 			if err != nil {
 				return svc, err
@@ -1090,8 +1116,9 @@ func ACMEPort(ctx context.Context, st *store.Store) (uint16, error) {
 	if err != nil {
 		return 0, err
 	}
+	res := reserved(ctx, st)
 	free := func(p int) bool {
-		if p >= int(params.PortBase) && p < int(params.PortBase)+int(params.PortRange) {
+		if p >= int(params.PortBase) && p < int(params.PortBase)+int(params.PortRange) || inReserved(res, p) {
 			return false
 		}
 		for _, s := range all {
@@ -1380,12 +1407,13 @@ func freePort(ctx context.Context, st *store.Store, all []store.Service) (int, e
 	if b, err := st.GetSetting(ctx, settingACMEPort); err == nil {
 		acme, _ = strconv.Atoi(string(b))
 	}
+	res := reserved(ctx, st)
 	for range 1000 {
 		p, err := randInt(20000, 60999)
 		if err != nil {
 			return 0, err
 		}
-		taken := p == acme || (p >= int(params.PortBase) && p < int(params.PortBase)+int(params.PortRange))
+		taken := p == acme || (p >= int(params.PortBase) && p < int(params.PortBase)+int(params.PortRange)) || inReserved(res, p)
 		for _, s := range all {
 			if r, ok := ServiceRotation(s); ok && p >= int(r.Base) && p < int(r.Base)+int(r.Range) {
 				taken = true
@@ -1423,6 +1451,27 @@ func newRotation(ctx context.Context, st *store.Store, all []store.Service) (Rot
 			taken = append(taken, span{int(p.Num), int(p.Num) + 1})
 		}
 	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return Rotation{}, nil, err
+	}
+	free := func(base, rng int) bool {
+		return !slices.ContainsFunc(taken, func(t span) bool { return base < t.hi && t.lo < base+rng })
+	}
+	// A pool chosen at install (-ports rotation=A-B): its slots in turn.
+	c, err := Ports(ctx, st)
+	if err != nil {
+		return Rotation{}, nil, err
+	}
+	if c.Rotation.Range > 0 {
+		for _, s := range rotationSlots(c.Rotation) {
+			if free(int(s.Base), int(s.Range)) {
+				return Rotation(s), key, nil
+			}
+		}
+		return Rotation{}, nil, fmt.Errorf("%w no free range for UDP rotation left in %s, chosen at install (rayctl ports)", store.ErrInvalid, c.Rotation)
+	}
+	res := reserved(ctx, st)
 	for range 1000 {
 		rng, err := randInt(1024, 4096)
 		if err != nil {
@@ -1432,11 +1481,7 @@ func newRotation(ctx context.Context, st *store.Store, all []store.Service) (Rot
 		if err != nil {
 			return Rotation{}, nil, err
 		}
-		if !slices.ContainsFunc(taken, func(t span) bool { return base < t.hi && t.lo < base+rng }) {
-			key := make([]byte, 32)
-			if _, err := rand.Read(key); err != nil {
-				return Rotation{}, nil, err
-			}
+		if free(base, rng) && !slices.ContainsFunc(res, func(s Span) bool { return s.overlaps(Span{uint16(base), uint16(rng)}) }) {
 			return Rotation{Base: uint16(base), Range: uint16(rng)}, key, nil
 		}
 	}

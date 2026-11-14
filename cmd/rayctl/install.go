@@ -24,6 +24,7 @@ import (
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/hostcheck"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 )
 
@@ -242,8 +243,8 @@ func (c *cli) install(ctx context.Context, args []string) error {
 
 // installOptions are install's flags.
 type installOptions struct {
-	host, domain, name, admin, packages, cfToken, dataplane, services, relay *string
-	checked                                                                  *bool
+	host, domain, name, admin, packages, cfToken, dataplane, services, relay, ports *string
+	checked                                                                         *bool
 }
 
 // installFlags defines install's flags on fs: install, and check, which
@@ -260,17 +261,23 @@ func installFlags(fs *flag.FlagSet) installOptions {
 		" (doh, naive and yggdrasil share TCP 443 with reality, which goes first; default with -domain: reality; \"none\" for none)")
 	checked := fs.Bool("checked", false, "the bootstrap has shown the host check: print only required checks that fail now")
 	relay := fs.String("relay", "", "make this host a relay in front of an exit (relay-v1): the bundle file from rayctl relay bundle on the exit")
+	ports := fs.String("ports", "", "ports of your choice, at the node's first install only (clients learn them at enrollment): "+
+		"spa=A-B (the knock, TCP and UDP; one port too), sub=N (subscription, TCP and UDP), api=N (TCP), rotation=A-B|off "+
+		"(the services' UDP rotation, a quarter of it each); 1024 and up, the rest random; rayctl ports lists them")
 	return installOptions{host: host, domain: domain, name: name, admin: admin, packages: packages, cfToken: cfToken,
-		dataplane: dataplane, services: services, relay: relay, checked: checked}
+		dataplane: dataplane, services: services, relay: relay, ports: ports, checked: checked}
 }
 
 func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOptions) error {
-	host, domain, name, admin, packages, cfToken, dataplane, services, relay, checked :=
-		o.host, o.domain, o.name, o.admin, o.packages, o.cfToken, o.dataplane, o.services, o.relay, o.checked
+	host, domain, name, admin, packages, cfToken, dataplane, services, relay, ports, checked :=
+		o.host, o.domain, o.name, o.admin, o.packages, o.cfToken, o.dataplane, o.services, o.relay, o.ports, o.checked
 	if err := needRoot(); err != nil {
 		return err
 	}
 	if *relay != "" {
+		if *ports != "" {
+			return errors.New("-ports is a node's: a relay takes its ports from the exit's bundle")
+		}
 		return installRelay(*relay, *packages)
 	}
 	// Before anything changes: over a running node, install restarts rayd
@@ -286,14 +293,26 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 	if err != nil {
 		return fmt.Errorf("-name: %w", err)
 	}
+	choice, err := parseInstallPorts(*ports)
+	if err != nil {
+		return err
+	}
 	// Before anything changes: a host that cannot run a node is left as it
 	// was (docs/08-decisions.md, R4-24).
-	if err := hostCheck(ctx, os.Stdout, hostcheck.Options{Host: *host, Domain: *domain, Services: splitList(*services)}, *checked, false); err != nil {
+	if err := hostCheck(ctx, os.Stdout, hostcheck.Options{Host: *host, Domain: *domain, Services: splitList(*services),
+		Ports: chosenPorts(choice)}, *checked, false); err != nil {
 		return err
 	}
 	for _, bin := range []string{deploy.DefaultBinaries.Rayd, deploy.DefaultBinaries.Rayspa} {
 		if _, err := os.Stat(bin); err != nil {
 			return fmt.Errorf("%s is missing: install/bootstrap.sh installs it", bin)
+		}
+	}
+	// An install again names the node's own ports or none (clients know
+	// them): asked of rayd's database before anything changes.
+	if _, err := os.Stat(deploy.DB); err == nil && !choice.Zero() {
+		if err := run("runuser", "-u", "rayd", "--", deploy.DefaultBinaries.Rayd, "init", "-db", deploy.DB, "-ports", choice.String(), "-check-ports"); err != nil {
+			return fmt.Errorf("-ports: %w; nothing was changed", err)
 		}
 	}
 	if *admin == "" {
@@ -394,6 +413,9 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 	initArgs := []string{"-u", "rayd", "--", deploy.DefaultBinaries.Rayd, "init", "-db", deploy.DB, "-host", *host}
 	if *domain != "" {
 		initArgs = append(initArgs, "-domain", *domain)
+	}
+	if !choice.Zero() {
+		initArgs = append(initArgs, "-ports", choice.String())
 	}
 	if err := run("runuser", initArgs...); err != nil {
 		return err
@@ -496,6 +518,20 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 	}
 	fmt.Println("\nRecovery from the provider console: rayspa teardown")
 	return nil
+}
+
+// parseInstallPorts reads -ports, clear of the ports sshd listens on.
+func parseInstallPorts(s string) (provision.PortChoice, error) {
+	if s == "" {
+		return provision.PortChoice{}, nil
+	}
+	var taken []uint16
+	if ps, err := sshdPorts(); err == nil {
+		for _, p := range ps {
+			taken = append(taken, uint16(p)) //nolint:gosec // G115: sshd's ports are 1..65535
+		}
+	}
+	return provision.ParsePorts(s, taken...)
 }
 
 type serviceKind struct{ kind, name string }

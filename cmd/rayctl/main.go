@@ -113,6 +113,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA: IPv4
                                             and IPv6, networks to /16 and /48; the list is replaced
                                             whole (name the ones you keep too)
+  ports                                     every port the node uses, for a provider's firewall: who
+                                            reaches it, whether chosen at install (-ports) or random,
+                                            the current port of each rotating range
   relay add NAME ADDRESS | list | remove NAME   relays in front of the node (relay-v1): one address
   relay bundle [-exit IP] [-ssh-port N] [-admin CIDRS] [-o FILE] NAME   the relay host's bundle (new certificate, new SPA keys)
   relay set [-ssh-port N] [-admin CIDRS] NAME   the relay host's SSH access, without a new bundle
@@ -143,13 +146,17 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             per-address limit on new inbound connections
                                             (spec/conn-limit-v1.md; root, on the node)
 
-  check [-host ADDR] [-domain D] [-services a,b]
+  check [-host ADDR] [-domain D] [-services a,b] [-ports LIST]
                                               whether this host can run a node: what is required (install
-                                              refuses without it), what is advised; changes nothing (root)
+                                              refuses without it), what is advised, whether the -ports are
+                                              free; changes nothing (root)
   legacy [-remove [-yes] [-purge-packages]]  raycontrol v0 (ray.sh) on this host; -remove backs it up, then
                                               removes only what it installed (root)
   install -host ADDR [-domain D] [-name NAME] [-admin A] [-cloudflare-token-file F] [-services reality,hy2-masq,hy2-obfs,dnstt,masterdns,slipstream|none]
-          [-dataplane DIR]                    set the node up on this host (root); with -domain REALITY by default
+          [-dataplane DIR] [-ports spa=A-B,sub=N,api=N,rotation=A-B|off]
+                                              set the node up on this host (root); with -domain REALITY by
+                                              default; -ports: ports of your choice at the first install
+                                              only (1024 and up; the rest random, 443 and 53 fixed)
   apply                                       install what the current services need (root)
   update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-no-handoff] [-rollback [-no-carry]]
                                               the newest verified release in place, back to the
@@ -308,6 +315,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.relay(ctx, sub, rest)
 	case "admin":
 		return c.adminAccess(ctx, args[1:])
+	case "ports":
+		return c.ports(ctx, args[1:])
 	case "check":
 		return c.check(ctx, args[1:])
 	case "legacy":

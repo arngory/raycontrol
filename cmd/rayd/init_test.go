@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -47,5 +48,31 @@ func TestInitSeqClock(t *testing.T) {
 	}
 	if got := seq(); got < before {
 		t.Fatalf("seq %d after -seq-clock, the clock says %d", got, before)
+	}
+}
+
+// rayd init -ports at the first install; -check-ports, which rayctl
+// install asks before it changes anything, takes the node's own ports or
+// a new node's, and creates no database.
+func TestInitPorts(t *testing.T) {
+	dir := t.TempDir()
+	db := filepath.Join(dir, "rayd.db")
+	if err := cmdInit([]string{"-db", db, "-ports", "spa=40000-40099,sub=40100", "-check-ports"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(db); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("-check-ports made a database: %v", err)
+	}
+	if err := cmdInit([]string{"-db", db, "-host", "203.0.113.7", "-ports", "spa=40000-40099,sub=40100"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdInit([]string{"-db", db, "-ports", "sub=40100", "-check-ports"}); err != nil {
+		t.Errorf("its own port: %v", err)
+	}
+	if err := cmdInit([]string{"-db", db, "-ports", "sub=40200", "-check-ports"}); err == nil {
+		t.Error("another port taken")
+	}
+	if err := cmdInit([]string{"-db", db, "-ports", "sub=80"}); err == nil {
+		t.Error("a privileged port taken")
 	}
 }

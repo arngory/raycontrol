@@ -1020,7 +1020,8 @@ func (s *Server) SetAdminAccess(ctx context.Context, req *connect.Request[nodev1
 // carrier) and the ports of enabled services. Rotated UDP slot ports need no
 // entry: they are redirected to the service port before any input chain.
 // outside is the same list before the node's redirects, for a provider's
-// firewall: TCP 80 for the ACME window, and only while HTTP-01 is in use.
+// firewall: TCP 80 for the ACME window, and only while HTTP-01 is in use,
+// and the UDP rotation ranges.
 func (s *Server) hostPorts(ctx context.Context) (host, outside []deploy.PortRange, err error) {
 	last := uint16(int(s.Params.PortBase) + int(s.Params.PortRange) - 1)
 	ports := []deploy.PortRange{
@@ -1044,6 +1045,13 @@ func (s *Server) hostPorts(ctx context.Context) (host, outside []deploy.PortRang
 		}
 	}
 	outside = slices.Clone(ports)
+	// The UDP rotation ranges reach the host as they are: a provider's
+	// firewall sees them before the redirect.
+	for _, svc := range services {
+		if rot, ok := provision.ServiceRotation(svc); ok && svc.Enabled {
+			outside = append(outside, deploy.PortRange{Proto: "udp", From: rot.Base, To: uint16(int(rot.Base) + int(rot.Range) - 1)})
+		}
+	}
 	if slices.ContainsFunc(services, func(svc store.Service) bool { return svc.Enabled && svc.Kind == "site" }) {
 		// The ACME window redirects TCP 80 here; host firewalls must pass it.
 		port, err := provision.ACMEPort(ctx, s.Store)

@@ -36,6 +36,7 @@ func (c *cli) check(ctx context.Context, args []string) error {
 	host := fs.String("host", "", "public address clients will use")
 	domain := fs.String("domain", "", "base domain: certificates from Let's Encrypt")
 	services := fs.String("services", "", "services the install sets up: dnstt and masterdns need UDP 53")
+	ports := fs.String("ports", "", "the ports install -ports chooses: nothing else may listen there")
 	// The install's other flags, so that the bootstrap passes its arguments
 	// to both as they are (a flag install has and check not failed the
 	// bootstrap: review of -name).
@@ -44,8 +45,12 @@ func (c *cli) check(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
+	choice, err := parseInstallPorts(*ports)
+	if err != nil {
+		return err
+	}
 	return hostCheck(ctx, os.Stdout, hostcheck.Options{Host: *host, Domain: *domain, Services: splitList(*services), AllowV0: *allowV0,
-		ICMP: c.icmpOn(ctx)}, false, c.json, slices.Concat(c.internetChecks(ctx), misnamedResults(c.misnamed(ctx)), c.reservedResults(ctx),
+		ICMP: c.icmpOn(ctx), Ports: chosenPorts(choice)}, false, c.json, slices.Concat(c.internetChecks(ctx), misnamedResults(c.misnamed(ctx)), c.reservedResults(ctx),
 		c.sshPortResults(ctx), conntrackResults(conntrackPaths{}))...)
 }
 

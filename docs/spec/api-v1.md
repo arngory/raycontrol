@@ -238,6 +238,15 @@ A client that lost Register's answer (timeout, dropped connection) may send it a
   нет такого или проверок не было). `latest` значит то же, что раньше: самый новый релиз вообще. Клиенту:
   `StartUpdate {version: latest_patch}`, когда поле не пусто и не равно `latest`, обновляет без смены минорной;
   кнопка с пустым `version` — как раньше, на `latest`.
+- Порты ноды (raycontrol v0.27.0, R4-39): `GetPorts {}` — как весь `NodeService`, и через API. Ответ — `ports[]`,
+  `NodePort {name; protos ("tcp", "udp"); from; to; source; access; current; current_until}`. `name` — `spa`, `sub`,
+  `api`, `acme` или имя сервиса; диапазон ротации UDP сервиса — `"<имя> rotation"`. `source`: `fixed`, `random`,
+  `chosen` (`rayctl install -ports`), `sshd`. `access`: `everyone`, `spa` (после стука), `admin` (адреса
+  администратора; после стука — устройства с SSH), `acme` (TCP 80 на время выпуска сертификата без DNS-провайдера).
+  У диапазонов, которые меняются по расписанию (`spa` и ротация), `current` — порт текущего слота, `current_until` —
+  когда он сменится (unix-секунды); у остальных — нули. Ключей в ответе нет. Клиенту метод не нужен для работы:
+  порты он по-прежнему берёт из пакета устройства. Он для экрана «что открыть у провайдера». Старая нода отвечает
+  `unimplemented`.
 
 ## 5a. Отзыв устройства меняет учётные данные пользователя (raycontrol v0.27.0)
 

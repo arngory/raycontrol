@@ -95,6 +95,11 @@ func decodeHex(s string, dst []byte) error {
 // Init creates the installation parameters on first run and keeps them on
 // later runs. host is the address clients use; empty keeps the stored one.
 func Init(ctx context.Context, st *store.Store, host string) (spa.Params, error) {
+	return InitWith(ctx, st, host, func() (spa.Params, error) { return spa.RandomParams(nil) })
+}
+
+// InitWith is Init with fresh making the parameters of a new node.
+func InitWith(ctx context.Context, st *store.Store, host string, fresh func() (spa.Params, error)) (spa.Params, error) {
 	if host != "" {
 		if err := st.SetSetting(ctx, settingHost, []byte(host)); err != nil {
 			return spa.Params{}, err
@@ -104,7 +109,7 @@ func Init(ctx context.Context, st *store.Store, host string) (spa.Params, error)
 	if !errors.Is(err, store.ErrNotFound) {
 		return p, err
 	}
-	if p, err = spa.RandomParams(nil); err != nil {
+	if p, err = fresh(); err != nil {
 		return p, err
 	}
 	b, err := json.Marshal(FromParams(p))

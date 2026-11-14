@@ -238,7 +238,7 @@ func TestSubPlaces(t *testing.T) {
 func TestRefusal(t *testing.T) {
 	node := []string{"install", "apply", "update", "uninstall", "backup", "restore", "report", "egress", "conn-limit",
 		"check", "legacy", "relay bundle", "service cert", "summary db"}
-	api := []string{"status", "node", "user", "service", "device", "audit", "relay", "admin", "dns", "summary",
+	api := []string{"status", "node", "user", "service", "device", "audit", "relay", "admin", "ports", "dns", "summary",
 		"app-mirror", "metrics", "remote whoami", "remote rotate", "service rotate", "relay list", "summary show",
 		"device invite", "debug", "debug on"}
 	free := []string{"knock", "probe", "remote enroll", "version"}

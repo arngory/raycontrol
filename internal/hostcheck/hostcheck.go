@@ -76,6 +76,15 @@ type Options struct {
 	// ICMP: a naive service carries ping and traceroute (icmp=on,
 	// spec/icmp-v1.md): its group must be allowed ICMP sockets.
 	ICMP bool
+	// Ports chosen with -ports: nothing else may listen there.
+	Ports []ChosenPorts
+}
+
+// ChosenPorts are ports the install was told to use, [From, To].
+type ChosenPorts struct {
+	Name     string   // spa, sub, api, rotation
+	Protos   []string // tcp, udp
+	From, To uint16
 }
 
 // Host is what the checks look at; System is this machine, tests replace
@@ -277,6 +286,20 @@ func (h *Host) Check(ctx context.Context, o Options) []Result {
 		others := others(listeners, p.proto, p.port, ours)
 		req(fmt.Sprintf("port %s %d", p.proto, p.port), len(others) == 0, describe(others),
 			"stop and disable what listens there (systemctl disable --now nginx): the node serves 443 itself")
+	}
+	for _, p := range o.Ports {
+		var busy []listener
+		for _, proto := range p.Protos {
+			for n := int(p.From); n <= int(p.To); n++ {
+				busy = append(busy, others(listeners, proto, uint16(n), ours)...)
+			}
+		}
+		span := strconv.Itoa(int(p.From))
+		if p.To != p.From {
+			span += "-" + strconv.Itoa(int(p.To))
+		}
+		req(fmt.Sprintf("port %s %s", strings.Join(p.Protos, "+"), span), len(busy) == 0, p.Name+" (-ports): "+describe(busy),
+			"stop what listens there, or choose other ports in -ports")
 	}
 	if slices.ContainsFunc(o.Services, func(s string) bool { return s == "dnstt" || s == "masterdns" || s == "slipstream" }) {
 		// systemd-resolved's stub shares the port with the front (both

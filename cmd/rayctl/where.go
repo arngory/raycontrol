@@ -41,6 +41,7 @@ var places = map[string]place{
 	"relay":        viaAPI,
 	"relay bundle": onNode, // root on the node; this SSH session's address
 	"admin":        viaAPI,
+	"ports":        viaAPI, // GetPorts: on the node as root or the group, or -remote FILE
 	"dns":          viaAPI,
 	"summary":      viaAPI,
 	"summary db":   onNode, // a file put in rayd's directory
