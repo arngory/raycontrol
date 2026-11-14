@@ -594,3 +594,14 @@ func TestReadSnapshotRegularOnly(t *testing.T) {
 		t.Errorf("missing: %v", err)
 	}
 }
+
+// -check only says: with -rollback, which changes the host, it is a usage
+// error, on a node and on a relay alike, before anything else.
+func TestUpdateCheckRollbackRefused(t *testing.T) {
+	c := &cli{}
+	for _, args := range [][]string{{"-check", "-rollback"}, {"-rollback", "-check", "-yes"}} {
+		if err := c.update(context.Background(), args); !errors.Is(err, errUsage) {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+}

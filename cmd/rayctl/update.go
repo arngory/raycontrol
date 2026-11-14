@@ -103,6 +103,10 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
+	// -check only says; a rollback changes the host (and takes the lock).
+	if *check && *rollback {
+		return errUsage
+	}
 	if fs.NArg() > 0 {
 		return c.updatePolicy(ctx, fs.Args())
 	}
