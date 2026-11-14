@@ -374,8 +374,11 @@ jobs:
             grep -q -e "$text" err.txt || { echo "rayctl $*: no \"$text\""; exit 1; }
           }
           expect 2 '^usage: rayctl'
-          # A node's command refuses in one line, before anything.
-          expect 1 '^rayctl: install works on a Linux node only, and this is darwin' install -host 192.0.2.1
+          # A node's command refuses in one line, before anything. With a
+          # -remote file that is not there: should the refusal ever be
+          # missing, install stops at "not through -remote" and touches
+          # nothing (bare, it would take the update lock as root first).
+          expect 1 '^rayctl: install works on a Linux node only, and this is darwin' -remote nofile.rcdev install -host 192.0.2.1
           [ "$(grep -c . err.txt)" = 1 ] || { echo "more than a line"; exit 1; }
           # A command for rayd says how to reach a node from here.
           expect 1 'rayctl -remote FILE status' status
