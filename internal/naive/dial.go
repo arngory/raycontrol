@@ -70,6 +70,11 @@ func (s *Server) dialUser(ctx context.Context, user, target string, paid bool) (
 // errAttempts is a dial that tried no address: it had no token for one.
 var errAttempts = errors.New("naive: too many attempts")
 
+// errNoTime is a dial that tried no address: its time was over when the
+// addresses came (a lookup that answered at the deadline). Not a timeout:
+// no attempt waited, so it is no 504 (ackRefusal).
+var errNoTime = errors.New("naive: no time left for an attempt")
+
 // dialRace dials the addresses of the first one's family in turn, and
 // those of the other family from fallbackDelay on (or once the first
 // family failed), as Go's dialer does: the first connection wins. A dial
@@ -90,8 +95,8 @@ func (s *Server) dialRace(ctx context.Context, user string, addrs []netip.AddrPo
 		switch {
 		case len(errs) > 0:
 			return attemptErrors(errs)
-		case dctx.Err() != nil:
-			return dctx.Err() // no time left for an attempt
+		case dctx.Err() != nil || expired(dctx):
+			return errNoTime
 		}
 		return errAttempts
 	}

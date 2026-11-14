@@ -266,6 +266,8 @@ func TestAckRefusal(t *testing.T) {
 		{silent, false, 502, ackUnreachable},
 		{op(syscall.ETIMEDOUT), false, 502, ackUnreachable},
 		{errAttempts, false, 502, ackUnreachable},
+		// No attempt waited: its time was over when the addresses came.
+		{errNoTime, true, 502, ackUnreachable},
 		// Several attempts: refused before silent before the rest, in
 		// whatever order they ended; denied only when all were.
 		{attemptErrors{silent, op(syscall.ECONNREFUSED)}, true, 502, ackRefused},

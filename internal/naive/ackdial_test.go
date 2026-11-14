@@ -38,6 +38,29 @@ func TestAckSlowLookup(t *testing.T) {
 	}
 }
 
+// Addresses that come exactly at the dial's deadline (a lookup that
+// answered then) leave no time for an attempt: none was tried, none was
+// silent, so 502 unreachable, not the 504 of a destination given its
+// time. The dial returned the context's DeadlineExceeded, ranked silent.
+// Both ways the addresses are tried: one family, and two.
+func TestAckNoTimeForAttempt(t *testing.T) {
+	h := &Server{dialAddr: func(context.Context, netip.AddrPort) (net.Conn, error) {
+		t.Error("an address was dialed after the dial's time")
+		return nil, os.ErrDeadlineExceeded
+	}}
+	for what, addrs := range map[string][]netip.AddrPort{
+		"one family":   {netip.MustParseAddrPort("198.51.100.1:443")},
+		"two families": {netip.MustParseAddrPort("198.51.100.1:443"), netip.MustParseAddrPort("[2001:db8::1]:443")},
+	} {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now())
+		_, err := h.dialRace(ctx, "u5", addrs)
+		cancel()
+		if status, reason := ackRefusal(err, true); status != http.StatusBadGateway || reason != ackUnreachable {
+			t.Errorf("%s, no time left: %v, answered %d %q", what, err, status, reason)
+		}
+	}
+}
+
 // A client whose password was taken and who asked for the dial's outcome
 // does not get the site's 404 for a target the node will not dial (a naive
 // client reads 404 from its proxy as its password refused): 502 denied,
