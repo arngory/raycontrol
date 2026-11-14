@@ -94,10 +94,15 @@ func TestNaive429(t *testing.T) {
 	if resp.StatusCode != http.StatusTooManyRequests || dials.Load() != 0 {
 		t.Fatalf("over the limit: %s, %d dials", resp.Status, dials.Load())
 	}
+	// With naive's Padding header, as a 200: a naive client takes an answer
+	// without it for a server that does not pad.
+	if resp.Header.Get("Padding") == "" {
+		t.Fatal("a 429 without the Padding header")
+	}
 	if resp, err := connect("other", "192.0.2.1:443"); err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("another user: %v %v", resp, err)
 	}
-	if resp, err := connect("wrong", "192.0.2.1:443"); err != nil || resp.StatusCode != http.StatusNotFound {
+	if resp, err := connect("wrong", "192.0.2.1:443"); err != nil || resp.StatusCode != http.StatusNotFound || resp.Header.Get("Padding") != "" {
 		t.Fatalf("unauthorised: %v %v", resp, err)
 	}
 	if got := h.Refused()["u5"][refusedTCP]; got != 1 {

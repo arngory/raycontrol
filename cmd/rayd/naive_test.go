@@ -330,7 +330,9 @@ func TestNaiveHTTP3AckConnect(t *testing.T) {
 	}
 	body, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway || resp.Header.Get(naive.AckHeader) != "refused" || len(body) != 0 || err != nil {
-		t.Fatalf("a closed port: %s, niko-ack %q, %d bytes after it (%v)", resp.Status, resp.Header.Get(naive.AckHeader), len(body), err)
+	if resp.StatusCode != http.StatusBadGateway || resp.Header.Get(naive.AckHeader) != "refused" || resp.Header.Get("Padding") == "" ||
+		len(body) != 0 || err != nil {
+		t.Fatalf("a closed port: %s, niko-ack %q, padding %q, %d bytes after it (%v)", resp.Status, resp.Header.Get(naive.AckHeader),
+			resp.Header.Get("Padding"), len(body), err)
 	}
 }

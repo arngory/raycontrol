@@ -1,6 +1,7 @@
 package naive
 
 import (
+	"bytes"
 	"io"
 	"net"
 	"testing"
@@ -68,5 +69,38 @@ func TestDestinationEnd(t *testing.T) {
 			t.Errorf("%s: the stream stayed open", name)
 		}
 		done()
+	}
+}
+
+// What a destination sent before it reset is not lost with the stream's
+// reset: a client that reads late reads all of it, then the error.
+func TestBytesBeforeResetArrive(t *testing.T) {
+	const size = 3 << 20
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = c.Write(bytes.Repeat([]byte{7}, size))
+		// The node's kernel takes it all, then the RST.
+		time.Sleep(300 * time.Millisecond)
+		_ = c.(*net.TCPConn).SetLinger(0)
+		c.Close()
+	}()
+	_, connect := tunnelServer(t, func(*Server) {})
+	_, s, done := connect(ln.Addr().String())
+	defer done()
+	time.Sleep(time.Second) // the client reads late: the RST is long there
+	n, err := io.Copy(io.Discard, s)
+	if n != size {
+		t.Errorf("read %d of %d bytes the destination sent before its reset (%v)", n, size, err)
+	}
+	if err == nil {
+		t.Error("a clean end after a reset")
 	}
 }

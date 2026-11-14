@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
-	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -63,16 +62,17 @@ func ackServer(t *testing.T, setup func(*Server)) (*Server, func(target string, 
 	}
 }
 
-// refused is an answer that is no tunnel: the status, the reason, and
-// nothing after them.
+// refused is an answer that is no tunnel: the status, the reason, naive's
+// Padding header as on a 200 (without it a naive client stops padding on
+// its next streams), and nothing after them.
 func refused(t *testing.T, what string, resp *http.Response, status int, reason string) {
 	t.Helper()
 	body, err := io.ReadAll(resp.Body)
 	if resp.StatusCode != status || resp.Header.Get(AckHeader) != reason || len(body) != 0 || err != nil {
 		t.Errorf("%s: %s, niko-ack %q, %d bytes after it (%v); want %d, %q and nothing", what, resp.Status, resp.Header.Get(AckHeader), len(body), err, status, reason)
 	}
-	if resp.Header.Get("Padding") != "" {
-		t.Errorf("%s: a refusal with naive's padding header", what)
+	if n := len(resp.Header.Get("Padding")); n < 30 || n > 61 {
+		t.Errorf("%s: a refusal with a Padding header of %d bytes, a 200 has 30 to 61", what, n)
 	}
 }
 
@@ -192,9 +192,10 @@ func TestAckConnect(t *testing.T) {
 	h.lim.mu.Unlock()
 	before := dials.Load()
 	resp, _ = connect(echo.Addr().String(), true, nil)
-	if resp.StatusCode != http.StatusTooManyRequests || dials.Load() != before {
-		t.Errorf("over the user's limit: %s, %d dials", resp.Status, dials.Load()-before)
+	if dials.Load() != before {
+		t.Errorf("over the user's limit: %d dials", dials.Load()-before)
 	}
+	refused(t, "over the user's limit", resp, http.StatusTooManyRequests, "")
 	h.lim.mu.Lock()
 	u.tcp -= tcpPerUser
 	h.lim.mu.Unlock()
@@ -234,33 +235,52 @@ func TestAckConnectDenied(t *testing.T) {
 	refused(t, "loopback", resp, http.StatusBadGateway, ackDenied)
 }
 
-// The mapping of a failed dial: 502 with one of three reasons, or 504;
-// never a status a naive client reads as its password refused.
+// The mapping of a failed dial: 502 with one of three reasons, or 504 when
+// the dial's whole time ran out; over all the attempts of a dial, whichever
+// came first; never a status a naive client reads as its password refused.
 func TestAckRefusal(t *testing.T) {
 	op := func(errno syscall.Errno) error {
 		return &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", errno)}
 	}
+	silent := &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}
 	for _, c := range []struct {
-		err    error
-		status int
-		reason string
+		err     error
+		expired bool
+		status  int
+		reason  string
 	}{
-		{op(syscall.ECONNREFUSED), 502, ackRefused},
-		{op(syscall.EHOSTUNREACH), 502, ackUnreachable},
-		{op(syscall.ENETUNREACH), 502, ackUnreachable},
-		{op(syscall.EPERM), 502, ackDenied},
-		{&net.OpError{Op: "dial", Net: "tcp", Err: errNotPublic}, 502, ackDenied},
-		{errNotPublic, 502, ackDenied},
-		{&net.DNSError{Err: "no such host", IsNotFound: true}, 502, ackUnreachable},
-		{&net.DNSError{Err: "timeout", IsTimeout: true}, 502, ackUnreachable},
-		{context.DeadlineExceeded, 504, ""},
-		{op(syscall.ETIMEDOUT), 504, ""},
-		{&net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}, 504, ""},
-		{errors.New("naive: too many attempts"), 502, ackUnreachable},
+		{op(syscall.ECONNREFUSED), false, 502, ackRefused},
+		{op(syscall.EHOSTUNREACH), false, 502, ackUnreachable},
+		{op(syscall.ENETUNREACH), false, 502, ackUnreachable},
+		{op(syscall.EPERM), false, 502, ackDenied},
+		{&net.OpError{Op: "dial", Net: "tcp", Err: errNotPublic}, false, 502, ackDenied},
+		{errNotPublic, false, 502, ackDenied},
+		{&net.DNSError{Err: "no such host", IsNotFound: true}, false, 502, ackUnreachable},
+		{&net.DNSError{Err: "timeout", IsTimeout: true}, true, 502, ackUnreachable},
+		// A lookup the dial's time ended: no address was ever silent.
+		{lookupError{context.DeadlineExceeded}, true, 502, ackUnreachable},
+		{lookupError{errLookups}, false, 502, ackUnreachable},
+		// 504 is the dial's whole time, and nothing less.
+		{context.DeadlineExceeded, true, 504, ""},
+		{silent, true, 504, ""},
+		{silent, false, 502, ackUnreachable},
+		{op(syscall.ETIMEDOUT), false, 502, ackUnreachable},
+		{errAttempts, false, 502, ackUnreachable},
+		// Several attempts: refused before silent before the rest, in
+		// whatever order they ended; denied only when all were.
+		{attemptErrors{silent, op(syscall.ECONNREFUSED)}, true, 502, ackRefused},
+		{attemptErrors{op(syscall.EHOSTUNREACH), op(syscall.ECONNREFUSED)}, false, 502, ackRefused},
+		{attemptErrors{op(syscall.EPERM), op(syscall.ECONNREFUSED)}, false, 502, ackRefused},
+		{attemptErrors{op(syscall.EHOSTUNREACH), silent}, true, 504, ""},
+		{attemptErrors{op(syscall.EPERM), silent}, true, 504, ""},
+		{attemptErrors{silent, op(syscall.EHOSTUNREACH)}, false, 502, ackUnreachable},
+		{attemptErrors{silent, silent}, false, 502, ackUnreachable},
+		{attemptErrors{op(syscall.EPERM), op(syscall.EHOSTUNREACH)}, false, 502, ackUnreachable},
+		{attemptErrors{op(syscall.EPERM), op(syscall.EACCES)}, true, 502, ackDenied},
 	} {
-		status, reason := ackRefusal(c.err)
+		status, reason := ackRefusal(c.err, c.expired)
 		if status != c.status || reason != c.reason {
-			t.Errorf("%v: %d %q, want %d %q", c.err, status, reason, c.status, c.reason)
+			t.Errorf("%v (expired %v): %d %q, want %d %q", c.err, c.expired, status, reason, c.status, c.reason)
 		}
 		switch status {
 		case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusProxyAuthRequired:

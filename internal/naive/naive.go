@@ -52,6 +52,12 @@ type Server struct {
 	names    names
 	uotIdle  time.Duration // uotIdle when 0 (tests make it short)
 	dialWait time.Duration // dialTimeout when 0 (tests make it short)
+	// dialAddr dials one address of a destination; the public dialer when
+	// nil (tests have their own, under the server's own choice of
+	// addresses). minAttempt is the least time an address gets; the
+	// constant when 0.
+	dialAddr   func(ctx context.Context, addr netip.AddrPort) (net.Conn, error)
+	minAttempt time.Duration
 
 	icmp     icmpLimits
 	icmpIdle time.Duration                   // icmpIdle when 0
@@ -83,19 +89,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // tunnel serves an authenticated CONNECT until it ends or a.ctx is done;
-// false when it answered without a tunnel (the site's answer, 429).
+// false when it answered without a tunnel (the site's answer, 429, the
+// honest connect's 502 and 504).
 func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool {
 	ctx := a.ctx
 	target := r.Host
+	// A target that is no host and port, or whose host is neither an
+	// address nor a domain name (a megabyte's :authority, say), is a bad
+	// target: nothing of it is looked up, kept or charged. It gets the
+	// site's answer; but a client that asked for the dial's outcome
+	// (niko-ack, ack.go) and whose password was taken must not read the
+	// site's 404 as that password refused: it gets the honest connect's
+	// refusal, as for any target the node will not dial.
 	host, _, err := net.SplitHostPort(target)
-	if err != nil {
-		s.Answer.ServeHTTP(w, r)
-		return false
+	if err == nil {
+		if _, perr := netip.ParseAddr(host); perr != nil && !domainName(host) {
+			err = errBadName
+		}
 	}
-	// A host that is neither an address nor a domain name (a megabyte's
-	// :authority, say) is a bad target too: nothing of it is looked up,
-	// kept or charged.
-	if _, err := netip.ParseAddr(host); err != nil && !domainName(host) {
+	if err != nil {
+		if r.Header.Get(AckHeader) == "1" {
+			refuse(w, http.StatusBadGateway, ackDenied)
+			return false
+		}
 		s.Answer.ServeHTTP(w, r)
 		return false
 	}
@@ -120,7 +136,7 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 		if kind != "" {
 			// Not who or where: no user and no destination in the log.
 			s.Log.Debug("naive: too many connections", "limit", kind)
-			w.WriteHeader(http.StatusTooManyRequests)
+			refuse(w, http.StatusTooManyRequests, "")
 			return false
 		}
 		defer done()
@@ -191,6 +207,7 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 
 	dctx, cancel := context.WithTimeout(ctx, s.dialTimeout())
 	out, err := s.dialUser(dctx, a.key, target, paid)
+	expired := errors.Is(dctx.Err(), context.DeadlineExceeded) // the dial had its whole time
 	cancel()
 	if err != nil {
 		// With niko-ack the dial's outcome is the answer, and nothing is
@@ -198,11 +215,8 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 		// meanwhile, gets the reset. Not where: no destination in the log,
 		// and none in the answer.
 		if ack && ctx.Err() == nil {
-			status, reason := ackRefusal(err)
-			if reason != "" {
-				w.Header().Set(AckHeader, reason)
-			}
-			w.WriteHeader(status)
+			status, reason := ackRefusal(err, expired)
+			refuse(w, status, reason)
 			s.Log.Debug("naive: destination unreachable", "status", status)
 			return false
 		}
