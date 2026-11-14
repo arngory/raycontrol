@@ -485,7 +485,7 @@ func TestHTTP3ReloadsCertificate(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- serveHTTP3(ctx, pc, certs.GetCertificate, http.NotFoundHandler()) }()
+	go func() { done <- serveHTTP3(ctx, pc, certs.GetCertificate, http.NotFoundHandler(), quicOptions{}) }()
 	defer func() {
 		cancel()
 		if err := <-done; err != nil {

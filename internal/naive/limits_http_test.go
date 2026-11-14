@@ -30,6 +30,7 @@ func limitServer(t *testing.T, dial func(ctx context.Context, network, addr stri
 	answer, _ := site.Responder(site.Answer404, "")
 	h := &Server{Users: &Users{Path: users}, Answer: answer, Dial: dial, Log: slog.New(slog.DiscardHandler)}
 	srv := httptest.NewUnstartedServer(h)
+	srv.Config = h.HTTPServer() // the limits of a connection as the service has them
 	srv.EnableHTTP2 = true
 	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}}
 	srv.StartTLS()

@@ -557,7 +557,7 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 				log.Error("doh3 socket", "service", svc.Name, "err", err)
 			} else {
 				go func() {
-					if err := serveHTTP3(h3ctx, pc, certs.GetCertificate, h); err != nil {
+					if err := serveHTTP3(h3ctx, pc, certs.GetCertificate, h, quicOptions{}); err != nil {
 						log.Error("doh3", "service", svc.Name, "err", err)
 					}
 				}()
@@ -1352,19 +1352,12 @@ func cmdNaive(args []string) error {
 			return err
 		}
 		go func() {
-			if err := serveHTTP3(ctx, pc, certs.GetCertificate, ns); err != nil {
+			if err := serveHTTP3(ctx, pc, certs.GetCertificate, ns, naiveQUIC()); err != nil {
 				log.Error("naive-quic", "err", err)
 			}
 		}()
 	}
-	srv := &http.Server{
-		Handler:           ns,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       5 * time.Minute,
-		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelDebug),
-		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
-			GetCertificate: certs.GetCertificate, NextProtos: []string{"h2", "http/1.1"}},
-	}
+	srv := naiveHTTPServer(ns, certs.GetCertificate, log)
 	go func() {
 		<-ctx.Done()
 		_ = srv.Close()
@@ -1417,17 +1410,47 @@ func cmdRelay(args []string) error {
 	return s.Serve(ctx, ln, pc, tlsCfg)
 }
 
+// naiveHTTPServer is the HTTP/2 side of a naive service: TLS 1.3 with
+// X25519MLKEM768 only, the limits of a connection naive's own.
+func naiveHTTPServer(ns *naive.Server, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), log *slog.Logger) *http.Server {
+	srv := ns.HTTPServer()
+	srv.ErrorLog = slog.NewLogLogger(log.Handler(), slog.LevelDebug)
+	srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+		GetCertificate: cert, NextProtos: []string{"h2", "http/1.1"}}
+	return srv
+}
+
+// quicOptions are what one of rayd's QUIC servers sets apart from the
+// other; the zero value leaves quic-go's and net/http's defaults (DoH3).
+type quicOptions struct {
+	// maxStreams is how many requests a connection holds at once (100
+	// when 0), maxHeaderBytes the most a request's header takes (1 MiB
+	// when 0).
+	maxStreams     int64
+	maxHeaderBytes int
+}
+
+// naiveQUIC are the limits of a naive connection over HTTP/3, the same as
+// over HTTP/2 (naive.Server.HTTPServer).
+func naiveQUIC() quicOptions {
+	return quicOptions{maxStreams: naive.MaxStreams, maxHeaderBytes: naive.MaxHeaderBytes}
+}
+
+func (o quicOptions) config() *quic.Config {
+	return &quic.Config{MaxIdleTimeout: 2 * time.Minute, KeepAlivePeriod: 0, MaxIncomingStreams: o.maxStreams}
+}
+
 // serveHTTP3 serves h on QUIC over the front's datagrams until ctx ends:
 // TLS 1.3 with X25519MLKEM768 only, ALPN h3, the certificate cert gives at
 // each handshake (certfile.Holder).
-func serveHTTP3(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), h http.Handler) error {
+func serveHTTP3(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), h http.Handler, o quicOptions) error {
 	tlsConf := http3.ConfigureTLSConfig(&tls.Config{MinVersion: tls.VersionTLS13,
 		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, GetCertificate: cert})
-	ln, err := quic.ListenEarly(pc, tlsConf, &quic.Config{MaxIdleTimeout: 2 * time.Minute, KeepAlivePeriod: 0})
+	ln, err := quic.ListenEarly(pc, tlsConf, o.config())
 	if err != nil {
 		return err
 	}
-	srv := &http3.Server{Handler: h, IdleTimeout: 2 * time.Minute}
+	srv := &http3.Server{Handler: h, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: o.maxHeaderBytes}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Close()
