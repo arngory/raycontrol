@@ -100,7 +100,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl -remote laptop.rcdev remote whoami` | какое это устройство: ID, пользователь, имя, роль, нода |
 
 `rayctl` для своей машины: Linux — из архива ноды; macOS и FreeBSD — архивы `rayctl-darwin-arm64`,
-`rayctl-darwin-amd64` и `rayctl-freebsd-amd64` (`.tar.gz`) с первого релиза после v0.25.1, под той же подписью
+`rayctl-darwin-amd64` и `rayctl-freebsd-amd64` (`.tar.gz`) с v0.26.0, под той же подписью
 `SHA256SUMS`. Там работают `remote enroll`, всё с `-remote`, `knock` и `probe`; команды самого сервера (`install`,
 `apply`, `update`, `backup`, `report`, `check`, `egress`, `conn-limit`, `service cert`, `relay bundle` и
 другие) отвечают `… works on a Linux node only`. С того же релиза `-remote` не читает файл устройства, открытый
@@ -223,6 +223,9 @@ sudo rayctl update          # релиз проверяется как на но
                             # не поднялся — откат к прежней версии с прежним снимком периметра
 sudo rayctl update -rollback   # вернуть версию до последнего обновления; и после оборванного обновления
 ```
+
+Не перезагружайте и не выключайте хост relay во время `rayctl update`: после загрузки relay может быть открытым и
+без пересылки. Тогда — `sudo rayctl update -rollback`; прервано ли обновление, говорит `rayctl update status`.
 
 `rayctl update remote|auto` на relay отказывает: у relay нет API rayd для устройств. Relay до v0.26.0 и запасной
 путь — тот же запуск ещё раз, с пакетом, который установка оставила на хосте relay:

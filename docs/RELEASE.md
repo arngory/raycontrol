@@ -38,7 +38,7 @@ variables → Actions. Без секрета релиз не собираетс�
    - **тегом**: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. Workflow прогоняет весь CI (`ci.yml`) на этом коммите и собирает `raycontrol-linux-{amd64,arm64}.tar.gz` (`rayd`,
    `rayspa`, `rayctl`, `xray`, `niko-server`, `slipstream-server`, `ipinfo_lite.mmdb`, `NOTICE`, `VERSIONS`) и, с
-   первого релиза после v0.25.1, три архива с одним `rayctl` для машины администратора (ниже), считает
+   v0.26.0, три архива с одним `rayctl` для машины администратора (ниже), считает
    `SHA256SUMS`, подписывает его (trusted comment `raycontrol vX.Y.Z` — по нему `rayctl update` узнаёт версию) и
    публикует релиз с этими файлами и `SHA256SUMS.minisig`. Пока CI не зелёный, ничего не публикуется: v0.16.0 вышел
    по зелёному прогону пулл-реквеста, а CI на `main`, шедший рядом с релизом, был красным.
@@ -64,7 +64,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 
 ## `rayctl` для macOS и FreeBSD
 
-С первого релиза после v0.25.1 релиз несёт ещё три архива: `rayctl-darwin-arm64.tar.gz`,
+С v0.26.0 релиз несёт ещё три архива: `rayctl-darwin-arm64.tar.gz`,
 `rayctl-darwin-amd64.tar.gz` и `rayctl-freebsd-amd64.tar.gz`. В каждом — `rayctl` и `VERSIONS` (тег и коммит): это
 `rayctl` для машины администратора — удалённое управление (`-remote`), `knock`, `probe`. Нода остаётся на Linux;
 команды, которые действуют на самом сервере, там отказывают одной строкой (таблица — `cmd/rayctl/where.go`).

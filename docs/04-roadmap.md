@@ -148,7 +148,14 @@ systemd-юниты, хранение секретов через systemd credent
   смене имени, и без неё; `rotate -now` срока не даёт (R4-19).
 
 После R4 — R5 (белые списки, отложено вместе с P-16) и проверка ноды на настоящем хосте с клиентом Niko.
-Форк Xray с v0.25.1 стоит на upstream v26.11.9 (ветка `raycontrol/v26.11.9`, что форк несёт — его FORK.md).
+Форк Xray с v0.25.1 стоит на upstream v26.11.9 (ветка `raycontrol/v26.11.9`, что форк несёт — его FORK.md); с v0.26.0 —
+коммит `46b58d4`, голова этой ветки: сокет, оставшийся от убитого процесса, больше не мешает следующему запуску.
+
+v0.26.0: пины ключа сертификата сайта в ссылках naive, `hy2-masq` и DoH ([spec/cert-pin-v1.md](spec/cert-pin-v1.md));
+честный connect у naive (`niko-ack`, [spec/naive-uot-v1.md](spec/naive-uot-v1.md) §4.1); обновление relay командой
+`rayctl update` на его хосте ([spec/node-update-v1.md](spec/node-update-v1.md) §5); `rayctl` для macOS и FreeBSD
+([18-platforms-and-hosts.md](18-platforms-and-hosts.md)). Во второй волне — обновление relay по просьбе ноды, чтобы
+обновление с телефона администратора обновляло и relay; на relay оно будет выключено по умолчанию.
 
 ## После проверки на VPS: кандидаты
 

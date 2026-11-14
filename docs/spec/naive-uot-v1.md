@@ -166,5 +166,6 @@
 ## 5. Версии
 
 - raycontrol v0.20.0: UoT v2 в naive (HTTP/2 и HTTP/3), `uot=2` в ссылке, сброс потока при отказах.
+- raycontrol v0.26.0: ответ после dial на TCP CONNECT с `niko-ack: 1` (§4.1), `niko-ack=1` в ссылке naive.
 - Niko `04d713c`: `udp_over_tcp` по `uot=2`.
 - Нода до v0.20.0 параметр не ставит, и клиент UDP через naive не шлёт.
