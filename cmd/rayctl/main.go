@@ -85,7 +85,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service cert SITE -chain F -key F [-force]
                                             a certificate of your own for the site and the services under
                                             it, in place of ACME's (root on the node only); the links
-                                            under it then carry no niko-pin. Refused, unless -force, when
+                                            under it then carry no niko-pin; it says whether the chain leads
+                                            to a root clients know. Refused, unless -force, when
                                             they carry the node's pins and its key is another: clients
                                             that hold them are cut off until they fetch their subscription
   service rotate NAME [-now] [-force] [-fresh]
@@ -821,6 +822,8 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 			// spec/cert-pin-v1.md §7: the node pins only keys of its own.
 			fmt.Fprintln(w, "with a certificate of your own the links of naive, hy2-masq and DoH under it carry no niko-pin:\n"+
 				"clients check its chain only, as before pins")
+			// What clients will make of the chain (spec/cert-pin-v1.md §7).
+			fmt.Fprint(w, certVerdict(chainPEM, time.Now()))
 			if r.Msg.Unpinned {
 				fmt.Fprintln(w, "warning: these links carried the pins of the node's keys, and this certificate has another key:\n"+
 					"clients refuse it (Niko 1.45.0: on hy2-masq) until they fetch their subscription. A client whose\n"+
