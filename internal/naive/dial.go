@@ -62,7 +62,7 @@ func (s *Server) dialUser(ctx context.Context, user, target string, paid bool) (
 		}
 	}
 	if len(public) == 0 {
-		return nil, errors.New("naive: destination not public")
+		return nil, errNotPublic
 	}
 	return s.dialRace(ctx, user, public)
 }

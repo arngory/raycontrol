@@ -79,7 +79,7 @@ func TestSitePinLines(t *testing.T) {
 	pins := vectorPinCurrent + "%2C" + vectorPinNext
 	for _, c := range []struct{ name, got, want string }{
 		{"naive", sub.NaiveLink(m, m.Services[1], "f3b1c0de-0000-4000-8000-000000000001"),
-			"naive+https://niko:f3b1c0de-0000-4000-8000-000000000001@203.0.113.7:443?niko-node=00112233445566778899aabbccddeeff" +
+			"naive+https://niko:f3b1c0de-0000-4000-8000-000000000001@203.0.113.7:443?niko-ack=1&niko-node=00112233445566778899aabbccddeeff" +
 				"&niko-pin=" + pins + "&niko-svc=5&sni=n4k2.example.com&uot=2#naive"},
 		{"hy2-masq", sub.HysteriaLink(m, m.Services[2], "f3b1c0de-0000-4000-8000-000000000002"),
 			"hysteria2://f3b1c0de-0000-4000-8000-000000000002@203.0.113.7:443/?niko-ack=1&niko-node=00112233445566778899aabbccddeeff" +
@@ -130,7 +130,7 @@ func TestSitePinsAbsent(t *testing.T) {
 		}
 	}
 	want := []string{
-		"naive+https://niko:p@203.0.113.7:443?niko-node=00112233445566778899aabbccddeeff&niko-svc=5&sni=n4k2.example.com&uot=2#naive",
+		"naive+https://niko:p@203.0.113.7:443?niko-ack=1&niko-node=00112233445566778899aabbccddeeff&niko-svc=5&sni=n4k2.example.com&uot=2#naive",
 		"hysteria2://p@203.0.113.7:443/?niko-ack=1&niko-node=00112233445566778899aabbccddeeff&niko-svc=6&sni=h7q9.example.com#hy2-masq",
 		"https://d3x8.example.com/dns-query/p?niko-node=00112233445566778899aabbccddeeff&niko-svc=7#doh",
 	}

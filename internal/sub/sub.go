@@ -603,6 +603,9 @@ func NaiveLink(m render.Model, s render.Service, password string) string {
 	if provision.NaiveICMP(s.Service) {
 		q.Set("icmp", "1")
 	}
+	// rayd naive answers a CONNECT with the header niko-ack: 1 after the
+	// dial, with its outcome (spec/naive-uot-v1.md §4), as Hysteria2 does.
+	q.Set("niko-ack", "1")
 	setSitePins(q, m, s)
 	return "naive+https://" + url.UserPassword("niko", password).String() + "@" + net.JoinHostPort(m.Host, "443") + "?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }

@@ -48,9 +48,10 @@ type Server struct {
 
 	// lim are the per-user limits (spec/conn-limit-v1.md §3.1), names the
 	// process's cache of names.
-	lim     limits
-	names   names
-	uotIdle time.Duration // uotIdle when 0 (tests make it short)
+	lim      limits
+	names    names
+	uotIdle  time.Duration // uotIdle when 0 (tests make it short)
+	dialWait time.Duration // dialTimeout when 0 (tests make it short)
 
 	icmp     icmpLimits
 	icmpIdle time.Duration                   // icmpIdle when 0
@@ -127,15 +128,25 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 	// 200 before the destination answers: waiting for it would cost each
 	// connection up to a round trip more. A destination that cannot be
 	// reached resets the stream (spec/naive-uot-v1.md §4): the client sees
-	// an error, not an empty answer.
-	w.Header().Set("Padding", paddingHeader())
-	w.WriteHeader(http.StatusOK)
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	// an error, not an empty answer. A client that asked for the dial's
+	// outcome (niko-ack, ack.go) gets its answer after the dial instead; a
+	// UoT or an ICMP stream has none to wait for.
+	ack := tcp && r.Header.Get(AckHeader) == "1"
+	var in *paddedStream
+	accept := func() bool {
+		w.Header().Set("Padding", paddingHeader())
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return false
+		}
+		flusher.Flush()
+		in = &paddedStream{r: r.Body, w: w, f: flusher}
 		return true
 	}
-	flusher.Flush()
-	in := &paddedStream{r: r.Body, w: w, f: flusher}
+	if !ack && !accept() {
+		return true
+	}
 
 	switch host {
 	case UoTName:
@@ -178,14 +189,30 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 		return true
 	}
 
-	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	dctx, cancel := context.WithTimeout(ctx, s.dialTimeout())
 	out, err := s.dialUser(dctx, a.key, target, paid)
 	cancel()
 	if err != nil {
-		s.Log.Debug("naive: destination unreachable") // not where: no destination in the log
+		// With niko-ack the dial's outcome is the answer, and nothing is
+		// written after it; a client that is gone, or a user revoked
+		// meanwhile, gets the reset. Not where: no destination in the log,
+		// and none in the answer.
+		if ack && ctx.Err() == nil {
+			status, reason := ackRefusal(err)
+			if reason != "" {
+				w.Header().Set(AckHeader, reason)
+			}
+			w.WriteHeader(status)
+			s.Log.Debug("naive: destination unreachable", "status", status)
+			return false
+		}
+		s.Log.Debug("naive: destination unreachable")
 		panic(http.ErrAbortHandler)
 	}
 	defer out.Close()
+	if ack && !accept() {
+		return true
+	}
 	// The client's end of the upload only half-closes the destination; the
 	// tunnel lasts until the destination is done sending, or the stream
 	// ends. Nothing writes to w once this returns. The bytes count at the
@@ -266,13 +293,13 @@ func password(r *http.Request) (string, bool) {
 // may not use naive to get at what only the node's own address reaches.
 // Names are looked up with the public resolvers.
 func PublicDialer() *net.Dialer {
-	return &net.Dialer{Timeout: 10 * time.Second, Resolver: PublicResolver(), Control: func(_, address string, _ syscall.RawConn) error {
+	return &net.Dialer{Timeout: dialTimeout, Resolver: PublicResolver(), Control: func(_, address string, _ syscall.RawConn) error {
 		ap, err := netip.ParseAddrPort(address)
 		if err != nil {
 			return err
 		}
 		if !Public(ap.Addr()) {
-			return errors.New("naive: destination not public")
+			return errNotPublic
 		}
 		return nil
 	}}

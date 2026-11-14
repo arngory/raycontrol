@@ -299,3 +299,73 @@ func TestNaiveHTTP3DestinationEnd(t *testing.T) {
 		cancel()
 	}
 }
+
+// The honest connect over HTTP/3 as over HTTP/2 (naive's TestAckConnect):
+// with niko-ack: 1 the answer comes after the dial, 200 with the early
+// bytes passed on first, or 502 and the reason.
+func TestNaiveHTTP3AckConnect(t *testing.T) {
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			c, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _ = io.Copy(c, c); c.Close() }()
+		}
+	}()
+	gone, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := gone.Addr().String()
+	gone.Close()
+	var dialed atomic.Int32
+	var d net.Dialer
+	ns, cert := naiveTest(t, func(ctx context.Context, network, addr string) (net.Conn, error) {
+		defer dialed.Add(1)
+		select {
+		case <-time.After(200 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return d.DialContext(ctx, network, addr)
+	})
+	tr := serveNaiveH3(t, ns, cert, naiveQUIC())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, pw := naiveConnect(ctx, t, "https://naive.test", echo.Addr().String())
+	req.Header.Set(naive.AckHeader, "1")
+	early := []byte(strings.Repeat("early bytes ", 3000))
+	s := naive.ClientStream(nil, pw)
+	go func() { _, _ = s.Write(early) }()
+	resp, err := tr.RoundTrip(req)
+	if err != nil || resp.StatusCode != http.StatusOK || resp.Header.Get("Padding") == "" {
+		t.Fatalf("a live destination: %v %v", resp, err)
+	}
+	defer resp.Body.Close()
+	if dialed.Load() != 1 {
+		t.Fatal("the 200 came before the dial was done")
+	}
+	got := make([]byte, len(early))
+	if _, err := io.ReadFull(naive.ClientStream(resp.Body, nil), got); err != nil || string(got) != string(early) {
+		t.Fatalf("the early bytes came back changed (%v)", err)
+	}
+
+	req, _ = naiveConnect(ctx, t, "https://naive.test", dead)
+	req.Header.Set(naive.AckHeader, "1")
+	resp, err = tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway || resp.Header.Get(naive.AckHeader) != "refused" || len(body) != 0 || err != nil {
+		t.Fatalf("a closed port: %s, niko-ack %q, %d bytes after it (%v)", resp.Status, resp.Header.Get(naive.AckHeader), len(body), err)
+	}
+}
