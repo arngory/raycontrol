@@ -131,7 +131,7 @@ func TestYggdrasilLANGroups(t *testing.T) {
 		}
 	}
 	tablet := devs[2]
-	if err := st.RevokeDevice(ctx, tablet.id); err != nil {
+	if _, err := st.RevokeDevice(ctx, tablet.id); err != nil {
 		t.Fatal(err)
 	}
 	group := func(user string) string { return fmt.Sprintf("u%d", ids[user]) }

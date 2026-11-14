@@ -50,7 +50,9 @@ func TestCarryRevocations(t *testing.T) {
 	if _, err := s.db.ExecContext(ctx, `UPDATE users SET expires_at = ? WHERE name = 'alice'`, sooner.Unix()); err != nil {
 		t.Fatal(err)
 	}
-	must(t, s.RevokeDevice(ctx, d1.ID))
+	if _, err := s.RevokeDevice(ctx, d1.ID); err != nil {
+		t.Fatal(err)
+	}
 	must(t, s.SetUserEnabled(ctx, "bob", false))
 	must(t, s.DeleteUser(ctx, "carol")) // and with her d3
 	must(t, s.DeleteInvite(ctx, inv.ID))
@@ -318,7 +320,9 @@ func TestCarryLAN(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	must(t, s.RevokeDevice(ctx, alices[0].ID))
+	if _, err := s.RevokeDevice(ctx, alices[0].ID); err != nil {
+		t.Fatal(err)
+	}
 	aliceKey := s.lanKey(t, "alice")
 	if _, err := s.SetUserLAN(ctx, "bob", false); err != nil {
 		t.Fatal(err)

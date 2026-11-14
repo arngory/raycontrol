@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/mlkem"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -381,17 +380,9 @@ func CollectForRender(ctx context.Context, st *store.Store) (Model, error) {
 	return m, nil
 }
 
-// NewUUID makes a random (version 4) UUID, the VLESS credential.
-func NewUUID() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	b[6] = b[6]&0x0f | 0x40
-	b[8] = b[8]&0x3f | 0x80
-	h := hex.EncodeToString(b[:])
-	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:], nil
-}
+// NewUUID makes a random (version 4) UUID, the VLESS credential
+// (store.NewUUID, which a revocation's new credentials take too).
+func NewUUID() (string, error) { return store.NewUUID() }
 
 // File is one rendered file.
 type File struct {

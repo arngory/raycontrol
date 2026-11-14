@@ -267,7 +267,7 @@ func TestEndpoint(t *testing.T) {
 	}
 
 	// A revoked device gets nothing.
-	if err := f.st.RevokeDevice(context.Background(), f.device.ID); err != nil {
+	if _, err := f.st.RevokeDevice(context.Background(), f.device.ID); err != nil {
 		t.Fatal(err)
 	}
 	resp3, err := get(pq, true)

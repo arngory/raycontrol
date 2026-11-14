@@ -273,7 +273,7 @@ func TestLANInSubscription(t *testing.T) {
 	// Revocation: the laptop goes from the list, and the password changes
 	// for everyone at once.
 	before := n.lanOf("alice/phone", "").Password
-	if err := n.st.RevokeDevice(ctx, laptop.ID); err != nil {
+	if _, err := n.st.RevokeDevice(ctx, laptop.ID); err != nil {
 		t.Fatal(err)
 	}
 	if l = n.lanOf("alice/phone", ""); slices.Contains(ids(l), laptop.ID) || l.Password == before || len(l.Password) != 43 {

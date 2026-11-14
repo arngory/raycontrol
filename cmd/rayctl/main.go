@@ -1127,10 +1127,34 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		if err := need(args, 1); err != nil {
 			return err
 		}
-		_, err := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: args[0]}))
-		return err
+		r, err := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: args[0]}))
+		if err != nil {
+			return err
+		}
+		return c.print(r.Msg, func(w *tabwriter.Writer) { fmt.Fprint(w, revokeText(args[0], r.Msg)) })
 	}
 	return errUsage
+}
+
+// revokeText says what a revocation did (R4-36): the user's credentials
+// are new, so the user's other devices are off until their next
+// subscription fetch.
+func revokeText(id string, r *nodev1.RevokeDeviceResponse) string {
+	switch {
+	case r.Invite:
+		return fmt.Sprintf("invite %s withdrawn\n", id)
+	case r.User == "":
+		// A node before v0.27.0: it said nothing, and changed no credentials.
+		return fmt.Sprintf("device %s revoked (the node is older than v0.27.0: the user's credentials stay as they were)\n", id)
+	case r.Already:
+		return fmt.Sprintf("device %s (%s/%s) was revoked already: nothing changed\n", id, r.User, r.Device)
+	case r.Credentials == 0:
+		return fmt.Sprintf("device %s (%s/%s) revoked; %s has no credentials yet\n", id, r.User, r.Device, r.User)
+	}
+	return fmt.Sprintf("device %s (%s/%s) revoked. %s's credentials are new (%d services): what the device kept stops\n"+
+		"working once rayd has applied them, in seconds. %s's other devices are cut too, until they fetch\n"+
+		"their subscription: Niko does it by itself after 15 to 30 s, its keys still open the subscription.\n",
+		id, r.User, r.Device, r.User, r.Credentials, r.User)
 }
 
 func (c *cli) audit(ctx context.Context, args []string) error {

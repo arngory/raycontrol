@@ -358,7 +358,7 @@ func TestRelayReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	gone, _, _ := srv.Store.CreateDevice(ctx, "alice", "old", "user")
-	if err := srv.Store.RevokeDevice(ctx, gone.ID); err != nil {
+	if _, err := srv.Store.RevokeDevice(ctx, gone.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r1", Address: "198.51.100.20"})); err != nil {

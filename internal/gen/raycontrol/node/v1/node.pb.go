@@ -6104,7 +6104,18 @@ func (x *RevokeDeviceRequest) GetId() string {
 }
 
 type RevokeDeviceResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// invite: the ID was an unused invite, now withdrawn; nothing else
+	// changed. A node before v0.27.0 answers with none of these fields.
+	Invite bool `protobuf:"varint,1,opt,name=invite,proto3" json:"invite,omitempty"`
+	// already: the device was revoked before; nothing changed this time.
+	Already bool `protobuf:"varint,2,opt,name=already,proto3" json:"already,omitempty"`
+	// user and device: whose device it is, and its name.
+	User   string `protobuf:"bytes,3,opt,name=user,proto3" json:"user,omitempty"`
+	Device string `protobuf:"bytes,4,opt,name=device,proto3" json:"device,omitempty"`
+	// credentials: how many of the user's credentials are new (one a
+	// service); 0 for a user with none yet.
+	Credentials   uint32 `protobuf:"varint,5,opt,name=credentials,proto3" json:"credentials,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6137,6 +6148,41 @@ func (x *RevokeDeviceResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use RevokeDeviceResponse.ProtoReflect.Descriptor instead.
 func (*RevokeDeviceResponse) Descriptor() ([]byte, []int) {
 	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{103}
+}
+
+func (x *RevokeDeviceResponse) GetInvite() bool {
+	if x != nil {
+		return x.Invite
+	}
+	return false
+}
+
+func (x *RevokeDeviceResponse) GetAlready() bool {
+	if x != nil {
+		return x.Already
+	}
+	return false
+}
+
+func (x *RevokeDeviceResponse) GetUser() string {
+	if x != nil {
+		return x.User
+	}
+	return ""
+}
+
+func (x *RevokeDeviceResponse) GetDevice() string {
+	if x != nil {
+		return x.Device
+	}
+	return ""
+}
+
+func (x *RevokeDeviceResponse) GetCredentials() uint32 {
+	if x != nil {
+		return x.Credentials
+	}
+	return 0
 }
 
 type CreateInviteRequest struct {
@@ -8126,8 +8172,13 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x06device\x18\x01 \x01(\v2\x1a.raycontrol.node.v1.DeviceR\x06device\x12\x16\n" +
 	"\x06bundle\x18\x02 \x01(\tR\x06bundle\"%\n" +
 	"\x13RevokeDeviceRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\"\x16\n" +
-	"\x14RevokeDeviceResponse\"\x84\x01\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"\x96\x01\n" +
+	"\x14RevokeDeviceResponse\x12\x16\n" +
+	"\x06invite\x18\x01 \x01(\bR\x06invite\x12\x18\n" +
+	"\aalready\x18\x02 \x01(\bR\aalready\x12\x12\n" +
+	"\x04user\x18\x03 \x01(\tR\x04user\x12\x16\n" +
+	"\x06device\x18\x04 \x01(\tR\x06device\x12 \n" +
+	"\vcredentials\x18\x05 \x01(\rR\vcredentials\"\x84\x01\n" +
 	"\x13CreateInviteRequest\x12\x12\n" +
 	"\x04user\x18\x01 \x01(\tR\x04user\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +

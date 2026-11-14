@@ -822,17 +822,30 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 }
 
 func (s *Server) RevokeDevice(ctx context.Context, req *connect.Request[nodev1.RevokeDeviceRequest]) (*connect.Response[nodev1.RevokeDeviceResponse], error) {
-	action := "device.revoke"
-	err := s.Store.RevokeDevice(ctx, req.Msg.Id)
-	if errors.Is(err, store.ErrNotFound) {
+	action, target := "device.revoke", req.Msg.Id
+	resp := &nodev1.RevokeDeviceResponse{}
+	r, err := s.Store.RevokeDevice(ctx, req.Msg.Id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
 		if ierr := s.Store.DeleteInvite(ctx, req.Msg.Id); ierr == nil || !errors.Is(ierr, store.ErrNotFound) {
 			action, err = "invite.delete", ierr
+			resp.Invite = true
+		}
+	case err == nil:
+		// The audit says whose device and that the user's credentials
+		// changed (R4-36), never what they are.
+		resp.User, resp.Device, resp.Already = r.User, r.Device, r.Already
+		resp.Credentials = uint32(r.Credentials) //nolint:gosec // G115: one a service
+		if r.Already {
+			target += " " + r.User + "/" + r.Device + ": revoked already, nothing changed"
+		} else {
+			target += fmt.Sprintf(" %s/%s: %d credentials of %s new", r.User, r.Device, r.Credentials, r.User)
 		}
 	}
-	if err := s.done(ctx, action, req.Msg.Id, err); err != nil {
+	if err := s.done(ctx, action, target, err); err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(&nodev1.RevokeDeviceResponse{}), nil
+	return connect.NewResponse(resp), nil
 }
 
 // DefaultInviteTTL is how long an invite works when the request says nothing.

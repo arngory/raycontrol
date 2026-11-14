@@ -322,11 +322,22 @@ func TestYggdrasilDeviceKeys(t *testing.T) {
 		t.Fatalf("node keys %v", keys)
 	}
 	// A revoked device's key goes.
-	if err := st.RevokeDevice(ctx, laptop.ID); err != nil {
+	if _, err := st.RevokeDevice(ctx, laptop.ID); err != nil {
 		t.Fatal(err)
 	}
 	if keys := nodeKeys(); len(keys) != 4 || keys[name+"-"+laptop.ID] != "" {
 		t.Fatalf("after revoking: %v", keys)
+	}
+	// The revocation gave the user a new inner UUID (R4-36), and the keys
+	// of the user's other devices follow from it: the phone's is new, and
+	// the node has the new one; Bob's stays.
+	if again := linkKey(phoneKey[:]); again == ph || nodeKeys()[name+"-"+phone.ID] != again {
+		t.Fatalf("the phone's key after its sibling's revocation: %s, was %s; node %v", again, ph, nodeKeys())
+	} else {
+		ph = again
+	}
+	if nodeKeys()[bob+"-"+bobPhone.ID] != keys[bob+"-"+bobPhone.ID] {
+		t.Fatal("another user's device key changed with the revocation")
 	}
 	// Rotation: each device's next key, then its previous one for the
 	// grace only.
