@@ -62,7 +62,7 @@ func runCommands(t *testing.T) []string {
 }
 
 // The table has every command rayctl runs and no other: a new command
-// says where it works, or this fails.
+// says where it works, or this fails. Its subcommands: TestSubPlaces.
 func TestPlaces(t *testing.T) {
 	cmds := runCommands(t)
 	for _, c := range cmds {
@@ -93,6 +93,146 @@ func TestPlaces(t *testing.T) {
 		}
 		if places[c] != want {
 			t.Errorf("%s: place %d, want %d (it is in localOnly)", c, places[c], want)
+		}
+	}
+}
+
+// subCommands reads the subcommands of each command that (*cli).run
+// passes its sub to (return c.service(ctx, sub, rest)): the cases of a
+// switch on sub in that method and the strings sub is compared with.
+func subCommands(t *testing.T) map[string][]string {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	methods := map[string]*ast.FuncDecl{}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil {
+				continue
+			}
+			if star, ok := fn.Recv.List[0].Type.(*ast.StarExpr); ok {
+				if id, ok := star.X.(*ast.Ident); ok && id.Name == "cli" {
+					methods[fn.Name.Name] = fn
+				}
+			}
+		}
+	}
+	isSub := func(e ast.Expr) bool { id, ok := e.(*ast.Ident); return ok && id.Name == "sub" }
+	str := func(e ast.Expr) (string, bool) {
+		lit, ok := e.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return "", false
+		}
+		s, err := strconv.Unquote(lit.Value)
+		return s, err == nil
+	}
+	subs := map[string][]string{}
+	ast.Inspect(methods["run"].Body, func(n ast.Node) bool {
+		cc, ok := n.(*ast.CaseClause)
+		if !ok || len(cc.List) != 1 || len(cc.Body) != 1 {
+			return true
+		}
+		cmd, _ := str(cc.List[0])
+		ret, ok := cc.Body[0].(*ast.ReturnStmt)
+		if !ok || len(ret.Results) != 1 {
+			return false
+		}
+		call, ok := ret.Results[0].(*ast.CallExpr)
+		if !ok || !slices.ContainsFunc(call.Args, isSub) {
+			return false
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || methods[sel.Sel.Name] == nil {
+			t.Fatalf("run: %s passes sub to %v, which is not a method here", cmd, call.Fun)
+		}
+		add := func(e ast.Expr) {
+			if s, ok := str(e); ok && s != "" && !slices.Contains(subs[cmd], s) {
+				subs[cmd] = append(subs[cmd], s)
+			}
+		}
+		ast.Inspect(methods[sel.Sel.Name].Body, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.SwitchStmt:
+				if isSub(n.Tag) {
+					for _, c := range n.Body.List {
+						for _, e := range c.(*ast.CaseClause).List {
+							add(e)
+						}
+					}
+				}
+			case *ast.BinaryExpr:
+				if n.Op == token.EQL || n.Op == token.NEQ {
+					if isSub(n.X) {
+						add(n.Y)
+					} else if isSub(n.Y) {
+						add(n.X)
+					}
+				}
+			}
+			return true
+		})
+		return false
+	})
+	if len(subs) < 8 || len(subs["service"]) < 5 {
+		t.Fatalf("the subcommands were not read: %v", subs)
+	}
+	return subs
+}
+
+// apiSubs are the subcommands that only ask rayd (and read or write the
+// files named on their command line, on this machine), and so work where
+// their command does: places has no line for them.
+var apiSubs = map[string][]string{
+	"node":       {"name", "note"},
+	"user":       {"add", "del", "disable", "enable", "export", "lan", "limit", "list", "reset-usage", "services", "usage"},
+	"service":    {"add", "del", "disable", "enable", "list", "rotate", "set"},
+	"device":     {"add", "invite", "list", "revoke"},
+	"relay":      {"add", "list", "remove", "set"},
+	"dns":        {"check", "cloudflare", "remove", "status", "sync"},
+	"summary":    {"api", "off", "on", "show"},
+	"app-mirror": {"off", "on", "show"},
+	"debug":      {"off", "on", "show"},
+}
+
+// Every subcommand says where it works too: a line of its own in places
+// when it acts on the node's host (as service cert, relay bundle and
+// summary db do), or apiSubs when it only asks rayd. A new subcommand of
+// an API command that does neither fails here, so that it cannot slip
+// through the refusal off Linux. What a subcommand's code does is not
+// checked: the list says so for it.
+func TestSubPlaces(t *testing.T) {
+	subs := subCommands(t)
+	for cmd, list := range subs {
+		for _, sub := range list {
+			_, own := places[cmd+" "+sub]
+			switch api := slices.Contains(apiSubs[cmd], sub); {
+			case !own && !api:
+				t.Errorf("%s %s: neither in places (where.go) nor in apiSubs: say where it works", cmd, sub)
+			case own && api:
+				t.Errorf("%s %s: both in places and in apiSubs", cmd, sub)
+			}
+		}
+	}
+	for cmd, list := range apiSubs {
+		for _, sub := range list {
+			if !slices.Contains(subs[cmd], sub) {
+				t.Errorf("apiSubs has %s %s, which rayctl does not", cmd, sub)
+			}
+		}
+	}
+	for key := range places {
+		if cmd, sub, ok := strings.Cut(key, " "); ok && !slices.Contains(subs[cmd], sub) {
+			t.Errorf("places has %q, which rayctl does not", key)
 		}
 	}
 }

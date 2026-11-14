@@ -27,7 +27,9 @@ const (
 )
 
 // places is where each command works, by "command" or "command sub"; the
-// longer key wins. Every command of (*cli).run is here (TestPlaces).
+// longer key wins. Every command of (*cli).run is here (TestPlaces); a
+// subcommand that acts on the host has its own line, one that only asks
+// rayd is in the test's list apiSubs (TestSubPlaces).
 var places = map[string]place{
 	"status":       viaAPI,
 	"node":         viaAPI,
