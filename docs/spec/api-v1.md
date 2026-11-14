@@ -227,6 +227,12 @@ A client that lost Register's answer (timeout, dropped connection) may send it a
   — `invalid_argument`; в аудите `user.lan=on|off`, отказы тоже. У `User` — `lan`, у `Device` — `lan`: согласие
   самого устройства, как его последний заголовок `X-Raycontrol-LAN` в запросе подписки (через API его не задать).
   `SetServiceOption` берёт у сервиса Yggdrasil `lan_relay` (Мбит/с на пользователя, 0–100000).
+- Последний сервис `ssh` (после raycontrol v0.26.0): порты включённых сервисов вида `ssh` — те, на которых периметр
+  пускает SSH с адресов администратора и после стука. `SetServiceEnabled {name; enabled: false}` и
+  `DeleteService {name}` для последнего включённого сервиса вида `ssh` отвечают `failed_precondition`: без него SSH
+  закрыт для всех со следующего снимка периметра. Новое поле `force` (`SetServiceEnabledRequest.force = 3`,
+  `DeleteServiceRequest.force = 2`) делает это всё равно; в аудите тогда `service.enable=false force` и
+  `service.delete force`. Нода до этого поля его не читает и выключает или удаляет без вопросов.
 
 ## 6. Смена клиентского ключа
 
@@ -247,7 +253,7 @@ A client that lost Register's answer (timeout, dropped connection) may send it a
 | `unauthenticated` | клиентский ключ не принадлежит активному устройству: не зарегистрирован, отозван, пользователь отключён или истёк |
 | `permission_denied` | устройство не `admin`, или вызов только для root на ноде; `Register`: PIN не прислан или неверный, деталь `PinTries{left}` (§4) |
 | `invalid_argument` | неверные данные: подпись при смене ключа, имя, срок приглашения, период или день сброса лимита, пустой `SetUserTraffic` |
-| `failed_precondition` | `ExportUser`: пользователь отключён, истёк или сверх лимита трафика; `RotateService` dnstt или masterdns без `now` и `force`, пока прежний ключ ещё в своём сроке (dnsseal-v1 §8). Только root на ноде: `RotateService` сайта, пока следующий ключ не пробыл срок публикации (без `force`) или ключу в работе меньше 72 часов (с `force`, без `fresh`); `SetCertificate` без `force`, когда он отрезал бы клиентов с пинами (cert-pin-v1 §5, §7) |
+| `failed_precondition` | `ExportUser`: пользователь отключён, истёк или сверх лимита трафика; `RotateService` dnstt или masterdns без `now` и `force`, пока прежний ключ ещё в своём сроке (dnsseal-v1 §8). Только root на ноде: `RotateService` сайта, пока следующий ключ не пробыл срок публикации (без `force`) или ключу в работе меньше 72 часов (с `force`, без `fresh`); `SetCertificate` без `force`, когда он отрезал бы клиентов с пинами (cert-pin-v1 §5, §7); `SetServiceEnabled` (выключить) и `DeleteService` без `force` для последнего включённого сервиса вида `ssh` (§5) |
 
 ## 8. Что проверить клиенту
 

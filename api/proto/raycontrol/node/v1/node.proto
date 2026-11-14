@@ -646,10 +646,20 @@ message CreateServiceResponse { Service service = 1; }
 message SetServiceEnabledRequest {
   string name = 1;
   bool enabled = 2;
+  // Disabling the last enabled service of kind ssh is failed_precondition
+  // (raycontrol after v0.26.0): its ports are what the perimeter admits
+  // SSH on from the admin addresses, and without one SSH is closed to all
+  // at the next snapshot. force disables it anyway.
+  bool force = 3;
 }
 message SetServiceEnabledResponse {}
 
-message DeleteServiceRequest { string name = 1; }
+message DeleteServiceRequest {
+  string name = 1;
+  // As SetServiceEnabledRequest.force: deleting the last enabled service
+  // of kind ssh is failed_precondition without it.
+  bool force = 2;
+}
 message DeleteServiceResponse {}
 
 message SetServiceOptionRequest {

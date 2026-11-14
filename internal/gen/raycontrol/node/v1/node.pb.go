@@ -5060,9 +5060,14 @@ func (x *CreateServiceResponse) GetService() *Service {
 }
 
 type SetServiceEnabledRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Enabled       bool                   `protobuf:"varint,2,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Name    string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Enabled bool                   `protobuf:"varint,2,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	// Disabling the last enabled service of kind ssh is failed_precondition
+	// (raycontrol after v0.26.0): its ports are what the perimeter admits
+	// SSH on from the admin addresses, and without one SSH is closed to all
+	// at the next snapshot. force disables it anyway.
+	Force         bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5111,6 +5116,13 @@ func (x *SetServiceEnabledRequest) GetEnabled() bool {
 	return false
 }
 
+func (x *SetServiceEnabledRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
+}
+
 type SetServiceEnabledResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -5148,8 +5160,11 @@ func (*SetServiceEnabledResponse) Descriptor() ([]byte, []int) {
 }
 
 type DeleteServiceRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// As SetServiceEnabledRequest.force: deleting the last enabled service
+	// of kind ssh is failed_precondition without it.
+	Force         bool `protobuf:"varint,2,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5189,6 +5204,13 @@ func (x *DeleteServiceRequest) GetName() string {
 		return x.Name
 	}
 	return ""
+}
+
+func (x *DeleteServiceRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
 }
 
 type DeleteServiceResponse struct {
@@ -8031,13 +8053,15 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12#\n" +
 	"\rsettings_json\x18\x03 \x01(\tR\fsettingsJson\"N\n" +
 	"\x15CreateServiceResponse\x125\n" +
-	"\aservice\x18\x01 \x01(\v2\x1b.raycontrol.node.v1.ServiceR\aservice\"H\n" +
+	"\aservice\x18\x01 \x01(\v2\x1b.raycontrol.node.v1.ServiceR\aservice\"^\n" +
 	"\x18SetServiceEnabledRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
-	"\aenabled\x18\x02 \x01(\bR\aenabled\"\x1b\n" +
-	"\x19SetServiceEnabledResponse\"*\n" +
+	"\aenabled\x18\x02 \x01(\bR\aenabled\x12\x14\n" +
+	"\x05force\x18\x03 \x01(\bR\x05force\"\x1b\n" +
+	"\x19SetServiceEnabledResponse\"@\n" +
 	"\x14DeleteServiceRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\"\x17\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05force\x18\x02 \x01(\bR\x05force\"\x17\n" +
 	"\x15DeleteServiceResponse\"U\n" +
 	"\x17SetServiceOptionRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +

@@ -567,11 +567,18 @@ func (s *Server) SetServiceEnabled(ctx context.Context, req *connect.Request[nod
 		err = provision.CheckRequirements(ctx, s.Store, req.Msg.Name)
 	} else {
 		err = provision.CheckNoDependents(ctx, s.Store, req.Msg.Name)
+		if err == nil {
+			err = lastSSH(ctx, s.Store, req.Msg.Name, "disable", req.Msg.Force)
+		}
 	}
 	if err == nil {
 		err = s.Store.SetServiceEnabled(ctx, req.Msg.Name, req.Msg.Enabled)
 	}
-	if err := s.done(ctx, "service.enable="+strconv.FormatBool(req.Msg.Enabled), req.Msg.Name, err); err != nil {
+	action := "service.enable=" + strconv.FormatBool(req.Msg.Enabled)
+	if req.Msg.Force {
+		action += " force"
+	}
+	if err := s.done(ctx, action, req.Msg.Name, err); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.SetServiceEnabledResponse{}), nil
@@ -580,9 +587,16 @@ func (s *Server) SetServiceEnabled(ctx context.Context, req *connect.Request[nod
 func (s *Server) DeleteService(ctx context.Context, req *connect.Request[nodev1.DeleteServiceRequest]) (*connect.Response[nodev1.DeleteServiceResponse], error) {
 	err := provision.CheckNoDependents(ctx, s.Store, req.Msg.Name)
 	if err == nil {
+		err = lastSSH(ctx, s.Store, req.Msg.Name, "delete", req.Msg.Force)
+	}
+	if err == nil {
 		err = s.Store.DeleteService(ctx, req.Msg.Name)
 	}
-	if err := s.done(ctx, "service.delete", req.Msg.Name, err); err != nil {
+	action := "service.delete"
+	if req.Msg.Force {
+		action += " force"
+	}
+	if err := s.done(ctx, action, req.Msg.Name, err); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.DeleteServiceResponse{}), nil

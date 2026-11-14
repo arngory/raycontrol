@@ -61,7 +61,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service list
   service add KIND NAME [-settings JSON]    slipstream: -settings '{"zone":"s.example.net"}' for a zone
                                             of your own (20 characters at most), else one is made up
-  service enable|disable|del NAME
+  service enable|disable|del NAME [-force]
+                                            -force: disable or delete the last enabled ssh service anyway
+                                            (refused without it: SSH to the node closes to everyone)
   service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false;
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
                                             naive: icmp=on|off (ping and traceroute through it, then
@@ -658,17 +660,25 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 					"run rayctl apply now to install their units.\n", rs.SNI)
 			}
 		})
-	case "enable", "disable":
+	case "enable", "disable", "del":
+		// -force: the last enabled ssh service may go too (rayd refuses
+		// otherwise: SSH would be closed to everyone).
+		fs := flag.NewFlagSet("service "+sub, flag.ContinueOnError)
+		force := fs.Bool("force", false, "disable or delete the last enabled ssh service anyway: SSH to the node is then closed to "+
+			"everyone from the perimeter's next snapshot, and only the provider's console is left")
 		if err := need(args, 1); err != nil {
 			return err
 		}
-		_, err := c.c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: args[0], Enabled: sub == "enable"}))
-		return err
-	case "del":
-		if err := need(args, 1); err != nil {
-			return err
+		if err := fs.Parse(args[1:]); err != nil || fs.NArg() > 0 || (sub == "enable" && *force) {
+			return errUsage
 		}
-		_, err := c.c.DeleteService(ctx, connect.NewRequest(&nodev1.DeleteServiceRequest{Name: args[0]}))
+		var err error
+		if sub == "del" {
+			_, err = c.c.DeleteService(ctx, connect.NewRequest(&nodev1.DeleteServiceRequest{Name: args[0], Force: *force}))
+		} else {
+			_, err = c.c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: args[0], Enabled: sub == "enable",
+				Force: *force}))
+		}
 		return err
 	case "set":
 		if err := need(args, 2); err != nil {
