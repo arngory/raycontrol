@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -194,7 +195,7 @@ func TestUploadWindows(t *testing.T) {
 	chunk := make([]byte, 60<<10)
 	for {
 		if _, err := up.Write(chunk); err != nil {
-			if err != io.ErrShortWrite {
+			if !errors.Is(err, io.ErrShortWrite) {
 				t.Fatal(err)
 			}
 			break
