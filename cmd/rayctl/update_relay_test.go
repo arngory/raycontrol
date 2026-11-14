@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -561,5 +562,35 @@ func TestRelayPolicy(t *testing.T) {
 	if err != nil || !strings.Contains(text, "host       relay") || !strings.Contains(text, "previous   v0.26.0") ||
 		!strings.Contains(text, "remote     does not apply") || !strings.Contains(text, "rayctl update -check") {
 		t.Errorf("status: %q %v", text, err)
+	}
+}
+
+// rayspa owns the snapshot's directory: root reads the snapshot without
+// following a link planted there and without waiting on a FIFO.
+func TestReadSnapshotRegularOnly(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(t.TempDir(), "shadow")
+	os.WriteFile(secret, []byte("root only"), 0o600)
+	link := filepath.Join(dir, "snapshot.pb")
+	os.Symlink(secret, link)
+	if _, err := readSnapshot(link); err == nil || !strings.Contains(err.Error(), "link") {
+		t.Errorf("a link: %v", err)
+	}
+	fifo := filepath.Join(dir, "fifo.pb")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Skip(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := readSnapshot(fifo); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("a FIFO was read")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("readSnapshot hangs on a FIFO")
+	}
+	if _, err := readSnapshot(filepath.Join(dir, "none")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("missing: %v", err)
 	}
 }

@@ -904,9 +904,11 @@ func adminIncludes(prefixes []string, addr string) bool {
 	})
 }
 
-// readSnapshot reads the perimeter rayspa saved.
+// readSnapshot reads the perimeter rayspa saved. rayspa owns its
+// directory: root reads the file without following a link and does not
+// wait on a FIFO there (readRegular).
 func readSnapshot(path string) (*perimeterv1.Snapshot, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: rayspa's state
+	raw, err := readRegular(path)
 	if err != nil {
 		return nil, err
 	}
