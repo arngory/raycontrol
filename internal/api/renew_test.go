@@ -72,6 +72,22 @@ func TestRenewUser(t *testing.T) {
 	if slices.Equal(after, links()) {
 		t.Fatal("the admin device's renewal changed nothing")
 	}
+	// From a user device: refused, and nothing changes.
+	inv, err = c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{User: "alice", Name: "phone", Role: "user"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := newRemoteDevice(t, addr, pin)
+	if _, err := user.register(ctx, inv.Msg.InviteCode, time.Now().Unix()/60); err != nil {
+		t.Fatal(err)
+	}
+	now := links()
+	if _, err := user.node.RenewUser(ctx, connect.NewRequest(&nodev1.RenewUserRequest{Name: "alice"})); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("from a user device: %v", err)
+	}
+	if !slices.Equal(now, links()) {
+		t.Fatal("a user device's call renewed")
+	}
 
 	entries, err := srv.Store.ListAudit(ctx, 20)
 	if err != nil {
