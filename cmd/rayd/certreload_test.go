@@ -341,13 +341,85 @@ func TestSiteReloadsCertificate(t *testing.T) {
 // runs; a chain that does not parse leaves the one in use; the connection
 // that was open answers throughout.
 func TestDoHReloadsCertificate(t *testing.T) {
+	d := startDoHStand(t)
+	k, leaf, set, settle, out := d.key, d.leaf, d.set, d.settle, d.out
+	dial := passed(t, d.paths.DoHSocket("doh"), "doh")
+	served := func(what string, want []byte) {
+		t.Helper()
+		c, got, err := dial()
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		c.Close()
+		if !bytes.Equal(got, want) {
+			t.Fatalf("%s: another certificate is served", what)
+		}
+	}
+
+	open, got, err := dial()
+	if err != nil || !bytes.Equal(got, leaf) {
+		t.Fatalf("the first handshake: %v", err)
+	}
+	request(t, open, "at the start")
+
+	// A renewal: the same key.
+	renewedPEM, renewed := issueChain(t, k)
+	set(renewedPEM, k.der)
+	settle()
+	served("after the renewal", renewed)
+	request(t, open, "after the renewal")
+
+	// A chain that is none, and one for another key: the listener keeps
+	// the certificate it has, and keeps running.
+	other := newSiteKeyPair(t)
+	otherPEM, otherLeaf := issueChain(t, other)
+	for what, chain := range map[string][]byte{"garbage in the store": []byte("garbage"), "a chain for another key": otherPEM} {
+		set(chain, k.der)
+		settle()
+		served(what, renewed)
+	}
+	request(t, open, "after the broken chains")
+
+	// The site's next key with its chain (a key change): no restart either.
+	set(otherPEM, other.der)
+	settle()
+	served("after the key change", otherLeaf)
+	request(t, open, "after the key change")
+
+	if c := strings.Count(out.String(), "doh serving"); c != 1 {
+		t.Fatalf("the listener started %d times:\n%s", c, out.String())
+	}
+	if c := strings.Count(out.String(), "doh certificate reloaded"); c != 2 {
+		t.Fatalf("%d reloads logged, want 2:\n%s", c, out.String())
+	}
+}
+
+// dohStand is serveDoH on a store of its own, with a doh service under a
+// site that has a certificate, and the changes it wakes on in the test's
+// hands.
+type dohStand struct {
+	st    *store.Store
+	paths render.Paths
+	key   siteKeyPair
+	leaf  []byte
+	out   *output
+	// set stores the site's chain and key, together, as the certificate
+	// manager does.
+	set func(chain, key []byte)
+	// settle wakes serveDoH and returns once it has been through the
+	// store since: a second round has begun.
+	settle func()
+}
+
+func startDoHStand(t *testing.T) *dohStand {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	dir := t.TempDir()
 	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	t.Cleanup(func() { st.Close() })
 	if _, err := provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +481,7 @@ func TestDoHReloadsCertificate(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(out, nil))
 	done := make(chan struct{})
 	go func() { serveDoH(ctx, st, paths, changes, log); close(done) }()
-	defer func() { cancel(); <-done }()
+	t.Cleanup(func() { cancel(); <-done })
 	for i := 0; ; i++ {
 		if _, err := os.Stat(paths.DoHSocket("doh")); err == nil {
 			break
@@ -419,54 +491,66 @@ func TestDoHReloadsCertificate(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	dial := passed(t, paths.DoHSocket("doh"), "doh")
-	served := func(what string, want []byte) {
+	return &dohStand{st: st, paths: paths, key: k, leaf: leaf, out: out, set: set, settle: settle}
+}
+
+// A change of the node's state reaches DoH's tokens at once (R4-36): a
+// user's credentials renewed, the token before is refused at the next
+// query, not when the handler's cache runs out.
+func TestDoHForgetsTokensAtChange(t *testing.T) {
+	d := startDoHStand(t)
+	ctx := context.Background()
+	svc, err := d.st.ServiceByName(ctx, "doh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice, err := d.st.CreateUser(ctx, store.User{Name: "alice", Enabled: true, Services: []int64{svc.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := func() string {
 		t.Helper()
-		c, got, err := dial()
+		c, err := d.st.Credentials(ctx, svc.ID, []int64{alice.ID}, store.NewUUID)
 		if err != nil {
-			t.Fatalf("%s: %v", what, err)
+			t.Fatal(err)
 		}
-		c.Close()
-		if !bytes.Equal(got, want) {
-			t.Fatalf("%s: another certificate is served", what)
+		return c[alice.ID]
+	}
+	dial := passed(t, d.paths.DoHSocket("doh"), "doh")
+	// A method DoH does not take: 405 for a token it accepts, 404 for one
+	// it does not, without an upstream to ask.
+	status := func(tok string) int {
+		t.Helper()
+		c, _, err := dial()
+		if err != nil {
+			t.Fatal(err)
 		}
+		defer c.Close()
+		if _, err := io.WriteString(c, "PUT /dns-query/"+tok+" HTTP/1.1\r\nHost: "+reloadName+"\r\nContent-Length: 0\r\n\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
 	}
-
-	open, got, err := dial()
-	if err != nil || !bytes.Equal(got, leaf) {
-		t.Fatalf("the first handshake: %v", err)
+	old := token()
+	d.settle()
+	if got := status(old); got != http.StatusMethodNotAllowed {
+		t.Fatalf("the user's token: %d", got)
 	}
-	request(t, open, "at the start")
-
-	// A renewal: the same key.
-	renewedPEM, renewed := issueChain(t, k)
-	set(renewedPEM, k.der)
-	settle()
-	served("after the renewal", renewed)
-	request(t, open, "after the renewal")
-
-	// A chain that is none, and one for another key: the listener keeps
-	// the certificate it has, and keeps running.
-	other := newSiteKeyPair(t)
-	otherPEM, otherLeaf := issueChain(t, other)
-	for what, chain := range map[string][]byte{"garbage in the store": []byte("garbage"), "a chain for another key": otherPEM} {
-		set(chain, k.der)
-		settle()
-		served(what, renewed)
+	if _, err := d.st.RenewUser(ctx, "alice"); err != nil {
+		t.Fatal(err)
 	}
-	request(t, open, "after the broken chains")
-
-	// The site's next key with its chain (a key change): no restart either.
-	set(otherPEM, other.der)
-	settle()
-	served("after the key change", otherLeaf)
-	request(t, open, "after the key change")
-
-	if c := strings.Count(out.String(), "doh serving"); c != 1 {
-		t.Fatalf("the listener started %d times:\n%s", c, out.String())
+	renewed := token()
+	d.settle()
+	if got := status(old); got != http.StatusNotFound {
+		t.Errorf("the token before the change: %d", got)
 	}
-	if c := strings.Count(out.String(), "doh certificate reloaded"); c != 2 {
-		t.Fatalf("%d reloads logged, want 2:\n%s", c, out.String())
+	if got := status(renewed); got != http.StatusMethodNotAllowed {
+		t.Errorf("the new token: %d", got)
 	}
 }
 
