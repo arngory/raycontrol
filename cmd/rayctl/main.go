@@ -33,6 +33,7 @@ import (
 	"github.com/arngory/raycontrol/internal/hostcheck"
 	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/roots"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -146,6 +147,11 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   conn-limit on|off                         per-user limits (naive, Hysteria2, Xray) and the
                                             per-address limit on new inbound connections
                                             (spec/conn-limit-v1.md; root, on the node)
+  roots [show] | system on|off | file PEM|none
+                                            the roots the node's own outbound TLS trusts (ACME, updates,
+                                            Cloudflare, the app mirror, DoH upstreams): its embedded list,
+                                            plus the system store or a PEM file only when root adds them
+                                            (a TLS-intercepting proxy, a private ACME CA)
 
   check [-host ADDR] [-domain D] [-services a,b] [-ports LIST]
                                               whether this host can run a node: what is required (install
@@ -344,6 +350,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.egress(ctx, args[1:])
 	case "conn-limit":
 		return c.connLimit(ctx, args[1:])
+	case "roots":
+		return rootsCmd(os.Stdout, roots.SettingsFile, roots.ExtraFile, args[1:])
 	case "remote":
 		return c.remoteCmd(ctx, sub, rest)
 	case "backup":

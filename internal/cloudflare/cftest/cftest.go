@@ -3,6 +3,7 @@
 package cftest
 
 import (
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -34,6 +35,15 @@ func New(t testing.TB) (*API, *cloudflare.Client) {
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	return f, &cloudflare.Client{Token: "good", BaseURL: srv.URL}
+}
+
+// NewTLS is New over HTTPS, under the test server's own root, which it
+// returns: what the node trusts decides (internal/roots).
+func NewTLS(t testing.TB) (*API, *cloudflare.Client, *x509.Certificate) {
+	f := &API{token: "good", Zones: []cloudflare.Zone{{ID: "z1", Name: "example.com", NameServers: []string{"ns1.example.net"}}}, Records: map[string]cloudflare.Record{}}
+	srv := httptest.NewTLSServer(f)
+	t.Cleanup(srv.Close)
+	return f, &cloudflare.Client{Token: "good", BaseURL: srv.URL}, srv.Certificate()
 }
 
 func (f *API) Add(r cloudflare.Record) {

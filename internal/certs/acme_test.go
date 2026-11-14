@@ -7,7 +7,6 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -20,6 +19,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/arngory/raycontrol/internal/roots"
+	"github.com/arngory/raycontrol/internal/roots/rootstest"
 )
 
 func TestCheckDNS(t *testing.T) {
@@ -75,6 +77,38 @@ func TestRenewAt(t *testing.T) {
 	}
 }
 
+// pebbleRoots trusts Pebble's root as a private ACME CA's is trusted on a
+// node, through the extra file of the node's roots: PEBBLE_ROOT, which CI
+// sets to Pebble's test/certs/pebble.minica.pem.
+func pebbleRoots(t *testing.T) {
+	t.Helper()
+	f := os.Getenv("PEBBLE_ROOT")
+	if f == "" {
+		t.Fatal("set PEBBLE_ROOT to Pebble's test/certs/pebble.minica.pem")
+	}
+	rootstest.Use(t, roots.Settings{File: f})
+}
+
+// TestIssuerRoots: the ACME directory is reached through the node's roots:
+// a CA whose root is not among them is refused, with no fallback to the
+// system store; with its root in the extra file it is reached.
+func TestIssuerRoots(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "no", http.StatusTeapot) }))
+	defer srv.Close()
+	account, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	is := &Issuer{Directory: srv.URL + "/dir", AccountKey: account, Window: func(uint16, time.Time) {}, Listen: "127.0.0.1:0"}
+	tr := rootstest.Use(t, roots.Settings{}, srv.Certificate())
+	_, err := is.Issue(context.Background(), []string{"site.example.test"}, key)
+	if err == nil || !roots.Verification(err) || tr.Status().Refused == 0 {
+		t.Fatalf("a root not in the list: %v", err)
+	}
+	rootstest.Use(t, roots.Settings{File: rootstest.File(t, srv.Certificate())})
+	if _, err = is.Issue(context.Background(), []string{"site.example.test"}, key); err == nil || roots.Verification(err) {
+		t.Fatalf("with the extra file: %v", err)
+	}
+}
+
 // TestIssueWithPebble gets a certificate from Pebble, Let's Encrypt's test
 // CA, through HTTP-01. CI starts Pebble (httpPort 5002) and
 // pebble-challtestsrv, which resolves every name to 127.0.0.1, and sets
@@ -90,9 +124,9 @@ func TestIssueWithPebble(t *testing.T) {
 		t.Fatal(err)
 	}
 	var windows []uint16
+	pebbleRoots(t)
 	is := &Issuer{
 		Directory:  dir,
-		HTTPClient: &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}, //nolint:gosec // Pebble's test CA
 		AccountKey: account,
 		Listen:     "127.0.0.1:5002",
 		Window:     func(port uint16, _ time.Time) { windows = append(windows, port) },
@@ -178,9 +212,9 @@ func TestIssueWildcardWithPebble(t *testing.T) {
 		t.Fatal(err)
 	}
 	windows := 0
+	pebbleRoots(t)
 	is := &Issuer{
 		Directory:  dir,
-		HTTPClient: &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}, //nolint:gosec // Pebble's test CA
 		AccountKey: account,
 		Window:     func(uint16, time.Time) { windows++ },
 		DNS:        func(context.Context) (DNSSolver, error) { return challtestsrv(mgmt), nil },

@@ -10,6 +10,8 @@ import (
 	"net/netip"
 	"sync"
 	"time"
+
+	"github.com/arngory/raycontrol/internal/roots"
 )
 
 // Provider is an online lookup service. It is only ever asked about a
@@ -29,8 +31,8 @@ var Providers = map[string]func(token string, hc *http.Client) Provider{
 // the URL.
 type IPinfo struct {
 	Token   string
-	BaseURL string // https://api.ipinfo.io by default
-	HTTP    *http.Client
+	BaseURL string       // https://api.ipinfo.io by default
+	HTTP    *http.Client // roots.Node's, with a timeout, when nil
 }
 
 // Name is the provider's name.
@@ -50,7 +52,9 @@ func (p *IPinfo) Lookup(ctx context.Context, network netip.Addr) (Info, error) {
 	req.Header.Set("Accept", "application/json")
 	hc := p.HTTP
 	if hc == nil {
-		hc = &http.Client{Timeout: 5 * time.Second}
+		// The node's roots, no fallback: the token goes with the request.
+		hc = roots.Node.Client(5 * time.Second)
+		defer hc.CloseIdleConnections()
 	}
 	resp, err := hc.Do(req) //nolint:gosec // G107: a fixed host, the path is an address
 	if err != nil {

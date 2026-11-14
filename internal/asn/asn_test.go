@@ -14,6 +14,9 @@ import (
 
 	"github.com/maxmind/mmdbwriter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
+
+	"github.com/arngory/raycontrol/internal/roots"
+	"github.com/arngory/raycontrol/internal/roots/rootstest"
 )
 
 // writeMMDB writes a database with one network and its record.
@@ -111,7 +114,7 @@ func TestChain(t *testing.T) {
 func TestIPinfoAPI(t *testing.T) {
 	var asked []string
 	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		asked = append(asked, r.URL.Path)
 		if r.Header.Get("Authorization") != "Bearer tok" || strings.Contains(r.URL.RawQuery, "tok") {
@@ -125,8 +128,17 @@ func TestIPinfoAPI(t *testing.T) {
 		w.Write([]byte(`{"ip":"203.0.113.0","asn":"AS64502","as_name":"Api Net","country_code":"UZ","country":"Uzbekistan"}`))
 	}))
 	defer srv.Close()
-	api := &API{Provider: &IPinfo{Token: "tok", BaseURL: srv.URL, HTTP: srv.Client()}}
 	ctx := context.Background()
+	// The node's roots decide: the test server's root is in none of them,
+	// the system store does not count; root's extra file does.
+	tr := rootstest.Use(t, roots.Settings{}, srv.Certificate())
+	if _, err := (&IPinfo{Token: "tok", BaseURL: srv.URL}).Lookup(ctx, netip.MustParseAddr("203.0.113.0")); !roots.Verification(err) || tr.Status().Refused != 1 {
+		t.Fatalf("a root not in the list: %v", err)
+	}
+	calls.Store(0)
+	asked = nil
+	rootstest.Use(t, roots.Settings{File: rootstest.File(t, srv.Certificate())})
+	api := &API{Provider: &IPinfo{Token: "tok", BaseURL: srv.URL}}
 	for range 3 {
 		info, ok := api.Lookup(ctx, netip.MustParseAddr("203.0.113.200"))
 		if !ok || info != (Info{ASN: 64502, Name: "Api Net", Country: "UZ"}) {

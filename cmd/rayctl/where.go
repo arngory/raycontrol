@@ -68,6 +68,7 @@ var places = map[string]place{
 	"report":     onNode,
 	"egress":     onNode,
 	"conn-limit": onNode,
+	"roots":      onNode, // root's file in /etc that rayd and rayctl update read
 }
 
 // nodeOS is the system a node runs on; thisOS the one rayctl runs on (a

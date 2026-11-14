@@ -8,7 +8,25 @@ import (
 
 	"github.com/arngory/raycontrol/internal/cloudflare"
 	"github.com/arngory/raycontrol/internal/cloudflare/cftest"
+	"github.com/arngory/raycontrol/internal/roots"
+	"github.com/arngory/raycontrol/internal/roots/rootstest"
 )
+
+// TestRoots: the API is reached through the node's roots only: a root not
+// among them is refused, with no fallback to the system store (the token
+// goes with every request); the extra file lets it through.
+func TestRoots(t *testing.T) {
+	ctx := context.Background()
+	_, c, root := cftest.NewTLS(t)
+	tr := rootstest.Use(t, roots.Settings{}, root)
+	if err := c.Verify(ctx); err == nil || !roots.Verification(err) || tr.Status().Refused == 0 {
+		t.Fatalf("a root not in the list: %v", err)
+	}
+	rootstest.Use(t, roots.Settings{File: rootstest.File(t, root)})
+	if err := c.Verify(ctx); err != nil {
+		t.Fatalf("with the extra file: %v", err)
+	}
+}
 
 func TestVerifyAndZone(t *testing.T) {
 	ctx := context.Background()

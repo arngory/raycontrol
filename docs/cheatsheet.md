@@ -2,7 +2,7 @@
 
 Все команды — на ноде, от root или от члена группы `raycontrol`; `install`, `apply`, `update` (и `update
 remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|allow`, `conn-limit on|off`,
-`relay bundle`, `service cert`, `service rotate САЙТ` и `summary db` — только root.
+`roots system|file`, `relay bundle`, `service cert`, `service rotate САЙТ` и `summary db` — только root.
 `-json` перед командой даёт машинный вывод (`rayctl -json status`). Пошаговая установка —
 [10-quickstart-debian13.md](10-quickstart-debian13.md).
 
@@ -53,6 +53,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl egress block\|allow local` | только root, на ноде: собственные и локальные сети ноды (loopback, частные, link-local с адресом метаданных, CGNAT, multicast) для новых соединений data plane, в ядре (с v0.27). По умолчанию закрыты; `allow` снимает только правило периметра, проверки naive, Xray и Hysteria2 остаются ([`spec/egress-policy-v1.md`](spec/egress-policy-v1.md) §10) |
 | `rayctl conn-limit` | пределы соединений (с v0.24): включены ли, где действуют (naive, Xray с v0.25, Hysteria2 с niko-server v0.17.0), их числа, таблица conntrack (занято, `max`, отбросы), страж (включён ли, переключения, отказы, вычищено), кто упёрся за 15 мин и отказы по сервису и виду; root видит и отброшенное пределом на адрес |
 | `rayctl conn-limit on\|off` | только root, на ноде: пределы на пользователя в каждом процессе naive, Hysteria2 (с niko-server v0.17.0) и Xray (REALITY, `inner`; с v0.25) — TCP: 1024 сразу, 30 новых/с, неудачные dial в долг; UDP: 256 сессий, журнал пар; резолвы; отказ naive — ответ `429`, Hysteria2 — `too many connections` — и предел новых входящих TCP и UDP на адрес, здесь и на relay ноды. По умолчанию включены. Действует за секунды; naive и Hysteria2 перечитывают файл и не перезапускаются, каждый Xray перезапускается один раз — открытые через него соединения рвутся. Размер таблицы, `notrack` DNS-туннелей и страж остаются всегда ([`spec/conn-limit-v1.md`](spec/conn-limit-v1.md)) |
+| `rayctl roots [show]` · `roots system on\|off` · `roots file PEM\|none` | корни своих исходящих TLS ноды (ACME, GitHub и зеркала, Cloudflare, IPinfo, зеркало приложения, DoH): встроенный список — Chrome и Mozilla без центров из Китая, 91 корень, как у клиента; хранилище системы и свой PEM (прокси, вскрывающий TLS; частный ACME-УЦ) — только если root добавит. `rayd` подхватывает со следующего соединения. Отказы — строка `tls-roots` в `rayctl status`. Загрузка релиза при отказе повторяется с хранилищем системы и предупреждением (подпись проверяется всё равно) |
 | `rayctl report [-o F] [-logs warning\|info\|debug\|none] [-since 24h] [-id ID]` | очищенный отчёт для issue, ничего не отправляет; `-logs debug` — со строками `-debug`, один `-id` на прогон |
 | `rayctl probe [-carrier udp\|tls\|tcp\|auto] [-addr A] [-links] [-redact] [-channel] @bundle` | проверить ноду снаружи, как клиент; `auto` — UDP, ClientHello, голый TCP; `-channel` — ещё и замер канала (TCP в обе стороны, эхо UDP); `-links` — со ссылками профилей (в них учётные данные) |
 | `journalctl -u rayd -u rayspa -u 'niko-*' -f` | журналы ноды |
@@ -191,7 +192,8 @@ shred -u /root/phone.bundle
 | `-reality-period` / `-reality-prepare` | 90 д / 1 д | ключи и имя REALITY; время на сертификат нового имени |
 | `-site-key-period` / `-site-key-lead` | 180 д / 14 д | ключ сертификата сайта (пины в ссылках, [`spec/cert-pin-v1.md`](spec/cert-pin-v1.md)): при выпуске после этого срока его сменяет следующий ключ, если тот пробыл в подписках срок публикации; `0` у периода — только `rayctl service rotate <сайт>`; срок публикации — не меньше 72 часов |
 | `-spa-tcp` | true | TCP-носитель SPA; `false`, если хватает UDP |
-| `-acme-directory` | Let's Encrypt | CA; пусто — без сертификатов |
+| `-acme-directory` | Let's Encrypt | CA; пусто — без сертификатов; корень частного CA — `rayctl roots file` |
+| `-tls-roots` | `/etc/raycontrol/tls-roots.json` | чему верят свои соединения ноды кроме встроенного списка (`rayctl roots`); другой файл — для стендов |
 | `-dns-check` · `-dns-check-resolvers` | 1 ч ±10 % · `google,cloudflare,quad9` | самопроверка DNS-зон с ноды; `0` — только `rayctl dns check -now` |
 | `-update-check` | `0` (выкл.) | искать новый релиз так часто, не чаще раза в час (±10 %): нода берёт подписанный SHA256SUMS последнего релиза только с github.com — он видит адрес ноды (зеркала — только у `rayctl update`); итог — строка `update` в `rayctl status`, новая версия — один раз в журнал. Только у релизных сборок (vX.Y.Z), независимо от `-dns-check` |
 | `-spa-ttl` / `-spa-max-ttl` | 10 мин / 1 ч | доступ по SPA, когда пакет просит срок по умолчанию; самый долгий доступ, который пакет может попросить |

@@ -26,6 +26,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/legacy"
 	"github.com/arngory/raycontrol/internal/perimeter"
+	"github.com/arngory/raycontrol/internal/roots"
 )
 
 // Level says what a failed check means.
@@ -133,7 +134,11 @@ func System() *Host {
 			if err != nil {
 				return err
 			}
-			resp, err := http.DefaultClient.Do(req)
+			// Through the roots ACME uses (internal/roots): a TLS-
+			// intercepting proxy shows here, before the install.
+			hc := roots.Node.Client(0)
+			defer hc.CloseIdleConnections()
+			resp, err := hc.Do(req)
 			if err != nil {
 				return err
 			}

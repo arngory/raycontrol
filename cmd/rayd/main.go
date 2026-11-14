@@ -54,6 +54,7 @@ import (
 	"github.com/arngory/raycontrol/internal/relayprobe"
 	"github.com/arngory/raycontrol/internal/release"
 	"github.com/arngory/raycontrol/internal/render"
+	"github.com/arngory/raycontrol/internal/roots"
 	"github.com/arngory/raycontrol/internal/site"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
@@ -181,7 +182,10 @@ func cmdServe(args []string) error {
 	xrayBin := fs.String("xray", deploy.DefaultBinaries.Xray, "Xray binary for -supervise")
 	nikoBin := fs.String("niko-server", deploy.DefaultBinaries.NikoServer, "niko-server binary for -supervise")
 	slipBin := fs.String("slipstream-server", deploy.DefaultBinaries.Slipstream, "slipstream-server binary for -supervise")
-	acmeDir := fs.String("acme-directory", certs.LetsEncrypt, "ACME directory for the sites' certificates (empty: none)")
+	acmeDir := fs.String("acme-directory", certs.LetsEncrypt, "ACME directory for the sites' certificates (empty: none); "+
+		"a private CA's root goes in the node's roots (rayctl roots file)")
+	tlsRoots := fs.String("tls-roots", roots.SettingsFile, "settings of the roots the node's own outbound TLS trusts besides "+
+		"its embedded list (rayctl roots; a stand may name a file of its own)")
 	credPeriod := fs.Duration("cred-period", 30*24*time.Hour, "how long a user credential stays current (0: no rotation)")
 	credLead := fs.Duration("cred-lead", 3*24*time.Hour, "the next credential is in the subscription this long before the switch")
 	probeDaily := fs.Int("probe-daily-mib", probe.DefaultDaily>>20, "channel probes: MiB per device and UTC day, both directions")
@@ -242,6 +246,11 @@ func cmdServe(args []string) error {
 
 	// Where the loops below report: rayctl status and the metrics (O-2).
 	hb := &health.Board{}
+	// The roots of the node's own outbound TLS (R4-41): which, and the
+	// connections they refused, in rayctl status.
+	rr := &rootsReporter{hb: hb, log: log}
+	roots.Node.Path, roots.Node.Report = *tlsRoots, rr.report
+	roots.Node.Status() // builds the pool: reported
 	go pruneAudit(ctx, st, hb, log)
 	paths := render.Paths{Rendered: *rendered, Run: *run, Supervised: *supervise}
 	rotateNow := make(chan struct{}, 1)
@@ -363,7 +372,7 @@ func cmdServe(args []string) error {
 		if release.IsRelease(version) {
 			// GitHub only: a mirror would learn the node's address too,
 			// for a question the operator can ask by hand.
-			f := &release.Fetcher{}
+			f := &release.Fetcher{Log: fetchLog(log)}
 			latest := func(ctx context.Context) (string, error) {
 				v, err := f.Latest(ctx, release.PubKey)
 				if err == nil {
@@ -385,7 +394,7 @@ func cmdServe(args []string) error {
 	// update auto patch); a root unit runs what it asks for, which a node
 	// without systemd does not have.
 	if !*supervise {
-		f := &release.Fetcher{}
+		f := &release.Fetcher{Log: fetchLog(log)}
 		latest := func(ctx context.Context) (string, error) { return f.Latest(ctx, release.PubKey) }
 		patch := func(ctx context.Context) (string, error) { return f.NewestPatch(ctx, release.PubKey, version) }
 		a := &autoUpdater{st: st, running: version, latest: latest, patch: patch, seen: &latestSeen, seenPatch: &patchSeen, request: nodeupdate.RequestFile,
@@ -760,7 +769,9 @@ func serveRemote(ctx context.Context, r *api.Remote, changes func() <-chan struc
 func dohHandler(st *store.Store, service int64, answer http.Handler, log *slog.Logger) *doh.Handler {
 	return &doh.Handler{Tokens: func(ctx context.Context) (map[string]bool, error) {
 		return st.DoHTokens(ctx, service, time.Now())
-	}, Answer: answer, Log: log}
+		// The upstreams through the node's roots: the queries are the users',
+		// a root planted in the image's store must not read them.
+	}, Answer: answer, Log: log, HTTP: roots.Node.Client(5 * time.Second)}
 }
 
 // syncDNS keeps the node's records in its DNS provider's zone: when the

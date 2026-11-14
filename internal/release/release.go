@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/blake2b"
+
+	"github.com/arngory/raycontrol/internal/roots"
 )
 
 // Repo is where releases are published.
@@ -172,7 +174,15 @@ func (f *Fetcher) URL(version, file string) string {
 func (f *Fetcher) Get(ctx context.Context, version, file string, limit int64) ([]byte, error) {
 	hc := f.HTTP
 	if hc == nil {
-		hc = &http.Client{Timeout: 10 * time.Minute}
+		// The node's roots; a host they refuse is tried again with the
+		// system store, said so: the signature protects the files, and a
+		// stale embedded list must never stop the update that renews it.
+		hc = roots.Node.Client(10*time.Minute, roots.SystemFallback(func(host string, err error) {
+			if f.Log != nil {
+				f.Log("warning: %s: %v; trying again with the system's certificate store (the signature still protects the files)", host, err)
+			}
+		}))
+		defer hc.CloseIdleConnections()
 	}
 	url := f.URL(version, file)
 	var errs []error
