@@ -247,3 +247,55 @@ func TestQUICIdleUnderFront(t *testing.T) {
 		}
 	}
 }
+
+// Over HTTP/3 as over HTTP/2 (naive's TestDestinationEnd): a destination
+// that breaks off resets the client's stream, one that ends its side ends
+// it.
+func TestNaiveHTTP3DestinationEnd(t *testing.T) {
+	var d net.Dialer
+	ns, cert := naiveTest(t, d.DialContext)
+	tr := serveNaiveH3(t, ns, cert, naiveQUIC())
+	for name, reset := range map[string]bool{"reset": true, "end": false} {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { ln.Close() })
+		told := make(chan struct{})
+		go func() {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte("hello"))
+			<-told
+			if reset {
+				_ = c.(*net.TCPConn).SetLinger(0) // close sends a RST
+			}
+			c.Close()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		req, pw := naiveConnect(ctx, t, "https://naive.test", ln.Addr().String())
+		resp, err := tr.RoundTrip(req)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: CONNECT: %v %v", name, resp, err)
+		}
+		s := naive.ClientStream(resp.Body, pw)
+		got := make([]byte, 5)
+		if _, err := io.ReadFull(s, got); err != nil || string(got) != "hello" {
+			t.Fatalf("%s: read %q %v", name, got, err)
+		}
+		close(told)
+		rest, err := io.ReadAll(s)
+		switch {
+		case len(rest) != 0:
+			t.Errorf("%s: %q after the destination was done", name, rest)
+		case reset && err == nil:
+			t.Errorf("%s: the stream ended cleanly: the client cannot tell a reset from the destination's end", name)
+		case !reset && err != nil:
+			t.Errorf("%s: the stream failed with %v after a clean end", name, err)
+		}
+		resp.Body.Close()
+		cancel()
+	}
+}

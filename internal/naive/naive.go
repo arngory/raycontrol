@@ -191,13 +191,26 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 			_ = cw.CloseWrite()
 		}
 	}()
-	down := make(chan struct{})
+	// down gets how the destination's side ended: nil for its end (FIN),
+	// and for a download the client's side stopped; its error when it
+	// broke off (a reset, its path's timeout).
+	down := make(chan error, 1)
 	go func() {
-		_, _ = io.Copy(in, countReader{out, a.traffic.down()})
-		close(down)
+		from := &brokenReader{r: countReader{out, a.traffic.down()}}
+		_, _ = io.Copy(in, from)
+		down <- from.err
 	}()
 	select {
-	case <-down:
+	case err := <-down:
+		// A destination that broke off resets the stream, as one that
+		// could not be reached does (spec/naive-uot-v1.md §4): ended
+		// cleanly, the client took what came for all there was. Only the
+		// destination's end is the stream's end. What broke is not said:
+		// the error names the destination.
+		if err != nil {
+			s.Log.Debug("naive: destination broke off")
+			panic(http.ErrAbortHandler)
+		}
 	case <-ctx.Done():
 		_ = out.Close()
 		// A client that does not read holds the download in a write
@@ -211,6 +224,21 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 		}
 	}
 	return true
+}
+
+// brokenReader keeps the error its reader ended with, if it was not its
+// end: what a copy does not tell apart from the writer's errors.
+type brokenReader struct {
+	r   io.Reader
+	err error
+}
+
+func (b *brokenReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err != nil && err != io.EOF {
+		b.err = err
+	}
+	return n, err
 }
 
 // password is Proxy-Authorization's: Basic, any user name.
