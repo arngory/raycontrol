@@ -268,6 +268,24 @@ func (c *cli) updatePolicyAt(ctx context.Context, args []string, policyFile, uni
 	return nil
 }
 
+// newerLine says, from what rayd's checks saw, that the latest release is
+// a new minor (or major) version, which the auto update never takes, and
+// what does; "" when it is not. Versions only: nothing a terminal acts on.
+func newerLine(m *nodev1.GetUpdateStatusResponse) string {
+	step := nodeupdate.Step(m.Latest, m.Installed)
+	if step == "" {
+		return ""
+	}
+	take := "rayctl update takes it"
+	if m.Remote == "on" {
+		take += " (or an admin's phone)"
+	}
+	if m.Auto == "patch" {
+		return fmt.Sprintf("newer      %s is a new %s version: the auto update takes patch releases only; %s", m.Latest, step, take)
+	}
+	return fmt.Sprintf("newer      %s is a new %s version: %s", m.Latest, step, take)
+}
+
 func (c *cli) updateStatus(ctx context.Context) error {
 	r, err := c.c.GetUpdateStatus(ctx, connect.NewRequest(&nodev1.GetUpdateStatusRequest{}))
 	if err != nil {
@@ -283,6 +301,9 @@ func (c *cli) updateStatus(ctx context.Context) error {
 	fmt.Printf("installed  %s\n", p(m.Installed))
 	if m.Latest != "" {
 		fmt.Printf("latest     %s\n", p(m.Latest))
+	}
+	if line := newerLine(m); line != "" {
+		fmt.Println(line)
 	}
 	fmt.Printf("remote     %s\nauto       %s (window %s, %s)\n", p(m.Remote), p(m.Auto), p(m.Window), p(m.Timezone))
 	if len(m.Held) > 0 {

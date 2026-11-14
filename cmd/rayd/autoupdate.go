@@ -89,6 +89,12 @@ func (a *autoUpdater) step(ctx context.Context, s *autoState, t time.Time) (soon
 		case s.last == "" && s.lerr != nil:
 			a.hb.Report("auto-update", "patch: the latest release not known: "+s.lerr.Error(), nil)
 			s.due = time.Time{}
+		case nodeupdate.Step(s.last, a.running) != "":
+			// Not taken (the policy is patch releases), but said: the
+			// operator would not learn of it otherwise.
+			a.hb.Report("auto-update", "patch, window "+p.Window+": "+s.last+" is out, a new "+nodeupdate.Step(s.last, a.running)+
+				" version, which it leaves: this node runs "+a.running+"; rayctl update takes it (or an admin's phone, with remote updates on)", nil)
+			s.due = time.Time{}
 		case s.last == "" || !nodeupdate.Patch(s.last, a.running):
 			a.hb.Report("auto-update", "patch, window "+p.Window+": up to date ("+a.running+")", nil)
 			s.due = time.Time{}

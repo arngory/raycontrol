@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -217,5 +218,59 @@ func TestAutoStep(t *testing.T) {
 	}
 	if r, ok := nodeupdate.PeekRequest(reqFile); !ok || r.Version != "v0.19.1" || r.Kind != nodeupdate.Auto {
 		t.Fatalf("the request: %+v %v", r, ok)
+	}
+}
+
+// A new minor version is not asked for, but said, with what takes it; no
+// newer release is up to date. From the release the check fetched: no
+// other call.
+func TestAutoStepNewerMinor(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	reqFile, statFile, polFile := filepath.Join(dir, "update-request"), filepath.Join(dir, "status.json"), filepath.Join(dir, "policy.json")
+	nodeupdate.WritePolicy(polFile, nodeupdate.Policy{Remote: "off", Auto: "patch", Window: "03:00-05:00"})
+	latest, asked := "v0.20.0", 0
+	hb := &health.Board{}
+	a := &autoUpdater{st: st, running: "v0.19.0", latest: func(context.Context) (string, error) { asked++; return latest, nil },
+		seen: &atomic.Value{}, request: reqFile, status: statFile, policy: polFile, now: time.Now, tick: 10 * time.Minute, hb: hb,
+		log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	detail := func() string {
+		for _, l := range hb.Loops() {
+			if l.Name == "auto-update" {
+				return l.Detail
+			}
+		}
+		return ""
+	}
+	var s autoState
+	at := time.Date(2026, 11, 8, 3, 10, 0, 0, time.Local)
+	for i := range 3 {
+		if a.step(ctx, &s, at.Add(time.Duration(i)*time.Minute)) || !s.due.IsZero() {
+			t.Fatalf("waits for a minor release: %+v", s)
+		}
+	}
+	if _, err := os.Stat(reqFile); !os.IsNotExist(err) || asked != 1 {
+		t.Fatalf("a minor release asked for (%v), or the latest fetched %d times", err, asked)
+	}
+	want := "patch, window 03:00-05:00: v0.20.0 is out, a new minor version, which it leaves: this node runs v0.19.0; " +
+		"rayctl update takes it (or an admin's phone, with remote updates on)"
+	if d := detail(); d != want {
+		t.Errorf("detail %q\nwant   %q", d, want)
+	}
+	// A major one likewise; none newer: up to date.
+	for v, want := range map[string]string{
+		"v1.0.0":  "v1.0.0 is out, a new major version",
+		"v0.19.0": "patch, window 03:00-05:00: up to date (v0.19.0)",
+	} {
+		latest, s = v, autoState{}
+		a.step(ctx, &s, at)
+		if d := detail(); !strings.Contains(d, want) {
+			t.Errorf("latest %s: %q", v, d)
+		}
 	}
 }
