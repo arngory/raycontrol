@@ -476,6 +476,37 @@ func TestManagerAfterImport(t *testing.T) {
 	}
 }
 
+// A request for the switch with no next key to switch to (a damaged store:
+// RequestSiteKeyRotation leaves none such): one order with the key in use,
+// which makes a next key and drops the request. It must not order at every
+// check.
+func TestManagerAskWithoutNextKey(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1767225600, 0)
+	n := newSiteNode(t, provision.SiteKeyPolicy{})
+	ca, _ := testCA()
+	n.at(ca, &now)
+	n.m.Once(ctx, now)
+	first := n.state()
+	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.st.UpdateService(ctx, n.id, store.ServiceUpdate{Delete: []string{provision.NextSecret(provision.SecretTLSKey)}}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if got := n.m.Once(ctx, now); got != 1 || n.issued != 2 {
+		t.Fatalf("the order: stored %d, issued %d", got, n.issued)
+	}
+	s := n.state()
+	if s.leafPin != first.leafPin || s.keys.RotateAt != 0 || len(s.next) == 0 || s.keys.NextAt != now.Unix() {
+		t.Fatalf("after the order: %+v", s.keys)
+	}
+	if got := n.m.Once(ctx, now.Add(time.Hour)); got != 0 || n.issued != 2 {
+		t.Fatalf("ordered again: stored %d, issued %d", got, n.issued)
+	}
+}
+
 // An order that the operator's certificate overtakes stores nothing: theirs
 // stays, and it is no failure.
 func TestManagerImportDuringOrder(t *testing.T) {

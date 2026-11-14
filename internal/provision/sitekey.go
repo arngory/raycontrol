@@ -247,13 +247,18 @@ type SiteIssue struct {
 	// it current.
 	Switch bool
 	// What names the key for the log: "kept" (the key in use), "next" (the
-	// next key takes over) or "new" (a site without a key of the node's
-	// own: its first certificate, or the one after the operator's).
+	// next key takes over) or "new" (one made for this order: a site's
+	// first certificate, or the one after the operator's when no next key
+	// was left).
 	What string
 
 	keyDER   []byte
 	makeNext bool
-	seen     [sha256.Size]byte
+	// dropAsk: the operator's switch was asked for and there is no next key
+	// to switch to (a damaged store): the request goes, or every check
+	// would order again.
+	dropAsk bool
+	seen    [sha256.Size]byte
 }
 
 // siteSeen is what an order is planned with: the certificate, both keys
@@ -305,19 +310,23 @@ func PlanSiteIssue(ctx context.Context, st *store.Store, id int64, now time.Time
 	due := p.Period > 0 && state.KeyAt != 0 && state.NextAt != 0 &&
 		now.Unix() >= state.KeyAt+int64(p.Period/time.Second) && now.Unix() >= state.NextAt+int64(p.Lead/time.Second)
 	own := !state.Imported && curErr == nil && ownSiteKey(cur)
+	// The operator's request is for the next key it was checked against:
+	// one made since (the store lost the other) has had no lead.
+	asked := state.RotateAt != 0 && state.NextAt != 0 && state.NextAt <= state.RotateAt
 	switch {
 	case !own && nextErr == nil:
-		plan.Key, plan.keyDER, plan.What = next, nextDER, "new"
+		plan.Key, plan.keyDER, plan.What = next, nextDER, "next"
 	case !own:
 		if plan.Key, plan.keyDER, err = newSiteKey(); err != nil {
 			return plan, err
 		}
 		plan.What = "new"
-	case nextErr == nil && (state.RotateAt != 0 || due):
+	case nextErr == nil && (asked || due):
 		plan.Key, plan.keyDER, plan.What = next, nextDER, "next"
 	default:
 		plan.Key, plan.What = cur, "kept"
 		plan.makeNext = nextErr != nil
+		plan.dropAsk = state.RotateAt != 0
 		return plan, nil
 	}
 	plan.Switch, plan.makeNext = true, true
@@ -373,6 +382,9 @@ func StoreSiteCertificate(ctx context.Context, st *store.Store, id int64, chainP
 		if !plan.Switch {
 			fields["tls_key_at"] = keyAtOr(state, secrets, now)
 		}
+	}
+	if plan.dropAsk {
+		fields["tls_rotate_at"] = nil
 	}
 	if len(fields) > 0 {
 		if u.Settings, err = setFields(svc.Settings, fields); err != nil {
