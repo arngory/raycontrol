@@ -15,8 +15,10 @@
 //	    -source 'arngory/sing-box 34eaa8c9c5a95702fec275561e9292a8f7ed9a08, common/certificate/chrome.go and mozilla.go (cmd/internal/update_certificates)' \
 //	    -date 2026-11-14 -o internal/roots/roots.pem
 //
-// internal/roots TestEmbedded then checks the count and the roots the
-// node's peers chain to; update both when the list changes.
+// internal/roots TestEmbedded then checks the count, the roots the
+// node's peers chain to, and the file's SHA-256 (embeddedSHA256): update
+// all three when the list changes, the hash to `sha256sum
+// internal/roots/roots.pem` of the file this wrote, in the same commit.
 package main
 
 import (

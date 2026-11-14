@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -10,9 +11,11 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/arngory/raycontrol/internal/roots"
 	"github.com/arngory/raycontrol/internal/roots/rootstest"
+	"github.com/arngory/raycontrol/internal/testca"
 )
 
 // TestRootsCmd: rayctl roots shows the default, root adds the system store
@@ -76,10 +79,24 @@ func TestRootsCmd(t *testing.T) {
 	if _, err := os.Stat(extra); !os.IsNotExist(err) {
 		t.Fatalf("the copy stays: %v", err)
 	}
-	leaf := filepath.Join(dir, "leaf.pem")
-	_ = os.WriteFile(leaf, []byte("no pem\n"), 0o600)
-	if _, err = run("file", leaf); err == nil {
+	empty := filepath.Join(dir, "empty.pem")
+	_ = os.WriteFile(empty, []byte("no pem\n"), 0o600)
+	if _, err = run("file", empty); err == nil {
 		t.Fatal("a file without certificates")
+	}
+	// A server's certificate, not a CA's: refused, nothing written.
+	ch, err := testca.New([]string{"site.example.test"}, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafBlock, _ := pem.Decode(ch.ChainPEM)
+	leaf := filepath.Join(dir, "leaf.pem")
+	_ = os.WriteFile(leaf, pem.EncodeToMemory(leafBlock), 0o600)
+	if _, err = run("file", leaf); err == nil || !strings.Contains(err.Error(), "site.example.test is no CA certificate") {
+		t.Fatalf("a leaf as root: %v", err)
+	}
+	if _, err := os.Stat(settings); !os.IsNotExist(err) {
+		t.Fatalf("a refused file wrote the settings: %v", err)
 	}
 	if _, err = run("system", "maybe"); !errors.Is(err, errUsage) {
 		t.Fatalf("usage: %v", err)

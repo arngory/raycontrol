@@ -23,10 +23,23 @@ import (
 	"github.com/arngory/raycontrol/internal/testca"
 )
 
-// TestEmbedded: the list parses, has the count its header says, and holds
-// the roots the node's peers chain to today; the CAs based in China and
-// Hong Kong that Chromium's list has are not in it.
+// embeddedSHA256 pins roots.pem: a list rebuilt by scripts/roots sets it
+// to `sha256sum internal/roots/roots.pem` in the same commit, with the
+// count and the roots TestEmbedded names; a change by any other way fails.
+const embeddedSHA256 = "ec8cd2f776598555c23e9492c7c8cae6f3aa86de624a30e9bb17b7cb4fb7fb7b"
+
+// TestEmbedded: the file is the one pinned, the list parses, has the count
+// its header says, and holds the roots the node's peers chain to today;
+// the CAs based in China and Hong Kong that Chromium's list has are not in
+// it.
 func TestEmbedded(t *testing.T) {
+	b, err := os.ReadFile("roots.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum := sha256.Sum256(b); hex.EncodeToString(sum[:]) != embeddedSHA256 {
+		t.Fatalf("roots.pem has SHA-256 %x, want %s: rebuilt by scripts/roots? then update embeddedSHA256", sum, embeddedSHA256)
+	}
 	cs := roots.Embedded()
 	if len(cs) != 91 {
 		t.Fatalf("%d roots, want 91", len(cs))
@@ -49,10 +62,14 @@ func TestEmbedded(t *testing.T) {
 		names[c.Subject.CommonName] = true
 	}
 	// Where the chains of the node's peers end (openssl s_client and
-	// crt.sh, 2026-11-14).
+	// crt.sh, 2026-11-14). gh-proxy.com, the second mirror: the chain as
+	// an egress proxy that re-terminates TLS handed it on (leaf, YE2,
+	// Root YE cross-signed by ISRG Root X2 to 2032-09-02), not seen end
+	// to end; Root YE and Root YR themselves are in neither list yet
+	// (R4-41: when the list must be rebuilt).
 	for _, want := range []string{
 		"ISRG Root X1", // Let's Encrypt; *.githubusercontent.com (YR1), api.ipinfo.io
-		"ISRG Root X2", // acme-v02.api.letsencrypt.org (YE1, Root YE)
+		"ISRG Root X2", // acme-v02.api.letsencrypt.org (YE1, Root YE); gh-proxy.com (YE2, Root YE), see below
 		"Sectigo Public Server Authentication Root E46", // github.com (Sectigo DV E36)
 		"Sectigo Public Server Authentication Root R46", // github.com (Sectigo DV R36), ghfast.top
 		"USERTrust ECC Certification Authority",         // their cross-signs
