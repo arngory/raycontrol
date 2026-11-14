@@ -54,6 +54,7 @@ var places = map[string]place{
 	"remote enroll": anywhere,
 	"knock":         anywhere,
 	"probe":         anywhere,
+	"version":       anywhere, // and with -remote FILE, the node's too (useRemote)
 
 	"check":      onNode,
 	"legacy":     onNode,

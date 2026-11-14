@@ -40,6 +40,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 |---|---|
 | `rayctl node name "Амстердам"` (`""` — убрать) | имя ноды: клиенты показывают его рядом с адресом со следующей подписки; до 48 символов, без управляющих и невидимых. При установке — `bootstrap.sh … -name "Амстердам"` |
 | `rayctl node note "До 1 Гбит/с, торренты нельзя 🙏"` (`""` — убрать) | описание ноды для пользователей: клиенты показывают его со следующей подписки; одна строка, до 200 символов, эмодзи и любые письменности, без управляющих, невидимых и символов смены направления |
+| `rayctl version` | версия этого `rayctl` и, на ноде или хосте relay, установленная (`installed`, её говорит `rayd version`; root не нужен). С `-remote ФАЙЛ` — ещё и версия ноды (`node`), из её состояния. Работает и на macOS и FreeBSD; `-json` — объект `{"rayctl", "installed", "node"}` без неизвестного |
 | `rayctl status` | версия, нода (и её имя), число пользователей, сервисов, устройств, порты SPA сейчас, политика выхода (`egress`); циклы rayd, `dns-zone <сервис>` — самопроверка зоны туннеля; `conn-limit` — кто упёрся в предел соединений за 15 мин (`u<id>` и сервис), `conntrack` — таблица от 70 %, страж за сутки, отбросы ядра |
 | `rayctl service list` | сервисы; для REALITY — когда сменились ключи и когда следующая смена |
 | `rayctl audit [-n 50]` | журнал действий администратора |
@@ -95,13 +96,13 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl service add api api` → `rayctl apply` | включить удалённый API: свой порт за SPA, mTLS |
 | `rayctl device invite admin laptop -role admin` | на ноде: приглашение для устройства администратора |
 | `rayctl remote enroll -o laptop.rcdev [-pin 123456] 'RCINV2:…'` | на своей машине: новый ключ, SPA, регистрация; файл устройства 0600. Берёт и `rcinv1:…`; PIN без `-pin` спрашивается без показа на экране |
-| `rayctl -remote laptop.rcdev status` | любая команда `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `dns`, `summary`, `app-mirror`, `metrics` через API |
+| `rayctl -remote laptop.rcdev status` | любая команда `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `dns`, `summary`, `app-mirror`, `metrics`, `debug`, `version` через API |
 | `rayctl -remote laptop.rcdev remote rotate` | новый клиентский ключ, старый перестаёт работать |
 | `rayctl -remote laptop.rcdev remote whoami` | какое это устройство: ID, пользователь, имя, роль, нода |
 
 `rayctl` для своей машины: Linux — из архива ноды; macOS и FreeBSD — архивы `rayctl-darwin-arm64`,
 `rayctl-darwin-amd64` и `rayctl-freebsd-amd64` (`.tar.gz`) с v0.26.0, под той же подписью
-`SHA256SUMS`. Там работают `remote enroll`, всё с `-remote`, `knock` и `probe`; команды самого сервера (`install`,
+`SHA256SUMS`. Там работают `remote enroll`, всё с `-remote`, `knock`, `probe` и `version`; команды самого сервера (`install`,
 `apply`, `update`, `backup`, `report`, `check`, `egress`, `conn-limit`, `service cert`, `relay bundle` и
 другие) отвечают `… works on a Linux node only`. С того же релиза `-remote` не читает файл устройства, открытый
 группе или остальным либо чужой (кроме root): `chmod 600 ФАЙЛ` (и на Linux). Подробно —

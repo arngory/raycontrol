@@ -1194,10 +1194,11 @@ xattr -d com.apple.quarantine rayctl
 **Что работает вне ноды:**
 
 - `knock` и `probe` — им нужен только пакет устройства;
+- `version` — версия `rayctl`; с `-remote ФАЙЛ` — и версия ноды;
 - `remote enroll` — регистрация по приглашению (§10.4), PIN спрашивается без показа на экране;
 - с файлом устройства, `-remote ФАЙЛ`: `remote whoami`, `remote rotate` и то же, что через `-remote` на Linux, —
   `status`, `node`, `user`, `service`, `device` (в том числе приглашение с QR в терминале), `audit`, `admin`, `dns`,
-  `summary`, `app-mirror`, `metrics`, `debug`. Что из этого нода разрешает удалённому устройству, решает она сама
+  `summary`, `app-mirror`, `metrics`, `debug`, `version`. Что из этого нода разрешает удалённому устройству, решает она сама
   (§10.4): так, окно отладки открывает и закрывает только root на ноде, через `-remote` работает лишь `debug show`.
 - `knock`, `probe` и `remote enroll` с `-remote` не запускаются, а отвечают одной строкой, например
   `knock takes no -remote: it works from this machine with the bundle on its command line (run it without -remote)`.
@@ -2395,6 +2396,22 @@ rayctl restore -i /root/node-2026-11-14.rcbak
 ### 12.3. Обновление ноды
 
 Обновление с v0.25.1 на v0.26.0 по шагам, вместе с relay и машинами администраторов, — §12.5.
+
+**Какая версия стоит:**
+
+```bash
+rayctl version
+```
+
+```
+rayctl     vX.Y.Z
+installed  vX.Y.Z (rayd on this host)
+```
+
+Первая строка — версия самого `rayctl`, вторая — установленная на этом хосте, ноде или relay. Root и работающий
+`rayd` не нужны. На своей машине (§7) `rayctl version` печатает только первую строку, а с `-remote ФАЙЛ` — ещё
+строку `node` с версией ноды. Эту команду знает `rayctl` после v0.26.0; в v0.26.0 и раньше версию ноды показывает
+первая строка `rayctl status`, версию relay — `rayctl update status` на его хосте.
 
 **Есть ли новый релиз:**
 

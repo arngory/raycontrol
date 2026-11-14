@@ -337,13 +337,14 @@ func isLocalOnly(cmd string) bool {
 // useRemote points the CLI at the node's remote API for the command line
 // args. What run does not know is its usage, and what needs no node here
 // (knock, probe) takes no -remote: both before the device file is read
-// and the node knocked on.
+// and the node knocked on. version works anywhere and, with -remote, asks
+// the node for its version too.
 func (c *cli) useRemote(ctx context.Context, path string, args []string) error {
 	p, name, ok := placeOf(args)
 	switch {
 	case !ok:
 		return errUsage
-	case p == anywhere:
+	case p == anywhere && name != "version":
 		return fmt.Errorf("%s takes no -remote: it works from this machine with the bundle on its command line (run it without -remote)", name)
 	case isLocalOnly(args[0]):
 		return fmt.Errorf("%s works on the node itself, not through -remote", args[0])

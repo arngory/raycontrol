@@ -38,6 +38,8 @@ import (
 const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
 
   status
+  version                                   this rayctl's version and, on a node or relay host, the one installed
+                                            (rayd's); with -remote FILE, the node's
   node name [NAME | ""]                     show, set or remove the node's name, which clients show
                                             with its address (at most 48 characters)
   node note [TEXT | ""]                     show, set or remove the note clients show their users (200 characters, one line)
@@ -160,7 +162,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   metrics [-o FILE]                           counts and times in the Prometheus text format; with
                                               -o for a collector's textfile directory
 
-  report [-o FILE] [-logs warning|info|none] [-since 24h] [-id ID]
+  report [-o FILE] [-logs warning|info|debug|none] [-since 24h] [-id ID]
       a redacted report for an issue: versions, system, checks, units,
       counts and warnings; nothing is sent anywhere
   knock [-carrier udp|tls|tcp|auto] [-addr A] [-ttl 10m] BUNDLE|@FILE
@@ -175,8 +177,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   remote enroll [-o FILE] [-carrier udp|tls|tcp|auto] [-addr A] INVITE|@FILE|-
       register a device from an invite (RCINV2:... or rcinv1:...): a new client
       key, SPA, then the API; writes the device file (bundle and key, mode 0600)
-  -remote FILE <command>                    status, user, service, device, audit, admin, dns, metrics, summary
-                                            run against the node through its API
+  -remote FILE <command>                    status, node, user, service, device, audit, admin, dns, metrics, summary,
+                                            app-mirror, debug, version run against the node through its API
   -remote FILE remote whoami|rotate         the device; a new client key for it
 `
 
@@ -332,6 +334,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.metrics(ctx, args[1:])
 	case "update":
 		return c.update(ctx, args[1:])
+	case "version":
+		return c.versionCmd(ctx, args[1:])
 	case "uninstall":
 		return c.uninstall(ctx, args[1:])
 	}
