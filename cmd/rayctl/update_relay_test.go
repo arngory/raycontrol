@@ -537,7 +537,7 @@ func TestRelayKeepRestore(t *testing.T) {
 	}
 	want := []string{"disarm", "systemctl stop rayd-relay.service", "systemctl stop rayspa.service", "place rayd", "place rayspa",
 		"systemctl daemon-reload",
-		"sysctl -q -p " + f.at("etc/sysctl/91-raycontrol-relay.conf"), "sysctl -q -p " + f.at("etc/sysctl/90-raycontrol.conf"),
+		"sysctl -q -e -p " + f.at("etc/sysctl/91-raycontrol-relay.conf"), "sysctl -q -e -p " + f.at("etc/sysctl/90-raycontrol.conf"),
 		"systemctl enable rayspa.service", "systemctl disable rayd-relay.service", "systemctl start rayspa.service"}
 	if !slices.Equal(f.ran, want) {
 		t.Errorf("ran %q\nwant %q", f.ran, want)
@@ -584,6 +584,55 @@ func TestRelayKeepRestore(t *testing.T) {
 	ops.tableGone = func() bool { return false }
 	if err := ops.open(); err == nil {
 		t.Error("a table left was not said")
+	}
+}
+
+// A sysctl file that does not load whole (net.ipv6.* with IPv6 off, a
+// container's read-only keys) is a warning in a restore, as in the install,
+// never a reason to open the host: the check after, of the previous
+// version, is what judges the relay (forwarding read in /proc among it).
+func TestRelayRestoreSysctlWarns(t *testing.T) {
+	sysctlFails := func(f *fakeRelay) {
+		run := f.env.ops.run
+		f.env.ops.run = func(name string, args ...string) error {
+			err := run(name, args...)
+			if name == "sysctl" {
+				return errors.New("sysctl: cannot stat /proc/sys/net/ipv6/conf/all/accept_ra: No such file or directory")
+			}
+			return err
+		}
+	}
+	opened := func(f *fakeRelay) bool {
+		return slices.ContainsFunc(f.ran, func(s string) bool { return strings.Contains(s, "disable --now") })
+	}
+
+	// An update whose check fails: rolled back, the previous version checked.
+	f := newFakeRelay(t)
+	sysctlFails(f)
+	f.bad["v0.26.1"] = errors.New("rayspa is inactive/dead")
+	text, err := f.update(updateOpts{want: "latest", yes: true})
+	if rb := (rolledBack{}); !errors.As(err, &rb) || opened(f) {
+		t.Fatalf("not rolled back: %v %q", err, f.ran)
+	}
+	if !strings.Contains(text, "warning: sysctl: cannot stat") || !slices.Equal(f.wants, []string{"v0.26.1", "v0.26.0"}) {
+		t.Errorf("output %q, checked %v", text, f.wants)
+	}
+	if !slices.Contains(f.ran, "sysctl -q -e -p "+f.at("etc/sysctl/90-raycontrol.conf")) {
+		t.Errorf("sysctl not as the install runs it: %q", f.ran)
+	}
+	// -rollback asked for on a healthy relay.
+	f.ran = nil
+	if _, err := f.rollback(true); err != nil || opened(f) {
+		t.Errorf("-rollback: %v %q", err, f.ran)
+	}
+	// The previous version does not pass its check (forwarding off, say):
+	// then, and only then, the host is opened.
+	f = newFakeRelay(t)
+	sysctlFails(f)
+	f.bad["v0.26.1"] = errors.New("rayspa is inactive/dead")
+	f.bad["v0.26.0"] = errors.New(`the relay does not forward (net.ipv4.ip_forward "0")`)
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err == nil || !strings.Contains(err.Error(), "host left open") || !opened(f) {
+		t.Errorf("not opened: %v", err)
 	}
 }
 

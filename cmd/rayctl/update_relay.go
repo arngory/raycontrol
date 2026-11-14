@@ -374,10 +374,14 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 	}
 	// Forwarding first (91-), the hardening after (90-raycontrol.conf):
 	// writing net.ipv4.ip_forward resets accept_redirects (unforwardAt).
+	// As the install loads them (deploy.Host.ApplySysctl): -e, so that keys
+	// this host does not have (net.ipv6.* with IPv6 off, a kernel without
+	// bbr) are skipped, and a failure is only a warning. What the relay
+	// needs of them, forwarding, the check after reads in /proc.
 	slices.Reverse(sysctl)
 	for _, f := range sysctl {
-		if err := o.run("sysctl", "-q", "-p", f); err != nil {
-			return k, err
+		if err := o.run("sysctl", "-q", "-e", "-p", f); err != nil {
+			fmt.Println("warning:", err)
 		}
 	}
 	for _, u := range o.units {
@@ -921,7 +925,7 @@ func (c *cli) relayEnvHere(ctx context.Context) relayEnv {
 					c, ok := h.Journal.Original(deploy.ChangeSysctl, "", forwardKey)
 					return c.Value, ok
 				},
-				func() { _ = runApart("sysctl", "-q", "-p", deploy.HardeningSysctl) })
+				func() { _ = runApart("sysctl", "-q", "-e", "-p", deploy.HardeningSysctl) })
 		},
 		tableGone: tableGone,
 		rayspa:    deploy.DefaultBinaries.Rayspa,
