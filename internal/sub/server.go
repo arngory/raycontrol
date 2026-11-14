@@ -285,7 +285,8 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 	if err != nil {
 		// The others go out: a 404 for all of them kept the client on its
 		// last subscription, without the next keys of the rest (review).
-		s.Log.Warn("subscription: profiles left out", "user", userName, "err", err)
+		// By the user's ID, not the name: logs carry no names (docs/09 §7).
+		s.Log.Warn("subscription: profiles left out", "user", u.ID, "err", err)
 		if len(profiles) == 0 {
 			return Envelope{}, err
 		}
