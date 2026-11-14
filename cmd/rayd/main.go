@@ -555,8 +555,8 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 	}()
 	for {
 		wake := changes()
-		// A change may have taken tokens away (a revocation renews the
-		// user's, R4-36): the next query asks the store again.
+		// A change may have taken tokens away (a revoked device's, R4-37):
+		// the next query asks the store again.
 		for _, l := range running {
 			l.h.Forget()
 		}
@@ -613,7 +613,7 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 			id := svc.ID
 			sw := &swapHandler{}
 			sw.set(answer)
-			h := &doh.Handler{Tokens: func(ctx context.Context) (map[string]bool, error) { return dohTokens(ctx, st, id) }, Answer: sw}
+			h := dohHandler(st, id, sw, log.With("service", svc.Name))
 			srv := dohHTTPServer(h, certs.GetCertificate, log)
 			go func() { _ = srv.ServeTLS(ln, "", "") }()
 			// DoH3: the same handler over QUIC, datagrams from the front (R3-5).
@@ -726,31 +726,14 @@ func serveRemote(ctx context.Context, r *api.Remote, changes func() <-chan struc
 	}
 }
 
-// dohTokens are the credentials DoH accepts now: those of active users
-// (store.User.Active: over the traffic limit is out too) with access to
-// the service, with their rotation (R4-1).
-func dohTokens(ctx context.Context, st *store.Store, service int64) (map[string]bool, error) {
-	users, err := st.ListUsers(ctx)
-	if err != nil {
-		return nil, err
-	}
-	sets, err := st.CredentialSets(ctx, service, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	now := time.Now()
-	out := map[string]bool{}
-	for _, u := range users {
-		if !u.Active(now) || !slices.Contains(u.Services, service) {
-			continue
-		}
-		for _, t := range sets[u.ID].Accepted(now) {
-			if t != "" {
-				out[t] = true
-			}
-		}
-	}
-	return out, nil
+// dohHandler is the handler of a DoH service: the tokens are those of
+// the devices not revoked of active users (store.User.Active: over the
+// traffic limit is out too) with access to the service, with their
+// rotation (R4-1, R4-37: store.DoHTokens), and strangers get answer.
+func dohHandler(st *store.Store, service int64, answer http.Handler, log *slog.Logger) *doh.Handler {
+	return &doh.Handler{Tokens: func(ctx context.Context) (map[string]bool, error) {
+		return st.DoHTokens(ctx, service, time.Now())
+	}, Answer: answer, Log: log}
 }
 
 // syncDNS keeps the node's records in its DNS provider's zone: when the

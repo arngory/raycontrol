@@ -776,8 +776,9 @@ type Revocation struct {
 	Already bool
 	// Credentials is how many of the user's credentials are new: every
 	// row the user has, one for each service the user has or had a
-	// credential on (inner's included). A count of credentials, not of
-	// the services the user has now.
+	// credential on (inner's included), but DoH's, which a revocation
+	// keeps (R4-37). A count of credentials, not of the services the user
+	// has now.
 	Credentials int
 }
 
@@ -788,6 +789,11 @@ type Revocation struct {
 // secret with no next and no previous one, so nothing it knew is accepted
 // once the data plane has the change: the user's other devices are cut
 // until they fetch their subscription, which their own keys still open.
+// DoH's is kept (R4-37): no device holds it, each has a token of its own
+// from it and its SPA key (DoHDeviceToken), and the revoked device's goes
+// with the device; its user's shared token, in its window, goes with the
+// revocation too (DoHTokens). So the resolver the other devices fetch
+// their subscription by goes on answering them.
 // The user's LAN key, when there is one, is new with it (lan-v1 §3): the
 // multicast password the device knew is no longer the user's, both at
 // once. A device revoked already is no error and changes nothing
@@ -819,7 +825,7 @@ func (s *Store) RevokeDevice(ctx context.Context, id string) (Revocation, error)
 		if _, err := tx.ExecContext(ctx, `UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, now, id); err != nil {
 			return err
 		}
-		r.Credentials, err = renewUser(ctx, tx, user, now, key)
+		r.Credentials, err = renewUser(ctx, tx, user, now, key, true)
 		return err
 	})
 	if err != nil {
@@ -831,8 +837,8 @@ func (s *Store) RevokeDevice(ctx context.Context, id string) (Revocation, error)
 // renewUser is what a revocation does to the device's user: every
 // credential new (renewCredentials) and the LAN key, when there is one,
 // replaced by key. It returns how many credentials there were.
-func renewUser(ctx context.Context, tx *sql.Tx, user, now int64, key []byte) (int, error) {
-	n, err := renewCredentials(ctx, tx, user, now)
+func renewUser(ctx context.Context, tx *sql.Tx, user, now int64, key []byte, keepDoH bool) (int, error) {
+	n, err := renewCredentials(ctx, tx, user, now, keepDoH)
 	if err != nil {
 		return 0, err
 	}
@@ -861,7 +867,7 @@ func (s *Store) RenewUser(ctx context.Context, name string) (int, error) {
 		if err != nil {
 			return err
 		}
-		n, err = renewUser(ctx, tx, user, s.now().Unix(), key)
+		n, err = renewUser(ctx, tx, user, s.now().Unix(), key, false)
 		return err
 	})
 	return n, err
@@ -906,7 +912,9 @@ func renewRevokedUsers(ctx context.Context, tx *sql.Tx, now int64) error {
 		if err != nil {
 			return err
 		}
-		n, err := renewUser(ctx, tx, u.id, now, key)
+		// DoH's too: the revoked device may hold the user's token, which
+		// was the line's then (R4-37).
+		n, err := renewUser(ctx, tx, u.id, now, key, false)
 		if err != nil {
 			return err
 		}
@@ -923,9 +931,11 @@ func renewRevokedUsers(ctx context.Context, tx *sql.Tx, now int64) error {
 // no next and no previous one, its rotation starting over at now, and
 // returns how many there were. A credential keeps its row: its service,
 // and the user's traffic and connection limits, which go by the user
-// (TrafficUser, u<id>), not by the secret's name.
-func renewCredentials(ctx context.Context, tx *sql.Tx, user, now int64) (int, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT service_id FROM credentials WHERE user_id = ? ORDER BY service_id`, user)
+// (TrafficUser, u<id>), not by the secret's name. With keepDoH those of
+// DoH services stay as they are and are not counted (RevokeDevice).
+func renewCredentials(ctx context.Context, tx *sql.Tx, user, now int64, keepDoH bool) (int, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT c.service_id FROM credentials c LEFT JOIN services s ON s.id = c.service_id
+		WHERE c.user_id = ? AND NOT (? AND coalesce(s.kind, '') = 'doh') ORDER BY c.service_id`, user, keepDoH)
 	if err != nil {
 		return 0, err
 	}

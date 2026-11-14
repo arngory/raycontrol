@@ -267,7 +267,7 @@ func carryDevices(ctx context.Context, tx *sql.Tx, gone bool) ([]CarriedDevice, 
 		return nil, err
 	}
 	for _, user := range users {
-		if _, err := renewCredentials(ctx, tx, user, now); err != nil {
+		if _, err := renewCredentials(ctx, tx, user, now, false); err != nil {
 			return nil, fmt.Errorf("store: carrying revocations: %w", err)
 		}
 		if !lan {

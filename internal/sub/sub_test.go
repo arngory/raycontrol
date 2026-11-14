@@ -879,7 +879,7 @@ func TestProfilesPartial(t *testing.T) {
 	m := render.Model{NodeID: "00", Host: "203.0.113.7", Services: []render.Service{inner, dns, doh},
 		Inner: map[int64]string{7: "uuid"}, Creds: map[int64]map[int64]string{3: {7: "token"}}}
 	u := render.User{ID: 7, Name: "alice", Services: []int64{2, 3}}
-	got, err := sub.Profiles(m, u)
+	got, err := sub.DeviceProfiles(m, u, testDevice)
 	if err == nil || !strings.Contains(err.Error(), "service dns") {
 		t.Fatalf("no error for the broken service: %v", err)
 	}

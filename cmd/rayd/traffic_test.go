@@ -4,12 +4,13 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/arngory/raycontrol/internal/store"
 )
 
-// DoH takes the tokens of active users only: one over the traffic limit
-// is out, as a disabled one (traffic-limit-v1 §3.1).
+// DoH takes the tokens of active users' devices only: one over the
+// traffic limit is out, as a disabled one (traffic-limit-v1 §3.1).
 func TestDoHTokensOverLimit(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
@@ -32,14 +33,18 @@ func TestDoHTokensOverLimit(t *testing.T) {
 	if _, err := st.Credentials(ctx, doh.ID, []int64{u.ID}, func() (string, error) { return "token-alice", nil }); err != nil {
 		t.Fatal(err)
 	}
-	tokens, err := dohTokens(ctx, st, doh.ID)
-	if err != nil || !tokens["token-alice"] {
+	_, key, err := st.CreateDevice(ctx, "alice", "phone", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := st.DoHTokens(ctx, doh.ID, time.Now())
+	if err != nil || !tokens[store.DoHDeviceToken("token-alice", key[:])] {
 		t.Fatalf("under the limit: %v %v", tokens, err)
 	}
 	if err := st.WriteTraffic(ctx, store.TrafficWrite{Adds: []store.TrafficAdd{{UserID: u.ID, Start: u.TrafficStart, Up: 1000}}}); err != nil {
 		t.Fatal(err)
 	}
-	if tokens, err = dohTokens(ctx, st, doh.ID); err != nil || len(tokens) != 0 {
+	if tokens, err = st.DoHTokens(ctx, doh.ID, time.Now()); err != nil || len(tokens) != 0 {
 		t.Fatalf("over the limit: %v %v", tokens, err)
 	}
 }
