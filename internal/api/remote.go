@@ -248,6 +248,14 @@ var nodeOnly = map[string]bool{
 	// Whether admins may update the node at all is root's (node-update-v1).
 }
 
+// secretAnswer are the calls open to admin devices whose answer carries a
+// secret: the user's credentials, or a key that lets a new device in.
+var secretAnswer = map[string]bool{
+	nodev1connect.NodeServiceExportUserProcedure:   true,
+	nodev1connect.NodeServiceCreateDeviceProcedure: true,
+	nodev1connect.NodeServiceCreateInviteProcedure: true,
+}
+
 // adminOnly lets admin devices call NodeService; the audit log names them.
 func (r *Remote) adminOnly() connect.UnaryInterceptorFunc {
 	return func(next connect.UnaryFunc) connect.UnaryFunc {
@@ -262,7 +270,21 @@ func (r *Remote) adminOnly() connect.UnaryInterceptorFunc {
 			if nodeOnly[req.Spec().Procedure] {
 				return nil, connect.NewError(connect.CodePermissionDenied, errors.New("on the node only (rayctl as root)"))
 			}
-			return next(context.WithValue(ctx, actorKey{}, d.UserName+"/"+d.Name+" (remote)"), req)
+			resp, err := next(context.WithValue(ctx, actorKey{}, d.UserName+"/"+d.Name+" (remote)"), req)
+			// The device once more after a call that answers with a secret:
+			// one revoked while the call ran must not take away what the
+			// call read or made after the revocation (its user's new
+			// credentials in an export, a new device's bundle, an invite).
+			// Whatever the call read after the revocation's commit, this
+			// read comes later and sees it. The other answers say nothing
+			// secret, and an admin may revoke the device it calls from or
+			// disable its own user.
+			if err == nil && secretAnswer[req.Spec().Procedure] {
+				if _, derr := r.device(ctx); derr != nil {
+					return nil, derr
+				}
+			}
+			return resp, err
 		}
 	}
 }
