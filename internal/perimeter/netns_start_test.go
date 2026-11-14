@@ -45,6 +45,9 @@ func TestNetnsStart(t *testing.T) {
 	if rs := list(); strings.Contains(rs, "table inet "+Table) {
 		t.Fatalf("a table before a snapshot:\n%s", rs)
 	}
+	if in, err := fw.InForce(); in || err != nil {
+		t.Fatalf("no table in force: %v, %v", in, err)
+	}
 
 	if err := fw.HoldForward(); err != nil {
 		t.Fatal(err)
@@ -57,6 +60,13 @@ func TestNetnsStart(t *testing.T) {
 	if err := fw.HoldForward(); err != nil {
 		t.Fatal(err)
 	}
+	// The hold is a table, but not one in force: it filters no input.
+	if present, _ := fw.Present(); !present {
+		t.Fatal("the hold is not a table")
+	}
+	if in, err := fw.InForce(); in || err != nil {
+		t.Fatalf("the hold in force: %v, %v", in, err)
+	}
 
 	snap := testSnapshot(&perimeterv1.Device{Id: "alice", Key: key(0x11), Allowed: []uint32{1}})
 	snap.AdminPrefixes = []string{"198.51.100.0/24"}
@@ -67,6 +77,9 @@ func TestNetnsStart(t *testing.T) {
 	rs = list()
 	if !g.Up() || !strings.Contains(rs, "hook input") || !strings.Contains(rs, "198.51.100.0/24") || !strings.Contains(rs, "chain relay_dnat") {
 		t.Fatalf("after the first snapshot (up %v):\n%s", g.Up(), rs)
+	}
+	if in, err := fw.InForce(); !in || err != nil {
+		t.Fatalf("the table in force: %v, %v", in, err)
 	}
 
 	// A restart: the next rayspa finds this table and keeps it until its

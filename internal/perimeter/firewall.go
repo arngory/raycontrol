@@ -460,6 +460,18 @@ func (n *NFT) Present() (bool, error) {
 	return false, nil
 }
 
+// InForce reports whether a perimeter table that filters input is in the
+// kernel: the input chain, not the table, since a relay's hold
+// (HoldForwardScript) is a table without one that leaves the host open.
+func (n *NFT) InForce() (bool, error) {
+	ok, err := n.hasChain("input")
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return false, nil // no such table or chain
+	}
+	return ok, err
+}
+
 // Teardown removes the table.
 func (n *NFT) Teardown() error {
 	return n.run(fmt.Sprintf("table inet %[1]s {}\ndelete table inet %[1]s\n", Table))

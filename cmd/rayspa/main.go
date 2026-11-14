@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -126,13 +127,13 @@ func run(args []string) error {
 	// that would shut the administrator out until rayd answers.
 	gate := perimeter.NewGate(fw, log)
 	gate.SetupAtFirstSnapshot()
-	leftOver, presentErr := fw.Present()
-	if presentErr != nil {
-		return presentErr // no nft: nothing here can work
+	if _, err := fw.Present(); err != nil {
+		return err // no nft: nothing here can work
 	}
-	if *relayBundle != "" && !leftOver {
+	if *relayBundle != "" {
 		// A boot: forwarding is on from sysctl.d, nothing forwards until
-		// the table is in.
+		// the table is in. A table there (an earlier rayspa's, or its
+		// hold) stays.
 		if err := fw.HoldForward(); err != nil {
 			log.Error("forwarding not held: the relay forwards whatever the kernel routes until its table is in", "err", err)
 		}
@@ -162,10 +163,11 @@ func run(args []string) error {
 	if *state != "" {
 		restore(*state, gate, carrier, log)
 	}
-	up := gate.Up()
+	st := startState{gate: gate, inForce: fw.InForce, pid: os.Getpid()}
+	cur := st.now()
 	switch {
-	case up:
-	case leftOver:
+	case cur.state == perimeter.GateUp:
+	case cur.leftOver:
 		log.Warn("no saved snapshot applied: the table an earlier rayspa left stays in force until rayd answers", "table", perimeter.Table)
 	default:
 		// Loud: the journal at error, and systemctl status.
@@ -173,8 +175,11 @@ func run(args []string) error {
 	}
 	// Ready once the start's table is in, or known not to be: the unit is
 	// ordered before network-pre.target, so interfaces come up after this.
-	notify(fmt.Sprintf("READY=1\nSTATUS=%s", perimeterStatus(up, leftOver)))
-	go watch(ctx, open, *state, gate, carrier, dl, log)
+	if err := notify("READY=1\nSTATUS=" + cur.status()); err != nil {
+		log.Error("sd_notify: READY not sent; under Type=notify systemd stops rayspa 30 s after its start (TimeoutStartSec) "+
+			"and starts it again (journalctl -u rayspa)", "err", err)
+	}
+	go watch(ctx, open, *state, gate, carrier, dl, &st.fromRayd, log)
 	go func() {
 		if err := perimeter.ReadNFLOG(ctx, uint16(*group), handle, log); err != nil {
 			log.Error("nflog", "err", err)
@@ -186,7 +191,7 @@ func run(args []string) error {
 	// firewalld reload) removed the table, it is back within a second.
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
-	log.Info("rayspa running", "table", perimeter.Table, "version", version, "up", up)
+	log.Info("rayspa running", "table", perimeter.Table, "version", version, "state", cur.state)
 	for {
 		select {
 		case <-ctx.Done():
@@ -205,47 +210,97 @@ func run(args []string) error {
 			if ports != nil {
 				carrier.Reconcile(ports)
 			}
-			if now := gate.Up(); now != up {
-				up = now
-				switch st := gate.State(); {
-				case up:
-					log.Info("perimeter up", "table", perimeter.Table)
-				case st == perimeter.GateBehind:
-					log.Warn("perimeter behind its snapshot: the table is in, a part of the snapshot is not yet", "table", perimeter.Table)
-				default:
-					log.Error("perimeter down: its table went and is not back yet; the host is open meanwhile", "table", perimeter.Table)
-				}
-				notify("STATUS=" + perimeterStatus(up, false))
+			// Each tick, as what a table left over is changes too: a
+			// flush ruleset before the first snapshot takes it away.
+			next := st.now()
+			if next == cur {
+				continue
+			}
+			switch {
+			case next.state == cur.state && next.leftOver == cur.leftOver:
+				// Only where the snapshot came from (rayd's now).
+			case next.state == perimeter.GateUp:
+				log.Info("perimeter up", "table", perimeter.Table)
+			case next.state == perimeter.GateBehind:
+				log.Warn("perimeter behind its snapshot: the table is in, a part of the snapshot is not yet", "table", perimeter.Table)
+			case next.leftOver:
+				log.Warn("the table an earlier rayspa left is in force, not this one's", "table", perimeter.Table, "state", next.state)
+			case next.state == perimeter.GateNotIn:
+				log.Error("perimeter down: its table is not in; the host is open meanwhile (journalctl -u rayspa -p warning says why)", "table", perimeter.Table)
+			default:
+				log.Error("perimeter down: the table an earlier rayspa left went; the host is open until rayd answers", "table", perimeter.Table)
+			}
+			cur = next
+			if err := notify("STATUS=" + cur.status()); err != nil {
+				log.Debug("sd_notify", "err", err)
 			}
 		}
 	}
 }
 
-// perimeterStatus is rayspa's line in systemctl status.
-func perimeterStatus(up, leftOver bool) string {
-	switch {
-	case up:
-		return "perimeter up"
-	case leftOver:
-		return "waiting for rayd: the table an earlier rayspa left is in force"
+// startState is what rayspa says of its table: the gate's state, whether
+// a table an earlier rayspa left is in force while this one has none, and
+// whether its snapshot came from rayd (not the saved one).
+type startState struct {
+	gate     *perimeter.Gate
+	inForce  func() (bool, error) // the table's input chain is in the kernel
+	pid      int
+	fromRayd atomic.Bool
+}
+
+type stateNow struct {
+	state    perimeter.GateState
+	leftOver bool // not this gate's table, but one with an input chain
+	fromRayd bool
+	pid      int
+}
+
+func (s *startState) now() stateNow {
+	n := stateNow{state: s.gate.State(), fromRayd: s.fromRayd.Load(), pid: s.pid}
+	if n.state == perimeter.GateNoSnapshot || n.state == perimeter.GateNotIn {
+		// The input chain, not the table: a relay's hold has a table and
+		// no input chain, and leaves the host open (R4-40).
+		n.leftOver, _ = s.inForce()
 	}
-	return "PERIMETER DOWN: the host is open until rayd answers"
+	return n
+}
+
+// status is rayspa's line in systemctl status. The table it means is this
+// process's (its pid, which systemctl show -p MainPID gives) only when it
+// begins "perimeter up: rayd's snapshot": rayctl update waits for that
+// (a table an earlier rayspa left would also be in the kernel).
+func (n stateNow) status() string {
+	who := fmt.Sprintf("; rayspa %s, pid %d", version, n.pid)
+	switch {
+	case n.state == perimeter.GateUp && n.fromRayd:
+		return "perimeter up: rayd's snapshot" + who
+	case n.state == perimeter.GateUp:
+		return "perimeter up: the saved snapshot, until rayd answers" + who
+	case n.state == perimeter.GateBehind:
+		return "perimeter behind: the table is in, its snapshot only in part (journalctl -u rayspa)" + who
+	case n.leftOver:
+		return "waiting for rayd: the table an earlier rayspa left is in force" + who
+	case n.state == perimeter.GateNotIn:
+		return "PERIMETER DOWN: the host is open, the table is not in (journalctl -u rayspa)" + who
+	}
+	return "PERIMETER DOWN: the host is open until rayd answers" + who
 }
 
 // notify sends state to systemd (sd_notify), when the unit asked for it
-// (Type=notify): nothing otherwise, and nothing if it fails.
-func notify(state string) {
+// (Type=notify): nothing otherwise.
+func notify(state string) error {
 	addr := os.Getenv("NOTIFY_SOCKET")
 	if addr == "" {
-		return
+		return nil
 	}
 	// A leading "@" is an abstract socket, as the net package reads it.
 	c, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: addr, Net: "unixgram"})
 	if err != nil {
-		return
+		return err
 	}
 	defer func() { _ = c.Close() }()
-	_, _ = c.Write([]byte(state))
+	_, err = c.Write([]byte(state))
+	return err
 }
 
 // guardReporter sends the guard's state to rayd (PerimeterService.
@@ -428,7 +483,9 @@ func (d *debugLevel) until(t int64) {
 	})
 }
 
-func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, dl *debugLevel, log *slog.Logger) {
+// fromRayd is set once a snapshot of the feed is the gate's (STATUS).
+func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, dl *debugLevel,
+	fromRayd *atomic.Bool, log *slog.Logger) {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		stream, err := open(ctx)
@@ -447,6 +504,7 @@ func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gat
 				} else {
 					log.Info("snapshot applied", "revision", snap.GetRevision(), "devices", len(snap.Devices))
 				}
+				fromRayd.Store(true)
 				if ports, _ := gate.Tick(); ports != nil {
 					carrier.Reconcile(ports)
 				}
