@@ -232,9 +232,9 @@ type NodeServiceClient interface {
 	// not stored anywhere it can be read back through the API.
 	CreateDevice(context.Context, *connect.Request[v1.CreateDeviceRequest]) (*connect.Response[v1.CreateDeviceResponse], error)
 	// RevokeDevice revokes a device, or withdraws an unused invite. Revoking
-	// a device changes every credential of its user at once
-	// (docs/spec/api-v1.md §5a): the user's other devices reconnect after
-	// their next subscription fetch.
+	// a device changes every credential of its user at once but DoH's, whose
+	// token is each device's (docs/spec/api-v1.md §5a): the user's other
+	// devices reconnect after their next subscription fetch.
 	RevokeDevice(context.Context, *connect.Request[v1.RevokeDeviceRequest]) (*connect.Response[v1.RevokeDeviceResponse], error)
 	// CreateInvite returns a one-time invite ("rcinv1:..."): the client
 	// registers the device itself through the remote API (R3-3).
@@ -1030,9 +1030,9 @@ type NodeServiceHandler interface {
 	// not stored anywhere it can be read back through the API.
 	CreateDevice(context.Context, *connect.Request[v1.CreateDeviceRequest]) (*connect.Response[v1.CreateDeviceResponse], error)
 	// RevokeDevice revokes a device, or withdraws an unused invite. Revoking
-	// a device changes every credential of its user at once
-	// (docs/spec/api-v1.md §5a): the user's other devices reconnect after
-	// their next subscription fetch.
+	// a device changes every credential of its user at once but DoH's, whose
+	// token is each device's (docs/spec/api-v1.md §5a): the user's other
+	// devices reconnect after their next subscription fetch.
 	RevokeDevice(context.Context, *connect.Request[v1.RevokeDeviceRequest]) (*connect.Response[v1.RevokeDeviceResponse], error)
 	// CreateInvite returns a one-time invite ("rcinv1:..."): the client
 	// registers the device itself through the remote API (R3-3).

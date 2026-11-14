@@ -6213,8 +6213,8 @@ type RevokeDeviceResponse struct {
 	User   string `protobuf:"bytes,3,opt,name=user,proto3" json:"user,omitempty"`
 	Device string `protobuf:"bytes,4,opt,name=device,proto3" json:"device,omitempty"`
 	// credentials: how many of the user's credentials are new, as
-	// RenewUserResponse counts them, not services; 0 for a user with none
-	// yet.
+	// RenewUserResponse counts them, not services, but without DoH's,
+	// which a revocation keeps (v0.27.0); 0 for a user with none yet.
 	Credentials   uint32 `protobuf:"varint,5,opt,name=credentials,proto3" json:"credentials,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

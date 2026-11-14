@@ -75,9 +75,9 @@ service NodeService {
   // not stored anywhere it can be read back through the API.
   rpc CreateDevice(CreateDeviceRequest) returns (CreateDeviceResponse);
   // RevokeDevice revokes a device, or withdraws an unused invite. Revoking
-  // a device changes every credential of its user at once
-  // (docs/spec/api-v1.md §5a): the user's other devices reconnect after
-  // their next subscription fetch.
+  // a device changes every credential of its user at once but DoH's, whose
+  // token is each device's (docs/spec/api-v1.md §5a): the user's other
+  // devices reconnect after their next subscription fetch.
   rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
   // CreateInvite returns a one-time invite ("rcinv1:..."): the client
   // registers the device itself through the remote API (R3-3).
@@ -797,8 +797,8 @@ message RevokeDeviceResponse {
   string user = 3;
   string device = 4;
   // credentials: how many of the user's credentials are new, as
-  // RenewUserResponse counts them, not services; 0 for a user with none
-  // yet.
+  // RenewUserResponse counts them, not services, but without DoH's,
+  // which a revocation keeps (v0.27.0); 0 for a user with none yet.
   uint32 credentials = 5;
 }
 
