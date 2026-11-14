@@ -28,6 +28,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/quic-go/quic-go"
+
 	"github.com/arngory/raycontrol/internal/api"
 	"github.com/arngory/raycontrol/internal/appmirror"
 	"github.com/arngory/raycontrol/internal/asn"
@@ -571,8 +573,21 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 			if pc, err := nikoipc.ListenPacket(p.DoH3Socket(svc.Name), p.PeerUID(render.FrontUID), log); err != nil {
 				log.Error("doh3 socket", "service", svc.Name, "err", err)
 			} else {
+				// The service's key of stateless resets, as naive-quic has
+				// its own (provision.EnsureQUICResetKey): after rayd starts
+				// anew a DoH3 client learns at its next packet that its
+				// connection is gone. Without the key the service serves
+				// as it did before it had one; why is said, the key never.
+				var o quicOptions
+				if own, err := st.ServiceSecrets(ctx, svc.ID); err != nil {
+					log.Warn("doh3: no key of stateless resets; serving without them", "service", svc.Name, "err", err)
+				} else if key, err := provision.EnsureQUICResetKey(ctx, st, svc, own); err != nil || len(key) != len(quic.StatelessResetKey{}) {
+					log.Warn("doh3: no key of stateless resets; serving without them", "service", svc.Name, "err", err)
+				} else {
+					o.resetKey = (*quic.StatelessResetKey)(key)
+				}
 				go func() {
-					if err := serveHTTP3(h3ctx, pc, certs.GetCertificate, h, quicOptions{}); err != nil {
+					if err := serveHTTP3(h3ctx, pc, certs.GetCertificate, h, o); err != nil {
 						log.Error("doh3", "service", svc.Name, "err", err)
 					}
 				}()
