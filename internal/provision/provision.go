@@ -61,6 +61,7 @@ const (
 	SecretTLSChain      = "tls_chain"            // ACME certificate chain, PEM
 	SecretObfsPassword  = "obfs_password"        //nolint:gosec // G101: a name; hy2-obfs, salamander
 	SecretYggdrasilSeed = "yggdrasil_seed"       // the node's Yggdrasil key, an ed25519 seed
+	SecretQUICReset     = "quic_reset_key"       //nolint:gosec // G101: a name; naive-quic, stateless resets, 32 bytes
 	SubscriptionService = "subscription"
 )
 
@@ -487,6 +488,14 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			if _, ok := v.(bool); !ok {
 				return svc, fmt.Errorf(`%w naive icmp: true or false (rayctl service set <naive> icmp=on|off)`, store.ErrInvalid)
 			}
+		}
+		if svc.Kind == "naive" {
+			// naive-quic's key of stateless resets (EnsureQUICResetKey).
+			key := make([]byte, 32)
+			if _, err := rand.Read(key); err != nil {
+				return svc, err
+			}
+			svc.Secrets[SecretQUICReset] = key
 		}
 		if svc.Kind == "yggdrasil" {
 			if peers, ok := settings["peers"]; ok {
@@ -1444,4 +1453,24 @@ func EnsureSealKey(ctx context.Context, st *store.Store, svc store.Service, secr
 		return nil, err
 	}
 	return st.InitServiceSecret(ctx, svc.ID, SecretSealKey, k)
+}
+
+// EnsureQUICResetKey gives a naive service made before it had one its key
+// of QUIC stateless resets (RFC 9000 §10.3): 32 random bytes, made once,
+// whoever asks first (render, at every collect), and kept for the service's
+// life. The tokens of a connection's IDs come from it, so a naive process
+// started anew answers a packet of a connection it no longer knows with a
+// reset the client believes, and the client need not wait out its idle
+// time. Whoever has the key can end the service's QUIC connections whose
+// packets they see: it goes to the service's process and nowhere else,
+// never to a log. It returns the key.
+func EnsureQUICResetKey(ctx context.Context, st *store.Store, svc store.Service, secrets map[string][]byte) ([]byte, error) {
+	if k := secrets[SecretQUICReset]; len(k) == 32 || svc.Kind != "naive" {
+		return k, nil
+	}
+	k := make([]byte, 32)
+	if _, err := rand.Read(k); err != nil {
+		return nil, err
+	}
+	return st.InitServiceSecret(ctx, svc.ID, SecretQUICReset, k)
 }

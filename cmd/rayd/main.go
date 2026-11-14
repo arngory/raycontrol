@@ -3,10 +3,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -1301,6 +1303,8 @@ func cmdNaive(args []string) error {
 		"read again when it changes; empty or absent: on")
 	icmp := fs.Bool("icmp", false, "carry ping and traceroute through "+naive.ICMPName+" (spec/icmp-v1.md): echoes from ICMP datagram sockets, "+
 		"which need the process's group in net.ipv4.ping_group_range")
+	resetKey := fs.String("reset-key", "", "file with the key of naive-quic's stateless resets (32 bytes, hex), the same at every start: "+
+		"a client whose connection the process no longer knows is told at once; empty or absent: no stateless resets")
 	fs.Parse(args)
 	if *users == "" || *chain == "" || *key == "" || *socket == "" {
 		return errors.New("naive needs -users, -chain, -key and -socket")
@@ -1351,8 +1355,17 @@ func cmdNaive(args []string) error {
 		if err != nil {
 			return err
 		}
+		o := naiveQUIC()
+		if *resetKey != "" {
+			// Without the key the service is as it was before it had
+			// one: clients wait out their idle time after a restart. Why
+			// it is missing is said, the file's content never.
+			if o.resetKey, err = readResetKey(*resetKey); err != nil {
+				log.Warn("naive-quic: no key of stateless resets; serving without them", "err", err)
+			}
+		}
 		go func() {
-			if err := serveHTTP3(ctx, pc, certs.GetCertificate, ns, naiveQUIC()); err != nil {
+			if err := serveHTTP3(ctx, pc, certs.GetCertificate, ns, o); err != nil {
 				log.Error("naive-quic", "err", err)
 			}
 		}()
@@ -1428,6 +1441,30 @@ type quicOptions struct {
 	// when 0).
 	maxStreams     int64
 	maxHeaderBytes int
+	// resetKey makes the tokens of stateless resets (RFC 9000 §10.3); nil:
+	// none are sent. With the same key at every start, a client whose
+	// connection the process does not know (it started anew) gets a reset
+	// it believes at its next packet, not silence until its idle time.
+	resetKey *quic.StatelessResetKey
+}
+
+// readResetKey reads the key of stateless resets: 32 bytes, hex
+// (render.NaiveQUICReset). Its errors say what is wrong with the file, and
+// nothing of what is in it.
+func readResetKey(file string) (*quic.StatelessResetKey, error) {
+	b, err := os.ReadFile(file) //nolint:gosec // G304: the unit's own file
+	if err != nil {
+		return nil, err
+	}
+	var key quic.StatelessResetKey
+	text := bytes.TrimSpace(b)
+	if hex.DecodedLen(len(text)) != len(key) {
+		return nil, fmt.Errorf("%s: not %d bytes in hex", file, len(key))
+	}
+	if _, err := hex.Decode(key[:], text); err != nil {
+		return nil, fmt.Errorf("%s: not hex", file)
+	}
+	return &key, nil
 }
 
 // naiveQUIC are the limits of a naive connection over HTTP/3, the same as
@@ -1448,7 +1485,8 @@ func (o quicOptions) config() *quic.Config {
 func serveHTTP3(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), h http.Handler, o quicOptions) error {
 	tlsConf := http3.ConfigureTLSConfig(&tls.Config{MinVersion: tls.VersionTLS13,
 		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, GetCertificate: cert})
-	ln, err := quic.ListenEarly(pc, tlsConf, o.config())
+	tr := &quic.Transport{Conn: pc, StatelessResetKey: o.resetKey}
+	ln, err := tr.ListenEarly(tlsConf, o.config())
 	if err != nil {
 		return err
 	}
@@ -1459,6 +1497,7 @@ func serveHTTP3(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHel
 		<-ctx.Done()
 		_ = srv.Close()
 		_ = ln.Close()
+		_ = tr.Close()
 		_ = pc.Close()
 	}()
 	if err := srv.ServeListener(ln); err != nil && ctx.Err() == nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, quic.ErrServerClosed) {

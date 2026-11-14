@@ -244,6 +244,13 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 				return m, err
 			}
 		}
+		// A naive service from before its key of QUIC stateless resets
+		// gets it now.
+		if s.Kind == "naive" {
+			if secrets[provision.SecretQUICReset], err = provision.EnsureQUICResetKey(ctx, st, s, secrets); err != nil {
+				return m, err
+			}
+		}
 		m.Services = append(m.Services, Service{s, secrets})
 	}
 	for i := range m.Services {
@@ -1804,6 +1811,10 @@ const (
 	// (spec/conn-limit-v1.md §3.1, §8). naive reads it again when it
 	// changes, without a restart; absent, the limits are on.
 	NaiveConnLimit = "conn-limit"
+	// NaiveQUICReset holds the key of naive-quic's stateless resets
+	// (provision.EnsureQUICResetKey): 32 bytes, hex. naive reads it at its
+	// start; absent, it sends no stateless resets.
+	NaiveQUICReset = "quic-reset.key"
 )
 
 // naiveFiles are the site's certificate (naive answers for a name under
@@ -1839,7 +1850,7 @@ func naiveFiles(s Service, m Model, p Paths) ([]File, error) {
 	}
 	dir := path.Join(p.Rendered, s.Name)
 	key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
-	return []File{
+	files := []File{
 		{Path: path.Join(dir, NaiveUsers), Mode: 0o640, Group: GroupName(s.Name), Content: u, Service: s.Name, Reload: true},
 		{Path: path.Join(dir, NaiveConnLimit), Mode: 0o640, Group: GroupName(s.Name), Content: connLimitFile(m), Service: s.Name, Reload: true},
 		// The chain is read again by the process (certfile, spec/cert-pin-v1.md
@@ -1848,7 +1859,19 @@ func naiveFiles(s Service, m Model, p Paths) ([]File, error) {
 		// (the site's next one) restarts the unit, as before.
 		{Path: path.Join(dir, NaiveChain), Mode: 0o640, Group: GroupName(s.Name), Content: chain, Service: s.Name, Reload: true, Needed: true},
 		{Path: path.Join(dir, NaiveKey), Mode: 0o600, Content: key, Service: s.Name},
-	}, nil
+	}
+	// The key of QUIC stateless resets, as dnstt's seal key goes: a file of
+	// the service's group (its process and rayd, no one else), not a copied
+	// credential, whose missing source keeps a unit down. The key never
+	// changes and the process reads it at its start only, so the file is
+	// marked as one the process rereads: its coming, at the update that
+	// brings it, restarts a running process and starts no stopped one
+	// (live.Applier), and no unit waits for it.
+	if k := s.Secrets[provision.SecretQUICReset]; len(k) == 32 {
+		files = append(files, File{Path: path.Join(dir, NaiveQUICReset), Mode: 0o640, Group: GroupName(s.Name),
+			Content: []byte(hex.EncodeToString(k) + "\n"), Service: s.Name, Reload: true})
+	}
+	return files, nil
 }
 
 // connLimitFile is NaiveConnLimit's content.
