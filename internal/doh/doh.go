@@ -2,7 +2,7 @@
 // decisions.md, R3-2): https://<name>/dns-query/<token>, RFC 8484 GET and
 // POST, the token being the user's credential for the service (with
 // rotation). Queries go on to upstream DoH resolvers; nothing is logged.
-// Anything else gets an empty 404, like the site.
+// Anything else gets the site's answer (Handler.Answer), as naive does.
 package doh
 
 import (
@@ -29,6 +29,9 @@ type Handler struct {
 	HTTP      *http.Client // with a timeout when nil
 	// CacheFor bounds how long Tokens is trusted (30 s when zero).
 	CacheFor time.Duration
+	// Answer serves whatever is not a query with a token: the site's
+	// answer, as naive gives it (an empty 404 when nil).
+	Answer http.Handler
 
 	mu     sync.Mutex
 	tokens map[string]bool
@@ -72,6 +75,10 @@ func (h *Handler) Forget() {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	token, ok := strings.CutPrefix(r.URL.Path, "/dns-query/")
 	if !ok || strings.Contains(token, "/") || !h.accepted(r.Context(), token) {
+		if h.Answer != nil {
+			h.Answer.ServeHTTP(w, r)
+			return
+		}
 		notFound(w)
 		return
 	}

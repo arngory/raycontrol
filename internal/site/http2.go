@@ -34,10 +34,14 @@ const (
 	StreamWindow = 2 << 20
 	ConnWindow   = 8 << 20
 
-	// IdleTimeout closes a connection of the site's, and of DoH's, that
-	// has had no request for this long. naive keeps its own longer: a
-	// client's connection waits there for the next tunnel.
-	IdleTimeout = 2 * time.Minute
+	// IdleTimeout closes a connection that has had no request for this
+	// long: the site's, DoH's and naive's alike, since anyone may open a
+	// connection to each and see when it goes. naive needs it long (a
+	// client's connection waits there for the next tunnel, and a new one
+	// costs a handshake); 5 minutes is what Caddy, the usual server of
+	// sites and of naive, keeps. The site and DoH had 2 minutes, naive 5:
+	// the one that closed later was the proxy.
+	IdleTimeout = 5 * time.Minute
 )
 
 // HTTPServer is the HTTP server of a name on the node's address, for h:

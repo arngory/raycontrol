@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -496,6 +497,40 @@ type dohListener struct {
 	certs *certfile.Holder
 	// h answers the queries; it forgets its tokens at every change.
 	h *doh.Handler
+	// mode is the site's answer that answer gives strangers (dohAnswer).
+	mode   string
+	answer *swapHandler
+}
+
+// swapHandler serves with the handler it was last given.
+type swapHandler struct{ h atomic.Pointer[http.Handler] }
+
+func (s *swapHandler) set(h http.Handler) { s.h.Store(&h) }
+
+func (s *swapHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	(*s.h.Load()).ServeHTTP(w, r)
+}
+
+// dohAnswer is what DoH answers whoever has no token, from its site's
+// settings: the site's answer, as naive has it (internal/deploy), but an
+// empty 404 for a site of pages, whose files are the site's own. Without
+// it a site that answered 403 or nothing had a DoH name beside it that
+// answered 404: told from the site, and from naive, without a token.
+func dohAnswer(siteSettings string) (string, http.Handler) {
+	var st struct {
+		Answer string `json:"answer"`
+	}
+	_ = json.Unmarshal([]byte(siteSettings), &st)
+	mode := st.Answer
+	if mode == "" || mode == site.AnswerPages {
+		mode = site.Answer404
+	}
+	h, err := site.Responder(mode, "")
+	if err != nil {
+		mode = site.Answer404
+		h, _ = site.Responder(mode, "")
+	}
+	return mode, h
 }
 
 // serveDoH keeps rayd's TLS listener on the socket of every enabled DoH
@@ -544,7 +579,14 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 			}
 			want[svc.Name] = true
 			sum := sha256.Sum256(append(slices.Clone(secrets[provision.SecretTLSChain]), secrets[provision.SecretTLSKey]...))
+			mode, answer := dohAnswer(site.Settings)
 			l := running[svc.Name]
+			if l != nil && l.mode != mode {
+				// The connections that are open take it at their next request.
+				l.answer.set(answer)
+				l.mode = mode
+				log.Info("doh answer changed", "service", svc.Name, "answer", mode)
+			}
 			if l != nil && l.cert == sum {
 				continue
 			}
@@ -569,7 +611,9 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 				continue
 			}
 			id := svc.ID
-			h := &doh.Handler{Tokens: func(ctx context.Context) (map[string]bool, error) { return dohTokens(ctx, st, id) }}
+			sw := &swapHandler{}
+			sw.set(answer)
+			h := &doh.Handler{Tokens: func(ctx context.Context) (map[string]bool, error) { return dohTokens(ctx, st, id) }, Answer: sw}
 			srv := dohHTTPServer(h, certs.GetCertificate, log)
 			go func() { _ = srv.ServeTLS(ln, "", "") }()
 			// DoH3: the same handler over QUIC, datagrams from the front (R3-5).
@@ -596,7 +640,7 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 					}
 				}()
 			}
-			running[svc.Name] = &dohListener{srv: srv, h3: h3stop, cert: sum, certs: certs, h: h}
+			running[svc.Name] = &dohListener{srv: srv, h3: h3stop, cert: sum, certs: certs, h: h, mode: mode, answer: sw}
 			log.Info("doh serving", "service", svc.Name)
 		}
 		for name := range running {

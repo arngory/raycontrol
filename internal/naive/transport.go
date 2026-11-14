@@ -2,7 +2,6 @@ package naive
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/arngory/raycontrol/internal/site"
 )
@@ -43,19 +42,16 @@ const (
 	// what a browser's stack adds stays under a kilobyte. A longer header
 	// never comes to the handler: the server answers 431 itself.
 	MaxHeaderBytes = 16 << 10
-
-	// h2Idle closes an HTTP/2 connection that has had no stream for this
-	// long. A tunnel has no idle time of its own: it lasts as long as its
-	// destination and its client keep it.
-	h2Idle = 5 * time.Minute
 )
 
 // HTTPServer is the HTTP/2 server of a naive service: the one every name
-// of the node's address has (site.HTTPServer), with each connection's
-// socket known to its streams (datagramStream). TLS and the error log are
-// the caller's.
+// of the node's address has (site.HTTPServer), with its idle time
+// (site.IdleTimeout: a connection without a stream; a tunnel has no idle
+// time of its own, it lasts as long as its destination and its client
+// keep it), and each connection's socket known to its streams
+// (datagramStream). TLS and the error log are the caller's.
 func (s *Server) HTTPServer() *http.Server {
-	srv := site.HTTPServer(s, h2Idle)
+	srv := site.HTTPServer(s, site.IdleTimeout)
 	srv.ConnContext = connContext
 	return srv
 }
