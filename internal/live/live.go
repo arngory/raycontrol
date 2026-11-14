@@ -242,6 +242,8 @@ func (a *Applier) Apply(ctx context.Context) error {
 			case err != nil:
 				failed[f.Service] = true
 				errs = append(errs, fmt.Errorf("service %s: %s: %w", f.Service, f.Path, err))
+			case fixed && f.AtStart:
+				// Read at the process's next start: no restart for it.
 			case fixed && f.Refresh:
 				// A broken service's users: reread, never a restart (Q-1).
 				changed[f.Service] = append(changed[f.Service], change{old, f.Content, true, rereads})
@@ -267,7 +269,10 @@ func (a *Applier) Apply(ctx context.Context) error {
 			// A change the process does not take by itself: its restart is
 			// written down first. A file that cannot be written down is
 			// not written either: the next apply finds the change again.
-			if !f.Reload || old == nil {
+			// Nor one it takes at its next start, whenever that is.
+			if f.AtStart {
+				err = nil
+			} else if !f.Reload || old == nil {
 				verb := "try-restart"
 				if old == nil && !rereads {
 					verb = "restart"
@@ -292,6 +297,9 @@ func (a *Applier) Apply(ctx context.Context) error {
 			continue
 		}
 		wrote[f.Service] = true
+		if f.AtStart {
+			continue // nothing to restart, nothing reloaded
+		}
 		changed[f.Service] = append(changed[f.Service], change{old, f.Content, f.Reload && old != nil, rereads})
 	}
 

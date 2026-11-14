@@ -66,8 +66,11 @@ func TestNaiveQUICResetKey(t *testing.T) {
 				t.Fatalf("the key is in %s", f.Path)
 			}
 		}
-		if !bytes.Equal(file.Content, append(k, '\n')) || file.Mode != 0o640 || file.Group != "niko-nv" || file.Service != "nv" || !file.Reload {
-			t.Fatalf("the key's file: %d bytes, mode %o, group %q, service %q, reload %v", len(file.Content), file.Mode, file.Group, file.Service, file.Reload)
+		// Read at the start only, and no unit waits for it: its coming
+		// restarts nothing (live.Applier).
+		if !bytes.Equal(file.Content, append(k, '\n')) || file.Mode != 0o640 || file.Group != "niko-nv" || file.Service != "nv" ||
+			!file.AtStart || file.Reload || file.Needed {
+			t.Fatalf("the key's file: %d bytes, mode %o, group %q, service %q, %+v", len(file.Content), file.Mode, file.Group, file.Service, file)
 		}
 		return file
 	}

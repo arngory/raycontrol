@@ -409,6 +409,11 @@ type File struct {
 	// service that failed to render (Q-1) still go out, so a revocation
 	// reaches its running process; nothing new is made for it.
 	Refresh bool
+	// AtStart: the process reads the file once, at its start, and serves
+	// without it; no unit waits for it. Writing it restarts nothing: the
+	// process has it from its next start on (naive-quic's key of stateless
+	// resets, which is of use only after a restart).
+	AtStart bool
 }
 
 // UnitName is the systemd unit of a service's process.
@@ -1854,13 +1859,16 @@ func naiveFiles(s Service, m Model, p Paths) ([]File, error) {
 	// The key of QUIC stateless resets, as dnstt's seal key goes: a file of
 	// the service's group (its process and rayd, no one else), not a copied
 	// credential, whose missing source keeps a unit down. The key never
-	// changes and the process reads it at its start only, so the file is
-	// marked as one the process rereads: its coming, at the update that
-	// brings it, restarts a running process and starts no stopped one
-	// (live.Applier), and no unit waits for it.
+	// changes and the process reads it at its start only (AtStart): its
+	// coming restarts nothing. At the update that brings it rayd writes the
+	// file when it starts, before rayctl applies the unit that names it
+	// and restarts the data plane: one restart the less for every tunnel
+	// of the node, and the process that starts then has the key. A process
+	// started without it (the file came later) serves without stateless
+	// resets until its next start, as every naive did before the key.
 	if k := s.Secrets[provision.SecretQUICReset]; len(k) == 32 {
 		files = append(files, File{Path: path.Join(dir, NaiveQUICReset), Mode: 0o640, Group: GroupName(s.Name),
-			Content: []byte(hex.EncodeToString(k) + "\n"), Service: s.Name, Reload: true})
+			Content: []byte(hex.EncodeToString(k) + "\n"), Service: s.Name, AtStart: true})
 	}
 	return files, nil
 }
