@@ -145,6 +145,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                               the newest verified release in place, back to the
                                               previous binaries if the node does not come back (root);
                                               on a relay host the relay, with its stored bundle
+                                              (not yet run on a real relay host); -check and
+                                              -rollback do not go together
   update status | remote on|off | auto off|patch [-window HH:MM-HH:MM]
                                               updates by request: admin devices over the API, rayd's
                                               own to patch releases in the window (root; not on a relay)
