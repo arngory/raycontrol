@@ -317,7 +317,7 @@ func weakerModes(kind, settings string) []string {
 // had must not cut its restart or its rollback. Ctrl-C reaches it as part
 // of the terminal's process group and stops it as it would stop this one;
 // this one stays to clean up.
-func handoff(r release.Release, stage, installed string, yes, force bool) (handed bool, err error) {
+func handoff(r release.Release, stage, installed, host string, yes, force bool) (handed bool, err error) {
 	// A directory of its own: if the release's rayctl does not run, this
 	// one extracts the release into the stage.
 	dir := filepath.Join(stage, "handoff")
@@ -347,7 +347,7 @@ func handoff(r release.Release, stage, installed string, yes, force bool) (hande
 	cmd := exec.Command(bin, args...) //nolint:gosec // G204: the verified release's rayctl
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.Env = append(os.Environ(), handoffEnv+"=1", updateFromEnv+"="+installed)
-	fmt.Printf("release %s verified: its own rayctl updates the node\n", r.Version)
+	fmt.Printf("release %s verified: its own rayctl updates the %s\n", r.Version, cmp.Or(host, "node"))
 	if err := cmd.Start(); err != nil {
 		return false, err
 	}

@@ -16,6 +16,7 @@ import (
 type updateOpts struct {
 	want, from, local            string
 	check, yes, force, noHandoff bool
+	host                         string // what the handoff says it updates: "node" when empty, or "relay"
 }
 
 // releaseBase is where releases are downloaded from: github.com when
@@ -118,7 +119,7 @@ func (c *cli) stageRelease(ctx context.Context, o updateOpts, stage, installed s
 	// the same version again, stays with this one: it knows the newer state
 	// of the host.
 	if handsOff(o.noHandoff, s.version, installed) {
-		h, herr := handoff(r, stage, installed, o.yes, o.force)
+		h, herr := handoff(r, stage, installed, o.host, o.yes, o.force)
 		if h {
 			s.done, s.handed = true, true
 			return s, herr

@@ -552,6 +552,7 @@ func realHealth(want string, probeRan bool, port int, client, name string) relay
 
 // updateRelay is rayctl update on a relay host.
 func (c *cli) updateRelay(ctx context.Context, o updateOpts, rollback bool, installed string) error {
+	o.host = "relay"
 	b, err := relayBundleAt(deploy.RelayBundle)
 	if err != nil {
 		return err

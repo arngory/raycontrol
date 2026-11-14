@@ -489,9 +489,9 @@ func TestStageReleaseRelay(t *testing.T) {
 		t.Fatal("a release below the relay's floor was handed the update")
 	}
 	// Newer: the release's own rayctl updates, from the verified files.
-	s, _, _, err = stage(updateOpts{want: "latest", from: v261, yes: true}, "v0.26.0")
-	if err != nil || !s.handed || s.version != "v0.26.1" {
-		t.Fatalf("handoff: %+v %v", s, err)
+	s, _, text, err = stage(updateOpts{want: "latest", from: v261, yes: true, host: "relay"}, "v0.26.0")
+	if err != nil || !s.handed || s.version != "v0.26.1" || !strings.Contains(text, "its own rayctl updates the relay") {
+		t.Fatalf("handoff: %+v %q %v", s, text, err)
 	}
 	args, _ := os.ReadFile(out)
 	env, _ := os.ReadFile(out + ".env")
