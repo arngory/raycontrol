@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -64,6 +67,67 @@ func waiting(t *testing.T, f *os.File) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// TestReadSecretHelper is rayctl at the prompt of a secret, on the
+// terminal of its standard input, for TestReadSecretSignal.
+func TestReadSecretHelper(t *testing.T) {
+	if os.Getenv("RAYCTL_TEST_SECRET") == "" {
+		t.Skip("run by TestReadSecretSignal")
+	}
+	_, err := readSecret("Passphrase: ", "", false)
+	fmt.Println("readSecret returned:", err)
+	os.Exit(0)
+}
+
+// Ctrl-C, kill or a closed terminal at the prompt end rayctl as the
+// signal does, and leave the terminal with its echo.
+func TestReadSecretSignal(t *testing.T) {
+	for _, sig := range []unix.Signal{unix.SIGINT, unix.SIGTERM, unix.SIGHUP} {
+		t.Run(unix.SignalName(sig), func(t *testing.T) {
+			// The child gets the signal's default, not SIG_IGN: the
+			// update's handoff tests leave Interrupt ignored in this
+			// process (signal.Reset after signal.Ignore keeps the kernel's
+			// SIG_IGN), and rayctl started so leaves an ignored signal
+			// alone. A caught signal is the default after exec; Stop
+			// would put SIG_IGN back, so not before the child is gone.
+			c := make(chan os.Signal, 1)
+			signal.Notify(c, sig)
+			defer signal.Stop(c)
+			_, slave := pty(t)
+			cmd := exec.Command(os.Args[0], "-test.run", "^TestReadSecretHelper$")
+			cmd.Env = append(os.Environ(), "RAYCTL_TEST_SECRET=1")
+			cmd.Stdin = slave
+			var out bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &out, &out
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			within(t, "the echo is off", func() bool { return !echoes(t, slave) })
+			if err := cmd.Process.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			ended := make(chan struct{})
+			go func() {
+				_ = cmd.Wait()
+				close(ended)
+			}()
+			select {
+			case <-ended:
+			case <-time.After(5 * time.Second):
+				_ = cmd.Process.Kill()
+				<-ended
+				t.Fatalf("rayctl did not end on %v within 5 s; it said %q", sig, out.String())
+			}
+			ws, _ := cmd.ProcessState.Sys().(syscall.WaitStatus)
+			if !ws.Signaled() || ws.Signal() != sig {
+				t.Errorf("rayctl ended %v, want by %v; it said %q", cmd.ProcessState, sig, out.String())
+			}
+			if !echoes(t, slave) {
+				t.Error("the echo is left off")
+			}
+		})
+	}
 }
 
 // A terminal is told from a pipe, its echo goes off and comes back as it

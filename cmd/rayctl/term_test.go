@@ -4,8 +4,12 @@ package main
 
 import (
 	"os"
+	"os/signal"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // stdin makes f the process's standard input until the test ends.
@@ -107,5 +111,46 @@ func TestReadSecretNoTerminal(t *testing.T) {
 	}
 	if _, err := readSecret("never shown: ", filepath.Join(t.TempDir(), "missing"), false); err == nil {
 		t.Error("a missing file: no error")
+	}
+}
+
+// While the echo is off, a signal that ends rayctl undoes it first and
+// then ends it with that signal; after stop, nothing is called. (The real
+// end, on a terminal: TestReadSecretSignal, Linux.)
+func TestOnEndSignal(t *testing.T) {
+	type call struct {
+		what string
+		sig  os.Signal
+	}
+	calls := make(chan call, 4)
+	stop := onEndSignal(func() { calls <- call{"undo", nil} }, func(s os.Signal) { calls <- call{"die", s} })
+	if err := unix.Kill(os.Getpid(), unix.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []call{{"undo", nil}, {"die", unix.SIGHUP}} {
+		select {
+		case got := <-calls:
+			if got != want {
+				t.Errorf("%v, want %v", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no %s within 5 s", want.what)
+		}
+	}
+	stop()
+	stop = onEndSignal(func() { calls <- call{"undo", nil} }, func(s os.Signal) { calls <- call{"die", s} })
+	stop()
+	// Notified elsewhere, so that the signal does not end the test.
+	other := make(chan os.Signal, 1)
+	signal.Notify(other, unix.SIGHUP)
+	defer signal.Stop(other)
+	if err := unix.Kill(os.Getpid(), unix.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	<-other
+	select {
+	case got := <-calls:
+		t.Errorf("after stop: %v", got)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
