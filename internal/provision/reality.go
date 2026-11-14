@@ -39,6 +39,14 @@ var realityCertLen = sync.OnceValue(func() int {
 func RealityChainMin() int { return realityCertLen() + 16 }
 
 // realityRoots verify the target's certificate; nil is the system pool.
+//
+// The one outbound TLS of the node's that internal/roots does not decide
+// (R4-41), on purpose: the target is a third-party site of the
+// operator's choice, which may sit under a CA outside the node's list,
+// and the check sends nothing secret (a handshake as a client's, no
+// token, no user's data). What it decides is whether the site suits
+// REALITY, as a client's browser-like view would see it; a root planted
+// in the system store can at most make it pass a site that should not.
 var realityRoots *x509.CertPool
 
 // CheckRealityTarget connects to a REALITY target the way a client's

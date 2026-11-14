@@ -1,7 +1,10 @@
 // Package roots decides which certificate roots the node's own outbound
 // TLS trusts (docs/08-decisions.md, R4-41): ACME, the release downloads
 // and the update check, the Cloudflare API, IPinfo, the client's releases
-// for the app mirror, the DoH upstreams. It is the only place that decides.
+// for the app mirror, the DoH upstreams. It is the only place that decides,
+// but for one connection left to the system store on purpose: the check
+// of a REALITY target (internal/provision), a third-party site that may
+// sit under a CA outside the list, to which nothing secret is sent.
 //
 // By default the node trusts the embedded list only (roots.pem): the
 // intersection of Chrome's and Mozilla's lists without the CAs based in
