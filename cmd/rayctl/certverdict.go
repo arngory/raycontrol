@@ -23,6 +23,10 @@ func certVerdict(chainPEM []byte, now time.Time) string {
 	case c.Kind == roots.Private:
 		v = fmt.Sprintf("warning: the chain leads to %s, a root that is not in the clients' list: naive and DoH clients will\n"+
 			"refuse it unless the root is added in the certificate field of each profile; over QUIC it works only so\n", c.Root)
+	case c.Kind == roots.Invalid && c.Listed:
+		v = fmt.Sprintf("warning: the chain leads to %s, a public root clients know, but does not verify: %s\n", c.Root, c.Reason)
+	case c.Kind == roots.Invalid:
+		v = fmt.Sprintf("warning: the chain leads to %s, its own root, not in the clients' list, and does not verify: %s\n", c.Root, c.Reason)
 	case c.Top == "":
 		v = "warning: the chain is incomplete: no certificate in it could be read\n"
 	default:

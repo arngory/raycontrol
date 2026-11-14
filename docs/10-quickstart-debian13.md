@@ -1627,6 +1627,7 @@ QUIC — только с отдельным переключателем (Niko 1
 | `the chain leads to …, a public root clients know` | цепочка ведёт к публичному корню из списка клиентов: naive и DoH примут |
 | `warning: the chain leads to …, a root that is not in the clients' list` | частный УЦ или центр вне списка: клиент примет, только если корень добавлен в каждый профиль; по QUIC — только так |
 | `warning: the chain is incomplete: it ends at …, issued by …` | в файле `-chain` не хватает промежуточного сертификата (или корня частного УЦ): импортируйте цепочку целиком, лист первым |
+| `warning: the chain leads to …, but does not verify: …` | цепочка полная и доходит до корня (из списка клиентов или своего), но не проходит проверку по другой причине, которую строка называет: лист без `serverAuth` в Extended Key Usage, истёкший лист или промежуточный. Клиенты откажут так же: нужен другой сертификат |
 
 ### Hysteria2 (`hy2-masq`, `hy2-obfs`)
 

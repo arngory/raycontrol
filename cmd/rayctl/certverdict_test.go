@@ -37,6 +37,10 @@ func TestCertVerdict(t *testing.T) {
 		{"private", ch.ChainPEM, now, "warning: the chain leads to raycontrol test root, a root that is not in the clients' list: " +
 			"naive and DoH clients will\nrefuse it unless the root is added in the certificate field of each profile; over QUIC it works only so\n"},
 		{"incomplete", noRoot, now, "warning: the chain is incomplete: it ends at raycontrol test intermediate, issued by raycontrol test root"},
+		{"public, expired", public, served.AddDate(1, 0, 0), "warning: the chain leads to GTS Root R4, a public root clients know, but does not verify: " +
+			"x509: certificate has expired or is not yet valid"},
+		{"private, expired", ch.ChainPEM, now.Add(2 * time.Hour), "warning: the chain leads to raycontrol test root, its own root, not in the clients' list, " +
+			"and does not verify: x509: certificate has expired or is not yet valid"},
 	} {
 		got := certVerdict(tc.chain, tc.at)
 		if !strings.HasPrefix(got, tc.want) || !strings.Contains(got, "naive verifies it as Chrome does") ||
