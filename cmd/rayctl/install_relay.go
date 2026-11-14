@@ -70,14 +70,9 @@ func installRelay(bundlePath, packages string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", bundlePath, err)
 	}
-	for _, tool := range []string{"nft", "systemctl", "systemd-run", "install"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			return fmt.Errorf("%s is missing: a relay needs nftables and systemd", tool)
-		}
-	}
-	flock, err := exec.LookPath("flock")
+	flock, err := relayTools()
 	if err != nil {
-		return errors.New("flock is missing (util-linux): the install's guard timer needs it")
+		return err
 	}
 	if _, err := os.Stat(deploy.DefaultBinaries.Rayspa); err != nil {
 		return fmt.Errorf("%s is missing: install/bootstrap.sh -relay installs it", deploy.DefaultBinaries.Rayspa)
@@ -229,7 +224,7 @@ func installRelay(bundlePath, packages string) error {
 		},
 		readSnapshot: func() (*perimeterv1.Snapshot, error) { return readSnapshot(relaySnapshot) },
 		check: func(snap *perimeterv1.Snapshot) (string, error) {
-			return checkRelaySSH(snap, port, sess.addr, b.Name)
+			return checkRelaySSH(snap, port, sess.addr, b.Name, "install again")
 		},
 		forward: func() error {
 			// The value before raycontrol first: once our file is there, a
@@ -314,6 +309,21 @@ func installRelay(bundlePath, packages string) error {
 	}
 	h.WarnRelayDropChains(probePort)
 	return nil
+}
+
+// relayTools checks the commands a relay install runs, and finds flock
+// for its guard timer.
+func relayTools() (flock string, err error) {
+	for _, tool := range []string{"nft", "systemctl", "systemd-run", "install"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			return "", fmt.Errorf("%s is missing: a relay needs nftables and systemd", tool)
+		}
+	}
+	flock, err = exec.LookPath("flock")
+	if err != nil {
+		return "", errors.New("flock is missing (util-linux): the install's guard timer needs it")
+	}
+	return flock, nil
 }
 
 // relayProbe starts rayd relay, the relay's probe endpoint, on a relay that
@@ -856,8 +866,8 @@ func relaySSHPort(sshd []int, listening func(int) bool, session int) (int, error
 // checkRelaySSH tells whether the relay's perimeter lets SSH in: on sshd's
 // port, from the relay's admin addresses, this session's address among
 // them (client, empty: not known). What it cannot check comes back as a
-// warning.
-func checkRelaySSH(snap *perimeterv1.Snapshot, port int, client, relay string) (string, error) {
+// warning. again is what the operator runs once the exit lets them in.
+func checkRelaySSH(snap *perimeterv1.Snapshot, port int, client, relay, again string) (string, error) {
 	if len(snap.AdminPrefixes) == 0 || !slices.ContainsFunc(snap.AdminPorts, func(p *perimeterv1.Port) bool { return p.Proto == "tcp" && int(p.Port) == port }) {
 		return "", fmt.Errorf("the relay's perimeter would not let SSH in here: sshd listens on %d, the relay's SSH port is %v, "+
 			"its admin addresses %v; on the exit: rayctl relay set -ssh-port %d -admin <your address> %s",
@@ -875,8 +885,8 @@ func checkRelaySSH(snap *perimeterv1.Snapshot, port int, client, relay string) (
 		// The next connection would be refused. relay set replaces the
 		// list: the one it has, and this address.
 		return "", fmt.Errorf("this SSH session comes from %s, not from the relay's admin addresses %v: the next one would be "+
-			"refused; on the exit: rayctl relay set -admin %s %s, then install again",
-			client, snap.AdminPrefixes, strings.Join(append(slices.Clone(snap.AdminPrefixes), client), ","), relay)
+			"refused; on the exit: rayctl relay set -admin %s %s, then %s",
+			client, snap.AdminPrefixes, strings.Join(append(slices.Clone(snap.AdminPrefixes), client), ","), relay, again)
 	}
 	return "", nil
 }

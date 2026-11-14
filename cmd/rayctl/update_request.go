@@ -214,8 +214,12 @@ func (t *tailWriter) reason(err error) string {
 }
 
 // updatePolicy is rayctl update remote|auto|status. The policy is a file
-// of root's (nodeupdate.PolicyFile) that rayd reads and cannot change.
+// of root's (nodeupdate.PolicyFile) that rayd reads and cannot change. A
+// relay has none (relayPolicy).
 func (c *cli) updatePolicy(ctx context.Context, args []string) error {
+	if host, _ := updateHost(deploy.DB, deploy.RelayBundle, relayUnitFile); host == relayHost {
+		return c.relayPolicy(args, previousDir)
+	}
 	return c.updatePolicyAt(ctx, args, nodeupdate.PolicyFile, "/etc/systemd/system/"+nodeupdate.PathUnit, needRoot)
 }
 

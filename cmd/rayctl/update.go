@@ -123,8 +123,14 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 		}
 		return nodeRequests().run()
 	}
-	if err := updatable(deploy.DB, deploy.RelayBundle); err != nil {
+	opts := updateOpts{want: *want, from: *from, local: *local, check: *check, yes: *yes, force: *force, noHandoff: *noHandoff}
+	switch host, err := updateHost(deploy.DB, deploy.RelayBundle, relayUnitFile); {
+	case err != nil:
 		return err
+	case host == relayHost:
+		// A relay's own update (spec/node-update-v1.md §5): the same
+		// release, verification and handoff, the relay's install.
+		return c.updateRelay(ctx, opts, *rollback, installed)
 	}
 	if !*check {
 		what := "update"
@@ -185,92 +191,15 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 		return misnamedUpdate(os.Stdout, names, *force, os.Getenv(nodeupdate.ResultEnv) != "", handedFrom)
 	}
 
-	if err := os.MkdirAll(deploy.JournalDir, 0o700); err != nil {
-		return err
-	}
-	stage, err := os.MkdirTemp(deploy.JournalDir, "update-")
+	stage, err := newStage()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(stage) }()
-
-	// The release: verified, or (tests) taken as it is.
-	switch {
-	case *local != "":
-		for name := range nodeBinaries {
-			if b, err := os.ReadFile(filepath.Join(*local, name)); err == nil { //nolint:gosec // G304: the operator's directory
-				if err := os.WriteFile(filepath.Join(stage, name), b, 0o755); err != nil { //nolint:gosec // G306: executables
-					return err
-				}
-			}
-		}
-		newVersion = "local"
-		fmt.Println("binaries from", *local, "without verification (test mode)")
-		if err := misnamedFirst(newVersion); err != nil || *check {
-			return err
-		}
-	default:
-		var r release.Release
-		arch := runtime.GOARCH
-		if *from != "" {
-			r, err = release.Local(*from, arch, releaseKey)
-		} else {
-			f := &release.Fetcher{Mirrors: mirrors(), Log: func(format string, a ...any) { fmt.Printf(format+"\n", a...) }}
-			v := *want
-			// Which release latest is first, from its signed SHA256SUMS:
-			// no archive downloaded for nothing.
-			if v == "latest" && !*force {
-				if l, lerr := f.Latest(ctx, releaseKey); lerr == nil {
-					switch {
-					case l == installed:
-						fmt.Printf("raycontrol %s is installed, the newest release\n", installed)
-						return nil
-					case release.Newer(installed, l):
-						return fmt.Errorf("installed %s is newer than the latest release %s; rayctl update -version %s goes back", installed, l, l)
-					case *check:
-						fmt.Printf("installed %s, release %s available: rayctl update\n", installed, l)
-						return misnamedFirst(l)
-					}
-					v = l
-				}
-			}
-			r, err = f.Fetch(ctx, v, arch, releaseKey)
-		}
-		if err != nil {
-			return err
-		}
-		newVersion = r.Version
-		switch {
-		case newVersion == installed && !*force:
-			fmt.Printf("raycontrol %s is installed, the newest release\n", installed)
-			return nil
-		case release.Newer(installed, newVersion) && *want == "latest" && !*force:
-			return fmt.Errorf("installed %s is newer than the latest release %s; rayctl update -version %s goes back", installed, newVersion, newVersion)
-		}
-		if *check {
-			fmt.Printf("installed %s, release %s available: rayctl update\n", installed, newVersion)
-			return misnamedFirst(newVersion)
-		}
-		if err := misnamedFirst(newVersion); err != nil {
-			return err
-		}
-		// A newer release updates the node with its own rayctl. Going back,
-		// or the same version again, stays with this one: it knows the
-		// newer state of the node.
-		if handsOff(*noHandoff, newVersion, installed) {
-			h, herr := handoff(r, stage, installed, *yes, *force)
-			if h {
-				handed = true
-				return herr
-			}
-			fmt.Printf("the release's rayctl does not run here (%v): this rayctl updates instead\n", herr)
-		}
-		if _, err := release.Extract(r.Archive, stage); err != nil {
-			return err
-		}
-		if b, err := os.ReadFile(filepath.Join(stage, "VERSIONS")); err == nil { //nolint:gosec // G304: our staging directory
-			fmt.Print(string(b))
-		}
+	s, err := c.stageRelease(ctx, opts, stage, installed, nodeBinaries, misnamedFirst)
+	newVersion, handed = s.version, s.handed
+	if err != nil || s.done {
+		return err
 	}
 	if !*yes {
 		fmt.Printf("Update raycontrol %s to %s? rayd, rayspa and the data plane restart; clients reconnect and send SPA again. Type yes to go on: ",
@@ -454,24 +383,31 @@ func installBinaries(stage string) error {
 			}
 			continue
 		}
-		b, err := os.ReadFile(src) //nolint:gosec // G304: our staging directory
-		if err != nil {
+		if err := placeBinary(src, dst); err != nil {
 			return err
 		}
-		// Next to the target, then renamed: a running binary is never
-		// written over.
-		tmp := dst + ".raycontrol-new"
-		if err := os.WriteFile(tmp, b, 0o755); err != nil { //nolint:gosec // G306: executables
-			return err
-		}
-		if err := os.Rename(tmp, dst); err != nil {
-			return err
-		}
-		if _, err := exec.LookPath("restorecon"); err == nil {
-			_ = exec.Command("restorecon", dst).Run() //nolint:gosec // G204: a fixed path
-		}
-		fmt.Println("installed", dst)
 	}
+	return nil
+}
+
+// placeBinary puts the binary src at dst: written next to it, then renamed
+// (a running binary is never written over), its SELinux label restored.
+func placeBinary(src, dst string) error {
+	b, err := os.ReadFile(src) //nolint:gosec // G304: our staging directory
+	if err != nil {
+		return err
+	}
+	tmp := dst + ".raycontrol-new"
+	if err := os.WriteFile(tmp, b, 0o755); err != nil { //nolint:gosec // G306: executables
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return err
+	}
+	if _, err := exec.LookPath("restorecon"); err == nil {
+		_ = exec.Command("restorecon", dst).Run() //nolint:gosec // G204: a fixed path
+	}
+	fmt.Println("installed", dst)
 	return nil
 }
 
@@ -892,17 +828,17 @@ func mirrors() []string {
 	return release.DefaultMirrors
 }
 
-// updatable says why this host cannot be updated with rayctl update: no
-// node here, or a relay (rayd is there too since v0.11), which takes a new
-// release with install/bootstrap.sh -relay.
+// updatable says why this host cannot be updated by request: no node
+// here, or a relay, which has no rayd API for devices (rayd is there too
+// since v0.11, as its probe endpoint) and is updated on its host only.
 func updatable(db, relayBundle string) error {
-	if _, err := os.Stat(db); err == nil {
-		return nil
+	switch host, err := updateHost(db, relayBundle, relayUnitFile); {
+	case err != nil:
+		return err
+	case host == relayHost:
+		return errRelayByHand
 	}
-	if _, err := os.Stat(relayBundle); err == nil {
-		return errors.New("this host is a relay: install/bootstrap.sh -relay with its bundle takes a new release")
-	}
-	return errors.New("raycontrol is not installed here (install/bootstrap.sh)")
+	return nil
 }
 
 // activeDataPlane lists the niko-* units that run now.

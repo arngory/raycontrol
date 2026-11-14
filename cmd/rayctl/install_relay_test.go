@@ -105,12 +105,12 @@ func TestCheckRelaySSH(t *testing.T) {
 		"not known":        {22, "", true, true, ""},
 		"through a tunnel": {22, "127.0.0.1", true, true, ""},
 	} {
-		warning, err := checkRelaySSH(snap, c.port, c.client, "r1")
+		warning, err := checkRelaySSH(snap, c.port, c.client, "r1", "install again")
 		if (err == nil) != c.ok || (warning != "") != c.warn || err != nil && !strings.Contains(err.Error(), c.suggestContains) {
 			t.Errorf("%s: %q %v", name, warning, err)
 		}
 	}
-	if _, err := checkRelaySSH(&perimeterv1.Snapshot{AdminPorts: snap.AdminPorts}, 22, "203.0.113.9", "r1"); err == nil {
+	if _, err := checkRelaySSH(&perimeterv1.Snapshot{AdminPorts: snap.AdminPorts}, 22, "203.0.113.9", "r1", "install again"); err == nil {
 		t.Error("no admin addresses")
 	}
 }

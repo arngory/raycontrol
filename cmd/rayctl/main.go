@@ -143,10 +143,11 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   apply                                       install what the current services need (root)
   update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-no-handoff] [-rollback [-no-carry]]
                                               the newest verified release in place, back to the
-                                              previous binaries if the node does not come back (root)
+                                              previous binaries if the node does not come back (root);
+                                              on a relay host the relay, with its stored bundle
   update status | remote on|off | auto off|patch [-window HH:MM-HH:MM]
                                               updates by request: admin devices over the API, rayd's
-                                              own to patch releases in the window (root)
+                                              own to patch releases in the window (root; not on a relay)
   uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]
                                               take back everything install and apply changed (root)
   backup [-o FILE] [-passphrase-file F]       the node's state sealed with a passphrase (root):
