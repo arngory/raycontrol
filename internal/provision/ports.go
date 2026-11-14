@@ -155,6 +155,72 @@ func ParsePorts(s string, taken ...uint16) (PortChoice, error) {
 	return c, nil
 }
 
+// SSHDPorts reads the ports in sshd -T's output: those of its listen
+// addresses, which say them all, or else its port lines.
+func SSHDPorts(out string) ([]uint16, error) {
+	var ports, listen []uint16
+	for _, line := range strings.Split(out, "\n") {
+		key, v, _ := strings.Cut(strings.TrimSpace(line), " ")
+		into := &ports
+		switch key {
+		case "port":
+		case "listenaddress":
+			into = &listen
+			// "[::]:22", "0.0.0.0:22 rdomain red"
+			if f := strings.Fields(v); len(f) > 0 {
+				v = f[0]
+			}
+			if i := strings.LastIndex(v, ":"); i >= 0 {
+				v = v[i+1:]
+			}
+		default:
+			continue
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 65535 {
+			return nil, fmt.Errorf("sshd -T: %s %q", key, v)
+		}
+		if !slices.Contains(*into, uint16(n)) {
+			*into = append(*into, uint16(n))
+		}
+	}
+	if len(listen) > 0 {
+		return listen, nil
+	}
+	return ports, nil
+}
+
+// ParseSSHPorts reads rayd init's -ssh-ports: the ports sshd listens on,
+// N[,N...], or none (no sshd, or an operator who checked).
+func ParseSSHPorts(s string) ([]uint16, error) {
+	if s == "none" {
+		return nil, nil
+	}
+	var out []uint16
+	for _, f := range strings.Split(s, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(f))
+		if err != nil || n < 1 || n > 65535 {
+			return nil, fmt.Errorf("-ssh-ports %q: N[,N...] or none", s)
+		}
+		if !slices.Contains(out, uint16(n)) {
+			out = append(out, uint16(n))
+		}
+	}
+	return out, nil
+}
+
+// SSHPortsArg is ports as -ssh-ports takes them.
+func SSHPortsArg(ports []uint16) string {
+	if len(ports) == 0 {
+		return "none"
+	}
+	s := make([]string, len(ports))
+	for i, p := range ports {
+		s[i] = strconv.Itoa(int(p))
+	}
+	return strings.Join(s, ",")
+}
+
 func parseSpan(v string) (Span, error) {
 	from, to, isRange := strings.Cut(v, "-")
 	if !isRange {
@@ -186,7 +252,9 @@ func Ports(ctx context.Context, st *store.Store) (PortChoice, error) {
 
 // CheckPorts refuses a choice for a node that exists already unless it is
 // what the node has: ports are chosen at its first install only (an
-// install again names them again, or not at all). Nothing is written.
+// install again names them again, or not at all). Nothing is written: it
+// runs on a store opened read-only (store.OpenReadOnly), beside a rayd
+// that runs.
 func CheckPorts(ctx context.Context, st *store.Store, c PortChoice) error {
 	if c.Zero() {
 		return nil
@@ -224,6 +292,21 @@ func CheckPorts(ctx context.Context, st *store.Store, c PortChoice) error {
 			"install again without -ports, or with these", store.ErrInvalid, c, has)
 	}
 	return nil
+}
+
+// keepChoice stores c as the node's chosen ports when the node is new
+// (fresh: its SPA parameters were made just now) and c names any. An
+// install again of a node made without -ports that names its random
+// ports (CheckPorts lets that through) stores nothing: they stay random,
+// as rayctl ports says, and nothing on the node changes.
+func keepChoice(ctx context.Context, st *store.Store, c PortChoice, fresh bool) error {
+	if !fresh || c.Zero() {
+		return nil
+	}
+	if _, err := st.GetSetting(ctx, settingPorts); !errors.Is(err, store.ErrNotFound) {
+		return err // there already (nil), or not readable
+	}
+	return st.SetSetting(ctx, settingPorts, []byte(c.String()))
 }
 
 // initPorts makes the SPA parameters of a new node with c's range, or a

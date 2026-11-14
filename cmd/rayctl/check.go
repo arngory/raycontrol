@@ -45,7 +45,7 @@ func (c *cli) check(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
-	choice, err := parseInstallPorts(*ports)
+	choice, _, err := parseInstallPorts(*ports)
 	if err != nil {
 		return err
 	}

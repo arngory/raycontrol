@@ -168,3 +168,52 @@ func TestInitPortsRandomSPA(t *testing.T) {
 		t.Fatalf("a choice after the first install: %v", err)
 	}
 }
+
+// A node made without -ports, installed again naming its own random SPA
+// range (CheckPorts lets that through): nothing is stored, and its ports
+// stay random, as rayctl ports says.
+func TestInitAgainKeepsRandom(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p, err := Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := PortChoice{SPA: Span{p.PortBase, p.PortRange}}
+	if _, err := Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com", Ports: c}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Ports(ctx, st); err != nil || !got.Zero() {
+		t.Fatalf("kept %+v %v, want none", got, err)
+	}
+}
+
+// rayd init's -ssh-ports, and sshd -T's output.
+func TestSSHPorts(t *testing.T) {
+	if ps, err := ParseSSHPorts("22, 2222,22"); err != nil || len(ps) != 2 || ps[0] != 22 || ps[1] != 2222 {
+		t.Fatalf("%v %v", ps, err)
+	}
+	if ps, err := ParseSSHPorts("none"); err != nil || ps != nil {
+		t.Fatalf("none: %v %v", ps, err)
+	}
+	for _, bad := range []string{"", "0", "70000", "ssh"} {
+		if _, err := ParseSSHPorts(bad); err == nil {
+			t.Errorf("%q taken", bad)
+		}
+	}
+	if SSHPortsArg(nil) != "none" || SSHPortsArg([]uint16{22, 2222}) != "22,2222" {
+		t.Error("SSHPortsArg")
+	}
+	ps, err := SSHDPorts("port 22\nlistenaddress [::]:2222\nlistenaddress 0.0.0.0:2222 rdomain red\n")
+	if err != nil || len(ps) != 1 || ps[0] != 2222 {
+		t.Fatalf("%v %v", ps, err)
+	}
+	c, err := ParsePorts("spa=2200-2299", ps...)
+	if err == nil || !strings.Contains(err.Error(), "SSH") {
+		t.Fatalf("over sshd's port: %+v %v", c, err)
+	}
+}

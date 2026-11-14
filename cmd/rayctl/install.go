@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,34 +50,13 @@ func sshdPortsOf(bin string) ([]int, error) {
 }
 
 func parseSSHDPorts(out string) ([]int, error) {
-	var ports, listen []int
-	for _, line := range strings.Split(out, "\n") {
-		key, v, _ := strings.Cut(strings.TrimSpace(line), " ")
-		into := &ports
-		switch key {
-		case "port":
-		case "listenaddress":
-			into = &listen
-			// "[::]:22", "0.0.0.0:22 rdomain red"
-			if f := strings.Fields(v); len(f) > 0 {
-				v = f[0]
-			}
-			if _, p, err := net.SplitHostPort(v); err == nil {
-				v = p
-			}
-		default:
-			continue
-		}
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > 65535 {
-			return nil, fmt.Errorf("sshd -T: %s %q", key, v)
-		}
-		if !slices.Contains(*into, n) {
-			*into = append(*into, n)
-		}
+	ps, err := provision.SSHDPorts(out)
+	if err != nil {
+		return nil, err
 	}
-	if len(listen) > 0 {
-		return listen, nil
+	ports := make([]int, len(ps))
+	for i, p := range ps {
+		ports[i] = int(p)
 	}
 	return ports, nil
 }
@@ -293,7 +271,7 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 	if err != nil {
 		return fmt.Errorf("-name: %w", err)
 	}
-	choice, err := parseInstallPorts(*ports)
+	choice, sshArg, err := parseInstallPorts(*ports)
 	if err != nil {
 		return err
 	}
@@ -311,7 +289,8 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 	// An install again names the node's own ports or none (clients know
 	// them): asked of rayd's database before anything changes.
 	if _, err := os.Stat(deploy.DB); err == nil && !choice.Zero() {
-		if err := run("runuser", "-u", "rayd", "--", deploy.DefaultBinaries.Rayd, "init", "-db", deploy.DB, "-ports", choice.String(), "-check-ports"); err != nil {
+		if err := run("runuser", "-u", "rayd", "--", deploy.DefaultBinaries.Rayd, "init", "-db", deploy.DB, "-ports", choice.String(),
+			"-ssh-ports", sshArg, "-check-ports"); err != nil {
 			return fmt.Errorf("-ports: %w; nothing was changed", err)
 		}
 	}
@@ -415,7 +394,9 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 		initArgs = append(initArgs, "-domain", *domain)
 	}
 	if !choice.Zero() {
-		initArgs = append(initArgs, "-ports", choice.String())
+		// sshd's ports as this root saw them: rayd init, as rayd, cannot
+		// ask sshd -T itself.
+		initArgs = append(initArgs, "-ports", choice.String(), "-ssh-ports", sshArg)
 	}
 	if err := run("runuser", initArgs...); err != nil {
 		return err
@@ -520,18 +501,30 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 	return nil
 }
 
-// parseInstallPorts reads -ports, clear of the ports sshd listens on.
-func parseInstallPorts(s string) (provision.PortChoice, error) {
+// parseInstallPorts reads -ports, clear of the ports sshd listens on, and
+// gives them as rayd init's -ssh-ports takes them ("none": no sshd, or
+// ports sshd could not tell). An sshd whose sshd -T fails leaves the
+// choice unchecked against it: said on stderr, with how to go on.
+func parseInstallPorts(s string) (provision.PortChoice, string, error) {
 	if s == "" {
-		return provision.PortChoice{}, nil
+		return provision.PortChoice{}, "", nil
 	}
 	var taken []uint16
-	if ps, err := sshdPorts(); err == nil {
+	ps, err := sshdPorts()
+	switch {
+	case err == nil:
 		for _, p := range ps {
 			taken = append(taken, uint16(p)) //nolint:gosec // G115: sshd's ports are 1..65535
 		}
+	case noOpenSSH(sshdBinary(), err):
+		// No OpenSSH here: no port of its to keep clear.
+	default:
+		fmt.Fprintf(os.Stderr, "warning: -ports is not checked against sshd's ports: %v. If sshd listens on a chosen port, "+
+			"the perimeter gives that port to SPA or a service and SSH loses it. See what sshd -T says and fix it, or check "+
+			"with ss -ltnp that none of the chosen ports is sshd's; then run this again\n", err)
 	}
-	return provision.ParsePorts(s, taken...)
+	c, err := provision.ParsePorts(s, taken...)
+	return c, provision.SSHPortsArg(taken), err
 }
 
 type serviceKind struct{ kind, name string }

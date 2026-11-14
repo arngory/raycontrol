@@ -99,15 +99,12 @@ func Init(ctx context.Context, st *store.Store, o Options) (spa.Params, error) {
 	if err := CheckPorts(ctx, st, o.Ports); err != nil {
 		return spa.Params{}, err
 	}
-	params, err := node.InitWith(ctx, st, o.Host, func() (spa.Params, error) { return initPorts(o.Ports) })
+	fresh := false
+	params, err := node.InitWith(ctx, st, o.Host, func() (spa.Params, error) { fresh = true; return initPorts(o.Ports) })
 	if err != nil {
 		return params, err
 	}
-	if _, err := st.GetSetting(ctx, settingPorts); errors.Is(err, store.ErrNotFound) && !o.Ports.Zero() {
-		if err := st.SetSetting(ctx, settingPorts, []byte(o.Ports.String())); err != nil {
-			return params, err
-		}
-	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+	if err := keepChoice(ctx, st, o.Ports, fresh); err != nil {
 		return params, err
 	}
 	if o.Domain != "" {

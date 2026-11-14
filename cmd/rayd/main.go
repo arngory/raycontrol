@@ -129,27 +129,41 @@ func cmdInit(args []string) error {
 	seqClock := fs.Bool("seq-clock", false, "the subscription's seq goes on from the clock at once (rayctl restore: the database is older than "+
 		"what clients have seen, and they drop answers with a lower seq)")
 	ports := fs.String("ports", "", "ports chosen at the node's first install (rayctl install -ports): spa=A-B,sub=N,api=N,rotation=A-B|off")
-	checkPorts := fs.Bool("check-ports", false, "only check -ports against the node in -db, changing nothing")
+	checkPorts := fs.Bool("check-ports", false, "only check -ports against the node in -db, changing nothing (read-only, no migration)")
+	sshPorts := fs.String("ssh-ports", "", "the ports sshd listens on, which -ports keeps clear of: N[,N...] or none (rayctl install passes "+
+		"them); empty: sshd -T says, and -ports is refused when it cannot")
 	fs.Parse(args)
 
-	choice, err := provision.ParsePorts(*ports)
+	var taken []uint16
+	if *ports != "" {
+		var err error
+		if taken, err = initSSHPorts(*sshPorts); err != nil {
+			return err
+		}
+	}
+	choice, err := provision.ParsePorts(*ports, taken...)
 	if err != nil {
 		return err
 	}
 	ctx := context.Background()
 	if *checkPorts {
+		// Beside the node's rayd, on its live database: read only, and no
+		// migration of a database this rayd would migrate.
 		if _, err := os.Stat(*db); errors.Is(err, os.ErrNotExist) {
 			return nil // a new node: any choice
 		}
+		st, err := store.OpenReadOnly(ctx, *db)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		return provision.CheckPorts(ctx, st, choice)
 	}
 	st, err := store.Open(ctx, *db)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	if *checkPorts {
-		return provision.CheckPorts(ctx, st, choice)
-	}
 	p, err := provision.Init(ctx, st, provision.Options{Host: *host, Domain: *domain, Ports: choice})
 	if err != nil {
 		return err
