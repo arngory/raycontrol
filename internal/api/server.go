@@ -217,16 +217,21 @@ func toConnect(err error) error {
 	return connect.NewError(connect.CodeInternal, err)
 }
 
-// done audits a mutating call and notifies the perimeter on success.
+// done audits a mutating call and notifies the perimeter when the store
+// call succeeded, whatever the audit write did: the change is made, and
+// what follows it (DoH's Forget, the data plane's apply) must run, or a
+// revoked device's token works until the cache expires. The caller still
+// gets the audit's error.
 func (s *Server) done(ctx context.Context, action, target string, err error) error {
 	result := "ok"
 	if err != nil {
 		result = "error: " + err.Error()
 	}
+	changed := err == nil
 	if aerr := s.Store.Audit(ctx, actorFrom(ctx), action, target, result); aerr != nil && err == nil {
 		err = aerr
 	}
-	if err == nil {
+	if changed {
 		s.notify()
 	}
 	return toConnect(err)
