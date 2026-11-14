@@ -411,6 +411,25 @@ func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) erro
 	return nil
 }
 
+// SeqToClock moves the stored seq up to the clock in milliseconds, so that
+// the next answer is above every one a client has seen. For a database put
+// back by rayctl restore: it holds the count of the day of the backup, and
+// rayd keeps to the stored count for its first minutes (ClockSeqAfter),
+// where clients would drop its answers (subscription-v1 §3). Not for an
+// update's rollback: there the old count is the right one.
+func SeqToClock(ctx context.Context, st *store.Store, now time.Time) error {
+	var seq uint64
+	if b, err := st.GetSetting(ctx, settingSeq); err == nil {
+		seq, _ = strconv.ParseUint(string(b), 10, 64)
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	if clock := uint64(max(now.UnixMilli(), 0)); clock > seq {
+		return st.SetSetting(ctx, settingSeq, []byte(strconv.FormatUint(clock, 10)))
+	}
+	return nil
+}
+
 // nextSeq returns a counter that grows with every response, across restarts.
 func (s *Server) nextSeq(ctx context.Context, now time.Time) (uint64, error) {
 	s.mu.Lock()

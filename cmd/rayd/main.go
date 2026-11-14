@@ -127,6 +127,8 @@ func cmdInit(args []string) error {
 	db := fs.String("db", defaultDB, "database path")
 	host := fs.String("host", "", "public address clients use (IP or domain)")
 	domain := fs.String("domain", "", "base domain for service subdomains and DNS tunnel zones")
+	seqClock := fs.Bool("seq-clock", false, "the subscription's seq goes on from the clock at once (rayctl restore: the database is older than "+
+		"what clients have seen, and they drop answers with a lower seq)")
 	fs.Parse(args)
 
 	ctx := context.Background()
@@ -138,6 +140,11 @@ func cmdInit(args []string) error {
 	p, err := provision.Init(ctx, st, provision.Options{Host: *host, Domain: *domain})
 	if err != nil {
 		return err
+	}
+	if *seqClock {
+		if err := sub.SeqToClock(ctx, st, time.Now()); err != nil {
+			return err
+		}
 	}
 	fmt.Printf("node %x initialised in %s\n", p.NodeID, *db)
 	return nil
