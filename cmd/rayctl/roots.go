@@ -158,7 +158,7 @@ func raydCannotRead(settingsFile string, s roots.Settings) error {
 			continue
 		}
 		if err := roots.Unreadable(f, uid, gids); err != nil {
-			return fmt.Errorf("rayd (user rayd) cannot read %s (%v): it stays on the embedded list until it can; chmod a+r the file, a+x the directories above it", f, err)
+			return fmt.Errorf("rayd (user rayd) cannot read %s (%w): it stays on the embedded list until it can; chmod a+r the file, a+x the directories above it", f, err)
 		}
 	}
 	return nil
