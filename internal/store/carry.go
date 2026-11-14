@@ -293,7 +293,7 @@ func CarryRestore(ctx context.Context, saved, current string) (Restored, error) 
 		if err != nil {
 			return r, err
 		}
-		if _, err := renewUser(ctx, tx, u.id, now, key); err != nil {
+		if _, err := renewUser(ctx, tx, u.id, now, key, false); err != nil {
 			return r, fmt.Errorf("store: carrying revocations: %w", err)
 		}
 		if !slices.Contains(r.Renewed, u.name) {

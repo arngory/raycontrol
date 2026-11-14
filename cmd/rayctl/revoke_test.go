@@ -50,13 +50,16 @@ func TestRenewText(t *testing.T) {
 // know: the devices this node's database has no record of.
 func TestRestoreCarryText(t *testing.T) {
 	made := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
-	if got := restoreCarryText(nil, nil, made); got != "" {
+	if got := restoreCarryText(store.Restored{}, made); got != "" {
 		t.Errorf("nothing to say: %q", got)
 	}
-	got := restoreCarryText([]store.CarriedDevice{{ID: "d1", User: "alice", Name: "phone"}},
-		[]store.CarriedDevice{{ID: "d2", User: "bob", Name: "tv"}}, made)
+	got := restoreCarryText(store.Restored{
+		Carried: []store.CarriedDevice{{ID: "d1", User: "alice", Name: "phone"}},
+		Unknown: []store.CarriedDevice{{ID: "d2", User: "bob", Name: "tv"}},
+		Renewed: []string{"carol", "dave"},
+	}, made)
 	for _, want := range []string{"d1  alice/phone", "credentials are new", "warning: this node's database has no record of 1 devices",
-		"2026-11-01T12:00:00Z cannot be known", "d2  bob/tv"} {
+		"2026-11-01T12:00:00Z cannot be known", "d2  bob/tv", "do not come back: carol, dave"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("no %q in\n%s", want, got)
 		}
