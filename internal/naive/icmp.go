@@ -68,12 +68,16 @@ const (
 // b[icmpHead:], and the head goes right before it.
 const icmpHead = 1 + 1 + 1 + 16 + 2 + 2 + 2
 
-// icmpLimits counts the ICMP streams, per user and in all. The service's
-// map is for a stream's start and end only: a stream keeps its user.
+// icmpLimits counts the ICMP streams, per user and in all. A user is the
+// one TCP's and UoT's limits know (admitted.key: the base name, u5 for all
+// the credentials of u5), not a password: with one set of limits to a
+// password, each credential of a rotation's overlap and each device's own
+// would have multiplied them. The service's map is for a stream's start and
+// end only: a stream keeps its user.
 type icmpLimits struct {
 	mu    sync.Mutex
 	total int
-	users map[[32]byte]*icmpUser
+	users map[string]*icmpUser
 	swept time.Time
 }
 
@@ -88,7 +92,7 @@ type icmpUser struct {
 
 // take is the user's for a new stream; nil over the user's or the
 // service's limit.
-func (l *icmpLimits) take(user [32]byte) *icmpUser {
+func (l *icmpLimits) take(user string) *icmpUser {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
@@ -101,7 +105,7 @@ func (l *icmpLimits) take(user [32]byte) *icmpUser {
 	u := l.users[user]
 	if u == nil {
 		if l.users == nil {
-			l.users = map[[32]byte]*icmpUser{}
+			l.users = map[string]*icmpUser{}
 		}
 		u = &icmpUser{echoes: bucket{icmpBurst, now}}
 		l.users[user] = u

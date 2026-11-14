@@ -84,7 +84,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // tunnel serves an authenticated CONNECT until it ends or a.ctx is done;
 // false when it answered without a tunnel (the site's answer, 429).
 func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool {
-	user, ctx := a.user, a.ctx
+	ctx := a.ctx
 	target := r.Host
 	host, _, err := net.SplitHostPort(target)
 	if err != nil {
@@ -162,7 +162,9 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 			s.Log.Debug("naive: ICMP is off")
 			panic(http.ErrAbortHandler)
 		}
-		u := s.icmp.take(user)
+		// The user's streams and echoes, whichever of the user's
+		// credentials opened the stream.
+		u := s.icmp.take(a.key)
 		if u == nil {
 			s.Log.Debug("naive: too many ICMP streams")
 			panic(http.ErrAbortHandler)

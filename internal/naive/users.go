@@ -148,14 +148,13 @@ func (c countReader) Read(b []byte) (int, error) {
 // session is a live stream of a password: cancel ends it.
 type session struct{ cancel context.CancelCauseFunc }
 
-// admitted is an authenticated stream: its user (the password's hash),
-// the counters of the name, a context that ends when the password leaves
-// the users file, and leave, which takes the stream out when it ends.
+// admitted is an authenticated stream: its user, the counters of the
+// name, a context that ends when the password leaves the users file, and
+// leave, which takes the stream out when it ends.
 type admitted struct {
-	user [32]byte
-	// key is whose limits it takes (spec/conn-limit-v1.md §2): the base
-	// name, u5 for u5 and its credentials' names; a password without a
-	// name is its own user.
+	// key is whose limits it takes, TCP's, UoT's and ICMP's alike
+	// (spec/conn-limit-v1.md §2): the base name, u5 for u5 and its
+	// credentials' names; a password without a name is its own user.
 	key     string
 	traffic *Traffic
 	ctx     context.Context
@@ -218,7 +217,7 @@ func (u *Users) admit(parent context.Context, password string) (admitted, bool) 
 	if name == "" {
 		key = "#" + hex.EncodeToString(hash[:8])
 	}
-	return admitted{user: hash, key: key, traffic: t, ctx: ctx, leave: leave}, true
+	return admitted{key: key, traffic: t, ctx: ctx, leave: leave}, true
 }
 
 // trafficOf is a name's counters, made at first sight and kept until the

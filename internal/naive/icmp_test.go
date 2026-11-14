@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -467,7 +468,7 @@ func TestICMPSilentClient(t *testing.T) {
 
 func TestICMPLimits(t *testing.T) {
 	var l icmpLimits
-	a, b := [32]byte{1}, [32]byte{2}
+	a, b := "u1", "u2"
 	var as []*icmpUser
 	for range icmpPerUser {
 		u := l.take(a)
@@ -540,11 +541,11 @@ func TestICMPLimits(t *testing.T) {
 		t.Fatalf("not forgotten: %d users, %d streams", len(l.users), l.total)
 	}
 	for i := range icmpPerService {
-		if l.take([32]byte{byte(i), byte(i >> 8), 7}) == nil {
+		if l.take("u"+strconv.Itoa(1000+i)) == nil {
 			t.Fatal("under the service's limit")
 		}
 	}
-	if l.take([32]byte{9, 9, 9}) != nil {
+	if l.take("u999") != nil {
 		t.Fatal("over the service's limit")
 	}
 }
@@ -587,7 +588,7 @@ func icmpTestStream(t testing.TB) (*icmpStream, *fakeNet, *syncBuffer) {
 	t.Helper()
 	fake := newFakeNet()
 	s := &Server{icmpOpen: fake.open}
-	u := s.icmp.take([32]byte{1})
+	u := s.icmp.take("u1")
 	if u == nil {
 		t.Fatal("no slot")
 	}
@@ -732,7 +733,7 @@ func TestIdleClock(t *testing.T) {
 func TestICMPStuckReset(t *testing.T) {
 	fake := newFakeNet()
 	s := &Server{icmpOpen: fake.open, icmpIdle: 200 * time.Millisecond}
-	u := s.icmp.take([32]byte{3})
+	u := s.icmp.take("u3")
 	pr, pw := io.Pipe()
 	defer pw.Close()
 	go func() {
@@ -1066,7 +1067,7 @@ func TestICMPPrivateRouters(t *testing.T) {
 	pingOrSkip(t, false)
 	allowed := netip.MustParseAddr("127.0.0.3")
 	s := &Server{Allow: func(a netip.Addr) bool { return a == allowed }}
-	u := s.icmp.take([32]byte{4})
+	u := s.icmp.take("u4")
 	w := &syncBuffer{}
 	st := newICMPStream(s, u, w)
 	defer func() { <-st.close() }()
@@ -1135,7 +1136,7 @@ func TestPingSocketTooBig(t *testing.T) {
 	// Through a stream: the client learns it, the echo is no loss.
 	s := &Server{Allow: func(a netip.Addr) bool { return a == dst }}
 	w := &syncBuffer{}
-	st := newICMPStream(s, s.icmp.take([32]byte{5}), w)
+	st := newICMPStream(s, s.icmp.take("u5"), w)
 	defer func() { <-st.close() }()
 	_ = st.echo(dst, 64, 7, 8, make([]byte, 1250), false)
 	if got := w.frames(t); !slices.Equal(got, []serverFrame{{wireTooBig, 0, dst, 7, 8, mtu(1200)}}) || st.dropped.Load() != 0 {

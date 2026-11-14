@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync/atomic"
 	"testing"
 )
@@ -73,7 +74,7 @@ func BenchmarkICMPEchoParallel(b *testing.B) {
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		n := next.Add(1)
-		st := newICMPStream(s, s.icmp.take([32]byte{byte(n), byte(n >> 8)}), io.Discard)
+		st := newICMPStream(s, s.icmp.take("u"+strconv.FormatUint(uint64(n), 10)), io.Discard)
 		defer func() { <-st.close() }()
 		for i := 0; pb.Next(); i++ {
 			_ = st.echo(dst, 1+i%30, 1, uint16(i), payload, false)
