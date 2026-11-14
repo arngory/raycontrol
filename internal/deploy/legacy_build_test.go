@@ -470,7 +470,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 			description: "raycontrol perimeter (nftables, SPA v2)",
 			// Before the network, ready by sd_notify (R4-40): in both.
 			early: true,
-			after: []string{"nftables.service", "firewalld.service", "ufw.service"},
+			after: rayspaAfter,
 			service: append([]string{
 				"User=rayspa", "Group=rayspa",
 				"ExecStart=" + bin.Rayspa + " run -socket " + Socket + " -state " + RayspaState,
