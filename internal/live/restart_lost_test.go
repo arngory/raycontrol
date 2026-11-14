@@ -171,6 +171,12 @@ func TestApplyOwesNothingWithoutAChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// REALITY is rendered once the site it borrows has a certificate.
+	site, _ := st.ServiceByName(ctx, "site")
+	if err := st.UpdateService(ctx, site.ID, store.ServiceUpdate{Set: map[string][]byte{
+		provision.SecretTLSChain: []byte("chain\n"), provision.SecretTLSKey: []byte("key")}}); err != nil {
+		t.Fatal(err)
+	}
 	var restarted []string
 	a := &Applier{
 		Store: st, Paths: render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: "/run/niko"},
@@ -182,6 +188,12 @@ func TestApplyOwesNothingWithoutAChange(t *testing.T) {
 		Inner: func(string) InnerAPI { return &fakeInner{} },
 	}
 	if err := a.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The test is about a rendered REALITY: without its file it would pass
+	// by doing nothing.
+	rdir := filepath.Join(dir, "rendered", "reality")
+	if _, err := os.Stat(filepath.Join(rdir, "xray.json")); err != nil {
 		t.Fatal(err)
 	}
 	restarted = nil
@@ -197,7 +209,6 @@ func TestApplyOwesNothingWithoutAChange(t *testing.T) {
 	}
 	// The directory of REALITY's files cannot be written: nothing changes,
 	// nothing is owed, and the apply says what failed.
-	rdir := filepath.Join(dir, "rendered", "reality")
 	if os.Getuid() == 0 {
 		t.Skip("root writes anywhere")
 	}
