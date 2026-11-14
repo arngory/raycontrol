@@ -337,6 +337,24 @@ Workflow выпуска на раннерах GitHub отличается тре
   битый блок `CERTIFICATE` обрывает разбор файла, остальные за ним отбрасываются. На Linux ничего не изменилось.
   Проверка: `test/system_roots_env_test.go` в cronet-go (Linux, cgo и purego); на Android не исполнялось, только
   собрано.
+- **QUIC и локально доверенные корни по желанию приложения** (naiveproxy `46938b71`, `go-158-20261114-3` →
+  `84acd91d7668e6f0a3ed9bdc4d9f0de10f056d5a`, `v0.0.0-20261114204807-84acd91d7668`). Ключ экспериментальных опций
+  `{"QUIC": {"allow_unknown_cert_roots": true}}` разрешает QUIC принимать цепочку к корню из `SSL_CERT_FILE` или
+  `SSL_CERT_DIR`, как это уже делает TCP. По умолчанию выключен: без ключа QUIC по-прежнему требует корень из списка
+  Chrome. Ключ снимает только проверку «корень известен» (`ERR_QUIC_CERT_ROOT_NOT_KNOWN`); цепочка, имя, сроки, CT
+  и пины проверяются как раньше. Пины при `CertificatePublicKeySHA256` действуют и для таких корней (обход пинов для
+  локальных корней в `NaiveClient` выключен). `TrustedRootCertificates` снимает ту же проверку сам, ключ ему не
+  мешает. `NaiveClient` ключ не передаёт: `SetQUICOptions` пересобирает словарь `"QUIC"`, поэтому ключ надо дописать
+  после него. Проверка: `test/quic_local_root_test.go` в cronet-go (Linux, cgo и purego); на Android не исполнялось,
+  только собрано.
+- **Список корней Chromium 158 шире списка «Chrome» ядра клиента.** В сборке 99 корней (хранилище версии 43), в
+  `chrome.go` ядра — 92: генератор ядра намеренно пропускает центры из Китая. Девять корней есть только в Chromium:
+  UCA Global G2 Root и UCA Extended Validation Root (UniTrust), vTrus Root CA и vTrus ECC Root CA (iTrusChina), GDCA
+  TrustAUTH R5 ROOT, CFCA EV ROOT, TrustAsia TLS RSA Root CA и TLS ECC Root CA, Hongkong Post Root CA 3. Вырезать их
+  из сборки нельзя: изменится содержимое `trust_anchors` в ClientHello. Решение владельца от 2026-11-14: профилю naive
+  без пина ноды и без своего корня клиент ставит набор пинов по настройке приложения («Chrome» — список ядра,
+  «Mozilla» — список Mozilla, «системные» — не ставит), и naive доверяет тому же списку, что остальное ядро. При
+  переходе на новую версию Chromium список расхождений пересчитывается и передаётся клиенту вместе с библиотекой.
 
 ## 9. Чего не удалось проверить
 
