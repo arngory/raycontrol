@@ -317,3 +317,55 @@ func TestRenewUser(t *testing.T) {
 		t.Fatalf("an unknown user: %v", err)
 	}
 }
+
+// rayctl restore: the user of a device revoked since the backup has a LAN
+// key in the restored database that the device never knew, neither the
+// backup's nor a key it could not have had (lan-v1 §3, R4-36).
+func TestCarryDeviceRevocationsRenewsLANKey(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	current, saved := filepath.Join(dir, "rayd.db"), filepath.Join(dir, "backup.db")
+	s, err := Open(ctx, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateUser(ctx, User{Name: "alice", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateUser(ctx, User{Name: "bob", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE users SET lan = 1, lan_key = randomblob(?)`, LANKeySize); err != nil {
+		t.Fatal(err)
+	}
+	phone, _, _ := s.CreateDevice(ctx, "alice", "phone", "user")
+	if _, _, err := s.CreateDevice(ctx, "bob", "phone", "user"); err != nil {
+		t.Fatal(err)
+	}
+	alices, bobs := s.lanKey(t, "alice"), s.lanKey(t, "bob")
+	s.Close()
+	copyFile(t, current, saved)
+
+	s, err = Open(ctx, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RevokeDevice(ctx, phone.ID); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if _, _, err := CarryDeviceRevocations(ctx, saved, current); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(ctx, saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if got := r.lanKey(t, "alice"); len(got) != LANKeySize || string(got) == string(alices) {
+		t.Errorf("alice's LAN key after the restore: %x, the backup's %x", got, alices)
+	}
+	if got := r.lanKey(t, "bob"); string(got) != string(bobs) {
+		t.Error("bob's LAN key changed")
+	}
+}
