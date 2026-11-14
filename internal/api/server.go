@@ -89,6 +89,12 @@ type Server struct {
 	// rayd started (rayctl metrics).
 	pinWrong, pinWithdrawn atomic.Uint64
 
+	// sshMu holds lastSSH's check and the write it allows as one: two
+	// calls that each take out one of the last two ssh services would
+	// both pass the check otherwise. Every change of the services goes
+	// through this server.
+	sshMu sync.Mutex
+
 	mu   sync.Mutex
 	rev  uint64
 	wake chan struct{} // closed on the next change
@@ -580,6 +586,8 @@ func (s *Server) SetServiceEnabled(ctx context.Context, req *connect.Request[nod
 	if req.Msg.Enabled {
 		err = provision.CheckRequirements(ctx, s.Store, req.Msg.Name)
 	} else {
+		s.sshMu.Lock()
+		defer s.sshMu.Unlock()
 		err = provision.CheckNoDependents(ctx, s.Store, req.Msg.Name)
 		if err == nil {
 			err = lastSSH(ctx, s.Store, req.Msg.Name, "disable", req.Msg.Force)
@@ -599,6 +607,8 @@ func (s *Server) SetServiceEnabled(ctx context.Context, req *connect.Request[nod
 }
 
 func (s *Server) DeleteService(ctx context.Context, req *connect.Request[nodev1.DeleteServiceRequest]) (*connect.Response[nodev1.DeleteServiceResponse], error) {
+	s.sshMu.Lock()
+	defer s.sshMu.Unlock()
 	err := provision.CheckNoDependents(ctx, s.Store, req.Msg.Name)
 	if err == nil {
 		err = lastSSH(ctx, s.Store, req.Msg.Name, "delete", req.Msg.Force)

@@ -2,13 +2,16 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"connectrpc.com/connect"
 
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 // The last enabled ssh service is what the perimeter admits SSH on: it is
@@ -79,5 +82,49 @@ func TestLastSSHService(t *testing.T) {
 	slices.Sort(actions)
 	if !slices.Equal(actions, []string{"service.delete force", "service.enable=false force"}) {
 		t.Errorf("audit %q", actions)
+	}
+}
+
+// Two calls at once, each taking out one of the last two ssh services:
+// one goes, the other is refused, and an ssh service stays enabled.
+func TestLastSSHServiceAtOnce(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	for round := range 10 {
+		a, b := fmt.Sprintf("ssh-a%d", round), fmt.Sprintf("ssh-b%d", round)
+		for i, name := range []string{a, b} {
+			if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "ssh", Name: name,
+				SettingsJson: fmt.Sprintf(`{"ports":["tcp/%d"]}`, 2000+2*round+i)})); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		wg.Go(func() {
+			_, errs[0] = c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: a, Enabled: false}))
+		})
+		wg.Go(func() {
+			_, errs[1] = c.DeleteService(ctx, connect.NewRequest(&nodev1.DeleteServiceRequest{Name: b}))
+		})
+		wg.Wait()
+		if (errs[0] == nil) == (errs[1] == nil) {
+			t.Fatalf("round %d: %v, %v", round, errs[0], errs[1])
+		}
+		services, err := srv.Store.ListServices(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.ContainsFunc(services, func(s store.Service) bool { return s.Kind == "ssh" && s.Enabled }) {
+			t.Fatalf("round %d: no ssh service enabled", round)
+		}
+		// The one left makes the next round's pair the last two.
+		for _, s := range services {
+			if s.Kind == "ssh" && s.Enabled {
+				if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: s.Name, Enabled: false, Force: true})); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
 	}
 }
