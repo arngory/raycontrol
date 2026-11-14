@@ -240,6 +240,7 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 	// migrate it, and the old one must not run on the new schema (Q-2). The
 	// data plane runs on meanwhile; the perimeter keeps its table.
 	touched = true
+	since := time.Now().Unix() // what rayd audits from here on is the update's
 	if err := run("systemctl", "stop", "rayd.service"); err != nil {
 		return err
 	}
@@ -260,7 +261,47 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 	}
 	fmt.Printf("raycontrol %s is running; the previous binaries are kept for rayctl update -rollback\n", newVersion)
 	c.belowDefaults(ctx)
+	c.renewedAtUpdate(ctx, since)
 	return nil
+}
+
+// renewedAtUpdate says how many users the new rayd's migration gave new
+// credentials, as a revocation now does (R4-36, the step of schema 14):
+// its audit lines since the update began. Nothing when there are none,
+// or when the audit cannot be read.
+func (c *cli) renewedAtUpdate(ctx context.Context, since int64) {
+	const limit = 1000 // the most ListAudit gives
+	r, err := c.c.ListAudit(ctx, connect.NewRequest(&nodev1.ListAuditRequest{Limit: limit}))
+	if err != nil {
+		return
+	}
+	fmt.Print(renewedText(r.Msg.Entries, since, limit))
+}
+
+// renewedText counts the user.renew:revoked-before lines at since or
+// later in entries (newest first, at most limit of them).
+func renewedText(entries []*nodev1.AuditEntry, since int64, limit int) string {
+	n := 0
+	for _, e := range entries {
+		if e.Time < since {
+			break
+		}
+		if e.Action == "user.renew:revoked-before" {
+			n++
+		}
+	}
+	if n == 0 {
+		return ""
+	}
+	count := fmt.Sprintf("%d users have", n)
+	switch {
+	case len(entries) >= limit && entries[len(entries)-1].Time >= since:
+		count = fmt.Sprintf("at least %d users have", n) // the update's oldest lines are past the list
+	case n == 1:
+		count = "1 user has"
+	}
+	return count + " new credentials: each had a device revoked before v0.27.0 (audit user.renew:revoked-before).\n" +
+		"Their other devices reconnect by themselves within 15-30 s.\n"
 }
 
 // belowDefaults says which services keep modes weaker than a new one of
