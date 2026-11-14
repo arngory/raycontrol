@@ -91,10 +91,20 @@ type Manager struct {
 	once  sync.Once
 	fails map[string]int
 	next  map[string]time.Time
-	last  map[string]time.Time // the last failed try of a site
-	asked map[string]int64     // the operator's switch (its time) that got its try past the back-off
+	last  map[string]time.Time   // the last failed try of a site
+	asked map[string]askedSwitch // the operator's switch that got its try past the back-off
 	wake  chan struct{}
 	retry atomic.Bool
+
+	mu    sync.Mutex
+	again map[string]bool // RetrySite's sites, for the next Once
+}
+
+// askedSwitch names a request for a site's switch: its time and how. An
+// upgrade (-force, then -fresh) keeps the time and is a request of its own.
+type askedSwitch struct {
+	at  int64
+	how string
 }
 
 // Wake makes Run check now, as when a site needs a new name; failures keep
@@ -120,6 +130,20 @@ func backoff(fails int) time.Duration { return min(time.Hour<<min(fails-1, 5), 2
 // that fails again waits longer.
 func (m *Manager) Retry() {
 	m.retry.Store(true)
+	m.Wake()
+}
+
+// RetrySite makes Run try one site now, as Retry does for all: RetryGap
+// after its last failed try at the earliest. The API runs it after a
+// switch is asked again while a request as strong waits: that request had
+// its try past the back-off, and a repeat must not wait out a day.
+func (m *Manager) RetrySite(name string) {
+	m.mu.Lock()
+	if m.again == nil {
+		m.again = map[string]bool{}
+	}
+	m.again[name] = true
+	m.mu.Unlock()
 	m.Wake()
 }
 
@@ -173,15 +197,21 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 		m.fails, m.next, m.last = map[string]int{}, map[string]time.Time{}, map[string]time.Time{}
 	}
 	if m.asked == nil {
-		m.asked = map[string]int64{}
+		m.asked = map[string]askedSwitch{}
 	}
+	m.mu.Lock()
+	again := m.again
+	m.again = nil
+	m.mu.Unlock()
 	// From the last try, not from next: changes in a row (a cron job) keep
 	// the gap however many there are.
-	if m.retry.Swap(false) {
-		for name, next := range m.next {
-			if soon := m.last[name].Add(RetryGap); soon.Before(next) {
-				m.next[name] = soon
-			}
+	all := m.retry.Swap(false)
+	for name, next := range m.next {
+		if !all && !again[name] {
+			continue
+		}
+		if soon := m.last[name].Add(RetryGap); soon.Before(next) {
+			m.next[name] = soon
 		}
 	}
 	services, err := m.Store.ListServices(ctx)
@@ -208,11 +238,12 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 		// with another key, and it gets one try now whatever the back-off
 		// of earlier failures: a leaked key must not serve a day longer
 		// because a renewal failed last week. One try a request; if it
-		// fails too, the back-off goes on.
+		// fails too, the back-off goes on. An upgrade (-force, then -fresh)
+		// is another request; the same one again is RetrySite's.
 		state := provision.ParseSiteKeyState(svc)
 		rotate := state.RotateAt != 0
-		if rotate && m.asked[svc.Name] != state.RotateAt {
-			m.asked[svc.Name] = state.RotateAt
+		if ask := (askedSwitch{state.RotateAt, state.RotateHow}); rotate && m.asked[svc.Name] != ask {
+			m.asked[svc.Name] = ask
 		} else if now.Before(m.next[svc.Name]) {
 			continue
 		}

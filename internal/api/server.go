@@ -66,6 +66,10 @@ type Server struct {
 	// DNSChanged runs after the operator changed the DNS provider or its
 	// records: the certificates are tried again (certs.Manager.Retry).
 	DNSChanged func()
+	// SiteKeyAsked runs after a site's switch was asked, again too
+	// (certs.Manager.RetrySite): the same request again gets a try
+	// RetryGap after its last failed one, not after the back-off.
+	SiteKeyAsked func(name string)
 	// Health is where rayd's loops report (O-2): status and metrics.
 	Health *health.Board
 	// DNSCheck checks the DNS tunnel zones from the node (CheckDNSZones);
@@ -617,8 +621,10 @@ func (s *Server) SetCertificate(ctx context.Context, req *connect.Request[nodev1
 // (spec/cert-pin-v1.md §5): root on the node only, as the site's own
 // certificate is. The certificate manager, woken by the change, gives the
 // order one try at once, whatever its back-off, and goes on by the
-// back-off if that fails. how is one of provision's SiteSwitch values;
-// each is audited under its own action.
+// back-off if that fails; an upgrade (-force, then -fresh) is a request of
+// its own. The same request again gets a try RetryGap (15 minutes) after
+// the last failed one at the earliest. how is one of provision's
+// SiteSwitch values; each is audited under its own action.
 func (s *Server) rotateSiteKey(ctx context.Context, name, how string, now time.Time) (*connect.Response[nodev1.RotateServiceResponse], error) {
 	if !isRoot(ctx) {
 		return nil, connect.NewError(connect.CodePermissionDenied, errors.New("a site's certificate key: root on the node only"))
@@ -636,6 +642,9 @@ func (s *Server) rotateSiteKey(ctx context.Context, name, how string, now time.T
 	}
 	if err := s.done(ctx, action, name, err); err != nil {
 		return nil, err
+	}
+	if s.SiteKeyAsked != nil {
+		s.SiteKeyAsked(name)
 	}
 	return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Key: "tls"}), nil
 }

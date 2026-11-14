@@ -472,6 +472,7 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 		}}
 	// The operator's DNS change may be the fix of a failure: try now.
 	srv.DNSChanged = m.Retry
+	srv.SiteKeyAsked = m.RetrySite
 	// A site's switch to its next key is an order of this manager's.
 	srv.Certificates = true
 	go m.Run(ctx)

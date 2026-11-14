@@ -768,8 +768,9 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 				if *fresh {
 					which = "a key made for it"
 				}
-				fmt.Fprintf(w, "%s: asked. rayd orders a certificate with %s: one try now, whatever its back-off, and if that fails\n"+
-					"again after the back-off (an hour, doubling to a day; rayctl status: acme %s). The key in use serves until\n"+
+				fmt.Fprintf(w, "%s: asked. rayd orders a certificate with %s: one try now, whatever its back-off (asked again the same\n"+
+					"way: 15 minutes after the last try at the earliest), and if that fails again after the back-off (an hour,\n"+
+					"doubling to a day; rayctl status: acme %s). The key in use serves until\n"+
 					"the certificate is stored. Then the processes that keep the key restart once (naive, the site, hy2-masq,\n"+
 					"Yggdrasil), and the key after it is in subscriptions from then\n", args[0], which, args[0])
 				if *fresh {

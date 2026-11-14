@@ -524,7 +524,8 @@ func StoreSiteCertificate(ctx context.Context, st *store.Store, id int64, chainP
 //     fail until they fetch.
 //
 // A request already waiting is answered as done; a stronger one replaces
-// its way.
+// its way and keeps its time, and the certificate manager gives it a try
+// of its own (it names a request by time and way).
 func RequestSiteKeyRotation(ctx context.Context, st *store.Store, name string, now time.Time, lead time.Duration, how string) error {
 	settingsMu.Lock()
 	defer settingsMu.Unlock()

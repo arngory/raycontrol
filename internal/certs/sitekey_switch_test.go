@@ -79,6 +79,72 @@ func TestManagerSwitchPastBackoff(t *testing.T) {
 	}
 }
 
+// A request is its time and its way: a waiting -force upgraded to -fresh
+// keeps the time and got no try of its own, so it waited out the back-off
+// of the failed one, up to a day, while rayctl said "one try now". The
+// same request again gets a try RetryGap after the last at the earliest
+// (Manager.RetrySite, run by the API at every request), not at once.
+func TestManagerSwitchAskedAgain(t *testing.T) {
+	ctx := context.Background()
+	start := time.Unix(1767225600, 0)
+	now := start
+	n := newSiteNode(t, provision.SiteKeyPolicy{})
+	ca, _ := testCA()
+	n.at(ca, &now)
+	n.m.Once(ctx, now)
+	first := n.state()
+	ask := func(how string) {
+		t.Helper()
+		if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now, 14*day, how); err != nil {
+			t.Fatal(err)
+		}
+		n.m.RetrySite("site")
+	}
+
+	// The CA fails for days: the back-off is a day.
+	n.fail = true
+	now = start.Add(61 * day)
+	for range 6 {
+		now = now.Add(25 * time.Hour)
+		n.m.Once(ctx, now)
+	}
+	now = now.Add(time.Minute)
+	// -force: its one try fails.
+	ask(provision.SiteSwitchForce)
+	fails := n.m.fails["site"]
+	n.m.Once(ctx, now)
+	if n.m.fails["site"] != fails+1 {
+		t.Fatal("no try for the forced switch")
+	}
+	// -force again five minutes later: no try within RetryGap of the last.
+	now = now.Add(5 * time.Minute)
+	ask(provision.SiteSwitchForce)
+	n.m.Once(ctx, now)
+	if n.m.fails["site"] != fails+1 {
+		t.Fatal("the same request again was tried within RetryGap of the last try")
+	}
+	// Due RetryGap after the last try, not after the back-off of a day.
+	if at := n.m.next["site"]; !at.Equal(now.Add(-5*time.Minute + RetryGap)) {
+		t.Fatalf("the repeat is tried in %v", at.Sub(now))
+	}
+	now = now.Add(RetryGap)
+	n.m.Once(ctx, now)
+	if n.m.fails["site"] != fails+2 {
+		t.Fatal("the same request again got no try after RetryGap")
+	}
+	// The CA works again a minute later, and the store leaked too:
+	// -fresh, a request of its own, is ordered at once.
+	n.fail = false
+	now = now.Add(time.Minute)
+	ask(provision.SiteSwitchFresh)
+	if got := n.m.Once(ctx, now); got != 1 {
+		t.Fatalf("the upgraded request got no try: the next is in %v", n.m.next["site"].Sub(now))
+	}
+	if s := n.state(); s.leafPin == first.leafPin || slices.Contains(first.pins, s.leafPin) {
+		t.Fatalf("-fresh serves a key of before: %s", s.leafPin)
+	}
+}
+
 // -force again a minute after the switch it asked for was made would
 // switch once more, to a key made a minute ago: clients that hold [A, B]
 // would meet C. Refused while the key in use is younger than a

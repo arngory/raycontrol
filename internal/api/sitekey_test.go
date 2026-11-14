@@ -75,6 +75,8 @@ func TestRotateSiteKey(t *testing.T) {
 		return provision.ParseSiteKeyState(svc)
 	}
 
+	var retried []string
+	srv.SiteKeyAsked = func(name string) { retried = append(retried, name) }
 	srv.Certificates = true
 	for who, c := range map[string]context.Context{"the group": as(1000), "remote": remote} {
 		if _, err := rotate(c, true); connect.CodeOf(err) != connect.CodePermissionDenied {
@@ -99,8 +101,8 @@ func TestRotateSiteKey(t *testing.T) {
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition || !strings.Contains(err.Error(), "rayctl service rotate site -force") {
 		t.Fatalf("four days in: %v", err)
 	}
-	if state().RotateAt != 0 || changes.Load() != before {
-		t.Fatal("a refused switch changed the site")
+	if state().RotateAt != 0 || changes.Load() != before || len(retried) != 0 {
+		t.Fatal("a refused switch changed the site, or woke the manager")
 	}
 	// Anyway.
 	r, err := rotate(as(0), true)
@@ -109,6 +111,11 @@ func TestRotateSiteKey(t *testing.T) {
 	}
 	if state().RotateAt == 0 || changes.Load() == before {
 		t.Fatal("the forced switch left no request, or woke nobody")
+	}
+	// Accepted, the same again too: the manager gives it a try RetryGap
+	// after the last one (certs.Manager.RetrySite).
+	if _, err := rotate(as(0), true); err != nil || !slices.Equal(retried, []string{"site", "site"}) {
+		t.Fatalf("asked again: %v, retried %v", err, retried)
 	}
 	entries, err := srv.Store.ListAudit(ctx, 10)
 	if err != nil {
