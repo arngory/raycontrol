@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
-	"golang.org/x/sys/unix"
 
 	pins "github.com/arngory/raycontrol/deploy"
 	"github.com/arngory/raycontrol/internal/naive"
@@ -195,16 +194,6 @@ func DNSAuthHint(s store.Service) string { return provision.DNSAuthHint(s) }
 
 // DNSAuthKeys is the file name of a DNS tunnel's device keys.
 const DNSAuthKeys = "auth.keys"
-
-// HostIPv6 reports whether this host can open IPv6 sockets.
-func HostIPv6() bool {
-	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
-	if err != nil {
-		return false
-	}
-	_ = unix.Close(fd)
-	return true
-}
 
 // Collect reads the model from the store and creates missing inner
 // credentials for users who reach a service behind the inner stage.

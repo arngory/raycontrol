@@ -12,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // Handler serves GET and HEAD /app/v1/<app>/<tag>/<name> to the devices
@@ -252,7 +250,7 @@ func pace(conn net.Conn, lowat int) {
 	}
 	if rc, err := tcp.SyscallConn(); err == nil {
 		_ = rc.Control(func(fd uintptr) {
-			_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_NOTSENT_LOWAT, lowat)
+			_ = setLowat(fd, lowat)
 		})
 	}
 }

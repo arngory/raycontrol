@@ -96,7 +96,7 @@ type ctConn struct {
 }
 
 func dialConntrack() (*ctConn, error) {
-	c, err := netlink.Dial(unix.NETLINK_NETFILTER, nil)
+	c, err := netlink.Dial(netlinkNetfilter, nil)
 	if err != nil {
 		return nil, fmt.Errorf("ctnetlink: %w", err)
 	}
@@ -106,7 +106,7 @@ func dialConntrack() (*ctConn, error) {
 func (c *ctConn) Close() error { return c.c.Close() }
 
 // nfgen is the nfnetlink header: the family, version 0, resource 0.
-func nfgen(family uint8) []byte { return []byte{family, unix.NFNETLINK_V0, 0, 0} }
+func nfgen(family uint8) []byte { return []byte{family, nfnetlinkV0, 0, 0} }
 
 // dump lists the entries of a family whose mark, masked, is value, and of
 // protocol proto (0: any): the kernel filters (ctnetlink_filter_match).
