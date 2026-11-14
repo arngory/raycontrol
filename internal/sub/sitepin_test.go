@@ -357,3 +357,96 @@ func TestSubscriptionPinOfTheKeyBefore(t *testing.T) {
 		t.Fatalf("after the hour: niko-pin %s", got)
 	}
 }
+
+// Pins this rayd made reach no subscription before its settle time
+// (ClockSeqAfter): an update rolled back in its first minutes puts back the
+// database of before its start, without them, and a client that took them
+// would refuse the node's leaf (Niko 1.45.0 on hy2-masq). The certificate
+// manager held back the first next key only; a site ordered for seconds
+// after the start (a switch, which makes a next key) published two pins at
+// once. Pins the database had at the start go out as before: a restart
+// that is no update does not take them away for ten minutes.
+func TestSubscriptionHoldsPinsOfTheFirstMinutes(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	var ids []int64
+	for _, kind := range []string{"reality", "naive"} {
+		svc, err := provision.CreateService(ctx, f.st, store.Service{Kind: kind, Name: kind, Enabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, svc.ID)
+	}
+	if err := f.st.SetUserServices(ctx, "alice", ids); err != nil {
+		t.Fatal(err)
+	}
+	site, err := f.st.ServiceByName(ctx, "site")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, certDER, err := provision.SelfSigned("site.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := provision.SPKIPin(certDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().Truncate(time.Second)
+	nextAt := func(at time.Time) {
+		t.Helper()
+		var settings map[string]any
+		json.Unmarshal([]byte(site.Settings), &settings)
+		settings["tls_next_pin"], settings["tls_next_at"] = vectorPinNext, at.Unix()
+		b, _ := json.Marshal(settings)
+		if err := f.st.UpdateService(ctx, site.ID, store.ServiceUpdate{Settings: string(b), Set: map[string][]byte{
+			provision.SecretTLSChain: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), provision.SecretTLSKey: keyDER,
+			provision.NextSecret(provision.SecretTLSKey): []byte("the next key")}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet(), ClockSeqAfter: start.Add(10 * time.Minute), PinsSince: start}
+	pins := func(at time.Time) string {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, profile := range p.Profiles {
+			if strings.HasPrefix(profile.Link, "naive+https://") {
+				u, err := url.Parse(profile.Link)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return u.Query().Get("niko-pin")
+			}
+		}
+		t.Fatal("no naive profile")
+		return ""
+	}
+	want := leaf + "," + vectorPinNext
+	// Pins from before the start: in the lists from the first second.
+	nextAt(start.Add(-24 * time.Hour))
+	if got := pins(start.Add(5 * time.Second)); got != want {
+		t.Fatalf("pins from before the start, 5 s in: niko-pin %q", got)
+	}
+	// Made 5 s after the start: held back until the settle time.
+	nextAt(start.Add(5 * time.Second))
+	for _, at := range []time.Duration{5 * time.Second, 10*time.Minute - time.Second} {
+		if got := pins(start.Add(at)); got != "" {
+			t.Fatalf("pins made after the start, %v in: niko-pin %q", at, got)
+		}
+	}
+	if got := pins(start.Add(10 * time.Minute)); got != want {
+		t.Fatalf("at the settle time: niko-pin %q", got)
+	}
+	// Without a start (tests, a server of no rayd), nothing is held.
+	srv.PinsSince = time.Time{}
+	if got := pins(start.Add(5 * time.Second)); got != want {
+		t.Fatalf("no start: niko-pin %q", got)
+	}
+}

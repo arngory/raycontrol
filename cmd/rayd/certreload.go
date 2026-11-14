@@ -39,8 +39,15 @@ func loadCertificate(chain, key string, parse func(chainPEM, keyPEM []byte) (tls
 // settleAfterStart is how long after its start rayd holds back what an
 // update rolled back in its first minutes could not take back from clients:
 // the subscription's seq by the clock (sub.Server.ClockSeqAfter) and the
-// first pins of a node updated to cert-pin-v1 (certs.Manager.NextKeyFrom).
+// first pins of a node updated to cert-pin-v1 (certs.Manager.NextKeyFrom),
+// and in the subscription every pin made meanwhile, by a switch too
+// (sub.Server.PinsSince).
 const settleAfterStart = 10 * time.Minute
+
+// processStart is this process's start: the pins made since are held back
+// from the subscription for settleAfterStart (sub.Server.PinsSince), those
+// of before are not.
+var processStart = time.Now()
 
 // certUnpairedAfter is how long rayd naive and rayd site wait for the
 // restart of a key switch before they exit to get it (tests shorten it).

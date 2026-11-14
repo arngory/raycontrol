@@ -55,6 +55,10 @@ type Server struct {
 	// counts on from the old seq: a client that took the clock's from the
 	// new rayd meanwhile would refuse every answer of the old one (review).
 	ClockSeqAfter time.Time
+	// PinsSince: pins made from then on (a site's next key or a switch,
+	// tls_next_at) reach no line before ClockSeqAfter, for the same
+	// rollback (spec/cert-pin-v1.md §8). rayd: its start. Zero: none held.
+	PinsSince time.Time
 	// Probe, when set, serves the channel probes (spec/probe-v1.md) on the
 	// same endpoint, and the subscription says so.
 	Probe *probe.Server
@@ -228,6 +232,7 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 		return Envelope{}, err
 	}
 	m.Now = now // what depends on the time (a pin of an hour) follows the subscription's
+	m.PinsSince, m.PinsAfter = s.PinsSince, s.ClockSeqAfter
 	u, err := s.Store.UserByName(ctx, userName)
 	if err != nil {
 		return Envelope{}, err

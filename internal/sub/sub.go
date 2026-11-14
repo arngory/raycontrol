@@ -556,7 +556,8 @@ func YggdrasilLink(m render.Model, s, inner render.Service, uuid string, device 
 // these keys only, whatever CA signed it. No parameter
 // where the node cannot promise the key of the next certificate
 // (provision.SiteKeyPins): the operator's own certificate, no certificate
-// manager.
+// manager. None either, for its first minutes, where this rayd changed the
+// site's pins (pinsHeld).
 func setSitePins(q url.Values, m render.Model, s render.Service) {
 	// The key before the last switch is in the list for an hour: by the
 	// subscription's time when it gives one (Server.build).
@@ -565,12 +566,26 @@ func setSitePins(q url.Values, m render.Model, s render.Service) {
 		now = time.Now()
 	}
 	for _, x := range m.Services {
-		if x.Kind == "site" && x.Name == provision.SiteOf(s.Service) {
+		if x.Kind == "site" && x.Name == provision.SiteOf(s.Service) && !pinsHeld(m, x, now) {
 			if pins := provision.SiteKeyPins(x.Service, x.Secrets, now); len(pins) > 0 {
 				q.Set("niko-pin", strings.Join(pins, ","))
 			}
 		}
 	}
+}
+
+// pinsHeld reports a site whose pins this rayd changed (a next key made,
+// a switch stored: tls_next_at from m.PinsSince on) before the settle
+// time m.PinsAfter (spec/cert-pin-v1.md §8). An update rolled back in its
+// first minutes puts back the database of before its start: pins made
+// since are gone from it, and a client that took them would refuse the
+// node's leaf. Pins the database had at the start are in that copy too
+// and go out as before: a restart that is no update loses none.
+func pinsHeld(m render.Model, site render.Service, now time.Time) bool {
+	if m.PinsSince.IsZero() || !now.Before(m.PinsAfter) {
+		return false
+	}
+	return provision.ParseSiteKeyState(site.Service).NextAt >= m.PinsSince.Unix()
 }
 
 // DoHLink is the DoH endpoint of a user (spec/subscription-v1.md §4): the

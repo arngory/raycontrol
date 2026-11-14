@@ -136,6 +136,11 @@ type Model struct {
 	Sets map[int64]map[int64]store.Credential
 	// Now dates the generated site; zero is the time of rendering.
 	Now time.Time
+	// PinsSince and PinsAfter hold back new pins (sub.Server.PinsSince):
+	// a site whose pins changed at PinsSince or later (its tls_next_at)
+	// gives its lines no niko-pin before PinsAfter. Zero PinsSince: none
+	// held.
+	PinsSince, PinsAfter time.Time
 	// FrontTCP puts TCP 443 behind the niko-server front (tcpmux, v0.2,
 	// docs/08-decisions.md R2-15): REALITY on a unix socket with PROXY v2,
 	// DoH and naive as passed sockets. Collect sets it; without it REALITY

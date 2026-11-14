@@ -812,7 +812,7 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 		return err
 	}
 	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier, RelayProbe: relayProbe,
-		ClockSeqAfter: time.Now().Add(settleAfterStart), App: app, Changed: changed}
+		ClockSeqAfter: time.Now().Add(settleAfterStart), PinsSince: processStart, App: app, Changed: changed}
 	port := int(ports[0].Num)
 	addr := ":" + strconv.Itoa(port)
 	// Channel probes (R4-16) on the same endpoint, and their UDP echo on
