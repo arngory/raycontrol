@@ -12,6 +12,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -71,22 +73,189 @@ func TestHandler(t *testing.T) {
 	}
 }
 
+// tok is a token of the node's shape (a UUID's), numbered.
+func tok(n int) string { return fmt.Sprintf("%08x-0000-4000-8000-000000000000", n) }
+
+// source is a Tokens that tests change as they go, safe to race with the
+// handler's background loads.
+type source struct {
+	mu     sync.Mutex
+	tokens map[string]bool
+	err    error
+	calls  atomic.Int32
+	gate   chan struct{} // when set, each call waits for a receive on it, or its context
+}
+
+func newSource(tokens ...string) *source {
+	s := &source{}
+	s.set(tokens...)
+	return s
+}
+
+func (s *source) set(tokens ...string) {
+	m := map[string]bool{}
+	for _, t := range tokens {
+		m[t] = true
+	}
+	s.mu.Lock()
+	s.tokens, s.err = m, nil
+	s.mu.Unlock()
+}
+
+func (s *source) fail(err error) {
+	s.mu.Lock()
+	s.err = err
+	s.mu.Unlock()
+}
+
+func (s *source) hold(gate chan struct{}) {
+	s.mu.Lock()
+	s.gate = gate
+	s.mu.Unlock()
+}
+
+func (s *source) Tokens(ctx context.Context) (map[string]bool, error) {
+	s.calls.Add(1)
+	s.mu.Lock()
+	gate := s.gate
+	s.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tokens, s.err
+}
+
 // A token taken away is refused once the handler forgets, not a cache
 // later (a revoked device's, R4-37).
 func TestForget(t *testing.T) {
-	tokens := map[string]bool{"old": true}
-	h := &Handler{CacheFor: time.Hour, Tokens: func(context.Context) (map[string]bool, error) { return tokens, nil }}
+	src := newSource(tok(1))
+	h := &Handler{CacheFor: time.Hour, Tokens: src.Tokens}
 	ctx := context.Background()
-	if h.check(ctx, "old") != accepted {
+	if h.check(ctx, tok(1), true) != accepted {
 		t.Fatal("the token is refused")
 	}
-	tokens = map[string]bool{"new": true}
-	if h.check(ctx, "old") != accepted {
+	src.set(tok(2))
+	if h.check(ctx, tok(1), true) != accepted {
 		t.Fatal("cached: still taken until forgotten")
 	}
 	h.Forget()
-	if h.check(ctx, "old") == accepted || h.check(ctx, "new") != accepted {
+	if h.check(ctx, tok(1), true) == accepted || h.check(ctx, tok(2), true) != accepted {
 		t.Fatal("after Forget the old token passes or the new one does not")
+	}
+}
+
+// After Forget a request with a token waits for the load Forget began, and
+// is never answered from the tokens before it, however slow the load; a
+// request with none does not wait. Past ReloadTimeout the load counts as
+// failed and the token gets the quick refusal; no second call of Tokens
+// starts while the first is out.
+func TestForgetWaits(t *testing.T) {
+	src := newSource(tok(1))
+	h := &Handler{CacheFor: time.Hour, ReloadTimeout: 300 * time.Millisecond, Tokens: src.Tokens}
+	ctx := context.Background()
+	if h.check(ctx, tok(1), true) != accepted {
+		t.Fatal("before")
+	}
+	gate := make(chan struct{})
+	src.hold(gate)
+	src.set(tok(2)) // tok(1)'s device revoked
+	h.Forget()
+	verdict := make(chan verdict)
+	go func() { verdict <- h.check(ctx, tok(1), true) }()
+	if h.check(ctx, "", false) != stranger {
+		t.Fatal("a request without a token")
+	}
+	select {
+	case v := <-verdict:
+		t.Fatalf("answered before the load: %v", v)
+	case <-time.After(50 * time.Millisecond):
+	}
+	gate <- struct{}{}
+	if v := <-verdict; v != refused {
+		t.Fatalf("the revoked token after the load: %v", v)
+	}
+	if h.check(ctx, tok(2), true) != accepted {
+		t.Fatal("the new token")
+	}
+
+	// A load that hangs: closed, at its timeout.
+	calls := src.calls.Load()
+	h.Forget()
+	start := time.Now()
+	if v := h.check(ctx, tok(2), true); v != refused {
+		t.Fatalf("a hung load: %v", v)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("waited %v", d)
+	}
+	for range 5 {
+		h.Forget()
+		h.check(ctx, tok(2), true)
+	}
+	if n := src.calls.Load() - calls; n > 2 {
+		t.Fatalf("%d calls of Tokens with one hung", n)
+	}
+	src.hold(nil)
+	close(gate)
+}
+
+// Past CacheFor with no Forget, the requests go on with the tokens they
+// have, not waiting for the load that runs.
+func TestStaleDoesNotWait(t *testing.T) {
+	src := newSource(tok(1))
+	h := &Handler{CacheFor: time.Millisecond, Tokens: src.Tokens}
+	ctx := context.Background()
+	if h.check(ctx, tok(1), true) != accepted {
+		t.Fatal("before")
+	}
+	gate := make(chan struct{})
+	src.hold(gate)
+	time.Sleep(5 * time.Millisecond)
+	start := time.Now()
+	for range 100 {
+		if h.check(ctx, tok(1), true) != accepted {
+			t.Fatal("refused while a load runs")
+		}
+	}
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Fatalf("waited %v", d)
+	}
+	for deadline := time.Now().Add(time.Second); src.calls.Load() < 2 && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if n := src.calls.Load(); n != 2 {
+		t.Fatalf("%d calls of Tokens, want 2: one load at a time", n)
+	}
+	src.hold(nil)
+	close(gate)
+}
+
+// A burst of Forgets during a load makes one more load, not one each.
+func TestForgetCoalesces(t *testing.T) {
+	src := newSource(tok(1))
+	h := &Handler{CacheFor: time.Hour, Tokens: src.Tokens}
+	ctx := context.Background()
+	h.check(ctx, tok(1), true)
+	gate := make(chan struct{})
+	src.hold(gate)
+	h.Forget()
+	for range 100 {
+		h.Forget()
+	}
+	src.hold(nil)
+	close(gate)
+	if h.check(ctx, tok(1), true) != accepted {
+		t.Fatal("after")
+	}
+	if n := src.calls.Load(); n < 2 || n > 3 { // the burst may come before the load reads the count
+		t.Fatalf("%d calls of Tokens, want 2 or 3", n)
 	}
 }
 
@@ -95,8 +264,9 @@ func TestForget(t *testing.T) {
 // never an answer to its query; a stranger, and a token retired longer
 // ago than RetiredFor, the site's answer; one accepted again is answered.
 func TestRetired(t *testing.T) {
-	tokens := map[string]bool{"a": true, "b": true}
-	h := &Handler{CacheFor: time.Hour, Tokens: func(context.Context) (map[string]bool, error) { return tokens, nil },
+	a, b, x := tok(0xa), tok(0xb), tok(0xc)
+	src := newSource(a, b)
+	h := &Handler{CacheFor: time.Hour, Tokens: src.Tokens,
 		Answer: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })}
 	status := func(path string) int {
 		t.Helper()
@@ -108,38 +278,38 @@ func TestRetired(t *testing.T) {
 		return w.Code
 	}
 	// PUT: an accepted token gets 405 without an upstream to ask.
-	if status("/dns-query/a") != http.StatusMethodNotAllowed || status("/dns-query/x") != http.StatusTeapot {
+	if status("/dns-query/"+a) != http.StatusMethodNotAllowed || status("/dns-query/"+x) != http.StatusTeapot {
 		t.Fatal("before")
 	}
-	tokens = map[string]bool{"b": true}
+	src.set(b)
 	h.Forget()
-	for path, want := range map[string]int{"/dns-query/a": 404, "/dns-query/b": 405, "/dns-query/x": 418, "/": 418,
-		"/dns-query/a/x": 418, "/dns-query/": 418} {
+	for path, want := range map[string]int{"/dns-query/" + a: 404, "/dns-query/" + b: 405, "/dns-query/" + x: 418, "/": 418,
+		"/dns-query/" + a + "/x": 418, "/dns-query/": 418} {
 		if got := status(path); got != want {
 			t.Errorf("%s: %d, want %d", path, got, want)
 		}
 	}
 	// Past RetiredFor: a stranger again.
-	h.mu.Lock()
+	h.rmu.Lock()
 	past := time.Now().UnixNano()
 	for i, e := range h.retired.ring {
 		if e.until != 0 {
 			h.retired.ring[i].until, h.retired.until[e.key] = past, past
 		}
 	}
-	h.mu.Unlock()
-	if got := status("/dns-query/a"); got != http.StatusTeapot {
+	h.rmu.Unlock()
+	if got := status("/dns-query/" + a); got != http.StatusTeapot {
 		t.Errorf("retired long ago: %d", got)
 	}
 	// Back (a user enabled again): accepted.
-	tokens = map[string]bool{"a": true, "b": true}
+	src.set(a, b)
 	h.Forget()
-	if got := status("/dns-query/a"); got != http.StatusMethodNotAllowed {
+	if got := status("/dns-query/" + a); got != http.StatusMethodNotAllowed {
 		t.Errorf("accepted again: %d", got)
 	}
 	// What is kept is no token.
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.rmu.Lock()
+	defer h.rmu.Unlock()
 	h.retired.prune(time.Now().UnixNano())
 	if len(h.retired.until) != 0 {
 		t.Errorf("pruned: %d left", len(h.retired.until))
@@ -168,55 +338,94 @@ func TestRetiredBound(t *testing.T) {
 	}
 }
 
-// While Tokens fails every request gets the quick 404, the good token's
-// and the stranger's alike: nobody waits out a silent site's hold, and
-// nothing is answered. One line says so, one more when it is over.
+// While Tokens fails a request whose path has a token-shaped segment gets
+// the quick 404, the good token's and a stranger's alike: nobody waits out
+// a silent site's hold, and nothing is answered. Any other request gets the
+// site's answer, as when the tokens are read. One line says so, one more
+// when it is over, and the retry is spaced.
 func TestTokensFail(t *testing.T) {
-	var fail bool
-	h := &Handler{CacheFor: time.Hour, Tokens: func(context.Context) (map[string]bool, error) {
-		if fail {
-			return nil, errors.New("database is locked")
-		}
-		return map[string]bool{"a": true}, nil
-	}, Answer: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })}
+	a := tok(0xa)
+	src := newSource(a)
+	h := &Handler{CacheFor: time.Hour, Tokens: src.Tokens, retry: 50 * time.Millisecond,
+		Answer: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })}
 	var log bytes.Buffer
-	h.Log = slog.New(slog.NewTextHandler(&log, nil))
+	var logMu sync.Mutex
+	h.Log = slog.New(slog.NewTextHandler(writerFunc(func(p []byte) (int, error) {
+		logMu.Lock()
+		defer logMu.Unlock()
+		return log.Write(p)
+	}), nil))
+	logged := func() string {
+		logMu.Lock()
+		defer logMu.Unlock()
+		return log.String()
+	}
 	ctx := context.Background()
-	if h.check(ctx, "a") != accepted {
+	if h.check(ctx, a, true) != accepted {
 		t.Fatal("before")
 	}
-	fail = true
+	src.fail(errors.New("database is locked"))
 	h.Forget()
+	status := func(path string) int {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodPut, path, nil))
+		return w.Code
+	}
+	status("/dns-query/" + a) // waits for the load the Forget began
 	for range 3 {
-		for _, tok := range []string{"a", "x", ""} {
-			if v := h.check(ctx, tok); v != refused {
-				t.Fatalf("%q while failing: %v", tok, v)
+		for path, want := range map[string]int{"/dns-query/" + a: 404, "/dns-query/" + tok(7): 404, "/x/" + tok(7) + "/y": 404,
+			"/": 418, "/anything": 418, "/dns-query/abc": 418} {
+			if got := status(path); got != want {
+				t.Fatalf("%s while failing: %d, want %d", path, got, want)
 			}
 		}
 	}
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/anything", nil))
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("a stranger while failing: %d", w.Code)
+	calls := src.calls.Load()
+	for range 20 {
+		h.Forget()
+		status("/dns-query/" + a)
 	}
-	if c := strings.Count(log.String(), "level=ERROR"); c != 1 {
-		t.Fatalf("%d error lines:\n%s", c, log.String())
+	if n := src.calls.Load() - calls; n > 2 {
+		t.Fatalf("%d calls of Tokens in a moment while failing", n)
 	}
-	fail = false
-	h.Forget()
-	if h.check(ctx, "a") != accepted || h.check(ctx, "x") != stranger {
-		t.Fatal("after")
+	if c := strings.Count(logged(), "level=ERROR"); c != 1 {
+		t.Fatalf("%d error lines:\n%s", c, logged())
 	}
-	if !strings.Contains(log.String(), "read again") || strings.Contains(log.String(), `"a"`) {
-		t.Fatalf("log:\n%s", log.String())
+	src.set(a)
+	time.Sleep(60 * time.Millisecond) // the retry
+	deadline := time.Now().Add(2 * time.Second)
+	for h.check(ctx, a, true) != accepted {
+		if time.Now().After(deadline) {
+			t.Fatal("after")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if h.check(ctx, tok(9), true) != stranger {
+		t.Fatal("a stranger after")
+	}
+	if !strings.Contains(logged(), "read again") || strings.Contains(logged(), a) {
+		t.Fatalf("log:\n%s", logged())
 	}
 	// A request whose client is gone does not fail the others.
 	h.Forget()
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
-	h.Tokens = func(ctx context.Context) (map[string]bool, error) { return map[string]bool{"a": true}, ctx.Err() }
-	if h.check(cctx, "a") != accepted {
+	h.check(cctx, a, true)
+	if h.check(ctx, a, true) != accepted {
 		t.Fatal("a cancelled request failed the tokens")
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+func TestTokenShaped(t *testing.T) {
+	for s, want := range map[string]bool{tok(1): true, strings.ToUpper(tok(1)): true, "": false, "abc": false,
+		strings.Replace(tok(1), "-", "x", 1): false, tok(1) + "0": false, strings.Replace(tok(1), "0", "g", 1): false} {
+		if tokenShaped(s) != want {
+			t.Errorf("%q: %v", s, !want)
+		}
 	}
 }
 
@@ -225,22 +434,22 @@ func TestTokensFail(t *testing.T) {
 func BenchmarkCheck(b *testing.B) {
 	tokens := map[string]bool{}
 	for i := range 30000 {
-		tokens[fmt.Sprintf("%08x-0000-4000-8000-000000000000", i)] = true
+		tokens[tok(i)] = true
 	}
 	h := &Handler{Tokens: func(context.Context) (map[string]bool, error) { return tokens, nil }}
 	ctx := context.Background()
-	h.check(ctx, "")
-	h.mu.Lock()
+	h.check(ctx, tok(0), true)
+	h.rmu.Lock()
 	for i := range MaxRetired {
 		h.retired.add(fmt.Sprintf("%08x-0000-4000-8000-00000000000f", i), time.Now().Add(time.Hour).UnixNano())
 	}
-	h.mu.Unlock()
-	for _, c := range []struct{ name, tok string }{{"valid", "00001234-0000-4000-8000-000000000000"},
+	h.rmu.Unlock()
+	for _, c := range []struct{ name, tok string }{{"valid", tok(0x1234)},
 		{"retired", "00001234-0000-4000-8000-00000000000f"}, {"stranger", "ffffffff-0000-4000-8000-000000000000"}} {
 		b.Run(c.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				h.check(ctx, c.tok)
+				h.check(ctx, c.tok, true)
 			}
 		})
 	}

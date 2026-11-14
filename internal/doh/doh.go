@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,13 +27,24 @@ import (
 var DefaultUpstreams = []string{"https://1.1.1.1/dns-query", "https://9.9.9.9/dns-query"}
 
 // Handler serves the DoH endpoint.
+//
+// Requests read the tokens through an atomic pointer and never wait for
+// a load of them, but in one case: after Forget, a request with a token
+// is not answered from tokens read before that Forget. It waits for a
+// load begun after it (ReloadTimeout at most, twice if one was already
+// on its way), then fails closed. One load at a time, in the background:
+// Forgets that come while one runs make one more, not one each.
 type Handler struct {
 	// Tokens returns the tokens accepted now.
 	Tokens    func(ctx context.Context) (map[string]bool, error)
 	Upstreams []string     // DefaultUpstreams when empty
 	HTTP      *http.Client // with a timeout when nil
-	// CacheFor bounds how long Tokens is trusted (30 s when zero).
+	// CacheFor bounds how long Tokens is trusted (30 s when zero); past it
+	// the requests go on with the tokens they have while a load runs.
 	CacheFor time.Duration
+	// ReloadTimeout bounds a call of Tokens (5 s when zero): past it the
+	// load counts as failed, and no other starts before that call returns.
+	ReloadTimeout time.Duration
 	// Answer serves whatever is not a query with a token: the site's
 	// answer, as naive gives it (an empty 404 when nil).
 	Answer http.Handler
@@ -40,12 +52,27 @@ type Handler struct {
 	// never a query, a token or an address.
 	Log *slog.Logger
 
-	mu     sync.Mutex
-	tokens map[string]bool
-	until  time.Time
-	// failing: Tokens failed at the last ask; every request is refused.
-	failing bool
+	cur  atomic.Pointer[snapshot]
+	want atomic.Uint64 // Forgets so far
+
+	mu      sync.Mutex
+	running bool          // a load is on its way
+	changed chan struct{} // closed and replaced at each new snapshot
+	retry   time.Duration // retryFailed when zero
+
+	rmu     sync.Mutex
 	retired retired
+	last    map[string]bool // the tokens of the last load that worked
+}
+
+// snapshot is one load of the tokens.
+type snapshot struct {
+	tokens map[string]bool
+	gen    uint64    // the Forgets before the load began
+	until  time.Time // trusted until; for a failure, when to try again
+	// failing: Tokens failed; requests with a token-shaped path get the
+	// quick refusal, the others the site's answer.
+	failing bool
 }
 
 const maxMessage = 65535
@@ -59,8 +86,12 @@ const (
 	MaxRetired = 8192
 )
 
-// retryFailed is how soon Tokens is asked again after it failed.
-const retryFailed = time.Second
+// retryFailed is how soon Tokens is asked again after it failed;
+// defaultReloadTimeout bounds a call of it.
+const (
+	retryFailed          = time.Second
+	defaultReloadTimeout = 5 * time.Second
+)
 
 // retired remembers the tokens the handler stopped accepting, for
 // RetiredFor: a device holding one (a rotation's previous token past its
@@ -146,69 +177,234 @@ func notFound(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusNotFound)
 }
 
-// check is the verdict on a request's token ("" for a request with none):
-// accepted while Tokens has it; refused while Tokens fails, for everyone,
-// and for a token retired lately; else a stranger. The tokens are asked
-// for at most every CacheFor, and at once after Forget.
-func (h *Handler) check(ctx context.Context, token string) verdict {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+// check is the verdict on a request's token ("" for a request with none;
+// shaped: its path has a segment of a token's shape): accepted while the
+// tokens have it; refused for a token retired lately; while Tokens fails,
+// refused if shaped, else a stranger. The tokens are loaded at most every
+// CacheFor, and at once after Forget.
+func (h *Handler) check(ctx context.Context, token string, shaped bool) verdict {
+	need := h.want.Load()
+	s := h.cur.Load()
 	now := time.Now()
-	if now.After(h.until) {
-		h.load(ctx, now)
+	switch {
+	case s == nil || (!s.failing && s.gen < need):
+		// Never loaded, or forgotten since: only a request with a token
+		// needs the tokens, and it gets none older than the Forget.
+		if token == "" {
+			h.kick(now)
+			return stranger
+		}
+		if s = h.await(ctx, need); s == nil || s.gen < need {
+			return closed(shaped)
+		}
+	case !now.Before(s.until):
+		h.kick(now) // stale: answered from these while the load runs
 	}
 	switch {
-	case h.failing:
-		return refused
-	case token != "" && h.tokens[token]:
+	case s.failing:
+		return closed(shaped)
+	case token != "" && s.tokens[token]:
 		return accepted
-	case token != "" && h.retired.has(token, now.UnixNano()):
+	case token != "" && h.isRetired(token, now.UnixNano()):
 		return refused
 	}
 	return stranger
 }
 
-// load asks Tokens anew; what it no longer has is retired. A failure
-// refuses every request until Tokens answers, asked again every
-// retryFailed: a device whose token is good must not wait out a silent
-// site's hold while the store cannot be read, and one whose token is gone
-// must get no answer.
-func (h *Handler) load(ctx context.Context, now time.Time) {
-	// Not the request's cancellation: a client gone must not fail them all.
-	t, err := h.Tokens(context.WithoutCancel(ctx))
-	if err != nil {
-		if !h.failing && h.Log != nil {
-			h.Log.Error("doh: the tokens cannot be read; every query is refused until they can", "err", err)
-		}
-		h.failing, h.until = true, now.Add(retryFailed)
-		return
+// closed is the verdict while the tokens cannot be had: a device whose
+// token is good must not wait out a silent site's hold, one whose token is
+// gone must get no answer, and a request with no token gets the site's
+// answer as ever.
+func closed(shaped bool) verdict {
+	if shaped {
+		return refused
 	}
-	if h.failing && h.Log != nil {
-		h.Log.Info("doh: the tokens are read again")
-	}
-	h.failing = false
-	at := now.UnixNano()
-	h.retired.prune(at)
-	for tok := range h.tokens {
-		if !t[tok] {
-			h.retired.add(tok, now.Add(RetiredFor).UnixNano())
-		}
-	}
-	every := h.CacheFor
-	if every == 0 {
-		every = 30 * time.Second
-	}
-	h.tokens, h.until = t, now.Add(every)
+	return stranger
 }
 
-// Forget makes the next request ask Tokens again: rayd calls it on every
-// change of the node's state, so a token gone with it (a revoked device's,
-// R4-37) is refused at once, not up to CacheFor later. The tokens it had
-// stay, to tell which went (retired).
-func (h *Handler) Forget() {
+func (h *Handler) isRetired(token string, now int64) bool {
+	h.rmu.Lock()
+	defer h.rmu.Unlock()
+	return h.retired.has(token, now)
+}
+
+func (h *Handler) reloadTimeout() time.Duration {
+	if h.ReloadTimeout > 0 {
+		return h.ReloadTimeout
+	}
+	return defaultReloadTimeout
+}
+
+// await waits for a snapshot of a load begun after the need-th Forget,
+// starting one if none is on its way, for two ReloadTimeouts at most (one
+// begun before may be running) or until the request is gone; it returns
+// the snapshot there is then.
+func (h *Handler) await(ctx context.Context, need uint64) *snapshot {
+	timer := time.NewTimer(2 * h.reloadTimeout())
+	defer timer.Stop()
+	for {
+		h.mu.Lock()
+		if s := h.cur.Load(); s != nil && s.gen >= need {
+			h.mu.Unlock()
+			return s
+		}
+		if !h.running {
+			h.start()
+		}
+		ch := h.changedLocked()
+		h.mu.Unlock()
+		select {
+		case <-ch:
+		case <-timer.C:
+			return h.cur.Load()
+		case <-ctx.Done():
+			return h.cur.Load()
+		}
+	}
+}
+
+// kick starts a load if none runs and one is due: never loaded, stale, or
+// forgotten since; after a failure not before its retry.
+func (h *Handler) kick(now time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.until = time.Time{}
+	if h.running {
+		return
+	}
+	s := h.cur.Load()
+	if s == nil || !now.Before(s.until) || (!s.failing && s.gen < h.want.Load()) {
+		h.start()
+	}
+}
+
+func (h *Handler) changedLocked() chan struct{} {
+	if h.changed == nil {
+		h.changed = make(chan struct{})
+	}
+	return h.changed
+}
+
+// start runs a load in the background; h.mu is held.
+func (h *Handler) start() {
+	h.running = true
+	go h.load()
+}
+
+// load asks Tokens anew, with its own deadline (not a request's: a client
+// gone must not fail them all), and publishes what it got; what the tokens
+// no longer have is retired. A failure, or a call past ReloadTimeout,
+// publishes a failing snapshot until the retry. A call past its time is
+// waited for before the next one starts: one at a time, even wedged. When
+// a Forget came during the load, another starts at once.
+func (h *Handler) load() {
+	gen := h.want.Load()
+	ctx, cancel := context.WithTimeout(context.Background(), h.reloadTimeout())
+	defer cancel()
+	type result struct {
+		tokens map[string]bool
+		err    error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		t, err := h.Tokens(ctx)
+		ch <- result{t, err}
+	}()
+	select {
+	case r := <-ch:
+		h.publish(gen, r.tokens, r.err)
+	case <-ctx.Done():
+		h.publish(gen, nil, fmt.Errorf("no answer in %v", h.reloadTimeout()))
+		<-ch
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.running = false
+	if s := h.cur.Load(); h.want.Load() > gen && !s.failing {
+		h.start()
+	}
+}
+
+func (h *Handler) publish(gen uint64, t map[string]bool, err error) {
+	now := time.Now()
+	prev := h.cur.Load()
+	wasFailing := prev != nil && prev.failing
+	s := &snapshot{gen: gen}
+	if err != nil {
+		if !wasFailing && h.Log != nil {
+			h.Log.Error("doh: the tokens cannot be read; queries with a token are refused until they can", "err", err)
+		}
+		retry := h.retry
+		if retry == 0 {
+			retry = retryFailed
+		}
+		s.failing, s.until = true, now.Add(retry)
+	} else {
+		if wasFailing && h.Log != nil {
+			h.Log.Info("doh: the tokens are read again")
+		}
+		at := now.UnixNano()
+		h.rmu.Lock()
+		h.retired.prune(at)
+		for tok := range h.last {
+			if !t[tok] {
+				h.retired.add(tok, now.Add(RetiredFor).UnixNano())
+			}
+		}
+		h.last = t
+		h.rmu.Unlock()
+		every := h.CacheFor
+		if every == 0 {
+			every = 30 * time.Second
+		}
+		s.tokens, s.until = t, now.Add(every)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cur.Store(s)
+	close(h.changedLocked())
+	h.changed = make(chan struct{})
+}
+
+// Forget makes the tokens be loaded again, at once: rayd calls it on every
+// change of the node's state, so a token gone with it (a revoked device's,
+// R4-37) is refused at once, not up to CacheFor later. Once it returns, no
+// request with a token is answered from tokens loaded before it. The
+// tokens it had stay, to tell which went (retired). While Tokens fails it
+// does not hasten the retry: nothing is accepted then anyway.
+func (h *Handler) Forget() {
+	h.want.Add(1)
+	h.kick(time.Now())
+}
+
+// tokenShaped reports whether a path segment has a token's shape: 36
+// characters, hex digits and four dashes as a UUID's.
+func tokenShaped(seg string) bool {
+	if len(seg) != 36 {
+		return false
+	}
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		switch {
+		case i == 8 || i == 13 || i == 18 || i == 23:
+			if c != '-' {
+				return false
+			}
+		case '0' <= c && c <= '9', 'a' <= c && c <= 'f', 'A' <= c && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// shapedPath reports whether a segment of path has a token's shape.
+func shapedPath(path string) bool {
+	for seg := range strings.SplitSeq(path, "/") {
+		if tokenShaped(seg) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -216,7 +412,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok || strings.Contains(token, "/") {
 		token = ""
 	}
-	switch h.check(r.Context(), token) {
+	switch h.check(r.Context(), token, shapedPath(r.URL.Path)) {
 	case refused:
 		// An empty 404, as a 404 site answers: at once, a status the
 		// client reads as a refusal over h2 and h3 alike.

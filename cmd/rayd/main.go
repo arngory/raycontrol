@@ -595,7 +595,9 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 	for {
 		wake := changes()
 		// A change may have taken tokens away (a revoked device's, R4-37):
-		// the next query asks the store again.
+		// each handler loads them again at once, and no query with a token
+		// is answered from those of before (doh.Handler.Forget). Changes
+		// that come while a load runs make one more load, not one each.
 		for _, l := range running {
 			l.h.Forget()
 		}
@@ -772,9 +774,10 @@ func serveRemote(ctx context.Context, r *api.Remote, changes func() <-chan struc
 func dohHandler(st *store.Store, service int64, answer http.Handler, log *slog.Logger) *doh.Handler {
 	return &doh.Handler{Tokens: func(ctx context.Context) (map[string]bool, error) {
 		return st.DoHTokens(ctx, service, time.Now())
+	}, Answer: answer, Log: log,
 		// The upstreams through the node's roots: the queries are the users',
 		// a root planted in the image's store must not read them.
-	}, Answer: answer, Log: log, HTTP: roots.Node.Client(5 * time.Second)}
+		HTTP: roots.Node.Client(5 * time.Second)}
 }
 
 // syncDNS keeps the node's records in its DNS provider's zone: when the
