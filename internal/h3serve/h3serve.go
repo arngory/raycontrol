@@ -38,17 +38,38 @@ const (
 	// header block left without END_HEADERS waits for the idle time.
 	HeaderTimeout = 10 * time.Second
 
-	// MaxPacketSize bounds the server's datagrams (the UDP payload): what
-	// Chrome sends and what the servers it talks to send it. A session of
-	// Chrome's is not a proxy's (SessionUsage::kDestination) and takes
-	// 1250 bytes; captures of Chrome 157 against Google's and Cloudflare's
-	// servers saw none longer either way (spec/naive-udp-v1.md §5.1). With
-	// quic-go's own 1280, and with its search of the path's MTU upward,
-	// which runs where the socket can set DF (to 1452), the node's packets
-	// were longer than any a real server sends a browser, and the probes
-	// break on tunnels that drop what does not fit.
+	// MaxPacketSize bounds the server's datagrams (the UDP payload) to a
+	// client on IPv4: what Chrome sends and what the servers it talks to
+	// send it. A session of Chrome's is not a proxy's
+	// (SessionUsage::kDestination) and takes 1250 bytes; captures of Chrome
+	// 157 against Google's and Cloudflare's servers saw none longer either
+	// way (spec/naive-udp-v1.md §4.5). With quic-go's own 1280, and with its
+	// search of the path's MTU upward, which runs where the socket can set
+	// DF (to 1452), the node's packets were longer than any a real server
+	// sends a browser, and the probes break on tunnels that drop what does
+	// not fit.
 	MaxPacketSize = 1250
+	// MaxPacketSizeIPv6 is the same to a client on IPv6. Chrome takes 20
+	// bytes off its packets when its socket is IPv6
+	// (net/quic/quic_chromium_client_session.cc: kAdditionalOverheadForIPv6),
+	// and a quiche server, which starts at 1000, sends what the client's
+	// Initial measured (quic_connection.cc, ProcessValidatedPacket): 1230.
+	// 1250 there is also 1298 bytes of IP, over the 1280 that IPv6 promises,
+	// and with no search of the path a tunnel of 1280 dropped every full
+	// packet of the server's.
+	MaxPacketSizeIPv6 = MaxPacketSize - 20
 )
+
+// PacketSize is the server's packet size to a client at addr:
+// MaxPacketSizeIPv6 to an IPv6 address that is not IPv4's, MaxPacketSize
+// to any other. The front passes an IPv4 client's address as IPv4
+// (nikoipc), a dual-stack socket as IPv4 in IPv6: both are IPv4 here.
+func PacketSize(addr net.Addr) int {
+	if ua, ok := addr.(*net.UDPAddr); ok && ua.IP.To4() == nil && len(ua.IP) == net.IPv6len {
+		return MaxPacketSizeIPv6
+	}
+	return MaxPacketSize
+}
 
 // Options are what a server takes of its caller.
 type Options struct {
@@ -70,11 +91,22 @@ type Options struct {
 	MaxHeaderBytes int
 }
 
-// Config is the QUIC side of a server: packets of MaxPacketSize, no
-// search of the path's MTU.
+// Config is the QUIC side of a server: packets of PacketSize to each
+// client, chosen once per connection, and no search of the path's MTU.
+// What the server accepts is the same for both: quic-go's 1452.
 func Config(o Options) *quic.Config {
-	return &quic.Config{MaxIdleTimeout: o.Idle, KeepAlivePeriod: 0, MaxIncomingStreams: o.MaxStreams,
+	v4 := &quic.Config{MaxIdleTimeout: o.Idle, KeepAlivePeriod: 0, MaxIncomingStreams: o.MaxStreams,
 		InitialPacketSize: MaxPacketSize, DisablePathMTUDiscovery: true}
+	v6 := *v4
+	v6.InitialPacketSize = MaxPacketSizeIPv6
+	c := *v4
+	c.GetConfigForClient = func(info *quic.ClientInfo) (*quic.Config, error) {
+		if PacketSize(info.RemoteAddr) == MaxPacketSizeIPv6 {
+			return &v6, nil
+		}
+		return v4, nil
+	}
+	return &c
 }
 
 // pending are the request streams of one QUIC connection that have no
