@@ -498,6 +498,8 @@ type dohListener struct {
 	cert [32]byte
 	// certs is what its handshakes answer with, TCP and QUIC.
 	certs *certfile.Holder
+	// h answers the queries; it forgets its tokens at every change.
+	h *doh.Handler
 }
 
 // serveDoH keeps rayd's TLS listener on the socket of every enabled DoH
@@ -522,6 +524,11 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 	}()
 	for {
 		wake := changes()
+		// A change may have taken tokens away (a revocation renews the
+		// user's, R4-36): the next query asks the store again.
+		for _, l := range running {
+			l.h.Forget()
+		}
 		services, err := st.ListServices(ctx)
 		if err != nil {
 			log.Error("doh", "err", err)
@@ -593,7 +600,7 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 					}
 				}()
 			}
-			running[svc.Name] = &dohListener{srv: srv, h3: h3stop, cert: sum, certs: certs}
+			running[svc.Name] = &dohListener{srv: srv, h3: h3stop, cert: sum, certs: certs, h: h}
 			log.Info("doh serving", "service", svc.Name)
 		}
 		for name := range running {

@@ -59,6 +59,16 @@ func (h *Handler) accepted(ctx context.Context, token string) bool {
 	return token != "" && h.tokens[token]
 }
 
+// Forget drops the tokens taken from Tokens, so that the next request
+// asks again: rayd calls it on every change of the node's state, so a
+// token gone with it (a revocation's new credentials, R4-36) is refused at
+// once, not up to CacheFor later.
+func (h *Handler) Forget() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.tokens, h.until = nil, time.Time{}
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	token, ok := strings.CutPrefix(r.URL.Path, "/dns-query/")
 	if !ok || strings.Contains(token, "/") || !h.accepted(r.Context(), token) {

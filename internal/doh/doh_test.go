@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHandler(t *testing.T) {
@@ -63,5 +64,24 @@ func TestHandler(t *testing.T) {
 	r.Body.Close()
 	if r.StatusCode != http.StatusUnsupportedMediaType {
 		t.Errorf("wrong type: %s", r.Status)
+	}
+}
+
+// A token taken away is refused once the handler forgets, not a cache
+// later (a revocation renews the user's, R4-36).
+func TestForget(t *testing.T) {
+	tokens := map[string]bool{"old": true}
+	h := &Handler{CacheFor: time.Hour, Tokens: func(context.Context) (map[string]bool, error) { return tokens, nil }}
+	ctx := context.Background()
+	if !h.accepted(ctx, "old") {
+		t.Fatal("the token is refused")
+	}
+	tokens = map[string]bool{"new": true}
+	if !h.accepted(ctx, "old") {
+		t.Fatal("cached: still taken until forgotten")
+	}
+	h.Forget()
+	if h.accepted(ctx, "old") || !h.accepted(ctx, "new") {
+		t.Fatal("after Forget the old token passes or the new one does not")
 	}
 }
