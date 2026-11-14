@@ -20,6 +20,7 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [10-quickstart-debian13.md](10-quickstart-debian13.md) | Нода с нуля на Debian 13 с Cloudflare и выдача подписки клиенту. |
 | [11-asn-sources.md](11-asn-sources.md) | Источники IP → ASN для сводки клиентов: базы и API, их лицензии и условия. |
 | [15-traffic.md](15-traffic.md) | Какой трафик несёт каждый профиль (TCP, UDP, DNS, ICMP) и в каком виде; mtr через туннель. |
+| [16-cronet-build.md](16-cronet-build.md) | Своя сборка libcronet и naive: что собирается, замеры, раннер с пределами по потокам и памяти, диск, ccache. |
 | [cheatsheet.md](cheatsheet.md) | Все команды `rayctl` на одной странице. |
 | [spec/spa-v2.md](spec/spa-v2.md) | Формат SPA v2 и пакета регистрации устройства (заморожен). |
 | [spec/subscription-v1.md](spec/subscription-v1.md) | Подписка: запрос, подписи, ссылки с параметрами `niko-*` (заморожена). |
