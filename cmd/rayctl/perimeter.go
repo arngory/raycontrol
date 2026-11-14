@@ -179,6 +179,26 @@ func perimeterResult(h perimeterHost) []hostcheck.Result {
 	return []hostcheck.Result{res}
 }
 
+// egressStatusLine is the egress policy in rayctl status. On a node of
+// rayd serve -supervise (docs/18-platforms-and-hosts.md) there is no
+// perimeter unless one was started by hand, and the policy's local part
+// never covers rayd's UID, as which the data plane runs there: what is set
+// is not what the kernel does, and the line says so.
+func egressStatusLine(e *nodev1.Egress, supervised bool) string {
+	if !supervised {
+		return egressLine(e)
+	}
+	line := "set: " + strings.TrimSuffix(egressLine(e), " (rayctl egress)")
+	if e.GetLocal() {
+		line += "; local networks: not in the kernel here (rayd serve -supervise: the data plane runs as rayd, " +
+			"which the local part does not cover), only the processes' own checks (Xray's routing, naive's and niko-server's)"
+	}
+	if e.GetSmtp() || e.GetBittorrent() {
+		line += "; smtp and bittorrent: only where a rayspa runs, which -supervise does not start"
+	}
+	return line + " (rayctl egress)"
+}
+
 // perimeterLoopState is loopState, but for rayd's perimeter loop when
 // rayspa follows the feed and reports nothing of its table (a rayspa
 // older than rayd): "unknown", not "ok" (R4-40).

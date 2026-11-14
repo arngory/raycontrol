@@ -406,6 +406,14 @@ func (c *cli) status(ctx context.Context) error {
 		return err
 	}
 	m := r.Msg
+	// A node of rayd serve -supervise (GetEgress names rayd's UID): no
+	// perimeter of its own, so the policy is not the kernel's there.
+	supervised := false
+	if m.Egress != nil {
+		if e, err := c.c.GetEgress(ctx, connect.NewRequest(&nodev1.GetEgressRequest{})); err == nil {
+			supervised = len(e.Msg.Uids) > 0
+		}
+	}
 	// sshd's ports against the perimeter's: root on the node only (sshd -T).
 	var ssh, per []hostcheck.Result
 	if !c.json && c.identity == nil && thisOS == nodeOS && os.Geteuid() == 0 {
@@ -424,7 +432,7 @@ func (c *cli) status(ctx context.Context) error {
 			fmt.Fprintf(w, "debug\topen until %s (rayctl debug off)\n", clock(m.DebugUntil))
 		}
 		if m.Egress != nil {
-			fmt.Fprintf(w, "egress\t%s\n", egressLine(m.Egress))
+			fmt.Fprintf(w, "egress\t%s\n", egressStatusLine(m.Egress, supervised))
 		}
 		// rayd's loops: the last round of each (O-2).
 		for _, l := range m.Loops {
