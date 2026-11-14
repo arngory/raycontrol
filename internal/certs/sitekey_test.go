@@ -37,6 +37,7 @@ type siteNode struct {
 	id     int64
 	issued int // certificates issued
 	fail   bool
+	clock  *time.Time // the test's clock, once it has one (at)
 }
 
 func newSiteNode(t *testing.T, keys provision.SiteKeyPolicy) *siteNode {
@@ -70,6 +71,7 @@ func newSiteNode(t *testing.T, keys provision.SiteKeyPolicy) *siteNode {
 // at makes the manager's certificates start at the time of the order (now
 // points to the test's clock; nil: the time of the first order stays).
 func (n *siteNode) at(ca *testca.CA, now *time.Time) *siteNode {
+	n.clock = now
 	n.m.Issue = func(_ context.Context, names []string, key crypto.Signer) ([][]byte, error) {
 		if n.fail {
 			return nil, errors.New("rate limited")
@@ -119,16 +121,18 @@ type siteState struct {
 func (n *siteNode) state() siteState {
 	n.t.Helper()
 	ctx := context.Background()
-	svc, err := n.st.ServiceByName(ctx, "site")
-	if err != nil {
-		n.t.Fatal(err)
-	}
-	secrets, err := n.st.ServiceSecrets(ctx, n.id)
+	svc, secrets, err := n.st.ServiceWithSecrets(ctx, n.id)
 	if err != nil {
 		n.t.Fatal(err)
 	}
 	s := siteState{key: secrets[provision.SecretTLSKey], next: secrets[provision.NextSecret(provision.SecretTLSKey)],
-		pins: provision.SiteKeyPins(svc, secrets), keys: provision.ParseSiteKeyState(svc)}
+		keys: provision.ParseSiteKeyState(svc)}
+	// The pins a subscription would carry at the test's time.
+	at := time.Unix(1767225600, 0)
+	if n.clock != nil {
+		at = *n.clock
+	}
+	s.pins = provision.SiteKeyPins(svc, secrets, at)
 	if block, _ := pem.Decode(secrets[provision.SecretTLSChain]); block != nil {
 		if s.leaf, err = x509.ParseCertificate(block.Bytes); err != nil {
 			n.t.Fatal(err)
@@ -290,11 +294,23 @@ func TestManagerRotatesAtPeriod(t *testing.T) {
 	if len(second.next) == 0 || bytes.Equal(second.next, first.next) || bytes.Equal(second.next, first.key) {
 		t.Fatal("no new next key")
 	}
-	if !slices.Equal(second.pins, []string{first.pins[1], pinOf(t, second.next)}) {
-		t.Fatalf("pins after the switch %v", second.pins)
+	// The key before stays in the list, last, for an hour (§5): a client
+	// that fetches before the processes took the new certificate meets the
+	// old leaf.
+	if !slices.Equal(second.pins, []string{first.pins[1], pinOf(t, second.next), first.pins[0]}) {
+		t.Fatalf("pins after the switch %v, before %v", second.pins, first.pins)
 	}
-	if second.keys.KeyAt != now.Unix() || second.keys.NextAt != now.Unix() {
+	if second.keys.KeyAt != now.Unix() || second.keys.NextAt != now.Unix() || second.keys.PrevUntil != now.Add(time.Hour).Unix() {
 		t.Fatalf("times after the switch: %+v", second.keys)
+	}
+	now = now.Add(time.Hour - time.Second)
+	if got := n.state().pins; len(got) != 3 {
+		t.Fatalf("pins a second before the hour is over: %v", got)
+	}
+	now = now.Add(time.Second)
+	second = n.state()
+	if !slices.Equal(second.pins, []string{first.pins[1], pinOf(t, second.next)}) {
+		t.Fatalf("pins an hour after the switch %v", second.pins)
 	}
 
 	// A period of a day now: the key is old enough at once, the next one
@@ -343,14 +359,14 @@ func TestManagerRotatesWhenAsked(t *testing.T) {
 	lead := 14 * day
 
 	// No certificate yet.
-	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now, lead, true); !errors.Is(err, store.ErrPrecondition) {
+	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now, lead, provision.SiteSwitchForce); !errors.Is(err, store.ErrPrecondition) {
 		t.Fatalf("without a certificate: %v", err)
 	}
 	n.m.Once(ctx, now)
 	first := n.state()
 
 	now = start.Add(13 * day)
-	err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now, lead, false)
+	err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now, lead, provision.SiteSwitchLead)
 	if !errors.Is(err, store.ErrPrecondition) {
 		t.Fatalf("13 days in: %v", err)
 	}
@@ -366,7 +382,7 @@ func TestManagerRotatesWhenAsked(t *testing.T) {
 	}
 
 	// Anyway.
-	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now, lead, true); err != nil {
+	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now, lead, provision.SiteSwitchForce); err != nil {
 		t.Fatal(err)
 	}
 	if n.state().keys.RotateAt != now.Unix() {
@@ -395,22 +411,22 @@ func TestManagerRotatesWhenAsked(t *testing.T) {
 	}
 
 	// The new next key has its own lead; after it no force is needed.
-	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now.Add(lead-time.Minute), lead, false); !errors.Is(err, store.ErrPrecondition) {
+	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now.Add(lead-time.Minute), lead, provision.SiteSwitchLead); !errors.Is(err, store.ErrPrecondition) {
 		t.Fatalf("before the new key's lead: %v", err)
 	}
 	now = now.Add(lead)
-	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now, lead, false); err != nil {
+	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now, lead, provision.SiteSwitchLead); err != nil {
 		t.Fatalf("after the lead: %v", err)
 	}
 	// Asked twice: one request.
-	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now.Add(time.Minute), lead, false); err != nil || n.state().keys.RotateAt != now.Unix() {
+	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now.Add(time.Minute), lead, provision.SiteSwitchLead); err != nil || n.state().keys.RotateAt != now.Unix() {
 		t.Fatalf("asked twice: %v", err)
 	}
 	if got := n.m.Once(ctx, now); got != 1 || n.state().leafPin != second.pins[1] {
 		t.Fatalf("the switch after the lead: stored %d", got)
 	}
 	// Not a site.
-	if err := provision.RequestSiteKeyRotation(ctx, n.st, "reality", now, lead, true); !errors.Is(err, store.ErrInvalid) {
+	if err := provision.RequestSiteKeyRotation(ctx, n.st, "reality", now, lead, provision.SiteSwitchForce); !errors.Is(err, store.ErrInvalid) {
 		t.Fatalf("a REALITY service: %v", err)
 	}
 }
@@ -430,7 +446,15 @@ func TestManagerAfterImport(t *testing.T) {
 	first := n.state()
 
 	ownChain, ownKey := operatorCert(t, now.Add(-time.Hour), now.Add(30*day))
-	got, err := provision.SetCertificate(ctx, n.st, "site", ownChain, ownKey, now)
+	// Another key under links that carry pins: refused, nothing changed.
+	if _, err := provision.SetCertificate(ctx, n.st, "site", ownChain, ownKey, now, false); !errors.Is(err, store.ErrPrecondition) ||
+		!strings.Contains(err.Error(), "-force") {
+		t.Fatalf("an import that cuts pinned clients, without force: %v", err)
+	}
+	if s := n.state(); s.keys.Imported || !slices.Equal(s.pins, first.pins) || !bytes.Equal(s.key, first.key) {
+		t.Fatal("the refused import changed the site")
+	}
+	got, err := provision.SetCertificate(ctx, n.st, "site", ownChain, ownKey, now, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,11 +465,11 @@ func TestManagerAfterImport(t *testing.T) {
 	if !imported.keys.Imported || imported.pins != nil || !bytes.Equal(imported.next, first.next) {
 		t.Fatalf("after the import: %+v, pins %v", imported.keys, imported.pins)
 	}
-	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now, 0, true); !errors.Is(err, store.ErrInvalid) {
+	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now, 0, provision.SiteSwitchForce); !errors.Is(err, store.ErrInvalid) {
 		t.Fatalf("a switch on the operator's certificate: %v", err)
 	}
 	// Again, the same key: no client is cut by it.
-	if got, err := provision.SetCertificate(ctx, n.st, "site", ownChain, ownKey, now); err != nil || got.Unpinned {
+	if got, err := provision.SetCertificate(ctx, n.st, "site", ownChain, ownKey, now, false); err != nil || got.Unpinned {
 		t.Fatalf("second import: %+v %v", got, err)
 	}
 	// Not due: nothing ordered, no pins.
@@ -468,7 +492,7 @@ func TestManagerAfterImport(t *testing.T) {
 	// An import on a site that never had the node's keys: nothing was
 	// pinned, nothing is cut, and no next key is made for it.
 	n2 := newSiteNode(t, provision.SiteKeyPolicy{})
-	if got, err := provision.SetCertificate(ctx, n2.st, "site", ownChain, ownKey, start); err != nil || got.Unpinned {
+	if got, err := provision.SetCertificate(ctx, n2.st, "site", ownChain, ownKey, start, false); err != nil || got.Unpinned {
 		t.Fatalf("import on a new site: %+v %v", got, err)
 	}
 	if n2.m.Once(ctx, start); len(n2.state().next) != 0 || n2.state().pins != nil || n2.issued != 0 {
@@ -488,7 +512,7 @@ func TestManagerAskWithoutNextKey(t *testing.T) {
 	n.at(ca, &now)
 	n.m.Once(ctx, now)
 	first := n.state()
-	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now, 0, false); err != nil {
+	if err := provision.RequestSiteKeyRotation(ctx, n.st, "site", now, 0, provision.SiteSwitchLead); err != nil {
 		t.Fatal(err)
 	}
 	if err := n.st.UpdateService(ctx, n.id, store.ServiceUpdate{Delete: []string{provision.NextSecret(provision.SecretTLSKey)}}); err != nil {
@@ -518,7 +542,7 @@ func TestManagerImportDuringOrder(t *testing.T) {
 	reported := 0
 	n.m.Report = func(string, error) { reported++ }
 	n.m.Issue = func(_ context.Context, names []string, key crypto.Signer) ([][]byte, error) {
-		if _, err := provision.SetCertificate(ctx, n.st, "site", ownChain, ownKey, now); err != nil {
+		if _, err := provision.SetCertificate(ctx, n.st, "site", ownChain, ownKey, now, false); err != nil {
 			t.Error(err)
 		}
 		return ca.Issue(names, key.Public(), now.Add(-time.Hour), now.Add(90*day))

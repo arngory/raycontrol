@@ -227,6 +227,7 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 	if err != nil {
 		return Envelope{}, err
 	}
+	m.Now = now // what depends on the time (a pin of an hour) follows the subscription's
 	u, err := s.Store.UserByName(ctx, userName)
 	if err != nil {
 		return Envelope{}, err

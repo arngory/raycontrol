@@ -124,7 +124,7 @@ func TestSupervisedNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provision.SetCertificate(ctx, st, "site", ca.ChainPEM, ca.KeyPEM, time.Now()); err != nil {
+	if _, err := provision.SetCertificate(ctx, st, "site", ca.ChainPEM, ca.KeyPEM, time.Now(), false); err != nil {
 		t.Fatal(err)
 	}
 	// A traffic limit: rayd counts alice's bytes (traffic-limit-v1).

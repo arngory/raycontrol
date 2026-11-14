@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"math/big"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/store"
+	"github.com/arngory/raycontrol/internal/testca"
 )
 
 // issueSite gives the site a certificate as the certificate manager does:
@@ -55,12 +57,15 @@ func TestRotateSiteKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rotate := func(ctx context.Context, force bool) (*nodev1.RotateServiceResponse, error) {
-		r, err := srv.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "site", Force: force}))
+	ask := func(ctx context.Context, force, fresh bool) (*nodev1.RotateServiceResponse, error) {
+		r, err := srv.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "site", Force: force, Fresh: fresh}))
 		if err != nil {
 			return nil, err
 		}
 		return r.Msg, nil
+	}
+	rotate := func(ctx context.Context, force bool) (*nodev1.RotateServiceResponse, error) {
+		return ask(ctx, force, false)
 	}
 	state := func() provision.SiteKeyState {
 		svc, err := srv.Store.ServiceByName(ctx, "site")
@@ -86,13 +91,13 @@ func TestRotateSiteKey(t *testing.T) {
 		t.Fatalf("before the first certificate: %v", err)
 	}
 
-	// The next key in subscriptions for a day: too early.
+	// The next key in subscriptions for four days: too early.
 	now := time.Now()
-	issueSite(t, srv.Store, site.ID, now.Add(-24*time.Hour))
+	issueSite(t, srv.Store, site.ID, now.Add(-4*24*time.Hour))
 	before := changes.Load()
 	_, err = rotate(as(0), false)
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition || !strings.Contains(err.Error(), "rayctl service rotate site -force") {
-		t.Fatalf("a day in: %v", err)
+		t.Fatalf("four days in: %v", err)
 	}
 	if state().RotateAt != 0 || changes.Load() != before {
 		t.Fatal("a refused switch changed the site")
@@ -126,5 +131,105 @@ func TestRotateSiteKey(t *testing.T) {
 	}
 	if r, err := rotate(as(0), false); err != nil || r.Key != "tls" {
 		t.Fatalf("after the lead: %+v %v", r, err)
+	}
+
+	// That switch made now: the key in use is minutes old, and the one after
+	// it too. Forced again it would land on a key that lists in use lack:
+	// refused, with the way out named.
+	issueSite(t, srv.Store, site.ID, now.Add(-time.Minute))
+	if _, err := rotate(as(0), true); connect.CodeOf(err) != connect.CodeFailedPrecondition || !strings.Contains(err.Error(), "rayctl service rotate site -fresh") {
+		t.Fatalf("forced a minute after a switch: %v", err)
+	}
+	// A fresh key: root only, no lead and no age asked, audited as itself.
+	for who, c := range map[string]context.Context{"the group": as(1000), "remote": remote} {
+		if _, err := ask(c, false, true); connect.CodeOf(err) != connect.CodePermissionDenied {
+			t.Fatalf("a fresh key, %s: %v", who, err)
+		}
+	}
+	if r, err := ask(as(0), false, true); err != nil || r.Key != "tls" {
+		t.Fatalf("a fresh key: %+v %v", r, err)
+	}
+	if s := state(); s.RotateAt == 0 || s.RotateHow != provision.SiteSwitchFresh {
+		t.Fatalf("the request for a fresh key: %+v", s)
+	}
+	entries, err = srv.Store.ListAudit(ctx, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(entries, func(e store.AuditEntry) bool {
+		return e.Action == "service.rotate fresh" && e.Target == "site" && e.Result == "ok"
+	}) {
+		t.Fatalf("audit: %+v", entries)
+	}
+}
+
+// The operator's certificate replaces the key clients pin and takes the
+// pins off every line: root's on the node, as the key switch is, not the
+// API group's and not a remote admin's. And it is refused, unless forced,
+// when it would cut the clients that hold the pins.
+func TestSetCertificateIsRoots(t *testing.T) {
+	srv, _, _ := startServer(t)
+	srv.Certificates = true
+	ctx := context.Background()
+	as := func(uid uint32) context.Context {
+		return context.WithValue(context.WithValue(ctx, peerKey{}, &unix.Ucred{Uid: uid}), actorKey{}, "test")
+	}
+	remote := context.WithValue(ctx, actorKey{}, "admin/laptop (remote)")
+	site, err := provision.CreateService(ctx, srv.Store, store.Service{Kind: "site", Name: "site", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	issueSite(t, srv.Store, site.ID, now.Add(-30*24*time.Hour))
+	pins := func() []string {
+		svc, secrets, err := srv.Store.ServiceWithSecrets(ctx, site.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return provision.SiteKeyPins(svc, secrets, now)
+	}
+	pinned := pins()
+	if len(pinned) != 2 {
+		t.Fatalf("pins %v", pinned)
+	}
+	svc, _ := srv.Store.ServiceByName(ctx, "site")
+	own, err := testca.New([]string{provision.SiteName(svc)}, now.Add(-time.Hour), now.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := func(ctx context.Context, force bool) (*nodev1.SetCertificateResponse, error) {
+		r, err := srv.SetCertificate(ctx, connect.NewRequest(&nodev1.SetCertificateRequest{Service: "site", ChainPem: own.ChainPEM,
+			KeyPem: own.KeyPEM, Force: force}))
+		if err != nil {
+			return nil, err
+		}
+		return r.Msg, nil
+	}
+	for who, c := range map[string]context.Context{"the group": as(1000), "remote": remote} {
+		if _, err := set(c, true); connect.CodeOf(err) != connect.CodePermissionDenied {
+			t.Fatalf("%s replaced the pinned key: %v", who, err)
+		}
+	}
+	if _, err := set(as(0), false); connect.CodeOf(err) != connect.CodeFailedPrecondition || !strings.Contains(err.Error(), "-force") {
+		t.Fatalf("root, another key under pins, without force: %v", err)
+	}
+	if got := pins(); !slices.Equal(got, pinned) {
+		t.Fatalf("pins after the refusals: %v, were %v", got, pinned)
+	}
+	r, err := set(as(0), true)
+	if err != nil || !r.Unpinned || pins() != nil {
+		t.Fatalf("root with force: %+v %v, pins %v", r, err, pins())
+	}
+	entries, err := srv.Store.ListAudit(ctx, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var forced, refused bool
+	for _, e := range entries {
+		forced = forced || (e.Action == "service.cert force" && e.Target == "site" && e.Result == "ok")
+		refused = refused || (e.Action == "service.cert" && e.Target == "site" && strings.HasPrefix(e.Result, "error"))
+	}
+	if !forced || !refused {
+		t.Fatalf("audit: %+v", entries)
 	}
 }

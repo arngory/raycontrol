@@ -592,19 +592,34 @@ func (s *Server) SetServiceOption(ctx context.Context, req *connect.Request[node
 	return connect.NewResponse(&nodev1.SetServiceOptionResponse{Service: servicePB(svc)}), nil
 }
 
+// SetCertificate puts the operator's certificate on a site: root on the
+// node only, as Backup. The request carries a private key, and the call
+// replaces the key the clients pin and takes the pins off the lines
+// (spec/cert-pin-v1.md §7): a member of the API group must not do what
+// rotateSiteKey keeps to root.
 func (s *Server) SetCertificate(ctx context.Context, req *connect.Request[nodev1.SetCertificateRequest]) (*connect.Response[nodev1.SetCertificateResponse], error) {
-	c, err := provision.SetCertificate(ctx, s.Store, req.Msg.Service, req.Msg.ChainPem, req.Msg.KeyPem, time.Now())
-	if err := s.done(ctx, "service.cert", req.Msg.Service, err); err != nil {
+	if !isRoot(ctx) {
+		return nil, connect.NewError(connect.CodePermissionDenied, errors.New("a site's certificate: root on the node only"))
+	}
+	c, err := provision.SetCertificate(ctx, s.Store, req.Msg.Service, req.Msg.ChainPem, req.Msg.KeyPem, time.Now(), req.Msg.Force)
+	action := "service.cert"
+	if req.Msg.Force {
+		action += " force"
+	}
+	if err := s.done(ctx, action, req.Msg.Service, err); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.SetCertificateResponse{Names: c.Names, NotAfter: c.NotAfter.Unix(), MissingNext: c.MissingNext,
 		Unpinned: c.Unpinned}), nil
 }
 
-// rotateSiteKey asks for a site's next certificate key (spec/cert-pin-v1.md
-// §5): root on the node only, as the site's own certificate is; the
-// certificate manager, woken by the change, orders with that key at once.
-func (s *Server) rotateSiteKey(ctx context.Context, name string, force bool, now time.Time) (*connect.Response[nodev1.RotateServiceResponse], error) {
+// rotateSiteKey asks for another key of a site's certificate
+// (spec/cert-pin-v1.md §5): root on the node only, as the site's own
+// certificate is. The certificate manager, woken by the change, gives the
+// order one try at once, whatever its back-off, and goes on by the
+// back-off if that fails. how is one of provision's SiteSwitch values;
+// each is audited under its own action.
+func (s *Server) rotateSiteKey(ctx context.Context, name, how string, now time.Time) (*connect.Response[nodev1.RotateServiceResponse], error) {
 	if !isRoot(ctx) {
 		return nil, connect.NewError(connect.CodePermissionDenied, errors.New("a site's certificate key: root on the node only"))
 	}
@@ -613,11 +628,11 @@ func (s *Server) rotateSiteKey(ctx context.Context, name string, force bool, now
 		err = fmt.Errorf("%w: rayd issues no certificates here (-acme-directory is empty): the key of %s changes with the certificate you import "+
 			"(rayctl service cert)", store.ErrPrecondition, name)
 	} else {
-		err = provision.RequestSiteKeyRotation(ctx, s.Store, name, now, s.SiteKeyLead, force)
+		err = provision.RequestSiteKeyRotation(ctx, s.Store, name, now, s.SiteKeyLead, how)
 	}
 	action := "service.rotate"
-	if force {
-		action += " force"
+	if how != provision.SiteSwitchLead {
+		action += " " + how
 	}
 	if err := s.done(ctx, action, name, err); err != nil {
 		return nil, err
@@ -628,7 +643,14 @@ func (s *Server) rotateSiteKey(ctx context.Context, name string, force bool, now
 func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.RotateServiceRequest]) (*connect.Response[nodev1.RotateServiceResponse], error) {
 	now := time.Now()
 	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "site" {
-		return s.rotateSiteKey(ctx, req.Msg.Name, req.Msg.Force, now)
+		how := provision.SiteSwitchLead
+		switch {
+		case req.Msg.Fresh:
+			how = provision.SiteSwitchFresh
+		case req.Msg.Force:
+			how = provision.SiteSwitchForce
+		}
+		return s.rotateSiteKey(ctx, req.Msg.Name, how, now)
 	}
 	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "masterdns" {
 		// masterdns-key-rotation §2: the new key at once, in subscriptions

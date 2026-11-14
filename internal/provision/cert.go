@@ -21,7 +21,8 @@ type Certificate struct {
 	// Unpinned: the lines of the services under the site carried the pins
 	// of the node's keys (SiteKeyPins), and this certificate has another
 	// key. Clients fail their pin until they get their subscription again,
-	// whose lines carry none now (spec/cert-pin-v1.md §7).
+	// whose lines carry none now (spec/cert-pin-v1.md §7). Only with force:
+	// without it such a certificate is refused.
 	Unpinned bool
 }
 
@@ -36,7 +37,11 @@ type Certificate struct {
 // key change the operator asked for is off. The next key stays: the
 // certificate manager takes it when it issues for the site again
 // (PlanSiteIssue).
-func SetCertificate(ctx context.Context, st *store.Store, name string, chainPEM, keyPEM []byte, now time.Time) (Certificate, error) {
+//
+// A certificate whose key is neither the one in use nor the next one, on a
+// site whose lines carry pins, would cut every client that holds them until
+// it fetches its subscription: store.ErrPrecondition unless force.
+func SetCertificate(ctx context.Context, st *store.Store, name string, chainPEM, keyPEM []byte, now time.Time, force bool) (Certificate, error) {
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
 	var out Certificate
@@ -84,12 +89,22 @@ func SetCertificate(ctx context.Context, st *store.Store, name string, chainPEM,
 			return out, err
 		}
 	}
-	secrets, err := st.ServiceSecrets(ctx, svc.ID)
+	svc, secrets, err := st.ServiceWithSecrets(ctx, svc.ID)
 	if err != nil {
 		return out, err
 	}
-	pinned := SiteKeyPins(svc, secrets)
-	settings, err := setFields(svc.Settings, map[string]any{"tls_imported": true, "tls_rotate_at": nil})
+	// The keys clients were promised: the one in use and the next. Not the
+	// one before, which is in the lists of an hour only.
+	pinned := SiteKeyPins(svc, secrets, now)
+	out.Unpinned = len(pinned) > 0 && !slices.Contains(pinned[:2], leafPin(leaf))
+	if out.Unpinned && !force {
+		return Certificate{}, fmt.Errorf("%w: the links of naive, hy2-masq and DoH under %s carry the pins of the node's keys, and this "+
+			"certificate has another key: every client that holds them would refuse it until it fetches its subscription again "+
+			"(a client that goes through one of these profiles notices by itself, after minutes; the others when they next fetch). "+
+			"Import it anyway with -force (rayctl service cert %s -chain F -key F -force)", store.ErrPrecondition, name, name)
+	}
+	settings, err := setFields(svc.Settings, map[string]any{"tls_imported": true, "tls_rotate_at": nil, "tls_rotate_pin": nil,
+		"tls_rotate_how": nil, "tls_prev_pin": nil, "tls_prev_until": nil})
 	if err != nil {
 		return out, err
 	}
@@ -100,6 +115,5 @@ func SetCertificate(ctx context.Context, st *store.Store, name string, chainPEM,
 		return out, err
 	}
 	out.Names, out.NotAfter = names, leaf.NotAfter
-	out.Unpinned = len(pinned) > 0 && !slices.Contains(pinned, leafPin(leaf))
 	return out, nil
 }

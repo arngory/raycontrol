@@ -6,7 +6,9 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net/url"
 	"path/filepath"
@@ -21,12 +23,13 @@ import (
 	"github.com/arngory/raycontrol/internal/testca"
 )
 
-// The pins of spec/cert-pin-v1.md §9 (provision's TestPublicKeyPinVectors
+// The pins of spec/cert-pin-v1.md §10 (provision's TestPublicKeyPinVectors
 // checks them against their SubjectPublicKeyInfo): P-256 keys with the
-// private scalars 01..20 and 21..40.
+// private scalars 01..20, 21..40 and 41..60.
 const (
 	vectorPinCurrent = "8dWUSbcnFl3nMr8oMzgSK5liimFZGP7cZ9h4__z0fac"
 	vectorPinNext    = "aKDy1GvP0Ev823jJBZeuwhvSD4gJN1ax7KUDa0YLvnM"
+	vectorPinBefore  = "YZcjdu03922roQ30O9I6r26d48YyWMiges0KEq_U8Z0"
 )
 
 func vectorKey(t *testing.T, first byte) *ecdsa.PrivateKey {
@@ -71,7 +74,7 @@ func vectorModel(t *testing.T, siteSettings string) render.Model {
 	}}
 }
 
-// The sample lines of spec/cert-pin-v1.md §9, byte for byte: what the node
+// The sample lines of spec/cert-pin-v1.md §10, byte for byte: what the node
 // writes for the three kinds, the pins through a comma, which the query
 // carries as %2C (as niko-dns-spare's).
 func TestSitePinLines(t *testing.T) {
@@ -102,6 +105,49 @@ func TestSitePinLines(t *testing.T) {
 		for _, problem := range strictProblems(c.name, c.got) {
 			t.Errorf("%s: %s", c.name, problem)
 		}
+	}
+}
+
+// For an hour after a switch that was not forced the list has a third pin,
+// the key before, last (§2, §5): the sample line of §10, and the list of
+// two again once the hour is over, by the model's time.
+func TestSitePinLinesAfterSwitch(t *testing.T) {
+	until := time.Unix(1767229200, 0)
+	m := vectorModel(t, `{"sni":"s0p1.example.com","tls_next_pin":"`+vectorPinNext+`","tls_prev_pin":"`+vectorPinBefore+
+		`","tls_prev_until":1767229200}`)
+	m.Now = until.Add(-time.Second)
+	three := vectorPinCurrent + "%2C" + vectorPinNext + "%2C" + vectorPinBefore
+	want := "naive+https://niko:f3b1c0de-0000-4000-8000-000000000001@203.0.113.7:443?niko-ack=1&niko-node=00112233445566778899aabbccddeeff" +
+		"&niko-pin=" + three + "&niko-svc=5&sni=n4k2.example.com&uot=2#naive"
+	got := sub.NaiveLink(m, m.Services[1], "f3b1c0de-0000-4000-8000-000000000001")
+	if got != want {
+		t.Errorf("an hour after a switch:\n got %s\nwant %s", got, want)
+	}
+	for _, link := range []string{got, sub.HysteriaLink(m, m.Services[2], "p"), sub.DoHLink(m, m.Services[3], "p")} {
+		u, err := url.Parse(link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pins := u.Query().Get("niko-pin"); pins != vectorPinCurrent+","+vectorPinNext+","+vectorPinBefore {
+			t.Errorf("niko-pin reads back as %s: %s", pins, link)
+		}
+	}
+	for kind, link := range map[string]string{"naive": got, "hy2-masq": sub.HysteriaLink(m, m.Services[2], "p"), "doh": sub.DoHLink(m, m.Services[3], "p")} {
+		for _, problem := range strictProblems(kind, link) {
+			t.Errorf("%s: %s", kind, problem)
+		}
+	}
+	m.Now = until
+	if u, _ := url.Parse(sub.NaiveLink(m, m.Services[1], "p")); u.Query().Get("niko-pin") != vectorPinCurrent+","+vectorPinNext {
+		t.Errorf("when the hour is over: niko-pin %s", u.Query().Get("niko-pin"))
+	}
+}
+
+// The lead of a site's next key and the age a forced switch asks of the key
+// in use are measured against how long a client may use a list.
+func TestSiteKeyMinAgeIsTheLifetime(t *testing.T) {
+	if provision.SiteKeyMinAge != sub.Lifetime {
+		t.Fatalf("provision.SiteKeyMinAge is %v, a subscription lives %v", provision.SiteKeyMinAge, sub.Lifetime)
 	}
 }
 
@@ -218,7 +264,15 @@ func TestSitePinsLeaveWithImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := provision.SetCertificate(ctx, st, "site", own.ChainPEM, own.KeyPEM, now)
+	// Refused as long as it is not forced: it would cut every client that
+	// holds the pins. Nothing changes.
+	if _, err := provision.SetCertificate(ctx, st, "site", own.ChainPEM, own.KeyPEM, now, false); !errors.Is(err, store.ErrPrecondition) {
+		t.Fatalf("an import of another key under pinned links, without force: %v", err)
+	}
+	if kept := pinsOf(); kept["naive"] != before["naive"] {
+		t.Fatalf("the refused import changed the pins: %v", kept)
+	}
+	c, err := provision.SetCertificate(ctx, st, "site", own.ChainPEM, own.KeyPEM, now, true)
 	if err != nil || !c.Unpinned {
 		t.Fatalf("import: %+v %v", c, err)
 	}
@@ -231,5 +285,75 @@ func TestSitePinsLeaveWithImport(t *testing.T) {
 	// hy2-obfs has its own certificate: its pin stays.
 	if after["hy2-obfs"] != before["hy2-obfs"] {
 		t.Fatalf("hy2-obfs: pin %q, before %q", after["hy2-obfs"], before["hy2-obfs"])
+	}
+}
+
+// The pin of the key before a switch is in the list for its hour by the
+// subscription's own time, in the signed answer a device gets.
+func TestSubscriptionPinOfTheKeyBefore(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	var ids []int64
+	for _, kind := range []string{"reality", "naive"} {
+		svc, err := provision.CreateService(ctx, f.st, store.Service{Kind: kind, Name: kind, Enabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, svc.ID)
+	}
+	if err := f.st.SetUserServices(ctx, "alice", ids); err != nil {
+		t.Fatal(err)
+	}
+	site, err := f.st.ServiceByName(ctx, "site")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, certDER, err := provision.SelfSigned("site.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Truncate(time.Second)
+	var settings map[string]any
+	json.Unmarshal([]byte(site.Settings), &settings)
+	settings["tls_next_pin"], settings["tls_next_at"] = vectorPinNext, now.Unix()
+	settings["tls_prev_pin"], settings["tls_prev_until"] = vectorPinBefore, now.Add(time.Hour).Unix()
+	b, _ := json.Marshal(settings)
+	leaf, err := provision.SPKIPin(certDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := []byte("the next key: its pin is stored beside it, the key is not parsed")
+	if err := f.st.UpdateService(ctx, site.ID, store.ServiceUpdate{Settings: string(b), Set: map[string][]byte{
+		provision.SecretTLSChain: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), provision.SecretTLSKey: keyDER, provision.NextSecret(provision.SecretTLSKey): next}}); err != nil {
+		t.Fatal(err)
+	}
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	pins := func(at time.Time) string {
+		t.Helper()
+		env, err := srv.Build(ctx, "alice", at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, profile := range p.Profiles {
+			if strings.HasPrefix(profile.Link, "naive+https://") {
+				u, err := url.Parse(profile.Link)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return u.Query().Get("niko-pin")
+			}
+		}
+		t.Fatal("no naive profile")
+		return ""
+	}
+	if got := pins(now.Add(59 * time.Minute)); got != leaf+","+vectorPinNext+","+vectorPinBefore {
+		t.Fatalf("within the hour: niko-pin %s", got)
+	}
+	if got := pins(now.Add(time.Hour)); got != leaf+","+vectorPinNext {
+		t.Fatalf("after the hour: niko-pin %s", got)
 	}
 }

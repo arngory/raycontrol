@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -64,6 +65,17 @@ type Manager struct {
 	// Keys is when a site's key changes by itself, at an issuance; zero:
 	// only when the operator asks.
 	Keys provision.SiteKeyPolicy
+	// NextKeyFrom: a site that has a certificate and no next key (a node
+	// just updated to cert-pin-v1) gets one only from then on (rayd: ten
+	// minutes after its start, as the subscription's seq takes the clock).
+	// An update that fails in its first minutes goes back to a version
+	// that knows no pins: none must have reached a client by then.
+	NextKeyFrom time.Time
+	// Check, if set, refuses a certificate before it is stored: rayd gives
+	// what the site process checks when it loads one (a chain long enough
+	// for REALITY). Stored unchecked, the site would keep the old
+	// certificate until it expired while the others served the new one.
+	Check func(chainPEM, keyPEM []byte) error
 	// Notify runs after a certificate is stored (rayd re-renders).
 	Notify func()
 	// Report, if set, gets each order's outcome per site (O-2).
@@ -80,6 +92,7 @@ type Manager struct {
 	fails map[string]int
 	next  map[string]time.Time
 	last  map[string]time.Time // the last failed try of a site
+	asked map[string]int64     // the operator's switch (its time) that got its try past the back-off
 	wake  chan struct{}
 	retry atomic.Bool
 }
@@ -147,6 +160,10 @@ func (m *Manager) wait(every time.Duration, now time.Time) time.Duration {
 			every = max(d, time.Second)
 		}
 	}
+	// The first next keys of an updated node: then, not an interval later.
+	if d := m.NextKeyFrom.Sub(now); d > 0 && d < every {
+		every = max(d, time.Second)
+	}
 	return every
 }
 
@@ -154,6 +171,9 @@ func (m *Manager) wait(every time.Duration, now time.Time) time.Duration {
 func (m *Manager) Once(ctx context.Context, now time.Time) int {
 	if m.fails == nil {
 		m.fails, m.next, m.last = map[string]int{}, map[string]time.Time{}, map[string]time.Time{}
+	}
+	if m.asked == nil {
+		m.asked = map[string]int64{}
 	}
 	// From the last try, not from next: changes in a row (a cron job) keep
 	// the gap however many there are.
@@ -175,14 +195,25 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 			continue
 		}
 		// The key after the one in use (cert-pin-v1 §4): a site from before
-		// it gets it at the first check, and its pins go into subscriptions.
-		// Whatever the back-off: no order is made for it.
-		if made, err := provision.EnsureSiteNextKey(ctx, m.Store, svc.ID, now); err != nil {
-			m.log().Error("certificates: next key", "service", svc.Name, "err", err)
-		} else if made {
-			m.log().Info("next certificate key made; its pin is in subscriptions from now", "service", svc.Name)
+		// it gets it at the first check from NextKeyFrom on, and its pins go
+		// into subscriptions. Whatever the back-off: no order is made for it.
+		if !now.Before(m.NextKeyFrom) {
+			if made, err := provision.EnsureSiteNextKey(ctx, m.Store, svc.ID, now); err != nil {
+				m.log().Error("certificates: next key", "service", svc.Name, "err", err)
+			} else if made {
+				m.log().Info("next certificate key made; its pin is in subscriptions from now", "service", svc.Name)
+			}
 		}
-		if now.Before(m.next[svc.Name]) {
+		// The operator's switch (rayctl service rotate SITE) is an order
+		// with another key, and it gets one try now whatever the back-off
+		// of earlier failures: a leaked key must not serve a day longer
+		// because a renewal failed last week. One try a request; if it
+		// fails too, the back-off goes on.
+		state := provision.ParseSiteKeyState(svc)
+		rotate := state.RotateAt != 0
+		if rotate && m.asked[svc.Name] != state.RotateAt {
+			m.asked[svc.Name] = state.RotateAt
+		} else if now.Before(m.next[svc.Name]) {
 			continue
 		}
 		// The names in use and those REALITY moves to at its next switch
@@ -195,9 +226,8 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 		}
 		chain := secrets[provision.SecretTLSChain]
 		want := append(slices.Clone(names), next...)
-		// Due, or the operator asked for the next key (rayctl service
-		// rotate SITE): the switch is an issuance with it.
-		rotate := provision.ParseSiteKeyState(svc).RotateAt != 0
+		// Due, or the operator asked for another key: the switch is an
+		// issuance with it.
 		if !due(chain, want, now) && !rotate {
 			continue
 		}
@@ -216,6 +246,8 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 			// The operator's certificate came during the order: theirs
 			// stays, and the next check looks at it. No failure.
 			m.log().Info("certificate not stored: the site changed during the order", "service", svc.Name)
+			delete(m.asked, svc.Name) // a request that came meanwhile gets its try
+			m.Wake()
 			continue
 		}
 		if m.Report != nil {
@@ -233,9 +265,13 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 		delete(m.next, svc.Name)
 		delete(m.last, svc.Name)
 		stored++
-	}
-	if stored > 0 && m.Notify != nil {
-		m.Notify()
+		// At once, not after the other sites' orders, which take their
+		// time: subscriptions carry this certificate's pins from the
+		// moment it is stored, and the processes take it only when rayd
+		// renders it.
+		if m.Notify != nil {
+			m.Notify()
+		}
 	}
 	return stored
 }
@@ -286,6 +322,15 @@ func (m *Manager) issue(ctx context.Context, svc store.Service, names []string, 
 	for _, der := range chain {
 		if err := pem.Encode(&pemChain, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
 			return err
+		}
+	}
+	if m.Check != nil {
+		keyDER, err := x509.MarshalPKCS8PrivateKey(plan.Key)
+		if err != nil {
+			return err
+		}
+		if err := m.Check(pemChain.Bytes(), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})); err != nil {
+			return fmt.Errorf("the certificate is not one the site can serve: %w", err)
 		}
 	}
 	if err := provision.StoreSiteCertificate(ctx, m.Store, svc.ID, pemChain.Bytes(), plan, now); err != nil {

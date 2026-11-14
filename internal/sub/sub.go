@@ -551,15 +551,22 @@ func YggdrasilLink(m render.Model, s, inner render.Service, uuid string, device 
 
 // setSitePins adds niko-pin to the line of a service that answers with its
 // site's certificate (spec/cert-pin-v1.md §2): the pins of the key of the
-// leaf in use and of the next key, from the stored keys. The client takes
-// a leaf with one of these keys only, whatever CA signed it. No parameter
+// leaf in use, of the next key and, for an hour after a switch, of the key
+// before, from what the store holds. The client takes a leaf with one of
+// these keys only, whatever CA signed it. No parameter
 // where the node cannot promise the key of the next certificate
 // (provision.SiteKeyPins): the operator's own certificate, no certificate
 // manager.
 func setSitePins(q url.Values, m render.Model, s render.Service) {
+	// The key before the last switch is in the list for an hour: by the
+	// subscription's time when it gives one (Server.build).
+	now := m.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
 	for _, x := range m.Services {
 		if x.Kind == "site" && x.Name == provision.SiteOf(s.Service) {
-			if pins := provision.SiteKeyPins(x.Service, x.Secrets); len(pins) > 0 {
+			if pins := provision.SiteKeyPins(x.Service, x.Secrets, now); len(pins) > 0 {
 				q.Set("niko-pin", strings.Join(pins, ","))
 			}
 		}

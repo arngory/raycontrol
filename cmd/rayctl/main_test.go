@@ -241,7 +241,13 @@ func TestKeyStateSite(t *testing.T) {
 		{`{"sni":"a.example.com"}`, ""}, // no certificate of the node's yet, or no ACME
 		{`{"tls_key_at":1767225600,"tls_next_at":1767312000}`, "key since 2026-01-01 00:00, next key pinned since 2026-01-02 00:00"},
 		{`{"tls_key_at":1767225600,"tls_next_at":1767312000,"tls_rotate_at":1768000000}`,
-			"key since 2026-01-01 00:00, next key pinned since 2026-01-02 00:00, switch to it ordered"},
+			"key since 2026-01-01 00:00, next key pinned since 2026-01-02 00:00, switch to it asked"},
+		{`{"tls_key_at":1767225600,"tls_next_at":1767312000,"tls_rotate_at":1768000000,"tls_rotate_how":"fresh"}`,
+			"key since 2026-01-01 00:00, next key pinned since 2026-01-02 00:00, switch to a fresh key asked"},
+		{`{"tls_key_at":1767225600,"tls_next_at":1767312000,"tls_prev_pin":"x","tls_prev_until":4102444800}`,
+			"key since 2026-01-01 00:00, next key pinned since 2026-01-02 00:00, previous key pinned until 2100-01-01 00:00"},
+		{`{"tls_key_at":1767225600,"tls_next_at":1767312000,"tls_prev_pin":"x","tls_prev_until":1767312000}`,
+			"key since 2026-01-01 00:00, next key pinned since 2026-01-02 00:00"},
 		{`{"tls_key_at":1767225600,"tls_next_at":1767312000,"tls_imported":true}`, "certificate of your own: no pins"},
 	} {
 		if got := keyState(&nodev1.Service{Kind: "site", SettingsJson: c.settings}); got != c.want {

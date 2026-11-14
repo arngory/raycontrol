@@ -326,9 +326,10 @@ func strictProblems(kind, link string) []string {
 // pinProblems lists what the client holds against niko-pin
 // (subscription-v1 §4, cert-pin-v1 §2): only on lines whose TLS the client
 // checks itself (Hysteria2, naive, DoH); a list through "," of base64url
-// without padding, 32 bytes each, no pin twice; one pin for hy2-obfs, two
-// at most elsewhere (the leaf's key and the next one). hy2-masq has no
-// pinSHA256: that names one certificate, and the site's is renewed.
+// without padding, 32 bytes each, no pin twice; one pin for hy2-obfs, three
+// at most elsewhere (the leaf's key, the next one and, for an hour after a
+// switch, the one before). hy2-masq has no pinSHA256: that names one
+// certificate, and the site's is renewed.
 func pinProblems(kind string, q url.Values) []string {
 	var out []string
 	if q.Has("pinSHA256") && kind != "hy2-obfs" {
@@ -341,7 +342,7 @@ func pinProblems(kind string, q url.Values) []string {
 		return append(out, "niko-pin on a "+kind+" line")
 	}
 	pins := strings.Split(q.Get("niko-pin"), ",")
-	if most := map[bool]int{true: 1, false: 2}[kind == "hy2-obfs"]; len(pins) > most {
+	if most := map[bool]int{true: 1, false: 3}[kind == "hy2-obfs"]; len(pins) > most {
 		out = append(out, "niko-pin with "+strconv.Itoa(len(pins))+" pins")
 	}
 	var seen []string
@@ -369,7 +370,10 @@ func TestPinProblems(t *testing.T) {
 		{"hy2-obfs", a, false},
 		{"hy2-obfs", a + "," + b, true},
 		{"naive", a + "," + a, true},
-		{"naive", a + "," + b + "," + base64.RawURLEncoding.EncodeToString(append(make([]byte, 31), 2)), true},
+		{"naive", a + "," + b + "," + base64.RawURLEncoding.EncodeToString(append(make([]byte, 31), 2)), false},
+		{"naive", a + "," + b + "," + base64.RawURLEncoding.EncodeToString(append(make([]byte, 31), 2)) + "," +
+			base64.RawURLEncoding.EncodeToString(append(make([]byte, 31), 3)), true},
+		{"hy2-masq", a + "," + b + "," + a, true},
 		{"naive", a + ",", true},
 		{"naive", a + "=", true},
 		{"naive", base64.StdEncoding.EncodeToString(append(make([]byte, 31), 0xfb)), true}, // padded, and not the URL alphabet

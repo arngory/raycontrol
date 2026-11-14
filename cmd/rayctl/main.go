@@ -74,10 +74,14 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             zone=SPARE (a spare becomes the main zone, the main one leaves);
                                             slipstream: max_connections=16..1024, device_connections=1..16
                                             (0: the defaults, 256 and 4; the server restarts)
-  service cert SITE -chain F -key F         a certificate of your own for the site and the services under
-                                            it, in place of ACME's (on the node only); the links under
-                                            it then carry no niko-pin
-  service rotate NAME [-now] [-force]       new REALITY keys (and server name, self-steal) ahead of
+  service cert SITE -chain F -key F [-force]
+                                            a certificate of your own for the site and the services under
+                                            it, in place of ACME's (root on the node only); the links
+                                            under it then carry no niko-pin. Refused, unless -force, when
+                                            they carry the node's pins and its key is another: clients
+                                            that hold them are cut off until they fetch their subscription
+  service rotate NAME [-now] [-force] [-fresh]
+                                            new REALITY keys (and server name, self-steal) ahead of
                                             schedule: after the lead time, or at once with -now;
                                             dnstt: a new seal key at once, masterdns: a new service key
                                             at once; the previous one accepted for -cred-grace (with
@@ -85,7 +89,10 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             in its grace, unless -force (that key then goes at once);
                                             a site (root): its certificate moves to the next key, the
                                             one clients already pin; refused until that key has been
-                                            in subscriptions for -site-key-lead, unless -force
+                                            in subscriptions for -site-key-lead, unless -force (the
+                                            key in use leaked; not twice within 72 h); -fresh: to a
+                                            key made now, the next key replaced too (the store
+                                            leaked): every pinned client is cut off until it fetches
   device list [USER]
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
@@ -692,6 +699,8 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 		fs := flag.NewFlagSet("service cert", flag.ContinueOnError)
 		chain := fs.String("chain", "", "certificate chain, PEM, leaf first")
 		key := fs.String("key", "", "private key, PEM")
+		force := fs.Bool("force", false, "import it although the links under the site carry the pins of the node's keys and this "+
+			"certificate has another key: clients that hold them refuse it until they fetch their subscription")
 		if err := need(args, 1); err != nil {
 			return err
 		}
@@ -706,7 +715,8 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 		if err != nil {
 			return err
 		}
-		r, err := c.c.SetCertificate(ctx, connect.NewRequest(&nodev1.SetCertificateRequest{Service: args[0], ChainPem: chainPEM, KeyPem: keyPEM}))
+		r, err := c.c.SetCertificate(ctx, connect.NewRequest(&nodev1.SetCertificateRequest{Service: args[0], ChainPem: chainPEM, KeyPem: keyPEM,
+			Force: *force}))
 		if err != nil {
 			return err
 		}
@@ -722,21 +732,25 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 				"clients check its chain only, as before pins")
 			if r.Msg.Unpinned {
 				fmt.Fprintln(w, "warning: these links carried the pins of the node's keys, and this certificate has another key:\n"+
-					"clients refuse it (Niko 1.45.0: on hy2-masq) until they fetch their subscription")
+					"clients refuse it (Niko 1.45.0: on hy2-masq) until they fetch their subscription. A client whose\n"+
+					"working profile is one of these notices by itself after 15 to 30 s at the earliest; the others\n"+
+					"when they next fetch, within the subscription's 72 hours")
 			}
 		})
 	case "rotate":
 		fs := flag.NewFlagSet("service rotate", flag.ContinueOnError)
 		now := fs.Bool("now", false, "switch at once; clients that have not fetched their subscription since lose this profile until they do")
 		force := fs.Bool("force", false, "dnstt, masterdns: switch even while the previous key is in its grace, which drops it at once; "+
-			"a site: switch to the next certificate key before clients have had its pin for the lead")
+			"a site: switch to the next certificate key before clients have had its pin for the lead (the key in use leaked)")
+		fresh := fs.Bool("fresh", false, "a site: move its certificate to a key made now and replace the next key too (the node's store "+
+			"leaked, both keys with it); no client holds its pin, all refuse the site's services until they fetch their subscription")
 		if err := need(args, 1); err != nil {
 			return err
 		}
 		if err := fs.Parse(args[1:]); err != nil {
 			return errUsage
 		}
-		r, err := c.c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: args[0], Now: *now, Force: *force}))
+		r, err := c.c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: args[0], Now: *now, Force: *force, Fresh: *fresh}))
 		if err != nil {
 			return err
 		}
@@ -744,10 +758,21 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 			what := cmp.Or(r.Msg.Key, "seal")
 			switch {
 			case r.Msg.Key == "tls":
-				// spec/cert-pin-v1.md §5: the switch is an issuance.
-				fmt.Fprintf(w, "%s: rayd orders a certificate with the next key now and switches to it when it is stored\n"+
-					"(rayctl status: acme %s); the processes that keep the key restart once (naive, the site, hy2-masq, Yggdrasil),\n"+
-					"and the key after it is in subscriptions from then\n", args[0], args[0])
+				// spec/cert-pin-v1.md §5: the switch is an issuance, and
+				// nothing changes until the certificate is stored.
+				which := "the next key"
+				if *fresh {
+					which = "a key made for it"
+				}
+				fmt.Fprintf(w, "%s: asked. rayd orders a certificate with %s: one try now, whatever its back-off, and if that fails\n"+
+					"again after the back-off (an hour, doubling to a day; rayctl status: acme %s). The key in use serves until\n"+
+					"the certificate is stored. Then the processes that keep the key restart once (naive, the site, hy2-masq,\n"+
+					"Yggdrasil), and the key after it is in subscriptions from then\n", args[0], which, args[0])
+				if *fresh {
+					fmt.Fprintln(w, "no client holds the pin of that key: from the switch on all of them refuse naive, hy2-masq and DoH\n"+
+						"under this site until they fetch their subscription (by themselves after 15 to 30 s at the earliest,\n"+
+						"when one of these is their working profile; otherwise when they next fetch)")
+				}
 			case r.Msg.Seal && r.Msg.PrevUntil != 0:
 				fmt.Fprintf(w, "%s has a new %s key, in subscriptions from now; the previous one is accepted until %s\n",
 					args[0], what, time.Unix(r.Msg.PrevUntil, 0).UTC().Format(time.RFC3339))
@@ -825,8 +850,14 @@ func keyState(s *nodev1.Service) string {
 			return ""
 		}
 		out := "key since " + day(st.KeyAt) + ", next key pinned since " + day(st.NextAt)
-		if st.RotateAt != 0 {
-			out += ", switch to it ordered"
+		switch {
+		case st.RotateAt != 0 && st.RotateHow == provision.SiteSwitchFresh:
+			out += ", switch to a fresh key asked"
+		case st.RotateAt != 0:
+			out += ", switch to it asked"
+		}
+		if st.PrevPin != "" && time.Now().Unix() < st.PrevUntil {
+			out += ", previous key pinned until " + day(st.PrevUntil)
 		}
 		return out
 	}

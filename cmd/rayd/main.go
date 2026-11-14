@@ -444,7 +444,11 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 		return &cloudflare.Solver{Client: c, Zone: zone}, nil
 	}
 	m := &certs.Manager{Store: st, Issue: is.Issue, Keys: keys, Notify: srv.Notify, Log: log,
-		Report: func(site string, err error) { hb.Done("acme "+site, err) },
+		// No pins from a node that may still roll its update back, and no
+		// certificate the site process would refuse to load.
+		NextKeyFrom: time.Now().Add(settleAfterStart),
+		Check:       func(chainPEM, keyPEM []byte) error { _, err := siteCertificate(chainPEM, keyPEM); return err },
+		Report:      func(site string, err error) { hb.Done("acme "+site, err) },
 		Wildcard: func(ctx context.Context) string {
 			if c, _, err := provision.Cloudflare(ctx, st); err != nil || c == nil {
 				return ""
@@ -783,7 +787,7 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 		return err
 	}
 	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier, RelayProbe: relayProbe,
-		ClockSeqAfter: time.Now().Add(10 * time.Minute), App: app, Changed: changed}
+		ClockSeqAfter: time.Now().Add(settleAfterStart), App: app, Changed: changed}
 	port := int(ports[0].Num)
 	addr := ":" + strconv.Itoa(port)
 	// Channel probes (R4-16) on the same endpoint, and their UDP echo on

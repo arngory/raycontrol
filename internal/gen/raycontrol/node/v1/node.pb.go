@@ -5332,10 +5332,15 @@ func (x *SetServiceOptionResponse) GetService() *Service {
 }
 
 type SetCertificateRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Service       string                 `protobuf:"bytes,1,opt,name=service,proto3" json:"service,omitempty"`                   // a site
-	ChainPem      []byte                 `protobuf:"bytes,2,opt,name=chain_pem,json=chainPem,proto3" json:"chain_pem,omitempty"` // leaf first
-	KeyPem        []byte                 `protobuf:"bytes,3,opt,name=key_pem,json=keyPem,proto3" json:"key_pem,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Service  string                 `protobuf:"bytes,1,opt,name=service,proto3" json:"service,omitempty"`                   // a site
+	ChainPem []byte                 `protobuf:"bytes,2,opt,name=chain_pem,json=chainPem,proto3" json:"chain_pem,omitempty"` // leaf first
+	KeyPem   []byte                 `protobuf:"bytes,3,opt,name=key_pem,json=keyPem,proto3" json:"key_pem,omitempty"`
+	// The lines under the site carry the pins of the node's keys and this
+	// certificate has another key: failed_precondition, since every client
+	// that holds the pins would refuse it until it fetches its subscription;
+	// force imports it anyway (spec/cert-pin-v1.md §7).
+	Force         bool `protobuf:"varint,4,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5391,6 +5396,13 @@ func (x *SetCertificateRequest) GetKeyPem() []byte {
 	return nil
 }
 
+func (x *SetCertificateRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
+}
+
 type SetCertificateResponse struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Names    []string               `protobuf:"bytes,1,rep,name=names,proto3" json:"names,omitempty"`                        // the site's names in use, all covered
@@ -5401,7 +5413,7 @@ type SetCertificateResponse struct {
 	// The lines of the services under the site carried the pins of the
 	// node's keys (niko-pin, spec/cert-pin-v1.md §7), and this certificate
 	// has another key: clients fail their pin until they get their
-	// subscription again, whose lines carry none now.
+	// subscription again, whose lines carry none now. Only with force.
 	Unpinned      bool `protobuf:"varint,4,opt,name=unpinned,proto3" json:"unpinned,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5475,8 +5487,15 @@ type RotateServiceRequest struct {
 	// drops it, as before raycontrol v0.24.0. A site: the switch to the next
 	// certificate key before that key has been in subscriptions for the lead
 	// is failed_precondition (clients that do not hold its pin yet would be
-	// cut off); force switches anyway. now means nothing for a site.
-	Force         bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
+	// cut off); force switches anyway, unless the key in use is younger than
+	// a subscription's lifetime (72 h: failed_precondition, the key after it
+	// is missing from lists in use). now means nothing for a site.
+	Force bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
+	// A site: the certificate moves to a key made for this order, and the
+	// next key is replaced too (both were in a store that leaked). No client
+	// holds its pin: all fail theirs until they fetch their subscription.
+	// Needs no force; audited as its own action.
+	Fresh         bool `protobuf:"varint,4,opt,name=fresh,proto3" json:"fresh,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5532,6 +5551,13 @@ func (x *RotateServiceRequest) GetForce() bool {
 	return false
 }
 
+func (x *RotateServiceRequest) GetFresh() bool {
+	if x != nil {
+		return x.Fresh
+	}
+	return false
+}
+
 type RotateServiceResponse struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	SwitchAt  int64                  `protobuf:"varint,1,opt,name=switch_at,json=switchAt,proto3" json:"switch_at,omitempty"`    // unix seconds; later if a new server name waits for its certificate
@@ -5539,7 +5565,7 @@ type RotateServiceResponse struct {
 	PrevUntil int64                  `protobuf:"varint,3,opt,name=prev_until,json=prevUntil,proto3" json:"prev_until,omitempty"` // the previous seal key is accepted until then (unix seconds); 0: no longer
 	// The key that switched at once: "seal" (dnstt, seal set too), "service"
 	// (masterdns, spec/masterdns-key-rotation.md; seal set too, for rayctl
-	// before v0.15.0); "tls" for a site, whose certificate with the next key
+	// before v0.15.0); "tls" for a site, whose certificate with another key
 	// rayd orders from switch_at on (spec/cert-pin-v1.md §5); empty for
 	// REALITY's scheduled switch.
 	Key           string `protobuf:"bytes,4,opt,name=key,proto3" json:"key,omitempty"`
@@ -8018,20 +8044,22 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x03key\x18\x02 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x03 \x01(\tR\x05value\"Q\n" +
 	"\x18SetServiceOptionResponse\x125\n" +
-	"\aservice\x18\x01 \x01(\v2\x1b.raycontrol.node.v1.ServiceR\aservice\"g\n" +
+	"\aservice\x18\x01 \x01(\v2\x1b.raycontrol.node.v1.ServiceR\aservice\"}\n" +
 	"\x15SetCertificateRequest\x12\x18\n" +
 	"\aservice\x18\x01 \x01(\tR\aservice\x12\x1b\n" +
 	"\tchain_pem\x18\x02 \x01(\fR\bchainPem\x12\x17\n" +
-	"\akey_pem\x18\x03 \x01(\fR\x06keyPem\"\x8a\x01\n" +
+	"\akey_pem\x18\x03 \x01(\fR\x06keyPem\x12\x14\n" +
+	"\x05force\x18\x04 \x01(\bR\x05force\"\x8a\x01\n" +
 	"\x16SetCertificateResponse\x12\x14\n" +
 	"\x05names\x18\x01 \x03(\tR\x05names\x12\x1b\n" +
 	"\tnot_after\x18\x02 \x01(\x03R\bnotAfter\x12!\n" +
 	"\fmissing_next\x18\x03 \x03(\tR\vmissingNext\x12\x1a\n" +
-	"\bunpinned\x18\x04 \x01(\bR\bunpinned\"R\n" +
+	"\bunpinned\x18\x04 \x01(\bR\bunpinned\"h\n" +
 	"\x14RotateServiceRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03now\x18\x02 \x01(\bR\x03now\x12\x14\n" +
-	"\x05force\x18\x03 \x01(\bR\x05force\"y\n" +
+	"\x05force\x18\x03 \x01(\bR\x05force\x12\x14\n" +
+	"\x05fresh\x18\x04 \x01(\bR\x05fresh\"y\n" +
 	"\x15RotateServiceResponse\x12\x1b\n" +
 	"\tswitch_at\x18\x01 \x01(\x03R\bswitchAt\x12\x12\n" +
 	"\x04seal\x18\x02 \x01(\bR\x04seal\x12\x1d\n" +
