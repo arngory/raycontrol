@@ -719,6 +719,37 @@ func TestGateLocalNotForwarded(t *testing.T) {
 	}
 }
 
+// Forwarded is what the gate puts in relay_fwd (rayctl update's check of a
+// relay asks it what the table must forward): local services and services
+// without ports add nothing, a port two services have is there once; a
+// relay with only local services forwards nothing.
+func TestForwardedIsTheGates(t *testing.T) {
+	for name, services := range map[string][]*perimeterv1.Service{
+		"all":       testSnapshot().Services,
+		"one local": append(slices.Clone(testSnapshot().Services[:2]), &perimeterv1.Service{Id: 3, Local: true, Ports: []*perimeterv1.Port{{Proto: "tcp", Port: 22}}}),
+		"local only": {
+			{Id: 3, Local: true, Ports: []*perimeterv1.Port{{Proto: "tcp", Port: 22}}},
+			{Id: 900, Local: true, Ports: []*perimeterv1.Port{{Proto: "tcp", Port: 8443}, {Proto: "udp", Port: 8443}}},
+		},
+		"no ports": {{Id: 4}},
+		"none":     nil,
+	} {
+		fw := &fakeFW{}
+		g := NewGate(fw, quiet)
+		snap := testSnapshot()
+		snap.Services = services
+		if err := g.Update(snap); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := Forwarded(services); !slices.Equal(got, fw.forward) {
+			t.Errorf("%s: Forwarded %v, the gate's relay_fwd %v", name, got, fw.forward)
+		}
+	}
+	if got := Forwarded(testSnapshot().Services); !slices.Equal(got, []Port{{"tcp", 22}, {"tcp", 443}, {"udp", 443}}) {
+		t.Errorf("Forwarded %v", got)
+	}
+}
+
 // A revocation the firewall refuses is tried again; one that comes while a
 // restore keeps failing is not opened again by the restore.
 func TestGateRevocations(t *testing.T) {

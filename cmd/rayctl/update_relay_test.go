@@ -239,7 +239,7 @@ func TestRelayHealth(t *testing.T) {
 	up := map[string]string{"ActiveState": "active", "SubState": "running"}
 	down := map[string]string{"ActiveState": "inactive", "SubState": "dead"}
 	snap := &perimeterv1.Snapshot{AdminPrefixes: []string{"203.0.113.9/32"}, AdminPorts: []*perimeterv1.Port{{Proto: "tcp", Port: 22}},
-		Services: []*perimeterv1.Service{{Id: 1}}}
+		Services: relayServices(true)}
 	good := func() relayHealth {
 		return relayHealth{
 			rayspa: func() (map[string]string, error) { return up, nil }, probe: func() (map[string]string, error) { return up, nil },
@@ -275,7 +275,7 @@ func TestRelayHealth(t *testing.T) {
 			h.nft = table(strings.Replace(relayTable, "dnat ip to 203.0.113.7", "counter", 1))
 		}, "forwards no service"},
 		"a perimeter without services": {func(h *relayHealth) {
-			empty := &perimeterv1.Snapshot{AdminPrefixes: snap.AdminPrefixes, AdminPorts: snap.AdminPorts}
+			empty := &perimeterv1.Snapshot{AdminPrefixes: snap.AdminPrefixes, AdminPorts: snap.AdminPorts, Services: relayServices(false)}
 			h.snapshot = func() (*perimeterv1.Snapshot, error) { return empty, nil }
 		}, "has no services"},
 		"no forwarding":   {func(h *relayHealth) { h.forwarding = func() ([]byte, error) { return []byte("0\n"), nil } }, "does not forward"},
@@ -295,7 +295,7 @@ func TestRelayHealth(t *testing.T) {
 	h.services = false
 	h.nft = table(strings.Replace(relayTable, "elements = { tcp . 443, udp . 443 }", "", 1))
 	h.snapshot = func() (*perimeterv1.Snapshot, error) {
-		return &perimeterv1.Snapshot{AdminPrefixes: snap.AdminPrefixes, AdminPorts: snap.AdminPorts}, nil
+		return &perimeterv1.Snapshot{AdminPrefixes: snap.AdminPrefixes, AdminPorts: snap.AdminPorts, Services: relayServices(false)}, nil
 	}
 	h.probeRan, h.probe = false, func() (map[string]string, error) { return down, nil }
 	h.want, h.version = "local", func() string { return "dev" }
@@ -390,14 +390,27 @@ func (f *fakeRelay) read(p string) string {
 
 func (f *fakeRelay) record(s string) { f.ran = append(f.ran, s) }
 
+// relayServices are the services of a relay's snapshot as its exit sends
+// them (api.RelaySnapshot): the relay's own SSH and the probe endpoint,
+// served there (Local), and, if forwarded, a service it forwards to the
+// exit on relayTable's ports.
+func relayServices(forwarded bool) []*perimeterv1.Service {
+	s := []*perimeterv1.Service{
+		{Id: 5, Local: true, Ports: []*perimeterv1.Port{{Proto: "tcp", Port: 22}}},
+		{Id: 900, Local: true, Ports: []*perimeterv1.Port{{Proto: "tcp", Port: 8443}, {Proto: "udp", Port: 8443}}},
+	}
+	if forwarded {
+		s = append(s, &perimeterv1.Service{Id: 1, Ports: []*perimeterv1.Port{{Proto: "tcp", Port: 443}, {Proto: "udp", Port: 443}}})
+	}
+	return s
+}
+
 // snapshotWith is a snapshot that lets 203.0.113.9 in on port 22, with a
-// service if services.
+// service it forwards if services.
 func snapshotWith(t *testing.T, services bool) string {
 	t.Helper()
-	snap := &perimeterv1.Snapshot{AdminPrefixes: []string{"203.0.113.9/32"}, AdminPorts: []*perimeterv1.Port{{Proto: "tcp", Port: 22}}}
-	if services {
-		snap.Services = []*perimeterv1.Service{{Id: 1}}
-	}
+	snap := &perimeterv1.Snapshot{AdminPrefixes: []string{"203.0.113.9/32"}, AdminPorts: []*perimeterv1.Port{{Proto: "tcp", Port: 22}},
+		Services: relayServices(services)}
 	b, err := proto.Marshal(snap)
 	if err != nil {
 		t.Fatal(err)
@@ -584,6 +597,20 @@ func TestRelayKeepRestore(t *testing.T) {
 	ops.tableGone = func() bool { return false }
 	if err := ops.open(); err == nil {
 		t.Error("a table left was not said")
+	}
+}
+
+// A relay that forwards nothing still has its own SSH and the probe in
+// its snapshot (Local, served there, never in relay_fwd): kept, it had no
+// services to forward, and the check does not ask its table for any.
+func TestRelayKeepLocalOnly(t *testing.T) {
+	for _, forwarded := range []bool{false, true} {
+		f := newFakeRelay(t)
+		f.write("state/snapshot.pb", snapshotWith(t, forwarded))
+		k, err := f.env.ops.keep("v0.26.0")
+		if err != nil || k.Services != forwarded {
+			t.Errorf("forwarded %v: kept services %v %v", forwarded, k.Services, err)
+		}
 	}
 }
 

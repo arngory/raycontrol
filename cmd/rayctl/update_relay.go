@@ -138,8 +138,8 @@ func relayBefore(sshd func() ([]int, error), listening func(int) bool, sess sess
 // relayKept is what an update keeps of the relay before it changes it, in
 // previousDir beside the binaries: the files the relay install writes (or
 // that one was not there), whether rayspa's last snapshot was kept and
-// whether it had services, and its units' states. Written last: its
-// presence says the copy is whole.
+// whether it had services to forward (perimeter.Forwarded), and its
+// units' states. Written last: its presence says the copy is whole.
 type relayKept struct {
 	Version  string             `json:"version"`
 	Files    map[string]bool    `json:"files"`
@@ -249,7 +249,7 @@ func (o relayOps) keep(version string) (relayKept, error) {
 			return k, err
 		}
 		snap := &perimeterv1.Snapshot{}
-		k.Snapshot, k.Services = true, proto.Unmarshal(b, snap) == nil && len(snap.Services) > 0
+		k.Snapshot, k.Services = true, proto.Unmarshal(b, snap) == nil && len(perimeter.Forwarded(snap.Services)) > 0
 	case !errors.Is(err, os.ErrNotExist):
 		return k, fmt.Errorf("rayspa's snapshot: %w", err)
 	}
@@ -559,7 +559,7 @@ func (h relayHealth) check() error {
 	if err != nil {
 		return fmt.Errorf("rayspa's perimeter cannot be read: %w", err)
 	}
-	if h.services && len(snap.Services) == 0 {
+	if h.services && len(perimeter.Forwarded(snap.Services)) == 0 {
 		return errors.New("the exit's perimeter for this relay has no services, the one before had: rayctl relay list on the exit")
 	}
 	if _, err := checkRelaySSH(snap, h.port, h.client, h.name, "rayctl update again"); err != nil {
