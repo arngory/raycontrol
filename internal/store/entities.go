@@ -883,10 +883,30 @@ func (s *Store) RenewUser(ctx context.Context, name string) (int, error) {
 // the previous one stays accepted for the grace after it, and the store
 // keeps neither the lead nor when a secret was first shown. Each user so
 // renewed has an audit line of its own, without the secrets.
+//
+// A database a rollback brought back to schema 13 (CarryRevocations) says
+// in settingRenewedRevoked until when its revocations are renewed: then
+// only the users of devices revoked at that time or later, by the older
+// rayd, get new credentials, not a second time the others.
 func renewRevokedUsers(ctx context.Context, tx *sql.Tx, now int64) error {
+	var since int64 // 0: every revocation
+	var mark []byte
+	err := tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, settingRenewedRevoked).Scan(&mark)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return err
+	default:
+		if t, perr := strconv.ParseInt(string(mark), 10, 64); perr == nil && t > 0 {
+			since = t
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, settingRenewedRevoked); err != nil {
+			return err
+		}
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT id, name FROM users u
-		WHERE EXISTS (SELECT 1 FROM devices d WHERE d.user_id = u.id AND d.revoked_at IS NOT NULL)
-		ORDER BY id`)
+		WHERE EXISTS (SELECT 1 FROM devices d WHERE d.user_id = u.id AND d.revoked_at IS NOT NULL AND d.revoked_at >= ?)
+		ORDER BY id`, since)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"regexp"
@@ -196,6 +197,9 @@ func TestDoHTokensRotation(t *testing.T) {
 	}
 }
 
+// spaKey is a device's SPA key of 32 bytes n, as the seeds write it.
+func spaKey(n byte) []byte { return bytes.Repeat([]byte{n}, 32) }
+
 // A database at schema 14 with DoH (v0.26.0 and before gave every device
 // the user's token): migrated to 15, the user's token is accepted beside
 // the devices' own for DoHSharedWindow from the upgrade, and not after; a
@@ -212,10 +216,10 @@ func TestMigration15SharedWindow(t *testing.T) {
 		`INSERT INTO user_services (user_id, service_id) VALUES (1, 1), (2, 1)`,
 		`INSERT INTO credentials (user_id, service_id, secret, created_at, rotated_at) VALUES (1, 1, 'a-tok', 1, 1), (2, 1, 'b-tok', 1, 1)`,
 		`INSERT INTO devices (id, user_id, name, role, spa_key, created_at, revoked_at) VALUES
-			('a000000000000001', 1, 'a', 'user', x'01', 10, NULL),
-			('a000000000000002', 1, 'b', 'user', x'02', 10, NULL),
-			('a000000000000003', 1, 'old', 'user', x'03', 10, 20),
-			('b000000000000001', 2, 'c', 'user', x'04', 10, NULL)`)
+			('a000000000000001', 1, 'a', 'user', x'0101010101010101010101010101010101010101010101010101010101010101', 10, NULL),
+			('a000000000000002', 1, 'b', 'user', x'0202020202020202020202020202020202020202020202020202020202020202', 10, NULL),
+			('a000000000000003', 1, 'old', 'user', x'0303030303030303030303030303030303030303030303030303030303030303', 10, 20),
+			('b000000000000001', 2, 'c', 'user', x'0404040404040404040404040404040404040404040404040404040404040404', 10, NULL)`)
 	before := time.Now()
 	s, err := Open(ctx, path)
 	if err != nil {
@@ -237,9 +241,9 @@ func TestMigration15SharedWindow(t *testing.T) {
 		}
 		return m
 	}
-	ta, tb := DoHDeviceToken("a-tok", []byte{1}), DoHDeviceToken("a-tok", []byte{2})
+	ta, tb := DoHDeviceToken("a-tok", spaKey(1)), DoHDeviceToken("a-tok", spaKey(2))
 	got := tokens(time.Now())
-	if !got["a-tok"] || !got["b-tok"] || !got[ta] || !got[tb] || got[DoHDeviceToken("a-tok", []byte{3})] {
+	if !got["a-tok"] || !got["b-tok"] || !got[ta] || !got[tb] || got[DoHDeviceToken("a-tok", spaKey(3))] {
 		t.Fatalf("in the window: %v", got)
 	}
 	if got = tokens(until); got["a-tok"] || got["b-tok"] || !got[ta] {

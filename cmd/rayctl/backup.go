@@ -211,7 +211,7 @@ func carryRestore(ctx context.Context, tmp string) (store.Restored, error) {
 	if err != nil {
 		return store.Restored{}, err
 	}
-	if len(r.Carried) > 0 || len(r.Renewed) > 0 {
+	if !r.Foreign {
 		if err := copyDB(work, tmp); err != nil {
 			return store.Restored{}, err
 		}
@@ -219,12 +219,16 @@ func carryRestore(ctx context.Context, tmp string) (store.Restored, error) {
 	return r, nil
 }
 
-// restoreCarryText says what the restore kept of the revocations and
-// renewals, and what it cannot know: the audit log is in the backup too,
-// so a device this node's database has no record of (a new host) may have
-// been revoked after the backup, and its user renewed.
+// restoreCarryText says what the restore did to credentials and what it
+// cannot know: on this node the clients hold its current secrets, so the
+// backup's do not come back; a device this node's database has no record
+// of (a new host, a user deleted here since) may have been revoked after
+// the backup, and the audit log is in the backup too.
 func restoreCarryText(r store.Restored, made time.Time) string {
 	var b strings.Builder
+	if r.Kept > 0 {
+		fmt.Fprintf(&b, "credentials and LAN keys stay as they are on this node now for %d users: the backup's older ones do not come back\n", r.Kept)
+	}
 	if len(r.Carried) > 0 {
 		fmt.Fprintf(&b, "revoked here since the backup, so revoked in it too; their users' credentials are new, and the users'\n"+
 			"other devices reconnect after their next subscription fetch:\n")
@@ -232,16 +236,22 @@ func restoreCarryText(r store.Restored, made time.Time) string {
 			fmt.Fprintf(&b, "  %s  %s/%s\n", d.ID, d.User, d.Name)
 		}
 	}
-	if len(r.Renewed) > 0 {
-		fmt.Fprintf(&b, "renewed here since the backup (rayctl user renew, the v0.27.0 update, a device added and revoked since),\n"+
-			"so the backup's credentials of these users do not come back: %s\n", strings.Join(r.Renewed, ", "))
+	if len(r.New) > 0 {
+		fmt.Fprintf(&b, "new credentials, their devices reconnect after their next subscription fetch:\n")
+		for _, n := range r.New {
+			fmt.Fprintf(&b, "  %s: %s\n", n.User, n.Why)
+		}
 	}
 	if len(r.Unknown) > 0 {
-		fmt.Fprintf(&b, "warning: this node's database has no record of %d devices the backup has active (a new host, or users\n"+
-			"deleted here since): whether any of them was revoked, or its user renewed, after %s cannot be known\n"+
-			"here. Revoke again those that must stay out (rayctl device revoke ID: their users' credentials change\n"+
-			"with it), and rayctl user renew NAME the users renewed elsewhere since:\n",
-			len(r.Unknown), made.Format(time.RFC3339))
+		why := "users deleted here since"
+		if r.Foreign {
+			why = "this database is another node's: a new host"
+		}
+		fmt.Fprintf(&b, "warning: this node's database has no record of %d devices the backup has active (%s):\n"+
+			"whether any of them was revoked, or its user renewed, after %s cannot be known here. Revoke again\n"+
+			"those that must stay out (rayctl device revoke ID: their users' credentials change with it), and\n"+
+			"rayctl user renew NAME the users renewed elsewhere since:\n",
+			len(r.Unknown), why, made.Format(time.RFC3339))
 		for _, d := range r.Unknown {
 			fmt.Fprintf(&b, "  %s  %s/%s\n", d.ID, d.User, d.Name)
 		}

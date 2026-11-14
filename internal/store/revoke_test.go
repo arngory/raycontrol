@@ -167,6 +167,7 @@ func TestCarryDeviceRevocations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	thisNode(t, s)
 	svc, _ := s.CreateService(ctx, Service{Kind: "reality", Name: "reality", Enabled: true, Settings: "{}"})
 	alice, _ := s.CreateUser(ctx, User{Name: "alice", Enabled: true, Services: []int64{svc.ID}})
 	bob, _ := s.CreateUser(ctx, User{Name: "bob", Enabled: true, Services: []int64{svc.ID}})
@@ -329,6 +330,7 @@ func TestCarryDeviceRevocationsRenewsLANKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	thisNode(t, s)
 	if _, err := s.CreateUser(ctx, User{Name: "alice", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}

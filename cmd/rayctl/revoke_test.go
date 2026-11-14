@@ -54,14 +54,21 @@ func TestRestoreCarryText(t *testing.T) {
 		t.Errorf("nothing to say: %q", got)
 	}
 	got := restoreCarryText(store.Restored{
+		Kept:    7,
 		Carried: []store.CarriedDevice{{ID: "d1", User: "alice", Name: "phone"}},
 		Unknown: []store.CarriedDevice{{ID: "d2", User: "bob", Name: "tv"}},
-		Renewed: []string{"carol", "dave"},
+		New:     []store.Renewal{{User: "carol", Why: "deleted here since the backup"}, {User: "dave", Why: "a device added and revoked here since the backup"}},
 	}, made)
-	for _, want := range []string{"d1  alice/phone", "credentials are new", "warning: this node's database has no record of 1 devices",
-		"2026-11-01T12:00:00Z cannot be known", "d2  bob/tv", "do not come back: carol, dave"} {
+	for _, want := range []string{"stay as they are on this node now for 7 users", "d1  alice/phone", "credentials are new",
+		"warning: this node's database has no record of 1 devices", "(users deleted here since)",
+		"2026-11-01T12:00:00Z cannot be known", "d2  bob/tv", "  carol: deleted here since the backup",
+		"  dave: a device added and revoked here since the backup"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("no %q in\n%s", want, got)
 		}
+	}
+	got = restoreCarryText(store.Restored{Foreign: true, Unknown: []store.CarriedDevice{{ID: "d2", User: "bob", Name: "tv"}}}, made)
+	if !strings.Contains(got, "another node's: a new host") || strings.Contains(got, "stay as they are") {
+		t.Errorf("a new host:\n%s", got)
 	}
 }

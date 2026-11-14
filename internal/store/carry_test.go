@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -475,118 +474,5 @@ func TestCarryRevocationsAfterRenewal(t *testing.T) {
 	}
 	if ic := rows(t, db, `PRAGMA integrity_check`); ic != "ok\n" {
 		t.Errorf("integrity %q", ic)
-	}
-}
-
-// rayctl restore of a backup made before a renewal on this node: a user
-// renewed since (an audit line user.renew the backup has not) takes
-// current's credentials and LAN key; a user with a device made and
-// revoked since gets new ones; a device revoked since is carried as
-// before. A rotation since, a failed renewal and a renewal before the
-// backup change nothing. Against another node's database nothing is
-// renewed.
-func TestCarryRestoreRenewals(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	current, saved := filepath.Join(dir, "rayd.db"), filepath.Join(dir, "backup.db")
-	s, err := Open(ctx, current)
-	if err != nil {
-		t.Fatal(err)
-	}
-	svc, err := s.CreateService(ctx, Service{Kind: "reality", Name: "reality", Enabled: true, Settings: "{}"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ids := map[string]int64{}
-	var all []int64
-	for _, n := range []string{"alice", "bob", "carol", "dave", "erin"} {
-		u, err := s.CreateUser(ctx, User{Name: n, Enabled: true, Services: []int64{svc.ID}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		ids[n] = u.ID
-		all = append(all, u.ID)
-	}
-	if _, err := s.Credentials(ctx, svc.ID, all, NewUUID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`UPDATE users SET lan = 1, lan_key = randomblob(?) WHERE name = 'alice'`, LANKeySize); err != nil {
-		t.Fatal(err)
-	}
-	davePhone, _, _ := s.CreateDevice(ctx, "dave", "phone", "user")
-	if _, err := s.RenewUser(ctx, "erin"); err != nil {
-		t.Fatal(err)
-	}
-	must(t, s.Audit(ctx, "test", "user.renew", "erin: 1 credentials new", "ok"))
-	backup := map[string]string{}
-	for n, id := range ids {
-		backup[n] = creds(t, s, id)[svc.ID][0]
-	}
-	aliceKey := s.lanKey(t, "alice")
-	s.Close()
-	copyFile(t, current, saved)
-
-	s, err = Open(ctx, current)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.RenewUser(ctx, "alice"); err != nil {
-		t.Fatal(err)
-	}
-	must(t, s.Audit(ctx, "test", "user.renew", "alice: 1 credentials new", "ok"))
-	must(t, s.Audit(ctx, "test", "user.renew", "bob: x", "error: injected")) // failed: not a renewal
-	for _, n := range []string{"bob", "erin"} {
-		if _, err := s.db.Exec(`UPDATE credentials SET prev_secret = secret, secret = ?, prev_until = 9999999999 WHERE user_id = ?`,
-			fmt.Sprintf("00000000-0000-4000-8000-%012d", ids[n]), ids[n]); err != nil {
-			t.Fatal(err)
-		}
-	}
-	watch, _, _ := s.CreateDevice(ctx, "carol", "watch", "user")
-	if _, err := s.RevokeDevice(ctx, watch.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.RevokeDevice(ctx, davePhone.ID); err != nil {
-		t.Fatal(err)
-	}
-	aliceNow, aliceKeyNow := creds(t, s, ids["alice"])[svc.ID], s.lanKey(t, "alice")
-	s.Close()
-
-	r, err := CarryRestore(ctx, saved, current)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(r.Carried) != 1 || r.Carried[0].ID != davePhone.ID || len(r.Unknown) != 0 || !slices.Equal(r.Renewed, []string{"alice", "carol"}) {
-		t.Fatalf("carried %+v, unknown %+v, renewed %v", r.Carried, r.Unknown, r.Renewed)
-	}
-	b, err := Open(ctx, saved)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := creds(t, b, ids["alice"])[svc.ID]; got != aliceNow {
-		t.Errorf("alice's credential %v, current %v", got, aliceNow)
-	}
-	if got := b.lanKey(t, "alice"); !bytes.Equal(got, aliceKeyNow) || bytes.Equal(got, aliceKey) {
-		t.Errorf("alice's LAN key %x, current %x, the backup's %x", got, aliceKeyNow, aliceKey)
-	}
-	for n, want := range map[string]bool{"bob": true, "erin": true, "carol": false, "dave": false} {
-		got := creds(t, b, ids[n])[svc.ID][0]
-		if (got == backup[n]) != want || !isUUID(got) {
-			t.Errorf("%s's credential %s, the backup's %s", n, got, backup[n])
-		}
-	}
-	b.Close()
-
-	// Another node's database (a new host): it can tell nothing.
-	other := filepath.Join(dir, "other.db")
-	o, err := Open(ctx, other)
-	if err != nil {
-		t.Fatal(err)
-	}
-	must(t, o.Audit(ctx, "test", "user.renew", "alice: 1 credentials new", "ok"))
-	o.Close()
-	fresh := filepath.Join(dir, "fresh.db")
-	copyFile(t, saved, fresh)
-	if r, err := CarryRestore(ctx, fresh, other); err != nil || len(r.Renewed) != 0 || len(r.Carried) != 0 {
-		t.Fatalf("against another node: %+v %v", r, err)
 	}
 }

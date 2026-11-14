@@ -686,6 +686,10 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool, carry carry) error {
 		if carry == carrySkip {
 			kept = "-no-carry: what was revoked since comes back too, and the credentials of then, those renewed since included.\n"
 		}
+		if then < 15 && now >= 15 {
+			kept += "DoH: the devices that fetched their subscription since the update have DoH tokens of their own,\n" +
+				"which the previous version does not take: they lose the node's resolver until their next subscription fetch.\n"
+		}
 		fmt.Printf("The update moved the database to schema %d; the previous version runs on %d.\n"+
 			"The database goes back to its copy from %s: users, devices and settings added or changed since are lost.\n%s",
 			now, then, fi.ModTime().Format(time.DateTime), kept)

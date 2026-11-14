@@ -116,14 +116,20 @@ func (s *Store) doHShared(ctx context.Context) (from, until int64, err error) {
 	if err != nil {
 		return 0, 0, err
 	}
+	from, until = parseDoHShared(v)
+	return from, until, nil
+}
+
+// parseDoHShared reads the value of settingDoHShared; one not as schema
+// 15 wrote it is no window (0, 0), the safe side.
+func parseDoHShared(v []byte) (from, until int64) {
 	f, u, ok := strings.Cut(string(v), " ")
 	from, ferr := strconv.ParseInt(f, 10, 64)
 	until, uerr := strconv.ParseInt(u, 10, 64)
 	if !ok || ferr != nil || uerr != nil {
-		// Not as schema 15 wrote it: no shared token, the safe side.
-		return 0, 0, nil
+		return 0, 0
 	}
-	return from, until, nil
+	return from, until
 }
 
 // DoHSharedUntil is when the shared window ends (zero: there is none).
