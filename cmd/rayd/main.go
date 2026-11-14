@@ -208,6 +208,16 @@ func cmdServe(args []string) error {
 		level.Set(slog.LevelDebug)
 	}
 	log := logx.New(os.Stderr, level)
+	// Interop (the client's CI): a stand that walks through a switch to the
+	// next key and a fresh one in minutes. Only without systemd, where no
+	// node in use runs.
+	if os.Getenv("RAYCONTROL_UNSAFE_SITE_KEY_FORCE_ANY_AGE") != "" {
+		if !*supervise {
+			return errors.New("RAYCONTROL_UNSAFE_SITE_KEY_FORCE_ANY_AGE is for a test stand (-supervise) only")
+		}
+		provision.UnsafeForceSwitchAtAnyAge()
+		log.Warn("UNSAFE: a forced switch of a site's key is taken at any age of the key in use")
+	}
 
 	st, err := store.Open(ctx, *db)
 	if err != nil {

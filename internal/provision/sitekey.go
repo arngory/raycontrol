@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/store"
@@ -53,6 +54,24 @@ const (
 // the key it would leave is younger: the key it would move to was made
 // with that one.
 const SiteKeyMinAge = 72 * time.Hour
+
+// forceAnyAge drops the age rule of a forced switch (UnsafeForceSwitchAtAnyAge).
+var forceAnyAge atomic.Bool
+
+// UnsafeForceSwitchAtAnyAge lets a forced switch leave a key of any age,
+// for a test stand that walks through both switches in minutes (rayd serve
+// -supervise with RAYCONTROL_UNSAFE_SITE_KEY_FORCE_ANY_AGE). Never on a node
+// in use: there the rule is what keeps a repeated -force from cutting
+// every client that has not fetched its subscription since.
+func UnsafeForceSwitchAtAnyAge() { forceAnyAge.Store(true) }
+
+// forceMinAge is how old the key in use must be for a forced switch.
+func forceMinAge() time.Duration {
+	if forceAnyAge.Load() {
+		return 0
+	}
+	return SiteKeyMinAge
+}
 
 // SitePrevPinFor is how long the pin of the key before stays in the lists
 // after a switch that was not forced. The processes take the new
@@ -557,7 +576,7 @@ func RequestSiteKeyRotation(ctx context.Context, st *store.Store, name string, n
 		fields["tls_rotate_pin"] = pin
 		since := time.Unix(state.NextAt, 0)
 		switch {
-		case how == SiteSwitchForce && state.KeyAt != 0 && now.Before(time.Unix(state.KeyAt, 0).Add(SiteKeyMinAge)):
+		case how == SiteSwitchForce && state.KeyAt != 0 && now.Before(time.Unix(state.KeyAt, 0).Add(forceMinAge())):
 			return fmt.Errorf("%w: %s: its key is in use only since %s, and the next one was made then: lists that clients may use "+
 				"until %s do not hold its pin. A second forced switch now would cut every client that has not fetched since. "+
 				"If the key in use leaked too, order a fresh one (rayctl service rotate %s -fresh)",
