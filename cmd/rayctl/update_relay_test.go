@@ -816,6 +816,41 @@ func TestRelayKeepWholeOrNothing(t *testing.T) {
 	if _, err := f.env.ops.kept(); err == nil {
 		t.Error("a rollback would restore from a copy that is not whole")
 	}
+	// The copy of an earlier update stays as it was when a keep fails,
+	// and goes once a new one is whole; nothing is left beside it.
+	f = newFakeRelay(t)
+	if _, err := f.env.ops.keep("v0.25.9"); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(f.at("state/snapshot.pb"))
+	os.Mkdir(f.at("state/snapshot.pb"), 0o700)
+	if _, err := f.env.ops.keep("v0.26.0"); err == nil {
+		t.Fatal("kept a snapshot that is a directory")
+	}
+	if k, err := f.env.ops.kept(); err != nil || k.Version != "v0.25.9" {
+		t.Errorf("the earlier copy after a keep that failed: %+v %v", k, err)
+	}
+	os.Remove(f.at("state/snapshot.pb"))
+	if _, err := f.env.ops.keep("v0.26.0"); err != nil {
+		t.Fatal(err)
+	}
+	if k, err := f.env.ops.kept(); err != nil || k.Version != "v0.26.0" || f.read("previous/VERSION") != "v0.26.0\n" {
+		t.Errorf("the new copy: %+v %v", k, err)
+	}
+	for _, d := range []string{"previous.new", "previous.old"} {
+		if _, err := os.Lstat(f.at(d)); !os.IsNotExist(err) {
+			t.Errorf("%s left: %v", d, err)
+		}
+	}
+	// Cut off between the renames: the earlier copy is taken back first.
+	os.Rename(f.at("previous"), f.at("previous.old"))
+	os.Mkdir(f.at("state/snapshot.pb"), 0o700)
+	if _, err := f.env.ops.keep("v0.26.1"); err == nil {
+		t.Fatal("kept a snapshot that is a directory")
+	}
+	if k, err := f.env.ops.kept(); err != nil || k.Version != "v0.26.0" {
+		t.Errorf("the copy cut off between the renames: %+v %v", k, err)
+	}
 }
 
 // rayctl update on a relay, the whole of it on a fake host.

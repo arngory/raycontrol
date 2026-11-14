@@ -214,19 +214,47 @@ func savedName(path string) string {
 	return strings.ReplaceAll(strings.TrimPrefix(path, "/"), "/", "_")
 }
 
-// keep puts the relay as it runs aside, version being the one installed;
-// the copy of an earlier update goes.
+// keep puts the relay as it runs aside, version being the one installed.
+// The copy is made beside the one of an earlier update, which it replaces
+// only once whole: a keep that fails leaves that one as it was.
 func (o relayOps) keep(version string) (relayKept, error) {
-	k := relayKept{Version: version, Files: map[string]bool{}, Units: map[string]unitWas{}}
-	if err := os.RemoveAll(o.dir); err != nil {
+	next, old := o.dir+".new", o.dir+".old"
+	if _, err := os.Lstat(o.dir); errors.Is(err, os.ErrNotExist) {
+		_ = os.Rename(old, o.dir) // cut off between the renames below
+	}
+	for _, d := range []string{next, old} {
+		if err := os.RemoveAll(d); err != nil {
+			return relayKept{}, err
+		}
+	}
+	k, err := o.keepIn(next, version)
+	if err == nil {
+		if err = os.Rename(o.dir, old); errors.Is(err, os.ErrNotExist) {
+			err = nil
+		}
+	}
+	if err == nil {
+		if err = os.Rename(next, o.dir); err != nil {
+			_ = os.Rename(old, o.dir)
+		}
+	}
+	if err != nil {
+		_ = os.RemoveAll(next)
 		return k, err
 	}
-	if err := os.MkdirAll(filepath.Join(o.dir, "files"), 0o700); err != nil {
+	_ = os.RemoveAll(old)
+	return k, nil
+}
+
+// keepIn is keep's copy, in dir.
+func (o relayOps) keepIn(dir, version string) (relayKept, error) {
+	k := relayKept{Version: version, Files: map[string]bool{}, Units: map[string]unitWas{}}
+	if err := os.MkdirAll(filepath.Join(dir, "files"), 0o700); err != nil {
 		return k, err
 	}
 	for name, p := range o.bins {
 		if b, err := os.ReadFile(p); err == nil { //nolint:gosec // G304: fixed paths
-			if err := os.WriteFile(filepath.Join(o.dir, name), b, 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil {
 				return k, err
 			}
 		}
@@ -240,7 +268,7 @@ func (o relayOps) keep(version string) (relayKept, error) {
 		case err != nil:
 			return k, err
 		}
-		if err := os.WriteFile(filepath.Join(o.dir, "files", savedName(f)), b, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "files", savedName(f)), b, 0o600); err != nil {
 			return k, err
 		}
 		k.Files[f] = true
@@ -248,7 +276,7 @@ func (o relayOps) keep(version string) (relayKept, error) {
 	// rayspa's directory: read without following a link.
 	switch b, err := readRegular(o.snapshot); {
 	case err == nil:
-		if err := os.WriteFile(filepath.Join(o.dir, "snapshot.pb"), b, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "snapshot.pb"), b, 0o600); err != nil {
 			return k, err
 		}
 		k.Snapshot = true
@@ -258,14 +286,14 @@ func (o relayOps) keep(version string) (relayKept, error) {
 	for _, u := range o.units {
 		k.Units[u] = o.state(u)
 	}
-	if err := os.WriteFile(filepath.Join(o.dir, "VERSION"), []byte(version+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "VERSION"), []byte(version+"\n"), 0o600); err != nil {
 		return k, err
 	}
 	j, err := json.Marshal(k)
 	if err != nil {
 		return k, err
 	}
-	return k, os.WriteFile(filepath.Join(o.dir, relayKeptFile), j, 0o600)
+	return k, os.WriteFile(filepath.Join(dir, relayKeptFile), j, 0o600)
 }
 
 // kept reads what the last update kept.
