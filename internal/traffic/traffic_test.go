@@ -368,7 +368,13 @@ func TestResetUsageDropsPending(t *testing.T) {
 	n.tick(time.Minute)
 	n.set("hy2:hy", "b1", "u1", 110, 120)
 	a.Round(n.ctx, "", false)
-	n.wantUsed("alice", 10, 20)
+	// Nor are those of the poll across the reset: some may be from before
+	// it (less than true, never more). The count starts at that poll.
+	n.wantUsed("alice", 0, 0)
+	n.tick(time.Minute)
+	n.set("hy2:hy", "b1", "u1", 115, 130)
+	a.Round(n.ctx, "", false)
+	n.wantUsed("alice", 5, 10)
 }
 
 func TestMonthlyReset(t *testing.T) {
