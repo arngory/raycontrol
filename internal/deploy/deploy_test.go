@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
@@ -1727,5 +1728,133 @@ func TestBuildSlipstream(t *testing.T) {
 	}
 	if slices.Contains(p.Units, "niko-front.service") || slices.ContainsFunc(p.Users, func(u deploy.SystemUser) bool { return u.Name == "niko-front" }) {
 		t.Errorf("a front without a config: units %v", p.Units)
+	}
+}
+
+// The front before its config, as at every install of the default
+// REALITY: REALITY, naive, hy2-masq and Yggdrasil render nothing until
+// their site has a certificate, nor the front with them, and their socket
+// directories are of the front's group all the same. The plan makes every
+// group it names, tmpfiles' and the units', and it is the plan of after
+// the certificate too: rayd, in the front's group, writes the front's
+// config then and starts the units that waited for theirs, with no apply.
+// Before, the front's user came with its config only: systemd-tmpfiles
+// did not find its group, and the install stopped there.
+func TestFrontBeforeItsConfig(t *testing.T) {
+	const tmpfiles = "/etc/tmpfiles.d/raycontrol.conf"
+	var reality deploy.Plan
+	for name, services := range map[string][][3]string{
+		"the default REALITY":     {{"reality", "reality", ""}},
+		"the guide's, no dnstt":   {{"reality", "reality", ""}, {"hy2-masq", "hy2-masq", ""}, {"naive", "naive", ""}, {"api", "api", ""}},
+		"hy2-masq":                {{"hy2-masq", "hy2-masq", ""}},
+		"REALITY and Yggdrasil":   {{"reality", "reality", ""}, {"yggdrasil", "ygg", ""}},
+		"the guide's, with dnstt": {{"reality", "reality", ""}, {"hy2-masq", "hy2-masq", ""}, {"naive", "naive", ""}, {"dnstt", "dns", ""}, {"api", "api", ""}},
+	} {
+		m, files := buildModel(t, render.DefaultPaths, services, nil)
+		in := deploy.InputsOf(m, files, render.DefaultPaths)
+		if in.Front != strings.Contains(name, "with dnstt") {
+			t.Fatalf("%s: the front rendered: %v", name, in.Front)
+		}
+		p := deploy.Build(in, render.DefaultPaths, deploy.DefaultBinaries)
+		if name == "the default REALITY" {
+			reality = p
+		}
+		if err := p.Check(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		made := map[string]bool{"root": true}
+		for _, u := range p.Users {
+			made[u.Name] = true
+		}
+		var named []string
+		for _, l := range strings.Split(file(p, tmpfiles), "\n") {
+			if f := strings.Fields(l); len(f) == 6 && f[0] == "d" {
+				named = append(named, f[3], f[4])
+			}
+		}
+		for _, f := range p.Files {
+			if !strings.HasPrefix(f.Path, "/etc/systemd/system/") {
+				continue
+			}
+			for _, l := range strings.Split(string(f.Content), "\n") {
+				k, v, _ := strings.Cut(l, "=")
+				if k == "User" || k == "Group" || k == "SupplementaryGroups" {
+					named = append(named, strings.Fields(v)...)
+				}
+			}
+		}
+		for _, g := range named {
+			if !made[g] {
+				t.Errorf("%s: %s is named and not made:\n%s", name, g, file(p, tmpfiles))
+			}
+		}
+		// Its unit waits for its config, and copies the probe key in from
+		// the first deploy (TestProbeKeyBeforeDNSTT).
+		front := file(p, "/etc/systemd/system/niko-front.service")
+		if !slices.Contains(p.Units, "niko-front.service") ||
+			!strings.Contains(front, "ConditionPathExists=/var/lib/raycontrol/rendered/front/front.json\n") ||
+			!strings.Contains(front, " /var/lib raycontrol/rendered/front/dnsprobe.key rayd niko-front /run/niko/front/dnsprobe.key\n") {
+			t.Errorf("%s: no front's unit that waits for its config:\n%s", name, front)
+		}
+		rayd := p.Users[slices.IndexFunc(p.Users, func(u deploy.SystemUser) bool { return u.Name == "rayd" })]
+		if !slices.Contains(rayd.ExtraGroups, "niko-front") {
+			t.Errorf("%s: rayd cannot give the front's config its group: %v", name, rayd.ExtraGroups)
+		}
+		// The certificate stored: the front's config is rendered, its
+		// probe key with it, and nothing of the plan changes.
+		after := in
+		after.Front, after.DNSProbeKey = true, true
+		if q := deploy.Build(after, render.DefaultPaths, deploy.DefaultBinaries); !reflect.DeepEqual(p, q) {
+			t.Errorf("%s: the plan changes with the front's config:\nbefore %+v\nafter  %+v", name, p, q)
+		}
+	}
+
+	// The plan of v0.27.0, without the front: refused before anything
+	// changes, for the line of a group it does not make.
+	old := clonePlan(reality)
+	old.Users = slices.DeleteFunc(old.Users, func(u deploy.SystemUser) bool { return u.Name == "niko-front" })
+	for i := range old.Users {
+		old.Users[i].ExtraGroups = slices.DeleteFunc(old.Users[i].ExtraGroups, func(g string) bool { return g == "niko-front" })
+	}
+	edit(t, &old, "/etc/systemd/system/rayd.service", "SupplementaryGroups=niko-front ", "SupplementaryGroups=")
+	old.Files = slices.DeleteFunc(old.Files, func(f deploy.File) bool { return f.Path == "/etc/systemd/system/niko-front.service" })
+	old.Units = slices.DeleteFunc(old.Units, func(u string) bool { return u == "niko-front.service" })
+	if err := old.Check(); err == nil || !strings.Contains(err.Error(), "reality-in 2750 niko-reality niko-front") {
+		t.Errorf("the plan without the front's user: %v", err)
+	}
+
+	// tmpfiles runs when one of its directories is missing, its file as it
+	// was: a node that went on with rayctl apply after such an install
+	// failed has no reality-in, and the apply that makes the front's group
+	// makes the directory too.
+	root := t.TempDir()
+	var cmds []string
+	h := &deploy.Host{Root: root, Out: &bytes.Buffer{},
+		Run: func(name string, args ...string) ([]byte, error) {
+			cmds = append(cmds, name+" "+strings.Join(args, " "))
+			return nil, nil
+		},
+		LookupUser: func(string) (int, error) { return 0, errors.New("unknown") }, LookupGroup: func(string) (int, error) { return 0, errors.New("unknown") },
+		LookPath: func(string) (string, error) { return "", errors.New("none") }}
+	for i, step := range []struct {
+		before func()
+		want   bool
+	}{
+		{func() {}, true}, // the file is new
+		{func() {
+			for _, d := range reality.Dirs {
+				os.MkdirAll(filepath.Join(root, d), 0o755)
+			}
+		}, false}, // nothing to make
+		{func() { os.Remove(filepath.Join(root, "/run/niko/reality-in")) }, true},
+	} {
+		step.before()
+		cmds = nil
+		if err := h.Apply(reality, "rayd.service"); err != nil {
+			t.Fatal(err)
+		}
+		if ran := slices.Contains(cmds, "systemd-tmpfiles --create "+tmpfiles); ran != step.want {
+			t.Errorf("apply %d: systemd-tmpfiles %v, want %v: %v", i+1, ran, step.want, cmds)
+		}
 	}
 }

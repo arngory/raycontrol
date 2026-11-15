@@ -436,7 +436,15 @@ func (h *Host) Apply(plan Plan, keep ...string) error {
 	}
 
 	h.relabel(written...)
-	if tmpfilesChanged {
+	// Also when one of its directories is missing and the file is as it
+	// was: a line whose group was not there made none, and an apply that
+	// makes the group later would not run it again (the front's group
+	// before its config, up to v0.27.0: a node that went on with rayctl
+	// apply after its install failed).
+	if tmpfilesChanged || slices.ContainsFunc(plan.Dirs, func(d string) bool {
+		_, err := os.Stat(h.path(d))
+		return errors.Is(err, os.ErrNotExist)
+	}) {
 		if err := h.run("systemd-tmpfiles", "--create", "/etc/tmpfiles.d/raycontrol.conf"); err != nil {
 			return err
 		}

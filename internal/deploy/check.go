@@ -388,7 +388,9 @@ func checkUnit(unit, content string, users map[string]bool) error {
 // (d) of the data plane's runtime directory and one level below it, with
 // the modes and owners Build gives them. A d line also sets the mode and
 // owner of a directory that is there: whose a directory becomes is
-// checked against its name.
+// checked against its name. The front's group is the plan's too: one
+// systemd-tmpfiles does not find fails the apply (the install of REALITY
+// alone did, up to v0.27.0).
 func checkTmpfiles(content string, users map[string]bool) error {
 	run := render.DefaultPaths.Run
 	front := render.GroupName("front")
@@ -409,9 +411,9 @@ func checkTmpfiles(content string, users map[string]bool) error {
 			case isAPI: // Xray's API socket: the service's, rayd's group
 				ok = ok && f[3] == render.GroupName(api) && users[f[3]] && f[4] == "rayd"
 			case isIn: // what the front passes: the service's, the front's group
-				ok = ok && f[3] == render.GroupName(in) && users[f[3]] && f[4] == front
+				ok = ok && f[3] == render.GroupName(in) && users[f[3]] && f[4] == front && users[front]
 			default: // DoH's socket: rayd's, the front's group; no unit's runtime directory
-				ok = ok && store.CheckProcessName(base) == nil && !users[render.GroupName(base)] && f[3] == "rayd" && f[4] == front
+				ok = ok && store.CheckProcessName(base) == nil && !users[render.GroupName(base)] && f[3] == "rayd" && f[4] == front && users[front]
 			}
 		}
 		if !ok {
