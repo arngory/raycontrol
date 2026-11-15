@@ -201,6 +201,53 @@ fi
 # shellcheck disable=SC2016 # expands in the container
 x sh -c 'kill "$(cat /run/listen.pid)"; rm /run/listen.pid'
 
+# The default services (no -services): REALITY alone, whose site waits for
+# a certificate this network cannot get, and the front's config with it.
+# The install goes through all the same (up to v0.27.0 systemd-tmpfiles
+# stopped it: the front's group came with the front's config only). A
+# certificate of a throwaway CA, as ACME's would come, then brings the site,
+# REALITY and the front up by themselves, the next apply changes nothing,
+# and uninstall leaves the host as it was. One system: the plan is the
+# same on all, and the rest of this test installs with -services dnstt.
+if [[ $distro == debian13 ]]; then
+	log "$distro: the default services, before and after the certificate"
+	redact() { sed -E 's/rcdev1:[A-Za-z0-9_-]+/rcdev1:<redacted>/g'; }
+	out="$(x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -host "$ip" -domain example.test -admin 192.0.2.1 2>&1)" ||
+		fail "bootstrap with the default services: $(redact <<<"$out")"
+	[[ $out == *"Services: reality. REALITY starts once its certificate is stored"* ]] || fail "default services: $(redact <<<"$out")"
+	wait_active rayd.service rayspa.service
+	wait_table "the install with the default services"
+	[[ $(x id -nG niko-front) == niko-front ]] || fail "the front's user: $(x id niko-front 2>&1)"
+	[[ $(x stat -c '%a %U %G' /run/niko/reality-in) == "2750 niko-reality niko-front" ]] ||
+		fail "no socket directory of REALITY for the front: $(x ls -l /run/niko)"
+	x systemctl is-enabled --quiet niko-front.service || fail "the front's unit is not installed before its config"
+	# The site's names from a CA of this test; REALITY takes a chain only
+	# as long as a real one.
+	x sh -ec 'cd /root && umask 077
+		openssl req -x509 -newkey rsa:4096 -nodes -days 2 -subj /CN=test-root -keyout ca.key -out ca.pem
+		openssl req -newkey rsa:4096 -nodes -subj /CN=test-inter -keyout int.key -out int.csr
+		printf "basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n" > int.ext
+		openssl x509 -req -in int.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -extfile int.ext -out int.pem
+		openssl req -newkey rsa:2048 -nodes -subj /CN=example.test -keyout site.key -out site.csr
+		printf "subjectAltName=DNS:example.test,DNS:*.example.test\nextendedKeyUsage=serverAuth\n" > site.ext
+		openssl x509 -req -in site.csr -CA int.pem -CAkey int.key -CAcreateserial -days 2 -extfile site.ext -out site.crt
+		cat site.crt int.pem ca.pem > site.pem' >/dev/null 2>&1 || fail "a certificate for the site"
+	out="$(x rayctl service cert site -chain /root/site.pem -key /root/site.key 2>&1)" || fail "rayctl service cert: $out"
+	wait_active niko-site.service niko-reality.service niko-front.service
+	[[ $(x ss -Hltnp 'sport = :443') == *niko-server* ]] || fail "the front does not listen on TCP 443"
+	again="$(x rayctl apply)" || fail "rayctl apply after the certificate"
+	if grep -E '^(wrote|restarting)' <<<"$again"; then
+		fail "the certificate needed an apply"
+	fi
+	out="$(x /usr/local/bin/rayctl uninstall -yes 2>&1)" || fail "rayctl uninstall after the default services: $out"
+	x sh -c 'rm -f /root/ca.* /root/int.* /root/site.*'
+	snapshot /root/after-default.snap
+	if ! diff -u <(x cat /root/before.snap) <(x cat /root/after-default.snap) >&2; then
+		fail "the host after the default services' uninstall differs from before the install (diff above)"
+	fi
+	x rm -f /root/after-default.snap
+fi
+
 log "$distro: raycontrol v0 in the way (R4-26)"
 # What legacy/ray.sh leaves: its settings and CLI, an Xray unit holding TCP
 # 443, its port-knocking set in table inet filter. Debian's stock table of

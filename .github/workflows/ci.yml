@@ -187,6 +187,8 @@ jobs:
     # (docs/08-decisions.md, R2-1), with each family's usual host firewall,
     # checked from a second container like a client: SPA over UDP and TCP,
     # the subscription, revocation, firewall reloads, flush ruleset, reboot.
+    # On debian13 first an install with the default services (REALITY
+    # alone), before and after its site's certificate, and its uninstall.
     needs: xray
     runs-on: ubuntu-24.04
     timeout-minutes: 30
