@@ -87,3 +87,40 @@ func TestOverAgainAfterRaisedLimitWakes(t *testing.T) {
 		t.Fatalf("audits %q", got)
 	}
 }
+
+// Off by a lowered limit, and reset before the loop's next poll: the loop
+// never had her as over, so before, that poll took her off again at once
+// (written, apply woken) by what she sent before the reset, seconds after
+// the subscription said she was back.
+func TestResetUsageAfterLoweredLimit(t *testing.T) {
+	n := newNode(t)
+	n.user("alice", 1<<30, "hy")
+	a := n.accountant()
+	n.set("hy2:hy", "b1", "u1", 0, 0)
+	a.Round(n.ctx, "", false)
+	n.tick(Every)
+	n.set("hy2:hy", "b1", "u1", 600, 600)
+	a.Round(n.ctx, "", false)
+	n.tick(time.Minute)
+	a.Round(n.ctx, "", false) // the minute's write: 1200 in the store
+	n.wantUsed("alice", 600, 600)
+	limit := int64(1000)
+	if _, err := n.st.SetUserTraffic(n.ctx, "alice", store.TrafficChange{Limit: &limit}); err != nil {
+		t.Fatal(err)
+	}
+	// Off in the store at once (apply is woken by the API); she sends on
+	// until the cut, and the administrator resets.
+	n.set("hy2:hy", "b1", "u1", 1100, 1100)
+	n.tick(5 * time.Second)
+	if _, err := n.st.SetUserTraffic(n.ctx, "alice", store.TrafficChange{ResetUsage: true}); err != nil {
+		t.Fatal(err)
+	}
+	woken := n.woken
+	for i := range 6 {
+		n.tick(Every)
+		a.Round(n.ctx, "", false)
+		if u, _ := n.st.UserByName(n.ctx, "alice"); !u.Active(n.now) || n.woken != woken {
+			t.Fatalf("round %d after the reset: active %v (used %d), woken %d, want %d", i, u.Active(n.now), u.Used(n.now), n.woken, woken)
+		}
+	}
+}
