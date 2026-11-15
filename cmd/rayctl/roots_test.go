@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/pem"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -58,15 +59,20 @@ func TestRootsCmd(t *testing.T) {
 	if out, _ = run("show"); !strings.Contains(out, "added (rayctl roots system off)") || !strings.Contains(out, extra+" (rayctl roots file none), its roots:") {
 		t.Fatalf("show: %s", out)
 	}
-	// The settings cannot be written: the file they name stays.
-	_ = os.Mkdir(settings+".tmp", 0o700)
-	if _, err = run("file", "none"); err == nil {
+	// The settings cannot be written: the file they name stays. Under a
+	// name of 255 bytes they read, and the temporary file beside it, a
+	// longer name, cannot be made (root passes any mode bits).
+	long := filepath.Join(filepath.Dir(settings), strings.Repeat("s", 250)+".json")
+	if b, err := os.ReadFile(settings); err != nil || os.WriteFile(long, b, 0o600) != nil {
+		t.Fatal(err)
+	}
+	if err = rootsCmd(io.Discard, long, extra, []string{"file", "none"}); err == nil {
 		t.Fatal("file none: the settings were not written")
 	}
 	if _, err := os.Stat(extra); err != nil {
 		t.Fatalf("the file the settings name went: %v", err)
 	}
-	_ = os.Remove(settings + ".tmp")
+	_ = os.Remove(long)
 	if _, err = run("system", "off"); err != nil {
 		t.Fatal(err)
 	}

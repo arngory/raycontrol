@@ -404,6 +404,38 @@ func TestSettingsFile(t *testing.T) {
 	}
 }
 
+// TestSettingsFileNoLink: a link put at the name the temporary file had
+// before (path.tmp) is not written through, nor a file there truncated;
+// the settings are written beside it, and no temporary file is left.
+func TestSettingsFileNoLink(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "tls-roots.json")
+	if err := os.Symlink(victim, p+".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	want := roots.Settings{System: true}
+	if err := roots.WriteSettings(p, want); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "keep" {
+		t.Fatalf("written through the link: %q", b)
+	}
+	if s, err := roots.ReadSettings(p); err != nil || s != want {
+		t.Fatalf("read %+v %v", s, err)
+	}
+	if fi, err := os.Lstat(p); err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o644 {
+		t.Fatalf("%v %v", fi, err)
+	}
+	left, _ := filepath.Glob(filepath.Join(dir, "tls-roots.json.*.tmp"))
+	if len(left) != 0 {
+		t.Fatalf("left: %v", left)
+	}
+}
+
 // TestUnreadable: the modes a user other than the owner needs, file and
 // directories above it.
 func TestUnreadable(t *testing.T) {

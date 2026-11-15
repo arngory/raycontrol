@@ -125,28 +125,35 @@ func WriteExtra(path string, cs []*x509.Certificate) error {
 // writeFile writes a file of root's by rename, mode 0644 whatever root's
 // umask (027 would leave it 0640 root:root, which rayd, user rayd, cannot
 // read: it would stay on the embedded list while rayctl said done). The
-// files hold public certificates and two settings, nothing secret.
+// files hold public certificates and two settings, nothing secret. The
+// temporary file is a new one in the same directory (os.CreateTemp:
+// O_EXCL, so never through a link or into a file put there before), its
+// mode set through its descriptor, then renamed over path, as rayctl's
+// placeDB writes a database.
 func writeFile(path string, b []byte) error {
 	if err := openDir(filepath.Dir(path)); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644) //nolint:gosec // G302,G304: roots, no secret; rayd reads them
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
 	_, err = f.Write(b)
-	if cerr := f.Chmod(0o644); err == nil {
+	if cerr := f.Chmod(0o644); err == nil { //nolint:gosec // G302: roots, no secret; rayd reads them
 		err = cerr
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
 	if err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	return nil
 }
 
 // openDir makes dir 0755 whatever the umask, or, when it exists, gives it
