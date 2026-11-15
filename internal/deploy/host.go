@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/arngory/raycontrol/internal/perimeter"
 	"github.com/arngory/raycontrol/internal/render"
 )
 
@@ -255,8 +256,11 @@ func ResolverProblem(root string) string {
 // SandboxResolverProblem says why niko-server's backends that go out
 // (Hysteria2, Yggdrasil's peers) could not resolve names with the host's
 // resolv.conf, or "" when they can: their units deny loopback and the
-// private ranges, all but systemd-resolved's stub (stubAllow). One server
-// they reach is enough. root is the host's root, "" for this host.
+// private ranges, all but systemd-resolved's stub (stubAllow), and the
+// perimeter's local part (on by default, R4-38) refuses the node's own and
+// local networks, all but the resolvers of perimeter.LocalResolvers on 53
+// (the stub, Azure's 168.63.129.16). One server they reach is enough. root
+// is the host's root, "" for this host.
 func SandboxResolverProblem(root string) string {
 	at := func(p string) string { return filepath.Join(root, p) }
 	b, err := os.ReadFile(at(resolvTarget(at, ResolvConf))) //nolint:gosec // G304: the host's resolv.conf
@@ -287,8 +291,9 @@ func SandboxResolverProblem(root string) string {
 	if len(out) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%s names %s, which Hysteria2 and Yggdrasil's peers may not reach (their units deny loopback and private ranges): "+
-		"the names their clients ask for fail; use systemd-resolved (its stub is let through) or a public resolver", ResolvConf, strings.Join(out, ", "))
+	return fmt.Sprintf("%s names %s, which Hysteria2 and Yggdrasil's peers may not reach (their units deny loopback and private ranges, "+
+		"and the perimeter the node's own and local networks): the names their clients ask for fail; "+
+		"use systemd-resolved (its stub is let through) or a public resolver", ResolvConf, strings.Join(out, ", "))
 }
 
 // ownAddrs are the host's addresses: the perimeter keeps the data plane
@@ -304,12 +309,42 @@ var ownAddrs = func() map[netip.Addr]bool {
 	return m
 }
 
-// sandboxReaches reports whether a unit with stubAllow reaches a's port 53.
+// sandboxReaches reports whether the data plane reaches a's port 53 from
+// a unit with denyLocal and stubAllow, past the perimeter's local part:
+// what both let through, from the same lists (unitDenied,
+// perimeter.LocalNets and LocalResolvers). The node's own addresses, which
+// to_node refuses before, are the caller's.
 func sandboxReaches(a netip.Addr) bool {
-	if a == netip.MustParseAddr("127.0.0.53") || a == netip.MustParseAddr("127.0.0.54") {
+	a = a.Unmap()
+	return a.IsValid() && !a.IsUnspecified() && a.Zone() == "" && unitReaches(a) && !perimeter.LocalRefuses53(a)
+}
+
+// unitDeniedSets are the prefixes of systemd's names in IPAddressDeny=.
+var unitDeniedSets = map[string][]string{
+	"localhost":  {"127.0.0.0/8", "::1/128"},
+	"link-local": {"169.254.0.0/16", "fe80::/64"},
+	"multicast":  {"224.0.0.0/4", "ff00::/8"},
+}
+
+// unitReaches reports whether a unit with denyLocal and stubAllow reaches
+// a: the allowed addresses win over the denied (systemd.resource-control(5)).
+func unitReaches(a netip.Addr) bool {
+	a = a.Unmap()
+	if slices.Contains(stubAddrs(), a.String()) {
 		return true
 	}
-	return a.IsGlobalUnicast() && !a.IsPrivate() && !netip.MustParsePrefix("100.64.0.0/10").Contains(a)
+	for _, d := range unitDenied {
+		prefixes, ok := unitDeniedSets[d]
+		if !ok {
+			prefixes = []string{d}
+		}
+		for _, p := range prefixes {
+			if netip.MustParsePrefix(p).Contains(a) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // resolvTarget is the file a resolv.conf link leads to through up to 8

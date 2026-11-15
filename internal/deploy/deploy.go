@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/arngory/raycontrol/internal/nodeupdate"
+	"github.com/arngory/raycontrol/internal/perimeter"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/site"
@@ -872,16 +873,33 @@ func (u unit) check() error {
 // stubAllow lets a unit that denies loopback reach systemd-resolved's stub
 // (127.0.0.53, and 127.0.0.54 without its DNSSEC and search handling), where
 // /etc/resolv.conf points on most hosts: niko-server resolves with the
-// host's resolver. A provider's resolver in a private range stays out of
-// reach (on some clouds it is the metadata server):
-// deploy.SandboxResolverProblem warns. naive and Xray ask public resolvers
-// themselves. Whatever else listens on any address answers there too: the
-// perimeter's output chain lets the data plane reach port 53 only.
-const stubAllow = "IPAddressAllow=127.0.0.53 127.0.0.54"
+// host's resolver. The addresses are the loopback ones of
+// perimeter.LocalResolvers, the resolvers the perimeter lets the data
+// plane reach on port 53 (Azure's 168.63.129.16, the other, is not in
+// denyLocal). A provider's resolver in a private range stays out of reach
+// (on some clouds it is the metadata server): SandboxResolverProblem
+// warns. naive and Xray ask public resolvers themselves. Whatever else
+// listens on any address answers there too: the perimeter's output chain
+// lets the data plane reach port 53 only.
+var stubAllow = "IPAddressAllow=" + strings.Join(stubAddrs(), " ")
 
-// denyLocal keeps a unit that goes out from the node itself and from local
-// networks: the internet only.
-const denyLocal = "IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7"
+func stubAddrs() []string {
+	var out []string
+	for _, a := range perimeter.LocalResolvers {
+		if a.IsLoopback() {
+			out = append(out, a.String())
+		}
+	}
+	return out
+}
+
+// unitDenied is what denyLocal keeps a unit that goes out from: the node
+// itself and local networks, the internet only. systemd's names are
+// sets (systemd.resource-control(5)): unitDeniedSets.
+var unitDenied = []string{"localhost", "link-local", "multicast", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"}
+
+// denyLocal is unitDenied as a unit's line.
+var denyLocal = "IPAddressDeny=" + strings.Join(unitDenied, " ")
 
 // ResolvedDropIn is where installs before v0.11 turned systemd-resolved's
 // stub off for the DNS tunnels; Apply removes it (giveBackStub).

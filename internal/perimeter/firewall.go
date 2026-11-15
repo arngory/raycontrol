@@ -347,7 +347,7 @@ table inet %[1]s {
 		oif "lo" meta skuid %[7]s ip daddr != 127.0.0.0/8 fib daddr type local jump to_node
 		oif "lo" meta skuid %[7]s ip6 daddr != ::1 fib daddr type local jump to_node
 		meta nfproto ipv4 meta l4proto udp ct state != established meta skuid %[7]s fib daddr type broadcast jump to_node
-		oif "lo" meta skuid %[7]s ip daddr { 127.0.0.53, 127.0.0.54 } meta l4proto { tcp, udp } th dport != 53 jump to_node
+		oif "lo" meta skuid %[7]s ip daddr { %[15]s } meta l4proto { tcp, udp } th dport != 53 jump to_node
 		meta skuid %[7]s ct state new,untracked jump egress_local
 		meta skuid %[7]s jump egress
 		meta skuid @egress_uid jump egress%[12]s
@@ -376,7 +376,8 @@ table inet %[1]s {
 	chain egress_local {
 	}%[8]s
 }
-`, Table, limit, n.NflogGroup, lo, loNAT, lo, guard, relay, relayMark, inRateRules(true, "\t\t", "", n.inDiv), frontUID, guardRules, local4, local6)
+`, Table, limit, n.NflogGroup, lo, loNAT, lo, guard, relay, relayMark, inRateRules(true, "\t\t", "", n.inDiv), frontUID, guardRules, local4, local6,
+		resolverElems(false, true))
 }
 
 // Setup installs the table and detects whether "destroy element" works.

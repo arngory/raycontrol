@@ -231,6 +231,96 @@ func TestNetnsLocalUntracked(t *testing.T) {
 	}
 }
 
+// TestNetnsLocalAzure: Azure's platform address, 168.63.129.16 (the
+// WireServer), is in the local networks, but on port 53, TCP and UDP, the
+// data plane reaches it (LocalResolvers): an Azure VM whose resolv.conf
+// names it (RHEL and Rocky with NetworkManager, no systemd-resolved)
+// resolves from niko-server's Hysteria2 and Yggdrasil. Its other ports are
+// refused, the guest agent's 80 and 32526 among them, and so is another
+// local network's port 53. It is routed out of a veth whose other end
+// answers nothing: a refusal is the perimeter's, at once.
+func TestNetnsLocalAzure(t *testing.T) {
+	if os.Getenv("RAYCONTROL_NETNS_TEST") != "1" {
+		t.Skip("set RAYCONTROL_NETNS_TEST=1 and run as root under unshare -n")
+	}
+	loUp(t)
+	for _, args := range [][]string{
+		{"link", "add", "rc-az", "type", "veth", "peer", "name", "rc-ay"}, {"addr", "add", "10.1.3.1/24", "dev", "rc-az"},
+		{"link", "set", "rc-az", "up"}, {"link", "set", "rc-ay", "up"},
+		{"route", "add", "168.63.129.16/32", "dev", "rc-az"}, {"route", "add", "169.254.0.0/16", "dev", "rc-az"},
+	} {
+		if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
+			t.Fatalf("ip %v: %v %s", args, err, out)
+		}
+	}
+	defer exec.Command("ip", "link", "del", "rc-az").Run()
+	fw := &NFT{NflogGroup: 7}
+	if err := fw.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	defer fw.Teardown()
+	if err := fw.SetEgress(Egress{Local: true}); err != nil {
+		t.Fatal(err)
+	}
+	const dataPlane = 9150
+	wire := func(port uint16) netip.AddrPort {
+		return netip.AddrPortFrom(netip.MustParseAddr("168.63.129.16"), port)
+	}
+	// refused tells whether a TCP connect from uid is refused within a
+	// moment; one that goes out waits for an answer that never comes.
+	refused := func(uid int, a netip.AddrPort) bool {
+		t.Helper()
+		family, sa := sockaddr(a)
+		fd, err := socketAs(uid, family, unix.SOCK_STREAM|unix.SOCK_NONBLOCK)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unix.Close(fd)
+		switch err := unix.Connect(fd, sa); {
+		case errors.Is(err, syscall.ECONNREFUSED):
+			return true
+		case !errors.Is(err, syscall.EINPROGRESS):
+			t.Fatalf("connect to %v: %v", a, err)
+		}
+		time.Sleep(300 * time.Millisecond)
+		v, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_ERROR)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return syscall.Errno(v) == syscall.ECONNREFUSED //nolint:gosec // G115: an errno
+	}
+
+	if err := sendAs(dataPlane, wire(53), []byte("x")); err != nil {
+		t.Errorf("the data plane's UDP to Azure's resolver: %v", err)
+	}
+	if refused(dataPlane, wire(53)) {
+		t.Error("the data plane's TCP to Azure's resolver is refused")
+	}
+	for _, port := range []uint16{80, 32526} {
+		if !refused(dataPlane, wire(port)) {
+			t.Errorf("the data plane's TCP to the WireServer's %d is not refused", port)
+		}
+		if c, err := connAs(dataPlane, wire(port)); !errors.Is(err, syscall.ECONNREFUSED) {
+			if c != nil {
+				c.Close()
+			}
+			t.Errorf("the data plane to the WireServer's %d: %v, want ECONNREFUSED", port, err)
+		}
+		if err := sendAs(dataPlane, wire(port), []byte("x")); !errors.Is(err, syscall.EPERM) {
+			t.Errorf("the data plane's UDP to the WireServer's %d: %v, want EPERM", port, err)
+		}
+	}
+	// Port 53 elsewhere in the local networks is no resolver of the list:
+	// AWS's 169.254.169.253 is reached only through systemd-resolved.
+	if err := sendAs(dataPlane, netip.MustParseAddrPort("169.254.169.253:53"), []byte("x")); !errors.Is(err, syscall.EPERM) {
+		t.Errorf("the data plane's UDP to 169.254.169.253:53: %v, want EPERM", err)
+	}
+	// Root (rayd's own lookups, the guest agent) is not the data plane's.
+	if refused(0, wire(80)) {
+		t.Error("root's TCP to the WireServer is refused")
+	}
+}
+
 // listenAs listens on TCP from a socket owned by uid.
 func listenAs(uid int, a netip.AddrPort) (net.Listener, error) {
 	family, sa := sockaddr(a)

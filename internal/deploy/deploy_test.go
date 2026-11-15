@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/arngory/raycontrol/internal/deploy"
+	"github.com/arngory/raycontrol/internal/perimeter"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/store"
@@ -1375,8 +1376,9 @@ func TestResolverProblem(t *testing.T) {
 }
 
 // Hysteria2 and Yggdrasil's peers resolve from units that deny loopback and
-// the private ranges, all but resolved's stub: one server they reach is
-// enough.
+// the private ranges, all but resolved's stub, past the perimeter's local
+// part, which refuses the local networks all but the stub and Azure's
+// resolver on 53: one server they reach is enough.
 func TestSandboxResolverProblem(t *testing.T) {
 	t.Cleanup(deploy.SetOwnAddrs(map[netip.Addr]bool{netip.MustParseAddr("203.0.113.5"): true}))
 	root := t.TempDir()
@@ -1402,6 +1404,18 @@ func TestSandboxResolverProblem(t *testing.T) {
 		"nameserver 10.0.0.1\nnameserver 10.0.0.2\nnameserver 10.0.0.3\nnameserver 1.1.1.1\n": true,
 		// The node's own address: the perimeter keeps the data plane from it.
 		"nameserver 203.0.113.5\n": true,
+		// Azure's platform resolver (RHEL, Rocky with NetworkManager):
+		// public for the units, and on 53 past the perimeter's local part.
+		"nameserver 168.63.129.16\n": false,
+		// The perimeter's local networks the units do not deny: refused
+		// there (R4-38), with nothing in the journal of the unit.
+		"nameserver 198.18.0.1\n":                           true,
+		"nameserver 192.0.0.10\n":                           true,
+		"nameserver 240.0.0.1\n":                            true,
+		"nameserver 0.0.0.0\n":                              true,
+		"nameserver 64:ff9b::a9fe:a9fe\n":                   true,
+		"nameserver 2002:c000:201::1\n":                     true,
+		"nameserver 198.18.0.1\nnameserver 168.63.129.16\n": false,
 	} {
 		os.WriteFile(conf, []byte(conf2), 0o644)
 		if p := deploy.SandboxResolverProblem(root); (p != "") != bad {
@@ -1411,6 +1425,42 @@ func TestSandboxResolverProblem(t *testing.T) {
 	os.WriteFile(conf, []byte("nameserver 10.0.0.2\nnameserver 172.16.0.2\n"), 0o644)
 	if p := deploy.SandboxResolverProblem(root); !strings.Contains(p, "10.0.0.2, 172.16.0.2") {
 		t.Errorf("the servers named: %q", p)
+	}
+}
+
+// What the warning calls reachable is what the units' lines and the
+// perimeter's local part let through, from the same lists: every resolver
+// of perimeter.LocalResolvers, no other address of LocalNets, nothing the
+// units deny.
+func TestSandboxReachesAgrees(t *testing.T) {
+	deny, allow := deploy.UnitLines()
+	if deny != "IPAddressDeny=localhost link-local multicast 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7" ||
+		allow != "IPAddressAllow=127.0.0.53 127.0.0.54" {
+		t.Fatalf("the units' lines: %q %q", deny, allow)
+	}
+	for _, a := range perimeter.LocalResolvers {
+		if !deploy.SandboxReaches(a) {
+			t.Errorf("resolver %s not reached", a)
+		}
+	}
+	for _, n := range perimeter.LocalNets {
+		p := netip.MustParsePrefix(n)
+		for _, a := range []netip.Addr{p.Addr(), p.Addr().Next()} {
+			if p.Contains(a) && !slices.Contains(perimeter.LocalResolvers, a) && deploy.SandboxReaches(a) {
+				t.Errorf("%s (%s) reached", a, n)
+			}
+		}
+	}
+	// The units' own: the stub only, of loopback; link-local, multicast.
+	for _, a := range []string{"127.0.0.1", "::1", "169.254.169.253", "fe80::1", "224.0.0.251", "ff02::fb", "10.0.0.2", "100.100.2.136", "fd00::53"} {
+		if deploy.SandboxReaches(netip.MustParseAddr(a)) {
+			t.Errorf("%s reached", a)
+		}
+	}
+	for _, a := range []string{"1.1.1.1", "8.8.8.8", "2606:4700:4700::1111", "::ffff:9.9.9.9"} {
+		if !deploy.SandboxReaches(netip.MustParseAddr(a)) {
+			t.Errorf("%s not reached", a)
+		}
 	}
 }
 

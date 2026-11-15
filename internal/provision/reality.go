@@ -54,15 +54,7 @@ var realityRoots *x509.CertPool
 
 // IsLocal reports whether an address is in the node's own and local
 // networks (perimeter.LocalNets, R4-38).
-func IsLocal(a netip.Addr) bool {
-	a = a.Unmap()
-	for _, n := range perimeter.LocalNets {
-		if netip.MustParsePrefix(n).Contains(a) {
-			return true
-		}
-	}
-	return false
-}
+func IsLocal(a netip.Addr) bool { return perimeter.InLocalNets(a) }
 
 // RealityLocalTarget is the target of an enabled REALITY service when the
 // operator gave it as a local address and port (127.0.0.1:8443, the host's

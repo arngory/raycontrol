@@ -121,6 +121,50 @@ var LocalNets = []string{
 	"::/96", "fc00::/7", "fe80::/10", "ff00::/8", "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16",
 }
 
+// LocalResolvers are the resolvers in LocalNets the data plane reaches
+// all the same, on port 53 (TCP and UDP) and no other: systemd-resolved's
+// stub (127.0.0.53, and 127.0.0.54 without its DNSSEC and search
+// handling), where /etc/resolv.conf points on most hosts, and Azure's
+// platform resolver on the WireServer, 168.63.129.16, which resolv.conf
+// names itself on an Azure VM without systemd-resolved (RHEL and Rocky
+// with NetworkManager): niko-server's Hysteria2 and Yggdrasil look names
+// up with the host's resolver. The WireServer's other ports (80 and
+// 32526, the guest agent's) stay refused, as the stub's (to_node).
+// deploy.SandboxResolverProblem reads the same list: a resolver not in it
+// is one the data plane does not reach.
+var LocalResolvers = []netip.Addr{netip.MustParseAddr("127.0.0.53"), netip.MustParseAddr("127.0.0.54"), netip.MustParseAddr("168.63.129.16")}
+
+// InLocalNets reports whether a is in LocalNets.
+func InLocalNets(a netip.Addr) bool {
+	a = a.Unmap()
+	for _, n := range LocalNets {
+		if netip.MustParsePrefix(n).Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// LocalRefuses53 reports whether the policy's local part, in force,
+// refuses a new flow of the data plane to a's port 53 (a resolver):
+// every address of LocalNets but LocalResolvers. What to_node refuses
+// before (the node's own addresses) is the caller's to know.
+func LocalRefuses53(a netip.Addr) bool {
+	return InLocalNets(a) && !slices.Contains(LocalResolvers, a.Unmap())
+}
+
+// resolverElems are LocalResolvers of one family as set elements; only
+// the loopback ones (the stub's, which to_node guards) with loopback.
+func resolverElems(v6, loopback bool) string {
+	var out []string
+	for _, a := range LocalResolvers {
+		if a.Is6() == v6 && (!loopback || a.IsLoopback()) {
+			out = append(out, a.String())
+		}
+	}
+	return strings.Join(out, ", ")
+}
+
 // localSets are the sets of LocalNets in the table, IPv4 and IPv6.
 func localSets() (v4, v6 string) {
 	var a, b []string
@@ -228,16 +272,21 @@ func EgressLocalScript(e Egress) string {
 	rule := func(chain, r string) { fmt.Fprintf(&b, "add rule inet %s %s %s\n", Table, chain, r) }
 	if e.Local {
 		// Only the data plane's new flows come here (the output chain):
-		// the node's own and local networks are refused, but for
-		// systemd-resolved's stub on 53 (to_node refuses its other ports
-		// before) and the channel probe on 127.0.0.1. A refusal the socket
+		// the node's own and local networks are refused, but for the
+		// resolvers on 53 (LocalResolvers: systemd-resolved's stub, whose
+		// other ports to_node refuses before, and Azure's) and the channel
+		// probe on 127.0.0.1. A refusal the socket
 		// sees at once, as to_node's: TCP a reset (ECONNREFUSED), UDP and
 		// ICMP EPERM. An ICMP error to a connect comes while connect holds
 		// the socket, counts as a soft error, and the refusal waits for the
 		// SYN's first retransmission, a second. naive and Hysteria2 answer
 		// an honest connect "denied" from their own check before it comes
 		// to this.
-		rule("egress_local", "meta l4proto { tcp, udp } ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 return")
+		for _, family := range []string{"ip", "ip6"} {
+			if elems := resolverElems(family == "ip6", false); elems != "" {
+				rule("egress_local", fmt.Sprintf("meta l4proto { tcp, udp } %s daddr { %s } th dport 53 return", family, elems))
+			}
+		}
 		// An operator's REALITY target on a local address: that address,
 		// protocol and port, from that service's process only.
 		for _, x := range e.Exempt {

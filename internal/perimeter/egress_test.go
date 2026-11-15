@@ -66,7 +66,7 @@ func TestEgressScript(t *testing.T) {
 			[]string{"add element inet raycontrol egress_uid { 0, 4242 }\n"}, []string{"egress_local meta", "egress_local ip"}},
 		{"local", Egress{Local: true, Loopback: []Port{{"tcp", 8443}, {"udp", 8443}}}, false, []string{
 			"flush chain inet raycontrol egress_local\n" +
-				"add rule inet raycontrol egress_local meta l4proto { tcp, udp } ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 return\n" +
+				"add rule inet raycontrol egress_local meta l4proto { tcp, udp } ip daddr { 127.0.0.53, 127.0.0.54, 168.63.129.16 } th dport 53 return\n" +
 				"add rule inet raycontrol egress_local ip daddr 127.0.0.1 meta l4proto . th dport { tcp . 8443, udp . 8443 } return\n" +
 				`add rule inet raycontrol egress_local ip daddr @local4 meta l4proto tcp counter reject with tcp reset comment "local"` + "\n" +
 				`add rule inet raycontrol egress_local ip daddr @local4 counter reject with icmpx admin-prohibited comment "local"` + "\n" +
@@ -207,6 +207,17 @@ func TestRulesetLocal(t *testing.T) {
 	for _, a := range []string{"1.1.1.1", "2606:4700:4700::1111", "200::1", "198.51.100.1", "168.63.129.15", "168.63.129.17"} {
 		if slices.ContainsFunc(LocalNets, func(n string) bool { return netip.MustParsePrefix(n).Contains(netip.MustParseAddr(a)) }) {
 			t.Errorf("%s is local", a)
+		}
+	}
+	// The resolvers the data plane reaches on 53 (LocalResolvers): the
+	// stub's other ports go to to_node, Azure's to the refusals.
+	if !strings.Contains(rs, `oif "lo" meta skuid `+DataPlaneUIDs+` ip daddr { 127.0.0.53, 127.0.0.54 } meta l4proto { tcp, udp } th dport != 53 jump to_node`) {
+		t.Error("the stub's other ports do not go to to_node")
+	}
+	for a, refused := range map[string]bool{"127.0.0.53": false, "127.0.0.54": false, "168.63.129.16": false, "::ffff:168.63.129.16": false,
+		"127.0.0.1": true, "198.18.0.1": true, "169.254.169.253": true, "10.0.0.2": true, "fd00:ec2::253": true, "1.1.1.1": false, "2606:4700:4700::1111": false} {
+		if got := LocalRefuses53(netip.MustParseAddr(a)); got != refused {
+			t.Errorf("LocalRefuses53(%s) = %v", a, got)
 		}
 	}
 }

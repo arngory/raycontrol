@@ -11,3 +11,9 @@ func SetOwnAddrs(m map[netip.Addr]bool) func() {
 	ownAddrs = func() map[netip.Addr]bool { return m }
 	return func() { ownAddrs = saved }
 }
+
+// SandboxReaches is sandboxReaches; UnitLines are denyLocal and stubAllow.
+var (
+	SandboxReaches = sandboxReaches
+	UnitLines      = func() (deny, allow string) { return denyLocal, stubAllow }
+)
