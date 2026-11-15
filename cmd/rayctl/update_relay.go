@@ -64,10 +64,11 @@ func updateHost(db, bundle, unit string) (hostKind, error) {
 	return noHost, errors.New("raycontrol is not installed here (install/bootstrap.sh)")
 }
 
-// errRelayByHand refuses what a relay does not have: updates by request
-// and automatic ones need rayd's API for devices, which a relay has not.
-var errRelayByHand = errors.New("this host is a relay: remote and automatic updates do not apply to it " +
-	"(a relay has no rayd API for devices); rayctl update on this host updates it")
+// errRelayByHand refuses a node's request on a relay: a relay has no rayd
+// API for devices, and no update of its own by schedule; it takes the
+// releases its exit names (relayRequests), or root's by hand.
+var errRelayByHand = errors.New("this host is a relay: a node's updates by request do not apply to it " +
+	"(a relay has no rayd API for devices); rayctl update on this host updates it, rayctl update remote on takes the releases its exit names")
 
 // relayUpdateSince is the first release whose rayctl updates a relay; an
 // older one is installed on a relay by its own bootstrap.sh -relay.
@@ -835,6 +836,7 @@ type relayEnv struct {
 	// result is where an update by the exit's word writes how it ended
 	// (nodeupdate.ResultEnv, given by the relay's runner); "" by hand.
 	result string
+	policy string // root's policy (nodeupdate.PolicyFile): -check says whether the exit's word updates the relay
 }
 
 // updateRelay is rayctl update on this relay host.
@@ -903,7 +905,11 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 	s, err := e.stage(ctx, o, st, installed)
 	newVersion, handed = s.version, s.handed
 	if o.check && !s.handed {
-		fmt.Println("this host is a relay " + b.Name + ": rayctl update here updates it; remote and automatic updates do not apply to a relay")
+		take := "rayctl update remote on takes the releases its exit names"
+		if nodeupdate.ReadPolicy(e.policy).Remote == "on" {
+			take = "the releases its exit names update it too (rayctl update remote off)"
+		}
+		fmt.Println("this host is a relay " + b.Name + ": rayctl update here updates it; " + take)
 	}
 	if err != nil || s.done {
 		return err
@@ -1130,6 +1136,7 @@ func (c *cli) relayEnvHere(ctx context.Context) relayEnv {
 		confirm: askYes,
 		signals: catchSignals,
 		result:  os.Getenv(nodeupdate.ResultEnv),
+		policy:  nodeupdate.PolicyFile,
 	}
 }
 
@@ -1155,32 +1162,135 @@ func realHealth(w healthWant) relayHealth {
 	}
 }
 
-// relayPolicy is rayctl update status|remote|auto on a relay: no policy,
-// since a relay has no rayd API for devices; status says what is
-// installed, what the last update kept, and whether one did not end.
-func (c *cli) relayPolicy(args []string, dir string) error {
+// errRelayAuto refuses rayctl update auto on a relay: it has no checks of
+// GitHub of its own, it goes where its exit went.
+var errRelayAuto = errors.New("a relay follows its exit: rayctl update remote on takes the releases the exit names")
+
+// relayPolicyAt is rayctl update status|remote on a relay with its host
+// given, so that a test runs it on directories of its own.
+type relayPolicyAt struct {
+	dir             string // previousDir: the copy an update kept, its mark
+	policy, status  string // nodeupdate.PolicyFile, StatusFile
+	request         string // nodeupdate.RelayRequestFile
+	units           string // where the unit files are
+	root            func() error
+	enable, disable func(unit string, now bool) error // journaled, for enable
+	probeEnabled    func() bool                       // rayd relay's unit enabled: it takes the exit's word
+	pathActive      func() bool
+	rayspa          func() string // rayspa's version
+}
+
+// relayPolicyHere is relayPolicyAt on this host.
+func relayPolicyHere() relayPolicyAt {
+	is := func(verb, unit, want string) bool {
+		out, _ := commandApart("systemctl", verb, unit).Output()
+		return strings.TrimSpace(string(out)) == want
+	}
+	return relayPolicyAt{
+		dir: previousDir, policy: nodeupdate.PolicyFile, status: nodeupdate.StatusFile, request: nodeupdate.RelayRequestFile,
+		units: "/etc/systemd/system", root: needRoot,
+		enable: func(u string, now bool) error {
+			h, err := journaledHost()
+			if err != nil {
+				return err
+			}
+			return enableUnit(h, u, now)
+		},
+		disable:      disableUnit,
+		probeEnabled: func() bool { return is("is-enabled", deploy.RelayProbeUnit, "enabled") },
+		pathActive:   func() bool { return is("is-active", deploy.RelayUpdatePath, "active") },
+		rayspa: func() string {
+			out, _ := exec.Command(deploy.DefaultBinaries.Rayspa, "version").Output() //nolint:gosec // G204: a fixed path
+			return strings.TrimSpace(string(out))
+		},
+	}
+}
+
+// relayPolicy is rayctl update status|remote|auto on a relay
+// (spec/relay-update-remote-v1.md §9.1). remote is root's switch for the
+// releases the exit names, in the policy file a node has, which rayd
+// relay reads and cannot write; auto does not apply. status says what is
+// installed, what the last update kept, whether one did not end, the
+// switch and the last update by the exit's word.
+func (c *cli) relayPolicy(args []string, at relayPolicyAt) error {
 	switch {
 	case args[0] == "status" && len(args) == 1:
-	case args[0] == "status":
-		return errUsage
-	case args[0] == "remote" || args[0] == "auto":
-		return errRelayByHand
-	default:
-		return errUsage
+		return c.relayStatus(at)
+	case args[0] == "remote" && len(args) == 2 && (args[1] == "on" || args[1] == "off"):
+		return at.remote(args[1] == "on")
+	case args[0] == "auto":
+		return errRelayAuto
 	}
-	out, _ := exec.Command(deploy.DefaultBinaries.Rayspa, "version").Output() //nolint:gosec // G204: a fixed path
-	rayspa := strings.TrimSpace(string(out))
+	return errUsage
+}
+
+// remote turns the update by the exit's word on or off. On only with the
+// units for it (an install from before them updates first) and with rayd
+// relay, which takes the exit's word; then the path unit runs, and the
+// recover unit is there for the next boot. Off: no unit runs it, and a
+// request waiting goes.
+func (at relayPolicyAt) remote(on bool) error {
+	if err := at.root(); err != nil {
+		return err
+	}
+	if on {
+		for _, u := range []string{deploy.RelayUpdatePath, deploy.RelayUpdateService, deploy.RelayRecover} {
+			if _, err := os.Stat(filepath.Join(at.units, u)); err != nil {
+				return fmt.Errorf("this relay has no %s yet (installed by a release before the update by the exit's word): rayctl update first", u)
+			}
+		}
+		if !at.probeEnabled() {
+			return fmt.Errorf("the relay's probe endpoint (rayd relay) does not run: it takes the exit's word; a new bundle from the exit has one (rayctl relay bundle there, then bash bootstrap.sh -relay %s here)",
+				deploy.RelayBundle)
+		}
+	}
+	p := nodeupdate.ReadPolicy(at.policy)
+	p.Remote = map[bool]string{true: "on", false: "off"}[on]
+	if err := nodeupdate.WritePolicy(at.policy, p); err != nil {
+		return err
+	}
+	if on {
+		if err := relayRemoteUnits(true, at.enable, at.disable); err != nil {
+			return fmt.Errorf("remote is on, but its units did not start: %w", err)
+		}
+		fmt.Println("the exit may now name a release for this relay: a signed one, newer than it; the relay downloads and verifies it itself (rayctl update remote off)")
+		return nil
+	}
+	// Off whatever the units say: the runner reads the policy again.
+	if err := relayRemoteUnits(false, at.enable, at.disable); err != nil {
+		fmt.Println("warning:", err)
+	}
+	if err := nodeupdate.RemoveRequest(at.request); err != nil {
+		return err
+	}
+	fmt.Println("the releases the exit names no longer update this relay (rayctl update remote on)")
+	return nil
+}
+
+// relayStatus is rayctl update status on a relay.
+func (c *cli) relayStatus(at relayPolicyAt) error {
+	rayspa := at.rayspa()
 	var previous string
-	if b, err := os.ReadFile(filepath.Join(dir, relayKeptFile)); err == nil { //nolint:gosec // G304: root's directory
+	if b, err := os.ReadFile(filepath.Join(at.dir, relayKeptFile)); err == nil { //nolint:gosec // G304: root's directory
 		var k relayKept
 		if json.Unmarshal(b, &k) == nil {
 			previous = k.Version
 		}
 	}
-	ops := relayOps{dir: dir}
+	ops := relayOps{dir: at.dir}
 	m, marked := ops.readMark()
+	remote := nodeupdate.ReadPolicy(at.policy).Remote
+	last := relayLast(nodeupdate.ReadStatus(at.status), time.Now())
 	if c.json {
-		st := map[string]any{"host": "relay", "installed": version, "rayspa": rayspa, "previous": previous, "remote": "n/a", "auto": "n/a"}
+		held := last.Held
+		if held == nil {
+			held = []string{}
+		}
+		st := map[string]any{"host": "relay", "installed": version, "rayspa": rayspa, "previous": previous, "remote": remote, "auto": "n/a",
+			"held": held, "last": nil}
+		if last.State != nodeupdate.Idle {
+			st["last"] = last
+		}
 		if marked {
 			st["unfinished"] = ops.adviceOf(m)
 		}
@@ -1191,18 +1301,63 @@ func (c *cli) relayPolicy(args []string, dir string) error {
 		fmt.Println(string(j))
 		return nil
 	}
+	// What the status file says, shown as text: no control characters
+	// reach the terminal (WriteStatus made them so; a file put there by
+	// another hand is read the same).
+	p := nodeupdate.Printable
 	fmt.Printf("host       relay\ninstalled  %s (rayctl)\n", version)
 	if rayspa != "" && rayspa != version {
-		fmt.Printf("rayspa     %s\n", rayspa)
+		fmt.Printf("rayspa     %s\n", p(rayspa))
 	}
 	if previous != "" {
-		fmt.Printf("previous   %s (rayctl update -rollback)\n", previous)
+		fmt.Printf("previous   %s (rayctl update -rollback)\n", p(previous))
 	}
 	if marked {
-		fmt.Printf("unfinished %s\n", ops.adviceOf(m))
+		fmt.Printf("unfinished %s\n", p(ops.adviceOf(m)))
+	}
+	if remote == "on" {
+		active := at.pathActive()
+		state := map[bool]string{true: "active", false: "not active"}[active]
+		fmt.Printf("remote     on: the exit names the release (%s %s); rayctl update remote off\n", deploy.RelayUpdatePath, state)
+		if !active {
+			fmt.Printf("warning: %s is not active: systemctl enable --now %s\n", deploy.RelayUpdatePath, deploy.RelayUpdatePath)
+		}
+	} else {
+		fmt.Println("remote     off (default): rayctl update remote on takes the releases the exit names")
+	}
+	if last.State == nodeupdate.Idle {
+		fmt.Println("last       none")
+	} else {
+		state := last.State
+		if last.Reason != "" {
+			state += " (" + last.Reason + ")"
+		}
+		line := fmt.Sprintf("last       %s: %s → %s, by %s", p(state), p(last.From), p(cmp.Or(last.To, "?")), p(last.By))
+		if !last.Ended.IsZero() {
+			line += ", " + last.Ended.UTC().Format(time.RFC3339)
+		} else if !last.Requested.IsZero() {
+			line += ", asked " + last.Requested.UTC().Format(time.RFC3339)
+		}
+		fmt.Println(line)
+	}
+	if len(last.Held) > 0 {
+		fmt.Printf("held       %s (did not hold here: the exit's word does not take them again; rayctl update -version V by hand)\n", p(strings.Join(last.Held, ", ")))
+	}
+	if last.Error != "" {
+		fmt.Printf("error      %s\n", p(last.Error))
 	}
 	fmt.Println("latest     rayctl update -check asks GitHub")
-	fmt.Println("remote     does not apply to a relay (no rayd API for devices)")
-	fmt.Println("auto       does not apply to a relay: rayctl update on this host")
+	fmt.Println("auto       does not apply: a relay follows its exit")
 	return nil
+}
+
+// relayLast is the last update by the exit's word as it stands at now: a
+// run with no outcome after nodeupdate.Stale (no word, no stop hook: a
+// power cut the recover unit has not seen to) failed.
+func relayLast(s nodeupdate.Status, now time.Time) nodeupdate.Status {
+	if s.State == nodeupdate.Running && now.Sub(s.Started) >= nodeupdate.Stale {
+		s.State = nodeupdate.Failed
+		s.Error = "interrupted: no outcome within " + nodeupdate.Stale.String() + " (journalctl -u " + deploy.RelayUpdateService + ")"
+	}
+	return s
 }

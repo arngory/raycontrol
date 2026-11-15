@@ -473,7 +473,7 @@ func newFakeRelay(t *testing.T) *fakeRelay {
 		tableGone: func() bool { return true }, rayspa: "rayspa",
 	}
 	f.env = relayEnv{
-		bundle: f.at("relay.bundle"), ops: ops, session: session{"203.0.113.9", 22},
+		bundle: f.at("relay.bundle"), ops: ops, session: session{"203.0.113.9", 22}, policy: f.at("policy.json"),
 		before: func(string) (int, string, error) {
 			f.asked++
 			return 22, "", f.before
@@ -936,7 +936,7 @@ func TestRelayUpdateWhole(t *testing.T) {
 	if text, err := f.update(updateOpts{want: "latest", check: true}); err != nil || !strings.Contains(text, "warning: the last update or rollback") {
 		t.Errorf("-check: %q %v", text, err)
 	}
-	if text, err := captureStdout(t, func() error { return (&cli{}).relayPolicy([]string{"status"}, f.env.ops.dir) }); err != nil ||
+	if text, err := captureStdout(t, func() error { return (&cli{}).relayPolicy([]string{"status"}, newFakePolicy(t, f.env.ops.dir).at) }); err != nil ||
 		!strings.Contains(text, "unfinished the last update or rollback") {
 		t.Errorf("status: %q %v", text, err)
 	}
@@ -1242,7 +1242,7 @@ func TestRelayMarkWithoutCopy(t *testing.T) {
 	if _, err := f.rollback(true); err == nil || !strings.Contains(err.Error(), want) {
 		t.Errorf("-rollback: %v", err)
 	}
-	if text, err := captureStdout(t, func() error { return (&cli{}).relayPolicy([]string{"status"}, f.env.ops.dir) }); err != nil ||
+	if text, err := captureStdout(t, func() error { return (&cli{}).relayPolicy([]string{"status"}, newFakePolicy(t, f.env.ops.dir).at) }); err != nil ||
 		!strings.Contains(text, want) {
 		t.Errorf("status: %q %v", text, err)
 	}
@@ -1516,29 +1516,6 @@ func TestStageReleaseRelay(t *testing.T) {
 	files = signedRelease(t, k, "v0.25.2", out)
 	if _, _, _, err := stage(updateOpts{want: "latest", check: true}, "v0.25.1"); err == nil || !strings.Contains(err.Error(), "bootstrap.sh -relay") {
 		t.Errorf("latest below the floor, -check: %v", err)
-	}
-}
-
-// rayctl update status|remote|auto on a relay: no policy to set, status
-// says what is installed and what the last update kept.
-func TestRelayPolicy(t *testing.T) {
-	c := &cli{}
-	dir := t.TempDir()
-	for _, args := range [][]string{{"remote", "on"}, {"auto", "patch"}} {
-		if err := c.relayPolicy(args, dir); !errors.Is(err, errRelayByHand) {
-			t.Errorf("%v: %v", args, err)
-		}
-	}
-	for _, args := range [][]string{{"status", "x"}, {"nope"}} {
-		if err := c.relayPolicy(args, dir); !errors.Is(err, errUsage) {
-			t.Errorf("%v: %v", args, err)
-		}
-	}
-	os.WriteFile(filepath.Join(dir, relayKeptFile), []byte(`{"version":"v0.26.0"}`), 0o600)
-	text, err := captureStdout(t, func() error { return c.relayPolicy([]string{"status"}, dir) })
-	if err != nil || !strings.Contains(text, "host       relay") || !strings.Contains(text, "previous   v0.26.0") ||
-		!strings.Contains(text, "remote     does not apply") || !strings.Contains(text, "rayctl update -check") {
-		t.Errorf("status: %q %v", text, err)
 	}
 }
 

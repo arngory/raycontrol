@@ -177,7 +177,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                               -rollback do not go together
   update status | remote on|off | auto off|patch [-window HH:MM-HH:MM]
                                               updates by request: admin devices over the API, rayd's
-                                              own to patch releases in the window (root; not on a relay)
+                                              own to patch releases in the window (root); on a relay
+                                              remote only: the releases its exit names
   uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]
                                               take back everything install and apply changed (root)
   backup [-o FILE] [-passphrase-file F]       the node's state sealed with a passphrase (root):
