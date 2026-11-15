@@ -76,8 +76,17 @@ func (r *Redactor) String(s string) string {
 	for _, n := range r.names {
 		s = replaceName(s, n)
 	}
-	s = ipv6.ReplaceAllStringFunc(s, r.addr)
-	s = ipv4.ReplaceAllStringFunc(s, r.addr)
+	// The addresses until none is left: text that is no address as a whole
+	// may hold one that a token leaves bare ("1:2:3:4:5:6::" when the IPv4
+	// address after it goes, the whole having a group too many). Each round
+	// that changes the text takes an address out of it.
+	for {
+		next := ipv4.ReplaceAllStringFunc(ipv6.ReplaceAllStringFunc(s, r.addr), r.addr)
+		if next == s {
+			break
+		}
+		s = next
+	}
 	s = hexIDs.ReplaceAllString(s, "<id>")
 	s = secrets.ReplaceAllStringFunc(s, func(m string) string {
 		if strings.Trim(m, "-_=") == "" {

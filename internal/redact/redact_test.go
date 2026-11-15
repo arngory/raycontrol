@@ -125,6 +125,19 @@ func TestAddressStartsWithColons(t *testing.T) {
 	}
 }
 
+// Text that is no address as a whole, an IPv6 address and then an IPv4 one
+// with a group too many, leaves none bare when the IPv4 one goes: a second
+// redaction changes nothing. testdata/fuzz/FuzzRedact/left-bare.
+func TestNothingLeftBare(t *testing.T) {
+	r := New()
+	for _, in := range []string{"00:0:0:0:0:1::0.00.0.10", "at 2001:db8:1:2:3:4::198.51.100.7 x"} {
+		out := r.String(in)
+		if strings.Contains(out, "::") || r.String(out) != out {
+			t.Errorf("%q: %q, then %q", in, out, r.String(out))
+		}
+	}
+}
+
 // An address with all its groups written out, or seven and "::", then a
 // port or a hex word after a colon, without brackets: the pattern takes
 // the colon and what follows with it, and the whole does not parse (eight
