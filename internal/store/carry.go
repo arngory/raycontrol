@@ -59,11 +59,11 @@ const settingSPAParams = "spa_params"
 // and the carry brought that into saved (a user current does not have
 // with new credentials, above): settingRenewedRevoked tells the step that
 // every revocation until now is renewed; an existing mark (an earlier
-// rollback's) keeps its earlier time (markRenewed). When current is older than 14 too (an update that
-// failed before the new rayd migrated it), nothing renewed them: no mark,
-// and the next update renews them all. Each change to credentials has an
-// audit line in saved (user.renew:rollback, device.revoke:rollback,
-// user.carry:rollback).
+// rollback's) keeps its earlier time (markRenewed). When current is older
+// than 14 too (an update that failed before the new rayd migrated it),
+// nothing renewed them: no mark, and the next update renews them all.
+// Each change to credentials has an audit line in saved
+// (user.renew:rollback, device.revoke:rollback, user.carry:rollback).
 //
 // Users and relays are matched by ID, name or address, and creation time:
 // SQLite reuses the ID of a deleted row. What was added or changed since
