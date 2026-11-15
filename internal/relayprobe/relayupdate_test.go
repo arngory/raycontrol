@@ -430,11 +430,18 @@ func TestUpdateReports(t *testing.T) {
 	h.none("a release whose run never ended")
 
 	// A status of another kind (none of the exit's offers): idle; what it
-	// holds, carried over as root does, still counts.
+	// holds, carried over as root does, still counts: the offer of it is
+	// declined, and that is told on its id (TestDeclinedTold).
 	h.setStatus(nodeupdate.Status{ID: "d4", Kind: nodeupdate.Remote, State: nodeupdate.Done, Target: "v0.28.0", Ended: h.clock,
 		Held: nodeupdate.ReadStatus(h.status).Holding()})
+	h.u.offered(false, nil)
 	h.look()
 	if r, _ := h.told(); r.State != nodeupdate.Idle || r.Id != "" || r.At != 0 {
+		t.Fatalf("told %v", r)
+	}
+	h.offer("a1", "v0.29.0")
+	h.look()
+	if r, _ := h.told(); r.State != nodeupdate.Failed || r.Id != "a1" || r.Reason != nodeupdate.ReasonVersion {
 		t.Fatalf("told %v", r)
 	}
 	h.none("a release held by a status of another kind")
@@ -519,6 +526,209 @@ func TestUpdateErrorRedacted(t *testing.T) {
 		t.Errorf("long text: %q (%d bytes)", r.Error, len(r.Error))
 	}
 }
+
+// A mirror's host and the relay's own name in root's text (a download
+// that failed, through a private mirror set in the unit's environment,
+// which rayd relay does not see) do not reach the exit: the hosts of the
+// links in it go wherever they are, and so do the host's names and the
+// mirrors rayd relay is told of; GitHub's and the default mirrors' stay.
+func TestUpdateErrorNamesRedacted(t *testing.T) {
+	h := newRelayHost(t, "v0.28.0")
+	h.remote("on")
+	h.u.red.Add(relayNames("relay7.fra.example.net", "https://m1.example.org/ https://ghfast.top/")...)
+	text := `downloading SHA256SUMS: Get "https://mirror.corp.example:8443/https://github.com/arngory/raycontrol/releases/download/v0.29.0/SHA256SUMS": ` +
+		`dial tcp: lookup mirror.corp.example on 127.0.0.53:53: no such host; https://ghfast.top/https://github.com/x: 502; ` +
+		`https://user@m1.example.org/y: 403 at relay7.fra.example.net (relay7)`
+	h.setStatus(nodeupdate.Status{ID: "a1", Kind: nodeupdate.Exit, State: nodeupdate.Failed, Untouched: true, Reason: nodeupdate.ReasonDownload,
+		Target: "v0.29.0", Error: text, Ended: h.clock})
+	h.look()
+	r, _ := h.told()
+	for _, leak := range []string{"mirror.corp", "corp.example", "m1.example", "fra.example", "example.net", "user@"} {
+		if strings.Contains(r.Error, leak) {
+			t.Errorf("leaked %q: %q", leak, r.Error)
+		}
+	}
+	for _, keep := range []string{"Get \"https://<domain>:8443/https://github.", "https://ghfast.top/https://github.", "lookup <domain> on", "no such host"} {
+		if !strings.Contains(r.Error, keep) {
+			t.Errorf("missing %q: %q", keep, r.Error)
+		}
+	}
+	for host, want := range map[string][]string{
+		"relay7.fra.example.net": {"relay7.fra.example.net", "example.net"},
+		"relay7.example.net.":    {"relay7.example.net", "example.net"},
+		"relay7.example":         {"relay7.example"},
+		"vps-1234":               {"vps-1234"},
+		"relay":                  nil,
+		"debian":                 nil,
+		"localhost":              nil,
+		"":                       nil,
+	} {
+		if got := relayNames(host, ""); !slices.Equal(got, want) {
+			t.Errorf("%q: %q", host, got)
+		}
+	}
+	if got := relayNames("", "https://m1.example.org/ https://ghfast.top/ https://gh-proxy.com/ http://[2001:db8::1]:8080/ https://10.0.0.1/"); !slices.Equal(got, []string{"m1.example.org"}) {
+		t.Errorf("mirrors: %q", got)
+	}
+	// rayd relay's own: the host it runs on.
+	if host, err := os.Hostname(); err == nil && strings.Count(host, ".") >= 1 {
+		u := NewUpdates("v0.28.0", h.request, filepath.Dir(h.status), nil)
+		if out := u.clean("the relay " + host + " said so"); strings.Contains(strings.ToLower(out), strings.ToLower(host)) {
+			t.Errorf("the host's name: %q", out)
+		}
+	}
+}
+
+// An offer rayd relay declines for a reason of its own is told on the
+// offer's id as an outcome, failed before any change, once (and at the
+// heartbeat): the exit does not wait on it for the whole of the relay's
+// turn. Version for a release held here, a build that is no release, done
+// under another id; busy for the wait after a failure that changed
+// nothing and for the request limit. Not when the exit knows already:
+// remote off, a relay on that release or newer, an update of it under way
+// or ended, a request or an update of another offer under way.
+func TestDeclinedTold(t *testing.T) {
+	type c struct {
+		version string
+		set     func(h *relayHost)
+		reason  string // "": no decline told
+	}
+	failed := func(id, target string, untouched bool, ago time.Duration) func(*relayHost) {
+		return func(h *relayHost) {
+			st := nodeupdate.Status{ID: id, Kind: nodeupdate.Exit, State: nodeupdate.Failed, Untouched: untouched, Target: target, Release: target,
+				Reason: nodeupdate.ReasonDownload, Requested: h.clock.Add(-ago), Started: h.clock.Add(-ago), Ended: h.clock.Add(-ago)}
+			if !untouched {
+				st.Reason, st.Held = nodeupdate.ReasonOpen, []string{target}
+			}
+			h.setStatus(st)
+		}
+	}
+	for name, c := range map[string]c{
+		"held": {"v0.28.0", func(h *relayHost) { failed("a0", "v0.29.0", false, time.Hour)(h) }, nodeupdate.ReasonVersion},
+		"held by a status of its own": {"v0.28.0", func(h *relayHost) {
+			h.setStatus(nodeupdate.Status{ID: "d4", Kind: nodeupdate.Local, State: nodeupdate.RolledBack, Held: []string{"v0.29.0"}})
+		}, nodeupdate.ReasonVersion},
+		"a build that is no release": {"dev", nil, nodeupdate.ReasonVersion},
+		"done under another id": {"v0.28.0", func(h *relayHost) {
+			h.setStatus(nodeupdate.Status{ID: "a0", Kind: nodeupdate.Exit, State: nodeupdate.Done, Target: "v0.29.0", Ended: h.clock})
+		}, nodeupdate.ReasonVersion},
+		"6 h after a failure": {"v0.28.0", failed("a0", "v0.29.0", true, time.Hour), nodeupdate.ReasonBusy},
+		"the request limit": {"v0.28.0", func(h *relayHost) {
+			h.u.seeded = true
+			for i := requestsDaily; i > 0; i-- {
+				h.u.asked = append(h.u.asked, h.clock.Add(-time.Duration(i)*time.Hour))
+			}
+		}, nodeupdate.ReasonBusy},
+		"held under its own id":     {"v0.28.0", failed("b1", "v0.29.0", false, time.Hour), ""},
+		"6 h after its own failure": {"v0.28.0", failed("b1", "v0.29.0", true, time.Hour), ""},
+		"on it already":             {"v0.29.0", nil, ""},
+		"newer already":             {"v0.29.1", nil, ""},
+		"remote off":                {"v0.28.0", func(h *relayHost) { h.remote("off") }, ""},
+		"another offer's request": {"v0.28.0", func(h *relayHost) {
+			nodeupdate.WriteRequest(h.request, nodeupdate.Request{ID: "a0", Kind: nodeupdate.Exit, Version: "v0.28.5", By: "exit", At: h.clock}, h.clock)
+		}, ""},
+		"another offer's update": {"v0.28.0", func(h *relayHost) {
+			h.setStatus(nodeupdate.Status{ID: "a0", Kind: nodeupdate.Exit, State: nodeupdate.Running, Target: "v0.29.0", Release: "v0.29.0", Started: h.clock})
+		}, ""},
+	} {
+		h := newRelayHost(t, c.version)
+		h.remote("on")
+		if c.set != nil {
+			c.set(h)
+		}
+		before := nodeupdate.ReadStatus(h.status)
+		h.offer("b1", "v0.29.0")
+		h.look()
+		r, n := h.told()
+		if c.reason == "" {
+			if r.State == nodeupdate.Failed && r.Id == "b1" && strings.HasPrefix(r.Error, "the offer not taken") {
+				t.Errorf("%s: declined told: %v", name, r)
+			}
+			continue
+		}
+		if r.State != nodeupdate.Failed || r.Id != "b1" || r.Target != "v0.29.0" || r.Reason != c.reason || r.At != h.clock.Unix() ||
+			!strings.HasPrefix(r.Error, "the offer not taken: ") || !r.Remote || r.Version != versionOf(c.version) {
+			t.Errorf("%s: told %v", name, r)
+			continue
+		}
+		if _, ok := h.waiting(); ok || nodeupdate.ReadStatus(h.status).ID != before.ID {
+			t.Errorf("%s: a request, or root's status changed", name)
+		}
+		// Once: not again at the next looks, the same at the heartbeat.
+		h.advance(time.Minute)
+		h.look()
+		h.look()
+		if _, m := h.told(); m != n {
+			t.Errorf("%s: told again (%d, %d)", name, n, m)
+		}
+		h.advance(heartbeat)
+		h.look()
+		if again, m := h.told(); m != n+1 || again.At != r.At || again.Reason != r.Reason {
+			t.Errorf("%s: at the heartbeat %v (%d, %d)", name, again, n, m)
+		}
+	}
+
+	// The wait over, the offer is taken: told as asked for, the decline
+	// gone. And the offer gone for another, declined for another reason.
+	h := newRelayHost(t, "v0.28.0")
+	h.remote("on")
+	failed("a0", "v0.29.0", true, time.Hour)(h)
+	h.offer("b1", "v0.29.0")
+	h.look()
+	h.advance(nodeupdate.RelayRetryAfter)
+	h.look()
+	if r, _ := h.told(); r.State != nodeupdate.Requested || r.Id != "b1" || r.Reason != "" || r.Error != "" {
+		t.Errorf("taken after the wait: %v", r)
+	}
+	h = newRelayHost(t, "v0.28.0")
+	h.remote("on")
+	failed("a0", "v0.29.0", false, time.Hour)(h)
+	h.offer("b1", "v0.29.0")
+	h.look()
+	h.advance(time.Minute)
+	h.offer("c2", "v0.29.0")
+	h.look()
+	declined, _ := h.told()
+	if declined.Id != "c2" || declined.Reason != nodeupdate.ReasonVersion || declined.At != h.clock.Unix() {
+		t.Errorf("another offer: %v", declined)
+	}
+	// Root's files move on (a rollback by hand, its status of its own):
+	// still declined, held, the same word.
+	h.setStatus(nodeupdate.Status{ID: "d5", Kind: nodeupdate.Local, State: nodeupdate.RolledBack, Held: []string{"v0.29.0"}})
+	h.advance(time.Minute)
+	h.look()
+	if r, _ := h.told(); r.Id != "c2" || r.Reason != nodeupdate.ReasonVersion || r.At != declined.At {
+		t.Errorf("the files moved on: %v", r)
+	}
+}
+
+// With remote off rayd relay checks nothing of the exit's offer, and
+// puts none of its fields in the journal; once on, only checked ones.
+func TestDeclinedLogged(t *testing.T) {
+	var buf strings.Builder
+	var mu sync.Mutex
+	h := newRelayHost(t, "v0.28.0")
+	h.u.log = slog.New(slog.NewTextHandler(writerFunc(func(p []byte) (int, error) { mu.Lock(); defer mu.Unlock(); return buf.Write(p) }),
+		&slog.HandlerOptions{Level: slog.LevelDebug}))
+	h.remote("off")
+	h.offer("evil id\nforged line", "v9.9.9 <the exit's text>")
+	h.look()
+	h.remote("on")
+	h.advance(logEvery)
+	h.look()
+	mu.Lock()
+	out := buf.String()
+	mu.Unlock()
+	if strings.Contains(out, "evil") || strings.Contains(out, "forged") || strings.Contains(out, "exit's text") || !strings.Contains(out, "off on this relay") ||
+		!strings.Contains(out, "no release, or no id") {
+		t.Errorf("journal:\n%s", out)
+	}
+}
+
+// writerFunc is a func as an io.Writer.
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 // The files as they may be found: rayd relay's directory missing (the
 // exit hears why nothing moves; asked again once it is there), the

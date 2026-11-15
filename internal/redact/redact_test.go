@@ -57,6 +57,34 @@ func TestIPv6Ends(t *testing.T) {
 	}
 }
 
+// An address followed by a colon, as in an error ("from 2001:db8::5:
+// refused"), goes, the colon stays; so does an IPv4 address with a
+// leading zero in an octet, which netip does not parse but a reader
+// reads. Times and MAC addresses with a colon after them stay.
+func TestAddressEnds(t *testing.T) {
+	r := New()
+	out := r.String(`from 2001:db8::5: refused; 2001:db8:1:2:3:4:5:6: no; dial 203.0.113.05:443; via 198.051.100.007 and 64:ff9b::198.51.100.09; ` +
+		`at 12:30:45: ok, mac aa:bb:cc:dd:ee:ff: up, lo 127.000.000.001`)
+	for _, leak := range []string{"2001:db8", "1:2:3:4", "203.0.113", "198.051", "100.007", "198.51.100"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("leaked %q: %s", leak, out)
+		}
+	}
+	for _, keep := range []string{"from <ip6:", ">: refused", ">: no", ">:443", "at 12:30:45: ok", "aa:bb:cc:dd:ee:ff: up", "127.000.000.001"} {
+		if !strings.Contains(out, keep) {
+			t.Errorf("missing %q: %s", keep, out)
+		}
+	}
+	// The same address, with or without its zero or its colon, the same
+	// token.
+	if a, b := r.String("203.0.113.5"), r.String("203.0.113.005"); a != b {
+		t.Errorf("%s and %s", a, b)
+	}
+	if a, b := r.String("2001:db8::5"), strings.TrimSuffix(r.String("2001:db8::5:"), ":"); a != b {
+		t.Errorf("%s and %s", a, b)
+	}
+}
+
 // Names learned later (a node's DNS tunnel zones) are hidden as well.
 func TestAdd(t *testing.T) {
 	r := New("203.0.113.7")

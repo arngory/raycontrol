@@ -116,12 +116,45 @@ func isLabelByte(c byte) bool {
 }
 
 // addr turns an address into a token: its kind and a salted short hash.
-// Loopback and unspecified addresses stay, they say nothing.
+// Loopback and unspecified addresses stay, they say nothing. The IPv6
+// pattern takes a colon after an address too ("from 2001:db8::5: refused",
+// the last group being optional), which then does not parse: the address
+// is the match without it, and the colon stays.
 func (r *Redactor) addr(m string) string {
-	a, err := netip.ParseAddr(m)
-	if err != nil {
+	a, ok := parseAddr(m)
+	if !ok {
+		if t, cut := strings.CutSuffix(m, ":"); cut && strings.Contains(t, ":") {
+			if a, ok := parseAddr(t); ok {
+				return r.token(a, t) + ":"
+			}
+		}
 		return m
 	}
+	return r.token(a, m)
+}
+
+// parseAddr parses an address as a reader takes it: an IPv4 one with a
+// leading zero in an octet too (203.0.113.05), which netip refuses.
+func parseAddr(m string) (netip.Addr, bool) {
+	if a, err := netip.ParseAddr(m); err == nil {
+		return a, true
+	}
+	if strings.Contains(m, ":") || strings.Count(m, ".") != 3 {
+		return netip.Addr{}, false
+	}
+	octets := strings.Split(m, ".")
+	for i, o := range octets {
+		octets[i] = strings.TrimLeft(o, "0")
+		if octets[i] == "" {
+			octets[i] = "0"
+		}
+	}
+	a, err := netip.ParseAddr(strings.Join(octets, "."))
+	return a, err == nil
+}
+
+// token is address a, found as m, as a report has it.
+func (r *Redactor) token(a netip.Addr, m string) string {
 	if a.IsLoopback() || a.IsUnspecified() {
 		return m
 	}

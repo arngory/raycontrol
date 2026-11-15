@@ -4,7 +4,12 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
+	"net/netip"
+	"net/url"
+	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -103,12 +108,75 @@ func NewUpdates(version, request, dir string, log *slog.Logger) *Updates {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
+	host, _ := os.Hostname()
 	return &Updates{
 		version: version, request: request, log: log, wake: make(chan struct{}, 1),
 		status:   filepath.Join(dir, filepath.Base(nodeupdate.StatusFile)),
 		policy:   filepath.Join(dir, filepath.Base(nodeupdate.PolicyFile)),
-		busyLook: lookBusy, idleLook: lookIdle, heartbeat: heartbeat, red: redact.New(), said: map[string]time.Time{},
+		busyLook: lookBusy, idleLook: lookIdle, heartbeat: heartbeat, said: map[string]time.Time{},
+		red: redact.New(relayNames(host, os.Getenv("RAYCONTROL_MIRRORS"))...),
 	}
+}
+
+// relayNames are the relay's own names its redactor hides beside what
+// redact does of itself: the host's name where it says where the relay is
+// (a full one, and its domain; a single label only with a digit in it,
+// relay1 or vps-1234: a plain word such as relay or debian says nothing,
+// and would take that word out of every text), and the hosts of the
+// mirrors set (RAYCONTROL_MIRRORS), a private one above all. The hosts of
+// other links root's text names are learned from it (clean).
+func relayNames(host, mirrors string) []string {
+	var names []string
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	switch labels := strings.Split(host, "."); {
+	case host == "" || host == "localhost":
+	case len(labels) > 2:
+		names = append(names, host, strings.Join(labels[len(labels)-2:], "."))
+	case len(labels) == 2:
+		names = append(names, host)
+	case len(host) >= 4 && strings.ContainsAny(host, "0123456789"):
+		names = append(names, host)
+	}
+	return append(names, linkHosts(mirrors)...)
+}
+
+// linkRe finds the host of a link (http, https).
+var linkRe = regexp.MustCompile(`(?i)\bhttps?://([^/\s"'<>?#]+)`)
+
+// publicHosts are the hosts a release comes from that say nothing of the
+// relay: GitHub's and the default mirrors'.
+var publicHosts = func() []string {
+	hosts := []string{"github.com", "githubusercontent.com"}
+	for _, m := range release.DefaultMirrors {
+		if u, err := url.Parse(m); err == nil && u.Hostname() != "" {
+			hosts = append(hosts, strings.ToLower(u.Hostname()))
+		}
+	}
+	return hosts
+}()
+
+// linkHosts are the hosts of the links in s but the public ones and
+// addresses (which redact takes out as addresses).
+func linkHosts(s string) []string {
+	var hosts []string
+	for _, m := range linkRe.FindAllStringSubmatch(s, -1) {
+		h := m[1]
+		if i := strings.LastIndexByte(h, '@'); i >= 0 {
+			h = h[i+1:]
+		}
+		if hp, _, err := net.SplitHostPort(h); err == nil {
+			h = hp
+		}
+		h = strings.ToLower(strings.Trim(h, "[]."))
+		if _, err := netip.ParseAddr(h); err == nil || h == "" || !strings.Contains(h, ".") {
+			continue
+		}
+		public := slices.ContainsFunc(publicHosts, func(p string) bool { return h == p || strings.HasSuffix(h, "."+p) })
+		if !public && !slices.Contains(hosts, h) {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts
 }
 
 func (u *Updates) clock() time.Time {
@@ -297,10 +365,50 @@ var notTaken = map[string]string{
 	"limit":     "a request at most every 10m0s and 6 a day",
 }
 
+// declines are the offers rayd relay does not take for reasons of its own
+// and the code it reports each with, as an outcome on the offer's id
+// (§3.5): failed, before any change. Without it the exit would see the
+// offer given and no word on it, and keep the relays after this one
+// waiting the whole of its turn. Remote off is told by remote itself; an
+// offer that is malformed has no id to tell it on; a request waiting or
+// an update under way is told by its own state, and ends in an outcome.
+var declines = map[string]string{
+	"current": nodeupdate.ReasonVersion, // not newer, a build that is no release, done under another id
+	"held":    nodeupdate.ReasonVersion,
+	"later":   nodeupdate.ReasonBusy, // RelayRetryAfter after a failure that changed nothing
+	"limit":   nodeupdate.ReasonBusy,
+}
+
+// told reports whether the exit knows, without a word on it, where the
+// relay stands on offer o: the files speak of its id (asked for, under
+// way, an outcome); a request waits or an update runs, whose outcome is to
+// come (and a run holds its own release until then, Status.Holding); or
+// the relay runs o's release or a newer one, which the report says.
+func told(o offer, st standing, version string) bool {
+	return st.r.Id == o.id || st.busy || isVersion(version) && !release.Newer(o.version, version)
+}
+
+// decline makes the relay's word on offer o, not taken for why, an
+// outcome on its id with reason's code, told over the files' state st as
+// a failure of rayd relay's own is, until the files or the offer move on.
+// The same decline keeps its time: the exit hears it once, and at the
+// heartbeat.
+func (u *Updates) decline(o offer, st standing, why, reason string, now time.Time) {
+	at := now.Unix()
+	if u.own != nil && u.own.Id == o.id && u.own.Target == o.version && u.own.Reason == reason {
+		at = u.own.At
+	}
+	u.own = proto.CloneOf(st.r)
+	u.own.State, u.own.Id, u.own.Target, u.own.Reason, u.own.At = nodeupdate.Failed, o.id, o.version, reason, at
+	u.own.Error = "the offer not taken: " + notTaken[why]
+	u.ownOver = st.r
+}
+
 // take is §3.5 for the exit's offer o, in its order; it reports whether a
 // request went in. Asked again for the same release (a recount, a new
 // feed, a restart of either side), it does nothing: the release runs
-// already, is held, failed a while ago, or its request waits.
+// already, is held, failed a while ago, or its request waits. An offer it
+// declines for a reason of its own it reports as an outcome (declines).
 func (u *Updates) take(o offer, st standing, now time.Time) bool {
 	v := o.version
 	var why string
@@ -332,7 +440,7 @@ func (u *Updates) take(o offer, st standing, now time.Time) bool {
 		case err != nil:
 			// Said to the exit, so that the phone shows why the relay
 			// does not move; tried again at the next look.
-			if u.own == nil || u.own.Id != o.id || u.own.Target != v {
+			if u.own == nil || u.own.Id != o.id || u.own.Target != v || u.own.Reason != "" {
 				u.own = proto.CloneOf(st.r)
 				u.own.State, u.own.Id, u.own.Target, u.own.Reason, u.own.At = nodeupdate.Failed, o.id, v, "", now.Unix()
 				u.own.Error = u.clean("the update request not written: " + err.Error())
@@ -353,11 +461,19 @@ func (u *Updates) take(o offer, st standing, now time.Time) bool {
 		if why == "current" {
 			level = slog.LevelDebug // the steady state once the relay updated
 		}
-		if why == "malformed" {
+		if why == "malformed" || why == "off" {
+			// The offer's fields unchecked (off: before any check): none
+			// of them goes in the journal.
 			u.say(why, now, level, "relay update: the exit's offer not taken", "why", notTaken[why])
 		} else {
 			u.say(why, now, level, "relay update: the exit's offer not taken", "version", v, "id", o.id, "why", notTaken[why])
 		}
+	}
+	switch reason, ok := declines[why]; {
+	case ok && !told(o, st, u.version):
+		u.decline(o, st, why, reason, now)
+	case u.own != nil && (u.own.Id != o.id || u.own.Target != v):
+		u.own, u.ownOver = nil, nil // of an offer gone
 	}
 	return false
 }
@@ -437,6 +553,11 @@ func (u *Updates) clean(s string) string {
 		s = strings.TrimSuffix(s, "…")
 		s = s[:max(strings.LastIndexFunc(s, unicode.IsSpace), 0)]
 	}
+	// A mirror's host (set in the update unit's environment, which rayd
+	// relay does not see) is named in a link of the download's error, and
+	// bare beside it ("lookup mirror.example: no such host"): taken from
+	// the links, it goes wherever it is.
+	u.red.Add(linkHosts(s)...)
 	s = u.red.String(nodeupdate.Printable(strings.Join(strings.Fields(s), " ")))
 	if cut {
 		s = strings.TrimSpace(s + " …")
