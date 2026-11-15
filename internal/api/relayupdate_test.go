@@ -650,6 +650,16 @@ func TestReportUpdate(t *testing.T) {
 	if r := record("r1"); r != back {
 		t.Fatalf("the same text again: %+v, was %+v", r, back)
 	}
+	// Another text alone, or another reason: kept for the phone, and no
+	// more (§6: the audit log and the journal have codes and versions).
+	advance(time.Second)
+	if err := report(r1, &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: nodeupdate.RolledBack, Id: st.ID, Target: "v0.28.0",
+		Reason: "check", Error: "another text"}); err != nil {
+		t.Fatal(err)
+	}
+	if r := record("r1"); r.Error != "another text" || r.Reason != "check" || r.ChangedAt != back.ChangedAt {
+		t.Fatalf("another text: %+v, was %+v", r, back)
+	}
 	want := []string{
 		"relay r1: relay.update idle -, remote off r1",
 		"relay r1: relay.update idle v0.27.0 r1",

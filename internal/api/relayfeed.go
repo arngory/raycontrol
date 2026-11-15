@@ -134,7 +134,10 @@ func (f *relayFeed) Report(ctx context.Context, req *connect.Request[perimeterv1
 // more than one call at once, or more than maxUpdateReports a minute, is
 // refused (ResourceExhausted), as is a field out of its bounds
 // (InvalidArgument); its error is cleaned again. The audit log and the
-// journal get codes and versions, never the error.
+// journal get codes and versions, never the error, and only of a change
+// of the state, the update, the version or root's switch,
+// maxUpdateAudits an hour at most: a relay that keeps changing what it
+// says fills neither.
 func (f *relayFeed) ReportUpdate(ctx context.Context, req *connect.Request[perimeterv1.ReportUpdateRequest]) (*connect.Response[perimeterv1.ReportUpdateResponse], error) {
 	relay, err := f.relayFrom(ctx, req.Peer().Addr)
 	if err != nil {
@@ -151,15 +154,24 @@ func (f *relayFeed) ReportUpdate(ctx context.Context, req *connect.Request[perim
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	changed, err := s.takeRelayReport(ctx, relay.Name, next, now)
+	moved, err := s.takeRelayReport(ctx, relay.Name, next, now)
 	if err != nil {
 		return nil, relayLookup(err)
 	}
-	if changed {
+	if moved {
 		line := relayUpdateLine(next)
-		f.r.Log.Info(line, "relay", relay.Name)
-		if err := s.Store.Audit(ctx, "relay "+relay.Name, line, relay.Name, "ok"); err != nil {
-			f.r.Log.Warn("relay update: the audit log", "relay", relay.Name, "err", err)
+		ok, muted := s.relayUpd.audited(relay.Name, now)
+		switch {
+		case ok:
+			f.r.Log.Info(line, "relay", relay.Name)
+		case muted:
+			line = relayMuted
+			f.r.Log.Warn(line, "relay", relay.Name)
+		}
+		if ok || muted {
+			if err := s.Store.Audit(ctx, "relay "+relay.Name, line, relay.Name, "ok"); err != nil {
+				f.r.Log.Warn("relay update: the audit log", "relay", relay.Name, "err", err)
+			}
 		}
 		s.kickRelayFeeds(ctx)
 	}

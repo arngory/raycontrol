@@ -447,3 +447,46 @@ func TestRelayTurnLastOffer(t *testing.T) {
 		t.Fatalf("a newer one done, then one failed: %v", o)
 	}
 }
+
+// A relay that keeps changing what it says fills neither the audit log nor
+// the journal (§6): a change of the text alone is no line, and a relay has
+// maxUpdateAudits lines an hour at most, and one that says so.
+func TestRelayTurnAudit(t *testing.T) {
+	srv, bundles, advance, now, _ := relayNode(t, "v0.28.0", "r1")
+	ctx := context.Background()
+	at1, _ := serveRemoteFrom(t, srv, "198.51.100.20:40000")
+	r1 := updateClient(t, bundles["r1"], at1)
+	report := func(u *perimeterv1.RelayUpdate) {
+		t.Helper()
+		advance(6 * time.Second) // ten a minute, within the twelve
+		if _, err := r1.ReportUpdate(ctx, connect.NewRequest(&perimeterv1.ReportUpdateRequest{Update: u})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	failed := func(text string) *perimeterv1.RelayUpdate {
+		return &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: nodeupdate.Failed, Id: "aa", Target: "v0.28.0", Reason: "download", Error: text}
+	}
+	for i := range 30 {
+		report(failed(strings.Repeat("x", i+1)))
+	}
+	if got := relayAudit(t, srv); len(got) != 1 {
+		t.Fatalf("the text alone: %v", got)
+	}
+	start := now()
+	for i := range 2 * maxUpdateAudits {
+		state := nodeupdate.Requested
+		if i%2 == 1 {
+			state = nodeupdate.Failed
+		}
+		report(&perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: state, Id: "aa", Target: "v0.28.0"})
+	}
+	got := relayAudit(t, srv)
+	if len(got) != maxUpdateAudits+1 || !strings.Contains(got[len(got)-1], "muted") {
+		t.Fatalf("%d lines within %v:\n%s", len(got), now().Sub(start), strings.Join(got, "\n"))
+	}
+	advance(time.Hour)
+	report(&perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: nodeupdate.Idle})
+	if again := relayAudit(t, srv); len(again) != len(got)+1 || !strings.HasSuffix(again[len(again)-1], "relay.update idle v0.27.0 r1") {
+		t.Fatalf("the next hour: %v", again)
+	}
+}

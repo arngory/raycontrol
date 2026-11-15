@@ -60,6 +60,10 @@ const (
 	// relaySeenEvery: when a relay was last heard of goes to its record
 	// this often at most; an open feed keeps it fresh in memory.
 	relaySeenEvery = 10 * time.Minute
+	// maxUpdateAudits: the audit log and the journal have this many of a
+	// relay's changes an hour at most, and a line once it had more: a relay
+	// that changes what it says without end does not fill them (§6).
+	maxUpdateAudits = 20
 )
 
 // noWord is the reason the exit gives an update a relay said it began and
@@ -234,6 +238,10 @@ type relayLive struct {
 	seenSaved time.Time // when that last went to its record
 	reporting bool      // a ReportUpdate under way
 	calls     []time.Time
+	// The hour of its changes the audit log counts (maxUpdateAudits): when
+	// it began, and how many came in it.
+	auditFrom time.Time
+	audits    int
 }
 
 // live is relay name's, under mu.
@@ -551,7 +559,7 @@ func (ru *relayUpdates) forget(name string) {
 	ru.mu.Lock()
 	defer ru.mu.Unlock()
 	if l := ru.relays[name]; l != nil {
-		l.seen, l.seenSaved = time.Time{}, time.Time{}
+		l.seen, l.seenSaved, l.auditFrom, l.audits = time.Time{}, time.Time{}, time.Time{}, 0
 	}
 }
 
@@ -705,18 +713,17 @@ func (s *Server) updateRelayRecord(ctx context.Context, name string, f func(*rel
 
 // takeRelayReport keeps relay name's report next, taken at now: written
 // only when it says something new, or when the record is due to keep when
-// the relay was last heard of. changed reports something new: the state,
-// the update, the versions, root's switch, the reason or the error. The
-// times are the exit's: when the state, the update, the version or the
-// switch last changed. The relay's turn is the exit's: nothing it says
-// moves it.
-func (s *Server) takeRelayReport(ctx context.Context, name string, next relayRecord, now time.Time) (changed bool, err error) {
+// the relay was last heard of. moved reports a change the queue and the
+// audit log go by: the state, the update, the version or root's switch,
+// when ChangedAt moves too; a new reason, error or target alone is kept
+// and no more. The relay's turn is the exit's: nothing it says moves it.
+func (s *Server) takeRelayReport(ctx context.Context, name string, next relayRecord, now time.Time) (moved bool, err error) {
 	at := now.Unix()
 	due := s.relayUpd.heard(name, now)
 	before, after, err := s.updateRelayRecord(ctx, name, func(r *relayRecord) {
 		prev := *r
 		next.ChangedAt, next.TurnID, next.TurnAt, next.SeenAt = prev.ChangedAt, prev.TurnID, prev.TurnAt, prev.SeenAt
-		if next.Reported != prev.Reported || next.UpdateID != prev.UpdateID || next.Version != prev.Version || next.Remote != prev.Remote {
+		if relayMoved(prev, next) {
 			next.ChangedAt = at
 		}
 		if next != prev || due {
@@ -727,8 +734,27 @@ func (s *Server) takeRelayReport(ctx context.Context, name string, next relayRec
 	if err != nil {
 		return false, err
 	}
-	before.SeenAt, after.SeenAt = 0, 0
-	return before != after, nil
+	return relayMoved(before, after), nil
+}
+
+// relayMoved reports whether a relay's record changed in what the queue
+// and the audit log go by.
+func relayMoved(a, b relayRecord) bool {
+	return a.Reported != b.Reported || a.UpdateID != b.UpdateID || a.Version != b.Version || a.Remote != b.Remote
+}
+
+// audited reports whether a change of relay name's at now goes to the
+// audit log and the journal: maxUpdateAudits an hour at most. muted is the
+// first one past them, said then, once an hour.
+func (ru *relayUpdates) audited(name string, now time.Time) (ok, muted bool) {
+	ru.mu.Lock()
+	defer ru.mu.Unlock()
+	l := ru.live(name, now)
+	if d := now.Sub(l.auditFrom); l.auditFrom.IsZero() || d >= time.Hour || d < 0 {
+		l.auditFrom, l.audits = now, 0
+	}
+	l.audits++
+	return l.audits <= maxUpdateAudits, l.audits == maxUpdateAudits+1
 }
 
 // relayUpdateLine is a report as the audit log and the journal have it:
@@ -746,6 +772,10 @@ func relayUpdateLine(r relayRecord) string {
 	}
 	return line
 }
+
+// relayMuted is the audit log's line when a relay's changes pass
+// maxUpdateAudits in an hour.
+var relayMuted = fmt.Sprintf("relay.update muted: more than %d changes within an hour, the rest of it unrecorded", maxUpdateAudits)
 
 // relayStatuses are the relays' updates for the phone (§8.2), by name; none
 // when the store does not answer: the node's own status matters more.
