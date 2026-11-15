@@ -244,8 +244,11 @@ func TestRelayTurnOnRelease(t *testing.T) {
 	}
 }
 
-// TurnTimeout is longer than the relay's update unit may run: its start,
-// its stop, then ExecStopPost under the stop's limit again.
+// TurnTimeout is longer than the relay's update unit may run, with time
+// to spare for the offer to reach it and the unit to start: its start,
+// then each phase of its stop on a TimeoutStopSec of its own (systemd's
+// service.c: the SIGTERM, ExecStopPost, and the SIGTERM after a slow
+// ExecStopPost, whose rollback takes it and goes on).
 func TestRelayTurnTimeout(t *testing.T) {
 	var unit string
 	for _, f := range deploy.RelayPlan(deploy.DefaultBinaries).Files {
@@ -265,7 +268,7 @@ func TestRelayTurnTimeout(t *testing.T) {
 		}
 		return d
 	}
-	if most := limit("TimeoutStartSec") + 2*limit("TimeoutStopSec"); TurnTimeout <= most {
+	if most := limit("TimeoutStartSec") + 3*limit("TimeoutStopSec"); TurnTimeout < most+5*time.Minute {
 		t.Fatalf("TurnTimeout %v, the unit runs %v at most", TurnTimeout, most)
 	}
 }

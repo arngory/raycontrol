@@ -33,12 +33,15 @@ import (
 // only), and takes what they say of it back (ReportUpdate).
 
 // TurnTimeout is how long a relay keeps its turn once the exit gave it and
-// no outcome came: longer than the relay's update unit may run (15 min to
-// start, then 5 to stop and 5 for ExecStopPost: 25 min), so that a relay
-// updating, whose feed drops while its rayd relay restarts, keeps it; a
-// relay that never answers, or says what it likes, holds the others back
-// no longer.
-const TurnTimeout = 30 * time.Minute
+// no outcome came: longer than the relay's update unit may run, with time
+// to spare for the offer to reach it and the unit to start (10 min). The
+// unit has 15 min to start, then each phase of its stop has a
+// TimeoutStopSec of its own (systemd's service.c): 5 for the SIGTERM, 5
+// for ExecStopPost and 5 for the SIGTERM after a slow ExecStopPost, whose
+// rollback takes it and goes on: 30 min. So a relay updating, whose feed
+// drops while its rayd relay restarts, keeps it; a relay that never
+// answers, or says what it likes, holds the others back no longer.
+const TurnTimeout = 40 * time.Minute
 
 // relayUpdateKey prefixes a relay's name in the settings table: its last
 // report there and its turn (§8.3), as JSON of relayRecord. No migration:
