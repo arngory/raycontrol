@@ -92,6 +92,12 @@ const (
 	Exit = "exit"
 )
 
+// Local is a status's kind, never a request's: an update or a rollback by
+// hand on the node (rayctl update). The exit names the release of one that
+// is done to its relays as it does after a remote or an auto update
+// (spec/relay-update-remote-v1.md §11 p. 1), unless it says NoRelays.
+const Local = "local"
+
 // NodeKinds and RelayKinds are the kinds root takes on each: on a node
 // rayd asks for remote and auto updates, on a relay rayd relay for the
 // exit's. Neither host runs the other's: a relay's request of kind remote
@@ -167,6 +173,10 @@ type Status struct {
 	// root's directory, which rayd relay cannot read: root on the relay
 	// must act.
 	Unfinished bool `json:"unfinished,omitempty"`
+	// NoRelays: an update by hand the exit does not name to its relays
+	// (rayctl update -no-relays). Absent, as an older rayctl writes it, the
+	// relays follow.
+	NoRelays bool `json:"no_relays,omitempty"`
 	// Held are releases whose update rolled back or broke on the way: the
 	// auto update leaves them alone, and so does a relay. Each status
 	// carries them over.

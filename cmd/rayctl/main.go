@@ -169,12 +169,13 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                               default; -ports: ports of your choice at the first install
                                               only (1024 and up; the rest random, 443 and 53 fixed)
   apply                                       install what the current services need (root)
-  update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-no-handoff] [-rollback [-no-carry]]
+  update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-no-handoff] [-no-relays] [-rollback [-no-carry]]
                                               the newest verified release in place, back to the
                                               previous binaries if the node does not come back (root);
                                               on a relay host the relay, with its stored bundle
                                               (not yet run on a real relay host); -check and
-                                              -rollback do not go together
+                                              -rollback do not go together; the node's relays
+                                              follow an update unless -no-relays
   update status | remote on|off | auto off|patch [-window HH:MM-HH:MM]
                                               updates by request: admin devices over the API, rayd's
                                               own to patch releases in the window (root); on a relay

@@ -350,13 +350,31 @@ func TestStatusFile(t *testing.T) {
 	if got := ReadStatus(path); got.Kind != Exit || got.Reason != ReasonUnfinished || !got.Unfinished || !got.Untouched {
 		t.Fatalf("a relay's: %+v", got)
 	}
+	// An update by hand on the node the relays do not follow
+	// (rayctl update -no-relays).
+	local := Status{ID: "0c", State: Done, From: "v0.27.0", To: "v0.28.0", Target: "v0.28.0", Release: "v0.28.0", By: "rayctl on the node", Kind: Local,
+		NoRelays: true}
+	if err := WriteStatus(path, local); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); !bytes.Contains(raw, []byte(`"no_relays":true`)) {
+		t.Errorf("no_relays not written: %s", raw)
+	}
+	if got := ReadStatus(path); got.Kind != Local || !got.NoRelays {
+		t.Fatalf("an update by hand: %+v", got)
+	}
+	local.NoRelays = false
+	WriteStatus(path, local)
+	if raw, _ := os.ReadFile(path); bytes.Contains(raw, []byte(`no_relays`)) {
+		t.Errorf("no_relays written when the relays follow: %s", raw)
+	}
 	// What the rayctl of an older release writes, with neither, reads as
 	// none (raycontrol v0.27.0).
 	os.Remove(path)
 	os.WriteFile(path, []byte(`{"id":"6f1c0e2a9b3d4c5e","state":"done","from":"v0.26.0","to":"v0.27.0","target":"latest","release":"v0.27.0",`+
 		`"by":"alice/phone (remote)","kind":"remote","held":["v0.26.1"],"requested":"2026-11-14T03:00:00Z","started":"2026-11-14T03:00:05Z",`+
 		`"ended":"2026-11-14T03:02:41Z"}`+"\n"), 0o644)
-	if got := ReadStatus(path); got.State != Done || got.To != "v0.27.0" || got.Reason != "" || got.Unfinished || !slices.Equal(got.Held, []string{"v0.26.1"}) ||
+	if got := ReadStatus(path); got.State != Done || got.To != "v0.27.0" || got.Reason != "" || got.Unfinished || got.NoRelays || !slices.Equal(got.Held, []string{"v0.26.1"}) ||
 		got.Ended.Unix() != time.Date(2026, 11, 14, 3, 2, 41, 0, time.UTC).Unix() {
 		t.Fatalf("an older status: %+v", got)
 	}
