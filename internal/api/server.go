@@ -571,10 +571,11 @@ func (s *Server) export(ctx context.Context, name string) ([]sub.Profile, error)
 }
 
 func servicePB(svc store.Service) *nodev1.Service {
-	pb := &nodev1.Service{Id: uint32(svc.ID), Kind: svc.Kind, Name: svc.Name, Enabled: svc.Enabled,
-		SettingsJson: svc.Settings, CreatedAt: svc.CreatedAt.Unix(), Uid: uint32(svc.UID), Sni: provision.SiteName(svc)}
 	// The published switch only: naive's next name is chosen, and served,
 	// an epoch ahead (R4-42), REALITY's waits for its certificate before.
+	// Not in the settings either (provision.ShownSettings).
+	pb := &nodev1.Service{Id: uint32(svc.ID), Kind: svc.Kind, Name: svc.Name, Enabled: svc.Enabled,
+		SettingsJson: provision.ShownSettings(svc), CreatedAt: svc.CreatedAt.Unix(), Uid: uint32(svc.UID), Sni: provision.SiteName(svc)}
 	switch svc.Kind {
 	case "reality":
 		if st := provision.ParseRealityState(svc); st.NextFrom != 0 {

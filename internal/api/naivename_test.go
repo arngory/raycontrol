@@ -145,6 +145,97 @@ func TestRotateNaiveNameOnStand(t *testing.T) {
 	}
 }
 
+// A next server name not yet published is in no answer of the API: not in
+// Service.sni_next, nor in its settings_json, of ListServices (remote
+// admins' too), CreateService or SetServiceOption. naive's is chosen and
+// routed an epoch ahead, REALITY's waits for its certificate; once
+// published both show. prepared_at (a time, no name) stays.
+func TestServiceSettingsHideUnpublishedNames(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "r"})); err != nil {
+		t.Fatal(err)
+	}
+	cr, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "naive", Name: "nv"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := provision.ParseNaiveState(srvService(t, srv, "nv")).SNINext
+	if next == "" {
+		t.Fatal("no next name chosen")
+	}
+	shows := func(what, settings, name string) {
+		t.Helper()
+		if strings.Contains(settings, name) {
+			t.Errorf("%s shows the unpublished %s: %s", what, name, settings)
+		}
+		if !strings.Contains(settings, `"sni"`) {
+			t.Errorf("%s lost the settings: %s", what, settings)
+		}
+	}
+	listed := func(name string) *nodev1.Service {
+		t.Helper()
+		l, err := c.ListServices(ctx, connect.NewRequest(&nodev1.ListServicesRequest{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range l.Msg.Services {
+			if s.Name == name {
+				return s
+			}
+		}
+		t.Fatalf("no %s", name)
+		return nil
+	}
+	shows("CreateService", cr.Msg.Service.SettingsJson, next)
+	shows("ListServices", listed("nv").SettingsJson, next)
+	so, err := c.SetServiceOption(ctx, connect.NewRequest(&nodev1.SetServiceOptionRequest{Name: "nv", Key: "rotate_sni", Value: "off"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shows("SetServiceOption", so.Msg.Service.SettingsJson, next)
+
+	// REALITY prepared with a new name that waits for its certificate.
+	if _, err := c.SetServiceOption(ctx, connect.NewRequest(&nodev1.SetServiceOptionRequest{Name: "r", Key: "rotate_sni", Value: "on"})); err != nil {
+		t.Fatal(err)
+	}
+	e := provision.RealityEpoch{Lead: 72 * time.Hour, Prepare: 24 * time.Hour}
+	if err := provision.RequestRotation(ctx, srv.Store, "r", time.Now(), e.Lead, false); err != nil {
+		t.Fatal(err)
+	}
+	resolves := func(context.Context, string) error { return nil }
+	if _, err := provision.RotateReality(ctx, srv.Store, time.Now(), e, resolves, nil); err != nil {
+		t.Fatal(err)
+	}
+	rs := provision.ParseRealityState(srvService(t, srv, "r"))
+	if rs.SNINext == "" || rs.NextFrom != 0 || rs.PreparedAt == 0 {
+		t.Fatalf("REALITY not waiting for a certificate: %+v", rs)
+	}
+	r := listed("r")
+	shows("ListServices (REALITY)", r.SettingsJson, rs.SNINext)
+	if r.SniNext != "" || !strings.Contains(r.SettingsJson, `"prepared_at"`) {
+		t.Errorf("REALITY waiting: %+v", r)
+	}
+
+	// Published: shown.
+	site := srvService(t, srv, "site")
+	keyDER, certDER, _ := provision.SelfSigned("*.example.com")
+	srv.Store.SetServiceSecret(ctx, site.ID, provision.SecretTLSChain, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}))
+	srv.Store.SetServiceSecret(ctx, site.ID, provision.SecretTLSKey, keyDER)
+	if err := provision.RequestRotation(ctx, srv.Store, "nv", time.Now(), e.Lead, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provision.RotateReality(ctx, srv.Store, time.Now(), e, resolves, nil); err != nil {
+		t.Fatal(err)
+	}
+	for name, n := range map[string]string{"nv": next, "r": rs.SNINext} {
+		if s := listed(name); s.SniNext != n || !strings.Contains(s.SettingsJson, n) {
+			t.Errorf("%s published: %+v", name, s)
+		}
+	}
+}
+
 func srvService(t *testing.T, srv *Server, name string) store.Service {
 	t.Helper()
 	svc, err := srv.Store.ServiceByName(context.Background(), name)

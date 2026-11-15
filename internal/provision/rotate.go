@@ -75,6 +75,33 @@ func ParseRealityState(svc store.Service) RealityState {
 	return st
 }
 
+// ShownSettings are the settings of a service as shown outside rayd (the
+// API's services, to remote admins too): without a next server name not
+// yet published, REALITY's waiting for its certificate, naive's chosen an
+// epoch ahead (R4-42). The front routes naive's from then, and under a
+// wildcard certificate nothing else names it until a client sends it: a
+// listing pasted into a ticket must not either. prepared_at stays: a time,
+// no name (rayctl says from it that a next name waits for its
+// certificate), and under listed names the name is in CT logs with its
+// order anyway.
+func ShownSettings(svc store.Service) string {
+	if svc.Kind != "reality" && svc.Kind != "naive" {
+		return svc.Settings
+	}
+	var st struct {
+		SNINext  string `json:"sni_next"`
+		NextFrom int64  `json:"next_from"`
+	}
+	if err := json.Unmarshal([]byte(svc.Settings), &st); err != nil || st.SNINext == "" || st.NextFrom != 0 {
+		return svc.Settings
+	}
+	shown, err := setFields(svc.Settings, map[string]any{"sni_next": nil})
+	if err != nil {
+		return "{}"
+	}
+	return shown
+}
+
 // RealityEpoch is the schedule of REALITY key rotation, and of naive's
 // name (R4-42), which shares its lead and preparation.
 type RealityEpoch struct {

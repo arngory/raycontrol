@@ -679,6 +679,9 @@ message Service {
   string kind = 2;
   string name = 3;
   bool enabled = 4;
+  // The service's settings, without a next server name not yet published
+  // (REALITY's sni_next waiting for its certificate, naive's chosen ahead;
+  // raycontrol v0.29.0): no client has it, and nothing shows it.
   string settings_json = 5;
   int64 created_at = 6;
   uint32 uid = 7; // system user of the service's process, 0 if none

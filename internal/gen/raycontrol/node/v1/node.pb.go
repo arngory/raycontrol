@@ -5083,14 +5083,17 @@ func (x *Profile) GetNextFrom() int64 {
 }
 
 type Service struct {
-	state        protoimpl.MessageState `protogen:"open.v1"`
-	Id           uint32                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"` // also the SPA scope ID
-	Kind         string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
-	Name         string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
-	Enabled      bool                   `protobuf:"varint,4,opt,name=enabled,proto3" json:"enabled,omitempty"`
-	SettingsJson string                 `protobuf:"bytes,5,opt,name=settings_json,json=settingsJson,proto3" json:"settings_json,omitempty"`
-	CreatedAt    int64                  `protobuf:"varint,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	Uid          uint32                 `protobuf:"varint,7,opt,name=uid,proto3" json:"uid,omitempty"` // system user of the service's process, 0 if none
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Id      uint32                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"` // also the SPA scope ID
+	Kind    string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	Name    string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	Enabled bool                   `protobuf:"varint,4,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	// The service's settings, without a next server name not yet published
+	// (REALITY's sni_next waiting for its certificate, naive's chosen ahead;
+	// raycontrol v0.29.0): no client has it, and nothing shows it.
+	SettingsJson string `protobuf:"bytes,5,opt,name=settings_json,json=settingsJson,proto3" json:"settings_json,omitempty"`
+	CreatedAt    int64  `protobuf:"varint,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	Uid          uint32 `protobuf:"varint,7,opt,name=uid,proto3" json:"uid,omitempty"` // system user of the service's process, 0 if none
 	// The server name in the service's links (settings' sni): REALITY,
 	// naive, DoH, hy2-masq, hy2-obfs, Yggdrasil, a site; empty for the
 	// others (raycontrol v0.29.0).

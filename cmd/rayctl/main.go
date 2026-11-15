@@ -1014,10 +1014,11 @@ func keyState(s *nodev1.Service) string {
 		return ""
 	}
 	var st struct {
-		RotatedAt int64  `json:"rotated_at"`
-		NextFrom  int64  `json:"next_from"`
-		SNINext   string `json:"sni_next"`
-		PrevUntil int64  `json:"prev_until"`
+		RotatedAt  int64  `json:"rotated_at"`
+		PreparedAt int64  `json:"prepared_at"`
+		NextFrom   int64  `json:"next_from"`
+		SNINext    string `json:"sni_next"`
+		PrevUntil  int64  `json:"prev_until"`
 	}
 	_ = json.Unmarshal([]byte(s.SettingsJson), &st)
 	out := "since creation"
@@ -1027,7 +1028,10 @@ func keyState(s *nodev1.Service) string {
 	switch {
 	case st.NextFrom != 0:
 		out += ", switch " + day(st.NextFrom)
-	case st.SNINext != "":
+	case st.PreparedAt != 0 || st.SNINext != "":
+		// Prepared and not published: a new name waits for its
+		// certificate (rayd since v0.29.0 shows no unpublished name, a
+		// rayd before shows it).
 		out += ", next name waits for its certificate"
 	}
 	if st.NextFrom != 0 && st.SNINext != "" {
