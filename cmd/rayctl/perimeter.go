@@ -33,9 +33,9 @@ type perimeterHost struct {
 }
 
 // showRayspa is systemctl show of rayspa.service, the properties
-// ownTable reads.
+// ownTable reads, and NRestarts for the update.
 func showRayspa() (map[string]string, error) {
-	out, err := exec.Command("systemctl", "show", "-p", "ActiveState,MainPID,StatusText", "rayspa.service").Output()
+	out, err := exec.Command("systemctl", "show", "-p", "ActiveState,MainPID,StatusText,NRestarts", "rayspa.service").Output()
 	st := map[string]string{}
 	for _, line := range strings.Split(string(out), "\n") {
 		if k, v, ok := strings.Cut(line, "="); ok {
@@ -55,15 +55,22 @@ const (
 	// ownUp: the running rayspa (its pid, MainPID) has its table in with
 	// a snapshot of rayd's.
 	ownUp
+	// ownSaved: the running rayspa has its table in with the snapshot it
+	// saved, and none of rayd's yet: rayd is away (a boot it did not come
+	// up in, rayd stopped). Up: the admin addresses and SPA work; what
+	// changed since the snapshot was saved is not in force.
+	ownSaved
 	// ownNot: the running rayspa says its table is not in, not whole, or
-	// not from rayd yet; or the STATUS is another process's.
+	// behind rayd (its newest snapshot refused); or the STATUS is another
+	// process's.
 	ownNot
 )
 
 // ownTable reads rayspa's STATUS (cmd/rayspa, stateNow.status): "perimeter
 // up: rayd's snapshot; rayspa V, pid N" from the process systemd runs now
-// is the one state that a table an earlier rayspa left cannot give. An
-// older rayspa's STATUS (no pid) is ownUnknown.
+// is the one state that a table an earlier rayspa left cannot give;
+// "perimeter up: the saved snapshot" is this process's table too, from
+// its saved snapshot. An older rayspa's STATUS (no pid) is ownUnknown.
 func ownTable(st map[string]string) (tableOwn, string) {
 	text := st["StatusText"]
 	i := strings.LastIndex(text, ", pid ")
@@ -73,21 +80,37 @@ func ownTable(st map[string]string) (tableOwn, string) {
 	if pid := text[i+len(", pid "):]; pid != st["MainPID"] || pid == "0" {
 		return ownNot, text + " (from pid " + pid + ", not the running " + st["MainPID"] + ")"
 	}
-	if strings.HasPrefix(text, "perimeter up: rayd's snapshot;") {
+	switch {
+	case strings.HasPrefix(text, "perimeter up: rayd's snapshot;"):
 		return ownUp, text
+	case strings.HasPrefix(text, "perimeter up: the saved snapshot"):
+		return ownSaved, text
 	}
 	return ownNot, text
 }
 
+// errRayspaRestarted: the new rayspa exited and systemd started it again
+// within the update's wait; waiting longer does not undo that.
+var errRayspaRestarted = errors.New("rayspa restarted")
+
 // rayspaUpdated is the update's check of the perimeter after rayspa's
 // restart (rayctl update, restartNode): the new rayspa has its own table
-// in, with the new rayd's snapshot (it starts after rayd). A rayspa whose
-// STATUS names no process (a rollback to a version before it) is checked
-// as before: running, and a table in the kernel.
+// in, with the new rayd's snapshot (it starts after rayd), and has not
+// exited since the update restarted it. The update's systemctl restart
+// leaves NRestarts at 0 (systemd counts only the starts of Restart=, and
+// starts the count again at any other: src/core/service.c,
+// flush_n_restarts), so a process that crashed and came back up within the
+// wait, with its table in, has 1 or more (errRayspaRestarted), as the
+// data plane's units are checked (waitUnit). A rayspa whose STATUS names
+// no process (a rollback to a version before it) is checked as before:
+// running, and a table in the kernel.
 func rayspaUpdated(show func() (map[string]string, error), table func() error) error {
 	st, err := show()
 	if err != nil {
 		return fmt.Errorf("systemctl show rayspa: %w", err)
+	}
+	if restartedSince(st, "0") {
+		return fmt.Errorf("%w (%s times since the update restarted it): journalctl -u rayspa says why", errRayspaRestarted, st["NRestarts"])
 	}
 	if st["ActiveState"] != "active" {
 		return fmt.Errorf("rayspa.service is %s", st["ActiveState"])
@@ -95,7 +118,7 @@ func rayspaUpdated(show func() (map[string]string, error), table func() error) e
 	switch own, text := ownTable(st); own {
 	case ownUp:
 		return nil
-	case ownNot:
+	case ownSaved, ownNot:
 		return fmt.Errorf("rayspa: %s", text)
 	}
 	if err := table(); err != nil {
@@ -176,6 +199,11 @@ func perimeterResult(h perimeterHost) []hostcheck.Result {
 		switch own, text := ownTable(st); own {
 		case ownUp:
 			res.Detail = "rayspa runs, its table is in with rayd's snapshot"
+		case ownSaved:
+			// Up: what rayspa does while rayd is away (rayctl status falls
+			// back to this line when rayd does not answer).
+			res.Detail = "rayspa runs, its table is in with the snapshot it saved: rayd is away, " +
+				"and what changed since that snapshot is not in force until rayd answers (systemctl status rayd)"
 		case ownNot:
 			res.OK = false
 			res.Detail = "a table is in, but rayspa says: " + text

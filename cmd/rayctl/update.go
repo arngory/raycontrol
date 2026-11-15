@@ -567,12 +567,18 @@ func (c *cli) restartNode(ctx context.Context, want, stage string, before []stri
 	return waitDataPlane(ctx, units, restarts, unitState, 3*time.Second, 30*time.Second, 500*time.Millisecond)
 }
 
-// waitPerimeter waits for check to pass, tries times every so long.
+// waitPerimeter waits for check to pass, tries times every so long. A
+// rayspa that restarted since the update's restart (errRayspaRestarted)
+// fails it at once: one that crashed is not the one to wait for, even
+// when it comes back up.
 func waitPerimeter(ctx context.Context, check func() error, tries int, every time.Duration) error {
 	var err error
 	for range tries {
 		if err = check(); err == nil {
 			return nil
+		}
+		if errors.Is(err, errRayspaRestarted) {
+			return fmt.Errorf("the new rayspa did not hold: %w", err)
 		}
 		select {
 		case <-ctx.Done():
