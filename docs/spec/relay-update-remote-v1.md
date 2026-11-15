@@ -11,8 +11,8 @@
 ## 1. Цель и чего здесь нет
 
 Цель:
-- выход (нода), обновившись по запросу (`remote` или `auto`), называет каждому своему relay версию, на которой теперь
-  работает сам;
+- выход (нода), обновившись по запросу (`remote` или `auto`) или вручную (`rayctl update` на ноде, кроме
+  `-no-relays`, §11 п. 1), называет каждому своему relay версию, на которой теперь работает сам;
 - relay, на котором root это разрешил, сам скачивает этот релиз, проверяет его своим закреплённым ключом и ставит его
   тем же кодом, что `rayctl update` на его хосте сегодня, с тем же откатом;
 - итог по каждому relay (версия, состояние, время, короткая причина) виден в `GetUpdateStatus` и `rayctl update status`
@@ -22,7 +22,6 @@
 - выбора версии для relay: выход называет только свою; «обновить relay на vX, а ноду нет» нельзя;
 - отката relay по слову выхода: никогда назад;
 - автообновления relay по своему расписанию: у relay нет своих проверок GitHub, он идёт за выходом;
-- обновления relay после `rayctl update` root на ноде (вручную) — §11, вопрос 1;
 - доставки релиза через выход: relay качает его сам (§11, вопрос 3);
 - relay с пакетом без точки замера (до v0.11.0): у него нет `rayd relay`, который принимает слово выхода (§3.1);
 - нового порта, нового сервиса или нового процесса на relay, который слушает сеть.
@@ -153,16 +152,17 @@ message RelayUpdate {
   предложений не получают; старый relay их бы и так пропустил (proto3), но так видно, кто их понимает.
 - Сравнение «изменилось ли» в `WatchRelay` идёт по всему ответу, снимку и предложению вместе, а не по одному снимку
   (сейчас `relayfeed.go:174-178`). Изменение предложения будит потоки так же, как изменение периметра.
-- Отказы `ReportUpdate` — как у `Report`: чужой — `NotFound` (как неизвестный путь, `relayfeed.go:23`); больше одного
-  вызова сразу или 12 в минуту от одного relay — `ResourceExhausted`; поле вне границ (§3.6) — `InvalidArgument`.
-  Старый выход отвечает `Unimplemented` (метода нет).
+- Отказы `ReportUpdate`: чужой — `NotFound`, как у `Report` (как неизвестный путь, `relayfeed.go:23`); больше одного
+  вызова сразу или больше 12 в минуту от одного relay — `ResourceExhausted` (у `Report` на одновременные вызовы
+  `Unavailable`; у нового метода код точнее); поле вне границ (§3.6) — `InvalidArgument`. Старый выход отвечает
+  `Unimplemented` (метода нет).
 
 ### 3.3. Что выход называет и когда
 
 Выход кладёт предложение `{id, version, ended_at}` в поток relay `R`, если всё так:
 1. последний статус по запросу (`status.json`, `nodeupdate.Settled`) — `done`, вид `remote`, `auto` или `local`
-   (ручной `rayctl update` на ноде пишет статус с видом `local`, решение владельца, §11 п. 1; с `-no-relays`
-   статус пишется с `relays: false`, и предложения нет);
+   (ручной `rayctl update` на ноде пишет статус с видом `local` и `by: "rayctl on the node"`, решение владельца,
+   §11 п. 1; с `-no-relays` статус пишется с `no_relays: true`, и предложения нет; поле без значения — relay идут);
 2. его `to` — release и равен версии этого rayd (`Server.Version`): нода работает на том, что поставило обновление,
    и не переставлена после него руками;
 3. ни запрос не ждёт, ни обновление не идёт (`nodeupdate.Busy`, `nodeupdate.go:316-322`);
@@ -239,8 +239,10 @@ Relay, обновляющийся сейчас, на минуту теряет �
 ### 3.6. Поля и границы
 
 - `version`, `target`: `""` или `vX.Y.Z` (`release.IsRelease`), до 40 байт.
-- `state`: одно из §3.4. `reason`: `""` или код из списка ниже. `id`: `""` или 1–32 hex, как у запроса
-  (`nodeupdate.go:160`).
+- `state`: одно из §3.4; новое состояние — изменение протокола, выход его не примет. `reason`: `""` или код вида
+  `[a-z][a-z_]{0,31}` (`nodeupdate.ValidReason`): выход принимает и код, которого не знает, — relay бывает новее
+  выхода (§7); список ниже — коды этой версии, телефон показывает незнакомый как есть. `id`: `""` или 1–32 hex, как
+  у запроса (`nodeupdate.go:160`).
 - `error`: печатный текст (`nodeupdate.Printable`), не длиннее 200 байт, на relay пропущен через `redact` (§6). Выход
   делает с ним то же ещё раз: relay он не верит.
 - Вся `ReportUpdateRequest` — не больше 1 КиБ.
@@ -646,7 +648,7 @@ relay      r4: unknown: no word (a relay before vW, or its rayd relay does not r
 - `internal/nodeupdate`: вид `exit` в `Check` (только `vX.Y.Z`, строго новее, `held`), `Allows`, `reason` и `unfinished`
   в статусе и итоге, обрезка; старый JSON без них читается.
 - `internal/api` (`relayfeed_test.go`, новый `relayupdate_test.go`): предложение только при `done` вида
-  `remote|auto` с `to` = версии rayd, не при `Busy`, не после ручного обновления; только в поток с `updates`; изменение
+  `remote|auto|local` с `to` = версии rayd, не при `Busy`, не при `no_relays`; только в поток с `updates`; изменение
   предложения будит поток и сравнивается вместе со снимком; очередь по именам с часами теста (прошёл, ушёл в обновление,
   молчит, `TurnTimeout`, перезапуск выхода); `ReportUpdate`: чужой пин, чужой адрес, лимиты, границы полей,
   `Printable`/`redact`, запись в `settings` только при изменении, удаление с `RemoveRelay`; `GetUpdateStatus.relays` и
@@ -709,7 +711,9 @@ relay      r4: unknown: no word (a relay before vW, or its rayd relay does not r
    `cmd/rayctl/update_relay.go`, `update_request.go`, `update_status_test.go`.
 7. **`rayd relay`.** Предложение (§3.5), запрос, опрос статуса, `ReportUpdate`, `updates: true`. Новый
    `internal/relayprobe/relayupdate.go` и тест; `relayprobe.go` (Watch), `cmd/rayd/main.go` (пути).
-8. **Выход: предложение и очередь.** Чтение `status.json`, очередь, предложение в потоке, сравнение всего ответа,
+8. **Выход: предложение и очередь.** Ручной `rayctl update` на ноде пишет `status.json` (`local`,
+   `by: "rayctl on the node"`), `-no-relays` — с `no_relays: true` (§11 п. 1; `cmd/rayctl/update.go`,
+   `nodeupdate.Status.NoRelays`). Чтение `status.json`, очередь, предложение в потоке, сравнение всего ответа,
    пробуждение. `internal/api/relayfeed.go`, новый `internal/api/relayupdate.go`, `remote.go`, тесты.
 9. **Выход: доклады.** `ReportUpdate`, `settings`, удаление с relay, `GetUpdateStatus.relays`, аудит.
    `internal/api/relayfeed.go`, `relayupdate.go`, `relays.go`, `update.go`, тесты.
