@@ -342,7 +342,7 @@ WantedBy=multi-user.target
 # raycontrol-relay-update.service — не в plan.Units, запускается только path-юнитом
 [Unit]
 Wants=network-online.target
-After=network-online.target rayspa.service
+After=network-online.target raycontrol-relay-recover.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/rayctl update -request
@@ -372,6 +372,13 @@ WantedBy=multi-user.target
   запускает. `rayctl install -relay` (и под обновлением) включает или выключает их по политике, так что состояние
   переживает и обновление, и повторный `bootstrap.sh -relay`.
 - Песочницы у сервиса нет, как у ноды (`deploy.go:855-862`): он ставит relay.
+- Сервис не упорядочен с `rayspa.service` (было `After=… rayspa.service`; нашёл `test/relay/host.sh`): пока сервис
+  останавливается (`systemctl stop` посреди обновления), задание юнита, упорядоченного с ним, ждёт конца остановки, а
+  откат, который остановка запускает, останавливает и запускает `rayspa` — оба ждали друг друга до `TimeoutStopSec`,
+  дважды (остановка, затем откат `ExecStopPost`): десять минут, юнит `failed`, в статусе `failed` и `unfinished`. При
+  загрузке он и так после `rayspa`: тот до `network-pre.target`, сервис после
+  `network-online.target`. Path-юнит упорядочен перед своим сервисом самим systemd, поэтому откат ставит его задания в
+  очередь (`--no-block`), не ждёт их.
 - В `relayOps.units` они добавляются **в конец**: `open` берёт `units[0]` как `rayspa` (`update_relay.go:488`), а
   `restore` запускает юниты по порядку (`update_relay.go:457-463`), path-юнит — после `rayspa` и точки замера.
   `open` выключает `rayspa` и точку замера отдельным `systemctl disable --now`, а path-юнит — сам по себе и только если

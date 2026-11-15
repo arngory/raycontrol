@@ -1928,12 +1928,12 @@ func TestRelayRemoteUnitsKept(t *testing.T) {
 	if _, err := captureStdout(t, func() error { _, err := ops.restore(true); return err }); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"disarm", "systemctl stop " + deploy.RelayUpdatePath, "systemctl stop rayd-relay.service", "systemctl stop rayspa.service",
+	want := []string{"disarm", "systemctl stop --no-block " + deploy.RelayUpdatePath, "systemctl stop rayd-relay.service", "systemctl stop rayspa.service",
 		"systemctl daemon-reload",
 		"sysctl -q -e -p " + f.at("etc/sysctl/91-raycontrol-relay.conf"), "sysctl -q -e -p " + f.at("etc/sysctl/90-raycontrol.conf"),
 		"systemctl enable rayspa.service", "systemctl enable rayd-relay.service", "systemctl enable " + deploy.RelayUpdatePath,
 		"systemctl enable " + deploy.RelayRecover,
-		"systemctl start rayspa.service", "systemctl start rayd-relay.service", "systemctl start " + deploy.RelayUpdatePath}
+		"systemctl start rayspa.service", "systemctl start rayd-relay.service", "systemctl start --no-block " + deploy.RelayUpdatePath}
 	if !slices.Equal(f.ran, want) {
 		t.Errorf("restore ran %q\nwant %q", f.ran, want)
 	}
@@ -1947,7 +1947,7 @@ func TestRelayRemoteUnitsKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Contains(f.ran, "systemctl disable "+deploy.RelayUpdatePath) || !slices.Contains(f.ran, "systemctl disable "+deploy.RelayRecover) ||
-		slices.Contains(f.ran, "systemctl start "+deploy.RelayUpdatePath) {
+		slices.Contains(f.ran, "systemctl start --no-block "+deploy.RelayUpdatePath) {
 		t.Errorf("restore of remote off ran %q", f.ran)
 	}
 	// open: the path unit down, then rayspa and the probe, the recover
@@ -1955,9 +1955,20 @@ func TestRelayRemoteUnitsKept(t *testing.T) {
 	ops.state = f.env.ops.state
 	f.ran = nil
 	if err := ops.open(); err != nil ||
-		!slices.Equal(f.ran, []string{"systemctl disable --now " + deploy.RelayUpdatePath, "systemctl disable --now rayd-relay.service rayspa.service",
+		!slices.Equal(f.ran, []string{"systemctl disable --now --no-block " + deploy.RelayUpdatePath, "systemctl disable --now rayd-relay.service rayspa.service",
 			"rayspa teardown", "unforward"}) {
 		t.Errorf("open: %v %q", err, f.ran)
+	}
+	// Above: a job of the path unit is never waited for, in a restore or
+	// open. The path unit is ordered before the update service
+	// (systemd.path): while that stops halfway (systemctl stop,
+	// test/relay/host.sh) the job waits for the stop, which waits for
+	// this rollback (until TimeoutStopSec).
+	if j := unitJob("stop", deploy.RelayUpdatePath); !slices.Equal(j, []string{"stop", "--no-block", deploy.RelayUpdatePath}) {
+		t.Errorf("unitJob of the path unit: %q", j)
+	}
+	if j := unitJob("start", relayUnit); !slices.Equal(j, []string{"start", relayUnit}) {
+		t.Errorf("unitJob of rayspa: %q", j)
 	}
 	if slices.ContainsFunc(f.ran, func(s string) bool { return strings.Contains(s, deploy.RelayRecover) }) {
 		t.Errorf("open touched the recover unit: %q", f.ran)

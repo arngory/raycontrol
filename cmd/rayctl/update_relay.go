@@ -388,7 +388,7 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 		if !o.loaded(u) {
 			continue
 		}
-		if err := o.run("systemctl", "stop", u); err != nil {
+		if err := o.run("systemctl", unitJob("stop", u)...); err != nil {
 			return k, fmt.Errorf("stopping %s: %w", u, err)
 		}
 	}
@@ -478,7 +478,7 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 	}
 	for _, u := range o.running() {
 		if k.Units[u].Active {
-			if err := o.run("systemctl", "start", u); err != nil {
+			if err := o.run("systemctl", unitJob("start", u)...); err != nil {
 				return k, err
 			}
 		}
@@ -490,6 +490,21 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 // units but enableOnly, in their order.
 func (o relayOps) running() []string {
 	return slices.DeleteFunc(slices.Clone(o.units), func(u string) bool { return slices.Contains(o.enableOnly, u) })
+}
+
+// unitJob is systemctl's arguments for a job (stop, start) of unit, a
+// path unit's queued (--no-block): the path unit of the update by the
+// exit's word is ordered before the service it starts (systemd.path), so
+// while that service stops (systemctl stop of it, a shutdown), with the
+// rollback it set off under way, a job of the path unit waits for the
+// stop to end, which waits for the rollback. Queued, the job runs once
+// the service has stopped; at any other time, at once. The path unit
+// runs no binary of the relay, and nothing waits for it.
+func unitJob(verb, unit string) []string {
+	if strings.HasSuffix(unit, ".path") {
+		return []string{verb, "--no-block", unit}
+	}
+	return []string{verb, unit}
 }
 
 // open takes rayspa down and its table off: the relay forwards nothing,
@@ -508,14 +523,19 @@ func (o relayOps) open() error {
 	// failure no matter. A rollback to a release from before them has
 	// removed their files, and systemctl disable fails on a unit with no
 	// file before it stops anything (systemd 252, 255): rayspa would run
-	// on, the host not open.
+	// on, the host not open. A path unit's job is queued, as unitJob has
+	// it: it waits for the update service's stop, which waits for us.
 	var own []string
 	for _, u := range stop {
 		switch {
 		case slices.Contains(o.units[:min(2, len(o.units))], u):
 			own = append(own, u)
 		case o.loaded(u):
-			_ = o.run("systemctl", "disable", "--now", u)
+			args := []string{"disable", "--now", u}
+			if strings.HasSuffix(u, ".path") {
+				args = []string{"disable", "--now", "--no-block", u}
+			}
+			_ = o.run("systemctl", args...)
 		}
 	}
 	disable := o.run("systemctl", append([]string{"disable", "--now"}, own...)...)

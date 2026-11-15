@@ -1060,7 +1060,7 @@ func TestRelayUpdateUnits(t *testing.T) {
 		deploy.RelayUpdateService: {svc, []string{"Type=oneshot\n", "ExecStart=/usr/local/bin/rayctl update -request\n",
 			"ExecStopPost=-/usr/local/bin/rayctl update -request-ended\n", "TimeoutStartSec=15min\n", "TimeoutStopSec=5min\n",
 			"StateDirectory=raycontrol-update\nStateDirectoryMode=0755\n", "Wants=network-online.target\n",
-			"After=network-online.target rayspa.service " + deploy.RelayRecover + "\n"},
+			"After=network-online.target " + deploy.RelayRecover + "\n"},
 			[]string{"User=", "[Install]", "ProtectSystem", "NoNewPrivileges"}},
 		deploy.RelayRecover: {recover, []string{"ConditionPathExists=" + deploy.RelayUpdateMark + "\n", "Type=oneshot\n",
 			"ExecStart=/usr/local/bin/rayctl update -request-recover\n", "TimeoutStartSec=10min\n", "[Install]\nWantedBy=multi-user.target\n"},
@@ -1120,6 +1120,33 @@ func TestRelayUpdateUnits(t *testing.T) {
 	if !strings.Contains(file(node, "/etc/systemd/system/"+nodeupdate.PathUnit), "PathExists="+nodeupdate.RequestFile+"\n") ||
 		!strings.Contains(file(node, "/etc/systemd/system/"+nodeupdate.ServiceUnit), "TimeoutStartSec=50min\n") {
 		t.Error("the node's update units changed")
+	}
+}
+
+// The relay's update service is ordered against none of the relay's
+// units, which its rollback stops and starts: while the service stops
+// (systemctl stop of it halfway, test/relay/host.sh), a job of a unit
+// ordered against it waits for the stop to end, and the stop waited for
+// the rollback until TimeoutStopSec, twice: ten minutes, the status
+// failed, the update unfinished. At boot it still comes after rayspa,
+// through the network targets.
+func TestRelayUpdateServiceOrdering(t *testing.T) {
+	p := deploy.RelayPlan(deploy.DefaultBinaries)
+	svc := file(p, "/etc/systemd/system/"+deploy.RelayUpdateService)
+	for _, l := range strings.Split(svc, "\n") {
+		k, v, _ := strings.Cut(l, "=")
+		if k != "After" && k != "Before" {
+			continue
+		}
+		for _, u := range strings.Fields(v) {
+			if slices.Contains(p.Units, u) {
+				t.Errorf("%s: %s=%s, one of the units its rollback stops and starts", deploy.RelayUpdateService, k, u)
+			}
+		}
+	}
+	if !strings.Contains(svc, "\nAfter=network-online.target ") ||
+		!strings.Contains(file(p, "/etc/systemd/system/rayspa.service"), "\nBefore=network-pre.target ") {
+		t.Errorf("not after rayspa at boot:\n%s", svc)
 	}
 }
 
