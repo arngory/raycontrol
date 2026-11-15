@@ -261,7 +261,7 @@ chain output {
 	meta skuid @egress_uid jump egress
 }
 chain egress_local {                                # rayspa пишет целиком вместе с egress (§3)
-	meta l4proto { tcp, udp } ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 return
+	meta l4proto { tcp, udp } ip daddr { 127.0.0.53, 127.0.0.54, 168.63.129.16 } th dport 53 return
 	ip daddr 127.0.0.1 meta l4proto . th dport { tcp . 8443, udp . 8443 } return   # порт подписки: проба
 	ip daddr @local4 meta l4proto tcp counter reject with tcp reset comment "local"
 	ip daddr @local4 counter reject with icmpx admin-prohibited comment "local"
@@ -293,10 +293,18 @@ chain egress_local {                                # rayspa пишет цели
   `rayctl status` на такой ноде так и пишет (`egress set: …; local networks: not in the kernel here …`), а не
   «blocked»: периметра у `-supervise` по умолчанию нет вовсе, SMTP и BitTorrent держит только запущенный вручную
   `rayspa`.
-- **Исключения:** заглушка systemd-resolved на 53 (niko-server разрешает имена системным резолвером; остальные её
-  порты по-прежнему закрывает `to_node`) и порт подписки на 127.0.0.1, TCP и UDP: туда ведёт имя пробы канала
-  ([probe-v1](probe-v1.md)). Порт приходит в снимке (`Egress.local.loopback`). Частный резолвер провайдера из
-  `/etc/resolv.conf` закрыт, как и раньше для `IPAddressDeny` (rayctl check об этом предупреждает).
+- **Исключения:** резолверы на 53, TCP и UDP (`perimeter.LocalResolvers`; niko-server — Hysteria2 и Yggdrasil с
+  публичными пирами — разрешает имена системным резолвером): заглушка systemd-resolved 127.0.0.53 и 127.0.0.54
+  (остальные её порты по-прежнему закрывает `to_node`) и резолвер платформы Azure на WireServer, 168.63.129.16:
+  на ВМ Azure без systemd-resolved (RHEL, Rocky с NetworkManager) `/etc/resolv.conf` называет его самого, и без
+  исключения data plane терял бы каждое имя. Остальные порты WireServer (80, 32526 — канал агента к хосту) закрыты.
+  И порт подписки на 127.0.0.1, TCP и UDP: туда ведёт имя пробы канала ([probe-v1](probe-v1.md)); порт приходит в
+  снимке (`Egress.local.loopback`). Другой резолвер из локальных сетей в `/etc/resolv.conf` (частный резолвер
+  провайдера, 169.254.169.253 AWS, 198.18.0.0/15) data plane не достаёт: `deploy.SandboxResolverProblem` (`rayctl
+  check`, предупреждения установки и `rayctl apply`) считает достижимым ровно то, что пропускают и `IPAddressDeny`
+  юнитов, и эта цепочка, — из тех же списков (`unitDenied`, `LocalNets`, `LocalResolvers`), — и предупреждает об
+  остальном. Тест `TestNetnsLocalAzure`: UDP и TCP UID 9150 на 168.63.129.16:53 проходят, TCP на :80 и :32526 —
+  сброс сразу, UDP туда — EPERM.
 - **Цель REALITY на локальном адресе** (решение владельца: такие цели должны работать). Оператор может красть у
   своего же веб-сервера (`{"target":"127.0.0.1:8443",…}`) или у сервера в частной сети. Цель набирает сам Xray
   сервиса REALITY, от UID этого сервиса и мимо своей маршрутизации, и `egress_local` её сбрасывал бы: REALITY
@@ -313,9 +321,33 @@ chain egress_local {                                # rayspa пишет цели
   от своих UID, исключение их не касается. Цель-**имя**, которое разрешается в локальный адрес, исключения не
   получает: решало бы DNS (обычно чужого) имени, что открыть процессу, через который ходит весь интернет, —
   169.254.169.254 тоже; проверка цели (`rayctl status`, `reality-target`) такую цель называет ошибкой и
-  предлагает задать адрес. Цель на собственном адресе ноды (не loopback) по-прежнему закрывает `to_node`. Проверка
-  цели идёт от `rayd`, а не от процесса сервиса: `rayd` под `local` не попадает, поэтому путь data plane она не
-  проходит; его обеспечивает исключение из тех же настроек.
+  предлагает задать адрес. Кроме имени **`localhost`** (в любом регистре; RFC 6761 §6.3: это loopback, что бы ни
+  сказал DNS, `/etc/hosts` даёт 127.0.0.1 и ::1): цель `localhost:8443` — естественная для своего nginx и
+  встречается у нод, созданных до v0.27.0, — даёт два исключения, 127.0.0.1 и [::1] с её портом, для UID сервиса:
+  резолвер Xray может взять любой из адресов.
+
+  Цель на **собственном адресе ноды**, кроме 127.0.0.0/8 и ::1, и цель `0.0.0.0` или `::` исключения не дают:
+  первую `to_node` сбрасывает раньше `egress_local`, вторую ядро набирает как loopback, и правило с адресом
+  `0.0.0.0` не совпадает никогда. Создание сервиса и `rayctl service set` такие цели не принимают
+  (`provision.CheckTargetAddr`: «use 127.0.0.1:PORT»), проверка цели отвергает и имя, которое разрешается в
+  собственный адрес. Проверка цели идёт от `rayd`, а не от процесса сервиса: `rayd` под `local` не попадает,
+  поэтому путь data plane она не проходит; его обеспечивает исключение из тех же настроек.
+
+  **Цель меняется на месте:** `rayctl service set NAME target=HOST:PORT` (v0.27.0). Проверяется, как при создании:
+  `RealityTarget` с `sni` сервиса, `CheckTargetAddr`, и API проверяет сам сайт с ноды (`CheckRealityTarget`: TLS
+  1.3, X25519MLKEM768, HTTP/2, длина цепочки, имя не в локальную сеть). Отказ ничего не меняет и в аудит не идёт,
+  как и при создании; принятая — аудит `service.set target=…`, `rayd` перерисовывает Xray сервиса и перезапускает
+  его. Ключи, shortIds и `sni` (из которого `serverNames`) не меняются — секреты сервиса не трогаются, — поэтому
+  ссылки клиентов прежние. Не для самокражи (`site`): её имя — имя сайта ноды, сертификата на него у чужой цели нет.
+
+  **Цели, заданные раньше**, о которых data plane не знает: `rayctl check` (пункт `reality target NAME`, уровень
+  Advised) и первый шаг `rayctl update` (строки `warning:`, и с `-check`) называют каждый включённый сервис REALITY,
+  чья цель — имя (кроме `localhost`), разрешающееся в локальный адрес, пока `local` закрыт (при обновлении с `rayd`
+  до v0.27.0 — закрыт: обновление его закроет), или собственный адрес ноды (адресом или именем), или `0.0.0.0`, — с
+  командой исправления: `rayctl service set NAME target=ADDR:PORT` (для имени в локальную сеть — его адрес, `sni`
+  остаётся) или `rayctl egress allow local`. `rayctl status` показывает то же в цикле `reality-target NAME` у
+  `rayd` (`provision.ForService` добавляет команды к отказу проверки цели). Только на ноде: имена — как их
+  разрешает её резолвер, адреса — её собственные; на `-supervise` — нет (data plane там от UID `rayd`).
 
   Других целей, которые оператор задаёт адресом и которые набирает data plane, нет: самокража (`site`) и цель-сокет
   идут через unix-сокет; hy2-masq маскируется сайтом ноды (тоже сокет); пиры Yggdrasil — публичные по смыслу,
@@ -339,5 +371,9 @@ Xray, niko-server, `IPAddressDeny`) остаются: выключателя у 
 её открытой — так и есть.
 
 Тесты: модульные — правила (`TestEgressScript`, `TestRulesetLocal`), список у Xray и naive
-(`TestPrivateNetsArePerimeters`, `TestPublicNotLocal`), хранилище, API, `rayctl egress`; в CI `perimeter` —
-`TestNetnsLocal` (loopback как локальная сеть: отказы, исключения, ответы клиенту, выключатель).
+(`TestPrivateNetsArePerimeters`, `TestPublicNotLocal`), предупреждение о резолвере (`TestSandboxResolverProblem`,
+`TestSandboxReachesAgrees`), цели REALITY (`TestRealityLocalTarget`, `TestCheckRealityTargetReach`,
+`TestRealityTargetWarning`, `TestRealityTargetOption`, `TestSetRealityTarget`, `TestRealityTargetWarnings`),
+хранилище, API, `rayctl egress`; в CI `perimeter` — `TestNetnsLocal` (loopback как локальная сеть: отказы,
+исключения, цель `localhost`, ответы клиенту, выключатель) и `TestNetnsLocalAzure` (резолвер Azure на 53 — да,
+другие его порты и 169.254.169.253:53 — нет).
