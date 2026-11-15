@@ -386,6 +386,7 @@ func (c *cli) updateStatus(ctx context.Context) error {
 	s := m.Status
 	if s == nil || s.State == nodeupdate.Idle {
 		fmt.Println("last       none")
+		fmt.Print(relayLines(m))
 		return nil
 	}
 	line := fmt.Sprintf("last       %s: %s → %s, by %s", p(s.State), p(s.From), p(cmp.Or(s.To, "?")), p(s.By))
@@ -398,5 +399,6 @@ func (c *cli) updateStatus(ctx context.Context) error {
 	if s.Error != "" {
 		fmt.Printf("error      %s\n", p(s.Error))
 	}
+	fmt.Print(relayLines(m))
 	return nil
 }
