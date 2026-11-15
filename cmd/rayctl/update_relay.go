@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/exec"
@@ -610,6 +611,56 @@ func relayInstallCommand(rayctl, bundle string, lock *os.File) *exec.Cmd {
 		cmd.Env = append(cmd.Env, relayLockEnv+"=3")
 	}
 	return cmd
+}
+
+// runSaying runs cmd, a rayctl, and when it fails says why as it did: its
+// last "rayctl: ..." line on stderr, which still goes where cmd sends it.
+// Without it the relay's status, the exit's and the admin's phone would
+// read "exit status 1" and nothing else.
+func runSaying(cmd *exec.Cmd) error {
+	why := &lastSaid{prefix: "rayctl: "}
+	if cmd.Stderr != nil {
+		cmd.Stderr = io.MultiWriter(cmd.Stderr, why)
+	} else {
+		cmd.Stderr = why
+	}
+	err := cmd.Run()
+	if err != nil && why.said != "" {
+		return fmt.Errorf("%s (%w)", why.said, err)
+	}
+	return err
+}
+
+// lastSaid keeps the last whole line written to it that starts with
+// prefix, without the prefix; a line longer than maxSaid is cut.
+type lastSaid struct {
+	prefix string
+	line   []byte // the line under way
+	said   string
+}
+
+const maxSaid = 400
+
+func (l *lastSaid) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, '\n')
+		chunk := p
+		if i >= 0 {
+			chunk = p[:i]
+		}
+		if room := maxSaid - len(l.line); room > 0 {
+			l.line = append(l.line, chunk[:min(len(chunk), room)]...)
+		}
+		if i < 0 {
+			break
+		}
+		if s, ok := strings.CutPrefix(string(l.line), l.prefix); ok && strings.TrimSpace(s) != "" {
+			l.said = strings.TrimSpace(s)
+		}
+		l.line, p = l.line[:0], p[i+1:]
+	}
+	return n, nil
 }
 
 // relayHealth is the check of a relay after its update or its rollback:
@@ -1275,7 +1326,7 @@ func (c *cli) relayEnvHere(ctx context.Context) relayEnv {
 		},
 		place: func(stage string) (bool, error) { return placeRelayBinaries(stage, relayBinaries, placeBinary) },
 		install: func(lock *os.File) error {
-			return relayInstallCommand("/usr/local/bin/rayctl", deploy.RelayBundle, lock).Run()
+			return runSaying(relayInstallCommand("/usr/local/bin/rayctl", deploy.RelayBundle, lock))
 		},
 		health: func(w healthWant) func() error {
 			h := realHealth(w)

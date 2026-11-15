@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"runtime"
@@ -2034,5 +2035,50 @@ func TestRelayRemoteUnits(t *testing.T) {
 	}
 	if err := relayRemoteUnits(true, failing, disable); err == nil || len(ran) != 2 {
 		t.Errorf("failing: %v %q", err, ran)
+	}
+}
+
+// A relay install that fails says why in the update's error, so in the
+// relay's status and the admin's phone (not "exit status 1" alone): its
+// last "rayctl: ..." line, which still reaches the journal.
+func TestRunSaying(t *testing.T) {
+	if os.Getenv("RAYCTL_TEST_RUN_SAYING") != "" {
+		fmt.Fprintln(os.Stderr, "rayctl: an earlier line")
+		fmt.Fprint(os.Stderr, "progress without the prefix\nrayctl: rayspa did not start: ")
+		fmt.Fprintln(os.Stderr, "unit failed")
+		fmt.Fprintln(os.Stderr, "rayctl:   ")
+		os.Exit(1)
+	}
+	var journal bytes.Buffer
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunSaying$") //nolint:gosec // G204: this test binary
+	cmd.Env = append(os.Environ(), "RAYCTL_TEST_RUN_SAYING=1")
+	cmd.Stderr = &journal
+	err := runSaying(cmd)
+	if err == nil || err.Error() != "rayspa did not start: unit failed (exit status 1)" {
+		t.Errorf("error %v", err)
+	}
+	if ee := (*exec.ExitError)(nil); !errors.As(err, &ee) {
+		t.Errorf("the exit status is not kept: %v", err)
+	}
+	if !strings.Contains(journal.String(), "progress without the prefix") {
+		t.Errorf("stderr did not reach its writer: %q", journal.String())
+	}
+	// Nothing said: the error as it was.
+	cmd = exec.Command("sh", "-c", "echo plain >&2; exit 3")
+	if err := runSaying(cmd); err == nil || err.Error() != "exit status 3" {
+		t.Errorf("silent failure: %v", err)
+	}
+	// A long line is cut, and bytes split across writes join.
+	l := &lastSaid{prefix: "rayctl: "}
+	l.Write([]byte("rayctl: " + strings.Repeat("x", 1000)))
+	l.Write([]byte("y\nrayctl: a"))
+	l.Write([]byte("b\n"))
+	if l.said != "ab" {
+		t.Errorf("said %q", l.said)
+	}
+	l = &lastSaid{prefix: "rayctl: "}
+	l.Write([]byte("rayctl: " + strings.Repeat("x", 1000) + "\n"))
+	if len(l.said) != maxSaid-len("rayctl: ") {
+		t.Errorf("cut to %d", len(l.said))
 	}
 }
