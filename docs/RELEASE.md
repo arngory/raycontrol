@@ -162,13 +162,17 @@ bootstrap. Версию он читает из подписанного комм
 `rayctl` на верхнем уровне, подпись minisign над `SHA256SUMS` с `raycontrol vX.Y.Z`, команда
 `update -from DIR -version V [-yes] [-force]` и две переменные (`-force` передаётся с v0.21.0, если его дал оператор). Для обновления по запросу
 ([spec/node-update-v1.md](spec/node-update-v1.md)) ещё `RAYCONTROL_UPDATE_RESULT=<файл>`: `rayctl`, который сделал
-обновление, пишет туда JSON `{"state": "done"|"rolled_back"|"failed", "version", "release", "error", "untouched"}`
-(`release` — релиз, который ставили; `untouched` — сбой до того, как на ноде что-то поменялось). Тоже между версиями: файлы
+обновление, пишет туда JSON `{"state": "done"|"rolled_back"|"failed", "version", "release", "error", "untouched",
+"reason"}` (`release` — релиз, который ставили; `untouched` — сбой до того, как на ноде что-то поменялось; `reason` —
+код места сбоя из [spec/relay-update-remote-v1.md](spec/relay-update-remote-v1.md) §3.6: слово из строчных латинских
+букв и `_`, до 32 байт; незнакомый читающему код — не ошибка). Тоже между версиями: файлы
 `/var/lib/raycontrol-update/status.json` (`id`, `state`, `from`, `to`, `target`, `release`, `by`, `kind`, `error`,
-`untouched`, `held`, `requested`, `started`, `ended`: итог пишет `rayctl` прежней версии, читает rayd новой) и
-`policy.json` (`remote`, `auto`, `window`), флаги юнита `update -request` и `update -request-ended`. И `units` в ответе
-`GetDeployment`: `rayctl` без передачи (`-no-handoff`, `rayctl` релиза не запустился) берёт оттуда юниты после
-обновления; `files` и `users` уйдут из ответа (apply-plan-v1, решение 2). Откат ниже v0.21.0 запускает apply старого
+`untouched`, `reason`, `unfinished`, `held`, `requested`, `started`, `ended`: итог пишет `rayctl` прежней версии, читает
+rayd новой; `kind` — `remote`, `auto`, `local`, на relay — `exit`) и `policy.json` (`remote`, `auto`, `window`), флаги
+юнита `update -request` и `update -request-ended`. `reason` и `unfinished` (только в статусе: обновление relay не
+кончилось, нужен root на нём) необязательны: прежние `rayctl` их не пишут, и итог или статус без них читается как
+«кода нет». И `units` в ответе `GetDeployment`: `rayctl` без передачи (`-no-handoff`, `rayctl` релиза не запустился)
+берёт оттуда юниты после обновления; `files` и `users` уйдут из ответа (apply-plan-v1, решение 2). Откат ниже v0.21.0 запускает apply старого
 `rayctl`, а тот ставит план rayd как есть: иного apply у старой версии нет (apply-plan-v1 §3.5). Всё остальное (раскладка, имена, число файлов, новые
 транспорты, способ установки) с v0.19.0 можно менять без ступеней. CI проверяет передачу строкой `upgrade (handoff)`:
 это дерево как v0.0.1 обновляется до себя же как v0.0.2, подписанного одноразовым ключом (сборка с тегом

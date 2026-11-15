@@ -84,7 +84,7 @@ func TestAutoUpdate(t *testing.T) {
 	}
 	waitFor("request", func() bool { _, ok := nodeupdate.PeekRequest(reqFile); return ok })
 	r, _ := nodeupdate.PeekRequest(reqFile)
-	if r.Kind != nodeupdate.Auto || r.Version != "v0.19.1" || r.Check("v0.19.0", r.At) != nil || !nodeupdate.InWindow(r.At.In(time.Local), "03:00-03:30") {
+	if r.Kind != nodeupdate.Auto || r.Version != "v0.19.1" || r.Check(nodeupdate.NodeKinds, "v0.19.0", nil, r.At) != nil || !nodeupdate.InWindow(r.At.In(time.Local), "03:00-03:30") {
 		t.Fatalf("request %+v at %s", r, r.At.In(time.Local).Format("15:04"))
 	}
 	if v, _ := seen.Load().(string); v != "v0.19.1" {
@@ -318,7 +318,7 @@ func TestAutoNewestPatch(t *testing.T) {
 	}
 	a.step(ctx, &s, s.due)
 	r, ok := nodeupdate.PeekRequest(reqFile)
-	if !ok || r.Version != "v0.26.2" || r.Kind != nodeupdate.Auto || r.Check("v0.26.0", r.At) != nil {
+	if !ok || r.Version != "v0.26.2" || r.Kind != nodeupdate.Auto || r.Check(nodeupdate.NodeKinds, "v0.26.0", nil, r.At) != nil {
 		t.Fatalf("request %+v %v: %q", r, ok, detail())
 	}
 	os.Remove(reqFile)

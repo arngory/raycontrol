@@ -68,7 +68,7 @@ func TestStartUpdate(t *testing.T) {
 		t.Fatalf("start: %+v %v", r, err)
 	}
 	req, ok := nodeupdate.PeekRequest(srv.NodeUpdate.Request)
-	if !ok || req.Kind != nodeupdate.Remote || req.Version != "v0.19.1" || req.ID != r.Msg.Status.Id || req.Check("v0.19.0", time.Now()) != nil ||
+	if !ok || req.Kind != nodeupdate.Remote || req.Version != "v0.19.1" || req.ID != r.Msg.Status.Id || req.Check(nodeupdate.NodeKinds, "v0.19.0", nil, time.Now()) != nil ||
 		req.Tried() != "v0.19.1" {
 		t.Fatalf("the request %+v %v", req, ok)
 	}

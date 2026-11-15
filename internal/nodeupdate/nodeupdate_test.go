@@ -3,6 +3,7 @@ package nodeupdate
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,37 +17,97 @@ import (
 func TestRequestCheck(t *testing.T) {
 	now := time.Now()
 	ok := Request{ID: NewID(), Kind: Remote, Version: "v0.19.1", By: "alice/phone (remote)", At: now.Add(-time.Second)}
-	if err := ok.Check("v0.19.0", now); err != nil {
+	if err := ok.Check(NodeKinds, "v0.19.0", nil, now); err != nil {
+		t.Fatal(err)
+	}
+	// A refusal carries its reason code where the codes name one; a request
+	// that is not well formed has none.
+	for _, c := range []struct {
+		r            func(Request) Request
+		want, reason string
+	}{
+		{func(r Request) Request { r.ID = ""; return r }, "no id", ""},
+		{func(r Request) Request { r.ID = "../../x"; return r }, "no id", ""},
+		{func(r Request) Request { r.Kind = "root"; return r }, "kind", ""},
+		{func(r Request) Request { r.Kind = Exit; return r }, "kind", ""}, // a relay's
+		{func(r Request) Request { r.Version = "v0.19"; return r }, "latest or vX.Y.Z", ReasonVersion},
+		{func(r Request) Request { r.Version = "v0.18.1"; return r }, "never goes back", ReasonVersion},
+		{func(r Request) Request { r.Version = "v0.19.0"; return r }, "never goes back", ReasonVersion},
+		{func(r Request) Request { r.Kind = Auto; r.Version = "v0.20.0"; return r }, "patch releases", ReasonVersion},
+		{func(r Request) Request { r.Kind = Auto; r.Version = "latest"; return r }, "patch releases", ReasonVersion},
+		{func(r Request) Request { r.By = ""; return r }, "no one", ""},
+		{func(r Request) Request { r.By = "alice\nraycontrol v9.9.9 is running"; return r }, "no one", ""},
+		{func(r Request) Request { r.By = "\x1b[2Jalice"; return r }, "no one", ""},
+		{func(r Request) Request { r.By = strings.Repeat("a", maxField+1); return r }, "no one", ""},
+		{func(r Request) Request { r.At = now.Add(-Stale - time.Minute); return r }, "too old", ReasonStale},
+		{func(r Request) Request { r.At = now.Add(time.Hour); return r }, "too old", ReasonStale},
+	} {
+		err := c.r(ok).Check(NodeKinds, "v0.19.0", nil, now)
+		if err == nil || !strings.Contains(err.Error(), c.want) || ReasonOf(err) != c.reason {
+			t.Errorf("%+v: %v (reason %q), want %q (%q)", c.r(ok), err, ReasonOf(err), c.want, c.reason)
+		}
+	}
+	if err := (Request{ID: NewID(), Kind: Remote, Version: "latest", By: "alice/phone (remote)", At: now}).Check(NodeKinds, "v0.19.0", nil, now); err != nil {
+		t.Errorf("latest: %v", err)
+	}
+	if err := (Request{ID: NewID(), Kind: Auto, Version: "v0.19.4", By: "auto", At: now}).Check(NodeKinds, "v0.19.0", nil, now); err != nil {
+		t.Errorf("a patch: %v", err)
+	}
+	// Held is the relay's rule here: an admin may still name a release that
+	// did not hold on the node; the auto update leaves it, on rayd's side.
+	if err := ok.Check(NodeKinds, "v0.19.0", []string{"v0.19.1"}, now); err != nil {
+		t.Errorf("a held release asked for by an admin: %v", err)
+	}
+}
+
+// A relay's request (spec/relay-update-remote-v1.md §4.2): the release its
+// exit names, any newer than the relay's, none that did not hold on it.
+// rayd relay is the side that cannot be trusted: none of it is skipped by
+// writing another kind.
+func TestExitRequestCheck(t *testing.T) {
+	now := time.Now()
+	held := []string{"v0.27.1"}
+	ok := Request{ID: NewID(), Kind: Exit, Version: "v0.28.0", By: "exit", At: now.Add(-time.Second)}
+	if err := ok.Check(RelayKinds, "v0.27.0", held, now); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {
-		r    func(Request) Request
-		want string
+		r            func(Request) Request
+		want, reason string
 	}{
-		{func(r Request) Request { r.ID = ""; return r }, "no id"},
-		{func(r Request) Request { r.ID = "../../x"; return r }, "no id"},
-		{func(r Request) Request { r.Kind = "root"; return r }, "kind"},
-		{func(r Request) Request { r.Version = "v0.19"; return r }, "latest or vX.Y.Z"},
-		{func(r Request) Request { r.Version = "v0.18.1"; return r }, "never goes back"},
-		{func(r Request) Request { r.Version = "v0.19.0"; return r }, "never goes back"},
-		{func(r Request) Request { r.Kind = Auto; r.Version = "v0.20.0"; return r }, "patch releases"},
-		{func(r Request) Request { r.Kind = Auto; r.Version = "latest"; return r }, "patch releases"},
-		{func(r Request) Request { r.By = ""; return r }, "no one"},
-		{func(r Request) Request { r.By = "alice\nraycontrol v9.9.9 is running"; return r }, "no one"},
-		{func(r Request) Request { r.By = "\x1b[2Jalice"; return r }, "no one"},
-		{func(r Request) Request { r.By = strings.Repeat("a", maxField+1); return r }, "no one"},
-		{func(r Request) Request { r.At = now.Add(-Stale - time.Minute); return r }, "too old"},
-		{func(r Request) Request { r.At = now.Add(time.Hour); return r }, "too old"},
+		{func(r Request) Request { r.Version = "latest"; return r }, "the release the exit runs", ReasonVersion},
+		{func(r Request) Request { r.Version = "v0.28"; return r }, "the release the exit runs", ReasonVersion},
+		{func(r Request) Request { r.Version = "v0.27.0"; return r }, "never goes back", ReasonVersion},
+		{func(r Request) Request { r.Version = "v0.26.9"; return r }, "never goes back", ReasonVersion},
+		{func(r Request) Request { r.Version = "v0.27.1"; return r }, "did not hold here", ReasonVersion},
+		{func(r Request) Request { r.At = now.Add(-Stale - time.Minute); return r }, "too old", ReasonStale},
+		{func(r Request) Request { r.Kind = Remote; return r }, "kind", ""},
+		{func(r Request) Request { r.Kind = Remote; r.Version = "v0.27.1"; return r }, "kind", ""}, // held, as remote
+		{func(r Request) Request { r.Kind = Auto; r.Version = "v0.27.2"; return r }, "kind", ""},
+		{func(r Request) Request { r.ID = "x"; return r }, "no id", ""},
+		{func(r Request) Request { r.By = ""; return r }, "no one", ""},
 	} {
-		if err := c.r(ok).Check("v0.19.0", now); err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("%+v: %v, want %q", c.r(ok), err, c.want)
+		err := c.r(ok).Check(RelayKinds, "v0.27.0", held, now)
+		if err == nil || !strings.Contains(err.Error(), c.want) || ReasonOf(err) != c.reason {
+			t.Errorf("%+v: %v (reason %q), want %q (%q)", c.r(ok), err, ReasonOf(err), c.want, c.reason)
 		}
 	}
-	if err := (Request{ID: NewID(), Kind: Remote, Version: "latest", By: "alice/phone (remote)", At: now}).Check("v0.19.0", now); err != nil {
-		t.Errorf("latest: %v", err)
+	// Any newer release, a minor or a major one too: the relay follows its
+	// exit (§11, 4). And a node takes no exit request.
+	for _, v := range []string{"v0.27.2", "v0.30.0", "v1.0.0"} {
+		r := ok
+		r.Version = v
+		if err := r.Check(RelayKinds, "v0.27.0", held, now); err != nil {
+			t.Errorf("%s: %v", v, err)
+		}
 	}
-	if err := (Request{ID: NewID(), Kind: Auto, Version: "v0.19.4", By: "auto", At: now}).Check("v0.19.0", now); err != nil {
-		t.Errorf("a patch: %v", err)
+	if err := ok.Check(NodeKinds, "v0.27.0", nil, now); err == nil || !strings.Contains(err.Error(), "kind") {
+		t.Errorf("an exit request on a node: %v", err)
+	}
+	// What a run that never ended left (Holding) is held too.
+	last := Status{State: Running, Release: "v0.28.0", Held: held}
+	if err := ok.Check(RelayKinds, "v0.27.0", last.Holding(), now); ReasonOf(err) != ReasonVersion {
+		t.Errorf("the release of a run that never ended: %v", err)
 	}
 }
 
@@ -59,9 +120,14 @@ func TestPolicy(t *testing.T) {
 		t.Fatalf("no file: %+v", p)
 	}
 	at := time.Date(2026, 11, 8, 3, 10, 0, 0, time.UTC)
-	remote, auto := Request{Kind: Remote}, Request{Kind: Auto}
-	if DefaultPolicy().Allows(remote, at) == nil || DefaultPolicy().Allows(auto, at) == nil {
-		t.Fatal("the default allows")
+	remote, auto, exit := Request{Kind: Remote}, Request{Kind: Auto}, Request{Kind: Exit}
+	for _, r := range []Request{remote, auto, exit} {
+		if err := DefaultPolicy().Allows(r, at); err == nil || ReasonOf(err) != ReasonPolicy {
+			t.Fatalf("the default, %s: %v", r.Kind, err)
+		}
+	}
+	if err := DefaultPolicy().Allows(exit, at); !strings.Contains(err.Error(), "off on this relay (rayctl update remote on)") {
+		t.Errorf("an exit request: %v", err)
 	}
 	for _, bad := range []Policy{{"yes", "off", DefaultWindow}, {"on", "minor", DefaultWindow}, {"on", "off", "3-5"}, {"on", "off", "03:00-03:10"}} {
 		if err := WritePolicy(path, bad); err == nil {
@@ -81,8 +147,19 @@ func TestPolicy(t *testing.T) {
 	if err := p.Allows(remote, at); err != nil {
 		t.Error(err)
 	}
-	if err := p.Allows(auto, at); err == nil {
-		t.Error("auto outside the window")
+	// On a relay remote is root's word that its exit may name the release.
+	if err := p.Allows(exit, at); err != nil {
+		t.Error(err)
+	}
+	if err := (Policy{Remote: "off", Auto: "patch", Window: "03:00-05:00"}).Allows(exit, at); err == nil {
+		t.Error("exit with remote off")
+	}
+	if err := p.Allows(auto, at); err == nil || ReasonOf(err) != ReasonPolicy {
+		t.Errorf("auto outside the window: %v", err)
+	}
+	// A kind with no rule of its own does not run, whatever is on.
+	if err := p.Allows(Request{Kind: "local"}, at); err == nil {
+		t.Error("a kind with no rule")
 	}
 	night := time.Date(2026, 11, 8, 0, 30, 0, 0, time.UTC)
 	if err := p.Allows(auto, night); err != nil {
@@ -187,6 +264,57 @@ func TestResultFile(t *testing.T) {
 	if _, ok := ReadResult(path); ok {
 		t.Error("an unknown state taken")
 	}
+	// The reason: a code, kept as long as it has the form of one, also one
+	// this version does not know (a newer rayctl's, for an older runner).
+	for reason, want := range map[string]string{
+		ReasonDownload:            ReasonDownload,
+		"mirror_gone":             "mirror_gone",
+		"Download":                "",
+		"down load":               "",
+		"ssh\n":                   "",
+		"_x":                      "",
+		"v2":                      "",
+		strings.Repeat("a", 33):   "",
+		"signature\x1b[2J":        "",
+		strings.Repeat("é", 2000): "",
+	} {
+		if err := WriteResult(path, Result{State: Failed, Untouched: true, Reason: reason}); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := ReadResult(path); !ok || got.Reason != want || !got.Untouched {
+			t.Errorf("reason %q: read %+v %v", reason, got, ok)
+		}
+	}
+	// What the rayctl of an older release writes, with no reason, reads as
+	// none.
+	os.WriteFile(path, []byte(`{"state":"failed","version":"v0.27.0","release":"v0.28.0","error":"no SHA256SUMS","untouched":true}`+"\n"), 0o600)
+	if got, ok := ReadResult(path); !ok || got.State != Failed || got.Reason != "" || !got.Untouched || got.Release != "v0.28.0" {
+		t.Errorf("an older result: %+v %v", got, ok)
+	}
+}
+
+// The codes are what ValidReason takes, and none twice.
+func TestReasons(t *testing.T) {
+	codes := []string{ReasonPolicy, ReasonStale, ReasonVersion, ReasonBusy, ReasonUnfinished, ReasonBundle, ReasonSSH, ReasonDownload,
+		ReasonSignature, ReasonPlace, ReasonInstall, ReasonCheck, ReasonInterrupted, ReasonOpen, ReasonNotTaken}
+	seen := map[string]bool{}
+	for _, c := range codes {
+		if !ValidReason(c) || c == "" || seen[c] {
+			t.Errorf("code %q", c)
+		}
+		seen[c] = true
+	}
+	if !ValidReason("") {
+		t.Error("none is no reason")
+	}
+	if ReasonOf(nil) != "" || ReasonOf(errors.New("x")) != "" {
+		t.Error("a reason from nowhere")
+	}
+	// Wrapped or joined, as the runner reports it.
+	err := errors.Join(fmt.Errorf("the request: %w", refused(ReasonStale, errors.New("too old"))), errors.New("disk full"))
+	if ReasonOf(err) != ReasonStale || !strings.Contains(err.Error(), "too old") {
+		t.Errorf("joined: %v %q", err, ReasonOf(err))
+	}
 }
 
 // The status replaces a link instead of writing through it.
@@ -212,9 +340,29 @@ func TestStatusFile(t *testing.T) {
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o644 {
 		t.Errorf("mode %v", fi.Mode())
 	}
+	// A relay's: of kind exit, with where it failed and whether an update
+	// of it did not end.
+	relay := Status{ID: "0b", State: Failed, From: "v0.27.0", To: "v0.27.0", Target: "v0.28.0", Release: "v0.28.0", By: "exit", Kind: Exit,
+		Error: "an earlier update did not end", Untouched: true, Reason: ReasonUnfinished, Unfinished: true}
+	if err := WriteStatus(path, relay); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadStatus(path); got.Kind != Exit || got.Reason != ReasonUnfinished || !got.Unfinished || !got.Untouched {
+		t.Fatalf("a relay's: %+v", got)
+	}
+	// What the rayctl of an older release writes, with neither, reads as
+	// none (raycontrol v0.27.0).
+	os.Remove(path)
+	os.WriteFile(path, []byte(`{"id":"6f1c0e2a9b3d4c5e","state":"done","from":"v0.26.0","to":"v0.27.0","target":"latest","release":"v0.27.0",`+
+		`"by":"alice/phone (remote)","kind":"remote","held":["v0.26.1"],"requested":"2026-11-14T03:00:00Z","started":"2026-11-14T03:00:05Z",`+
+		`"ended":"2026-11-14T03:02:41Z"}`+"\n"), 0o644)
+	if got := ReadStatus(path); got.State != Done || got.To != "v0.27.0" || got.Reason != "" || got.Unfinished || !slices.Equal(got.Held, []string{"v0.26.1"}) ||
+		got.Ended.Unix() != time.Date(2026, 11, 14, 3, 2, 41, 0, time.UTC).Unix() {
+		t.Fatalf("an older status: %+v", got)
+	}
 	// However long the fields, and whatever JSON escapes in them, rayd
 	// reads the status back.
-	s.State, s.Error = Failed, strings.Repeat("é\x1b<&\"\\", maxFile)
+	s.State, s.Error, s.Reason = Failed, strings.Repeat("é\x1b<&\"\\", maxFile), strings.Repeat("<", maxFile)
 	s.ID, s.From, s.To, s.Target, s.Release, s.By, s.Kind = strings.Repeat("<\\", maxFile), strings.Repeat("\"", maxFile), strings.Repeat("\x00", maxFile),
 		strings.Repeat(">", maxFile), strings.Repeat("&", maxFile), strings.Repeat("<", maxFile), strings.Repeat("\u2028", maxFile)
 	s.Held = []string{"v0.19.1", "v0.19.2", "v0.19.3", "v0.19.4", "v0.19.5", "v0.19.6", "v0.19.7", "v0.19.8", "v0.19.9", "not one", strings.Repeat("x", maxFile)}
@@ -225,7 +373,7 @@ func TestStatusFile(t *testing.T) {
 		t.Errorf("escapes in the status, %d bytes", len(raw))
 	}
 	got := ReadStatus(path)
-	if got.State != Failed || !utf8.ValidString(got.Error) || strings.ContainsRune(got.Error, 0x1b) || strings.ContainsRune(got.To, 0) {
+	if got.State != Failed || !utf8.ValidString(got.Error) || strings.ContainsRune(got.Error, 0x1b) || strings.ContainsRune(got.To, 0) || got.Reason != "" {
 		t.Errorf("long fields: %+v", got)
 	}
 	if len(got.Held) != maxHeld || got.Held[maxHeld-1] != "v0.19.9" {
@@ -351,7 +499,7 @@ func TestTriedAndHolding(t *testing.T) {
 	if h := (Status{State: Done, Release: "v0.19.3", Held: []string{"v0.19.1"}}).Holding(); !slices.Equal(h, []string{"v0.19.1"}) {
 		t.Errorf("done: %v", h)
 	}
-	if err := (Request{ID: NewID(), Kind: Remote, Version: "latest", Release: "v1", By: "x", At: time.Now()}).Check("v0.19.0", time.Now()); err == nil {
+	if err := (Request{ID: NewID(), Kind: Remote, Version: "latest", Release: "v1", By: "x", At: time.Now()}).Check(NodeKinds, "v0.19.0", nil, time.Now()); err == nil {
 		t.Error("a release hint that is no release")
 	}
 }

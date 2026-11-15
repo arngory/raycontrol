@@ -56,7 +56,7 @@ func (q requests) run() error {
 	st := nodeupdate.Status{ID: r.ID, From: version, To: r.Version, Target: r.Version, Release: r.Tried(), By: r.By, Kind: r.Kind,
 		Requested: r.At, Started: now.UTC(), Held: nodeupdate.ReadStatus(q.status).Holding()}
 	if err == nil {
-		err = r.Check(version, now)
+		err = r.Check(nodeupdate.NodeKinds, version, st.Held, now)
 	}
 	if err == nil {
 		err = nodeupdate.ReadPolicy(q.policy).Allows(r, now)

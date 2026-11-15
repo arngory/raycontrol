@@ -89,6 +89,8 @@ func TestUpdateRequest(t *testing.T) {
 			req(nodeupdate.Auto, "v0.19.1"), nil, "outside the window"},
 		{[3]string{"on", "off", nodeupdate.DefaultWindow}, stale, nil, "too old"},
 		{[3]string{"on", "off", nodeupdate.DefaultWindow}, req(nodeupdate.Remote, "latest"), errors.New("a relay host"), "a relay host"},
+		// A relay's kind: not the node's, with remote on too.
+		{[3]string{"on", "patch", inWindow}, req(nodeupdate.Exit, "v0.19.1"), nil, `kind "exit"`},
 	} {
 		policy(c.policy[0], c.policy[1], c.policy[2])
 		q.ready = func() error { return c.ready }
