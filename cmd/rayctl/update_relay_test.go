@@ -1784,16 +1784,46 @@ func TestRelayRemoteUnitsKept(t *testing.T) {
 		slices.Contains(f.ran, "systemctl start "+deploy.RelayUpdatePath) {
 		t.Errorf("restore of remote off ran %q", f.ran)
 	}
-	// open: the path unit down with rayspa and the probe, the recover
+	// open: the path unit down, then rayspa and the probe, the recover
 	// unit left for the next boot.
 	ops.state = f.env.ops.state
 	f.ran = nil
 	if err := ops.open(); err != nil ||
-		!slices.Equal(f.ran, []string{"systemctl disable --now " + deploy.RelayUpdatePath + " rayd-relay.service rayspa.service", "rayspa teardown", "unforward"}) {
+		!slices.Equal(f.ran, []string{"systemctl disable --now " + deploy.RelayUpdatePath, "systemctl disable --now rayd-relay.service rayspa.service",
+			"rayspa teardown", "unforward"}) {
 		t.Errorf("open: %v %q", err, f.ran)
 	}
 	if slices.ContainsFunc(f.ran, func(s string) bool { return strings.Contains(s, deploy.RelayRecover) }) {
 		t.Errorf("open touched the recover unit: %q", f.ran)
+	}
+	// After a rollback to a release from before the update by the exit's
+	// word (or an update by hand from one that failed): the restore took
+	// the path unit's file away, and systemctl (252, 255) refuses to
+	// disable a unit with no file, stopping nothing of the call. rayspa
+	// and the probe go down all the same, and the host is open; the path
+	// unit is not asked for.
+	f = newFakeRelay(t)
+	ops = f.env.ops
+	ops.units = append(ops.units, deploy.RelayUpdatePath, deploy.RelayRecover)
+	ops.enableOnly = []string{deploy.RelayRecover}
+	ops.loaded = func(u string) bool { return u != deploy.RelayUpdatePath }
+	run := ops.run
+	ops.run = func(name string, args ...string) error {
+		if name == "systemctl" && len(args) > 0 && args[0] == "disable" && slices.Contains(args, deploy.RelayUpdatePath) {
+			f.record("refused " + strings.Join(args, " "))
+			return errors.New("Failed to disable unit: Unit file " + deploy.RelayUpdatePath + " does not exist.")
+		}
+		return run(name, args...)
+	}
+	if err := ops.open(); err != nil || !f.down ||
+		!slices.Equal(f.ran, []string{"systemctl disable --now rayd-relay.service rayspa.service", "rayspa teardown", "unforward"}) {
+		t.Errorf("open, the path unit's file gone: %v %q", err, f.ran)
+	}
+	// Its file there but the disable failing all the same: no matter.
+	ops.loaded = func(string) bool { return true }
+	f.ran, f.down = nil, false
+	if err := ops.open(); err != nil || !f.down || !slices.Contains(f.ran, "systemctl disable --now rayd-relay.service rayspa.service") {
+		t.Errorf("open, the path unit refused: %v %q", err, f.ran)
 	}
 }
 

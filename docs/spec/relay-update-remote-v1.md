@@ -312,7 +312,8 @@ StateDirectoryMode=0755
 [Unit]
 ConditionPathExists=/var/lib/raycontrol-install/previous/relay.unfinished
 Wants=network-online.target
-After=network-online.target
+# после sshd: откат отказывает, пока на порту sshd никто не слушает
+After=network-online.target ssh.service ssh.socket sshd.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/rayctl update -request-recover
@@ -329,6 +330,9 @@ WantedBy=multi-user.target
 - Песочницы у сервиса нет, как у ноды (`deploy.go:855-862`): он ставит relay.
 - В `relayOps.units` они добавляются **в конец**: `open` берёт `units[0]` как `rayspa` (`update_relay.go:488`), а
   `restore` запускает юниты по порядку (`update_relay.go:457-463`), path-юнит — после `rayspa` и точки замера.
+  `open` выключает `rayspa` и точку замера отдельным `systemctl disable --now`, а path-юнит — сам по себе и только если
+  systemd его знает, не глядя на ошибку: после отката на релиз без этих юнитов их файлов нет, и systemd 252/255 на
+  `disable` юнита без файла отказывает целиком, ничего не остановив (`rayspa` работал бы дальше, хост не открыт).
 
 ### 4.2. `rayctl update -request` на relay
 

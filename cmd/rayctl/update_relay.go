@@ -503,7 +503,22 @@ func (o relayOps) open() error {
 	_ = o.mark(m)
 	stop := o.running()
 	slices.Reverse(stop)
-	disable := o.run("systemctl", append([]string{"disable", "--now"}, stop...)...)
+	// rayspa and the probe in a call of their own: the units of the
+	// update by the exit's word go first, each only if systemd has it, its
+	// failure no matter. A rollback to a release from before them has
+	// removed their files, and systemctl disable fails on a unit with no
+	// file before it stops anything (systemd 252, 255): rayspa would run
+	// on, the host not open.
+	var own []string
+	for _, u := range stop {
+		switch {
+		case slices.Contains(o.units[:min(2, len(o.units))], u):
+			own = append(own, u)
+		case o.loaded(u):
+			_ = o.run("systemctl", "disable", "--now", u)
+		}
+	}
+	disable := o.run("systemctl", append([]string{"disable", "--now"}, own...)...)
 	tear := o.run(o.rayspa, "teardown")
 	o.unforward()
 	if !o.tableGone() {
