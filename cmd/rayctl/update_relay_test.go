@@ -30,6 +30,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/release"
 )
 
@@ -369,7 +370,10 @@ type fakeRelay struct {
 	prompt string
 	inst   func() error // the install
 	placeF func(src, dst string) error
-	env    relayEnv
+	// signalled: a signal came from the point of no return on (the
+	// unit's stop, a shutdown).
+	signalled bool
+	env       relayEnv
 }
 
 func (f *fakeRelay) at(p string) string { return filepath.Join(f.dir, p) }
@@ -512,7 +516,10 @@ func newFakeRelay(t *testing.T) *fakeRelay {
 			return func() error { f.wants = append(f.wants, w.want); return f.bad[w.want] }
 		},
 		confirm: func(p string) bool { f.prompt = p; return f.yes },
-		signals: func() func() { f.record("signals"); return func() {} },
+		signals: func() (func() bool, func()) {
+			f.record("signals")
+			return func() bool { return f.signalled }, func() { f.record("signals end") }
+		},
 	}
 	return f
 }
@@ -966,6 +973,228 @@ func TestRelayUpdateWhole(t *testing.T) {
 	}
 }
 
+// Under the relay's runner (spec/relay-update-remote-v1.md §4.2) the
+// update writes how it ended, as a node's does: touched once the first
+// binary went in, and the code of where it failed; its mark says it is
+// the exit's. By hand nothing is written and the mark is a person's.
+func TestRelayUpdateResult(t *testing.T) {
+	boom := errors.New("boom")
+	held := func(f *fakeRelay) {
+		l, err := takeInstallLock(f.at("install.lock"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { l.Close() })
+	}
+	for name, c := range map[string]struct {
+		set  func(*fakeRelay)
+		want nodeupdate.Result
+	}{
+		"done": {nil, nodeupdate.Result{State: nodeupdate.Done, Version: "v0.26.1", Release: "v0.26.1"}},
+		"no bundle": {func(f *fakeRelay) { os.Remove(f.at("relay.bundle")) },
+			nodeupdate.Result{State: nodeupdate.Failed, Version: "v0.26.0", Untouched: true, Reason: nodeupdate.ReasonBundle}},
+		"an update by hand that did not end": {func(f *fakeRelay) {
+			os.MkdirAll(f.env.ops.dir, 0o700)
+			f.env.ops.mark(relayMark{State: "updating", From: "v0.25.9", To: "v0.26.0"})
+		}, nodeupdate.Result{State: nodeupdate.Failed, Version: "v0.26.0", Untouched: true, Reason: nodeupdate.ReasonUnfinished}},
+		"SSH": {func(f *fakeRelay) { f.before = errors.New("this SSH session comes from 198.51.100.7") },
+			nodeupdate.Result{State: nodeupdate.Failed, Version: "v0.26.0", Untouched: true, Reason: nodeupdate.ReasonSSH}},
+		"download": {func(f *fakeRelay) {
+			f.env.stage = func(context.Context, updateOpts, string, string) (staged, error) {
+				return staged{}, fetchReason(errors.New("downloading SHA256SUMS: timeout"))
+			}
+		}, nodeupdate.Result{State: nodeupdate.Failed, Version: "v0.26.0", Untouched: true, Reason: nodeupdate.ReasonDownload}},
+		"another install": {held,
+			nodeupdate.Result{State: nodeupdate.Failed, Version: "v0.26.0", Release: "v0.26.1", Untouched: true, Reason: nodeupdate.ReasonBusy}},
+		"full disk": {func(f *fakeRelay) {
+			f.placeF = func(string, string) error { return errors.New("no space left on device") }
+		},
+			nodeupdate.Result{State: nodeupdate.Failed, Version: "v0.26.0", Release: "v0.26.1", Untouched: true, Reason: nodeupdate.ReasonPlace}},
+		"full disk, the second binary": {func(f *fakeRelay) {
+			f.placeF = func(_, dst string) error { // rayctl and rayd go in first
+				if filepath.Base(dst) == "rayspa" {
+					return errors.New("no space left on device")
+				}
+				return nil
+			}
+		}, nodeupdate.Result{State: nodeupdate.RolledBack, Version: "v0.26.0", Release: "v0.26.1", Reason: nodeupdate.ReasonInstall}},
+		"install": {func(f *fakeRelay) { f.inst = func() error { return boom } },
+			nodeupdate.Result{State: nodeupdate.RolledBack, Version: "v0.26.0", Release: "v0.26.1", Reason: nodeupdate.ReasonInstall}},
+		"check": {func(f *fakeRelay) { f.bad["v0.26.1"] = boom },
+			nodeupdate.Result{State: nodeupdate.RolledBack, Version: "v0.26.0", Release: "v0.26.1", Reason: nodeupdate.ReasonCheck}},
+		"open": {func(f *fakeRelay) { f.inst = func() error { return boom }; f.bad["v0.26.0"] = boom },
+			nodeupdate.Result{State: nodeupdate.Failed, Release: "v0.26.1", Reason: nodeupdate.ReasonOpen}},
+		// The unit's stop cut the install short: rolled back, interrupted.
+		"interrupted": {func(f *fakeRelay) { f.signalled = true; f.inst = func() error { return errors.New("interrupted") } },
+			nodeupdate.Result{State: nodeupdate.RolledBack, Version: "v0.26.0", Release: "v0.26.1", Reason: nodeupdate.ReasonInterrupted}},
+		// Interrupted and not back: the host is open, which root must see.
+		"interrupted, open": {func(f *fakeRelay) {
+			f.signalled = true
+			f.inst = func() error { return errors.New("interrupted") }
+			f.bad["v0.26.0"] = boom
+		}, nodeupdate.Result{State: nodeupdate.Failed, Release: "v0.26.1", Reason: nodeupdate.ReasonOpen}},
+		"a signal, and done all the same": {func(f *fakeRelay) { f.signalled = true },
+			nodeupdate.Result{State: nodeupdate.Done, Version: "v0.26.1", Release: "v0.26.1"}},
+	} {
+		f := newFakeRelay(t)
+		f.env.result = f.at("result.json")
+		var mark string
+		f.inst = func() error { mark = f.read("previous/" + relayMarkFile); return nil }
+		if c.set != nil {
+			c.set(f)
+		}
+		_, err := f.update(updateOpts{want: "v0.26.1", yes: true})
+		got, ok := nodeupdate.ReadResult(f.env.result)
+		want := c.want
+		if !ok || got.Error == "" != (want.State == nodeupdate.Done) {
+			t.Errorf("%s: %+v %v (%v)", name, got, ok, err)
+			continue
+		}
+		if want.State == nodeupdate.Done && err != nil || want.State != nodeupdate.Done && got.Error != strings.TrimPrefix(err.Error(), "update failed, the previous version runs again: ") {
+			t.Errorf("%s: error %q, the update's %v", name, got.Error, err)
+		}
+		got.Error = ""
+		if got != want {
+			t.Errorf("%s: %+v, want %+v (%v)", name, got, want, err)
+		}
+		if name == "done" && !strings.Contains(mark, `"by":"exit"`) {
+			t.Errorf("the mark of an update by the exit's word: %s", mark)
+		}
+	}
+
+	// The release's rayctl took the update: it writes the outcome, not this
+	// one.
+	f := newFakeRelay(t)
+	f.env.result = f.at("result.json")
+	f.env.stage = func(context.Context, updateOpts, string, string) (staged, error) {
+		return staged{version: "v0.26.1", done: true, handed: true}, errors.New("the update by the rayctl of v0.26.1: exit status 1")
+	}
+	if _, err := f.update(updateOpts{want: "v0.26.1", yes: true}); err == nil {
+		t.Fatal("the handed update's error is lost")
+	}
+	if _, err := os.Stat(f.env.result); !os.IsNotExist(err) {
+		t.Errorf("a result beside the release's rayctl's: %v", err)
+	}
+	// -check and -rollback write none.
+	f = newFakeRelay(t)
+	f.env.result = f.at("result.json")
+	if _, err := f.update(updateOpts{want: "latest", check: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.rollback(true); err == nil {
+		t.Fatal("rolled back with nothing kept")
+	}
+	if _, err := os.Stat(f.env.result); !os.IsNotExist(err) {
+		t.Errorf("a result of -check or -rollback: %v", err)
+	}
+
+	// By hand: no result, and the mark names no one.
+	f = newFakeRelay(t)
+	var mark string
+	f.inst = func() error { mark = f.read("previous/" + relayMarkFile); return nil }
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(mark, `"by"`) || !strings.Contains(mark, `"state":"updating"`) {
+		t.Errorf("the mark of an update by hand: %s", mark)
+	}
+	if entries, _ := filepath.Glob(f.at("*.json")); len(entries) != 0 {
+		t.Errorf("an update by hand wrote %v", entries)
+	}
+}
+
+// A relay's update by the exit's word handed to the release's rayctl: the
+// unit's stop (SIGTERM to every process of it) does not end the rayctl
+// that handed it over while the release's own rolls the relay back, or
+// the runner would find it gone with no outcome. Were it not caught, this
+// test's process would die here.
+func TestHandoffRelayWaits(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "ended")
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	body := "#!/bin/sh\nsleep 1\necho ended > " + out + "\n"
+	tw.WriteHeader(&tar.Header{Name: "rayctl", Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg})
+	tw.Write([]byte(body))
+	tw.Close()
+	zw.Close()
+	r := release.Release{Version: "v0.26.1", Archive: buf.Bytes(), Sums: []byte("sums"), Sig: []byte("sig")}
+	t.Setenv(nodeupdate.ResultEnv, filepath.Join(t.TempDir(), "result.json"))
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	}()
+	var handed bool
+	_, err := captureStdout(t, func() (err error) { handed, err = handoff(r, t.TempDir(), "v0.26.0", "relay", true, false); return err })
+	if !handed || err != nil {
+		t.Fatalf("handed %v: %v", handed, err)
+	}
+	if b, _ := os.ReadFile(out); string(b) != "ended\n" {
+		t.Errorf("returned before the release's rayctl ended: %q", b)
+	}
+}
+
+// The release an update stages, its failure's code: one that does not
+// verify (another key, another version signed), one that cannot be had,
+// one below the relay's floor or behind the relay.
+func TestStageReleaseReasons(t *testing.T) {
+	k := newSigner(t)
+	saved := releaseKey
+	releaseKey = k.pub
+	t.Cleanup(func() { releaseKey = saved })
+	t.Setenv(handoffEnv, "")
+	t.Setenv("RAYCONTROL_MIRRORS", "")
+	c := &cli{}
+	stage := func(o updateOpts, installed string) error {
+		_, err := captureStdout(t, func() error {
+			_, err := c.stageRelease(context.Background(), o, t.TempDir(), installed, relayBinaries, relayTarget)
+			return err
+		})
+		return err
+	}
+	out := filepath.Join(t.TempDir(), "handed")
+	other := releaseDir(t, signedRelease(t, newSigner(t), "v0.26.1", out))
+	if err := stage(updateOpts{want: "latest", from: other}, "v0.26.0"); reasonOf(err) != nodeupdate.ReasonSignature {
+		t.Errorf("another key: %q %v", reasonOf(err), err)
+	}
+	files := signedRelease(t, k, "v0.26.1", out)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// v0.26.2 is v0.26.1's files: the signature says v0.26.1.
+		if !strings.Contains(r.URL.Path, "/v0.26.1/") && !strings.Contains(r.URL.Path, "/v0.26.2/") {
+			http.NotFound(w, r)
+			return
+		}
+		if b, ok := files[r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]]; ok {
+			w.Write(b)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	releaseBase = srv.URL
+	t.Cleanup(func() { releaseBase = "" })
+	for _, c := range []struct {
+		want, installed, reason string
+	}{
+		{"v0.26.2", "v0.26.0", nodeupdate.ReasonSignature}, // a mirror's older release under a newer name
+		{"v0.26.9", "v0.26.0", nodeupdate.ReasonDownload},  // not published
+	} {
+		if err := stage(updateOpts{want: c.want, yes: true}, c.installed); err == nil || reasonOf(err) != c.reason {
+			t.Errorf("%s: %q %v", c.want, reasonOf(err), err)
+		}
+	}
+	if _, err := os.Stat(out); err == nil {
+		t.Error("a release that did not verify ran")
+	}
+	// Below the relay's floor, or older than the relay: the version.
+	if err := stage(updateOpts{want: "latest", from: releaseDir(t, signedRelease(t, k, "v0.25.2", out))}, "v0.25.1"); reasonOf(err) != nodeupdate.ReasonVersion {
+		t.Errorf("below the floor: %q %v", reasonOf(err), err)
+	}
+	if err := stage(updateOpts{want: "latest", from: releaseDir(t, files)}, "v0.27.0"); reasonOf(err) != nodeupdate.ReasonVersion {
+		t.Errorf("older than the relay: %q %v", reasonOf(err), err)
+	}
+}
+
 // While another install has the relay install lock (bootstrap.sh -relay,
 // or the install of an update that was killed), neither an update nor a
 // -rollback changes anything.
@@ -1358,14 +1587,25 @@ func TestUpdateCheckRollbackRefused(t *testing.T) {
 // SSH connection gone) do not end the rayctl that would roll back: were
 // they not caught, this test's process would die here.
 func TestCatchSignals(t *testing.T) {
-	stop := catchSignals()
+	caught, stop := catchSignals()
 	defer stop()
+	if caught() {
+		t.Fatal("caught before any came")
+	}
 	for _, s := range []syscall.Signal{syscall.SIGTERM, syscall.SIGHUP} {
 		if err := syscall.Kill(os.Getpid(), s); err != nil {
 			t.Fatal(err)
 		}
 	}
 	time.Sleep(200 * time.Millisecond)
+	// Said, and still said when asked again: an update cut short by the
+	// unit's stop is interrupted.
+	if !caught() {
+		t.Error("the signals are not said to have come")
+	}
+	if !caught() {
+		t.Error("the signals are not said to have come when asked again")
+	}
 }
 
 // What a relay install writes and an update keeps: the plan's files and

@@ -21,6 +21,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/perimeter"
 	"github.com/arngory/raycontrol/internal/release"
 )
@@ -86,8 +87,8 @@ var relayBinaries = map[string]string{
 // back below relayUpdateSince takes that release's bootstrap.sh.
 func relayTarget(to string) error {
 	if release.IsRelease(to) && release.Newer(relayUpdateSince, to) {
-		return fmt.Errorf("%s cannot be installed on a relay by rayctl update (it can from %s): "+
-			"RAYCONTROL_VERSION=%s bash bootstrap.sh -relay %s installs it", to, relayUpdateSince, to, deploy.RelayBundle)
+		return withReason(nodeupdate.ReasonVersion, fmt.Errorf("%s cannot be installed on a relay by rayctl update (it can from %s): "+
+			"RAYCONTROL_VERSION=%s bash bootstrap.sh -relay %s installs it", to, relayUpdateSince, to, deploy.RelayBundle))
 	}
 	return nil
 }
@@ -98,10 +99,11 @@ func relayBundleAt(path string) (node.RelayBundle, error) {
 	b, err := node.ReadRelayBundle(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return b, fmt.Errorf("this host is a relay, but its bundle %s is missing: nothing changed; put the relay's bundle "+
-			"there (0600), or a new one from rayctl relay bundle on the exit (it replaces the old one)", path)
+		return b, withReason(nodeupdate.ReasonBundle, fmt.Errorf("this host is a relay, but its bundle %s is missing: nothing changed; put the relay's bundle "+
+			"there (0600), or a new one from rayctl relay bundle on the exit (it replaces the old one)", path))
 	case err != nil:
-		return b, fmt.Errorf("the relay's bundle %s: %w: nothing changed; a new one comes from rayctl relay bundle on the exit", path, err)
+		return b, withReason(nodeupdate.ReasonBundle,
+			fmt.Errorf("the relay's bundle %s: %w: nothing changed; a new one comes from rayctl relay bundle on the exit", path, err))
 	}
 	return b, nil
 }
@@ -163,7 +165,16 @@ type relayMark struct {
 	State string `json:"state"`
 	From  string `json:"from,omitempty"`
 	To    string `json:"to,omitempty"`
+	// By is markByExit for an update by the exit's word, run under the
+	// relay's update unit (spec/relay-update-remote-v1.md §4.2): with no
+	// one in an SSH session to recover it, root's units roll it back
+	// themselves (§4.3). "" by hand: a person was there and was told
+	// what to do, and nothing rolls it back for them.
+	By string `json:"by,omitempty"`
 }
+
+// markByExit is relayMark.By of an update by the exit's word.
+const markByExit = nodeupdate.Exit
 
 // advice is what to do about m; whole says whether a whole copy of the
 // relay from before is there to roll back to. Without one, -rollback has
@@ -715,7 +726,7 @@ type relayUpdate struct {
 // ran; only if it does not come back is the host left open (rayspa
 // stopped and disabled, its table off, no forwarding), so that its admin
 // is never shut out. The mark goes once the relay is checked, updated or
-// back.
+// back. A failure carries the code of its place (reasonOf).
 func (u relayUpdate) run() error {
 	if err := u.keep(); err != nil {
 		return fmt.Errorf("keeping the relay as it runs: %w (nothing changed)", err)
@@ -726,14 +737,14 @@ func (u relayUpdate) run() error {
 	renamed, err := u.place()
 	if err != nil && !renamed {
 		u.unmark()
-		return fmt.Errorf("installing: %w (nothing changed: the relay runs as it did)", err)
+		return withReason(nodeupdate.ReasonPlace, fmt.Errorf("installing: %w (nothing changed: the relay runs as it did)", err))
 	}
 	if err != nil {
-		err = fmt.Errorf("installing: %w", err)
+		err = withReason(nodeupdate.ReasonInstall, fmt.Errorf("installing: %w", err))
 	} else if err = u.install(); err != nil {
-		err = fmt.Errorf("the relay install: %w", err)
+		err = withReason(nodeupdate.ReasonInstall, fmt.Errorf("the relay install: %w", err))
 	} else if err = u.check(); err != nil {
-		err = fmt.Errorf("after the install: %w", err)
+		err = withReason(nodeupdate.ReasonCheck, fmt.Errorf("after the install: %w", err))
 	}
 	if err == nil {
 		u.unmark()
@@ -748,7 +759,7 @@ func (u relayUpdate) run() error {
 }
 
 // backOrOpen brings the previous relay back after cause; if it does not
-// come back, it opens the host and says so.
+// come back, it opens the host and says so (open, whatever cause's code).
 func backOrOpen(cause error, restore, checkBack, open func() error) error {
 	berr := restore()
 	if berr == nil {
@@ -758,12 +769,12 @@ func backOrOpen(cause error, restore, checkBack, open func() error) error {
 		return rolledBack{cause}
 	}
 	if oerr := open(); oerr != nil {
-		return fmt.Errorf("%w; the previous relay did not come back either (%v), and rayspa could NOT be taken down (%v): "+
+		return withReason(nodeupdate.ReasonOpen, fmt.Errorf("%w; the previous relay did not come back either (%v), and rayspa could NOT be taken down (%v): "+
 			"run systemctl disable --now %s && %s teardown before you leave this session",
-			cause, berr, oerr, relayUnit, deploy.DefaultBinaries.Rayspa)
+			cause, berr, oerr, relayUnit, deploy.DefaultBinaries.Rayspa))
 	}
-	return fmt.Errorf("%w; the previous relay did not come back either (%v): rayspa is stopped and disabled, the host "+
-		"left open and not forwarding; bash bootstrap.sh -relay %s installs the relay again", cause, berr, deploy.RelayBundle)
+	return withReason(nodeupdate.ReasonOpen, fmt.Errorf("%w; the previous relay did not come back either (%v): rayspa is stopped and disabled, the host "+
+		"left open and not forwarding; bash bootstrap.sh -relay %s installs the relay again", cause, berr, deploy.RelayBundle))
 }
 
 // healthWant is what a check after a change expects: the version, the
@@ -794,7 +805,12 @@ type relayEnv struct {
 	install     func(lock *os.File) error
 	health      func(healthWant) func() error
 	confirm     func(prompt string) bool
-	signals     func() (stop func()) // from the point of no return
+	// signals catches, from the point of no return, what would end this
+	// rayctl halfway (catchSignals).
+	signals func() (caught func() bool, stop func())
+	// result is where an update by the exit's word writes how it ended
+	// (nodeupdate.ResultEnv, given by the relay's runner); "" by hand.
+	result string
 }
 
 // updateRelay is rayctl update on this relay host.
@@ -802,8 +818,27 @@ func (c *cli) updateRelay(ctx context.Context, o updateOpts, rollback bool, inst
 	return c.relayEnvHere(ctx).update(ctx, o, rollback, installed)
 }
 
-func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, installed string) error {
+func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, installed string) (err error) {
 	o.host = "relay"
+	// Signals caught from the point of no return stay caught to the very
+	// end, the outcome written: deferred first, this runs last.
+	stopSignals := func() {}
+	defer func() { stopSignals() }()
+	// Under the relay's runner (spec/relay-update-remote-v1.md §4.2): how
+	// the update ended, as a node's does (writeResult), unless the
+	// release's rayctl it was handed to wrote it. touched: the first
+	// binary went in.
+	var (
+		newVersion      string
+		touched, handed bool
+	)
+	if e.result != "" && !o.check && !rollback {
+		defer func() {
+			if !handed {
+				writeResult(e.result, err, touched, installed, newVersion)
+			}
+		}()
+	}
 	b, err := relayBundleAt(e.bundle)
 	if err != nil {
 		return err
@@ -813,14 +848,14 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 	}
 	if !o.check {
 		if err := e.lock("update"); err != nil {
-			return err
+			return withReason(nodeupdate.ReasonBusy, err)
 		}
 	}
 	// An update that did not end: one way back, said before anything
 	// else, never "installed, the newest release".
 	if m, marked := e.ops.readMark(); marked {
 		if !o.check {
-			return errors.New(e.ops.adviceOf(m))
+			return withReason(nodeupdate.ReasonUnfinished, errors.New(e.ops.adviceOf(m)))
 		}
 		fmt.Println("warning:", e.ops.adviceOf(m))
 	}
@@ -829,7 +864,7 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 	case err != nil && o.check:
 		fmt.Println("warning: the update would refuse:", err)
 	case err != nil:
-		return err
+		return withReason(nodeupdate.ReasonSSH, err)
 	case warning != "":
 		fmt.Fprintln(os.Stderr, "warning:", warning)
 	}
@@ -842,6 +877,7 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 	}
 	defer func() { _ = os.RemoveAll(st) }()
 	s, err := e.stage(ctx, o, st, installed)
+	newVersion, handed = s.version, s.handed
 	if o.check && !s.handed {
 		fmt.Println("this host is a relay " + b.Name + ": rayctl update here updates it; remote and automatic updates do not apply to a relay")
 	}
@@ -852,7 +888,7 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 	// from the first change through the install, which takes it on.
 	il, err := e.installLock()
 	if err != nil {
-		return fmt.Errorf("%w (nothing changed)", err)
+		return withReason(nodeupdate.ReasonBusy, fmt.Errorf("%w (nothing changed)", err))
 	}
 	defer il.Close()
 	if !o.yes && !e.confirm(fmt.Sprintf("Update relay %s from %s to %s? rayspa restarts: forwarding stops, usually for under a minute, "+
@@ -862,15 +898,27 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 	}
 	// From here the update goes to its end: Ctrl-C, a closed SSH
 	// connection or SIGTERM reach the install (its process group is the
-	// terminal's), which stops as on any failure, and this rayctl takes the
+	// terminal's; under the relay's unit, its stop reaches every process
+	// of it), which stops as on any failure, and this rayctl takes the
 	// relay back; a reader of its output gone does not stop it either.
-	defer e.signals()()
+	caught, stop := e.signals()
+	stopSignals = stop
 
+	// The mark says who runs the update: by the exit's word, root's units
+	// roll back one that did not end (spec/relay-update-remote-v1.md §4.3).
+	by := ""
+	if e.result != "" {
+		by = markByExit
+	}
 	var k relayKept
 	u := relayUpdate{
-		keep:    func() (err error) { k, err = e.ops.keep(installed); return err },
-		mark:    func() error { return e.ops.mark(relayMark{State: "updating", From: installed, To: s.version}) },
-		place:   func() (bool, error) { return e.place(st) },
+		keep: func() (err error) { k, err = e.ops.keep(installed); return err },
+		mark: func() error { return e.ops.mark(relayMark{State: "updating", From: installed, To: s.version, By: by}) },
+		place: func() (bool, error) {
+			renamed, err := e.place(st)
+			touched = touched || renamed
+			return renamed, err
+		},
 		install: func() error { return e.install(il) },
 		check: func() error {
 			return e.health(healthWant{want: s.version, probeRan: k.Units[deploy.RelayProbeUnit].Active, port: port, client: e.session.addr, name: b.Name})()
@@ -881,6 +929,11 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 		unmark:    e.ops.unmark,
 	}
 	if err := u.run(); err != nil {
+		// Rolled back because a signal cut the install short (the unit's
+		// timeout or stop, a shutdown): that is where it failed.
+		if rb := (rolledBack{}); caught() && errors.As(err, &rb) {
+			return withReason(nodeupdate.ReasonInterrupted, err)
+		}
 		return err
 	}
 	fmt.Printf("relay %s runs raycontrol %s; the previous binaries are kept for rayctl update -rollback\n", b.Name, s.version)
@@ -937,7 +990,8 @@ func (e relayEnv) rollback(yes bool, name string) error {
 	if !yes && !e.confirm(fmt.Sprintf("Roll the relay back to %s? rayspa restarts: forwarding stops for a moment. Type yes to go on: ", k.Version)) {
 		return errors.New("not confirmed")
 	}
-	defer e.signals()()
+	_, stop := e.signals()
+	defer stop()
 	err = backOrOpen(errors.New("asked for"), func() error { _, err := e.ops.restore(marked || open); return err },
 		func() error { return relayBack(k, e.health, port, e.session.addr, name) }, e.ops.open)
 	if rb := (rolledBack{}); errors.As(err, &rb) {
@@ -951,11 +1005,20 @@ func (e relayEnv) rollback(yes bool, name string) error {
 // catchSignals takes, until stop, what would end rayctl halfway: Ctrl-C,
 // Ctrl-\, SIGHUP, SIGTERM, and SIGPIPE (a write to a reader gone, such as
 // tee after the SSH connection dropped, fails instead). Caught, not
-// ignored: the install it starts gets them as usual.
-func catchSignals() (stop func()) {
+// ignored: the install it starts gets them as usual. caught says whether
+// one came since.
+func catchSignals() (caught func() bool, stop func()) {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGQUIT, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGPIPE)
-	return func() { signal.Stop(sigs) }
+	got := false
+	return func() bool {
+		select {
+		case <-sigs:
+			got = true
+		default:
+		}
+		return got
+	}, func() { signal.Stop(sigs) }
 }
 
 // askYes asks prompt on the terminal; yes is the only yes.
@@ -1041,6 +1104,7 @@ func (c *cli) relayEnvHere(ctx context.Context) relayEnv {
 		},
 		confirm: askYes,
 		signals: catchSignals,
+		result:  os.Getenv(nodeupdate.ResultEnv),
 	}
 }
 

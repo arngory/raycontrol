@@ -402,6 +402,14 @@ func handoff(r release.Release, stage, installed, host string, yes, force bool) 
 	// this one stays to clean up after it.
 	signal.Ignore(os.Interrupt)
 	defer signal.Reset(os.Interrupt)
+	// A relay's update by its exit's word (spec/relay-update-remote-v1.md
+	// §4.3): the unit's stop sends SIGTERM to every process of it, and the
+	// release's rayctl takes it and puts the relay back; this one waits
+	// for that end, or the runner would find it gone with no outcome yet.
+	if host == "relay" && os.Getenv(nodeupdate.ResultEnv) != "" {
+		_, stop := catchSignals()
+		defer stop()
+	}
 	if err := cmd.Wait(); err != nil {
 		return true, fmt.Errorf("the update by the rayctl of %s: %w", r.Version, err)
 	}
@@ -679,9 +687,10 @@ func (e rolledBack) Unwrap() error { return e.cause }
 
 // writeResult tells the runner of an update by request how it ended
 // (nodeupdate.ResultEnv): done, rolled back, or failed, and then whether
-// the node was touched at all.
+// the node was touched at all, and the code of where it failed when err
+// has one (reasonOf).
 func writeResult(path string, err error, touched bool, installed, newVersion string) {
-	r := nodeupdate.Result{State: nodeupdate.Done, Version: installed}
+	r := nodeupdate.Result{State: nodeupdate.Done, Version: installed, Reason: reasonOf(err)}
 	if release.IsRelease(newVersion) {
 		r.Release = newVersion
 	}
