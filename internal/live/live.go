@@ -310,6 +310,21 @@ func (a *Applier) Apply(ctx context.Context) error {
 		}
 		changed[f.Service] = append(changed[f.Service], change{old, f.Content, f.Reload && old != nil, rereads})
 	}
+	// No front's config from Render: the front carries nothing now (its
+	// last service deleted, disabled, waiting for a certificate, or not
+	// rendering: the front leaves that out too, render.ServiceErrors). The
+	// one of before goes: the front's unit waits for it only, and is
+	// planned for what this render wrote, not for it (deploy, the
+	// salamander passwords it copies in). Left there, it started the front
+	// at the next apply, update or boot with backends that are gone, one
+	// password missing: niko-server exited, again every 2 s.
+	frontGone := !slices.ContainsFunc(files, func(f render.File) bool { return f.Path == a.Paths.FrontConfig() })
+	if frontGone {
+		if err := a.dropFrontConfig(owed, before); err != nil {
+			failed["front"] = true
+			errs = append(errs, fmt.Errorf("service front: %s: %w", a.Paths.FrontConfig(), err))
+		}
+	}
 
 	// What to restart: the services whose files changed, and those owed a
 	// restart from an apply that did not get to it.
@@ -360,9 +375,10 @@ func (a *Applier) Apply(ctx context.Context) error {
 	}
 	for service, verb := range owed {
 		switch {
-		case !rendered[service]:
+		case !rendered[service] && (service != "front" || !frontGone):
 			// The service is gone or off: its unit must not be started for
-			// a file it once waited for.
+			// a file it once waited for. The front without its config is
+			// owed its stop: a restart cannot start it.
 			a.settle(service, owed)
 		case failed[service]:
 			// Half-written: the next apply.
@@ -392,6 +408,33 @@ func (a *Applier) Apply(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// dropFrontConfig removes the front's config, which this render did not
+// make. Its stop is written down first, as a restart is before the file
+// that calls for it changes: try-restart stops a running front, whose
+// unit's condition then fails. The probe key stays: the unit copies it in
+// as long as there is no config (deploy, TestProbeKeyBeforeDNSTT), and
+// Render writes it again with the next one.
+func (a *Applier) dropFrontConfig(owed, before map[string]string) error {
+	config := a.Paths.FrontConfig()
+	if _, err := os.Lstat(config); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := a.owe("front", "try-restart", owed); err != nil {
+		return err // not removed either: the next apply finds it again
+	}
+	if err := os.Remove(config); err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Still there: a restart would start the front on it.
+		if _, was := before["front"]; !was {
+			a.settle("front", owed)
+		}
+		return err
+	}
+	a.Log.Info("the front carries no service: its config removed, the front stops", "path", config)
+	return nil
 }
 
 // xrayService finds the Xray service (inner, REALITY) of that name.

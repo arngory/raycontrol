@@ -56,7 +56,12 @@ var (
 	// Shorter hex runs: device and node IDs, which link reports to a node.
 	hexIDs = regexp.MustCompile(`(?i)\b[0-9a-f]{12,31}\b`)
 	ipv4   = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
-	ipv6   = regexp.MustCompile(`(?i)\b(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}\b`)
+	// The last group may be missing: an address or a prefix that ends in
+	// "::" (2001:db8::/32, an admin prefix) ends on no word boundary. Or
+	// it is an IPv4 address (64:ff9b::198.51.100.9), taken whole: cut at
+	// its first dot, the rest would be three octets that the IPv4 pattern
+	// does not take. Only what parses as an address is replaced (addr).
+	ipv6 = regexp.MustCompile(`(?i)\b(?:[0-9a-f]{0,4}:){2,8}(?:\d{1,3}(?:\.\d{1,3}){3}\b|[0-9a-f]{1,4}\b)?`)
 )
 
 // String redacts s.
@@ -112,11 +117,53 @@ func isLabelByte(c byte) bool {
 
 // addr turns an address into a token: its kind and a salted short hash.
 // Loopback and unspecified addresses stay, they say nothing.
+//
+// The IPv6 pattern takes more than the address around a colon, and the
+// whole then does not parse. After it: a colon ("from 2001:db8::5:
+// refused", the last group being optional), or a colon and a port or a
+// hex word, without brackets, after an address of eight groups or of
+// seven and "::" ("2001:db8:1:2:3:4:5:6:443", eight groups and the
+// last): the address is the match up to its last colon, and the rest
+// stays. Before it: the colon that glues it to a word ("ipv6:2001:db8::1",
+// where the match starts on a word boundary), which stays too.
 func (r *Redactor) addr(m string) string {
-	a, err := netip.ParseAddr(m)
-	if err != nil {
-		return m
+	lead := ""
+	if strings.HasPrefix(m, ":") && !strings.HasPrefix(m, "::") {
+		lead, m = ":", m[1:]
 	}
+	if a, ok := parseAddr(m); ok {
+		return lead + r.token(a, m)
+	}
+	if i := strings.LastIndexByte(m, ':'); i > 0 && strings.Contains(m[:i], ":") {
+		if a, ok := parseAddr(m[:i]); ok {
+			return lead + r.token(a, m[:i]) + m[i:]
+		}
+	}
+	return lead + m
+}
+
+// parseAddr parses an address as a reader takes it: an IPv4 one with a
+// leading zero in an octet too (203.0.113.05), which netip refuses.
+func parseAddr(m string) (netip.Addr, bool) {
+	if a, err := netip.ParseAddr(m); err == nil {
+		return a, true
+	}
+	if strings.Contains(m, ":") || strings.Count(m, ".") != 3 {
+		return netip.Addr{}, false
+	}
+	octets := strings.Split(m, ".")
+	for i, o := range octets {
+		octets[i] = strings.TrimLeft(o, "0")
+		if octets[i] == "" {
+			octets[i] = "0"
+		}
+	}
+	a, err := netip.ParseAddr(strings.Join(octets, "."))
+	return a, err == nil
+}
+
+// token is address a, found as m, as a report has it.
+func (r *Redactor) token(a netip.Addr, m string) string {
 	if a.IsLoopback() || a.IsUnspecified() {
 		return m
 	}

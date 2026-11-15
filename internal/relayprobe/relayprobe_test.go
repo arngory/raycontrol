@@ -41,17 +41,27 @@ type exit struct {
 	answer  error
 	refuse  error         // the feed's answer instead of a snapshot
 	drop    chan struct{} // closed: the feed ends
+
+	// Updates (relay-update-remote-v1): the offer sent with the snapshot,
+	// whether the last feed asked for offers, the reports, and how
+	// ReportUpdate answers (nil: Unimplemented, as an exit before them).
+	offer   *perimeterv1.RelayUpdateOffer
+	updates bool
+	feeds   int
+	told    []*perimeterv1.RelayUpdate
+	tell    func(context.Context) error
 }
 
 func (e *exit) WatchRelay(ctx context.Context, req *connect.Request[perimeterv1.WatchRelayRequest], s *connect.ServerStream[perimeterv1.WatchRelayResponse]) error {
 	e.mu.Lock()
-	e.probe = req.Msg.Probe
-	drop, refuse := e.drop, e.refuse
+	e.probe, e.updates = req.Msg.Probe, req.Msg.Updates
+	e.feeds++
+	drop, refuse, snap, offer := e.drop, e.refuse, e.snap, e.offer
 	e.mu.Unlock()
 	if refuse != nil {
 		return refuse
 	}
-	if err := s.Send(&perimeterv1.WatchRelayResponse{Snapshot: e.snap}); err != nil {
+	if err := s.Send(&perimeterv1.WatchRelayResponse{Snapshot: snap, Update: offer}); err != nil {
 		return err
 	}
 	select {
@@ -69,6 +79,20 @@ func (e *exit) Report(_ context.Context, req *connect.Request[perimeterv1.Report
 		return nil, e.answer
 	}
 	return connect.NewResponse(&perimeterv1.ReportResponse{}), nil
+}
+
+func (e *exit) ReportUpdate(ctx context.Context, req *connect.Request[perimeterv1.ReportUpdateRequest]) (*connect.Response[perimeterv1.ReportUpdateResponse], error) {
+	e.mu.Lock()
+	e.told = append(e.told, req.Msg.Update)
+	tell := e.tell
+	e.mu.Unlock()
+	if tell == nil {
+		return e.UnimplementedRelayServiceHandler.ReportUpdate(ctx, req)
+	}
+	if err := tell(ctx); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&perimeterv1.ReportUpdateResponse{}), nil
 }
 
 // The endpoint takes the devices the exit allows it, checks RC1 with their

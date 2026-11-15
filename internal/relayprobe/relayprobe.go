@@ -2,7 +2,8 @@
 // (relay-v1 §9.1). It takes the devices and their keys for this relay
 // (K_relay) from the exit's RelayService, as the relay's rayspa does, and
 // serves down, up and the UDP echo; reports go on to the exit with the
-// client's network, never its address (§9.3).
+// client's network, never its address (§9.3). It takes the exit's word on
+// the relay's updates too (spec/relay-update-remote-v1.md, Updates).
 package relayprobe
 
 import (
@@ -52,6 +53,9 @@ type Server struct {
 	// ID names the bundle (its client certificate's pin): kept devices of
 	// another bundle, another exit's perhaps, are not taken.
 	ID string
+	// Updates takes the exit's update offers from the feed
+	// (spec/relay-update-remote-v1.md); nil: the feed asks for none.
+	Updates *Updates
 
 	mu      sync.Mutex
 	devices map[string][spa.KeySize]byte // K_relay of the devices the relay knows
@@ -290,25 +294,41 @@ func (s *Server) setUp(up bool) {
 }
 
 // Watch follows the exit's feed for this relay's rayd relay, reconnecting
-// with backoff; the devices it last gave stay until the next snapshot.
+// with backoff; the devices it last gave stay until the next snapshot. The
+// exit's update offers go to Updates, which runs beside it until ctx ends,
+// and which Watch does not wait for while the feed is open: Watch returns
+// once both are done.
 func (s *Server) Watch(ctx context.Context) {
+	u := s.Updates
+	if u != nil {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			u.run(ctx, s.Exit)
+		}()
+		defer func() { <-done }()
+	}
 	backoff := time.Second
 	for ctx.Err() == nil {
-		stream, err := s.Exit.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{Probe: true}))
+		stream, err := s.Exit.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{Probe: true, Updates: u != nil}))
 		if err == nil {
+			first := true
 			for stream.Receive() {
 				backoff = time.Second
-				snap := stream.Msg().Snapshot
-				s.take(snap)
+				msg := stream.Msg()
+				s.take(msg.Snapshot)
 				s.setUp(true)
 				if err := s.save(); err != nil {
 					s.Log.Warn("relay probe: devices not kept", "err", err)
 				}
+				u.offered(first, msg.GetUpdate())
+				first = false
 			}
 			err = stream.Err()
 			_ = stream.Close()
 		}
 		s.setUp(false)
+		u.closed()
 		// The exit answers, and does not know this relay: not away, but
 		// gone for this bundle. Its devices go; the feed is tried again.
 		switch connect.CodeOf(err) {

@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -269,11 +270,21 @@ func TestFetch(t *testing.T) {
 	if err != nil || r.Version != "v0.3.0" || !bytes.Equal(r.Archive, arc) {
 		t.Fatalf("latest: %v %v", r.Version, err)
 	}
-	if _, err := f.Fetch(ctx, "v0.2.0", "amd64", k.pub); err == nil {
-		t.Fatal("a release asked for by another version")
+	// One that is not there is no release that does not verify
+	// (ErrUnverified: a relay's exit hears download, not signature).
+	if _, err := f.Fetch(ctx, "v0.2.0", "amd64", k.pub); err == nil || !errors.Is(err, ErrNotFound) || errors.Is(err, ErrUnverified) {
+		t.Fatalf("a release not published: %v", err)
 	}
-	if _, err := f.Fetch(ctx, "latest", "amd64", newKey(t).pub); err == nil {
-		t.Fatal("a release signed with another key")
+	if _, err := f.Fetch(ctx, "latest", "amd64", newKey(t).pub); !errors.Is(err, ErrUnverified) || !strings.HasPrefix(err.Error(), "SHA256SUMS: minisign: ") {
+		t.Fatalf("a release signed with another key: %v", err)
+	}
+	// The signature names another version than the one asked for (a mirror
+	// serving an older release under a newer one's path).
+	sums := []byte("00  " + Archive("amd64") + "\n")
+	none := func(string) ([]byte, error) { return nil, errors.New("not asked") }
+	if _, err := check("v0.4.0", "amd64", k.pub, sums, k.sign(sums, "raycontrol v0.3.0", false), none); !errors.Is(err, ErrUnverified) ||
+		err.Error() != "asked for v0.4.0, the signature says v0.3.0" {
+		t.Fatalf("another version signed: %v", err)
 	}
 
 	// GitHub down: the mirror serves, the signature still decides.
@@ -300,7 +311,7 @@ func TestLocal(t *testing.T) {
 		t.Fatalf("%v %v", r.Version, err)
 	}
 	os.WriteFile(filepath.Join(dir, Archive("arm64")), append(arc, 0), 0o644)
-	if _, err := Local(dir, "arm64", k.pub); err == nil || !strings.Contains(err.Error(), "checksum") {
+	if _, err := Local(dir, "arm64", k.pub); !errors.Is(err, ErrUnverified) || !strings.Contains(err.Error(), "checksum") {
 		t.Fatalf("changed archive: %v", err)
 	}
 }

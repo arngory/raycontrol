@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -29,7 +30,7 @@ func TestUpdateRequest(t *testing.T) {
 	statDir := filepath.Join(dir, "status")
 	q := requests{request: filepath.Join(dir, "update-request"), status: filepath.Join(statDir, "status.json"),
 		policy: filepath.Join(statDir, "policy.json"), result: filepath.Join(statDir, "result.json"),
-		ready: func() error { return nil }, nodeVersion: func() string { return "v0.19.0" }}
+		ready: func() error { return nil }, nodeVersion: func() string { return "v0.19.0" }, kinds: nodeRequests().kinds}
 	os.MkdirAll(statDir, 0o755)
 	policy := func(remote, auto, window string) {
 		t.Helper()
@@ -89,6 +90,8 @@ func TestUpdateRequest(t *testing.T) {
 			req(nodeupdate.Auto, "v0.19.1"), nil, "outside the window"},
 		{[3]string{"on", "off", nodeupdate.DefaultWindow}, stale, nil, "too old"},
 		{[3]string{"on", "off", nodeupdate.DefaultWindow}, req(nodeupdate.Remote, "latest"), errors.New("a relay host"), "a relay host"},
+		// A relay's kind: not the node's, with remote on too.
+		{[3]string{"on", "patch", inWindow}, req(nodeupdate.Exit, "v0.19.1"), nil, `kind "exit"`},
 	} {
 		policy(c.policy[0], c.policy[1], c.policy[2])
 		q.ready = func() error { return c.ready }
@@ -249,6 +252,13 @@ func TestWriteResult(t *testing.T) {
 		{rolledBack{errors.New("niko-front.service exited")}, true, nodeupdate.Result{State: nodeupdate.RolledBack, Version: "v0.19.0", Release: "v0.19.1", Error: "niko-front.service exited"}},
 		{errors.New("downloading"), false, nodeupdate.Result{State: nodeupdate.Failed, Version: "v0.19.0", Release: "v0.19.1", Error: "downloading", Untouched: true}},
 		{errors.New("x; rollback failed too: y"), true, nodeupdate.Result{State: nodeupdate.Failed, Release: "v0.19.1", Error: "x; rollback failed too: y"}},
+		// The code of where it failed, for a relay's exit: the outermost.
+		{withReason(nodeupdate.ReasonDownload, errors.New("downloading")), false,
+			nodeupdate.Result{State: nodeupdate.Failed, Version: "v0.19.0", Release: "v0.19.1", Error: "downloading", Untouched: true, Reason: nodeupdate.ReasonDownload}},
+		{rolledBack{withReason(nodeupdate.ReasonCheck, errors.New("rayspa is inactive/dead"))}, true,
+			nodeupdate.Result{State: nodeupdate.RolledBack, Version: "v0.19.0", Release: "v0.19.1", Error: "rayspa is inactive/dead", Reason: nodeupdate.ReasonCheck}},
+		{withReason(nodeupdate.ReasonOpen, fmt.Errorf("%w; not back", withReason(nodeupdate.ReasonInstall, errors.New("x")))), true,
+			nodeupdate.Result{State: nodeupdate.Failed, Release: "v0.19.1", Error: "x; not back", Reason: nodeupdate.ReasonOpen}},
 	} {
 		writeResult(path, c.err, c.touched, "v0.19.0", "v0.19.1")
 		if got, ok := nodeupdate.ReadResult(path); !ok || got != c.want {

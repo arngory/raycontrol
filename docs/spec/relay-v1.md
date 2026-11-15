@@ -158,6 +158,12 @@ REALITY, Hysteria2 и naive остаются сквозными от клиен�
      - Обновление relay — с v0.26.0 `rayctl update` на его хосте: та же установка с сохранённым пакетом, проверка и
        откат к прежнему relay ([node-update-v1.md](node-update-v1.md) §5). Relay до v0.26.0 обновляется повторным
        `bootstrap.sh -relay /etc/raycontrol/relay.bundle`.
+     - С v0.28.0 relay идёт и за обновлением выхода, если root на нём включил `rayctl update remote on` (по умолчанию
+       выключено): выход называет relay свою версию в потоке `WatchRelay` (`WatchRelayRequest.updates`,
+       `WatchRelayResponse.update`), по одному relay за раз, а `rayd relay` докладывает итог (`ReportUpdate`). Ставит
+       root на relay тем же `rayctl update`, релиз качает и проверяет сам relay
+       ([relay-update-remote-v1.md](relay-update-remote-v1.md)). Поля добавлены совместимо: старый relay и старый
+       выход их пропускают. На настоящем хосте relay не запускалось.
      - SSH самого relay открыт с его собственных адресов администратора (`rayctl relay set` на выходе, без нового пакета).
        Выход не видит sshd хоста relay, поэтому `relay set -ssh-port` с ним не сверяется.
      - `rayctl install -relay` до записи файлов и запуска `rayspa` требует порт sshd:
@@ -245,9 +251,10 @@ v0.11.0 (`5bcf3aa`).
   (сессий на relay нет) и нет замера через туннель.
 - Авторизация — `RC1`, как в `probe-v1` §2, но MAC на ключе `K_relay`, а не на ключе устройства: другого ключа у relay
   нет.
-- `rayd relay` берёт устройства и их `K_relay` своим потоком `RelayService.WatchRelay` по тому же сертификату пакета (до
-  двух потоков на relay: `rayspa` и `rayd relay`). Берёт только устройства, которым выход открыл точку замера; пока
-  выход недоступен, прежний список остаётся для `down`, `up` и UDP-эха.
+- `rayd relay` берёт устройства и их `K_relay` своим потоком `RelayService.WatchRelay` по тому же сертификату пакета (у
+  relay по потоку от `rayspa` и от `rayd relay`; новый поток своего вида закрывает прежний, и, пока прежние
+  закрываются, открытых бывает до четырёх: `relayfeed.go`, `admitRelayStream`). Берёт только устройства, которым выход
+  открыл точку замера; пока выход недоступен, прежний список остаётся для `down`, `up` и UDP-эха.
 - Установка: `bootstrap.sh -relay` ставит и `rayd`; `rayctl install -relay` запускает юнит `rayd-relay` (пользователь
   `rayd`, без привилегий, своя копия пакета), когда relay уже работает. Не запустился или пакет без точки замера —
   предупреждение: relay работает и без неё. Цепочки ufw или firewalld с политикой drop на forward или на входе

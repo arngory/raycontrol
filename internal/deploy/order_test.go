@@ -322,6 +322,13 @@ func TestRayspaNoOrderingCycle(t *testing.T) {
 						t.Errorf("%s is not ordered after rayspa.service", u)
 					}
 				}
+				// The relay's recover unit rolls back only once sshd listens:
+				// the rollback refuses while nothing does.
+				for _, u := range sc.ssh {
+					if kind == "relay" && !before(t, dir, u, deploy.RelayRecover) {
+						t.Errorf("%s is not ordered after %s", deploy.RelayRecover, u)
+					}
+				}
 			})
 		}
 	}

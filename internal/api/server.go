@@ -102,6 +102,9 @@ type Server struct {
 	// ACME window (certs.Issuer): rayspa points TCP 80 to acmePort.
 	acmePort  uint16
 	acmeUntil time.Time
+
+	// The relays' updates by the node's word (relayupdate.go).
+	relayUpd relayUpdates
 }
 
 // SetACMEWindow opens the perimeter window for an ACME order to port until

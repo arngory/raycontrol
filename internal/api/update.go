@@ -24,7 +24,11 @@ type NodeUpdate struct {
 	// LatestPatch the newest patch release of the running minor version
 	// they found after a newer minor version ("" when none).
 	Latest, LatestPatch func() string
-	Now                 func() time.Time
+	// Now is the clock; Mono this rayd's monotonic one, which a step of
+	// the clock (set back, or on by hours) does not move. A test gives
+	// both, or Now alone, whose time Mono then follows.
+	Now  func() time.Time
+	Mono func() time.Duration
 }
 
 func (u *NodeUpdate) request() string {
@@ -84,6 +88,20 @@ func (u *NodeUpdate) now() time.Time {
 		return nodeupdate.LocalNow() // the zone as it is now, not as rayd started
 	}
 	return u.Now()
+}
+
+// monoStart is this rayd's start on its monotonic clock.
+var monoStart = time.Now()
+
+// mono is the time on this rayd's monotonic clock (Mono).
+func (u *NodeUpdate) mono() time.Duration {
+	switch {
+	case u != nil && u.Mono != nil:
+		return u.Mono()
+	case u != nil && u.Now != nil:
+		return u.Now().Sub(monoStart.Round(0))
+	}
+	return time.Since(monoStart)
 }
 
 // current is the last status as it stands now, and the request waiting.
@@ -149,8 +167,9 @@ func (s *Server) StartUpdate(ctx context.Context, req *connect.Request[nodev1.St
 }
 
 // GetUpdateStatus reports the last update by request, or the one under
-// way, and root's policy.
-func (s *Server) GetUpdateStatus(_ context.Context, _ *connect.Request[nodev1.GetUpdateStatusRequest]) (*connect.Response[nodev1.GetUpdateStatusResponse], error) {
+// way, root's policy, and the relays' updates by the node's word
+// (spec/relay-update-remote-v1.md §8).
+func (s *Server) GetUpdateStatus(ctx context.Context, _ *connect.Request[nodev1.GetUpdateStatusRequest]) (*connect.Response[nodev1.GetUpdateStatusResponse], error) {
 	u := s.NodeUpdate
 	now := u.now()
 	st, r, waiting := u.current(now)
@@ -166,6 +185,7 @@ func (s *Server) GetUpdateStatus(_ context.Context, _ *connect.Request[nodev1.Ge
 		Held:      st.Held,
 		// After Latest: a field for clients, set from the same checks.
 		LatestPatch: u.latestPatch(s.Version),
+		Relays:      s.relayStatuses(ctx, st, r, waiting, now),
 	}
 	if waiting && r.ID != st.ID {
 		out.Status = requestedPB(r, s.Version)

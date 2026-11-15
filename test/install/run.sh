@@ -189,15 +189,79 @@ for f in /usr/local/bin/rayd /usr/local/bin/rayctl /var/lib/raycontrol /var/lib/
 done
 # shellcheck disable=SC2016 # expands in the container
 x sh -c 'kill "$(cat /run/listen.pid)"; rm /run/listen.pid'
-# A port chosen with -ports that something holds: the check names it.
-x sh -c '/opt/rc/listen udp:40050 & echo $! > /run/listen.pid'
-if out="$(x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -check -host "$ip" -ports spa=40000-40099,sub=40100 2>&1)"; then
+# A port chosen with -ports that something holds: the check names it. The
+# ports are below the ephemeral range (32768-60999): Docker's embedded DNS
+# on 127.0.0.11 listens on a random port there, and once took one of these.
+x sh -c '/opt/rc/listen udp:23050 & echo $! > /run/listen.pid'
+if out="$(x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -check -host "$ip" -ports spa=23000-23099,sub=23100 2>&1)"; then
 	fail "bootstrap -check passed with a chosen port taken: $out"
 fi
-[[ $out == *"FAIL  port tcp+udp 40000-40099: spa (-ports): udp "*":40050 is taken by listen"* &&
-	$out == *"ok    port tcp+udp 40100: sub (-ports): free"* ]] || fail "chosen ports: $out"
+[[ $out == *"FAIL  port tcp+udp 23000-23099: spa (-ports): "*"udp "*":23050 is taken by listen"* &&
+	$out == *"ok    port tcp+udp 23100: sub (-ports): free"* ]] || fail "chosen ports: $out"
 # shellcheck disable=SC2016 # expands in the container
 x sh -c 'kill "$(cat /run/listen.pid)"; rm /run/listen.pid'
+
+# The default services (no -services): REALITY alone, whose site waits for
+# a certificate this network cannot get, and the front's config with it.
+# The install goes through all the same (up to v0.27.0 systemd-tmpfiles
+# stopped it: the front's group came with the front's config only). A
+# certificate of a throwaway CA, as ACME's would come, then brings the site,
+# REALITY and the front up by themselves, the next apply changes nothing,
+# and uninstall leaves the host as it was. One system: the plan is the
+# same on all, and the rest of this test installs with -services dnstt.
+if [[ $distro == debian13 ]]; then
+	log "$distro: the default services, before and after the certificate"
+	redact() { sed -E 's/rcdev1:[A-Za-z0-9_-]+/rcdev1:<redacted>/g'; }
+	out="$(x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -host "$ip" -domain example.test -admin 192.0.2.1 2>&1)" ||
+		fail "bootstrap with the default services: $(redact <<<"$out")"
+	[[ $out == *"Services: reality. REALITY starts once its certificate is stored"* ]] || fail "default services: $(redact <<<"$out")"
+	wait_active rayd.service rayspa.service
+	wait_table "the install with the default services"
+	[[ $(x id -nG niko-front) == niko-front ]] || fail "the front's user: $(x id niko-front 2>&1)"
+	[[ $(x stat -c '%a %U %G' /run/niko/reality-in) == "2750 niko-reality niko-front" ]] ||
+		fail "no socket directory of REALITY for the front: $(x ls -l /run/niko)"
+	x systemctl is-enabled --quiet niko-front.service || fail "the front's unit is not installed before its config"
+	# hy2-obfs needs no certificate: the front comes up with it alone, and
+	# stops when it goes, its config with it, and stays so through rayctl
+	# apply. The config of before used to stay and start the front without
+	# the service's salamander password, again every 2 s, at that apply,
+	# an update or a reboot (review of v0.28.0).
+	out="$(x rayctl service add hy2-obfs hy2-obfs 2>&1)" || fail "rayctl service add hy2-obfs: $out"
+	out="$(x rayctl apply 2>&1)" || fail "rayctl apply with hy2-obfs: $out"
+	wait_active niko-hy2-obfs.service niko-front.service
+	out="$(x rayctl service del hy2-obfs 2>&1)" || fail "rayctl service del hy2-obfs: $out"
+	out="$(x rayctl apply 2>&1)" || fail "rayctl apply without hy2-obfs: $out"
+	sleep 3 # an auto-restart comes 2 s after the exit
+	st="$(x systemctl show -p ActiveState,SubState,ConditionResult niko-front.service | sort | paste -sd' ')"
+	if [[ $st != "ActiveState=inactive ConditionResult=no SubState=dead" ]] || x test -e /var/lib/raycontrol/rendered/front/front.json; then
+		fail "the front after its last service went ($st): $(x journalctl --no-pager -u niko-front -n 5 -o cat)"
+	fi
+	# The site's names from a CA of this test; REALITY takes a chain only
+	# as long as a real one.
+	x sh -ec 'cd /root && umask 077
+		openssl req -x509 -newkey rsa:4096 -nodes -days 2 -subj /CN=test-root -keyout ca.key -out ca.pem
+		openssl req -newkey rsa:4096 -nodes -subj /CN=test-inter -keyout int.key -out int.csr
+		printf "basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n" > int.ext
+		openssl x509 -req -in int.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -extfile int.ext -out int.pem
+		openssl req -newkey rsa:2048 -nodes -subj /CN=example.test -keyout site.key -out site.csr
+		printf "subjectAltName=DNS:example.test,DNS:*.example.test\nextendedKeyUsage=serverAuth\n" > site.ext
+		openssl x509 -req -in site.csr -CA int.pem -CAkey int.key -CAcreateserial -days 2 -extfile site.ext -out site.crt
+		cat site.crt int.pem ca.pem > site.pem' >/dev/null 2>&1 || fail "a certificate for the site"
+	out="$(x rayctl service cert site -chain /root/site.pem -key /root/site.key 2>&1)" || fail "rayctl service cert: $out"
+	wait_active niko-site.service niko-reality.service niko-front.service
+	[[ $(x ss -Hltnp 'sport = :443') == *niko-server* ]] || fail "the front does not listen on TCP 443"
+	again="$(x rayctl apply)" || fail "rayctl apply after the certificate"
+	if grep -E '^(wrote|restarting)' <<<"$again"; then
+		fail "the certificate needed an apply"
+	fi
+	out="$(x /usr/local/bin/rayctl uninstall -yes 2>&1)" || fail "rayctl uninstall after the default services: $out"
+	x sh -c 'rm -f /root/ca.* /root/int.* /root/site.*'
+	snapshot /root/after-default.snap
+	if ! diff -u <(x cat /root/before.snap) <(x cat /root/after-default.snap) >&2; then
+		fail "the host after the default services' uninstall differs from before the install (diff above)"
+	fi
+	x rm -f /root/after-default.snap
+fi
 
 log "$distro: raycontrol v0 in the way (R4-26)"
 # What legacy/ray.sh leaves: its settings and CLI, an Xray unit holding TCP

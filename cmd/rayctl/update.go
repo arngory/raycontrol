@@ -46,6 +46,10 @@ const updateStageEnv = "RAYCONTROL_UPDATE_STAGE"
 const (
 	updateFromEnv = "RAYCONTROL_UPDATE_FROM"
 	handoffEnv    = "RAYCONTROL_UPDATE_HANDOFF"
+	// noRelaysEnv is -no-relays, for the release's rayctl: the one that
+	// updates notes the update (noteUpdate), and the handoff's command
+	// line is frozen.
+	noRelaysEnv = "RAYCONTROL_UPDATE_NO_RELAYS"
 )
 
 // releaseKey checks releases: release.PubKey (a test build may take
@@ -100,6 +104,8 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 	noHandoff := fs.Bool("no-handoff", false, "update with this rayctl, not the release's own (when the new one cannot run here)")
 	request := fs.Bool("request", false, "run the update the node asked for (raycontrol-update.service: spec/node-update-v1.md)")
 	requestEnded := fs.Bool("request-ended", false, "mark an update by request whose runner was killed as failed (the unit's ExecStopPost)")
+	requestRecover := fs.Bool("request-recover", false, "roll back a relay's update by its exit's word that did not end (raycontrol-relay-recover.service, at boot)")
+	noRelays := fs.Bool("no-relays", false, "the relays in front of the node do not follow this update (spec/relay-update-remote-v1.md)")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
@@ -115,17 +121,15 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 		return err
 	}
 	// The request goes whatever this node is (rayd's word is checked
-	// there): left in place, the path unit would fire again and again.
+	// there): left in place, the path unit would fire again and again. A
+	// relay's runner is its own (update_relay_request.go).
 	switch {
 	case *requestEnded:
-		return markInterrupted(nodeupdate.StatusFile)
+		return hostRequests().ended()
+	case *requestRecover:
+		return hostRequests().recover()
 	case *request:
-		// One at a time; a request waits a while for a manual update or
-		// apply to end (the unit gives it 50 minutes in all).
-		if err := takeUpdateLock("update by request", 10*time.Minute); err != nil {
-			return err
-		}
-		return nodeRequests().run()
+		return hostRequests().take()
 	}
 	opts := updateOpts{want: *want, from: *from, local: *local, check: *check, yes: *yes, force: *force, noHandoff: *noHandoff}
 	switch host, err := updateHost(deploy.DB, deploy.RelayBundle, relayUnitFile); {
@@ -193,6 +197,21 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 			return nil
 		}
 		return misnamedUpdate(os.Stdout, names, *force, os.Getenv(nodeupdate.ResultEnv) != "", handedFrom)
+	}
+
+	// An update by hand goes where rayd reads the updates by request's
+	// (spec/relay-update-remote-v1.md §11 p. 1): the exit names the release
+	// it put in to its relays, unless -no-relays, and one that did not hold
+	// is held. The rayctl that did it notes it, as with writeResult; one
+	// that hands it over passes -no-relays on.
+	if os.Getenv(nodeupdate.ResultEnv) == "" && !*check {
+		skip := skipRelays(*noRelays)
+		started := time.Now().UTC()
+		defer func() {
+			if touched && !handed {
+				noteUpdate(nodeupdate.StatusFile, err, installed, newVersion, skip, started)
+			}
+		}()
 	}
 
 	stage, err := newStage()
@@ -402,6 +421,14 @@ func handoff(r release.Release, stage, installed, host string, yes, force bool) 
 	// this one stays to clean up after it.
 	signal.Ignore(os.Interrupt)
 	defer signal.Reset(os.Interrupt)
+	// A relay's update by its exit's word (spec/relay-update-remote-v1.md
+	// §4.3): the unit's stop sends SIGTERM to every process of it, and the
+	// release's rayctl takes it and puts the relay back; this one waits
+	// for that end, or the runner would find it gone with no outcome yet.
+	if host == "relay" && os.Getenv(nodeupdate.ResultEnv) != "" {
+		_, stop := catchSignals()
+		defer stop()
+	}
 	if err := cmd.Wait(); err != nil {
 		return true, fmt.Errorf("the update by the rayctl of %s: %w", r.Version, err)
 	}
@@ -661,7 +688,7 @@ func (c *cli) failUpdate(ctx context.Context, cause error, before []string) erro
 func applyEnv(stage string) []string {
 	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
 		name, _, _ := strings.Cut(kv, "=")
-		return name == nodeupdate.ResultEnv || name == handoffEnv || name == updateFromEnv || name == updateStageEnv
+		return name == nodeupdate.ResultEnv || name == handoffEnv || name == updateFromEnv || name == updateStageEnv || name == noRelaysEnv
 	})
 	if stage != "" {
 		env = append(env, updateStageEnv+"="+stage)
@@ -679,9 +706,10 @@ func (e rolledBack) Unwrap() error { return e.cause }
 
 // writeResult tells the runner of an update by request how it ended
 // (nodeupdate.ResultEnv): done, rolled back, or failed, and then whether
-// the node was touched at all.
+// the node was touched at all, and the code of where it failed when err
+// has one (reasonOf).
 func writeResult(path string, err error, touched bool, installed, newVersion string) {
-	r := nodeupdate.Result{State: nodeupdate.Done, Version: installed}
+	r := nodeupdate.Result{State: nodeupdate.Done, Version: installed, Reason: reasonOf(err)}
 	if release.IsRelease(newVersion) {
 		r.Release = newVersion
 	}
@@ -711,8 +739,50 @@ func noteRollback(statusFile, from, to string) {
 	}
 	now := time.Now().UTC()
 	_ = nodeupdate.WriteStatus(statusFile, nodeupdate.Status{ID: nodeupdate.NewID(), State: nodeupdate.RolledBack, From: from, To: to, Target: from,
-		Release: from, By: "root (rayctl update -rollback)", Kind: "local", Error: "rolled back by hand", Requested: now, Started: now, Ended: now,
+		Release: from, By: "root (rayctl update -rollback)", Kind: nodeupdate.Local, Error: "rolled back by hand", Requested: now, Started: now, Ended: now,
 		Held: nodeupdate.Hold(nodeupdate.ReadStatus(statusFile).Held, from)})
+}
+
+// skipRelays reports whether the relays stay as they are after this update
+// by hand: -no-relays here, or from the rayctl that handed it over. Said
+// on to the release's rayctl this one hands it to, through its
+// environment; never from the environment of a command run by hand.
+func skipRelays(flag bool) bool {
+	skip := flag || os.Getenv(handoffEnv) == "1" && os.Getenv(noRelaysEnv) == "1"
+	if skip {
+		_ = os.Setenv(noRelaysEnv, "1")
+	} else {
+		_ = os.Unsetenv(noRelaysEnv)
+	}
+	return skip
+}
+
+// noteUpdate: an update by hand that changed the node, from installed to
+// newVersion, ended with err (rolledBack: undone). Done, it is the release
+// the exit names to its relays, unless noRelays; rolled back or broken on
+// the way, that release is held, as a runner holds it. The status
+// directory is made if it is not there: the relays follow an update by
+// hand whether or not the node ever ran one by request.
+func noteUpdate(statusFile string, err error, installed, newVersion string, noRelays bool, started time.Time) {
+	st := nodeupdate.Status{ID: nodeupdate.NewID(), State: nodeupdate.Done, From: installed, To: newVersion, Target: newVersion,
+		By: "rayctl on the node", Kind: nodeupdate.Local, NoRelays: noRelays, Requested: started, Started: started, Ended: time.Now().UTC(),
+		Held: nodeupdate.ReadStatus(statusFile).Holding()}
+	if release.IsRelease(newVersion) {
+		st.Release = newVersion
+	}
+	var rb rolledBack
+	switch {
+	case errors.As(err, &rb):
+		st.State, st.To, st.Error = nodeupdate.RolledBack, installed, rb.cause.Error()
+	case err != nil:
+		st.State, st.To, st.Error = nodeupdate.Failed, raydVersion(), err.Error() // half way: what rayd says it runs
+	}
+	if st.State != nodeupdate.Done {
+		st.Held = nodeupdate.Hold(st.Held, st.Release)
+	}
+	if werr := nodeupdate.WriteStatus(statusFile, st); werr != nil {
+		fmt.Fprintln(os.Stderr, "rayctl: the update's status:", werr)
+	}
 }
 
 // rollbackUpdate installs the binaries the last update kept aside, asked

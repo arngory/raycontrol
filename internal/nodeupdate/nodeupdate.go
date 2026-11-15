@@ -4,7 +4,9 @@
 // privileges: it writes a request, a root unit (raycontrol-update.path)
 // sees it and runs rayctl update -request, which checks it again against
 // root's own policy file, updates as rayctl update does (signed releases
-// only) and writes the outcome to a status file rayd reads.
+// only) and writes the outcome to a status file rayd reads. A relay goes
+// the same way (spec/relay-update-remote-v1.md): its rayd relay asks for
+// the release its exit names (exit), root on the relay checks and runs it.
 package nodeupdate
 
 import (
@@ -33,8 +35,11 @@ const (
 	// RequestFile is rayd's: in its state directory, watched by
 	// raycontrol-update.path.
 	RequestFile = "/var/lib/raycontrol/update-request"
-	// StatusDir is root's (0755): rayd reads what is in it, nobody but
-	// root writes it.
+	// RelayRequestFile is rayd relay's, on a relay: in its state directory
+	// (StateDirectory=rayd-relay), watched by the relay's own path unit.
+	RelayRequestFile = "/var/lib/rayd-relay/update-request"
+	// StatusDir is root's (0755), on a node and on a relay alike: rayd
+	// (rayd relay) reads what is in it, nobody but root writes it.
 	StatusDir  = "/var/lib/raycontrol-update"
 	StatusFile = StatusDir + "/status.json"
 	// PolicyFile is root's (rayctl update remote|auto): rayd cannot turn
@@ -65,6 +70,11 @@ const (
 	// RetryAfter: an auto update that failed before it changed the node
 	// (the download, say) is asked for again this much later.
 	RetryAfter = 24 * time.Hour
+	// RelayRetryAfter: an update by the exit's word that failed before it
+	// changed the relay is asked for again this much later, if the exit
+	// still names that release. As long as a cycle of the auto update's
+	// checks: GitHub sees a relay no more often than a node.
+	RelayRetryAfter = 6 * time.Hour
 
 	maxFile   = 4 << 10  // a request, the policy
 	maxStatus = 16 << 10 // the status, the result
@@ -77,6 +87,24 @@ const (
 const (
 	Remote = "remote"
 	Auto   = "auto"
+	// Exit is a relay's: the release its exit runs, which the exit names to
+	// it over its feed and rayd relay asks for.
+	Exit = "exit"
+)
+
+// Local is a status's kind, never a request's: an update or a rollback by
+// hand on the node (rayctl update). The exit names the release of one that
+// is done to its relays as it does after a remote or an auto update
+// (spec/relay-update-remote-v1.md §11 p. 1), unless it says NoRelays.
+const Local = "local"
+
+// NodeKinds and RelayKinds are the kinds root takes on each: on a node
+// rayd asks for remote and auto updates, on a relay rayd relay for the
+// exit's. Neither host runs the other's: a relay's request of kind remote
+// would skip what an exit one is held to.
+var (
+	NodeKinds  = []string{Remote, Auto}
+	RelayKinds = []string{Exit}
 )
 
 // States of an update.
@@ -87,6 +115,29 @@ const (
 	Done       = "done"
 	RolledBack = "rolled_back" // the update failed and the previous version runs
 	Failed     = "failed"      // refused, or failed without a rollback
+)
+
+// Reasons, codes for where an update failed
+// (spec/relay-update-remote-v1.md §3.6), for a program to act on; the
+// error says it for a person. Whoever knows the place sets one.
+const (
+	// Before anything changed (untouched).
+	ReasonPolicy     = "policy"     // root: the policy does not let it run (remote off by the time it ran)
+	ReasonStale      = "stale"      // root: the request older than Stale
+	ReasonVersion    = "version"    // root: not newer, held, or older than a relay updates to (v0.26.0)
+	ReasonBusy       = "busy"       // root: the update lock not taken in time
+	ReasonUnfinished = "unfinished" // an earlier update of the relay did not end (its mark)
+	ReasonBundle     = "bundle"     // the relay's bundle missing or unreadable
+	ReasonSSH        = "ssh"        // the snapshot would not let SSH in on sshd's port
+	ReasonDownload   = "download"   // neither GitHub nor a mirror gave the files
+	ReasonSignature  = "signature"  // a wrong signature, or it signs another version than the one asked for
+	ReasonPlace      = "place"      // the first binary did not go in
+	ReasonNotTaken   = "not_taken"  // rayd relay's own: the request not taken within Stale
+	// After a change.
+	ReasonInstall     = "install"     // rayctl install -relay failed; rolled back
+	ReasonCheck       = "check"       // the check after the install failed; rolled back
+	ReasonInterrupted = "interrupted" // cut short (killed, the unit's timeout, a shutdown); rolled back after
+	ReasonOpen        = "open"        // the previous relay did not come back: the host is open, forwarding nothing
 )
 
 // ErrWaiting: a request waits already.
@@ -117,8 +168,18 @@ type Status struct {
 	Kind      string `json:"kind"`
 	Error     string `json:"error,omitempty"`
 	Untouched bool   `json:"untouched,omitempty"` // failed before anything on the node changed
+	Reason    string `json:"reason,omitempty"`    // where it failed, a code (ReasonPolicy, …); an older rayctl writes none
+	// Unfinished: an update of the relay did not end, its mark is left in
+	// root's directory, which rayd relay cannot read: root on the relay
+	// must act.
+	Unfinished bool `json:"unfinished,omitempty"`
+	// NoRelays: an update by hand the exit does not name to its relays
+	// (rayctl update -no-relays). Absent, as an older rayctl writes it, the
+	// relays follow.
+	NoRelays bool `json:"no_relays,omitempty"`
 	// Held are releases whose update rolled back or broke on the way: the
-	// auto update leaves them alone. Each status carries them over.
+	// auto update leaves them alone, and so does a relay. Each status
+	// carries them over.
 	Held      []string  `json:"held,omitempty"`
 	Requested time.Time `json:"requested"`
 	Started   time.Time `json:"started"`
@@ -140,7 +201,38 @@ type Result struct {
 	Release   string `json:"release,omitempty"` // the release it went for, once known
 	Error     string `json:"error,omitempty"`
 	Untouched bool   `json:"untouched,omitempty"` // failed before anything on the node changed
+	Reason    string `json:"reason,omitempty"`    // where it failed, a code (ReasonPolicy, …); an older rayctl writes none
 }
+
+// refusal is a check that failed, with the reason code for it.
+type refusal struct {
+	reason string
+	err    error
+}
+
+func refused(reason string, err error) error { return refusal{reason, err} }
+
+func (e refusal) Error() string { return e.err.Error() }
+func (e refusal) Unwrap() error { return e.err }
+
+// ReasonOf is the reason code err carries, "" when none: Check and Allows
+// give one to what they refuse for a reason the codes name (a request too
+// old, a version, the policy), none to a request that is not well formed.
+func ReasonOf(err error) string {
+	var r refusal
+	if errors.As(err, &r) {
+		return r.reason
+	}
+	return ""
+}
+
+var reasonRe = regexp.MustCompile(`^[a-z][a-z_]{0,31}$`)
+
+// ValidReason reports whether s is "" or has the form of a reason code: a
+// word of lowercase letters and '_', at most 32 bytes. Not only the codes
+// this version knows: the rayctl of a newer release may write one for the
+// runner of an older one, which carries it on.
+func ValidReason(s string) bool { return s == "" || reasonRe.MatchString(s) }
 
 // NewID names a request.
 func NewID() string {
@@ -154,41 +246,54 @@ func NewID() string {
 func ValidVersion(v string) bool { return v == "latest" || release.IsRelease(v) }
 
 // Check is a request as the root side takes it at now: well formed and
-// fresh, its kind allowed, never back.
-func (r Request) Check(installed string, now time.Time) error {
+// fresh, of a kind this host takes (NodeKinds, RelayKinds), never back.
+// An auto update takes a patch release only; an exit one only the release
+// the exit names, and none in held: an update to it did not hold on this
+// host before, and only a newer release moves it on. Held is the last
+// status's (Status.Holding).
+func (r Request) Check(kinds []string, installed string, held []string, now time.Time) error {
 	switch {
 	case r.ID == "" || len(r.ID) > 32 || strings.Trim(r.ID, "0123456789abcdef") != "":
 		return errors.New("the request has no id")
-	case r.Kind != Remote && r.Kind != Auto:
+	case !slices.Contains(kinds, r.Kind):
 		return fmt.Errorf("a request of kind %q", Printable(r.Kind))
+	case r.Kind == Exit && !release.IsRelease(r.Version):
+		return refused(ReasonVersion, fmt.Errorf("version %q: vX.Y.Z, the release the exit runs", Printable(r.Version)))
 	case !ValidVersion(r.Version):
-		return fmt.Errorf("version %q: latest or vX.Y.Z", Printable(r.Version))
+		return refused(ReasonVersion, fmt.Errorf("version %q: latest or vX.Y.Z", Printable(r.Version)))
 	case r.Release != "" && !release.IsRelease(r.Release):
 		return fmt.Errorf("release %q: vX.Y.Z", Printable(r.Release))
 	case r.By == "" || len(r.By) > maxField || Printable(r.By) != r.By:
 		return fmt.Errorf("the request names no one who asked (%q)", Printable(r.By))
 	case now.Sub(r.At) > Stale || r.At.Sub(now) > time.Minute:
-		return fmt.Errorf("the request is from %s: too old to run now", r.At.UTC().Format(time.RFC3339))
+		return refused(ReasonStale, fmt.Errorf("the request is from %s: too old to run now", r.At.UTC().Format(time.RFC3339)))
 	case r.Version != "latest" && !release.Newer(r.Version, installed):
-		return fmt.Errorf("%s is not newer than %s: an update by request never goes back", r.Version, installed)
+		return refused(ReasonVersion, fmt.Errorf("%s is not newer than %s: an update by request never goes back", r.Version, installed))
 	case r.Kind == Auto && (r.Version == "latest" || !Patch(r.Version, installed)):
-		return fmt.Errorf("an auto update takes patch releases of %s only, not %s", installed, r.Version)
+		return refused(ReasonVersion, fmt.Errorf("an auto update takes patch releases of %s only, not %s", installed, r.Version))
+	case r.Kind == Exit && slices.Contains(held, r.Version):
+		return refused(ReasonVersion, fmt.Errorf("%s did not hold here before: a newer release moves this relay on (or rayctl update -version %s by hand)", r.Version, r.Version))
 	}
 	return nil
 }
 
 // Allows reports why p does not let r run at now, nil when it does: a
-// remote request while root has remote updates on, an auto one while auto
-// is on and in the window (a few minutes' grace for a request written at
-// its end).
+// remote request while root has remote updates on, an exit one (on a
+// relay) the same, an auto one while auto is on and in the window (a few
+// minutes' grace for a request written at its end). A kind it has no
+// rule for it does not let run.
 func (p Policy) Allows(r Request, now time.Time) error {
 	switch {
 	case r.Kind == Remote && p.Remote != "on":
-		return errors.New("remote updates are off on this node (rayctl update remote on)")
+		return refused(ReasonPolicy, errors.New("remote updates are off on this node (rayctl update remote on)"))
+	case r.Kind == Exit && p.Remote != "on":
+		return refused(ReasonPolicy, errors.New("updates by the exit's word are off on this relay (rayctl update remote on)"))
 	case r.Kind == Auto && p.Auto != "patch":
-		return errors.New("auto updates are off on this node (rayctl update auto patch)")
+		return refused(ReasonPolicy, errors.New("auto updates are off on this node (rayctl update auto patch)"))
 	case r.Kind == Auto && !InWindow(now, p.Window) && !InWindow(now.Add(-5*time.Minute), p.Window):
-		return fmt.Errorf("an auto update outside the window %s", p.Window)
+		return refused(ReasonPolicy, fmt.Errorf("an auto update outside the window %s", p.Window))
+	case r.Kind != Remote && r.Kind != Exit && r.Kind != Auto:
+		return fmt.Errorf("no policy for a request of kind %q", Printable(r.Kind))
 	}
 	return nil
 }
@@ -246,22 +351,64 @@ func PeekRequest(path string) (Request, bool) {
 	return r, true
 }
 
-// WriteStatus is root's, in its own directory. Fields are made printable
-// and cut, so that ReadStatus takes the file back whatever they held.
+// WriteStatus is root's, in its own directory, 0644: the node's rayd
+// reads it. Fields are made printable and cut, so that ReadStatus takes
+// the file back whatever they held.
 func WriteStatus(path string, s Status) error {
-	for _, f := range []*string{&s.ID, &s.State, &s.From, &s.To, &s.Target, &s.Release, &s.By, &s.Kind} {
-		*f = clip(Printable(*f), maxField)
-	}
-	s.Error = clip(Printable(s.Error), maxError)
-	s.Held = slices.DeleteFunc(slices.Clone(s.Held), func(v string) bool { return !release.IsRelease(v) || len(v) > maxField })
-	if len(s.Held) > maxHeld {
-		s.Held = s.Held[len(s.Held)-maxHeld:]
-	}
-	b, err := marshal(s)
+	b, err := statusBytes(s)
 	if err != nil {
 		return err
 	}
 	return writeRoot(path, b)
+}
+
+// WriteStatusFor is WriteStatus on a relay: the file 0640, of group gid,
+// rayd relay's, which reads it, and nobody else; with gid < 0 root's alone
+// (0600). Its error is root's whole text, the relay's admin addresses and
+// its exit's among it, which only rayd relay redacts before the exit has
+// it (spec/relay-update-remote-v1.md §6).
+func WriteStatusFor(path string, s Status, gid int) error {
+	b, err := statusBytes(s)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // G301: as writeRoot's
+		return err
+	}
+	mode := os.FileMode(0o600)
+	if gid >= 0 {
+		mode = 0o640
+	}
+	tmp, err := writeTemp(path, b, mode)
+	if err != nil {
+		return err
+	}
+	if gid >= 0 {
+		err = os.Chown(tmp, -1, gid)
+	}
+	if err == nil {
+		err = os.Rename(tmp, path) // replaces a link, does not follow it
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
+}
+
+// statusBytes is s as WriteStatus writes it.
+func statusBytes(s Status) ([]byte, error) {
+	for _, f := range []*string{&s.ID, &s.State, &s.From, &s.To, &s.Target, &s.Release, &s.By, &s.Kind} {
+		*f = clip(Printable(*f), maxField)
+	}
+	s.Error = clip(Printable(s.Error), maxError)
+	if !ValidReason(s.Reason) {
+		s.Reason = ""
+	}
+	s.Held = slices.DeleteFunc(slices.Clone(s.Held), func(v string) bool { return !release.IsRelease(v) || len(v) > maxField })
+	if len(s.Held) > maxHeld {
+		s.Held = s.Held[len(s.Held)-maxHeld:]
+	}
+	return marshal(s)
 }
 
 // Tried is the release r goes for, as far as it is known before it runs.
@@ -276,10 +423,12 @@ func (r Request) Tried() string {
 }
 
 // Holding is what s holds, and its own release when it is a run that
-// never ended (a power cut: no word, no stop hook): what the next status
-// carries over.
+// never ended (a power cut: no word, no stop hook) and may have changed
+// the host: what the next status carries over. A run known to have
+// changed nothing (Untouched: a relay's, cut short before its first
+// change) holds its release no more than a failed download does.
 func (s Status) Holding() []string {
-	if s.State == Running {
+	if s.State == Running && !s.Untouched {
 		return Hold(s.Held, s.Release)
 	}
 	return s.Held
@@ -362,6 +511,9 @@ func WritePolicy(path string, p Policy) error {
 // WriteResult is the updating rayctl's, to the file ResultEnv names.
 func WriteResult(path string, r Result) error {
 	r.Version, r.Release, r.Error = clip(Printable(r.Version), maxField), clip(Printable(r.Release), maxField), clip(Printable(r.Error), maxError)
+	if !ValidReason(r.Reason) {
+		r.Reason = ""
+	}
 	b, err := marshal(r)
 	if err != nil {
 		return err

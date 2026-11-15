@@ -83,7 +83,7 @@ func InputsOf(m render.Model, files []render.File, p render.Paths) Inputs {
 	}
 	// The front's config, not any file of the front's: a slipstream service
 	// that failed to render still refreshes its keys file there (review).
-	front := path.Join(p.Rendered, "front", "front.json")
+	front := p.FrontConfig()
 	in.Front = rendered[front]
 	in.DNSProbeKey = rendered[path.Join(p.Rendered, "front", render.DNSProbeKeyFile)]
 	// The front answers the DNS tunnels on UDP 53 when its rendered config

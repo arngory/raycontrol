@@ -354,7 +354,21 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 		}
 		return false
 	})
-	hasFront := in.Front
+	// The services the front carries, each behind a directory of the
+	// front's group (tmpfiles below), and DoH, whose directory is rayd's.
+	carried := slices.Concat(naives, dns, hysteria, yggs)
+	if in.FrontTCP {
+		carried = append(carried, reality...)
+	}
+	doh := slices.ContainsFunc(services, func(s ServiceInput) bool { return s.Kind == "doh" })
+	// The front's user, its unit and rayd in its group come with them, not
+	// only with its config: REALITY, naive, hy2-masq and Yggdrasil render
+	// nothing until their site has a certificate, nor the front with them,
+	// and tmpfiles fails on a group that is not there (the install of the
+	// default REALITY did, up to v0.27.0). The unit waits for its config
+	// (ConditionPathExists); once the certificate is stored rayd writes the
+	// config, of the front's group, and starts the unit as it starts theirs.
+	hasFront := in.Front || len(carried) > 0 || doh
 	// Credentials are copied in from rendered files by root, from a
 	// directory rayd cannot change (copyIn).
 	anchor := renderedAnchor(p)
@@ -693,7 +707,12 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 				frontCreds = append(frontCreds, copyIn(bin.Rayd, anchor, renderedOwner, "niko-front", src, dst))
 			}
 		}
-		cred(in.DNSProbeKey, path.Join(p.Rendered, "front", render.DNSProbeKeyFile), p.FrontDNSProbe())
+		// The probe key before the front's config too, as from every first
+		// deploy (TestProbeKeyBeforeDNSTT): Render writes it with every
+		// front, and the unit waits for the config (its condition comes
+		// before ExecStartPre); a dnstt service added through the API after
+		// the certificate then finds it.
+		cred(in.DNSProbeKey || !in.Front, path.Join(p.Rendered, "front", render.DNSProbeKeyFile), p.FrontDNSProbe())
 		for _, s := range hysteria {
 			if s.Kind == "hy2-obfs" {
 				cred(s.Salamander, path.Join(p.Rendered, "front", s.Name+".salamander"), p.FrontSalamander(s.Name))
@@ -702,11 +721,11 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 		units = append(units, unit{
 			name:        render.UnitName("front"),
 			description: "niko-server front (multiplexers)",
-			needs:       path.Join(p.Rendered, "front", "front.json"),
+			needs:       p.FrontConfig(),
 			after:       after,
 			service: append([]string{
 				"User=niko-front", "Group=niko-front",
-				"ExecStart=" + bin.NikoServer + " front -c " + path.Join(p.Rendered, "front", "front.json"),
+				"ExecStart=" + bin.NikoServer + " front -c " + p.FrontConfig(),
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, "front"), "/run/"),
 				// The front group (rayd) passes through to the stats
 				// socket; the credentials in it are the front's alone
@@ -776,19 +795,15 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 	}
 	// Sockets the front passes connections and datagrams to (R2-15), each
 	// in a directory of the service user and the front's group: the front
-	// reaches them and nothing else of the services (S-1).
+	// reaches them and nothing else of the services (S-1). The front's
+	// group comes with them (hasFront).
 	for _, s := range services {
 		if s.Kind == "doh" {
 			tmp.dir(path.Dir(p.DoHSocket(s.Name)), "2750", "rayd", render.GroupName("front"))
 		}
 	}
-	for _, s := range slices.Concat(naives, dns, hysteria, yggs) {
+	for _, s := range carried {
 		tmp.dir(p.FrontDir(s.Name), "2750", render.GroupName(s.Name), render.GroupName("front"))
-	}
-	if in.FrontTCP {
-		for _, s := range reality {
-			tmp.dir(p.FrontDir(s.Name), "2750", render.GroupName(s.Name), render.GroupName("front"))
-		}
 	}
 	plan.Dirs = tmp.dirs
 	plan.Warnings = append(plan.Warnings, tmp.warnings...)

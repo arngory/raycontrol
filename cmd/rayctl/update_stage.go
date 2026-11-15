@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,6 +31,46 @@ var releaseBase string
 type staged struct {
 	version      string
 	done, handed bool
+}
+
+// reasonErr is an update's error with the code of where it failed
+// (nodeupdate.Reason*, spec/relay-update-remote-v1.md §3.6): the outcome
+// an update by request writes carries it (writeResult), for a relay's
+// exit to show; a person reads the text, which is err's.
+type reasonErr struct {
+	reason string
+	err    error
+}
+
+func (e reasonErr) Error() string { return e.err.Error() }
+func (e reasonErr) Unwrap() error { return e.err }
+
+// withReason is err with the code of where it failed, nil for nil.
+func withReason(reason string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return reasonErr{reason, err}
+}
+
+// reasonOf is the code err carries: the outermost one (a rollback that
+// did not bring the relay back is open, whatever failed first), or
+// nodeupdate's for a request refused; "" when none.
+func reasonOf(err error) string {
+	if r := (reasonErr{}); errors.As(err, &r) {
+		return r.reason
+	}
+	return nodeupdate.ReasonOf(err)
+}
+
+// fetchReason is err, of a release that was not staged, with its code: a
+// release that does not verify (a signature, the version it signs, the
+// archive's checksum), or one that could not be had.
+func fetchReason(err error) error {
+	if errors.Is(err, release.ErrUnverified) {
+		return withReason(nodeupdate.ReasonSignature, err)
+	}
+	return withReason(nodeupdate.ReasonDownload, err)
 }
 
 // newStage is the update's staging directory, root's, beside the install
@@ -104,7 +145,8 @@ func (c *cli) stageRelease(ctx context.Context, o updateOpts, stage, installed s
 					s.done = true
 					return s, nil
 				case release.Newer(installed, l):
-					return s, fmt.Errorf("installed %s is newer than the latest release %s; rayctl update -version %s goes back", installed, l, l)
+					return s, withReason(nodeupdate.ReasonVersion,
+						fmt.Errorf("installed %s is newer than the latest release %s; rayctl update -version %s goes back", installed, l, l))
 				case o.check:
 					fmt.Printf("installed %s, release %s available: rayctl update\n", installed, l)
 					if p != "" {
@@ -119,7 +161,7 @@ func (c *cli) stageRelease(ctx context.Context, o updateOpts, stage, installed s
 		r, err = f.Fetch(ctx, v, arch, releaseKey)
 	}
 	if err != nil {
-		return s, err
+		return s, fetchReason(err)
 	}
 	s.version = r.Version
 	switch {
@@ -128,7 +170,8 @@ func (c *cli) stageRelease(ctx context.Context, o updateOpts, stage, installed s
 		s.done = true
 		return s, nil
 	case release.Newer(installed, s.version) && o.want == "latest" && !o.force:
-		return s, fmt.Errorf("installed %s is newer than the latest release %s; rayctl update -version %s goes back", installed, s.version, s.version)
+		return s, withReason(nodeupdate.ReasonVersion,
+			fmt.Errorf("installed %s is newer than the latest release %s; rayctl update -version %s goes back", installed, s.version, s.version))
 	}
 	if o.check {
 		fmt.Printf("installed %s, release %s available: rayctl update\n", installed, s.version)

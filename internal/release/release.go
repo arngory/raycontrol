@@ -240,6 +240,19 @@ func (f *Fetcher) Get(ctx context.Context, version, file string, limit int64) ([
 	return nil, fmt.Errorf("downloading %s: %w", file, errors.Join(errs...))
 }
 
+// ErrUnverified is in the chain of the error of a release that does not
+// verify: its signature, the version it signs, the archive's checksum. A
+// release that could not be had (GitHub and the mirrors did not answer, or
+// have no such file) is not: rayctl tells the two apart for a relay's exit
+// (spec/relay-update-remote-v1.md §3.6, signature and download).
+var ErrUnverified = errors.New("the release does not verify")
+
+// unverified is an error that ErrUnverified matches; its text is its own.
+type unverified struct{ error }
+
+func (e unverified) Unwrap() error        { return e.error }
+func (e unverified) Is(target error) bool { return target == ErrUnverified }
+
 // Release is a verified release.
 type Release struct {
 	Version string
@@ -282,9 +295,13 @@ func (f *Fetcher) Latest(ctx context.Context, pubKey string) (string, error) {
 	}
 	trusted, err := Verify(sums, sig, pubKey)
 	if err != nil {
-		return "", fmt.Errorf("SHA256SUMS: %w", err)
+		return "", unverified{fmt.Errorf("SHA256SUMS: %w", err)}
 	}
-	return VersionOf(trusted)
+	v, err := VersionOf(trusted)
+	if err != nil {
+		return "", unverified{err}
+	}
+	return v, nil
 }
 
 // Local verifies a release from a directory holding SHA256SUMS, its
@@ -312,14 +329,14 @@ func (f *Fetcher) verified(ctx context.Context, version, arch, pubKey string, su
 func check(version, arch, pubKey string, sums, sig []byte, archiveOf func(signed string) ([]byte, error)) (Release, error) {
 	trusted, err := Verify(sums, sig, pubKey)
 	if err != nil {
-		return Release{}, fmt.Errorf("SHA256SUMS: %w", err)
+		return Release{}, unverified{fmt.Errorf("SHA256SUMS: %w", err)}
 	}
 	signed, err := VersionOf(trusted)
 	if err != nil {
-		return Release{}, err
+		return Release{}, unverified{err}
 	}
 	if version != "latest" && signed != version {
-		return Release{}, fmt.Errorf("asked for %s, the signature says %s", version, signed)
+		return Release{}, unverified{fmt.Errorf("asked for %s, the signature says %s", version, signed)}
 	}
 	want, err := sumOf(sums, Archive(arch))
 	if err != nil {
@@ -330,7 +347,7 @@ func check(version, arch, pubKey string, sums, sig []byte, archiveOf func(signed
 		return Release{}, err
 	}
 	if got := sha256.Sum256(archive); !strings.EqualFold(hex.EncodeToString(got[:]), want) {
-		return Release{}, fmt.Errorf("%s: checksum mismatch", Archive(arch))
+		return Release{}, unverified{fmt.Errorf("%s: checksum mismatch", Archive(arch))}
 	}
 	return Release{Version: signed, Archive: archive, Sums: sums, Sig: sig}, nil
 }

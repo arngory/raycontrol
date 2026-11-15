@@ -7822,7 +7822,10 @@ type GetUpdateStatusResponse struct {
 	// it, as rayd's checks saw it (the auto update's target): latest when
 	// that is one; after a newer minor version, the one rayd found by asking
 	// for the next patch numbers. "" when none, or not checked.
-	LatestPatch   string `protobuf:"bytes,9,opt,name=latest_patch,json=latestPatch,proto3" json:"latest_patch,omitempty"`
+	LatestPatch string `protobuf:"bytes,9,opt,name=latest_patch,json=latestPatch,proto3" json:"latest_patch,omitempty"`
+	// The relays in front of this node and their updates by the node's word
+	// (spec/relay-update-remote-v1.md §8), by name. An older node sends none.
+	Relays        []*RelayUpdateStatus `protobuf:"bytes,10,rep,name=relays,proto3" json:"relays,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -7920,6 +7923,141 @@ func (x *GetUpdateStatusResponse) GetLatestPatch() string {
 	return ""
 }
 
+func (x *GetUpdateStatusResponse) GetRelays() []*RelayUpdateStatus {
+	if x != nil {
+		return x.Relays
+	}
+	return nil
+}
+
+// RelayUpdateStatus is a relay's update by the node's word: the relay's
+// last report and the node's offer as one. Times are the node's clock,
+// not the relay's, which may differ.
+type RelayUpdateStatus struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Name    string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Version string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"` // what the relay last said it runs; "" never said
+	// unknown (no report ever: an older relay, or its rayd relay does not
+	// run), off (behind target, but root on the relay has not allowed it),
+	// current (on target or newer, or nothing offered), waiting (its turn
+	// has not come: another relay updates, or one before it has not passed),
+	// offered (its turn: in its feed, no report on it yet), and as the relay
+	// reported on update_id: requested, running, done, rolled_back, failed
+	// (with reason no_word: an hour without a word after requested or
+	// running, or the queue went past it with no word on the offer).
+	// waiting and offered end: within the relays' turns, 30 minutes each.
+	State         string `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`
+	Target        string `protobuf:"bytes,4,opt,name=target,proto3" json:"target,omitempty"`                         // the version offered; "" none
+	UpdateId      string `protobuf:"bytes,5,opt,name=update_id,json=updateId,proto3" json:"update_id,omitempty"`     // the node's update it follows (UpdateStatus.id)
+	Reason        string `protobuf:"bytes,6,opt,name=reason,proto3" json:"reason,omitempty"`                         // a code for the client to name (policy, download, signature, …); "" none
+	Error         string `protobuf:"bytes,7,opt,name=error,proto3" json:"error,omitempty"`                           // short text for a person, redacted, at most 200 bytes
+	ChangedAt     int64  `protobuf:"varint,8,opt,name=changed_at,json=changedAt,proto3" json:"changed_at,omitempty"` // unix seconds: when state became what it is
+	SeenAt        int64  `protobuf:"varint,9,opt,name=seen_at,json=seenAt,proto3" json:"seen_at,omitempty"`          // unix seconds: when the node last heard the relay at all (a feed, a report); 0 never
+	Remote        bool   `protobuf:"varint,10,opt,name=remote,proto3" json:"remote,omitempty"`                       // the relay takes the node's word (root on it: rayctl update remote on)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RelayUpdateStatus) Reset() {
+	*x = RelayUpdateStatus{}
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[132]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RelayUpdateStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RelayUpdateStatus) ProtoMessage() {}
+
+func (x *RelayUpdateStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[132]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RelayUpdateStatus.ProtoReflect.Descriptor instead.
+func (*RelayUpdateStatus) Descriptor() ([]byte, []int) {
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{132}
+}
+
+func (x *RelayUpdateStatus) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *RelayUpdateStatus) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+func (x *RelayUpdateStatus) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *RelayUpdateStatus) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *RelayUpdateStatus) GetUpdateId() string {
+	if x != nil {
+		return x.UpdateId
+	}
+	return ""
+}
+
+func (x *RelayUpdateStatus) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *RelayUpdateStatus) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *RelayUpdateStatus) GetChangedAt() int64 {
+	if x != nil {
+		return x.ChangedAt
+	}
+	return 0
+}
+
+func (x *RelayUpdateStatus) GetSeenAt() int64 {
+	if x != nil {
+		return x.SeenAt
+	}
+	return 0
+}
+
+func (x *RelayUpdateStatus) GetRemote() bool {
+	if x != nil {
+		return x.Remote
+	}
+	return false
+}
+
 // UpdateStatus is the last update by request, or the one under way.
 type UpdateStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -7944,7 +8082,7 @@ type UpdateStatus struct {
 
 func (x *UpdateStatus) Reset() {
 	*x = UpdateStatus{}
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[132]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[133]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7956,7 +8094,7 @@ func (x *UpdateStatus) String() string {
 func (*UpdateStatus) ProtoMessage() {}
 
 func (x *UpdateStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_node_v1_node_proto_msgTypes[132]
+	mi := &file_raycontrol_node_v1_node_proto_msgTypes[133]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7969,7 +8107,7 @@ func (x *UpdateStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateStatus.ProtoReflect.Descriptor instead.
 func (*UpdateStatus) Descriptor() ([]byte, []int) {
-	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{132}
+	return file_raycontrol_node_v1_node_proto_rawDescGZIP(), []int{133}
 }
 
 func (x *UpdateStatus) GetId() string {
@@ -8633,7 +8771,7 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\aversion\x18\x01 \x01(\tR\aversion\"O\n" +
 	"\x13StartUpdateResponse\x128\n" +
 	"\x06status\x18\x01 \x01(\v2 .raycontrol.node.v1.UpdateStatusR\x06status\"\x18\n" +
-	"\x16GetUpdateStatusRequest\"\xa0\x02\n" +
+	"\x16GetUpdateStatusRequest\"\xdf\x02\n" +
 	"\x17GetUpdateStatusResponse\x128\n" +
 	"\x06status\x18\x01 \x01(\v2 .raycontrol.node.v1.UpdateStatusR\x06status\x12\x1c\n" +
 	"\tinstalled\x18\x02 \x01(\tR\tinstalled\x12\x16\n" +
@@ -8643,7 +8781,22 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x06window\x18\x06 \x01(\tR\x06window\x12\x1a\n" +
 	"\btimezone\x18\a \x01(\tR\btimezone\x12\x12\n" +
 	"\x04held\x18\b \x03(\tR\x04held\x12!\n" +
-	"\flatest_patch\x18\t \x01(\tR\vlatestPatch\"\xa1\x02\n" +
+	"\flatest_patch\x18\t \x01(\tR\vlatestPatch\x12=\n" +
+	"\x06relays\x18\n" +
+	" \x03(\v2%.raycontrol.node.v1.RelayUpdateStatusR\x06relays\"\x8a\x02\n" +
+	"\x11RelayUpdateStatus\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\tR\aversion\x12\x14\n" +
+	"\x05state\x18\x03 \x01(\tR\x05state\x12\x16\n" +
+	"\x06target\x18\x04 \x01(\tR\x06target\x12\x1b\n" +
+	"\tupdate_id\x18\x05 \x01(\tR\bupdateId\x12\x16\n" +
+	"\x06reason\x18\x06 \x01(\tR\x06reason\x12\x14\n" +
+	"\x05error\x18\a \x01(\tR\x05error\x12\x1d\n" +
+	"\n" +
+	"changed_at\x18\b \x01(\x03R\tchangedAt\x12\x17\n" +
+	"\aseen_at\x18\t \x01(\x03R\x06seenAt\x12\x16\n" +
+	"\x06remote\x18\n" +
+	" \x01(\bR\x06remote\"\xa1\x02\n" +
 	"\fUpdateStatus\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12\x12\n" +
@@ -8733,7 +8886,7 @@ func file_raycontrol_node_v1_node_proto_rawDescGZIP() []byte {
 	return file_raycontrol_node_v1_node_proto_rawDescData
 }
 
-var file_raycontrol_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 141)
+var file_raycontrol_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 142)
 var file_raycontrol_node_v1_node_proto_goTypes = []any{
 	(*GetPortsRequest)(nil),           // 0: raycontrol.node.v1.GetPortsRequest
 	(*GetPortsResponse)(nil),          // 1: raycontrol.node.v1.GetPortsResponse
@@ -8867,15 +9020,16 @@ var file_raycontrol_node_v1_node_proto_goTypes = []any{
 	(*StartUpdateResponse)(nil),       // 129: raycontrol.node.v1.StartUpdateResponse
 	(*GetUpdateStatusRequest)(nil),    // 130: raycontrol.node.v1.GetUpdateStatusRequest
 	(*GetUpdateStatusResponse)(nil),   // 131: raycontrol.node.v1.GetUpdateStatusResponse
-	(*UpdateStatus)(nil),              // 132: raycontrol.node.v1.UpdateStatus
-	nil,                               // 133: raycontrol.node.v1.SummaryNetwork.NetsEntry
-	nil,                               // 134: raycontrol.node.v1.SummaryNetwork.UdpMtuEntry
-	nil,                               // 135: raycontrol.node.v1.SummaryService.ResultsEntry
-	nil,                               // 136: raycontrol.node.v1.SummaryService.UdpEntry
-	nil,                               // 137: raycontrol.node.v1.SummaryService.MbpsEntry
-	nil,                               // 138: raycontrol.node.v1.SummaryService.StallKibEntry
-	nil,                               // 139: raycontrol.node.v1.SummaryService.DnsEntry
-	nil,                               // 140: raycontrol.node.v1.SummaryService.ZoneEntry
+	(*RelayUpdateStatus)(nil),         // 132: raycontrol.node.v1.RelayUpdateStatus
+	(*UpdateStatus)(nil),              // 133: raycontrol.node.v1.UpdateStatus
+	nil,                               // 134: raycontrol.node.v1.SummaryNetwork.NetsEntry
+	nil,                               // 135: raycontrol.node.v1.SummaryNetwork.UdpMtuEntry
+	nil,                               // 136: raycontrol.node.v1.SummaryService.ResultsEntry
+	nil,                               // 137: raycontrol.node.v1.SummaryService.UdpEntry
+	nil,                               // 138: raycontrol.node.v1.SummaryService.MbpsEntry
+	nil,                               // 139: raycontrol.node.v1.SummaryService.StallKibEntry
+	nil,                               // 140: raycontrol.node.v1.SummaryService.DnsEntry
+	nil,                               // 141: raycontrol.node.v1.SummaryService.ZoneEntry
 }
 var file_raycontrol_node_v1_node_proto_depIdxs = []int32{
 	2,   // 0: raycontrol.node.v1.GetPortsResponse.ports:type_name -> raycontrol.node.v1.NodePort
@@ -8924,127 +9078,128 @@ var file_raycontrol_node_v1_node_proto_depIdxs = []int32{
 	111, // 43: raycontrol.node.v1.ListAuditResponse.entries:type_name -> raycontrol.node.v1.AuditEntry
 	116, // 44: raycontrol.node.v1.GetSummaryResponse.dbs:type_name -> raycontrol.node.v1.SummaryDB
 	117, // 45: raycontrol.node.v1.GetSummaryResponse.networks:type_name -> raycontrol.node.v1.SummaryNetwork
-	133, // 46: raycontrol.node.v1.SummaryNetwork.nets:type_name -> raycontrol.node.v1.SummaryNetwork.NetsEntry
+	134, // 46: raycontrol.node.v1.SummaryNetwork.nets:type_name -> raycontrol.node.v1.SummaryNetwork.NetsEntry
 	118, // 47: raycontrol.node.v1.SummaryNetwork.services:type_name -> raycontrol.node.v1.SummaryService
-	134, // 48: raycontrol.node.v1.SummaryNetwork.udp_mtu:type_name -> raycontrol.node.v1.SummaryNetwork.UdpMtuEntry
-	135, // 49: raycontrol.node.v1.SummaryService.results:type_name -> raycontrol.node.v1.SummaryService.ResultsEntry
-	136, // 50: raycontrol.node.v1.SummaryService.udp:type_name -> raycontrol.node.v1.SummaryService.UdpEntry
-	137, // 51: raycontrol.node.v1.SummaryService.mbps:type_name -> raycontrol.node.v1.SummaryService.MbpsEntry
-	138, // 52: raycontrol.node.v1.SummaryService.stall_kib:type_name -> raycontrol.node.v1.SummaryService.StallKibEntry
-	139, // 53: raycontrol.node.v1.SummaryService.dns:type_name -> raycontrol.node.v1.SummaryService.DnsEntry
-	140, // 54: raycontrol.node.v1.SummaryService.zone:type_name -> raycontrol.node.v1.SummaryService.ZoneEntry
+	135, // 48: raycontrol.node.v1.SummaryNetwork.udp_mtu:type_name -> raycontrol.node.v1.SummaryNetwork.UdpMtuEntry
+	136, // 49: raycontrol.node.v1.SummaryService.results:type_name -> raycontrol.node.v1.SummaryService.ResultsEntry
+	137, // 50: raycontrol.node.v1.SummaryService.udp:type_name -> raycontrol.node.v1.SummaryService.UdpEntry
+	138, // 51: raycontrol.node.v1.SummaryService.mbps:type_name -> raycontrol.node.v1.SummaryService.MbpsEntry
+	139, // 52: raycontrol.node.v1.SummaryService.stall_kib:type_name -> raycontrol.node.v1.SummaryService.StallKibEntry
+	140, // 53: raycontrol.node.v1.SummaryService.dns:type_name -> raycontrol.node.v1.SummaryService.DnsEntry
+	141, // 54: raycontrol.node.v1.SummaryService.zone:type_name -> raycontrol.node.v1.SummaryService.ZoneEntry
 	123, // 55: raycontrol.node.v1.GetAppMirrorResponse.releases:type_name -> raycontrol.node.v1.AppRelease
-	132, // 56: raycontrol.node.v1.StartUpdateResponse.status:type_name -> raycontrol.node.v1.UpdateStatus
-	132, // 57: raycontrol.node.v1.GetUpdateStatusResponse.status:type_name -> raycontrol.node.v1.UpdateStatus
-	46,  // 58: raycontrol.node.v1.NodeService.GetStatus:input_type -> raycontrol.node.v1.GetStatusRequest
-	67,  // 59: raycontrol.node.v1.NodeService.ListUsers:input_type -> raycontrol.node.v1.ListUsersRequest
-	69,  // 60: raycontrol.node.v1.NodeService.CreateUser:input_type -> raycontrol.node.v1.CreateUserRequest
-	75,  // 61: raycontrol.node.v1.NodeService.SetUserEnabled:input_type -> raycontrol.node.v1.SetUserEnabledRequest
-	77,  // 62: raycontrol.node.v1.NodeService.SetUserServices:input_type -> raycontrol.node.v1.SetUserServicesRequest
-	79,  // 63: raycontrol.node.v1.NodeService.DeleteUser:input_type -> raycontrol.node.v1.DeleteUserRequest
-	71,  // 64: raycontrol.node.v1.NodeService.SetUserTraffic:input_type -> raycontrol.node.v1.SetUserTrafficRequest
-	73,  // 65: raycontrol.node.v1.NodeService.SetUserLAN:input_type -> raycontrol.node.v1.SetUserLANRequest
-	81,  // 66: raycontrol.node.v1.NodeService.ExportUser:input_type -> raycontrol.node.v1.ExportUserRequest
-	82,  // 67: raycontrol.node.v1.NodeService.RenewUser:input_type -> raycontrol.node.v1.RenewUserRequest
-	87,  // 68: raycontrol.node.v1.NodeService.ListServices:input_type -> raycontrol.node.v1.ListServicesRequest
-	89,  // 69: raycontrol.node.v1.NodeService.CreateService:input_type -> raycontrol.node.v1.CreateServiceRequest
-	91,  // 70: raycontrol.node.v1.NodeService.SetServiceEnabled:input_type -> raycontrol.node.v1.SetServiceEnabledRequest
-	93,  // 71: raycontrol.node.v1.NodeService.DeleteService:input_type -> raycontrol.node.v1.DeleteServiceRequest
-	99,  // 72: raycontrol.node.v1.NodeService.RotateService:input_type -> raycontrol.node.v1.RotateServiceRequest
-	95,  // 73: raycontrol.node.v1.NodeService.SetServiceOption:input_type -> raycontrol.node.v1.SetServiceOptionRequest
-	97,  // 74: raycontrol.node.v1.NodeService.SetCertificate:input_type -> raycontrol.node.v1.SetCertificateRequest
-	103, // 75: raycontrol.node.v1.NodeService.ListDevices:input_type -> raycontrol.node.v1.ListDevicesRequest
-	105, // 76: raycontrol.node.v1.NodeService.CreateDevice:input_type -> raycontrol.node.v1.CreateDeviceRequest
-	107, // 77: raycontrol.node.v1.NodeService.RevokeDevice:input_type -> raycontrol.node.v1.RevokeDeviceRequest
-	109, // 78: raycontrol.node.v1.NodeService.CreateInvite:input_type -> raycontrol.node.v1.CreateInviteRequest
-	112, // 79: raycontrol.node.v1.NodeService.ListAudit:input_type -> raycontrol.node.v1.ListAuditRequest
-	22,  // 80: raycontrol.node.v1.NodeService.GetAdminAccess:input_type -> raycontrol.node.v1.GetAdminAccessRequest
-	24,  // 81: raycontrol.node.v1.NodeService.SetAdminAccess:input_type -> raycontrol.node.v1.SetAdminAccessRequest
-	27,  // 82: raycontrol.node.v1.NodeService.AddRelay:input_type -> raycontrol.node.v1.AddRelayRequest
-	29,  // 83: raycontrol.node.v1.NodeService.ListRelays:input_type -> raycontrol.node.v1.ListRelaysRequest
-	31,  // 84: raycontrol.node.v1.NodeService.RemoveRelay:input_type -> raycontrol.node.v1.RemoveRelayRequest
-	33,  // 85: raycontrol.node.v1.NodeService.IssueRelayBundle:input_type -> raycontrol.node.v1.IssueRelayBundleRequest
-	35,  // 86: raycontrol.node.v1.NodeService.SetRelayAccess:input_type -> raycontrol.node.v1.SetRelayAccessRequest
-	3,   // 87: raycontrol.node.v1.NodeService.SetDNSProvider:input_type -> raycontrol.node.v1.SetDNSProviderRequest
-	5,   // 88: raycontrol.node.v1.NodeService.GetDNS:input_type -> raycontrol.node.v1.GetDNSRequest
-	7,   // 89: raycontrol.node.v1.NodeService.SyncDNS:input_type -> raycontrol.node.v1.SyncDNSRequest
-	9,   // 90: raycontrol.node.v1.NodeService.RemoveDNS:input_type -> raycontrol.node.v1.RemoveDNSRequest
-	13,  // 91: raycontrol.node.v1.NodeService.CheckDNSZones:input_type -> raycontrol.node.v1.CheckDNSZonesRequest
-	18,  // 92: raycontrol.node.v1.NodeService.Backup:input_type -> raycontrol.node.v1.BackupRequest
-	20,  // 93: raycontrol.node.v1.NodeService.GetMetrics:input_type -> raycontrol.node.v1.GetMetricsRequest
-	114, // 94: raycontrol.node.v1.NodeService.GetSummary:input_type -> raycontrol.node.v1.GetSummaryRequest
-	119, // 95: raycontrol.node.v1.NodeService.SetSummary:input_type -> raycontrol.node.v1.SetSummaryRequest
-	121, // 96: raycontrol.node.v1.NodeService.GetAppMirror:input_type -> raycontrol.node.v1.GetAppMirrorRequest
-	124, // 97: raycontrol.node.v1.NodeService.SetAppMirror:input_type -> raycontrol.node.v1.SetAppMirrorRequest
-	128, // 98: raycontrol.node.v1.NodeService.StartUpdate:input_type -> raycontrol.node.v1.StartUpdateRequest
-	130, // 99: raycontrol.node.v1.NodeService.GetUpdateStatus:input_type -> raycontrol.node.v1.GetUpdateStatusRequest
-	126, // 100: raycontrol.node.v1.NodeService.SetDebug:input_type -> raycontrol.node.v1.SetDebugRequest
-	61,  // 101: raycontrol.node.v1.NodeService.SetNodeName:input_type -> raycontrol.node.v1.SetNodeNameRequest
-	63,  // 102: raycontrol.node.v1.NodeService.SetNodeNote:input_type -> raycontrol.node.v1.SetNodeNoteRequest
-	49,  // 103: raycontrol.node.v1.NodeService.GetEgress:input_type -> raycontrol.node.v1.GetEgressRequest
-	51,  // 104: raycontrol.node.v1.NodeService.SetEgress:input_type -> raycontrol.node.v1.SetEgressRequest
-	53,  // 105: raycontrol.node.v1.NodeService.GetConnLimit:input_type -> raycontrol.node.v1.GetConnLimitRequest
-	59,  // 106: raycontrol.node.v1.NodeService.SetConnLimit:input_type -> raycontrol.node.v1.SetConnLimitRequest
-	37,  // 107: raycontrol.node.v1.NodeService.GetDeployment:input_type -> raycontrol.node.v1.GetDeploymentRequest
-	42,  // 108: raycontrol.node.v1.NodeService.GetDeployInputs:input_type -> raycontrol.node.v1.GetDeployInputsRequest
-	0,   // 109: raycontrol.node.v1.NodeService.GetPorts:input_type -> raycontrol.node.v1.GetPortsRequest
-	47,  // 110: raycontrol.node.v1.NodeService.GetStatus:output_type -> raycontrol.node.v1.GetStatusResponse
-	68,  // 111: raycontrol.node.v1.NodeService.ListUsers:output_type -> raycontrol.node.v1.ListUsersResponse
-	70,  // 112: raycontrol.node.v1.NodeService.CreateUser:output_type -> raycontrol.node.v1.CreateUserResponse
-	76,  // 113: raycontrol.node.v1.NodeService.SetUserEnabled:output_type -> raycontrol.node.v1.SetUserEnabledResponse
-	78,  // 114: raycontrol.node.v1.NodeService.SetUserServices:output_type -> raycontrol.node.v1.SetUserServicesResponse
-	80,  // 115: raycontrol.node.v1.NodeService.DeleteUser:output_type -> raycontrol.node.v1.DeleteUserResponse
-	72,  // 116: raycontrol.node.v1.NodeService.SetUserTraffic:output_type -> raycontrol.node.v1.SetUserTrafficResponse
-	74,  // 117: raycontrol.node.v1.NodeService.SetUserLAN:output_type -> raycontrol.node.v1.SetUserLANResponse
-	84,  // 118: raycontrol.node.v1.NodeService.ExportUser:output_type -> raycontrol.node.v1.ExportUserResponse
-	83,  // 119: raycontrol.node.v1.NodeService.RenewUser:output_type -> raycontrol.node.v1.RenewUserResponse
-	88,  // 120: raycontrol.node.v1.NodeService.ListServices:output_type -> raycontrol.node.v1.ListServicesResponse
-	90,  // 121: raycontrol.node.v1.NodeService.CreateService:output_type -> raycontrol.node.v1.CreateServiceResponse
-	92,  // 122: raycontrol.node.v1.NodeService.SetServiceEnabled:output_type -> raycontrol.node.v1.SetServiceEnabledResponse
-	94,  // 123: raycontrol.node.v1.NodeService.DeleteService:output_type -> raycontrol.node.v1.DeleteServiceResponse
-	100, // 124: raycontrol.node.v1.NodeService.RotateService:output_type -> raycontrol.node.v1.RotateServiceResponse
-	96,  // 125: raycontrol.node.v1.NodeService.SetServiceOption:output_type -> raycontrol.node.v1.SetServiceOptionResponse
-	98,  // 126: raycontrol.node.v1.NodeService.SetCertificate:output_type -> raycontrol.node.v1.SetCertificateResponse
-	104, // 127: raycontrol.node.v1.NodeService.ListDevices:output_type -> raycontrol.node.v1.ListDevicesResponse
-	106, // 128: raycontrol.node.v1.NodeService.CreateDevice:output_type -> raycontrol.node.v1.CreateDeviceResponse
-	108, // 129: raycontrol.node.v1.NodeService.RevokeDevice:output_type -> raycontrol.node.v1.RevokeDeviceResponse
-	110, // 130: raycontrol.node.v1.NodeService.CreateInvite:output_type -> raycontrol.node.v1.CreateInviteResponse
-	113, // 131: raycontrol.node.v1.NodeService.ListAudit:output_type -> raycontrol.node.v1.ListAuditResponse
-	23,  // 132: raycontrol.node.v1.NodeService.GetAdminAccess:output_type -> raycontrol.node.v1.GetAdminAccessResponse
-	25,  // 133: raycontrol.node.v1.NodeService.SetAdminAccess:output_type -> raycontrol.node.v1.SetAdminAccessResponse
-	28,  // 134: raycontrol.node.v1.NodeService.AddRelay:output_type -> raycontrol.node.v1.AddRelayResponse
-	30,  // 135: raycontrol.node.v1.NodeService.ListRelays:output_type -> raycontrol.node.v1.ListRelaysResponse
-	32,  // 136: raycontrol.node.v1.NodeService.RemoveRelay:output_type -> raycontrol.node.v1.RemoveRelayResponse
-	34,  // 137: raycontrol.node.v1.NodeService.IssueRelayBundle:output_type -> raycontrol.node.v1.IssueRelayBundleResponse
-	36,  // 138: raycontrol.node.v1.NodeService.SetRelayAccess:output_type -> raycontrol.node.v1.SetRelayAccessResponse
-	4,   // 139: raycontrol.node.v1.NodeService.SetDNSProvider:output_type -> raycontrol.node.v1.SetDNSProviderResponse
-	6,   // 140: raycontrol.node.v1.NodeService.GetDNS:output_type -> raycontrol.node.v1.GetDNSResponse
-	8,   // 141: raycontrol.node.v1.NodeService.SyncDNS:output_type -> raycontrol.node.v1.SyncDNSResponse
-	10,  // 142: raycontrol.node.v1.NodeService.RemoveDNS:output_type -> raycontrol.node.v1.RemoveDNSResponse
-	14,  // 143: raycontrol.node.v1.NodeService.CheckDNSZones:output_type -> raycontrol.node.v1.CheckDNSZonesResponse
-	19,  // 144: raycontrol.node.v1.NodeService.Backup:output_type -> raycontrol.node.v1.BackupResponse
-	21,  // 145: raycontrol.node.v1.NodeService.GetMetrics:output_type -> raycontrol.node.v1.GetMetricsResponse
-	115, // 146: raycontrol.node.v1.NodeService.GetSummary:output_type -> raycontrol.node.v1.GetSummaryResponse
-	120, // 147: raycontrol.node.v1.NodeService.SetSummary:output_type -> raycontrol.node.v1.SetSummaryResponse
-	122, // 148: raycontrol.node.v1.NodeService.GetAppMirror:output_type -> raycontrol.node.v1.GetAppMirrorResponse
-	125, // 149: raycontrol.node.v1.NodeService.SetAppMirror:output_type -> raycontrol.node.v1.SetAppMirrorResponse
-	129, // 150: raycontrol.node.v1.NodeService.StartUpdate:output_type -> raycontrol.node.v1.StartUpdateResponse
-	131, // 151: raycontrol.node.v1.NodeService.GetUpdateStatus:output_type -> raycontrol.node.v1.GetUpdateStatusResponse
-	127, // 152: raycontrol.node.v1.NodeService.SetDebug:output_type -> raycontrol.node.v1.SetDebugResponse
-	62,  // 153: raycontrol.node.v1.NodeService.SetNodeName:output_type -> raycontrol.node.v1.SetNodeNameResponse
-	64,  // 154: raycontrol.node.v1.NodeService.SetNodeNote:output_type -> raycontrol.node.v1.SetNodeNoteResponse
-	50,  // 155: raycontrol.node.v1.NodeService.GetEgress:output_type -> raycontrol.node.v1.GetEgressResponse
-	52,  // 156: raycontrol.node.v1.NodeService.SetEgress:output_type -> raycontrol.node.v1.SetEgressResponse
-	54,  // 157: raycontrol.node.v1.NodeService.GetConnLimit:output_type -> raycontrol.node.v1.GetConnLimitResponse
-	60,  // 158: raycontrol.node.v1.NodeService.SetConnLimit:output_type -> raycontrol.node.v1.SetConnLimitResponse
-	38,  // 159: raycontrol.node.v1.NodeService.GetDeployment:output_type -> raycontrol.node.v1.GetDeploymentResponse
-	43,  // 160: raycontrol.node.v1.NodeService.GetDeployInputs:output_type -> raycontrol.node.v1.GetDeployInputsResponse
-	1,   // 161: raycontrol.node.v1.NodeService.GetPorts:output_type -> raycontrol.node.v1.GetPortsResponse
-	110, // [110:162] is the sub-list for method output_type
-	58,  // [58:110] is the sub-list for method input_type
-	58,  // [58:58] is the sub-list for extension type_name
-	58,  // [58:58] is the sub-list for extension extendee
-	0,   // [0:58] is the sub-list for field type_name
+	133, // 56: raycontrol.node.v1.StartUpdateResponse.status:type_name -> raycontrol.node.v1.UpdateStatus
+	133, // 57: raycontrol.node.v1.GetUpdateStatusResponse.status:type_name -> raycontrol.node.v1.UpdateStatus
+	132, // 58: raycontrol.node.v1.GetUpdateStatusResponse.relays:type_name -> raycontrol.node.v1.RelayUpdateStatus
+	46,  // 59: raycontrol.node.v1.NodeService.GetStatus:input_type -> raycontrol.node.v1.GetStatusRequest
+	67,  // 60: raycontrol.node.v1.NodeService.ListUsers:input_type -> raycontrol.node.v1.ListUsersRequest
+	69,  // 61: raycontrol.node.v1.NodeService.CreateUser:input_type -> raycontrol.node.v1.CreateUserRequest
+	75,  // 62: raycontrol.node.v1.NodeService.SetUserEnabled:input_type -> raycontrol.node.v1.SetUserEnabledRequest
+	77,  // 63: raycontrol.node.v1.NodeService.SetUserServices:input_type -> raycontrol.node.v1.SetUserServicesRequest
+	79,  // 64: raycontrol.node.v1.NodeService.DeleteUser:input_type -> raycontrol.node.v1.DeleteUserRequest
+	71,  // 65: raycontrol.node.v1.NodeService.SetUserTraffic:input_type -> raycontrol.node.v1.SetUserTrafficRequest
+	73,  // 66: raycontrol.node.v1.NodeService.SetUserLAN:input_type -> raycontrol.node.v1.SetUserLANRequest
+	81,  // 67: raycontrol.node.v1.NodeService.ExportUser:input_type -> raycontrol.node.v1.ExportUserRequest
+	82,  // 68: raycontrol.node.v1.NodeService.RenewUser:input_type -> raycontrol.node.v1.RenewUserRequest
+	87,  // 69: raycontrol.node.v1.NodeService.ListServices:input_type -> raycontrol.node.v1.ListServicesRequest
+	89,  // 70: raycontrol.node.v1.NodeService.CreateService:input_type -> raycontrol.node.v1.CreateServiceRequest
+	91,  // 71: raycontrol.node.v1.NodeService.SetServiceEnabled:input_type -> raycontrol.node.v1.SetServiceEnabledRequest
+	93,  // 72: raycontrol.node.v1.NodeService.DeleteService:input_type -> raycontrol.node.v1.DeleteServiceRequest
+	99,  // 73: raycontrol.node.v1.NodeService.RotateService:input_type -> raycontrol.node.v1.RotateServiceRequest
+	95,  // 74: raycontrol.node.v1.NodeService.SetServiceOption:input_type -> raycontrol.node.v1.SetServiceOptionRequest
+	97,  // 75: raycontrol.node.v1.NodeService.SetCertificate:input_type -> raycontrol.node.v1.SetCertificateRequest
+	103, // 76: raycontrol.node.v1.NodeService.ListDevices:input_type -> raycontrol.node.v1.ListDevicesRequest
+	105, // 77: raycontrol.node.v1.NodeService.CreateDevice:input_type -> raycontrol.node.v1.CreateDeviceRequest
+	107, // 78: raycontrol.node.v1.NodeService.RevokeDevice:input_type -> raycontrol.node.v1.RevokeDeviceRequest
+	109, // 79: raycontrol.node.v1.NodeService.CreateInvite:input_type -> raycontrol.node.v1.CreateInviteRequest
+	112, // 80: raycontrol.node.v1.NodeService.ListAudit:input_type -> raycontrol.node.v1.ListAuditRequest
+	22,  // 81: raycontrol.node.v1.NodeService.GetAdminAccess:input_type -> raycontrol.node.v1.GetAdminAccessRequest
+	24,  // 82: raycontrol.node.v1.NodeService.SetAdminAccess:input_type -> raycontrol.node.v1.SetAdminAccessRequest
+	27,  // 83: raycontrol.node.v1.NodeService.AddRelay:input_type -> raycontrol.node.v1.AddRelayRequest
+	29,  // 84: raycontrol.node.v1.NodeService.ListRelays:input_type -> raycontrol.node.v1.ListRelaysRequest
+	31,  // 85: raycontrol.node.v1.NodeService.RemoveRelay:input_type -> raycontrol.node.v1.RemoveRelayRequest
+	33,  // 86: raycontrol.node.v1.NodeService.IssueRelayBundle:input_type -> raycontrol.node.v1.IssueRelayBundleRequest
+	35,  // 87: raycontrol.node.v1.NodeService.SetRelayAccess:input_type -> raycontrol.node.v1.SetRelayAccessRequest
+	3,   // 88: raycontrol.node.v1.NodeService.SetDNSProvider:input_type -> raycontrol.node.v1.SetDNSProviderRequest
+	5,   // 89: raycontrol.node.v1.NodeService.GetDNS:input_type -> raycontrol.node.v1.GetDNSRequest
+	7,   // 90: raycontrol.node.v1.NodeService.SyncDNS:input_type -> raycontrol.node.v1.SyncDNSRequest
+	9,   // 91: raycontrol.node.v1.NodeService.RemoveDNS:input_type -> raycontrol.node.v1.RemoveDNSRequest
+	13,  // 92: raycontrol.node.v1.NodeService.CheckDNSZones:input_type -> raycontrol.node.v1.CheckDNSZonesRequest
+	18,  // 93: raycontrol.node.v1.NodeService.Backup:input_type -> raycontrol.node.v1.BackupRequest
+	20,  // 94: raycontrol.node.v1.NodeService.GetMetrics:input_type -> raycontrol.node.v1.GetMetricsRequest
+	114, // 95: raycontrol.node.v1.NodeService.GetSummary:input_type -> raycontrol.node.v1.GetSummaryRequest
+	119, // 96: raycontrol.node.v1.NodeService.SetSummary:input_type -> raycontrol.node.v1.SetSummaryRequest
+	121, // 97: raycontrol.node.v1.NodeService.GetAppMirror:input_type -> raycontrol.node.v1.GetAppMirrorRequest
+	124, // 98: raycontrol.node.v1.NodeService.SetAppMirror:input_type -> raycontrol.node.v1.SetAppMirrorRequest
+	128, // 99: raycontrol.node.v1.NodeService.StartUpdate:input_type -> raycontrol.node.v1.StartUpdateRequest
+	130, // 100: raycontrol.node.v1.NodeService.GetUpdateStatus:input_type -> raycontrol.node.v1.GetUpdateStatusRequest
+	126, // 101: raycontrol.node.v1.NodeService.SetDebug:input_type -> raycontrol.node.v1.SetDebugRequest
+	61,  // 102: raycontrol.node.v1.NodeService.SetNodeName:input_type -> raycontrol.node.v1.SetNodeNameRequest
+	63,  // 103: raycontrol.node.v1.NodeService.SetNodeNote:input_type -> raycontrol.node.v1.SetNodeNoteRequest
+	49,  // 104: raycontrol.node.v1.NodeService.GetEgress:input_type -> raycontrol.node.v1.GetEgressRequest
+	51,  // 105: raycontrol.node.v1.NodeService.SetEgress:input_type -> raycontrol.node.v1.SetEgressRequest
+	53,  // 106: raycontrol.node.v1.NodeService.GetConnLimit:input_type -> raycontrol.node.v1.GetConnLimitRequest
+	59,  // 107: raycontrol.node.v1.NodeService.SetConnLimit:input_type -> raycontrol.node.v1.SetConnLimitRequest
+	37,  // 108: raycontrol.node.v1.NodeService.GetDeployment:input_type -> raycontrol.node.v1.GetDeploymentRequest
+	42,  // 109: raycontrol.node.v1.NodeService.GetDeployInputs:input_type -> raycontrol.node.v1.GetDeployInputsRequest
+	0,   // 110: raycontrol.node.v1.NodeService.GetPorts:input_type -> raycontrol.node.v1.GetPortsRequest
+	47,  // 111: raycontrol.node.v1.NodeService.GetStatus:output_type -> raycontrol.node.v1.GetStatusResponse
+	68,  // 112: raycontrol.node.v1.NodeService.ListUsers:output_type -> raycontrol.node.v1.ListUsersResponse
+	70,  // 113: raycontrol.node.v1.NodeService.CreateUser:output_type -> raycontrol.node.v1.CreateUserResponse
+	76,  // 114: raycontrol.node.v1.NodeService.SetUserEnabled:output_type -> raycontrol.node.v1.SetUserEnabledResponse
+	78,  // 115: raycontrol.node.v1.NodeService.SetUserServices:output_type -> raycontrol.node.v1.SetUserServicesResponse
+	80,  // 116: raycontrol.node.v1.NodeService.DeleteUser:output_type -> raycontrol.node.v1.DeleteUserResponse
+	72,  // 117: raycontrol.node.v1.NodeService.SetUserTraffic:output_type -> raycontrol.node.v1.SetUserTrafficResponse
+	74,  // 118: raycontrol.node.v1.NodeService.SetUserLAN:output_type -> raycontrol.node.v1.SetUserLANResponse
+	84,  // 119: raycontrol.node.v1.NodeService.ExportUser:output_type -> raycontrol.node.v1.ExportUserResponse
+	83,  // 120: raycontrol.node.v1.NodeService.RenewUser:output_type -> raycontrol.node.v1.RenewUserResponse
+	88,  // 121: raycontrol.node.v1.NodeService.ListServices:output_type -> raycontrol.node.v1.ListServicesResponse
+	90,  // 122: raycontrol.node.v1.NodeService.CreateService:output_type -> raycontrol.node.v1.CreateServiceResponse
+	92,  // 123: raycontrol.node.v1.NodeService.SetServiceEnabled:output_type -> raycontrol.node.v1.SetServiceEnabledResponse
+	94,  // 124: raycontrol.node.v1.NodeService.DeleteService:output_type -> raycontrol.node.v1.DeleteServiceResponse
+	100, // 125: raycontrol.node.v1.NodeService.RotateService:output_type -> raycontrol.node.v1.RotateServiceResponse
+	96,  // 126: raycontrol.node.v1.NodeService.SetServiceOption:output_type -> raycontrol.node.v1.SetServiceOptionResponse
+	98,  // 127: raycontrol.node.v1.NodeService.SetCertificate:output_type -> raycontrol.node.v1.SetCertificateResponse
+	104, // 128: raycontrol.node.v1.NodeService.ListDevices:output_type -> raycontrol.node.v1.ListDevicesResponse
+	106, // 129: raycontrol.node.v1.NodeService.CreateDevice:output_type -> raycontrol.node.v1.CreateDeviceResponse
+	108, // 130: raycontrol.node.v1.NodeService.RevokeDevice:output_type -> raycontrol.node.v1.RevokeDeviceResponse
+	110, // 131: raycontrol.node.v1.NodeService.CreateInvite:output_type -> raycontrol.node.v1.CreateInviteResponse
+	113, // 132: raycontrol.node.v1.NodeService.ListAudit:output_type -> raycontrol.node.v1.ListAuditResponse
+	23,  // 133: raycontrol.node.v1.NodeService.GetAdminAccess:output_type -> raycontrol.node.v1.GetAdminAccessResponse
+	25,  // 134: raycontrol.node.v1.NodeService.SetAdminAccess:output_type -> raycontrol.node.v1.SetAdminAccessResponse
+	28,  // 135: raycontrol.node.v1.NodeService.AddRelay:output_type -> raycontrol.node.v1.AddRelayResponse
+	30,  // 136: raycontrol.node.v1.NodeService.ListRelays:output_type -> raycontrol.node.v1.ListRelaysResponse
+	32,  // 137: raycontrol.node.v1.NodeService.RemoveRelay:output_type -> raycontrol.node.v1.RemoveRelayResponse
+	34,  // 138: raycontrol.node.v1.NodeService.IssueRelayBundle:output_type -> raycontrol.node.v1.IssueRelayBundleResponse
+	36,  // 139: raycontrol.node.v1.NodeService.SetRelayAccess:output_type -> raycontrol.node.v1.SetRelayAccessResponse
+	4,   // 140: raycontrol.node.v1.NodeService.SetDNSProvider:output_type -> raycontrol.node.v1.SetDNSProviderResponse
+	6,   // 141: raycontrol.node.v1.NodeService.GetDNS:output_type -> raycontrol.node.v1.GetDNSResponse
+	8,   // 142: raycontrol.node.v1.NodeService.SyncDNS:output_type -> raycontrol.node.v1.SyncDNSResponse
+	10,  // 143: raycontrol.node.v1.NodeService.RemoveDNS:output_type -> raycontrol.node.v1.RemoveDNSResponse
+	14,  // 144: raycontrol.node.v1.NodeService.CheckDNSZones:output_type -> raycontrol.node.v1.CheckDNSZonesResponse
+	19,  // 145: raycontrol.node.v1.NodeService.Backup:output_type -> raycontrol.node.v1.BackupResponse
+	21,  // 146: raycontrol.node.v1.NodeService.GetMetrics:output_type -> raycontrol.node.v1.GetMetricsResponse
+	115, // 147: raycontrol.node.v1.NodeService.GetSummary:output_type -> raycontrol.node.v1.GetSummaryResponse
+	120, // 148: raycontrol.node.v1.NodeService.SetSummary:output_type -> raycontrol.node.v1.SetSummaryResponse
+	122, // 149: raycontrol.node.v1.NodeService.GetAppMirror:output_type -> raycontrol.node.v1.GetAppMirrorResponse
+	125, // 150: raycontrol.node.v1.NodeService.SetAppMirror:output_type -> raycontrol.node.v1.SetAppMirrorResponse
+	129, // 151: raycontrol.node.v1.NodeService.StartUpdate:output_type -> raycontrol.node.v1.StartUpdateResponse
+	131, // 152: raycontrol.node.v1.NodeService.GetUpdateStatus:output_type -> raycontrol.node.v1.GetUpdateStatusResponse
+	127, // 153: raycontrol.node.v1.NodeService.SetDebug:output_type -> raycontrol.node.v1.SetDebugResponse
+	62,  // 154: raycontrol.node.v1.NodeService.SetNodeName:output_type -> raycontrol.node.v1.SetNodeNameResponse
+	64,  // 155: raycontrol.node.v1.NodeService.SetNodeNote:output_type -> raycontrol.node.v1.SetNodeNoteResponse
+	50,  // 156: raycontrol.node.v1.NodeService.GetEgress:output_type -> raycontrol.node.v1.GetEgressResponse
+	52,  // 157: raycontrol.node.v1.NodeService.SetEgress:output_type -> raycontrol.node.v1.SetEgressResponse
+	54,  // 158: raycontrol.node.v1.NodeService.GetConnLimit:output_type -> raycontrol.node.v1.GetConnLimitResponse
+	60,  // 159: raycontrol.node.v1.NodeService.SetConnLimit:output_type -> raycontrol.node.v1.SetConnLimitResponse
+	38,  // 160: raycontrol.node.v1.NodeService.GetDeployment:output_type -> raycontrol.node.v1.GetDeploymentResponse
+	43,  // 161: raycontrol.node.v1.NodeService.GetDeployInputs:output_type -> raycontrol.node.v1.GetDeployInputsResponse
+	1,   // 162: raycontrol.node.v1.NodeService.GetPorts:output_type -> raycontrol.node.v1.GetPortsResponse
+	111, // [111:163] is the sub-list for method output_type
+	59,  // [59:111] is the sub-list for method input_type
+	59,  // [59:59] is the sub-list for extension type_name
+	59,  // [59:59] is the sub-list for extension extendee
+	0,   // [0:59] is the sub-list for field type_name
 }
 
 func init() { file_raycontrol_node_v1_node_proto_init() }
@@ -9060,7 +9215,7 @@ func file_raycontrol_node_v1_node_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_raycontrol_node_v1_node_proto_rawDesc), len(file_raycontrol_node_v1_node_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   141,
+			NumMessages:   142,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

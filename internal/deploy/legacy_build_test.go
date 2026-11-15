@@ -26,7 +26,11 @@ import (
 // one changes naive's unit, so the update that brings it restarts naive:
 // once, with the rest of the data plane (the key's file itself restarts
 // nothing, render.File.AtStart). Since R4-40 rayspa's unit starts before
-// the network, in both.
+// the network, in both. And in both the front's user, unit (with the
+// probe key) and rayd's group come with the first service it carries,
+// not with its config only: a plan of REALITY, naive, hy2-masq or
+// Yggdrasil before their site's certificate named the front's group in
+// tmpfiles without making it, and the install failed.
 // Remove it with GetDeployment's files (§4.1, step 8).
 func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binaries) Plan {
 	plan := Plan{Conntrack: true}
@@ -75,7 +79,9 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 	// The front's config, not any file of the front's: a slipstream service
 	// that failed to render still refreshes its keys file there (review).
 	frontConfig := path.Join(p.Rendered, "front", "front.json")
-	hasFront := slices.ContainsFunc(files, func(f render.File) bool { return f.Path == frontConfig })
+	frontRendered := slices.ContainsFunc(files, func(f render.File) bool { return f.Path == frontConfig })
+	hasFront := frontRendered || len(slices.Concat(naives, dns, hysteria, yggs)) > 0 || m.FrontTCP && len(reality) > 0 ||
+		slices.ContainsFunc(m.Services, func(s render.Service) bool { return s.Kind == "doh" })
 	anchor := renderedAnchor(p) // decision 3, the one change since v0.20.1
 
 	var raydGroups []string
@@ -415,7 +421,11 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 				frontCreds = append(frontCreds, copyIn(bin.Rayd, anchor, renderedOwner, "niko-front", src, dst))
 			}
 		}
-		cred(path.Join(p.Rendered, "front", render.DNSProbeKeyFile), p.FrontDNSProbe())
+		if probe := path.Join(p.Rendered, "front", render.DNSProbeKeyFile); !frontRendered {
+			frontCreds = append(frontCreds, copyIn(bin.Rayd, anchor, renderedOwner, "niko-front", probe, p.FrontDNSProbe()))
+		} else {
+			cred(probe, p.FrontDNSProbe())
+		}
 		for _, s := range hysteria {
 			if s.Kind == "hy2-obfs" {
 				cred(path.Join(p.Rendered, "front", s.Name+".salamander"), p.FrontSalamander(s.Name))

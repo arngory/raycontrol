@@ -49,11 +49,11 @@ type Remote struct {
 	now         func() time.Time
 
 	relayMu      sync.Mutex
-	relayStreams map[string]int       // WatchRelay streams open per relay
-	relayReports map[string]int       // Report calls under way per relay
-	relayProbes  map[string]int       // rayd relay's feeds open per relay
-	relayProbeAt map[string]time.Time // when the last of them closed
-	started      time.Time            // when Serve began
+	relayStreams map[string][]*relayStream // WatchRelay streams open per relay
+	relayReports map[string]int            // Report calls under way per relay
+	relayProbes  map[string]int            // rayd relay's feeds open per relay
+	relayProbeAt map[string]time.Time      // when the last of them closed
+	started      time.Time                 // when Serve began
 }
 
 // relayProbeGrace keeps a relay's probe endpoint listed while its rayd relay

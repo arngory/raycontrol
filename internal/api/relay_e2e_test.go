@@ -20,9 +20,13 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
+	"google.golang.org/protobuf/encoding/protojson"
+
 	"github.com/arngory/raycontrol/internal/asn"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/spa"
@@ -66,6 +70,11 @@ func (e2eASN) Lookup(_ context.Context, addr netip.Addr) (asn.Info, bool) {
 // client finds it closed before the knock, and after it takes down and the
 // UDP echo with K_relay (not with its own key), and its report through the
 // relay is counted at the exit once (again: 429).
+//
+// With RAYCONTROL_RELAY_E2E_VERSION the exit runs that release, its last
+// update done (relay-update-remote-v1 §3.3): it names the release to the
+// relay's rayd relay, and test/relay/e2e.sh reads what GetUpdateStatus
+// says of the relay (relayExitUpdated).
 func TestRelayE2ERole(t *testing.T) {
 	role := os.Getenv("RAYCONTROL_RELAY_E2E_ROLE")
 	if role == "" {
@@ -93,6 +102,9 @@ func relayExit(ctx context.Context, t *testing.T, dir, exit, relayAddr string) {
 		t.Fatal(err)
 	}
 	srv := &Server{Store: st, Params: params, Version: "test"}
+	if v := os.Getenv("RAYCONTROL_RELAY_E2E_VERSION"); v != "" {
+		relayExitUpdated(ctx, t, srv, dir, v)
+	}
 	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "api", Name: "api", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -230,6 +242,40 @@ func relayExit(ctx context.Context, t *testing.T, dir, exit, relayAddr string) {
 	}()
 	fmt.Println("exit ready")
 	<-ctx.Done()
+}
+
+// relayExitUpdated makes the exit release v, its last update by request
+// done to v (spec/relay-update-remote-v1.md §3.3): the exit names v to its
+// relays' rayd relay. Its update files are in dir, not the host's; what
+// GetUpdateStatus says goes to dir/update-status.json (proto names, every
+// field) every 200 ms, for test/relay/e2e.sh to read.
+func relayExitUpdated(ctx context.Context, t *testing.T, srv *Server, dir, v string) {
+	srv.Version = v
+	srv.NodeUpdate = &NodeUpdate{Request: filepath.Join(dir, "node-update-request"), Status: filepath.Join(dir, "node-status.json"),
+		Policy: filepath.Join(dir, "node-policy.json"), Unit: filepath.Join(dir, nodeupdate.PathUnit)}
+	now := time.Now().UTC()
+	st := nodeupdate.Status{ID: nodeupdate.NewID(), State: nodeupdate.Done, To: v, Target: v, Release: v, By: "alice/phone (remote)",
+		Kind: nodeupdate.Remote, Requested: now.Add(-3 * time.Minute), Started: now.Add(-2 * time.Minute), Ended: now.Add(-time.Minute)}
+	if err := nodeupdate.WriteStatus(srv.NodeUpdate.Status, st); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Printf("exit: %s, its update %s done\n", v, st.ID)
+	out := filepath.Join(dir, "update-status.json")
+	go func() {
+		for ctx.Err() == nil {
+			resp, err := srv.GetUpdateStatus(ctx, connect.NewRequest(&nodev1.GetUpdateStatusRequest{}))
+			if err == nil {
+				b, merr := protojson.MarshalOptions{UseProtoNames: true, EmitUnpopulated: true}.Marshal(resp.Msg)
+				if merr == nil && os.WriteFile(out+".new", b, 0o600) == nil {
+					err = os.Rename(out+".new", out)
+				}
+			}
+			if err != nil && ctx.Err() == nil {
+				fmt.Println("exit: update status:", err)
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}()
 }
 
 func relayClient(ctx context.Context, t *testing.T, dir, relay, seen string) {

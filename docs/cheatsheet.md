@@ -18,11 +18,11 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `bootstrap.sh … -ports spa=40000-40099,sub=40100,api=40101,rotation=41000-41399` | с v0.27.0: свои порты вместо случайных, для файрвола провайдера или NAT — стук (TCP и UDP, диапазон или один порт), подписка (TCP и UDP), API (TCP), ротация UDP (четверть диапазона на сервис; `rotation=off` — без неё); от 1024; что не названо — случайное. **Только при первой установке:** клиенты знают эти порты из пакета устройства, повторная установка с другими отказывает ([10-quickstart-debian13.md](10-quickstart-debian13.md) §5.2) |
 | `rayctl ports` · `rayctl -json ports` | с v0.27.0: все порты ноды для файрвола провайдера — протокол, номер или диапазон, кто достаёт (все, после стука, адреса администратора), как задан (`fixed`, `random`, `chosen`, `sshd`), у меняющихся — порт сейчас и время смены; root или группа `raycontrol`, или `-remote ФАЙЛ` |
 | `rayctl apply` | поставить то, что нужно новым сервисам: пользователи, юниты, файлы |
-| `rayctl update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-no-handoff]` | обновить ноду до проверенного релиза; при сбое — сам откат. С v0.19: обновление делает `rayctl` самого релиза (`-no-handoff` — этим `rayctl`, если новый здесь не запускается). С v0.15.0: юниты data plane, которые работали до обновления, должны заработать снова (иначе откат); файлы релиза, которых прежняя версия не знает, ставит новый rayctl; в конце — DNS-туннели, у которых режимы слабее, чем у нового сервиса |
+| `rayctl update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-no-handoff] [-no-relays]` | обновить ноду до проверенного релиза; при сбое — сам откат. С v0.19: обновление делает `rayctl` самого релиза (`-no-handoff` — этим `rayctl`, если новый здесь не запускается). С v0.15.0: юниты data plane, которые работали до обновления, должны заработать снова (иначе откат); файлы релиза, которых прежняя версия не знает, ставит новый rayctl; в конце — DNS-туннели, у которых режимы слабее, чем у нового сервиса. С v0.28: ручное обновление пишет статус (`by rayctl on the node`, его видит и телефон; откатившееся — в `held`), и relay с `remote on` идут за удавшимся, по одному; `-no-relays` — не идут |
 | `rayctl update -rollback [-no-carry]` | вернуть бинарники, которые заменило последнее обновление; базу — только если обновление сдвинуло её схему, с вопросом. `-no-carry` — вернуть копию базы как есть, без отозванного с тех пор (когда нынешнюю базу не прочитать) |
 | `rayctl update remote on\|off` | с v0.19, только root: admin-устройства могут обновлять ноду через API (StartUpdate) — только на подписанный релиз новее ноды; по умолчанию выкл. Политика — файл root `/var/lib/raycontrol-update/policy.json`, rayd его только читает ([`spec/node-update-v1.md`](spec/node-update-v1.md)) |
 | `rayctl update auto patch [-window 03:00-05:00]` / `auto off` | с v0.19, только root: rayd сам обновляется на патч-версии своей минорной в окне (время ноды, окно не короче 30 мин); раз в ~6 ч спрашивает GitHub; по умолчанию выкл. После отката эту версию больше не просит; после сбоя до изменений на ноде (скачивание) — через сутки. Новую минорную (или мажорную) не ставит, а называет: строка `auto-update` в `rayctl status` и `newer` в `rayctl update status` (после v0.26.0). С v0.27.0 после выхода новой минорной берёт самый новый патч своей: спрашивает следующие номера (не больше 8 за проверку; один пропуск переступает), строка `patch` в `rayctl update status` |
-| `rayctl update status` | политика обновлений, последний релиз (что видели проверки rayd; сам к GitHub не ходит, без проверок — `latest     not checked`), последнее обновление по запросу; журнал самого обновления — `journalctl -u raycontrol-update` |
+| `rayctl update status` | политика обновлений, последний релиз (что видели проверки rayd; сам к GitHub не ходит, без проверок — `latest     not checked`), последнее обновление по запросу (с v0.28 — и ручное); журнал самого обновления — `journalctl -u raycontrol-update`. С v0.28 — по строке на relay: версия и где его обновление по слову ноды (`unknown`, `off`, `current`, `waiting for …`, `offered`, `requested`, `running`, `done`, `rolled_back`, `failed` с кодом и текстом); `-json` — поле `relays` ([10-quickstart-debian13.md](10-quickstart-debian13.md) §12.4) |
 | `rayctl update -version v0.15.0` → `rayctl update` | нода на v0.10–v0.14: в два шага, их `rayctl` не берёт архив с новыми файлами (`unexpected "slipstream-server"`); [RELEASE.md](RELEASE.md) |
 | `rayctl uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]` | убрать всё по журналу установки, записи в Cloudflare тоже |
 | `rayctl admin <ваш IP> [прежние адреса…]` | с консоли провайдера: пустить свой адрес к SSH без SPA (список заменяется целиком) |
@@ -236,7 +236,20 @@ sudo rayctl update -rollback   # вернуть версию до последн
 Не перезагружайте и не выключайте хост relay во время `rayctl update`: после загрузки relay может быть открытым и
 без пересылки. Тогда — `sudo rayctl update -rollback`; прервано ли обновление, говорит `rayctl update status`.
 
-`rayctl update remote|auto` на relay отказывает: у relay нет API rayd для устройств. Relay до v0.26.0 и запасной
-путь — тот же запуск ещё раз, с пакетом, который установка оставила на хосте relay:
-`sudo bash bootstrap.sh -relay /etc/raycontrol/relay.bundle`
-([10-quickstart-debian13.md](10-quickstart-debian13.md) §12.4, [spec/node-update-v1.md](spec/node-update-v1.md) §5).
+С v0.28.0 relay идёт и за обновлением ноды — по слову ноды, если root на relay это разрешил (по умолчанию нет).
+Тоже не запускалось на настоящем хосте.
+
+```
+sudo rayctl update remote on    # нужны relay v0.28.0+ (сначала rayctl update) и rayd relay; по одному relay за раз,
+                                # только подписанный релиз новее установленного, качает сам relay
+sudo rayctl update remote off   # relay остаётся на своей версии; ждущий запрос удаляется
+sudo rayctl update status       # remote, last (по слову ноды, с кодом причины), held, error; без root last не читается
+journalctl -u raycontrol-relay-update   # само обновление по слову ноды; journalctl -u rayd-relay — слово ноды и доклады
+```
+
+На ноде: `rayctl update -no-relays` — relay не идут за этим обновлением; выключателя relay на ноде нет.
+`rayctl update auto` на relay отказывает: relay идёт за выходом. До v0.28.0 `rayctl update remote|auto` на relay
+отказывали. Relay до v0.26.0 и запасной путь — тот же запуск ещё раз, с пакетом, который установка оставила на хосте
+relay: `sudo bash bootstrap.sh -relay /etc/raycontrol/relay.bundle`
+([10-quickstart-debian13.md](10-quickstart-debian13.md) §12.4, [spec/node-update-v1.md](spec/node-update-v1.md) §5,
+[spec/relay-update-remote-v1.md](spec/relay-update-remote-v1.md)).

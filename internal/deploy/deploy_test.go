@@ -8,12 +8,14 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
 	"testing"
 
 	"github.com/arngory/raycontrol/internal/deploy"
+	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/perimeter"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -1035,6 +1037,123 @@ func TestRelayPlan(t *testing.T) {
 	}
 }
 
+// The relay's update by its exit's word (relay-update-remote-v1 §4.1):
+// three unit files of its own in the plan, none of them a unit the plan
+// enables (root's policy does); the path unit watches the request in
+// rayd relay's own state directory; the service runs as root, unsandboxed,
+// and only by the path unit; the recover unit once a boot, on the mark.
+// The node's update units stay as they were.
+func TestRelayUpdateUnits(t *testing.T) {
+	p := deploy.RelayPlan(deploy.DefaultBinaries)
+	if err := p.Check(); err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(p.Units, func(u string) bool { return strings.HasPrefix(u, "raycontrol-") }) {
+		t.Errorf("units %v", p.Units)
+	}
+	unit := func(name string) string { return file(p, "/etc/systemd/system/"+name) }
+	path, svc, recover := unit(deploy.RelayUpdatePath), unit(deploy.RelayUpdateService), unit(deploy.RelayRecover)
+	for name, c := range map[string]struct {
+		content    string
+		want, none []string
+	}{
+		deploy.RelayUpdatePath: {path, []string{"[Path]\nPathExists=" + nodeupdate.RelayRequestFile + "\n", "[Install]\nWantedBy=multi-user.target\n"}, nil},
+		deploy.RelayUpdateService: {svc, []string{"Type=oneshot\n", "ExecStart=/usr/local/bin/rayctl update -request\n",
+			"ExecStopPost=-/usr/local/bin/rayctl update -request-ended\n", "TimeoutStartSec=15min\n", "TimeoutStopSec=5min\n",
+			"StateDirectory=raycontrol-update\nStateDirectoryMode=0755\n", "Wants=network-online.target\n",
+			"After=network-online.target " + deploy.RelayRecover + "\n"},
+			[]string{"User=", "[Install]", "ProtectSystem", "NoNewPrivileges"}},
+		// On the mark, or on root's status: a run cut short before its
+		// first change (the mark goes in before it) has its status settled.
+		deploy.RelayRecover: {recover, []string{"ConditionPathExists=|" + deploy.RelayUpdateMark + "\n",
+			"ConditionPathExists=|" + nodeupdate.StatusFile + "\n", "Type=oneshot\n",
+			"ExecStart=/usr/local/bin/rayctl update -request-recover\n", "TimeoutStartSec=10min\n", "[Install]\nWantedBy=multi-user.target\n"},
+			[]string{"User=", "ExecStopPost", "ProtectSystem"}},
+	} {
+		for _, w := range c.want {
+			if !strings.Contains(c.content, w) {
+				t.Errorf("%s lacks %q:\n%s", name, w, c.content)
+			}
+		}
+		for _, w := range c.none {
+			if strings.Contains(c.content, w) {
+				t.Errorf("%s has %q:\n%s", name, w, c.content)
+			}
+		}
+	}
+	// The request is in rayd relay's state directory, which only it and
+	// root reach (0700).
+	probe := unit(deploy.RelayProbeUnit)
+	if !strings.Contains(probe, "\nStateDirectory="+strings.TrimPrefix(filepath.Dir(nodeupdate.RelayRequestFile), "/var/lib/")+"\n") ||
+		!strings.Contains(probe, "\nStateDirectoryMode=0700\n") || filepath.Dir(filepath.Dir(nodeupdate.RelayRequestFile)) != "/var/lib" {
+		t.Errorf("%s is not in rayd relay's state directory:\n%s", nodeupdate.RelayRequestFile, probe)
+	}
+	// Not one of the plan's enabled units, not as root writes it: refused.
+	for name, edit := range map[string]func(*deploy.Plan){
+		"the service enabled": func(p *deploy.Plan) { p.Units = append(p.Units, deploy.RelayUpdateService) },
+		"recover enabled":     func(p *deploy.Plan) { p.Units = append(p.Units, deploy.RelayRecover) },
+		"another command": func(p *deploy.Plan) {
+			for i, f := range p.Files {
+				if strings.HasSuffix(f.Path, deploy.RelayUpdateService) {
+					p.Files[i].Content = bytes.Replace(f.Content, []byte("rayctl update -request\n"), []byte("rayctl update -request; /bin/sh\n"), 1)
+				}
+			}
+		},
+		"another file watched": func(p *deploy.Plan) {
+			for i, f := range p.Files {
+				if strings.HasSuffix(f.Path, deploy.RelayUpdatePath) {
+					p.Files[i].Content = bytes.Replace(f.Content, []byte("/var/lib/rayd-relay/"), []byte("/tmp/"), 1)
+				}
+			}
+		},
+	} {
+		q := p
+		q.Files, q.Units = slices.Clone(p.Files), slices.Clone(p.Units)
+		edit(&q)
+		if err := q.Check(); err == nil {
+			t.Errorf("%s: passed the check", name)
+		}
+	}
+	// A node has none of them, and its own update units are the node's.
+	node := deploy.Build(deploy.Inputs{}, render.DefaultPaths, deploy.DefaultBinaries)
+	for _, f := range node.Files {
+		if strings.Contains(f.Path, "raycontrol-relay-") || strings.Contains(string(f.Content), "rayd-relay/update-request") {
+			t.Errorf("a node's plan has %s", f.Path)
+		}
+	}
+	if !strings.Contains(file(node, "/etc/systemd/system/"+nodeupdate.PathUnit), "PathExists="+nodeupdate.RequestFile+"\n") ||
+		!strings.Contains(file(node, "/etc/systemd/system/"+nodeupdate.ServiceUnit), "TimeoutStartSec=50min\n") {
+		t.Error("the node's update units changed")
+	}
+}
+
+// The relay's update service is ordered against none of the relay's
+// units, which its rollback stops and starts: while the service stops
+// (systemctl stop of it halfway, test/relay/host.sh), a job of a unit
+// ordered against it waits for the stop to end, and the stop waited for
+// the rollback until TimeoutStopSec, twice: ten minutes, the status
+// failed, the update unfinished. At boot it still comes after rayspa,
+// through the network targets.
+func TestRelayUpdateServiceOrdering(t *testing.T) {
+	p := deploy.RelayPlan(deploy.DefaultBinaries)
+	svc := file(p, "/etc/systemd/system/"+deploy.RelayUpdateService)
+	for _, l := range strings.Split(svc, "\n") {
+		k, v, _ := strings.Cut(l, "=")
+		if k != "After" && k != "Before" {
+			continue
+		}
+		for _, u := range strings.Fields(v) {
+			if slices.Contains(p.Units, u) {
+				t.Errorf("%s: %s=%s, one of the units its rollback stops and starts", deploy.RelayUpdateService, k, u)
+			}
+		}
+	}
+	if !strings.Contains(svc, "\nAfter=network-online.target ") ||
+		!strings.Contains(file(p, "/etc/systemd/system/rayspa.service"), "\nBefore=network-pre.target ") {
+		t.Errorf("not after rayspa at boot:\n%s", svc)
+	}
+}
+
 // The DNS tunnels share UDP 53 with systemd-resolved's stub: its sockets on
 // 127.0.0.53 and 127.0.0.54 draw no warning, another resolver's do; and a
 // host where an install before v0.11 turned the stub off gets it back: the
@@ -1612,5 +1731,133 @@ func TestBuildSlipstream(t *testing.T) {
 	}
 	if slices.Contains(p.Units, "niko-front.service") || slices.ContainsFunc(p.Users, func(u deploy.SystemUser) bool { return u.Name == "niko-front" }) {
 		t.Errorf("a front without a config: units %v", p.Units)
+	}
+}
+
+// The front before its config, as at every install of the default
+// REALITY: REALITY, naive, hy2-masq and Yggdrasil render nothing until
+// their site has a certificate, nor the front with them, and their socket
+// directories are of the front's group all the same. The plan makes every
+// group it names, tmpfiles' and the units', and it is the plan of after
+// the certificate too: rayd, in the front's group, writes the front's
+// config then and starts the units that waited for theirs, with no apply.
+// Before, the front's user came with its config only: systemd-tmpfiles
+// did not find its group, and the install stopped there.
+func TestFrontBeforeItsConfig(t *testing.T) {
+	const tmpfiles = "/etc/tmpfiles.d/raycontrol.conf"
+	var reality deploy.Plan
+	for name, services := range map[string][][3]string{
+		"the default REALITY":     {{"reality", "reality", ""}},
+		"the guide's, no dnstt":   {{"reality", "reality", ""}, {"hy2-masq", "hy2-masq", ""}, {"naive", "naive", ""}, {"api", "api", ""}},
+		"hy2-masq":                {{"hy2-masq", "hy2-masq", ""}},
+		"REALITY and Yggdrasil":   {{"reality", "reality", ""}, {"yggdrasil", "ygg", ""}},
+		"the guide's, with dnstt": {{"reality", "reality", ""}, {"hy2-masq", "hy2-masq", ""}, {"naive", "naive", ""}, {"dnstt", "dns", ""}, {"api", "api", ""}},
+	} {
+		m, files := buildModel(t, render.DefaultPaths, services, nil)
+		in := deploy.InputsOf(m, files, render.DefaultPaths)
+		if in.Front != strings.Contains(name, "with dnstt") {
+			t.Fatalf("%s: the front rendered: %v", name, in.Front)
+		}
+		p := deploy.Build(in, render.DefaultPaths, deploy.DefaultBinaries)
+		if name == "the default REALITY" {
+			reality = p
+		}
+		if err := p.Check(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		made := map[string]bool{"root": true}
+		for _, u := range p.Users {
+			made[u.Name] = true
+		}
+		var named []string
+		for _, l := range strings.Split(file(p, tmpfiles), "\n") {
+			if f := strings.Fields(l); len(f) == 6 && f[0] == "d" {
+				named = append(named, f[3], f[4])
+			}
+		}
+		for _, f := range p.Files {
+			if !strings.HasPrefix(f.Path, "/etc/systemd/system/") {
+				continue
+			}
+			for _, l := range strings.Split(string(f.Content), "\n") {
+				k, v, _ := strings.Cut(l, "=")
+				if k == "User" || k == "Group" || k == "SupplementaryGroups" {
+					named = append(named, strings.Fields(v)...)
+				}
+			}
+		}
+		for _, g := range named {
+			if !made[g] {
+				t.Errorf("%s: %s is named and not made:\n%s", name, g, file(p, tmpfiles))
+			}
+		}
+		// Its unit waits for its config, and copies the probe key in from
+		// the first deploy (TestProbeKeyBeforeDNSTT).
+		front := file(p, "/etc/systemd/system/niko-front.service")
+		if !slices.Contains(p.Units, "niko-front.service") ||
+			!strings.Contains(front, "ConditionPathExists=/var/lib/raycontrol/rendered/front/front.json\n") ||
+			!strings.Contains(front, " /var/lib raycontrol/rendered/front/dnsprobe.key rayd niko-front /run/niko/front/dnsprobe.key\n") {
+			t.Errorf("%s: no front's unit that waits for its config:\n%s", name, front)
+		}
+		rayd := p.Users[slices.IndexFunc(p.Users, func(u deploy.SystemUser) bool { return u.Name == "rayd" })]
+		if !slices.Contains(rayd.ExtraGroups, "niko-front") {
+			t.Errorf("%s: rayd cannot give the front's config its group: %v", name, rayd.ExtraGroups)
+		}
+		// The certificate stored: the front's config is rendered, its
+		// probe key with it, and nothing of the plan changes.
+		after := in
+		after.Front, after.DNSProbeKey = true, true
+		if q := deploy.Build(after, render.DefaultPaths, deploy.DefaultBinaries); !reflect.DeepEqual(p, q) {
+			t.Errorf("%s: the plan changes with the front's config:\nbefore %+v\nafter  %+v", name, p, q)
+		}
+	}
+
+	// The plan of v0.27.0, without the front: refused before anything
+	// changes, for the line of a group it does not make.
+	old := clonePlan(reality)
+	old.Users = slices.DeleteFunc(old.Users, func(u deploy.SystemUser) bool { return u.Name == "niko-front" })
+	for i := range old.Users {
+		old.Users[i].ExtraGroups = slices.DeleteFunc(old.Users[i].ExtraGroups, func(g string) bool { return g == "niko-front" })
+	}
+	edit(t, &old, "/etc/systemd/system/rayd.service", "SupplementaryGroups=niko-front ", "SupplementaryGroups=")
+	old.Files = slices.DeleteFunc(old.Files, func(f deploy.File) bool { return f.Path == "/etc/systemd/system/niko-front.service" })
+	old.Units = slices.DeleteFunc(old.Units, func(u string) bool { return u == "niko-front.service" })
+	if err := old.Check(); err == nil || !strings.Contains(err.Error(), "reality-in 2750 niko-reality niko-front") {
+		t.Errorf("the plan without the front's user: %v", err)
+	}
+
+	// tmpfiles runs when one of its directories is missing, its file as it
+	// was: a node that went on with rayctl apply after such an install
+	// failed has no reality-in, and the apply that makes the front's group
+	// makes the directory too.
+	root := t.TempDir()
+	var cmds []string
+	h := &deploy.Host{Root: root, Out: &bytes.Buffer{},
+		Run: func(name string, args ...string) ([]byte, error) {
+			cmds = append(cmds, name+" "+strings.Join(args, " "))
+			return nil, nil
+		},
+		LookupUser: func(string) (int, error) { return 0, errors.New("unknown") }, LookupGroup: func(string) (int, error) { return 0, errors.New("unknown") },
+		LookPath: func(string) (string, error) { return "", errors.New("none") }}
+	for i, step := range []struct {
+		before func()
+		want   bool
+	}{
+		{func() {}, true}, // the file is new
+		{func() {
+			for _, d := range reality.Dirs {
+				os.MkdirAll(filepath.Join(root, d), 0o755)
+			}
+		}, false}, // nothing to make
+		{func() { os.Remove(filepath.Join(root, "/run/niko/reality-in")) }, true},
+	} {
+		step.before()
+		cmds = nil
+		if err := h.Apply(reality, "rayd.service"); err != nil {
+			t.Fatal(err)
+		}
+		if ran := slices.Contains(cmds, "systemd-tmpfiles --create "+tmpfiles); ran != step.want {
+			t.Errorf("apply %d: systemd-tmpfiles %v, want %v: %v", i+1, ran, step.want, cmds)
+		}
 	}
 }

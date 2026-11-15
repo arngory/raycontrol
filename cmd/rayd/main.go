@@ -602,6 +602,9 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 	afterChange func(func()), log *slog.Logger) {
 	forgets := &dohForgets{}
 	afterChange(forgets.forget)
+	// A user's first secret is made after the change that added them woke
+	// the handlers: they load again once it is (store.OnNewCredentials).
+	st.OnNewCredentials(forgets.forget)
 	running := map[string]*dohListener{}
 	stop := func(name string) {
 		if l := running[name]; l != nil {
@@ -1555,12 +1558,18 @@ func cmdNaive(args []string) error {
 
 // cmdRelay serves the probe-v1 endpoint of a relay host (relay-v1 §9.1):
 // TCP (TLS) and the UDP echo on the bundle's port, the devices and their
-// K_relay from the exit, reports passed on to the exit.
+// K_relay from the exit, reports passed on to the exit. It takes the
+// exit's word on the relay's updates as well
+// (spec/relay-update-remote-v1.md §3.5): a request for root on the relay,
+// when root's policy allows it.
 func cmdRelay(args []string) error {
 	fs := flag.NewFlagSet("relay", flag.ExitOnError)
 	bundle := fs.String("bundle", "", "the relay's bundle (rayctl relay bundle on the exit); a file only its owner reads")
 	daily := fs.Int("probe-daily", 0, "probe volume per device and UTC day, MiB (default: probe-v1's)")
 	state := fs.String("state", "", "keep the devices of the exit's last snapshot here, for a start while the exit is away")
+	updateRequest := fs.String("update-request", nodeupdate.RelayRequestFile,
+		"ask root for an update to the release the exit names here (in this daemon's own directory; root's unit watches it)")
+	updateDir := fs.String("update-dir", nodeupdate.StatusDir, "root's update directory: its policy (rayctl update remote on) and the last update's status")
 	fs.Parse(args)
 	if *bundle == "" || fs.NArg() != 0 || *daily < 0 {
 		return errors.New("relay needs -bundle")
@@ -1575,6 +1584,7 @@ func cmdRelay(args []string) error {
 		return err
 	}
 	s.State = *state
+	s.Updates = relayprobe.NewUpdates(version, *updateRequest, *updateDir, log)
 	if err := s.Load(); err != nil {
 		log.Warn("relay probe: kept devices not read; waiting for the exit", "err", err)
 	}

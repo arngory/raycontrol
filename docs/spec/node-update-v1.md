@@ -76,8 +76,9 @@ rayctl update status                           # политика, послед�
 - `rayctl update status` к GitHub сам не ходит: этот запрос показывает GitHub адрес ноды, и решает его root
   (`rayctl update -check`). Если проверок не было, с v0.27.0 он так и пишет: `latest     not checked: …`, а при
   включённом auto до первой проверки — `latest     not known yet: …`.
-- Нода без systemd (`rayd serve -supervise`) и хост relay так не обновляются. Relay обновляет только root на его
-  хосте, `rayctl update` (§5).
+- Нода без systemd (`rayd serve -supervise`) так не обновляется. Хост relay обновляет root на нём, `rayctl update`
+  (§5), а с v0.28.0 — и слово его выхода, если root на relay включил `rayctl update remote on`: relay идёт за
+  обновлением выхода ([relay-update-remote-v1.md](relay-update-remote-v1.md)). `auto` на relay нет.
 
 ## 2. API (admin-устройство)
 
@@ -119,8 +120,10 @@ rayctl update status                           # политика, послед�
 
 `target` — какую версию просили (`latest` или `vX.Y.Z`). `release` — какой релиз пробовали (`vX.Y.Z`, как только
 известен: для `latest` — после проверки подписи). `to` — до запуска то же, что `target`, после — версия, которую
-показывает нода (`""`, если неизвестна). `by` — кто просил: `alice/phone (remote)`, `auto` или
-`root (rayctl update -rollback)` для отката вручную.
+показывает нода (`""`, если неизвестна). `by` — кто просил: `alice/phone (remote)`, `auto`,
+`root (rayctl update -rollback)` для отката вручную или, с v0.28.0, `rayctl on the node` для ручного `rayctl update`
+на ноде (`kind: local`; [relay-update-remote-v1.md](relay-update-remote-v1.md) §11 п. 1): `status` показывает и
+ручные обновления.
 
 Во время обновления перезапускаются rayd, сам API и data plane. Соединение рвётся на минуту-другую, это ожидаемо.
 Клиент переподключается и опрашивает `GetUpdateStatus`, разумно раз в 5–10 с. Обычно обновление занимает 1–3 минуты.
@@ -158,9 +161,9 @@ rayd работает без привилегий (`User=rayd`). Поэтому 
    Если не сработало и это (питание), rayd сам считает `running` старше часа оборвавшимся.
 
 Повторов auto почти не делает:
-- версию, обновление на которую откатилось (`rolled_back`, в том числе откат вручную) или сломалось на ходу
-  (`failed`), он больше не просит, кто бы её ни просил (auto или админ через `latest`). Такие релизы root
-  держит в `held` статуса, и каждый новый статус их переносит;
+- версию, обновление на которую откатилось (`rolled_back`, в том числе откат вручную и, с v0.28.0, ручной
+  `rayctl update`, который откатился) или сломалось на ходу (`failed`), он больше не просит, кто бы её ни просил
+  (auto или админ через `latest`). Такие релизы root держит в `held` статуса, и каждый новый статус их переносит;
 - версию, обновление на которую не дошло до изменений на ноде (`failed` с `untouched`: скачивание, проверка), он
   просит ещё раз через сутки.
 
@@ -219,15 +222,23 @@ snapshot` и кончается `pid <MainPID>`. Одной таблицы в я
   `GetUpdateStatus.latest_patch`. Для клиента: кнопка «обновить» по-прежнему шлёт `StartUpdate {version: ""}`
   (`latest`, самый новый релиз вообще); если `latest_patch` не пуст и не равен `latest`, клиент может предложить
   и его — `StartUpdate {version: latest_patch}`, патч без смены минорной. Без поля (старая нода) — как раньше.
+- raycontrol v0.28.0: relay обновляются по слову выхода ([relay-update-remote-v1.md](relay-update-remote-v1.md));
+  `GetUpdateStatusResponse.relays` (§8 там же); ручной `rayctl update` на ноде пишет статус (`by`, выше), relay идут
+  и за ним, кроме `rayctl update -no-relays`.
 
 ## 5. Relay: `rayctl update` на его хосте
 
-С raycontrol v0.26.0 `rayctl update` на хосте relay ([relay-v1.md](relay-v1.md)), от root, обновляет сам relay. На
-хосте relay три бинарника: `rayspa` (периметр, SPA, пересылка), `rayd` (точка замера `rayd relay`; его командой юниты
-копируют себе пакет relay) и `rayctl`. Базы ноды там нет.
+С raycontrol v0.26.0 `rayctl update` на хосте relay ([relay-v1.md](relay-v1.md)), от root, обновляет сам relay. С
+v0.28.0 то же обновление запускает и слово выхода: выход, обновившись, называет relay свою версию, и root на relay
+ставит её тем же кодом, если сам разрешил (`rayctl update remote on` на relay, по умолчанию выключено) —
+[relay-update-remote-v1.md](relay-update-remote-v1.md). Ниже — само обновление, общее у обоих путей; что иначе по
+слову выхода (никого нет в SSH-сессии, root откатывает сам) — там же, §4. На хосте relay три бинарника: `rayspa`
+(периметр, SPA, пересылка), `rayd` (точка замера `rayd relay`; его командой юниты копируют себе пакет relay) и
+`rayctl`. Базы ноды там нет.
 
 **На настоящем хосте relay с systemd это обновление ни разу не запускалось** — ни установка из обновления, ни откат,
-ни прерывания. Всё ниже следует из кода и модульных тестов на временных каталогах; заданий CI для хоста relay нет.
+ни прерывания. Всё ниже следует из кода и модульных тестов на временных каталогах; обновление по слову выхода
+проходит в CI в контейнерах (задание `relay-host`: выход и relay с systemd на Debian 13; `test/relay/e2e.sh` в сетевых пространствах имён): установка из обновления, откаты и прерывания.
 
 **Как у ноды** — тот же код (`stageRelease` в `cmd/rayctl`):
 - релиз с GitHub или зеркал либо из каталога (`-from DIR`); `SHA256SUMS` и его подпись minisign проверяются
@@ -376,16 +387,35 @@ relay оно открывает, только если иначе админис
   только с адресов администратора relay, — и `rayctl` так и пишет (`the host is NOT open`) вместе с теми же
   командами.
 
-**`-check` и `status` на relay.** `rayctl update -check` печатает версии и строку о том, что удалённое и
-автоматическое обновление к relay не относятся. Если обновление отказало бы (сессия не из списка, метка) — ещё
-предупреждение. `rayctl update status` печатает установленную версию, версию, сохранённую для отката, метку, если
-она есть, и что `remote` и `auto` к relay не относятся; последний релиз — через `-check` (запрос к GitHub).
+**`-check` и `status` на relay.** `rayctl update -check` печатает версии и строку о том, обновляет ли relay слово
+выхода: `this host is a relay msk: rayctl update here updates it; rayctl update remote on takes the releases its exit
+names` или, с `remote on`, `…; the releases its exit names update it too (rayctl update remote off)` (с v0.28.0; до
+него — что удалённое и автоматическое обновление к relay не относятся). Если обновление отказало бы (сессия не из
+списка, метка) — ещё предупреждение. `rayctl update status` печатает установленную версию, версию, сохранённую для
+отката, метку, если она есть, и с v0.28.0:
+- `remote` — политику root и работает ли path-юнит (`raycontrol-relay-update.path active`; политика `on`, а юнит не
+  работает — ещё строка `warning: … is not active: systemctl enable --now …`);
+- `last` — последнее обновление по слову выхода или ремонт root руками: состояние с кодом причины, версии, кто, когда;
+  у пользователя не root и не `rayd` — `last       not readable by this user (root's and rayd relay's): sudo rayctl
+  update status` (статус relay — 0640, группа `rayd`);
+- `held` — версии, которые не удержались и которых слово выхода больше не берёт (руками — `-version V`), и `error`;
+- `auto       does not apply: a relay follows its exit`.
+
+Последний релиз — через `-check` (запрос к GitHub). `-json`: `remote` (`on`/`off`), `last` (или `null`), `held`.
 
 **Не поддерживается:**
-- удалённое обновление с admin-устройства и автообновление: у relay нет API rayd для устройств. `rayctl update
-  remote|auto` на relay отказывают (`remote and automatic updates do not apply to it`), `rayctl update -request` —
-  тоже;
-- обновление всех relay с выхода;
+- обновление с admin-устройства прямо на relay: у relay нет API rayd для устройств. С v0.28.0 relay идёт за
+  обновлением своего выхода (с телефона, auto или ручным `rayctl update` на ноде), если root на relay включил
+  `rayctl update remote on`. До v0.28.0 `rayctl update remote` на relay отказывал
+  (`remote and automatic updates do not apply to it`);
+- автообновление relay по своему расписанию: у relay нет своих проверок GitHub. `rayctl update auto` на relay
+  отказывает (`a relay follows its exit: rayctl update remote on takes the releases the exit names`);
+- обновление relay с выхода отдельно от ноды, на другую версию или откат по слову выхода: выход называет только ту
+  версию, на которой работает сам, и только вперёд. Выключателя на выходе нет: придержать relay — `rayctl update remote
+  off` на нём ([relay-update-remote-v1.md](relay-update-remote-v1.md) §1, §11);
+- запрос вида `remote` или `auto` на relay и вида `exit` на ноде: root каждого хоста берёт только свои
+  (`nodeupdate.NodeKinds`, `RelayKinds`). `rayctl update -request` на relay с v0.28.0 — runner юнита
+  `raycontrol-relay-update.service` (relay-update-remote-v1 §4.2), руками не нужен;
 - `rayctl update` на relay до v0.26.0: такой `rayctl` отказывает
   (`this host is a relay: install/bootstrap.sh -relay …`). На v0.26.0 relay переходит повторным `bootstrap.sh -relay`
   с пакетом.
@@ -404,4 +434,5 @@ relay оно открывает, только если иначе админис
 - замок установки, переданный как fd 3; окружение установки; перехват SIGTERM и SIGHUP.
 
 На настоящем хосте не проверены: systemd, nft, sysctl, `/proc/PID/exe` процесса `rayspa`, передача fd 3 установке
-и сами прерывания.
+и сами прерывания. Обновление по слову выхода (юниты relay, runner, откат без человека, `rayd relay`, очередь на
+выходе) проверено модульными тестами и в CI в контейнерах (задание `relay-host`: выход и relay с systemd на Debian 13; `test/relay/e2e.sh` в сетевых пространствах имён): [relay-update-remote-v1.md](relay-update-remote-v1.md) §12, §14.

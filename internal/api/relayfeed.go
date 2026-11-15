@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"time"
 
 	"connectrpc.com/connect"
@@ -35,8 +36,52 @@ func relayLookup(err error) error {
 }
 
 // maxRelayStreams bounds the WatchRelay streams of one relay at once: its
-// rayspa and its rayd relay (relay-v1 §9.1).
-const maxRelayStreams = 2
+// rayspa's and its rayd relay's (relay-v1 §9.1), and those a new one of
+// the same kind has just ended (they go as their handlers return).
+const maxRelayStreams = 4
+
+// relayStream is one WatchRelay stream open: its kind (rayspa's; rayd
+// relay's, with probe set, and with updates from v0.28.0 on: an older one
+// may overlap a newer during the relay's own update) and how to end it.
+type relayStream struct {
+	probe, updates bool
+	end            context.CancelFunc
+}
+
+// admitRelayStream takes a new stream of a relay, ending the open ones of
+// the same kind: a relay runs one rayspa and one rayd relay, and a new
+// stream from its certificate and address means the old one is gone. A
+// relay that restarted (its own update, a reboot) often leaves its old
+// connections up on the exit, their FIN or RST dropped by its perimeter
+// going down; counted, they refused its new streams until keepalive
+// ended them, minutes on. Only too many streams still ending are refused.
+// r.relayMu is held.
+func (r *Remote) admitRelayStream(name string, s *relayStream) bool {
+	if r.relayStreams == nil {
+		r.relayStreams = map[string][]*relayStream{}
+	}
+	open := r.relayStreams[name]
+	if len(open) >= maxRelayStreams {
+		return false
+	}
+	for _, o := range open {
+		if o.probe == s.probe && o.updates == s.updates {
+			o.end()
+		}
+	}
+	r.relayStreams[name] = append(open, s)
+	return true
+}
+
+// dropRelayStream forgets a stream that ended. r.relayMu is held.
+func (r *Remote) dropRelayStream(name string, s *relayStream) {
+	open := slices.DeleteFunc(r.relayStreams[name], func(o *relayStream) bool { return o == s })
+	if len(open) == 0 {
+		delete(r.relayStreams, name)
+		return
+	}
+	r.relayStreams[name] = open
+}
 
 // maxRelayReports bounds the Report calls of one relay at once.
 const maxRelayReports = 4
@@ -69,6 +114,7 @@ func (f *relayFeed) Report(ctx context.Context, req *connect.Request[perimeterv1
 	if err != nil {
 		return nil, err
 	}
+	f.r.Server.relayHeard(ctx, relay.Name, f.r.Server.NodeUpdate.now())
 	if f.r.RelayReport == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, summary.ErrDisabled)
 	}
@@ -126,11 +172,65 @@ func (f *relayFeed) Report(ctx context.Context, req *connect.Request[perimeterv1
 	return nil, connect.NewError(connect.CodeInternal, errors.New("report not taken"))
 }
 
+// ReportUpdate takes a relay's word on its updates by the exit's
+// (spec/relay-update-remote-v1.md §3.2): a whole state each time, kept
+// for the phone (GetUpdateStatus) and for the queue. The relay is not
+// trusted (§6): anyone but the relay gets what Report gives a stranger;
+// more than one call at once, or more than maxUpdateReports a minute, is
+// refused (ResourceExhausted), as is a field out of its bounds
+// (InvalidArgument); its error is cleaned again. The audit log and the
+// journal get codes and versions, never the error, and only of a change
+// of the state, the update, the version or root's switch,
+// maxUpdateAudits an hour at most: a relay that keeps changing what it
+// says fills neither.
+func (f *relayFeed) ReportUpdate(ctx context.Context, req *connect.Request[perimeterv1.ReportUpdateRequest]) (*connect.Response[perimeterv1.ReportUpdateResponse], error) {
+	relay, err := f.relayFrom(ctx, req.Peer().Addr)
+	if err != nil {
+		return nil, err
+	}
+	s := f.r.Server
+	now := s.NodeUpdate.now()
+	done, err := s.relayUpd.admit(relay.Name, now)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	next, err := checkRelayUpdate(req.Msg, func(e string) string { return s.cleanRelayError(ctx, e) })
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	moved, err := s.takeRelayReport(ctx, relay.Name, next, now)
+	if err != nil {
+		return nil, relayLookup(err)
+	}
+	if moved {
+		line := relayUpdateLine(next)
+		ok, muted := s.relayUpd.audited(relay.Name, now)
+		switch {
+		case ok:
+			f.r.Log.Info(line, "relay", relay.Name)
+		case muted:
+			line = relayMuted
+			f.r.Log.Warn(line, "relay", relay.Name)
+		}
+		if ok || muted {
+			if err := s.Store.Audit(ctx, "relay "+relay.Name, line, relay.Name, "ok"); err != nil {
+				f.r.Log.Warn("relay update: the audit log", "relay", relay.Name, "err", err)
+			}
+		}
+		s.kickRelayFeeds(ctx)
+	}
+	return connect.NewResponse(&perimeterv1.ReportUpdateResponse{}), nil
+}
+
 // WatchRelay streams a relay's perimeter: the current snapshot at once and a
 // new one after every change. The caller is the relay whose client
 // certificate this is, calling from the relay's address; anyone else gets
 // what a wrong path gets. A relay removed or given a new certificate is cut
-// off at the next change.
+// off at the next change. A feed with updates (rayd relay's, that knows
+// them) has the release the exit names to the relay beside the snapshot
+// when it is the relay's turn (spec/relay-update-remote-v1.md §3.3), and a
+// new answer when either changes; any other feed sends what it always did.
 func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimeterv1.WatchRelayRequest], stream *connect.ServerStream[perimeterv1.WatchRelayResponse]) error {
 	p := f.r.Perimeter
 	pin := pinFrom(ctx)
@@ -138,18 +238,18 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 	if err != nil {
 		return err
 	}
-	// One relay runs one rayspa: a second stream may overlap a reconnect,
-	// more is a relay doing work it has no need for.
+	s := f.r.Server
+	// One relay runs one rayspa and one rayd relay: a new stream of one
+	// ends the old (admitRelayStream).
+	probe := req.Msg.Probe
+	ctx, end := context.WithCancel(ctx)
+	defer end()
+	own := &relayStream{probe: probe, updates: req.Msg.Updates, end: end}
 	f.r.relayMu.Lock()
-	if f.r.relayStreams == nil {
-		f.r.relayStreams = map[string]int{}
-	}
-	if f.r.relayStreams[relay.Name] >= maxRelayStreams {
+	if !f.r.admitRelayStream(relay.Name, own) {
 		f.r.relayMu.Unlock()
 		return connect.NewError(connect.CodeResourceExhausted, errors.New("too many feeds for this relay"))
 	}
-	f.r.relayStreams[relay.Name]++
-	probe := req.Msg.Probe
 	if probe {
 		if f.r.relayProbes == nil {
 			f.r.relayProbes, f.r.relayProbeAt = map[string]int{}, map[string]time.Time{}
@@ -159,13 +259,27 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 	f.r.relayMu.Unlock()
 	defer func() {
 		f.r.relayMu.Lock()
-		f.r.relayStreams[relay.Name]--
+		f.r.dropRelayStream(relay.Name, own)
 		if probe {
 			f.r.relayProbes[relay.Name]--
 			f.r.relayProbeAt[relay.Name] = f.r.clock()
 		}
 		f.r.relayMu.Unlock()
 	}()
+	// Any feed open is the relay heard of (§8.1, seen_at).
+	s.relayUpd.listen(relay.Name, 1, s.NodeUpdate.now())
+	defer func() { s.relayUpd.listen(relay.Name, -1, s.NodeUpdate.now()) }()
+	// A feed with updates open or gone moves the queue (§3.3): the relay
+	// is there to take its turn, or may be past it.
+	updates := req.Msg.Updates
+	if updates {
+		s.relayUpd.opened(relay.Name, s.NodeUpdate.now())
+		s.kickRelayFeeds(ctx)
+		defer func() {
+			s.relayUpd.closed(relay.Name, s.NodeUpdate.now())
+			s.kickRelayFeeds(ctx)
+		}()
+	}
 	refresh := p.Refresh
 	if refresh <= 0 {
 		refresh = time.Minute
@@ -173,6 +287,13 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 	var last []byte
 	for {
 		rev, wake := p.changes()
+		var (
+			offerWake <-chan struct{}
+			kicks     uint64
+		)
+		if updates {
+			offerWake, kicks = s.relayUpd.changes(relay.Name, s.NodeUpdate.now())
+		}
 		if r, err := p.Store.RelayByCertPin(ctx, pin); err != nil {
 			return relayLookup(err)
 		} else if r.Name != relay.Name {
@@ -185,21 +306,42 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 		if err != nil {
 			return toConnect(err)
 		}
-		body, err := proto.MarshalOptions{Deterministic: true}.Marshal(snap)
+		resp := &perimeterv1.WatchRelayResponse{Snapshot: snap}
+		gave := false
+		if updates {
+			// The relay's turn, when it comes now, is given and written
+			// before the offer goes out.
+			offers, g, err := s.relayOffers(ctx, s.NodeUpdate.now())
+			if err != nil {
+				return toConnect(err)
+			}
+			resp.Update, gave = offers[relay.Name], g
+		}
+		// The whole answer, snapshot and offer: a new offer is news as a
+		// new perimeter is.
+		body, err := proto.MarshalOptions{Deterministic: true}.Marshal(resp)
 		if err != nil {
 			return err
 		}
 		if string(body) != string(last) {
 			snap.Revision = rev
-			if err := stream.Send(&perimeterv1.WatchRelayResponse{Snapshot: snap}); err != nil {
+			if err := stream.Send(resp); err != nil {
 				return err
 			}
 			last = body
 		}
+		if updates {
+			s.relayUpd.sentOffer(relay.Name, resp.Update, kicks, s.NodeUpdate.now())
+			if gave {
+				s.kickRelayFeeds(ctx) // a relay given its turn: the others' offers change
+			}
+		}
+		s.relayHeard(ctx, relay.Name, s.NodeUpdate.now())
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-wake:
+		case <-offerWake:
 		case <-time.After(refresh):
 		}
 	}
