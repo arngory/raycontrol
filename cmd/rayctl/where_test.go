@@ -190,7 +190,7 @@ func subCommands(t *testing.T) map[string][]string {
 // their command does: places has no line for them.
 var apiSubs = map[string][]string{
 	"node":       {"name", "note"},
-	"user":       {"add", "del", "disable", "enable", "export", "lan", "limit", "list", "reset-usage", "services", "usage"},
+	"user":       {"add", "del", "disable", "enable", "export", "lan", "limit", "list", "renew", "reset-usage", "services", "usage"},
 	"service":    {"add", "del", "disable", "enable", "list", "rotate", "set"},
 	"device":     {"add", "invite", "list", "revoke"},
 	"relay":      {"add", "list", "remove", "set"},
@@ -236,12 +236,12 @@ func TestSubPlaces(t *testing.T) {
 // Off Linux the commands that act on the node's host refuse, in one line
 // that says so, whatever the flags; the rest of the table does not.
 func TestRefusal(t *testing.T) {
-	node := []string{"install", "apply", "update", "uninstall", "backup", "restore", "report", "egress", "conn-limit",
+	node := []string{"install", "apply", "update", "uninstall", "backup", "restore", "report", "egress", "conn-limit", "roots",
 		"check", "legacy", "relay bundle", "service cert", "summary db"}
-	api := []string{"status", "node", "user", "service", "device", "audit", "relay", "admin", "dns", "summary",
+	api := []string{"status", "node", "user", "service", "device", "audit", "relay", "admin", "ports", "dns", "summary",
 		"app-mirror", "metrics", "remote whoami", "remote rotate", "service rotate", "relay list", "summary show",
 		"device invite", "debug", "debug on"}
-	free := []string{"knock", "probe", "remote enroll"}
+	free := []string{"knock", "probe", "remote enroll", "version"}
 	for _, c := range runCommands(t) {
 		if !slices.Contains(node, c) && !slices.Contains(api, c) && !slices.Contains(free, c) && c != "remote" {
 			t.Errorf("command %q is in none of this test's lists", c)
@@ -290,7 +290,7 @@ func TestRefusal(t *testing.T) {
 		if err := refusal(goos, false, false, []string{"install"}); err == nil {
 			t.Errorf("%s, install: not refused", goos)
 		}
-		for _, a := range [][]string{nil, {"nonsense"}, {"-h"}, {"version"}} {
+		for _, a := range [][]string{nil, {"nonsense"}, {"-h"}} {
 			if err := refusal(goos, false, false, a); err != nil {
 				t.Errorf("%s, %v: %v", goos, a, err)
 			}
@@ -401,6 +401,13 @@ func TestMainRefuses(t *testing.T) {
 		{"freebsd", []string{"-remote", open, "knock", "x"}, 1, "rayctl: knock takes no -remote", 1},
 		{"linux", []string{"-remote", open, "nonsense"}, 2, "rayctl: bad usage", 0},
 		{"darwin", []string{"-remote", missing, "nonsense", "x"}, 2, "rayctl: bad usage", 0},
+		// version works anywhere; with -remote it asks the node too, so the
+		// device file is read.
+		{"darwin", []string{"version"}, 0, "", 0},
+		{"freebsd", []string{"-json", "version"}, 0, "", 0},
+		{"darwin", []string{"-remote", missing, "version"}, 1, "rayctl: open " + missing, 1},
+		{"linux", []string{"-remote", open, "version"}, 1, "rayctl: device file " + open + " is mode -rw-r--r--", 1},
+		{"darwin", []string{"version", "x"}, 2, "rayctl: bad usage", 0},
 	} {
 		cmd := exec.Command(os.Args[0], append([]string{"-test.run", "^TestRunMain$", "--"}, c.args...)...)
 		cmd.Env = append(os.Environ(), "RAYCTL_TEST_OS="+c.goos)

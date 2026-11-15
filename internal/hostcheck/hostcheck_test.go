@@ -196,6 +196,26 @@ func addListener(root, file, line, pid, inode, comm, exe string) {
 
 const tcp443 = "   1: 00000000:01BB 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 7001 1\n"
 
+// Ports chosen with -ports are required free, but for the node's own
+// (rayd's subscription and API, on an install again).
+func TestChosenPorts(t *testing.T) {
+	h, root, _ := fakeHost(t)
+	addListener(root, "udp", "   4: 00000000:9C72 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 7101 2\n",
+		"401", "7101", "unbound", "/usr/sbin/unbound")
+	addListener(root, "tcp", "   5: 00000000:9CA5 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 7102 1\n",
+		"402", "7102", "rayd", "/usr/local/bin/rayd")
+	rs := h.Check(context.Background(), Options{Ports: []ChosenPorts{
+		{Name: "spa", Protos: []string{"tcp", "udp"}, From: 40000, To: 40099},
+		{Name: "api", Protos: []string{"tcp"}, From: 40101, To: 40101}}})
+	spa, ok := find(rs, Required, "port tcp+udp 40000-40099")
+	if !ok || spa.OK || !strings.Contains(spa.Detail, "spa (-ports): udp 0.0.0.0:40050 is taken by unbound (pid 401)") || spa.Fix == "" {
+		t.Errorf("spa: %+v", spa)
+	}
+	if api, ok := find(rs, Required, "port tcp 40101"); !ok || !api.OK || api.Detail != "api (-ports): free" {
+		t.Errorf("api: %+v", api)
+	}
+}
+
 func TestOwnListenersAndResolved(t *testing.T) {
 	h, root, _ := fakeHost(t)
 	// The node's own front on 443 (rayctl check on an installed node, after
@@ -369,9 +389,9 @@ func TestEgressPolicyCheck(t *testing.T) {
 		ok     bool
 		detail string
 	}{
-		{"kernel takes it", "", true, "the BitTorrent and SMTP filter loads (rayctl egress)"},
+		{"kernel takes it", "", true, "the BitTorrent, SMTP and local networks filter loads (rayctl egress)"},
 		{"no @ih", "@ih", true, "no @ih in this kernel"},
-		{"refused", "udp length 38", false, "cannot load the BitTorrent and SMTP filter: exit status 1: Error: Could not process rule: Operation not supported"},
+		{"refused", "udp length 38", false, "cannot load the BitTorrent, SMTP and local networks filter: exit status 1: Error: Could not process rule: Operation not supported"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h, _, _ := fakeHost(t)

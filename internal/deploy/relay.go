@@ -37,8 +37,12 @@ func RelayPlan(bin Binaries) Plan {
 	u := unit{
 		name:        "rayspa.service",
 		description: "raycontrol relay (nftables, SPA v2, forwarding to the exit)",
-		after:       []string{"nftables.service", "firewalld.service", "ufw.service"},
-		service: []string{
+		// Before the interfaces come up, as on a node (R4-40): forwarding
+		// is on from sysctl.d by then, and the relay's table, or until its
+		// first snapshot a forward chain that drops (HoldForward), is in.
+		early: true,
+		after: rayspaAfter,
+		service: append([]string{
 			"User=rayspa", "Group=rayspa",
 			"RuntimeDirectory=rayspa", "RuntimeDirectoryMode=0700",
 			copyIn(bin.Rayd, path.Dir(RelayBundle), bundleOwner, "rayspa", RelayBundle, relayBundleCopy),
@@ -48,7 +52,7 @@ func RelayPlan(bin Binaries) Plan {
 			"AmbientCapabilities=CAP_NET_ADMIN",
 			"CapabilityBoundingSet=CAP_NET_ADMIN",
 			"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
-		},
+		}, rayspaReady...),
 	}
 	// The relay's probe endpoint (relay-v1 §9.1): no privileges, a port
 	// above 1024, its own copy of the bundle. It runs only beside rayspa:

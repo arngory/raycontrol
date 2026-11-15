@@ -20,6 +20,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/arngory/raycontrol/internal/roots"
 )
 
 // ghRelease is what the GitHub API says of a release. Its prerelease flag
@@ -92,16 +94,19 @@ func (m *Mirror) client() *http.Client {
 		return m.HTTP
 	}
 	m.clientOnce.Do(func() {
+		// The node's roots, no fallback: the client checks the files'
+		// signature too, but a mirror that stops on a stale list is fixed by
+		// the node's next update, which may fall back (internal/release).
 		m.ownClient = &http.Client{
 			Timeout: 30 * time.Minute, // a file; releaseTimeout bounds a release
-			Transport: &http.Transport{
+			Transport: roots.Node.Transport(&http.Transport{
 				Proxy:                 http.ProxyFromEnvironment,
 				DialContext:           (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
 				TLSHandshakeTimeout:   30 * time.Second,
 				ResponseHeaderTimeout: 60 * time.Second,
 				IdleConnTimeout:       90 * time.Second,
 				ForceAttemptHTTP2:     true,
-			},
+			}),
 			CheckRedirect: m.redirect,
 		}
 	})

@@ -25,7 +25,8 @@ import (
 // told where its key of QUIC stateless resets is (-reset-key). The last
 // one changes naive's unit, so the update that brings it restarts naive:
 // once, with the rest of the data plane (the key's file itself restarts
-// nothing, render.File.AtStart).
+// nothing, render.File.AtStart). Since R4-40 rayspa's unit starts before
+// the network, in both.
 // Remove it with GetDeployment's files (§4.1, step 8).
 func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binaries) Plan {
 	plan := Plan{Conntrack: true}
@@ -467,9 +468,10 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 		{
 			name:        "rayspa.service",
 			description: "raycontrol perimeter (nftables, SPA v2)",
-			// After the host firewalls: their start may flush the ruleset.
-			after: []string{"rayd.service", "nftables.service", "firewalld.service", "ufw.service"},
-			service: []string{
+			// Before the network, ready by sd_notify (R4-40): in both.
+			early: true,
+			after: rayspaAfter,
+			service: append([]string{
 				"User=rayspa", "Group=rayspa",
 				"ExecStart=" + bin.Rayspa + " run -socket " + Socket + " -state " + RayspaState,
 				// The last snapshot: SPA keys and the admin addresses, rayspa's only.
@@ -477,7 +479,7 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 				"AmbientCapabilities=CAP_NET_ADMIN",
 				"CapabilityBoundingSet=CAP_NET_ADMIN",
 				"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
-			},
+			}, rayspaReady...),
 		},
 	}
 	for i, u := range append(control, units...) {

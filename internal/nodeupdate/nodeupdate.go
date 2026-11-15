@@ -482,6 +482,19 @@ func Patch(a, b string) bool {
 	return ma[0] == mb[0] && ma[1] == mb[1]
 }
 
+// Step says what release a is to b when it is newer and no patch release
+// of b, which the auto update leaves: "minor" (v0.26.3 to v0.27.0) or
+// "major" (to v1.0.0); "" otherwise.
+func Step(a, b string) string {
+	if !release.IsRelease(a) || !release.IsRelease(b) || !release.Newer(a, b) || Patch(a, b) {
+		return ""
+	}
+	if strings.Split(a, ".")[0] != strings.Split(b, ".")[0] {
+		return "major"
+	}
+	return "minor"
+}
+
 var windowRe = regexp.MustCompile(`^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$`)
 
 // ParseWindow reads "HH:MM-HH:MM" (the node's local time; it may run past

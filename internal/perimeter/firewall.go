@@ -135,6 +135,7 @@ func (n *NFT) Ruleset() string {
 	if guard == "" {
 		guard = DataPlaneUIDs
 	}
+	local4, local6 := localSets()
 	// The guard of the conntrack table (spec/conn-limit-v1.md §6.3): every
 	// new data-plane flow gets the mark, and leaving the node it passes
 	// conn_guard, empty until the guard is on (SetGuard). Never UID 0, nor
@@ -204,6 +205,9 @@ table inet %[1]s {
 	set rate4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set rate6 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set egress_uid { type uid; }
+	# The node's own and local networks (R4-38, LocalNets).
+	set local4 { type ipv4_addr; flags interval; elements = { %[13]s }; }
+	set local6 { type ipv6_addr; flags interval; elements = { %[14]s }; }
 	# The DNS tunnels' UDP ports (the public UDP ports), past conntrack.
 	set dns_ports { type inet_service; }
 	# New inbound flows by source: IPv4 address, /64 and /48 (§6.2).
@@ -319,8 +323,8 @@ table inet %[1]s {
 	# Users' traffic does not reach the node itself (S-2): a proxy exit
 	# connecting to one of the node's own addresses would come in on lo,
 	# past SPA and the admin addresses, to SSH, the API and the
-	# subscription. Loopback stays with the processes' own rules (Xray's
-	# block list, systemd's IPAddressDeny): the channel probe goes there.
+	# subscription. 127.0.0.0/8 and ::1 are not looked at here: the
+	# channel probe goes there (egress_local below lets its port only).
 	# A local destination always leaves through lo, so every other packet
 	# stops at the first, cheapest match; the FIB lookup comes last.
 	# A subnet's broadcast address looks public to the processes and
@@ -330,12 +334,21 @@ table inet %[1]s {
 	# (IPAddressAllow), answers on 53 only: whatever else listens on any
 	# address does not take the data plane there. What passes, the data
 	# plane's way to the internet, goes through the egress policy.
+	# Loopback and the local networks (R4-38) are the policy's part
+	# egress_local, apart from these guards: a new flow only (ct state
+	# before the set lookup, so an established packet pays a compare),
+	# which passes egress next, with return. Replies to clients on a local
+	# network are established, never new: they pass. Untracked packets too
+	# (the front's DNS answers, notrack_out): never "new", they would pass
+	# by it to any local address; so the DNS tunnels do not answer a query
+	# from a local network either. new,untracked is a mask, one compare.
 	chain output {
 		type filter hook output priority 0; policy accept;
 		oif "lo" meta skuid %[7]s ip daddr != 127.0.0.0/8 fib daddr type local jump to_node
 		oif "lo" meta skuid %[7]s ip6 daddr != ::1 fib daddr type local jump to_node
 		meta nfproto ipv4 meta l4proto udp ct state != established meta skuid %[7]s fib daddr type broadcast jump to_node
-		oif "lo" meta skuid %[7]s ip daddr { 127.0.0.53, 127.0.0.54 } meta l4proto { tcp, udp } th dport != 53 jump to_node
+		oif "lo" meta skuid %[7]s ip daddr { %[15]s } meta l4proto { tcp, udp } th dport != 53 jump to_node
+		meta skuid %[7]s ct state new,untracked jump egress_local
 		meta skuid %[7]s jump egress
 		meta skuid @egress_uid jump egress%[12]s
 	}
@@ -357,19 +370,80 @@ table inet %[1]s {
 	chain bt_utp {
 	}
 	chain bt_dht {
+	}
+	# The data plane's new flows to the node's own and local networks
+	# (R4-38): empty until SetEgress, as the policy's other chains.
+	chain egress_local {
 	}%[8]s
 }
-`, Table, limit, n.NflogGroup, lo, loNAT, lo, guard, relay, relayMark, inRateRules(true, "\t\t", "", n.inDiv), frontUID, guardRules)
+`, Table, limit, n.NflogGroup, lo, loNAT, lo, guard, relay, relayMark, inRateRules(true, "\t\t", "", n.inDiv), frontUID, guardRules, local4, local6,
+		resolverElems(false, true))
 }
 
 // Setup installs the table and detects whether "destroy element" works.
-func (n *NFT) Setup() error {
-	if err := n.run(n.Ruleset()); err != nil {
+func (n *NFT) Setup() error { return n.SetupWith(TableContents{}) }
+
+// SetupWith installs the table with its contents in one transaction
+// (docs/08-decisions.md R4-40): the admin addresses, the public ports, the
+// slots and the grants are in from the table's first packet, or, refused,
+// nothing changes and an earlier table stays. Then it detects whether
+// "destroy element" works.
+func (n *NFT) SetupWith(c TableContents) error {
+	if err := n.run(n.SetupScript(c)); err != nil {
 		return err
 	}
 	probe := fmt.Sprintf("destroy element inet %s allow4 { 192.0.2.1 . tcp . 1 }\n", Table)
 	n.destroy = n.run(probe) == nil
 	return nil
+}
+
+// SetupScript is the transaction of SetupWith: the table (Ruleset) and
+// what goes into it, each part as its setter writes it.
+func (n *NFT) SetupScript(c TableContents) string {
+	var b strings.Builder
+	b.WriteString(n.Ruleset())
+	if c.InLimitOff {
+		b.WriteString(inLimitScript(false, n.RelayTo.IsValid(), n.inDiv))
+	}
+	b.WriteString(publicScript(c.Public))
+	b.WriteString(adminScript(c.Admin, c.AdminPorts))
+	if n.RelayTo.IsValid() {
+		b.WriteString(forwardScript(c.Forward))
+	}
+	if c.ACMEPort != 0 {
+		b.WriteString(acmeScript(c.ACMEPort, c.ACMETTL))
+	}
+	b.WriteString(grantsScript(c.Grants))
+	if c.Relayed {
+		b.WriteString(relaysScript(c.Relays, c.RelayPorts))
+	}
+	b.WriteString(rotationScript(c.Rotation))
+	b.WriteString(spaPortsScript(c.SPAUDP, c.SPATCP))
+	return b.String()
+}
+
+// HoldForwardScript is the table a relay host has until its first snapshot
+// (docs/08-decisions.md R4-40): forwarding on (sysctl.d, at boot) and
+// nothing forwarded, as relay_forward drops by default. It has no input
+// chain: it never shuts the administrator out. Setup replaces it, in one
+// transaction, as any table of the name.
+func HoldForwardScript() string {
+	return fmt.Sprintf(`table inet %s {
+	chain relay_forward {
+		type filter hook forward priority 0; policy drop;
+		ct state established,related accept
+	}
+}
+`, Table)
+}
+
+// HoldForward puts HoldForwardScript in force where the host has no
+// perimeter table yet; a table there (an earlier rayspa's) is left alone.
+func (n *NFT) HoldForward() error {
+	if ok, err := n.Present(); err != nil || ok {
+		return err
+	}
+	return n.run(HoldForwardScript())
 }
 
 // Present looks the table up in "nft list tables".
@@ -390,6 +464,18 @@ func (n *NFT) Present() (bool, error) {
 	return false, nil
 }
 
+// InForce reports whether a perimeter table that filters input is in the
+// kernel: the input chain, not the table, since a relay's hold
+// (HoldForwardScript) is a table without one that leaves the host open.
+func (n *NFT) InForce() (bool, error) {
+	ok, err := n.hasChain("input")
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return false, nil // no such table or chain
+	}
+	return ok, err
+}
+
 // Teardown removes the table.
 func (n *NFT) Teardown() error {
 	return n.run(fmt.Sprintf("table inet %[1]s {}\ndelete table inet %[1]s\n", Table))
@@ -404,7 +490,9 @@ func joinPorts(ports []uint16) string {
 }
 
 // SetSPAPorts replaces the slot ports in one transaction.
-func (n *NFT) SetSPAPorts(udp, tcp []uint16) error {
+func (n *NFT) SetSPAPorts(udp, tcp []uint16) error { return n.run(spaPortsScript(udp, tcp)) }
+
+func spaPortsScript(udp, tcp []uint16) string {
 	var b strings.Builder
 	for _, set := range []struct {
 		name  string
@@ -415,13 +503,15 @@ func (n *NFT) SetSPAPorts(udp, tcp []uint16) error {
 			fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set.name, joinPorts(set.ports))
 		}
 	}
-	return n.run(b.String())
+	return b.String()
 }
 
 // SetPublic replaces the ports open to everyone, and with them the DNS
 // tunnels' ports that skip conntrack: the public UDP ports are theirs
 // (store's public kinds), in the same transaction.
-func (n *NFT) SetPublic(ports []Port) error {
+func (n *NFT) SetPublic(ports []Port) error { return n.run(publicScript(ports)) }
+
+func publicScript(ports []Port) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "flush set inet %s public\nflush set inet %s dns_ports\n", Table, Table)
 	if len(ports) > 0 {
@@ -430,7 +520,7 @@ func (n *NFT) SetPublic(ports []Port) error {
 	if dns := DNSPorts(ports); len(dns) > 0 {
 		fmt.Fprintf(&b, "add element inet %s dns_ports { %s }\n", Table, joinPorts(dns))
 	}
-	return n.run(b.String())
+	return b.String()
 }
 
 // DNSPorts are the DNS tunnels' ports among the public ones: the UDP ports
@@ -614,6 +704,10 @@ func (n *NFT) hasChain(chain string) (bool, error) {
 
 // SetAdmin replaces the admin prefixes and ports in one transaction.
 func (n *NFT) SetAdmin(prefixes []netip.Prefix, ports []Port) error {
+	return n.run(adminScript(prefixes, ports))
+}
+
+func adminScript(prefixes []netip.Prefix, ports []Port) string {
 	var v4, v6 []string
 	for _, p := range prefixes {
 		if p.Addr().Is4() {
@@ -632,7 +726,7 @@ func (n *NFT) SetAdmin(prefixes []netip.Prefix, ports []Port) error {
 			fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set.name, strings.Join(set.elems, ", "))
 		}
 	}
-	return n.run(b.String())
+	return b.String()
 }
 
 // SetForward replaces the ports a relay forwards (relay-v1 §3.1).
@@ -640,12 +734,16 @@ func (n *NFT) SetForward(ports []Port) error {
 	if !n.RelayTo.IsValid() {
 		return nil
 	}
+	return n.run(forwardScript(ports))
+}
+
+func forwardScript(ports []Port) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "flush set inet %s relay_fwd\n", Table)
 	if elems := portElems(ports); len(elems) > 0 {
 		fmt.Fprintf(&b, "add element inet %s relay_fwd { %s }\n", Table, strings.Join(elems, ", "))
 	}
-	return n.run(b.String())
+	return b.String()
 }
 
 // relayMark is the conntrack mark bit of flows a relay opened (admit,
@@ -658,6 +756,10 @@ const relayMark = "0x00400000"
 // reach, and turns relay_check on: the flows a relay opened end when
 // nothing lets them in any more.
 func (n *NFT) SetRelays(addrs []netip.Prefix, ports []Port) error {
+	return n.run(relaysScript(addrs, ports))
+}
+
+func relaysScript(addrs []netip.Prefix, ports []Port) string {
 	var v4, v6 []string
 	for _, p := range addrs {
 		if p.Addr().Is4() {
@@ -682,11 +784,13 @@ func (n *NFT) SetRelays(addrs []netip.Prefix, ports []Port) error {
 		"add rule inet %[1]s relay_check counter comment \"relay-removed\"\n"+
 		"add rule inet %[1]s relay_check meta l4proto tcp reject with tcp reset\n"+
 		"add rule inet %[1]s relay_check drop\n", Table)
-	return n.run(b.String())
+	return b.String()
 }
 
 // SetRotation replaces the rotation map in one transaction.
-func (n *NFT) SetRotation(udp map[uint16]uint16) error {
+func (n *NFT) SetRotation(udp map[uint16]uint16) error { return n.run(rotationScript(udp)) }
+
+func rotationScript(udp map[uint16]uint16) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "flush map inet %s rot_udp\n", Table)
 	if len(udp) > 0 {
@@ -701,11 +805,13 @@ func (n *NFT) SetRotation(udp map[uint16]uint16) error {
 		}
 		fmt.Fprintf(&b, "add element inet %s rot_udp { %s }\n", Table, strings.Join(elems, ", "))
 	}
-	return n.run(b.String())
+	return b.String()
 }
 
 // SetACME replaces the ACME window in one transaction.
-func (n *NFT) SetACME(port uint16, ttl time.Duration) error {
+func (n *NFT) SetACME(port uint16, ttl time.Duration) error { return n.run(acmeScript(port, ttl)) }
+
+func acmeScript(port uint16, ttl time.Duration) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "flush map inet %s acme_redirect\nflush set inet %s acme_in\n", Table, Table)
 	if port != 0 && ttl > 0 {
@@ -713,7 +819,7 @@ func (n *NFT) SetACME(port uint16, ttl time.Duration) error {
 		fmt.Fprintf(&b, "add element inet %s acme_redirect { 80 timeout %ds : %d }\n", Table, secs, port)
 		fmt.Fprintf(&b, "add element inet %s acme_in { %d timeout %ds }\n", Table, port, secs)
 	}
-	return n.run(b.String())
+	return b.String()
 }
 
 func portElems(ports []Port) []string {
@@ -775,15 +881,19 @@ type Grant struct {
 // AllowAll opens the grants in one transaction, on a table just made
 // (Setup): there is nothing of theirs to replace.
 func (n *NFT) AllowAll(grants []Grant) error {
+	if s := grantsScript(grants); s != "" {
+		return n.run(s)
+	}
+	return nil
+}
+
+func grantsScript(grants []Grant) string {
 	var b strings.Builder
 	for _, gr := range grants {
 		set, elems := elements(gr.Addr, []Port{gr.Port}, gr.TTL)
 		fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set, elems)
 	}
-	if b.Len() == 0 {
-		return nil
-	}
-	return n.run(b.String())
+	return b.String()
 }
 
 // Deny closes ports for addr now, in one transaction; an error is real.

@@ -365,7 +365,9 @@ func TestApplyBrokenKeepsRevoking(t *testing.T) {
 	// Broken: inner off (a database from before the check), then a
 	// revocation.
 	st.SetServiceEnabled(ctx, "inner", false)
-	must(t, st.RevokeDevice(ctx, d1.ID))
+	if _, err := st.RevokeDevice(ctx, d1.ID); err != nil {
+		t.Fatal(err)
+	}
 	restarted = nil
 	if err := a.Apply(ctx); !render.Partial(err) {
 		t.Fatalf("apply with a broken dns: %v", err)
@@ -382,7 +384,9 @@ func TestApplyBrokenKeepsRevoking(t *testing.T) {
 	}
 	// Not made where it is missing.
 	os.Remove(keys)
-	must(t, st.RevokeDevice(ctx, d2.ID))
+	if _, err := st.RevokeDevice(ctx, d2.ID); err != nil {
+		t.Fatal(err)
+	}
 	a.Apply(ctx)
 	if _, err := os.Stat(keys); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("keys file made for a broken service: %v", err)

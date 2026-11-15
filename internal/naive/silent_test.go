@@ -1,9 +1,11 @@
 package naive
 
 import (
+	"encoding/base64"
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -85,4 +87,37 @@ func TestSilentAnswerKeepsNoBody(t *testing.T) {
 	if got := p.window(1); got != 0 {
 		t.Errorf("%d bytes of a held stream's window came back", got)
 	}
+}
+
+// The silent answer over each transport: a stranger's CONNECT, and a
+// naive one with a wrong password, get no answer at all for the hold, and
+// then the stream's reset, never a status.
+func TestSilentAnswerOver(t *testing.T) {
+	hold := site.SilentHold
+	site.SilentHold = 300 * time.Millisecond
+	t.Cleanup(func() { site.SilentHold = hold })
+	overProtos(t, func(t *testing.T) {
+		users := filepath.Join(t.TempDir(), "users.json")
+		writeUsersNamed(t, users, map[string]string{"pw": "u5-ab12"})
+		answer, _ := site.Responder(site.AnswerSilent, "")
+		h := &Server{Users: &Users{Path: users}, Answer: answer, Log: slog.New(slog.DiscardHandler)}
+		url, tr := serveOver(t, h)
+		for _, password := range []string{"", "wrong"} {
+			req, _ := http.NewRequest(http.MethodConnect, url, http.NoBody)
+			req.Host = "192.0.2.1:443"
+			req.Header.Set("Padding", paddingHeader())
+			if password != "" {
+				req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("niko:"+password)))
+			}
+			start := time.Now()
+			resp, err := tr.RoundTrip(req)
+			if err == nil {
+				resp.Body.Close()
+				t.Fatalf("password %q: %s, want no answer", password, resp.Status)
+			}
+			if d := time.Since(start); d < site.SilentHold/2 {
+				t.Fatalf("password %q: the stream ended after %v, before the hold (%v)", password, d, err)
+			}
+		}
+	})
 }

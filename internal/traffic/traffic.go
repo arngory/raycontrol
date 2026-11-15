@@ -416,16 +416,22 @@ func (a *Accountant) Round(ctx context.Context, only string, force bool) {
 	}
 
 	// Who is over the limit now: the store's count, a reset read as zero,
-	// with the bytes not written yet.
+	// with the bytes not written yet of the current period (those of a
+	// period an administrator's reset ended go with it: the write drops
+	// them).
 	var exhausted, restored []store.User
 	for id, u := range limited {
 		used := u.Used(now)
-		if p := a.pending[id]; p != nil {
+		if p := a.pending[id]; p != nil && p.start.Equal(u.PeriodStart(now)) {
 			used = addCapped(used, addCapped(p.up, p.down))
 		}
 		over := used >= *u.TrafficLimit
 		switch {
-		case over && !a.over[id]:
+		// A crossing not told yet, or one the store does not have: over
+		// again after an administrator's reset or raised limit that no
+		// poll saw her under. Either is written first and wakes apply:
+		// render and the subscription read the store, never this loop.
+		case over && (!a.over[id] || !u.OverLimit(now)):
 			exhausted = append(exhausted, u)
 		case !over && a.over[id]:
 			restored = append(restored, u)
@@ -536,8 +542,21 @@ func (a *Accountant) take(src Source, r Reading, limited map[int64]store.User, n
 		}
 		v = store.TrafficCounter{Up: max(v.Up, 0), Down: max(v.Down, 0)}
 		next.marks[name] = v
-		tracked := u.TrafficCountedFrom.Before(polled)
-		young := !r.Start.IsZero() && !r.Start.Before(u.TrafficCountedFrom.Add(youngSlack))
+		// Counted since the limit was set, or since the period began if
+		// that is later: rayctl user reset-usage starts one at any moment.
+		// What a process counted between its last poll and a later start
+		// straddles it, as with a limit just set: it is not counted (less
+		// than true, never more; a monthly reset the loop writes itself
+		// drops it the same way, resetting). Before, the bytes a user
+		// sent between the poll that took her off and the cut came back
+		// into the new period, and an interop's reset-usage did not
+		// stick.
+		since := u.TrafficCountedFrom
+		if u.TrafficStart.After(since) {
+			since = u.TrafficStart
+		}
+		tracked := since.Before(polled)
+		young := !r.Start.IsZero() && !r.Start.Before(since.Add(youngSlack))
 		if !tracked && !young {
 			continue // counted from this poll on
 		}

@@ -20,6 +20,9 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/blake2b"
+
+	"github.com/arngory/raycontrol/internal/roots"
+	"github.com/arngory/raycontrol/internal/roots/rootstest"
 )
 
 // testKey is a minisign key pair made the way minisign makes one.
@@ -214,6 +217,44 @@ func serveRelease(t *testing.T, k testKey, version string, arc []byte, brokenGit
 	}))
 	t.Cleanup(srv.Close)
 	return &Fetcher{Base: srv.URL, Mirrors: []string{srv.URL + "/mirror/"}}, &hits
+}
+
+// TestFetchRoots: over HTTPS the release comes through the node's roots.
+// A host whose root is not among them is tried again with the system
+// store, with a warning: the signature protects the files, and a stale
+// list must not stop the update that brings the next one. The extra file
+// lets it through without one.
+func TestFetchRoots(t *testing.T) {
+	ctx := context.Background()
+	k := newKey(t)
+	arc := archive(t, map[string]string{"rayd": "new"})
+	sum := sha256.Sum256(arc)
+	sums := []byte(hex.EncodeToString(sum[:]) + "  " + Archive("amd64") + "\n")
+	files := map[string][]byte{"SHA256SUMS": sums, "SHA256SUMS.minisig": k.sign(sums, "raycontrol v0.3.0", false), Archive("amd64"): arc}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(files[r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]])
+	}))
+	defer srv.Close()
+	var logged []string
+	f := &Fetcher{Base: srv.URL, Log: func(format string, a ...any) { logged = append(logged, fmt.Sprintf(format, a...)) }}
+
+	rootstest.Use(t, roots.Settings{})
+	if _, err := f.Fetch(ctx, "latest", "amd64", k.pub); err == nil || !roots.Verification(err) {
+		t.Fatalf("a root in neither: %v", err)
+	}
+	logged = nil
+	tr := rootstest.Use(t, roots.Settings{}, srv.Certificate())
+	if r, err := f.Fetch(ctx, "latest", "amd64", k.pub); err != nil || r.Version != "v0.3.0" {
+		t.Fatalf("through the system store: %v", err)
+	}
+	if st := tr.Status(); len(logged) == 0 || !strings.Contains(logged[0], "warning: 127.0.0.1: ") || st.Rescued == 0 || st.Refused != 0 {
+		t.Fatalf("logged %q, status %+v", logged, tr.Status())
+	}
+	logged = nil
+	rootstest.Use(t, roots.Settings{File: rootstest.File(t, srv.Certificate())})
+	if _, err := f.Latest(ctx, k.pub); err != nil || len(logged) != 0 {
+		t.Fatalf("with the extra file: %v, logged %q", err, logged)
+	}
 }
 
 func TestFetch(t *testing.T) {

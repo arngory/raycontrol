@@ -1,0 +1,719 @@
+# relay-update-remote-v1: relay обновляется по слову выхода
+
+Статус: **черновик** (2026-11-14), не реализовано. Вторая волна после v0.26.0 ([`04-roadmap.md`](../04-roadmap.md),
+«Во второй волне — обновление relay по просьбе ноды»). Релиз, в котором это выйдет, ниже — **vW** (номер — при выпуске,
+не раньше v0.27.0). Пометка «(вывод)» — не проверено ни кодом, ни тестом. Решения владельца от 2026-11-14 — §11.
+
+Зачем: обновление ноды с телефона администратора (`StartUpdate`) или автообновление оставляют relay на прежней версии.
+Обновить relay сегодня может только root на его хосте, `rayctl update` ([node-update-v1.md](node-update-v1.md) §5). Нужно,
+чтобы после обновления ноды по запросу её relay обновлялись сами, по слову ноды, и чтобы телефон видел итог по каждому.
+
+## 1. Цель и чего здесь нет
+
+Цель:
+- выход (нода), обновившись по запросу (`remote` или `auto`), называет каждому своему relay версию, на которой теперь
+  работает сам;
+- relay, на котором root это разрешил, сам скачивает этот релиз, проверяет его своим закреплённым ключом и ставит его
+  тем же кодом, что `rayctl update` на его хосте сегодня, с тем же откатом;
+- итог по каждому relay (версия, состояние, время, короткая причина) виден в `GetUpdateStatus` и `rayctl update status`
+  на выходе.
+
+Чего здесь нет:
+- выбора версии для relay: выход называет только свою; «обновить relay на vX, а ноду нет» нельзя;
+- отката relay по слову выхода: никогда назад;
+- автообновления relay по своему расписанию: у relay нет своих проверок GitHub, он идёт за выходом;
+- обновления relay после `rayctl update` root на ноде (вручную) — §11, вопрос 1;
+- доставки релиза через выход: relay качает его сам (§11, вопрос 3);
+- relay с пакетом без точки замера (до v0.11.0): у него нет `rayd relay`, который принимает слово выхода (§3.1);
+- нового порта, нового сервиса или нового процесса на relay, который слушает сеть.
+
+## 2. Как сейчас
+
+### 2.1. Обновление ноды по запросу
+
+- rayd (`User=rayd`) только пишет запрос `/var/lib/raycontrol/update-request` (`internal/nodeupdate/nodeupdate.go:33-35`,
+  `199-216`: создаётся атомарно и не заменяет свежий чужой).
+- `raycontrol-update.path` (`PathExists=`) запускает `raycontrol-update.service`: oneshot от root, `ExecStart=rayctl update
+  -request`, `ExecStopPost=rayctl update -request-ended`, `TimeoutStartSec=50min` (`internal/deploy/deploy.go:855-885`).
+  Сервис не в `plan.Units`: apply его не запускает (`deploy.go:720-728`, `internal/deploy/check.go:107-108`).
+- `rayctl update -request` берёт замок обновления с ожиданием 10 мин (`cmd/rayctl/update.go:119-128`) и проверяет запрос
+  заново: формат, возраст ≤ 1 ч, никогда назад, auto — только патч (`nodeupdate.go:158-178`), политику root из
+  `/var/lib/raycontrol-update/policy.json` (`nodeupdate.go:184-194`, `341-348`). Пишет статус `running` или `failed`,
+  затем удаляет запрос (`cmd/rayctl/update_request.go:56-81`).
+- Само обновление — `rayctl update -yes -version V` с `RAYCONTROL_UPDATE_RESULT` (`update_request.go:84-89`); итог
+  ребёнка (`nodeupdate.Result`, `nodeupdate.go:137-143`) или, если его нет, код выхода и хвост вывода
+  (`update_request.go:91-109`) идут в `status.json`. Версии, обновление на которые откатилось или сломалось, держатся в
+  `held` (`update_request.go:110-112`). Формат `Result`, `status.json`, `policy.json` и флаги юнита заморожены
+  (`docs/RELEASE.md:132-140`).
+- Передача: `rayctl` на хосте проверяет релиз и отдаёт обновление `rayctl` релиза (`update.go:41-60`,
+  `cmd/rayctl/update_stage.go:126-136`).
+
+### 2.2. Обновление relay
+
+- `rayctl update` на хосте relay узнаёт relay по пакету или юниту `rayspa` с `-relay` (`cmd/rayctl/update_relay.go:53-64`)
+  и уходит в `updateRelay` (`update.go:129-137`) — **до** того места, где пишется итог для `RAYCONTROL_UPDATE_RESULT`
+  (`update.go:166-176`): обновление relay итога не пишет.
+- Выбор и проверка релиза общие с нодой (`stageRelease`, `update_stage.go:52-144`): подпись `SHA256SUMS` закреплённым
+  ключом, версия из trusted comment и она же — та, что просили (`internal/release/release.go:289-300`); назад — только
+  названная версия или `-force` (`update_stage.go:110-117`); не ниже v0.26.0 (`update_relay.go:71-93`).
+- До изменений: пакет читается (`update_relay.go:95-107`), sshd на одном порту и сессия на нём, снимок пускает SSH
+  (`update_relay.go:109-134`; `cmd/rayctl/install_relay.go:933-975`). Адрес сессии неизвестен (нет sshd в цепочке
+  родителей, `cmd/rayctl/install.go:153-186`) — только предупреждение (`install_relay.go:960-962`).
+- Копия relay в `/var/lib/raycontrol-install/previous` (`update_relay.go:224-308`), метка `previous/relay.unfinished`
+  (`update_relay.go:162-166`, `326-347`), замок установки relay передаётся установке как fd 3 (`update_relay.go:538-550`,
+  `install_relay.go:428-489`).
+- Шаги и откат: `relayUpdate.run` (`update_relay.go:712-748`), `backOrOpen` (`update_relay.go:750-767`), проверка
+  `relayHealth` с `perimeter.Forwarded` (`update_relay.go:608-653`, строка 628), ожидание до 30 с и ещё 3 с
+  (`update_relay.go:1038-1041`).
+- Подтверждение снимается `-yes` (`update_relay.go:858-862`); сигналы с точки невозврата перехватываются
+  (`update_relay.go:863-867`, `951-959`).
+- `rayctl update remote|auto` и `-request` на relay отказывают (`update_relay.go:66-69`, `1072-1081`; `update.go:878-889`
+  через `nodeRequests().ready`, `update_request.go:34-37`). `rayctl update status` на relay — версия, копия, метка,
+  `remote`/`auto` «does not apply» (`update_relay.go:1082-1118`).
+
+### 2.3. Как relay и выход говорят друг с другом
+
+- Соединение одно, от relay к выходу: удалённый API выхода, TLS 1.3, сертификат выхода по пину из пакета, клиентский
+  сертификат relay (`internal/api/remote.go:143`, `150-166`; `internal/relayprobe/relayprobe.go:80-84`). Выход узнаёт relay по
+  пину сертификата **и** адресу (`internal/api/relayfeed.go:32-45`).
+- `RelayService` (`api/proto/raycontrol/perimeter/v1/perimeter.proto:43-50`):
+  - `WatchRelay` — поток от выхода к relay: снимок сразу и после каждого изменения, а без изменений — пересчёт раз в
+    минуту (`relayfeed.go:157-191`). Новое сообщение уходит, только если изменились байты снимка
+    (`relayfeed.go:174-184`). Не больше двух потоков на relay: `rayspa` и `rayd relay` (`relayfeed.go:25-27`, `129-139`).
+  - `Report` — унарный вызов от relay к выходу (`relayfeed.go:47-115`), до 4 одновременно.
+- На relay поток держат двое: `rayspa` (`WatchRelayRequest{}`, `cmd/rayspa/main.go:373-390`; переподключение до 30 с,
+  `main.go:467`) и `rayd relay` (`probe: true`, `relayprobe.go:292-329`; до 1 мин, строка 327).
+- `rayd relay` — юнит `rayd-relay.service`: пользователь `rayd`, без возможностей, `StateDirectory=rayd-relay` (0700),
+  `PartOf=` и `Requisite=` на `rayspa.service` (`internal/deploy/relay.go:57-80`), общая защита юнитов с
+  `ProtectSystem=strict` (`deploy.go:120-140`). Для пакета без точки замера он не запускается
+  (`install_relay.go:340-366`).
+
+Следствие: всё, что выход говорит relay, идёт в потоке `WatchRelay`; всё, что relay говорит выходу, — унарным вызовом
+`RelayService`. Других путей нет, и новый не нужен.
+
+## 3. Протокол
+
+### 3.1. Кто говорит
+
+- **На выходе** — rayd: он читает свой `status.json` (как сейчас для `GetUpdateStatus`, `internal/api/update.go:89-96`),
+  решает, что назвать relay, и кладёт это в поток `WatchRelay`. Принимает итоги relay новым вызовом `ReportUpdate`.
+- **На relay** — `rayd relay`: без привилегий, уже держит поток с выходом, уже работает в своём каталоге. Он получает
+  предложение, проверяет его, пишет запрос в свой каталог и докладывает итог. Не `rayspa`: у него `CAP_NET_ADMIN`
+  (`deploy/relay.go:52-53`), и ему незачем ни писать файлы для root, ни звать выход.
+- **Root на relay** — юнит, запущенный по файлу запроса (§4). Он один меняет хост.
+
+### 3.2. Сообщения (perimeter.v1, только добавления)
+
+```proto
+message WatchRelayRequest {
+  bool probe = 1;
+  // The feed takes the exit's update offers (relay-update-remote-v1): rayd
+  // relay of vW and newer sets it, whatever the relay's policy.
+  bool updates = 2;
+}
+
+message WatchRelayResponse {
+  Snapshot snapshot = 1;
+  // The release the exit asks this relay to update to. Absent: nothing
+  // asked (an older exit, no update by request, or not this relay's turn).
+  RelayUpdateOffer update = 2;
+}
+
+message RelayUpdateOffer {
+  string id = 1;       // the node's update it follows (node.v1 UpdateStatus.id): 1-32 hex
+  string version = 2;  // vX.Y.Z: the release the exit runs, which that update installed
+  int64 ended_at = 3;  // unix seconds, the exit's clock: when that update ended
+}
+
+service RelayService {
+  // ... WatchRelay, Report as before
+  // ReportUpdate tells the exit where the relay stands with updates
+  // (relay-update-remote-v1): its version, root's switch, the state of the
+  // last offer it took. A whole state each time, never a delta.
+  rpc ReportUpdate(ReportUpdateRequest) returns (ReportUpdateResponse);
+}
+
+message ReportUpdateRequest { RelayUpdate update = 1; }
+message ReportUpdateResponse {}
+
+message RelayUpdate {
+  string version = 1;   // the relay's release now (rayd relay's own version)
+  bool remote = 2;      // root on the relay takes the exit's offers (rayctl update remote on)
+  string state = 3;     // idle | requested | running | done | rolled_back | failed (§3.4)
+  string id = 4;        // the offer the state is about; "" with idle
+  string target = 5;    // the version that offer named
+  string reason = 6;    // a code (§3.6); "" when none
+  string error = 7;     // short text, redacted on the relay (§6), at most 200 bytes
+  int64 at = 8;         // unix seconds, the relay's clock: when the state was reached
+  bool unfinished = 9;  // an update of the relay did not end: root on the relay must act
+}
+```
+
+- `WatchRelayRequest.updates`: выход кладёт `update` только в потоки с ним. Поток `rayspa` и поток старого `rayd relay`
+  предложений не получают; старый relay их бы и так пропустил (proto3), но так видно, кто их понимает.
+- Сравнение «изменилось ли» в `WatchRelay` идёт по всему ответу, снимку и предложению вместе, а не по одному снимку
+  (сейчас `relayfeed.go:174-178`). Изменение предложения будит потоки так же, как изменение периметра.
+- Отказы `ReportUpdate` — как у `Report`: чужой — `NotFound` (как неизвестный путь, `relayfeed.go:23`); больше одного
+  вызова сразу или 12 в минуту от одного relay — `ResourceExhausted`; поле вне границ (§3.6) — `InvalidArgument`.
+  Старый выход отвечает `Unimplemented` (метода нет).
+
+### 3.3. Что выход называет и когда
+
+Выход кладёт предложение `{id, version, ended_at}` в поток relay `R`, если всё так:
+1. последний статус по запросу (`status.json`, `nodeupdate.Settled`) — `done`, вид `remote`, `auto` или `local`
+   (ручной `rayctl update` на ноде пишет статус с видом `local`, решение владельца, §11 п. 1; с `-no-relays`
+   статус пишется с `relays: false`, и предложения нет);
+2. его `to` — release и равен версии этого rayd (`Server.Version`): нода работает на том, что поставило обновление,
+   и не переставлена после него руками;
+3. ни запрос не ждёт, ни обновление не идёт (`nodeupdate.Busy`, `nodeupdate.go:316-322`);
+4. очередь `R` пришла (ниже).
+
+Иначе предложения нет. Значит:
+- откатившееся или сломанное обновление ноды relay не трогает;
+- после ручного `rayctl update` на ноде relay идут за ним (§11 п. 1), кроме `rayctl update -no-relays`;
+  после установки руками в обход `rayctl update` (бинарь положили сами) версия rayd не совпадает с `to`, и
+  предложения нет;
+- предложение не устаревает: relay, который вернулся через неделю, получит его сразу, если очередь прошла.
+
+**Очередь.** Relay обновляются по одному, по порядку имён: тот, кто идёт через relay, теряет один путь за раз, а не
+все сразу. Очередь `R` пришла, когда каждый relay перед ним «прошёл» для этого `id`:
+- доложил `done`, `rolled_back` или `failed` по этому `id`;
+- или доложил, что работает на `version` или новее, или что `remote` выключен;
+- или ни разу не докладывал (старый relay, нет `rayd relay`) и сейчас у него нет потока с `updates`;
+- или его последнее слово — не `requested`/`running`, и потока с `updates` нет дольше 20 мин;
+- или предложение ушло ему больше 20 мин назад (`TurnTimeout`), а итога нет.
+
+Relay, обновляющийся сейчас, на минуту теряет поток (его `rayd relay` перезапускается), но очередь за ним не идёт:
+последнее слово `running`. Очередь в памяти rayd; после перезапуска выхода она строится заново по сохранённым итогам
+(§5.1), и прошедшие relay снова проходят сразу.
+
+### 3.4. Состояния на relay
+
+Свои: `rayd relay` их докладывает, root их пишет. `status.json` relay — та же структура, что у ноды
+(`nodeupdate.Status`, `nodeupdate.go:108-126`), в том же месте `/var/lib/raycontrol-update/status.json` (каталог root,
+0755), с видом `exit` и двумя новыми необязательными полями `reason` и `unfinished`.
+
+```
+           предложение подходит (§3.5)
+  idle ─────────────────────────────► requested ──── root взял ────► running
+  done/rolled_back/failed ──────────┘     │                           │
+                                          │ 1 ч не взят               ├─► done
+                                          ▼                           ├─► rolled_back   (откат прошёл)
+                                       failed (not_taken)             └─► failed        (отказ до изменений, или хост открыт)
+```
+
+| state | кто пишет | что значит |
+|---|---|---|
+| `idle` | — | relay не брал ни одного предложения |
+| `requested` | `rayd relay` (в памяти, файл запроса) | запрос записан, root ещё не взял |
+| `running` | root, `status.json` | идёт `rayctl update` relay |
+| `done` | root | relay на `target`, проверен |
+| `rolled_back` | root | не вышло, прежний relay вернулся и проверен; `target` — в `held` |
+| `failed` | root или `rayd relay` | отказ до изменений (`untouched`), хост открыт (`open`), оборвалось или запрос не взят |
+
+### 3.5. Что делает `rayd relay` с предложением
+
+На каждое новое предложение, на каждое открытие потока и раз в минуту:
+1. Читает политику (`policy.json`, `nodeupdate.ReadPolicy`) и статус (`status.json`). Оба файла root, 0644, в каталоге
+   0755: `ProtectSystem=strict` их читать даёт.
+2. `remote` не `on` → запроса нет; доклад с `remote: false`.
+3. `version` не `vX.Y.Z` или не новее своей → запроса нет; доклад как есть (выход увидит, что relay уже там).
+4. `version` в `held` статуса → запроса нет: эта версия у relay не держалась. Двигает только более новая.
+5. Последний статус — `failed` с `untouched` по этой версии, и прошло меньше 6 ч (`RelayRetryAfter`) → ждёт. 6 ч — как
+   цикл проверок auto у ноды (`cmd/rayd/autoupdate.go:18-21`): GitHub видит relay не чаще.
+6. Запрос ждёт или обновление идёт (`nodeupdate.Busy`) → ждёт.
+7. Не больше одного нового запроса за 10 мин и шести за сутки: взломанный выход, называя несуществующие версии, не
+   заставит relay ходить к GitHub без конца.
+8. Иначе пишет запрос `nodeupdate.WriteRequest` в `/var/lib/rayd-relay/update-request` (свой `StateDirectory`):
+   `{id: offer.id, kind: "exit", version: offer.version, by: "exit", at: <часы relay>}` и докладывает `requested`.
+
+Пока последний статус `requested` или `running`, `rayd relay` смотрит `status.json` раз в 10 с, иначе раз в минуту,
+и докладывает каждое изменение. Доклад — всегда целое состояние (`RelayUpdate`). Не принят (связь, `Unavailable`,
+`ResourceExhausted`) — повтор со следующим взглядом; `Unimplemented` (старый выход) — больше не зовёт до следующего
+открытия потока. Без изменений — раз в 10 мин, чтобы у выхода было «когда слышали».
+
+**Идемпотентность.** Повтор того же предложения (новый пересчёт, переподключение, перезапуск любой из сторон)
+ничего не делает: шаг 3 (версия уже стоит), 4 (`held`), 5 или 6. Новый запрос по той же версии бывает только после
+`failed` с `untouched` и паузы шага 5. `id` нужен для связи итога с обновлением ноды, не для решения.
+
+### 3.6. Поля и границы
+
+- `version`, `target`: `""` или `vX.Y.Z` (`release.IsRelease`), до 40 байт.
+- `state`: одно из §3.4. `reason`: `""` или код из списка ниже. `id`: `""` или 1–32 hex, как у запроса
+  (`nodeupdate.go:160`).
+- `error`: печатный текст (`nodeupdate.Printable`), не длиннее 200 байт, на relay пропущен через `redact` (§6). Выход
+  делает с ним то же ещё раз: relay он не верит.
+- Вся `ReportUpdateRequest` — не больше 1 КиБ.
+
+Коды `reason`, их ставит тот, кто знает место сбоя (новое необязательное поле `reason` в `nodeupdate.Result` и
+`nodeupdate.Status`; старый `rayctl` его не пишет, и тогда код пустой):
+
+| reason | где | untouched |
+|---|---|---|
+| `policy` | root: `remote` выключен к моменту запуска | да |
+| `stale` | root: запрос старше часа | да |
+| `version` | root: не новее, ниже v0.26.0, `held` | да |
+| `busy` | root: замок обновления не взят за 10 мин | да |
+| `unfinished` | прошлое обновление relay не кончилось (метка) | да |
+| `bundle` | пакета нет или не читается (`update_relay.go:95-107`) | да |
+| `ssh` | снимок не пустит SSH на порт sshd (`relayBefore`) | да |
+| `download` | ни GitHub, ни зеркала не отдали файлы | да |
+| `signature` | подпись не та или версия в ней не та, что просили | да |
+| `place` | первый бинарник не встал (`update_relay.go:726-730`) | да |
+| `install` | `rayctl install -relay` не прошёл; откат | нет |
+| `check` | проверка после установки не прошла; откат | нет |
+| `interrupted` | обновление оборвалось (убито, таймаут, выключение); откат после | нет |
+| `open` | прежний relay не вернулся: хост открыт и не пересылает | нет |
+| `not_taken` | `rayd relay`: запрос не взят за час | да |
+
+### 3.7. Таймауты
+
+| что | сколько | почему |
+|---|---|---|
+| выход пересчитывает предложение | ≤ 60 с (`refresh`, `relayfeed.go:157-160`) | `status.json` пишет root; rayd узнаёт о нём, только прочтя |
+| `rayd relay` смотрит статус | 10 с при `requested`/`running`, иначе 60 с | |
+| доклад «я жив» | 10 мин | |
+| запрос устаревает | 1 ч (`nodeupdate.Stale`) | как у ноды |
+| юнит обновления relay | `TimeoutStartSec=15min`, `TimeoutStopSec=5min` | скачивание + до ~4 мин установки и отката (node-update §5, строка 236); на остановке хватает времени на откат |
+| очередь relay (`TurnTimeout`) | 20 мин | больше юнита: обновляющийся relay не теряет очередь |
+| выход без слова при `requested`/`running` | 1 ч → для телефона `failed`, `no_word` | как `Settled` у ноды (`nodeupdate.go:306-314`) |
+| повтор после `untouched` | 6 ч | §3.5, шаг 5 |
+
+## 4. Root на relay
+
+### 4.1. Юниты
+
+На relay три новых файла юнитов. Имена свои, не ноды: `check.go` сверяет файлы юнитов обновления ноды по пути с
+текстом (`check.go:62-68`, `82-85`), и у relay другой `PathExists=`.
+
+```ini
+# raycontrol-relay-update.path
+[Path]
+PathExists=/var/lib/rayd-relay/update-request
+[Install]
+WantedBy=multi-user.target
+
+# raycontrol-relay-update.service — не в plan.Units, запускается только path-юнитом
+[Unit]
+Wants=network-online.target
+After=network-online.target rayspa.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rayctl update -request
+ExecStopPost=-/usr/local/bin/rayctl update -request-ended
+TimeoutStartSec=15min
+TimeoutStopSec=5min
+StateDirectory=raycontrol-update
+StateDirectoryMode=0755
+
+# raycontrol-relay-recover.service — раз за загрузку
+[Unit]
+ConditionPathExists=/var/lib/raycontrol-install/previous/relay.unfinished
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rayctl update -request-recover
+TimeoutStartSec=10min
+[Install]
+WantedBy=multi-user.target
+```
+
+- Файлы — часть `deploy.RelayPlan` (`deploy/relay.go:36-91`). Тогда копия relay перед обновлением и откат берут их сами:
+  список файлов копии строится из плана (`update_relay.go:185-195`).
+- **Включены** path-юнит и `recover` только при `remote on`. При `off` на хосте лежат два файла, которые никто не
+  запускает. `rayctl install -relay` (и под обновлением) включает или выключает их по политике, так что состояние
+  переживает и обновление, и повторный `bootstrap.sh -relay`.
+- Песочницы у сервиса нет, как у ноды (`deploy.go:855-862`): он ставит relay.
+- В `relayOps.units` они добавляются **в конец**: `open` берёт `units[0]` как `rayspa` (`update_relay.go:488`), а
+  `restore` запускает юниты по порядку (`update_relay.go:457-463`), path-юнит — после `rayspa` и точки замера.
+
+### 4.2. `rayctl update -request` на relay
+
+На relay `-request` больше не отказывает (`updatable`, `update.go:881-889`), а идёт в `relayRequests().run()` — тот же
+`requests.run` (`update_request.go:48-118`) с путями relay и тремя отличиями:
+- запрос — `/var/lib/rayd-relay/update-request`, читается без перехода по ссылкам (`nodeupdate.ReadRequest`), как у
+  ноды из каталога rayd;
+- проверка (`Request.Check` с видом `exit`): `kind` — `exit`; `version` — только `vX.Y.Z` (не `latest`: выход называет
+  версию), строго новее установленной; не в `held`; не ниже v0.26.0 (`relayTarget`); политика `remote on`
+  (`Policy.Allows` для `exit` — как для `remote`). Взломанный `rayd relay` не обойдёт ни одно из этого;
+- ребёнок — `rayctl update -yes -version V` с `RAYCONTROL_UPDATE_RESULT`, как у ноды (`update_request.go:86-88`). Он
+  уходит в `updateRelay`, проверяет релиз, отдаёт обновление `rayctl` релиза (передача), и **пишет итог**: ветку relay
+  в `update` надо перенести за установку `writeResult` (`update.go:129-137` до `166-176`), а `touched` поставить там,
+  где `relayUpdate.run` переименовал первый бинарник (`update_relay.go:726-733`). `rolledBack` уже есть
+  (`update_relay.go:744`, `update.go:598-603`), и хвост вывода для старого ребёнка узнаёт его по той же строке
+  (`update_request.go:100`).
+
+Метка relay получает поле `by` (`relayMark`, `update_relay.go:162-166`): `exit`, когда обновление идёт с
+`RAYCONTROL_UPDATE_RESULT` под этим юнитом. По нему узнаётся обновление, которое relay может довести до конца сам.
+
+Перед итогом runner пишет в статус `unfinished`, если метка осталась (каталог `previous` — root 0700,
+`update_relay.go:263`, `update_stage.go:37-41`, и `rayd relay` его не видит).
+
+### 4.3. Откат сам
+
+`relayUpdate.run` откатывает relay сам при любом сбое после первого изменения (`update_relay.go:731-747`). Этого мало
+без человека в SSH, и вот три случая, где сегодня откат ждёт root:
+1. **Ребёнок убит** (kill -9, нехватка памяти): runner видит выход без итога и метку `by: exit` → сам запускает
+   `rayctl update -rollback -yes` (тот же `relayEnv.rollback`, `update_relay.go:905-949`) один раз. Итог —
+   `rolled_back` с `interrupted` или `failed` с `open`.
+2. **Таймаут юнита**: systemd шлёт SIGTERM всей группе; `rayctl` relay его перехватывает (`update_relay.go:955-959`) и
+   откатывает, установка останавливается как при ошибке. Runner сигнал тоже перехватывает и ждёт ребёнка. Не уложились в
+   `TimeoutStopSec` — SIGKILL, затем `ExecStopPost` (`-request-ended`): на relay он, как сейчас, меняет `running` на
+   `failed` (`update_request.go:131-143`) и, если метка `by: exit` осталась и система не выключается
+   (`systemctl is-system-running` не `stopping`), один раз делает то же, что случай 1.
+3. **Выключение или потеря питания** посреди обновления: откат запустить юниты не может, хост открыт, `rayspa` выключен
+   (node-update §5, строки 282-287, 311-314). После загрузки `raycontrol-relay-recover.service` при метке `by: exit`
+   делает `rayctl update -rollback -yes`. Метку без `by` (обновление руками) он не трогает: там был человек, и ему
+   сказано, что делать.
+
+`-rollback` под юнитом проверяет SSH, как и руками (`update_relay.go:922-936`), но адрес сессии неизвестен — только
+предупреждение (`install_relay.go:960-962`). Порт sshd и то, что снимок пускает SSH с адресов администратора relay,
+проверяются по-прежнему. Если не вернулся и прежний relay, хост открыт (`backOrOpen`), как сегодня: закрытый для
+администратора хост хуже открытого.
+
+### 4.4. Что добавляется на хосте, который должен быть маленьким
+
+- Ни одного нового слушающего сокета; ни одного нового процесса, который работает всё время.
+- Код, работающий от root: `rayctl update -request`, `-request-ended`, `-request-recover` на relay. Что он читает от
+  других: файл запроса ≤ 4 КиБ JSON из каталога `rayd` (без ссылок, `nodeupdate.go:457-473`); всё остальное — файлы
+  root (политика, статус, метка) и релиз из сети, который ручной `rayctl update` качает и сегодня.
+- Юниты: path (inotify на один путь) и oneshot; boot-oneshot с условием по файлу. При `remote off` ни один не
+  включён.
+- `rayd relay`: разбор трёх полей предложения, запись одного файла, чтение двух файлов root, один унарный вызов.
+  Поверхность к сети прежняя: тот же поток к выходу.
+- Выход: обработчик `ReportUpdate` за тем же mTLS и проверкой адреса, что `Report`.
+- Новое, что видит сеть: relay ходит к GitHub или зеркалам сразу после обновления выхода, а не тогда, когда root решит.
+  GitHub и зеркала видят адрес relay рядом по времени с адресом выхода (§6).
+
+Оценка (вывод): около 600 строк вне тестов, из них от root — ~200 (runner relay, recover, политика, юниты).
+
+## 5. Порядок относительно обновления ноды
+
+**Решение: после**, и по одному relay за раз. Обновление ноды от relay не зависит и их не ждёт.
+
+Почему не до и не вместе:
+- Установка relay включает `rayspa` только после первого снимка от выхода, и ждёт его 45 с (`install_relay.go:206-224`,
+  relay-v1 §7). Пока выход перезапускается (1–3 мин, node-update §2), снимка нет: обновление relay «вместе» с нодой
+  падало бы на установке и откатывалось — две остановки пересылки вместо одной.
+- «До» значит, что нода ждёт relay, а relay, который не отвечает, задержит её. Это запрещено. И если обновление ноды
+  потом откатится, relay окажется впереди неё без причины.
+- «После» по готовому `done` значит: relay идёт на версию, которая на ноде прошла проверку и не откатилась.
+
+Что видят клиенты на каждом шаге (обновление с телефона, два relay):
+
+| шаг | напрямую к выходу | через relay | сколько |
+|---|---|---|---|
+| нода: rayd остановлен, копия базы | работает: data plane и периметр как были (`update.go:239-241`) | работает | секунды |
+| нода: бинарники, перезапуск rayd, `rayspa`, data plane | рвётся, переподключение и новый стук | рвётся: relay пересылает к перезапускающемуся выходу; его таблица на месте | 1–3 мин |
+| нода `done`; потоки relay переподключаются | работает | работает, таблица relay не менялась | ≤ 30 с / 1 мин (`rayspa/main.go:467`, `relayprobe.go:327`) |
+| выход называет версию r1; r1 качает и проверяет | работает | работает | ≤ 60 с + скачивание (10–60 с) |
+| r1: копия, бинарники | работает | работает | секунды |
+| r1: `rayctl install -relay`, перезапуск `rayspa`, первый снимок | работает | **через r1 — нет**: клиент переподключается и стучится снова; через r2 — работает | обычно < 1 мин, до ~4 мин при сбое (150 + 45 + 33 с, node-update §5) |
+| r1: проверка и `done`; очередь r2 | работает | через r1 снова работает | 30 + 3 с |
+| r2: то же | работает | через r2 — нет, через r1 — работает | как у r1 |
+
+Итого клиент через relay теряет путь дважды: вместе со всеми при обновлении выхода и ещё раз, ненадолго, при
+обновлении своего relay. Слить эти остановки в одну нельзя (первая причина выше).
+
+## 6. Модель угроз
+
+**Взломанный выход.** Он и сегодня держит relay в руках: снимок решает, что relay пересылает и кого пускает по SSH.
+Новое у него — назвать версию. Что он с этим может:
+- поставить на relay только релиз, подписанный ключом релизов: relay качает сам и проверяет своим закреплённым ключом
+  (`release.PubKey`, `update.go:51-53`), версию берёт из подписи и требует, чтобы она была той, что просили
+  (`release.go:294-300`);
+- только вперёд: root сверяет «строго новее» сам (§4.2), назад и ту же версию — нет;
+- выбрать момент перезапуска relay (одна остановка пересылки на каждый более новый релиз) — меньше, чем он может и так,
+  убрав сервисы из снимка;
+- называть несуществующие версии: каждая — скачивание с ответом 404 (`untouched`), не чаще §3.5, шаг 7;
+- повторять версию, которая на relay откатилась, — нет: `held`.
+Он не может: выбрать сборку, ветку, `-local`, `-from`, `-force`, флаги или окружение `rayctl`; запустить откат.
+
+**Взломанный relay.** Он может солгать выходу о себе (версия, состояние): телефон покажет неправду об этом relay.
+Ограничено: поля по §3.6, выход сам режет их и чистит; один relay не влияет ни на обновление ноды, ни на очередь
+дольше `TurnTimeout`, ни на других relay. Логи выхода получают только имя relay, коды и версии. Взломанный `rayd relay` на
+своём хосте может писать запросы: root проверяет их заново (§4.2), и худшее — обновление на более новый подписанный
+релиз.
+
+**Сеть между relay и выходом.** mTLS: выход по пину из пакета, relay по пину клиентского сертификата и адресу
+(§2.3). Подменить предложение или доклад нельзя; можно задержать или выбросить. Тогда relay не обновится, а телефон
+увидит `failed` (`no_word`) через час. Видно, что обновление идёт: размер и время сообщений в потоке (вывод).
+
+**Зеркало или сеть между relay и GitHub.** Отдают старый подписанный релиз вместо названного — отказ: версия в
+подписи не та (`release.go:298-300`), `signature`, `untouched`. Задерживают новый (freeze) — `download`, повтор через
+6 ч. Подписать своё — нельзя без ключа. Видят адрес relay: так и с ручным обновлением; теперь — сразу после выхода.
+
+**Логи и доклады.** Ни адресов пользователей, ни их назначений, ни ключей:
+- `error` в докладе — текст, пропущенный через `internal/redact` (`redact.String`: адреса, ключи, идентификаторы,
+  ссылки), затем `Printable` и 200 байт. Сообщения установки relay содержат адреса — например, адрес выхода
+  (`install_relay.go:220-222`) или адреса администратора relay (`install_relay.go:969-971`); на выход и в телефон они не
+  уходят. Полный текст остаётся в журнале юнита relay и в его `status.json`, на хосте relay;
+- выход пишет в аудит `relay.update <имя> <состояние> <версия>`, в журнал — то же;
+- `rayd relay` пишет в журнал версию и `id` предложения, код и состояние, но не текст установки.
+
+## 7. Сбои
+
+| что случилось | что делает relay | что видят выход и телефон |
+|---|---|---|
+| на relay `remote off` (по умолчанию) | ничего не пишет | `off`, версия relay |
+| relay старше vW или `rayd relay` не запущен (пакет без точки замера) | не понимает предложений | `unknown`, очередь идёт дальше |
+| выход старше vW | предложений нет; `ReportUpdate` → `Unimplemented`, больше не зовёт до нового потока | — |
+| relay уже на этой версии или новее | ничего | `current` |
+| GitHub и зеркала недоступны | `failed`, `download`, `untouched`; повтор через 6 ч | `failed` (`download`), время |
+| подпись не та, зеркало отдало старый релиз | `failed`, `signature`, `untouched`; повтор через 6 ч | `failed` (`signature`) |
+| снимок не пустит SSH на порт sshd | `failed`, `ssh`, ничего не тронуто | `failed` (`ssh`): на выходе `rayctl relay set` |
+| пакет relay пропал | `failed`, `bundle` | `failed` (`bundle`) |
+| метка прошлого ручного обновления | `failed`, `unfinished` | `failed` (`unfinished`), `unfinished: true`: нужен root |
+| root обновляет руками (замок) | runner ждёт 10 мин, затем `failed`, `busy`; повтор через 6 ч | `failed` (`busy`) |
+| первый бинарник не встал (диск) | ничего не изменилось, `failed`, `place` | `failed` (`place`) |
+| установка: выход не дал первый снимок за 45 с | откат, прежний relay с прежним снимком пересылает | `rolled_back` (`install`); версия в `held` |
+| проверка после установки не прошла | откат | `rolled_back` (`check`) |
+| ребёнок убит посреди | runner откатывает сам (§4.3) | `rolled_back` (`interrupted`) |
+| таймаут юнита | откат в `rayctl`, затем `ExecStopPost` | `rolled_back` или `failed` (`interrupted`) |
+| выключение, перезагрузка, питание | хост открыт до загрузки; после — `recover` откатывает | до загрузки: последнее `running`; после — `rolled_back` (`interrupted`) |
+| откат не вернул relay | хост открыт, не пересылает; `rayspa` и `rayd relay` выключены | доклада нет: `running`, через час `failed` (`no_word`). Нужен root: SSH открыт отовсюду |
+| relay не докладывает (сеть) | работает дальше | через `TurnTimeout` очередь идёт дальше; `seen_at` стоит; через час после `running` — `failed` (`no_word`) |
+| relay выключен неделю и вернулся | при первом потоке получает предложение (версию, на которой выход сейчас) и сразу идёт на неё | `offered` → … |
+| нода откатилась или упала | — | предложения нет; relay нетронуты |
+| ноду потом откатили руками, relay уже новее | ничего: назад никогда | предложения нет; relay новее выхода (relay-v1 заморожен: работает) |
+| нода обновилась снова, пока relay обновляется | идёт своё; следующее предложение — новее | второй `offered` после первого итога |
+| выход перезапустился посреди обновления relay | установка ждёт снимок до 45 с; иначе откат | итог приходит после переподключения |
+| `ReportUpdate` отказан (`ResourceExhausted`, связь) | повтор со следующим взглядом | доклад позже |
+| relay удалён на выходе или новый пакет | поток отрезан (`NotFound`), предложений нет | строки relay нет (удалён) |
+| взломанный выход называет несуществующие версии | `failed`, `download`; не чаще 1/10 мин и 6/сутки | `failed` (`download`) |
+| часы relay и выхода расходятся | запрос и его возраст — по часам relay | время на телефоне — по часам выхода (§8.1) |
+
+Обновление ноды не ждёт ни одного relay: её `status` — `done`, как только `done` она сама.
+
+## 8. API для телефона (node.v1, только добавления)
+
+### 8.1. Поля
+
+```proto
+message GetUpdateStatusResponse {
+  // ... 1-9 as before
+  // The relays in front of this node and their updates by the node's word
+  // (relay-update-remote-v1), by name. An older node sends none.
+  repeated RelayUpdateStatus relays = 10;
+}
+
+message RelayUpdateStatus {
+  string name = 1;
+  string version = 2;    // what the relay last said it runs; "" never said
+  string state = 3;      // §8.2
+  string target = 4;     // the version offered; "" none
+  string update_id = 5;  // the node's update it follows (UpdateStatus.id)
+  string reason = 6;     // §3.6
+  string error = 7;      // short text, redacted, at most 200 bytes
+  int64 changed_at = 8;  // unix seconds, the node's clock: when state became what it is
+  int64 seen_at = 9;     // when the node last heard the relay at all (a feed stream, a report), the node's clock; 0 never
+  bool remote = 10;      // the relay takes the node's word (root on it: rayctl update remote on)
+}
+```
+
+Все времена — unix-секунды, как `UpdateStatus.ended_at`, по часам выхода: он ставит их при приёме доклада.
+`seen_at` — когда выход последний раз слышал relay вообще: открытый поток фида (`WatchRelay`) или доклад любого
+вида (`Report`, `ReportUpdate`), а не только по обновлению; по нему телефон показывает «давно не на связи» отдельно
+от `state`. `reason` — машинный код из §3.6 (его клиент переводит сам), `error` — короткий текст для человека, на
+английском; новых кодов и состояний старое приложение не ломает, оно показывает их как есть (сверено с клиентом
+2026-11-14). Время из доклада (`RelayUpdate.at`) телефону не
+нужно: часы relay могут идти иначе.
+
+### 8.2. Состояние для телефона
+
+Выход сводит доклад relay и своё предложение в одно `state`:
+
+| state | что значит |
+|---|---|
+| `unknown` | relay ни разу не докладывал: старше vW, нет `rayd relay` или не подключался с тех пор |
+| `off` | relay младше `target`, но root на нём не разрешил (`remote: false`) |
+| `current` | relay на `target` или новее, либо предложения нет |
+| `waiting` | ждёт очереди: обновляется другой relay |
+| `offered` | предложение в его потоке, доклада о нём ещё нет |
+| `requested`, `running`, `done`, `rolled_back`, `failed` | как доложил relay по этому `update_id` (§3.4); `failed` с `no_word` — час без слова после `requested`/`running` |
+
+Клиенту: после `StartUpdate` опрашивать `GetUpdateStatus`, как сейчас (node-update §2), пока свой `status` не итог
+**или** хоть один relay в `waiting`, `offered`, `requested`, `running`. Строка relay — имя, версия, состояние, время
+`changed_at`, причина. Без поля `relays` (старая нода) — как раньше. С клиентом согласовано 2026-11-14: поля §8.1 как
+есть, времена в секундах, `seen_at` — любая связь, `reason` — код, `error` — текст.
+
+### 8.3. Хранение на выходе
+
+Последний доклад каждого relay — в таблице `settings` (`internal/store/store.go:180-195`, `217`), ключ
+`relay-update/<имя>`, JSON полей §8.1 без `state` (оно сводится при чтении). Без миграции схемы: откат ноды не
+должен возвращать базу из-за этой волны (node-update §3, «Откат и база»). Пишется только при изменении; `seen_at` —
+в памяти и в базе не чаще раза в 10 мин (поток фида держит его свежим, пока открыт). `RemoveRelay` (`internal/api/relays.go:62-68`) удаляет и ключ.
+
+## 9. `rayctl`
+
+### 9.1. На relay
+
+```
+rayctl update remote on|off     # root: принимать ли версию, которую называет выход
+rayctl update status            # политика, юнит, последнее обновление по слову выхода
+rayctl update -check            # как сейчас; строка о remote — по политике
+```
+
+- Политика — тот же файл и формат, что у ноды: `/var/lib/raycontrol-update/policy.json` (`nodeupdate.WritePolicy`,
+  `update_request.go:233-258`), каталог root 0755. Нет файла или он битый — выключено (`nodeupdate.go:339-348`).
+  Слово то же, `remote`: обновление по запросу, только просит здесь выход, а не устройство администратора.
+- `remote on` (только root): пишет политику; требует файлы юнитов (relay vW и новее; иначе: `rayctl update` сначала) и
+  юнит `rayd-relay` (иначе: `the relay's probe endpoint (rayd relay) does not run: it takes the exit's word; a new
+  bundle from the exit has one`); затем `systemctl enable --now raycontrol-relay-update.path` и `enable
+  raycontrol-relay-recover.service`. Печатает:
+  `the exit may now name a release for this relay: a signed one, newer than it; the relay downloads and verifies it itself (rayctl update remote off)`.
+- `remote off`: пишет политику, выключает оба юнита, удаляет ждущий запрос (`nodeupdate.RemoveRequest`).
+- `rayctl update auto …` на relay по-прежнему отказывает, с другим текстом: `a relay follows its exit: rayctl update
+  remote on takes the releases the exit names`.
+- `rayctl update status`:
+
+  ```
+  host       relay
+  installed  v0.28.0 (rayctl)
+  previous   v0.27.0 (rayctl update -rollback)
+  remote     on: the exit names the release (raycontrol-relay-update.path active); rayctl update remote off
+  last       done: v0.27.0 → v0.28.0, by exit, 2026-11-20T03:41:12Z
+  latest     rayctl update -check asks GitHub
+  auto       does not apply: a relay follows its exit
+  ```
+
+  `remote off` — `remote     off (default): rayctl update remote on takes the releases the exit names`. Политика `on`, а
+  path-юнит не активен — ещё строка `warning: … not active: systemctl enable --now …`. `held`, `error` — как у ноды
+  (`update_request.go:333-350`). `-json`: `"remote": "on"|"off"` вместо `"n/a"`, плюс `last`, `held`.
+- `rayctl update -request`, `-request-ended`, `-request-recover` — флаги юнитов, руками не нужны.
+
+### 9.2. На выходе
+
+Новых команд нет, кроме флага `rayctl update -no-relays` (§11 п. 1); выключателя на выходе нет (§11 п. 2).
+`rayctl update status` добавляет по строке на relay:
+
+```
+relay      r1: v0.28.0, done (v0.27.0 → v0.28.0), 2026-11-20T03:41:12Z
+relay      r2: v0.27.0, off: root on r2 has not allowed it (rayctl update remote on there)
+relay      r3: v0.27.0, waiting for r2
+relay      r4: unknown: no word (a relay before vW, or its rayd relay does not run)
+```
+
+`failed`/`rolled_back` — с кодом и текстом; `-json` — поле `relays`.
+
+## 10. Версии и переход
+
+- **Новый выход, relay v0.26.x–до vW.** В потоке нет `updates`: предложений нет, доклада нет — `unknown`. Чтобы relay
+  шёл за выходом: root на relay `rayctl update` (до vW или новее), затем `rayctl update remote on`. Это один раз.
+- **Старый выход, новый relay.** Предложений нет. `ReportUpdate` → `Unimplemented`: `rayd relay` замолкает до
+  следующего потока. Relay работает как раньше; relay-v1 заморожен, совместимость полей — proto3.
+- **Relay выключен днями.** Предложение не устаревает (§3.3); вернувшись, relay сразу идёт на версию, на которой выход
+  сейчас, через все пропущенные — одним обновлением, как `rayctl update` руками.
+- **Relay откатили руками ниже vW.** Откат возвращает файлы как были: юнитов не было — они удаляются (копия помнит, что
+  файла не было, `update_relay.go:276-278`, `388-394`), а path-юнит выключается (`update_relay.go:453-455`; что
+  `systemctl disable` делает с уже удалённым файлом — проверить на хосте, вывод). `policy.json` остаётся, старый `rayctl`
+  его не читает.
+- **Повторный `bootstrap.sh -relay`** — юниты включаются по политике.
+- **Форматы.** `nodeupdate.Result` и `status.json` получают необязательные `reason` и (статус) `unfinished`; вид `exit`.
+  Старый runner лишние поля пропускает (JSON). В замороженном списке `docs/RELEASE.md:132-140` — новые флаги
+  `update -request-recover`, юниты relay и путь запроса relay.
+- **Нода без systemd** (`rayd serve -supervise`) — обновлений по запросу нет (node-update §1), предложений тоже.
+
+## 11. Решения владельца (2026-11-14)
+
+Вопросы стояли так, как в черновике `7c17f4d`; ответы владельца дословно: «1) да 2) к чему это 3) в основном из github,
+в дальнейшем если мы займёмся оркестрированием и кубером в какой-то мере, мб ansible - могли бы при объединении нод
+транслировать контент в выделенной полосе для служебных нужд 4) любую новее».
+
+1. **Relay идут и за ручным `rayctl update` на ноде.** Ручное обновление пишет `status.json` с видом `local` и
+   `by: "rayctl on the node"` (как `noteRollback`, `update.go:633-641`; клиент выводит `by` в строке «кем», пустым его
+   оставлять нельзя), и выход называет эту версию, как после `remote` и `auto`. Исключение —
+   `rayctl update -no-relays`: статус пишется с `relays: false`, предложения нет. Цена принята: `GetUpdateStatus.status`
+   показывает и ручные обновления (клиенту сообщено 2026-11-14). Откат (`-rollback`) relay не трогает: `rolled_back`
+   не `done` (§3.3).
+2. **Выключателя на выходе нет.** Владелец спросил, зачем он; он нужен, только чтобы администратор выхода мог
+   придержать один relay, не заходя на его хост (relay на хосте, где новая версия известна плохой; relay, оставленный
+   на старой версии как запасной). Это решается на самом relay: root там не включает или выключает `remote`
+   (`rayctl update remote off`). В v1 — одна точка решения, на relay.
+3. **Релиз relay берёт сам, в основном с GitHub** (и зеркала, как `rayctl update` на relay сегодня). Передача файлов
+   через выход — не в v1; к ней вернёмся вместе с оркестрацией нод (ansible, в какой-то мере Kubernetes): служебная
+   полоса между объединёнными нодами, по которой идёт и содержимое релизов. До выпуска v1 всё равно проверить на
+   настоящем relay в стране, открыт ли оттуда GitHub (§12.3); если нет — relay доложит `download`, и это видно на
+   телефоне.
+4. **Relay берёт любую версию новее своей**, как `StartUpdate` у ноды: relay всегда за выходом. Root, которому это не
+   нужно, не включает `remote`.
+
+## 12. Тесты
+
+### 12.1. Модульные
+
+- `internal/nodeupdate`: вид `exit` в `Check` (только `vX.Y.Z`, строго новее, `held`), `Allows`, `reason` и `unfinished`
+  в статусе и итоге, обрезка; старый JSON без них читается.
+- `internal/api` (`relayfeed_test.go`, новый `relayupdate_test.go`): предложение только при `done` вида
+  `remote|auto` с `to` = версии rayd, не при `Busy`, не после ручного обновления; только в поток с `updates`; изменение
+  предложения будит поток и сравнивается вместе со снимком; очередь по именам с часами теста (прошёл, ушёл в обновление,
+  молчит, `TurnTimeout`, перезапуск выхода); `ReportUpdate`: чужой пин, чужой адрес, лимиты, границы полей,
+  `Printable`/`redact`, запись в `settings` только при изменении, удаление с `RemoveRelay`; `GetUpdateStatus.relays` и
+  сведение `state` (§8.2), `no_word`.
+- `internal/relayprobe`: шаги §3.5 по порядку на временных каталогах (политика, версия, `held`, `untouched` и 6 ч,
+  `Busy`, лимит запросов), запрос пишется атомарно и один; опрос статуса и доклады при изменении; `Unimplemented` →
+  тишина до нового потока; `error` без адресов (тест с адресом выхода и адресами администратора в тексте).
+- `cmd/rayctl` (`update_relay_test.go`, новый `update_relay_request_test.go`): `-request` на relay — отказ при `off`,
+  старом запросе, не новее, `held`, ниже v0.26.0; `running` пишется до удаления запроса; итог ребёнка с `reason`
+  (`untouched` до первого бинарника, `rolledBack` после); хвост без итога; метка с `by: exit`; убитый ребёнок → откат
+  runner'ом; `-request-ended` с меткой и без, при выключении — без отката; `-request-recover` трогает только метку
+  `by: exit`; `remote on|off` включает и выключает юниты (подменённый `systemctl`), отказ без юнитов и без `rayd relay`;
+  `status` и `-json`; `relayOps.units` с новыми юнитами в конце — `open` и `restore` (`relayEnv` уже позволяет весь
+  путь на каталогах теста, `update_relay.go:779-798`).
+- `internal/deploy`: `RelayPlan` с тремя файлами, `Check` их пропускает, сервис не в `Units`; файлы юнитов ноды не
+  тронуты.
+
+### 12.2. В контейнерах (`test/`)
+
+- `test/relay/e2e.sh` (три пространства имён, настоящие `rayspa -relay`, `rayd relay` и выход из `api.test`): выход с
+  `status.json` `done` → предложение доходит до `rayd relay` → файл запроса с нужными полями; без `remote on` — файла
+  нет; доклад виден в `GetUpdateStatus.relays`; старый `rayd relay` (бинарник v0.26.0) — `unknown`; старый выход
+  (v0.26.0) с новым `rayd relay` — `Unimplemented`, relay работает и пересылает.
+- Новый `test/relay/host.sh` (CI, задание как `upgrade`): два контейнера с systemd — выход (как `test/install/run.sh`)
+  и relay (`bootstrap.sh -relay`). Релиз — сборка `releasetest`, подписанная ключом теста (`cmd/rayctl/testkey.go`,
+  `test/install/handoff-release.sh`), отдаётся с локального HTTP как зеркало (`RAYCONTROL_MIRRORS`, drop-in юнита).
+  Сценарии: обновление по слову выхода до конца, пересылка после (стук и TCP через relay, как в e2e); сбой проверки
+  (релиз с `rayspa`, который падает) → `rolled_back`, relay пересылает; выход недоступен во время установки → откат;
+  kill -9 ребёнка → откат runner'ом; `systemctl stop` сервиса посреди → откат; перезапуск контейнера посреди →
+  `recover` после загрузки; `remote off` → ничего; зеркало отдаёт другой подписанный релиз → `signature`.
+
+### 12.3. Только на настоящем хосте
+
+Как и для ручного обновления relay (node-update §5, строки 190-191, 367-368), CI хоста relay с настоящим ядром и
+провайдером нет:
+- `systemd`: path-юнит, `TimeoutStopSec` и перехват SIGTERM группы, выключение посреди, `recover` после потери
+  питания;
+- `nft`, `sysctl`, `/proc/PID/exe` процесса `rayspa`, передача fd 3;
+- доступность GitHub и зеркал из сети relay (§11, вопрос 3);
+- клиент Niko через relay на телефоне в обоих разрывах §5: сколько он на самом деле без пути;
+- `systemctl disable` юнита, чей файл откат уже удалил (§10).
+
+## 13. План реализации
+
+Каждый — один коммит, проверяемый отдельно; поведение включается последним.
+
+1. **proto.** `perimeter.proto`: `WatchRelayRequest.updates`, `WatchRelayResponse.update`, `RelayUpdateOffer`,
+   `ReportUpdate`, `RelayUpdate`; `node.proto`: `GetUpdateStatusResponse.relays`, `RelayUpdateStatus`. Генерация в
+   `internal/gen/…`. Обработчик `ReportUpdate` пока `Unimplemented`.
+2. **nodeupdate.** Вид `exit`, `RelayRequestFile`, `RelayRetryAfter`, `reason`/`unfinished` в `Result` и `Status`, коды.
+   `internal/nodeupdate/nodeupdate.go`, `_test.go`; `docs/RELEASE.md` (формат).
+3. **Итог обновления relay.** Ветка relay после установки `writeResult`, `touched`, `reason` по месту сбоя; поле
+   `by` метки. `cmd/rayctl/update.go`, `update_relay.go`, `update_stage.go`, `update_relay_test.go`. Поведение руками
+   не меняется.
+4. **Юниты relay.** Три файла в `RelayPlan`, `check.go`, включение по политике в `install_relay.go`, `relayOps.units`.
+   `internal/deploy/relay.go`, `check.go`, `deploy_test.go`; `cmd/rayctl/install_relay.go`, `update_relay.go`, тесты.
+5. **Root на relay.** `-request` на relay, `-request-ended` с откатом, `-request-recover`, откат runner'ом.
+   `cmd/rayctl/update.go`, `update_request.go`, новый `update_relay_request.go`, тесты.
+6. **Политика на relay.** `rayctl update remote on|off`, `status`, `-check`, `auto` с новым текстом.
+   `cmd/rayctl/update_relay.go`, `update_request.go`, `update_status_test.go`.
+7. **`rayd relay`.** Предложение (§3.5), запрос, опрос статуса, `ReportUpdate`, `updates: true`. Новый
+   `internal/relayprobe/relayupdate.go` и тест; `relayprobe.go` (Watch), `cmd/rayd/main.go` (пути).
+8. **Выход: предложение и очередь.** Чтение `status.json`, очередь, предложение в потоке, сравнение всего ответа,
+   пробуждение. `internal/api/relayfeed.go`, новый `internal/api/relayupdate.go`, `remote.go`, тесты.
+9. **Выход: доклады.** `ReportUpdate`, `settings`, удаление с relay, `GetUpdateStatus.relays`, аудит.
+   `internal/api/relayfeed.go`, `relayupdate.go`, `relays.go`, `update.go`, тесты.
+10. **`rayctl update status` на выходе.** Строки relay, `-json`. `cmd/rayctl/update_request.go`, `update_status_test.go`.
+11. **Тесты в контейнерах.** `test/relay/e2e.sh`, новый `test/relay/host.sh`, `.github/workflows/ci.yml`.
+12. **Документы.** node-update-v1 §5 («Не поддерживается», `-check`, `status`), relay-v1 §7, `docs/RELEASE.md`,
+    шпаргалка и руководство, записка клиенту в `docs/handoff/` (§8), этот документ — «принят» с отличиями.

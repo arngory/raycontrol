@@ -358,7 +358,7 @@ func TestRelayReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	gone, _, _ := srv.Store.CreateDevice(ctx, "alice", "old", "user")
-	if err := srv.Store.RevokeDevice(ctx, gone.ID); err != nil {
+	if _, err := srv.Store.RevokeDevice(ctx, gone.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r1", Address: "198.51.100.20"})); err != nil {
@@ -584,4 +584,25 @@ func TestRelayProbeUp(t *testing.T) {
 	mu.Unlock()
 	waitFor(false)
 	rayspa.Close()
+}
+
+// A relay forgets its devices when the exit says it does not know the
+// relay, so only the store's "no such relay" may say that: a store that
+// failed for a moment is the exit away.
+func TestRelayLookup(t *testing.T) {
+	if got := connect.CodeOf(relayLookup(store.ErrNotFound)); got != connect.CodeNotFound {
+		t.Errorf("no such relay: %v", got)
+	}
+	if got := connect.CodeOf(relayLookup(fmt.Errorf("listing relays: %w", store.ErrNotFound))); got != connect.CodeNotFound {
+		t.Errorf("no such relay, wrapped: %v", got)
+	}
+	for _, err := range []error{errors.New("database is locked"), context.DeadlineExceeded, store.ErrInvalid} {
+		got := relayLookup(err)
+		if connect.CodeOf(got) != connect.CodeUnavailable {
+			t.Errorf("%v: %v, want unavailable", err, connect.CodeOf(got))
+		}
+		if strings.Contains(got.Error(), err.Error()) {
+			t.Errorf("%v: the store's words reach the relay: %v", err, got)
+		}
+	}
 }

@@ -275,6 +275,21 @@ func TestPatchAndWindow(t *testing.T) {
 			t.Errorf("Patch(%s, %s) = %v", c.a, c.b, got)
 		}
 	}
+	// What the auto update leaves: a newer minor or major version.
+	for _, c := range []struct{ a, b, want string }{
+		{"v0.27.0", "v0.26.3", "minor"},
+		{"v0.30.1", "v0.26.0", "minor"},
+		{"v1.0.0", "v0.26.0", "major"},
+		{"v0.26.4", "v0.26.3", ""},
+		{"v0.26.0", "v0.27.0", ""},
+		{"v0.27.0", "v0.27.0", ""},
+		{"v0.27.0", "dev", ""},
+		{"", "v0.26.0", ""},
+	} {
+		if got := Step(c.a, c.b); got != c.want {
+			t.Errorf("Step(%s, %s) = %q, want %q", c.a, c.b, got, c.want)
+		}
+	}
 	at := func(h, m int) time.Time { return time.Date(2026, 11, 8, h, m, 0, 0, time.UTC) }
 	for _, c := range []struct {
 		w    string

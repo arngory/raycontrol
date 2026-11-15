@@ -510,9 +510,12 @@ func isCredentialPrint(s string) bool {
 }
 
 // CredentialSets is Credentials with the rotation state.
+// With no userIDs it only reads: no transaction, nothing made.
 func (s *Store) CredentialSets(ctx context.Context, serviceID int64, userIDs []int64, gen func() (string, error)) (map[int64]Credential, error) {
-	if _, err := s.Credentials(ctx, serviceID, userIDs, gen); err != nil {
-		return nil, err
+	if len(userIDs) > 0 {
+		if _, err := s.Credentials(ctx, serviceID, userIDs, gen); err != nil {
+			return nil, err
+		}
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT user_id, secret, coalesce(next_secret, ''), coalesce(next_from, 0),
 		coalesce(prev_secret, ''), coalesce(prev_until, 0) FROM credentials WHERE service_id = ?`, serviceID)
@@ -768,35 +771,238 @@ func (s *Store) ActiveDevice(ctx context.Context, id string) (Device, [spa.KeySi
 	return d, key, nil
 }
 
-// RevokeDevice marks a device revoked. Revocation is permanent. The user's
-// LAN key, when there is one, is new with it (lan-v1 §3): the multicast
-// password the device knew is no longer the user's, both at once. A device
-// revoked already is no error and changes nothing; an unknown one is
-// ErrNotFound.
-func (s *Store) RevokeDevice(ctx context.Context, id string) error {
+// Revocation is what RevokeDevice did.
+type Revocation struct {
+	User   string // the device's user
+	Device string // the device's name
+	// Already: the device was revoked before, and nothing changed.
+	Already bool
+	// Credentials is how many of the user's credentials are new: every
+	// row the user has, one for each service the user has or had a
+	// credential on (inner's included), but DoH's, which a revocation
+	// keeps (R4-37). A count of credentials, not of the services the user
+	// has now.
+	Credentials int
+}
+
+// RevokeDevice marks a device revoked. Revocation is permanent. In the same
+// transaction every credential of its user is new (docs/08-decisions.md,
+// R4-36): the credentials are the user's, shared by all the user's
+// devices, and the revoked one may have kept its lines. Each gets a fresh
+// secret with no next and no previous one, so nothing it knew is accepted
+// once the data plane has the change: the user's other devices are cut
+// until they fetch their subscription, which their own keys still open.
+// DoH's is kept (R4-37): no device holds it, each has a token of its own
+// from it and its SPA key (DoHDeviceToken), and the revoked device's goes
+// with the device; its user's shared token, in its window, goes with the
+// revocation too (DoHTokens). So the resolver the other devices fetch
+// their subscription by goes on answering them.
+// The user's LAN key, when there is one, is new with it (lan-v1 §3): the
+// multicast password the device knew is no longer the user's, both at
+// once. A device revoked already is no error and changes nothing
+// (Revocation.Already); an unknown one is ErrNotFound.
+func (s *Store) RevokeDevice(ctx context.Context, id string) (Revocation, error) {
+	var r Revocation
 	key, err := newLANKey()
 	if err != nil {
-		return err
+		return r, err
 	}
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, s.now().Unix(), id)
+	err = s.tx(ctx, func(tx *sql.Tx) error {
+		var user int64
+		var revoked sql.NullInt64
+		err := tx.QueryRowContext(ctx, `SELECT d.user_id, u.name, d.name, d.revoked_at FROM devices d JOIN users u ON u.id = d.user_id
+			WHERE d.id = ?`, id).Scan(&user, &r.User, &r.Device, &revoked)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("device %q: %w", id, ErrNotFound)
+		}
 		if err != nil {
 			return err
 		}
-		if n, err := res.RowsAffected(); err != nil {
-			return err
-		} else if n == 0 {
-			// Revoked already (a retry): done, nothing changes.
-			var known int
-			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM devices WHERE id = ?`, id).Scan(&known); err != nil || known > 0 {
-				return err
-			}
-			return fmt.Errorf("device %q: %w", id, ErrNotFound)
+		if revoked.Valid {
+			// Revoked already (a retry): done, nothing changes, and the
+			// credentials are not changed again.
+			r.Already = true
+			return nil
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE users SET lan_key = ? WHERE lan_key IS NOT NULL
-			AND id = (SELECT user_id FROM devices WHERE id = ?)`, key, id)
+		now := s.now().Unix()
+		if _, err := tx.ExecContext(ctx, `UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, now, id); err != nil {
+			return err
+		}
+		r.Credentials, err = renewUser(ctx, tx, user, now, key, true)
 		return err
 	})
+	if err != nil {
+		return Revocation{}, err
+	}
+	return r, nil
+}
+
+// renewUser is what a revocation does to the device's user: every
+// credential new (renewCredentials) and the LAN key, when there is one,
+// replaced by key. It returns how many credentials there were.
+func renewUser(ctx context.Context, tx *sql.Tx, user, now int64, key []byte, keepDoH bool) (int, error) {
+	n, err := renewCredentials(ctx, tx, user, now, keepDoH)
+	if err != nil {
+		return 0, err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE users SET lan_key = ? WHERE lan_key IS NOT NULL AND id = ?`, key, user)
+	return n, err
+}
+
+// RenewUser gives a user new credentials at once, as a revocation of one
+// of the user's devices does (RevokeDevice): each a fresh secret with no
+// next and no previous one, and a new LAN key when the user has one. For
+// a device revoked by a node that left the credentials as they were, or
+// a credential that leaked otherwise (rayctl user renew). It returns how
+// many credentials are new.
+func (s *Store) RenewUser(ctx context.Context, name string) (int, error) {
+	key, err := newLANKey()
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	err = s.tx(ctx, func(tx *sql.Tx) error {
+		var user int64
+		err := tx.QueryRowContext(ctx, `SELECT id FROM users WHERE name = ?`, name).Scan(&user)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("user %q: %w", name, ErrNotFound)
+		}
+		if err != nil {
+			return err
+		}
+		n, err = renewUser(ctx, tx, user, s.now().Unix(), key, false)
+		return err
+	})
+	return n, err
+}
+
+// renewRevokedUsers is the step of schema 14 (v0.27.0, R4-36): every user
+// with a device revoked gets new credentials once, as a revocation now
+// gives them. A revocation before schema 14 left them as they were, and
+// the revoked device may hold them still. Every revocation in a database
+// at schema 13 is one of those: no raycontrol that renews wrote one. When
+// the credentials rotated since says nothing safe: the current secret was
+// in the subscriptions as the next one for the lead before its switch,
+// the previous one stays accepted for the grace after it, and the store
+// keeps neither the lead nor when a secret was first shown. Each user so
+// renewed has an audit line of its own, without the secrets.
+//
+// A database a rollback brought back to schema 13 from one at 14 or later
+// (CarryRevocations) says in settingRenewedRevoked until when its
+// revocations are renewed, the earliest such time when it was rolled back
+// more than once: then only the users of devices revoked at that time or
+// later, by the older rayd, get new credentials, not a second time the
+// others. An update that failed before this step ran leaves no mark.
+func renewRevokedUsers(ctx context.Context, tx *sql.Tx, now int64) error {
+	var since int64 // 0: every revocation
+	var mark []byte
+	err := tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, settingRenewedRevoked).Scan(&mark)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return err
+	default:
+		if t, perr := strconv.ParseInt(string(mark), 10, 64); perr == nil && t > 0 {
+			since = t
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, settingRenewedRevoked); err != nil {
+			return err
+		}
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id, name FROM users u
+		WHERE EXISTS (SELECT 1 FROM devices d WHERE d.user_id = u.id AND d.revoked_at IS NOT NULL AND d.revoked_at >= ?)
+		ORDER BY id`, since)
+	if err != nil {
+		return err
+	}
+	type user struct {
+		id   int64
+		name string
+	}
+	var users []user
+	for rows.Next() {
+		var u user
+		if err := rows.Scan(&u.id, &u.name); err != nil {
+			rows.Close()
+			return err
+		}
+		users = append(users, u)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, u := range users {
+		key, err := newLANKey()
+		if err != nil {
+			return err
+		}
+		// DoH's too: the revoked device may hold the user's token, which
+		// was the line's then (R4-37).
+		n, err := renewUser(ctx, tx, u.id, now, key, false)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO audit_log (ts, actor, action, target, result) VALUES (?, ?, ?, ?, ?)`,
+			now, "rayd (schema 14)", "user.renew:revoked-before",
+			fmt.Sprintf("%s: %d credentials new, a device of the user was revoked before v0.27.0", u.name, n), "ok"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// renewCredentials gives every credential of a user a fresh secret, with
+// no next and no previous one, its rotation starting over at now, and
+// returns how many there were. A credential keeps its row: its service,
+// and the user's traffic and connection limits, which go by the user
+// (TrafficUser, u<id>), not by the secret's name. With keepDoH those of
+// DoH services stay as they are and are not counted (RevokeDevice).
+func renewCredentials(ctx context.Context, tx *sql.Tx, user, now int64, keepDoH bool) (int, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT c.service_id FROM credentials c LEFT JOIN services s ON s.id = c.service_id
+		WHERE c.user_id = ? AND NOT (? AND coalesce(s.kind, '') = 'doh') ORDER BY c.service_id`, user, keepDoH)
+	if err != nil {
+		return 0, err
+	}
+	var services []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		services = append(services, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, svc := range services {
+		secret, err := NewUUID()
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE credentials SET secret = ?, next_secret = NULL, next_from = NULL,
+			prev_secret = NULL, prev_until = NULL, rotated_at = ? WHERE user_id = ? AND service_id = ?`,
+			secret, now, user, svc); err != nil {
+			return 0, err
+		}
+	}
+	return len(services), nil
+}
+
+// NewUUID makes a random (version 4) UUID: every user credential is one,
+// the VLESS UUID of REALITY and inner, and the passwords of Hysteria2,
+// naive and DoH (122 random bits).
+func NewUUID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	h := hex.EncodeToString(b[:])
+	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:], nil
 }
 
 // SPADevices returns the devices that may currently pass SPA: not revoked,

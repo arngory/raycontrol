@@ -25,6 +25,7 @@ import (
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/spa"
+	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/summary"
 )
 
@@ -325,8 +326,9 @@ func CheckAuth(header string, deviceKey [spa.KeySize]byte, now time.Time) bool {
 func Profiles(m render.Model, u render.User) ([]Profile, error) { return DeviceProfiles(m, u, nil) }
 
 // DeviceProfiles are the profiles of a user's device, given by its SPA key:
-// links that differ by device (Yggdrasil's key) are that device's. Without
-// a device they are the user's (rayctl user export).
+// links that differ by device (Yggdrasil's key, DoH's token) are that
+// device's. Without a device they are the user's (rayctl user export),
+// and there is no DoH: its token is a device's alone (R4-37).
 func DeviceProfiles(m render.Model, u render.User, device []byte) ([]Profile, error) {
 	var inner *render.Service
 	for i := range m.Services {
@@ -447,13 +449,15 @@ func serviceProfile(m render.Model, u render.User, s render.Service, inner *rend
 		}
 		return &p, nil
 	case "doh":
-		token := m.Creds[s.ID][u.ID]
+		// The device's token from the user's secret (R4-37): the node
+		// tells the devices apart, and a revoked one's dies alone.
+		token := store.DoHDeviceToken(m.Creds[s.ID][u.ID], device)
 		if token == "" {
 			return nil, nil
 		}
 		p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: DoHLink(m, s, token)}
 		if set := m.Sets[s.ID][u.ID]; set.Next != "" {
-			p.Next = &Next{Link: DoHLink(m, s, set.Next), From: set.NextFrom.Unix()}
+			p.Next = &Next{Link: DoHLink(m, s, store.DoHDeviceToken(set.Next, device)), From: set.NextFrom.Unix()}
 		}
 		return &p, nil
 	case "naive":
@@ -588,7 +592,7 @@ func pinsHeld(m render.Model, site render.Service, now time.Time) bool {
 	return provision.ParseSiteKeyState(site.Service).NextAt >= m.PinsSince.Unix()
 }
 
-// DoHLink is the DoH endpoint of a user (spec/subscription-v1.md §4): the
+// DoHLink is the DoH endpoint of a device (spec/subscription-v1.md §4): the
 // standard https://<name>/dns-query/<token> with the Niko parameters, which
 // the client drops before it asks.
 func DoHLink(m render.Model, s render.Service, token string) string {

@@ -24,6 +24,8 @@ import (
 
 	"golang.org/x/crypto/blake2b"
 
+	"github.com/arngory/raycontrol/internal/roots"
+	"github.com/arngory/raycontrol/internal/roots/rootstest"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -168,7 +170,24 @@ func newMirror(t *testing.T, g *fakeGitHub, k testKey) *Mirror {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return &Mirror{Store: st, Dir: filepath.Join(t.TempDir(), "app"), API: g.srv.URL, HTTP: g.srv.Client(), PubKey: k.pub}
+	// The mirror's own client, trusting the test server's root as the
+	// node trusts an extra file of root's (internal/roots).
+	rootstest.Use(t, roots.Settings{File: rootstest.File(t, g.srv.Certificate())})
+	return &Mirror{Store: st, Dir: filepath.Join(t.TempDir(), "app"), API: g.srv.URL, PubKey: k.pub}
+}
+
+// TestMirrorRoots: the mirror's own client trusts the node's roots only:
+// a source under a root not among them is refused, the system store
+// does not count.
+func TestMirrorRoots(t *testing.T) {
+	g := newGitHub(t)
+	k := newKey(t)
+	g.release(k, "v1.40.0", apks("v1.40.0"), "", nil)
+	m := newMirror(t, g, k)
+	tr := rootstest.Use(t, roots.Settings{}, g.srv.Certificate())
+	if err := m.Sync(context.Background()); err == nil || !roots.Verification(err) || tr.Status().Refused == 0 {
+		t.Fatalf("a root not in the list: %v", err)
+	}
 }
 
 func apks(tag string) map[string][]byte {

@@ -30,14 +30,18 @@ import (
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1/devicev1connect"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
+	"github.com/arngory/raycontrol/internal/hostcheck"
 	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/roots"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
 const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
 
   status
+  version                                   this rayctl's version and, on a node or relay host, the one installed
+                                            (rayd's); with -remote FILE, the node's
   node name [NAME | ""]                     show, set or remove the node's name, which clients show
                                             with its address (at most 48 characters)
   node note [TEXT | ""]                     show, set or remove the note clients show their users (200 characters, one line)
@@ -56,11 +60,19 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   user usage [NAME]                         the users' counts against their limits
   user reset-usage NAME                     the current period's count from zero, now
   user export NAME [-o FILE]                the user's links, as in the subscription (they hold credentials)
+  user renew NAME                           new credentials for the user at once, no overlap, as a device
+                                            revocation gives them; the user's devices are cut until they
+                                            fetch their subscription (Niko: at its next connection check,
+                                            within about 10 minutes)
   service list
   service add KIND NAME [-settings JSON]    slipstream: -settings '{"zone":"s.example.net"}' for a zone
                                             of your own (20 characters at most), else one is made up
-  service enable|disable|del NAME
-  service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false;
+  service enable|disable|del NAME [-force]
+                                            -force: disable or delete the last enabled ssh service anyway
+                                            (refused without it: SSH to the node closes to everyone)
+  service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false,
+                                            target=HOST:PORT (who answers non-clients, checked as at
+                                            creation; keys, shortIds and server name stay);
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
                                             naive: icmp=on|off (ping and traceroute through it, then
                                             rayctl apply);
@@ -76,7 +88,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service cert SITE -chain F -key F [-force]
                                             a certificate of your own for the site and the services under
                                             it, in place of ACME's (root on the node only); the links
-                                            under it then carry no niko-pin. Refused, unless -force, when
+                                            under it then carry no niko-pin; it says whether the chain leads
+                                            to a root clients know. Refused, unless -force, when
                                             they carry the node's pins and its key is another: clients
                                             that hold them are cut off until they fetch their subscription
   service rotate NAME [-now] [-force] [-fresh]
@@ -102,7 +115,12 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             the short form (QR half the size, Niko 1.35 or later),
                                             rcinv1 for older Niko
   audit [-n 50]
-  admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA
+  admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA: IPv4
+                                            and IPv6, networks to /16 and /48; the list is replaced
+                                            whole (name the ones you keep too)
+  ports                                     every port the node uses, for a provider's firewall: who
+                                            reaches it, whether chosen at install (-ports) or random,
+                                            the current port of each rotating range
   relay add NAME ADDRESS | list | remove NAME   relays in front of the node (relay-v1): one address
   relay bundle [-exit IP] [-ssh-port N] [-admin CIDRS] [-o FILE] NAME   the relay host's bundle (new certificate, new SPA keys)
   relay set [-ssh-port N] [-admin CIDRS] NAME   the relay host's SSH access, without a new bundle
@@ -125,21 +143,31 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             level (client addresses too) until it closes by itself; root
   egress [show]                             the node's egress policy on every profile, whether it is in
                                             force and (root) what it blocked
-  egress block|allow bittorrent|smtp        block or allow BitTorrent, or SMTP (TCP 25), on every
+  egress block|allow bittorrent|smtp|local  block or allow BitTorrent, SMTP (TCP 25), or the node's own
+                                            and local networks (blocked by default), on every
                                             profile (spec/egress-policy-v1.md; root, on the node)
   conn-limit [show]                         the connection limits: on or off, their numbers, the
                                             conntrack table, the guard, users at a limit in 15 min
   conn-limit on|off                         per-user limits (naive, Hysteria2, Xray) and the
                                             per-address limit on new inbound connections
                                             (spec/conn-limit-v1.md; root, on the node)
+  roots [show] | system on|off | file PEM|none
+                                            the roots the node's own outbound TLS trusts (ACME, updates,
+                                            Cloudflare, the app mirror, DoH upstreams): its embedded list,
+                                            plus the system store or a PEM file only when root adds them
+                                            (a TLS-intercepting proxy, a private ACME CA)
 
-  check [-host ADDR] [-domain D] [-services a,b]
+  check [-host ADDR] [-domain D] [-services a,b] [-ports LIST]
                                               whether this host can run a node: what is required (install
-                                              refuses without it), what is advised; changes nothing (root)
+                                              refuses without it), what is advised, whether the -ports are
+                                              free; changes nothing (root)
   legacy [-remove [-yes] [-purge-packages]]  raycontrol v0 (ray.sh) on this host; -remove backs it up, then
                                               removes only what it installed (root)
   install -host ADDR [-domain D] [-name NAME] [-admin A] [-cloudflare-token-file F] [-services reality,hy2-masq,hy2-obfs,dnstt,masterdns,slipstream|none]
-          [-dataplane DIR]                    set the node up on this host (root); with -domain REALITY by default
+          [-dataplane DIR] [-ports spa=A-B,sub=N,api=N,rotation=A-B|off]
+                                              set the node up on this host (root); with -domain REALITY by
+                                              default; -ports: ports of your choice at the first install
+                                              only (1024 and up; the rest random, 443 and 53 fixed)
   apply                                       install what the current services need (root)
   update [-check] [-version vX.Y.Z] [-from DIR] [-yes] [-no-handoff] [-rollback [-no-carry]]
                                               the newest verified release in place, back to the
@@ -154,29 +182,32 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                               take back everything install and apply changed (root)
   backup [-o FILE] [-passphrase-file F]       the node's state sealed with a passphrase (root):
                                               users, keys, services, certificates
-  restore -i FILE [-passphrase-file F] [-host ADDR] [-yes]
+  restore -i FILE [-passphrase-file F] [-host ADDR] [-no-carry] [-yes]
                                               put a backup in place and bring the node up on it,
-                                              here or on a new host after install (root)
+                                              here or on a new host after install (root); -no-carry
+                                              brings back the backup's credentials and revocations
   metrics [-o FILE]                           counts and times in the Prometheus text format; with
                                               -o for a collector's textfile directory
 
-  report [-o FILE] [-logs warning|info|none] [-since 24h] [-id ID]
+  report [-o FILE] [-logs warning|info|debug|none] [-since 24h] [-id ID]
       a redacted report for an issue: versions, system, checks, units,
       counts and warnings; nothing is sent anywhere
   knock [-carrier udp|tls|tcp|auto] [-addr A] [-ttl 10m] BUNDLE|@FILE
       SPA only: open the device's services to this address for a while; with
       the emergency bundle, SSH (then ssh as usual)
-  probe [-carrier udp|tls|tcp|auto] [-addr A] [-links] [-redact] [-channel] BUNDLE|@FILE|-
+  probe [-carrier udp|tls|tcp|auto] [-addr A] [-links] [-payload] [-redact] [-channel] [-report JSON|@FILE]
+        [-dns [-resolver system,google,udp:IP,…]] BUNDLE|@FILE|-
       check a node from outside like a client: SPA, then the subscription
       (pin, both signatures). Needs only the device bundle. -channel then
-      measures the channel (TCP down and up, UDP echo; probe-v1).
+      measures the channel (TCP down and up, UDP echo; probe-v1); -dns checks
+      the subscription's DNS tunnel zones from this machine.
 
   From another machine, through the node's remote API (admin devices):
-  remote enroll [-o FILE] [-carrier udp|tls|tcp|auto] [-addr A] INVITE|@FILE|-
+  remote enroll [-o FILE] [-carrier udp|tls|tcp|auto] [-addr A] [-pin PIN] INVITE|@FILE|-
       register a device from an invite (RCINV2:... or rcinv1:...): a new client
       key, SPA, then the API; writes the device file (bundle and key, mode 0600)
-  -remote FILE <command>                    status, user, service, device, audit, admin, dns, metrics, summary
-                                            run against the node through its API
+  -remote FILE <command>                    status, node, user, service, device, audit, admin, dns, metrics, summary,
+                                            app-mirror, debug, version run against the node through its API
   -remote FILE remote whoami|rotate         the device; a new client key for it
 `
 
@@ -296,6 +327,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.relay(ctx, sub, rest)
 	case "admin":
 		return c.adminAccess(ctx, args[1:])
+	case "ports":
+		return c.ports(ctx, args[1:])
 	case "check":
 		return c.check(ctx, args[1:])
 	case "legacy":
@@ -322,6 +355,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.egress(ctx, args[1:])
 	case "conn-limit":
 		return c.connLimit(ctx, args[1:])
+	case "roots":
+		return rootsCmd(os.Stdout, roots.SettingsFile, roots.ExtraFile, args[1:])
 	case "remote":
 		return c.remoteCmd(ctx, sub, rest)
 	case "backup":
@@ -332,6 +367,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.metrics(ctx, args[1:])
 	case "update":
 		return c.update(ctx, args[1:])
+	case "version":
+		return c.versionCmd(ctx, args[1:])
 	case "uninstall":
 		return c.uninstall(ctx, args[1:])
 	}
@@ -363,9 +400,31 @@ func when(unix int64) string {
 func (c *cli) status(ctx context.Context) error {
 	r, err := c.c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
 	if err != nil {
+		// rayd away (a boot it did not come up in): the perimeter all the
+		// same, which does not need it.
+		if c.identity == nil && thisOS == nodeOS && os.Geteuid() == 0 {
+			for _, r := range perimeterResult(defaultPerimeterHost) {
+				fmt.Fprintf(os.Stderr, "perimeter table: %s\n", perimeterLine(r))
+			}
+		}
 		return err
 	}
 	m := r.Msg
+	// A node of rayd serve -supervise (GetEgress names rayd's UID): no
+	// perimeter of its own, so the policy is not the kernel's there.
+	supervised := false
+	if m.Egress != nil {
+		if e, err := c.c.GetEgress(ctx, connect.NewRequest(&nodev1.GetEgressRequest{})); err == nil {
+			supervised = len(e.Msg.Uids) > 0
+		}
+	}
+	// sshd's ports against the perimeter's: root on the node only (sshd -T).
+	var ssh, per []hostcheck.Result
+	if !c.json && c.identity == nil && thisOS == nodeOS && os.Geteuid() == 0 {
+		ssh = c.sshPortResults(ctx)
+		// The table in the kernel, as rayd cannot see it (R4-40).
+		per = perimeterResult(defaultPerimeterHost)
+	}
 	return c.print(m, func(w *tabwriter.Writer) {
 		fmt.Fprintf(w, "version\t%s\nnode\t%s\n", m.Version, m.NodeId)
 		if m.Name != "" {
@@ -377,11 +436,19 @@ func (c *cli) status(ctx context.Context) error {
 			fmt.Fprintf(w, "debug\topen until %s (rayctl debug off)\n", clock(m.DebugUntil))
 		}
 		if m.Egress != nil {
-			fmt.Fprintf(w, "egress\t%s\n", egressLine(m.Egress))
+			fmt.Fprintf(w, "egress\t%s\n", egressStatusLine(m.Egress, supervised))
 		}
 		// rayd's loops: the last round of each (O-2).
 		for _, l := range m.Loops {
-			fmt.Fprintf(w, "%s\t%s\n", l.Name, loopState(l, time.Now()))
+			fmt.Fprintf(w, "%s\t%s\n", l.Name, perimeterLoopState(l, time.Now()))
+		}
+		for _, r := range ssh {
+			if !r.OK {
+				fmt.Fprintf(w, "ssh port\tWARNING %s: %s\n", r.Detail, r.Fix)
+			}
+		}
+		for _, r := range per {
+			fmt.Fprintf(w, "perimeter table\t%s\n", perimeterLine(r))
 		}
 	})
 }
@@ -559,8 +626,31 @@ func (c *cli) user(ctx context.Context, sub string, args []string) error {
 		return err
 	case "export":
 		return c.exportUser(ctx, args)
+	case "renew":
+		if err := need(args, 1); err != nil {
+			return err
+		}
+		r, err := c.c.RenewUser(ctx, connect.NewRequest(&nodev1.RenewUserRequest{Name: args[0]}))
+		if connect.CodeOf(err) == connect.CodeUnimplemented {
+			return errors.New("the node is older than v0.27.0: it cannot renew a user's credentials")
+		}
+		if err != nil {
+			return err
+		}
+		return c.print(r.Msg, func(w *tabwriter.Writer) { fmt.Fprint(w, renewText(r.Msg)) })
 	}
 	return errUsage
+}
+
+// renewText says what rayctl user renew did (R4-36).
+func renewText(r *nodev1.RenewUserResponse) string {
+	if r.Credentials == 0 {
+		return fmt.Sprintf("%s has no credentials yet: nothing to renew\n", r.Name)
+	}
+	return fmt.Sprintf("%s's credentials are new (%d credentials): the old ones stop working once rayd has applied\n"+
+		"them, in seconds. %s's devices are cut until they fetch their subscription: Niko does it by\n"+
+		"itself at its next connection check (every 10 minutes, 15 to 30 s after a network change; a\n"+
+		"sleeping phone once it wakes), its keys still open the subscription.\n", r.Name, r.Credentials, r.Name)
 }
 
 // exportUser prints the links of a user's subscription (P-10), or writes
@@ -654,17 +744,25 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 					"run rayctl apply now to install their units.\n", rs.SNI)
 			}
 		})
-	case "enable", "disable":
+	case "enable", "disable", "del":
+		// -force: the last enabled ssh service may go too (rayd refuses
+		// otherwise: SSH would be closed to everyone).
+		fs := flag.NewFlagSet("service "+sub, flag.ContinueOnError)
+		force := fs.Bool("force", false, "disable or delete the last enabled ssh service anyway: SSH to the node is then closed to "+
+			"everyone from the perimeter's next snapshot, and only the provider's console is left")
 		if err := need(args, 1); err != nil {
 			return err
 		}
-		_, err := c.c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: args[0], Enabled: sub == "enable"}))
-		return err
-	case "del":
-		if err := need(args, 1); err != nil {
-			return err
+		if err := fs.Parse(args[1:]); err != nil || fs.NArg() > 0 || (sub == "enable" && *force) {
+			return errUsage
 		}
-		_, err := c.c.DeleteService(ctx, connect.NewRequest(&nodev1.DeleteServiceRequest{Name: args[0]}))
+		var err error
+		if sub == "del" {
+			_, err = c.c.DeleteService(ctx, connect.NewRequest(&nodev1.DeleteServiceRequest{Name: args[0], Force: *force}))
+		} else {
+			_, err = c.c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: args[0], Enabled: sub == "enable",
+				Force: *force}))
+		}
 		return err
 	case "set":
 		if err := need(args, 2); err != nil {
@@ -683,6 +781,11 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 			switch r.Msg.Service.Kind {
 			case "site":
 				fmt.Fprintln(w, "run rayctl apply to restart the site with it")
+			case "reality":
+				if key == "target" {
+					fmt.Fprintln(w, "rayd restarts its Xray with the new target within seconds; the keys, shortIds and server name stay,\n"+
+						"so the clients' links do not change (rayctl egress lists the target when it is a local address)")
+				}
 			case "yggdrasil":
 				if key == "lan_relay" {
 					fmt.Fprintln(w, "rayd restarts the backend with it: LAN traffic through the node up to "+value+
@@ -737,11 +840,13 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 			// spec/cert-pin-v1.md §7: the node pins only keys of its own.
 			fmt.Fprintln(w, "with a certificate of your own the links of naive, hy2-masq and DoH under it carry no niko-pin:\n"+
 				"clients check its chain only, as before pins")
+			// What clients will make of the chain (spec/cert-pin-v1.md §7).
+			fmt.Fprint(w, certVerdict(chainPEM, time.Now()))
 			if r.Msg.Unpinned {
 				fmt.Fprintln(w, "warning: these links carried the pins of the node's keys, and this certificate has another key:\n"+
 					"clients refuse it (Niko 1.45.0: on hy2-masq) until they fetch their subscription. A client whose\n"+
-					"working profile is one of these notices by itself after 15 to 30 s at the earliest; the others\n"+
-					"when they next fetch, within the subscription's 72 hours")
+					"working profile is one of these notices by itself at its next connection check (every 10 minutes,\n"+
+					"15 to 30 s after a network change); the others when they next fetch, within the subscription's 72 hours")
 			}
 		})
 	case "rotate":
@@ -778,8 +883,8 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 					"Yggdrasil), and the key after it is in subscriptions from then\n", args[0], which, args[0])
 				if *fresh {
 					fmt.Fprintln(w, "no client holds the pin of that key: from the switch on all of them refuse naive, hy2-masq and DoH\n"+
-						"under this site until they fetch their subscription (by themselves after 15 to 30 s at the earliest,\n"+
-						"when one of these is their working profile; otherwise when they next fetch)")
+						"under this site until they fetch their subscription (by themselves at their next connection check,\n"+
+						"within about 10 minutes, when one of these is their working profile; otherwise when they next fetch)")
 				}
 			case r.Msg.Seal && r.Msg.PrevUntil != 0:
 				fmt.Fprintf(w, "%s has a new %s key, in subscriptions from now; the previous one is accepted until %s\n",
@@ -1100,10 +1205,36 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		if err := need(args, 1); err != nil {
 			return err
 		}
-		_, err := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: args[0]}))
-		return err
+		r, err := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: args[0]}))
+		if err != nil {
+			return err
+		}
+		return c.print(r.Msg, func(w *tabwriter.Writer) { fmt.Fprint(w, revokeText(args[0], r.Msg)) })
 	}
 	return errUsage
+}
+
+// revokeText says what a revocation did (R4-36): the user's credentials
+// are new, so the user's other devices are off until their next
+// subscription fetch.
+func revokeText(id string, r *nodev1.RevokeDeviceResponse) string {
+	switch {
+	case r.Invite:
+		return fmt.Sprintf("invite %s withdrawn\n", id)
+	case r.User == "":
+		// A node before v0.27.0: it said nothing, and changed no credentials.
+		return fmt.Sprintf("device %s revoked (the node is older than v0.27.0: the user's credentials stay as they were)\n", id)
+	case r.Already:
+		return fmt.Sprintf("device %s (%s/%s) was revoked already: nothing changed (rayctl user renew %s gives the user\n"+
+			"other credentials at once)\n", id, r.User, r.Device, r.User)
+	case r.Credentials == 0:
+		return fmt.Sprintf("device %s (%s/%s) revoked; %s has no credentials yet\n", id, r.User, r.Device, r.User)
+	}
+	return fmt.Sprintf("device %s (%s/%s) revoked. %s's credentials are new (%d credentials): what the device kept stops\n"+
+		"working once rayd has applied them, in seconds. %s's other devices are cut too, until they fetch\n"+
+		"their subscription: Niko does it by itself at its next connection check (every 10 minutes, 15 to 30 s\n"+
+		"after a network change; a sleeping phone once it wakes), its keys still open the subscription.\n",
+		id, r.User, r.Device, r.User, r.Credentials, r.User)
 }
 
 func (c *cli) audit(ctx context.Context, args []string) error {

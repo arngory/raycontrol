@@ -30,6 +30,7 @@ type Store struct {
 	db   *sql.DB
 	now  func() time.Time
 	path string
+	doh  dohCache // DoHTokens' HMACs (doh.go)
 }
 
 // Open opens (creating if needed) the database at path and applies pending
@@ -107,6 +108,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			if _, err := tx.ExecContext(ctx, string(body)); err != nil {
 				return fmt.Errorf("store: migration %s: %w", name, err)
 			}
+			if step := migrationSteps[version]; step != nil {
+				if err := step(ctx, tx, s.now().Unix()); err != nil {
+					return fmt.Errorf("store: migration %s: %w", name, err)
+				}
+			}
 			_, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`, version, s.now().Unix())
 			return err
 		})
@@ -115,6 +121,16 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// migrationSteps are the data changes of a migration that its SQL cannot
+// make: each runs after the SQL of its version, in the same transaction,
+// so once, as the migration does, also on a database that passes several
+// versions in one start. A step runs on the schema of its version: what
+// it calls must keep working there, or the step takes its own copy.
+var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx, now int64) error{
+	14: renewRevokedUsers,
+	15: startDoHShared,
 }
 
 // ErrNewerSchema: the database was migrated by a newer raycontrol.

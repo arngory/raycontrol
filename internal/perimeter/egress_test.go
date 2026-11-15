@@ -3,6 +3,8 @@ package perimeter
 import (
 	"errors"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -61,13 +63,30 @@ func TestEgressScript(t *testing.T) {
 			`tcp doff 8 @th,256,8 0x13 @th,264,128 0x426974546f7272656e742070726f746f @th,392,24 0x636f6c counter reject with tcp reset comment "bittorrent-tcp"`,
 		}, []string{"@ih"}},
 		{"supervised", Egress{SMTP: true, UIDs: []uint32{0, 4242}}, false,
-			[]string{"add element inet raycontrol egress_uid { 0, 4242 }\n"}, nil},
+			[]string{"add element inet raycontrol egress_uid { 0, 4242 }\n"}, []string{"egress_local meta", "egress_local ip"}},
+		{"local", Egress{Local: true, Loopback: []Port{{"tcp", 8443}, {"udp", 8443}}}, false, []string{
+			"flush chain inet raycontrol egress_local\n" +
+				"add rule inet raycontrol egress_local meta l4proto { tcp, udp } ip daddr { 127.0.0.53, 127.0.0.54, 168.63.129.16 } th dport 53 return\n" +
+				"add rule inet raycontrol egress_local ip daddr 127.0.0.1 meta l4proto . th dport { tcp . 8443, udp . 8443 } return\n" +
+				`add rule inet raycontrol egress_local ip daddr @local4 meta l4proto tcp counter reject with tcp reset comment "local"` + "\n" +
+				`add rule inet raycontrol egress_local ip daddr @local4 counter reject with icmpx admin-prohibited comment "local"` + "\n" +
+				`add rule inet raycontrol egress_local ip6 daddr @local6 meta l4proto tcp counter reject with tcp reset comment "local"` + "\n" +
+				`add rule inet raycontrol egress_local ip6 daddr @local6 counter reject with icmpx admin-prohibited comment "local"` + "\n",
+		}, []string{"dport 25", "bittorrent"}},
+		{"local, no probe", Egress{Local: true}, false, []string{"@local4", "@local6", "127.0.0.53"}, []string{"127.0.0.1"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := EgressScript(c.e, c.doff)
+			// Two transactions (SetEgress): local, then the rest; each
+			// flushes what it writes, and only that.
+			local, rest := EgressLocalScript(c.e), EgressOptionalScript(c.e, c.doff)
+			if s != local+rest || !strings.HasPrefix(local, "flush chain inet raycontrol egress_local\n") ||
+				strings.Count(local, "flush ") != 1 || strings.Contains(rest, "egress_local") {
+				t.Errorf("not local, then the rest:\n%s\n--\n%s", local, rest)
+			}
 			for _, f := range flushes {
-				if !strings.HasPrefix(s, flushes[0]) || !strings.Contains(s, f) {
-					t.Errorf("lacks %q, or not first:\n%s", f, s)
+				if !strings.HasPrefix(rest, flushes[0]) || !strings.Contains(rest, f) || strings.Contains(local, f) {
+					t.Errorf("lacks %q, or not first:\n%s", f, rest)
 				}
 			}
 			for _, w := range c.want {
@@ -94,6 +113,112 @@ func TestEgressOf(t *testing.T) {
 	}
 	if e.Equal(Egress{SMTP: true, UIDs: []uint32{0}}) || !e.Equal(Egress{SMTP: true, UIDs: []uint32{0, 9190}}) {
 		t.Error("Equal")
+	}
+	// The local networks (R4-38): refused unless allowed; a rayd from
+	// before them sends no Local, and gets the policy it had.
+	if e.Local {
+		t.Error("an older rayd's snapshot refuses the local networks")
+	}
+	e = egressOf(&perimeterv1.Egress{Local: &perimeterv1.Local{Loopback: []*perimeterv1.Port{
+		{Proto: "udp", Port: 8443}, {Proto: "tcp", Port: 8443}, {Proto: "tcp", Port: 8443}, {Proto: "sctp", Port: 1}, {Proto: "tcp"}}}})
+	if !e.Local || !slices.Equal(e.Loopback, []Port{{"tcp", 8443}, {"udp", 8443}}) {
+		t.Errorf("local: %+v", e)
+	}
+	if e.Equal(Egress{Local: true}) {
+		t.Error("Equal without the probe's ports")
+	}
+	if e = egressOf(&perimeterv1.Egress{Local: &perimeterv1.Local{Allow: true, Loopback: []*perimeterv1.Port{{Proto: "tcp", Port: 8443}}}}); e.Local || e.Loopback != nil {
+		t.Errorf("allowed: %+v", e)
+	}
+
+	// A REALITY target on a local address: one address, TCP or UDP, a
+	// port, a service's UID; anything else is left out, never widened.
+	tcp := func(p uint32) *perimeterv1.Port { return &perimeterv1.Port{Proto: "tcp", Port: p} }
+	e = egressOf(&perimeterv1.Egress{Local: &perimeterv1.Local{Exempt: []*perimeterv1.LocalExempt{
+		{Addr: "127.0.0.1", Port: tcp(8443), Uid: 9120},
+		{Addr: "127.0.0.1", Port: tcp(8443), Uid: 9120},
+		{Addr: "::ffff:10.0.0.7", Port: tcp(443), Uid: 9121},
+		{Addr: "10.0.0.0/8", Port: tcp(443), Uid: 9121},
+		{Addr: "127.0.0.1", Port: tcp(8443), Uid: frontUID},
+		{Addr: "127.0.0.1", Port: tcp(8443), Uid: 0},
+		{Addr: "127.0.0.1", Port: tcp(0), Uid: 9120},
+		{Addr: "127.0.0.1", Port: tcp(70000), Uid: 9120},
+		{Addr: "127.0.0.1", Port: &perimeterv1.Port{Proto: "sctp", Port: 1}, Uid: 9120},
+		{Addr: "fe80::1%eth0", Port: tcp(443), Uid: 9120},
+	}}})
+	want := []LocalExempt{{netip.MustParseAddr("10.0.0.7"), Port{"tcp", 443}, 9121}, {netip.MustParseAddr("127.0.0.1"), Port{"tcp", 8443}, 9120}}
+	if !slices.Equal(e.Exempt, want) {
+		t.Errorf("exempt: %v, want %v", e.Exempt, want)
+	}
+	if e.Equal(Egress{Local: true}) {
+		t.Error("Equal without the exemptions")
+	}
+	s := EgressLocalScript(e)
+	for _, r := range []string{"meta skuid 9120 ip daddr 127.0.0.1 meta l4proto tcp th dport 8443 return",
+		"meta skuid 9121 ip daddr 10.0.0.7 meta l4proto tcp th dport 443 return"} {
+		if i, j := strings.Index(s, r), strings.Index(s, "@local4"); i < 0 || i > j {
+			t.Errorf("lacks %q before the refusals:\n%s", r, s)
+		}
+	}
+	v6 := Egress{Local: true, Exempt: []LocalExempt{{netip.MustParseAddr("fd00::7"), Port{"tcp", 443}, 9122}}}
+	if !strings.Contains(EgressLocalScript(v6), "meta skuid 9122 ip6 daddr fd00::7 meta l4proto tcp th dport 443 return") {
+		t.Errorf("IPv6:\n%s", EgressLocalScript(v6))
+	}
+	if strings.Contains(EgressLocalScript(Egress{Exempt: v6.Exempt}), "skuid") {
+		t.Error("an exemption with local allowed")
+	}
+}
+
+// The table's part of R4-38: the sets of LocalNets, and the output
+// chain's jump for the data plane's new flows, after the guards of the
+// node's own addresses and before the rest of the policy; the extra UIDs
+// (rayd's, supervised) do not take it.
+func TestRulesetLocal(t *testing.T) {
+	rs := (&NFT{}).Ruleset()
+	for _, want := range []string{
+		"set local4 { type ipv4_addr; flags interval; elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 168.63.129.16/32, 169.254.0.0/16, " +
+			"172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 }; }",
+		"set local6 { type ipv6_addr; flags interval; elements = { ::/96, fc00::/7, fe80::/10, ff00::/8, 64:ff9b::/96, 64:ff9b:1::/48, 2002::/16 }; }",
+		"chain egress_local {\n\t}",
+		"\t\tmeta skuid " + DataPlaneUIDs + " ct state new,untracked jump egress_local\n\t\tmeta skuid " + DataPlaneUIDs + " jump egress\n\t\tmeta skuid @egress_uid jump egress\n",
+	} {
+		if !strings.Contains(rs, want) {
+			t.Errorf("ruleset lacks %q", want)
+		}
+	}
+	if strings.Index(rs, "jump egress_local") < strings.LastIndex(rs, "jump to_node") {
+		t.Error("egress_local before the guards of the node's own addresses")
+	}
+	if strings.Contains(rs, "@egress_uid ct state new,untracked jump egress_local") {
+		t.Error("the extra UIDs take the local part")
+	}
+	for _, n := range LocalNets {
+		if _, err := netip.ParsePrefix(n); err != nil {
+			t.Errorf("%s: %v", n, err)
+		}
+	}
+	// The metadata address, in both of its spellings.
+	for _, a := range []string{"169.254.169.254", "64:ff9b::a9fe:a9fe", "fd00:ec2::254", "127.0.0.1", "::1", "100.64.0.1", "255.255.255.255",
+		"168.63.129.16", "169.254.169.253", "fd00:ec2::253", "fd20:ce::254", "100.100.100.200", "fe80::a9fe:a9fe"} {
+		if !slices.ContainsFunc(LocalNets, func(n string) bool { return netip.MustParsePrefix(n).Contains(netip.MustParseAddr(a)) }) {
+			t.Errorf("%s is not local", a)
+		}
+	}
+	for _, a := range []string{"1.1.1.1", "2606:4700:4700::1111", "200::1", "198.51.100.1", "168.63.129.15", "168.63.129.17"} {
+		if slices.ContainsFunc(LocalNets, func(n string) bool { return netip.MustParsePrefix(n).Contains(netip.MustParseAddr(a)) }) {
+			t.Errorf("%s is local", a)
+		}
+	}
+	// The resolvers the data plane reaches on 53 (LocalResolvers): the
+	// stub's other ports go to to_node, Azure's to the refusals.
+	if !strings.Contains(rs, `oif "lo" meta skuid `+DataPlaneUIDs+` ip daddr { 127.0.0.53, 127.0.0.54 } meta l4proto { tcp, udp } th dport != 53 jump to_node`) {
+		t.Error("the stub's other ports do not go to to_node")
+	}
+	for a, refused := range map[string]bool{"127.0.0.53": false, "127.0.0.54": false, "168.63.129.16": false, "::ffff:168.63.129.16": false,
+		"127.0.0.1": true, "198.18.0.1": true, "169.254.169.253": true, "10.0.0.2": true, "fd00:ec2::253": true, "1.1.1.1": false, "2606:4700:4700::1111": false} {
+		if got := LocalRefuses53(netip.MustParseAddr(a)); got != refused {
+			t.Errorf("LocalRefuses53(%s) = %v", a, got)
+		}
 	}
 }
 
@@ -217,5 +342,66 @@ func TestGateEgress(t *testing.T) {
 	snap.Egress = &perimeterv1.Egress{Bittorrent: true}
 	if err := g.Update(snap); err != nil || !fw.egress.Equal(Egress{BitTorrent: true}) || !g.egressOn {
 		t.Fatalf("a new policy: %+v %v", fw.egress, err)
+	}
+}
+
+// fakeNFT is an nft that refuses any script with one of refuse in it and
+// keeps the scripts it took, one file each, in dir/took.
+func fakeNFT(t *testing.T, refuse ...string) (bin string, took func() []string) {
+	t.Helper()
+	dir := t.TempDir()
+	var check strings.Builder
+	for _, r := range refuse {
+		check.WriteString("if printf '%s\\n' \"$in\" | grep -qF -- '" + r + "'; then echo 'Error: refused (test)' >&2; exit 1; fi\n")
+	}
+	script := "#!/bin/sh\nin=$(cat)\n" + check.String() +
+		"n=$(ls " + dir + "/took 2>/dev/null | wc -l)\nmkdir -p " + dir + "/took\nprintf '%s\\n' \"$in\" > " + dir + "/took/$((n+1000))\n"
+	bin = filepath.Join(dir, "nft")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil { //nolint:gosec // G306: an executable
+		t.Fatal(err)
+	}
+	return bin, func() []string {
+		entries, _ := os.ReadDir(filepath.Join(dir, "took"))
+		var out []string
+		for _, e := range entries {
+			b, _ := os.ReadFile(filepath.Join(dir, "took", e.Name()))
+			out = append(out, string(b))
+		}
+		return out
+	}
+}
+
+// local is a transaction of its own, first (R4-38): a kernel that refuses
+// both BitTorrent variants (@ih and tcp doff) keeps the local block, and
+// one that refuses the local block keeps SMTP and BitTorrent.
+func TestSetEgressLocalApart(t *testing.T) {
+	e := Egress{SMTP: true, BitTorrent: true, Local: true}
+	bin, took := fakeNFT(t, "@ih", "tcp doff")
+	err := (&NFT{Bin: bin}).SetEgress(e)
+	if err == nil || !strings.Contains(err.Error(), "smtp, bittorrent") || strings.Contains(err.Error(), "local:") {
+		t.Fatalf("BitTorrent refused: %v", err)
+	}
+	if got := took(); len(got) != 1 || !strings.Contains(got[0], `egress_local ip daddr @local4`) || strings.Contains(got[0], "bittorrent") {
+		t.Fatalf("BitTorrent refused, taken: %q", got)
+	}
+
+	bin, took = fakeNFT(t, "egress_local ip daddr @local4")
+	err = (&NFT{Bin: bin}).SetEgress(e)
+	if err == nil || !strings.Contains(err.Error(), "local:") || strings.Contains(err.Error(), "smtp, bittorrent") {
+		t.Fatalf("local refused: %v", err)
+	}
+	if got := took(); len(got) != 1 || !strings.Contains(got[0], "bittorrent-tcp") || !strings.Contains(got[0], "dport 25") ||
+		strings.Contains(got[0], "egress_local") {
+		t.Fatalf("local refused, taken: %q", got)
+	}
+
+	// Both taken: two transactions, local first.
+	bin, took = fakeNFT(t)
+	if err := (&NFT{Bin: bin}).SetEgress(e); err != nil {
+		t.Fatal(err)
+	}
+	if got := took(); len(got) != 2 || !strings.HasPrefix(got[0], "flush chain inet raycontrol egress_local\n") ||
+		!strings.Contains(got[1], "bittorrent") {
+		t.Fatalf("taken: %q", got)
 	}
 }

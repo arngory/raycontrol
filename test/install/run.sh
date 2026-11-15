@@ -189,6 +189,15 @@ for f in /usr/local/bin/rayd /usr/local/bin/rayctl /var/lib/raycontrol /var/lib/
 done
 # shellcheck disable=SC2016 # expands in the container
 x sh -c 'kill "$(cat /run/listen.pid)"; rm /run/listen.pid'
+# A port chosen with -ports that something holds: the check names it.
+x sh -c '/opt/rc/listen udp:40050 & echo $! > /run/listen.pid'
+if out="$(x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -check -host "$ip" -ports spa=40000-40099,sub=40100 2>&1)"; then
+	fail "bootstrap -check passed with a chosen port taken: $out"
+fi
+[[ $out == *"FAIL  port tcp+udp 40000-40099: spa (-ports): udp "*":40050 is taken by listen"* &&
+	$out == *"ok    port tcp+udp 40100: sub (-ports): free"* ]] || fail "chosen ports: $out"
+# shellcheck disable=SC2016 # expands in the container
+x sh -c 'kill "$(cat /run/listen.pid)"; rm /run/listen.pid'
 
 log "$distro: raycontrol v0 in the way (R4-26)"
 # What legacy/ray.sh leaves: its settings and CLI, an Xray unit holding TCP
@@ -454,12 +463,19 @@ docker run --rm --network "$net" -v "$bin:/opt/rc:ro" "$image" sh -ec '
 	/opt/rc/rayctl -remote /root/console.rcdev user add carol
 	/opt/rc/rayctl -remote /root/console.rcdev remote rotate
 	/opt/rc/rayctl -remote /root/console.rcdev remote whoami
+	/opt/rc/rayctl -remote /root/console.rcdev ports | grep -Eq "^tcp\+udp +[0-9]+-[0-9]+ +spa +random +everyone "
 	if /opt/rc/rayctl -remote /root/console.rcdev backup; then exit 1; fi
 	if /opt/rc/rayctl remote enroll -o /root/again.rcdev "$1"; then echo "an invite worked twice"; exit 1; fi
 ' _ "$invite" | sed -E 's/rc(dev|inv)1:[A-Za-z0-9_-]+/rc\11:<redacted>/g; s/RCINV2:[A-Z2-7]+/RCINV2:<redacted>/g' || fail "remote API from the client"
 [[ $(x rayctl user list) == *carol* ]] || fail "the user made through the remote API is missing"
 [[ $(x rayctl audit) == *"alice/console (remote)"* ]] || fail "the remote admin is not in the audit log"
 [[ $(x rayctl device list alice) == *registered* ]] || fail "the remote device is not listed as registered"
+# rayctl ports: installed without -ports, every number the node's own.
+ports="$(x rayctl ports)" || fail "rayctl ports"
+if ! grep -Eq '^tcp\+udp +[0-9]+ +sub +random +after the knock' <<<"$ports" || ! grep -Eq '^tcp +443 +reality +fixed ' <<<"$ports" ||
+	! grep -Eq '^udp +[0-9]+-[0-9]+ +hy2o rotation +random ' <<<"$ports" || grep -q chosen <<<"$ports"; then
+	fail "rayctl ports: $ports"
+fi
 
 # The egress policy (spec/egress-policy-v1.md): this system's nft takes the
 # rules (the kernel is the runner's), rayspa puts them in force, and they

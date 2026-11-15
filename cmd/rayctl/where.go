@@ -41,6 +41,7 @@ var places = map[string]place{
 	"relay":        viaAPI,
 	"relay bundle": onNode, // root on the node; this SSH session's address
 	"admin":        viaAPI,
+	"ports":        viaAPI, // GetPorts: on the node as root or the group, or -remote FILE
 	"dns":          viaAPI,
 	"summary":      viaAPI,
 	"summary db":   onNode, // a file put in rayd's directory
@@ -54,6 +55,7 @@ var places = map[string]place{
 	"remote enroll": anywhere,
 	"knock":         anywhere,
 	"probe":         anywhere,
+	"version":       anywhere, // and with -remote FILE, the node's too (useRemote)
 
 	"check":      onNode,
 	"legacy":     onNode,
@@ -66,6 +68,7 @@ var places = map[string]place{
 	"report":     onNode,
 	"egress":     onNode,
 	"conn-limit": onNode,
+	"roots":      onNode, // root's file in /etc that rayd and rayctl update read
 }
 
 // nodeOS is the system a node runs on; thisOS the one rayctl runs on (a

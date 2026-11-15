@@ -994,7 +994,7 @@ func TestXrayNoSniffing(t *testing.T) {
 		}
 	}
 	on := true
-	if _, err := st.SetEgress(ctx, &on, &on); err != nil {
+	if _, err := st.SetEgress(ctx, &on, &on, &on); err != nil {
 		t.Fatal(err)
 	}
 	if after := xray(); !maps.EqualFunc(before, after, bytes.Equal) {

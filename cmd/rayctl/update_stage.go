@@ -8,6 +8,7 @@ import (
 	"runtime"
 
 	"github.com/arngory/raycontrol/internal/deploy"
+	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/release"
 )
 
@@ -50,6 +51,7 @@ func newStage() (string, error) {
 // that target, or warns of it.
 func (c *cli) stageRelease(ctx context.Context, o updateOpts, stage, installed string, bins map[string]string, first func(to string) error) (staged, error) {
 	var s staged
+	first = c.targetsFirst(ctx, first) // REALITY targets the data plane does not reach (R4-38)
 	if o.local != "" {
 		for name := range bins {
 			if b, err := os.ReadFile(filepath.Join(o.local, name)); err == nil { //nolint:gosec // G304: the operator's directory
@@ -78,7 +80,25 @@ func (c *cli) stageRelease(ctx context.Context, o updateOpts, stage, installed s
 		// archive downloaded for nothing.
 		if v == "latest" && !o.force {
 			if l, lerr := f.Latest(ctx, releaseKey); lerr == nil {
+				// Unless latest is a patch release of this one, a patch
+				// release may be out beside it: after a new minor version,
+				// and after a latest that is not newer (GitHub's latest may
+				// be a backport of an older minor version; one request when
+				// latest is this version: release.Fetcher.NewestPatch).
+				p := ""
+				if release.IsRelease(installed) && !nodeupdate.Patch(l, installed) && (o.check || !release.Newer(l, installed)) {
+					p, _ = f.NewestPatch(ctx, releaseKey, installed, l)
+				}
 				switch {
+				case p != "" && !release.Newer(l, installed):
+					// The newest release there is for this node.
+					fmt.Printf("release %s, a patch release of %s, is out; GitHub's latest, %s, is not newer\n", p, installed, l)
+					if o.check {
+						fmt.Printf("installed %s, release %s available: rayctl update\n", installed, p)
+						s.done = true
+						return s, first(p)
+					}
+					l = p
 				case l == installed:
 					fmt.Printf("raycontrol %s is installed, the newest release\n", installed)
 					s.done = true
@@ -87,6 +107,9 @@ func (c *cli) stageRelease(ctx context.Context, o updateOpts, stage, installed s
 					return s, fmt.Errorf("installed %s is newer than the latest release %s; rayctl update -version %s goes back", installed, l, l)
 				case o.check:
 					fmt.Printf("installed %s, release %s available: rayctl update\n", installed, l)
+					if p != "" {
+						fmt.Printf("release %s, the newest patch release of %s, available: rayctl update -version %s\n", p, installed, p)
+					}
 					s.done = true
 					return s, first(l)
 				}

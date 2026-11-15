@@ -94,6 +94,74 @@ func NewGate(fw Firewall, log *slog.Logger) *Gate {
 	return &Gate{fw: fw, log: log, now: time.Now, holders: map[grantKey]map[string]time.Time{}}
 }
 
+// SetupAtFirstSnapshot makes the gate take the table only with its first
+// snapshot (rayspa's start, docs/08-decisions.md R4-40): Update then makes
+// the table and fills it in one go, and until then the gate leaves the
+// kernel as it is. A table an earlier rayspa left there (a restart) stays
+// in force, its admin addresses with it; with none (a boot without a saved
+// snapshot, or with one that does not apply) the host stays as open as the
+// rest of the ruleset leaves it. An empty table would close it to everyone,
+// the administrator included, until rayd answers, and rayd may not.
+func (g *Gate) SetupAtFirstSnapshot() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.restoring = true
+}
+
+// GateState is where the gate's table stands, as rayspa says it (STATUS,
+// its report to rayd).
+type GateState int
+
+const (
+	// GateNoSnapshot: no snapshot yet, so no table of this gate; one an
+	// earlier rayspa left may be in force, or none.
+	GateNoSnapshot GateState = iota
+	// GateNotIn: a snapshot, but its table is not in: the kernel refused
+	// it, or it went (flush ruleset) and is not back yet.
+	GateNotIn
+	// GateBehind: the table is in, the last snapshot only in part (Tick
+	// applies the rest).
+	GateBehind
+	// GateUp: the table is in with all of the last snapshot.
+	GateUp
+)
+
+func (s GateState) String() string {
+	switch s {
+	case GateNoSnapshot:
+		return "no snapshot yet"
+	case GateNotIn:
+		return "table not in"
+	case GateBehind:
+		return "snapshot applied in part"
+	case GateUp:
+		return "up"
+	}
+	return "unknown"
+}
+
+// State says where the gate's table stands.
+func (g *Gate) State() GateState {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	switch {
+	case g.verifier == nil:
+		return GateNoSnapshot
+	case g.restoring:
+		return GateNotIn
+	case g.pending != nil:
+		return GateBehind
+	}
+	return GateUp
+}
+
+// Up reports whether the gate's table is in the kernel with all of its
+// last snapshot: false before the first snapshot, while a table that went
+// is being restored, and while a snapshot is in only in part (the admin
+// addresses of a new one, say). The egress policy stands apart
+// (egressLocked): a kernel that refuses it does not take the gate down.
+func (g *Gate) Up() bool { return g.State() == GateUp }
+
 // Forwarded are the ports a relay's table forwards to its exit (relay_fwd)
 // for these services of its snapshot: every port of a service not served
 // here (Local: a relay's own SSH, the probe), once, in order. They are in
@@ -277,7 +345,7 @@ func (g *Gate) catchUpLocked(now time.Time) error {
 			// should not keep revoked grants open, or long.
 			_ = g.regrantLocked()
 			_ = g.denyLocked()
-			if err := g.restoreLocked(); err != nil {
+			if err := g.restoreLocked(g.pending); err != nil {
 				return err
 			}
 		}
@@ -497,12 +565,12 @@ func (g *Gate) egressLocked(now time.Time) {
 		if g.egressFailures == 1 {
 			level = slog.LevelWarn
 		}
-		g.log.Log(context.Background(), level, "egress policy not in force, trying again", "smtp", g.egress.SMTP,
+		g.log.Log(context.Background(), level, "egress policy not in force, trying again", "smtp", g.egress.SMTP, "local", g.egress.Local,
 			"bittorrent", g.egress.BitTorrent, "err", err, "in", wait)
 		return
 	}
 	g.egressOn, g.egressFailures, g.egressRetryAt = true, 0, time.Time{}
-	g.log.Info("egress policy", "smtp", g.egress.SMTP, "bittorrent", g.egress.BitTorrent, "uids", g.egress.UIDs)
+	g.log.Info("egress policy", "smtp", g.egress.SMTP, "bittorrent", g.egress.BitTorrent, "local", g.egress.Local, "uids", g.egress.UIDs)
 }
 
 // acmeLocked opens, moves or closes the ACME window.
@@ -600,6 +668,11 @@ func (g *Gate) Tick() ([]uint16, error) {
 		g.restoring = true
 		g.log.Warn("nftables table was removed (flush ruleset? nftables or firewalld reload?), restoring", "table", Table)
 	}
+	if g.verifier == nil {
+		// No snapshot yet: nothing to put into a table, and an empty one
+		// would shut the administrator out (SetupAtFirstSnapshot).
+		return nil, ErrNotReady
+	}
 	var behind error
 	if g.restoring || g.pending != nil {
 		// A firewall that keeps failing is tried again less and less often.
@@ -648,106 +721,176 @@ func (g *Gate) Tick() ([]uint16, error) {
 //
 // A restore that fails halfway is tried again at the next tick, the table
 // being there or not.
-func (g *Gate) restoreLocked() error {
+//
+// With u (a snapshot not applied yet: the first one at rayspa's start)
+// the table is made with u's sets, not the gate's: the admin addresses,
+// the public ports and the slots go in with the table, so that no new SYN
+// of the administrator meets a table without them. A firewall that can
+// (TableSetup, NFT) takes it all in one transaction: the table is in
+// whole, or not at all and the kernel stays as it was.
+func (g *Gate) restoreLocked(u *update) error {
 	g.restoring = true
-	if err := g.fw.Setup(); err != nil {
+	now := g.now()
+	c := TableContents{
+		Public: g.public, Admin: g.admin, AdminPorts: g.adminPorts, Forward: g.forward,
+		Relays: g.relays, RelayPorts: g.relayPorts, Relayed: g.relaysSet, InLimitOff: g.inLimitOff,
+	}
+	acmePort, acmeUntil := g.acmePort, g.acmeUntil
+	if u != nil {
+		c.Public, c.Admin, c.AdminPorts, c.Forward = u.public, u.admin, u.adminPorts, u.forward
+		c.Relays, c.RelayPorts, c.Relayed = u.relays, u.relayPorts, true
+		acmePort, acmeUntil = 0, time.Time{}
+		if w := u.acme; w != nil && w.Port != 0 && w.Until > now.Unix() {
+			acmePort, acmeUntil = uint16(w.Port), time.Unix(w.Until, 0)
+		}
+	}
+	if acmePort != 0 && acmeUntil.After(now) {
+		c.ACMEPort, c.ACMETTL = acmePort, acmeUntil.Sub(now)
+	} else {
+		acmePort, acmeUntil = 0, time.Time{}
+	}
+	for key, devs := range g.holders {
+		if ttl := longest(devs).Sub(now); ttl > 0 {
+			c.Grants = append(c.Grants, Grant{Addr: key.addr, Port: key.port, TTL: ttl})
+		}
+	}
+	if g.verifier != nil {
+		c.Rotation, c.SPAUDP, c.SPATCP = g.slotsAt(now)
+	}
+	if ts, ok := g.fw.(TableSetup); ok {
+		if err := ts.SetupWith(c); err != nil {
+			return err
+		}
+	} else if err := g.restoreSteps(c); err != nil {
 		return err
+	}
+	g.public, g.admin, g.adminPorts, g.forward = c.Public, c.Admin, c.AdminPorts, c.Forward
+	g.relays, g.relayPorts, g.relaysSet = c.Relays, c.RelayPorts, c.Relayed
+	g.acmePort, g.acmeUntil = acmePort, acmeUntil
+	g.inLimitTableOff = c.InLimitOff
+	g.rotMap, g.udpPorts, g.tcpPorts = nil, nil, nil
+	if g.verifier != nil {
+		g.rotMap, g.udpPorts, g.tcpPorts = c.Rotation, c.SPAUDP, slices.Clone(c.SPATCP)
 	}
 	g.revoking, g.regrant = nil, nil // a new table: grants come back at their longest
 	// Its egress chains are empty: the policy goes in once the restore is
-	// done (egressLocked), at once.
+	// done (egressLocked), at once. The guard is off in a new table: it
+	// goes back at the next tick (guardLocked).
 	g.egressOn, g.egressFailures, g.egressRetryAt = false, 0, time.Time{}
-	// The per-address limit is on in a new table, the guard off: the
-	// guard goes back at the next tick (guardLocked).
-	g.inLimitTableOff = false
 	if g.guard != nil {
 		g.guard.applied = false
 	}
-	if err := g.inLimitLocked(); err != nil {
+	g.restoring = false
+	g.log.Info("perimeter table restored", "table", Table, "grants", len(c.Grants))
+	return nil
+}
+
+// TableContents is what a table of the gate holds besides its rules: the
+// sets, maps and grants of a snapshot (restoreLocked).
+type TableContents struct {
+	Public, AdminPorts, Forward, RelayPorts []Port
+	Admin, Relays                           []netip.Prefix
+	// Relayed turns relay_check on (SetRelays), with the grants in.
+	Relayed    bool
+	InLimitOff bool
+	ACMEPort   uint16
+	ACMETTL    time.Duration
+	Grants     []Grant
+	Rotation   map[uint16]uint16
+	SPAUDP     []uint16
+	SPATCP     []uint16
+}
+
+// TableSetup is a firewall that makes the table with its contents in one
+// transaction (NFT).
+type TableSetup interface {
+	SetupWith(c TableContents) error
+}
+
+// restoreSteps is restoreLocked for a firewall without SetupWith: one
+// call per part, the table first. Until the last is in, restoring stays
+// set and the gate is not up.
+func (g *Gate) restoreSteps(c TableContents) error {
+	if err := g.fw.Setup(); err != nil {
 		return err
 	}
-	if len(g.public) > 0 {
-		if err := g.fw.SetPublic(g.public); err != nil {
+	if c.InLimitOff {
+		if err := g.fw.SetInLimit(false); err != nil {
 			return err
 		}
 	}
-	if len(g.admin) > 0 || len(g.adminPorts) > 0 {
-		if err := g.fw.SetAdmin(g.admin, g.adminPorts); err != nil {
+	if len(c.Public) > 0 {
+		if err := g.fw.SetPublic(c.Public); err != nil {
 			return err
 		}
 	}
-	if len(g.forward) > 0 {
-		if err := g.fw.SetForward(g.forward); err != nil {
+	if len(c.Admin) > 0 || len(c.AdminPorts) > 0 {
+		if err := g.fw.SetAdmin(c.Admin, c.AdminPorts); err != nil {
 			return err
 		}
 	}
-	g.rotMap, g.udpPorts, g.tcpPorts = nil, nil, nil
-	now := g.now()
-	if g.acmePort != 0 && g.acmeUntil.After(now) {
-		if err := g.fw.SetACME(g.acmePort, g.acmeUntil.Sub(now)); err != nil {
+	if len(c.Forward) > 0 {
+		if err := g.fw.SetForward(c.Forward); err != nil {
 			return err
 		}
 	}
-	var grants []Grant
-	for key, devs := range g.holders {
-		var until time.Time
-		for _, u := range devs {
-			if u.After(until) {
-				until = u
-			}
-		}
-		if ttl := until.Sub(now); ttl > 0 {
-			grants = append(grants, Grant{Addr: key.addr, Port: key.port, TTL: ttl})
+	if c.ACMEPort != 0 {
+		if err := g.fw.SetACME(c.ACMEPort, c.ACMETTL); err != nil {
+			return err
 		}
 	}
 	if all, ok := g.fw.(interface{ AllowAll([]Grant) error }); ok {
 		// One transaction, not one nft call per grant.
-		if err := all.AllowAll(grants); err != nil {
+		if err := all.AllowAll(c.Grants); err != nil {
 			return err
 		}
 	} else {
-		for _, gr := range grants {
+		for _, gr := range c.Grants {
 			if err := g.fw.Allow(gr.Addr, []Port{gr.Port}, gr.TTL); err != nil {
 				return err
 			}
 		}
 	}
 	// Last, with the grants back: relay_check cuts what nothing lets in.
-	if g.relaysSet {
-		if err := g.fw.SetRelays(g.relays, g.relayPorts); err != nil {
+	if c.Relayed {
+		if err := g.fw.SetRelays(c.Relays, c.RelayPorts); err != nil {
 			return err
 		}
 	}
 	if g.verifier != nil {
-		if err := g.slotsLocked(); err != nil {
+		if err := g.fw.SetRotation(c.Rotation); err != nil {
+			return err
+		}
+		if err := g.fw.SetSPAPorts(c.SPAUDP, c.SPATCP); err != nil {
 			return err
 		}
 	}
-	g.restoring = false
-	g.log.Info("perimeter table restored", "table", Table, "grants", len(grants))
 	return nil
 }
 
-func (g *Gate) slotsLocked() error {
-	now := g.now()
-	rot := map[uint16]uint16{}
+// slotsAt are the rotation map and the SPA slot ports at now.
+func (g *Gate) slotsAt(now time.Time) (rot map[uint16]uint16, udp, tcp []uint16) {
+	rot = map[uint16]uint16{}
 	for _, r := range g.rotations {
 		for _, p := range r.sched.ActivePorts(now) {
 			rot[p] = r.target
 		}
 	}
+	udp = g.params.ActivePorts(now)
+	slices.Sort(udp)
+	if g.tcpCarrier {
+		tcp = slices.Clone(udp)
+	}
+	return rot, udp, tcp
+}
+
+func (g *Gate) slotsLocked() error {
+	rot, udp, tcp := g.slotsAt(g.now())
 	if !maps.Equal(rot, g.rotMap) {
 		if err := g.fw.SetRotation(rot); err != nil {
 			return err
 		}
 		g.rotMap = rot
-	}
-
-	udp := g.params.ActivePorts(now)
-	slices.Sort(udp)
-	var tcp []uint16
-	if g.tcpCarrier {
-		tcp = udp
 	}
 	if slices.Equal(udp, g.udpPorts) && slices.Equal(tcp, g.tcpPorts) {
 		return nil

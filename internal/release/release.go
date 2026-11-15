@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/blake2b"
+
+	"github.com/arngory/raycontrol/internal/roots"
 )
 
 // Repo is where releases are published.
@@ -172,21 +174,35 @@ func (f *Fetcher) URL(version, file string) string {
 func (f *Fetcher) Get(ctx context.Context, version, file string, limit int64) ([]byte, error) {
 	hc := f.HTTP
 	if hc == nil {
-		hc = &http.Client{Timeout: 10 * time.Minute}
+		// The node's roots; a host they refuse is tried again with the
+		// system store, said so: the signature protects the files, and a
+		// stale embedded list must never stop the update that renews it.
+		hc = roots.Node.Client(10*time.Minute, roots.SystemFallback(func(host string, err error) {
+			if f.Log != nil {
+				f.Log("warning: %s: %v; trying again with the system's certificate store (the signature still protects the files)", host, err)
+			}
+		}))
+		defer hc.CloseIdleConnections()
 	}
 	url := f.URL(version, file)
 	var errs []error
+	why := ""
 	for _, prefix := range append([]string{""}, f.Mirrors...) {
 		if prefix != "" && f.Log != nil {
-			f.Log("github.com did not answer, trying %s (the signature still protects the files)", prefix)
+			f.Log("%s, trying %s (the signature still protects the files)", why, prefix)
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, prefix+url, nil)
 		if err != nil {
 			return nil, err
 		}
+		from := req.URL.Host
 		resp, err := hc.Do(req)
 		if err != nil {
 			errs = append(errs, err)
+			why = from + " did not answer"
+			if ctx.Err() != nil {
+				break
+			}
 			continue
 		}
 		b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
@@ -194,8 +210,27 @@ func (f *Fetcher) Get(ctx context.Context, version, file string, limit int64) ([
 		switch {
 		case err != nil:
 			errs = append(errs, err)
+			why = from + " broke off"
+		case resp.StatusCode == http.StatusNotFound && prefix == "":
+			// GitHub answered: there is no such file (a patch number
+			// not released, a release whose assets were deleted). The
+			// mirrors would only say the same, and learn the node's
+			// address and version for it. Mirrors are for a GitHub that
+			// does not answer: a transport error or timeout (blocked by
+			// DNS, a reset, an interceptor the roots refuse), a 5xx, a
+			// 429, or any other status, such as a block page's 403 or
+			// 451. A block page that answers 404 over a certificate the
+			// node accepts (through the system store only, an
+			// interceptor's root there) reads as "no such release": the
+			// check finds nothing that round, with the system store's
+			// warning in the log.
+			return nil, fmt.Errorf("downloading %s: %s: %s: %w", file, prefix+url, resp.Status, ErrNotFound)
+		case resp.StatusCode == http.StatusNotFound:
+			errs = append(errs, fmt.Errorf("%s: %s: %w", prefix+url, resp.Status, ErrNotFound))
+			why = from + " has no " + file
 		case resp.StatusCode != http.StatusOK:
 			errs = append(errs, fmt.Errorf("%s: %s", prefix+url, resp.Status))
+			why = from + " answered " + resp.Status
 		case int64(len(b)) > limit:
 			return nil, fmt.Errorf("%s: larger than %d bytes", file, limit)
 		default:

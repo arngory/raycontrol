@@ -73,6 +73,9 @@ const RealityShortIDs = 4
 type Options struct {
 	Host   string // address clients use
 	Domain string // base domain for service subdomains; may be empty
+	// Ports chosen at the first install (rayctl install -ports); a node
+	// that exists takes only its own again (CheckPorts).
+	Ports PortChoice
 }
 
 // NodeKeys are the node's signing keys (subscription signatures).
@@ -93,8 +96,15 @@ func (k NodeKeys) PublicJSON() map[string]string {
 // Init prepares a node: SPA parameters, signing keys, the subscription
 // service. Repeating it keeps everything already created.
 func Init(ctx context.Context, st *store.Store, o Options) (spa.Params, error) {
-	params, err := node.Init(ctx, st, o.Host)
+	if err := CheckPorts(ctx, st, o.Ports); err != nil {
+		return spa.Params{}, err
+	}
+	fresh := false
+	params, err := node.InitWith(ctx, st, o.Host, func() (spa.Params, error) { fresh = true; return initPorts(o.Ports) })
 	if err != nil {
+		return params, err
+	}
+	if err := keepChoice(ctx, st, o.Ports, fresh); err != nil {
 		return params, err
 	}
 	if o.Domain != "" {
@@ -123,7 +133,7 @@ func Init(ctx context.Context, st *store.Store, o Options) (spa.Params, error) {
 		if err != nil {
 			return params, err
 		}
-		svc, err := subscriptionService(params, host)
+		svc, err := subscriptionService(params, host, o.Ports)
 		if err != nil {
 			return params, err
 		}
@@ -169,18 +179,18 @@ func randInt(lo, hi int) (int, error) {
 	return lo + int(n.Int64()), nil
 }
 
-// subscriptionService picks a random port outside the SPA range and a
-// self-signed certificate; clients pin its key (spec/subscription-v1.md).
-func subscriptionService(p spa.Params, host string) (store.Service, error) {
-	var port int
-	for {
+// subscriptionService takes the chosen port, or picks a random one outside
+// the SPA range and the other chosen ports, and a self-signed certificate;
+// clients pin its key (spec/subscription-v1.md).
+func subscriptionService(p spa.Params, host string, c PortChoice) (store.Service, error) {
+	port := int(c.Sub)
+	for port == 0 {
 		n, err := randInt(20000, 60999)
 		if err != nil {
 			return store.Service{}, err
 		}
-		if n < int(p.PortBase) || n >= int(p.PortBase)+int(p.PortRange) {
+		if (n < int(p.PortBase) || n >= int(p.PortBase)+int(p.PortRange)) && !inReserved([]Span{{c.API, 1}, c.Rotation}, n) {
 			port = n
-			break
 		}
 	}
 	key, cert, err := selfSigned(host)
@@ -546,9 +556,16 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		}
 		svc.Secrets[SecretTLSKey], svc.Secrets[SecretTLSCert] = key, cert
 		if _, ok := settings["ports"]; !ok {
-			port, err := freePort(ctx, st, all)
+			// Chosen at install (-ports api=N), else random.
+			c, err := Ports(ctx, st)
 			if err != nil {
 				return svc, err
+			}
+			port := int(c.API)
+			if port == 0 {
+				if port, err = freePort(ctx, st, all); err != nil {
+					return svc, err
+				}
 			}
 			settings["ports"] = []string{fmt.Sprintf("tcp/%d", port)}
 		}
@@ -589,6 +606,13 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		if err := realitySettings(settings); err != nil {
 			return svc, err
 		}
+		// An address the data plane does not reach (the node's own,
+		// 0.0.0.0): refused, as the check of a name refuses one there.
+		if target, _ := settings["target"].(string); target != "" {
+			if err := CheckTargetAddr(target); err != nil {
+				return svc, fmt.Errorf("%w %w", store.ErrInvalid, err)
+			}
+		}
 		if err := realitySecrets(svc.Secrets); err != nil {
 			return svc, err
 		}
@@ -600,7 +624,13 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		if err != nil {
 			return svc, err
 		}
-		if _, ok := settings["udp_rotation"]; !ok && hasUDP(store.Service{Kind: svc.Kind, Settings: string(b)}) {
+		c, err := Ports(ctx, st)
+		if err != nil {
+			return svc, err
+		}
+		// rotation=off at install: none (the service stays on its own
+		// port, spa-v2 §11).
+		if _, ok := settings["udp_rotation"]; !ok && !c.NoRotate && hasUDP(store.Service{Kind: svc.Kind, Settings: string(b)}) {
 			rot, key, err := newRotation(ctx, st, append(slices.Clone(all), store.Service{Kind: svc.Kind, Settings: string(b)}))
 			if err != nil {
 				return svc, err
@@ -855,6 +885,16 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			return svc, fmt.Errorf("%w rotate_sni: true or false", store.ErrInvalid)
 		}
 		v = b
+	case svc.Kind == "reality" && key == "target":
+		// Who answers non-clients (spec/egress-policy-v1.md §10), checked
+		// as at creation: the API checks the site itself first
+		// (CheckRealityTarget). The keys, the shortIds and the server
+		// name stay (the sni, not the target, is in the links), so the
+		// clients keep working; the next render gives Xray the new one.
+		if err := realityTargetOption(svc, value); err != nil {
+			return svc, err
+		}
+		v = value
 	case (svc.Kind == "hy2-masq" || svc.Kind == "hy2-obfs") && (key == "up_mbps" || key == "down_mbps"):
 		// The ceilings of the server's Brutal per connection (R4-16): up is
 		// what the node sends a client at most (the node's channel or its
@@ -943,7 +983,7 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			v = 0
 		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; naive: icmp; yggdrasil: peers, lan_relay; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open, target; hy2-*: up_mbps, down_mbps; naive: icmp; yggdrasil: peers, lan_relay; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
@@ -1090,8 +1130,9 @@ func ACMEPort(ctx context.Context, st *store.Store) (uint16, error) {
 	if err != nil {
 		return 0, err
 	}
+	res := reserved(ctx, st)
 	free := func(p int) bool {
-		if p >= int(params.PortBase) && p < int(params.PortBase)+int(params.PortRange) {
+		if p >= int(params.PortBase) && p < int(params.PortBase)+int(params.PortRange) || inReserved(res, p) {
 			return false
 		}
 		for _, s := range all {
@@ -1380,12 +1421,13 @@ func freePort(ctx context.Context, st *store.Store, all []store.Service) (int, e
 	if b, err := st.GetSetting(ctx, settingACMEPort); err == nil {
 		acme, _ = strconv.Atoi(string(b))
 	}
+	res := reserved(ctx, st)
 	for range 1000 {
 		p, err := randInt(20000, 60999)
 		if err != nil {
 			return 0, err
 		}
-		taken := p == acme || (p >= int(params.PortBase) && p < int(params.PortBase)+int(params.PortRange))
+		taken := p == acme || (p >= int(params.PortBase) && p < int(params.PortBase)+int(params.PortRange)) || inReserved(res, p)
 		for _, s := range all {
 			if r, ok := ServiceRotation(s); ok && p >= int(r.Base) && p < int(r.Base)+int(r.Range) {
 				taken = true
@@ -1423,6 +1465,27 @@ func newRotation(ctx context.Context, st *store.Store, all []store.Service) (Rot
 			taken = append(taken, span{int(p.Num), int(p.Num) + 1})
 		}
 	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return Rotation{}, nil, err
+	}
+	free := func(base, rng int) bool {
+		return !slices.ContainsFunc(taken, func(t span) bool { return base < t.hi && t.lo < base+rng })
+	}
+	// A pool chosen at install (-ports rotation=A-B): its slots in turn.
+	c, err := Ports(ctx, st)
+	if err != nil {
+		return Rotation{}, nil, err
+	}
+	if c.Rotation.Range > 0 {
+		for _, s := range rotationSlots(c.Rotation) {
+			if free(int(s.Base), int(s.Range)) {
+				return Rotation(s), key, nil
+			}
+		}
+		return Rotation{}, nil, fmt.Errorf("%w no free range for UDP rotation left in %s, chosen at install (rayctl ports)", store.ErrInvalid, c.Rotation)
+	}
+	res := reserved(ctx, st)
 	for range 1000 {
 		rng, err := randInt(1024, 4096)
 		if err != nil {
@@ -1432,11 +1495,7 @@ func newRotation(ctx context.Context, st *store.Store, all []store.Service) (Rot
 		if err != nil {
 			return Rotation{}, nil, err
 		}
-		if !slices.ContainsFunc(taken, func(t span) bool { return base < t.hi && t.lo < base+rng }) {
-			key := make([]byte, 32)
-			if _, err := rand.Read(key); err != nil {
-				return Rotation{}, nil, err
-			}
+		if free(base, rng) && !slices.ContainsFunc(res, func(s Span) bool { return s.overlaps(Span{uint16(base), uint16(rng)}) }) {
 			return Rotation{Base: uint16(base), Range: uint16(rng)}, key, nil
 		}
 	}

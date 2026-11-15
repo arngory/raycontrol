@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/acme"
+
+	"github.com/arngory/raycontrol/internal/roots"
 )
 
 // LetsEncrypt is the default ACME directory.
@@ -45,7 +47,7 @@ type DNSSolver interface {
 // Issuer runs ACME orders.
 type Issuer struct {
 	Directory  string        // ACME directory URL
-	HTTPClient *http.Client  // nil: the default client
+	HTTPClient *http.Client  // nil: roots.Node's
 	AccountKey crypto.Signer // the node's ACME account key
 	// Listen is the HTTP-01 responder address; "" picks a free port, which
 	// the perimeter window points TCP 80 to.
@@ -192,7 +194,15 @@ func (is *Issuer) Issue(ctx context.Context, names []string, key crypto.Signer) 
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	client := &acme.Client{Key: is.AccountKey, DirectoryURL: is.Directory, HTTPClient: is.HTTPClient, UserAgent: "raycontrol"}
+	// The CA's root must be among the node's roots: the embedded list, or
+	// for a private CA the file root names (rayctl roots file). No fallback
+	// to the system store: nothing above TLS checks what ACME answers.
+	hc := is.HTTPClient
+	if hc == nil {
+		hc = roots.Node.Client(0)
+		defer hc.CloseIdleConnections()
+	}
+	client := &acme.Client{Key: is.AccountKey, DirectoryURL: is.Directory, HTTPClient: hc, UserAgent: "raycontrol"}
 	if _, err := client.Register(ctx, &acme.Account{}, acme.AcceptTOS); err != nil && !errors.Is(err, acme.ErrAccountAlreadyExists) {
 		return nil, fmt.Errorf("acme account: %w", err)
 	}

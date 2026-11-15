@@ -59,6 +59,11 @@ type Server struct {
 	// tls_next_at) reach no line before ClockSeqAfter, for the same
 	// rollback (spec/cert-pin-v1.md §8). rayd: its start. Zero: none held.
 	PinsSince time.Time
+	// PinsAfter, when set, is when those pins reach the lines instead of
+	// ClockSeqAfter: rayd's test stand (RAYCONTROL_UNSAFE_SITE_KEY_SETTLE_NOW)
+	// lets them through seconds after its start, its seq still keeping to
+	// the stored count for ClockSeqAfter.
+	PinsAfter time.Time
 	// Probe, when set, serves the channel probes (spec/probe-v1.md) on the
 	// same endpoint, and the subscription says so.
 	Probe *probe.Server
@@ -203,7 +208,21 @@ func (s *Server) handle(r *http.Request) (Envelope, error) {
 			s.Changed()
 		}
 	}
-	return s.build(ctx, dev.UserName, dev.ID, key[:], addr, now)
+	env, err := s.build(ctx, dev.UserName, dev.ID, key[:], addr, now)
+	if err != nil {
+		return Envelope{}, err
+	}
+	// The device once more, after the last read of what the subscription
+	// carries: a revocation that commits after the check above gives the
+	// user new credentials and a new LAN key in the same transaction
+	// (store.RevokeDevice), and build reads them in statements of their
+	// own. Whatever of that build saw, this read sees the revocation too
+	// (the store's one connection: each statement after the commits
+	// before it), and the device gets what a revoked one gets.
+	if _, _, err := s.Store.ActiveDevice(ctx, dev.ID); err != nil {
+		return Envelope{}, err
+	}
+	return env, nil
 }
 
 // Build returns the signed subscription of a user.
@@ -232,7 +251,10 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 		return Envelope{}, err
 	}
 	m.Now = now // what depends on the time (a pin of an hour) follows the subscription's
-	m.PinsSince, m.PinsAfter = s.PinsSince, s.ClockSeqAfter
+	m.PinsSince, m.PinsAfter = s.PinsSince, s.PinsAfter
+	if m.PinsAfter.IsZero() {
+		m.PinsAfter = s.ClockSeqAfter
+	}
 	u, err := s.Store.UserByName(ctx, userName)
 	if err != nil {
 		return Envelope{}, err
@@ -263,7 +285,8 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 	if err != nil {
 		// The others go out: a 404 for all of them kept the client on its
 		// last subscription, without the next keys of the rest (review).
-		s.Log.Warn("subscription: profiles left out", "user", userName, "err", err)
+		// By the user's ID, not the name: logs carry no names (docs/09 §7).
+		s.Log.Warn("subscription: profiles left out", "user", u.ID, "err", err)
 		if len(profiles) == 0 {
 			return Envelope{}, err
 		}

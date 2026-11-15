@@ -6,7 +6,6 @@ package naive
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -94,6 +93,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool {
 	ctx := a.ctx
 	target := r.Host
+	// The padding the client asked for (padding.go): what every answer
+	// from here on says, a refusal's as a 200's.
+	reply, padded := paddingType(r.Header)
 	// A target that is no host and port, or whose host is neither an
 	// address nor a domain name (a megabyte's :authority, say), is a bad
 	// target: nothing of it is looked up, kept or charged. It gets the
@@ -109,7 +111,7 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 	}
 	if err != nil {
 		if r.Header.Get(AckHeader) == "1" {
-			refuse(w, http.StatusBadGateway, ackDenied)
+			refuse(w, http.StatusBadGateway, ackDenied, reply)
 			return false
 		}
 		s.Answer.ServeHTTP(w, r)
@@ -136,7 +138,7 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 		if kind != "" {
 			// Not who or where: no user and no destination in the log.
 			s.Log.Debug("naive: too many connections", "limit", kind)
-			refuse(w, http.StatusTooManyRequests, "")
+			refuse(w, http.StatusTooManyRequests, "", reply)
 			return false
 		}
 		defer done()
@@ -150,7 +152,7 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 	ack := tcp && r.Header.Get(AckHeader) == "1"
 	var in *paddedStream
 	accept := func() bool {
-		w.Header().Set("Padding", paddingHeader())
+		answerPadding(w, reply)
 		w.WriteHeader(http.StatusOK)
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -158,6 +160,9 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 		}
 		flusher.Flush()
 		in = &paddedStream{r: r.Body, w: w, f: flusher}
+		if !padded {
+			in.unpadded()
+		}
 		return true
 	}
 	if !ack && !accept() {
@@ -216,7 +221,7 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 		// and none in the answer.
 		if ack && ctx.Err() == nil {
 			status, reason := ackRefusal(err, ranOut)
-			refuse(w, status, reason)
+			refuse(w, status, reason, reply)
 			s.Log.Debug("naive: destination unreachable", "status", status)
 			return false
 		}
@@ -321,10 +326,18 @@ func PublicDialer() *net.Dialer {
 
 var (
 	cgnat = netip.MustParsePrefix("100.64.0.0/10")
-	// IPv6 prefixes that carry IPv4 addresses (NAT64, 6to4, IPv4-compatible):
+	// Not the internet, apart from the private ranges: IPv6 prefixes that
+	// carry IPv4 addresses (NAT64, 6to4, IPv4-compatible):
 	// 64:ff9b::a9fe:a9fe is 169.254.169.254 where NAT64 is routed.
-	carriesV4 = []netip.Prefix{netip.MustParsePrefix("64:ff9b::/96"), netip.MustParsePrefix("64:ff9b:1::/48"),
-		netip.MustParsePrefix("2002::/16"), netip.MustParsePrefix("::/96")}
+	notPublic = []netip.Prefix{netip.MustParsePrefix("64:ff9b::/96"), netip.MustParsePrefix("64:ff9b:1::/48"),
+		netip.MustParsePrefix("2002::/16"), netip.MustParsePrefix("::/96"),
+		// Not private to Go, but not the internet either, as Xray's routing
+		// and the perimeter's local sets have them (R4-38): "this network",
+		// IETF protocol assignments, benchmarking, reserved.
+		netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("192.0.0.0/24"),
+		netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("240.0.0.0/4"),
+		// Azure's platform address (WireServer), public but the host's.
+		netip.MustParsePrefix("168.63.129.16/32")}
 	local struct {
 		once  sync.Once
 		addrs map[netip.Addr]bool
@@ -338,7 +351,7 @@ func Public(a netip.Addr) bool {
 	if !a.IsGlobalUnicast() || a.IsPrivate() || cgnat.Contains(a) {
 		return false
 	}
-	for _, p := range carriesV4 {
+	for _, p := range notPublic {
 		if p.Contains(a) {
 			return false
 		}
@@ -353,110 +366,6 @@ func Public(a netip.Addr) bool {
 		}
 	})
 	return !local.addrs[a]
-}
-
-// The padding of naive's first frames each way (as NaiveProxy and the
-// sing-box inbound do): [length 2][padding length 1][data][zeros].
-const paddingFrames = 8
-
-// randByte draws padding sizes: an observer must not predict them.
-func randByte() byte {
-	var b [1]byte
-	_, _ = rand.Read(b[:])
-	return b[0]
-}
-
-func paddingHeader() string {
-	b := make([]byte, 30+int(randByte()%32))
-	for i := range b {
-		if i < 16 {
-			b[i] = "!#$()+<>?@[]^`{}"[randByte()%16]
-		} else {
-			b[i] = '~'
-		}
-	}
-	return string(b)
-}
-
-// ClientStream is the client's side of the tunnel: what it writes into the
-// CONNECT request body and reads from the response, padded the same way.
-func ClientStream(response io.Reader, request io.Writer) io.ReadWriter {
-	return &paddedStream{r: response, w: request}
-}
-
-// PaddingHeader is a value for the Padding header of a CONNECT.
-func PaddingHeader() string { return paddingHeader() }
-
-// paddedStream is the tunnel inside the CONNECT stream.
-type paddedStream struct {
-	r io.Reader
-	w io.Writer
-	f http.Flusher
-
-	readFrames, writeFrames int
-	remaining, skip         int
-	mu                      sync.Mutex // writes
-}
-
-func (p *paddedStream) Read(b []byte) (int, error) {
-	for {
-		if p.remaining > 0 {
-			if len(b) > p.remaining {
-				b = b[:p.remaining]
-			}
-			n, err := p.r.Read(b)
-			p.remaining -= n
-			return n, err
-		}
-		if p.skip > 0 {
-			if _, err := io.CopyN(io.Discard, p.r, int64(p.skip)); err != nil {
-				return 0, err
-			}
-			p.skip = 0
-		}
-		if p.readFrames >= paddingFrames {
-			return p.r.Read(b)
-		}
-		var h [3]byte
-		if _, err := io.ReadFull(p.r, h[:]); err != nil {
-			return 0, err
-		}
-		p.readFrames++
-		p.remaining, p.skip = int(binary.BigEndian.Uint16(h[:2])), int(h[2])
-	}
-}
-
-func (p *paddedStream) Write(b []byte) (int, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	written := 0
-	for len(b) > 0 {
-		chunk := b
-		if p.writeFrames < paddingFrames && len(chunk) > 65535 {
-			chunk = chunk[:65535]
-		}
-		var err error
-		if p.writeFrames < paddingFrames {
-			pad := int(randByte())
-			frame := make([]byte, 3+len(chunk)+pad)
-			binary.BigEndian.PutUint16(frame, uint16(len(chunk)))
-			frame[2] = byte(pad)
-			copy(frame[3:], chunk)
-			_, err = p.w.Write(frame)
-			p.writeFrames++
-		} else {
-			_, err = p.w.Write(chunk)
-		}
-		if err != nil {
-			return written, err
-		}
-		if p.f != nil {
-			p.f.Flush()
-		}
-		written += len(chunk)
-		b = b[len(chunk):]
-	}
-	return written, nil
 }
 
 // resolvers are where naive looks names up: public ones, as Xray does

@@ -12,6 +12,8 @@ import (
 
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/perimeter"
+	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 // What rayctl egress asks of the host; tests replace them.
@@ -28,7 +30,7 @@ func (c *cli) egress(ctx context.Context, args []string) error {
 	switch {
 	case len(args) == 0 || len(args) == 1 && args[0] == "show":
 		return c.egressShow(ctx)
-	case len(args) == 2 && (args[0] == "block" || args[0] == "allow") && (args[1] == "bittorrent" || args[1] == "smtp"):
+	case len(args) == 2 && (args[0] == "block" || args[0] == "allow") && (args[1] == "bittorrent" || args[1] == "smtp" || args[1] == "local"):
 		return c.egressSet(ctx, args[0] == "block", args[1])
 	}
 	return errUsage
@@ -39,10 +41,13 @@ func (c *cli) egressSet(ctx context.Context, block bool, part string) error {
 		return errors.New("rayctl egress " + map[bool]string{true: "block", false: "allow"}[block] + ": root only")
 	}
 	req := &nodev1.SetEgressRequest{}
-	if part == "bittorrent" {
+	switch part {
+	case "bittorrent":
 		req.Bittorrent = &block
-	} else {
+	case "smtp":
 		req.Smtp = &block
+	default:
+		req.Local = &block
 	}
 	doff := false
 	if block {
@@ -53,7 +58,8 @@ func (c *cli) egressSet(ctx context.Context, block bool, part string) error {
 			return err
 		}
 		want := perimeter.Egress{SMTP: cur.Msg.GetEgress().GetSmtp() || part == "smtp",
-			BitTorrent: cur.Msg.GetEgress().GetBittorrent() || part == "bittorrent", UIDs: cur.Msg.Uids}
+			BitTorrent: cur.Msg.GetEgress().GetBittorrent() || part == "bittorrent", UIDs: cur.Msg.Uids,
+			Local: cur.Msg.GetEgress().GetLocal() || part == "local"}
 		if doff, err = perimeter.CheckEgress(want, egressCheck); err != nil {
 			return fmt.Errorf("the kernel does not take the egress policy, nothing changed: %w", err)
 		}
@@ -72,6 +78,12 @@ func (c *cli) egressSet(ctx context.Context, block bool, part string) error {
 			}
 		case part == "bittorrent":
 			fmt.Fprintln(w, "BitTorrent allowed on every profile within a second or two")
+		case part == "local" && block:
+			fmt.Fprintln(w, "the node's own and local networks blocked for new connections on every profile within a second or two:")
+			fmt.Fprintln(w, "loopback, private ranges, link-local and the cloud metadata address, CGNAT, multicast (R4-38)")
+		case part == "local":
+			fmt.Fprintln(w, "the perimeter no longer blocks the node's own and local networks; the processes' own checks still do")
+			fmt.Fprintln(w, "(Xray's routing, naive, systemd's IPAddressDeny): spec/egress-policy-v1.md §10")
 		case block:
 			fmt.Fprintln(w, "SMTP (TCP 25) blocked on every profile within a second or two, connections open to 25 too;")
 			fmt.Fprintln(w, "mail clients' 465 and 587 stay open")
@@ -87,14 +99,26 @@ func (c *cli) egressShow(ctx context.Context) error {
 		return err
 	}
 	e := r.Msg.GetEgress()
+	// The REALITY targets on a local address the local part lets through
+	// (spec/egress-policy-v1.md §10): as rayd puts them in the snapshot.
+	var exempt []string
+	if e.GetLocal() {
+		if svcs, err := c.c.ListServices(ctx, connect.NewRequest(&nodev1.ListServicesRequest{})); err == nil {
+			exempt = localExemptLines(svcs.Msg.Services)
+		}
+	}
 	return c.print(r.Msg, func(w *tabwriter.Writer) {
 		state := map[bool]string{true: "blocked", false: "allowed"}
 		fmt.Fprintf(w, "bittorrent\t%s\n", state[e.GetBittorrent()])
 		fmt.Fprintf(w, "smtp (tcp 25)\t%s\n", state[e.GetSmtp()])
+		fmt.Fprintf(w, "local networks\t%s\n", state[e.GetLocal()])
+		for _, x := range exempt {
+			fmt.Fprintf(w, "local exempt\t%s\n", x)
+		}
 		fmt.Fprintf(w, "covers\tevery profile: the data plane's processes, UIDs %s\n", perimeter.DataPlaneUIDs)
 		for _, uid := range r.Msg.Uids {
 			// rayd serve -supervise: the data plane runs as rayd.
-			fmt.Fprintf(w, "covers\trayd's UID %d (supervised): every process of that user\n", uid)
+			fmt.Fprintf(w, "covers\trayd's UID %d (supervised): every process of that user; not the local networks, which rayd reaches itself\n", uid)
 		}
 		if egressEuid() != 0 {
 			fmt.Fprintln(w, "in force\tonly root sees it, and the counters")
@@ -110,6 +134,22 @@ func (c *cli) egressShow(ctx context.Context) error {
 	})
 }
 
+// localExemptLines say what the local part lets through for REALITY
+// targets on a local address: the destination, to whom, why.
+func localExemptLines(services []*nodev1.Service) []string {
+	var out []string
+	for _, s := range services {
+		if s.Uid == 0 {
+			continue
+		}
+		for _, ap := range provision.RealityLocalTarget(store.Service{Kind: s.Kind, Enabled: s.Enabled, Settings: s.SettingsJson}) {
+			out = append(out, fmt.Sprintf("tcp %s: REALITY %s's target, for its process only (uid %d); "+
+				"anyone reaching %s's port without its keys reaches it through REALITY", ap, s.Name, s.Uid, s.Name))
+		}
+	}
+	return out
+}
+
 // egressInForce says whether the rules in the table are the policy's.
 func egressInForce(e *nodev1.Egress, blocks map[string]perimeter.Drops, err error) string {
 	if err != nil {
@@ -117,7 +157,8 @@ func egressInForce(e *nodev1.Egress, blocks map[string]perimeter.Drops, err erro
 	}
 	_, smtp := blocks["smtp"]
 	_, bt := blocks["bittorrent-tcp"]
-	if smtp != e.GetSmtp() || bt != e.GetBittorrent() {
+	_, local := blocks["local"]
+	if smtp != e.GetSmtp() || bt != e.GetBittorrent() || local != e.GetLocal() {
 		return "not yet: rayspa has not applied it (journalctl -u rayspa)"
 	}
 	return "yes"
@@ -131,6 +172,9 @@ func egressLine(e *nodev1.Egress) string {
 	}
 	if e.GetSmtp() {
 		blocked = append(blocked, "smtp (tcp 25)")
+	}
+	if e.GetLocal() {
+		blocked = append(blocked, "local networks")
 	}
 	if len(blocked) == 0 {
 		return "nothing blocked (rayctl egress)"

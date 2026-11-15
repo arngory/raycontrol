@@ -8,6 +8,7 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -341,85 +343,9 @@ func TestSiteReloadsCertificate(t *testing.T) {
 // runs; a chain that does not parse leaves the one in use; the connection
 // that was open answers throughout.
 func TestDoHReloadsCertificate(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	dir := t.TempDir()
-	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	if _, err := provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.test"}); err != nil {
-		t.Fatal(err)
-	}
-	for _, kind := range []string{"reality", "doh"} {
-		if _, err := provision.CreateService(ctx, st, store.Service{Kind: kind, Name: kind, Enabled: true}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	site, err := st.ServiceByName(ctx, "site")
-	if err != nil {
-		t.Fatal(err)
-	}
-	k := newSiteKeyPair(t)
-	chainPEM, leaf := issueChain(t, k)
-	set := func(chain, key []byte) {
-		t.Helper()
-		// Together, as the certificate manager stores them.
-		if err := st.UpdateService(ctx, site.ID, store.ServiceUpdate{Set: map[string][]byte{
-			provision.SecretTLSChain: chain, provision.SecretTLSKey: key}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	set(chainPEM, k.der)
-
-	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run"), Supervised: true}
-	if err := os.MkdirAll(filepath.Dir(paths.DoHSocket("doh")), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	// The changes rayd's loops wake on, and how many rounds serveDoH began.
-	var mu sync.Mutex
-	wake, rounds := make(chan struct{}), 0
-	changes := func() <-chan struct{} {
-		mu.Lock()
-		defer mu.Unlock()
-		rounds++
-		return wake
-	}
-	began := func() int {
-		mu.Lock()
-		defer mu.Unlock()
-		return rounds
-	}
-	// settle wakes serveDoH and returns once it has been through the store
-	// since: a second round has begun.
-	settle := func() {
-		t.Helper()
-		for target := began() + 2; began() < target; {
-			mu.Lock()
-			old := wake
-			wake = make(chan struct{})
-			mu.Unlock()
-			close(old)
-			for at, i := began(), 0; began() == at && i < 400; i++ {
-				time.Sleep(5 * time.Millisecond)
-			}
-		}
-	}
-	out := &output{}
-	log := slog.New(slog.NewTextHandler(out, nil))
-	done := make(chan struct{})
-	go func() { serveDoH(ctx, st, paths, changes, log); close(done) }()
-	defer func() { cancel(); <-done }()
-	for i := 0; ; i++ {
-		if _, err := os.Stat(paths.DoHSocket("doh")); err == nil {
-			break
-		}
-		if i == 400 {
-			t.Fatal("no DoH socket")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	dial := passed(t, paths.DoHSocket("doh"), "doh")
+	d := startDoHStand(t)
+	k, leaf, set, settle, out := d.key, d.leaf, d.set, d.settle, d.out
+	dial := passed(t, d.paths.DoHSocket("doh"), "doh")
 	served := func(what string, want []byte) {
 		t.Helper()
 		c, got, err := dial()
@@ -467,6 +393,223 @@ func TestDoHReloadsCertificate(t *testing.T) {
 	}
 	if c := strings.Count(out.String(), "doh certificate reloaded"); c != 2 {
 		t.Fatalf("%d reloads logged, want 2:\n%s", c, out.String())
+	}
+}
+
+// dohStand is serveDoH on a store of its own, with a doh service under a
+// site that has a certificate, and the changes it wakes on in the test's
+// hands.
+type dohStand struct {
+	st    *store.Store
+	paths render.Paths
+	key   siteKeyPair
+	leaf  []byte
+	out   *output
+	// set stores the site's chain and key, together, as the certificate
+	// manager does.
+	set func(chain, key []byte)
+	// settle wakes serveDoH and returns once it has been through the
+	// store since: a second round has begun.
+	settle func()
+}
+
+func startDoHStand(t *testing.T) *dohStand {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	if _, err := provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"reality", "doh"} {
+		if _, err := provision.CreateService(ctx, st, store.Service{Kind: kind, Name: kind, Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	site, err := st.ServiceByName(ctx, "site")
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := newSiteKeyPair(t)
+	chainPEM, leaf := issueChain(t, k)
+	set := func(chain, key []byte) {
+		t.Helper()
+		// Together, as the certificate manager stores them.
+		if err := st.UpdateService(ctx, site.ID, store.ServiceUpdate{Set: map[string][]byte{
+			provision.SecretTLSChain: chain, provision.SecretTLSKey: key}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set(chainPEM, k.der)
+
+	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run"), Supervised: true}
+	if err := os.MkdirAll(filepath.Dir(paths.DoHSocket("doh")), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// The changes rayd's loops wake on, how many rounds serveDoH began,
+	// and the hooks a change runs first (api.Server.AfterChange).
+	var mu sync.Mutex
+	wake, rounds := make(chan struct{}), 0
+	var hooks []func()
+	afterChange := func(f func()) {
+		mu.Lock()
+		defer mu.Unlock()
+		hooks = append(hooks, f)
+	}
+	changes := func() <-chan struct{} {
+		mu.Lock()
+		defer mu.Unlock()
+		rounds++
+		return wake
+	}
+	began := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return rounds
+	}
+	// settle wakes serveDoH and returns once it has been through the store
+	// since: a second round has begun.
+	settle := func() {
+		t.Helper()
+		mu.Lock()
+		run := slices.Clone(hooks)
+		mu.Unlock()
+		for _, f := range run {
+			f()
+		}
+		for target := began() + 2; began() < target; {
+			mu.Lock()
+			old := wake
+			wake = make(chan struct{})
+			mu.Unlock()
+			close(old)
+			for at, i := began(), 0; began() == at && i < 400; i++ {
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+	}
+	out := &output{}
+	log := slog.New(slog.NewTextHandler(out, nil))
+	done := make(chan struct{})
+	go func() { serveDoH(ctx, st, paths, changes, afterChange, log); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	for i := 0; ; i++ {
+		if _, err := os.Stat(paths.DoHSocket("doh")); err == nil {
+			break
+		}
+		if i == 400 {
+			t.Fatal("no DoH socket")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return &dohStand{st: st, paths: paths, key: k, leaf: leaf, out: out, set: set, settle: settle}
+}
+
+// A change of the node's state reaches DoH's tokens at once, through the
+// Forget of serveDoH's change hook: a device revoked, its token is refused
+// at the next query, with the quick 404 of a token retired, not the site's
+// answer and not when the handler's cache runs out; its sibling's token,
+// which the revocation leaves (R4-37), goes on without a new subscription.
+// The user's credentials renewed (rayctl user renew), every token before
+// is refused and the new ones taken.
+func TestDoHForgetsTokensAtChange(t *testing.T) {
+	d := startDoHStand(t)
+	ctx := context.Background()
+	svc, err := d.st.ServiceByName(ctx, "doh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The site answers 403: a stranger's answer, told from the 404 of a
+	// token retired.
+	site, err := d.st.ServiceByName(ctx, "site")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(site.Settings), &settings); err != nil {
+		t.Fatal(err)
+	}
+	settings["answer"] = "403"
+	b, _ := json.Marshal(settings)
+	if err := d.st.UpdateService(ctx, site.ID, store.ServiceUpdate{Settings: string(b)}); err != nil {
+		t.Fatal(err)
+	}
+	alice, err := d.st.CreateUser(ctx, store.User{Name: "alice", Enabled: true, Services: []int64{svc.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	devA, keyA, err := d.st.CreateDevice(ctx, "alice", "a", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, keyB, err := d.st.CreateDevice(ctx, "alice", "b", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := func(key []byte) string {
+		t.Helper()
+		c, err := d.st.Credentials(ctx, svc.ID, []int64{alice.ID}, store.NewUUID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store.DoHDeviceToken(c[alice.ID], key)
+	}
+	dial := passed(t, d.paths.DoHSocket("doh"), "doh")
+	// A method DoH does not take: 405 for a token it accepts, the site's
+	// 403 for a stranger, 404 for a token retired, without an upstream to
+	// ask.
+	status := func(tok string) int {
+		t.Helper()
+		c, _, err := dial()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		if _, err := io.WriteString(c, "PUT /dns-query/"+tok+" HTTP/1.1\r\nHost: "+reloadName+"\r\nContent-Length: 0\r\n\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	a, b2 := token(keyA[:]), token(keyB[:])
+	d.settle()
+	if a == b2 || status(a) != http.StatusMethodNotAllowed || status(b2) != http.StatusMethodNotAllowed {
+		t.Fatalf("the devices' tokens: %q %q", a, b2)
+	}
+	if got := status("00000000-0000-4000-8000-000000000000"); got != http.StatusForbidden {
+		t.Fatalf("a stranger: %d", got)
+	}
+	if _, err := d.st.RevokeDevice(ctx, devA.ID); err != nil {
+		t.Fatal(err)
+	}
+	d.settle()
+	if got := status(a); got != http.StatusNotFound {
+		t.Errorf("the revoked device's token: %d", got)
+	}
+	if got := status(b2); got != http.StatusMethodNotAllowed {
+		t.Errorf("the sibling's token after the revocation: %d", got)
+	}
+	if token(keyB[:]) != b2 {
+		t.Error("the revocation changed the sibling's token")
+	}
+	if _, err := d.st.RenewUser(ctx, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	renewed := token(keyB[:])
+	d.settle()
+	if got := status(b2); got != http.StatusNotFound {
+		t.Errorf("the token before the renewal: %d", got)
+	}
+	if got := status(renewed); got != http.StatusMethodNotAllowed {
+		t.Errorf("the new token: %d", got)
 	}
 }
 

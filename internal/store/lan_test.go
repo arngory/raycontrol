@@ -77,7 +77,7 @@ func TestLANMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if v, err := Schema(ctx, path); err != nil || v != 13 {
+	if v, err := Schema(ctx, path); err != nil || v != KnownSchema() {
 		t.Fatalf("schema %d %v", v, err)
 	}
 	u, err := s.UserByName(ctx, "alice")
@@ -95,7 +95,7 @@ func TestLANMigration(t *testing.T) {
 		t.Fatalf("%x %v %v", key, list, err)
 	}
 	// The revoked device stays revoked, and its revocation makes no key.
-	if err := s.RevokeDevice(ctx, "0123456789abcdef"); err != nil {
+	if _, err := s.RevokeDevice(ctx, "0123456789abcdef"); err != nil {
 		t.Fatal(err)
 	}
 	if key := s.lanKey(t, "alice"); key != nil {
@@ -241,7 +241,9 @@ func TestSetDeviceLAN(t *testing.T) {
 		t.Fatalf("an unknown device: %v %v", changed, err)
 	}
 	now = now.Add(time.Hour)
-	must(t, s.RevokeDevice(ctx, devs[1].ID))
+	if _, err := s.RevokeDevice(ctx, devs[1].ID); err != nil {
+		t.Fatal(err)
+	}
 	if changed, err := s.SetDeviceLAN(ctx, devs[1].ID, true, LANShowEvery); err != nil || changed {
 		t.Fatalf("a revoked device: %v %v", changed, err)
 	}
@@ -279,7 +281,9 @@ func TestLANDevicesAndRevocation(t *testing.T) {
 	}
 	bobKey := s.lanKey(t, "bob")
 
-	must(t, s.RevokeDevice(ctx, devs[1].ID))
+	if _, err := s.RevokeDevice(ctx, devs[1].ID); err != nil {
+		t.Fatal(err)
+	}
 	key2, list, err := s.LANDevices(ctx, u.ID)
 	if err != nil || len(key2) != LANKeySize || bytes.Equal(key, key2) {
 		t.Fatalf("revocation: the key %x, then %x (%v)", key, key2, err)
@@ -296,10 +300,10 @@ func TestLANDevicesAndRevocation(t *testing.T) {
 	}
 	// A revocation of one already revoked (a retry: no error), or of none:
 	// nothing changes.
-	if err := s.RevokeDevice(ctx, devs[1].ID); err != nil {
+	if _, err := s.RevokeDevice(ctx, devs[1].ID); err != nil {
 		t.Fatalf("again: %v", err)
 	}
-	if err := s.RevokeDevice(ctx, "0000000000000000"); !errors.Is(err, ErrNotFound) {
+	if _, err := s.RevokeDevice(ctx, "0000000000000000"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("none: %v", err)
 	}
 	if !bytes.Equal(key2, s.lanKey(t, "alice")) {

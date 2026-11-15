@@ -1194,8 +1194,11 @@ func TestNetnsEgress(t *testing.T) {
 		}
 		bittorrent(t)
 		datagram(9110, v4(16881), tracker, false)
-		if blocks, err := fw.EgressBlocks(); err != nil || len(blocks) != len(EgressRules) {
+		// every rule of the parts in force: local is not one of them here
+		if blocks, err := fw.EgressBlocks(); err != nil || len(blocks) != len(EgressRules)-1 {
 			t.Errorf("rules after the restore: %+v %v", blocks, err)
+		} else if _, local := blocks["local"]; local {
+			t.Errorf("a counter of local with local off: %+v", blocks)
 		}
 	})
 

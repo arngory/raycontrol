@@ -132,3 +132,26 @@ func TestStartUpdate(t *testing.T) {
 		t.Fatalf("audit %v", actions)
 	}
 }
+
+// latest_patch: the latest release when it is a patch release of the
+// node's, else what the checks found past a newer minor version, and only
+// a patch release newer than the node's.
+func TestLatestPatch(t *testing.T) {
+	for _, c := range []struct{ latest, patch, want string }{
+		{"v0.26.3", "", "v0.26.3"},
+		{"v0.26.3", "v0.26.2", "v0.26.3"},
+		{"v0.27.0", "v0.26.2", "v0.26.2"},
+		{"v0.27.0", "", ""},
+		{"v0.27.0", "v0.26.0", ""},
+		{"v0.27.0", "v0.25.9", ""},
+		{"", "", ""},
+	} {
+		u := &NodeUpdate{Latest: func() string { return c.latest }, LatestPatch: func() string { return c.patch }}
+		if got := u.latestPatch("v0.26.0"); got != c.want {
+			t.Errorf("latest %q patch %q: %q, want %q", c.latest, c.patch, got, c.want)
+		}
+	}
+	if got := (*NodeUpdate)(nil).latestPatch("v0.26.0"); got != "" {
+		t.Errorf("no checks: %q", got)
+	}
+}

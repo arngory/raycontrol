@@ -33,6 +33,12 @@ service NodeService {
   // switch is pending (P-10). They hold the user's credentials, so the
   // call is audited. They work only from an address SPA has opened.
   rpc ExportUser(ExportUserRequest) returns (ExportUserResponse);
+  // RenewUser gives a user new credentials at once, as a revocation of one
+  // of the user's devices does (docs/08-decisions.md, R4-36): each a fresh
+  // secret with no next and no previous one, and a new LAN password when
+  // the user has the LAN. The user's devices are cut until they fetch
+  // their subscription. Since v0.27.0; an older node answers unimplemented.
+  rpc RenewUser(RenewUserRequest) returns (RenewUserResponse);
 
   rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
   rpc CreateService(CreateServiceRequest) returns (CreateServiceResponse);
@@ -68,7 +74,10 @@ service NodeService {
   // CreateDevice returns the device bundle with the device key. The key is
   // not stored anywhere it can be read back through the API.
   rpc CreateDevice(CreateDeviceRequest) returns (CreateDeviceResponse);
-  // RevokeDevice revokes a device, or withdraws an unused invite.
+  // RevokeDevice revokes a device, or withdraws an unused invite. Revoking
+  // a device changes every credential of its user at once but DoH's, whose
+  // token is each device's (docs/spec/api-v1.md §5a): the user's other
+  // devices reconnect after their next subscription fetch.
   rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
   // CreateInvite returns a one-time invite ("rcinv1:..."): the client
   // registers the device itself through the remote API (R3-3).
@@ -174,6 +183,34 @@ service NodeService {
   // which rayctl apply checks before it builds anything. No keys, no file
   // contents. Root on the node only.
   rpc GetDeployInputs(GetDeployInputsRequest) returns (GetDeployInputsResponse);
+  // GetPorts lists every port the node uses or admits, for a provider's
+  // firewall or a NAT (rayctl ports): no keys, the current port of each
+  // rotating range.
+  rpc GetPorts(GetPortsRequest) returns (GetPortsResponse);
+}
+
+message GetPortsRequest {}
+message GetPortsResponse {
+  repeated NodePort ports = 1;
+}
+// NodePort is a port, or a range of them, of the node.
+message NodePort {
+  // "spa", "sub", "api", "acme", or the service's name; a service's UDP
+  // rotation range is "<name> rotation".
+  string name = 1;
+  repeated string protos = 2; // "tcp", "udp"
+  uint32 from = 3;
+  uint32 to = 4; // from for one port
+  // "fixed" (443, 53, 80), "random" (drawn by the node), "chosen"
+  // (rayctl install -ports) or "sshd" (where sshd listened at install).
+  string source = 5;
+  // Who reaches it: "everyone" (SPA itself, the DNS tunnels, an open
+  // REALITY), "spa" (an address after its knock), "admin" (the admin
+  // addresses, and after a knock a device allowed SSH), "acme" (TCP 80
+  // while a certificate is issued without a DNS provider).
+  string access = 6;
+  uint32 current = 7;      // a rotating range: the port of this slot (the slots on either side are open too)
+  int64 current_until = 8; // unix seconds: when current changes
 }
 
 message SetDNSProviderRequest {
@@ -424,6 +461,10 @@ message GetStatusResponse {
 message Egress {
   bool bittorrent = 1; // the handshake, uTP SYN, UDP tracker connect, DHT queries
   bool smtp = 2;       // TCP to port 25
+  // The node's own and local networks (R4-38): blocked unless the
+  // administrator allowed them. False from an older rayd, which does not
+  // block them in the perimeter.
+  bool local = 3;
 }
 
 message GetEgressRequest {}
@@ -438,6 +479,7 @@ message SetEgressRequest {
   // Only the parts given change.
   optional bool bittorrent = 1;
   optional bool smtp = 2;
+  optional bool local = 3;
 }
 message SetEgressResponse {
   Egress egress = 1; // as kept
@@ -606,6 +648,15 @@ message DeleteUserRequest { string name = 1; }
 message DeleteUserResponse {}
 
 message ExportUserRequest { string name = 1; }
+
+message RenewUserRequest { string name = 1; }
+message RenewUserResponse {
+  string name = 1;
+  // credentials: how many of the user's credentials are new: one for
+  // each service the user has or had a credential on, the inner one
+  // behind the DNS tunnels and Yggdrasil included.
+  uint32 credentials = 2;
+}
 message ExportUserResponse {
   repeated Profile profiles = 1;
 }
@@ -646,10 +697,20 @@ message CreateServiceResponse { Service service = 1; }
 message SetServiceEnabledRequest {
   string name = 1;
   bool enabled = 2;
+  // Disabling the last enabled service of kind ssh is failed_precondition
+  // (raycontrol after v0.26.0): its ports are what the perimeter admits
+  // SSH on from the admin addresses, and without one SSH is closed to all
+  // at the next snapshot. force disables it anyway.
+  bool force = 3;
 }
 message SetServiceEnabledResponse {}
 
-message DeleteServiceRequest { string name = 1; }
+message DeleteServiceRequest {
+  string name = 1;
+  // As SetServiceEnabledRequest.force: deleting the last enabled service
+  // of kind ssh is failed_precondition without it.
+  bool force = 2;
+}
 message DeleteServiceResponse {}
 
 message SetServiceOptionRequest {
@@ -759,7 +820,20 @@ message CreateDeviceResponse {
 }
 
 message RevokeDeviceRequest { string id = 1; }
-message RevokeDeviceResponse {}
+message RevokeDeviceResponse {
+  // invite: the ID was an unused invite, now withdrawn; nothing else
+  // changed. A node before v0.27.0 answers with none of these fields.
+  bool invite = 1;
+  // already: the device was revoked before; nothing changed this time.
+  bool already = 2;
+  // user and device: whose device it is, and its name.
+  string user = 3;
+  string device = 4;
+  // credentials: how many of the user's credentials are new, as
+  // RenewUserResponse counts them, not services, but without DoH's,
+  // which a revocation keeps (v0.27.0); 0 for a user with none yet.
+  uint32 credentials = 5;
+}
 
 message CreateInviteRequest {
   string user = 1;
@@ -892,6 +966,11 @@ message GetUpdateStatusResponse {
   // Releases whose update rolled back or broke on the way: the auto update
   // leaves them alone.
   repeated string held = 8;
+  // The newest patch release of the installed minor version newer than
+  // it, as rayd's checks saw it (the auto update's target): latest when
+  // that is one; after a newer minor version, the one rayd found by asking
+  // for the next patch numbers. "" when none, or not checked.
+  string latest_patch = 9;
 }
 // UpdateStatus is the last update by request, or the one under way.
 message UpdateStatus {

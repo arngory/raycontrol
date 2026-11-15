@@ -13,6 +13,40 @@ service PerimeterService {
   // ReportGuard tells rayd the state of the conntrack guard
   // (spec/conn-limit-v1.md §6.3): at each switch and once a minute.
   rpc ReportGuard(ReportGuardRequest) returns (ReportGuardResponse);
+  // ReportGate tells rayd where rayspa's own table stands
+  // (docs/08-decisions.md, R4-40): at each change and every 30 s. rayd
+  // cannot read the kernel's table; a rayspa that follows the feed but
+  // cannot put its table in leaves the host open. An older rayspa sends
+  // none (rayd: unknown).
+  rpc ReportGate(ReportGateRequest) returns (ReportGateResponse);
+}
+
+message ReportGateRequest {
+  Gate gate = 1;
+}
+
+message ReportGateResponse {}
+
+// Gate is rayspa's table as rayspa knows it. Never an address, nor the
+// kernel's error text (which may carry one).
+message Gate {
+  // "up": the table in, with all of the last snapshot; "behind": the
+  // table in, the last snapshot only in part; "not_in": a snapshot, but
+  // its table is not in (refused, or removed and not back): the host is
+  // open, or closed by a table an earlier rayspa left (left_over);
+  // "no_snapshot": none yet, so no table of this rayspa's.
+  string state = 1;
+  // Not up, and a table an earlier rayspa left (one with its input
+  // chain) is in force.
+  bool left_over = 2;
+  // The snapshot in force came from rayd's feed, not from the saved one.
+  bool from_rayd = 3;
+  string version = 4; // rayspa's
+  uint32 pid = 5;
+  // The feed's newest snapshot did not apply (rayspa refused it: its
+  // journal says why), so an earlier one is in force: rayspa is behind
+  // rayd's latest, up or not. Cleared when one of the feed's applies.
+  bool refused = 6;
 }
 
 message ReportGuardRequest {
@@ -114,6 +148,35 @@ message Egress {
   // guard of the node's own addresses does not take them: rayd reaches the
   // node itself.
   repeated uint32 uids = 3;
+  // The node's own and local networks (docs/08-decisions.md, R4-38):
+  // loopback, private, link-local, CGNAT, multicast, the metadata address.
+  // Absent (an older rayd): rayspa does not hold them back, as before.
+  Local local = 4;
+}
+
+// Local is the egress policy's part for the node's own and local networks.
+message Local {
+  // The data plane may reach them (rayctl egress allow local); false, the
+  // default: refused, but for systemd-resolved's stub on port 53 and the
+  // ports below.
+  bool allow = 1;
+  // Ports on 127.0.0.1 the data plane reaches all the same: the channel
+  // probe's endpoint (the subscription's port, spec/probe-v1.md).
+  repeated Port loopback = 2;
+  // Exact destinations one process of the data plane reaches all the
+  // same: a REALITY target the operator set on a local address (the
+  // host's own web server on 127.0.0.1:8443, a server on the private
+  // network), from that REALITY service's process only. Absent (an older
+  // rayd): none.
+  repeated LocalExempt exempt = 3;
+}
+
+// LocalExempt is one destination the local part lets through, by its
+// exact address, protocol and port, for one UID.
+message LocalExempt {
+  string addr = 1; // one IP address
+  Port port = 2;
+  uint32 uid = 3;  // the service's process (9110-9179)
 }
 
 message AcmeWindow {

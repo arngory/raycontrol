@@ -89,9 +89,16 @@ type Server struct {
 	// rayd started (rayctl metrics).
 	pinWrong, pinWithdrawn atomic.Uint64
 
-	mu   sync.Mutex
-	rev  uint64
-	wake chan struct{} // closed on the next change
+	// sshMu holds lastSSH's check and the write it allows as one: two
+	// calls that each take out one of the last two ssh services would
+	// both pass the check otherwise. Every change of the services goes
+	// through this server.
+	sshMu sync.Mutex
+
+	mu    sync.Mutex
+	rev   uint64
+	wake  chan struct{} // closed on the next change
+	after []func()      // AfterChange
 	// ACME window (certs.Issuer): rayspa points TCP 80 to acmePort.
 	acmePort  uint16
 	acmeUntil time.Time
@@ -123,10 +130,25 @@ func (s *Server) notify() {
 		close(s.wake)
 		s.wake = nil
 	}
+	after := s.after
 	s.mu.Unlock()
+	for _, f := range after {
+		f()
+	}
 	if s.OnChange != nil {
 		s.OnChange()
 	}
+}
+
+// AfterChange adds f to what runs at every change, in the call that made
+// it, before that call returns: rayd's DoH Forget, so that once
+// RevokeDevice has answered, the revoked device's token is refused from
+// the next query (R4-37). What watches Changes (the data plane's apply)
+// runs in the background as before. f must not block.
+func (s *Server) AfterChange(f func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.after = append(s.after, f)
 }
 
 // Changes returns a channel closed at the next change.
@@ -211,16 +233,21 @@ func toConnect(err error) error {
 	return connect.NewError(connect.CodeInternal, err)
 }
 
-// done audits a mutating call and notifies the perimeter on success.
+// done audits a mutating call and notifies the perimeter when the store
+// call succeeded, whatever the audit write did: the change is made, and
+// what follows it (DoH's Forget, the data plane's apply) must run, or a
+// revoked device's token works until the cache expires. The caller still
+// gets the audit's error.
 func (s *Server) done(ctx context.Context, action, target string, err error) error {
 	result := "ok"
 	if err != nil {
 		result = "error: " + err.Error()
 	}
+	changed := err == nil
 	if aerr := s.Store.Audit(ctx, actorFrom(ctx), action, target, result); aerr != nil && err == nil {
 		err = aerr
 	}
-	if err == nil {
+	if changed {
 		s.notify()
 	}
 	return toConnect(err)
@@ -508,6 +535,20 @@ func (s *Server) ExportUser(ctx context.Context, req *connect.Request[nodev1.Exp
 	return connect.NewResponse(resp), nil
 }
 
+// RenewUser gives a user new credentials at once (R4-36). The audit says
+// how many, never what they are.
+func (s *Server) RenewUser(ctx context.Context, req *connect.Request[nodev1.RenewUserRequest]) (*connect.Response[nodev1.RenewUserResponse], error) {
+	n, err := s.Store.RenewUser(ctx, req.Msg.Name)
+	target := req.Msg.Name
+	if err == nil {
+		target += fmt.Sprintf(": %d credentials new", n)
+	}
+	if err := s.done(ctx, "user.renew", target, err); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&nodev1.RenewUserResponse{Name: req.Msg.Name, Credentials: uint32(n)}), nil //nolint:gosec // G115: one a service
+}
+
 var errUserInactive = errors.New("user is disabled, expired or over the traffic limit")
 
 func (s *Server) export(ctx context.Context, name string) ([]sub.Profile, error) {
@@ -566,29 +607,59 @@ func (s *Server) SetServiceEnabled(ctx context.Context, req *connect.Request[nod
 	if req.Msg.Enabled {
 		err = provision.CheckRequirements(ctx, s.Store, req.Msg.Name)
 	} else {
+		s.sshMu.Lock()
+		defer s.sshMu.Unlock()
 		err = provision.CheckNoDependents(ctx, s.Store, req.Msg.Name)
+		if err == nil {
+			err = lastSSH(ctx, s.Store, req.Msg.Name, "disable", req.Msg.Force)
+		}
 	}
 	if err == nil {
 		err = s.Store.SetServiceEnabled(ctx, req.Msg.Name, req.Msg.Enabled)
 	}
-	if err := s.done(ctx, "service.enable="+strconv.FormatBool(req.Msg.Enabled), req.Msg.Name, err); err != nil {
+	action := "service.enable=" + strconv.FormatBool(req.Msg.Enabled)
+	if req.Msg.Force {
+		action += " force"
+	}
+	if err := s.done(ctx, action, req.Msg.Name, err); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.SetServiceEnabledResponse{}), nil
 }
 
 func (s *Server) DeleteService(ctx context.Context, req *connect.Request[nodev1.DeleteServiceRequest]) (*connect.Response[nodev1.DeleteServiceResponse], error) {
+	s.sshMu.Lock()
+	defer s.sshMu.Unlock()
 	err := provision.CheckNoDependents(ctx, s.Store, req.Msg.Name)
+	if err == nil {
+		err = lastSSH(ctx, s.Store, req.Msg.Name, "delete", req.Msg.Force)
+	}
 	if err == nil {
 		err = s.Store.DeleteService(ctx, req.Msg.Name)
 	}
-	if err := s.done(ctx, "service.delete", req.Msg.Name, err); err != nil {
+	action := "service.delete"
+	if req.Msg.Force {
+		action += " force"
+	}
+	if err := s.done(ctx, action, req.Msg.Name, err); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.DeleteServiceResponse{}), nil
 }
 
 func (s *Server) SetServiceOption(ctx context.Context, req *connect.Request[nodev1.SetServiceOptionRequest]) (*connect.Response[nodev1.SetServiceOptionResponse], error) {
+	if req.Msg.Key == "target" && s.CheckRealityTarget != nil {
+		// A REALITY service's new target, checked from the node as a new
+		// service's is, with its server name (which stays). One that
+		// steals from the node's site takes none (provision says why).
+		if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "reality" {
+			if old, sni, err := provision.RealityTargetFromJSON(svc.Settings); err == nil && !strings.HasPrefix(old, "site:") {
+				if err := s.CheckRealityTarget(ctx, req.Msg.Value, sni); err != nil {
+					return nil, connect.NewError(connect.CodeInvalidArgument, err)
+				}
+			}
+		}
+	}
 	svc, err := provision.SetServiceOption(ctx, s.Store, req.Msg.Name, req.Msg.Key, req.Msg.Value)
 	if err := s.done(ctx, "service.set "+req.Msg.Key+"="+req.Msg.Value, req.Msg.Name, err); err != nil {
 		return nil, err
@@ -808,17 +879,30 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 }
 
 func (s *Server) RevokeDevice(ctx context.Context, req *connect.Request[nodev1.RevokeDeviceRequest]) (*connect.Response[nodev1.RevokeDeviceResponse], error) {
-	action := "device.revoke"
-	err := s.Store.RevokeDevice(ctx, req.Msg.Id)
-	if errors.Is(err, store.ErrNotFound) {
+	action, target := "device.revoke", req.Msg.Id
+	resp := &nodev1.RevokeDeviceResponse{}
+	r, err := s.Store.RevokeDevice(ctx, req.Msg.Id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
 		if ierr := s.Store.DeleteInvite(ctx, req.Msg.Id); ierr == nil || !errors.Is(ierr, store.ErrNotFound) {
 			action, err = "invite.delete", ierr
+			resp.Invite = true
+		}
+	case err == nil:
+		// The audit says whose device and that the user's credentials
+		// changed (R4-36), never what they are.
+		resp.User, resp.Device, resp.Already = r.User, r.Device, r.Already
+		resp.Credentials = uint32(r.Credentials) //nolint:gosec // G115: one a service
+		if r.Already {
+			target += " " + r.User + "/" + r.Device + ": revoked already, nothing changed"
+		} else {
+			target += fmt.Sprintf(" %s/%s: %d credentials of %s new", r.User, r.Device, r.Credentials, r.User)
 		}
 	}
-	if err := s.done(ctx, action, req.Msg.Id, err); err != nil {
+	if err := s.done(ctx, action, target, err); err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(&nodev1.RevokeDeviceResponse{}), nil
+	return connect.NewResponse(resp), nil
 }
 
 // DefaultInviteTTL is how long an invite works when the request says nothing.
@@ -969,7 +1053,8 @@ func (s *Server) SetAdminAccess(ctx context.Context, req *connect.Request[nodev1
 // carrier) and the ports of enabled services. Rotated UDP slot ports need no
 // entry: they are redirected to the service port before any input chain.
 // outside is the same list before the node's redirects, for a provider's
-// firewall: TCP 80 for the ACME window, and only while HTTP-01 is in use.
+// firewall: TCP 80 for the ACME window, and only while HTTP-01 is in use,
+// and the UDP rotation ranges.
 func (s *Server) hostPorts(ctx context.Context) (host, outside []deploy.PortRange, err error) {
 	last := uint16(int(s.Params.PortBase) + int(s.Params.PortRange) - 1)
 	ports := []deploy.PortRange{
@@ -993,6 +1078,13 @@ func (s *Server) hostPorts(ctx context.Context) (host, outside []deploy.PortRang
 		}
 	}
 	outside = slices.Clone(ports)
+	// The UDP rotation ranges reach the host as they are: a provider's
+	// firewall sees them before the redirect.
+	for _, svc := range services {
+		if rot, ok := provision.ServiceRotation(svc); ok && svc.Enabled {
+			outside = append(outside, deploy.PortRange{Proto: "udp", From: rot.Base, To: uint16(int(rot.Base) + int(rot.Range) - 1)})
+		}
+	}
 	if slices.ContainsFunc(services, func(svc store.Service) bool { return svc.Enabled && svc.Kind == "site" }) {
 		// The ACME window redirects TCP 80 here; host firewalls must pass it.
 		port, err := provision.ACMEPort(ctx, s.Store)

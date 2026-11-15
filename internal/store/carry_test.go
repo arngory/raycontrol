@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +51,9 @@ func TestCarryRevocations(t *testing.T) {
 	if _, err := s.db.ExecContext(ctx, `UPDATE users SET expires_at = ? WHERE name = 'alice'`, sooner.Unix()); err != nil {
 		t.Fatal(err)
 	}
-	must(t, s.RevokeDevice(ctx, d1.ID))
+	if _, err := s.RevokeDevice(ctx, d1.ID); err != nil {
+		t.Fatal(err)
+	}
 	must(t, s.SetUserEnabled(ctx, "bob", false))
 	must(t, s.DeleteUser(ctx, "carol")) // and with her d3
 	must(t, s.DeleteInvite(ctx, inv.ID))
@@ -318,7 +321,9 @@ func TestCarryLAN(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	must(t, s.RevokeDevice(ctx, alices[0].ID))
+	if _, err := s.RevokeDevice(ctx, alices[0].ID); err != nil {
+		t.Fatal(err)
+	}
 	aliceKey := s.lanKey(t, "alice")
 	if _, err := s.SetUserLAN(ctx, "bob", false); err != nil {
 		t.Fatal(err)
@@ -371,5 +376,168 @@ func TestCarryLAN(t *testing.T) {
 	db.Close()
 	if err := CarryRevocations(ctx, old, current); err != nil {
 		t.Fatalf("a copy without LAN: %v", err)
+	}
+}
+
+// A rollback after the update to schema 14 (R4-36): the copy is at 13,
+// and the step renewed in current the users with a device revoked before
+// it. No credential goes back: every one the copy and current both have
+// is current's in the copy, so no old secret of a renewed user is left in
+// any slot (those the revoked devices know), a renewal since by rayctl
+// user renew stays, and an ordinary rotation since stays too. A user or a
+// credential made since does not come into the copy, a user deleted since
+// is disabled there, and the copy is still a database of schema 13.
+func TestCarryRevocationsAfterRenewal(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	saved, current := filepath.Join(dir, "saved.db"), filepath.Join(dir, "current.db")
+	schemaAt(t, saved, 13, matrix13()...)
+	copyFile(t, saved, current)
+	s, err := Open(ctx, current) // the step renews alice, carol, dave, frank
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RenewUser(ctx, "bob"); err != nil { // for a leak, after the update
+		t.Fatal(err)
+	}
+	// erin's ordinary rotation since: e1n current, e1 in its grace.
+	if _, err := s.db.Exec(`UPDATE credentials SET secret = 'e1n', next_secret = NULL, next_from = NULL,
+		prev_secret = 'e1', prev_until = 9999999999, rotated_at = 99 WHERE user_id = 5`); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := s.CreateService(ctx, Service{Kind: "naive", Name: "naive2", Enabled: true, Settings: "{}"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, s.SetUserServices(ctx, "bob", []int64{1, 2, svc.ID}))
+	zed, err := s.CreateUser(ctx, User{Name: "zed", Enabled: true, Services: []int64{1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Credentials(ctx, 1, []int64{2, zed.ID}, NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Credentials(ctx, svc.ID, []int64{2}, NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	must(t, s.DeleteUser(ctx, "dave"))
+	now := credsByRow(t, s.db)
+	nowLAN := lanKeys(t, s.db)
+	s.Close()
+
+	must(t, CarryRevocations(ctx, saved, current))
+	db, err := sql.Open("sqlite", "file:"+saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	got := credsByRow(t, db)
+	if len(got) != 8 {
+		t.Errorf("credentials in the copy: %v", got)
+	}
+	for k, v := range got {
+		if v != now[k] {
+			t.Errorf("credential %s in the copy %q, current %q", k, v, now[k])
+		}
+		if strings.HasPrefix(k, "5/") {
+			continue // erin's rotation: its previous, e1, is accepted now too
+		}
+		for _, old := range matrixSecrets {
+			if slices.Contains(strings.Fields(v), old) {
+				t.Errorf("credential %s holds the copy's %s: %q", k, old, v)
+			}
+		}
+	}
+	keys := lanKeys(t, db)
+	for _, id := range []int{1, 2, 3, 5, 6} {
+		if keys[id] != nowLAN[id] {
+			t.Errorf("user %d's LAN key %s, current %s", id, keys[id], nowLAN[id])
+		}
+	}
+	if u := rows(t, db, `SELECT name, enabled FROM users ORDER BY id`); u != "alice 1\nbob 1\ncarol 1\ndave 0\nerin 0\nfrank 0\n" {
+		t.Errorf("users in the copy:\n%s", u)
+	}
+	// Still schema 13, as the older rayd that opens it made it.
+	fresh := filepath.Join(dir, "fresh13.db")
+	schemaAt(t, fresh, 13)
+	fdb, err := sql.Open("sqlite", "file:"+fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fdb.Close()
+	const schema = `SELECT type, name, coalesce(sql, '') FROM sqlite_master ORDER BY type, name`
+	if a, b := rows(t, db, schema), rows(t, fdb, schema); a != b {
+		t.Errorf("the copy's schema:\n%s\nschema 13:\n%s", a, b)
+	}
+	if v := rows(t, db, `SELECT max(version) FROM schema_migrations`); v != "13\n" {
+		t.Errorf("the copy's version %q", v)
+	}
+	if ic := rows(t, db, `PRAGMA integrity_check`); ic != "ok\n" {
+		t.Errorf("integrity %q", ic)
+	}
+}
+
+// A rollback to a copy at schema 14 or later, a user deleted since (bob,
+// after a device of his was made and revoked: gone with him) and a service
+// deleted since (naive): both come back disabled, and their credentials in
+// the copy are new, as a restore makes them, so bob enabled again lets no
+// device in with what the copy had. The others' stay current's. Each
+// renewal has its audit line, without a secret.
+func TestCarryRevocationsDeletedFresh(t *testing.T) {
+	ctx := context.Background()
+	f := newRestoreFix(t, func(s *Store) {
+		if _, err := s.db.Exec(`UPDATE users SET lan = 1, lan_key = randomblob(?) WHERE name = 'bob'`, LANKeySize); err != nil {
+			t.Fatal(err)
+		}
+	})
+	before := secrets(t, f.backup)
+	b := f.open(t, f.backup)
+	bobKey := b.lanKey(t, "bob")
+	b.Close()
+	s := f.open(t, f.current)
+	watch, _, _ := s.CreateDevice(ctx, "bob", "watch", "user")
+	if _, err := s.RevokeDevice(ctx, watch.ID); err != nil {
+		t.Fatal(err)
+	}
+	must(t, s.DeleteUser(ctx, "bob"))
+	must(t, s.DeleteService(ctx, "naive"))
+	s.Close()
+	now := secrets(t, f.current)
+	must(t, CarryRevocations(ctx, f.backup, f.current))
+	got := secrets(t, f.backup)
+	for svc, sec := range got["bob"] {
+		if sec == before["bob"][svc] || !isUUID(sec) {
+			t.Errorf("bob's credential on %d is the copy's: %s", svc, sec)
+		}
+	}
+	for _, n := range []string{"alice", "carol", "dave", "erin"} {
+		for svc, sec := range got[n] {
+			switch {
+			case svc == f.naive && (sec == before[n][svc] || !isUUID(sec)):
+				t.Errorf("%s's credential on the deleted service is the copy's", n)
+			case svc != f.naive && sec != now[n][svc]:
+				t.Errorf("%s's credential on %d is %s, current's %s", n, svc, sec, now[n][svc])
+			}
+		}
+	}
+	r := f.open(t, f.backup)
+	defer r.Close()
+	if u, err := r.UserByName(ctx, "bob"); err != nil || u.Enabled {
+		t.Errorf("bob: %+v %v", u, err)
+	}
+	if k := r.lanKey(t, "bob"); bytes.Equal(k, bobKey) {
+		t.Error("bob's LAN key is the copy's")
+	}
+	if svc, _ := r.ServiceByName(ctx, "naive"); svc.Enabled {
+		t.Error("the deleted service is enabled")
+	}
+	a := auditOf(t, f.backup)
+	for _, want := range [][2]string{
+		{"user.renew:rollback", "bob: 3 credentials new, a device of the user revoked on the node since the copy; deleted on the node since the copy"},
+		{"user.renew:rollback", "alice: 1 credentials new, a service of theirs deleted on the node since the copy"},
+	} {
+		if !hasAudit(a, want[0], want[1]) {
+			t.Errorf("no audit line %s %q in %+v", want[0], want[1], a)
+		}
 	}
 }

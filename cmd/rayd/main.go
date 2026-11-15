@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -53,6 +54,7 @@ import (
 	"github.com/arngory/raycontrol/internal/relayprobe"
 	"github.com/arngory/raycontrol/internal/release"
 	"github.com/arngory/raycontrol/internal/render"
+	"github.com/arngory/raycontrol/internal/roots"
 	"github.com/arngory/raycontrol/internal/site"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
@@ -126,15 +128,43 @@ func cmdInit(args []string) error {
 	domain := fs.String("domain", "", "base domain for service subdomains and DNS tunnel zones")
 	seqClock := fs.Bool("seq-clock", false, "the subscription's seq goes on from the clock at once (rayctl restore: the database is older than "+
 		"what clients have seen, and they drop answers with a lower seq)")
+	ports := fs.String("ports", "", "ports chosen at the node's first install (rayctl install -ports): spa=A-B,sub=N,api=N,rotation=A-B|off")
+	checkPorts := fs.Bool("check-ports", false, "only check -ports against the node in -db, changing nothing (read-only, no migration)")
+	sshPorts := fs.String("ssh-ports", "", "the ports sshd listens on, which -ports keeps clear of: N[,N...] or none (rayctl install passes "+
+		"them); empty: sshd -T says, and -ports is refused when it cannot")
 	fs.Parse(args)
 
+	var taken []uint16
+	if *ports != "" {
+		var err error
+		if taken, err = initSSHPorts(*sshPorts); err != nil {
+			return err
+		}
+	}
+	choice, err := provision.ParsePorts(*ports, taken...)
+	if err != nil {
+		return err
+	}
 	ctx := context.Background()
+	if *checkPorts {
+		// Beside the node's rayd, on its live database: read only, and no
+		// migration of a database this rayd would migrate.
+		if _, err := os.Stat(*db); errors.Is(err, os.ErrNotExist) {
+			return nil // a new node: any choice
+		}
+		st, err := store.OpenReadOnly(ctx, *db)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		return provision.CheckPorts(ctx, st, choice)
+	}
 	st, err := store.Open(ctx, *db)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	p, err := provision.Init(ctx, st, provision.Options{Host: *host, Domain: *domain})
+	p, err := provision.Init(ctx, st, provision.Options{Host: *host, Domain: *domain, Ports: choice})
 	if err != nil {
 		return err
 	}
@@ -166,7 +196,10 @@ func cmdServe(args []string) error {
 	xrayBin := fs.String("xray", deploy.DefaultBinaries.Xray, "Xray binary for -supervise")
 	nikoBin := fs.String("niko-server", deploy.DefaultBinaries.NikoServer, "niko-server binary for -supervise")
 	slipBin := fs.String("slipstream-server", deploy.DefaultBinaries.Slipstream, "slipstream-server binary for -supervise")
-	acmeDir := fs.String("acme-directory", certs.LetsEncrypt, "ACME directory for the sites' certificates (empty: none)")
+	acmeDir := fs.String("acme-directory", certs.LetsEncrypt, "ACME directory for the sites' certificates (empty: none); "+
+		"a private CA's root goes in the node's roots (rayctl roots file)")
+	tlsRoots := fs.String("tls-roots", roots.SettingsFile, "settings of the roots the node's own outbound TLS trusts besides "+
+		"its embedded list (rayctl roots; a stand may name a file of its own)")
 	credPeriod := fs.Duration("cred-period", 30*24*time.Hour, "how long a user credential stays current (0: no rotation)")
 	credLead := fs.Duration("cred-lead", 3*24*time.Hour, "the next credential is in the subscription this long before the switch")
 	probeDaily := fs.Int("probe-daily-mib", probe.DefaultDaily>>20, "channel probes: MiB per device and UTC day, both directions")
@@ -208,12 +241,8 @@ func cmdServe(args []string) error {
 	// Interop (the client's CI): a stand that walks through a switch to the
 	// next key and a fresh one in minutes. Only without systemd, where no
 	// node in use runs.
-	if os.Getenv("RAYCONTROL_UNSAFE_SITE_KEY_FORCE_ANY_AGE") != "" {
-		if !*supervise {
-			return errors.New("RAYCONTROL_UNSAFE_SITE_KEY_FORCE_ANY_AGE is for a test stand (-supervise) only")
-		}
-		provision.UnsafeForceSwitchAtAnyAge()
-		log.Warn("UNSAFE: a forced switch of a site's key is taken at any age of the key in use")
+	if err := unsafeStand(*supervise, os.Getenv, log); err != nil {
+		return err
 	}
 
 	st, err := store.Open(ctx, *db)
@@ -231,6 +260,12 @@ func cmdServe(args []string) error {
 
 	// Where the loops below report: rayctl status and the metrics (O-2).
 	hb := &health.Board{}
+	// The roots of the node's own outbound TLS (R4-41): which, and the
+	// connections they refused, in rayctl status.
+	rr := &rootsReporter{hb: hb, log: log}
+	roots.Node.Path, roots.Node.Report = *tlsRoots, rr.report
+	roots.Node.Status() // builds the pool: reported
+	go rr.run(ctx, roots.Node)
 	go pruneAudit(ctx, st, hb, log)
 	paths := render.Paths{Rendered: *rendered, Run: *run, Supervised: *supervise}
 	rotateNow := make(chan struct{}, 1)
@@ -248,9 +283,11 @@ func cmdServe(args []string) error {
 	// only while the administrator has the mirror on (rayctl app-mirror).
 	srv.AppMirror = &appmirror.Mirror{Store: st, Dir: filepath.Join(filepath.Dir(*db), "app"), Conn: probe.Conn, Log: log}
 	// The update by request (spec/node-update-v1.md): the latest release
-	// rayd's checks saw, for GetUpdateStatus.
-	var latestSeen atomic.Value
-	srv.NodeUpdate = &api.NodeUpdate{Latest: func() string { v, _ := latestSeen.Load().(string); return v }}
+	// rayd's checks saw, and the newest patch release of this version, for
+	// GetUpdateStatus.
+	var latestSeen, patchSeen atomic.Value
+	srv.NodeUpdate = &api.NodeUpdate{Latest: func() string { v, _ := latestSeen.Load().(string); return v },
+		LatestPatch: func() string { v, _ := patchSeen.Load().(string); return v }}
 	// Interop (the client's CI): releases from a server of the test's,
 	// signed with its key. Never on a node in use: anything that key signs
 	// would go to its devices.
@@ -277,6 +314,11 @@ func cmdServe(args []string) error {
 		log.Warn("rayspa user not found; only root receives the perimeter feed", "user", *rayspaUser)
 	}
 
+	if !*supervise {
+		// rayspa away: rayctl status's "perimeter" line, and the journal
+		// at error (R4-40). A supervised node has no rayspa.
+		go per.MonitorRayspa(ctx, log)
+	}
 	if *supervise && !*liveApply {
 		return errors.New("-supervise needs -live: the processes read the rendered files")
 	}
@@ -345,7 +387,7 @@ func cmdServe(args []string) error {
 		if release.IsRelease(version) {
 			// GitHub only: a mirror would learn the node's address too,
 			// for a question the operator can ask by hand.
-			f := &release.Fetcher{}
+			f := &release.Fetcher{Log: fetchLog(log)}
 			latest := func(ctx context.Context) (string, error) {
 				v, err := f.Latest(ctx, release.PubKey)
 				if err == nil {
@@ -353,7 +395,12 @@ func cmdServe(args []string) error {
 				}
 				return v, err
 			}
-			go checkUpdates(ctx, latest, version, *updateCheck, hb, log)
+			patch := func(ctx context.Context, latest string) (string, error) {
+				v, err := f.NewestPatch(ctx, release.PubKey, version, latest)
+				patchSeen.Store(v)
+				return v, err
+			}
+			go checkUpdates(ctx, latest, patch, version, *updateCheck, hb, log)
 		} else {
 			log.Info("no update check: this build is no release", "version", version)
 		}
@@ -362,9 +409,12 @@ func cmdServe(args []string) error {
 	// update auto patch); a root unit runs what it asks for, which a node
 	// without systemd does not have.
 	if !*supervise {
-		f := &release.Fetcher{}
+		f := &release.Fetcher{Log: fetchLog(log)}
 		latest := func(ctx context.Context) (string, error) { return f.Latest(ctx, release.PubKey) }
-		a := &autoUpdater{st: st, running: version, latest: latest, seen: &latestSeen, request: nodeupdate.RequestFile,
+		patch := func(ctx context.Context, latest string) (string, error) {
+			return f.NewestPatch(ctx, release.PubKey, version, latest)
+		}
+		a := &autoUpdater{st: st, running: version, latest: latest, patch: patch, seen: &latestSeen, seenPatch: &patchSeen, request: nodeupdate.RequestFile,
 			status: nodeupdate.StatusFile, policy: nodeupdate.PolicyFile, now: nodeupdate.LocalNow, tick: 10 * time.Minute, hb: hb, log: log}
 		go a.run(ctx)
 	}
@@ -385,7 +435,7 @@ func cmdServe(args []string) error {
 	defer func() { stop(); <-trafficDone }()
 	go checkResolver(ctx, hb, log)
 	go followDebug(ctx, st, level, *debug, srv.Changes, srv.Notify, log)
-	go serveDoH(ctx, st, paths, srv.Changes, log)
+	go serveDoH(ctx, st, paths, srv.Changes, srv.AfterChange, log)
 	// Client summaries (R4-21): reports in, from devices and through relays
 	// (relay-v1 §9.3), hints out; only while the administrator has them on
 	// (rayctl summary on). One collector: a device's network counts once a
@@ -460,7 +510,7 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 	m := &certs.Manager{Store: st, Issue: is.Issue, Keys: keys, Notify: srv.Notify, Log: log,
 		// No pins from a node that may still roll its update back, and no
 		// certificate the site process would refuse to load.
-		NextKeyFrom: time.Now().Add(settleAfterStart),
+		NextKeyFrom: time.Now().Add(pinSettle),
 		Check:       func(chainPEM, keyPEM []byte) error { _, err := siteCertificate(chainPEM, keyPEM); return err },
 		Report:      func(site string, err error) { hb.Done("acme "+site, err) },
 		Wildcard: func(ctx context.Context) string {
@@ -498,6 +548,42 @@ type dohListener struct {
 	cert [32]byte
 	// certs is what its handshakes answer with, TCP and QUIC.
 	certs *certfile.Holder
+	// h answers the queries; it forgets its tokens at every change.
+	h *doh.Handler
+	// mode is the site's answer that answer gives strangers (dohAnswer).
+	mode   string
+	answer *swapHandler
+}
+
+// swapHandler serves with the handler it was last given.
+type swapHandler struct{ h atomic.Pointer[http.Handler] }
+
+func (s *swapHandler) set(h http.Handler) { s.h.Store(&h) }
+
+func (s *swapHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	(*s.h.Load()).ServeHTTP(w, r)
+}
+
+// dohAnswer is what DoH answers whoever has no token, from its site's
+// settings: the site's answer, as naive has it (internal/deploy), but an
+// empty 404 for a site of pages, whose files are the site's own. Without
+// it a site that answered 403 or nothing had a DoH name beside it that
+// answered 404: told from the site, and from naive, without a token.
+func dohAnswer(siteSettings string) (string, http.Handler) {
+	var st struct {
+		Answer string `json:"answer"`
+	}
+	_ = json.Unmarshal([]byte(siteSettings), &st)
+	mode := st.Answer
+	if mode == "" || mode == site.AnswerPages {
+		mode = site.Answer404
+	}
+	h, err := site.Responder(mode, "")
+	if err != nil {
+		mode = site.Answer404
+		h, _ = site.Responder(mode, "")
+	}
+	return mode, h
 }
 
 // serveDoH keeps rayd's TLS listener on the socket of every enabled DoH
@@ -506,12 +592,22 @@ type dohListener struct {
 // renewal, the site's next key) goes to the listener as it runs: new
 // handshakes get it, the connections that are open go on
 // (spec/cert-pin-v1.md §6). One that does not parse leaves the one in use.
-func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func() <-chan struct{}, log *slog.Logger) {
+//
+// A change may have taken tokens away (a revoked device's, R4-37): each
+// handler forgets its tokens in the call that made the change (afterChange,
+// api.Server.AfterChange), so that when the API has answered no query with
+// a token is answered from those of before (doh.Handler.Forget). The
+// listeners follow the changes in the background, as the data plane does.
+func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func() <-chan struct{},
+	afterChange func(func()), log *slog.Logger) {
+	forgets := &dohForgets{}
+	afterChange(forgets.forget)
 	running := map[string]*dohListener{}
 	stop := func(name string) {
 		if l := running[name]; l != nil {
 			_ = l.srv.Close()
 			l.h3()
+			forgets.remove(l.h)
 			delete(running, name)
 		}
 	}
@@ -541,7 +637,14 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 			}
 			want[svc.Name] = true
 			sum := sha256.Sum256(append(slices.Clone(secrets[provision.SecretTLSChain]), secrets[provision.SecretTLSKey]...))
+			mode, answer := dohAnswer(site.Settings)
 			l := running[svc.Name]
+			if l != nil && l.mode != mode {
+				// The connections that are open take it at their next request.
+				l.answer.set(answer)
+				l.mode = mode
+				log.Info("doh answer changed", "service", svc.Name, "answer", mode)
+			}
 			if l != nil && l.cert == sum {
 				continue
 			}
@@ -566,7 +669,10 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 				continue
 			}
 			id := svc.ID
-			h := &doh.Handler{Tokens: func(ctx context.Context) (map[string]bool, error) { return dohTokens(ctx, st, id) }}
+			sw := &swapHandler{}
+			sw.set(answer)
+			h := dohHandler(st, id, sw, log.With("service", svc.Name))
+			forgets.add(h) // before it answers a query
 			srv := dohHTTPServer(h, certs.GetCertificate, log)
 			go func() { _ = srv.ServeTLS(ln, "", "") }()
 			// DoH3: the same handler over QUIC, datagrams from the front (R3-5).
@@ -593,7 +699,7 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 					}
 				}()
 			}
-			running[svc.Name] = &dohListener{srv: srv, h3: h3stop, cert: sum, certs: certs}
+			running[svc.Name] = &dohListener{srv: srv, h3: h3stop, cert: sum, certs: certs, h: h, mode: mode, answer: sw}
 			log.Info("doh serving", "service", svc.Name)
 		}
 		for name := range running {
@@ -607,6 +713,37 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 		case <-wake:
 		case <-time.After(10 * time.Minute):
 		}
+	}
+}
+
+// dohForgets are the handlers serveDoH runs, for the change hook to make
+// each forget its tokens.
+type dohForgets struct {
+	mu sync.Mutex
+	hs map[*doh.Handler]bool
+}
+
+func (f *dohForgets) add(h *doh.Handler) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.hs == nil {
+		f.hs = map[*doh.Handler]bool{}
+	}
+	f.hs[h] = true
+}
+
+func (f *dohForgets) remove(h *doh.Handler) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.hs, h)
+}
+
+// forget is the change hook: Forget does not block.
+func (f *dohForgets) forget() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for h := range f.hs {
+		h.Forget()
 	}
 }
 
@@ -679,31 +816,17 @@ func serveRemote(ctx context.Context, r *api.Remote, changes func() <-chan struc
 	}
 }
 
-// dohTokens are the credentials DoH accepts now: those of active users
-// (store.User.Active: over the traffic limit is out too) with access to
-// the service, with their rotation (R4-1).
-func dohTokens(ctx context.Context, st *store.Store, service int64) (map[string]bool, error) {
-	users, err := st.ListUsers(ctx)
-	if err != nil {
-		return nil, err
-	}
-	sets, err := st.CredentialSets(ctx, service, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	now := time.Now()
-	out := map[string]bool{}
-	for _, u := range users {
-		if !u.Active(now) || !slices.Contains(u.Services, service) {
-			continue
-		}
-		for _, t := range sets[u.ID].Accepted(now) {
-			if t != "" {
-				out[t] = true
-			}
-		}
-	}
-	return out, nil
+// dohHandler is the handler of a DoH service: the tokens are those of
+// the devices not revoked of active users (store.User.Active: over the
+// traffic limit is out too) with access to the service, with their
+// rotation (R4-1, R4-37: store.DoHTokens), and strangers get answer.
+func dohHandler(st *store.Store, service int64, answer http.Handler, log *slog.Logger) *doh.Handler {
+	return &doh.Handler{Tokens: func(ctx context.Context) (map[string]bool, error) {
+		return st.DoHTokens(ctx, service, time.Now())
+	}, Answer: answer, Log: log,
+		// The upstreams through the node's roots: the queries are the users',
+		// a root planted in the image's store must not read them.
+		HTTP: roots.Node.Client(5 * time.Second)}
 }
 
 // syncDNS keeps the node's records in its DNS provider's zone: when the
@@ -812,7 +935,7 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 		return err
 	}
 	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier, RelayProbe: relayProbe,
-		ClockSeqAfter: time.Now().Add(settleAfterStart), PinsSince: processStart, App: app, Changed: changed}
+		ClockSeqAfter: time.Now().Add(settleAfterStart), PinsSince: processStart, PinsAfter: time.Now().Add(pinSettle), App: app, Changed: changed}
 	port := int(ports[0].Num)
 	addr := ":" + strconv.Itoa(port)
 	// Channel probes (R4-16) on the same endpoint, and their UDP echo on
@@ -1018,7 +1141,9 @@ func checkRealityTargets(ctx context.Context, st *store.Store, changes func() <-
 					continue
 				}
 				cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-				err = provision.CheckRealityTarget(cctx, target, sni)
+				// A target the data plane does not reach says what fixes it
+				// (rayctl status shows the loop).
+				err = provision.ForService(svc.Name, provision.CheckRealityTarget(cctx, target, sni))
 				cancel()
 				if ctx.Err() != nil {
 					return
@@ -1181,12 +1306,19 @@ func checkDNSZones(ctx context.Context, mon *dnscheck.Monitor, st *store.Store, 
 // -update-check, off unless asked: github.com or a mirror sees the node's
 // address). The loop "update" in rayctl status says what it found; a
 // check that fails is said there too, never as a failure of the node, and
-// a new release goes to the log once.
-func checkUpdates(ctx context.Context, fetch func(context.Context) (string, error), running string, period time.Duration, hb *health.Board, log *slog.Logger) {
+// a new release goes to the log once. Unless latest is a patch release of
+// the running one, patch (nil: none) looks for the newest one (newestPatch:
+// latest may be a backport of an older minor version).
+func checkUpdates(ctx context.Context, fetch func(context.Context) (string, error), patch func(context.Context, string) (string, error),
+	running string, period time.Duration, hb *health.Board, log *slog.Logger) {
 	said := ""
 	for {
 		cctx, cancel := context.WithTimeout(ctx, time.Minute)
 		latest, err := fetch(cctx)
+		newest := ""
+		if err == nil && !nodeupdate.Patch(latest, running) {
+			newest, _ = newestPatch(cctx, latest, running, patch)
+		}
 		cancel()
 		switch {
 		case ctx.Err() != nil:
@@ -1194,10 +1326,20 @@ func checkUpdates(ctx context.Context, fetch func(context.Context) (string, erro
 		case err != nil:
 			hb.Report("update", "not checked: "+err.Error(), nil)
 		case release.Newer(latest, running):
-			hb.Report("update", latest+" is out, this node runs "+running+": rayctl update", nil)
+			d := latest + " is out, this node runs " + running + ": rayctl update"
+			if newest != "" {
+				d += " (" + newest + ", a patch release of this minor version: rayctl update -version " + newest + ")"
+			}
+			hb.Report("update", d, nil)
 			if latest != said {
 				said = latest
 				log.Info("a newer release is out", "latest", latest, "running", running)
+			}
+		case newest != "":
+			hb.Report("update", newest+" is out, a patch release of "+running+" (GitHub's latest, "+latest+", is not newer): rayctl update -version "+newest, nil)
+			if newest != said {
+				said = newest
+				log.Info("a newer release is out", "patch", newest, "latest", latest, "running", running)
 			}
 		default:
 			hb.Report("update", "up to date ("+running+")", nil)

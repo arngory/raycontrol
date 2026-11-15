@@ -228,6 +228,9 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 			}
 		}
 	}
+	if err := keepRayspaUnit(previousDir); err != nil {
+		return err
+	}
 	if err := os.WriteFile(filepath.Join(previousDir, "VERSION"), []byte(installed+"\n"), 0o600); err != nil {
 		return err
 	}
@@ -240,6 +243,7 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 	// migrate it, and the old one must not run on the new schema (Q-2). The
 	// data plane runs on meanwhile; the perimeter keeps its table.
 	touched = true
+	since := time.Now().Unix() // what rayd audits from here on is the update's
 	if err := run("systemctl", "stop", "rayd.service"); err != nil {
 		return err
 	}
@@ -248,6 +252,9 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 		return fmt.Errorf("keeping the database: %w", err)
 	}
 
+	if err := stageRayspaUnit(stage); err != nil {
+		return c.failUpdate(ctx, fmt.Errorf("staging rayspa's unit: %w", err), before)
+	}
 	if err := installBinaries(stage); err != nil {
 		return c.failUpdate(ctx, fmt.Errorf("installing: %w", err), before)
 	}
@@ -260,7 +267,47 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 	}
 	fmt.Printf("raycontrol %s is running; the previous binaries are kept for rayctl update -rollback\n", newVersion)
 	c.belowDefaults(ctx)
+	c.renewedAtUpdate(ctx, since)
 	return nil
+}
+
+// renewedAtUpdate says how many users the new rayd's migration gave new
+// credentials, as a revocation now does (R4-36, the step of schema 14):
+// its audit lines since the update began. Nothing when there are none,
+// or when the audit cannot be read.
+func (c *cli) renewedAtUpdate(ctx context.Context, since int64) {
+	const limit = 1000 // the most ListAudit gives
+	r, err := c.c.ListAudit(ctx, connect.NewRequest(&nodev1.ListAuditRequest{Limit: limit}))
+	if err != nil {
+		return
+	}
+	fmt.Print(renewedText(r.Msg.Entries, since, limit))
+}
+
+// renewedText counts the user.renew:revoked-before lines at since or
+// later in entries (newest first, at most limit of them).
+func renewedText(entries []*nodev1.AuditEntry, since int64, limit int) string {
+	n := 0
+	for _, e := range entries {
+		if e.Time < since {
+			break
+		}
+		if e.Action == "user.renew:revoked-before" {
+			n++
+		}
+	}
+	if n == 0 {
+		return ""
+	}
+	count := fmt.Sprintf("%d users have", n)
+	switch {
+	case len(entries) >= limit && entries[len(entries)-1].Time >= since:
+		count = fmt.Sprintf("at least %d users have", n) // the update's oldest lines are past the list
+	case n == 1:
+		count = "1 user has"
+	}
+	return count + " new credentials: each had a device revoked before v0.27.0 (audit user.renew:revoked-before).\n" +
+		"Their other devices reconnect by themselves at their next connection check, within about 10 minutes.\n"
 }
 
 // belowDefaults says which services keep modes weaker than a new one of
@@ -391,7 +438,55 @@ func installBinaries(stage string) error {
 			return err
 		}
 	}
+	// rayspa's unit with its binary: the update stages the new one, the
+	// rollback has the one the update replaced. Without it a restart that
+	// fails before rayctl apply would leave a rayspa of one version under
+	// the unit of another: an old one under Type=notify never says it is
+	// ready, is stopped after 30 s and starts again, its first table
+	// (empty, in that version) each time taking every grant with it.
+	if b, err := os.ReadFile(filepath.Join(stage, rayspaUnitName)); err == nil { //nolint:gosec // G304: our staging directory
+		f := deploy.File{Path: rayspaUnitPath, Mode: 0o644, Content: b}
+		changed, err := h.WriteFile(f)
+		if err != nil {
+			return err
+		}
+		if changed {
+			fmt.Println("installed", f.Path)
+			if err := run("systemctl", "daemon-reload"); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+// rayspaUnitName is rayspa's unit in a staging directory and in
+// previousDir; rayspaUnitPath is where it runs from.
+const (
+	rayspaUnitName = "rayspa.service"
+	rayspaUnitPath = "/etc/systemd/system/rayspa.service"
+)
+
+// stageRayspaUnit puts the unit of the rayspa staged into dir, from the
+// deployment of this rayctl (the release's), when the node has a rayspa
+// (not rayd serve -supervise). keepRayspaUnit keeps the one in place for a
+// rollback the same way.
+func stageRayspaUnit(dir string) error {
+	if _, err := os.Stat(rayspaUnitPath); err != nil {
+		return nil
+	}
+	return os.WriteFile(filepath.Join(dir, rayspaUnitName), deploy.RayspaUnit(deploy.DefaultBinaries).Content, 0o600)
+}
+
+func keepRayspaUnit(dir string) error {
+	b, err := os.ReadFile(rayspaUnitPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, rayspaUnitName), b, 0o600)
 }
 
 // placeBinary puts the binary src at dst: written next to it, then renamed
@@ -460,17 +555,38 @@ func (c *cli) restartNode(ctx context.Context, want, stage string, before []stri
 		st, _ := unitState(u)()
 		units, restarts[u] = append(units, u), st["NRestarts"]
 	}
-	for i := 0; ; i++ {
-		if exec.Command("systemctl", "is-active", "--quiet", "rayspa.service").Run() == nil &&
-			exec.Command("nft", "list", "table", "inet", "raycontrol").Run() == nil {
-			break
-		}
-		if i == 30 {
-			return errors.New("rayspa did not bring the perimeter back (journalctl -u rayspa)")
-		}
-		time.Sleep(time.Second)
+	// The new rayspa's own table, with the new rayd's snapshot: rayspa
+	// leaves an earlier table in place until its first snapshot (R4-40),
+	// so a table in the kernel and a running rayspa are true at once with
+	// the old table, frozen, if the new rayspa cannot put its own in.
+	if err := waitPerimeter(ctx, func() error {
+		return rayspaUpdated(showRayspa, exec.Command("nft", "list", "table", "inet", "raycontrol").Run)
+	}, 30, time.Second); err != nil {
+		return err
 	}
 	return waitDataPlane(ctx, units, restarts, unitState, 3*time.Second, 30*time.Second, 500*time.Millisecond)
+}
+
+// waitPerimeter waits for check to pass, tries times every so long. A
+// rayspa that restarted since the update's restart (errRayspaRestarted)
+// fails it at once: one that crashed is not the one to wait for, even
+// when it comes back up.
+func waitPerimeter(ctx context.Context, check func() error, tries int, every time.Duration) error {
+	var err error
+	for range tries {
+		if err = check(); err == nil {
+			return nil
+		}
+		if errors.Is(err, errRayspaRestarted) {
+			return fmt.Errorf("the new rayspa did not hold: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return errInterrupted
+		case <-time.After(every):
+		}
+	}
+	return fmt.Errorf("rayspa did not bring the perimeter back: %w (journalctl -u rayspa)", err)
 }
 
 // waitDataPlane waits for each data-plane unit that ran before the update
@@ -638,13 +754,20 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool, carry carry) error {
 	if restoreDB {
 		kept := "What was taken away since stays taken away: revoked devices, disabled or deleted users and relays,\n" +
 			"services taken from users or disabled, replaced certificates, the admin addresses; and where the\n" +
-			"previous version has the LAN (v0.23.0 and later), a LAN turned off and the users' LAN keys as they are now.\n"
+			"previous version has the LAN (v0.23.0 and later), a LAN turned off and the users' LAN keys as they are now.\n" +
+			"Credentials stay as they are now, those renewed or rotated since included: no secret a renewal retired\n" +
+			"comes back. The users of devices revoked since get new credentials once more: their other devices\n" +
+			"reconnect after their next subscription fetch. A user or a service deleted since comes back disabled,\n" +
+			"with new credentials: a device made since and gone with the user may know the copy's.\n"
 		if carry == carrySkip {
-			kept = "-no-carry: what was revoked since comes back too.\n"
+			kept = "-no-carry: what was revoked since comes back too, and the credentials of then, those renewed since included.\n"
+		}
+		if then < 15 && now >= 15 {
+			kept += "DoH: the devices that fetched their subscription since the update have DoH tokens of their own,\n" +
+				"which the previous version does not take: they lose the node's resolver until their next subscription fetch.\n"
 		}
 		fmt.Printf("The update moved the database to schema %d; the previous version runs on %d.\n"+
-			"The database goes back to its copy from %s: users, devices and settings added or changed since are lost,\n"+
-			"credentials rotated since come back. %s",
+			"The database goes back to its copy from %s: users, devices and settings added or changed since are lost.\n%s",
 			now, then, fi.ModTime().Format(time.DateTime), kept)
 		if !yes {
 			fmt.Print("Type yes to go on: ")

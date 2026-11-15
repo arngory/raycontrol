@@ -43,6 +43,9 @@ const (
 	// PerimeterServiceReportGuardProcedure is the fully-qualified name of the PerimeterService's
 	// ReportGuard RPC.
 	PerimeterServiceReportGuardProcedure = "/raycontrol.perimeter.v1.PerimeterService/ReportGuard"
+	// PerimeterServiceReportGateProcedure is the fully-qualified name of the PerimeterService's
+	// ReportGate RPC.
+	PerimeterServiceReportGateProcedure = "/raycontrol.perimeter.v1.PerimeterService/ReportGate"
 	// RelayServiceWatchRelayProcedure is the fully-qualified name of the RelayService's WatchRelay RPC.
 	RelayServiceWatchRelayProcedure = "/raycontrol.perimeter.v1.RelayService/WatchRelay"
 	// RelayServiceReportProcedure is the fully-qualified name of the RelayService's Report RPC.
@@ -57,6 +60,12 @@ type PerimeterServiceClient interface {
 	// ReportGuard tells rayd the state of the conntrack guard
 	// (spec/conn-limit-v1.md §6.3): at each switch and once a minute.
 	ReportGuard(context.Context, *connect.Request[v1.ReportGuardRequest]) (*connect.Response[v1.ReportGuardResponse], error)
+	// ReportGate tells rayd where rayspa's own table stands
+	// (docs/08-decisions.md, R4-40): at each change and every 30 s. rayd
+	// cannot read the kernel's table; a rayspa that follows the feed but
+	// cannot put its table in leaves the host open. An older rayspa sends
+	// none (rayd: unknown).
+	ReportGate(context.Context, *connect.Request[v1.ReportGateRequest]) (*connect.Response[v1.ReportGateResponse], error)
 }
 
 // NewPerimeterServiceClient constructs a client for the raycontrol.perimeter.v1.PerimeterService
@@ -82,6 +91,12 @@ func NewPerimeterServiceClient(httpClient connect.HTTPClient, baseURL string, op
 			connect.WithSchema(perimeterServiceMethods.ByName("ReportGuard")),
 			connect.WithClientOptions(opts...),
 		),
+		reportGate: connect.NewClient[v1.ReportGateRequest, v1.ReportGateResponse](
+			httpClient,
+			baseURL+PerimeterServiceReportGateProcedure,
+			connect.WithSchema(perimeterServiceMethods.ByName("ReportGate")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -89,6 +104,7 @@ func NewPerimeterServiceClient(httpClient connect.HTTPClient, baseURL string, op
 type perimeterServiceClient struct {
 	watchPerimeter *connect.Client[v1.WatchPerimeterRequest, v1.WatchPerimeterResponse]
 	reportGuard    *connect.Client[v1.ReportGuardRequest, v1.ReportGuardResponse]
+	reportGate     *connect.Client[v1.ReportGateRequest, v1.ReportGateResponse]
 }
 
 // WatchPerimeter calls raycontrol.perimeter.v1.PerimeterService.WatchPerimeter.
@@ -101,6 +117,11 @@ func (c *perimeterServiceClient) ReportGuard(ctx context.Context, req *connect.R
 	return c.reportGuard.CallUnary(ctx, req)
 }
 
+// ReportGate calls raycontrol.perimeter.v1.PerimeterService.ReportGate.
+func (c *perimeterServiceClient) ReportGate(ctx context.Context, req *connect.Request[v1.ReportGateRequest]) (*connect.Response[v1.ReportGateResponse], error) {
+	return c.reportGate.CallUnary(ctx, req)
+}
+
 // PerimeterServiceHandler is an implementation of the raycontrol.perimeter.v1.PerimeterService
 // service.
 type PerimeterServiceHandler interface {
@@ -110,6 +131,12 @@ type PerimeterServiceHandler interface {
 	// ReportGuard tells rayd the state of the conntrack guard
 	// (spec/conn-limit-v1.md §6.3): at each switch and once a minute.
 	ReportGuard(context.Context, *connect.Request[v1.ReportGuardRequest]) (*connect.Response[v1.ReportGuardResponse], error)
+	// ReportGate tells rayd where rayspa's own table stands
+	// (docs/08-decisions.md, R4-40): at each change and every 30 s. rayd
+	// cannot read the kernel's table; a rayspa that follows the feed but
+	// cannot put its table in leaves the host open. An older rayspa sends
+	// none (rayd: unknown).
+	ReportGate(context.Context, *connect.Request[v1.ReportGateRequest]) (*connect.Response[v1.ReportGateResponse], error)
 }
 
 // NewPerimeterServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -131,12 +158,20 @@ func NewPerimeterServiceHandler(svc PerimeterServiceHandler, opts ...connect.Han
 		connect.WithSchema(perimeterServiceMethods.ByName("ReportGuard")),
 		connect.WithHandlerOptions(opts...),
 	)
+	perimeterServiceReportGateHandler := connect.NewUnaryHandler(
+		PerimeterServiceReportGateProcedure,
+		svc.ReportGate,
+		connect.WithSchema(perimeterServiceMethods.ByName("ReportGate")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/raycontrol.perimeter.v1.PerimeterService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case PerimeterServiceWatchPerimeterProcedure:
 			perimeterServiceWatchPerimeterHandler.ServeHTTP(w, r)
 		case PerimeterServiceReportGuardProcedure:
 			perimeterServiceReportGuardHandler.ServeHTTP(w, r)
+		case PerimeterServiceReportGateProcedure:
+			perimeterServiceReportGateHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -152,6 +187,10 @@ func (UnimplementedPerimeterServiceHandler) WatchPerimeter(context.Context, *con
 
 func (UnimplementedPerimeterServiceHandler) ReportGuard(context.Context, *connect.Request[v1.ReportGuardRequest]) (*connect.Response[v1.ReportGuardResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.perimeter.v1.PerimeterService.ReportGuard is not implemented"))
+}
+
+func (UnimplementedPerimeterServiceHandler) ReportGate(context.Context, *connect.Request[v1.ReportGateRequest]) (*connect.Response[v1.ReportGateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.perimeter.v1.PerimeterService.ReportGate is not implemented"))
 }
 
 // RelayServiceClient is a client for the raycontrol.perimeter.v1.RelayService service.

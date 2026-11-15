@@ -31,6 +31,8 @@ type PerimeterServer struct {
 	// Refresh re-reads the store this often even without changes, so that
 	// expiring users drop out on time.
 	Refresh time.Duration
+
+	watch rayspaWatch // whether rayspa follows the feed (MonitorRayspa)
 }
 
 var _ perimeterv1connect.PerimeterServiceHandler = (*PerimeterServer)(nil)
@@ -44,6 +46,8 @@ func (p *PerimeterServer) WatchPerimeter(ctx context.Context, _ *connect.Request
 	if !p.rayspaPeer(ctx) {
 		return connect.NewError(connect.CodePermissionDenied, errors.New("only rayspa may watch the perimeter"))
 	}
+	p.watch.start(time.Now())
+	defer func() { p.watch.end(time.Now()) }()
 	var last []byte
 	for {
 		rev, wake := p.changes()
@@ -204,7 +208,8 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 	if err != nil {
 		return nil, err
 	}
-	snap.Egress = &perimeterv1.Egress{Smtp: egress.SMTP, Bittorrent: egress.BitTorrent, Uids: p.egressUIDs()}
+	snap.Egress = &perimeterv1.Egress{Smtp: egress.SMTP, Bittorrent: egress.BitTorrent, Uids: p.egressUIDs(),
+		Local: &perimeterv1.Local{Allow: !egress.Local, Loopback: probeLoopback(services), Exempt: localExempt(services)}}
 	// The per-address limit on new inbound connections (conn-limit-v1 §8).
 	if snap.ConnLimitOff, err = p.Store.ConnLimitOff(ctx); err != nil {
 		return nil, err
@@ -366,4 +371,45 @@ func realityOpen(svc store.Service) bool {
 	}
 	_ = json.Unmarshal([]byte(svc.Settings), &st)
 	return st.Open
+}
+
+// localExempt are the REALITY targets the operator set on a local
+// address, or on localhost (provision.RealityLocalTarget): the data plane's
+// local part lets each through by its address, TCP and port, from its
+// service's process only (spec/egress-policy-v1.md §10). On a supervised
+// node the services run as rayd, which the local part does not cover:
+// there they change nothing.
+func localExempt(services []store.Service) []*perimeterv1.LocalExempt {
+	var out []*perimeterv1.LocalExempt
+	for _, svc := range services {
+		if svc.UID < store.FirstServiceUID || svc.UID > store.LastServiceUID {
+			continue
+		}
+		for _, ap := range provision.RealityLocalTarget(svc) {
+			out = append(out, &perimeterv1.LocalExempt{Addr: ap.Addr().String(),
+				Port: &perimeterv1.Port{Proto: "tcp", Port: uint32(ap.Port())}, Uid: uint32(svc.UID)}) //nolint:gosec // G115: checked above
+		}
+	}
+	return out
+}
+
+// probeLoopback are the ports on 127.0.0.1 the data plane reaches with
+// the node's own and local networks blocked (R4-38): the subscription's,
+// where the channel probes through the tunnels go (spec/probe-v1.md;
+// naive and Hysteria2 dial TCP, Xray's probe outbound TCP and UDP).
+func probeLoopback(services []store.Service) []*perimeterv1.Port {
+	var out []*perimeterv1.Port
+	for _, svc := range services {
+		if !svc.Enabled || svc.Kind != "subscription" {
+			continue
+		}
+		ports, err := svc.Ports()
+		if err != nil || len(ports) == 0 {
+			continue
+		}
+		for _, proto := range []string{"tcp", "udp"} {
+			out = append(out, &perimeterv1.Port{Proto: proto, Port: uint32(ports[0].Num)})
+		}
+	}
+	return out
 }

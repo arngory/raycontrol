@@ -58,6 +58,8 @@ const (
 	NodeServiceSetUserLANProcedure = "/raycontrol.node.v1.NodeService/SetUserLAN"
 	// NodeServiceExportUserProcedure is the fully-qualified name of the NodeService's ExportUser RPC.
 	NodeServiceExportUserProcedure = "/raycontrol.node.v1.NodeService/ExportUser"
+	// NodeServiceRenewUserProcedure is the fully-qualified name of the NodeService's RenewUser RPC.
+	NodeServiceRenewUserProcedure = "/raycontrol.node.v1.NodeService/RenewUser"
 	// NodeServiceListServicesProcedure is the fully-qualified name of the NodeService's ListServices
 	// RPC.
 	NodeServiceListServicesProcedure = "/raycontrol.node.v1.NodeService/ListServices"
@@ -163,6 +165,8 @@ const (
 	// NodeServiceGetDeployInputsProcedure is the fully-qualified name of the NodeService's
 	// GetDeployInputs RPC.
 	NodeServiceGetDeployInputsProcedure = "/raycontrol.node.v1.NodeService/GetDeployInputs"
+	// NodeServiceGetPortsProcedure is the fully-qualified name of the NodeService's GetPorts RPC.
+	NodeServiceGetPortsProcedure = "/raycontrol.node.v1.NodeService/GetPorts"
 )
 
 // NodeServiceClient is a client for the raycontrol.node.v1.NodeService service.
@@ -190,6 +194,12 @@ type NodeServiceClient interface {
 	// switch is pending (P-10). They hold the user's credentials, so the
 	// call is audited. They work only from an address SPA has opened.
 	ExportUser(context.Context, *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error)
+	// RenewUser gives a user new credentials at once, as a revocation of one
+	// of the user's devices does (docs/08-decisions.md, R4-36): each a fresh
+	// secret with no next and no previous one, and a new LAN password when
+	// the user has the LAN. The user's devices are cut until they fetch
+	// their subscription. Since v0.27.0; an older node answers unimplemented.
+	RenewUser(context.Context, *connect.Request[v1.RenewUserRequest]) (*connect.Response[v1.RenewUserResponse], error)
 	ListServices(context.Context, *connect.Request[v1.ListServicesRequest]) (*connect.Response[v1.ListServicesResponse], error)
 	CreateService(context.Context, *connect.Request[v1.CreateServiceRequest]) (*connect.Response[v1.CreateServiceResponse], error)
 	SetServiceEnabled(context.Context, *connect.Request[v1.SetServiceEnabledRequest]) (*connect.Response[v1.SetServiceEnabledResponse], error)
@@ -223,7 +233,10 @@ type NodeServiceClient interface {
 	// CreateDevice returns the device bundle with the device key. The key is
 	// not stored anywhere it can be read back through the API.
 	CreateDevice(context.Context, *connect.Request[v1.CreateDeviceRequest]) (*connect.Response[v1.CreateDeviceResponse], error)
-	// RevokeDevice revokes a device, or withdraws an unused invite.
+	// RevokeDevice revokes a device, or withdraws an unused invite. Revoking
+	// a device changes every credential of its user at once but DoH's, whose
+	// token is each device's (docs/spec/api-v1.md §5a): the user's other
+	// devices reconnect after their next subscription fetch.
 	RevokeDevice(context.Context, *connect.Request[v1.RevokeDeviceRequest]) (*connect.Response[v1.RevokeDeviceResponse], error)
 	// CreateInvite returns a one-time invite ("rcinv1:..."): the client
 	// registers the device itself through the remote API (R3-3).
@@ -322,6 +335,10 @@ type NodeServiceClient interface {
 	// which rayctl apply checks before it builds anything. No keys, no file
 	// contents. Root on the node only.
 	GetDeployInputs(context.Context, *connect.Request[v1.GetDeployInputsRequest]) (*connect.Response[v1.GetDeployInputsResponse], error)
+	// GetPorts lists every port the node uses or admits, for a provider's
+	// firewall or a NAT (rayctl ports): no keys, the current port of each
+	// rotating range.
+	GetPorts(context.Context, *connect.Request[v1.GetPortsRequest]) (*connect.Response[v1.GetPortsResponse], error)
 }
 
 // NewNodeServiceClient constructs a client for the raycontrol.node.v1.NodeService service. By
@@ -387,6 +404,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			httpClient,
 			baseURL+NodeServiceExportUserProcedure,
 			connect.WithSchema(nodeServiceMethods.ByName("ExportUser")),
+			connect.WithClientOptions(opts...),
+		),
+		renewUser: connect.NewClient[v1.RenewUserRequest, v1.RenewUserResponse](
+			httpClient,
+			baseURL+NodeServiceRenewUserProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("RenewUser")),
 			connect.WithClientOptions(opts...),
 		),
 		listServices: connect.NewClient[v1.ListServicesRequest, v1.ListServicesResponse](
@@ -635,6 +658,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("GetDeployInputs")),
 			connect.WithClientOptions(opts...),
 		),
+		getPorts: connect.NewClient[v1.GetPortsRequest, v1.GetPortsResponse](
+			httpClient,
+			baseURL+NodeServiceGetPortsProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetPorts")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -649,6 +678,7 @@ type nodeServiceClient struct {
 	setUserTraffic    *connect.Client[v1.SetUserTrafficRequest, v1.SetUserTrafficResponse]
 	setUserLAN        *connect.Client[v1.SetUserLANRequest, v1.SetUserLANResponse]
 	exportUser        *connect.Client[v1.ExportUserRequest, v1.ExportUserResponse]
+	renewUser         *connect.Client[v1.RenewUserRequest, v1.RenewUserResponse]
 	listServices      *connect.Client[v1.ListServicesRequest, v1.ListServicesResponse]
 	createService     *connect.Client[v1.CreateServiceRequest, v1.CreateServiceResponse]
 	setServiceEnabled *connect.Client[v1.SetServiceEnabledRequest, v1.SetServiceEnabledResponse]
@@ -690,6 +720,7 @@ type nodeServiceClient struct {
 	setConnLimit      *connect.Client[v1.SetConnLimitRequest, v1.SetConnLimitResponse]
 	getDeployment     *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
 	getDeployInputs   *connect.Client[v1.GetDeployInputsRequest, v1.GetDeployInputsResponse]
+	getPorts          *connect.Client[v1.GetPortsRequest, v1.GetPortsResponse]
 }
 
 // GetStatus calls raycontrol.node.v1.NodeService.GetStatus.
@@ -735,6 +766,11 @@ func (c *nodeServiceClient) SetUserLAN(ctx context.Context, req *connect.Request
 // ExportUser calls raycontrol.node.v1.NodeService.ExportUser.
 func (c *nodeServiceClient) ExportUser(ctx context.Context, req *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error) {
 	return c.exportUser.CallUnary(ctx, req)
+}
+
+// RenewUser calls raycontrol.node.v1.NodeService.RenewUser.
+func (c *nodeServiceClient) RenewUser(ctx context.Context, req *connect.Request[v1.RenewUserRequest]) (*connect.Response[v1.RenewUserResponse], error) {
+	return c.renewUser.CallUnary(ctx, req)
 }
 
 // ListServices calls raycontrol.node.v1.NodeService.ListServices.
@@ -942,6 +978,11 @@ func (c *nodeServiceClient) GetDeployInputs(ctx context.Context, req *connect.Re
 	return c.getDeployInputs.CallUnary(ctx, req)
 }
 
+// GetPorts calls raycontrol.node.v1.NodeService.GetPorts.
+func (c *nodeServiceClient) GetPorts(ctx context.Context, req *connect.Request[v1.GetPortsRequest]) (*connect.Response[v1.GetPortsResponse], error) {
+	return c.getPorts.CallUnary(ctx, req)
+}
+
 // NodeServiceHandler is an implementation of the raycontrol.node.v1.NodeService service.
 type NodeServiceHandler interface {
 	GetStatus(context.Context, *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error)
@@ -967,6 +1008,12 @@ type NodeServiceHandler interface {
 	// switch is pending (P-10). They hold the user's credentials, so the
 	// call is audited. They work only from an address SPA has opened.
 	ExportUser(context.Context, *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error)
+	// RenewUser gives a user new credentials at once, as a revocation of one
+	// of the user's devices does (docs/08-decisions.md, R4-36): each a fresh
+	// secret with no next and no previous one, and a new LAN password when
+	// the user has the LAN. The user's devices are cut until they fetch
+	// their subscription. Since v0.27.0; an older node answers unimplemented.
+	RenewUser(context.Context, *connect.Request[v1.RenewUserRequest]) (*connect.Response[v1.RenewUserResponse], error)
 	ListServices(context.Context, *connect.Request[v1.ListServicesRequest]) (*connect.Response[v1.ListServicesResponse], error)
 	CreateService(context.Context, *connect.Request[v1.CreateServiceRequest]) (*connect.Response[v1.CreateServiceResponse], error)
 	SetServiceEnabled(context.Context, *connect.Request[v1.SetServiceEnabledRequest]) (*connect.Response[v1.SetServiceEnabledResponse], error)
@@ -1000,7 +1047,10 @@ type NodeServiceHandler interface {
 	// CreateDevice returns the device bundle with the device key. The key is
 	// not stored anywhere it can be read back through the API.
 	CreateDevice(context.Context, *connect.Request[v1.CreateDeviceRequest]) (*connect.Response[v1.CreateDeviceResponse], error)
-	// RevokeDevice revokes a device, or withdraws an unused invite.
+	// RevokeDevice revokes a device, or withdraws an unused invite. Revoking
+	// a device changes every credential of its user at once but DoH's, whose
+	// token is each device's (docs/spec/api-v1.md §5a): the user's other
+	// devices reconnect after their next subscription fetch.
 	RevokeDevice(context.Context, *connect.Request[v1.RevokeDeviceRequest]) (*connect.Response[v1.RevokeDeviceResponse], error)
 	// CreateInvite returns a one-time invite ("rcinv1:..."): the client
 	// registers the device itself through the remote API (R3-3).
@@ -1099,6 +1149,10 @@ type NodeServiceHandler interface {
 	// which rayctl apply checks before it builds anything. No keys, no file
 	// contents. Root on the node only.
 	GetDeployInputs(context.Context, *connect.Request[v1.GetDeployInputsRequest]) (*connect.Response[v1.GetDeployInputsResponse], error)
+	// GetPorts lists every port the node uses or admits, for a provider's
+	// firewall or a NAT (rayctl ports): no keys, the current port of each
+	// rotating range.
+	GetPorts(context.Context, *connect.Request[v1.GetPortsRequest]) (*connect.Response[v1.GetPortsResponse], error)
 }
 
 // NewNodeServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -1160,6 +1214,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		NodeServiceExportUserProcedure,
 		svc.ExportUser,
 		connect.WithSchema(nodeServiceMethods.ByName("ExportUser")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceRenewUserHandler := connect.NewUnaryHandler(
+		NodeServiceRenewUserProcedure,
+		svc.RenewUser,
+		connect.WithSchema(nodeServiceMethods.ByName("RenewUser")),
 		connect.WithHandlerOptions(opts...),
 	)
 	nodeServiceListServicesHandler := connect.NewUnaryHandler(
@@ -1408,6 +1468,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("GetDeployInputs")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceGetPortsHandler := connect.NewUnaryHandler(
+		NodeServiceGetPortsProcedure,
+		svc.GetPorts,
+		connect.WithSchema(nodeServiceMethods.ByName("GetPorts")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/raycontrol.node.v1.NodeService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case NodeServiceGetStatusProcedure:
@@ -1428,6 +1494,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceSetUserLANHandler.ServeHTTP(w, r)
 		case NodeServiceExportUserProcedure:
 			nodeServiceExportUserHandler.ServeHTTP(w, r)
+		case NodeServiceRenewUserProcedure:
+			nodeServiceRenewUserHandler.ServeHTTP(w, r)
 		case NodeServiceListServicesProcedure:
 			nodeServiceListServicesHandler.ServeHTTP(w, r)
 		case NodeServiceCreateServiceProcedure:
@@ -1510,6 +1578,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceGetDeploymentHandler.ServeHTTP(w, r)
 		case NodeServiceGetDeployInputsProcedure:
 			nodeServiceGetDeployInputsHandler.ServeHTTP(w, r)
+		case NodeServiceGetPortsProcedure:
+			nodeServiceGetPortsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1553,6 +1623,10 @@ func (UnimplementedNodeServiceHandler) SetUserLAN(context.Context, *connect.Requ
 
 func (UnimplementedNodeServiceHandler) ExportUser(context.Context, *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.ExportUser is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) RenewUser(context.Context, *connect.Request[v1.RenewUserRequest]) (*connect.Response[v1.RenewUserResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.RenewUser is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) ListServices(context.Context, *connect.Request[v1.ListServicesRequest]) (*connect.Response[v1.ListServicesResponse], error) {
@@ -1717,4 +1791,8 @@ func (UnimplementedNodeServiceHandler) GetDeployment(context.Context, *connect.R
 
 func (UnimplementedNodeServiceHandler) GetDeployInputs(context.Context, *connect.Request[v1.GetDeployInputsRequest]) (*connect.Response[v1.GetDeployInputsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetDeployInputs is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetPorts(context.Context, *connect.Request[v1.GetPortsRequest]) (*connect.Response[v1.GetPortsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetPorts is not implemented"))
 }

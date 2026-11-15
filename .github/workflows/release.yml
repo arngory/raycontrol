@@ -169,6 +169,13 @@ jobs:
   release:
     needs: [ci, build, rayctl]
     runs-on: ubuntu-24.04
+    # One publish at a time: two close together would both list the
+    # releases before either is out, and both pass --latest. The one that
+    # runs is not cancelled; GitHub keeps one waiting, so a third that
+    # comes meanwhile cancels the waiting one, which is run again by hand.
+    concurrency:
+      group: release
+      cancel-in-progress: false
     permissions:
       contents: write
     env:
@@ -207,7 +214,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           read -ra archives <<< "$ARCHIVES"
-          gh release create "$TAG" --target "$GITHUB_SHA" --title "raycontrol ${TAG}" \
+          # "Latest" only for the highest version: GitHub marks every new
+          # release latest unless told otherwise, so a backport (v0.25.5
+          # after v0.26.1) would point bootstrap.sh and the nodes' checks
+          # at an older release. The published releases, drafts and
+          # pre-releases left out, vX.Y.Z tags only, with this tag; the
+          # listing must succeed, or nothing is published.
+          tags=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select(.draft | not) | select(.prerelease | not) | .tag_name')
+          highest=$({ printf '%s\n' "$TAG"; printf '%s\n' "$tags"; } | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+          latest=--latest=false
+          [ "$highest" = "$TAG" ] && latest=--latest
+          echo "highest release ${highest}: ${TAG} published with ${latest}"
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "raycontrol ${TAG}" "$latest" \
             --notes-file ".github/release-notes/${TAG}.md" \
             "${archives[@]}" SHA256SUMS SHA256SUMS.minisig

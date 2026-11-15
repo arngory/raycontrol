@@ -107,7 +107,7 @@ func TestLinksForStrictClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	profiles, err := sub.Profiles(m, m.Users[0])
+	profiles, err := sub.DeviceProfiles(m, m.Users[0], testDevice)
 	if err != nil {
 		t.Fatal(err)
 	}

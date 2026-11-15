@@ -39,6 +39,11 @@ jobs:
         run: shellcheck -x scripts/*.sh install/*.sh test/install/*.sh test/supervise/*.sh test/relay/*.sh test/dns53/*.sh
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+      # rayspa's unit at boot (R4-40): no ordering cycle with cloud-init, the
+      # network managers, sshd and the host firewalls, by systemd-analyze
+      # verify; here it fails instead of skipping without it.
+      - name: rayspa's ordering at boot
+        run: RAYCONTROL_REQUIRE_SYSTEMD_ANALYZE=1 go test -count=1 -run TestRayspaNoOrderingCycle -v ./internal/deploy
       # Built from source with the module's Go: prebuilt binaries made with an
       # older Go refuse to lint a go 1.26 module.
       - name: golangci-lint
@@ -152,7 +157,12 @@ jobs:
           (cd "$dir" && PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 "$bin/pebble" -dnsserver 127.0.0.1:8053 &)
           for i in $(seq 30); do curl -skf https://127.0.0.1:14000/dir > /dev/null && exit 0; sleep 1; done
           exit 1
-      - run: PEBBLE_DIRECTORY=https://127.0.0.1:14000/dir go test -count=1 -run 'TestIssue.*WithPebble' -v ./internal/certs
+      # Pebble's root goes in as a private CA's does on a node: the extra
+      # file of the node's roots (internal/roots), not the system store.
+      - run: |
+          dir="$(cd /tmp && go mod download -json "$PEBBLE" | jq -r .Dir)"
+          PEBBLE_DIRECTORY=https://127.0.0.1:14000/dir PEBBLE_ROOT="$dir/test/certs/pebble.minica.pem" \
+            go test -count=1 -run 'TestIssue.*WithPebble' -v ./internal/certs
 
   bootstrap:
     # The signature checks of install/bootstrap.sh (openssl) and of rayctl

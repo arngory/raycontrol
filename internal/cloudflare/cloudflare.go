@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/arngory/raycontrol/internal/roots"
 )
 
 // API is Cloudflare's API v4.
@@ -34,7 +36,7 @@ const Owner = "raycontrol"
 type Client struct {
 	Token   string
 	BaseURL string       // API when empty
-	HTTP    *http.Client // a client with a timeout when nil
+	HTTP    *http.Client // roots.Node's, with a timeout, when nil
 }
 
 // Zone is a DNS zone on Cloudflare.
@@ -99,7 +101,9 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	req.Header.Set("Content-Type", "application/json")
 	hc := c.HTTP
 	if hc == nil {
-		hc = &http.Client{Timeout: 30 * time.Second}
+		// The node's roots, no fallback: the token goes with the request.
+		hc = roots.Node.Client(30 * time.Second)
+		defer hc.CloseIdleConnections()
 	}
 	resp, err := hc.Do(req)
 	if err != nil {

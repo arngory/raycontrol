@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/mlkem"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -381,17 +380,9 @@ func CollectForRender(ctx context.Context, st *store.Store) (Model, error) {
 	return m, nil
 }
 
-// NewUUID makes a random (version 4) UUID, the VLESS credential.
-func NewUUID() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	b[6] = b[6]&0x0f | 0x40
-	b[8] = b[8]&0x3f | 0x80
-	h := hex.EncodeToString(b[:])
-	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:], nil
-}
+// NewUUID makes a random (version 4) UUID, the VLESS credential
+// (store.NewUUID, which a revocation's new credentials take too).
+func NewUUID() (string, error) { return store.NewUUID() }
 
 // File is one rendered file.
 type File struct {
@@ -1232,9 +1223,10 @@ func DNSTTPublicKey(s Service) (string, error) {
 
 // privateNets are never reachable through the inner stage. The IPv6
 // prefixes that carry IPv4 addresses (NAT64, 6to4, IPv4-compatible) go too:
-// 64:ff9b::a9fe:a9fe is 169.254.169.254 where NAT64 is routed.
+// 64:ff9b::a9fe:a9fe is 169.254.169.254 where NAT64 is routed. Azure's
+// platform address 168.63.129.16 too (perimeter.LocalNets says why).
 var privateNets = []string{
-	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "168.63.129.16/32", "169.254.0.0/16", "172.16.0.0/12",
 	"192.0.0.0/24", "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
 	"::/96", "fc00::/7", "fe80::/10", "ff00::/8", "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16",
 }

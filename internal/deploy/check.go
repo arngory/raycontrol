@@ -229,15 +229,31 @@ func checkUnit(unit, content string, users map[string]bool) error {
 		return oneOf(u, "network-online.target", "rayd.service", "rayspa.service", "nftables.service", "firewalld.service", "ufw.service") ||
 			strings.HasPrefix(u, "niko-") && unitUser(u) != ""
 	}
+	// rayspa's ordering (R4-40) is these lines exactly; no other unit has
+	// them.
+	early := unit == "rayspa.service"
+	earlyAfterLine := strings.Join(append(slices.Clone(earlyAfter), rayspaAfter...), " ")
 	caps := func(v string) bool {
 		return v == "" || v == "CAP_NET_BIND_SERVICE" && isNiko || v == "CAP_NET_ADMIN" && unit == "rayspa.service"
 	}
 	var copies [][2]string // user, destination of each copy
 	check := map[string]map[string]func(string) bool{
 		"[Unit]": {
-			"Description":           func(string) bool { return true },
-			"Wants":                 func(v string) bool { return v == "network-online.target" },
-			"After":                 func(v string) bool { return fieldsOf(v, afterUnit) },
+			"Description": func(string) bool { return true },
+			// rayspa before the interfaces come up (R4-40), every other
+			// unit after the network.
+			"Wants": func(v string) bool {
+				return v == map[bool]string{true: "network-pre.target", false: "network-online.target"}[early]
+			},
+			"DefaultDependencies": func(v string) bool { return early && v == "no" },
+			"Before":              func(v string) bool { return early && v == "network-pre.target shutdown.target" },
+			"Conflicts":           func(v string) bool { return early && v == "shutdown.target" },
+			"After": func(v string) bool {
+				if early {
+					return v == earlyAfterLine
+				}
+				return fieldsOf(v, afterUnit)
+			},
 			"StartLimitIntervalSec": func(v string) bool { return v == "0" },
 			"ConditionPathExists":   func(v string) bool { return under(v, rendered) },
 			"PartOf":                func(v string) bool { return unit == RelayProbeUnit && v == "rayspa.service" },
@@ -298,6 +314,10 @@ func checkUnit(unit, content string, users map[string]bool) error {
 			"IPAddressDeny":  func(v string) bool { return v == strings.TrimPrefix(denyLocal, "IPAddressDeny=") },
 			"IPAddressAllow": func(v string) bool { return oneOf(v, "127.0.0.1", strings.TrimPrefix(stubAllow, "IPAddressAllow=")) },
 			"PrivateNetwork": func(v string) bool { return v == "yes" },
+			// rayspa's ready (rayspaReady).
+			"Type":            func(v string) bool { return unit == "rayspa.service" && v == "notify" },
+			"NotifyAccess":    func(v string) bool { return unit == "rayspa.service" && v == "main" },
+			"TimeoutStartSec": func(v string) bool { return unit == "rayspa.service" && v == "30s" },
 		},
 		"[Install]": {
 			"WantedBy": func(v string) bool {
@@ -330,6 +350,13 @@ func checkUnit(unit, content string, users map[string]bool) error {
 	for _, k := range slices.Concat([]string{"User", "Group", "ExecStart"}, slices.Collect(maps.Keys(hardeningLines))) {
 		if once[k] != 1 {
 			return fmt.Errorf("%s %d times, want once", k, once[k])
+		}
+	}
+	if early {
+		for _, k := range []string{"DefaultDependencies", "Before", "Conflicts", "After"} {
+			if once[k] != 1 {
+				return fmt.Errorf("rayspa's %s %d times, want once", k, once[k])
+			}
 		}
 	}
 	for _, k := range []string{"RuntimeDirectory", "StateDirectory", "SupplementaryGroups"} {

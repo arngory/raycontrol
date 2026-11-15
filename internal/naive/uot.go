@@ -111,6 +111,42 @@ func readAddr(r *bufio.Reader, socks bool) (uotAddr, error) {
 	return a, nil
 }
 
+// readRequest reads a stream's request (spec/naive-uot-v1.md §2):
+// isConnect, then the destination in the SOCKS form. errRefused for one to
+// reset; a read's own error when the stream ended before it was whole.
+func readRequest(r *bufio.Reader) (connect bool, dest uotAddr, err error) {
+	c, err := r.ReadByte()
+	if err != nil {
+		return false, dest, err
+	}
+	if c > 1 {
+		return false, dest, fmt.Errorf("%w: isConnect %d", errRefused, c)
+	}
+	dest, err = readAddr(r, true)
+	return c == 1, dest, err
+}
+
+// readPacketHead reads the head of a client's packet: its destination (not
+// on a connected stream) and the length of its data, which follows. A
+// length past what a client may send is errRefused before anything of the
+// data is read.
+func readPacketHead(r *bufio.Reader, connected bool) (dest uotAddr, n int, err error) {
+	if !connected {
+		if dest, err = readAddr(r, false); err != nil {
+			return dest, 0, err
+		}
+	}
+	l, err := next(r, 2)
+	if err != nil {
+		return dest, 0, err
+	}
+	n = int(binary.BigEndian.Uint16(l))
+	if n > uotMaxPayload {
+		return dest, 0, fmt.Errorf("%w: a packet of %d bytes", errRefused, n)
+	}
+	return dest, n, nil
+}
+
 // next is the reader's next n bytes, valid until it reads again: nothing is
 // allocated per packet.
 func next(r *bufio.Reader, n int) ([]byte, error) {
@@ -402,14 +438,7 @@ func (s *Server) serveUoT(ctx context.Context, slot *uotSlot, traffic *Traffic, 
 	r := bufio.NewReaderSize(stream, 4<<10)
 	// A client that does not say where to holds no slot past the idle time.
 	_ = dl.SetReadDeadline(time.Now().Add(idle))
-	connect, err := r.ReadByte()
-	if err != nil {
-		return nil
-	}
-	if connect > 1 {
-		return fmt.Errorf("%w: isConnect %d", errRefused, connect)
-	}
-	dest, err := readAddr(r, true)
+	connect, dest, err := readRequest(r)
 	if err != nil {
 		if errors.Is(err, errRefused) {
 			return err
@@ -423,7 +452,7 @@ func (s *Server) serveUoT(ctx context.Context, slot *uotSlot, traffic *Traffic, 
 
 	// The errors say why, never where: no destination in the log.
 	var to netip.AddrPort
-	if connect == 1 {
+	if connect {
 		var ok bool
 		if to, ok = u.resolve(dest); !ok {
 			return fmt.Errorf("%w: the destination is not allowed", errRefused)
@@ -533,20 +562,9 @@ var uotBufs = sync.Pool{New: func() any { return new([uotMaxPayload]byte) }}
 func (u *uotStream) upstream(r *bufio.Reader, conn *net.UDPConn, to netip.AddrPort) error {
 	connected := to.IsValid()
 	for {
-		var dest uotAddr
-		if !connected {
-			var err error
-			if dest, err = readAddr(r, false); err != nil {
-				return err
-			}
-		}
-		l, err := next(r, 2)
+		dest, n, err := readPacketHead(r, connected)
 		if err != nil {
 			return err
-		}
-		n := int(binary.BigEndian.Uint16(l))
-		if n > uotMaxPayload {
-			return fmt.Errorf("%w: a packet of %d bytes", errRefused, n)
 		}
 		buf := uotBufs.Get().(*[uotMaxPayload]byte)
 		err = u.send(r, conn, to, dest, buf[:n])

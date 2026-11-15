@@ -32,6 +32,9 @@ func (n *egressNode) SetEgress(_ context.Context, req *connect.Request[nodev1.Se
 	if req.Msg.Smtp != nil {
 		n.egress.Smtp = *req.Msg.Smtp
 	}
+	if req.Msg.Local != nil {
+		n.egress.Local = *req.Msg.Local
+	}
 	return connect.NewResponse(&nodev1.SetEgressResponse{Egress: n.egress}), nil
 }
 
@@ -85,6 +88,18 @@ func TestEgressCommand(t *testing.T) {
 		n.egress.Smtp || scripts != nil {
 		t.Fatalf("allow smtp: %v, asked %v, dry runs %d", err, n.sets, len(scripts))
 	}
+	// The local networks (R4-38): allowed without a dry run, blocked after
+	// one that has the local chain in it.
+	refuse, scripts = false, nil
+	n.egress.Local = true
+	if err := c.egress(ctx, []string{"allow", "local"}); err != nil || len(n.sets) != 3 || n.sets[2].Local == nil || *n.sets[2].Local ||
+		n.egress.Local || scripts != nil {
+		t.Fatalf("allow local: %v, asked %v, dry runs %d", err, n.sets, len(scripts))
+	}
+	if err := c.egress(ctx, []string{"block", "local"}); err != nil || len(n.sets) != 4 || !*n.sets[3].Local || !n.egress.Local ||
+		len(scripts) != 1 || !strings.Contains(scripts[0], `egress_local ip daddr @local4 meta l4proto tcp counter reject with tcp reset comment "local"`) {
+		t.Fatalf("block local: %v, asked %v, dry run %q", err, n.sets, scripts)
+	}
 	if !isLocalOnly("egress") {
 		t.Error("rayctl -remote F egress goes to the remote API")
 	}
@@ -104,6 +119,9 @@ func TestEgressInForce(t *testing.T) {
 		{bt, map[string]perimeter.Drops{}, nil, "not yet"},
 		{&nodev1.Egress{Smtp: true, Bittorrent: true}, inForce, nil, "not yet"},
 		{bt, nil, errors.New("nft list chain egress: exit status 1"), "unknown"},
+		{&nodev1.Egress{Local: true}, map[string]perimeter.Drops{"local": {}}, nil, "yes"},
+		{&nodev1.Egress{Local: true}, map[string]perimeter.Drops{}, nil, "not yet"},
+		{&nodev1.Egress{}, map[string]perimeter.Drops{"local": {}}, nil, "not yet"},
 	} {
 		if got := egressInForce(c.e, c.blocks, c.err); !strings.HasPrefix(got, c.want) {
 			t.Errorf("%v %v %v: %q", c.e, c.blocks, c.err, got)
@@ -114,6 +132,7 @@ func TestEgressInForce(t *testing.T) {
 		{Bittorrent: true}:             "blocked: bittorrent (rayctl egress)",
 		{Bittorrent: true, Smtp: true}: "blocked: bittorrent, smtp (tcp 25) (rayctl egress)",
 		{Smtp: true}:                   "blocked: smtp (tcp 25) (rayctl egress)",
+		{Local: true}:                  "blocked: local networks (rayctl egress)",
 	} {
 		if got := egressLine(e); got != want {
 			t.Errorf("%v: %q", e, got)

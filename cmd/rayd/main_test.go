@@ -324,11 +324,15 @@ func TestCheckUpdates(t *testing.T) {
 	latest := func(v string) func(context.Context) (string, error) {
 		return func(context.Context) (string, error) { return v, nil }
 	}
+	var patch func(context.Context, string) (string, error)
 	detail := func(f func(context.Context) (string, error), running string) health.Loop {
 		hb := &health.Board{}
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
-		go func() { checkUpdates(ctx, f, running, time.Hour, hb, slog.New(slog.DiscardHandler)); close(done) }()
+		go func() {
+			checkUpdates(ctx, f, patch, running, time.Hour, hb, slog.New(slog.DiscardHandler))
+			close(done)
+		}()
 		for range 200 {
 			if ls := hb.Loops(); len(ls) == 1 {
 				cancel()
@@ -355,6 +359,19 @@ func TestCheckUpdates(t *testing.T) {
 	if l := detail(latest("v0.14.0"), "v0.14.0"); l.Failing() || l.Detail != "up to date (v0.14.0)" {
 		t.Fatalf("same: %+v", l)
 	}
+	// A newer minor version, and a patch release of the running one.
+	patch = func(context.Context, string) (string, error) { return "v0.14.2", nil }
+	if l := detail(latest("v0.15.0"), "v0.14.0"); l.Failing() ||
+		l.Detail != "v0.15.0 is out, this node runs v0.14.0: rayctl update (v0.14.2, a patch release of this minor version: rayctl update -version v0.14.2)" {
+		t.Fatalf("newer, and a patch: %+v", l)
+	}
+	// A backport marked latest, older than the node: its patch is told of.
+	patch = func(context.Context, string) (string, error) { return "v0.14.1", nil }
+	if l := detail(latest("v0.13.5"), "v0.14.0"); l.Failing() ||
+		l.Detail != "v0.14.1 is out, a patch release of v0.14.0 (GitHub's latest, v0.13.5, is not newer): rayctl update -version v0.14.1" {
+		t.Fatalf("backport latest: %+v", l)
+	}
+	patch = nil
 	// CI builds carry a commit, not a release: not checked at all.
 	if release.IsRelease("0123456789ab") || release.IsRelease("dev") || !release.IsRelease("v0.14.0") {
 		t.Fatal("IsRelease")

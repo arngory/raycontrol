@@ -297,54 +297,76 @@ func (st *icmpStream) close() <-chan struct{} {
 func (st *icmpStream) upstream(r *bufio.Reader) error {
 	payload := make([]byte, icmpMaxPayload)
 	for {
-		kind, err := r.ReadByte()
-		if err != nil {
-			return err
-		}
-		if kind != icmpEcho {
-			return fmt.Errorf("%w: frame kind %d", errRefused, kind)
-		}
-		af, err := r.ReadByte()
-		if err != nil {
-			return err
-		}
-		size := 0
-		switch af {
-		case 4:
-			size = 4
-		case 6:
-			size = 16
-		default:
-			return fmt.Errorf("%w: address family %d", errRefused, af)
-		}
-		h, err := next(r, size+1+2+2+2)
-		if err != nil {
-			return err
-		}
-		dst, _ := netip.AddrFromSlice(h[:size])
-		ttl := int(h[size])
-		id := binary.BigEndian.Uint16(h[size+1:])
-		seq := binary.BigEndian.Uint16(h[size+3:])
-		n := int(binary.BigEndian.Uint16(h[size+5:]))
-		// Longer than the node sends: read past, answered "too big".
-		big := n > icmpMaxPayload
-		if big {
-			_, err = r.Discard(n)
-			n = 0
-		} else {
-			_, err = io.ReadFull(r, payload[:n])
-		}
+		e, err := readEcho(r, payload)
 		if err != nil {
 			return err
 		}
 		st.touch()
+		ttl := e.ttl
 		if ttl == 0 || ttl > icmpMaxTTL {
 			ttl = icmpMaxTTL
 		}
-		if err := st.echo(dst, ttl, id, seq, payload[:n], big); err != nil {
+		if err := st.echo(e.dst, ttl, e.id, e.seq, e.data, e.big); err != nil {
 			return err
 		}
 	}
+}
+
+// icmpEchoFrame is a client's frame: its data in the buffer readEcho was
+// given, none when big (longer than the node sends).
+type icmpEchoFrame struct {
+	dst     netip.Addr
+	ttl     int
+	id, seq uint16
+	data    []byte
+	big     bool
+}
+
+// readEcho reads one client frame, its data into payload (icmpMaxPayload
+// bytes). errRefused for a frame that cannot be read as one; a read's own
+// error when the stream ended inside one. An echo longer than the node
+// sends is read past, not kept: it is answered "too big".
+func readEcho(r *bufio.Reader, payload []byte) (e icmpEchoFrame, err error) {
+	kind, err := r.ReadByte()
+	if err != nil {
+		return e, err
+	}
+	if kind != icmpEcho {
+		return e, fmt.Errorf("%w: frame kind %d", errRefused, kind)
+	}
+	af, err := r.ReadByte()
+	if err != nil {
+		return e, err
+	}
+	size := 0
+	switch af {
+	case 4:
+		size = 4
+	case 6:
+		size = 16
+	default:
+		return e, fmt.Errorf("%w: address family %d", errRefused, af)
+	}
+	h, err := next(r, size+1+2+2+2)
+	if err != nil {
+		return e, err
+	}
+	e.dst, _ = netip.AddrFromSlice(h[:size])
+	e.ttl = int(h[size])
+	e.id = binary.BigEndian.Uint16(h[size+1:])
+	e.seq = binary.BigEndian.Uint16(h[size+3:])
+	n := int(binary.BigEndian.Uint16(h[size+5:]))
+	if e.big = n > icmpMaxPayload; e.big {
+		_, err = r.Discard(n)
+		n = 0
+	} else {
+		_, err = io.ReadFull(r, payload[:n])
+	}
+	if err != nil {
+		return e, err
+	}
+	e.data = payload[:n]
+	return e, nil
 }
 
 // echo sends one echo, or answers it in the node's name: a destination not

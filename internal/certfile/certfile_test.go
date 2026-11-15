@@ -316,7 +316,13 @@ func TestLoaderWatch(t *testing.T) {
 		t.Fatal("the chain after the broken one is not served")
 	}
 
+	// The reload is logged after the swap: a handshake can see the new chain
+	// a moment before its line is written.
 	got := out.String()
+	for deadline := time.Now().Add(2 * time.Second); strings.Count(got, "certificate reloaded") < 2 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+		got = out.String()
+	}
 	if c := strings.Count(got, "certificate reloaded"); c != 2 {
 		t.Errorf("%d reloads logged, want 2:\n%s", c, got)
 	}

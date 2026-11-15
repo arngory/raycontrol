@@ -268,6 +268,38 @@ func (c *cli) updatePolicyAt(ctx context.Context, args []string, policyFile, uni
 	return nil
 }
 
+// newerLine says, from what rayd's checks saw, that the latest release is
+// a new minor (or major) version, which the auto update never takes, and
+// what does; "" when it is not. Versions only: nothing a terminal acts on.
+func newerLine(m *nodev1.GetUpdateStatusResponse) string {
+	step := nodeupdate.Step(m.Latest, m.Installed)
+	if step == "" {
+		return ""
+	}
+	take := "rayctl update takes it"
+	if m.Remote == "on" {
+		take += " (or an admin's phone)"
+	}
+	if m.Auto == "patch" {
+		return fmt.Sprintf("newer      %s is a new %s version: the auto update takes patch releases only; %s", m.Latest, step, take)
+	}
+	return fmt.Sprintf("newer      %s is a new %s version: %s", m.Latest, step, take)
+}
+
+// patchLine names the newest patch release of the node's minor version
+// when it is not the latest release (a newer minor version is out), and
+// what takes it; "" otherwise.
+func patchLine(m *nodev1.GetUpdateStatusResponse) string {
+	if m.LatestPatch == "" || m.LatestPatch == m.Latest || !nodeupdate.Patch(m.LatestPatch, m.Installed) {
+		return ""
+	}
+	take := "rayctl update -version " + m.LatestPatch + " takes it"
+	if m.Auto == "patch" {
+		take = "the auto update takes it in its window"
+	}
+	return fmt.Sprintf("patch      %s, the newest patch release of %s: %s", nodeupdate.Printable(m.LatestPatch), nodeupdate.Printable(m.Installed), take)
+}
+
 func (c *cli) updateStatus(ctx context.Context) error {
 	r, err := c.c.GetUpdateStatus(ctx, connect.NewRequest(&nodev1.GetUpdateStatusRequest{}))
 	if err != nil {
@@ -281,8 +313,21 @@ func (c *cli) updateStatus(ctx context.Context) error {
 	// terminal.
 	p := nodeupdate.Printable
 	fmt.Printf("installed  %s\n", p(m.Installed))
-	if m.Latest != "" {
+	// Never a check of its own: a request to GitHub shows it the node's
+	// address, root's to decide (rayctl update -check).
+	switch {
+	case m.Latest != "":
 		fmt.Printf("latest     %s\n", p(m.Latest))
+	case m.Auto == "patch":
+		fmt.Println("latest     not known yet: rayd asks GitHub every ~6 h (rayctl status, loop auto-update, says why not); rayctl update -check asks now")
+	default:
+		fmt.Println("latest     not checked: rayd asks GitHub only with rayctl update auto patch or rayd -update-check; rayctl update -check asks now")
+	}
+	if line := patchLine(m); line != "" {
+		fmt.Println(line)
+	}
+	if line := newerLine(m); line != "" {
+		fmt.Println(line)
 	}
 	fmt.Printf("remote     %s\nauto       %s (window %s, %s)\n", p(m.Remote), p(m.Auto), p(m.Window), p(m.Timezone))
 	if len(m.Held) > 0 {
