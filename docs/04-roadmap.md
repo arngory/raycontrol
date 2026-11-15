@@ -154,11 +154,16 @@ systemd-юниты, хранение секретов через systemd credent
 v0.26.0: пины ключа сертификата сайта в ссылках naive, `hy2-masq` и DoH ([spec/cert-pin-v1.md](spec/cert-pin-v1.md));
 честный connect у naive (`niko-ack`, [spec/naive-uot-v1.md](spec/naive-uot-v1.md) §4.1); обновление relay командой
 `rayctl update` на его хосте ([spec/node-update-v1.md](spec/node-update-v1.md) §5); `rayctl` для macOS и FreeBSD
-([18-platforms-and-hosts.md](18-platforms-and-hosts.md)). Во второй волне — обновление relay по просьбе ноды, чтобы
-обновление с телефона администратора обновляло и relay; на relay оно будет выключено по умолчанию. Спецификация —
-[spec/relay-update-remote-v1.md](spec/relay-update-remote-v1.md), решения владельца от 2026-11-14 — в её §11: relay идут
-и за ручным `rayctl update` на ноде (кроме `-no-relays`), выключателя на выходе нет, релиз relay берёт сам (в основном с
-GitHub), принимает любую версию новее своей. Выходит после v0.27.0.
+([18-platforms-and-hosts.md](18-platforms-and-hosts.md)).
+
+~~Вторая волна — обновление relay по просьбе ноды.~~ **Сделано** (v0.28.0,
+[spec/relay-update-remote-v1.md](spec/relay-update-remote-v1.md), отличия от черновика — её §14): удавшееся обновление
+ноды — с телефона администратора, автообновлением или `rayctl update` на ней (кроме `-no-relays`) — relay берут сами,
+по одному, если root на relay включил `rayctl update remote on` (по умолчанию выключено). Решения владельца от
+2026-11-14 — в её §11: выключателя на выходе нет, релиз relay берёт сам (в основном с GitHub), принимает любую версию
+новее своей. Строки relay — в `GetUpdateStatus` и `rayctl update status` на ноде, на телефоне — в более позднем Niko
+([handoff/niko-relay-update-note.md](handoff/niko-relay-update-note.md)). Проверено модульными тестами; тестов в
+контейнерах (её §12.2) нет, на настоящем relay не запускалось.
 
 После второй волны — маршрутизация на ноде и наборы правил, по исследованию mihomo
 ([19-mihomo-review.md](19-mihomo-review.md), решения владельца от 2026-11-14 — в его §10):
