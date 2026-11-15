@@ -50,6 +50,9 @@ const (
 	RelayServiceWatchRelayProcedure = "/raycontrol.perimeter.v1.RelayService/WatchRelay"
 	// RelayServiceReportProcedure is the fully-qualified name of the RelayService's Report RPC.
 	RelayServiceReportProcedure = "/raycontrol.perimeter.v1.RelayService/Report"
+	// RelayServiceReportUpdateProcedure is the fully-qualified name of the RelayService's ReportUpdate
+	// RPC.
+	RelayServiceReportUpdateProcedure = "/raycontrol.perimeter.v1.RelayService/ReportUpdate"
 )
 
 // PerimeterServiceClient is a client for the raycontrol.perimeter.v1.PerimeterService service.
@@ -201,6 +204,14 @@ type RelayServiceClient interface {
 	// K_relay. The exit takes it for a device the relay knows, about the
 	// client's network, never its address.
 	Report(context.Context, *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error)
+	// ReportUpdate tells the exit where the relay stands with updates
+	// (spec/relay-update-remote-v1.md §3.2): its version, root's switch, the
+	// state of the last offer it took. A whole state each time, never a
+	// delta. NotFound for anyone but the relay, as for Report;
+	// ResourceExhausted for more than one call at once from the relay, or
+	// more than 12 a minute; InvalidArgument for a field out of its bounds.
+	// An older exit answers Unimplemented.
+	ReportUpdate(context.Context, *connect.Request[v1.ReportUpdateRequest]) (*connect.Response[v1.ReportUpdateResponse], error)
 }
 
 // NewRelayServiceClient constructs a client for the raycontrol.perimeter.v1.RelayService service.
@@ -226,13 +237,20 @@ func NewRelayServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(relayServiceMethods.ByName("Report")),
 			connect.WithClientOptions(opts...),
 		),
+		reportUpdate: connect.NewClient[v1.ReportUpdateRequest, v1.ReportUpdateResponse](
+			httpClient,
+			baseURL+RelayServiceReportUpdateProcedure,
+			connect.WithSchema(relayServiceMethods.ByName("ReportUpdate")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // relayServiceClient implements RelayServiceClient.
 type relayServiceClient struct {
-	watchRelay *connect.Client[v1.WatchRelayRequest, v1.WatchRelayResponse]
-	report     *connect.Client[v1.ReportRequest, v1.ReportResponse]
+	watchRelay   *connect.Client[v1.WatchRelayRequest, v1.WatchRelayResponse]
+	report       *connect.Client[v1.ReportRequest, v1.ReportResponse]
+	reportUpdate *connect.Client[v1.ReportUpdateRequest, v1.ReportUpdateResponse]
 }
 
 // WatchRelay calls raycontrol.perimeter.v1.RelayService.WatchRelay.
@@ -245,6 +263,11 @@ func (c *relayServiceClient) Report(ctx context.Context, req *connect.Request[v1
 	return c.report.CallUnary(ctx, req)
 }
 
+// ReportUpdate calls raycontrol.perimeter.v1.RelayService.ReportUpdate.
+func (c *relayServiceClient) ReportUpdate(ctx context.Context, req *connect.Request[v1.ReportUpdateRequest]) (*connect.Response[v1.ReportUpdateResponse], error) {
+	return c.reportUpdate.CallUnary(ctx, req)
+}
+
 // RelayServiceHandler is an implementation of the raycontrol.perimeter.v1.RelayService service.
 type RelayServiceHandler interface {
 	WatchRelay(context.Context, *connect.Request[v1.WatchRelayRequest], *connect.ServerStream[v1.WatchRelayResponse]) error
@@ -253,6 +276,14 @@ type RelayServiceHandler interface {
 	// K_relay. The exit takes it for a device the relay knows, about the
 	// client's network, never its address.
 	Report(context.Context, *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error)
+	// ReportUpdate tells the exit where the relay stands with updates
+	// (spec/relay-update-remote-v1.md §3.2): its version, root's switch, the
+	// state of the last offer it took. A whole state each time, never a
+	// delta. NotFound for anyone but the relay, as for Report;
+	// ResourceExhausted for more than one call at once from the relay, or
+	// more than 12 a minute; InvalidArgument for a field out of its bounds.
+	// An older exit answers Unimplemented.
+	ReportUpdate(context.Context, *connect.Request[v1.ReportUpdateRequest]) (*connect.Response[v1.ReportUpdateResponse], error)
 }
 
 // NewRelayServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -274,12 +305,20 @@ func NewRelayServiceHandler(svc RelayServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(relayServiceMethods.ByName("Report")),
 		connect.WithHandlerOptions(opts...),
 	)
+	relayServiceReportUpdateHandler := connect.NewUnaryHandler(
+		RelayServiceReportUpdateProcedure,
+		svc.ReportUpdate,
+		connect.WithSchema(relayServiceMethods.ByName("ReportUpdate")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/raycontrol.perimeter.v1.RelayService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case RelayServiceWatchRelayProcedure:
 			relayServiceWatchRelayHandler.ServeHTTP(w, r)
 		case RelayServiceReportProcedure:
 			relayServiceReportHandler.ServeHTTP(w, r)
+		case RelayServiceReportUpdateProcedure:
+			relayServiceReportUpdateHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -295,4 +334,8 @@ func (UnimplementedRelayServiceHandler) WatchRelay(context.Context, *connect.Req
 
 func (UnimplementedRelayServiceHandler) Report(context.Context, *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.perimeter.v1.RelayService.Report is not implemented"))
+}
+
+func (UnimplementedRelayServiceHandler) ReportUpdate(context.Context, *connect.Request[v1.ReportUpdateRequest]) (*connect.Response[v1.ReportUpdateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.perimeter.v1.RelayService.ReportUpdate is not implemented"))
 }

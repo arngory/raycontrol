@@ -81,12 +81,25 @@ service RelayService {
   // K_relay. The exit takes it for a device the relay knows, about the
   // client's network, never its address.
   rpc Report(ReportRequest) returns (ReportResponse);
+  // ReportUpdate tells the exit where the relay stands with updates
+  // (spec/relay-update-remote-v1.md §3.2): its version, root's switch, the
+  // state of the last offer it took. A whole state each time, never a
+  // delta. NotFound for anyone but the relay, as for Report;
+  // ResourceExhausted for more than one call at once from the relay, or
+  // more than 12 a minute; InvalidArgument for a field out of its bounds.
+  // An older exit answers Unimplemented.
+  rpc ReportUpdate(ReportUpdateRequest) returns (ReportUpdateResponse);
 }
 
 message WatchRelayRequest {
   // The feed of rayd relay, the relay's probe endpoint (relay-v1 §9.1), not
   // of its rayspa: while one is open the subscription lists the endpoint.
   bool probe = 1;
+  // The feed takes the exit's update offers
+  // (spec/relay-update-remote-v1.md §3.2): a rayd relay that knows them
+  // sets it, whatever the relay's policy. rayspa's feed and an older rayd
+  // relay's get none.
+  bool updates = 2;
 }
 
 message ReportRequest {
@@ -101,6 +114,50 @@ message ReportResponse {}
 
 message WatchRelayResponse {
   Snapshot snapshot = 1;
+  // The release the exit asks this relay to update to, in a feed with
+  // updates only. Absent: nothing asked (an older exit, no update by
+  // request, or not this relay's turn).
+  RelayUpdateOffer update = 2;
+}
+
+// RelayUpdateOffer names the release the exit runs after an update of its
+// own (spec/relay-update-remote-v1.md §3.3). The relay takes it only if
+// root on the relay allows it (rayctl update remote on) and only forward;
+// it downloads and verifies the release itself.
+message RelayUpdateOffer {
+  string id = 1;      // the node's update it follows (node.v1 UpdateStatus.id): 1-32 hex
+  string version = 2; // vX.Y.Z: the release the exit runs, which that update installed
+  int64 ended_at = 3; // unix seconds, the exit's clock: when that update ended
+}
+
+message ReportUpdateRequest {
+  // At most 1 KiB, the whole request.
+  RelayUpdate update = 1;
+}
+
+message ReportUpdateResponse {}
+
+// RelayUpdate is where a relay stands with updates by the exit's word
+// (spec/relay-update-remote-v1.md §3.4, §3.6). The exit trusts none of it:
+// it checks the bounds and cleans error again.
+message RelayUpdate {
+  string version = 1;  // the relay's release now (rayd relay's own version): "" or vX.Y.Z, at most 40 bytes
+  bool remote = 2;     // root on the relay takes the exit's offers (rayctl update remote on)
+  // idle (no offer taken yet), requested (the request written, root has
+  // not taken it), running, done (on target, checked), rolled_back (the
+  // previous relay runs again, checked; target held), failed (refused
+  // before any change, the host left open, cut short, or not taken).
+  string state = 3;
+  string id = 4;       // the offer the state is about: 1-32 hex; "" with idle
+  string target = 5;   // the version that offer named: "" or vX.Y.Z, at most 40 bytes
+  // A code, "" when none: policy, stale, version, busy, unfinished,
+  // bundle, ssh, download, signature, place (all before any change);
+  // install, check, interrupted, open (after); not_taken (rayd relay: the
+  // request not taken within an hour).
+  string reason = 6;
+  string error = 7;    // short printable text, redacted on the relay (no addresses, no keys), at most 200 bytes
+  int64 at = 8;        // unix seconds, the relay's clock: when the state was reached
+  bool unfinished = 9; // an update of the relay did not end: root on the relay must act
 }
 
 message WatchPerimeterRequest {}

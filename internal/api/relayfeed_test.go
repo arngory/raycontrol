@@ -486,6 +486,11 @@ func TestRelayReport(t *testing.T) {
 	if err := report(dev.ID, "203.0.113.0/24", "{}"); err != nil {
 		t.Errorf("after the others: %v", err)
 	}
+	// Its updates are not taken yet: the relay hears what an older exit
+	// answers (spec/relay-update-remote-v1.md §3.2).
+	if _, err := feed.ReportUpdate(ctx, connect.NewRequest(&perimeterv1.ReportUpdateRequest{Update: &perimeterv1.RelayUpdate{State: "idle"}})); connect.CodeOf(err) != connect.CodeUnimplemented {
+		t.Errorf("an update report: %v", err)
+	}
 
 	// The certificate from another address; a node without the summary.
 	other, _ := serveRemoteFrom(t, srv, "198.51.100.99:40000", func(r *Remote) { r.RelayReport = take })

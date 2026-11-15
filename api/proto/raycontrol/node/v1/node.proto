@@ -971,6 +971,31 @@ message GetUpdateStatusResponse {
   // that is one; after a newer minor version, the one rayd found by asking
   // for the next patch numbers. "" when none, or not checked.
   string latest_patch = 9;
+  // The relays in front of this node and their updates by the node's word
+  // (spec/relay-update-remote-v1.md §8), by name. An older node sends none.
+  repeated RelayUpdateStatus relays = 10;
+}
+// RelayUpdateStatus is a relay's update by the node's word: the relay's
+// last report and the node's offer as one. Times are the node's clock,
+// not the relay's, which may differ.
+message RelayUpdateStatus {
+  string name = 1;
+  string version = 2; // what the relay last said it runs; "" never said
+  // unknown (no report ever: an older relay, or its rayd relay does not
+  // run), off (behind target, but root on the relay has not allowed it),
+  // current (on target or newer, or nothing offered), waiting (for its
+  // turn: another relay updates), offered (in its feed, no report on it
+  // yet), and as the relay reported on update_id: requested, running,
+  // done, rolled_back, failed (with reason no_word: an hour without a
+  // word after requested or running).
+  string state = 3;
+  string target = 4;    // the version offered; "" none
+  string update_id = 5; // the node's update it follows (UpdateStatus.id)
+  string reason = 6;    // a code for the client to name (policy, download, signature, …); "" none
+  string error = 7;     // short text for a person, redacted, at most 200 bytes
+  int64 changed_at = 8; // unix seconds: when state became what it is
+  int64 seen_at = 9;    // unix seconds: when the node last heard the relay at all (a feed, a report); 0 never
+  bool remote = 10;     // the relay takes the node's word (root on it: rayctl update remote on)
 }
 // UpdateStatus is the last update by request, or the one under way.
 message UpdateStatus {

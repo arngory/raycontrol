@@ -126,6 +126,14 @@ func (f *relayFeed) Report(ctx context.Context, req *connect.Request[perimeterv1
 	return nil, connect.NewError(connect.CodeInternal, errors.New("report not taken"))
 }
 
+// ReportUpdate is a relay's word on its updates by the exit's
+// (spec/relay-update-remote-v1.md §3.2). Not taken yet: every caller gets
+// what an exit without the method answers, so a relay's rayd relay stays
+// quiet until its next feed, as it does with an older exit.
+func (*relayFeed) ReportUpdate(context.Context, *connect.Request[perimeterv1.ReportUpdateRequest]) (*connect.Response[perimeterv1.ReportUpdateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("relay updates are not taken yet"))
+}
+
 // WatchRelay streams a relay's perimeter: the current snapshot at once and a
 // new one after every change. The caller is the relay whose client
 // certificate this is, calling from the relay's address; anyone else gets
