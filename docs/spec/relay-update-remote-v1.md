@@ -626,7 +626,7 @@ relay      r4: unknown: no word (a relay before vW, or its rayd relay does not r
 1. **Relay идут и за ручным `rayctl update` на ноде.** Ручное обновление пишет `status.json` с видом `local` и
    `by: "rayctl on the node"` (как `noteRollback`, `update.go:633-641`; клиент выводит `by` в строке «кем», пустым его
    оставлять нельзя), и выход называет эту версию, как после `remote` и `auto`. Исключение —
-   `rayctl update -no-relays`: статус пишется с `relays: false`, предложения нет. Цена принята: `GetUpdateStatus.status`
+   `rayctl update -no-relays`: статус пишется с `no_relays: true`, предложения нет. Цена принята: `GetUpdateStatus.status`
    показывает и ручные обновления (клиенту сообщено 2026-11-14). Откат (`-rollback`) relay не трогает: `rolled_back`
    не `done` (§3.3).
 2. **Выключателя на выходе нет.** Владелец спросил, зачем он; он нужен, только чтобы администратор выхода мог
