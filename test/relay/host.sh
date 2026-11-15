@@ -331,7 +331,8 @@ midway() {
 # beside its feed's.
 feeds() {
 	local e r
-	e="$(xe ss -Htn state established dst "$relay_ip" | awk '{print $4}' | sort)"
+	# The exit's dual-stack socket names the relay [::ffff:A]:P.
+	e="$(xe ss -Htn state established dst "$relay_ip" | awk '{print $4}' | sed -E 's/^\[::ffff:([0-9.]+)\]/\1/' | sort)"
 	r="$(xr ss -Htnp state established dst "$exit_ip")"
 	grep -q '"rayspa"' <<<"$r" && grep -q '"rayd"' <<<"$r" || return 1
 	[[ -z $(comm -13 <(echo "$e") <(awk '{print $3}' <<<"$r" | sort)) ]]
