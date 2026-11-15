@@ -183,9 +183,14 @@ func RayspaUnit(bin Binaries) File { return rayspaUnit(bin).file() }
 
 // rayspaAfter are the host firewalls rayspa starts after: their start may
 // flush the ruleset (Debian's nftables.service loads /etc/nftables.conf,
-// which begins with "flush ruleset"). Both have no default dependencies
-// either. Not firewalld.service: it keeps them (After=basic.target), and
-// ordering after it would bring sysinit.target and the cycle back; its
+// which begins with "flush ruleset"). Debian's nftables.service and ufw
+// have no default dependencies either; RHEL's and Rocky's nftables.service
+// keeps them (After=basic.target), so where it is enabled rayspa starts
+// after sysinit.target, which closes no cycle there: their cloud-init's
+// network stage is not before sysinit.target (TestRayspaNoOrderingCycle,
+// with Rocky 10's units). Not firewalld.service: it keeps them too, and on
+// a Debian or Ubuntu cloud image, whose cloud-init network stage is before
+// sysinit.target, ordering after it would bring the cycle back; its
 // nftables backend changes its own table only, and a flush that took
 // rayspa's anyway is undone within a second (R2-3).
 var rayspaAfter = []string{"nftables.service", "ufw.service"}

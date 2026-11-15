@@ -35,16 +35,16 @@ var orderingStubs = map[string]string{
 		"Before=network.target multi-user.target shutdown.target initrd-switch-root.target\nConflicts=shutdown.target initrd-switch-root.target\nWants=systemd-networkd.socket network.target",
 	"systemd-networkd-wait-online.service": "DefaultDependencies=no\nConflicts=shutdown.target\nBindsTo=systemd-networkd.service\nAfter=systemd-networkd.service\nBefore=network-online.target shutdown.target",
 
-	// cloud-init 24.x and later, Debian and Ubuntu variant (rendered from
-	// the templates as the packages are), with the network stage of its own:
-	// https://github.com/canonical/cloud-init/tree/main/systemd
-	// (cloud-init-main.service.tmpl, cloud-init-local.service.tmpl,
-	// cloud-init-network.service.tmpl, cloud-config.service,
-	// cloud-config.target, cloud-final.service, cloud-init.target).
+	// cloud-init of Debian 13, with the network stage of its own: the
+	// units of cloud-init_25.1.4-1+deb13u1_all.deb
+	// (https://deb.debian.org/debian/pool/main/c/cloud-init/), under
+	// /usr/lib/systemd/system. cloud-init.target has no Wants= of its own:
+	// the units' WantedBy=cloud-init.target links are, written here as its
+	// Wants= (cloud-init-generator links the target into multi-user.target).
 	"cloud-init-main.service":  "DefaultDependencies=no\nAfter=systemd-remount-fs.service\nBefore=cloud-init-local.service\nBefore=shutdown.target\nConflicts=shutdown.target\nRequiresMountsFor=/var/lib/cloud",
 	"cloud-init-local.service": "DefaultDependencies=no\nWants=network-pre.target\nAfter=hv_kvp_daemon.service\nBefore=network-pre.target\nBefore=shutdown.target\nBefore=sysinit.target\nConflicts=shutdown.target",
 	"cloud-init-network.service": "DefaultDependencies=no\nWants=cloud-init-local.service\nWants=sshd-keygen.service\nWants=sshd.service\nAfter=cloud-init-local.service\n" +
-		"After=systemd-networkd-wait-online.service\nAfter=networking.service\nBefore=network-online.target\nBefore=sshd-keygen.service\nBefore=sshd.service\n" +
+		"After=systemd-networkd-wait-online.service\nAfter=networking.service\nBefore=network-online.target\nBefore=chronyd.service\nBefore=sshd-keygen.service\nBefore=sshd.service\n" +
 		"Before=systemd-user-sessions.service\nBefore=sysinit.target\nBefore=shutdown.target\nConflicts=shutdown.target",
 	"cloud-config.target":  "Wants=cloud-init-local.service cloud-init-network.service\nAfter=cloud-init-local.service cloud-init-network.service",
 	"cloud-config.service": "After=network-online.target cloud-config.target\nWants=network-online.target cloud-config.target",
@@ -92,22 +92,39 @@ var orderingStubs = map[string]string{
 	"firewalld.service": "Before=network-pre.target\nWants=network-pre.target\nPartOf=dbus.service\nConflicts=iptables.service ip6tables.service ebtables.service ipset.service",
 }
 
-// cloud-init's RHEL variant of the same templates: its network stage
-// keeps the default dependencies, after NetworkManager.
-var rhelStubs = map[string]string{
-	"cloud-init-main.service":  "DefaultDependencies=no\nRequires=dbus.socket\nAfter=dbus.socket\nAfter=systemd-remount-fs.service\nBefore=cloud-init-local.service\nBefore=shutdown.target\nConflicts=shutdown.target",
-	"cloud-init-local.service": "DefaultDependencies=no\nWants=network-pre.target\nAfter=hv_kvp_daemon.service\nBefore=network-pre.target\nBefore=shutdown.target\nBefore=firewalld.target\nConflicts=shutdown.target",
-	"cloud-init-network.service": "Wants=cloud-init-local.service\nWants=sshd-keygen.service\nWants=sshd.service\nAfter=cloud-init-local.service\nAfter=systemd-networkd-wait-online.service\n" +
-		"After=NetworkManager.service\nAfter=NetworkManager-wait-online.service\nBefore=network-online.target\nBefore=sshd-keygen.service\nBefore=sshd.service\nBefore=systemd-user-sessions.service",
+// Rocky Linux 10's own units (RHEL 10's cloud-init), from
+// cloud-init-24.4-7.el10_2.1.rocky.0.1.noarch.rpm and
+// nftables-1.1.5-6.el10_2.x86_64.rpm
+// (https://dl.rockylinux.org/pub/rocky/10/AppStream/x86_64/os/Packages/c/,
+// .../10/BaseOS/x86_64/os/Packages/n/), under /usr/lib/systemd/system: one
+// network stage, cloud-init.service, after NetworkManager and not before
+// sysinit.target; a local stage with the default dependencies (so after
+// sysinit.target); no cloud-init-main.service. nftables.service keeps the
+// default dependencies too (After=basic.target), unlike Debian's.
+var rockyStubs = map[string]string{
+	"cloud-init-local.service": "Wants=network-pre.target\nAfter=hv_kvp_daemon.service\nAfter=systemd-remount-fs.service\nBefore=network-pre.target\n" +
+		"Before=shutdown.target\nConflicts=shutdown.target\nRequiresMountsFor=/var/lib/cloud",
+	"cloud-init.service": "DefaultDependencies=no\nWants=cloud-init-local.service\nWants=sshd-keygen.service\nWants=sshd.service\nAfter=cloud-init-local.service\n" +
+		"After=systemd-networkd-wait-online.service\nAfter=NetworkManager.service\nAfter=NetworkManager-wait-online.service\nBefore=network-online.target\n" +
+		"Before=sshd-keygen.service\nBefore=sshd.service\nBefore=systemd-user-sessions.service",
+	"cloud-config.target": "Wants=cloud-init-local.service cloud-init.service\nAfter=cloud-init-local.service cloud-init.service",
+	"cloud-init.target":   "After=multi-user.target\nWants=cloud-init-local.service cloud-init.service cloud-config.service cloud-final.service",
+	"nftables.service":    "Wants=network-pre.target\nBefore=network-pre.target",
 }
 
-// ubuntuStubs: cloud-init's Ubuntu variant is not after
-// systemd-networkd-wait-online.service (netplan's networkd is waited for
-// otherwise).
-var ubuntuStubs = map[string]string{
-	"cloud-init-network.service": "DefaultDependencies=no\nWants=cloud-init-local.service\nWants=sshd-keygen.service\nWants=sshd.service\nAfter=cloud-init-local.service\n" +
-		"After=networking.service\nBefore=network-online.target\nBefore=sshd-keygen.service\nBefore=sshd.service\n" +
+// Ubuntu 24.04's own units, from cloud-init_26.2-0ubuntu1~24.04.2_all.deb
+// (http://archive.ubuntu.com/ubuntu/pool/main/c/cloud-init/), under
+// /usr/lib/systemd/system: one network stage, cloud-init.service (the
+// name noble keeps), after systemd-networkd-wait-online.service and
+// before sysinit.target; no cloud-init-main.service.
+var nobleStubs = map[string]string{
+	"cloud-init-local.service": "DefaultDependencies=no\nWants=network-pre.target\nAfter=hv_kvp_daemon.service\nAfter=systemd-remount-fs.service\n" +
+		"Before=network-pre.target\nBefore=shutdown.target\nBefore=sysinit.target\nConflicts=shutdown.target\nRequiresMountsFor=/var/lib/cloud",
+	"cloud-init.service": "DefaultDependencies=no\nWants=cloud-init-local.service\nWants=sshd-keygen.service\nWants=sshd.service\nAfter=cloud-init-local.service\n" +
+		"After=systemd-networkd-wait-online.service\nAfter=networking.service\nBefore=network-online.target\nBefore=sshd-keygen.service\nBefore=sshd.service\n" +
 		"Before=systemd-user-sessions.service\nBefore=sysinit.target\nBefore=shutdown.target\nConflicts=shutdown.target",
+	"cloud-config.target": "Wants=cloud-init-local.service cloud-init.service\nAfter=cloud-init-local.service cloud-init.service",
+	"cloud-init.target":   "After=multi-user.target\nWants=cloud-init-local.service cloud-init.service cloud-config.service cloud-final.service",
 }
 
 type bootScenario struct {
@@ -119,22 +136,34 @@ type bootScenario struct {
 	network, ssh []string
 }
 
-var cloudInit24 = []string{"cloud-init.target", "cloud-init-main.service", "cloud-init-local.service", "cloud-init-network.service",
-	"cloud-config.target", "cloud-config.service", "cloud-final.service"}
+// cloudInitDebian13 are Debian 13's cloud-init units; cloudInitOneStage
+// Ubuntu 24.04's and Rocky 10's, with their own stubs (nobleStubs,
+// rockyStubs).
+var (
+	cloudInitDebian13 = []string{"cloud-init.target", "cloud-init-main.service", "cloud-init-local.service", "cloud-init-network.service",
+		"cloud-config.target", "cloud-config.service", "cloud-final.service"}
+	cloudInitOneStage = []string{"cloud-init.target", "cloud-init-local.service", "cloud-init.service",
+		"cloud-config.target", "cloud-config.service", "cloud-final.service"}
+)
 
 var bootScenarios = []bootScenario{
-	{name: "debian-cloud-init-24-ifupdown", units: append(slices.Clone(cloudInit24), "networking.service", "ssh.service", "nftables.service"),
+	{name: "debian-13-cloud-init-25.1-ifupdown", units: append(slices.Clone(cloudInitDebian13), "networking.service", "ssh.service", "nftables.service"),
 		network: []string{"networking.service"}, ssh: []string{"ssh.service"}},
 	{name: "debian-cloud-init-23-ifupdown", units: []string{"cloud-init.target", "cloud-init-local.service", "cloud-init.service",
 		"cloud-config.service", "cloud-final.service", "networking.service", "ssh.service", "nftables.service"},
 		network: []string{"networking.service"}, ssh: []string{"ssh.service"}},
-	{name: "debian-cloud-init-24-networkd", units: append(slices.Clone(cloudInit24), "systemd-networkd.service", "systemd-networkd-wait-online.service",
+	{name: "debian-13-cloud-init-25.1-networkd", units: append(slices.Clone(cloudInitDebian13), "systemd-networkd.service", "systemd-networkd-wait-online.service",
 		"ssh.service", "nftables.service"), network: []string{"systemd-networkd.service"}, ssh: []string{"ssh.service"}},
-	{name: "ubuntu-cloud-init-24-networkd-ssh-socket", units: append(slices.Clone(cloudInit24), "systemd-networkd.service",
-		"systemd-networkd-wait-online.service", "ssh.socket", "ssh.service", "ufw.service"), over: ubuntuStubs,
+	{name: "ubuntu-24.04-cloud-init-26.2-networkd-ssh-socket", units: append(slices.Clone(cloudInitOneStage), "systemd-networkd.service",
+		"systemd-networkd-wait-online.service", "ssh.socket", "ssh.service", "ufw.service"), over: nobleStubs,
 		network: []string{"systemd-networkd.service"}, ssh: []string{"ssh.service"}},
-	{name: "rhel-cloud-init-24-networkmanager-firewalld", units: append(slices.Clone(cloudInit24), "NetworkManager.service",
-		"NetworkManager-wait-online.service", "dbus.service", "dbus.socket", "sshd.service", "firewalld.service"), over: rhelStubs,
+	{name: "rocky-10-cloud-init-24.4-networkmanager-firewalld", units: append(slices.Clone(cloudInitOneStage), "NetworkManager.service",
+		"NetworkManager-wait-online.service", "dbus.service", "dbus.socket", "sshd.service", "firewalld.service"), over: rockyStubs,
+		network: []string{"NetworkManager.service"}, ssh: []string{"sshd.service"}},
+	// Rocky's nftables.service in place of firewalld: rayspa is after it,
+	// so after basic.target there, which closes no cycle.
+	{name: "rocky-10-cloud-init-24.4-networkmanager-nftables", units: append(slices.Clone(cloudInitOneStage), "NetworkManager.service",
+		"NetworkManager-wait-online.service", "dbus.service", "dbus.socket", "sshd.service", "nftables.service"), over: rockyStubs,
 		network: []string{"NetworkManager.service"}, ssh: []string{"sshd.service"}},
 	{name: "debian-ifupdown", units: []string{"networking.service", "ssh.service", "nftables.service", "ufw.service"},
 		network: []string{"networking.service"}, ssh: []string{"ssh.service"}},
@@ -255,8 +284,10 @@ func before(t *testing.T, dir, first, then string) bool {
 }
 
 // rayspa's unit closes no ordering cycle at boot, with cloud-init's stages
-// (24.x and the older single network stage), ifupdown, systemd-networkd and
-// NetworkManager, OpenSSH (service and socket) and the host firewalls; and
+// as Debian 13 (25.1), Ubuntu 24.04 (26.2) and Rocky 10 (24.4) ship them
+// and as 23.4 had them, ifupdown, systemd-networkd and NetworkManager,
+// OpenSSH (service and socket) and the host firewalls, Debian's and
+// Rocky's nftables among them; and
 // no interface gets its address, nor does sshd start, before rayspa is
 // ready (its table in, R4-40). systemd-analyze verify finds the cycles,
 // as systemd would at boot; without it the test is skipped, but not in CI
