@@ -887,10 +887,12 @@ func (s *Store) RenewUser(ctx context.Context, name string) (int, error) {
 // keeps neither the lead nor when a secret was first shown. Each user so
 // renewed has an audit line of its own, without the secrets.
 //
-// A database a rollback brought back to schema 13 (CarryRevocations) says
-// in settingRenewedRevoked until when its revocations are renewed: then
-// only the users of devices revoked at that time or later, by the older
-// rayd, get new credentials, not a second time the others.
+// A database a rollback brought back to schema 13 from one at 14 or later
+// (CarryRevocations) says in settingRenewedRevoked until when its
+// revocations are renewed, the earliest such time when it was rolled back
+// more than once: then only the users of devices revoked at that time or
+// later, by the older rayd, get new credentials, not a second time the
+// others. An update that failed before this step ran leaves no mark.
 func renewRevokedUsers(ctx context.Context, tx *sql.Tx, now int64) error {
 	var since int64 // 0: every revocation
 	var mark []byte

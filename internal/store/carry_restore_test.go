@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -603,4 +604,130 @@ func TestRollbackThenUpdateRenewsOnce(t *testing.T) {
 	if v := rows(t, s.db, `SELECT value FROM settings WHERE key = '`+settingRenewedRevoked+`'`); v != "" {
 		t.Errorf("the marker stays: %q", v)
 	}
+}
+
+// renewedBefore is the step of schema 14's audit lines in a database.
+func renewedBefore(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	return rows(t, db, `SELECT target FROM audit_log WHERE action = 'user.renew:revoked-before' ORDER BY target`)
+}
+
+// An update that fails before the new rayd ran (staging rayspa's unit,
+// installing the binaries): failUpdate rolls back with the carry, and the
+// database is at 13 still, its step never run. The copy gets no mark, so
+// the next update renews every user with a device revoked; with the mark
+// an earlier rollback left in both, that mark stays as it was, not moved
+// to the failed update's time.
+func TestRollbackFailedUpdate(t *testing.T) {
+	ctx := context.Background()
+	mark := func(t *testing.T, db *sql.DB) string {
+		t.Helper()
+		return strings.TrimSpace(rows(t, db, `SELECT CAST(value AS TEXT) FROM settings WHERE key = '`+settingRenewedRevoked+`'`))
+	}
+	t.Run("no mark", func(t *testing.T) {
+		dir := t.TempDir()
+		saved, current := filepath.Join(dir, "saved.db"), filepath.Join(dir, "rayd.db")
+		schemaAt(t, saved, 13, matrix13()...)
+		copyFile(t, saved, current)
+		must(t, CarryRevocations(ctx, saved, current))
+		db, err := sql.Open("sqlite", "file:"+saved)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := mark(t, db); m != "" {
+			t.Errorf("a mark %s after a failed update", m)
+		}
+		db.Close()
+		s, err := Open(ctx, saved) // the next update
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		got := renewedBefore(t, s.db)
+		for _, n := range []string{"alice", "carol", "dave", "frank"} {
+			if !strings.Contains(got, n+": ") {
+				t.Errorf("%s not renewed at the next update:\n%s", n, got)
+			}
+		}
+		if strings.Count(got, "\n") != 4 {
+			t.Errorf("renewed:\n%s", got)
+		}
+	})
+	t.Run("earlier mark", func(t *testing.T) {
+		dir := t.TempDir()
+		saved, current := filepath.Join(dir, "saved.db"), filepath.Join(dir, "rayd.db")
+		// The first rollback's mark at 44: carol's two (45, 46), dave's (47)
+		// and frank's (48) revoked after it, on the older rayd.
+		schemaAt(t, saved, 13, append(matrix13(),
+			`INSERT INTO settings (key, value) VALUES ('`+settingRenewedRevoked+`', CAST('44' AS BLOB))`)...)
+		copyFile(t, saved, current)
+		must(t, CarryRevocations(ctx, saved, current))
+		db, err := sql.Open("sqlite", "file:"+saved)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := mark(t, db); m != "44" {
+			t.Errorf("the mark %q, want the first rollback's 44", m)
+		}
+		db.Close()
+		s, err := Open(ctx, saved)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		if got := renewedBefore(t, s.db); strings.Contains(got, "alice") || strings.Count(got, "\n") != 3 {
+			t.Errorf("renewed at the next update:\n%s", got)
+		}
+	})
+}
+
+// Two rollbacks: the first marks the copy at T1; the older rayd revokes
+// bob's phone; an update copies the database (the mark in the copy) and
+// its step renews bob; a second rollback carries that. The copy's mark
+// stays T1 (markRenewed), not the second rollback's time, and the step of
+// the next update renews from T1 on, bob included once more.
+func TestTwoRollbacksKeepFirstMark(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	saved, current := filepath.Join(dir, "saved.db"), filepath.Join(dir, "rayd.db")
+	schemaAt(t, saved, 13, matrix13()...)
+	copyFile(t, saved, current)
+	s, err := Open(ctx, current) // the first update
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	must(t, CarryRevocations(ctx, saved, current)) // the first rollback
+	db, err := sql.Open("sqlite", "file:"+saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t1 := time.Now().Unix() - 1000
+	if _, err := db.Exec(`UPDATE settings SET value = CAST(? AS BLOB) WHERE key = ?`, strconv.FormatInt(t1, 10), settingRenewedRevoked); err != nil {
+		t.Fatal(err)
+	}
+	// v0.26.0: bob's phone revoked, no renewal.
+	if _, err := db.Exec(`UPDATE devices SET revoked_at = ? WHERE id = 'b1'`, t1+10); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	saved2 := filepath.Join(dir, "saved2.db") // the second update's copy
+	copyFile(t, saved, saved2)
+	copyFile(t, saved, current)
+	if s, err = Open(ctx, current); err != nil { // the second update: bob renewed
+		t.Fatal(err)
+	}
+	if got := renewedBefore(t, s.db); !strings.HasPrefix(got, "bob: ") || strings.Count(got, "\n") != 1 {
+		t.Fatalf("the second update renewed:\n%s", got)
+	}
+	s.Close()
+	must(t, CarryRevocations(ctx, saved2, current)) // the second rollback
+	db, err = sql.Open("sqlite", "file:"+saved2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := strings.TrimSpace(rows(t, db, `SELECT CAST(value AS TEXT) FROM settings WHERE key = '`+settingRenewedRevoked+`'`)); m != strconv.FormatInt(t1, 10) {
+		t.Errorf("the mark %q, want the first rollback's %d", m, t1)
+	}
+	db.Close()
 }

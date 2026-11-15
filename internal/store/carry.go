@@ -49,11 +49,16 @@ const settingSPAParams = "spa_params"
 // undone, its secrets being those the clients fetched.
 //
 // A copy older than schema 14 has revocations its step will renew again at
-// the next update: a user of one that current does not have (deleted
-// since) gets new credentials and LAN key here, and settingRenewedRevoked
-// tells the step that every revocation until now is renewed. Each change
-// to credentials has an audit line in saved (user.renew:rollback,
-// device.revoke:rollback, user.carry:rollback).
+// the next update. When current is at 14 or later, its step renewed them,
+// and the carry brought that into saved: a user of one that current does
+// not have (deleted since) gets new credentials and LAN key here, and
+// settingRenewedRevoked tells the step that every revocation until now is
+// renewed; an existing mark (an earlier rollback's) keeps its earlier
+// time (markRenewed). When current is older than 14 too (an update that
+// failed before the new rayd migrated it), nothing renewed them: no mark,
+// and the next update renews them all. Each change to credentials has an
+// audit line in saved (user.renew:rollback, device.revoke:rollback,
+// user.carry:rollback).
 //
 // Users and relays are matched by ID, name or address, and creation time:
 // SQLite reuses the ID of a deleted row. What was added or changed since
@@ -92,6 +97,14 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 	if err != nil {
 		return err
 	}
+	curVersion, err := schemaOf(ctx, tx, "cur")
+	if err != nil {
+		return err
+	}
+	// The step of schema 14 renewed current's revoked users, and saved may
+	// say so once the carry brought their credentials: not after an update
+	// that failed before the new rayd ran, current at 13 as saved is.
+	renewedAll := version < 14 && curVersion >= 14
 	// The same user in both: a deleted user's ID may have gone to another.
 	const sameUser = `c.id = users.id AND c.name = users.name AND c.created_at = users.created_at`
 	if _, err := carryCredentials(ctx, tx); err != nil {
@@ -102,7 +115,7 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 		return err
 	}
 	renewed := map[string]int{}
-	if version < 14 {
+	if renewedAll {
 		// The step of schema 14 will skip what is renewed until now: the
 		// credentials of a user with a device revoked that current does not
 		// have are the copy's, of before the step, and get new ones here.
@@ -222,13 +235,41 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 			return err
 		}
 	}
-	if version < 14 {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES (?, ?)
-			ON CONFLICT(key) DO UPDATE SET value = excluded.value`, settingRenewedRevoked, []byte(strconv.FormatInt(now, 10))); err != nil {
+	if renewedAll {
+		if err := markRenewed(ctx, tx, now); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// markRenewed writes settingRenewedRevoked into main at now, unless main
+// has one already at an earlier time: a copy an earlier rollback marked at
+// T1, on which the older rayd ran and revoked devices without renewing,
+// and which an update then copied again. T1 stays. A mark claims that
+// every revocation before it has its user renewed; the carry vouches only
+// for what current's step renewed, and that step took T1 from this copy.
+// Wrong the later way, a device revoked between T1 and now would keep its
+// user's credentials for good, and nothing would say so; wrong the earlier
+// way, the next update renews once more the users of devices revoked
+// between T1 and now, whose other devices reconnect after their next
+// fetch. A mark that does not read as a time stays too: the step takes it
+// for none, and renews them all.
+func markRenewed(ctx context.Context, tx *sql.Tx, now int64) error {
+	var old []byte
+	err := tx.QueryRowContext(ctx, `SELECT value FROM main.settings WHERE key = ?`, settingRenewedRevoked).Scan(&old)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return err
+	default:
+		if t, perr := strconv.ParseInt(string(old), 10, 64); perr != nil || t <= now {
+			return nil
+		}
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO main.settings (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, settingRenewedRevoked, []byte(strconv.FormatInt(now, 10)))
+	return err
 }
 
 // CarriedDevice is a device revoked in the current database and active in
