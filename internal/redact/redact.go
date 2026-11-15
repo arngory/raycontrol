@@ -56,7 +56,12 @@ var (
 	// Shorter hex runs: device and node IDs, which link reports to a node.
 	hexIDs = regexp.MustCompile(`(?i)\b[0-9a-f]{12,31}\b`)
 	ipv4   = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
-	ipv6   = regexp.MustCompile(`(?i)\b(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}\b`)
+	// The last group may be missing: an address or a prefix that ends in
+	// "::" (2001:db8::/32, an admin prefix) ends on no word boundary. Or
+	// it is an IPv4 address (64:ff9b::198.51.100.9), taken whole: cut at
+	// its first dot, the rest would be three octets that the IPv4 pattern
+	// does not take. Only what parses as an address is replaced (addr).
+	ipv6 = regexp.MustCompile(`(?i)\b(?:[0-9a-f]{0,4}:){2,8}(?:\d{1,3}(?:\.\d{1,3}){3}\b|[0-9a-f]{1,4}\b)?`)
 )
 
 // String redacts s.

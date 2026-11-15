@@ -40,6 +40,23 @@ ok: unit niko-dns.service active, port 53, version v0.1.1`
 	}
 }
 
+// Addresses and prefixes that end in "::", or in an IPv4 address, go
+// whole: an admin prefix in a relay's install message is one.
+func TestIPv6Ends(t *testing.T) {
+	out := New().String(`admin addresses [2001:db8:1::/48 198.51.100.7/32], sshd at [2001:db8::]:22, ` +
+		`nat64 64:ff9b::198.51.100.9, full 1:2:3:4:5:6:7::, at 2026-11-20T03:41:12Z 12:30:45 aa:bb:cc:dd:ee:ff`)
+	for _, leak := range []string{"2001:db8", "198.51.100", "51.100.9", "1:2:3"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("leaked %q: %s", leak, out)
+		}
+	}
+	for _, keep := range []string{"<ip6:", "/48 <ip4:", "]:22,", "2026-11-20T03:41:12Z 12:30:45 aa:bb:cc:dd:ee:ff"} {
+		if !strings.Contains(out, keep) {
+			t.Errorf("missing %q: %s", keep, out)
+		}
+	}
+}
+
 // Names learned later (a node's DNS tunnel zones) are hidden as well.
 func TestAdd(t *testing.T) {
 	r := New("203.0.113.7")
