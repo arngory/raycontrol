@@ -28,15 +28,16 @@ type turnNode struct {
 	srv     *Server
 	sock    string
 	advance func(time.Duration)
+	step    func(time.Duration) // the clock set back or on: the monotonic one stays
 	now     func() time.Time
 	st      nodeupdate.Status // the last update's status
 }
 
 func newTurnNode(t *testing.T, names ...string) *turnNode {
 	t.Helper()
-	srv, _, advance, now, sock := relayNode(t, "v0.28.0", names...)
-	n := &turnNode{t: t, ctx: context.Background(), srv: srv, sock: sock, advance: advance, now: now}
-	n.status(nodeupdate.Status{ID: "6f1c0e2a9b3d4c5e", State: nodeupdate.Done, From: "v0.27.0", To: "v0.28.0", Kind: nodeupdate.Remote, Ended: now()})
+	srv, _, clock, sock := relayNodeClock(t, "v0.28.0", names...)
+	n := &turnNode{t: t, ctx: context.Background(), srv: srv, sock: sock, advance: clock.advance, step: clock.step, now: clock.now}
+	n.status(nodeupdate.Status{ID: "6f1c0e2a9b3d4c5e", State: nodeupdate.Done, From: "v0.27.0", To: "v0.28.0", Kind: nodeupdate.Remote, Ended: n.now()})
 	return n
 }
 
@@ -102,7 +103,7 @@ func (n *turnNode) offers() []string {
 func (n *turnNode) restart() {
 	ru := &n.srv.relayUpd
 	ru.mu.Lock()
-	ru.relays, ru.started = nil, time.Time{}
+	ru.relays, ru.started, ru.startedAt = nil, time.Time{}, steady{}
 	ru.mu.Unlock()
 }
 
@@ -459,6 +460,72 @@ func TestRelayTurnHeldAcrossOffers(t *testing.T) {
 	if !ok || n.now().Sub(given) < TurnTimeout || n.now().Sub(given) > TurnTimeout+time.Minute {
 		t.Fatalf("r1 after %v, %v after r2's turn: %v", waited, n.now().Sub(given), n.states())
 	}
+}
+
+// The exit's clock set back or on (a step: NTP after a boot, by hand)
+// moves no turn (§3.7): while rayd runs a turn lasts TurnTimeout on its
+// monotonic clock from when it was given, neither for ever (set back) nor
+// ending at once under a relay that updates (set on); a turn and a word
+// the records have ahead of the clock after a restart count from then.
+func TestRelayTurnClockSteps(t *testing.T) {
+	setUp := func(t *testing.T) *turnNode {
+		t.Helper()
+		n := newTurnNode(t, "r1", "r2")
+		n.feed("r1", "r2")
+		n.report("r1", nodeupdate.Idle, "v0.27.0", "")
+		n.report("r2", nodeupdate.Idle, "v0.27.0", "")
+		if got := n.offers(); !slices.Equal(got, []string{"r1"}) {
+			t.Fatalf("r1's turn: %v", got)
+		}
+		return n
+	}
+	// r1 silent in its turn: it runs out all the same.
+	t.Run("set back", func(t *testing.T) {
+		n := setUp(t)
+		n.step(-2 * time.Hour)
+		if waited, ok := n.within("r2", TurnTimeout); !ok || waited < TurnTimeout-time.Minute {
+			t.Fatalf("r2 after %v (%v): %v", waited, ok, n.states())
+		}
+		if got := n.states(); !slices.Equal(got, []string{"r1 failed", "r2 offered"}) {
+			t.Fatalf("%v", got)
+		}
+	})
+	// While r1 updates: its turn goes on, and its update.
+	t.Run("set on", func(t *testing.T) {
+		n := setUp(t)
+		n.report("r1", nodeupdate.Requested, "v0.27.0", n.st.ID)
+		n.advance(time.Minute)
+		n.report("r1", nodeupdate.Running, "v0.27.0", n.st.ID)
+		n.step(2 * time.Hour)
+		if got := n.offers(); !slices.Equal(got, []string{"r1"}) {
+			t.Fatalf("%v", got)
+		}
+		if got := n.states(); !slices.Equal(got, []string{"r1 running", "r2 waiting"}) {
+			t.Fatalf("%v", got)
+		}
+		n.advance(5 * time.Minute)
+		n.report("r1", nodeupdate.Done, "v0.28.0", n.st.ID)
+		if got := n.offers(); !slices.Equal(got, []string{"r1", "r2"}) {
+			t.Fatalf("r1 done: %v", got)
+		}
+	})
+	// r1's turn and its word, ahead of the clock, count from the restart.
+	t.Run("restarted, set back", func(t *testing.T) {
+		n := setUp(t)
+		n.report("r1", nodeupdate.Running, "v0.27.0", n.st.ID)
+		n.restart()
+		n.step(-2 * time.Hour)
+		n.feed("r1", "r2")
+		if got := n.offers(); !slices.Equal(got, []string{"r1"}) {
+			t.Fatalf("%v", got)
+		}
+		if got := n.states(); !slices.Equal(got, []string{"r1 running", "r2 waiting"}) {
+			t.Fatalf("%v", got)
+		}
+		if waited, ok := n.within("r2", TurnTimeout); !ok || waited < TurnTimeout-time.Minute {
+			t.Fatalf("r2 after %v (%v): %v", waited, ok, n.states())
+		}
+	})
 }
 
 // Two looks at the queue at once give one turn: the turn is written

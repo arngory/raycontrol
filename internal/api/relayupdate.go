@@ -228,10 +228,11 @@ func offerKey(o *perimeterv1.RelayUpdateOffer) string {
 // at every look (the turns are in the records), so after a restart of the
 // exit from the records alone. The zero value is ready.
 type relayUpdates struct {
-	mu      sync.Mutex
-	started time.Time // the first look: a relay not seen since was not seen before it
-	relays  map[string]*relayLive
-	red     *redact.Redactor // the relays' errors, once more: one salt while rayd runs
+	mu        sync.Mutex
+	started   time.Time // the first look: a relay not seen since was not seen before it
+	startedAt steady    // started as the queue holds it
+	relays    map[string]*relayLive
+	red       *redact.Redactor // the relays' errors, once more: one salt while rayd runs
 	// turnMu holds a look at the queue that may give a turn, and a relay's
 	// removal or addition, as one (§3.3): two looks never give two turns
 	// at once, and none goes to a relay removed meanwhile or to a new one
@@ -259,6 +260,33 @@ type relayLive struct {
 	// it began, and how many came in it.
 	auditFrom time.Time
 	audits    int
+	// Its record's times and closedAt as the queue holds them (steady).
+	turnAt, changedAt, underwayAt, closed steady
+}
+
+// steady is one of the queue's times (§3.3: a turn given, a relay's
+// change, a feed gone), unix seconds on the exit's clock as it was then,
+// held on this rayd's monotonic clock from when the queue first sees it:
+// a step of the clock meanwhile (set back, or on by hours: NTP after a
+// boot, by hand) neither stretches a turn without end nor ends one under
+// way (§3.7). One ahead of the clock when first seen (the clock set back
+// before this rayd started) is taken as then: a turn so lasts TurnTimeout
+// from it at most, and a relay updating in it is not passed by.
+type steady struct {
+	unix int64         // the time as kept
+	mono time.Duration // when it was on the monotonic clock
+}
+
+// of is time t (unix seconds) as the clock reads it at now, mono the
+// monotonic clock then; 0 stays 0.
+func (s *steady) of(t int64, now time.Time, mono time.Duration) int64 {
+	if t == 0 {
+		return 0
+	}
+	if s.unix != t {
+		s.unix, s.mono = t, mono-max(now.Sub(time.Unix(t, 0)), 0)
+	}
+	return now.Add(s.mono - mono).Unix()
 }
 
 // live is relay name's, under mu.
@@ -504,18 +532,21 @@ func (s *Server) relayViews(ctx context.Context, now time.Time) ([]relayView, er
 		}
 		views = append(views, relayView{Name: r.Name, Rec: rec})
 	}
+	// The times the queue goes by, on the monotonic clock (steady).
+	mono := s.NodeUpdate.mono()
 	ru := &s.relayUpd
 	ru.mu.Lock()
-	start := ru.start(now)
+	start := time.Unix(ru.startedAt.of(ru.start(now).Unix(), now, mono), 0)
 	for i := range views {
 		v := &views[i]
-		v.ClosedAt = start
-		if l := ru.relays[v.Name]; l != nil {
-			v.Feeds = l.feeds
-			if !l.closedAt.IsZero() {
-				v.ClosedAt = l.closedAt
-			}
+		l := ru.live(v.Name, now)
+		v.Feeds, v.ClosedAt = l.feeds, start
+		if !l.closedAt.IsZero() {
+			v.ClosedAt = time.Unix(l.closed.of(l.closedAt.Unix(), now, mono), 0)
 		}
+		v.Rec.TurnAt = l.turnAt.of(v.Rec.TurnAt, now, mono)
+		v.Rec.ChangedAt = l.changedAt.of(v.Rec.ChangedAt, now, mono)
+		v.Rec.UnderwayAt = l.underwayAt.of(v.Rec.UnderwayAt, now, mono)
 	}
 	ru.mu.Unlock()
 	slices.SortFunc(views, func(a, b relayView) int { return strings.Compare(a.Name, b.Name) })
@@ -605,6 +636,7 @@ func (ru *relayUpdates) forget(name string) {
 	defer ru.mu.Unlock()
 	if l := ru.relays[name]; l != nil {
 		l.seen, l.seenSaved, l.auditFrom, l.audits = time.Time{}, time.Time{}, time.Time{}, 0
+		l.turnAt, l.changedAt, l.underwayAt = steady{}, steady{}, steady{}
 	}
 }
 

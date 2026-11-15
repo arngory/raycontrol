@@ -301,10 +301,50 @@ func TestRelayQueue(t *testing.T) {
 	}
 }
 
-// testClock is a clock the test moves.
+// A time of the queue's is held on the monotonic clock from when it is
+// first seen: the clock's steps after move it with the clock, so that it
+// stays as long ago as it was; one ahead of the clock is taken as then.
+func TestSteady(t *testing.T) {
+	c := newTestClock()
+	var s steady
+	at := c.now().Add(-5 * time.Minute).Unix()
+	if got := s.of(at, c.now(), c.mono()); got != at {
+		t.Fatalf("first seen: %d, kept %d", got, at)
+	}
+	c.advance(time.Minute)
+	c.step(-2 * time.Hour)
+	if got := s.of(at, c.now(), c.mono()); got != c.now().Add(-6*time.Minute).Unix() {
+		t.Fatalf("set back: %v ago", c.now().Sub(time.Unix(got, 0)))
+	}
+	c.step(5 * time.Hour)
+	if got := s.of(at, c.now(), c.mono()); got != c.now().Add(-6*time.Minute).Unix() {
+		t.Fatalf("set on: %v ago", c.now().Sub(time.Unix(got, 0)))
+	}
+	ahead := c.now().Add(3 * time.Hour).Unix()
+	if got := s.of(ahead, c.now(), c.mono()); got != c.now().Unix() {
+		t.Fatalf("ahead: %v ago", c.now().Sub(time.Unix(got, 0)))
+	}
+	c.advance(time.Minute)
+	if got := s.of(ahead, c.now(), c.mono()); got != c.now().Add(-time.Minute).Unix() {
+		t.Fatalf("ahead, a minute on: %v ago", c.now().Sub(time.Unix(got, 0)))
+	}
+	if got := s.of(0, c.now(), c.mono()); got != 0 {
+		t.Fatalf("none: %d", got)
+	}
+}
+
+// testClock is a clock the test moves, with a monotonic one beside it: a
+// step moves the clock alone, as one set back or on does.
 type testClock struct {
-	mu sync.Mutex
-	t  time.Time
+	mu      sync.Mutex
+	t       time.Time
+	start   time.Time
+	stepped time.Duration
+}
+
+func newTestClock() *testClock {
+	t := time.Date(2026, 11, 20, 3, 40, 0, 0, time.UTC)
+	return &testClock{t: t, start: t}
 }
 
 func (c *testClock) now() time.Time {
@@ -313,10 +353,22 @@ func (c *testClock) now() time.Time {
 	return c.t
 }
 
+func (c *testClock) mono() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t.Sub(c.start) - c.stepped
+}
+
 func (c *testClock) advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.t = c.t.Add(d)
+}
+
+func (c *testClock) step(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t, c.stepped = c.t.Add(d), c.stepped+d
 }
 
 // relayNode is an exit of version with the relays named, each with its
@@ -324,6 +376,13 @@ func (c *testClock) advance(d time.Duration) {
 // test's and a clock the test moves; sock is its API's socket.
 func relayNode(t *testing.T, version string, names ...string) (srv *Server, bundles map[string]node.RelayBundle, advance func(time.Duration),
 	now func() time.Time, sock string) {
+	t.Helper()
+	srv, bundles, clock, sock := relayNodeClock(t, version, names...)
+	return srv, bundles, clock.advance, clock.now, sock
+}
+
+// relayNodeClock is relayNode with its clock.
+func relayNodeClock(t *testing.T, version string, names ...string) (srv *Server, bundles map[string]node.RelayBundle, clock *testClock, sock string) {
 	t.Helper()
 	srv, sock, _ = startServer(t)
 	ctx := context.Background()
@@ -348,11 +407,11 @@ func relayNode(t *testing.T, version string, names ...string) (srv *Server, bund
 		bundles[name] = b
 	}
 	dir := t.TempDir()
-	clock := &testClock{t: time.Date(2026, 11, 20, 3, 40, 0, 0, time.UTC)}
+	clock = newTestClock()
 	srv.Version = version
 	srv.NodeUpdate = &NodeUpdate{Request: filepath.Join(dir, "update-request"), Status: filepath.Join(dir, "status.json"),
-		Policy: filepath.Join(dir, "policy.json"), Unit: filepath.Join(dir, "unit"), Now: clock.now}
-	return srv, bundles, clock.advance, clock.now, sock
+		Policy: filepath.Join(dir, "policy.json"), Unit: filepath.Join(dir, "unit"), Now: clock.now, Mono: clock.mono}
+	return srv, bundles, clock, sock
 }
 
 // setRecord puts relay name's record in place, as a report would.

@@ -24,7 +24,11 @@ type NodeUpdate struct {
 	// LatestPatch the newest patch release of the running minor version
 	// they found after a newer minor version ("" when none).
 	Latest, LatestPatch func() string
-	Now                 func() time.Time
+	// Now is the clock; Mono this rayd's monotonic one, which a step of
+	// the clock (set back, or on by hours) does not move. A test gives
+	// both, or Now alone, whose time Mono then follows.
+	Now  func() time.Time
+	Mono func() time.Duration
 }
 
 func (u *NodeUpdate) request() string {
@@ -84,6 +88,20 @@ func (u *NodeUpdate) now() time.Time {
 		return nodeupdate.LocalNow() // the zone as it is now, not as rayd started
 	}
 	return u.Now()
+}
+
+// monoStart is this rayd's start on its monotonic clock.
+var monoStart = time.Now()
+
+// mono is the time on this rayd's monotonic clock (Mono).
+func (u *NodeUpdate) mono() time.Duration {
+	switch {
+	case u != nil && u.Mono != nil:
+		return u.Mono()
+	case u != nil && u.Now != nil:
+		return u.Now().Sub(monoStart.Round(0))
+	}
+	return time.Since(monoStart)
 }
 
 // current is the last status as it stands now, and the request waiting.
