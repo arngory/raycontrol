@@ -1,0 +1,11 @@
+go test fuzz v1
+string("")
+string("")
+string("")
+[]byte("")
+[]byte("")
+uint8(0)
+uint8(0)
+uint8(0)
+uint8(0)
+string("nat64 64:ff9b::198.51.100.09 up")

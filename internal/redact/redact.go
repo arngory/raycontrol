@@ -143,22 +143,30 @@ func (r *Redactor) addr(m string) string {
 }
 
 // parseAddr parses an address as a reader takes it: an IPv4 one with a
-// leading zero in an octet too (203.0.113.05), which netip refuses.
+// leading zero in an octet too (203.0.113.05), which netip refuses, alone
+// or at the end of an IPv6 one (64:ff9b::198.51.100.09).
 func parseAddr(m string) (netip.Addr, bool) {
 	if a, err := netip.ParseAddr(m); err == nil {
 		return a, true
 	}
-	if strings.Contains(m, ":") || strings.Count(m, ".") != 3 {
+	head, v4 := "", m
+	if i := strings.LastIndexByte(m, ':'); i >= 0 {
+		head, v4 = m[:i+1], m[i+1:]
+	}
+	if strings.Count(v4, ".") != 3 {
 		return netip.Addr{}, false
 	}
-	octets := strings.Split(m, ".")
+	octets := strings.Split(v4, ".")
 	for i, o := range octets {
+		if o == "" {
+			return netip.Addr{}, false
+		}
 		octets[i] = strings.TrimLeft(o, "0")
 		if octets[i] == "" {
 			octets[i] = "0"
 		}
 	}
-	a, err := netip.ParseAddr(strings.Join(octets, "."))
+	a, err := netip.ParseAddr(head + strings.Join(octets, "."))
 	return a, err == nil
 }
 

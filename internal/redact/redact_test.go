@@ -85,6 +85,21 @@ func TestAddressEnds(t *testing.T) {
 	}
 }
 
+// An IPv6 address that ends in an IPv4 one with a leading zero goes whole,
+// with the token it has without the zero: the IPv4 part alone went before,
+// and "64:ff9b::" stayed, an address a second redaction then took.
+// testdata/fuzz/FuzzRedact/embedded-leading-zero.
+func TestEmbeddedLeadingZero(t *testing.T) {
+	r := New()
+	want := r.String("nat64 64:ff9b::198.51.100.9 up")
+	for _, in := range []string{"nat64 64:ff9b::198.51.100.09 up", "nat64 64:ff9b::198.051.100.009 up"} {
+		out := r.String(in)
+		if out != want || r.String(out) != out {
+			t.Errorf("%q: %q, then %q; want %q", in, out, r.String(out), want)
+		}
+	}
+}
+
 // An address with all its groups written out, or seven and "::", then a
 // port or a hex word after a colon, without brackets: the pattern takes
 // the colon and what follows with it, and the whole does not parse (eight
