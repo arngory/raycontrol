@@ -169,6 +169,13 @@ jobs:
   release:
     needs: [ci, build, rayctl]
     runs-on: ubuntu-24.04
+    # One publish at a time: two close together would both list the
+    # releases before either is out, and both pass --latest. The one that
+    # runs is not cancelled; GitHub keeps one waiting, so a third that
+    # comes meanwhile cancels the waiting one, which is run again by hand.
+    concurrency:
+      group: release
+      cancel-in-progress: false
     permissions:
       contents: write
     env:
