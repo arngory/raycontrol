@@ -721,11 +721,11 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 		units = append(units, unit{
 			name:        render.UnitName("front"),
 			description: "niko-server front (multiplexers)",
-			needs:       path.Join(p.Rendered, "front", "front.json"),
+			needs:       p.FrontConfig(),
 			after:       after,
 			service: append([]string{
 				"User=niko-front", "Group=niko-front",
-				"ExecStart=" + bin.NikoServer + " front -c " + path.Join(p.Rendered, "front", "front.json"),
+				"ExecStart=" + bin.NikoServer + " front -c " + p.FrontConfig(),
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, "front"), "/run/"),
 				// The front group (rayd) passes through to the stats
 				// socket; the credentials in it are the front's alone

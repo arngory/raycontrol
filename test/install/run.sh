@@ -221,6 +221,21 @@ if [[ $distro == debian13 ]]; then
 	[[ $(x stat -c '%a %U %G' /run/niko/reality-in) == "2750 niko-reality niko-front" ]] ||
 		fail "no socket directory of REALITY for the front: $(x ls -l /run/niko)"
 	x systemctl is-enabled --quiet niko-front.service || fail "the front's unit is not installed before its config"
+	# hy2-obfs needs no certificate: the front comes up with it alone, and
+	# stops when it goes, its config with it, and stays so through rayctl
+	# apply. The config of before used to stay and start the front without
+	# the service's salamander password, again every 2 s, at that apply,
+	# an update or a reboot (review of v0.28.0).
+	out="$(x rayctl service add hy2-obfs hy2-obfs 2>&1)" || fail "rayctl service add hy2-obfs: $out"
+	out="$(x rayctl apply 2>&1)" || fail "rayctl apply with hy2-obfs: $out"
+	wait_active niko-hy2-obfs.service niko-front.service
+	out="$(x rayctl service del hy2-obfs 2>&1)" || fail "rayctl service del hy2-obfs: $out"
+	out="$(x rayctl apply 2>&1)" || fail "rayctl apply without hy2-obfs: $out"
+	sleep 3 # an auto-restart comes 2 s after the exit
+	st="$(x systemctl show -p ActiveState,SubState,ConditionResult niko-front.service | sort | paste -sd' ')"
+	if [[ $st != "ActiveState=inactive ConditionResult=no SubState=dead" ]] || x test -e /var/lib/raycontrol/rendered/front/front.json; then
+		fail "the front after its last service went ($st): $(x journalctl --no-pager -u niko-front -n 5 -o cat)"
+	fi
 	# The site's names from a CA of this test; REALITY takes a chain only
 	# as long as a real one.
 	x sh -ec 'cd /root && umask 077

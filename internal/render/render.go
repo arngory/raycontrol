@@ -843,7 +843,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		files = append(files, File{Path: path.Join(p.Rendered, "front", "front.json"), Mode: 0o640, Group: GroupName("front"), Content: b, Service: "front"})
+		files = append(files, File{Path: p.FrontConfig(), Mode: 0o640, Group: GroupName("front"), Content: b, Service: "front"})
 	}
 	if len(errs) > 0 {
 		return files, skipped, errs
@@ -1639,6 +1639,11 @@ const DNSProbeKeyFile = "dnsprobe.key"
 // niko-server v0.11.0): in the front's runtime directory, which the front
 // group (rayd) may pass through.
 func (p Paths) FrontStats() string { return p.socket("front", "stats") }
+
+// FrontConfig is the front's config. Its unit waits for it
+// (ConditionPathExists): rayd removes it once the front carries nothing
+// (live.Apply).
+func (p Paths) FrontConfig() string { return path.Join(p.Rendered, "front", "front.json") }
 
 // FrontDNSProbe is where the front reads the dnsprobe-v1 key.
 func (p Paths) FrontDNSProbe() string {
