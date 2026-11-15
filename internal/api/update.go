@@ -149,8 +149,9 @@ func (s *Server) StartUpdate(ctx context.Context, req *connect.Request[nodev1.St
 }
 
 // GetUpdateStatus reports the last update by request, or the one under
-// way, and root's policy.
-func (s *Server) GetUpdateStatus(_ context.Context, _ *connect.Request[nodev1.GetUpdateStatusRequest]) (*connect.Response[nodev1.GetUpdateStatusResponse], error) {
+// way, root's policy, and the relays' updates by the node's word
+// (spec/relay-update-remote-v1.md §8).
+func (s *Server) GetUpdateStatus(ctx context.Context, _ *connect.Request[nodev1.GetUpdateStatusRequest]) (*connect.Response[nodev1.GetUpdateStatusResponse], error) {
 	u := s.NodeUpdate
 	now := u.now()
 	st, r, waiting := u.current(now)
@@ -166,6 +167,7 @@ func (s *Server) GetUpdateStatus(_ context.Context, _ *connect.Request[nodev1.Ge
 		Held:      st.Held,
 		// After Latest: a field for clients, set from the same checks.
 		LatestPatch: u.latestPatch(s.Version),
+		Relays:      s.relayStatuses(ctx, st, r, waiting, now),
 	}
 	if waiting && r.ID != st.ID {
 		out.Status = requestedPB(r, s.Version)

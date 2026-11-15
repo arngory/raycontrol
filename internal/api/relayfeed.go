@@ -69,6 +69,7 @@ func (f *relayFeed) Report(ctx context.Context, req *connect.Request[perimeterv1
 	if err != nil {
 		return nil, err
 	}
+	f.r.Server.relayHeard(ctx, relay.Name, f.r.Server.NodeUpdate.now())
 	if f.r.RelayReport == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, summary.ErrDisabled)
 	}
@@ -126,12 +127,43 @@ func (f *relayFeed) Report(ctx context.Context, req *connect.Request[perimeterv1
 	return nil, connect.NewError(connect.CodeInternal, errors.New("report not taken"))
 }
 
-// ReportUpdate is a relay's word on its updates by the exit's
-// (spec/relay-update-remote-v1.md §3.2). Not taken yet: every caller gets
-// what an exit without the method answers, so a relay's rayd relay stays
-// quiet until its next feed, as it does with an older exit.
-func (*relayFeed) ReportUpdate(context.Context, *connect.Request[perimeterv1.ReportUpdateRequest]) (*connect.Response[perimeterv1.ReportUpdateResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("relay updates are not taken yet"))
+// ReportUpdate takes a relay's word on its updates by the exit's
+// (spec/relay-update-remote-v1.md §3.2): a whole state each time, kept
+// for the phone (GetUpdateStatus) and for the queue. The relay is not
+// trusted (§6): anyone but the relay gets what Report gives a stranger;
+// more than one call at once, or more than maxUpdateReports a minute, is
+// refused (ResourceExhausted), as is a field out of its bounds
+// (InvalidArgument); its error is cleaned again. The audit log and the
+// journal get codes and versions, never the error.
+func (f *relayFeed) ReportUpdate(ctx context.Context, req *connect.Request[perimeterv1.ReportUpdateRequest]) (*connect.Response[perimeterv1.ReportUpdateResponse], error) {
+	relay, err := f.relayFrom(ctx, req.Peer().Addr)
+	if err != nil {
+		return nil, err
+	}
+	s := f.r.Server
+	now := s.NodeUpdate.now()
+	done, err := s.relayUpd.admit(relay.Name, now)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	next, err := checkRelayUpdate(req.Msg, func(e string) string { return s.cleanRelayError(ctx, e) })
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	changed, err := s.takeRelayReport(ctx, relay.Name, next, now)
+	if err != nil {
+		return nil, relayLookup(err)
+	}
+	if changed {
+		line := relayUpdateLine(next)
+		f.r.Log.Info(line, "relay", relay.Name)
+		if err := s.Store.Audit(ctx, "relay "+relay.Name, line, relay.Name, "ok"); err != nil {
+			f.r.Log.Warn("relay update: the audit log", "relay", relay.Name, "err", err)
+		}
+		s.kickRelayFeeds(ctx)
+	}
+	return connect.NewResponse(&perimeterv1.ReportUpdateResponse{}), nil
 }
 
 // WatchRelay streams a relay's perimeter: the current snapshot at once and a
@@ -178,6 +210,9 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 		}
 		f.r.relayMu.Unlock()
 	}()
+	// Any feed open is the relay heard of (§8.1, seen_at).
+	s.relayUpd.listen(relay.Name, 1, s.NodeUpdate.now())
+	defer func() { s.relayUpd.listen(relay.Name, -1, s.NodeUpdate.now()) }()
 	// A feed with updates open or gone moves the queue (§3.3): the relay
 	// is there to take its turn, or may be past it.
 	updates := req.Msg.Updates
@@ -241,6 +276,7 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 		if updates && s.relayUpd.sentOffer(relay.Name, offered, kicks, s.NodeUpdate.now()) {
 			s.kickRelayFeeds(ctx) // a relay given its turn: the others wait
 		}
+		s.relayHeard(ctx, relay.Name, s.NodeUpdate.now())
 		select {
 		case <-ctx.Done():
 			return nil

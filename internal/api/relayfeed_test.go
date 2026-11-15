@@ -487,9 +487,9 @@ func TestRelayReport(t *testing.T) {
 	if err := report(dev.ID, "203.0.113.0/24", "{}"); err != nil {
 		t.Errorf("after the others: %v", err)
 	}
-	// Its updates are not taken yet: the relay hears what an older exit
-	// answers (spec/relay-update-remote-v1.md §3.2).
-	if _, err := feed.ReportUpdate(ctx, connect.NewRequest(&perimeterv1.ReportUpdateRequest{Update: &perimeterv1.RelayUpdate{State: "idle"}})); connect.CodeOf(err) != connect.CodeUnimplemented {
+	// Its word on its updates, beside (spec/relay-update-remote-v1.md
+	// §3.2): its own bounds, none of the summary's.
+	if _, err := feed.ReportUpdate(ctx, connect.NewRequest(&perimeterv1.ReportUpdateRequest{Update: &perimeterv1.RelayUpdate{State: "idle"}})); err != nil {
 		t.Errorf("an update report: %v", err)
 	}
 
@@ -669,7 +669,7 @@ func quiet(t *testing.T, what string, feeds ...<-chan *perimeterv1.WatchRelayRes
 // of the offer is a new answer in the feeds it changes and in no other, and
 // rayspa's feed, or an older rayd relay's, sends what it always did.
 func TestRelayFeedOffer(t *testing.T) {
-	srv, bundles, _, now := relayNode(t, "v0.28.0", "r1", "r2")
+	srv, bundles, _, now, _ := relayNode(t, "v0.28.0", "r1", "r2")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	fast := func(r *Remote) { r.Perimeter.Refresh = 50 * time.Millisecond }
@@ -734,7 +734,7 @@ func TestRelayFeedOffer(t *testing.T) {
 // coming moves the queue for a relay that never reported, and wakes only
 // the feeds whose answer it changes.
 func TestRelayFeedTurn(t *testing.T) {
-	srv, bundles, advance, now := relayNode(t, "v0.28.0", "r1", "r2", "r3")
+	srv, bundles, advance, now, _ := relayNode(t, "v0.28.0", "r1", "r2", "r3")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	at := map[string]string{}

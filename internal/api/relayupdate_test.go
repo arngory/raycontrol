@@ -3,19 +3,25 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/encoding/protowire"
 
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
+	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/nodeupdate"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 // The exit names a release to its relays only after an update of its own
@@ -77,7 +83,7 @@ func TestRelayQueue(t *testing.T) {
 	rec := func(state, id, version string, remote bool, changed time.Duration) relayRecord {
 		r := relayRecord{Reported: state, UpdateID: id, Version: version, Remote: remote, ChangedAt: ago(changed).Unix()}
 		if id != "" {
-			r.Since = r.ChangedAt
+			r.Since, r.SinceID = r.ChangedAt, id
 		}
 		return r
 	}
@@ -220,16 +226,17 @@ func (c *testClock) advance(d time.Duration) {
 
 // relayNode is an exit of version with the relays named, each with its
 // bundle, at 198.51.100.20 and on, its update files in a directory of the
-// test's and a clock the test moves.
-func relayNode(t *testing.T, version string, names ...string) (*Server, map[string]node.RelayBundle, func(time.Duration), func() time.Time) {
+// test's and a clock the test moves; sock is its API's socket.
+func relayNode(t *testing.T, version string, names ...string) (srv *Server, bundles map[string]node.RelayBundle, advance func(time.Duration),
+	now func() time.Time, sock string) {
 	t.Helper()
-	srv, sock, _ := startServer(t)
+	srv, sock, _ = startServer(t)
 	ctx := context.Background()
 	c := NewUnixClient(sock)
 	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "api", Name: "api"})); err != nil {
 		t.Fatal(err)
 	}
-	bundles := map[string]node.RelayBundle{}
+	bundles = map[string]node.RelayBundle{}
 	for i, name := range names {
 		addr := fmt.Sprintf("198.51.100.%d", 20+i)
 		if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: name, Address: addr})); err != nil {
@@ -250,7 +257,7 @@ func relayNode(t *testing.T, version string, names ...string) (*Server, map[stri
 	srv.Version = version
 	srv.NodeUpdate = &NodeUpdate{Request: filepath.Join(dir, "update-request"), Status: filepath.Join(dir, "status.json"),
 		Policy: filepath.Join(dir, "policy.json"), Unit: filepath.Join(dir, "unit"), Now: clock.now}
-	return srv, bundles, clock.advance, clock.now
+	return srv, bundles, clock.advance, clock.now, sock
 }
 
 // setRecord puts relay name's record in place, as a report would.
@@ -301,14 +308,14 @@ func TestRelayTurnGiven(t *testing.T) {
 // After a restart of the exit the queue is the records': a relay that
 // reported its outcome passes at once, the next is offered.
 func TestRelayQueueRestart(t *testing.T) {
-	srv, _, advance, now := relayNode(t, "v0.28.0", "r1", "r2", "r3")
+	srv, _, advance, now, _ := relayNode(t, "v0.28.0", "r1", "r2", "r3")
 	ctx := context.Background()
 	st := nodeupdate.Status{ID: "6f1c0e2a9b3d4c5e", State: nodeupdate.Done, From: "v0.27.0", To: "v0.28.0", Kind: nodeupdate.Remote, Ended: now()}
 	if err := nodeupdate.WriteStatus(srv.NodeUpdate.Status, st); err != nil {
 		t.Fatal(err)
 	}
 	setRecord(t, srv, "r1", relayRecord{Reported: nodeupdate.Done, UpdateID: st.ID, Version: "v0.28.0", Remote: true, ChangedAt: now().Unix()})
-	setRecord(t, srv, "r2", relayRecord{Reported: nodeupdate.Running, UpdateID: st.ID, Version: "v0.27.0", Remote: true, ChangedAt: now().Unix(), Since: now().Unix()})
+	setRecord(t, srv, "r2", relayRecord{Reported: nodeupdate.Running, UpdateID: st.ID, Version: "v0.27.0", Remote: true, ChangedAt: now().Unix(), Since: now().Unix(), SinceID: st.ID})
 	setRecord(t, srv, "r3", relayRecord{Reported: nodeupdate.Idle, Version: "v0.27.0", Remote: true, ChangedAt: now().Unix()})
 	offers := func() []string {
 		t.Helper()
@@ -336,8 +343,9 @@ func TestRelayQueueRestart(t *testing.T) {
 	if got := offers(); !slices.Equal(got, []string{"r1", "r2", "r3"}) {
 		t.Fatalf("after TurnTimeout: %v", got)
 	}
-	// A relay removed is no longer in the queue.
-	setRecord(t, srv, "r2", relayRecord{Reported: nodeupdate.Running, UpdateID: st.ID, Version: "v0.27.0", Remote: true, ChangedAt: now().Unix(), Since: now().Unix()})
+	// A relay removed mid-update is no longer in the queue: r2 updating,
+	// as its record says when it took its turn a moment ago.
+	setRecord(t, srv, "r2", relayRecord{Reported: nodeupdate.Running, UpdateID: st.ID, Version: "v0.27.0", Remote: true, ChangedAt: now().Unix(), Since: now().Unix(), SinceID: st.ID})
 	if got := offers(); !slices.Equal(got, []string{"r1", "r2"}) {
 		t.Fatalf("r2 at it again: %v", got)
 	}
@@ -346,5 +354,437 @@ func TestRelayQueueRestart(t *testing.T) {
 	}
 	if got := offers(); !slices.Equal(got, []string{"r1", "r3"}) {
 		t.Fatalf("r2 removed: %v", got)
+	}
+}
+
+// updateClient is relay b's RelayService at the exit's addr.
+func updateClient(t *testing.T, b node.RelayBundle, addr string) perimeterv1connect.RelayServiceClient {
+	t.Helper()
+	cert, err := DecodeClientCertificate([]byte(b.Cert))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return perimeterv1connect.NewRelayServiceClient(remoteHTTP(b.API.Pin, cert), "https://"+addr)
+}
+
+// relayAudit are the audit lines of relay updates, oldest first.
+func relayAudit(t *testing.T, srv *Server) []string {
+	t.Helper()
+	entries, err := srv.Store.ListAudit(context.Background(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range slices.Backward(entries) {
+		if strings.HasPrefix(e.Action, "relay.update ") {
+			out = append(out, e.Actor+": "+e.Action+" "+e.Target)
+		}
+	}
+	return out
+}
+
+// A relay's word on its updates (spec/relay-update-remote-v1.md §3.2,
+// §3.6, §8.3): from the relay only, within its bounds, its error cleaned
+// again; kept only when it says something new, audited then with codes and
+// versions alone; and the next relay's turn comes with it.
+func TestReportUpdate(t *testing.T) {
+	srv, bundles, advance, now, _ := relayNode(t, "v0.28.0", "r1", "r2")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	at1, _ := serveRemoteFrom(t, srv, "198.51.100.20:40000")
+	at2, _ := serveRemoteFrom(t, srv, "198.51.100.21:40000")
+	elsewhere, _ := serveRemoteFrom(t, srv, "198.51.100.99:40000")
+	r1 := updateClient(t, bundles["r1"], at1)
+	st := nodeupdate.Status{ID: "6f1c0e2a9b3d4c5e", State: nodeupdate.Done, From: "v0.27.0", To: "v0.28.0", Kind: nodeupdate.Auto, Ended: now()}
+	nodeupdate.WriteStatus(srv.NodeUpdate.Status, st)
+	report := func(c perimeterv1connect.RelayServiceClient, u *perimeterv1.RelayUpdate) error {
+		_, err := c.ReportUpdate(ctx, connect.NewRequest(&perimeterv1.ReportUpdateRequest{Update: u}))
+		return err
+	}
+	record := func(name string) relayRecord {
+		t.Helper()
+		r, err := readRelayRecord(ctx, srv.Store, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	// Nobody but the relay: its certificate from elsewhere, another
+	// relay's from its address.
+	idle := &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: nodeupdate.Idle}
+	for name, c := range map[string]perimeterv1connect.RelayServiceClient{
+		"from another address":       updateClient(t, bundles["r1"], elsewhere),
+		"r2's certificate from r1's": updateClient(t, bundles["r2"], at1),
+		"r1's certificate from r2's": updateClient(t, bundles["r1"], at2),
+	} {
+		if err := report(c, idle); connect.CodeOf(err) != connect.CodeNotFound {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if r := record("r1"); r != (relayRecord{}) {
+		t.Fatalf("a stranger's report kept: %+v", r)
+	}
+
+	// Out of bounds.
+	long := strings.Repeat("9", 40)
+	for name, u := range map[string]*perimeterv1.RelayUpdate{
+		"no update":            nil,
+		"a version not one":    {Version: "v0.28", State: nodeupdate.Idle},
+		"a dev build's commit": {Version: "1a2b3c4", State: nodeupdate.Idle},
+		"a version too long":   {Version: "v0.28." + long, State: nodeupdate.Idle},
+		"a target not one":     {Version: "v0.27.0", Target: "latest", State: nodeupdate.Requested, Id: "aa"},
+		"a state unknown":      {Version: "v0.27.0", State: "paused"},
+		"no state":             {Version: "v0.27.0"},
+		"an id not hex":        {Version: "v0.27.0", State: nodeupdate.Failed, Id: "../x"},
+		"an id too long":       {Version: "v0.27.0", State: nodeupdate.Failed, Id: strings.Repeat("a", 33)},
+		"an id in capitals":    {Version: "v0.27.0", State: nodeupdate.Failed, Id: "AA"},
+		"a reason not a code":  {Version: "v0.27.0", State: nodeupdate.Failed, Id: "aa", Reason: "Download"},
+		"a reason too long":    {Version: "v0.27.0", State: nodeupdate.Failed, Id: "aa", Reason: strings.Repeat("a", 33)},
+		"an error too long":    {Version: "v0.27.0", State: nodeupdate.Failed, Id: "aa", Error: strings.Repeat("x", maxUpdateError+1)},
+	} {
+		advance(5 * time.Second) // within the minute's 12
+		if err := report(r1, u); connect.CodeOf(err) != connect.CodeInvalidArgument {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	advance(5 * time.Second)
+	big := &perimeterv1.ReportUpdateRequest{Update: idle}
+	big.ProtoReflect().SetUnknown(protowire.AppendBytes(protowire.AppendTag(nil, 99, protowire.BytesType), make([]byte, maxUpdateReport)))
+	if _, err := r1.ReportUpdate(ctx, connect.NewRequest(big)); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("over 1 KiB: %v", err)
+	}
+	if r := record("r1"); r != (relayRecord{}) {
+		t.Fatalf("a refused report kept: %+v", r)
+	}
+	advance(time.Minute) // the refused ones counted against the minute's
+
+	// What rayd relay sends (step 7): an idle relay of a dev build, at 0,
+	// remote off.
+	if err := report(r1, &perimeterv1.RelayUpdate{State: nodeupdate.Idle}); err != nil {
+		t.Fatal(err)
+	}
+	if r := record("r1"); r.Reported != nodeupdate.Idle || r.Version != "" || r.Remote || r.ChangedAt != now().Unix() || r.SeenAt != now().Unix() {
+		t.Fatalf("idle: %+v", r)
+	}
+	// Remote on, its version: a change, audited.
+	advance(time.Minute)
+	if err := report(r1, idle); err != nil {
+		t.Fatal(err)
+	}
+	first := record("r1")
+	if first.Reported != nodeupdate.Idle || first.Version != "v0.27.0" || !first.Remote || first.ChangedAt != now().Unix() {
+		t.Fatalf("idle, remote on: %+v", first)
+	}
+	// The same again: nothing written, nothing audited.
+	advance(time.Minute)
+	if err := report(r1, idle); err != nil {
+		t.Fatal(err)
+	}
+	if r := record("r1"); r != first {
+		t.Fatalf("the same report written again: %+v, was %+v", r, first)
+	}
+	// The same after relaySeenEvery: only when it was heard of.
+	advance(relaySeenEvery)
+	if err := report(r1, idle); err != nil {
+		t.Fatal(err)
+	}
+	if r := record("r1"); r.SeenAt != now().Unix() || r.ChangedAt != first.ChangedAt {
+		t.Fatalf("heard of: %+v, was %+v", r, first)
+	}
+
+	// It takes the offer, runs it, fails with a text the exit cleans
+	// again: an address, a key, what a terminal acts on, cut to 200 bytes;
+	// a reason this exit does not know is taken by its form.
+	if err := report(r1, &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: nodeupdate.Requested, Id: st.ID, Target: "v0.28.0"}); err != nil {
+		t.Fatal(err)
+	}
+	asked := record("r1")
+	if asked.Since != now().Unix() || asked.SinceID != st.ID || asked.UpdateID != st.ID {
+		t.Fatalf("requested: %+v", asked)
+	}
+	// Nothing it says moves when its turn began: not a word of no update
+	// in between.
+	advance(time.Minute)
+	if err := report(r1, idle); err != nil {
+		t.Fatal(err)
+	}
+	advance(time.Minute)
+	if err := report(r1, &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: nodeupdate.Requested, Id: st.ID, Target: "v0.28.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if r := record("r1"); r.Since != asked.Since || r.SinceID != st.ID {
+		t.Fatalf("requested again: %+v, first %+v", r, asked)
+	}
+	advance(time.Minute)
+	if err := report(r1, &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: nodeupdate.Running, Id: st.ID, Target: "v0.28.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if r := record("r1"); r.Since != asked.Since || r.ChangedAt != now().Unix() {
+		t.Fatalf("running: %+v, requested %+v", r, asked)
+	}
+	advance(time.Minute)
+	text := "install: no first snapshot from 203.0.113.7 \x1b[31mwith key " + strings.Repeat("Ab", 20) + " é" + strings.Repeat("x", 150)
+	if err := report(r1, &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: nodeupdate.RolledBack, Id: st.ID, Target: "v0.28.0",
+		Reason: "quota", Error: text[:maxUpdateError-1]}); err != nil {
+		t.Fatal(err)
+	}
+	back := record("r1")
+	if back.Reported != nodeupdate.RolledBack || back.Reason != "quota" || strings.Contains(back.Error, "203.0.113.7") ||
+		strings.Contains(back.Error, "AbAb") || strings.ContainsRune(back.Error, 0x1b) || !strings.HasPrefix(back.Error, "install: no first snapshot from <ip4:") ||
+		len(back.Error) > maxUpdateError || !utf8.ValidString(back.Error) || back.Since != asked.Since {
+		t.Fatalf("rolled back: %+v", back)
+	}
+	// The same text again stays the same: nothing new.
+	if err := report(r1, &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: nodeupdate.RolledBack, Id: st.ID, Target: "v0.28.0",
+		Reason: "quota", Error: text[:maxUpdateError-1]}); err != nil {
+		t.Fatal(err)
+	}
+	if r := record("r1"); r != back {
+		t.Fatalf("the same text again: %+v, was %+v", r, back)
+	}
+	want := []string{
+		"relay r1: relay.update idle -, remote off r1",
+		"relay r1: relay.update idle v0.27.0 r1",
+		"relay r1: relay.update requested v0.27.0 to v0.28.0 r1",
+		"relay r1: relay.update idle v0.27.0 r1",
+		"relay r1: relay.update requested v0.27.0 to v0.28.0 r1",
+		"relay r1: relay.update running v0.27.0 to v0.28.0 r1",
+		"relay r1: relay.update rolled_back v0.27.0 to v0.28.0 (quota) r1",
+	}
+	if got := relayAudit(t, srv); !slices.Equal(got, want) {
+		t.Fatalf("audit\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+
+	// r1's outcome is r2's turn: its feed gets the offer.
+	f2 := feedMsgs(ctx, t, bundles["r2"], at2, &perimeterv1.WatchRelayRequest{Probe: true, Updates: true})
+	if m := nextMsg(t, f2, "r2"); m.Update == nil || m.Update.Id != st.ID {
+		t.Fatalf("r2 after r1 rolled back: %v", m)
+	}
+
+	// At most 12 a minute from one relay; the next minute again.
+	advance(time.Minute)
+	for i := range maxUpdateReports {
+		if err := report(r1, idle); err != nil {
+			t.Fatalf("report %d: %v", i, err)
+		}
+	}
+	if err := report(r1, idle); connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("a 13th in a minute: %v", err)
+	}
+	// Another relay's own minute.
+	if err := report(updateClient(t, bundles["r2"], at2), idle); err != nil {
+		t.Fatalf("r2 while r1 is held back: %v", err)
+	}
+	advance(time.Minute)
+	if err := report(r1, idle); err != nil {
+		t.Fatalf("the next minute: %v", err)
+	}
+}
+
+// A relay's error as the exit keeps it: redacted again, the exit's own
+// name too, printable, at most 200 bytes, cut on a rune; the same text the
+// same while rayd runs.
+func TestCleanRelayError(t *testing.T) {
+	srv, _, _, _, _ := relayNode(t, "v0.28.0")
+	ctx := context.Background()
+	// The relay's addresses grow as tokens: past 200 bytes, cut.
+	e := strings.Repeat("8.8.4.4 ", 24) + "é"
+	got := srv.cleanRelayError(ctx, e)
+	if len(got) > maxUpdateError || !utf8.ValidString(got) || strings.Contains(got, "8.8.4.4") || !strings.HasPrefix(got, "<ip4:") {
+		t.Fatalf("%d bytes: %q", len(got), got)
+	}
+	if again := srv.cleanRelayError(ctx, e); again != got {
+		t.Fatalf("the same text: %q, then %q", got, again)
+	}
+	if got := srv.cleanRelayError(ctx, "rayspa at n.example.com: \x07 bell"); got != "rayspa at <domain>: ? bell" {
+		t.Fatalf("the exit's name: %q", got)
+	}
+	if got := srv.cleanRelayError(ctx, strings.Repeat("ab ", 66)+"a"+"é"); len(got) != 199 {
+		t.Fatalf("cut inside a rune: %d bytes", len(got))
+	}
+}
+
+// One report at a time from a relay, whatever the minute allows.
+func TestReportUpdateAtOnce(t *testing.T) {
+	var ru relayUpdates
+	now := time.Date(2026, 11, 20, 4, 0, 0, 0, time.UTC)
+	done, err := ru.admit("r1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ru.admit("r1", now); connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("a second at once: %v", err)
+	}
+	other, err := ru.admit("r2", now)
+	if err != nil {
+		t.Fatalf("another relay's: %v", err)
+	}
+	other()
+	done()
+	if done, err := ru.admit("r1", now); err != nil {
+		t.Fatalf("after the first: %v", err)
+	} else {
+		done()
+	}
+}
+
+// A relay removed takes its record with it, a report under way finds no
+// relay, and one added again by its name starts with none.
+func TestRelayUpdateRemoved(t *testing.T) {
+	srv, bundles, _, now, sock := relayNode(t, "v0.28.0", "r1")
+	ctx := context.Background()
+	at1, _ := serveRemoteFrom(t, srv, "198.51.100.20:40000")
+	r1 := updateClient(t, bundles["r1"], at1)
+	if _, err := r1.ReportUpdate(ctx, connect.NewRequest(&perimeterv1.ReportUpdateRequest{Update: &perimeterv1.RelayUpdate{Version: "v0.27.0", State: nodeupdate.Idle}})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Store.GetSetting(ctx, relayUpdateKey+"r1"); err != nil {
+		t.Fatalf("no record: %v", err)
+	}
+	c := NewUnixClient(sock)
+	if _, err := c.RemoveRelay(ctx, connect.NewRequest(&nodev1.RemoveRelayRequest{Name: "r1"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Store.GetSetting(ctx, relayUpdateKey+"r1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("the record outlived its relay: %v", err)
+	}
+	if _, err := srv.takeRelayReport(ctx, "r1", relayRecord{Reported: nodeupdate.Idle}, now()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("a report after the removal: %v", err)
+	}
+	if _, err := srv.Store.GetSetting(ctx, relayUpdateKey+"r1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("a report after the removal kept")
+	}
+	if _, err := r1.ReportUpdate(ctx, connect.NewRequest(&perimeterv1.ReportUpdateRequest{Update: &perimeterv1.RelayUpdate{State: nodeupdate.Idle}})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("the removed relay reports: %v", err)
+	}
+	// One a removal left behind.
+	setRecord(t, srv, "r1", relayRecord{Reported: nodeupdate.Done, Version: "v0.28.0"})
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r1", Address: "198.51.100.30"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Store.GetSetting(ctx, relayUpdateKey+"r1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("a new relay with an old one's record: %v", err)
+	}
+}
+
+// The phone's view of each relay (§8.2): its report on the offer, or where
+// it stands with it; an update under way silent for an hour failed.
+func TestRelayStatus(t *testing.T) {
+	now := time.Date(2026, 11, 20, 5, 0, 0, 0, time.UTC)
+	ago := func(d time.Duration) int64 { return now.Add(-d).Unix() }
+	o := &perimeterv1.RelayUpdateOffer{Id: "aa", Version: "v0.28.0", EndedAt: ago(30 * time.Minute)}
+	rec := func(state, id, version, target string, remote bool) relayRecord {
+		return relayRecord{Reported: state, UpdateID: id, Version: version, Target: target, Remote: remote, ChangedAt: ago(5 * time.Minute), Since: ago(6 * time.Minute)}
+	}
+	offered := func(r relayRecord) relayView {
+		return relayView{Name: "r1", Rec: r, OfferID: "aa", OfferedAt: now.Add(-7 * time.Minute)}
+	}
+	plain := func(r relayRecord) relayView { return relayView{Name: "r1", Rec: r} }
+	silent := rec(nodeupdate.Running, "aa", "v0.27.0", "v0.28.0", true)
+	silent.ChangedAt = ago(nodeupdate.Stale)
+	failed := rec(nodeupdate.Failed, "aa", "v0.27.0", "v0.28.0", true)
+	failed.Reason, failed.Error = nodeupdate.ReasonDownload, "neither GitHub nor a mirror answered"
+	type want struct {
+		state, target, id, reason string
+		changed                   int64
+	}
+	for _, c := range []struct {
+		name string
+		v    relayView
+		o    *perimeterv1.RelayUpdateOffer
+		want want
+	}{
+		{"nothing offered, never a word", plain(relayRecord{}), nil, want{"unknown", "", "", "", 0}},
+		{"nothing offered, its last done", plain(rec(nodeupdate.Done, "9f", "v0.27.0", "v0.27.0", true)), nil, want{"current", "", "", "", ago(5 * time.Minute)}},
+		{"nothing offered, an update under way", plain(rec(nodeupdate.Running, "9f", "v0.26.0", "v0.27.0", true)), nil,
+			want{nodeupdate.Running, "v0.27.0", "9f", "", ago(5 * time.Minute)}},
+		{"nothing offered, silent under way", plain(silent), nil, want{nodeupdate.Failed, "v0.28.0", "aa", noWord, now.Unix()}},
+		{"offered, never a word", offered(relayRecord{}), o, want{"offered", "v0.28.0", "aa", "", now.Add(-7 * time.Minute).Unix()}},
+		{"an older relay", plain(relayRecord{SeenAt: ago(time.Minute)}), o, want{"unknown", "", "", "", 0}},
+		{"done", plain(rec(nodeupdate.Done, "aa", "v0.28.0", "v0.28.0", true)), o, want{nodeupdate.Done, "v0.28.0", "aa", "", ago(5 * time.Minute)}},
+		{"failed", plain(failed), o, want{nodeupdate.Failed, "v0.28.0", "aa", nodeupdate.ReasonDownload, ago(5 * time.Minute)}},
+		{"requested", offered(rec(nodeupdate.Requested, "aa", "v0.27.0", "v0.28.0", true)), o,
+			want{nodeupdate.Requested, "v0.28.0", "aa", "", ago(5 * time.Minute)}},
+		{"running, silent for an hour", offered(silent), o, want{nodeupdate.Failed, "v0.28.0", "aa", noWord, now.Unix()}},
+		{"on it, by hand", plain(rec(nodeupdate.Idle, "", "v0.28.0", "", true)), o, want{"current", "v0.28.0", "aa", "", ago(5 * time.Minute)}},
+		{"newer", plain(rec(nodeupdate.Idle, "", "v0.29.0", "", false)), o, want{"current", "v0.28.0", "aa", "", ago(5 * time.Minute)}},
+		{"root has not allowed it", plain(rec(nodeupdate.Idle, "", "v0.27.0", "", false)), o, want{"off", "v0.28.0", "aa", "", ago(5 * time.Minute)}},
+		{"an earlier update under way", plain(rec(nodeupdate.Running, "9f", "v0.26.0", "v0.27.0", true)), o,
+			want{nodeupdate.Running, "v0.27.0", "9f", "", ago(5 * time.Minute)}},
+		{"in its feed", offered(rec(nodeupdate.Idle, "", "v0.27.0", "", true)), o, want{"offered", "v0.28.0", "aa", "", now.Add(-7 * time.Minute).Unix()}},
+		{"its turn to come", plain(rec(nodeupdate.Idle, "", "v0.27.0", "", true)), o, want{"waiting", "v0.28.0", "aa", "", o.EndedAt}},
+		{"failed on an earlier offer, waiting", plain(rec(nodeupdate.Failed, "9f", "v0.27.0", "v0.27.5", true)), o, want{"waiting", "v0.28.0", "aa", "", o.EndedAt}},
+	} {
+		rs := relayStatus(c.v, c.o, now.Add(-time.Minute), now)
+		got := want{rs.State, rs.Target, rs.UpdateId, rs.Reason, rs.ChangedAt}
+		if got != c.want || rs.Name != "r1" || rs.Version != c.v.Rec.Version || rs.Remote != c.v.Rec.Remote || rs.SeenAt != now.Add(-time.Minute).Unix() {
+			t.Errorf("%s: %+v, want %+v", c.name, rs, c.want)
+		}
+		if rs.Reason == noWord && !strings.Contains(rs.Error, "no word") {
+			t.Errorf("%s: error %q", c.name, rs.Error)
+		}
+		if c.name == "failed" && rs.Error != failed.Error {
+			t.Errorf("failed: error %q", rs.Error)
+		}
+	}
+}
+
+// GetUpdateStatus lists every relay by name with its update for the phone
+// (§8), seen_at fresh while a feed of it is open.
+func TestGetUpdateStatusRelays(t *testing.T) {
+	srv, bundles, advance, now, sock := relayNode(t, "v0.28.0", "r1", "r2", "r3")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	at1, _ := serveRemoteFrom(t, srv, "198.51.100.20:40000")
+	at2, _ := serveRemoteFrom(t, srv, "198.51.100.21:40000")
+	c := NewUnixClient(sock)
+	status := func() []*nodev1.RelayUpdateStatus {
+		t.Helper()
+		r, err := c.GetUpdateStatus(ctx, connect.NewRequest(&nodev1.GetUpdateStatusRequest{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.Msg.Relays
+	}
+	states := func(rs []*nodev1.RelayUpdateStatus) []string {
+		var out []string
+		for _, r := range rs {
+			out = append(out, r.Name+" "+r.State)
+		}
+		return out
+	}
+	// No update by request: the relays are there, unheard of.
+	if got := states(status()); !slices.Equal(got, []string{"r1 unknown", "r2 unknown", "r3 unknown"}) {
+		t.Fatalf("before: %v", got)
+	}
+	st := nodeupdate.Status{ID: "6f1c0e2a9b3d4c5e", State: nodeupdate.Done, From: "v0.27.0", To: "v0.28.0", Kind: nodeupdate.Remote, Ended: now()}
+	nodeupdate.WriteStatus(srv.NodeUpdate.Status, st)
+	// r1's rayd relay reports and takes the offer; r2's waits; r3 is an
+	// older relay, rayspa only.
+	f1 := feedMsgs(ctx, t, bundles["r1"], at1, &perimeterv1.WatchRelayRequest{Probe: true, Updates: true})
+	nextMsg(t, f1, "r1")
+	r1 := updateClient(t, bundles["r1"], at1)
+	if _, err := r1.ReportUpdate(ctx, connect.NewRequest(&perimeterv1.ReportUpdateRequest{Update: &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true,
+		State: nodeupdate.Requested, Id: st.ID, Target: "v0.28.0"}})); err != nil {
+		t.Fatal(err)
+	}
+	r2 := updateClient(t, bundles["r2"], at2)
+	if _, err := r2.ReportUpdate(ctx, connect.NewRequest(&perimeterv1.ReportUpdateRequest{Update: &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true,
+		State: nodeupdate.Idle}})); err != nil {
+		t.Fatal(err)
+	}
+	advance(time.Minute)
+	rs := status()
+	if got := states(rs); !slices.Equal(got, []string{"r1 requested", "r2 waiting", "r3 unknown"}) {
+		t.Fatalf("under way: %v", got)
+	}
+	if rs[0].SeenAt != now().Unix() || rs[0].Target != "v0.28.0" || rs[0].UpdateId != st.ID || rs[1].SeenAt != now().Add(-time.Minute).Unix() || rs[2].SeenAt != 0 {
+		t.Fatalf("under way: %v", rs)
+	}
+	// An hour without a word from r1.
+	advance(nodeupdate.Stale)
+	if rs := status(); rs[0].State != nodeupdate.Failed || rs[0].Reason != noWord {
+		t.Fatalf("an hour on: %v", rs[0])
 	}
 }
