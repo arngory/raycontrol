@@ -1,0 +1,10 @@
+go test fuzz v1
+[]byte("")
+uint8(0)
+string("")
+uint32(0)
+uint32(0)
+uint32(0)
+uint32(0)
+bool(false)
+bool(false)

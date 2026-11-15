@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/spa"
 )
@@ -701,6 +703,92 @@ func TestGateRelayOneAddress(t *testing.T) {
 	snap.RelayPrefixes = []string{"192.0.2.0/24"}
 	if err := g.Update(snap); err == nil || len(fw.relays) != 0 {
 		t.Fatalf("relay network accepted: %v %v", err, fw.relays)
+	}
+}
+
+// A snapshot without SPA parameters is refused, not a panic: an empty
+// message parses (a saved snapshot cut to nothing by a power cut, or a
+// feed's), and rayspa, root, would die on it at every start.
+// testdata/fuzz/FuzzGateUpdate/no-spa.
+func TestGateNoSPAParams(t *testing.T) {
+	fw := &fakeFW{}
+	g := NewGate(fw, quiet)
+	snap := &perimeterv1.Snapshot{}
+	if err := proto.Unmarshal(nil, snap); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Update(snap); err == nil || errors.Is(err, ErrPending) || fw.setups != 0 || len(fw.calls) != 0 {
+		t.Fatalf("a snapshot without SPA parameters: %v, calls %v", err, fw.calls)
+	}
+}
+
+// A port's protocol is TCP or UDP, or the snapshot is refused: it goes into
+// the nft transactions as it is, and one with a newline is a command of its
+// own, root's, on a relay the exit's to choose: here flush ruleset, which
+// takes every other table of the host with it.
+// testdata/fuzz/FuzzGateUpdate/nft-in-protocol.
+func TestGatePortProtocol(t *testing.T) {
+	evil := "tcp . 22 }\nflush ruleset\nadd element inet raycontrol public { tcp"
+	if !strings.Contains(publicScript([]Port{{evil, 22}}), "\nflush ruleset\n") {
+		t.Fatal("the protocol no longer goes into the script as it is: this test says nothing")
+	}
+	for _, name := range []string{"public", "service", "admin", "relay"} {
+		for _, proto := range []string{evil, "sctp", "", "TCP"} {
+			fw := &fakeFW{}
+			g := NewGate(fw, quiet)
+			snap := testSnapshot()
+			p := &perimeterv1.Port{Proto: proto, Port: 22}
+			switch name {
+			case "public":
+				snap.PublicPorts = append(snap.PublicPorts, p)
+			case "service":
+				snap.Services[0].Ports = append(snap.Services[0].Ports, p)
+			case "admin":
+				snap.AdminPorts = append(snap.AdminPorts, p)
+			case "relay":
+				snap.RelayPorts = append(snap.RelayPorts, p)
+			}
+			if err := g.Update(snap); err == nil || errors.Is(err, ErrPending) || len(fw.calls) != 0 || fw.public != nil {
+				t.Errorf("%s port of protocol %q: %v, calls %v", name, proto, err, fw.calls)
+			}
+		}
+	}
+}
+
+// A snapshot's number past its 16 bits is refused, not cut to another: the
+// SPA ports' base and range, a rotation whose base and range overflow the
+// check of their sum (its slot ports wrap round past 65535 to 0 and up), a
+// port, a rotation's target, the ACME port, a service and a device's
+// scope (65536+3 is service 3).
+// testdata/fuzz/FuzzGateUpdate/spa-port-base-cut, rotation-overflow,
+// port-cut.
+func TestGateNumbersInRange(t *testing.T) {
+	for name, cut := range map[string]func(*perimeterv1.Snapshot){
+		"spa base": func(s *perimeterv1.Snapshot) { s.Spa.PortBase = 65536 + 40000 },
+		"spa range": func(s *perimeterv1.Snapshot) {
+			s.Spa.PortBase, s.Spa.PortRange = 40000, 65536+1
+		},
+		"rotation": func(s *perimeterv1.Snapshot) {
+			s.Services[1].Rotation = &perimeterv1.Rotation{PortKey: key(0x55), PortBase: 0xffff0000 + 60000, PortRange: 10000, TargetPort: 443}
+		},
+		"target": func(s *perimeterv1.Snapshot) {
+			s.Services[1].Rotation = &perimeterv1.Rotation{PortKey: key(0x55), PortBase: 20000, PortRange: 1000, TargetPort: 65536 + 443}
+		},
+		"public":  func(s *perimeterv1.Snapshot) { s.PublicPorts[0].Port = 65536 + 22 },
+		"service": func(s *perimeterv1.Snapshot) { s.Services[2].Ports[0].Port = 65536 + 22 },
+		"acme": func(s *perimeterv1.Snapshot) {
+			s.Acme = &perimeterv1.AcmeWindow{Port: 65536 + 9180, Until: time.Now().Add(time.Hour).Unix()}
+		},
+		"id":    func(s *perimeterv1.Snapshot) { s.Services[2].Id = 65536 + 1 },
+		"scope": func(s *perimeterv1.Snapshot) { s.Devices[0].Allowed = []uint32{65536 + 3} },
+	} {
+		fw := &fakeFW{}
+		g := NewGate(fw, quiet)
+		snap := testSnapshot(&perimeterv1.Device{Id: "alice", Key: key(0x11), Allowed: []uint32{1}})
+		cut(snap)
+		if err := g.Update(snap); err == nil || errors.Is(err, ErrPending) || len(fw.calls) != 0 {
+			t.Errorf("%s: %v, calls %v, slots %v, rotation %v", name, err, fw.calls, fw.udp, fw.rot)
+		}
 	}
 }
 

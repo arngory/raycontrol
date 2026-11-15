@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -455,11 +456,32 @@ func save(file string, snap *perimeterv1.Snapshot) error {
 	if err != nil {
 		return err
 	}
+	// Synced before the rename, and the rename after it: a power cut
+	// leaves the snapshot of before or this one, never an empty file
+	// (XFS, Rocky's default, keeps the rename and not the data).
 	tmp := file + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // G304: the operator's -state path
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, file)
+	_, err = f.Write(b)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, file); err != nil {
+		return err
+	}
+	if d, err := os.Open(filepath.Dir(file)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 // watch follows the perimeter feed from rayd, reconnecting with backoff.

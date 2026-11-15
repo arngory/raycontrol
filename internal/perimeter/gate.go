@@ -192,6 +192,9 @@ func portsOf(ps []*perimeterv1.Port) []Port {
 }
 
 func paramsOf(p *perimeterv1.SPAParams) (spa.Params, error) {
+	if p == nil {
+		return spa.Params{}, errors.New("perimeter: no SPA parameters")
+	}
 	out := spa.Params{
 		EpochLen:  time.Duration(p.EpochLenS) * time.Second,
 		SlotLen:   time.Duration(p.SlotLenS) * time.Second,
@@ -203,9 +206,48 @@ func paramsOf(p *perimeterv1.SPAParams) (spa.Params, error) {
 	if len(p.NodeId) != spa.NodeIDSize || len(p.PortKey) != spa.KeySize {
 		return out, errors.New("perimeter: bad node id or port key size")
 	}
+	if p.PortBase > 65535 || p.PortRange > 65535 {
+		return out, fmt.Errorf("perimeter: SPA port range %d+%d out of bounds", p.PortBase, p.PortRange)
+	}
 	copy(out.NodeID[:], p.NodeId)
 	copy(out.PortKey[:], p.PortKey)
 	return out, out.Validate()
+}
+
+// checkPorts refuses a snapshot with a port of another protocol than TCP
+// or UDP: the protocol is a string, and goes into the nft transactions as
+// it is (portElems, elements), where one with a newline or a brace would
+// be commands of its own, run by root. And a number past its 16 bits (a
+// port, a service, a scope), which would be cut to another.
+func checkPorts(snap *perimeterv1.Snapshot) error {
+	lists := [][]*perimeterv1.Port{snap.GetPublicPorts(), snap.GetAdminPorts(), snap.GetRelayPorts()}
+	for _, s := range snap.GetServices() {
+		lists = append(lists, s.GetPorts())
+	}
+	for _, ps := range lists {
+		for _, p := range ps {
+			if p.GetProto() != "tcp" && p.GetProto() != "udp" {
+				return fmt.Errorf("perimeter: port %d of protocol %.16q: tcp or udp", p.GetPort(), p.GetProto())
+			}
+			if p.GetPort() > 65535 {
+				return fmt.Errorf("perimeter: port %s/%d out of range", p.GetProto(), p.GetPort())
+			}
+		}
+	}
+	for _, s := range snap.GetServices() {
+		if r := s.GetRotation(); s.GetId() > 65535 || r != nil && r.GetTargetPort() > 65535 {
+			return fmt.Errorf("perimeter: service %d out of range, or its rotation's port", s.GetId())
+		}
+	}
+	for _, d := range snap.GetDevices() {
+		if slices.ContainsFunc(d.GetAllowed(), func(id uint32) bool { return id > 65535 }) {
+			return fmt.Errorf("perimeter: device %.64q allowed a service out of range", d.GetId())
+		}
+	}
+	if snap.GetAcme().GetPort() > 65535 {
+		return fmt.Errorf("perimeter: ACME port %d out of range", snap.GetAcme().GetPort())
+	}
+	return nil
 }
 
 // Update applies a snapshot: devices, service ports, public ports. Grants of
@@ -213,6 +255,9 @@ func paramsOf(p *perimeterv1.SPAParams) (spa.Params, error) {
 func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 	params, err := paramsOf(snap.GetSpa())
 	if err != nil {
+		return err
+	}
+	if err := checkPorts(snap); err != nil {
 		return err
 	}
 	devices := make([]spa.Device, 0, len(snap.Devices))
@@ -234,7 +279,7 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 	for _, s := range snap.Services {
 		services[uint16(s.Id)] = portsOf(s.Ports)
 		if r := s.Rotation; r != nil {
-			if len(r.PortKey) != spa.KeySize || r.PortRange == 0 || r.PortBase+r.PortRange > 65536 {
+			if len(r.PortKey) != spa.KeySize || r.PortRange == 0 || uint64(r.PortBase)+uint64(r.PortRange) > 65536 {
 				return fmt.Errorf("perimeter: bad rotation of service %d", s.Id)
 			}
 			sched := params

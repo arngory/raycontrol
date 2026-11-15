@@ -60,8 +60,11 @@ var (
 	// "::" (2001:db8::/32, an admin prefix) ends on no word boundary. Or
 	// it is an IPv4 address (64:ff9b::198.51.100.9), taken whole: cut at
 	// its first dot, the rest would be three octets that the IPv4 pattern
-	// does not take. Only what parses as an address is replaced (addr).
-	ipv6 = regexp.MustCompile(`(?i)\b(?:[0-9a-f]{0,4}:){2,8}(?:\d{1,3}(?:\.\d{1,3}){3}\b|[0-9a-f]{1,4}\b)?`)
+	// does not take. One that starts with "::" (::ffff:c633:6407, ::2)
+	// starts on no word boundary either, unless a word is before it: its
+	// "::" after anything but a word. Only what parses as an address is
+	// replaced (addr).
+	ipv6 = regexp.MustCompile(`(?i)(?:\b(?:[0-9a-f]{0,4}:){2,8}|\B::(?:[0-9a-f]{1,4}:){0,6})(?:\d{1,3}(?:\.\d{1,3}){3}\b|[0-9a-f]{1,4}\b)?`)
 )
 
 // String redacts s.
@@ -73,8 +76,17 @@ func (r *Redactor) String(s string) string {
 	for _, n := range r.names {
 		s = replaceName(s, n)
 	}
-	s = ipv6.ReplaceAllStringFunc(s, r.addr)
-	s = ipv4.ReplaceAllStringFunc(s, r.addr)
+	// The addresses until none is left: text that is no address as a whole
+	// may hold one that a token leaves bare ("1:2:3:4:5:6::" when the IPv4
+	// address after it goes, the whole having a group too many). Each round
+	// that changes the text takes an address out of it.
+	for {
+		next := ipv4.ReplaceAllStringFunc(ipv6.ReplaceAllStringFunc(s, r.addr), r.addr)
+		if next == s {
+			break
+		}
+		s = next
+	}
 	s = hexIDs.ReplaceAllString(s, "<id>")
 	s = secrets.ReplaceAllStringFunc(s, func(m string) string {
 		if strings.Trim(m, "-_=") == "" {
@@ -125,10 +137,11 @@ func isLabelByte(c byte) bool {
 // seven and "::" ("2001:db8:1:2:3:4:5:6:443", eight groups and the
 // last): the address is the match up to its last colon, and the rest
 // stays. Before it: the colon that glues it to a word ("ipv6:2001:db8::1",
-// where the match starts on a word boundary), which stays too.
+// where the match starts on a word boundary, or "ipv6:::2", where it
+// starts with three), which stays too.
 func (r *Redactor) addr(m string) string {
 	lead := ""
-	if strings.HasPrefix(m, ":") && !strings.HasPrefix(m, "::") {
+	if strings.HasPrefix(m, ":") && (!strings.HasPrefix(m, "::") || strings.HasPrefix(m, ":::")) {
 		lead, m = ":", m[1:]
 	}
 	if a, ok := parseAddr(m); ok {
@@ -143,22 +156,30 @@ func (r *Redactor) addr(m string) string {
 }
 
 // parseAddr parses an address as a reader takes it: an IPv4 one with a
-// leading zero in an octet too (203.0.113.05), which netip refuses.
+// leading zero in an octet too (203.0.113.05), which netip refuses, alone
+// or at the end of an IPv6 one (64:ff9b::198.51.100.09).
 func parseAddr(m string) (netip.Addr, bool) {
 	if a, err := netip.ParseAddr(m); err == nil {
 		return a, true
 	}
-	if strings.Contains(m, ":") || strings.Count(m, ".") != 3 {
+	head, v4 := "", m
+	if i := strings.LastIndexByte(m, ':'); i >= 0 {
+		head, v4 = m[:i+1], m[i+1:]
+	}
+	if strings.Count(v4, ".") != 3 {
 		return netip.Addr{}, false
 	}
-	octets := strings.Split(m, ".")
+	octets := strings.Split(v4, ".")
 	for i, o := range octets {
+		if o == "" {
+			return netip.Addr{}, false
+		}
 		octets[i] = strings.TrimLeft(o, "0")
 		if octets[i] == "" {
 			octets[i] = "0"
 		}
 	}
-	a, err := netip.ParseAddr(strings.Join(octets, "."))
+	a, err := netip.ParseAddr(head + strings.Join(octets, "."))
 	return a, err == nil
 }
 
@@ -175,6 +196,6 @@ func (r *Redactor) token(a netip.Addr, m string) string {
 		kind += "-private"
 	}
 	h := hmac.New(sha256.New, r.salt)
-	h.Write(a.AsSlice())
+	h.Write(a.Unmap().AsSlice()) // a mapped address is the IPv4 one
 	return "<" + kind + ":" + hex.EncodeToString(h.Sum(nil)[:3]) + ">"
 }

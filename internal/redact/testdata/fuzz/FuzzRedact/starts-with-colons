@@ -1,0 +1,11 @@
+go test fuzz v1
+string("ipv6 at")
+string("and")
+string("up")
+[]byte("\xc6\x33\x64\x07")
+[]byte("\x00\x00\x00\x00\x00\x000000000000")
+uint8(11)
+uint8(6)
+uint8(0)
+uint8(0)
+string(" ::ffff:c633:6407 ::2 (::5efe:c000:201)")
