@@ -45,6 +45,11 @@ const TurnTimeout = 30 * time.Minute
 // a rollback of the node keeps its database.
 const relayUpdateKey = "relay-update/"
 
+// relayOfferKey is the settings key of the last offer the exit named
+// (§3.3), as JSON of lastOffer: named again after an update that failed
+// since, while the node runs its release.
+const relayOfferKey = "relay-update-offer"
+
 // Bounds of a relay's reports (§3.2, §3.6). An honest relay reports once
 // per change and every 10 minutes, one call at a time.
 const (
@@ -119,12 +124,13 @@ func validUpdateID(id string) bool {
 	return id != "" && len(id) <= 32 && strings.Trim(id, "0123456789abcdef") == ""
 }
 
-// relayOffer is what the exit names its relays (§3.3 points 1-3), nil for
-// nothing: the last update, settled at now (st), is done, by request or by
-// hand (Local) without -no-relays; it put in a release, and this rayd runs
-// that release (version: one installed by hand past rayctl update since
-// differs); and no update waits or runs. An update that rolled back or
-// failed names nothing: the relays stay on what holds.
+// relayOffer is what the last status names the relays (§3.3 points 1-3),
+// nil for nothing: the last update, settled at now (st), is done, by
+// request or by hand (Local) without -no-relays; it put in a release, and
+// this rayd runs that release (version: one installed by hand past rayctl
+// update since differs); and no update waits or runs. An update that
+// rolled back or failed names nothing itself (relayOfferAt: the one done
+// before it may).
 func relayOffer(st nodeupdate.Status, req nodeupdate.Request, waiting bool, version string, now time.Time) *perimeterv1.RelayUpdateOffer {
 	switch {
 	case st.State != nodeupdate.Done || st.NoRelays:
@@ -139,10 +145,52 @@ func relayOffer(st nodeupdate.Status, req nodeupdate.Request, waiting bool, vers
 	return &perimeterv1.RelayUpdateOffer{Id: st.ID, Version: st.To, EndedAt: unixOf(st.Ended)}
 }
 
+// lastOffer is the last offer the exit named, as it keeps it.
+type lastOffer struct {
+	ID      string `json:"id"`
+	Version string `json:"version"`
+	EndedAt int64  `json:"ended_at"`
+}
+
+// relayOfferAt is what the exit names its relays (§3.3 points 1-3), its
+// queue aside, with the last status st and the request waiting: the offer
+// of the last update, when it is done; after an update that rolled back or
+// failed since, the one done before it, while this rayd runs its release;
+// none while an update waits or runs. The last one named is kept for that:
+// a newer update done replaces it (with none, after -no-relays or with
+// another release running), and so does a node on another release (rolled
+// back by hand, or one installed past rayctl update).
+func (s *Server) relayOfferAt(ctx context.Context, st nodeupdate.Status, req nodeupdate.Request, waiting bool, now time.Time) *perimeterv1.RelayUpdateOffer {
+	if nodeupdate.Busy(st, req, waiting, now) {
+		return nil
+	}
+	var last *perimeterv1.RelayUpdateOffer
+	if b, err := s.Store.GetSetting(ctx, relayOfferKey); err == nil {
+		var l lastOffer
+		if json.Unmarshal(b, &l) == nil && validUpdateID(l.ID) && release.IsRelease(l.Version) {
+			last = &perimeterv1.RelayUpdateOffer{Id: l.ID, Version: l.Version, EndedAt: l.EndedAt}
+		}
+	}
+	o := relayOffer(st, req, waiting, s.Version, now)
+	switch {
+	case o != nil && !proto.Equal(o, last):
+		if b, err := json.Marshal(lastOffer{ID: o.Id, Version: o.Version, EndedAt: o.EndedAt}); err == nil {
+			_ = s.Store.SetSetting(ctx, relayOfferKey, b)
+		}
+	case o != nil:
+	case last == nil:
+	case st.State == nodeupdate.Done || last.Version != s.Version:
+		_ = s.Store.DeleteSetting(ctx, relayOfferKey)
+	default:
+		o = last // a later update put nothing in: the node runs last's release
+	}
+	return o
+}
+
 // relayOfferNow is what the exit names its relays at now, its queue aside.
-func (s *Server) relayOfferNow(now time.Time) *perimeterv1.RelayUpdateOffer {
+func (s *Server) relayOfferNow(ctx context.Context, now time.Time) *perimeterv1.RelayUpdateOffer {
 	st, req, waiting := s.NodeUpdate.current(now)
-	return relayOffer(st, req, waiting, s.Version, now)
+	return s.relayOfferAt(ctx, st, req, waiting, now)
 }
 
 // offerKey names an offer for comparison, "" none.
@@ -427,7 +475,7 @@ func (s *Server) relayViews(ctx context.Context, now time.Time) ([]relayView, er
 // before any feed sends it: two looks at once never give two, and after a
 // restart of the exit the queue goes on from the records.
 func (s *Server) relayOffers(ctx context.Context, now time.Time) (offers map[string]*perimeterv1.RelayUpdateOffer, gave bool, err error) {
-	o := s.relayOfferNow(now)
+	o := s.relayOfferNow(ctx, now)
 	if o == nil {
 		return nil, false, nil
 	}
@@ -706,7 +754,7 @@ func (s *Server) relayStatuses(ctx context.Context, st nodeupdate.Status, req no
 	if err != nil {
 		return nil
 	}
-	o := relayOffer(st, req, waiting, s.Version, now)
+	o := s.relayOfferAt(ctx, st, req, waiting, now)
 	turns := make([]relayTurn, len(views))
 	if o != nil {
 		turns = relayQueue(o, views, now)

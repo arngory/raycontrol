@@ -12,6 +12,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/deploy"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/nodeupdate"
 )
 
@@ -385,5 +386,64 @@ func TestRelayTurnOnce(t *testing.T) {
 	n.report("r2", nodeupdate.Idle, "v0.27.0", "")
 	if got := n.offers(); !slices.Equal(got, []string{"r2"}) {
 		t.Fatalf("the new r1, never heard of: %v", got)
+	}
+}
+
+// An update of the node that failed or rolled back since the last one
+// done leaves the relays on that one's offer while the node runs its
+// release (§3.3): a newer one done replaces it, and the node on another
+// release drops it.
+func TestRelayTurnLastOffer(t *testing.T) {
+	n := newTurnNode(t, "r1", "r2")
+	n.feed("r1", "r2")
+	n.report("r1", nodeupdate.Idle, "v0.27.0", "")
+	n.report("r2", nodeupdate.Idle, "v0.27.0", "")
+	done := n.st
+	offer := func() *perimeterv1.RelayUpdateOffer {
+		t.Helper()
+		return n.srv.relayOfferNow(n.ctx, n.now())
+	}
+	if o := offer(); o == nil || o.Id != done.ID {
+		t.Fatalf("done: %v", o)
+	}
+	n.advance(time.Minute)
+	n.status(nodeupdate.Status{ID: "0a1b2c3d4e5f6071", State: nodeupdate.Failed, From: "v0.28.0", To: "v0.28.1", Kind: nodeupdate.Auto,
+		Untouched: true, Ended: n.now()})
+	if o := offer(); o == nil || o.Id != done.ID || o.Version != "v0.28.0" || o.EndedAt != done.Ended.Unix() {
+		t.Fatalf("a later update failed: %v", o)
+	}
+	if got := n.offers(); !slices.Equal(got, []string{"r1"}) {
+		t.Fatalf("a later update failed: %v", got)
+	}
+	n.status(nodeupdate.Status{ID: "0a1b2c3d4e5f6072", State: nodeupdate.RolledBack, From: "v0.28.0", To: "v0.28.0", Target: "v0.28.1", Kind: nodeupdate.Remote,
+		Ended: n.now()})
+	if o := offer(); o == nil || o.Id != done.ID {
+		t.Fatalf("a later update rolled back: %v", o)
+	}
+	// Another update asked for: none while it waits.
+	if err := nodeupdate.WriteRequest(n.srv.NodeUpdate.Request, nodeupdate.Request{ID: "ab", Kind: nodeupdate.Remote, Version: "latest", By: "x", At: n.now()}, n.now()); err != nil {
+		t.Fatal(err)
+	}
+	if o := offer(); o != nil {
+		t.Fatalf("an update waits: %v", o)
+	}
+	// Rolled back by hand: none, and none again on the release.
+	n.status(nodeupdate.Status{ID: "0a1b2c3d4e5f6073", State: nodeupdate.Failed, From: "v0.28.0", To: "v0.28.1", Kind: nodeupdate.Remote, Ended: n.now()})
+	n.advance(nodeupdate.Stale)
+	n.srv.Version = "v0.27.0"
+	if o := offer(); o != nil {
+		t.Fatalf("the node rolled back by hand: %v", o)
+	}
+	n.srv.Version = "v0.28.0"
+	if o := offer(); o != nil {
+		t.Fatalf("the node on the release again: %v", o)
+	}
+	// A newer one done.
+	n.srv.Version = "v0.28.1"
+	n.status(nodeupdate.Status{ID: "0a1b2c3d4e5f6074", State: nodeupdate.Done, From: "v0.28.0", To: "v0.28.1", Kind: nodeupdate.Remote, Ended: n.now()})
+	n.offers()
+	n.status(nodeupdate.Status{ID: "0a1b2c3d4e5f6075", State: nodeupdate.Failed, From: "v0.28.1", To: "v0.29.0", Kind: nodeupdate.Remote, Ended: n.now()})
+	if o := offer(); o == nil || o.Id != "0a1b2c3d4e5f6074" || o.Version != "v0.28.1" {
+		t.Fatalf("a newer one done, then one failed: %v", o)
 	}
 }
