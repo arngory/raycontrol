@@ -86,6 +86,12 @@ type relayRecord struct {
 	Error    string `json:"error,omitempty"`
 	// ChangedAt is when Reported, UpdateID, Version or Remote last changed.
 	ChangedAt int64 `json:"changed_at,omitempty"`
+	// UnderwayAt is when the relay went under way (requested, running) on
+	// UpdateID, while it stays so: what it says of root's switch, its
+	// version, or requested and running in turn moves ChangedAt, not this.
+	// The hour after which the phone has it failed (no_word, §8.2) counts
+	// from it.
+	UnderwayAt int64 `json:"underway_at,omitempty"`
 	// TurnID and TurnAt are the relay's last turn (§3.3): the offer the
 	// exit gave it to take, and when. Only the exit sets them, as it gives
 	// a turn (relayOffers); nothing the relay says moves them. The relay
@@ -767,6 +773,13 @@ func (s *Server) takeRelayReport(ctx context.Context, name string, next relayRec
 		if outcomeOn(prev, prev.TurnID) || outcomeOn(next, prev.TurnID) {
 			next.TurnOver = true
 		}
+		switch {
+		case !underway(next.Reported):
+		case underway(prev.Reported) && prev.UpdateID == next.UpdateID:
+			next.UnderwayAt = cmp.Or(prev.UnderwayAt, prev.ChangedAt, at) // an older exit's record: its last change
+		default:
+			next.UnderwayAt = at
+		}
 		if relayMoved(prev, next) {
 			next.ChangedAt = at
 		}
@@ -864,13 +877,15 @@ func relayStatus(v relayView, o *perimeterv1.RelayUpdateOffer, t relayTurn, seen
 	rec := v.Rec
 	rs := &nodev1.RelayUpdateStatus{Name: v.Name, Version: rec.Version, Remote: rec.Remote, SeenAt: unixOf(seen)}
 	reported := rec.Reported != ""
-	// As reported: an update under way that has been silent for Stale is
-	// taken as failed, as the node's own (nodeupdate.Settled).
+	// As reported: an update under way for Stale with no outcome is taken
+	// as failed, as the node's own (nodeupdate.Settled); counted from when
+	// it went under way, whatever the relay said of it since.
 	asReported := func(target string) {
 		rs.State, rs.Target, rs.UpdateId, rs.Reason, rs.Error, rs.ChangedAt = rec.Reported, target, rec.UpdateID, rec.Reason, rec.Error, rec.ChangedAt
-		if underway(rec.Reported) && now.Sub(time.Unix(rec.ChangedAt, 0)) >= nodeupdate.Stale {
-			rs.State, rs.Reason, rs.ChangedAt = nodeupdate.Failed, noWord, rec.ChangedAt+int64(nodeupdate.Stale/time.Second)
-			rs.Error = "no word from the relay within " + nodeupdate.Stale.String() + " after " + rec.Reported
+		since := cmp.Or(rec.UnderwayAt, rec.ChangedAt)
+		if underway(rec.Reported) && now.Sub(time.Unix(since, 0)) >= nodeupdate.Stale {
+			rs.State, rs.Reason, rs.ChangedAt = nodeupdate.Failed, noWord, since+int64(nodeupdate.Stale/time.Second)
+			rs.Error = "no word from the relay of an outcome within " + nodeupdate.Stale.String() + " after " + rec.Reported
 		}
 	}
 	ours := func(state string, at int64) {

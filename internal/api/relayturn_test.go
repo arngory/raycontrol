@@ -300,6 +300,41 @@ func TestRelayTurnStates(t *testing.T) {
 	}
 }
 
+// An update a relay says is under way and never ends is failed (no_word)
+// an hour after it went under way (§8.2), whatever the relay says of it
+// meanwhile: flipping root's switch, or requested and running, does not
+// keep its row running for ever. A new update goes under way afresh.
+func TestRelayTurnNoWordFlips(t *testing.T) {
+	n := newTurnNode(t, "r1")
+	n.feed("r1")
+	n.report("r1", nodeupdate.Idle, "v0.27.0", "")
+	n.offers()
+	under := func(state string, remote bool) {
+		n.take("r1", relayRecord{Reported: state, Version: "v0.27.0", Remote: remote, UpdateID: n.st.ID, Target: "v0.28.0"})
+	}
+	under(nodeupdate.Requested, true)
+	start := n.now()
+	for i := 0; n.now().Sub(start) < nodeupdate.Stale; i++ {
+		n.advance(10 * time.Minute)
+		under([]string{nodeupdate.Running, nodeupdate.Requested}[i%2], i%3 != 2)
+	}
+	n.advance(time.Second)
+	r, err := NewUnixClient(n.sock).GetUpdateStatus(n.ctx, connect.NewRequest(&nodev1.GetUpdateStatusRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rs := r.Msg.Relays[0]; rs.State != nodeupdate.Failed || rs.Reason != noWord || rs.ChangedAt != start.Add(nodeupdate.Stale).Unix() {
+		t.Fatalf("an hour under way, flipping: %v", rs)
+	}
+	// It ends, then asks again: an hour from then.
+	n.take("r1", relayRecord{Reported: nodeupdate.Failed, Version: "v0.27.0", Remote: true, UpdateID: n.st.ID, Target: "v0.28.0", Reason: nodeupdate.ReasonBusy})
+	n.advance(time.Minute)
+	under(nodeupdate.Requested, true)
+	if got := n.states(); !slices.Equal(got, []string{"r1 requested"}) {
+		t.Fatalf("asked again: %v", got)
+	}
+}
+
 // rayd relay's refusal of an offer before any change (failed, untouched,
 // version or busy, on the offer's id) is the relay's outcome of it: the
 // next relay's turn comes, and the phone shows why.

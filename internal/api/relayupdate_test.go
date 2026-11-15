@@ -658,7 +658,7 @@ func TestReportUpdate(t *testing.T) {
 	if err := report(r1, &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: nodeupdate.Running, Id: st.ID, Target: "v0.28.0"}); err != nil {
 		t.Fatal(err)
 	}
-	if r := record("r1"); !sameTurn(r) || r.ChangedAt != now().Unix() {
+	if r := record("r1"); !sameTurn(r) || r.ChangedAt != now().Unix() || r.UnderwayAt != now().Add(-time.Minute).Unix() {
 		t.Fatalf("running: %+v, its turn %+v", r, turn)
 	}
 	advance(time.Minute)
@@ -871,6 +871,11 @@ func TestRelayStatus(t *testing.T) {
 		{"requested", offered(rec(nodeupdate.Requested, "aa", "v0.27.0", "v0.28.0", true)), o,
 			want{nodeupdate.Requested, "v0.28.0", "aa", "", ago(5 * time.Minute)}},
 		{"running, silent for an hour", offered(silent), o, want{nodeupdate.Failed, "v0.28.0", "aa", noWord, now.Unix()}},
+		{"under way for an hour, saying other things since", func() relayView {
+			v := offered(rec(nodeupdate.Running, "aa", "v0.27.0", "v0.28.0", false))
+			v.Rec.UnderwayAt = ago(nodeupdate.Stale + time.Minute)
+			return v
+		}(), o, want{nodeupdate.Failed, "v0.28.0", "aa", noWord, ago(time.Minute)}},
 		{"on it, by hand", plain(rec(nodeupdate.Idle, "", "v0.28.0", "", true)), o, want{"current", "v0.28.0", "aa", "", ago(5 * time.Minute)}},
 		{"newer", plain(rec(nodeupdate.Idle, "", "v0.29.0", "", false)), o, want{"current", "v0.28.0", "aa", "", ago(5 * time.Minute)}},
 		{"root has not allowed it", plain(rec(nodeupdate.Idle, "", "v0.27.0", "", false)), o, want{"off", "v0.28.0", "aa", "", ago(5 * time.Minute)}},

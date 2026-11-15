@@ -3134,7 +3134,7 @@ v0.28.0 в ней видно и ручное обновление (`by rayctl on
 | `interrupted` | обновление оборвалось (таймаут юнита, `systemctl stop`, выключение, kill): `rolled_back` — root на relay откатил его сам; `failed` до первого изменения — ничего не тронуто, повтор через 6 часов | обычно ничего; если `rayctl update status` на relay говорит о незаконченном обновлении — `rayctl update -rollback` там |
 | `open` | прежняя версия не вернулась: relay открыт и не пересылает, SSH на нём открыт отовсюду | на relay `rayctl update -rollback` или повторная установка (ниже) |
 | `not_taken` | запрос ждал час, а root на relay его не взял | на relay `systemctl status raycontrol-relay-update.path`; `systemctl reset-failed` и `systemctl enable --now` этого юнита |
-| `no_word` | relay замолчал: час без слова после `requested` или `running`, или очередь ушла дальше без его ответа (30 минут) | на relay `rayctl update status` и `journalctl -u rayd-relay`; связь relay с нодой |
+| `no_word` | relay замолчал: час без итога после `requested` или `running`, или очередь ушла дальше без его ответа (30 минут) | на relay `rayctl update status` и `journalctl -u rayd-relay`; связь relay с нодой |
 | другой код | relay новее ноды | показан как есть; подробности — `rayctl update status` на relay |
 
 **Relay до v0.26.0 и запасной путь.** `rayctl` relay старше v0.26.0 отказывает:
