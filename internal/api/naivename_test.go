@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/pem"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -142,6 +143,65 @@ func TestRotateNaiveNameOnStand(t *testing.T) {
 	}
 	if sw := provision.ParseNaiveState(srvService(t, srv, "nv")); sw.SNI != first.SNINext || sw.SNIPrev != first.SNI || sw.NextFrom != 0 {
 		t.Fatalf("after -now: %+v", sw)
+	}
+}
+
+// rayctl service rotate naive -now, again and again: the answer says
+// which previous names stay routed after the switch (the one in use now
+// first), and which go once over three; the audit line says which go.
+func TestRotateNaivePreviousNames(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	srv.RealityLead = 72 * time.Hour
+	e := provision.RealityEpoch{Lead: srv.RealityLead, Prepare: 24 * time.Hour, Grace: 48 * time.Hour, NaivePeriod: 90 * 24 * time.Hour}
+	ctx := context.Background()
+	srv.Rotate = func() {
+		if _, err := provision.RotateReality(ctx, srv.Store, time.Now(), e, nil, nil); err != nil {
+			t.Error(err)
+		}
+	}
+	c := NewUnixClient(sock)
+	for _, s := range [][2]string{{"reality", "r"}, {"naive", "nv"}} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: s[0], Name: s[1]})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ca, err := testca.New([]string{"*.example.com"}, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provision.SetCertificate(ctx, srv.Store, "site", ca.ChainPEM, ca.KeyPEM, time.Now(), false); err != nil {
+		t.Fatal(err)
+	}
+	var names []string // in use, one switch after the other
+	for range 4 {
+		names = append(names, provision.ParseNaiveState(srvService(t, srv, "nv")).SNI)
+		r, err := c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "nv", Now: true}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := slices.Clone(names)
+		slices.Reverse(want)
+		if len(want) > provision.NaivePrevCap {
+			want = want[:provision.NaivePrevCap]
+		}
+		if !slices.Equal(r.Msg.KeptNames, want) {
+			t.Fatalf("switch %d: kept %v, want %v", len(names), r.Msg.KeptNames, want)
+		}
+		if got := provision.ParseNaiveState(srvService(t, srv, "nv")).Previous(); !slices.Equal(got, want) {
+			t.Fatalf("switch %d: routed %v, want %v", len(names), got, want)
+		}
+		if len(names) <= provision.NaivePrevCap && r.Msg.DroppedNames != nil || len(names) > provision.NaivePrevCap && !slices.Equal(r.Msg.DroppedNames, names[:1]) {
+			t.Fatalf("switch %d: dropped %v", len(names), r.Msg.DroppedNames)
+		}
+	}
+	entries, err := srv.Store.ListAudit(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(entries, func(e store.AuditEntry) bool {
+		return e.Action == "service.rotate drops "+names[0] && e.Target == "nv" && e.Result == "ok"
+	}) {
+		t.Fatalf("audit: %+v", entries)
 	}
 }
 

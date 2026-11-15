@@ -795,6 +795,14 @@ message RotateServiceResponse {
   // server name alone (R4-42), at switch_at or once its certificate covers
   // the new name; the previous name stays accepted until the switch after.
   string kind = 5;
+  // naive: the previous names that stay routed after the switch, newest
+  // first (the name in use now first): each until a switch a period
+  // (-naive-sni-period) after the one that left it, 3 at most.
+  repeated string kept_names = 6;
+  // naive: the previous names the switch takes off the front, left a
+  // period ago or more, or the oldest over 3. Devices that know only one of
+  // them lose naive until they fetch their subscription.
+  repeated string dropped_names = 7;
 }
 
 message Device {

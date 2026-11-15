@@ -135,6 +135,55 @@ func TestNaiveRoutesOneRestartAnEpoch(t *testing.T) {
 	}
 }
 
+// Two switches within a period (rayctl service rotate -now, twice): the
+// front routes every previous name still accepted, over TCP and UDP, the
+// one in the links before the first switch included; front.json changes at
+// the switches only, the publication of the next epoch's name included.
+func TestNaiveRoutesPreviousNames(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	for _, s := range [][2]string{{"reality", "r"}, {"naive", "nv"}} {
+		if _, err := provision.CreateService(ctx, st, store.Service{Kind: s[0], Name: s[1], Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	siteCert(t, ctx, st, "*.example.com")
+	e := provision.RealityEpoch{Lead: 3 * day, Prepare: day, Grace: 2 * day, NaivePeriod: 90 * day}
+	ok := func(context.Context, string) error { return nil }
+	nv, _ := st.ServiceByName(ctx, "nv")
+	a := naiveNames(t, ctx, st, "nv")
+	at := nv.CreatedAt.Add(5 * day)
+	for i := range 2 {
+		at = at.Add(time.Duration(i) * time.Hour)
+		if err := provision.RequestRotation(ctx, st, "nv", at, e.Lead, true); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := provision.RotateReality(ctx, st, at, e, ok, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := naiveNames(t, ctx, st, "nv")
+	if prev := got.Previous(); len(prev) != 2 || prev[1] != a.SNI {
+		t.Fatalf("previous names %v, want %s among them", prev, a.SNI)
+	}
+	after := renderFront(t, ctx, st)
+	if after.err != nil {
+		t.Fatal(after.err)
+	}
+	after.routes(t, "nv", got.SNI, got.Previous()[0], a.SNI, got.SNINext)
+	// The next scheduled publication (a lead before a period on): no
+	// change.
+	if _, err := provision.RotateReality(ctx, st, at.Add(87*day), e, ok, nil); err != nil {
+		t.Fatal(err)
+	}
+	if naiveNames(t, ctx, st, "nv").NextFrom == 0 {
+		t.Fatal("not published")
+	}
+	if pub := renderFront(t, ctx, st); !bytes.Equal(pub.raw, after.raw) {
+		t.Fatalf("the publication changed front.json:\n%s\n%s", after.raw, pub.raw)
+	}
+}
+
 // A naive service from before R4-42 (a node updated from v0.28.0, a
 // restored backup without sni_next): the first render gives it its next
 // name and routes it, and the renders after change nothing: the front

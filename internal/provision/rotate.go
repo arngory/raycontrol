@@ -400,25 +400,42 @@ func dropPrevReality(ctx context.Context, st *store.Store, svc store.Service, lo
 //     that have not fetched their subscription since lose the profile
 //     until they do (leaked keys, a blocked name);
 //   - naive's server name (R4-42), whatever rotate_sni says: at once, the
-//     previous name stays accepted until the switch after (no secret
-//     leaked), and clients move with their next subscription.
+//     previous name stays accepted until a switch a period after its own
+//     (NaivePrevious; no secret leaked), and clients move with their next
+//     subscription.
 //
 // Under a certificate of listed names (HTTP-01) the new name waits for its
 // certificate first, -reality-prepare at most.
 func RequestRotation(ctx context.Context, st *store.Store, name string, now time.Time, lead time.Duration, immediately bool) error {
+	_, err := RequestRotationNames(ctx, st, name, now, lead, immediately, 0)
+	return err
+}
+
+// NaiveSwitchNames are what a naive switch asked for does to the previous
+// names, were it at the time asked (later, a name may be older than the
+// period by then): Kept stay routed after it, newest first (the name in
+// use now first), Dropped leave the front.
+type NaiveSwitchNames struct {
+	Kept, Dropped []string
+}
+
+// RequestRotationNames is RequestRotation, and for naive what the switch
+// does to its previous names under -naive-sni-period (0: the default).
+func RequestRotationNames(ctx context.Context, st *store.Store, name string, now time.Time, lead time.Duration, immediately bool,
+	naivePeriod time.Duration) (NaiveSwitchNames, error) {
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
 	svc, err := st.ServiceByName(ctx, name)
 	if err != nil {
-		return err
+		return NaiveSwitchNames{}, err
 	}
 	if svc.Kind == "slipstream" {
 		// One certificate a server, one pin a client: a new key would cut
 		// every client off until its next subscription.
-		return fmt.Errorf("%w: %s (slipstream) has no rotation: its clients pin the server's one key (spec/slipstream-v1.md §3); a new key is a new service", store.ErrInvalid, name)
+		return NaiveSwitchNames{}, fmt.Errorf("%w: %s (slipstream) has no rotation: its clients pin the server's one key (spec/slipstream-v1.md §3); a new key is a new service", store.ErrInvalid, name)
 	}
 	if svc.Kind != "reality" && svc.Kind != "naive" {
-		return fmt.Errorf("%w: %s is neither REALITY nor naive (rotation: reality, naive's name, dnstt's seal key, masterdns's key, a site's certificate key)", store.ErrInvalid, name)
+		return NaiveSwitchNames{}, fmt.Errorf("%w: %s is neither REALITY nor naive (rotation: reality, naive's name, dnstt's seal key, masterdns's key, a site's certificate key)", store.ErrInvalid, name)
 	}
 	at := now.Add(lead)
 	if immediately {
@@ -430,14 +447,23 @@ func RequestRotation(ctx context.Context, st *store.Store, name string, now time
 		// Nothing of the current set stays after the switch (R4-19).
 		fields["urgent"] = true
 	}
+	switchAt := at.Unix()
 	if published != 0 && at.Unix() < published {
 		fields["next_from"] = max(at.Unix(), now.Unix()) // a published switch only moves earlier
 	}
+	if published != 0 {
+		switchAt = min(switchAt, published)
+	}
+	var names NaiveSwitchNames
+	if svc.Kind == "naive" {
+		kept, dropped := NaivePrevious(ParseNaiveState(svc), switchAt, naivePeriod)
+		names = NaiveSwitchNames{Kept: retiredNames(kept), Dropped: dropped}
+	}
 	settings, err := setFields(svc.Settings, fields)
 	if err != nil {
-		return err
+		return NaiveSwitchNames{}, err
 	}
-	return st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: settings})
+	return names, st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: settings})
 }
 
 // SiteOf returns the node's site a service relies on: the one REALITY
@@ -489,10 +515,12 @@ func SiteNames(site store.Service, all []store.Service) (names, next []string) {
 			next = add(next, state.SNINext)
 		}
 		if s.Kind == "naive" && s.Enabled && siteOf(s) == site.Name {
-			// The previous name until the next switch: a client on it
-			// checks the certificate against it.
+			// The previous names while routed (NaivePrevious): a client
+			// on one checks the certificate against it.
 			state := ParseNaiveState(s)
-			names = add(names, state.SNIPrev)
+			for _, n := range state.Previous() {
+				names = add(names, n)
+			}
 			switch {
 			case state.NextFrom != 0:
 				// Published: clients may take it from now (up to 2 minutes

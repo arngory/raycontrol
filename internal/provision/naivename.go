@@ -20,12 +20,13 @@ import (
 // The front's routes change once an epoch. The next name is chosen at the
 // switch before (at the service's creation, at the first render of a node
 // from before R4-42) and routed from then on, before it is published; the
-// previous name stays routed until the next switch. So the routes are
-// {sni, sni_next}, then {sni, sni_prev, sni_next}, and front.json changes
-// only at a switch, which restarts the front (it reads its routes at its
-// start only). The publication changes no route: a client whose clock is
-// ahead, or that tries next early when link fails, finds the new name
-// served; one that never fetched since finds the old one served.
+// previous name stays routed until the next switch, and longer when that
+// comes within a period (NaivePrevious). So the routes are {sni, sni_next},
+// then {sni, sni_prev, sni_next}, and front.json changes only at a switch,
+// which restarts the front (it reads its routes at its start only). The
+// publication changes no route: a client whose clock is ahead, or that
+// tries next early when link fails, finds the new name served; one that
+// never fetched since finds the old one served.
 //
 // Neither the site's key nor the password changes with the name: the
 // lines before and after carry the same niko-pin.
@@ -36,11 +37,22 @@ type NaiveState struct {
 	SNI        string `json:"sni"`                   // the name in use, in the links
 	SNINext    string `json:"sni_next,omitempty"`    // the name after the next switch, routed already; in subscriptions once published
 	NextFrom   int64  `json:"next_from,omitempty"`   // sni_next published, switch at this time
-	SNIPrev    string `json:"sni_prev,omitempty"`    // the name before the last switch, routed until the next one
+	SNIPrev    string `json:"sni_prev,omitempty"`    // the name before the last switch (at rotated_at), routed until a switch after
 	RotatedAt  int64  `json:"rotated_at,omitempty"`  // last switch; the service's creation before the first
 	PreparedAt int64  `json:"prepared_at,omitempty"` // the site's certificate is asked to cover sni_next since then
 	RotateSNI  *bool  `json:"rotate_sni,omitempty"`  // scheduled switches: true always, false never; unset: under a wildcard certificate only
 	RotateAt   int64  `json:"rotate_at,omitempty"`   // switch requested by the operator for this time
+	// The names before sni_prev still routed, newest first: left less than
+	// a period before the last switch (NaivePrevious). A release before
+	// knows sni_prev alone, which stays the newest.
+	SNIOlder []NaiveRetired `json:"sni_older,omitempty"`
+}
+
+// NaiveRetired is a previous name of a naive service older than sni_prev,
+// with the switch that left it.
+type NaiveRetired struct {
+	SNI       string `json:"sni"`
+	RetiredAt int64  `json:"retired_at"`
 }
 
 // ParseNaiveState reads the name rotation state of a naive service.
@@ -51,6 +63,69 @@ func ParseNaiveState(svc store.Service) NaiveState {
 		st.RotatedAt = svc.CreatedAt.Unix()
 	}
 	return st
+}
+
+// Previous are the previous names the front routes, newest first:
+// sni_prev, then sni_older.
+func (s NaiveState) Previous() []string {
+	var out []string
+	if s.SNIPrev != "" {
+		out = append(out, s.SNIPrev)
+	}
+	for _, o := range s.SNIOlder {
+		if o.SNI != "" {
+			out = append(out, o.SNI)
+		}
+	}
+	return out
+}
+
+// NaivePrevCap is how many previous names of a naive service the front
+// routes at most.
+const NaivePrevCap = 3
+
+// DefaultNaiveSNIPeriod is rayd serve -naive-sni-period's default, and how
+// long previous names stay with -naive-sni-period 0.
+const DefaultNaiveSNIPeriod = 90 * 24 * time.Hour
+
+// NaivePrevious is what a naive switch at a time does to the previous
+// names (the owner's answer 3 to docs/20 §9: the previous name is accepted
+// the whole epoch). Each name left at a switch stays routed until the first
+// switch a period or more after that one (-naive-sni-period; 90 days with
+// 0): a device that fetched nothing since knows only the link it had. At
+// the cadence of the period that is the next switch, as before; a switch
+// asked for within the period (rayctl service rotate -now, twice, or after
+// the scheduled one when the new name is blocked at once) keeps the name
+// before too. At most NaivePrevCap, the oldest dropped first. Names go only
+// at a switch: front.json changes once a switch still. kept are the
+// previous names after the switch, newest first (the name in use before
+// it first), dropped those it takes off the front.
+func NaivePrevious(state NaiveState, at int64, period time.Duration) (kept []NaiveRetired, dropped []string) {
+	if period <= 0 {
+		period = DefaultNaiveSNIPeriod
+	}
+	keep := int64(period / time.Second)
+	all := append([]NaiveRetired{{SNI: state.SNI, RetiredAt: at}, {SNI: state.SNIPrev, RetiredAt: state.RotatedAt}}, state.SNIOlder...)
+	for _, n := range all {
+		switch {
+		case n.SNI == "" || n.SNI == state.SNINext || slices.ContainsFunc(kept, func(k NaiveRetired) bool { return k.SNI == n.SNI }) ||
+			slices.Contains(dropped, n.SNI):
+		case at-n.RetiredAt >= keep || len(kept) == NaivePrevCap:
+			dropped = append(dropped, n.SNI)
+		default:
+			kept = append(kept, n)
+		}
+	}
+	return kept, dropped
+}
+
+// retiredNames are the names of a list of previous ones.
+func retiredNames(list []NaiveRetired) []string {
+	out := make([]string, 0, len(list))
+	for _, n := range list {
+		out = append(out, n.SNI)
+	}
+	return out
 }
 
 // EnsureNaiveNext gives a naive service without a next name one (a node
@@ -272,22 +347,33 @@ func rotateNaive(ctx context.Context, st *store.Store, all []store.Service, svc 
 	if !naiveSwitchNow(all, svc, state.NextFrom, t, switched, slack) {
 		return changed, nil
 	}
-	return true, switchNaive(ctx, st, all, svc, state, log)
+	return true, switchNaive(ctx, st, all, svc, state, e.NaivePeriod, log)
 }
 
 // switchNaive makes the next name current, the current one previous (it
-// stays routed until the next switch), and chooses the name after.
-func switchNaive(ctx context.Context, st *store.Store, all []store.Service, svc store.Service, state NaiveState, log *slog.Logger) error {
+// stays routed until a switch a period after this one, NaivePrevious, as
+// the previous ones left within the period before), and chooses the name
+// after.
+func switchNaive(ctx context.Context, st *store.Store, all []store.Service, svc store.Service, state NaiveState, period time.Duration,
+	log *slog.Logger) error {
 	name, err := newZone(ctx, st, all)
 	if err != nil {
 		return err
 	}
-	fields := map[string]any{"sni": state.SNINext, "sni_prev": state.SNI, "sni_next": name, "rotated_at": state.NextFrom,
+	kept, dropped := NaivePrevious(state, state.NextFrom, period)
+	fields := map[string]any{"sni": state.SNINext, "sni_prev": nil, "sni_older": nil, "sni_next": name, "rotated_at": state.NextFrom,
 		"next_from": nil, "rotate_at": nil, "prepared_at": nil}
+	if len(kept) > 0 {
+		fields["sni_prev"] = kept[0].SNI
+	}
+	if len(kept) > 1 {
+		fields["sni_older"] = kept[1:]
+	}
 	if err := naiveFields(ctx, st, svc, fields); err != nil {
 		return err
 	}
-	log.Info("naive server name switched; the previous one is accepted until the next switch", "service", svc.Name)
+	log.Info("naive server name switched; the previous ones are accepted until a switch a period after theirs", "service", svc.Name,
+		"previous", retiredNames(kept), "dropped", dropped)
 	return nil
 }
 

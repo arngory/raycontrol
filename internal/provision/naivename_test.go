@@ -63,8 +63,8 @@ func allNames(t *testing.T, ctx context.Context, st *store.Store) map[string]str
 	}
 	seen := map[string]string{}
 	for _, s := range all {
-		ns := ParseNaiveState(s) // sni, sni_next, sni_prev of any kind
-		for _, n := range []string{ns.SNI, ns.SNINext, ns.SNIPrev} {
+		ns := ParseNaiveState(s) // sni, sni_next, sni_prev of any kind; naive's older ones
+		for _, n := range append([]string{ns.SNI, ns.SNINext}, ns.Previous()...) {
 			if n == "" {
 				continue
 			}
@@ -602,4 +602,132 @@ func TestNaiveNamesApart(t *testing.T) {
 	if _, err := SetServiceOption(ctx, st, "dns", "spare_zones", prev); err == nil {
 		t.Fatalf("a spare zone took naive's previous name %s: %s", prev, mustService(t, ctx, st, "dns").Settings)
 	}
+	// Five switches within an hour each: three previous names routed, the
+	// oldest of them taken by no zone either.
+	older := naiveState(t, ctx, st, "nv").SNIOlder
+	if len(older) != 2 {
+		t.Fatalf("older names %+v", older)
+	}
+	if _, err := SetServiceOption(ctx, st, "dns", "spare_zones", older[1].SNI); err == nil {
+		t.Fatalf("a spare zone took naive's older name %s", older[1].SNI)
+	}
+}
+
+// The owner's answer 3: the previous name is accepted the whole epoch. A
+// second switch within the period keeps the name before the first too:
+// rayctl service rotate -now twice, or right after the scheduled switch
+// because the new name is blocked at once (devices that cannot fetch went
+// back to link, the name before). Names go at a switch only, a period
+// after the one that left them, 3 at most; the request says which.
+func TestNaiveNamePreviousNames(t *testing.T) {
+	routed := func(t *testing.T, ctx context.Context, st *store.Store, names ...string) {
+		t.Helper()
+		got := naiveState(t, ctx, st, "nv")
+		all, _ := st.ListServices(ctx)
+		site, _ := st.ServiceByName(ctx, "site")
+		certified, _ := SiteNames(site, all)
+		for _, n := range names {
+			if n != got.SNI && n != got.SNINext && !slices.Contains(got.Previous(), n) {
+				t.Fatalf("%s no longer routed: %+v", n, got)
+			}
+			if !slices.Contains(certified, n) && n != got.SNINext {
+				t.Fatalf("%s not among the certificate's names %v", n, certified)
+			}
+		}
+	}
+	t.Run("-now twice", func(t *testing.T) {
+		ctx, st, nv := naiveNode(t, "*.example.com")
+		a := ParseNaiveState(nv)
+		now := nv.CreatedAt.Add(5 * day)
+		var asked []NaiveSwitchNames
+		for i := range 2 {
+			at := now.Add(time.Duration(i) * time.Hour)
+			n, err := RequestRotationNames(ctx, st, "nv", at, naiveEpoch.Lead, true, naiveEpoch.NaivePeriod)
+			if err != nil {
+				t.Fatal(err)
+			}
+			asked = append(asked, n)
+			rotateAt(t, ctx, st, at, naiveEpoch)
+		}
+		got := naiveState(t, ctx, st, "nv")
+		routed(t, ctx, st, a.SNI, a.SNINext)
+		if got.SNIPrev != a.SNINext || len(got.SNIOlder) != 1 || got.SNIOlder[0] != (NaiveRetired{a.SNI, now.Unix()}) {
+			t.Fatalf("after two switches: %+v", got)
+		}
+		if !slices.Equal(asked[1].Kept, []string{a.SNINext, a.SNI}) || asked[1].Dropped != nil {
+			t.Fatalf("the second request said %+v", asked[1])
+		}
+		allNames(t, ctx, st)
+	})
+	t.Run("scheduled, then -now", func(t *testing.T) {
+		ctx, st, nv := naiveNode(t, "*.example.com")
+		SetServiceOption(ctx, st, "r", "rotate_sni", "off")
+		e := naiveEpoch
+		e.Period = 0
+		a := ParseNaiveState(nv)
+		rotateAt(t, ctx, st, nv.CreatedAt.Add(87*day), e)
+		rotateAt(t, ctx, st, nv.CreatedAt.Add(90*day), e) // a → b
+		b := naiveState(t, ctx, st, "nv")
+		later := nv.CreatedAt.Add(92 * day) // b blocked
+		if err := RequestRotation(ctx, st, "nv", later, e.Lead, true); err != nil {
+			t.Fatal(err)
+		}
+		rotateAt(t, ctx, st, later, e) // b → c
+		routed(t, ctx, st, a.SNI, b.SNI)
+		// The next scheduled switch, a period after: b goes, a too.
+		rotateAt(t, ctx, st, later.Add(87*day), e)
+		rotateAt(t, ctx, st, later.Add(90*day), e)
+		got := naiveState(t, ctx, st, "nv")
+		if prev := got.Previous(); len(prev) != 1 || slices.Contains(prev, a.SNI) || slices.Contains(prev, b.SNI) {
+			t.Fatalf("a period on: %+v", got)
+		}
+	})
+	t.Run("by the schedule: one previous name", func(t *testing.T) {
+		ctx, st, nv := naiveNode(t, "*.example.com")
+		SetServiceOption(ctx, st, "r", "rotate_sni", "off")
+		e := naiveEpoch
+		e.Period = 0
+		for _, d := range []time.Duration{87, 90, 177, 180, 267, 270} {
+			rotateAt(t, ctx, st, nv.CreatedAt.Add(d*day), e)
+		}
+		if got := naiveState(t, ctx, st, "nv"); got.SNIPrev == "" || got.SNIOlder != nil || got.RotatedAt != nv.CreatedAt.Add(270*day).Unix() {
+			t.Fatalf("three scheduled switches: %+v", got)
+		}
+	})
+	t.Run("at most three", func(t *testing.T) {
+		ctx, st, nv := naiveNode(t, "*.example.com")
+		a := ParseNaiveState(nv)
+		now := nv.CreatedAt.Add(5 * day)
+		var last NaiveSwitchNames
+		for i := range 4 {
+			at := now.Add(time.Duration(i) * time.Hour)
+			n, err := RequestRotationNames(ctx, st, "nv", at, naiveEpoch.Lead, true, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			last = n
+			rotateAt(t, ctx, st, at, naiveEpoch)
+		}
+		got := naiveState(t, ctx, st, "nv")
+		if prev := got.Previous(); len(prev) != NaivePrevCap || slices.Contains(prev, a.SNI) || got.SNIPrev != prev[0] {
+			t.Fatalf("after four switches: %+v", got)
+		}
+		if len(last.Kept) != NaivePrevCap || !slices.Equal(last.Dropped, []string{a.SNI}) {
+			t.Fatalf("the fourth request said %+v", last)
+		}
+		allNames(t, ctx, st)
+	})
+	t.Run("period 0: 90 days", func(t *testing.T) {
+		state := NaiveState{SNI: "c", SNINext: "d", SNIPrev: "b", RotatedAt: 1000, SNIOlder: []NaiveRetired{{"a", 500}}}
+		day := int64(24 * 3600)
+		if kept, dropped := NaivePrevious(state, 500+90*day-1, 0); len(kept) != 3 || dropped != nil {
+			t.Fatalf("within 90 days: %v %v", kept, dropped)
+		}
+		if kept, dropped := NaivePrevious(state, 500+90*day, 0); len(kept) != 2 || !slices.Equal(dropped, []string{"a"}) {
+			t.Fatalf("90 days on: %v %v", kept, dropped)
+		}
+		if kept, _ := NaivePrevious(state, 500+day, 30*24*time.Hour); len(kept) != 3 {
+			t.Fatalf("a day on, a period of 30 days: %v", kept)
+		}
+	})
 }

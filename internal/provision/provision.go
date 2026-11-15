@@ -1278,15 +1278,16 @@ func nodeNameClash(ctx context.Context, st *store.Store, all []store.Service, zo
 		return "the name the zones are delegated to, " + string(ns), nil
 	}
 	for _, svc := range all {
-		// The previous name too: the front routes it until the next
-		// switch (REALITY, naive).
+		// The previous names too: the front routes them until a switch
+		// after (REALITY, naive; naive's older ones, NaivePrevious).
 		var names struct {
-			SNI     string `json:"sni"`
-			SNINext string `json:"sni_next"`
-			SNIPrev string `json:"sni_prev"`
+			SNI      string         `json:"sni"`
+			SNINext  string         `json:"sni_next"`
+			SNIPrev  string         `json:"sni_prev"`
+			SNIOlder []NaiveRetired `json:"sni_older"`
 		}
 		_ = json.Unmarshal([]byte(svc.Settings), &names)
-		for _, n := range []string{names.SNI, names.SNINext, names.SNIPrev} {
+		for _, n := range append([]string{names.SNI, names.SNINext, names.SNIPrev}, retiredNames(names.SNIOlder)...) {
 			if holds(canonicalZone(n)) {
 				return "the server name of " + svc.Name + ", " + n, nil
 			}

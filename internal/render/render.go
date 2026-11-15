@@ -807,15 +807,20 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				quic = backendRef{Socket: p.NaiveQUICSocket(s.Name), Mode: "packet", UID: p.PeerUID(s.UID)}
 			}
 			backends[s.Name] = ref
-			// naive: its name, the one before its last switch and the one
-			// after its next (R4-42), whatever is published: the routes,
-			// and front.json with them, change at a switch only, which
-			// restarts the front (it reads its routes at its start). A
-			// client that moves early, or back, finds both names served.
+			// naive: its name, the ones before it still accepted (the one
+			// before its last switch, and those left within the period
+			// before, provision.NaivePrevious) and the one after its next
+			// (R4-42), whatever is published: the routes, and front.json
+			// with them, change at a switch only, which restarts the front
+			// (it reads its routes at its start). A client that moves
+			// early, or back, finds its names served.
 			own := []string{strings.ToLower(st.SNI)}
 			if s.Kind == "naive" {
 				ns := provision.ParseNaiveState(s.Service)
-				own = append(own, strings.ToLower(ns.SNIPrev), strings.ToLower(ns.SNINext))
+				for _, n := range ns.Previous() {
+					own = append(own, strings.ToLower(n))
+				}
+				own = append(own, strings.ToLower(ns.SNINext))
 			}
 			names, err := claim(tcpNames, s.Name, own...)
 			if err != nil {

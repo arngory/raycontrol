@@ -89,16 +89,20 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 	if _, err := provision.SetCertificate(ctx, st, "site", ca.ChainPEM, ca.KeyPEM, time.Now(), false); err != nil {
 		t.Fatal(err)
 	}
-	// naive after a switch of its name (R4-42): its routes carry the name
-	// in use, the one before and the one after, over TCP and UDP.
-	if err := provision.RequestRotation(ctx, st, "naive", time.Now(), time.Hour, true); err != nil {
-		t.Fatal(err)
+	// naive after three switches of its name within a period (R4-42,
+	// rayctl service rotate -now thrice): its routes carry the name in use,
+	// the three before it and the one after, over TCP and UDP.
+	for i := range 3 {
+		at := time.Now().Add(time.Duration(i) * time.Minute)
+		if err := provision.RequestRotation(ctx, st, "naive", at, time.Hour, true); err != nil {
+			t.Fatal(err)
+		}
+		if n, err := provision.RotateReality(ctx, st, at, provision.RealityEpoch{Lead: time.Hour, Prepare: time.Hour}, nil, nil); err != nil || n != 1 {
+			t.Fatalf("naive's switch: %d %v", n, err)
+		}
 	}
-	if n, err := provision.RotateReality(ctx, st, time.Now(), provision.RealityEpoch{Lead: time.Hour, Prepare: time.Hour}, nil, nil); err != nil || n != 1 {
-		t.Fatalf("naive's switch: %d %v", n, err)
-	}
-	if nv, _ := st.ServiceByName(ctx, "naive"); provision.ParseNaiveState(nv).SNIPrev == "" {
-		t.Fatalf("naive not switched: %s", nv.Settings)
+	if nv, _ := st.ServiceByName(ctx, "naive"); len(provision.ParseNaiveState(nv).Previous()) != 3 {
+		t.Fatalf("naive not switched thrice: %s", nv.Settings)
 	}
 	st.SetSetting(ctx, "dns_ns_name", []byte("ns9.example.test"))
 	if _, err := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true}); err != nil {
@@ -150,9 +154,11 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 	configs := write()
 	nv, _ := st.ServiceByName(ctx, "naive")
 	ns := provision.ParseNaiveState(nv)
-	if b, _ := os.ReadFile(filepath.Join(paths.Rendered, "front", "front.json")); strings.Count(string(b), `"`+ns.SNIPrev+`"`) != 2 ||
-		strings.Count(string(b), `"`+ns.SNI+`"`) != 2 || strings.Count(string(b), `"`+ns.SNINext+`"`) != 2 {
-		t.Fatalf("naive's three names, TCP and UDP, in front.json:\n%s", b)
+	b, _ := os.ReadFile(filepath.Join(paths.Rendered, "front", "front.json"))
+	for _, n := range append([]string{ns.SNI, ns.SNINext}, ns.Previous()...) {
+		if strings.Count(string(b), `"`+n+`"`) != 2 {
+			t.Fatalf("naive's five names, TCP and UDP, in front.json (%s):\n%s", n, b)
+		}
 	}
 	yggBackend := filepath.Join(paths.Rendered, "ygg", "backend.json")
 	if b, _ := os.ReadFile(yggBackend); strings.Contains(string(b), "lan_relay_mbps") || !strings.Contains(string(b), `"stats_socket"`) {

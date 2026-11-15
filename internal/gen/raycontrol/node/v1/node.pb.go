@@ -5936,7 +5936,15 @@ type RotateServiceResponse struct {
 	// The service's kind (raycontrol v0.29.0): "naive" is a switch of its
 	// server name alone (R4-42), at switch_at or once its certificate covers
 	// the new name; the previous name stays accepted until the switch after.
-	Kind          string `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
+	Kind string `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
+	// naive: the previous names that stay routed after the switch, newest
+	// first (the name in use now first): each until a switch a period
+	// (-naive-sni-period) after the one that left it, 3 at most.
+	KeptNames []string `protobuf:"bytes,6,rep,name=kept_names,json=keptNames,proto3" json:"kept_names,omitempty"`
+	// naive: the previous names the switch takes off the front, left a
+	// period ago or more, or the oldest over 3. Devices that know only one of
+	// them lose naive until they fetch their subscription.
+	DroppedNames  []string `protobuf:"bytes,7,rep,name=dropped_names,json=droppedNames,proto3" json:"dropped_names,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6004,6 +6012,20 @@ func (x *RotateServiceResponse) GetKind() string {
 		return x.Kind
 	}
 	return ""
+}
+
+func (x *RotateServiceResponse) GetKeptNames() []string {
+	if x != nil {
+		return x.KeptNames
+	}
+	return nil
+}
+
+func (x *RotateServiceResponse) GetDroppedNames() []string {
+	if x != nil {
+		return x.DroppedNames
+	}
+	return nil
 }
 
 type Device struct {
@@ -8657,14 +8679,17 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03now\x18\x02 \x01(\bR\x03now\x12\x14\n" +
 	"\x05force\x18\x03 \x01(\bR\x05force\x12\x14\n" +
-	"\x05fresh\x18\x04 \x01(\bR\x05fresh\"\x8d\x01\n" +
+	"\x05fresh\x18\x04 \x01(\bR\x05fresh\"\xd1\x01\n" +
 	"\x15RotateServiceResponse\x12\x1b\n" +
 	"\tswitch_at\x18\x01 \x01(\x03R\bswitchAt\x12\x12\n" +
 	"\x04seal\x18\x02 \x01(\bR\x04seal\x12\x1d\n" +
 	"\n" +
 	"prev_until\x18\x03 \x01(\x03R\tprevUntil\x12\x10\n" +
 	"\x03key\x18\x04 \x01(\tR\x03key\x12\x12\n" +
-	"\x04kind\x18\x05 \x01(\tR\x04kind\"\xc4\x01\n" +
+	"\x04kind\x18\x05 \x01(\tR\x04kind\x12\x1d\n" +
+	"\n" +
+	"kept_names\x18\x06 \x03(\tR\tkeptNames\x12#\n" +
+	"\rdropped_names\x18\a \x03(\tR\fdroppedNames\"\xc4\x01\n" +
 	"\x06Device\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04user\x18\x02 \x01(\tR\x04user\x12\x12\n" +

@@ -206,8 +206,9 @@ func cmdServe(args []string) error {
 	credGrace := fs.Duration("cred-grace", 2*24*time.Hour, "the previous credential (and REALITY key set) is accepted this long after the switch (12h at least)")
 	realityPeriod := fs.Duration("reality-period", 90*24*time.Hour, "how long REALITY keys stay current; their next set is published -cred-lead ahead (0: no rotation)")
 	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new server name (REALITY's, naive's) may wait for its certificate")
-	naiveSNIPeriod := fs.Duration("naive-sni-period", 90*24*time.Hour, "how long a naive server name stays current: the next one is published -cred-lead ahead, "+
-		"under a wildcard certificate only unless rayctl service set NAME rotate_sni=on (0: only by rayctl service rotate NAME)")
+	naiveSNIPeriod := fs.Duration("naive-sni-period", provision.DefaultNaiveSNIPeriod, "how long a naive server name stays current: the next one is published -cred-lead ahead, "+
+		"under a wildcard certificate only unless rayctl service set NAME rotate_sni=on (0: only by rayctl service rotate NAME); "+
+		"a name left at a switch stays accepted until a switch this long after (90 days with 0), 3 previous names at most")
 	siteKeyPeriod := fs.Duration("site-key-period", provision.DefaultSiteKeyPeriod, "how long the key of a site's certificate stays in use: at an issuance after that the next key takes over (0: only by rayctl service rotate SITE)")
 	siteKeyLead := fs.Duration("site-key-lead", provision.DefaultSiteKeyLead, "the next key of a site's certificate is in the subscription (niko-pin) this long before a switch to it")
 	debug := fs.Bool("debug", false, "log at debug level: refused subscription requests with their addresses (personal data: turn it off after use)")
@@ -272,7 +273,7 @@ func cmdServe(args []string) error {
 	paths := render.Paths{Rendered: *rendered, Run: *run, Supervised: *supervise}
 	rotateNow := make(chan struct{}, 1)
 	srv := &api.Server{Store: st, Params: params, Version: version, Paths: paths, Binaries: deploy.DefaultBinaries,
-		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead, CredGrace: *credGrace, SiteKeyLead: *siteKeyLead, Health: hb,
+		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead, NaivePeriod: *naiveSNIPeriod, CredGrace: *credGrace, SiteKeyLead: *siteKeyLead, Health: hb,
 		Rotate: func() {
 			select {
 			case rotateNow <- struct{}{}:
