@@ -63,7 +63,8 @@ func TestLinksForStrictClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyDER, certDER, err := provision.SelfSigned("site.example.com")
+	// A wildcard: it covers the names naive moves to.
+	keyDER, certDER, err := provision.SelfSigned("*.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,8 +86,9 @@ func TestLinksForStrictClient(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A rotation under way: new credentials published, and new REALITY keys
-	// (with a new name for the self-steal one).
+	// A rotation under way: new credentials published, new REALITY keys
+	// (with a new name for the self-steal one), and a new name for one
+	// naive (R4-42), with the next password in that line.
 	now := time.Now()
 	day := 24 * time.Hour
 	render.Collect(ctx, st) // makes the credentials
@@ -94,7 +96,7 @@ func TestLinksForStrictClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	epoch := provision.RealityEpoch{Period: 90 * day, Lead: 3 * day, Prepare: day}
-	for _, name := range []string{"reality", "reality-foreign"} {
+	for _, name := range []string{"reality", "reality-foreign", "naive"} {
 		if err := provision.RequestRotation(ctx, st, name, now.Add(26*day), epoch.Lead, false); err != nil {
 			t.Fatal(err)
 		}
@@ -132,6 +134,21 @@ func TestLinksForStrictClient(t *testing.T) {
 			for _, problem := range strictProblems(k.kind, link) {
 				t.Errorf("%s (%s): %s\n  %s", k.name, k.kind, problem, link)
 			}
+		}
+	}
+	// naive's next name (subscription-v1 §3): the next line of the naive that
+	// moves is the line under its new sni; the other's keeps its name.
+	for name, moves := range map[string]bool{"naive": true, "naive-icmp": false} {
+		svc, _ := st.ServiceByName(ctx, name)
+		ns := provision.ParseNaiveState(svc)
+		cur, _ := url.Parse(byName[name].Link)
+		next, _ := url.Parse(nextLink(byName[name]))
+		want := ns.SNI
+		if moves {
+			want = ns.SNINext
+		}
+		if cur.Query().Get("sni") != ns.SNI || next.Query().Get("sni") != want || (ns.NextFrom != 0) != moves {
+			t.Errorf("%s: sni %s, next %s, want %s (%+v)", name, cur.Query().Get("sni"), next.Query().Get("sni"), want, ns)
 		}
 	}
 	// ICMP (icmp-v1 §1): icmp=1 on the naive that carries it, and only there.
