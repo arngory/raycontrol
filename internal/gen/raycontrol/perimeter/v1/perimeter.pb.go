@@ -118,9 +118,13 @@ type Gate struct {
 	// chain) is in force.
 	LeftOver bool `protobuf:"varint,2,opt,name=left_over,json=leftOver,proto3" json:"left_over,omitempty"`
 	// The snapshot in force came from rayd's feed, not from the saved one.
-	FromRayd      bool   `protobuf:"varint,3,opt,name=from_rayd,json=fromRayd,proto3" json:"from_rayd,omitempty"`
-	Version       string `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"` // rayspa's
-	Pid           uint32 `protobuf:"varint,5,opt,name=pid,proto3" json:"pid,omitempty"`
+	FromRayd bool   `protobuf:"varint,3,opt,name=from_rayd,json=fromRayd,proto3" json:"from_rayd,omitempty"`
+	Version  string `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"` // rayspa's
+	Pid      uint32 `protobuf:"varint,5,opt,name=pid,proto3" json:"pid,omitempty"`
+	// The feed's newest snapshot did not apply (rayspa refused it: its
+	// journal says why), so an earlier one is in force: rayspa is behind
+	// rayd's latest, up or not. Cleared when one of the feed's applies.
+	Refused       bool `protobuf:"varint,6,opt,name=refused,proto3" json:"refused,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -188,6 +192,13 @@ func (x *Gate) GetPid() uint32 {
 		return x.Pid
 	}
 	return 0
+}
+
+func (x *Gate) GetRefused() bool {
+	if x != nil {
+		return x.Refused
+	}
+	return false
 }
 
 type ReportGuardRequest struct {
@@ -1439,13 +1450,14 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"'raycontrol/perimeter/v1/perimeter.proto\x12\x17raycontrol.perimeter.v1\"F\n" +
 	"\x11ReportGateRequest\x121\n" +
 	"\x04gate\x18\x01 \x01(\v2\x1d.raycontrol.perimeter.v1.GateR\x04gate\"\x14\n" +
-	"\x12ReportGateResponse\"\x82\x01\n" +
+	"\x12ReportGateResponse\"\x9c\x01\n" +
 	"\x04Gate\x12\x14\n" +
 	"\x05state\x18\x01 \x01(\tR\x05state\x12\x1b\n" +
 	"\tleft_over\x18\x02 \x01(\bR\bleftOver\x12\x1b\n" +
 	"\tfrom_rayd\x18\x03 \x01(\bR\bfromRayd\x12\x18\n" +
 	"\aversion\x18\x04 \x01(\tR\aversion\x12\x10\n" +
-	"\x03pid\x18\x05 \x01(\rR\x03pid\"J\n" +
+	"\x03pid\x18\x05 \x01(\rR\x03pid\x12\x18\n" +
+	"\arefused\x18\x06 \x01(\bR\arefused\"J\n" +
 	"\x12ReportGuardRequest\x124\n" +
 	"\x05guard\x18\x01 \x01(\v2\x1e.raycontrol.perimeter.v1.GuardR\x05guard\"\x15\n" +
 	"\x13ReportGuardResponse\"\xdf\x01\n" +

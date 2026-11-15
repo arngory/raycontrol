@@ -43,6 +43,10 @@ message Gate {
   bool from_rayd = 3;
   string version = 4; // rayspa's
   uint32 pid = 5;
+  // The feed's newest snapshot did not apply (rayspa refused it: its
+  // journal says why), so an earlier one is in force: rayspa is behind
+  // rayd's latest, up or not. Cleared when one of the feed's applies.
+  bool refused = 6;
 }
 
 message ReportGuardRequest {

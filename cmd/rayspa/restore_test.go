@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,6 +51,67 @@ func savedSnapshot() *perimeterv1.Snapshot {
 		AdminPrefixes: []string{"198.51.100.0/24"},
 		AdminPorts:    []*perimeterv1.Port{{Proto: "tcp", Port: 22}},
 	}
+}
+
+// chanFeed is a feed whose snapshots the test hands over one at a time;
+// took says the one before was processed (the next Receive came).
+type chanFeed struct {
+	in   chan *perimeterv1.Snapshot
+	took chan struct{}
+	cur  *perimeterv1.Snapshot
+}
+
+func (f *chanFeed) Receive() bool {
+	if f.cur != nil {
+		f.took <- struct{}{}
+	}
+	s, ok := <-f.in
+	f.cur = s
+	return ok
+}
+func (f *chanFeed) Snapshot() *perimeterv1.Snapshot { return f.cur }
+func (f *chanFeed) Err() error                      { return nil }
+func (f *chanFeed) Close() error                    { return nil }
+
+// rayd learns when rayspa refuses the feed's newest snapshot (refused, in
+// ReportGate): set by a snapshot that does not apply, while an earlier one
+// stays in force, cleared by the next that does; from_rayd stays as it was.
+func TestWatchRefused(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	g := perimeter.NewGate(&countingFW{}, log)
+	g.SetupAtFirstSnapshot()
+	feed := &chanFeed{in: make(chan *perimeterv1.Snapshot), took: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	opened := false
+	open := func(ctx context.Context) (snapshots, error) {
+		if !opened {
+			opened = true
+			return feed, nil
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	var fromRayd, refused atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watch(ctx, open, "", g, &perimeter.TCPCarrier{}, nil, &fromRayd, &refused, make(chan struct{}, 1), log)
+	}()
+	bad := savedSnapshot()
+	bad.Spa.PortKey = []byte{1}
+	for i, c := range []struct {
+		snap               *perimeterv1.Snapshot
+		fromRayd, refusing bool
+	}{{bad, false, true}, {savedSnapshot(), true, false}, {bad, true, true}, {savedSnapshot(), true, false}} {
+		feed.in <- c.snap
+		<-feed.took
+		if fromRayd.Load() != c.fromRayd || refused.Load() != c.refusing || !g.Up() != (i == 0) {
+			t.Errorf("snapshot %d: from rayd %v, refused %v, up %v", i, fromRayd.Load(), refused.Load(), g.Up())
+		}
+	}
+	cancel()
+	close(feed.in)
+	<-done
 }
 
 // The start from the saved snapshot (R4-40): one that applies makes the

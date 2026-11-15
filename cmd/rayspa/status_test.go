@@ -49,6 +49,15 @@ func TestStartStatus(t *testing.T) {
 	if s := behind.status(); !strings.HasPrefix(s, "perimeter behind") {
 		t.Errorf("behind: %q", s)
 	}
+	// rayd's newest snapshot refused: an earlier one (or the saved one) is
+	// up, behind rayd; not "rayd's snapshot", which the update waits for,
+	// nor "the saved snapshot", which says rayd is away.
+	for _, from := range []bool{true, false} {
+		refused := stateNow{state: perimeter.GateUp, fromRayd: from, refused: true, pid: 7}
+		if s := refused.status(); !strings.HasPrefix(s, "perimeter behind rayd: ") || !strings.HasSuffix(s, "; rayspa "+version+", pid 7") {
+			t.Errorf("refused, from rayd %v: %q", from, s)
+		}
+	}
 	notIn := stateNow{state: perimeter.GateNotIn, pid: 7}
 	if s := notIn.status(); !strings.HasPrefix(s, "PERIMETER DOWN: the host is open, the table is not in") {
 		t.Errorf("not in: %q", s)
@@ -61,9 +70,12 @@ func TestGatePB(t *testing.T) {
 	for st, want := range map[perimeter.GateState]string{perimeter.GateUp: "up", perimeter.GateBehind: "behind",
 		perimeter.GateNotIn: "not_in", perimeter.GateNoSnapshot: "no_snapshot"} {
 		g := gatePB(stateNow{state: st, leftOver: true, fromRayd: true, pid: 9})
-		if g.State != want || !g.LeftOver || !g.FromRayd || g.Pid != 9 || g.Version != version {
+		if g.State != want || !g.LeftOver || !g.FromRayd || g.Refused || g.Pid != 9 || g.Version != version {
 			t.Errorf("%v: %v", st, g)
 		}
+	}
+	if g := gatePB(stateNow{state: perimeter.GateUp, fromRayd: true, refused: true, pid: 9}); !g.Refused {
+		t.Errorf("refused: %v", g)
 	}
 }
 

@@ -135,3 +135,118 @@ func TestMonitorRayspaGate(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// monitor is a PerimeterServer whose rayspa loop is watched from start.
+func monitor(t *testing.T) (p *PerimeterServer, loop func() health.Loop, log *slog.Logger, buf *bytes.Buffer) {
+	t.Helper()
+	buf = &bytes.Buffer{}
+	log = slog.New(slog.NewTextHandler(buf, nil))
+	board := &health.Board{}
+	p = &PerimeterServer{Server: &Server{Health: board}}
+	loop = func() health.Loop {
+		for _, l := range board.Loops() {
+			if l.Name == RayspaLoop {
+				return l
+			}
+		}
+		return health.Loop{}
+	}
+	return p, loop, log, buf
+}
+
+// A rayspa that crashes and comes back every minute, its table never in:
+// each process reports not_in with a pid of its own, and follows the feed
+// for a while. The count of not up is not restarted by a new pid, only by
+// an up report or a gap of reports longer than gateStale: the loop fails.
+func TestMonitorRayspaCrashLoop(t *testing.T) {
+	p, loop, log, _ := monitor(t)
+	start := time.Unix(1767225600, 0)
+	p.watch.since = start
+	at := func(d time.Duration) time.Time { return start.Add(d) }
+	failedAt := time.Duration(0)
+	for m := range 10 {
+		run := time.Duration(m) * time.Minute
+		p.watch.start(at(run + time.Second))
+		for d := run; d < run+time.Minute; d += 10 * time.Second {
+			if (d-run)%(30*time.Second) == 0 { // at its start, then every 30 s
+				p.watch.report(&perimeterv1.Gate{State: gateNotIn, Version: "v0.27.1", Pid: uint32(100 + m)}, at(d+2*time.Second))
+			}
+			if d-run == 40*time.Second {
+				p.watch.end(at(d)) // the crash
+			}
+			p.reportRayspa(at(d+3*time.Second), log)
+			if failedAt == 0 && loop().Failing() {
+				failedAt = d
+			}
+		}
+	}
+	if l := loop(); !l.Failing() || !strings.Contains(l.Err, "is not in") || failedAt > 3*time.Minute {
+		t.Fatalf("a crash loop: failed at %v, %+v", failedAt, l)
+	}
+	// Up again, then a gap longer than gateStale: a new count.
+	p.watch.start(at(11 * time.Minute))
+	p.watch.report(&perimeterv1.Gate{State: gateUp, FromRayd: true, Pid: 200}, at(11*time.Minute))
+	p.reportRayspa(at(11*time.Minute), log)
+	if l := loop(); l.Failing() {
+		t.Fatalf("up: %+v", l)
+	}
+	p.watch.report(&perimeterv1.Gate{State: gateNotIn, Pid: 200}, at(12*time.Minute))
+	p.watch.report(&perimeterv1.Gate{State: gateNotIn, Pid: 201}, at(12*time.Minute+gateStale))
+	p.reportRayspa(at(12*time.Minute+gateStale+time.Second), log)
+	if l := loop(); l.Failing() {
+		t.Fatalf("a new count after a gap: %+v", l)
+	}
+}
+
+// rayspa up on its saved snapshot while every snapshot of rayd's fails
+// its checks (from_rayd false), or up on an earlier snapshot of rayd's
+// while it refuses the newest (refused): the table is in, but what changed
+// since, a revocation, is not. For longer than the grace while rayspa
+// follows the feed, the loop fails with its own reason; a snapshot of
+// rayd's taken, ok again. At rayspa's start the saved snapshot is up for
+// a moment: no failure within the grace.
+func TestMonitorRayspaBehindRayd(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		behind *perimeterv1.Gate
+		reason string
+	}{
+		{"the saved snapshot", &perimeterv1.Gate{State: gateUp, Version: "v0.27.1", Pid: 7}, "up on the snapshot rayspa saved, not on rayd's"},
+		{"an earlier snapshot", &perimeterv1.Gate{State: gateUp, FromRayd: true, Refused: true, Version: "v0.27.1", Pid: 7},
+			"up on an earlier snapshot of rayd's (it refused the newest)"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p, loop, log, buf := monitor(t)
+			start := time.Unix(1767225600, 0)
+			p.watch.since = start
+			at := func(d time.Duration) time.Time { return start.Add(d) }
+			up := &perimeterv1.Gate{State: gateUp, FromRayd: true, Version: "v0.27.1", Pid: 7}
+			p.watch.start(at(time.Second))
+			p.watch.report(up, at(2*time.Second))
+			p.reportRayspa(at(10*time.Second), log)
+			for d := 20 * time.Second; d < 20*time.Second+rayspaGrace; d += 10 * time.Second {
+				p.watch.report(c.behind, at(d))
+				p.reportRayspa(at(d), log)
+			}
+			if l := loop(); l.Failing() || !strings.Contains(l.Detail, "its table is in") {
+				t.Fatalf("within the grace: %+v", l)
+			}
+			for d := 20*time.Second + rayspaGrace; d < 4*time.Minute; d += 10 * time.Second {
+				p.watch.report(c.behind, at(d))
+				p.reportRayspa(at(d), log)
+			}
+			l := loop()
+			if !l.Failing() || !strings.Contains(l.Err, c.reason) || !strings.Contains(l.Err, "revocations") || strings.Contains(l.Err, "host is open") {
+				t.Fatalf("behind: %+v", l)
+			}
+			if n := strings.Count(buf.String(), "perimeter behind rayd"); n != 1 || strings.Contains(buf.String(), "perimeter down") {
+				t.Fatalf("journal:\n%s", buf.String())
+			}
+			p.watch.report(up, at(4*time.Minute))
+			p.reportRayspa(at(4*time.Minute), log)
+			if l := loop(); l.Failing() {
+				t.Fatalf("rayd's snapshot taken: %+v", l)
+			}
+		})
+	}
+}

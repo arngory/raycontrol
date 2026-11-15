@@ -188,7 +188,7 @@ func run(args []string) error {
 	}
 	report(cur)
 	fed := make(chan struct{}, 1)
-	go watch(ctx, open, *state, gate, carrier, dl, &st.fromRayd, fed, log)
+	go watch(ctx, open, *state, gate, carrier, dl, &st.fromRayd, &st.refused, fed, log)
 	go func() {
 		if err := perimeter.ReadNFLOG(ctx, uint16(*group), handle, log); err != nil {
 			log.Error("nflog", "err", err)
@@ -252,23 +252,26 @@ func run(args []string) error {
 
 // startState is what rayspa says of its table: the gate's state, whether
 // a table an earlier rayspa left is in force while this one has none, and
-// whether its snapshot came from rayd (not the saved one).
+// whether its snapshot came from rayd (not the saved one), and whether the
+// feed's newest was refused (an earlier one is in force).
 type startState struct {
 	gate     *perimeter.Gate
 	inForce  func() (bool, error) // the table's input chain is in the kernel
 	pid      int
 	fromRayd atomic.Bool
+	refused  atomic.Bool
 }
 
 type stateNow struct {
 	state    perimeter.GateState
 	leftOver bool // not this gate's table, but one with an input chain
 	fromRayd bool
+	refused  bool // the feed's newest snapshot did not apply
 	pid      int
 }
 
 func (s *startState) now() stateNow {
-	n := stateNow{state: s.gate.State(), fromRayd: s.fromRayd.Load(), pid: s.pid}
+	n := stateNow{state: s.gate.State(), fromRayd: s.fromRayd.Load(), refused: s.refused.Load(), pid: s.pid}
 	if n.state == perimeter.GateNoSnapshot || n.state == perimeter.GateNotIn {
 		// The input chain, not the table: a relay's hold has a table and
 		// no input chain, and leaves the host open (R4-40).
@@ -280,10 +283,14 @@ func (s *startState) now() stateNow {
 // status is rayspa's line in systemctl status. The table it means is this
 // process's (its pid, which systemctl show -p MainPID gives) only when it
 // begins "perimeter up: rayd's snapshot": rayctl update waits for that
-// (a table an earlier rayspa left would also be in the kernel).
+// (a table an earlier rayspa left would also be in the kernel). "perimeter
+// up: the saved snapshot" is one with no snapshot of rayd's yet (rayd
+// away); one whose snapshots of rayd's are refused is behind rayd.
 func (n stateNow) status() string {
 	who := fmt.Sprintf("; rayspa %s, pid %d", version, n.pid)
 	switch {
+	case n.state == perimeter.GateUp && n.refused:
+		return "perimeter behind rayd: the table is in with an earlier snapshot, rayd's newest was refused (journalctl -u rayspa)" + who
 	case n.state == perimeter.GateUp && n.fromRayd:
 		return "perimeter up: rayd's snapshot" + who
 	case n.state == perimeter.GateUp:
@@ -397,7 +404,8 @@ func gateReporter(ctx context.Context, socket string, log *slog.Logger) func(sta
 func gatePB(n stateNow) *perimeterv1.Gate {
 	state := map[perimeter.GateState]string{perimeter.GateUp: "up", perimeter.GateBehind: "behind",
 		perimeter.GateNotIn: "not_in", perimeter.GateNoSnapshot: "no_snapshot"}[n.state]
-	return &perimeterv1.Gate{State: state, LeftOver: n.leftOver, FromRayd: n.fromRayd, Version: version, Pid: uint32(n.pid)} //nolint:gosec // G115: a pid
+	return &perimeterv1.Gate{State: state, LeftOver: n.leftOver, FromRayd: n.fromRayd, Refused: n.refused, Version: version,
+		Pid: uint32(n.pid)} //nolint:gosec // G115: a pid
 }
 
 func guardPB(st perimeter.GuardState) *perimeterv1.Guard {
@@ -545,10 +553,12 @@ func (d *debugLevel) until(t int64) {
 	})
 }
 
-// fromRayd is set once a snapshot of the feed is the gate's (STATUS); fed
-// gets word of each feed's first snapshot.
+// fromRayd is set once a snapshot of the feed is the gate's (STATUS);
+// refused while the feed's newest is not (rayd learns it: an earlier one,
+// or the saved one, is in force); fed gets word of each feed's first
+// snapshot.
 func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gate, carrier *perimeter.TCPCarrier, dl *debugLevel,
-	fromRayd *atomic.Bool, fed chan<- struct{}, log *slog.Logger) {
+	fromRayd, refused *atomic.Bool, fed chan<- struct{}, log *slog.Logger) {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		stream, err := open(ctx)
@@ -564,10 +574,12 @@ func watch(ctx context.Context, open openFeed, state string, gate *perimeter.Gat
 					log.Warn("snapshot applied in part; the rest follows", "revision", snap.GetRevision(), "err", err)
 				} else if err != nil {
 					log.Error("applying snapshot", "revision", snap.GetRevision(), "err", err)
+					refused.Store(true)
 					continue
 				} else {
 					log.Info("snapshot applied", "revision", snap.GetRevision(), "devices", len(snap.Devices))
 				}
+				refused.Store(false)
 				fromRayd.Store(true)
 				if first {
 					first = false

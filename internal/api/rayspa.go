@@ -31,8 +31,17 @@ type rayspaWatch struct {
 
 	gate     *perimeterv1.Gate // the last report; nil: none
 	gateAt   time.Time         // when it came
-	notUp    time.Time         // reports say not up since; zero: up, or none
+	notUp    time.Time         // reports say not current (gateCurrent) since; zero: current, or none
 	gateDown bool              // the table's outage is in the journal
+}
+
+// gateCurrent reports whether a report is of a table up with rayd's newest
+// snapshot: up, with a snapshot of the feed (not the one rayspa saved),
+// the feed's newest not refused. Up on the saved snapshot, or on an
+// earlier one, while rayspa follows the feed is a rayspa that takes none
+// of rayd's snapshots: what changed since, a revocation, is not in force.
+func gateCurrent(g *perimeterv1.Gate) bool {
+	return g.GetState() == gateUp && g.GetFromRayd() && !g.GetRefused()
 }
 
 func (w *rayspaWatch) start(now time.Time) {
@@ -57,10 +66,13 @@ func (w *rayspaWatch) report(g *perimeterv1.Gate, now time.Time) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	switch {
-	case g.GetState() == gateUp:
+	case gateCurrent(g):
 		w.notUp = time.Time{}
-	case w.notUp.IsZero() || w.gate == nil || w.gate.GetPid() != g.GetPid():
-		// Not up since this report: a new process starts its own count.
+	case w.notUp.IsZero() || w.gate == nil || now.Sub(w.gateAt) >= gateStale:
+		// Not current since this report: the one before was, or there was
+		// none for a while. A new process does not start the count again:
+		// a rayspa that crashes and comes back every minute, its table
+		// never in, would never fail the loop.
 		w.notUp = now
 	}
 	w.gate, w.gateAt = g, now
@@ -157,7 +169,7 @@ func (p *PerimeterServer) reportRayspa(now time.Time, log *slog.Logger) {
 		w.down = true
 	}
 	down := w.down
-	tableDown := following && gate != nil && gate.GetState() != gateUp && notUp >= rayspaGrace
+	tableDown := following && gate != nil && !gateCurrent(gate) && notUp >= rayspaGrace
 	wasTableDown := w.gateDown
 	w.gateDown = tableDown
 	w.mu.Unlock()
@@ -172,7 +184,7 @@ func (p *PerimeterServer) reportRayspa(now time.Time, log *slog.Logger) {
 		}
 		p.Health.Report(RayspaLoop, RayspaUnknown+"rayspa follows the perimeter, its table is not reported "+
 			"(a rayspa older than this rayd, or its reports do not arrive); rayctl status as root reads it", nil)
-	case following && gate.GetState() == gateUp:
+	case following && gateCurrent(gate):
 		if wasDown {
 			log.Info("perimeter: rayspa follows the perimeter again")
 		}
@@ -184,11 +196,15 @@ func (p *PerimeterServer) reportRayspa(now time.Time, log *slog.Logger) {
 		err := fmt.Errorf("rayspa follows the perimeter, but its table %s for %v: %s (journalctl -u rayspa -p warning)",
 			gateText(gate), notUp.Round(time.Second), gateEffect(gate))
 		if !wasTableDown {
-			log.Error("perimeter down", "err", err)
+			msg := "perimeter down"
+			if gate.GetState() == gateUp {
+				msg = "perimeter behind rayd"
+			}
+			log.Error(msg, "err", err)
 		}
 		p.Health.Done(RayspaLoop, err)
 	case following:
-		// Not up for less than rayspaGrace: the round before stands.
+		// Not current for less than rayspaGrace: the round before stands.
 	case down:
 		err := fmt.Errorf("rayspa has not followed the perimeter for %v: no knock opens a port, "+
 			"and if it did not come up since a boot the host is open (rayctl status as root; journalctl -u rayspa)", away.Round(time.Second))
@@ -199,20 +215,26 @@ func (p *PerimeterServer) reportRayspa(now time.Time, log *slog.Logger) {
 	}
 }
 
-// gateText says where a table that is not up stands.
+// gateText says where a table that is not current stands.
 func gateText(g *perimeterv1.Gate) string {
-	switch g.GetState() {
-	case gateBehind:
+	switch {
+	case g.GetState() == gateUp && !g.GetFromRayd():
+		return "is up on the snapshot rayspa saved, not on rayd's (it takes none of rayd's)"
+	case g.GetState() == gateUp:
+		return "is up on an earlier snapshot of rayd's (it refused the newest)"
+	case g.GetState() == gateBehind:
 		return "is behind its snapshot (in, a part of the snapshot not)"
-	case gateNone:
+	case g.GetState() == gateNone:
 		return "has no snapshot to put in (rayspa took none of rayd's)"
 	}
 	return "is not in"
 }
 
-// gateEffect says what a table that is not up means for the host.
+// gateEffect says what a table that is not current means for the host.
 func gateEffect(g *perimeterv1.Gate) string {
 	switch {
+	case g.GetState() == gateUp:
+		return "what changed since (admin addresses, revocations, ports) is not in force"
 	case g.GetState() == gateBehind:
 		return "the last change of the perimeter (admin addresses, a revocation, ports) is not in force"
 	case g.GetLeftOver():
