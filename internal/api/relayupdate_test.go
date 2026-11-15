@@ -73,30 +73,27 @@ func TestRelayOffer(t *testing.T) {
 
 // The queue (§3.3): one relay at a time by name; a relay passes with an
 // outcome, on the release, with remote off, never heard of and with no
-// feed, silent for TurnTimeout, or TurnTimeout after its turn began; one
-// given its turn keeps it, and nobody else updates meanwhile.
+// feed, silent for TurnTimeout, or TurnTimeout after the exit gave it its
+// turn; one given its turn keeps it, and nobody else updates meanwhile.
+// The exit gives a turn to the relay whose turn came, with a feed; a relay
+// past its turn has the offer once the queue is through, and a later turn
+// if it takes it then. A relay counts as updating only in a turn the exit
+// gave it.
 func TestRelayQueue(t *testing.T) {
 	now := time.Date(2026, 11, 20, 4, 0, 0, 0, time.UTC)
 	ago := func(d time.Duration) time.Time { return now.Add(-d) }
 	o := &perimeterv1.RelayUpdateOffer{Id: "aa", Version: "v0.28.0"}
+	newer := &perimeterv1.RelayUpdateOffer{Id: "bb", Version: "v0.28.1"}
 	idle := relayRecord{Reported: nodeupdate.Idle, Version: "v0.27.0", Remote: true, ChangedAt: ago(time.Hour).Unix()}
 	rec := func(state, id, version string, remote bool, changed time.Duration) relayRecord {
-		r := relayRecord{Reported: state, UpdateID: id, Version: version, Remote: remote, ChangedAt: ago(changed).Unix()}
-		if id != "" {
-			r.Since, r.SinceID = r.ChangedAt, id
-		}
-		return r
-	}
-	// since is r first reported on its id at, earlier than it changed.
-	since := func(r relayRecord, d time.Duration) relayRecord {
-		r.Since = ago(d).Unix()
-		return r
+		return relayRecord{Reported: state, UpdateID: id, Version: version, Remote: remote, ChangedAt: ago(changed).Unix()}
 	}
 	view := func(name string, r relayRecord, feeds int) relayView {
 		return relayView{Name: name, Rec: r, Feeds: feeds, ClosedAt: ago(2 * time.Hour)}
 	}
-	given := func(v relayView, at time.Duration) relayView {
-		v.OfferID, v.OfferedAt = o.Id, ago(at)
+	// given is v given its turn for update id at ago.
+	given := func(v relayView, id string, at time.Duration) relayView {
+		v.Rec.TurnID, v.Rec.TurnAt = id, ago(at).Unix()
 		return v
 	}
 	closed := func(v relayView, at time.Duration) relayView {
@@ -109,89 +106,153 @@ func TestRelayQueue(t *testing.T) {
 		views  []relayView
 		offers []string
 		passed []string
+		give   []string
 	}{
 		{"nothing heard, no feeds: no one to wait for", o,
-			[]relayView{view("r1", relayRecord{}, 0), view("r2", relayRecord{}, 0)}, []string{"r1", "r2"}, []string{"r1", "r2"}},
-		{"the first by name", o,
-			[]relayView{view("r1", relayRecord{}, 1), view("r2", idle, 1), view("r3", idle, 1)}, []string{"r1"}, nil},
+			[]relayView{view("r1", relayRecord{}, 0), view("r2", relayRecord{}, 0)}, []string{"r1", "r2"}, []string{"r1", "r2"}, nil},
+		{"the first by name, given its turn", o,
+			[]relayView{view("r1", relayRecord{}, 1), view("r2", idle, 1), view("r3", idle, 1)}, []string{"r1"}, nil, []string{"r1"}},
 		// Given the offer and gone without a word: it may be updating.
 		{"never reported, given its turn, no feed", o,
-			[]relayView{given(view("r1", relayRecord{}, 0), time.Minute), view("r2", idle, 1)}, []string{"r1"}, nil},
+			[]relayView{given(view("r1", relayRecord{}, 0), "aa", time.Minute), view("r2", idle, 1)}, []string{"r1"}, nil, nil},
 		{"never reported, given its turn TurnTimeout ago", o,
-			[]relayView{given(view("r1", relayRecord{}, 0), TurnTimeout+time.Second), view("r2", idle, 1)}, []string{"r1", "r2"}, []string{"r1"}},
+			[]relayView{given(view("r1", relayRecord{}, 0), "aa", TurnTimeout+time.Second), view("r2", idle, 1)}, []string{"r2"}, []string{"r1"},
+			[]string{"r2"}},
 		{"after an outcome, the next; the first keeps it, on the release", o,
 			[]relayView{view("r1", rec(nodeupdate.Done, "aa", "v0.28.0", true, time.Minute), 1), view("r2", idle, 1), view("r3", idle, 1)},
-			[]string{"r1", "r2"}, []string{"r1"}},
+			[]string{"r1", "r2"}, []string{"r1"}, []string{"r2"}},
 		{"failed or rolled back: passed, and no offer while another updates", o,
 			[]relayView{view("r1", rec(nodeupdate.Failed, "aa", "v0.27.0", true, time.Minute), 1), view("r2", rec(nodeupdate.RolledBack, "aa", "v0.27.0", true, time.Minute), 1),
-				given(view("r3", rec(nodeupdate.Running, "aa", "v0.27.0", true, time.Minute), 1), 2*time.Minute)},
-			[]string{"r3"}, []string{"r1", "r2"}},
+				given(view("r3", rec(nodeupdate.Running, "aa", "v0.27.0", true, time.Minute), 1), "aa", 2*time.Minute)},
+			[]string{"r3"}, []string{"r1", "r2"}, nil},
+		// rayd relay refuses an offer it will not take as an outcome on it.
+		{"given its turn, refused it", o,
+			[]relayView{given(view("r1", rec(nodeupdate.Failed, "aa", "v0.27.0", true, time.Minute), 1), "aa", 2*time.Minute), view("r2", idle, 1)},
+			[]string{"r2"}, []string{"r1"}, []string{"r2"}},
 		{"on the release or newer, without an update", o,
-			[]relayView{view("r1", rec(nodeupdate.Idle, "", "v0.29.0", true, time.Hour), 1), view("r2", idle, 1)}, []string{"r1", "r2"}, []string{"r1"}},
+			[]relayView{view("r1", rec(nodeupdate.Idle, "", "v0.29.0", true, time.Hour), 1), view("r2", idle, 1)}, []string{"r1", "r2"}, []string{"r1"},
+			[]string{"r2"}},
+		// Its new rayd relay says so as soon as the install restarts it,
+		// before root's check: still updating.
+		{"updating, on the release already", o,
+			[]relayView{given(view("r1", rec(nodeupdate.Running, "aa", "v0.28.0", true, time.Minute), 1), "aa", 5*time.Minute), view("r2", idle, 1)},
+			[]string{"r1"}, nil, nil},
 		{"remote off", o,
-			[]relayView{view("r1", rec(nodeupdate.Idle, "", "v0.27.0", false, time.Hour), 1), view("r2", idle, 1)}, []string{"r1", "r2"}, []string{"r1"}},
-		{"remote off with an update under way: it goes on, the others wait", o,
-			[]relayView{given(view("r1", rec(nodeupdate.Running, "aa", "v0.27.0", false, 2*time.Minute), 0), 3*time.Minute), view("r2", idle, 1)},
-			[]string{"r1"}, nil},
+			[]relayView{view("r1", rec(nodeupdate.Idle, "", "v0.27.0", false, time.Hour), 1), view("r2", idle, 1)}, []string{"r2"}, []string{"r1"},
+			[]string{"r2"}},
+		{"remote off with an update under way in its turn: it goes on, the others wait", o,
+			[]relayView{given(view("r1", rec(nodeupdate.Running, "aa", "v0.27.0", false, 2*time.Minute), 0), "aa", 3*time.Minute), view("r2", idle, 1)},
+			[]string{"r1"}, nil, nil},
 		{"updating, its feed down while rayd relay restarts", o,
-			[]relayView{given(closed(view("r1", rec(nodeupdate.Running, "aa", "v0.27.0", true, 5*time.Minute), 0), time.Minute), 6*time.Minute), view("r2", idle, 1)},
-			[]string{"r1"}, nil},
+			[]relayView{given(closed(view("r1", rec(nodeupdate.Running, "aa", "v0.27.0", true, 5*time.Minute), 0), time.Minute), "aa", 6*time.Minute),
+				view("r2", idle, 1)},
+			[]string{"r1"}, nil, nil},
 		{"given its turn, no word for TurnTimeout", o,
-			[]relayView{given(view("r1", idle, 1), TurnTimeout+time.Second), view("r2", idle, 1)}, []string{"r1", "r2"}, []string{"r1"}},
+			[]relayView{given(view("r1", idle, 1), "aa", TurnTimeout+time.Second), view("r2", idle, 1)}, []string{"r2"}, []string{"r1"}, []string{"r2"}},
 		{"given its turn, not yet TurnTimeout", o,
-			[]relayView{given(view("r1", idle, 1), TurnTimeout-time.Second), view("r2", idle, 1)}, []string{"r1"}, nil},
+			[]relayView{given(view("r1", idle, 1), "aa", TurnTimeout-time.Second), view("r2", idle, 1)}, []string{"r1"}, nil, nil},
+		// Its turn came, and it has no feed to take it: the queue waits.
 		{"silent, its feed gone a while", o,
-			[]relayView{closed(view("r1", idle, 0), 10*time.Minute), view("r2", idle, 1)}, []string{"r1"}, nil},
+			[]relayView{closed(view("r1", idle, 0), 10*time.Minute), view("r2", idle, 1)}, nil, nil, nil},
 		{"silent, its feed gone TurnTimeout", o,
-			[]relayView{closed(view("r1", idle, 0), TurnTimeout+time.Second), view("r2", idle, 1)}, []string{"r1", "r2"}, []string{"r1"}},
-		{"silent after it took the offer: its last word is an update under way", o,
-			[]relayView{closed(view("r1", rec(nodeupdate.Requested, "aa", "v0.27.0", true, 5*time.Minute), 0), TurnTimeout+time.Second), view("r2", idle, 1)},
-			[]string{"r1"}, nil},
-		// The exit restarted: no offer given in memory, the records only.
-		{"after a restart: running, from its report", o,
-			[]relayView{view("r1", rec(nodeupdate.Running, "aa", "v0.27.0", true, 5*time.Minute), 0), view("r2", idle, 1)}, []string{"r1"}, nil},
-		{"after a restart: running since TurnTimeout", o,
-			[]relayView{view("r1", rec(nodeupdate.Running, "aa", "v0.27.0", true, TurnTimeout+time.Second), 0), view("r2", idle, 1)},
-			[]string{"r1", "r2"}, []string{"r1"}},
+			[]relayView{closed(view("r1", idle, 0), TurnTimeout+time.Second), view("r2", idle, 1)}, []string{"r2"}, []string{"r1"}, []string{"r2"}},
+		{"silent after it took the offer, its turn TurnTimeout ago", o,
+			[]relayView{given(closed(view("r1", rec(nodeupdate.Requested, "aa", "v0.27.0", true, 5*time.Minute), 0), TurnTimeout), "aa",
+				TurnTimeout+time.Second), view("r2", idle, 1)},
+			[]string{"r2"}, []string{"r1"}, []string{"r2"}},
+		// The exit restarted: the turns are in the records.
+		{"after a restart: running in its turn", o,
+			[]relayView{given(view("r1", rec(nodeupdate.Running, "aa", "v0.27.0", true, 5*time.Minute), 0), "aa", 6*time.Minute), view("r2", idle, 1)},
+			[]string{"r1"}, nil, nil},
+		{"after a restart: its turn TurnTimeout ago", o,
+			[]relayView{given(view("r1", rec(nodeupdate.Running, "aa", "v0.27.0", true, 5*time.Minute), 0), "aa", TurnTimeout+time.Second),
+				view("r2", idle, 1)},
+			[]string{"r2"}, []string{"r1"}, []string{"r2"}},
 		{"after a restart: done, and the next", o,
 			[]relayView{view("r1", rec(nodeupdate.Done, "aa", "v0.28.0", true, time.Hour), 1), view("r2", rec(nodeupdate.Done, "aa", "v0.28.0", true, time.Hour), 0),
-				view("r3", idle, 1)}, []string{"r1", "r2", "r3"}, []string{"r1", "r2"}},
+				view("r3", idle, 1)}, []string{"r1", "r2", "r3"}, []string{"r1", "r2"}, []string{"r3"}},
 		// A relay before the one updating that wants its turn now.
 		{"back, while another holds its turn", o,
-			[]relayView{view("r1", idle, 1), given(view("r2", rec(nodeupdate.Requested, "aa", "v0.27.0", true, time.Minute), 1), 2*time.Minute)},
-			[]string{"r2"}, nil},
-		// The node updated again while a relay still updates to the previous.
-		{"a newer offer while a relay updates to the last", &perimeterv1.RelayUpdateOffer{Id: "bb", Version: "v0.28.1"},
+			[]relayView{view("r1", idle, 1), given(view("r2", rec(nodeupdate.Requested, "aa", "v0.27.0", true, time.Minute), 1), "aa", 2*time.Minute)},
+			[]string{"r2"}, nil, nil},
+		// The node updated again while a relay still updates to the
+		// previous: the new offer after it, to it too.
+		{"a newer offer while a relay updates in its turn for the last", newer,
 			[]relayView{view("r1", rec(nodeupdate.Done, "aa", "v0.28.0", true, 10*time.Minute), 1),
-				given(view("r2", rec(nodeupdate.Running, "aa", "v0.27.0", true, 3*time.Minute), 1), 4*time.Minute)},
-			nil, nil},
-		// A relay holds the others back TurnTimeout at most, whatever it says.
-		{"said requested, then running, for TurnTimeout", o,
-			[]relayView{view("r1", since(rec(nodeupdate.Running, "aa", "v0.27.0", true, time.Minute), TurnTimeout+time.Second), 1), view("r2", idle, 1)},
-			[]string{"r1", "r2"}, []string{"r1"}},
+				given(view("r2", rec(nodeupdate.Running, "aa", "v0.27.0", true, 3*time.Minute), 1), "aa", 4*time.Minute)},
+			nil, nil, nil},
+		{"after a restart: a newer offer while a relay updates in its turn for the last, no feed", newer,
+			[]relayView{view("r1", rec(nodeupdate.Done, "aa", "v0.28.0", true, 10*time.Minute), 1),
+				given(view("r2", rec(nodeupdate.Running, "aa", "v0.27.0", true, 3*time.Minute), 0), "aa", 4*time.Minute)},
+			nil, nil, nil},
+		{"a newer offer, the last turn TurnTimeout ago", newer,
+			[]relayView{view("r1", rec(nodeupdate.Done, "aa", "v0.28.0", true, 10*time.Minute), 1),
+				given(view("r2", rec(nodeupdate.Running, "aa", "v0.27.0", true, 3*time.Minute), 1), "aa", TurnTimeout+time.Second)},
+			[]string{"r1"}, nil, []string{"r1"}},
+		{"a newer offer once it ended", newer,
+			[]relayView{view("r1", rec(nodeupdate.Done, "aa", "v0.28.0", true, 10*time.Minute), 1),
+				given(view("r2", rec(nodeupdate.Done, "aa", "v0.28.0", true, time.Minute), 1), "aa", 4*time.Minute)},
+			[]string{"r1"}, nil, []string{"r1"}},
+		// A relay holds the others back in its turn only, whatever it says.
+		{"updating for the offer, never given it", o,
+			[]relayView{view("r1", idle, 1), view("r2", rec(nodeupdate.Running, "aa", "v0.27.0", true, time.Minute), 1)}, []string{"r1"}, nil,
+			[]string{"r1"}},
+		{"updating for the offer, never given it, no feed", o,
+			[]relayView{view("r1", idle, 1), closed(view("r2", rec(nodeupdate.Running, "aa", "v0.27.0", true, time.Minute), 0), time.Minute)},
+			[]string{"r1"}, nil, []string{"r1"}},
 		{"updating for an id never given to it", o,
-			[]relayView{view("r1", idle, 1), view("r2", rec(nodeupdate.Running, "ff", "v0.27.0", true, time.Minute), 1)}, []string{"r1"}, nil},
+			[]relayView{view("r1", idle, 1), view("r2", rec(nodeupdate.Running, "ff", "v0.27.0", true, time.Minute), 1)}, []string{"r1"}, nil,
+			[]string{"r1"}},
 		{"updating for an id never given to it, no feed for TurnTimeout", o,
 			[]relayView{closed(view("r1", rec(nodeupdate.Running, "ff", "v0.27.0", true, time.Minute), 0), TurnTimeout+time.Second), view("r2", idle, 1)},
-			[]string{"r1", "r2"}, []string{"r1"}},
+			[]string{"r2"}, []string{"r1"}, []string{"r2"}},
 		{"updating for an id never given to it, remote off", o,
-			[]relayView{view("r1", rec(nodeupdate.Running, "ff", "v0.27.0", false, time.Minute), 1), view("r2", idle, 1)}, []string{"r1", "r2"}, []string{"r1"}},
-		{"after a restart: running for an earlier offer", &perimeterv1.RelayUpdateOffer{Id: "bb", Version: "v0.28.1"},
+			[]relayView{view("r1", rec(nodeupdate.Running, "ff", "v0.27.0", false, time.Minute), 1), view("r2", idle, 1)}, []string{"r2"}, []string{"r1"},
+			[]string{"r2"}},
+		{"running for an earlier offer never given to it", newer,
 			[]relayView{view("r1", rec(nodeupdate.Done, "aa", "v0.28.0", true, 10*time.Minute), 1), view("r2", rec(nodeupdate.Running, "aa", "v0.27.0", true, time.Minute), 1)},
-			[]string{"r1"}, nil},
+			[]string{"r1"}, nil, []string{"r1"}},
 		// A relay whose update never ended (its rollback failed: no rayspa,
 		// no rayd relay), and the node updated again.
-		{"stuck since an earlier offer, no feed for TurnTimeout", &perimeterv1.RelayUpdateOffer{Id: "bb", Version: "v0.28.1"},
-			[]relayView{closed(given(view("r1", rec(nodeupdate.Running, "aa", "v0.27.0", true, 2*time.Hour), 0), 2*time.Hour), TurnTimeout+time.Second),
+		{"stuck since an earlier offer, no feed for TurnTimeout", newer,
+			[]relayView{closed(given(view("r1", rec(nodeupdate.Running, "aa", "v0.27.0", true, 2*time.Hour), 0), "aa", 2*time.Hour), TurnTimeout+time.Second),
 				view("r2", idle, 1)},
-			[]string{"r1", "r2"}, []string{"r1"}},
-		{"a newer offer once it ended", &perimeterv1.RelayUpdateOffer{Id: "bb", Version: "v0.28.1"},
-			[]relayView{view("r1", rec(nodeupdate.Done, "aa", "v0.28.0", true, 10*time.Minute), 1),
-				given(view("r2", rec(nodeupdate.Done, "aa", "v0.28.0", true, time.Minute), 1), 4*time.Minute)},
-			[]string{"r1"}, nil},
+			[]string{"r2"}, []string{"r1"}, []string{"r2"}},
+		// Through: every relay passed. One that failed before any change
+		// has the offer while nobody updates, and its retry is a turn.
+		{"through: the offer to one that failed, no turn", o,
+			[]relayView{given(view("r1", rec(nodeupdate.Failed, "aa", "v0.27.0", true, 6*time.Hour), 1), "aa", 7*time.Hour),
+				view("r2", rec(nodeupdate.Done, "aa", "v0.28.0", true, 5*time.Hour), 1)},
+			[]string{"r1", "r2"}, []string{"r1", "r2"}, nil},
+		{"through: it asks again, a later turn", o,
+			[]relayView{given(view("r1", rec(nodeupdate.Requested, "aa", "v0.27.0", true, time.Minute), 1), "aa", 7*time.Hour),
+				view("r2", rec(nodeupdate.Done, "aa", "v0.28.0", true, 5*time.Hour), 1)},
+			[]string{"r1", "r2"}, []string{"r1", "r2"}, []string{"r1"}},
+		{"through: back after its turn ran out, it takes it, a later turn", o,
+			[]relayView{given(view("r1", rec(nodeupdate.Requested, "aa", "v0.27.0", true, time.Minute), 1), "aa", TurnTimeout+10*time.Minute),
+				view("r2", rec(nodeupdate.Done, "aa", "v0.28.0", true, 5*time.Minute), 1)},
+			[]string{"r1", "r2"}, []string{"r1", "r2"}, []string{"r1"}},
+		{"through: under way, never given it, a turn", o,
+			[]relayView{view("r1", rec(nodeupdate.Running, "aa", "v0.27.0", false, time.Minute), 1), view("r2", rec(nodeupdate.Done, "aa", "v0.28.0", true, 5*time.Minute), 1)},
+			[]string{"r1", "r2"}, []string{"r1", "r2"}, []string{"r1"}},
+		{"through: its word from its turn, no later one", o,
+			[]relayView{given(view("r1", rec(nodeupdate.Running, "aa", "v0.27.0", true, TurnTimeout), 1), "aa", TurnTimeout+time.Minute),
+				view("r2", rec(nodeupdate.Done, "aa", "v0.28.0", true, 5*time.Minute), 1)},
+			[]string{"r1", "r2"}, []string{"r1", "r2"}, nil},
+		{"through: it asks again with no feed", o,
+			[]relayView{given(closed(view("r1", rec(nodeupdate.Requested, "aa", "v0.27.0", true, time.Minute), 0), TurnTimeout+time.Second), "aa", 7*time.Hour),
+				view("r2", rec(nodeupdate.Done, "aa", "v0.28.0", true, 5*time.Hour), 1)},
+			[]string{"r1", "r2"}, []string{"r1", "r2"}, nil},
+		{"not through: one that failed waits for the others", o,
+			[]relayView{given(view("r1", rec(nodeupdate.Requested, "aa", "v0.27.0", true, time.Minute), 1), "aa", 7*time.Hour), view("r2", idle, 1)},
+			[]string{"r2"}, []string{"r1"}, []string{"r2"}},
+		{"through: another one asks again while it updates", o,
+			[]relayView{given(view("r1", rec(nodeupdate.Requested, "aa", "v0.27.0", true, time.Minute), 1), "aa", 7*time.Hour),
+				given(view("r2", rec(nodeupdate.Running, "aa", "v0.27.0", true, time.Minute), 1), "aa", 2*time.Minute)},
+			[]string{"r2"}, []string{"r1"}, nil},
 	} {
 		turns := relayQueue(c.o, c.views, now)
-		var offers, passed []string
+		var offers, passed, give []string
 		for i, tu := range turns {
 			if tu.Offer {
 				offers = append(offers, c.views[i].Name)
@@ -199,9 +260,12 @@ func TestRelayQueue(t *testing.T) {
 			if tu.Passed {
 				passed = append(passed, c.views[i].Name)
 			}
+			if tu.Give {
+				give = append(give, c.views[i].Name)
+			}
 		}
-		if !slices.Equal(offers, c.offers) || !slices.Equal(passed, c.passed) {
-			t.Errorf("%s: offers %v, passed %v; want %v, %v", c.name, offers, passed, c.offers, c.passed)
+		if !slices.Equal(offers, c.offers) || !slices.Equal(passed, c.passed) || !slices.Equal(give, c.give) {
+			t.Errorf("%s: offers %v, passed %v, given %v; want %v, %v, %v", c.name, offers, passed, give, c.offers, c.passed, c.give)
 		}
 	}
 }
@@ -269,35 +333,65 @@ func setRecord(t *testing.T, srv *Server, name string, r relayRecord) {
 	}
 }
 
-// A relay's turn begins when its feed has the offer as its turn: an offer
-// to a relay past its turn (remote off, say) starts none, so that a root
-// turning remote on later does not make it one that holds the others back.
-// A feed that looked before a kick which found another offer for it is
-// woken again.
+// The exit gives a relay its turn as the queue reaches it and writes it in
+// the relay's record before any feed sends the offer: once, whatever the
+// looks after; an offer to a relay past its turn (remote off, say) gives
+// none, so that a root turning remote on later does not make it one that
+// holds the others back. A feed that looked before a kick which found
+// another offer for it is woken again.
 func TestRelayTurnGiven(t *testing.T) {
+	srv, _, advance, now, _ := relayNode(t, "v0.28.0", "r1", "r2")
+	ctx := context.Background()
+	st := nodeupdate.Status{ID: "6f1c0e2a9b3d4c5e", State: nodeupdate.Done, From: "v0.27.0", To: "v0.28.0", Kind: nodeupdate.Remote, Ended: now()}
+	if err := nodeupdate.WriteStatus(srv.NodeUpdate.Status, st); err != nil {
+		t.Fatal(err)
+	}
+	setRecord(t, srv, "r1", relayRecord{Reported: nodeupdate.Idle, Version: "v0.27.0", ChangedAt: now().Unix()})
+	setRecord(t, srv, "r2", relayRecord{Reported: nodeupdate.Idle, Version: "v0.27.0", Remote: true, ChangedAt: now().Unix()})
+	srv.relayUpd.opened("r1", now())
+	srv.relayUpd.opened("r2", now())
+	record := func(name string) relayRecord {
+		t.Helper()
+		r, err := readRelayRecord(ctx, srv.Store, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	offers, gave, err := srv.relayOffers(ctx, now())
+	if err != nil || !gave || offers["r1"] != nil || offers["r2"] == nil {
+		t.Fatalf("r1 remote off, r2's turn: %v %v %v", offers, gave, err)
+	}
+	if r := record("r1"); r.TurnID != "" {
+		t.Fatalf("an offer past the relay's turn gave one: %+v", r)
+	}
+	given := record("r2")
+	if given.TurnID != st.ID || given.TurnAt != now().Unix() {
+		t.Fatalf("r2's turn: %+v", given)
+	}
+	advance(time.Minute)
+	if _, gave, err := srv.relayOffers(ctx, now()); err != nil || gave || record("r2") != given {
+		t.Fatalf("its turn again: %v %v %+v", gave, err, record("r2"))
+	}
+	// Root on r1 turns remote on: r1 is before r2, which holds its turn.
+	setRecord(t, srv, "r1", relayRecord{Reported: nodeupdate.Idle, Version: "v0.27.0", Remote: true, ChangedAt: now().Unix()})
+	if offers, gave, _ := srv.relayOffers(ctx, now()); gave || offers["r1"] != nil || offers["r2"] == nil {
+		t.Fatalf("r1 while r2 holds its turn: %v %v", offers, gave)
+	}
+
 	var ru relayUpdates
-	now := time.Date(2026, 11, 20, 4, 0, 0, 0, time.UTC)
 	o := &perimeterv1.RelayUpdateOffer{Id: "aa", Version: "v0.28.0", EndedAt: 1}
-	if ru.sentOffer("r1", relayOffered{o, false}, 0, now) || ru.relays["r1"].offerID != "" {
-		t.Fatal("an offer past the relay's turn began one")
-	}
-	if !ru.sentOffer("r1", relayOffered{o, true}, 0, now.Add(time.Minute)) || ru.relays["r1"].offerID != "aa" || !ru.relays["r1"].offeredAt.Equal(now.Add(time.Minute)) {
-		t.Fatalf("its turn: %+v", ru.relays["r1"])
-	}
-	if ru.sentOffer("r1", relayOffered{o, true}, 0, now.Add(2*time.Minute)) || !ru.relays["r1"].offeredAt.Equal(now.Add(time.Minute)) {
-		t.Fatalf("its turn again: %+v", ru.relays["r1"])
-	}
-	wake, kicks := ru.changes("r2", now)
+	wake, kicks := ru.changes("r2", now())
 	ru.relays["r2"].kicks++
 	ru.relays["r2"].want = offerKey(o)
-	ru.sentOffer("r2", relayOffered{}, kicks, now)
+	ru.sentOffer("r2", nil, kicks, now())
 	select {
 	case <-wake:
 	default:
 		t.Fatal("a feed that looked before the kick sleeps on")
 	}
-	wake, kicks = ru.changes("r2", now)
-	ru.sentOffer("r2", relayOffered{o, true}, kicks, now)
+	wake, kicks = ru.changes("r2", now())
+	ru.sentOffer("r2", o, kicks, now())
 	select {
 	case <-wake:
 		t.Fatal("a feed woken for nothing")
@@ -315,25 +409,26 @@ func TestRelayQueueRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	setRecord(t, srv, "r1", relayRecord{Reported: nodeupdate.Done, UpdateID: st.ID, Version: "v0.28.0", Remote: true, ChangedAt: now().Unix()})
-	setRecord(t, srv, "r2", relayRecord{Reported: nodeupdate.Running, UpdateID: st.ID, Version: "v0.27.0", Remote: true, ChangedAt: now().Unix(), Since: now().Unix(), SinceID: st.ID})
+	setRecord(t, srv, "r2", relayRecord{Reported: nodeupdate.Running, UpdateID: st.ID, Version: "v0.27.0", Remote: true, ChangedAt: now().Unix(), TurnID: st.ID,
+		TurnAt: now().Unix()})
 	setRecord(t, srv, "r3", relayRecord{Reported: nodeupdate.Idle, Version: "v0.27.0", Remote: true, ChangedAt: now().Unix()})
 	offers := func() []string {
 		t.Helper()
-		m, err := srv.relayOffers(ctx, now())
+		m, _, err := srv.relayOffers(ctx, now())
 		if err != nil {
 			t.Fatal(err)
 		}
 		var names []string
-		for name, of := range m {
-			if of.o.Id != st.ID || of.o.Version != "v0.28.0" {
-				t.Fatalf("offer %v", of.o)
+		for name, o := range m {
+			if o.Id != st.ID || o.Version != "v0.28.0" {
+				t.Fatalf("offer %v", o)
 			}
 			names = append(names, name)
 		}
 		slices.Sort(names)
 		return names
 	}
-	// r2 updates (its feed down while it restarts): r3 waits.
+	// r2 updates in its turn (its feed down while it restarts): r3 waits.
 	if got := offers(); !slices.Equal(got, []string{"r1", "r2"}) {
 		t.Fatalf("after the restart: %v", got)
 	}
@@ -344,8 +439,9 @@ func TestRelayQueueRestart(t *testing.T) {
 		t.Fatalf("after TurnTimeout: %v", got)
 	}
 	// A relay removed mid-update is no longer in the queue: r2 updating,
-	// as its record says when it took its turn a moment ago.
-	setRecord(t, srv, "r2", relayRecord{Reported: nodeupdate.Running, UpdateID: st.ID, Version: "v0.27.0", Remote: true, ChangedAt: now().Unix(), Since: now().Unix(), SinceID: st.ID})
+	// as its record says, in a turn given a moment ago.
+	setRecord(t, srv, "r2", relayRecord{Reported: nodeupdate.Running, UpdateID: st.ID, Version: "v0.27.0", Remote: true, ChangedAt: now().Unix(), TurnID: st.ID,
+		TurnAt: now().Unix()})
 	if got := offers(); !slices.Equal(got, []string{"r1", "r2"}) {
 		t.Fatalf("r2 at it again: %v", got)
 	}
@@ -493,35 +589,46 @@ func TestReportUpdate(t *testing.T) {
 		t.Fatalf("heard of: %+v, was %+v", r, first)
 	}
 
+	// The exit gives it its turn (relayOffers, as its feed with updates
+	// looks), and nothing it says after moves it.
+	if _, _, err := srv.updateRelayRecord(ctx, "r1", func(r *relayRecord) { r.TurnID, r.TurnAt = st.ID, now().Unix() }); err != nil {
+		t.Fatal(err)
+	}
+	turn := record("r1")
+	sameTurn := func(r relayRecord) bool { return r.TurnID == turn.TurnID && r.TurnAt == turn.TurnAt }
 	// It takes the offer, runs it, fails with a text the exit cleans
 	// again: an address, a key, what a terminal acts on, cut to 200 bytes;
 	// a reason this exit does not know is taken by its form.
+	advance(time.Minute)
 	if err := report(r1, &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: nodeupdate.Requested, Id: st.ID, Target: "v0.28.0"}); err != nil {
 		t.Fatal(err)
 	}
 	asked := record("r1")
-	if asked.Since != now().Unix() || asked.SinceID != st.ID || asked.UpdateID != st.ID {
+	if !sameTurn(asked) || asked.UpdateID != st.ID || asked.ChangedAt != now().Unix() {
 		t.Fatalf("requested: %+v", asked)
 	}
-	// Nothing it says moves when its turn began: not a word of no update
-	// in between.
+	// Not a word of no update in between, nor of another.
 	advance(time.Minute)
 	if err := report(r1, idle); err != nil {
 		t.Fatal(err)
 	}
 	advance(time.Minute)
+	if err := report(r1, &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: nodeupdate.Running, Id: "0123456789abcdef", Target: "v0.28.0"}); err != nil {
+		t.Fatal(err)
+	}
+	advance(time.Minute)
 	if err := report(r1, &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: nodeupdate.Requested, Id: st.ID, Target: "v0.28.0"}); err != nil {
 		t.Fatal(err)
 	}
-	if r := record("r1"); r.Since != asked.Since || r.SinceID != st.ID {
-		t.Fatalf("requested again: %+v, first %+v", r, asked)
+	if r := record("r1"); !sameTurn(r) {
+		t.Fatalf("requested again: %+v, its turn %+v", r, turn)
 	}
 	advance(time.Minute)
 	if err := report(r1, &perimeterv1.RelayUpdate{Version: "v0.27.0", Remote: true, State: nodeupdate.Running, Id: st.ID, Target: "v0.28.0"}); err != nil {
 		t.Fatal(err)
 	}
-	if r := record("r1"); r.Since != asked.Since || r.ChangedAt != now().Unix() {
-		t.Fatalf("running: %+v, requested %+v", r, asked)
+	if r := record("r1"); !sameTurn(r) || r.ChangedAt != now().Unix() {
+		t.Fatalf("running: %+v, its turn %+v", r, turn)
 	}
 	advance(time.Minute)
 	text := "install: no first snapshot from 203.0.113.7 \x1b[31mwith key " + strings.Repeat("Ab", 20) + " é" + strings.Repeat("x", 150)
@@ -532,7 +639,7 @@ func TestReportUpdate(t *testing.T) {
 	back := record("r1")
 	if back.Reported != nodeupdate.RolledBack || back.Reason != "quota" || strings.Contains(back.Error, "203.0.113.7") ||
 		strings.Contains(back.Error, "AbAb") || strings.ContainsRune(back.Error, 0x1b) || !strings.HasPrefix(back.Error, "install: no first snapshot from <ip4:") ||
-		len(back.Error) > maxUpdateError || !utf8.ValidString(back.Error) || back.Since != asked.Since {
+		len(back.Error) > maxUpdateError || !utf8.ValidString(back.Error) || !sameTurn(back) {
 		t.Fatalf("rolled back: %+v", back)
 	}
 	// The same text again stays the same: nothing new.
@@ -548,6 +655,7 @@ func TestReportUpdate(t *testing.T) {
 		"relay r1: relay.update idle v0.27.0 r1",
 		"relay r1: relay.update requested v0.27.0 to v0.28.0 r1",
 		"relay r1: relay.update idle v0.27.0 r1",
+		"relay r1: relay.update running v0.27.0 to v0.28.0 r1",
 		"relay r1: relay.update requested v0.27.0 to v0.28.0 r1",
 		"relay r1: relay.update running v0.27.0 to v0.28.0 r1",
 		"relay r1: relay.update rolled_back v0.27.0 to v0.28.0 (quota) r1",
@@ -669,22 +777,36 @@ func TestRelayUpdateRemoved(t *testing.T) {
 }
 
 // The phone's view of each relay (§8.2): its report on the offer, or where
-// it stands with it; an update under way silent for an hour failed.
+// it stands with it in the queue; an update under way silent for an hour
+// failed. What the queue says ends: offered only while the relay holds its
+// turn, waiting until its turn comes, and a relay the queue went past with
+// no word on the offer failed, no_word.
 func TestRelayStatus(t *testing.T) {
 	now := time.Date(2026, 11, 20, 5, 0, 0, 0, time.UTC)
 	ago := func(d time.Duration) int64 { return now.Add(-d).Unix() }
 	o := &perimeterv1.RelayUpdateOffer{Id: "aa", Version: "v0.28.0", EndedAt: ago(30 * time.Minute)}
 	rec := func(state, id, version, target string, remote bool) relayRecord {
-		return relayRecord{Reported: state, UpdateID: id, Version: version, Target: target, Remote: remote, ChangedAt: ago(5 * time.Minute), Since: ago(6 * time.Minute)}
+		return relayRecord{Reported: state, UpdateID: id, Version: version, Target: target, Remote: remote, ChangedAt: ago(5 * time.Minute)}
 	}
-	offered := func(r relayRecord) relayView {
-		return relayView{Name: "r1", Rec: r, OfferID: "aa", OfferedAt: now.Add(-7 * time.Minute)}
+	plain := func(r relayRecord) relayView {
+		return relayView{Name: "r1", Rec: r, Feeds: 1, ClosedAt: now.Add(-2 * time.Hour)}
 	}
-	plain := func(r relayRecord) relayView { return relayView{Name: "r1", Rec: r} }
+	// given is v given its turn for the offer at ago.
+	given := func(v relayView, at time.Duration) relayView {
+		v.Rec.TurnID, v.Rec.TurnAt = o.Id, ago(at)
+		return v
+	}
+	offered := func(r relayRecord) relayView { return given(plain(r), 7*time.Minute) }
+	away := func(v relayView, at time.Duration) relayView {
+		v.Feeds, v.ClosedAt = 0, now.Add(-at)
+		return v
+	}
 	silent := rec(nodeupdate.Running, "aa", "v0.27.0", "v0.28.0", true)
 	silent.ChangedAt = ago(nodeupdate.Stale)
 	failed := rec(nodeupdate.Failed, "aa", "v0.27.0", "v0.28.0", true)
 	failed.Reason, failed.Error = nodeupdate.ReasonDownload, "neither GitHub nor a mirror answered"
+	refused := rec(nodeupdate.Failed, "aa", "v0.27.0", "v0.28.0", true)
+	refused.Reason = nodeupdate.ReasonVersion
 	type want struct {
 		state, target, id, reason string
 		changed                   int64
@@ -700,10 +822,11 @@ func TestRelayStatus(t *testing.T) {
 		{"nothing offered, an update under way", plain(rec(nodeupdate.Running, "9f", "v0.26.0", "v0.27.0", true)), nil,
 			want{nodeupdate.Running, "v0.27.0", "9f", "", ago(5 * time.Minute)}},
 		{"nothing offered, silent under way", plain(silent), nil, want{nodeupdate.Failed, "v0.28.0", "aa", noWord, now.Unix()}},
-		{"offered, never a word", offered(relayRecord{}), o, want{"offered", "v0.28.0", "aa", "", now.Add(-7 * time.Minute).Unix()}},
+		{"offered, never a word", offered(relayRecord{}), o, want{"offered", "v0.28.0", "aa", "", ago(7 * time.Minute)}},
 		{"an older relay", plain(relayRecord{SeenAt: ago(time.Minute)}), o, want{"unknown", "", "", "", 0}},
 		{"done", plain(rec(nodeupdate.Done, "aa", "v0.28.0", "v0.28.0", true)), o, want{nodeupdate.Done, "v0.28.0", "aa", "", ago(5 * time.Minute)}},
 		{"failed", plain(failed), o, want{nodeupdate.Failed, "v0.28.0", "aa", nodeupdate.ReasonDownload, ago(5 * time.Minute)}},
+		{"refused it in its turn", offered(refused), o, want{nodeupdate.Failed, "v0.28.0", "aa", nodeupdate.ReasonVersion, ago(5 * time.Minute)}},
 		{"requested", offered(rec(nodeupdate.Requested, "aa", "v0.27.0", "v0.28.0", true)), o,
 			want{nodeupdate.Requested, "v0.28.0", "aa", "", ago(5 * time.Minute)}},
 		{"running, silent for an hour", offered(silent), o, want{nodeupdate.Failed, "v0.28.0", "aa", noWord, now.Unix()}},
@@ -712,11 +835,25 @@ func TestRelayStatus(t *testing.T) {
 		{"root has not allowed it", plain(rec(nodeupdate.Idle, "", "v0.27.0", "", false)), o, want{"off", "v0.28.0", "aa", "", ago(5 * time.Minute)}},
 		{"an earlier update under way", plain(rec(nodeupdate.Running, "9f", "v0.26.0", "v0.27.0", true)), o,
 			want{nodeupdate.Running, "v0.27.0", "9f", "", ago(5 * time.Minute)}},
-		{"in its feed", offered(rec(nodeupdate.Idle, "", "v0.27.0", "", true)), o, want{"offered", "v0.28.0", "aa", "", now.Add(-7 * time.Minute).Unix()}},
+		{"an earlier update under way, remote off since", plain(rec(nodeupdate.Running, "9f", "v0.26.0", "v0.27.0", false)), o,
+			want{nodeupdate.Running, "v0.27.0", "9f", "", ago(5 * time.Minute)}},
+		{"in its feed", offered(rec(nodeupdate.Idle, "", "v0.27.0", "", true)), o, want{"offered", "v0.28.0", "aa", "", ago(7 * time.Minute)}},
 		{"its turn to come", plain(rec(nodeupdate.Idle, "", "v0.27.0", "", true)), o, want{"waiting", "v0.28.0", "aa", "", o.EndedAt}},
 		{"failed on an earlier offer, waiting", plain(rec(nodeupdate.Failed, "9f", "v0.27.0", "v0.27.5", true)), o, want{"waiting", "v0.28.0", "aa", "", o.EndedAt}},
+		{"away a while, waiting", away(plain(rec(nodeupdate.Idle, "", "v0.27.0", "", true)), 10*time.Minute), o, want{"waiting", "v0.28.0", "aa", "", o.EndedAt}},
+		// The queue went past it with no word on the offer.
+		{"its turn ran out", given(plain(rec(nodeupdate.Idle, "", "v0.27.0", "", true)), TurnTimeout+7*time.Minute), o,
+			want{nodeupdate.Failed, "v0.28.0", "aa", noWord, ago(7 * time.Minute)}},
+		{"its turn ran out, it said nothing of it", given(plain(rec(nodeupdate.RolledBack, "9f", "v0.27.0", "v0.28.0", true)), 72*time.Hour), o,
+			want{nodeupdate.Failed, "v0.28.0", "aa", noWord, ago(72*time.Hour - TurnTimeout)}},
+		{"away for TurnTimeout", away(plain(rec(nodeupdate.Idle, "", "v0.27.0", "", true)), TurnTimeout+time.Minute), o,
+			want{nodeupdate.Failed, "v0.28.0", "aa", noWord, ago(time.Minute)}},
 	} {
-		rs := relayStatus(c.v, c.o, now.Add(-time.Minute), now)
+		var turn relayTurn
+		if c.o != nil {
+			turn = relayQueue(c.o, []relayView{c.v}, now)[0]
+		}
+		rs := relayStatus(c.v, c.o, turn, now.Add(-time.Minute), now)
 		got := want{rs.State, rs.Target, rs.UpdateId, rs.Reason, rs.ChangedAt}
 		if got != c.want || rs.Name != "r1" || rs.Version != c.v.Rec.Version || rs.Remote != c.v.Rec.Remote || rs.SeenAt != now.Add(-time.Minute).Unix() {
 			t.Errorf("%s: %+v, want %+v", c.name, rs, c.want)

@@ -107,6 +107,27 @@ func TestUpdateStatusRelays(t *testing.T) {
 	if !strings.HasSuffix(out, "relay      r1: v0.27.0, waiting for its turn\n") {
 		t.Fatalf("its turn:\n%s", out)
 	}
+	// The relay the others wait for: the one holding its turn, or the one
+	// whose update began last, not one before it whose turn ran out while
+	// it still says it runs; else one at an earlier update.
+	id := "6f1c0e2a9b3d4c5e"
+	ran := &nodev1.RelayUpdateStatus{Name: "r1", Version: "v0.27.0", State: "running", Target: "v0.28.0", UpdateId: id, ChangedAt: at - 3600}
+	waits := &nodev1.RelayUpdateStatus{Name: "r4", Version: "v0.27.0", State: "waiting", Target: "v0.28.0", UpdateId: id}
+	for _, c := range []struct {
+		relays []*nodev1.RelayUpdateStatus
+		want   string
+	}{
+		{[]*nodev1.RelayUpdateStatus{ran, {Name: "r2", State: "offered", Target: "v0.28.0", UpdateId: id, ChangedAt: at}, waits}, "r2"},
+		{[]*nodev1.RelayUpdateStatus{ran, {Name: "r2", Version: "v0.27.0", State: "requested", Target: "v0.28.0", UpdateId: id, ChangedAt: at}, waits}, "r2"},
+		{[]*nodev1.RelayUpdateStatus{{Name: "r1", Version: "v0.26.0", State: "running", Target: "v0.27.0", UpdateId: "0a", ChangedAt: at}, ran, waits}, "r1"},
+		{[]*nodev1.RelayUpdateStatus{{Name: "r1", Version: "v0.26.0", State: "running", Target: "v0.27.0", UpdateId: "0a", ChangedAt: at}, waits}, "r1"},
+	} {
+		m.Relays = c.relays
+		out, _ = captureStdout(t, func() error { return (&cli{c: updateNode{m: m}}).updateStatus(context.Background()) })
+		if !strings.HasSuffix(out, "relay      r4: v0.27.0, waiting for "+c.want+"\n") {
+			t.Errorf("waiting for %s:\n%s", c.want, out)
+		}
+	}
 	m.Relays = nil
 	if out, _ = captureStdout(t, func() error { return (&cli{c: updateNode{m: m}}).updateStatus(context.Background()) }); strings.Contains(out, "relay") {
 		t.Fatalf("no relays:\n%s", out)

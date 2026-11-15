@@ -39,12 +39,7 @@ func (s *Server) AddRelay(ctx context.Context, req *connect.Request[nodev1.AddRe
 	}
 	var r store.Relay
 	if err == nil {
-		r, err = s.Store.CreateRelay(ctx, req.Msg.Name, addr)
-	}
-	if err == nil {
-		// A new relay by an old one's name has none of its reports
-		// (relay-update-remote-v1 §8.3): one a removal could not delete.
-		_ = s.Store.DeleteSetting(ctx, relayUpdateKey+r.Name)
+		r, err = s.addRelay(ctx, req.Msg.Name, addr)
 	}
 	if err := s.done(ctx, "relay.add "+req.Msg.Address, req.Msg.Name, err); err != nil {
 		return nil, err
@@ -72,12 +67,32 @@ func (s *Server) RemoveRelay(ctx context.Context, req *connect.Request[nodev1.Re
 	return connect.NewResponse(&nodev1.RemoveRelayResponse{}), nil
 }
 
+// addRelay creates the relay. A new relay by an old one's name has none
+// of its reports nor its turn (relay-update-remote-v1 §8.3): neither a
+// record a removal could not delete, nor what the exit keeps of the old
+// one in memory. Against a look at the queue (turnMu): none gives the old
+// relay's turn to the new one.
+func (s *Server) addRelay(ctx context.Context, name string, addr netip.Addr) (store.Relay, error) {
+	s.relayUpd.turnMu.Lock()
+	defer s.relayUpd.turnMu.Unlock()
+	r, err := s.Store.CreateRelay(ctx, name, addr)
+	if err != nil {
+		return r, err
+	}
+	_ = s.Store.DeleteSetting(ctx, relayUpdateKey+r.Name)
+	s.relayUpd.forget(r.Name)
+	return r, nil
+}
+
 // removeRelay deletes the relay and its update reports
 // (relay-update-remote-v1 §8.3), as one against a report taken meanwhile,
-// which then finds no relay. The relay is gone once its row is: a record
-// left behind (the store failed in between) is nobody's, and AddRelay
-// clears it for a new relay of the name.
+// which then finds no relay, and against a look at the queue, which gives
+// it no turn after. The relay is gone once its row is: a record left
+// behind (the store failed in between) is nobody's, and AddRelay clears it
+// for a new relay of the name.
 func (s *Server) removeRelay(ctx context.Context, name string) error {
+	s.relayUpd.turnMu.Lock()
+	defer s.relayUpd.turnMu.Unlock()
 	s.relayUpd.saveMu.Lock()
 	defer s.relayUpd.saveMu.Unlock()
 	if err := s.Store.DeleteRelay(ctx, name); err != nil {

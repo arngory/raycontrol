@@ -7939,11 +7939,13 @@ type RelayUpdateStatus struct {
 	Version string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"` // what the relay last said it runs; "" never said
 	// unknown (no report ever: an older relay, or its rayd relay does not
 	// run), off (behind target, but root on the relay has not allowed it),
-	// current (on target or newer, or nothing offered), waiting (for its
-	// turn: another relay updates), offered (in its feed, no report on it
-	// yet), and as the relay reported on update_id: requested, running,
-	// done, rolled_back, failed (with reason no_word: an hour without a
-	// word after requested or running).
+	// current (on target or newer, or nothing offered), waiting (its turn
+	// has not come: another relay updates, or one before it has not passed),
+	// offered (its turn: in its feed, no report on it yet), and as the relay
+	// reported on update_id: requested, running, done, rolled_back, failed
+	// (with reason no_word: an hour without a word after requested or
+	// running, or the queue went past it with no word on the offer).
+	// waiting and offered end: within the relays' turns, 30 minutes each.
 	State         string `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`
 	Target        string `protobuf:"bytes,4,opt,name=target,proto3" json:"target,omitempty"`                         // the version offered; "" none
 	UpdateId      string `protobuf:"bytes,5,opt,name=update_id,json=updateId,proto3" json:"update_id,omitempty"`     // the node's update it follows (UpdateStatus.id)

@@ -15,13 +15,7 @@ import (
 // printable; a state this rayctl does not know is shown as it is.
 func relayLines(m *nodev1.GetUpdateStatusResponse) string {
 	p := nodeupdate.Printable
-	// The relay the others wait for: the one the offer went to.
-	busy := ""
-	for _, r := range m.Relays {
-		if busy == "" && (r.State == "offered" || r.State == nodeupdate.Requested || r.State == nodeupdate.Running) {
-			busy = r.Name
-		}
-	}
+	busy := relayBusy(m.Relays)
 	var b strings.Builder
 	for _, r := range m.Relays {
 		name := p(r.Name)
@@ -66,6 +60,39 @@ func relayLines(m *nodev1.GetUpdateStatusResponse) string {
 		b.WriteString("relay      " + line + "\n")
 	}
 	return b.String()
+}
+
+// relayBusy is the relay the others wait for (§8.2), "" none: the one
+// holding its turn with no word on it yet (offered, which rayd shows only
+// then); else the one whose update of the offer the others wait on began
+// last (one before it whose turn ran out may still say it updates, until
+// an hour of silence fails it); else one still at an earlier update (the
+// node updated again meanwhile).
+func relayBusy(rs []*nodev1.RelayUpdateStatus) string {
+	offer := ""
+	for _, r := range rs {
+		if r.State == "waiting" && offer == "" {
+			offer = r.UpdateId
+		}
+	}
+	busy, rank, at := "", 0, int64(0)
+	for _, r := range rs {
+		k := 0
+		switch {
+		case r.State == "offered":
+			k = 3
+		case r.State != nodeupdate.Requested && r.State != nodeupdate.Running:
+			continue
+		case offer != "" && r.UpdateId == offer:
+			k = 2
+		default:
+			k = 1
+		}
+		if k > rank || k == 2 && rank == 2 && r.ChangedAt > at {
+			busy, rank, at = r.Name, k, r.ChangedAt
+		}
+	}
+	return busy
 }
 
 // relayAt is ", " and the time of unix seconds t, "" for none.

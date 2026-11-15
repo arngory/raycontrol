@@ -251,14 +251,15 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 			return toConnect(err)
 		}
 		resp := &perimeterv1.WatchRelayResponse{Snapshot: snap}
-		var offered relayOffered
+		gave := false
 		if updates {
-			offers, err := s.relayOffers(ctx, s.NodeUpdate.now())
+			// The relay's turn, when it comes now, is given and written
+			// before the offer goes out.
+			offers, g, err := s.relayOffers(ctx, s.NodeUpdate.now())
 			if err != nil {
 				return toConnect(err)
 			}
-			offered = offers[relay.Name]
-			resp.Update = offered.o
+			resp.Update, gave = offers[relay.Name], g
 		}
 		// The whole answer, snapshot and offer: a new offer is news as a
 		// new perimeter is.
@@ -273,8 +274,11 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 			}
 			last = body
 		}
-		if updates && s.relayUpd.sentOffer(relay.Name, offered, kicks, s.NodeUpdate.now()) {
-			s.kickRelayFeeds(ctx) // a relay given its turn: the others wait
+		if updates {
+			s.relayUpd.sentOffer(relay.Name, resp.Update, kicks, s.NodeUpdate.now())
+			if gave {
+				s.kickRelayFeeds(ctx) // a relay given its turn: the others' offers change
+			}
 		}
 		s.relayHeard(ctx, relay.Name, s.NodeUpdate.now())
 		select {
