@@ -188,6 +188,172 @@ func TestNaiveNameJoinsReality(t *testing.T) {
 	}
 }
 
+// The joint switch does not hang on the phase of rayd's minute rounds, nor
+// on REALITY publishing on time: naive publishes REALITY's time exactly,
+// though its round comes up to a minute after its lead began, waits for a
+// REALITY that waits for its certificate, and switches in the round
+// REALITY switches in. So the front's routes change in one round only (one
+// render, one restart of the front for both).
+func TestNaiveNameJoinsRealityRound(t *testing.T) {
+	type node struct {
+		ctx   context.Context
+		st    *store.Store
+		r, nv store.Service
+	}
+	wildcard := func(t *testing.T) node {
+		ctx, st, nv := naiveNode(t, "*.example.com")
+		return node{ctx, st, mustService(t, ctx, st, "r"), nv}
+	}
+	// Listed names, rotate_sni on for both: REALITY waits for a
+	// certificate of its new name in vain, then publishes without it, a
+	// round after its lead began.
+	listed := func(t *testing.T) node {
+		ctx, st, nv := naiveNode(t)
+		for _, s := range []string{"r", "nv"} {
+			if _, err := SetServiceOption(ctx, st, s, "rotate_sni", "on"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ns, site := ParseNaiveState(nv), mustService(t, ctx, st, "site")
+		storeCert(t, ctx, st, "site", SiteName(site), ns.SNI, ns.SNINext)
+		return node{ctx, st, mustService(t, ctx, st, "r"), mustService(t, ctx, st, "nv")}
+	}
+	for _, c := range []struct {
+		name  string
+		setup func(*testing.T) node
+		phase time.Duration    // of the rounds
+		down  [2]time.Duration // rayd down, after REALITY's creation
+	}{
+		{"wildcard, phase 0", wildcard, 0, [2]time.Duration{}},
+		{"wildcard, phase 17s", wildcard, 17 * time.Second, [2]time.Duration{}},
+		{"wildcard, phase 59s", wildcard, 59 * time.Second, [2]time.Duration{}},
+		{"REALITY waits for its certificate, phase 17s", listed, 17 * time.Second, [2]time.Duration{}},
+		{"REALITY waits for its certificate, phase 59s", listed, 59 * time.Second, [2]time.Duration{}},
+		// REALITY prepares 3 hours late, publishes a round after, 3 hours
+		// past its time; naive's lead began meanwhile.
+		{"rayd down as REALITY would prepare", wildcard, 17 * time.Second, [2]time.Duration{86*day - time.Hour, 87*day + 2*time.Hour}},
+		{"rayd down, REALITY waits for its certificate", listed, 17 * time.Second, [2]time.Duration{86*day - time.Hour, 86*day + 3*time.Hour}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			n := c.setup(t)
+			ctx, st := n.ctx, n.st
+			// naive's own time 10 days after REALITY's: it joins REALITY's.
+			rotated := n.r.CreatedAt.Add(10 * day).Unix()
+			if err := naiveFields(ctx, st, n.nv, map[string]any{"rotated_at": rotated}); err != nil {
+				t.Fatal(err)
+			}
+			e := naiveEpoch
+			X := n.r.CreatedAt.Add(e.Period)
+			// What the front routes: naive's three names, REALITY's.
+			routes := func() string {
+				ns, rs := naiveState(t, ctx, st, "nv"), mustService(t, ctx, st, "r")
+				return strings.Join([]string{ns.SNI, ns.SNIPrev, ns.SNINext, SiteName(rs)}, " ")
+			}
+			var naiveAt, realityAt time.Time
+			var changes []time.Time
+			last := routes()
+			// By the hour, by the minute about the leads and the switches.
+			near := func(at time.Time) bool {
+				for _, p := range []time.Time{X.Add(-e.Lead - e.Prepare), X.Add(-e.Lead), X} {
+					if at.After(p.Add(-2*time.Hour)) && at.Before(p.Add(5*time.Hour)) {
+						return true
+					}
+				}
+				return false
+			}
+			for at := n.r.CreatedAt.Add(80*day + c.phase); at.Before(X.Add(day)); {
+				if down := at.After(n.r.CreatedAt.Add(c.down[0])) && at.Before(n.r.CreatedAt.Add(c.down[1])); !down {
+					rotateAt(t, ctx, st, at, e)
+				}
+				if naiveAt.IsZero() && naiveState(t, ctx, st, "nv").RotatedAt != rotated {
+					naiveAt = at
+				}
+				if realityAt.IsZero() && ParseRealityState(mustService(t, ctx, st, "r")).RotatedAt != n.r.CreatedAt.Unix() {
+					realityAt = at
+				}
+				if r := routes(); r != last {
+					changes, last = append(changes, at), r
+				}
+				if near(at) {
+					at = at.Add(time.Minute)
+				} else {
+					at = at.Add(time.Hour)
+				}
+			}
+			if naiveAt.IsZero() || !naiveAt.Equal(realityAt) {
+				t.Fatalf("REALITY switched in the round of %v, naive in that of %v", realityAt, naiveAt)
+			}
+			if len(changes) != 1 {
+				t.Fatalf("the front's routes changed in the rounds of %v", changes)
+			}
+			// naive's time is REALITY's: the next epoch counts from it.
+			if got, want := naiveState(t, ctx, st, "nv").RotatedAt, ParseRealityState(mustService(t, ctx, st, "r")).RotatedAt; got != want {
+				t.Fatalf("naive switched for %v, REALITY for %v", time.Unix(got, 0), time.Unix(want, 0))
+			}
+			allNames(t, ctx, st)
+		})
+	}
+}
+
+// A naive switch published for a time a little apart from REALITY's (one
+// of them published late) goes in REALITY's round, before its time or
+// after; one further apart keeps its own.
+func TestNaiveNameJoinsRealityApart(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		offset time.Duration // naive's published time after REALITY's
+		joined bool
+	}{
+		{"4 minutes before", -4 * time.Minute, true},
+		{"40 seconds before", -40 * time.Second, true},
+		{"40 seconds after", 40 * time.Second, true},
+		{"4 minutes after", 4 * time.Minute, true},
+		{"10 minutes before", -10 * time.Minute, false},
+		{"10 minutes after", 10 * time.Minute, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx, st, nv := naiveNode(t, "*.example.com")
+			r := mustService(t, ctx, st, "r")
+			e := naiveEpoch
+			X := r.CreatedAt.Add(e.Period)
+			if err := naiveFields(ctx, st, nv, map[string]any{"rotated_at": r.CreatedAt.Add(10 * day).Unix()}); err != nil {
+				t.Fatal(err)
+			}
+			rotateAt(t, ctx, st, X.Add(-e.Lead-e.Prepare), e)
+			rotateAt(t, ctx, st, X.Add(-e.Lead), e)
+			if rs, ns := ParseRealityState(mustService(t, ctx, st, "r")), naiveState(t, ctx, st, "nv"); rs.NextFrom != X.Unix() || ns.NextFrom != X.Unix() {
+				t.Fatalf("published for %d and %d, want %d", rs.NextFrom, ns.NextFrom, X.Unix())
+			}
+			from := X.Add(c.offset)
+			if err := naiveFields(ctx, st, mustService(t, ctx, st, "nv"), map[string]any{"next_from": from.Unix()}); err != nil {
+				t.Fatal(err)
+			}
+			var naiveAt, realityAt time.Time
+			for at := X.Add(-20 * time.Minute); at.Before(X.Add(20 * time.Minute)); at = at.Add(time.Minute) {
+				rotateAt(t, ctx, st, at, e)
+				if naiveAt.IsZero() && naiveState(t, ctx, st, "nv").NextFrom == 0 {
+					naiveAt = at
+				}
+				if realityAt.IsZero() && ParseRealityState(mustService(t, ctx, st, "r")).NextFrom == 0 {
+					realityAt = at
+				}
+			}
+			if realityAt != X.Add(-RealityEarly) {
+				t.Fatalf("REALITY switched at %v", realityAt)
+			}
+			switch {
+			case c.joined && !naiveAt.Equal(realityAt):
+				t.Fatalf("naive switched at %v, REALITY at %v", naiveAt, realityAt)
+			case !c.joined && !naiveAt.Equal(from):
+				t.Fatalf("naive switched at %v, want its own time %v", naiveAt, from)
+			}
+			if got := naiveState(t, ctx, st, "nv").RotatedAt; got != from.Unix() {
+				t.Fatalf("naive switched for %v, want %v", time.Unix(got, 0), from)
+			}
+		})
+	}
+}
+
 func mustService(t *testing.T, ctx context.Context, st *store.Store, name string) store.Service {
 	t.Helper()
 	svc, err := st.ServiceByName(ctx, name)

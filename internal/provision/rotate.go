@@ -76,7 +76,7 @@ func ParseRealityState(svc store.Service) RealityState {
 }
 
 // RealityEpoch is the schedule of REALITY key rotation, and of naive's
-// name (R4-42), which shares its lead, preparation and early switch.
+// name (R4-42), which shares its lead and preparation.
 type RealityEpoch struct {
 	Period  time.Duration // a key set is current this long
 	Lead    time.Duration // the next set is in subscriptions this long before the switch
@@ -128,6 +128,9 @@ func RotateReality(ctx context.Context, st *store.Store, now time.Time, e Realit
 	// changed.
 	changed := 0
 	var errs []error
+	// The REALITY switches of this round, their times by site: a naive
+	// switch for about that time goes in this round with them.
+	switched := map[string][]int64{}
 	for _, svc := range all {
 		if svc.Kind != "reality" || !svc.Enabled {
 			continue
@@ -142,6 +145,12 @@ func RotateReality(ctx context.Context, st *store.Store, now time.Time, e Realit
 			// A name chosen in this round is taken for the next service.
 			if all, err = st.ListServices(ctx); err != nil {
 				return changed, errors.Join(append(errs, err)...)
+			}
+			before := ParseRealityState(svc)
+			if i := slices.IndexFunc(all, func(s store.Service) bool { return s.ID == svc.ID }); i >= 0 && before.NextFrom != 0 {
+				if after := ParseRealityState(all[i]); after.NextFrom == 0 && after.RotatedAt == before.NextFrom {
+					switched[siteOf(svc)] = append(switched[siteOf(svc)], before.NextFrom)
+				}
 			}
 		}
 	}
@@ -160,7 +169,7 @@ func RotateReality(ctx context.Context, st *store.Store, now time.Time, e Realit
 			continue
 		}
 		svc := current[i]
-		ok, err := rotateNaive(ctx, st, current, svc, now, e, log)
+		ok, err := rotateNaive(ctx, st, current, svc, now, e, switched, log)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("naive %s: %w", svc.Name, err))
 			continue

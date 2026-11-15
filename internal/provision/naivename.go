@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/store"
@@ -99,36 +100,58 @@ func naiveNext(ctx context.Context, st *store.Store, all []store.Service, svc st
 	return setFields(svc.Settings, map[string]any{"sni_next": name})
 }
 
-// naiveSwitch is when a naive service's next switch is due (MaxInt64:
-// none): the operator's time, or a period after the last switch when a
-// scheduled switch moves the name (RenamesAt). A scheduled one moves to the
-// next switch of a REALITY of the same site within half a period of it
-// (the owner's answer 2 to docs/20 §9): REALITY's switch restarts the front
-// when its name changes, and naive's too, and one restart carries both.
-func naiveSwitch(ctx context.Context, st *store.Store, all []store.Service, svc store.Service, state NaiveState, e RealityEpoch, now int64) int64 {
-	due := int64(math.MaxInt64)
+// naiveDue is when a naive service's next switch is due.
+type naiveDue struct {
+	at      int64 // MaxInt64: none
+	reality bool  // at is the switch of a REALITY of the same site, which this one joins
+	waits   bool  // that REALITY waits for its new name's certificate: its time is set at its publication
+}
+
+// joinSlack is how far apart a naive switch and a REALITY switch of its
+// site may be and still go in one round, in seconds: 5 minutes, a quarter
+// of the lead at most. A round runs every minute at its own phase, so a
+// naive switch published a lead ahead of REALITY's would land up to a
+// minute after it; a lead short by that much is harmless.
+func joinSlack(e RealityEpoch) int64 {
+	return int64(min(5*time.Minute, e.Lead/4) / time.Second)
+}
+
+// naiveSwitch is when a naive service's next switch is due: the operator's
+// time, or a period after the last switch when a scheduled switch moves
+// the name (RenamesAt). A scheduled one moves to the next switch of a
+// REALITY of the same site within half a period of it (the owner's answer
+// 2 to docs/20 §9): REALITY's switch restarts the front when its name
+// changes, and naive's too, and one restart carries both.
+func naiveSwitch(ctx context.Context, st *store.Store, all []store.Service, svc store.Service, state NaiveState, e RealityEpoch, now int64) naiveDue {
+	d := naiveDue{at: math.MaxInt64}
 	if e.NaivePeriod > 0 && RenamesAt(ctx, st, all, siteOf(svc), state.RotateSNI, false) {
 		period := int64(e.NaivePeriod / time.Second)
-		due = state.RotatedAt + period
-		join, gap := int64(0), period/2+1
-		for _, r := range all {
+		d.at = state.RotatedAt + period
+		join, gap := -1, period/2+1
+		for i, r := range all {
 			if r.Kind != "reality" || !r.Enabled || siteOf(r) == "" || siteOf(r) != siteOf(svc) {
 				continue
 			}
-			// One to come: a REALITY behind its time (waiting for its
-			// certificate) is not waited for.
-			if at := realityNextSwitch(r, e); at != math.MaxInt64 && at >= now && abs(at-due) < gap {
-				join, gap = at, abs(at-due)
+			// One to come: a REALITY behind its time (rayd was down) is not
+			// waited for.
+			if at := realityNextSwitch(r, e); at != math.MaxInt64 && at >= now && abs(at-d.at) < gap {
+				join, gap = i, abs(at-d.at)
 			}
 		}
-		if join != 0 {
-			due = join
+		if join >= 0 {
+			// Its scheduled time until it publishes. One that waits for its
+			// new name's certificate publishes -reality-prepare after it
+			// began at most, with its time a lead after that if it comes
+			// late: naive publishes in that round, with that time.
+			rs := ParseRealityState(all[join])
+			d = naiveDue{at: realityNextSwitch(all[join], e), reality: true,
+				waits: rs.NextFrom == 0 && rs.PreparedAt != 0 && now < rs.PreparedAt+int64(e.Prepare/time.Second)+joinSlack(e)}
 		}
 	}
-	if state.RotateAt != 0 {
-		due = min(due, state.RotateAt)
+	if state.RotateAt != 0 && state.RotateAt < d.at {
+		d = naiveDue{at: state.RotateAt}
 	}
-	return due
+	return d
 }
 
 // realityNextSwitch is when a REALITY service switches next: its published
@@ -146,26 +169,30 @@ func realityNextSwitch(r store.Service, e RealityEpoch) int64 {
 	return math.MaxInt64
 }
 
-// naiveEarly is how long before its time a naive switch happens: as early
-// as a REALITY of the same site switching at that time (RealityEarly with
-// a grace period; published for it, or switched for it in this round), so
-// that both are in one round; otherwise not early at all. naive itself
-// needs none: the new name is routed already, and a client whose clock is
-// ahead finds it served. (A lead as short as RealityEarly, as on a test
-// stand, would otherwise switch at the publication.)
-func naiveEarly(all []store.Service, svc store.Service, from int64, e RealityEpoch) int64 {
-	if e.Grace <= 0 {
-		return 0
+// naiveSwitchNow reports whether a naive switch published for from happens
+// in the round at t. With a REALITY switch of its site for a time within
+// the slack of from, it goes in that switch's round (switched: the REALITY
+// switches of this round by site, their times), so up to RealityEarly and
+// the slack before from: one render, one restart of the front carries
+// both. Otherwise it goes at from, unless such a REALITY switch is still to
+// come: then it waits for it, the slack at most. The moment matters to no
+// client: the front routes the next name from before its publication, and
+// the name before it until the switch after.
+func naiveSwitchNow(all []store.Service, svc store.Service, from, t int64, switched map[string][]int64, slack int64) bool {
+	site := siteOf(svc)
+	if site != "" && slices.ContainsFunc(switched[site], func(at int64) bool { return abs(at-from) <= slack }) {
+		return true
 	}
-	for _, r := range all {
-		if r.Kind != "reality" || !r.Enabled || siteOf(r) == "" || siteOf(r) != siteOf(svc) {
-			continue
-		}
-		if rs := ParseRealityState(r); rs.NextFrom == from || rs.RotatedAt == from {
-			return int64(RealityEarly / time.Second)
-		}
+	if t < from {
+		return false
 	}
-	return 0
+	return site == "" || !slices.ContainsFunc(all, func(r store.Service) bool {
+		if r.Kind != "reality" || !r.Enabled || siteOf(r) != site {
+			return false
+		}
+		rs := ParseRealityState(r)
+		return rs.NextFrom != 0 && abs(rs.NextFrom-from) <= slack && t < rs.NextFrom+slack
+	})
 }
 
 func abs(x int64) int64 {
@@ -175,9 +202,10 @@ func abs(x int64) int64 {
 	return x
 }
 
-// rotateNaive advances the name rotation of one naive service at now.
+// rotateNaive advances the name rotation of one naive service at now;
+// switched are the REALITY switches of this round, by site.
 func rotateNaive(ctx context.Context, st *store.Store, all []store.Service, svc store.Service, now time.Time, e RealityEpoch,
-	log *slog.Logger) (bool, error) {
+	switched map[string][]int64, log *slog.Logger) (bool, error) {
 	state := ParseNaiveState(svc)
 	t := now.Unix()
 	if state.SNINext == "" {
@@ -189,56 +217,61 @@ func rotateNaive(ctx context.Context, st *store.Store, all []store.Service, svc 
 		}
 		return true, st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: settings})
 	}
-	lead := int64(e.Lead / time.Second)
-	if state.NextFrom != 0 {
-		if t < state.NextFrom-naiveEarly(all, svc, state.NextFrom, e) {
+	lead, slack := int64(e.Lead/time.Second), joinSlack(e)
+	changed := false
+	if state.NextFrom == 0 {
+		due := naiveSwitch(ctx, st, all, svc, state, e, t)
+		covered := SiteCovers(ctx, st, all, siteOf(svc), state.SNINext)
+		switch {
+		case due.at == math.MaxInt64 && state.PreparedAt != 0:
+			// Called off (rotate_sni off, the period 0, the operator's switch
+			// given up): the certificate no longer needs the name.
+			return true, naiveFields(ctx, st, svc, map[string]any{"prepared_at": nil})
+		case due.at == math.MaxInt64:
 			return false, nil
+		case !covered && state.PreparedAt == 0:
+			// The site's certificate is asked for the next name: at once,
+			// for a scheduled switch an epoch ahead (under listed names it is
+			// in CT logs from now: rotate_sni=on chose that), at the request
+			// for the operator's.
+			log.Info("naive: the next server name waits for its certificate", "service", svc.Name)
+			return true, naiveFields(ctx, st, svc, map[string]any{"prepared_at": t})
+		case t < due.at-lead:
+			return false, nil
+		case due.waits:
+			// The REALITY it joins waits for its certificate: its time is
+			// set at its publication, and this one publishes with it.
+			return false, nil
+		case !covered && t < max(state.PreparedAt, due.at-lead)+int64(e.Prepare/time.Second):
+			return false, nil
+		case !covered:
+			// Not certified in time: the name stays, for this epoch.
+			log.Warn("naive server name stays: the next name got no certificate in time", "service", svc.Name)
+			return true, naiveFields(ctx, st, svc, map[string]any{"prepared_at": nil, "rotate_at": nil, "rotated_at": t})
 		}
-		return true, switchNaive(ctx, st, all, svc, state, log)
-	}
-
-	due := naiveSwitch(ctx, st, all, svc, state, e, t)
-	covered := SiteCovers(ctx, st, all, siteOf(svc), state.SNINext)
-	switch {
-	case due == math.MaxInt64 && state.PreparedAt != 0:
-		// Called off (rotate_sni off, the period 0, the operator's switch
-		// given up): the certificate no longer needs the name.
-		return true, naiveFields(ctx, st, svc, map[string]any{"prepared_at": nil})
-	case due == math.MaxInt64:
-		return false, nil
-	case !covered && state.PreparedAt == 0:
-		// The site's certificate is asked for the next name: at once,
-		// for a scheduled switch an epoch ahead (under listed names it is
-		// in CT logs from now: rotate_sni=on chose that), at the request
-		// for the operator's.
-		log.Info("naive: the next server name waits for its certificate", "service", svc.Name)
-		return true, naiveFields(ctx, st, svc, map[string]any{"prepared_at": t})
-	case t < due-lead:
-		return false, nil
-	case !covered && t < max(state.PreparedAt, due-lead)+int64(e.Prepare/time.Second):
-		return false, nil
-	case !covered:
-		// Not certified in time: the name stays, for this epoch.
-		log.Warn("naive server name stays: the next name got no certificate in time", "service", svc.Name)
-		return true, naiveFields(ctx, st, svc, map[string]any{"prepared_at": nil, "rotate_at": nil, "rotated_at": t})
-	}
-	from := max(due, t+lead)
-	if state.RotateAt != 0 && state.RotateAt <= t {
-		from = t // now: the operator asked for it
-	}
-	if err := naiveFields(ctx, st, svc, map[string]any{"next_from": from, "prepared_at": nil}); err != nil {
-		return false, err
-	}
-	log.Info("naive: next server name published", "service", svc.Name, "switch", time.Unix(from, 0).UTC())
-	if t < from-naiveEarly(all, svc, from, e) {
-		return true, nil
+		from := max(due.at, t+lead)
+		if due.reality && due.at >= t+lead-slack {
+			// REALITY's time exactly, though this round came up to the
+			// slack after its lead began: both switch in one round.
+			from = due.at
+		}
+		if state.RotateAt != 0 && state.RotateAt <= t {
+			from = t // now: the operator asked for it
+		}
+		if err := naiveFields(ctx, st, svc, map[string]any{"next_from": from, "prepared_at": nil}); err != nil {
+			return false, err
+		}
+		log.Info("naive: next server name published", "service", svc.Name, "switch", time.Unix(from, 0).UTC())
+		var err error
+		if svc, err = st.ServiceByName(ctx, svc.Name); err != nil {
+			return true, err
+		}
+		state, changed = ParseNaiveState(svc), true
 	}
 	// The operator's switch at once: the name is routed already.
-	svc, err := st.ServiceByName(ctx, svc.Name)
-	if err != nil {
-		return true, err
+	if !naiveSwitchNow(all, svc, state.NextFrom, t, switched, slack) {
+		return changed, nil
 	}
-	state = ParseNaiveState(svc)
 	return true, switchNaive(ctx, st, all, svc, state, log)
 }
 
