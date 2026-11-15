@@ -74,4 +74,16 @@ func TestRestoreCarryText(t *testing.T) {
 	if !strings.Contains(got, "another node's: a new host") || strings.Contains(got, "stay as they are") {
 		t.Errorf("a new host:\n%s", got)
 	}
+	got = restoreCarryText(store.Restored{Foreign: true, Newer: "device d2 bob/tv is revoked in the backup and active here",
+		Unknown: []store.CarriedDevice{{ID: "d1", User: "alice", Name: "phone"}}}, made)
+	for _, want := range []string{
+		"the backup is newer than this node's database: nothing carried (device d2 bob/tv is revoked in the backup and active here)\n",
+		"warning: this node's database is no later state of the backup (a new host with this node's identity,\n",
+		"restored here): it says nothing of the 1 devices the backup has active:\n",
+		"d1  alice/phone",
+	} {
+		if !strings.Contains(got, want) || strings.Contains(got, "another node's") {
+			t.Errorf("no %q in\n%s", want, got)
+		}
+	}
 }

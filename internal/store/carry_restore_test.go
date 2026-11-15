@@ -168,7 +168,7 @@ func TestCarryRestoreKeepsCurrent(t *testing.T) {
 	s.Close()
 	now := secrets(t, f.current)
 
-	r, err := CarryRestore(ctx, f.backup, f.current)
+	r, err := CarryRestore(ctx, f.backup, f.current, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestCarryRestoreDeviceAdded(t *testing.T) {
 	}
 	s.Close()
 	now := secrets(t, f.current)
-	r, err := CarryRestore(ctx, f.backup, f.current)
+	r, err := CarryRestore(ctx, f.backup, f.current, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +290,7 @@ func TestCarryRestoreAuditPruned(t *testing.T) {
 	must(t, s.PruneAudit(ctx, time.Now().Add(time.Hour)))
 	s.Close()
 	now := secrets(t, f.current)
-	if _, err := CarryRestore(ctx, f.backup, f.current); err != nil {
+	if _, err := CarryRestore(ctx, f.backup, f.current, ""); err != nil {
 		t.Fatal(err)
 	}
 	for svc, sec := range secrets(t, f.backup)["alice"] {
@@ -316,7 +316,7 @@ func TestCarryRestoreTwice(t *testing.T) {
 	for i := range 2 {
 		work := filepath.Join(f.dir, fmt.Sprintf("restore%d.db", i))
 		copyFile(t, f.backup, work)
-		r, err := CarryRestore(ctx, work, f.current)
+		r, err := CarryRestore(ctx, work, f.current, "")
 		if err != nil || r.Kept != len(restoreUsers) {
 			t.Fatalf("restore %d: %+v %v", i, r, err)
 		}
@@ -354,7 +354,7 @@ func TestCarryRestoreAfterRollback(t *testing.T) {
 	}
 	copyFile(t, pre, f.current) // rolled back
 	want := secrets(t, f.current)
-	if _, err := CarryRestore(ctx, f.backup, f.current); err != nil {
+	if _, err := CarryRestore(ctx, f.backup, f.current, ""); err != nil {
 		t.Fatal(err)
 	}
 	got := secrets(t, f.backup)
@@ -396,7 +396,7 @@ func TestCarryRestoreUserRecreated(t *testing.T) {
 	}
 	s.Close()
 	now := secrets(t, f.current)
-	r, err := CarryRestore(ctx, f.backup, f.current)
+	r, err := CarryRestore(ctx, f.backup, f.current, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +438,7 @@ func TestCarryRestoreServiceDeleted(t *testing.T) {
 	must(t, s.DeleteService(ctx, "naive"))
 	s.Close()
 	now := secrets(t, f.current)
-	r, err := CarryRestore(ctx, f.backup, f.current)
+	r, err := CarryRestore(ctx, f.backup, f.current, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +466,7 @@ func TestCarryRestoreForeign(t *testing.T) {
 	o := f.open(t, other)
 	must(t, o.SetSetting(ctx, settingSPAParams, []byte(`{"node_id":"ffeeddccbbaa99887766554433221100"}`)))
 	o.Close()
-	r, err := CarryRestore(ctx, f.backup, other)
+	r, err := CarryRestore(ctx, f.backup, other, "")
 	if err != nil || !r.Foreign || r.Kept != 0 || len(r.New) != 0 || len(r.Unknown) != len(restoreUsers) {
 		t.Fatalf("%+v %v", r, err)
 	}
@@ -504,7 +504,7 @@ func TestCarryRestoreDoHWindowOpen(t *testing.T) {
 	}
 	s.Close()
 	now := secrets(t, f.current)
-	if _, err := CarryRestore(ctx, f.backup, f.current); err != nil {
+	if _, err := CarryRestore(ctx, f.backup, f.current, ""); err != nil {
 		t.Fatal(err)
 	}
 	got := secrets(t, f.backup)

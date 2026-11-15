@@ -296,9 +296,13 @@ type Renewal struct {
 // Restored is what CarryRestore carried into a backup from the node's
 // database.
 type Restored struct {
-	// Foreign: the node's database is another node's (a new host), and
-	// nothing was carried; every active device of the backup is Unknown.
+	// Foreign: nothing was carried, and every active device of the backup
+	// is Unknown. The node's database is another node's (a new host), or,
+	// with Newer, it is the backup's node's but no later state of it.
 	Foreign bool
+	// Newer says what the backup has that the node's database does not
+	// (backupNewer): the first sign found.
+	Newer string
 	// Kept is how many users of the backup have the credentials and LAN
 	// key the node's database has, none new.
 	Kept int
@@ -329,7 +333,7 @@ type AddedDevice struct {
 // CarryDeviceRevocations is CarryRestore for a caller that reports only
 // the devices: the rest is carried all the same.
 func CarryDeviceRevocations(ctx context.Context, saved, current string) (carried, unknown []CarriedDevice, err error) {
-	r, err := CarryRestore(ctx, saved, current)
+	r, err := CarryRestore(ctx, saved, current, "")
 	return r.Carried, r.Unknown, err
 }
 
@@ -360,11 +364,23 @@ func CarryDeviceRevocations(ctx context.Context, saved, current string) (carried
 //
 // A current database of another node (a new host) has none of the
 // backup's secrets to carry: nothing changes, and all of saved's active
-// devices are Unknown. Neither database may be open elsewhere.
-func CarryRestore(ctx context.Context, saved, current string) (Restored, error) {
+// devices are Unknown. The same when current is the backup's node's but
+// not at least as new as the backup in every respect (backupNewer): a
+// backup restored on a new host gives it the node_id, so does a disk
+// cloned, and a restore -no-carry of an older copy leaves the node behind
+// its newer backups. Carried then, current's older secrets would go over
+// the backup's (a secret renewed after a leak back, a revoked device's
+// user's credentials as the device knew them) with no word.
+//
+// made is the backup's database as it was made, when saved is that
+// database migrated since (rayctl restore runs rayd init on it first, and
+// the step of schema 14 renews and audits there at the restore's time);
+// "" when saved is as made. backupNewer reads made. Neither database may
+// be open elsewhere.
+func CarryRestore(ctx context.Context, saved, current, made string) (Restored, error) {
 	var r Restored
-	if strings.ContainsAny(current, "?#") {
-		return r, fmt.Errorf("store: database path %q", current)
+	if strings.ContainsAny(current, "?#") || strings.ContainsAny(made, "?#") {
+		return r, fmt.Errorf("store: database path %q", current+made)
 	}
 	db, err := sql.Open("sqlite", "file:"+saved+"?_pragma=busy_timeout(5000)")
 	if err != nil {
@@ -378,6 +394,13 @@ func CarryRestore(ctx context.Context, saved, current string) (Restored, error) 
 	defer conn.Close() //nolint:errcheck // returns the connection to the pool
 	if _, err := conn.ExecContext(ctx, `ATTACH DATABASE ? AS cur`, "file:"+current+"?mode=ro"); err != nil {
 		return r, fmt.Errorf("store: opening %s: %w", current, err)
+	}
+	bk := "main"
+	if made != "" {
+		if _, err := conn.ExecContext(ctx, `ATTACH DATABASE ? AS bk`, "file:"+made+"?mode=ro"); err != nil {
+			return r, fmt.Errorf("store: opening %s: %w", made, err)
+		}
+		bk = "bk"
 	}
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -393,7 +416,16 @@ func CarryRestore(ctx context.Context, saved, current string) (Restored, error) 
 	}
 	if !same {
 		r.Foreign = true
-		r.Unknown, err = unknownDevices(ctx, tx)
+		r.Unknown, err = unknownDevices(ctx, tx, false)
+		return r, err // nothing written
+	}
+	if r.Newer, err = backupNewer(ctx, tx, bk); err != nil {
+		return r, err
+	}
+	if r.Newer != "" {
+		// What current says of the backup's devices is of before them.
+		r.Foreign = true
+		r.Unknown, err = unknownDevices(ctx, tx, true)
 		return r, err // nothing written
 	}
 	now := time.Now().Unix()
@@ -458,11 +490,11 @@ func CarryRestore(ctx context.Context, saved, current string) (Restored, error) 
 		id   int64
 		name string
 	}
-	var made []user
+	var renew []user
 	for _, d := range r.Added {
 		u := user{d.userID, d.User}
-		if !carried(u.name) && !slices.Contains(made, u) {
-			made = append(made, u)
+		if !carried(u.name) && !slices.Contains(renew, u) {
+			renew = append(renew, u)
 		}
 		w := "a device added and revoked here since the backup"
 		if !d.Revoked {
@@ -472,7 +504,7 @@ func CarryRestore(ctx context.Context, saved, current string) (Restored, error) 
 			why[d.User] = append(why[d.User], w)
 		}
 	}
-	for _, u := range made {
+	for _, u := range renew {
 		key, err := newLANKey()
 		if err != nil {
 			return r, err
@@ -497,10 +529,194 @@ func CarryRestore(ctx context.Context, saved, current string) (Restored, error) 
 	if err := auditCarry(ctx, tx, now, "rayctl restore", "restore", users, r.Carried, counts, why, renewed); err != nil {
 		return r, err
 	}
-	if r.Unknown, err = unknownDevices(ctx, tx); err != nil {
+	if r.Unknown, err = unknownDevices(ctx, tx, false); err != nil {
 		return r, err
 	}
 	return r, tx.Commit()
+}
+
+// backupNewer says what the backup (schema bk of tx: its database as it
+// was made) has that cur does not, the first sign found, or "" when there
+// is none: cur is then a later state of the backup's node as far as can
+// be told, which carrying takes for granted (current's secrets,
+// revocations and devices are those of since the backup). The signs,
+// those that compare no clocks first:
+//   - a device revoked in the backup and active in cur: a revocation is
+//     for good;
+//   - a device in the backup that cur does not have, of a user cur has
+//     (ID, name and creation time): a device goes only with its user;
+//   - a credential both have that moved on in the backup: cur's secret is
+//     the backup's previous one, or cur's next one is the backup's
+//     current one, or the backup has a next one that cur, at the same
+//     current, does not; or the backup's rotated_at (a switch and a
+//     renewal set it) is later;
+//   - a service of the backup whose ID cur never gave (above its
+//     AUTOINCREMENT sequence) or gave to another (kind, creation time);
+//   - an invite used in the backup and not in cur, or with fewer PIN
+//     tries left;
+//   - an audit line of the backup that cur does not have, though cur
+//     still keeps lines that old (rayd prunes by time, the oldest first):
+//     every change through the API has one;
+//   - the backup's newest record (a user, device, service or invite
+//     made, a device revoked or let into the LAN, an invite used, a
+//     credential rotated, an audit line) later than cur's newest.
+//
+// The rotation, the audit lines' range and the newest record compare
+// times. On one host there is one clock, and a later state of the node
+// has every record of the backup's or one made later. Across two hosts (a
+// backup restored on a new host, which went its own way) cur's records of
+// before the hosts parted carry the backup's host's times; a clock behind
+// on cur's host makes those signs fire sooner, one ahead may hide them,
+// and the clock-free ones still see a revocation, a device or a service
+// added, a rotation of a secret both knew and a line audited on the
+// backup's side.
+func backupNewer(ctx context.Context, tx *sql.Tx, bk string) (string, error) {
+	has := func(schema, table, column string) (bool, error) {
+		ok, err := hasTable(ctx, tx, schema, table)
+		if err == nil && ok && column != "" {
+			ok, err = hasColumn(ctx, tx, schema, table, column)
+		}
+		return ok, err
+	}
+	both := func(table, column string) (bool, error) {
+		ok, err := has(bk, table, column)
+		if err == nil && ok {
+			ok, err = has("cur", table, column)
+		}
+		return ok, err
+	}
+	type sign struct {
+		table, column string // both databases must have it ("": any)
+		say, query    string
+	}
+	signs := []sign{
+		{"", "", "device %s %s/%s is revoked in the backup and active here",
+			`SELECT d.id, u.name, d.name FROM bk.devices d JOIN bk.users u ON u.id = d.user_id
+			 JOIN cur.devices c ON c.id = d.id
+			 WHERE d.revoked_at IS NOT NULL AND c.revoked_at IS NULL ORDER BY u.name, d.name`},
+		{"", "", "the backup has device %s %s/%s, which this database never had",
+			`SELECT d.id, u.name, d.name FROM bk.devices d JOIN bk.users u ON u.id = d.user_id
+			 JOIN cur.users c ON c.id = u.id AND c.name = u.name AND c.created_at = u.created_at
+			 WHERE NOT EXISTS (SELECT 1 FROM cur.devices x WHERE x.id = d.id) ORDER BY u.name, d.name`},
+		{"credentials", "rotated_at", "%s's credential on %s changed in the backup after it did here",
+			`SELECT u.name, s.name FROM bk.credentials b
+			 JOIN bk.users u ON u.id = b.user_id
+			 JOIN cur.users cu ON cu.id = u.id AND cu.name = u.name AND cu.created_at = u.created_at
+			 JOIN bk.services s ON s.id = b.service_id
+			 JOIN cur.services cs ON cs.id = s.id AND cs.kind = s.kind
+			 JOIN cur.credentials c ON c.user_id = b.user_id AND c.service_id = b.service_id
+			 WHERE c.secret = b.prev_secret
+			    OR (c.next_secret = b.secret AND c.secret IS NOT b.secret)
+			    OR (c.secret = b.secret AND b.next_secret IS NOT NULL AND c.next_secret IS NOT b.next_secret)
+			    OR b.rotated_at > c.rotated_at
+			 ORDER BY u.name, s.name`},
+		{"sqlite_sequence", "", "the backup has service %s, which this database never had",
+			`SELECT s.name FROM bk.services s
+			 WHERE s.id > coalesce((SELECT seq FROM cur.sqlite_sequence WHERE name = 'services'), 0)
+			    OR EXISTS (SELECT 1 FROM cur.services c WHERE c.id = s.id AND (c.kind IS NOT s.kind OR c.created_at IS NOT s.created_at))
+			 ORDER BY s.id`},
+		{"invites", "", "the invite of %s/%s is used in the backup and not here",
+			`SELECT u.name, i.name FROM bk.invites i JOIN bk.users u ON u.id = i.user_id JOIN cur.invites c ON c.id = i.id
+			 WHERE i.used_at IS NOT NULL AND c.used_at IS NULL ORDER BY u.name, i.name`},
+		{"invites", "pin_tries", "the invite of %s/%s has fewer PIN tries left in the backup than here",
+			`SELECT u.name, i.name FROM bk.invites i JOIN bk.users u ON u.id = i.user_id JOIN cur.invites c ON c.id = i.id
+			 WHERE i.pin_tries < c.pin_tries ORDER BY u.name, i.name`},
+		{"", "", "the backup's audit line %s of %s UTC is not in this database, which keeps lines that old",
+			`SELECT b.action, datetime(b.ts, 'unixepoch') FROM bk.audit_log b
+			 WHERE b.ts >= (SELECT min(ts) FROM cur.audit_log)
+			   AND NOT EXISTS (SELECT 1 FROM cur.audit_log c WHERE c.ts = b.ts AND c.action = b.action
+			                   AND c.actor = b.actor AND c.target = b.target AND c.result = b.result)
+			 ORDER BY b.ts DESC, b.id DESC`},
+	}
+	for _, s := range signs {
+		if s.table != "" {
+			ok, err := both(s.table, s.column)
+			if err != nil {
+				return "", err
+			}
+			if !ok {
+				continue
+			}
+		}
+		got, err := firstRow(ctx, tx, strings.ReplaceAll(s.query, "bk.", bk+".")+` LIMIT 1`)
+		if err != nil {
+			return "", fmt.Errorf("store: comparing the backup: %w", err)
+		}
+		if got != nil {
+			return fmt.Sprintf(s.say, got...), nil
+		}
+	}
+	// The newest record of each.
+	newest := func(schema string) (string, error) {
+		terms := []string{
+			`(SELECT max(created_at) FROM S.users)`, `(SELECT max(created_at) FROM S.devices)`,
+			`(SELECT max(revoked_at) FROM S.devices)`, `(SELECT max(created_at) FROM S.services)`,
+			`(SELECT max(ts) FROM S.audit_log)`,
+		}
+		for _, t := range []struct{ table, column, term string }{
+			{"credentials", "rotated_at", `(SELECT max(rotated_at) FROM S.credentials)`},
+			{"devices", "lan_at", `(SELECT max(lan_at) FROM S.devices)`},
+			{"invites", "", `(SELECT max(created_at) FROM S.invites)`},
+			{"invites", "", `(SELECT max(used_at) FROM S.invites)`},
+		} {
+			ok, err := has(schema, t.table, t.column)
+			if err != nil {
+				return "", err
+			}
+			if ok {
+				terms = append(terms, t.term)
+			}
+		}
+		for i, t := range terms {
+			terms[i] = "coalesce(" + strings.ReplaceAll(t, "S.", schema+".") + ", 0)"
+		}
+		return "max(" + strings.Join(terms, ", ") + ")", nil
+	}
+	b, err := newest(bk)
+	if err != nil {
+		return "", err
+	}
+	c, err := newest("cur")
+	if err != nil {
+		return "", err
+	}
+	got, err := firstRow(ctx, tx, `SELECT datetime(b, 'unixepoch'), datetime(c, 'unixepoch') FROM (SELECT `+b+` AS b, `+c+` AS c) WHERE b > c`)
+	if err != nil {
+		return "", fmt.Errorf("store: comparing the backup: %w", err)
+	}
+	if got != nil {
+		return fmt.Sprintf("the backup's newest record is of %s UTC, this database's of %s UTC", got...), nil
+	}
+	return "", nil
+}
+
+// firstRow is the first row of a query, its columns as text, or nil.
+func firstRow(ctx context.Context, tx *sql.Tx, query string) ([]any, error) {
+	rows, err := tx.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	text := make([]sql.NullString, len(cols))
+	dest := make([]any, len(cols))
+	for i := range text {
+		dest[i] = &text[i]
+	}
+	if err := rows.Scan(dest...); err != nil {
+		return nil, err
+	}
+	out := make([]any, len(cols))
+	for i, t := range text {
+		out[i] = t.String
+	}
+	return out, nil
 }
 
 // addedDevices are the devices of cur that main does not have, of users
@@ -526,11 +742,12 @@ func addedDevices(ctx context.Context, tx *sql.Tx) ([]AddedDevice, error) {
 	return out, rows.Err()
 }
 
-// unknownDevices are the active devices of main that cur has no record of.
-func unknownDevices(ctx context.Context, tx *sql.Tx) ([]CarriedDevice, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT d.id, u.name, d.name FROM devices d JOIN users u ON u.id = d.user_id
-		WHERE d.revoked_at IS NULL AND NOT EXISTS (SELECT 1 FROM cur.devices c WHERE c.id = d.id)
-		ORDER BY u.name, d.name`)
+// unknownDevices are the active devices of main that cur has no record
+// of; with all, every active device of main.
+func unknownDevices(ctx context.Context, tx *sql.Tx, all bool) ([]CarriedDevice, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT d.id, u.name, d.name FROM main.devices d JOIN main.users u ON u.id = d.user_id
+		WHERE d.revoked_at IS NULL AND (?1 OR NOT EXISTS (SELECT 1 FROM cur.devices c WHERE c.id = d.id))
+		ORDER BY u.name, d.name`, all)
 	if err != nil {
 		return nil, err
 	}

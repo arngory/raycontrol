@@ -160,9 +160,10 @@ func (c *cli) restore(ctx context.Context, args []string) error {
 	// new credentials for their users. With rayd stopped, so that none is
 	// missed.
 	if *noCarry {
-		fmt.Println("-no-carry: devices revoked since the backup come back, and with them their users' credentials of then")
+		fmt.Println("-no-carry: devices revoked since the backup come back, and with them their users' credentials of then;\n" +
+			"a newer backup restored here later carries nothing from this database")
 	} else {
-		carried, err := carryRestore(ctx, tmp)
+		carried, err := carryRestore(ctx, tmp, db)
 		if err != nil {
 			_ = run("systemctl", "start", "rayd.service")
 			return fmt.Errorf("keeping the revocations made since the backup: %w; nothing changed "+
@@ -195,8 +196,10 @@ func (c *cli) restore(ctx context.Context, args []string) error {
 // carryRestore brings into the restored copy at tmp (rayd's, checked by
 // rayd init) the revocations and renewals of the node's database since the
 // backup (store.CarryRestore): on root's copies of both, then the result
-// back over tmp as copyDB writes.
-func carryRestore(ctx context.Context, tmp string) (store.Restored, error) {
+// back over tmp as copyDB writes. made is the backup's database as it
+// came out of the backup, before rayd init migrated tmp: whether the node's
+// database is a later state of the backup is read from it.
+func carryRestore(ctx context.Context, tmp string, made []byte) (store.Restored, error) {
 	current, doneCur, err := rootCopy(deploy.DB)
 	if err != nil {
 		return store.Restored{}, err
@@ -207,7 +210,16 @@ func carryRestore(ctx context.Context, tmp string) (store.Restored, error) {
 		return store.Restored{}, err
 	}
 	defer doneWork()
-	r, err := store.CarryRestore(ctx, work, current)
+	dir, err := os.MkdirTemp("", "rayctl-db-")
+	if err != nil {
+		return store.Restored{}, err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	asMade := filepath.Join(dir, "backup.db")
+	if err := os.WriteFile(asMade, made, 0o600); err != nil {
+		return store.Restored{}, err
+	}
+	r, err := store.CarryRestore(ctx, work, current, asMade)
 	if err != nil {
 		return store.Restored{}, err
 	}
@@ -223,9 +235,14 @@ func carryRestore(ctx context.Context, tmp string) (store.Restored, error) {
 // cannot know: on this node the clients hold its current secrets, so the
 // backup's do not come back; a device this node's database has no record
 // of (a new host, a user deleted here since) may have been revoked after
-// the backup, and the audit log is in the backup too.
+// the backup, and the audit log is in the backup too. A database of this
+// node that is no later state of the backup (store.Restored.Newer) says
+// nothing of any device: nothing is carried, and why is said first.
 func restoreCarryText(r store.Restored, made time.Time) string {
 	var b strings.Builder
+	if r.Newer != "" {
+		fmt.Fprintf(&b, "the backup is newer than this node's database: nothing carried (%s)\n", r.Newer)
+	}
 	if r.Kept > 0 {
 		fmt.Fprintf(&b, "credentials and LAN keys stay as they are on this node now for %d users: the backup's older ones do not come back\n", r.Kept)
 	}
@@ -254,15 +271,23 @@ func restoreCarryText(r store.Restored, made time.Time) string {
 		}
 	}
 	if len(r.Unknown) > 0 {
-		why := "users deleted here since"
-		if r.Foreign {
-			why = "this database is another node's: a new host"
+		why := "(users deleted here since)"
+		head := "has no record of %d devices the backup has active"
+		switch {
+		case r.Newer != "":
+			why = "(a new host with this node's identity,\na cloned disk, or an older copy restored here)"
+			head = "is no later state of the backup " + why + ": it says nothing of the %d devices the backup has active"
+		case r.Foreign:
+			why = "(this database is another node's: a new host)"
 		}
-		fmt.Fprintf(&b, "warning: this node's database has no record of %d devices the backup has active (%s):\n"+
+		if r.Newer == "" {
+			head += " " + why
+		}
+		fmt.Fprintf(&b, "warning: this node's database "+head+":\n"+
 			"whether any of them was revoked, or its user renewed, after %s cannot be known here. Revoke again\n"+
 			"those that must stay out (rayctl device revoke ID: their users' credentials change with it), and\n"+
 			"rayctl user renew NAME the users renewed elsewhere since:\n",
-			len(r.Unknown), why, made.Format(time.RFC3339))
+			len(r.Unknown), made.Format(time.RFC3339))
 		for _, d := range r.Unknown {
 			fmt.Fprintf(&b, "  %s  %s/%s\n", d.ID, d.User, d.Name)
 		}
