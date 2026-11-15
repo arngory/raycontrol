@@ -116,21 +116,30 @@ func isLabelByte(c byte) bool {
 }
 
 // addr turns an address into a token: its kind and a salted short hash.
-// Loopback and unspecified addresses stay, they say nothing. The IPv6
-// pattern takes a colon after an address too ("from 2001:db8::5: refused",
-// the last group being optional), which then does not parse: the address
-// is the match without it, and the colon stays.
+// Loopback and unspecified addresses stay, they say nothing.
+//
+// The IPv6 pattern takes more than the address around a colon, and the
+// whole then does not parse. After it: a colon ("from 2001:db8::5:
+// refused", the last group being optional), or a colon and a port or a
+// hex word, without brackets, after an address of eight groups or of
+// seven and "::" ("2001:db8:1:2:3:4:5:6:443", eight groups and the
+// last): the address is the match up to its last colon, and the rest
+// stays. Before it: the colon that glues it to a word ("ipv6:2001:db8::1",
+// where the match starts on a word boundary), which stays too.
 func (r *Redactor) addr(m string) string {
-	a, ok := parseAddr(m)
-	if !ok {
-		if t, cut := strings.CutSuffix(m, ":"); cut && strings.Contains(t, ":") {
-			if a, ok := parseAddr(t); ok {
-				return r.token(a, t) + ":"
-			}
-		}
-		return m
+	lead := ""
+	if strings.HasPrefix(m, ":") && !strings.HasPrefix(m, "::") {
+		lead, m = ":", m[1:]
 	}
-	return r.token(a, m)
+	if a, ok := parseAddr(m); ok {
+		return lead + r.token(a, m)
+	}
+	if i := strings.LastIndexByte(m, ':'); i > 0 && strings.Contains(m[:i], ":") {
+		if a, ok := parseAddr(m[:i]); ok {
+			return lead + r.token(a, m[:i]) + m[i:]
+		}
+	}
+	return lead + m
 }
 
 // parseAddr parses an address as a reader takes it: an IPv4 one with a

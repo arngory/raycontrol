@@ -85,6 +85,52 @@ func TestAddressEnds(t *testing.T) {
 	}
 }
 
+// An address with all its groups written out, or seven and "::", then a
+// port or a hex word after a colon, without brackets: the pattern takes
+// the colon and what follows with it, and the whole does not parse (eight
+// groups since 06745d2, review of v0.28.0). And one glued to a word by a
+// colon ("ipv6:2001:db8::1"), where the match starts at that colon. Each
+// goes, the colon and what follows it stay. Times, MAC addresses, port
+// lists, durations, hex IDs and paths of Rust stay as they were.
+func TestAddressBetweenColons(t *testing.T) {
+	r := New()
+	for _, c := range []struct{ in, addr, want string }{
+		{"dial 2001:db8:1:2:3:4:5:6:443 refused", "2001:db8:1:2:3:4:5:6", "dial {a}:443 refused"},
+		{"dial 2001:db8:1:2:3:4::5:443 refused", "2001:db8:1:2:3:4::5", "dial {a}:443 refused"},
+		{"conn 2001:db8:1:2:3:4:5:6:1bb", "2001:db8:1:2:3:4:5:6", "conn {a}:1bb"},
+		{"from 2001:db8:1:2:3:4:5:6:7:8", "2001:db8:1:2:3:4:5:6", "from {a}:7:8"},
+		{"from 2001:db8:1:2:3:4:5:6: no", "2001:db8:1:2:3:4:5:6", "from {a}: no"},
+		{"from 2001:db8::5: refused", "2001:db8::5", "from {a}: refused"},
+		{"ipv6:2001:db8::1 up", "2001:db8::1", "ipv6:{a} up"},
+		{"src:2001:db8:1::7, dst", "2001:db8:1::7", "src:{a}, dst"},
+		{"peer=[2001:db8::9]:443 src:2001:db8::9", "2001:db8::9", "peer=[{a}]:443 src:{a}"},
+		{"src:2001:db8:1:2:3:4:5:6:443", "2001:db8:1:2:3:4:5:6", "src:{a}:443"},
+		{"src:2001:db8::5: refused", "2001:db8::5", "src:{a}: refused"},
+		{"nat64:64:ff9b::198.51.100.9:53", "64:ff9b::198.51.100.9", "nat64:{a}:53"},
+		{"lo:::1 and ipv6:::1", "", "lo:::1 and ipv6:::1"},
+		{"at 12:34:56 ok", "", "at 12:34:56 ok"},
+		{"at 12:30:45: ok", "", "at 12:30:45: ok"},
+		{"time:12:34:56 ok", "", "time:12:34:56 ok"},
+		{"mac aa:bb:cc:dd:ee:ff up, aa:bb:cc:dd:ee:ff: down, mac:aa:bb:cc:dd:ee:ff", "", "mac aa:bb:cc:dd:ee:ff up, aa:bb:cc:dd:ee:ff: down, mac:aa:bb:cc:dd:ee:ff"},
+		{"ports 80:443:8443 and 53:5353", "", "ports 80:443:8443 and 53:5353"},
+		{"after 1m30s, 250ms, 1h2m3.5s", "", "after 1m30s, 250ms, 1h2m3.5s"},
+		{"device 5b2a7728b0c35433: up", "", "device <id>: up"},
+		{"std::io::Error: os::unix", "", "std::io::Error: os::unix"},
+	} {
+		want := c.want
+		if c.addr != "" {
+			tok := r.String(c.addr)
+			if !strings.HasPrefix(tok, "<ip") {
+				t.Fatalf("%s: no token: %s", c.addr, tok)
+			}
+			want = strings.ReplaceAll(want, "{a}", tok)
+		}
+		if out := r.String(c.in); out != want {
+			t.Errorf("%q:\n got %q\nwant %q", c.in, out, want)
+		}
+	}
+}
+
 // Names learned later (a node's DNS tunnel zones) are hidden as well.
 func TestAdd(t *testing.T) {
 	r := New("203.0.113.7")
