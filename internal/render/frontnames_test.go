@@ -203,4 +203,33 @@ func TestFrontNamesOneService(t *testing.T) {
 	}
 }
 
+// The front's default REALITY (the only one on most nodes) keeps a route
+// of its current name alone: every name no route has reaches it anyway,
+// so its previous name would only change front.json, and restart the
+// front, at its next keys-only switch.
+func TestDefaultRealityRoute(t *testing.T) {
+	ctx := context.Background()
+	st := node(t)
+	r, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	siteCert(t, ctx, st, "*.example.com")
+	e := provision.RealityEpoch{Period: 90 * day, Lead: 3 * day, Prepare: day, Grace: 2 * day}
+	ok := func(context.Context, string) error { return nil }
+	old := sni(t, ctx, st, "r")
+	for _, at := range []time.Duration{86 * day, 86*day + time.Minute, 90 * day} {
+		if _, err := provision.RotateReality(ctx, st, r.CreatedAt.Add(at), e, ok, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sni(t, ctx, st, "r") == old {
+		t.Fatal("not renamed under the wildcard")
+	}
+	fc := renderFront(t, ctx, st)
+	if len(fc.tcp) != 1 || fc.tcp[sni(t, ctx, st, "r")] != "r" || fc.def != "r" {
+		t.Fatalf("the default's routes: %v", fc.tcp)
+	}
+}
+
 const day = 24 * time.Hour

@@ -705,12 +705,18 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "reality"), Mode: "proxy-v2", UID: p.PeerUID(s.UID)}
 				var rs RealitySettings
 				_ = json.Unmarshal([]byte(s.Settings), &rs)
-				// The name before the last switch too, until the next one: a
+				// A REALITY that is not the default (the first) takes the
+				// name before its last switch too, until the next one: a
 				// client still on it reaches this REALITY (its previous keys
-				// in their grace, R4-19; after it, its site), not the first
-				// REALITY's, which is the default. The grace's end changes
-				// no route, and no restart of the front comes with it.
-				names, err := claim(tcpNames, s.Name, rs.SNI, provision.ParseRealityState(s.Service).SNIPrev)
+				// in their grace, R4-19; after it, its site), not the
+				// default's. The grace's end changes no route, so no restart
+				// of the front comes with it. The default gets every name no
+				// route has: its routes stay as they were.
+				own := []string{rs.SNI}
+				if tcpDefault != "" {
+					own = append(own, provision.ParseRealityState(s.Service).SNIPrev)
+				}
+				names, err := claim(tcpNames, s.Name, own...)
 				if err != nil {
 					return err
 				}
