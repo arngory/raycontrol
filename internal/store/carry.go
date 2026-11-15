@@ -307,11 +307,23 @@ type Restored struct {
 	Carried []CarriedDevice
 	// New are the other users of the backup with new credentials: deleted
 	// here since (or deleted and made again), with a credential the node no
-	// longer has, or with a device made and revoked since the backup.
+	// longer has, or with a device made since the backup (Added).
 	New []Renewal
+	// Added are the devices current has, of users the backup has, that the
+	// backup does not: made since, revoked since or not. They are not in
+	// the restored database, and their users have new credentials and a
+	// new LAN key there: each device fetched the user's.
+	Added []AddedDevice
 	// Unknown are the devices active in the backup that current has no
 	// record of: whether one was revoked since cannot be known.
 	Unknown []CarriedDevice
+}
+
+// AddedDevice is a device of Restored.Added.
+type AddedDevice struct {
+	CarriedDevice
+	Revoked bool // revoked here already
+	userID  int64
 }
 
 // CarryDeviceRevocations is CarryRestore for a caller that reports only
@@ -337,8 +349,10 @@ func CarryDeviceRevocations(ctx context.Context, saved, current string) (carried
 //     is not known;
 //   - a device revoked in current since stays revoked in saved, and its
 //     user gets new credentials and a new LAN key (carryDevices);
-//   - a user with a device in current made and revoked since the backup
-//     gets new credentials and a new LAN key: the device knew the user's.
+//   - a user with a device in current made since the backup, revoked
+//     since or not, gets new credentials and a new LAN key: the device
+//     knew the user's, and it is not in saved (Restored.Added). One still
+//     active is cut with the restore, not at the next rotation.
 //
 // The renewals keep DoH's secrets only where saved can have no shared DoH
 // token (carryKeepsDoH). Each change has an audit line in saved
@@ -434,34 +448,29 @@ func CarryRestore(ctx context.Context, saved, current string) (Restored, error) 
 	carried := func(name string) bool {
 		return slices.ContainsFunc(r.Carried, func(d CarriedDevice) bool { return d.User == name })
 	}
-	// A device made and revoked since: the backup's credentials of its
-	// user may be those it had.
-	rows, err := tx.QueryContext(ctx, `SELECT u.id, u.name FROM main.users u
-		JOIN cur.users c ON c.id = u.id AND c.name = u.name AND c.created_at = u.created_at
-		WHERE EXISTS (SELECT 1 FROM cur.devices d WHERE d.user_id = c.id AND d.revoked_at IS NOT NULL
-		              AND NOT EXISTS (SELECT 1 FROM main.devices m WHERE m.id = d.id))
-		ORDER BY u.name`)
-	if err != nil {
-		return r, fmt.Errorf("store: carrying revocations: %w", err)
+	// A device made since, revoked or not: it is not in saved and goes
+	// with the restore, but it fetched its user's credentials, which are
+	// current's now in saved.
+	if r.Added, err = addedDevices(ctx, tx); err != nil {
+		return r, err
 	}
 	type user struct {
 		id   int64
 		name string
 	}
 	var made []user
-	for rows.Next() {
-		var u user
-		if err := rows.Scan(&u.id, &u.name); err != nil {
-			rows.Close()
-			return r, err
-		}
-		if !carried(u.name) {
+	for _, d := range r.Added {
+		u := user{d.userID, d.User}
+		if !carried(u.name) && !slices.Contains(made, u) {
 			made = append(made, u)
 		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return r, err
+		w := "a device added and revoked here since the backup"
+		if !d.Revoked {
+			w = "a device added here since the backup, not in it"
+		}
+		if !slices.Contains(why[d.User], w) {
+			why[d.User] = append(why[d.User], w)
+		}
 	}
 	for _, u := range made {
 		key, err := newLANKey()
@@ -472,7 +481,6 @@ func CarryRestore(ctx context.Context, saved, current string) (Restored, error) 
 		if err != nil {
 			return r, fmt.Errorf("store: carrying revocations: %w", err)
 		}
-		why[u.name] = append(why[u.name], "a device added and revoked here since the backup")
 		renewed[u.name] = max(renewed[u.name], n)
 	}
 	for _, u := range users {
@@ -493,6 +501,29 @@ func CarryRestore(ctx context.Context, saved, current string) (Restored, error) 
 		return r, err
 	}
 	return r, tx.Commit()
+}
+
+// addedDevices are the devices of cur that main does not have, of users
+// main has (ID, name and creation time).
+func addedDevices(ctx context.Context, tx *sql.Tx) ([]AddedDevice, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT d.id, u.id, u.name, d.name, d.revoked_at IS NOT NULL FROM cur.devices d
+		JOIN main.users u ON u.id = d.user_id
+		JOIN cur.users c ON c.id = u.id AND c.name = u.name AND c.created_at = u.created_at
+		WHERE NOT EXISTS (SELECT 1 FROM main.devices m WHERE m.id = d.id)
+		ORDER BY u.name, d.name, d.id`)
+	if err != nil {
+		return nil, fmt.Errorf("store: carrying revocations: %w", err)
+	}
+	defer rows.Close()
+	var out []AddedDevice
+	for rows.Next() {
+		var d AddedDevice
+		if err := rows.Scan(&d.ID, &d.userID, &d.User, &d.Name, &d.Revoked); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
 
 // unknownDevices are the active devices of main that cur has no record of.

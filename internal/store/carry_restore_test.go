@@ -173,7 +173,8 @@ func TestCarryRestoreKeepsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if r.Foreign || r.Kept != 3 || len(r.Carried) != 1 || r.Carried[0].ID != f.phones["dave"].ID || len(r.Unknown) != 0 ||
-		!slices.Equal(r.New, []Renewal{{User: "carol", Why: "a device added and revoked here since the backup"}}) {
+		!slices.Equal(r.New, []Renewal{{User: "carol", Why: "a device added and revoked here since the backup"}}) ||
+		len(r.Added) != 1 || r.Added[0].CarriedDevice != (CarriedDevice{ID: watch.ID, User: "carol", Name: "watch"}) || !r.Added[0].Revoked {
 		t.Fatalf("%+v", r)
 	}
 	got := secrets(t, f.backup)
@@ -222,6 +223,56 @@ func TestCarryRestoreKeepsCurrent(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A device enrolled since the backup and still active (bob's tablet, from
+// an invite that leaked, say) is not in the backup and goes with the
+// restore, but it fetched bob's credentials, current's: bob gets new ones,
+// and restore lists the device. A device added since by a user dave who
+// also had one revoked since is listed, and dave renewed once. erin, with
+// nothing added, keeps current's.
+func TestCarryRestoreDeviceAdded(t *testing.T) {
+	ctx := context.Background()
+	f := newRestoreFix(t, nil)
+	s := f.open(t, f.current)
+	tablet, _, err := s.CreateDevice(ctx, "bob", "tablet", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	laptop, _, _ := s.CreateDevice(ctx, "dave", "laptop", "user")
+	if _, err := s.RevokeDevice(ctx, f.phones["dave"].ID); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	now := secrets(t, f.current)
+	r, err := CarryRestore(ctx, f.backup, f.current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Foreign || r.Kept != 3 || len(r.Carried) != 1 ||
+		!slices.Equal(r.New, []Renewal{{User: "bob", Why: "a device added here since the backup, not in it"}}) {
+		t.Fatalf("%+v", r)
+	}
+	if len(r.Added) != 2 || r.Added[0].CarriedDevice != (CarriedDevice{ID: tablet.ID, User: "bob", Name: "tablet"}) || r.Added[0].Revoked ||
+		r.Added[1].CarriedDevice != (CarriedDevice{ID: laptop.ID, User: "dave", Name: "laptop"}) {
+		t.Fatalf("added %+v", r.Added)
+	}
+	got := secrets(t, f.backup)
+	for _, n := range []string{"bob", "dave"} {
+		for _, svc := range []int64{f.reality, f.naive} {
+			if sec := got[n][svc]; sec == now[n][svc] || !isUUID(sec) {
+				t.Errorf("%s's credential on %d is the one the added device fetched: %s", n, svc, sec)
+			}
+		}
+	}
+	for svc, sec := range got["erin"] {
+		if sec != now["erin"][svc] {
+			t.Errorf("erin's credential on %d changed", svc)
+		}
+	}
+	if !hasAudit(auditOf(t, f.backup), "user.renew:restore", "bob: 2 credentials new, a device added here since the backup") {
+		t.Error("no audit line for bob")
 	}
 }
 

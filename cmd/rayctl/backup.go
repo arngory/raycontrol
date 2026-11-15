@@ -236,6 +236,17 @@ func restoreCarryText(r store.Restored, made time.Time) string {
 			fmt.Fprintf(&b, "  %s  %s/%s\n", d.ID, d.User, d.Name)
 		}
 	}
+	if len(r.Added) > 0 {
+		fmt.Fprintf(&b, "added here since the backup, so not in it: gone with the restore. Each fetched its user's credentials,\n"+
+			"which are new, so what it holds works no more:\n")
+		for _, d := range r.Added {
+			state := ""
+			if d.Revoked {
+				state = " (revoked here already)"
+			}
+			fmt.Fprintf(&b, "  %s  %s/%s%s\n", d.ID, d.User, d.Name, state)
+		}
+	}
 	if len(r.New) > 0 {
 		fmt.Fprintf(&b, "new credentials, their devices reconnect after their next subscription fetch:\n")
 		for _, n := range r.New {

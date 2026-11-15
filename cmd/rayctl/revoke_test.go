@@ -58,8 +58,11 @@ func TestRestoreCarryText(t *testing.T) {
 		Carried: []store.CarriedDevice{{ID: "d1", User: "alice", Name: "phone"}},
 		Unknown: []store.CarriedDevice{{ID: "d2", User: "bob", Name: "tv"}},
 		New:     []store.Renewal{{User: "carol", Why: "deleted here since the backup"}, {User: "dave", Why: "a device added and revoked here since the backup"}},
+		Added: []store.AddedDevice{{CarriedDevice: store.CarriedDevice{ID: "d3", User: "dave", Name: "watch"}, Revoked: true},
+			{CarriedDevice: store.CarriedDevice{ID: "d4", User: "erin", Name: "tablet"}}},
 	}, made)
 	for _, want := range []string{"stay as they are on this node now for 7 users", "d1  alice/phone", "credentials are new",
+		"added here since the backup, so not in it: gone with the restore", "d3  dave/watch (revoked here already)\n", "d4  erin/tablet\n",
 		"warning: this node's database has no record of 1 devices", "(users deleted here since)",
 		"2026-11-01T12:00:00Z cannot be known", "d2  bob/tv", "  carol: deleted here since the backup",
 		"  dave: a device added and revoked here since the backup"} {
