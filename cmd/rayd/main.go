@@ -435,7 +435,7 @@ func cmdServe(args []string) error {
 	defer func() { stop(); <-trafficDone }()
 	go checkResolver(ctx, hb, log)
 	go followDebug(ctx, st, level, *debug, srv.Changes, srv.Notify, log)
-	go serveDoH(ctx, st, paths, srv.Changes, log)
+	go serveDoH(ctx, st, paths, srv.Changes, srv.AfterChange, log)
 	// Client summaries (R4-21): reports in, from devices and through relays
 	// (relay-v1 §9.3), hints out; only while the administrator has them on
 	// (rayctl summary on). One collector: a device's network counts once a
@@ -592,12 +592,22 @@ func dohAnswer(siteSettings string) (string, http.Handler) {
 // renewal, the site's next key) goes to the listener as it runs: new
 // handshakes get it, the connections that are open go on
 // (spec/cert-pin-v1.md §6). One that does not parse leaves the one in use.
-func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func() <-chan struct{}, log *slog.Logger) {
+//
+// A change may have taken tokens away (a revoked device's, R4-37): each
+// handler forgets its tokens in the call that made the change (afterChange,
+// api.Server.AfterChange), so that when the API has answered no query with
+// a token is answered from those of before (doh.Handler.Forget). The
+// listeners follow the changes in the background, as the data plane does.
+func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func() <-chan struct{},
+	afterChange func(func()), log *slog.Logger) {
+	forgets := &dohForgets{}
+	afterChange(forgets.forget)
 	running := map[string]*dohListener{}
 	stop := func(name string) {
 		if l := running[name]; l != nil {
 			_ = l.srv.Close()
 			l.h3()
+			forgets.remove(l.h)
 			delete(running, name)
 		}
 	}
@@ -608,13 +618,6 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 	}()
 	for {
 		wake := changes()
-		// A change may have taken tokens away (a revoked device's, R4-37):
-		// each handler loads them again at once, and no query with a token
-		// is answered from those of before (doh.Handler.Forget). Changes
-		// that come while a load runs make one more load, not one each.
-		for _, l := range running {
-			l.h.Forget()
-		}
 		services, err := st.ListServices(ctx)
 		if err != nil {
 			log.Error("doh", "err", err)
@@ -669,6 +672,7 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 			sw := &swapHandler{}
 			sw.set(answer)
 			h := dohHandler(st, id, sw, log.With("service", svc.Name))
+			forgets.add(h) // before it answers a query
 			srv := dohHTTPServer(h, certs.GetCertificate, log)
 			go func() { _ = srv.ServeTLS(ln, "", "") }()
 			// DoH3: the same handler over QUIC, datagrams from the front (R3-5).
@@ -709,6 +713,37 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 		case <-wake:
 		case <-time.After(10 * time.Minute):
 		}
+	}
+}
+
+// dohForgets are the handlers serveDoH runs, for the change hook to make
+// each forget its tokens.
+type dohForgets struct {
+	mu sync.Mutex
+	hs map[*doh.Handler]bool
+}
+
+func (f *dohForgets) add(h *doh.Handler) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.hs == nil {
+		f.hs = map[*doh.Handler]bool{}
+	}
+	f.hs[h] = true
+}
+
+func (f *dohForgets) remove(h *doh.Handler) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.hs, h)
+}
+
+// forget is the change hook: Forget does not block.
+func (f *dohForgets) forget() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for h := range f.hs {
+		h.Forget()
 	}
 }
 

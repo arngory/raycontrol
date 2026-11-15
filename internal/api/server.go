@@ -95,9 +95,10 @@ type Server struct {
 	// through this server.
 	sshMu sync.Mutex
 
-	mu   sync.Mutex
-	rev  uint64
-	wake chan struct{} // closed on the next change
+	mu    sync.Mutex
+	rev   uint64
+	wake  chan struct{} // closed on the next change
+	after []func()      // AfterChange
 	// ACME window (certs.Issuer): rayspa points TCP 80 to acmePort.
 	acmePort  uint16
 	acmeUntil time.Time
@@ -129,10 +130,25 @@ func (s *Server) notify() {
 		close(s.wake)
 		s.wake = nil
 	}
+	after := s.after
 	s.mu.Unlock()
+	for _, f := range after {
+		f()
+	}
 	if s.OnChange != nil {
 		s.OnChange()
 	}
+}
+
+// AfterChange adds f to what runs at every change, in the call that made
+// it, before that call returns: rayd's DoH Forget, so that once
+// RevokeDevice has answered, the revoked device's token is refused from
+// the next query (R4-37). What watches Changes (the data plane's apply)
+// runs in the background as before. f must not block.
+func (s *Server) AfterChange(f func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.after = append(s.after, f)
 }
 
 // Changes returns a channel closed at the next change.

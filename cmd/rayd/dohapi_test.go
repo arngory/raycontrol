@@ -20,10 +20,11 @@ import (
 	"github.com/arngory/raycontrol/internal/store"
 )
 
-// RevokeDevice through the API reaches DoH's tokens by itself: the API's
-// change wakes serveDoH, whose Forget makes the handler load the tokens
-// again, and the revoked device's token gets the quick 404 within moments,
-// not when the handler's 30 s cache runs out; the sibling's goes on.
+// RevokeDevice through the API reaches DoH's tokens by itself, before it
+// answers: the API's change runs serveDoH's hook, whose Forget makes the
+// handler load the tokens again, and the first query after the answer with
+// the revoked device's token gets the quick 404, not when the handler's
+// 30 s cache runs out nor when serveDoH wakes; the sibling's goes on.
 // Nothing in the test calls Forget or wakes serveDoH.
 func TestDoHRevokeThroughAPI(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -84,7 +85,10 @@ func TestDoHRevokeThroughAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	dohDone := make(chan struct{})
-	go func() { serveDoH(ctx, st, paths, srv.Changes, slog.New(slog.DiscardHandler)); close(dohDone) }()
+	go func() {
+		serveDoH(ctx, st, paths, srv.Changes, srv.AfterChange, slog.New(slog.DiscardHandler))
+		close(dohDone)
+	}()
 	t.Cleanup(func() { cancel(); <-dohDone; <-apiDone })
 	for i := 0; ; i++ {
 		_, e1 := os.Stat(paths.DoHSocket("doh"))
@@ -121,12 +125,8 @@ func TestDoHRevokeThroughAPI(t *testing.T) {
 	if _, err := api.NewUnixClient(sock).RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: devA.ID})); err != nil {
 		t.Fatal(err)
 	}
-	start := time.Now()
-	for status(a) != http.StatusNotFound {
-		if time.Since(start) > 5*time.Second {
-			t.Fatal("the revoked device's token is still taken: the API's change did not reach DoH's Forget")
-		}
-		time.Sleep(20 * time.Millisecond)
+	if got := status(a); got != http.StatusNotFound {
+		t.Fatalf("the revoked device's token, right after the API's answer: %d", got)
 	}
 	if got := status(b); got != http.StatusMethodNotAllowed {
 		t.Errorf("the sibling's token after the revocation: %d", got)

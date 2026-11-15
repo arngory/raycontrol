@@ -30,10 +30,14 @@ var DefaultUpstreams = []string{"https://1.1.1.1/dns-query", "https://9.9.9.9/dn
 //
 // Requests read the tokens through an atomic pointer and never wait for
 // a load of them, but in one case: after Forget, a request with a token
-// is not answered from tokens read before that Forget. It waits for a
-// load begun after it (ReloadTimeout at most, twice if one was already
-// on its way), then fails closed. One load at a time, in the background:
-// Forgets that come while one runs make one more, not one each.
+// (a path segment of a token's shape after /dns-query/: no other can be
+// one) is not answered from tokens read before that Forget. It waits for
+// a load begun after it (ReloadTimeout at most, twice if one was already
+// on its way), then fails closed. Any other request is answered at once.
+// One load at a time, in the background. Forgets that come while one runs
+// make one more, not one each, and it starts at once only if a request
+// waits for it: else ForgetDelay after the last load ended, so that a
+// burst of changes with no query costs a load each ForgetDelay at most.
 type Handler struct {
 	// Tokens returns the tokens accepted now.
 	Tokens    func(ctx context.Context) (map[string]bool, error)
@@ -57,8 +61,12 @@ type Handler struct {
 
 	mu      sync.Mutex
 	running bool          // a load is on its way
+	waiting int           // requests in await
+	due     bool          // a load is set to start after delay
+	lastEnd time.Time     // when the last load ended
 	changed chan struct{} // closed and replaced at each new snapshot
 	retry   time.Duration // retryFailed when zero
+	delay   time.Duration // ForgetDelay when zero
 
 	rmu     sync.Mutex
 	retired retired
@@ -87,10 +95,12 @@ const (
 )
 
 // retryFailed is how soon Tokens is asked again after it failed;
-// defaultReloadTimeout bounds a call of it.
+// defaultReloadTimeout bounds a call of it. ForgetDelay is how long after
+// the last load a load for Forgets waits when no request waits for it.
 const (
 	retryFailed          = time.Second
 	defaultReloadTimeout = 5 * time.Second
+	ForgetDelay          = 200 * time.Millisecond
 )
 
 // retired remembers the tokens the handler stopped accepting, for
@@ -177,23 +187,23 @@ func notFound(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusNotFound)
 }
 
-// check is the verdict on a request's token ("" for a request with none;
-// shaped: its path has a segment of a token's shape): accepted while the
-// tokens have it; refused for a token retired lately; while Tokens fails,
-// refused if shaped, else a stranger. The tokens are loaded at most every
-// CacheFor, and at once after Forget.
+// check is the verdict on a request's token ("" for a request with none,
+// or with none of a token's shape; shaped: its path has a segment of a
+// token's shape): accepted while the tokens have it; refused for a token
+// retired lately; while Tokens fails, refused if shaped, else a stranger.
+// The tokens are loaded at most every CacheFor, and after Forget.
 func (h *Handler) check(ctx context.Context, token string, shaped bool) verdict {
 	need := h.want.Load()
 	s := h.cur.Load()
 	now := time.Now()
 	switch {
-	case s == nil || (!s.failing && s.gen < need):
-		// Never loaded, or forgotten since: only a request with a token
-		// needs the tokens, and it gets none older than the Forget.
-		if token == "" {
-			h.kick(now)
-			return stranger
-		}
+	case s == nil && token == "":
+		h.kick(now) // for the next request with a token
+		return stranger
+	case token != "" && (s == nil || (!s.failing && s.gen < need)):
+		// Never loaded, or forgotten since: a token gets none older than
+		// the Forget. A request without one needs no tokens, and does not
+		// wait (nor tell by its time that the node's state changed).
 		if s = h.await(ctx, need); s == nil || s.gen < need {
 			return closed(shaped)
 		}
@@ -238,10 +248,19 @@ func (h *Handler) reloadTimeout() time.Duration {
 // await waits for a snapshot of a load begun after the need-th Forget,
 // starting one if none is on its way, for two ReloadTimeouts at most (one
 // begun before may be running) or until the request is gone; it returns
-// the snapshot there is then.
+// the snapshot there is then. While it waits, a load that ends behind the
+// Forgets starts the next at once.
 func (h *Handler) await(ctx context.Context, need uint64) *snapshot {
 	timer := time.NewTimer(2 * h.reloadTimeout())
 	defer timer.Stop()
+	h.mu.Lock()
+	h.waiting++
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		h.waiting--
+		h.mu.Unlock()
+	}()
 	for {
 		h.mu.Lock()
 		if s := h.cur.Load(); s != nil && s.gen >= need {
@@ -263,18 +282,48 @@ func (h *Handler) await(ctx context.Context, need uint64) *snapshot {
 	}
 }
 
-// kick starts a load if none runs and one is due: never loaded, stale, or
-// forgotten since; after a failure not before its retry.
+// kick starts a load if none runs and the tokens are never loaded or
+// stale; after a failure not before its retry. One for Forgets is
+// forgotten's to start.
 func (h *Handler) kick(now time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.running {
 		return
 	}
-	s := h.cur.Load()
-	if s == nil || !now.Before(s.until) || (!s.failing && s.gen < h.want.Load()) {
+	if s := h.cur.Load(); s == nil || !now.Before(s.until) {
 		h.start()
 	}
+}
+
+// forgotten starts the load the Forgets so far need, if they need one: at
+// once when a request waits for it or the last load ended ForgetDelay ago,
+// else when it is that long ago. None while one runs (its end sees to it),
+// none while one is set to start, none while Tokens fails (nothing is
+// accepted then, and the retry comes as it would). h.mu is held.
+func (h *Handler) forgotten(now time.Time) {
+	if h.running || h.due {
+		return
+	}
+	if s := h.cur.Load(); s != nil && (s.failing || s.gen >= h.want.Load()) {
+		return
+	}
+	delay := h.delay
+	if delay == 0 {
+		delay = ForgetDelay
+	}
+	wait := h.lastEnd.Add(delay).Sub(now)
+	if h.waiting > 0 || wait <= 0 {
+		h.start()
+		return
+	}
+	h.due = true
+	time.AfterFunc(wait, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.due = false
+		h.forgotten(time.Now())
+	})
 }
 
 func (h *Handler) changedLocked() chan struct{} {
@@ -295,7 +344,7 @@ func (h *Handler) start() {
 // no longer have is retired. A failure, or a call past ReloadTimeout,
 // publishes a failing snapshot until the retry. A call past its time is
 // waited for before the next one starts: one at a time, even wedged. When
-// a Forget came during the load, another starts at once.
+// a Forget came during the load, another follows (forgotten).
 func (h *Handler) load() {
 	gen := h.want.Load()
 	ctx, cancel := context.WithTimeout(context.Background(), h.reloadTimeout())
@@ -319,9 +368,8 @@ func (h *Handler) load() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.running = false
-	if s := h.cur.Load(); h.want.Load() > gen && !s.failing {
-		h.start()
-	}
+	h.lastEnd = time.Now()
+	h.forgotten(h.lastEnd)
 }
 
 func (h *Handler) publish(gen uint64, t map[string]bool, err error) {
@@ -365,15 +413,19 @@ func (h *Handler) publish(gen uint64, t map[string]bool, err error) {
 	h.changed = make(chan struct{})
 }
 
-// Forget makes the tokens be loaded again, at once: rayd calls it on every
-// change of the node's state, so a token gone with it (a revoked device's,
-// R4-37) is refused at once, not up to CacheFor later. Once it returns, no
-// request with a token is answered from tokens loaded before it. The
-// tokens it had stay, to tell which went (retired). While Tokens fails it
-// does not hasten the retry: nothing is accepted then anyway.
+// Forget makes the tokens be loaded again: rayd calls it on every change
+// of the node's state, in the call that made it, so a token gone with it
+// (a revoked device's, R4-37) is refused from the next request, not up to
+// CacheFor later. Once it returns, no request with a token is answered
+// from tokens loaded before it. The load starts at once, or ForgetDelay
+// after the last one when changes come faster (forgotten). The tokens it
+// had stay, to tell which went (retired). While Tokens fails it does not
+// hasten the retry: nothing is accepted then anyway.
 func (h *Handler) Forget() {
 	h.want.Add(1)
-	h.kick(time.Now())
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.forgotten(time.Now())
 }
 
 // tokenShaped reports whether a path segment has a token's shape: 36
@@ -409,7 +461,7 @@ func shapedPath(path string) bool {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	token, ok := strings.CutPrefix(r.URL.Path, "/dns-query/")
-	if !ok || strings.Contains(token, "/") {
+	if !ok || !tokenShaped(token) { // the node's tokens are all of that shape
 		token = ""
 	}
 	switch h.check(r.Context(), token, shapedPath(r.URL.Path)) {

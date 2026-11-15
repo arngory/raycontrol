@@ -78,12 +78,13 @@ func benchNode(b *testing.B, n int) (*store.Store, int64, string) {
 // Requests with a good token, one after another for 3 s at least, while
 // the tokens load, at 5 000 and 50 000 devices: "refresh" with a CacheFor
 // of 100 ms (rayd: 30 s), "forget" with a Forget every 10 ms (an API
-// mutation, as rayd's serveDoH makes on each). It reports the mean, the
-// 99th percentile and the longest request, and how many loads ran. Run
-// it with -benchtime 1x: the window, not b.N, sets the length.
+// mutation, as rayd makes on each); "sparse" the same with a request
+// every 50 ms, "idle" with none. It reports the mean, the 99th percentile
+// and the longest request, and how many loads ran. Run it with
+// -benchtime 1x: the window, not b.N, sets the length.
 func BenchmarkRequestDuringReload(b *testing.B) {
 	for _, n := range []int{5000, 50000} {
-		for _, mode := range []string{"refresh", "forget"} {
+		for _, mode := range []string{"refresh", "forget", "sparse", "idle"} {
 			b.Run(fmt.Sprintf("%d/%s", n, mode), func(b *testing.B) {
 				st, svc, token := benchNode(b, n)
 				var loads atomic.Int64
@@ -115,14 +116,21 @@ func BenchmarkRequestDuringReload(b *testing.B) {
 							return
 						case <-time.After(10 * time.Millisecond):
 						}
-						if mode == "forget" {
+						if mode != "refresh" {
 							h.Forget()
 						}
 					}
 				}()
 				var took []time.Duration
 				b.ResetTimer()
-				for t0 := time.Now(); len(took) < b.N || time.Since(t0) < 3*time.Second; {
+				for t0 := time.Now(); time.Since(t0) < 3*time.Second; {
+					switch mode {
+					case "idle":
+						time.Sleep(3 * time.Second)
+						continue
+					case "sparse":
+						time.Sleep(50 * time.Millisecond)
+					}
 					t0 := time.Now()
 					if c := serve(); c != http.StatusMethodNotAllowed {
 						b.Fatalf("the token during a load: %d", c)
@@ -132,6 +140,10 @@ func BenchmarkRequestDuringReload(b *testing.B) {
 				b.StopTimer()
 				close(stop)
 				<-done
+				b.ReportMetric(float64(loads.Load()), "loads")
+				if len(took) == 0 {
+					return
+				}
 				var sum time.Duration
 				for _, d := range took {
 					sum += d
@@ -140,7 +152,6 @@ func BenchmarkRequestDuringReload(b *testing.B) {
 				slices.Sort(took)
 				b.ReportMetric(float64(took[len(took)*99/100].Microseconds()), "p99-µs")
 				b.ReportMetric(float64(took[len(took)-1].Microseconds()), "max-µs")
-				b.ReportMetric(float64(loads.Load()), "loads")
 			})
 		}
 	}

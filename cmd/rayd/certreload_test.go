@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -449,9 +450,16 @@ func startDoHStand(t *testing.T) *dohStand {
 	if err := os.MkdirAll(filepath.Dir(paths.DoHSocket("doh")), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	// The changes rayd's loops wake on, and how many rounds serveDoH began.
+	// The changes rayd's loops wake on, how many rounds serveDoH began,
+	// and the hooks a change runs first (api.Server.AfterChange).
 	var mu sync.Mutex
 	wake, rounds := make(chan struct{}), 0
+	var hooks []func()
+	afterChange := func(f func()) {
+		mu.Lock()
+		defer mu.Unlock()
+		hooks = append(hooks, f)
+	}
 	changes := func() <-chan struct{} {
 		mu.Lock()
 		defer mu.Unlock()
@@ -467,6 +475,12 @@ func startDoHStand(t *testing.T) *dohStand {
 	// since: a second round has begun.
 	settle := func() {
 		t.Helper()
+		mu.Lock()
+		run := slices.Clone(hooks)
+		mu.Unlock()
+		for _, f := range run {
+			f()
+		}
 		for target := began() + 2; began() < target; {
 			mu.Lock()
 			old := wake
@@ -481,7 +495,7 @@ func startDoHStand(t *testing.T) *dohStand {
 	out := &output{}
 	log := slog.New(slog.NewTextHandler(out, nil))
 	done := make(chan struct{})
-	go func() { serveDoH(ctx, st, paths, changes, log); close(done) }()
+	go func() { serveDoH(ctx, st, paths, changes, afterChange, log); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
 	for i := 0; ; i++ {
 		if _, err := os.Stat(paths.DoHSocket("doh")); err == nil {
@@ -495,13 +509,13 @@ func startDoHStand(t *testing.T) *dohStand {
 	return &dohStand{st: st, paths: paths, key: k, leaf: leaf, out: out, set: set, settle: settle}
 }
 
-// A change of the node's state reaches DoH's tokens at once, through
-// serveDoH's Forget: a device revoked, its token is refused at the next
-// query, with the quick 404 of a token retired, not the site's answer and
-// not when the handler's cache runs out; its sibling's token, which the
-// revocation leaves (R4-37), goes on without a new subscription. The
-// user's credentials renewed (rayctl user renew), every token before is
-// refused and the new ones taken.
+// A change of the node's state reaches DoH's tokens at once, through the
+// Forget of serveDoH's change hook: a device revoked, its token is refused
+// at the next query, with the quick 404 of a token retired, not the site's
+// answer and not when the handler's cache runs out; its sibling's token,
+// which the revocation leaves (R4-37), goes on without a new subscription.
+// The user's credentials renewed (rayctl user renew), every token before
+// is refused and the new ones taken.
 func TestDoHForgetsTokensAtChange(t *testing.T) {
 	d := startDoHStand(t)
 	ctx := context.Background()

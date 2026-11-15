@@ -33,8 +33,9 @@ func TestHandler(t *testing.T) {
 	defer upstream.Close()
 	down := httptest.NewServer(http.NotFoundHandler())
 	down.Close() // the first upstream is gone: the next one answers
+	good := tok(1)
 	h := &Handler{Upstreams: []string{down.URL, upstream.URL},
-		Tokens: func(context.Context) (map[string]bool, error) { return map[string]bool{"tok": true}, nil }}
+		Tokens: func(context.Context) (map[string]bool, error) { return map[string]bool{good: true, "tok": true}, nil }}
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -47,26 +48,27 @@ func TestHandler(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp, b
 	}
-	resp, b := get("/dns-query/tok?dns=" + base64.RawURLEncoding.EncodeToString(query))
+	resp, b := get("/dns-query/" + good + "?dns=" + base64.RawURLEncoding.EncodeToString(query))
 	if resp.StatusCode != 200 || !bytes.Equal(b, answer) || resp.Header.Get("Content-Type") != "application/dns-message" ||
 		resp.Header.Get("Cache-Control") != "max-age=60" {
 		t.Fatalf("GET: %s %v", resp.Status, resp.Header)
 	}
-	r, _ := http.Post(srv.URL+"/dns-query/tok", "application/dns-message", bytes.NewReader(query))
+	r, _ := http.Post(srv.URL+"/dns-query/"+good, "application/dns-message", bytes.NewReader(query))
 	b, _ = io.ReadAll(r.Body)
 	r.Body.Close()
 	if r.StatusCode != 200 || !bytes.Equal(b, answer) {
 		t.Fatalf("POST: %s", r.Status)
 	}
-	for _, path := range []string{"/dns-query/other?dns=AAAA", "/dns-query/", "/", "/dns-query/tok/x"} {
+	// "tok" is in the tokens, but of no token's shape: never one.
+	for _, path := range []string{"/dns-query/other?dns=AAAA", "/dns-query/", "/", "/dns-query/" + good + "/x", "/dns-query/tok"} {
 		if resp, b := get(path); resp.StatusCode != 404 || len(b) != 0 {
 			t.Errorf("%s: %s %q", path, resp.Status, b)
 		}
 	}
-	if resp, _ := get("/dns-query/tok?dns=" + base64.RawURLEncoding.EncodeToString([]byte("short"))); resp.StatusCode != 400 {
+	if resp, _ := get("/dns-query/" + good + "?dns=" + base64.RawURLEncoding.EncodeToString([]byte("short"))); resp.StatusCode != 400 {
 		t.Errorf("short message: %s", resp.Status)
 	}
-	r, _ = http.Post(srv.URL+"/dns-query/tok", "text/plain", strings.NewReader("x"))
+	r, _ = http.Post(srv.URL+"/dns-query/"+good, "text/plain", strings.NewReader("x"))
 	r.Body.Close()
 	if r.StatusCode != http.StatusUnsupportedMediaType {
 		t.Errorf("wrong type: %s", r.Status)
@@ -256,6 +258,137 @@ func TestForgetCoalesces(t *testing.T) {
 	}
 	if n := src.calls.Load(); n < 2 || n > 3 { // the burst may come before the load reads the count
 		t.Fatalf("%d calls of Tokens, want 2 or 3", n)
+	}
+}
+
+// After Forget, while the load is out, only a request whose segment after
+// /dns-query/ has a token's shape waits for it: any other is answered at
+// once, as before the change, so that its time tells nothing of one.
+func TestUnshapedDoesNotWait(t *testing.T) {
+	src := newSource(tok(1))
+	h := &Handler{CacheFor: time.Hour, Tokens: src.Tokens,
+		Answer: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })}
+	status := func(path string) int {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodPut, path, nil))
+		return w.Code
+	}
+	if status("/dns-query/"+tok(1)) != http.StatusMethodNotAllowed {
+		t.Fatal("before")
+	}
+	gate := make(chan struct{})
+	src.hold(gate)
+	h.Forget()
+	start := time.Now()
+	for _, path := range []string{"/dns-query/abc", "/dns-query/" + tok(1) + "x", "/dns-query/", "/dns-query/" + tok(1) + "/x", "/", "/x/" + tok(1)} {
+		if got := status(path); got != http.StatusTeapot {
+			t.Errorf("%s: %d", path, got)
+		}
+	}
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Fatalf("waited %v", d)
+	}
+	shaped := make(chan int)
+	go func() { shaped <- status("/dns-query/" + tok(9)) }()
+	select {
+	case c := <-shaped:
+		t.Fatalf("a token-shaped request answered before the load: %d", c)
+	case <-time.After(50 * time.Millisecond):
+	}
+	src.hold(nil)
+	close(gate)
+	if c := <-shaped; c != http.StatusTeapot {
+		t.Fatalf("a stranger's token after the load: %d", c)
+	}
+}
+
+// Forgets with no request (a burst of changes, no DoH traffic) load the
+// tokens at once for the first, then once each ForgetDelay after the last
+// load at most, not back to back; an isolated one later loads at once. A
+// request with a token never waits for the delay: it starts the load
+// itself, and gets no token of before the Forget.
+func TestForgetIdle(t *testing.T) {
+	src := newSource(tok(1))
+	h := &Handler{CacheFor: time.Hour, Tokens: src.Tokens, delay: 50 * time.Millisecond}
+	ctx := context.Background()
+	if h.check(ctx, tok(1), true) != accepted {
+		t.Fatal("before")
+	}
+	time.Sleep(60 * time.Millisecond)
+	calls := src.calls.Load()
+	h.Forget()
+	for deadline := time.Now().Add(time.Second); src.calls.Load() == calls; {
+		if time.Now().After(deadline) {
+			t.Fatal("no load after a Forget")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	calls = src.calls.Load()
+	for t0 := time.Now(); time.Since(t0) < 500*time.Millisecond; {
+		h.Forget()
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if n := src.calls.Load() - calls; n < 2 || n > 12 {
+		t.Fatalf("%d loads in 500 ms of Forgets, want one each 50 ms at most", n)
+	}
+
+	h.mu.Lock()
+	h.delay = time.Hour // only a request starts the load now
+	h.mu.Unlock()
+	if h.check(ctx, tok(1), true) != accepted {
+		t.Fatal("caught up")
+	}
+	src.set(tok(2))
+	h.Forget()
+	start := time.Now()
+	if h.check(ctx, tok(1), true) != refused || h.check(ctx, tok(2), true) != accepted {
+		t.Fatal("a token of before the Forget, or not the new one")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("the request waited %v", d)
+	}
+}
+
+// A load that ends behind the Forgets starts the next at once when a
+// request waits for it, whatever the delay.
+func TestForgetWaiterStartsAtOnce(t *testing.T) {
+	src := newSource(tok(1))
+	h := &Handler{CacheFor: time.Hour, Tokens: src.Tokens, delay: time.Hour}
+	ctx := context.Background()
+	if h.check(ctx, tok(1), true) != accepted {
+		t.Fatal("before")
+	}
+	gate := make(chan struct{})
+	src.hold(gate)
+	h.Forget()
+	verdict := make(chan verdict)
+	go func() { verdict <- h.check(ctx, tok(1), true) }() // starts the load, held
+	for deadline := time.Now().Add(time.Second); src.calls.Load() < 2; {
+		if time.Now().After(deadline) {
+			t.Fatal("no load")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	src.set(tok(2))
+	h.Forget() // during it: the waiter needs one more
+	go func() { verdict <- h.check(ctx, tok(2), true) }()
+	time.Sleep(20 * time.Millisecond)
+	src.hold(nil)
+	close(gate)
+	start := time.Now()
+	for range 2 {
+		select {
+		case <-verdict:
+		case <-time.After(2 * time.Second):
+			t.Fatal("the next load waited for the delay")
+		}
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("%v", d)
+	}
+	if h.check(ctx, tok(2), true) != accepted || h.check(ctx, tok(1), true) == accepted {
+		t.Fatal("after")
 	}
 }
 
