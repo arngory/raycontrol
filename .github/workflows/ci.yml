@@ -292,6 +292,38 @@ jobs:
           TEST_RELEASE_KEY="$(cat hand/key.pub)" EXPECT_HANDOFF=1 STEPS_ONLY=1 \
             test/install/upgrade.sh debian13 hand/new hand/old hand/step
 
+  relay-host:
+    # A relay updated by its exit's word on systemd hosts
+    # (test/relay/host.sh, relay-update-remote-v1 §12.2): an exit and a
+    # relay (bootstrap.sh -relay) in containers, this tree as test
+    # releases signed with a throwaway key on a local mirror. The exit's
+    # update names its release to the relay, which takes it once root
+    # turns remote on and forwards after; and back from a rayspa that
+    # does not run, the exit away, a kill -9, systemctl stop and a power
+    # cut halfway; another signed release refused; remote off.
+    needs: xray
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: xray
+          path: bin
+      - name: niko-server and slipstream-server releases
+        run: |
+          scripts/niko-server.sh amd64 bin/niko-server
+          scripts/slipstream-server.sh amd64 bin/slipstream-server
+          chmod +x bin/*
+      - run: sudo apt-get install -y minisign
+      - name: Prepare the systemd image
+        run: test/install/prepare.sh debian13
+      - name: The relay's update by its exit's word
+        run: test/relay/host.sh bin
+
   supervise:
     # A node without systemd (rayd serve -supervise) in a plain container,
     # probed from a second one: the recipe for a client's CI.
