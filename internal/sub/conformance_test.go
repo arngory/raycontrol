@@ -95,7 +95,7 @@ func TestLinksForStrictClient(t *testing.T) {
 	}
 	epoch := provision.RealityEpoch{Period: 90 * day, Lead: 3 * day, Prepare: day}
 	for _, name := range []string{"reality", "reality-foreign"} {
-		if err := provision.RequestRealityRotation(ctx, st, name, now.Add(26*day), epoch.Lead, false); err != nil {
+		if err := provision.RequestRotation(ctx, st, name, now.Add(26*day), epoch.Lead, false); err != nil {
 			t.Fatal(err)
 		}
 	}

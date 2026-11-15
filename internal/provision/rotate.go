@@ -75,18 +75,26 @@ func ParseRealityState(svc store.Service) RealityState {
 	return st
 }
 
-// RealityEpoch is the schedule of REALITY key rotation.
+// RealityEpoch is the schedule of REALITY key rotation, and of naive's
+// name (R4-42), which shares its lead, preparation and early switch.
 type RealityEpoch struct {
 	Period  time.Duration // a key set is current this long
 	Lead    time.Duration // the next set is in subscriptions this long before the switch
 	Prepare time.Duration // a new server name may take this long to get its certificate
 	Grace   time.Duration // the previous set is accepted this long after the switch (0: not at all)
+	// NaivePeriod: a naive name is current this long (0: it changes only
+	// when the operator asks). The previous name needs no grace: it is
+	// accepted until the next switch.
+	NaivePeriod time.Duration
 }
 
 // Check reports a schedule that cannot work.
 func (e RealityEpoch) Check() error {
 	if e.Period > 0 && e.Lead+e.Prepare >= e.Period {
 		return errors.New("REALITY rotation: lead and preparation must be shorter than the period")
+	}
+	if e.NaivePeriod > 0 && e.Lead+e.Prepare >= e.NaivePeriod {
+		return errors.New("naive name rotation: lead and preparation must be shorter than the period")
 	}
 	return nil
 }
@@ -97,10 +105,13 @@ func (e RealityEpoch) Check() error {
 var settingsMu sync.Mutex
 
 // RotateReality advances the key rotation of every enabled REALITY service
-// at now and returns how many changed. resolves checks that a name points
-// to the node; nil keeps the server names. With a zero period only the
-// switches the operator asks for happen. A service that fails is skipped:
-// the error names it, and the others still rotate.
+// at now, then the name rotation of every enabled naive service (R4-42):
+// in one round, so that a naive switch joined to REALITY's happens with it,
+// and one render, one restart of the front, carries both. It returns how
+// many changed. resolves checks that a name points to the node; nil keeps
+// REALITY's server names. With a zero period only the switches the
+// operator asks for happen. A service that fails is skipped: the error
+// names it, and the others still rotate.
 func RotateReality(ctx context.Context, st *store.Store, now time.Time, e RealityEpoch,
 	resolves func(ctx context.Context, name string) error, log *slog.Logger) (int, error) {
 	settingsMu.Lock()
@@ -124,6 +135,34 @@ func RotateReality(ctx context.Context, st *store.Store, now time.Time, e Realit
 		ok, err := rotateOne(ctx, st, all, svc, now, e, resolves, log)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("reality %s: %w", svc.Name, err))
+			continue
+		}
+		if ok {
+			changed++
+			// A name chosen in this round is taken for the next service.
+			if all, err = st.ListServices(ctx); err != nil {
+				return changed, errors.Join(append(errs, err)...)
+			}
+		}
+	}
+	for _, s := range all {
+		if s.Kind != "naive" || !s.Enabled {
+			continue
+		}
+		// The list as it is now: with REALITY's switches of this round,
+		// and a name chosen for a service in it taken for the next.
+		current, err := st.ListServices(ctx)
+		if err != nil {
+			return changed, errors.Join(append(errs, err)...)
+		}
+		i := slices.IndexFunc(current, func(c store.Service) bool { return c.ID == s.ID })
+		if i < 0 {
+			continue
+		}
+		svc := current[i]
+		ok, err := rotateNaive(ctx, st, current, svc, now, e, log)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("naive %s: %w", svc.Name, err))
 			continue
 		}
 		if ok {
@@ -318,11 +357,19 @@ func dropPrevReality(ctx context.Context, st *store.Store, svc store.Service, lo
 	return st.UpdateService(ctx, svc.ID, u)
 }
 
-// RequestRealityRotation asks for the next switch of a REALITY service:
-// a lead time away (clients get the next keys first), or at once (clients
-// that have not fetched their subscription since lose the profile until
-// they do; for leaked keys or a blocked name).
-func RequestRealityRotation(ctx context.Context, st *store.Store, name string, now time.Time, lead time.Duration, immediately bool) error {
+// RequestRotation asks for the next switch of a service, a lead time away
+// (clients get what is next first) or at once:
+//
+//   - REALITY's keys (and its server name, self-steal): at once, clients
+//     that have not fetched their subscription since lose the profile
+//     until they do (leaked keys, a blocked name);
+//   - naive's server name (R4-42), whatever rotate_sni says: at once, the
+//     previous name stays accepted until the switch after (no secret
+//     leaked), and clients move with their next subscription.
+//
+// Under a certificate of listed names (HTTP-01) the new name waits for its
+// certificate first, -reality-prepare at most.
+func RequestRotation(ctx context.Context, st *store.Store, name string, now time.Time, lead time.Duration, immediately bool) error {
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
 	svc, err := st.ServiceByName(ctx, name)
@@ -334,19 +381,20 @@ func RequestRealityRotation(ctx context.Context, st *store.Store, name string, n
 		// every client off until its next subscription.
 		return fmt.Errorf("%w: %s (slipstream) has no rotation: its clients pin the server's one key (spec/slipstream-v1.md §3); a new key is a new service", store.ErrInvalid, name)
 	}
-	if svc.Kind != "reality" {
-		return fmt.Errorf("%w: %s is not a REALITY service (rotation: reality, dnstt's seal key, masterdns's key)", store.ErrInvalid, name)
+	if svc.Kind != "reality" && svc.Kind != "naive" {
+		return fmt.Errorf("%w: %s is neither REALITY nor naive (rotation: reality, naive's name, dnstt's seal key, masterdns's key, a site's certificate key)", store.ErrInvalid, name)
 	}
 	at := now.Add(lead)
 	if immediately {
 		at = now
 	}
 	fields := map[string]any{"rotate_at": at.Unix()}
-	if immediately {
+	published := ParseRealityState(svc).NextFrom // naive's next_from alike
+	if immediately && svc.Kind == "reality" {
 		// Nothing of the current set stays after the switch (R4-19).
 		fields["urgent"] = true
 	}
-	if state := ParseRealityState(svc); state.NextFrom != 0 && at.Unix() < state.NextFrom {
+	if published != 0 && at.Unix() < published {
 		fields["next_from"] = max(at.Unix(), now.Unix()) // a published switch only moves earlier
 	}
 	settings, err := setFields(svc.Settings, fields)
@@ -370,8 +418,12 @@ func siteOf(svc store.Service) string {
 }
 
 // SiteNames returns the names a site's certificate covers: its own and
-// those of the REALITY services that steal from it (names), and the names
-// they move to at their next switch (next).
+// those of the services under it, with the previous names still accepted
+// (names), and the names REALITY and naive move to at their next switch
+// (next). naive's next name is asked for only once its switch wants it
+// (prepared_at, R4-42) or it is published: under listed names (HTTP-01) a
+// name in the certificate is in CT logs from its order, and one a client
+// may never use should not be.
 func SiteNames(site store.Service, all []store.Service) (names, next []string) {
 	add := func(list []string, n string) []string {
 		if n != "" && !slices.Contains(names, n) && !slices.Contains(next, n) {
@@ -399,6 +451,21 @@ func SiteNames(site store.Service, all []store.Service) (names, next []string) {
 				names = add(names, state.SNIPrev)
 			}
 			next = add(next, state.SNINext)
+		}
+		if s.Kind == "naive" && s.Enabled && siteOf(s) == site.Name {
+			// The previous name until the next switch: a client on it
+			// checks the certificate against it.
+			state := ParseNaiveState(s)
+			names = add(names, state.SNIPrev)
+			switch {
+			case state.NextFrom != 0:
+				// Published: clients may take it from now (up to 2 minutes
+				// before its time, or when link fails), and a renewal that
+				// lost it would fail them.
+				names = add(names, state.SNINext)
+			case state.PreparedAt != 0:
+				next = add(next, state.SNINext)
+			}
 		}
 	}
 	return names, next

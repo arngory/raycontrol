@@ -127,7 +127,7 @@ func TestSlipstreamService(t *testing.T) {
 		Settings: `{"max_connections":4}`}); !errors.Is(err, store.ErrInvalid) {
 		t.Errorf("max_connections 4 at creation: %v", err)
 	}
-	if err := RequestRealityRotation(ctx, st, "slip", time.Now(), time.Hour, false); err == nil || !strings.Contains(err.Error(), "pin") {
+	if err := RequestRotation(ctx, st, "slip", time.Now(), time.Hour, false); err == nil || !strings.Contains(err.Error(), "pin") {
 		t.Errorf("rotate: %v", err)
 	}
 }

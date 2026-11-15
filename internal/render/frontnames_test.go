@@ -159,7 +159,7 @@ func TestFrontNamesOneService(t *testing.T) {
 	r2, _ := st.ServiceByName(ctx, "r2")
 	now := r2.CreatedAt.Add(time.Hour)
 	old := sni(t, ctx, st, "r2")
-	if err := provision.RequestRealityRotation(ctx, st, "r2", now, e.Lead, false); err != nil {
+	if err := provision.RequestRotation(ctx, st, "r2", now, e.Lead, false); err != nil {
 		t.Fatal(err)
 	}
 	for _, at := range []time.Time{now, now.Add(time.Minute), now.Add(e.Lead)} {

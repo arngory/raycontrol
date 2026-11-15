@@ -756,7 +756,7 @@ func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.
 	if req.Msg.Now {
 		at = now
 	}
-	err := provision.RequestRealityRotation(ctx, s.Store, req.Msg.Name, now, s.RealityLead, req.Msg.Now)
+	err := provision.RequestRotation(ctx, s.Store, req.Msg.Name, now, s.RealityLead, req.Msg.Now)
 	if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
 		return nil, err
 	}

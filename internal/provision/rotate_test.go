@@ -229,7 +229,7 @@ func TestRealityRotationNameDefault(t *testing.T) {
 			at := svc.CreatedAt.Add(86 * day)
 			if c.asked {
 				at = svc.CreatedAt.Add(5 * day)
-				if err := RequestRealityRotation(ctx, st, "r", at, epoch.Lead, false); err != nil {
+				if err := RequestRotation(ctx, st, "r", at, epoch.Lead, false); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -319,7 +319,7 @@ func TestRealityRotationRequest(t *testing.T) {
 	now := svc.CreatedAt.Add(5 * day)
 	ok := func(context.Context, string) error { return nil }
 
-	if err := RequestRealityRotation(ctx, st, "r", now, epoch.Lead, false); err != nil {
+	if err := RequestRotation(ctx, st, "r", now, epoch.Lead, false); err != nil {
 		t.Fatal(err)
 	}
 	if n, _ := RotateReality(ctx, st, now, epoch, ok, nil); n != 1 {
@@ -330,7 +330,7 @@ func TestRealityRotationRequest(t *testing.T) {
 		t.Fatalf("state %+v", state)
 	}
 	// At once: moves the published switch to now.
-	if err := RequestRealityRotation(ctx, st, "r", now.Add(time.Hour), epoch.Lead, true); err != nil {
+	if err := RequestRotation(ctx, st, "r", now.Add(time.Hour), epoch.Lead, true); err != nil {
 		t.Fatal(err)
 	}
 	if n, _ := RotateReality(ctx, st, now.Add(time.Hour), epoch, ok, nil); n != 1 {
@@ -340,7 +340,7 @@ func TestRealityRotationRequest(t *testing.T) {
 	if state.RotatedAt != now.Add(time.Hour).Unix() || state.RotateAt != 0 || state.NextFrom != 0 {
 		t.Fatalf("state %+v", state)
 	}
-	if err := RequestRealityRotation(ctx, st, "site", now, epoch.Lead, true); !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrInvalid) {
+	if err := RequestRotation(ctx, st, "site", now, epoch.Lead, true); !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrInvalid) {
 		t.Fatalf("site: %v", err)
 	}
 }
@@ -354,7 +354,7 @@ func TestRealityRotationOff(t *testing.T) {
 		t.Fatal("rotated with the period off")
 	}
 	now := svc.CreatedAt.Add(400 * day)
-	if err := RequestRealityRotation(ctx, st, "r", now, off.Lead, true); err != nil {
+	if err := RequestRotation(ctx, st, "r", now, off.Lead, true); err != nil {
 		t.Fatal(err)
 	}
 	RotateReality(ctx, st, now, off, nil, nil)
@@ -362,7 +362,7 @@ func TestRealityRotationOff(t *testing.T) {
 		t.Fatal("requested switch did not happen")
 	}
 	// A lost next set starts the round again instead of failing forever.
-	RequestRealityRotation(ctx, st, "r", now.Add(time.Hour), off.Lead, false)
+	RequestRotation(ctx, st, "r", now.Add(time.Hour), off.Lead, false)
 	RotateReality(ctx, st, now.Add(time.Hour), off, nil, nil)
 	svc, _ = st.ServiceByName(ctx, "r")
 	st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Delete: []string{NextSecret(SecretRealityKey)}})
@@ -483,7 +483,7 @@ func TestRealityRotationUrgent(t *testing.T) {
 		t.Fatal("no grace period after a scheduled switch")
 	}
 	now := created.Add(91*day + time.Hour)
-	if err := RequestRealityRotation(ctx, st, "r", now, e.Lead, true); err != nil {
+	if err := RequestRotation(ctx, st, "r", now, e.Lead, true); err != nil {
 		t.Fatal(err)
 	}
 	if n := rotate(now); n != 1 {
