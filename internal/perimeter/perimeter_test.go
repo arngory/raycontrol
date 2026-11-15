@@ -755,6 +755,43 @@ func TestGatePortProtocol(t *testing.T) {
 	}
 }
 
+// A snapshot's number past its 16 bits is refused, not cut to another: the
+// SPA ports' base and range, a rotation whose base and range overflow the
+// check of their sum (its slot ports wrap round past 65535 to 0 and up), a
+// port, a rotation's target, the ACME port, a service and a device's
+// scope (65536+3 is service 3).
+// testdata/fuzz/FuzzGateUpdate/spa-port-base-cut, rotation-overflow,
+// port-cut.
+func TestGateNumbersInRange(t *testing.T) {
+	for name, cut := range map[string]func(*perimeterv1.Snapshot){
+		"spa base": func(s *perimeterv1.Snapshot) { s.Spa.PortBase = 65536 + 40000 },
+		"spa range": func(s *perimeterv1.Snapshot) {
+			s.Spa.PortBase, s.Spa.PortRange = 40000, 65536+1
+		},
+		"rotation": func(s *perimeterv1.Snapshot) {
+			s.Services[1].Rotation = &perimeterv1.Rotation{PortKey: key(0x55), PortBase: 0xffff0000 + 60000, PortRange: 10000, TargetPort: 443}
+		},
+		"target": func(s *perimeterv1.Snapshot) {
+			s.Services[1].Rotation = &perimeterv1.Rotation{PortKey: key(0x55), PortBase: 20000, PortRange: 1000, TargetPort: 65536 + 443}
+		},
+		"public":  func(s *perimeterv1.Snapshot) { s.PublicPorts[0].Port = 65536 + 22 },
+		"service": func(s *perimeterv1.Snapshot) { s.Services[2].Ports[0].Port = 65536 + 22 },
+		"acme": func(s *perimeterv1.Snapshot) {
+			s.Acme = &perimeterv1.AcmeWindow{Port: 65536 + 9180, Until: time.Now().Add(time.Hour).Unix()}
+		},
+		"id":    func(s *perimeterv1.Snapshot) { s.Services[2].Id = 65536 + 1 },
+		"scope": func(s *perimeterv1.Snapshot) { s.Devices[0].Allowed = []uint32{65536 + 3} },
+	} {
+		fw := &fakeFW{}
+		g := NewGate(fw, quiet)
+		snap := testSnapshot(&perimeterv1.Device{Id: "alice", Key: key(0x11), Allowed: []uint32{1}})
+		cut(snap)
+		if err := g.Update(snap); err == nil || errors.Is(err, ErrPending) || len(fw.calls) != 0 {
+			t.Errorf("%s: %v, calls %v, slots %v, rotation %v", name, err, fw.calls, fw.udp, fw.rot)
+		}
+	}
+}
+
 // On a relay, its own SSH is a local service (relay-v1 §3.1): in the scope
 // of the devices allowed SSH, never forwarded to the exit.
 func TestGateLocalNotForwarded(t *testing.T) {
