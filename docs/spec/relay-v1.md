@@ -158,6 +158,12 @@ REALITY, Hysteria2 и naive остаются сквозными от клиен�
      - Обновление relay — с v0.26.0 `rayctl update` на его хосте: та же установка с сохранённым пакетом, проверка и
        откат к прежнему relay ([node-update-v1.md](node-update-v1.md) §5). Relay до v0.26.0 обновляется повторным
        `bootstrap.sh -relay /etc/raycontrol/relay.bundle`.
+     - С v0.28.0 relay идёт и за обновлением выхода, если root на нём включил `rayctl update remote on` (по умолчанию
+       выключено): выход называет relay свою версию в потоке `WatchRelay` (`WatchRelayRequest.updates`,
+       `WatchRelayResponse.update`), по одному relay за раз, а `rayd relay` докладывает итог (`ReportUpdate`). Ставит
+       root на relay тем же `rayctl update`, релиз качает и проверяет сам relay
+       ([relay-update-remote-v1.md](relay-update-remote-v1.md)). Поля добавлены совместимо: старый relay и старый
+       выход их пропускают. На настоящем хосте relay не запускалось.
      - SSH самого relay открыт с его собственных адресов администратора (`rayctl relay set` на выходе, без нового пакета).
        Выход не видит sshd хоста relay, поэтому `relay set -ssh-port` с ним не сверяется.
      - `rayctl install -relay` до записи файлов и запуска `rayspa` требует порт sshd:

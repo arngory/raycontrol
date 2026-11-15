@@ -170,11 +170,20 @@ bootstrap. Версию он читает из подписанного комм
 `/var/lib/raycontrol-update/status.json` (`id`, `state`, `from`, `to`, `target`, `release`, `by`, `kind`, `error`,
 `untouched`, `reason`, `unfinished`, `no_relays`, `held`, `requested`, `started`, `ended`: итог пишет `rayctl` прежней версии, читает
 rayd новой; `kind` — `remote`, `auto`, `local`, на relay — `exit`) и `policy.json` (`remote`, `auto`, `window`), флаги
-юнита `update -request` и `update -request-ended`. `reason` и `unfinished` (только в статусе: обновление relay не
-кончилось, нужен root на нём) необязательны: прежние `rayctl` их не пишут, и итог или статус без них читается как
-«кода нет». `no_relays: true` — у ручного `rayctl update -no-relays` на ноде (вид `local`, `by: "rayctl on the node"`):
-выход не называет эту версию своим relay; поля нет — relay идут за обновлением
-([spec/relay-update-remote-v1.md](spec/relay-update-remote-v1.md) §11 п. 1). И `units` в ответе `GetDeployment`: `rayctl` без передачи (`-no-handoff`, `rayctl` релиза не запустился)
+юнитов `update -request`, `update -request-ended` и, на relay, `update -request-recover`. `reason` и `unfinished`
+(только в статусе: обновление relay не кончилось, нужен root на нём) необязательны: прежние `rayctl` их не пишут, и итог
+или статус без них читается как «кода нет». `no_relays: true` — у ручного `rayctl update -no-relays` на ноде (вид
+`local`, `by: "rayctl on the node"`): выход не называет эту версию своим relay; поля нет — relay идут за обновлением
+([spec/relay-update-remote-v1.md](spec/relay-update-remote-v1.md) §11 п. 1). На relay с v0.28.0 ещё
+(relay-update-remote-v1 §4): юнит одного релиза запускает `rayctl` другого, `rayd relay` одной версии пишет то, что
+читает `rayctl` root другой, а runner, `ExecStopPost` и откат при загрузке находят то, что оставил `rayctl` релиза.
+Поэтому заморожены имена юнитов `raycontrol-relay-update.path`, `raycontrol-relay-update.service` и
+`raycontrol-relay-recover.service` (их включают и выключают по имени `rayctl update remote` и установка relay, копия
+обновления помнит их состояния); путь запроса `/var/lib/rayd-relay/update-request` (JSON запроса ноды, вид `exit`);
+метка `/var/lib/raycontrol-install/previous/relay.unfinished` (`state`, `from`, `to`, `by`: сами откатывают только
+обновление с `by: "exit"`); откат, который они запускают, — `update -rollback -yes` установленного `rayctl` с
+`RAYCONTROL_RELAY_ROLLBACK_BY_RUNNER=1` (тогда статус пишет runner); статус relay — 0640 с группой `rayd`, его читает
+`rayd relay`. И `units` в ответе `GetDeployment`: `rayctl` без передачи (`-no-handoff`, `rayctl` релиза не запустился)
 берёт оттуда юниты после обновления; `files` и `users` уйдут из ответа (apply-plan-v1, решение 2). Откат ниже v0.21.0 запускает apply старого
 `rayctl`, а тот ставит план rayd как есть: иного apply у старой версии нет (apply-plan-v1 §3.5). Всё остальное (раскладка, имена, число файлов, новые
 транспорты, способ установки) с v0.19.0 можно менять без ступеней. CI проверяет передачу строкой `upgrade (handoff)`:
