@@ -318,11 +318,16 @@ midway() {
 # feeds: the relay holds its two feeds (rayspa, rayd relay), and the exit
 # none that is gone: one the exit still counts would take the place of a
 # new one (two at most), and the next install would wait in vain.
+# The relay's two feeds (rayspa's, rayd relay's) are up on both ends. The
+# exit may still hold the dead connections of the processes the last
+# update restarted (their FIN dropped as the perimeter went down) until
+# keepalive ends them: a new feed of a kind ends the old one's stream at
+# once, so only the relay's own connections are counted.
 feeds() {
 	local e r
 	e="$(xe ss -Htn state established dst "$relay_ip" | awk '{print $4}' | sort)"
 	r="$(xr ss -Htn state established dst "$exit_ip" | awk '{print $3}' | sort)"
-	[[ $(grep -c . <<<"$e") == 2 && $e == "$r" ]]
+	[[ $(grep -c . <<<"$r") == 2 && -z $(comm -13 <(echo "$e") <(echo "$r")) ]]
 }
 log "1. the exit updates by hand to v0.91.0 and names it to the relay"
 out="$(xe env RAYCONTROL_TEST_RELEASE_KEY="$key" rayctl update -from /opt/rel/v0.91.0 -yes 2>&1)" || fail "the exit's update: $out"

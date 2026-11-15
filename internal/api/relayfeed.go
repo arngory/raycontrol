@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"time"
 
 	"connectrpc.com/connect"
@@ -35,8 +36,52 @@ func relayLookup(err error) error {
 }
 
 // maxRelayStreams bounds the WatchRelay streams of one relay at once: its
-// rayspa and its rayd relay (relay-v1 §9.1).
-const maxRelayStreams = 2
+// rayspa's and its rayd relay's (relay-v1 §9.1), and those a new one of
+// the same kind has just ended (they go as their handlers return).
+const maxRelayStreams = 4
+
+// relayStream is one WatchRelay stream open: its kind (rayspa's; rayd
+// relay's, with probe set, and with updates from v0.28.0 on: an older one
+// may overlap a newer during the relay's own update) and how to end it.
+type relayStream struct {
+	probe, updates bool
+	end            context.CancelFunc
+}
+
+// admitRelayStream takes a new stream of a relay, ending the open ones of
+// the same kind: a relay runs one rayspa and one rayd relay, and a new
+// stream from its certificate and address means the old one is gone. A
+// relay that restarted (its own update, a reboot) often leaves its old
+// connections up on the exit, their FIN or RST dropped by its perimeter
+// going down; counted, they refused its new streams until keepalive
+// ended them, minutes on. Only too many streams still ending are refused.
+// r.relayMu is held.
+func (r *Remote) admitRelayStream(name string, s *relayStream) bool {
+	if r.relayStreams == nil {
+		r.relayStreams = map[string][]*relayStream{}
+	}
+	open := r.relayStreams[name]
+	if len(open) >= maxRelayStreams {
+		return false
+	}
+	for _, o := range open {
+		if o.probe == s.probe && o.updates == s.updates {
+			o.end()
+		}
+	}
+	r.relayStreams[name] = append(open, s)
+	return true
+}
+
+// dropRelayStream forgets a stream that ended. r.relayMu is held.
+func (r *Remote) dropRelayStream(name string, s *relayStream) {
+	open := slices.DeleteFunc(r.relayStreams[name], func(o *relayStream) bool { return o == s })
+	if len(open) == 0 {
+		delete(r.relayStreams, name)
+		return
+	}
+	r.relayStreams[name] = open
+}
 
 // maxRelayReports bounds the Report calls of one relay at once.
 const maxRelayReports = 4
@@ -194,18 +239,17 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 		return err
 	}
 	s := f.r.Server
-	// One relay runs one rayspa: a second stream may overlap a reconnect,
-	// more is a relay doing work it has no need for.
+	// One relay runs one rayspa and one rayd relay: a new stream of one
+	// ends the old (admitRelayStream).
+	probe := req.Msg.Probe
+	ctx, end := context.WithCancel(ctx)
+	defer end()
+	own := &relayStream{probe: probe, updates: req.Msg.Updates, end: end}
 	f.r.relayMu.Lock()
-	if f.r.relayStreams == nil {
-		f.r.relayStreams = map[string]int{}
-	}
-	if f.r.relayStreams[relay.Name] >= maxRelayStreams {
+	if !f.r.admitRelayStream(relay.Name, own) {
 		f.r.relayMu.Unlock()
 		return connect.NewError(connect.CodeResourceExhausted, errors.New("too many feeds for this relay"))
 	}
-	f.r.relayStreams[relay.Name]++
-	probe := req.Msg.Probe
 	if probe {
 		if f.r.relayProbes == nil {
 			f.r.relayProbes, f.r.relayProbeAt = map[string]int{}, map[string]time.Time{}
@@ -215,7 +259,7 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 	f.r.relayMu.Unlock()
 	defer func() {
 		f.r.relayMu.Lock()
-		f.r.relayStreams[relay.Name]--
+		f.r.dropRelayStream(relay.Name, own)
 		if probe {
 			f.r.relayProbes[relay.Name]--
 			f.r.relayProbeAt[relay.Name] = f.r.clock()

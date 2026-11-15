@@ -234,23 +234,84 @@ func TestRelayFeedStreams(t *testing.T) {
 	addr, _ := serveRemoteFrom(t, srv, "198.51.100.20:40000")
 	cert, _ := DecodeClientCertificate([]byte(b.Cert))
 	feed := perimeterv1connect.NewRelayServiceClient(remoteHTTP(b.API.Pin, cert), "https://"+addr)
-	var open []*connect.ServerStreamForClient[perimeterv1.WatchRelayResponse]
-	for range 2 {
-		s, err := feed.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{}))
+	watch := func(probe bool) *connect.ServerStreamForClient[perimeterv1.WatchRelayResponse] {
+		t.Helper()
+		s, err := feed.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{Probe: probe}))
 		if err != nil || !s.Receive() {
-			t.Fatalf("feed: %v %v", err, s.Err())
+			t.Fatalf("feed (probe %v): %v %v", probe, err, s.Err())
 		}
-		open = append(open, s)
+		return s
 	}
-	s, _ := feed.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{}))
-	if s.Receive() || connect.CodeOf(s.Err()) != connect.CodeResourceExhausted {
-		t.Fatalf("a third feed: %v", s.Err())
+	// rayspa's feed and rayd relay's, side by side.
+	old, probe := watch(false), watch(true)
+	// A relay that restarted leaves its old connection up on the exit
+	// (its FIN dropped by its perimeter going down): its new feed of the
+	// same kind ends the old one, it is not refused.
+	fresh := watch(false)
+	ended := make(chan bool, 1)
+	go func() { ended <- !old.Receive() }()
+	select {
+	case gone := <-ended:
+		if !gone {
+			t.Fatal("the old feed got a message after a new one of its kind")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the old feed of the kind is still open")
 	}
-	open[0].Close()
-	time.Sleep(200 * time.Millisecond)
-	s, _ = feed.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{}))
-	if !s.Receive() {
-		t.Fatalf("a feed after one closed: %v", s.Err())
+	// The other kind stays, and so does the new one: neither ends.
+	gone := make(chan string, 2)
+	for name, s := range map[string]*connect.ServerStreamForClient[perimeterv1.WatchRelayResponse]{"probe": probe, "new": fresh} {
+		go func() {
+			for s.Receive() {
+			}
+			gone <- name
+		}()
+	}
+	select {
+	case name := <-gone:
+		t.Fatalf("the %s feed ended", name)
+	case <-time.After(time.Second):
+	}
+	probe.Close()
+	fresh.Close()
+}
+
+// Only streams still ending fill a relay's place: too many of them at once
+// are refused, a new one of a kind ends the open ones of that kind.
+func TestAdmitRelayStream(t *testing.T) {
+	var r Remote
+	ended := map[int]int{}
+	stream := func(i int, probe bool) *relayStream {
+		return &relayStream{probe: probe, end: func() { ended[i]++ }}
+	}
+	s0, s1 := stream(0, false), stream(1, true)
+	if !r.admitRelayStream("r1", s0) || !r.admitRelayStream("r1", s1) || len(ended) != 0 {
+		t.Fatalf("rayspa's and rayd relay's: %v", ended)
+	}
+	s2 := stream(2, false)
+	if !r.admitRelayStream("r1", s2) || ended[0] != 1 || ended[1] != 0 {
+		t.Fatalf("a new rayspa feed: ended %v", ended)
+	}
+	// s0 has not returned yet (its connection is half dead): one more.
+	if !r.admitRelayStream("r1", stream(3, false)) {
+		t.Fatal("a fourth stream refused")
+	}
+	if r.admitRelayStream("r1", stream(4, true)) {
+		t.Fatalf("a fifth stream at once admitted: %d open", len(r.relayStreams["r1"]))
+	}
+	if !r.admitRelayStream("r2", stream(5, true)) {
+		t.Fatal("another relay's stream refused")
+	}
+	r.dropRelayStream("r1", s0)
+	r.dropRelayStream("r1", s2)
+	if !r.admitRelayStream("r1", stream(6, true)) || ended[1] != 1 {
+		t.Fatalf("after two ended: %v", ended)
+	}
+	for _, s := range slices.Clone(r.relayStreams["r1"]) {
+		r.dropRelayStream("r1", s)
+	}
+	if _, ok := r.relayStreams["r1"]; ok {
+		t.Fatal("a relay with no stream is still listed")
 	}
 }
 
