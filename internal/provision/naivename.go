@@ -332,9 +332,13 @@ func rotateNaive(ctx context.Context, st *store.Store, all []store.Service, svc 
 			return true, naiveFields(ctx, st, svc, map[string]any{"prepared_at": nil, "rotate_at": nil, "rotated_at": t})
 		}
 		from := max(due.at, t+lead)
-		if due.reality && due.at >= t+lead-slack {
-			// REALITY's time exactly, though this round came up to the
-			// slack after its lead began: both switch in one round.
+		if due.reality && due.at >= t {
+			// REALITY's time exactly, however late this round (rayd was
+			// down as naive's lead began, a REALITY switched -now): both
+			// switch in one round. naive needs no lead for it: its next
+			// name is routed since its last switch, its current one stays
+			// routed after it, and clients take the new one at their
+			// next fetch.
 			from = due.at
 		}
 		if state.RotateAt != 0 && state.RotateAt <= t {

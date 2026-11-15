@@ -224,16 +224,25 @@ func TestNaiveNameJoinsRealityRound(t *testing.T) {
 		setup func(*testing.T) node
 		phase time.Duration    // of the rounds
 		down  [2]time.Duration // rayd down, after REALITY's creation
+		now   time.Duration    // rotate REALITY -now, after its creation
 	}{
-		{"wildcard, phase 0", wildcard, 0, [2]time.Duration{}},
-		{"wildcard, phase 17s", wildcard, 17 * time.Second, [2]time.Duration{}},
-		{"wildcard, phase 59s", wildcard, 59 * time.Second, [2]time.Duration{}},
-		{"REALITY waits for its certificate, phase 17s", listed, 17 * time.Second, [2]time.Duration{}},
-		{"REALITY waits for its certificate, phase 59s", listed, 59 * time.Second, [2]time.Duration{}},
+		{"wildcard, phase 0", wildcard, 0, [2]time.Duration{}, 0},
+		{"wildcard, phase 17s", wildcard, 17 * time.Second, [2]time.Duration{}, 0},
+		{"wildcard, phase 59s", wildcard, 59 * time.Second, [2]time.Duration{}, 0},
+		{"REALITY waits for its certificate, phase 17s", listed, 17 * time.Second, [2]time.Duration{}, 0},
+		{"REALITY waits for its certificate, phase 59s", listed, 59 * time.Second, [2]time.Duration{}, 0},
 		// REALITY prepares 3 hours late, publishes a round after, 3 hours
 		// past its time; naive's lead began meanwhile.
-		{"rayd down as REALITY would prepare", wildcard, 17 * time.Second, [2]time.Duration{86*day - time.Hour, 87*day + 2*time.Hour}},
-		{"rayd down, REALITY waits for its certificate", listed, 17 * time.Second, [2]time.Duration{86*day - time.Hour, 86*day + 3*time.Hour}},
+		{"rayd down as REALITY would prepare", wildcard, 17 * time.Second, [2]time.Duration{86*day - time.Hour, 87*day + 2*time.Hour}, 0},
+		{"rayd down, REALITY waits for its certificate", listed, 17 * time.Second, [2]time.Duration{86*day - time.Hour, 86*day + 3*time.Hour}, 0},
+		// REALITY published on time; naive's first round in its lead
+		// comes 10 minutes, an hour late (rayd down, the host asleep):
+		// past the slack, it still takes REALITY's time (review 2).
+		{"rayd down as naive's lead begins, 10 minutes", wildcard, 17 * time.Second, [2]time.Duration{87*day - time.Minute, 87*day + 10*time.Minute}, 0},
+		{"rayd down as naive's lead begins, an hour", wildcard, 17 * time.Second, [2]time.Duration{87*day - time.Minute, 87*day + time.Hour}, 0},
+		// rotate REALITY -now, 10 days before naive's time: naive goes
+		// with it, at once, its next name routed since its last switch.
+		{"rotate REALITY -now", wildcard, 17 * time.Second, [2]time.Duration{}, 80 * day},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			n := c.setup(t)
@@ -255,14 +264,21 @@ func TestNaiveNameJoinsRealityRound(t *testing.T) {
 			last := routes()
 			// By the hour, by the minute about the leads and the switches.
 			near := func(at time.Time) bool {
-				for _, p := range []time.Time{X.Add(-e.Lead - e.Prepare), X.Add(-e.Lead), X} {
+				for _, p := range []time.Time{X.Add(-e.Lead - e.Prepare), X.Add(-e.Lead), X, n.r.CreatedAt.Add(c.now)} {
 					if at.After(p.Add(-2*time.Hour)) && at.Before(p.Add(5*time.Hour)) {
 						return true
 					}
 				}
 				return false
 			}
+			asked := false
 			for at := n.r.CreatedAt.Add(80*day + c.phase); at.Before(X.Add(day)); {
+				if c.now != 0 && !asked && !at.Before(n.r.CreatedAt.Add(c.now)) {
+					if err := RequestRotation(ctx, st, "r", at, e.Lead, true); err != nil {
+						t.Fatal(err)
+					}
+					asked = true
+				}
 				if down := at.After(n.r.CreatedAt.Add(c.down[0])) && at.Before(n.r.CreatedAt.Add(c.down[1])); !down {
 					rotateAt(t, ctx, st, at, e)
 				}
