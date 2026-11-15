@@ -100,6 +100,31 @@ func TestEmbeddedLeadingZero(t *testing.T) {
 	}
 }
 
+// An address that starts with "::" goes too: after a space or a bracket
+// its match had no word boundary to start on, and glued to a word by a
+// colon it started with three; either way it stayed whole, ::ffff:c633:6407
+// (198.51.100.7, mapped, in hex) too. A mapped address has its IPv4 one's
+// token. testdata/fuzz/FuzzRedact/starts-with-colons.
+func TestAddressStartsWithColons(t *testing.T) {
+	r := New()
+	v4, two := r.String("198.51.100.7"), r.String("0:0:0:0:0:0:0:2")
+	for in, want := range map[string]string{
+		"from ::ffff:c633:6407 up":           "from " + v4 + " up",
+		"(::ffff:198.51.100.7)":              "(" + v4 + ")",
+		"src=::2, dst=[::2]:443":             "src=" + two + ", dst=[" + two + "]:443",
+		"ipv6:::2 and ipv6:::ffff:c633:6407": "ipv6:" + two + " and ipv6:" + v4,
+		"from ::2: refused":                  "from " + two + ": refused",
+		"lo ::1, any ::, std ::io::Err":      "lo ::1, any ::, std ::io::Err",
+	} {
+		if out := r.String(in); out != want {
+			t.Errorf("%q: %q, want %q", in, out, want)
+		}
+	}
+	if !strings.HasPrefix(v4, "<ip4:") || !strings.HasPrefix(two, "<ip6:") {
+		t.Fatalf("tokens %s %s", v4, two)
+	}
+}
+
 // An address with all its groups written out, or seven and "::", then a
 // port or a hex word after a colon, without brackets: the pattern takes
 // the colon and what follows with it, and the whole does not parse (eight

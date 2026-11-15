@@ -60,8 +60,11 @@ var (
 	// "::" (2001:db8::/32, an admin prefix) ends on no word boundary. Or
 	// it is an IPv4 address (64:ff9b::198.51.100.9), taken whole: cut at
 	// its first dot, the rest would be three octets that the IPv4 pattern
-	// does not take. Only what parses as an address is replaced (addr).
-	ipv6 = regexp.MustCompile(`(?i)\b(?:[0-9a-f]{0,4}:){2,8}(?:\d{1,3}(?:\.\d{1,3}){3}\b|[0-9a-f]{1,4}\b)?`)
+	// does not take. One that starts with "::" (::ffff:c633:6407, ::2)
+	// starts on no word boundary either, unless a word is before it: its
+	// "::" after anything but a word. Only what parses as an address is
+	// replaced (addr).
+	ipv6 = regexp.MustCompile(`(?i)(?:\b(?:[0-9a-f]{0,4}:){2,8}|\B::(?:[0-9a-f]{1,4}:){0,6})(?:\d{1,3}(?:\.\d{1,3}){3}\b|[0-9a-f]{1,4}\b)?`)
 )
 
 // String redacts s.
@@ -125,10 +128,11 @@ func isLabelByte(c byte) bool {
 // seven and "::" ("2001:db8:1:2:3:4:5:6:443", eight groups and the
 // last): the address is the match up to its last colon, and the rest
 // stays. Before it: the colon that glues it to a word ("ipv6:2001:db8::1",
-// where the match starts on a word boundary), which stays too.
+// where the match starts on a word boundary, or "ipv6:::2", where it
+// starts with three), which stays too.
 func (r *Redactor) addr(m string) string {
 	lead := ""
-	if strings.HasPrefix(m, ":") && !strings.HasPrefix(m, "::") {
+	if strings.HasPrefix(m, ":") && (!strings.HasPrefix(m, "::") || strings.HasPrefix(m, ":::")) {
 		lead, m = ":", m[1:]
 	}
 	if a, ok := parseAddr(m); ok {
@@ -183,6 +187,6 @@ func (r *Redactor) token(a netip.Addr, m string) string {
 		kind += "-private"
 	}
 	h := hmac.New(sha256.New, r.salt)
-	h.Write(a.AsSlice())
+	h.Write(a.Unmap().AsSlice()) // a mapped address is the IPv4 one
 	return "<" + kind + ":" + hex.EncodeToString(h.Sum(nil)[:3]) + ">"
 }
