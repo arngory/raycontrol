@@ -306,6 +306,11 @@ func (s *Server) exitAddress(ctx context.Context, given string, relay netip.Addr
 	}
 	sameFamily := func(a netip.Addr) bool { return a.Unmap().Is4() == relay.Is4() }
 	if a, err := netip.ParseAddr(host); err == nil {
+		if a.Zone() != "" {
+			// The relay refuses it (node.DecodeRelayBundle): a zone is
+			// any text after "%", and rayspa writes the exit into nft.
+			return netip.Addr{}, fmt.Errorf("%w exit address %q: an IP without a zone (-exit)", store.ErrInvalid, host)
+		}
 		if !sameFamily(a) {
 			return netip.Addr{}, fmt.Errorf("%w exit address %s: the relay %s is of the other family (-exit)", store.ErrInvalid, a, relay)
 		}

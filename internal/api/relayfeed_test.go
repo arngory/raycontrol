@@ -109,9 +109,12 @@ func TestRelayFeed(t *testing.T) {
 	for name, req := range map[string]*nodev1.IssueRelayBundleRequest{
 		"a name for the exit":       {Name: "r1", ExitAddress: "exit.example.com", Admin: []string{"192.0.2.7"}},
 		"an exit of another family": {Name: "r1", ExitAddress: "2001:db8::7", Admin: []string{"192.0.2.7"}},
-		"nobody for its SSH":        {Name: "r2", ExitAddress: "203.0.113.7"},
-		"SSH on a forwarded port":   {Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.2.7"}, SshPort: uint32(apiSvc.endpoint.Port)},
-		"a wide admin prefix":       {Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.0.0/8"}},
+		// A zone is any text after "%"; the relay's rayspa would write it
+		// into nft (node.DecodeRelayBundle refuses it there too).
+		"an exit with a zone":     {Name: "r1", ExitAddress: "::ffff:203.0.113.7%x\nflush ruleset", Admin: []string{"192.0.2.7"}},
+		"nobody for its SSH":      {Name: "r2", ExitAddress: "203.0.113.7"},
+		"SSH on a forwarded port": {Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.2.7"}, SshPort: uint32(apiSvc.endpoint.Port)},
+		"a wide admin prefix":     {Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.0.0/8"}},
 	} {
 		if _, err := srv.issueRelayBundle(ctx, req); !errors.Is(err, store.ErrInvalid) {
 			t.Errorf("bundle with %s: %v", name, err)
