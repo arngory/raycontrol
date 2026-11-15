@@ -40,30 +40,31 @@ var portless = regexp.MustCompile(`:[0-9]+`)
 // her limit through Hysteria2, rayctl user reset-usage, the subscription
 // says she is back, and a new client goes through Hysteria2 at once. Each
 // cycle says how long the new client waited for its first answer, and
-// whether alice stays back. Set XRAY_BIN and NIKO_SERVER_BIN; it needs UDP
-// 443 (root, or a network namespace of its own); TRAFFIC_RESET_CYCLES
-// cycles (3).
+// whether alice stays back. Minutes a cycle, so it runs only when asked:
+// TRAFFIC_RESET_CYCLES cycles, with XRAY_BIN and NIKO_SERVER_BIN; it
+// needs UDP 443 (root, or a network namespace of its own). Before
+// v0.27.0 each cycle found her off again 71 s after the reset in the
+// subscription and 125 s after it through Hysteria2 (internal/traffic
+// TestResetUsageNotOverAgainByBytesBefore is the quick test of it).
 func TestTrafficResetSupervised(t *testing.T) {
 	bin := os.Getenv("XRAY_BIN")
 	niko := os.Getenv("NIKO_SERVER_BIN")
-	if bin == "" || niko == "" {
-		t.Skip("set XRAY_BIN and NIKO_SERVER_BIN")
+	cycles, _ := strconv.Atoi(os.Getenv("TRAFFIC_RESET_CYCLES"))
+	if bin == "" || niko == "" || cycles <= 0 {
+		t.Skip("set TRAFFIC_RESET_CYCLES, XRAY_BIN and NIKO_SERVER_BIN")
 	}
 	if pc, err := net.ListenPacket("udp", ":443"); err != nil {
 		t.Skipf("UDP 443: %v", err)
 	} else {
 		pc.Close()
 	}
-	cycles := 3
-	if n, err := strconv.Atoi(os.Getenv("TRAFFIC_RESET_CYCLES")); err == nil && n > 0 {
-		cycles = n
-	}
-	// How long a cycle watches her after the reset (TRAFFIC_RESET_WATCH).
-	watch := 30 * time.Second
+	// How long a cycle watches her after the reset (TRAFFIC_RESET_WATCH):
+	// past the loop's minute's write and apply's minute after it.
+	watch := 150 * time.Second
 	if d, err := time.ParseDuration(os.Getenv("TRAFFIC_RESET_WATCH")); err == nil {
 		watch = d
 	}
-	waits := []string{"refused", "none"}
+	waits := []string{"cut"}
 	if w := os.Getenv("TRAFFIC_RESET_WAIT"); w != "" {
 		waits = strings.Split(w, ",")
 	}
