@@ -147,8 +147,7 @@ func (q requests) outcome() (nodeupdate.Result, bool) {
 // (spec/relay-update-remote-v1.md §7), as after a download that failed.
 func (r *relayRunner) cutShort(st *nodeupdate.Status, version func() string, failedAfter bool) {
 	st.Reason = nodeupdate.ReasonInterrupted
-	m, marked := r.mark()
-	if !marked || m.By != markByExit {
+	if !r.exitMarked() {
 		st.Untouched = st.State == nodeupdate.Failed && !failedAfter && untouchedSince(st.From, version())
 		return
 	}
@@ -161,11 +160,57 @@ func (r *relayRunner) cutShort(st *nodeupdate.Status, version func() string, fai
 	st.To = version()
 }
 
+// exitMarked reports whether the mark of an update by the exit's word is
+// left: one that changed the relay and did not end.
+func (r *relayRunner) exitMarked() bool {
+	m, marked := r.mark()
+	return marked && m.By == markByExit
+}
+
 // untouchedSince reports whether a relay whose update left no mark of the
 // exit's, from version from, is still on it as its rayd says (now): a
 // release, the same. Anything else (another version, none told) may be
 // what the update left.
 func untouchedSince(from, now string) bool { return release.IsRelease(from) && now == from }
+
+// held is what q's last status holds, carried over into the next
+// (Status.Holding). On a relay, a run by the exit's word that never ended
+// (a power cut, the recover unit not run since), with no mark of the
+// exit's left and the relay on the version it came from, changed nothing
+// (the mark goes in before the first change): its release is not held,
+// or the relay would never take it again (spec/relay-update-remote-v1.md
+// §4.3).
+func (q requests) held() []string {
+	st := nodeupdate.ReadStatus(q.status)
+	if q.relay != nil && st.Kind == nodeupdate.Exit && st.State == nodeupdate.Running && !q.relay.exitMarked() && untouchedSince(st.From, q.nodeVersion()) {
+		st.Untouched = true
+	}
+	return st.Holding()
+}
+
+// unended settles st, a run root's status still has running though its
+// runner is gone (cut says how), from what the run left: the outcome the
+// update wrote, if it did; else failed, interrupted, and, with no mark of
+// the exit's (it goes in before the first change) and the relay on the
+// version it came from, untouched, its release not held but tried again
+// later (cutShort). exits reports the exit's mark left: the relay is to be
+// rolled back.
+func (q requests) unended(st *nodeupdate.Status, cut string) (exits bool) {
+	st.Ended = time.Now().UTC()
+	if res, ok := nodeupdate.ReadResult(q.result); ok {
+		q.settle(st, res)
+		st.Held, st.Unfinished = holdIfBroke(*st), q.unfinished()
+		_ = os.Remove(q.result)
+		return false
+	}
+	st.State, st.Reason, st.Error = nodeupdate.Failed, nodeupdate.ReasonInterrupted, cut
+	exits = q.relay.exitMarked()
+	if v := q.nodeVersion(); !exits && untouchedSince(st.From, v) {
+		st.Untouched, st.To = true, v
+	}
+	st.Held, st.Unfinished = holdIfBroke(*st), q.unfinished()
+	return exits
+}
 
 // rolledBack runs the rollback and says in st how it went: rolled back
 // (interrupted), or not, open when the host was left open.
@@ -200,22 +245,8 @@ func (q requests) ended() error {
 	if st.State != nodeupdate.Running {
 		return nil // the runner wrote how it ended
 	}
-	st.Ended = time.Now().UTC()
-	if res, ok := nodeupdate.ReadResult(q.result); ok {
-		q.settle(&st, res)
-		st.Held, st.Unfinished = holdIfBroke(st), q.unfinished()
-		_ = os.Remove(q.result)
-		return q.writeStatus(st)
-	}
 	cut := "interrupted (" + cmp.Or(os.Getenv("SERVICE_RESULT"), "killed") + ")"
-	st.State, st.Reason = nodeupdate.Failed, nodeupdate.ReasonInterrupted
-	st.Error = cut + ": journalctl -u " + deploy.RelayUpdateService
-	m, marked := q.relay.mark()
-	exits := marked && m.By == markByExit
-	if v := q.nodeVersion(); !exits && untouchedSince(st.From, v) {
-		st.Untouched, st.To = true, v
-	}
-	st.Held, st.Unfinished = holdIfBroke(st), q.unfinished()
+	exits := q.unended(&st, cut+": journalctl -u "+deploy.RelayUpdateService)
 	// Failed first: the rollback may itself be cut short.
 	if err := q.writeStatus(st); err != nil {
 		return err
@@ -234,9 +265,11 @@ func (q requests) ended() error {
 }
 
 // recover is rayctl update -request-recover, the relay's recover unit, once
-// a boot while the mark is there: an update by the exit's word that a
-// shutdown or a power cut ended halfway is rolled back, its status says
-// so. A mark by hand stays for the person who ran it.
+// a boot while the mark or root's status is there: an update by the exit's
+// word that a shutdown or a power cut ended halfway is rolled back, its
+// status says so; one they ended before its first change, with no mark
+// yet, is settled (recoverCut). A mark by hand stays for the person who
+// ran it.
 func (q requests) recover() error {
 	if q.relay == nil {
 		fmt.Println("nothing to recover: this host is no relay")
@@ -245,8 +278,7 @@ func (q requests) recover() error {
 	m, marked := q.relay.mark()
 	switch {
 	case !marked:
-		fmt.Println("no update of the relay to recover")
-		return nil
+		return q.recoverCut()
 	case m.By != markByExit:
 		fmt.Println("an update or rollback of this relay by hand did not end: it is root's to recover (rayctl update status says how)")
 		return nil
@@ -271,6 +303,45 @@ func (q requests) recover() error {
 	}
 	if st.State != nodeupdate.RolledBack {
 		return errors.New(st.Error)
+	}
+	return nil
+}
+
+// recoverCut is the recover unit with no mark: root's status says a run by
+// the exit's word is under way, and none can be at the boot (the update
+// unit starts after this one). A shutdown or a power cut ended it before
+// its first change, the mark not yet in, or after its last, the mark gone
+// and the outcome not yet in the status. Settled as the unit's stop would
+// have (unended), with nothing to roll back: on the version it came from,
+// failed, interrupted and untouched, its release not held but tried again
+// later; else what the update wrote, or failed and held. Left running,
+// rayd relay would take it as cut short after a change and decline the
+// release as held for good, and root refuse it (spec §4.3).
+func (q requests) recoverCut() error {
+	running := func(st nodeupdate.Status) bool { return st.Kind == nodeupdate.Exit && st.State == nodeupdate.Running }
+	if !running(nodeupdate.ReadStatus(q.status)) {
+		fmt.Println("no update of the relay to recover")
+		return nil
+	}
+	if err := q.relay.lock(); err != nil {
+		return err
+	}
+	st := nodeupdate.ReadStatus(q.status)
+	if !running(st) {
+		fmt.Println("no update of the relay to recover")
+		return nil
+	}
+	q.unended(&st, "the update did not end (a shutdown, a power cut) and left no mark: journalctl -u "+deploy.RelayUpdateService)
+	if err := q.writeStatus(st); err != nil {
+		return err
+	}
+	switch {
+	case st.State != nodeupdate.Failed:
+		fmt.Printf("the update of the relay to %s ended before the boot: %s\n", st.Release, st.State)
+	case st.Untouched:
+		fmt.Printf("the update of the relay to %s was cut short before its first change: nothing changed, it is tried again later\n", st.Release)
+	default:
+		fmt.Printf("the update of the relay to %s was cut short, and the relay is not on %s: rayctl update status\n", st.Release, st.From)
 	}
 	return nil
 }

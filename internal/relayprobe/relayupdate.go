@@ -293,7 +293,7 @@ func (u *Updates) read(now time.Time) standing {
 	req, waiting := nodeupdate.PeekRequest(u.request)
 	stat := nodeupdate.ReadStatus(u.status)
 	r := &perimeterv1.RelayUpdate{Version: versionOf(u.version), Remote: nodeupdate.ReadPolicy(u.policy).Remote == "on", State: nodeupdate.Idle}
-	st := standing{r: r, held: stat.Holding(), busy: nodeupdate.Busy(stat, req, waiting, now)}
+	st := standing{r: r, busy: nodeupdate.Busy(stat, req, waiting, now)}
 	if stat.Kind == nodeupdate.Exit && !stat.Requested.IsZero() {
 		st.asked = append(st.asked, stat.Requested)
 	}
@@ -319,13 +319,20 @@ func (u *Updates) read(now time.Time) standing {
 		case stat.State == nodeupdate.Running && now.Sub(stat.Started) >= nodeupdate.Stale:
 			// Its runner died with no word (a power cut): the update was
 			// cut short. As nodeupdate.Settled, which says so in the
-			// node's words.
+			// node's words. This rayd relay still of the version it came
+			// from (an install restarts it with the release's), it changed
+			// nothing: its release is tried again later, not held for
+			// good, as root's recover unit would have it (§4.3).
 			r.State, r.Reason, st.since = nodeupdate.Failed, nodeupdate.ReasonInterrupted, stat.Started.Add(nodeupdate.Stale)
 			r.Error = "no outcome within " + nodeupdate.Stale.String() + ": cut short (rayctl update status on the relay)"
+			if isVersion(stat.From) && stat.From == u.version {
+				st.untouched, stat.Untouched = true, true
+			}
 		case stat.State == nodeupdate.Running || st.since.IsZero():
 			st.since = stat.Started
 		}
 	}
+	st.held = stat.Holding()
 	if !st.since.IsZero() {
 		r.At = st.since.Unix()
 	}

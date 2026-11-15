@@ -114,7 +114,7 @@ func (q requests) run() error {
 	}
 	// The releases the auto update leaves alone go on from status to status.
 	st := nodeupdate.Status{ID: r.ID, From: version, To: r.Version, Target: r.Version, Release: r.Tried(), By: r.By, Kind: r.Kind,
-		Requested: r.At, Started: now.UTC(), Held: nodeupdate.ReadStatus(q.status).Holding()}
+		Requested: r.At, Started: now.UTC(), Held: q.held()}
 	if err == nil {
 		err = q.stop()
 	}

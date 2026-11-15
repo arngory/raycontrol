@@ -419,7 +419,9 @@ func TestUpdateReports(t *testing.T) {
 		t.Fatalf("told %v", r)
 	}
 
-	// A run with no outcome for an hour (its runner killed with no word).
+	// A run with no outcome for an hour (its runner killed with no word);
+	// the relay on the version it came from, it is tried again 6 h on
+	// (TestStaleRunUntouched), not at once.
 	st = h.take()
 	h.advance(nodeupdate.Stale)
 	h.look()
@@ -445,6 +447,35 @@ func TestUpdateReports(t *testing.T) {
 		t.Fatalf("told %v", r)
 	}
 	h.none("a release held by a status of another kind")
+}
+
+// A run root's status still has as running an hour on (a power cut before
+// the update's first change, the recover unit not run) failed, interrupted;
+// with this rayd relay still of the version it came from, the relay did
+// not change: its release is not held but tried again 6 h after, as after
+// any failure that changed nothing. Of another version it is held.
+func TestStaleRunUntouched(t *testing.T) {
+	for _, c := range []struct {
+		from  string
+		again bool
+	}{{"v0.28.0", true}, {"v0.27.0", false}, {"", false}} {
+		h := newRelayHost(t, "v0.28.0")
+		h.remote("on")
+		started := h.clock.Add(-nodeupdate.Stale)
+		h.setStatus(nodeupdate.Status{ID: "a1", Kind: nodeupdate.Exit, State: nodeupdate.Running, From: c.from, To: "v0.29.0", Target: "v0.29.0",
+			Release: "v0.29.0", By: "exit", Requested: started, Started: started})
+		h.offer("a1", "v0.29.0")
+		h.look()
+		if r, _ := h.told(); r.State != nodeupdate.Failed || r.Reason != nodeupdate.ReasonInterrupted || r.Id != "a1" {
+			t.Fatalf("from %q: told %v", c.from, r)
+		}
+		h.none("at once")
+		h.advance(nodeupdate.RelayRetryAfter)
+		h.look()
+		if r, ok := h.waiting(); ok != c.again || ok && (r.ID != "a1" || r.Version != "v0.29.0") {
+			t.Errorf("from %q, 6 h on: %+v %v", c.from, r, ok)
+		}
+	}
 }
 
 // An exit older than the method (Unimplemented) is not called again until

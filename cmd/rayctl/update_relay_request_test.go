@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"os"
 	"path/filepath"
@@ -573,6 +574,95 @@ func TestRelayRequestRecover(t *testing.T) {
 	// On a node: nothing.
 	if _, err := captureStdout(t, nodeRequests().recover); err != nil {
 		t.Error(err)
+	}
+}
+
+// A power cut before the update's first change leaves root's status
+// running and no mark (it goes in before the first change): at the boot
+// the recover unit settles it, failed, interrupted, and with the relay on
+// the version it came from untouched, its release not held but tried
+// again later (spec §4.3); on another version, held. An outcome the update
+// wrote before the cut is taken. And a runner that finds such a status
+// left (the recover unit did not run) does not hold its release either.
+func TestRelayRequestPowerCutFirst(t *testing.T) {
+	running := func(f *fakeRunner) {
+		nodeupdate.WriteStatus(f.q.status, nodeupdate.Status{ID: "0a", State: nodeupdate.Running, From: "v0.27.0", To: "v0.27.1", Target: "v0.27.1",
+			Release: "v0.27.1", By: "exit", Kind: nodeupdate.Exit, Held: []string{"v0.26.9"}, Started: time.Now().Add(-time.Hour)})
+	}
+	for name, c := range map[string]struct {
+		set       func(*fakeRunner)
+		state     string
+		untouched bool
+		held      bool
+	}{
+		"on its version": {func(*fakeRunner) {}, nodeupdate.Failed, true, false},
+		"moved on":       {func(f *fakeRunner) { f.relayVer = "v0.27.1" }, nodeupdate.Failed, false, true},
+		"its outcome written": {func(f *fakeRunner) {
+			os.WriteFile(f.q.result, []byte(`{"state":"done","version":"v0.27.1","release":"v0.27.1"}`), 0o600)
+		}, nodeupdate.Done, false, false},
+	} {
+		f := newFakeRunner(t)
+		running(f)
+		c.set(f)
+		if _, err := captureStdout(t, f.q.recover); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		st := nodeupdate.ReadStatus(f.q.status)
+		if st.ID != "0a" || st.State != c.state || c.state == nodeupdate.Failed && st.Reason != nodeupdate.ReasonInterrupted || st.Untouched != c.untouched ||
+			slices.Contains(st.Held, "v0.27.1") != c.held || !slices.Contains(st.Held, "v0.26.9") || f.rolled != 0 || st.Ended.IsZero() || st.Unfinished {
+			t.Errorf("%s: %+v, rolled back %d", name, st, f.rolled)
+		}
+		if _, err := os.Stat(f.q.result); !os.IsNotExist(err) {
+			t.Errorf("%s: the result stays", name)
+		}
+	}
+	// Nothing to settle: a status that ended, of another kind, none.
+	for name, st := range map[string]nodeupdate.Status{
+		"ended":           {ID: "0a", State: nodeupdate.Done, Kind: nodeupdate.Exit, Release: "v0.27.1"},
+		"another kind":    {ID: "0a", State: nodeupdate.Running, Kind: nodeupdate.Local, Release: "v0.27.1"},
+		"no status, none": {},
+	} {
+		f := newFakeRunner(t)
+		f.locked = errors.New("the lock is not for this")
+		if st.State != "" {
+			nodeupdate.WriteStatus(f.q.status, st)
+		}
+		if _, err := captureStdout(t, f.q.recover); err != nil || nodeupdate.ReadStatus(f.q.status).State != cmp.Or(st.State, nodeupdate.Idle) {
+			t.Errorf("%s: %v %+v", name, err, nodeupdate.ReadStatus(f.q.status))
+		}
+	}
+	// The update lock held (root updating by hand): refused, nothing done.
+	f := newFakeRunner(t)
+	running(f)
+	f.locked = errors.New("another update is running")
+	if _, err := captureStdout(t, f.q.recover); err == nil || nodeupdate.ReadStatus(f.q.status).State != nodeupdate.Running {
+		t.Errorf("locked: %v %+v", err, nodeupdate.ReadStatus(f.q.status))
+	}
+
+	// The recover unit did not run (remote turned off and on since): the
+	// next request for the release runs.
+	f = newFakeRunner(t)
+	running(f)
+	f.rayctl(`echo '{"state":"done","version":"v0.27.1","release":"v0.27.1"}' > "$RAYCONTROL_UPDATE_RESULT"`)
+	f.request("v0.27.1")
+	if st, err := f.run(); err != nil || st.State != nodeupdate.Done || !slices.Equal(st.Held, []string{"v0.26.9"}) {
+		t.Errorf("asked again: %v %+v", err, st)
+	}
+	// Moved on, or the exit's mark there: held as before.
+	for name, set := range map[string]func(*fakeRunner){
+		"moved on": func(f *fakeRunner) { f.relayVer = "v0.27.1" },
+		"the exit's mark": func(f *fakeRunner) {
+			f.mark(relayMark{State: "updating", From: "v0.27.0", To: "v0.27.1", By: markByExit})
+		},
+	} {
+		f := newFakeRunner(t)
+		running(f)
+		set(f)
+		f.rayctl(`exit 9`)
+		f.request("v0.27.1")
+		if st, _ := f.run(); st.State != nodeupdate.Failed || st.Reason != nodeupdate.ReasonVersion || !slices.Contains(st.Held, "v0.27.1") {
+			t.Errorf("%s: %+v", name, st)
+		}
 	}
 }
 

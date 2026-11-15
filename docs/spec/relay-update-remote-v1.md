@@ -364,9 +364,10 @@ TimeoutStopSec=5min
 StateDirectory=raycontrol-update
 StateDirectoryMode=0755
 
-# raycontrol-relay-recover.service — раз за загрузку
+# raycontrol-relay-recover.service — раз за загрузку, при метке или при статусе root
 [Unit]
-ConditionPathExists=/var/lib/raycontrol-install/previous/relay.unfinished
+ConditionPathExists=|/var/lib/raycontrol-install/previous/relay.unfinished
+ConditionPathExists=|/var/lib/raycontrol-update/status.json
 Wants=network-online.target
 # после sshd: откат отказывает, пока на порту sshd никто не слушает
 After=network-online.target ssh.service ssh.socket sshd.service
@@ -445,12 +446,19 @@ WantedBy=multi-user.target
 3. **Выключение или потеря питания** посреди обновления: откат запустить юниты не может, хост открыт, `rayspa` выключен
    (node-update §5, строки 282-287, 311-314). После загрузки `raycontrol-relay-recover.service` при метке `by: exit`
    делает `rayctl update -rollback -yes`. Метку без `by` (обновление руками) он не трогает: там был человек, и ему
-   сказано, что делать.
+   сказано, что делать. Без метки, если статус root — `running` вида `exit` (выключение до первого изменения, метки
+   ещё нет, или после последнего, метка уже снята, а итога в статусе нет), он подводит итог, как `ExecStopPost`, без
+   отката: итог, который успело написать обновление, или `failed`, `interrupted` — `untouched`, если `rayd` relay на
+   `From`. Поэтому он запускается и при статусе root (`ConditionPathExists=|…`), не только при метке.
 
 Ни итога, ни метки `by: exit`, и `rayd` relay на той версии, с которой обновление шло (`From`), — обновление оборвалось
-до первого изменения (метка пишется до него): runner и `ExecStopPost` пишут `failed`, `interrupted`, `untouched`, и релиз
-не попадает в `held` (иначе `rayd relay` отвечал бы на него `held` навсегда). Другая версия, или вывод сказал о сбое
-после изменения (`update failed:`), — как раньше: `failed`, релиз в `held`.
+до первого изменения (метка пишется до него): runner, `ExecStopPost` и `recover` после загрузки пишут `failed`,
+`interrupted`, `untouched`, и релиз не попадает в `held` (иначе `rayd relay` отвечал бы на него `held` навсегда). Другая
+версия, или вывод сказал о сбое после изменения (`update failed:`), — как раньше: `failed`, релиз в `held`. Статус
+`running`, оставшийся без них (`recover` не запускался), так же не держит релиз: `rayd relay` через час считает его
+оборванным (`failed`, `interrupted`) и, если сам ещё на `From`, ничего не изменившим (повтор через 6 ч), а runner, взяв
+следующий запрос, не переносит этот релиз в `held` при том же условии, что и `recover` (`Status.Holding` не держит
+релиз `running`, о котором решено `untouched`).
 
 `-rollback` под юнитом проверяет SSH, как и руками (`update_relay.go:922-936`), но адрес сессии неизвестен — только
 предупреждение (`install_relay.go:960-962`). Порт sshd и то, что снимок пускает SSH с адресов администратора relay,
@@ -571,7 +579,7 @@ WantedBy=multi-user.target
 | ребёнок убит посреди | runner откатывает сам (§4.3) | `rolled_back` (`interrupted`) |
 | таймаут юнита | откат в `rayctl`, затем `ExecStopPost` | `rolled_back` или `failed` (`interrupted`) |
 | таймаут юнита или `systemctl stop` до первого изменения (GitHub медленно отдаёт файлы, ожидание замка) | `rayctl` и runner перехватывают SIGTERM с начала: скачивание обрывается, `failed`, `interrupted`, `untouched`; релиз не в `held`, повтор через 6 ч. `rayctl`, убитый сигналом без итога и без метки, на прежней версии — то же (§4.3) | `failed` (`interrupted`) |
-| выключение, перезагрузка, питание | хост открыт до загрузки; после — `recover` откатывает | до загрузки: последнее `running`; после — `rolled_back` (`interrupted`) |
+| выключение, перезагрузка, питание | хост открыт до загрузки; после — `recover` откатывает; до первого изменения — подводит итог без отката: ничего не тронуто, повтор через 6 ч | до загрузки: последнее `running`; после — `rolled_back` (`interrupted`); до первого изменения — `failed` (`interrupted`) |
 | откат не вернул relay | хост открыт, не пересылает; `rayspa` и `rayd relay` выключены | доклада нет: `running`, через час `failed` (`no_word`). Нужен root: SSH открыт отовсюду |
 | relay не докладывает (сеть) | работает дальше | через `TurnTimeout` очередь идёт дальше; `seen_at` стоит; через час после `running` — `failed` (`no_word`) |
 | relay выключен неделю и вернулся | при первом потоке получает предложение (версию, на которой выход сейчас) и сразу идёт на неё | `offered` → … |
@@ -877,7 +885,9 @@ relay      r5: unknown: no word from it (an older relay, or its rayd relay does 
 - **Остановка до первого изменения освобождает релиз** (§4.2, §4.3): runner и ребёнок (`stopOnSignal` под
   `RAYCONTROL_UPDATE_RESULT`) принимают SIGTERM юнита с начала: `failed`, `interrupted`, `untouched`, релиз не в
   `held`, повтор через 6 ч. В черновике `interrupted` бывал только после изменений, и такой обрыв держал релиз
-  навсегда. `ExecStopPost` берёт итог, если обновление успело его написать (убит один runner).
+  навсегда. `ExecStopPost` берёт итог, если обновление успело его написать (убит один runner). Так же — потеря
+  питания до первого изменения: `recover` запускается и при статусе root, без метки, и подводит итог без отката;
+  `rayd relay` и runner не держат релиз статуса `running`, если relay на `From` и метки нет.
 - **Юниты** (§4.1): `raycontrol-relay-recover.service` — после `ssh.service`, `ssh.socket` и `sshd.service` (откат
   отказывает, пока на порту sshd никто не слушает); `raycontrol-relay-update.service` — после recover. `open`
   выключает path-юнит отдельным вызовом и только если systemd его знает: после отката на релиз без этих юнитов

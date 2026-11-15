@@ -423,10 +423,12 @@ func (r Request) Tried() string {
 }
 
 // Holding is what s holds, and its own release when it is a run that
-// never ended (a power cut: no word, no stop hook): what the next status
-// carries over.
+// never ended (a power cut: no word, no stop hook) and may have changed
+// the host: what the next status carries over. A run known to have
+// changed nothing (Untouched: a relay's, cut short before its first
+// change) holds its release no more than a failed download does.
 func (s Status) Holding() []string {
-	if s.State == Running {
+	if s.State == Running && !s.Untouched {
 		return Hold(s.Held, s.Release)
 	}
 	return s.Held

@@ -1063,7 +1063,10 @@ func TestRelayUpdateUnits(t *testing.T) {
 			"StateDirectory=raycontrol-update\nStateDirectoryMode=0755\n", "Wants=network-online.target\n",
 			"After=network-online.target " + deploy.RelayRecover + "\n"},
 			[]string{"User=", "[Install]", "ProtectSystem", "NoNewPrivileges"}},
-		deploy.RelayRecover: {recover, []string{"ConditionPathExists=" + deploy.RelayUpdateMark + "\n", "Type=oneshot\n",
+		// On the mark, or on root's status: a run cut short before its
+		// first change (the mark goes in before it) has its status settled.
+		deploy.RelayRecover: {recover, []string{"ConditionPathExists=|" + deploy.RelayUpdateMark + "\n",
+			"ConditionPathExists=|" + nodeupdate.StatusFile + "\n", "Type=oneshot\n",
 			"ExecStart=/usr/local/bin/rayctl update -request-recover\n", "TimeoutStartSec=10min\n", "[Install]\nWantedBy=multi-user.target\n"},
 			[]string{"User=", "ExecStopPost", "ProtectSystem"}},
 	} {

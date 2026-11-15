@@ -566,6 +566,11 @@ func TestTriedAndHolding(t *testing.T) {
 	if h := (Status{State: Done, Release: "v0.19.3", Held: []string{"v0.19.1"}}).Holding(); !slices.Equal(h, []string{"v0.19.1"}) {
 		t.Errorf("done: %v", h)
 	}
+	// A run that never ended, known to have changed nothing (a relay's,
+	// cut before its first change): its release is not held.
+	if h := (Status{State: Running, Release: "v0.19.3", Held: []string{"v0.19.1"}, Untouched: true}).Holding(); !slices.Equal(h, []string{"v0.19.1"}) {
+		t.Errorf("a run that never ended, untouched: %v", h)
+	}
 	if err := (Request{ID: NewID(), Kind: Remote, Version: "latest", Release: "v1", By: "x", At: time.Now()}).Check(NodeKinds, "v0.19.0", nil, time.Now()); err == nil {
 		t.Error("a release hint that is no release")
 	}
