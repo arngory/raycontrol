@@ -105,7 +105,7 @@ func TestNaiveRoutesOneRestartAnEpoch(t *testing.T) {
 
 	// The switch: one change of front.json, the old name still served.
 	beforeSwitch := renderFront(t, ctx, st)
-	rotate(created.Add(90*day - provision.RealityEarly))
+	rotate(created.Add(90 * day))
 	sw := naiveNames(t, ctx, st, "nv")
 	if sw.SNI != first.SNINext || sw.SNIPrev != first.SNI {
 		t.Fatalf("not switched: %+v", sw)

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/pem"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/store"
+	"github.com/arngory/raycontrol/internal/testca"
 )
 
 // rayctl service rotate on naive (R4-42) asks for a switch of its server
@@ -81,6 +83,65 @@ func TestRotateNaiveName(t *testing.T) {
 	if r, err := c.SetServiceOption(ctx, connect.NewRequest(&nodev1.SetServiceOptionRequest{Name: "nv", Key: "rotate_sni", Value: "on"})); err != nil ||
 		provision.ParseNaiveState(srvService(t, srv, "nv")).RotateSNI == nil {
 		t.Fatalf("rotate_sni=on: %v %v", r, err)
+	}
+}
+
+// The client's interop stand (rayd serve -supervise -acme-directory "",
+// test/supervise/run.sh): a wildcard certificate of the operator's
+// (rayctl service cert site), a short lead (rayd serve -cred-lead 2m).
+// rayctl service rotate naive publishes the next name at once, the
+// switch a lead away, and -now switches in the same round; the previous
+// name stays in the front's routes.
+func TestRotateNaiveNameOnStand(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	srv.RealityLead = 2 * time.Minute
+	e := provision.RealityEpoch{Lead: srv.RealityLead, Prepare: 24 * time.Hour, Grace: 48 * time.Hour, NaivePeriod: 90 * 24 * time.Hour}
+	ctx := context.Background()
+	// rayd's rotation loop runs a round at each request.
+	srv.Rotate = func() {
+		if _, err := provision.RotateReality(ctx, srv.Store, time.Now(), e, nil, nil); err != nil {
+			t.Error(err)
+		}
+	}
+	c := NewUnixClient(sock)
+	for _, s := range [][2]string{{"reality", "r"}, {"naive", "nv"}} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: s[0], Name: s[1]})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"nv"}})); err != nil {
+		t.Fatal(err)
+	}
+	ca, err := testca.New([]string{"*.example.com"}, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provision.SetCertificate(ctx, srv.Store, "site", ca.ChainPEM, ca.KeyPEM, time.Now(), false); err != nil {
+		t.Fatal(err)
+	}
+	first := provision.ParseNaiveState(srvService(t, srv, "nv"))
+	start := time.Now()
+	if _, err := c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "nv"})); err != nil {
+		t.Fatal(err)
+	}
+	ns := provision.ParseNaiveState(srvService(t, srv, "nv"))
+	if ns.SNI != first.SNI || ns.SNINext != first.SNINext || ns.NextFrom < start.Add(2*time.Minute).Unix() || ns.NextFrom > time.Now().Add(2*time.Minute).Unix() {
+		t.Fatalf("published: %+v", ns)
+	}
+	// The user's export, as the subscription: the next line under the new
+	// name from the switch's time.
+	ex, err := c.ExportUser(ctx, connect.NewRequest(&nodev1.ExportUserRequest{Name: "alice"}))
+	if err != nil || len(ex.Msg.Profiles) != 1 {
+		t.Fatalf("export: %v %v", ex, err)
+	}
+	if p := ex.Msg.Profiles[0]; !strings.Contains(p.Link, "sni="+first.SNI) || !strings.Contains(p.NextLink, "sni="+first.SNINext) || p.NextFrom != ns.NextFrom {
+		t.Fatalf("profile %+v", p)
+	}
+	if _, err := c.RotateService(ctx, connect.NewRequest(&nodev1.RotateServiceRequest{Name: "nv", Now: true})); err != nil {
+		t.Fatal(err)
+	}
+	if sw := provision.ParseNaiveState(srvService(t, srv, "nv")); sw.SNI != first.SNINext || sw.SNIPrev != first.SNI || sw.NextFrom != 0 {
+		t.Fatalf("after -now: %+v", sw)
 	}
 }
 

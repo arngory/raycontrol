@@ -12,7 +12,8 @@ import (
 )
 
 // naiveEpoch is rayd's default schedule: 90 days, published 3 days ahead,
-// a day for a certificate, the switch 2 minutes early as REALITY's.
+// a day for a certificate, REALITY's grace (a naive switch joined to
+// REALITY's comes 2 minutes early with it).
 var naiveEpoch = RealityEpoch{Period: 90 * day, Lead: 3 * day, Prepare: day, Grace: 2 * day, NaivePeriod: 90 * day}
 
 // naiveNode is a node with REALITY on its site, naive beside it, and a
@@ -111,10 +112,10 @@ func TestNaiveNameEpoch(t *testing.T) {
 	if pub.NextFrom != created.Add(90*day).Unix() || pub.SNINext != first.SNINext || pub.SNI != first.SNI || pub.PreparedAt != 0 {
 		t.Fatalf("published: %+v", pub)
 	}
-	if n := rotateAt(t, ctx, st, created.Add(90*day-RealityEarly-time.Second), e); n != 0 {
+	if n := rotateAt(t, ctx, st, created.Add(90*day-time.Second), e); n != 0 {
 		t.Fatal("switched early")
 	}
-	if n := rotateAt(t, ctx, st, created.Add(90*day-RealityEarly), e); n != 1 {
+	if n := rotateAt(t, ctx, st, created.Add(90*day), e); n != 1 {
 		t.Fatal("not switched")
 	}
 	sw := naiveState(t, ctx, st, "nv")
@@ -282,7 +283,7 @@ func TestNaiveNameRequest(t *testing.T) {
 		if got := naiveState(t, ctx, st, "nv"); got.NextFrom != from.Unix() || got.PreparedAt != 0 {
 			t.Fatalf("published: %+v", got)
 		}
-		if n := rotateAt(t, ctx, st, from.Add(-RealityEarly-time.Second), naiveEpoch); n != 0 {
+		if n := rotateAt(t, ctx, st, from.Add(-time.Second), naiveEpoch); n != 0 {
 			t.Fatal("switched early")
 		}
 		rotateAt(t, ctx, st, from, naiveEpoch)

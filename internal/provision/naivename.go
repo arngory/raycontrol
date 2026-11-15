@@ -146,6 +146,28 @@ func realityNextSwitch(r store.Service, e RealityEpoch) int64 {
 	return math.MaxInt64
 }
 
+// naiveEarly is how long before its time a naive switch happens: as early
+// as a REALITY of the same site switching at that time (RealityEarly with
+// a grace period; published for it, or switched for it in this round), so
+// that both are in one round; otherwise not early at all. naive itself
+// needs none: the new name is routed already, and a client whose clock is
+// ahead finds it served. (A lead as short as RealityEarly, as on a test
+// stand, would otherwise switch at the publication.)
+func naiveEarly(all []store.Service, svc store.Service, from int64, e RealityEpoch) int64 {
+	if e.Grace <= 0 {
+		return 0
+	}
+	for _, r := range all {
+		if r.Kind != "reality" || !r.Enabled || siteOf(r) == "" || siteOf(r) != siteOf(svc) {
+			continue
+		}
+		if rs := ParseRealityState(r); rs.NextFrom == from || rs.RotatedAt == from {
+			return int64(RealityEarly / time.Second)
+		}
+	}
+	return 0
+}
+
 func abs(x int64) int64 {
 	if x < 0 {
 		return -x
@@ -168,12 +190,8 @@ func rotateNaive(ctx context.Context, st *store.Store, all []store.Service, svc 
 		return true, st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: settings})
 	}
 	lead := int64(e.Lead / time.Second)
-	early := int64(0)
-	if e.Grace > 0 {
-		early = int64(RealityEarly / time.Second) // as REALITY's switch, which this one may join
-	}
 	if state.NextFrom != 0 {
-		if t < state.NextFrom-early {
+		if t < state.NextFrom-naiveEarly(all, svc, state.NextFrom, e) {
 			return false, nil
 		}
 		return true, switchNaive(ctx, st, all, svc, state, log)
@@ -212,7 +230,7 @@ func rotateNaive(ctx context.Context, st *store.Store, all []store.Service, svc 
 		return false, err
 	}
 	log.Info("naive: next server name published", "service", svc.Name, "switch", time.Unix(from, 0).UTC())
-	if t < from-early {
+	if t < from-naiveEarly(all, svc, from, e) {
 		return true, nil
 	}
 	// The operator's switch at once: the name is routed already.
