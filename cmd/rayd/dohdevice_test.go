@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,9 +34,39 @@ import (
 // the sibling's goes on being answered without a new subscription. A
 // stranger gets the site's answer throughout, as before.
 func TestDoHDeviceTokens(t *testing.T) {
+	// The silent answer reads the global SilentHold in the server's
+	// goroutines, which may still be in a handler (an HTTP/3 stream's, past
+	// the client's reset) when the test is over: it goes back only once the
+	// servers are stopped and every handler has returned. Registered first,
+	// this cleanup runs last.
 	old := site.SilentHold
 	site.SilentHold = 2 * time.Second
-	defer func() { site.SilentHold = old }()
+	var inMu sync.Mutex
+	idle := sync.NewCond(&inMu)
+	in := 0
+	t.Cleanup(func() {
+		inMu.Lock()
+		for in > 0 {
+			idle.Wait()
+		}
+		inMu.Unlock()
+		site.SilentHold = old
+	})
+	tracked := func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			inMu.Lock()
+			in++
+			inMu.Unlock()
+			defer func() {
+				inMu.Lock()
+				if in--; in == 0 {
+					idle.Broadcast()
+				}
+				inMu.Unlock()
+			}()
+			h.ServeHTTP(w, r)
+		})
+	}
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
 	if err != nil {
@@ -96,10 +127,10 @@ func TestDoHDeviceTokens(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		srv := dohHTTPServer(h, fixedCert(cert), log)
+		srv := dohHTTPServer(tracked(h), fixedCert(cert), log)
 		go func() { _ = srv.ServeTLS(ln, "", "") }()
 		h2 := &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: naiveClientTLS("h2")}
-		h3addr := serveQUIC(t, h, cert, quicOptions{})
+		h3addr := serveQUIC(t, tracked(h), cert, quicOptions{})
 		h3 := &http3.Transport{TLSClientConfig: naiveClientTLS(), QUICConfig: &quic.Config{MaxIdleTimeout: 30 * time.Second},
 			Dial: func(ctx context.Context, _ string, tlsConf *tls.Config, conf *quic.Config) (*quic.Conn, error) {
 				return quic.DialAddrEarly(ctx, h3addr, tlsConf, conf)
@@ -154,7 +185,7 @@ func TestDoHDeviceTokens(t *testing.T) {
 			expect("a stranger", proto, stranger, strangerWant, false)
 		}
 
-		// The revocation, and the Forget serveDoH makes at every change.
+		// The revocation, and the Forget its change hook makes (serveDoH).
 		if _, err := st.RevokeDevice(ctx, devA.ID); err != nil {
 			t.Fatal(err)
 		}
