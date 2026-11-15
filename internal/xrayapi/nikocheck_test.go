@@ -41,6 +41,8 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 	var ids []int64
 	for _, s := range []store.Service{
 		{Kind: "reality", Name: "reality"},
+		// A second REALITY on the site: its own name, one route a name.
+		{Kind: "reality", Name: "reality2"},
 		{Kind: "hy2-obfs", Name: "hy2o"},
 		{Kind: "hy2-masq", Name: "hy2m"},
 		{Kind: "naive", Name: "naive"},

@@ -602,6 +602,21 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			}
 			settings["site"] = site.Name
 			settings["sni"] = SiteName(site)
+			// A second REALITY on the site: a name of its own. The front
+			// routes a name to one service, and refused its whole config
+			// with the site's name on two.
+			if all, err = st.ListServices(ctx); err != nil {
+				return svc, err
+			}
+			if slices.ContainsFunc(all, func(s store.Service) bool {
+				return s.Kind == "reality" && strings.EqualFold(SiteName(s), SiteName(site)) // SiteName: the sni setting
+			}) {
+				name, err := newZone(ctx, st, all)
+				if err != nil {
+					return svc, err
+				}
+				settings["sni"] = name
+			}
 		}
 		if err := realitySettings(settings); err != nil {
 			return svc, err

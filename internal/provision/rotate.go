@@ -57,7 +57,7 @@ type RealityState struct {
 	RotateAt   int64  `json:"rotate_at,omitempty"`   // switch requested by the operator for this time
 	Urgent     bool   `json:"urgent,omitempty"`      // switch at once, the current set not kept (leaked keys)
 	PrevUntil  int64  `json:"prev_until,omitempty"`  // the previous set is accepted until then (R4-19)
-	SNIPrev    string `json:"sni_prev,omitempty"`    // the server name of the previous set
+	SNIPrev    string `json:"sni_prev,omitempty"`    // the server name of the previous set, routed by the front until the next switch
 }
 
 // ParseRealityState reads the rotation state of a service.
@@ -289,9 +289,11 @@ func switchReality(ctx context.Context, st *store.Store, all []store.Service, sv
 	return nil
 }
 
-// dropPrevReality ends the grace period of the previous set.
+// dropPrevReality ends the grace period of the previous set. Its name stays
+// in the front's route until the next switch (render): the end of the grace
+// changes no route, so it restarts no front.
 func dropPrevReality(ctx context.Context, st *store.Store, svc store.Service, log *slog.Logger) error {
-	settings, err := setFields(svc.Settings, map[string]any{"prev_until": nil, "sni_prev": nil})
+	settings, err := setFields(svc.Settings, map[string]any{"prev_until": nil})
 	if err != nil {
 		return err
 	}

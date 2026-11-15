@@ -572,6 +572,33 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 	var tcpRoutes []tcpRoute
 	tcpDefault := "" // the first REALITY service: its target answers like the site
 	backends := map[string]backendRef{}
+	// A name the front routes, TCP and UDP apart: its service. niko-server
+	// refuses its whole config when two routes carry one name (TCP 443, UDP
+	// 443 and UDP 53 go down with it): the first service to claim a name
+	// has it.
+	tcpNames, udpNames := map[string]string{}, map[string]string{}
+	// claim takes names in a table for a service. The first is the one in
+	// its links: taken by another service, the service is not routed at all
+	// (an error, as a zone that nests). The others (a previous or next name)
+	// are left out of its route when another has them.
+	claim := func(table map[string]string, service string, names ...string) ([]string, error) {
+		var out []string
+		for i, n := range names {
+			key := provision.CanonicalZone(n)
+			switch other, taken := table[key]; {
+			case key == "" && i == 0:
+				return nil, errors.New("no server name")
+			case key == "" || other == service:
+			case taken && i == 0:
+				return nil, fmt.Errorf("server name %s is routed to %s already: give one of them another", n, other)
+			case taken:
+			default:
+				table[key] = service
+				out = append(out, n)
+			}
+		}
+		return out, nil
+	}
 
 	// one renders a service. On an error nothing of it is kept, and the
 	// others go on (Q-1): one broken service must not hold back users,
@@ -673,7 +700,16 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "reality"), Mode: "proxy-v2", UID: p.PeerUID(s.UID)}
 				var rs RealitySettings
 				_ = json.Unmarshal([]byte(s.Settings), &rs)
-				tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{rs.SNI}, Backend: s.Name})
+				// The name before the last switch too, until the next one: a
+				// client still on it reaches this REALITY (its previous keys
+				// in their grace, R4-19; after it, its site), not the first
+				// REALITY's, which is the default. The grace's end changes
+				// no route, and no restart of the front comes with it.
+				names, err := claim(tcpNames, s.Name, rs.SNI, provision.ParseRealityState(s.Service).SNIPrev)
+				if err != nil {
+					return err
+				}
+				tcpRoutes = append(tcpRoutes, tcpRoute{SNI: names, Backend: s.Name})
 				if tcpDefault == "" {
 					tcpDefault = s.Name
 				}
@@ -696,7 +732,11 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 					SNI string `json:"sni"`
 				}
 				_ = json.Unmarshal([]byte(s.Settings), &st)
-				udpRoutes = append(udpRoutes, udpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: s.Name})
+				names, err := claim(udpNames, s.Name, strings.ToLower(st.SNI))
+				if err != nil {
+					return err
+				}
+				udpRoutes = append(udpRoutes, udpRoute{SNI: names, Backend: s.Name})
 			}
 		case "site":
 			fs, err := siteFiles(s, m, p)
@@ -734,11 +774,19 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				quic = backendRef{Socket: p.NaiveQUICSocket(s.Name), Mode: "packet", UID: p.PeerUID(s.UID)}
 			}
 			backends[s.Name] = ref
-			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: s.Name})
+			names, err := claim(tcpNames, s.Name, strings.ToLower(st.SNI))
+			if err != nil {
+				return err
+			}
+			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: names, Backend: s.Name})
 			// The same name over QUIC: DoH3 and naive-quic (R3-5).
 			if m.FrontUDP {
 				backends[quicBackend(s.Name)] = quic
-				udpRoutes = append(udpRoutes, udpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: quicBackend(s.Name)})
+				names, err := claim(udpNames, s.Name, strings.ToLower(st.SNI))
+				if err != nil {
+					return err
+				}
+				udpRoutes = append(udpRoutes, udpRoute{SNI: names, Backend: quicBackend(s.Name)})
 			}
 		case "yggdrasil":
 			// A TLS link behind tcpmux by name (R4-15), into inner.
@@ -760,7 +808,11 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			files = append(files, fs...)
 			st, _, _ := YggdrasilNode(s)
 			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "fd"), Mode: "fd", UID: p.PeerUID(s.UID)}
-			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: s.Name})
+			names, err := claim(tcpNames, s.Name, strings.ToLower(st.SNI))
+			if err != nil {
+				return err
+			}
+			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: names, Backend: s.Name})
 		case "ssh", "subscription", "api":
 			// Not data-plane processes.
 		default:
@@ -779,6 +831,14 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			for z, name := range taken {
 				if name == s.Name {
 					delete(taken, z)
+				}
+			}
+			// Its names likewise: a later service may have them.
+			for _, table := range []map[string]string{tcpNames, udpNames} {
+				for n, name := range table {
+					if name == s.Name {
+						delete(table, n)
+					}
 				}
 			}
 			delete(backends, s.Name)

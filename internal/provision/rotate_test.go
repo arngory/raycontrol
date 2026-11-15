@@ -346,7 +346,9 @@ func TestRealityRotationGrace(t *testing.T) {
 		t.Fatal("previous keys kept")
 	}
 	_, state, secrets = reload(t, ctx, st, "r")
-	if state.PrevUntil != 0 || state.SNIPrev != "" {
+	// The name stays for the front's route until the next switch: the end
+	// of the grace restarts no front.
+	if state.PrevUntil != 0 || state.SNIPrev != oldName {
 		t.Fatalf("after the grace period: %+v", state)
 	}
 	for _, name := range RealitySecrets {
