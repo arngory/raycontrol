@@ -189,13 +189,15 @@ for f in /usr/local/bin/rayd /usr/local/bin/rayctl /var/lib/raycontrol /var/lib/
 done
 # shellcheck disable=SC2016 # expands in the container
 x sh -c 'kill "$(cat /run/listen.pid)"; rm /run/listen.pid'
-# A port chosen with -ports that something holds: the check names it.
-x sh -c '/opt/rc/listen udp:40050 & echo $! > /run/listen.pid'
-if out="$(x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -check -host "$ip" -ports spa=40000-40099,sub=40100 2>&1)"; then
+# A port chosen with -ports that something holds: the check names it. The
+# ports are below the ephemeral range (32768-60999): Docker's embedded DNS
+# on 127.0.0.11 listens on a random port there, and once took one of these.
+x sh -c '/opt/rc/listen udp:23050 & echo $! > /run/listen.pid'
+if out="$(x env RAYCONTROL_LOCAL_DIR=/opt/rc bash /opt/install/bootstrap.sh -check -host "$ip" -ports spa=23000-23099,sub=23100 2>&1)"; then
 	fail "bootstrap -check passed with a chosen port taken: $out"
 fi
-[[ $out == *"FAIL  port tcp+udp 40000-40099: spa (-ports): udp "*":40050 is taken by listen"* &&
-	$out == *"ok    port tcp+udp 40100: sub (-ports): free"* ]] || fail "chosen ports: $out"
+[[ $out == *"FAIL  port tcp+udp 23000-23099: spa (-ports): "*"udp "*":23050 is taken by listen"* &&
+	$out == *"ok    port tcp+udp 23100: sub (-ports): free"* ]] || fail "chosen ports: $out"
 # shellcheck disable=SC2016 # expands in the container
 x sh -c 'kill "$(cat /run/listen.pid)"; rm /run/listen.pid'
 
