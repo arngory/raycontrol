@@ -65,9 +65,15 @@ jobs:
       # A relay in the kernel between three namespaces (relay-v1 §3.1).
       - run: sudo test/relay/run.sh ./perimeter.test
       # The same with the real parts: the exit's feed, rayspa -relay and
-      # rayd relay (the relay's probe endpoint, relay-v1 §9).
-      - run: go test -c -o api.test ./internal/api && go build -o rayspa ./cmd/rayspa && go build -o rayd ./cmd/rayd
-      - run: sudo test/relay/e2e.sh ./api.test ./rayspa ./rayd
+      # rayd relay (the relay's probe endpoint, relay-v1 §9), and the
+      # exit's word on the relay's updates (relay-update-remote-v1 §12.2):
+      # rayd a release build, as rayd relay takes offers only then, and
+      # against v0.26.0's rayd relay and exit (its api.test).
+      - run: >-
+          go test -c -o api.test ./internal/api && go build -o rayspa ./cmd/rayspa &&
+          go build -ldflags "-X main.version=v0.90.0" -o rayd ./cmd/rayd
+      - run: test/relay/previous.sh old v0.26.0
+      - run: sudo test/relay/e2e.sh ./api.test ./rayspa ./rayd old/api.test old/rayd
       # rayd credential as root, the runtime directory a mount of its own as
       # in the unit's mount namespace; the reserved ports in a network
       # namespace of their own (the test job runs them unprivileged).
