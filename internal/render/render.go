@@ -240,9 +240,14 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 			}
 		}
 		// A naive service from before its key of QUIC stateless resets
-		// gets it now.
+		// gets it now; one from before R4-42 its next name, which the
+		// front routes from this render on, before any subscription has
+		// it.
 		if s.Kind == "naive" {
 			if secrets[provision.SecretQUICReset], err = provision.EnsureQUICResetKey(ctx, st, s, secrets); err != nil {
+				return m, err
+			}
+			if s, err = provision.EnsureNaiveNext(ctx, st, s); err != nil {
 				return m, err
 			}
 		}
@@ -774,15 +779,27 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				quic = backendRef{Socket: p.NaiveQUICSocket(s.Name), Mode: "packet", UID: p.PeerUID(s.UID)}
 			}
 			backends[s.Name] = ref
-			names, err := claim(tcpNames, s.Name, strings.ToLower(st.SNI))
+			// naive: its name, the one before its last switch and the one
+			// after its next (R4-42), whatever is published: the routes,
+			// and front.json with them, change at a switch only, which
+			// restarts the front (it reads its routes at its start). A
+			// client that moves early, or back, finds both names served.
+			own := []string{strings.ToLower(st.SNI)}
+			if s.Kind == "naive" {
+				ns := provision.ParseNaiveState(s.Service)
+				own = append(own, strings.ToLower(ns.SNIPrev), strings.ToLower(ns.SNINext))
+			}
+			names, err := claim(tcpNames, s.Name, own...)
 			if err != nil {
 				return err
 			}
 			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: names, Backend: s.Name})
-			// The same name over QUIC: DoH3 and naive-quic (R3-5).
+			// The same names over QUIC: DoH3 and naive-quic (R3-5). An h3
+			// client on a name not routed gets silence from the front, not
+			// an error (niko-server's udpfront drops it).
 			if m.FrontUDP {
 				backends[quicBackend(s.Name)] = quic
-				names, err := claim(udpNames, s.Name, strings.ToLower(st.SNI))
+				names, err := claim(udpNames, s.Name, own...)
 				if err != nil {
 					return err
 				}

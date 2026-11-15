@@ -132,20 +132,18 @@ func naiveSwitch(ctx context.Context, st *store.Store, all []store.Service, svc 
 }
 
 // realityNextSwitch is when a REALITY service switches next: its published
-// time, or the one it is due at (MaxInt64: none).
+// time, or its scheduled one (MaxInt64: none). A switch the operator asked
+// for counts once published: its time is set then, from the publication
+// on (a lead after it), not at the request.
 func realityNextSwitch(r store.Service, e RealityEpoch) int64 {
 	rs := ParseRealityState(r)
-	if rs.NextFrom != 0 {
+	switch {
+	case rs.NextFrom != 0:
 		return rs.NextFrom
+	case e.Period > 0:
+		return rs.RotatedAt + int64(e.Period/time.Second)
 	}
-	due := int64(math.MaxInt64)
-	if e.Period > 0 {
-		due = rs.RotatedAt + int64(e.Period/time.Second)
-	}
-	if rs.RotateAt != 0 {
-		due = min(due, rs.RotateAt)
-	}
-	return due
+	return math.MaxInt64
 }
 
 func abs(x int64) int64 {

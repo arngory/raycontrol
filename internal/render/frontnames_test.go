@@ -140,7 +140,9 @@ func TestFrontNamesOneService(t *testing.T) {
 	if before.err != nil {
 		t.Fatal(before.err)
 	}
-	want := map[string]string{sni(t, ctx, st, "r1"): "r1", sni(t, ctx, st, "r2"): "r2", sni(t, ctx, st, "nv"): "nv", sni(t, ctx, st, "dh"): "dh"}
+	nv, _ := st.ServiceByName(ctx, "nv")
+	want := map[string]string{sni(t, ctx, st, "r1"): "r1", sni(t, ctx, st, "r2"): "r2", sni(t, ctx, st, "nv"): "nv", sni(t, ctx, st, "dh"): "dh",
+		provision.ParseNaiveState(nv).SNINext: "nv"} // naive's next name, routed ahead (R4-42)
 	if before.def != "r1" || len(before.tcp) != len(want) {
 		t.Fatalf("default %s, routes %v", before.def, before.tcp)
 	}
@@ -149,7 +151,7 @@ func TestFrontNamesOneService(t *testing.T) {
 			t.Errorf("%s routed to %q, want %s", n, before.tcp[n], svc)
 		}
 	}
-	if before.udp[sni(t, ctx, st, "hy")] != "hy" || len(before.udp) != 3 {
+	if before.udp[sni(t, ctx, st, "hy")] != "hy" || len(before.udp) != 4 {
 		t.Errorf("UDP routes %v", before.udp)
 	}
 
