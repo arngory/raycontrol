@@ -139,7 +139,7 @@ func (q requests) run() error {
 		st.State = nodeupdate.Running
 	}
 	st.Unfinished = q.unfinished()
-	werr := nodeupdate.WriteStatus(q.status, st)
+	werr := q.writeStatus(st)
 	if rerr := nodeupdate.RemoveRequest(q.request); werr == nil {
 		werr = rerr
 	}
@@ -190,7 +190,7 @@ func (q requests) run() error {
 	st.Unfinished = q.unfinished()
 	st.Held = holdIfBroke(st)
 	_ = os.Remove(q.result)
-	if err := nodeupdate.WriteStatus(q.status, st); err != nil {
+	if err := q.writeStatus(st); err != nil {
 		return errors.Join(runErr, err)
 	}
 	return runErr

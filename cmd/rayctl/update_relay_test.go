@@ -16,9 +16,11 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -1432,6 +1434,170 @@ func TestRelayRollbackWhole(t *testing.T) {
 	f.write("state/snapshot.pb", "a snapshot the update's install took")
 	if _, err := f.rollback(true); err != nil || f.read("state/snapshot.pb") != snapshotWith(t, true) || f.asked != 1 {
 		t.Errorf("marked, not open: %v %q, asked %d", err, f.read("state/snapshot.pb"), f.asked)
+	}
+}
+
+// statusGroup makes the relay's status group this test's own (rayd's is
+// not here).
+func statusGroup(t *testing.T) int {
+	t.Helper()
+	g, err := user.LookupGroupId(strconv.Itoa(os.Getgid()))
+	if err != nil {
+		t.Skipf("no name for gid %d: %v", os.Getgid(), err)
+	}
+	saved := relayStatusGroup
+	t.Cleanup(func() { relayStatusGroup = saved })
+	relayStatusGroup = g.Name
+	return os.Getgid()
+}
+
+// statusMode is the mode and group of a status file.
+func statusMode(t *testing.T, path string) (os.FileMode, int) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Mode().Perm(), int(fi.Sys().(*syscall.Stat_t).Gid)
+}
+
+// A rollback by hand on the relay is root's own repair, and its status
+// says so (kind local, which rayd relay tells the exit as none of its
+// offers): not the update by the exit's word that failed and left the
+// host open, unfinished, nor done for the release rolled back from, which
+// rayd relay would take for the one it runs. That release is held. Under
+// the runner (its ExecStopPost, the recover unit) the runner writes the
+// status, not the rollback.
+func TestRelayRollbackNoted(t *testing.T) {
+	gid := statusGroup(t)
+	for name, c := range map[string]struct {
+		last      nodeupdate.Status
+		marked    bool
+		installed string
+	}{
+		"after the exit's update, done": {last: nodeupdate.Status{ID: "0a", State: nodeupdate.Done, From: "v0.26.0", To: "v0.26.1", Target: "v0.26.1",
+			Release: "v0.26.1", By: "exit", Kind: nodeupdate.Exit, Held: []string{"v0.25.9"}}, installed: "v0.26.1"},
+		"after the exit's update left the host open": {last: nodeupdate.Status{ID: "0b", State: nodeupdate.Failed, From: "v0.26.0", Target: "v0.26.1",
+			Release: "v0.26.1", By: "exit", Kind: nodeupdate.Exit, Reason: nodeupdate.ReasonOpen, Unfinished: true, Held: []string{"v0.25.9", "v0.26.1"}},
+			marked: true, installed: "v0.26.0"},
+	} {
+		f := newFakeRelay(t)
+		f.env.status = f.at("update/status.json")
+		os.Mkdir(f.at("update"), 0o755)
+		nodeupdate.WriteStatus(f.env.status, c.last)
+		f.env.ops.keep("v0.26.0")
+		f.write("bin/rayspa", "rayspa v0.26.1")
+		if c.marked {
+			f.env.ops.mark(relayMark{State: "open", From: "v0.26.0", To: "v0.26.1", By: markByExit})
+			f.open = true
+		}
+		// The rayctl that runs it: the new one after a good update, maybe
+		// still the old one after one that did not end (its mark says).
+		if _, err := captureStdout(t, func() error { return f.env.update(context.Background(), updateOpts{yes: true}, true, c.installed) }); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		st := nodeupdate.ReadStatus(f.env.status)
+		if st.Kind != nodeupdate.Local || st.State != nodeupdate.RolledBack || st.To != "v0.26.0" || st.Unfinished || st.ID == c.last.ID ||
+			!slices.Equal(st.Held, []string{"v0.25.9", "v0.26.1"}) || !strings.HasPrefix(st.By, "root") {
+			t.Errorf("%s: %+v", name, st)
+		}
+		if mode, g := statusMode(t, f.env.status); mode != 0o640 || g != gid {
+			t.Errorf("%s: mode %v, group %d", name, mode, g)
+		}
+	}
+	// The release rolled back from is the one that ran, by hand after a
+	// good update.
+	f := newFakeRelay(t)
+	f.env.status = f.at("update/status.json")
+	os.Mkdir(f.at("update"), 0o755)
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.rollback(true); err != nil {
+		t.Fatal(err)
+	}
+	if st := nodeupdate.ReadStatus(f.env.status); st.From != "v0.26.1" || st.Release != "v0.26.1" || !slices.Equal(st.Held, []string{"v0.26.1"}) {
+		t.Errorf("by hand after a good update: %+v", st)
+	}
+	// Under the runner: nothing written.
+	f = newFakeRelay(t)
+	f.env.status = f.at("update/status.json")
+	os.Mkdir(f.at("update"), 0o755)
+	last := nodeupdate.Status{ID: "0c", State: nodeupdate.Failed, Kind: nodeupdate.Exit, Target: "v0.26.1", Reason: nodeupdate.ReasonInterrupted}
+	nodeupdate.WriteStatus(f.env.status, last)
+	f.env.ops.keep("v0.26.0")
+	t.Setenv(rollbackByRunnerEnv, "1")
+	if _, err := f.rollback(true); err != nil {
+		t.Fatal(err)
+	}
+	if st := nodeupdate.ReadStatus(f.env.status); st.ID != "0c" {
+		t.Errorf("under the runner: %+v", st)
+	}
+	// No update by the exit's word ever ran: no status made.
+	t.Setenv(rollbackByRunnerEnv, "")
+	f = newFakeRelay(t)
+	f.env.status = f.at("none/status.json")
+	f.env.ops.keep("v0.26.0")
+	if _, err := f.rollback(true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(f.at("none")); !os.IsNotExist(err) {
+		t.Errorf("a status made: %v", err)
+	}
+	// The runner's rollback says it runs it.
+	dir := t.TempDir()
+	rayctl := filepath.Join(dir, "rayctl")
+	os.WriteFile(rayctl, []byte("#!/bin/sh\nenv > "+filepath.Join(dir, "env")+"\n"), 0o755)
+	if _, err := runRollback(rayctl); err != nil {
+		t.Fatal(err)
+	}
+	if env, _ := os.ReadFile(filepath.Join(dir, "env")); !strings.Contains(string(env), rollbackByRunnerEnv+"=1\n") {
+		t.Errorf("the runner's rollback: %s", env)
+	}
+}
+
+// The relay's status, as its runner writes it, is rayd relay's group's to
+// read (0640), not everyone's: it holds root's whole text. A node's stays
+// 0644, its rayd reads it as ever.
+func TestRelayStatusMode(t *testing.T) {
+	gid := statusGroup(t)
+	f := newFakeRunner(t)
+	f.rayctl(`echo '{"state":"failed","version":"v0.27.0","error":"this SSH session comes from 198.51.100.7","untouched":true,"reason":"ssh"}' > "$RAYCONTROL_UPDATE_RESULT"; exit 1`)
+	f.request("v0.27.1")
+	if st, _ := f.run(); st.Reason != nodeupdate.ReasonSSH {
+		t.Fatalf("%+v", st)
+	}
+	if mode, g := statusMode(t, f.q.status); mode != 0o640 || g != gid {
+		t.Errorf("a relay's: mode %v, group %d", mode, g)
+	}
+	// ExecStopPost and the recover unit write it the same.
+	nodeupdate.WriteStatus(f.q.status, nodeupdate.Status{ID: "0a", State: nodeupdate.Running, From: "v0.27.0", Target: "v0.27.1", Kind: nodeupdate.Exit})
+	captureStdout(t, f.q.ended)
+	if mode, g := statusMode(t, f.q.status); mode != 0o640 || g != gid {
+		t.Errorf("ended: mode %v, group %d", mode, g)
+	}
+	f.mark(relayMark{State: "open", From: "v0.27.0", To: "v0.27.1", By: markByExit})
+	captureStdout(t, f.q.recover)
+	if mode, g := statusMode(t, f.q.status); mode != 0o640 || g != gid {
+		t.Errorf("recovered: mode %v, group %d", mode, g)
+	}
+	// No such group: root's alone.
+	relayStatusGroup = "no-such-group-of-raycontrol"
+	f.request("v0.27.1")
+	f.run()
+	if mode, _ := statusMode(t, f.q.status); mode != 0o600 {
+		t.Errorf("no group: mode %v", mode)
+	}
+	// A node's.
+	n := nodeRequests()
+	dir := t.TempDir()
+	n.request, n.status, n.policy, n.result = filepath.Join(dir, "update-request"), filepath.Join(dir, "status.json"), filepath.Join(dir, "policy.json"),
+		filepath.Join(dir, "result.json")
+	n.lock = func(func() bool) error { return nil }
+	nodeupdate.WriteRequest(n.request, nodeupdate.Request{ID: "0a", Kind: nodeupdate.Remote, Version: "v0.27.1", By: "alice", At: time.Now()}, time.Now())
+	captureStdout(t, n.take)
+	if mode, _ := statusMode(t, n.status); mode != 0o644 {
+		t.Errorf("a node's: mode %v", mode)
 	}
 }
 

@@ -351,9 +351,52 @@ func PeekRequest(path string) (Request, bool) {
 	return r, true
 }
 
-// WriteStatus is root's, in its own directory. Fields are made printable
-// and cut, so that ReadStatus takes the file back whatever they held.
+// WriteStatus is root's, in its own directory, 0644: the node's rayd
+// reads it. Fields are made printable and cut, so that ReadStatus takes
+// the file back whatever they held.
 func WriteStatus(path string, s Status) error {
+	b, err := statusBytes(s)
+	if err != nil {
+		return err
+	}
+	return writeRoot(path, b)
+}
+
+// WriteStatusFor is WriteStatus on a relay: the file 0640, of group gid,
+// rayd relay's, which reads it, and nobody else; with gid < 0 root's alone
+// (0600). Its error is root's whole text, the relay's admin addresses and
+// its exit's among it, which only rayd relay redacts before the exit has
+// it (spec/relay-update-remote-v1.md §6).
+func WriteStatusFor(path string, s Status, gid int) error {
+	b, err := statusBytes(s)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // G301: as writeRoot's
+		return err
+	}
+	mode := os.FileMode(0o600)
+	if gid >= 0 {
+		mode = 0o640
+	}
+	tmp, err := writeTemp(path, b, mode)
+	if err != nil {
+		return err
+	}
+	if gid >= 0 {
+		err = os.Chown(tmp, -1, gid)
+	}
+	if err == nil {
+		err = os.Rename(tmp, path) // replaces a link, does not follow it
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
+}
+
+// statusBytes is s as WriteStatus writes it.
+func statusBytes(s Status) ([]byte, error) {
 	for _, f := range []*string{&s.ID, &s.State, &s.From, &s.To, &s.Target, &s.Release, &s.By, &s.Kind} {
 		*f = clip(Printable(*f), maxField)
 	}
@@ -365,11 +408,7 @@ func WriteStatus(path string, s Status) error {
 	if len(s.Held) > maxHeld {
 		s.Held = s.Held[len(s.Held)-maxHeld:]
 	}
-	b, err := marshal(s)
-	if err != nil {
-		return err
-	}
-	return writeRoot(path, b)
+	return marshal(s)
 }
 
 // Tried is the release r goes for, as far as it is known before it runs.

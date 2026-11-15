@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/perimeter"
+	"github.com/arngory/raycontrol/internal/release"
 )
 
 // relaySnapshot is where rayspa keeps the last snapshot it applied.
@@ -86,7 +88,7 @@ func installRelay(bundlePath, packages string) (err error) {
 	}
 	// One install at a time: two would share the guard. Under rayctl
 	// update, the update's own lock, held from before its first change.
-	_, done, err := relayInstallBegin(relayInstallLock, previousDir)
+	_, done, err := relayInstallBegin(relayInstallLock, previousDir, nodeupdate.StatusFile)
 	if err != nil {
 		return err
 	}
@@ -467,28 +469,65 @@ const relayMarkFile = "relay.unfinished"
 // given the install's outcome, lets it go. A relay installed anew and
 // checked outside an update has no past: an update that did not end is
 // over (relayMarkFile), and what an earlier update kept of the relay
-// would roll it back to a version from before this install (dropRelayCopy).
-// Under an update, the update keeps and says.
-func relayInstallBegin(path, dir string) (lock *os.File, done func(error), err error) {
+// would roll it back to a version from before this install (dropRelayCopy),
+// and the status of the relay's updates (status, "": none) says so
+// (noteRelayInstalled). Under an update, the update keeps and says.
+func relayInstallBegin(path, dir, status string) (lock *os.File, done func(error), err error) {
 	lock, underUpdate, err := relayInstallLockFor(path)
 	if err != nil {
 		return nil, nil, err
 	}
 	return lock, func(err error) {
 		if err == nil && !underUpdate {
-			dropRelayCopy(dir)
+			m, marked := dropRelayCopy(dir)
+			noteRelayInstalled(status, m, marked)
 		}
 		_ = lock.Close()
 	}, nil
 }
 
+// noteRelayInstalled: a relay installed anew and checked by root while an
+// update of it had not ended (m, its mark, gone now; or the last status
+// still says unfinished) is root's own repair, a status of kind local,
+// which rayd relay tells the exit as none of its offers. Without it the
+// last status would go on saying failed (open) and unfinished, a relay
+// that needs root. The release that update went to is held, unless it is
+// the one installed: only a newer one moves the relay on.
+func noteRelayInstalled(status string, m relayMark, marked bool) {
+	if status == "" {
+		return
+	}
+	last := nodeupdate.ReadStatus(status)
+	if !marked && (!last.Unfinished || last.State == nodeupdate.Running) {
+		return
+	}
+	if _, err := os.Stat(filepath.Dir(status)); err != nil {
+		return
+	}
+	held := last.Holding()
+	if m.To != version {
+		held = nodeupdate.Hold(held, m.To)
+	}
+	now := time.Now().UTC()
+	st := nodeupdate.Status{ID: nodeupdate.NewID(), State: nodeupdate.Done, From: cmp.Or(m.From, last.From), To: version, Target: version,
+		By: "root (rayctl install -relay)", Kind: nodeupdate.Local, Requested: now, Started: now, Ended: now, Held: held}
+	if release.IsRelease(version) {
+		st.Release = version
+	}
+	if err := writeRelayStatus(status, st); err != nil {
+		fmt.Println("warning: the status of the relay's updates:", err)
+	}
+}
+
 // dropRelayCopy removes what an earlier update kept of the relay in dir
-// (previousDir), its mark with it. Only a relay's copy, the one with
-// relay.json: a node's has none (and installRelay refuses a node's host);
-// without one, the mark alone goes. The copies keep swaps through (dir.new,
-// dir.old) go too when they hold relay.json: one left by a crash between
-// keep's renames would come back as dir at the next update.
-func dropRelayCopy(dir string) {
+// (previousDir), its mark with it, and says what the mark was. Only a
+// relay's copy, the one with relay.json: a node's has none (and
+// installRelay refuses a node's host); without one, the mark alone goes.
+// The copies keep swaps through (dir.new, dir.old) go too when they hold
+// relay.json: one left by a crash between keep's renames would come back
+// as dir at the next update.
+func dropRelayCopy(dir string) (relayMark, bool) {
+	m, marked := relayOps{dir: dir}.readMark()
 	for _, d := range []string{dir + ".new", dir + ".old"} {
 		if _, err := os.Lstat(filepath.Join(d, relayKeptFile)); err == nil {
 			_ = os.RemoveAll(d)
@@ -496,9 +535,10 @@ func dropRelayCopy(dir string) {
 	}
 	if _, err := os.Lstat(filepath.Join(dir, relayKeptFile)); err == nil {
 		_ = os.RemoveAll(dir)
-		return
+		return m, marked
 	}
 	_ = os.Remove(filepath.Join(dir, relayMarkFile))
+	return m, marked
 }
 
 // relayInstallLockFor takes the install lock, or the one an update passed

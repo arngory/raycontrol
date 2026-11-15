@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	_ "time/tzdata" // the zones of TestWindowAcrossClockChanges, wherever it runs
@@ -314,6 +315,54 @@ func TestReasons(t *testing.T) {
 	err := errors.Join(fmt.Errorf("the request: %w", refused(ReasonStale, errors.New("too old"))), errors.New("disk full"))
 	if ReasonOf(err) != ReasonStale || !strings.Contains(err.Error(), "too old") {
 		t.Errorf("joined: %v %q", err, ReasonOf(err))
+	}
+}
+
+// A relay's status is not for everyone on the relay (root's whole text:
+// its admin addresses, its exit's): 0640, of rayd relay's group, which
+// reads it; root's alone with no group. It replaces a link as the node's
+// does, and reads back the same.
+func TestStatusFileFor(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "status", "status.json")
+	target := filepath.Join(dir, "target")
+	os.WriteFile(target, []byte("keep"), 0o600)
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.Symlink(target, path)
+	s := Status{ID: "0b", State: Failed, From: "v0.27.0", To: "v0.27.0", Target: "v0.28.0", Kind: Exit,
+		Error: "this SSH session comes from 198.51.100.7, not from the relay's admin addresses [203.0.113.0/24]", Reason: ReasonSSH, Untouched: true}
+	gid := os.Getgid()
+	if err := WriteStatusFor(path, s, gid); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "keep" {
+		t.Fatal("written through a link")
+	}
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode().Perm() != 0o640 || !fi.Mode().IsRegular() {
+		t.Fatalf("mode %v %v", fi, err)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || int(st.Gid) != gid {
+		t.Errorf("group %v", fi.Sys())
+	}
+	if got := ReadStatus(path); got.ID != "0b" || got.Error != s.Error || got.Reason != ReasonSSH {
+		t.Errorf("read %+v", got)
+	}
+	if err := WriteStatusFor(path, s, -1); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Errorf("no group: mode %v", fi.Mode())
+	}
+	// The node's stays readable by its rayd.
+	if err := WriteStatus(path, s); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o644 {
+		t.Errorf("the node's: mode %v", fi.Mode())
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(path)); len(entries) != 1 {
+		t.Errorf("left beside it: %v", entries)
 	}
 }
 

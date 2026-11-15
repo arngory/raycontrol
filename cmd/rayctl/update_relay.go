@@ -858,6 +858,9 @@ type relayEnv struct {
 	// (nodeupdate.ResultEnv, given by the relay's runner); "" by hand.
 	result string
 	policy string // root's policy (nodeupdate.PolicyFile): -check says whether the exit's word updates the relay
+	// status is root's status of the relay's updates (nodeupdate.StatusFile):
+	// a rollback by hand says it there (noteRollback); "" says nothing.
+	status string
 }
 
 // updateRelay is rayctl update on this relay host.
@@ -903,7 +906,7 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 		return err
 	}
 	if rollback {
-		return e.rollback(o.yes, b.Name)
+		return e.rollback(o.yes, b.Name, installed)
 	}
 	if !o.check {
 		if err := e.lock("update"); err != nil {
@@ -1022,8 +1025,9 @@ func relayBack(k relayKept, health func(healthWant) func() error, port int, clie
 // when the host is open (the install removes it); else it stays the one
 // rayspa has now (the exit's latest perimeter, which let this session
 // in). A host that is open is not checked against its perimeter first:
-// there is none, and nothing to lose by restoring one.
-func (e relayEnv) rollback(yes bool, name string) error {
+// there is none, and nothing to lose by restoring one. installed is the
+// version that runs now; once back, the status says so (noteRollback).
+func (e relayEnv) rollback(yes bool, name, installed string) error {
 	if err := e.lock("rollback"); err != nil {
 		return err
 	}
@@ -1065,9 +1069,50 @@ func (e relayEnv) rollback(yes bool, name string) error {
 	if rb := (rolledBack{}); errors.As(err, &rb) {
 		e.ops.unmark()
 		fmt.Printf("the relay runs %s again\n", k.Version)
+		from := installed
+		if marked && release.IsRelease(m.To) {
+			from = m.To // the update that did not end went there
+		}
+		e.noteRollback(from, k.Version)
 		return nil
 	}
 	return err
+}
+
+// rollbackByRunnerEnv tells rayctl update -rollback that the relay's
+// runner (its ExecStopPost, the recover unit) runs it, and writes the
+// status of the update it rolls back itself.
+const rollbackByRunnerEnv = "RAYCONTROL_RELAY_ROLLBACK_BY_RUNNER"
+
+// noteRollback: the relay rolled back by hand from from to to is root's
+// own doing, a status of kind local, which rayd relay tells the exit as
+// none of its offers (idle). Without it the last status would go on
+// saying what it said: an update by the exit's word failed (open) and
+// unfinished, or done for from, which rayd relay would take for the
+// release it runs and never ask for again. from is held, as on a node (an
+// update that did not hold): only a newer release moves the relay on, or
+// rayctl update -version by hand. Not under the runner, which writes its
+// own status after the rollback it runs.
+func (e relayEnv) noteRollback(from, to string) {
+	if e.status == "" || os.Getenv(rollbackByRunnerEnv) == "1" {
+		return
+	}
+	if _, err := os.Stat(filepath.Dir(e.status)); err != nil {
+		return // no update by the exit's word ever ran here
+	}
+	held := nodeupdate.ReadStatus(e.status).Holding()
+	if from != to {
+		held = nodeupdate.Hold(held, from)
+	}
+	now := time.Now().UTC()
+	st := nodeupdate.Status{ID: nodeupdate.NewID(), State: nodeupdate.RolledBack, From: from, To: to, Target: from, By: "root (rayctl update -rollback)",
+		Kind: nodeupdate.Local, Error: "rolled back by hand", Requested: now, Started: now, Ended: now, Held: held}
+	if release.IsRelease(from) {
+		st.Release = from
+	}
+	if err := writeRelayStatus(e.status, st); err != nil {
+		fmt.Fprintln(os.Stderr, "rayctl: the update's status:", err)
+	}
 }
 
 // catchSignals takes, until stop, what would end rayctl halfway: Ctrl-C,
@@ -1221,6 +1266,7 @@ func (c *cli) relayEnvHere(ctx context.Context) relayEnv {
 		interrupt: stopOnSignal,
 		result:    os.Getenv(nodeupdate.ResultEnv),
 		policy:    nodeupdate.PolicyFile,
+		status:    nodeupdate.StatusFile,
 	}
 }
 
@@ -1365,6 +1411,14 @@ func (c *cli) relayStatus(at relayPolicyAt) error {
 	m, marked := ops.readMark()
 	remote := nodeupdate.ReadPolicy(at.policy).Remote
 	last := relayLast(nodeupdate.ReadStatus(at.status), time.Now())
+	// root's and rayd relay's alone (writeRelayStatus): another user sees
+	// no status, and is told why, not "none".
+	unreadable := false
+	if f, err := os.Open(at.status); err == nil {
+		_ = f.Close()
+	} else {
+		unreadable = errors.Is(err, os.ErrPermission)
+	}
 	if c.json {
 		held := last.Held
 		if held == nil {
@@ -1377,6 +1431,9 @@ func (c *cli) relayStatus(at relayPolicyAt) error {
 		}
 		if marked {
 			st["unfinished"] = ops.adviceOf(m)
+		}
+		if unreadable {
+			st["last_unreadable"] = true // root's and rayd relay's alone
 		}
 		j, err := json.MarshalIndent(st, "", "  ")
 		if err != nil {
@@ -1409,9 +1466,12 @@ func (c *cli) relayStatus(at relayPolicyAt) error {
 	} else {
 		fmt.Println("remote     off (default): rayctl update remote on takes the releases the exit names")
 	}
-	if last.State == nodeupdate.Idle {
+	switch {
+	case unreadable:
+		fmt.Println("last       not readable by this user (root's and rayd relay's): sudo rayctl update status")
+	case last.State == nodeupdate.Idle:
 		fmt.Println("last       none")
-	} else {
+	default:
 		state := last.State
 		if last.Reason != "" {
 			state += " (" + last.Reason + ")"

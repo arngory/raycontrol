@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,6 +79,33 @@ func relayRequests() requests {
 		lock:     func() error { return takeUpdateLock("recovery of an update by the exit's word", 2*time.Minute) },
 	}
 	return q
+}
+
+// relayStatusGroup is the group that reads a relay's status beside root:
+// rayd relay's (Group=rayd, deploy.RelayPlan). A test's own.
+var relayStatusGroup = "rayd"
+
+// writeRelayStatus writes a relay's status, 0640 of relayStatusGroup:
+// rayd relay reads it, nobody else on the relay does (its error is root's
+// whole text, the relay's admin addresses and its exit's among it); root's
+// alone (0600) when there is no such group, and then no rayd relay either.
+func writeRelayStatus(path string, st nodeupdate.Status) error {
+	gid := -1
+	if g, err := user.LookupGroup(relayStatusGroup); err == nil {
+		if n, err := strconv.Atoi(g.Gid); err == nil {
+			gid = n
+		}
+	}
+	return nodeupdate.WriteStatusFor(path, st, gid)
+}
+
+// writeStatus writes q's status: a relay's as writeRelayStatus, a node's
+// for everyone (its rayd reads it).
+func (q requests) writeStatus(st nodeupdate.Status) error {
+	if q.relay != nil {
+		return writeRelayStatus(q.status, st)
+	}
+	return nodeupdate.WriteStatus(q.status, st)
 }
 
 // unfinished says whether an update of the relay did not end: its mark is
@@ -176,7 +205,7 @@ func (q requests) ended() error {
 		q.settle(&st, res)
 		st.Held, st.Unfinished = holdIfBroke(st), q.unfinished()
 		_ = os.Remove(q.result)
-		return nodeupdate.WriteStatus(q.status, st)
+		return q.writeStatus(st)
 	}
 	cut := "interrupted (" + cmp.Or(os.Getenv("SERVICE_RESULT"), "killed") + ")"
 	st.State, st.Reason = nodeupdate.Failed, nodeupdate.ReasonInterrupted
@@ -188,7 +217,7 @@ func (q requests) ended() error {
 	}
 	st.Held, st.Unfinished = holdIfBroke(st), q.unfinished()
 	// Failed first: the rollback may itself be cut short.
-	if err := nodeupdate.WriteStatus(q.status, st); err != nil {
+	if err := q.writeStatus(st); err != nil {
 		return err
 	}
 	if !exits {
@@ -201,7 +230,7 @@ func (q requests) ended() error {
 	q.relay.free()
 	q.relay.rolledBack(&st, "the update was "+cut, "by the unit's stop")
 	st.Ended, st.To, st.Unfinished = time.Now().UTC(), q.nodeVersion(), q.unfinished()
-	return nodeupdate.WriteStatus(q.status, st)
+	return q.writeStatus(st)
 }
 
 // recover is rayctl update -request-recover, the relay's recover unit, once
@@ -237,7 +266,7 @@ func (q requests) recover() error {
 	q.relay.rolledBack(&st, "the update of the relay did not end (a shutdown, a power cut)", "at the boot")
 	st.Ended, st.To, st.Untouched, st.Unfinished = now, q.nodeVersion(), false, q.unfinished()
 	st.Held = nodeupdate.Hold(st.Held, st.Release)
-	if err := nodeupdate.WriteStatus(q.status, st); err != nil {
+	if err := q.writeStatus(st); err != nil {
 		return err
 	}
 	if st.State != nodeupdate.RolledBack {
@@ -253,6 +282,8 @@ func runRollback(rayctl string) (string, error) {
 	tail := &tailWriter{max: 40}
 	cmd := exec.Command(rayctl, "update", "-rollback", "-yes") //nolint:gosec // G204: the installed rayctl
 	cmd.Stdout, cmd.Stderr = io.MultiWriter(os.Stdout, tail), io.MultiWriter(os.Stderr, tail)
+	// Its status is the runner's to write, of the update it rolls back.
+	cmd.Env = append(os.Environ(), rollbackByRunnerEnv+"=1")
 	if err := cmd.Run(); err != nil {
 		return tail.reason(err), err
 	}

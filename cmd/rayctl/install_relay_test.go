@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/nodeupdate"
 )
 
 // A relay opens one SSH port: sshd's, from its listen addresses, which
@@ -544,7 +546,7 @@ func installLockChild(path, previous string) {
 		fmt.Printf("install: "+format+"\n", a...)
 		os.Exit(1)
 	}
-	_, done, err := relayInstallBegin(path, previous)
+	_, done, err := relayInstallBegin(path, previous, "")
 	if err != nil {
 		fail("%v", err)
 	}
@@ -577,7 +579,7 @@ func TestRelayInstallBegin(t *testing.T) {
 	write(relayKeptFile, `{"version":"v0.26.0"}`)
 	write(relayMarkFile, `{"state":"open"}`)
 	write("rayspa", "rayspa v0.26.0")
-	_, done, err := relayInstallBegin(lock, previous)
+	_, done, err := relayInstallBegin(lock, previous, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,7 +590,7 @@ func TestRelayInstallBegin(t *testing.T) {
 	if !there(relayKeptFile) || !there(relayMarkFile) {
 		t.Error("an install that failed removed the copy or the mark")
 	}
-	_, done, err = relayInstallBegin(lock, previous)
+	_, done, err = relayInstallBegin(lock, previous, "")
 	if err != nil {
 		t.Fatalf("the lock after an install that failed: %v", err)
 	}
@@ -601,7 +603,7 @@ func TestRelayInstallBegin(t *testing.T) {
 	write("VERSION", "v0.26.0\n")
 	write("rayd.db", "db")
 	write(relayMarkFile, `{"state":"updating"}`)
-	_, done, err = relayInstallBegin(lock, previous)
+	_, done, err = relayInstallBegin(lock, previous, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -613,6 +615,72 @@ func TestRelayInstallBegin(t *testing.T) {
 		t.Errorf("the lock after done: %v", err)
 	} else {
 		l.Close()
+	}
+}
+
+// A relay installed anew by root while an update by the exit's word had
+// not ended (its mark, or a last status that still says unfinished) is
+// root's repair: the status says so, of kind local (rayd relay tells the
+// exit none of its offers), no longer failed (open) and unfinished; the
+// release that update went to is held unless it is the one installed. An
+// install that failed, or one while an update runs, or with nothing left
+// unfinished, leaves the status as it is.
+func TestRelayInstallNoted(t *testing.T) {
+	saved := version
+	t.Cleanup(func() { version = saved })
+	version = "v0.26.0"
+	statusGroup(t)
+	open := nodeupdate.Status{ID: "0b", State: nodeupdate.Failed, From: "v0.26.0", Target: "v0.26.1", Release: "v0.26.1", By: "exit", Kind: nodeupdate.Exit,
+		Reason: nodeupdate.ReasonOpen, Unfinished: true, Held: []string{"v0.25.9"}}
+	for name, c := range map[string]struct {
+		last     nodeupdate.Status
+		mark     *relayMark
+		failed   bool
+		installs string
+		noted    bool
+		held     []string
+	}{
+		"the host left open":       {last: open, mark: &relayMark{State: "open", From: "v0.26.0", To: "v0.26.1", By: markByExit}, noted: true, held: []string{"v0.25.9", "v0.26.1"}},
+		"the release it went to":   {last: open, mark: &relayMark{State: "open", From: "v0.26.0", To: "v0.26.1", By: markByExit}, installs: "v0.26.1", noted: true, held: []string{"v0.25.9"}},
+		"a mark by hand":           {last: nodeupdate.Status{ID: "0c", State: nodeupdate.Done, Kind: nodeupdate.Exit, Target: "v0.26.0"}, mark: &relayMark{State: "updating", From: "v0.26.0", To: "v0.26.1"}, noted: true, held: []string{"v0.26.1"}},
+		"unfinished, no mark left": {last: open, noted: true, held: []string{"v0.25.9"}},
+		"the install failed":       {last: open, mark: &relayMark{State: "open", From: "v0.26.0", To: "v0.26.1", By: markByExit}, failed: true},
+		"nothing unfinished":       {last: nodeupdate.Status{ID: "0d", State: nodeupdate.Done, Kind: nodeupdate.Exit, Target: "v0.26.1"}},
+		"an update runs, no mark":  {last: nodeupdate.Status{ID: "0e", State: nodeupdate.Running, Kind: nodeupdate.Exit, Target: "v0.26.1", Unfinished: true}},
+	} {
+		dir := t.TempDir()
+		lock, previous, status := filepath.Join(dir, "lock"), filepath.Join(dir, "previous"), filepath.Join(dir, "update", "status.json")
+		os.MkdirAll(previous, 0o700)
+		os.MkdirAll(filepath.Dir(status), 0o755)
+		os.WriteFile(filepath.Join(previous, relayKeptFile), []byte(`{"version":"v0.26.0"}`), 0o600)
+		if c.mark != nil {
+			relayOps{dir: previous}.mark(*c.mark)
+		}
+		nodeupdate.WriteStatus(status, c.last)
+		version = cmp.Or(c.installs, "v0.26.0")
+		_, done, err := relayInstallBegin(lock, previous, status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.failed {
+			done(errors.New("the relay took no perimeter from its exit"))
+		} else {
+			done(nil)
+		}
+		st := nodeupdate.ReadStatus(status)
+		if !c.noted {
+			if st.ID != c.last.ID {
+				t.Errorf("%s: rewritten: %+v", name, st)
+			}
+			continue
+		}
+		if st.ID == c.last.ID || st.Kind != nodeupdate.Local || st.State != nodeupdate.Done || st.To != version || st.Unfinished ||
+			!slices.Equal(st.Held, c.held) || !strings.HasPrefix(st.By, "root") {
+			t.Errorf("%s: %+v", name, st)
+		}
+		if fi, err := os.Stat(status); err != nil || fi.Mode().Perm() != 0o640 {
+			t.Errorf("%s: %v %v", name, fi, err)
+		}
 	}
 }
 
@@ -628,7 +696,7 @@ func TestRelayInstallDropsSwapCopies(t *testing.T) {
 		os.WriteFile(filepath.Join(d, relayKeptFile), []byte(`{"version":"v0.25.9"}`), 0o600)
 		os.WriteFile(filepath.Join(d, "rayspa"), []byte("rayspa v0.25.9"), 0o600)
 	}
-	_, done, err := relayInstallBegin(lock, previous)
+	_, done, err := relayInstallBegin(lock, previous, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -646,7 +714,7 @@ func TestRelayInstallDropsSwapCopies(t *testing.T) {
 	// Without relay.json: not a relay's copy, it stays.
 	os.MkdirAll(previous+".old", 0o700)
 	os.WriteFile(filepath.Join(previous+".old", "VERSION"), []byte("v0.26.0\n"), 0o600)
-	_, done, err = relayInstallBegin(lock, previous)
+	_, done, err = relayInstallBegin(lock, previous, "")
 	if err != nil {
 		t.Fatal(err)
 	}
