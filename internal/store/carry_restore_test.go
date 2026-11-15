@@ -436,6 +436,11 @@ func TestCarryRestoreServiceDeleted(t *testing.T) {
 	before := secrets(t, f.backup)
 	s := f.open(t, f.current)
 	must(t, s.DeleteService(ctx, "naive"))
+	// As the API does: every change has its audit line, so this database
+	// has a record later than the backup's even when the service it lost
+	// was the backup's newest (a second turning between the two made the
+	// backup look newer, and it was taken for another node's).
+	must(t, s.Audit(ctx, "rayctl", "service.delete", "naive", "ok"))
 	s.Close()
 	now := secrets(t, f.current)
 	r, err := CarryRestore(ctx, f.backup, f.current, "")
