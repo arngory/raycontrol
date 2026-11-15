@@ -57,22 +57,26 @@ func TestInitSeqClock(t *testing.T) {
 func TestInitPorts(t *testing.T) {
 	dir := t.TempDir()
 	db := filepath.Join(dir, "rayd.db")
-	if err := cmdInit([]string{"-db", db, "-ports", "spa=40000-40099,sub=40100", "-check-ports"}); err != nil {
+	if err := cmdInit([]string{"-db", db, "-ssh-ports", "none", "-ports", "spa=40000-40099,sub=40100", "-check-ports"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(db); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("-check-ports made a database: %v", err)
 	}
-	if err := cmdInit([]string{"-db", db, "-host", "203.0.113.7", "-ports", "spa=40000-40099,sub=40100"}); err != nil {
+	if err := cmdInit([]string{"-db", db, "-host", "203.0.113.7", "-ssh-ports", "none", "-ports", "spa=40000-40099,sub=40100"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmdInit([]string{"-db", db, "-ports", "sub=40100", "-check-ports"}); err != nil {
+	if err := cmdInit([]string{"-db", db, "-ssh-ports", "none", "-ports", "sub=40100", "-check-ports"}); err != nil {
 		t.Errorf("its own port: %v", err)
 	}
-	if err := cmdInit([]string{"-db", db, "-ports", "sub=40200", "-check-ports"}); err == nil {
+	if err := cmdInit([]string{"-db", db, "-ssh-ports", "none", "-ports", "sub=40200", "-check-ports"}); err == nil {
 		t.Error("another port taken")
 	}
-	if err := cmdInit([]string{"-db", db, "-ports", "sub=80"}); err == nil {
+	if err := cmdInit([]string{"-db", db, "-ssh-ports", "none", "-ports", "sub=80"}); err == nil {
 		t.Error("a privileged port taken")
+	}
+	// sshd's port is kept clear of, whether given or read from sshd -T
+	if err := cmdInit([]string{"-db", filepath.Join(dir, "other.db"), "-ssh-ports", "40500", "-ports", "sub=40500", "-check-ports"}); err == nil {
+		t.Error("sshd's port taken")
 	}
 }
