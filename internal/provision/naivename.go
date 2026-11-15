@@ -132,9 +132,11 @@ func retiredNames(list []NaiveRetired) []string {
 // from before R4-42, a restored backup made before): rayd renders it at
 // once, so that it is routed before it is ever published. It returns the
 // service as stored. A node whose domain has no free name left keeps the
-// service as it is: the name waits, the render does not.
-func EnsureNaiveNext(ctx context.Context, st *store.Store, svc store.Service) (store.Service, error) {
-	if svc.Kind != "naive" || ParseNaiveState(svc).SNINext != "" {
+// service as it is: the name waits, the render does not. On a node
+// without a domain (the render's, Model.Domain) naive's name does not
+// change: it returns at once, with no lock and no read.
+func EnsureNaiveNext(ctx context.Context, st *store.Store, svc store.Service, domain string) (store.Service, error) {
+	if svc.Kind != "naive" || domain == "" || ParseNaiveState(svc).SNINext != "" {
 		return svc, nil
 	}
 	settingsMu.Lock()
@@ -284,6 +286,11 @@ func rotateNaive(ctx context.Context, st *store.Store, all []store.Service, svc 
 	state := ParseNaiveState(svc)
 	t := now.Unix()
 	if state.SNINext == "" {
+		// Without the node's domain there is no name to move to: the
+		// name stays, nothing to do (as before R4-42).
+		if domain, err := Domain(ctx, st); err != nil || domain == "" {
+			return false, err
+		}
 		// The render picks it first (EnsureNaiveNext); a store no render
 		// has read since gets it here, published at a later round only.
 		settings, err := naiveNext(ctx, st, all, svc)

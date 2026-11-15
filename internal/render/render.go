@@ -255,7 +255,7 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 			if secrets[provision.SecretQUICReset], err = provision.EnsureQUICResetKey(ctx, st, s, secrets); err != nil {
 				return m, err
 			}
-			if s, err = provision.EnsureNaiveNext(ctx, st, s); err != nil {
+			if s, err = provision.EnsureNaiveNext(ctx, st, s, m.Domain); err != nil {
 				return m, err
 			}
 		}

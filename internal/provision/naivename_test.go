@@ -2,6 +2,7 @@ package provision
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -539,7 +540,7 @@ func TestNaiveNameRestored(t *testing.T) {
 	got := make([]string, 8)
 	for i := range got {
 		wg.Go(func() {
-			s, err := EnsureNaiveNext(ctx, st, nv)
+			s, err := EnsureNaiveNext(ctx, st, nv, "example.com")
 			if err != nil {
 				t.Error(err)
 			}
@@ -730,4 +731,79 @@ func TestNaiveNamePreviousNames(t *testing.T) {
 			t.Fatalf("a day on, a period of 30 days: %v", kept)
 		}
 	})
+}
+
+// A node initialised without a domain, naive under the operator's own name
+// (as it worked before R4-42): its names have nowhere to move, so nothing
+// rotates. It is made, every rotation round is clean (REALITY's keys still
+// switch, under the name it has), rayctl service rotate says why it does
+// nothing, and the render's EnsureNaiveNext returns without the lock or a
+// read.
+func TestNaiveNameWithoutDomain(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	if _, err := Init(ctx, st, Options{Host: "203.0.113.7"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []store.Service{
+		{Kind: "site", Name: "site", Settings: `{"sni":"www.example.org"}`},
+		{Kind: "reality", Name: "r"},
+		{Kind: "naive", Name: "nv", Settings: `{"sni":"nv.example.org"}`},
+	} {
+		s.Enabled = true
+		if _, err := CreateService(ctx, st, s); err != nil {
+			t.Fatalf("%s: %v", s.Name, err)
+		}
+	}
+	nv := mustService(t, ctx, st, "nv")
+	if ns := ParseNaiveState(nv); ns.SNI != "nv.example.org" || ns.SNINext != "" {
+		t.Fatalf("naive made: %s", nv.Settings)
+	}
+	storeCert(t, ctx, st, "site", "www.example.org", "nv.example.org")
+	// rotate_sni on everywhere: still nothing to move to.
+	for _, s := range []string{"r", "nv"} {
+		if _, err := SetServiceOption(ctx, st, s, "rotate_sni", "on"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := RequestRotation(ctx, st, "nv", nv.CreatedAt, naiveEpoch.Lead, true); err == nil || !strings.Contains(err.Error(), "no domain") {
+		t.Fatalf("rotate naive: %v", err)
+	}
+	if err := RequestRotation(ctx, st, "r", nv.CreatedAt.Add(10*day), naiveEpoch.Lead, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []time.Duration{time.Hour, 10 * day, 11 * day, 13 * day, 87 * day, 90 * day, 200 * day} {
+		if _, err := RotateReality(ctx, st, nv.CreatedAt.Add(d), naiveEpoch, func(context.Context, string) error { return nil }, nil); err != nil {
+			t.Fatalf("round at %v: %v", d, err)
+		}
+	}
+	if got := ParseNaiveState(mustService(t, ctx, st, "nv")); got.SNI != "nv.example.org" || got.SNINext != "" || got.Previous() != nil ||
+		got.RotateAt != 0 || got.PreparedAt != 0 || got.NextFrom != 0 || got.RotatedAt != nv.CreatedAt.Unix() {
+		t.Fatalf("naive after the rounds: %+v", got)
+	}
+	r := ParseRealityState(mustService(t, ctx, st, "r"))
+	if r.RotatedAt == mustService(t, ctx, st, "r").CreatedAt.Unix() || SiteName(mustService(t, ctx, st, "r")) != "www.example.org" {
+		t.Fatalf("REALITY's keys did not switch, or its name moved: %s", mustService(t, ctx, st, "r").Settings)
+	}
+	// The render's call, while a round holds the lock.
+	settingsMu.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := EnsureNaiveNext(ctx, st, nv, "")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		settingsMu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		settingsMu.Unlock()
+		t.Fatal("EnsureNaiveNext waited for the lock on a node without a domain")
+	}
 }

@@ -105,3 +105,57 @@ func TestNaiveNextName(t *testing.T) {
 		})
 	}
 }
+
+// A node without a domain, naive under the operator's own name: made, a
+// rotation round is clean, and its profile has that name and no next (as
+// before R4-42); every render, as for each subscription, gives up nothing.
+func TestNaiveWithoutDomain(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := provision.Init(ctx, st, provision.Options{Host: "203.0.113.7"}); err != nil {
+		t.Fatal(err)
+	}
+	var nv store.Service
+	for _, s := range []store.Service{
+		{Kind: "site", Name: "site", Settings: `{"sni":"www.example.org"}`},
+		{Kind: "reality", Name: "r"},
+		{Kind: "naive", Name: "nv", Settings: `{"sni":"nv.example.org"}`},
+	} {
+		s.Enabled = true
+		if nv, err = provision.CreateService(ctx, st, s); err != nil {
+			t.Fatalf("%s: %v", s.Name, err)
+		}
+	}
+	site, _ := st.ServiceByName(ctx, "site")
+	keyDER, certDER, _ := provision.SelfSigned("www.example.org")
+	st.SetServiceSecret(ctx, site.ID, provision.SecretTLSChain, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}))
+	st.SetServiceSecret(ctx, site.ID, provision.SecretTLSKey, keyDER)
+	if _, err := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	st.SetUserServices(ctx, "alice", []int64{nv.ID})
+	e := provision.RealityEpoch{Period: 90 * 24 * time.Hour, Lead: 72 * time.Hour, Prepare: 24 * time.Hour, Grace: 48 * time.Hour, NaivePeriod: 90 * 24 * time.Hour}
+	for range 2 {
+		m, err := render.Collect(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := provision.RotateReality(ctx, st, time.Now(), e, nil, nil); err != nil {
+			t.Fatalf("rotation round: %v", err)
+		}
+		profiles, err := sub.Profiles(m, m.Users[0])
+		if err != nil || len(profiles) != 1 || profiles[0].Next != nil {
+			t.Fatalf("profiles %+v %v", profiles, err)
+		}
+		if l, _ := url.Parse(profiles[0].Link); l.Query().Get("sni") != "nv.example.org" {
+			t.Fatalf("link %s", profiles[0].Link)
+		}
+	}
+	if got, _ := st.ServiceByName(ctx, "nv"); got.Settings != nv.Settings {
+		t.Fatalf("naive's settings changed: %s, was %s", got.Settings, nv.Settings)
+	}
+}

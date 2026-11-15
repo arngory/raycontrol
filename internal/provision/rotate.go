@@ -264,7 +264,11 @@ func rotateOne(ctx context.Context, st *store.Store, all []store.Service, svc st
 		rename := false
 		if site := siteOf(svc); site != "" && resolves != nil {
 			rename = RenamesAt(ctx, st, all, site, state.RotateSNI, state.RotateAt != 0)
-			if !rename && state.RotateSNI == nil {
+			domain, _ := Domain(ctx, st)
+			switch {
+			case !rename && domain == "":
+				log.Info("REALITY server name stays: the node has no domain for a new one (rayd init -domain)", "service", svc.Name)
+			case !rename && state.RotateSNI == nil:
 				log.Info("REALITY server name stays: its site has no wildcard certificate (R4-42; rotate_sni=on moves it all the same)",
 					"service", svc.Name)
 			}
@@ -437,6 +441,18 @@ func RequestRotationNames(ctx context.Context, st *store.Store, name string, now
 	if svc.Kind != "reality" && svc.Kind != "naive" {
 		return NaiveSwitchNames{}, fmt.Errorf("%w: %s is neither REALITY nor naive (rotation: reality, naive's name, dnstt's seal key, masterdns's key, a site's certificate key)", store.ErrInvalid, name)
 	}
+	if svc.Kind == "naive" {
+		// naive's switch is its name's, and a new name is a subdomain of
+		// the node's domain: none to move to without one.
+		domain, err := Domain(ctx, st)
+		if err != nil {
+			return NaiveSwitchNames{}, err
+		}
+		if domain == "" {
+			return NaiveSwitchNames{}, fmt.Errorf("%w: %s keeps its server name %s: the node has no domain, and a new name would be a subdomain of it "+
+				"(rayd init -domain DOMAIN, with *.DOMAIN pointing to the node, gives naive names to move to)", store.ErrInvalid, name, SiteName(svc))
+		}
+	}
 	at := now.Add(lead)
 	if immediately {
 		at = now
@@ -542,7 +558,14 @@ func SiteNames(site store.Service, all []store.Service) (names, next []string) {
 // a wildcard certificate (WildcardSite). Under a certificate of listed
 // names (HTTP-01) the new name would be in CT logs from its order, days
 // before clients use it, in one list with every other name of the node.
+//
+// Never on a node without a domain: a new name is a subdomain of it, so
+// there is none to move to (newZone), and the name stays as the operator
+// gave it.
 func RenamesAt(ctx context.Context, st *store.Store, all []store.Service, site string, rotateSNI *bool, asked bool) bool {
+	if domain, err := Domain(ctx, st); err != nil || domain == "" {
+		return false
+	}
 	if rotateSNI != nil {
 		return *rotateSNI
 	}

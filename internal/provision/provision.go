@@ -507,12 +507,20 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 					return svc, fmt.Errorf(`%w naive rotate_sni: true or false (rayctl service set <naive> rotate_sni=on|off|auto)`, store.ErrInvalid)
 				}
 			}
+			// A node without a domain has no names to move to (a new one
+			// is a subdomain of the domain): naive keeps the operator's.
 			sni, _ := settings["sni"].(string)
-			next, err := newZone(ctx, st, all, sni)
+			domain, err := Domain(ctx, st)
 			if err != nil {
 				return svc, err
 			}
-			settings["sni_next"] = next
+			if domain != "" {
+				next, err := newZone(ctx, st, all, sni)
+				if err != nil {
+					return svc, err
+				}
+				settings["sni_next"] = next
+			}
 		}
 		if svc.Kind == "naive" || svc.Kind == "doh" {
 			// The key of stateless resets of naive-quic, and of DoH3
