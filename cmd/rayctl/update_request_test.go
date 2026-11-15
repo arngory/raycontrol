@@ -30,7 +30,7 @@ func TestUpdateRequest(t *testing.T) {
 	statDir := filepath.Join(dir, "status")
 	q := requests{request: filepath.Join(dir, "update-request"), status: filepath.Join(statDir, "status.json"),
 		policy: filepath.Join(statDir, "policy.json"), result: filepath.Join(statDir, "result.json"),
-		ready: func() error { return nil }, nodeVersion: func() string { return "v0.19.0" }}
+		ready: func() error { return nil }, nodeVersion: func() string { return "v0.19.0" }, kinds: nodeRequests().kinds}
 	os.MkdirAll(statDir, 0o755)
 	policy := func(remote, auto, window string) {
 		t.Helper()

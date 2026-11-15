@@ -100,6 +100,7 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 	noHandoff := fs.Bool("no-handoff", false, "update with this rayctl, not the release's own (when the new one cannot run here)")
 	request := fs.Bool("request", false, "run the update the node asked for (raycontrol-update.service: spec/node-update-v1.md)")
 	requestEnded := fs.Bool("request-ended", false, "mark an update by request whose runner was killed as failed (the unit's ExecStopPost)")
+	requestRecover := fs.Bool("request-recover", false, "roll back a relay's update by its exit's word that did not end (raycontrol-relay-recover.service, at boot)")
 	if err := fs.Parse(args); err != nil {
 		return errUsage
 	}
@@ -115,17 +116,15 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 		return err
 	}
 	// The request goes whatever this node is (rayd's word is checked
-	// there): left in place, the path unit would fire again and again.
+	// there): left in place, the path unit would fire again and again. A
+	// relay's runner is its own (update_relay_request.go).
 	switch {
 	case *requestEnded:
-		return markInterrupted(nodeupdate.StatusFile)
+		return hostRequests().ended()
+	case *requestRecover:
+		return hostRequests().recover()
 	case *request:
-		// One at a time; a request waits a while for a manual update or
-		// apply to end (the unit gives it 50 minutes in all).
-		if err := takeUpdateLock("update by request", 10*time.Minute); err != nil {
-			return err
-		}
-		return nodeRequests().run()
+		return hostRequests().take()
 	}
 	opts := updateOpts{want: *want, from: *from, local: *local, check: *check, yes: *yes, force: *force, noHandoff: *noHandoff}
 	switch host, err := updateHost(deploy.DB, deploy.RelayBundle, relayUnitFile); {
