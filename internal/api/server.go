@@ -648,6 +648,18 @@ func (s *Server) DeleteService(ctx context.Context, req *connect.Request[nodev1.
 }
 
 func (s *Server) SetServiceOption(ctx context.Context, req *connect.Request[nodev1.SetServiceOptionRequest]) (*connect.Response[nodev1.SetServiceOptionResponse], error) {
+	if req.Msg.Key == "target" && s.CheckRealityTarget != nil {
+		// A REALITY service's new target, checked from the node as a new
+		// service's is, with its server name (which stays). One that
+		// steals from the node's site takes none (provision says why).
+		if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "reality" {
+			if old, sni, err := provision.RealityTargetFromJSON(svc.Settings); err == nil && !strings.HasPrefix(old, "site:") {
+				if err := s.CheckRealityTarget(ctx, req.Msg.Value, sni); err != nil {
+					return nil, connect.NewError(connect.CodeInvalidArgument, err)
+				}
+			}
+		}
+	}
 	svc, err := provision.SetServiceOption(ctx, s.Store, req.Msg.Name, req.Msg.Key, req.Msg.Value)
 	if err := s.done(ctx, "service.set "+req.Msg.Key+"="+req.Msg.Value, req.Msg.Name, err); err != nil {
 		return nil, err

@@ -51,6 +51,7 @@ func newStage() (string, error) {
 // that target, or warns of it.
 func (c *cli) stageRelease(ctx context.Context, o updateOpts, stage, installed string, bins map[string]string, first func(to string) error) (staged, error) {
 	var s staged
+	first = c.targetsFirst(ctx, first) // REALITY targets the data plane does not reach (R4-38)
 	if o.local != "" {
 		for name := range bins {
 			if b, err := os.ReadFile(filepath.Join(o.local, name)); err == nil { //nolint:gosec // G304: the operator's directory

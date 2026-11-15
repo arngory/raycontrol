@@ -69,7 +69,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service enable|disable|del NAME [-force]
                                             -force: disable or delete the last enabled ssh service anyway
                                             (refused without it: SSH to the node closes to everyone)
-  service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false;
+  service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false,
+                                            target=HOST:PORT (who answers non-clients, checked as at
+                                            creation; keys, shortIds and server name stay);
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
                                             naive: icmp=on|off (ping and traceroute through it, then
                                             rayctl apply);
@@ -777,6 +779,11 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 			switch r.Msg.Service.Kind {
 			case "site":
 				fmt.Fprintln(w, "run rayctl apply to restart the site with it")
+			case "reality":
+				if key == "target" {
+					fmt.Fprintln(w, "rayd restarts its Xray with the new target within seconds; the keys, shortIds and server name stay,\n"+
+						"so the clients' links do not change (rayctl egress lists the target when it is a local address)")
+				}
 			case "yggdrasil":
 				if key == "lan_relay" {
 					fmt.Fprintln(w, "rayd restarts the backend with it: LAN traffic through the node up to "+value+

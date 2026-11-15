@@ -374,20 +374,21 @@ func realityOpen(svc store.Service) bool {
 }
 
 // localExempt are the REALITY targets the operator set on a local
-// address (provision.RealityLocalTarget): the data plane's local part lets
-// each through by its address, TCP and port, from its service's process
-// only (spec/egress-policy-v1.md §10). On a supervised node the services
-// run as rayd, which the local part does not cover: there they change
-// nothing.
+// address, or on localhost (provision.RealityLocalTarget): the data plane's
+// local part lets each through by its address, TCP and port, from its
+// service's process only (spec/egress-policy-v1.md §10). On a supervised
+// node the services run as rayd, which the local part does not cover:
+// there they change nothing.
 func localExempt(services []store.Service) []*perimeterv1.LocalExempt {
 	var out []*perimeterv1.LocalExempt
 	for _, svc := range services {
-		ap, ok := provision.RealityLocalTarget(svc)
-		if !ok || svc.UID < store.FirstServiceUID || svc.UID > store.LastServiceUID {
+		if svc.UID < store.FirstServiceUID || svc.UID > store.LastServiceUID {
 			continue
 		}
-		out = append(out, &perimeterv1.LocalExempt{Addr: ap.Addr().String(),
-			Port: &perimeterv1.Port{Proto: "tcp", Port: uint32(ap.Port())}, Uid: uint32(svc.UID)}) //nolint:gosec // G115: checked above
+		for _, ap := range provision.RealityLocalTarget(svc) {
+			out = append(out, &perimeterv1.LocalExempt{Addr: ap.Addr().String(),
+				Port: &perimeterv1.Port{Proto: "tcp", Port: uint32(ap.Port())}, Uid: uint32(svc.UID)}) //nolint:gosec // G115: checked above
+		}
 	}
 	return out
 }

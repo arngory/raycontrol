@@ -148,6 +148,36 @@ func TestNetnsLocal(t *testing.T) {
 	if err := reach(dataPlane, steal); !errors.Is(err, syscall.ECONNREFUSED) {
 		t.Errorf("another process to the REALITY target: %v, want ECONNREFUSED", err)
 	}
+	// A target given as localhost: both loopbacks, as rayd sends them
+	// (Xray's resolver may take either).
+	policy(&perimeterv1.Egress{Local: &perimeterv1.Local{Exempt: []*perimeterv1.LocalExempt{
+		{Addr: "127.0.0.1", Port: &perimeterv1.Port{Proto: "tcp", Port: 17004}, Uid: reality},
+		{Addr: "::1", Port: &perimeterv1.Port{Proto: "tcp", Port: 17004}, Uid: reality}}}})
+	localhost := []netip.AddrPort{steal}
+	steal6 := ap("::1", 17004)
+	if l, err := net.Listen("tcp", steal6.String()); err == nil {
+		defer l.Close()
+		go func() {
+			for {
+				c, err := l.Accept()
+				if err != nil {
+					return
+				}
+				c.Close()
+			}
+		}()
+		localhost = append(localhost, steal6)
+	} else {
+		t.Logf("no ::1 here (%v): the localhost target's IPv6 half not tried", err)
+	}
+	for _, a := range localhost {
+		if err := reach(reality, a); err != nil {
+			t.Errorf("REALITY to its localhost target %v: %v", a, err)
+		}
+		if err := reach(dataPlane, a); !errors.Is(err, syscall.ECONNREFUSED) {
+			t.Errorf("another process to the localhost target %v: %v, want ECONNREFUSED", a, err)
+		}
+	}
 
 	policy(&perimeterv1.Egress{Local: &perimeterv1.Local{Allow: true}})
 	if err := reach(dataPlane, service); err != nil {

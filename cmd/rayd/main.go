@@ -1141,7 +1141,9 @@ func checkRealityTargets(ctx context.Context, st *store.Store, changes func() <-
 					continue
 				}
 				cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-				err = provision.CheckRealityTarget(cctx, target, sni)
+				// A target the data plane does not reach says what fixes it
+				// (rayctl status shows the loop).
+				err = provision.ForService(svc.Name, provision.CheckRealityTarget(cctx, target, sni))
 				cancel()
 				if ctx.Err() != nil {
 					return

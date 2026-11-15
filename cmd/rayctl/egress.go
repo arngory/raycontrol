@@ -139,12 +139,13 @@ func (c *cli) egressShow(ctx context.Context) error {
 func localExemptLines(services []*nodev1.Service) []string {
 	var out []string
 	for _, s := range services {
-		ap, ok := provision.RealityLocalTarget(store.Service{Kind: s.Kind, Enabled: s.Enabled, Settings: s.SettingsJson})
-		if !ok || s.Uid == 0 {
+		if s.Uid == 0 {
 			continue
 		}
-		out = append(out, fmt.Sprintf("tcp %s: REALITY %s's target, for its process only (uid %d); "+
-			"anyone reaching %s's port without its keys reaches it through REALITY", ap, s.Name, s.Uid, s.Name))
+		for _, ap := range provision.RealityLocalTarget(store.Service{Kind: s.Kind, Enabled: s.Enabled, Settings: s.SettingsJson}) {
+			out = append(out, fmt.Sprintf("tcp %s: REALITY %s's target, for its process only (uid %d); "+
+				"anyone reaching %s's port without its keys reaches it through REALITY", ap, s.Name, s.Uid, s.Name))
+		}
 	}
 	return out
 }

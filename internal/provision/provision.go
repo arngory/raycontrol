@@ -606,6 +606,13 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 		if err := realitySettings(settings); err != nil {
 			return svc, err
 		}
+		// An address the data plane does not reach (the node's own,
+		// 0.0.0.0): refused, as the check of a name refuses one there.
+		if target, _ := settings["target"].(string); target != "" {
+			if err := CheckTargetAddr(target); err != nil {
+				return svc, fmt.Errorf("%w %w", store.ErrInvalid, err)
+			}
+		}
 		if err := realitySecrets(svc.Secrets); err != nil {
 			return svc, err
 		}
@@ -878,6 +885,16 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			return svc, fmt.Errorf("%w rotate_sni: true or false", store.ErrInvalid)
 		}
 		v = b
+	case svc.Kind == "reality" && key == "target":
+		// Who answers non-clients (spec/egress-policy-v1.md §10), checked
+		// as at creation: the API checks the site itself first
+		// (CheckRealityTarget). The keys, the shortIds and the server
+		// name stay (the sni, not the target, is in the links), so the
+		// clients keep working; the next render gives Xray the new one.
+		if err := realityTargetOption(svc, value); err != nil {
+			return svc, err
+		}
+		v = value
 	case (svc.Kind == "hy2-masq" || svc.Kind == "hy2-obfs") && (key == "up_mbps" || key == "down_mbps"):
 		// The ceilings of the server's Brutal per connection (R4-16): up is
 		// what the node sends a client at most (the node's channel or its
@@ -966,7 +983,7 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			v = 0
 		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open; hy2-*: up_mbps, down_mbps; naive: icmp; yggdrasil: peers, lan_relay; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open, target; hy2-*: up_mbps, down_mbps; naive: icmp; yggdrasil: peers, lan_relay; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -8,10 +9,15 @@ import (
 	"strings"
 	"time"
 
+	"connectrpc.com/connect"
+
 	"github.com/arngory/raycontrol/internal/api"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/hostcheck"
 	"github.com/arngory/raycontrol/internal/perimeter"
+	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/release"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 // perimeterHost is what perimeterResult asks of the host; tests replace it.
@@ -197,6 +203,81 @@ func egressStatusLine(e *nodev1.Egress, supervised bool) string {
 		line += "; smtp and bittorrent: only where a rayspa runs, which -supervise does not start"
 	}
 	return line + " (rayctl egress)"
+}
+
+// realityTargetWarning is a REALITY service whose target the data plane
+// does not reach (provision.RealityTargetWarning), and what fixes it.
+type realityTargetWarning struct{ service, problem, fix string }
+
+// localFrom is the release whose rayd blocks the local networks (R4-38):
+// one before it does not, and the update to it will.
+const localFrom = "v0.27.0"
+
+// realityTargetWarnings are the enabled REALITY services whose target the
+// data plane does not reach (spec/egress-policy-v1.md §10), for rayctl
+// check and the update's first look: a target set before v0.27.0 by a
+// name that resolves to a local address dies with the update. Only on the
+// node (the names as its resolver answers them, its own addresses), and
+// none when rayd does not answer, or on a node of rayd serve -supervise,
+// where the data plane runs as rayd, which neither to_node nor the local
+// part covers.
+func (c *cli) realityTargetWarnings(ctx context.Context) []realityTargetWarning {
+	if c.c == nil || c.identity != nil || thisOS != nodeOS {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	svcs, err := c.c.ListServices(ctx, connect.NewRequest(&nodev1.ListServicesRequest{}))
+	if err != nil {
+		return nil
+	}
+	e, err := c.c.GetEgress(ctx, connect.NewRequest(&nodev1.GetEgressRequest{}))
+	if err != nil || len(e.Msg.Uids) > 0 {
+		return nil
+	}
+	version := ""
+	if st, err := c.c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{})); err == nil {
+		version = st.Msg.Version
+	}
+	local := localBlocked(version, e.Msg.GetEgress().GetLocal())
+	own := provision.OwnAddrs()
+	var out []realityTargetWarning
+	for _, s := range svcs.Msg.Services {
+		svc := store.Service{Kind: s.Kind, Name: s.Name, Enabled: s.Enabled, Settings: s.SettingsJson}
+		if p, fix := provision.RealityTargetWarning(ctx, svc, local, own); p != "" {
+			out = append(out, realityTargetWarning{s.Name, p, fix})
+		}
+	}
+	return out
+}
+
+// localBlocked reports whether the local networks are blocked for the
+// data plane, as rayd of version says (local), or once an update from it
+// is in: a rayd before localFrom says false, as it does not block them,
+// and the update brings them blocked (no allow could be set before).
+func localBlocked(version string, local bool) bool {
+	return local || (release.IsRelease(version) && release.Newer(localFrom, version))
+}
+
+// realityTargetResults are realityTargetWarnings as rayctl check's.
+func realityTargetResults(ws []realityTargetWarning) []hostcheck.Result {
+	var out []hostcheck.Result
+	for _, w := range ws {
+		out = append(out, hostcheck.Result{Level: hostcheck.Advised, Name: "reality target " + w.service, OK: false, Detail: w.problem, Fix: w.fix})
+	}
+	return out
+}
+
+// targetsFirst is the update's first look (stageRelease's first) with the
+// REALITY targets the data plane does not reach said before it, -check
+// too: it refuses nothing, the operator decides.
+func (c *cli) targetsFirst(ctx context.Context, first func(to string) error) func(to string) error {
+	return func(to string) error {
+		for _, w := range c.realityTargetWarnings(ctx) {
+			fmt.Printf("warning: %s: %s\n", w.problem, w.fix)
+		}
+		return first(to)
+	}
 }
 
 // perimeterLoopState is loopState, but for rayd's perimeter loop when
