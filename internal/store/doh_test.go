@@ -278,3 +278,50 @@ func TestMigration15SharedWindow(t *testing.T) {
 		t.Fatalf("no DoH, a window: %v %v", until, err)
 	}
 }
+
+// TestNewCredentialsHook: a user's first DoH secret is made when a model is
+// first built for them (the data plane's apply, a subscription), after the
+// change that added them woke the DoH handlers. The hook tells them it
+// exists, so the device's token is known at once, not at the next load up
+// to 30 s later (client interop, v0.27.0: a new device's token answered
+// after 29.5 s). It runs only after a call that made one, once it is in.
+func TestNewCredentialsHook(t *testing.T) {
+	ctx := context.Background()
+	f := newDoHFixture(t)
+	calls := 0
+	var seen map[string]bool
+	f.s.OnNewCredentials(func() {
+		calls++
+		seen = f.tokens(t, time.Now()) // committed: a load from here has it
+	})
+	if _, err := f.s.Credentials(ctx, f.svc, []int64{f.alice.ID, f.bob.ID}, NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("the hook ran %d times with no credential made", calls)
+	}
+	carol, err := f.s.CreateUser(ctx, User{Name: "carol", Enabled: true, Services: []int64{f.svc}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, key, err := f.s.CreateDevice(ctx, "carol", "phone", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.tokens(t, time.Now()); len(got) != 3 {
+		t.Fatalf("carol has a token before her secret exists: %v", got)
+	}
+	sets, err := f.s.CredentialSets(ctx, f.svc, []int64{f.alice.ID, f.bob.ID, carol.ID}, NewUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("the hook ran %d times for one credential made, want 1", calls)
+	}
+	if want := DoHDeviceToken(sets[carol.ID].Current, key[:]); !seen[want] {
+		t.Fatalf("device %s: its token is not in the tokens loaded from the hook: %v", d.ID, seen)
+	}
+	if _, err := f.s.CredentialSets(ctx, f.svc, []int64{carol.ID}, NewUUID); err != nil || calls != 1 {
+		t.Fatalf("again with nothing new: %d calls, %v", calls, err)
+	}
+}

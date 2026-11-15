@@ -422,6 +422,7 @@ func (s *Store) UpdateService(ctx context.Context, id int64, u ServiceUpdate) er
 // userIDs are returned as they are.
 func (s *Store) Credentials(ctx context.Context, serviceID int64, userIDs []int64, gen func() (string, error)) (map[int64]string, error) {
 	out := map[int64]string{}
+	created := false
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `SELECT user_id, secret FROM credentials WHERE service_id = ?`, serviceID)
 		if err != nil {
@@ -453,9 +454,13 @@ func (s *Store) Credentials(ctx context.Context, serviceID int64, userIDs []int6
 				return err
 			}
 			out[id] = secret
+			created = true
 		}
 		return nil
 	})
+	if f := s.newCreds.Load(); err == nil && created && f != nil {
+		(*f)()
+	}
 	return out, err
 }
 

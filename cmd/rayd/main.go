@@ -602,6 +602,9 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 	afterChange func(func()), log *slog.Logger) {
 	forgets := &dohForgets{}
 	afterChange(forgets.forget)
+	// A user's first secret is made after the change that added them woke
+	// the handlers: they load again once it is (store.OnNewCredentials).
+	st.OnNewCredentials(forgets.forget)
 	running := map[string]*dohListener{}
 	stop := func(name string) {
 		if l := running[name]; l != nil {

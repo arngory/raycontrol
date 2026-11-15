@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -31,7 +32,19 @@ type Store struct {
 	now  func() time.Time
 	path string
 	doh  dohCache // DoHTokens' HMACs (doh.go)
+	// newCreds runs after a call that created credentials committed them
+	// (OnNewCredentials).
+	newCreds atomic.Pointer[func()]
 }
+
+// OnNewCredentials sets f to run after a call that created credentials
+// (Credentials, CredentialSets: a user's first secret for a service is made
+// when a model is first built for it, by the data plane's apply or a
+// subscription) has committed them. rayd's DoH handlers load their tokens
+// again then: the change that added the user woke them before the secret
+// existed, and the device's token would be unknown until the next load,
+// up to 30 s (R4-37). f must not block.
+func (s *Store) OnNewCredentials(f func()) { s.newCreds.Store(&f) }
 
 // Open opens (creating if needed) the database at path and applies pending
 // migrations. The file is created with mode 0600: it holds device keys.
