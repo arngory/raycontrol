@@ -46,15 +46,20 @@ const settingSPAParams = "spa_params"
 // on top. A renewal since the copy (rayctl user renew, the step of schema
 // 14) left no next and no previous secret, so the copy's would be the very
 // ones it retired; and an ordinary rotation since is no worse kept than
-// undone, its secrets being those the clients fetched.
+// undone, its secrets being those the clients fetched. A credential of
+// saved that current does not have (its user deleted, or deleted and made
+// again, or its service deleted since the copy) gets a new secret, as a
+// restore gives it (freshenUnmatched), and such a user a new LAN key: the
+// user or the service comes back disabled, and a device made and revoked
+// since, gone with its user, may know the copy's ones; enabled again, the
+// user would let it back in.
 //
 // A copy older than schema 14 has revocations its step will renew again at
 // the next update. When current is at 14 or later, its step renewed them,
-// and the carry brought that into saved: a user of one that current does
-// not have (deleted since) gets new credentials and LAN key here, and
-// settingRenewedRevoked tells the step that every revocation until now is
-// renewed; an existing mark (an earlier rollback's) keeps its earlier
-// time (markRenewed). When current is older than 14 too (an update that
+// and the carry brought that into saved (a user current does not have
+// with new credentials, above): settingRenewedRevoked tells the step that
+// every revocation until now is renewed; an existing mark (an earlier
+// rollback's) keeps its earlier time (markRenewed). When current is older than 14 too (an update that
 // failed before the new rayd migrated it), nothing renewed them: no mark,
 // and the next update renews them all. Each change to credentials has an
 // audit line in saved (user.renew:rollback, device.revoke:rollback,
@@ -114,32 +119,36 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 	if err != nil {
 		return err
 	}
+	// What current does not have is new, as a restore makes it.
+	fresh, err := freshenUnmatched(ctx, tx, now)
+	if err != nil {
+		return err
+	}
+	why := map[string][]string{}
 	renewed := map[string]int{}
-	if renewedAll {
-		// The step of schema 14 will skip what is renewed until now: the
-		// credentials of a user with a device revoked that current does not
-		// have are the copy's, of before the step, and get new ones here.
-		fresh, err := freshenUnmatched(ctx, tx, now, true)
-		if err != nil {
-			return err
+	for _, u := range users {
+		switch {
+		case !u.matched && u.sameName:
+			why[u.name] = append(why[u.name], "deleted and made again on the node since the copy")
+		case !u.matched:
+			why[u.name] = append(why[u.name], "deleted on the node since the copy")
+		case fresh[u.name] > 0:
+			why[u.name] = append(why[u.name], "a service of theirs deleted on the node since the copy")
 		}
-		for _, u := range users {
-			if !u.matched && u.revoked && u.lan {
-				if err := newUserLANKey(ctx, tx, u.id); err != nil {
-					return err
-				}
-				fresh[u.name] += 0
+		if !u.matched && u.lan {
+			if err := newUserLANKey(ctx, tx, u.id); err != nil {
+				return err
 			}
 		}
-		for n, k := range fresh {
-			renewed[n] = k
+		if len(why[u.name]) > 0 {
+			renewed[u.name] = fresh[u.name]
 		}
 	}
 	carried, counts, err := carryDevices(ctx, tx, true, keepDoH, now)
 	if err != nil {
 		return err
 	}
-	if err := auditCarry(ctx, tx, now, actor, "rollback", users, carried, counts, nil, renewed); err != nil {
+	if err := auditCarry(ctx, tx, now, actor, "rollback", users, carried, counts, why, renewed); err != nil {
 		return err
 	}
 	stmts := []string{
@@ -390,7 +399,7 @@ func CarryRestore(ctx context.Context, saved, current string) (Restored, error) 
 		  AND u.lan_key IS NOT NULL AND c.lan_key IS NOT NULL AND c.lan_key IS NOT u.lan_key`); err != nil {
 		return r, fmt.Errorf("store: carrying LAN keys: %w", err)
 	}
-	fresh, err := freshenUnmatched(ctx, tx, now, false)
+	fresh, err := freshenUnmatched(ctx, tx, now)
 	if err != nil {
 		return r, err
 	}
@@ -515,8 +524,6 @@ type carryUser struct {
 	matched, sameName bool
 	// lan: main has a LAN key for the user; curLAN: cur has one too.
 	lan, curLAN bool
-	// revoked: main has a device of the user's revoked.
-	revoked bool
 }
 
 func carryUsers(ctx context.Context, tx *sql.Tx) ([]carryUser, error) {
@@ -531,14 +538,12 @@ func carryUsers(ctx context.Context, tx *sql.Tx) ([]carryUser, error) {
 		EXISTS (SELECT 1 FROM cur.users c WHERE c.name = u.name),
 		u.lan_key IS NOT NULL,
 		coalesce((SELECT c.lan_key IS NOT NULL FROM cur.users c
-		          WHERE c.id = u.id AND c.name = u.name AND c.created_at = u.created_at), 0),
-		EXISTS (SELECT 1 FROM main.devices d WHERE d.user_id = u.id AND d.revoked_at IS NOT NULL)
+		          WHERE c.id = u.id AND c.name = u.name AND c.created_at = u.created_at), 0)
 		FROM main.users u ORDER BY u.name`
 		withoutLAN = `SELECT u.id, u.name,
 		EXISTS (SELECT 1 FROM cur.users c WHERE c.id = u.id AND c.name = u.name AND c.created_at = u.created_at),
 		EXISTS (SELECT 1 FROM cur.users c WHERE c.name = u.name),
-		0, 0,
-		EXISTS (SELECT 1 FROM main.devices d WHERE d.user_id = u.id AND d.revoked_at IS NOT NULL)
+		0, 0
 		FROM main.users u ORDER BY u.name`
 	)
 	q := withoutLAN
@@ -553,7 +558,7 @@ func carryUsers(ctx context.Context, tx *sql.Tx) ([]carryUser, error) {
 	var out []carryUser
 	for rows.Next() {
 		var u carryUser
-		if err := rows.Scan(&u.id, &u.name, &u.matched, &u.sameName, &u.lan, &u.curLAN, &u.revoked); err != nil {
+		if err := rows.Scan(&u.id, &u.name, &u.matched, &u.sameName, &u.lan, &u.curLAN); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -613,10 +618,9 @@ func carryCredentials(ctx context.Context, tx *sql.Tx) ([]string, error) {
 
 // freshenUnmatched gives every credential of main that cur does not have
 // (no row of the same user, by ID, name and creation time, and the same
-// service, by ID and kind) a new secret, with no next and no previous one;
-// with revoked, only those of users with a device revoked in main. It
-// returns how many each user's name got.
-func freshenUnmatched(ctx context.Context, tx *sql.Tx, now int64, revoked bool) (map[string]int, error) {
+// service, by ID and kind) a new secret, with no next and no previous one.
+// It returns how many each user's name got.
+func freshenUnmatched(ctx context.Context, tx *sql.Tx, now int64) (map[string]int, error) {
 	out := map[string]int{}
 	has, err := hasColumn(ctx, tx, "main", "credentials", "rotated_at")
 	if err != nil || !has {
@@ -629,8 +633,7 @@ func freshenUnmatched(ctx context.Context, tx *sql.Tx, now int64, revoked bool) 
 		        JOIN cur.services cs ON cs.id = c.service_id
 		        JOIN main.services s ON s.id = mc.service_id AND s.kind = cs.kind
 		        WHERE c.user_id = mc.user_id AND c.service_id = mc.service_id)
-		  AND (NOT ?1 OR EXISTS (SELECT 1 FROM main.devices d WHERE d.user_id = mu.id AND d.revoked_at IS NOT NULL))
-		ORDER BY mc.user_id, mc.service_id`, revoked)
+		ORDER BY mc.user_id, mc.service_id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: carrying credentials: %w", err)
 	}
@@ -730,17 +733,18 @@ func auditCarry(ctx context.Context, tx *sql.Tx, now int64, actor, op string, us
 	kept := 0
 	for _, u := range users {
 		if n, ok := counts[u.name]; ok {
-			if err := write("user.renew:"+op, fmt.Sprintf("%s: %d credentials new, a device of the user revoked on the node since the copy", u.name, n)); err != nil {
+			w := "a device of the user revoked on the node since the copy"
+			if r, ok := renewed[u.name]; ok { // a rollback's user deleted since: new before
+				n = max(n, r)
+				w += "; " + strings.Join(why[u.name], "; ")
+			}
+			if err := write("user.renew:"+op, fmt.Sprintf("%s: %d credentials new, %s", u.name, n, w)); err != nil {
 				return err
 			}
 			continue
 		}
 		if n, ok := renewed[u.name]; ok {
-			w := "a device of the user revoked before schema 14, not on the node"
-			if why != nil {
-				w = strings.Join(why[u.name], "; ")
-			}
-			if err := write("user.renew:"+op, fmt.Sprintf("%s: %d credentials new, %s", u.name, n, w)); err != nil {
+			if err := write("user.renew:"+op, fmt.Sprintf("%s: %d credentials new, %s", u.name, n, strings.Join(why[u.name], "; "))); err != nil {
 				return err
 			}
 			continue

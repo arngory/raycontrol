@@ -751,7 +751,8 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool, carry carry) error {
 			"previous version has the LAN (v0.23.0 and later), a LAN turned off and the users' LAN keys as they are now.\n" +
 			"Credentials stay as they are now, those renewed or rotated since included: no secret a renewal retired\n" +
 			"comes back. The users of devices revoked since get new credentials once more: their other devices\n" +
-			"reconnect after their next subscription fetch.\n"
+			"reconnect after their next subscription fetch. A user or a service deleted since comes back disabled,\n" +
+			"with new credentials: a device made since and gone with the user may know the copy's.\n"
 		if carry == carrySkip {
 			kept = "-no-carry: what was revoked since comes back too, and the credentials of then, those renewed since included.\n"
 		}

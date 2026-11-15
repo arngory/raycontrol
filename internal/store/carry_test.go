@@ -476,3 +476,68 @@ func TestCarryRevocationsAfterRenewal(t *testing.T) {
 		t.Errorf("integrity %q", ic)
 	}
 }
+
+// A rollback to a copy at schema 14 or later, a user deleted since (bob,
+// after a device of his was made and revoked: gone with him) and a service
+// deleted since (naive): both come back disabled, and their credentials in
+// the copy are new, as a restore makes them, so bob enabled again lets no
+// device in with what the copy had. The others' stay current's. Each
+// renewal has its audit line, without a secret.
+func TestCarryRevocationsDeletedFresh(t *testing.T) {
+	ctx := context.Background()
+	f := newRestoreFix(t, func(s *Store) {
+		if _, err := s.db.Exec(`UPDATE users SET lan = 1, lan_key = randomblob(?) WHERE name = 'bob'`, LANKeySize); err != nil {
+			t.Fatal(err)
+		}
+	})
+	before := secrets(t, f.backup)
+	b := f.open(t, f.backup)
+	bobKey := b.lanKey(t, "bob")
+	b.Close()
+	s := f.open(t, f.current)
+	watch, _, _ := s.CreateDevice(ctx, "bob", "watch", "user")
+	if _, err := s.RevokeDevice(ctx, watch.ID); err != nil {
+		t.Fatal(err)
+	}
+	must(t, s.DeleteUser(ctx, "bob"))
+	must(t, s.DeleteService(ctx, "naive"))
+	s.Close()
+	now := secrets(t, f.current)
+	must(t, CarryRevocations(ctx, f.backup, f.current))
+	got := secrets(t, f.backup)
+	for svc, sec := range got["bob"] {
+		if sec == before["bob"][svc] || !isUUID(sec) {
+			t.Errorf("bob's credential on %d is the copy's: %s", svc, sec)
+		}
+	}
+	for _, n := range []string{"alice", "carol", "dave", "erin"} {
+		for svc, sec := range got[n] {
+			switch {
+			case svc == f.naive && (sec == before[n][svc] || !isUUID(sec)):
+				t.Errorf("%s's credential on the deleted service is the copy's", n)
+			case svc != f.naive && sec != now[n][svc]:
+				t.Errorf("%s's credential on %d is %s, current's %s", n, svc, sec, now[n][svc])
+			}
+		}
+	}
+	r := f.open(t, f.backup)
+	defer r.Close()
+	if u, err := r.UserByName(ctx, "bob"); err != nil || u.Enabled {
+		t.Errorf("bob: %+v %v", u, err)
+	}
+	if k := r.lanKey(t, "bob"); bytes.Equal(k, bobKey) {
+		t.Error("bob's LAN key is the copy's")
+	}
+	if svc, _ := r.ServiceByName(ctx, "naive"); svc.Enabled {
+		t.Error("the deleted service is enabled")
+	}
+	a := auditOf(t, f.backup)
+	for _, want := range [][2]string{
+		{"user.renew:rollback", "bob: 3 credentials new, a device of the user revoked on the node since the copy; deleted on the node since the copy"},
+		{"user.renew:rollback", "alice: 1 credentials new, a service of theirs deleted on the node since the copy"},
+	} {
+		if !hasAudit(a, want[0], want[1]) {
+			t.Errorf("no audit line %s %q in %+v", want[0], want[1], a)
+		}
+	}
+}
