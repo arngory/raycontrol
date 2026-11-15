@@ -1,0 +1,2 @@
+go test fuzz v1
+string("rcrelay1:eyJ2IjoxLCJuYW1lIjoiciIsImV4aXQiOiJmZTgwOjoxJXhcbmZsdXNoIHJ1bGVzZXRcbiIsImFwaSI6eyJwb3J0IjoxLCJwaW4iOiJwIn0sImNlcnQiOiJjIn0")

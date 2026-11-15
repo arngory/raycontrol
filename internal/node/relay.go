@@ -64,6 +64,10 @@ func DecodeRelayBundle(s string) (RelayBundle, error) {
 		return b, fmt.Errorf("unsupported relay bundle version %d", b.Version)
 	case !b.Exit.IsValid() || b.API.Port == 0 || b.API.Pin == "" || b.Cert == "" || b.Name == "":
 		return b, errors.New("relay bundle without exit, API, certificate or name")
+	case b.Exit.Zone() != "":
+		// A zone is any text after the address's "%", and rayspa puts the
+		// exit's address into its nft table as it is (the DNAT target).
+		return b, errors.New("relay bundle whose exit address has a zone: the exit's address alone")
 	case b.Probe != nil && (b.Probe.Port == 0 || b.Probe.Cert == ""):
 		return b, errors.New("relay bundle with a probe endpoint without port or certificate")
 	}
