@@ -722,6 +722,39 @@ func TestGateNoSPAParams(t *testing.T) {
 	}
 }
 
+// A port's protocol is TCP or UDP, or the snapshot is refused: it goes into
+// the nft transactions as it is, and one with a newline is a command of its
+// own, root's, on a relay the exit's to choose: here flush ruleset, which
+// takes every other table of the host with it.
+// testdata/fuzz/FuzzGateUpdate/nft-in-protocol.
+func TestGatePortProtocol(t *testing.T) {
+	evil := "tcp . 22 }\nflush ruleset\nadd element inet raycontrol public { tcp"
+	if !strings.Contains(publicScript([]Port{{evil, 22}}), "\nflush ruleset\n") {
+		t.Fatal("the protocol no longer goes into the script as it is: this test says nothing")
+	}
+	for _, name := range []string{"public", "service", "admin", "relay"} {
+		for _, proto := range []string{evil, "sctp", "", "TCP"} {
+			fw := &fakeFW{}
+			g := NewGate(fw, quiet)
+			snap := testSnapshot()
+			p := &perimeterv1.Port{Proto: proto, Port: 22}
+			switch name {
+			case "public":
+				snap.PublicPorts = append(snap.PublicPorts, p)
+			case "service":
+				snap.Services[0].Ports = append(snap.Services[0].Ports, p)
+			case "admin":
+				snap.AdminPorts = append(snap.AdminPorts, p)
+			case "relay":
+				snap.RelayPorts = append(snap.RelayPorts, p)
+			}
+			if err := g.Update(snap); err == nil || errors.Is(err, ErrPending) || len(fw.calls) != 0 || fw.public != nil {
+				t.Errorf("%s port of protocol %q: %v, calls %v", name, proto, err, fw.calls)
+			}
+		}
+	}
+}
+
 // On a relay, its own SSH is a local service (relay-v1 §3.1): in the scope
 // of the devices allowed SSH, never forwarded to the exit.
 func TestGateLocalNotForwarded(t *testing.T) {

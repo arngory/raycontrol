@@ -211,11 +211,33 @@ func paramsOf(p *perimeterv1.SPAParams) (spa.Params, error) {
 	return out, out.Validate()
 }
 
+// checkPorts refuses a snapshot with a port of another protocol than TCP
+// or UDP: the protocol is a string, and goes into the nft transactions as
+// it is (portElems, elements), where one with a newline or a brace would
+// be commands of its own, run by root.
+func checkPorts(snap *perimeterv1.Snapshot) error {
+	lists := [][]*perimeterv1.Port{snap.GetPublicPorts(), snap.GetAdminPorts(), snap.GetRelayPorts()}
+	for _, s := range snap.GetServices() {
+		lists = append(lists, s.GetPorts())
+	}
+	for _, ps := range lists {
+		for _, p := range ps {
+			if p.GetProto() != "tcp" && p.GetProto() != "udp" {
+				return fmt.Errorf("perimeter: port %d of protocol %.16q: tcp or udp", p.GetPort(), p.GetProto())
+			}
+		}
+	}
+	return nil
+}
+
 // Update applies a snapshot: devices, service ports, public ports. Grants of
 // devices that lost access are closed at once.
 func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 	params, err := paramsOf(snap.GetSpa())
 	if err != nil {
+		return err
+	}
+	if err := checkPorts(snap); err != nil {
 		return err
 	}
 	devices := make([]spa.Device, 0, len(snap.Devices))
