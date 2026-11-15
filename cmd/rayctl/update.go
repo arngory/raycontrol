@@ -307,7 +307,7 @@ func renewedText(entries []*nodev1.AuditEntry, since int64, limit int) string {
 		count = "1 user has"
 	}
 	return count + " new credentials: each had a device revoked before v0.27.0 (audit user.renew:revoked-before).\n" +
-		"Their other devices reconnect by themselves within 15-30 s.\n"
+		"Their other devices reconnect by themselves at their next connection check, within about 10 minutes.\n"
 }
 
 // belowDefaults says which services keep modes weaker than a new one of

@@ -27,7 +27,7 @@ func TestRenewedText(t *testing.T) {
 		line(1001, "user.renew:revoked-before"), line(1000, "user.renew"), line(999, "user.renew:revoked-before")}
 	got := renewedText(entries, since, 1000)
 	if !strings.HasPrefix(got, "2 users have new credentials: each had a device revoked before v0.27.0") ||
-		!strings.Contains(got, "reconnect by themselves within 15-30 s") {
+		!strings.Contains(got, "reconnect by themselves at their next connection check") {
 		t.Errorf("%q", got)
 	}
 	if got := renewedText(entries[:2], since, 1000); !strings.HasPrefix(got, "1 user has new credentials") {

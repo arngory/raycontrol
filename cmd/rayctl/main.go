@@ -62,7 +62,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   user export NAME [-o FILE]                the user's links, as in the subscription (they hold credentials)
   user renew NAME                           new credentials for the user at once, no overlap, as a device
                                             revocation gives them; the user's devices are cut until they
-                                            fetch their subscription (15 to 30 s)
+                                            fetch their subscription (Niko: at its next connection check,
+                                            within about 10 minutes)
   service list
   service add KIND NAME [-settings JSON]    slipstream: -settings '{"zone":"s.example.net"}' for a zone
                                             of your own (20 characters at most), else one is made up
@@ -648,7 +649,8 @@ func renewText(r *nodev1.RenewUserResponse) string {
 	}
 	return fmt.Sprintf("%s's credentials are new (%d credentials): the old ones stop working once rayd has applied\n"+
 		"them, in seconds. %s's devices are cut until they fetch their subscription: Niko does it by\n"+
-		"itself after 15 to 30 s, its keys still open the subscription.\n", r.Name, r.Credentials, r.Name)
+		"itself at its next connection check (every 10 minutes, 15 to 30 s after a network change; a\n"+
+		"sleeping phone once it wakes), its keys still open the subscription.\n", r.Name, r.Credentials, r.Name)
 }
 
 // exportUser prints the links of a user's subscription (P-10), or writes
@@ -843,8 +845,8 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 			if r.Msg.Unpinned {
 				fmt.Fprintln(w, "warning: these links carried the pins of the node's keys, and this certificate has another key:\n"+
 					"clients refuse it (Niko 1.45.0: on hy2-masq) until they fetch their subscription. A client whose\n"+
-					"working profile is one of these notices by itself after 15 to 30 s at the earliest; the others\n"+
-					"when they next fetch, within the subscription's 72 hours")
+					"working profile is one of these notices by itself at its next connection check (every 10 minutes,\n"+
+					"15 to 30 s after a network change); the others when they next fetch, within the subscription's 72 hours")
 			}
 		})
 	case "rotate":
@@ -881,8 +883,8 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 					"Yggdrasil), and the key after it is in subscriptions from then\n", args[0], which, args[0])
 				if *fresh {
 					fmt.Fprintln(w, "no client holds the pin of that key: from the switch on all of them refuse naive, hy2-masq and DoH\n"+
-						"under this site until they fetch their subscription (by themselves after 15 to 30 s at the earliest,\n"+
-						"when one of these is their working profile; otherwise when they next fetch)")
+						"under this site until they fetch their subscription (by themselves at their next connection check,\n"+
+						"within about 10 minutes, when one of these is their working profile; otherwise when they next fetch)")
 				}
 			case r.Msg.Seal && r.Msg.PrevUntil != 0:
 				fmt.Fprintf(w, "%s has a new %s key, in subscriptions from now; the previous one is accepted until %s\n",
@@ -1230,7 +1232,8 @@ func revokeText(id string, r *nodev1.RevokeDeviceResponse) string {
 	}
 	return fmt.Sprintf("device %s (%s/%s) revoked. %s's credentials are new (%d credentials): what the device kept stops\n"+
 		"working once rayd has applied them, in seconds. %s's other devices are cut too, until they fetch\n"+
-		"their subscription: Niko does it by itself after 15 to 30 s, its keys still open the subscription.\n",
+		"their subscription: Niko does it by itself at its next connection check (every 10 minutes, 15 to 30 s\n"+
+		"after a network change; a sleeping phone once it wakes), its keys still open the subscription.\n",
 		id, r.User, r.Device, r.User, r.Credentials, r.User)
 }
 
