@@ -25,12 +25,14 @@ import (
 // through what rayd gave it.
 //
 // Files: the units of rayd, rayspa, niko-<name> and the relay's probe,
-// the update's two units, tmpfiles, polkit, two sysctl files, two firewall
-// files; mode 0644 or 0755, nothing else (no setuid, setgid or sticky
-// bit). Fixed files must be as rayctl writes them; units only have the
-// lines of their templates; tmpfiles only directories under the data
-// plane's runtime directory. Users: rayd, rayspa, niko-<name> with their
-// UIDs, in niko-* groups only. Units: only those whose files the plan has.
+// the node's two update units and the relay's three, tmpfiles, polkit, two
+// sysctl files, two firewall files; mode 0644 or 0755, nothing else (no
+// setuid, setgid or sticky bit). Fixed files must be as rayctl writes
+// them; units only have the lines of their templates; tmpfiles only
+// directories under the data plane's runtime directory. Users: rayd,
+// rayspa, niko-<name> with their UIDs, in niko-* groups only. Units: only
+// those whose files the plan has, never an update service (its path unit
+// starts it) nor the relay's recover unit (its boot does).
 func (p Plan) Check() error {
 	users := map[string]bool{}
 	uids := map[int]bool{}
@@ -65,6 +67,9 @@ func (p Plan) Check() error {
 		"/etc/polkit-1/rules.d/50-raycontrol.rules":     polkitRule,
 		"/etc/systemd/system/" + nodeupdate.PathUnit:    updatePath,
 		"/etc/systemd/system/" + nodeupdate.ServiceUnit: updateService,
+		"/etc/systemd/system/" + RelayUpdatePath:        relayUpdatePath,
+		"/etc/systemd/system/" + RelayUpdateService:     relayUpdateService,
+		"/etc/systemd/system/" + RelayRecover:           relayRecover,
 	}
 	files := map[string]bool{}
 	for _, f := range p.Files {
@@ -104,8 +109,10 @@ func (p Plan) Check() error {
 		switch {
 		case seen[u]:
 			return fmt.Errorf("unit %s twice", u)
-		case u == nodeupdate.ServiceUnit:
+		case u == nodeupdate.ServiceUnit || u == RelayUpdateService:
 			return fmt.Errorf("unit %s: started by its path unit only", u)
+		case u == RelayRecover:
+			return fmt.Errorf("unit %s: run at boot only, by its condition", u)
 		case !files["/etc/systemd/system/"+u]:
 			return fmt.Errorf("unit %q: not one of the plan's files", u)
 		}
@@ -135,7 +142,8 @@ func checkUser(u SystemUser) error {
 }
 
 // unitUser is the user a unit of raycontrol's runs as, or "" for a unit
-// that is not one Check takes (the update's two units are fixed files).
+// that is not one Check takes (the update's units, the node's and the
+// relay's, are fixed files).
 func unitUser(unit string) string {
 	switch unit {
 	case "rayd.service", RelayProbeUnit:

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/arngory/raycontrol/internal/deploy"
+	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/perimeter"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -1032,6 +1033,93 @@ func TestRelayPlan(t *testing.T) {
 	if !strings.Contains(file(p, "/etc/sysctl.d/91-raycontrol-relay.conf"), "net.ipv4.ip_forward = 1") ||
 		!strings.Contains(file(p, "/etc/sysctl.d/90-raycontrol.conf"), "accept_redirects = 0") {
 		t.Error("relay sysctl")
+	}
+}
+
+// The relay's update by its exit's word (relay-update-remote-v1 §4.1):
+// three unit files of its own in the plan, none of them a unit the plan
+// enables (root's policy does); the path unit watches the request in
+// rayd relay's own state directory; the service runs as root, unsandboxed,
+// and only by the path unit; the recover unit once a boot, on the mark.
+// The node's update units stay as they were.
+func TestRelayUpdateUnits(t *testing.T) {
+	p := deploy.RelayPlan(deploy.DefaultBinaries)
+	if err := p.Check(); err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(p.Units, func(u string) bool { return strings.HasPrefix(u, "raycontrol-") }) {
+		t.Errorf("units %v", p.Units)
+	}
+	unit := func(name string) string { return file(p, "/etc/systemd/system/"+name) }
+	path, svc, recover := unit(deploy.RelayUpdatePath), unit(deploy.RelayUpdateService), unit(deploy.RelayRecover)
+	for name, c := range map[string]struct {
+		content    string
+		want, none []string
+	}{
+		deploy.RelayUpdatePath: {path, []string{"[Path]\nPathExists=" + nodeupdate.RelayRequestFile + "\n", "[Install]\nWantedBy=multi-user.target\n"}, nil},
+		deploy.RelayUpdateService: {svc, []string{"Type=oneshot\n", "ExecStart=/usr/local/bin/rayctl update -request\n",
+			"ExecStopPost=-/usr/local/bin/rayctl update -request-ended\n", "TimeoutStartSec=15min\n", "TimeoutStopSec=5min\n",
+			"StateDirectory=raycontrol-update\nStateDirectoryMode=0755\n", "Wants=network-online.target\n",
+			"After=network-online.target rayspa.service " + deploy.RelayRecover + "\n"},
+			[]string{"User=", "[Install]", "ProtectSystem", "NoNewPrivileges"}},
+		deploy.RelayRecover: {recover, []string{"ConditionPathExists=" + deploy.RelayUpdateMark + "\n", "Type=oneshot\n",
+			"ExecStart=/usr/local/bin/rayctl update -request-recover\n", "TimeoutStartSec=10min\n", "[Install]\nWantedBy=multi-user.target\n"},
+			[]string{"User=", "ExecStopPost", "ProtectSystem"}},
+	} {
+		for _, w := range c.want {
+			if !strings.Contains(c.content, w) {
+				t.Errorf("%s lacks %q:\n%s", name, w, c.content)
+			}
+		}
+		for _, w := range c.none {
+			if strings.Contains(c.content, w) {
+				t.Errorf("%s has %q:\n%s", name, w, c.content)
+			}
+		}
+	}
+	// The request is in rayd relay's state directory, which only it and
+	// root reach (0700).
+	probe := unit(deploy.RelayProbeUnit)
+	if !strings.Contains(probe, "\nStateDirectory="+strings.TrimPrefix(filepath.Dir(nodeupdate.RelayRequestFile), "/var/lib/")+"\n") ||
+		!strings.Contains(probe, "\nStateDirectoryMode=0700\n") || filepath.Dir(filepath.Dir(nodeupdate.RelayRequestFile)) != "/var/lib" {
+		t.Errorf("%s is not in rayd relay's state directory:\n%s", nodeupdate.RelayRequestFile, probe)
+	}
+	// Not one of the plan's enabled units, not as root writes it: refused.
+	for name, edit := range map[string]func(*deploy.Plan){
+		"the service enabled": func(p *deploy.Plan) { p.Units = append(p.Units, deploy.RelayUpdateService) },
+		"recover enabled":     func(p *deploy.Plan) { p.Units = append(p.Units, deploy.RelayRecover) },
+		"another command": func(p *deploy.Plan) {
+			for i, f := range p.Files {
+				if strings.HasSuffix(f.Path, deploy.RelayUpdateService) {
+					p.Files[i].Content = bytes.Replace(f.Content, []byte("rayctl update -request\n"), []byte("rayctl update -request; /bin/sh\n"), 1)
+				}
+			}
+		},
+		"another file watched": func(p *deploy.Plan) {
+			for i, f := range p.Files {
+				if strings.HasSuffix(f.Path, deploy.RelayUpdatePath) {
+					p.Files[i].Content = bytes.Replace(f.Content, []byte("/var/lib/rayd-relay/"), []byte("/tmp/"), 1)
+				}
+			}
+		},
+	} {
+		q := p
+		q.Files, q.Units = slices.Clone(p.Files), slices.Clone(p.Units)
+		edit(&q)
+		if err := q.Check(); err == nil {
+			t.Errorf("%s: passed the check", name)
+		}
+	}
+	// A node has none of them, and its own update units are the node's.
+	node := deploy.Build(deploy.Inputs{}, render.DefaultPaths, deploy.DefaultBinaries)
+	for _, f := range node.Files {
+		if strings.Contains(f.Path, "raycontrol-relay-") || strings.Contains(string(f.Content), "rayd-relay/update-request") {
+			t.Errorf("a node's plan has %s", f.Path)
+		}
+	}
+	if !strings.Contains(file(node, "/etc/systemd/system/"+nodeupdate.PathUnit), "PathExists="+nodeupdate.RequestFile+"\n") ||
+		!strings.Contains(file(node, "/etc/systemd/system/"+nodeupdate.ServiceUnit), "TimeoutStartSec=50min\n") {
+		t.Error("the node's update units changed")
 	}
 }
 

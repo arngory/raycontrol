@@ -208,12 +208,20 @@ func relayFiles() []string {
 // relayOps are the relay host's parts an update keeps and puts back, with
 // the host's operations given so that a test can follow them.
 type relayOps struct {
-	dir         string            // previousDir
-	bins        map[string]string // relayBinaries
-	files       []string          // relayFiles
-	sysctlDir   string            // where of them are sysctl's, applied again after a restore
-	snapshot    string            // rayspa's last snapshot
-	units       []string          // rayspa's unit, then the probe's (Requisite on rayspa)
+	dir       string            // previousDir
+	bins      map[string]string // relayBinaries
+	files     []string          // relayFiles
+	sysctlDir string            // where of them are sysctl's, applied again after a restore
+	snapshot  string            // rayspa's last snapshot
+	// units are rayspa's unit, then the probe's (Requisite on rayspa),
+	// then those of the update by the exit's word: rayspa first (open's
+	// check), the path unit started after rayspa and the probe (restore).
+	units []string
+	// enableOnly are of units the ones a restore or open never stops or
+	// starts, only enables as they were: the recover unit runs once at
+	// boot, and may be what runs the rollback; and it must stay enabled
+	// on a host left open, to roll it back after the next boot.
+	enableOnly  []string
 	state       func(unit string) unitWas
 	loaded      func(unit string) bool
 	run         func(name string, args ...string) error
@@ -371,7 +379,7 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 	o.disarm()
 	// Stopped for sure: a rayspa that runs on would keep the new binary
 	// and its table, and the check after would look at it.
-	stop := slices.Clone(o.units)
+	stop := o.running()
 	slices.Reverse(stop)
 	for _, u := range stop {
 		if !o.loaded(u) {
@@ -465,7 +473,7 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 			_ = o.run("systemctl", "disable", u) // perhaps no such unit
 		}
 	}
-	for _, u := range o.units {
+	for _, u := range o.running() {
 		if k.Units[u].Active {
 			if err := o.run("systemctl", "start", u); err != nil {
 				return k, err
@@ -473,6 +481,12 @@ func (o relayOps) restore(withSnapshot bool) (relayKept, error) {
 		}
 	}
 	return k, nil
+}
+
+// running are the units a restore stops and starts, and open takes down:
+// units but enableOnly, in their order.
+func (o relayOps) running() []string {
+	return slices.DeleteFunc(slices.Clone(o.units), func(u string) bool { return slices.Contains(o.enableOnly, u) })
 }
 
 // open takes rayspa down and its table off: the relay forwards nothing,
@@ -484,7 +498,7 @@ func (o relayOps) open() error {
 	m, _ := o.readMark()
 	m.State = "open"
 	_ = o.mark(m)
-	stop := slices.Clone(o.units)
+	stop := o.running()
 	slices.Reverse(stop)
 	disable := o.run("systemctl", append([]string{"disable", "--now"}, stop...)...)
 	tear := o.run(o.rayspa, "teardown")
@@ -590,6 +604,16 @@ type relayHealth struct {
 
 func running(st map[string]string) bool {
 	return st["ActiveState"] == "active" && st["SubState"] == "running"
+}
+
+// unitActive is whether unit, in state st, runs as a restore starts it
+// again: a service running, a path unit active (its SubState is waiting,
+// or running while its service runs).
+func unitActive(unit string, st map[string]string) bool {
+	if strings.HasSuffix(unit, ".path") {
+		return st["ActiveState"] == "active"
+	}
+	return running(st)
 }
 
 // nftBlock is the lines of one set or chain ("set admin4") of an nft
@@ -1034,11 +1058,12 @@ func (c *cli) relayEnvHere(ctx context.Context) relayEnv {
 	hctx := context.WithoutCancel(ctx) // the checks after a change have their own time
 	ops := relayOps{
 		dir: previousDir, bins: relayBinaries, files: relayFiles(), sysctlDir: "/etc/sysctl.d/", snapshot: relaySnapshot,
-		units: []string{relayUnit, deploy.RelayProbeUnit},
+		units:      []string{relayUnit, deploy.RelayProbeUnit, deploy.RelayUpdatePath, deploy.RelayRecover},
+		enableOnly: []string{deploy.RelayRecover},
 		state: func(u string) unitWas {
 			en, _ := commandApart("systemctl", "is-enabled", u).Output()
 			st, _ := unitState(u)()
-			return unitWas{Enabled: strings.TrimSpace(string(en)) == "enabled", Active: running(st)}
+			return unitWas{Enabled: strings.TrimSpace(string(en)) == "enabled", Active: unitActive(u, st)}
 		},
 		loaded: unitLoaded,
 		run:    runApart,

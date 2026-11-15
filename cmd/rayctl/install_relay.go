@@ -22,6 +22,7 @@ import (
 	"github.com/arngory/raycontrol/internal/deploy"
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/perimeter"
 )
 
@@ -310,8 +311,51 @@ func installRelay(bundlePath, packages string) (err error) {
 	} else if note != "" {
 		fmt.Println(note)
 	}
+	// The update by the exit's word, on as root's policy has it: what
+	// stays through an update (this install runs under it) and a
+	// bootstrap.sh -relay again. The relay works without it.
+	remote := nodeupdate.ReadPolicy(nodeupdate.PolicyFile).Remote == "on"
+	if err := relayRemoteUnits(remote, func(u string, now bool) error { return enableUnit(h, u, now) }, disableUnit); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: the units of the update by the exit's word: %v (rayctl update remote on|off sets them again)\n", err)
+	}
 	h.WarnRelayDropChains(probePort)
 	return nil
+}
+
+// relayRemoteUnits enables the units of the relay's update by its exit's
+// word (spec/relay-update-remote-v1.md §4.1), the path unit started and
+// the recover unit for the next boot, when on (root's policy has remote
+// on), and disables them when not; recover is never started or stopped
+// here (it may be what runs).
+func relayRemoteUnits(on bool, enable, disable func(unit string, now bool) error) error {
+	if on {
+		return errors.Join(enable(deploy.RelayUpdatePath, true), enable(deploy.RelayRecover, false))
+	}
+	return errors.Join(disable(deploy.RelayUpdatePath, true), disable(deploy.RelayRecover, false))
+}
+
+// enableUnit enables unit, and starts it when now; journaled first, so
+// that rayctl uninstall takes it down (a path unit's file alone it would
+// remove, its link left behind).
+func enableUnit(h *deploy.Host, unit string, now bool) error {
+	if err := h.Journal.Record(deploy.Change{Kind: deploy.ChangeUnit, Name: unit}); err != nil {
+		return err
+	}
+	return runApart("systemctl", systemctlEnable("enable", unit, now)...)
+}
+
+// disableUnit disables unit, and stops it when now.
+func disableUnit(unit string, now bool) error {
+	return runApart("systemctl", systemctlEnable("disable", unit, now)...)
+}
+
+// systemctlEnable is systemctl's arguments to enable or disable unit, with
+// --now when now.
+func systemctlEnable(verb, unit string, now bool) []string {
+	if now {
+		return []string{verb, "--now", unit}
+	}
+	return []string{verb, unit}
 }
 
 // relayTools checks the commands a relay install runs, and finds flock

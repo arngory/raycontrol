@@ -1613,9 +1613,118 @@ func TestCatchSignals(t *testing.T) {
 func TestRelayFiles(t *testing.T) {
 	files := relayFiles()
 	for _, f := range []string{"/etc/systemd/system/rayspa.service", "/etc/systemd/system/" + deploy.RelayProbeUnit,
-		deploy.HardeningSysctl, deploy.RelaySysctl, deploy.ConntrackSysctl, deploy.ModulesLoad, deploy.PortsSysctl} {
+		deploy.HardeningSysctl, deploy.RelaySysctl, deploy.ConntrackSysctl, deploy.ModulesLoad, deploy.PortsSysctl,
+		// The update by the exit's word (relay-update-remote-v1 §4.1): a
+		// rollback below it takes them away, a rollback to it back.
+		"/etc/systemd/system/" + deploy.RelayUpdatePath, "/etc/systemd/system/" + deploy.RelayUpdateService,
+		"/etc/systemd/system/" + deploy.RelayRecover} {
 		if !slices.Contains(files, f) {
 			t.Errorf("%s is not kept", f)
 		}
+	}
+	// The recover unit's condition is the mark this rayctl writes.
+	if p := filepath.Join(previousDir, relayMarkFile); p != deploy.RelayUpdateMark {
+		t.Errorf("the mark is %s, the recover unit waits for %s", p, deploy.RelayUpdateMark)
+	}
+}
+
+// The units of the update by the exit's word come after rayspa and the
+// probe on this host: rayspa first, which open looks at, the path unit
+// started after the two; the recover unit is only enabled again as it
+// was, never stopped or started by a restore or open (it may be what runs
+// the rollback, and must stay enabled on a host left open). A path unit
+// waiting counts as active.
+func TestRelayRemoteUnitsKept(t *testing.T) {
+	ops := (&cli{}).relayEnvHere(context.Background()).ops
+	if !slices.Equal(ops.units, []string{relayUnit, deploy.RelayProbeUnit, deploy.RelayUpdatePath, deploy.RelayRecover}) ||
+		!slices.Equal(ops.enableOnly, []string{deploy.RelayRecover}) {
+		t.Fatalf("units %v, enable only %v", ops.units, ops.enableOnly)
+	}
+	waiting := map[string]string{"ActiveState": "active", "SubState": "waiting"}
+	if !unitActive(deploy.RelayUpdatePath, waiting) || unitActive(relayUnit, waiting) ||
+		!unitActive(relayUnit, map[string]string{"ActiveState": "active", "SubState": "running"}) ||
+		unitActive(deploy.RelayUpdatePath, map[string]string{"ActiveState": "inactive", "SubState": "dead"}) {
+		t.Error("unitActive")
+	}
+
+	f := newFakeRelay(t)
+	ops = f.env.ops
+	ops.units = append(ops.units, deploy.RelayUpdatePath, deploy.RelayRecover)
+	ops.enableOnly = []string{deploy.RelayRecover}
+	// remote on before the update: the path unit enabled and waiting, the
+	// recover unit enabled, not running.
+	ops.state = func(u string) unitWas { return unitWas{Enabled: true, Active: u != deploy.RelayRecover} }
+	if _, err := ops.keep("v0.26.0"); err != nil {
+		t.Fatal(err)
+	}
+	f.ran = nil
+	if _, err := captureStdout(t, func() error { _, err := ops.restore(true); return err }); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"disarm", "systemctl stop " + deploy.RelayUpdatePath, "systemctl stop rayd-relay.service", "systemctl stop rayspa.service",
+		"systemctl daemon-reload",
+		"sysctl -q -e -p " + f.at("etc/sysctl/91-raycontrol-relay.conf"), "sysctl -q -e -p " + f.at("etc/sysctl/90-raycontrol.conf"),
+		"systemctl enable rayspa.service", "systemctl enable rayd-relay.service", "systemctl enable " + deploy.RelayUpdatePath,
+		"systemctl enable " + deploy.RelayRecover,
+		"systemctl start rayspa.service", "systemctl start rayd-relay.service", "systemctl start " + deploy.RelayUpdatePath}
+	if !slices.Equal(f.ran, want) {
+		t.Errorf("restore ran %q\nwant %q", f.ran, want)
+	}
+	// remote off before: both disabled again.
+	ops.state = func(u string) unitWas { return unitWas{Enabled: u == relayUnit, Active: u == relayUnit} }
+	if _, err := ops.keep("v0.26.0"); err != nil {
+		t.Fatal(err)
+	}
+	f.ran = nil
+	if _, err := captureStdout(t, func() error { _, err := ops.restore(true); return err }); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(f.ran, "systemctl disable "+deploy.RelayUpdatePath) || !slices.Contains(f.ran, "systemctl disable "+deploy.RelayRecover) ||
+		slices.Contains(f.ran, "systemctl start "+deploy.RelayUpdatePath) {
+		t.Errorf("restore of remote off ran %q", f.ran)
+	}
+	// open: the path unit down with rayspa and the probe, the recover
+	// unit left for the next boot.
+	ops.state = f.env.ops.state
+	f.ran = nil
+	if err := ops.open(); err != nil ||
+		!slices.Equal(f.ran, []string{"systemctl disable --now " + deploy.RelayUpdatePath + " rayd-relay.service rayspa.service", "rayspa teardown", "unforward"}) {
+		t.Errorf("open: %v %q", err, f.ran)
+	}
+	if slices.ContainsFunc(f.ran, func(s string) bool { return strings.Contains(s, deploy.RelayRecover) }) {
+		t.Errorf("open touched the recover unit: %q", f.ran)
+	}
+}
+
+// rayctl install -relay enables the units of the update by the exit's word
+// as root's policy has it: on, the path unit started and the recover unit
+// for the next boot; off, both disabled, the recover unit never stopped.
+func TestRelayRemoteUnits(t *testing.T) {
+	var ran []string
+	enable := func(u string, now bool) error {
+		ran = append(ran, strings.Join(systemctlEnable("enable", u, now), " "))
+		return nil
+	}
+	disable := func(u string, now bool) error {
+		ran = append(ran, strings.Join(systemctlEnable("disable", u, now), " "))
+		return nil
+	}
+	if err := relayRemoteUnits(true, enable, disable); err != nil ||
+		!slices.Equal(ran, []string{"enable --now " + deploy.RelayUpdatePath, "enable " + deploy.RelayRecover}) {
+		t.Errorf("on: %v %q", err, ran)
+	}
+	ran = nil
+	if err := relayRemoteUnits(false, enable, disable); err != nil ||
+		!slices.Equal(ran, []string{"disable --now " + deploy.RelayUpdatePath, "disable " + deploy.RelayRecover}) {
+		t.Errorf("off: %v %q", err, ran)
+	}
+	// One that fails does not keep the other from its turn, and is said.
+	ran = nil
+	failing := func(u string, now bool) error {
+		ran = append(ran, u)
+		return errors.New("Unit file " + u + " does not exist")
+	}
+	if err := relayRemoteUnits(true, failing, disable); err == nil || len(ran) != 2 {
+		t.Errorf("failing: %v %q", err, ran)
 	}
 }
