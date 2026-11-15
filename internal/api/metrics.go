@@ -203,6 +203,17 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 		m.Add("raycontrol_reality_next_from_seconds", "Switch time of the published next key set (Unix time, 0 when none).",
 			float64(st.NextFrom), "service", svc.Name)
 	}
+	// naive's server name (R4-42).
+	for _, svc := range services {
+		if svc.Kind != "naive" || !svc.Enabled {
+			continue
+		}
+		st := provision.ParseNaiveState(svc)
+		m.Add("raycontrol_naive_name_rotated_at_seconds", "Last switch of the naive server name (Unix time; the service's creation before the first).",
+			float64(st.RotatedAt), "service", svc.Name)
+		m.Add("raycontrol_naive_name_next_from_seconds", "Switch time of the published next naive server name (Unix time, 0 when none).",
+			float64(st.NextFrom), "service", svc.Name)
+	}
 
 	// DNS: problems only, the records themselves are in "rayctl dns".
 	_, problems, err := provision.DNSRecords(ctx, s.Store)

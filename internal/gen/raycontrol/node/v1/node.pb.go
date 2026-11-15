@@ -5083,14 +5083,25 @@ func (x *Profile) GetNextFrom() int64 {
 }
 
 type Service struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            uint32                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"` // also the SPA scope ID
-	Kind          string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
-	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
-	Enabled       bool                   `protobuf:"varint,4,opt,name=enabled,proto3" json:"enabled,omitempty"`
-	SettingsJson  string                 `protobuf:"bytes,5,opt,name=settings_json,json=settingsJson,proto3" json:"settings_json,omitempty"`
-	CreatedAt     int64                  `protobuf:"varint,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	Uid           uint32                 `protobuf:"varint,7,opt,name=uid,proto3" json:"uid,omitempty"` // system user of the service's process, 0 if none
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Id           uint32                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"` // also the SPA scope ID
+	Kind         string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	Name         string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	Enabled      bool                   `protobuf:"varint,4,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	SettingsJson string                 `protobuf:"bytes,5,opt,name=settings_json,json=settingsJson,proto3" json:"settings_json,omitempty"`
+	CreatedAt    int64                  `protobuf:"varint,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	Uid          uint32                 `protobuf:"varint,7,opt,name=uid,proto3" json:"uid,omitempty"` // system user of the service's process, 0 if none
+	// The server name in the service's links (settings' sni): REALITY,
+	// naive, DoH, hy2-masq, hy2-obfs, Yggdrasil, a site; empty for the
+	// others (raycontrol v0.29.0).
+	Sni string `protobuf:"bytes,8,opt,name=sni,proto3" json:"sni,omitempty"`
+	// REALITY and naive: the server name in subscriptions from next_from on,
+	// only once published (R4-7, R4-42); empty when no switch is published
+	// or the published one keeps the name. A naive service has its next name
+	// chosen and served earlier: it shows here once clients get it.
+	SniNext string `protobuf:"bytes,9,opt,name=sni_next,json=sniNext,proto3" json:"sni_next,omitempty"`
+	// REALITY and naive: the published switch, unix seconds; 0: none.
+	NextFrom      int64 `protobuf:"varint,10,opt,name=next_from,json=nextFrom,proto3" json:"next_from,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5170,6 +5181,27 @@ func (x *Service) GetCreatedAt() int64 {
 func (x *Service) GetUid() uint32 {
 	if x != nil {
 		return x.Uid
+	}
+	return 0
+}
+
+func (x *Service) GetSni() string {
+	if x != nil {
+		return x.Sni
+	}
+	return ""
+}
+
+func (x *Service) GetSniNext() string {
+	if x != nil {
+		return x.SniNext
+	}
+	return ""
+}
+
+func (x *Service) GetNextFrom() int64 {
+	if x != nil {
+		return x.NextFrom
 	}
 	return 0
 }
@@ -5897,7 +5929,11 @@ type RotateServiceResponse struct {
 	// before v0.15.0); "tls" for a site, whose certificate with another key
 	// rayd orders from switch_at on (spec/cert-pin-v1.md §5); empty for
 	// REALITY's scheduled switch.
-	Key           string `protobuf:"bytes,4,opt,name=key,proto3" json:"key,omitempty"`
+	Key string `protobuf:"bytes,4,opt,name=key,proto3" json:"key,omitempty"`
+	// The service's kind (raycontrol v0.29.0): "naive" is a switch of its
+	// server name alone (R4-42), at switch_at or once its certificate covers
+	// the new name; the previous name stays accepted until the switch after.
+	Kind          string `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5956,6 +5992,13 @@ func (x *RotateServiceResponse) GetPrevUntil() int64 {
 func (x *RotateServiceResponse) GetKey() string {
 	if x != nil {
 		return x.Key
+	}
+	return ""
+}
+
+func (x *RotateServiceResponse) GetKind() string {
+	if x != nil {
+		return x.Kind
 	}
 	return ""
 }
@@ -8558,7 +8601,7 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\aservice\x18\x02 \x01(\tR\aservice\x12\x12\n" +
 	"\x04link\x18\x03 \x01(\tR\x04link\x12\x1b\n" +
 	"\tnext_link\x18\x04 \x01(\tR\bnextLink\x12\x1b\n" +
-	"\tnext_from\x18\x05 \x01(\x03R\bnextFrom\"\xb1\x01\n" +
+	"\tnext_from\x18\x05 \x01(\x03R\bnextFrom\"\xfb\x01\n" +
 	"\aService\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\rR\x02id\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x12\n" +
@@ -8567,7 +8610,11 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\rsettings_json\x18\x05 \x01(\tR\fsettingsJson\x12\x1d\n" +
 	"\n" +
 	"created_at\x18\x06 \x01(\x03R\tcreatedAt\x12\x10\n" +
-	"\x03uid\x18\a \x01(\rR\x03uid\"\x15\n" +
+	"\x03uid\x18\a \x01(\rR\x03uid\x12\x10\n" +
+	"\x03sni\x18\b \x01(\tR\x03sni\x12\x19\n" +
+	"\bsni_next\x18\t \x01(\tR\asniNext\x12\x1b\n" +
+	"\tnext_from\x18\n" +
+	" \x01(\x03R\bnextFrom\"\x15\n" +
 	"\x13ListServicesRequest\"e\n" +
 	"\x14ListServicesResponse\x127\n" +
 	"\bservices\x18\x01 \x03(\v2\x1b.raycontrol.node.v1.ServiceR\bservices\x12\x14\n" +
@@ -8607,13 +8654,14 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03now\x18\x02 \x01(\bR\x03now\x12\x14\n" +
 	"\x05force\x18\x03 \x01(\bR\x05force\x12\x14\n" +
-	"\x05fresh\x18\x04 \x01(\bR\x05fresh\"y\n" +
+	"\x05fresh\x18\x04 \x01(\bR\x05fresh\"\x8d\x01\n" +
 	"\x15RotateServiceResponse\x12\x1b\n" +
 	"\tswitch_at\x18\x01 \x01(\x03R\bswitchAt\x12\x12\n" +
 	"\x04seal\x18\x02 \x01(\bR\x04seal\x12\x1d\n" +
 	"\n" +
 	"prev_until\x18\x03 \x01(\x03R\tprevUntil\x12\x10\n" +
-	"\x03key\x18\x04 \x01(\tR\x03key\"\xc4\x01\n" +
+	"\x03key\x18\x04 \x01(\tR\x03key\x12\x12\n" +
+	"\x04kind\x18\x05 \x01(\tR\x04kind\"\xc4\x01\n" +
 	"\x06Device\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04user\x18\x02 \x01(\tR\x04user\x12\x12\n" +

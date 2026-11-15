@@ -55,7 +55,10 @@ service NodeService {
   // once and then by its back-off, and switches when it is stored. Root on
   // the node only. To the next key: failed_precondition unless that key has
   // been in subscriptions for the lead, or force. To a key made for the
-  // order, with a new next key: fresh.
+  // order, with a new next key: fresh. For a naive service it asks for a
+  // switch of its server name (R4-42, raycontrol v0.29.0): a lead time
+  // away, or at once with now to the next name the front already routes;
+  // the previous name stays accepted until the switch after, now or not.
   rpc RotateService(RotateServiceRequest) returns (RotateServiceResponse);
   // SetServiceOption changes one of the few settings that may change after
   // creation: a site's answer, whether REALITY moves its server name,
@@ -679,6 +682,17 @@ message Service {
   string settings_json = 5;
   int64 created_at = 6;
   uint32 uid = 7; // system user of the service's process, 0 if none
+  // The server name in the service's links (settings' sni): REALITY,
+  // naive, DoH, hy2-masq, hy2-obfs, Yggdrasil, a site; empty for the
+  // others (raycontrol v0.29.0).
+  string sni = 8;
+  // REALITY and naive: the server name in subscriptions from next_from on,
+  // only once published (R4-7, R4-42); empty when no switch is published
+  // or the published one keeps the name. A naive service has its next name
+  // chosen and served earlier: it shows here once clients get it.
+  string sni_next = 9;
+  // REALITY and naive: the published switch, unix seconds; 0: none.
+  int64 next_from = 10;
 }
 
 message ListServicesRequest {}
@@ -774,6 +788,10 @@ message RotateServiceResponse {
   // rayd orders from switch_at on (spec/cert-pin-v1.md §5); empty for
   // REALITY's scheduled switch.
   string key = 4;
+  // The service's kind (raycontrol v0.29.0): "naive" is a switch of its
+  // server name alone (R4-42), at switch_at or once its certificate covers
+  // the new name; the previous name stays accepted until the switch after.
+  string kind = 5;
 }
 
 message Device {
