@@ -89,10 +89,16 @@ type relayRecord struct {
 	// TurnID and TurnAt are the relay's last turn (§3.3): the offer the
 	// exit gave it to take, and when. Only the exit sets them, as it gives
 	// a turn (relayOffers); nothing the relay says moves them. The relay
-	// counts as updating only within its turn: TurnTimeout from TurnAt.
+	// counts as updating only within its turn: TurnTimeout from TurnAt,
+	// and until TurnOver.
 	TurnID string `json:"turn_id,omitempty"`
 	TurnAt int64  `json:"turn_at,omitempty"`
-	SeenAt int64  `json:"seen_at,omitempty"`
+	// TurnOver: the relay's outcome on TurnID came, which ends its turn
+	// (takeRelayReport): if it takes that offer again (a retry, an offer
+	// it declined and takes later), that is a later turn, not the rest of
+	// this one.
+	TurnOver bool  `json:"turn_over,omitempty"`
+	SeenAt   int64 `json:"seen_at,omitempty"`
 }
 
 // readRelayRecord is relay name's record; none (Reported "") when there is
@@ -118,6 +124,11 @@ func underway(state string) bool { return state == nodeupdate.Requested || state
 // ended: the relay's state of an update that has an outcome.
 func ended(state string) bool {
 	return state == nodeupdate.Done || state == nodeupdate.RolledBack || state == nodeupdate.Failed
+}
+
+// outcomeOn reports whether record r has the relay's outcome on update id.
+func outcomeOn(r relayRecord, id string) bool {
+	return id != "" && r.UpdateID == id && ended(r.Reported)
 }
 
 // atLeast reports whether release v is target or newer.
@@ -328,58 +339,86 @@ func (r relayView) turn(id string) (time.Time, bool) {
 	return time.Unix(r.Rec.TurnAt, 0), true
 }
 
+// over reports whether relay r's turn, given at at, is over at now: its
+// outcome on it came, or TurnTimeout passed.
+func (r relayView) over(at, now time.Time) bool { return r.Rec.TurnOver || now.Sub(at) >= TurnTimeout }
+
 // updating reports whether relay r is updating at now as the queue counts
 // it (§3.3, §6): it says an update is under way, for the turn the exit
 // gave it (for this offer, or for the one before: the node updated again
-// meanwhile, and rayd restarted), less than TurnTimeout since the exit
-// gave it. What it says of any other update, or later, holds nobody back.
+// meanwhile, and rayd restarted), and that turn is not over. What it says
+// of any other update, or later, holds nobody back.
 func (r relayView) updating(now time.Time) bool {
 	at, ok := r.turn(r.Rec.UpdateID)
-	return underway(r.Rec.Reported) && ok && now.Sub(at) < TurnTimeout
+	return underway(r.Rec.Reported) && ok && !r.over(at, now)
+}
+
+// holding reports whether relay r holds a turn at now, for whichever
+// offer: it was given, is not over, and no outcome on it is in the record
+// (one an older exit kept with its turn). Its word on that turn may be
+// lost (the exit restarted for its next update as it gave it, the relay's
+// report not taken): it may be updating, and nobody else begins until
+// the turn is over (§3.3).
+func (r relayView) holding(now time.Time) bool {
+	at, ok := r.turn(r.Rec.TurnID)
+	return ok && !r.over(at, now) && !outcomeOn(r.Rec, r.Rec.TurnID)
 }
 
 // passed reports whether relay r is past its turn for offer o (§3.3): it
 // reported an outcome of o (a refusal before any change included); or,
 // unless it is updating (updating: that goes on regardless, whatever its
 // version or root's switch say meanwhile), it runs o's release or newer,
-// root on it does not take offers, it never reported and has no feed with
-// updates (an older relay, no rayd relay) and was not given o (it may be
+// or root on it does not take offers; or, unless it holds a turn for an
+// earlier offer (holding), it never reported and has no feed with updates
+// (an older relay, no rayd relay) and was not given o (it may be
 // updating, its report lost), it has had no such feed for TurnTimeout, or
-// its turn for o began TurnTimeout ago with no outcome.
+// its turn for o is over with no outcome on o in the record (TurnTimeout
+// since it was given, or its outcome came and it said something else
+// since).
 func (r relayView) passed(o *perimeterv1.RelayUpdateOffer, now time.Time) bool {
 	rec, reported := r.Rec, r.Rec.Reported != ""
 	given, ok := r.turn(o.Id)
 	switch {
-	case reported && rec.UpdateID == o.Id && ended(rec.Reported):
+	case outcomeOn(rec, o.Id):
 		return true
 	case r.updating(now):
 		return false
 	case reported && (atLeast(rec.Version, o.Version) || !rec.Remote):
 		return true
+	case r.holding(now):
+		return false
 	case !reported && r.Feeds == 0 && !ok:
 		return true
 	case reported && r.Feeds == 0 && now.Sub(r.ClosedAt) >= TurnTimeout:
 		return true
 	}
-	return ok && now.Sub(given) >= TurnTimeout
+	return ok && r.over(given, now)
 }
 
 // tookLate reports whether relay r, past its turn for o, took o all the
 // same: it says an update to o is under way, and said so after its turn
-// for o ran out, or with no turn for o (§3.5 step 5's retry after a
-// failure before any change; a relay back after its turn ran out).
+// for o was over (its outcome came, or TurnTimeout passed), or with no
+// turn for o (§3.5 step 5's retry after a failure before any change; an
+// offer it declined in its turn and takes once the queue is through; a
+// relay back after its turn ran out).
 func (r relayView) tookLate(o *perimeterv1.RelayUpdateOffer) bool {
 	if !underway(r.Rec.Reported) || r.Rec.UpdateID != o.Id {
 		return false
 	}
 	at, ok := r.turn(o.Id)
-	return !ok || r.Rec.ChangedAt >= at.Add(TurnTimeout).Unix()
+	return !ok || r.Rec.TurnOver || r.Rec.ChangedAt >= at.Add(TurnTimeout).Unix()
 }
 
 // passedAt is when relay r went past its turn for o with no word on it,
 // and why, for the phone (§8.2).
 func (r relayView) passedAt(o *perimeterv1.RelayUpdateOffer, now time.Time) (int64, string) {
-	if at, ok := r.turn(o.Id); ok && now.Sub(at) >= TurnTimeout {
+	at, ok := r.turn(o.Id)
+	switch {
+	case ok && r.Rec.TurnOver:
+		// Its outcome on o came in its turn, and it has said something
+		// else since (root on it repaired it by hand, say).
+		return r.Rec.ChangedAt, "no word from the relay on this update since its outcome in its turn"
+	case ok && r.over(at, now):
 		return at.Add(TurnTimeout).Unix(), "no word from the relay on this update within its turn (" + TurnTimeout.String() + ")"
 	}
 	if r.Feeds == 0 && now.Sub(r.ClosedAt) >= TurnTimeout {
@@ -416,7 +455,7 @@ func relayQueue(o *perimeterv1.RelayUpdateOffer, views []relayView, now time.Tim
 	for i, r := range views {
 		t := &turns[i]
 		t.Passed = r.passed(o, now)
-		if t.Busy = !t.Passed && (r.Rec.TurnID == o.Id || r.updating(now)); t.Busy {
+		if t.Busy = !t.Passed && (r.Rec.TurnID == o.Id || r.updating(now) || r.holding(now)); t.Busy {
 			busy++
 		}
 		through = through && t.Passed
@@ -514,7 +553,7 @@ func (s *Server) relayOffers(ctx context.Context, now time.Time) (offers map[str
 			return offers, gave, nil
 		}
 		for _, name := range give {
-			_, _, err := s.updateRelayRecord(ctx, name, func(r *relayRecord) { r.TurnID, r.TurnAt = o.Id, now.Unix() })
+			_, _, err := s.updateRelayRecord(ctx, name, func(r *relayRecord) { r.TurnID, r.TurnAt, r.TurnOver = o.Id, now.Unix(), false })
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return nil, gave, err
 			}
@@ -716,13 +755,18 @@ func (s *Server) updateRelayRecord(ctx context.Context, name string, f func(*rel
 // the relay was last heard of. moved reports a change the queue and the
 // audit log go by: the state, the update, the version or root's switch,
 // when ChangedAt moves too; a new reason, error or target alone is kept
-// and no more. The relay's turn is the exit's: nothing it says moves it.
+// and no more. The relay's turn is the exit's: nothing it says moves it,
+// but its outcome on it, which ends it (TurnOver; an older exit's record
+// with the outcome in it as well).
 func (s *Server) takeRelayReport(ctx context.Context, name string, next relayRecord, now time.Time) (moved bool, err error) {
 	at := now.Unix()
 	due := s.relayUpd.heard(name, now)
 	before, after, err := s.updateRelayRecord(ctx, name, func(r *relayRecord) {
 		prev := *r
-		next.ChangedAt, next.TurnID, next.TurnAt, next.SeenAt = prev.ChangedAt, prev.TurnID, prev.TurnAt, prev.SeenAt
+		next.ChangedAt, next.TurnID, next.TurnAt, next.TurnOver, next.SeenAt = prev.ChangedAt, prev.TurnID, prev.TurnAt, prev.TurnOver, prev.SeenAt
+		if outcomeOn(prev, prev.TurnID) || outcomeOn(next, prev.TurnID) {
+			next.TurnOver = true
+		}
 		if relayMoved(prev, next) {
 			next.ChangedAt = at
 		}

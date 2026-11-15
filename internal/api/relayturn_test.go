@@ -348,6 +348,84 @@ func TestRelayTurnRetry(t *testing.T) {
 	}
 }
 
+// A relay's outcome on its turn ends the turn (§3.3): one that declined
+// the offer in its turn (its request limit, a request it could not write)
+// and takes it once the queue is through, still within the time its first
+// turn had, takes it in a later turn, given as it says so, and holds the
+// queue in it to its end: a relay that comes meanwhile waits, and never
+// updates beside it.
+func TestRelayTurnDeclinedThenTaken(t *testing.T) {
+	n := newTurnNode(t, "r1", "r2", "r3")
+	n.feed("r1", "r2")
+	n.report("r1", nodeupdate.Idle, "v0.27.0", "")
+	n.report("r2", nodeupdate.Idle, "v0.27.0", "")
+	n.offers()
+	first := n.now()
+	n.take("r1", relayRecord{Reported: nodeupdate.Failed, Version: "v0.27.0", Remote: true, UpdateID: n.st.ID, Target: "v0.28.0", Reason: nodeupdate.ReasonBusy})
+	if got := n.offers(); !slices.Equal(got, []string{"r2"}) {
+		t.Fatalf("r1 declined: %v", got)
+	}
+	n.advance(5 * time.Minute)
+	n.report("r2", nodeupdate.Done, "v0.28.0", n.st.ID)
+	if got := n.offers(); !slices.Contains(got, "r1") {
+		t.Fatalf("through: %v", got)
+	}
+	// Its request limit over, r1 takes the offer.
+	n.advance(5 * time.Minute)
+	n.report("r1", nodeupdate.Requested, "v0.27.0", n.st.ID)
+	n.offers()
+	r1, err := readRelayRecord(n.ctx, n.srv.Store, "r1")
+	if err != nil || r1.TurnID != n.st.ID || r1.TurnAt != n.now().Unix() {
+		t.Errorf("r1 took it: no later turn: %+v %v", r1, err)
+	}
+	n.advance(time.Minute)
+	n.report("r1", nodeupdate.Running, "v0.27.0", n.st.ID)
+	// r3 comes past the time r1's first turn had, while r1 updates.
+	n.advance(TurnTimeout - 10*time.Minute)
+	if n.now().Sub(first) <= TurnTimeout {
+		t.Fatal("the test's clock")
+	}
+	n.feed("r3")
+	n.report("r3", nodeupdate.Idle, "v0.27.0", "")
+	if got := n.offers(); slices.Contains(got, "r3") {
+		t.Fatalf("r3 while r1 updates in its later turn: %v (%v)", got, n.states())
+	}
+	n.report("r1", nodeupdate.Done, "v0.28.0", n.st.ID)
+	if got := n.offers(); !slices.Contains(got, "r3") {
+		t.Fatalf("r1 done: %v", got)
+	}
+}
+
+// A relay given its turn holds the queue in it for any offer until an
+// outcome on it or TurnTimeout: its word on it lost (the exit restarted for
+// its next update as it gave it), it may be updating; the relays before it
+// wait for the new offer meanwhile.
+func TestRelayTurnHeldAcrossOffers(t *testing.T) {
+	n := newTurnNode(t, "r1", "r2")
+	n.feed("r1", "r2")
+	n.report("r1", nodeupdate.Idle, "v0.27.0", "")
+	n.report("r2", nodeupdate.Idle, "v0.27.0", "")
+	n.offers()
+	n.report("r1", nodeupdate.Done, "v0.28.0", n.st.ID)
+	if got := n.offers(); !slices.Equal(got, []string{"r1", "r2"}) {
+		t.Fatalf("r2's turn: %v", got)
+	}
+	given := n.now()
+	// The node's next update: rayd stops before r2's word on its turn came.
+	n.advance(time.Minute)
+	n.restart()
+	n.srv.Version = "v0.29.0"
+	n.status(nodeupdate.Status{ID: "0a1b2c3d4e5f6071", State: nodeupdate.Done, From: "v0.28.0", To: "v0.29.0", Kind: nodeupdate.Remote, Ended: n.now()})
+	n.feed("r1", "r2")
+	if got := n.offers(); len(got) != 0 {
+		t.Fatalf("while r2 holds its turn for the last: %v", got)
+	}
+	waited, ok := n.within("r1", TurnTimeout)
+	if !ok || n.now().Sub(given) < TurnTimeout || n.now().Sub(given) > TurnTimeout+time.Minute {
+		t.Fatalf("r1 after %v, %v after r2's turn: %v", waited, n.now().Sub(given), n.states())
+	}
+}
+
 // Two looks at the queue at once give one turn: the turn is written
 // before a feed sends the offer. A relay removed and added again by its
 // name has none of the old one's turn.
