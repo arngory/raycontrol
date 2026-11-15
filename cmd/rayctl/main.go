@@ -919,8 +919,8 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 			case r.Msg.Kind == "naive" && *now:
 				// R4-42: the next name is routed already; nothing leaked.
 				fmt.Fprintf(w, "%s moves to its next server name within a minute (under a certificate of listed names once the certificate\n"+
-					"covers it, -reality-prepare at most). Clients move with their next subscription (Niko at its next connection\n"+
-					"check, within about 10 minutes)\n", args[0])
+					"covers it, -reality-prepare at most). Clients move with their next subscription (Niko at its next scheduled\n"+
+					"fetch, or sooner once the old name stops working for it: two failed connection checks)\n", args[0])
 				naivePreviousText(w, r.Msg)
 			case r.Msg.Kind == "naive":
 				fmt.Fprintf(w, "%s moves to a new server name at %s, which clients get in their subscription before (under a certificate\n"+
