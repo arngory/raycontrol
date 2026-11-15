@@ -192,6 +192,9 @@ func portsOf(ps []*perimeterv1.Port) []Port {
 }
 
 func paramsOf(p *perimeterv1.SPAParams) (spa.Params, error) {
+	if p == nil {
+		return spa.Params{}, errors.New("perimeter: no SPA parameters")
+	}
 	out := spa.Params{
 		EpochLen:  time.Duration(p.EpochLenS) * time.Second,
 		SlotLen:   time.Duration(p.SlotLenS) * time.Second,

@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/spa"
 )
@@ -701,6 +703,22 @@ func TestGateRelayOneAddress(t *testing.T) {
 	snap.RelayPrefixes = []string{"192.0.2.0/24"}
 	if err := g.Update(snap); err == nil || len(fw.relays) != 0 {
 		t.Fatalf("relay network accepted: %v %v", err, fw.relays)
+	}
+}
+
+// A snapshot without SPA parameters is refused, not a panic: an empty
+// message parses (a saved snapshot cut to nothing by a power cut, or a
+// feed's), and rayspa, root, would die on it at every start.
+// testdata/fuzz/FuzzGateUpdate/no-spa.
+func TestGateNoSPAParams(t *testing.T) {
+	fw := &fakeFW{}
+	g := NewGate(fw, quiet)
+	snap := &perimeterv1.Snapshot{}
+	if err := proto.Unmarshal(nil, snap); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Update(snap); err == nil || errors.Is(err, ErrPending) || fw.setups != 0 || len(fw.calls) != 0 {
+		t.Fatalf("a snapshot without SPA parameters: %v, calls %v", err, fw.calls)
 	}
 }
 
