@@ -152,6 +152,14 @@ type Model struct {
 	// devices allowed on it (spec/dnsauth-v1.md): "<device id> <hex>".
 	// Only CollectForRender fills it.
 	DNSAuth map[int64][]string
+	// FrontCopies says whether the front's installed unit copies in the
+	// credential at a path (deploy.UnitCopies); nil: it copies in all the
+	// render names (rayctl apply, which writes the unit with the render,
+	// and the supervisor's own plan). A hy2-obfs whose salamander password
+	// the unit does not copy in yet waits for rayctl apply off the front:
+	// the front reads every password at its start, and one missing keeps
+	// it from starting, every route on UDP and TCP 443 with it.
+	FrontCopies func(path string) bool
 	// Devices maps user ID to the user's devices not revoked: each has its
 	// own key in the Yggdrasil mesh, from its SPA key, and its LAN consent.
 	// Only CollectForRender fills it, and only with a Yggdrasil service.
@@ -733,6 +741,20 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			fs, err := hysteriaFiles(s, m, p)
 			if err != nil {
 				return err
+			}
+			if s.Kind == "hy2-obfs" && m.FrontCopies != nil && !m.FrontCopies(p.FrontSalamander(s.Name)) {
+				// Its files are written: rayctl apply's unit copies the
+				// password from them, and rayd, restarted by that apply for
+				// the service's group, routes it then. The front's copy
+				// restarts nothing before: the front does not read it.
+				for i := range fs {
+					if fs[i].Service == "front" {
+						fs[i].AtStart = true
+					}
+				}
+				files = append(files, fs...)
+				skipped = append(skipped, s.Name+" (waits for rayctl apply: the front does not have its password yet)")
+				return nil
 			}
 			files = append(files, fs...)
 			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}

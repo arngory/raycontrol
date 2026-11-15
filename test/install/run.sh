@@ -227,6 +227,12 @@ if [[ $distro == debian13 ]]; then
 	# the service's salamander password, again every 2 s, at that apply,
 	# an update or a reboot (review of v0.28.0).
 	out="$(x rayctl service add hy2-obfs hy2-obfs 2>&1)" || fail "rayctl service add hy2-obfs: $out"
+	# Before the apply its password is not copied in for the front: rayd
+	# keeps it off the front's config, which would fail the front at every
+	# start (restarting every 2 s) until the apply.
+	sleep 3
+	n="$(x systemctl show -p NRestarts --value niko-front.service)"
+	[[ $n == 0 ]] || fail "the front restarted $n times with a hy2-obfs not applied: $(x journalctl --no-pager -u niko-front -n 5 -o cat)"
 	out="$(x rayctl apply 2>&1)" || fail "rayctl apply with hy2-obfs: $out"
 	wait_active niko-hy2-obfs.service niko-front.service
 	out="$(x rayctl service del hy2-obfs 2>&1)" || fail "rayctl service del hy2-obfs: $out"

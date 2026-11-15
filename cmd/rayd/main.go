@@ -330,7 +330,7 @@ func cmdServe(args []string) error {
 	acct := &traffic.Accountant{Store: st, Sources: traffic.Processes(paths), Health: hb, Log: log, Notify: srv.Notify}
 	if *liveApply {
 		applier := &live.Applier{Store: st, Paths: paths, Log: log, Report: func(err error) { hb.Done("apply", err) },
-			BeforeRestart: acct.Flush}
+			BeforeRestart: acct.Flush, FrontUnit: deploy.UnitPath(render.UnitName("front"))}
 		var sup *live.Supervisor
 		if *supervise {
 			sup, err = supervisor(paths, deploy.Binaries{Xray: *xrayBin, NikoServer: *nikoBin, Slipstream: *slipBin}, st, log)
@@ -338,6 +338,7 @@ func cmdServe(args []string) error {
 				return err
 			}
 			applier.Restart = sup.Restart
+			applier.FrontUnit = ""
 		}
 		// The socket opens after the first render: rayctl apply waits for it
 		// before it starts the data-plane units that read these files.

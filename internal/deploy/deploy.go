@@ -266,7 +266,7 @@ func (u unit) file() File {
 		wantedBy = "multi-user.target"
 	}
 	fmt.Fprintf(&b, "\n[Install]\nWantedBy=%s\n", wantedBy)
-	return File{Path: "/etc/systemd/system/" + u.name, Mode: 0o644, Content: []byte(b.String())}
+	return File{Path: UnitPath(u.name), Mode: 0o644, Content: []byte(b.String())}
 }
 
 // process is the unit as a plain process (Plan.Processes).
@@ -958,6 +958,9 @@ TimeoutStartSec=50min
 StateDirectory=raycontrol-update
 StateDirectoryMode=0755
 `
+
+// UnitPath is where a unit of the plan is installed.
+func UnitPath(name string) string { return "/etc/systemd/system/" + name }
 
 // polkitRule lets rayd restart data-plane units after it re-renders their
 // configs, and nothing else.
