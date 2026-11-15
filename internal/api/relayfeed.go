@@ -138,7 +138,10 @@ func (*relayFeed) ReportUpdate(context.Context, *connect.Request[perimeterv1.Rep
 // new one after every change. The caller is the relay whose client
 // certificate this is, calling from the relay's address; anyone else gets
 // what a wrong path gets. A relay removed or given a new certificate is cut
-// off at the next change.
+// off at the next change. A feed with updates (rayd relay's, that knows
+// them) has the release the exit names to the relay beside the snapshot
+// when it is the relay's turn (spec/relay-update-remote-v1.md §3.3), and a
+// new answer when either changes; any other feed sends what it always did.
 func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimeterv1.WatchRelayRequest], stream *connect.ServerStream[perimeterv1.WatchRelayResponse]) error {
 	p := f.r.Perimeter
 	pin := pinFrom(ctx)
@@ -146,6 +149,7 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 	if err != nil {
 		return err
 	}
+	s := f.r.Server
 	// One relay runs one rayspa: a second stream may overlap a reconnect,
 	// more is a relay doing work it has no need for.
 	f.r.relayMu.Lock()
@@ -174,6 +178,17 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 		}
 		f.r.relayMu.Unlock()
 	}()
+	// A feed with updates open or gone moves the queue (§3.3): the relay
+	// is there to take its turn, or may be past it.
+	updates := req.Msg.Updates
+	if updates {
+		s.relayUpd.opened(relay.Name, s.NodeUpdate.now())
+		s.kickRelayFeeds(ctx)
+		defer func() {
+			s.relayUpd.closed(relay.Name, s.NodeUpdate.now())
+			s.kickRelayFeeds(ctx)
+		}()
+	}
 	refresh := p.Refresh
 	if refresh <= 0 {
 		refresh = time.Minute
@@ -181,6 +196,13 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 	var last []byte
 	for {
 		rev, wake := p.changes()
+		var (
+			offerWake <-chan struct{}
+			kicks     uint64
+		)
+		if updates {
+			offerWake, kicks = s.relayUpd.changes(relay.Name, s.NodeUpdate.now())
+		}
 		if r, err := p.Store.RelayByCertPin(ctx, pin); err != nil {
 			return relayLookup(err)
 		} else if r.Name != relay.Name {
@@ -193,21 +215,37 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 		if err != nil {
 			return toConnect(err)
 		}
-		body, err := proto.MarshalOptions{Deterministic: true}.Marshal(snap)
+		resp := &perimeterv1.WatchRelayResponse{Snapshot: snap}
+		var offered relayOffered
+		if updates {
+			offers, err := s.relayOffers(ctx, s.NodeUpdate.now())
+			if err != nil {
+				return toConnect(err)
+			}
+			offered = offers[relay.Name]
+			resp.Update = offered.o
+		}
+		// The whole answer, snapshot and offer: a new offer is news as a
+		// new perimeter is.
+		body, err := proto.MarshalOptions{Deterministic: true}.Marshal(resp)
 		if err != nil {
 			return err
 		}
 		if string(body) != string(last) {
 			snap.Revision = rev
-			if err := stream.Send(&perimeterv1.WatchRelayResponse{Snapshot: snap}); err != nil {
+			if err := stream.Send(resp); err != nil {
 				return err
 			}
 			last = body
+		}
+		if updates && s.relayUpd.sentOffer(relay.Name, offered, kicks, s.NodeUpdate.now()) {
+			s.kickRelayFeeds(ctx) // a relay given its turn: the others wait
 		}
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-wake:
+		case <-offerWake:
 		case <-time.After(refresh):
 		}
 	}

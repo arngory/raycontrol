@@ -21,6 +21,7 @@ import (
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/summary"
@@ -610,4 +611,172 @@ func TestRelayLookup(t *testing.T) {
 			t.Errorf("%v: the store's words reach the relay: %v", err, got)
 		}
 	}
+}
+
+// feedMsgs follows a relay's feed: its answers as they come.
+func feedMsgs(ctx context.Context, t *testing.T, b node.RelayBundle, addr string, req *perimeterv1.WatchRelayRequest) <-chan *perimeterv1.WatchRelayResponse {
+	t.Helper()
+	cert, err := DecodeClientCertificate([]byte(b.Cert))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := perimeterv1connect.NewRelayServiceClient(remoteHTTP(b.API.Pin, cert), "https://"+addr).WatchRelay(ctx, connect.NewRequest(req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make(chan *perimeterv1.WatchRelayResponse, 16)
+	go func() {
+		defer close(out)
+		for s.Receive() {
+			out <- s.Msg()
+		}
+	}()
+	t.Cleanup(func() { s.Close() })
+	return out
+}
+
+// nextMsg is the feed's next answer, within a while.
+func nextMsg(t *testing.T, msgs <-chan *perimeterv1.WatchRelayResponse, what string) *perimeterv1.WatchRelayResponse {
+	t.Helper()
+	select {
+	case m, ok := <-msgs:
+		if !ok {
+			t.Fatalf("%s: the feed ended", what)
+		}
+		return m
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s: nothing", what)
+	}
+	return nil
+}
+
+// quiet checks that the feeds send nothing for a while: over several of
+// their looks, every 50 ms here.
+func quiet(t *testing.T, what string, feeds ...<-chan *perimeterv1.WatchRelayResponse) {
+	t.Helper()
+	time.Sleep(300 * time.Millisecond)
+	for i, msgs := range feeds {
+		select {
+		case m := <-msgs:
+			t.Errorf("%s: feed %d sent %v", what, i, m)
+		default:
+		}
+	}
+}
+
+// The exit names its release to its relays in the feeds with updates only
+// (spec/relay-update-remote-v1.md §3.2-§3.3), one relay at a time; a change
+// of the offer is a new answer in the feeds it changes and in no other, and
+// rayspa's feed, or an older rayd relay's, sends what it always did.
+func TestRelayFeedOffer(t *testing.T) {
+	srv, bundles, _, now := relayNode(t, "v0.28.0", "r1", "r2")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	fast := func(r *Remote) { r.Perimeter.Refresh = 50 * time.Millisecond }
+	at1, _ := serveRemoteFrom(t, srv, "198.51.100.20:40000", fast)
+	at2, _ := serveRemoteFrom(t, srv, "198.51.100.21:40000", fast)
+	st := nodeupdate.Status{ID: "6f1c0e2a9b3d4c5e", State: nodeupdate.Done, From: "v0.27.0", To: "v0.28.0", Kind: nodeupdate.Remote, Ended: now()}
+	if err := nodeupdate.WriteStatus(srv.NodeUpdate.Status, st); err != nil {
+		t.Fatal(err)
+	}
+	want := func(m *perimeterv1.WatchRelayResponse, offer bool, what string) {
+		t.Helper()
+		if m.Snapshot == nil || (m.Update != nil) != offer || offer && (m.Update.Id != st.ID || m.Update.Version != "v0.28.0" || m.Update.EndedAt != st.Ended.Unix()) {
+			t.Fatalf("%s: %v", what, m)
+		}
+	}
+	rayspa1 := feedMsgs(ctx, t, bundles["r1"], at1, &perimeterv1.WatchRelayRequest{})
+	want(nextMsg(t, rayspa1, "r1's rayspa"), false, "r1's rayspa")
+	probe1 := feedMsgs(ctx, t, bundles["r1"], at1, &perimeterv1.WatchRelayRequest{Probe: true, Updates: true})
+	want(nextMsg(t, probe1, "r1's rayd relay"), true, "r1's rayd relay")
+	// An older rayd relay (no updates) on r2: it never has one, and r2
+	// never reported, so r2 is not waited for.
+	old2 := feedMsgs(ctx, t, bundles["r2"], at2, &perimeterv1.WatchRelayRequest{Probe: true})
+	want(nextMsg(t, old2, "r2's older rayd relay"), false, "r2's older rayd relay")
+	// r2's newer one waits for r1, which has not said a word yet.
+	probe2 := feedMsgs(ctx, t, bundles["r2"], at2, &perimeterv1.WatchRelayRequest{Probe: true, Updates: true})
+	want(nextMsg(t, probe2, "r2's rayd relay"), false, "r2's rayd relay")
+	quiet(t, "nothing changed", rayspa1, probe1, old2, probe2)
+
+	// r1 is done: r2's turn, a new answer in r2's feed only.
+	setRecord(t, srv, "r1", relayRecord{Reported: nodeupdate.Done, UpdateID: st.ID, Target: "v0.28.0", Version: "v0.28.0", Remote: true, ChangedAt: now().Unix()})
+	srv.kickRelayFeeds(ctx)
+	want(nextMsg(t, probe2, "r2 after r1"), true, "r2 after r1")
+	quiet(t, "r1 done", rayspa1, probe1, old2, probe2)
+
+	// Another update asked for: no offer while it waits.
+	if err := nodeupdate.WriteRequest(srv.NodeUpdate.Request, nodeupdate.Request{ID: "ab", Kind: nodeupdate.Remote, Version: "latest", By: "x", At: now()}, now()); err != nil {
+		t.Fatal(err)
+	}
+	want(nextMsg(t, probe1, "r1, busy"), false, "r1, busy")
+	want(nextMsg(t, probe2, "r2, busy"), false, "r2, busy")
+	quiet(t, "busy", rayspa1, probe1, old2, probe2)
+	if err := os.Remove(srv.NodeUpdate.Request); err != nil {
+		t.Fatal(err)
+	}
+	want(nextMsg(t, probe1, "r1, again"), true, "r1, again")
+	want(nextMsg(t, probe2, "r2, again"), true, "r2, again")
+	quiet(t, "again", rayspa1, probe1, old2, probe2)
+
+	// The node does not run what the update put in (another rayd installed
+	// by hand since): it names nothing.
+	other := st
+	other.To = "v0.28.1"
+	if err := nodeupdate.WriteStatus(srv.NodeUpdate.Status, other); err != nil {
+		t.Fatal(err)
+	}
+	want(nextMsg(t, probe1, "r1, by hand"), false, "r1, by hand")
+	want(nextMsg(t, probe2, "r2, by hand"), false, "r2, by hand")
+	quiet(t, "by hand", rayspa1, probe1, old2, probe2)
+}
+
+// A relay given its turn holds the others back; its feed's going and
+// coming moves the queue for a relay that never reported, and wakes only
+// the feeds whose answer it changes.
+func TestRelayFeedTurn(t *testing.T) {
+	srv, bundles, advance, now := relayNode(t, "v0.28.0", "r1", "r2", "r3")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	at := map[string]string{}
+	for i, name := range []string{"r1", "r2", "r3"} {
+		at[name], _ = serveRemoteFrom(t, srv, fmt.Sprintf("198.51.100.%d:40000", 20+i))
+	}
+	st := nodeupdate.Status{ID: "6f1c0e2a9b3d4c5e", State: nodeupdate.Done, From: "v0.27.0", To: "v0.28.0", Kind: nodeupdate.Local, Ended: now()}
+	nodeupdate.WriteStatus(srv.NodeUpdate.Status, st)
+	feed := func(name string) (<-chan *perimeterv1.WatchRelayResponse, context.CancelFunc) {
+		fctx, fcancel := context.WithCancel(ctx)
+		return feedMsgs(fctx, t, bundles[name], at[name], &perimeterv1.WatchRelayRequest{Probe: true, Updates: true}), fcancel
+	}
+	has := func(m *perimeterv1.WatchRelayResponse) bool { return m.Update != nil && m.Update.Id == st.ID }
+	// r2 and r3 come first; r1 never reported and has no feed: r2's turn.
+	f2, _ := feed("r2")
+	if !has(nextMsg(t, f2, "r2")) {
+		t.Fatal("r2 waits for a relay never heard of")
+	}
+	f3, _ := feed("r3")
+	if has(nextMsg(t, f3, "r3")) {
+		t.Fatal("r3 at once with r2")
+	}
+	// r1's newer rayd relay comes: it waits for r2, which holds its turn,
+	// and nothing else changes.
+	f1, close1 := feed("r1")
+	if has(nextMsg(t, f1, "r1")) {
+		t.Fatal("r1 before r2 ended")
+	}
+	quiet(t, "r1 came", f1, f2, f3)
+	// r2's turn times out: r1's comes, the first by name, and r2's offer
+	// goes with it.
+	advance(TurnTimeout + time.Second)
+	srv.kickRelayFeeds(ctx)
+	if !has(nextMsg(t, f1, "r1 after r2's turn")) {
+		t.Fatal("r1 after r2's turn")
+	}
+	if has(nextMsg(t, f2, "r2 after its turn")) {
+		t.Fatal("r2 keeps the offer while r1 updates")
+	}
+	quiet(t, "r1's turn", f1, f2, f3)
+	// r1 reports nothing and its feed goes (its rayd relay restarts): it
+	// keeps its turn.
+	close1()
+	quiet(t, "r1 away", f2, f3)
 }
