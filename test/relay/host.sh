@@ -93,11 +93,15 @@ fail() {
 		xr rayctl update status >&2 || true
 		xr journalctl --no-pager -n 300 -u rayspa -u rayd-relay -u raycontrol-relay-update -u raycontrol-relay-recover >&2 || true
 		xr systemctl --failed --no-pager >&2 || true
+		echo "--- relay: connections to the exit" >&2
+		xr ss -Htnp dst "$exit_ip" >&2 || true
 		xr nft list ruleset >&2 || true
 	fi
 	if docker inspect "$ex" >/dev/null 2>&1; then
 		echo "--- exit" >&2
 		xe rayctl update status >&2 || true
+		echo "--- exit: connections from the relay" >&2
+		xe ss -Htnp dst "$relay_ip" >&2 || true
 		xe journalctl --no-pager -n 100 -u rayd >&2 || true
 	fi
 	if docker inspect "$mirror" >/dev/null 2>&1; then
@@ -323,11 +327,14 @@ midway() {
 # update restarted (their FIN dropped as the perimeter went down) until
 # keepalive ends them: a new feed of a kind ends the old one's stream at
 # once, so only the relay's own connections are counted.
+# By process on the relay: rayd relay may hold a connection for its calls
+# beside its feed's.
 feeds() {
 	local e r
 	e="$(xe ss -Htn state established dst "$relay_ip" | awk '{print $4}' | sort)"
-	r="$(xr ss -Htn state established dst "$exit_ip" | awk '{print $3}' | sort)"
-	[[ $(grep -c . <<<"$r") == 2 && -z $(comm -13 <(echo "$e") <(echo "$r")) ]]
+	r="$(xr ss -Htnp state established dst "$exit_ip")"
+	grep -q '"rayspa"' <<<"$r" && grep -q '"rayd"' <<<"$r" || return 1
+	[[ -z $(comm -13 <(echo "$e") <(awk '{print $3}' <<<"$r" | sort)) ]]
 }
 log "1. the exit updates by hand to v0.91.0 and names it to the relay"
 out="$(xe env RAYCONTROL_TEST_RELEASE_KEY="$key" rayctl update -from /opt/rel/v0.91.0 -yes 2>&1)" || fail "the exit's update: $out"
