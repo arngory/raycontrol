@@ -29,7 +29,12 @@ import (
 // The server name only ever moves to another random subdomain of the
 // node's own domain (self-steal): nothing outside the node is looked up,
 // scanned or borrowed. It moves only when the new name resolves to the node
-// (a wildcard record) and the site's certificate covers it.
+// (a wildcard record) and the site's certificate covers it. By default
+// (rotate_sni unset) it moves at a scheduled switch only under a wildcard
+// certificate (WildcardSite, R4-42): otherwise the new name would be in CT
+// logs days before the switch, beside every other name of the node. A
+// switch the operator asks for moves it anyway; rotate_sni on moves it at
+// every switch, off at none.
 
 // RealitySecrets are the secrets of one REALITY key set.
 var RealitySecrets = []string{SecretRealityKey, SecretRealityMLDSA, SecretMLKEMSeed, SecretShortIDs}
@@ -53,7 +58,7 @@ type RealityState struct {
 	PreparedAt int64  `json:"prepared_at,omitempty"` // next keys made, waiting for the name's certificate
 	NextFrom   int64  `json:"next_from,omitempty"`   // next keys published, switch at this time
 	SNINext    string `json:"sni_next,omitempty"`    // the server name after the switch, if it changes
-	RotateSNI  *bool  `json:"rotate_sni,omitempty"`  // false keeps the server name
+	RotateSNI  *bool  `json:"rotate_sni,omitempty"`  // false keeps the server name, true moves it at every switch; unset: auto (RenamesAt)
 	RotateAt   int64  `json:"rotate_at,omitempty"`   // switch requested by the operator for this time
 	Urgent     bool   `json:"urgent,omitempty"`      // switch at once, the current set not kept (leaked keys)
 	PrevUntil  int64  `json:"prev_until,omitempty"`  // the previous set is accepted until then (R4-19)
@@ -181,7 +186,15 @@ func rotateOne(ctx context.Context, st *store.Store, all []store.Service, svc st
 			set[NextSecret(name)] = v
 		}
 		state.PreparedAt = t
-		if site := siteOf(svc); site != "" && resolves != nil && (state.RotateSNI == nil || *state.RotateSNI) {
+		rename := false
+		if site := siteOf(svc); site != "" && resolves != nil {
+			rename = RenamesAt(ctx, st, all, site, state.RotateSNI, state.RotateAt != 0)
+			if !rename && state.RotateSNI == nil {
+				log.Info("REALITY server name stays: its site has no wildcard certificate (R4-42; rotate_sni=on moves it all the same)",
+					"service", svc.Name)
+			}
+		}
+		if rename {
 			name, err := newZone(ctx, st, all)
 			if err != nil {
 				return false, err
@@ -389,6 +402,67 @@ func SiteNames(site store.Service, all []store.Service) (names, next []string) {
 		}
 	}
 	return names, next
+}
+
+// RenamesAt reports whether a switch moves a server name to a new one
+// (REALITY R4-7, naive R4-42), by the service's rotate_sni: on (true) at
+// every switch, off (false) at none; unset (auto) at a switch the operator
+// asked for, and at a scheduled one only when the site's names come under
+// a wildcard certificate (WildcardSite). Under a certificate of listed
+// names (HTTP-01) the new name would be in CT logs from its order, days
+// before clients use it, in one list with every other name of the node.
+func RenamesAt(ctx context.Context, st *store.Store, all []store.Service, site string, rotateSNI *bool, asked bool) bool {
+	if rotateSNI != nil {
+		return *rotateSNI
+	}
+	return asked || WildcardSite(ctx, st, all, site)
+}
+
+// WildcardSite reports whether the names of a site come under one
+// certificate *.<domain>, so that a new name of the node shows in no CT
+// log (R4-10): the site's certificate is one, or the node orders through
+// DNS-01 (a Cloudflare token) and every name of the site is one label under
+// the domain, as the certificate manager then orders *.<domain> alone.
+func WildcardSite(ctx context.Context, st *store.Store, all []store.Service, site string) bool {
+	domain, err := Domain(ctx, st)
+	if err != nil || domain == "" {
+		return false
+	}
+	i := slices.IndexFunc(all, func(s store.Service) bool { return s.Kind == "site" && s.Name == site })
+	if i < 0 {
+		return false
+	}
+	if secrets, err := st.ServiceSecrets(ctx, all[i].ID); err == nil && chainNames(secrets[SecretTLSChain], "*."+domain) {
+		return true
+	}
+	if c, _, err := Cloudflare(ctx, st); err != nil || c == nil {
+		return false
+	}
+	names, next := SiteNames(all[i], all)
+	return UnderWildcard(append(names, next...), domain)
+}
+
+// UnderWildcard reports whether *.domain covers every name: each one label
+// below the domain.
+func UnderWildcard(names []string, domain string) bool {
+	for _, n := range names {
+		label, ok := strings.CutSuffix(CanonicalZone(n), "."+CanonicalZone(domain))
+		if !ok || label == "" || strings.Contains(label, ".") {
+			return false
+		}
+	}
+	return len(names) > 0
+}
+
+// chainNames reports whether the leaf of a PEM chain lists name as it is
+// (a wildcard name too).
+func chainNames(chainPEM []byte, name string) bool {
+	block, _ := pem.Decode(chainPEM)
+	if block == nil {
+		return false
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	return err == nil && slices.ContainsFunc(leaf.DNSNames, func(n string) bool { return strings.EqualFold(n, name) })
 }
 
 // SiteCovers reports whether the certificate of a site covers name.

@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -264,7 +263,7 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 		}
 		order := want
 		if m.Wildcard != nil {
-			if d := m.Wildcard(ctx); d != "" && underWildcard(want, d) {
+			if d := m.Wildcard(ctx); d != "" && provision.UnderWildcard(want, d) {
 				order = []string{"*." + d}
 			}
 		}
@@ -324,18 +323,6 @@ func due(chainPEM []byte, names []string, now time.Time) bool {
 		}
 	}
 	return !now.Before(RenewAt(leaf))
-}
-
-// underWildcard reports whether *.domain covers every name: each one label
-// below the domain.
-func underWildcard(names []string, domain string) bool {
-	for _, n := range names {
-		label, ok := strings.CutSuffix(n, "."+domain)
-		if !ok || label == "" || strings.Contains(label, ".") {
-			return false
-		}
-	}
-	return len(names) > 0
 }
 
 // issue orders a certificate for names with the site's key (the one in use,

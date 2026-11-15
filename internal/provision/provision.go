@@ -895,9 +895,12 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			return svc, fmt.Errorf("%w open: %s does not listen on tcp/443", store.ErrInvalid, svc.Name)
 		}
 	case svc.Kind == "reality" && key == "rotate_sni":
-		b, err := strconv.ParseBool(value)
+		// Whether a switch moves the server name (RenamesAt): on at every
+		// switch, off at none, auto (unset) at a scheduled one only under
+		// a wildcard certificate, and at the operator's.
+		b, err := rotateSNIOption(value)
 		if err != nil {
-			return svc, fmt.Errorf("%w rotate_sni: true or false", store.ErrInvalid)
+			return svc, err
 		}
 		v = b
 	case svc.Kind == "reality" && key == "target":
@@ -1020,6 +1023,24 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 	}
 	svc.Settings = string(b)
 	return svc, nil
+}
+
+// rotateSNIOption reads rotate_sni=on|off|auto (true and false as before
+// v0.29.0): the setting's value, 0 for auto, which removes it.
+func rotateSNIOption(value string) (any, error) {
+	switch strings.ToLower(value) {
+	case "auto":
+		return 0, nil
+	case "on":
+		return true, nil
+	case "off":
+		return false, nil
+	}
+	b, err := strconv.ParseBool(value)
+	if err != nil {
+		return nil, fmt.Errorf("%w rotate_sni: on, off or auto", store.ErrInvalid)
+	}
+	return b, nil
 }
 
 // LANRelayDefault is niko-server's ceiling of LAN traffic through the node

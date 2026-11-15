@@ -559,6 +559,11 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	day := 24 * time.Hour
 	epoch := provision.RealityEpoch{Period: 90 * day, Lead: 3 * day, Prepare: day, Grace: 2 * day}
 	resolves := func(context.Context, string) error { return nil }
+	// A certificate of listed names: the name moves at a scheduled switch
+	// with rotate_sni on only (R4-42).
+	if _, err := provision.SetServiceOption(ctx, st, "reality", "rotate_sni", "on"); err != nil {
+		t.Fatal(err)
+	}
 	if n, err := provision.RotateReality(ctx, st, svc.CreatedAt.Add(86*day), epoch, resolves, nil); err != nil || n != 1 {
 		t.Fatalf("prepare: %d %v", n, err)
 	}

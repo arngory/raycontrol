@@ -70,7 +70,10 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service enable|disable|del NAME [-force]
                                             -force: disable or delete the last enabled ssh service anyway
                                             (refused without it: SSH to the node closes to everyone)
-  service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false,
+  service set NAME KEY=VALUE                site: answer=404|403|silent|pages;
+                                            reality: rotate_sni=on|off|auto (whether a switch moves the
+                                            server name; auto: a scheduled one only under a wildcard
+                                            certificate, one you ask for always),
                                             target=HOST:PORT (who answers non-clients, checked as at
                                             creation; keys, shortIds and server name stay);
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);

@@ -174,6 +174,11 @@ func TestManagerNextName(t *testing.T) {
 	}
 	site, _ := st.ServiceByName(ctx, "site")
 	name := provision.SiteName(site)
+	// Under HTTP-01 a scheduled switch moves the name only when asked to
+	// (R4-42).
+	if _, err := provision.SetServiceOption(ctx, st, "r", "rotate_sni", "on"); err != nil {
+		t.Fatal(err)
+	}
 	epoch := provision.RealityEpoch{Period: 90 * 24 * time.Hour, Lead: 3 * 24 * time.Hour, Prepare: 24 * time.Hour}
 	ok := func(context.Context, string) error { return nil }
 	if n, err := provision.RotateReality(ctx, st, r.CreatedAt.Add(86*24*time.Hour), epoch, ok, nil); err != nil || n != 1 {
