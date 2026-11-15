@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,6 +31,9 @@ import (
 	"github.com/arngory/raycontrol/internal/sub"
 	"github.com/arngory/raycontrol/internal/testca"
 )
+
+// portless drops the ports of an error's addresses, which differ by try.
+var portless = regexp.MustCompile(`:[0-9]+`)
 
 // TestTrafficResetSupervised: the client's interop sequence on a node run
 // as rayd serve -supervise runs it (traffic-limit-v1 §3.4): alice exhausts
@@ -54,12 +58,17 @@ func TestTrafficResetSupervised(t *testing.T) {
 	if n, err := strconv.Atoi(os.Getenv("TRAFFIC_RESET_CYCLES")); err == nil && n > 0 {
 		cycles = n
 	}
+	// How long a cycle watches her after the reset (TRAFFIC_RESET_WATCH).
+	watch := 30 * time.Second
+	if d, err := time.ParseDuration(os.Getenv("TRAFFIC_RESET_WATCH")); err == nil {
+		watch = d
+	}
 	waits := []string{"refused", "none"}
 	if w := os.Getenv("TRAFFIC_RESET_WAIT"); w != "" {
 		waits = strings.Split(w, ",")
 	}
 	ip := hostAddr(t)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cycles)*3*time.Minute+time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cycles)*(3*time.Minute+watch)+time.Minute)
 	defer cancel()
 	dir := t.TempDir()
 	rayd := os.Getenv("RAYD_BIN")
@@ -215,7 +224,7 @@ func TestTrafficResetSupervised(t *testing.T) {
 		// The client that uses the traffic up: it downloads until the
 		// subscription says she is over (the interop's loop).
 		oldPort, stopOld := hysteriaSocks(t, bin, link, "", rootFile)
-		var downloaded atomic.Int64
+		var downloaded, failing atomic.Int64
 		stopDownload := make(chan struct{})
 		dlDone := make(chan struct{})
 		go func() {
@@ -229,12 +238,18 @@ func TestTrafficResetSupervised(t *testing.T) {
 				}
 				resp, err := hc.Get(base + "/big")
 				if err != nil {
+					failing.Add(1)
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}
 				n, _ := io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
 				downloaded.Add(n)
+				if n == int64(len(big)) {
+					failing.Store(0)
+				} else {
+					failing.Add(1)
+				}
 			}
 		}()
 		exhaustedAt := time.Time{}
@@ -254,6 +269,18 @@ func TestTrafficResetSupervised(t *testing.T) {
 		wait := waits[cycle%len(waits)]
 		switch wait {
 		case "none":
+		case "cut":
+			// The old client downloads on until the node cuts it.
+			for deadline := time.Now().Add(60 * time.Second); failing.Load() < 3; time.Sleep(50 * time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatalf("cycle %d: the old client was never cut", cycle)
+				}
+			}
+			close(stopDownload)
+			stopOld()
+			<-dlDone
+			t.Logf("%s cycle %d (%s): the old client cut %v after the subscription said exhausted, %d MiB after it", since(), cycle, name,
+				time.Since(exhaustedAt).Round(time.Millisecond), (downloaded.Load()-atExhaust)>>20)
 		case "refused":
 			close(stopDownload)
 			stopOld()
@@ -297,7 +324,7 @@ func TestTrafficResetSupervised(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 		}
 		backAt := time.Now()
-		if wait != "refused" {
+		if wait != "refused" && wait != "cut" {
 			close(stopDownload)
 			stopOld()
 			<-dlDone
@@ -323,7 +350,7 @@ func TestTrafficResetSupervised(t *testing.T) {
 				}
 				err = fmt.Errorf("body %q", body)
 			}
-			msg := err.Error()
+			msg := portless.ReplaceAllString(err.Error(), ":P")
 			var ne net.Error
 			if errors.As(err, &ne) && ne.Timeout() {
 				msg = "timeout"
@@ -333,17 +360,27 @@ func TestTrafficResetSupervised(t *testing.T) {
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
-		// Does she stay back? The next rounds of the traffic loop.
+		// Does she stay back? The next rounds of the traffic loop, its
+		// minute's write and apply's minute after it: she sends nothing
+		// but a word every 3 s.
 		var later []string
-		for range 4 {
-			time.Sleep(5 * time.Second)
+		var offAt, refusedAt time.Duration
+		for time.Since(backAt) < watch {
+			time.Sleep(3 * time.Second)
 			p, err := fetch()
-			state := "?"
-			if err == nil {
-				state = fmt.Sprintf("exhausted=%v used=%d", exhausted(p), p.Traffic.Used)
+			if err == nil && exhausted(p) && offAt == 0 {
+				offAt = time.Since(backAt)
+				later = append(later, fmt.Sprintf("%.0fs subscription exhausted, used %d", offAt.Seconds(), p.Traffic.Used))
 			}
-			_, gerr := hc.Get(base + "/")
-			later = append(later, fmt.Sprintf("%s through=%v", state, gerr == nil))
+			if resp, gerr := hc.Get(base + "/"); gerr != nil && refusedAt == 0 {
+				refusedAt = time.Since(backAt)
+				later = append(later, fmt.Sprintf("%.0fs refused through Hysteria2", refusedAt.Seconds()))
+			} else if gerr == nil {
+				resp.Body.Close()
+			}
+		}
+		if offAt != 0 || refusedAt != 0 {
+			slow = append(slow, fmt.Sprintf("cycle %d (%s): off again after the reset: %q", cycle, name, later))
 		}
 		stopNew()
 		if answered == 0 {
