@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,4 +65,25 @@ func TestUpdateLock(t *testing.T) {
 		t.Fatal("a second holder")
 	}
 	heldLock = saved
+}
+
+// A relay's runner told to stop while it waits for the lock waits no more:
+// its unit's stop has TimeoutStopSec, and a shutdown waits for it.
+func TestUpdateLockWaitStopped(t *testing.T) {
+	updateLockPath = filepath.Join(t.TempDir(), "lock")
+	t.Setenv(lockEnv, "")
+	other, err := os.OpenFile(updateLockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if err := syscall.Flock(int(other.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	asked := 0
+	err = takeUpdateLockUnless("update by the exit's word", time.Minute, func() bool { asked++; return asked > 1 })
+	if !errors.Is(err, errLockWaitStopped) || time.Since(start) > 10*time.Second || os.Getenv(lockEnv) == "held" {
+		t.Errorf("%v after %v", err, time.Since(start))
+	}
 }

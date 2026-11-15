@@ -36,11 +36,14 @@ type requests struct {
 	// none.
 	target func(version string) error
 	// lock takes the update lock, waiting a while for a manual update or
-	// apply to end.
-	lock func() error
+	// apply to end, unless stop says the wait is over (nil: never).
+	lock func(stop func() bool) error
 	// refused is a refusal before any check (a relay's runner that did not
 	// get the lock).
 	refused error
+	// stopped says whether the unit was told to stop since the runner
+	// began (a relay's, take); nil on a node.
+	stopped func() bool
 	// relay is a relay's (relayRequests); nil on a node.
 	relay *relayRunner
 }
@@ -48,22 +51,47 @@ type requests struct {
 func nodeRequests() requests {
 	return requests{request: nodeupdate.RequestFile, status: nodeupdate.StatusFile, policy: nodeupdate.PolicyFile, result: nodeupdate.ResultFile,
 		rayctl: "/usr/local/bin/rayctl", ready: func() error { return updatable(deploy.DB, deploy.RelayBundle) }, nodeVersion: raydVersion,
-		kinds: nodeupdate.NodeKinds, lock: func() error { return takeUpdateLock("update by request", 10*time.Minute) }}
+		kinds: nodeupdate.NodeKinds, lock: func(func() bool) error { return takeUpdateLock("update by request", 10*time.Minute) }}
 }
 
 // take is rayctl update -request: one update at a time, a request waiting
 // a while for a manual update or apply to end (the node's unit gives it
-// 50 minutes in all, a relay's 15). On a node a request that does not get
-// the lock stays, and the path unit runs it again; on a relay it is
-// refused (busy), and rayd relay asks again later.
+// 50 minutes in all, a relay's 15, of which a relay's runner waits
+// relayLockWait: the download, the install and a rollback need the rest).
+// On a node a request that does not get the lock stays, and the path unit
+// runs it again; on a relay it is refused (busy), and rayd relay asks
+// again later.
+//
+// A relay's unit may be stopped at any moment (its timeout, systemctl
+// stop, a shutdown: SIGTERM to all of it). Its runner takes the signal
+// from its start, so that it always writes how the update ended, and once
+// told to stop it begins no update (interrupted, nothing changed).
 func (q requests) take() error {
-	if err := q.lock(); err != nil {
+	if q.relay != nil {
+		caught, stop := q.relay.signals()
+		defer stop()
+		q.stopped = caught
+	}
+	if err := q.lock(q.stopped); err != nil {
 		if q.relay == nil {
 			return err
 		}
 		q.refused = withReason(nodeupdate.ReasonBusy, err)
 	}
 	return q.run()
+}
+
+// errStopped refuses an update by the exit's word whose unit was told to
+// stop before the update began.
+var errStopped = withReason(nodeupdate.ReasonInterrupted,
+	errors.New("the relay's update unit was stopped (its timeout, systemctl stop, a shutdown) before the update began: nothing changed"))
+
+// stop is errStopped once the unit was told to stop, else nil.
+func (q requests) stop() error {
+	if q.stopped != nil && q.stopped() {
+		return errStopped
+	}
+	return nil
 }
 
 // run is an update the node asked for (spec/node-update-v1.md §3): the
@@ -87,6 +115,9 @@ func (q requests) run() error {
 	// The releases the auto update leaves alone go on from status to status.
 	st := nodeupdate.Status{ID: r.ID, From: version, To: r.Version, Target: r.Version, Release: r.Tried(), By: r.By, Kind: r.Kind,
 		Requested: r.At, Started: now.UTC(), Held: nodeupdate.ReadStatus(q.status).Holding()}
+	if err == nil {
+		err = q.stop()
+	}
 	if err == nil {
 		err = q.refused
 	}
@@ -125,18 +156,18 @@ func (q requests) run() error {
 	cmd := exec.Command(q.rayctl, "update", "-yes", "-version", r.Version) //nolint:gosec // G204: the installed rayctl
 	cmd.Stdout, cmd.Stderr = io.MultiWriter(os.Stdout, tail), io.MultiWriter(os.Stderr, tail)
 	cmd.Env = append(os.Environ(), nodeupdate.ResultEnv+"="+q.result)
-	if q.relay != nil {
-		// The unit's stop (its timeout, a shutdown) sends SIGTERM to all of
-		// it: the update takes it and rolls the relay back, and this one
-		// waits for that, to the status written.
-		_, stop := q.relay.signals()
-		defer stop()
+	// On a relay the unit's stop (its timeout, a shutdown) sends SIGTERM to
+	// all of it: the update takes it, and stops before its first change or
+	// rolls the relay back after it; this one takes it too (take) and waits
+	// for that, to the status written. Told to stop on the way here, it
+	// begins no update.
+	runErr := q.stop()
+	if runErr == nil {
+		runErr = cmd.Run()
 	}
-	runErr := cmd.Run()
 	st.Ended = time.Now().UTC()
 	if res, ok := q.outcome(); ok {
-		st.State, st.Error, st.Untouched, st.Reason = res.State, res.Error, res.Untouched, res.Reason
-		st.To, st.Release = cmp.Or(res.Version, q.nodeVersion()), cmp.Or(res.Release, st.Release)
+		q.settle(&st, res)
 	} else {
 		// No word from the update (a rayctl that died): its exit and its
 		// last lines.
@@ -153,18 +184,32 @@ func (q requests) run() error {
 		// hours old.
 		st.Release = cmp.Or(tail.verified(), st.Release)
 		if q.relay != nil && runErr != nil {
-			q.relay.cutShort(&st, q.nodeVersion)
+			q.relay.cutShort(&st, q.nodeVersion, tail.has(relayFailedLine))
 		}
 	}
 	st.Unfinished = q.unfinished()
-	if st.State == nodeupdate.RolledBack || (st.State == nodeupdate.Failed && !st.Untouched) {
-		st.Held = nodeupdate.Hold(st.Held, st.Release)
-	}
+	st.Held = holdIfBroke(st)
 	_ = os.Remove(q.result)
 	if err := nodeupdate.WriteStatus(q.status, st); err != nil {
 		return errors.Join(runErr, err)
 	}
 	return runErr
+}
+
+// settle puts in st the outcome the update wrote.
+func (q requests) settle(st *nodeupdate.Status, res nodeupdate.Result) {
+	st.State, st.Error, st.Untouched, st.Reason = res.State, res.Error, res.Untouched, res.Reason
+	st.To, st.Release = cmp.Or(res.Version, q.nodeVersion()), cmp.Or(res.Release, st.Release)
+}
+
+// holdIfBroke is st's held releases, with its own when its update rolled
+// back or broke on the way; one that failed before it changed anything is
+// tried again later.
+func holdIfBroke(st nodeupdate.Status) []string {
+	if st.State == nodeupdate.RolledBack || (st.State == nodeupdate.Failed && !st.Untouched) {
+		return nodeupdate.Hold(st.Held, st.Release)
+	}
+	return st.Held
 }
 
 // raydVersion is the version of the rayd installed, "" when it does not

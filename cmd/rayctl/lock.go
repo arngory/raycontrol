@@ -25,6 +25,16 @@ var updateLockPath = "/run/raycontrol-update.lock"
 // waiting up to wait for one that holds it (0: not at all). The lock lasts
 // as long as this process.
 func takeUpdateLock(what string, wait time.Duration) error {
+	return takeUpdateLockUnless(what, wait, nil)
+}
+
+// errLockWaitStopped: the wait for the update lock ended on stop's word.
+var errLockWaitStopped = errors.New("stopped while waiting for the update lock")
+
+// takeUpdateLockUnless is takeUpdateLock, the wait ending as soon as stop
+// says so (nil: it never does): the relay's runner, whose unit is stopped,
+// does not wait on.
+func takeUpdateLockUnless(what string, wait time.Duration, stop func() bool) error {
 	if os.Getenv(lockEnv) == "held" {
 		return nil // a parent rayctl holds it for this one
 	}
@@ -47,6 +57,10 @@ func takeUpdateLock(what string, wait time.Duration) error {
 			_ = f.Close()
 			return fmt.Errorf("another %s is running (%s); %s again once it ends",
 				cmp.Or(strings.TrimSpace(string(holder)), "update, rollback or apply"), updateLockPath, what)
+		}
+		if stop != nil && stop() {
+			_ = f.Close()
+			return errLockWaitStopped
 		}
 		time.Sleep(time.Second)
 	}

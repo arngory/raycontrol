@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -775,7 +777,7 @@ func (u relayUpdate) run() error {
 		u.unmark()
 		return nil
 	}
-	fmt.Println("update failed:", err)
+	fmt.Println(relayFailedLine, err)
 	err = backOrOpen(err, u.restore, u.checkBack, u.open)
 	if rb := (rolledBack{}); errors.As(err, &rb) {
 		u.unmark()
@@ -833,6 +835,10 @@ type relayEnv struct {
 	// signals catches, from the point of no return, what would end this
 	// rayctl halfway (catchSignals).
 	signals func() (caught func() bool, stop func())
+	// interrupt is, for an update by the exit's word, its unit's stop
+	// taken from the start (stopOnSignal): ctx ends at the signal, so that
+	// the download stops, and caught says it came.
+	interrupt func(ctx context.Context) (_ context.Context, caught func() bool, stop func())
 	// result is where an update by the exit's word writes how it ended
 	// (nodeupdate.ResultEnv, given by the relay's runner); "" by hand.
 	result string
@@ -858,9 +864,21 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 		newVersion      string
 		touched, handed bool
 	)
+	// The unit's stop (its timeout during a slow download, systemctl stop,
+	// a shutdown) may come before the point of no return too: taken from
+	// the start, it ends the download, and the update stops before its
+	// first change, saying so (interrupted, untouched), never killed with
+	// no word. By hand Ctrl-C ends it there as ever.
+	interrupted := func() bool { return false }
 	if e.result != "" && !o.check && !rollback {
+		var stop func()
+		ctx, interrupted, stop = e.interrupt(ctx)
+		defer stop()
 		defer func() {
 			if !handed {
+				if err != nil && !touched && interrupted() && reasonOf(err) != nodeupdate.ReasonInterrupted {
+					err = withReason(nodeupdate.ReasonInterrupted, fmt.Errorf("stopped before any change (the update unit's timeout or stop): %w", err))
+				}
 				writeResult(e.result, err, touched, installed, newVersion)
 			}
 		}()
@@ -933,6 +951,11 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 	// relay back; a reader of its output gone does not stop it either.
 	caught, stop := e.signals()
 	stopSignals = stop
+	// Told to stop on the way here (while the release was staged): the
+	// install would not get the signal, which came before it.
+	if interrupted() {
+		return errStoppedFirst
+	}
 
 	// The mark says who runs the update: by the exit's word, root's units
 	// roll back one that did not end (spec/relay-update-remote-v1.md §4.3).
@@ -961,7 +984,7 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 	if err := u.run(); err != nil {
 		// Rolled back because a signal cut the install short (the unit's
 		// timeout or stop, a shutdown): that is where it failed.
-		if rb := (rolledBack{}); caught() && errors.As(err, &rb) {
+		if rb := (rolledBack{}); (caught() || interrupted()) && errors.As(err, &rb) {
 			return withReason(nodeupdate.ReasonInterrupted, err)
 		}
 		return err
@@ -1051,6 +1074,39 @@ func catchSignals() (caught func() bool, stop func()) {
 	}, func() { signal.Stop(sigs) }
 }
 
+// errStoppedFirst is an update by the exit's word told to stop before its
+// first change.
+var errStoppedFirst = withReason(nodeupdate.ReasonInterrupted,
+	errors.New("stopped before any change (the update unit's timeout or stop): nothing changed"))
+
+// stopOnSignal takes, until stop, what the update unit's stop sends
+// (SIGTERM; SIGINT, SIGHUP and SIGQUIT as well): the first ends ctx, and
+// caught says from then on that one came. Caught, not ignored: the
+// commands the update starts get them as usual.
+func stopOnSignal(ctx context.Context) (_ context.Context, caught func() bool, stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	var got atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-sigs:
+			got.Store(true)
+			cancel()
+		case <-done:
+		}
+	}()
+	var once sync.Once
+	return ctx, got.Load, func() {
+		once.Do(func() {
+			signal.Stop(sigs)
+			close(done)
+			cancel()
+		})
+	}
+}
+
 // askYes asks prompt on the terminal; yes is the only yes.
 func askYes(prompt string) bool {
 	fmt.Print(prompt)
@@ -1123,7 +1179,19 @@ func (c *cli) relayEnvHere(ctx context.Context) relayEnv {
 		installLock: func() (*os.File, error) { return takeInstallLock(relayInstallLock) },
 		newStage:    newStage,
 		stage: func(ctx context.Context, o updateOpts, stage, installed string) (staged, error) {
-			return c.stageRelease(ctx, o, stage, installed, relayBinaries, relayTarget)
+			// Downloaded and verified, before the handoff: an update told
+			// to stop meanwhile (by the exit's word, interrupt) hands over
+			// to no one; the release's rayctl would not get the signal,
+			// which came before it ran.
+			return c.stageRelease(ctx, o, stage, installed, relayBinaries, func(to string) error {
+				if err := relayTarget(to); err != nil {
+					return err
+				}
+				if err := ctx.Err(); err != nil {
+					return fmt.Errorf("nothing changed: %w", err)
+				}
+				return nil
+			})
 		},
 		place: func(stage string) (bool, error) { return placeRelayBinaries(stage, relayBinaries, placeBinary) },
 		install: func(lock *os.File) error {
@@ -1133,10 +1201,11 @@ func (c *cli) relayEnvHere(ctx context.Context) relayEnv {
 			h := realHealth(w)
 			return func() error { return waitHealthy(hctx, h.check, 30*time.Second, 3*time.Second, time.Second) }
 		},
-		confirm: askYes,
-		signals: catchSignals,
-		result:  os.Getenv(nodeupdate.ResultEnv),
-		policy:  nodeupdate.PolicyFile,
+		confirm:   askYes,
+		signals:   catchSignals,
+		interrupt: stopOnSignal,
+		result:    os.Getenv(nodeupdate.ResultEnv),
+		policy:    nodeupdate.PolicyFile,
 	}
 }
 

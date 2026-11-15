@@ -373,7 +373,12 @@ type fakeRelay struct {
 	// signalled: a signal came from the point of no return on (the
 	// unit's stop, a shutdown).
 	signalled bool
-	env       relayEnv
+	// early: the unit's stop came before the point of no return (an
+	// update by the exit's word takes it from its start); stop ends the
+	// update's context as the signal would.
+	early bool
+	stop  context.CancelFunc
+	env   relayEnv
 }
 
 func (f *fakeRelay) at(p string) string { return filepath.Join(f.dir, p) }
@@ -519,6 +524,11 @@ func newFakeRelay(t *testing.T) *fakeRelay {
 		signals: func() (func() bool, func()) {
 			f.record("signals")
 			return func() bool { return f.signalled }, func() { f.record("signals end") }
+		},
+		interrupt: func(ctx context.Context) (context.Context, func() bool, func()) {
+			f.record("interrupt")
+			ctx, f.stop = context.WithCancel(ctx)
+			return ctx, func() bool { return f.early }, f.stop
 		},
 	}
 	return f
@@ -1100,6 +1110,120 @@ func TestRelayUpdateResult(t *testing.T) {
 	}
 	if entries, _ := filepath.Glob(f.at("*.json")); len(entries) != 0 {
 		t.Errorf("an update by hand wrote %v", entries)
+	}
+}
+
+// An update by the exit's word takes its unit's stop from its start (its
+// timeout during a slow download, systemctl stop): the download ends, and
+// the update stops before its first change, saying so in its outcome:
+// failed, interrupted, untouched, which rayd relay asks for again later.
+// Never killed with no word, which the runner could only guess at. Told
+// to stop once the release is staged, it changes nothing either; once it
+// changed something, it rolls back as ever, interrupted. By hand the
+// signal is not taken before the point of no return.
+func TestRelayUpdateStoppedFirst(t *testing.T) {
+	stopped := func(f *fakeRelay) func(context.Context, updateOpts, string, string) (staged, error) {
+		return func(ctx context.Context, _ updateOpts, stage, _ string) (staged, error) {
+			f.early = true
+			f.stop()
+			<-ctx.Done()
+			return staged{}, fetchReason(fmt.Errorf("downloading SHA256SUMS: %w", ctx.Err()))
+		}
+	}
+	for name, c := range map[string]struct {
+		set  func(*fakeRelay)
+		want nodeupdate.Result
+	}{
+		"during the download": {func(f *fakeRelay) { f.env.stage = stopped(f) },
+			nodeupdate.Result{State: nodeupdate.Failed, Version: "v0.26.0", Untouched: true, Reason: nodeupdate.ReasonInterrupted}},
+		"once staged": {func(f *fakeRelay) {
+			stage := f.env.stage
+			f.env.stage = func(ctx context.Context, o updateOpts, st, installed string) (staged, error) {
+				s, err := stage(ctx, o, st, installed)
+				f.early = true
+				return s, err
+			}
+		}, nodeupdate.Result{State: nodeupdate.Failed, Version: "v0.26.0", Release: "v0.26.1", Untouched: true, Reason: nodeupdate.ReasonInterrupted}},
+		"in the install": {func(f *fakeRelay) {
+			f.inst = func() error { f.early = true; return errors.New("interrupted") }
+		}, nodeupdate.Result{State: nodeupdate.RolledBack, Version: "v0.26.0", Release: "v0.26.1", Reason: nodeupdate.ReasonInterrupted}},
+	} {
+		f := newFakeRelay(t)
+		f.env.result = f.at("result.json")
+		c.set(f)
+		_, err := f.update(updateOpts{want: "v0.26.1", yes: true})
+		got, ok := nodeupdate.ReadResult(f.env.result)
+		if !ok || err == nil || got.Error == "" || !strings.Contains(err.Error(), got.Error) {
+			t.Errorf("%s: %+v %v (%v)", name, got, ok, err)
+			continue
+		}
+		if c.want.Untouched && !strings.Contains(got.Error, "stopped before any change") {
+			t.Errorf("%s: %q", name, got.Error)
+		}
+		got.Error = ""
+		if got != c.want {
+			t.Errorf("%s: %+v, want %+v (%v)", name, got, c.want, err)
+		}
+		if c.want.Untouched {
+			if _, marked := f.env.ops.readMark(); marked || f.read("bin/rayspa") != "rayspa v0.26.0" || slices.Contains(f.ran, "install") {
+				t.Errorf("%s: changed: %q", name, f.ran)
+			}
+			if _, err := f.env.ops.kept(); err == nil {
+				t.Errorf("%s: kept a copy", name)
+			}
+		}
+	}
+	// By hand: none of it.
+	f := newFakeRelay(t)
+	if _, err := f.update(updateOpts{want: "latest", yes: true}); err != nil || slices.Contains(f.ran, "interrupt") {
+		t.Errorf("by hand: %v %q", err, f.ran)
+	}
+
+	// The real signal: SIGTERM while the download goes on (were it not
+	// taken, this test's process would die here).
+	f = newFakeRelay(t)
+	f.env.result = f.at("result.json")
+	f.env.interrupt = stopOnSignal
+	f.env.stage = func(ctx context.Context, _ updateOpts, _, _ string) (staged, error) {
+		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+			return staged{}, errors.New("the download did not stop")
+		}
+		return staged{}, fetchReason(fmt.Errorf("downloading SHA256SUMS: %w", ctx.Err()))
+	}
+	_, err := f.update(updateOpts{want: "v0.26.1", yes: true})
+	if got, ok := nodeupdate.ReadResult(f.env.result); !ok || err == nil || got.State != nodeupdate.Failed || !got.Untouched ||
+		got.Reason != nodeupdate.ReasonInterrupted {
+		t.Errorf("SIGTERM downloading: %+v %v (%v)", got, ok, err)
+	}
+}
+
+// stopOnSignal ends its context at the first signal and says so after;
+// stopped, it ends it too, but says no signal came.
+func TestStopOnSignal(t *testing.T) {
+	ctx, caught, stop := stopOnSignal(context.Background())
+	if caught() || ctx.Err() != nil {
+		t.Fatal("caught before any came")
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("SIGTERM did not end the context")
+	}
+	if !caught() {
+		t.Error("the signal is not said to have come")
+	}
+	stop()
+	stop()
+	ctx, caught, stop = stopOnSignal(context.Background())
+	stop()
+	if ctx.Err() == nil || caught() {
+		t.Errorf("stopped: %v %v", ctx.Err(), caught())
 	}
 }
 

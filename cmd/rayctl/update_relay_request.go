@@ -12,6 +12,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/nodeupdate"
+	"github.com/arngory/raycontrol/internal/release"
 )
 
 // Root on a relay (spec/relay-update-remote-v1.md §4.2-§4.3): rayd relay,
@@ -38,6 +39,16 @@ type relayRunner struct {
 	lock     func() error // the update lock for the recover unit
 }
 
+// relayLockWait is how long a relay's runner waits for a manual update or
+// rollback to let the update lock go: of its unit's 15 minutes
+// (TimeoutStartSec), the download needs most of the rest, and the install
+// with a rollback after it up to about 4.
+const relayLockWait = 3 * time.Minute
+
+// relayFailedLine is what a relay's update prints once it failed after a
+// change (relayUpdate.run), before it rolls the relay back.
+const relayFailedLine = "update failed:"
+
 // hostRequests is where this host's requests are: a relay's or the node's.
 func hostRequests() requests {
 	if host, _ := updateHost(deploy.DB, deploy.RelayBundle, relayUnitFile); host == relayHost {
@@ -52,7 +63,9 @@ func relayRequests() requests {
 	q := requests{request: nodeupdate.RelayRequestFile, status: nodeupdate.StatusFile, policy: nodeupdate.PolicyFile, result: nodeupdate.ResultFile,
 		rayctl: "/usr/local/bin/rayctl", ready: func() error { return nil }, nodeVersion: raydVersion,
 		kinds: nodeupdate.RelayKinds, target: relayTarget,
-		lock: func() error { return takeUpdateLock("update by the exit's word", 10*time.Minute) }}
+		lock: func(stop func() bool) error {
+			return takeUpdateLockUnless("update by the exit's word", relayLockWait, stop)
+		}}
 	ops := relayOps{dir: previousDir}
 	q.relay = &relayRunner{
 		mark:     ops.readMark,
@@ -94,14 +107,20 @@ func (q requests) outcome() (nodeupdate.Result, bool) {
 }
 
 // cutShort is a relay's update that ended with no outcome (killed: kill
-// -9, out of memory, the unit's timeout), st as the runner read its exit
-// and last lines. Interrupted; and if it left its mark, the exit's, the
-// relay is rolled back here, once, unless the system shuts down (no unit
-// would start: the recover unit does it after the boot).
-func (r *relayRunner) cutShort(st *nodeupdate.Status, version func() string) {
+// -9, out of memory, the unit's timeout or stop before it took the
+// signal), st as the runner read its exit and last lines; failedAfter:
+// they said it failed after a change. Interrupted; and if it left its
+// mark, the exit's, the relay is rolled back here, once, unless the
+// system shuts down (no unit would start: the recover unit does it after
+// the boot). With no such mark (it goes in before the first change) and
+// the relay still on the version it came from, it changed nothing:
+// untouched, and its release is not held but tried again later
+// (spec/relay-update-remote-v1.md §7), as after a download that failed.
+func (r *relayRunner) cutShort(st *nodeupdate.Status, version func() string, failedAfter bool) {
 	st.Reason = nodeupdate.ReasonInterrupted
 	m, marked := r.mark()
 	if !marked || m.By != markByExit {
+		st.Untouched = st.State == nodeupdate.Failed && !failedAfter && untouchedSince(st.From, version())
 		return
 	}
 	if r.stopping() {
@@ -112,6 +131,12 @@ func (r *relayRunner) cutShort(st *nodeupdate.Status, version func() string) {
 	r.rolledBack(st, "the update ended with no outcome ("+st.Error+")", "by its runner")
 	st.To = version()
 }
+
+// untouchedSince reports whether a relay whose update left no mark of the
+// exit's, from version from, is still on it as its rayd says (now): a
+// release, the same. Anything else (another version, none told) may be
+// what the update left.
+func untouchedSince(from, now string) bool { return release.IsRelease(from) && now == from }
 
 // rolledBack runs the rollback and says in st how it went: rolled back
 // (interrupted), or not, open when the host was left open.
@@ -133,9 +158,11 @@ func (r *relayRunner) rolledBack(st *nodeupdate.Status, what, by string) {
 
 // ended is rayctl update -request-ended, the update unit's ExecStopPost:
 // a runner that did not get to write how the update ended (killed past
-// the unit's TimeoutStopSec) leaves it running. Failed, interrupted; on a
-// relay, rolled back if the update left the exit's mark, as the runner
-// would have, unless the system shuts down.
+// the unit's TimeoutStopSec) leaves it running. On a relay, the outcome
+// the update wrote, if it did (the runner alone was killed); else failed,
+// interrupted, and rolled back if the update left the exit's mark, as the
+// runner would have, unless the system shuts down. With no such mark and
+// the relay on the version it came from, nothing changed (cutShort).
 func (q requests) ended() error {
 	if q.relay == nil {
 		return markInterrupted(q.status)
@@ -144,16 +171,27 @@ func (q requests) ended() error {
 	if st.State != nodeupdate.Running {
 		return nil // the runner wrote how it ended
 	}
+	st.Ended = time.Now().UTC()
+	if res, ok := nodeupdate.ReadResult(q.result); ok {
+		q.settle(&st, res)
+		st.Held, st.Unfinished = holdIfBroke(st), q.unfinished()
+		_ = os.Remove(q.result)
+		return nodeupdate.WriteStatus(q.status, st)
+	}
 	cut := "interrupted (" + cmp.Or(os.Getenv("SERVICE_RESULT"), "killed") + ")"
-	st.State, st.Ended, st.Reason = nodeupdate.Failed, time.Now().UTC(), nodeupdate.ReasonInterrupted
+	st.State, st.Reason = nodeupdate.Failed, nodeupdate.ReasonInterrupted
 	st.Error = cut + ": journalctl -u " + deploy.RelayUpdateService
-	st.Held, st.Unfinished = nodeupdate.Hold(st.Held, st.Release), q.unfinished()
+	m, marked := q.relay.mark()
+	exits := marked && m.By == markByExit
+	if v := q.nodeVersion(); !exits && untouchedSince(st.From, v) {
+		st.Untouched, st.To = true, v
+	}
+	st.Held, st.Unfinished = holdIfBroke(st), q.unfinished()
 	// Failed first: the rollback may itself be cut short.
 	if err := nodeupdate.WriteStatus(q.status, st); err != nil {
 		return err
 	}
-	m, marked := q.relay.mark()
-	if !marked || m.By != markByExit {
+	if !exits {
 		return nil
 	}
 	if q.relay.stopping() {

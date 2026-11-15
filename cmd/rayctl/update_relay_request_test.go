@@ -6,9 +6,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/nodeupdate"
 )
 
@@ -27,6 +29,9 @@ type fakeRunner struct {
 	onFree   func()       // the install lock waited for
 	locked   error        // the update lock not taken
 	relayVer string       // the relay's version as its rayd says
+	onLock   func()       // the update lock waited for
+	// signalled: the unit was told to stop (its runner caught the signal).
+	signalled bool
 }
 
 func newFakeRunner(t *testing.T) *fakeRunner {
@@ -44,7 +49,15 @@ func newFakeRunner(t *testing.T) *fakeRunner {
 	f.q = requests{request: filepath.Join(f.dir, "rayd-relay", "update-request"), status: filepath.Join(f.dir, "status", "status.json"),
 		policy: filepath.Join(f.dir, "status", "policy.json"), result: filepath.Join(f.dir, "status", "result.json"),
 		ready: func() error { return nil }, nodeVersion: func() string { return f.relayVer },
-		kinds: nodeupdate.RelayKinds, target: relayTarget, lock: func() error { return f.locked }}
+		kinds: nodeupdate.RelayKinds, target: relayTarget, lock: func(stop func() bool) error {
+			if f.onLock != nil {
+				f.onLock()
+			}
+			if stop != nil && stop() {
+				return errLockWaitStopped
+			}
+			return f.locked
+		}}
 	f.q.relay = &relayRunner{
 		mark:     f.ops.readMark,
 		stopping: func() bool { return f.stopping },
@@ -63,7 +76,7 @@ func newFakeRunner(t *testing.T) *fakeRunner {
 			f.ops.unmark()
 			return "", nil
 		},
-		signals: func() (func() bool, func()) { return func() bool { return false }, func() {} },
+		signals: func() (func() bool, func()) { return func() bool { return f.signalled }, func() {} },
 		lock:    func() error { return f.locked },
 	}
 	f.policy("on")
@@ -244,10 +257,11 @@ echo '{"state":"done","version":"v0.27.1","release":"v0.27.1"}' > "$RAYCONTROL_U
 			nodeupdate.Status{State: nodeupdate.RolledBack, To: "v0.27.0", Reason: nodeupdate.ReasonCheck, Error: "rayspa is inactive/dead"}, true},
 		"not downloaded": {`echo '{"state":"failed","version":"v0.27.0","error":"downloading SHA256SUMS: timeout","untouched":true,"reason":"download"}' > "$RAYCONTROL_UPDATE_RESULT"; exit 1`,
 			nodeupdate.Status{State: nodeupdate.Failed, To: "v0.27.0", Reason: nodeupdate.ReasonDownload, Untouched: true, Error: "downloading SHA256SUMS: timeout"}, false},
-		// No outcome and no mark: it died before its first change, or
-		// after its last; what it said last, interrupted.
+		// No outcome and no mark, the relay where it was: it died before
+		// its first change; what it said last, interrupted, untouched,
+		// and tried again later (TestRelayRequestCutShort).
 		"died": {`echo "rayctl: SHA256SUMS: downloading" >&2; exit 1`,
-			nodeupdate.Status{State: nodeupdate.Failed, To: "v0.27.0", Reason: nodeupdate.ReasonInterrupted, Error: "SHA256SUMS: downloading"}, true},
+			nodeupdate.Status{State: nodeupdate.Failed, To: "v0.27.0", Reason: nodeupdate.ReasonInterrupted, Untouched: true, Error: "SHA256SUMS: downloading"}, false},
 		// An older runner's way: rolled back, by its words.
 		"its words": {`echo "rayctl: update failed, the previous version runs again: rayspa is inactive/dead" >&2; exit 1`,
 			nodeupdate.Status{State: nodeupdate.RolledBack, To: "v0.27.0", Reason: nodeupdate.ReasonInterrupted, Error: "update failed, the previous version runs again: rayspa is inactive/dead"}, true},
@@ -337,6 +351,74 @@ func TestRelayRequestKilled(t *testing.T) {
 	}
 }
 
+// The unit stopped before the update changed anything (its timeout during
+// a download GitHub throttles, systemctl stop): the update that died of
+// the signal, with no outcome and no mark, left the relay as it was. Its
+// release is not held, or rayd relay would never ask for it again: failed,
+// interrupted, untouched, tried again later (spec §7). The runner takes
+// the signal from its start: told to stop while it waits for the lock, or
+// before the update began, it begins none. Died after a change (the relay
+// on another version, or it said it failed after one), the release is
+// held as before.
+func TestRelayRequestCutShort(t *testing.T) {
+	for name, c := range map[string]struct {
+		script    string
+		set       func(*fakeRunner)
+		untouched bool
+		ran       bool
+	}{
+		"killed downloading":                    {script: `echo 'downloading SHA256SUMS'; kill -TERM $$`, untouched: true, ran: true},
+		"killed, moved on":                      {script: `kill -TERM $$`, set: func(f *fakeRunner) { f.relayVer = "v0.27.1" }, ran: true},
+		"killed, said it failed after a change": {script: `echo 'update failed: the relay install: boom'; kill -9 $$`, ran: true},
+		"stopped before the update began": {script: `exit 9`, set: func(f *fakeRunner) {
+			f.q.ready = func() error { f.signalled = true; return nil }
+		}, untouched: true},
+		"stopped waiting for the lock": {script: `exit 9`, set: func(f *fakeRunner) {
+			f.locked = errors.New("another update is running")
+			f.onLock = func() { f.signalled = true }
+		}, untouched: true},
+	} {
+		f := newFakeRunner(t)
+		f.rayctl(c.script)
+		if c.set != nil {
+			c.set(f)
+		}
+		f.request("v0.27.1")
+		st, err := f.run()
+		_, ran := os.Stat(f.at("args"))
+		if err == nil || st.State != nodeupdate.Failed || st.Reason != nodeupdate.ReasonInterrupted || st.Untouched != c.untouched ||
+			slices.Contains(st.Held, "v0.27.1") == c.untouched || f.rolled != 0 || (ran == nil) != c.ran || st.Error == "" {
+			t.Errorf("%s: %v %+v, rolled back %d, ran %v", name, err, st, f.rolled, ran == nil)
+		}
+		if !c.ran && !strings.Contains(st.Error, "nothing changed") {
+			t.Errorf("%s: %q", name, st.Error)
+		}
+	}
+
+	// The real signals: SIGTERM to the runner while it waits for the lock
+	// (were it not caught there, this test's process would die), then to
+	// the update and the runner at once, as the unit's stop sends it.
+	f := newFakeRunner(t)
+	f.q.relay.signals = catchSignals
+	f.rayctl(`exit 9`)
+	f.locked = errors.New("another update is running")
+	f.onLock = func() {
+		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+		time.Sleep(200 * time.Millisecond)
+	}
+	f.request("v0.27.1")
+	if st, err := f.run(); err == nil || st.State != nodeupdate.Failed || st.Reason != nodeupdate.ReasonInterrupted || !st.Untouched || len(st.Held) != 0 {
+		t.Errorf("SIGTERM waiting for the lock: %v %+v", err, st)
+	}
+	f = newFakeRunner(t)
+	f.q.relay.signals = catchSignals
+	f.rayctl(`echo 'downloading SHA256SUMS'; kill -TERM $PPID $$`)
+	f.request("v0.27.1")
+	if st, err := f.run(); err == nil || st.State != nodeupdate.Failed || st.Reason != nodeupdate.ReasonInterrupted || !st.Untouched || len(st.Held) != 0 {
+		t.Errorf("SIGTERM to the unit while it downloads: %v %+v", err, st)
+	}
+}
+
 // rayctl update -request-ended, the unit's ExecStopPost: a runner killed
 // past the unit's TimeoutStopSec leaves the status running. Failed,
 // interrupted; with the exit's mark, rolled back as the runner would have
@@ -361,15 +443,24 @@ func TestRelayRequestEnded(t *testing.T) {
 	if _, err := captureStdout(t, f.q.ended); err != nil || f.rolled != 1 {
 		t.Errorf("again: %v, rolled back %d", err, f.rolled)
 	}
-	for name, set := range map[string]func(*fakeRunner){
-		"no mark":    func(*fakeRunner) {},
-		"by hand":    func(f *fakeRunner) { f.mark(relayMark{State: "updating", From: "v0.27.0", To: "v0.27.1"}) },
-		"stopping":   func(f *fakeRunner) { f.stopping = true; f.mark(relayMark{State: "updating", By: markByExit}) },
-		"not mine":   nil,
-		"no running": nil,
+	// No mark of the exit's (it goes in before the first change) and the
+	// relay where it was: nothing changed, untouched, its release not held
+	// but tried again later. On another version, or the exit's mark left
+	// as the system shuts down, held.
+	for name, c := range map[string]struct {
+		set       func(*fakeRunner)
+		untouched bool
+	}{
+		"no mark":           {func(*fakeRunner) {}, true},
+		"by hand":           {func(f *fakeRunner) { f.mark(relayMark{State: "updating", From: "v0.27.0", To: "v0.27.1"}) }, true},
+		"no mark, moved on": {func(f *fakeRunner) { f.relayVer = "v0.27.1" }, false},
+		"no mark, not told": {func(f *fakeRunner) { f.relayVer = "" }, false},
+		"stopping":          {func(f *fakeRunner) { f.stopping = true; f.mark(relayMark{State: "updating", By: markByExit}) }, false},
+		"not mine":          {},
+		"no running":        {},
 	} {
 		f := newFakeRunner(t)
-		if set == nil {
+		if c.set == nil {
 			nodeupdate.WriteStatus(f.q.status, nodeupdate.Status{ID: "0a", State: nodeupdate.Done, Kind: nodeupdate.Exit})
 			f.mark(relayMark{State: "updating", By: markByExit})
 			captureStdout(t, f.q.ended)
@@ -379,12 +470,44 @@ func TestRelayRequestEnded(t *testing.T) {
 			continue
 		}
 		running(f)
-		set(f)
+		c.set(f)
 		captureStdout(t, f.q.ended)
 		_, marked := f.ops.readMark()
 		if st := nodeupdate.ReadStatus(f.q.status); st.State != nodeupdate.Failed || st.Reason != nodeupdate.ReasonInterrupted || f.rolled != 0 ||
-			st.Unfinished != marked || !slices.Contains(st.Held, "v0.27.1") {
+			st.Unfinished != marked || st.Untouched != c.untouched || slices.Contains(st.Held, "v0.27.1") == c.untouched ||
+			c.untouched && st.To != "v0.27.0" {
 			t.Errorf("%s: %+v, rolled back %d", name, st, f.rolled)
+		}
+	}
+	// The runner alone was killed: the outcome the update wrote (rolled
+	// back by the release's rayctl, done), not interrupted, no rollback
+	// again.
+	for name, c := range map[string]struct {
+		result string
+		want   nodeupdate.Status
+		held   bool
+	}{
+		"rolled back": {`{"state":"rolled_back","version":"v0.27.0","release":"v0.27.1","error":"rayspa is inactive/dead","reason":"check"}`,
+			nodeupdate.Status{State: nodeupdate.RolledBack, To: "v0.27.0", Reason: nodeupdate.ReasonCheck, Error: "rayspa is inactive/dead"}, true},
+		"done": {`{"state":"done","version":"v0.27.1","release":"v0.27.1"}`,
+			nodeupdate.Status{State: nodeupdate.Done, To: "v0.27.1"}, false},
+		"stopped first": {`{"state":"failed","version":"v0.27.0","error":"stopped before any change","untouched":true,"reason":"interrupted"}`,
+			nodeupdate.Status{State: nodeupdate.Failed, To: "v0.27.0", Reason: nodeupdate.ReasonInterrupted, Error: "stopped before any change", Untouched: true}, false},
+	} {
+		f := newFakeRunner(t)
+		running(f)
+		if err := os.WriteFile(f.q.result, []byte(c.result), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := captureStdout(t, f.q.ended)
+		st := nodeupdate.ReadStatus(f.q.status)
+		got := nodeupdate.Status{State: st.State, To: st.To, Reason: st.Reason, Error: st.Error, Untouched: st.Untouched}
+		if err != nil || got.State != c.want.State || got.To != c.want.To || got.Reason != c.want.Reason || got.Error != c.want.Error ||
+			got.Untouched != c.want.Untouched || slices.Contains(st.Held, "v0.27.1") != c.held || f.rolled != 0 || st.Ended.IsZero() || st.ID != "0a" {
+			t.Errorf("a result, %s: %v %+v, rolled back %d", name, err, st, f.rolled)
+		}
+		if _, err := os.Stat(f.q.result); !os.IsNotExist(err) {
+			t.Errorf("a result, %s: the result stays", name)
 		}
 	}
 	// A node's: as ever, no rollback of its own.
@@ -453,6 +576,24 @@ func TestRelayRequestRecover(t *testing.T) {
 	}
 }
 
+// A relay's runner waits for the lock a fifth of its unit's time at most:
+// the download, the install and a rollback need the rest (spec §4.2).
+func TestRelayLockWait(t *testing.T) {
+	var limit time.Duration
+	for _, f := range deploy.RelayPlan(deploy.DefaultBinaries).Files {
+		if strings.HasSuffix(f.Path, "/"+deploy.RelayUpdateService) {
+			for _, l := range strings.Split(string(f.Content), "\n") {
+				if v, ok := strings.CutPrefix(l, "TimeoutStartSec="); ok {
+					limit, _ = time.ParseDuration(strings.TrimSuffix(v, "in"))
+				}
+			}
+		}
+	}
+	if limit == 0 || relayLockWait*5 > limit {
+		t.Errorf("the lock waited for %v of the unit's %v", relayLockWait, limit)
+	}
+}
+
 // The runner of each host: a relay's takes the exit's requests from rayd
 // relay's directory only, a node's the node's; a node's request that does
 // not get the lock stays for the path unit to run again, untouched.
@@ -467,7 +608,7 @@ func TestHostRunners(t *testing.T) {
 	}
 	dir := t.TempDir()
 	n.request, n.status = filepath.Join(dir, "update-request"), filepath.Join(dir, "status.json")
-	n.lock = func() error { return errors.New("another update is running") }
+	n.lock = func(func() bool) error { return errors.New("another update is running") }
 	nodeupdate.WriteRequest(n.request, nodeupdate.Request{ID: "0a", Kind: nodeupdate.Remote, Version: "latest", By: "alice", At: time.Now()}, time.Now())
 	if err := n.take(); err == nil {
 		t.Fatal("taken without the lock")
