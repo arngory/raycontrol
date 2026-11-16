@@ -887,6 +887,10 @@ func (c *DatagramConn) Close() error // Cancel
     ноды закрывает отправку (`CLOSED`), а не держит `CAPSULE_TIMEOUT` до конца потока; ошибка «не начат» оборачивает
     `os.ErrInvalid`; `WriteDatagram`: `ErrDatagramQueueFull`, `ErrDatagramCapsuleTimeout`, `ErrDatagramTooLarge` —
     потерян один пакет, сессию не закрывать.
+  - Второй раунд ревью (naiveproxy `c38848c9`, cronet-go `f9c6de6c`): чистый конец потока — только FIN без ошибки потока
+    (STOP_SENDING с H3_NO_ERROR, как закрывает нода, — тоже чистый, `io.EOF`); капсула, обрезанная FIN, и
+    STOP_SENDING с кодом ошибки — `NetError`. Опубликовано в go-158 `46ce0301` (`v0.0.0-20261116120557-46ce030156ee`,
+    run 43863009323).
   - `MaxPayload` на IPv4 для раннего потока (Stream ID в 1 байт) — 1214; таблица §4.1 считает ID в 2 байта (1206).
 - **Ядро:** `ListenPacket` исходящего naive возвращает `net.PacketConn` поверх этого соединения, если строка несёт
   `udp=1` и проба этой сети прошла (§9.4); иначе — UoT, как сейчас. `WriteTo` дописывает адрес или имя (§3.2) и зовёт
