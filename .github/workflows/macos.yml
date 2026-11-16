@@ -1,0 +1,74 @@
+name: rayctl on macOS
+
+# rayctl started on a Mac, apart from CI: macOS runners are often not there
+# for this repository, and a job cancelled while it waits for one marked
+# every CI run red although nothing failed. CI builds, vets and compiles
+# rayctl's tests for macOS from Linux on every push (job rayctl); this one
+# runs them where they can run, when rayctl's code changes, weekly and by
+# hand. The Release workflow never waits for it.
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "cmd/rayctl/**"
+      - "internal/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/macos.yml"
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rayctl-macos:
+    # The same rayctl where it can run: built on a Mac, started, and the
+    # tests of what it does there differently from a node (where each
+    # command works, the device file's mode, the terminal without one).
+    # Not the whole suite: most of it is the node's.
+    name: rayctl (macOS, run)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Build and start
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o rayctl ./cmd/rayctl
+          file rayctl
+          # expect CODE TEXT ARGS: rayctl's exit code and a line of its
+          # standard error.
+          expect() {
+            local code=$1 text=$2 status=0
+            shift 2
+            ./rayctl "$@" 2>err.txt || status=$?
+            cat err.txt
+            [ "$status" = "$code" ] || { echo "rayctl $*: exit $status, want $code"; exit 1; }
+            grep -q -e "$text" err.txt || { echo "rayctl $*: no \"$text\""; exit 1; }
+          }
+          expect 2 '^usage: rayctl'
+          # A node's command refuses in one line, before anything. With a
+          # -remote file that is not there: should the refusal ever be
+          # missing, install stops at "not through -remote" and touches
+          # nothing (bare, it would take the update lock as root first).
+          expect 1 '^rayctl: install works on a Linux node only, and this is darwin' -remote nofile.rcdev install -host 192.0.2.1
+          [ "$(grep -c . err.txt)" = 1 ] || { echo "more than a line"; exit 1; }
+          # A command for rayd says how to reach a node from here.
+          expect 1 'rayctl -remote FILE status' status
+          # A device file others can read is refused with the fix; closed to
+          # them it is read, and this one is no device file.
+          echo 'rcdev1:x' > open.rcdev
+          chmod 644 open.rcdev
+          expect 1 'chmod 600 open.rcdev' -remote open.rcdev status
+          chmod 600 open.rcdev
+          expect 1 '^rayctl: open.rcdev: ' -remote open.rcdev status
+      - name: Tests
+        run: >-
+          go test -count=1 -v
+          -run 'TestPlaces|TestSubPlaces|TestRefusal|TestMisplaced|TestMainRefuses|TestDeviceFile|TestTerminalNot|TestFlushInputPipe|TestReadSecretNoTerminal|TestOnEndSignal'
+          ./cmd/rayctl
+

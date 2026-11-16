@@ -401,60 +401,6 @@ jobs:
           go vet "${pkgs[@]}"
           go test -count=1 -run '^$' -exec true "${pkgs[@]}"
 
-  rayctl-macos:
-    # The same rayctl where it can run: built on a Mac, started, and the
-    # tests of what it does there differently from a node (where each
-    # command works, the device file's mode, the terminal without one).
-    # Not the whole suite: most of it is the node's. Advisory and bounded;
-    # not run by the Release workflow at all, so that a release never waits
-    # for a Mac runner (a called workflow sees its caller's name in
-    # github.workflow).
-    name: rayctl (macOS, run)
-    if: github.workflow != 'Release'
-    runs-on: macos-latest
-    timeout-minutes: 15
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version-file: go.mod
-      - name: Build and start
-        run: |
-          CGO_ENABLED=0 go build -trimpath -o rayctl ./cmd/rayctl
-          file rayctl
-          # expect CODE TEXT ARGS: rayctl's exit code and a line of its
-          # standard error.
-          expect() {
-            local code=$1 text=$2 status=0
-            shift 2
-            ./rayctl "$@" 2>err.txt || status=$?
-            cat err.txt
-            [ "$status" = "$code" ] || { echo "rayctl $*: exit $status, want $code"; exit 1; }
-            grep -q -e "$text" err.txt || { echo "rayctl $*: no \"$text\""; exit 1; }
-          }
-          expect 2 '^usage: rayctl'
-          # A node's command refuses in one line, before anything. With a
-          # -remote file that is not there: should the refusal ever be
-          # missing, install stops at "not through -remote" and touches
-          # nothing (bare, it would take the update lock as root first).
-          expect 1 '^rayctl: install works on a Linux node only, and this is darwin' -remote nofile.rcdev install -host 192.0.2.1
-          [ "$(grep -c . err.txt)" = 1 ] || { echo "more than a line"; exit 1; }
-          # A command for rayd says how to reach a node from here.
-          expect 1 'rayctl -remote FILE status' status
-          # A device file others can read is refused with the fix; closed to
-          # them it is read, and this one is no device file.
-          echo 'rcdev1:x' > open.rcdev
-          chmod 644 open.rcdev
-          expect 1 'chmod 600 open.rcdev' -remote open.rcdev status
-          chmod 600 open.rcdev
-          expect 1 '^rayctl: open.rcdev: ' -remote open.rcdev status
-      - name: Tests
-        run: >-
-          go test -count=1 -v
-          -run 'TestPlaces|TestSubPlaces|TestRefusal|TestMisplaced|TestMainRefuses|TestDeviceFile|TestTerminalNot|TestFlushInputPipe|TestReadSecretNoTerminal|TestOnEndSignal'
-          ./cmd/rayctl
-
   build:
     # The release archive as the Release workflow makes it, without the
     # signature: raycontrol, niko-server checked against the pinned hashes,
