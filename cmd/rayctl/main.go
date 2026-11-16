@@ -92,10 +92,12 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             zone=SPARE (a spare becomes the main zone, the main one leaves);
                                             slipstream: max_connections=16..1024, device_connections=1..16
                                             (0: the defaults, 256 and 4; the server restarts)
-  service peer-keys NAME                    yggdrasil: the public keys a peer of your own (peers=) lets in
+  service peer-keys [-names] NAME           yggdrasil: the public keys a peer of your own (peers=) lets in
                                             with AllowedPublicKeys, as HJSON for its config: the node's,
-                                            then each user's and device's, a comment saying whose; they
-                                            change with devices, users and credential switches
+                                            then each user's and device's, labelled as in the node's users
+                                            file (-names: with the users' and devices' names, which then
+                                            sit on a host outside the node); they change with devices,
+                                            users and credential switches
   service cert SITE -chain F -key F [-force]
                                             a certificate of your own for the site and the services under
                                             it, in place of ACME's (root on the node only); the links

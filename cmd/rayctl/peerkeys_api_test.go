@@ -95,6 +95,23 @@ func TestPeerKeysAndRelayPortsAPI(t *testing.T) {
 	if strings.Count(out, "\n  \"") != len(want) || !strings.HasPrefix(strings.SplitN(out, "AllowedPublicKeys: [\n", 2)[1], "  # the node (") {
 		t.Errorf("the block:\n%s", out)
 	}
+	// Labels, no names, unless -names.
+	for _, p := range render.YggdrasilPeers(m, ygg, inner) {
+		if !strings.Contains(out, "  # "+p.Label+": ") {
+			t.Errorf("no label %s in\n%s", p.Label, out)
+		}
+	}
+	for _, name := range []string{"alice", "phone", "laptop"} {
+		if strings.Contains(out, name) {
+			t.Errorf("%s named without -names:\n%s", name, out)
+		}
+	}
+	named := run("service", "peer-keys", "-names", "ygg")
+	for _, line := range []string{"user alice, the user's own key", "user alice, device laptop", "user alice, device phone"} {
+		if !strings.Contains(named, line) {
+			t.Errorf("-names: no %q in\n%s", line, named)
+		}
+	}
 
 	run("relay", "add", "msk", "198.51.100.20")
 	out = run("relay", "ports", "msk")

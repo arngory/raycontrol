@@ -5817,8 +5817,13 @@ func (x *SetServiceOptionResponse) GetService() *Service {
 }
 
 type GetYggdrasilPeerKeysRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Service       string                 `protobuf:"bytes,1,opt,name=service,proto3" json:"service,omitempty"` // a Yggdrasil service's name
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Service string                 `protobuf:"bytes,1,opt,name=service,proto3" json:"service,omitempty"` // a Yggdrasil service's name
+	// With the users' and devices' names (YggdrasilPeerKey.user, .device).
+	// Without, each key has only its label, the node's own numbers: the
+	// keys go into a config on a host outside the node, which names nobody
+	// unless the operator asks (lan-v1 §4.3).
+	Names         bool `protobuf:"varint,2,opt,name=names,proto3" json:"names,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5858,6 +5863,13 @@ func (x *GetYggdrasilPeerKeysRequest) GetService() string {
 		return x.Service
 	}
 	return ""
+}
+
+func (x *GetYggdrasilPeerKeysRequest) GetNames() bool {
+	if x != nil {
+		return x.Names
+	}
+	return false
 }
 
 type GetYggdrasilPeerKeysResponse struct {
@@ -5934,16 +5946,19 @@ type YggdrasilPeerKey struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	PublicKey string                 `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"` // ed25519, hex
 	Address   string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`                      // its mesh address
-	User      string                 `protobuf:"bytes,3,opt,name=user,proto3" json:"user,omitempty"`
+	User      string                 `protobuf:"bytes,3,opt,name=user,proto3" json:"user,omitempty"`                            // the user's name; only with names
 	// The device's ID; "": the user's own key, from the UUID alone (links of
 	// rayctl user export, subscriptions before v0.20.1).
 	DeviceId string `protobuf:"bytes,4,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
-	Device   string `protobuf:"bytes,5,opt,name=device,proto3" json:"device,omitempty"` // the device's name
+	Device   string `protobuf:"bytes,5,opt,name=device,proto3" json:"device,omitempty"` // the device's name; only with names
 	// "current", "next" (in subscriptions already: clients move to it at
 	// from) or "previous" (the node still takes it until until).
-	Credential    string `protobuf:"bytes,6,opt,name=credential,proto3" json:"credential,omitempty"`
-	From          int64  `protobuf:"varint,7,opt,name=from,proto3" json:"from,omitempty"`   // unix seconds; next only
-	Until         int64  `protobuf:"varint,8,opt,name=until,proto3" json:"until,omitempty"` // unix seconds; previous only
+	Credential string `protobuf:"bytes,6,opt,name=credential,proto3" json:"credential,omitempty"`
+	From       int64  `protobuf:"varint,7,opt,name=from,proto3" json:"from,omitempty"`   // unix seconds; next only
+	Until      int64  `protobuf:"varint,8,opt,name=until,proto3" json:"until,omitempty"` // unix seconds; previous only
+	// Its name in the backend's users file: u<user id>, -<device id> for a
+	// device's, -n for the next UUID's, -p for the previous one's.
+	Label         string `protobuf:"bytes,9,opt,name=label,proto3" json:"label,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6032,6 +6047,13 @@ func (x *YggdrasilPeerKey) GetUntil() int64 {
 		return x.Until
 	}
 	return 0
+}
+
+func (x *YggdrasilPeerKey) GetLabel() string {
+	if x != nil {
+		return x.Label
+	}
+	return ""
 }
 
 type SetCertificateRequest struct {
@@ -9014,14 +9036,15 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x03key\x18\x02 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x03 \x01(\tR\x05value\"Q\n" +
 	"\x18SetServiceOptionResponse\x125\n" +
-	"\aservice\x18\x01 \x01(\v2\x1b.raycontrol.node.v1.ServiceR\aservice\"7\n" +
+	"\aservice\x18\x01 \x01(\v2\x1b.raycontrol.node.v1.ServiceR\aservice\"M\n" +
 	"\x1bGetYggdrasilPeerKeysRequest\x12\x18\n" +
-	"\aservice\x18\x01 \x01(\tR\aservice\"\xb0\x01\n" +
+	"\aservice\x18\x01 \x01(\tR\aservice\x12\x14\n" +
+	"\x05names\x18\x02 \x01(\bR\x05names\"\xb0\x01\n" +
 	"\x1cGetYggdrasilPeerKeysResponse\x12\x18\n" +
 	"\aservice\x18\x01 \x01(\tR\aservice\x12\x19\n" +
 	"\bnode_key\x18\x02 \x01(\tR\anodeKey\x12!\n" +
 	"\fnode_address\x18\x03 \x01(\tR\vnodeAddress\x128\n" +
-	"\x04keys\x18\x04 \x03(\v2$.raycontrol.node.v1.YggdrasilPeerKeyR\x04keys\"\xde\x01\n" +
+	"\x04keys\x18\x04 \x03(\v2$.raycontrol.node.v1.YggdrasilPeerKeyR\x04keys\"\xf4\x01\n" +
 	"\x10YggdrasilPeerKey\x12\x1d\n" +
 	"\n" +
 	"public_key\x18\x01 \x01(\tR\tpublicKey\x12\x18\n" +
@@ -9033,7 +9056,8 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"credential\x18\x06 \x01(\tR\n" +
 	"credential\x12\x12\n" +
 	"\x04from\x18\a \x01(\x03R\x04from\x12\x14\n" +
-	"\x05until\x18\b \x01(\x03R\x05until\"}\n" +
+	"\x05until\x18\b \x01(\x03R\x05until\x12\x14\n" +
+	"\x05label\x18\t \x01(\tR\x05label\"}\n" +
 	"\x15SetCertificateRequest\x12\x18\n" +
 	"\aservice\x18\x01 \x01(\tR\aservice\x12\x1b\n" +
 	"\tchain_pem\x18\x02 \x01(\fR\bchainPem\x12\x17\n" +

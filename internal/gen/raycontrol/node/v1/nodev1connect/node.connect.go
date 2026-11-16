@@ -234,8 +234,10 @@ type NodeServiceClient interface {
 	// mesh, which peers with it, then each active user's own key and each
 	// of the user's devices not revoked, for every inner UUID the node takes
 	// now (its backend's users file): these change with the devices, the
-	// users and every credential switch. Public keys only. Who may list the
-	// devices may ask. Since v0.31.0; an older node answers unimplemented.
+	// users and every credential switch. Public keys only, each with its
+	// label in that file; the users' and devices' names only when asked
+	// (names). Who may list the devices may ask. Since v0.31.0; an older
+	// node answers unimplemented.
 	GetYggdrasilPeerKeys(context.Context, *connect.Request[v1.GetYggdrasilPeerKeysRequest]) (*connect.Response[v1.GetYggdrasilPeerKeysResponse], error)
 	// SetCertificate puts the operator's own certificate on a site, in place
 	// of one from ACME, for every service under it (REALITY self-steal,
@@ -1073,8 +1075,10 @@ type NodeServiceHandler interface {
 	// mesh, which peers with it, then each active user's own key and each
 	// of the user's devices not revoked, for every inner UUID the node takes
 	// now (its backend's users file): these change with the devices, the
-	// users and every credential switch. Public keys only. Who may list the
-	// devices may ask. Since v0.31.0; an older node answers unimplemented.
+	// users and every credential switch. Public keys only, each with its
+	// label in that file; the users' and devices' names only when asked
+	// (names). Who may list the devices may ask. Since v0.31.0; an older
+	// node answers unimplemented.
 	GetYggdrasilPeerKeys(context.Context, *connect.Request[v1.GetYggdrasilPeerKeysRequest]) (*connect.Response[v1.GetYggdrasilPeerKeysResponse], error)
 	// SetCertificate puts the operator's own certificate on a site, in place
 	// of one from ACME, for every service under it (REALITY self-steal,

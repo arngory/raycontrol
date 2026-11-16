@@ -129,7 +129,7 @@ func yggdrasilUsers(m Model, s Service, inner Service) []map[string]any {
 		if p.LAN {
 			e.LAN = LANGroup(p.UserID)
 		}
-		keys[p.label] = e
+		keys[p.Label] = e
 	}
 	users := []map[string]any{}
 	for _, name := range slices.Sorted(maps.Keys(keys)) {
@@ -156,8 +156,9 @@ type YggdrasilPeer struct {
 	// LAN: the key is in its user's group (lan-v1 §2.2): a device that
 	// shows itself, of a user with LAN on.
 	LAN bool
-	// label is its name in the users file: u<id>, -<device>, -n or -p.
-	label string
+	// Label is its name in the users file: u<user id>, -<device id>, -n or
+	// -p; the node's own numbers, no one's name (lan-v1 §4.3).
+	Label string
 }
 
 // YggdrasilPeers are the keys a Yggdrasil service lets in, as its users
@@ -192,12 +193,12 @@ func YggdrasilPeers(m Model, s Service, inner Service) []YggdrasilPeer {
 		}
 		for _, c := range creds {
 			out = append(out, YggdrasilPeer{UserID: u.ID, User: u.Name, Credential: c.name, From: c.from, Until: c.until,
-				Key: pub(YggdrasilKey(c.uuid)), label: InnerEmail(u.ID) + c.suffix})
+				Key: pub(YggdrasilKey(c.uuid)), Label: InnerEmail(u.ID) + c.suffix})
 		}
 		for _, d := range m.Devices[u.ID] {
 			for _, c := range creds {
 				out = append(out, YggdrasilPeer{UserID: u.ID, User: u.Name, Device: d.ID, Credential: c.name, From: c.from, Until: c.until,
-					Key: pub(YggdrasilDeviceKey(c.uuid, d.Key[:])), LAN: u.LAN && d.LAN, label: InnerEmail(u.ID) + "-" + d.ID + c.suffix})
+					Key: pub(YggdrasilDeviceKey(c.uuid, d.Key[:])), LAN: u.LAN && d.LAN, Label: InnerEmail(u.ID) + "-" + d.ID + c.suffix})
 			}
 		}
 	}

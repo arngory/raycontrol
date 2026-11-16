@@ -71,8 +71,10 @@ service NodeService {
   // mesh, which peers with it, then each active user's own key and each
   // of the user's devices not revoked, for every inner UUID the node takes
   // now (its backend's users file): these change with the devices, the
-  // users and every credential switch. Public keys only. Who may list the
-  // devices may ask. Since v0.31.0; an older node answers unimplemented.
+  // users and every credential switch. Public keys only, each with its
+  // label in that file; the users' and devices' names only when asked
+  // (names). Who may list the devices may ask. Since v0.31.0; an older
+  // node answers unimplemented.
   rpc GetYggdrasilPeerKeys(GetYggdrasilPeerKeysRequest) returns (GetYggdrasilPeerKeysResponse);
   // SetCertificate puts the operator's own certificate on a site, in place
   // of one from ACME, for every service under it (REALITY self-steal,
@@ -775,6 +777,11 @@ message SetServiceOptionResponse {
 
 message GetYggdrasilPeerKeysRequest {
   string service = 1; // a Yggdrasil service's name
+  // With the users' and devices' names (YggdrasilPeerKey.user, .device).
+  // Without, each key has only its label, the node's own numbers: the
+  // keys go into a config on a host outside the node, which names nobody
+  // unless the operator asks (lan-v1 §4.3).
+  bool names = 2;
 }
 message GetYggdrasilPeerKeysResponse {
   string service = 1;
@@ -787,16 +794,19 @@ message GetYggdrasilPeerKeysResponse {
 message YggdrasilPeerKey {
   string public_key = 1; // ed25519, hex
   string address = 2;    // its mesh address
-  string user = 3;
+  string user = 3;       // the user's name; only with names
   // The device's ID; "": the user's own key, from the UUID alone (links of
   // rayctl user export, subscriptions before v0.20.1).
   string device_id = 4;
-  string device = 5; // the device's name
+  string device = 5; // the device's name; only with names
   // "current", "next" (in subscriptions already: clients move to it at
   // from) or "previous" (the node still takes it until until).
   string credential = 6;
   int64 from = 7;  // unix seconds; next only
   int64 until = 8; // unix seconds; previous only
+  // Its name in the backend's users file: u<user id>, -<device id> for a
+  // device's, -n for the next UUID's, -p for the previous one's.
+  string label = 9;
 }
 
 message SetCertificateRequest {
