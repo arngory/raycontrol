@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -184,6 +185,61 @@ func TestAddressBetweenColons(t *testing.T) {
 	}
 }
 
+// Addresses glued to a word, a number or each other, with no separator
+// between: each goes, the glue stays. An IPv4 one with zeros before an
+// octet of three digits (0203) too. A version of four numbers that could
+// be octets goes, a "v" before it or not: an address after a "v" looks the
+// same, and the node's own versions have three (v0.30.0, go1.27.4, Xray
+// 25.10.15). Paths of Rust and a word before "::" and one group, as
+// before, stay. A link or a UUID after one is hidden too: the token leaves
+// the word boundary their patterns look for. testdata/fuzz/FuzzRedact/
+// glued-before-link.
+func TestGlued(t *testing.T) {
+	r := New()
+	tokens := regexp.MustCompile(`\{([^}]*)\}`)
+	for _, c := range []struct{ in, want string }{
+		{"host203.0.113.5 up", "host{203.0.113.5} up"},
+		{"203.0.113.5abc", "{203.0.113.5}abc"},
+		{"x_203.0.113.05_y", "x_{203.0.113.5}_y"},
+		{"to 7203.0.113.5:443", "to 7{203.0.113.5}:443"},
+		{"0203.0.113.0005", "{203.0.113.5}"},
+		{"203.0.113.5203.0.113.6", "{203.0.113.52}{3.0.113.6}"},
+		{"[2001:db8::1]x", "[{2001:db8::1}]x"},
+		{"host2001:db8::1 up", "host{2001:db8::1} up"},
+		{"addr2a01:4f8::1, eth0fe80::1", "addr{2a01:4f8::1}, eth0{fe80::1}"},
+		{"host2001:db8:1:2:3:4:5:6:443", "host{2001:db8:1:2:3:4:5:6}:443"},
+		{"2001:db8::1x and 2001:db8:1:2:3:4:5:6x", "{2001:db8::1}x and {2001:db8:1:2:3:4:5:6}x"},
+		{"64:ff9b::198.51.100.9x, ::ffff:198.51.100.7y", "{64:ff9b::198.51.100.9}x, {198.51.100.7}y"},
+		{"2001:db8::1203.0.113.5", "{2001:db8::1}{203.0.113.5}"},
+		{"203.0.113.52001:db8::1", "{203.0.113.5}{2001:db8::1}"},
+		{"203.0.113.5ss://x@y and 198.51.100.7a1c2a3b4-0000-4000-8000-000000000007", "{203.0.113.5}<link> and {198.51.100.7}<uuid>"},
+		{"v1.2.3.4", "v{1.2.3.4}"},
+		{"version v0.30.0, go1.27.4, Xray 25.10.15", "version v0.30.0, go1.27.4, Xray 25.10.15"},
+		{"std::io::Error: os::unix, std::f64::consts, u64::MAX, Self::new", "std::io::Error: os::unix, std::f64::consts, u64::MAX, Self::new"},
+		{"at 12:30:45.123, mac aa:bb:cc:dd:ee:ff, Chrome/120.0.6099.109", "at 12:30:45.123, mac aa:bb:cc:dd:ee:ff, Chrome/120.0.6099.109"},
+	} {
+		want := tokens.ReplaceAllStringFunc(c.want, func(m string) string {
+			tok := r.String(m[1 : len(m)-1])
+			if !strings.HasPrefix(tok, "<ip") {
+				t.Fatalf("%s: no token: %s", m, tok)
+			}
+			return tok
+		})
+		if out := r.String(c.in); out != want {
+			t.Errorf("%q:\n got %q\nwant %q", c.in, out, want)
+		}
+	}
+}
+
+// Text that is not UTF-8 before a name with capitals in it: the name went
+// by places in strings.ToLower's text, which the byte had grown by two,
+// and the slice was out of range. testdata/fuzz/FuzzRedact/name-not-utf8.
+func TestNameNotUTF8(t *testing.T) {
+	if out := New("node.example.org").String("\xd1node.eXAmple.org \xffa.Node.Example.org"); out != "\xd1<domain> \xff<sub>.<domain>" {
+		t.Errorf("%q", out)
+	}
+}
+
 // Names learned later (a node's DNS tunnel zones) are hidden as well.
 func TestAdd(t *testing.T) {
 	r := New("203.0.113.7")
@@ -191,5 +247,26 @@ func TestAdd(t *testing.T) {
 	out := r.String("zone t.example.com, NS ns9.example.com, other www.example.org")
 	if strings.Contains(out, "t.example.com") || strings.Contains(out, "ns9.example.com") || !strings.Contains(out, "www.example.org") {
 		t.Fatalf("%q", out)
+	}
+}
+
+// BenchmarkString: a line without an address, one with several, and a
+// report of a few hundred lines.
+func BenchmarkString(b *testing.B) {
+	plain := "ok: unit niko-dns.service active, port 53, version v0.1.1, took 12ms, 3 of 4 checks"
+	addrs := "spa granted src=198.51.100.23 device=5b2a7728b0c35433 from 2001:db8::42 dial 203.0.113.05:443 via [2001:db8:1::7]:8443"
+	r := New("example.com")
+	for _, c := range []struct{ name, in string }{
+		{"plain", plain},
+		{"addresses", addrs},
+		{"report", strings.Repeat(plain+"\n"+addrs+"\n"+plain+"\n", 100)},
+	} {
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(c.in)))
+			for b.Loop() {
+				r.String(c.in)
+			}
+		})
 	}
 }

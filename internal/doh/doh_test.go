@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -72,6 +73,23 @@ func TestHandler(t *testing.T) {
 	r.Body.Close()
 	if r.StatusCode != http.StatusUnsupportedMediaType {
 		t.Errorf("wrong type: %s", r.Status)
+	}
+	// A body cut short: shorter than its Content-Length (HTTP/3 ends it so),
+	// or broken off (HTTP/2 tells so at the stream's end); the query whole
+	// in it or not, 400, not an empty 200 (cmd/rayd's TestDoHShortBody
+	// over both).
+	for name, body := range map[string]io.Reader{
+		"short":      bytes.NewReader(query),
+		"broken off": io.MultiReader(bytes.NewReader(query), iotest.ErrReader(errors.New("stream ended early"))),
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/dns-query/"+good, body)
+		req.Header.Set("Content-Type", "application/dns-message")
+		req.ContentLength = int64(len(query)) + 10
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d %q", name, rec.Code, rec.Body)
+		}
 	}
 }
 

@@ -99,10 +99,12 @@ func writeRelayStatus(path string, st nodeupdate.Status) error {
 	return nodeupdate.WriteStatusFor(path, st, gid)
 }
 
-// writeStatus writes q's status: a relay's as writeRelayStatus, a node's
-// for everyone (its rayd reads it).
+// writeStatus writes q's status: a relay's as writeRelayStatus, its text
+// naming no mirror (hideMirrors: an update's last lines may), a node's for
+// everyone (its rayd reads it).
 func (q requests) writeStatus(st nodeupdate.Status) error {
 	if q.relay != nil {
+		st.Error = hideMirrors(st.Error)
 		return writeRelayStatus(q.status, st)
 	}
 	return nodeupdate.WriteStatus(q.status, st)
