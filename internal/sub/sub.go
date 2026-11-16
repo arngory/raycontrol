@@ -647,6 +647,12 @@ func naiveLink(m render.Model, s render.Service, password, sni string) string {
 	if provision.NaiveICMP(s.Service) {
 		q.Set("icmp", "1")
 	}
+	// UDP as HTTP/3 datagrams on naive-quic (spec/naive-udp-v1.md §9.1):
+	// only with udp=on and a UDP port; uot=2 stays, the client's way where
+	// QUIC does not pass and before its probe.
+	if provision.NaiveUDPLink(s.Service) {
+		q.Set("udp", "1")
+	}
 	// rayd naive answers a CONNECT with the header niko-ack: 1 after the
 	// dial, with its outcome (spec/naive-uot-v1.md §4), as Hysteria2 does.
 	q.Set("niko-ack", "1")

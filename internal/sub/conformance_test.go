@@ -42,6 +42,7 @@ func TestLinksForStrictClient(t *testing.T) {
 		{"hy2-obfs", "hy2o", ""},
 		{"naive", "naive", ""},
 		{"naive", "naive-icmp", `{"icmp":true}`},
+		{"naive", "naive-udp", `{"udp":true}`},
 		{"doh", "doh", ""},
 		{"dnstt", "dns", ""},
 		{"dnstt", "dns-spare", `{"spare_zones":2}`},
@@ -160,11 +161,21 @@ func TestLinksForStrictClient(t *testing.T) {
 			}
 		}
 	}
+	// UDP datagrams (naive-udp-v1 §9.1): udp=1 on the naive that carries
+	// them, and only there; uot=2 stays on all (strictProblems).
+	for name, want := range map[string]bool{"naive": false, "naive-icmp": false, "naive-udp": true} {
+		for _, link := range []string{byName[name].Link, nextLink(byName[name])} {
+			u, _ := url.Parse(link)
+			if u.Query().Has("udp") != want {
+				t.Errorf("%s: udp=1 %v, want %v: %s", name, u.Query().Has("udp"), want, link)
+			}
+		}
+	}
 	// cert-pin-v1 §2: the lines served with the site's certificate carry
 	// its two pins, the leaf's first, the current link and the next one
 	// alike; hy2-obfs keeps its one pin and pinSHA256; no other line has
 	// niko-pin.
-	pinned := map[string]int{"hy2": 2, "naive": 2, "naive-icmp": 2, "doh": 2, "hy2o": 1}
+	pinned := map[string]int{"hy2": 2, "naive": 2, "naive-icmp": 2, "naive-udp": 2, "doh": 2, "hy2o": 1}
 	for _, k := range kinds {
 		for _, link := range []string{byName[k.name].Link, nextLink(byName[k.name])} {
 			u, _ := url.Parse(link)
@@ -325,6 +336,11 @@ func strictProblems(kind, link string) []string {
 		// ICMP (icmp-v1 §1): 1 or absent.
 		if q.Has("icmp") && q.Get("icmp") != "1" {
 			out = append(out, "naive with icmp="+q.Get("icmp")+", not 1")
+		}
+		// UDP datagrams (naive-udp-v1 §9.1): 1 or absent; Niko 1.45.0 and
+		// every release before skip it.
+		if q.Has("udp") && q.Get("udp") != "1" {
+			out = append(out, "naive with udp="+q.Get("udp")+", not 1")
 		}
 		// The client ignores these; the node must not rely on them.
 		for _, key := range []string{"cert", "extra-headers"} {
