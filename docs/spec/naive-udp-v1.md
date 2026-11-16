@@ -1287,8 +1287,8 @@ connect для TCP делается отдельно и на этот поряд
    только адреса. Ответы Hysteria2 «от имени» здесь не повторены.
 9. **Отказы и счётчики.** Новых видов отказов conn-limit нет: `429` считается как `udp`, вытеснение — как `evicted`.
    Счётчики процесса (запросы, отказы `429`/`503`, датаграммы в обе стороны, капсулы, отброшенные) — в строке сокета
-   статистики naive (поле `udp`; отброшенные — и по причинам, `dropped_by`). С v0.31.0 rayd читает его для
-   `rayctl metrics`, по сервису, с запуска naive: `raycontrol_naive_udp_requests_total`, `…_refused_total`,
+   статистики naive (поле `udp`; отброшенные — и по причинам, `dropped_by`). С v0.31.0 rayd читает его у сервисов
+   с `udp=on` для `rayctl metrics`, по сервису, с запуска naive: `raycontrol_naive_udp_requests_total`, `…_refused_total`,
    `…_datagrams_total` и `…_capsules_total` (`direction="in"` — к назначениям, `"out"` — клиенту),
    `…_dropped_total` (`reason`: каждая причина, с нулём; не покрытое причинами — `other`); ни адресов, ни назначений.
    Снять руками: `printf 'traffic\n' | socat - UNIX-CONNECT:/run/niko/<сервис naive>/stats.sock`. В конце запроса — строка debug с

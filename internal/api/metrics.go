@@ -281,7 +281,9 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 				r.st, r.err = dnsstats.Read(ctx, s.Paths.StatsSocket(r.name))
 			}()
 		case "naive":
-			if s.NaiveUDP == nil {
+			// Only with udp=on: the line of one without has no udp, and
+			// its users' bytes are the traffic loop's to read.
+			if s.NaiveUDP == nil || !provision.NaiveUDP(svc) {
 				continue
 			}
 			r := &naiveRead{name: svc.Name}

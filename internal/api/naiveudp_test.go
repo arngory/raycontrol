@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -20,7 +21,8 @@ import (
 // (naive-udp-v1 §7) as its stats socket gives them, read the way rayd
 // wires it: by service, direction and reason only, every reason with its
 // zero; what the reasons do not cover is "other". A service without
-// udp=on, one whose socket does not answer and a disabled one show none.
+// udp=on (its socket not even read), one whose socket does not answer and
+// a disabled one show none.
 func TestMetricsNaiveUDP(t *testing.T) {
 	srv, sock, _ := startServer(t)
 	ctx := context.Background()
@@ -28,8 +30,15 @@ func TestMetricsNaiveUDP(t *testing.T) {
 	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "reality", Name: "reality"})); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"nv", "plain", "away", "off"} {
+	for _, name := range []string{"nv", "plain", "away", "off", "stale"} {
 		if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "naive", Name: name})); err != nil {
+			t.Fatal(name, err)
+		}
+	}
+	// udp=on but on plain and stale (a process still running with -udp
+	// before rayctl apply).
+	for _, name := range []string{"nv", "away", "off"} {
+		if _, err := c.SetServiceOption(ctx, connect.NewRequest(&nodev1.SetServiceOptionRequest{Name: name, Key: "udp", Value: "on"})); err != nil {
 			t.Fatal(name, err)
 		}
 	}
@@ -58,6 +67,7 @@ func TestMetricsNaiveUDP(t *testing.T) {
 	})
 	serve("plain", nil)
 	serve("off", func() naive.UDPStats { return naive.UDPStats{Requests: 99} })
+	serve("stale", func() naive.UDPStats { return naive.UDPStats{Requests: 98} })
 	var mu sync.Mutex
 	var asked []string
 	srv.NaiveUDP = func(ctx context.Context, service string) (*naive.UDPStats, error) {
@@ -95,13 +105,16 @@ func TestMetricsNaiveUDP(t *testing.T) {
 			t.Errorf("no line for the reason %s", reason)
 		}
 	}
-	for _, name := range []string{"plain", "away", "off"} {
-		if strings.Contains(text, `raycontrol_naive_udp_requests_total{service="`+name+`"}`) {
-			t.Errorf("%s has UDP metrics", name)
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "raycontrol_naive_udp_") && !strings.Contains(line, `{service="nv"`) {
+			t.Errorf("UDP metrics of another service: %s", line)
 		}
 	}
-	if strings.Contains(strings.Join(asked, " "), "off") {
-		t.Errorf("a disabled service's socket read: %v", asked)
+	// Only the enabled services with udp=on are read: not a disabled one,
+	// not one without udp=on, whatever its process gives.
+	slices.Sort(asked)
+	if !slices.Equal(asked, []string{"away", "nv"}) {
+		t.Errorf("sockets read: %v", asked)
 	}
 	for _, line := range strings.Split(text, "\n") {
 		if strings.HasPrefix(line, "raycontrol_naive_udp_") {
