@@ -3484,10 +3484,10 @@ rayctl update -check
 ```
 
 ```
-installed v0.26.0, release v0.27.0 available: rayctl update
+installed v0.30.0, release v0.31.0 available: rayctl update
 ```
 
-или, если обновлять нечего: `raycontrol v0.27.0 is installed, the newest release`.
+или, если обновлять нечего: `raycontrol v0.31.0 is installed, the newest release`.
 
 **Обновить:**
 
@@ -3499,12 +3499,12 @@ rayctl update
 
 1. `rayctl` скачивает релиз и проверяет его так же, как установщик (§3.3): подпись, версию, контрольную сумму. Пока
    проверка не прошла, из архива ничего не запускается.
-2. Печатает `release v0.27.0 verified: its own rayctl updates the node` и передаёт обновление `rayctl` из самого
+2. Печатает `release v0.31.0 verified: its own rayctl updates the node` и передаёт обновление `rayctl` из самого
    релиза.
 3. Тот печатает состав релиза и спрашивает:
 
    ```
-   Update raycontrol v0.26.0 to v0.27.0? rayd, rayspa and the data plane restart; clients reconnect and send SPA again. Type yes to go on:
+   Update raycontrol v0.30.0 to v0.31.0? rayd, rayspa and the data plane restart; clients reconnect and send SPA again. Type yes to go on:
    ```
 
    Введите `yes`.
@@ -3516,7 +3516,7 @@ rayctl update
 Успех:
 
 ```
-raycontrol v0.27.0 is running; the previous binaries are kept for rayctl update -rollback
+raycontrol v0.31.0 is running; the previous binaries are kept for rayctl update -rollback
 ```
 
 - **Клиенты** переподключаются сами; перерыв — около минуты.
@@ -3553,7 +3553,7 @@ raycontrol v0.27.0 is running; the previous binaries are kept for rayctl update 
   ```
 
   Подпись проверяется так же.
-- **Конкретная версия:** `rayctl update -version v0.27.0`. На более старую версию нода сама не уходит: её надо
+- **Конкретная версия:** `rayctl update -version v0.31.0`. На более старую версию нода сама не уходит: её надо
   назвать явно.
 - **Только одно обновление, откат или `apply` за раз.** Второе сразу откажет: `another … is running`.
 - **Со старых версий.** С v0.15.0 и новее — просто `rayctl update`. С v0.10–v0.14 — в два шага:
@@ -3584,10 +3584,10 @@ rayctl update auto patch -window 03:00-05:00
 rayd checks GitHub for releases every ~6 h and updates to a newer patch release of this minor version in the window 03:00-05:00, node time (rayctl update status)
 ```
 
-- Ставятся только **патч-версии** той же минорной: v0.27.0 → v0.27.2, но не v0.28.0. Минорные обновления — руками.
+- Ставятся только **патч-версии** той же минорной: v0.31.0 → v0.31.2, но не v0.32.0. Минорные обновления — руками.
 - **Самая новая патч-версия вашей минорной** — с v0.27.0. Нода спрашивает у GitHub последний релиз. Если это
-  патч вашей минорной, она его и ставит. Иначе — последний релиз уже новая минорная (v0.28.0) или та версия, что
-  стоит, — нода по очереди спрашивает следующие номера своей: v0.27.1, v0.27.2 и так далее, и ставит самый
+  патч вашей минорной, она его и ставит. Иначе — последний релиз уже новая минорная (v0.32.0) или та версия, что
+  стоит, — нода по очереди спрашивает следующие номера своей: v0.31.1, v0.31.2 и так далее, и ставит самый
   старший найденный. Один пропущенный номер (релиз сняли, а следом вышел исправленный) она переступает, на двух
   подряд останавливается; если последний релиз — та версия, что стоит, она спрашивает только следующий номер. За
   одну проверку — не больше 8 номеров, то есть не больше 18 запросов к GitHub. Обычно запросов 3: последний релиз
@@ -3597,15 +3597,15 @@ rayd checks GitHub for releases every ~6 h and updates to a newer patch release 
   `ok … ago:`:
 
   ```
-  patch, window 03:00-05:00: v0.28.0 is out, a new minor version, which it leaves: this node runs v0.27.0; rayctl update takes it (or an admin's phone, with remote updates on)
+  patch, window 03:00-05:00: v0.32.0 is out, a new minor version, which it leaves: this node runs v0.31.0; rayctl update takes it (or an admin's phone, with remote updates on)
   ```
 
   Всегда — в `rayctl update status`, вместе с найденным патчем, если он есть:
 
   ```
-  latest     v0.28.0
-  patch      v0.27.2, the newest patch release of v0.27.0: the auto update takes it in its window
-  newer      v0.28.0 is a new minor version: the auto update takes patch releases only; rayctl update takes it
+  latest     v0.32.0
+  patch      v0.31.2, the newest patch release of v0.31.0: the auto update takes it in its window
+  newer      v0.32.0 is a new minor version: the auto update takes patch releases only; rayctl update takes it
   ```
 
   Так с v0.27.0. Нода на v0.26.x о новой минорной не говорит и патчи своей минорной после выхода v0.27.0 сама не
@@ -3613,8 +3613,8 @@ rayd checks GitHub for releases every ~6 h and updates to a newer patch release 
 - `rayctl update -check` при новой минорной называет и самый новый патч вашей (с v0.27.0):
 
   ```
-  installed v0.27.0, release v0.28.0 available: rayctl update
-  release v0.27.2, the newest patch release of v0.27.0, available: rayctl update -version v0.27.2
+  installed v0.31.0, release v0.32.0 available: rayctl update
+  release v0.31.2, the newest patch release of v0.31.0, available: rayctl update -version v0.31.2
   ```
 - Окно — по часам сервера, не короче 30 минут; без `-window` — 03:00–05:00.
 - Ставятся только подписанные релизы и никогда не старее установленного.
@@ -3637,8 +3637,8 @@ rayctl update status
 ```
 
 ```
-installed  v0.27.0
-latest     v0.27.0
+installed  v0.31.0
+latest     v0.31.0
 remote     off
 auto       patch (window 03:00-05:00, CET +01:00)
 last       none
@@ -4504,6 +4504,8 @@ journalctl -u rayd --since -1h | grep -i certif
 | `journalctl -b`: `Found ordering cycle` с `rayspa.service`, после загрузки нет сети или cloud-init не отработал | юнит `rayspa` с `Before=network-pre.target` и умолчаниями systemd: так его писали промежуточные сборки перед v0.27.0, в выпуск он не попал; или юнит правили руками. Он идёт до `network-pre.target`, а сетевая стадия cloud-init — до `sysinit.target`. Или `/var` либо `/var/lib` на NFS или iSCSI: так нода не поддерживается (§0, «Требования к VPS») | `rayctl apply` пишет юнит v0.27.0 с `DefaultDependencies=no`; проверка: `systemd-analyze verify /etc/systemd/system/rayspa.service` без `ordering cycle` |
 | `rayctl status`: `perimeter unknown …: rayspa follows the perimeter, its table is not reported …` | `rayspa` старее `rayd` (бинарник ставили руками) и о своей таблице не сообщает | `rayctl status` от root (строка `perimeter table`) скажет, стоит ли таблица; `rayctl update -force` ставит все бинарники релиза заново, `rayspa` тоже (простой `rayctl update` при той же версии ничего не делает) |
 | Загрузка висит ~30 с на «A start job is running for raycontrol perimeter», затем сеть поднимается, `rayspa` перезапускается | `rayspa` не прислал systemd «готов»: бинарник старой версии под новым юнитом (`Type=notify`) | `journalctl -u rayspa -b`: строка `sd_notify: READY not sent` или её отсутствие у старого бинарника; `rayctl update -rollback` или `rayctl update -force` ставят бинарник и юнит вместе |
+| через relay клиенты не подключаются, напрямую — подключаются | у провайдера relay закрыты его порты (диапазон SPA relay, пересылаемые порты) или relay не получил периметр от ноды | `rayctl relay ports ИМЯ` и файрвол провайдера relay (§6.7.6); на relay `systemctl is-active rayspa rayd-relay`, `journalctl -u rayspa` (§6.7.7) |
+| naive перестал проходить у устройств, которые давно не брали подписку, после смены имени | их имя фронт больше не обслуживает: смены чаще раза в 90 дней снимают самое старое из трёх прежних имён (`no longer accepted after the switch: …` в выводе `rayctl service rotate`) | устройству — взять подписку заново; Niko делает это сам после двух неудачных проверок соединения (§8, naive) |
 
 ### DNS-туннели
 
