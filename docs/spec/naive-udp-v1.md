@@ -776,11 +776,39 @@ var (
 )
 ```
 
-  `CAPSULE_TIMEOUT` (§8.2): `Send` возвращает его для следующей датаграммы, пока предыдущая капсула ждёт дольше 100 мс;
-  `DroppedCapsules` — счётчик отброшенных. По желанию клиента поверх этого — `DatagramConn` по образцу
-  `BidirectionalConn`: `ReadDatagram(ctx) ([]byte, error)` с очередью приёма, `WriteDatagram([]byte) error`,
-  `MaxPayload() int`, `Close() error` — тогда в `naive_client.go` остаются второй движок, заголовки авторизации и
-  разбор адреса §3.2.
+  Согласовано с клиентом (2026-11-16):
+  - **`CAPSULE_TIMEOUT`** — только для `Send`, которому нужна капсула (не влезло в датаграмму QUIC или `MaxPayload()`
+    ещё 0), пока голова очереди капсул ждёт дольше 100 мс. Датаграмму, которая влезает в кадр QUIC, застрявшая большая
+    не задерживает и не отклоняет. Капсулы старше 100 мс библиотека выбрасывает сама и считает в `DroppedCapsules`:
+    устаревший UDP хуже потерянного.
+  - **Context ID** — константа формата (2): библиотека добавляет его при отправке и снимает при приёме, датаграммы с
+    другим ID отбрасывает. Наружу его нет: вызывающий даёт и получает только `[тип адреса][адрес][порт][данные]` (§3.2).
+  - **`MaxPayload`** — после Quarter Stream ID и Context ID: ровно столько можно отдать в `Send`, чтобы ушло одной
+    датаграммой QUIC.
+  - **Заголовки** — `map[string]string`, как у `DialEarly`: порядок и повторы не нужны.
+  - **`DatagramConn`** (делает сервер, в cronet-go) по образцу `BidirectionalConn`, под `N.PacketConn` ядра:
+
+```go
+func (e StreamEngine) CreateDatagramConn(ctx context.Context, url string, headers map[string]string) *DatagramConn
+// Ответ ноды: 200, 429 (предел), 503 (повтор позже) или ответ сайта (флаг выключен,
+// старая нода: клиент держит UoT в этой сети); ошибка — OnFailed/OnCanceled/контекст.
+func (c *DatagramConn) WaitReady(ctx context.Context) (status int, headers map[string]string, err error)
+// В буфер вызывающего, без выделения на пакет; обрезанное — ErrDatagramTruncated, n = len(b).
+func (c *DatagramConn) ReadDatagram(ctx context.Context, b []byte) (n int, err error)
+// Из нескольких горутин; не блокирует; капсула разрешена (§4.4).
+func (c *DatagramConn) WriteDatagram(b []byte) error
+func (c *DatagramConn) MaxPayload() int
+func (c *DatagramConn) SetReadDeadline(t time.Time) error
+func (c *DatagramConn) SetWriteDeadline(t time.Time) error
+func (c *DatagramConn) Dropped() (receive, capsules uint64) // очередь приёма полна; капсулы старше 100 мс
+func (c *DatagramConn) Done() <-chan struct{}
+func (c *DatagramConn) Err() error
+func (c *DatagramConn) Close() error // Cancel
+```
+
+    Очередь приёма ограничена (256): при переполнении новые датаграммы отбрасываются и считаются. В `naive_client.go`
+    у клиента остаются второй движок (создаётся лениво, при первом UDP-сокете строки с `udp=1`), заголовки
+    авторизации и адрес §3.2.
 - **Ядро:** `ListenPacket` исходящего naive возвращает `net.PacketConn` поверх этого соединения, если строка несёт
   `udp=1` и проба этой сети прошла (§9.4); иначе — UoT, как сейчас. `WriteTo` дописывает адрес или имя (§3.2) и зовёт
   `send`, разрешая капсулу по §4.4; чтение разбирает адрес источника.
