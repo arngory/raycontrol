@@ -4,6 +4,8 @@ package perimeter
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"net"
 	"net/netip"
 	"os"
@@ -268,7 +270,7 @@ func TestNetnsSlotChange(t *testing.T) {
 	t.Run("the old flow's socket to the new port", func(t *testing.T) {
 		const msg = "4: the old flow's socket to the new port"
 		sock := netip.MustParseAddrPort(flow.LocalAddr().String())
-		failed := insertFailed(t)
+		failed, counted := insertFailed(t)
 		answered := ask(t, flow, cur, msg, dropped)
 		if at, reached := seen(msg); answered || reached {
 			// Not as §11 says: told in the run's output, not passed.
@@ -279,8 +281,8 @@ func TestNetnsSlotChange(t *testing.T) {
 				"the socket being %v, and it answered %v: the input hook's null SNAT binding gave the clashing "+
 				"reply tuple another client port", unix.ByteSliceToString(u.Release[:]), at, sock, answered)
 		}
-		if n := insertFailed(t) - failed; n != 1 {
-			t.Errorf("insert_failed grew by %d, want 1: not dropped at the entry's confirmation", n)
+		if n, _ := insertFailed(t); counted && n-failed != 1 {
+			t.Errorf("insert_failed grew by %d, want 1: not dropped at the entry's confirmation", n-failed)
 		}
 		es := entries(t, unix.AF_INET, false)
 		if e, ok := findEntry(es, func(e ctEntry) bool { return e.Orig.Src == sock && e.Orig.Dst.Port() == cur }); ok {
@@ -306,10 +308,15 @@ func inRot(t *testing.T, p uint16) bool {
 }
 
 // insertFailed is the namespace's conntrack insert_failed, all CPUs: an
-// entry not confirmed because one in the table already has its tuple.
-func insertFailed(t *testing.T) uint64 {
+// entry not confirmed because one in the table already has its tuple. Not
+// counted (ok false) on a kernel without conntrack's files in /proc
+// (CONFIG_NF_CONNTRACK_PROCFS off, as on CI's runners).
+func insertFailed(t *testing.T) (n uint64, ok bool) {
 	t.Helper()
 	b, err := os.ReadFile("/proc/net/stat/nf_conntrack")
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, false
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,5 +342,5 @@ func insertFailed(t *testing.T) uint64 {
 		}
 		sum += n
 	}
-	return sum
+	return sum, true
 }
