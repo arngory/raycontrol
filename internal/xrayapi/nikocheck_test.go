@@ -217,8 +217,12 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 	restore()
 	for _, c := range configs {
 		b, _ := os.ReadFile(c)
-		if want := filepath.Base(filepath.Dir(c)); (want == "front" || want == "hy2o" || want == "hy2m") != strings.Contains(string(b), `"cid_key_file"`) {
-			t.Errorf("%s: cid_key_file where it does not belong, or none where it does:\n%s", strings.TrimPrefix(c, dir), b)
+		option := `"cid_key_file"` // a Hysteria2 backend's: its label's key
+		if filepath.Base(filepath.Dir(c)) == "front" {
+			option = `"cid_keys_file"` // the front's: its backends' labels' keys
+		}
+		if want := filepath.Base(filepath.Dir(c)); (want == "front" || want == "hy2o" || want == "hy2m") != strings.Contains(string(b), option) {
+			t.Errorf("%s: %s where it does not belong, or none where it does:\n%s", strings.TrimPrefix(c, dir), option, b)
 		}
 		out, err := exec.Command(niko, "check", "-c", c).CombinedOutput()
 		if err != nil || strings.TrimSpace(string(out)) != "ok" {

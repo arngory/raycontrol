@@ -601,9 +601,9 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		// changed (niko-server v0.18.0, spec/quic-cid-route-v1.md).
 		CIDLabel int `json:"cid_label,omitempty"`
 	}
-	// The front routes QUIC by connection ID with the node's secret, from
-	// niko-server v0.18.0 (frontCID); rayd's own QUIC servers make
-	// labelled IDs whatever the front reads (cid).
+	// The front routes QUIC by connection ID with its backends' labels'
+	// keys, from niko-server v0.18.0 (frontCID); rayd's own QUIC servers
+	// make labelled IDs whatever the front reads (cid).
 	cid := len(m.QUICCIDKey) == cidkey.SecretLen
 	frontCID := cid && NikoServerAtLeast(NikoCIDRouteFrom)
 	label := func(s Service) int {
@@ -990,17 +990,23 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				listen = append(listen, "[::]:443")
 			}
 			udp := map[string]any{"listen": listen, "idle": FrontUDPIdle.String(), "routes": udpRoutes}
-			if frontCID {
-				// The node's secret of routable connection IDs: the front
-				// derives every label's key from it. A file of the front's
-				// group, as front.json. The front reads it at its start; a
-				// new secret (a database restored from elsewhere) restarts
-				// it, and the backends with it, whose labels' keys changed
-				// too: none is left on another key.
-				key := path.Join(p.Rendered, "front", QUICCIDKey)
-				udp["cid_key_file"] = key
-				files = append(files, File{Path: key, Mode: 0o640, Group: GroupName("front"),
-					Content: []byte(hex.EncodeToString(m.QUICCIDKey) + "\n"), Service: "front"})
+			var labels []int
+			for _, b := range backends {
+				if b.CIDLabel != 0 {
+					labels = append(labels, b.CIDLabel)
+				}
+			}
+			if keys := frontCIDKeys(m.QUICCIDKey, labels); frontCID && keys != nil {
+				// The keys of the labels of the backends the front routes,
+				// never the node's secret (with it the front could make
+				// the key of any label, those to come too). A file of the
+				// front's group, as front.json. The front reads it at its
+				// start; a new secret (a database restored from elsewhere)
+				// restarts it, and the backends with it, whose labels'
+				// keys changed too: none is left on another key.
+				file := path.Join(p.Rendered, "front", FrontQUICCIDKeys)
+				udp["cid_keys_file"] = file
+				files = append(files, File{Path: file, Mode: 0o640, Group: GroupName("front"), Content: keys, Service: "front"})
 			}
 			front["udp"] = udp
 		}
@@ -2072,11 +2078,30 @@ func naiveFiles(s Service, m Model, p Paths) ([]File, error) {
 	return files, nil
 }
 
-// QUICCIDKey is the file of a key of routable connection IDs
-// (spec/quic-cid-route-v1.md): among the front's files the node's secret
-// (32 bytes, hex), among a Hysteria2 service's its label's key (16 bytes,
-// hex, cidkey.LabelKey).
+// QUICCIDKey is a Hysteria2 service's file of its label's key of
+// routable connection IDs (spec/quic-cid-route-v1.md): 16 bytes, hex
+// (cidkey.LabelKey).
 const QUICCIDKey = "quic-cid.key"
+
+// FrontQUICCIDKeys is the front's file of the keys of its backends'
+// labels: a line "<label> <16 bytes in hex>" each, by label.
+const FrontQUICCIDKeys = "quic-cid.keys"
+
+// frontCIDKeys is the content of FrontQUICCIDKeys for the labels of the
+// backends the front has: their keys from the node's secret; nil with no
+// label or no secret.
+func frontCIDKeys(secret []byte, labels []int) []byte {
+	slices.Sort(labels)
+	var out []byte
+	for _, l := range slices.Compact(labels) {
+		k, err := cidkey.LabelKey(secret, l)
+		if err != nil {
+			return nil
+		}
+		out = append(out, fmt.Sprintf("%d %s\n", l, hex.EncodeToString(k))...)
+	}
+	return out
+}
 
 // NaiveQUICCID is a naive service's file of its label and the label's key
 // of routable connection IDs: "<label> <16 bytes in hex>".

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/arngory/raycontrol/internal/quiccid/cidkey"
 )
@@ -158,6 +159,60 @@ func TestAhead(t *testing.T) {
 	}
 	if g.Ahead([]byte{1, 2, 3}) {
 		t.Fatal("3 bytes")
+	}
+}
+
+// The counter starts from the clock: 4096 a second, a random offset
+// within the second, modulo 2^40. A process after another starts past the
+// IDs the one before issued below 4096 a second, so they are neither ahead
+// of it nor issued again.
+func TestStart(t *testing.T) {
+	const mask = 1<<counterBits - 1
+	key := labelKey(t, 2, 7)
+	c, _ := NewCodec(key)
+	t0 := time.Unix(1794844800, 0) // 2026-11-16
+	for range 100 {
+		g, _ := newGeneratorAt(key, 7, t0)
+		if d := (g.next.Load() - uint64(t0.Unix())<<12) & mask; d > 4095 {
+			t.Fatalf("start %d past the clock's second", d)
+		}
+	}
+	if start(t0, 0xffff) != (uint64(t0.Unix())<<12+0xfff)&mask {
+		t.Fatal("the random offset past 4095")
+	}
+	g, _ := NewGenerator(key, 7)
+	if now := uint64(time.Now().Unix()) << 12; (g.next.Load()-now)&mask > 2*4096 && (now-g.next.Load())&mask > 2*4096 {
+		t.Fatal("NewGenerator does not start from the clock")
+	}
+	// Started two seconds apart, the first 4096 IDs of each are apart.
+	a, _ := newGeneratorAt(key, 7, t0)
+	b, _ := newGeneratorAt(key, 7, t0.Add(2*time.Second))
+	seen := map[string]bool{}
+	for range 4096 {
+		id, _ := a.GenerateConnectionID()
+		seen[string(id.Bytes())] = true
+	}
+	for range 4096 {
+		if id, _ := b.GenerateConnectionID(); seen[string(id.Bytes())] {
+			t.Fatalf("%v: issued by both", id)
+		}
+	}
+	// A process that ran 1000 s and issued 1000 IDs a second: none of its
+	// IDs is ahead of the one started after it.
+	old, _ := newGeneratorAt(key, 7, t0)
+	first := old.next.Load()
+	fresh, _ := newGeneratorAt(key, 7, t0.Add(1000*time.Second))
+	for _, d := range []uint64{1, 2, 500000, 1000*1000 - 1, 1000 * 1000} {
+		if id := c.Encode(7, (first+d)&mask); fresh.Ahead(id[:]) {
+			t.Fatalf("the old process's ID +%d is ahead of the new one", d)
+		}
+	}
+	// The counter wraps: a start near 2^40 counts on past 0.
+	w, _ := newGeneratorAt(key, 7, time.Unix(int64(mask>>12), 0))
+	w.next.Store(mask)
+	zero := c.Encode(7, 0)
+	if id, _ := w.GenerateConnectionID(); !bytes.Equal(id.Bytes(), zero[:]) {
+		t.Fatal("no wrap at 2^40")
 	}
 }
 

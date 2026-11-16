@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"path"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/arngory/raycontrol/internal/provision"
@@ -19,12 +22,13 @@ import (
 // Routable connection IDs (spec/quic-cid-route-v1.md): one secret for the
 // node, made once; each QUIC service's label is its ID, and each label has
 // its own key. rayd's naive-quic gets its label and its key in a file of
-// its own whatever the front; the front (udp.cid_key_file, the secret;
-// backends.*.cid_label) and the Hysteria2 backends (options.cid_key_file,
-// their label's key; options.cid_label) only from niko-server v0.18.0,
-// which reads them. The secret is in the front's file and nowhere else, a
-// label's key in its service's file and nowhere else. None of them is
-// read at the start only: a new secret restarts every process of them.
+// its own whatever the front; the front (udp.cid_keys_file, the keys of its
+// backends' labels; backends.*.cid_label) and the Hysteria2 backends
+// (options.cid_key_file, their label's key; options.cid_label) only from
+// niko-server v0.18.0, which reads them. A label's key is in its service's
+// file and the front's, and nowhere else; the secret is in none. None of
+// them is read at the start only: a new secret restarts every process of
+// them.
 func TestQUICCIDRender(t *testing.T) {
 	ctx := context.Background()
 	st := node(t)
@@ -61,15 +65,24 @@ func TestQUICCIDRender(t *testing.T) {
 		}
 		return hex.EncodeToString(k)
 	}
+	// The front's file: the keys of its backends' labels, by label.
+	frontKeys := path.Join(p.Rendered, "front", render.FrontQUICCIDKeys)
+	byLabel := []string{"nv", "dh", "hm", "ho"}
+	slices.SortFunc(byLabel, func(a, b string) int { return ids[a] - ids[b] })
+	var lines strings.Builder
+	for _, name := range byLabel {
+		fmt.Fprintf(&lines, "%d %s\n", ids[name], labelKey(name))
+	}
+	hmFile, hoFile := path.Join(p.Rendered, "hm", render.QUICCIDKey), path.Join(p.Rendered, "ho", render.QUICCIDKey)
 	keyFiles := map[string]string{ // path: content
-		path.Join(p.Rendered, "front", render.QUICCIDKey): h + "\n",
-		path.Join(p.Rendered, "hm", render.QUICCIDKey):    labelKey("hm") + "\n",
-		path.Join(p.Rendered, "ho", render.QUICCIDKey):    labelKey("ho") + "\n",
+		frontKeys: lines.String(),
+		hmFile:    labelKey("hm") + "\n",
+		hoFile:    labelKey("ho") + "\n",
 	}
 	naiveFile := path.Join(p.Rendered, "nv", render.NaiveQUICCID)
-	keyOf := map[string]string{h: path.Join(p.Rendered, "front", render.QUICCIDKey), labelKey("nv"): naiveFile,
-		labelKey("hm"): path.Join(p.Rendered, "hm", render.QUICCIDKey), labelKey("ho"): path.Join(p.Rendered, "ho", render.QUICCIDKey),
-		labelKey("dh"): ""} // rayd derives DoH3's itself
+	// The files each label's key may be in; DoH3's rayd derives itself.
+	homes := map[string][]string{labelKey("nv"): {naiveFile, frontKeys}, labelKey("hm"): {hmFile, frontKeys},
+		labelKey("ho"): {hoFile, frontKeys}, labelKey("dh"): {frontKeys}}
 	groups := map[string]string{"front": "niko-front", "hm": "niko-hm", "ho": "niko-ho", "nv": "niko-nv"}
 
 	for _, tag := range []string{"v0.17.1", "v0.18.0"} {
@@ -87,12 +100,14 @@ func TestQUICCIDRender(t *testing.T) {
 		byPath := map[string]render.File{}
 		for _, f := range files {
 			byPath[f.Path] = f
-			for k, home := range keyOf {
-				if f.Path != home && bytes.Contains(f.Content, []byte(k)) {
-					t.Fatalf("%s: a key of %s is in %s", tag, home, f.Path)
+			for k, allowed := range homes {
+				if !slices.Contains(allowed, f.Path) && bytes.Contains(f.Content, []byte(k)) {
+					t.Fatalf("%s: a key of %s is in %s", tag, allowed[0], f.Path)
 				}
 			}
-			if f.Path != keyOf[h] && bytes.Contains(f.Content, secret) {
+			// The secret stays in the store and rayd: no process of the
+			// data plane has it, the front's included.
+			if bytes.Contains(f.Content, []byte(h)) || bytes.Contains(f.Content, secret) {
 				t.Fatalf("%s: the secret is in %s", tag, f.Path)
 			}
 		}
@@ -117,7 +132,7 @@ func TestQUICCIDRender(t *testing.T) {
 		}
 		var front struct {
 			UDP struct {
-				CIDKeyFile string `json:"cid_key_file"`
+				CIDKeysFile string `json:"cid_keys_file"`
 			} `json:"udp"`
 			Backends map[string]struct {
 				CIDLabel int `json:"cid_label"`
@@ -135,8 +150,8 @@ func TestQUICCIDRender(t *testing.T) {
 				t.Errorf("%s: backend %s label %d, want %d", tag, name, b.CIDLabel, want[name])
 			}
 		}
-		if wantKey := map[bool]string{true: path.Join(p.Rendered, "front", render.QUICCIDKey)}[on]; front.UDP.CIDKeyFile != wantKey {
-			t.Errorf("%s: udp.cid_key_file %q", tag, front.UDP.CIDKeyFile)
+		if wantKey := map[bool]string{true: frontKeys}[on]; front.UDP.CIDKeysFile != wantKey {
+			t.Errorf("%s: udp.cid_keys_file %q", tag, front.UDP.CIDKeysFile)
 		}
 		for _, hy := range []string{"hm", "ho"} {
 			var backend struct {
