@@ -742,8 +742,9 @@ func TestUDPPlaces(t *testing.T) {
 	if st := h.UDPStats(); st.Requests != 2 || st.Refused != 1 {
 		t.Fatalf("%+v", st)
 	}
-	// Quiet past quietAfter, the request gives way to a new one, and is
-	// reset.
+	// Quiet past quietAfter, the request gives way to a new one, and ends
+	// cleanly, as an idle one does: the client must not take it for a
+	// failure of the path.
 	h.lim.mu.Lock()
 	for s := range h.lim.users["u5"].slots {
 		if s.stream != nil {
@@ -754,8 +755,11 @@ func TestUDPPlaces(t *testing.T) {
 	if q := c.open(udpRequestOf{}); q.resp.StatusCode != http.StatusOK {
 		t.Fatalf("with a quiet one: %s", q.resp.Status)
 	}
-	if err := q.ended(); !isReset(err) {
+	if err := q.ended(); err != nil {
 		t.Fatalf("the quiet one ended with %v", err)
+	}
+	if got := h.Refused()["u5"][refusedEvicted]; got != 1 {
+		t.Fatalf("evictions %v", h.Refused())
 	}
 }
 

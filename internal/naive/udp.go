@@ -316,9 +316,9 @@ func (d *udpRequest) fail(err error) {
 
 // carryUDP carries a request's datagrams until the client ends it, the
 // idle time runs out, the stream fails or ctx is done, and ends the
-// stream: cleanly at the client's end and the idle time, reset otherwise
-// (the user revoked or the request evicted, a capsule that cannot be read,
-// a client gone or not reading). Nothing reads or writes the stream once
+// stream: cleanly at the client's end, the idle time and an eviction for a
+// new request, reset otherwise (the user revoked, a capsule that cannot be
+// read, a client gone or not reading). Nothing reads or writes the stream once
 // it returns, and nothing of the request is left waiting: its queues are
 // empty, and the connection's sender is all that may still send one of its
 // datagrams.
@@ -364,7 +364,8 @@ loop:
 			reset = true
 			break loop
 		case <-ctx.Done():
-			reset = true
+			// Revoked, gone or shut down; an eviction ends cleanly.
+			reset = !errors.Is(context.Cause(ctx), errEvicted)
 			break loop
 		case <-tick.C:
 			if mono()-slot.last.Load() > int64(idle) {
@@ -400,7 +401,10 @@ loop:
 			left = false
 		}
 	}
-	if reset || context.Cause(ctx) != nil {
+	// A quiet request that gave way to a new one ends as an idle one does:
+	// cleanly, so the client takes it for the end of the socket, not for a
+	// failure of the path (§3.2). Revocation and the rest reset.
+	if reset || (context.Cause(ctx) != nil && !errors.Is(context.Cause(ctx), errEvicted)) {
 		st.Reset()
 	} else {
 		_ = st.Close()
