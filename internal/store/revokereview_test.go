@@ -244,3 +244,39 @@ func TestCarryRevocationsRenewOnce(t *testing.T) {
 		t.Errorf("renewals %q", lines)
 	}
 }
+
+// A revocation with overlap on the node whose rotation has switched, and a
+// scheduled next published since: no longer the rotation that revocation
+// began, so a restore gives the user new credentials, as for one without
+// overlap (overlapInFlight; the mutation run's M7).
+func TestCarryRestoreOverlapSwitchedRenews(t *testing.T) {
+	ctx := context.Background()
+	f := newRestoreFix(t, nil)
+	r := DefaultRotation
+	s := f.open(t, f.current)
+	must(t, s.SetRotation(ctx, r))
+	t1 := time.Now().Truncate(time.Second).Add(time.Minute)
+	s.SetClock(func() time.Time { return t1 })
+	rev, err := s.RevokeDeviceOverlap(ctx, f.phones["alice"].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RotateCredentials(ctx, rev.SwitchAt, r, NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RotateCredentials(ctx, rev.SwitchAt.Add(r.Period-r.Lead), r, NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	now := credRowsOf(t, s.db)["alice"][f.naive]
+	if now.Next == "" || now.Rotated != rev.SwitchAt.Unix() {
+		t.Fatalf("no scheduled next after the switch: %+v", now)
+	}
+	s.Close()
+	res, err := CarryRestore(ctx, f.backup, f.current, "")
+	if err != nil || len(res.Carried) != 1 || res.Carried[0].Rotating {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if got := credRowsAt(t, f.backup)["alice"][f.naive]; got.Secret == now.Secret || got.Next != "" {
+		t.Errorf("alice: %+v, the node's %+v", got, now)
+	}
+}
