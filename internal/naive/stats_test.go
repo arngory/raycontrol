@@ -111,3 +111,41 @@ func TestStatsRefusedLate(t *testing.T) {
 		t.Fatalf("%+v %v", r.Limits, err)
 	}
 }
+
+// The datagram requests' counts (naive-udp-v1 §7) reach rayd's reader of
+// the line as naive gives them, the reasons of the dropped ones too; none
+// without udp=on. DropReasons names every reason UDPStats may give.
+func TestStatsUDP(t *testing.T) {
+	dir := t.TempDir()
+	users := filepath.Join(dir, "users.json")
+	if err := os.WriteFile(users, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	u := &naive.Users{Path: users}
+	sock := filepath.Join(dir, "stats.sock")
+	if err := u.ServeStats(t.Context(), sock, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := traffic.ReadLine(t.Context(), sock); err != nil || r.UDP != nil {
+		t.Fatalf("without udp=on: %+v %v", r.UDP, err)
+	}
+	want := naive.UDPStats{Requests: 7, Refused: 2, In: 40, Out: 38, CapsulesIn: 3, CapsulesOut: 1, Dropped: 5,
+		DroppedBy: map[string]int64{"denied": 4, "write": 1}}
+	u.SetUDP(func() naive.UDPStats { return want })
+	r, err := traffic.ReadLine(t.Context(), sock)
+	if err != nil || r.UDP == nil {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if got := *r.UDP; got.Requests != 7 || got.Refused != 2 || got.In != 40 || got.Out != 38 || got.CapsulesIn != 3 || got.CapsulesOut != 1 ||
+		got.Dropped != 5 || len(got.DroppedBy) != 2 || got.DroppedBy["denied"] != 4 || got.DroppedBy["write"] != 1 {
+		t.Fatalf("read %+v", got)
+	}
+	reasons := naive.DropReasons()
+	if len(reasons) != 10 || reasons[0] != "bad" || reasons[9] != "write" {
+		t.Fatalf("reasons %v", reasons)
+	}
+	reasons[0] = "changed"
+	if naive.DropReasons()[0] != "bad" {
+		t.Fatal("DropReasons gave its own list away")
+	}
+}

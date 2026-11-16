@@ -153,6 +153,8 @@ func TestHandsOff(t *testing.T) {
 		{false, "v0.19.0", "v0.19.0", false}, // -force, same version
 		{false, "v0.18.1", "v0.19.0", false}, // going back: this rayctl knows the newer node
 		{false, "v0.19.0", "v0.18.1", false}, // the target is this rayctl
+		{false, "v0.30.2", "dev", false},     // before v0.31.0 over a dev build: this rayctl renews (R4-43)
+		{false, "v0.31.1", "dev", true},
 	} {
 		if got := handsOff(c.refused, c.target, c.installed); got != c.want {
 			t.Errorf("handsOff(%v, %s, %s) = %v", c.refused, c.target, c.installed, got)

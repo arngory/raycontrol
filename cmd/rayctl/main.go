@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -33,6 +34,7 @@ import (
 	"github.com/arngory/raycontrol/internal/hostcheck"
 	"github.com/arngory/raycontrol/internal/nodeupdate"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/release"
 	"github.com/arngory/raycontrol/internal/roots"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -92,6 +94,12 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             zone=SPARE (a spare becomes the main zone, the main one leaves);
                                             slipstream: max_connections=16..1024, device_connections=1..16
                                             (0: the defaults, 256 and 4; the server restarts)
+  service peer-keys [-names] NAME           yggdrasil: the public keys a peer of your own (peers=) lets in
+                                            with AllowedPublicKeys, as HJSON for its config: the node's,
+                                            then each user's and device's, labelled as in the node's users
+                                            file (-names: with the users' and devices' names, which then
+                                            sit on a host outside the node); they change with devices,
+                                            users and credential switches
   service cert SITE -chain F -key F [-force]
                                             a certificate of your own for the site and the services under
                                             it, in place of ACME's (root on the node only); the links
@@ -118,7 +126,13 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   device list [USER]
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
-  device revoke ID                          a device, or an invite not yet used
+  device revoke [-overlap] ID               a device, or an invite not yet used; a device's user gets new
+                                            credentials at once, the user's other devices cut until they
+                                            fetch their subscription. -overlap, for a device given away
+                                            or broken, not stolen: they rotate instead, the next ones
+                                            published now, the switch after -cred-lead (3 days), the old
+                                            ones, which the device knew, accepted -cred-grace (2 days)
+                                            more; the other devices move over without a cut
   device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv2|rcinv1]
                                             a one-time invite: the client registers the device itself
                                             through the remote API (service add api api); rcinv2 is
@@ -132,9 +146,12 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             reaches it, whether chosen at install (-ports) or random,
                                             the current port of each rotating range
   relay add NAME ADDRESS | list | remove NAME   relays in front of the node (relay-v1): one address
-  relay bundle [-exit IP] [-ssh-port N] [-admin CIDRS] [-o FILE] NAME   the relay host's bundle (new certificate, new SPA keys)
+                                            each, reaching the service ports without SPA
+  relay bundle [-exit IP] [-ssh-port N] [-admin CIDRS] [-o FILE] NAME   the relay host's bundle: new certificate, new SPA keys (root only)
   relay set [-ssh-port N] [-admin CIDRS] NAME   the relay host's SSH access, without a new bundle
-                                            each, reaching the service ports without SPA; root only
+  relay ports NAME                          every port the relay host takes, for a provider's firewall
+                                            in front of it: its SSH, SPA range and probe endpoint, and
+                                            the exit's ports it forwards (relay bundle prints them too)
   dns [status]                              the DNS provider and the records the node needs
   dns cloudflare [-token-file F]            records and wildcard certificates through Cloudflare
                                             (token asked for without echo when no file is given)
@@ -218,8 +235,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   remote enroll [-o FILE] [-carrier udp|tls|tcp|auto] [-addr A] [-pin PIN] INVITE|@FILE|-
       register a device from an invite (RCINV2:... or rcinv1:...): a new client
       key, SPA, then the API; writes the device file (bundle and key, mode 0600)
-  -remote FILE <command>                    status, node, user, service, device, audit, admin, dns, metrics, summary,
-                                            app-mirror, debug, version run against the node through its API
+  -remote FILE <command>                    status, node, user, service, device, audit, admin, ports, relay
+                                            list|ports|set, dns, metrics, summary, app-mirror, debug, version run
+                                            against the node through its API
   -remote FILE remote whoami|rotate         the device; a new client key for it
 `
 
@@ -840,6 +858,8 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 				}
 			}
 		})
+	case "peer-keys":
+		return c.peerKeys(ctx, args)
 	case "cert":
 		fs := flag.NewFlagSet("service cert", flag.ContinueOnError)
 		chain := fs.String("chain", "", "certificate chain, PEM, leaf first")
@@ -1321,35 +1341,135 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 				r.Msg.Device.Id, r.Msg.Device.User, r.Msg.Device.Name, r.Msg.Bundle)
 		})
 	case "revoke":
-		if err := need(args, 1); err != nil {
-			return err
-		}
-		r, err := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: args[0]}))
+		fs := flag.NewFlagSet("device revoke", flag.ContinueOnError)
+		overlap := fs.Bool("overlap", false, "rotate the user's credentials with overlap instead of new ones at once (a device given away or broken, not stolen)")
+		id, err := oneArg(fs, args)
 		if err != nil {
 			return err
 		}
-		return c.print(r.Msg, func(w *tabwriter.Writer) { fmt.Fprint(w, revokeText(args[0], r.Msg)) })
+		if *overlap {
+			// A node before v0.31.0 reads no overlap and would revoke
+			// without it, cutting the user's other devices: refused here,
+			// before anything is revoked. Not an invite: any node withdraws
+			// it alike, and no credentials change.
+			st, err := c.c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
+			if err != nil {
+				return err
+			}
+			if err := overlapKnown(st.Msg.Version); err != nil && !c.isInvite(ctx, id) {
+				return err
+			}
+		}
+		r, err := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: id, Overlap: *overlap}))
+		if err != nil {
+			return err
+		}
+		if c.json {
+			// What the text says beside the answer, for -json on stderr.
+			if note := revokeNote(*overlap, r.Msg); note != "" {
+				fmt.Fprint(os.Stderr, note)
+			}
+		}
+		if *overlap && r.Msg.SwitchAt != 0 {
+			// The user's last device: nothing else needed the overlap.
+			if devs, err := c.c.ListDevices(ctx, connect.NewRequest(&nodev1.ListDevicesRequest{User: r.Msg.User})); err == nil &&
+				!slices.ContainsFunc(devs.Msg.Devices, func(d *nodev1.Device) bool { return d.RevokedAt == 0 }) {
+				fmt.Fprint(os.Stderr, lastDeviceWarning(id, r.Msg))
+			}
+		}
+		return c.print(r.Msg, func(w *tabwriter.Writer) { fmt.Fprint(w, revokeText(id, *overlap, r.Msg)) })
 	}
 	return errUsage
 }
 
+// oneArg parses the flags of fs before or after its one argument, and
+// returns the argument.
+func oneArg(fs *flag.FlagSet, args []string) (string, error) {
+	if err := fs.Parse(args); err != nil || fs.NArg() == 0 {
+		return "", errUsage
+	}
+	arg := fs.Arg(0)
+	if err := fs.Parse(fs.Args()[1:]); err != nil || fs.NArg() != 0 {
+		return "", errUsage
+	}
+	return arg, nil
+}
+
+// overlapSince is the first release whose node reads RevokeDeviceRequest.
+// overlap.
+const overlapSince = "v0.31.0"
+
+// overlapKnown refuses -overlap for a node of a release before
+// overlapSince: it would revoke without overlap. A build that is no release
+// (dev) is taken at its word; revokeNote says what it did.
+func overlapKnown(version string) error {
+	if release.IsRelease(version) && release.Newer(overlapSince, version) {
+		return fmt.Errorf("the node runs raycontrol %s, which knows no -overlap (%s has it): it would revoke without it,\n"+
+			"cutting the user's other devices at once. Nothing revoked: update the node, or revoke without -overlap", version, overlapSince)
+	}
+	return nil
+}
+
+// isInvite reports whether id is an invite not used yet on the node (an
+// error: no).
+func (c *cli) isInvite(ctx context.Context, id string) bool {
+	l, err := c.c.ListDevices(ctx, connect.NewRequest(&nodev1.ListDevicesRequest{}))
+	return err == nil && slices.ContainsFunc(l.Msg.Invites, func(inv *nodev1.Invite) bool { return inv.Id == id })
+}
+
+// revokeNote is what revokeText says besides the answer's fields: a node
+// that revoked without overlap though it was asked for.
+func revokeNote(overlap bool, r *nodev1.RevokeDeviceResponse) string {
+	if overlap && !r.Invite && !r.Already && r.User != "" && r.Credentials > 0 && r.SwitchAt == 0 {
+		return "The node is older than v0.31.0: it knows no -overlap, and revoked without it.\n"
+	}
+	return ""
+}
+
+// lastDeviceWarning says that a revocation with overlap left the user no
+// active device: the overlap kept nobody up and only lets the revoked
+// device in until the end of the grace.
+func lastDeviceWarning(id string, r *nodev1.RevokeDeviceResponse) string {
+	return fmt.Sprintf("warning: %s was %s's last active device: the overlap keeps no other device up, and only lets this one\n"+
+		"in until %s; to cut it off now: rayctl user renew %s\n", id, r.User, revokeAt(r.Until), r.User)
+}
+
+// revokeAt is a time of a revocation's answer, in UTC to the minute.
+func revokeAt(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04") + " UTC" }
+
 // revokeText says what a revocation did (R4-36): the user's credentials
 // are new, so the user's other devices are off until their next
-// subscription fetch.
-func revokeText(id string, r *nodev1.RevokeDeviceResponse) string {
+// subscription fetch. With overlap (R4-43) they rotate instead: the other
+// devices move over with their next fetch, and what the device knew stops
+// working at the end of the grace, which it says.
+func revokeText(id string, overlap bool, r *nodev1.RevokeDeviceResponse) string {
 	switch {
 	case r.Invite:
 		return fmt.Sprintf("invite %s withdrawn\n", id)
 	case r.User == "":
 		// A node before v0.27.0: it said nothing, and changed no credentials.
 		return fmt.Sprintf("device %s revoked (the node is older than v0.27.0: the user's credentials stay as they were)\n", id)
+	case r.Already && r.Until != 0:
+		// Revoked with overlap before, its rotation not switched yet.
+		return fmt.Sprintf("device %s (%s/%s) was revoked already, with overlap: nothing changed, and what it knew is still\n"+
+			"accepted until %s. To cut it off now: rayctl user renew %s (the other devices are then cut too,\n"+
+			"until they fetch their subscription).\n", id, r.User, r.Device, revokeAt(r.Until), r.User)
 	case r.Already:
 		return fmt.Sprintf("device %s (%s/%s) was revoked already: nothing changed (rayctl user renew %s gives the user\n"+
 			"other credentials at once)\n", id, r.User, r.Device, r.User)
 	case r.Credentials == 0:
 		return fmt.Sprintf("device %s (%s/%s) revoked; %s has no credentials yet\n", id, r.User, r.Device, r.User)
+	case overlap && r.SwitchAt != 0:
+		at := revokeAt
+		return fmt.Sprintf("device %s (%s/%s) revoked with overlap. %s's credentials rotate (%d credentials): the next ones are\n"+
+			"accepted now, and %s's other devices get them with their next subscription fetch and switch to them\n"+
+			"at %s. The old ones, which the revoked device knew, stop working at %s\n"+
+			"(rayd's rotation runs every 10 minutes: up to 10 minutes later). For a stolen device revoke without\n"+
+			"-overlap; to cut this one off now: rayctl user renew %s (the other devices are then cut too, until\n"+
+			"they fetch their subscription).\n",
+			id, r.User, r.Device, r.User, r.Credentials, r.User, at(r.SwitchAt), at(r.Until), r.User)
 	}
-	return fmt.Sprintf("device %s (%s/%s) revoked. %s's credentials are new (%d credentials): what the device kept stops\n"+
+	return revokeNote(overlap, r) + fmt.Sprintf("device %s (%s/%s) revoked. %s's credentials are new (%d credentials): what the device kept stops\n"+
 		"working once rayd has applied them, in seconds. %s's other devices are cut too, until they fetch\n"+
 		"their subscription: Niko does it by itself at its next connection check (every 10 minutes, 15 to 30 s\n"+
 		"after a network change; a sleeping phone once it wakes), its keys still open the subscription.\n",

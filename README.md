@@ -106,7 +106,7 @@ Nothing is ever sent anywhere by the node; see
 
 ## Build
 
-Go 1.26:
+Go 1.27.4:
 
 ```
 go build ./cmd/...
@@ -167,7 +167,7 @@ raycontrol хранит пользователей и ключи, генерир
   `apply`, адреса администратора, `report` — очищенный отчёт для issue, `backup`/`restore` — копия ноды под парольной
   фразой, `metrics` — счётчики без имён, `uninstall` — полный откат установки по журналу, проверенный сравнением со
   снимком системы). Нода ничего не отправляет наружу сама.
-- **Сборка:** Go 1.26, `go build ./cmd/...`, `go test ./...`; API генерируется `scripts/gen.sh`.
+- **Сборка:** Go 1.27.4, `go build ./cmd/...`, `go test ./...`; API генерируется `scripts/gen.sh`.
 - **Документы:** [docs/](docs/README.md); формат SPA v2 заморожен в [docs/spec/spa-v2.md](docs/spec/spa-v2.md).
 - **v0:** bash-установщик перенесён в [legacy/](legacy/); для новых установок не использовать.
 

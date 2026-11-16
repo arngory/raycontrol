@@ -14,17 +14,18 @@
 | `example.com` | ваш домен |
 | `198.51.100.50` | адрес, с которого вы заходите на сервер по SSH |
 | `u-k3f9-x2qa` | имя пользователя, которое выдаст нода |
-| `v0.27.0` | версия релиза; руководство описывает её и обновление relay по слову ноды из v0.28.0 (§12.4, §12.5) |
+| `v0.31.0` | версия релиза; руководство описывает её |
 
 Команды выполняются на сервере от root, если не сказано иначе. Вывод команд — английский, как его печатают
 программы; значения в примерах (номера портов, имена, даты) у вас будут свои.
 
-> **Статус: что проверено и где.** Руководство сверено с кодом v0.27.0 перед его выпуском (коммит `41274a3`):
-> каждая команда, флаг, путь и строка вывода взяты из исходников. Редакция для v0.25.1 сверялась ещё и с выводом
-> собранных `rayctl` и `rayd`; то, что добавлено для v0.26.0 и v0.27.0, взято из строк формата в коде и из тестов.
-> Обновление relay по слову ноды и ручное обновление в статусе (v0.28.0: §12.3–§12.5) описаны по коду ветки перед
-> выпуском, его модульным тестам и тестам в контейнерах с systemd (CI, задание `relay-host`); на настоящем relay
-> они не запускались.
+> **Статус: что проверено и где.** Руководство сверено с кодом v0.31.0 перед его выпуском (ветка
+> `claude/clever-feynman-w0e2v1` на 16 ноября 2026 года): каждая команда, флаг, путь и строка вывода взяты из
+> исходников. Редакция для v0.25.1 сверялась ещё и с выводом собранных `rayctl` и `rayd`; то, что добавлено для
+> v0.26.0–v0.31.0, взято из строк формата в коде и из тестов. Вывод `rayctl relay ports`, `rayctl relay bundle` (§6.7) и
+> `rayctl service peer-keys` (§8, Yggdrasil) — из теста `TestPeerKeysAndRelayPortsAPI`, запущенного при этой правке от
+> root: настоящий API `rayd` на временной базе, без data plane. Relay (§6.7) и свой пир Yggdrasil (§8) на настоящих
+> хостах **не запускались**.
 >
 > - **Не запускалось на настоящем VPS.** Установка по этому тексту на настоящий Debian 13 при его написании не
 >   выполнялась. В репозитории записана одна установка на настоящий VPS — версий v0.10.1–v0.11.0 (Debian 13,
@@ -38,17 +39,21 @@
 >   `nft flush ruleset`, перезагрузка узла, отчёт, обновление с откатом, резервная копия и восстановление,
 >   удаление со сравнением со снимком системы. Не покрыто: Let's Encrypt, Cloudflare и интернет (сеть теста
 >   закрытая), поэтому REALITY, naive и Yggdrasil там только ставятся — их процессы ждут сертификата.
-> - **CI, остальное:** туннели на настоящих Xray, niko-server и slipstream (`xray`); сертификаты на Pebble,
->   тестовом CA Let's Encrypt, через HTTP-01 и DNS-01 (`acme`); подпись релиза против настоящего minisign
->   (`bootstrap`); периметр и relay в сетевых пространствах имён (`perimeter`); обновление с прежних релизов на
->   Debian 13 (`upgrade`). Cloudflare — на имитации его API. Установка relay скриптом на хост с systemd и
->   обновление relay (`rayctl update` и по слову ноды) в CI не запускаются (§12.4).
+> - **CI, остальное:** туннели на настоящих Xray, niko-server и slipstream, naive за настоящим фронтом под
+>   следующим и прежним именем и UDP naive датаграммами через фронт (`xray`); сертификаты на Pebble, тестовом CA
+>   Let's Encrypt, через HTTP-01 и DNS-01 (`acme`); подпись релиза против настоящего minisign (`bootstrap`);
+>   периметр и relay в сетевых пространствах имён (`perimeter`); обновление с прежних релизов на Debian 13
+>   (`upgrade`); с v0.28.0 — первая установка relay скриптом `bootstrap.sh -relay` и его обновления по слову ноды
+>   с откатами в контейнерах с systemd (Debian 13, `relay-host`). Cloudflare — на имитации его API. Ручной
+>   `rayctl update` на relay отдельным шагом в CI не идёт: по слову ноды работает тот же код (§6.7).
 > - **Interop с клиентом Niko:** тест клиента против ноды без systemd (`rayd serve -supervise`) на Linux, без
->   телефона. По записи в [handoff/SYNC.md](handoff/SYNC.md) (строка T16) он зелёный на выпущенном v0.26.0;
->   для v0.27.0 записи при правке руководства ещё не было.
+>   телефона. По записям в [handoff/SYNC.md](handoff/SYNC.md) он зелёный на выпущенных v0.28.0 (строка T18) и
+>   v0.29.0 (T19, со сменой имени naive); UDP naive датаграммами (v0.30.0) — на кандидате, с ядром клиента, которое
+>   ещё не выпущено (T20). Для v0.31.0 записи при правке руководства ещё не было.
 > - **Проверено руками:** подпись и контрольная сумма опубликованного релиза v0.25.1 (§3) и вывод команд `rayctl`
->   на локальном `rayd` без data plane и без systemd — при редакции для v0.25.1. Подпись v0.26.0 сверена при его
->   выпуске (handoff/SYNC.md, строка T16). v0.27.0 при правке руководства ещё не был опубликован.
+>   на локальном `rayd` без data plane и без systemd — при редакции для v0.25.1. Подпись опубликованного v0.30.0
+>   проверена командой из §3.4 при этой правке (`Trusted comment: raycontrol v0.30.0`); подписи v0.26.0–v0.29.0
+>   сверены при их выпуске (handoff/SYNC.md, строки T16–T19). v0.31.0 при правке ещё не был опубликован.
 > - **Пины сертификата** (§8): по записи в handoff/SYNC.md (T16) interop клиента на выпущенном v0.26.0 прошёл с
 >   пинами из подписки на стенде с сертификатами от Pebble, с обеими сменами ключа; на телефоне — нет.
 > - **Клиент Niko** описан по документам этого репозитория и по сообщениям сессии, которая ведёт клиент; экраны
@@ -85,7 +90,7 @@
 | устройство | телефон или ноутбук пользователя; у каждого свой ключ, отзывается отдельно |
 | приглашение | одноразовая строка или QR, по которой устройство регистрируется само |
 | пакет устройства | строка `rcdev1:…` с ключом устройства: старый способ, без приглашения. «Аварийный пакет» — такой же, для входа по SSH |
-| пакет relay | строка `rcrelay1:…` с ключом relay (§12.4) |
+| пакет relay | строка `rcrelay1:…` с ключом relay (§6.7) |
 | SPA-пакет, стук | одна датаграмма или одно короткое TCP-соединение с подписью устройства; после него нода на время открывает порты адресу отправителя |
 
 Слово «пакет» без уточнения дальше не используется: системные пакеты Debian названы системными, сетевые —
@@ -99,11 +104,11 @@
 |---|---|---|---|---|---|
 | REALITY (`reality`) | да | да, внутри TCP | любой | нет | основной: TCP 443, снаружи — TLS к обычному сайту |
 | Hysteria2 (`hy2-masq`, `hy2-obfs`) | да | да, настоящие датаграммы QUIC | любой | нет | самый быстрый; звонки, игры, WireGuard. Нужен UDP 443 |
-| naive (`naive`) | да | да, внутри потока (с v0.20.0) | любой | да, если включить (§9, §11) | второй TCP-профиль (HTTP/2 и HTTP/3); единственный с ping через ноду |
+| naive (`naive`) | да | да, внутри потока (с v0.20.0); с `udp=on` — ещё и датаграммами HTTP/3 (с v0.30.0, §8) | любой | да, если включить (§9, §11) | второй TCP-профиль (HTTP/2 и HTTP/3); единственный с ping через ноду |
 | DoH (`doh`) | — | — | это и есть DNS | — | резолвер ноды для клиента, по 443 |
-| Yggdrasil (`ygg`) | да, через `inner` | да, через `inner` | как у `inner` | только ping адреса ноды в mesh | запасной путь через публичные пиры; сеть между своими устройствами (§9) |
+| Yggdrasil (`ygg`) | да, через `inner` | да, через `inner` | как у `inner` | только ping адреса ноды в mesh | запасной путь через пиры, публичные или свой (§8); сеть между своими устройствами (§9) |
 | DNS-туннели (`dns`, `mdns`, `slip`) | да, через `inner` | да, но поверх надёжного потока | как у `inner` | нет | аварийный канал, когда закрыто всё, кроме DNS: 0,1–3 Мбит/с |
-| relay | как у профиля за ним | как у профиля | как у профиля | нет | вход через второй хост, когда прямой путь к ноде режется |
+| relay | как у профиля за ним | как у профиля | как у профиля | нет | вход через второй хост, когда прямой путь к ноде режется (§6.7) |
 
 - **`inner`** — внутренняя ступень: Xray, в который приходят DNS-туннели и Yggdrasil. Создаётся сама, отдельно её
   не заводят.
@@ -135,7 +140,7 @@
   - Hysteria2 — около 32 с: 250–300 Мбит/с на ядро. UDP-сервисы упираются в процессор первыми.
   - Проверка хоста предупреждает, если ядер меньше двух.
 - **Диск.** Архив релиза для amd64 — около 57 МБ, распакованный — около 146 МБ (замер по опубликованному v0.25.1;
-  архивы v0.26.0 и v0.27.0 не мерились).
+  архив v0.30.0 на GitHub — 58,5 МБ, распакованные архивы новее v0.25.1 не мерились).
   `rayctl update` держит прежние бинарники для отката, а на время обновления на диске лежат ещё архив и его
   распакованная копия. Проверка хоста отказывает, если в `/usr/local` или `/var/lib` свободно меньше 500 МиБ, и
   предупреждает при меньше 2 ГиБ. База ноды — единицы МБ, журналы ведёт journald.
@@ -435,7 +440,7 @@ echo $SSH_CONNECTION
 ### 3.1. Скачать и прочитать установщик
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/arngory/raycontrol/v0.27.0/install/bootstrap.sh -o bootstrap.sh
+curl -fsSL https://raw.githubusercontent.com/arngory/raycontrol/v0.31.0/install/bootstrap.sh -o bootstrap.sh
 ```
 
 ```bash
@@ -455,12 +460,12 @@ sha256sum bootstrap.sh
 - **Сам скрипт не подписан.** Подписан только релиз — архив, который скрипт скачает. Подлинность скрипта держится
   на трёх вещах: вы берёте его по HTTPS с GitHub, из тега релиза, а не из ветки; вы его читаете; и сумма
   совпадает с этой страницей. Скрипт небольшой, около 400 строк, и запускаете вы его от root — просмотрите его.
-- **Что это значит.** Сумма посчитана для `install/bootstrap.sh` в коде v0.27.0. Этот файл не менялся с v0.16.0:
-  у тегов `v0.25.1` и `v0.26.0` сумма та же.
+- **Что это значит.** Сумма посчитана для `install/bootstrap.sh` в коде v0.31.0. Этот файл не менялся с v0.16.0:
+  у тегов от `v0.25.1` до `v0.30.0` сумма та же.
 - **Если сумма другая:** вы скачали другую версию скрипта (другой тег или ветку) или его подменили по пути. Не
   запускайте, пока не поймёте, какая из причин ваша.
-- **Какой релиз он поставит.** Последний опубликованный, а не обязательно v0.27.0. Ровно v0.27.0 —
-  `RAYCONTROL_VERSION=v0.27.0` перед командой (§3.3). Руководство описывает v0.27.0; в более новом релизе вывод
+- **Какой релиз он поставит.** Последний опубликованный, а не обязательно v0.31.0. Ровно v0.31.0 —
+  `RAYCONTROL_VERSION=v0.31.0` перед командой (§3.3). Руководство описывает v0.31.0; в более новом релизе вывод
   и возможности могут отличаться.
 
 ### 3.2. Сверить ключ подписи
@@ -500,7 +505,7 @@ PUBKEY="RWQBergjLoDHqeme5vyIuIRXJLjTj1EF3jR1nlWBVJO3rWxgy9SZj4bD"
 Если всё сошлось, установщик печатает:
 
 ```
-bootstrap: release v0.27.0, signature verified
+bootstrap: release v0.31.0, signature verified
 ```
 
 Если нет — одну из строк ниже и останавливается, ничего не поставив:
@@ -514,7 +519,10 @@ bootstrap: release v0.27.0, signature verified
 
 **Переменные окружения установщика:**
 
-- `RAYCONTROL_VERSION=v0.27.0` — поставить конкретный релиз, а не последний.
+- `RAYCONTROL_VERSION=v0.31.0` — поставить конкретный релиз, а не последний. Поверх уже стоящей ноды скрипт не
+  ставит релиз старше её (и до v0.31.0, если её `rayd` версии не называет), даже с `-check`: тогда он выходит с 1 и
+  предлагает `rayctl update -version` (назад) или `RAYCONTROL_VERSION=<установленная>` — если «последний» на GitHub
+  оказался старше установленного.
 - `RAYCONTROL_MIRRORS="https://mirror.example/"` — свои префиксы зеркал через пробел. Зеркала используются, только
   когда github.com не отвечает; подпись делает безопасным любое зеркало. По умолчанию — два публичных прокси GitHub.
 - `TMPDIR=/root/tmp` — если `/tmp` смонтирован с `noexec`: установщик запускает `rayctl` из временного каталога.
@@ -532,15 +540,15 @@ mkdir -p /root/rc-release && cd /root/rc-release
 ```
 
 ```bash
-curl -fsSLO https://github.com/arngory/raycontrol/releases/download/v0.27.0/SHA256SUMS
+curl -fsSLO https://github.com/arngory/raycontrol/releases/download/v0.31.0/SHA256SUMS
 ```
 
 ```bash
-curl -fsSLO https://github.com/arngory/raycontrol/releases/download/v0.27.0/SHA256SUMS.minisig
+curl -fsSLO https://github.com/arngory/raycontrol/releases/download/v0.31.0/SHA256SUMS.minisig
 ```
 
 ```bash
-curl -fsSLO https://github.com/arngory/raycontrol/releases/download/v0.27.0/raycontrol-linux-amd64.tar.gz
+curl -fsSLO https://github.com/arngory/raycontrol/releases/download/v0.31.0/raycontrol-linux-amd64.tar.gz
 ```
 
 ```bash
@@ -551,7 +559,7 @@ minisign -Vm SHA256SUMS -P RWQBergjLoDHqeme5vyIuIRXJLjTj1EF3jR1nlWBVJO3rWxgy9SZj
 
 ```
 Signature and comment signature verified
-Trusted comment: raycontrol v0.27.0
+Trusted comment: raycontrol v0.31.0
 ```
 
 ```bash
@@ -565,15 +573,17 @@ raycontrol-linux-amd64.tar.gz: OK
 ```
 
 - **Что это значит.** Подпись покрывает `SHA256SUMS`, а он — архивы. Первая команда доказывает, что список сумм
-  подписан нашим ключом и относится к v0.27.0, вторая — что архив тот самый.
+  подписан нашим ключом и относится к v0.31.0, вторая — что архив тот самый.
 - **Если minisign пишет про другой key id или `Signature verification failed`:** файлы не подписаны нашим ключом.
   Не ставьте их.
 - **Если `sha256sum` пишет `FAILED`:** архив скачался с ошибкой или подменён. Скачайте снова.
 - На arm64 замените в имени архива `amd64` на `arm64`.
 
 Эти две команды с этим ключом выполнены над опубликованным релизом v0.25.1, когда писалась редакция руководства
-для него: вывод был ровно таким, с `v0.25.1` в последней строке подписи. У v0.26.0 подпись и trusted comment
-`raycontrol v0.26.0` сверены при выпуске (handoff/SYNC.md, T16). v0.27.0 при правке ещё не был опубликован.
+для него: вывод был ровно таким, с `v0.25.1` в последней строке подписи. У v0.26.0–v0.29.0 подпись и trusted
+comment сверены при выпуске (handoff/SYNC.md, T16–T19). Над опубликованным v0.30.0 первая команда выполнена при
+этой правке: `Signature and comment signature verified` и `Trusted comment: raycontrol v0.30.0`. v0.31.0 при правке
+ещё не был опубликован.
 
 Эти файлы можно потом отдать ноде для обновления без доступа к GitHub: `rayctl update -from /root/rc-release` (§12).
 Вернитесь в домашний каталог:
@@ -599,7 +609,7 @@ bash bootstrap.sh -check -host 203.0.113.7 -domain example.com -services reality
 **Что вы должны увидеть.** Пример для годного сервера; числа и версии у вас свои:
 
 ```
-bootstrap: release v0.27.0, signature verified
+bootstrap: release v0.31.0, signature verified
 no raycontrol v0 (ray.sh) on this host
 Required: without these the node does not work
   ok    root
@@ -772,7 +782,7 @@ bash bootstrap.sh -host 203.0.113.7 -domain example.com -name "Amsterdam" -cloud
 | `-check` | только проверка хоста (§4) |
 | `-remove-v0` | сначала убрать прежний raycontrol v0 (§4) |
 | `-purge-v0-packages` | то же и удалить его системные пакеты |
-| `-relay ФАЙЛ` | поставить не ноду, а relay перед ней (§12.4) |
+| `-relay ФАЙЛ` | поставить не ноду, а relay перед ней (§6.7) |
 
 #### Свои порты
 
@@ -820,7 +830,7 @@ bash bootstrap.sh -host 203.0.113.7 -domain example.com -cloudflare-token-file /
 
 1. **Зависимости.** Установщик ставит недостающее из curl, openssl, nftables и polkitd и печатает
    `bootstrap: installing …`.
-2. **Релиз.** Скачивание и проверка подписи (§3.3): `bootstrap: release v0.27.0, signature verified`.
+2. **Релиз.** Скачивание и проверка подписи (§3.3): `bootstrap: release v0.31.0, signature verified`.
 3. **Проверка хоста** — тот же вывод, что в §4. При `FAIL` установка останавливается, системные пакеты из шага 1
    удаляются, из raycontrol не ставится ничего.
 4. **Бинарники.** `rayd`, `rayspa` и `rayctl` кладутся в `/usr/local/bin`, data plane — в
@@ -979,7 +989,7 @@ rayctl status
 Что вы должны увидеть (пример):
 
 ```
-version              v0.27.0
+version              v0.31.0
 node                 113f6bdbbcc3792a89c1c839df6c500b
 name                 Amsterdam
 host                 203.0.113.7
@@ -988,14 +998,16 @@ services             9
 active devices       1
 spa ports            [27441 28500 27844]
 egress               blocked: local networks (rayctl egress)
+naive naive          name k2p.example.com
 acme site            ok 2m10s ago
 apply                ok 40s ago
 conn-limit           ok 8s ago: on; nobody at a limit in 15 min
 credential-rotation  ok 2m30s ago
 dns                  ok 2m5s ago
 dns-zone dns         ok 1m50s ago: …
+naive-names          ok 30s ago
 …
-perimeter            ok 5s ago: rayspa follows the perimeter, its table is in (rayspa v0.27.0)
+perimeter            ok 5s ago: rayspa follows the perimeter, its table is in (rayspa v0.31.0)
 …
 tls-roots            ok 40s ago: embedded 91 roots of 2026-11-14; system store not added; no extra file
 …
@@ -1019,13 +1031,15 @@ perimeter table      ok: rayspa runs, its table is in with rayd's snapshot
 | `port53` | UDP 53 рядом с нодой никто не занял |
 | `resolver` | `/etc/resolv.conf` читается службами |
 | `reality-target <сервис>` | чужая цель REALITY жива (только если вы её задали) |
+| `naive <сервис>` | имя сервера naive и, пока смена опубликована, следующее (с v0.29.0, §8, naive) |
+| `naive-names` | фронт обслуживает опубликованное следующее имя каждого naive (§8, naive); только на ноде с naive |
 | `perimeter` | `rayspa` следит за снимками `rayd` и его таблица стоит (так говорит сам `rayspa`). `FAILED` — `rayspa` не связан с `rayd` или его таблица не стоит дольше 90 секунд; `unknown` — `rayspa` старее `rayd` и о таблице не сообщает (§13) |
 | `perimeter table` | таблица в ядре, как её читает `nft`, и чья она (только от root на ноде) |
 | `tls-roots` | каким корням верят свои соединения ноды (§6.4). `FAILED` — эти корни отклонили соединения за последние 12 часов, с последним хостом и причиной (§13) |
 | `ssh port` | только от root на ноде и только когда порты sshd разошлись с портами сервисов `ssh` (§7) |
 | `traffic`, `traffic <сервис>` | счёт трафика пользователей |
 | `conn-limit`, `conntrack` | пределы соединений и таблица соединений |
-| `credential-rotation`, `reality-rotation`, `prune` | плановые смены ключей и чистка |
+| `credential-rotation`, `reality-rotation`, `prune` | плановые смены ключей и имён сервера (REALITY и naive) и чистка |
 | `update`, `auto-update` | проверка и установка обновлений, если включены (§9) |
 
 **Если `rayctl: … connect: no such file or directory` или `connection refused`:** `rayd` не запущен. Смотрите
@@ -1159,6 +1173,546 @@ usermod -aG raycontrol ИМЯ
 `debug on|off`, `egress block|allow`, `conn-limit on|off`, `roots system|file`, `relay bundle`, `service cert`, `service rotate САЙТ`,
 `summary db`. `service cert` — только root с v0.26.0; раньше её могли и члены группы.
 
+### 6.7. Relay: второй вход перед нодой (по желанию)
+
+Этот раздел нужен не всем. Пропустите его, если клиенты доходят до ноды напрямую; вернуться к нему можно в любой
+момент.
+
+> **Не проверено на настоящем хосте.** `bootstrap.sh -relay`, `rayctl update` на relay и обновление relay по слову
+> ноды на настоящем relay ни разу не запускались. В CI с v0.28.0 они идут в контейнерах с systemd (Debian 13,
+> задание `relay-host`): первая установка скриптом, обновление по слову ноды, откаты, отключение питания;
+> пересылка, стук и точка замера — ещё и в сетевых пространствах имён. Держите доступ к консоли провайдера relay,
+> пока ставите и обновляете.
+
+#### 6.7.1. Зачем relay
+
+**Relay** — второй сервер перед нодой. Клиент стучится к нему, а ядро relay пересылает соединения к ноде. Ключей
+сервисов и расшифрованного трафика на relay нет: REALITY, Hysteria2 и naive остаются сквозными от клиента до ноды.
+
+Relay нужен, когда в сети клиента режется сам путь к ноде, а не протокол ([spec/relay-v1.md](spec/relay-v1.md) §1):
+
+- на мобильных сетях TCP к зарубежным хостингам замирает после 16–20 КБ;
+- в режиме белого списка доступны только разрешённые адреса, а UDP 443 и UDP 53 режутся.
+
+Ответ — вход через сервер в стране клиента, лучше в сети (AS) из белого списка, а от него — к ноде за рубежом. Через
+relay идут профили REALITY, Hysteria2, naive и DoH ноды; DNS-туннели и Yggdrasil через relay не ходят, у них свой
+путь. UDP через relay — только на 443: ротации портов через relay нет. Клиент получает relay в подписке и сам решает,
+когда идти через него: например, когда relay отвечает, а нода напрямую нет.
+
+#### 6.7.2. Что нужно
+
+- **Второй VPS с публичным IPv4.** Адрес relay — только IPv4: на IPv6 нода отвечает
+  `relay address …: a relay host is IPv4 for now`. Нода и relay на одном хосте не живут: на хосте ноды установка
+  relay отказывает (`this host is a node (/var/lib/raycontrol/rayd.db): a relay goes on a host of its own`).
+- **Система — Debian 13** (рекомендуется: на нём relay проверяется в CI). Нужны systemd, nftables (его ставит
+  установщик), `systemd-run` и `flock` (util-linux). Замеров памяти и процессора для relay нет: пересылает ядро, а
+  на хосте работают только `rayspa` и точка замера `rayd relay`.
+- **Сервис `api` на ноде** (§8, «Удалённый API»): relay берёт свой периметр через удалённый API ноды. Без него
+  `rayctl relay bundle` отказывает: `the relay takes its perimeter from the remote API: enable the api service first`.
+- **Адрес relay — не в списке администратора ноды.** Иначе он доходил бы до SSH ноды; `rayctl relay add` такой адрес
+  не примет (`… inside the admin prefix …, it would reach SSH`), а `rayctl admin` не примет сеть, в которой лежит
+  relay.
+- **Файрвол провайдера ноды** менять не нужно: relay приходит к ноде на те же порты, что уже открыты (§6.1).
+
+#### 6.7.3. Подготовить хост relay
+
+Зайдите на хост relay по SSH от root и пройдите те шаги §2, которые к нему относятся:
+
+| Шаг | Для relay |
+|---|---|
+| §2.1 обновления, §2.2 перезагрузка | нужны, теми же командами |
+| §2.3 часы | нужны: SPA relay проверяет время так же, как нода, с расхождением не больше 30 секунд |
+| §2.4 порты 443 и 53 | не нужен: на этих портах relay ничего не слушает, пересылает ядро |
+| §2.5 umask и `/etc/resolv.conf` | umask не важен; в `/etc/resolv.conf` нужен рабочий резолвер, чтобы скачать релиз |
+| §2.6 SSH | нужен, и строже, чем для ноды (ниже) |
+
+**SSH на relay.**
+
+- Вход только по ключам, как в §2.6: периметр relay закроет SSH всем, кроме адресов администратора relay, но с этих
+  адресов до sshd доходит любой.
+- **sshd слушает ровно один порт.** Relay открывает один порт SSH, и установка отказывает, если их больше:
+  `sshd is configured for [22 2222]: a relay opens one SSH port; keep one (Port, ListenAddress in sshd_config)`.
+  Сессия установки должна прийти на этот же порт.
+- **Порт по умолчанию — 22.** Если sshd на relay слушает другой, скажите это ноде при выдаче пакета:
+  `rayctl relay bundle -ssh-port 2222 …` (ниже).
+- **Адреса администратора relay — свои,** не адреса ноды. По умолчанию это адрес SSH-сессии, из которой вы
+  запустите `rayctl relay bundle` на ноде. Если на relay вы заходите с другого адреса, задайте его в `-admin`.
+- **Аварийного входа на хост relay нет.** `rayctl knock` к relay не стучится, аварийного пакета устройства у
+  relay нет. Если ваш адрес сменится, замените список на ноде: `rayctl relay set -admin … msk` (§12.4). Нет
+  доступа и к ноде — с консоли провайдера relay: `systemctl stop rayspa && rayspa teardown`. Хост relay тогда
+  открыт и ничего не пересылает, пока rayspa не запустится снова (`systemctl start rayspa` или перезагрузка).
+  Затем, вернув доступ к ноде (§7), — на ней `rayctl relay set -admin … msk` и на relay `systemctl start rayspa`:
+  новые адреса он берёт со следующим снимком периметра, в пределах минуты.
+
+**Проверка хоста (§4) на relay не запускается:** `bootstrap.sh -relay` ставит relay без неё, а то, что нужно relay
+(команды, sshd, пакет relay), проверяет сам `rayctl install -relay` до любых изменений.
+
+#### 6.7.4. Завести relay на ноде
+
+На ноде, от root, **из обычной SSH-сессии с того адреса, с которого будете заходить на relay**:
+
+```bash
+rayctl relay add msk 198.51.100.20
+```
+
+Что вы должны увидеть:
+
+```
+relay msk (198.51.100.20) added: it reaches the service ports without SPA, never SSH
+```
+
+- `msk` — имя relay, любое: по нему клиенты различают relay, а нода ведёт их очередь обновлений. `198.51.100.20` —
+  публичный IPv4 хоста relay.
+- **Что это значит.** Адрес relay теперь доходит до портов сервисов ноды без SPA, постоянно (но не до SSH). Поэтому
+  relay, который больше не нужен или потерян, обязательно убирают с ноды (§6.7.11).
+
+Пакет relay:
+
+```bash
+rayctl relay bundle -o /root/msk.bundle msk
+```
+
+Команда — только для root на ноде. В stderr она печатает, кто будет заходить на хост relay по SSH, и все порты,
+которые надо открыть у провайдера relay (пример — с портами ноды из §5.2):
+
+```
+relay msk: its host's SSH (tcp/22) from 198.51.100.50/32: this SSH session's address (198.51.100.50), the default for a relay with none
+relay msk: a provider's firewall in front of the relay host lets in all of these (rayctl relay ports msk
+lists them again; the exit's ports follow its services):
+PROTO    PORTS        NAME      TO          REACHED BY
+tcp      22           ssh       relay host  the relay's admin addresses; after the knock for SSH devices
+tcp+udp  27097-30998  spa       relay host  everyone
+tcp+udp  30999        probe     relay host  after the knock
+tcp+udp  40100        sub       the exit    after the knock
+tcp      443          reality   the exit    after the knock
+udp      443          hy2-masq  the exit    after the knock
+tcp+udp  443          naive     the exit    after the knock
+tcp      40101        api       the exit    after the knock
+relay msk: a new certificate and new SPA keys for it; the bundle before no longer works, and the
+running relay stops taking its perimeter until the new bundle is installed there. Clients take the new keys
+with their next subscription. A lost relay host still reaches the services from its address: rayctl relay
+remove it. The bundle holds the relay's private key: copy it to the relay host only, then there:
+  bootstrap.sh -relay BUNDLE_FILE
+```
+
+- **Первая строка** — SSH хоста relay: порт, адреса, с которых он открыт, и откуда они взялись (`as given` — из
+  `-admin`; `the relay's own, kept (rayctl relay set changes them)` — у relay уже был список).
+- **Таблица** — все порты хоста relay (с v0.31.0). `TO`: `relay host` — порт самого relay, `the exit` — relay
+  пересылает его на тот же порт ноды. `REACHED BY`: `everyone` — всем (это стук), `after the knock` — только после
+  верного стука. Диапазон SPA (`spa`) и точка замера (`probe`) — свои у relay и новые с каждым пакетом; пересылаемые
+  порты — порты сервисов ноды, кроме SSH, публичных (DNS-туннели) и диапазонов ротации UDP. С Yggdrasil в таблице
+  есть строка `ygg` (tcp/443, тот же порт, что у REALITY): профиль Yggdrasil клиенты через relay не ведут. У SSH
+  написано ещё `after the knock for SSH devices`: периметр relay это допускает, но `rayctl knock` к relay не
+  стучится, так что на деле SSH relay открыт только его адресам администратора.
+- **Если `the relay host's SSH needs admin addresses (-admin): give them, or run from an SSH session`:** вы запустили
+  команду из tmux, screen или с консоли, и адреса сессии нет. Задайте адреса сами:
+  `rayctl relay bundle -admin 198.51.100.50 -o /root/msk.bundle msk` (через запятую; сети — не шире /16 для IPv4 и
+  /48 для IPv6, как у `rayctl admin`).
+- **Если sshd на relay не на 22,** добавьте `-ssh-port 2222`. **Если relay должен пересылать на другой адрес ноды**
+  (нода задана именем или адресов у неё несколько): `-exit 203.0.113.7`.
+- **Каждый `relay bundle` — новый пакет.** Прежний пакет того же relay перестаёт работать сразу: работающий relay
+  теряет связь с нодой, пока на него не поставят новый. `-o` не перезаписывает файл: перед повтором удалите прежний
+  (`shred -u /root/msk.bundle`), иначе команда откажет, не записав пакета. Порт SSH и адреса администратора
+  меняются и без нового пакета: `rayctl relay set` (§12.4).
+- **В пакете relay — его закрытый ключ.** Скопируйте файл **только** на хост relay — со своей машины, через неё, без
+  копии на своём диске (на relay входят только по ключу, §2.6, а ключа к relay на ноде обычно нет):
+
+  ```bash
+  scp -3 root@203.0.113.7:/root/msk.bundle root@198.51.100.20:/root/
+  ```
+
+  Затем удалите его на ноде:
+
+  ```bash
+  shred -u /root/msk.bundle
+  ```
+
+- Таблицу портов в любой момент повторяет `rayctl relay ports msk` (§6.7.6).
+
+#### 6.7.5. Поставить relay на его хост
+
+На хосте relay, от root, из обычной SSH-сессии с адреса администратора relay (не из tmux и не из screen). Скрипт —
+тот же, что для ноды: скачайте его и сверьте сумму и ключ, как в §3.1 и §3.2.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/arngory/raycontrol/v0.31.0/install/bootstrap.sh -o bootstrap.sh
+```
+
+```bash
+RAYCONTROL_VERSION=v0.31.0 bash bootstrap.sh -relay /root/msk.bundle
+```
+
+`RAYCONTROL_VERSION` ставит relay на ту же версию, что у ноды; без него скрипт ставит последний опубликованный
+релиз. Релиз проверяется так же, как для ноды (§3.3): `bootstrap: release v0.31.0, signature verified`. Ставятся
+только `rayspa`, `rayd` и `rayctl`, без data plane. Затем `rayctl install -relay` ставит периметр relay, ждёт, пока
+запустится `rayspa` (до 150 секунд: сначала он может ждать сети), затем первый снимок периметра от ноды (ещё до 45
+секунд) и проверяет, что SSH с вашего адреса после него проходит.
+
+Успех — в конце:
+
+```
+relay msk up: knocks with K_relay open the exit's services through here (exit 203.0.113.7).
+This host's SSH (port 22) is reachable from 198.51.100.50/32, the relay's own admin addresses (rayctl relay set on the exit).
+Its probe endpoint (rayd relay) is on tcp/30999 and udp/30999: a provider's firewall in front of this host lets both through.
+```
+
+- **Что это значит.** Периметр relay закрыл на хосте всё, кроме его SPA, пересылки к ноде после стука, точки замера
+  и SSH с адресов администратора relay. Файл `/root/msk.bundle` больше не нужен: установка сохранила копию в
+  `/etc/raycontrol/relay.bundle`. Удалите его: `shred -u /root/msk.bundle`.
+- **Если установка не прошла,** она сама снимает периметр и оставляет хост открытым: запереть вас relay не может.
+  Последняя строка говорит, что случилось:
+
+| Что вы видите | Причина | Что делать |
+|---|---|---|
+| `sshd is configured for [22 2222]: a relay opens one SSH port; …` | sshd слушает несколько портов | оставьте один `Port` в `sshd_config`, перезапустите sshd |
+| `this SSH session came in on port …, sshd's configuration says … (sshd -T): …` | sshd не перезапущен после смены порта | если у провайдера relay есть файрвол, откройте в нём новый порт; `systemctl restart ssh`, зайдите заново на новый порт |
+| `nothing listens on tcp/…, sshd's port in its configuration (sshd -T): restart sshd, or ssh.socket` | на порту из конфигурации sshd никто не слушает: sshd не перезапущен после смены `Port` (установка — с консоли или из tmux) или остановлен | `systemctl restart ssh` (если sshd запускает `ssh.socket` — `systemctl restart ssh.socket`); новый порт откройте у провайдера relay, если там файрвол |
+| `the relay's perimeter would not let SSH in here: sshd listens on 2222, the relay's SSH port is …; on the exit: rayctl relay set -ssh-port 2222 -admin <your address> msk` | порт SSH в пакете не тот, на котором sshd | на ноде — команда из строки, затем установка снова, с тем же пакетом |
+| `this SSH session comes from …, not from the relay's admin addresses …: the next one would be refused; on the exit: rayctl relay set -admin … msk, then install again` | вы зашли на relay не с адреса администратора relay | на ноде — команда из строки, затем установка снова |
+| `the relay took no perimeter from its exit … (API port …) within 45 s: does the exit know this host's address (rayctl relay list), is its api service on, and is this the newest bundle? …` | relay не получил периметр от API ноды | адрес в `rayctl relay list` — адрес этого хоста; `api` включён (`rayctl service list`); пакет — последний выданный; исходящие соединения relay к ноде ничто не режет |
+| `another rayctl install -relay is running on this host` | идёт другая установка или обновление relay | дождитесь её конца |
+
+Предупреждение `this session's address is not known (tmux, screen, a console?): SSH to this host opens only from …`
+— не ошибка: установка не видит адреса вашей сессии и не может проверить, что следующая пройдёт. Сверьте список в
+строке сами.
+
+#### 6.7.6. Файрвол провайдера перед relay
+
+Если у провайдера relay есть файрвол, откройте в нём порты из таблицы `rayctl relay bundle` (§6.7.4). Повторить её
+можно в любой момент, на ноде:
+
+```bash
+rayctl relay ports msk
+```
+
+Вывод — та же таблица. Работает от root и от группы `raycontrol`, как `rayctl relay list`; со своей машины —
+`rayctl -remote ФАЙЛ relay ports msk`.
+
+- **Диапазон SPA и точка замера** появляются в списке только после `rayctl relay bundle`: до пакета их у relay нет, и
+  под таблицей стоит `no SPA range yet: rayctl relay bundle msk makes it, with the probe endpoint`. `rayctl relay set`
+  их не даёт. С каждым новым пакетом они меняются: после него откройте новые.
+- **Пересылаемые порты** следуют за сервисами ноды без нового пакета: добавили на ноде сервис со своим портом —
+  relay пересылает и его, откройте его у провайдера relay.
+- Проще всего, как и у ноды, открыть у провайдера relay весь входящий трафик: периметр relay сам закрывает всё,
+  кроме перечисленного.
+- Нода старше v0.31.0 портов relay не перечисляет: `relay ports` отвечает `the node runs a version before v0.31.0,
+  which does not list a relay's ports: …`, а `relay bundle` называет только SSH и порт замера.
+
+#### 6.7.7. Проверить
+
+**На ноде** — relay в списке и с портом замера:
+
+```bash
+rayctl relay list
+```
+
+```
+NAME  ADDRESS        PROBE  ADDED
+msk   198.51.100.20  30999  2026-11-20
+```
+
+`-` в столбце `PROBE` — пакет relay ещё не выдавался.
+
+```bash
+rayctl update status
+```
+
+В конце — строка relay. `relay      msk: v0.31.0, current` значит, что точка замера relay связалась с нодой и
+доложила свою версию. `unknown: no word from it (an older relay, or its rayd relay does not run)` — связи ещё не
+было: подождите минуту; не прошло — смотрите на relay `journalctl -u rayd-relay`.
+
+**На хосте relay:**
+
+```bash
+systemctl is-active rayspa rayd-relay
+```
+
+Две строки `active`: `rayspa` держит периметр и пересылку, `rayd-relay` — точка замера relay.
+
+```bash
+rayctl update status
+```
+
+Первые строки — `host       relay` и `installed  v0.31.0 (rayctl)`; что в остальных — §6.7.9, «Что видно на relay».
+
+**Снаружи.** `rayctl probe` через relay не ходит: она стучится к ноде её SPA, а к relay стучатся ключом `K_relay`.
+Видно другое — что relay есть в подписке. С машины администратора, пакетом устройства из §8 («Проба снаружи»):
+
+```bash
+./rayctl probe -payload @probe.bundle
+```
+
+В строке `payload` (это JSON подписки; в нём учётные данные, никому его не показывайте) есть
+`"relays":[{"id":"msk","host":"198.51.100.20",…`, а у профилей, которые идут через relay, — `"via":["msk"]`. Поле
+`"probe"` у relay нода пишет, только пока точка замера relay с ней связана. Relay попадает в подписку сразу после
+`rayctl relay bundle`; клиенты получат его со следующей подпиской.
+
+**Клиент.** Niko 1.30.0 и новее берёт relay из подписки и сам решает, когда идти через него (сеть, замер relay,
+запомненный результат пути; [spec/relay-v1.md](spec/relay-v1.md) §4–§5). Как путь через relay выглядит на экране
+Niko, здесь не проверялось. Проверить его на деле можно только из сети, где прямой путь к ноде режется: подключитесь
+профилем и откройте сайт.
+
+#### 6.7.8. Обновление relay руками
+
+С v0.26.0 relay обновляет `rayctl update` на его хосте. От root, из обычной SSH-сессии с адреса администратора
+relay:
+
+```bash
+rayctl update -check
+```
+
+```bash
+rayctl update
+```
+
+- Релиз берётся и проверяется так же, как на ноде (§12.3): подпись, версия из подписи, назад — только с
+  `-version` или `-force`, `-from DIR` для хоста без доступа к GitHub. Релиз новее установленного ставит `rayctl`
+  самого релиза.
+- Дальше — то же, что повторная установка с сохранённым пакетом (ниже): новые `rayspa`, `rayd` и `rayctl`, затем
+  `rayctl install -relay /etc/raycontrol/relay.bundle` новой версии. Новый пакет с ноды не нужен.
+- До любых изменений `rayctl update` проверяет пакет relay и вашу SSH-сессию: sshd на одном порту, сессия на нём,
+  её адрес в списке администратора relay. Если адреса нет в списке, обновление отказывает и подсказывает команду для
+  ноды: `rayctl relay set -admin <список>,<ваш адрес> msk`, затем `rayctl update` снова. Из tmux или с консоли
+  адрес неизвестен: будет только предупреждение.
+- Пока идёт `bootstrap.sh -relay`, обновление не начинается: `another rayctl install -relay is running`.
+- После установки проверяется, что работает новый `rayspa` и его таблица применила периметр (адреса администратора,
+  пересылка сервисов к ноде), пересылка включена, SSH открыт с адресов администратора, точка замера работает, если
+  работала до обновления. Не прошло — relay возвращается к прежней версии с прежними юнитами и снимком периметра:
+
+  ```
+  rayctl: update failed, the previous version runs again: …
+  ```
+
+  Если не поднимается и прежняя, `rayctl` снимает периметр и оставляет хост открытым, без пересылки, и так и пишет:
+  запереть вас relay не может. Тогда — повторная установка (ниже).
+- `rayctl update -rollback` — вернуть версию до последнего обновления вручную.
+- **Обновление оборвалось** (kill -9, пропало питание): следующий `rayctl update` отказывает и пишет
+  `an update of this relay from … to … was interrupted: rayctl update -rollback puts … back`. Так и сделайте:
+  `rayctl update -rollback` возвращает прежнюю версию, даже если хост остался открытым. Ctrl-C и обрыв SSH
+  обновление не обрывают: оно само доводит откат до конца. Подробно, по шагам, —
+  [spec/node-update-v1.md](spec/node-update-v1.md) §5.
+- **Не перезагружайте и не выключайте хост relay, пока идёт обновление.** systemd остановит всё, откат не сможет
+  снова запустить службы, и после загрузки relay может оказаться открытым и без пересылки. Тогда после загрузки
+  выполните `rayctl update -rollback` (или повторную установку с пакетом, ниже); прервано ли обновление, говорит
+  `rayctl update status`. Обновление по слову ноды (ниже) после такой загрузки откатывает сам root на relay; ручное —
+  нет.
+- `rayctl update status` на relay: установленная версия, сохранённая для отката, прерванное обновление, если было; с
+  v0.28.0 — ещё `remote` и последнее обновление по слову ноды (ниже). Своего автообновления у relay нет:
+  `rayctl update auto` на нём отказывает (`a relay follows its exit: rayctl update remote on takes the releases the
+  exit names`). Обновить relay прямо с телефона нельзя: у relay нет API rayd для устройств.
+- Пересылка прерывается на время обновления: обычно меньше минуты, а если нода не отвечает и обновление
+  откатывается — до 5 минут. Клиенты переподключаются.
+- **Что проверено.** Модульные тесты, весь путь обновления и отката — на временных каталогах; в CI (`relay-host`) тот
+  же код идёт как обновление по слову ноды (ниже), ручного шага там нет. На настоящем хосте relay `rayctl update`
+  **ни разу не запускался** (см. в начале §6.7).
+
+#### 6.7.9. Обновление relay по слову ноды
+
+С v0.28.0. Нода, обновившись, называет свою новую версию каждому своему relay.
+Relay, на котором root это разрешил, обновляется сам: качает релиз с GitHub или зеркал, проверяет его своим ключом и
+ставит тем же `rayctl update`, что вы запускаете руками, с той же проверкой и откатом. По умолчанию выключено. Relay
+идут за любым удавшимся обновлением ноды: с телефона, автообновлением и `rayctl update` на ноде (кроме
+`rayctl update -no-relays`, §12.3).
+
+Что нужно:
+
+- relay на v0.28.0 или новее. Relay на v0.27.0 и раньше слова ноды не понимает: один раз обновите его руками (выше;
+  relay до v0.26.0 — повторной установкой, ниже);
+- нода на v0.28.0 или новее;
+- на relay работает точка замера `rayd relay`: слово ноды слушает она.
+
+**Включить.** На хосте relay, от root:
+
+```bash
+rayctl update remote on
+```
+
+Что вы должны увидеть:
+
+```
+the exit may now name a release for this relay: a signed one, newer than it; the relay downloads and verifies it itself (rayctl update remote off)
+```
+
+Если видите другое:
+
+| Что вы видите | Причина | Что делать |
+|---|---|---|
+| `this relay has no raycontrol-relay-update.path yet (installed by a release before the update by the exit's word): rayctl update first` | relay старше v0.28.0 | `rayctl update` на relay, затем снова `rayctl update remote on` |
+| `the relay's probe endpoint (rayd relay) does not run: it takes the exit's word; a new bundle from the exit has one …` | пакет relay без точки замера (выдан до v0.11.0) | на ноде `rayctl relay bundle -o /root/msk.bundle msk`, на relay `bash bootstrap.sh -relay` с новым пакетом (ниже) |
+| `remote is on, but its units did not start: …` | systemd не запустил юниты обновления | `systemctl status raycontrol-relay-update.path`, затем снова `rayctl update remote on` |
+
+**Выключить:** `rayctl update remote off`. Запрос, который ждал, удаляется; relay остаётся на своей версии.
+Выключателя на ноде нет: придержать один relay (запасной, на старой версии) можно только на нём самом.
+
+**Что происходит после обновления ноды.**
+
+1. Нода обновляется сама и проверяет себя. Relay её не ждут, и она их не ждёт. Если обновление ноды откатилось или
+   не удалось, relay ничего не делают: они идут за последним удавшимся, пока нода на нём.
+2. Нода называет версию relay по одному, по порядку имён (как в `rayctl relay list`): клиент, который ходит через
+   relay, теряет один путь за раз. Следующий relay ждёт, пока предыдущий не кончит, но не дольше 40 минут его
+   очереди. Relay, который докладывал и пропал до своей очереди, держит следующих ещё до 40 минут, пока нода его
+   ждёт: так каждый держит очередь до 40 минут до неё и до 40 минут в ней.
+3. Relay с `remote on` пишет запрос. Root на relay проверяет его заново: только подписанный релиз, только новее
+   установленного, не ниже v0.26.0. Взломанная нода не поставит на relay ни свою сборку, ни старую версию.
+4. Дальше — то же, что `rayctl update` руками: скачивание, установка, проверка, при сбое откат. Пересылка через этот
+   relay прерывается: обычно меньше минуты, до ~5 минут, если обновление откатывается.
+5. Relay докладывает ноде итог, и очередь идёт к следующему.
+
+- Версию, обновление на которую на relay откатилось (и ту, с которой его откатили руками `rayctl update -rollback`),
+  он больше не берёт: двигает только более новая или `rayctl update -version V` на нём руками.
+- Сбой до изменений (GitHub и зеркала недоступны, подпись не та, обновление оборвалось до первого изменения) —
+  повтор через 6 часов.
+- Relay пишет не больше одного запроса за 10 минут и шести за сутки, что бы ни называла нода.
+- Relay, выключенный надолго, после включения сразу идёт на версию, на которой нода сейчас.
+- Обновление по слову ноды, которое оборвалось после первого изменения (таймаут, `systemctl stop`, выключение), root
+  на relay откатывает сам: сразу или после следующей загрузки. Ручное обновление он не трогает.
+
+**Что видно на relay.** `rayctl update status` от root:
+
+```
+host       relay
+installed  v0.28.1 (rayctl)
+previous   v0.28.0 (rayctl update -rollback)
+remote     on: the exit names the release (raycontrol-relay-update.path active); rayctl update remote off
+last       done: v0.28.0 → v0.28.1, by exit, 2026-11-20T03:41:12Z
+latest     rayctl update -check asks GitHub
+auto       does not apply: a relay follows its exit
+```
+
+- `last` — последнее обновление по слову ноды: состояние, в скобках код причины (таблица ниже), версии, кто и когда.
+  После `rayctl update -rollback` руками или повторной установки здесь — они (`by root (…)`).
+- `held` — версии, которые на relay не удержались, `error` — текст ошибки целиком. В нём бывают адреса: файл
+  статуса relay читают только root и `rayd relay`. Не от root вместо строки `last` —
+  `last       not readable by this user (root's and rayd relay's): sudo rayctl update status`.
+- `remote off` — строка `remote     off (default): rayctl update remote on takes the releases the exit names`.
+- `remote on`, а юнит не работает (например, systemd остановил его за слишком частые запросы) — ещё строка
+  `warning: raycontrol-relay-update.path is not active: systemctl enable --now raycontrol-relay-update.path`. Так и
+  сделайте; если systemd отказывает — сначала `systemctl reset-failed raycontrol-relay-update.path`.
+- `rayctl update -check` на relay говорит, обновляет ли его нода: `…; the releases its exit names update it too
+  (rayctl update remote off)` или `…; rayctl update remote on takes the releases its exit names`.
+- Журнал самого обновления — `journalctl -u raycontrol-relay-update`; что relay услышал от ноды и что ей сказал —
+  `journalctl -u rayd-relay` (строки `relay update …`).
+
+**Что видно на ноде.** `rayctl update status` после своих строк печатает по строке на каждый relay:
+
+```
+last       done: v0.28.0 → v0.28.1, by alice/phone (remote), 2026-11-20T03:38:02Z
+relay      msk: v0.28.1, done (v0.28.0 → v0.28.1), 2026-11-20T03:41:12Z
+relay      spb: v0.28.0, running (v0.28.0 → v0.28.1), 2026-11-20T03:42:40Z
+relay      tver: v0.28.0, waiting for spb
+```
+
+| Строка relay | Что значит |
+|---|---|
+| `unknown: no word from it (an older relay, or its rayd relay does not run)` | relay ни разу не докладывал: он старше v0.28.0, у него нет точки замера или он ещё не подключался |
+| `off: root on msk has not allowed it (rayctl update remote on there)` | relay младше ноды, а `remote` на нём выключен |
+| `current` | relay на версии ноды или новее; или ноде сейчас нечего называть (идёт её обновление, последнее было с `-no-relays`) |
+| `waiting for spb`, `waiting for its turn` | его очередь ещё не пришла |
+| `offered v0.28.1, …` | его очередь: версия названа, ответа ещё нет; не дольше 40 минут |
+| `requested (… → …)`, `running (… → …)` | запрос записан, обновление идёт |
+| `done (… → …)` | relay обновлён и проверен |
+| `rolled_back (… → …), …, КОД: …` | не вышло, прежняя версия relay работает снова; эту версию relay больше не возьмёт |
+| `failed (… → …), …, КОД: …` | отказ или сбой; код — ниже |
+
+`-json` даёт то же полем `relays`. В журнал действий ноды (`rayctl audit`) идёт только смена состояния relay
+(`relay.update …`), не больше 20 строк в час на relay.
+
+**На телефоне администратора.** Нода отдаёт строки relay в `GetUpdateStatus` (поле `relays`: имя, версия, состояние,
+время, код причины). По записи в [handoff/SYNC.md](handoff/SYNC.md) (строка T18) их показывает режим администратора
+Niko 1.55.0 и новее: состояние, причину, версию, время и «давно не отзывался» после 30 минут без связи с relay; Niko
+1.54.0 — нет. Экраны здесь не проверялись. Строка последнего обновления самой ноды в Niko есть и раньше; с v0.28.0 в
+ней видно и ручное обновление (`by rayctl on the node`).
+
+**Если relay сообщил о сбое.** Код — в строке relay на ноде и в строке `last` на relay:
+
+| Код | Что случилось | Что делать |
+|---|---|---|
+| `policy` | `remote` на relay выключили, пока запрос ждал | ничего; включить снова — `rayctl update remote on` на relay |
+| `stale` | запрос пролежал больше часа, прежде чем root его взял | ничего: сбой до изменений, relay попросит тот же выпуск снова через 6 часов |
+| `version` | версия не новее установленной, ниже v0.26.0 или уже не удержалась на relay; или relay отказался сам: на нём не релизная сборка | ничего; нужную версию — `rayctl update -version V` на relay руками |
+| `busy` | на relay шло ручное обновление (замок не взят за 3 минуты) или relay отложил запрос: 6 часов после сбоя без изменений, не больше одного запроса за 10 минут и шести за сутки | ничего: relay повторит сам; сразу — `rayctl update` на relay |
+| `unfinished` | прошлое обновление relay руками не кончилось | на relay `rayctl update status` скажет, что делать (обычно `rayctl update -rollback`) |
+| `bundle` | пакета relay нет или его не прочесть | на ноде `rayctl relay bundle`, на relay `bash bootstrap.sh -relay` с новым пакетом |
+| `ssh` | снимок периметра не пустит SSH на порт sshd relay | на ноде `rayctl relay set -admin …`; sshd на relay — на одном порту |
+| `download` | ни GitHub, ни зеркала не отдали релиз | на relay `rayctl update -check`: открыт ли оттуда GitHub; relay повторит через 6 часов; без GitHub — `rayctl update -from DIR` на relay руками |
+| `signature` | подпись не та, или зеркало отдало другой релиз | relay повторит через 6 часов; если повторяется — сообщите: релиз или зеркало подменяют |
+| `place` | первый бинарник не встал (нет места на диске) | освободить место на relay; ничего не изменилось |
+| `install` | установка новой версии не прошла (например, нода не дала первый снимок за 45 с); откат выполнен | relay на прежней версии; причина — `journalctl -u raycontrol-relay-update` на relay |
+| `check` | проверка после установки не прошла; откат выполнен | то же |
+| `interrupted` | обновление оборвалось (таймаут юнита, `systemctl stop`, выключение, kill): `rolled_back` — root на relay откатил его сам; `failed` до первого изменения — ничего не тронуто, повтор через 6 часов | обычно ничего; если `rayctl update status` на relay говорит о незаконченном обновлении — `rayctl update -rollback` там |
+| `open` | прежняя версия не вернулась: relay открыт и не пересылает, SSH на нём открыт отовсюду | на relay `rayctl update -rollback` или повторная установка (ниже) |
+| `not_taken` | запрос ждал час, а root на relay его не взял | на relay `systemctl status raycontrol-relay-update.path`; `systemctl reset-failed` и `systemctl enable --now` этого юнита |
+| `no_word` | relay замолчал: час без итога после `requested` или `running`, или очередь ушла дальше без его ответа (40 минут) | на relay `rayctl update status` и `journalctl -u rayd-relay`; связь relay с нодой |
+| другой код | relay новее ноды | показан как есть; подробности — `rayctl update status` на relay |
+
+#### 6.7.10. Relay до v0.26.0 и запасной путь
+
+`rayctl` relay старше v0.26.0 отказывает:
+
+```
+rayctl: this host is a relay: install/bootstrap.sh -relay with its bundle takes a new release
+```
+
+Такой relay, а также relay, который `rayctl update` оставил открытым, получает новый релиз повторной установкой
+поверх — теми же двумя командами на хосте relay:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/arngory/raycontrol/v0.31.0/install/bootstrap.sh -o bootstrap.sh
+```
+
+```bash
+bash bootstrap.sh -relay /etc/raycontrol/relay.bundle
+```
+
+Скрипт ставит последний опубликованный релиз; тег в адресе — версия самого скрипта, сверьте её сумму, как в
+§3.1. После такого запуска relay на последнем релизе, и дальше его обновляет `rayctl update`. Relay на v0.25.1 и
+старше так обновляется в последний раз.
+
+- `/etc/raycontrol/relay.bundle` — копия пакета relay, которую установка оставила на его хосте. Новый пакет relay
+  с ноды для обновления не нужен. Если на ноде с тех пор выполняли `rayctl relay bundle`, прежний уже не действует:
+  перенесите новый и укажите его.
+- Запускайте из SSH-сессии с адреса администратора relay: установка проверяет, что после неё вы сможете зайти
+  снова.
+- На время установки пересылка прерывается, клиенты переподключаются.
+- Разумно обновлять relay вместе с нодой. Пример зависимости: предел новых соединений на адрес действует на relay,
+  только когда на нём стоит v0.24.0 или новее.
+- **Что проверено.** В CI relay проверяется в сетевых пространствах имён (пересылка, стук, точка замера),
+  модульными тестами шагов установки, в том числе повторной поверх прежней, и с v0.28.0 — в контейнерах с systemd
+  (Debian 13): первая установка `bootstrap.sh -relay` и обновления по слову ноды. Повторная установка поверх
+  прежней целиком в CI не запускается. Запуск с путём
+  `/etc/raycontrol/relay.bundle` следует из кода: установка читает пакет relay до любых изменений и не переписывает
+  файл с тем же содержимым.
+
+#### 6.7.11. Убрать relay
+
+На ноде:
+
+```bash
+rayctl relay remove msk
+```
+
+```
+relay msk removed
+```
+
+- **Только это отнимает у адреса relay доступ к портам сервисов ноды.** Нода обрывает и уже открытые через него
+  соединения, а клиенты перестают видеть relay со следующей подпиской. Потерянный или захваченный хост relay
+  убирайте так же, сразу: на нём ключ relay, и до `relay remove` его адрес доходит до сервисов ноды без SPA.
+- `relay remove` и `relay add` может и член группы `raycontrol`; admin-устройство — нет (`on the node only (rayctl
+  as root)`).
+
+Затем на хосте relay, от root:
+
+```bash
+rayctl uninstall
+```
+
+Команда спросит подтверждение (`yes`) и вернёт всё, что меняла установка relay: периметр, пересылку, юниты и
+бинарники. **Хост после этого открыт**, как до установки.
+
+Тот же relay снова — `rayctl relay add` и новый пакет: у нового relay под тем же именем другие ключи SPA, и
+прежний пакет к нему не подходит.
+
 ## 7. Порты и доступ к серверу
 
 Периметр — таблица nftables `inet raycontrol`. По умолчанию всё входящее отбрасывается молча.
@@ -1276,7 +1830,7 @@ ssh root@203.0.113.7
 - **Windows:** сборки нет. Подойдёт виртуальная машина с Linux.
 
 > **Статус.** Сборки для macOS и FreeBSD делаются с Linux кросс-компиляцией. На macOS `rayctl` запускался только в
-> CI (job `rayctl (macOS, run)`: справочный, на runner с macOS arm64 зелёный); на настоящем Mac руками — нет. На
+> CI (workflow `rayctl on macOS`: на runner с macOS arm64 зелёный); на настоящем Mac руками — нет. На
 > FreeBSD он **не запускался нигде**. Команды этого раздела для macOS и FreeBSD написаны по общим сведениям об этих
 > системах, без проверки.
 
@@ -1344,8 +1898,9 @@ xattr -d com.apple.quarantine rayctl
 - `remote enroll` — регистрация по приглашению (§10.4), PIN спрашивается без показа на экране;
 - с файлом устройства, `-remote ФАЙЛ`: `remote whoami`, `remote rotate` и то же, что через `-remote` на Linux, —
   `status`, `node`, `user`, `service`, `device` (в том числе приглашение с QR в терминале), `audit`, `admin`, `ports`,
-  `dns`, `summary`, `app-mirror`, `metrics`, `debug`, `version`. Что из этого нода разрешает удалённому устройству, решает она сама
-  (§10.4): так, окно отладки открывает и закрывает только root на ноде, через `-remote` работает лишь `debug show`.
+  `relay` (`list`, `ports`, `set`), `dns`, `summary`, `app-mirror`, `metrics`, `debug`, `version`. Что из этого нода
+  разрешает удалённому устройству, решает она сама (§10.4): так, окно отладки открывает и закрывает только root на
+  ноде, через `-remote` работает лишь `debug show`.
 - `knock` и `probe` с `-remote` не запускаются, а отвечают одной строкой, например
   `knock takes no -remote: it works from this machine with the bundle on its command line (run it without -remote)`.
   `remote enroll` флаг `-remote` пропускает: файл устройства он пишет сам (`-o`).
@@ -1470,7 +2025,7 @@ admin-устройства — удалённый доступ админист�
   3   site          site          true     key since 2026-11-14 13:58, next key pinned since 2026-11-14 13:58
   4   reality       reality       true     since creation
   5   hy2-masq      hy2-masq      true
-  7   naive         naive         true
+  7   naive         naive         true     name k2p.example.com since creation
   9   inner         inner         true
   11  dns           dnstt         true     auth required, v2 optional, seal optional
   14  api           api           true
@@ -1479,8 +2034,9 @@ admin-устройства — удалённый доступ админист�
   ```
 
   `subscription`, `ssh`, `site` и `inner` — служебные, нода заводит их сама; `api` вы добавили сами, но для
-  устройств он такой же несущий. В `KEYS` у `site` — ключ его сертификата (ниже, «Сертификат сайта и пины»). Виды `olcrtc` и `openflux` в строке `kinds` есть, но эта версия их не
-  разворачивает: не добавляйте их.
+  устройств он такой же несущий. В `KEYS` у `site` — ключ его сертификата (ниже, «Сертификат сайта и пины»), у
+  `naive` — имя сервера и его смена (ниже, naive). Виды `olcrtc` и `openflux` в строке `kinds` есть, но эта версия
+  их не разворачивает: не добавляйте их.
 
 ### Как проверить, что сервис работает
 
@@ -1733,41 +2289,92 @@ QUIC — только с отдельным переключателем «naive
   отдельному соединению QUIC на UDP 443, теряются они поодиночке, как обычный UDP. В подписке у naive появляется
   `udp=1`; `uot=2` остаётся, и там, где QUIC не проходит, клиент идёт по-старому.
   - **По умолчанию выключено**: включённым станет после проверки на живых сетях.
-  - **Клиент.** Сторона ноды готова; пользоваться ею будет Niko со вторым движком naive, когда он выйдет. Выпущенные
-    версии, включая 1.45.0, параметр `udp=1` пропускают и работают как раньше.
+  - **Клиент.** Сторона ноды готова; пользоваться ею будет Niko со вторым движком naive. По записям этого
+    репозитория такой Niko ещё не выпущен ([handoff/SYNC.md](handoff/SYNC.md), строка T20: interop ядра клиента с
+    кандидатом v0.30.0 зелёный). Выпущенные версии, включая 1.45.0, параметр `udp=1` пропускают и работают как
+    раньше.
+  - **Как им пользуется клиент** (по спецификации и сообщениям клиента, на телефоне здесь не проверялось): в новой
+    сети UDP сначала идёт по-старому, внутри потока; через несколько секунд клиент один раз проверяет датаграммы эхом
+    к ноде и, если они проходят, открывает ими новые сокеты приложений; результат помнит по сети. Подробно —
+    [naive-udp-v1](spec/naive-udp-v1.md) §9.4.
+  - **Когда включать.** Когда у ваших людей появится Niko со вторым движком naive и им нужен UDP через naive
+    (звонки, игры) там, где QUIC до ноды проходит. Клиенту без второго движка включённый флаг ничего не меняет.
   - **Что меняется на ноде.** naive перезапускается; его QUIC объявляет датаграммы (две строки, которые прочтёт только
     прошедший SPA и рукопожатие с верным именем; длины пакетов с ними на пути меняются на несколько байт, так что
     включённый флаг можно заметить по длинам, — сам naive-quic от DoH3 и так отличает имя в SNI). Места, пределы,
     учёт трафика, отзыв и политика выхода — те же, что у UDP внутри потока: 256 сокетов UDP на пользователя на оба
     способа вместе.
-  - **Нужен UDP-порт** у сервиса (по умолчанию `udp/443` есть). Без него `rayctl service set` предупреждает, и
-    `udp=1` в подписке не появляется.
-  - **Проверить:** `grep -o -- -udp /etc/systemd/system/niko-naive.service` печатает `-udp`; в подписке у naive есть
-    `udp=1`.
+  - **Нужен UDP-порт** у сервиса (по умолчанию `udp/443` есть). Без него `rayctl service set` предупреждает
+    (`warning: the service has no UDP port: naive-quic cannot be reached, and no link says udp=1`), и `udp=1` в
+    подписке не появляется.
+  - **Проверить, что включено:** `grep -o -- -udp /etc/systemd/system/niko-naive.service` печатает `-udp`; в
+    подписке у naive есть `udp=1` (`rayctl probe -links`, §8 «Проба снаружи»).
+  - **Проверить, что пользуются** (с v0.31.0) — счётчики naive в `rayctl metrics`, только у сервиса с `udp=on`:
+
+    ```bash
+    rayctl metrics | grep '^raycontrol_naive_udp_'
+    ```
+
+    ```
+    raycontrol_naive_udp_requests_total{service="naive"} 12
+    raycontrol_naive_udp_refused_total{service="naive"} 0
+    raycontrol_naive_udp_datagrams_total{service="naive",direction="in"} 4810
+    raycontrol_naive_udp_datagrams_total{service="naive",direction="out"} 5237
+    raycontrol_naive_udp_capsules_total{service="naive",direction="in"} 3
+    raycontrol_naive_udp_capsules_total{service="naive",direction="out"} 0
+    raycontrol_naive_udp_dropped_total{service="naive",reason="bad"} 0
+    …
+    ```
+
+    `requests` — запросы UDP, которые нода приняла (`200`), `refused` — отказы (`429`: мест нет; `503`: сокет не
+    открылся). `datagrams` — датаграммы к назначениям (`in`) и клиентам (`out`), из них `capsules` — те, что не
+    влезли в пакет QUIC и шли в потоке запроса. `dropped` — отброшенные, по причинам naive (`bad`, `context`,
+    `denied`, `limit`, `stranger`, `long`, `queue`, `quic`, `late`, `write`), каждая строкой, с нулём. Счёт — с
+    запуска naive: каждый его перезапуск (обновление, смена настроек naive) счёт обнуляет. `requests` растёт —
+    клиенты ходят датаграммами; ноль при включённом флаге — ни один клиент ещё не умеет или проба у них не прошла.
+    Строк нет — флаг выключен.
 - **Смена имени** (с v0.29.0, [08-decisions.md](08-decisions.md) R4-42). В ссылке naive адрес ноды, а имя — только в
   `sni=`. Нода может сменить это имя без простоя: новое приходит в подписке заранее, как следующий пароль, и клиент
   переходит на него сам. Клиенту ничего нового не нужно.
-  - **По расписанию** — раз в 90 дней (`rayd serve -naive-sni-period`), публикация за 3 дня. По умолчанию (`auto`)
-    только с токеном Cloudflare (сертификат `*.<домен>`, DNS-01): без него, при HTTP-01, новое имя попало бы в
-    журналы CT при заказе сертификата, раньше, чем им пользуются, и в одном списке со всеми именами ноды.
-    `rotate_sni=on` меняет имя и при HTTP-01: тогда следующее имя заказывается сразу после смены и видно в журналах
-    CT всю эпоху. `off` — по расписанию не менять.
+  - **Что происходит само.** Раз в 90 дней (`rayd serve -naive-sni-period`) нода выбирает новое имя, за 3 дня
+    публикует его в подписке (`next`) и в назначенный час переходит на него. Следующее имя фронт обслуживает с самого
+    начала эпохи, ещё до публикации, а прежнее — до следующей смены.
+  - **Нужен wildcard-сертификат.** По умолчанию (`rotate_sni=auto`) смена по расписанию идёт, только если имена сайта
+    под одним сертификатом `*.<домен>`: с токеном Cloudflare (DNS-01, §1) или со своим сертификатом на
+    `*.<домен>` (`rayctl service cert`). Без него, при HTTP-01, новое имя попало бы в журналы CT при заказе
+    сертификата, раньше, чем им пользуются, и в одном списке со всеми именами ноды. `rotate_sni=on` меняет имя и при
+    HTTP-01: тогда следующее имя заказывается сразу после смены и видно в журналах CT всю эпоху. `off` — по
+    расписанию не менять. На ноде без домена имена не меняются вовсе.
   - **По команде** — `rayctl service rotate naive`: переход через 3 дня, клиенты получают новое имя в подписке
     заранее. `-now` — сразу, если имя уже заблокировали: клиенты переходят с ближайшей подпиской (Niko — при
     очередной плановой выборке, а раньше — как только прежнее имя у него перестанет работать: после двух неудачных
     проверок соединения подряд). Команда работает при любом `rotate_sni`. При HTTP-01 новое
     имя сначала ждёт сертификат, не дольше суток (`-reality-prepare`); не дождалось — имя остаётся прежним
-    (`rayctl status`, строка `acme site`).
+    (`rayctl status`, строка `acme site`). Что вы увидите после `rayctl service rotate naive`:
+
+    ```
+    naive moves to a new server name at 2026-11-23T14:00:00Z, which clients get in their subscription before (under a certificate
+    of listed names it waits for its certificate first, and the switch comes a lead after that)
+    ```
+
+    С `-now` первая строка — `naive moves to its next server name within a minute …`. Под ними — какие прежние имена
+    фронт оставит (`still accepted after the switch: …`) и, если есть, какое снимет
+    (`no longer accepted after the switch: …`).
   - **Прежнее имя** нода принимает до следующей смены — и после `-now` тоже: устройство, которое не забрало подписку,
     работает на старом. Если следующая смена пришла раньше, чем через 90 дней (`-now` дважды или `-now` сразу после
     плановой, когда новое имя заблокировали), прежние имена остаются все, пока каждому не исполнится 90 дней с его
-    смены, но не больше трёх: `rayctl service rotate naive -now` печатает, какие останутся и какое снимется.
-    Следующее имя фронт обслуживает с самого начала эпохи, ещё до публикации.
+    смены, но не больше трёх: `rayctl service rotate naive` печатает, какие останутся и какое снимется.
   - **Цена.** Фронт niko-server перезапускается один раз за эпоху, в момент смены: рвутся соединения REALITY,
     Hysteria2 и naive по QUIC (они переподключаются). naive по HTTP/2 и DoH не рвутся. Если REALITY того же сайта
     меняет имя в пределах полуэпохи, naive меняет своё вместе с ним, и перезапуск один на двоих.
-  - **Что видно:** `rayctl service list` (имя, назначенная смена и её имя), `rayctl status` (строка `naive <имя
-    сервиса>`; строка `naive-names` с ошибкой — опубликованное имя фронт не обслуживает, см. строку `apply`).
+  - **Что видно.** В `rayctl service list`, столбец `KEYS` у naive: `name k2p.example.com since creation` (или
+    `since <дата>` после смены); с опубликованной сменой — `…, switch 2026-12-01 14:00 to x7q.example.com`; при HTTP-01
+    до сертификата — `…, next name waits for its certificate`; после команды, до публикации, — `…, switch asked for
+    <дата>`; прежние имена — `…, abc.example.com accepted until a switch a period after the last`. В `rayctl status` —
+    строка `naive naive` с именем (`name k2p.example.com, next x7q.example.com from 2026-12-01 14:00 UTC`, пока смена
+    опубликована) и строка `naive-names`: `FAILED` в ней значит, что опубликованное имя фронт не обслуживает (naive
+    выпал из рендера — см. строку `apply`), и клиенты, перешедшие на новое имя, вернутся на прежнее. Для Prometheus —
+    `raycontrol_naive_name_rotated_at_seconds` и `raycontrol_naive_name_next_from_seconds` в `rayctl metrics`.
   - **Чего не даёт.** Против блокировки по адресу и по домену ноды смена поддомена не помогает: адрес тот же.
 - **Честный connect** (с v0.26.0). В ссылке naive есть `niko-ack=1`. Клиент, который шлёт заголовок `niko-ack: 1`,
   получает ответ, когда нода уже соединилась с адресатом: `200` — соединение есть; `502` с причиной `refused`
@@ -1809,7 +2416,7 @@ QUIC — только с отдельным переключателем «naive
 ### Yggdrasil (`ygg`)
 
 - **Что это.** Узел сети Yggdrasil: клиент поднимает с нодой TLS-линк на TCP 443, а трафик уходит в `inner`. Даёт
-  запасной путь через публичные пиры и сеть между устройствами одного пользователя.
+  запасной путь через пиры — публичные или свой (ниже) — и сеть между устройствами одного пользователя.
 - **После установки по умолчанию:** выключен. Нужен `reality`.
 - **Добавить:**
 
@@ -1826,9 +2433,10 @@ QUIC — только с отдельным переключателем «naive
 
   | Команда | По умолчанию | Что делает |
   |---|---|---|
-  | `rayctl service set ygg peers=URI,URI`, затем `rayctl apply` | нет пиров | публичные пиры, до 8 (ниже) |
+  | `rayctl service set ygg peers=URI,URI`, затем `rayctl apply` | нет пиров | пиры — публичные или свой, до 8 (ниже) |
   | `rayctl service set ygg peers=none`, затем `rayctl apply` | — | убрать пиры |
   | `rayctl service set ygg lan_relay=50` | `20` | потолок сети между устройствами через ноду, Мбит/с на пользователя (§9) |
+  | `rayctl service peer-keys [-names] ygg` | — | ключи для `AllowedPublicKeys` своего пира (с v0.31.0, ниже) |
 
 - **Публичные пиры.**
 
@@ -1845,8 +2453,158 @@ QUIC — только с отдельным переключателем «naive
     получает их в подписке как запасной путь к ноде; как он выбирает между ними, решает клиент.
   - `quic://` — только по IP-адресу.
   - `tcp://` и `ws://` нода примет, но линк в них открытый: протокол Yggdrasil виден на проводе.
-  - С пирами нода видна в общей сети Yggdrasil. Команда сама предупреждает: с публичными пирами изменённый клиент
-    может провести данные мимо потолка `lan_relay` и лимитов трафика. На ноде с лимитами пиры лучше не включать.
+  - С публичными пирами (и со своим, у которого они есть) нода видна в общей сети Yggdrasil. Команда сама
+    предупреждает: с пирами изменённый клиент может провести данные мимо потолка `lan_relay` и лимитов трафика. На
+    ноде с лимитами пиры лучше не включать.
+
+#### Свой пир
+
+Публичный пир — чужой сервер в общей сети Yggdrasil. Свой пир — yggdrasil-go на вашем VPS; ноде его
+дают так же, через `peers`. Клиенты получают его в подписке как запасной путь и идут через него, только когда
+прямой линк к ноде не подключается. Зачем свой: трафик клиентов через него видит ваш сервер, а не чужой оператор,
+и его адреса нет в публичных списках пиров. Чего он не закрывает — ниже, «Что видят пиры».
+
+> **Не проверено.** Свой пир по этому тексту на настоящем VPS не поднимался. Команды и пути yggdrasil-go ниже взяты
+> из его документации, скрипта его пакета (`contrib/deb`) и пакета Debian, а что пир отвечает и шлёт — из исходников
+> yggdrasil-go v0.5.12, не из кода raycontrol; `rayctl service peer-keys` — из кода и теста
+> `TestPeerKeysAndRelayPortsAPI`.
+
+**1. Что поставить.** yggdrasil-go версии 0.5.x — на отдельный VPS с публичным адресом (на ноду — нет: её
+Yggdrasil — свой, внутри niko-server).
+
+- **Debian 13** — системный пакет `yggdrasil` (в trixie — 0.5.12): `apt install yggdrasil`.
+- **Новее** — из apt-репозитория проекта: инструкция «Installing on Debian/Ubuntu» на
+  [yggdrasil-network.github.io](https://yggdrasil-network.github.io/installation-linux-deb.html).
+- **0.4.x не подходит:** с 0.5 он несовместим, и нода с таким пиром не соединится.
+- **Нода работает на форке yggdrasil-go 0.5.15** (`arngory/yggdrasil-go`, `deploy/versions.env`): его правки — не в
+  протоколе, по проводу это та же 0.5. Неофициальные реализации (например, на Rust) — совместимость не обещана и
+  здесь не проверялась.
+
+**2. Конфиг** — `/etc/yggdrasil/yggdrasil.conf`. Пакет Debian создаёт только каталог `/etc/yggdrasil` (0750,
+`root:yggdrasil`); если файла нет, создайте его, как в `README.Debian` пакета (`mkdir -p` — каталог уже есть):
+
+```bash
+mkdir -p /etc/yggdrasil
+yggdrasil -genconf > /etc/yggdrasil/yggdrasil.conf
+chown -R root:yggdrasil /etc/yggdrasil
+chmod 0750 /etc/yggdrasil
+```
+
+Пакет из репозитория проекта (0.5.12, 0.5.15) создаёт этот же файл сам и сразу запускает службу с конфигом по
+умолчанию. Страница проекта называет `/etc/yggdrasil.conf`, но его пакет держит конфиг в
+`/etc/yggdrasil/yggdrasil.conf`, а `/etc/yggdrasil.conf`, если тот есть, переносит туда. В конфиге поменяйте:
+
+- `Listen: ["tls://0.0.0.0:443"]` — где пир принимает линки; порт любой свободный. На 443 линк до пира — соединение
+  TLS с обычным VPS; по рукопожатию TLS-клиент yggdrasil-go от браузера отличим, а при активной проверке виден узел
+  Yggdrasil (ниже, «Что видят пиры»). Этот порт TCP откройте у провайдера пира.
+- `Peers: []` — пусто: закрытая сеть из пира, ноды и ваших клиентов. Публичные пиры здесь соединят его, а с ним и
+  ноду, с общей сетью Yggdrasil — с той же ценой, что публичные пиры у ноды (выше). Закрытой сеть остаётся, только
+  пока и у ноды в `peers` нет публичных пиров: нода пересылает между всеми своими пирами. И пока `AllowedPublicKeys`
+  пуст, войти в неё может любой, кто узнал адрес пира (шаг 4).
+- `MulticastInterfaces: []` — пиру на VPS незачем искать соседей в сети провайдера, а `AllowedPublicKeys` (шаг 4)
+  на таких соседей не действует.
+- `IfName: none` — пиру не нужен свой адрес в сети: он только пересылает. (Так советуем мы; на работу ноды это не
+  влияет.)
+
+Затем `systemctl enable --now yggdrasil` (после правок — `systemctl restart yggdrasil`).
+
+**3. Отдать пир ноде.** На ноде:
+
+```bash
+rayctl service set ygg peers=tls://peer.example.net:443
+```
+
+```bash
+rayctl apply
+```
+
+- **Адрес пира — публичный адрес или имя.** Частный адрес нода не примет (`… a public address, or a name`), а
+  `quic://` — только по IP (`… a quic peer needs an IP address, not a name`): имя `quic://` клиент резолвил бы мимо
+  своего DNS.
+- Список заменяется целиком: свой пир и публичные — вместе, через запятую, до 8.
+- Команда печатает `run rayctl apply: the unit gets network access with public peers, and loses it without` и
+  предупреждение о лимитах (выше): оно относится к любым пирам, свой не исключение.
+- Нода сама соединяется с пиром; клиенты получат его в подписке (`niko-ygg-via`) при следующем её получении.
+
+**4. Закрыть пир ключами** (по желанию). Пустой `AllowedPublicKeys` пускает к пиру любого, как публичный пир.
+Список ключей, которые пир должен пускать, печатает нода (с v0.31.0):
+
+```bash
+rayctl service peer-keys ygg
+```
+
+Что вы должны увидеть (ключи у вас свои):
+
+```
+# The keys the node's Yggdrasil service ygg lets in, for AllowedPublicKeys of a peer of yours
+# (yggdrasil-go 0.5, HJSON): public keys only. Labels as in the node's users file: u<user id>
+# (rayctl -json user list), -<device id> (rayctl device list), -n the next key, -p the previous one.
+AllowedPublicKeys: [
+  # the node (200:e943:1f0b:c856:d891:92bc:327d:85d4), which peers with yours
+  "8b5e707a1bd493b736a1e6c13d15a925be6a7a5ed731213500057df875cd577b"
+  # u1: the user's own key (links of rayctl user export)
+  "8a4c80317c4d7c5febfbdf0aee351efc11fcc68f0f5cecb42bb812e28b70381d"
+  # u1-9714a109ba8c5f48: a device's key
+  "abd0d7b09b07e65d173c9c012a1cfdedf10268b71ac448231d57e4f17745d428"
+]
+```
+
+и в stderr — `note: these are the keys the node lets in now, and they change: …`.
+
+- **Что это.** Открытые ключи: ключ ноды (она соединяется с пиром сама), затем у каждого активного пользователя с
+  этим сервисом — его ключ (им пользуются ссылки `rayctl user export`) и ключ каждого неотозванного устройства.
+  Закрытых ключей и seed ноды в нём нет. Блок целиком заменяет строку `AllowedPublicKeys: []` в конфиге пира;
+  yggdrasil-go 0.5 читает его как есть. Затем на пире `systemctl restart yggdrasil`.
+- **Имён нет.** Над ключом — метка из файла пользователей ноды: `u<id пользователя>`, `-<id устройства>`, `-n` —
+  следующий ключ, `-p` — прежний. Чьи это id, говорят `rayctl -json user list` и `rayctl device list`. Конфиг пира
+  лежит вне ноды, и имена рядом с адресами пирингов связали бы их с людьми. `-names`
+  (`rayctl service peer-keys -names ygg`) добавляет имена пользователей и устройств и предупреждает об этом:
+  `warning: with -names the block names users and devices on a host outside the node: …`.
+- **Список меняется:** добавили или отозвали устройство; пользователя включили, выключили, у него кончился срок или
+  лимит; и при каждой смене учётных данных пользователя (раз в 30 дней: следующие ключи — в списке за 3 дня до
+  смены, с пометкой `next: from …`, прежние — ещё 2 дня после, `previous: until …`). Пир со старым списком не
+  пустит тех, кого в нём нет: у них пропадёт путь через этот пир (прямой путь к ноде остаётся). Значит, блок надо
+  обновлять на пире при каждом изменении. **Проще оставить `AllowedPublicKeys` пустым, но тогда пир открыт** — так
+  говорит и сама команда. Содержимого трафика это никому не открывает, но пир, как публичный, пускает любого, кто узнал его адрес:
+  тот видит ключи подключённых устройств и достаёт до клиентов, идущих через пир, мимо фильтра ноды (ниже, «Чем
+  помогает свой пир»).
+- `-json` даёт то же объектом, с адресом каждого ключа в сети Yggdrasil. Запускать может тот, кто может смотреть
+  устройства: root и группа `raycontrol` на ноде, admin-устройство через `-remote`. Нода старше v0.31.0 отвечает
+  `the node runs a version before v0.31.0, which does not list the keys its Yggdrasil service lets in`.
+
+#### Что видят пиры
+
+Профиль Yggdrasil через пир — свой или публичный — это три слоя, один в другом:
+
+1. **Линк телефона до пира** — по URI пира. `tls://`, `quic://` и `wss://` шифруют линк TLS: в сети видно
+   соединение TLS или QUIC с адресом пира, но не протокол Yggdrasil. `tcp://` и `ws://` — без TLS: рамки
+   и рукопожатие Yggdrasil видны на проводе, содержимое всё равно зашифровано (слой 2).
+2. **Сквозное шифрование Yggdrasil** — между ключом устройства и ключом ноды. Пир пересылает кадры, но прочесть их
+   не может. Выдать себя за ноду он тоже не может: адрес ноды в сети (`200::/7`) выводится из её ключа, а подобрать
+   ключ под чужой адрес практически невозможно. Это шифрование классическое, не постквантовое.
+3. **VLESS к `inner`** — внутри идёт VLESS с шифрованием `mlkem768x25519plus` (постквантовым) к адресу ноды в сети
+   и её порту выхода; ключ этого шифрования — из ссылки. Дальше `inner` выпускает трафик в интернет, как у
+   DNS-туннелей.
+
+**Что видит пир, через который идёт клиент.** Не содержимое, а метаданные:
+
+- IP-адрес телефона — он прямой собеседник пира;
+- какой ключ говорит с каким: ключи источника и назначения открыты в каждом кадре
+  ([spec/lan-v1.md](spec/lan-v1.md) §2.1), то есть «этот адрес ходит к этой ноде»;
+- сколько и когда.
+
+У публичного пира это видит чужой оператор, а по документации Yggdrasil и другие узлы общей сети могут узнать,
+кто с кем соединён. Цензор в сети клиента видит соединение с адресом из публичных списков пиров: такие адреса
+легко узнать и заблокировать.
+
+**Чем помогает свой пир.** Трафик клиентов через него видит ваш сервер, а не чужой оператор, и его адреса нет в
+публичных списках. С `tls://` на 443 линк до него — соединение TLS с обычным VPS; по рукопожатию TLS-клиент yggdrasil-go
+от браузера отличим, а при активной проверке виден узел Yggdrasil: сразу после TLS пир сам шлёт своё приветствие с
+ключом. Но с пустым `AllowedPublicKeys` к нему может подключиться любой, кто узнал адрес: спросить у пира список его
+пиров (ключи ноды и подключённых сейчас устройств, без IP-адресов; [spec/lan-v1.md](spec/lan-v1.md) §2.1) и слать кадры
+клиентам, идущим через пир, мимо фильтра ноды — их защищает только фильтр в клиенте (там же, §2.3). От посторонних это
+закрывает `AllowedPublicKeys` (шаг 4). Устройства всех пользователей ноды он пускает, так что друг до друга через пир
+они достают и с ним.
 
 ### DNS-туннели: dnstt (`dns`), masterdns (`mdns`), slipstream (`slip`)
 
@@ -1934,7 +2692,7 @@ QUIC — только с отдельным переключателем «naive
 ### Удалённый API (`api`)
 
 - **Что это.** Свой TCP-порт за SPA с взаимной проверкой сертификатов. Нужен для трёх вещей: регистрации устройств
-  по приглашению (QR), управления нодой с телефона или своего компьютера и для relay.
+  по приглашению (QR), управления нодой с телефона или своего компьютера и для relay (§6.7).
 - **После установки по умолчанию:** выключен, если не указан в `-services`.
 - **Добавить:**
 
@@ -1959,7 +2717,7 @@ QUIC — только с отдельным переключателем «naive
 | Возможность | Что даёт | По умолчанию | Кто включает | Команда | Как проверить | Цена и риск |
 |---|---|---|---|---|---|---|
 | **Ping через ноду** | настоящий ping и traceroute через профиль naive (§11) | выкл. | настройку — группа или admin-устройство; `apply` — root | `rayctl service set naive icmp=on`, затем `rayctl apply`. В Niko: экспериментальная настройка «Ping через ноду» | `grep -o -- -icmp /etc/systemd/system/niko-naive.service` печатает `-icmp`; на телефоне — тест из §11 | naive перезапускается; нода шлёт ICMP от своего адреса по просьбе клиентов, до 30 в секунду на пользователя |
-| **UDP naive датаграммами** (с v0.30.0) | UDP через naive по QUIC: пакеты теряются поодиночке, а не задерживают друг друга | выкл. | настройку — группа или admin-устройство; `apply` — root | `rayctl service set naive udp=on`, затем `rayctl apply` | `grep -o -- -udp /etc/systemd/system/niko-naive.service` печатает `-udp`; у naive в подписке `udp=1` | naive перезапускается; его QUIC объявляет датаграммы прошедшим SPA; клиенты без второго движка naive не замечают ничего |
+| **UDP naive датаграммами** (с v0.30.0) | UDP через naive по QUIC: пакеты теряются поодиночке, а не задерживают друг друга | выкл. | настройку — группа или admin-устройство; `apply` — root | `rayctl service set naive udp=on`, затем `rayctl apply` | `grep -o -- -udp /etc/systemd/system/niko-naive.service` печатает `-udp`; у naive в подписке `udp=1`; пользуются ли — `rayctl metrics`, `raycontrol_naive_udp_requests_total` (§8) | naive перезапускается; его QUIC объявляет датаграммы прошедшим SPA; клиенты без второго движка naive не замечают ничего, а Niko с ним по записям репозитория ещё не выпущен |
 | **Политика выхода: BitTorrent** | закрыть BitTorrent на всех профилях сразу, в ядре | открыт | root | `rayctl egress block bittorrent` | `rayctl egress`: `bittorrent blocked`, `in force yes` | зашифрованный BitTorrent по TCP всё равно проходит |
 | **Политика выхода: SMTP** | закрыть TCP 25 на всех профилях | открыт | root | `rayctl egress block smtp` | `rayctl egress` | почта в телефоне не страдает: 465 и 587 открыты |
 | **Политика выхода: локальные сети** (с v0.27.0) | ядро не пускает data plane в собственные и локальные сети ноды | **закрыты** | root | открыть: `rayctl egress allow local`; закрыть: `rayctl egress block local` | `rayctl egress`: `local networks blocked`, строки `local exempt` | открывать не стоит: проверки процессов остаются, но страховки ядра больше нет |
@@ -1970,11 +2728,12 @@ QUIC — только с отдельным переключателем «naive
 | **Автообновление** | нода сама ставит патч-версии ночью | выкл. | root | `rayctl update auto patch` | `rayctl update status` | нода раз в ~6 ч спрашивает GitHub; обновление рвёт соединения на минуту |
 | **Обновление с телефона** | admin-устройство может обновить ноду | выкл. | root | `rayctl update remote on` | `rayctl update status`: `remote on` | кто владеет admin-устройством, тот выбирает момент обновления |
 | **Зеркало обновлений Niko** | клиенты качают новую версию Niko с ноды, когда GitHub недоступен | выкл. | группа или admin-устройство | `rayctl app-mirror on` | `rayctl app-mirror` | нужен 1 ГиБ свободного места; нода раз в ~6 ч спрашивает GitHub |
-| **Relay** | вход через второй хост перед нодой | нет | root | `rayctl relay add`, `rayctl relay bundle` (§12.4) | `rayctl relay list` | второй сервер; адрес relay доходит до портов сервисов без SPA |
+| **Relay** | вход через второй хост перед нодой | нет | `relay add` — группа; пакет relay — root | `rayctl relay add`, `rayctl relay bundle` (§6.7) | `rayctl relay list` | второй сервер; адрес relay доходит до портов сервисов без SPA |
 | **Запасные зоны DNS-туннеля** | клиент уходит на другую зону, когда основную режут | нет | группа или admin-устройство; `apply` — root | `rayctl service set dns spare_zones=2`, затем `rayctl apply` | `rayctl service list`; `rayctl dns check -now` | до 4 зон; больше записей в DNS |
 | **Окно отладки** | подробные журналы на время разбора | закрыто | root | `rayctl debug on -for 30m` | `rayctl debug` | в журнал попадают адреса клиентов; сервисы перезапускаются при открытии и закрытии |
 | **Сводка от клиентов** | как профили работают в сетях клиентов; подсказки порядка профилей | выкл. | группа или admin-устройство | `rayctl summary on` | `rayctl summary` | клиенты шлют отчёты только с согласия пользователя |
-| **Публичные пиры Yggdrasil** | запасной путь к ноде через сеть Yggdrasil | нет | группа или admin-устройство; `apply` — root | `rayctl service set ygg peers=…`, затем `rayctl apply` (§8) | `rayctl -json service list` — у `ygg` есть `peers` | нода видна в сети Yggdrasil; обход лимитов изменённым клиентом |
+| **Новое имя сервера по расписанию без wildcard** (naive и REALITY, с v0.29.0) | смена имени раз в 90 дней и при сертификате через HTTP-01 | выкл.: без wildcard-сертификата имя меняется только командой | группа или admin-устройство | `rayctl service set naive rotate_sni=on` (REALITY — так же) | `rayctl service list`, столбец `KEYS` | следующее имя видно в журналах CT всю эпоху, в одном списке с остальными именами ноды |
+| **Пиры Yggdrasil** (публичные или свой) | запасной путь к ноде через сеть Yggdrasil | нет | группа или admin-устройство; `apply` — root | `rayctl service set ygg peers=…`, затем `rayctl apply` (§8, «Свой пир») | `rayctl -json service list` — у `ygg` есть `peers` | нода видна в сети Yggdrasil; обход лимитов изменённым клиентом |
 | **TCP 443 без SPA** | REALITY отвечает всем: молчащий на 443 хост заметнее | за SPA | группа или admin-устройство | `rayctl service set reality open=true` | `rayctl -json service list` — у reality `open` | активное зондирование 443 становится возможным и для naive, DoH и Yggdrasil |
 | **Потолки Hysteria2** | ограничить скорость одного соединения | нет | группа или admin-устройство | `rayctl service set hy2-masq up_mbps=500` | в выводе команды | — |
 | **PIN у приглашения** | QR без PIN бесполезен | без PIN | тот, кто делает приглашение | `rayctl device invite … -pin` (§10) | `rayctl device list`: `PIN (5 tries)` | PIN надо сообщить другим каналом |
@@ -2068,7 +2827,7 @@ u-k3f9-x2qa  0     50G    monthly, day 1  2026-11-14 13:59Z  2026-12-01 00:00Z  
 - Байты, прошедшие через ноду, идут в лимит трафика пользователя.
 - `rayctl user lan ИМЯ on` ещё раз — новый пароль сети; отзыв любого устройства пользователя тоже меняет пароль.
 
-**Автообновление и обновление с телефона** — §12.3. **Relay** — §12.4. **Окно отладки** — §12.1.
+**Автообновление и обновление с телефона** — §12.3. **Relay** — §6.7. **Окно отладки** — §12.1.
 
 **Запасные зоны.** `spare_zones=2` заводит две случайные зоны в домене ноды; `spare_zones=a.example.net,b.example.org`
 — свои; `spare_zones=none` — убрать. Нода делегирует, обслуживает и проверяет каждую, как основную; для зоны вне
@@ -2283,14 +3042,16 @@ checked: rayctl -remote laptop.rcdev status
   ```
   rayctl: device file laptop.rcdev is mode -rw-r--r--: it holds a private key, make it 0600: chmod 600 laptop.rcdev (if its filesystem keeps no modes: copy it to your home directory, chmod 600 the copy)
   ```
-- Через `-remote` работают `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `ports`, `dns`,
-  `summary`, `app-mirror`, `metrics`, `debug show` и `version`. Остальное отвечает отказом одного из трёх видов:
+- Через `-remote` работают `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `ports`, `relay list`,
+  `relay ports`, `relay set`, `dns`, `summary`, `app-mirror`, `metrics`, `debug show` и `version`. Остальное отвечает
+  отказом одного из трёх видов:
   - `… works on the node itself, not through -remote` — у `install`, `apply`, `update`, `uninstall`, `backup`,
     `restore`, `report`, `egress`, `conn-limit`, `roots`;
   - `… takes no -remote` — у `knock` и `probe`: им нужен только пакет на командной строке, запускайте их без
     `-remote`;
   - `… on the node only (rayctl as root)` — у отдельных действий внутри разрешённых команд: `service cert`,
-    `relay add`, `relay remove`, `debug on`.
+    `relay add`, `relay remove`, `relay bundle`, `debug on` (`relay bundle` не от root `rayctl` отклоняет ещё на
+    вашей машине: `must run as root`).
 - На macOS и FreeBSD команды самого сервера отказывают ещё до обращения к ноде, своим видом строки:
   `… works on a Linux node only` (§7, «`rayctl` на своей машине»).
 - Новый ключ устройству: `rayctl -remote laptop.rcdev remote rotate`.
@@ -2321,13 +3082,15 @@ device fbe632f9b3f9a754 (u-k3f9-x2qa/phone) enrolled; bundle in /root/phone.bund
 | Что нужно | Команда | Что происходит |
 |---|---|---|
 | потерян или украден телефон | `rayctl device list ИМЯ`, затем `rayctl device revoke ID` | устройство больше не пройдёт SPA, не получит подписку и не войдёт в API. С v0.27.0 у человека сразу новые учётные данные: всё, что осталось в телефоне, перестаёт действовать, его соединения рвутся. Остальные устройства человека теряют связь до ближайшей проверки соединения (Niko — до ~10 минут) и сами берут новую подписку; DoH у них не прерывается |
+| старый телефон отдали или он сломался (не украден) | `rayctl device revoke -overlap ID` | с v0.31.0: устройство так же больше не пройдёт SPA, не получит подписку и не войдёт в API, но учётные данные человека не меняются сразу, а сменяются, как по расписанию: остальные его устройства берут новые со следующей подпиской и не рвутся; то, что осталось в телефоне, работает ещё до 5 дней (команда пишет точное время). Украденный — без `-overlap` |
 | отменить неиспользованное приглашение | `rayctl device revoke ID` | приглашение перестаёт действовать |
 | приостановить человека | `rayctl user disable ИМЯ` | он снят со всех профилей на всех своих устройствах, открытые соединения рвутся за секунды |
 | вернуть | `rayctl user enable ИМЯ` | профили возвращаются с прежними учётными данными |
 | удалить насовсем | `rayctl user del ИМЯ` | пользователь, его устройства и его учётные данные удалены |
 
 `user disable`, `user enable` и `user del` при успехе ничего не печатают; `device revoke` говорит, чьё это было
-устройство и сколько учётных данных человека заменено. Проверка — `rayctl device list` (столбец `REVOKED`) и
+устройство и сколько учётных данных человека заменено (с `-overlap` — сколько сменяется, когда переход и до какого
+времени работают прежние). Проверка — `rayctl device list` (столбец `REVOKED`) и
 `rayctl user list` (столбец `ENABLED`).
 
 Отозванное устройство вернуть нельзя: выдайте новое приглашение. С v0.27.0 имя отозванного устройства свободно,
@@ -2373,6 +3136,37 @@ device 3f0c9a1e5b7d2468 (u-k3f9-x2qa/phone) revoked. u-k3f9-x2qa's credentials a
 Выключать и включать пользователя, чтобы оборвать соединения, и пересоздавать его ради новых данных больше не
 нужно.
 
+**Плановая замена: отзыв с перекрытием (с v0.31.0).** Если телефон не украден, а отдан или сломан, остальные
+устройства человека рвать незачем:
+
+```bash
+rayctl device revoke -overlap ID
+```
+
+```
+device 3f0c9a1e5b7d2468 (u-k3f9-x2qa/phone) revoked with overlap. u-k3f9-x2qa's credentials rotate (4 credentials): ...
+... switch to them
+at 2026-11-19 12:00 UTC. The old ones, which the revoked device knew, stop working at 2026-11-21 12:00 UTC ...
+```
+
+- **Что закрывается сразу** — то же, что без `-overlap`: SPA, подписка и API для этого устройства, его метка в
+  dnstt и slipstream, его ключ в Yggdrasil, его токен DoH; пароль LAN человека новый.
+- **Учётные данные человека** не меняются сразу, а сменяются так же, как по расписанию (§10.7): новые сразу в
+  подписке и сразу принимаются, переход — через 3 дня (`-cred-lead`), прежние принимаются ещё 2 дня
+  (`-cred-grace`). Остальные устройства человека берут новые со следующей подпиской; ничего не рвётся, предупреждать
+  людей не нужно.
+- **Что осталось в отозванном телефоне,** работает до конца этого срока — по умолчанию 5 дней после отзыва (при
+  нескольких таких отзывах подряд — не дольше 8). Чтобы всё-таки отрезать сразу: `rayctl user renew ИМЯ`.
+- **Если смена уже шла** (новые данные уже были в подписке), отзыв заменяет их ещё раз и начинает 3 дня заново:
+  отозванный телефон мог их получить.
+- **Если это последнее устройство человека,** `rayctl` предупредит: перекрытие тогда никого не держит и только
+  продлевает отозванному время — лучше без `-overlap` или `rayctl user renew ИМЯ` после.
+- **Повторный отзыв** того же устройства ничего не меняет, но скажет, до какого времени то, что в нём осталось, ещё
+  работает (пока не прошёл переход), и напомнит про `rayctl user renew ИМЯ`.
+- С admin-устройства через `-remote` — так же. Нода старше v0.31.0 `-overlap` не знает: `rayctl` спрашивает её
+  версию и там ничего не отзывает — обновите ноду или отзовите без `-overlap` (приглашение отзывает: данных у него
+  нет).
+
 **Устройства, отозванные до v0.27.0.** Тогда отзыв данные не менял, а повторный отзыв теперь ничего не делает.
 Поэтому обновление до v0.27.0 один раз даёт новые учётные данные каждому человеку, у которого есть отозванное
 устройство: так же, как отзыв, без перекрытия. Остальные устройства этих людей переподключаются на ближайшей
@@ -2385,8 +3179,8 @@ device 3f0c9a1e5b7d2468 (u-k3f9-x2qa/phone) revoked. u-k3f9-x2qa's credentials a
 rayctl user renew ИМЯ
 ```
 
-Всё как при отзыве: старые данные перестают действовать за секунды, устройства человека переподключаются после
-следующей подписки.
+Всё как при отзыве без `-overlap`: старые данные перестают действовать за секунды, устройства человека
+переподключаются после следующей подписки.
 
 На ноде старше v0.27.0 отзыв учётные данные не меняет; `rayctl device revoke` нового `rayctl` к такой ноде так и
 скажет. Там по-прежнему: `rayctl user disable` и `enable` — оборвать соединения, а при пути без SPA — удалить
@@ -2397,12 +3191,16 @@ rayctl user renew ИМЯ
 Ссылки в подписке — не постоянные. Нода меняет их сама:
 
 - **Учётные данные пользователя** (UUID и пароли профилей) — раз в 30 дней. Новые появляются в подписке за 3 дня
-  до смены, прежние принимаются ещё 2 дня после.
-- **Ключи REALITY и имя его сервера** — раз в 90 дней, с таким же перекрытием.
+  до смены, прежние принимаются ещё 2 дня после. Так же, вне расписания, — после `rayctl device revoke -overlap`
+  (с v0.31.0, §10.6).
+- **Ключи REALITY** — раз в 90 дней, с таким же перекрытием. **Имена сервера REALITY и naive** — тоже раз в 90
+  дней, но только под wildcard-сертификатом (с токеном Cloudflare; §8). Новое имя приходит в подписке заранее.
 
 Клиент забирает подписку сам и переходит на новые ссылки заранее.
 
-- **Что замечает пользователь: ничего.** С v0.23.0 смена не рвёт даже открытые соединения.
+- **Что замечает пользователь: обычно ничего.** С v0.23.0 смена учётных данных и ключей не рвёт открытые
+  соединения; смена имени сервера один раз перезапускает фронт (§8, naive, «Цена»): REALITY, Hysteria2 и naive по
+  QUIC переподключаются.
 - **Исключение.** Устройство, которое не выходило на связь с нодой дольше этого перекрытия — около пяти дней
   вокруг смены, — подключится не с первого раза: сначала клиент обновит подписку. Ключ устройства и доступ к
   подписке при сменах не меняются, так что заново добавлять устройство не нужно.
@@ -2632,7 +3430,10 @@ rayctl restore -i /root/node-2026-11-14.rcbak
     устройства под `added here since the backup, so not in it`, у уже отозванных — с пометкой
     `(revoked here already)`. Действующее устройство отрезано сразу; если оно нужно, выпустите для него новое
     приглашение (`rayctl device invite`);
-  - пользователи устройств, отозванных здесь после копии;
+  - пользователи устройств, отозванных здесь после копии; кроме отозванных с `-overlap`, у которых смена данных ещё
+    не дошла до перехода и нет устройств, добавленных после копии: смена идёт дальше, как шла (`restore`
+    перечисляет их под `revoked here with overlap since the backup`); устройство, добавленное после копии и
+    отозванное с `-overlap`, даёт новые данные, как любое добавленное;
   - пользователи, удалённые здесь после копии, и удалённые и созданные заново под тем же именем;
   - строки сервисов, удалённых после копии, — только эти строки;
   - ключ LAN, если LAN пользователю выключили после копии.
@@ -2724,8 +3525,8 @@ rayctl restore -i /root/node-2026-11-14.rcbak
 
 ### 12.3. Обновление ноды
 
-Обновление по шагам, вместе с relay и машинами администраторов: с v0.27.0 на v0.28.0 — §12.5, с v0.26.0 на
-v0.27.0 — §12.6.
+Обновление по шагам, вместе с relay и машинами администраторов: с v0.27.0 и новее до v0.31.0 — §12.5, с v0.26.0 —
+§12.6, затем шаги 3–6 §12.5.
 
 **Какая версия стоит:**
 
@@ -2750,10 +3551,10 @@ rayctl update -check
 ```
 
 ```
-installed v0.26.0, release v0.27.0 available: rayctl update
+installed v0.30.0, release v0.31.0 available: rayctl update
 ```
 
-или, если обновлять нечего: `raycontrol v0.27.0 is installed, the newest release`.
+или, если обновлять нечего: `raycontrol v0.31.0 is installed, the newest release`.
 
 **Обновить:**
 
@@ -2765,12 +3566,12 @@ rayctl update
 
 1. `rayctl` скачивает релиз и проверяет его так же, как установщик (§3.3): подпись, версию, контрольную сумму. Пока
    проверка не прошла, из архива ничего не запускается.
-2. Печатает `release v0.27.0 verified: its own rayctl updates the node` и передаёт обновление `rayctl` из самого
+2. Печатает `release v0.31.0 verified: its own rayctl updates the node` и передаёт обновление `rayctl` из самого
    релиза.
 3. Тот печатает состав релиза и спрашивает:
 
    ```
-   Update raycontrol v0.26.0 to v0.27.0? rayd, rayspa and the data plane restart; clients reconnect and send SPA again. Type yes to go on:
+   Update raycontrol v0.30.0 to v0.31.0? rayd, rayspa and the data plane restart; clients reconnect and send SPA again. Type yes to go on:
    ```
 
    Введите `yes`.
@@ -2782,7 +3583,7 @@ rayctl update
 Успех:
 
 ```
-raycontrol v0.27.0 is running; the previous binaries are kept for rayctl update -rollback
+raycontrol v0.31.0 is running; the previous binaries are kept for rayctl update -rollback
 ```
 
 - **Клиенты** переподключаются сами; перерыв — около минуты.
@@ -2804,7 +3605,12 @@ raycontrol v0.27.0 is running; the previous binaries are kept for rayctl update 
   пользователи и сервисы), а учётные данные пользователей остаются нынешними, с v0.27.0 — все: и новые после
   обновления до v0.27.0 или `rayctl user renew`, и сменённые ротацией. Данные, которые знают отозванные раньше
   устройства, откат не возвращает. Новые данные при откате получают пользователи устройств, отозванных после
-  обновления: их устройства переподключатся после следующей подписки. Пользователь или сервис, удалённые после
+  обновления, и с `-overlap` тоже (прежняя версия с `-cred-period 0` смену не довела бы), и, с v0.31.0,
+  пользователи устройств, добавленных после обновления: откат их убирает. Их устройства переподключатся после
+  следующей подписки. Если схема та же (откат с v0.31.0 на v0.27.0–v0.30.x), база остаётся как есть, кроме
+  одного: пользователям устройств, отозванных с `-overlap`, чья смена ещё идёт, откат при `-cred-period 0` тоже даёт
+  новые данные, остановив `rayd`, и так же `rayctl update -version` на версию до v0.31.0 (§12.5, «Если нужно
+  вернуться»). Пользователь или сервис, удалённые после
   обновления, возвращаются выключенными и с новыми учётными данными. Повторное обновление после отката не меняет
   данные второй раз тем, кого уже обновило первое, — только пользователям устройств, отозванных на прежней версии
   после отката (после второго отката — начиная с первого).
@@ -2819,15 +3625,16 @@ raycontrol v0.27.0 is running; the previous binaries are kept for rayctl update 
   ```
 
   Подпись проверяется так же.
-- **Конкретная версия:** `rayctl update -version v0.27.0`. На более старую версию нода сама не уходит: её надо
-  назвать явно.
+- **Конкретная версия:** `rayctl update -version v0.31.0`. На более старую версию нода сама не уходит: её надо
+  назвать явно. Назад на версию до v0.31.0 при `-cred-period 0` — с обновлением данных после отзывов с `-overlap`
+  (§12.5, «Если нужно вернуться»); `bootstrap.sh` релиз старше установленного поверх ноды не ставит.
 - **Только одно обновление, откат или `apply` за раз.** Второе сразу откажет: `another … is running`.
 - **Со старых версий.** С v0.15.0 и новее — просто `rayctl update`. С v0.10–v0.14 — в два шага:
   `rayctl update -version v0.15.0`, затем `rayctl update` ([RELEASE.md](RELEASE.md), «Со старых версий: ступени»).
 
 **Relay идут за обновлением ноды** (с v0.28.0). Удавшееся обновление ноды — `rayctl update`, с телефона или
 автообновлением — нода называет своим relay. Те, на которых root включил `rayctl update remote on`, обновляются
-сами, по одному (§12.4). Чтобы relay остались на своих версиях:
+сами, по одному (§6.7.9). Чтобы relay остались на своих версиях:
 
 ```bash
 rayctl update -no-relays
@@ -2850,10 +3657,10 @@ rayctl update auto patch -window 03:00-05:00
 rayd checks GitHub for releases every ~6 h and updates to a newer patch release of this minor version in the window 03:00-05:00, node time (rayctl update status)
 ```
 
-- Ставятся только **патч-версии** той же минорной: v0.27.0 → v0.27.2, но не v0.28.0. Минорные обновления — руками.
+- Ставятся только **патч-версии** той же минорной: v0.31.0 → v0.31.2, но не v0.32.0. Минорные обновления — руками.
 - **Самая новая патч-версия вашей минорной** — с v0.27.0. Нода спрашивает у GitHub последний релиз. Если это
-  патч вашей минорной, она его и ставит. Иначе — последний релиз уже новая минорная (v0.28.0) или та версия, что
-  стоит, — нода по очереди спрашивает следующие номера своей: v0.27.1, v0.27.2 и так далее, и ставит самый
+  патч вашей минорной, она его и ставит. Иначе — последний релиз уже новая минорная (v0.32.0) или та версия, что
+  стоит, — нода по очереди спрашивает следующие номера своей: v0.31.1, v0.31.2 и так далее, и ставит самый
   старший найденный. Один пропущенный номер (релиз сняли, а следом вышел исправленный) она переступает, на двух
   подряд останавливается; если последний релиз — та версия, что стоит, она спрашивает только следующий номер. За
   одну проверку — не больше 8 номеров, то есть не больше 18 запросов к GitHub. Обычно запросов 3: последний релиз
@@ -2863,15 +3670,15 @@ rayd checks GitHub for releases every ~6 h and updates to a newer patch release 
   `ok … ago:`:
 
   ```
-  patch, window 03:00-05:00: v0.28.0 is out, a new minor version, which it leaves: this node runs v0.27.0; rayctl update takes it (or an admin's phone, with remote updates on)
+  patch, window 03:00-05:00: v0.32.0 is out, a new minor version, which it leaves: this node runs v0.31.0; rayctl update takes it (or an admin's phone, with remote updates on)
   ```
 
   Всегда — в `rayctl update status`, вместе с найденным патчем, если он есть:
 
   ```
-  latest     v0.28.0
-  patch      v0.27.2, the newest patch release of v0.27.0: the auto update takes it in its window
-  newer      v0.28.0 is a new minor version: the auto update takes patch releases only; rayctl update takes it
+  latest     v0.32.0
+  patch      v0.31.2, the newest patch release of v0.31.0: the auto update takes it in its window
+  newer      v0.32.0 is a new minor version: the auto update takes patch releases only; rayctl update takes it
   ```
 
   Так с v0.27.0. Нода на v0.26.x о новой минорной не говорит и патчи своей минорной после выхода v0.27.0 сама не
@@ -2879,8 +3686,8 @@ rayd checks GitHub for releases every ~6 h and updates to a newer patch release 
 - `rayctl update -check` при новой минорной называет и самый новый патч вашей (с v0.27.0):
 
   ```
-  installed v0.27.0, release v0.28.0 available: rayctl update
-  release v0.27.2, the newest patch release of v0.27.0, available: rayctl update -version v0.27.2
+  installed v0.31.0, release v0.32.0 available: rayctl update
+  release v0.31.2, the newest patch release of v0.31.0, available: rayctl update -version v0.31.2
   ```
 - Окно — по часам сервера, не короче 30 минут; без `-window` — 03:00–05:00.
 - Ставятся только подписанные релизы и никогда не старее установленного.
@@ -2903,8 +3710,8 @@ rayctl update status
 ```
 
 ```
-installed  v0.27.0
-latest     v0.27.0
+installed  v0.31.0
+latest     v0.31.0
 remote     off
 auto       patch (window 03:00-05:00, CET +01:00)
 last       none
@@ -2921,338 +3728,92 @@ last       none
   Сразу после включения автообновления, до первой проверки, — `latest     not known yet: …`. Так с v0.27.0;
   раньше строки `latest` в этих случаях не было вовсе.
 - `last` — последнее обновление: по запросу, автообновлением или, с v0.28.0, `rayctl update` на ноде.
-- С relay (с v0.28.0) в конце — по строке на каждый: его версия и где его обновление по слову ноды (§12.4,
+- С relay (с v0.28.0) в конце — по строке на каждый: его версия и где его обновление по слову ноды (§6.7.9,
   «Что видно на ноде»).
 
 Журнал обновлений, запущенных нодой или с телефона, — `journalctl -u raycontrol-update`.
 
-### 12.4. Relay: установка и обновление
+### 12.4. Relay: обслуживание
 
-> **Не проверено на настоящем хосте.** `bootstrap.sh -relay`, `rayctl update` на relay (с v0.26.0) и обновление
-> relay по слову ноды (с v0.28.0) на настоящем relay ни разу не запускались. В CI с v0.28.0 они идут в контейнерах
-> с systemd (Debian 13, задание `relay-host`): первая установка, обновление по слову ноды, откаты, отключение
-> питания; пересылка, стук и точка замера — ещё и в сетевых пространствах имён. Держите доступ к консоли провайдера
-> relay, пока обновляете.
+Установка, проверка, обновление и удаление relay — §6.7. Здесь — то, что нужно время от времени.
 
-**Relay** — второй сервер перед нодой. Клиент стучится к нему, а ядро relay пересылает соединения к ноде. Ключей
-сервисов и расшифрованного трафика на relay нет. Нужен, когда прямой путь к ноде в сети клиента режется.
-
-**Что нужно:** отдельный сервер с публичным IPv4 (нода и relay на одном хосте не живут) и сервис `api` на ноде.
-DNS-туннели и Yggdrasil через relay не ходят.
-
-**Установка.** На ноде, от root:
-
-```bash
-rayctl relay add msk 198.51.100.20
-```
-
-```bash
-rayctl relay bundle -o /root/msk.bundle msk
-```
-
-Вторая команда печатает, с каких адресов будет открыт SSH хоста relay и какой порт замера нужно открыть у его
-провайдера.
-
-- **Адреса SSH хоста relay.** Без `-admin` это адрес SSH-сессии, из которой вы запустили команду на ноде. Из
-  tmux, screen или с консоли адреса нет, и команда откажет: `the relay host's SSH needs admin addresses (-admin)`.
-  Тогда задайте их сами: `rayctl relay bundle -admin 198.51.100.50 -o /root/msk.bundle msk`. Впишите адрес, с
-  которого будете заходить на хост relay.
-- **В пакете relay — его закрытый ключ.** Скопируйте файл **только** на хост relay и удалите его на ноде:
+- **Каждый день** — строки relay в конце `rayctl update status` на ноде (§6.7.7, §6.7.9): `current` — relay на
+  версии ноды и на связи; `unknown` — его точка замера с нодой не связана; `failed` и `rolled_back` — §6.7.9,
+  «Если relay сообщил о сбое».
+- **Ваш адрес сменился** — заменить адреса SSH хоста relay, без нового пакета, на ноде:
 
   ```bash
-  shred -u /root/msk.bundle
+  rayctl relay set -admin 198.51.100.50 msk
   ```
 
-- **Файрвол провайдера relay.** Команды, которая печатает полный список портов relay, нет: печатается только
-  порт замера. Нужны ещё его SSH, порты, которые он пересылает (TCP и UDP 443, порт подписки и порт API ноды), и
-  его собственный диапазон SPA. Проще всего открыть у провайдера relay весь входящий трафик.
-
-На хосте relay, от root, из обычной SSH-сессии:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/arngory/raycontrol/v0.27.0/install/bootstrap.sh -o bootstrap.sh
-```
-
-```bash
-bash bootstrap.sh -relay /root/msk.bundle
-```
-
-Скрипт — тот же, что в §3.1: сверьте его так же. Файл `/root/msk.bundle` на хосте relay после установки удалите:
-установка сохранила свою копию в `/etc/raycontrol/relay.bundle`.
-
-Успех:
-
-```
-relay msk up: knocks with K_relay open the exit's services through here (exit 203.0.113.7).
-This host's SSH (port 22) is reachable from 198.51.100.50, the relay's own admin addresses (rayctl relay set on the exit).
-```
-
-- Установка relay закрывает на его хосте всё, кроме пересылки и SSH с адресов администратора relay. Если проверка не
-  проходит — например, ваш адрес не входит в список, — установка сама снимает периметр и оставляет хост открытым.
-- **Аварийного входа на хост relay нет.** У него нет аварийного пакета устройства, и `rayctl knock` к relay не
-  стучится. Если ваш адрес сменился, путь один — на ноде заменить список адресов SSH relay, без нового пакета:
-  `rayctl relay set -admin 198.51.100.50 msk`. Relay берёт новый список в пределах минуты. Нет доступа и к ноде —
-  остаётся консоль провайдера relay.
-- Убрать relay — на ноде: `rayctl relay remove msk`. Только это отнимает у его адреса доступ к портам сервисов.
-- Снять установку с хоста relay — на нём: `rayctl uninstall`. Команда возвращает всё, что меняла установка
-  relay, и хост снова открыт.
-
-**Обновление relay с v0.26.0: `rayctl update` на хосте relay.** От root, из обычной SSH-сессии с адреса
-администратора relay:
-
-```bash
-rayctl update -check
-```
-
-```bash
-rayctl update
-```
-
-- Релиз берётся и проверяется так же, как на ноде (§12.3): подпись, версия из подписи, назад — только с
-  `-version` или `-force`, `-from DIR` для хоста без доступа к GitHub. Релиз новее установленного ставит `rayctl`
-  самого релиза.
-- Дальше — то же, что повторная установка с сохранённым пакетом (ниже): новые `rayspa`, `rayd` и `rayctl`, затем
-  `rayctl install -relay /etc/raycontrol/relay.bundle` новой версии. Новый пакет с ноды не нужен.
-- До любых изменений `rayctl update` проверяет пакет relay и вашу SSH-сессию: sshd на одном порту, сессия на нём,
-  её адрес в списке администратора relay. Если адреса нет в списке, обновление отказывает и подсказывает команду для
-  ноды: `rayctl relay set -admin <список>,<ваш адрес> msk`, затем `rayctl update` снова. Из tmux или с консоли
-  адрес неизвестен: будет только предупреждение.
-- Пока идёт `bootstrap.sh -relay`, обновление не начинается: `another rayctl install -relay is running`.
-- После установки проверяется, что работает новый `rayspa` и его таблица применила периметр (адреса администратора,
-  пересылка сервисов к ноде), пересылка включена, SSH открыт с адресов администратора, точка замера работает, если
-  работала до обновления. Не прошло — relay возвращается к прежней версии с прежними юнитами и снимком периметра:
-
   ```
-  rayctl: update failed, the previous version runs again: …
+  relay msk: the relay takes the new SSH access with its next snapshot (within a minute)
   ```
 
-  Если не поднимается и прежняя, `rayctl` снимает периметр и оставляет хост открытым, без пересылки, и так и пишет:
-  запереть вас relay не может. Тогда — повторная установка (ниже).
-- `rayctl update -rollback` — вернуть версию до последнего обновления вручную.
-- **Обновление оборвалось** (kill -9, пропало питание): следующий `rayctl update` отказывает и пишет
-  `an update of this relay from … to … was interrupted: rayctl update -rollback puts … back`. Так и сделайте:
-  `rayctl update -rollback` возвращает прежнюю версию, даже если хост остался открытым. Ctrl-C и обрыв SSH
-  обновление не обрывают: оно само доводит откат до конца. Подробно, по шагам, —
-  [spec/node-update-v1.md](spec/node-update-v1.md) §5.
-- **Не перезагружайте и не выключайте хост relay, пока идёт обновление.** systemd остановит всё, откат не сможет
-  снова запустить службы, и после загрузки relay может оказаться открытым и без пересылки. Тогда после загрузки
-  выполните `rayctl update -rollback` (или повторную установку с пакетом, ниже); прервано ли обновление, говорит
-  `rayctl update status`. Обновление по слову ноды (ниже) после такой загрузки откатывает сам root на relay; ручное —
-  нет.
-- `rayctl update status` на relay: установленная версия, сохранённая для отката, прерванное обновление, если было; с
-  v0.28.0 — ещё `remote` и последнее обновление по слову ноды (ниже). Своего автообновления у relay нет:
-  `rayctl update auto` на нём отказывает (`a relay follows its exit: rayctl update remote on takes the releases the
-  exit names`). Обновить relay прямо с телефона нельзя: у relay нет API rayd для устройств.
-- Пересылка прерывается на время обновления: обычно меньше минуты, а если нода не отвечает и обновление
-  откатывается — до 5 минут. Клиенты переподключаются.
-- **Что проверено.** Модульные тесты, весь путь обновления и отката — на временных каталогах. На настоящем хосте relay
-  с systemd `rayctl update` **ни разу не запускался**, в CI его нет (см. в начале раздела).
+  Список заменяется целиком, через запятую. `relay set` может и admin-устройство (`-remote`). Нет доступа и к
+  ноде — §6.7.3, «Аварийного входа на хост relay нет».
+- **Другой порт sshd на relay** — по шагам, не закрывая текущую сессию на relay (открытое соединение смену
+  периметра и перезапуск sshd переживает):
 
-**Обновление relay по слову ноды (с v0.28.0).** Нода, обновившись, называет свою новую версию каждому своему relay.
-Relay, на котором root это разрешил, обновляется сам: качает релиз с GitHub или зеркал, проверяет его своим ключом и
-ставит тем же `rayctl update`, что вы запускаете руками, с той же проверкой и откатом. По умолчанию выключено. Relay
-идут за любым удавшимся обновлением ноды: с телефона, автообновлением и `rayctl update` на ноде (кроме
-`rayctl update -no-relays`, §12.3).
+  1. Если у провайдера relay есть файрвол — откройте в нём tcp/2222.
+  2. На relay добавьте в `sshd_config` вторую строку `Port 2222` рядом с `Port 22`, затем `systemctl restart ssh`.
+  3. На ноде `rayctl relay set -ssh-port 2222 msk`; через минуту откройте новую сессию к relay на порт 2222.
+  4. На relay уберите `Port 22`, затем `systemctl restart ssh`.
 
-Что нужно:
+  Пока у sshd на relay два порта, `rayctl update` там (и по слову ноды тоже) отказывает, ничего не меняя: relay
+  держит ровно один порт sshd (§6.7.3). Порядок следует из кода, на relay не проверялся; консоль провайдера relay
+  держите под рукой.
+- **На ноде появился сервис со своим портом** (например, `api`) — relay пересылает и его, без нового пакета:
+  откройте его у провайдера relay (`rayctl relay ports msk`, §6.7.6).
+- **Новый пакет relay** (`rayctl relay bundle`) — когда хост relay мог утечь, а убирать его вы не хотите, или
+  установка потеряла пакет. Старый пакет перестаёт работать сразу, у relay новые диапазон SPA и порт замера: откройте
+  их у провайдера relay, поставьте новый пакет `bootstrap.sh -relay` (§6.7.5).
+- **Перезагрузка хоста relay** — обычный `reboot`: `rayspa` и `rayd-relay` поднимаются сами. Только не во время
+  обновления relay (§6.7.8).
+- **Хост relay потерян или захвачен** — сразу `rayctl relay remove` на ноде (§6.7.11).
 
-- relay на v0.28.0 или новее. Relay на v0.27.0 и раньше слова ноды не понимает: один раз обновите его руками (выше;
-  relay до v0.26.0 — повторной установкой, ниже);
-- нода на v0.28.0 или новее;
-- на relay работает точка замера `rayd relay`: слово ноды слушает она.
+### 12.5. Обновление с v0.27.0 и новее до v0.31.0
 
-**Включить.** На хосте relay, от root:
+Для ноды на v0.27.0, v0.28.x, v0.29.0 или v0.30.0 и её relay. Нода на v0.26.0 обновляется сразу на v0.31.0 по шагам
+§12.6: всё, что там сказано о v0.27.0, случится в этом же обновлении, а строки вывода назовут v0.31.0; затем — шаги
+3–6 этого раздела.
 
-```bash
-rayctl update remote on
-```
+Что изменилось после v0.27.0, коротко:
 
-Что вы должны увидеть:
-
-```
-the exit may now name a release for this relay: a signed one, newer than it; the relay downloads and verifies it itself (rayctl update remote off)
-```
-
-Если видите другое:
-
-| Что вы видите | Причина | Что делать |
-|---|---|---|
-| `this relay has no raycontrol-relay-update.path yet (installed by a release before the update by the exit's word): rayctl update first` | relay старше v0.28.0 | `rayctl update` на relay, затем снова `rayctl update remote on` |
-| `the relay's probe endpoint (rayd relay) does not run: it takes the exit's word; a new bundle from the exit has one …` | пакет relay без точки замера (выдан до v0.11.0) | на ноде `rayctl relay bundle -o /root/msk.bundle msk`, на relay `bash bootstrap.sh -relay` с новым пакетом (ниже) |
-| `remote is on, but its units did not start: …` | systemd не запустил юниты обновления | `systemctl status raycontrol-relay-update.path`, затем снова `rayctl update remote on` |
-
-**Выключить:** `rayctl update remote off`. Запрос, который ждал, удаляется; relay остаётся на своей версии.
-Выключателя на ноде нет: придержать один relay (запасной, на старой версии) можно только на нём самом.
-
-**Что происходит после обновления ноды.**
-
-1. Нода обновляется сама и проверяет себя. Relay её не ждут, и она их не ждёт. Если обновление ноды откатилось или
-   не удалось, relay ничего не делают: они идут за последним удавшимся, пока нода на нём.
-2. Нода называет версию relay по одному, по порядку имён (как в `rayctl relay list`): клиент, который ходит через
-   relay, теряет один путь за раз. Следующий relay ждёт, пока предыдущий не кончит, но не дольше 40 минут его
-   очереди. Relay, который докладывал и пропал до своей очереди, держит следующих ещё до 40 минут, пока нода его
-   ждёт: так каждый держит очередь до 40 минут до неё и до 40 минут в ней.
-3. Relay с `remote on` пишет запрос. Root на relay проверяет его заново: только подписанный релиз, только новее
-   установленного, не ниже v0.26.0. Взломанная нода не поставит на relay ни свою сборку, ни старую версию.
-4. Дальше — то же, что `rayctl update` руками: скачивание, установка, проверка, при сбое откат. Пересылка через этот
-   relay прерывается: обычно меньше минуты, до ~5 минут, если обновление откатывается.
-5. Relay докладывает ноде итог, и очередь идёт к следующему.
-
-- Версию, обновление на которую на relay откатилось (и ту, с которой его откатили руками `rayctl update -rollback`),
-  он больше не берёт: двигает только более новая или `rayctl update -version V` на нём руками.
-- Сбой до изменений (GitHub и зеркала недоступны, подпись не та, обновление оборвалось до первого изменения) —
-  повтор через 6 часов.
-- Relay пишет не больше одного запроса за 10 минут и шести за сутки, что бы ни называла нода.
-- Relay, выключенный надолго, после включения сразу идёт на версию, на которой нода сейчас.
-- Обновление по слову ноды, которое оборвалось после первого изменения (таймаут, `systemctl stop`, выключение), root
-  на relay откатывает сам: сразу или после следующей загрузки. Ручное обновление он не трогает.
-
-**Что видно на relay.** `rayctl update status` от root:
-
-```
-host       relay
-installed  v0.28.1 (rayctl)
-previous   v0.28.0 (rayctl update -rollback)
-remote     on: the exit names the release (raycontrol-relay-update.path active); rayctl update remote off
-last       done: v0.28.0 → v0.28.1, by exit, 2026-11-20T03:41:12Z
-latest     rayctl update -check asks GitHub
-auto       does not apply: a relay follows its exit
-```
-
-- `last` — последнее обновление по слову ноды: состояние, в скобках код причины (таблица ниже), версии, кто и когда.
-  После `rayctl update -rollback` руками или повторной установки здесь — они (`by root (…)`).
-- `held` — версии, которые на relay не удержались, `error` — текст ошибки целиком. В нём бывают адреса: файл
-  статуса relay читают только root и `rayd relay`. Не от root вместо строки `last` —
-  `last       not readable by this user (root's and rayd relay's): sudo rayctl update status`.
-- `remote off` — строка `remote     off (default): rayctl update remote on takes the releases the exit names`.
-- `remote on`, а юнит не работает (например, systemd остановил его за слишком частые запросы) — ещё строка
-  `warning: raycontrol-relay-update.path is not active: systemctl enable --now raycontrol-relay-update.path`. Так и
-  сделайте; если systemd отказывает — сначала `systemctl reset-failed raycontrol-relay-update.path`.
-- `rayctl update -check` на relay говорит, обновляет ли его нода: `…; the releases its exit names update it too
-  (rayctl update remote off)` или `…; rayctl update remote on takes the releases its exit names`.
-- Журнал самого обновления — `journalctl -u raycontrol-relay-update`; что relay услышал от ноды и что ей сказал —
-  `journalctl -u rayd-relay` (строки `relay update …`).
-
-**Что видно на ноде.** `rayctl update status` после своих строк печатает по строке на каждый relay:
-
-```
-last       done: v0.28.0 → v0.28.1, by alice/phone (remote), 2026-11-20T03:38:02Z
-relay      msk: v0.28.1, done (v0.28.0 → v0.28.1), 2026-11-20T03:41:12Z
-relay      spb: v0.28.0, running (v0.28.0 → v0.28.1), 2026-11-20T03:42:40Z
-relay      tver: v0.28.0, waiting for spb
-```
-
-| Строка relay | Что значит |
-|---|---|
-| `unknown: no word from it (an older relay, or its rayd relay does not run)` | relay ни разу не докладывал: он старше v0.28.0, у него нет точки замера или он ещё не подключался |
-| `off: root on msk has not allowed it (rayctl update remote on there)` | relay младше ноды, а `remote` на нём выключен |
-| `current` | relay на версии ноды или новее; или ноде сейчас нечего называть (идёт её обновление, последнее было с `-no-relays`) |
-| `waiting for spb`, `waiting for its turn` | его очередь ещё не пришла |
-| `offered v0.28.1, …` | его очередь: версия названа, ответа ещё нет; не дольше 40 минут |
-| `requested (… → …)`, `running (… → …)` | запрос записан, обновление идёт |
-| `done (… → …)` | relay обновлён и проверен |
-| `rolled_back (… → …), …, КОД: …` | не вышло, прежняя версия relay работает снова; эту версию relay больше не возьмёт |
-| `failed (… → …), …, КОД: …` | отказ или сбой; код — ниже |
-
-`-json` даёт то же полем `relays`. В журнал действий ноды (`rayctl audit`) идёт только смена состояния relay
-(`relay.update …`), не больше 20 строк в час на relay.
-
-**На телефоне администратора.** Нода отдаёт строки relay в `GetUpdateStatus` (поле `relays`: имя, версия, состояние,
-время, код причины). Niko 1.54.0 — админка для v0.27.0 — их пока не показывает: покажет более поздний выпуск Niko.
-До него смотрите `rayctl update status` на ноде. Строка последнего обновления самой ноды в Niko есть и сейчас; с
-v0.28.0 в ней видно и ручное обновление (`by rayctl on the node`).
-
-**Если relay сообщил о сбое.** Код — в строке relay на ноде и в строке `last` на relay:
-
-| Код | Что случилось | Что делать |
-|---|---|---|
-| `policy` | `remote` на relay выключили, пока запрос ждал | ничего; включить снова — `rayctl update remote on` на relay |
-| `stale` | запрос пролежал больше часа, прежде чем root его взял | ничего: сбой до изменений, relay попросит тот же выпуск снова через 6 часов |
-| `version` | версия не новее установленной, ниже v0.26.0 или уже не удержалась на relay; или relay отказался сам: на нём не релизная сборка | ничего; нужную версию — `rayctl update -version V` на relay руками |
-| `busy` | на relay шло ручное обновление (замок не взят за 3 минуты) или relay отложил запрос: 6 часов после сбоя без изменений, не больше одного запроса за 10 минут и шести за сутки | ничего: relay повторит сам; сразу — `rayctl update` на relay |
-| `unfinished` | прошлое обновление relay руками не кончилось | на relay `rayctl update status` скажет, что делать (обычно `rayctl update -rollback`) |
-| `bundle` | пакета relay нет или его не прочесть | на ноде `rayctl relay bundle`, на relay `bash bootstrap.sh -relay` с новым пакетом |
-| `ssh` | снимок периметра не пустит SSH на порт sshd relay | на ноде `rayctl relay set -admin …`; sshd на relay — на одном порту |
-| `download` | ни GitHub, ни зеркала не отдали релиз | на relay `rayctl update -check`: открыт ли оттуда GitHub; relay повторит через 6 часов; без GitHub — `rayctl update -from DIR` на relay руками |
-| `signature` | подпись не та, или зеркало отдало другой релиз | relay повторит через 6 часов; если повторяется — сообщите: релиз или зеркало подменяют |
-| `place` | первый бинарник не встал (нет места на диске) | освободить место на relay; ничего не изменилось |
-| `install` | установка новой версии не прошла (например, нода не дала первый снимок за 45 с); откат выполнен | relay на прежней версии; причина — `journalctl -u raycontrol-relay-update` на relay |
-| `check` | проверка после установки не прошла; откат выполнен | то же |
-| `interrupted` | обновление оборвалось (таймаут юнита, `systemctl stop`, выключение, kill): `rolled_back` — root на relay откатил его сам; `failed` до первого изменения — ничего не тронуто, повтор через 6 часов | обычно ничего; если `rayctl update status` на relay говорит о незаконченном обновлении — `rayctl update -rollback` там |
-| `open` | прежняя версия не вернулась: relay открыт и не пересылает, SSH на нём открыт отовсюду | на relay `rayctl update -rollback` или повторная установка (ниже) |
-| `not_taken` | запрос ждал час, а root на relay его не взял | на relay `systemctl status raycontrol-relay-update.path`; `systemctl reset-failed` и `systemctl enable --now` этого юнита |
-| `no_word` | relay замолчал: час без итога после `requested` или `running`, или очередь ушла дальше без его ответа (40 минут) | на relay `rayctl update status` и `journalctl -u rayd-relay`; связь relay с нодой |
-| другой код | relay новее ноды | показан как есть; подробности — `rayctl update status` на relay |
-
-**Relay до v0.26.0 и запасной путь.** `rayctl` relay старше v0.26.0 отказывает:
-
-```
-rayctl: this host is a relay: install/bootstrap.sh -relay with its bundle takes a new release
-```
-
-Такой relay, а также relay, который `rayctl update` оставил открытым, получает новый релиз повторной установкой
-поверх — теми же двумя командами на хосте relay:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/arngory/raycontrol/v0.27.0/install/bootstrap.sh -o bootstrap.sh
-```
-
-```bash
-bash bootstrap.sh -relay /etc/raycontrol/relay.bundle
-```
-
-Скрипт ставит последний опубликованный релиз; тег в адресе — версия самого скрипта, сверьте её сумму, как в
-§3.1. После такого запуска relay на последнем релизе, и дальше его обновляет `rayctl update`. Relay на v0.25.1 и
-старше так обновляется в последний раз.
-
-- `/etc/raycontrol/relay.bundle` — копия пакета relay, которую установка оставила на его хосте. Новый пакет relay
-  с ноды для обновления не нужен. Если на ноде с тех пор выполняли `rayctl relay bundle`, прежний уже не действует:
-  перенесите новый и укажите его.
-- Запускайте из SSH-сессии с адреса администратора relay: установка проверяет, что после неё вы сможете зайти
-  снова.
-- На время установки пересылка прерывается, клиенты переподключаются.
-- Разумно обновлять relay вместе с нодой. Пример зависимости: предел новых соединений на адрес действует на relay,
-  только когда на нём стоит v0.24.0 или новее.
-- **Что проверено.** В CI relay проверяется в сетевых пространствах имён (пересылка, стук, точка замера),
-  модульными тестами шагов установки, в том числе повторной поверх прежней, и с v0.28.0 — в контейнерах с systemd
-  (Debian 13): первая установка `bootstrap.sh -relay` и обновления по слову ноды. Повторная установка поверх
-  прежней целиком в CI не запускается. Запуск с путём
-  `/etc/raycontrol/relay.bundle` следует из кода: установка читает пакет relay до любых изменений и не переписывает
-  файл с тем же содержимым.
-
-### 12.5. Обновление с v0.27.0 на v0.28.0
-
-Для ноды на v0.27.0 и её relay. Нода на v0.26.0 обновляется сразу на v0.28.0 по шагам §12.6: всё, что там сказано о
-v0.27.0, случится в этом же обновлении, а строки вывода назовут v0.28.0. Relay обновит шаг 12 там же; затем — шаги
-4–5 этого раздела.
-
-Что меняется в v0.28.0, коротко:
-
-- relay могут обновляться по слову ноды: после удавшегося обновления ноды — сами, по одному. Включает это root на
-  каждом relay, по умолчанию выключено (§12.4);
-- `rayctl update` на ноде виден в `rayctl update status` и на телефоне (`by rayctl on the node`), и relay идут за
-  ним; с `rayctl update -no-relays` — не идут (§12.3);
-- `rayctl update status` на ноде показывает relay;
-- DoH нового пользователя работает сразу: раньше нода узнавала токен его устройства только через время до 30 секунд;
-- `rayctl report` и `rayctl probe` скрывают и адреса, которые раньше пропускали: IPv6, который кончается на `::`
-  (`2001:db8::/32`), IPv6 с IPv4 внутри (`64:ff9b::198.51.100.9`), IPv6 перед двоеточием и IPv4 с ведущим нулём
-  (`203.0.113.05`).
+- **v0.28.0** — relay могут обновляться по слову ноды, по одному; включает это root на каждом relay (§6.7.9).
+  `rayctl update` на ноде виден в `rayctl update status` и на телефоне (`by rayctl on the node`), relay идут и за ним,
+  кроме `rayctl update -no-relays` (§12.3). Свежая установка без DNS-туннеля больше не падает на первом `apply`.
+  DoH нового пользователя работает сразу. `rayctl report` и `rayctl probe` скрывают больше видов адресов.
+- **v0.28.1** — укрепление `rayspa` по итогам фаззинга; неудачная установка relay говорит, почему.
+- **v0.29.0** — имя сервера naive меняется эпохами под wildcard-сертификатом и по команде
+  `rayctl service rotate <naive> [-now]`; REALITY при плановой смене без wildcard имя оставляет (§8, naive и REALITY).
+- **v0.30.0** — флаг `udp` у naive: UDP датаграммами HTTP/3, по умолчанию выключен (§8, naive).
+- **v0.31.0** — `rayctl service peer-keys` для своего пира Yggdrasil (§8), `rayctl relay ports` и все порты хоста
+  relay в `rayctl relay bundle` (§6.7.6), счётчики UDP naive в `rayctl metrics` (§8, naive).
 
 **Что произойдёт само и что нет.**
 
-- **Автообновление v0.28.0 не поставит:** это новая минорная версия (§12.3). Обновить — `rayctl update` на ноде или
+- **Автообновление v0.31.0 не поставит:** это новая минорная версия (§12.3). Обновить — `rayctl update` на ноде или
   с телефона администратора, если на ноде `rayctl update remote on`.
-- **База не меняется** (схема 15): откат её не возвращает и ничего не спрашивает.
+- **База не меняется** (схема 15): откат её не возвращает и ничего не спрашивает (но после отзывов с `-overlap` —
+  ниже, «Если нужно вернуться»).
 - **Клиентам ничего делать не надо.** Как при любом обновлении, `rayd`, `rayspa` и data plane перезапускаются:
   клиенты переподключаются, перерыв — около минуты.
-- **Relay сами на v0.28.0 не перейдут:** на v0.27.0 у них нет того, что слушает слово ноды. Один раз — руками (шаг
-  3). До тех пор relay работают, как работали.
-- **Машины администраторов:** новых команд для `-remote` нет, прежний `rayctl` годится.
+- **naive** (если нода на v0.28.x или раньше): первый рендер после обновления выбирает каждому naive следующее имя, и
+  фронт один раз перезапускается вместе с обновлением. Под wildcard-сертификатом (с токеном Cloudflare) naive,
+  созданному 90 дней назад и раньше, смена положена сразу: следующее имя появится в подписке в течение минуты, а
+  переход — через 3 дня (или вместе со сменой REALITY того же сайта, если она ближе 45 дней).
+- **REALITY без токена Cloudflare** (сертификат через HTTP-01) при следующей плановой смене оставит имя сервера;
+  ключи и shortId сменит как раньше. Прежнее поведение — `rayctl service set reality rotate_sni=on`.
+- **Флаг `udp` у naive** выключен и сам не включается: на ноде ничего не меняется, пока вы его не включите (§8).
+- **Relay на v0.27.0 и раньше сами не обновятся:** у них нет того, что слушает слово ноды. Один раз — руками
+  (шаг 3). До тех пор они работают, как работали.
+- **Машины администраторов:** прежний `rayctl` работает, но не знает новых команд (шаг 6).
 
 **Шаг 1. Резервная копия.** На ноде, от root:
 
 ```bash
-rayctl backup -o /root/node-before-v0.28.0.rcbak
+rayctl backup -o /root/node-before-v0.31.0.rcbak
 ```
 
 Заберите файл на свою машину; как проверить, что он открывается вашей фразой, — §12.6, шаг 1.
@@ -3264,17 +3825,21 @@ rayctl update -check
 ```
 
 ```
-installed v0.27.0, release v0.28.0 available: rayctl update
+installed v0.27.0, release v0.31.0 available: rayctl update
 ```
 
 ```bash
 rayctl update
 ```
 
-Строки — как в §12.3: `release v0.28.0 verified: its own rayctl updates the node`, вопрос
-`Update raycontrol v0.27.0 to v0.28.0? …` — введите `yes`, в конце
-`raycontrol v0.28.0 is running; the previous binaries are kept for rayctl update -rollback`. Флага `-no-relays` здесь
-не нужно: его знает только `rayctl` с v0.28.0, а relay на v0.27.0 за нодой и так не идут.
+Строки — как в §12.3: `release v0.31.0 verified: its own rayctl updates the node`, вопрос
+`Update raycontrol v0.27.0 to v0.31.0? …` — введите `yes`, в конце
+`raycontrol v0.31.0 is running; the previous binaries are kept for rayctl update -rollback`.
+
+- **С v0.27.0** флага `-no-relays` нет: его знает только `rayctl` с v0.28.0, а relay на v0.27.0 за нодой и так не
+  идут.
+- **С v0.28.0 и новее** relay с `remote on` после удавшегося обновления пойдут за нодой сами, по одному (§6.7.9).
+  Чтобы они остались на своих версиях — `rayctl update -no-relays`.
 
 Проверка:
 
@@ -3282,22 +3847,24 @@ rayctl update
 rayctl update status
 ```
 
-Строка `last       done: v0.27.0 → v0.28.0, by rayctl on the node, …`: это обновление записал уже `rayctl` v0.28.0.
-Если перед нодой есть relay, в конце — их строки. Пока relay на v0.27.0, у каждого
-`unknown: no word from it (an older relay, or its rayd relay does not run)`: так и должно быть до шага 3.
+Строка `last       done: v0.27.0 → v0.31.0, by rayctl on the node, …`. Если перед нодой есть relay, в конце — их
+строки: `unknown: no word from it (an older relay, or its rayd relay does not run)` у relay на v0.27.0 и раньше (так
+и должно быть до шага 3), `off: …` у relay новее v0.27.0 с `remote off`, `waiting …`, `offered …`, `running …` и
+`done …` у тех, что идут за нодой.
 
-**Шаг 3. Каждый relay — один раз руками.** На хосте relay, от root, из SSH-сессии с адреса администратора relay:
+**Шаг 3. Relay на v0.27.0 и раньше — один раз руками.** На хосте relay, от root, из SSH-сессии с адреса
+администратора relay:
 
 ```bash
 rayctl update -check
 ```
 
 ```
-installed v0.27.0, release v0.28.0 available: rayctl update
+installed v0.27.0, release v0.31.0 available: rayctl update
 this host is a relay msk: rayctl update here updates it; remote and automatic updates do not apply to a relay
 ```
 
-Вторую строку печатает `rayctl` v0.27.0; с v0.28.0 она другая (§12.4).
+Вторую строку печатает `rayctl` v0.27.0; с v0.28.0 она другая (§6.7.9).
 
 ```bash
 rayctl update
@@ -3305,12 +3872,14 @@ rayctl update
 
 Что вы должны увидеть:
 
-1. `release v0.28.0 verified: its own rayctl updates the relay`;
-2. `rayctl v0.28.0 updates the relay, handed over by the rayctl of v0.27.0`;
-3. вопрос `Update relay msk from v0.27.0 to v0.28.0? …` — введите `yes`;
-4. в конце `relay msk runs raycontrol v0.28.0; the previous binaries are kept for rayctl update -rollback`.
+1. `release v0.31.0 verified: its own rayctl updates the relay`;
+2. `rayctl v0.31.0 updates the relay, handed over by the rayctl of v0.27.0`;
+3. вопрос `Update relay msk from v0.27.0 to v0.31.0? …` — введите `yes`;
+4. в конце `relay msk runs raycontrol v0.31.0; the previous binaries are kept for rayctl update -rollback`.
 
-Пересылка через этот relay прерывается, обычно меньше минуты. Отказы и откат — §12.4.
+Пересылка через этот relay прерывается, обычно меньше минуты. Отказы и откат — §6.7.8. Relay до v0.26.0 —
+повторной установкой (§6.7.10). Relay на v0.28.0 и новее с `remote off` обновите так же или включите им `remote on`
+(шаг 4) — тогда их обновит следующее обновление ноды.
 
 **Шаг 4. Включить обновление по слову ноды** — на тех relay, которые должны идти за нодой. На хосте relay, от root:
 
@@ -3323,41 +3892,97 @@ the exit may now name a release for this relay: a signed one, newer than it; the
 ```
 
 Relay, который должен остаться на своей версии (запасной), оставьте с `remote off`: это по умолчанию. Что нужно и
-какие бывают отказы — §12.4.
+какие бывают отказы — §6.7.9.
 
 **Шаг 5. Проверить.** На ноде:
+
+```bash
+rayctl status
+```
+
+`version` — `v0.31.0`, строк `FAILED` нет. С naive — строка `naive <сервис>` с именем и строка `naive-names` (§6.2).
 
 ```bash
 rayctl update status
 ```
 
-После шагов 3 и 4 — `relay      msk: v0.28.0, current`: relay на версии ноды. Следующее удавшееся обновление ноды
-relay с `remote on` возьмут сами, по одному; что тогда видно — §12.4. На телефоне администратора строк relay пока
-нет: Niko 1.54.0 — админка для v0.27.0 — их не показывает, покажет более поздний выпуск Niko.
+После шагов 3 и 4 — `relay      msk: v0.31.0, current`: relay на версии ноды. Следующее удавшееся обновление ноды
+relay с `remote on` возьмут сами, по одному; что тогда видно — §6.7.9. На телефоне администратора строки relay
+показывает Niko 1.55.0 и новее (§6.7.9, «На телефоне администратора»).
 
-**Если нужно вернуться на v0.27.0:**
+**Файрвол провайдера перед relay.** До v0.31.0 нода называла для него только SSH и порт замера relay; диапазон SPA
+relay и пересылаемые порты были нужны и раньше, но списком не печатались. Сверьте, что открыто у провайдера relay:
 
-- **Нода:** `rayctl update -rollback`. Схема базы та же, поэтому вопроса о базе нет. Relay, которые уже на v0.28.0,
-  остаются на ней: назад relay по слову ноды не ходят, а с нодой v0.27.0 работают, как раньше.
-- **Relay:** `rayctl update -rollback` на нём. Откат на v0.27.0 убирает юниты обновления по слову ноды; `remote` в
-  `/var/lib/raycontrol-update/policy.json` остаётся, v0.27.0 его не читает. На настоящем хосте relay это не
-  проверялось.
+```bash
+rayctl relay ports msk
+```
+
+Таблица — §6.7.6. Если у провайдера relay открыт весь входящий трафик, делать ничего не нужно.
+
+**Шаг 6. Машины администраторов.** Поставьте новый `rayctl` на каждую машину, где вы пользуетесь `-remote` (§7,
+«`rayctl` на своей машине»). Прежний `rayctl` с новой нодой работает, но:
+
+- не знает `service peer-keys` (v0.31.0) и `relay ports` (v0.31.0): отвечает `rayctl: bad usage` и печатает справку;
+- не показывает имена naive в `rayctl status` и `rayctl service list` и новые строки `service rotate` у naive
+  (v0.29.0);
+- `rayctl` до v0.28.0 не знает `rayctl update -no-relays`, но на машине администратора он и не нужен.
+
+Новый `rayctl` со старой нодой: `service peer-keys` и `relay ports` отвечают, что нода старше v0.31.0 (§6.7.6, §8).
+
+**Что посмотреть после обновления** — новое, что включается не само:
+
+- смена имени naive (§8, naive): по расписанию она идёт только под wildcard-сертификатом; без токена Cloudflare —
+  командой `rayctl service rotate naive`, когда имя заблокировали;
+- UDP naive датаграммами (§8, naive) — пока клиенты его не умеют, включать незачем;
+- свой пир Yggdrasil (§8, Yggdrasil, «Свой пир») — если ставите `peers`.
+
+**Если нужно вернуться.**
+
+- **Нода:** `rayctl update -rollback`. Схема базы та же, поэтому вопроса о базе нет. Откат ниже v0.29.0 оставляет
+  фронту только текущее имя naive: устройства, которые ещё ходят по прежнему имени, теряют naive, пока не возьмут
+  подписку. Relay, которые уже обновились, остаются на своей версии: назад relay по слову ноды не ходят, а со
+  старой нодой работают, как раньше.
+
+  > **Внимание: отзывы с `-overlap` и `-cred-period 0`.** Это касается любого возврата на версию до v0.31.0:
+  > `rayctl update -rollback` и `rayctl update -version v0.30.x`. Если после обновления вы отзывали устройства с
+  > `-overlap`, а нода работает без плановой ротации (`-cred-period 0`), прежняя версия цикла ротации не запускает:
+  > начатая отзывом смена не дошла бы до перехода никогда, и то, что знало отозванное устройство, принималось бы и
+  > дальше. Поэтому `rayctl`, прежде чем ставить прежние бинарники, останавливает `rayd` и даёт новые данные сразу,
+  > как обычный отзыв, каждому пользователю, у которого смена в пути (есть следующие данные или прежние ещё
+  > принимаются после перехода), и печатает их имена; в аудите — `user.renew:rollback` или `user.renew:downgrade`.
+  > Сюда попадают и пользователи плановой смены, начатой до того, как период стал 0: это безвредно. Их остальные
+  > устройства теряют связь до следующей подписки (Niko — до ~10 минут). С `-cred-period` смену доводит прежняя
+  > версия, данные не меняются, `rayd` ради этого не останавливается. Период `rayctl` берёт из базы, куда его пишет
+  > `rayd` при старте: поменяли флаги в юните — сначала `systemctl restart rayd`, потом возврат. Если обновить данные
+  > не удалось, `rayctl update -version` ничего не ставит, а `rayd` работает дальше (сообщение это говорит);
+  > `rayctl update -rollback -no-carry` никого не трогает: тогда отрежьте отозванное сами — `rayctl user renew ИМЯ`.
+  > Назад — только через `rayctl update`: `bootstrap.sh` поверх базы ноды не ставит релиз старше того, что называет
+  > её `rayd` (и до v0.31.0, если `rayd` релиза не называет, например после `rayctl uninstall -keep-state`), а в
+  > `bootstrap.sh` старых релизов такой проверки нет. Копию v0.31 восстанавливайте `rayctl` v0.31 или новее.
+- **Relay:** `rayctl update -rollback` на нём. Откат relay на v0.27.0 убирает юниты обновления по слову ноды;
+  `remote` в `/var/lib/raycontrol-update/policy.json` остаётся, v0.27.0 его не читает. На настоящем хосте relay это
+  не проверялось.
 
 **Если что-то пошло не так.**
 
 | Что вы видите | Причина | Что делать |
 |---|---|---|
 | `rayctl: bad usage` на `rayctl update -no-relays` | `rayctl` на ноде старше v0.28.0 | обновите ноду без флага: relay на v0.27.0 за ней и так не идут |
-| на relay: `rayctl: this host is a relay: remote and automatic updates do not apply to it …` на `rayctl update remote on` | relay ещё на v0.27.0 | шаг 3, затем шаг 4 |
-| на relay: `this relay has no raycontrol-relay-update.path yet …: rayctl update first` | `rayctl` v0.28.0 (например, из архива) на relay, который ещё на v0.27.0 | шаг 3 |
-| на relay: `the relay's probe endpoint (rayd relay) does not run …` | пакет relay без точки замера | §12.4, «Обновление relay по слову ноды» |
+| `rayctl: bad usage` на `service peer-keys` или `relay ports` | `rayctl` старше v0.31.0 | шаг 6 |
+| на relay: `rayctl: this host is a relay: remote and automatic updates do not apply to it …` на `rayctl update remote on` | relay ещё на v0.27.0 или раньше | шаг 3, затем шаг 4 |
+| на relay: `this relay has no raycontrol-relay-update.path yet …: rayctl update first` | новый `rayctl` (например, из архива) на relay, который ещё на v0.27.0 | шаг 3 |
+| на relay: `the relay's probe endpoint (rayd relay) does not run …` | пакет relay без точки замера | §6.7.9 |
 | на ноде: `relay      msk: unknown: …` после шага 3 | `rayd relay` на relay не работает или не связался с нодой | на relay `systemctl status rayd-relay` и `journalctl -u rayd-relay` |
-| на ноде: `relay      msk: …, failed (…)` или `rolled_back (…)` | relay сообщил о сбое | §12.4, «Если relay сообщил о сбое» |
+| на ноде: `relay      msk: …, failed (…)` или `rolled_back (…)` | relay сообщил о сбое | §6.7.9, «Если relay сообщил о сбое» |
+| `rayctl status`: `naive-names FAILED …: name … published (switch …), but the front does not serve it: …` | naive выпал из рендера фронта: ждёт сертификата сайта или не отрисовался | строка `apply` в `rayctl status` говорит почему; клиенты, перешедшие на новое имя, вернутся на прежнее |
+| `rayctl status`, строка `apply`: сервис REALITY не попал во фронт, потому что его имя уже у другого | два REALITY на одном сайте, созданные до v0.29.0 | `rayctl service rotate ИМЯ` — новое имя второму, или удалить и добавить его заново |
 
 ### 12.6. Обновление с v0.26.0 на v0.27.0
 
-Для ноды, которая сейчас работает на v0.26.0 (после выхода v0.28.0 — по этим шагам сразу на v0.28.0, §12.5). Раздел
-можно пройти, не читая остальные: ссылки на них — только за подробностями. Что меняется в v0.27.0, коротко:
+Для ноды, которая сейчас работает на v0.26.0. Сейчас по этим шагам она обновляется сразу на v0.31.0: строки вывода
+назовут v0.31.0 вместо v0.27.0, а что ещё изменилось после v0.27.0 — §12.5 (после этого раздела пройдите там шаги
+3–6). Раздел можно пройти, не читая остальные: ссылки на них — только за подробностями. Что меняется в v0.27.0,
+коротко:
 
 - отзыв устройства сразу даёт его пользователю новые учётные данные (§10.6); при обновлении это один раз
   делается за прошлые отзывы;
@@ -3725,7 +4350,7 @@ Linux — `rayctl` из архива ноды v0.27.0, macOS и FreeBSD — ар
 - после `device revoke` ничего не печатает, хотя учётные данные человека нода сменила.
 
 **Шаг 12. Relay.** Нода v0.27.0 relay не обновляет: обновите каждый хост relay сами (с v0.28.0 relay могут идти за
-нодой, §12.4). На хосте relay, от root, из SSH-сессии с адреса администратора relay:
+нодой, §6.7.9). На хосте relay, от root, из SSH-сессии с адреса администратора relay:
 
 ```bash
 rayctl update -check
@@ -3750,11 +4375,11 @@ rayctl update
 4. в конце `relay msk runs raycontrol v0.27.0; the previous binaries are kept for rayctl update -rollback`.
 
 Проверка — `rayctl update status` на хосте relay: первые строки `host       relay` и `installed  v0.27.0 (rayctl)`.
-Подробно, с отказами и откатом relay, — §12.4. Relay на v0.25.1 и старше `rayctl update` не обновляет: его путь —
-повторная установка (§12.4, «Relay до v0.26.0 и запасной путь»).
+Подробно, с отказами и откатом relay, — §6.7.8. Relay на v0.25.1 и старше `rayctl update` не обновляет: его путь —
+повторная установка (§6.7.10).
 
 > **Не проверено на настоящем хосте.** `rayctl update` на relay не запускается в CI и ни разу не запускался на
-> настоящем relay (§12.4). Держите доступ к консоли провайдера relay, пока обновляете.
+> настоящем relay (§6.7). Держите доступ к консоли провайдера relay, пока обновляете.
 
 **Если нужно вернуться на v0.26.0:**
 
@@ -3816,8 +4441,8 @@ Type yes to go on:
 | `rayctl: bad usage` на `user renew`, `ports`, `version`, `roots` | `rayctl` старше v0.27.0 | шаг 11 |
 | `rayctl: keeping the revocations made since the update: … -no-carry …` | откат не прочитал нынешнюю базу | выше, «Если нужно вернуться» |
 | `rayctl status`: `apply FAILED …: service …: … of niko-….service failed, its process runs with the files of before …` | перезапуск службы после смены её файлов не удался; он остаётся в долгу и повторяется при каждом `apply` | `journalctl -u niko-ИМЯ -n 50` — почему юнит не стартует; исправить, затем `rayctl apply` |
-| на relay: `rayctl: this host is a relay: install/bootstrap.sh -relay with its bundle takes a new release` | на relay v0.25.1 или старше | повторная установка, §12.4 |
-| на relay: `rayctl: an update of this relay from … to … was interrupted: rayctl update -rollback puts … back` | прошлое `rayctl update` на relay оборвалось | `rayctl update -rollback`, затем снова `rayctl update` (§12.4) |
+| на relay: `rayctl: this host is a relay: install/bootstrap.sh -relay with its bundle takes a new release` | на relay v0.25.1 или старше | повторная установка, §6.7.10 |
+| на relay: `rayctl: an update of this relay from … to … was interrupted: rayctl update -rollback puts … back` | прошлое `rayctl update` на relay оборвалось | `rayctl update -rollback`, затем снова `rayctl update` (§6.7.8) |
 
 ### 12.7. Перезагрузка
 
@@ -3845,7 +4470,7 @@ Type yes to go on:
 
 | Что | Как меняется сейчас | Команда досрочной смены |
 |---|---|---|
-| учётные данные пользователей (UUID, пароли) | сами, раз в 30 дней, с перекрытием (§10.7); с v0.27.0 — и при каждом отзыве устройства, сразу | `rayctl user renew ИМЯ` — сразу, без перекрытия (с v0.27.0, §10.6) |
+| учётные данные пользователей (UUID, пароли) | сами, раз в 30 дней, с перекрытием (§10.7); с v0.27.0 — и при каждом отзыве устройства, сразу; с v0.31.0 при `device revoke -overlap` — с перекрытием, переход через 3 дня | `rayctl user renew ИМЯ` — сразу, без перекрытия (с v0.27.0, §10.6) |
 | ключи REALITY и имя его сервера | ключи — сами, раз в 90 дней; имя вместе с ними — с v0.29.0 только под wildcard-сертификатом (с токеном Cloudflare), иначе только по команде (`rotate_sni`, §8) | `rayctl service rotate reality` — через 3 дня, с публикацией заранее; `-now` — сразу; имя меняется и при HTTP-01 |
 | имя сервера naive (с v0.29.0) | само, раз в 90 дней, только под wildcard-сертификатом (с токеном Cloudflare) или с `rotate_sni=on`; прежнее имя принимается до следующей смены, а при сменах чаще раза в 90 дней — до смены через 90 дней после своей, не больше трёх прежних (§8, naive) | `rayctl service rotate naive` — через 3 дня; `-now` — сразу; при любом `rotate_sni` |
 | ключ печати dnstt | только по команде | `rayctl service rotate dns` |
@@ -3978,6 +4603,8 @@ journalctl -u rayd --since -1h | grep -i certif
 | `journalctl -b`: `Found ordering cycle` с `rayspa.service`, после загрузки нет сети или cloud-init не отработал | юнит `rayspa` с `Before=network-pre.target` и умолчаниями systemd: так его писали промежуточные сборки перед v0.27.0, в выпуск он не попал; или юнит правили руками. Он идёт до `network-pre.target`, а сетевая стадия cloud-init — до `sysinit.target`. Или `/var` либо `/var/lib` на NFS или iSCSI: так нода не поддерживается (§0, «Требования к VPS») | `rayctl apply` пишет юнит v0.27.0 с `DefaultDependencies=no`; проверка: `systemd-analyze verify /etc/systemd/system/rayspa.service` без `ordering cycle` |
 | `rayctl status`: `perimeter unknown …: rayspa follows the perimeter, its table is not reported …` | `rayspa` старее `rayd` (бинарник ставили руками) и о своей таблице не сообщает | `rayctl status` от root (строка `perimeter table`) скажет, стоит ли таблица; `rayctl update -force` ставит все бинарники релиза заново, `rayspa` тоже (простой `rayctl update` при той же версии ничего не делает) |
 | Загрузка висит ~30 с на «A start job is running for raycontrol perimeter», затем сеть поднимается, `rayspa` перезапускается | `rayspa` не прислал systemd «готов»: бинарник старой версии под новым юнитом (`Type=notify`) | `journalctl -u rayspa -b`: строка `sd_notify: READY not sent` или её отсутствие у старого бинарника; `rayctl update -rollback` или `rayctl update -force` ставят бинарник и юнит вместе |
+| через relay клиенты не подключаются, напрямую — подключаются | у провайдера relay закрыты его порты (диапазон SPA relay, пересылаемые порты) или relay не получил периметр от ноды | `rayctl relay ports ИМЯ` и файрвол провайдера relay (§6.7.6); на relay `systemctl is-active rayspa rayd-relay`, `journalctl -u rayspa` (§6.7.7) |
+| naive перестал проходить у устройств, которые давно не брали подписку, после смены имени | их имя фронт больше не обслуживает: смены чаще раза в 90 дней снимают самое старое из трёх прежних имён (`no longer accepted after the switch: …` в выводе `rayctl service rotate`) | устройству — взять подписку заново; Niko делает это сам после двух неудачных проверок соединения (§8, naive) |
 
 ### DNS-туннели
 
@@ -4010,16 +4637,16 @@ journalctl -u rayd --since -1h | grep -i certif
 | у человека отвалились все устройства сразу после обновления до v0.27.0 | у него было отозванное устройство, и обновление сменило его учётные данные (строка `… users have new credentials …` в выводе `rayctl update`) | ничего: Niko сам берёт подписку на ближайшей проверке соединения, до ~10 минут; устройство, которое так и не подключилось, — обновить подписку в Niko (кнопка «Обновить» у группы; §12.6, шаг 6) |
 | у устройства перестал работать DoH ноды после обновления, остальное работает | устройство не брало подписку дольше 72 часов после обновления (прежний общий токен больше не принимается) или нода откатилась на v0.26.0, а устройство уже взяло токен v0.27.0 | устройству — взять подписку заново: Niko 1.52.0 и новее делает это сам (§8, «DoH»), в более раннем — кнопка «Обновить» у группы; простое переподключение подписку не обновляет |
 | `rayctl: bad usage` на `user renew`, `ports`, `version` или `roots` | `rayctl` старше v0.27.0 (на своей машине или на ноде до обновления) | новый `rayctl` (§12.6, шаг 11) |
-| `this host is a relay: install/bootstrap.sh -relay …` | `rayctl update` relay старше v0.26.0 | повторная установка с пакетом, §12.4 |
-| `this host is a relay: remote and automatic updates do not apply …` | `rayctl update remote` или `auto` на хосте relay старше v0.28.0 | `rayctl update` на relay; с v0.28.0 `rayctl update remote on` там работает (§12.4) |
-| `a relay follows its exit: rayctl update remote on takes the releases the exit names` | `rayctl update auto` на хосте relay | своего автообновления у relay нет: `rayctl update remote on` на нём, §12.4 |
-| `this relay has no raycontrol-relay-update.path yet …: rayctl update first` | `rayctl` v0.28.0 на relay, который ещё не обновлён до v0.28.0 | `rayctl update` на relay, затем `remote on` снова (§12.4) |
-| `the relay's probe endpoint (rayd relay) does not run: it takes the exit's word …` | у relay нет точки замера (пакет до v0.11.0) или `rayd-relay` выключен | новый пакет: `rayctl relay bundle` на ноде, `bootstrap.sh -relay` на relay (§12.4) |
+| `this host is a relay: install/bootstrap.sh -relay …` | `rayctl update` relay старше v0.26.0 | повторная установка с пакетом, §6.7.10 |
+| `this host is a relay: remote and automatic updates do not apply …` | `rayctl update remote` или `auto` на хосте relay старше v0.28.0 | `rayctl update` на relay; с v0.28.0 `rayctl update remote on` там работает (§6.7.9) |
+| `a relay follows its exit: rayctl update remote on takes the releases the exit names` | `rayctl update auto` на хосте relay | своего автообновления у relay нет: `rayctl update remote on` на нём, §6.7.9 |
+| `this relay has no raycontrol-relay-update.path yet …: rayctl update first` | `rayctl` v0.28.0 на relay, который ещё не обновлён до v0.28.0 | `rayctl update` на relay, затем `remote on` снова (§6.7.9) |
+| `the relay's probe endpoint (rayd relay) does not run: it takes the exit's word …` | у relay нет точки замера (пакет до v0.11.0) или `rayd-relay` выключен | новый пакет: `rayctl relay bundle` на ноде, `bootstrap.sh -relay` на relay (§6.7.9) |
 | `warning: raycontrol-relay-update.path is not active: …` в `rayctl update status` на relay | path-юнит остановлен (systemd остановил его за частые запросы или его выключили руками) | `systemctl reset-failed raycontrol-relay-update.path`, затем `systemctl enable --now raycontrol-relay-update.path` |
-| на ноде `relay      ИМЯ: …, failed (…)` или `rolled_back (…)` в `rayctl update status` | relay сообщил о сбое обновления по слову ноды | код после времени — таблица в §12.4, «Если relay сообщил о сбое» |
-| `… not from the relay's admin addresses …, then rayctl update again` | SSH-сессия не с адреса администратора relay | на ноде `rayctl relay set -admin …`, затем `rayctl update` на relay, §12.4 |
-| `an update of this relay … was interrupted: rayctl update -rollback …` | прошлое обновление relay оборвалось | `rayctl update -rollback` на relay, §12.4 |
-| `the last update or rollback of this relay did not bring it back (open and not forwarding, unless its rayspa still runs) …` | прежняя версия не поднялась, хост открыт без пересылки, если `rayspa` удалось остановить | `rayctl update -rollback` или повторная установка с пакетом, §12.4 |
+| на ноде `relay      ИМЯ: …, failed (…)` или `rolled_back (…)` в `rayctl update status` | relay сообщил о сбое обновления по слову ноды | код после времени — таблица в §6.7.9, «Если relay сообщил о сбое» |
+| `… not from the relay's admin addresses …, then rayctl update again` | SSH-сессия не с адреса администратора relay | на ноде `rayctl relay set -admin …`, затем `rayctl update` на relay, §6.7.8 |
+| `an update of this relay … was interrupted: rayctl update -rollback …` | прошлое обновление relay оборвалось | `rayctl update -rollback` на relay, §6.7.8 |
+| `the last update or rollback of this relay did not bring it back (open and not forwarding, unless its rayspa still runs) …` | прежняя версия не поднялась, хост открыт без пересылки, если `rayspa` удалось остановить | `rayctl update -rollback` или повторная установка с пакетом, §6.7.10 |
 | `permission_denied: a site's certificate: root on the node only` | `rayctl service cert` не от root: с v0.26.0 импорт — только root на ноде | от root на ноде; автоматику, которая импортирует от группы `raycontrol`, перевести на root |
 | `device file … is mode …: it holds a private key, make it 0600: …` | `rayctl` v0.26.0 не читает файл устройства, открытый группе или остальным | `chmod 600 ФАЙЛ` (§10.4) |
 | `rayctl status`: `apply FAILED …: service …: … of niko-….service failed, its process runs with the files of before …` | перезапуск после смены файлов не удался; он остаётся в долгу и повторяется при каждом `apply` | `journalctl -u niko-ИМЯ -n 50` — почему юнит не стартует; исправить, затем `rayctl apply` |
@@ -4055,6 +4682,8 @@ journalctl -u rayd --since -1h | grep -i certif
 - [ ] У провайдера открыты порты из строки `must let in` и диапазоны меняющихся UDP-портов — либо весь входящий
       трафик (§6.1).
 - [ ] Сервер перезагружен после установки хотя бы раз, и после перезагрузки `rayctl status` снова без `FAILED`.
+- [ ] С relay: в `rayctl update status` у каждого relay `current`, у провайдера relay открыты порты из
+      `rayctl relay ports ИМЯ`, в подписке (`rayctl probe -payload`) relay есть (§6.7.7).
 
 **Снаружи**
 
@@ -4080,15 +4709,18 @@ journalctl -u rayd --since -1h | grep -i certif
 
 ## 15. Что готовится
 
-Этого в v0.28.0 **нет**; команд для этого не существует. Перечислено, чтобы вы не искали:
+Этого в v0.31.0 **нет**; команд для этого не существует. Перечислено, чтобы вы не искали:
 
 - ping через Hysteria2: сейчас он есть только у naive;
-- доставка релиза relay через ноду: relay качает релиз сам, с GitHub или зеркал (§12.4).
+- доставка релиза relay через ноду: relay качает релиз сам, с GitHub или зеркал (§6.7.9);
+- стук к relay из `rayctl`: `rayctl knock` и `rayctl probe` к relay не стучатся, аварийного входа на хост relay нет
+  (§6.7.3, §6.7.7);
+- relay на IPv6: адрес relay — только IPv4 (§6.7.2).
 
 На стороне клиента:
 
-- строки relay на телефоне: нода отдаёт их с v0.28.0 (§12.4, «На телефоне администратора»), Niko 1.54.0 их не
-  показывает, покажет более поздний выпуск;
+- UDP naive датаграммами HTTP/3: сторона ноды готова с v0.30.0 (§8, naive), но Niko со вторым движком naive, по
+  записям этого репозитория, ещё не выпущен ([handoff/SYNC.md](handoff/SYNC.md), строка T20);
 - настройка «Не отвечать на ping с телефона» (§11): в Niko 1.45.0 её не было, в каком выпуске она появилась,
   записи этого репозитория не говорят.
 

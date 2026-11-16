@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strings"
@@ -180,7 +181,11 @@ func Handler(root string) http.Handler {
 		st, err := os.Stat(path.Join(root, p)) //nolint:gosec // G304: cleaned, inside the site root
 		if err == nil && st.IsDir() {
 			if _, err := os.Stat(path.Join(root, p, "index.html")); err == nil { //nolint:gosec // G304: as above
-				http.Redirect(w, r, p+"/", http.StatusMovedPermanently)
+				// The site's own directory, escaped: a path on this host
+				// whatever its name holds (a backslash, which browsers read
+				// as "/", a "?", a "%").
+				to := (&url.URL{Path: p + "/"}).EscapedPath()
+				http.Redirect(w, r, to, http.StatusMovedPermanently) //nolint:gosec // G710: an existing directory of the site, escaped: a path on this host
 				return
 			}
 		}

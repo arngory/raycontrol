@@ -44,7 +44,7 @@ type Host struct {
 func NewHost(out io.Writer) *Host {
 	return &Host{
 		Run: func(name string, args ...string) ([]byte, error) {
-			return exec.Command(name, args...).CombinedOutput()
+			return exec.Command(name, args...).CombinedOutput() //nolint:gosec // G204: commands the deployment's code names, no shell
 		},
 		Out:      out,
 		LookPath: exec.LookPath,

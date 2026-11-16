@@ -27,7 +27,7 @@ func TestRevokeText(t *testing.T) {
 		{&nodev1.RevokeDeviceResponse{User: "carol", Device: "tv"}, "carol has no credentials yet", "cut"},
 		{&nodev1.RevokeDeviceResponse{}, "older than v0.27.0", "new"},
 	} {
-		got := revokeText("d1", c.r)
+		got := revokeText("d1", false, c.r)
 		if !strings.Contains(got, c.want) || (c.none != "" && strings.Contains(got, c.none)) {
 			t.Errorf("%v: %q", c.r, got)
 		}
@@ -83,6 +83,57 @@ func TestRestoreCarryText(t *testing.T) {
 		"d1  alice/phone",
 	} {
 		if !strings.Contains(got, want) || strings.Contains(got, "another node's") {
+			t.Errorf("no %q in\n%s", want, got)
+		}
+	}
+}
+
+// rayctl device revoke -overlap says that the user's credentials rotate,
+// when the switch is and when the old ones stop working, and what to do
+// for a stolen device (R4-43); a node before v0.31.0, which does not read
+// overlap, made them new at once, and rayctl says so.
+func TestRevokeOverlapText(t *testing.T) {
+	switchAt := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC).Unix()
+	until := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC).Unix()
+	rotating := &nodev1.RevokeDeviceResponse{User: "alice", Device: "phone", Credentials: 3, SwitchAt: switchAt, Until: until}
+	older := &nodev1.RevokeDeviceResponse{User: "alice", Device: "phone", Credentials: 3}
+	for _, c := range []struct {
+		r          *nodev1.RevokeDeviceResponse
+		want, none string
+	}{
+		{rotating, "revoked with overlap. alice's credentials rotate (3 credentials)", "are new"},
+		{rotating, "other devices get them with their next subscription fetch and switch to them\nat 2026-11-19 12:00 UTC", "devices are cut too,"},
+		{rotating, "The old ones, which the revoked device knew, stop working at 2026-11-21 12:00 UTC", ""},
+		{rotating, "For a stolen device revoke without\n-overlap; to cut this one off now: rayctl user renew alice", ""},
+		{older, "older than v0.31.0: it knows no -overlap", "rotate"},
+		{older, "alice's credentials are new (3 credentials)", ""},
+		{&nodev1.RevokeDeviceResponse{User: "carol", Device: "tv"}, "carol has no credentials yet", "overlap"},
+		{&nodev1.RevokeDeviceResponse{User: "alice", Device: "phone", Already: true}, "revoked already: nothing changed", "rotate"},
+	} {
+		got := revokeText("d1", true, c.r)
+		if !strings.Contains(got, c.want) || (c.none != "" && strings.Contains(got, c.none)) {
+			t.Errorf("%v: %q", c.r, got)
+		}
+	}
+	// Without -overlap, switch_at is not looked at.
+	if got := revokeText("d1", false, rotating); !strings.Contains(got, "credentials are new") || strings.Contains(got, "older than v0.31.0") {
+		t.Errorf("%q", got)
+	}
+}
+
+// rayctl restore says which revocations it carried with their rotation
+// going on (with overlap) and which gave new credentials.
+func TestRestoreCarryTextOverlap(t *testing.T) {
+	made := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	got := restoreCarryText(store.Restored{
+		Kept:    2,
+		Carried: []store.CarriedDevice{{ID: "d1", User: "alice", Name: "phone"}, {ID: "d2", User: "bob", Name: "tv", Rotating: true}},
+	}, made)
+	for _, want := range []string{
+		"their users' credentials are new, and the users'\nother devices reconnect after their next subscription fetch:\n  d1  alice/phone\n",
+		"revoked here with overlap since the backup", "the rotation the revocation began going on to its switch and grace:\n  d2  bob/tv\n",
+	} {
+		if !strings.Contains(got, want) {
 			t.Errorf("no %q in\n%s", want, got)
 		}
 	}

@@ -24,7 +24,7 @@
 | WS-6 | Ротация | планировщик: ключи и порт SPA, учётные данные пользователей с перекрытием, ключи REALITY и shortId, SNI | — |
 | WS-7 | Сертификаты и домены | ACME в коротком окне (TLS-ALPN-01) или DNS-01 через API провайдера; wildcard; проверка DNS-записей и делегирования | L-16, L-42 |
 | WS-8 | Хост и изоляция | системные пользователи с фиксированными UID, юниты с hardening, polkit для управления юнитами, sysctl, отключение stub resolved | L-04, L-07, L-53, L-55 |
-| WS-9 | Эксплуатация | bootstrap + `rayctl install`, `update` с откатом, `backup`/`restore` (R4-13), `uninstall` по журналу, статус и метрики, webhook-уведомления | L-05, L-06, L-11, L-15, L-17, L-18, L-19, L-54, L-56 |
+| WS-9 | Эксплуатация | bootstrap + `rayctl install`, `update` с откатом, `backup`/`restore` (R4-13), `uninstall` по журналу, статус и метрики, webhook-уведомления (после v0.31.0, [spec/integrations-v1.md](spec/integrations-v1.md) §4) | L-05, L-06, L-11, L-15, L-17, L-18, L-19, L-54, L-56 |
 | WS-10 | Белые списки | бэкенд `inner`, движки olcRTC и OpenFlux, аккаунты платформ в режимах `node` и `client`, проверка и резервные аккаунты | — |
 | WS-11 | Тестирование | SPA v2 (векторы), периметр в network namespace, установка в systemd-контейнерах (Debian 12/13, Ubuntu 24.04, Rocky Linux 9/10, R2-1), зондирование, PQ, изоляция, отпечатки, тестовые точки RU/CN/KZ/KG/UZ | — |
 
@@ -167,7 +167,19 @@ v0.26.0: пины ключа сертификата сайта в ссылках
 
 После второй волны — маршрутизация на ноде и наборы правил, по исследованию mihomo
 ([19-mihomo-review.md](19-mihomo-review.md), решения владельца от 2026-11-14 — в его §10):
-- наборы правил через ноду: какие списки нода держит и отдаёт клиентам, выбирает администратор;
+- наборы правил через ноду и правила администратора в подписке — черновик [spec/rules-v1.md](spec/rules-v1.md)
+  (R4-44): репозиторий списков `arngory/niko-routes` с двумя ключами (списков — у человека, свежести — в CI),
+  зеркало на ноде (какие наборы отдавать, выбирает администратор; по умолчанию выключено), поле `rules` с `enforce`
+  (`block`, `node`, `relay`, `direct`); приложение целиком по умолчанию, адаптивный режим — опция. Ключ списков
+  заводит владелец;
+- вход на relay — выход в интернет страны relay для внутренних сервисов, черновик
+  [spec/relay-entry-v1.md](spec/relay-entry-v1.md) (R4-45): naive на relay, включают root relay и администратор
+  выхода; подтверждённое приложение `inside-only` выпускает целиком, неподтверждённым — только наборы `inside-only`
+  и адреса своей страны; TLS — свой сертификат и доверие ровно к нему (ждёт API в cronet-go); риск оператора relay
+  владелец принял;
+- подлинность приложения для правил ноды — черновик [spec/app-attest-v1.md](spec/app-attest-v1.md) (R4-46):
+  аппаратная аттестация ключа Android раз в сутки, подпись ключом TEE на каждое соединение naive, тег набора в
+  CONNECT; режимы «учитывать» и «строго», по умолчанию выключено;
 - выходы ноды (второй хоп) для класса назначений: минимум — вышестоящий прокси по HTTP и SOCKS5; недоступный выход —
   отказ, а не обход напрямую;
 - по желанию администратора, выключено по умолчанию: блокировка рекламы и вредоносного по спискам; список живых
@@ -180,6 +192,51 @@ v0.26.0: пины ключа сертификата сайта в ссылках
   по §9 п. 5: hy2-masq тем же механизмом (только маршрут UDP);
 - дальше, если займёмся оркестрацией нод (ansible, в какой-то мере Kubernetes): служебная полоса между объединёнными
   нодами, по которой идёт в том числе содержимое релизов для relay (мысль владельца от 2026-11-14).
+
+**Маршрутизация QUIC во фронте по connection ID** (найдено клиентом 2026-11-16; спека
+[spec/quic-cid-route-v1.md](spec/quic-cid-route-v1.md)): фронт (udpmux) принимал новый поток только по Initial, и
+соединение QUIC (Hysteria2, naive-quic, DoH3) не переживало смену порта NAT у клиента и не могло перейти на новый
+сокет при смене слота (spa-v2 §11).
+- ~~фронт и бэкенды~~ — сделано 2026-11-16: connection ID сервера — 8 байт, Speck64/128 от метки (ID сервиса) и
+  счётчика под ключом метки (свой у каждой, из секрета ноды; бэкенд знает только свой); фронт по метке в коротком
+  заголовке или Handshake с незнакомого адреса (для hy2-obfs — после снятия salamander) заводит поток, не больше 32 в
+  секунду с источника. По ревью: Hysteria2 проверяет новый путь (раньше один подделанный пакет направлял загрузку
+  пользователя на чужой адрес), сервер не отвечает сбросом на ID, которые ещё выдаст, новый секрет перезапускает
+  читающих его. По второму ревью: у фронта ключи меток его бэкендов, а не секрет; счётчик начинается от часов.
+  niko-server — ветка к v0.18.0 (фронт, Hysteria2), raycontrol — `internal/quiccid`, naive-quic и DoH3, отрисовка.
+  Тесты: клиент Hysteria2 и клиент quic-go со сменой порта посреди соединения (в т. ч. `AddPath`/`Switch`),
+  naive-quic через настоящий фронт; классическая BPF-программа читает тот же формат (шаг (г) naive-udp-v1 §5);
+- выпуск niko-server v0.18.0 и поднятие пина: до него фронт меток не читает (опции пишутся с пина v0.18.0);
+- клиент: перенос соединения на порт нового слота вместо нового соединения — с нового сокета (port hopping
+  Hysteria2, `AddPath` quic-go) или с того же (сервис видит новый порт источника, spa-v2 §11);
+- тест в netns с `nft redirect` порта слота и переходом соединения на 443 и на порту слота, клиент с ID нулевой
+  длины (иначе предел quic-go ниже);
+- **патч quic-go: переход на путь делает ID пробы активным.** Сервер quic-go v0.64.1 (naive-quic, DoH3) переживает
+  лишь два перехода клиента со своими connection ID (spec/quic-cid-route-v1.md §5; Chromium и Hysteria2 — ID нулевой
+  длины, их это не касается). Исправить маленьким патчем в нашем форке quic-go (`replace` в go.mod, как форки Xray и
+  sing-box), тест — `TestNekoServerQUICRebindLimit` niko-server (он упадёт, когда переходов станет больше: снять
+  предел в спеке). Текст для issue upstream, отправить оттуда, где есть доступ:
+
+  > **Server keeps the old destination connection ID after switching to a validated path (RFC 9000 §9.5), and runs
+  > out of the client's connection IDs after two migrations.** quic-go v0.64.1, server side, peer with non-empty
+  > connection IDs. When a packet arrives from a new address, `pathManager.HandlePacket` (path_manager.go:123) takes
+  > an unused peer connection ID via `connIDManager.GetConnIDForPath` for the PATH_CHALLENGE. After the path is
+  > validated and the server switches (`SwitchToPath`, path_manager.go:178), the probe's connection ID stays in
+  > `connIDManager.pathProbing`; it is neither made the active connection ID nor retired, and the server keeps
+  > sending on the new path with the connection ID it used on the old one (RFC 9000 §9.5: an endpoint MUST NOT reuse
+  > a connection ID when sending to more than one destination address). With `active_connection_id_limit` 4 and
+  > sequence 0 retired, two spare IDs remain: at the third address change the server logs "skipping validation of
+  > new path ... since no connection ID is available" and never moves, and the connection dies at its idle timeout.
+  > Reproduction: a server behind a UDP relay that changes its source port three times while an HTTP/3 client
+  > (quic-go Transport with ConnectionIDLength 8) keeps making requests; the third change never completes. Expected:
+  > on switching, make the path's connection ID the active one and retire the previous one (RETIRE_CONNECTION_ID is
+  > the peer's, the server sends with the new ID), so that the spares are replenished by NEW_CONNECTION_ID as usual.
+- **адрес ответа бэкенда до проверки** (найдено вторым ревью, было и раньше): бэкенд в режиме `packet` запоминает,
+  с какого адреса фронта пришла последняя датаграмма клиента (`locals[client]`, niko-server `backend.go:268-271`,
+  raycontrol `nikoipc`), до того, как стек QUIC её проверил. Подделанная датаграмма с адресом клиента на другой порт
+  фронта (порт слота, 443) переставляет, с какого порта фронт отвечает этому клиенту: ответы уходят с порта, которого
+  клиент не ждёт, пока его следующий пакет не вернёт запись. Запоминать адрес только для датаграмм, которые стек
+  принял (или держать адрес фронта на поток), — в IPC и в обоих бэкендах.
 
 **UDP у naive датаграммами HTTP/3** ([spec/naive-udp-v1.md](spec/naive-udp-v1.md), решения §12):
 - ~~сторона ноды~~ — сделано, v0.30.0: шаг 0 и шаг 1 её §11 без замера NewReno против BBR. Запрос `connect-udp` на
@@ -199,6 +256,23 @@ v0.26.0: пины ключа сертификата сайта в ссылках
   длиннее 1250 при отпечатке Chrome, который их не шлёт (§4.5), это видно на пути. Мерить отдельно не нужно: QUIC
   ищет MTU сам по ходу соединения. Брать в работу по доле капсул вверх на живом трафике (счётчик ноды
   `capsules_in`); с ней же решить, нужна ли маскировка (размер пакета на пути не спрятать).
+
+## После v0.31.0: интеграции
+
+Решение владельца 2026-11-16: спека — сейчас, реализация — после выпуска v0.31.0 (R4-47). Черновик —
+[spec/integrations-v1.md](spec/integrations-v1.md):
+- роли `billing` и `support` на mTLS-устройствах: таблица всех методов, служебные пользователи, пределы частоты,
+  аудит (§2); новые методы `GetUser` и `SetUserExpiry`;
+- доступ без стука по списку постоянных адресов устройства; `rayctl knock -keep` и описание стука для своей
+  реализации (§3);
+- события webhook по Standard Webhooks с подписью Ed25519 — это и есть «webhook-уведомления» направления WS-9
+  (K-2): проверка адреса, очередь в базе, повторы, защита от SSRF, `rayctl webhook`, опрос `ListEvents` (§4);
+- OpenAPI подмножеств `billing` и `support` из тех же proto, шлюз для языков без `X25519MLKEM768` (§5);
+- эталонный Telegram-бот — только описание, код позже в отдельном репозитории (§7); режим опроса — позже (§8).
+
+Вопросы §14 спеки владелец закрыл 2026-11-16 («в целом по рекомендации»): HMAC только явным выбором, по умолчанию
+только служебные события, проверка адреса webhook обязательна, `ListEvents` — в v1, предохранитель массовых действий
+`billing`; пределы соединений по тарифам и интеграция через локальный сокет — позже.
 
 ## После проверки на VPS: кандидаты
 

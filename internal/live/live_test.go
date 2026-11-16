@@ -1,6 +1,7 @@
 package live
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -475,5 +476,56 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A new secret of routable connection IDs (a database restored from
+// another node, a setting lost) restarts the front and every backend that
+// reads a key of it (spec/quic-cid-route-v1.md §2): none is left on
+// another key than the front's, routing nobody (review F6). Rendered for
+// niko-server v0.18.0, which takes the keys.
+func TestApplyQUICCIDKeyChange(t *testing.T) {
+	defer render.UseNikoServer("v0.18.0")()
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	provision.Init(ctx, st, provision.Options{Host: "203.0.113.7", Domain: "example.com"})
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-obfs", Name: "hy2", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	var restarted []string
+	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: "/run/niko"}
+	a := &Applier{Store: st, Paths: paths, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Restart: func(_ context.Context, verb, unit string) error {
+			restarted = append(restarted, verb+" "+unit)
+			return nil
+		},
+		Inner: func(string) InnerAPI { return &fakeInner{} }}
+	if err := a.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{filepath.Join(paths.Rendered, "front", render.FrontQUICCIDKeys), filepath.Join(paths.Rendered, "hy2", render.QUICCIDKey)} {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatalf("not rendered: %v", err)
+		}
+	}
+	restarted = nil
+	if err := a.Apply(ctx); err != nil || len(restarted) != 0 {
+		t.Fatalf("idle apply: restarted %v, %v", restarted, err)
+	}
+	// Another secret.
+	if err := st.SetSetting(ctx, "quic_cid_key", bytes.Repeat([]byte{9}, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(restarted)
+	if !slices.Equal(restarted, []string{"try-restart niko-front.service", "try-restart niko-hy2.service"}) {
+		t.Fatalf("a new secret restarted %v", restarted)
 	}
 }

@@ -5,6 +5,9 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"maps"
+	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +19,7 @@ import (
 	"github.com/arngory/raycontrol/internal/connlimit"
 	"github.com/arngory/raycontrol/internal/dnsstats"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/provision"
 )
 
@@ -256,18 +260,43 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 	var reads []*read
 	var front dnsstats.Front
 	var frontErr error
+	// naive's datagram requests (spec/naive-udp-v1.md §7): the udp of its
+	// stats socket's line, on a service with udp=on.
+	type naiveRead struct {
+		name string
+		udp  *naive.UDPStats
+	}
+	var naives []*naiveRead
 	var wg sync.WaitGroup
 	for _, svc := range services {
-		if svc.Kind != "dnstt" || !svc.Enabled {
+		if !svc.Enabled {
 			continue
 		}
-		r := &read{name: svc.Name}
-		reads = append(reads, r)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			r.st, r.err = dnsstats.Read(ctx, s.Paths.StatsSocket(r.name))
-		}()
+		switch svc.Kind {
+		case "dnstt":
+			r := &read{name: svc.Name}
+			reads = append(reads, r)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				r.st, r.err = dnsstats.Read(ctx, s.Paths.StatsSocket(r.name))
+			}()
+		case "naive":
+			// Only with udp=on: the line of one without has no udp, and
+			// its users' bytes are the traffic loop's to read.
+			if s.NaiveUDP == nil || !provision.NaiveUDP(svc) {
+				continue
+			}
+			r := &naiveRead{name: svc.Name}
+			naives = append(naives, r)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if udp, err := s.NaiveUDP(ctx, r.name); err == nil {
+					r.udp = udp
+				}
+			}()
+		}
 	}
 	wg.Add(1)
 	go func() {
@@ -278,6 +307,11 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 	for _, r := range reads {
 		if r.err == nil {
 			addDNSTTStats(&m, r.name, r.st)
+		}
+	}
+	for _, r := range naives {
+		if r.udp != nil {
+			addNaiveUDP(&m, r.name, *r.udp)
 		}
 	}
 	// The front's: queries by zone (load: anyone can send a zone's name;
@@ -338,6 +372,63 @@ func addConnLimit(m *Metrics, s connlimit.Snapshot) {
 			m.Add("raycontrol_conn_guard_swept_total", "Conntrack entries without a socket the guard removed, by kind.", float64(k.v), "kind", k.kind)
 		}
 	}
+}
+
+// addNaiveUDP adds a naive service's datagram requests since its process
+// started (spec/naive-udp-v1.md §7), labelled by service: counts only,
+// never who or where. The datagrams dropped go by reason, every reason
+// naive has with its zero; what its reasons do not cover (a naive of
+// another version) as "other", so that they add up to its dropped.
+func addNaiveUDP(m *Metrics, service string, u naive.UDPStats) {
+	add := func(name, help string, v int64, labels ...string) {
+		m.Add(name, help, float64(v), append([]string{"service", service}, labels...)...)
+	}
+	add("raycontrol_naive_udp_requests_total", "naive's datagram requests answered 200 (connect-udp over HTTP/3) since naive started.", u.Requests)
+	add("raycontrol_naive_udp_refused_total", "naive's datagram requests refused (429: no place; 503: no socket) since naive started.", u.Refused)
+	for _, d := range []struct {
+		dir           string
+		all, capsules int64
+	}{{"in", u.In, u.CapsulesIn}, {"out", u.Out, u.CapsulesOut}} {
+		add("raycontrol_naive_udp_datagrams_total", "naive's datagrams since it started: in, sent on to destinations; out, passed to clients.", d.all,
+			"direction", d.dir)
+		add("raycontrol_naive_udp_capsules_total", "Of naive's datagrams, those that went as capsules in the request's stream, by direction.", d.capsules,
+			"direction", d.dir)
+	}
+	// naive's reasons in its order, then any other it gave; what they do
+	// not cover is "other".
+	reasons := naive.DropReasons()
+	byReason := maps.Clone(u.DroppedBy)
+	if byReason == nil {
+		byReason = map[string]int64{}
+	}
+	// Saturating: the line is a data-plane process's, whose counts may
+	// add up past int64 (traffic-limit-v1 §6).
+	var sum int64
+	for _, r := range sortedKeys(byReason) {
+		sum = addSaturating(sum, byReason[r])
+		if !slices.Contains(reasons, r) {
+			reasons = append(reasons, r)
+		}
+	}
+	if u.Dropped > sum {
+		if !slices.Contains(reasons, "other") {
+			reasons = append(reasons, "other")
+		}
+		byReason["other"] = addSaturating(byReason["other"], u.Dropped-sum)
+	}
+	for _, r := range reasons {
+		add("raycontrol_naive_udp_dropped_total", "naive's datagrams dropped, either way, by reason (spec/naive-udp-v1.md §7).", max(byReason[r], 0), "reason", r)
+	}
+}
+
+// addSaturating is a + b for counts: below zero is zero, past
+// math.MaxInt64 is math.MaxInt64.
+func addSaturating(a, b int64) int64 {
+	a, b = max(a, 0), max(b, 0)
+	if b > math.MaxInt64-a {
+		return math.MaxInt64
+	}
+	return a + b
 }
 
 // addDNSTTStats adds a dnstt service's counters, labelled by service.

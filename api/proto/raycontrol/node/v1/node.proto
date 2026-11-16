@@ -65,6 +65,17 @@ service NodeService {
   // Hysteria2's Brutal ceilings, Yggdrasil's public peers and its ceiling
   // of LAN traffic through the node (lan_relay, docs/spec/lan-v1.md §4.4).
   rpc SetServiceOption(SetServiceOptionRequest) returns (SetServiceOptionResponse);
+  // GetYggdrasilPeerKeys returns the public keys a Yggdrasil service lets
+  // in, for a peer of the operator's own (yggdrasil-go's
+  // AllowedPublicKeys, rayctl service peer-keys): the node's key in the
+  // mesh, which peers with it, then each active user's own key and each
+  // of the user's devices not revoked, for every inner UUID the node takes
+  // now (its backend's users file): these change with the devices, the
+  // users and every credential switch. Public keys only, each with its
+  // label in that file; the users' and devices' names only when asked
+  // (names). Who may list the devices may ask. Since v0.31.0; an older
+  // node answers unimplemented.
+  rpc GetYggdrasilPeerKeys(GetYggdrasilPeerKeysRequest) returns (GetYggdrasilPeerKeysResponse);
   // SetCertificate puts the operator's own certificate on a site, in place
   // of one from ACME, for every service under it (REALITY self-steal,
   // hy2-masq, naive, DoH, Yggdrasil). With ACME on, rayd renews it when it
@@ -80,7 +91,11 @@ service NodeService {
   // RevokeDevice revokes a device, or withdraws an unused invite. Revoking
   // a device changes every credential of its user at once but DoH's, whose
   // token is each device's (docs/spec/api-v1.md §5a): the user's other
-  // devices reconnect after their next subscription fetch.
+  // devices reconnect after their next subscription fetch. With overlap
+  // (v0.31.0, R4-43) the credentials rotate instead, as at a scheduled
+  // switch: the next ones published now, the switch after the lead, the
+  // old ones accepted for the grace after it; for a device given away or
+  // broken, not stolen.
   rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
   // CreateInvite returns a one-time invite ("rcinv1:..."): the client
   // registers the device itself through the remote API (R3-3).
@@ -95,7 +110,8 @@ service NodeService {
 
   // Relays in front of the node (relay-v1): one address each, which
   // reaches the service ports without SPA. Adding and removing is for
-  // root on the node only: a relay opens the perimeter.
+  // root on the node only: a relay opens the perimeter. ListRelays gives
+  // each relay's ports too (Relay.ports), for its host's firewall.
   rpc AddRelay(AddRelayRequest) returns (AddRelayResponse);
   rpc ListRelays(ListRelaysRequest) returns (ListRelaysResponse);
   rpc RemoveRelay(RemoveRelayRequest) returns (RemoveRelayResponse);
@@ -324,6 +340,27 @@ message Relay {
   string address = 2;
   int64 created_at = 3;
   uint32 probe_port = 4; // its probe endpoint, TCP and UDP (relay-v1 §9.1); 0: none
+  // Every port the relay host takes from outside, for a provider's
+  // firewall in front of it (rayctl relay ports): its SSH, its SPA range
+  // and probe endpoint once its bundle is out (rayctl relay bundle makes
+  // them), and the exit's ports it forwards, as its perimeter has them
+  // now. Since v0.31.0; empty from a node before.
+  repeated RelayPort ports = 5;
+}
+// RelayPort is a port, or a range of them, a relay host takes.
+message RelayPort {
+  // "ssh" (the relay host's own), "spa" (the relay's SPA range), "probe"
+  // (its probe endpoint), or what it forwards to the exit: "sub", "api" or
+  // the service's name.
+  string name = 1;
+  repeated string protos = 2; // "tcp", "udp"
+  uint32 from = 3;
+  uint32 to = 4;              // from for one port
+  bool forwarded = 5;         // to the exit, on the same port; else the relay host answers itself
+  // Who reaches it: "everyone" (SPA), "spa" (an address after its knock at
+  // the relay), "admin" (the relay's admin addresses, and after a knock a
+  // device allowed SSH).
+  string access = 6;
 }
 message AddRelayRequest {
   string name = 1;
@@ -352,6 +389,9 @@ message IssueRelayBundleResponse {
   repeated string admin = 3; // and its admin addresses
   bool admin_kept = 4;       // the relay's list from before, none asked for
   uint32 probe_port = 5;     // its probe endpoint, TCP and UDP (relay-v1 §9.1)
+  // Every port the relay host takes with this bundle (Relay.ports), for a
+  // provider's firewall in front of it. Since v0.31.0.
+  repeated RelayPort ports = 6;
 }
 message SetRelayAccessRequest {
   string name = 1;
@@ -740,6 +780,40 @@ message SetServiceOptionResponse {
   Service service = 1;
 }
 
+message GetYggdrasilPeerKeysRequest {
+  string service = 1; // a Yggdrasil service's name
+  // With the users' and devices' names (YggdrasilPeerKey.user, .device).
+  // Without, each key has only its label, the node's own numbers: the
+  // keys go into a config on a host outside the node, which names nobody
+  // unless the operator asks (lan-v1 §4.3).
+  bool names = 2;
+}
+message GetYggdrasilPeerKeysResponse {
+  string service = 1;
+  string node_key = 2;     // the node's ed25519 public key in the mesh, hex
+  string node_address = 3; // the node's mesh address (200::/7)
+  repeated YggdrasilPeerKey keys = 4;
+}
+// YggdrasilPeerKey is one key a Yggdrasil service lets in: a public key,
+// whose it is and from which inner UUID of the user's rotation.
+message YggdrasilPeerKey {
+  string public_key = 1; // ed25519, hex
+  string address = 2;    // its mesh address
+  string user = 3;       // the user's name; only with names
+  // The device's ID; "": the user's own key, from the UUID alone (links of
+  // rayctl user export, subscriptions before v0.20.1).
+  string device_id = 4;
+  string device = 5; // the device's name; only with names
+  // "current", "next" (in subscriptions already: clients move to it at
+  // from) or "previous" (the node still takes it until until).
+  string credential = 6;
+  int64 from = 7;  // unix seconds; next only
+  int64 until = 8; // unix seconds; previous only
+  // Its name in the backend's users file: u<user id>, -<device id> for a
+  // device's, -n for the next UUID's, -p for the previous one's.
+  string label = 9;
+}
+
 message SetCertificateRequest {
   string service = 1; // a site
   bytes chain_pem = 2; // leaf first
@@ -849,7 +923,16 @@ message CreateDeviceResponse {
   string bundle = 2; // "rcdev1:..." (docs/spec/spa-v2.md)
 }
 
-message RevokeDeviceRequest { string id = 1; }
+message RevokeDeviceRequest {
+  string id = 1;
+  // overlap: the user's credentials rotate with the overlap of a scheduled
+  // switch instead of being new at once (v0.31.0, docs/spec/api-v1.md
+  // §5a): the user's other devices move over without a cut, and what the
+  // revoked device knew is accepted until the grace after the switch ends.
+  // For a planned replacement, not a stolen device. A node before v0.31.0
+  // does not read it and makes them new at once.
+  bool overlap = 2;
+}
 message RevokeDeviceResponse {
   // invite: the ID was an unused invite, now withdrawn; nothing else
   // changed. A node before v0.27.0 answers with none of these fields.
@@ -861,8 +944,20 @@ message RevokeDeviceResponse {
   string device = 4;
   // credentials: how many of the user's credentials are new, as
   // RenewUserResponse counts them, not services, but without DoH's,
-  // which a revocation keeps (v0.27.0); 0 for a user with none yet.
+  // which a revocation keeps (v0.27.0); 0 for a user with none yet. With
+  // overlap: how many rotate.
   uint32 credentials = 5;
+  // switch_at and until, only for a revocation with overlap (v0.31.0):
+  // when the user's devices switch to the next credentials it published
+  // (unix seconds, the latest of them), and when the ones the revoked
+  // device knew stop being accepted, switch_at plus the grace. rayd's
+  // rotation runs every 10 minutes, so each comes up to 10 minutes later.
+  // 0 without overlap, with no credentials, or from an older node. For a
+  // device revoked already (already), until alone: while the rotation its
+  // revocation with overlap began has not switched, when what it knew
+  // stops being accepted (v0.31.0); 0 otherwise.
+  int64 switch_at = 6;
+  int64 until = 7;
 }
 
 message CreateInviteRequest {

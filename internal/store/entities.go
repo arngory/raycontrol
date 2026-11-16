@@ -555,14 +555,28 @@ type Rotation struct {
 
 // RotateCredentials advances every credential's rotation at now: publishes
 // next secrets that are due, switches to them at their time and drops
-// previous secrets past their grace. It returns how many rows changed.
+// previous secrets past their grace. With no period (rayd -cred-period 0)
+// nothing is due, but the switches and drops still run: a revocation with
+// overlap publishes a next secret whatever the schedule (R4-43). It
+// returns how many rows changed.
 func (s *Store) RotateCredentials(ctx context.Context, now time.Time, r Rotation, gen func() (string, error)) (int, error) {
 	changed := 0
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		t := now.Unix()
-		res, err := tx.ExecContext(ctx, `UPDATE credentials SET prev_secret = secret, prev_until = ?,
+		// The previous secret is accepted for the grace after this round,
+		// as R4-1 has it: clients that could not fetch while rayd was down
+		// keep it that long. Not a rotation a revocation with overlap
+		// began (a device of the user revoked since the current secret
+		// became current, revokedSinceCurrent; never DoH's): the grace
+		// after the switch's time, so that a round late after rayd's
+		// downtime does not lengthen what the revocation announced
+		// (R4-43). Clients moved at next_from on their own.
+		res, err := tx.ExecContext(ctx, `UPDATE credentials AS c SET prev_secret = secret,
+			prev_until = CASE WHEN coalesce((SELECT s.kind FROM services s WHERE s.id = c.service_id), '') != 'doh'
+			    AND EXISTS (SELECT 1 FROM devices d WHERE d.user_id = c.user_id AND `+revokedSinceCurrent+`)
+			  THEN next_from + ?1 ELSE ?2 + ?1 END,
 			secret = next_secret, next_secret = NULL, next_from = NULL, rotated_at = next_from
-			WHERE next_secret IS NOT NULL AND next_from <= ?`, now.Add(r.Grace).Unix(), t)
+			WHERE next_secret IS NOT NULL AND next_from <= ?2`, int64(r.Grace/time.Second), t)
 		if err != nil {
 			return err
 		}
@@ -575,6 +589,9 @@ func (s *Store) RotateCredentials(ctx context.Context, now time.Time, r Rotation
 		}
 		n, _ = res.RowsAffected()
 		changed += int(n)
+		if r.Period <= 0 {
+			return nil
+		}
 
 		rows, err := tx.QueryContext(ctx, `SELECT user_id, service_id, coalesce(rotated_at, created_at) FROM credentials
 			WHERE next_secret IS NULL AND coalesce(rotated_at, created_at) + ? <= ?`,
@@ -786,8 +803,19 @@ type Revocation struct {
 	// row the user has, one for each service the user has or had a
 	// credential on (inner's included), but DoH's, which a revocation
 	// keeps (R4-37). A count of credentials, not of the services the user
-	// has now.
+	// has now. With Overlap: how many rotate.
 	Credentials int
+	// Overlap: a revocation with overlap (RevokeDeviceOverlap), whose
+	// credentials rotate. SwitchAt is when the user's devices switch to
+	// the next credentials it published (the latest of them), Until when
+	// the credentials the revoked device knew stop being accepted:
+	// SwitchAt plus the grace. rayd's rotation loop runs every 10 minutes,
+	// so each comes up to 10 minutes later. Zero without overlap or with
+	// no credentials. For a device revoked Already, Until is when what it
+	// knew stops being accepted while a rotation that its revocation with
+	// overlap began has not switched (stillAccepted), zero otherwise.
+	Overlap         bool
+	SwitchAt, Until time.Time
 }
 
 // RevokeDevice marks a device revoked. Revocation is permanent. In the same
@@ -806,7 +834,31 @@ type Revocation struct {
 // multicast password the device knew is no longer the user's, both at
 // once. A device revoked already is no error and changes nothing
 // (Revocation.Already); an unknown one is ErrNotFound.
+// RevokeDeviceOverlap revokes for a planned replacement instead.
 func (s *Store) RevokeDevice(ctx context.Context, id string) (Revocation, error) {
+	return s.revokeDevice(ctx, id, false)
+}
+
+// RevokeDeviceOverlap is RevokeDevice for a device given away or broken,
+// not stolen (rayctl device revoke -overlap; docs/08-decisions.md, R4-43):
+// the user's credentials but DoH's rotate, unscheduled, with the overlap
+// of the scheduled rotation (R4-1), instead of being new at once. Each
+// gets a fresh next secret, which the user's other devices find in their
+// next subscription and the data plane accepts at once; they switch to it
+// after the lead, and the secret the revoked device knew is accepted for
+// the grace after that, as at a scheduled switch (rotateForRevocation; a
+// next already published is replaced). The lead and the grace are rayd's
+// (StoredRotation). So the other devices move over without a cut, and the
+// revoked device's lines work lead + grace after the revocation (2 × lead
+// + grace at most, with revocations in a row). Everything else is as
+// RevokeDevice does it: the device's own keys go at once, DoH's secret
+// stays, the LAN key is new at once (a multicast interface takes one
+// password, and the device may be in the same Wi-Fi).
+func (s *Store) RevokeDeviceOverlap(ctx context.Context, id string) (Revocation, error) {
+	return s.revokeDevice(ctx, id, true)
+}
+
+func (s *Store) revokeDevice(ctx context.Context, id string, overlap bool) (Revocation, error) {
 	var r Revocation
 	key, err := newLANKey()
 	if err != nil {
@@ -825,21 +877,64 @@ func (s *Store) RevokeDevice(ctx context.Context, id string) (Revocation, error)
 		}
 		if revoked.Valid {
 			// Revoked already (a retry): done, nothing changes, and the
-			// credentials are not changed again.
+			// credentials are not changed again. Revoked with overlap, it
+			// may still get in: the caller hears until when.
 			r.Already = true
-			return nil
+			rot, err := s.revocationRotation(ctx, tx)
+			if err != nil {
+				return err
+			}
+			r.Until, err = stillAccepted(ctx, tx, user, revoked.Int64, rot.Grace)
+			return err
 		}
 		now := s.now().Unix()
 		if _, err := tx.ExecContext(ctx, `UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, now, id); err != nil {
 			return err
 		}
-		r.Credentials, err = renewUser(ctx, tx, user, now, key, true)
+		if !overlap {
+			r.Credentials, err = renewUser(ctx, tx, user, now, key, true)
+			return err
+		}
+		r.Overlap = true
+		rot, err := s.revocationRotation(ctx, tx)
+		if err != nil {
+			return err
+		}
+		n, at, err := rotateForRevocation(ctx, tx, user, now, rot.Lead)
+		if err != nil {
+			return err
+		}
+		if r.Credentials = n; n > 0 {
+			r.SwitchAt = time.Unix(at, 0)
+			r.Until = r.SwitchAt.Add(rot.Grace)
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE users SET lan_key = ? WHERE lan_key IS NOT NULL AND id = ?`, key, user)
 		return err
 	})
 	if err != nil {
 		return Revocation{}, err
 	}
 	return r, nil
+}
+
+// stillAccepted is until when the current secret that a device of the
+// user revoked at revoked knew is still accepted, zero when it is not
+// known to be: a rotation that a revocation with overlap began and that
+// has not switched yet (a next secret, the current one older than the
+// revocation, or of its second after a switch: the chain's rule,
+// revokedSinceCurrent) accepts it until its switch plus grace, the latest
+// of the user's credentials but DoH's. A revocation without overlap renewed the
+// credentials at revoked: nothing then. After the switch the store cannot
+// tell which revocation the previous secret outlived, and says nothing.
+func stillAccepted(ctx context.Context, tx *sql.Tx, user, revoked int64, grace time.Duration) (time.Time, error) {
+	var from sql.NullInt64
+	err := tx.QueryRowContext(ctx, `SELECT max(c.next_from) FROM credentials c LEFT JOIN services s ON s.id = c.service_id
+		WHERE c.user_id = ?1 AND coalesce(s.kind, '') != 'doh' AND c.next_secret IS NOT NULL
+		  AND (coalesce(c.rotated_at, c.created_at) < ?2 OR c.rotated_at = ?2 AND c.prev_secret IS NOT NULL)`, user, revoked).Scan(&from)
+	if err != nil || !from.Valid {
+		return time.Time{}, err
+	}
+	return time.Unix(from.Int64, 0).Add(grace), nil
 }
 
 // renewUser is what a revocation does to the device's user: every

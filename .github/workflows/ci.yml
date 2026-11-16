@@ -19,6 +19,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -28,6 +30,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -45,10 +49,11 @@ jobs:
       - name: rayspa's ordering at boot
         run: RAYCONTROL_REQUIRE_SYSTEMD_ANALYZE=1 go test -count=1 -run TestRayspaNoOrderingCycle -v ./internal/deploy
       # Built from source with the module's Go: prebuilt binaries made with an
-      # older Go refuse to lint a go 1.26 module.
+      # older Go refuse to lint a go 1.27 module, and v2.5.0 could not read
+      # Go 1.27's export data.
       - name: golangci-lint
         run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
           "$(go env GOPATH)/bin/golangci-lint" run ./...
 
   perimeter:
@@ -56,6 +61,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -86,6 +93,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Fetch Xray
         run: |
           . deploy/versions.env
@@ -93,10 +102,17 @@ jobs:
           git -C xray checkout -q "$XRAY_COMMIT"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: xray/go.mod
+          # One Go for everything we ship: the go line of our go.mod (setup-go
+          # reads that line alone, so go.mod has no toolchain line), not
+          # whatever 1.27.x is newest when the job runs; GOTOOLCHAIN=local
+          # below refuses rather than fetch another Go if the fork asks for a
+          # newer one.
+          go-version-file: go.mod
           cache: false
       - name: Build Xray
         working-directory: xray
+        env:
+          GOTOOLCHAIN: local
         run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/xray" ./main
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
@@ -151,6 +167,8 @@ jobs:
       PEBBLE: github.com/letsencrypt/pebble/v2@v2.10.1
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -176,6 +194,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -198,6 +218,8 @@ jobs:
         distro: [debian12, debian13, ubuntu2404, rocky9, rocky10]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -251,6 +273,8 @@ jobs:
           - from: handoff
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -308,6 +332,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -334,6 +360,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -368,6 +396,8 @@ jobs:
           - {goos: freebsd, goarch: amd64, tests: own}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -393,60 +423,6 @@ jobs:
           go vet "${pkgs[@]}"
           go test -count=1 -run '^$' -exec true "${pkgs[@]}"
 
-  rayctl-macos:
-    # The same rayctl where it can run: built on a Mac, started, and the
-    # tests of what it does there differently from a node (where each
-    # command works, the device file's mode, the terminal without one).
-    # Not the whole suite: most of it is the node's. Advisory and bounded;
-    # not run by the Release workflow at all, so that a release never waits
-    # for a Mac runner (a called workflow sees its caller's name in
-    # github.workflow).
-    name: rayctl (macOS, run)
-    if: github.workflow != 'Release'
-    runs-on: macos-latest
-    timeout-minutes: 15
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version-file: go.mod
-      - name: Build and start
-        run: |
-          CGO_ENABLED=0 go build -trimpath -o rayctl ./cmd/rayctl
-          file rayctl
-          # expect CODE TEXT ARGS: rayctl's exit code and a line of its
-          # standard error.
-          expect() {
-            local code=$1 text=$2 status=0
-            shift 2
-            ./rayctl "$@" 2>err.txt || status=$?
-            cat err.txt
-            [ "$status" = "$code" ] || { echo "rayctl $*: exit $status, want $code"; exit 1; }
-            grep -q -e "$text" err.txt || { echo "rayctl $*: no \"$text\""; exit 1; }
-          }
-          expect 2 '^usage: rayctl'
-          # A node's command refuses in one line, before anything. With a
-          # -remote file that is not there: should the refusal ever be
-          # missing, install stops at "not through -remote" and touches
-          # nothing (bare, it would take the update lock as root first).
-          expect 1 '^rayctl: install works on a Linux node only, and this is darwin' -remote nofile.rcdev install -host 192.0.2.1
-          [ "$(grep -c . err.txt)" = 1 ] || { echo "more than a line"; exit 1; }
-          # A command for rayd says how to reach a node from here.
-          expect 1 'rayctl -remote FILE status' status
-          # A device file others can read is refused with the fix; closed to
-          # them it is read, and this one is no device file.
-          echo 'rcdev1:x' > open.rcdev
-          chmod 644 open.rcdev
-          expect 1 'chmod 600 open.rcdev' -remote open.rcdev status
-          chmod 600 open.rcdev
-          expect 1 '^rayctl: open.rcdev: ' -remote open.rcdev status
-      - name: Tests
-        run: >-
-          go test -count=1 -v
-          -run 'TestPlaces|TestSubPlaces|TestRefusal|TestMisplaced|TestMainRefuses|TestDeviceFile|TestTerminalNot|TestFlushInputPipe|TestReadSecretNoTerminal|TestOnEndSignal'
-          ./cmd/rayctl
-
   build:
     # The release archive as the Release workflow makes it, without the
     # signature: raycontrol, niko-server checked against the pinned hashes,
@@ -457,6 +433,8 @@ jobs:
         goarch: [amd64, arm64]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -477,10 +455,16 @@ jobs:
           git -C xray checkout -q "$XRAY_COMMIT"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: xray/go.mod
+          # One Go for everything we ship: the go line of our go.mod (setup-go
+          # reads that line alone, so go.mod has no toolchain line), not
+          # whatever 1.27.x is newest when the job runs; GOTOOLCHAIN=local
+          # below refuses rather than fetch another Go if the fork asks for a
+          # newer one.
+          go-version-file: go.mod
       - name: Build Xray
         working-directory: xray
         env:
+          GOTOOLCHAIN: local
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}

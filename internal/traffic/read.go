@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/xrayapi"
 )
@@ -51,6 +52,37 @@ type Reading struct {
 	// round by it (internal/connlimit).
 	Age      time.Duration
 	AgeKnown bool
+	// UDP are rayd naive's datagram requests since it started
+	// (spec/naive-udp-v1.md §7, the line's "udp"), on a service with
+	// udp=on: counts only, nothing of who or where (rayctl metrics). nil
+	// from the others, and where the field is not sane: a bad one costs
+	// the bytes nothing.
+	UDP *naive.UDPStats
+}
+
+// maxDropReasons bounds the reasons of a UDP answer: naive has ten.
+const maxDropReasons = 16
+
+// parseUDP reads the line's "udp", nil when it is not there or not sane:
+// counts below zero become zero, a reason is 1-16 of a-z, 0-9 and _.
+func parseUDP(raw json.RawMessage) *naive.UDPStats {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var u naive.UDPStats
+	if json.Unmarshal(raw, &u) != nil || len(u.DroppedBy) > maxDropReasons {
+		return nil
+	}
+	for _, p := range []*int64{&u.Requests, &u.Refused, &u.In, &u.Out, &u.CapsulesIn, &u.CapsulesOut, &u.Dropped} {
+		*p = max(*p, 0)
+	}
+	for reason, n := range u.DroppedBy {
+		if reason == "" || len(reason) > 16 || strings.Trim(reason, "abcdefghijklmnopqrstuvwxyz0123456789_") != "" {
+			return nil
+		}
+		u.DroppedBy[reason] = max(n, 0)
+	}
+	return &u
 }
 
 // monoStart anchors Mono where the kernel's clock cannot be read:
@@ -96,7 +128,8 @@ var ErrNoCounters = errors.New("no byte counters (niko-server before v0.15.0?)")
 // ReadLine asks a stats socket for its users' bytes: the line "traffic",
 // answered by one JSON line {"v": 1, "boot": "...", "users": {"u5": {"up":
 // N, "down": N}}} (niko-server v0.15.0's Hysteria2 backends, rayd naive),
-// with "limit" and "uptime" from rayd naive v0.24.0 and niko-server v0.17.0.
+// with "limit" and "uptime" from rayd naive v0.24.0 and niko-server v0.17.0,
+// and "udp" from rayd naive v0.30.0 with udp=on (Reading.UDP).
 func ReadLine(ctx context.Context, path string) (Reading, error) {
 	body, err := ask(ctx, path)
 	if err != nil {
@@ -179,6 +212,8 @@ func parseLine(body []byte) (Reading, error) {
 		} `json:"users"`
 		Limit  map[string]map[string]int64 `json:"limit"`
 		Uptime *int64                      `json:"uptime"`
+		// Read on its own (parseUDP): a bad one leaves the bytes be.
+		UDP json.RawMessage `json:"udp"`
 	}
 	// The decoder's error is not passed on: it may quote the answer (a
 	// key's path), and it goes to rayctl status.
@@ -195,7 +230,7 @@ func parseLine(body []byte) (Reading, error) {
 	if len(a.Users) > maxNames {
 		return Reading{}, fmt.Errorf("%d names, at most %d", len(a.Users), maxNames)
 	}
-	r := Reading{Boot: a.Boot, Users: make(map[string]store.TrafficCounter, len(a.Users))}
+	r := Reading{Boot: a.Boot, Users: make(map[string]store.TrafficCounter, len(a.Users)), UDP: parseUDP(a.UDP)}
 	if a.Uptime != nil && *a.Uptime >= 0 && *a.Uptime < 1<<40 {
 		r.Age, r.AgeKnown = time.Duration(*a.Uptime)*time.Second, true
 	}

@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -36,15 +35,11 @@ var ErrRefused = errors.New("subscription refused (404)")
 // HTTP is a client for the endpoint: TLS 1.3 with X25519MLKEM768 only and
 // the certificate pinned.
 func (c Client) HTTP() *http.Client {
-	pin := func(raw [][]byte, _ [][]*x509.Certificate) error {
-		if len(raw) == 0 {
+	pin := func(cs tls.ConnectionState) error {
+		if len(cs.PeerCertificates) == 0 {
 			return errors.New("no certificate")
 		}
-		cert, err := x509.ParseCertificate(raw[0])
-		if err != nil {
-			return err
-		}
-		sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+		sum := sha256.Sum256(cs.PeerCertificates[0].RawSubjectPublicKeyInfo)
 		got := base64.RawURLEncoding.EncodeToString(sum[:])
 		if subtle.ConstantTimeCompare([]byte(got), []byte(c.Pin)) != 1 {
 			return fmt.Errorf("certificate pin %s, want %s", got, c.Pin)
@@ -55,9 +50,12 @@ func (c Client) HTTP() *http.Client {
 		TLSClientConfig: &tls.Config{
 			MinVersion:       tls.VersionTLS13,
 			CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
-			// The pin replaces the chain check: the certificate is self-signed.
-			InsecureSkipVerify:    true, //nolint:gosec // G402: pinned in VerifyPeerCertificate
-			VerifyPeerCertificate: pin,
+			// The pin replaces the chain check: the certificate is
+			// self-signed. VerifyConnection runs on every handshake, a
+			// resumed one too; VerifyPeerCertificate would skip resumed
+			// sessions, should a session cache ever be set.
+			InsecureSkipVerify: true, //nolint:gosec // G402: pinned in VerifyConnection
+			VerifyConnection:   pin,
 		},
 		ForceAttemptHTTP2: true,
 	}}

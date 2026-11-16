@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -91,6 +92,16 @@ type Options struct {
 	MaxStreams     int64
 	PendingStreams int
 	MaxHeaderBytes int
+	// ConnIDs makes the server's connection IDs, ConnIDLen bytes each: the
+	// IDs with the backend's label the front routes a client by when its
+	// address changes (internal/quiccid, spec/quic-cid-route-v1.md); nil,
+	// random ones of ConnIDLen. A client whose address changes is answered
+	// at the new one once quic-go has validated the path (its server's
+	// path manager; the packet socket gives each datagram its address).
+	// A generator that knows its IDs to come (Ahead, quiccid.Generator)
+	// has the packets for them dropped before quic-go would answer them
+	// with a stateless reset (aheadConn).
+	ConnIDs quic.ConnectionIDGenerator
 	// Datagrams announces HTTP/3 datagrams (RFC 9297): the transport
 	// parameter max_datagram_frame_size and SETTINGS_H3_DATAGRAM, which
 	// whoever completes a handshake sees. naive with udp=on
@@ -202,9 +213,17 @@ func headerRead(h http.Handler) http.Handler {
 // X25519MLKEM768 only, ALPN h3, the certificate cert gives at each
 // handshake (certfile.Holder).
 func Serve(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInfo) (*tls.Certificate, error), h http.Handler, o Options) error {
+	if o.ConnIDs != nil && o.ConnIDs.ConnectionIDLen() != ConnIDLen {
+		// Shorter IDs would make the table of stateless reset tokens
+		// small enough to read out (ConnIDLen).
+		return fmt.Errorf("h3serve: connection IDs of %d bytes, want %d", o.ConnIDs.ConnectionIDLen(), ConnIDLen)
+	}
+	if a, ok := o.ConnIDs.(interface{ Ahead([]byte) bool }); ok {
+		pc = &aheadConn{PacketConn: pc, ahead: a.Ahead}
+	}
 	tlsConf := http3.ConfigureTLSConfig(&tls.Config{MinVersion: tls.VersionTLS13,
 		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, GetCertificate: cert})
-	tr := &quic.Transport{Conn: pc, StatelessResetKey: o.ResetKey, ConnectionIDLength: ConnIDLen,
+	tr := &quic.Transport{Conn: pc, StatelessResetKey: o.ResetKey, ConnectionIDLength: ConnIDLen, ConnectionIDGenerator: o.ConnIDs,
 		// Each connection's streams without a header, where its requests
 		// find them too: their contexts come from the connection's.
 		ConnContext: func(ctx context.Context, _ *quic.ClientInfo) (context.Context, error) {
@@ -250,6 +269,47 @@ func Serve(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInf
 		return err
 	}
 	return nil
+}
+
+// aheadConn drops a client's short-header packet for a connection ID the
+// server's generator will issue and has not yet (quiccid.Generator.Ahead).
+// quic-go answers a packet for an ID it does not know with a stateless
+// reset whose token is a function of the ID and the service's key, which
+// never changes: whoever has the label's key reads the counter in the
+// server's IDs, could collect the tokens of the IDs to come and end those
+// connections later (review of quic-cid-route-v1, F2). The socket's sizes
+// are the socket's: quic-go asks for them as of a UDP socket.
+type aheadConn struct {
+	net.PacketConn
+	ahead func([]byte) bool
+}
+
+// minShort is the shortest short-header packet with an ID of ConnIDLen
+// that quic-go could open: the header, the packet number's 4 bytes and the
+// 16 of the header protection's sample.
+const minShort = 1 + ConnIDLen + 4 + 16
+
+func (c *aheadConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	for {
+		n, addr, err := c.PacketConn.ReadFrom(b)
+		if err != nil || n < minShort || b[0]&0xc0 != 0x40 || !c.ahead(b[1:1+ConnIDLen]) {
+			return n, addr, err
+		}
+	}
+}
+
+func (c *aheadConn) SetReadBuffer(bytes int) error {
+	if s, ok := c.PacketConn.(interface{ SetReadBuffer(int) error }); ok {
+		return s.SetReadBuffer(bytes)
+	}
+	return errors.New("h3serve: the socket has no read buffer to size")
+}
+
+func (c *aheadConn) SetWriteBuffer(bytes int) error {
+	if s, ok := c.PacketConn.(interface{ SetWriteBuffer(int) error }); ok {
+		return s.SetWriteBuffer(bytes)
+	}
+	return errors.New("h3serve: the socket has no write buffer to size")
 }
 
 // serveConn serves the requests of one connection until it ends, or ctx

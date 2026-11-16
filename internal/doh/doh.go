@@ -492,8 +492,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unsupported media type", http.StatusUnsupportedMediaType)
 			return
 		}
+		// A body cut short is no message, whatever came of it: one shorter
+		// than its Content-Length, which HTTP/2 tells as an error at the
+		// stream's end and HTTP/3 (quic-go) as its end, or broken off. It
+		// gets the 400 of a bad message, not the empty 200 of a handler
+		// that wrote nothing.
 		b, err := io.ReadAll(io.LimitReader(r.Body, maxMessage+1))
-		if err != nil {
+		if err != nil || int64(len(b)) < r.ContentLength {
+			http.Error(w, "bad dns message", http.StatusBadRequest)
 			return
 		}
 		msg = b
@@ -515,7 +521,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if cache != "" {
 		w.Header().Set("Cache-Control", cache)
 	}
-	_, _ = w.Write(resp)
+	_, _ = w.Write(resp) //nolint:gosec // G705: a DNS message as application/dns-message, not a page
 }
 
 // forward asks the upstreams in turn.
@@ -536,7 +542,7 @@ func (h *Handler) forward(ctx context.Context, msg []byte) (resp []byte, cache s
 		}
 		req.Header.Set("Content-Type", "application/dns-message")
 		req.Header.Set("Accept", "application/dns-message")
-		r, err := hc.Do(req)
+		r, err := hc.Do(req) //nolint:gosec // G704: the node's own upstreams; only the body is the client's
 		if err != nil {
 			errs = append(errs, err)
 			continue

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -44,7 +45,14 @@ func (s *Server) AddRelay(ctx context.Context, req *connect.Request[nodev1.AddRe
 	if err := s.done(ctx, "relay.add "+req.Msg.Address, req.Msg.Name, err); err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(&nodev1.AddRelayResponse{Relay: relayPB(r)}), nil
+	pb := relayPB(r)
+	// As stored, its SSH port's default with it.
+	if stored, err := s.Store.RelayByName(ctx, r.Name); err == nil {
+		if services, err := s.Store.ListServices(ctx); err == nil {
+			pb.Ports = relayPorts(stored, services)
+		}
+	}
+	return connect.NewResponse(&nodev1.AddRelayResponse{Relay: pb}), nil
 }
 
 func (s *Server) ListRelays(ctx context.Context, _ *connect.Request[nodev1.ListRelaysRequest]) (*connect.Response[nodev1.ListRelaysResponse], error) {
@@ -52,11 +60,78 @@ func (s *Server) ListRelays(ctx context.Context, _ *connect.Request[nodev1.ListR
 	if err != nil {
 		return nil, toConnect(err)
 	}
+	services, err := s.Store.ListServices(ctx)
+	if err != nil {
+		return nil, toConnect(err)
+	}
 	resp := &nodev1.ListRelaysResponse{}
 	for _, r := range rs {
-		resp.Relays = append(resp.Relays, relayPB(r))
+		pb := relayPB(r)
+		pb.Ports = relayPorts(r, services)
+		resp.Relays = append(resp.Relays, pb)
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// relayPorts are the ports a relay host takes from outside, for a
+// provider's firewall in front of it (rayctl relay ports), from what its
+// perimeter is made of (RelaySnapshot): its own SSH for its admin
+// addresses (AdminPorts), its SPA range for everyone, its probe endpoint
+// and the exit's ports it forwards (relayServicesOf) after a knock. The
+// SPA range and the probe endpoint only once a bundle is out (CertPin, as
+// the subscription has it, sub.addRelays): the SPA parameters a relay may
+// have before (SetRelayAccess draws them to check its SSH port) are
+// replaced by the bundle's, and a firewall opened for them would be
+// opened for the wrong range.
+func relayPorts(relay store.Relay, services []store.Service) []*nodev1.RelayPort {
+	out := []*nodev1.RelayPort{{Name: "ssh", Protos: []string{"tcp"}, From: uint32(relay.SSHPort), To: uint32(relay.SSHPort), Access: "admin"}}
+	bundled := relay.CertPin != ""
+	if bundled && len(relay.SPA) > 0 {
+		var j node.SPAParams
+		if json.Unmarshal(relay.SPA, &j) == nil {
+			if p, err := j.Params(); err == nil && p.PortRange > 0 {
+				out = append(out, &nodev1.RelayPort{Name: "spa", Protos: []string{"tcp", "udp"}, From: uint32(p.PortBase),
+					To: uint32(p.PortBase) + uint32(p.PortRange) - 1, Access: "everyone"})
+			}
+		}
+	}
+	forwarded, scoped := relayServicesOf(relay, services)
+	if bundled && relay.ProbePort != 0 && !scoped[provision.RelayProbeSvc] {
+		out = append(out, &nodev1.RelayPort{Name: "probe", Protos: []string{"tcp", "udp"}, From: uint32(relay.ProbePort),
+			To: uint32(relay.ProbePort), Access: "spa"})
+	}
+	byID := map[uint32]store.Service{}
+	for _, svc := range services {
+		byID[uint32(svc.ID)] = svc
+	}
+	for _, ps := range forwarded {
+		if ps.Local {
+			continue // the relay host's SSH, above
+		}
+		svc := byID[ps.Id]
+		name := svc.Name
+		switch svc.Kind {
+		case "subscription":
+			name = "sub"
+		case "api":
+			name = "api"
+		}
+		// One line a port number, its protocols together (GetPorts).
+		byNum := map[uint32]*nodev1.RelayPort{}
+		for _, p := range ps.Ports {
+			rp := byNum[p.Port]
+			if rp == nil {
+				rp = &nodev1.RelayPort{Name: name, From: p.Port, To: p.Port, Forwarded: true, Access: "spa"}
+				byNum[p.Port] = rp
+				out = append(out, rp)
+			}
+			if !slices.Contains(rp.Protos, p.Proto) {
+				rp.Protos = append(rp.Protos, p.Proto)
+				slices.Sort(rp.Protos)
+			}
+		}
+	}
+	return out
 }
 
 func (s *Server) RemoveRelay(ctx context.Context, req *connect.Request[nodev1.RemoveRelayRequest]) (*connect.Response[nodev1.RemoveRelayResponse], error) {
@@ -196,11 +271,15 @@ func (s *Server) issueRelayBundle(ctx context.Context, req *nodev1.IssueRelayBun
 	if err != nil {
 		return nil, err
 	}
-	if err := s.Store.IssueRelay(ctx, relay.Name, store.RelayIssue{SPA: spaJSON, SSHPort: sshPort, Admin: admin, CertPin: CertPin(cert.Leaf),
+	certPin := CertPin(cert.Leaf)
+	if err := s.Store.IssueRelay(ctx, relay.Name, store.RelayIssue{SPA: spaJSON, SSHPort: sshPort, Admin: admin, CertPin: certPin,
 		ProbePort: probePort, ProbePin: probePin}); err != nil {
 		return nil, err
 	}
-	return &nodev1.IssueRelayBundleResponse{Bundle: bundle, SshPort: uint32(sshPort), Admin: admin, AdminKept: kept, ProbePort: uint32(probePort)}, nil
+	// The relay as the bundle makes it: its ports for its host's firewall.
+	relay.SPA, relay.SSHPort, relay.Admin, relay.ProbePort, relay.CertPin = spaJSON, sshPort, admin, probePort, certPin
+	return &nodev1.IssueRelayBundleResponse{Bundle: bundle, SshPort: uint32(sshPort), Admin: admin, AdminKept: kept, ProbePort: uint32(probePort),
+		Ports: relayPorts(relay, services)}, nil
 }
 
 // relayAccess checks the relay host's SSH port and admin list asked for,

@@ -84,7 +84,7 @@ type Host struct {
 func System(out io.Writer) *Host {
 	return &Host{
 		Run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			return exec.CommandContext(ctx, name, args...).CombinedOutput()
+			return exec.CommandContext(ctx, name, args...).CombinedOutput() //nolint:gosec // G204: commands the detection's code names, no shell
 		},
 		LookPath: func(name string) error { _, err := exec.LookPath(name); return err },
 		Out:      out,

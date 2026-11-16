@@ -641,7 +641,7 @@ func (c *cli) uninstall(ctx context.Context, args []string) error {
 }
 
 func run(name string, args ...string) error {
-	out, err := exec.Command(name, args...).CombinedOutput()
+	out, err := exec.Command(name, args...).CombinedOutput() //nolint:gosec // G204: commands rayctl's code names, no shell
 	if err != nil {
 		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -277,6 +278,58 @@ echo '{"state":"done","version":"v0.27.1","release":"v0.27.1"}' > "$RAYCONTROL_U
 			t.Errorf("%s: %+v, rolled back %d", name, st, f.rolled)
 		}
 	}
+}
+
+// A private mirror the relay's update went through (RAYCONTROL_MIRRORS in
+// the update unit's environment) is named in the download's error: in the
+// outcome the update writes, in its last lines when it wrote none. Root's
+// status of the relay's updates, all that rayd relay reads of them and
+// tells the exit, names it by its place alone; the update's own error, in
+// the unit's journal, by its name.
+func TestRelayStatusNamesNoMirror(t *testing.T) {
+	t.Setenv("RAYCONTROL_MIRRORS", "https://ghfast.top/ https://user:s3cret@mirror.corp.example:8443/gh/")
+	got := `downloading SHA256SUMS: Get \"https://user:***@mirror.corp.example:8443/gh/https://github.com/arngory/raycontrol/releases/download/v0.27.1/SHA256SUMS\": ` +
+		`dial tcp: lookup mirror.corp.example on 127.0.0.53:53: no such host`
+	hidden := func(name, text string) {
+		t.Helper()
+		for _, leak := range []string{"mirror.corp", "corp.example", "user", "s3cret", "***"} {
+			if strings.Contains(text, leak) {
+				t.Errorf("%s: %q in %q", name, leak, text)
+			}
+		}
+		if !strings.Contains(text, `Get "<mirror 2 of 2>/https://github.com/`) || !strings.Contains(text, "lookup <mirror 2 of 2> on") {
+			t.Errorf("%s: %q", name, text)
+		}
+	}
+	for name, script := range map[string]string{
+		"outcome":    `echo '{"state":"failed","version":"v0.27.0","error":"` + got + `","untouched":true,"reason":"download"}' > "$RAYCONTROL_UPDATE_RESULT"; exit 1`,
+		"last lines": `echo "rayctl: ` + got + `" >&2; exit 1`,
+	} {
+		f := newFakeRunner(t)
+		f.rayctl(script)
+		f.request("v0.27.1")
+		st, _ := f.run()
+		if st.State != nodeupdate.Failed {
+			t.Errorf("%s: %+v", name, st)
+		}
+		hidden(name, st.Error)
+	}
+
+	// The update writes its outcome so, and returns its error whole.
+	f := newFakeRelay(t)
+	f.env.result = f.at("result.json")
+	f.env.stage = func(context.Context, updateOpts, string, string) (staged, error) {
+		return staged{}, fetchReason(errors.New(strings.ReplaceAll(got, `\"`, `"`)))
+	}
+	_, err := f.update(updateOpts{want: "v0.26.1", yes: true})
+	if err == nil || !strings.Contains(err.Error(), "lookup mirror.corp.example on") {
+		t.Errorf("the update's own error: %v", err)
+	}
+	res, ok := nodeupdate.ReadResult(f.env.result)
+	if !ok || res.Reason != nodeupdate.ReasonDownload {
+		t.Fatalf("%+v %v", res, ok)
+	}
+	hidden("the update's outcome", res.Error)
 }
 
 // A relay's update that ended with no outcome and left the exit's mark

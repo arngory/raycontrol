@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -144,12 +143,8 @@ func TestEndpoint(t *testing.T) {
 	go srv.Serve(ctx, addr, f.tlsCfg)
 	time.Sleep(200 * time.Millisecond)
 
-	pin := func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		c, err := x509.ParseCertificate(rawCerts[0])
-		if err != nil {
-			return err
-		}
-		sum := sha256.Sum256(c.RawSubjectPublicKeyInfo)
+	pin := func(cs tls.ConnectionState) error {
+		sum := sha256.Sum256(cs.PeerCertificates[0].RawSubjectPublicKeyInfo)
 		want, _ := provision.SPKIPin(f.cert)
 		if base64.RawURLEncoding.EncodeToString(sum[:]) != want {
 			return errors.New("pin mismatch")
@@ -158,7 +153,7 @@ func TestEndpoint(t *testing.T) {
 	}
 	client := func(curves ...tls.CurveID) *http.Client {
 		return &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, VerifyPeerCertificate: pin, CurvePreferences: curves}}}
+			InsecureSkipVerify: true, VerifyConnection: pin, CurvePreferences: curves}}}
 	}
 	get := func(c *http.Client, auth bool) (*http.Response, error) {
 		req, _ := http.NewRequest("GET", "https://"+addr+sub.Path, nil)

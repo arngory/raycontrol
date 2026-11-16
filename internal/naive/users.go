@@ -412,8 +412,8 @@ type TrafficSnapshot struct {
 	// (a field rayd before v0.24.0 does not read).
 	Uptime int64 `json:"uptime"`
 	// UDP are the datagram requests' counts since the start
-	// (spec/naive-udp-v1.md §7), on a service with udp=on: for whoever
-	// reads the socket; rayd does not.
+	// (spec/naive-udp-v1.md §7), on a service with udp=on: rayd reads them
+	// for rayctl metrics (traffic.Reading.UDP, from v0.31.0).
 	UDP *UDPStats `json:"udp,omitempty"`
 }
 

@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
-	mrand "math/rand/v2"
 	"strings"
 	"sync"
 
@@ -162,10 +161,18 @@ func TLSCarrier(pkt []byte) ([]byte, error) {
 		}
 		exts = append(exts, helloExt{typ, data})
 	}
-	// Chrome shuffles its extensions, the GREASE ones staying first and last.
+	// Chrome shuffles its extensions, the GREASE ones staying first and
+	// last: Fisher-Yates on seeds from the system's random source, as
+	// BoringSSL does (RAND_bytes, a seed of 32 bits per place), like every
+	// other random part of the hello. No order follows from another.
 	if len(exts) > 2 && isGREASE(exts[0].typ) && isGREASE(exts[len(exts)-1].typ) {
 		mid := exts[1 : len(exts)-1]
-		mrand.Shuffle(len(mid), func(i, j int) { mid[i], mid[j] = mid[j], mid[i] })
+		seeds := make([]byte, 4*len(mid))
+		_, _ = rand.Read(seeds)
+		for i := len(mid) - 1; i > 0; i-- {
+			j := binary.BigEndian.Uint32(seeds[4*i:]) % uint32(i+1)
+			mid[i], mid[j] = mid[j], mid[i]
+		}
 	}
 
 	var b cryptobyte.Builder

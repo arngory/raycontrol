@@ -16,6 +16,7 @@ import (
 
 	"github.com/arngory/raycontrol/internal/h3serve"
 	"github.com/arngory/raycontrol/internal/naive"
+	"github.com/arngory/raycontrol/internal/quiccid"
 	"github.com/arngory/raycontrol/internal/render"
 )
 
@@ -34,6 +35,9 @@ type quicOptions struct {
 	// datagrams announces HTTP/3 datagrams (h3serve.Options.Datagrams):
 	// naive-quic with udp=on (spec/naive-udp-v1.md).
 	datagrams bool
+	// connIDs makes the server's connection IDs with the service's label
+	// (h3serve.Options.ConnIDs, spec/quic-cid-route-v1.md); nil: random.
+	connIDs quic.ConnectionIDGenerator
 }
 
 // h3Options are o with what both servers share: an idle time the front
@@ -43,7 +47,21 @@ type quicOptions struct {
 func h3Options(o quicOptions) h3serve.Options {
 	return h3serve.Options{ResetKey: o.resetKey, HeaderWait: o.headerWait, Idle: render.QUICIdle,
 		MaxStreams: naive.MaxStreams, PendingStreams: naive.PendingStreams, MaxHeaderBytes: naive.MaxHeaderBytes,
-		Datagrams: o.datagrams}
+		Datagrams: o.datagrams, ConnIDs: o.connIDs}
+}
+
+// connIDs is the generator of a QUIC server's connection IDs with its
+// service's label under the label's key (spec/quic-cid-route-v1.md): the
+// front finds the service of a client whose address changed by it. The
+// error says what is wrong, nothing of the key; the server then serves
+// with random IDs, as before the label, and only clients whose address
+// changes lose their connections.
+func connIDs(labelKey []byte, label int) (quic.ConnectionIDGenerator, error) {
+	g, err := quiccid.NewGenerator(labelKey, label)
+	if err != nil {
+		return nil, err
+	}
+	return g, nil
 }
 
 // naiveUDP is what -udp makes of a naive server (spec/naive-udp-v1.md),

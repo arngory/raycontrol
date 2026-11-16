@@ -168,6 +168,46 @@ func TestServe(t *testing.T) {
 	}
 }
 
+// TestHandlerRedirect: a directory without its slash goes to the same
+// directory with it, a path on this host whatever its name holds: a
+// backslash a browser reads as "/" ("/\evil.example/" is another host to
+// it), a "?" that would start a query, a "%".
+func TestHandlerRedirect(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"journal", `\evil.example`, "x?y", "50%", "a b/c"} {
+		os.MkdirAll(filepath.Join(root, d), 0o755)
+		os.WriteFile(filepath.Join(root, d, "index.html"), []byte("page"), 0o644)
+	}
+	os.Mkdir(filepath.Join(root, "bare"), 0o755) // no index.html: no redirect
+	srv := httptest.NewServer(Handler(root))
+	defer srv.Close()
+	hc := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	for path, want := range map[string]string{
+		"/journal":            "/journal/",
+		"/%5Cevil.example":    "/%5Cevil.example/",
+		"/x%3Fy":              "/x%3Fy/",
+		"/50%25":              "/50%25/",
+		"/a%20b/c":            "/a%20b/c/",
+		"//journal":           "/journal/",
+		"/bare":               "",
+		"/journal/../nope":    "",
+		"/%2F%2Fevil.example": "",
+	} {
+		resp, err := hc.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		got := resp.Header.Get("Location")
+		switch {
+		case want == "" && (resp.StatusCode != http.StatusNotFound || got != ""):
+			t.Errorf("%s: %d to %q, want 404", path, resp.StatusCode, got)
+		case want != "" && (resp.StatusCode != http.StatusMovedPermanently || got != want):
+			t.Errorf("%s: %d to %q, want 301 to %q", path, resp.StatusCode, got, want)
+		}
+	}
+}
+
 func TestServeTLS12(t *testing.T) {
 	root := newCert(t, nil, "Test Root", true)
 	leaf := newCert(t, root, "k3f.example.com", false)

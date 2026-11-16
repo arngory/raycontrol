@@ -51,6 +51,8 @@ import (
 	"github.com/arngory/raycontrol/internal/pprofx"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/quiccid"
+	"github.com/arngory/raycontrol/internal/quiccid/cidkey"
 	"github.com/arngory/raycontrol/internal/relayprobe"
 	"github.com/arngory/raycontrol/internal/release"
 	"github.com/arngory/raycontrol/internal/render"
@@ -200,10 +202,13 @@ func cmdServe(args []string) error {
 		"a private CA's root goes in the node's roots (rayctl roots file)")
 	tlsRoots := fs.String("tls-roots", roots.SettingsFile, "settings of the roots the node's own outbound TLS trusts besides "+
 		"its embedded list (rayctl roots; a stand may name a file of its own)")
-	credPeriod := fs.Duration("cred-period", 30*24*time.Hour, "how long a user credential stays current (0: no rotation)")
-	credLead := fs.Duration("cred-lead", 3*24*time.Hour, "the next credential is in the subscription this long before the switch")
+	credPeriod := fs.Duration("cred-period", store.DefaultRotation.Period, "how long a user credential stays current (0: no scheduled rotation; "+
+		"rayctl device revoke -overlap still starts one of its user's credentials)")
+	credLead := fs.Duration("cred-lead", store.DefaultRotation.Lead, "the next credential is in the subscription this long before the switch, "+
+		"a scheduled one and the one rayctl device revoke -overlap publishes")
 	probeDaily := fs.Int("probe-daily-mib", probe.DefaultDaily>>20, "channel probes: MiB per device and UTC day, both directions")
-	credGrace := fs.Duration("cred-grace", 2*24*time.Hour, "the previous credential (and REALITY key set) is accepted this long after the switch (12h at least)")
+	credGrace := fs.Duration("cred-grace", store.DefaultRotation.Grace, "the previous credential (and REALITY key set) is accepted this long after the switch (12h at least); "+
+		"after rayctl device revoke -overlap, what the device knew works -cred-lead + -cred-grace")
 	realityPeriod := fs.Duration("reality-period", 90*24*time.Hour, "how long REALITY keys stay current; their next set is published -cred-lead ahead (0: no rotation)")
 	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new server name (REALITY's, naive's) may wait for its certificate")
 	naiveSNIPeriod := fs.Duration("naive-sni-period", provision.DefaultNaiveSNIPeriod, "how long a naive server name stays current: the next one is published -cred-lead ahead, "+
@@ -308,6 +313,12 @@ func cmdServe(args []string) error {
 	// the guard as rayspa reports it.
 	srv.ConnLimit = &connlimit.Monitor{Sources: connLimitSources(st, paths), Off: st.ConnLimitOff, Health: hb, Log: log}
 	go srv.ConnLimit.Run(ctx)
+	// naive's datagram requests for rayctl metrics (naive-udp-v1 §7): the
+	// same line as its bytes and refusals, read when the metrics are asked.
+	srv.NaiveUDP = func(ctx context.Context, service string) (*naive.UDPStats, error) {
+		r, err := traffic.ReadLine(ctx, paths.StatsSocket(service))
+		return r.UDP, err
+	}
 	per := &api.PerimeterServer{Server: srv, RayspaUID: -1, DefaultTTL: *spaTTL, MaxTTL: *spaMaxTTL, TCPCarrier: *spaTCP, Refresh: time.Minute}
 	policy := api.PeerPolicy{Group: *group}
 	if u, err := user.Lookup(*rayspaUser); err == nil {
@@ -362,17 +373,12 @@ func cmdServe(args []string) error {
 	if *updateCheck > 0 && *updateCheck < time.Hour {
 		return errors.New("-update-check must be an hour or more: each check asks github.com from the node")
 	}
-	if *credPeriod > 0 {
-		if *credLead >= *credPeriod {
-			return errors.New("-cred-lead must be shorter than -cred-period")
-		}
-		// Niko moves to a new credential up to 12 h after the switch
-		// (RAYCONTROL.md §11): the previous one must outlive that.
-		if *credGrace < minCredGrace {
-			return fmt.Errorf("-cred-grace must be at least %v: clients move to the new credential up to 12 h after the switch", minCredGrace)
-		}
-		r := store.Rotation{Period: *credPeriod, Lead: *credLead, Grace: *credGrace}
-		go rotateCredentials(ctx, st, r, func() { srv.Notify() }, hb, log)
+	r, err := credRotation(store.Rotation{Period: *credPeriod, Lead: *credLead, Grace: *credGrace}, log)
+	if err != nil {
+		return err
+	}
+	if err := startCredentialRotation(ctx, st, r, func() { srv.Notify() }, hb, log); err != nil {
+		return err
 	}
 	var cm *certs.Manager
 	var is *certs.Issuer
@@ -699,6 +705,18 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 					log.Warn("doh3: no key of stateless resets; serving without them", "service", svc.Name, "err", err)
 				} else {
 					o.resetKey = (*quic.StatelessResetKey)(key)
+				}
+				// The service's label and its key, from the node's secret,
+				// as the front has them (spec/quic-cid-route-v1.md); without
+				// them, random IDs. rayd takes the secret at the service's
+				// start: a database restored with another one restarts rayd.
+				label := render.CIDLabel(svc.ID)
+				if secret, err := st.QUICCIDKey(ctx); err != nil {
+					log.Warn("doh3: connection IDs without a label", "service", svc.Name, "err", err)
+				} else if key, err := cidkey.LabelKey(secret, label); err != nil {
+					log.Warn("doh3: connection IDs without a label", "service", svc.Name, "err", err)
+				} else if o.connIDs, err = connIDs(key, label); err != nil {
+					log.Warn("doh3: connection IDs without a label", "service", svc.Name, "err", err)
 				}
 				go func() {
 					if err := serveHTTP3(h3ctx, pc, certs.GetCertificate, h, o); err != nil {
@@ -1491,6 +1509,9 @@ func cmdNaive(args []string) error {
 		"a client whose connection the process no longer knows is told at once; empty or absent: no stateless resets")
 	udp := fs.Bool("udp", false, "carry UDP as HTTP/3 datagrams of connect-udp requests to naive-quic (spec/naive-udp-v1.md): "+
 		"naive-quic announces HTTP/3 datagrams; without it a connect-udp request gets the site's answer")
+	cidFile := fs.String("cid", "", "file with the label of naive-quic's connection IDs and its key, \"<label> <16 bytes in hex>\" "+
+		"(spec/quic-cid-route-v1.md): the IDs carry the label, by which the front finds a client whose address changed; "+
+		"empty or absent: random IDs")
 	fs.Parse(args)
 	if *users == "" || *chain == "" || *key == "" || *socket == "" {
 		return errors.New("naive needs -users, -chain, -key and -socket")
@@ -1550,6 +1571,18 @@ func cmdNaive(args []string) error {
 			// it is missing is said, the file's content never.
 			if o.resetKey, err = readResetKey(*resetKey); err != nil {
 				log.Warn("naive-quic: no key of stateless resets; serving without them", "err", err)
+			}
+		}
+		if *cidFile != "" {
+			// Without the label and its key the IDs are random, as before:
+			// a client whose address changes loses its connection. Why is
+			// said, the key never.
+			label, key, err := quiccid.ReadLabelled(*cidFile)
+			if err == nil {
+				o.connIDs, err = connIDs(key, label)
+			}
+			if err != nil {
+				log.Warn("naive-quic: connection IDs without a label", "file", *cidFile, "err", err)
 			}
 		}
 		go func() {

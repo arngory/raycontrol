@@ -280,12 +280,13 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, a admitted) bool
 		_ = out.Close()
 		// A client that does not read holds the download in a write
 		// (flow control), and with it the stream of a revoked user: past
-		// a second it fails, as UoT's and ICMP's.
+		// a second it fails, as UoT's and ICMP's. How the copy ended does
+		// not matter here: the close or the deadline ended it.
 		select {
-		case <-down:
+		case <-down: //nolint:errcheck // only its end is waited for
 		case <-time.After(time.Second):
 			_ = http.NewResponseController(w).SetWriteDeadline(time.Now())
-			<-down
+			<-down //nolint:errcheck // only its end is waited for
 		}
 	}
 	return true

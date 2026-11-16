@@ -34,12 +34,15 @@ jobs:
     # The whole CI on the commit being released: nothing is published unless
     # it is green. v0.16.0 went out from a green pull request while CI on
     # main, run beside the release, was red.
-    # Its job rayctl (macOS, run) skips itself under this workflow's name.
+    # rayctl started on a Mac is a workflow of its own (macos.yml), not run here.
     uses: ./.github/workflows/ci.yml
 
   asn:
     # One download for both archives.
     runs-on: ubuntu-24.04
+    # IPINFO_TOKEN lives in this environment, open to v* tags and main only
+    # (docs/RELEASE.md): a workflow on any other branch cannot read it.
+    environment: release-data
     steps:
       - name: IPinfo Lite
         env:
@@ -65,6 +68,8 @@ jobs:
         goarch: [amd64, arm64]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -79,15 +84,7 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
-        run: |
-          go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o dist/ ./cmd/...
-          # The binaries are built on the toolchain go.mod names, not on an
-          # older Go a runner or setup-go happens to have.
-          want=$(go mod edit -json | jq -r '.Toolchain // ("go" + .Go)')
-          for b in dist/rayd dist/rayctl dist/rayspa; do
-            got=$(go version "$b" | awk '{print $2}')
-            [ "$got" = "$want" ] || { echo "$b built with $got, go.mod names $want"; exit 1; }
-          done
+        run: go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o dist/ ./cmd/...
       - name: niko-server
         run: scripts/niko-server.sh ${{ matrix.goarch }} dist/niko-server
       - name: slipstream-server
@@ -99,14 +96,31 @@ jobs:
           git -C xray checkout -q "$XRAY_COMMIT"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: xray/go.mod
+          # One Go for everything we ship: the go line of our go.mod (setup-go
+          # reads that line alone, so go.mod has no toolchain line), not
+          # whatever 1.27.x is newest when the job runs; GOTOOLCHAIN=local
+          # below refuses rather than fetch another Go if the fork asks for a
+          # newer one.
+          go-version-file: go.mod
       - name: Build Xray
         working-directory: xray
         env:
+          GOTOOLCHAIN: local
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
         run: go build -trimpath -ldflags "-s -w -buildid=" -o ../dist/xray ./main
+      - name: One Go
+        # The binaries built here, Xray's too, are built on the Go go.mod
+        # names, not on an older Go a runner or setup-go happens to have,
+        # nor on a newer one the fork's go.mod would fetch. niko-server and
+        # slipstream-server come as released, checked by their hashes.
+        run: |
+          want=$(go mod edit -json | jq -r '.Toolchain // ("go" + .Go)')
+          for b in dist/rayd dist/rayctl dist/rayspa dist/xray; do
+            got=$(go version "$b" | awk '{print $2}')
+            [ "$got" = "$want" ] || { echo "$b built with $got, go.mod names $want"; exit 1; }
+          done
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ipinfo-lite
@@ -144,6 +158,8 @@ jobs:
           - {goos: freebsd, goarch: amd64}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -169,6 +185,10 @@ jobs:
   release:
     needs: [ci, build, rayctl]
     runs-on: ubuntu-24.04
+    # MINISIGN_SECRET_KEY lives in this environment: v* tags and main only,
+    # and the owner approves each run (docs/RELEASE.md). A repository secret
+    # would be readable by a workflow on any branch.
+    environment: release
     # One publish at a time: two close together would both list the
     # releases before either is out, and both pass --latest. The one that
     # runs is not cancelled; GitHub keeps one waiting, so a third that
@@ -187,6 +207,8 @@ jobs:
         rayctl-darwin-arm64.tar.gz rayctl-darwin-amd64.tar.gz rayctl-freebsd-amd64.tar.gz
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: raycontrol-*
@@ -197,6 +219,19 @@ jobs:
           merge-multiple: true
       - name: Release notes exist
         run: test -s ".github/release-notes/${TAG}.md"
+      - name: The commit is on main
+        # The environment admits any v* tag, and a tag's workflow comes from
+        # the tag's commit: a tag on a commit main does not hold would sign
+        # what was never merged. The tag ruleset is what forbids such tags;
+        # this catches the mistake.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status=$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${GITHUB_SHA}" --jq .status)
+          case "$status" in
+            identical|behind) ;;
+            *) echo "commit ${GITHUB_SHA} is not on main ($status)"; exit 1 ;;
+          esac
       - name: Sign
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}

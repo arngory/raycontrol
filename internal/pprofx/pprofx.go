@@ -53,7 +53,7 @@ func listen(addr string) (net.Listener, error) {
 	if !ok || path == "" {
 		return nil, errors.New("only unix:PATH (a socket for its owner only)")
 	}
-	_ = os.Remove(path)
+	_ = os.Remove(path) //nolint:gosec // G703: the socket of the operator's RAYD_PPROF, left by an earlier run
 	// Start runs first thing in main, before other goroutines make files.
 	old := syscall.Umask(0o077)
 	ln, err := net.Listen("unix", path)

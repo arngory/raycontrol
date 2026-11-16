@@ -203,4 +203,30 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 			t.Errorf("niko-server check ygg with lan_relay=%s: %v\n%s", v, err, out)
 		}
 	}
+
+	// Routable connection IDs (spec/quic-cid-route-v1.md): what render
+	// writes for niko-server v0.18.0, the front's key and labels and the
+	// Hysteria2 backends' options, checked by a niko-server that takes
+	// them (the pin may be older).
+	if !nikoTakesCID(t, niko) {
+		t.Log("the niko-server at NIKO_SERVER_BIN does not route by connection ID: its configs are not checked")
+		return
+	}
+	restore := render.UseNikoServer("v0.18.0")
+	configs = write()
+	restore()
+	for _, c := range configs {
+		b, _ := os.ReadFile(c)
+		option := `"cid_key_file"` // a Hysteria2 backend's: its label's key
+		if filepath.Base(filepath.Dir(c)) == "front" {
+			option = `"cid_keys_file"` // the front's: its backends' labels' keys
+		}
+		if want := filepath.Base(filepath.Dir(c)); (want == "front" || want == "hy2o" || want == "hy2m") != strings.Contains(string(b), option) {
+			t.Errorf("%s: %s where it does not belong, or none where it does:\n%s", strings.TrimPrefix(c, dir), option, b)
+		}
+		out, err := exec.Command(niko, "check", "-c", c).CombinedOutput()
+		if err != nil || strings.TrimSpace(string(out)) != "ok" {
+			t.Errorf("niko-server check %s with labels: %v\n%s", strings.TrimPrefix(c, dir), err, out)
+		}
+	}
 }

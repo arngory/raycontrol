@@ -109,7 +109,7 @@ type Host struct {
 func System() *Host {
 	return &Host{
 		Run: func(ctx context.Context, stdin, name string, args ...string) ([]byte, error) {
-			cmd := exec.CommandContext(ctx, name, args...)
+			cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: commands the checks' code names, no shell
 			if stdin != "" {
 				cmd.Stdin = strings.NewReader(stdin)
 			}
