@@ -22,7 +22,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl update -rollback [-no-carry]` | вернуть бинарники, которые заменило последнее обновление; базу — только если обновление сдвинуло её схему, с вопросом. `-no-carry` — вернуть копию базы как есть, без отозванного с тех пор (когда нынешнюю базу не прочитать) |
 | `rayctl update remote on\|off` | с v0.19, только root: admin-устройства могут обновлять ноду через API (StartUpdate) — только на подписанный релиз новее ноды; по умолчанию выкл. Политика — файл root `/var/lib/raycontrol-update/policy.json`, rayd его только читает ([`spec/node-update-v1.md`](spec/node-update-v1.md)) |
 | `rayctl update auto patch [-window 03:00-05:00]` / `auto off` | с v0.19, только root: rayd сам обновляется на патч-версии своей минорной в окне (время ноды, окно не короче 30 мин); раз в ~6 ч спрашивает GitHub; по умолчанию выкл. После отката эту версию больше не просит; после сбоя до изменений на ноде (скачивание) — через сутки. Новую минорную (или мажорную) не ставит, а называет: строка `auto-update` в `rayctl status` и `newer` в `rayctl update status` (после v0.26.0). С v0.27.0 после выхода новой минорной берёт самый новый патч своей: спрашивает следующие номера (не больше 8 за проверку; один пропуск переступает), строка `patch` в `rayctl update status` |
-| `rayctl update status` | политика обновлений, последний релиз (что видели проверки rayd; сам к GitHub не ходит, без проверок — `latest     not checked`), последнее обновление по запросу (с v0.28 — и ручное); журнал самого обновления — `journalctl -u raycontrol-update`. С v0.28 — по строке на relay: версия и где его обновление по слову ноды (`unknown`, `off`, `current`, `waiting for …`, `offered`, `requested`, `running`, `done`, `rolled_back`, `failed` с кодом и текстом); `-json` — поле `relays` ([10-quickstart-debian13.md](10-quickstart-debian13.md) §12.4) |
+| `rayctl update status` | политика обновлений, последний релиз (что видели проверки rayd; сам к GitHub не ходит, без проверок — `latest     not checked`), последнее обновление по запросу (с v0.28 — и ручное); журнал самого обновления — `journalctl -u raycontrol-update`. С v0.28 — по строке на relay: версия и где его обновление по слову ноды (`unknown`, `off`, `current`, `waiting for …`, `offered`, `requested`, `running`, `done`, `rolled_back`, `failed` с кодом и текстом); `-json` — поле `relays` ([10-quickstart-debian13.md](10-quickstart-debian13.md) §6.7.9) |
 | `rayctl update -version v0.15.0` → `rayctl update` | нода на v0.10–v0.14: в два шага, их `rayctl` не берёт архив с новыми файлами (`unexpected "slipstream-server"`); [RELEASE.md](RELEASE.md) |
 | `rayctl uninstall [-yes] [-keep-state] [-keep-dns] [-purge-packages]` | убрать всё по журналу установки, записи в Cloudflare тоже |
 | `rayctl admin <ваш IP> [прежние адреса…]` | с консоли провайдера: пустить свой адрес к SSH без SPA (список заменяется целиком) |
@@ -43,8 +43,8 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl node name "Амстердам"` (`""` — убрать) | имя ноды: клиенты показывают его рядом с адресом со следующей подписки; до 48 символов, без управляющих и невидимых. При установке — `bootstrap.sh … -name "Амстердам"` |
 | `rayctl node note "До 1 Гбит/с, торренты нельзя 🙏"` (`""` — убрать) | описание ноды для пользователей: клиенты показывают его со следующей подписки; одна строка, до 200 символов, эмодзи и любые письменности, без управляющих, невидимых и символов смены направления |
 | `rayctl version` | версия этого `rayctl` и, на ноде или хосте relay, установленная (`installed`, её говорит `rayd version`; root не нужен). С `-remote ФАЙЛ` — ещё и версия ноды (`node`), из её состояния. Работает и на macOS и FreeBSD; `-json` — объект `{"rayctl", "installed", "node"}` без неизвестного |
-| `rayctl status` | версия, нода (и её имя), число пользователей, сервисов, устройств, порты SPA сейчас, политика выхода (`egress`); циклы rayd, `dns-zone <сервис>` — самопроверка зоны туннеля; `conn-limit` — кто упёрся в предел соединений за 15 мин (`u<id>` и сервис), `conntrack` — таблица от 70 %, страж за сутки, отбросы ядра |
-| `rayctl service list` | сервисы; для REALITY — когда сменились ключи и когда следующая смена |
+| `rayctl status` | версия, нода (и её имя), число пользователей, сервисов, устройств, порты SPA сейчас, политика выхода (`egress`); с v0.29 — строка `naive <сервис>` с именем сервера и опубликованным следующим; циклы rayd (`naive-names` — фронт обслуживает опубликованное имя naive), `dns-zone <сервис>` — самопроверка зоны туннеля; `conn-limit` — кто упёрся в предел соединений за 15 мин (`u<id>` и сервис), `conntrack` — таблица от 70 %, страж за сутки, отбросы ядра |
+| `rayctl service list` | сервисы; в `KEYS`: у REALITY — когда сменились ключи и когда следующая смена, у naive — имя сервера, назначенная смена и прежние имена (с v0.29), у сайта — ключи сертификата и пины, у DNS-туннелей — режимы и ключи |
 | `rayctl audit [-n 50]` | журнал действий администратора |
 | `rayctl debug on [-for 30m]` / `off` / `show` | окно отладки: rayd, rayspa и data plane пишут подробно, с адресами клиентов; закрывается само (до суток); службы data plane перезапускаются |
 | `rayctl egress` | политика выхода ноды (с v0.21): что закрыто, для кого, действует ли; root видит и счётчики правил; `local exempt` — цель REALITY на локальном адресе (или `localhost`: две строки, 127.0.0.1 и ::1), которую пропускает только процессу её сервиса |
@@ -101,7 +101,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl service add api api` → `rayctl apply` | включить удалённый API: свой порт за SPA, mTLS |
 | `rayctl device invite admin laptop -role admin` | на ноде: приглашение для устройства администратора |
 | `rayctl remote enroll -o laptop.rcdev [-pin 123456] 'RCINV2:…'` | на своей машине: новый ключ, SPA, регистрация; файл устройства 0600. Берёт и `rcinv1:…`; PIN без `-pin` спрашивается без показа на экране |
-| `rayctl -remote laptop.rcdev status` | любая команда `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `dns`, `summary`, `app-mirror`, `metrics`, `debug`, `version` через API |
+| `rayctl -remote laptop.rcdev status` | любая команда `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `ports`, `relay` (`list`, `ports`, `set`), `dns`, `summary`, `app-mirror`, `metrics`, `debug`, `version` через API |
 | `rayctl -remote laptop.rcdev remote rotate` | новый клиентский ключ, старый перестаёт работать |
 | `rayctl -remote laptop.rcdev remote whoami` | какое это устройство: ID, пользователь, имя, роль, нода |
 
@@ -142,7 +142,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl service set dns zone=<запасная>` → `rayctl apply` | запасная зона становится основной, прежняя основная уходит: только запасная — она у клиентов уже есть; прежнюю они теряют со следующей подпиской |
 | `rayctl service rotate dns [-now] [-force]` | новый ключ печати сразу, в подписке с этого момента; прежний нода принимает ещё `-cred-grace` (2 дня), с `-now` — не принимает (ключ утёк): клиенты без новой подписки не получают ничего, пока её не обновят. Второй сброс в пределах срока — отказ (ключ до прежнего ещё нужен клиентам); `-force` — всё равно, снимая его. Заодно меняется ключ самопроверки ноды (строка `node-check` в ключах dnsauth всех dnstt-сервисов). `rayctl service list` показывает режим, дату ключа и срок прежнего |
 | `rayctl service set ygg lan_relay=50` | потолок связи устройство—устройство через ноду в локальной сети (`user lan`), Мбит/с на пользователя: без настройки 20, `0` — только напрямую в одной Wi-Fi; эти байты идут в лимит трафика. Бэкенд перезапускается сам. Только с niko-server v0.16.0: более старый отвергает настройку, и Yggdrasil не поднимется |
-| `rayctl service set ygg peers=tls://host:443,quic://203.0.113.9:443` → `rayctl apply` | публичные пиры Yggdrasil, до 8 (по умолчанию нет; `quic` — только по IP; лучше разные операторы и `tls`/`quic`/`wss`): нода видна в сети Yggdrasil, клиенты получают пиры как запасной путь; `peers=none` — выключить |
+| `rayctl service set ygg peers=tls://host:443,quic://203.0.113.9:443` → `rayctl apply` | пиры Yggdrasil — публичные или свой (yggdrasil-go 0.5; 0.4 несовместим), до 8 (по умолчанию нет; адрес — публичный или имя, частные не принимаются; `quic` — только по IP; лучше разные операторы и `tls`/`quic`/`wss`): нода соединяется с ними сама, с публичными видна в сети Yggdrasil, клиенты получают пиры как запасной путь; `peers=none` — выключить. Свой пир и что видят пиры — [10-quickstart-debian13.md](10-quickstart-debian13.md) §8, Yggdrasil |
 | `rayctl service peer-keys [-names] ygg` | с v0.31.0: открытые ключи для `AllowedPublicKeys` своего пира (yggdrasil-go 0.5) — блок HJSON, который вставляется в его конфиг: ключ ноды, затем ключи каждого пользователя (для ссылок `user export`) и каждого его неотозванного устройства, у активных пользователей; над каждым — метка из файла пользователей ноды (`u<id пользователя>`, `-<id устройства>`, `-n` следующий, `-p` прежний: id — в `rayctl -json user list` и `rayctl device list`), имён нет; при смене UUID — и следующие (`next: from …`) и прежние (`previous: until …`). `-names` — ещё и имена пользователей и устройств, с предупреждением: конфиг пира лежит вне ноды, и по нему адрес пиринга связывается с человеком (lan-v1 §4.3). Только открытые ключи; `-json` — с адресами в сети Yggdrasil, имена тоже только с `-names`. Список меняется с устройствами, пользователями и каждой сменой UUID (раз в `-cred-period`), пир надо обновлять — проще оставить `AllowedPublicKeys` пустым. Root, группа `raycontrol` или `-remote ФАЙЛ` (как `device list`) |
 | `rayctl service cert site -chain chain.pem -key key.pem [-force]` | root: свой сертификат сайта вместо ACME (свой CA, другой ACME-клиент, тестовый CA): для REALITY, hy2-masq, naive, DoH и Yggdrasil под сайтом; должен покрывать все имена сайта. Под своим сертификатом ссылки naive, `hy2-masq` и DoH идут без `niko-pin`. Если они уже несут пины ноды, а ключ другой, — отказ: клиенты не прошли бы пин до новой подписки; `-force` — всё равно |
 | …после `service cert` | строка о цепочке: `leads to …, a public root clients know` — naive и DoH примут; `a root that is not in the clients' list` — частный УЦ: клиент примет, только если корень добавлен в поле сертификата каждого профиля naive (по QUIC — только так; корни, установленные в телефон, — отдельная настройка приложения и только для HTTP/2); `incomplete` — импортируйте цепочку целиком. Предупреждение, не отказ |
@@ -210,6 +210,9 @@ shred -u /root/phone.bundle
 
 ## Relay (relay-v1)
 
+Пошагово — [10-quickstart-debian13.md](10-quickstart-debian13.md) §6.7: второй VPS с публичным IPv4 (Debian 13), sshd
+на нём — ровно на одном порту, на ноде — сервис `api`.
+
 ```
 rayctl relay add msk 198.51.100.20   # адрес relay (IPv4) доходит до портов сервисов без SPA, но не до SSH
 rayctl relay bundle -o msk.bundle msk   # пакет для хоста relay: новый сертификат и ключи SPA, прежние не работают;
@@ -230,10 +233,16 @@ rayctl relay remove msk   # потерянный relay: только remove от
 sudo bash bootstrap.sh -relay msk.bundle   # rayspa, пересылка ядром к выходу; SSH — с адресов администратора relay;
                                            # rayd relay — точка замера relay (если её нет, relay работает и без неё)
 journalctl -u rayd-relay                   # точка замера relay: поток от выхода, отчёты
+systemctl is-active rayspa rayd-relay      # оба active: периметр с пересылкой и точка замера
 ```
 
+Проверка с ноды: в `rayctl update status` у relay `current` (точка замера связалась и доложила версию; `unknown` —
+нет связи); `rayctl probe -payload @bundle` с другой машины — relay в `relays` подписки и `via` у профилей. Через
+relay `rayctl probe` и `rayctl knock` не стучатся.
+
 Обновление relay с v0.26.0 — на его хосте, от root. **На настоящем хосте relay оно ни разу не запускалось**
-(только модульные тесты): держите доступ к консоли провайдера.
+(модульные тесты; в CI тот же код идёт как обновление по слову ноды, задание `relay-host`): держите доступ к
+консоли провайдера.
 
 ```
 sudo rayctl update -check   # версии; откажет ли обновление (SSH-сессия не с адреса администратора relay)
@@ -260,5 +269,5 @@ journalctl -u raycontrol-relay-update   # само обновление по с�
 `rayctl update auto` на relay отказывает: relay идёт за выходом. До v0.28.0 `rayctl update remote|auto` на relay
 отказывали. Relay до v0.26.0 и запасной путь — тот же запуск ещё раз, с пакетом, который установка оставила на хосте
 relay: `sudo bash bootstrap.sh -relay /etc/raycontrol/relay.bundle`
-([10-quickstart-debian13.md](10-quickstart-debian13.md) §12.4, [spec/node-update-v1.md](spec/node-update-v1.md) §5,
+([10-quickstart-debian13.md](10-quickstart-debian13.md) §6.7, [spec/node-update-v1.md](spec/node-update-v1.md) §5,
 [spec/relay-update-remote-v1.md](spec/relay-update-remote-v1.md)).
