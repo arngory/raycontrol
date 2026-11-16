@@ -79,15 +79,7 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
-        run: |
-          go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o dist/ ./cmd/...
-          # The binaries are built on the toolchain go.mod names, not on an
-          # older Go a runner or setup-go happens to have.
-          want=$(go mod edit -json | jq -r '.Toolchain // ("go" + .Go)')
-          for b in dist/rayd dist/rayctl dist/rayspa; do
-            got=$(go version "$b" | awk '{print $2}')
-            [ "$got" = "$want" ] || { echo "$b built with $got, go.mod names $want"; exit 1; }
-          done
+        run: go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o dist/ ./cmd/...
       - name: niko-server
         run: scripts/niko-server.sh ${{ matrix.goarch }} dist/niko-server
       - name: slipstream-server
@@ -99,9 +91,11 @@ jobs:
           git -C xray checkout -q "$XRAY_COMMIT"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          # One Go for everything we ship: the toolchain of our go.mod, not
-          # whatever 1.27.x is newest when the job runs; GOTOOLCHAIN=local below
-          # refuses rather than fetch another one if the fork asks for newer.
+          # One Go for everything we ship: the go line of our go.mod (setup-go
+          # reads that line alone, so go.mod has no toolchain line), not
+          # whatever 1.27.x is newest when the job runs; GOTOOLCHAIN=local
+          # below refuses rather than fetch another Go if the fork asks for a
+          # newer one.
           go-version-file: go.mod
       - name: Build Xray
         working-directory: xray
@@ -111,6 +105,17 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
         run: go build -trimpath -ldflags "-s -w -buildid=" -o ../dist/xray ./main
+      - name: One Go
+        # The binaries built here, Xray's too, are built on the Go go.mod
+        # names, not on an older Go a runner or setup-go happens to have,
+        # nor on a newer one the fork's go.mod would fetch. niko-server and
+        # slipstream-server come as released, checked by their hashes.
+        run: |
+          want=$(go mod edit -json | jq -r '.Toolchain // ("go" + .Go)')
+          for b in dist/rayd dist/rayctl dist/rayspa dist/xray; do
+            got=$(go version "$b" | awk '{print $2}')
+            [ "$got" = "$want" ] || { echo "$b built with $got, go.mod names $want"; exit 1; }
+          done
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ipinfo-lite

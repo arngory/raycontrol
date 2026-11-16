@@ -45,10 +45,11 @@ jobs:
       - name: rayspa's ordering at boot
         run: RAYCONTROL_REQUIRE_SYSTEMD_ANALYZE=1 go test -count=1 -run TestRayspaNoOrderingCycle -v ./internal/deploy
       # Built from source with the module's Go: prebuilt binaries made with an
-      # older Go refuse to lint a go 1.26 module.
+      # older Go refuse to lint a go 1.27 module, and v2.5.0 could not read
+      # Go 1.27's export data.
       - name: golangci-lint
         run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
           "$(go env GOPATH)/bin/golangci-lint" run ./...
 
   perimeter:
@@ -93,9 +94,11 @@ jobs:
           git -C xray checkout -q "$XRAY_COMMIT"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          # One Go for everything we ship: the toolchain of our go.mod, not
-          # whatever 1.27.x is newest when the job runs; GOTOOLCHAIN=local below
-          # refuses rather than fetch another one if the fork asks for newer.
+          # One Go for everything we ship: the go line of our go.mod (setup-go
+          # reads that line alone, so go.mod has no toolchain line), not
+          # whatever 1.27.x is newest when the job runs; GOTOOLCHAIN=local
+          # below refuses rather than fetch another Go if the fork asks for a
+          # newer one.
           go-version-file: go.mod
           cache: false
       - name: Build Xray
@@ -482,9 +485,11 @@ jobs:
           git -C xray checkout -q "$XRAY_COMMIT"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          # One Go for everything we ship: the toolchain of our go.mod, not
-          # whatever 1.27.x is newest when the job runs; GOTOOLCHAIN=local below
-          # refuses rather than fetch another one if the fork asks for newer.
+          # One Go for everything we ship: the go line of our go.mod (setup-go
+          # reads that line alone, so go.mod has no toolchain line), not
+          # whatever 1.27.x is newest when the job runs; GOTOOLCHAIN=local
+          # below refuses rather than fetch another Go if the fork asks for a
+          # newer one.
           go-version-file: go.mod
       - name: Build Xray
         working-directory: xray
