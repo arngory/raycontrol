@@ -23,7 +23,8 @@ import (
 // backends.*.cid_label) and the Hysteria2 backends (options.cid_key_file,
 // their label's key; options.cid_label) only from niko-server v0.18.0,
 // which reads them. The secret is in the front's file and nowhere else, a
-// label's key in its service's file and nowhere else.
+// label's key in its service's file and nowhere else. None of them is
+// read at the start only: a new secret restarts every process of them.
 func TestQUICCIDRender(t *testing.T) {
 	ctx := context.Background()
 	st := node(t)
@@ -95,10 +96,10 @@ func TestQUICCIDRender(t *testing.T) {
 				t.Fatalf("%s: the secret is in %s", tag, f.Path)
 			}
 		}
-		// naive-quic's: always, its label and its key, read at its start.
+		// naive-quic's: always, its label and its key; a change restarts it.
 		nf := byPath[naiveFile]
 		if string(nf.Content) != strconv.Itoa(ids["nv"])+" "+labelKey("nv")+"\n" || nf.Mode != 0o640 || nf.Group != "niko-nv" ||
-			nf.Service != "nv" || !nf.AtStart || nf.Reload || nf.Needed {
+			nf.Service != "nv" || nf.AtStart || nf.Reload || nf.Needed {
 			t.Fatalf("%s: naive's file %+v", tag, nf)
 		}
 		if label, got, err := quiccid.ParseLabelled(nf.Content); err != nil || label != ids["nv"] || hex.EncodeToString(got) != labelKey("nv") {
@@ -110,7 +111,7 @@ func TestQUICCIDRender(t *testing.T) {
 				t.Fatalf("%s: %s rendered %v", tag, file, ok)
 			}
 			if svc := path.Base(path.Dir(file)); ok && (string(f.Content) != content || f.Mode != 0o640 || f.Group != groups[svc] ||
-				f.Service != svc || !f.AtStart || f.Reload || f.Needed) {
+				f.Service != svc || f.AtStart || f.Reload || f.Needed) {
 				t.Fatalf("%s: %s: %+v", tag, file, f)
 			}
 		}

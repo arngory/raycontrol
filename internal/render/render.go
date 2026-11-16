@@ -993,12 +993,14 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if frontCID {
 				// The node's secret of routable connection IDs: the front
 				// derives every label's key from it. A file of the front's
-				// group, as front.json; the front reads it at its start
-				// and serves without it, so it restarts nothing.
+				// group, as front.json. The front reads it at its start; a
+				// new secret (a database restored from elsewhere) restarts
+				// it, and the backends with it, whose labels' keys changed
+				// too: none is left on another key.
 				key := path.Join(p.Rendered, "front", QUICCIDKey)
 				udp["cid_key_file"] = key
 				files = append(files, File{Path: key, Mode: 0o640, Group: GroupName("front"),
-					Content: []byte(hex.EncodeToString(m.QUICCIDKey) + "\n"), Service: "front", AtStart: true})
+					Content: []byte(hex.EncodeToString(m.QUICCIDKey) + "\n"), Service: "front"})
 			}
 			front["udp"] = udp
 		}
@@ -1902,12 +1904,12 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 		// Connection IDs with the service's label, as the front has it
 		// (spec/quic-cid-route-v1.md): the backend gets its label's key,
 		// never the node's secret, in the service's own file, read at its
-		// start.
+		// start; a new key restarts it.
 		if k, err := cidkey.LabelKey(m.QUICCIDKey, label); err == nil {
 			key := path.Join(dir, QUICCIDKey)
 			options["cid_key_file"], options["cid_label"] = key, label
 			files = append(files, File{Path: key, Mode: 0o640, Group: GroupName(s.Name),
-				Content: []byte(hex.EncodeToString(k) + "\n"), Service: s.Name, AtStart: true})
+				Content: []byte(hex.EncodeToString(k) + "\n"), Service: s.Name})
 		}
 	}
 	if s.Kind == "hy2-obfs" {
@@ -2057,14 +2059,14 @@ func naiveFiles(s Service, m Model, p Paths) ([]File, error) {
 	}
 	// The label of naive-quic's connection IDs and its key, never the
 	// node's secret (spec/quic-cid-route-v1.md): read at the start, served
-	// without. The label is
+	// without; a new key restarts naive, as it does the front. The label is
 	// in the file, not the unit: rayctl apply builds the unit from inputs
 	// that carry no service's ID. Whatever niko-server the front is: an
 	// older front only does not read the labels.
 	if label := CIDLabel(s.ID); label != 0 {
 		if k, err := cidkey.LabelKey(m.QUICCIDKey, label); err == nil {
 			files = append(files, File{Path: path.Join(dir, NaiveQUICCID), Mode: 0o640, Group: GroupName(s.Name),
-				Content: []byte(strconv.Itoa(label) + " " + hex.EncodeToString(k) + "\n"), Service: s.Name, AtStart: true})
+				Content: []byte(strconv.Itoa(label) + " " + hex.EncodeToString(k) + "\n"), Service: s.Name})
 		}
 	}
 	return files, nil
