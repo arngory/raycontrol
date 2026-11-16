@@ -385,12 +385,29 @@ func CollectForRender(ctx context.Context, st *store.Store) (Model, error) {
 		}
 		m.DNSAuth[svc.ID] = lines
 	}
-	if slices.ContainsFunc(m.Services, func(s Service) bool { return s.Kind == "yggdrasil" }) {
-		if m.Devices, err = st.ActiveDeviceSecrets(ctx); err != nil {
-			return m, err
-		}
+	return m, collectDevices(ctx, st, &m)
+}
+
+// CollectYggdrasil is Collect plus the devices of the Yggdrasil users file
+// (Model.Devices), as CollectForRender fills them, and nothing else of
+// it: what YggdrasilPeers needs, without the DNS tunnels' device keys.
+func CollectYggdrasil(ctx context.Context, st *store.Store) (Model, error) {
+	m, err := Collect(ctx, st)
+	if err != nil {
+		return m, err
 	}
-	return m, nil
+	return m, collectDevices(ctx, st, &m)
+}
+
+// collectDevices fills Model.Devices when the model has a Yggdrasil
+// service: each device not revoked has its own key in the mesh.
+func collectDevices(ctx context.Context, st *store.Store, m *Model) error {
+	if !slices.ContainsFunc(m.Services, func(s Service) bool { return s.Kind == "yggdrasil" }) {
+		return nil
+	}
+	var err error
+	m.Devices, err = st.ActiveDeviceSecrets(ctx)
+	return err
 }
 
 // NewUUID makes a random (version 4) UUID, the VLESS credential

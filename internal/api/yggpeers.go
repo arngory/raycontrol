@@ -25,7 +25,9 @@ import (
 // Who may list the devices may ask (ListDevices: root, the group, admin
 // devices through the remote API): the answer names the same users and
 // devices, and the keys are those their links already carry, from which
-// nothing of a device's secret follows. Not audited, as ListDevices.
+// nothing of a device's secret follows. Not audited, as ListDevices. The
+// model is Collect's and the devices' keys (CollectYggdrasil), nothing of
+// the DNS tunnels' keys that CollectForRender derives too.
 func (s *Server) GetYggdrasilPeerKeys(ctx context.Context, req *connect.Request[nodev1.GetYggdrasilPeerKeysRequest]) (*connect.Response[nodev1.GetYggdrasilPeerKeysResponse], error) {
 	svc, err := s.Store.ServiceByName(ctx, req.Msg.Service)
 	if err != nil {
@@ -38,7 +40,7 @@ func (s *Server) GetYggdrasilPeerKeys(ctx context.Context, req *connect.Request[
 		return nil, connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("service %s is disabled: it lets no one in (rayctl service enable %s)", svc.Name, svc.Name))
 	}
 	// The model the users file is rendered from, its devices with it.
-	m, err := render.CollectForRender(ctx, s.Store)
+	m, err := render.CollectYggdrasil(ctx, s.Store)
 	if err != nil {
 		return nil, toConnect(err)
 	}

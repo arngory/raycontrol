@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
@@ -166,4 +168,59 @@ func TestYggdrasilPeers(t *testing.T) {
 	check(t0.Add(31*day), "current", "previous")
 	// Past the grace: the previous keys go.
 	check(t0.Add(34*day), "current")
+}
+
+// CollectYggdrasil is the model of the Yggdrasil users file, as
+// CollectForRender has it, without the DNS tunnels' device keys: the same
+// devices, the same keys let in, no dnsauth key derived.
+func TestCollectYggdrasil(t *testing.T) {
+	ctx := context.Background()
+	st := yggNode(t)
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	ygg, _ := st.ServiceByName(ctx, "ygg")
+	dns, _ := st.ServiceByName(ctx, "dns")
+	if _, err := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	st.SetUserServices(ctx, "alice", []int64{ygg.ID, dns.ID})
+	for _, name := range []string{"phone", "laptop"} {
+		if _, _, err := st.CreateDevice(ctx, "alice", name, "user"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	full, err := render.CollectForRender(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.DNSAuth[dns.ID]) == 0 {
+		t.Fatal("no dnsauth keys to leave out")
+	}
+	m, err := render.CollectYggdrasil(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.DNSAuth != nil || !reflect.DeepEqual(m.Devices, full.Devices) || len(m.Devices[m.Users[0].ID]) != 2 {
+		t.Fatalf("DNSAuth %v, devices %v (render's %v)", m.DNSAuth, m.Devices, full.Devices)
+	}
+	peers := func(m render.Model) []string {
+		var s, inner render.Service
+		for _, x := range m.Services {
+			switch x.Kind {
+			case "yggdrasil":
+				s = x
+			case "inner":
+				inner = x
+			}
+		}
+		var out []string
+		for _, p := range render.YggdrasilPeers(m, s, inner) {
+			out = append(out, p.Label+" "+hex.EncodeToString(p.Key))
+		}
+		return out
+	}
+	if a, b := peers(m), peers(full); len(a) != 3 || !slices.Equal(a, b) { // the user's own and two devices'
+		t.Fatalf("peers %q, render's %q", a, b)
+	}
 }
