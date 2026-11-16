@@ -39,8 +39,9 @@ func newStalling(t *testing.T) *stalling {
 }
 
 // serveStalling serves h with datagrams on pc, and gives a client's
-// connection to it; the server ends with the test.
-func serveStalling(t *testing.T, pc *stalling, h http.Handler) *http3.ClientConn {
+// connection to it, whose QUIC takes datagrams; its HTTP/3 SETTINGS
+// announce them unless noH3Datagrams. The server ends with the test.
+func serveStalling(t *testing.T, pc *stalling, h http.Handler, noH3Datagrams ...bool) *http3.ClientConn {
 	t.Helper()
 	cert := selfSigned(t)
 	ctx, stop := context.WithCancel(context.Background())
@@ -60,7 +61,7 @@ func serveStalling(t *testing.T, pc *stalling, h http.Handler) *http3.ClientConn
 		stop()
 		<-done
 	})
-	return (&http3.Transport{EnableDatagrams: true}).NewClientConn(qc)
+	return (&http3.Transport{EnableDatagrams: len(noH3Datagrams) == 0 || !noH3Datagrams[0]}).NewClientConn(qc)
 }
 
 // connectUDP opens a connect-udp request on cc, and does not wait for its
@@ -255,5 +256,112 @@ func TestSenderForgetsEndedStreams(t *testing.T) {
 	// The first, when it is not in the sender's hand.
 	if inTurn > 1 {
 		t.Errorf("%d streams in the sender's turn after %d ended, one open", inTurn, n)
+	}
+}
+
+// The sender takes the requests' queues in turn, one datagram each: with
+// two streams' queues full while it waits, what goes once the client
+// acknowledges again alternates between them, and each queue drains to
+// its end. (A sender that took from the back of the turn, or a stream
+// that did not come back to it with datagrams left, would not.)
+func TestSenderRoundRobin(t *testing.T) {
+	pc := newStalling(t)
+	var mu sync.Mutex
+	var order []int // whose (1 or 2) each marked datagram the sender took was
+	fillers := 0
+	heard := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(order)
+	}
+	streams := make(chan *Stream, 2)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		take, ok := Datagrams(r.Context(), w)
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		streams <- take()
+		<-r.Context().Done()
+	})
+	cc := serveStalling(t, pc, h)
+	connectUDP(t, cc)
+	a := <-streams
+	connectUDP(t, cc)
+	b := <-streams
+	for i, st := range []*Stream{a, b} {
+		st.OnSent(func(n int) {
+			mu.Lock()
+			defer mu.Unlock()
+			if n <= 0 {
+				fillers++
+				return
+			}
+			order = append(order, i+1)
+		})
+	}
+	// The sender stalls on a's fillers; what is left of them goes, so
+	// that a's queue holds the marked ones only.
+	full := make([]byte, a.snd.limit()-len(a.qid))
+	stall(pc, a, full, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return fillers
+	})
+	a.mu.Lock()
+	for a.n > 0 {
+		datagramBufs.Put(a.ring[a.head].d)
+		a.ring[a.head] = queued{}
+		a.head = (a.head + 1) % len(a.ring)
+		a.n--
+	}
+	a.mu.Unlock()
+	const each = 10
+	for i := 1; i <= each; i++ {
+		_, _ = a.SendDatagram(full, i)
+	}
+	for i := 1; i <= each; i++ {
+		_, _ = b.SendDatagram(full, i)
+	}
+	pc.stall.Store(false)
+	for end := time.Now().Add(20 * time.Second); heard() < 2*each && time.Now().Before(end); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) < 2*each {
+		t.Fatalf("%d of %d went: %v", len(order), 2*each, order)
+	}
+	// In turn: the same stream twice in a row only where the sender held
+	// a filler of a's when it stalled.
+	runs := 0
+	for i := 1; i < len(order); i++ {
+		if order[i] == order[i-1] {
+			runs++
+		}
+	}
+	if runs > 2 {
+		t.Errorf("not in turn: %v", order)
+	}
+}
+
+// A client whose QUIC takes datagrams but whose HTTP/3 SETTINGS do not
+// announce them gets no stream of datagrams: no HTTP datagram may be sent
+// to it (RFC 9297 §2.1.1). (The transport parameter alone does not do.)
+func TestDatagramsNeedSettings(t *testing.T) {
+	got := make(chan bool, 1)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, ok := Datagrams(r.Context(), w)
+		got <- ok
+		w.WriteHeader(http.StatusNotFound)
+	})
+	connectUDP(t, serveStalling(t, newStalling(t), h, true))
+	select {
+	case ok := <-got:
+		if ok {
+			t.Fatal("a stream of datagrams for a client without SETTINGS_H3_DATAGRAM")
+		}
+	case <-time.After(SettingsWait + 5*time.Second):
+		t.Fatal("no answer")
 	}
 }
