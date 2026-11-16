@@ -169,6 +169,15 @@ probe() {
 # shape writes what the comparison takes of the node to $work/$node.shape.
 shape() {
 	mkdir -p "$work/$node"
+	# rayd writes a rendered file as a .tmp-* beside it and renames it (live
+	# applies a service set moments ago): wait until none is half written, so
+	# that the comparison sees the node at rest. One that stays is a leftover,
+	# and the comparison shows it.
+	# shellcheck disable=SC2016 # expands in the container
+	x sh -c 'for i in $(seq 40); do
+		[ -z "$(find /var/lib/raycontrol/rendered -name ".tmp-*" -print -quit)" ] && break
+		sleep 0.25
+	done' || fail "shape: wait for rendered files"
 	# shellcheck disable=SC2016 # expands in the container
 	x sh -c '
 	echo "== units"; systemctl list-unit-files "niko-*" "ray*" --no-legend --plain | awk "{print \$1, \$2}" | sort
