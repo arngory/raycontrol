@@ -17,7 +17,7 @@ func DeployInputsProto(in deploy.Inputs) *nodev1.GetDeployInputsResponse {
 	}
 	for _, s := range in.Services {
 		ps := &nodev1.DeployService{Kind: s.Kind, Name: s.Name, Uid: uint32(max(s.UID, 0)), //nolint:gosec // G115: a UID
-			Answer: s.Answer, Site: s.Site, PublicPeers: s.PublicPeers, Salamander: s.Salamander, Icmp: s.ICMP}
+			Answer: s.Answer, Site: s.Site, PublicPeers: s.PublicPeers, Salamander: s.Salamander, Icmp: s.ICMP, Udp: s.UDP}
 		if s.Kind == "slipstream" {
 			ps.Slipstream = &nodev1.DeploySlipstream{Zone: s.Slipstream.Zone, QuicAlpn: s.Slipstream.ALPN, QuicSni: s.Slipstream.SNI,
 				MaxConnections:    uint32(max(s.Slipstream.MaxConnections, 0)),    //nolint:gosec // G115: checked by ParseSlipstream
@@ -51,7 +51,7 @@ func DeployInputs(r *nodev1.GetDeployInputsResponse) (deploy.Inputs, error) {
 	}
 	for _, s := range r.GetServices() {
 		si := deploy.ServiceInput{Kind: s.GetKind(), Name: s.GetName(), UID: int(s.GetUid()), Answer: s.GetAnswer(), Site: s.GetSite(),
-			PublicPeers: s.GetPublicPeers(), Salamander: s.GetSalamander(), ICMP: s.GetIcmp()}
+			PublicPeers: s.GetPublicPeers(), Salamander: s.GetSalamander(), ICMP: s.GetIcmp(), UDP: s.GetUdp()}
 		if ss := s.GetSlipstream(); ss != nil {
 			si.Slipstream = provision.SlipstreamSettings{Zone: ss.GetZone(), ALPN: ss.GetQuicAlpn(), SNI: ss.GetQuicSni(),
 				MaxConnections: int(ss.GetMaxConnections()), DeviceConnections: int(ss.GetDeviceConnections())}

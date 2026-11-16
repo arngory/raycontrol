@@ -62,6 +62,9 @@ type ServiceInput struct {
 	// ICMP: a naive service carries ping and traceroute (icmp=on,
 	// spec/icmp-v1.md). naive's only.
 	ICMP bool
+	// UDP: a naive service carries UDP as HTTP/3 datagrams (udp=on,
+	// spec/naive-udp-v1.md). naive's only.
+	UDP bool
 }
 
 // MaxInputServices bounds the services of Inputs: the 70 UIDs of the
@@ -108,6 +111,7 @@ func InputsOf(m render.Model, files []render.File, p render.Paths) Inputs {
 		case "naive":
 			si.Site = provision.SiteOf(s.Service)
 			si.ICMP = provision.NaiveICMP(s.Service)
+			si.UDP = provision.NaiveUDP(s.Service)
 		case "slipstream":
 			ss, err := provision.ParseSlipstream(s.Service)
 			if err != nil {
@@ -226,11 +230,14 @@ func (in Inputs) Check() error {
 			return err
 		}
 	}
-	// ICMP is naive's: no database gives it to another kind (NaiveICMP),
-	// only a rayd that does not report what it has.
+	// ICMP and UDP are naive's: no database gives them to another kind
+	// (NaiveICMP, NaiveUDP), only a rayd that does not report what it has.
 	for _, s := range in.Services {
 		if s.ICMP && s.Kind != "naive" {
 			return fmt.Errorf("service %q (%q) with ICMP: naive's only", s.Name, s.Kind)
+		}
+		if s.UDP && s.Kind != "naive" {
+			return fmt.Errorf("service %q (%q) with UDP datagrams: naive's only", s.Name, s.Kind)
 		}
 	}
 	return nil

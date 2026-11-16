@@ -499,6 +499,11 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 				return svc, fmt.Errorf(`%w naive icmp: true or false (rayctl service set <naive> icmp=on|off)`, store.ErrInvalid)
 			}
 		}
+		if v, ok := settings["udp"]; ok && svc.Kind == "naive" {
+			if _, ok := v.(bool); !ok {
+				return svc, fmt.Errorf(`%w naive udp: true or false (rayctl service set <naive> udp=on|off)`, store.ErrInvalid)
+			}
+		}
 		if svc.Kind == "naive" {
 			// The name after the first switch (R4-42): routed by the front
 			// from the start, in subscriptions once published.
@@ -896,6 +901,17 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 		default:
 			return svc, fmt.Errorf("%w icmp: on or off", store.ErrInvalid)
 		}
+	case svc.Kind == "naive" && key == "udp":
+		// UDP as HTTP/3 datagrams (spec/naive-udp-v1.md §7): off by
+		// default until it is checked on live networks (§11, step 4).
+		switch value {
+		case "on":
+			v = true
+		case "off":
+			v = 0
+		default:
+			return svc, fmt.Errorf("%w udp: on or off", store.ErrInvalid)
+		}
 	case svc.Kind == "site" && key == "answer":
 		if !slices.Contains(site.Answers, value) {
 			return svc, fmt.Errorf("%w site answer %q: want one of %s", store.ErrInvalid, value, strings.Join(site.Answers, ", "))
@@ -1027,7 +1043,7 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			v = 0
 		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open, target; hy2-*: up_mbps, down_mbps; naive: icmp, rotate_sni; yggdrasil: peers, lan_relay; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open, target; hy2-*: up_mbps, down_mbps; naive: icmp, udp, rotate_sni; yggdrasil: peers, lan_relay; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
@@ -1160,6 +1176,36 @@ func NaiveICMP(svc store.Service) bool {
 	}
 	_ = json.Unmarshal([]byte(svc.Settings), &s)
 	return svc.Kind == "naive" && s.ICMP
+}
+
+// NaiveUDP reports whether a naive service carries UDP as HTTP/3 datagrams
+// (spec/naive-udp-v1.md): off unless rayctl service set <naive> udp=on.
+// Its clients reach it only on a UDP port of the service (NaiveUDPLink).
+func NaiveUDP(svc store.Service) bool {
+	var s struct {
+		UDP bool `json:"udp"`
+	}
+	_ = json.Unmarshal([]byte(svc.Settings), &s)
+	return svc.Kind == "naive" && s.UDP
+}
+
+// NaiveUDPLink reports whether a naive service's links say udp=1
+// (spec/naive-udp-v1.md §9.1): udp=on, and a UDP port its clients reach
+// naive-quic on (443 behind the front, and the ports of its schedule).
+func NaiveUDPLink(svc store.Service) bool {
+	if !NaiveUDP(svc) {
+		return false
+	}
+	ports, err := svc.Ports()
+	if err != nil {
+		return false
+	}
+	for _, p := range ports {
+		if p.Proto == "udp" {
+			return true
+		}
+	}
+	return false
 }
 
 // SiteName returns the server name of a decoy site.

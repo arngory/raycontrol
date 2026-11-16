@@ -78,7 +78,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             creation; keys, shortIds and server name stay);
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
                                             naive: icmp=on|off (ping and traceroute through it, then
-                                            rayctl apply), rotate_sni=on|off|auto (its server name
+                                            rayctl apply), udp=on|off (UDP as HTTP/3 datagrams,
+                                            naive-udp-v1; off by default; then rayctl apply),
+                                            rotate_sni=on|off|auto (its server name
                                             every -naive-sni-period; auto: under a wildcard certificate
                                             only; rotate always switches);
                                             yggdrasil: peers=URI,URI|none (public peers, then rayctl apply),
@@ -827,6 +829,14 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 				if key == "icmp" {
 					fmt.Fprintln(w, "run rayctl apply: naive restarts with ICMP "+value+" (with it on, apply lets its group open ICMP sockets);\n"+
 						"until then clients that see icmp=1 in the link get their ICMP streams reset")
+				}
+				if key == "udp" {
+					fmt.Fprintln(w, "run rayctl apply: naive restarts with UDP datagrams "+value+"; links say udp=1 while it is on;\n"+
+						"clients without the second engine ignore it and keep UDP over the HTTP/2 stream (uot=2)")
+					svc := store.Service{Kind: r.Msg.Service.Kind, Settings: r.Msg.Service.SettingsJson}
+					if provision.NaiveUDP(svc) && !provision.NaiveUDPLink(svc) {
+						fmt.Fprintln(w, "warning: the service has no UDP port: naive-quic cannot be reached, and no link says udp=1")
+					}
 				}
 			}
 		})

@@ -234,6 +234,29 @@ func TestSiteAnswer(t *testing.T) {
 	if n, err := CreateService(ctx, st, store.Service{Kind: "naive", Name: "naive3", Enabled: true, Settings: `{"icmp":true}`}); err != nil || !NaiveICMP(n) {
 		t.Fatalf(`naive with "icmp":true: %v`, err)
 	}
+	// naive's UDP datagrams (spec/naive-udp-v1.md §7): the same, off
+	// unless set; the links say udp=1 only with a UDP port.
+	if n, err = st.ServiceByName(ctx, "naive"); err != nil || NaiveUDP(n) || NaiveUDPLink(n) {
+		t.Fatalf("a new naive: %v, udp %v", err, NaiveUDP(n))
+	}
+	if n, err = SetServiceOption(ctx, st, "naive", "udp", "on"); err != nil || !NaiveUDP(n) || !NaiveUDPLink(n) {
+		t.Fatalf("udp=on: %v %s", err, n.Settings)
+	}
+	if n, err = SetServiceOption(ctx, st, "naive", "udp", "off"); err != nil || NaiveUDP(n) || strings.Contains(n.Settings, "udp\"") {
+		t.Fatalf("udp=off: %v %s", err, n.Settings)
+	}
+	for _, c := range [][3]string{{"naive", "udp", "true"}, {"naive", "udp", "1"}, {"r", "udp", "on"}, {"site", "udp", "on"}} {
+		if _, err := SetServiceOption(ctx, st, c[0], c[1], c[2]); !errors.Is(err, store.ErrInvalid) {
+			t.Errorf("%s %s=%s: %v", c[0], c[1], c[2], err)
+		}
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "naive", Name: "naive4", Enabled: true, Settings: `{"udp":"on"}`}); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf(`naive with "udp":"on": %v`, err)
+	}
+	tcpOnly, err := CreateService(ctx, st, store.Service{Kind: "naive", Name: "naive5", Enabled: true, Settings: `{"udp":true,"ports":["tcp/443"]}`})
+	if err != nil || !NaiveUDP(tcpOnly) || NaiveUDPLink(tcpOnly) {
+		t.Fatalf(`naive with udp on TCP only: %v %s`, err, tcpOnly.Settings)
+	}
 	// SSH shares no port: a grant for the other service would reach sshd.
 	if _, err := CreateService(ctx, st, store.Service{Kind: "ssh", Name: "ssh", Enabled: true}); err != nil {
 		t.Fatal(err)

@@ -201,7 +201,7 @@ func TestDeployInputsRoundTrip(t *testing.T) {
 		{Kind: "ssh", Name: "ssh", Enabled: true},
 		{Kind: "dnstt", Name: "dns", Enabled: true},
 		{Kind: "reality", Name: "reality", Enabled: true},
-		{Kind: "naive", Name: "naive", Enabled: true, Settings: `{"icmp":true}`},
+		{Kind: "naive", Name: "naive", Enabled: true, Settings: `{"icmp":true,"udp":true}`},
 		{Kind: "hy2-obfs", Name: "ho", Enabled: true},
 		{Kind: "slipstream", Name: "slip", Enabled: true},
 		{Kind: "yggdrasil", Name: "ygg", Enabled: true},
@@ -224,6 +224,9 @@ func TestDeployInputsRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan.Files = append(plan.Files, deploy.FirewallFiles(in.HostPorts)...)
+	if i := slices.IndexFunc(in.Services, func(s deploy.ServiceInput) bool { return s.Kind == "naive" }); i < 0 || !in.Services[i].UDP || !back.Services[i].UDP {
+		t.Fatalf("naive's UDP not reported: %+v", in.Services)
+	}
 	if !plan.ICMP || plan.ICMP != dep.Msg.Icmp || !slices.Equal(plan.Units, dep.Msg.Units) || !slices.Equal(plan.Warnings, dep.Msg.Warnings) || len(plan.Files) != len(dep.Msg.Files) {
 		t.Fatalf("root's plan %v %v, rayd's %v %v", plan.Units, plan.Warnings, dep.Msg.Units, dep.Msg.Warnings)
 	}

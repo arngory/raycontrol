@@ -85,6 +85,11 @@ func TestBuildFromInputs(t *testing.T) {
 		"naive with ICMP, supervised": {p: supervised, services: [][3]string{{"reality", "reality", ""}, {"naive", "naive", `{"icmp":true}`}}},
 		"naive with ICMP off again": {p: render.DefaultPaths, services: [][3]string{{"reality", "reality", ""}, {"naive", "naive", `{"icmp":true}`}},
 			tweak: setOption("naive", "icmp", "off")},
+		"naive with UDP": {p: render.DefaultPaths, services: [][3]string{{"reality", "reality", ""}, {"naive", "naive", ""}},
+			tweak: setOption("naive", "udp", "on")},
+		"naive with UDP and ICMP": {p: render.DefaultPaths, services: [][3]string{{"reality", "reality", ""}, {"naive", "naive", `{"icmp":true,"udp":true}`}}},
+		"naive with UDP off again": {p: render.DefaultPaths, services: [][3]string{{"reality", "reality", ""}, {"naive", "naive", `{"udp":true}`}},
+			tweak: setOption("naive", "udp", "off")},
 		"TestBuildDNSKeyWithoutRender": {p: render.DefaultPaths, services: [][3]string{{"dnstt", "dnstt", ""}, {"masterdns", "masterdns", ""}},
 			drop: func(f render.File) bool { return f.Service == "dnstt" || f.Service == "masterdns" }},
 		"TestFrontCredentialsOnlyRendered": {p: render.DefaultPaths, services: plan2Services,
@@ -119,10 +124,14 @@ func TestBuildFromInputs(t *testing.T) {
 		if len(want.Files) == 0 || len(want.Units) == 0 {
 			t.Fatalf("%s: an empty plan", name)
 		}
-		// The ICMP models do have it (spec/icmp-v1.md): -icmp and Plan.ICMP.
-		if icmp := strings.Contains(name, "ICMP") && !strings.Contains(name, "off"); want.ICMP != icmp ||
-			strings.Contains(file(want, "/etc/systemd/system/niko-naive.service"), " -icmp\n") != icmp {
+		// The ICMP models do have it (spec/icmp-v1.md): -icmp and Plan.ICMP;
+		// the UDP ones -udp (spec/naive-udp-v1.md).
+		unit := file(want, "/etc/systemd/system/niko-naive.service")
+		if icmp := strings.Contains(name, "ICMP") && !strings.Contains(name, "off"); want.ICMP != icmp || strings.Contains(unit, " -icmp") != icmp {
 			t.Errorf("%s: ICMP %v", name, want.ICMP)
+		}
+		if udp := strings.Contains(name, "UDP") && !strings.Contains(name, "off"); strings.Contains(unit, " -udp") != udp {
+			t.Errorf("%s: UDP %v, unit\n%s", name, udp, unit)
 		}
 		for i := range max(len(want.Files), len(got.Files)) {
 			if i >= len(want.Files) || i >= len(got.Files) || want.Files[i].Path != got.Files[i].Path ||
