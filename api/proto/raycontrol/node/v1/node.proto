@@ -65,6 +65,15 @@ service NodeService {
   // Hysteria2's Brutal ceilings, Yggdrasil's public peers and its ceiling
   // of LAN traffic through the node (lan_relay, docs/spec/lan-v1.md §4.4).
   rpc SetServiceOption(SetServiceOptionRequest) returns (SetServiceOptionResponse);
+  // GetYggdrasilPeerKeys returns the public keys a Yggdrasil service lets
+  // in, for a peer of the operator's own (yggdrasil-go's
+  // AllowedPublicKeys, rayctl service peer-keys): the node's key in the
+  // mesh, which peers with it, then each active user's own key and each
+  // of the user's devices not revoked, for every inner UUID the node takes
+  // now (its backend's users file): these change with the devices, the
+  // users and every credential switch. Public keys only. Who may list the
+  // devices may ask. Since v0.31.0; an older node answers unimplemented.
+  rpc GetYggdrasilPeerKeys(GetYggdrasilPeerKeysRequest) returns (GetYggdrasilPeerKeysResponse);
   // SetCertificate puts the operator's own certificate on a site, in place
   // of one from ACME, for every service under it (REALITY self-steal,
   // hy2-masq, naive, DoH, Yggdrasil). With ACME on, rayd renews it when it
@@ -762,6 +771,32 @@ message SetServiceOptionRequest {
 }
 message SetServiceOptionResponse {
   Service service = 1;
+}
+
+message GetYggdrasilPeerKeysRequest {
+  string service = 1; // a Yggdrasil service's name
+}
+message GetYggdrasilPeerKeysResponse {
+  string service = 1;
+  string node_key = 2;     // the node's ed25519 public key in the mesh, hex
+  string node_address = 3; // the node's mesh address (200::/7)
+  repeated YggdrasilPeerKey keys = 4;
+}
+// YggdrasilPeerKey is one key a Yggdrasil service lets in: a public key,
+// whose it is and from which inner UUID of the user's rotation.
+message YggdrasilPeerKey {
+  string public_key = 1; // ed25519, hex
+  string address = 2;    // its mesh address
+  string user = 3;
+  // The device's ID; "": the user's own key, from the UUID alone (links of
+  // rayctl user export, subscriptions before v0.20.1).
+  string device_id = 4;
+  string device = 5; // the device's name
+  // "current", "next" (in subscriptions already: clients move to it at
+  // from) or "previous" (the node still takes it until until).
+  string credential = 6;
+  int64 from = 7;  // unix seconds; next only
+  int64 until = 8; // unix seconds; previous only
 }
 
 message SetCertificateRequest {

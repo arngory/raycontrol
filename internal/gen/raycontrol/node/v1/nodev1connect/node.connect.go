@@ -78,6 +78,9 @@ const (
 	// NodeServiceSetServiceOptionProcedure is the fully-qualified name of the NodeService's
 	// SetServiceOption RPC.
 	NodeServiceSetServiceOptionProcedure = "/raycontrol.node.v1.NodeService/SetServiceOption"
+	// NodeServiceGetYggdrasilPeerKeysProcedure is the fully-qualified name of the NodeService's
+	// GetYggdrasilPeerKeys RPC.
+	NodeServiceGetYggdrasilPeerKeysProcedure = "/raycontrol.node.v1.NodeService/GetYggdrasilPeerKeys"
 	// NodeServiceSetCertificateProcedure is the fully-qualified name of the NodeService's
 	// SetCertificate RPC.
 	NodeServiceSetCertificateProcedure = "/raycontrol.node.v1.NodeService/SetCertificate"
@@ -225,6 +228,15 @@ type NodeServiceClient interface {
 	// Hysteria2's Brutal ceilings, Yggdrasil's public peers and its ceiling
 	// of LAN traffic through the node (lan_relay, docs/spec/lan-v1.md §4.4).
 	SetServiceOption(context.Context, *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error)
+	// GetYggdrasilPeerKeys returns the public keys a Yggdrasil service lets
+	// in, for a peer of the operator's own (yggdrasil-go's
+	// AllowedPublicKeys, rayctl service peer-keys): the node's key in the
+	// mesh, which peers with it, then each active user's own key and each
+	// of the user's devices not revoked, for every inner UUID the node takes
+	// now (its backend's users file): these change with the devices, the
+	// users and every credential switch. Public keys only. Who may list the
+	// devices may ask. Since v0.31.0; an older node answers unimplemented.
+	GetYggdrasilPeerKeys(context.Context, *connect.Request[v1.GetYggdrasilPeerKeysRequest]) (*connect.Response[v1.GetYggdrasilPeerKeysResponse], error)
 	// SetCertificate puts the operator's own certificate on a site, in place
 	// of one from ACME, for every service under it (REALITY self-steal,
 	// hy2-masq, naive, DoH, Yggdrasil). With ACME on, rayd renews it when it
@@ -452,6 +464,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("SetServiceOption")),
 			connect.WithClientOptions(opts...),
 		),
+		getYggdrasilPeerKeys: connect.NewClient[v1.GetYggdrasilPeerKeysRequest, v1.GetYggdrasilPeerKeysResponse](
+			httpClient,
+			baseURL+NodeServiceGetYggdrasilPeerKeysProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetYggdrasilPeerKeys")),
+			connect.WithClientOptions(opts...),
+		),
 		setCertificate: connect.NewClient[v1.SetCertificateRequest, v1.SetCertificateResponse](
 			httpClient,
 			baseURL+NodeServiceSetCertificateProcedure,
@@ -673,58 +691,59 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 
 // nodeServiceClient implements NodeServiceClient.
 type nodeServiceClient struct {
-	getStatus         *connect.Client[v1.GetStatusRequest, v1.GetStatusResponse]
-	listUsers         *connect.Client[v1.ListUsersRequest, v1.ListUsersResponse]
-	createUser        *connect.Client[v1.CreateUserRequest, v1.CreateUserResponse]
-	setUserEnabled    *connect.Client[v1.SetUserEnabledRequest, v1.SetUserEnabledResponse]
-	setUserServices   *connect.Client[v1.SetUserServicesRequest, v1.SetUserServicesResponse]
-	deleteUser        *connect.Client[v1.DeleteUserRequest, v1.DeleteUserResponse]
-	setUserTraffic    *connect.Client[v1.SetUserTrafficRequest, v1.SetUserTrafficResponse]
-	setUserLAN        *connect.Client[v1.SetUserLANRequest, v1.SetUserLANResponse]
-	exportUser        *connect.Client[v1.ExportUserRequest, v1.ExportUserResponse]
-	renewUser         *connect.Client[v1.RenewUserRequest, v1.RenewUserResponse]
-	listServices      *connect.Client[v1.ListServicesRequest, v1.ListServicesResponse]
-	createService     *connect.Client[v1.CreateServiceRequest, v1.CreateServiceResponse]
-	setServiceEnabled *connect.Client[v1.SetServiceEnabledRequest, v1.SetServiceEnabledResponse]
-	deleteService     *connect.Client[v1.DeleteServiceRequest, v1.DeleteServiceResponse]
-	rotateService     *connect.Client[v1.RotateServiceRequest, v1.RotateServiceResponse]
-	setServiceOption  *connect.Client[v1.SetServiceOptionRequest, v1.SetServiceOptionResponse]
-	setCertificate    *connect.Client[v1.SetCertificateRequest, v1.SetCertificateResponse]
-	listDevices       *connect.Client[v1.ListDevicesRequest, v1.ListDevicesResponse]
-	createDevice      *connect.Client[v1.CreateDeviceRequest, v1.CreateDeviceResponse]
-	revokeDevice      *connect.Client[v1.RevokeDeviceRequest, v1.RevokeDeviceResponse]
-	createInvite      *connect.Client[v1.CreateInviteRequest, v1.CreateInviteResponse]
-	listAudit         *connect.Client[v1.ListAuditRequest, v1.ListAuditResponse]
-	getAdminAccess    *connect.Client[v1.GetAdminAccessRequest, v1.GetAdminAccessResponse]
-	setAdminAccess    *connect.Client[v1.SetAdminAccessRequest, v1.SetAdminAccessResponse]
-	addRelay          *connect.Client[v1.AddRelayRequest, v1.AddRelayResponse]
-	listRelays        *connect.Client[v1.ListRelaysRequest, v1.ListRelaysResponse]
-	removeRelay       *connect.Client[v1.RemoveRelayRequest, v1.RemoveRelayResponse]
-	issueRelayBundle  *connect.Client[v1.IssueRelayBundleRequest, v1.IssueRelayBundleResponse]
-	setRelayAccess    *connect.Client[v1.SetRelayAccessRequest, v1.SetRelayAccessResponse]
-	setDNSProvider    *connect.Client[v1.SetDNSProviderRequest, v1.SetDNSProviderResponse]
-	getDNS            *connect.Client[v1.GetDNSRequest, v1.GetDNSResponse]
-	syncDNS           *connect.Client[v1.SyncDNSRequest, v1.SyncDNSResponse]
-	removeDNS         *connect.Client[v1.RemoveDNSRequest, v1.RemoveDNSResponse]
-	checkDNSZones     *connect.Client[v1.CheckDNSZonesRequest, v1.CheckDNSZonesResponse]
-	backup            *connect.Client[v1.BackupRequest, v1.BackupResponse]
-	getMetrics        *connect.Client[v1.GetMetricsRequest, v1.GetMetricsResponse]
-	getSummary        *connect.Client[v1.GetSummaryRequest, v1.GetSummaryResponse]
-	setSummary        *connect.Client[v1.SetSummaryRequest, v1.SetSummaryResponse]
-	getAppMirror      *connect.Client[v1.GetAppMirrorRequest, v1.GetAppMirrorResponse]
-	setAppMirror      *connect.Client[v1.SetAppMirrorRequest, v1.SetAppMirrorResponse]
-	startUpdate       *connect.Client[v1.StartUpdateRequest, v1.StartUpdateResponse]
-	getUpdateStatus   *connect.Client[v1.GetUpdateStatusRequest, v1.GetUpdateStatusResponse]
-	setDebug          *connect.Client[v1.SetDebugRequest, v1.SetDebugResponse]
-	setNodeName       *connect.Client[v1.SetNodeNameRequest, v1.SetNodeNameResponse]
-	setNodeNote       *connect.Client[v1.SetNodeNoteRequest, v1.SetNodeNoteResponse]
-	getEgress         *connect.Client[v1.GetEgressRequest, v1.GetEgressResponse]
-	setEgress         *connect.Client[v1.SetEgressRequest, v1.SetEgressResponse]
-	getConnLimit      *connect.Client[v1.GetConnLimitRequest, v1.GetConnLimitResponse]
-	setConnLimit      *connect.Client[v1.SetConnLimitRequest, v1.SetConnLimitResponse]
-	getDeployment     *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
-	getDeployInputs   *connect.Client[v1.GetDeployInputsRequest, v1.GetDeployInputsResponse]
-	getPorts          *connect.Client[v1.GetPortsRequest, v1.GetPortsResponse]
+	getStatus            *connect.Client[v1.GetStatusRequest, v1.GetStatusResponse]
+	listUsers            *connect.Client[v1.ListUsersRequest, v1.ListUsersResponse]
+	createUser           *connect.Client[v1.CreateUserRequest, v1.CreateUserResponse]
+	setUserEnabled       *connect.Client[v1.SetUserEnabledRequest, v1.SetUserEnabledResponse]
+	setUserServices      *connect.Client[v1.SetUserServicesRequest, v1.SetUserServicesResponse]
+	deleteUser           *connect.Client[v1.DeleteUserRequest, v1.DeleteUserResponse]
+	setUserTraffic       *connect.Client[v1.SetUserTrafficRequest, v1.SetUserTrafficResponse]
+	setUserLAN           *connect.Client[v1.SetUserLANRequest, v1.SetUserLANResponse]
+	exportUser           *connect.Client[v1.ExportUserRequest, v1.ExportUserResponse]
+	renewUser            *connect.Client[v1.RenewUserRequest, v1.RenewUserResponse]
+	listServices         *connect.Client[v1.ListServicesRequest, v1.ListServicesResponse]
+	createService        *connect.Client[v1.CreateServiceRequest, v1.CreateServiceResponse]
+	setServiceEnabled    *connect.Client[v1.SetServiceEnabledRequest, v1.SetServiceEnabledResponse]
+	deleteService        *connect.Client[v1.DeleteServiceRequest, v1.DeleteServiceResponse]
+	rotateService        *connect.Client[v1.RotateServiceRequest, v1.RotateServiceResponse]
+	setServiceOption     *connect.Client[v1.SetServiceOptionRequest, v1.SetServiceOptionResponse]
+	getYggdrasilPeerKeys *connect.Client[v1.GetYggdrasilPeerKeysRequest, v1.GetYggdrasilPeerKeysResponse]
+	setCertificate       *connect.Client[v1.SetCertificateRequest, v1.SetCertificateResponse]
+	listDevices          *connect.Client[v1.ListDevicesRequest, v1.ListDevicesResponse]
+	createDevice         *connect.Client[v1.CreateDeviceRequest, v1.CreateDeviceResponse]
+	revokeDevice         *connect.Client[v1.RevokeDeviceRequest, v1.RevokeDeviceResponse]
+	createInvite         *connect.Client[v1.CreateInviteRequest, v1.CreateInviteResponse]
+	listAudit            *connect.Client[v1.ListAuditRequest, v1.ListAuditResponse]
+	getAdminAccess       *connect.Client[v1.GetAdminAccessRequest, v1.GetAdminAccessResponse]
+	setAdminAccess       *connect.Client[v1.SetAdminAccessRequest, v1.SetAdminAccessResponse]
+	addRelay             *connect.Client[v1.AddRelayRequest, v1.AddRelayResponse]
+	listRelays           *connect.Client[v1.ListRelaysRequest, v1.ListRelaysResponse]
+	removeRelay          *connect.Client[v1.RemoveRelayRequest, v1.RemoveRelayResponse]
+	issueRelayBundle     *connect.Client[v1.IssueRelayBundleRequest, v1.IssueRelayBundleResponse]
+	setRelayAccess       *connect.Client[v1.SetRelayAccessRequest, v1.SetRelayAccessResponse]
+	setDNSProvider       *connect.Client[v1.SetDNSProviderRequest, v1.SetDNSProviderResponse]
+	getDNS               *connect.Client[v1.GetDNSRequest, v1.GetDNSResponse]
+	syncDNS              *connect.Client[v1.SyncDNSRequest, v1.SyncDNSResponse]
+	removeDNS            *connect.Client[v1.RemoveDNSRequest, v1.RemoveDNSResponse]
+	checkDNSZones        *connect.Client[v1.CheckDNSZonesRequest, v1.CheckDNSZonesResponse]
+	backup               *connect.Client[v1.BackupRequest, v1.BackupResponse]
+	getMetrics           *connect.Client[v1.GetMetricsRequest, v1.GetMetricsResponse]
+	getSummary           *connect.Client[v1.GetSummaryRequest, v1.GetSummaryResponse]
+	setSummary           *connect.Client[v1.SetSummaryRequest, v1.SetSummaryResponse]
+	getAppMirror         *connect.Client[v1.GetAppMirrorRequest, v1.GetAppMirrorResponse]
+	setAppMirror         *connect.Client[v1.SetAppMirrorRequest, v1.SetAppMirrorResponse]
+	startUpdate          *connect.Client[v1.StartUpdateRequest, v1.StartUpdateResponse]
+	getUpdateStatus      *connect.Client[v1.GetUpdateStatusRequest, v1.GetUpdateStatusResponse]
+	setDebug             *connect.Client[v1.SetDebugRequest, v1.SetDebugResponse]
+	setNodeName          *connect.Client[v1.SetNodeNameRequest, v1.SetNodeNameResponse]
+	setNodeNote          *connect.Client[v1.SetNodeNoteRequest, v1.SetNodeNoteResponse]
+	getEgress            *connect.Client[v1.GetEgressRequest, v1.GetEgressResponse]
+	setEgress            *connect.Client[v1.SetEgressRequest, v1.SetEgressResponse]
+	getConnLimit         *connect.Client[v1.GetConnLimitRequest, v1.GetConnLimitResponse]
+	setConnLimit         *connect.Client[v1.SetConnLimitRequest, v1.SetConnLimitResponse]
+	getDeployment        *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
+	getDeployInputs      *connect.Client[v1.GetDeployInputsRequest, v1.GetDeployInputsResponse]
+	getPorts             *connect.Client[v1.GetPortsRequest, v1.GetPortsResponse]
 }
 
 // GetStatus calls raycontrol.node.v1.NodeService.GetStatus.
@@ -805,6 +824,11 @@ func (c *nodeServiceClient) RotateService(ctx context.Context, req *connect.Requ
 // SetServiceOption calls raycontrol.node.v1.NodeService.SetServiceOption.
 func (c *nodeServiceClient) SetServiceOption(ctx context.Context, req *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error) {
 	return c.setServiceOption.CallUnary(ctx, req)
+}
+
+// GetYggdrasilPeerKeys calls raycontrol.node.v1.NodeService.GetYggdrasilPeerKeys.
+func (c *nodeServiceClient) GetYggdrasilPeerKeys(ctx context.Context, req *connect.Request[v1.GetYggdrasilPeerKeysRequest]) (*connect.Response[v1.GetYggdrasilPeerKeysResponse], error) {
+	return c.getYggdrasilPeerKeys.CallUnary(ctx, req)
 }
 
 // SetCertificate calls raycontrol.node.v1.NodeService.SetCertificate.
@@ -1043,6 +1067,15 @@ type NodeServiceHandler interface {
 	// Hysteria2's Brutal ceilings, Yggdrasil's public peers and its ceiling
 	// of LAN traffic through the node (lan_relay, docs/spec/lan-v1.md §4.4).
 	SetServiceOption(context.Context, *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error)
+	// GetYggdrasilPeerKeys returns the public keys a Yggdrasil service lets
+	// in, for a peer of the operator's own (yggdrasil-go's
+	// AllowedPublicKeys, rayctl service peer-keys): the node's key in the
+	// mesh, which peers with it, then each active user's own key and each
+	// of the user's devices not revoked, for every inner UUID the node takes
+	// now (its backend's users file): these change with the devices, the
+	// users and every credential switch. Public keys only. Who may list the
+	// devices may ask. Since v0.31.0; an older node answers unimplemented.
+	GetYggdrasilPeerKeys(context.Context, *connect.Request[v1.GetYggdrasilPeerKeysRequest]) (*connect.Response[v1.GetYggdrasilPeerKeysResponse], error)
 	// SetCertificate puts the operator's own certificate on a site, in place
 	// of one from ACME, for every service under it (REALITY self-steal,
 	// hy2-masq, naive, DoH, Yggdrasil). With ACME on, rayd renews it when it
@@ -1264,6 +1297,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		NodeServiceSetServiceOptionProcedure,
 		svc.SetServiceOption,
 		connect.WithSchema(nodeServiceMethods.ByName("SetServiceOption")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceGetYggdrasilPeerKeysHandler := connect.NewUnaryHandler(
+		NodeServiceGetYggdrasilPeerKeysProcedure,
+		svc.GetYggdrasilPeerKeys,
+		connect.WithSchema(nodeServiceMethods.ByName("GetYggdrasilPeerKeys")),
 		connect.WithHandlerOptions(opts...),
 	)
 	nodeServiceSetCertificateHandler := connect.NewUnaryHandler(
@@ -1516,6 +1555,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceRotateServiceHandler.ServeHTTP(w, r)
 		case NodeServiceSetServiceOptionProcedure:
 			nodeServiceSetServiceOptionHandler.ServeHTTP(w, r)
+		case NodeServiceGetYggdrasilPeerKeysProcedure:
+			nodeServiceGetYggdrasilPeerKeysHandler.ServeHTTP(w, r)
 		case NodeServiceSetCertificateProcedure:
 			nodeServiceSetCertificateHandler.ServeHTTP(w, r)
 		case NodeServiceListDevicesProcedure:
@@ -1659,6 +1700,10 @@ func (UnimplementedNodeServiceHandler) RotateService(context.Context, *connect.R
 
 func (UnimplementedNodeServiceHandler) SetServiceOption(context.Context, *connect.Request[v1.SetServiceOptionRequest]) (*connect.Response[v1.SetServiceOptionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetServiceOption is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetYggdrasilPeerKeys(context.Context, *connect.Request[v1.GetYggdrasilPeerKeysRequest]) (*connect.Response[v1.GetYggdrasilPeerKeysResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetYggdrasilPeerKeys is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) SetCertificate(context.Context, *connect.Request[v1.SetCertificateRequest]) (*connect.Response[v1.SetCertificateResponse], error) {

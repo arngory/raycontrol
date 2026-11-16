@@ -119,45 +119,89 @@ func YggdrasilAddress(key ed25519.PublicKey) netip.Addr {
 // group (lan-v1 §2.2), for every UUID of the rotation: niko-server passes
 // frames between the keys of one group, and none between the others.
 func yggdrasilUsers(m Model, s Service, inner Service) []map[string]any {
-	now := m.Now
-	if now.IsZero() {
-		now = time.Now()
-	}
 	type entry struct {
 		PublicKey string `json:"public_key"`
 		LAN       string `json:"lan,omitempty"`
 	}
 	keys := map[string]entry{}
-	for _, u := range m.Users {
-		if !slices.Contains(u.Services, s.ID) || m.Inner[u.ID] == "" {
-			continue
+	for _, p := range YggdrasilPeers(m, s, inner) {
+		e := entry{PublicKey: hex.EncodeToString(p.Key)}
+		if p.LAN {
+			e.LAN = LANGroup(p.UserID)
 		}
-		// The user's key (exported links, older subscriptions) and each
-		// device's, for every UUID of the rotation.
-		uuids := map[string]string{"": m.Inner[u.ID]}
-		set := m.Sets[inner.ID][u.ID]
-		if set.Next != "" {
-			uuids["-n"] = set.Next
-		}
-		if set.Prev != "" && now.Before(set.PrevUntil) {
-			uuids["-p"] = set.Prev
-		}
-		for suffix, uuid := range uuids {
-			keys[InnerEmail(u.ID)+suffix] = entry{PublicKey: hex.EncodeToString(YggdrasilKey(uuid).Public().(ed25519.PublicKey))}
-			for _, d := range m.Devices[u.ID] {
-				e := entry{PublicKey: hex.EncodeToString(YggdrasilDeviceKey(uuid, d.Key[:]).Public().(ed25519.PublicKey))}
-				if u.LAN && d.LAN {
-					e.LAN = LANGroup(u.ID)
-				}
-				keys[InnerEmail(u.ID)+"-"+d.ID+suffix] = e
-			}
-		}
+		keys[p.label] = e
 	}
 	users := []map[string]any{}
 	for _, name := range slices.Sorted(maps.Keys(keys)) {
 		users = append(users, map[string]any{"name": name, "enabled": true, "yggdrasil": keys[name]})
 	}
 	return users
+}
+
+// YggdrasilPeer is a key a Yggdrasil service lets in (its users file):
+// whose it is, and from which inner UUID of its user's rotation. A public
+// key only: what a peer of the operator's own (AllowedPublicKeys) lets in.
+type YggdrasilPeer struct {
+	UserID int64
+	User   string
+	// Device is the device's ID; "" for the user's own key, from the UUID
+	// alone (exported links, subscriptions before v0.20.1).
+	Device string
+	// Credential is the inner UUID it comes from: "current", "next" (in
+	// subscriptions already, clients move to it at From) or "previous"
+	// (still let in until Until).
+	Credential  string
+	From, Until time.Time
+	Key         ed25519.PublicKey
+	// LAN: the key is in its user's group (lan-v1 §2.2): a device that
+	// shows itself, of a user with LAN on.
+	LAN bool
+	// label is its name in the users file: u<id>, -<device>, -n or -p.
+	label string
+}
+
+// YggdrasilPeers are the keys a Yggdrasil service lets in, as its users
+// file has them (yggdrasilUsers, the same list): of each active user of
+// the service, the user's own key and each device's not revoked
+// (Model.Devices), for the current inner UUID, the next one while it is
+// published and the previous one in its grace. In the model's order of
+// users; for each, the user's own keys first, then each device's, current,
+// next, previous.
+func YggdrasilPeers(m Model, s Service, inner Service) []YggdrasilPeer {
+	now := m.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	type credential struct {
+		name, suffix, uuid string
+		from, until        time.Time
+	}
+	pub := func(k ed25519.PrivateKey) ed25519.PublicKey { return k.Public().(ed25519.PublicKey) }
+	var out []YggdrasilPeer
+	for _, u := range m.Users {
+		if !slices.Contains(u.Services, s.ID) || m.Inner[u.ID] == "" {
+			continue
+		}
+		creds := []credential{{name: "current", uuid: m.Inner[u.ID]}}
+		set := m.Sets[inner.ID][u.ID]
+		if set.Next != "" {
+			creds = append(creds, credential{name: "next", suffix: "-n", uuid: set.Next, from: set.NextFrom})
+		}
+		if set.Prev != "" && now.Before(set.PrevUntil) {
+			creds = append(creds, credential{name: "previous", suffix: "-p", uuid: set.Prev, until: set.PrevUntil})
+		}
+		for _, c := range creds {
+			out = append(out, YggdrasilPeer{UserID: u.ID, User: u.Name, Credential: c.name, From: c.from, Until: c.until,
+				Key: pub(YggdrasilKey(c.uuid)), label: InnerEmail(u.ID) + c.suffix})
+		}
+		for _, d := range m.Devices[u.ID] {
+			for _, c := range creds {
+				out = append(out, YggdrasilPeer{UserID: u.ID, User: u.Name, Device: d.ID, Credential: c.name, From: c.from, Until: c.until,
+					Key: pub(YggdrasilDeviceKey(c.uuid, d.Key[:])), LAN: u.LAN && d.LAN, label: InnerEmail(u.ID) + "-" + d.ID + c.suffix})
+			}
+		}
+	}
+	return out
 }
 
 func yggdrasilFiles(s Service, m Model, inner Service, p Paths) ([]File, error) {

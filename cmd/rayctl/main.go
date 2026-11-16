@@ -92,6 +92,10 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             zone=SPARE (a spare becomes the main zone, the main one leaves);
                                             slipstream: max_connections=16..1024, device_connections=1..16
                                             (0: the defaults, 256 and 4; the server restarts)
+  service peer-keys NAME                    yggdrasil: the public keys a peer of your own (peers=) lets in
+                                            with AllowedPublicKeys, as HJSON for its config: the node's,
+                                            then each user's and device's, a comment saying whose; they
+                                            change with devices, users and credential switches
   service cert SITE -chain F -key F [-force]
                                             a certificate of your own for the site and the services under
                                             it, in place of ACME's (root on the node only); the links
@@ -843,6 +847,8 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 				}
 			}
 		})
+	case "peer-keys":
+		return c.peerKeys(ctx, args)
 	case "cert":
 		fs := flag.NewFlagSet("service cert", flag.ContinueOnError)
 		chain := fs.String("chain", "", "certificate chain, PEM, leaf first")

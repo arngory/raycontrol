@@ -191,7 +191,7 @@ func subCommands(t *testing.T) map[string][]string {
 var apiSubs = map[string][]string{
 	"node":       {"name", "note"},
 	"user":       {"add", "del", "disable", "enable", "export", "lan", "limit", "list", "renew", "reset-usage", "services", "usage"},
-	"service":    {"add", "del", "disable", "enable", "list", "rotate", "set"},
+	"service":    {"add", "del", "disable", "enable", "list", "peer-keys", "rotate", "set"},
 	"device":     {"add", "invite", "list", "revoke"},
 	"relay":      {"add", "list", "ports", "remove", "set"},
 	"dns":        {"check", "cloudflare", "remove", "status", "sync"},

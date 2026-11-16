@@ -254,6 +254,15 @@ A client that lost Register's answer (timeout, dropped connection) may send it a
   же порт, иначе отвечает сам хост relay. `access`: `everyone`, `spa` (после стука к relay), `admin` (адреса
   администратора relay; после стука — устройства с SSH). `ListRelays` (как весь `NodeService`, и через API) отдаёт их
   по текущим сервисам выхода; до первого пакета у relay нет `spa` и `probe`. Старая нода полей не заполняет.
+- Ключи для своего пира Yggdrasil (raycontrol v0.31.0): `GetYggdrasilPeerKeys {service}` — как `ListDevices` (root и
+  группа на ноде, admin-устройства через API; без аудита). Ответ — `node_key` (открытый ключ ed25519 ноды в Yggdrasil,
+  hex), `node_address`, `keys[]`: `YggdrasilPeerKey {public_key; address; user; device_id; device; credential; from;
+  until}` — ключи, которые пускает файл пользователей бэкенда: у каждого активного пользователя сервиса свой ключ
+  (`device_id` пуст: ссылки `rayctl user export`) и ключ каждого неотозванного устройства, для каждого UUID ротации:
+  `credential` — `current`, `next` (с `from`, unix-секунды) или `previous` (до `until`). Порядок — по пользователю,
+  сначала его собственный ключ, затем устройства по имени. Только открытые ключи: ни seed ноды, ни ключей
+  устройств. Не Yggdrasil — `invalid_argument`, нет сервиса — `not_found`, выключен или без `inner` —
+  `failed_precondition`, старая нода — `unimplemented`.
 
 ## 5a. Отзыв устройства меняет учётные данные пользователя (raycontrol v0.27.0)
 
