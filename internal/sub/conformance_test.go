@@ -43,6 +43,8 @@ func TestLinksForStrictClient(t *testing.T) {
 		{"naive", "naive", ""},
 		{"naive", "naive-icmp", `{"icmp":true}`},
 		{"naive", "naive-udp", `{"udp":true}`},
+		// udp=on without a UDP port: naive-quic cannot be reached.
+		{"naive", "naive-udp-tcp", `{"udp":true,"ports":["tcp/443"]}`},
 		{"doh", "doh", ""},
 		{"dnstt", "dns", ""},
 		{"dnstt", "dns-spare", `{"spare_zones":2}`},
@@ -162,8 +164,9 @@ func TestLinksForStrictClient(t *testing.T) {
 		}
 	}
 	// UDP datagrams (naive-udp-v1 §9.1): udp=1 on the naive that carries
-	// them, and only there; uot=2 stays on all (strictProblems).
-	for name, want := range map[string]bool{"naive": false, "naive-icmp": false, "naive-udp": true} {
+	// them and has a UDP port, and only there; uot=2 stays on all
+	// (strictProblems).
+	for name, want := range map[string]bool{"naive": false, "naive-icmp": false, "naive-udp": true, "naive-udp-tcp": false} {
 		for _, link := range []string{byName[name].Link, nextLink(byName[name])} {
 			u, _ := url.Parse(link)
 			if u.Query().Has("udp") != want {
@@ -175,7 +178,7 @@ func TestLinksForStrictClient(t *testing.T) {
 	// its two pins, the leaf's first, the current link and the next one
 	// alike; hy2-obfs keeps its one pin and pinSHA256; no other line has
 	// niko-pin.
-	pinned := map[string]int{"hy2": 2, "naive": 2, "naive-icmp": 2, "naive-udp": 2, "doh": 2, "hy2o": 1}
+	pinned := map[string]int{"hy2": 2, "naive": 2, "naive-icmp": 2, "naive-udp": 2, "naive-udp-tcp": 2, "doh": 2, "hy2o": 1}
 	for _, k := range kinds {
 		for _, link := range []string{byName[k.name].Link, nextLink(byName[k.name])} {
 			u, _ := url.Parse(link)
