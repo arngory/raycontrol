@@ -289,6 +289,13 @@ func TestCarryRestorePlainNotRotating(t *testing.T) {
 	if _, err := s.RevokeDeviceOverlap(ctx, f.phones["alice"].ID); err != nil {
 		t.Fatal(err)
 	}
+	// Her DoH secret has a next of the schedule, older than the tablet's
+	// revocation: DoH is no revocation's (R4-37) and labels nothing
+	// (review 3, X13).
+	if _, err := s.db.Exec(`UPDATE credentials SET next_secret = 'n', next_from = ? WHERE user_id = ? AND service_id = ?`,
+		t1.Add(DefaultRotation.Lead).Unix(), f.ids["alice"], f.doh); err != nil {
+		t.Fatal(err)
+	}
 	s.Close()
 	res, err := CarryRestore(ctx, f.backup, f.current, "")
 	if err != nil {

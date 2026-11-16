@@ -178,6 +178,21 @@ check_version() {
 	fi
 }
 
+# going_back SIGNED INSTALLED says why the release SIGNED is not put over a
+# node that runs INSTALLED, a newer release: going back is rayctl update's
+# (rayctl update -version SIGNED), which keeps a copy of the database and,
+# for a rayd before v0.31.0, renews the users whose rotation a revocation
+# with -overlap began, which that rayd would never finish (R4-43). A rayd
+# that names no release is taken at its word.
+going_back() {
+	local signed=$1 installed=$2
+	[[ $installed =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
+	if version_lt "$signed" "$installed"; then
+		echo "this host is a node on raycontrol $installed, newer than $signed: rayctl update -version $signed goes back"
+		return 1
+	fi
+}
+
 # install_deps installs what is missing: curl, openssl, nft and polkit (rayd
 # restarts data-plane units through polkit). INSTALLED_PKGS records them as
 # manager:name,name for rayctl uninstall -purge-packages.
@@ -350,6 +365,11 @@ main() {
 		exec 9<&- # rayctl takes the lock itself
 		/usr/local/bin/rayctl install -relay "$RELAY_BUNDLE" ${INSTALLED_PKGS:+-packages "$INSTALLED_PKGS"}
 		return
+	fi
+
+	# A node here already, on a newer release: not over it (going_back).
+	if [[ -z ${RAYCONTROL_LOCAL_DIR:-} && -e /var/lib/raycontrol/rayd.db && -x /usr/local/bin/rayd ]]; then
+		why="$(going_back "$signed" "$(/usr/local/bin/rayd version 2>/dev/null)")" || die "$why"
 	fi
 
 	# raycontrol v0 goes first, when asked: it holds 443 and its nftables

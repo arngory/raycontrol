@@ -264,18 +264,21 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 	// data plane runs on meanwhile; the perimeter keeps its table.
 	touched = true
 	since := time.Now().Unix() // what rayd audits from here on is the update's
-	if err := run("systemctl", "stop", "rayd.service"); err != nil {
+	// Going back to a rayd before v0.31.0 (-version, -from, -local) renews
+	// the users of rotations a revocation with overlap began, which that
+	// rayd would never finish (R4-43); one that cannot does not go back.
+	renewed, err := localNode.stopForInstall(ctx, newVersion)
+	if err != nil {
 		return err
 	}
-	if err := copyDB(deploy.DB, filepath.Join(previousDir, "rayd.db")); err != nil {
-		_ = run("systemctl", "start", "rayd.service")
-		return fmt.Errorf("keeping the database: %w", err)
+	if len(renewed) > 0 {
+		fmt.Print(renewedForOlderText(newVersion, renewed))
 	}
 
 	if err := stageRayspaUnit(stage); err != nil {
 		return c.failUpdate(ctx, fmt.Errorf("staging rayspa's unit: %w", err), before)
 	}
-	if err := installBinaries(stage); err != nil {
+	if err := localNode.install(stage); err != nil {
 		return c.failUpdate(ctx, fmt.Errorf("installing: %w", err), before)
 	}
 	// Restart and rollback each get their own time, whatever the download
@@ -825,7 +828,7 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool, carry carry) error {
 	}
 	// rayd's database is read from root's copy: SQLite would follow a link
 	// or block on a FIFO planted in rayd's directory.
-	current, done, err := rootCopy(deploy.DB)
+	current, done, err := rootCopy(localNode.db)
 	if err != nil {
 		return err
 	}
@@ -868,55 +871,6 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool, carry carry) error {
 	return c.rollback(ctx, "asked for", restoreDB, carry)
 }
 
-// rollbackRenewsOverlap reports whether a rollback that keeps the database
-// gives new credentials to the users whose rotation a revocation with
-// overlap began (store.RenewOverlapRotations, R4-43): when it goes back to
-// a rayd before overlapSince, or to a build that is no release, and the
-// node runs without a period (rot, the schedule rayd stored; the flags
-// stay with the unit): such a rayd runs no rotation loop then, and would
-// never switch the rotation nor drop the previous secret. With a period
-// its loop finishes them.
-func rollbackRenewsOverlap(target string, rot store.Rotation) bool {
-	if release.IsRelease(target) && !release.Newer(overlapSince, target) {
-		return false
-	}
-	return rot.Period <= 0
-}
-
-// renewOverlapAtRollback gives new credentials to the users whose rotation
-// a revocation with overlap began, in the node's database, when a rollback
-// to target keeps it (rollbackRenewsOverlap): on root's copy, with rayd
-// stopped, then the copy back, as the copy of the update goes back. It
-// returns the users renewed.
-func renewOverlapAtRollback(ctx context.Context, target string) ([]string, error) {
-	probe, done, err := rootCopy(deploy.DB)
-	if err != nil {
-		return nil, err
-	}
-	defer done()
-	rot, err := store.RotationAt(ctx, probe)
-	if err != nil || !rollbackRenewsOverlap(target, rot) {
-		return nil, err
-	}
-	// Whether there is anyone, on that copy, before rayd stops.
-	users, err := store.RenewOverlapRotations(ctx, probe, "rayctl update -rollback", "rollback")
-	if err != nil || len(users) == 0 {
-		return nil, err
-	}
-	if err := run("systemctl", "stop", "rayd.service"); err != nil {
-		return nil, err
-	}
-	work, doneWork, err := rootCopy(deploy.DB)
-	if err != nil {
-		return nil, err
-	}
-	defer doneWork()
-	if users, err = store.RenewOverlapRotations(ctx, work, "rayctl update -rollback", "rollback"); err != nil || len(users) == 0 {
-		return users, err
-	}
-	return users, copyDB(work, deploy.DB)
-}
-
 func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry carry, ran ...string) error {
 	b, err := os.ReadFile(filepath.Join(previousDir, "VERSION")) //nolint:gosec // G304: a fixed path
 	if err != nil {
@@ -926,14 +880,15 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 	fmt.Printf("rolling back to %s (%s)\n", prev, why)
 	before := append(activeDataPlane(), ran...)
 	saved := filepath.Join(previousDir, "rayd.db")
+	dbBack := false // rayd stopped, the copy of the database back
 	if _, err := os.Stat(saved); restoreDB && err == nil {
-		if err := run("systemctl", "stop", "rayd.service"); err != nil {
+		if err := localNode.systemctl("stop", "rayd.service"); err != nil {
 			return err
 		}
 		// Revocations since the copy stay (the copy is root's, in
 		// previousDir): a rollback must not let a revoked device back in.
 		if carry != carrySkip {
-			current, done, err := rootCopy(deploy.DB)
+			current, done, err := rootCopy(localNode.db)
 			if err == nil {
 				err = store.CarryRevocations(ctx, saved, current, node.AdminAccessSetting)
 				done()
@@ -946,28 +901,40 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 				fmt.Println("the revocations since the update could not be carried, the copy goes back as it is:", err)
 			}
 		}
-		if err := copyDB(saved, deploy.DB); err != nil {
+		if err := copyDB(saved, localNode.db); err != nil {
 			return fmt.Errorf("putting the database back: %w", err)
 		}
 		fmt.Println("database put back from", saved)
-	} else if carry != carrySkip {
-		// The database stays (its schema did not move, v0.27.0 to v0.30
-		// run on this one): no carry runs, and a rotation a revocation
-		// with overlap began would stay for the older rayd (R4-43).
-		users, err := renewOverlapAtRollback(ctx, prev)
+		dbBack = true
+	}
+	// The binaries of prev go in: a rayd before v0.31.0 would never finish
+	// a rotation a revocation with overlap began (R4-43). The carry above
+	// renewed those of the revocations since the copy; where the database
+	// stays (its schema did not move, v0.27.0 to v0.30 run on this one) no
+	// carry ran.
+	renewStopped := false // rayd stopped for the renewal only
+	if carry != carrySkip {
+		users, stoppedHere, err := localNode.renewForOlder(ctx, prev, dbBack, "rayctl update -rollback", "rollback")
+		renewStopped = stoppedHere
 		switch {
+		case err != nil && carry == carryMust && dbBack:
+			return fmt.Errorf("renewing the users of revocations with overlap: %w; rayd is stopped and the database copy is back, "+
+				"the previous binaries are not in place (rayctl update -rollback -no-carry leaves them, and what the revoked devices knew stays accepted)", err)
 		case err != nil && carry == carryMust:
-			return fmt.Errorf("renewing the users of revocations with overlap: %w (rayctl update -rollback -no-carry "+
+			return fmt.Errorf("renewing the users of revocations with overlap: %w; nothing rolled back (rayctl update -rollback -no-carry "+
 				"leaves them, and what the revoked devices knew stays accepted)", err)
 		case err != nil:
 			fmt.Println("the users of revocations with overlap could not be renewed:", err)
 		case len(users) > 0:
-			fmt.Printf("%s runs no credential rotation without -cred-period: the users of devices revoked with -overlap,\n"+
-				"whose rotation it would never finish, have new credentials now, and their other devices reconnect after\n"+
-				"their next subscription fetch: %s\n", prev, strings.Join(users, ", "))
+			fmt.Print(renewedForOlderText(prev, users))
 		}
 	}
-	if err := installBinaries(previousDir); err != nil {
+	if err := localNode.install(previousDir); err != nil {
+		if renewStopped {
+			// Stopped for the renewal only: the database is this rayd's.
+			return localNode.startAgain(fmt.Errorf("installing the previous binaries: %w", err),
+				"some may be in place (rayctl update -rollback again)")
+		}
 		return err
 	}
 	want := prev
@@ -983,8 +950,11 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 // must be a regular file; each copy is a fresh temporary file (O_EXCL) in
 // the destination directory, given the directory's owner through its
 // descriptor, then renamed over the target (a rename replaces a planted link,
-// it does not follow it). The stale WAL and shared memory go first, so a
-// crash never leaves the new database next to the old one's WAL.
+// it does not follow it). Both copies are written before anything of dst
+// moves; then dst's WAL goes aside and the shared memory goes, so a crash
+// never leaves the new database next to the old one's WAL, the new file
+// goes in, and its WAL; only then does the old WAL go. A failure before
+// the new file is in place puts the old WAL back: dst is as it was.
 func copyDB(src, dst string) error {
 	di, err := os.Lstat(filepath.Dir(dst))
 	if err != nil {
@@ -993,44 +963,117 @@ func copyDB(src, dst string) error {
 	if !di.IsDir() {
 		return fmt.Errorf("%s is not a directory", filepath.Dir(dst))
 	}
-	for _, stale := range []string{dst + "-wal", dst + "-shm"} {
-		if err := os.Remove(stale); err != nil && !errors.Is(err, os.ErrNotExist) {
+	main, err := readRegular(src)
+	if err != nil {
+		return err
+	}
+	wal, err := readRegular(src + "-wal")
+	hasWAL := err == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	newMain, err := stageDB(dst, main)
+	if err != nil {
+		return err
+	}
+	newWAL := ""
+	if hasWAL {
+		if newWAL, err = stageDB(dst+"-wal", wal); err != nil {
+			os.Remove(newMain)
 			return err
 		}
 	}
-	for _, suffix := range []string{"", "-wal"} {
-		b, err := readRegular(src + suffix)
-		if errors.Is(err, os.ErrNotExist) && suffix != "" {
-			continue
+	drop := func() {
+		os.Remove(newMain)
+		if newWAL != "" {
+			os.Remove(newWAL)
 		}
-		if err != nil {
+	}
+	aside, err := setAside(dst + "-wal")
+	if err != nil {
+		drop()
+		return err
+	}
+	if err := os.Remove(dst + "-shm"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		putBack(aside, dst+"-wal")
+		drop()
+		return err
+	}
+	if err := os.Rename(newMain, dst); err != nil {
+		putBack(aside, dst+"-wal")
+		drop()
+		return err
+	}
+	if newWAL != "" {
+		if err := os.Rename(newWAL, dst+"-wal"); err != nil {
+			os.Remove(newWAL)
 			return err
 		}
-		if err := placeDB(dst+suffix, b); err != nil {
-			return err
-		}
+	}
+	if aside != "" {
+		os.Remove(aside)
 	}
 	return nil
 }
 
+// setAside moves name to a fresh name beside it and returns that name, ""
+// when there is no name (a rename moves a link, it does not follow it).
+func setAside(name string) (string, error) {
+	if _, err := os.Lstat(name); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	f, err := os.CreateTemp(filepath.Dir(name), filepath.Base(name)+".*.aside")
+	if err != nil {
+		return "", err
+	}
+	aside := f.Name()
+	f.Close()
+	if err := os.Rename(name, aside); err != nil {
+		os.Remove(aside)
+		return "", err
+	}
+	return aside, nil
+}
+
+// putBack moves a name setAside gave back to name.
+func putBack(aside, name string) {
+	if aside != "" {
+		_ = os.Rename(aside, name)
+	}
+}
+
 // placeDB puts b at dst, mode 0600, the owner of dst's directory's: a new
-// file there (os.CreateTemp: O_EXCL, never through a link), its mode and
-// owner set through its descriptor, then renamed over dst. The directory
-// may be rayd's: a link it put at dst is replaced, never written through
-// or given away (copyDB, restore).
+// file there (stageDB), then renamed over dst. The directory may be
+// rayd's: a link it put at dst is replaced, never written through or
+// given away (copyDB, restore).
 func placeDB(dst string, b []byte) error {
-	dir := filepath.Dir(dst)
-	di, err := os.Lstat(dir)
+	tmp, err := stageDB(dst, b)
 	if err != nil {
 		return err
 	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// stageDB writes b to a new file beside dst (os.CreateTemp: O_EXCL, never
+// through a link), mode 0600, the owner of dst's directory's, set through
+// its descriptor, synced, and returns its name, for a rename over dst.
+func stageDB(dst string, b []byte) (string, error) {
+	dir := filepath.Dir(dst)
+	di, err := os.Lstat(dir)
+	if err != nil {
+		return "", err
+	}
 	if !di.IsDir() {
-		return fmt.Errorf("%s is not a directory", dir)
+		return "", fmt.Errorf("%s is not a directory", dir)
 	}
 	owner, _ := di.Sys().(*syscall.Stat_t)
 	f, err := os.CreateTemp(dir, filepath.Base(dst)+".*.tmp")
 	if err != nil {
-		return err
+		return "", err
 	}
 	tmp := f.Name()
 	werr := func() error {
@@ -1053,13 +1096,9 @@ func placeDB(dst string, b []byte) error {
 	if werr != nil {
 		f.Close()
 		os.Remove(tmp)
-		return werr
+		return "", werr
 	}
-	if err := os.Rename(tmp, dst); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+	return tmp, nil
 }
 
 // rootCopy copies rayd's database (and its WAL) into a directory of root's

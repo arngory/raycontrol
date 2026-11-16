@@ -563,13 +563,20 @@ func (s *Store) RotateCredentials(ctx context.Context, now time.Time, r Rotation
 	changed := 0
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		t := now.Unix()
-		// The previous secret is accepted for the grace after the switch's
-		// time, not after this round's: a round late after rayd's downtime
-		// does not lengthen what a revocation with overlap announced
+		// The previous secret is accepted for the grace after this round,
+		// as R4-1 has it: clients that could not fetch while rayd was down
+		// keep it that long. Not a rotation a revocation with overlap
+		// began (a device of the user revoked since the current secret
+		// became current, revokedSinceCurrent; never DoH's): the grace
+		// after the switch's time, so that a round late after rayd's
+		// downtime does not lengthen what the revocation announced
 		// (R4-43). Clients moved at next_from on their own.
-		res, err := tx.ExecContext(ctx, `UPDATE credentials SET prev_secret = secret, prev_until = next_from + ?,
+		res, err := tx.ExecContext(ctx, `UPDATE credentials AS c SET prev_secret = secret,
+			prev_until = CASE WHEN coalesce((SELECT s.kind FROM services s WHERE s.id = c.service_id), '') != 'doh'
+			    AND EXISTS (SELECT 1 FROM devices d WHERE d.user_id = c.user_id AND `+revokedSinceCurrent+`)
+			  THEN next_from + ?1 ELSE ?2 + ?1 END,
 			secret = next_secret, next_secret = NULL, next_from = NULL, rotated_at = next_from
-			WHERE next_secret IS NOT NULL AND next_from <= ?`, int64(r.Grace/time.Second), t)
+			WHERE next_secret IS NOT NULL AND next_from <= ?2`, int64(r.Grace/time.Second), t)
 		if err != nil {
 			return err
 		}
@@ -913,16 +920,17 @@ func (s *Store) revokeDevice(ctx context.Context, id string, overlap bool) (Revo
 // stillAccepted is until when the current secret that a device of the
 // user revoked at revoked knew is still accepted, zero when it is not
 // known to be: a rotation that a revocation with overlap began and that
-// has not switched yet (a next secret, the current one no newer than the
-// revocation) accepts it until its switch plus grace, the latest of the
-// user's credentials but DoH's. A revocation without overlap renewed the
+// has not switched yet (a next secret, the current one older than the
+// revocation, or of its second after a switch: the chain's rule,
+// revokedSinceCurrent) accepts it until its switch plus grace, the latest
+// of the user's credentials but DoH's. A revocation without overlap renewed the
 // credentials at revoked: nothing then. After the switch the store cannot
 // tell which revocation the previous secret outlived, and says nothing.
 func stillAccepted(ctx context.Context, tx *sql.Tx, user, revoked int64, grace time.Duration) (time.Time, error) {
 	var from sql.NullInt64
 	err := tx.QueryRowContext(ctx, `SELECT max(c.next_from) FROM credentials c LEFT JOIN services s ON s.id = c.service_id
-		WHERE c.user_id = ? AND coalesce(s.kind, '') != 'doh' AND c.next_secret IS NOT NULL
-		  AND coalesce(c.rotated_at, c.created_at) < ?`, user, revoked).Scan(&from)
+		WHERE c.user_id = ?1 AND coalesce(s.kind, '') != 'doh' AND c.next_secret IS NOT NULL
+		  AND (coalesce(c.rotated_at, c.created_at) < ?2 OR c.rotated_at = ?2 AND c.prev_secret IS NOT NULL)`, user, revoked).Scan(&from)
 	if err != nil || !from.Valid {
 		return time.Time{}, err
 	}

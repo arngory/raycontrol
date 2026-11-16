@@ -85,6 +85,20 @@ func rotationIn(ctx context.Context, q queryRower, schema string) (Rotation, err
 // revocation the current credential outlived (rotateForRevocation).
 const RevocationChain = 2
 
+// revokedSinceCurrent is the chain's rule (rotateForRevocation) in SQL,
+// for a credential c and a device d of its user: d was revoked after c's
+// secret became current, so it may have known that secret, and a
+// revocation of it was one with overlap (one without renews the
+// credentials in its own second, rotated_at being its revoked_at). At
+// rotated_at too where the row has a previous secret (a switch: rotated_at
+// is next_from, and a device revoked in that second, after the switch,
+// knew the secret as the next one). The loop drops the previous secret at
+// the end of the grace: from then on a revocation in the very second of
+// the switch (the loop having run in that second) is no longer told from
+// a renewal's own, and is not counted (rotateForRevocation's bound).
+const revokedSinceCurrent = `(d.revoked_at > coalesce(c.rotated_at, c.created_at)
+	OR d.revoked_at = c.rotated_at AND c.prev_secret IS NOT NULL)`
+
 // rotateForRevocation is what a revocation with overlap does to its user's
 // credentials (RevokeDeviceOverlap; docs/08-decisions.md, R4-43): an
 // unscheduled rotation with the overlap of the scheduled one (R4-1).
@@ -111,6 +125,11 @@ const RevocationChain = 2
 // the secrets it has), and a lower -cred-lead after a restart moves a
 // switch earlier. A switch late after downtime keeps the previous secret
 // for the grace after its time, not after the loop's (RotateCredentials).
+// One more limit: a device revoked in the very second of a switch, after
+// the loop switched in that second, is counted while the previous secret
+// lasts (revokedSinceCurrent); a revocation after the grace no longer
+// counts it, and what it knew may be accepted up to (RevocationChain+1)
+// leads + grace after its revocation.
 // A revocation late in a chain gives the other devices less notice than a
 // lead; one that misses the new next goes on with its link, the previous
 // secret now, for the grace, and fetches.

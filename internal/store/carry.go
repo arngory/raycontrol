@@ -1192,8 +1192,7 @@ func carryDevices(ctx context.Context, tx *sql.Tx, gone, keepDoH, keeps bool, no
 					if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM main.credentials c
 						JOIN main.devices d ON d.id = ?1 LEFT JOIN main.services s ON s.id = c.service_id
 						WHERE c.user_id = ?2 AND coalesce(s.kind, '') != 'doh' AND c.next_secret IS NOT NULL
-						  AND (d.revoked_at > coalesce(c.rotated_at, c.created_at)
-						       OR d.revoked_at = c.rotated_at AND c.prev_secret IS NOT NULL))`,
+						  AND `+revokedSinceCurrent+`)`,
 						carried[i].ID, u.id).Scan(&after); err != nil {
 						return nil, nil, err
 					}

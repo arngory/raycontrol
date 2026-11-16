@@ -91,6 +91,24 @@ version_lt v0.9.0 v0.10.0 || { echo "FAIL v0.9.0 < v0.10.0"; failures=$((failure
 ! version_lt v0.10.0 v0.9.0 || { echo "FAIL v0.10.0 > v0.9.0"; failures=$((failures + 1)); }
 ! version_lt v1.0.0 v1.0.0 || { echo "FAIL v1.0.0 == v1.0.0"; failures=$((failures + 1)); }
 
+# Not over a node of a newer release: going back is rayctl update's (R4-43).
+back() {
+	local want=$1 signed=$2 installed=$3 got
+	if going_back "$signed" "$installed" >/dev/null; then got=pass; else got=fail; fi
+	if [[ $got == "$want" ]]; then
+		echo "ok   $signed over $installed: $got"
+	else
+		echo "FAIL $signed over $installed: $got, want $want"
+		failures=$((failures + 1))
+	fi
+}
+back fail v0.30.2 v0.31.0
+back fail v0.31.0 v0.31.1
+back pass v0.31.0 v0.31.0
+back pass v0.31.1 v0.31.0
+back pass v0.30.2 dev
+back pass v0.30.2 ""
+
 # A release lists more archives than a node takes: the other architecture's
 # and rayctl for other systems (rayctl-darwin-*, rayctl-freebsd-*), in the
 # one signed SHA256SUMS. bootstrap.sh checks its archive against its own
