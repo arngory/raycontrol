@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -130,5 +132,52 @@ func TestMetricsNaiveUDP(t *testing.T) {
 	srv.NaiveUDP = nil
 	if m, err = c.GetMetrics(ctx, connect.NewRequest(&nodev1.GetMetricsRequest{})); err != nil || strings.Contains(m.Msg.Text, "raycontrol_naive_udp_") {
 		t.Fatalf("without the reader: %v", err)
+	}
+}
+
+// A hostile line's dropped datagrams: sums past int64 saturate, nothing
+// comes out below zero, "other" is what the reasons do not cover, added to
+// an "other" the line gave itself.
+func TestAddNaiveUDPHostile(t *testing.T) {
+	lines := func(u naive.UDPStats) map[string]string {
+		var m Metrics
+		addNaiveUDP(&m, "nv", u)
+		out := map[string]string{}
+		for _, l := range strings.Split(m.String(), "\n") {
+			if r, ok := strings.CutPrefix(l, `raycontrol_naive_udp_dropped_total{service="nv",reason="`); ok {
+				reason, v, _ := strings.Cut(r, `"} `)
+				out[reason] = v
+			}
+		}
+		return out
+	}
+	const top = math.MaxInt64
+	// Two reasons at the top: their sum saturates, no "other" comes from
+	// a sum that wrapped below dropped.
+	got := lines(naive.UDPStats{Dropped: top, DroppedBy: map[string]int64{"denied": top, "write": top}})
+	if _, ok := got["other"]; ok || got["denied"] != strconv.FormatFloat(top, 'f', -1, 64) {
+		t.Errorf("saturated: %v", got)
+	}
+	// Below zero (not what traffic.ReadLine gives, but whatever the hook
+	// does): zero, and no wrap either.
+	got = lines(naive.UDPStats{Dropped: 5, DroppedBy: map[string]int64{"denied": -top, "write": 2}})
+	if got["denied"] != "0" || got["write"] != "2" || got["other"] != "3" {
+		t.Errorf("below zero: %v", got)
+	}
+	// The line's own "other", and the rest on top of it, at the top.
+	got = lines(naive.UDPStats{Dropped: top, DroppedBy: map[string]int64{"other": top - 1}})
+	if got["other"] != strconv.FormatFloat(top, 'f', -1, 64) {
+		t.Errorf("other: %v", got)
+	}
+	got = lines(naive.UDPStats{Dropped: 10, DroppedBy: map[string]int64{"other": 4, "late": 1}})
+	if got["other"] != "9" || got["late"] != "1" || got["bad"] != "0" {
+		t.Errorf("other and the rest: %v", got)
+	}
+	for _, v := range []int64{0, 1, top} {
+		for _, w := range []int64{-1, 0, 1, top} {
+			if s := addSaturating(v, w); s < 0 || s < v || w > 0 && v < top && s == v {
+				t.Errorf("%d + %d = %d", v, w, s)
+			}
+		}
 	}
 }

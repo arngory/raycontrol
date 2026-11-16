@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -400,9 +401,11 @@ func addNaiveUDP(m *Metrics, service string, u naive.UDPStats) {
 	if byReason == nil {
 		byReason = map[string]int64{}
 	}
+	// Saturating: the line is a data-plane process's, whose counts may
+	// add up past int64 (traffic-limit-v1 §6).
 	var sum int64
 	for _, r := range sortedKeys(byReason) {
-		sum += byReason[r]
+		sum = addSaturating(sum, byReason[r])
 		if !slices.Contains(reasons, r) {
 			reasons = append(reasons, r)
 		}
@@ -411,11 +414,21 @@ func addNaiveUDP(m *Metrics, service string, u naive.UDPStats) {
 		if !slices.Contains(reasons, "other") {
 			reasons = append(reasons, "other")
 		}
-		byReason["other"] += u.Dropped - sum
+		byReason["other"] = addSaturating(byReason["other"], u.Dropped-sum)
 	}
 	for _, r := range reasons {
-		add("raycontrol_naive_udp_dropped_total", "naive's datagrams dropped, either way, by reason (spec/naive-udp-v1.md §7).", byReason[r], "reason", r)
+		add("raycontrol_naive_udp_dropped_total", "naive's datagrams dropped, either way, by reason (spec/naive-udp-v1.md §7).", max(byReason[r], 0), "reason", r)
 	}
+}
+
+// addSaturating is a + b for counts: below zero is zero, past
+// math.MaxInt64 is math.MaxInt64.
+func addSaturating(a, b int64) int64 {
+	a, b = max(a, 0), max(b, 0)
+	if b > math.MaxInt64-a {
+		return math.MaxInt64
+	}
+	return a + b
 }
 
 // addDNSTTStats adds a dnstt service's counters, labelled by service.
