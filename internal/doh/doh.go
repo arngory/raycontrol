@@ -492,8 +492,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unsupported media type", http.StatusUnsupportedMediaType)
 			return
 		}
+		// A body cut short is no message, whatever came of it: one shorter
+		// than its Content-Length, which HTTP/2 tells as an error at the
+		// stream's end and HTTP/3 (quic-go) as its end, or broken off. It
+		// gets the 400 of a bad message, not the empty 200 of a handler
+		// that wrote nothing.
 		b, err := io.ReadAll(io.LimitReader(r.Body, maxMessage+1))
-		if err != nil {
+		if err != nil || int64(len(b)) < r.ContentLength {
+			http.Error(w, "bad dns message", http.StatusBadRequest)
 			return
 		}
 		msg = b
