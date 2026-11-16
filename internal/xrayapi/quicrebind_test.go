@@ -146,9 +146,8 @@ func (n *naiveUDPNode) datagramBack(ctx context.Context, rs *http3.RequestStream
 // its label. The front pins the new port by that label, quic-go validates
 // the path and moves there, and the connect-udp request goes on carrying
 // UDP, twice over. Rendered for the pin (no labels in the front), the
-// connection is lost at the new port, as it was before. CI runs the pinned
-// niko-server (v0.17.1): the test is skipped there until the pin is
-// v0.18.0.
+// connection is lost at the new port, as it was before. CI runs it with
+// the pinned niko-server (v0.18.0 since raycontrol v0.31.0).
 func TestQUICRebindWithNikoServer(t *testing.T) {
 	niko := os.Getenv("NIKO_SERVER_BIN")
 	if niko == "" {
