@@ -247,6 +247,13 @@ A client that lost Register's answer (timeout, dropped connection) may send it a
   когда он сменится (unix-секунды); у остальных — нули. Ключей в ответе нет. Клиенту метод не нужен для работы:
   порты он по-прежнему берёт из пакета устройства. Он для экрана «что открыть у провайдера». Старая нода отвечает
   `unimplemented`.
+- Порты хоста relay (raycontrol v0.31.0, [relay-v1.md](relay-v1.md) §3.1): у `Relay` — `ports = 5`, у
+  `IssueRelayBundleResponse` — `ports = 6`: `RelayPort {name; protos; from; to; forwarded; access}`, всё, что хост
+  relay принимает снаружи, для файрвола провайдера перед ним. `name` — `ssh` (SSH самого relay), `spa` (диапазон SPA
+  relay), `probe` (точка замера) или пересылаемое к выходу: `sub`, `api`, имя сервиса; `forwarded` — к выходу на тот
+  же порт, иначе отвечает сам хост relay. `access`: `everyone`, `spa` (после стука к relay), `admin` (адреса
+  администратора relay; после стука — устройства с SSH). `ListRelays` (как весь `NodeService`, и через API) отдаёт их
+  по текущим сервисам выхода; до первого пакета у relay нет `spa` и `probe`. Старая нода полей не заполняет.
 
 ## 5a. Отзыв устройства меняет учётные данные пользователя (raycontrol v0.27.0)
 
