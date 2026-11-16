@@ -362,6 +362,28 @@ func TestUDPDropLimit(t *testing.T) {
 	}
 }
 
+// A write to a destination that fails is a drop of its own (write): every
+// datagram of a client is sent or dropped, and counted as one of the two.
+// The broadcast address, allowed here, fails each write: the request's
+// socket has no SO_BROADCAST (EACCES).
+func TestUDPDropWrite(t *testing.T) {
+	echo := udpEcho(t)
+	broadcast := netip.MustParseAddrPort("255.255.255.255:9")
+	h, c := udpServer(t, func(h *Server) {
+		h.Allow = func(a netip.Addr) bool { return a == echo.Addr() || a == broadcast.Addr() }
+	})
+	q := c.open(udpRequestOf{})
+	q.send(udpDest(broadcast), []byte("everyone"))
+	eventually(t, "a failed write not counted", func() bool { return dropped(h, dropWrite) == 1 })
+	q.send(udpDest(echo), []byte("after"))
+	if g := q.recv(); string(g.data) != "after" {
+		t.Fatalf("%q", g.data)
+	}
+	if st := h.UDPStats(); st.In != 1 {
+		t.Fatalf("%+v", st)
+	}
+}
+
 // IPv6 both ways, a datagram and a capsule; an IPv4 address in IPv6 is
 // IPv4's. Where the host has no IPv6 (some sandboxes), skipped.
 func TestUDPIPv6(t *testing.T) {

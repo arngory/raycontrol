@@ -123,10 +123,11 @@ const (
 	dropQueue           // a queue to the client is full, or the request ended with answers in it
 	dropQUIC            // the QUIC rule (§4.4)
 	dropLate            // a capsule that waited past capsuleWait
+	dropWrite           // the write to the destination failed: no route (IPv6 on a node without it), the kernel's egress rules
 	dropKinds
 )
 
-var dropNames = [dropKinds]string{"bad", "context", "denied", "limit", "stranger", "long", "queue", "quic", "late"}
+var dropNames = [dropKinds]string{"bad", "context", "denied", "limit", "stranger", "long", "queue", "quic", "late", "write"}
 
 // udpCounts are datagrams: sent to the destinations (in) and passed to the
 // client (out), of them those that went as capsules, and those dropped.
@@ -531,9 +532,12 @@ func (d *udpRequest) upstream(b []byte, capsule bool) {
 		return
 	}
 	// A destination that answers "unreachable" fails a write or two: the
-	// request lives on, as UDP would.
+	// request lives on, as UDP would. What did not go is a drop: the
+	// counts add up to what came.
 	if n, err := d.conn.WriteToUDPAddrPort(data, to); err == nil {
 		d.sentUp(capsule, n)
+	} else {
+		d.drop(dropWrite)
 	}
 }
 
