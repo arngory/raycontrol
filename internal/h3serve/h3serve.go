@@ -95,6 +95,9 @@ type Options struct {
 	// parameter max_datagram_frame_size and SETTINGS_H3_DATAGRAM, which
 	// whoever completes a handshake sees. naive with udp=on
 	// (spec/naive-udp-v1.md); off, the server is as it was without them.
+	// On, quic-go keeps up to 32 datagrams for any request stream that does
+	// not read them, a TCP tunnel's too, for as long as it lasts: the
+	// streams a peer holds bound it (spec/naive-udp-v1.md §16.3).
 	Datagrams bool
 }
 
