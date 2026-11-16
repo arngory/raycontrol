@@ -143,12 +143,14 @@ func TestNaiveHeaderLimit(t *testing.T) {
 	}{{"h2", h2, "https://" + serveNaiveH2(t, ns, cert), true}, {"h3", h3, "https://naive.test", false}} {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		req, _ := naiveConnect(ctx, t, c.url, "192.0.2.1:443")
+		req.Header.Set(naive.AckHeader, "1") // the 200 after the dial: counted when it comes
 		resp, err := c.rt.RoundTrip(req)
 		if err != nil || resp.StatusCode != http.StatusOK {
 			t.Fatalf("%s: a CONNECT: %v %v", c.name, resp, err)
 		}
 		resp.Body.Close()
 		req, _ = naiveConnect(ctx, t, c.url, "192.0.2.1:443")
+		req.Header.Set(naive.AckHeader, "1")
 		req.Header.Set("X-Filler", strings.Repeat("x", 2*naive.MaxHeaderBytes))
 		resp, err = c.rt.RoundTrip(req)
 		served := err == nil && resp.StatusCode == http.StatusOK
