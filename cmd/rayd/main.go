@@ -52,6 +52,7 @@ import (
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/quiccid"
+	"github.com/arngory/raycontrol/internal/quiccid/cidkey"
 	"github.com/arngory/raycontrol/internal/relayprobe"
 	"github.com/arngory/raycontrol/internal/release"
 	"github.com/arngory/raycontrol/internal/render"
@@ -707,12 +708,16 @@ func serveDoH(ctx context.Context, st *store.Store, p render.Paths, changes func
 				} else {
 					o.resetKey = (*quic.StatelessResetKey)(key)
 				}
-				// The node's secret of routable connection IDs and the
-				// service's label, as the front has them
-				// (spec/quic-cid-route-v1.md); without them, random IDs.
+				// The service's label and its key, from the node's secret,
+				// as the front has them (spec/quic-cid-route-v1.md); without
+				// them, random IDs. rayd takes the secret at the service's
+				// start: a database restored with another one restarts rayd.
+				label := render.CIDLabel(svc.ID)
 				if secret, err := st.QUICCIDKey(ctx); err != nil {
 					log.Warn("doh3: connection IDs without a label", "service", svc.Name, "err", err)
-				} else if o.connIDs, err = connIDs(secret, render.CIDLabel(svc.ID)); err != nil {
+				} else if key, err := cidkey.LabelKey(secret, label); err != nil {
+					log.Warn("doh3: connection IDs without a label", "service", svc.Name, "err", err)
+				} else if o.connIDs, err = connIDs(key, label); err != nil {
 					log.Warn("doh3: connection IDs without a label", "service", svc.Name, "err", err)
 				}
 				go func() {
@@ -1506,7 +1511,7 @@ func cmdNaive(args []string) error {
 		"a client whose connection the process no longer knows is told at once; empty or absent: no stateless resets")
 	udp := fs.Bool("udp", false, "carry UDP as HTTP/3 datagrams of connect-udp requests to naive-quic (spec/naive-udp-v1.md): "+
 		"naive-quic announces HTTP/3 datagrams; without it a connect-udp request gets the site's answer")
-	cidFile := fs.String("cid", "", "file with the label of naive-quic's connection IDs and the node's secret, \"<label> <32 bytes in hex>\" "+
+	cidFile := fs.String("cid", "", "file with the label of naive-quic's connection IDs and its key, \"<label> <16 bytes in hex>\" "+
 		"(spec/quic-cid-route-v1.md): the IDs carry the label, by which the front finds a client whose address changed; "+
 		"empty or absent: random IDs")
 	fs.Parse(args)
@@ -1571,12 +1576,12 @@ func cmdNaive(args []string) error {
 			}
 		}
 		if *cidFile != "" {
-			// Without the label and the secret the IDs are random, as
-			// before: a client whose address changes loses its connection.
-			// Why is said, the secret never.
-			label, secret, err := quiccid.ReadLabelled(*cidFile)
+			// Without the label and its key the IDs are random, as before:
+			// a client whose address changes loses its connection. Why is
+			// said, the key never.
+			label, key, err := quiccid.ReadLabelled(*cidFile)
 			if err == nil {
-				o.connIDs, err = connIDs(secret, label)
+				o.connIDs, err = connIDs(key, label)
 			}
 			if err != nil {
 				log.Warn("naive-quic: connection IDs without a label", "file", *cidFile, "err", err)

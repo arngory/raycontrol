@@ -11,17 +11,20 @@ import (
 
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/quiccid"
+	"github.com/arngory/raycontrol/internal/quiccid/cidkey"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
 // Routable connection IDs (spec/quic-cid-route-v1.md): one secret for the
-// node, made once; each QUIC service's label is its ID. rayd's naive-quic
-// gets its label and the secret in a file of its own whatever the front;
-// the front (udp.cid_key_file, backends.*.cid_label) and the Hysteria2
-// backends (options.cid_key_file, options.cid_label) only from
-// niko-server v0.18.0, which reads them. The secret is in those files and
-// nowhere else.
+// node, made once; each QUIC service's label is its ID, and each label has
+// its own key. rayd's naive-quic gets its label and its key in a file of
+// its own whatever the front; the front (udp.cid_key_file, the secret;
+// backends.*.cid_label) and the Hysteria2 backends (options.cid_key_file,
+// their label's key; options.cid_label) only from niko-server v0.18.0,
+// which reads them. The secret is in the front's file and nowhere else, a
+// label's key in its service's file and nowhere else. None of them is
+// read at the start only: a new secret restarts every process of them.
 func TestQUICCIDRender(t *testing.T) {
 	ctx := context.Background()
 	st := node(t)
@@ -38,7 +41,7 @@ func TestQUICCIDRender(t *testing.T) {
 	}
 	st.UpdateService(ctx, site.ID, store.ServiceUpdate{Set: map[string][]byte{provision.SecretTLSChain: []byte("chain"), provision.SecretTLSKey: []byte("key")}})
 	secret, err := st.QUICCIDKey(ctx)
-	if err != nil || len(secret) != quiccid.SecretLen {
+	if err != nil || len(secret) != cidkey.SecretLen {
 		t.Fatalf("the secret: %d bytes, %v", len(secret), err)
 	}
 	if again, _ := st.QUICCIDKey(ctx); !bytes.Equal(again, secret) {
@@ -51,12 +54,22 @@ func TestQUICCIDRender(t *testing.T) {
 	}
 	p := render.DefaultPaths
 	h := hex.EncodeToString(secret)
+	labelKey := func(name string) string {
+		k, err := cidkey.LabelKey(secret, ids[name])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hex.EncodeToString(k)
+	}
 	keyFiles := map[string]string{ // path: content
 		path.Join(p.Rendered, "front", render.QUICCIDKey): h + "\n",
-		path.Join(p.Rendered, "hm", render.QUICCIDKey):    h + "\n",
-		path.Join(p.Rendered, "ho", render.QUICCIDKey):    h + "\n",
+		path.Join(p.Rendered, "hm", render.QUICCIDKey):    labelKey("hm") + "\n",
+		path.Join(p.Rendered, "ho", render.QUICCIDKey):    labelKey("ho") + "\n",
 	}
 	naiveFile := path.Join(p.Rendered, "nv", render.NaiveQUICCID)
+	keyOf := map[string]string{h: path.Join(p.Rendered, "front", render.QUICCIDKey), labelKey("nv"): naiveFile,
+		labelKey("hm"): path.Join(p.Rendered, "hm", render.QUICCIDKey), labelKey("ho"): path.Join(p.Rendered, "ho", render.QUICCIDKey),
+		labelKey("dh"): ""} // rayd derives DoH3's itself
 	groups := map[string]string{"front": "niko-front", "hm": "niko-hm", "ho": "niko-ho", "nv": "niko-nv"}
 
 	for _, tag := range []string{"v0.17.1", "v0.18.0"} {
@@ -74,18 +87,22 @@ func TestQUICCIDRender(t *testing.T) {
 		byPath := map[string]render.File{}
 		for _, f := range files {
 			byPath[f.Path] = f
-			_, isKey := keyFiles[f.Path]
-			if f.Path != naiveFile && !isKey && (bytes.Contains(f.Content, []byte(h)) || bytes.Contains(f.Content, secret)) {
+			for k, home := range keyOf {
+				if f.Path != home && bytes.Contains(f.Content, []byte(k)) {
+					t.Fatalf("%s: a key of %s is in %s", tag, home, f.Path)
+				}
+			}
+			if f.Path != keyOf[h] && bytes.Contains(f.Content, secret) {
 				t.Fatalf("%s: the secret is in %s", tag, f.Path)
 			}
 		}
-		// naive-quic's: always, its label and the secret, read at its start.
+		// naive-quic's: always, its label and its key; a change restarts it.
 		nf := byPath[naiveFile]
-		if string(nf.Content) != strconv.Itoa(ids["nv"])+" "+h+"\n" || nf.Mode != 0o640 || nf.Group != "niko-nv" || nf.Service != "nv" ||
-			!nf.AtStart || nf.Reload || nf.Needed {
+		if string(nf.Content) != strconv.Itoa(ids["nv"])+" "+labelKey("nv")+"\n" || nf.Mode != 0o640 || nf.Group != "niko-nv" ||
+			nf.Service != "nv" || nf.AtStart || nf.Reload || nf.Needed {
 			t.Fatalf("%s: naive's file %+v", tag, nf)
 		}
-		if label, got, err := quiccid.ParseLabelled(nf.Content); err != nil || label != ids["nv"] || !bytes.Equal(got, secret) {
+		if label, got, err := quiccid.ParseLabelled(nf.Content); err != nil || label != ids["nv"] || hex.EncodeToString(got) != labelKey("nv") {
 			t.Fatalf("%s: naive's file does not read: %v", tag, err)
 		}
 		for file, content := range keyFiles {
@@ -94,7 +111,7 @@ func TestQUICCIDRender(t *testing.T) {
 				t.Fatalf("%s: %s rendered %v", tag, file, ok)
 			}
 			if svc := path.Base(path.Dir(file)); ok && (string(f.Content) != content || f.Mode != 0o640 || f.Group != groups[svc] ||
-				f.Service != svc || !f.AtStart || f.Reload || f.Needed) {
+				f.Service != svc || f.AtStart || f.Reload || f.Needed) {
 				t.Fatalf("%s: %s: %+v", tag, file, f)
 			}
 		}
@@ -142,15 +159,11 @@ func TestQUICCIDRender(t *testing.T) {
 	}
 }
 
-// A label is a service's ID while it fits 16 bits; render's bounds are
-// quiccid's, which it does not import.
+// A label is a service's ID while it fits 16 bits.
 func TestCIDLabel(t *testing.T) {
 	for id, want := range map[int64]int{1: 1, 300: 300, quiccid.MaxLabel: quiccid.MaxLabel, quiccid.MaxLabel + 1: 0, 0: 0, -3: 0} {
 		if got := render.CIDLabel(id); got != want {
 			t.Errorf("service %d: label %d, want %d", id, got, want)
 		}
-	}
-	if render.CIDSecretLen != quiccid.SecretLen {
-		t.Fatal("the secret's length")
 	}
 }

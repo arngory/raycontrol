@@ -7,16 +7,15 @@
 //
 //	label (16 bits) | 0 (8 bits) | counter (40 bits)
 //
-// under a key derived from the node's secret, which the front and every
-// QUIC backend of the node share. To anyone without it the IDs are random
-// and distinct, their label included. niko-server has the same code
-// (nikoserver/quiccid.go); the spec's example checks both.
+// under the label's key (cidkey.LabelKey, from the node's secret). The
+// front has every label's key; a backend only its own. To anyone without
+// it the IDs are random and distinct, their label included. niko-server
+// has the same code (nikoserver/quiccid.go); the spec's example checks
+// both.
 package quiccid
 
 import (
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -28,6 +27,8 @@ import (
 	"sync/atomic"
 
 	"github.com/quic-go/quic-go"
+
+	"github.com/arngory/raycontrol/internal/quiccid/cidkey"
 )
 
 const (
@@ -35,30 +36,27 @@ const (
 	// have always been (h3serve.ConnIDLen).
 	Len = 8
 	// MaxLabel is the largest label; 0 is none.
-	MaxLabel = 1<<16 - 1
-	// SecretLen is the node's secret: 32 bytes.
-	SecretLen = 32
+	MaxLabel = cidkey.MaxLabel
 
 	rounds      = 27 // Speck64/128
 	counterBits = 40
-	keyContext  = "quic-cid-route-v1"
+	// aheadWindow is how far past the last ID issued an ID of the
+	// generator's own counts as one it will issue (Generator.Ahead).
+	aheadWindow = 1 << 32
 )
 
-// Codec is Speck64/128 under the key of a node's secret.
+// Codec is Speck64/128 under a label's key.
 type Codec struct {
 	rk [rounds]uint32
 }
 
-// NewCodec derives the Speck key from the node's secret:
-// HMAC-SHA256(secret, "quic-cid-route-v1"), its first 16 bytes, read as
-// the key words l2 l1 l0 k0 of the Speck paper (big-endian).
-func NewCodec(secret []byte) (*Codec, error) {
-	if len(secret) != SecretLen {
-		return nil, fmt.Errorf("quiccid: a secret of %d bytes, want %d", len(secret), SecretLen)
+// NewCodec is the codec of a label's key (cidkey.LabelKey, 16 bytes), read
+// as the key words l2 l1 l0 k0 of the Speck paper (big-endian).
+func NewCodec(labelKey []byte) (*Codec, error) {
+	if len(labelKey) != cidkey.KeyLen {
+		return nil, fmt.Errorf("quiccid: a key of %d bytes, want %d", len(labelKey), cidkey.KeyLen)
 	}
-	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(keyContext))
-	return newSpeck(mac.Sum(nil)[:16]), nil
+	return newSpeck(labelKey), nil
 }
 
 func newSpeck(key []byte) *Codec {
@@ -100,12 +98,19 @@ func (c *Codec) Encode(label uint16, counter uint64) [Len]byte {
 
 // Label reads the label of an ID; false when it holds none.
 func (c *Codec) Label(id []byte) (uint16, bool) {
+	label, _, ok := c.Decode(id)
+	return label, ok
+}
+
+// Decode reads the label and the counter of an ID; false when it holds no
+// label.
+func (c *Codec) Decode(id []byte) (label uint16, counter uint64, ok bool) {
 	if len(id) < Len {
-		return 0, false
+		return 0, 0, false
 	}
-	x, _ := c.decrypt(binary.BigEndian.Uint32(id[0:4]), binary.BigEndian.Uint32(id[4:8]))
-	label := uint16(x >> 16) //nolint:gosec // G115: the top 16 bits
-	return label, x&0xff00 == 0 && label != 0
+	x, y := c.decrypt(binary.BigEndian.Uint32(id[0:4]), binary.BigEndian.Uint32(id[4:8]))
+	label = uint16(x >> 16) //nolint:gosec // G115: the top 16 bits
+	return label, uint64(x&0xff)<<32 | uint64(y), x&0xff00 == 0 && label != 0
 }
 
 // Generator makes a backend's connection IDs for quic-go
@@ -120,13 +125,13 @@ type Generator struct {
 
 var _ quic.ConnectionIDGenerator = (*Generator)(nil)
 
-// NewGenerator is the generator of a backend's label, under the node's
-// secret.
-func NewGenerator(secret []byte, label int) (*Generator, error) {
+// NewGenerator is the generator of a backend's label, under the label's
+// key.
+func NewGenerator(labelKey []byte, label int) (*Generator, error) {
 	if label < 1 || label > MaxLabel {
 		return nil, fmt.Errorf("quiccid: label %d, want 1-%d", label, MaxLabel)
 	}
-	codec, err := NewCodec(secret)
+	codec, err := NewCodec(labelKey)
 	if err != nil {
 		return nil, err
 	}
@@ -148,50 +153,51 @@ func (g *Generator) GenerateConnectionID() (quic.ConnectionID, error) {
 // ConnectionIDLen is Len.
 func (g *Generator) ConnectionIDLen() int { return Len }
 
-// ParseSecret reads the node's secret from its file's text: 32 bytes in
-// hex, white space around it aside.
-func ParseSecret(text []byte) ([]byte, error) {
-	secret, err := hex.DecodeString(strings.TrimSpace(string(text)))
-	if err != nil || len(secret) != SecretLen {
-		return nil, errors.New("want 32 bytes in hex")
+// Ahead reports whether id is one of the generator's own, its label under
+// its key, that it has not issued yet and will within the next 2^32 IDs.
+// A server must not answer a packet for such an ID with a stateless reset:
+// the token is a function of the ID and the service's key, and whoever has
+// the label's key could collect the tokens of the IDs to come and end
+// those connections later (h3serve drops such packets). An ID of a
+// process before this one falls in the window by chance only, 2^-8 of the
+// time: its client then waits out its idle time instead of a reset.
+func (g *Generator) Ahead(id []byte) bool {
+	if len(id) < Len {
+		return false
 	}
-	return secret, nil
+	x, y := g.codec.decrypt(binary.BigEndian.Uint32(id[0:4]), binary.BigEndian.Uint32(id[4:8]))
+	if uint16(x>>16) != g.label || x&0xff00 != 0 { //nolint:gosec // G115: the top 16 bits
+		return false
+	}
+	const mask = 1<<counterBits - 1
+	counter := uint64(x&0xff)<<32 | uint64(y)
+	d := (counter - g.next.Load()) & mask
+	return d >= 1 && d <= aheadWindow
 }
 
-// ParseLabelled reads a backend's label and the node's secret from one
-// line: "<label> <32 bytes in hex>" (a naive service's file,
-// render.NaiveQUICCID).
-func ParseLabelled(text []byte) (label int, secret []byte, err error) {
+// ParseLabelled reads a backend's label and its key from one line:
+// "<label> <16 bytes in hex>" (a naive service's file, render.NaiveQUICCID).
+// Its errors say what is wrong, never what the line holds.
+func ParseLabelled(text []byte) (label int, key []byte, err error) {
 	fields := strings.Fields(string(text))
 	if len(fields) != 2 {
-		return 0, nil, errors.New("want a label and a secret")
+		return 0, nil, errors.New("want a label and its key")
 	}
 	if label, err = strconv.Atoi(fields[0]); err != nil || label < 1 || label > MaxLabel {
 		return 0, nil, fmt.Errorf("want a label of 1-%d", MaxLabel)
 	}
-	if secret, err = ParseSecret([]byte(fields[1])); err != nil {
-		return 0, nil, err
+	if key, err = hex.DecodeString(fields[1]); err != nil || len(key) != cidkey.KeyLen {
+		return 0, nil, fmt.Errorf("want a key of %d bytes in hex", cidkey.KeyLen)
 	}
-	return label, secret, nil
+	return label, key, nil
 }
 
-// ReadLabelled reads a backend's label and the node's secret from its
-// file (ParseLabelled). Its errors say what is wrong with the file, never
-// what it holds.
-func ReadLabelled(file string) (label int, secret []byte, err error) {
+// ReadLabelled reads a backend's label and its key from its file
+// (ParseLabelled).
+func ReadLabelled(file string) (label int, key []byte, err error) {
 	b, err := os.ReadFile(file) //nolint:gosec // G304: the path is the caller's flag
 	if err != nil {
 		return 0, nil, err
 	}
 	return ParseLabelled(b)
-}
-
-// ReadSecret reads the node's secret from its file. Its errors say what
-// is wrong with the file, never what it holds.
-func ReadSecret(file string) ([]byte, error) {
-	b, err := os.ReadFile(file) //nolint:gosec // G304: the path is the caller's flag
-	if err != nil {
-		return nil, err
-	}
-	return ParseSecret(b)
 }

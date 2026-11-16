@@ -29,6 +29,7 @@ import (
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/probe"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/quiccid/cidkey"
 	"github.com/arngory/raycontrol/internal/site"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
@@ -603,7 +604,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 	// The front routes QUIC by connection ID with the node's secret, from
 	// niko-server v0.18.0 (frontCID); rayd's own QUIC servers make
 	// labelled IDs whatever the front reads (cid).
-	cid := len(m.QUICCIDKey) == cidSecretLen
+	cid := len(m.QUICCIDKey) == cidkey.SecretLen
 	frontCID := cid && NikoServerAtLeast(NikoCIDRouteFrom)
 	label := func(s Service) int {
 		if frontCID {
@@ -991,13 +992,15 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			udp := map[string]any{"listen": listen, "idle": FrontUDPIdle.String(), "routes": udpRoutes}
 			if frontCID {
 				// The node's secret of routable connection IDs: the front
-				// reads it at its start and serves without it, so it
-				// restarts nothing and no unit waits for it; it never
-				// changes. A file of the front's group, as front.json.
+				// derives every label's key from it. A file of the front's
+				// group, as front.json. The front reads it at its start; a
+				// new secret (a database restored from elsewhere) restarts
+				// it, and the backends with it, whose labels' keys changed
+				// too: none is left on another key.
 				key := path.Join(p.Rendered, "front", QUICCIDKey)
 				udp["cid_key_file"] = key
 				files = append(files, File{Path: key, Mode: 0o640, Group: GroupName("front"),
-					Content: []byte(hex.EncodeToString(m.QUICCIDKey) + "\n"), Service: "front", AtStart: true})
+					Content: []byte(hex.EncodeToString(m.QUICCIDKey) + "\n"), Service: "front"})
 			}
 			front["udp"] = udp
 		}
@@ -1897,14 +1900,17 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 		options["conn_limit_file"] = limit
 		files = append(files, File{Path: limit, Mode: 0o640, Group: GroupName(s.Name), Content: connLimitFile(m), Service: s.Name, Reload: true})
 	}
-	if label := CIDLabel(s.ID); label != 0 && len(m.QUICCIDKey) == cidSecretLen && NikoServerAtLeast(NikoCIDRouteFrom) {
+	if label := CIDLabel(s.ID); label != 0 && NikoServerAtLeast(NikoCIDRouteFrom) {
 		// Connection IDs with the service's label, as the front has it
-		// (spec/quic-cid-route-v1.md): the backend reads the secret at its
-		// start, from the service's own file, and serves without it.
-		key := path.Join(dir, QUICCIDKey)
-		options["cid_key_file"], options["cid_label"] = key, label
-		files = append(files, File{Path: key, Mode: 0o640, Group: GroupName(s.Name),
-			Content: []byte(hex.EncodeToString(m.QUICCIDKey) + "\n"), Service: s.Name, AtStart: true})
+		// (spec/quic-cid-route-v1.md): the backend gets its label's key,
+		// never the node's secret, in the service's own file, read at its
+		// start; a new key restarts it.
+		if k, err := cidkey.LabelKey(m.QUICCIDKey, label); err == nil {
+			key := path.Join(dir, QUICCIDKey)
+			options["cid_key_file"], options["cid_label"] = key, label
+			files = append(files, File{Path: key, Mode: 0o640, Group: GroupName(s.Name),
+				Content: []byte(hex.EncodeToString(k) + "\n"), Service: s.Name})
+		}
 	}
 	if s.Kind == "hy2-obfs" {
 		options["obfs_password_file"] = p.Credential(s.Name, HysteriaObfs)
@@ -2051,35 +2057,30 @@ func naiveFiles(s Service, m Model, p Paths) ([]File, error) {
 		files = append(files, File{Path: path.Join(dir, NaiveQUICReset), Mode: 0o640, Group: GroupName(s.Name),
 			Content: []byte(hex.EncodeToString(k) + "\n"), Service: s.Name, AtStart: true})
 	}
-	// The label of naive-quic's connection IDs and the node's secret
-	// (spec/quic-cid-route-v1.md), as the reset key goes: read at the
-	// start, served without. The label is in the file, not the unit:
-	// rayctl apply builds the unit from inputs that carry no service's ID.
-	// Whatever niko-server the front is: an older front only does not read
-	// the labels.
-	if label := CIDLabel(s.ID); label != 0 && len(m.QUICCIDKey) == cidSecretLen {
-		files = append(files, File{Path: path.Join(dir, NaiveQUICCID), Mode: 0o640, Group: GroupName(s.Name),
-			Content: []byte(strconv.Itoa(label) + " " + hex.EncodeToString(m.QUICCIDKey) + "\n"), Service: s.Name, AtStart: true})
+	// The label of naive-quic's connection IDs and its key, never the
+	// node's secret (spec/quic-cid-route-v1.md): read at the start, served
+	// without; a new key restarts naive, as it does the front. The label is
+	// in the file, not the unit: rayctl apply builds the unit from inputs
+	// that carry no service's ID. Whatever niko-server the front is: an
+	// older front only does not read the labels.
+	if label := CIDLabel(s.ID); label != 0 {
+		if k, err := cidkey.LabelKey(m.QUICCIDKey, label); err == nil {
+			files = append(files, File{Path: path.Join(dir, NaiveQUICCID), Mode: 0o640, Group: GroupName(s.Name),
+				Content: []byte(strconv.Itoa(label) + " " + hex.EncodeToString(k) + "\n"), Service: s.Name})
+		}
 	}
 	return files, nil
 }
 
-// QUICCIDKey is the file of the node's secret of routable connection IDs
-// (spec/quic-cid-route-v1.md) among the front's files and a Hysteria2
-// service's: 32 bytes, hex.
+// QUICCIDKey is the file of a key of routable connection IDs
+// (spec/quic-cid-route-v1.md): among the front's files the node's secret
+// (32 bytes, hex), among a Hysteria2 service's its label's key (16 bytes,
+// hex, cidkey.LabelKey).
 const QUICCIDKey = "quic-cid.key"
 
-// NaiveQUICCID is a naive service's file of its label and the node's
-// secret of routable connection IDs: "<label> <32 bytes in hex>".
+// NaiveQUICCID is a naive service's file of its label and the label's key
+// of routable connection IDs: "<label> <16 bytes in hex>".
 const NaiveQUICCID = "quic-cid"
-
-// cidSecretLen and maxCIDLabel are internal/quiccid's SecretLen and
-// MaxLabel: render does not import it, nor quic-go with it, which rayctl
-// and rayspa do not link (a test keeps them equal).
-const (
-	cidSecretLen = 32
-	maxCIDLabel  = 1<<16 - 1
-)
 
 // NikoCIDRouteFrom is the first niko-server whose front and Hysteria2
 // backends take the options of routable connection IDs (udp.cid_key_file,
@@ -2092,7 +2093,7 @@ var NikoCIDRouteFrom = [3]int{0, 18, 0}
 // no other service has; 0, none, for an ID past 16 bits (such a service's
 // clients lose their connection when their address changes, as before).
 func CIDLabel(serviceID int64) int {
-	if serviceID < 1 || serviceID > maxCIDLabel {
+	if serviceID < 1 || serviceID > cidkey.MaxLabel {
 		return 0
 	}
 	return int(serviceID)

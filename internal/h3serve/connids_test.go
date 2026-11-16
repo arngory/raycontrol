@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/arngory/raycontrol/internal/quiccid"
+	"github.com/arngory/raycontrol/internal/quiccid/cidkey"
 )
 
 // scids is a server's socket that keeps the Source Connection IDs of the
@@ -43,8 +45,11 @@ func (s *scids) WriteTo(b []byte, addr net.Addr) (int, error) {
 // 8 bytes that carry the backend's label under the node's secret
 // (spec/quic-cid-route-v1.md). A generator of another length is refused.
 func TestConnIDs(t *testing.T) {
-	secret := bytes.Repeat([]byte{0x42}, quiccid.SecretLen)
-	gen, err := quiccid.NewGenerator(secret, 4242)
+	key, err := cidkey.LabelKey(bytes.Repeat([]byte{0x42}, cidkey.SecretLen), 4242)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen, err := quiccid.NewGenerator(key, 4242)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +85,7 @@ func TestConnIDs(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	codec, _ := quiccid.NewCodec(secret)
+	codec, _ := quiccid.NewCodec(key)
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	if len(pc.ids) == 0 {
@@ -105,3 +110,129 @@ func (shortIDs) GenerateConnectionID() (quic.ConnectionID, error) {
 	return quic.ConnectionIDFromBytes([]byte{1, 2, 3, 4}), nil
 }
 func (shortIDs) ConnectionIDLen() int { return 4 }
+
+// A packet for an ID the server will issue gets no stateless reset: with
+// the label's key one reads the counter in the server's IDs, and the
+// token of an ID to come, collected now, ended its connection later
+// (review of quic-cid-route-v1, F2). An ID the server never issued (a
+// process before it) still gets its reset.
+func TestNoResetAhead(t *testing.T) {
+	key, _ := cidkey.LabelKey(bytes.Repeat([]byte{0x43}, cidkey.SecretLen), 77)
+	gen, _ := quiccid.NewGenerator(key, 77)
+	codec, _ := quiccid.NewCodec(key)
+	udp, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc := &scids{PacketConn: udp}
+	cert := selfSigned(t)
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	o := Options{Idle: time.Minute, MaxStreams: 100, PendingStreams: 10, MaxHeaderBytes: 16 << 10, ConnIDs: gen,
+		ResetKey: &quic.StatelessResetKey{1}}
+	go func() {
+		done <- Serve(ctx, pc, func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil },
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }), o)
+	}()
+	defer func() {
+		stop()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	tr := &http3.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true, //nolint:gosec // G402: the test's own server
+		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}},
+		Dial: func(ctx context.Context, _ string, tlsConf *tls.Config, conf *quic.Config) (*quic.Conn, error) {
+			return quic.DialAddrEarly(ctx, udp.LocalAddr().String(), tlsConf, conf)
+		}}
+	defer tr.Close()
+	req, _ := http.NewRequest(http.MethodGet, "https://h3.test/", nil)
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	// The counter of the server's last long header's ID: the IDs it has
+	// issued end a few past it (NEW_CONNECTION_ID).
+	pc.mu.Lock()
+	last := pc.ids[len(pc.ids)-1]
+	pc.mu.Unlock()
+	label, counter, ok := codec.Decode(last)
+	if !ok || label != 77 {
+		t.Fatalf("server ID %x: label %d %v", last, label, ok)
+	}
+	answered := func(c uint64) bool {
+		s, err := net.DialUDP("udp4", nil, udp.LocalAddr().(*net.UDPAddr))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		id := codec.Encode(77, c&(1<<40-1))
+		d := make([]byte, 100)
+		d[0] = 0x41
+		copy(d[1:], id[:])
+		_, _ = s.Write(d)
+		_ = s.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		_, err = s.Read(make([]byte, 200))
+		return err == nil
+	}
+	for k := uint64(8); k < 24; k++ {
+		if answered(counter + k) {
+			t.Fatalf("a stateless reset for counter +%d, an ID the server will issue", k)
+		}
+	}
+	if !answered(counter - 1000) {
+		t.Fatal("no stateless reset for an ID the server never issued: resets are off, the test proves nothing")
+	}
+}
+
+// fedConn gives ReadFrom the datagrams of a list, in order.
+type fedConn struct {
+	net.PacketConn
+	in [][]byte
+}
+
+func (f *fedConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	if len(f.in) == 0 {
+		return 0, nil, io.EOF
+	}
+	n := copy(b, f.in[0])
+	f.in = f.in[1:]
+	return n, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}, nil
+}
+
+// aheadConn drops a short header for an ID ahead, of a packet quic-go
+// could open, and passes the same bytes in a long header, a packet too
+// short, and an ID issued.
+func TestAheadConn(t *testing.T) {
+	key, _ := cidkey.LabelKey(bytes.Repeat([]byte{0x44}, cidkey.SecretLen), 9)
+	gen, _ := quiccid.NewGenerator(key, 9)
+	codec, _ := quiccid.NewCodec(key)
+	issued, _ := gen.GenerateConnectionID()
+	_, last, _ := codec.Decode(issued.Bytes())
+	packet := func(first byte, id []byte, size int) []byte {
+		p := make([]byte, size)
+		p[0] = first
+		copy(p[1:], id)
+		return p
+	}
+	ahead := codec.Encode(9, last+5)
+	in := [][]byte{
+		packet(0x41, ahead[:], 100),        // dropped
+		packet(0xc1, ahead[:], 100),        // a long header
+		packet(0x41, ahead[:], minShort-1), // too short
+		packet(0x41, issued.Bytes(), 100),  // issued
+	}
+	c := &aheadConn{PacketConn: &fedConn{in: in}, ahead: gen.Ahead}
+	b := make([]byte, 200)
+	for i, want := range in[1:] {
+		n, _, err := c.ReadFrom(b)
+		if err != nil || !bytes.Equal(b[:n], want) {
+			t.Fatalf("datagram %d: %x %v, want %x", i, b[:n], err, want[:9])
+		}
+	}
+	if _, _, err := c.ReadFrom(b); !errors.Is(err, io.EOF) {
+		t.Fatalf("one more: %v", err)
+	}
+}
