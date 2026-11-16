@@ -57,14 +57,19 @@ func (f renewFix) exec(t *testing.T, q string, args ...any) {
 }
 
 // No revocation with overlap, no renewal: a switch of the schedule with
-// the previous secret in its grace (dave), a next the schedule published
-// after a revocation without overlap (erin), after rayd went to
-// -cred-period 0 (review 3, N2).
+// the previous secret in its grace (dave; frida, a revocation without
+// overlap a period before it), a next the schedule published after a
+// revocation without overlap (erin), after rayd went to -cred-period 0
+// (review 3, N2).
 func TestRenewOverlapRotationsFalsePositives(t *testing.T) {
 	ctx := context.Background()
 	withPeriod := DefaultRotation
-	f := newRenewFix(t, withPeriod, "dave", "erin")
+	f := newRenewFix(t, withPeriod, "dave", "erin", "frida")
 	t0 := time.Now().Truncate(time.Second).Add(time.Minute)
+	f.s.SetClock(func() time.Time { return t0.Add(withPeriod.Lead - withPeriod.Period) })
+	if _, err := f.s.RevokeDevice(ctx, f.devs["frida"][0].ID); err != nil { // her switch a period on: t0 + lead
+		t.Fatal(err)
+	}
 	f.s.SetClock(func() time.Time { return t0 })
 	if _, err := f.s.RevokeDevice(ctx, f.devs["erin"][0].ID); err != nil { // stolen: renewed in its second
 		t.Fatal(err)
@@ -81,7 +86,7 @@ func TestRenewOverlapRotationsFalsePositives(t *testing.T) {
 	// erin's next, the schedule's, a period after her renewal.
 	f.exec(t, `UPDATE credentials SET next_secret = 'n', next_from = ? WHERE user_id = ?`, t0.Add(withPeriod.Period).Unix(), f.ids["erin"])
 	rows := credRowsOf(t, f.s.db)
-	if rows["dave"][f.svc].Prev == "" || rows["erin"][f.svc].Next == "" {
+	if rows["dave"][f.svc].Prev == "" || rows["erin"][f.svc].Next == "" || rows["frida"][f.svc].Prev == "" {
 		t.Fatalf("fixture: %+v", rows)
 	}
 	must(t, f.s.SetRotation(ctx, Rotation{Lead: withPeriod.Lead, Grace: withPeriod.Grace}))
@@ -261,5 +266,68 @@ func TestRevokeRepeatSameSecondSwitch(t *testing.T) {
 	again, err := s.RevokeDevice(ctx, a.ID)
 	if err != nil || !again.Already || !again.Until.Equal(rev.Until) {
 		t.Errorf("repeat: until %v, the revocation's %v (%v)", again.Until, rev.Until, err)
+	}
+}
+
+// A scheduled switch of a DoH secret, late after downtime, keeps R4-1's
+// grace after the round though a device of the user was revoked since
+// that secret became current: no revocation rotates DoH (R4-37).
+func TestRotateLateSwitchGraceDoH(t *testing.T) {
+	ctx := context.Background()
+	r := DefaultRotation
+	f := newRenewFix(t, r, "alice")
+	doh, _ := f.s.CreateService(ctx, Service{Kind: "doh", Name: "doh", Enabled: true, Settings: "{}"})
+	if _, err := f.s.Credentials(ctx, doh.ID, []int64{f.ids["alice"]}, NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	f.s.SetClock(func() time.Time { return time.Now().Add(time.Minute) })
+	if _, err := f.s.RevokeDevice(ctx, f.devs["alice"][0].ID); err != nil {
+		t.Fatal(err)
+	}
+	c0 := credRowsOf(t, f.s.db)["alice"][doh.ID]
+	if _, err := f.s.RotateCredentials(ctx, time.Unix(c0.Rotated, 0).Add(r.Period-r.Lead), r, NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	c1 := credRowsOf(t, f.s.db)["alice"][doh.ID]
+	back := time.Unix(c1.NextFrom, 0).Add(r.Grace + time.Hour)
+	if _, err := f.s.RotateCredentials(ctx, back, r, NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	if c2 := credRowsOf(t, f.s.db)["alice"][doh.ID]; c1.Next == "" || c2.Prev != c0.Secret || c2.PrevUntil != back.Add(r.Grace).Unix() {
+		t.Errorf("DoH, late: the previous until back+%v", time.Unix(c2.PrevUntil, 0).Sub(back))
+	}
+}
+
+// A restore carries a device revoked with overlap in the very second a
+// scheduled switch was made, after it, as rotating: it knew the current
+// secret as the next one (revokedSinceCurrent, the previous secret there).
+func TestCarryRestoreSameSecondRotating(t *testing.T) {
+	ctx := context.Background()
+	r := DefaultRotation
+	f := newRestoreFix(t, nil)
+	s := f.open(t, f.current)
+	must(t, s.SetRotation(ctx, r))
+	c0 := credRowsOf(t, s.db)["alice"][f.naive]
+	if _, err := s.RotateCredentials(ctx, time.Unix(c0.Rotated, 0).Add(r.Period-r.Lead), r, NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	S := time.Unix(credRowsOf(t, s.db)["alice"][f.naive].NextFrom, 0)
+	if _, err := s.RotateCredentials(ctx, S, r, NewUUID); err != nil {
+		t.Fatal(err)
+	}
+	s.SetClock(func() time.Time { return S })
+	if _, err := s.RevokeDeviceOverlap(ctx, f.phones["alice"].ID); err != nil {
+		t.Fatal(err)
+	}
+	if c := credRowsOf(t, s.db)["alice"][f.naive]; c.Rotated != S.Unix() || c.Prev == "" || c.Next == "" {
+		t.Fatalf("fixture: %+v", c)
+	}
+	s.Close()
+	res, err := CarryRestore(ctx, f.backup, f.current, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Carried) != 1 || !res.Carried[0].Rotating {
+		t.Errorf("carried %+v", res.Carried)
 	}
 }
