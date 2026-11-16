@@ -467,6 +467,7 @@ func TestCarryRestoreOverlapInFlight(t *testing.T) {
 	})
 	backup := credRowsAt(t, f.backup)
 	s := f.open(t, f.current)
+	s.SetClock(func() time.Time { return time.Now().Add(time.Minute) }) // not in the credentials' second
 	if _, err := s.RevokeDeviceOverlap(ctx, f.phones["alice"].ID); err != nil {
 		t.Fatal(err)
 	}

@@ -1350,12 +1350,13 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		if *overlap {
 			// A node before v0.31.0 reads no overlap and would revoke
 			// without it, cutting the user's other devices: refused here,
-			// before anything is revoked.
+			// before anything is revoked. Not an invite: any node withdraws
+			// it alike, and no credentials change.
 			st, err := c.c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
 			if err != nil {
 				return err
 			}
-			if err := overlapKnown(st.Msg.Version); err != nil {
+			if err := overlapKnown(st.Msg.Version); err != nil && !c.isInvite(ctx, id) {
 				return err
 			}
 		}
@@ -1407,6 +1408,13 @@ func overlapKnown(version string) error {
 			"cutting the user's other devices at once. Nothing revoked: update the node, or revoke without -overlap", version, overlapSince)
 	}
 	return nil
+}
+
+// isInvite reports whether id is an invite not used yet on the node (an
+// error: no).
+func (c *cli) isInvite(ctx context.Context, id string) bool {
+	l, err := c.c.ListDevices(ctx, connect.NewRequest(&nodev1.ListDevicesRequest{}))
+	return err == nil && slices.ContainsFunc(l.Msg.Invites, func(inv *nodev1.Invite) bool { return inv.Id == id })
 }
 
 // revokeNote is what revokeText says besides the answer's fields: a node

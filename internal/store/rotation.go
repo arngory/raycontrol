@@ -104,28 +104,35 @@ const RevocationChain = 2
 // device knew, further each time. The switch is therefore never later
 // than RevocationChain leads after the first revocation since the current
 // secret became current (the user's devices revoked after its rotated_at,
-// in either mode, and now): the old secret is accepted at most
-// RevocationChain×lead + grace after any revocation, at most lead + grace
-// after the last one of a chain. A revocation late in a chain gives the
-// other devices less notice than a lead; one that misses the new next
-// goes on with its link, the previous secret now, for the grace, and
-// fetches.
+// at it after a switch, in either mode, and now): the old secret is
+// accepted at most RevocationChain×lead + grace after any revocation, at
+// most lead + grace after the last one of a chain, while rayd runs with
+// the same flags: nothing switches while it is down (the data plane keeps
+// the secrets it has), and a lower -cred-lead after a restart moves a
+// switch earlier. A switch late after downtime keeps the previous secret
+// for the grace after its time, not after the loop's (RotateCredentials).
+// A revocation late in a chain gives the other devices less notice than a
+// lead; one that misses the new next goes on with its link, the previous
+// secret now, for the grace, and fetches.
 //
 // It runs in the caller's transaction, after the device is revoked, on
 // tx's main database. It returns how many credentials rotate and the
 // latest switch (Unix seconds; 0 with none).
 func rotateForRevocation(ctx context.Context, tx *sql.Tx, user, now int64, lead time.Duration) (int, int64, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT c.service_id, coalesce(c.rotated_at, c.created_at) FROM credentials c
-		LEFT JOIN services s ON s.id = c.service_id
+	rows, err := tx.QueryContext(ctx, `SELECT c.service_id, coalesce(c.rotated_at, c.created_at), c.prev_secret IS NOT NULL
+		FROM credentials c LEFT JOIN services s ON s.id = c.service_id
 		WHERE c.user_id = ? AND coalesce(s.kind, '') != 'doh' ORDER BY c.service_id`, user)
 	if err != nil {
 		return 0, 0, err
 	}
-	type row struct{ service, rotated int64 }
+	type row struct {
+		service, rotated int64
+		switched         bool // a previous secret: rotated_at is a switch's
+	}
 	var list []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.service, &r.rotated); err != nil {
+		if err := rows.Scan(&r.service, &r.rotated, &r.switched); err != nil {
 			rows.Close()
 			return 0, 0, err
 		}
@@ -141,10 +148,17 @@ func rotateForRevocation(ctx context.Context, tx *sql.Tx, user, now int64, lead 
 		// After rotated_at, not at it: a revocation without overlap renews
 		// the user's credentials in its own second (rotated_at is its
 		// revoked_at), and so does a carry's renewal; the devices revoked
-		// so know none of the current secrets.
+		// so know none of the current secrets. At it too where the row
+		// switched (a previous secret; rotated_at is next_from): a device
+		// revoked in the second of the switch, after it, knew the current
+		// secret as the next one.
+		since := r.rotated + 1
+		if r.switched {
+			since = r.rotated
+		}
 		var first sql.NullInt64
-		if err := tx.QueryRowContext(ctx, `SELECT min(revoked_at) FROM devices WHERE user_id = ? AND revoked_at > ?`,
-			user, r.rotated).Scan(&first); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT min(revoked_at) FROM devices WHERE user_id = ? AND revoked_at >= ?`,
+			user, since).Scan(&first); err != nil {
 			return 0, 0, err
 		}
 		chain := now

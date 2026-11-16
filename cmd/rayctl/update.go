@@ -99,7 +99,8 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 	yes := fs.Bool("yes", false, "do not ask")
 	force := fs.Bool("force", false, "install even if the release is not newer")
 	rollback := fs.Bool("rollback", false, "put back the binaries the last update replaced")
-	noCarry := fs.Bool("no-carry", false, "with -rollback: put the database copy back as it is, without what was revoked since (when the current database cannot be read)")
+	noCarry := fs.Bool("no-carry", false, "with -rollback: put the database copy back as it is, without what was revoked since (when the current database cannot be read); "+
+		"where the database stays, give no new credentials to the users of devices revoked with -overlap")
 	local := fs.String("local", "", "binaries from this directory, not verified: for tests only")
 	noHandoff := fs.Bool("no-handoff", false, "update with this rayctl, not the release's own (when the new one cannot run here)")
 	request := fs.Bool("request", false, "run the update the node asked for (raycontrol-update.service: spec/node-update-v1.md)")
@@ -867,6 +868,55 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool, carry carry) error {
 	return c.rollback(ctx, "asked for", restoreDB, carry)
 }
 
+// rollbackRenewsOverlap reports whether a rollback that keeps the database
+// gives new credentials to the users whose rotation a revocation with
+// overlap began (store.RenewOverlapRotations, R4-43): when it goes back to
+// a rayd before overlapSince, or to a build that is no release, and the
+// node runs without a period (rot, the schedule rayd stored; the flags
+// stay with the unit): such a rayd runs no rotation loop then, and would
+// never switch the rotation nor drop the previous secret. With a period
+// its loop finishes them.
+func rollbackRenewsOverlap(target string, rot store.Rotation) bool {
+	if release.IsRelease(target) && !release.Newer(overlapSince, target) {
+		return false
+	}
+	return rot.Period <= 0
+}
+
+// renewOverlapAtRollback gives new credentials to the users whose rotation
+// a revocation with overlap began, in the node's database, when a rollback
+// to target keeps it (rollbackRenewsOverlap): on root's copy, with rayd
+// stopped, then the copy back, as the copy of the update goes back. It
+// returns the users renewed.
+func renewOverlapAtRollback(ctx context.Context, target string) ([]string, error) {
+	probe, done, err := rootCopy(deploy.DB)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	rot, err := store.RotationAt(ctx, probe)
+	if err != nil || !rollbackRenewsOverlap(target, rot) {
+		return nil, err
+	}
+	// Whether there is anyone, on that copy, before rayd stops.
+	users, err := store.RenewOverlapRotations(ctx, probe, "rayctl update -rollback", "rollback")
+	if err != nil || len(users) == 0 {
+		return nil, err
+	}
+	if err := run("systemctl", "stop", "rayd.service"); err != nil {
+		return nil, err
+	}
+	work, doneWork, err := rootCopy(deploy.DB)
+	if err != nil {
+		return nil, err
+	}
+	defer doneWork()
+	if users, err = store.RenewOverlapRotations(ctx, work, "rayctl update -rollback", "rollback"); err != nil || len(users) == 0 {
+		return users, err
+	}
+	return users, copyDB(work, deploy.DB)
+}
+
 func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry carry, ran ...string) error {
 	b, err := os.ReadFile(filepath.Join(previousDir, "VERSION")) //nolint:gosec // G304: a fixed path
 	if err != nil {
@@ -900,6 +950,22 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 			return fmt.Errorf("putting the database back: %w", err)
 		}
 		fmt.Println("database put back from", saved)
+	} else if carry != carrySkip {
+		// The database stays (its schema did not move, v0.27.0 to v0.30
+		// run on this one): no carry runs, and a rotation a revocation
+		// with overlap began would stay for the older rayd (R4-43).
+		users, err := renewOverlapAtRollback(ctx, prev)
+		switch {
+		case err != nil && carry == carryMust:
+			return fmt.Errorf("renewing the users of revocations with overlap: %w (rayctl update -rollback -no-carry "+
+				"leaves them, and what the revoked devices knew stays accepted)", err)
+		case err != nil:
+			fmt.Println("the users of revocations with overlap could not be renewed:", err)
+		case len(users) > 0:
+			fmt.Printf("%s runs no credential rotation without -cred-period: the users of devices revoked with -overlap,\n"+
+				"whose rotation it would never finish, have new credentials now, and their other devices reconnect after\n"+
+				"their next subscription fetch: %s\n", prev, strings.Join(users, ", "))
+		}
 	}
 	if err := installBinaries(previousDir); err != nil {
 		return err

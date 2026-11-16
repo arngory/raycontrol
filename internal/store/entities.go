@@ -563,9 +563,13 @@ func (s *Store) RotateCredentials(ctx context.Context, now time.Time, r Rotation
 	changed := 0
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		t := now.Unix()
-		res, err := tx.ExecContext(ctx, `UPDATE credentials SET prev_secret = secret, prev_until = ?,
+		// The previous secret is accepted for the grace after the switch's
+		// time, not after this round's: a round late after rayd's downtime
+		// does not lengthen what a revocation with overlap announced
+		// (R4-43). Clients moved at next_from on their own.
+		res, err := tx.ExecContext(ctx, `UPDATE credentials SET prev_secret = secret, prev_until = next_from + ?,
 			secret = next_secret, next_secret = NULL, next_from = NULL, rotated_at = next_from
-			WHERE next_secret IS NOT NULL AND next_from <= ?`, now.Add(r.Grace).Unix(), t)
+			WHERE next_secret IS NOT NULL AND next_from <= ?`, int64(r.Grace/time.Second), t)
 		if err != nil {
 			return err
 		}

@@ -75,6 +75,14 @@ func TestDeviceRevokeOverlapAPI(t *testing.T) {
 	if _, _, err := st.ActiveDevice(ctx, phone.ID); err != nil {
 		t.Fatalf("the phone was revoked: %v", err)
 	}
+	// An invite: withdrawn by it all the same.
+	inv, _, err := st.CreateInvite(ctx, "alice", "tablet", "user", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, _, err := run("device", "revoke", "-overlap", inv.ID); err != nil || !strings.Contains(out, "invite "+inv.ID+" withdrawn") {
+		t.Fatalf("an invite against v0.30.2: %q %v", out, err)
+	}
 
 	// v0.31.0: revoked with overlap; the laptop stays, so no warning.
 	srv.Version = "v0.31.0"

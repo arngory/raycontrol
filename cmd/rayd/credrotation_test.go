@@ -29,6 +29,9 @@ func TestCredRotation(t *testing.T) {
 		{in: store.Rotation{Lead: 2 * h, Grace: h}, want: store.Rotation{Lead: 2 * h, Grace: minCredGrace}},
 		{in: store.Rotation{Lead: -h, Grace: 13 * h}, want: store.Rotation{Lead: store.DefaultRotation.Lead, Grace: 13 * h}},
 		{in: store.Rotation{Lead: 40 * day, Grace: 0}, want: store.Rotation{Lead: store.DefaultRotation.Lead, Grace: minCredGrace}},
+		// The bounds: a lead of the default period is out, a second less in.
+		{in: store.Rotation{Lead: 30 * day, Grace: 13 * h}, want: store.Rotation{Lead: store.DefaultRotation.Lead, Grace: 13 * h}},
+		{in: store.Rotation{Lead: 30*day - time.Second, Grace: 13 * h}, want: store.Rotation{Lead: 30*day - time.Second, Grace: 13 * h}},
 		{in: store.Rotation{Lead: 0, Grace: 13 * h}, want: store.Rotation{Lead: 0, Grace: 13 * h}},
 	} {
 		got, err := credRotation(c.in, log)
