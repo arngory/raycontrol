@@ -195,7 +195,16 @@ func FuzzRedact(f *testing.F) {
 		in := plain(pre) + seps[int(s1)%len(seps)] + t1 + seps[int(s1/32+1)%len(seps)] + plain(mid) + seps[int(s2)%len(seps)] + t2 +
 			seps[int(s2/32+1)%len(seps)] + plain(post)
 		out := r.String(in)
-		left := addrsIn(out)
+		// A kept address (loopback, unspecified) holds what it holds: the
+		// mapped loopback ::ffff:127.48.48.48 starts with ::ffff, another
+		// address. testdata/fuzz/FuzzRedact/loopback-holds-another.
+		rest := out
+		for i, x := range []netip.Addr{x1, x2} {
+			if x = x.WithZone("").Unmap(); x.IsLoopback() || x.IsUnspecified() {
+				rest = strings.ReplaceAll(rest, []string{t1, t2}[i], " ")
+			}
+		}
+		left := addrsIn(rest)
 		for i, x := range []netip.Addr{x1, x2} {
 			x = x.WithZone("").Unmap()
 			if x.IsLoopback() || x.IsUnspecified() {
