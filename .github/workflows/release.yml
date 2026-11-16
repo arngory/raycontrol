@@ -40,6 +40,9 @@ jobs:
   asn:
     # One download for both archives.
     runs-on: ubuntu-24.04
+    # IPINFO_TOKEN lives in this environment, open to v* tags and main only
+    # (docs/RELEASE.md): a workflow on any other branch cannot read it.
+    environment: release-data
     steps:
       - name: IPinfo Lite
         env:
@@ -65,6 +68,8 @@ jobs:
         goarch: [amd64, arm64]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -153,6 +158,8 @@ jobs:
           - {goos: freebsd, goarch: amd64}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -178,6 +185,10 @@ jobs:
   release:
     needs: [ci, build, rayctl]
     runs-on: ubuntu-24.04
+    # MINISIGN_SECRET_KEY lives in this environment: v* tags and main only,
+    # and the owner approves each run (docs/RELEASE.md). A repository secret
+    # would be readable by a workflow on any branch.
+    environment: release
     # One publish at a time: two close together would both list the
     # releases before either is out, and both pass --latest. The one that
     # runs is not cancelled; GitHub keeps one waiting, so a third that
@@ -196,6 +207,8 @@ jobs:
         rayctl-darwin-arm64.tar.gz rayctl-darwin-amd64.tar.gz rayctl-freebsd-amd64.tar.gz
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: raycontrol-*
@@ -206,6 +219,19 @@ jobs:
           merge-multiple: true
       - name: Release notes exist
         run: test -s ".github/release-notes/${TAG}.md"
+      - name: The commit is on main
+        # The environment admits any v* tag, and a tag's workflow comes from
+        # the tag's commit: a tag on a commit main does not hold would sign
+        # what was never merged. The tag ruleset is what forbids such tags;
+        # this catches the mistake.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status=$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${GITHUB_SHA}" --jq .status)
+          case "$status" in
+            identical|behind) ;;
+            *) echo "commit ${GITHUB_SHA} is not on main ($status)"; exit 1 ;;
+          esac
       - name: Sign
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
