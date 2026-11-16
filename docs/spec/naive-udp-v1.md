@@ -739,6 +739,48 @@ Chromium и `…DatagramPayload` в quiche, §2.3) — мелкие механи
 - **cronet-go:** обвязка объекта по образцу `bidirectional_stream_*` (cgo и purego), около 400 строк (оценка); второй
   движок в `NaiveClient` и метод, который открывает на нём запрос §3.2 с теми же заголовками авторизации, что
   `DialEarly` (`cgo:naive_client.go:455-506`), и отдаёт соединение датаграмм с очередью приёма.
+- **Обвязка Go (черновик к согласованию с клиентом, 2026-11-16).** В корне cronet-go, рядом с `BidirectionalStream`,
+  в том же стиле (cgo и purego, колбэки через карту по указателю):
+
+```go
+// DatagramStream — запрос connect-udp (§3) на движке, чьи сессии — QUIC.
+type DatagramStream struct{ ptr uintptr }
+
+// Колбэки — в сетевом потоке движка: не блокировать; data живёт до возврата.
+type DatagramStreamCallback interface {
+	OnReady(stream DatagramStream, status int, headers map[string]string) // любой ответ: 200, 429, 503, сайт
+	OnDatagram(stream DatagramStream, data []byte)                         // нагрузка после Context ID
+	OnMaxPayloadChanged(stream DatagramStream, maxPayload int)
+	OnClosed(stream DatagramStream)               // чистый конец; следующий пакет — новый запрос
+	OnFailed(stream DatagramStream, netError int) // сброс, обрыв, нода без SETTINGS_H3_DATAGRAM
+	OnCanceled(stream DatagramStream)
+}
+
+func (e StreamEngine) CreateDatagramStream(callback DatagramStreamCallback) DatagramStream
+// Start шлёт extended CONNECT (:protocol connect-udp ставит библиотека) на url
+// с заголовками, как у туннеля naive (авторизация, Padding). false — не начат.
+func (s DatagramStream) Start(url string, headers map[string]string) bool
+// Send копирует data и ставит в очередь сетевого потока, не блокируя.
+// allowCapsule: не влезло в датаграмму QUIC — послать капсулой (§4.4).
+func (s DatagramStream) Send(data []byte, allowCapsule bool) error
+func (s DatagramStream) MaxPayload() int         // 0 до OnReady: пока только капсулой
+func (s DatagramStream) DroppedCapsules() uint64 // капсулы, не ушедшие за 100 мс
+func (s DatagramStream) Cancel()
+func (s DatagramStream) Destroy() bool
+
+var (
+	ErrDatagramQueueFull      = errors.New("cronet: datagram queue full")       // DATAGRAM_STREAM_QUEUE_FULL
+	ErrDatagramTooLarge       = errors.New("cronet: datagram too large")        // DATAGRAM_STREAM_TOO_LARGE
+	ErrDatagramClosed         = errors.New("cronet: datagram stream closed")    // DATAGRAM_STREAM_CLOSED
+	ErrDatagramCapsuleTimeout = errors.New("cronet: datagram capsule timeout")  // DATAGRAM_STREAM_CAPSULE_TIMEOUT
+)
+```
+
+  `CAPSULE_TIMEOUT` (§8.2): `Send` возвращает его для следующей датаграммы, пока предыдущая капсула ждёт дольше 100 мс;
+  `DroppedCapsules` — счётчик отброшенных. По желанию клиента поверх этого — `DatagramConn` по образцу
+  `BidirectionalConn`: `ReadDatagram(ctx) ([]byte, error)` с очередью приёма, `WriteDatagram([]byte) error`,
+  `MaxPayload() int`, `Close() error` — тогда в `naive_client.go` остаются второй движок, заголовки авторизации и
+  разбор адреса §3.2.
 - **Ядро:** `ListenPacket` исходящего naive возвращает `net.PacketConn` поверх этого соединения, если строка несёт
   `udp=1` и проба этой сети прошла (§9.4); иначе — UoT, как сейчас. `WriteTo` дописывает адрес или имя (§3.2) и зовёт
   `send`, разрешая капсулу по §4.4; чтение разбирает адрес источника.
