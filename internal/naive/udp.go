@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -128,6 +129,10 @@ const (
 )
 
 var dropNames = [dropKinds]string{"bad", "context", "denied", "limit", "stranger", "long", "queue", "quic", "late", "write"}
+
+// DropReasons are the reasons a datagram is dropped for, as UDPStats
+// names them (rayctl metrics shows each, with its zero).
+func DropReasons() []string { return slices.Clone(dropNames[:]) }
 
 // udpCounts are datagrams: sent to the destinations (in) and passed to the
 // client (out), of them those that went as capsules, and those dropped.

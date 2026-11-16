@@ -82,6 +82,52 @@ func TestParseLine(t *testing.T) {
 	}
 }
 
+// naive's datagram requests (naive-udp-v1 §7): read beside the bytes; a
+// count below zero is zero; one that is not sane (too many reasons, a
+// reason that is not a word, a value of another type) is left out, and
+// the bytes are read all the same.
+func TestParseLineUDP(t *testing.T) {
+	line := func(udp string) []byte {
+		return []byte(`{"v":1,"boot":"b","users":{"u5":{"up":1,"down":2}},"udp":` + udp + `}`)
+	}
+	r, err := parseLine(line(`{"requests":3,"refused":1,"in":10,"out":-2,"capsules_in":1,"capsules_out":0,"dropped":4,` +
+		`"dropped_by":{"denied":3,"late":-1}}`))
+	if err != nil || r.UDP == nil {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if u := r.UDP; u.Requests != 3 || u.Refused != 1 || u.In != 10 || u.Out != 0 || u.CapsulesIn != 1 || u.Dropped != 4 ||
+		u.DroppedBy["denied"] != 3 || u.DroppedBy["late"] != 0 {
+		t.Fatalf("udp %+v", u)
+	}
+	if r, _ := parseLine([]byte(`{"v":1,"boot":"b","users":{}}`)); r.UDP != nil {
+		t.Fatalf("no udp: %+v", r.UDP)
+	}
+	var many strings.Builder
+	many.WriteString(`{"dropped_by":{`)
+	for i := range maxDropReasons + 1 {
+		if i > 0 {
+			many.WriteByte(',')
+		}
+		many.WriteString(`"r` + itoa(int64(i)) + `":1`)
+	}
+	many.WriteString(`}}`)
+	for name, udp := range map[string]string{
+		"null":                          `null`,
+		"too many reasons":              many.String(),
+		"a reason with a label's quote": `{"dropped_by":{"a\"b":1}}`,
+		"a reason with a capital":       `{"dropped_by":{"Denied":1}}`,
+		"an empty reason":               `{"dropped_by":{"":1}}`,
+		"a long reason":                 `{"dropped_by":{"` + strings.Repeat("a", 17) + `":1}}`,
+		"a string":                      `{"requests":"3"}`,
+		"not an object":                 `[1,2]`,
+	} {
+		r, err := parseLine(line(udp))
+		if err != nil || r.UDP != nil || r.Users["u5"].Down != 2 {
+			t.Errorf("%s: %+v %+v %v", name, r.UDP, r.Users, err)
+		}
+	}
+}
+
 // serve answers each connection to a unix socket with answer, after
 // reading its line.
 func serve(t *testing.T, answer func(c net.Conn, line string)) string {

@@ -60,7 +60,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `systemctl status rayd rayspa 'niko-*'` | состояние юнитов; у `rayspa` строка `Status:` — где его таблица (`perimeter up: rayd's snapshot; rayspa V, pid N` — своя, со снимком `rayd`; `perimeter up: the saved snapshot` — своя, с сохранённым снимком, пока `rayd` нет, это нормально; `perimeter behind rayd` — `rayspa` отверг новый снимок `rayd`, действует прежний: `journalctl -u rayspa` скажет почему) |
 | `nft list table inet raycontrol` | периметр; цепочка `early` — отброшенное до сборки фрагментов, `egress` — политика выхода, `in_rate` — предел новых входящих на адрес, `conn_guard` — страж conntrack (пуста, пока он выключен) |
 | `sysctl net.netfilter.nf_conntrack_count net.netfilter.nf_conntrack_max` | таблица conntrack: `apply` ставит размер по памяти (65 536–262 144) и сроки SYN_SENT 30 с, FIN_WAIT 30 с, TIME_WAIT 60 с — только больше размер и только меньше сроки, чем были (`/etc/sysctl.d/90-raycontrol-conntrack.conf`) |
-| `rayctl metrics [-o /var/lib/node_exporter/textfile/raycontrol.prom]` | счётчики в формате Prometheus: только числа, без имён и адресов |
+| `rayctl metrics [-o /var/lib/node_exporter/textfile/raycontrol.prom]` | счётчики в формате Prometheus: только числа, без имён и адресов. С v0.31.0 — и UDP naive по каждому сервису с `udp=on`, с его запуска: запросы (`raycontrol_naive_udp_requests_total`), отказы `429`/`503` (`…_refused_total`), датаграммы и капсулы к назначениям и клиенту (`…_datagrams_total`, `…_capsules_total`, `direction="in\|out"`), отброшенные по причинам (`…_dropped_total`, `reason`: `denied`, `write`, `limit`…) — без адресов и назначений |
 
 ## Сводка от клиентов (необязательно, R4-21)
 

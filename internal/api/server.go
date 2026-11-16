@@ -28,6 +28,7 @@ import (
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
 	"github.com/arngory/raycontrol/internal/health"
+	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -88,6 +89,11 @@ type Server struct {
 	// ConnLimit keeps the refusals, the table and the guard
 	// (spec/conn-limit-v1.md §7); nil shows nothing of them.
 	ConnLimit *connlimit.Monitor
+	// NaiveUDP reads a naive service's datagram requests from its stats
+	// socket (traffic.ReadLine, spec/naive-udp-v1.md §7) for the metrics:
+	// nil without udp=on, or an error when it cannot be read. nil: the
+	// metrics show none.
+	NaiveUDP func(ctx context.Context, service string) (*naive.UDPStats, error)
 
 	// Wrong invite PINs, and the invites the last of them withdrew, since
 	// rayd started (rayctl metrics).

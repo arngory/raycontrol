@@ -308,6 +308,12 @@ func cmdServe(args []string) error {
 	// the guard as rayspa reports it.
 	srv.ConnLimit = &connlimit.Monitor{Sources: connLimitSources(st, paths), Off: st.ConnLimitOff, Health: hb, Log: log}
 	go srv.ConnLimit.Run(ctx)
+	// naive's datagram requests for rayctl metrics (naive-udp-v1 §7): the
+	// same line as its bytes and refusals, read when the metrics are asked.
+	srv.NaiveUDP = func(ctx context.Context, service string) (*naive.UDPStats, error) {
+		r, err := traffic.ReadLine(ctx, paths.StatsSocket(service))
+		return r.UDP, err
+	}
 	per := &api.PerimeterServer{Server: srv, RayspaUID: -1, DefaultTTL: *spaTTL, MaxTTL: *spaMaxTTL, TCPCarrier: *spaTCP, Refresh: time.Minute}
 	policy := api.PeerPolicy{Group: *group}
 	if u, err := user.Lookup(*rayspaUser); err == nil {
