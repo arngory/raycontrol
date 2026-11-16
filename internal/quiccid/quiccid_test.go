@@ -143,3 +143,27 @@ func FuzzCodec(f *testing.F) {
 		}
 	})
 }
+
+func TestReadLabelled(t *testing.T) {
+	dir := t.TempDir()
+	secret := bytes.Repeat([]byte{6}, SecretLen)
+	h := hex.EncodeToString(secret)
+	good := filepath.Join(dir, "good")
+	_ = os.WriteFile(good, []byte("4242 "+h+"\n"), 0o600)
+	if label, got, err := ReadLabelled(good); err != nil || label != 4242 || !bytes.Equal(got, secret) {
+		t.Fatalf("%d %x %v", label, got, err)
+	}
+	for name, content := range map[string]string{"no label": h, "label 0": "0 " + h, "label 65536": "65536 " + h,
+		"not a number": "x " + h, "short secret": "1 0102", "three fields": "1 " + h + " 2", "empty": ""} {
+		p := filepath.Join(dir, "bad")
+		_ = os.WriteFile(p, []byte(content), 0o600)
+		if _, _, err := ReadLabelled(p); err == nil {
+			t.Errorf("%s: read", name)
+		} else if bytes.Contains([]byte(err.Error()), []byte(h[:16])) {
+			t.Errorf("%s: the error tells the secret: %v", name, err)
+		}
+	}
+	if _, _, err := ReadLabelled(filepath.Join(dir, "missing")); err == nil {
+		t.Error("missing")
+	}
+}

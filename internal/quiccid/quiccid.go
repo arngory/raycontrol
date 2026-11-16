@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math/bits"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -155,6 +156,34 @@ func ParseSecret(text []byte) ([]byte, error) {
 		return nil, errors.New("want 32 bytes in hex")
 	}
 	return secret, nil
+}
+
+// ParseLabelled reads a backend's label and the node's secret from one
+// line: "<label> <32 bytes in hex>" (a naive service's file,
+// render.NaiveQUICCID).
+func ParseLabelled(text []byte) (label int, secret []byte, err error) {
+	fields := strings.Fields(string(text))
+	if len(fields) != 2 {
+		return 0, nil, errors.New("want a label and a secret")
+	}
+	if label, err = strconv.Atoi(fields[0]); err != nil || label < 1 || label > MaxLabel {
+		return 0, nil, fmt.Errorf("want a label of 1-%d", MaxLabel)
+	}
+	if secret, err = ParseSecret([]byte(fields[1])); err != nil {
+		return 0, nil, err
+	}
+	return label, secret, nil
+}
+
+// ReadLabelled reads a backend's label and the node's secret from its
+// file (ParseLabelled). Its errors say what is wrong with the file, never
+// what it holds.
+func ReadLabelled(file string) (label int, secret []byte, err error) {
+	b, err := os.ReadFile(file) //nolint:gosec // G304: the path is the caller's flag
+	if err != nil {
+		return 0, nil, err
+	}
+	return ParseLabelled(b)
 }
 
 // ReadSecret reads the node's secret from its file. Its errors say what

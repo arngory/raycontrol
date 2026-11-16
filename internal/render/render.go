@@ -174,6 +174,10 @@ type Model struct {
 	// debug level. Xray stays at warning: at info it logs the users'
 	// destinations.
 	Debug bool
+	// QUICCIDKey is the node's secret of routable connection IDs
+	// (docs/spec/quic-cid-route-v1.md): the front reads the labels of its
+	// QUIC backends' connection IDs with it, and they make them.
+	QUICCIDKey []byte
 	// ConnLimitOff: the per-user connection limits are off (rayctl
 	// conn-limit off, spec/conn-limit-v1.md §8): naive and Hysteria2 (from
 	// niko-server v0.17.0) read it from their conn-limit file without a
@@ -274,6 +278,11 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 		return m, err
 	}
 	if m.NSName, err = provision.NSName(ctx, st); err != nil {
+		return m, err
+	}
+	// The secret of routable connection IDs, made once whatever the
+	// services: the front and every QUIC backend share it.
+	if m.QUICCIDKey, err = st.QUICCIDKey(ctx); err != nil {
 		return m, err
 	}
 
@@ -586,6 +595,21 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 		// Devices: the front names each query's device (IPC version 2,
 		// niko-server v0.14.0), for the server's limit per device.
 		Devices bool `json:"devices,omitempty"`
+		// CIDLabel: the label of a QUIC backend's connection IDs, by
+		// which the front finds the backend of a client whose address
+		// changed (niko-server v0.18.0, spec/quic-cid-route-v1.md).
+		CIDLabel int `json:"cid_label,omitempty"`
+	}
+	// The front routes QUIC by connection ID with the node's secret, from
+	// niko-server v0.18.0 (frontCID); rayd's own QUIC servers make
+	// labelled IDs whatever the front reads (cid).
+	cid := len(m.QUICCIDKey) == cidSecretLen
+	frontCID := cid && NikoServerAtLeast(NikoCIDRouteFrom)
+	label := func(s Service) int {
+		if frontCID {
+			return CIDLabel(s.ID)
+		}
+		return 0
 	}
 	type tcpRoute struct {
 		SNI     []string `json:"sni"`
@@ -774,7 +798,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				return nil
 			}
 			files = append(files, fs...)
-			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
+			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID), CIDLabel: label(s)}
 			if s.Kind == "hy2-obfs" {
 				udpRoutes = append(udpRoutes, udpRoute{SalamanderPasswordFile: p.FrontSalamander(s.Name), Backend: s.Name})
 			} else {
@@ -809,7 +833,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			}
 			_ = json.Unmarshal([]byte(s.Settings), &st)
 			ref := backendRef{Socket: p.DoHSocket(s.Name), Mode: "fd", UID: p.PeerUID(RaydUID)}
-			quic := backendRef{Socket: p.DoH3Socket(s.Name), Mode: "packet", UID: p.PeerUID(RaydUID)}
+			quic := backendRef{Socket: p.DoH3Socket(s.Name), Mode: "packet", UID: p.PeerUID(RaydUID), CIDLabel: label(s)}
 			if s.Kind == "naive" {
 				fs, err := naiveFiles(s, m, p)
 				if err != nil {
@@ -821,7 +845,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				}
 				files = append(files, fs...)
 				ref = backendRef{Socket: p.NaiveSocket(s.Name), Mode: "fd", UID: p.PeerUID(s.UID)}
-				quic = backendRef{Socket: p.NaiveQUICSocket(s.Name), Mode: "packet", UID: p.PeerUID(s.UID)}
+				quic = backendRef{Socket: p.NaiveQUICSocket(s.Name), Mode: "packet", UID: p.PeerUID(s.UID), CIDLabel: label(s)}
 			}
 			backends[s.Name] = ref
 			// naive: its name, the ones before it still accepted (the one
@@ -964,7 +988,18 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if m.IPv6 {
 				listen = append(listen, "[::]:443")
 			}
-			front["udp"] = map[string]any{"listen": listen, "idle": FrontUDPIdle.String(), "routes": udpRoutes}
+			udp := map[string]any{"listen": listen, "idle": FrontUDPIdle.String(), "routes": udpRoutes}
+			if frontCID {
+				// The node's secret of routable connection IDs: the front
+				// reads it at its start and serves without it, so it
+				// restarts nothing and no unit waits for it; it never
+				// changes. A file of the front's group, as front.json.
+				key := path.Join(p.Rendered, "front", QUICCIDKey)
+				udp["cid_key_file"] = key
+				files = append(files, File{Path: key, Mode: 0o640, Group: GroupName("front"),
+					Content: []byte(hex.EncodeToString(m.QUICCIDKey) + "\n"), Service: "front", AtStart: true})
+			}
+			front["udp"] = udp
 		}
 		b, err := jsonFile(front)
 		if err != nil {
@@ -1862,6 +1897,15 @@ func hysteriaFiles(s Service, m Model, p Paths) ([]File, error) {
 		options["conn_limit_file"] = limit
 		files = append(files, File{Path: limit, Mode: 0o640, Group: GroupName(s.Name), Content: connLimitFile(m), Service: s.Name, Reload: true})
 	}
+	if label := CIDLabel(s.ID); label != 0 && len(m.QUICCIDKey) == cidSecretLen && NikoServerAtLeast(NikoCIDRouteFrom) {
+		// Connection IDs with the service's label, as the front has it
+		// (spec/quic-cid-route-v1.md): the backend reads the secret at its
+		// start, from the service's own file, and serves without it.
+		key := path.Join(dir, QUICCIDKey)
+		options["cid_key_file"], options["cid_label"] = key, label
+		files = append(files, File{Path: key, Mode: 0o640, Group: GroupName(s.Name),
+			Content: []byte(hex.EncodeToString(m.QUICCIDKey) + "\n"), Service: s.Name, AtStart: true})
+	}
 	if s.Kind == "hy2-obfs" {
 		options["obfs_password_file"] = p.Credential(s.Name, HysteriaObfs)
 		pw := s.Secrets[provision.SecretObfsPassword]
@@ -2007,7 +2051,61 @@ func naiveFiles(s Service, m Model, p Paths) ([]File, error) {
 		files = append(files, File{Path: path.Join(dir, NaiveQUICReset), Mode: 0o640, Group: GroupName(s.Name),
 			Content: []byte(hex.EncodeToString(k) + "\n"), Service: s.Name, AtStart: true})
 	}
+	// The label of naive-quic's connection IDs and the node's secret
+	// (spec/quic-cid-route-v1.md), as the reset key goes: read at the
+	// start, served without. The label is in the file, not the unit:
+	// rayctl apply builds the unit from inputs that carry no service's ID.
+	// Whatever niko-server the front is: an older front only does not read
+	// the labels.
+	if label := CIDLabel(s.ID); label != 0 && len(m.QUICCIDKey) == cidSecretLen {
+		files = append(files, File{Path: path.Join(dir, NaiveQUICCID), Mode: 0o640, Group: GroupName(s.Name),
+			Content: []byte(strconv.Itoa(label) + " " + hex.EncodeToString(m.QUICCIDKey) + "\n"), Service: s.Name, AtStart: true})
+	}
 	return files, nil
+}
+
+// QUICCIDKey is the file of the node's secret of routable connection IDs
+// (spec/quic-cid-route-v1.md) among the front's files and a Hysteria2
+// service's: 32 bytes, hex.
+const QUICCIDKey = "quic-cid.key"
+
+// NaiveQUICCID is a naive service's file of its label and the node's
+// secret of routable connection IDs: "<label> <32 bytes in hex>".
+const NaiveQUICCID = "quic-cid"
+
+// cidSecretLen and maxCIDLabel are internal/quiccid's SecretLen and
+// MaxLabel: render does not import it, nor quic-go with it, which rayctl
+// and rayspa do not link (a test keeps them equal).
+const (
+	cidSecretLen = 32
+	maxCIDLabel  = 1<<16 - 1
+)
+
+// NikoCIDRouteFrom is the first niko-server whose front and Hysteria2
+// backends take the options of routable connection IDs (udp.cid_key_file,
+// backends.*.cid_label, options.cid_key_file and options.cid_label; its
+// v0.18.0 notes). An older one refuses them, and the whole config with
+// them.
+var NikoCIDRouteFrom = [3]int{0, 18, 0}
+
+// CIDLabel is the label of a service's QUIC connection IDs: its ID, which
+// no other service has; 0, none, for an ID past 16 bits (such a service's
+// clients lose their connection when their address changes, as before).
+func CIDLabel(serviceID int64) int {
+	if serviceID < 1 || serviceID > maxCIDLabel {
+		return 0
+	}
+	return int(serviceID)
+}
+
+// UseNikoServer makes Render write for niko-server tag instead of the
+// pinned release, until restore is called: for the tests of other packages
+// that run a niko-server of their own (NIKO_SERVER_BIN) newer than the pin.
+// Not while another Render runs.
+func UseNikoServer(tag string) (restore func()) {
+	was := nikoServerTag
+	nikoServerTag = tag
+	return func() { nikoServerTag = was }
 }
 
 // connLimitFile is NaiveConnLimit's content.

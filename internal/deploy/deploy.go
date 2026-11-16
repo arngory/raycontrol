@@ -560,7 +560,11 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 					" -conn-limit " + path.Join(dir, render.NaiveConnLimit) +
 					// The key of QUIC stateless resets, read at the start
 					// from the service's own file; naive starts without it.
-					" -reset-key " + path.Join(dir, render.NaiveQUICReset) + probeArg + frontUID + flags,
+					" -reset-key " + path.Join(dir, render.NaiveQUICReset) +
+					// The label of its connection IDs and the node's secret
+					// (spec/quic-cid-route-v1.md), read at the start from the
+					// service's own file; naive starts without them.
+					" -cid " + path.Join(dir, render.NaiveQUICCID) + probeArg + frontUID + flags,
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
 				"ReadWritePaths=" + path.Dir(p.NaiveSocket(s.Name)),
