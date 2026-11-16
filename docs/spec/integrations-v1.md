@@ -1,10 +1,11 @@
 # integrations-v1: внешние системы у ноды (боты, биллинг)
 
 Статус: **черновик** (2026-11-16), ничего не сделано. В планах после v0.31.0: решение владельца 2026-11-16 (цитата —
-§13; [08-decisions](../08-decisions.md) R4-47). Основа: удалённый API — [api-v1](api-v1.md) (R3-3), стук —
-[spa-v2](spa-v2.md), уведомления — webhook (K-2), журналы доступа выключены (D-12), лимиты —
-[traffic-limit-v1](traffic-limit-v1.md) и [conn-limit-v1](conn-limit-v1.md), что получает пользователь —
-[subscription-v1](subscription-v1.md). Пометка «(вывод)» — не проверено ни кодом, ни тестом.
+§13; [08-decisions](../08-decisions.md) R4-47). Вопросы §14 владелец закрыл 2026-11-16: «в целом по рекомендации».
+Основа: удалённый API — [api-v1](api-v1.md) (R3-3), стук — [spa-v2](spa-v2.md), уведомления — webhook (K-2),
+журналы доступа выключены (D-12), лимиты — [traffic-limit-v1](traffic-limit-v1.md) и
+[conn-limit-v1](conn-limit-v1.md), что получает пользователь — [subscription-v1](subscription-v1.md). Пометка
+«(вывод)» — не проверено ни кодом, ни тестом.
 
 Зачем: Telegram-бот, бот WhatsApp Business или чужой биллинг сегодня подключаются к ноде только так:
 `rayctl -remote <файл admin-устройства> -json …` со своего хоста. Это плохо по трём причинам:
@@ -26,14 +27,17 @@
   постоянных адресов у устройства вместо SPA. mTLS остаётся в обоих.
 - **События** (§4): нода сама шлёт POST по [Standard Webhooks](https://www.standardwebhooks.com) (заголовки
   `webhook-id`, `webhook-timestamp`, `webhook-signature`). Подпись — Ed25519 (`v1a`): у получателя только открытый
-  ключ. HMAC (`v1`) — по выбору. Доставка — хотя бы раз, с повторами и очередью на ноде. В событиях нет ни адресов,
-  ни назначений, ни ключей.
+  ключ. HMAC (`v1`) — только по явному выбору. Адрес начинает получать события только после проверки (§4.6).
+  Доставка — хотя бы раз, с повторами и очередью на ноде. Без входящего порта — опрос `ListEvents` (§4.9). В
+  событиях нет ни адресов, ни назначений, ни ключей. По умолчанию включены только служебные события (§4.3).
 - **OpenAPI** (§5) — подмножество `billing` и `support` из тех же proto, генератором `protoc-gen-connect-openapi`.
   Вызов — обычный `POST` JSON с клиентским сертификатом.
 - **Секреты** (§6): на ноде — пины устройств (и ключи SPA, как у всех устройств) и ключи подписи событий; токены
   Telegram и WhatsApp и ключ устройства — только у интеграции.
 - **По умолчанию выключено всё**: нет ни событий, ни устройств интеграций, ни списков адресов, пока их не заведёт
   администратор (§10).
+- **Не в v1** (§14): пределы соединений на пользователя для тарифов, интеграция через локальный сокет ноды, режим
+  опроса команд (§8).
 
 ## 2. Роли
 
@@ -70,12 +74,15 @@ rayctl remote enroll 'RCINV2:…' -o billing.rcdev   # файл устройст
 **Служебный** пользователь — тот, у кого есть неотозванное устройство или неиспользованное приглашение роли `admin`,
 `billing` или `support`, или сервис вида `ssh` или `api`. Остальные — **обычные**.
 
-`billing` и `support` видят и меняют только обычных:
+`billing` и `support` видят только обычных (`support` только видит):
 - `ListUsers`, `ListDevices` служебных не показывают;
 - метод по имени служебного отвечает `not_found`, как для неизвестного: ни выключить администратора, ни удалить его
   пользователя, ни отозвать его устройство, ни выдать приглашение на его имя;
 - проверка — в той же транзакции, что изменение;
 - `CreateUser` с именем служебного — `already_exists`: имя занято, и это видно. Цена принята.
+- `support` видит имена пользователей и устройств, но не `note` пользователя: там бывают личные данные (§14 п. 7). Поле
+  пустое, пока администратор не разрешит: `rayctl integration set support-notes on` (root, группа `raycontrol`,
+  admin-устройства; аудит `integration.set`). `billing` видит `note` всегда: обычно он его и пишет.
 
 `billing` назначает только сервисы данных: `reality`, `hy2-masq`, `hy2-obfs`, `naive`, `doh`, `yggdrasil`, `dnstt`,
 `masterdns`, `slipstream`, `olcrtc`, `openflux`, `inner`. `ssh`, `api`, `subscription`, `site` — `permission_denied`.
@@ -90,15 +97,15 @@ rayctl remote enroll 'RCINV2:…' -o billing.rcdev   # файл устройст
 | Метод | admin | billing | support | Почему так |
 |---|---|---|---|---|
 | `GetStatus` | да | да* | да* | *без `host`, `spa_ports`, `debug_until`, текстов `loops[].error` и `detail` |
-| `ListUsers` | да | да (обычные) | да (обычные) | состояние и счётчики трафика |
-| `CreateUser` | да | да | — | сервисы — только данных (§2.2) |
-| `SetUserEnabled` | да | да | — | |
-| `SetUserServices` | да | да | — | только сервисы данных |
-| `DeleteUser` | да | да | — | |
+| `ListUsers` | да | да (обычные) | да* (обычные) | состояние и счётчики трафика; *`support` — без `note`, пока администратор не разрешил (§2.2) |
+| `CreateUser` | да | нет | — | сервисы — только данных (§2.2) |
+| `SetUserEnabled` | да | да* | — | *выключение — под предохранителем (§2.4) |
+| `SetUserServices` | да | нет | — | только сервисы данных |
+| `DeleteUser` | да | да* | — | *под предохранителем (§2.4) |
 | `SetUserTraffic` | да | да* | — | *не включает и не выключает учёт трафика на ноде (§2.4) |
 | `SetUserLAN` | да | — | — | согласие администратора (lan-v1 §1.1) |
-| `ExportUser` | да | — | — | ответ — учётные данные пользователя; без SPA устройства пользователя ссылки не работают (R4-17); пользователю — приглашение (§7) |
-| `RenewUser` | да | да | — | «ключи утекли»: новые данные, секрета в ответе нет |
+| `ExportUser` | да | — | — | ответ — учётные данные пользователя; без SPA устройства пользователя ссылки не работают (R4-17); пользователю — приглашение (§7, §14 п. 3) |
+| `RenewUser` | да | нет | — | «ключи утекли»: новые данные, секрета в ответе нет |
 | `ListServices` | да | да* | да* | *только `id`, `kind`, `name`, `enabled`: нужно для `services` пользователя |
 | `CreateService`, `SetServiceEnabled`, `DeleteService`, `RotateService`, `SetServiceOption` | да | — | — | сервисы и ключи |
 | `GetYggdrasilPeerKeys` | да | — | — | ключи пира |
@@ -124,15 +131,17 @@ rayctl remote enroll 'RCINV2:…' -o billing.rcdev   # файл устройст
 | `SetEgress`, `SetConnLimit` | только root | — | — | |
 | `GetDeployment`, `GetDeployInputs` | только root | — | — | план `apply` (R4-33) |
 | `GetPorts` | да | — | — | периметр |
-| **новые** (§10): `GetUser` | да | да (обычные) | да (обычные) | один пользователь вместо всего списка |
-| `SetUserExpiry` | да | да | — | срок: продлить, снять, истечь сейчас |
+| **новые** (§10): `GetUser` | да | да (обычные) | да* (обычные) | один пользователь вместо всего списка; *как `ListUsers` |
+| `SetUserExpiry` | да | нет | — | срок: продлить, снять, истечь сейчас |
 | `SetDeviceAllow` | да | — | — | список адресов (§3.2) |
-| `ListWebhooks`, `AddWebhook`, `SetWebhook`, `DeleteWebhook`, `TestWebhook`, `RotateWebhookKey`, `RetryWebhook` | да | — | — | `-allow-net` — только root (§4.7) |
+| `ListWebhooks`, `AddWebhook`, `SetWebhook`, `DeleteWebhook`, `VerifyWebhook`, `TestWebhook`, `RotateWebhookKey`, `RetryWebhook` | да | — | — | `-allow-net` — только root (§4.7) |
+| `ListEvents` | да | нет | да | только своя лента: адрес вида `poll` с `-for` этого устройства (§4.9) |
+| `GetIntegrationSettings`, `SetIntegrationSettings` | да* | — | — | *пределы частоты и предохранителя — только root на ноде; заметки для `support` — admin (§2.2, §2.4, §2.6) |
 
 `DeviceService`: `Register` — по приглашению, как сейчас; `GetSelf` и `RotateCertificate` — `admin`, `billing`,
 `support` (свой ключ интеграция меняет сама, §6). `RelayService` — только relay.
 
-Итого: `billing` — 12 нынешних методов и 2 новых, `support` — 6 нынешних и 1 новый.
+Итого: `billing` — 12 нынешних методов и 3 новых, `support` — 6 нынешних и 2 новых (`GetUser`, `ListEvents`).
 
 Поля, скрытые от роли (*), нода очищает в ответе, а не только в описании: одна разметка proto задаёт и права, и
 OpenAPI (§5.1).
@@ -150,21 +159,30 @@ OpenAPI (§5.1).
   или выключил бы учёт, — `failed_precondition`. Администратор держит учёт включённым новой настройкой
   `rayctl traffic counting on` (`auto` — как сейчас).
 - Где `billing` может навредить — массово выключить или удалить обычных пользователей, выдать себе приглашение `user`
-  — это его роль. Ограничивают частота (§2.6), аудит (§2.5) и события администратору (§4.3). Предохранитель на
-  массовые удаления — §14 п. 6.
+  — это его роль. Ограничивают частота (§2.6), аудит (§2.5), события администратору (§4.3) и предохранитель ниже.
+- **Предохранитель массовых действий** (§14 п. 6). `DeleteUser` и `SetUserEnabled {enabled: false}` от всех устройств
+  `billing` вместе считаются за скользящий час. Сверх предела (по умолчанию 50 в час, удаления и выключения вместе)
+  вызов — `failed_precondition` («over the hourly limit of mass actions: confirm»), ничего не изменено, а администратору
+  уходит событие `integration.mass_action` (§4.3) и строка в `rayctl status`. Выше предела проходит только вызов с
+  флагом подтверждения: новое поле `confirm_mass` в `DeleteUserRequest` и `SetUserEnabledRequest`. Такой вызов
+  выполняется, в аудите — с пометкой `confirm`, а событие администратору уходит всё равно (одно в час, с числом). Флаг
+  ставит сам `billing`: предохранитель ловит сбой интеграции (цикл, неверная выборка), а не взлом; от взлома — событие и
+  отзыв устройства (§6). Предел — настройка root на ноде: `rayctl integration set mass-limit 50` (`0` — каждое массовое
+  действие с флагом). Действия администратора и root предохранитель не считает.
 
 ### 2.5 Аудит
 
 | Кто | `actor` | Что пишется |
 |---|---|---|
 | admin-устройство | `<пользователь>/<устройство> (remote)`, как сейчас | как сейчас |
-| `billing` | `<пользователь>/<устройство> (billing)` | каждое изменение, теми же действиями (`user.create`, `user.enable=false`, `user.traffic …`, `user.expires=<время>` — новое, `device.revoke`, `invite.create:user`); отказы по роли; превышения частоты |
+| `billing` | `<пользователь>/<устройство> (billing)` | каждое изменение, теми же действиями (`user.create`, `user.enable=false`, `user.traffic …`, `user.expires=<время>` — новое, `device.revoke`, `invite.create:user`; сверх предела массовых действий — с `confirm`); отказы по роли; превышения частоты; отказы предохранителя (`api.mass`) |
 | `support` | `<пользователь>/<устройство> (support)` | только отказы и превышения; чтения не пишутся |
 | нода | `rayd` | `user.expired` (новое, цикл сроков §4.3), смены состояния webhook |
-| администратор | как сейчас | `device.allow` (§3.4), `webhook.add`, `webhook.set`, `webhook.del`, `webhook.rotate`, `webhook.test`, `webhook.retry`; `webhook.gone` пишет `rayd` |
+| администратор | как сейчас | `device.allow` (§3.4), `integration.set` (заметки для `support`; предел массовых действий — только root), `integration.limits` (только root), `webhook.add`, `webhook.set`, `webhook.del`, `webhook.verify`, `webhook.rotate`, `webhook.test`, `webhook.retry`; `webhook.gone` и итог проверки адреса пишет `rayd` |
 
-- Отказ по роли — `api.denied`, цель `<метод>`; превышение — `api.limited`. Не чаще строки в 10 минут на устройство и
-  метод, с числом за это время. Иначе сломанная интеграция заполнит журнал (D-11, 90 дней).
+- Отказ по роли — `api.denied`, цель `<метод>`; превышение — `api.limited`; отказ предохранителя — `api.mass`. Не
+  чаще строки в 10 минут на устройство и метод, с числом за это время. Иначе сломанная интеграция заполнит журнал
+  (D-11, 90 дней).
 - Чтения не пишутся ни у кого, как сейчас (кроме `ExportUser`). Число вызовов и время последнего — в памяти rayd, в
   `rayctl integration status` (§11). Это сервер интеграции, а не человек: D-12 о нём не говорит.
 - В аудите нет ни секретов, ни адресов клиентов. Адреса из списка интеграции в `device.allow` есть: это серверы,
@@ -185,7 +203,11 @@ OpenAPI (§5.1).
   `apply`.
 - Неизвестный сертификат — `unauthenticated`. Новые соединения с адреса считает предел входящих периметра
   (conn-limit-v1 §6.2). Адреса из списков интеграций от него не освобождены, в отличие от адресов администратора.
-- Числа — начальные. Настройки на устройство пока нет (§14 п. 10).
+- Числа таблицы — значения по умолчанию, в коде. root на ноде меняет их для роли или для одного устройства: `rayctl
+  integration limits billing read=200,20/s write=50,5/s heavy=20,60/h inflight=4` или `… limits DEVICE_ID …`; `heavy` —
+  колонка приглашений, отзыва и `RenewUser`; `-reset` возвращает умолчание. Хранится в `settings`, применяется без
+  перезапуска, аудит — `integration.limits`. Группа `raycontrol` и admin-устройства пределы видят
+  (`GetIntegrationSettings`), но не меняют: администратор с телефона не снимает ограничение с интеграции (§14 п. 10).
 
 ## 3. Доступ интеграции к API
 
@@ -229,14 +251,15 @@ OpenAPI (§5.1).
     — `permission_denied`, даже если стучались;
   - устройство со списком пришло с адреса не из своего списка → `permission_denied`.
   Так «только для устройств интеграций» держится на уровне вызова. Цена: администратор, который сидит за тем же
-  адресом, что сервер биллинга, ходит не с этого адреса или без списка у биллинга (§14 п. 5).
+  адресом, что сервер биллинга, ходит не с этого адреса или без списка у биллинга. Тот же порт — решение владельца
+  (§14 п. 5).
 - **Устройство со списком не стучится.** Его ключа SPA нет в снимке периметра. Ключ в базе остаётся (столбец
   обязателен), но ничего не открывает. Включить список — перевести устройство в этот режим, `-clear` — обратно в
   SPA. Пакет и порт прежние.
 - **mTLS не меняется**: клиентский сертификат, пин ноды, `X25519MLKEM768`.
 - Через relay — нет: список работает только на выходе, напрямую.
 - Почему не отдельный порт: не нужен новый порт, `rayctl apply`, правило в firewalld/ufw (R2-2), новый пакет при
-  смене режима. Отдельный порт снял бы ограничение про общий адрес — вариант в §14 п. 5.
+  смене режима. Отдельный порт снял бы ограничение про общий адрес, но владелец выбрал тот же (§14 п. 5).
 
 ### 3.3 IPv6
 
@@ -318,7 +341,7 @@ webhook-signature: v1a,<base64 подписи, 64 байта>
 - **HMAC-SHA256, `v1`** — по выбору (`-sig v1`), для получателя, который не умеет Ed25519: эталонные библиотеки
   Standard Webhooks (JS, Python, Go) проверяют только `v1` (§15). Секрет `whsec_` + base64 32 байт показывается один
   раз, при `add` и `rotate`. Нода хранит его открытым: ей им подписывать. Кто знает секрет, подделает событие этому
-  получателю — только ему: секрет у каждого адреса свой. Разрешать ли `v1` вообще — §14 п. 1.
+  получателю — только ему: секрет у каждого адреса свой. `v1` разрешён только явным выбором (§14 п. 1).
 - Во время смены ключа заголовок несёт две подписи через пробел, новую первой (§4.6). Проверять — пока одна не
   сойдётся.
 - Ключ получатель берёт из своей настройки, а не из запроса: тело `webhook.key_rotated` — только справка.
@@ -351,35 +374,39 @@ def verify(headers, body: bytes) -> bool:
 
 ### 4.3 События
 
-«По умолчанию» — входит ли тип в адрес без `-events` для его аудитории (§4.6). Владельцу — §14 п. 2.
+«По умолчанию» — входит ли тип в адрес без `-events` для его аудитории (§4.6). По решению владельца (§14 п. 2)
+по умолчанию включены только служебные: `user.expired`, `user.traffic_exhausted`, `device.revoked`, `service.down`,
+`service.up`, `cert.expiring`, `update.available`. Остальное администратор включает у адреса сам (`-events`).
 
 | Тип | Аудитория | По умолчанию | Когда | `data` (кроме `user`, `by`) |
 |---|---|---|---|---|
-| `user.created` | admin, billing | нет | `CreateUser` | `services` (имена), `expires_at`, `traffic.limit` |
-| `user.deleted` | admin, billing | да | `DeleteUser` | — |
-| `user.enabled`, `user.disabled` | admin, billing | да | `SetUserEnabled` | — |
-| `user.expired` | admin, billing | да | срок прошёл (цикл сроков rayd, раз в минуту; один раз на значение срока, и после простоя rayd) | `expires_at` |
-| `user.expiring` | admin, billing | нет | за 72 ч и за 24 ч до срока, один раз на порог | `expires_at` |
-| `user.renewed` | admin, billing | да | `SetUserExpiry` дал срок позже прежнего или снял его; истёкший снова действует | `expires_at`, `previous` |
-| `user.traffic_exhausted` | admin, billing | да | цикл `traffic`: снят по лимиту (traffic-limit-v1 §3.1) | `traffic` (как в подписке) |
-| `user.traffic_restored` | admin, billing | да | возврат: поднят лимит, снят лимит, сброс | `traffic` |
-| `user.traffic_reset` | admin, billing | да | новый период или `reset_usage` | `traffic` |
-| `user.traffic_threshold` | admin, billing | нет | первый переход 80 % и 90 % за период | `traffic`, `percent` |
-| `user.conn_limit_hit` | admin, billing | нет | на границе четверти часа: упирался в предел соединений (conn-limit-v1 §7) | `services`, `window: {from, to}` |
-| `user.credentials_rotated` | admin, billing | да | новые учётные данные сразу: `RenewUser`, отзыв устройства (R4-36), перенос при `restore` или откате | `reason`: `renew`, `revoke`, `restore`, `rollback`; `credentials` (число) |
-| `device.added` | admin, billing | нет | `CreateDevice` | `device: {id, name, role}` |
-| `device.registered` | admin, billing | да | `Register`: приглашение использовано | `device`, `invite_id` |
-| `device.revoked` | admin, billing | да | `RevokeDevice` | `device`, `credentials` |
-| `invite.withdrawn` | admin, billing | нет | отозвано, сгорело на PIN, заменено новым | `invite_id`, `reason`: `revoked`, `pin`, `replaced` |
+| `user.created` | все | нет | `CreateUser` | `services` (имена), `expires_at`, `traffic.limit` |
+| `user.deleted` | все | нет | `DeleteUser` | — |
+| `user.enabled`, `user.disabled` | все | нет | `SetUserEnabled` | — |
+| `user.expired` | все | да | срок прошёл (цикл сроков rayd, раз в минуту; один раз на значение срока, и после простоя rayd) | `expires_at` |
+| `user.expiring` | все | нет | за 72 ч и за 24 ч до срока, один раз на порог | `expires_at` |
+| `user.renewed` | все | нет | `SetUserExpiry` дал срок позже прежнего или снял его; истёкший снова действует | `expires_at`, `previous` |
+| `user.traffic_exhausted` | все | да | цикл `traffic`: снят по лимиту (traffic-limit-v1 §3.1) | `traffic` (как в подписке) |
+| `user.traffic_restored` | все | нет | возврат: поднят лимит, снят лимит, сброс | `traffic` |
+| `user.traffic_reset` | все | нет | новый период или `reset_usage` | `traffic` |
+| `user.traffic_threshold` | все | нет | первый переход 80 % и 90 % за период | `traffic`, `percent` |
+| `user.conn_limit_hit` | все | нет | на границе четверти часа: упирался в предел соединений (conn-limit-v1 §7) | `services`, `window: {from, to}` |
+| `user.credentials_rotated` | все | нет | новые учётные данные сразу: `RenewUser`, отзыв устройства (R4-36), перенос при `restore` или откате | `reason`: `renew`, `revoke`, `restore`, `rollback`; `credentials` (число) |
+| `device.added` | все | нет | `CreateDevice` | `device: {id, name, role}` |
+| `device.registered` | все | нет | `Register`: приглашение использовано | `device`, `invite_id` |
+| `device.revoked` | все | да | `RevokeDevice` | `device`, `credentials` |
+| `invite.withdrawn` | все | нет | отозвано, сгорело на PIN, заменено новым | `invite_id`, `reason`: `revoked`, `pin`, `replaced` |
 | `service.down`, `service.up` | admin | да | см. ниже | `service: {id, kind, name}`, `check`, `since` |
 | `cert.expiring` | admin | да | сертификату сайта осталось 14, 7, 3, 1 день | `service`, `not_after` |
 | `update.available` | admin | да | проверка rayd нашла выпуск новее (`latest` или `latest_patch`), один раз на версию | `installed`, `latest`, `latest_patch` |
-| `update.applied` | admin | да | обновление закончилось | `from`, `to`, `state`: `done`, `rolled_back`, `failed`; `kind` |
-| `relay.down`, `relay.up` | admin | да | от relay с выданным пакетом нет ленты 10 минут / снова есть | `relay: {name}`, `since` |
-| `perimeter.down`, `perimeter.up` | admin | да | таблица rayspa не `up` дольше минуты / снова `up` (R4-40) | `state` |
+| `update.applied` | admin | нет | обновление закончилось | `from`, `to`, `state`: `done`, `rolled_back`, `failed`; `kind` |
+| `relay.down`, `relay.up` | admin | нет | от relay с выданным пакетом нет ленты 10 минут / снова есть | `relay: {name}`, `since` |
+| `perimeter.down`, `perimeter.up` | admin | нет | таблица rayspa не `up` дольше минуты / снова `up` (R4-40) | `state` |
+| `integration.mass_action` | admin | да | `billing` упёрся в предел массовых действий или прошёл его с `confirm_mass`; одно в час (§2.4) | `device: {id, name}`, `count`, `limit`, `refused`, `confirmed` |
 | `webhook.test` | все | всегда | `rayctl webhook test` | — |
 | `webhook.gap` | все | всегда | после переполнения (§4.5) | `dropped`, `first_seq`, `last_seq`, `since`, `until` |
 | `webhook.key_rotated` | все | всегда | `rayctl webhook rotate` | `public_key` (у `v1a`), `old_until` |
+| `webhook.verify` | все | всегда | проверка адреса (§4.6); не событие очереди, без `seq` | `challenge` |
 
 - Перечень, о котором шла речь, — так: «пользователь истёк» — `user.expired`; «трафик исчерпан или сброшен» —
   `user.traffic_exhausted`, `user.traffic_reset`; «предел соединений» — `user.conn_limit_hit`; «устройство
@@ -391,6 +418,8 @@ def verify(headers, body: bytes) -> bool:
   (`restarts/<сервис>`); сокет статистики процесса не отвечает два опроса подряд; не проходит проверка зоны
   (`dns-zone`) или цели REALITY (`reality-target`). `check` — `process`, `zone`, `target`. **`service.up`** — все
   признаки в норме 2 минуты. Так мигание не даёт пары событий на каждый опрос.
+- `integration.mass_action` включено по умолчанию сверх списка служебных: о нём владелец сказал отдельно (§14 п. 6).
+  `webhook.*` — механика доставки, не события, и не выключаются.
 - `billing` и `support` получают события только об обычных пользователях и их устройствах. Устройства
   администраторов и интеграций — только аудитории `admin`.
 - Событие пишется в очередь в той же транзакции, что и изменение, которое его вызвало (или запись цикла о переходе):
@@ -435,9 +464,11 @@ def verify(headers, body: bytes) -> bool:
 
 ```
 rayctl webhook add URL [-audience admin|billing|support] [-events a,b,user.*] [-sig v1a|v1] [-label ams]
-                       [-names on|off] [-pin SPKI] [-pq-only] [-verify] [-for DEVICE_ID] [-allow-net CIDR]
+                       [-names on|off] [-pin SPKI] [-pq-only] [-for DEVICE_ID] [-allow-net CIDR]
+rayctl webhook add -poll -for DEVICE_ID [-audience …] [-events …] [-label …] [-names …]   # лента, §4.9
 rayctl webhook list [-keys]                    # ID, аудитория, хост, события, состояние, очередь
-rayctl webhook set ID [-events …] [-on|-off] [-for DEVICE_ID] [-label …] [-names …]
+rayctl webhook set ID [-url URL] [-events …] [-on|-off] [-for DEVICE_ID] [-label …] [-names …]
+rayctl webhook verify ID                       # проверка адреса снова: код, время, итог
 rayctl webhook del ID
 rayctl webhook test ID                         # webhook.test сразу, вне очереди: код, время, группа TLS
 rayctl webhook rotate ID [-overlap 72h | -now] [-sig v1|v1a]
@@ -449,8 +480,28 @@ rayctl webhook status [ID]                     # §11
   частную сеть — дело хоста, как политика выхода (egress-policy-v1 §9).
 - URL хранится в базе. В выводе, аудите и статусе — только хост и путь без query: в query получатели часто кладут
   свой токен.
-- Новый адрес — включён. Проверка `webhook-challenge` (расширение стандарта «endpoint verification», 2026-10-30) —
-  по `-verify`: адрес начинает получать события только после ответа (§14 п. 8).
+- **Проверка адреса обязательна** (§14 п. 8). Новый адрес — `unverified`: событий ему нет, и в очередь для него
+  ничего не ставится (`seq` начинается после проверки). `add` сразу шлёт проверку, ждёт ответа до 15 с и печатает
+  итог; не прошла — нода повторяет её по расписанию §4.5 до трёх суток, дальше ждёт `rayctl webhook verify ID`. Смена
+  URL (`set -url`) — снова `unverified`. После `rotate` проверка не нужна: в окне действуют оба ключа.
+  - Запрос — `POST` на адрес, подписан, как любое сообщение (`webhook-id`, `webhook-timestamp`, `webhook-signature`),
+    с заголовком `webhook-challenge: C` (`C` — 32 случайных байта в base64, новые на каждую проверку) и телом
+    `{"type":"webhook.verify","timestamp":…,"v":1,"node":…,"data":{"challenge":"C"}}`.
+  - Ответ — `2xx` с заголовком `webhook-challenge-response: <схема>,<base64(HMAC-SHA256(VK, C))>`, где
+    `VK = HMAC-SHA256(K, "wev-v1")`, `K` — байты ключа адреса у получателя (открытый ключ после `whpk_` у `v1a`,
+    секрет после `whsec_` у `v1`), `<схема>` — `v1a` или `v1`, `C` — строка заголовка как пришла. Тело ответа не
+    читается.
+  - Нода сравнивает весь заголовок за постоянное время с ответом по каждому действующему ключу адреса.
+    Перенаправление, тайм-аут, другой код или заголовок — не прошла.
+  - Это формат расширения Standard Webhooks «endpoint verification» (`wev-v1`, 2026-10-30), закреплённый как есть.
+    Расширение свежее; если оно изменится, наша проверка остаётся `wev-v1`, а новое — отдельной версией.
+  - Что доказывает: по адресу отвечает тот, кто поставил у себя ключ именно этого адреса, то есть согласился
+    принимать события ноды. Чужой живой сервис (SSRF, поток на третью сторону) проверку не пройдёт: ключ у каждого
+    адреса свой. У `v1a` ключ открытый, так что это согласие и верная настройка, а не секрет. Что получатель
+    проверяет подпись каждого события, проверка не доказывает.
+  - Порядок для получателя: `add` печатает ключ (`whpk_…` или `whsec_…`) → поставить его у получателя → `rayctl
+    webhook verify ID`, если первая проверка прошла раньше, чем получатель был готов.
+  - Лента `poll` (§4.9) не проверяется: её читает устройство по mTLS.
 - `-for DEVICE_ID` привязывает адрес к устройству интеграции: отзыв устройства выключает адрес (`device_revoked`),
   а `data.by.device` показывает эхо её вызовов.
 - **Смена ключа.** `rotate` заводит новый ключ. Весь `-overlap` (по умолчанию 72 ч) каждое сообщение несёт две
@@ -484,12 +535,39 @@ rayctl webhook status [ID]                     # §11
 
 ### 4.8 Что делать получателю
 
+0. На запрос с `webhook-challenge` — ответить `webhook-challenge-response` (§4.6) и тело как событие не
+   обрабатывать:
+
+   ```python
+   import base64, hashlib, hmac
+   def challenge_response(challenge: str, key: bytes, scheme: str = "v1a") -> str:
+       vk = hmac.new(key, b"wev-v1", hashlib.sha256).digest()
+       return scheme + "," + base64.b64encode(hmac.new(vk, challenge.encode(), hashlib.sha256).digest()).decode()
+   ```
 1. Проверить подпись по своему ключу, допуск `webhook-timestamp` — 5 минут.
 2. Отбросить повтор: хранить `webhook-id` хотя бы 4 суток (столько живут повторы, §4.5) или последний `seq` по
    метке ноды.
 3. Ответить `2xx` сразу, обрабатывать после. `410` — если адрес больше не нужен.
 4. Деньги и доступы решать по состоянию из API (`GetUser`), а не по одному событию: событие — повод посмотреть.
 5. Строки из события (имена) — данные, не разметка и не ссылки (§9 п. 2).
+
+### 4.9 Опрос событий: `ListEvents`
+
+Для получателя без входящего порта (§14 п. 11): тот же поток событий, но его забирает само устройство интеграции.
+
+- `rayctl webhook add -poll -for DEVICE_ID …` заводит ленту: адрес без URL, без подписи и без проверки (§4.6). Читает
+  её только устройство `-for` (`admin`, `billing` или `support`). Аудитория — не шире его роли.
+- `ListEvents {after_seq; limit (1–500, по умолчанию 100); wait_seconds (0–25)} → {events; next_seq}`, где `Event
+  {id; seq; type; body}`: `id` — тот же `msg_…`, `body` — то же JSON-тело, что у webhook (§4.1). Один разбор для обоих
+  способов.
+- **Подтверждение — сам `after_seq`.** События с `seq ≤ after_seq` нода считает доставленными и удаляет. Повтор с
+  тем же `after_seq` отдаёт то же самое: потерянный ответ ничего не теряет. Доставка — хотя бы раз, как у webhook.
+- `wait_seconds` — длинный опрос: если событий нет, нода держит вызов до первого события или до срока. Один такой
+  вызов в полёте на ленту. В пределах частоты (§2.6) это одно чтение.
+- Подписи нет: подлинность — mTLS и пин ноды, как у любого вызова.
+- Очередь, её предел, `seq` и `webhook.gap` — как §4.5. Не забранное за 3 суток — «не доставлено».
+- Отзыв устройства `-for` выключает ленту, как адрес (§4.6).
+- `rayctl -remote F events [-follow] [-after SEQ]` печатает ленту, событие на строку. Старая нода — `unimplemented`.
 
 ## 5. OpenAPI и JSON по HTTP
 
@@ -519,10 +597,12 @@ plugins:
   - local: protoc-gen-connect-openapi
     out: api/openapi/support
     opt: [services=raycontrol.node.v1.NodeService, services=raycontrol.device.v1.DeviceService,
-          allowed-visibilities=SUPPORT, content-types=json, trim-unused-types, short-operation-ids,
+          allowed-visibilities=SUPPORT;NOTES, content-types=json, trim-unused-types, short-operation-ids,
           base=api/openapi/base.yaml]
 ```
 
+- `User.note` размечен `"ADMIN,BILLING,NOTES"`: в описании `support` поле есть, с пометкой «пусто, пока
+  администратор не разрешил» (§2.2). Отдаёт его `support` нода по настройке `support-notes`, а не по разметке.
 - `base.yaml` — `info`, сервер-заглушка `https://{host}:{port}`, схема безопасности `mutualTLS` (есть в OpenAPI
   3.1), описание пина: пин сертификатом в OpenAPI не выразить.
 - Файлы лежат в репозитории и прикладываются к выпуску. CI пересобирает и сравнивает, как сгенерированный Go.
@@ -606,13 +686,14 @@ Bot API.
 **Как устроен.**
 - Бот держит устройство `billing` (малый оператор: бот и есть биллинг) или ходит в свой биллинг, у которого это
   устройство. Устройство `support` боту мало: ему нужны приглашения.
-- К Telegram — длинным опросом (`getUpdates`): входящего порта для Telegram не нужно. События ноды — свой адрес
-  webhook (`-audience billing -for <устройство бота>`) или, без входящего порта, позже — опрос (§8).
+- К Telegram — длинным опросом (`getUpdates`), к ноде за событиями — тоже: лента `ListEvents` (`rayctl webhook add
+  -poll -for <устройство бота> -audience billing -events …`, §4.9). Входящего порта у бота нет вовсе. Свой адрес
+  webhook — по желанию, тогда с проверкой (§4.6).
 - Хранит (SQLite): привязки `telegram_id → (метка ноды, имя пользователя, created_at)`, коды привязки (SHA-256,
   срок, использован ли), счётчики частоты, настройки уведомлений. Не хранит: приглашений после отправки, переписки,
   телефонов, имён из Telegram. Журнал — номер команды и итог, без текста сообщений.
-- Секреты: токен бота — в менеджере секретов, файл устройства — 0600 (или шлюз §5.4), открытый ключ `whpk_` — в
-  настройке.
+- Секреты: токен бота — в менеджере секретов, файл устройства — 0600 (или шлюз §5.4); со своим адресом webhook —
+  ещё открытый ключ `whpk_` в настройке.
 
 **Привязка пользователя** (одноразовый код).
 1. Администратор (`/link <пользователь>` в чате из списка администраторов бота) или биллинг (метод самого бота)
@@ -640,9 +721,11 @@ Bot API.
   Поэтому срок короткий. По `device.registered` бот пишет «зарегистрировано устройство X; если не вы — /devices» и
   удаляет своё сообщение с приглашением; по истечении срока — тоже. PIN приглашения боту ничего не даёт: он ушёл бы
   тем же каналом.
-- Уведомления от событий: `user.traffic_exhausted`, `user.traffic_reset`, `user.expiring` (если включено),
-  `user.expired`, `user.renewed`, `device.registered`, `device.revoked`. Текст — шаблоны бота, строки из события
-  только подставляются.
+- Уведомления от событий. По умолчанию ленте достаются `user.expired`, `user.traffic_exhausted`, `device.revoked`
+  (§4.3); остальное администратор включает у ленты бота сам: `-events user.expired,user.expiring,user.renewed,
+  user.traffic_exhausted,user.traffic_reset,user.traffic_threshold,device.registered,device.revoked,user.deleted`.
+  Без `device.registered` бот не узнает, что приглашение использовано, без `user.deleted` — что привязку пора снять.
+  Текст — шаблоны бота, строки из события только подставляются.
 
 **Частота.**
 - На `telegram_id`: команда не чаще раза в 2 с; `/mysub` — 3 в час и 10 в сутки; коды — шаг 3 привязки.
@@ -663,8 +746,7 @@ HTTPS, хоть статический хостинг: команды подпи
   (метка этой ноды), срок (не больше 10 минут), `seq` больше последнего, `id` новый. Выполняет с ролью устройства,
   с теми же пределами и аудитом. Результат шлёт событием `command.result` `{id, seq, code, response}`.
 - Цена: задержка до периода опроса; нода ходит к интеграции постоянно, и та видит её адрес.
-- Рядом — проще и раньше: **опрос событий** методом `ListEvents {after_seq}` вместо webhook, для получателя без
-  входящего порта (§14 п. 11).
+- Опрос **событий** без входящего порта — уже в v1: `ListEvents` (§4.9). Здесь — опрос **команд**, он позже.
 
 ## 9. Модель угроз
 
@@ -673,8 +755,10 @@ HTTPS, хоть статический хостинг: команды подпи
      VPN), поменять лимиты и сроки. Не может: тронуть сервисы, ключи, периметр, relay, обновление, администраторов,
      другие интеграции, прочитать учётные данные (`ExportUser`, `CreateDevice` закрыты) и аудит.
    - Подделать события ноды другим получателям не может: у них только открытые ключи (`v1a`). С `v1` — только себе.
-   - Видно: аудит с `(billing)`, события администратору (`user.deleted`, `device.registered`), счётчики отказов и
-     превышений. Скорость вреда ограничена §2.6. Лечение — отзыв устройства (§6), он действует сразу.
+   - Видно: аудит с `(billing)`, счётчики отказов и превышений, событие `integration.mass_action` (включено по
+     умолчанию) и другие события администратору, если он их включил (`user.deleted`, `device.registered`).
+     Скорость вреда ограничена §2.6, массовые удаления и выключения — предохранителем (§2.4): больше 50 в час — только
+     с флагом подтверждения и с событием администратору. Лечение — отзыв устройства (§6), он действует сразу.
 2. **Взломана нода.** У нападающего всё, что у ноды: ключи подписи событий (подделает события получателям), пины
    устройств, ключ TLS API (выдаст себя за ноду интеграциям). Токенов Telegram и WhatsApp, ключей устройств
    интеграций и привязок пользователей к Telegram на ноде нет. Поэтому получателю: не доверять событию в деньгах
@@ -685,7 +769,8 @@ HTTPS, хоть статический хостинг: команды подпи
    дольше 5 минут, и тот отсекается.
 4. **SSRF.** Адрес задаёт только администратор (`billing` и `support` не могут). Нода проверяет каждый адрес после
    разрешения и соединяется с ним, без перенаправлений и прокси. Частные сети — только явно и только root (§4.7).
-   Тело ответа никуда не возвращается.
+   Тело ответа никуда не возвращается. До проверки (§4.6) адрес получает только сам проверочный запрос, а пройти
+   её может лишь тот, кто поставил у себя ключ этого адреса: чужому живому сервису событий не слать.
 5. **Адрес из списка достался другому** (облако отдало IP, общий NAT, соседи по `/64`). Он доходит до TLS порта API
    и видит, что порт открыт. Дальше — только с ключом устройства. Остаётся поверхность рукопожатия TLS и нагрузка,
    её держит предел входящих (§2.6). Списки узкие (§3.3), адреса убирать при переезде; без вызовов 30 дней — `rayctl
@@ -712,12 +797,17 @@ HTTPS, хоть статический хостинг: команды подпи
   - `GetUser {name} → {User user}`; `SetUserExpiry {name; expires_at (0 — без срока; в прошлом — истечь сейчас)} →
     {User user}`;
   - `SetDeviceAllow {id; repeated string prefixes} → {Device device}`; у `Device` — `allow`, `last_call`;
-  - методы webhook (§2.3) и их сообщения;
+  - методы webhook (§2.3) и их сообщения, `ListEvents` (§4.9);
+  - `GetIntegrationSettings`, `SetIntegrationSettings`: пределы частоты, предел массовых действий, заметки для
+    `support` (§2.2, §2.4, §2.6);
+  - `confirm_mass` в `DeleteUserRequest` и `SetUserEnabledRequest` (§2.4); нода до него поле не читает, и
+    предохранителя у неё нет;
   - значения `role`: `billing`, `support` (строка, поле прежнее);
   - правила видимости на методах и полях (§5.1).
 - **База** — миграция 0016 (номер — следующий свободный): `devices` и `invites` пересоздаются с ролями в `CHECK`
-  (SQLite не меняет ограничение на месте, как в 0014); `devices.allow`; таблицы `webhooks`, `webhook_keys`,
-  `webhook_outbox`; отметки сроков (`user.expired`, `user.expiring` — один раз на значение).
+  (SQLite не меняет ограничение на месте, как в 0014); `devices.allow`; таблицы `webhooks` (с видом `url` или
+  `poll` и состоянием проверки), `webhook_keys`, `webhook_outbox`; отметки сроков (`user.expired`, `user.expiring` —
+  один раз на значение). Настройки интеграций — ключи в `settings`.
 - **Старая нода, новый rayctl**: приглашение с ролью `billing` — `invalid_argument` («use user or admin»), новые
   методы — `unimplemented`; rayctl называет версию ноды.
 - **Новая нода, старый rayctl**: роль печатается как есть. `rayctl -remote` с файлом устройства `billing` работает
@@ -726,7 +816,8 @@ HTTPS, хоть статический хостинг: команды подпи
   webhook в ней нет, интеграции отрезаны до нового обновления. Перенос отзывов (api-v1 §5a) их не затрагивает: у
   служебного пользователя нет учётных данных.
 - **Клиент Niko** — без изменений: подписка, `rcdev1`, `Register` прежние.
-- **По умолчанию выключено**: ни адресов webhook, ни устройств интеграций, ни списков, `traffic counting auto`.
+- **По умолчанию выключено**: ни адресов webhook, ни лент, ни устройств интеграций, ни списков, `traffic counting
+  auto`, `support-notes off`; пределы частоты и массовых действий — умолчания из кода.
   Пока администратор ничего не завёл, нода ведёт себя как v0.31.0: тот же периметр, те же порты, ни одного
   нового исходящего запроса.
 
@@ -737,18 +828,26 @@ rayctl device invite USER NAME -role billing|support [-allow ADDRS] [-ttl 1h] [-
 rayctl device allow ID ADDRS | -clear
 rayctl device list                               # ROLE, ACCESS, LAST CALL
 rayctl integration status                        # по устройствам интеграций: вызовы, отказы, превышения за сутки
+rayctl integration set support-notes on|off      # §2.2: admin
+rayctl integration set mass-limit 50             # §2.4: только root
+rayctl integration limits [ROLE|DEVICE_ID] [read=… write=… heavy=… inflight=…] [-reset]   # §2.6: только root
 rayctl integration gateway -device F -listen …   # §5.4
+rayctl -remote F events [-follow] [-after SEQ]   # лента ListEvents, §4.9
 rayctl knock [-keep] [-ttl 10m] @F               # §3.1
 rayctl remote export F -pem OUT                  # §5.2
 rayctl user expires NAME 2026-12-31|30d|never    # SetUserExpiry
 rayctl traffic counting on|auto                  # §2.4
-rayctl webhook add|list|set|del|test|rotate|retry|status   # §4.6
+rayctl webhook add|list|set|verify|del|test|rotate|retry|status   # §4.6, лента — add -poll (§4.9)
 ```
 
 **`rayctl status`** — строки:
 - `webhook wh1 (billing, hooks.example.net): ok, очередь 0, доставлено 2 мин назад (204, 85 мс, X25519MLKEM768)`;
 - `webhook wh2 (admin, ops.example.net): не доставляется 3 ч (503, 14 попыток), очередь 340, старейшее 3 ч`;
 - `webhook wh3: overflow — 1 200 выброшено с 10:00, ждёт места` и `gone` (`410`);
+- `webhook wh4 (billing, bot.example.net): не проверен — нет webhook-challenge-response (204); rayctl webhook verify
+  wh4`;
+- `webhook wh5 (лента integrations/bot): забрано 30 с назад, очередь 0`;
+- `integration mass actions: 50 из 50 за час — отказано 12, подтверждено 0 (integrations/billing)`;
 - `integration integrations/billing (billing, static 1): вызов 1 мин назад; отказов 0, превышений 0 за сутки`;
 - предупреждения: устройство со списком без вызовов 30 дней; адрес webhook выключен отзывом устройства.
 
@@ -766,60 +865,62 @@ rayctl webhook add|list|set|del|test|rotate|retry|status   # §4.6
   `raycontrol_webhook_oldest_age_seconds{endpoint}`;
 - `raycontrol_webhook_dropped_total{endpoint}`, `raycontrol_webhook_undelivered_total{endpoint}`;
 - `raycontrol_webhook_last_success_timestamp_seconds{endpoint}`;
+- `raycontrol_webhook_verify_total{endpoint, result}`: `ok`, `mismatch`, `http`, `timeout`, `tls`, `refused`;
 - `raycontrol_api_calls_total{role, code}`, `raycontrol_api_limited_total{role}`;
+- `raycontrol_integration_mass_actions_total{result}`: `done`, `refused`, `confirmed`;
 - `raycontrol_devices{role, state}` — с ролями `billing` и `support`.
 
 ## 12. Что где меняется
 
 - `api/proto`: §10; `visibility.proto`; разметка всех методов.
 - `internal/api`: таблица ролей из дескрипторов вместо `adminOnly` и `nodeOnly`; очистка полей; служебные
-  пользователи (§2.2); проверка адреса (§3.2); пределы (§2.6); новые методы.
+  пользователи (§2.2); проверка адреса (§3.2); пределы и их настройка (§2.6); предохранитель (§2.4); `ListEvents`
+  (§4.9); новые методы.
 - `internal/store`: миграция; роли; `SPADevices` (scope интеграций — `api`, устройства со списком — не в снимке);
   очередь событий в транзакциях изменений.
 - `internal/perimeter`, `perimeter.proto`: наборы `integ4`, `integ6`, поля снимка.
-- `cmd/rayd`: цикл сроков; отправитель webhook (очередь, подписи, защита §4.7, повторы); события из циклов
-  `traffic`, `conn-limit`, обновления, relay, периметра.
+- `cmd/rayd`: цикл сроков; отправитель webhook (проверка адреса, очередь, подписи, защита §4.7, повторы); события
+  из циклов `traffic`, `conn-limit`, обновления, relay, периметра.
 - `cmd/rayctl`: §11.
 - Комплект интеграции: публичный пакет стука на Go, эталон стука на Python, проверка подписи на Python и Go,
   OpenAPI, пример юнита `knock -keep`. Бот — отдельный репозиторий.
 - Доки: api-v1 §5 (роли), §7 (`resource_exhausted`); `10-quickstart-debian13`, `cheatsheet`.
 
-## 13. Решение владельца
+## 13. Решения владельца
 
 2026-11-16: «Можешь в целом пока сейчас этой спекой заняться со всеми деталями … пусть будет в планах после
 0.31.0». Спека — сейчас, реализация — после выпуска v0.31.0.
 
-## 14. Открыто
+2026-11-16, на вопросы этой спеки: «в целом по рекомендации». Рекомендации — те, что ему передали; где они
+расходились с первой редакцией §14 (п. 8, п. 10), действуют они. Итог — §14.
 
-Вопросы владельцу; в скобках — рекомендация.
+## 14. Решения по вопросам (закрыты 2026-11-16)
 
-1. **HMAC (`v1`) вообще?** (Да, только по `-sig v1`, по умолчанию Ed25519: эталонные библиотеки стандарта и многие
-   готовые приёмники проверяют только `v1`. Иначе — только `v1a`, а получателю — 10 строк своей проверки.)
-2. **Какие события включены по умолчанию.** (Как в §4.3: у `billing` — жизненный цикл пользователя, трафик,
-   устройства; у `admin` — сервисы, сертификаты, обновления, relay, периметр. Выключены: `user.created`,
-   `user.expiring`, `user.traffic_threshold`, `user.conn_limit_hit`, `device.added`, `invite.withdrawn`. Иначе —
-   ничего, пока администратор не перечислит.)
-3. **`ExportUser` для `billing`.** (Нет: учётные данные пользователя в чужой системе, а без SPA устройства ссылки не
-   работают.)
-4. **Пределы соединений по тарифам.** Задача ждёт от биллинга «лимиты соединений», а их на пользователя нет: решение
-   conn-limit-v1 §12 — один выключатель root без чисел. Для тарифов нужны свои уровни в Xray (traffic-limit-v1 §5,
-   conn-limit-v1 §8). (Не в v1. Отдельная спека, если появится тариф, которому это нужно.)
-5. **Список адресов на том же порту API** (§3.2) или на отдельном. (Тот же: без нового порта, `apply` и правил в
-   файрволе хоста. Цена — администратор за одним адресом с биллингом.)
-6. **Предохранитель массовых действий `billing`**: больше 50 удалений или выключений в час — отказ и событие
-   администратору. (Да, число — настройкой root.)
-7. **Что видит `support`.** (Имена пользователей и устройств — да, `note` — нет.)
-8. **Проверка адреса webhook** (`webhook-challenge`) обязательна? (Нет, по `-verify`: адрес задаёт администратор, а
-   расширению стандарта меньше трёх недель.)
-9. **`user.expiring` и `user.traffic_threshold`** — нужны ли вообще. (Да, выключены по умолчанию: это главные
-   напоминания бота.)
-10. **Пределы частоты на устройство** — настройкой или числами в коде. (Числа в коде в v1; настройка — когда
-    попросят.)
-11. **Опрос событий** (`ListEvents`) рядом с webhook — для получателя без входящего порта. (Да, в той же версии:
-    очередь та же, метод маленький.)
-12. **Интеграция на самой ноде** через сокет (своя группа, например `raycontrol-billing`). (Нет: бот на ноде ходит
-    к Telegram с адреса ноды и держит токен рядом с её ключами. Если понадобится — тот же удалённый API на
-    `127.0.0.1`.)
+Все двенадцать — «в целом по рекомендации» (§13). Открытых вопросов к владельцу нет.
+
+1. **HMAC (`v1`)** — разрешён, только явным выбором (`-sig v1`). По умолчанию — Ed25519 (`v1a`) (§4.2).
+2. **События по умолчанию — только служебные**: `user.expired`, `user.traffic_exhausted`, `device.revoked`;
+   `service.down` и `service.up`, `cert.expiring`, `update.available`. Остальное выключено и включается у адреса
+   (`-events`) (§4.3). Сверх списка включено `integration.mass_action`: о событии администратору владелец сказал
+   отдельно (п. 6). `webhook.*` — механика доставки, не выключается.
+3. **`ExportUser` для `billing`** — нет. Пользователю — только приглашение (§2.3, §7).
+4. **Пределы соединений на пользователя для тарифов** — позже, не в v1: нужно менять conn-limit-v1 (там решено:
+   один выключатель root без чисел, §12) и вводить уровни в Xray (§8 там же).
+5. **Список адресов — на том же порту API** (§3.2). Цена — администратор за одним адресом с сервером биллинга.
+6. **Предохранитель массовых действий `billing`** — да: больше предела за час (по умолчанию 50 удалений и
+   выключений вместе) — отказ и событие администратору; выше предела — только с флагом подтверждения
+   (`confirm_mass`). Предел — настройка root (§2.4).
+7. **Что видит `support`** — имена пользователей и устройств да, `note` по умолчанию нет (там бывают личные
+   данные); администратор разрешает настройкой `support-notes` (§2.2).
+8. **Проверка адреса webhook обязательна** при добавлении: адрес получает события только после неё. Формат —
+   `wev-v1` расширения Standard Webhooks «endpoint verification», закреплённый у нас как есть (§4.6). В первой
+   редакции было «по выбору»: решение — по рекомендации, переданной владельцу.
+9. **`user.expiring` и `user.traffic_threshold`** — остаются, выключены по умолчанию (§4.3).
+10. **Пределы частоты** — умолчания в коде, root меняет их настройкой для роли или устройства (§2.6). В первой
+    редакции было «числа в коде»: решение — по рекомендации, переданной владельцу.
+11. **`ListEvents`** (опрос событий без входящего порта) — да, в v1 (§4.9).
+12. **Интеграция на самой ноде через локальный сокет** (своя группа) — позже, не в v1. Сейчас — удалённый API на
+    `127.0.0.1` с устройством интеграции, как с любого хоста.
 
 ## 15. Не проверено
 
@@ -829,6 +930,8 @@ rayctl webhook add|list|set|del|test|rotate|retry|status   # §4.6
   `main`.
 - **Эталонные библиотеки** Standard Webhooks на JS, Python и Go проверяют только `v1` (HMAC) и допускают 5 минут
   (смотрел исходники в `main`). Остальные (Java, Rust, Ruby, PHP, C#, Elixir) не смотрел.
+- **Ответ на проверку адреса** (§4.6) в библиотеке Go уже есть (`EndpointVerificationResponse`), но только для
+  `v1`; в JS и Python его не нашёл. Получателю `v1a` — 4 строки §4.8. Пример §4.8 по тексту расширения, не запускал.
 - **`protoc-gen-connect-openapi`**: последняя версия — v0.30.0 от 2026-11-06 (прокси модулей Go). Проект переехал в
   организацию `connectrpc`: модуль `connectrpc.com/protoc-gen-connect-openapi`, тот же коммит отдаётся и по старому
   пути `github.com/sudorandom/…`, но `go.mod` v0.30.0 называет новый. До 1.0, около 300 звёзд. Разбор
