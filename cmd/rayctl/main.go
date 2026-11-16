@@ -227,8 +227,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   remote enroll [-o FILE] [-carrier udp|tls|tcp|auto] [-addr A] [-pin PIN] INVITE|@FILE|-
       register a device from an invite (RCINV2:... or rcinv1:...): a new client
       key, SPA, then the API; writes the device file (bundle and key, mode 0600)
-  -remote FILE <command>                    status, node, user, service, device, audit, admin, dns, metrics, summary,
-                                            app-mirror, debug, version run against the node through its API
+  -remote FILE <command>                    status, node, user, service, device, audit, admin, ports, relay (but
+                                            relay bundle), dns, metrics, summary, app-mirror, debug, version run
+                                            against the node through its API
   -remote FILE remote whoami|rotate         the device; a new client key for it
 `
 
