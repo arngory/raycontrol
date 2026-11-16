@@ -24,12 +24,21 @@ func TestRenewOverlapRotations(t *testing.T) {
 	r := Rotation{Lead: DefaultRotation.Lead, Grace: DefaultRotation.Grace} // -cred-period 0
 	must(t, s.SetRotation(ctx, r))
 	svc, _ := s.CreateService(ctx, Service{Kind: "naive", Name: "naive", Enabled: true, Settings: "{}"})
+	doh, _ := s.CreateService(ctx, Service{Kind: "doh", Name: "doh", Enabled: true, Settings: "{}"})
 	ids := map[string]int64{}
 	for _, n := range []string{"alice", "bob", "carol", "dave"} {
-		u, _ := s.CreateUser(ctx, User{Name: n, Enabled: true, Services: []int64{svc.ID}})
+		u, _ := s.CreateUser(ctx, User{Name: n, Enabled: true, Services: []int64{svc.ID, doh.ID}})
 		ids[n] = u.ID
 	}
-	if _, err := s.Credentials(ctx, svc.ID, []int64{ids["alice"], ids["bob"], ids["carol"], ids["dave"]}, NewUUID); err != nil {
+	for _, id := range []int64{svc.ID, doh.ID} {
+		if _, err := s.Credentials(ctx, id, []int64{ids["alice"], ids["bob"], ids["carol"], ids["dave"]}, NewUUID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// bob's DoH secret has a next of a schedule from before -cred-period 0:
+	// DoH is no revocation's (R4-37), and makes him no user to renew.
+	if _, err := s.db.Exec(`UPDATE credentials SET next_secret = 'n', next_from = ? WHERE user_id = ? AND service_id = ?`,
+		time.Now().Add(DefaultRotation.Lead).Unix(), ids["bob"], doh.ID); err != nil {
 		t.Fatal(err)
 	}
 	devs := map[string]Device{}
@@ -49,11 +58,11 @@ func TestRenewOverlapRotations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// carol's switched (by hand, for this test only: alice's too) and her
-	// previous secret, the one her phone knew, in its grace.
+	// carol's rotation switched (by hand, as the loop would at its time),
+	// her previous secret, the one her phone knew, in its grace.
 	if _, err := s.db.Exec(`UPDATE credentials SET prev_secret = secret, prev_until = ?, secret = next_secret,
-		next_secret = NULL, next_from = NULL, rotated_at = ? WHERE user_id = ?`,
-		rev.Until.Unix(), rev.SwitchAt.Unix(), ids["carol"]); err != nil {
+		next_secret = NULL, next_from = NULL, rotated_at = ? WHERE user_id = ? AND service_id = ?`,
+		rev.Until.Unix(), rev.SwitchAt.Unix(), ids["carol"], svc.ID); err != nil {
 		t.Fatal(err)
 	}
 	before := credRowsOf(t, s.db)
@@ -76,8 +85,13 @@ func TestRenewOverlapRotations(t *testing.T) {
 		}
 	}
 	for _, n := range []string{"bob", "dave"} {
-		if got[n][svc.ID] != before[n][svc.ID] {
-			t.Errorf("%s changed: %+v", n, got[n][svc.ID])
+		if got[n][svc.ID] != before[n][svc.ID] || got[n][doh.ID] != before[n][doh.ID] {
+			t.Errorf("%s changed: %+v", n, got[n])
+		}
+	}
+	for _, n := range []string{"alice", "carol"} {
+		if got[n][doh.ID] != before[n][doh.ID] {
+			t.Errorf("%s's DoH secret changed", n)
 		}
 	}
 	// Nothing a revoked phone knew is accepted a year on, with no loop.
