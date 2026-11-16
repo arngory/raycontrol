@@ -3,7 +3,9 @@
 // whoever has no password and no token: the same transport parameters, the
 // same HTTP/3 SETTINGS, connection IDs of the same length and a stateless
 // reset from both. What differs is what each one's key and handler make of
-// a request. The numbers are the caller's (cmd/rayd: naive's limits and
+// a request, and, on a naive service with udp=on, the two lines that
+// announce HTTP/3 datagrams (Options.Datagrams; spec/naive-udp-v1.md §7,
+// §10.1). The numbers are the caller's (cmd/rayd: naive's limits and
 // render's idle time); the package imports nothing of the node's, so that
 // naive's own tests serve over it as rayd does.
 package h3serve
@@ -89,6 +91,11 @@ type Options struct {
 	MaxStreams     int64
 	PendingStreams int
 	MaxHeaderBytes int
+	// Datagrams announces HTTP/3 datagrams (RFC 9297): the transport
+	// parameter max_datagram_frame_size and SETTINGS_H3_DATAGRAM, which
+	// whoever completes a handshake sees. naive with udp=on
+	// (spec/naive-udp-v1.md); off, the server is as it was without them.
+	Datagrams bool
 }
 
 // Config is the QUIC side of a server: packets of PacketSize to each
@@ -96,7 +103,7 @@ type Options struct {
 // What the server accepts is the same for both: quic-go's 1452.
 func Config(o Options) *quic.Config {
 	v4 := &quic.Config{MaxIdleTimeout: o.Idle, KeepAlivePeriod: 0, MaxIncomingStreams: o.MaxStreams,
-		InitialPacketSize: MaxPacketSize, DisablePathMTUDiscovery: true}
+		InitialPacketSize: MaxPacketSize, DisablePathMTUDiscovery: true, EnableDatagrams: o.Datagrams}
 	v6 := *v4
 	v6.InitialPacketSize = MaxPacketSizeIPv6
 	c := *v4
@@ -205,7 +212,7 @@ func Serve(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInf
 	}
 	// A connection without a request goes after the same time as a silent
 	// one.
-	srv := &http3.Server{Handler: headerRead(h), IdleTimeout: o.Idle, MaxHeaderBytes: o.MaxHeaderBytes}
+	srv := &http3.Server{Handler: headerRead(h), IdleTimeout: o.Idle, MaxHeaderBytes: o.MaxHeaderBytes, EnableDatagrams: o.Datagrams}
 	wait := o.HeaderWait
 	if wait == 0 {
 		wait = HeaderTimeout
@@ -281,4 +288,80 @@ func serveConn(ctx context.Context, srv *http3.Server, qc *quic.Conn, wait time.
 			}
 		})
 	}
+}
+
+// SettingsWait bounds how long a request waits for its client's SETTINGS
+// (Datagrams): a client sends them first thing, before any request.
+const SettingsWait = HeaderTimeout
+
+// Datagrams gives a request's HTTP/3 stream with its datagrams (RFC 9297):
+// ok false when w is no HTTP/3 server's of this package, when the server
+// does not announce datagrams (Options.Datagrams), or when the client's
+// SETTINGS, waited for while ctx lasts and SettingsWait at most, do not
+// have SETTINGS_H3_DATAGRAM. take writes the answer's header (200 unless
+// the handler wrote another status) and gives the stream over: the
+// handler ends it, with Stream.Close or Stream.Reset.
+func Datagrams(ctx context.Context, w http.ResponseWriter) (take func() *Stream, ok bool) {
+	srv, _ := ctx.Value(http3.ServerContextKey).(*http3.Server)
+	hw, isH3 := w.(interface {
+		http3.HTTPStreamer
+		http3.Settingser
+	})
+	if srv == nil || !srv.EnableDatagrams || !isH3 {
+		return nil, false
+	}
+	t := time.NewTimer(SettingsWait)
+	defer t.Stop()
+	select {
+	case <-hw.ReceivedSettings():
+	case <-ctx.Done():
+		return nil, false
+	case <-t.C:
+		return nil, false
+	}
+	if st := hw.Settings(); st == nil || !st.EnableDatagrams {
+		return nil, false
+	}
+	return func() *Stream { return &Stream{s: hw.HTTPStream()} }, true
+}
+
+// Stream is a request's HTTP/3 stream, taken over for its datagrams: its
+// content (inside DATA frames, which carry capsules) and its HTTP
+// datagrams, the payload after the quarter stream ID.
+type Stream struct{ s *http3.Stream }
+
+func (d *Stream) Read(b []byte) (int, error)         { return d.s.Read(b) }
+func (d *Stream) Write(b []byte) (int, error)        { return d.s.Write(b) }
+func (d *Stream) SetReadDeadline(t time.Time) error  { return d.s.SetReadDeadline(t) }
+func (d *Stream) SetWriteDeadline(t time.Time) error { return d.s.SetWriteDeadline(t) }
+
+// SendDatagram queues b as one QUIC datagram, waiting while the
+// connection's queue is full; tooLarge, with nothing sent, when it does not
+// fit a QUIC packet of the connection.
+func (d *Stream) SendDatagram(b []byte) (tooLarge bool, err error) {
+	err = d.s.SendDatagram(b)
+	if _, ok := errors.AsType[*quic.DatagramTooLargeError](err); ok {
+		return true, nil
+	}
+	return false, err
+}
+
+// ReceiveDatagram waits for the next datagram of the stream; an error once
+// ctx ends or the stream's receiving side does.
+func (d *Stream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
+	return d.s.ReceiveDatagram(ctx)
+}
+
+// Close ends the stream cleanly: FIN, and nothing more read, as http3 ends
+// a request whose handler returned.
+func (d *Stream) Close() error {
+	d.s.CancelRead(quic.StreamErrorCode(http3.ErrCodeNoError))
+	return d.s.Close()
+}
+
+// Reset resets the stream both ways, as http3 resets a request whose
+// handler aborted (http.ErrAbortHandler).
+func (d *Stream) Reset() {
+	d.s.CancelRead(quic.StreamErrorCode(http3.ErrCodeInternalError))
+	d.s.CancelWrite(quic.StreamErrorCode(http3.ErrCodeInternalError))
 }
