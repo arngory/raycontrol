@@ -215,7 +215,10 @@ type NodeServiceClient interface {
 	// once and then by its back-off, and switches when it is stored. Root on
 	// the node only. To the next key: failed_precondition unless that key has
 	// been in subscriptions for the lead, or force. To a key made for the
-	// order, with a new next key: fresh.
+	// order, with a new next key: fresh. For a naive service it asks for a
+	// switch of its server name (R4-42, raycontrol v0.29.0): a lead time
+	// away, or at once with now to the next name the front already routes;
+	// the previous name stays accepted until the switch after, now or not.
 	RotateService(context.Context, *connect.Request[v1.RotateServiceRequest]) (*connect.Response[v1.RotateServiceResponse], error)
 	// SetServiceOption changes one of the few settings that may change after
 	// creation: a site's answer, whether REALITY moves its server name,
@@ -1029,7 +1032,10 @@ type NodeServiceHandler interface {
 	// once and then by its back-off, and switches when it is stored. Root on
 	// the node only. To the next key: failed_precondition unless that key has
 	// been in subscriptions for the lead, or force. To a key made for the
-	// order, with a new next key: fresh.
+	// order, with a new next key: fresh. For a naive service it asks for a
+	// switch of its server name (R4-42, raycontrol v0.29.0): a lead time
+	// away, or at once with now to the next name the front already routes;
+	// the previous name stays accepted until the switch after, now or not.
 	RotateService(context.Context, *connect.Request[v1.RotateServiceRequest]) (*connect.Response[v1.RotateServiceResponse], error)
 	// SetServiceOption changes one of the few settings that may change after
 	// creation: a site's answer, whether REALITY moves its server name,

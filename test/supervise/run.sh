@@ -44,8 +44,10 @@ x mkdir -p /var/lib/raycontrol /run/raycontrol
 x /opt/rc/rayd init -host "$ip" -domain example.test >/dev/null
 # NIKO_SERVER_UNSAFE_ANY_DESTINATION: the tunnels may reach this private
 # network (a test network has no public addresses); never on a real node.
+# -cred-lead 5m: what is next (naive's next name below) is published five
+# minutes ahead of its switch, not three days.
 x sh -c 'NIKO_SERVER_UNSAFE_ANY_DESTINATION=1 nohup /opt/rc/rayd serve -supervise \
-	-xray /opt/rc/xray -niko-server /opt/rc/niko-server -acme-directory "" >/var/log/rayd.log 2>&1 & echo $! >/run/rayd.pid'
+	-xray /opt/rc/xray -niko-server /opt/rc/niko-server -acme-directory "" -cred-lead 5m >/var/log/rayd.log 2>&1 & echo $! >/run/rayd.pid'
 for _ in $(seq 50); do x test -S /run/raycontrol/rayd.sock && break; sleep 0.2; done
 x test -S /run/raycontrol/rayd.sock || fail "rayd did not open its API socket"
 
@@ -53,13 +55,14 @@ log "services, the site's certificate, a user and a device"
 x /opt/rc/rayctl service add reality reality >/dev/null
 x /opt/rc/rayctl service add hy2-obfs hy2o >/dev/null
 x /opt/rc/rayctl service add yggdrasil ygg >/dev/null
+x /opt/rc/rayctl service add naive naive >/dev/null
 # A test CA in place of ACME: REALITY (self-steal), Yggdrasil, hy2-masq and
 # naive take the site's certificate. Clients that verify it trust root.pem.
 (cd "$here/../.." && go run ./test/supervise/testcert -o "$work" '*.example.test')
 docker cp "$work/chain.pem" "$node:/root/chain.pem"
 docker cp "$work/key.pem" "$node:/root/key.pem"
 x /opt/rc/rayctl service cert site -chain /root/chain.pem -key /root/key.pem || fail "rayctl service cert"
-x /opt/rc/rayctl user add alice -services reality,hy2o,ygg >/dev/null
+x /opt/rc/rayctl user add alice -services reality,hy2o,ygg,naive >/dev/null
 bundle="$(x /opt/rc/rayctl device add alice laptop | grep '^rcdev1:')" || fail "no bundle"
 
 log "the data plane under rayd"
@@ -79,6 +82,34 @@ echo "$out"
 [[ $out == *"channel link: "* ]] || fail "no link from the client's address: $out"
 links="$(x /opt/rc/rayctl user export alice)"
 [[ $(grep -c '^vless://' <<<"$links") -ge 1 && $(grep -c '^hysteria2://' <<<"$links") == 1 ]] || fail "links: $links"
+
+log "naive's next name (R4-42): published at once, the front unchanged; -now switches"
+# The site's certificate is a wildcard: the next name, routed since the
+# service was made, is covered already.
+sni() { sed -n "s/^naive+https:.*[?&]sni=\([^&#]*\).*/\1/p"; }
+front() { x sha256sum /var/lib/raycontrol/rendered/front/front.json; }
+before="$(front)"
+x /opt/rc/rayctl service rotate naive >/dev/null || fail "rotate naive"
+for _ in $(seq 25); do
+	links="$(x /opt/rc/rayctl user export alice)"
+	grep -q '^# naive from ' <<<"$links" && break
+	sleep 0.2
+done
+grep -q '^# naive from ' <<<"$links" || fail "no next link of naive: $links"
+old="$(grep -A1 '^# naive (service' <<<"$links" | sni)"
+new="$(grep -A1 '^# naive from ' <<<"$links" | sni)"
+[[ -n $old && -n $new && $old != "$new" ]] || fail "naive's names: $old, next $new"
+[[ $(front) == "$before" ]] || fail "the publication changed front.json"
+x grep -q "\"$new\"" /var/lib/raycontrol/rendered/front/front.json || fail "the next name $new not routed"
+x /opt/rc/rayctl service rotate naive -now >/dev/null || fail "rotate naive -now"
+for _ in $(seq 25); do
+	[[ $(x /opt/rc/rayctl user export alice | grep -A1 '^# naive (service' | sni) == "$new" ]] && break
+	sleep 0.2
+done
+[[ $(x /opt/rc/rayctl user export alice | grep -A1 '^# naive (service' | sni) == "$new" ]] || fail "naive did not switch to $new"
+for _ in $(seq 25); do x grep -q "\"$old\"" /var/lib/raycontrol/rendered/front/front.json && [[ $(front) != "$before" ]] && break; sleep 0.2; done
+x grep -q "\"$old\"" /var/lib/raycontrol/rendered/front/front.json || fail "the previous name $old not routed after the switch"
+echo "naive: $old, then $new; the previous name still routed"
 
 log "stop: rayd takes its processes with it"
 # shellcheck disable=SC2016 # expands in the container

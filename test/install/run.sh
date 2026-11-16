@@ -227,6 +227,17 @@ if [[ $distro == debian13 ]]; then
 	# the service's salamander password, again every 2 s, at that apply,
 	# an update or a reboot (review of v0.28.0).
 	out="$(x rayctl service add hy2-obfs hy2-obfs 2>&1)" || fail "rayctl service add hy2-obfs: $out"
+	# Before the apply its password is not copied in for the front: rayd
+	# keeps it off the front's config, which would fail the front at every
+	# start (restarting every 2 s) until the apply. REALITY waits for its
+	# certificate: the front carries nothing, has no config and stays
+	# down. rayd renders half a second after the change; the front's
+	# first restart would come 2 s after its failed start.
+	sleep 5
+	st="$(x systemctl show -p ActiveState,SubState,NRestarts niko-front.service | sort | paste -sd' ')"
+	if [[ $st != "ActiveState=inactive NRestarts=0 SubState=dead" ]] || x test -e /var/lib/raycontrol/rendered/front/front.json; then
+		fail "the front with a hy2-obfs not applied ($st): $(x journalctl --no-pager -u niko-front -n 5 -o cat)"
+	fi
 	out="$(x rayctl apply 2>&1)" || fail "rayctl apply with hy2-obfs: $out"
 	wait_active niko-hy2-obfs.service niko-front.service
 	out="$(x rayctl service del hy2-obfs 2>&1)" || fail "rayctl service del hy2-obfs: $out"

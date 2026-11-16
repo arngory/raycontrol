@@ -205,7 +205,10 @@ func cmdServe(args []string) error {
 	probeDaily := fs.Int("probe-daily-mib", probe.DefaultDaily>>20, "channel probes: MiB per device and UTC day, both directions")
 	credGrace := fs.Duration("cred-grace", 2*24*time.Hour, "the previous credential (and REALITY key set) is accepted this long after the switch (12h at least)")
 	realityPeriod := fs.Duration("reality-period", 90*24*time.Hour, "how long REALITY keys stay current; their next set is published -cred-lead ahead (0: no rotation)")
-	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new REALITY server name may wait for its certificate")
+	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new server name (REALITY's, naive's) may wait for its certificate")
+	naiveSNIPeriod := fs.Duration("naive-sni-period", provision.DefaultNaiveSNIPeriod, "how long a naive server name stays current: the next one is published -cred-lead ahead, "+
+		"under a wildcard certificate only unless rayctl service set NAME rotate_sni=on (0: only by rayctl service rotate NAME); "+
+		"a name left at a switch stays accepted until a switch this long after (90 days with 0), 3 previous names at most")
 	siteKeyPeriod := fs.Duration("site-key-period", provision.DefaultSiteKeyPeriod, "how long the key of a site's certificate stays in use: at an issuance after that the next key takes over (0: only by rayctl service rotate SITE)")
 	siteKeyLead := fs.Duration("site-key-lead", provision.DefaultSiteKeyLead, "the next key of a site's certificate is in the subscription (niko-pin) this long before a switch to it")
 	debug := fs.Bool("debug", false, "log at debug level: refused subscription requests with their addresses (personal data: turn it off after use)")
@@ -216,7 +219,7 @@ func cmdServe(args []string) error {
 	dnsCheckPrivate := fs.Bool("dns-check-private", false,
 		"the DNS check asks the parent zone's servers at private, shared or reserved addresses too (a lab's own parent zone)")
 	fs.Parse(args)
-	epoch := provision.RealityEpoch{Period: *realityPeriod, Lead: *credLead, Prepare: *realityPrepare, Grace: *credGrace}
+	epoch := provision.RealityEpoch{Period: *realityPeriod, Lead: *credLead, Prepare: *realityPrepare, Grace: *credGrace, NaivePeriod: *naiveSNIPeriod}
 	if err := epoch.Check(); err != nil {
 		return err
 	}
@@ -270,7 +273,7 @@ func cmdServe(args []string) error {
 	paths := render.Paths{Rendered: *rendered, Run: *run, Supervised: *supervise}
 	rotateNow := make(chan struct{}, 1)
 	srv := &api.Server{Store: st, Params: params, Version: version, Paths: paths, Binaries: deploy.DefaultBinaries,
-		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead, CredGrace: *credGrace, SiteKeyLead: *siteKeyLead, Health: hb,
+		CheckRealityTarget: provision.CheckRealityTarget, RealityLead: *credLead, NaivePeriod: *naiveSNIPeriod, CredGrace: *credGrace, SiteKeyLead: *siteKeyLead, Health: hb,
 		Rotate: func() {
 			select {
 			case rotateNow <- struct{}{}:
@@ -328,7 +331,7 @@ func cmdServe(args []string) error {
 	acct := &traffic.Accountant{Store: st, Sources: traffic.Processes(paths), Health: hb, Log: log, Notify: srv.Notify}
 	if *liveApply {
 		applier := &live.Applier{Store: st, Paths: paths, Log: log, Report: func(err error) { hb.Done("apply", err) },
-			BeforeRestart: acct.Flush}
+			BeforeRestart: acct.Flush, FrontUnit: deploy.UnitPath(render.UnitName("front"))}
 		var sup *live.Supervisor
 		if *supervise {
 			sup, err = supervisor(paths, deploy.Binaries{Xray: *xrayBin, NikoServer: *nikoBin, Slipstream: *slipBin}, st, log)
@@ -336,6 +339,7 @@ func cmdServe(args []string) error {
 				return err
 			}
 			applier.Restart = sup.Restart
+			applier.FrontUnit = ""
 		}
 		// The socket opens after the first render: rayctl apply waits for it
 		// before it starts the data-plane units that read these files.
@@ -377,7 +381,7 @@ func cmdServe(args []string) error {
 			log.Error("certificates not managed", "err", err)
 		}
 	}
-	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, hb, log)
+	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, paths.FrontConfig(), hb, log)
 	go syncDNS(ctx, st, srv.Changes, hb, log)
 	go checkRealityTargets(ctx, st, srv.Changes, hb, log)
 	if *dnsCheck > 0 {
@@ -871,12 +875,14 @@ func syncDNS(ctx context.Context, st *store.Store, changes func() <-chan struct{
 	}
 }
 
-// rotateReality advances the REALITY key rotation every minute (R4-7), so
-// the switch lands within a minute of the time clients have, and at once
-// on an operator request. A new server name needs a certificate first: the
-// manager is woken for it. Without certificate management the names stay.
+// rotateReality advances the REALITY key rotation (R4-7) and naive's
+// server names (R4-42) every minute, in one round, so the switch lands
+// within a minute of the time clients have, and at once on an operator
+// request. A new server name needs a certificate first: the manager is
+// woken for it. Without certificate management REALITY's names stay, and
+// naive's move only under a certificate that covers them already.
 func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoch, is *certs.Issuer, cm *certs.Manager,
-	now <-chan struct{}, notify func(), hb *health.Board, log *slog.Logger) {
+	now <-chan struct{}, notify func(), frontConfig string, hb *health.Board, log *slog.Logger) {
 	var resolves func(context.Context, string) error
 	if is != nil && cm != nil {
 		resolves = func(ctx context.Context, name string) error { return is.CheckDNS(ctx, []string{name}) }
@@ -892,6 +898,10 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 			if cm != nil {
 				cm.Wake()
 			}
+		}
+		// A published naive name the front does not serve (docs/20 §8.4).
+		if naive, err := naiveServed(ctx, st, frontConfig); naive || err != nil {
+			hb.Done(naiveNamesLoop, err)
 		}
 		// The previous seal keys of dnstt services past their grace
 		// (spec/dnsseal-v1.md §8): the key files lose them.

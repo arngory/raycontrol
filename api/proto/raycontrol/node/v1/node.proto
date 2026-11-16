@@ -55,7 +55,10 @@ service NodeService {
   // once and then by its back-off, and switches when it is stored. Root on
   // the node only. To the next key: failed_precondition unless that key has
   // been in subscriptions for the lead, or force. To a key made for the
-  // order, with a new next key: fresh.
+  // order, with a new next key: fresh. For a naive service it asks for a
+  // switch of its server name (R4-42, raycontrol v0.29.0): a lead time
+  // away, or at once with now to the next name the front already routes;
+  // the previous name stays accepted until the switch after, now or not.
   rpc RotateService(RotateServiceRequest) returns (RotateServiceResponse);
   // SetServiceOption changes one of the few settings that may change after
   // creation: a site's answer, whether REALITY moves its server name,
@@ -676,9 +679,23 @@ message Service {
   string kind = 2;
   string name = 3;
   bool enabled = 4;
+  // The service's settings, without a next server name not yet published
+  // (REALITY's sni_next waiting for its certificate, naive's chosen ahead;
+  // raycontrol v0.29.0): no client has it, and nothing shows it.
   string settings_json = 5;
   int64 created_at = 6;
   uint32 uid = 7; // system user of the service's process, 0 if none
+  // The server name in the service's links (settings' sni): REALITY,
+  // naive, DoH, hy2-masq, hy2-obfs, Yggdrasil, a site; empty for the
+  // others (raycontrol v0.29.0).
+  string sni = 8;
+  // REALITY and naive: the server name in subscriptions from next_from on,
+  // only once published (R4-7, R4-42); empty when no switch is published
+  // or the published one keeps the name. A naive service has its next name
+  // chosen and served earlier: it shows here once clients get it.
+  string sni_next = 9;
+  // REALITY and naive: the published switch, unix seconds; 0: none.
+  int64 next_from = 10;
 }
 
 message ListServicesRequest {}
@@ -774,6 +791,18 @@ message RotateServiceResponse {
   // rayd orders from switch_at on (spec/cert-pin-v1.md §5); empty for
   // REALITY's scheduled switch.
   string key = 4;
+  // The service's kind (raycontrol v0.29.0): "naive" is a switch of its
+  // server name alone (R4-42), at switch_at or once its certificate covers
+  // the new name; the previous name stays accepted until the switch after.
+  string kind = 5;
+  // naive: the previous names that stay routed after the switch, newest
+  // first (the name in use now first): each until a switch a period
+  // (-naive-sni-period) after the one that left it, 3 at most.
+  repeated string kept_names = 6;
+  // naive: the previous names the switch takes off the front, left a
+  // period ago or more, or the oldest over 3. Devices that know only one of
+  // them lose naive until they fetch their subscription.
+  repeated string dropped_names = 7;
 }
 
 message Device {

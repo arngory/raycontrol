@@ -440,7 +440,7 @@ func TestRealityKeysInSubscription(t *testing.T) {
 
 	// New keys requested for day 29: they come first, with the next UUID,
 	// which the server already accepts.
-	if err := provision.RequestRealityRotation(ctx, st, "r", now.Add(26*day), epoch.Lead, false); err != nil {
+	if err := provision.RequestRotation(ctx, st, "r", now.Add(26*day), epoch.Lead, false); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := provision.RotateReality(ctx, st, now.Add(26*day), epoch, nil, nil); err != nil || n != 1 {

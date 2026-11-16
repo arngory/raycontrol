@@ -152,6 +152,14 @@ type Model struct {
 	// devices allowed on it (spec/dnsauth-v1.md): "<device id> <hex>".
 	// Only CollectForRender fills it.
 	DNSAuth map[int64][]string
+	// FrontCopies says whether the front's installed unit copies in the
+	// credential at a path (deploy.UnitCopies); nil: it copies in all the
+	// render names (rayctl apply, which writes the unit with the render,
+	// and the supervisor's own plan). A hy2-obfs whose salamander password
+	// the unit does not copy in yet waits for rayctl apply off the front:
+	// the front reads every password at its start, and one missing keeps
+	// it from starting, every route on UDP and TCP 443 with it.
+	FrontCopies func(path string) bool
 	// Devices maps user ID to the user's devices not revoked: each has its
 	// own key in the Yggdrasil mesh, from its SPA key, and its LAN consent.
 	// Only CollectForRender fills it, and only with a Yggdrasil service.
@@ -240,9 +248,14 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 			}
 		}
 		// A naive service from before its key of QUIC stateless resets
-		// gets it now.
+		// gets it now; one from before R4-42 its next name, which the
+		// front routes from this render on, before any subscription has
+		// it.
 		if s.Kind == "naive" {
 			if secrets[provision.SecretQUICReset], err = provision.EnsureQUICResetKey(ctx, st, s, secrets); err != nil {
+				return m, err
+			}
+			if s, err = provision.EnsureNaiveNext(ctx, st, s, m.Domain); err != nil {
 				return m, err
 			}
 		}
@@ -572,6 +585,33 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 	var tcpRoutes []tcpRoute
 	tcpDefault := "" // the first REALITY service: its target answers like the site
 	backends := map[string]backendRef{}
+	// A name the front routes, TCP and UDP apart: its service. niko-server
+	// refuses its whole config when two routes carry one name (TCP 443, UDP
+	// 443 and UDP 53 go down with it): the first service to claim a name
+	// has it.
+	tcpNames, udpNames := map[string]string{}, map[string]string{}
+	// claim takes names in a table for a service. The first is the one in
+	// its links: taken by another service, the service is not routed at all
+	// (an error, as a zone that nests). The others (a previous or next name)
+	// are left out of its route when another has them.
+	claim := func(table map[string]string, service string, names ...string) ([]string, error) {
+		var out []string
+		for i, n := range names {
+			key := provision.CanonicalZone(n)
+			switch other, taken := table[key]; {
+			case key == "" && i == 0:
+				return nil, errors.New("no server name")
+			case key == "" || other == service:
+			case taken && i == 0:
+				return nil, fmt.Errorf("server name %s is routed to %s already: give one of them another", n, other)
+			case taken:
+			default:
+				table[key] = service
+				out = append(out, n)
+			}
+		}
+		return out, nil
+	}
 
 	// one renders a service. On an error nothing of it is kept, and the
 	// others go on (Q-1): one broken service must not hold back users,
@@ -673,7 +713,22 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "reality"), Mode: "proxy-v2", UID: p.PeerUID(s.UID)}
 				var rs RealitySettings
 				_ = json.Unmarshal([]byte(s.Settings), &rs)
-				tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{rs.SNI}, Backend: s.Name})
+				// A REALITY that is not the default (the first) takes the
+				// name before its last switch too, until the next one: a
+				// client still on it reaches this REALITY (its previous keys
+				// in their grace, R4-19; after it, its site), not the
+				// default's. The grace's end changes no route, so no restart
+				// of the front comes with it. The default gets every name no
+				// route has: its routes stay as they were.
+				own := []string{rs.SNI}
+				if tcpDefault != "" {
+					own = append(own, provision.ParseRealityState(s.Service).SNIPrev)
+				}
+				names, err := claim(tcpNames, s.Name, own...)
+				if err != nil {
+					return err
+				}
+				tcpRoutes = append(tcpRoutes, tcpRoute{SNI: names, Backend: s.Name})
 				if tcpDefault == "" {
 					tcpDefault = s.Name
 				}
@@ -687,6 +742,20 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			if err != nil {
 				return err
 			}
+			if s.Kind == "hy2-obfs" && m.FrontCopies != nil && !m.FrontCopies(p.FrontSalamander(s.Name)) {
+				// Its files are written: rayctl apply's unit copies the
+				// password from them, and rayd, restarted by that apply for
+				// the service's group, routes it then. The front's copy
+				// restarts nothing before: the front does not read it.
+				for i := range fs {
+					if fs[i].Service == "front" {
+						fs[i].AtStart = true
+					}
+				}
+				files = append(files, fs...)
+				skipped = append(skipped, s.Name+" (waits for rayctl apply: the front does not have its password yet)")
+				return nil
+			}
 			files = append(files, fs...)
 			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "packet"), Mode: "packet", UID: p.PeerUID(s.UID)}
 			if s.Kind == "hy2-obfs" {
@@ -696,7 +765,11 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 					SNI string `json:"sni"`
 				}
 				_ = json.Unmarshal([]byte(s.Settings), &st)
-				udpRoutes = append(udpRoutes, udpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: s.Name})
+				names, err := claim(udpNames, s.Name, strings.ToLower(st.SNI))
+				if err != nil {
+					return err
+				}
+				udpRoutes = append(udpRoutes, udpRoute{SNI: names, Backend: s.Name})
 			}
 		case "site":
 			fs, err := siteFiles(s, m, p)
@@ -734,11 +807,36 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				quic = backendRef{Socket: p.NaiveQUICSocket(s.Name), Mode: "packet", UID: p.PeerUID(s.UID)}
 			}
 			backends[s.Name] = ref
-			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: s.Name})
-			// The same name over QUIC: DoH3 and naive-quic (R3-5).
+			// naive: its name, the ones before it still accepted (the one
+			// before its last switch, and those left within the period
+			// before, provision.NaivePrevious) and the one after its next
+			// (R4-42), whatever is published: the routes, and front.json
+			// with them, change at a switch only, which restarts the front
+			// (it reads its routes at its start). A client that moves
+			// early, or back, finds its names served.
+			own := []string{strings.ToLower(st.SNI)}
+			if s.Kind == "naive" {
+				ns := provision.ParseNaiveState(s.Service)
+				for _, n := range ns.Previous() {
+					own = append(own, strings.ToLower(n))
+				}
+				own = append(own, strings.ToLower(ns.SNINext))
+			}
+			names, err := claim(tcpNames, s.Name, own...)
+			if err != nil {
+				return err
+			}
+			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: names, Backend: s.Name})
+			// The same names over QUIC: DoH3 and naive-quic (R3-5). An h3
+			// client on a name not routed gets silence from the front, not
+			// an error (niko-server's udpfront drops it).
 			if m.FrontUDP {
 				backends[quicBackend(s.Name)] = quic
-				udpRoutes = append(udpRoutes, udpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: quicBackend(s.Name)})
+				names, err := claim(udpNames, s.Name, own...)
+				if err != nil {
+					return err
+				}
+				udpRoutes = append(udpRoutes, udpRoute{SNI: names, Backend: quicBackend(s.Name)})
 			}
 		case "yggdrasil":
 			// A TLS link behind tcpmux by name (R4-15), into inner.
@@ -760,7 +858,11 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			files = append(files, fs...)
 			st, _, _ := YggdrasilNode(s)
 			backends[s.Name] = backendRef{Socket: p.FrontSocket(s.Name, "fd"), Mode: "fd", UID: p.PeerUID(s.UID)}
-			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: []string{strings.ToLower(st.SNI)}, Backend: s.Name})
+			names, err := claim(tcpNames, s.Name, strings.ToLower(st.SNI))
+			if err != nil {
+				return err
+			}
+			tcpRoutes = append(tcpRoutes, tcpRoute{SNI: names, Backend: s.Name})
 		case "ssh", "subscription", "api":
 			// Not data-plane processes.
 		default:
@@ -779,6 +881,14 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			for z, name := range taken {
 				if name == s.Name {
 					delete(taken, z)
+				}
+			}
+			// Its names likewise: a later service may have them.
+			for _, table := range []map[string]string{tcpNames, udpNames} {
+				for n, name := range table {
+					if name == s.Name {
+						delete(table, n)
+					}
 				}
 			}
 			delete(backends, s.Name)

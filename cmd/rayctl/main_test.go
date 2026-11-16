@@ -256,6 +256,24 @@ func TestKeyStateSite(t *testing.T) {
 	}
 }
 
+// rayctl service list: REALITY's switch. A new name that waits for its
+// certificate shows from prepared_at (rayd since v0.29.0 hides the name
+// itself until it is published), or from the name (a rayd before).
+func TestKeyStateReality(t *testing.T) {
+	for _, c := range []struct{ settings, want string }{
+		{`{"sni":"a.example.com"}`, "since creation"},
+		{`{"sni":"a.example.com","prepared_at":1767225600}`, "since creation, next name waits for its certificate"},
+		{`{"sni":"a.example.com","prepared_at":1767225600,"sni_next":"b.example.com"}`, "since creation, next name waits for its certificate"},
+		{`{"sni":"a.example.com","prepared_at":1767225600,"sni_next":"b.example.com","next_from":1767312000}`,
+			"since creation, switch 2026-01-02 00:00 with a new name"},
+		{`{"sni":"a.example.com","prepared_at":1767225600,"next_from":1767312000}`, "since creation, switch 2026-01-02 00:00"},
+	} {
+		if got := keyState(&nodev1.Service{Kind: "reality", SettingsJson: c.settings}); got != c.want {
+			t.Errorf("reality %s: %q", c.settings, got)
+		}
+	}
+}
+
 // inviteNode makes invites as a node does, the short form when it has one,
 // and keeps the IDs of those withdrawn.
 type inviteNode struct {

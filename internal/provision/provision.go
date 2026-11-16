@@ -499,6 +499,29 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 				return svc, fmt.Errorf(`%w naive icmp: true or false (rayctl service set <naive> icmp=on|off)`, store.ErrInvalid)
 			}
 		}
+		if svc.Kind == "naive" {
+			// The name after the first switch (R4-42): routed by the front
+			// from the start, in subscriptions once published.
+			if v, ok := settings["rotate_sni"]; ok {
+				if _, ok := v.(bool); !ok {
+					return svc, fmt.Errorf(`%w naive rotate_sni: true or false (rayctl service set <naive> rotate_sni=on|off|auto)`, store.ErrInvalid)
+				}
+			}
+			// A node without a domain has no names to move to (a new one
+			// is a subdomain of the domain): naive keeps the operator's.
+			sni, _ := settings["sni"].(string)
+			domain, err := Domain(ctx, st)
+			if err != nil {
+				return svc, err
+			}
+			if domain != "" {
+				next, err := newZone(ctx, st, all, sni)
+				if err != nil {
+					return svc, err
+				}
+				settings["sni_next"] = next
+			}
+		}
 		if svc.Kind == "naive" || svc.Kind == "doh" {
 			// The key of stateless resets of naive-quic, and of DoH3
 			// (EnsureQUICResetKey).
@@ -602,6 +625,21 @@ func createService(ctx context.Context, st *store.Store, svc store.Service) (sto
 			}
 			settings["site"] = site.Name
 			settings["sni"] = SiteName(site)
+			// A second REALITY on the site: a name of its own. The front
+			// routes a name to one service, and refused its whole config
+			// with the site's name on two.
+			if all, err = st.ListServices(ctx); err != nil {
+				return svc, err
+			}
+			if slices.ContainsFunc(all, func(s store.Service) bool {
+				return s.Kind == "reality" && strings.EqualFold(SiteName(s), SiteName(site)) // SiteName: the sni setting
+			}) {
+				name, err := newZone(ctx, st, all)
+				if err != nil {
+					return svc, err
+				}
+				settings["sni"] = name
+			}
 		}
 		if err := realitySettings(settings); err != nil {
 			return svc, err
@@ -879,10 +917,16 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			// Only TCP 443 opens; a REALITY moved off it has nothing to open.
 			return svc, fmt.Errorf("%w open: %s does not listen on tcp/443", store.ErrInvalid, svc.Name)
 		}
-	case svc.Kind == "reality" && key == "rotate_sni":
-		b, err := strconv.ParseBool(value)
+	case (svc.Kind == "reality" || svc.Kind == "naive") && key == "rotate_sni":
+		// Whether a switch moves the server name (RenamesAt): on at every
+		// switch, off at none, auto (unset) at a scheduled one only under
+		// a wildcard certificate, and at the operator's. naive has its
+		// name to change only: off and auto keep its scheduled switches
+		// (none, or under a wildcard only), rayctl service rotate always
+		// switches (R4-42).
+		b, err := rotateSNIOption(value)
 		if err != nil {
-			return svc, fmt.Errorf("%w rotate_sni: true or false", store.ErrInvalid)
+			return svc, err
 		}
 		v = b
 	case svc.Kind == "reality" && key == "target":
@@ -983,7 +1027,7 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			v = 0
 		}
 	default:
-		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open, target; hy2-*: up_mbps, down_mbps; naive: icmp; yggdrasil: peers, lan_relay; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
+		return svc, fmt.Errorf("%w: %s has no option %q (site: answer; reality: rotate_sni, open, target; hy2-*: up_mbps, down_mbps; naive: icmp, rotate_sni; yggdrasil: peers, lan_relay; dnstt, masterdns: auth, auth_hint, seal, spare_zones, zone; slipstream: max_connections, device_connections)", store.ErrInvalid, name, key)
 	}
 	var settings map[string]any
 	if err := json.Unmarshal([]byte(svc.Settings), &settings); err != nil {
@@ -1005,6 +1049,24 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 	}
 	svc.Settings = string(b)
 	return svc, nil
+}
+
+// rotateSNIOption reads rotate_sni=on|off|auto (true and false as before
+// v0.29.0): the setting's value, 0 for auto, which removes it.
+func rotateSNIOption(value string) (any, error) {
+	switch strings.ToLower(value) {
+	case "auto":
+		return 0, nil
+	case "on":
+		return true, nil
+	case "off":
+		return false, nil
+	}
+	b, err := strconv.ParseBool(value)
+	if err != nil {
+		return nil, fmt.Errorf("%w rotate_sni: on, off or auto", store.ErrInvalid)
+	}
+	return b, nil
 }
 
 // LANRelayDefault is niko-server's ceiling of LAN traffic through the node
@@ -1224,12 +1286,16 @@ func nodeNameClash(ctx context.Context, st *store.Store, all []store.Service, zo
 		return "the name the zones are delegated to, " + string(ns), nil
 	}
 	for _, svc := range all {
+		// The previous names too: the front routes them until a switch
+		// after (REALITY, naive; naive's older ones, NaivePrevious).
 		var names struct {
-			SNI     string `json:"sni"`
-			SNINext string `json:"sni_next"`
+			SNI      string         `json:"sni"`
+			SNINext  string         `json:"sni_next"`
+			SNIPrev  string         `json:"sni_prev"`
+			SNIOlder []NaiveRetired `json:"sni_older"`
 		}
 		_ = json.Unmarshal([]byte(svc.Settings), &names)
-		for _, n := range []string{names.SNI, names.SNINext} {
+		for _, n := range append([]string{names.SNI, names.SNINext, names.SNIPrev}, retiredNames(names.SNIOlder)...) {
 			if holds(canonicalZone(n)) {
 				return "the server name of " + svc.Name + ", " + n, nil
 			}

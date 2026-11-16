@@ -78,6 +78,11 @@ func TestRealityRotationSelfSteal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A certificate of listed names (HTTP-01): the name moves at a
+	// scheduled switch only with rotate_sni on (R4-42).
+	if _, err := SetServiceOption(ctx, st, "r", "rotate_sni", "on"); err != nil {
+		t.Fatal(err)
+	}
 	created := svc.CreatedAt
 	_, _, first := reload(t, ctx, st, "r")
 	site, _ := st.ServiceByName(ctx, "site")
@@ -165,6 +170,93 @@ func TestRealityRotationSelfSteal(t *testing.T) {
 	}
 }
 
+// Without rotate_sni (auto, R4-42) a scheduled switch keeps the server name
+// under a certificate of listed names (HTTP-01: the new name would be in CT
+// logs before the switch) and moves it under a wildcard one, the site's
+// *.<domain> or the one the node orders through DNS-01 with its Cloudflare
+// token; a switch the operator asks for moves it either way. on moves it at
+// every switch, off at none. The keys and shortIds change every time.
+func TestRealityRotationNameDefault(t *testing.T) {
+	listed := func(t *testing.T, ctx context.Context, st *store.Store) {
+		site, _ := st.ServiceByName(ctx, "site")
+		storeCert(t, ctx, st, "site", SiteName(site))
+	}
+	wildcard := func(t *testing.T, ctx context.Context, st *store.Store) {
+		storeCert(t, ctx, st, "site", "*.example.com")
+	}
+	cloudflare := func(t *testing.T, ctx context.Context, st *store.Store) {
+		listed(t, ctx, st)
+		for k, v := range map[string]string{settingDNSProvider: "cloudflare", settingCFToken: "token", settingCFZone: `{"id":"z","name":"example.com"}`} {
+			if err := st.SetSetting(ctx, k, []byte(v)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, c := range []struct {
+		name         string
+		cert         func(*testing.T, context.Context, *store.Store)
+		option       string // rotate_sni; "": unset
+		asked, moves bool
+	}{
+		{"listed names", listed, "", false, false},
+		{"listed names, asked", listed, "", true, true},
+		{"wildcard", wildcard, "", false, true},
+		{"DNS-01", cloudflare, "", false, true},
+		{"listed names, on", listed, "on", false, true},
+		{"wildcard, off", wildcard, "off", false, false},
+		{"listed names, off, asked", listed, "off", true, false},
+		{"wildcard, auto again", wildcard, "auto", false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx, st := rotationNode(t)
+			svc, err := CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.cert(t, ctx, st)
+			if c.option != "" {
+				if c.option == "auto" {
+					SetServiceOption(ctx, st, "r", "rotate_sni", "off")
+				}
+				if svc, err = SetServiceOption(ctx, st, "r", "rotate_sni", c.option); err != nil {
+					t.Fatal(err)
+				}
+				if got := ParseRealityState(svc).RotateSNI; (got == nil) != (c.option == "auto") {
+					t.Fatalf("rotate_sni=%s kept as %v: %s", c.option, got, svc.Settings)
+				}
+			}
+			_, _, before := reload(t, ctx, st, "r")
+			at := svc.CreatedAt.Add(86 * day)
+			if c.asked {
+				at = svc.CreatedAt.Add(5 * day)
+				if err := RequestRotation(ctx, st, "r", at, epoch.Lead, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var asked []string
+			resolves := func(_ context.Context, name string) error { asked = append(asked, name); return nil }
+			if _, err := RotateReality(ctx, st, at, epoch, resolves, nil); err != nil {
+				t.Fatal(err)
+			}
+			_, state, secrets := reload(t, ctx, st, "r")
+			if moved := state.SNINext != ""; moved != c.moves || moved && !slices.Equal(asked, []string{state.SNINext}) || !moved && len(asked) != 0 {
+				t.Fatalf("next name %q, want one %v; names looked up %v", state.SNINext, c.moves, asked)
+			}
+			if bytes.Equal(secrets[NextSecret(SecretRealityKey)], before[SecretRealityKey]) || len(secrets[NextSecret(SecretShortIDs)]) == 0 {
+				t.Fatal("no next keys")
+			}
+		})
+	}
+	for v, want := range map[string]any{"on": true, "true": true, "off": false, "false": false, "auto": 0, "AUTO": 0} {
+		if got, err := rotateSNIOption(v); err != nil || got != want {
+			t.Errorf("rotate_sni=%s: %v %v", v, got, err)
+		}
+	}
+	if _, err := rotateSNIOption("maybe"); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("rotate_sni=maybe: %v", err)
+	}
+}
+
 func TestRealityRotationKeysOnly(t *testing.T) {
 	ctx, st := rotationNode(t)
 	svc, err := CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true})
@@ -200,6 +292,7 @@ func TestRealityRotationKeysOnly(t *testing.T) {
 func TestRealityRotationNameWithoutCertificate(t *testing.T) {
 	ctx, st := rotationNode(t)
 	svc, _ := CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true})
+	SetServiceOption(ctx, st, "r", "rotate_sni", "on")
 	created := svc.CreatedAt
 	ok := func(context.Context, string) error { return nil }
 	RotateReality(ctx, st, created.Add(86*day), epoch, ok, nil)
@@ -226,7 +319,7 @@ func TestRealityRotationRequest(t *testing.T) {
 	now := svc.CreatedAt.Add(5 * day)
 	ok := func(context.Context, string) error { return nil }
 
-	if err := RequestRealityRotation(ctx, st, "r", now, epoch.Lead, false); err != nil {
+	if err := RequestRotation(ctx, st, "r", now, epoch.Lead, false); err != nil {
 		t.Fatal(err)
 	}
 	if n, _ := RotateReality(ctx, st, now, epoch, ok, nil); n != 1 {
@@ -237,7 +330,7 @@ func TestRealityRotationRequest(t *testing.T) {
 		t.Fatalf("state %+v", state)
 	}
 	// At once: moves the published switch to now.
-	if err := RequestRealityRotation(ctx, st, "r", now.Add(time.Hour), epoch.Lead, true); err != nil {
+	if err := RequestRotation(ctx, st, "r", now.Add(time.Hour), epoch.Lead, true); err != nil {
 		t.Fatal(err)
 	}
 	if n, _ := RotateReality(ctx, st, now.Add(time.Hour), epoch, ok, nil); n != 1 {
@@ -247,7 +340,7 @@ func TestRealityRotationRequest(t *testing.T) {
 	if state.RotatedAt != now.Add(time.Hour).Unix() || state.RotateAt != 0 || state.NextFrom != 0 {
 		t.Fatalf("state %+v", state)
 	}
-	if err := RequestRealityRotation(ctx, st, "site", now, epoch.Lead, true); !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrInvalid) {
+	if err := RequestRotation(ctx, st, "site", now, epoch.Lead, true); !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrInvalid) {
 		t.Fatalf("site: %v", err)
 	}
 }
@@ -261,7 +354,7 @@ func TestRealityRotationOff(t *testing.T) {
 		t.Fatal("rotated with the period off")
 	}
 	now := svc.CreatedAt.Add(400 * day)
-	if err := RequestRealityRotation(ctx, st, "r", now, off.Lead, true); err != nil {
+	if err := RequestRotation(ctx, st, "r", now, off.Lead, true); err != nil {
 		t.Fatal(err)
 	}
 	RotateReality(ctx, st, now, off, nil, nil)
@@ -269,7 +362,7 @@ func TestRealityRotationOff(t *testing.T) {
 		t.Fatal("requested switch did not happen")
 	}
 	// A lost next set starts the round again instead of failing forever.
-	RequestRealityRotation(ctx, st, "r", now.Add(time.Hour), off.Lead, false)
+	RequestRotation(ctx, st, "r", now.Add(time.Hour), off.Lead, false)
 	RotateReality(ctx, st, now.Add(time.Hour), off, nil, nil)
 	svc, _ = st.ServiceByName(ctx, "r")
 	st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Delete: []string{NextSecret(SecretRealityKey)}})
@@ -293,6 +386,7 @@ func TestRealityRotationGrace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	SetServiceOption(ctx, st, "r", "rotate_sni", "on")
 	created := svc.CreatedAt
 	_, _, first := reload(t, ctx, st, "r")
 	site, _ := st.ServiceByName(ctx, "site")
@@ -346,7 +440,9 @@ func TestRealityRotationGrace(t *testing.T) {
 		t.Fatal("previous keys kept")
 	}
 	_, state, secrets = reload(t, ctx, st, "r")
-	if state.PrevUntil != 0 || state.SNIPrev != "" {
+	// The name stays for the front's route until the next switch: the end
+	// of the grace restarts no front.
+	if state.PrevUntil != 0 || state.SNIPrev != oldName {
 		t.Fatalf("after the grace period: %+v", state)
 	}
 	for _, name := range RealitySecrets {
@@ -387,7 +483,7 @@ func TestRealityRotationUrgent(t *testing.T) {
 		t.Fatal("no grace period after a scheduled switch")
 	}
 	now := created.Add(91*day + time.Hour)
-	if err := RequestRealityRotation(ctx, st, "r", now, e.Lead, true); err != nil {
+	if err := RequestRotation(ctx, st, "r", now, e.Lead, true); err != nil {
 		t.Fatal(err)
 	}
 	if n := rotate(now); n != 1 {

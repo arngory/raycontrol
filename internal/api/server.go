@@ -53,6 +53,10 @@ type Server struct {
 	// keys are published; Rotate, if set, runs the rotation at once.
 	RealityLead time.Duration
 	Rotate      func()
+	// NaivePeriod is rayd -naive-sni-period: how long a naive service's
+	// previous names stay routed after their switch (0: the default,
+	// provision.NaivePrevious).
+	NaivePeriod time.Duration
 	// CredGrace is how long a previous dnstt seal key stays accepted after
 	// the operator switched it (rayd -cred-grace); zero: not at all.
 	CredGrace time.Duration
@@ -571,8 +575,22 @@ func (s *Server) export(ctx context.Context, name string) ([]sub.Profile, error)
 }
 
 func servicePB(svc store.Service) *nodev1.Service {
-	return &nodev1.Service{Id: uint32(svc.ID), Kind: svc.Kind, Name: svc.Name, Enabled: svc.Enabled,
-		SettingsJson: svc.Settings, CreatedAt: svc.CreatedAt.Unix(), Uid: uint32(svc.UID)}
+	// The published switch only: naive's next name is chosen, and served,
+	// an epoch ahead (R4-42), REALITY's waits for its certificate before.
+	// Not in the settings either (provision.ShownSettings).
+	pb := &nodev1.Service{Id: uint32(svc.ID), Kind: svc.Kind, Name: svc.Name, Enabled: svc.Enabled,
+		SettingsJson: provision.ShownSettings(svc), CreatedAt: svc.CreatedAt.Unix(), Uid: uint32(svc.UID), Sni: provision.SiteName(svc)}
+	switch svc.Kind {
+	case "reality":
+		if st := provision.ParseRealityState(svc); st.NextFrom != 0 {
+			pb.NextFrom, pb.SniNext = st.NextFrom, st.SNINext
+		}
+	case "naive":
+		if st := provision.ParseNaiveState(svc); st.NextFrom != 0 {
+			pb.NextFrom, pb.SniNext = st.NextFrom, st.SNINext
+		}
+	}
+	return pb
 }
 
 func (s *Server) ListServices(ctx context.Context, _ *connect.Request[nodev1.ListServicesRequest]) (*connect.Response[nodev1.ListServicesResponse], error) {
@@ -720,7 +738,7 @@ func (s *Server) rotateSiteKey(ctx context.Context, name, how string, now time.T
 	if s.SiteKeyAsked != nil {
 		s.SiteKeyAsked(name)
 	}
-	return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Key: "tls"}), nil
+	return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Key: "tls", Kind: "site"}), nil
 }
 
 func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.RotateServiceRequest]) (*connect.Response[nodev1.RotateServiceResponse], error) {
@@ -742,7 +760,7 @@ func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.
 		if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
 			return nil, err
 		}
-		return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Seal: true, Key: "service", PrevUntil: state.PrevUntil}), nil
+		return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Seal: true, Key: "service", PrevUntil: state.PrevUntil, Kind: "masterdns"}), nil
 	}
 	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil && svc.Kind == "dnstt" {
 		// dnsseal-v1 §8: the new key at once, the previous one for the grace.
@@ -750,20 +768,29 @@ func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.
 		if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
 			return nil, err
 		}
-		return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Seal: true, Key: "seal", PrevUntil: state.PrevUntil}), nil
+		return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: now.Unix(), Seal: true, Key: "seal", PrevUntil: state.PrevUntil, Kind: "dnstt"}), nil
 	}
 	at := now.Add(s.RealityLead)
 	if req.Msg.Now {
 		at = now
 	}
-	err := provision.RequestRealityRotation(ctx, s.Store, req.Msg.Name, now, s.RealityLead, req.Msg.Now)
-	if err := s.done(ctx, "service.rotate", req.Msg.Name, err); err != nil {
+	names, err := provision.RequestRotationNames(ctx, s.Store, req.Msg.Name, now, s.RealityLead, req.Msg.Now, s.NaivePeriod)
+	action := "service.rotate"
+	if len(names.Dropped) > 0 {
+		// naive: previous names the switch takes off the front.
+		action += " drops " + strings.Join(names.Dropped, ",")
+	}
+	if err := s.done(ctx, action, req.Msg.Name, err); err != nil {
 		return nil, err
 	}
 	if s.Rotate != nil {
 		s.Rotate()
 	}
-	return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: at.Unix()}), nil
+	kind := ""
+	if svc, err := s.Store.ServiceByName(ctx, req.Msg.Name); err == nil {
+		kind = svc.Kind
+	}
+	return connect.NewResponse(&nodev1.RotateServiceResponse{SwitchAt: at.Unix(), Kind: kind, KeptNames: names.Kept, DroppedNames: names.Dropped}), nil
 }
 
 func devicePB(d store.Device) *nodev1.Device {

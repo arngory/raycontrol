@@ -52,3 +52,22 @@ func copyOf(line string) (src, dst string, ok bool) {
 	}
 	return path.Join(f[2], f[3]), f[6], true
 }
+
+// UnitCopies is what a unit file copies in before its start: the
+// destinations of its credential lines (copyIn). rayd reads the front's
+// installed unit with it: a password its config would name that the unit
+// does not copy in yet (a hy2-obfs added since the last rayctl apply)
+// would keep the whole front from starting (live.Applier.FrontUnit).
+func UnitCopies(unit []byte) map[string]bool {
+	out := map[string]bool{}
+	for line := range strings.Lines(string(unit)) {
+		v, ok := strings.CutPrefix(strings.TrimSpace(line), "ExecStartPre=")
+		if !ok {
+			continue
+		}
+		if _, dst, ok := copyOf(v); ok {
+			out[dst] = true
+		}
+	}
+	return out
+}

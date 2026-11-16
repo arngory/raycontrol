@@ -505,7 +505,9 @@ func selfSignedCert(t *testing.T, name string) tls.Certificate {
 // TestRealitySelfStealWithXray: REALITY with the node's own decoy site as
 // target, as rendered for a node with a domain. The site runs on its unix
 // socket with a chain long enough for ML-DSA-65; a client from the link gets
-// through, a probe without credentials gets the site.
+// through, a probe without credentials gets the site. DoH and naive share
+// the front, h2 and h3; naive under its next name before its switch and
+// under the previous one after it (R4-42).
 func TestRealitySelfStealWithXray(t *testing.T) {
 	bin := os.Getenv("XRAY_BIN")
 	if bin == "" {
@@ -559,6 +561,11 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	day := 24 * time.Hour
 	epoch := provision.RealityEpoch{Period: 90 * day, Lead: 3 * day, Prepare: day, Grace: 2 * day}
 	resolves := func(context.Context, string) error { return nil }
+	// A certificate of listed names: the name moves at a scheduled switch
+	// with rotate_sni on only (R4-42).
+	if _, err := provision.SetServiceOption(ctx, st, "reality", "rotate_sni", "on"); err != nil {
+		t.Fatal(err)
+	}
 	if n, err := provision.RotateReality(ctx, st, svc.CreatedAt.Add(86*day), epoch, resolves, nil); err != nil || n != 1 {
 		t.Fatalf("prepare: %d %v", n, err)
 	}
@@ -587,7 +594,9 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 	}
 	root := mk("Test Root", true, nil, &rootKey.PublicKey, nil, rootKey)
 	inter := mk("Test Intermediate", true, nil, &interKey.PublicKey, root, rootKey)
-	leaf := mk(name, false, []string{name, nextName, dohName.SNI, naiveName.SNI}, &leafKey.PublicKey, inter, interKey)
+	// naive's next name too (R4-42): the front routes it ahead.
+	naiveFirst := provision.ParseNaiveState(naiveSvc)
+	leaf := mk(name, false, []string{name, nextName, dohName.SNI, naiveName.SNI, naiveFirst.SNINext}, &leafKey.PublicKey, inter, interKey)
 	var chainPEM bytes.Buffer
 	for _, c := range []*x509.Certificate{leaf, inter, root} {
 		pem.Encode(&chainPEM, &pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
@@ -896,6 +905,70 @@ func TestRealitySelfStealWithXray(t *testing.T) {
 		t.Fatal("the previous keys still work after the grace period")
 	}
 	probe(nextName)
+
+	// naive's name (R4-42), over h2 and h3 through the front: its next name
+	// is routed from the start (a client that takes next early, up to 2
+	// minutes before its time, gets through), and after the switch the
+	// name before still is, until the switch after.
+	naiveVia := func(sni string) {
+		t.Helper()
+		auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(naiveLink.User.String()))
+		h2 := &http.Transport{ForceAttemptHTTP2: true, DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return tls.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port), &tls.Config{ServerName: sni, RootCAs: roots, NextProtos: []string{"h2"},
+				CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}})
+		}}
+		defer h2.CloseIdleConnections()
+		h3 := &http3.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}},
+			Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+				return quic.DialAddrEarly(ctx, "127.0.0.1:"+strconv.Itoa(port), tlsCfg, cfg)
+			}}
+		defer h3.Close()
+		for _, rt := range []http.RoundTripper{h2, h3} {
+			pr, pw := io.Pipe()
+			req, _ := http.NewRequest(http.MethodConnect, "https://"+sni, pr)
+			req.Host = page.Listener.Addr().String()
+			req.Header.Set("Padding", naive.PaddingHeader())
+			req.Header.Set("Proxy-Authorization", auth)
+			resp, err := rt.RoundTrip(req)
+			if err != nil || resp.StatusCode != 200 {
+				t.Fatalf("naive CONNECT under %s (%T): %v %v", sni, rt, resp, err)
+			}
+			tunnel := naive.ClientStream(resp.Body, pw)
+			fmt.Fprintf(tunnel, "GET / HTTP/1.1\r\nHost: page\r\nConnection: close\r\n\r\n")
+			got, _ := io.ReadAll(io.LimitReader(tunnel, 4096))
+			pw.Close()
+			resp.Body.Close()
+			if !bytes.Contains(got, []byte("through reality")) {
+				t.Fatalf("naive under %s (%T): %q", sni, rt, got)
+			}
+		}
+	}
+	naiveVia(naiveFirst.SNI)
+	naiveVia(naiveFirst.SNINext)
+	at := svc.CreatedAt.Add(93 * day)
+	if err := provision.RequestRotation(ctx, st, "naive", at, epoch.Lead, true); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := provision.RotateReality(ctx, st, at, epoch, resolves, nil); err != nil || n != 1 {
+		t.Fatalf("naive's switch: %d %v", n, err)
+	}
+	if m, err = render.Collect(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	if files, skipped, err = render.Render(m, paths); err != nil || len(skipped) != 0 {
+		t.Fatalf("render: %v, skipped %v", err, skipped)
+	}
+	for _, f := range files {
+		os.WriteFile(f.Path, f.Content, 0o644)
+	}
+	stopFront()
+	stopFront = runFront(t, niko, filepath.Join(paths.Rendered, "front", "front.json"), port)
+	switched := provision.ParseNaiveState(m.Services[slices.IndexFunc(m.Services, func(s render.Service) bool { return s.ID == naiveSvc.ID })].Service)
+	if switched.SNI != naiveFirst.SNINext || switched.SNIPrev != naiveFirst.SNI {
+		t.Fatalf("naive after its switch: %+v", switched)
+	}
+	naiveVia(switched.SNI)
+	naiveVia(switched.SNIPrev)
 }
 
 // runFront starts the niko-server front from a rendered config, listening

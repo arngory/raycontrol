@@ -466,8 +466,20 @@ func serviceProfile(m render.Model, u render.User, s render.Service, inner *rend
 			return nil, nil
 		}
 		p := Profile{Svc: uint16(s.ID), Name: s.Name, Link: NaiveLink(m, s, password)}
-		if set := m.Sets[s.ID][u.ID]; set.Next != "" {
+		set := m.Sets[s.ID][u.ID]
+		if set.Next != "" {
 			p.Next = &Next{Link: NaiveLink(m, s, set.Next), From: set.NextFrom.Unix()}
+		}
+		// One next per profile, the earliest switch: the password's (R4-1)
+		// or the server name's (R4-42). The next password goes with the
+		// new name when there is one: the node takes it from its
+		// publication on. Nothing else in the line changes, niko-pin
+		// included: the site keeps its key with the name.
+		if ns := provision.ParseNaiveState(s.Service); ns.NextFrom != 0 && ns.SNINext != "" && (p.Next == nil || ns.NextFrom <= p.Next.From) {
+			if set.Next != "" {
+				password = set.Next
+			}
+			p.Next = &Next{Link: naiveLink(m, s, password, ns.SNINext), From: ns.NextFrom}
 		}
 		return &p, nil
 	case "hy2-masq", "hy2-obfs":
@@ -617,8 +629,14 @@ func NaiveLink(m render.Model, s render.Service, password string) string {
 		SNI string `json:"sni"`
 	}
 	_ = json.Unmarshal([]byte(s.Settings), &st)
+	return naiveLink(m, s, password, st.SNI)
+}
+
+// naiveLink is NaiveLink under a server name: the service's, or the one it
+// moves to at its next switch (R4-42).
+func naiveLink(m render.Model, s render.Service, password, sni string) string {
 	q := url.Values{}
-	q.Set("sni", st.SNI)
+	q.Set("sni", sni)
 	q.Set("niko-node", m.NodeID)
 	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
 	// UDP over TCP v2 (spec/naive-uot-v1.md): without it the client sends

@@ -23,6 +23,7 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [16-cronet-build.md](16-cronet-build.md) | Своя сборка libcronet и naive: что собирается, замеры, раннер с пределами по потокам и памяти, диск, ccache. |
 | [17-naive-default.md](17-naive-default.md) | naive как профиль по умолчанию: разбор ноды и клиента, дефекты, UDP и не-TCP трафик, порядок работ, решения владельца. |
 | [18-platforms-and-hosts.md](18-platforms-and-hosts.md) | `rayctl` и нода вне Linux, LXC и OpenVZ, нода без публичного адреса, порты при установке, слой абстракции платформы: факты, варианты, цена. |
+| [20-naive-sni-rotation.md](20-naive-sni-rotation.md) | Смена имени naive: варианты, что видит цензор, решение (смена эпохами, R4-42) и как оно реализовано в v0.29.0. |
 | [cheatsheet.md](cheatsheet.md) | Все команды `rayctl` на одной странице. |
 | [spec/spa-v2.md](spec/spa-v2.md) | Формат SPA v2 и пакета регистрации устройства (заморожен). |
 | [spec/subscription-v1.md](spec/subscription-v1.md) | Подписка: запрос, подписи, ссылки с параметрами `niko-*` (заморожена). |
@@ -36,6 +37,7 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [handoff/niko-mux-note.md](handoff/niko-mux-note.md) | Фронт niko-server на 443: tcpmux и udpmux, Hysteria2 на sing-quic, naive-quic и DoH3, что поменять в CI Niko. |
 | [handoff/niko-ygg-note.md](handoff/niko-ygg-note.md) | Yggdrasil на ноде (R4-15): профиль `niko-ygg`, конфиг ядра клиента, ротация ключа вместе с UUID. |
 | [handoff/niko-probe-note.md](handoff/niko-probe-note.md) | Замер канала (R4-16, ответ на §13): TCP и эхо UDP на эндпоинте подписки, потолки Brutal, что дальше. |
+| [handoff/niko-naive-sni-note.md](handoff/niko-naive-sni-note.md) | Новое имя naive в `next` (R4-42, v0.29.0): что обещает нода, как получить опубликованный `next` на стенде interop. |
 | [handoff/niko-prompt-2026-11-03.md](handoff/niko-prompt-2026-11-03.md) | Промпт для сессии клиента: всё с прошлых закреплений (фронт, Yggdrasil, замер, Brutal), что сделать и что прислать. |
 
 Статус: решения приняты (08), документы 01–04 переписаны под них. Data plane — [niko-server](https://github.com/arngory/niko-server) ([SPEC](https://github.com/arngory/niko-server/blob/main/docs/SPEC.md)), control plane — raycontrol; обе ведёт эта сессия.

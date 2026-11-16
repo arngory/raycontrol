@@ -29,7 +29,12 @@ import (
 // The server name only ever moves to another random subdomain of the
 // node's own domain (self-steal): nothing outside the node is looked up,
 // scanned or borrowed. It moves only when the new name resolves to the node
-// (a wildcard record) and the site's certificate covers it.
+// (a wildcard record) and the site's certificate covers it. By default
+// (rotate_sni unset) it moves at a scheduled switch only under a wildcard
+// certificate (WildcardSite, R4-42): otherwise the new name would be in CT
+// logs days before the switch, beside every other name of the node. A
+// switch the operator asks for moves it anyway; rotate_sni on moves it at
+// every switch, off at none.
 
 // RealitySecrets are the secrets of one REALITY key set.
 var RealitySecrets = []string{SecretRealityKey, SecretRealityMLDSA, SecretMLKEMSeed, SecretShortIDs}
@@ -53,11 +58,11 @@ type RealityState struct {
 	PreparedAt int64  `json:"prepared_at,omitempty"` // next keys made, waiting for the name's certificate
 	NextFrom   int64  `json:"next_from,omitempty"`   // next keys published, switch at this time
 	SNINext    string `json:"sni_next,omitempty"`    // the server name after the switch, if it changes
-	RotateSNI  *bool  `json:"rotate_sni,omitempty"`  // false keeps the server name
+	RotateSNI  *bool  `json:"rotate_sni,omitempty"`  // false keeps the server name, true moves it at every switch; unset: auto (RenamesAt)
 	RotateAt   int64  `json:"rotate_at,omitempty"`   // switch requested by the operator for this time
 	Urgent     bool   `json:"urgent,omitempty"`      // switch at once, the current set not kept (leaked keys)
 	PrevUntil  int64  `json:"prev_until,omitempty"`  // the previous set is accepted until then (R4-19)
-	SNIPrev    string `json:"sni_prev,omitempty"`    // the server name of the previous set
+	SNIPrev    string `json:"sni_prev,omitempty"`    // the server name of the previous set, routed by the front until the next switch
 }
 
 // ParseRealityState reads the rotation state of a service.
@@ -70,18 +75,53 @@ func ParseRealityState(svc store.Service) RealityState {
 	return st
 }
 
-// RealityEpoch is the schedule of REALITY key rotation.
+// ShownSettings are the settings of a service as shown outside rayd (the
+// API's services, to remote admins too): without a next server name not
+// yet published, REALITY's waiting for its certificate, naive's chosen an
+// epoch ahead (R4-42). The front routes naive's from then, and under a
+// wildcard certificate nothing else names it until a client sends it: a
+// listing pasted into a ticket must not either. prepared_at stays: a time,
+// no name (rayctl says from it that a next name waits for its
+// certificate), and under listed names the name is in CT logs with its
+// order anyway.
+func ShownSettings(svc store.Service) string {
+	if svc.Kind != "reality" && svc.Kind != "naive" {
+		return svc.Settings
+	}
+	var st struct {
+		SNINext  string `json:"sni_next"`
+		NextFrom int64  `json:"next_from"`
+	}
+	if err := json.Unmarshal([]byte(svc.Settings), &st); err != nil || st.SNINext == "" || st.NextFrom != 0 {
+		return svc.Settings
+	}
+	shown, err := setFields(svc.Settings, map[string]any{"sni_next": nil})
+	if err != nil {
+		return "{}"
+	}
+	return shown
+}
+
+// RealityEpoch is the schedule of REALITY key rotation, and of naive's
+// name (R4-42), which shares its lead and preparation.
 type RealityEpoch struct {
 	Period  time.Duration // a key set is current this long
 	Lead    time.Duration // the next set is in subscriptions this long before the switch
 	Prepare time.Duration // a new server name may take this long to get its certificate
 	Grace   time.Duration // the previous set is accepted this long after the switch (0: not at all)
+	// NaivePeriod: a naive name is current this long (0: it changes only
+	// when the operator asks). The previous name needs no grace: it is
+	// accepted until the next switch.
+	NaivePeriod time.Duration
 }
 
 // Check reports a schedule that cannot work.
 func (e RealityEpoch) Check() error {
 	if e.Period > 0 && e.Lead+e.Prepare >= e.Period {
 		return errors.New("REALITY rotation: lead and preparation must be shorter than the period")
+	}
+	if e.NaivePeriod > 0 && e.Lead+e.Prepare >= e.NaivePeriod {
+		return errors.New("naive name rotation: lead and preparation must be shorter than the period")
 	}
 	return nil
 }
@@ -92,10 +132,13 @@ func (e RealityEpoch) Check() error {
 var settingsMu sync.Mutex
 
 // RotateReality advances the key rotation of every enabled REALITY service
-// at now and returns how many changed. resolves checks that a name points
-// to the node; nil keeps the server names. With a zero period only the
-// switches the operator asks for happen. A service that fails is skipped:
-// the error names it, and the others still rotate.
+// at now, then the name rotation of every enabled naive service (R4-42):
+// in one round, so that a naive switch joined to REALITY's happens with it,
+// and one render, one restart of the front, carries both. It returns how
+// many changed. resolves checks that a name points to the node; nil keeps
+// REALITY's server names. With a zero period only the switches the
+// operator asks for happen. A service that fails is skipped: the error
+// names it, and the others still rotate.
 func RotateReality(ctx context.Context, st *store.Store, now time.Time, e RealityEpoch,
 	resolves func(ctx context.Context, name string) error, log *slog.Logger) (int, error) {
 	settingsMu.Lock()
@@ -112,6 +155,9 @@ func RotateReality(ctx context.Context, st *store.Store, now time.Time, e Realit
 	// changed.
 	changed := 0
 	var errs []error
+	// The REALITY switches of this round, their times by site: a naive
+	// switch for about that time goes in this round with them.
+	switched := map[string][]int64{}
 	for _, svc := range all {
 		if svc.Kind != "reality" || !svc.Enabled {
 			continue
@@ -119,6 +165,40 @@ func RotateReality(ctx context.Context, st *store.Store, now time.Time, e Realit
 		ok, err := rotateOne(ctx, st, all, svc, now, e, resolves, log)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("reality %s: %w", svc.Name, err))
+			continue
+		}
+		if ok {
+			changed++
+			// A name chosen in this round is taken for the next service.
+			if all, err = st.ListServices(ctx); err != nil {
+				return changed, errors.Join(append(errs, err)...)
+			}
+			before := ParseRealityState(svc)
+			if i := slices.IndexFunc(all, func(s store.Service) bool { return s.ID == svc.ID }); i >= 0 && before.NextFrom != 0 {
+				if after := ParseRealityState(all[i]); after.NextFrom == 0 && after.RotatedAt == before.NextFrom {
+					switched[siteOf(svc)] = append(switched[siteOf(svc)], before.NextFrom)
+				}
+			}
+		}
+	}
+	for _, s := range all {
+		if s.Kind != "naive" || !s.Enabled {
+			continue
+		}
+		// The list as it is now: with REALITY's switches of this round,
+		// and a name chosen for a service in it taken for the next.
+		current, err := st.ListServices(ctx)
+		if err != nil {
+			return changed, errors.Join(append(errs, err)...)
+		}
+		i := slices.IndexFunc(current, func(c store.Service) bool { return c.ID == s.ID })
+		if i < 0 {
+			continue
+		}
+		svc := current[i]
+		ok, err := rotateNaive(ctx, st, current, svc, now, e, switched, log)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("naive %s: %w", svc.Name, err))
 			continue
 		}
 		if ok {
@@ -181,7 +261,19 @@ func rotateOne(ctx context.Context, st *store.Store, all []store.Service, svc st
 			set[NextSecret(name)] = v
 		}
 		state.PreparedAt = t
-		if site := siteOf(svc); site != "" && resolves != nil && (state.RotateSNI == nil || *state.RotateSNI) {
+		rename := false
+		if site := siteOf(svc); site != "" && resolves != nil {
+			rename = RenamesAt(ctx, st, all, site, state.RotateSNI, state.RotateAt != 0)
+			domain, _ := Domain(ctx, st)
+			switch {
+			case !rename && domain == "":
+				log.Info("REALITY server name stays: the node has no domain for a new one (rayd init -domain)", "service", svc.Name)
+			case !rename && state.RotateSNI == nil:
+				log.Info("REALITY server name stays: its site has no wildcard certificate (R4-42; rotate_sni=on moves it all the same)",
+					"service", svc.Name)
+			}
+		}
+		if rename {
 			name, err := newZone(ctx, st, all)
 			if err != nil {
 				return false, err
@@ -289,9 +381,11 @@ func switchReality(ctx context.Context, st *store.Store, all []store.Service, sv
 	return nil
 }
 
-// dropPrevReality ends the grace period of the previous set.
+// dropPrevReality ends the grace period of the previous set. Its name stays
+// in the front's route until the next switch (render): the end of the grace
+// changes no route, so it restarts no front.
 func dropPrevReality(ctx context.Context, st *store.Store, svc store.Service, log *slog.Logger) error {
-	settings, err := setFields(svc.Settings, map[string]any{"prev_until": nil, "sni_prev": nil})
+	settings, err := setFields(svc.Settings, map[string]any{"prev_until": nil})
 	if err != nil {
 		return err
 	}
@@ -303,42 +397,89 @@ func dropPrevReality(ctx context.Context, st *store.Store, svc store.Service, lo
 	return st.UpdateService(ctx, svc.ID, u)
 }
 
-// RequestRealityRotation asks for the next switch of a REALITY service:
-// a lead time away (clients get the next keys first), or at once (clients
-// that have not fetched their subscription since lose the profile until
-// they do; for leaked keys or a blocked name).
-func RequestRealityRotation(ctx context.Context, st *store.Store, name string, now time.Time, lead time.Duration, immediately bool) error {
+// RequestRotation asks for the next switch of a service, a lead time away
+// (clients get what is next first) or at once:
+//
+//   - REALITY's keys (and its server name, self-steal): at once, clients
+//     that have not fetched their subscription since lose the profile
+//     until they do (leaked keys, a blocked name);
+//   - naive's server name (R4-42), whatever rotate_sni says: at once, the
+//     previous name stays accepted until a switch a period after its own
+//     (NaivePrevious; no secret leaked), and clients move with their next
+//     subscription.
+//
+// Under a certificate of listed names (HTTP-01) the new name waits for its
+// certificate first, -reality-prepare at most.
+func RequestRotation(ctx context.Context, st *store.Store, name string, now time.Time, lead time.Duration, immediately bool) error {
+	_, err := RequestRotationNames(ctx, st, name, now, lead, immediately, 0)
+	return err
+}
+
+// NaiveSwitchNames are what a naive switch asked for does to the previous
+// names, were it at the time asked (later, a name may be older than the
+// period by then): Kept stay routed after it, newest first (the name in
+// use now first), Dropped leave the front.
+type NaiveSwitchNames struct {
+	Kept, Dropped []string
+}
+
+// RequestRotationNames is RequestRotation, and for naive what the switch
+// does to its previous names under -naive-sni-period (0: the default).
+func RequestRotationNames(ctx context.Context, st *store.Store, name string, now time.Time, lead time.Duration, immediately bool,
+	naivePeriod time.Duration) (NaiveSwitchNames, error) {
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
 	svc, err := st.ServiceByName(ctx, name)
 	if err != nil {
-		return err
+		return NaiveSwitchNames{}, err
 	}
 	if svc.Kind == "slipstream" {
 		// One certificate a server, one pin a client: a new key would cut
 		// every client off until its next subscription.
-		return fmt.Errorf("%w: %s (slipstream) has no rotation: its clients pin the server's one key (spec/slipstream-v1.md §3); a new key is a new service", store.ErrInvalid, name)
+		return NaiveSwitchNames{}, fmt.Errorf("%w: %s (slipstream) has no rotation: its clients pin the server's one key (spec/slipstream-v1.md §3); a new key is a new service", store.ErrInvalid, name)
 	}
-	if svc.Kind != "reality" {
-		return fmt.Errorf("%w: %s is not a REALITY service (rotation: reality, dnstt's seal key, masterdns's key)", store.ErrInvalid, name)
+	if svc.Kind != "reality" && svc.Kind != "naive" {
+		return NaiveSwitchNames{}, fmt.Errorf("%w: %s is neither REALITY nor naive (rotation: reality, naive's name, dnstt's seal key, masterdns's key, a site's certificate key)", store.ErrInvalid, name)
+	}
+	if svc.Kind == "naive" {
+		// naive's switch is its name's, and a new name is a subdomain of
+		// the node's domain: none to move to without one.
+		domain, err := Domain(ctx, st)
+		if err != nil {
+			return NaiveSwitchNames{}, err
+		}
+		if domain == "" {
+			return NaiveSwitchNames{}, fmt.Errorf("%w: %s keeps its server name %s: the node has no domain, and a new name would be a subdomain of it "+
+				"(rayd init -domain DOMAIN, with *.DOMAIN pointing to the node, gives naive names to move to)", store.ErrInvalid, name, SiteName(svc))
+		}
 	}
 	at := now.Add(lead)
 	if immediately {
 		at = now
 	}
 	fields := map[string]any{"rotate_at": at.Unix()}
-	if immediately {
+	published := ParseRealityState(svc).NextFrom // naive's next_from alike
+	if immediately && svc.Kind == "reality" {
 		// Nothing of the current set stays after the switch (R4-19).
 		fields["urgent"] = true
 	}
-	if state := ParseRealityState(svc); state.NextFrom != 0 && at.Unix() < state.NextFrom {
+	switchAt := at.Unix()
+	if published != 0 && at.Unix() < published {
 		fields["next_from"] = max(at.Unix(), now.Unix()) // a published switch only moves earlier
+	}
+	if published != 0 {
+		switchAt = min(switchAt, published)
+	}
+	var names NaiveSwitchNames
+	if svc.Kind == "naive" {
+		kept, dropped := NaivePrevious(ParseNaiveState(svc), switchAt, naivePeriod)
+		names = NaiveSwitchNames{Kept: retiredNames(kept), Dropped: dropped}
 	}
 	settings, err := setFields(svc.Settings, fields)
 	if err != nil {
-		return err
+		return NaiveSwitchNames{}, err
 	}
-	return st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: settings})
+	return names, st.UpdateService(ctx, svc.ID, store.ServiceUpdate{Settings: settings})
 }
 
 // SiteOf returns the node's site a service relies on: the one REALITY
@@ -355,8 +496,12 @@ func siteOf(svc store.Service) string {
 }
 
 // SiteNames returns the names a site's certificate covers: its own and
-// those of the REALITY services that steal from it (names), and the names
-// they move to at their next switch (next).
+// those of the services under it, with the previous names still accepted
+// (names), and the names REALITY and naive move to at their next switch
+// (next). naive's next name is asked for only once its switch wants it
+// (prepared_at, R4-42) or it is published: under listed names (HTTP-01) a
+// name in the certificate is in CT logs from its order, and one a client
+// may never use should not be.
 func SiteNames(site store.Service, all []store.Service) (names, next []string) {
 	add := func(list []string, n string) []string {
 		if n != "" && !slices.Contains(names, n) && !slices.Contains(next, n) {
@@ -385,8 +530,93 @@ func SiteNames(site store.Service, all []store.Service) (names, next []string) {
 			}
 			next = add(next, state.SNINext)
 		}
+		if s.Kind == "naive" && s.Enabled && siteOf(s) == site.Name {
+			// The previous names while routed (NaivePrevious): a client
+			// on one checks the certificate against it.
+			state := ParseNaiveState(s)
+			for _, n := range state.Previous() {
+				names = add(names, n)
+			}
+			switch {
+			case state.NextFrom != 0:
+				// Published: clients may take it from now (up to 2 minutes
+				// before its time, or when link fails), and a renewal that
+				// lost it would fail them.
+				names = add(names, state.SNINext)
+			case state.PreparedAt != 0:
+				next = add(next, state.SNINext)
+			}
+		}
 	}
 	return names, next
+}
+
+// RenamesAt reports whether a switch moves a server name to a new one
+// (REALITY R4-7, naive R4-42), by the service's rotate_sni: on (true) at
+// every switch, off (false) at none; unset (auto) at a switch the operator
+// asked for, and at a scheduled one only when the site's names come under
+// a wildcard certificate (WildcardSite). Under a certificate of listed
+// names (HTTP-01) the new name would be in CT logs from its order, days
+// before clients use it, in one list with every other name of the node.
+//
+// Never on a node without a domain: a new name is a subdomain of it, so
+// there is none to move to (newZone), and the name stays as the operator
+// gave it.
+func RenamesAt(ctx context.Context, st *store.Store, all []store.Service, site string, rotateSNI *bool, asked bool) bool {
+	if domain, err := Domain(ctx, st); err != nil || domain == "" {
+		return false
+	}
+	if rotateSNI != nil {
+		return *rotateSNI
+	}
+	return asked || WildcardSite(ctx, st, all, site)
+}
+
+// WildcardSite reports whether the names of a site come under one
+// certificate *.<domain>, so that a new name of the node shows in no CT
+// log (R4-10): the site's certificate is one, or the node orders through
+// DNS-01 (a Cloudflare token) and every name of the site is one label under
+// the domain, as the certificate manager then orders *.<domain> alone.
+func WildcardSite(ctx context.Context, st *store.Store, all []store.Service, site string) bool {
+	domain, err := Domain(ctx, st)
+	if err != nil || domain == "" {
+		return false
+	}
+	i := slices.IndexFunc(all, func(s store.Service) bool { return s.Kind == "site" && s.Name == site })
+	if i < 0 {
+		return false
+	}
+	if secrets, err := st.ServiceSecrets(ctx, all[i].ID); err == nil && chainNames(secrets[SecretTLSChain], "*."+domain) {
+		return true
+	}
+	if c, _, err := Cloudflare(ctx, st); err != nil || c == nil {
+		return false
+	}
+	names, next := SiteNames(all[i], all)
+	return UnderWildcard(append(names, next...), domain)
+}
+
+// UnderWildcard reports whether *.domain covers every name: each one label
+// below the domain.
+func UnderWildcard(names []string, domain string) bool {
+	for _, n := range names {
+		label, ok := strings.CutSuffix(CanonicalZone(n), "."+CanonicalZone(domain))
+		if !ok || label == "" || strings.Contains(label, ".") {
+			return false
+		}
+	}
+	return len(names) > 0
+}
+
+// chainNames reports whether the leaf of a PEM chain lists name as it is
+// (a wildcard name too).
+func chainNames(chainPEM []byte, name string) bool {
+	block, _ := pem.Decode(chainPEM)
+	if block == nil {
+		return false
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	return err == nil && slices.ContainsFunc(leaf.DNSNames, func(n string) bool { return strings.EqualFold(n, name) })
 }
 
 // SiteCovers reports whether the certificate of a site covers name.

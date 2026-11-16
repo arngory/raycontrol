@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/deploy"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/xrayapi"
@@ -56,6 +57,11 @@ type Applier struct {
 	// Pending is the directory of the restarts owed (owe); empty: "restarts"
 	// beside the rendered directory, in rayd's state directory.
 	Pending string
+	// FrontUnit is the front's installed unit file (systemd); empty: none
+	// to read (the supervisor copies in what its own plan names). A
+	// hy2-obfs whose password it does not copy in yet is kept off the
+	// front until rayctl apply (render.Model.FrontCopies).
+	FrontUnit string
 
 	skipped []string // the waiting services last logged
 }
@@ -102,6 +108,24 @@ var errNoUnit = errors.New("no such unit")
 //
 // One file a service, named by it, holding the verb. rayd's own directory:
 // nobody else writes there.
+
+// frontCopies is what the front's installed unit copies in, as
+// render.Model.FrontCopies has it: nil (all) without FrontUnit or without
+// the unit, which rayctl apply then writes with every one the render names.
+func (a *Applier) frontCopies() func(string) bool {
+	if a.FrontUnit == "" {
+		return nil
+	}
+	b, err := os.ReadFile(a.FrontUnit)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			a.Log.Warn("the front's unit cannot be read; its routes as rendered", "err", err)
+		}
+		return nil
+	}
+	copies := deploy.UnitCopies(b)
+	return func(path string) bool { return copies[path] }
+}
 
 func (a *Applier) pendingDir() string {
 	if a.Pending != "" {
@@ -186,6 +210,7 @@ func (a *Applier) Apply(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	m.FrontCopies = a.frontCopies()
 	// A service that cannot be rendered keeps its files and its process;
 	// the others are applied (Q-1).
 	files, skipped, rerr := render.Render(m, a.Paths)

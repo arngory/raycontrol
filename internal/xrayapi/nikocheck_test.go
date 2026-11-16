@@ -41,6 +41,8 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 	var ids []int64
 	for _, s := range []store.Service{
 		{Kind: "reality", Name: "reality"},
+		// A second REALITY on the site: its own name, one route a name.
+		{Kind: "reality", Name: "reality2"},
 		{Kind: "hy2-obfs", Name: "hy2o"},
 		{Kind: "hy2-masq", Name: "hy2m"},
 		{Kind: "naive", Name: "naive"},
@@ -86,6 +88,21 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 	}
 	if _, err := provision.SetCertificate(ctx, st, "site", ca.ChainPEM, ca.KeyPEM, time.Now(), false); err != nil {
 		t.Fatal(err)
+	}
+	// naive after three switches of its name within a period (R4-42,
+	// rayctl service rotate -now thrice): its routes carry the name in use,
+	// the three before it and the one after, over TCP and UDP.
+	for i := range 3 {
+		at := time.Now().Add(time.Duration(i) * time.Minute)
+		if err := provision.RequestRotation(ctx, st, "naive", at, time.Hour, true); err != nil {
+			t.Fatal(err)
+		}
+		if n, err := provision.RotateReality(ctx, st, at, provision.RealityEpoch{Lead: time.Hour, Prepare: time.Hour}, nil, nil); err != nil || n != 1 {
+			t.Fatalf("naive's switch: %d %v", n, err)
+		}
+	}
+	if nv, _ := st.ServiceByName(ctx, "naive"); len(provision.ParseNaiveState(nv).Previous()) != 3 {
+		t.Fatalf("naive not switched thrice: %s", nv.Settings)
 	}
 	st.SetSetting(ctx, "dns_ns_name", []byte("ns9.example.test"))
 	if _, err := st.CreateUser(ctx, store.User{Name: "alice", Enabled: true}); err != nil {
@@ -135,6 +152,14 @@ func TestRenderedConfigsWithNikoServer(t *testing.T) {
 		return configs
 	}
 	configs := write()
+	nv, _ := st.ServiceByName(ctx, "naive")
+	ns := provision.ParseNaiveState(nv)
+	b, _ := os.ReadFile(filepath.Join(paths.Rendered, "front", "front.json"))
+	for _, n := range append([]string{ns.SNI, ns.SNINext}, ns.Previous()...) {
+		if strings.Count(string(b), `"`+n+`"`) != 2 {
+			t.Fatalf("naive's five names, TCP and UDP, in front.json (%s):\n%s", n, b)
+		}
+	}
 	yggBackend := filepath.Join(paths.Rendered, "ygg", "backend.json")
 	if b, _ := os.ReadFile(yggBackend); strings.Contains(string(b), "lan_relay_mbps") || !strings.Contains(string(b), `"stats_socket"`) {
 		t.Fatalf("ygg backend.json:\n%s", b)

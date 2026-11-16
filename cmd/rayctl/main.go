@@ -70,12 +70,17 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service enable|disable|del NAME [-force]
                                             -force: disable or delete the last enabled ssh service anyway
                                             (refused without it: SSH to the node closes to everyone)
-  service set NAME KEY=VALUE                site: answer=404|403|silent|pages; reality: rotate_sni=true|false,
+  service set NAME KEY=VALUE                site: answer=404|403|silent|pages;
+                                            reality: rotate_sni=on|off|auto (whether a switch moves the
+                                            server name; auto: a scheduled one only under a wildcard
+                                            certificate, one you ask for always),
                                             target=HOST:PORT (who answers non-clients, checked as at
                                             creation; keys, shortIds and server name stay);
                                             hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
                                             naive: icmp=on|off (ping and traceroute through it, then
-                                            rayctl apply);
+                                            rayctl apply), rotate_sni=on|off|auto (its server name
+                                            every -naive-sni-period; auto: under a wildcard certificate
+                                            only; rotate always switches);
                                             yggdrasil: peers=URI,URI|none (public peers, then rayctl apply),
                                             lan_relay=N (LAN through the node, Mbit/s a user, 20 unless set;
                                             0: in one Wi-Fi only);
@@ -95,6 +100,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   service rotate NAME [-now] [-force] [-fresh]
                                             new REALITY keys (and server name, self-steal) ahead of
                                             schedule: after the lead time, or at once with -now;
+                                            naive: a new server name after the lead time, or at once
+                                            with -now, the previous ones accepted until a switch a
+                                            period after theirs, 3 at most (it says which stay);
                                             dnstt: a new seal key at once, masterdns: a new service key
                                             at once; the previous one accepted for -cred-grace (with
                                             -now: not at all); refused while the key before is still
@@ -420,6 +428,18 @@ func (c *cli) status(ctx context.Context) error {
 			supervised = len(e.Msg.Uids) > 0
 		}
 	}
+	// naive's server names (R4-42): the one in use and the published next;
+	// a rayd that cannot answer leaves the lines out.
+	var naives []*nodev1.Service
+	if !c.json {
+		if l, err := c.c.ListServices(ctx, connect.NewRequest(&nodev1.ListServicesRequest{})); err == nil {
+			for _, s := range l.Msg.Services {
+				if s.Kind == "naive" && s.Enabled {
+					naives = append(naives, s)
+				}
+			}
+		}
+	}
 	// sshd's ports against the perimeter's: root on the node only (sshd -T).
 	var ssh, per []hostcheck.Result
 	if !c.json && c.identity == nil && thisOS == nodeOS && os.Geteuid() == 0 {
@@ -439,6 +459,9 @@ func (c *cli) status(ctx context.Context) error {
 		}
 		if m.Egress != nil {
 			fmt.Fprintf(w, "egress\t%s\n", egressStatusLine(m.Egress, supervised))
+		}
+		for _, s := range naives {
+			fmt.Fprintf(w, "naive %s\t%s\n", s.Name, naiveStatus(s))
 		}
 		// rayd's loops: the last round of each (O-2).
 		for _, l := range m.Loops {
@@ -893,6 +916,17 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 					args[0], what, time.Unix(r.Msg.PrevUntil, 0).UTC().Format(time.RFC3339))
 			case r.Msg.Seal:
 				fmt.Fprintf(w, "%s has a new %s key; the previous one is no longer accepted (its sessions closed): clients get nothing until they fetch their subscription\n", args[0], what)
+			case r.Msg.Kind == "naive" && *now:
+				// R4-42: the next name is routed already; nothing leaked.
+				fmt.Fprintf(w, "%s moves to its next server name within a minute (under a certificate of listed names once the certificate\n"+
+					"covers it, -reality-prepare at most). Clients move with their next subscription (Niko at its next scheduled\n"+
+					"fetch, or sooner once the old name stops working for it: two failed connection checks)\n", args[0])
+				naivePreviousText(w, r.Msg)
+			case r.Msg.Kind == "naive":
+				fmt.Fprintf(w, "%s moves to a new server name at %s, which clients get in their subscription before (under a certificate\n"+
+					"of listed names it waits for its certificate first, and the switch comes a lead after that)\n",
+					args[0], time.Unix(r.Msg.SwitchAt, 0).UTC().Format(time.RFC3339))
+				naivePreviousText(w, r.Msg)
 			default:
 				fmt.Fprintf(w, "%s switches to new keys at %s (later if a new server name waits for its certificate)\n",
 					args[0], time.Unix(r.Msg.SwitchAt, 0).UTC().Format(time.RFC3339))
@@ -900,6 +934,25 @@ func (c *cli) service(ctx context.Context, sub string, args []string) error {
 		})
 	}
 	return errUsage
+}
+
+// naivePreviousText says which previous names of a naive service its
+// switch keeps on the front, and which it takes off (R4-42,
+// provision.NaivePrevious); a rayd before says neither.
+func naivePreviousText(w *tabwriter.Writer, r *nodev1.RotateServiceResponse) {
+	if len(r.KeptNames) == 0 && len(r.DroppedNames) == 0 {
+		fmt.Fprintln(w, "the previous name stays accepted until the switch after")
+		return
+	}
+	if len(r.KeptNames) > 0 {
+		kept := append([]string{r.KeptNames[0] + " (in use now)"}, r.KeptNames[1:]...)
+		fmt.Fprintf(w, "still accepted after the switch: %s; each until a switch -naive-sni-period after the one that left it\n",
+			strings.Join(kept, ", "))
+	}
+	if len(r.DroppedNames) > 0 {
+		fmt.Fprintf(w, "no longer accepted after the switch: %s (left a period ago or more, or over %d previous names):\n"+
+			"devices that know only it lose naive until they fetch their subscription\n", strings.Join(r.DroppedNames, ", "), provision.NaivePrevCap)
+	}
 }
 
 // keyState says when a REALITY service last switched keys and when the
@@ -976,14 +1029,18 @@ func keyState(s *nodev1.Service) string {
 		}
 		return out
 	}
+	if s.Kind == "naive" {
+		return naiveNameState(s, day)
+	}
 	if s.Kind != "reality" {
 		return ""
 	}
 	var st struct {
-		RotatedAt int64  `json:"rotated_at"`
-		NextFrom  int64  `json:"next_from"`
-		SNINext   string `json:"sni_next"`
-		PrevUntil int64  `json:"prev_until"`
+		RotatedAt  int64  `json:"rotated_at"`
+		PreparedAt int64  `json:"prepared_at"`
+		NextFrom   int64  `json:"next_from"`
+		SNINext    string `json:"sni_next"`
+		PrevUntil  int64  `json:"prev_until"`
 	}
 	_ = json.Unmarshal([]byte(s.SettingsJson), &st)
 	out := "since creation"
@@ -993,7 +1050,10 @@ func keyState(s *nodev1.Service) string {
 	switch {
 	case st.NextFrom != 0:
 		out += ", switch " + day(st.NextFrom)
-	case st.SNINext != "":
+	case st.PreparedAt != 0 || st.SNINext != "":
+		// Prepared and not published: a new name waits for its
+		// certificate (rayd since v0.29.0 shows no unpublished name, a
+		// rayd before shows it).
 		out += ", next name waits for its certificate"
 	}
 	if st.NextFrom != 0 && st.SNINext != "" {
@@ -1001,6 +1061,53 @@ func keyState(s *nodev1.Service) string {
 	}
 	if st.PrevUntil != 0 {
 		out += ", previous keys until " + day(st.PrevUntil) // R4-19
+	}
+	return out
+}
+
+// naiveStatus is a naive service's line in rayctl status: the server name
+// in its links and, once published, the next one from its time (the
+// API's fields; a rayd before v0.29.0 fills neither, and the name comes
+// from the settings).
+func naiveStatus(s *nodev1.Service) string {
+	name := s.Sni
+	if name == "" {
+		name = provision.SiteName(store.Service{Settings: s.SettingsJson})
+	}
+	out := "name " + name
+	if s.SniNext != "" && s.NextFrom != 0 {
+		out += ", next " + s.SniNext + " from " + time.Unix(s.NextFrom, 0).UTC().Format("2006-01-02 15:04") + " UTC"
+	}
+	return out
+}
+
+// naiveNameState says where naive's server name stands (R4-42): the name
+// in use and since when, the published switch and its name, a next name
+// waiting for its certificate or a switch asked, the previous names still
+// accepted, and rotate_sni when set. A next name not yet published is not
+// shown: no client has it (nor does rayd since v0.29.0 give it).
+func naiveNameState(s *nodev1.Service, day func(int64) string) string {
+	st := provision.ParseNaiveState(store.Service{Kind: s.Kind, Settings: s.SettingsJson, CreatedAt: time.Unix(s.CreatedAt, 0)})
+	out := "name " + st.SNI + " since creation"
+	if st.RotatedAt != s.CreatedAt {
+		out = "name " + st.SNI + " since " + day(st.RotatedAt)
+	}
+	switch {
+	case st.NextFrom != 0:
+		out += ", switch " + day(st.NextFrom) + " to " + st.SNINext
+	case st.PreparedAt != 0:
+		out += ", next name waits for its certificate"
+	case st.RotateAt != 0:
+		out += ", switch asked for " + day(st.RotateAt)
+	}
+	switch prev := st.Previous(); {
+	case len(prev) == 1:
+		out += ", " + prev[0] + " accepted until a switch a period after the last"
+	case len(prev) > 1:
+		out += ", " + strings.Join(prev, ", ") + " accepted until a switch a period after the one that left each"
+	}
+	if st.RotateSNI != nil {
+		out += map[bool]string{true: ", rotate_sni on", false: ", rotate_sni off"}[*st.RotateSNI]
 	}
 	return out
 }
