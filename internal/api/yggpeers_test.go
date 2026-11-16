@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 // GetYggdrasilPeerKeys: the node's key in the mesh and its address, then
@@ -260,4 +262,149 @@ func yggUsersFile(t *testing.T, srv *Server, name string) map[string]string {
 	}
 	t.Fatalf("no users file of %s rendered", name)
 	return nil
+}
+
+// The keys of a credential switch reach the answer with their times: the
+// next UUID's from its switch (from), once published; after the switch the
+// previous UUID's until the end of its grace (until); the current ones
+// with neither.
+func TestGetYggdrasilPeerKeysRotation(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	c := NewUnixClient(sock)
+	for _, s := range []*nodev1.CreateServiceRequest{{Kind: "reality", Name: "reality"}, {Kind: "yggdrasil", Name: "ygg"}} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(s)); err != nil {
+			t.Fatal(s.Name, err)
+		}
+	}
+	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice", Services: []string{"ygg"}})); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := srv.Store.CreateDevice(ctx, "alice", "phone", "user"); err != nil {
+		t.Fatal(err)
+	}
+	get := func() []*nodev1.YggdrasilPeerKey {
+		t.Helper()
+		r, err := c.GetYggdrasilPeerKeys(ctx, connect.NewRequest(&nodev1.GetYggdrasilPeerKeysRequest{Service: "ygg"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.Msg.Keys
+	}
+	set := func() store.Credential {
+		t.Helper()
+		m, err := render.Collect(ctx, srv.Store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range m.Services {
+			if s.Kind == "inner" {
+				return m.Sets[s.ID][m.Users[0].ID]
+			}
+		}
+		t.Fatal("no inner")
+		return store.Credential{}
+	}
+	// The credential a label names: "" current, "-n" next, "-p" previous.
+	credOf := func(label string) string {
+		for _, s := range []string{"-n", "-p"} {
+			if strings.HasSuffix(label, s) {
+				return s
+			}
+		}
+		return ""
+	}
+	check := func(want map[string][2]int64) {
+		t.Helper()
+		got := map[string][2]int64{}
+		n := map[string]int{}
+		for _, k := range get() {
+			if _, dup := got[k.Label]; dup {
+				t.Fatalf("%s twice", k.Label)
+			}
+			got[k.Label] = [2]int64{k.From, k.Until}
+			cred := credOf(k.Label)
+			n[cred]++
+			if map[string]string{"": "current", "-n": "next", "-p": "previous"}[cred] != k.Credential {
+				t.Errorf("%s is %s", k.Label, k.Credential)
+			}
+			times, ok := want[cred]
+			if !ok || [2]int64{k.From, k.Until} != times {
+				t.Errorf("%s: from %d until %d, want %v", k.Label, k.From, k.Until, times)
+			}
+		}
+		for cred := range want {
+			if n[cred] != 2 { // the user's own key and the phone's
+				t.Errorf("%d keys %q, want 2: %v", n[cred], cred, got)
+			}
+		}
+		if len(got) != 2*len(want) {
+			t.Errorf("keys %v, want %v", got, want)
+		}
+	}
+	check(map[string][2]int64{"": {0, 0}})
+	day := 24 * time.Hour
+	r := store.Rotation{Period: 30 * day, Lead: 3 * day, Grace: 2 * day}
+	now := time.Now()
+	if n, err := srv.Store.RotateCredentials(ctx, now.Add(28*day), r, render.NewUUID); err != nil || n == 0 {
+		t.Fatalf("publish: %d %v", n, err)
+	}
+	next := set().NextFrom.Unix()
+	if next <= now.Unix() {
+		t.Fatalf("next from %d", next)
+	}
+	check(map[string][2]int64{"": {0, 0}, "-n": {next, 0}})
+	if n, err := srv.Store.RotateCredentials(ctx, now.Add(31*day), r, render.NewUUID); err != nil || n == 0 {
+		t.Fatalf("switch: %d %v", n, err)
+	}
+	until := set().PrevUntil.Unix()
+	if until <= next {
+		t.Fatalf("previous until %d, next was from %d", until, next)
+	}
+	check(map[string][2]int64{"": {0, 0}, "-p": {0, until}})
+}
+
+// The answer's order whatever order the keys come in: with names, by the
+// user's name, the user's own keys first, then the devices by name; without
+// names, by the user's number, then the devices by ID; each device's
+// current, next, previous.
+func TestComparePeerKeys(t *testing.T) {
+	row := func(userID int64, user, devID, dev, cred string) peerKeyRow {
+		return peerKeyRow{pb: &nodev1.YggdrasilPeerKey{User: user, DeviceId: devID, Device: dev, Credential: cred,
+			Label: fmt.Sprintf("u%d %s %s %s %s", userID, user, devID, dev, cred)}, userID: userID}
+	}
+	labels := func(rows []peerKeyRow) []string {
+		var out []string
+		for _, r := range rows {
+			out = append(out, r.pb.Label)
+		}
+		return out
+	}
+	// Named: zoe (u1) after alice (u9); alice's devices by name, not ID.
+	named := []peerKeyRow{
+		row(9, "alice", "", "", "current"), row(9, "alice", "", "", "next"), row(9, "alice", "", "", "previous"),
+		row(9, "alice", "ff01", "laptop", "current"), row(9, "alice", "ff01", "laptop", "next"),
+		row(9, "alice", "0a02", "phone", "current"), row(9, "alice", "0a02", "phone", "next"), row(9, "alice", "0a02", "phone", "previous"),
+		row(1, "zoe", "", "", "current"), row(1, "zoe", "77", "tablet", "current"),
+	}
+	// Bare: u1 before u9 (and u9 before u10, numbers not text); devices by ID.
+	bare := []peerKeyRow{
+		row(1, "", "", "", "current"), row(1, "", "77", "", "current"),
+		row(9, "", "", "", "current"), row(9, "", "", "", "next"),
+		row(9, "", "0a02", "", "current"), row(9, "", "0a02", "", "next"), row(9, "", "0a02", "", "previous"),
+		row(9, "", "ff01", "", "current"), row(9, "", "ff01", "", "next"),
+		row(10, "", "", "", "current"),
+	}
+	r := rand.New(rand.NewPCG(7, 11))
+	for _, want := range [][]peerKeyRow{named, bare} {
+		for range 200 {
+			got := slices.Clone(want)
+			r.Shuffle(len(got), func(i, j int) { got[i], got[j] = got[j], got[i] })
+			slices.SortFunc(got, comparePeerKeys)
+			if !slices.Equal(labels(got), labels(want)) {
+				t.Fatalf("sorted\n%q\nwant\n%q", labels(got), labels(want))
+			}
+		}
+	}
 }
