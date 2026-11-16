@@ -109,3 +109,79 @@ func (shortIDs) GenerateConnectionID() (quic.ConnectionID, error) {
 	return quic.ConnectionIDFromBytes([]byte{1, 2, 3, 4}), nil
 }
 func (shortIDs) ConnectionIDLen() int { return 4 }
+
+// A packet for an ID the server will issue gets no stateless reset: with
+// the label's key one reads the counter in the server's IDs, and the
+// token of an ID to come, collected now, ended its connection later
+// (review of quic-cid-route-v1, F2). An ID the server never issued (a
+// process before it) still gets its reset.
+func TestNoResetAhead(t *testing.T) {
+	key, _ := cidkey.LabelKey(bytes.Repeat([]byte{0x43}, cidkey.SecretLen), 77)
+	gen, _ := quiccid.NewGenerator(key, 77)
+	codec, _ := quiccid.NewCodec(key)
+	udp, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc := &scids{PacketConn: udp}
+	cert := selfSigned(t)
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	o := Options{Idle: time.Minute, MaxStreams: 100, PendingStreams: 10, MaxHeaderBytes: 16 << 10, ConnIDs: gen,
+		ResetKey: &quic.StatelessResetKey{1}}
+	go func() {
+		done <- Serve(ctx, pc, func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil },
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }), o)
+	}()
+	defer func() {
+		stop()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	tr := &http3.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true, //nolint:gosec // G402: the test's own server
+		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}},
+		Dial: func(ctx context.Context, _ string, tlsConf *tls.Config, conf *quic.Config) (*quic.Conn, error) {
+			return quic.DialAddrEarly(ctx, udp.LocalAddr().String(), tlsConf, conf)
+		}}
+	defer tr.Close()
+	req, _ := http.NewRequest(http.MethodGet, "https://h3.test/", nil)
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	// The counter of the server's last long header's ID: the IDs it has
+	// issued end a few past it (NEW_CONNECTION_ID).
+	pc.mu.Lock()
+	last := pc.ids[len(pc.ids)-1]
+	pc.mu.Unlock()
+	label, counter, ok := codec.Decode(last)
+	if !ok || label != 77 {
+		t.Fatalf("server ID %x: label %d %v", last, label, ok)
+	}
+	answered := func(c uint64) bool {
+		s, err := net.DialUDP("udp4", nil, udp.LocalAddr().(*net.UDPAddr))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		id := codec.Encode(77, c&(1<<40-1))
+		d := make([]byte, 100)
+		d[0] = 0x41
+		copy(d[1:], id[:])
+		_, _ = s.Write(d)
+		_ = s.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		_, err = s.Read(make([]byte, 200))
+		return err == nil
+	}
+	for k := uint64(8); k < 24; k++ {
+		if answered(counter + k) {
+			t.Fatalf("a stateless reset for counter +%d, an ID the server will issue", k)
+		}
+	}
+	if !answered(counter - 1000) {
+		t.Fatal("no stateless reset for an ID the server never issued: resets are off, the test proves nothing")
+	}
+}
