@@ -709,6 +709,19 @@ func (e rolledBack) Unwrap() error { return e.cause }
 // the node was touched at all, and the code of where it failed when err
 // has one (reasonOf).
 func writeResult(path string, err error, touched bool, installed, newVersion string) {
+	saveResult(path, resultOf(err, touched, installed, newVersion))
+}
+
+// writeRelayResult is writeResult on a relay: its text, which rayd relay
+// tells the exit, names no mirror (hideMirrors); the journal does.
+func writeRelayResult(path string, err error, touched bool, installed, newVersion string) {
+	r := resultOf(err, touched, installed, newVersion)
+	r.Error = hideMirrors(r.Error)
+	saveResult(path, r)
+}
+
+// resultOf is how an update ended (writeResult).
+func resultOf(err error, touched bool, installed, newVersion string) nodeupdate.Result {
 	r := nodeupdate.Result{State: nodeupdate.Done, Version: installed, Reason: reasonOf(err)}
 	if release.IsRelease(newVersion) {
 		r.Release = newVersion
@@ -725,6 +738,10 @@ func writeResult(path string, err error, touched bool, installed, newVersion str
 			r.Version = "" // half way: rayd says, once it answers
 		}
 	}
+	return r
+}
+
+func saveResult(path string, r nodeupdate.Result) {
 	if werr := nodeupdate.WriteResult(path, r); werr != nil {
 		fmt.Fprintln(os.Stderr, "rayctl: the update's result:", werr)
 	}
@@ -1024,6 +1041,13 @@ func mirrors() []string {
 	}
 	return release.DefaultMirrors
 }
+
+// hideMirrors is text that goes beyond a relay with its mirrors named by
+// their place (release.HideMirrors): rayd relay tells the exit what root's
+// status of the relay's updates says, and a mirror of the relay's own, a
+// private one maybe, is not the exit's to know. The relay's journal (the
+// update unit's) names it.
+func hideMirrors(text string) string { return release.HideMirrors(text, mirrors()) }
 
 // updatable says why this host cannot be updated by request: no node
 // here, or a relay, which has no rayd API for devices (rayd is there too

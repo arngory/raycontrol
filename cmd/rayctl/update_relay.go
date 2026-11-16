@@ -968,7 +968,7 @@ func (e relayEnv) update(ctx context.Context, o updateOpts, rollback bool, insta
 				if err != nil && !touched && interrupted() && reasonOf(err) != nodeupdate.ReasonInterrupted {
 					err = withReason(nodeupdate.ReasonInterrupted, fmt.Errorf("stopped before any change (the update unit's timeout or stop): %w", err))
 				}
-				writeResult(e.result, err, touched, installed, newVersion)
+				writeRelayResult(e.result, err, touched, installed, newVersion)
 			}
 		}()
 	}
