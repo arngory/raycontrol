@@ -190,9 +190,11 @@ func TestUDPClientNotAcknowledging(t *testing.T) {
 	if senders != 1 || inQUIC > 1 {
 		t.Errorf("%d senders, %d goroutines in quic-go's queue of datagrams", senders, inQUIC)
 	}
-	// Some of it is the connection's own (quic-go keeps what it sent until
-	// acknowledged, within its window); before, each request left about
-	// 100 KiB, 8 MiB in all.
+	// What grows is quic-go's: the state of each stream the client reset,
+	// kept until the client acknowledges its end, which it never does here
+	// (some 12 KiB a stream, the connection's streams at most; a heap
+	// profile shows newStream and its frames). Before, each request also
+	// left about 100 KiB of its own, 8 MiB in all.
 	if grown := int64(heap1) - int64(heap0); grown > 3<<20 {
 		t.Errorf("%d KiB more held after 80 more requests", grown>>10)
 	}

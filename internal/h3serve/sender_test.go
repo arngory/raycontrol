@@ -28,6 +28,72 @@ func (s *stalling) WriteTo(b []byte, a net.Addr) (int, error) {
 	return s.PacketConn.WriteTo(b, a)
 }
 
+// newStalling is a server's socket of loopback that can stall.
+func newStalling(t *testing.T) *stalling {
+	t.Helper()
+	raw, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &stalling{PacketConn: raw}
+}
+
+// serveStalling serves h with datagrams on pc, and gives a client's
+// connection to it; the server ends with the test.
+func serveStalling(t *testing.T, pc *stalling, h http.Handler) *http3.ClientConn {
+	t.Helper()
+	cert := selfSigned(t)
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, pc, func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil }, h,
+			Options{Idle: time.Minute, MaxStreams: 100, PendingStreams: 10, MaxHeaderBytes: 16 << 10, Datagrams: true})
+	}()
+	qc, err := quic.DialAddr(t.Context(), pc.LocalAddr().String(), &tls.Config{InsecureSkipVerify: true, //nolint:gosec // G402: the test's own server
+		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, NextProtos: []string{http3.NextProtoH3}},
+		&quic.Config{EnableDatagrams: true, MaxIdleTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = qc.CloseWithError(0, "")
+		stop()
+		<-done
+	})
+	return (&http3.Transport{EnableDatagrams: true}).NewClientConn(qc)
+}
+
+// connectUDP opens a connect-udp request on cc, and does not wait for its
+// answer.
+func connectUDP(t *testing.T, cc *http3.ClientConn) *http3.RequestStream {
+	t.Helper()
+	rs, err := cc.OpenRequestStream(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodConnect, "https://h3.test/x", nil)
+	req.Proto = "connect-udp"
+	if err := rs.SendRequestHeader(req); err != nil {
+		t.Fatal(err)
+	}
+	return rs
+}
+
+// stall fills the connection's queue in quic-go with datagrams of st
+// while the client acknowledges nothing, until the sender waits there:
+// what it hears of stops growing. full is a datagram of a whole packet.
+func stall(pc *stalling, st *Stream, full []byte, heard func() int) {
+	pc.stall.Store(true)
+	for i := range 400 {
+		_, _ = st.SendDatagram(full, -i)
+		time.Sleep(time.Millisecond)
+	}
+	for last := -1; last != heard(); {
+		last = heard()
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
 // A request never waits for its datagrams, however stalled its connection:
 // with quic-go's queue full and the sender waiting there, SendDatagram
 // returns at once; the stream's queue keeps the newest StreamQueued, the
@@ -35,12 +101,7 @@ func (s *stalling) WriteTo(b []byte, a net.Addr) (int, error) {
 // "Too large" is told before anything is copied, from the limit learned of
 // quic-go.
 func TestSenderNeverWaits(t *testing.T) {
-	cert := selfSigned(t)
-	raw, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	pc := &stalling{PacketConn: raw}
+	pc := newStalling(t)
 	type result struct {
 		took             time.Duration
 		kept             []int
@@ -76,17 +137,7 @@ func TestSenderNeverWaits(t *testing.T) {
 		// Datagrams of a whole packet each: a probe quic-go sends while
 		// nothing is acknowledged takes one or two, not a queue's worth.
 		full := make([]byte, res.limit-len(st.qid))
-		// The client stops acknowledging; fillers until the sender waits in
-		// quic-go's queue: what it hears of stops growing.
-		pc.stall.Store(true)
-		for i := range 400 {
-			_, _ = st.SendDatagram(full, -i)
-			time.Sleep(time.Millisecond)
-		}
-		for last := -1; last != heardNow(); {
-			last = heardNow()
-			time.Sleep(300 * time.Millisecond)
-		}
+		stall(pc, st, full, heardNow)
 		res.droppedBefore = st.Dropped()
 		st.mu.Lock()
 		res.queuedBefore = st.n
@@ -108,33 +159,7 @@ func TestSenderNeverWaits(t *testing.T) {
 		res.atClose = st.Dropped()
 		results <- res
 	})
-	ctx, stop := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- Serve(ctx, pc, func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil }, h,
-			Options{Idle: time.Minute, MaxStreams: 100, PendingStreams: 10, MaxHeaderBytes: 16 << 10, Datagrams: true})
-	}()
-	defer func() {
-		stop()
-		<-done
-	}()
-	qc, err := quic.DialAddr(t.Context(), raw.LocalAddr().String(), &tls.Config{InsecureSkipVerify: true, //nolint:gosec // G402: the test's own server
-		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, NextProtos: []string{http3.NextProtoH3}},
-		&quic.Config{EnableDatagrams: true, MaxIdleTimeout: time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer qc.CloseWithError(0, "")
-	cc := (&http3.Transport{EnableDatagrams: true}).NewClientConn(qc)
-	rs, err := cc.OpenRequestStream(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	req, _ := http.NewRequest(http.MethodConnect, "https://h3.test/x", nil)
-	req.Proto = "connect-udp"
-	if err := rs.SendRequestHeader(req); err != nil {
-		t.Fatal(err)
-	}
+	connectUDP(t, serveStalling(t, pc, h))
 	var res result
 	select {
 	case res = <-results:
@@ -168,5 +193,67 @@ func TestSenderNeverWaits(t *testing.T) {
 	}
 	if got := res.atClose - res.dropped; got > int64(kept) || got < int64(kept)-slack {
 		t.Errorf("%d dropped at the end, %d were kept", got, kept)
+	}
+}
+
+// A request that ends while the connection's sender waits for good leaves
+// nothing with it: its queue empties and it leaves the sender's turn,
+// which holds the open requests only, however many came and went. (A
+// stream that ended stayed in the turn until the sender came to it, which
+// a stalled sender never does.)
+func TestSenderForgetsEndedStreams(t *testing.T) {
+	pc := newStalling(t)
+	var snd *sender
+	stalled := make(chan struct{})
+	var first sync.Once
+	ended := make(chan struct{}, 64)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		take, ok := Datagrams(r.Context(), w)
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		st := take()
+		full := make([]byte, st.snd.limit()-len(st.qid))
+		isFirst := false
+		first.Do(func() { isFirst = true })
+		if isFirst {
+			// The first stays open, and stalls the sender.
+			var heard atomic.Int64
+			st.OnSent(func(int) { heard.Add(1) })
+			stall(pc, st, full, func() int { return int(heard.Load()) })
+			snd = st.snd
+			close(stalled)
+			<-r.Context().Done()
+			return
+		}
+		for range 3 {
+			_, _ = st.SendDatagram(full, 0)
+		}
+		st.Reset()
+		ended <- struct{}{}
+	})
+	cc := serveStalling(t, pc, h)
+	connectUDP(t, cc)
+	select {
+	case <-stalled:
+	case <-time.After(30 * time.Second):
+		t.Fatal("not stalled")
+	}
+	const n = 50
+	for range n {
+		connectUDP(t, cc)
+		select {
+		case <-ended:
+		case <-time.After(10 * time.Second):
+			t.Fatal("a request did not end")
+		}
+	}
+	snd.mu.Lock()
+	inTurn := len(snd.ready)
+	snd.mu.Unlock()
+	// The first, when it is not in the sender's hand.
+	if inTurn > 1 {
+		t.Errorf("%d streams in the sender's turn after %d ended, one open", inTurn, n)
 	}
 }

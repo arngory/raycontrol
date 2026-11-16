@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,7 +48,7 @@ type sender struct {
 	once sync.Once
 	max  atomic.Int64 // the largest QUIC datagram payload; 0: none
 
-	mu    sync.Mutex
+	mu    sync.Mutex    // under a stream's own, where both are held
 	ready []*Stream     // streams with datagrams waiting, in turn
 	wake  chan struct{} // one place: a stream became ready
 }
@@ -79,7 +80,8 @@ func (s *sender) limit() int {
 	return int(s.max.Load())
 }
 
-// push puts a stream with datagrams waiting at the end of the turn.
+// push puts a stream with datagrams waiting at the end of the turn. Under
+// the stream's lock: its place in the turn follows its turn flag.
 func (s *sender) push(d *Stream) {
 	s.mu.Lock()
 	s.ready = append(s.ready, d)
@@ -87,6 +89,17 @@ func (s *sender) push(d *Stream) {
 	select {
 	case s.wake <- struct{}{}:
 	default:
+	}
+}
+
+// remove takes a stream that ended out of the turn, if it is there: a
+// sender that waits for quic-go for good takes nothing from the turn, and
+// what is there stays as long. Under the stream's lock.
+func (s *sender) remove(d *Stream) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if i := slices.Index(s.ready, d); i >= 0 {
+		s.ready = slices.Delete(s.ready, i, i+1)
 	}
 }
 
@@ -244,40 +257,37 @@ func (d *Stream) SendDatagram(b []byte, n int) (tooLarge bool, err error) {
 	}
 	d.ring[(d.head+d.n)%len(d.ring)] = queued{d: dg, n: n}
 	d.n++
-	push := !d.turn
-	d.turn = true
+	if !d.turn {
+		d.turn = true
+		d.snd.push(d)
+	}
 	d.mu.Unlock()
 	if old != nil {
 		datagramBufs.Put(old)
 		d.dropped.Add(1)
 	}
-	if push {
-		d.snd.push(d)
-	}
 	return false, nil
 }
 
-// pop takes the oldest datagram for the sender, and puts the stream at the
-// end of the turn again when more wait; nil when none does.
+// pop takes the oldest datagram for the sender (next took the stream out
+// of the turn), and puts the stream at the end of the turn again when more
+// wait; nil when none does.
 func (d *Stream) pop() (dg *datagram, n int, sent func(int)) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.n == 0 || d.closed {
 		d.turn = false
-		d.mu.Unlock()
 		return nil, 0, nil
 	}
 	q := d.ring[d.head]
 	d.ring[d.head] = queued{}
 	d.head = (d.head + 1) % len(d.ring)
 	d.n--
-	more := d.n > 0
-	d.turn = more
-	sent = d.sent
-	d.mu.Unlock()
-	if more {
+	d.turn = d.n > 0
+	if d.turn {
 		d.snd.push(d)
 	}
-	return q.d, q.n, sent
+	return q.d, q.n, d.sent
 }
 
 // OnSent sets what hears of each datagram quic-go took for sending, from
@@ -300,11 +310,17 @@ func (d *Stream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 	return d.s.ReceiveDatagram(ctx)
 }
 
-// end empties the stream's queue: nothing more of it goes.
+// end empties the stream's queue and takes it out of the sender's turn:
+// nothing more of it goes, and nothing of it is left with the sender but a
+// datagram it has taken.
 func (d *Stream) end() {
 	d.mu.Lock()
 	d.closed = true
 	d.sent = nil
+	if d.turn {
+		d.turn = false
+		d.snd.remove(d)
+	}
 	left := d.n
 	for d.n > 0 {
 		datagramBufs.Put(d.ring[d.head].d)
