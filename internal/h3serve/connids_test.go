@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -183,5 +184,55 @@ func TestNoResetAhead(t *testing.T) {
 	}
 	if !answered(counter - 1000) {
 		t.Fatal("no stateless reset for an ID the server never issued: resets are off, the test proves nothing")
+	}
+}
+
+// fedConn gives ReadFrom the datagrams of a list, in order.
+type fedConn struct {
+	net.PacketConn
+	in [][]byte
+}
+
+func (f *fedConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	if len(f.in) == 0 {
+		return 0, nil, io.EOF
+	}
+	n := copy(b, f.in[0])
+	f.in = f.in[1:]
+	return n, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}, nil
+}
+
+// aheadConn drops a short header for an ID ahead, of a packet quic-go
+// could open, and passes the same bytes in a long header, a packet too
+// short, and an ID issued.
+func TestAheadConn(t *testing.T) {
+	key, _ := cidkey.LabelKey(bytes.Repeat([]byte{0x44}, cidkey.SecretLen), 9)
+	gen, _ := quiccid.NewGenerator(key, 9)
+	codec, _ := quiccid.NewCodec(key)
+	issued, _ := gen.GenerateConnectionID()
+	_, last, _ := codec.Decode(issued.Bytes())
+	packet := func(first byte, id []byte, size int) []byte {
+		p := make([]byte, size)
+		p[0] = first
+		copy(p[1:], id)
+		return p
+	}
+	ahead := codec.Encode(9, last+5)
+	in := [][]byte{
+		packet(0x41, ahead[:], 100),        // dropped
+		packet(0xc1, ahead[:], 100),        // a long header
+		packet(0x41, ahead[:], minShort-1), // too short
+		packet(0x41, issued.Bytes(), 100),  // issued
+	}
+	c := &aheadConn{PacketConn: &fedConn{in: in}, ahead: gen.Ahead}
+	b := make([]byte, 200)
+	for i, want := range in[1:] {
+		n, _, err := c.ReadFrom(b)
+		if err != nil || !bytes.Equal(b[:n], want) {
+			t.Fatalf("datagram %d: %x %v, want %x", i, b[:n], err, want[:9])
+		}
+	}
+	if _, _, err := c.ReadFrom(b); !errors.Is(err, io.EOF) {
+		t.Fatalf("one more: %v", err)
 	}
 }
