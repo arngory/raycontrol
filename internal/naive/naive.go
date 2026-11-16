@@ -43,7 +43,12 @@ type Server struct {
 	// ICMP carries ping and traceroute through ICMPName (spec/icmp-v1.md):
 	// off unless the service has icmp=on.
 	ICMP bool
-	Log  *slog.Logger
+	// UDP carries UDP as HTTP/3 datagrams (spec/naive-udp-v1.md, udp.go):
+	// off unless the service has udp=on. H3 gives a request's HTTP/3
+	// stream (cmd/rayd: h3serve.Datagrams); without it no request is one.
+	UDP bool
+	H3  H3
+	Log *slog.Logger
 
 	// lim are the per-user limits (spec/conn-limit-v1.md §3.1), names the
 	// process's cache of names.
@@ -62,11 +67,19 @@ type Server struct {
 	icmpIdle time.Duration                   // icmpIdle when 0
 	icmpOpen func(v6 bool) (icmpConn, error) // openPing when nil
 	icmpWarn icmpWarn
+
+	udp udpTotals
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// HTTP/2 (TCP) or HTTP/3 (QUIC); naive never speaks HTTP/1 to a server.
-	if r.Method != http.MethodConnect || r.ProtoMajor < 2 || r.Header.Get("Padding") == "" {
+	if r.Method == http.MethodConnect && r.Proto == ConnectUDP {
+		s.serveUDP(w, r)
+		return
+	}
+	// HTTP/2 (TCP) or HTTP/3 (QUIC); naive never speaks HTTP/1 to a
+	// server, nor an extended CONNECT of another protocol: the site's
+	// answer, never a tunnel.
+	if r.Method != http.MethodConnect || r.ProtoMajor < 2 || extendedConnect(r) || r.Header.Get("Padding") == "" {
 		s.Answer.ServeHTTP(w, r)
 		return
 	}

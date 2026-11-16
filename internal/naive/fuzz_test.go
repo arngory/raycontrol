@@ -532,3 +532,126 @@ func FuzzICMP(f *testing.F) {
 		}
 	})
 }
+
+// FuzzUDPDatagram: whatever a client puts in an HTTP datagram, parseUDP
+// reads it without a panic and keeps nothing past it; what it takes is a
+// destination with a port and data a client may send, and written again
+// it reads the same. The data is the input's own, not a copy.
+func FuzzUDPDatagram(f *testing.F) {
+	f.Add(udpDatagram(udpDest(netip.MustParseAddrPort("192.0.2.1:53")), []byte("query")))
+	f.Add(udpDatagram(udpDest(netip.MustParseAddrPort("[2001:db8::1]:443")), nil))
+	f.Add(udpDatagram(udpDest(netip.MustParseAddrPort("[::ffff:192.0.2.1]:443")), []byte{1}))
+	f.Add(udpDatagram(udpDestName("example.com", 3478), []byte("stun")))
+	f.Add([]byte{0x40, 0x02, udpName, 1, 'a', 0, 1})
+	f.Add([]byte{udpContext, udpName, 0})
+	f.Add([]byte{0, udpIPv4})
+	f.Add([]byte{0xc0})
+	f.Fuzz(func(t *testing.T, in []byte) {
+		dest, data, why := parseUDP(in)
+		if why >= 0 {
+			if why >= dropKinds || data != nil {
+				t.Fatalf("dropped (%d) with %d bytes", why, len(data))
+			}
+			return
+		}
+		if dest.port == 0 || len(data) > uotMaxPayload || (dest.name == "") == !dest.ip.IsValid() || len(dest.name) > 255 {
+			t.Fatalf("read %+v and %d bytes", dest, len(data))
+		}
+		if len(data) > 0 && &data[len(data)-1] != &in[len(in)-1] {
+			t.Fatal("the data is not the input's end")
+		}
+		var again []byte
+		if dest.name != "" {
+			again = udpDatagram(udpDestName(dest.name, dest.port), data)
+		} else {
+			again = udpDatagram(udpDest(netip.AddrPortFrom(dest.ip, dest.port)), data)
+			// The node's answer from there reads the same.
+			if d2, data2, why2 := parseUDP(append(appendUDPHead(nil, netip.AddrPortFrom(dest.ip, dest.port)), data...)); why2 >= 0 || d2 != dest || !bytes.Equal(data2, data) {
+				t.Fatalf("an answer from %+v read as %+v (%d)", dest, d2, why2)
+			}
+		}
+		d2, data2, why2 := parseUDP(again)
+		if why2 >= 0 || d2 != dest || !bytes.Equal(data2, data) {
+			t.Fatalf("read again: %+v %d (%d), first %+v %d", d2, len(data2), why2, dest, len(data))
+		}
+	})
+}
+
+// fuzzStream is an H3Stream whose content is a fuzzer's input and which
+// takes no datagram.
+type fuzzStream struct{ bytes.Reader }
+
+func (*fuzzStream) Write(b []byte) (int, error)                     { return len(b), nil }
+func (*fuzzStream) SetReadDeadline(time.Time) error                 { return nil }
+func (*fuzzStream) SetWriteDeadline(time.Time) error                { return nil }
+func (*fuzzStream) SendDatagram([]byte) (bool, error)               { return false, nil }
+func (*fuzzStream) ReceiveDatagram(context.Context) ([]byte, error) { return nil, io.EOF }
+func (*fuzzStream) Close() error                                    { return nil }
+func (*fuzzStream) Reset()                                          {}
+
+// FuzzUDPCapsules: whatever a client sends in a datagram request's stream,
+// the capsules are read one by one, each to its last byte and not past it:
+// a DATAGRAM capsule's payload goes to upstream (here nothing is allowed
+// and nothing looked up, so each is dropped and counted), a capsule of
+// another type is skipped, one longer than capsuleMax is refused before
+// its payload is read, one cut short is refused, and the end between two
+// capsules is the client's clean end.
+func FuzzUDPCapsules(f *testing.F) {
+	capsule := func(typ uint64, payload []byte) []byte {
+		return append(appendVarint(appendVarint(nil, typ), uint64(len(payload))), payload...)
+	}
+	dg := udpDatagram(udpDest(netip.MustParseAddrPort("192.0.2.1:53")), []byte("q"))
+	f.Add(capsule(capsuleDatagram, dg))
+	f.Add(append(capsule(0x2a, []byte("skip")), capsule(capsuleDatagram, udpDatagram(udpDestName("example.com", 53), nil))...))
+	f.Add(capsule(capsuleDatagram, make([]byte, 5000)))
+	f.Add(appendVarint([]byte{capsuleDatagram}, capsuleMax+1))
+	f.Add(capsule(capsuleDatagram, dg)[:4])
+	f.Add([]byte{0x40})
+	f.Add([]byte{})
+	s := &Server{Allow: func(netip.Addr) bool { return false }, Log: slog.New(slog.DiscardHandler)}
+	s.lim.lookupBurst = 1e-9 // never a whole token
+	free, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Cleanup(func() { free.Close() })
+	f.Fuzz(func(t *testing.T, in []byte) {
+		// The reference: the capsules as RFC 9297 §3.2 frames them.
+		datagrams, want := 0, error(nil)
+		for rest := in; len(rest) > 0; {
+			typ, n := parseVarint(rest)
+			if n == 0 {
+				want = errRefused
+				break
+			}
+			l, m := parseVarint(rest[n:])
+			if m == 0 || l > capsuleMax {
+				want = errRefused
+				break
+			}
+			if uint64(len(rest)-n-m) < l {
+				want = errRefused
+				break
+			}
+			if typ == capsuleDatagram {
+				datagrams++
+			}
+			rest = rest[n+m+int(l):]
+		}
+		st := &fuzzStream{}
+		st.Reader.Reset(in)
+		d := &udpRequest{s: s, conn: free, st: st, u: &uotStream{s: s, ctx: context.Background(), slot: &uotSlot{user: "u"},
+			names: map[string]uotResolved{}, peers: map[netip.AddrPort]pairTimes{}}}
+		got := d.readCapsules()
+		if errors.Is(got, errRefused) != (want != nil) || (want == nil && got != nil) {
+			t.Fatalf("ended with %v, want %v", got, want)
+		}
+		var dropped int64
+		for i := range d.n.dropped {
+			dropped += d.n.dropped[i].Load()
+		}
+		if dropped != int64(datagrams) || d.n.in.Load() != 0 {
+			t.Fatalf("%d dropped and %d sent of %d datagrams", dropped, d.n.in.Load(), datagrams)
+		}
+	})
+}
