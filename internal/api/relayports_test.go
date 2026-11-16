@@ -81,11 +81,27 @@ func TestRelayPorts(t *testing.T) {
 	if got := show(added.Msg.Relay.Ports); !slices.Equal(got, before) {
 		t.Errorf("added %q", got)
 	}
+	// Its admin addresses before the bundle (the natural order: the
+	// bundle needs some): SetRelayAccess draws SPA parameters of its own
+	// to check the SSH port against, which the bundle replaces. Still no
+	// SPA range listed: a firewall opened for it would be the wrong one.
+	if _, err := c.SetRelayAccess(ctx, connect.NewRequest(&nodev1.SetRelayAccessRequest{Name: "r1", Admin: []string{"192.0.2.7"}})); err != nil {
+		t.Fatal(err)
+	}
+	drawn, err := srv.Store.RelayByName(ctx, "r1")
+	if err != nil || len(drawn.SPA) == 0 || drawn.CertPin != "" {
+		t.Fatalf("after relay set: SPA %q, pin %q, %v", drawn.SPA, drawn.CertPin, err)
+	}
+	if got := show(relayPorts()); !slices.Equal(got, before) {
+		t.Fatalf("after relay set, before the bundle %q", got)
+	}
 
-	issued, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "203.0.113.7", SshPort: 2200,
-		Admin: []string{"192.0.2.7"}})
+	issued, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "203.0.113.7", SshPort: 2200})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if bundled, _ := srv.Store.RelayByName(ctx, "r1"); string(bundled.SPA) == string(drawn.SPA) {
+		t.Fatal("the bundle kept the SPA parameters relay set drew")
 	}
 	got := show(issued.Ports)
 	want := append([]string{"ssh tcp 2200 relay admin", "spa tcp+udp range relay everyone",

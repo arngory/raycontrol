@@ -1497,8 +1497,9 @@ type Relay struct {
 	ProbePort uint32                 `protobuf:"varint,4,opt,name=probe_port,json=probePort,proto3" json:"probe_port,omitempty"` // its probe endpoint, TCP and UDP (relay-v1 §9.1); 0: none
 	// Every port the relay host takes from outside, for a provider's
 	// firewall in front of it (rayctl relay ports): its SSH, its SPA range
-	// and probe endpoint, and the exit's ports it forwards, as its perimeter
-	// has them now. Since v0.31.0; empty from a node before.
+	// and probe endpoint once its bundle is out (rayctl relay bundle makes
+	// them), and the exit's ports it forwards, as its perimeter has them
+	// now. Since v0.31.0; empty from a node before.
 	Ports         []*RelayPort `protobuf:"bytes,5,rep,name=ports,proto3" json:"ports,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
