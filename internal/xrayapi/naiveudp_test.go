@@ -40,26 +40,36 @@ import (
 	"github.com/arngory/raycontrol/internal/sub"
 )
 
-// TestNaiveUDPWithNikoServer: naive-udp-v1 through the pinned niko-server
-// front, as a node runs it. A naive service with udp=on, rendered; its
-// link says udp=1; the front routes QUIC for the naive name to rayd
-// naive's packet socket (udpmux, R3-5), where h3serve serves it with
-// datagrams as rayd naive -udp does. A connect-udp request through the
-// front carries UDP both ways: a QUIC datagram, and a capsule for what does
-// not fit the node's packets of 1250 bytes. Set NIKO_SERVER_BIN.
-func TestNaiveUDPWithNikoServer(t *testing.T) {
+// naiveUDPNode is a node with a naive service with udp=on behind the
+// pinned niko-server front: what a connect-udp client needs of it, and
+// rayd naive's QUIC side, which serve starts as rayd naive -udp serves it.
+type naiveUDPNode struct {
+	port     int    // the front's, TCP and UDP
+	sni      string // the naive name
+	password string
+	roots    *x509.CertPool
+	ns       *naive.Server
+	echo     netip.AddrPort // a UDP echo the requests reach
+	// serve starts rayd naive's QUIC side on its packet socket, as a new
+	// process does; stop ends the one serving, as rayd naive ends at
+	// SIGTERM: its clients are told (H3_NO_ERROR).
+	serve, stop func()
+}
+
+// startNaiveUDPNode renders the node, starts rayd naive's sockets, its
+// QUIC side and the front. Set NIKO_SERVER_BIN.
+func startNaiveUDPNode(t *testing.T, ctx context.Context) *naiveUDPNode {
+	t.Helper()
 	niko := os.Getenv("NIKO_SERVER_BIN")
 	if niko == "" {
 		t.Skip("set NIKO_SERVER_BIN to the pinned niko-server")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
 	dir := t.TempDir()
 	st, err := store.Open(ctx, filepath.Join(dir, "rayd.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	t.Cleanup(func() { st.Close() })
 	if _, err := provision.Init(ctx, st, provision.Options{Host: "127.0.0.1", Domain: "example.com"}); err != nil {
 		t.Fatal(err)
 	}
@@ -121,47 +131,12 @@ func TestNaiveUDPWithNikoServer(t *testing.T) {
 		t.Fatalf("naive link %s", link.Redacted())
 	}
 
-	// rayd naive's sockets before the front, as on a node; its QUIC side
-	// with datagrams, as rayd naive -udp serves it.
-	quiet := slog.New(slog.DiscardHandler)
-	nl, err := nikoipc.ListenFD(paths.NaiveSocket("naive"), os.Getuid(), quiet)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer nl.Close()
-	nl3, err := nikoipc.ListenPacket(paths.NaiveQUICSocket("naive"), os.Getuid(), quiet)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ns := &naive.Server{Users: &naive.Users{Path: filepath.Join(paths.Rendered, "naive", render.NaiveUsers)}, Answer: http.NotFoundHandler(),
-		UDP: true, Log: quiet, Allow: func(a netip.Addr) bool { return a == netip.MustParseAddr("127.0.0.1") }}
-	ns.H3 = func(ctx context.Context, w http.ResponseWriter) (func() naive.H3Stream, bool) {
-		take, ok := h3serve.Datagrams(ctx, w)
-		if !ok {
-			return nil, false
-		}
-		return func() naive.H3Stream { return take() }, true
-	}
-	cert := tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
-	sctx, stop := context.WithCancel(ctx)
-	served := make(chan error, 1)
-	go func() {
-		served <- h3serve.Serve(sctx, nl3, func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil }, ns,
-			h3serve.Options{Idle: render.QUICIdle, MaxStreams: naive.MaxStreams, PendingStreams: naive.PendingStreams,
-				MaxHeaderBytes: naive.MaxHeaderBytes, Datagrams: true})
-	}()
-	defer func() {
-		stop()
-		<-served
-	}()
-	runFront(t, niko, filepath.Join(paths.Rendered, "front", "front.json"), port)
-
-	// An echo the request reaches.
+	// An echo the requests reach.
 	echo, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echo.Close()
+	t.Cleanup(func() { echo.Close() })
 	go func() {
 		buf := make([]byte, 2048)
 		for {
@@ -172,31 +147,81 @@ func TestNaiveUDPWithNikoServer(t *testing.T) {
 			_, _ = echo.WriteToUDPAddrPort(buf[:n], from)
 		}
 	}()
-	at := echo.LocalAddr().(*net.UDPAddr).AddrPort()
 
-	// The client: QUIC to the front's port under the naive name, its
-	// SETTINGS with datagrams, a connect-udp request with the link's
-	// password.
-	roots := x509.NewCertPool()
+	// rayd naive's sockets before the front, as on a node; its QUIC side
+	// with datagrams, as rayd naive -udp serves it.
+	quiet := slog.New(slog.DiscardHandler)
+	nl, err := nikoipc.ListenFD(paths.NaiveSocket("naive"), os.Getuid(), quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { nl.Close() })
+	ns := &naive.Server{Users: &naive.Users{Path: filepath.Join(paths.Rendered, "naive", render.NaiveUsers)}, Answer: http.NotFoundHandler(),
+		UDP: true, Log: quiet, Allow: func(a netip.Addr) bool { return a == netip.MustParseAddr("127.0.0.1") }}
+	ns.H3 = func(ctx context.Context, w http.ResponseWriter) (func() naive.H3Stream, bool) {
+		take, ok := h3serve.Datagrams(ctx, w)
+		if !ok {
+			return nil, false
+		}
+		return func() naive.H3Stream { return take() }, true
+	}
+	cert := tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+	node := &naiveUDPNode{port: port, sni: naiveName.SNI, password: password, roots: x509.NewCertPool(), ns: ns,
+		echo: echo.LocalAddr().(*net.UDPAddr).AddrPort()}
 	leaf, _ := x509.ParseCertificate(der)
-	roots.AddCert(leaf)
-	qc, err := quic.DialAddr(ctx, "127.0.0.1:"+strconv.Itoa(port), &tls.Config{ServerName: naiveName.SNI, RootCAs: roots,
+	node.roots.AddCert(leaf)
+	node.serve = func() {
+		nl3, err := nikoipc.ListenPacket(paths.NaiveQUICSocket("naive"), os.Getuid(), quiet)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx, cancel := context.WithCancel(ctx)
+		served := make(chan error, 1)
+		go func() {
+			served <- h3serve.Serve(sctx, nl3, func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil }, ns,
+				h3serve.Options{Idle: render.QUICIdle, MaxStreams: naive.MaxStreams, PendingStreams: naive.PendingStreams,
+					MaxHeaderBytes: naive.MaxHeaderBytes, Datagrams: true})
+		}()
+		var once bool
+		stop := func() {
+			if !once {
+				once = true
+				cancel()
+				if err := <-served; err != nil {
+					t.Errorf("h3serve: %v", err)
+				}
+			}
+		}
+		t.Cleanup(stop)
+		node.stop = stop
+	}
+	node.serve()
+	runFront(t, niko, filepath.Join(paths.Rendered, "front", "front.json"), port)
+	return node
+}
+
+// connectUDP is a client of the node: QUIC to the front's port under the
+// naive name, its SETTINGS with datagrams, a connect-udp request with the
+// link's password, answered 200 with niko-udp: 1.
+func (n *naiveUDPNode) connectUDP(t *testing.T, ctx context.Context) (*quic.Conn, *http3.RequestStream) {
+	t.Helper()
+	qc, err := quic.DialAddr(ctx, "127.0.0.1:"+strconv.Itoa(n.port), &tls.Config{ServerName: n.sni, RootCAs: n.roots,
 		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, NextProtos: []string{http3.NextProtoH3}}, &quic.Config{EnableDatagrams: true})
 	if err != nil {
 		t.Fatalf("QUIC through the front: %v", err)
 	}
-	defer qc.CloseWithError(0, "")
+	t.Cleanup(func() { _ = qc.CloseWithError(0, "") })
 	cc := (&http3.Transport{EnableDatagrams: true}).NewClientConn(qc)
 	rs, err := cc.OpenRequestStream(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, _ := http.NewRequest(http.MethodConnect, "https://"+naiveName.SNI+"/.well-known/masque/udp/%2A/%2A/", nil)
+	req, _ := http.NewRequest(http.MethodConnect, "https://"+n.sni+"/.well-known/masque/udp/%2A/%2A/", nil)
 	req.Proto = naive.ConnectUDP
 	req.Header.Set("Capsule-Protocol", "?1")
 	req.Header.Set(naive.UDPHeader, "1")
 	req.Header.Set("Padding", naive.PaddingHeader())
-	req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("niko:"+password)))
+	req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("niko:"+n.password)))
 	if err := rs.SendRequestHeader(req); err != nil {
 		t.Fatal(err)
 	}
@@ -204,19 +229,45 @@ func TestNaiveUDPWithNikoServer(t *testing.T) {
 	if err != nil || resp.StatusCode != http.StatusOK || resp.Header.Get(naive.UDPHeader) != "1" {
 		t.Fatalf("connect-udp through the front: %v %v", resp, err)
 	}
-	defer func() { rs.CancelRead(0); rs.CancelWrite(0) }()
-	// [Context ID 2][4][address][port][data]
-	head := append([]byte{2, 4}, at.Addr().AsSlice()...)
-	head = binary.BigEndian.AppendUint16(head, at.Port())
-	if err := rs.SendDatagram(append(bytes.Clone(head), "through the front"...)); err != nil {
+	t.Cleanup(func() { rs.CancelRead(0); rs.CancelWrite(0) })
+	return qc, rs
+}
+
+// head is a datagram's head to the echo (§3.2): [Context ID 2][4][address][port].
+func (n *naiveUDPNode) head() []byte {
+	h := append([]byte{2, 4}, n.echo.Addr().AsSlice()...)
+	return binary.BigEndian.AppendUint16(h, n.echo.Port())
+}
+
+// echoed sends data to the echo in a QUIC datagram and waits for it back.
+func (n *naiveUDPNode) echoed(t *testing.T, ctx context.Context, rs *http3.RequestStream, data string) {
+	t.Helper()
+	want := append(n.head(), data...)
+	if err := rs.SendDatagram(bytes.Clone(want)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := rs.ReceiveDatagram(ctx)
-	if err != nil || !bytes.Equal(got, append(bytes.Clone(head), "through the front"...)) {
+	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("datagram back: %q %v", got, err)
 	}
+}
+
+// TestNaiveUDPWithNikoServer: naive-udp-v1 through the pinned niko-server
+// front, as a node runs it. A naive service with udp=on, rendered; its
+// link says udp=1; the front routes QUIC for the naive name to rayd
+// naive's packet socket (udpmux, R3-5), where h3serve serves it with
+// datagrams as rayd naive -udp does. A connect-udp request through the
+// front carries UDP both ways: a QUIC datagram, and a capsule for what does
+// not fit the node's packets of 1250 bytes. Set NIKO_SERVER_BIN.
+func TestNaiveUDPWithNikoServer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	node := startNaiveUDPNode(t, ctx)
+	_, rs := node.connectUDP(t, ctx)
+	node.echoed(t, ctx, rs, "through the front")
 	// 1300 bytes: more than the node's packets of 1250 take, a capsule each
 	// way.
+	head := node.head()
 	big := bytes.Repeat([]byte{'c'}, 1300)
 	capsule := append([]byte{0x00, 0x40 | byte((len(head)+len(big))>>8), byte(len(head) + len(big))}, head...)
 	if _, err := rs.Write(append(capsule, big...)); err != nil {
@@ -229,6 +280,7 @@ func TestNaiveUDPWithNikoServer(t *testing.T) {
 	// An answer counts once the connection's sender handed it to QUIC, a
 	// datagram once its write returned: either may come after the client
 	// has the answer.
+	ns := node.ns
 	for end := time.Now().Add(5 * time.Second); (ns.UDPStats().Out != 2 || ns.UDPStats().In != 2) && time.Now().Before(end); {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -239,5 +291,44 @@ func TestNaiveUDPWithNikoServer(t *testing.T) {
 	_ = rs.Close()
 	if _, err := io.ReadAll(rs); err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("the end: %v", err)
+	}
+}
+
+// TestNaiveUDPRestartWithNikoServer: rayd naive restarts under the running
+// front, as rayctl apply restarts it when udp is turned on. The client of
+// the process before is told at once (H3_NO_ERROR), not left to its idle
+// time; the front takes the new process's packet socket by itself, and a
+// connect-udp request right after the restart, on a new QUIC connection,
+// carries UDP: its Initials wait at most for the front to come back to the
+// socket, which QUIC's retransmissions cover. Set NIKO_SERVER_BIN.
+func TestNaiveUDPRestartWithNikoServer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	node := startNaiveUDPNode(t, ctx)
+	before, rs := node.connectUDP(t, ctx)
+	node.echoed(t, ctx, rs, "before the restart")
+
+	node.stop() // SIGTERM
+	select {
+	case <-before.Context().Done():
+		var app *quic.ApplicationError
+		if cause := context.Cause(before.Context()); !errors.As(cause, &app) || !app.Remote ||
+			app.ErrorCode != quic.ApplicationErrorCode(http3.ErrCodeNoError) {
+			t.Fatalf("the connection to the process before ended with %v", cause)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the client of the process before was not told")
+	}
+	start := time.Now()
+	node.serve()
+	_, rs = node.connectUDP(t, ctx)
+	node.echoed(t, ctx, rs, "after the restart")
+	t.Logf("connect-udp %v after the new process took its socket", time.Since(start).Round(time.Millisecond))
+	ns := node.ns
+	for end := time.Now().Add(5 * time.Second); ns.UDPStats().In != 2 && time.Now().Before(end); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s := ns.UDPStats(); s.Requests != 2 || s.In != 2 {
+		t.Fatalf("%+v", s)
 	}
 }
