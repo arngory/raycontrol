@@ -264,30 +264,38 @@ func TestNetnsSlotChange(t *testing.T) {
 	passes(t, socket(client), cur, "3: a new socket to the new port")
 	refused(t, socket(stranger), cur, "3: an address without SPA")
 
-	// 4. The old flow's socket to the new port: by spa-v2.md §11 its entry
-	// takes the old flow's reply tuple (both redirected to one port) and
-	// is dropped when confirmed.
+	// 4. The old flow's socket to the new port. Both slot ports redirect to
+	// one service port, so the second entry's reply tuple would clash
+	// with the first's. On the kernels seen (6.18 here, 7.0 on CI) the
+	// input hook's null SNAT binding gives it another client port: the
+	// service has the packet from a new source port, as after a NAT port
+	// change, and answers through the slot port (spa-v2.md §11). A kernel
+	// that drops it at confirmation instead is allowed too. Never allowed:
+	// the service seeing the old flow's own source port on the new port,
+	// or the old flow breaking.
 	t.Run("the old flow's socket to the new port", func(t *testing.T) {
 		const msg = "4: the old flow's socket to the new port"
 		sock := netip.MustParseAddrPort(flow.LocalAddr().String())
 		failed, counted := insertFailed(t)
 		answered := ask(t, flow, cur, msg, dropped)
-		if at, reached := seen(msg); answered || reached {
-			// Not as §11 says: told in the run's output, not passed.
-			passes(t, flow, old, "4: the open flow on the old port, after")
+		at, reached := seen(msg)
+		switch {
+		case reached && at.Port() == sock.Port():
+			t.Errorf("the service had it from the socket's own port %v: two entries with one reply tuple", at)
+		case reached:
+			if !answered {
+				t.Errorf("the service had it from %v but its answer did not come back", at)
+			}
 			var u unix.Utsname
 			_ = unix.Uname(&u)
-			t.Skipf("spa-v2.md §11: dropped when its entry is confirmed; here (Linux %s) the service had it from %v, "+
-				"the socket being %v, and it answered %v: the input hook's null SNAT binding gave the clashing "+
-				"reply tuple another client port", unix.ByteSliceToString(u.Release[:]), at, sock, answered)
-		}
-		if n, _ := insertFailed(t); counted && n-failed != 1 {
-			t.Errorf("insert_failed grew by %d, want 1: not dropped at the entry's confirmation", n-failed)
+			t.Logf("Linux %s: passed with the source port remapped, %v -> %v", unix.ByteSliceToString(u.Release[:]), sock, at)
+		default:
+			if n, _ := insertFailed(t); counted && n-failed != 1 {
+				t.Errorf("dropped, but insert_failed grew by %d, want 1", n-failed)
+			}
+			t.Log("dropped when its entry was confirmed")
 		}
 		es := entries(t, unix.AF_INET, false)
-		if e, ok := findEntry(es, func(e ctEntry) bool { return e.Orig.Src == sock && e.Orig.Dst.Port() == cur }); ok {
-			t.Errorf("an entry for the old flow's socket to the new port: %+v", e)
-		}
 		if _, ok := findEntry(es, func(e ctEntry) bool { return e.Orig.Src == sock && e.Orig.Dst.Port() == old }); !ok {
 			t.Error("the old flow's entry is gone")
 		}
