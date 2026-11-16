@@ -202,14 +202,41 @@ v0.26.0: пины ключа сертификата сайта в ссылках
   заголовке или Handshake с незнакомого адреса (для hy2-obfs — после снятия salamander) заводит поток, не больше 32 в
   секунду с источника. По ревью: Hysteria2 проверяет новый путь (раньше один подделанный пакет направлял загрузку
   пользователя на чужой адрес), сервер не отвечает сбросом на ID, которые ещё выдаст, новый секрет перезапускает
-  читающих его. niko-server — ветка к
-  v0.18.0 (фронт, Hysteria2), raycontrol — `internal/quiccid`, naive-quic и DoH3, отрисовка. Тесты: клиент Hysteria2
-  и клиент quic-go со сменой порта посреди соединения (в т. ч. `AddPath`/`Switch`), naive-quic через настоящий фронт;
-  классическая BPF-программа читает тот же формат (шаг (г) naive-udp-v1 §5);
+  читающих его. По второму ревью: у фронта ключи меток его бэкендов, а не секрет; счётчик начинается от часов.
+  niko-server — ветка к v0.18.0 (фронт, Hysteria2), raycontrol — `internal/quiccid`, naive-quic и DoH3, отрисовка.
+  Тесты: клиент Hysteria2 и клиент quic-go со сменой порта посреди соединения (в т. ч. `AddPath`/`Switch`),
+  naive-quic через настоящий фронт; классическая BPF-программа читает тот же формат (шаг (г) naive-udp-v1 §5);
 - выпуск niko-server v0.18.0 и поднятие пина: до него фронт меток не читает (опции пишутся с пина v0.18.0);
-- клиент: перенос соединения на новый сокет при смене слота (port hopping Hysteria2, `AddPath` quic-go) вместо нового
-  соединения;
-- тест в netns с `nft redirect` порта слота и сменой порта клиента на 443 и на порту слота.
+- клиент: перенос соединения на порт нового слота вместо нового соединения — с нового сокета (port hopping
+  Hysteria2, `AddPath` quic-go) или с того же (сервис видит новый порт источника, spa-v2 §11);
+- тест в netns с `nft redirect` порта слота и переходом соединения на 443 и на порту слота, клиент с ID нулевой
+  длины (иначе предел quic-go ниже);
+- **патч quic-go: переход на путь делает ID пробы активным.** Сервер quic-go v0.64.1 (naive-quic, DoH3) переживает
+  лишь два перехода клиента со своими connection ID (spec/quic-cid-route-v1.md §5; Chromium и Hysteria2 — ID нулевой
+  длины, их это не касается). Исправить маленьким патчем в нашем форке quic-go (`replace` в go.mod, как форки Xray и
+  sing-box), тест — `TestNekoServerQUICRebindLimit` niko-server (он упадёт, когда переходов станет больше: снять
+  предел в спеке). Текст для issue upstream, отправить оттуда, где есть доступ:
+
+  > **Server keeps the old destination connection ID after switching to a validated path (RFC 9000 §9.5), and runs
+  > out of the client's connection IDs after two migrations.** quic-go v0.64.1, server side, peer with non-empty
+  > connection IDs. When a packet arrives from a new address, `pathManager.HandlePacket` (path_manager.go:123) takes
+  > an unused peer connection ID via `connIDManager.GetConnIDForPath` for the PATH_CHALLENGE. After the path is
+  > validated and the server switches (`SwitchToPath`, path_manager.go:178), the probe's connection ID stays in
+  > `connIDManager.pathProbing`; it is neither made the active connection ID nor retired, and the server keeps
+  > sending on the new path with the connection ID it used on the old one (RFC 9000 §9.5: an endpoint MUST NOT reuse
+  > a connection ID when sending to more than one destination address). With `active_connection_id_limit` 4 and
+  > sequence 0 retired, two spare IDs remain: at the third address change the server logs "skipping validation of
+  > new path ... since no connection ID is available" and never moves, and the connection dies at its idle timeout.
+  > Reproduction: a server behind a UDP relay that changes its source port three times while an HTTP/3 client
+  > (quic-go Transport with ConnectionIDLength 8) keeps making requests; the third change never completes. Expected:
+  > on switching, make the path's connection ID the active one and retire the previous one (RETIRE_CONNECTION_ID is
+  > the peer's, the server sends with the new ID), so that the spares are replenished by NEW_CONNECTION_ID as usual.
+- **адрес ответа бэкенда до проверки** (найдено вторым ревью, было и раньше): бэкенд в режиме `packet` запоминает,
+  с какого адреса фронта пришла последняя датаграмма клиента (`locals[client]`, niko-server `backend.go:268-271`,
+  raycontrol `nikoipc`), до того, как стек QUIC её проверил. Подделанная датаграмма с адресом клиента на другой порт
+  фронта (порт слота, 443) переставляет, с какого порта фронт отвечает этому клиенту: ответы уходят с порта, которого
+  клиент не ждёт, пока его следующий пакет не вернёт запись. Запоминать адрес только для датаграмм, которые стек
+  принял (или держать адрес фронта на поток), — в IPC и в обоих бэкендах.
 
 **UDP у naive датаграммами HTTP/3** ([spec/naive-udp-v1.md](spec/naive-udp-v1.md), решения §12):
 - ~~сторона ноды~~ — сделано, v0.30.0: шаг 0 и шаг 1 её §11 без замера NewReno против BBR. Запрос `connect-udp` на
