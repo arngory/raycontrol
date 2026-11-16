@@ -144,12 +144,19 @@ func TestQUICNamesLookAlike(t *testing.T) {
 // naive-quic with udp=on announces HTTP/3 datagrams to whoever completes a
 // handshake (spec/naive-udp-v1.md §7, §10.1): max_datagram_frame_size in
 // its transport parameters and SETTINGS_H3_DATAGRAM. DoH3 on the same
-// address does not, and those two lines are all that tells them apart.
+// address does not, and those two lines are all that tells them apart
+// here. They change what each does too, after the handshake as they come:
+// DoH3 closes a connection that sends a DATAGRAM frame (quic-go's
+// FRAME_ENCODING_ERROR, as for any frame not negotiated), and naive-quic
+// closes with H3_SETTINGS_ERROR one whose SETTINGS announce HTTP/3
+// datagrams without the transport parameter (RFC 9297 §2.1.1). Neither
+// tells a prober more than the transport parameter does.
 func TestQUICNamesDatagrams(t *testing.T) {
 	ns, cert := naiveTest(t, sink)
-	ns.UDP, ns.H3 = true, naiveH3
+	o := naiveUDP(ns, true)
+	o.resetKey = testResetKey(t)
 	faces := quicFaces(t, map[string]string{
-		"naive-quic": serveQUIC(t, ns, cert, quicOptions{resetKey: testResetKey(t), datagrams: true}),
+		"naive-quic": serveQUIC(t, ns, cert, o),
 		"DoH3":       serveQUIC(t, noTokens(), cert, quicOptions{resetKey: testResetKey(t)}),
 	})
 	n, d := faces["naive-quic"], faces["DoH3"]

@@ -199,12 +199,16 @@ func TestQUICNamesAnswerAlike(t *testing.T) {
 		ns.Answer = answer
 		// naive with udp=on (naive-udp-v1): a connect-udp without a
 		// password is answered as DoH3 answers it.
-		ns.UDP, ns.H3 = true, naiveH3
+		withUDP := naiveUDP(ns, true)
 		h := noTokens()
 		_, h.Answer = dohAnswer(`{"answer":"` + mode + `"}`)
 		got := map[string][]string{}
 		for name, srv := range map[string]http.Handler{"naive-quic": ns, "DoH3": h} {
-			addr := serveQUIC(t, srv, cert, quicOptions{datagrams: name == "naive-quic"})
+			o := quicOptions{}
+			if name == "naive-quic" {
+				o = withUDP
+			}
+			addr := serveQUIC(t, srv, cert, o)
 			tr := &http3.Transport{TLSClientConfig: naiveClientTLS(), QUICConfig: &quic.Config{MaxIdleTimeout: 30 * time.Second, EnableDatagrams: true},
 				EnableDatagrams: true,
 				Dial: func(ctx context.Context, _ string, tlsConf *tls.Config, conf *quic.Config) (*quic.Conn, error) {

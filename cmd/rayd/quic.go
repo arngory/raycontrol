@@ -46,6 +46,21 @@ func h3Options(o quicOptions) h3serve.Options {
 		Datagrams: o.datagrams}
 }
 
+// naiveUDP is what -udp makes of a naive server (spec/naive-udp-v1.md),
+// and the options of its QUIC side: with it, connect-udp served
+// (naive.Server.UDP, the streams h3serve gives), HTTP/3 datagrams announced
+// and the datagram requests' counts on the stats socket; without it,
+// none of these. Its users (Server.Users) must be set.
+func naiveUDP(ns *naive.Server, udp bool) quicOptions {
+	ns.UDP, ns.H3 = udp, naiveH3
+	if udp {
+		ns.Users.SetUDP(ns.UDPStats)
+	} else {
+		ns.Users.SetUDP(nil)
+	}
+	return quicOptions{datagrams: udp}
+}
+
 // naiveH3 gives naive a request's HTTP/3 stream with its datagrams
 // (naive.H3): h3serve's, for internal/naive does not import quic-go.
 func naiveH3(ctx context.Context, w http.ResponseWriter) (func() naive.H3Stream, bool) {

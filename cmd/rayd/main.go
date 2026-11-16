@@ -1519,14 +1519,12 @@ func cmdNaive(args []string) error {
 	// The users file is watched: a user taken off it (disabled, expired,
 	// over the traffic limit) loses the live streams (traffic-limit-v1 §3.2).
 	go nu.Watch(ctx)
-	ns := &naive.Server{Users: nu, Answer: handler, ICMP: *icmp, UDP: *udp, H3: naiveH3, Log: log}
-	// The refusals of the connection limits go out with the bytes, and the
-	// datagram requests' counts with udp: set before the stats socket
+	ns := &naive.Server{Users: nu, Answer: handler, ICMP: *icmp, Log: log}
+	// The refusals of the connection limits go out with the bytes, and
+	// with -udp the datagram requests' counts: set before the stats socket
 	// answers.
 	nu.SetRefused(ns.Refused)
-	if *udp {
-		nu.SetUDP(ns.UDPStats)
-	}
+	quicOpts := naiveUDP(ns, *udp)
 	if *statsSocket != "" {
 		if err := nu.ServeStats(ctx, *statsSocket, log); err != nil {
 			return err
@@ -1545,7 +1543,7 @@ func cmdNaive(args []string) error {
 		if err != nil {
 			return err
 		}
-		o := quicOptions{datagrams: *udp}
+		o := quicOpts
 		if *resetKey != "" {
 			// Without the key the service is as it was before it had
 			// one: clients wait out their idle time after a restart. Why

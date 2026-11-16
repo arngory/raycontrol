@@ -16,14 +16,14 @@ import (
 	"github.com/arngory/raycontrol/internal/naive"
 )
 
-// naiveUDP serves ns as rayd naive does with -udp on or off (naiveH3, the
-// datagrams of h3Options), and sends one connect-udp request of
+// connectUDPWith serves ns as cmdNaive does with -udp on or off (naiveUDP,
+// then serveHTTP3), and sends one connect-udp request of
 // spec/naive-udp-v1.md §3.2 to it: its answer and its stream.
-func naiveUDP(t *testing.T, ns *naive.Server, udp bool) (*http.Response, *http3.RequestStream) {
+func connectUDPWith(t *testing.T, ns *naive.Server, udp bool) (*http.Response, *http3.RequestStream) {
 	t.Helper()
-	ns.UDP, ns.H3 = udp, naiveH3
+	o := naiveUDP(ns, udp)
 	_, cert := naiveTest(t, sink)
-	addr := serveQUIC(t, ns, cert, quicOptions{datagrams: udp})
+	addr := serveQUIC(t, ns, cert, o)
 	qc, err := quic.DialAddr(t.Context(), addr, naiveClientTLS(http3.NextProtoH3), &quic.Config{EnableDatagrams: true, MaxIdleTimeout: 30 * time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -50,8 +50,11 @@ func naiveUDP(t *testing.T, ns *naive.Server, udp bool) (*http.Response, *http3.
 	return resp, rs
 }
 
-// rayd naive with -udp carries UDP as HTTP/3 datagrams; without it a
-// connect-udp request is the site's.
+// rayd naive with -udp carries UDP as HTTP/3 datagrams, and its stats
+// socket counts them; without it a connect-udp request is the site's, and
+// the stats say nothing of datagrams. What -udp sets is naiveUDP's, which
+// cmdNaive calls: the server's flag, its streams, the QUIC side's
+// datagrams, the counts; any one of them off fails the request.
 func TestNaiveUDP(t *testing.T) {
 	echo, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -73,7 +76,7 @@ func TestNaiveUDP(t *testing.T) {
 
 	ns, _ := naiveTest(t, sink)
 	ns.Allow = loopback
-	resp, rs := naiveUDP(t, ns, true)
+	resp, rs := connectUDPWith(t, ns, true)
 	if resp.StatusCode != http.StatusOK || resp.Header.Get(naive.UDPHeader) != "1" {
 		t.Fatalf("-udp: %s %v", resp.Status, resp.Header)
 	}
@@ -98,9 +101,15 @@ func TestNaiveUDP(t *testing.T) {
 	if st := ns.UDPStats(); st.Requests != 1 || st.In != 1 || st.Out != 1 {
 		t.Fatalf("%+v", st)
 	}
+	if snap := ns.Users.Snapshot(); snap.UDP == nil || snap.UDP.Requests != 1 {
+		t.Fatalf("-udp: the stats socket's counts %+v", snap.UDP)
+	}
 
 	ns, _ = naiveTest(t, sink)
-	if resp, _ := naiveUDP(t, ns, false); resp.StatusCode != http.StatusNotFound || resp.Header.Get(naive.UDPHeader) != "" {
+	if resp, _ := connectUDPWith(t, ns, false); resp.StatusCode != http.StatusNotFound || resp.Header.Get(naive.UDPHeader) != "" {
 		t.Fatalf("without -udp: %s %v", resp.Status, resp.Header)
+	}
+	if snap := ns.Users.Snapshot(); snap.UDP != nil {
+		t.Fatalf("without -udp: counts of datagrams %+v", snap.UDP)
 	}
 }
