@@ -242,9 +242,32 @@ jobs:
           sha256sum "${archives[@]}" > SHA256SUMS
           cat SHA256SUMS
           umask 077
-          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
-          minisign -S -s "$RUNNER_TEMP/minisign.key" -m SHA256SUMS -t "raycontrol ${TAG}"
-          rm -f "$RUNNER_TEMP/minisign.key"
+          key="$RUNNER_TEMP/minisign.key"
+          trap 'rm -f "$key" "$key.in" "$key.pub"' EXIT
+          # The secret is raycontrol.key whole: its comment line and its key
+          # line. The key line alone, as it is easily pasted, is taken too;
+          # CRs, trailing blanks and empty lines go.
+          printf '%s\n' "$MINISIGN_SECRET_KEY" | tr -d '\r' | sed -e 's/[[:space:]]*$//' -e '/^$/d' > "$key.in"
+          lines=$(wc -l < "$key.in")
+          if [ "$lines" -eq 1 ] && ! grep -q '^untrusted comment:' "$key.in"; then
+            { echo "untrusted comment: minisign secret key"; cat "$key.in"; } > "$key"
+          else
+            cp "$key.in" "$key"
+          fi
+          # Sign only with the key whose public half bootstrap.sh and rayctl
+          # pin: a release signed with another one no node would take.
+          pinned=$(sed -n 's/^const PubKey = "\(RW[A-Za-z0-9+/]*\)"$/\1/p' internal/release/release.go)
+          test -n "$pinned" || { echo "no pinned public key in internal/release/release.go"; exit 1; }
+          if ! minisign -R -s "$key" -p "$key.pub" < /dev/null > /dev/null 2>&1; then
+            echo "MINISIGN_SECRET_KEY is not a minisign secret key without a password ($lines line(s) after trimming; want raycontrol.key whole, its comment line and its key line)"
+            exit 1
+          fi
+          if [ "$(sed -n 2p "$key.pub")" != "$pinned" ]; then
+            echo "MINISIGN_SECRET_KEY is another key than the one bootstrap.sh and rayctl pin ($pinned): nothing signed"
+            exit 1
+          fi
+          minisign -S -s "$key" -m SHA256SUMS -t "raycontrol ${TAG}" < /dev/null
+          minisign -Vm SHA256SUMS -P "$pinned"
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
