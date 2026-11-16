@@ -674,11 +674,14 @@ func parseUDP(b []byte) (dest uotAddr, data []byte, why int) {
 		dest.ip = netip.AddrFrom16([16]byte(b[1:17])).Unmap()
 		b = b[17:]
 	case udpName:
+		// The length as an int: 2 + a byte of 254 or 255 wrapped around
+		// as a byte, and a long name cut b the wrong way round.
 		if len(b) < 2 || b[1] == 0 || len(b) < 2+int(b[1])+2 {
 			return dest, nil, dropBad
 		}
-		dest.name = string(b[2 : 2+b[1]])
-		b = b[2+b[1]:]
+		l := int(b[1])
+		dest.name = string(b[2 : 2+l])
+		b = b[2+l:]
 	default:
 		return dest, nil, dropBad
 	}

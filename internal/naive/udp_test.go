@@ -79,6 +79,12 @@ func TestParseUDP(t *testing.T) {
 		{"IPv6 cut", udpDatagram(udpDest(v6)[:18], nil), uotAddr{}, "", dropBad},
 		{"empty name", []byte{udpContext, udpName, 0, 0, 53}, uotAddr{}, "", dropBad},
 		{"name cut", udpDatagram(udpDestName("example.com", 53)[:8], nil), uotAddr{}, "", dropBad},
+		// The longest names: 2 + 254 or 255 wraps around in a byte.
+		{"a name of 253", udpDatagram(udpDestName(strings.Repeat("a", 253), 53), []byte("x")), uotAddr{name: strings.Repeat("a", 253), port: 53}, "x", -1},
+		{"a name of 254", udpDatagram(udpDestName(strings.Repeat("a", 254), 53), []byte("x")), uotAddr{name: strings.Repeat("a", 254), port: 53}, "x", -1},
+		{"a name of 255", udpDatagram(udpDestName(strings.Repeat("a", 255), 53), []byte("x")), uotAddr{name: strings.Repeat("a", 255), port: 53}, "x", -1},
+		{"a name of 255 cut", udpDatagram(udpDestName(strings.Repeat("a", 255), 53)[:200], nil), uotAddr{}, "", dropBad},
+		{"a name of 255 without port", udpDatagram(udpDestName(strings.Repeat("a", 255), 53)[:257], nil), uotAddr{}, "", dropBad},
 		{"name without port", []byte{udpContext, udpName, 1, 'a', 0}, uotAddr{}, "", dropBad},
 		{"port 0", udpDatagram(udpDest(netip.AddrPortFrom(v4.Addr(), 0)), []byte("x")), uotAddr{}, "", dropBad},
 		{"port 0 by name", udpDatagram(udpDestName("example.com", 0), []byte("x")), uotAddr{}, "", dropBad},

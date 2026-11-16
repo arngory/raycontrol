@@ -542,6 +542,8 @@ func FuzzUDPDatagram(f *testing.F) {
 	f.Add(udpDatagram(udpDest(netip.MustParseAddrPort("[2001:db8::1]:443")), nil))
 	f.Add(udpDatagram(udpDest(netip.MustParseAddrPort("[::ffff:192.0.2.1]:443")), []byte{1}))
 	f.Add(udpDatagram(udpDestName("example.com", 3478), []byte("stun")))
+	f.Add(udpDatagram(udpDestName(strings.Repeat("n", 255), 53), []byte("long")))
+	f.Add(udpDatagram(udpDestName(strings.Repeat("n", 254), 53), nil))
 	f.Add([]byte{0x40, 0x02, udpName, 1, 'a', 0, 1})
 	f.Add([]byte{udpContext, udpName, 0})
 	f.Add([]byte{0, udpIPv4})
