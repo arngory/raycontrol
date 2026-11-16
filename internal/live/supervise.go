@@ -281,6 +281,6 @@ func copyFile(from, to string) error {
 	if err := os.MkdirAll(filepath.Dir(to), 0o750); err != nil {
 		return err
 	}
-	_ = os.Remove(to) // 0400: not writable in place
-	return os.WriteFile(to, b, 0o400)
+	_ = os.Remove(to)                 // 0400: not writable in place
+	return os.WriteFile(to, b, 0o400) //nolint:gosec // G703: the deployment plan's own path; b is what goes in it
 }

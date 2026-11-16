@@ -201,7 +201,7 @@ func (j *Journal) RecordFile(path string) error {
 	if err := os.MkdirAll(filepath.Join(j.dir(), "backup"), 0o700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(j.dir(), "backup", backup), b, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(j.dir(), "backup", backup), b, 0o600); err != nil { //nolint:gosec // G703: the journal's directory, a hashed name; b is what goes in it
 		return err
 	}
 	return j.Record(Change{Kind: ChangeFile, Path: path, Backup: backup, Mode: st.Mode().Perm()})

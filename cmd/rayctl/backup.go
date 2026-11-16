@@ -216,7 +216,7 @@ func carryRestore(ctx context.Context, tmp string, made []byte) (store.Restored,
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	asMade := filepath.Join(dir, "backup.db")
-	if err := os.WriteFile(asMade, made, 0o600); err != nil {
+	if err := os.WriteFile(asMade, made, 0o600); err != nil { //nolint:gosec // G703: a fixed name in our temporary directory; made is what it holds
 		return store.Restored{}, err
 	}
 	r, err := store.CarryRestore(ctx, work, current, asMade)

@@ -4,12 +4,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -86,17 +84,15 @@ func PinnedTLS(pin string, cert *tls.Certificate) *tls.Config {
 		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
 		NextProtos:       []string{"h2"},
 		// The pin replaces the chain check: the certificate is self-signed.
-		InsecureSkipVerify: true, //nolint:gosec // G402: pinned in VerifyPeerCertificate
-		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			if len(raw) == 0 {
+		// VerifyConnection runs on every handshake, a resumed one too;
+		// VerifyPeerCertificate would skip resumed sessions, should a
+		// session cache ever be set.
+		InsecureSkipVerify: true, //nolint:gosec // G402: pinned in VerifyConnection
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
 				return errors.New("no certificate")
 			}
-			c, err := x509.ParseCertificate(raw[0])
-			if err != nil {
-				return err
-			}
-			sum := sha256.Sum256(c.RawSubjectPublicKeyInfo)
-			got := base64.RawURLEncoding.EncodeToString(sum[:])
+			got := CertPin(cs.PeerCertificates[0])
 			if subtle.ConstantTimeCompare([]byte(got), []byte(pin)) != 1 {
 				return fmt.Errorf("certificate pin %s, want %s", got, pin)
 			}

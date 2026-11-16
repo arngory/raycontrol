@@ -288,7 +288,7 @@ func (o relayOps) keepIn(dir, version string) (relayKept, error) {
 	}
 	for name, p := range o.bins {
 		if b, err := os.ReadFile(p); err == nil { //nolint:gosec // G304: fixed paths
-			if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil { //nolint:gosec // G703: the keep's directory, fixed names; b is what goes in them
 				return k, err
 			}
 		}
@@ -302,7 +302,7 @@ func (o relayOps) keepIn(dir, version string) (relayKept, error) {
 		case err != nil:
 			return k, err
 		}
-		if err := os.WriteFile(filepath.Join(dir, "files", savedName(f)), b, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "files", savedName(f)), b, 0o600); err != nil { //nolint:gosec // G703: as above
 			return k, err
 		}
 		k.Files[f] = true

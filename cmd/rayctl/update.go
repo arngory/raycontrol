@@ -242,7 +242,7 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 	}
 	for name, dst := range nodeBinaries {
 		if b, err := os.ReadFile(dst); err == nil { //nolint:gosec // G304: fixed paths
-			if err := os.WriteFile(filepath.Join(previousDir, name), b, 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(previousDir, name), b, 0o600); err != nil { //nolint:gosec // G703: fixed paths; b is what goes in them
 				return err
 			}
 		}
@@ -449,7 +449,7 @@ func installBinaries(stage string) error {
 	}
 	for name, dst := range nodeBinaries {
 		src := filepath.Join(stage, name)
-		if _, err := os.Stat(src); err != nil {
+		if _, err := os.Stat(src); err != nil { //nolint:gosec // G703: a stage in the journal's directory (apply checks one from the environment), fixed names
 			continue
 		}
 		// The data plane's (deploy.DataPlaneDir): by the host, with its
@@ -513,7 +513,7 @@ func keepRayspaUnit(dir string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, rayspaUnitName), b, 0o600)
+	return os.WriteFile(filepath.Join(dir, rayspaUnitName), b, 0o600) //nolint:gosec // G703: the stage, a fixed name; b is what goes in it
 }
 
 // placeBinary puts the binary src at dst: written next to it, then renamed

@@ -217,7 +217,8 @@ func (s *Server) ServeUnix(ctx context.Context, path string, policy PeerPolicy, 
 	srv := &http.Server{Handler: mux, ConnContext: connContext, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// ctx is done: the shutdown has its own time.
+		shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 	}()

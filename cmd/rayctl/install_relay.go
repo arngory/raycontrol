@@ -529,15 +529,15 @@ func noteRelayInstalled(status string, m relayMark, marked bool) {
 func dropRelayCopy(dir string) (relayMark, bool) {
 	m, marked := relayOps{dir: dir}.readMark()
 	for _, d := range []string{dir + ".new", dir + ".old"} {
-		if _, err := os.Lstat(filepath.Join(d, relayKeptFile)); err == nil {
-			_ = os.RemoveAll(d)
+		if _, err := os.Lstat(filepath.Join(d, relayKeptFile)); err == nil { //nolint:gosec // G703: root's previousDir, fixed names
+			_ = os.RemoveAll(d) //nolint:gosec // G703: as above
 		}
 	}
-	if _, err := os.Lstat(filepath.Join(dir, relayKeptFile)); err == nil {
-		_ = os.RemoveAll(dir)
+	if _, err := os.Lstat(filepath.Join(dir, relayKeptFile)); err == nil { //nolint:gosec // G703: as above
+		_ = os.RemoveAll(dir) //nolint:gosec // G703: as above
 		return m, marked
 	}
-	_ = os.Remove(filepath.Join(dir, relayMarkFile))
+	_ = os.Remove(filepath.Join(dir, relayMarkFile)) //nolint:gosec // G703: as above
 	return m, marked
 }
 
@@ -997,7 +997,7 @@ func joined(errs ...error) string {
 // commandApart is a command in a process group of its own: a second
 // Ctrl-C at the terminal does not reach it halfway.
 func commandApart(name string, args ...string) *exec.Cmd {
-	cmd := exec.Command(name, args...)
+	cmd := exec.Command(name, args...) //nolint:gosec // G204: commands rayctl's code names, no shell
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd
 }

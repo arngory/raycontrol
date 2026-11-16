@@ -1,6 +1,7 @@
 package pprofx
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -31,7 +32,10 @@ func TestStart(t *testing.T) {
 	if fi, err := os.Stat(sock); err != nil || fi.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("socket %v %v", fi.Mode(), err)
 	}
-	c := &http.Client{Transport: &http.Transport{Dial: func(string, string) (net.Conn, error) { return net.Dial("unix", sock) }}}
+	var d net.Dialer
+	c := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return d.DialContext(ctx, "unix", sock)
+	}}}
 	resp, err := c.Get("http://x/debug/pprof/goroutine?debug=1")
 	if err != nil {
 		t.Fatal(err)

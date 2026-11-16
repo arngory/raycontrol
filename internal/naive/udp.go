@@ -264,7 +264,7 @@ type udpRequest struct {
 	// capsules go from the socket's reader to the stream's writer.
 	capsules chan *udpAnswer
 	done     chan struct{} // closed at the end: what waits is dropped
-	failed   chan error    // the stream takes no more
+	failed   chan struct{} // the stream takes no more (fail)
 }
 
 // udpAnswer is an answer framed for the client at buf[dg:end], its data
@@ -323,10 +323,12 @@ func passedDown(slot *uotSlot, n *udpCounts, totals *udpTotals, traffic *Traffic
 	}
 }
 
-// fail notes that the stream takes no more.
-func (d *udpRequest) fail(err error) {
+// fail notes that the stream takes no more: a write to it failed. The
+// error is not kept: the request resets, its counts say what was dropped,
+// and the log names no destination.
+func (d *udpRequest) fail() {
 	select {
-	case d.failed <- err:
+	case d.failed <- struct{}{}:
 	default:
 	}
 }
@@ -351,7 +353,7 @@ func (s *Server) carryUDP(ctx context.Context, slot *uotSlot, traffic *Traffic, 
 	u.touch()
 	s.lim.uotRun(slot, u)
 	d := &udpRequest{s: s, u: u, conn: conn, st: st, n: new(udpCounts), capsules: make(chan *udpAnswer, capsuleQueued),
-		done: make(chan struct{}), failed: make(chan error, 1)}
+		done: make(chan struct{}), failed: make(chan struct{}, 1)}
 	down := passedDown(slot, d.n, &s.udp, traffic)
 	st.OnSent(func(n int) { down(false, n) })
 
@@ -610,7 +612,7 @@ func (d *udpRequest) receive() {
 		switch {
 		case err != nil:
 			d.drop(dropQueue)
-			d.fail(err)
+			d.fail()
 			continue
 		case !tooLarge:
 			continue // copied: the buffer reads the next one
@@ -671,7 +673,7 @@ func (d *udpRequest) writeCapsules(down func(capsule bool, size int)) {
 		n := a.n
 		udpAnswers.Put(a)
 		if err != nil {
-			d.fail(err)
+			d.fail()
 			return
 		}
 		down(true, n)
