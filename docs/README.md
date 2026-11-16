@@ -28,6 +28,7 @@ API для CLI и клиента Niko. Все порты закрыты до SPA
 | [spec/spa-v2.md](spec/spa-v2.md) | Формат SPA v2 и пакета регистрации устройства (заморожен). |
 | [spec/subscription-v1.md](spec/subscription-v1.md) | Подписка: запрос, подписи, ссылки с параметрами `niko-*` (заморожена). |
 | [spec/api-v1.md](spec/api-v1.md) | Удалённый API: приглашения `rcinv1:`, регистрация, mTLS по ключу устройства, роли. |
+| [spec/integrations-v1.md](spec/integrations-v1.md) | Внешние системы у ноды (боты, биллинг): роли `billing` и `support`, доступ по постоянным адресам, события webhook, OpenAPI (черновик, после v0.31.0). |
 | [RELEASE.md](RELEASE.md) | Ключ подписи и выпуск релизов. |
 | [handoff/niko-session.md](handoff/niko-session.md) | Что передать в сессию Niko: правки SPEC, контракт niko-server, доработки клиента. |
 | [handoff/niko-r1-reply.md](handoff/niko-r1-reply.md) | Ответ на документы R1 сессии Niko: TCP-носитель SPA, замечания к CONFIG и IPC. |
