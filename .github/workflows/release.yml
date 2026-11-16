@@ -40,6 +40,9 @@ jobs:
   asn:
     # One download for both archives.
     runs-on: ubuntu-24.04
+    # IPINFO_TOKEN lives in this environment, open to v* tags and main only
+    # (docs/RELEASE.md): a workflow on any other branch cannot read it.
+    environment: release-data
     steps:
       - name: IPinfo Lite
         env:
@@ -178,6 +181,10 @@ jobs:
   release:
     needs: [ci, build, rayctl]
     runs-on: ubuntu-24.04
+    # MINISIGN_SECRET_KEY lives in this environment: v* tags and main only,
+    # and the owner approves each run (docs/RELEASE.md). A repository secret
+    # would be readable by a workflow on any branch.
+    environment: release
     # One publish at a time: two close together would both list the
     # releases before either is out, and both pass --latest. The one that
     # runs is not cancelled; GitHub keeps one waiting, so a third that

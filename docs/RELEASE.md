@@ -12,8 +12,8 @@
    minisign -G -W -p raycontrol.pub -s raycontrol.key
    ```
    `-W` — ключ без пароля: он хранится только в секретах GitHub и в вашем офлайн-хранилище.
-2. Содержимое `raycontrol.key` целиком — в секрет репозитория `MINISIGN_SECRET_KEY`
-   (Settings → Secrets and variables → Actions).
+2. Содержимое `raycontrol.key` целиком — в секрет `MINISIGN_SECRET_KEY` **окружения** `release` (ниже, «Окружения
+   выпуска»), не в секреты репозитория.
 3. Вторая строка `raycontrol.pub` (начинается с `RW`) — в `PUBKEY` файла `install/bootstrap.sh`, отдельным коммитом.
    До этого bootstrap отказывается работать.
 4. `raycontrol.key` — в офлайн-хранилище. Потеря ключа = новый ключ и новый `bootstrap.sh`.
@@ -25,8 +25,22 @@
 ## Один раз: токен IPinfo
 
 Релиз несёт базу AS для сводки от клиентов — IPinfo Lite (R4-21, CC BY-SA 4.0). Release-workflow скачивает её
-токеном из секрета репозитория `IPINFO_TOKEN`: бесплатный аккаунт на ipinfo.io → токен → Settings → Secrets and
-variables → Actions. Без секрета релиз не собирается. База кладётся в архив без изменений, атрибуция — в `NOTICE`.
+токеном из секрета `IPINFO_TOKEN` окружения `release-data`: бесплатный аккаунт на ipinfo.io → токен → секрет
+окружения (ниже). Без секрета релиз не собирается. База кладётся в архив без изменений, атрибуция — в `NOTICE`.
+
+## Один раз: окружения выпуска
+
+Секреты релиза — в окружениях GitHub, а не в секретах репозитория: секрет репозитория читает workflow любой ветки,
+и ветка `claude/**` с ошибочной или подсунутой правкой workflow унесла бы ключ подписи. Settings → Environments:
+
+- **`release`** — секрет `MINISIGN_SECRET_KEY`. Required reviewers: владелец («Prevent self-reviews» выключен, пока
+  других ревьюеров нет). Deployment branches and tags → Selected: тег `v*` и ветка `main` (ручной запуск).
+  Каждый релиз ждёт кнопки Approve в Actions (Review deployments) перед подписью.
+- **`release-data`** — секрет `IPINFO_TOKEN`. Без ревьюеров (иначе два одобрения на релиз), те же тег `v*` и
+  ветка `main`.
+
+Задачи `release` и `asn` в `release.yml` ссылаются на эти окружения. После первого релиза через окружения
+одноимённые секреты репозитория удаляются.
 
 ## Выпуск
 
