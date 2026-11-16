@@ -698,6 +698,9 @@ int datagram_stream_start(datagram_stream* s, const char* url,
 int datagram_stream_send(datagram_stream* s, const char* data, int len, int flags);
 /* До on_ready — 0: пока только капсулой. */
 int datagram_stream_max_payload(datagram_stream* s);
+/* Капсулы, выброшенные библиотекой за 100 мс (добавлено при реализации, под
+ * DroppedCapsules §8.4). */
+uint64_t datagram_stream_dropped_capsules(datagram_stream* s);
 void datagram_stream_cancel(datagram_stream* s);
 int datagram_stream_destroy(datagram_stream* s);
 ```
@@ -707,9 +710,11 @@ int datagram_stream_destroy(datagram_stream* s);
 - **Обратное давление.** `send` не блокирует. Счётчик неотправленных задач ограничен (64): сверх — `QUEUE_FULL`. Дальше
   датаграмму держит очередь quiche не дольше 1,25 RTT (§2.3). На приёме библиотека ничего не копит: очередь — у
   вызывающего.
-- **`CAPSULE_TIMEOUT`** сам вызов вернуть не может: капсула пишется позже, в сетевом потоке. Предложение: `send`
-  возвращает его для следующей датаграммы, пока предыдущая капсула ждёт дольше 100 мс, а счётчик отброшенных капсул
-  виден вызывающему. Согласовать с клиентом (§13).
+- **`CAPSULE_TIMEOUT`** сам вызов вернуть не может: капсула пишется позже, в сетевом потоке. Согласовано (§8.4): `send`
+  возвращает его только для датаграммы, которой нужна капсула, пока голова очереди капсул ждёт дольше 100 мс; счётчик
+  отброшенных капсул — `datagram_stream_dropped_capsules`. В реализации головой считается и капсула, застрявшая в
+  буфере отправки потока, а 100 мс отсчитываются не раньше отправки заголовков запроса — ранние капсулы не теряются
+  на рукопожатии.
 - **Конец.** Три разных: `on_closed` — чистый (после него следующий пакет приложения открывает новый запрос);
   `on_failed` — сброс или обрыв; `on_canceled` — по `cancel`. После любого из них колбэков нет. `destroy` — из любого
   потока, выполняется отложенно.
@@ -731,6 +736,22 @@ int datagram_stream_destroy(datagram_stream* s);
 Итого 10–12 файлов, 600–900 строк. Сверх файлов: имена в quiche переименовываются (в 154 рядом живут `…MessagePayload` в
 Chromium и `…DatagramPayload` в quiche, §2.3) — мелкие механические правки на каждом мажоре, раз в четыре недели. Оценка
 не проверена сборкой.
+
+**Как вышло (arngory/naiveproxy, 158.0.8127.36, `098643ce`…`1ee76200`, 2026-11-16):** 16 файлов, +1270/−10. Сверх
+таблицы:
+
+- `net/quic/quic_chromium_client_session.{h,cc}` — `WaitForSettings()` и `OnSettingsFrame`: ждать `SETTINGS` в Chromium
+  было нечем, а без них нельзя честно ответить «нода без датаграмм» до отправки запроса.
+- `net/quic/quic_chromium_client_stream.{h,cc}` — две правки под режим капсул: конец тела (FIN) в этом режиме не
+  доходит до `OnBodyAvailable` (добавлен `OnFinRead`), а заголовки ответа, пришедшие в одном пакете с закрытием потока,
+  теперь доставляются (заголовки записываются до `ConsumeHeaderList()`). Без них ответ сайта от ноды (quic-go шлёт
+  STOP_SENDING и FIN вместе с не-200) превращался в `ERR_QUIC_PROTOCOL_ERROR` вместо `on_ready(404)` и `on_closed`.
+- `components/grpc_support/BUILD.gn`, `include/headers.gni`, `components/cronet/cronet_exports.lst` — сборка и экспорт
+  `datagram_stream_*`.
+- Тест на C++ не добавлен: `bidirectional_stream_quic_impl_unittest.cc` в урезанном дереве нет. Проверка — интеграционные
+  тесты cronet-go через настоящую libcronet против сервера quic-go (§8.4).
+
+Номера строк из 154, приведённые выше, в 158 совпали.
 
 Второй движок патча не требует (§2.4).
 
@@ -809,6 +830,24 @@ func (c *DatagramConn) Close() error // Cancel
     Очередь приёма ограничена (256): при переполнении новые датаграммы отбрасываются и считаются. В `naive_client.go`
     у клиента остаются второй движок (создаётся лениво, при первом UDP-сокете строки с `udp=1`), заголовки
     авторизации и адрес §3.2.
+
+  Реализовано (arngory/cronet-go, `c16f6a61`…`c2dbe685`, 2026-11-16) как выше, с добавками:
+  - `ErrDatagramUnsupported` и `CheckDatagramSupport() error`: библиотека без `datagram_stream_*` (выпущенная раньше)
+    грузится как прежде, а датаграммы отвечают этой ошибкой; `CreateDatagramConn` на ней возвращает уже закрытый conn.
+    purego ищет эти символы отдельно; cgo берёт `datagram_stream_c.h`, если он в наборе заголовков, иначе — заглушки
+    (заголовки и библиотеки публикуются одной сборкой).
+  - `func (c *DatagramConn) SetDeadline(t time.Time) error`.
+  - Заголовки: библиотека ставит `:protocol connect-udp` и `capsule-protocol: ?1` (если нет) и всегда идёт по QUIC;
+    вызывающий — `niko-udp: 1`, авторизацию и `Padding`, и сам проверяет `niko-udp: 1` в ответе 200.
+  - `Err()`: `io.EOF` — нода закрыла чисто или ответила не 200 (`WaitReady` отдаёт статус); `NetError` — сбой,
+    в том числе `-322` (`ERR_METHOD_NOT_SUPPORTED`) у ноды без `SETTINGS_H3_DATAGRAM` или extended CONNECT;
+    `net.ErrClosed` — после `Close`; ошибка контекста — если он кончился до ответа ноды (контекст
+    `CreateDatagramConn` ограничивает только установку).
+  - После конца `WriteDatagram` возвращает `ErrDatagramClosed` (после `Close` — `net.ErrClosed`); принятое до конца
+    читается до ошибки. До 200 `Send(…, false)` возвращает `ErrDatagramTooLarge` (влезает только капсула): так
+    клиент держит правило 1252 байт для пар QUIC (§4.4).
+  - Очередь приёма — кольцо переиспользуемых буферов, без выделения памяти на датаграмму.
+  - `MaxPayload` на IPv4 для раннего потока (Stream ID в 1 байт) — 1214; таблица §4.1 считает ID в 2 байта (1206).
 - **Ядро:** `ListenPacket` исходящего naive возвращает `net.PacketConn` поверх этого соединения, если строка несёт
   `udp=1` и проба этой сети прошла (§9.4); иначе — UoT, как сейчас. `WriteTo` дописывает адрес или имя (§3.2) и зовёт
   `send`, разрешая капсулу по §4.4; чтение разбирает адрес источника.
