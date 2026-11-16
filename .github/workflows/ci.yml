@@ -93,10 +93,15 @@ jobs:
           git -C xray checkout -q "$XRAY_COMMIT"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: xray/go.mod
+          # One Go for everything we ship: the toolchain of our go.mod, not
+          # whatever 1.27.x is newest when the job runs; GOTOOLCHAIN=local below
+          # refuses rather than fetch another one if the fork asks for newer.
+          go-version-file: go.mod
           cache: false
       - name: Build Xray
         working-directory: xray
+        env:
+          GOTOOLCHAIN: local
         run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/xray" ./main
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
@@ -477,10 +482,14 @@ jobs:
           git -C xray checkout -q "$XRAY_COMMIT"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version-file: xray/go.mod
+          # One Go for everything we ship: the toolchain of our go.mod, not
+          # whatever 1.27.x is newest when the job runs; GOTOOLCHAIN=local below
+          # refuses rather than fetch another one if the fork asks for newer.
+          go-version-file: go.mod
       - name: Build Xray
         working-directory: xray
         env:
+          GOTOOLCHAIN: local
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
