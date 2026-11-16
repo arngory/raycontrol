@@ -138,9 +138,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             reaches it, whether chosen at install (-ports) or random,
                                             the current port of each rotating range
   relay add NAME ADDRESS | list | remove NAME   relays in front of the node (relay-v1): one address
-  relay bundle [-exit IP] [-ssh-port N] [-admin CIDRS] [-o FILE] NAME   the relay host's bundle (new certificate, new SPA keys)
+                                            each, reaching the service ports without SPA
+  relay bundle [-exit IP] [-ssh-port N] [-admin CIDRS] [-o FILE] NAME   the relay host's bundle: new certificate, new SPA keys (root only)
   relay set [-ssh-port N] [-admin CIDRS] NAME   the relay host's SSH access, without a new bundle
-                                            each, reaching the service ports without SPA; root only
   relay ports NAME                          every port the relay host takes, for a provider's firewall
                                             in front of it: its SSH, SPA range and probe endpoint, and
                                             the exit's ports it forwards (relay bundle prints them too)
@@ -227,8 +227,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   remote enroll [-o FILE] [-carrier udp|tls|tcp|auto] [-addr A] [-pin PIN] INVITE|@FILE|-
       register a device from an invite (RCINV2:... or rcinv1:...): a new client
       key, SPA, then the API; writes the device file (bundle and key, mode 0600)
-  -remote FILE <command>                    status, node, user, service, device, audit, admin, ports, relay (but
-                                            relay bundle), dns, metrics, summary, app-mirror, debug, version run
+  -remote FILE <command>                    status, node, user, service, device, audit, admin, ports, relay
+                                            list|ports|set, dns, metrics, summary, app-mirror, debug, version run
                                             against the node through its API
   -remote FILE remote whoami|rotate         the device; a new client key for it
 `
