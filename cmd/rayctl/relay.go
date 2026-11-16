@@ -63,6 +63,23 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 		if err := needRoot(); err != nil {
 			return err
 		}
+		// The file first: issuing the bundle changes the relay's keys, so
+		// a bundle that then found no file to go to (one there already, a
+		// directory that takes none) was lost, the one before dead too.
+		var file *os.File
+		if *out != "" {
+			f, err := createNew(*out)
+			if err != nil {
+				return fmt.Errorf("%w: nothing issued, the relay's bundle before still works", err)
+			}
+			file = f
+			defer func() {
+				if file != nil { // no bundle in it
+					_ = file.Close()
+					_ = os.Remove(*out)
+				}
+			}()
+		}
 		session := sshClient()
 		r, err := c.c.IssueRelayBundle(ctx, connect.NewRequest(&nodev1.IssueRelayBundleRequest{
 			Name: fs.Arg(0), ExitAddress: *exit, SshPort: uint32(*ssh), Admin: splitList(*admin), AdminIfNone: splitList(session)}))
@@ -91,10 +108,17 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 			fmt.Fprintf(os.Stderr, "relay %s: its probe endpoint on tcp/%d and udp/%d (rayd relay): a provider's firewall in front of\n"+
 				"the relay host lets both through, as it does the forwarded ports\n", fs.Arg(0), r.Msg.ProbePort, r.Msg.ProbePort)
 		}
-		if *out == "" {
+		if file == nil {
 			fmt.Println(r.Msg.Bundle)
-		} else if err := writeNew(*out, []byte(r.Msg.Bundle+"\n")); err != nil {
-			return err
+		} else {
+			_, err := file.WriteString(r.Msg.Bundle + "\n")
+			if cerr := file.Close(); err == nil {
+				err = cerr
+			}
+			if err != nil {
+				return err
+			}
+			file = nil
 		}
 		fmt.Fprintf(os.Stderr, "relay %s: a new certificate and new SPA keys for it; the bundle before no longer works, and the\n"+
 			"running relay stops taking its perimeter until the new bundle is installed there. Clients take the new keys\n"+
@@ -181,15 +205,7 @@ func printRelayPorts(w *tabwriter.Writer, ports []*nodev1.RelayPort) {
 	}
 }
 
-// writeNew writes a new file for root only; an existing one is left alone.
-func writeNew(path string, b []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: the operator's file
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
+// createNew makes a new file for root only; an existing one is left alone.
+func createNew(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: the operator's file
 }
