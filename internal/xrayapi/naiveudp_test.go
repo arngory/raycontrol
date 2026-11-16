@@ -35,6 +35,7 @@ import (
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/nikoipc"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/quiccid"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
@@ -59,6 +60,16 @@ type naiveUDPNode struct {
 // startNaiveUDPNode renders the node, starts rayd naive's sockets, its
 // QUIC side and the front. Set NIKO_SERVER_BIN.
 func startNaiveUDPNode(t *testing.T, ctx context.Context) *naiveUDPNode {
+	t.Helper()
+	return startNaiveUDPNodeFor(t, ctx, "")
+}
+
+// startNaiveUDPNodeFor is startNaiveUDPNode with render writing for
+// niko-server tag, the pinned one when "": a NIKO_SERVER_BIN newer than
+// the pin takes what the pin does not (routable connection IDs from
+// v0.18.0). rayd naive's QUIC side takes the label of its connection IDs
+// from its rendered file, as rayd naive -cid does.
+func startNaiveUDPNodeFor(t *testing.T, ctx context.Context, tag string) *naiveUDPNode {
 	t.Helper()
 	niko := os.Getenv("NIKO_SERVER_BIN")
 	if niko == "" {
@@ -112,6 +123,9 @@ func startNaiveUDPNode(t *testing.T, ctx context.Context) *naiveUDPNode {
 	paths := render.Paths{Rendered: filepath.Join(dir, "rendered"), Run: filepath.Join(dir, "run")}
 	for _, d := range []string{paths.FrontDir("reality"), filepath.Dir(paths.NaiveSocket("naive")), filepath.Dir(paths.SiteSocket("site"))} {
 		os.MkdirAll(d, 0o755)
+	}
+	if tag != "" {
+		defer render.UseNikoServer(tag)()
 	}
 	files, _, err := render.Render(m, paths)
 	if err != nil && !render.Partial(err) {
@@ -175,12 +189,22 @@ func startNaiveUDPNode(t *testing.T, ctx context.Context) *naiveUDPNode {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The label of its connection IDs and the node's secret, always
+		// rendered (render.NaiveQUICCID), as rayd naive -cid reads them.
+		label, secret, err := quiccid.ReadLabelled(filepath.Join(paths.Rendered, "naive", render.NaiveQUICCID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids, err := quiccid.NewGenerator(secret, label)
+		if err != nil {
+			t.Fatal(err)
+		}
 		sctx, cancel := context.WithCancel(ctx)
 		served := make(chan error, 1)
 		go func() {
 			served <- h3serve.Serve(sctx, nl3, func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &cert, nil }, ns,
 				h3serve.Options{Idle: render.QUICIdle, MaxStreams: naive.MaxStreams, PendingStreams: naive.PendingStreams,
-					MaxHeaderBytes: naive.MaxHeaderBytes, Datagrams: true})
+					MaxHeaderBytes: naive.MaxHeaderBytes, Datagrams: true, ConnIDs: ids})
 		}()
 		var once bool
 		stop := func() {
@@ -205,7 +229,13 @@ func startNaiveUDPNode(t *testing.T, ctx context.Context) *naiveUDPNode {
 // link's password, answered 200 with niko-udp: 1.
 func (n *naiveUDPNode) connectUDP(t *testing.T, ctx context.Context) (*quic.Conn, *http3.RequestStream) {
 	t.Helper()
-	qc, err := quic.DialAddr(ctx, "127.0.0.1:"+strconv.Itoa(n.port), &tls.Config{ServerName: n.sni, RootCAs: n.roots,
+	return n.connectUDPVia(t, ctx, "127.0.0.1:"+strconv.Itoa(n.port))
+}
+
+// connectUDPVia is connectUDP to the front through addr (a client's NAT).
+func (n *naiveUDPNode) connectUDPVia(t *testing.T, ctx context.Context, addr string) (*quic.Conn, *http3.RequestStream) {
+	t.Helper()
+	qc, err := quic.DialAddr(ctx, addr, &tls.Config{ServerName: n.sni, RootCAs: n.roots,
 		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, NextProtos: []string{http3.NextProtoH3}}, &quic.Config{EnableDatagrams: true})
 	if err != nil {
 		t.Fatalf("QUIC through the front: %v", err)
