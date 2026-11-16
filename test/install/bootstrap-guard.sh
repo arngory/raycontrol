@@ -49,13 +49,13 @@ run_case() {
 	(
 		# shellcheck disable=SC1090,SC1091 # the copy made above
 		. "$t/bootstrap.sh"
-		# shellcheck disable=SC2329 # bootstrap.sh's main calls them
+		# shellcheck disable=SC2317,SC2329 # bootstrap.sh's main calls them (SC2317 before shellcheck 0.11)
 		fetch() { cp "$t/fix/$(basename "$1")" "$2"; }
-		# shellcheck disable=SC2329
+		# shellcheck disable=SC2317,SC2329
 		verify_minisig() { return 0; }
-		# shellcheck disable=SC2329
+		# shellcheck disable=SC2317,SC2329
 		signed_version() { echo "$fake_signed"; }
-		# shellcheck disable=SC2329
+		# shellcheck disable=SC2317,SC2329
 		install_deps() { :; }
 		main "$@"
 	) >"$t/out" 2>&1
