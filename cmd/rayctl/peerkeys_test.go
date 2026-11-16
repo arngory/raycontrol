@@ -113,7 +113,7 @@ func TestPeerKeysCommand(t *testing.T) {
 	if out != want {
 		t.Fatalf("got\n%s\nwant\n%s", out, want)
 	}
-	if !strings.Contains(note, "they change") || !strings.Contains(note, "Leaving AllowedPublicKeys empty is the simpler choice") ||
+	if !strings.Contains(note, "they change") || !strings.Contains(note, "Leaving AllowedPublicKeys empty is simpler but open") ||
 		strings.Contains(note, "warning") {
 		t.Errorf("the note:\n%s", note)
 	}

@@ -73,8 +73,10 @@ const peerKeysNote = `note: these are the keys the node lets in now, and they ch
 enabled, disabled, expired or over the limit, and each user's credential switch (every -cred-period,
 30 days by default: the next keys are listed from -cred-lead, 3 days, before it, the previous ones for
 -cred-grace, 2 days, after). A peer that keeps to AllowedPublicKeys must take each change, or the clients
-it leaves out lose their path through it. Leaving AllowedPublicKeys empty is the simpler choice: the peer
-then lets anyone peer, as a public peer does.
+it leaves out lose their path through it. Leaving AllowedPublicKeys empty is simpler but open: anyone who
+learns the peer's address can then peer with it, ask it for its peers' keys (the node's and the devices'
+connected now) and send frames to clients that go through it past the node's filter (spec/lan-v1.md §2.1,
+§2.3), as with a public peer.
 `
 
 func keysOf(keys []*nodev1.YggdrasilPeerKey) []string {
