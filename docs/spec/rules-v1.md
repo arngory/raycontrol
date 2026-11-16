@@ -337,12 +337,12 @@ niko-routes.
     {"tag": "ads", "sha256": "…", "size": 90211, "path": "/rules/v1/<sha256>.srs"},
     {"tag": "ru-blocked", "sha256": "…", "size": 412345, "path": "/rules/v1/<sha256>.srs"},
     {"tag": "ru-inside-only", "sha256": "…", "size": 41234, "path": "/rules/v1/<sha256>.srs"},
-    {"tag": "office", "sha256": "…", "size": 1180, "path": "/rules/v1/<sha256>.srs", "own": true}],
+    {"tag": "own:office", "sha256": "…", "size": 1180, "path": "/rules/v1/<sha256>.srs", "own": true}],
   "enforce": [
     {"set": "ads", "action": "block"},
     {"set": "ru-blocked", "action": "node"},
     {"set": "ru-inside-only", "action": "relay", "relay": "r1", "fallback": "none", "adaptive": false},
-    {"set": "office", "action": "direct"}]}
+    {"set": "own:office", "action": "direct"}]}
 ```
 
 | Поле | Смысл |
@@ -365,7 +365,10 @@ niko-routes.
   файл, и `kind`. Версии у клиента и ноды могут расходиться (клиент взял 1043 с GitHub, нода отдаёт 1042): тогда
   хеши ноды не из манифеста клиента, но имя то же. Файл с хешем, который есть в манифесте клиента, берётся с ноды;
   другой — с GitHub или из своей копии.
-- **Свои наборы ноды** — `.srs`, которые администратор кладёт сам (`rayctl rules own add`, §8), с `own: true`. Их
+- **Свои наборы ноды** — `.srs`, которые администратор кладёт сам (`rayctl rules own add`, §8), с `own: true` и
+  тегом с приставкой **`own:`** (`own:office`): с именами манифеста они не пересекаются. Тег без приставки или тег,
+  чьё имя после приставки совпадает с именем набора манифеста, `rayctl rules own add` не принимает, а клиент такой
+  набор отбрасывает с предупреждением. Их
   нет в манифесте; клиент берёт файл с ноды по SHA-256. Подписаны только подписью ноды.
 - Поля нет: зеркало выключено, ещё ничего не принято или нода старше.
 - Поле отдаётся всем активным устройствам, как `app`: в файлах списков нет ничего, чего нет на GitHub. Свои наборы
@@ -506,7 +509,7 @@ rayctl rules                              # зеркало, принятые в�
 rayctl rules mirror on|off                # по умолчанию off; off удаляет файлы
 rayctl rules sets                         # наборы принятого манифеста: tag, kind, country, размер, отдаётся ли
 rayctl rules enable|disable TAG…          # какие наборы отдавать
-rayctl rules own add TAG FILE.srs         # свой набор ноды (только block, node, direct)
+rayctl rules own add NAME FILE.srs        # свой набор ноды с тегом own:NAME (только block, node, direct)
 rayctl rules own remove TAG
 rayctl rules enforce                      # правила по порядку, с причиной, если правило не публикуется
 rayctl rules enforce add [-at N] -action block|node SET
@@ -610,7 +613,9 @@ rayctl rules enforce remove N
 - Считает ли GitHub коммит от `github-actions[bot]` активностью, которая держит расписание (§3.3). Официальная
   документация говорит только «no repository activity … in 60 days».
 - Сколько префиксов будет у наборов стран после пересечения с IPinfo Lite (§2.4).
-- Что ядро клиента перечитывает изменённый `.srs` без разрыва соединений — со слов клиента (ROUTING-APPS §3).
+- Что ядро клиента перечитывает изменённый `.srs` без разрыва соединений — со слов клиента (ROUTING-APPS §3). Это
+  касается только имён и подсетей. Состав приложений (`user_id`, теги) задаётся при сборке конфига: новые пакеты в
+  списке требуют пересборки конфига клиента.
 - Условия IPinfo: CC BY-SA 4.0 и FAQ «within a product» против общих ToS «internal business purposes»
   (11-asn-sources §2.2): формулировки расходятся.
 - Нужен ли токен IPinfo для скачивания Lite — по странице так (`?token=`), без аккаунта не пробовали.

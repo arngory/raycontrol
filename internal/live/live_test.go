@@ -508,7 +508,7 @@ func TestApplyQUICCIDKeyChange(t *testing.T) {
 	if err := a.Apply(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{filepath.Join(paths.Rendered, "front", render.QUICCIDKey), filepath.Join(paths.Rendered, "hy2", render.QUICCIDKey)} {
+	for _, f := range []string{filepath.Join(paths.Rendered, "front", render.FrontQUICCIDKeys), filepath.Join(paths.Rendered, "hy2", render.QUICCIDKey)} {
 		if _, err := os.Stat(f); err != nil {
 			t.Fatalf("not rendered: %v", err)
 		}

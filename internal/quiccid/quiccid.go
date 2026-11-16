@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/quic-go/quic-go"
 
@@ -115,8 +116,8 @@ func (c *Codec) Decode(id []byte) (label uint16, counter uint64, ok bool) {
 
 // Generator makes a backend's connection IDs for quic-go
 // (quic.Transport.ConnectionIDGenerator): its label and a counter that
-// starts at random, one step per ID. IDs of one generator do not repeat
-// before 2^40 of them; those of two labels never meet.
+// starts from the clock (start), one step per ID. IDs of one generator do
+// not repeat before 2^40 of them; those of two labels never meet.
 type Generator struct {
 	codec *Codec
 	label uint16
@@ -128,6 +129,11 @@ var _ quic.ConnectionIDGenerator = (*Generator)(nil)
 // NewGenerator is the generator of a backend's label, under the label's
 // key.
 func NewGenerator(labelKey []byte, label int) (*Generator, error) {
+	return newGeneratorAt(labelKey, label, time.Now())
+}
+
+// newGeneratorAt is NewGenerator started at now.
+func newGeneratorAt(labelKey []byte, label int, now time.Time) (*Generator, error) {
 	if label < 1 || label > MaxLabel {
 		return nil, fmt.Errorf("quiccid: label %d, want 1-%d", label, MaxLabel)
 	}
@@ -135,13 +141,27 @@ func NewGenerator(labelKey []byte, label int) (*Generator, error) {
 	if err != nil {
 		return nil, err
 	}
-	var b [8]byte
+	var b [2]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return nil, err
 	}
 	g := &Generator{codec: codec, label: uint16(label)} //nolint:gosec // G115: checked above
-	g.next.Store(binary.BigEndian.Uint64(b[:]))
+	g.next.Store(start(now, binary.BigEndian.Uint16(b[:])))
 	return g, nil
+}
+
+// start is a generator's counter at its start: 4096 a second of the clock
+// since 1970, and a random offset within the second, modulo 2^40 (the
+// counter wraps every 2^28 s, 8.5 years). A process after another starts
+// past the IDs the one before issued, as long as that one issued fewer
+// than 4096 a second on average since its own start: its IDs are behind
+// the new window of Ahead and still get their resets, and the new IDs are
+// not the old ones. Without the label's key the counter is not seen: the
+// IDs stay random. A clock set back by more than the old process lived
+// puts the old IDs in the window: their clients wait out their idle time
+// instead of a reset, and nothing else.
+func start(now time.Time, random uint16) uint64 {
+	return (uint64(now.Unix())<<12 + uint64(random&0xfff)) & (1<<counterBits - 1) //nolint:gosec // G115: the seconds since 1970
 }
 
 // GenerateConnectionID is the next ID.
@@ -158,9 +178,9 @@ func (g *Generator) ConnectionIDLen() int { return Len }
 // A server must not answer a packet for such an ID with a stateless reset:
 // the token is a function of the ID and the service's key, and whoever has
 // the label's key could collect the tokens of the IDs to come and end
-// those connections later (h3serve drops such packets). An ID of a
-// process before this one falls in the window by chance only, 2^-8 of the
-// time: its client then waits out its idle time instead of a reset.
+// those connections later (h3serve drops such packets). The IDs of a
+// process before this one are behind the window (start): they still get
+// their resets.
 func (g *Generator) Ahead(id []byte) bool {
 	if len(id) < Len {
 		return false

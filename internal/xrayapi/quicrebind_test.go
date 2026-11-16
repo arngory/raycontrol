@@ -106,7 +106,7 @@ func nikoTakesCID(t *testing.T, niko string) bool {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := `{"schema":1,"role":"front","backends":{"q":{"socket":"/run/q.sock","mode":"packet","uid":1,"cid_label":1}},
-		"udp":{"listen":["127.0.0.1:443"],"routes":[{"sni":["q.example.com"],"backend":"q"}],"cid_key_file":"/run/q.key"}}`
+		"udp":{"listen":["127.0.0.1:443"],"routes":[{"sni":["q.example.com"],"backend":"q"}],"cid_keys_file":"/run/q.keys"}}`
 	path := filepath.Join(dir, "front.json")
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)

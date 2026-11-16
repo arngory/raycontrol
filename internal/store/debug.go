@@ -48,9 +48,10 @@ func (s *Store) DNSProbeKey(ctx context.Context) ([]byte, error) {
 }
 
 // settingQUICCIDKey is the node's secret of routable connection IDs
-// (docs/spec/quic-cid-route-v1.md): 32 bytes, made once, shared by the
-// front and the node's QUIC backends (Hysteria2, naive-quic, DoH3), never
-// sent to a client.
+// (docs/spec/quic-cid-route-v1.md): 32 bytes, made once, never sent to a
+// client. It stays here and in rayd: each QUIC backend (Hysteria2,
+// naive-quic, DoH3) gets its own label's key derived from it, the front
+// the keys of its backends' labels (render).
 const settingQUICCIDKey = "quic_cid_key"
 
 // QUICCIDKey returns the node's secret of routable connection IDs, making
