@@ -994,12 +994,14 @@ services             9
 active devices       1
 spa ports            [27441 28500 27844]
 egress               blocked: local networks (rayctl egress)
+naive naive          name k2p.example.com
 acme site            ok 2m10s ago
 apply                ok 40s ago
 conn-limit           ok 8s ago: on; nobody at a limit in 15 min
 credential-rotation  ok 2m30s ago
 dns                  ok 2m5s ago
 dns-zone dns         ok 1m50s ago: …
+naive-names          ok 30s ago
 …
 perimeter            ok 5s ago: rayspa follows the perimeter, its table is in (rayspa v0.31.0)
 …
@@ -1025,13 +1027,15 @@ perimeter table      ok: rayspa runs, its table is in with rayd's snapshot
 | `port53` | UDP 53 рядом с нодой никто не занял |
 | `resolver` | `/etc/resolv.conf` читается службами |
 | `reality-target <сервис>` | чужая цель REALITY жива (только если вы её задали) |
+| `naive <сервис>` | имя сервера naive и, пока смена опубликована, следующее (с v0.29.0, §8, naive) |
+| `naive-names` | фронт обслуживает опубликованное следующее имя каждого naive (§8, naive); только на ноде с naive |
 | `perimeter` | `rayspa` следит за снимками `rayd` и его таблица стоит (так говорит сам `rayspa`). `FAILED` — `rayspa` не связан с `rayd` или его таблица не стоит дольше 90 секунд; `unknown` — `rayspa` старее `rayd` и о таблице не сообщает (§13) |
 | `perimeter table` | таблица в ядре, как её читает `nft`, и чья она (только от root на ноде) |
 | `tls-roots` | каким корням верят свои соединения ноды (§6.4). `FAILED` — эти корни отклонили соединения за последние 12 часов, с последним хостом и причиной (§13) |
 | `ssh port` | только от root на ноде и только когда порты sshd разошлись с портами сервисов `ssh` (§7) |
 | `traffic`, `traffic <сервис>` | счёт трафика пользователей |
 | `conn-limit`, `conntrack` | пределы соединений и таблица соединений |
-| `credential-rotation`, `reality-rotation`, `prune` | плановые смены ключей и чистка |
+| `credential-rotation`, `reality-rotation`, `prune` | плановые смены ключей и имён сервера (REALITY и naive) и чистка |
 | `update`, `auto-update` | проверка и установка обновлений, если включены (§9) |
 
 **Если `rayctl: … connect: no such file or directory` или `connection refused`:** `rayd` не запущен. Смотрите
@@ -2003,7 +2007,7 @@ admin-устройства — удалённый доступ админист�
   3   site          site          true     key since 2026-11-14 13:58, next key pinned since 2026-11-14 13:58
   4   reality       reality       true     since creation
   5   hy2-masq      hy2-masq      true
-  7   naive         naive         true
+  7   naive         naive         true     name k2p.example.com since creation
   9   inner         inner         true
   11  dns           dnstt         true     auth required, v2 optional, seal optional
   14  api           api           true
@@ -2012,7 +2016,8 @@ admin-устройства — удалённый доступ админист�
   ```
 
   `subscription`, `ssh`, `site` и `inner` — служебные, нода заводит их сама; `api` вы добавили сами, но для
-  устройств он такой же несущий. В `KEYS` у `site` — ключ его сертификата (ниже, «Сертификат сайта и пины»). Виды `olcrtc` и `openflux` в строке `kinds` есть, но эта версия их не
+  устройств он такой же несущий. В `KEYS` у `site` — ключ его сертификата (ниже, «Сертификат сайта и пины»), у `naive` — имя сервера и его смена
+  (ниже, naive). Виды `olcrtc` и `openflux` в строке `kinds` есть, но эта версия их не
   разворачивает: не добавляйте их.
 
 ### Как проверить, что сервис работает
@@ -2266,41 +2271,91 @@ QUIC — только с отдельным переключателем «naive
   отдельному соединению QUIC на UDP 443, теряются они поодиночке, как обычный UDP. В подписке у naive появляется
   `udp=1`; `uot=2` остаётся, и там, где QUIC не проходит, клиент идёт по-старому.
   - **По умолчанию выключено**: включённым станет после проверки на живых сетях.
-  - **Клиент.** Сторона ноды готова; пользоваться ею будет Niko со вторым движком naive, когда он выйдет. Выпущенные
-    версии, включая 1.45.0, параметр `udp=1` пропускают и работают как раньше.
+  - **Клиент.** Сторона ноды готова; пользоваться ею будет Niko со вторым движком naive. По записям этого
+    репозитория такой Niko ещё не выпущен ([handoff/SYNC.md](handoff/SYNC.md), строка T20: interop ядра клиента с
+    кандидатом v0.30.0 зелёный). Выпущенные версии, включая 1.45.0, параметр `udp=1` пропускают и работают как
+    раньше.
+  - **Как им пользуется клиент** (по спецификации и сообщениям клиента, на телефоне здесь не проверялось): в новой
+    сети UDP сначала идёт по-старому, внутри потока; через несколько секунд клиент один раз проверяет датаграммы эхом
+    к ноде и, если они проходят, открывает ими новые сокеты приложений; результат помнит по сети. Подробно —
+    [naive-udp-v1](spec/naive-udp-v1.md) §9.4.
+  - **Когда включать.** Когда у ваших людей появится Niko со вторым движком naive и им нужен UDP через naive
+    (звонки, игры) там, где QUIC до ноды проходит. Клиенту без второго движка включённый флаг ничего не меняет.
   - **Что меняется на ноде.** naive перезапускается; его QUIC объявляет датаграммы (две строки, которые прочтёт только
     прошедший SPA и рукопожатие с верным именем; длины пакетов с ними на пути меняются на несколько байт, так что
     включённый флаг можно заметить по длинам, — сам naive-quic от DoH3 и так отличает имя в SNI). Места, пределы,
     учёт трафика, отзыв и политика выхода — те же, что у UDP внутри потока: 256 сокетов UDP на пользователя на оба
     способа вместе.
-  - **Нужен UDP-порт** у сервиса (по умолчанию `udp/443` есть). Без него `rayctl service set` предупреждает, и
-    `udp=1` в подписке не появляется.
-  - **Проверить:** `grep -o -- -udp /etc/systemd/system/niko-naive.service` печатает `-udp`; в подписке у naive есть
-    `udp=1`.
+  - **Нужен UDP-порт** у сервиса (по умолчанию `udp/443` есть). Без него `rayctl service set` предупреждает
+    (`warning: the service has no UDP port: naive-quic cannot be reached, and no link says udp=1`), и `udp=1` в
+    подписке не появляется.
+  - **Проверить, что включено:** `grep -o -- -udp /etc/systemd/system/niko-naive.service` печатает `-udp`; в
+    подписке у naive есть `udp=1` (`rayctl probe -links`, §8 «Проба снаружи»).
+  - **Проверить, что пользуются** (с v0.31.0) — счётчики naive в `rayctl metrics`, только у сервиса с `udp=on`:
+
+    ```bash
+    rayctl metrics | grep '^raycontrol_naive_udp_'
+    ```
+
+    ```
+    raycontrol_naive_udp_requests_total{service="naive"} 12
+    raycontrol_naive_udp_refused_total{service="naive"} 0
+    raycontrol_naive_udp_datagrams_total{service="naive",direction="in"} 4810
+    raycontrol_naive_udp_datagrams_total{service="naive",direction="out"} 5237
+    raycontrol_naive_udp_capsules_total{service="naive",direction="in"} 3
+    raycontrol_naive_udp_capsules_total{service="naive",direction="out"} 0
+    raycontrol_naive_udp_dropped_total{service="naive",reason="bad"} 0
+    …
+    ```
+
+    `requests` — запросы UDP, которые нода приняла (`200`), `refused` — отказы (`429`: мест нет; `503`: сокет не
+    открылся). `datagrams` — датаграммы к назначениям (`in`) и клиентам (`out`), из них `capsules` — те, что не
+    влезли в пакет QUIC и шли в потоке запроса. `dropped` — отброшенные, по причинам naive (`bad`, `context`,
+    `denied`, `limit`, `stranger`, `long`, `queue`, `quic`, `late`, `write`), каждая строкой, с нулём. Счёт — с
+    запуска naive: каждый его перезапуск (обновление, смена настроек naive) счёт обнуляет. `requests` растёт — клиенты ходят датаграммами; ноль
+    при включённом флаге — ни один клиент ещё не умеет или проба у них не прошла. Строк нет — флаг выключен.
 - **Смена имени** (с v0.29.0, [08-decisions.md](08-decisions.md) R4-42). В ссылке naive адрес ноды, а имя — только в
   `sni=`. Нода может сменить это имя без простоя: новое приходит в подписке заранее, как следующий пароль, и клиент
   переходит на него сам. Клиенту ничего нового не нужно.
-  - **По расписанию** — раз в 90 дней (`rayd serve -naive-sni-period`), публикация за 3 дня. По умолчанию (`auto`)
-    только с токеном Cloudflare (сертификат `*.<домен>`, DNS-01): без него, при HTTP-01, новое имя попало бы в
-    журналы CT при заказе сертификата, раньше, чем им пользуются, и в одном списке со всеми именами ноды.
-    `rotate_sni=on` меняет имя и при HTTP-01: тогда следующее имя заказывается сразу после смены и видно в журналах
-    CT всю эпоху. `off` — по расписанию не менять.
+  - **Что происходит само.** Раз в 90 дней (`rayd serve -naive-sni-period`) нода выбирает новое имя, за 3 дня
+    публикует его в подписке (`next`) и в назначенный час переходит на него. Следующее имя фронт обслуживает с самого
+    начала эпохи, ещё до публикации, а прежнее — до следующей смены.
+  - **Нужен wildcard-сертификат.** По умолчанию (`rotate_sni=auto`) смена по расписанию идёт, только если имена сайта
+    под одним сертификатом `*.<домен>`: с токеном Cloudflare (DNS-01, §1) или со своим сертификатом на
+    `*.<домен>` (`rayctl service cert`). Без него, при HTTP-01, новое имя попало бы в журналы CT при заказе
+    сертификата, раньше, чем им пользуются, и в одном списке со всеми именами ноды. `rotate_sni=on` меняет имя и при
+    HTTP-01: тогда следующее имя заказывается сразу после смены и видно в журналах CT всю эпоху. `off` — по
+    расписанию не менять. На ноде без домена имена не меняются вовсе.
   - **По команде** — `rayctl service rotate naive`: переход через 3 дня, клиенты получают новое имя в подписке
     заранее. `-now` — сразу, если имя уже заблокировали: клиенты переходят с ближайшей подпиской (Niko — при
     очередной плановой выборке, а раньше — как только прежнее имя у него перестанет работать: после двух неудачных
     проверок соединения подряд). Команда работает при любом `rotate_sni`. При HTTP-01 новое
     имя сначала ждёт сертификат, не дольше суток (`-reality-prepare`); не дождалось — имя остаётся прежним
-    (`rayctl status`, строка `acme site`).
+    (`rayctl status`, строка `acme site`). Что вы увидите после `rayctl service rotate naive`:
+
+    ```
+    naive moves to a new server name at 2026-11-23T14:00:00Z, which clients get in their subscription before (under a certificate
+    of listed names it waits for its certificate first, and the switch comes a lead after that)
+    ```
+
+    С `-now` первая строка — `naive moves to its next server name within a minute …`. Под ними — какие прежние имена
+    фронт оставит (`still accepted after the switch: …`) и, если есть, какое снимет
+    (`no longer accepted after the switch: …`).
   - **Прежнее имя** нода принимает до следующей смены — и после `-now` тоже: устройство, которое не забрало подписку,
     работает на старом. Если следующая смена пришла раньше, чем через 90 дней (`-now` дважды или `-now` сразу после
     плановой, когда новое имя заблокировали), прежние имена остаются все, пока каждому не исполнится 90 дней с его
-    смены, но не больше трёх: `rayctl service rotate naive -now` печатает, какие останутся и какое снимется.
-    Следующее имя фронт обслуживает с самого начала эпохи, ещё до публикации.
+    смены, но не больше трёх: `rayctl service rotate naive` печатает, какие останутся и какое снимется.
   - **Цена.** Фронт niko-server перезапускается один раз за эпоху, в момент смены: рвутся соединения REALITY,
     Hysteria2 и naive по QUIC (они переподключаются). naive по HTTP/2 и DoH не рвутся. Если REALITY того же сайта
     меняет имя в пределах полуэпохи, naive меняет своё вместе с ним, и перезапуск один на двоих.
-  - **Что видно:** `rayctl service list` (имя, назначенная смена и её имя), `rayctl status` (строка `naive <имя
-    сервиса>`; строка `naive-names` с ошибкой — опубликованное имя фронт не обслуживает, см. строку `apply`).
+  - **Что видно.** В `rayctl service list`, столбец `KEYS` у naive: `name k2p.example.com since creation` (или
+    `since <дата>` после смены); с опубликованной сменой — `…, switch 2026-12-01 14:00 to x7q.example.com`; при HTTP-01
+    до сертификата — `…, next name waits for its certificate`; после команды, до публикации, — `…, switch asked for
+    <дата>`; прежние имена — `…, abc.example.com accepted until a switch a period after the last`. В `rayctl status` —
+    строка `naive naive` с именем (`name k2p.example.com, next x7q.example.com from 2026-12-01 14:00 UTC`, пока смена
+    опубликована) и строка `naive-names`: `FAILED` в ней значит, что опубликованное имя фронт не обслуживает (naive
+    выпал из рендера — см. строку `apply`), и клиенты, перешедшие на новое имя, вернутся на прежнее. Для Prometheus —
+    `raycontrol_naive_name_rotated_at_seconds` и `raycontrol_naive_name_next_from_seconds` в `rayctl metrics`.
   - **Чего не даёт.** Против блокировки по адресу и по домену ноды смена поддомена не помогает: адрес тот же.
 - **Честный connect** (с v0.26.0). В ссылке naive есть `niko-ack=1`. Клиент, который шлёт заголовок `niko-ack: 1`,
   получает ответ, когда нода уже соединилась с адресатом: `200` — соединение есть; `502` с причиной `refused`
@@ -2492,7 +2547,7 @@ QUIC — только с отдельным переключателем «naive
 | Возможность | Что даёт | По умолчанию | Кто включает | Команда | Как проверить | Цена и риск |
 |---|---|---|---|---|---|---|
 | **Ping через ноду** | настоящий ping и traceroute через профиль naive (§11) | выкл. | настройку — группа или admin-устройство; `apply` — root | `rayctl service set naive icmp=on`, затем `rayctl apply`. В Niko: экспериментальная настройка «Ping через ноду» | `grep -o -- -icmp /etc/systemd/system/niko-naive.service` печатает `-icmp`; на телефоне — тест из §11 | naive перезапускается; нода шлёт ICMP от своего адреса по просьбе клиентов, до 30 в секунду на пользователя |
-| **UDP naive датаграммами** (с v0.30.0) | UDP через naive по QUIC: пакеты теряются поодиночке, а не задерживают друг друга | выкл. | настройку — группа или admin-устройство; `apply` — root | `rayctl service set naive udp=on`, затем `rayctl apply` | `grep -o -- -udp /etc/systemd/system/niko-naive.service` печатает `-udp`; у naive в подписке `udp=1` | naive перезапускается; его QUIC объявляет датаграммы прошедшим SPA; клиенты без второго движка naive не замечают ничего |
+| **UDP naive датаграммами** (с v0.30.0) | UDP через naive по QUIC: пакеты теряются поодиночке, а не задерживают друг друга | выкл. | настройку — группа или admin-устройство; `apply` — root | `rayctl service set naive udp=on`, затем `rayctl apply` | `grep -o -- -udp /etc/systemd/system/niko-naive.service` печатает `-udp`; у naive в подписке `udp=1`; пользуются ли — `rayctl metrics`, `raycontrol_naive_udp_requests_total` (§8) | naive перезапускается; его QUIC объявляет датаграммы прошедшим SPA; клиенты без второго движка naive не замечают ничего, а Niko с ним по записям репозитория ещё не выпущен |
 | **Политика выхода: BitTorrent** | закрыть BitTorrent на всех профилях сразу, в ядре | открыт | root | `rayctl egress block bittorrent` | `rayctl egress`: `bittorrent blocked`, `in force yes` | зашифрованный BitTorrent по TCP всё равно проходит |
 | **Политика выхода: SMTP** | закрыть TCP 25 на всех профилях | открыт | root | `rayctl egress block smtp` | `rayctl egress` | почта в телефоне не страдает: 465 и 587 открыты |
 | **Политика выхода: локальные сети** (с v0.27.0) | ядро не пускает data plane в собственные и локальные сети ноды | **закрыты** | root | открыть: `rayctl egress allow local`; закрыть: `rayctl egress block local` | `rayctl egress`: `local networks blocked`, строки `local exempt` | открывать не стоит: проверки процессов остаются, но страховки ядра больше нет |
@@ -2507,7 +2562,8 @@ QUIC — только с отдельным переключателем «naive
 | **Запасные зоны DNS-туннеля** | клиент уходит на другую зону, когда основную режут | нет | группа или admin-устройство; `apply` — root | `rayctl service set dns spare_zones=2`, затем `rayctl apply` | `rayctl service list`; `rayctl dns check -now` | до 4 зон; больше записей в DNS |
 | **Окно отладки** | подробные журналы на время разбора | закрыто | root | `rayctl debug on -for 30m` | `rayctl debug` | в журнал попадают адреса клиентов; сервисы перезапускаются при открытии и закрытии |
 | **Сводка от клиентов** | как профили работают в сетях клиентов; подсказки порядка профилей | выкл. | группа или admin-устройство | `rayctl summary on` | `rayctl summary` | клиенты шлют отчёты только с согласия пользователя |
-| **Публичные пиры Yggdrasil** | запасной путь к ноде через сеть Yggdrasil | нет | группа или admin-устройство; `apply` — root | `rayctl service set ygg peers=…`, затем `rayctl apply` (§8) | `rayctl -json service list` — у `ygg` есть `peers` | нода видна в сети Yggdrasil; обход лимитов изменённым клиентом |
+| **Новое имя сервера по расписанию без wildcard** (naive и REALITY, с v0.29.0) | смена имени раз в 90 дней и при сертификате через HTTP-01 | выкл.: без wildcard-сертификата имя меняется только командой | группа или admin-устройство | `rayctl service set naive rotate_sni=on` (REALITY — так же) | `rayctl service list`, столбец `KEYS` | следующее имя видно в журналах CT всю эпоху, в одном списке с остальными именами ноды |
+| **Пиры Yggdrasil** (публичные или свой) | запасной путь к ноде через сеть Yggdrasil | нет | группа или admin-устройство; `apply` — root | `rayctl service set ygg peers=…`, затем `rayctl apply` (§8, «Свой пир») | `rayctl -json service list` — у `ygg` есть `peers` | нода видна в сети Yggdrasil; обход лимитов изменённым клиентом |
 | **TCP 443 без SPA** | REALITY отвечает всем: молчащий на 443 хост заметнее | за SPA | группа или admin-устройство | `rayctl service set reality open=true` | `rayctl -json service list` — у reality `open` | активное зондирование 443 становится возможным и для naive, DoH и Yggdrasil |
 | **Потолки Hysteria2** | ограничить скорость одного соединения | нет | группа или admin-устройство | `rayctl service set hy2-masq up_mbps=500` | в выводе команды | — |
 | **PIN у приглашения** | QR без PIN бесполезен | без PIN | тот, кто делает приглашение | `rayctl device invite … -pin` (§10) | `rayctl device list`: `PIN (5 tries)` | PIN надо сообщить другим каналом |
@@ -2933,7 +2989,8 @@ rayctl user renew ИМЯ
 
 - **Учётные данные пользователя** (UUID и пароли профилей) — раз в 30 дней. Новые появляются в подписке за 3 дня
   до смены, прежние принимаются ещё 2 дня после.
-- **Ключи REALITY и имя его сервера** — раз в 90 дней, с таким же перекрытием.
+- **Ключи REALITY** — раз в 90 дней, с таким же перекрытием. **Имена сервера REALITY и naive** — тоже раз в 90
+  дней, но только под wildcard-сертификатом (с токеном Cloudflare; §8). Новое имя приходит в подписке заранее.
 
 Клиент забирает подписку сам и переходит на новые ссылки заранее.
 
@@ -4382,6 +4439,8 @@ journalctl -u rayd --since -1h | grep -i certif
 - [ ] У провайдера открыты порты из строки `must let in` и диапазоны меняющихся UDP-портов — либо весь входящий
       трафик (§6.1).
 - [ ] Сервер перезагружен после установки хотя бы раз, и после перезагрузки `rayctl status` снова без `FAILED`.
+- [ ] С relay: в `rayctl update status` у каждого relay `current`, у провайдера relay открыты порты из
+      `rayctl relay ports ИМЯ`, в подписке (`rayctl probe -payload`) relay есть (§6.7.7).
 
 **Снаружи**
 
