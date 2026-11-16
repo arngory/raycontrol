@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
 	"log/slog"
 	"net"
 	"net/http"
@@ -47,6 +48,13 @@ func loudUDP(t *testing.T, n, size int) (netip.AddrPort, func(size int) int) {
 		}
 	}()
 	return c.LocalAddr().(*net.UDPAddr).AddrPort(), func(size int) int { return int(got[size].Load()) }
+}
+
+// quicInitial is a QUIC v1 packet with a long header, n bytes long.
+func quicInitial(n int) []byte {
+	b := binary.BigEndian.AppendUint32([]byte{0xc3}, 1)
+	b = append(b, 8)
+	return append(b, make([]byte, n-len(b))...)
 }
 
 func dropped(h *Server, kind int) int64 { return h.udp.dropped[kind].Load() }
@@ -188,6 +196,76 @@ func TestUDPClientNotAcknowledging(t *testing.T) {
 	}
 	if dropped(h, dropQueue) == 0 {
 		t.Error("nothing dropped from the queues")
+	}
+}
+
+// The QUIC rule on the client's capsules (§4.4): a pair whose first
+// datagram is QUIC's takes capsules of 1252 bytes at most; a longer one
+// does not reach the destination. A capsule the rule drops makes no pair:
+// the next datagram is still the pair's first. Another pair takes long
+// capsules.
+func TestUDPQUICRuleUpstream(t *testing.T) {
+	dest, got := loudUDP(t, 0, 0)
+	other, otherGot := loudUDP(t, 0, 0)
+	h, c := udpServer(t, nil)
+	q := c.open(udpRequestOf{})
+	pairs := func() int {
+		h.lim.mu.Lock()
+		defer h.lim.mu.Unlock()
+		return h.lim.users["u5"].pairs
+	}
+	// A long QUIC capsule first: dropped, and no pair of it.
+	q.capsule(capsuleDatagram, udpDatagram(udpDest(dest), quicInitial(1300)))
+	eventually(t, "not dropped by the QUIC rule", func() bool { return dropped(h, dropQUIC) == 1 })
+	if p := pairs(); p != 0 || h.UDPStats().In != 0 {
+		t.Fatalf("%d pairs, %d sent", p, h.UDPStats().In)
+	}
+	// A QUIC datagram makes the pair, marked.
+	q.send(udpDest(dest), quicInitial(100))
+	eventually(t, "the first datagram did not go", func() bool { return got(100) == 1 })
+	// A long capsule of the pair's, QUIC or not, does not go; one of 1252
+	// does.
+	q.capsule(capsuleDatagram, udpDatagram(udpDest(dest), bytes.Repeat([]byte{'x'}, 1253)))
+	q.capsule(capsuleDatagram, udpDatagram(udpDest(dest), quicInitial(1300)))
+	q.capsule(capsuleDatagram, udpDatagram(udpDest(dest), quicInitial(quicCapsuleMax)))
+	eventually(t, "1252 bytes did not go", func() bool { return got(quicCapsuleMax) == 1 })
+	if got(1253) != 0 || got(1300) != 0 || dropped(h, dropQUIC) != 3 {
+		t.Fatalf("past the rule: %d of 1253, %d of 1300; %d dropped", got(1253), got(1300), dropped(h, dropQUIC))
+	}
+	// A pair that began with something else takes them.
+	q.send(udpDest(other), []byte("hello"))
+	// The datagram and the capsule come by two ways: the capsule after.
+	eventually(t, "the other pair's first datagram did not go", func() bool { return otherGot(len("hello")) == 1 })
+	q.capsule(capsuleDatagram, udpDatagram(udpDest(other), quicInitial(1300)))
+	eventually(t, "an unmarked pair's capsule did not go", func() bool { return otherGot(1300) == 1 })
+}
+
+// The longest HTTP datagram a client may send fits a capsule: its Context
+// ID in the longest form a varint has (8 bytes), a name of 255 bytes, the
+// port, 65 507 bytes of data. It reads, and goes; one byte more in a
+// capsule resets the stream (TestReadCapsuleHead).
+func TestUDPLongestCapsule(t *testing.T) {
+	longest := append([]byte{0xc0, 0, 0, 0, 0, 0, 0, udpContext}, udpDestName(strings.Repeat("a", 255), 53)...)
+	longest = append(longest, make([]byte, uotMaxPayload)...)
+	if len(longest) != capsuleMax {
+		t.Fatalf("the longest datagram is %d bytes, capsules take %d", len(longest), capsuleMax)
+	}
+	dest, data, why := parseUDP(longest)
+	if why >= 0 || len(dest.name) != 255 || len(data) != uotMaxPayload {
+		t.Fatalf("%d: %d bytes of name, %d of data", why, len(dest.name), len(data))
+	}
+	echo := udpEcho(t)
+	_, c := udpServer(t, func(h *Server) {
+		h.Resolve = func(context.Context, string) ([]netip.Addr, error) { return []netip.Addr{echo.Addr()}, nil }
+	})
+	q := c.open(udpRequestOf{})
+	longest = append([]byte{0xc0, 0, 0, 0, 0, 0, 0, udpContext}, udpDestName(strings.Repeat("a", 255), echo.Port())...)
+	q.capsule(capsuleDatagram, append(longest, make([]byte, uotMaxPayload)...))
+	// The echo's answer is past what the node passes back: the request
+	// lives on.
+	q.send(udpDest(echo), []byte("after"))
+	if g := q.recv(); string(g.data) != "after" {
+		t.Fatalf("%q", g.data)
 	}
 }
 

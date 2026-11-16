@@ -57,10 +57,11 @@ const (
 	capsuleWait   = 100 * time.Millisecond
 
 	capsuleDatagram = 0x00
-	// capsuleMax bounds a capsule's payload (§3.2): the Context ID, a name
-	// of 255 bytes, the port and a client's longest UDP payload. A longer
-	// capsule of any type resets the stream.
-	capsuleMax = 1 + 1 + 1 + 255 + 2 + uotMaxPayload
+	// capsuleMax bounds a capsule's payload (§3.2): the longest HTTP
+	// datagram a client may send, the Context ID in its longest form (8
+	// bytes), a name of 255 bytes, the port and a client's longest UDP
+	// payload. A longer capsule of any type resets the stream.
+	capsuleMax = 8 + 1 + 1 + 255 + 2 + uotMaxPayload
 	// quicCapsuleMax is the most a capsule carries for a pair marked as
 	// QUIC's, either way (§4.4): 1280 − 28, what QUIC stacks start with.
 	// The handshake and the full packets of a nested QUIC pass; its probes
@@ -511,13 +512,18 @@ func (d *udpRequest) upstream(b []byte, capsule bool) {
 		return
 	}
 	// The pair is QUIC's when its first datagram is (§4.4): an address
-	// pair, which a name's pair is through the address it resolved to.
-	if !d.u.reach(to, quicLong(data)) {
-		d.drop(dropLimit)
-		return
+	// pair, which a name's pair is through the address it resolved to. The
+	// rule comes before the pair: a capsule it drops makes none, and takes
+	// no token for a new destination.
+	quic := quicLong(data)
+	if capsule && len(data) > quicCapsuleMax {
+		if has, marked := d.u.pair(to); marked || (!has && quic) {
+			d.drop(dropQUIC)
+			return
+		}
 	}
-	if _, marked := d.u.pair(to); capsule && len(data) > quicCapsuleMax && marked {
-		d.drop(dropQUIC)
+	if !d.u.reach(to, quic) {
+		d.drop(dropLimit)
 		return
 	}
 	// A destination that answers "unreachable" fails a write or two: the
