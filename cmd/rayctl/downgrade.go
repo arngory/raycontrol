@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -82,9 +83,26 @@ func (n nodeEnv) renewForOlder(ctx context.Context, target string, stopped bool,
 		return nil, false, fmt.Errorf("stopping rayd: %w", err)
 	}
 	if users, err = n.renewCopy(ctx, target, actor, op); err != nil {
-		return nil, false, n.startAgain(err, "nothing changed")
+		done := "nothing changed"
+		if s := placedState(err); s != "" {
+			done = s
+		}
+		return nil, false, n.startAgain(err, done)
 	}
 	return users, true, nil
+}
+
+// placedState says what of the database a failed renewal changed, "" for
+// nothing: copyDB put the renewed database in place, and failed after
+// (its WAL, errDBPlaced) or only at the sync (errDBUnsynced).
+func placedState(err error) string {
+	switch {
+	case errors.Is(err, errDBUnsynced):
+		return "the renewed database is in place, its directory not synced"
+	case errors.Is(err, errDBPlaced):
+		return "the renewed database is in place without its WAL"
+	}
+	return ""
 }
 
 // rotation is the schedule rayd stored at its start, read on root's copy
@@ -148,7 +166,11 @@ func (n nodeEnv) stopForInstall(ctx context.Context, target, actor string) ([]st
 	}
 	users, _, err := n.renewForOlder(ctx, target, true, actor, "downgrade")
 	if err != nil {
-		return nil, n.startAgain(fmt.Errorf("renewing the users of revocations with overlap for %s: %w", target, err), "nothing installed")
+		done := "nothing installed"
+		if s := placedState(err); s != "" {
+			done += ", " + s
+		}
+		return nil, n.startAgain(fmt.Errorf("renewing the users of revocations with overlap for %s: %w", target, err), done)
 	}
 	return users, nil
 }

@@ -33,6 +33,8 @@ func TestCredRotation(t *testing.T) {
 		{in: store.Rotation{Lead: 30 * day, Grace: 13 * h}, want: store.Rotation{Lead: store.DefaultRotation.Lead, Grace: 13 * h}},
 		{in: store.Rotation{Lead: 30*day - time.Second, Grace: 13 * h}, want: store.Rotation{Lead: 30*day - time.Second, Grace: 13 * h}},
 		{in: store.Rotation{Lead: 0, Grace: 13 * h}, want: store.Rotation{Lead: 0, Grace: 13 * h}},
+		// A negative period is none, stored as 0 (review 5, S1).
+		{in: store.Rotation{Period: -h, Lead: 2 * h, Grace: 13 * h}, want: store.Rotation{Lead: 2 * h, Grace: 13 * h}},
 	} {
 		got, err := credRotation(c.in, log)
 		if (err != nil) != c.err || err == nil && got != c.want {

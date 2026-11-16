@@ -83,6 +83,7 @@ run_case back-over-v0.31.0 refused v0.30.2 v0.31.0 yes -host 192.0.2.1
 run_case same-v0.31.0 installed v0.31.0 v0.31.0 yes -host 192.0.2.1
 run_case forward installed v0.31.1 v0.31.0 yes -host 192.0.2.1
 run_case keep-state-no-rayd refused v0.30.2 none yes -host 192.0.2.1
+run_case keep-state-no-rayd-v0.30.9 refused v0.30.9 none yes -host 192.0.2.1 # the top of the v0.30 line
 run_case keep-state-no-rayd-v0.31.0 installed v0.31.0 none yes -host 192.0.2.1
 run_case rayd-fails refused v0.30.2 fail yes -host 192.0.2.1
 run_case rayd-dev refused v0.30.2 dev yes -host 192.0.2.1

@@ -61,22 +61,46 @@ type queryRower interface {
 }
 
 // rotationIn reads the stored schedule of the database schema (main, or
-// cur in a carry).
+// cur in a carry): DefaultRotation when there is none or it does not read
+// (rotationRead).
 func rotationIn(ctx context.Context, q queryRower, schema string) (Rotation, error) {
-	var b []byte
-	err := q.QueryRowContext(ctx, `SELECT value FROM `+schema+`.settings WHERE key = ?`, settingRotation).Scan(&b)
-	if errors.Is(err, sql.ErrNoRows) {
-		return DefaultRotation, nil
-	}
+	r, ok, err := rotationRead(ctx, q, schema)
 	if err != nil {
 		return Rotation{}, err
 	}
-	var v rotationJSON
-	if json.Unmarshal(b, &v) != nil || v.Lead < 0 || v.Grace < 0 || v.Period < 0 {
+	if !ok {
 		return DefaultRotation, nil
 	}
-	return Rotation{Period: time.Duration(v.Period) * time.Second, Lead: time.Duration(v.Lead) * time.Second,
-		Grace: time.Duration(v.Grace) * time.Second}, nil
+	return r, nil
+}
+
+// rotationRead reads the stored schedule of the database schema; ok is
+// false when there is none or it does not read. A field out of range is
+// read as rayd runs with it: a negative period as none (rayd, of any
+// version, runs no schedule then), a negative lead or grace as the
+// default's, the other fields as they are.
+func rotationRead(ctx context.Context, q queryRower, schema string) (r Rotation, ok bool, err error) {
+	var b []byte
+	err = q.QueryRowContext(ctx, `SELECT value FROM `+schema+`.settings WHERE key = ?`, settingRotation).Scan(&b)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Rotation{}, false, nil
+	}
+	if err != nil {
+		return Rotation{}, false, err
+	}
+	var v rotationJSON
+	if json.Unmarshal(b, &v) != nil {
+		return Rotation{}, false, nil
+	}
+	r = Rotation{Period: time.Duration(max(v.Period, 0)) * time.Second, Lead: time.Duration(v.Lead) * time.Second,
+		Grace: time.Duration(v.Grace) * time.Second}
+	if v.Lead < 0 {
+		r.Lead = DefaultRotation.Lead
+	}
+	if v.Grace < 0 {
+		r.Grace = DefaultRotation.Grace
+	}
+	return r, true, nil
 }
 
 // RevocationChain bounds how far repeated revocations with overlap of one

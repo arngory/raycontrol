@@ -18,7 +18,8 @@ import (
 // range is set right with a warning rather than refused: a grace under
 // 12 h is raised to 12 h, and a lead below zero or of the default period
 // or more (what the revoked device knew would be accepted that long) is
-// the default lead.
+// the default lead. A negative period is none, and is stored as 0: going
+// back reads it (store.RotationAt).
 func credRotation(r store.Rotation, log *slog.Logger) (store.Rotation, error) {
 	if r.Period > 0 {
 		if r.Lead >= r.Period {
@@ -31,6 +32,7 @@ func credRotation(r store.Rotation, log *slog.Logger) (store.Rotation, error) {
 		}
 		return r, nil
 	}
+	r.Period = 0
 	if r.Lead < 0 || r.Lead >= store.DefaultRotation.Period {
 		log.Warn("-cred-lead out of range without -cred-period, for the rotations revocations with overlap start: the default",
 			"lead", r.Lead, "to", store.DefaultRotation.Lead)

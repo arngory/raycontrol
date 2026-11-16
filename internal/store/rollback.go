@@ -94,13 +94,23 @@ func renewOverlapRotations(ctx context.Context, path, actor, op string, clock fu
 	return names, err
 }
 
-// RotationAt is the schedule stored in the database at path (StoredRotation
-// of a Store with none set), read only: what the node's rayd ran with.
+// RotationAt is the schedule stored in the database at path, read only:
+// what the node's rayd ran with (rotationRead: a negative period as none).
+// When there is none, or it does not read, no period, with the default lead
+// and grace: going back then renews (rollbackRenewsOverlap in rayctl), a
+// false positive at worst, and a harmless one.
 func RotationAt(ctx context.Context, path string) (Rotation, error) {
 	s, err := OpenReadOnly(ctx, path)
 	if err != nil {
 		return Rotation{}, err
 	}
 	defer s.Close()
-	return rotationIn(ctx, s.db, "main")
+	r, ok, err := rotationRead(ctx, s.db, "main")
+	if err != nil {
+		return Rotation{}, err
+	}
+	if !ok {
+		return Rotation{Lead: DefaultRotation.Lead, Grace: DefaultRotation.Grace}, nil
+	}
+	return r, nil
 }

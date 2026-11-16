@@ -685,7 +685,7 @@ func (c *cli) failUpdate(ctx context.Context, cause error, before []string) erro
 	// The units that ran before the update: the one whose failure brought
 	// the rollback here is likely in auto-restart by now, not in the
 	// rollback's own list (review).
-	if err := c.rollback(ctx, "the update failed", true, carryTry, before...); err != nil {
+	if err := c.rollback(ctx, updateFailed, true, carryTry, before...); err != nil {
 		return fmt.Errorf("%w; rollback failed too: %w", cause, err)
 	}
 	return rolledBack{cause}
@@ -876,6 +876,10 @@ func (c *cli) rollbackUpdate(ctx context.Context, yes bool, carry carry) error {
 	return c.rollback(ctx, "asked for", restoreDB, carry)
 }
 
+// updateFailed is why failUpdate rolls back: the audit's actor of its
+// renewal is the automatic rollback's.
+const updateFailed = "the update failed"
+
 func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry carry, ran ...string) error {
 	b, err := os.ReadFile(filepath.Join(previousDir, "VERSION")) //nolint:gosec // G304: a fixed path
 	if err != nil {
@@ -908,8 +912,14 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 		}
 		if err := copyDB(saved, localNode.db); err != nil {
 			err = fmt.Errorf("putting the database back: %w", err)
-			if errors.Is(err, errDBPlaced) {
-				return fmt.Errorf("%w; rayd is stopped, the copy in place without its WAL: rayctl update -rollback -no-carry", err)
+			switch {
+			case errors.Is(err, errDBUnsynced):
+				return fmt.Errorf("%w; rayd is stopped, the copy in place: sync, then rayctl update -rollback -no-carry", err)
+			case errors.Is(err, errDBPlaced):
+				// A rollback again finds the schemas equal and leaves the
+				// database as it is: its WAL goes in by hand.
+				return fmt.Errorf("%w; rayd is stopped, the copy in place without its WAL. Put the copy in by hand, then go on:\n%s",
+					err, copyByHand(saved, localNode.db))
 			}
 			// Nothing of the database moved (copyDB).
 			return localNode.startAgain(err, "nothing rolled back")
@@ -928,8 +938,12 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 	// stays (its schema did not move, v0.27.0 to v0.30 run on this one) no
 	// carry ran.
 	renewStopped := false // rayd stopped for the renewal only
+	actor := "rayctl update -rollback"
+	if why == updateFailed {
+		actor = "rayctl update (automatic rollback)"
+	}
 	if carry != carrySkip {
-		users, stoppedHere, err := localNode.renewForOlder(ctx, prev, dbBack, "rayctl update -rollback", "rollback")
+		users, stoppedHere, err := localNode.renewForOlder(ctx, prev, dbBack, actor, "rollback")
 		renewStopped = stoppedHere
 		switch {
 		case err != nil && carry == carryMust && dbBack:
@@ -939,7 +953,8 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 			return fmt.Errorf("renewing the users of revocations with overlap: %w; nothing rolled back (rayctl update -rollback -no-carry "+
 				"leaves them, and what the revoked devices knew stays accepted)", err)
 		case err != nil:
-			fmt.Println("the users of revocations with overlap could not be renewed:", err)
+			fmt.Printf("the users with a rotation in flight could not be renewed (%v): what their devices revoked with -overlap knew\n"+
+				"stays accepted with %s; rayctl user renew NAME for each of them\n", err, prev)
 		case len(users) > 0:
 			fmt.Print(renewedForOlderText(prev, users))
 		}
@@ -1037,7 +1052,26 @@ func copyDB(src, dst string) error {
 	if aside != "" {
 		os.Remove(aside)
 	}
-	return syncDir(filepath.Dir(dst))
+	if err := syncDBDir(filepath.Dir(dst)); err != nil {
+		return fmt.Errorf("%w: %w", errDBUnsynced, err)
+	}
+	return nil
+}
+
+// errDBUnsynced: copyDB put the new database and its WAL in place, and
+// the directory's sync failed: the renames may not outlive a crash.
+var errDBUnsynced = errors.New("the new database is in place, its directory not synced")
+
+// syncDBDir syncs copyDB's directory (tests make it fail).
+var syncDBDir = syncDir
+
+// copyByHand is what puts the database copy saved, and its WAL, in place
+// of db by hand, rayd stopped, and goes on with the rollback.
+func copyByHand(saved, db string) string {
+	return fmt.Sprintf("  rm -f %[2]s-shm %[2]s-wal\n"+
+		"  install -m 0600 -o rayd -g rayd %[1]s %[2]s\n"+
+		"  test ! -e %[1]s-wal || install -m 0600 -o rayd -g rayd %[1]s-wal %[2]s-wal\n"+
+		"  rayctl update -rollback -no-carry\n", saved, db)
 }
 
 // renameDBFile puts copyDB's new files in place (tests make it fail).
