@@ -295,13 +295,19 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 }
 
 // relayServices are the services a relay forwards to this node and its own
-// SSH (local), and their IDs.
-func (p *PerimeterServer) relayServices(ctx context.Context, relay store.Relay) ([]*perimeterv1.Service, map[uint16]bool, error) {
-	var out []*perimeterv1.Service
-	services, err := p.Store.ListServices(ctx)
+// SSH (local), and their IDs: its snapshot's, and its ports' (relayPorts).
+func (s *Server) relayServices(ctx context.Context, relay store.Relay) ([]*perimeterv1.Service, map[uint16]bool, error) {
+	services, err := s.Store.ListServices(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
+	out, scoped := relayServicesOf(relay, services)
+	return out, scoped, nil
+}
+
+// relayServicesOf is relayServices of the services given.
+func relayServicesOf(relay store.Relay, services []store.Service) ([]*perimeterv1.Service, map[uint16]bool) {
+	var out []*perimeterv1.Service
 	scoped := map[uint16]bool{}
 	ssh := provision.SSHPorts(services)
 	sshPort := store.Port{Proto: "tcp", Num: relay.SSHPort}
@@ -331,7 +337,7 @@ func (p *PerimeterServer) relayServices(ctx context.Context, relay store.Relay) 
 		out = append(out, ps)
 		scoped[uint16(svc.ID)] = true
 	}
-	return out, scoped, nil
+	return out, scoped
 }
 
 // RelayKnows reports whether a relay knows the device: whether it may

@@ -135,6 +135,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   relay bundle [-exit IP] [-ssh-port N] [-admin CIDRS] [-o FILE] NAME   the relay host's bundle (new certificate, new SPA keys)
   relay set [-ssh-port N] [-admin CIDRS] NAME   the relay host's SSH access, without a new bundle
                                             each, reaching the service ports without SPA; root only
+  relay ports NAME                          every port the relay host takes, for a provider's firewall
+                                            in front of it: its SSH, SPA range and probe endpoint, and
+                                            the exit's ports it forwards (relay bundle prints them too)
   dns [status]                              the DNS provider and the records the node needs
   dns cloudflare [-token-file F]            records and wildcard certificates through Cloudflare
                                             (token asked for without echo when no file is given)

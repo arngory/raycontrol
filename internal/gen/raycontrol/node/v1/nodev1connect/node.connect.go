@@ -251,7 +251,8 @@ type NodeServiceClient interface {
 	SetAdminAccess(context.Context, *connect.Request[v1.SetAdminAccessRequest]) (*connect.Response[v1.SetAdminAccessResponse], error)
 	// Relays in front of the node (relay-v1): one address each, which
 	// reaches the service ports without SPA. Adding and removing is for
-	// root on the node only: a relay opens the perimeter.
+	// root on the node only: a relay opens the perimeter. ListRelays gives
+	// each relay's ports too (Relay.ports), for its host's firewall.
 	AddRelay(context.Context, *connect.Request[v1.AddRelayRequest]) (*connect.Response[v1.AddRelayResponse], error)
 	ListRelays(context.Context, *connect.Request[v1.ListRelaysRequest]) (*connect.Response[v1.ListRelaysResponse], error)
 	RemoveRelay(context.Context, *connect.Request[v1.RemoveRelayRequest]) (*connect.Response[v1.RemoveRelayResponse], error)
@@ -1068,7 +1069,8 @@ type NodeServiceHandler interface {
 	SetAdminAccess(context.Context, *connect.Request[v1.SetAdminAccessRequest]) (*connect.Response[v1.SetAdminAccessResponse], error)
 	// Relays in front of the node (relay-v1): one address each, which
 	// reaches the service ports without SPA. Adding and removing is for
-	// root on the node only: a relay opens the perimeter.
+	// root on the node only: a relay opens the perimeter. ListRelays gives
+	// each relay's ports too (Relay.ports), for its host's firewall.
 	AddRelay(context.Context, *connect.Request[v1.AddRelayRequest]) (*connect.Response[v1.AddRelayResponse], error)
 	ListRelays(context.Context, *connect.Request[v1.ListRelaysRequest]) (*connect.Response[v1.ListRelaysResponse], error)
 	RemoveRelay(context.Context, *connect.Request[v1.RemoveRelayRequest]) (*connect.Response[v1.RemoveRelayResponse], error)
