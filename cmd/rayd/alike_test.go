@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -196,12 +197,16 @@ func TestQUICNamesAnswerAlike(t *testing.T) {
 			t.Fatal(err)
 		}
 		ns.Answer = answer
+		// naive with udp=on (naive-udp-v1): a connect-udp without a
+		// password is answered as DoH3 answers it.
+		ns.UDP, ns.H3 = true, naiveH3
 		h := noTokens()
 		_, h.Answer = dohAnswer(`{"answer":"` + mode + `"}`)
 		got := map[string][]string{}
 		for name, srv := range map[string]http.Handler{"naive-quic": ns, "DoH3": h} {
-			addr := serveQUIC(t, srv, cert, quicOptions{})
-			tr := &http3.Transport{TLSClientConfig: naiveClientTLS(), QUICConfig: &quic.Config{MaxIdleTimeout: 30 * time.Second},
+			addr := serveQUIC(t, srv, cert, quicOptions{datagrams: name == "naive-quic"})
+			tr := &http3.Transport{TLSClientConfig: naiveClientTLS(), QUICConfig: &quic.Config{MaxIdleTimeout: 30 * time.Second, EnableDatagrams: true},
+				EnableDatagrams: true,
 				Dial: func(ctx context.Context, _ string, tlsConf *tls.Config, conf *quic.Config) (*quic.Conn, error) {
 					return quic.DialAddrEarly(ctx, addr, tlsConf, conf)
 				}}
@@ -209,7 +214,19 @@ func TestQUICNamesAnswerAlike(t *testing.T) {
 			connect, _ := http.NewRequest(http.MethodConnect, "https://naive.test", http.NoBody)
 			connect.Host = "192.0.2.1:443"
 			connect.Header.Set("Padding", naive.PaddingHeader())
-			for _, req := range []*http.Request{get, connect} {
+			reqs := []*http.Request{get, connect}
+			for _, pw := range []string{"", "wrong"} {
+				udp, _ := http.NewRequest(http.MethodConnect, "https://naive.test/.well-known/masque/udp/%2A/%2A/", http.NoBody)
+				udp.Proto = naive.ConnectUDP
+				udp.Header.Set("Padding", naive.PaddingHeader())
+				udp.Header.Set(naive.UDPHeader, "1")
+				udp.Header.Set("Capsule-Protocol", "?1")
+				if pw != "" {
+					udp.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("niko:"+pw)))
+				}
+				reqs = append(reqs, udp)
+			}
+			for _, req := range reqs {
 				got[name] = append(got[name], h2Answer(t, tr, req))
 			}
 			_ = tr.Close()

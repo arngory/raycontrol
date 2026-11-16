@@ -6,6 +6,8 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -266,6 +268,121 @@ func TestUDPLongestCapsule(t *testing.T) {
 	q.send(udpDest(echo), []byte("after"))
 	if g := q.recv(); string(g.data) != "after" {
 		t.Fatalf("%q", g.data)
+	}
+}
+
+// A capsule that waited more than 100 ms since its answer came is dropped
+// (§4.4): a client that opens its stream's window late gets the newest
+// answers, not the stale ones; the queue keeps the newest (the oldest give
+// way).
+func TestUDPCapsuleLate(t *testing.T) {
+	loudAt, _ := loudUDP(t, 64, 1400)
+	h, c := udpServer(t, nil, udpOpts{window: 4 << 10})
+	q := c.open(udpRequestOf{noRead: true})
+	q.send(udpDest(loudAt), []byte("go"))
+	eventually(t, "no capsule pushed out of the queue", func() bool { return dropped(h, dropQueue) > 0 })
+	time.Sleep(300 * time.Millisecond)
+	// The client reads now: what waited goes as late.
+	go func() { _, _ = io.Copy(io.Discard, q.rs) }()
+	eventually(t, "no capsule dropped as late", func() bool { return dropped(h, dropLate) > 0 })
+	q.send(udpDest(loudAt), []byte("go"))
+	eventually(t, "no fresh capsule after the late ones", func() bool { return h.UDPStats().CapsulesOut > 4 })
+	t.Logf("%+v; late %d, queue %d", h.UDPStats(), dropped(h, dropLate), dropped(h, dropQueue))
+}
+
+// A socket that does not open is 503 before any answer, with Padding; the
+// place is given back.
+func TestUDP503(t *testing.T) {
+	h, c := udpServer(t, func(h *Server) {
+		h.udpSocket = func(context.Context) (*net.UDPConn, error) { return nil, errors.New("no sockets") }
+	})
+	q := c.open(udpRequestOf{})
+	if q.resp.StatusCode != http.StatusServiceUnavailable || q.resp.Header.Get("Padding") == "" || q.resp.Header.Get(UDPHeader) != "" {
+		t.Fatalf("%s %v", q.resp.Status, q.resp.Header)
+	}
+	if st := h.UDPStats(); st.Refused != 1 || st.Requests != 0 || h.lim.count() != 0 {
+		t.Fatalf("%+v, %d places", st, h.lim.count())
+	}
+}
+
+// With the per-user limits off (rayctl conn-limit off), datagram requests
+// are as UoT's streams: no quiet one gives way at the user's 256, which
+// stays; pairs are not counted.
+func TestUDPConnLimitOff(t *testing.T) {
+	echo := udpEcho(t)
+	h, c := udpServer(t, nil)
+	h.SetConnLimit(false)
+	q := c.open(udpRequestOf{})
+	q.send(udpDest(echo), []byte("x"))
+	q.recv()
+	h.lim.mu.Lock()
+	pairs := h.lim.users["u5"].pairs
+	h.lim.mu.Unlock()
+	if pairs != 0 {
+		t.Fatalf("%d pairs counted with the limits off", pairs)
+	}
+	for range uotPerUser - 1 {
+		if s, _ := h.lim.uotTake("u5", func(error) {}); s == nil {
+			t.Fatal("no place")
+		}
+	}
+	h.lim.mu.Lock()
+	for s := range h.lim.users["u5"].slots {
+		s.last.Store(mono() - int64(quietAfter) - int64(time.Second))
+	}
+	h.lim.mu.Unlock()
+	if over := c.open(udpRequestOf{}); over.resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("over the limit with the limits off: %s", over.resp.Status)
+	}
+	q.send(udpDest(echo), []byte("still"))
+	if g := q.recv(); string(g.data) != "still" {
+		t.Fatalf("%q", g.data)
+	}
+}
+
+// A new destination past the user's tokens for new destinations is
+// dropped as limit; the request lives on, and its pairs go on.
+func TestUDPDropLimit(t *testing.T) {
+	echo := udpEcho(t)
+	other := udpEcho(t)
+	h, c := udpServer(t, nil)
+	q := c.open(udpRequestOf{})
+	q.send(udpDest(echo), []byte("x"))
+	q.recv()
+	h.lim.mu.Lock()
+	h.lim.users["u5"].peers = bucket{0, h.lim.clock()}
+	h.lim.mu.Unlock()
+	q.send(udpDest(other), []byte("new"))
+	eventually(t, "a new destination past the tokens not dropped", func() bool { return dropped(h, dropLimit) == 1 })
+	q.send(udpDest(echo), []byte("old"))
+	if g := q.recv(); g.from != echo || string(g.data) != "old" {
+		t.Fatalf("%+v", g)
+	}
+}
+
+// IPv6 both ways, a datagram and a capsule; an IPv4 address in IPv6 is
+// IPv4's. Where the host has no IPv6 (some sandboxes), skipped.
+func TestUDPIPv6(t *testing.T) {
+	echo := udpEchoAt(t, netip.IPv6Loopback())
+	if !echo.IsValid() {
+		t.Skip("no IPv6 on this host")
+	}
+	_, c := udpServer(t, nil)
+	q := c.open(udpRequestOf{})
+	q.send(udpDest(echo), []byte("six"))
+	if g := q.recv(); g.from != echo || string(g.data) != "six" || g.capsule {
+		t.Fatalf("%+v", g)
+	}
+	big := bytes.Repeat([]byte{'x'}, 1300)
+	q.capsule(capsuleDatagram, udpDatagram(udpDest(echo), big))
+	if g := q.recv(); g.from != echo || !bytes.Equal(g.data, big) || !g.capsule {
+		t.Fatalf("%v %d bytes, capsule %v", g.from, len(g.data), g.capsule)
+	}
+	v4 := udpEcho(t)
+	mapped := netip.AddrPortFrom(netip.AddrFrom16(v4.Addr().As16()), v4.Port())
+	q.send(udpDest(mapped), []byte("mapped"))
+	if g := q.recv(); g.from != v4 || string(g.data) != "mapped" {
+		t.Fatalf("%+v", g)
 	}
 }
 

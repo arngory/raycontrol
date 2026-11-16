@@ -211,7 +211,11 @@ func (s *Server) serveUDP(w http.ResponseWriter, r *http.Request) {
 	defer s.lim.uotPut(slot)
 	// One socket per request: the app's socket has one port of the node,
 	// and answers come from where it sent only (port-restricted cone).
-	conn, err := uotSocket(uctx, netip.AddrPort{})
+	open := s.udpSocket
+	if open == nil {
+		open = func(ctx context.Context) (*net.UDPConn, error) { return uotSocket(ctx, netip.AddrPort{}) }
+	}
+	conn, err := open(uctx)
 	if err != nil {
 		s.udp.refused.Add(1)
 		s.logger().Debug("naive: no UDP socket", "err", err)

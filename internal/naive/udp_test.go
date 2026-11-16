@@ -528,6 +528,14 @@ func TestUDPEcho(t *testing.T) {
 	if st.Requests != 1 || st.In != 3 || st.Out != 3 || st.Dropped < 6 || st.CapsulesIn != 0 || st.CapsulesOut != 0 {
 		t.Fatalf("stats %+v", st)
 	}
+	// Each drop by its reason: the stranger's answers (the echo's other
+	// port), what is not allowed (two addresses, a name with no address,
+	// the probe name without a probe), the unreadable, another Context ID.
+	for kind, least := range map[int]int64{dropStranger: 3, dropDenied: 4, dropBad: 1, dropContext: 1} {
+		if got := h.udp.dropped[kind].Load(); got < least {
+			t.Errorf("dropped as %s: %d, want %d at least", dropNames[kind], got, least)
+		}
+	}
 	// The client's end is the request's: the node ends it cleanly and gives
 	// the place back.
 	_ = q.rs.Close()

@@ -68,7 +68,8 @@ type Server struct {
 	icmpOpen func(v6 bool) (icmpConn, error) // openPing when nil
 	icmpWarn icmpWarn
 
-	udp udpTotals
+	udp       udpTotals
+	udpSocket func(ctx context.Context) (*net.UDPConn, error) // a request's socket; uotSocket's unconnected one when nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
