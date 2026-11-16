@@ -226,6 +226,12 @@ func TestNaiveUDPWithNikoServer(t *testing.T) {
 	if _, err := io.ReadFull(rs, back); err != nil || !bytes.Equal(back, append(capsule, big...)) {
 		t.Fatalf("capsule back: %d bytes, %v", len(back), err)
 	}
+	// An answer counts once the connection's sender handed it to QUIC, a
+	// datagram once its write returned: either may come after the client
+	// has the answer.
+	for end := time.Now().Add(5 * time.Second); (ns.UDPStats().Out != 2 || ns.UDPStats().In != 2) && time.Now().Before(end); {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if s := ns.UDPStats(); s.Requests != 1 || s.In != 2 || s.Out != 2 || s.CapsulesIn != 1 || s.CapsulesOut != 1 {
 		t.Fatalf("%+v", s)
 	}

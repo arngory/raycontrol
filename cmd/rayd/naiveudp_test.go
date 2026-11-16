@@ -89,6 +89,12 @@ func TestNaiveUDP(t *testing.T) {
 	if err != nil || string(got) != string(dg)+"ping" {
 		t.Fatalf("% x %v", got, err)
 	}
+	// The answer counts once the connection's sender handed it to QUIC,
+	// the datagram once its write returned: either may come after the
+	// client has the answer.
+	for end := time.Now().Add(5 * time.Second); (ns.UDPStats().Out != 1 || ns.UDPStats().In != 1) && time.Now().Before(end); {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if st := ns.UDPStats(); st.Requests != 1 || st.In != 1 || st.Out != 1 {
 		t.Fatalf("%+v", st)
 	}

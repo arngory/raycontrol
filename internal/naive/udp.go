@@ -45,15 +45,14 @@ const (
 	// or a name, from the node the answer's source, IPv4 or IPv6.
 	udpIPv4, udpIPv6, udpName = 4, 6, 3
 
-	// udpQueued answers wait for SendDatagram, which blocks while the
-	// connection's own queue is full (32 in quic-go): a full queue drops
-	// the new one (§7). Without it the answers would wait in the socket's
-	// buffer, hundreds of them, each late by all before it.
-	udpQueued = 32
 	// capsuleQueued answers too large for a QUIC packet wait for the
-	// stream, capsuleWait at most (§4.4): an older one is dropped, stale UDP
-	// being worse than lost UDP. A capsule whose write has begun is
-	// written whole: one cut in half would end the stream.
+	// stream, capsuleWait at most from when they came (§4.4): an older one
+	// is dropped, stale UDP being worse than lost UDP, and in a full queue
+	// the oldest gives way. A capsule whose write has begun is written
+	// whole: one cut in half would end the stream. The answers that fit a
+	// QUIC datagram wait in the stream's own queue of the connection's
+	// sender (h3serve.StreamQueued: 32, the oldest giving way), which never
+	// makes a request wait.
 	capsuleQueued = 32
 	capsuleWait   = 100 * time.Millisecond
 
@@ -84,12 +83,22 @@ type H3Stream interface {
 	io.ReadWriter
 	SetReadDeadline(time.Time) error
 	SetWriteDeadline(time.Time) error
-	// SendDatagram queues b as one QUIC datagram, waiting while the
-	// connection's queue is full; tooLarge, with nothing sent, when it
-	// does not fit a QUIC packet of the connection.
-	SendDatagram(b []byte) (tooLarge bool, err error)
+	// SendDatagram queues b, one HTTP datagram, for the connection's
+	// sender and never waits: in the stream's full queue the oldest gives
+	// way. tooLarge, with nothing queued, when b does not fit a QUIC packet
+	// of the connection; an error once the stream's sending side ended. n
+	// is what OnSent hears of when it goes.
+	SendDatagram(b []byte, n int) (tooLarge bool, err error)
+	// OnSent sets what hears of each datagram the sender handed to QUIC:
+	// the n it was queued with, from the sender's goroutine, possibly after
+	// the stream ended.
+	OnSent(func(n int))
+	// Dropped is how many of the stream's datagrams did not go: pushed
+	// out of its queue, or left in it at the end.
+	Dropped() int64
 	ReceiveDatagram(ctx context.Context) ([]byte, error)
-	// Close ends the stream cleanly (FIN); Reset resets it both ways.
+	// Close ends the stream cleanly (FIN); Reset resets it both ways. What
+	// waits in its queue is dropped.
 	Close() error
 	Reset()
 }
@@ -110,7 +119,7 @@ const (
 	dropLimit           // a new destination past the limits (newPair, uotPeers)
 	dropStranger        // an answer not from a pair
 	dropLong            // past the ceiling: 65 507 bytes from the client, 1500 from a destination
-	dropQueue           // the queue to the client is full
+	dropQueue           // a queue to the client is full, or the request ended with answers in it
 	dropQUIC            // the QUIC rule (§4.4)
 	dropLate            // a capsule that waited past capsuleWait
 	dropKinds
@@ -214,15 +223,7 @@ func (s *Server) serveUDP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(UDPHeader, udpVersion)
 	st := take()
 	s.udp.requests.Add(1)
-	// The stream is the handler's now: ended here, cleanly or by a reset.
-	// Reset: the user revoked (left the users file), the request gave way
-	// to a new one, a capsule that cannot be read, a client gone or not
-	// reading. Clean: the client's end, the idle time.
-	if s.carryUDP(uctx, slot, a.traffic, conn, st) || context.Cause(uctx) != nil {
-		st.Reset()
-		return
-	}
-	_ = st.Close()
+	s.carryUDP(uctx, slot, a.traffic, conn, st)
 }
 
 // udpRequest is one datagram request's state: the policy is a uotStream's.
@@ -231,18 +232,16 @@ type udpRequest struct {
 	u    *uotStream
 	conn *net.UDPConn
 	st   H3Stream
-	n    udpCounts
+	n    *udpCounts // its own allocation: the connection's sender holds it (sent)
 
 	// sendMu: one client's datagram is sent at a time, from the stream's
 	// capsules or from its QUIC datagrams; the stream's names (uotStream)
 	// are one sender's, as UoT's.
 	sendMu sync.Mutex
-	// answers go from the socket's reader to the one that passes them to
-	// SendDatagram; capsules from it to the stream's writer.
-	answers  chan *udpAnswer
+	// capsules go from the socket's reader to the stream's writer.
 	capsules chan *udpAnswer
 	done     chan struct{} // closed at the end: what waits is dropped
-	failed   chan error    // a writer's end: the stream does not take more
+	failed   chan error    // the stream takes no more
 }
 
 // udpAnswer is an answer framed for the client at buf[dg:end], its data
@@ -252,17 +251,25 @@ type udpAnswer struct {
 	dg, end int
 	n       int   // its data
 	quic    bool  // from a pair marked as QUIC's
-	at      int64 // mono: when it was queued as a capsule
+	at      int64 // mono: when it came from the destination
 }
 
-// The bound of a request's answers is udpQueued + capsuleQueued of them,
-// 1.5 KiB each: under 100 KiB for a client that reads nothing and
-// destinations that send as fast as they can (UoT's stream: 198 KiB).
+// An answer that fits a QUIC datagram is copied into the stream's queue
+// at once (h3serve.Stream.SendDatagram), and its buffer reads the next
+// one. The bound of a request's answers is then its stream's queue, 32
+// datagrams of 1.4 KiB at most, and capsuleQueued capsules of 1.5 KiB:
+// under 100 KiB for a client that reads nothing and destinations that send
+// as fast as they can (UoT's stream: 198 KiB); nothing of it outlives the
+// request but a datagram its connection's sender has taken.
 var udpAnswers = sync.Pool{New: func() any { return new(udpAnswer) }}
 
-func (d *udpRequest) drop(kind int) {
-	d.n.dropped[kind].Add(1)
-	d.s.udp.dropped[kind].Add(1)
+func (d *udpRequest) drop(kind int) { d.dropN(kind, 1) }
+
+func (d *udpRequest) dropN(kind int, n int64) {
+	if n > 0 {
+		d.n.dropped[kind].Add(n)
+		d.s.udp.dropped[kind].Add(n)
+	}
 }
 
 // sentUp counts a datagram sent to its destination.
@@ -276,19 +283,24 @@ func (d *udpRequest) sentUp(capsule bool, n int) {
 	d.u.traffic.addUp(n) // the payload, as it went to the destination
 }
 
-// passedDown counts an answer the client's side took.
-func (d *udpRequest) passedDown(capsule bool, n int) {
-	d.u.touch()
-	d.n.out.Add(1)
-	d.s.udp.out.Add(1)
-	if capsule {
-		d.n.capsulesOut.Add(1)
-		d.s.udp.capsulesOut.Add(1)
+// passedDown is what counts an answer the client's side took: the
+// request's idle time, its counts, the user's bytes. It holds none of the
+// request's state but those: the connection's sender may call it after the
+// request ended (H3Stream.OnSent).
+func passedDown(slot *uotSlot, n *udpCounts, totals *udpTotals, traffic *Traffic) func(capsule bool, size int) {
+	return func(capsule bool, size int) {
+		slot.last.Store(mono())
+		n.out.Add(1)
+		totals.out.Add(1)
+		if capsule {
+			n.capsulesOut.Add(1)
+			totals.capsulesOut.Add(1)
+		}
+		traffic.addDown(size) // the payload, as it came from the destination
 	}
-	d.u.traffic.addDown(n) // the payload, as it came from the destination
 }
 
-// fail notes that a writer stopped: the stream takes no more.
+// fail notes that the stream takes no more.
 func (d *udpRequest) fail(err error) {
 	select {
 	case d.failed <- err:
@@ -297,11 +309,14 @@ func (d *udpRequest) fail(err error) {
 }
 
 // carryUDP carries a request's datagrams until the client ends it, the
-// idle time runs out, a writer fails or ctx is done; reset says the stream
-// must be reset, not ended. Nothing reads or writes the stream once it
-// returns, but a SendDatagram that waits for the connection's queue,
-// which ends by itself (the queue drains, or the connection ends).
-func (s *Server) carryUDP(ctx context.Context, slot *uotSlot, traffic *Traffic, conn *net.UDPConn, st H3Stream) (reset bool) {
+// idle time runs out, the stream fails or ctx is done, and ends the
+// stream: cleanly at the client's end and the idle time, reset otherwise
+// (the user revoked or the request evicted, a capsule that cannot be read,
+// a client gone or not reading). Nothing reads or writes the stream once
+// it returns, and nothing of the request is left waiting: its queues are
+// empty, and the connection's sender is all that may still send one of its
+// datagrams.
+func (s *Server) carryUDP(ctx context.Context, slot *uotSlot, traffic *Traffic, conn *net.UDPConn, st H3Stream) {
 	idle := s.uotIdle
 	if idle == 0 {
 		idle = uotIdle
@@ -312,27 +327,25 @@ func (s *Server) carryUDP(ctx context.Context, slot *uotSlot, traffic *Traffic, 
 	u := &uotStream{s: s, ctx: rctx, slot: slot, traffic: traffic, names: map[string]uotResolved{}, peers: map[netip.AddrPort]pairTimes{}}
 	u.touch()
 	s.lim.uotRun(slot, u)
-	d := &udpRequest{s: s, u: u, conn: conn, st: st, answers: make(chan *udpAnswer, udpQueued),
-		capsules: make(chan *udpAnswer, capsuleQueued), done: make(chan struct{}), failed: make(chan error, 1)}
+	d := &udpRequest{s: s, u: u, conn: conn, st: st, n: new(udpCounts), capsules: make(chan *udpAnswer, capsuleQueued),
+		done: make(chan struct{}), failed: make(chan error, 1)}
+	down := passedDown(slot, d.n, &s.udp, traffic)
+	st.OnSent(func(n int) { down(false, n) })
 
 	var readers sync.WaitGroup
 	up := make(chan error, 1)
 	readers.Go(func() { up <- d.readCapsules() })
 	readers.Go(func() { d.readDatagrams(rctx) })
 	readers.Go(d.receive)
-	delivered := make(chan struct{})
-	go func() {
-		defer close(delivered)
-		d.deliver()
-	}()
 	written := make(chan struct{})
 	go func() {
 		defer close(written)
-		d.writeCapsules()
+		d.writeCapsules(down)
 	}()
 
 	tick := time.NewTicker(idle / 8)
 	defer tick.Stop()
+	reset := false
 loop:
 	for {
 		select {
@@ -353,39 +366,49 @@ loop:
 			}
 		}
 	}
-	// The readers stop: the socket goes (its reader closes the answers),
-	// the lookups and the datagrams' wait end, a read of the stream fails.
+	// The readers stop: the socket goes, the lookups and the datagrams'
+	// wait end, a read of the stream fails.
 	close(d.done)
 	stop()
 	_ = conn.Close()
 	_ = st.SetReadDeadline(time.Now())
 	readers.Wait()
-	// The writers drop what waits. A capsule the client does not take
-	// (flow control) holds the stream's writer: past a second it fails,
-	// and the stream, which may have half a capsule, is reset. A
-	// SendDatagram that waits for the connection is left to end by itself.
-	grace, graceEnd := context.WithTimeout(context.Background(), time.Second)
-	defer graceEnd()
+	// The capsules' writer stops. A capsule the client does not take (flow
+	// control) holds it: past a second its write fails, and the stream,
+	// which may have half a capsule, is reset.
 	select {
 	case <-written:
-	case <-grace.Done():
+	case <-time.After(time.Second):
 		_ = st.SetWriteDeadline(time.Now())
 		<-written
 		reset = true
 	}
-	select {
-	case <-delivered:
-	case <-grace.Done():
+	// What waits is dropped: the capsules here, the datagrams with the
+	// stream's end.
+	for left := true; left; {
+		select {
+		case a := <-d.capsules:
+			d.drop(dropQueue)
+			udpAnswers.Put(a)
+		default:
+			left = false
+		}
 	}
+	if reset || context.Cause(ctx) != nil {
+		st.Reset()
+	} else {
+		_ = st.Close()
+	}
+	d.dropN(dropQueue, st.Dropped())
 	// Counts only: no destination, no source in the log.
-	args := []any{"in", d.n.in.Load(), "capsules_in", d.n.capsulesIn.Load(), "out", d.n.out.Load(), "capsules_out", d.n.capsulesOut.Load()}
+	args := []any{"in", d.n.in.Load(), "capsules_in", d.n.capsulesIn.Load(), "out", d.n.out.Load(), "capsules_out", d.n.capsulesOut.Load(),
+		"reset", reset}
 	for i := range d.n.dropped {
 		if n := d.n.dropped[i].Load(); n > 0 {
 			args = append(args, "dropped_"+dropNames[i], n)
 		}
 	}
 	s.logger().Debug("naive: UDP request ended", args...)
-	return reset
 }
 
 // readDatagrams sends the client's QUIC datagrams on until ctx ends or the
@@ -428,6 +451,9 @@ func (d *udpRequest) readCapsules() error {
 			d.upstream(b, true)
 			continue
 		}
+		// A long one: a buffer of the pool's while it is read, which the
+		// client may make last (a head, then nothing) until the idle time
+		// or eviction, as UoT's stream holds its packet's (uotBufs).
 		buf := capsuleBufs.Get().(*[capsuleMax]byte)
 		_, err = io.ReadFull(r, buf[:n])
 		if err == nil {
@@ -440,7 +466,7 @@ func (d *udpRequest) readCapsules() error {
 	}
 }
 
-// capsuleBufs hold a long capsule while its datagram is sent.
+// capsuleBufs hold a long capsule while it is read and its datagram sent.
 var capsuleBufs = sync.Pool{New: func() any { return new([capsuleMax]byte) }}
 
 // readCapsuleHead reads a capsule's type and length: io.EOF at the end of
@@ -490,7 +516,7 @@ func (d *udpRequest) upstream(b []byte, capsule bool) {
 		d.drop(dropLimit)
 		return
 	}
-	if capsule && len(data) > quicCapsuleMax && d.u.quicPair(to) {
+	if _, marked := d.u.pair(to); capsule && len(data) > quicCapsuleMax && marked {
 		d.drop(dropQUIC)
 		return
 	}
@@ -515,11 +541,11 @@ func (d *udpRequest) destination(dest uotAddr) (netip.AddrPort, bool) {
 	return d.u.resolve(dest)
 }
 
-// receive takes the answers off the socket as they come and queues them
-// for the client, framed; it closes the queue when the socket ends. It
-// never waits for the client: a full queue drops the new answer.
+// receive takes the answers off the socket as they come and passes them
+// on, framed: to the stream's queue of datagrams, which copies them, or,
+// too large for a QUIC packet, to the capsules' writer. It never waits for
+// the client; it stops when the socket ends.
 func (d *udpRequest) receive() {
-	defer close(d.answers)
 	a := udpAnswers.Get().(*udpAnswer)
 	defer func() { udpAnswers.Put(a) }()
 	var head [udpHead]byte
@@ -543,60 +569,59 @@ func (d *udpRequest) receive() {
 			continue
 		}
 		h := appendUDPHead(head[:0], from)
-		a.dg, a.end, a.n, a.quic = udpHead-len(h), udpHead+n, n, quic
+		a.dg, a.end, a.n, a.quic, a.at = udpHead-len(h), udpHead+n, n, quic, mono()
 		copy(a.buf[a.dg:udpHead], h)
-		select {
-		case d.answers <- a:
-			a = udpAnswers.Get().(*udpAnswer)
-		default:
+		tooLarge, err := d.st.SendDatagram(a.buf[a.dg:a.end], n)
+		switch {
+		case err != nil:
 			d.drop(dropQueue)
+			d.fail(err)
+			continue
+		case !tooLarge:
+			continue // copied: the buffer reads the next one
+		case quic && n > quicCapsuleMax:
+			d.drop(dropQUIC)
+			continue
 		}
+		d.queueCapsule(a)
+		a = udpAnswers.Get().(*udpAnswer)
 	}
 }
 
-// deliver passes the queued answers to the client as QUIC datagrams, and
-// those too large for one to the stream's writer, until the queue is
-// closed, the request ends or the stream takes no more datagrams.
-func (d *udpRequest) deliver() {
-	defer close(d.capsules)
+// queueCapsule queues an answer for the capsules' writer; in a full queue
+// the oldest gives way. The reader is the only one that queues, so a place
+// freed is its own.
+func (d *udpRequest) queueCapsule(a *udpAnswer) {
 	for {
-		a := nextAnswer(d.done, d.answers)
-		if a == nil {
-			return // the request ended, or the socket did
-		}
-		tooLarge, err := d.st.SendDatagram(a.buf[a.dg:a.end])
-		switch {
-		case err != nil:
-			udpAnswers.Put(a)
-			d.fail(err)
-			return
-		case !tooLarge:
-			d.passedDown(false, a.n)
-			udpAnswers.Put(a)
-			continue
-		case a.quic && a.n > quicCapsuleMax:
-			d.drop(dropQUIC)
-			udpAnswers.Put(a)
-			continue
-		}
-		a.at = mono()
 		select {
 		case d.capsules <- a:
+			return
 		default:
+		}
+		select {
+		case old := <-d.capsules:
 			d.drop(dropQueue)
-			udpAnswers.Put(a)
+			udpAnswers.Put(old)
+		default:
 		}
 	}
 }
 
 // writeCapsules writes the queued capsules to the stream, each whole, until
-// the queue is closed or the request ends; one that waited past
-// capsuleWait is dropped. A write that fails ends the request.
-func (d *udpRequest) writeCapsules() {
+// the request ends; one that came from its destination more than
+// capsuleWait ago is dropped. A write that fails ends the request.
+func (d *udpRequest) writeCapsules(down func(capsule bool, size int)) {
 	for {
-		a := nextAnswer(d.done, d.capsules)
-		if a == nil {
-			return // the request ended, or no more come
+		var a *udpAnswer
+		select {
+		case <-d.done:
+			return
+		default:
+		}
+		select {
+		case <-d.done:
+			return
+		case a = <-d.capsules:
 		}
 		if time.Duration(mono()-a.at) > capsuleWait {
 			d.drop(dropLate)
@@ -614,23 +639,7 @@ func (d *udpRequest) writeCapsules() {
 			d.fail(err)
 			return
 		}
-		d.passedDown(true, n)
-	}
-}
-
-// nextAnswer is the next answer of q, waiting for one; nil once done is closed,
-// which goes first, or q is.
-func nextAnswer(done <-chan struct{}, q <-chan *udpAnswer) *udpAnswer {
-	select {
-	case <-done:
-		return nil
-	default:
-	}
-	select {
-	case <-done:
-		return nil
-	case a := <-q:
-		return a
+		down(true, n)
 	}
 }
 

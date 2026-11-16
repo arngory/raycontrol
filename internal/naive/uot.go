@@ -255,11 +255,13 @@ func (u *uotStream) hear(ap netip.AddrPort) (ok, quic bool) {
 	return ok, t.quic
 }
 
-// quicPair reports whether the stream has the pair, marked as QUIC's.
-func (u *uotStream) quicPair(ap netip.AddrPort) bool {
+// pair reports whether the stream has the pair, and whether it is marked
+// as QUIC's; it notes nothing.
+func (u *uotStream) pair(ap netip.AddrPort) (ok, quic bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.peers[ap].quic
+	t, ok := u.peers[ap]
+	return ok, t.quic
 }
 
 // uotResolved is what a stream knows of a name until a moment, so that

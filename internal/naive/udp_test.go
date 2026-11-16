@@ -511,7 +511,9 @@ func TestUDPEcho(t *testing.T) {
 	}
 	q.quiet(100 * time.Millisecond)
 	// The bytes count for the user's name, payloads only: "one", "named",
-	// "still" each way.
+	// "still" each way. An answer counts once the connection's sender
+	// handed it to QUIC, which may come after the client has it.
+	eventually(t, "the datagrams are not counted", func() bool { return h.UDPStats().Out == 3 && h.UDPStats().In == 3 })
 	snap := h.Users.Snapshot()
 	if got := snap.Users["u5-ab12"]; got.Up != 13 || got.Down != 13 {
 		t.Fatalf("traffic %+v", got)

@@ -584,7 +584,9 @@ type fuzzStream struct{ bytes.Reader }
 func (*fuzzStream) Write(b []byte) (int, error)                     { return len(b), nil }
 func (*fuzzStream) SetReadDeadline(time.Time) error                 { return nil }
 func (*fuzzStream) SetWriteDeadline(time.Time) error                { return nil }
-func (*fuzzStream) SendDatagram([]byte) (bool, error)               { return false, nil }
+func (*fuzzStream) SendDatagram([]byte, int) (bool, error)          { return false, nil }
+func (*fuzzStream) OnSent(func(int))                                {}
+func (*fuzzStream) Dropped() int64                                  { return 0 }
 func (*fuzzStream) ReceiveDatagram(context.Context) ([]byte, error) { return nil, io.EOF }
 func (*fuzzStream) Close() error                                    { return nil }
 func (*fuzzStream) Reset()                                          {}
@@ -640,7 +642,7 @@ func FuzzUDPCapsules(f *testing.F) {
 		}
 		st := &fuzzStream{}
 		st.Reader.Reset(in)
-		d := &udpRequest{s: s, conn: free, st: st, u: &uotStream{s: s, ctx: context.Background(), slot: &uotSlot{user: "u"},
+		d := &udpRequest{s: s, conn: free, st: st, n: new(udpCounts), u: &uotStream{s: s, ctx: context.Background(), slot: &uotSlot{user: "u"},
 			names: map[string]uotResolved{}, peers: map[netip.AddrPort]pairTimes{}}}
 		got := d.readCapsules()
 		if errors.Is(got, errRefused) != (want != nil) || (want == nil && got != nil) {

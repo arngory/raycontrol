@@ -39,17 +39,29 @@ func TestDatagrams(t *testing.T) {
 		}
 		w.Header().Set("Capsule-Protocol", "?1")
 		st := take()
+		sent := make(chan int, 4)
+		st.OnSent(func(n int) { sent <- n })
 		res := datagramsResult{ok: true}
-		res.small, res.smallErr = st.SendDatagram([]byte("small"))
-		res.tooLarge, res.err = st.SendDatagram(make([]byte, MaxPacketSize))
+		res.small, res.smallErr = st.SendDatagram([]byte("small"), 0)
+		res.tooLarge, res.err = st.SendDatagram(make([]byte, MaxPacketSize), 0)
 		results <- res
-		// The client's datagram comes back; then the end it asks for.
+		// The client's datagram comes back; then the end it asks for, once
+		// the sender took the echo (an end drops what waits).
 		b, err := st.ReceiveDatagram(r.Context())
 		if err != nil {
 			st.Reset()
 			return
 		}
-		if _, err := st.SendDatagram(b); err != nil || string(b) == "reset" {
+		if _, err := st.SendDatagram(b, 1); err != nil {
+			st.Reset()
+			return
+		}
+		for n := range sent {
+			if n == 1 {
+				break
+			}
+		}
+		if string(b) == "reset" {
 			st.Reset()
 			return
 		}
