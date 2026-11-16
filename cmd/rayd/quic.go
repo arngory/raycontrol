@@ -51,13 +51,13 @@ func h3Options(o quicOptions) h3serve.Options {
 }
 
 // connIDs is the generator of a QUIC server's connection IDs with its
-// service's label under the node's secret (spec/quic-cid-route-v1.md): the
+// service's label under the label's key (spec/quic-cid-route-v1.md): the
 // front finds the service of a client whose address changed by it. The
-// error says what is wrong, nothing of the secret; the server then serves
+// error says what is wrong, nothing of the key; the server then serves
 // with random IDs, as before the label, and only clients whose address
 // changes lose their connections.
-func connIDs(secret []byte, label int) (quic.ConnectionIDGenerator, error) {
-	g, err := quiccid.NewGenerator(secret, label)
+func connIDs(labelKey []byte, label int) (quic.ConnectionIDGenerator, error) {
+	g, err := quiccid.NewGenerator(labelKey, label)
 	if err != nil {
 		return nil, err
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/arngory/raycontrol/internal/quiccid"
+	"github.com/arngory/raycontrol/internal/quiccid/cidkey"
 )
 
 // scids is a server's socket that keeps the Source Connection IDs of the
@@ -43,8 +44,11 @@ func (s *scids) WriteTo(b []byte, addr net.Addr) (int, error) {
 // 8 bytes that carry the backend's label under the node's secret
 // (spec/quic-cid-route-v1.md). A generator of another length is refused.
 func TestConnIDs(t *testing.T) {
-	secret := bytes.Repeat([]byte{0x42}, quiccid.SecretLen)
-	gen, err := quiccid.NewGenerator(secret, 4242)
+	key, err := cidkey.LabelKey(bytes.Repeat([]byte{0x42}, cidkey.SecretLen), 4242)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen, err := quiccid.NewGenerator(key, 4242)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +84,7 @@ func TestConnIDs(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	codec, _ := quiccid.NewCodec(secret)
+	codec, _ := quiccid.NewCodec(key)
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	if len(pc.ids) == 0 {
