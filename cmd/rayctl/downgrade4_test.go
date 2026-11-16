@@ -122,9 +122,14 @@ func TestCopyDBWALFailsAfterMain(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	saved := renameWAL
-	t.Cleanup(func() { renameWAL = saved })
-	renameWAL = func(string, string) error { return errors.New("no rename") }
+	saved := renameDBFile
+	t.Cleanup(func() { renameDBFile = saved })
+	renameDBFile = func(src, dst string) error {
+		if strings.HasSuffix(dst, "-wal") {
+			return errors.New("no rename")
+		}
+		return os.Rename(src, dst)
+	}
 	err := copyDB(src, dst)
 	if !errors.Is(err, errDBPlaced) {
 		t.Fatalf("%v", err)
@@ -135,5 +140,30 @@ func TestCopyDBWALFailsAfterMain(t *testing.T) {
 	ents, _ := os.ReadDir(filepath.Dir(dst))
 	if len(ents) != 1 {
 		t.Errorf("beside the new file: %v", ents)
+	}
+}
+
+// copyDB: the new file cannot go in: the old WAL goes back beside the old
+// file, nothing else is left, the destination as it was (review 4, M5).
+func TestCopyDBMainFails(t *testing.T) {
+	src, dst := filepath.Join(t.TempDir(), "rayd.db"), filepath.Join(t.TempDir(), "rayd.db")
+	for name, body := range map[string]string{src: "new", src + "-wal": "new frames", dst: "old", dst + "-wal": "old frames"} {
+		if err := os.WriteFile(name, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	saved := renameDBFile
+	t.Cleanup(func() { renameDBFile = saved })
+	renameDBFile = func(string, string) error { return errors.New("no rename") }
+	if err := copyDB(src, dst); err == nil || errors.Is(err, errDBPlaced) {
+		t.Fatalf("%v", err)
+	}
+	for name, want := range map[string]string{dst: "old", dst + "-wal": "old frames"} {
+		if b, err := os.ReadFile(name); err != nil || string(b) != want {
+			t.Errorf("%s: %q %v", filepath.Base(name), b, err)
+		}
+	}
+	if ents, _ := os.ReadDir(filepath.Dir(dst)); len(ents) != 2 {
+		t.Errorf("left: %v", ents)
 	}
 }

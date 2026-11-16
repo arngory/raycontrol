@@ -1018,13 +1018,13 @@ func copyDB(src, dst string) error {
 		drop()
 		return err
 	}
-	if err := os.Rename(newMain, dst); err != nil {
+	if err := renameDBFile(newMain, dst); err != nil {
 		putBack(aside, dst+"-wal")
 		drop()
 		return err
 	}
 	if newWAL != "" {
-		if err := renameWAL(newWAL, dst+"-wal"); err != nil {
+		if err := renameDBFile(newWAL, dst+"-wal"); err != nil {
 			// The new file is in place: the old WAL must not come back
 			// beside it.
 			os.Remove(newWAL)
@@ -1040,8 +1040,8 @@ func copyDB(src, dst string) error {
 	return syncDir(filepath.Dir(dst))
 }
 
-// renameWAL puts copyDB's new WAL in place (tests make it fail).
-var renameWAL = os.Rename
+// renameDBFile puts copyDB's new files in place (tests make it fail).
+var renameDBFile = os.Rename
 
 // errDBPlaced: copyDB put the new database file in place, and failed
 // after (its WAL); the destination is no longer as it was.
