@@ -6797,8 +6797,15 @@ func (x *CreateDeviceResponse) GetBundle() string {
 }
 
 type RevokeDeviceRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// overlap: the user's credentials rotate with the overlap of a scheduled
+	// switch instead of being new at once (v0.31.0, docs/spec/api-v1.md
+	// §5a): the user's other devices move over without a cut, and what the
+	// revoked device knew is accepted until the grace after the switch ends.
+	// For a planned replacement, not a stolen device. A node before v0.31.0
+	// does not read it and makes them new at once.
+	Overlap       bool `protobuf:"varint,2,opt,name=overlap,proto3" json:"overlap,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6840,6 +6847,13 @@ func (x *RevokeDeviceRequest) GetId() string {
 	return ""
 }
 
+func (x *RevokeDeviceRequest) GetOverlap() bool {
+	if x != nil {
+		return x.Overlap
+	}
+	return false
+}
+
 type RevokeDeviceResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// invite: the ID was an unused invite, now withdrawn; nothing else
@@ -6852,8 +6866,17 @@ type RevokeDeviceResponse struct {
 	Device string `protobuf:"bytes,4,opt,name=device,proto3" json:"device,omitempty"`
 	// credentials: how many of the user's credentials are new, as
 	// RenewUserResponse counts them, not services, but without DoH's,
-	// which a revocation keeps (v0.27.0); 0 for a user with none yet.
-	Credentials   uint32 `protobuf:"varint,5,opt,name=credentials,proto3" json:"credentials,omitempty"`
+	// which a revocation keeps (v0.27.0); 0 for a user with none yet. With
+	// overlap: how many rotate.
+	Credentials uint32 `protobuf:"varint,5,opt,name=credentials,proto3" json:"credentials,omitempty"`
+	// switch_at and until, only for a revocation with overlap (v0.31.0):
+	// when the user's devices switch to the next credentials it published
+	// (unix seconds, the latest of them), and when the ones the revoked
+	// device knew stop being accepted, switch_at plus the grace. rayd's
+	// rotation runs every 10 minutes, so each comes up to 10 minutes later.
+	// 0 without overlap, with no credentials, or from an older node.
+	SwitchAt      int64 `protobuf:"varint,6,opt,name=switch_at,json=switchAt,proto3" json:"switch_at,omitempty"`
+	Until         int64 `protobuf:"varint,7,opt,name=until,proto3" json:"until,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6919,6 +6942,20 @@ func (x *RevokeDeviceResponse) GetDevice() string {
 func (x *RevokeDeviceResponse) GetCredentials() uint32 {
 	if x != nil {
 		return x.Credentials
+	}
+	return 0
+}
+
+func (x *RevokeDeviceResponse) GetSwitchAt() int64 {
+	if x != nil {
+		return x.SwitchAt
+	}
+	return 0
+}
+
+func (x *RevokeDeviceResponse) GetUntil() int64 {
+	if x != nil {
+		return x.Until
 	}
 	return 0
 }
@@ -9118,15 +9155,18 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x04role\x18\x03 \x01(\tR\x04role\"b\n" +
 	"\x14CreateDeviceResponse\x122\n" +
 	"\x06device\x18\x01 \x01(\v2\x1a.raycontrol.node.v1.DeviceR\x06device\x12\x16\n" +
-	"\x06bundle\x18\x02 \x01(\tR\x06bundle\"%\n" +
+	"\x06bundle\x18\x02 \x01(\tR\x06bundle\"?\n" +
 	"\x13RevokeDeviceRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\"\x96\x01\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
+	"\aoverlap\x18\x02 \x01(\bR\aoverlap\"\xc9\x01\n" +
 	"\x14RevokeDeviceResponse\x12\x16\n" +
 	"\x06invite\x18\x01 \x01(\bR\x06invite\x12\x18\n" +
 	"\aalready\x18\x02 \x01(\bR\aalready\x12\x12\n" +
 	"\x04user\x18\x03 \x01(\tR\x04user\x12\x16\n" +
 	"\x06device\x18\x04 \x01(\tR\x06device\x12 \n" +
-	"\vcredentials\x18\x05 \x01(\rR\vcredentials\"\x84\x01\n" +
+	"\vcredentials\x18\x05 \x01(\rR\vcredentials\x12\x1b\n" +
+	"\tswitch_at\x18\x06 \x01(\x03R\bswitchAt\x12\x14\n" +
+	"\x05until\x18\a \x01(\x03R\x05until\"\x84\x01\n" +
 	"\x13CreateInviteRequest\x12\x12\n" +
 	"\x04user\x18\x01 \x01(\tR\x04user\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +

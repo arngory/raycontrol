@@ -42,7 +42,11 @@ import (
 // systemd (CI, containers): REALITY with its site, Hysteria2 (hy2-obfs)
 // and Yggdrasil with inner behind the front, all from the rendered files. A client then
 // probes through both tunnels, and asks link directly from the address of
-// its Hysteria2 session: its own session is listed (R4-20).
+// its Hysteria2 session: its own session is listed (R4-20). Then another
+// device of the user is revoked with overlap through rayd's API (R4-43):
+// the user's credentials rotate with the lead and the grace of rayd's
+// flags, the laptop's subscription carries the next REALITY link, which
+// the running Xray takes at once, and its current links go on working.
 func TestSupervisedNode(t *testing.T) {
 	bin := os.Getenv("XRAY_BIN")
 	niko := os.Getenv("NIKO_SERVER_BIN")
@@ -132,6 +136,14 @@ func TestSupervisedNode(t *testing.T) {
 	st.CreateUser(ctx, store.User{Name: "alice", Enabled: true, TrafficLimit: &limit})
 	st.SetUserServices(ctx, "alice", []int64{reality.ID, hy.ID})
 	dev, key, err := st.CreateDevice(ctx, "alice", "laptop", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	phone, _, err := st.CreateDevice(ctx, "alice", "phone", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeKeys, err := provision.LoadNodeKeys(ctx, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,6 +330,31 @@ func TestSupervisedNode(t *testing.T) {
 	if err := json.Unmarshal(raw, &stats); err != nil || stats.Connections < 1 || len(stats.Own) < 1 || stats.Own[0].RTTus == 0 {
 		t.Fatalf("link from %s: %s (%+v, %v)", ls.Address, raw, stats, err)
 	}
+
+	// The phone revoked with overlap through rayd's API: alice's
+	// credentials rotate with rayd's lead and grace (its flags' defaults
+	// here), stored at its start; nothing restarts, the next REALITY link
+	// in the laptop's subscription gets in at once, and the current
+	// Hysteria2 one goes on.
+	before := time.Now()
+	rev, err := api.NewUnixClient(filepath.Join(run, "rayd.sock")).RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: phone.ID, Overlap: true}))
+	if r := store.DefaultRotation; err != nil || rev.Msg.Credentials != 2 || rev.Msg.SwitchAt < before.Add(r.Lead).Unix() ||
+		rev.Msg.SwitchAt > time.Now().Add(r.Lead).Unix() || rev.Msg.Until != rev.Msg.SwitchAt+int64(r.Grace/time.Second) {
+		t.Fatalf("revoke: %v %v", rev, err)
+	}
+	sc.NodeKeys = nodeKeys.PublicJSON()
+	fetched, err := sc.Fetch(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(fetched.Profiles, func(p sub.Profile) bool { return p.Name == "reality" })
+	if i < 0 || fetched.Profiles[i].Link != linkOf("reality") || fetched.Profiles[i].Next == nil || fetched.Profiles[i].Next.From != rev.Msg.SwitchAt {
+		t.Fatalf("the laptop's subscription after the revocation: %+v", fetched.Profiles)
+	}
+	nextPort, stopNext := realitySocks(t, bin, fetched.Profiles[i].Next.Link, "")
+	probeVia("REALITY with the next credential", nextPort)
+	stopNext()
+	probeVia("Hysteria2 after the revocation", port)
 
 	// rayd stops at once: its last traffic round reads the processes
 	// before the supervisor stops them, and writes alice's two probes,

@@ -91,7 +91,11 @@ service NodeService {
   // RevokeDevice revokes a device, or withdraws an unused invite. Revoking
   // a device changes every credential of its user at once but DoH's, whose
   // token is each device's (docs/spec/api-v1.md §5a): the user's other
-  // devices reconnect after their next subscription fetch.
+  // devices reconnect after their next subscription fetch. With overlap
+  // (v0.31.0, R4-43) the credentials rotate instead, as at a scheduled
+  // switch: the next ones published now, the switch after the lead, the
+  // old ones accepted for the grace after it; for a device given away or
+  // broken, not stolen.
   rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
   // CreateInvite returns a one-time invite ("rcinv1:..."): the client
   // registers the device itself through the remote API (R3-3).
@@ -919,7 +923,16 @@ message CreateDeviceResponse {
   string bundle = 2; // "rcdev1:..." (docs/spec/spa-v2.md)
 }
 
-message RevokeDeviceRequest { string id = 1; }
+message RevokeDeviceRequest {
+  string id = 1;
+  // overlap: the user's credentials rotate with the overlap of a scheduled
+  // switch instead of being new at once (v0.31.0, docs/spec/api-v1.md
+  // §5a): the user's other devices move over without a cut, and what the
+  // revoked device knew is accepted until the grace after the switch ends.
+  // For a planned replacement, not a stolen device. A node before v0.31.0
+  // does not read it and makes them new at once.
+  bool overlap = 2;
+}
 message RevokeDeviceResponse {
   // invite: the ID was an unused invite, now withdrawn; nothing else
   // changed. A node before v0.27.0 answers with none of these fields.
@@ -931,8 +944,17 @@ message RevokeDeviceResponse {
   string device = 4;
   // credentials: how many of the user's credentials are new, as
   // RenewUserResponse counts them, not services, but without DoH's,
-  // which a revocation keeps (v0.27.0); 0 for a user with none yet.
+  // which a revocation keeps (v0.27.0); 0 for a user with none yet. With
+  // overlap: how many rotate.
   uint32 credentials = 5;
+  // switch_at and until, only for a revocation with overlap (v0.31.0):
+  // when the user's devices switch to the next credentials it published
+  // (unix seconds, the latest of them), and when the ones the revoked
+  // device knew stop being accepted, switch_at plus the grace. rayd's
+  // rotation runs every 10 minutes, so each comes up to 10 minutes later.
+  // 0 without overlap, with no credentials, or from an older node.
+  int64 switch_at = 6;
+  int64 until = 7;
 }
 
 message CreateInviteRequest {

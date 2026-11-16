@@ -124,7 +124,13 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   device list [USER]
   device add USER NAME [-role user|admin] [-o FILE]
                                             the enrollment bundle, once: on the screen or alone in FILE
-  device revoke ID                          a device, or an invite not yet used
+  device revoke [-overlap] ID               a device, or an invite not yet used; a device's user gets new
+                                            credentials at once, the user's other devices cut until they
+                                            fetch their subscription. -overlap, for a device given away
+                                            or broken, not stolen: they rotate instead, the next ones
+                                            published now, the switch after -cred-lead (3 days), the old
+                                            ones, which the device knew, accepted -cred-grace (2 days)
+                                            more; the other devices move over without a cut
   device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv2|rcinv1]
                                             a one-time invite: the client registers the device itself
                                             through the remote API (service add api api); rcinv2 is
@@ -1333,22 +1339,40 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 				r.Msg.Device.Id, r.Msg.Device.User, r.Msg.Device.Name, r.Msg.Bundle)
 		})
 	case "revoke":
-		if err := need(args, 1); err != nil {
-			return err
-		}
-		r, err := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: args[0]}))
+		fs := flag.NewFlagSet("device revoke", flag.ContinueOnError)
+		overlap := fs.Bool("overlap", false, "rotate the user's credentials with overlap instead of new ones at once (a device given away or broken, not stolen)")
+		id, err := oneArg(fs, args)
 		if err != nil {
 			return err
 		}
-		return c.print(r.Msg, func(w *tabwriter.Writer) { fmt.Fprint(w, revokeText(args[0], r.Msg)) })
+		r, err := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: id, Overlap: *overlap}))
+		if err != nil {
+			return err
+		}
+		return c.print(r.Msg, func(w *tabwriter.Writer) { fmt.Fprint(w, revokeText(id, *overlap, r.Msg)) })
 	}
 	return errUsage
 }
 
+// oneArg parses the flags of fs before or after its one argument, and
+// returns the argument.
+func oneArg(fs *flag.FlagSet, args []string) (string, error) {
+	if err := fs.Parse(args); err != nil || fs.NArg() == 0 {
+		return "", errUsage
+	}
+	arg := fs.Arg(0)
+	if err := fs.Parse(fs.Args()[1:]); err != nil || fs.NArg() != 0 {
+		return "", errUsage
+	}
+	return arg, nil
+}
+
 // revokeText says what a revocation did (R4-36): the user's credentials
 // are new, so the user's other devices are off until their next
-// subscription fetch.
-func revokeText(id string, r *nodev1.RevokeDeviceResponse) string {
+// subscription fetch. With overlap (R4-43) they rotate instead: the other
+// devices move over with their next fetch, and what the device knew stops
+// working at the end of the grace, which it says.
+func revokeText(id string, overlap bool, r *nodev1.RevokeDeviceResponse) string {
 	switch {
 	case r.Invite:
 		return fmt.Sprintf("invite %s withdrawn\n", id)
@@ -1360,8 +1384,22 @@ func revokeText(id string, r *nodev1.RevokeDeviceResponse) string {
 			"other credentials at once)\n", id, r.User, r.Device, r.User)
 	case r.Credentials == 0:
 		return fmt.Sprintf("device %s (%s/%s) revoked; %s has no credentials yet\n", id, r.User, r.Device, r.User)
+	case overlap && r.SwitchAt != 0:
+		at := func(t int64) string { return time.Unix(t, 0).UTC().Format("2006-01-02 15:04") + " UTC" }
+		return fmt.Sprintf("device %s (%s/%s) revoked with overlap. %s's credentials rotate (%d credentials): the next ones are\n"+
+			"accepted now, and %s's other devices get them with their next subscription fetch and switch to them\n"+
+			"at %s. The old ones, which the revoked device knew, stop working at %s\n"+
+			"(rayd's rotation runs every 10 minutes: up to 10 minutes later). For a stolen device revoke without\n"+
+			"-overlap; to cut this one off now: rayctl user renew %s (the other devices are then cut too, until\n"+
+			"they fetch their subscription).\n",
+			id, r.User, r.Device, r.User, r.Credentials, r.User, at(r.SwitchAt), at(r.Until), r.User)
 	}
-	return fmt.Sprintf("device %s (%s/%s) revoked. %s's credentials are new (%d credentials): what the device kept stops\n"+
+	older := ""
+	if overlap {
+		// A node before v0.31.0 does not read overlap.
+		older = "The node is older than v0.31.0: it knows no -overlap, and revoked without it.\n"
+	}
+	return older + fmt.Sprintf("device %s (%s/%s) revoked. %s's credentials are new (%d credentials): what the device kept stops\n"+
 		"working once rayd has applied them, in seconds. %s's other devices are cut too, until they fetch\n"+
 		"their subscription: Niko does it by itself at its next connection check (every 10 minutes, 15 to 30 s\n"+
 		"after a network change; a sleeping phone once it wakes), its keys still open the subscription.\n",

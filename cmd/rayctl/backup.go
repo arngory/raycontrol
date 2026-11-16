@@ -157,7 +157,8 @@ func (c *cli) restore(ctx context.Context, args []string) error {
 	}
 	// A revocation is for good, and changed its user's credentials (R4-36):
 	// the devices revoked here since the backup stay revoked in it, with
-	// new credentials for their users. With rayd stopped, so that none is
+	// new credentials for their users, or the rotation a revocation with
+	// overlap began going on (R4-43). With rayd stopped, so that none is
 	// missed.
 	if *noCarry {
 		fmt.Println("-no-carry: devices revoked since the backup come back, and with them their users' credentials of then;\n" +
@@ -246,19 +247,37 @@ func restoreCarryText(r store.Restored, made time.Time) string {
 	if r.Kept > 0 {
 		fmt.Fprintf(&b, "credentials and LAN keys stay as they are on this node now for %d users: the backup's older ones do not come back\n", r.Kept)
 	}
-	if len(r.Carried) > 0 {
+	var renewed, rotating []store.CarriedDevice
+	for _, d := range r.Carried {
+		if d.Rotating {
+			rotating = append(rotating, d)
+		} else {
+			renewed = append(renewed, d)
+		}
+	}
+	if len(renewed) > 0 {
 		fmt.Fprintf(&b, "revoked here since the backup, so revoked in it too; their users' credentials are new, and the users'\n"+
 			"other devices reconnect after their next subscription fetch:\n")
-		for _, d := range r.Carried {
+		for _, d := range renewed {
+			fmt.Fprintf(&b, "  %s  %s/%s\n", d.ID, d.User, d.Name)
+		}
+	}
+	if len(rotating) > 0 {
+		fmt.Fprintf(&b, "revoked here with overlap since the backup, so revoked in it too; their users' credentials are as\n"+
+			"here, the rotation the revocation began going on to its switch and grace:\n")
+		for _, d := range rotating {
 			fmt.Fprintf(&b, "  %s  %s/%s\n", d.ID, d.User, d.Name)
 		}
 	}
 	if len(r.Added) > 0 {
 		fmt.Fprintf(&b, "added here since the backup, so not in it: gone with the restore. Each fetched its user's credentials,\n"+
-			"which are new, so what it holds works no more:\n")
+			"which are new, so what it holds works no more (one revoked with overlap: its rotation goes on):\n")
 		for _, d := range r.Added {
 			state := ""
-			if d.Revoked {
+			switch {
+			case d.Rotating:
+				state = " (revoked here already, with overlap)"
+			case d.Revoked:
 				state = " (revoked here already)"
 			}
 			fmt.Fprintf(&b, "  %s  %s/%s%s\n", d.ID, d.User, d.Name, state)

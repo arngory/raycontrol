@@ -202,10 +202,13 @@ func cmdServe(args []string) error {
 		"a private CA's root goes in the node's roots (rayctl roots file)")
 	tlsRoots := fs.String("tls-roots", roots.SettingsFile, "settings of the roots the node's own outbound TLS trusts besides "+
 		"its embedded list (rayctl roots; a stand may name a file of its own)")
-	credPeriod := fs.Duration("cred-period", 30*24*time.Hour, "how long a user credential stays current (0: no rotation)")
-	credLead := fs.Duration("cred-lead", 3*24*time.Hour, "the next credential is in the subscription this long before the switch")
+	credPeriod := fs.Duration("cred-period", store.DefaultRotation.Period, "how long a user credential stays current (0: no scheduled rotation; "+
+		"rayctl device revoke -overlap still starts one of its user's credentials)")
+	credLead := fs.Duration("cred-lead", store.DefaultRotation.Lead, "the next credential is in the subscription this long before the switch, "+
+		"a scheduled one and the one rayctl device revoke -overlap publishes")
 	probeDaily := fs.Int("probe-daily-mib", probe.DefaultDaily>>20, "channel probes: MiB per device and UTC day, both directions")
-	credGrace := fs.Duration("cred-grace", 2*24*time.Hour, "the previous credential (and REALITY key set) is accepted this long after the switch (12h at least)")
+	credGrace := fs.Duration("cred-grace", store.DefaultRotation.Grace, "the previous credential (and REALITY key set) is accepted this long after the switch (12h at least); "+
+		"after rayctl device revoke -overlap, what the device knew works -cred-lead + -cred-grace")
 	realityPeriod := fs.Duration("reality-period", 90*24*time.Hour, "how long REALITY keys stay current; their next set is published -cred-lead ahead (0: no rotation)")
 	realityPrepare := fs.Duration("reality-prepare", 24*time.Hour, "how long a new server name (REALITY's, naive's) may wait for its certificate")
 	naiveSNIPeriod := fs.Duration("naive-sni-period", provision.DefaultNaiveSNIPeriod, "how long a naive server name stays current: the next one is published -cred-lead ahead, "+
@@ -370,6 +373,7 @@ func cmdServe(args []string) error {
 	if *updateCheck > 0 && *updateCheck < time.Hour {
 		return errors.New("-update-check must be an hour or more: each check asks github.com from the node")
 	}
+	r := store.Rotation{Period: *credPeriod, Lead: *credLead, Grace: *credGrace}
 	if *credPeriod > 0 {
 		if *credLead >= *credPeriod {
 			return errors.New("-cred-lead must be shorter than -cred-period")
@@ -379,9 +383,21 @@ func cmdServe(args []string) error {
 		if *credGrace < minCredGrace {
 			return fmt.Errorf("-cred-grace must be at least %v: clients move to the new credential up to 12 h after the switch", minCredGrace)
 		}
-		r := store.Rotation{Period: *credPeriod, Lead: *credLead, Grace: *credGrace}
-		go rotateCredentials(ctx, st, r, func() { srv.Notify() }, hb, log)
+	} else if r.Grace < minCredGrace {
+		// No schedule, but a revocation with overlap still rotates its
+		// user's credentials with this lead and grace (R4-43); before, the
+		// grace meant nothing here, so it is raised rather than refused.
+		log.Warn("-cred-grace raised for the rotations revocations with overlap start", "grace", r.Grace, "to", minCredGrace)
+		r.Grace = minCredGrace
 	}
+	// A revocation with overlap takes the lead and the grace rayd runs
+	// with from the database.
+	if err := st.SetRotation(ctx, r); err != nil {
+		return err
+	}
+	// Without a period the loop only switches and drops: what revocations
+	// with overlap published.
+	go rotateCredentials(ctx, st, r, func() { srv.Notify() }, hb, log)
 	var cm *certs.Manager
 	var is *certs.Issuer
 	if *acmeDir != "" {

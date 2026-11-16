@@ -918,7 +918,14 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 func (s *Server) RevokeDevice(ctx context.Context, req *connect.Request[nodev1.RevokeDeviceRequest]) (*connect.Response[nodev1.RevokeDeviceResponse], error) {
 	action, target := "device.revoke", req.Msg.Id
 	resp := &nodev1.RevokeDeviceResponse{}
-	r, err := s.Store.RevokeDevice(ctx, req.Msg.Id)
+	// With overlap (R4-43) the credentials rotate instead of being new at
+	// once. An admin device may ask for it as root may: it revokes the
+	// device all the same, and gives no more than a revocation does.
+	revoke := s.Store.RevokeDevice
+	if req.Msg.Overlap {
+		revoke = s.Store.RevokeDeviceOverlap
+	}
+	r, err := revoke(ctx, req.Msg.Id)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		if ierr := s.Store.DeleteInvite(ctx, req.Msg.Id); ierr == nil || !errors.Is(ierr, store.ErrNotFound) {
@@ -927,12 +934,21 @@ func (s *Server) RevokeDevice(ctx context.Context, req *connect.Request[nodev1.R
 		}
 	case err == nil:
 		// The audit says whose device and that the user's credentials
-		// changed (R4-36), never what they are.
+		// changed (R4-36) or rotate (with overlap, R4-43, and when), never
+		// what they are.
 		resp.User, resp.Device, resp.Already = r.User, r.Device, r.Already
 		resp.Credentials = uint32(r.Credentials) //nolint:gosec // G115: one a service
-		if r.Already {
+		resp.SwitchAt, resp.Until = unixOf(r.SwitchAt), unixOf(r.Until)
+		switch {
+		case r.Already:
 			target += " " + r.User + "/" + r.Device + ": revoked already, nothing changed"
-		} else {
+		case r.Overlap:
+			target += fmt.Sprintf(" %s/%s: with overlap: %d credentials of %s rotate", r.User, r.Device, r.Credentials, r.User)
+			if r.Credentials > 0 {
+				target += fmt.Sprintf(": next published, switch at %s, the old ones accepted until %s",
+					r.SwitchAt.UTC().Format(time.RFC3339), r.Until.UTC().Format(time.RFC3339))
+			}
+		default:
 			target += fmt.Sprintf(" %s/%s: %d credentials of %s new", r.User, r.Device, r.Credentials, r.User)
 		}
 	}
