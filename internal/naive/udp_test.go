@@ -531,9 +531,20 @@ func TestUDPEcho(t *testing.T) {
 	// Each drop by its reason: the stranger's answers (the echo's other
 	// port), what is not allowed (two addresses, a name with no address,
 	// the probe name without a probe), the unreadable, another Context ID.
+	var by int64
+	for _, n := range st.DroppedBy {
+		by += n
+	}
+	if by != st.Dropped {
+		t.Errorf("dropped %d, by reason %v", st.Dropped, st.DroppedBy)
+	}
 	for kind, least := range map[int]int64{dropStranger: 3, dropDenied: 4, dropBad: 1, dropContext: 1} {
 		if got := h.udp.dropped[kind].Load(); got < least {
 			t.Errorf("dropped as %s: %d, want %d at least", dropNames[kind], got, least)
+		}
+		// The stats socket shows the same, by name.
+		if got := st.DroppedBy[dropNames[kind]]; got < least {
+			t.Errorf("stats: dropped as %s: %d, want %d at least", dropNames[kind], got, least)
 		}
 	}
 	// The client's end is the request's: the node ends it cleanly and gives
@@ -703,7 +714,8 @@ func TestUDPSiteAnswer(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h, c := udpServer(t, nil, o)
 			site(t, c.open(udpRequestOf{}))
-			if h.lim.count() != 0 || h.UDPStats() != (UDPStats{}) {
+			if st := h.UDPStats(); h.lim.count() != 0 || st.Requests != 0 || st.Refused != 0 || st.In != 0 || st.Out != 0 ||
+				st.CapsulesIn != 0 || st.CapsulesOut != 0 || st.Dropped != 0 || st.DroppedBy != nil {
 				t.Fatalf("%d places, %+v", h.lim.count(), h.UDPStats())
 			}
 		})

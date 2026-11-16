@@ -153,6 +153,10 @@ type UDPStats struct {
 	CapsulesIn  int64 `json:"capsules_in"`
 	CapsulesOut int64 `json:"capsules_out"`
 	Dropped     int64 `json:"dropped"` // either way, whatever the reason
+	// DroppedBy splits Dropped by reason (bad, context, denied, limit,
+	// stranger, long, queue, quic, late, write), reasons with none left
+	// out: the one place a silent loss shows why without the debug log.
+	DroppedBy map[string]int64 `json:"dropped_by,omitempty"`
 }
 
 // UDPStats are the server's datagram requests since it started.
@@ -161,7 +165,15 @@ func (s *Server) UDPStats() UDPStats {
 	st := UDPStats{Requests: t.requests.Load(), Refused: t.refused.Load(), In: t.in.Load(), Out: t.out.Load(),
 		CapsulesIn: t.capsulesIn.Load(), CapsulesOut: t.capsulesOut.Load()}
 	for i := range t.dropped {
-		st.Dropped += t.dropped[i].Load()
+		n := t.dropped[i].Load()
+		if n == 0 {
+			continue
+		}
+		st.Dropped += n
+		if st.DroppedBy == nil {
+			st.DroppedBy = map[string]int64{}
+		}
+		st.DroppedBy[dropNames[i]] = n
 	}
 	return st
 }
