@@ -373,31 +373,13 @@ func cmdServe(args []string) error {
 	if *updateCheck > 0 && *updateCheck < time.Hour {
 		return errors.New("-update-check must be an hour or more: each check asks github.com from the node")
 	}
-	r := store.Rotation{Period: *credPeriod, Lead: *credLead, Grace: *credGrace}
-	if *credPeriod > 0 {
-		if *credLead >= *credPeriod {
-			return errors.New("-cred-lead must be shorter than -cred-period")
-		}
-		// Niko moves to a new credential up to 12 h after the switch
-		// (RAYCONTROL.md §11): the previous one must outlive that.
-		if *credGrace < minCredGrace {
-			return fmt.Errorf("-cred-grace must be at least %v: clients move to the new credential up to 12 h after the switch", minCredGrace)
-		}
-	} else if r.Grace < minCredGrace {
-		// No schedule, but a revocation with overlap still rotates its
-		// user's credentials with this lead and grace (R4-43); before, the
-		// grace meant nothing here, so it is raised rather than refused.
-		log.Warn("-cred-grace raised for the rotations revocations with overlap start", "grace", r.Grace, "to", minCredGrace)
-		r.Grace = minCredGrace
-	}
-	// A revocation with overlap takes the lead and the grace rayd runs
-	// with from the database.
-	if err := st.SetRotation(ctx, r); err != nil {
+	r, err := credRotation(store.Rotation{Period: *credPeriod, Lead: *credLead, Grace: *credGrace}, log)
+	if err != nil {
 		return err
 	}
-	// Without a period the loop only switches and drops: what revocations
-	// with overlap published.
-	go rotateCredentials(ctx, st, r, func() { srv.Notify() }, hb, log)
+	if err := startCredentialRotation(ctx, st, r, func() { srv.Notify() }, hb, log); err != nil {
+		return err
+	}
 	var cm *certs.Manager
 	var is *certs.Issuer
 	if *acmeDir != "" {

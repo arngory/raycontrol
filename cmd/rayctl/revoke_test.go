@@ -128,12 +128,10 @@ func TestRestoreCarryTextOverlap(t *testing.T) {
 	got := restoreCarryText(store.Restored{
 		Kept:    2,
 		Carried: []store.CarriedDevice{{ID: "d1", User: "alice", Name: "phone"}, {ID: "d2", User: "bob", Name: "tv", Rotating: true}},
-		Added:   []store.AddedDevice{{CarriedDevice: store.CarriedDevice{ID: "d3", User: "carol", Name: "watch", Rotating: true}, Revoked: true}},
 	}, made)
 	for _, want := range []string{
 		"their users' credentials are new, and the users'\nother devices reconnect after their next subscription fetch:\n  d1  alice/phone\n",
 		"revoked here with overlap since the backup", "the rotation the revocation began going on to its switch and grace:\n  d2  bob/tv\n",
-		"  d3  carol/watch (revoked here already, with overlap)\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("no %q in\n%s", want, got)

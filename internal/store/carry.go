@@ -28,13 +28,14 @@ const settingSPAParams = "spa_params"
 // place (rayctl update -rollback):
 //   - a device revoked or deleted stays revoked, and a device's certificate
 //     replaced stays replaced; the user of a device revoked so gets new
-//     credentials, as a revocation gives (carryDevices), unless current
-//     has the rotation a revocation with overlap began, not yet switched:
-//     that goes on as announced (R4-43, overlapInFlight);
-//   - a device made since the copy, active in current or revoked there
-//     (but with overlap, its rotation in flight), gives its user new
-//     credentials and a new LAN key, as a restore does (renewAdded): the
-//     rollback drops it, and it knew the user's;
+//     credentials, as a revocation gives (carryDevices), a revocation with
+//     overlap (R4-43) too, its rotation in flight or not: the older rayd
+//     the rollback goes back to runs no rotation loop without a period
+//     (-cred-period 0, before v0.31.0), and the rotation would never
+//     switch, leaving the revoked device's secret accepted for good;
+//   - a device made since the copy, active in current or revoked there,
+//     gives its user new credentials and a new LAN key, as a restore does
+//     (renewAdded): the rollback drops it, and it knew the user's;
 //   - a user disabled or deleted stays disabled, an earlier expiry stays,
 //     and a service taken from a user stays taken;
 //   - a user's or a device's LAN consent taken back stays taken back, and
@@ -150,11 +151,8 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 			renewed[u.name] = fresh[u.name]
 		}
 	}
-	keeps, err := carryKeepsRotation(ctx, tx, keepDoH)
-	if err != nil {
-		return err
-	}
-	carried, counts, err := carryDevices(ctx, tx, true, keepDoH, keeps, now)
+	// No rotation kept: see above.
+	carried, counts, err := carryDevices(ctx, tx, true, keepDoH, false, now)
 	if err != nil {
 		return err
 	}
@@ -249,7 +247,7 @@ func CarryRevocations(ctx context.Context, saved, current string, keep ...string
 	if err != nil {
 		return err
 	}
-	if _, err := renewAdded(ctx, tx, now, keepDoH, keeps, added, counts, why, renewed,
+	if _, err := renewAdded(ctx, tx, now, keepDoH, added, counts, why, renewed,
 		"a device made on the node since the copy, not in it", "a device made and revoked on the node since the copy"); err != nil {
 		return err
 	}
@@ -341,9 +339,7 @@ type Restored struct {
 	// Added are the devices current has, of users the backup has, that the
 	// backup does not: made since, revoked since or not. They are not in
 	// the restored database, and their users have new credentials and a
-	// new LAN key there: each device fetched the user's. Not for one
-	// revoked with overlap whose rotation is in flight (Rotating): that
-	// goes on.
+	// new LAN key there: each device fetched the user's.
 	Added []AddedDevice
 	// Unknown are the devices active in the backup that current has no
 	// record of: whether one was revoked since cannot be known.
@@ -386,8 +382,8 @@ func CarryDeviceRevocations(ctx context.Context, saved, current string) (carried
 //   - a user with a device in current made since the backup, revoked
 //     since or not, gets new credentials and a new LAN key: the device
 //     knew the user's, and it is not in saved (Restored.Added). One still
-//     active is cut with the restore, not at the next rotation. One
-//     revoked with overlap, its rotation in flight, needs nothing more.
+//     active is cut with the restore, not at the next rotation; one
+//     revoked with overlap too, its rotation in flight or not (renewAdded).
 //
 // The renewals keep DoH's secrets only where saved can have no shared DoH
 // token (carryKeepsDoH). Each change has an audit line in saved
@@ -523,9 +519,17 @@ func CarryRestore(ctx context.Context, saved, current, made string) (Restored, e
 	if r.Added, err = addedDevices(ctx, tx); err != nil {
 		return r, err
 	}
-	if r.Added, err = renewAdded(ctx, tx, now, keepDoH, keeps, r.Added, counts, why, renewed,
-		"a device added here since the backup, not in it", "a device added and revoked here since the backup"); err != nil {
+	renewedAdded, err := renewAdded(ctx, tx, now, keepDoH, r.Added, counts, why, renewed,
+		"a device added here since the backup, not in it", "a device added and revoked here since the backup")
+	if err != nil {
 		return r, err
+	}
+	// A user renewed for a device added has no rotation going on, whatever
+	// a carried revocation began.
+	for i := range r.Carried {
+		if renewedAdded[r.Carried[i].User] {
+			r.Carried[i].Rotating = false
+		}
 	}
 	for _, u := range users {
 		if carried(u.name) {
@@ -759,33 +763,24 @@ func addedDevices(ctx context.Context, tx *sql.Tx) ([]AddedDevice, error) {
 	return out, rows.Err()
 }
 
-// renewAdded gives the users of the devices of added new credentials and a
-// new LAN key, as a restore does (R4-36): each device knew its user's
-// credentials, which are cur's in main, and it is not in main, so the
-// carry drops it. Not for a device revoked in cur with overlap whose
-// user's rotation is in flight (with keeps; overlapInFlight): that goes
-// on, and the device is returned Rotating. A user renewed already
-// (counts, carryDevices) is not renewed twice. The reasons, active (a
-// device the carry drops) and revoked, go into why, the counts into
-// renewed. It returns added with Rotating set.
-func renewAdded(ctx context.Context, tx *sql.Tx, now int64, keepDoH, keeps bool, added []AddedDevice,
-	counts map[string]int, why map[string][]string, renewed map[string]int, active, revoked string) ([]AddedDevice, error) {
+// renewAdded gives the users of the devices of added new credentials and,
+// where main has LAN keys, a new LAN key, as a restore does (R4-36): each
+// device knew its user's credentials, which are cur's in main, and it is
+// not in main, so the carry drops it. One revoked with overlap too, its
+// rotation in flight or not: main has no record of it, so a later
+// revocation with overlap there would not count it in its chain
+// (rotateForRevocation), and what it knew could outlive 2 x lead + grace.
+// A user renewed already (counts, carryDevices) is not renewed twice. The
+// reasons, active (a device the carry drops) and revoked, go into why,
+// the counts into renewed. It returns the users it renewed, by name.
+func renewAdded(ctx context.Context, tx *sql.Tx, now int64, keepDoH bool, added []AddedDevice,
+	counts map[string]int, why map[string][]string, renewed map[string]int, active, revoked string) (map[string]bool, error) {
 	type user struct {
 		id   int64
 		name string
 	}
 	var renew []user
-	for i, d := range added {
-		if d.Revoked && keeps {
-			inFlight, err := overlapInFlight(ctx, tx, d.userID)
-			if err != nil {
-				return nil, err
-			}
-			if inFlight {
-				added[i].Rotating = true
-				continue
-			}
-		}
+	for _, d := range added {
 		u := user{d.userID, d.User}
 		if _, done := counts[u.name]; !done && !slices.Contains(renew, u) {
 			renew = append(renew, u)
@@ -798,18 +793,26 @@ func renewAdded(ctx context.Context, tx *sql.Tx, now int64, keepDoH, keeps bool,
 			why[d.User] = append(why[d.User], w)
 		}
 	}
+	// A copy older than the LAN (schema 13) has no LAN keys.
+	lan, err := hasColumn(ctx, tx, "main", "users", "lan_key")
+	if err != nil {
+		return nil, err
+	}
+	done := map[string]bool{}
 	for _, u := range renew {
-		key, err := newLANKey()
-		if err != nil {
-			return nil, err
-		}
-		n, err := renewUser(ctx, tx, u.id, now, key, keepDoH)
+		n, err := renewCredentials(ctx, tx, u.id, now, keepDoH)
 		if err != nil {
 			return nil, fmt.Errorf("store: carrying revocations: %w", err)
 		}
+		if lan {
+			if err := newUserLANKey(ctx, tx, u.id); err != nil {
+				return nil, err
+			}
+		}
 		renewed[u.name] = max(renewed[u.name], n)
+		done[u.name] = true
 	}
-	return added, nil
+	return done, nil
 }
 
 // overlapInFlight reports whether the user's credentials in main, cur's
@@ -832,12 +835,13 @@ func overlapInFlight(ctx context.Context, tx *sql.Tx, user int64) (bool, error) 
 	return ok, err
 }
 
-// carryKeepsRotation reports whether a carry may keep a rotation that a
+// carryKeepsRotation reports whether a restore may keep a rotation that a
 // revocation with overlap in current began (overlapInFlight): only with
 // current at schema 14 or later (an older one knows no such revocation)
 // and main keeping DoH's secrets (carryKeepsDoH): where main takes the DoH
 // secret for a token, the revoked device may hold it, and no revocation
-// rotates it, so the user gets new credentials, DoH's too.
+// rotates it, so the user gets new credentials, DoH's too. A rollback
+// never keeps one (CarryRevocations).
 func carryKeepsRotation(ctx context.Context, tx *sql.Tx, keepDoH bool) (bool, error) {
 	v, err := schemaOf(ctx, tx, "cur")
 	return err == nil && v >= 14 && keepDoH, err

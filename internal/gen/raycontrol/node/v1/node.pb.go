@@ -6874,7 +6874,10 @@ type RevokeDeviceResponse struct {
 	// (unix seconds, the latest of them), and when the ones the revoked
 	// device knew stop being accepted, switch_at plus the grace. rayd's
 	// rotation runs every 10 minutes, so each comes up to 10 minutes later.
-	// 0 without overlap, with no credentials, or from an older node.
+	// 0 without overlap, with no credentials, or from an older node. For a
+	// device revoked already (already), until alone: while the rotation its
+	// revocation with overlap began has not switched, when what it knew
+	// stops being accepted (v0.31.0); 0 otherwise.
 	SwitchAt      int64 `protobuf:"varint,6,opt,name=switch_at,json=switchAt,proto3" json:"switch_at,omitempty"`
 	Until         int64 `protobuf:"varint,7,opt,name=until,proto3" json:"until,omitempty"`
 	unknownFields protoimpl.UnknownFields

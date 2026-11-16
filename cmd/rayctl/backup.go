@@ -271,13 +271,10 @@ func restoreCarryText(r store.Restored, made time.Time) string {
 	}
 	if len(r.Added) > 0 {
 		fmt.Fprintf(&b, "added here since the backup, so not in it: gone with the restore. Each fetched its user's credentials,\n"+
-			"which are new, so what it holds works no more (one revoked with overlap: its rotation goes on):\n")
+			"which are new, so what it holds works no more:\n")
 		for _, d := range r.Added {
 			state := ""
-			switch {
-			case d.Rotating:
-				state = " (revoked here already, with overlap)"
-			case d.Revoked:
+			if d.Revoked {
 				state = " (revoked here already)"
 			}
 			fmt.Fprintf(&b, "  %s  %s/%s%s\n", d.ID, d.User, d.Name, state)

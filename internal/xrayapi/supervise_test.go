@@ -186,7 +186,11 @@ func TestSupervisedNode(t *testing.T) {
 	defer os.RemoveAll(run)
 	cmd := exec.Command(rayd, "serve", "-db", db, "-socket", filepath.Join(run, "rayd.sock"),
 		"-rendered", filepath.Join(dir, "rendered"), "-run", filepath.Join(run, "run"),
-		"-supervise", "-xray", bin, "-niko-server", niko, "-acme-directory", "", "-dns-check", "0")
+		"-supervise", "-xray", bin, "-niko-server", niko, "-acme-directory", "", "-dns-check", "0",
+		// No scheduled credential rotation, a lead and a grace of their
+		// own: rayd raises the grace to 12 h, stores both for revocations
+		// with overlap, and runs its rotation loop all the same (R4-43).
+		"-cred-period", "0", "-cred-lead", "2h", "-cred-grace", "1h")
 	// Hysteria2's backend reaches test addresses only with this.
 	cmd.Env = append(os.Environ(), "NIKO_SERVER_UNSAFE_ANY_DESTINATION=1")
 	var logs bytes.Buffer
@@ -302,6 +306,9 @@ func TestSupervisedNode(t *testing.T) {
 	if l := loops["traffic hy2o"]; l == nil || l.Failing {
 		t.Fatalf("the traffic loop of hy2o: %+v", l)
 	}
+	if l := loops["credential-rotation"]; l == nil || l.Failing {
+		t.Fatalf("no credential rotation loop without -cred-period: %+v", l)
+	}
 	t.Logf("traffic ygg: %q", loops["traffic ygg"].Detail)
 
 	// Through REALITY (self-steal on the site) into inner.
@@ -332,13 +339,13 @@ func TestSupervisedNode(t *testing.T) {
 	}
 
 	// The phone revoked with overlap through rayd's API: alice's
-	// credentials rotate with rayd's lead and grace (its flags' defaults
-	// here), stored at its start; nothing restarts, the next REALITY link
-	// in the laptop's subscription gets in at once, and the current
+	// credentials rotate with rayd's lead and grace (2 h, and 1 h raised
+	// to 12 h), stored at its start; nothing restarts, the next REALITY
+	// link in the laptop's subscription gets in at once, and the current
 	// Hysteria2 one goes on.
 	before := time.Now()
 	rev, err := api.NewUnixClient(filepath.Join(run, "rayd.sock")).RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: phone.ID, Overlap: true}))
-	if r := store.DefaultRotation; err != nil || rev.Msg.Credentials != 2 || rev.Msg.SwitchAt < before.Add(r.Lead).Unix() ||
+	if r := (store.Rotation{Lead: 2 * time.Hour, Grace: 12 * time.Hour}); err != nil || rev.Msg.Credentials != 2 || rev.Msg.SwitchAt < before.Add(r.Lead).Unix() ||
 		rev.Msg.SwitchAt > time.Now().Add(r.Lead).Unix() || rev.Msg.Until != rev.Msg.SwitchAt+int64(r.Grace/time.Second) {
 		t.Fatalf("revoke: %v %v", rev, err)
 	}

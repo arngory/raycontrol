@@ -173,10 +173,14 @@ func TestRevokeOverlapRotatesCredentials(t *testing.T) {
 		t.Error("the LAN keys after the revocation")
 	}
 
-	// A repeat: done already, nothing changes, not the credentials again.
-	again, err := s.RevokeDeviceOverlap(ctx, phone.ID)
-	if err != nil || again != (Revocation{User: "alice", Device: "phone", Already: true}) {
-		t.Fatalf("repeat: %+v %v", again, err)
+	// A repeat: done already, nothing changes, not the credentials again;
+	// with or without overlap it says until when what the device knew is
+	// still accepted.
+	for _, revoke := range []func(context.Context, string) (Revocation, error){s.RevokeDeviceOverlap, s.RevokeDevice} {
+		again, err := revoke(ctx, phone.ID)
+		if err != nil || again != (Revocation{User: "alice", Device: "phone", Already: true, Until: want.Until}) {
+			t.Fatalf("repeat: %+v %v", again, err)
+		}
 	}
 	if got := credRowsOf(t, s.db)["alice"]; got[reality] != after["alice"][reality] || got[naive] != after["alice"][naive] {
 		t.Fatal("a repeated revoke changed the credentials")
@@ -277,7 +281,10 @@ func TestRevokeOverlapChain(t *testing.T) {
 	s, svcs, users := revokeNode(t, r)
 	reality := svcs[0]
 	alice := users["alice"].ID
-	t0 := time.Now().Truncate(time.Second)
+	// A minute after the credentials were made: a revocation in their own
+	// second would not count for the chain (it is no later than
+	// rotated_at), as a renewal's does not.
+	t0 := time.Now().Truncate(time.Second).Add(time.Minute)
 	var devs []Device
 	for _, n := range []string{"a", "b", "c", "d", "e", "f"} {
 		d, _, err := s.CreateDevice(ctx, "alice", n, "user")
@@ -361,10 +368,21 @@ func TestRevokeOverlapStoredRotation(t *testing.T) {
 	if got, err := s.StoredRotation(ctx); err != nil || got != r {
 		t.Fatalf("stored: %+v %v", got, err)
 	}
-	// None stored, or one that does not read: rayd's defaults.
+	// What rayd set wins over what the database holds, one that does not
+	// read included: the loop and a revocation go by the same flags.
 	must(t, s.SetSetting(ctx, settingRotation, []byte("{")))
+	if got, err := s.StoredRotation(ctx); err != nil || got != r {
+		t.Fatalf("set, the stored one unreadable: %+v %v", got, err)
+	}
+	// Another Store on the database (no SetRotation): what is stored, and
+	// rayd's defaults where nothing reads.
+	s.rotation.Store(nil)
 	if got, err := s.StoredRotation(ctx); err != nil || got != DefaultRotation {
 		t.Fatalf("unreadable: %+v %v", got, err)
+	}
+	must(t, s.SetSetting(ctx, settingRotation, []byte(`{"period":0,"lead":300,"grace":43200}`)))
+	if got, err := s.StoredRotation(ctx); err != nil || got != r {
+		t.Fatalf("stored: %+v %v", got, err)
 	}
 	must(t, s.SetRotation(ctx, r))
 	phone, _, _ := s.CreateDevice(ctx, "bob", "phone", "user")
@@ -493,12 +511,11 @@ func TestCarryRestoreOverlapInFlight(t *testing.T) {
 	}
 }
 
-// A rollback's carry (CarryRevocations) keeps the rotation a revocation
-// with overlap since the copy began: the copy's credentials would be those
-// the revoked device knew with no switch coming, and new ones would cut
-// the user's other devices; the node's are what the operator was told.
-// After the switch, the user gets new credentials, as without overlap.
-func TestCarryRevocationsOverlapInFlight(t *testing.T) {
+// A rollback's carry (CarryRevocations) gives the user of a device revoked
+// with overlap since the copy new credentials, its rotation in flight or
+// switched: the rayd it goes back to (before v0.31.0) runs no rotation
+// loop with -cred-period 0, and the rotation would never switch.
+func TestCarryRevocationsOverlapRenews(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	current, saved := filepath.Join(dir, "rayd.db"), filepath.Join(dir, "saved.db")
@@ -526,15 +543,17 @@ func TestCarryRevocationsOverlapInFlight(t *testing.T) {
 	must(t, CarryRevocations(ctx, saved, current))
 	s, _ = Open(ctx, saved)
 	defer s.Close()
-	if got := credRowsOf(t, s.db)["alice"][svc.ID]; got != now || got.Secret != old || got.Next == "" {
+	if got := credRowsOf(t, s.db)["alice"][svc.ID]; got.Secret == old || got.Secret == now.Next || !isUUID(got.Secret) ||
+		got.Next != "" || got.Prev != "" {
 		t.Fatalf("the rollback's credential %+v, the node's %+v", got, now)
 	}
 	if _, _, err := s.ActiveDevice(ctx, phone.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("the phone is back: %v", err)
 	}
 	a, err := s.ListAudit(ctx, 100)
-	if err != nil || !hasAudit(a, "device.revoke:rollback", phone.ID+" alice/phone: revoked on the node since the copy, with overlap") ||
-		!hasAudit(a, "user.carry:rollback", "1 users") || hasAudit(a, "user.renew:rollback", "alice") {
+	if err != nil || !hasAudit(a, "device.revoke:rollback", phone.ID+" alice/phone: revoked on the node since the copy") ||
+		hasAudit(a, "device.revoke:rollback", phone.ID+" alice/phone: revoked on the node since the copy, with overlap") ||
+		!hasAudit(a, "user.renew:rollback", "alice: 1 credentials new, a device of the user revoked on the node since the copy") {
 		t.Fatalf("audit %+v %v", a, err)
 	}
 	s.Close()
@@ -562,7 +581,7 @@ func TestCarryRevocationsOverlapInFlight(t *testing.T) {
 // A device made on the node since the copy goes with the rollback, which
 // takes it for revoked: its user gets new credentials and a new LAN key at
 // once, as a restore gives them (R4-36); the others' stay the node's. One
-// revoked with overlap, its rotation in flight, keeps that rotation.
+// revoked with overlap too.
 func TestCarryRevocationsAddedRenews(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -606,19 +625,21 @@ func TestCarryRevocationsAddedRenews(t *testing.T) {
 	if k := s.lanKey(t, "alice"); len(k) != LANKeySize || string(k) == string(aliceKey) {
 		t.Error("alice's LAN key is the node's")
 	}
-	if got["bob"][svc.ID] != now["bob"][svc.ID] || got["carol"][svc.ID] != now["carol"][svc.ID] || got["carol"][svc.ID].Next == "" {
+	if c := got["carol"][svc.ID]; got["bob"][svc.ID] != now["bob"][svc.ID] || c.Secret == now["carol"][svc.ID].Secret || c.Next != "" {
 		t.Errorf("bob %+v, carol %+v", got["bob"][svc.ID], got["carol"][svc.ID])
 	}
 	a, _ := s.ListAudit(ctx, 100)
 	if !hasAudit(a, "user.renew:rollback", "alice: 1 credentials new, a device made on the node since the copy, not in it") ||
-		hasAudit(a, "user.renew:rollback", "carol") || !hasAudit(a, "user.carry:rollback", "2 users") {
+		!hasAudit(a, "user.renew:rollback", "carol: 1 credentials new, a device made and revoked on the node since the copy") ||
+		!hasAudit(a, "user.carry:rollback", "1 users") {
 		t.Errorf("audit %+v", a)
 	}
 }
 
 // A device made since the backup and revoked with overlap on the node: the
-// restore drops it, and its user's rotation goes on as the node has it,
-// with no new credentials; listed as Rotating.
+// restore drops it, and its user gets new credentials, as for one revoked
+// without: the restored database has no record of the device, so a later
+// revocation with overlap would not count it in its chain.
 func TestCarryRestoreAddedOverlap(t *testing.T) {
 	ctx := context.Background()
 	f := newRestoreFix(t, nil)
@@ -633,14 +654,15 @@ func TestCarryRestoreAddedOverlap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Foreign || r.Kept != 5 || len(r.New) != 0 || len(r.Added) != 1 || !r.Added[0].Rotating || !r.Added[0].Revoked {
+	if r.Foreign || r.Kept != 4 || len(r.Added) != 1 || r.Added[0].Rotating || !r.Added[0].Revoked ||
+		len(r.New) != 1 || r.New[0] != (Renewal{User: "carol", Why: "a device added and revoked here since the backup"}) {
 		t.Fatalf("%+v", r)
 	}
 	got := credRowsAt(t, f.backup)
-	if c := got["carol"][f.naive]; c != now["carol"][f.naive] || c.Next == "" {
+	if c := got["carol"][f.naive]; c.Secret == now["carol"][f.naive].Secret || c.Next != "" || c.Prev != "" {
 		t.Fatalf("carol: %+v, the node's %+v", c, now["carol"][f.naive])
 	}
-	if hasAudit(auditOf(t, f.backup), "user.renew:restore", "carol") {
-		t.Error("carol renewed")
+	if !hasAudit(auditOf(t, f.backup), "user.renew:restore", "carol: 2 credentials new, a device added and revoked here since the backup") {
+		t.Error("carol not renewed")
 	}
 }

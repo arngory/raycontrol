@@ -22,23 +22,38 @@ type rotationJSON struct {
 	Grace  int64 `json:"grace"`
 }
 
-// SetRotation stores the schedule rayd runs with, as its flags give it, so
+// SetRotation sets the schedule rayd runs with, as its flags give it, so
 // that a rotation started outside rayd's loop (a revocation with overlap,
-// RevokeDeviceOverlap) has the same lead and says the same grace. rayd
-// writes it at every start; an older rayd does not read it.
+// RevokeDeviceOverlap) has the same lead and says the same grace as the
+// loop. The Store keeps it, and writes it into the database for another
+// process on the same database; rayd sets it at every start. An older rayd
+// does not read the setting.
 func (s *Store) SetRotation(ctx context.Context, r Rotation) error {
 	b, err := json.Marshal(rotationJSON{Period: int64(r.Period / time.Second), Lead: int64(r.Lead / time.Second), Grace: int64(r.Grace / time.Second)})
 	if err != nil {
 		return err
 	}
-	return s.SetSetting(ctx, settingRotation, b)
+	if err := s.SetSetting(ctx, settingRotation, b); err != nil {
+		return err
+	}
+	s.rotation.Store(&r)
+	return nil
 }
 
-// StoredRotation is the schedule SetRotation stored, DefaultRotation when
-// there is none (no rayd of this version started on the database yet) or
-// it does not read.
+// StoredRotation is the schedule a revocation with overlap goes by: the one
+// SetRotation set on this Store; else the one the database holds; else,
+// none there (no rayd of this version started on it yet) or one that does
+// not read, DefaultRotation.
 func (s *Store) StoredRotation(ctx context.Context) (Rotation, error) {
-	return rotationIn(ctx, s.db, "main")
+	return s.revocationRotation(ctx, s.db)
+}
+
+// revocationRotation is StoredRotation, read through q (a transaction).
+func (s *Store) revocationRotation(ctx context.Context, q queryRower) (Rotation, error) {
+	if r := s.rotation.Load(); r != nil {
+		return *r, nil
+	}
+	return rotationIn(ctx, q, "main")
 }
 
 type queryRower interface {
@@ -88,8 +103,8 @@ const RevocationChain = 2
 // in a row would push the switch, and the life of what the first revoked
 // device knew, further each time. The switch is therefore never later
 // than RevocationChain leads after the first revocation since the current
-// secret became current (the user's devices revoked at or after its
-// rotated_at, in either mode, and now): the old secret is accepted at most
+// secret became current (the user's devices revoked after its rotated_at,
+// in either mode, and now): the old secret is accepted at most
 // RevocationChain×lead + grace after any revocation, at most lead + grace
 // after the last one of a chain. A revocation late in a chain gives the
 // other devices less notice than a lead; one that misses the new next
@@ -123,8 +138,12 @@ func rotateForRevocation(ctx context.Context, tx *sql.Tx, user, now int64, lead 
 	l := int64(lead / time.Second)
 	var latest int64
 	for _, r := range list {
+		// After rotated_at, not at it: a revocation without overlap renews
+		// the user's credentials in its own second (rotated_at is its
+		// revoked_at), and so does a carry's renewal; the devices revoked
+		// so know none of the current secrets.
 		var first sql.NullInt64
-		if err := tx.QueryRowContext(ctx, `SELECT min(revoked_at) FROM devices WHERE user_id = ? AND revoked_at >= ?`,
+		if err := tx.QueryRowContext(ctx, `SELECT min(revoked_at) FROM devices WHERE user_id = ? AND revoked_at > ?`,
 			user, r.rotated).Scan(&first); err != nil {
 			return 0, 0, err
 		}

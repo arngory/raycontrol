@@ -35,6 +35,9 @@ type Store struct {
 	// newCreds runs after a call that created credentials committed them
 	// (OnNewCredentials).
 	newCreds atomic.Pointer[func()]
+	// rotation is rayd's schedule (SetRotation), for a revocation with
+	// overlap.
+	rotation atomic.Pointer[Rotation]
 }
 
 // OnNewCredentials sets f to run after a call that created credentials

@@ -952,7 +952,10 @@ message RevokeDeviceResponse {
   // (unix seconds, the latest of them), and when the ones the revoked
   // device knew stop being accepted, switch_at plus the grace. rayd's
   // rotation runs every 10 minutes, so each comes up to 10 minutes later.
-  // 0 without overlap, with no credentials, or from an older node.
+  // 0 without overlap, with no credentials, or from an older node. For a
+  // device revoked already (already), until alone: while the rotation its
+  // revocation with overlap began has not switched, when what it knew
+  // stops being accepted (v0.31.0); 0 otherwise.
   int64 switch_at = 6;
   int64 until = 7;
 }

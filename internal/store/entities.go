@@ -800,7 +800,9 @@ type Revocation struct {
 	// the credentials the revoked device knew stop being accepted:
 	// SwitchAt plus the grace. rayd's rotation loop runs every 10 minutes,
 	// so each comes up to 10 minutes later. Zero without overlap or with
-	// no credentials.
+	// no credentials. For a device revoked Already, Until is when what it
+	// knew stops being accepted while a rotation that its revocation with
+	// overlap began has not switched (stillAccepted), zero otherwise.
 	Overlap         bool
 	SwitchAt, Until time.Time
 }
@@ -864,9 +866,15 @@ func (s *Store) revokeDevice(ctx context.Context, id string, overlap bool) (Revo
 		}
 		if revoked.Valid {
 			// Revoked already (a retry): done, nothing changes, and the
-			// credentials are not changed again.
+			// credentials are not changed again. Revoked with overlap, it
+			// may still get in: the caller hears until when.
 			r.Already = true
-			return nil
+			rot, err := s.revocationRotation(ctx, tx)
+			if err != nil {
+				return err
+			}
+			r.Until, err = stillAccepted(ctx, tx, user, revoked.Int64, rot.Grace)
+			return err
 		}
 		now := s.now().Unix()
 		if _, err := tx.ExecContext(ctx, `UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, now, id); err != nil {
@@ -877,7 +885,7 @@ func (s *Store) revokeDevice(ctx context.Context, id string, overlap bool) (Revo
 			return err
 		}
 		r.Overlap = true
-		rot, err := rotationIn(ctx, tx, "main")
+		rot, err := s.revocationRotation(ctx, tx)
 		if err != nil {
 			return err
 		}
@@ -896,6 +904,25 @@ func (s *Store) revokeDevice(ctx context.Context, id string, overlap bool) (Revo
 		return Revocation{}, err
 	}
 	return r, nil
+}
+
+// stillAccepted is until when the current secret that a device of the
+// user revoked at revoked knew is still accepted, zero when it is not
+// known to be: a rotation that a revocation with overlap began and that
+// has not switched yet (a next secret, the current one no newer than the
+// revocation) accepts it until its switch plus grace, the latest of the
+// user's credentials but DoH's. A revocation without overlap renewed the
+// credentials at revoked: nothing then. After the switch the store cannot
+// tell which revocation the previous secret outlived, and says nothing.
+func stillAccepted(ctx context.Context, tx *sql.Tx, user, revoked int64, grace time.Duration) (time.Time, error) {
+	var from sql.NullInt64
+	err := tx.QueryRowContext(ctx, `SELECT max(c.next_from) FROM credentials c LEFT JOIN services s ON s.id = c.service_id
+		WHERE c.user_id = ? AND coalesce(s.kind, '') != 'doh' AND c.next_secret IS NOT NULL
+		  AND coalesce(c.rotated_at, c.created_at) < ?`, user, revoked).Scan(&from)
+	if err != nil || !from.Valid {
+		return time.Time{}, err
+	}
+	return time.Unix(from.Int64, 0).Add(grace), nil
 }
 
 // renewUser is what a revocation does to the device's user: every
