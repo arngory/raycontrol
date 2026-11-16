@@ -101,9 +101,17 @@ func TestInitPorts(t *testing.T) {
 		t.Fatalf("a fifth rotation: %v", err)
 	}
 	// The ACME responder's random port keeps clear of the chosen ones.
-	acme, err := ACMEPort(ctx, st)
-	if err != nil || acme >= 40000 && acme <= 41399 {
-		t.Fatalf("acme %d %v", acme, err)
+	// What lies between them (40102-40999) is free: a pick there, one in
+	// 45, failed this test when it held the whole span. Picked anew a
+	// hundred times, for a better chance to see one in the chosen ports.
+	for range 100 {
+		if err := st.DeleteSetting(ctx, settingACMEPort); err != nil {
+			t.Fatal(err)
+		}
+		acme, err := ACMEPort(ctx, st)
+		if err != nil || acme >= 40000 && acme <= 40101 || acme >= 41000 && acme <= 41399 {
+			t.Fatalf("acme %d %v", acme, err)
+		}
 	}
 
 	// Again: the same ports, a part of them, or none are taken; others
