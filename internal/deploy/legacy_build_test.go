@@ -15,7 +15,8 @@ import (
 )
 
 // legacyBuild is Build as it was before Inputs (v0.20.1, with naive's
-// ICMP of spec/icmp-v1.md, which came beside Inputs), kept as the
+// ICMP of spec/icmp-v1.md, which came beside Inputs, and its UDP datagrams
+// of spec/naive-udp-v1.md, which came after: -udp), kept as the
 // oracle of TestBuildFromInputs: the plan rayctl now builds from rayd's
 // inputs must be the plan rayd built from its model, byte for byte, so
 // that nothing changes on a node. Three changes, made in both on purpose:
@@ -252,6 +253,9 @@ func legacyBuild(m render.Model, files []render.File, p render.Paths, bin Binari
 			// which AF_INET and AF_INET6 cover; apply lets the group open them.
 			icmp = " -icmp"
 			plan.ICMP = true
+		}
+		if provision.NaiveUDP(s.Service) {
+			icmp += " -udp"
 		}
 		units = append(units, unit{
 			name:        render.UnitName(s.Name),

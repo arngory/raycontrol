@@ -31,6 +31,9 @@ type quicOptions struct {
 	resetKey *quic.StatelessResetKey
 	// headerWait is h3serve.HeaderTimeout when 0 (tests make it short).
 	headerWait time.Duration
+	// datagrams announces HTTP/3 datagrams (h3serve.Options.Datagrams):
+	// naive-quic with udp=on (spec/naive-udp-v1.md).
+	datagrams bool
 }
 
 // h3Options are o with what both servers share: an idle time the front
@@ -39,7 +42,33 @@ type quicOptions struct {
 // bounds of the streams without a header and of a header.
 func h3Options(o quicOptions) h3serve.Options {
 	return h3serve.Options{ResetKey: o.resetKey, HeaderWait: o.headerWait, Idle: render.QUICIdle,
-		MaxStreams: naive.MaxStreams, PendingStreams: naive.PendingStreams, MaxHeaderBytes: naive.MaxHeaderBytes}
+		MaxStreams: naive.MaxStreams, PendingStreams: naive.PendingStreams, MaxHeaderBytes: naive.MaxHeaderBytes,
+		Datagrams: o.datagrams}
+}
+
+// naiveUDP is what -udp makes of a naive server (spec/naive-udp-v1.md),
+// and the options of its QUIC side: with it, connect-udp served
+// (naive.Server.UDP, the streams h3serve gives), HTTP/3 datagrams announced
+// and the datagram requests' counts on the stats socket; without it,
+// none of these. Its users (Server.Users) must be set.
+func naiveUDP(ns *naive.Server, udp bool) quicOptions {
+	ns.UDP, ns.H3 = udp, naiveH3
+	if udp {
+		ns.Users.SetUDP(ns.UDPStats)
+	} else {
+		ns.Users.SetUDP(nil)
+	}
+	return quicOptions{datagrams: udp}
+}
+
+// naiveH3 gives naive a request's HTTP/3 stream with its datagrams
+// (naive.H3): h3serve's, for internal/naive does not import quic-go.
+func naiveH3(ctx context.Context, w http.ResponseWriter) (func() naive.H3Stream, bool) {
+	take, ok := h3serve.Datagrams(ctx, w)
+	if !ok {
+		return nil, false
+	}
+	return func() naive.H3Stream { return take() }, true
 }
 
 // parseResetKey reads a key of stateless resets from its text: 32 bytes,

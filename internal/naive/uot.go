@@ -189,10 +189,13 @@ type uotStream struct {
 
 // pairTimes are a pair's last packet sent, last either way (monoAt: the
 // wall clock may step back, and a step back would hold every pair), and
-// whether an answer came.
+// whether an answer came. quic marks a pair of a datagram request whose
+// first packet was QUIC's (spec/naive-udp-v1.md §4.4, the QUIC rule); UoT
+// marks none.
 type pairTimes struct {
 	sent, any int64
 	answered  bool
+	quic      bool
 }
 
 // end is when conntrack lets the pair go: 30 s after the last packet sent
@@ -234,6 +237,12 @@ func (u *uotStream) ends() []int64 {
 
 // heard notes an answer from a pair, and reports whether it is one.
 func (u *uotStream) heard(ap netip.AddrPort) bool {
+	ok, _ := u.hear(ap)
+	return ok
+}
+
+// hear is heard, and whether the pair is marked as QUIC's.
+func (u *uotStream) hear(ap netip.AddrPort) (ok, quic bool) {
 	ap = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
 	now := monoAt(u.s.lim.clock())
 	u.mu.Lock()
@@ -243,7 +252,16 @@ func (u *uotStream) heard(ap netip.AddrPort) bool {
 		t.any, t.answered = now, true
 		u.peers[ap] = t
 	}
-	return ok
+	return ok, t.quic
+}
+
+// pair reports whether the stream has the pair, and whether it is marked
+// as QUIC's; it notes nothing.
+func (u *uotStream) pair(ap netip.AddrPort) (ok, quic bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	t, ok := u.peers[ap]
+	return ok, t.quic
 }
 
 // uotResolved is what a stream knows of a name until a moment, so that
@@ -275,7 +293,11 @@ func (u *uotStream) sent(ap netip.AddrPort, now int64) bool {
 // mayReach reports whether the client may send to ap: a destination it sent
 // to before, or a new one while the stream has room and the user's limits
 // let it (limits.newPair).
-func (u *uotStream) mayReach(ap netip.AddrPort) bool {
+func (u *uotStream) mayReach(ap netip.AddrPort) bool { return u.reach(ap, false) }
+
+// reach is mayReach; a new pair is marked as QUIC's when quic says its
+// first packet is (spec/naive-udp-v1.md §4.4).
+func (u *uotStream) reach(ap netip.AddrPort, quic bool) bool {
 	now := u.s.lim.clock()
 	m := monoAt(now)
 	if u.sent(ap, m) {
@@ -298,7 +320,7 @@ func (u *uotStream) mayReach(ap netip.AddrPort) bool {
 		return false
 	}
 	u.mu.Lock()
-	u.peers[ap] = pairTimes{sent: m, any: m}
+	u.peers[ap] = pairTimes{sent: m, any: m, quic: quic}
 	u.mu.Unlock()
 	return true
 }

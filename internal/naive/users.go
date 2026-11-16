@@ -48,8 +48,10 @@ type Users struct {
 	traffic map[string]*Traffic
 	boot    string
 	stale   time.Duration // staleAfter when 0 (tests make it short)
-	// refused gives the refusals of the connection limits (SetRefused).
+	// refused gives the refusals of the connection limits (SetRefused),
+	// udp the datagram requests' counts (SetUDP).
 	refused func() map[string]map[string]int64
+	udp     func() UDPStats
 }
 
 // SetRefused sets where the stats socket's answer gets the refusals of the
@@ -59,6 +61,14 @@ func (u *Users) SetRefused(f func() map[string]map[string]int64) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.refused = f
+}
+
+// SetUDP sets where the stats socket's answer gets the datagram requests'
+// counts (Server.UDPStats); nil: none, as on a service without udp=on.
+func (u *Users) SetUDP(f func() UDPStats) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.udp = f
 }
 
 // staleAfter is how long the counters of a name gone from the file stay
@@ -401,6 +411,10 @@ type TrafficSnapshot struct {
 	// a process started since its last round by it, whose refusals are new
 	// (a field rayd before v0.24.0 does not read).
 	Uptime int64 `json:"uptime"`
+	// UDP are the datagram requests' counts since the start
+	// (spec/naive-udp-v1.md §7), on a service with udp=on: for whoever
+	// reads the socket; rayd does not.
+	UDP *UDPStats `json:"udp,omitempty"`
 }
 
 // UserTraffic are a name's bytes at the destinations' side.
@@ -426,6 +440,10 @@ func (u *Users) Snapshot() TrafficSnapshot {
 		if r := u.refused(); len(r) > 0 {
 			s.Limit = r
 		}
+	}
+	if u.udp != nil {
+		st := u.udp()
+		s.UDP = &st
 	}
 	return s
 }

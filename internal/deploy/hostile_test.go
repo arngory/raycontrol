@@ -151,8 +151,9 @@ func TestInputsCheck(t *testing.T) {
 	}
 	icmp := goodInputs()
 	icmp.Services[4].ICMP = true // naive's
+	icmp.Services[4].UDP = true
 	if err := icmp.Check(); err != nil {
-		t.Fatalf("naive with ICMP: %v", err)
+		t.Fatalf("naive with ICMP and UDP: %v", err)
 	}
 	for name, f := range map[string]func(*deploy.Inputs){
 		"proto":             func(in *deploy.Inputs) { in.HostPorts[0].Proto = `tcp"/><port protocol="tcp" port="1-65535` },
@@ -163,6 +164,7 @@ func TestInputsCheck(t *testing.T) {
 		"too many services": func(in *deploy.Inputs) { in.Services = make([]deploy.ServiceInput, deploy.MaxInputServices+1) },
 		"too many ports":    func(in *deploy.Inputs) { in.HostPorts = make([]deploy.PortRange, 1025) },
 		"ICMP not naive's":  func(in *deploy.Inputs) { in.Services[1].ICMP = true },
+		"UDP not naive's":   func(in *deploy.Inputs) { in.Services[3].UDP = true },
 	} {
 		in := goodInputs()
 		f(&in)

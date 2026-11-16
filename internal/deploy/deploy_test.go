@@ -764,6 +764,22 @@ func TestBuildNaive(t *testing.T) {
 		!strings.Contains(u, "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n") {
 		t.Errorf("ICMP on: plan %v, unit\n%s", p.ICMP, u)
 	}
+	// UDP as HTTP/3 datagrams (spec/naive-udp-v1.md): off unless set; on,
+	// naive gets -udp, and nothing else changes.
+	if strings.Contains(file(p, "/etc/systemd/system/niko-naive.service"), "-udp") {
+		t.Errorf("UDP on by default")
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "naive", "udp", "on"); err != nil {
+		t.Fatal(err)
+	}
+	if m, err = render.CollectForRender(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	withUDP := build(m, files, render.DefaultPaths)
+	if u := file(withUDP, "/etc/systemd/system/niko-naive.service"); !strings.Contains(u, " -icmp -udp\n") ||
+		strings.Replace(u, " -udp", "", 1) != file(p, "/etc/systemd/system/niko-naive.service") {
+		t.Errorf("UDP on, unit\n%s", u)
+	}
 }
 
 // The ping groups hold the data plane's (render.FrontUID to

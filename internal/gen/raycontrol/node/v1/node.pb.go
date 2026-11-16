@@ -2548,6 +2548,7 @@ type DeployService struct {
 	Salamander    bool                   `protobuf:"varint,7,opt,name=salamander,proto3" json:"salamander,omitempty"`                      // hy2-obfs: the front's copy of its salamander password is rendered
 	Slipstream    *DeploySlipstream      `protobuf:"bytes,8,opt,name=slipstream,proto3" json:"slipstream,omitempty"`
 	Icmp          bool                   `protobuf:"varint,9,opt,name=icmp,proto3" json:"icmp,omitempty"` // naive: it carries ping and traceroute (icmp=on, spec/icmp-v1.md)
+	Udp           bool                   `protobuf:"varint,10,opt,name=udp,proto3" json:"udp,omitempty"`  // naive: it carries UDP as HTTP/3 datagrams (udp=on, spec/naive-udp-v1.md)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2641,6 +2642,13 @@ func (x *DeployService) GetSlipstream() *DeploySlipstream {
 func (x *DeployService) GetIcmp() bool {
 	if x != nil {
 		return x.Icmp
+	}
+	return false
+}
+
+func (x *DeployService) GetUdp() bool {
+	if x != nil {
+		return x.Udp
 	}
 	return false
 }
@@ -8434,7 +8442,7 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"host_ports\x18\a \x03(\v2\x1d.raycontrol.node.v1.PortRangeR\thostPorts\x12B\n" +
 	"\routside_ports\x18\b \x03(\v2\x1d.raycontrol.node.v1.PortRangeR\foutsidePorts\x12\x1a\n" +
-	"\bwarnings\x18\t \x03(\tR\bwarnings\"\x92\x02\n" +
+	"\bwarnings\x18\t \x03(\tR\bwarnings\"\xa4\x02\n" +
 	"\rDeployService\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x10\n" +
@@ -8448,7 +8456,9 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"slipstream\x18\b \x01(\v2$.raycontrol.node.v1.DeploySlipstreamR\n" +
 	"slipstream\x12\x12\n" +
-	"\x04icmp\x18\t \x01(\bR\x04icmp\"\xcc\x01\n" +
+	"\x04icmp\x18\t \x01(\bR\x04icmp\x12\x10\n" +
+	"\x03udp\x18\n" +
+	" \x01(\bR\x03udp\"\xcc\x01\n" +
 	"\x10DeploySlipstream\x12\x12\n" +
 	"\x04zone\x18\x01 \x01(\tR\x04zone\x12\x1b\n" +
 	"\tquic_alpn\x18\x02 \x01(\tR\bquicAlpn\x12\x19\n" +

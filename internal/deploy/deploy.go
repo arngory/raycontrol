@@ -532,12 +532,18 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 				answer = x.Answer
 			}
 		}
-		icmp := ""
+		flags := ""
 		if s.ICMP {
 			// ping and traceroute (spec/icmp-v1.md): ICMP datagram sockets,
 			// which AF_INET and AF_INET6 cover; apply lets the group open them.
-			icmp = " -icmp"
+			flags = " -icmp"
 			plan.ICMP = true
+		}
+		if s.UDP {
+			// UDP as HTTP/3 datagrams of naive-quic (spec/naive-udp-v1.md):
+			// the sockets to the destinations are UDP's, which AF_INET and
+			// AF_INET6 cover, as UoT's are.
+			flags += " -udp"
 		}
 		units = append(units, unit{
 			name:        render.UnitName(s.Name),
@@ -554,7 +560,7 @@ func Build(in Inputs, p render.Paths, bin Binaries) Plan {
 					" -conn-limit " + path.Join(dir, render.NaiveConnLimit) +
 					// The key of QUIC stateless resets, read at the start
 					// from the service's own file; naive starts without it.
-					" -reset-key " + path.Join(dir, render.NaiveQUICReset) + probeArg + frontUID + icmp,
+					" -reset-key " + path.Join(dir, render.NaiveQUICReset) + probeArg + frontUID + flags,
 				"RuntimeDirectory=" + strings.TrimPrefix(path.Join(p.Run, s.Name), "/run/"),
 				"RuntimeDirectoryMode=0710",
 				"ReadWritePaths=" + path.Dir(p.NaiveSocket(s.Name)),

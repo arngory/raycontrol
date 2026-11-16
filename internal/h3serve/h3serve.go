@@ -3,7 +3,9 @@
 // whoever has no password and no token: the same transport parameters, the
 // same HTTP/3 SETTINGS, connection IDs of the same length and a stateless
 // reset from both. What differs is what each one's key and handler make of
-// a request. The numbers are the caller's (cmd/rayd: naive's limits and
+// a request, and, on a naive service with udp=on, the two lines that
+// announce HTTP/3 datagrams (Options.Datagrams; spec/naive-udp-v1.md §7,
+// §10.1). The numbers are the caller's (cmd/rayd: naive's limits and
 // render's idle time); the package imports nothing of the node's, so that
 // naive's own tests serve over it as rayd does.
 package h3serve
@@ -89,6 +91,15 @@ type Options struct {
 	MaxStreams     int64
 	PendingStreams int
 	MaxHeaderBytes int
+	// Datagrams announces HTTP/3 datagrams (RFC 9297): the transport
+	// parameter max_datagram_frame_size and SETTINGS_H3_DATAGRAM, which
+	// whoever completes a handshake sees. naive with udp=on
+	// (spec/naive-udp-v1.md); off, the server is as it was without them.
+	// On, quic-go keeps up to 32 datagrams for any request stream that does
+	// not read them, a TCP tunnel's too, for as long as it lasts: the
+	// streams a peer holds bound it (spec/naive-udp-v1.md §16.3). Each
+	// connection then has a sender of its own (datagrams.go).
+	Datagrams bool
 }
 
 // Config is the QUIC side of a server: packets of PacketSize to each
@@ -96,7 +107,7 @@ type Options struct {
 // What the server accepts is the same for both: quic-go's 1452.
 func Config(o Options) *quic.Config {
 	v4 := &quic.Config{MaxIdleTimeout: o.Idle, KeepAlivePeriod: 0, MaxIncomingStreams: o.MaxStreams,
-		InitialPacketSize: MaxPacketSize, DisablePathMTUDiscovery: true}
+		InitialPacketSize: MaxPacketSize, DisablePathMTUDiscovery: true, EnableDatagrams: o.Datagrams}
 	v6 := *v4
 	v6.InitialPacketSize = MaxPacketSizeIPv6
 	c := *v4
@@ -197,7 +208,13 @@ func Serve(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInf
 		// Each connection's streams without a header, where its requests
 		// find them too: their contexts come from the connection's.
 		ConnContext: func(ctx context.Context, _ *quic.ClientInfo) (context.Context, error) {
-			return context.WithValue(ctx, pendingKey{}, newPending(o.PendingStreams)), nil
+			ctx = context.WithValue(ctx, pendingKey{}, newPending(o.PendingStreams))
+			if o.Datagrams {
+				// The connection's sender of datagrams (datagrams.go): its
+				// requests find it in their contexts.
+				ctx = context.WithValue(ctx, senderKey{}, newSender())
+			}
+			return ctx, nil
 		}}
 	ln, err := tr.ListenEarly(tlsConf, Config(o))
 	if err != nil {
@@ -205,7 +222,7 @@ func Serve(ctx context.Context, pc net.PacketConn, cert func(*tls.ClientHelloInf
 	}
 	// A connection without a request goes after the same time as a silent
 	// one.
-	srv := &http3.Server{Handler: headerRead(h), IdleTimeout: o.Idle, MaxHeaderBytes: o.MaxHeaderBytes}
+	srv := &http3.Server{Handler: headerRead(h), IdleTimeout: o.Idle, MaxHeaderBytes: o.MaxHeaderBytes, EnableDatagrams: o.Datagrams}
 	wait := o.HeaderWait
 	if wait == 0 {
 		wait = HeaderTimeout
@@ -252,6 +269,11 @@ func serveConn(ctx context.Context, srv *http3.Server, qc *quic.Conn, wait time.
 	}
 	var streams sync.WaitGroup
 	defer streams.Wait()
+	// The requests' datagrams, while the connection lasts.
+	if snd, ok := qc.Context().Value(senderKey{}).(*sender); ok {
+		snd.qc = qc
+		streams.Go(snd.run)
+	}
 	// The control and QPACK streams.
 	streams.Go(func() {
 		for {

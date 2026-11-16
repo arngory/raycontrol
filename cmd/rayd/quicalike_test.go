@@ -110,6 +110,17 @@ func strangerReset(t *testing.T, addr string, id []byte) []byte {
 	return nil
 }
 
+// quicFace is what a client without a password or a token learns of a
+// QUIC server: its transport parameters and HTTP/3 SETTINGS (each
+// connection's own IDs and token taken out), its answer to a request that
+// is not its, and the length of its stateless reset.
+type quicFace struct {
+	params   qlog.ParametersSet
+	settings h3qlog.SettingsFrame
+	status   int
+	reset    int // a stateless reset's length
+}
+
 // naive-quic and DoH3 are not told from each other by one who has no
 // password and no token: the same transport parameters, connection IDs of
 // the same length, the same HTTP/3 SETTINGS, the same answer to a request
@@ -117,17 +128,54 @@ func strangerReset(t *testing.T, addr string, id []byte) []byte {
 // connection.
 func TestQUICNamesLookAlike(t *testing.T) {
 	ns, cert := naiveTest(t, sink)
-	servers := map[string]string{
+	faces := quicFaces(t, map[string]string{
 		"naive-quic": serveQUIC(t, ns, cert, quicOptions{resetKey: testResetKey(t)}),
 		"DoH3":       serveQUIC(t, noTokens(), cert, quicOptions{resetKey: testResetKey(t)}),
+	})
+	n, d := faces["naive-quic"], faces["DoH3"]
+	if !reflect.DeepEqual(n, d) {
+		t.Errorf("naive-quic is told from DoH3:\n naive-quic %+v\n DoH3       %+v", n, d)
 	}
-	type face struct {
-		params   qlog.ParametersSet
-		settings h3qlog.SettingsFrame
-		status   int
-		reset    int // a stateless reset's length
+	if n.params.InitialMaxStreamsBidi != naive.MaxStreams || n.settings.MaxFieldSectionSize != naive.MaxHeaderBytes || n.status != http.StatusNotFound {
+		t.Errorf("naive-quic: %d streams, %d bytes of header, status %d", n.params.InitialMaxStreamsBidi, n.settings.MaxFieldSectionSize, n.status)
 	}
-	faces := map[string]face{}
+}
+
+// naive-quic with udp=on announces HTTP/3 datagrams to whoever completes a
+// handshake (spec/naive-udp-v1.md §7, §10.1): max_datagram_frame_size in
+// its transport parameters and SETTINGS_H3_DATAGRAM. DoH3 on the same
+// address does not, and those two lines are all that tells them apart
+// here. They change what each does too, after the handshake as they come:
+// DoH3 closes a connection that sends a DATAGRAM frame (quic-go's
+// FRAME_ENCODING_ERROR, as for any frame not negotiated), and naive-quic
+// closes with H3_SETTINGS_ERROR one whose SETTINGS announce HTTP/3
+// datagrams without the transport parameter (RFC 9297 §2.1.1). Neither
+// tells a prober more than the transport parameter does.
+func TestQUICNamesDatagrams(t *testing.T) {
+	ns, cert := naiveTest(t, sink)
+	o := naiveUDP(ns, true)
+	o.resetKey = testResetKey(t)
+	faces := quicFaces(t, map[string]string{
+		"naive-quic": serveQUIC(t, ns, cert, o),
+		"DoH3":       serveQUIC(t, noTokens(), cert, quicOptions{resetKey: testResetKey(t)}),
+	})
+	n, d := faces["naive-quic"], faces["DoH3"]
+	if n.settings.Datagram == nil || !*n.settings.Datagram || n.params.MaxDatagramFrameSize != 16383 {
+		t.Fatalf("naive-quic with udp=on: SETTINGS_H3_DATAGRAM %v, max_datagram_frame_size %d", n.settings.Datagram, n.params.MaxDatagramFrameSize)
+	}
+	if d.settings.Datagram != nil || d.params.MaxDatagramFrameSize == 16383 {
+		t.Fatalf("DoH3: SETTINGS_H3_DATAGRAM %v, max_datagram_frame_size %d", d.settings.Datagram, d.params.MaxDatagramFrameSize)
+	}
+	n.settings.Datagram, n.params.MaxDatagramFrameSize = d.settings.Datagram, d.params.MaxDatagramFrameSize
+	if !reflect.DeepEqual(n, d) {
+		t.Errorf("naive-quic with udp=on is told from DoH3 by more than datagrams:\n naive-quic %+v\n DoH3       %+v", n, d)
+	}
+}
+
+// quicFaces are the faces of the servers at their addresses, by name.
+func quicFaces(t *testing.T, servers map[string]string) map[string]quicFace {
+	t.Helper()
+	faces := map[string]quicFace{}
 	for name, addr := range servers {
 		seen := &h3Seen{}
 		tr := &http3.Transport{TLSClientConfig: naiveClientTLS(),
@@ -142,13 +190,13 @@ func TestQUICNamesLookAlike(t *testing.T) {
 			t.Fatalf("%s: %v", name, err)
 		}
 		resp.Body.Close()
-		var f face
+		var f quicFace
 		deadline := time.Now().Add(5 * time.Second)
 		for {
 			seen.mu.Lock()
 			ok := seen.params != nil && seen.settings != nil
 			if ok {
-				f = face{params: *seen.params, settings: *seen.settings, status: resp.StatusCode}
+				f = quicFace{params: *seen.params, settings: *seen.settings, status: resp.StatusCode}
 			}
 			seen.mu.Unlock()
 			if ok {
@@ -172,13 +220,7 @@ func TestQUICNamesLookAlike(t *testing.T) {
 		f.reset = len(strangerReset(t, addr, []byte{1, 2, 3, 4, 5, 6, 7, 8}))
 		faces[name] = f
 	}
-	n, d := faces["naive-quic"], faces["DoH3"]
-	if !reflect.DeepEqual(n, d) {
-		t.Errorf("naive-quic is told from DoH3:\n naive-quic %+v\n DoH3       %+v", n, d)
-	}
-	if n.params.InitialMaxStreamsBidi != naive.MaxStreams || n.settings.MaxFieldSectionSize != naive.MaxHeaderBytes || n.status != http.StatusNotFound {
-		t.Errorf("naive-quic: %d streams, %d bytes of header, status %d", n.params.InitialMaxStreamsBidi, n.settings.MaxFieldSectionSize, n.status)
-	}
+	return faces
 }
 
 // The token of a stateless reset is a function of the service's key and a

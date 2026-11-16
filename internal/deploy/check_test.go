@@ -247,6 +247,12 @@ func TestPlanCheckAcceptsOurs(t *testing.T) {
 	if p := plans["naive with ICMP"]; !p.ICMP || !strings.Contains(file(p, "/etc/systemd/system/niko-naive.service"), " -icmp\n") {
 		t.Fatal("naive with ICMP: no -icmp")
 	}
+	udp := goodInputs()
+	udp.Services[4].UDP = true
+	plans["naive with UDP"] = deploy.Build(udp, render.DefaultPaths, deploy.DefaultBinaries)
+	if p := plans["naive with UDP"]; p.ICMP || !strings.Contains(file(p, "/etc/systemd/system/niko-naive.service"), " -udp\n") {
+		t.Fatal("naive with UDP: no -udp")
+	}
 	for name, services := range map[string][][3]string{
 		"self-steal":      {{"reality", "r", ""}, {"doh", "doh", ""}},
 		"hysteria":        {{"hy2-masq", "hy2-masq", ""}, {"hy2-obfs", "hy2-obfs", ""}},
@@ -256,6 +262,7 @@ func TestPlanCheckAcceptsOurs(t *testing.T) {
 		"every kind":      {{"reality", "reality", ""}, {"naive", "naive", ""}, {"doh", "doh", ""}, {"yggdrasil", "ygg", ""}, {"hy2-masq", "hm", ""}, {"hy2-obfs", "ho", ""}, {"dnstt", "dns", ""}, {"masterdns", "mdns", ""}, {"slipstream", "slip", ""}, {"api", "api", ""}, {"ssh", "ssh", ""}, {"olcrtc", "olc", ""}},
 		"masterdns alone": {{"masterdns", "mdns", ""}},
 		"naive, ICMP":     {{"reality", "reality", ""}, {"naive", "naive", `{"icmp":true}`}},
+		"naive, UDP":      {{"reality", "reality", ""}, {"naive", "naive", `{"udp":true,"icmp":true}`}},
 	} {
 		m, files := buildModel(t, render.DefaultPaths, services, nil)
 		plans[name] = build(m, files, render.DefaultPaths)

@@ -424,6 +424,7 @@ message DeployService {
   bool salamander = 7;   // hy2-obfs: the front's copy of its salamander password is rendered
   DeploySlipstream slipstream = 8;
   bool icmp = 9;         // naive: it carries ping and traceroute (icmp=on, spec/icmp-v1.md)
+  bool udp = 10;         // naive: it carries UDP as HTTP/3 datagrams (udp=on, spec/naive-udp-v1.md)
 }
 
 // DeploySlipstream are a slipstream service's settings
