@@ -13,7 +13,9 @@ import (
 // no rotation loop: the users whose rotation a revocation with overlap
 // began, in flight (alice) or switched with a previous secret still
 // accepted (carol), get new credentials, audited; one revoked without
-// overlap (bob) and one never revoked (dave) keep theirs (review 2, B1).
+// overlap (bob), one never revoked (dave) and one renewed since her
+// revocation with a next no revocation began (erin) keep theirs (review 2,
+// B1).
 func TestRenewOverlapRotations(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "rayd.db")
@@ -26,12 +28,12 @@ func TestRenewOverlapRotations(t *testing.T) {
 	svc, _ := s.CreateService(ctx, Service{Kind: "naive", Name: "naive", Enabled: true, Settings: "{}"})
 	doh, _ := s.CreateService(ctx, Service{Kind: "doh", Name: "doh", Enabled: true, Settings: "{}"})
 	ids := map[string]int64{}
-	for _, n := range []string{"alice", "bob", "carol", "dave"} {
+	for _, n := range []string{"alice", "bob", "carol", "dave", "erin"} {
 		u, _ := s.CreateUser(ctx, User{Name: n, Enabled: true, Services: []int64{svc.ID, doh.ID}})
 		ids[n] = u.ID
 	}
 	for _, id := range []int64{svc.ID, doh.ID} {
-		if _, err := s.Credentials(ctx, id, []int64{ids["alice"], ids["bob"], ids["carol"], ids["dave"]}, NewUUID); err != nil {
+		if _, err := s.Credentials(ctx, id, []int64{ids["alice"], ids["bob"], ids["carol"], ids["dave"], ids["erin"]}, NewUUID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -42,7 +44,7 @@ func TestRenewOverlapRotations(t *testing.T) {
 		t.Fatal(err)
 	}
 	devs := map[string]Device{}
-	for _, n := range []string{"alice", "bob", "carol", "dave"} {
+	for _, n := range []string{"alice", "bob", "carol", "dave", "erin"} {
 		devs[n], _, _ = s.CreateDevice(ctx, n, "phone", "user")
 	}
 	known := credRowsOf(t, s.db)
@@ -65,6 +67,19 @@ func TestRenewOverlapRotations(t *testing.T) {
 		rev.Until.Unix(), rev.SwitchAt.Unix(), ids["carol"], svc.ID); err != nil {
 		t.Fatal(err)
 	}
+	// erin's phone revoked, her credentials renewed a second later (user
+	// renew), then a next of a schedule from before -cred-period 0.
+	if _, err := s.RevokeDevice(ctx, devs["erin"].ID); err != nil {
+		t.Fatal(err)
+	}
+	s.SetClock(func() time.Time { return t0.Add(time.Second) })
+	if _, err := s.RenewUser(ctx, "erin"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE credentials SET next_secret = 'n', next_from = ? WHERE user_id = ? AND service_id = ?`,
+		t0.Add(DefaultRotation.Lead).Unix(), ids["erin"], svc.ID); err != nil {
+		t.Fatal(err)
+	}
 	before := credRowsOf(t, s.db)
 	s.Close()
 
@@ -84,7 +99,7 @@ func TestRenewOverlapRotations(t *testing.T) {
 			t.Errorf("%s: %+v", n, c)
 		}
 	}
-	for _, n := range []string{"bob", "dave"} {
+	for _, n := range []string{"bob", "dave", "erin"} {
 		if got[n][svc.ID] != before[n][svc.ID] || got[n][doh.ID] != before[n][doh.ID] {
 			t.Errorf("%s changed: %+v", n, got[n])
 		}

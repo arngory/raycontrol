@@ -140,6 +140,9 @@ func TestCarryRestoreRotatingButRenewed(t *testing.T) {
 	if _, _, err := s.CreateDevice(ctx, "alice", "laptop", "user"); err != nil { // made since, active
 		t.Fatal(err)
 	}
+	// Not in the credentials' second: the phone revoked after they became
+	// current, as on a node.
+	s.SetClock(func() time.Time { return time.Now().Add(time.Minute) })
 	if _, err := s.RevokeDeviceOverlap(ctx, f.phones["alice"].ID); err != nil {
 		t.Fatal(err)
 	}
