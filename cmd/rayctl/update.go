@@ -59,8 +59,13 @@ var releaseKey = release.PubKey
 // handsOff reports whether this rayctl hands the update to the release's
 // own: a release newer than the node, a rayctl of another version than
 // this one, not already handed over, not refused (-no-handoff).
+//
+// Nor a target before overlapSince over a node that names no release (a
+// dev build): that release's rayctl would not renew what its rayd never
+// finishes (renewForOlder, R4-43); this one does, as for going back.
 func handsOff(refused bool, target, installed string) bool {
-	return os.Getenv(handoffEnv) != "1" && !refused && target != version && release.Newer(target, installed)
+	return os.Getenv(handoffEnv) != "1" && !refused && target != version && release.Newer(target, installed) &&
+		(!beforeOverlap(target) || release.IsRelease(installed))
 }
 
 // installedVersion is the version on the node: this rayctl's, or, in an
@@ -267,7 +272,7 @@ func (c *cli) update(ctx context.Context, args []string) (err error) {
 	// Going back to a rayd before v0.31.0 (-version, -from, -local) renews
 	// the users of rotations a revocation with overlap began, which that
 	// rayd would never finish (R4-43); one that cannot does not go back.
-	renewed, err := localNode.stopForInstall(ctx, newVersion)
+	renewed, err := localNode.stopForInstall(ctx, newVersion, updateActor(opts, newVersion))
 	if err != nil {
 		return err
 	}
@@ -895,18 +900,28 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 			}
 			switch {
 			case err != nil && carry == carryMust:
-				return fmt.Errorf("keeping the revocations made since the update: %w (rayd is stopped; "+
-					"rayctl update -rollback -no-carry puts the copy back as it is)", err)
+				return localNode.startAgain(fmt.Errorf("keeping the revocations made since the update: %w", err),
+					"nothing rolled back (rayctl update -rollback -no-carry puts the copy back as it is)")
 			case err != nil:
 				fmt.Println("the revocations since the update could not be carried, the copy goes back as it is:", err)
 			}
 		}
 		if err := copyDB(saved, localNode.db); err != nil {
-			return fmt.Errorf("putting the database back: %w", err)
+			err = fmt.Errorf("putting the database back: %w", err)
+			if errors.Is(err, errDBPlaced) {
+				return fmt.Errorf("%w; rayd is stopped, the copy in place without its WAL: rayctl update -rollback -no-carry", err)
+			}
+			// Nothing of the database moved (copyDB).
+			return localNode.startAgain(err, "nothing rolled back")
 		}
 		fmt.Println("database put back from", saved)
 		dbBack = true
 	}
+	// With the copy back, the period the renewal goes by is the copy's,
+	// the previous version's own: the revocations made since the copy were
+	// carried above (CarryRevocations), which renews their users whatever
+	// the period. That carries correctness there; the renewal is for what
+	// the copy itself holds.
 	// The binaries of prev go in: a rayd before v0.31.0 would never finish
 	// a rotation a revocation with overlap began (R4-43). The carry above
 	// renewed those of the revocations since the copy; where the database
@@ -930,6 +945,10 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 		}
 	}
 	if err := localNode.install(previousDir); err != nil {
+		if dbBack {
+			return fmt.Errorf("installing the previous binaries: %w; rayd is stopped, the database copy is back, "+
+				"some previous binaries may be in place: rayctl update -rollback -no-carry", err)
+		}
 		if renewStopped {
 			// Stopped for the renewal only: the database is this rayd's.
 			return localNode.startAgain(fmt.Errorf("installing the previous binaries: %w", err),
@@ -1005,15 +1024,37 @@ func copyDB(src, dst string) error {
 		return err
 	}
 	if newWAL != "" {
-		if err := os.Rename(newWAL, dst+"-wal"); err != nil {
+		if err := renameWAL(newWAL, dst+"-wal"); err != nil {
+			// The new file is in place: the old WAL must not come back
+			// beside it.
 			os.Remove(newWAL)
-			return err
+			if aside != "" {
+				os.Remove(aside)
+			}
+			return fmt.Errorf("%w, its WAL not: %w", errDBPlaced, err)
 		}
 	}
 	if aside != "" {
 		os.Remove(aside)
 	}
-	return nil
+	return syncDir(filepath.Dir(dst))
+}
+
+// renameWAL puts copyDB's new WAL in place (tests make it fail).
+var renameWAL = os.Rename
+
+// errDBPlaced: copyDB put the new database file in place, and failed
+// after (its WAL); the destination is no longer as it was.
+var errDBPlaced = errors.New("the new database file is in place")
+
+// syncDir makes the renames in dir durable.
+func syncDir(dir string) error {
+	d, err := os.Open(dir) //nolint:gosec // G304: the database's directory
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // setAside moves name to a fresh name beside it and returns that name, ""

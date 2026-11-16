@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -10,12 +11,12 @@ import (
 // Regression tests from the second review of R4-43.
 
 // A rollback that keeps the database (the same schema) to a rayd that runs
-// no rotation loop: the users whose rotation a revocation with overlap
-// began, in flight (alice) or switched with a previous secret still
-// accepted (carol), get new credentials, audited; one revoked without
-// overlap (bob), one never revoked (dave) and one renewed since her
-// revocation with a next no revocation began (erin) keep theirs (review 2,
-// B1).
+// no rotation loop: the users with a rotation in flight get new
+// credentials, audited: one a revocation with overlap began, not switched
+// (alice) or switched with a previous secret still accepted (carol), and
+// one the schedule began before the period went to 0 (erin, renewed by
+// design since review 4); one revoked without overlap (bob) and one never
+// revoked (dave) keep theirs (review 2, B1).
 func TestRenewOverlapRotations(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "rayd.db")
@@ -84,7 +85,7 @@ func TestRenewOverlapRotations(t *testing.T) {
 	s.Close()
 
 	users, err := RenewOverlapRotations(ctx, path, "rayctl update -rollback", "rollback")
-	if err != nil || len(users) != 2 || users[0] != "alice" || users[1] != "carol" {
+	if err != nil || !slices.Equal(users, []string{"alice", "carol", "erin"}) {
 		t.Fatalf("renewed %v %v", users, err)
 	}
 	s, err = Open(ctx, path)
@@ -93,18 +94,18 @@ func TestRenewOverlapRotations(t *testing.T) {
 	}
 	defer s.Close()
 	got := credRowsOf(t, s.db)
-	for _, n := range []string{"alice", "carol"} {
+	for _, n := range []string{"alice", "carol", "erin"} {
 		c := got[n][svc.ID]
 		if c.Secret == known[n][svc.ID].Secret || c.Secret == before[n][svc.ID].Secret || c.Next != "" || c.Prev != "" {
 			t.Errorf("%s: %+v", n, c)
 		}
 	}
-	for _, n := range []string{"bob", "dave", "erin"} {
+	for _, n := range []string{"bob", "dave"} {
 		if got[n][svc.ID] != before[n][svc.ID] || got[n][doh.ID] != before[n][doh.ID] {
 			t.Errorf("%s changed: %+v", n, got[n])
 		}
 	}
-	for _, n := range []string{"alice", "carol"} {
+	for _, n := range []string{"alice", "carol", "erin"} {
 		if got[n][doh.ID] != before[n][doh.ID] {
 			t.Errorf("%s's DoH secret changed", n)
 		}
@@ -119,7 +120,7 @@ func TestRenewOverlapRotations(t *testing.T) {
 		}
 	}
 	a, _ := s.ListAudit(ctx, 20)
-	if !hasAudit(a, "user.renew:rollback", "alice: 1 credentials new, a rotation a revocation with overlap began") ||
+	if !hasAudit(a, "user.renew:rollback", "alice: 1 credentials new, a rotation in flight, which the rayd that goes in") ||
 		!hasAudit(a, "user.renew:rollback", "carol: 1 credentials new") || hasAudit(a, "user.renew:rollback", "bob") {
 		t.Errorf("audit %+v", a)
 	}

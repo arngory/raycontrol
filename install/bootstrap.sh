@@ -69,6 +69,9 @@ MIN_VERSION="v0.10.0"
 RELAY_MIN_VERSION="v0.10.1"
 # RELAY_PROBE_MIN_VERSION is the first release with rayd relay (relay-v1 §9.1).
 RELAY_PROBE_MIN_VERSION="v0.11.0"
+# OVERLAP_VERSION is the first release whose rayctl renews, going back, what
+# an older rayd would never finish (R4-43): going_back.
+OVERLAP_VERSION="v0.31.0"
 
 die() {
 	echo "bootstrap: $*" >&2
@@ -179,16 +182,24 @@ check_version() {
 }
 
 # going_back SIGNED INSTALLED says why the release SIGNED is not put over a
-# node that runs INSTALLED, a newer release: going back is rayctl update's
-# (rayctl update -version SIGNED), which keeps a copy of the database and,
-# for a rayd before v0.31.0, renews the users whose rotation a revocation
-# with -overlap began, which that rayd would never finish (R4-43). A rayd
-# that names no release is taken at its word.
+# node's database whose rayd says INSTALLED: going back is rayctl
+# update's (rayctl update -version SIGNED), which keeps a copy of the
+# database and, for a rayd before v0.31.0, renews the users with a rotation
+# in flight, which that rayd would never finish (R4-43). Over a newer
+# release, nothing older; when no release can be read (no rayd, one that
+# fails, a build that is no release: rayctl uninstall -keep-state, a broken
+# binary), nothing before OVERLAP_VERSION.
 going_back() {
 	local signed=$1 installed=$2
-	[[ $installed =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
-	if version_lt "$signed" "$installed"; then
-		echo "this host is a node on raycontrol $installed, newer than $signed: rayctl update -version $signed goes back"
+	if [[ $installed =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+		if version_lt "$signed" "$installed"; then
+			echo "this host is a node on raycontrol $installed, newer than $signed: rayctl update -version $signed goes back, or RAYCONTROL_VERSION=$installed installs $installed again"
+			return 1
+		fi
+		return 0
+	fi
+	if version_lt "$signed" "$OVERLAP_VERSION"; then
+		echo "this host has a node's database (/var/lib/raycontrol/rayd.db) and no rayd that names its release: install $OVERLAP_VERSION or newer (RAYCONTROL_VERSION), then rayctl update -version $signed goes back"
 		return 1
 	fi
 }
@@ -367,9 +378,14 @@ main() {
 		return
 	fi
 
-	# A node here already, on a newer release: not over it (going_back).
-	if [[ -z ${RAYCONTROL_LOCAL_DIR:-} && -e /var/lib/raycontrol/rayd.db && -x /usr/local/bin/rayd ]]; then
-		why="$(going_back "$signed" "$(/usr/local/bin/rayd version 2>/dev/null)")" || die "$why"
+	# A node's database here already: not an older release over it
+	# (going_back). -check stops here too, with 1.
+	if [[ -z ${RAYCONTROL_LOCAL_DIR:-} && -e /var/lib/raycontrol/rayd.db ]]; then
+		local installed=""
+		if [[ -x /usr/local/bin/rayd ]]; then
+			installed="$(/usr/local/bin/rayd version 2>/dev/null || true)"
+		fi
+		why="$(going_back "$signed" "$installed")" || die "$why"
 	fi
 
 	# raycontrol v0 goes first, when asked: it holds 443 and its nftables

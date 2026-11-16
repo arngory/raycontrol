@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -56,23 +57,28 @@ func (f renewFix) exec(t *testing.T, q string, args ...any) {
 	}
 }
 
-// No revocation with overlap, no renewal: a switch of the schedule with
-// the previous secret in its grace (dave; frida, a revocation without
-// overlap a period before it), a next the schedule published after a
-// revocation without overlap (erin), after rayd went to -cred-period 0
-// (review 3, N2).
-func TestRenewOverlapRotationsFalsePositives(t *testing.T) {
+// Under -cred-period 0 every rotation in flight is renewed, whoever began
+// it (review 4, B1): a switch of the schedule with the previous secret in
+// its grace (dave; frida, a revocation without overlap a period before
+// it), a next the schedule published after a revocation without overlap
+// (erin): harmless, their devices reconnect after their next fetch. Not a
+// user with nothing in flight (hugo, revoked without overlap), nor one
+// whose previous secret ends at the very second (ida: prev_until is not
+// ahead).
+func TestRenewOverlapRotationsAnyInFlight(t *testing.T) {
 	ctx := context.Background()
 	withPeriod := DefaultRotation
-	f := newRenewFix(t, withPeriod, "dave", "erin", "frida")
+	f := newRenewFix(t, withPeriod, "dave", "erin", "frida", "hugo", "ida")
 	t0 := time.Now().Truncate(time.Second).Add(time.Minute)
 	f.s.SetClock(func() time.Time { return t0.Add(withPeriod.Lead - withPeriod.Period) })
 	if _, err := f.s.RevokeDevice(ctx, f.devs["frida"][0].ID); err != nil { // her switch a period on: t0 + lead
 		t.Fatal(err)
 	}
 	f.s.SetClock(func() time.Time { return t0 })
-	if _, err := f.s.RevokeDevice(ctx, f.devs["erin"][0].ID); err != nil { // stolen: renewed in its second
-		t.Fatal(err)
+	for _, n := range []string{"erin", "hugo"} {
+		if _, err := f.s.RevokeDevice(ctx, f.devs[n][0].ID); err != nil { // stolen: renewed in its second
+			t.Fatal(err)
+		}
 	}
 	// dave's credentials from long ago: published now, switched a lead on.
 	f.exec(t, `UPDATE credentials SET created_at = ?, rotated_at = NULL WHERE user_id = ?`,
@@ -85,33 +91,33 @@ func TestRenewOverlapRotationsFalsePositives(t *testing.T) {
 	}
 	// erin's next, the schedule's, a period after her renewal.
 	f.exec(t, `UPDATE credentials SET next_secret = 'n', next_from = ? WHERE user_id = ?`, t0.Add(withPeriod.Period).Unix(), f.ids["erin"])
+	now := t0.Add(withPeriod.Lead + time.Hour)
+	f.exec(t, `UPDATE credentials SET prev_secret = 'p', prev_until = ? WHERE user_id = ?`, now.Unix(), f.ids["ida"])
 	rows := credRowsOf(t, f.s.db)
-	if rows["dave"][f.svc].Prev == "" || rows["erin"][f.svc].Next == "" || rows["frida"][f.svc].Prev == "" {
+	if rows["dave"][f.svc].Prev == "" || rows["erin"][f.svc].Next == "" || rows["frida"][f.svc].Prev == "" ||
+		rows["hugo"][f.svc].Next != "" || rows["hugo"][f.svc].Prev != "" {
 		t.Fatalf("fixture: %+v", rows)
 	}
 	must(t, f.s.SetRotation(ctx, Rotation{Lead: withPeriod.Lead, Grace: withPeriod.Grace}))
 	f.s.Close()
-	users, err := RenewOverlapRotations(ctx, f.path, "t", "rollback")
-	if err != nil || len(users) != 0 {
-		t.Errorf("renewed %v %v; none had a device revoked with overlap", users, err)
+	users, err := renewOverlapRotations(ctx, f.path, "t", "rollback", func() time.Time { return now })
+	if err != nil || !slices.Equal(users, []string{"dave", "erin", "frida"}) {
+		t.Errorf("renewed %v %v", users, err)
 	}
 }
 
-// The renewal's edges (review 3, N2, X6, X7, X17): gina's device revoked
-// with overlap in the second of a switch, after it, the previous secret
-// dropped since (the loop at the end of the grace), her rotation in
-// flight: renewed, with a new LAN key, not none. frank's rotation switched
-// and its previous secret past its time (rayd down, not dropped yet):
-// nothing is accepted, nothing to renew.
+// The renewal's edges (review 3, N2, X6, X7, X17; review 4, M21): gina's
+// device revoked with overlap in the second of a switch, after it, the
+// previous secret dropped since (the loop at the end of the grace), her
+// rotation in flight: renewed, with a new LAN key, not none, not the one
+// her revocations left. frank's rotation switched and its previous secret
+// past its time (rayd down, not dropped yet): nothing is accepted,
+// nothing to renew.
 func TestRenewOverlapRotationsEdges(t *testing.T) {
 	ctx := context.Background()
 	r := Rotation{Lead: DefaultRotation.Lead, Grace: DefaultRotation.Grace}
 	f := newRenewFix(t, r, "frank", "gina")
 	f.exec(t, `UPDATE users SET lan = 1, lan_key = randomblob(?) WHERE name = 'gina'`, LANKeySize)
-	var lanBefore []byte
-	if err := f.s.db.QueryRow(`SELECT lan_key FROM users WHERE name = 'gina'`).Scan(&lanBefore); err != nil {
-		t.Fatal(err)
-	}
 	t0 := time.Now().Truncate(time.Second).Add(time.Minute)
 	f.s.SetClock(func() time.Time { return t0 })
 	var revs [2]Revocation
@@ -135,6 +141,10 @@ func TestRenewOverlapRotationsEdges(t *testing.T) {
 	before := credRowsOf(t, f.s.db)
 	if g := before["gina"][f.svc]; g.Next == "" || g.Rotated != S.Unix() || g.Prev != "" || before["frank"][f.svc].Prev == "" {
 		t.Fatalf("fixture: %+v", before)
+	}
+	var lanBefore []byte // the revocations' own, new
+	if err := f.s.db.QueryRow(`SELECT lan_key FROM users WHERE name = 'gina'`).Scan(&lanBefore); err != nil || len(lanBefore) != LANKeySize {
+		t.Fatal(err)
 	}
 	f.s.Close()
 	users, err := RenewOverlapRotations(ctx, f.path, "t", "rollback")

@@ -106,8 +106,15 @@ back fail v0.30.2 v0.31.0
 back fail v0.31.0 v0.31.1
 back pass v0.31.0 v0.31.0
 back pass v0.31.1 v0.31.0
-back pass v0.30.2 dev
-back pass v0.30.2 ""
+# No release read where the database is: nothing before v0.31.0.
+back fail v0.30.2 dev
+back fail v0.30.2 ""
+back fail v0.30.2 v0.31.0-rc.1
+back pass v0.31.0 ""
+back pass v0.31.2 dev
+
+# The guard as main() runs it (bootstrap-guard.sh).
+"$here/bootstrap-guard.sh" || failures=$((failures + 1))
 
 # A release lists more archives than a node takes: the other architecture's
 # and rayctl for other systems (rayctl-darwin-*, rayctl-freebsd-*), in the

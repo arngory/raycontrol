@@ -151,9 +151,11 @@ func currentSecrets(t *testing.T, path string) map[string]string {
 
 // renewForOlder with rayd running (a rollback that keeps the database):
 // alice, her rotation in flight, renewed on the live database, rayd
-// stopped once, for that, and not started (the rollback's restart does);
-// bob, revoked without overlap, as he was; the database rayd's, mode 0600.
-// Again: nothing left, rayd not stopped. Review 3, N6 (X1, X2, X4).
+// stopped once, before anything is decided, and not started (the
+// rollback's restart does); bob, revoked without overlap, as he was; the
+// database rayd's, mode 0600. Again: nothing left, rayd stopped all the
+// same, the decision made with it stopped (review 3, N6: X1, X2, X4;
+// review 4, nit 4).
 func TestRenewForOlder(t *testing.T) {
 	for _, crash := range []bool{false, true} {
 		f := newFakeNode(t, 0, crash)
@@ -181,7 +183,7 @@ func TestRenewForOlder(t *testing.T) {
 		}
 		f.calls = nil
 		if users, stopped, err := n.renewForOlder(context.Background(), "v0.30.0", false, "rayctl update -rollback", "rollback"); err != nil ||
-			len(users) != 0 || stopped || len(f.calls) != 0 {
+			len(users) != 0 || !stopped || !slices.Equal(f.calls, []string{"stop rayd.service"}) {
 			t.Errorf("crash=%v: again: %v %v %v %q", crash, users, stopped, err, f.calls)
 		}
 	}
@@ -251,7 +253,7 @@ func TestStopForInstall(t *testing.T) {
 
 	f := newFakeNode(t, 0, false)
 	previousDir = t.TempDir()
-	users, err := f.env().stopForInstall(ctx, "v0.30.2")
+	users, err := f.env().stopForInstall(ctx, "v0.30.2", "rayctl update -version v0.30.2")
 	if err != nil || !slices.Equal(users, []string{"alice"}) || !slices.Equal(f.calls, []string{"stop rayd.service"}) {
 		t.Fatalf("to v0.30.2: %v %v %q", users, err, f.calls)
 	}
@@ -275,7 +277,7 @@ func TestStopForInstall(t *testing.T) {
 
 	f = newFakeNode(t, 0, false)
 	previousDir = t.TempDir()
-	if users, err := f.env().stopForInstall(ctx, "v0.31.1"); err != nil || len(users) != 0 || currentSecrets(t, f.db)["alice"] != f.known["alice"] {
+	if users, err := f.env().stopForInstall(ctx, "v0.31.1", "rayctl update -version v0.31.1"); err != nil || len(users) != 0 || currentSecrets(t, f.db)["alice"] != f.known["alice"] {
 		t.Errorf("to v0.31.1: %v %v", users, err)
 	}
 
@@ -285,7 +287,7 @@ func TestStopForInstall(t *testing.T) {
 	t.Setenv("TMPDIR", os.Getenv("TMPDIR"))
 	gone := filepath.Join(t.TempDir(), "gone")
 	f.onStop = func() { os.Setenv("TMPDIR", gone) }
-	_, err = f.env().stopForInstall(ctx, "v0.30.2")
+	_, err = f.env().stopForInstall(ctx, "v0.30.2", "rayctl update -version v0.30.2")
 	os.Setenv("TMPDIR", "")
 	if err == nil || !strings.Contains(err.Error(), "nothing installed, rayd started again") ||
 		!slices.Equal(f.calls, []string{"stop rayd.service", "start rayd.service"}) || currentSecrets(t, f.db)["alice"] != f.known["alice"] {
@@ -296,7 +298,7 @@ func TestStopForInstall(t *testing.T) {
 	f = newFakeNode(t, 0, false)
 	previousDir = t.TempDir()
 	f.plantFIFO(t)
-	if _, err := f.env().stopForInstall(ctx, "v0.30.2"); err == nil || !strings.Contains(err.Error(), "keeping the database") ||
+	if _, err := f.env().stopForInstall(ctx, "v0.30.2", "rayctl update -version v0.30.2"); err == nil || !strings.Contains(err.Error(), "keeping the database") ||
 		!strings.Contains(err.Error(), "rayd started again") || !slices.Equal(f.calls, []string{"stop rayd.service", "start rayd.service"}) {
 		t.Errorf("copy failing: %v %q", err, f.calls)
 	}
