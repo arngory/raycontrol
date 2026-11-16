@@ -1489,6 +1489,8 @@ func cmdNaive(args []string) error {
 		"which need the process's group in net.ipv4.ping_group_range")
 	resetKey := fs.String("reset-key", "", "file with the key of naive-quic's stateless resets (32 bytes, hex), the same at every start: "+
 		"a client whose connection the process no longer knows is told at once; empty or absent: no stateless resets")
+	udp := fs.Bool("udp", false, "carry UDP as HTTP/3 datagrams of connect-udp requests to naive-quic (spec/naive-udp-v1.md): "+
+		"naive-quic announces HTTP/3 datagrams; without it a connect-udp request gets the site's answer")
 	fs.Parse(args)
 	if *users == "" || *chain == "" || *key == "" || *socket == "" {
 		return errors.New("naive needs -users, -chain, -key and -socket")
@@ -1517,10 +1519,14 @@ func cmdNaive(args []string) error {
 	// The users file is watched: a user taken off it (disabled, expired,
 	// over the traffic limit) loses the live streams (traffic-limit-v1 §3.2).
 	go nu.Watch(ctx)
-	ns := &naive.Server{Users: nu, Answer: handler, ICMP: *icmp, Log: log}
-	// The refusals of the connection limits go out with the bytes: set
-	// before the stats socket answers.
+	ns := &naive.Server{Users: nu, Answer: handler, ICMP: *icmp, UDP: *udp, H3: naiveH3, Log: log}
+	// The refusals of the connection limits go out with the bytes, and the
+	// datagram requests' counts with udp: set before the stats socket
+	// answers.
 	nu.SetRefused(ns.Refused)
+	if *udp {
+		nu.SetUDP(ns.UDPStats)
+	}
 	if *statsSocket != "" {
 		if err := nu.ServeStats(ctx, *statsSocket, log); err != nil {
 			return err
@@ -1539,7 +1545,7 @@ func cmdNaive(args []string) error {
 		if err != nil {
 			return err
 		}
-		var o quicOptions
+		o := quicOptions{datagrams: *udp}
 		if *resetKey != "" {
 			// Without the key the service is as it was before it had
 			// one: clients wait out their idle time after a restart. Why
@@ -1559,7 +1565,7 @@ func cmdNaive(args []string) error {
 		<-ctx.Done()
 		_ = srv.Close()
 	}()
-	log.Info("serving naive", "socket", *socket, "answer", *answer, "icmp", *icmp, "conn_limit", ns.ConnLimitOn())
+	log.Info("serving naive", "socket", *socket, "answer", *answer, "icmp", *icmp, "udp", *udp && *quicSocket != "", "conn_limit", ns.ConnLimitOn())
 	if err := srv.ServeTLS(ln, "", ""); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

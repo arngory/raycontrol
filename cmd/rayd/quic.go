@@ -31,6 +31,9 @@ type quicOptions struct {
 	resetKey *quic.StatelessResetKey
 	// headerWait is h3serve.HeaderTimeout when 0 (tests make it short).
 	headerWait time.Duration
+	// datagrams announces HTTP/3 datagrams (h3serve.Options.Datagrams):
+	// naive-quic with udp=on (spec/naive-udp-v1.md).
+	datagrams bool
 }
 
 // h3Options are o with what both servers share: an idle time the front
@@ -39,7 +42,18 @@ type quicOptions struct {
 // bounds of the streams without a header and of a header.
 func h3Options(o quicOptions) h3serve.Options {
 	return h3serve.Options{ResetKey: o.resetKey, HeaderWait: o.headerWait, Idle: render.QUICIdle,
-		MaxStreams: naive.MaxStreams, PendingStreams: naive.PendingStreams, MaxHeaderBytes: naive.MaxHeaderBytes}
+		MaxStreams: naive.MaxStreams, PendingStreams: naive.PendingStreams, MaxHeaderBytes: naive.MaxHeaderBytes,
+		Datagrams: o.datagrams}
+}
+
+// naiveH3 gives naive a request's HTTP/3 stream with its datagrams
+// (naive.H3): h3serve's, for internal/naive does not import quic-go.
+func naiveH3(ctx context.Context, w http.ResponseWriter) (func() naive.H3Stream, bool) {
+	take, ok := h3serve.Datagrams(ctx, w)
+	if !ok {
+		return nil, false
+	}
+	return func() naive.H3Stream { return take() }, true
 }
 
 // parseResetKey reads a key of stateless resets from its text: 32 bytes,
