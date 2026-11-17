@@ -4,16 +4,18 @@ name: Release
 # release with the notes from .github/release-notes/<tag>.md. Each archive
 # carries the data plane as well: Xray built from the pinned commit of our
 # fork and niko-server checked against the hashes pinned in
-# deploy/versions.env, so one signature covers everything bootstrap installs. Runs on a pushed
-# tag v*, or by hand (Actions -> Release -> Run workflow) with the tag as input:
-# the release then creates the tag on the commit it was run from.
+# deploy/versions.env, so one signature covers everything bootstrap installs. Runs on the
+# owner's pushed tag v*: the tag ruleset lets only the owner create one. By
+# hand (Actions -> Release -> Run workflow, the tag as input) it only runs
+# again for a tag already on the commit it is run from (a publish that
+# failed); job tag checks both before anything else.
 # The archives also carry IPinfo Lite, the AS database of the client
 # summaries (R4-21, CC BY-SA 4.0, attribution in NOTICE).
 # Beside the node's archives, rayctl alone for the administrator's own
 # machine (rayctl-darwin-*, rayctl-freebsd-*), in the same signed SHA256SUMS:
 # a node and bootstrap.sh read their own line of it by name.
-# Needs the repository secrets MINISIGN_SECRET_KEY and IPINFO_TOKEN
-# (docs/RELEASE.md).
+# Needs MINISIGN_SECRET_KEY in the environment release and IPINFO_TOKEN in
+# release-data (docs/RELEASE.md).
 on:
   push:
     tags: ["v*"]
@@ -30,7 +32,35 @@ permissions:
   contents: read
 
 jobs:
+  tag:
+    # Before CI and the approvals, not after: the tag is there, on this
+    # commit (only the owner creates v* tags), and no release of it is yet.
+    # The Releases page publishes one, empty, when it makes the tag, and that
+    # becomes the latest bootstrap.sh installs (v0.31.0: bootstrap.sh found
+    # no archive until it was deleted).
+    runs-on: ubuntu-24.04
+    steps:
+      - name: The tag on this commit, and no release of it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad tag $TAG"; exit 1; }
+          sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/refs/tags/${TAG}" --jq .sha 2>/dev/null) || sha=
+          if [ -z "$sha" ]; then
+            echo "no tag $TAG: only the owner creates v* tags (the tag ruleset), on a commit of main, with"
+            echo "  git tag $TAG $GITHUB_SHA && git push origin $TAG"
+            echo "and the release runs on that push (not the Releases page: it publishes an empty release)"
+            exit 1
+          fi
+          [ "$sha" = "$GITHUB_SHA" ] || { echo "tag $TAG is on $sha, this run on $GITHUB_SHA"; exit 1; }
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --silent 2>/dev/null; then
+            echo "a release $TAG is there already (the Releases page publishes one with its tag):"
+            echo "delete the release, keep the tag, and re-run"
+            exit 1
+          fi
+
   ci:
+    needs: tag
     # The whole CI on the commit being released: nothing is published unless
     # it is green. v0.16.0 went out from a green pull request while CI on
     # main, run beside the release, was red.
@@ -39,6 +69,7 @@ jobs:
 
   asn:
     # One download for both archives.
+    needs: tag
     runs-on: ubuntu-24.04
     # IPINFO_TOKEN lives in this environment, open to v* tags and main only
     # (docs/RELEASE.md): a workflow on any other branch cannot read it.
@@ -73,12 +104,6 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
-      - name: Tag
-        run: |
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad tag $TAG"; exit 1; }
-          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
-            [ "${{ github.event_name }}" = push ] || { echo "tag $TAG already exists"; exit 1; }
-          fi
       - name: Build
         env:
           CGO_ENABLED: "0"
@@ -149,6 +174,7 @@ jobs:
     # from the administrator's own machine (docs/18, §2). Built here from
     # Linux, without cgo, as CI's rayctl job builds them on every commit. Not
     # notarised by Apple and never run in this workflow.
+    needs: tag
     runs-on: ubuntu-24.04
     strategy:
       matrix:
