@@ -5,10 +5,11 @@ name: Release
 # carries the data plane as well: Xray built from the pinned commit of our
 # fork and niko-server checked against the hashes pinned in
 # deploy/versions.env, so one signature covers everything bootstrap installs. Runs on the
-# owner's pushed tag v*: the tag ruleset lets only the owner create one. By
-# hand (Actions -> Release -> Run workflow, the tag as input) it only runs
-# again for a tag already on the commit it is run from (a publish that
-# failed); job tag checks both before anything else.
+# owner's tag v* (the tag ruleset lets only the owner create one): made on
+# the Releases page (Draft a new release, a new tag on main, Publish) or
+# pushed with git. By hand (Actions -> Release -> Run workflow, the tag as
+# input) it only runs again for a tag already on the commit it is run from
+# (a publish that failed); job tag checks both before anything else.
 # The archives also carry IPinfo Lite, the AS database of the client
 # summaries (R4-21, CC BY-SA 4.0, attribution in NOTICE).
 # Beside the node's archives, rayctl alone for the administrator's own
@@ -34,29 +35,43 @@ permissions:
 jobs:
   tag:
     # Before CI and the approvals, not after: the tag is there, on this
-    # commit (only the owner creates v* tags), and no release of it is yet.
-    # The Releases page publishes one, empty, when it makes the tag, and that
-    # becomes the latest bootstrap.sh installs (v0.31.0: bootstrap.sh found
-    # no archive until it was deleted).
+    # commit (only the owner creates v* tags), and no release of it with
+    # files is yet. The Releases page publishes a release, empty, when it
+    # makes the tag, and that became the latest bootstrap.sh installs
+    # (v0.31.0: no archive until it was deleted). Such an empty release is
+    # deleted here, seconds after it is made, the tag kept; this run
+    # publishes the real one. Made as a pre-release it is never the latest
+    # even for those seconds.
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - name: The tag on this commit, and no release of it
+      - name: The tag on this commit; an empty release of it out of the way
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad tag $TAG"; exit 1; }
           sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/refs/tags/${TAG}" --jq .sha 2>/dev/null) || sha=
           if [ -z "$sha" ]; then
-            echo "no tag $TAG: only the owner creates v* tags (the tag ruleset), on a commit of main, with"
+            echo "no tag $TAG: only the owner makes v* tags (the tag ruleset), on a commit of main:"
+            echo "on the Releases page (Draft a new release, tag $TAG, target main, Publish) or with"
             echo "  git tag $TAG $GITHUB_SHA && git push origin $TAG"
-            echo "and the release runs on that push (not the Releases page: it publishes an empty release)"
+            echo "and the release runs on it"
             exit 1
           fi
           [ "$sha" = "$GITHUB_SHA" ] || { echo "tag $TAG is on $sha, this run on $GITHUB_SHA"; exit 1; }
-          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --silent 2>/dev/null; then
-            echo "a release $TAG is there already (the Releases page publishes one with its tag):"
-            echo "delete the release, keep the tag, and re-run"
-            exit 1
+          # A published release of the tag (drafts have none): with files it
+          # is out already; without, it is the Releases page's.
+          rel=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq '"\(.id) \(.assets | length)"' 2>/dev/null) || rel=
+          if [ -n "$rel" ]; then
+            read -r id files <<< "$rel"
+            if [ "$files" != 0 ]; then
+              echo "release $TAG is out already, with $files files"
+              exit 1
+            fi
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${id}"
+            echo "::notice::the empty release $TAG of the Releases page deleted, the tag kept: this run publishes $TAG"
           fi
 
   ci:
