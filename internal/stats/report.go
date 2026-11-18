@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -30,7 +32,7 @@ type Report struct {
 	Node    Node       `json:"node"`
 	Host    *HostStats `json:"host,omitempty"`
 	// Services by kind and number, never by name.
-	Services []Service `json:"services,omitempty"`
+	Services []Service `json:"services"`
 	// Devices whose client the node recorded since ClientsSince, by
 	// product and version (client-min-v1 §5). The node records a client
 	// that did not change at most hourly, so the span is two hours at
@@ -136,9 +138,16 @@ var runID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 // '_', at most 64 (the client's test run, RayTestRun).
 func ValidRun(s string) bool { return runID.MatchString(s) }
 
+// Clean maps a series as rayd sampled it, with the operator's names, to
+// what a report shows (spec/stats-v1.md §2.4): its labels, or ok false to
+// leave it out. Series it maps alike are summed, after each one's increase
+// is taken: one that goes away (a site deleted, its loop gone) takes no
+// count back.
+type Clean func(name string, labels []string) (out []string, ok bool)
+
 // Report is the window of the last `last` (MinWindow to MaxWindow) up to
-// a sample taken now.
-func (s *Sampler) Report(ctx context.Context, last time.Duration) (Report, error) {
+// a sample taken now, its series mapped by clean.
+func (s *Sampler) Report(ctx context.Context, last time.Duration, clean Clean) (Report, error) {
 	if last < MinWindow || last > MaxWindow {
 		return Report{}, fmt.Errorf("stats: the window is %v to %v, not %v", MinWindow, MaxWindow, last)
 	}
@@ -147,7 +156,14 @@ func (s *Sampler) Report(ctx context.Context, last time.Duration) (Report, error
 		return Report{}, err
 	}
 	s.mu.Lock()
-	held := slices.Clone(s.samples)
+	// Only the samples taken before this one: a Take that ended while this
+	// sample was being collected comes after it in the ring.
+	var held []Sample
+	for _, sm := range s.samples {
+		if sm.At.Before(end.At) {
+			held = append(held, sm)
+		}
+	}
 	series := make(map[string]*meta, len(s.series))
 	for k, m := range s.series {
 		series[k] = m
@@ -156,7 +172,7 @@ func (s *Sampler) Report(ctx context.Context, last time.Duration) (Report, error
 	s.mu.Unlock()
 
 	r := Report{V: Version, Kind: Kind, Side: "node", Generated: end.At.UTC(), To: end.At.UTC(), Asked: last.String(),
-		Counters: []Counter{}, Gauges: []Gauge{}, Clients: []ClientSeen{}}
+		Services: []Service{}, Counters: []Counter{}, Gauges: []Gauge{}, Clients: []ClientSeen{}}
 	from := end.At.Add(-last)
 	// The window's samples: the last one at or before from, and every one
 	// after it; the sample taken now closes them.
@@ -178,7 +194,7 @@ func (s *Sampler) Report(ctx context.Context, last time.Duration) (Report, error
 			r.Why = append(r.Why, "fewer samples than the window")
 		}
 	}
-	window := append(held[first:], end)
+	window := append(slices.Clone(held[first:]), end)
 	r.From = window[0].At.UTC()
 	for i := 1; i < len(window); i++ {
 		if gap := window[i].At.Sub(window[i-1].At); gap > 3*s.every() {
@@ -188,77 +204,124 @@ func (s *Sampler) Report(ctx context.Context, last time.Duration) (Report, error
 	}
 
 	// Every series the window read, even one the last read missed (a
-	// stats socket that timed out this minute).
-	union := map[string]bool{}
+	// stats socket that timed out this minute), and what it shows as.
+	type shown struct {
+		name   string
+		labels []string
+	}
+	cleanKey := map[string]string{} // raw key -> shown key
+	shownOf := map[string]shown{}
 	for _, sm := range window {
 		for k := range sm.Values {
-			union[k] = true
+			if _, done := cleanKey[k]; done {
+				continue
+			}
+			m := series[k]
+			if m == nil {
+				m = metaOfKey(k)
+			}
+			labels, ok := clean(m.name, m.labels)
+			if !ok {
+				cleanKey[k] = ""
+				continue
+			}
+			ck := Point{Name: m.name, Labels: labels}.Key()
+			cleanKey[k], shownOf[ck] = ck, shown{m.name, labels}
 		}
 	}
-	keys := make([]string, 0, len(union))
-	for k := range union {
-		if _, ok := series[k]; !ok {
-			series[k] = metaOfKey(k)
-		}
-		keys = append(keys, k)
+
+	// Counters: each raw series' increase, then summed by what it shows
+	// as. A series not read before its first reading in the window counts
+	// from that reading (a counter of the kernel's since boot read late
+	// would bring all of it otherwise).
+	type counted struct {
+		delta            float64
+		reset, seenStart bool
 	}
-	slices.Sort(keys)
-	resets := 0
-	for _, k := range keys {
-		m := series[k]
-		labels := labelMap(m.labels)
-		if (Point{Name: m.name}).Counter() {
-			c := Counter{Name: m.name, Labels: labels}
-			prev, seen := window[0].Values[k]
-			// Not read at the window's start: its last reading before.
-			for i := first - 1; !seen && i >= 0; i-- {
-				prev, seen = held[i].Values[k]
-			}
-			c.New = !seen
-			for _, sm := range window[1:] {
-				v, ok := sm.Values[k]
-				if !ok {
-					continue // not read this minute: the next reading counts from the last
-				}
-				switch {
-				case !seen:
-					c.Delta += v // it began within the window
-				case v >= prev:
-					c.Delta += v - prev
-				default:
-					c.Delta += v // went back: counted again from zero
-					c.Reset = true
-				}
-				prev, seen = v, true
-			}
-			if c.Reset {
-				resets++
-			}
-			r.Counters = append(r.Counters, c)
+	counters := map[string]*counted{}
+	gaugeKeys := map[string]bool{}
+	for k, ck := range cleanKey {
+		if ck == "" {
 			continue
 		}
-		g := Gauge{Name: m.name, Labels: labels, Range: Range{Min: math.Inf(1), Max: math.Inf(-1)}}
-		for _, sm := range window {
-			if v, ok := sm.Values[k]; ok {
-				g.End, g.Min, g.Max = v, min(g.Min, v), max(g.Max, v)
+		if !strings.HasSuffix(shownOf[ck].name, "_total") {
+			gaugeKeys[ck] = true
+			continue
+		}
+		c := counters[ck]
+		if c == nil {
+			c = &counted{}
+			counters[ck] = c
+		}
+		prev, seen := window[0].Values[k]
+		for i := first - 1; !seen && i >= 0; i-- {
+			prev, seen = held[i].Values[k]
+		}
+		c.seenStart = c.seenStart || seen
+		for _, sm := range window[1:] {
+			v, ok := sm.Values[k]
+			if !ok {
+				continue // not read this minute: the next reading counts from the last
+			}
+			switch {
+			case !seen: // its first reading: where it counts from
+			case v >= prev:
+				c.delta += v - prev
+			default:
+				c.delta += v // went back: counted again from zero
+				c.reset = true
+			}
+			prev, seen = v, true
+		}
+	}
+	resets := 0
+	for _, ck := range slices.Sorted(maps.Keys(counters)) {
+		c, sh := counters[ck], shownOf[ck]
+		if c.reset {
+			resets++
+		}
+		r.Counters = append(r.Counters, Counter{Name: sh.name, Labels: labelMap(sh.labels), Delta: c.delta, Reset: c.reset, New: !c.seenStart})
+	}
+	// Gauges: summed by what they show as in each sample, then the last,
+	// least and most of those sums.
+	ranges := make(map[string]*Range, len(gaugeKeys))
+	for ck := range gaugeKeys {
+		ranges[ck] = &Range{Min: math.Inf(1), Max: math.Inf(-1)}
+	}
+	for _, sm := range window {
+		sums := map[string]float64{}
+		for k, v := range sm.Values {
+			if ck := cleanKey[k]; gaugeKeys[ck] {
+				sums[ck] += v
 			}
 		}
-		r.Gauges = append(r.Gauges, g)
+		for ck, sum := range sums {
+			g := ranges[ck]
+			g.End, g.Min, g.Max = sum, min(g.Min, sum), max(g.Max, sum)
+		}
+	}
+	for _, ck := range slices.Sorted(maps.Keys(gaugeKeys)) {
+		sh := shownOf[ck]
+		r.Gauges = append(r.Gauges, Gauge{Name: sh.name, Labels: labelMap(sh.labels), Range: *ranges[ck]})
 	}
 	if resets > 0 {
 		r.Partial = true
 		r.Why = append(r.Why, fmt.Sprintf("%d counters went back (a process restarted): their increase misses up to a sample each", resets))
 	}
-	r.Host = hostStats(window)
+	r.Host = hostStats(window, s.every())
 	return r, nil
 }
 
 // hostStats is the host over the window's samples; nil when none read it.
-func hostStats(window []Sample) *HostStats {
+// A step shorter than half of every (the report's own sample just after a
+// minute's) counts in the mean, not in the end, least and most: over a few
+// milliseconds the share is coarse and mostly rayd's own collecting.
+func hostStats(window []Sample, every time.Duration) *HostStats {
 	var hs []Host
+	var at []time.Time
 	for _, sm := range window {
 		if sm.Host.OK {
-			hs = append(hs, sm.Host)
+			hs, at = append(hs, sm.Host), append(at, sm.At)
 		}
 	}
 	if len(hs) == 0 {
@@ -292,14 +355,20 @@ func hostStats(window []Sample) *HostStats {
 		}
 		db, dt := b.CPUBusy-a.CPUBusy, b.CPUTotal-a.CPUTotal
 		busy, total = busy+db, total+dt
+		out.Net = out.Net.add(netStep(a.Net, b.Net))
+		if !at[i].IsZero() && !at[i-1].IsZero() && at[i].Sub(at[i-1]) < every/2 {
+			continue
+		}
 		pct := round1(100 * float64(db) / float64(dt))
 		cpu.Min, cpu.Max, cpu.End = min(cpu.Min, pct), max(cpu.Max, pct), pct
 		steps++
-		out.Net = out.Net.add(netStep(a.Net, b.Net))
 	}
-	if steps > 0 {
+	if total > 0 {
 		avg := round1(100 * float64(busy) / float64(total))
 		cpu.Avg = &avg
+		if steps == 0 {
+			cpu.Min, cpu.Max, cpu.End = avg, avg, avg
+		}
 		out.CPUBusyPct = cpu
 	}
 	return out

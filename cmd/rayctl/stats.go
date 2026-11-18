@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -59,12 +60,16 @@ func (c *cli) stats(ctx context.Context, args []string) error {
 		r.Node.NikoServer = binaryVersion(deploy.DefaultBinaries.NikoServer)
 		r.Node.Xray = binaryVersion(deploy.DefaultBinaries.Xray)
 		if os.Geteuid() == 0 {
-			if units, err := c.journalUnits(ctx); err == nil {
+			units, err := c.journalUnits(ctx)
+			if err == nil {
 				r.Journal, err = journalCounts(ctx, r.From, r.To, units)
-				if err != nil {
-					r.Partial = true
-					r.Why = append(r.Why, "the journal unread: "+err.Error())
-				}
+			}
+			if err != nil {
+				// The error to the operator only: journalctl's names paths
+				// with the machine's ID.
+				fmt.Fprintln(os.Stderr, "rayctl stats: the journal not counted:", err)
+				r.Partial = true
+				r.Why = append(r.Why, "the journal not counted (rayctl said why on its stderr)")
 			}
 		}
 	}
@@ -85,11 +90,18 @@ func (c *cli) stats(ctx context.Context, args []string) error {
 }
 
 // binaryVersion is a binary's "version" line, cut to its first two words
-// ("niko-server v0.18.3", "Xray 26.11.9"); "" when it does not run.
+// ("niko-server v0.18.3", "Xray 26.11.9"); "" when it does not run or
+// fails: an error's text is no version.
 func binaryVersion(path string) string {
-	line := firstLine(path, "version")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "version").Output() //nolint:gosec // G204: the node's own binaries
+	if err != nil {
+		return ""
+	}
+	line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
 	f := strings.Fields(line)
-	if len(f) < 2 || strings.Contains(line, "no such file") || strings.Contains(line, "not found") {
+	if len(f) < 2 {
 		return ""
 	}
 	return f[0] + " " + f[1]
@@ -122,7 +134,7 @@ var journalUnitGlobs = []string{"rayd", "rayspa", "niko-*"}
 // `from` to `to`, by unit (as units names it; another unit as "other")
 // and priority: no text of any entry.
 func journalCounts(ctx context.Context, from, to time.Time, units map[string]string) ([]stats.JournalCount, error) {
-	args := []string{"--no-pager", "-o", "json", "--output-fields=_SYSTEMD_UNIT,PRIORITY", "-p", "warning",
+	args := []string{"--no-pager", "-o", "json", "--output-fields=_SYSTEMD_UNIT,UNIT,OBJECT_SYSTEMD_UNIT,COREDUMP_UNIT,PRIORITY", "-p", "warning",
 		"--since", "@" + strconv.FormatInt(from.Unix(), 10), "--until", "@" + strconv.FormatInt(to.Unix()+1, 10)}
 	for _, u := range journalUnitGlobs {
 		args = append(args, "-u", u)
@@ -154,15 +166,20 @@ func countJournal(r io.Reader, units map[string]string) ([]stats.JournalCount, e
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for sc.Scan() {
 		var e struct {
-			Unit     string `json:"_SYSTEMD_UNIT"`
-			Priority string `json:"PRIORITY"`
+			Unit       string `json:"_SYSTEMD_UNIT"`
+			AboutUnit  string `json:"UNIT"`                // systemd's own lines about a unit (its failures)
+			ObjectUnit string `json:"OBJECT_SYSTEMD_UNIT"` // lines of others about it
+			CoreUnit   string `json:"COREDUMP_UNIT"`       // its core dumps
+			Priority   string `json:"PRIORITY"`
 		}
 		if json.Unmarshal(sc.Bytes(), &e) != nil {
 			continue
 		}
-		unit, ok := units[e.Unit]
+		// What the entry is about: journalctl -u matches all four.
+		of := cmp.Or(e.CoreUnit, e.ObjectUnit, e.AboutUnit, e.Unit)
+		unit, ok := units[of]
 		if !ok {
-			unit = journalUnitOther(e.Unit)
+			unit = journalUnitOther(of)
 		}
 		counts[[2]string{unit, priorityName(e.Priority)}]++
 	}

@@ -40,7 +40,12 @@ func TestGetStats(t *testing.T) {
 	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice"})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.CreateDevice(ctx, connect.NewRequest(&nodev1.CreateDeviceRequest{User: "alice", Name: "phone"})); err != nil {
+	dev, err := c.CreateDevice(ctx, connect.NewRequest(&nodev1.CreateDeviceRequest{User: "alice", Name: "phone"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A device names its client itself: free text in the pre-release.
+	if err := srv.Store.SetDeviceClient(ctx, dev.Msg.Device.Id, "niko/1.59.0-secret.1", time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	srv.Paths.Run = t.TempDir()
@@ -130,6 +135,9 @@ func TestGetStats(t *testing.T) {
 	}
 	if !front {
 		t.Error("no front counters")
+	}
+	if len(r.Clients) != 1 || r.Clients[0] != (stats.ClientSeen{Product: "niko", Version: "1.59.0-other", Devices: 1}) {
+		t.Errorf("clients: %+v", r.Clients)
 	}
 	var ids []string
 	for _, s := range r.Services {

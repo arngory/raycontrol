@@ -22,28 +22,40 @@ import (
 	"github.com/arngory/raycontrol/internal/sub"
 )
 
-// statsLabels are the labels a stats sample keeps (spec/stats-v1.md §3):
-// service and zone as numbers, a loop by its kind, the rest as the
-// metrics have them. A label not listed is dropped, its series summed: a
-// new metric's label stays out of the reports until it is looked at.
+// statsLabels are the labels a report keeps (spec/stats-v1.md §2.4):
+// service and zone as numbers, a loop by its kind, a client's product and
+// version as clientLabel has them, the rest as the metrics have them. A
+// label not listed is dropped, its series summed with their likes: a new
+// metric's label stays out of the reports until it is looked at.
 var statsLabels = map[string]bool{
 	"service": true, "zone": true, "loop": true, "kind": true, "state": true, "role": true, "enabled": true,
 	"product": true, "version": true, "reason": true, "result": true, "direction": true, "outcome": true,
 }
 
-// StatsPoints is the metrics as the stats sampler keeps them: no Unix times
-// and no version (the report has its own), services as kind#n (their
-// order of creation among the services of that kind), a zone as its
-// service's and its number there, a loop by the word that names its kind.
+// StatsPoints is the metrics as the stats sampler keeps them, in rayd's
+// memory only: no Unix times and no version (the report has its own), the
+// labels as they are. statsClean makes them fit to show when a report is
+// built, so that a series is followed by its own name across the window.
 func (s *Server) StatsPoints(ctx context.Context, now time.Time) ([]stats.Point, error) {
 	m, err := s.collect(ctx, now)
 	if err != nil {
 		return nil, err
 	}
-	services, err := s.Store.ListServices(ctx)
-	if err != nil {
-		return nil, err
+	out := make([]stats.Point, 0, len(m.points))
+	for _, p := range m.points {
+		if p.Name == "raycontrol_info" || strings.HasSuffix(p.Name, "_seconds") {
+			continue
+		}
+		out = append(out, p)
 	}
+	return out, nil
+}
+
+// statsClean maps a sampled series to what a report shows, by the services
+// there are now: a service as kind#n (its order of creation among those of
+// its kind), a zone as its service's and its number there, a loop by the
+// word that names its kind; a service or zone gone since as "other".
+func statsClean(services []store.Service) stats.Clean {
 	ids := serviceIDs(services)
 	zones := map[string]string{}
 	for _, svc := range services {
@@ -51,14 +63,10 @@ func (s *Server) StatsPoints(ctx context.Context, now time.Time) ([]stats.Point,
 			zones[z] = fmt.Sprintf("%s/zone%d", ids[svc.Name], i+1)
 		}
 	}
-	out := make([]stats.Point, 0, len(m.points))
-	for _, p := range m.points {
-		if p.Name == "raycontrol_info" || strings.HasSuffix(p.Name, "_seconds") {
-			continue
-		}
-		labels := make([]string, 0, len(p.Labels))
-		for i := 0; i+1 < len(p.Labels); i += 2 {
-			name, value := p.Labels[i], p.Labels[i+1]
+	return func(_ string, raw []string) ([]string, bool) {
+		labels := make([]string, 0, len(raw))
+		for i := 0; i+1 < len(raw); i += 2 {
+			name, value := raw[i], raw[i+1]
 			if !statsLabels[name] {
 				continue
 			}
@@ -69,12 +77,42 @@ func (s *Server) StatsPoints(ctx context.Context, now time.Time) ([]stats.Point,
 				value = cmp.Or(zones[value], "other")
 			case "loop":
 				value, _, _ = strings.Cut(value, " ")
+			case "product":
+				value = clientProduct(value)
+			case "version":
+				value = clientVersion(value)
 			}
 			labels = append(labels, name, value)
 		}
-		out = append(out, stats.Point{Name: p.Name, Labels: labels, Value: p.Value})
+		return labels, true
 	}
-	return out, nil
+}
+
+// clientProduct is a client's product as a report names it: one raycontrol
+// knows, or "other". A device names its own; a report passed on carries
+// none of a device's free text.
+func clientProduct(p string) string {
+	switch p {
+	case "niko", "rayctl", "-":
+		return p
+	}
+	return "other"
+}
+
+// clientVersion is a client's version without its pre-release's text,
+// which a device chooses: "1.59.0-pre.20261120.1" is "1.59.0-pre", one
+// whose pre-release is not alpha, beta, rc or pre "1.59.0-other".
+func clientVersion(v string) string {
+	core, pre, found := strings.Cut(v, "-")
+	if !found {
+		return core
+	}
+	word, _, _ := strings.Cut(pre, ".")
+	switch word {
+	case "alpha", "beta", "rc", "pre":
+		return core + "-" + word
+	}
+	return core + "-other"
 }
 
 // serviceIDs is stats.ServiceIDs of the store's services.
@@ -98,7 +136,11 @@ func (s *Server) GetStats(ctx context.Context, req *connect.Request[nodev1.GetSt
 	if last < stats.MinWindow || last > stats.MaxWindow {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("the window is %v to %v", stats.MinWindow, stats.MaxWindow))
 	}
-	r, err := s.Stats.Report(ctx, last)
+	services, err := s.Store.ListServices(ctx)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	r, err := s.Stats.Report(ctx, last, statsClean(services))
 	if errors.Is(err, stats.ErrNoSamples) {
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("rayd has no sample yet: ask again in a minute"))
 	}
@@ -115,10 +157,6 @@ func (s *Server) GetStats(ctx context.Context, req *connect.Request[nodev1.GetSt
 		r.Node.RaydUptimeS = int64(now.Sub(s.Started).Seconds())
 	}
 
-	services, err := s.Store.ListServices(ctx)
-	if err != nil {
-		return nil, toConnect(err)
-	}
 	ids := serviceIDs(services)
 	for _, svc := range services {
 		out := stats.Service{ID: ids[svc.Name], Kind: svc.Kind, Enabled: svc.Enabled}
@@ -147,12 +185,16 @@ func (s *Server) GetStats(ctx context.Context, req *connect.Request[nodev1.GetSt
 	if err != nil {
 		return nil, toConnect(err)
 	}
+	seen := map[[2]string]int{}
 	for _, c := range clients {
 		product, version, _ := strings.Cut(c.Client, "/")
 		if product == "" {
 			continue // never named one
 		}
-		r.Clients = append(r.Clients, stats.ClientSeen{Product: product, Version: version, Devices: c.Devices})
+		seen[[2]string{clientProduct(product), clientVersion(version)}] += c.Devices
+	}
+	for k, n := range seen {
+		r.Clients = append(r.Clients, stats.ClientSeen{Product: k[0], Version: k[1], Devices: n})
 	}
 	stats.SortClients(r.Clients)
 

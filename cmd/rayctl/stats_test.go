@@ -16,6 +16,8 @@ func TestCountJournal(t *testing.T) {
 		`{"_SYSTEMD_UNIT":"niko-my-naive.service","PRIORITY":"3"}`,
 		`{"_SYSTEMD_UNIT":"niko-front.service","PRIORITY":"4"}`,
 		`{"_SYSTEMD_UNIT":"niko-gone.service","PRIORITY":"2"}`,
+		`{"_SYSTEMD_UNIT":"init.scope","UNIT":"niko-my-naive.service","PRIORITY":"4"}`,
+		`{"_SYSTEMD_UNIT":"systemd-coredump@0.service","COREDUMP_UNIT":"rayd.service","PRIORITY":"2"}`,
 		`not json`,
 	}, "\n")
 	got, err := countJournal(strings.NewReader(in), map[string]string{"rayd.service": "rayd", "niko-my-naive.service": "naive#1"})
@@ -26,7 +28,7 @@ func TestCountJournal(t *testing.T) {
 	for _, c := range got {
 		s = append(s, c.Unit+"/"+c.Priority+"="+string(rune('0'+c.Entries)))
 	}
-	if want := "naive#1/err=1 niko-front/warning=1 other/crit=1 rayd/err=1 rayd/warning=2"; strings.Join(s, " ") != want {
+	if want := "naive#1/err=1 naive#1/warning=1 niko-front/warning=1 other/crit=1 rayd/crit=1 rayd/err=1 rayd/warning=2"; strings.Join(s, " ") != want {
 		t.Fatalf("%v, want %s", s, want)
 	}
 }
