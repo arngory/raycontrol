@@ -97,7 +97,7 @@ func sshPortResult(sshd []int, admitted map[int][]string) hostcheck.Result {
 	p := missing[0]
 	res.Fix = fmt.Sprintf("rayctl service add ssh ssh-%d -settings '{\"ports\":[\"tcp/%d\"]}', give it to the users who knock for SSH "+
 		"(rayctl user services emergency ssh,ssh-%d: the list whole), then rayctl apply; keep the old port in sshd until a new "+
-		"session on %d gets in (docs/10-quickstart-debian13.md §7); or put sshd back on %s", p, p, p, p, cmpPorts(ports))
+		"session on %d gets in (docs/guide/quickstart-debian13.md §7); or put sshd back on %s", p, p, p, p, cmpPorts(ports))
 	return res
 }
 

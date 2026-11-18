@@ -1,5 +1,5 @@
 // Package summary is the node's side of the client summaries
-// (docs/08-decisions.md, R4-21; docs/spec/probe-v1.md §6): with the user's
+// (docs/decisions.md, R4-21; docs/spec/probe-v1.md §6): with the user's
 // consent a client tells the node, once a day per network, how its profiles
 // fared there, in coarse buckets. The node keeps counters by day, AS and
 // service for 30 days, and gives clients in a network with enough reports

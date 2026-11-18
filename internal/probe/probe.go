@@ -1,5 +1,5 @@
 // Package probe measures the channel between a device and the node
-// (docs/spec/probe-v1.md, docs/08-decisions.md R4-16): TCP down and up over
+// (docs/spec/probe-v1.md, docs/decisions.md R4-16): TCP down and up over
 // the subscription endpoint's HTTPS, with the server's view of the
 // connection (TCP_INFO), and a UDP echo on the same port number. A device
 // has one probe at a time, each up to 30 s, within a daily volume.

@@ -3,7 +3,7 @@
 // store, certbot certificate and port-knocking nftables table. The node
 // cannot run next to it: its Xray holds 443 and its table drops what the
 // node serves. Only what v0 put there goes, each item recognised by v0's
-// own markers; a backup comes first (docs/08-decisions.md, R4-26).
+// own markers; a backup comes first (docs/decisions.md, R4-26).
 package legacy
 
 import (

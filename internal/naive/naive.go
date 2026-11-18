@@ -1,5 +1,5 @@
 // Package naive serves NaiveProxy over HTTP/2 for the node's clients
-// (docs/08-decisions.md, R2-14): an authenticated CONNECT with naive's
+// (docs/decisions.md, R2-14): an authenticated CONNECT with naive's
 // padding opens a tunnel; anything else gets the site's answer, never 407.
 // TLS (1.3, X25519MLKEM768 only) is the caller's.
 package naive

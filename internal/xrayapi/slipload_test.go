@@ -28,7 +28,7 @@ import (
 )
 
 // TestSlipstreamLoad measures a slipstream service under load
-// (docs/14-capacity.md): SLIPSTREAM_LOAD clients (a list, like 1,8,32,64),
+// (docs/design/capacity.md): SLIPSTREAM_LOAD clients (a list, like 1,8,32,64),
 // each its own device with its own key, download through the niko-server
 // front and the server for SLIPSTREAM_LOAD_SECONDS (20) from a sink in
 // place of the inner stage, all on loopback. It logs the throughput, the

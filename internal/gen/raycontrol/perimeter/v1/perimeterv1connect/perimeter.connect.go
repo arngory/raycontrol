@@ -64,7 +64,7 @@ type PerimeterServiceClient interface {
 	// (spec/conn-limit-v1.md §6.3): at each switch and once a minute.
 	ReportGuard(context.Context, *connect.Request[v1.ReportGuardRequest]) (*connect.Response[v1.ReportGuardResponse], error)
 	// ReportGate tells rayd where rayspa's own table stands
-	// (docs/08-decisions.md, R4-40): at each change and every 30 s. rayd
+	// (docs/decisions.md, R4-40): at each change and every 30 s. rayd
 	// cannot read the kernel's table; a rayspa that follows the feed but
 	// cannot put its table in leaves the host open. An older rayspa sends
 	// none (rayd: unknown).
@@ -135,7 +135,7 @@ type PerimeterServiceHandler interface {
 	// (spec/conn-limit-v1.md §6.3): at each switch and once a minute.
 	ReportGuard(context.Context, *connect.Request[v1.ReportGuardRequest]) (*connect.Response[v1.ReportGuardResponse], error)
 	// ReportGate tells rayd where rayspa's own table stands
-	// (docs/08-decisions.md, R4-40): at each change and every 30 s. rayd
+	// (docs/decisions.md, R4-40): at each change and every 30 s. rayd
 	// cannot read the kernel's table; a rayspa that follows the feed but
 	// cannot put its table in leaves the host open. An older rayspa sends
 	// none (rayd: unknown).

@@ -276,7 +276,7 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 		return err
 	}
 	// Before anything changes: a host that cannot run a node is left as it
-	// was (docs/08-decisions.md, R4-24).
+	// was (docs/decisions.md, R4-24).
 	if err := hostCheck(ctx, os.Stdout, hostcheck.Options{Host: *host, Domain: *domain, Services: splitList(*services),
 		Ports: chosenPorts(choice)}, *checked, false); err != nil {
 		return err
@@ -319,7 +319,7 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 		return err
 	}
 	// Recorded before anything else changes: rayctl uninstall takes all of
-	// it back (docs/08-decisions.md, R4-2).
+	// it back (docs/decisions.md, R4-2).
 	for _, b := range []string{deploy.DefaultBinaries.Rayd, deploy.DefaultBinaries.Rayspa, "/usr/local/bin/rayctl"} {
 		if _, err := os.Stat(b); err == nil {
 			if err := h.Journal.Record(deploy.Change{Kind: deploy.ChangeBinary, Path: b}); err != nil {

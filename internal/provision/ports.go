@@ -33,7 +33,7 @@ func (s Span) String() string {
 }
 
 // PortChoice are the ports an operator chose at install (rayctl install
-// -ports, docs/18-platforms-and-hosts.md §6), for a provider's firewall or
+// -ports, docs/research/platforms-and-hosts.md §6), for a provider's firewall or
 // a NAT that forwards only some ports. What is not chosen is random as
 // before. They are chosen once: a client learns every one of them from
 // its device bundle, and a port that moved would strand it.

@@ -17,7 +17,7 @@ import (
 	"github.com/arngory/raycontrol/internal/provision"
 )
 
-// Yggdrasil (docs/08-decisions.md, R4-15): a niko-server backend behind
+// Yggdrasil (docs/decisions.md, R4-15): a niko-server backend behind
 // tcpmux. Clients peer with the node directly over a TLS link under a name
 // of the node's domain; the node's mesh address leads to inner on its exit
 // port. The node's key and the site's certificate key go through systemd's

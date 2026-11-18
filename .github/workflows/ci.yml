@@ -215,7 +215,7 @@ jobs:
 
   install:
     # A whole install through bootstrap.sh in a systemd container per system
-    # (docs/08-decisions.md, R2-1), with each family's usual host firewall,
+    # (docs/decisions.md, R2-1), with each family's usual host firewall,
     # checked from a second container like a client: SPA over UDP and TCP,
     # the subscription, revocation, firewall reloads, flush ruleset, reboot.
     # On debian13 first an install with the default services (REALITY
@@ -390,7 +390,7 @@ jobs:
 
   rayctl:
     # rayctl for the administrator's own machine: macOS and FreeBSD, built
-    # from Linux as the Release workflow builds them (docs/18, §2). The node
+    # from Linux as the Release workflow builds them (docs/research/platforms-and-hosts.md, §2). The node
     # stays Linux; what is Linux's alone sits in *_linux.go, and this job is
     # what keeps the other files building. Nothing runs here: the tests are
     # vetted, compiled and linked, not run (-exec true). On FreeBSD only

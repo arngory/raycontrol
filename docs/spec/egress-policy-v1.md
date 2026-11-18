@@ -5,7 +5,7 @@ niko-server, форк Xray и Niko ради неё не меняются (в т�
 
 Зачем:
 - Сейчас BitTorrent режет только выход Xray, по сниффингу открытого рукопожатия (`internal/render/render.go:1215`).
-  Hysteria2 и naive его пропускают. Порт 25 открыт везде ([15-traffic](../15-traffic.md) §1).
+  Hysteria2 и naive его пропускают. Порт 25 открыт везде ([traffic](../design/traffic.md) §1).
 - Спам на порт 25 и торренты — частые причины жалоб хостеру и чёрных списков для адреса ноды.
 - Нужен один выключатель на ноду, одинаковый для всех профилей. Как всё новое, он выключен по умолчанию.
 
@@ -146,7 +146,7 @@ chain bt_dht { @th,64,96 0x64313a6164323a696432303a counter drop comment "bittor
   поэтому raycontrol сначала закрепляет новый релиз (v0.15.0) в `deploy/versions.env`, и только потом render пишет
   поле в `backend.json` (`render.go:1555-1566`). `sniff.UTP` из sing-box (`common/sniff/bittorrent.go:56`) брать
   нельзя: он принимает любой тип пакета uTP, и WireGuard handshake initiation (148 байт, `01 00 00 00 …`) проходит
-  у него как uTP (проверено). Это отрезало бы WARP, который [15-traffic](../15-traffic.md) §2 советует вести через
+  у него как uTP (проверено). Это отрезало бы WARP, который [traffic](../design/traffic.md) §2 советует вести через
   Hysteria2. Строгая проверка ST_SYN форка Xray (`common/protocol/bittorrent/bittorrent.go:34`) так не ошибается.
 - **naive.** В `go.mod` нет ни sing, ни sing-box, а пакет `sniff` тянет `adapter` и `constant`, то есть весь
   sing-box в rayd. Нужен свой разбор, строк 60. CONNECT: первые 20 байт выгрузки на лету, уже после dial (ждать
@@ -173,7 +173,7 @@ raycontrol:
   (`internal/hostcheck/hostcheck.go:213`). Ядро её не берёт — отказ с причиной.
 - render: у Xray нет `sniffing` и правила `bittorrent` (`render.go:1199`, `1203`, `1215`, `1440`). Конфиг Xray от
   политики больше не зависит: Xray перезапускается один раз, при обновлении.
-- [15-traffic](../15-traffic.md) §1: вместо «BitTorrent режет только Xray» — ссылка сюда.
+- [traffic](../design/traffic.md) §1: вместо «BitTorrent режет только Xray» — ссылка сюда.
 
 naive, niko-server и форк Xray — без изменений, у Xray меняется только конфиг. Niko — ничего: поля о политике в
 подписке нет (§9), владелец может сказать о ней в описании ноды.
@@ -184,7 +184,7 @@ naive, niko-server и форк Xray — без изменений, у Xray ме�
   bittorrent-utp|bittorrent-tracker|bittorrent-dht"}` и `…_bytes_total`. Для TCP пакет ≈ попытка, для UDP —
   датаграмма.
 - Ни адресов, ни портов назначения, ни пользователей. В правилах нет `log`, и в окне отладки тоже: строка журнала
-  несла бы адрес назначения (P3, [09-observability](../09-observability.md) §2).
+  несла бы адрес назначения (P3, [observability](../design/observability.md) §2).
 
 ## 7. Тесты
 
@@ -214,7 +214,7 @@ naive, niko-server и форк Xray — без изменений, у Xray ме�
 - raycontrol v0.21.0 (номер предварительный): `rayctl egress`, цепочка `egress`, `Snapshot.egress`, Xray без
   сниффинга и правила BitTorrent, миграция `egress_bittorrent=on` для нод с Xray, метрики §6.
 - niko-server, Xray, Niko — ради политики без изменений.
-- Нода до v0.21.0: `rayctl egress` нет, BitTorrent режет только Xray, как в [15-traffic](../15-traffic.md).
+- Нода до v0.21.0: `rayctl egress` нет, BitTorrent режет только Xray, как в [traffic](../design/traffic.md).
 
 ## 9. Решения владельца
 

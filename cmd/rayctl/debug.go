@@ -11,7 +11,7 @@ import (
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 )
 
-// debug opens or closes the debug window (docs/09-observability.md §3):
+// debug opens or closes the debug window (docs/design/observability.md §3):
 // rayd, rayspa and niko-server log at debug level until it ends by
 // itself. Client addresses then reach the journal.
 func (c *cli) debug(ctx context.Context, sub string, args []string) error {

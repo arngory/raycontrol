@@ -117,7 +117,7 @@ func handshake(addr string, conf *tls.Config) string {
 // TLS, HTTP/2 and HTTP/1.1, for each answer of the site's but its pages.
 // What must differ is pinned too, so that a change of it is seen: naive
 // and DoH take TLS 1.3 with X25519MLKEM768 only, the site whatever a
-// browser of the last years offers (docs/15-traffic.md, "Одно лицо").
+// browser of the last years offers (docs/design/traffic.md, "Одно лицо").
 func TestNamesAlikeBeyondFirstFrames(t *testing.T) {
 	if (&naive.Server{}).HTTPServer().IdleTimeout != site.IdleTimeout ||
 		dohHTTPServer(noTokens(), nil, slog.New(slog.DiscardHandler)).IdleTimeout != site.IdleTimeout {
@@ -179,7 +179,7 @@ func TestNamesAlikeBeyondFirstFrames(t *testing.T) {
 			}
 			for _, name := range []string{"naive", "DoH"} {
 				if got := handshake(names[name], conf); !strings.HasPrefix(got, "refused") {
-					t.Errorf("%s: %s takes it (%s): the difference docs/15-traffic.md names is gone, say so there", probe, name, got)
+					t.Errorf("%s: %s takes it (%s): the difference docs/design/traffic.md names is gone, say so there", probe, name, got)
 				}
 			}
 		}

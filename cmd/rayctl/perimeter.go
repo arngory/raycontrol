@@ -147,7 +147,7 @@ var defaultPerimeterHost = perimeterHost{
 	show: showRayspa,
 }
 
-// perimeterResult says whether the perimeter is up (docs/08-decisions.md,
+// perimeterResult says whether the perimeter is up (docs/decisions.md,
 // R4-40): rayspa's table in the kernel, rayspa running. None before the
 // install, and none for anyone but root, who alone may read the table.
 // Without the table the host is open: that is a failure as loud as the
@@ -214,7 +214,7 @@ func perimeterResult(h perimeterHost) []hostcheck.Result {
 }
 
 // egressStatusLine is the egress policy in rayctl status. On a node of
-// rayd serve -supervise (docs/18-platforms-and-hosts.md) there is no
+// rayd serve -supervise (docs/research/platforms-and-hosts.md) there is no
 // perimeter unless one was started by hand, and the policy's local part
 // never covers rayd's UID, as which the data plane runs there: what is set
 // is not what the kernel does, and the line says so.

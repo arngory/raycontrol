@@ -197,7 +197,7 @@ func (s *Server) handle(r *http.Request) (Envelope, error) {
 	}
 	// The device's LAN consent (lan-v1 §1.1, §4.4): written when it
 	// changes, before the answer, which follows it. Not logged: it is the
-	// device's activity (09-observability §1); rayctl device list shows
+	// device's activity (observability §1); rayctl device list shows
 	// the state.
 	if on, said := lanConsent(r.Header); said {
 		changed, err := s.Store.SetDeviceLAN(ctx, dev.ID, on, store.LANShowEvery)
@@ -285,7 +285,7 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 	if err != nil {
 		// The others go out: a 404 for all of them kept the client on its
 		// last subscription, without the next keys of the rest (review).
-		// By the user's ID, not the name: logs carry no names (docs/09 §7).
+		// By the user's ID, not the name: logs carry no names (docs/design/observability.md §7).
 		s.Log.Warn("subscription: profiles left out", "user", u.ID, "err", err)
 		if len(profiles) == 0 {
 			return Envelope{}, err

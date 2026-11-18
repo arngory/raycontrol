@@ -21,8 +21,8 @@ bash bootstrap.sh -host <public address> -domain <domain> -services reality,dnst
 The script verifies the release signature and the host, installs, and closes every port but SPA, the DNS tunnels
 and SSH from your address. From the provider's console, `rayspa teardown` opens the host again.
 
-Step by step, from a bare server to a client bundle: [docs/10-quickstart-debian13.md](docs/10-quickstart-debian13.md)
-(Russian). Every command: [docs/cheatsheet.md](docs/cheatsheet.md).
+Step by step, from a bare server to a client bundle: [docs/guide/quickstart-debian13.md](docs/guide/quickstart-debian13.md)
+(Russian). Every command: [docs/guide/cheatsheet.md](docs/guide/cheatsheet.md).
 
 ## Use
 
@@ -55,7 +55,7 @@ go test ./...
 
 **По-русски.** raycontrol — управление самодостаточной прокси-нодой на одном Linux-хосте: пользователи, устройства
 и ключи, конфиги niko-server, файрвол со SPA, ротация, подписанная подписка и API для клиента Niko. Установка —
-три команды выше, пошагово — [docs/10-quickstart-debian13.md](docs/10-quickstart-debian13.md), все команды —
-[docs/cheatsheet.md](docs/cheatsheet.md), остальное — [docs/README.md](docs/README.md).
+три команды выше, пошагово — [docs/guide/quickstart-debian13.md](docs/guide/quickstart-debian13.md), все команды —
+[docs/guide/cheatsheet.md](docs/guide/cheatsheet.md), остальное — [docs/README.md](docs/README.md).
 
 License: GPL-3.0, see [LICENSE](LICENSE).

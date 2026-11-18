@@ -1,5 +1,5 @@
 // Command roots rebuilds internal/roots/roots.pem, the root list of the
-// node's own outbound TLS (docs/08-decisions.md, R4-41), from two PEM
+// node's own outbound TLS (docs/decisions.md, R4-41), from two PEM
 // files: Chrome's list and Mozilla's as the client's core embeds them,
 // both without the CAs CCADB places in China. The result is their
 // intersection by the SHA-256 of the DER SubjectPublicKeyInfo, each root

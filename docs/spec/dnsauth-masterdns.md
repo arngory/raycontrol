@@ -1,6 +1,6 @@
 # dnsauth-v1 для masterdns: метка ключа устройства
 
-Статус: согласовано, для raycontrol v0.14.0 ([`04-roadmap.md`](../04-roadmap.md)), станет §7
+Статус: согласовано, для raycontrol v0.14.0 ([`../roadmap.md`](../roadmap.md)), станет §7
 [`dnsauth-v1.md`](dnsauth-v1.md). Сверен с форком `c9c3ab3` (ресёрч 2026-11-06) и с ревью клиента (2026-11-06, правки
 §1, §2, §3, §6, §7); клиент принял §1–§7. Сделано: форк masterdns (`arngory/sing-box`, `third_party/masterdnsvpn`,
 коммит `34d5ef9`) — обе стороны протокола; niko-server v0.11.0 — проверка меток по своему файлу ключей
@@ -38,7 +38,7 @@ base36( nonce (12) || AES-GCM(K_svc, nonce)(кадр) || тег GCM (16) )
 клиент читает его без ключа (`transport.go:657-668`, `M/internal/client/tunnel_runtime.go:288`). Открыты SessionID,
 cookie, тип, stream, seq; в данных — `PO:` у PONG (`server_session.go:594-606`), `INV` у ERROR_DROP (`:608-621`),
 нули у MTU_DOWN (`server_utils.go:131-136`), ID и cookie в SESSION_ACCEPT. Данные потоков защищает `inner`. Поправка
-к `04-roadmap.md` («Открытых полей нет»): так только в запросах.
+к `../roadmap.md` («Открытых полей нет»): так только в запросах.
 
 Отсюда сегодня (дыра — в 16 битах, не в порядке проверок): ID и cookie — по байту, открыты в ответах и подбираются без
 ограничений. Неизвестный ID получает ERROR_DROP сразу, известный с чужим cookie — пустой ответ (счётчик промахов
@@ -197,7 +197,7 @@ raycontrol:
   `:779-784`.
 - `internal/provision/provision.go:290-291, 714, 725`: `auth` у masterdns.
 - `internal/sub/sub.go:297-303`: `niko-dnsauth=v1` у masterdns, если режим не `off`.
-- Доки: subscription-v1 §4 (`niko-dnsauth` — и masterdns), dnsauth-v1 §7, `04-roadmap.md` (ответы открыты), SYNC.
+- Доки: subscription-v1 §4 (`niko-dnsauth` — и masterdns), dnsauth-v1 §7, `../roadmap.md` (ответы открыты), SYNC.
 
 Клиент (Niko):
 - при `niko-dnsauth=v1` у профиля masterdns — K, как для dnstt (ключ устройства, `niko-node`, `niko-svc`), в

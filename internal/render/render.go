@@ -35,7 +35,7 @@ import (
 	"github.com/arngory/raycontrol/internal/store"
 )
 
-// Fixed UIDs (docs/08-decisions.md, R1-6).
+// Fixed UIDs (docs/decisions.md, R1-6).
 const (
 	FrontUID  = 9100
 	RaydUID   = 9190
@@ -142,7 +142,7 @@ type Model struct {
 	// held.
 	PinsSince, PinsAfter time.Time
 	// FrontTCP puts TCP 443 behind the niko-server front (tcpmux, v0.2,
-	// docs/08-decisions.md R2-15): REALITY on a unix socket with PROXY v2,
+	// docs/decisions.md R2-15): REALITY on a unix socket with PROXY v2,
 	// DoH and naive as passed sockets. Collect sets it; without it REALITY
 	// binds its TCP port itself (R2-7), and DoH and naive are not served.
 	FrontTCP bool
@@ -468,7 +468,7 @@ func (p Paths) socket(service, kind string) string { return path.Join(p.Run, ser
 
 // Credential is where a process finds a secret: systemd (root) copies it
 // from the rendered file into the service's runtime directory before the
-// start, readable by the service user only (docs/08-decisions.md, R2-9).
+// start, readable by the service user only (docs/decisions.md, R2-9).
 func (p Paths) Credential(service, name string) string {
 	return path.Join(p.Run, service, name)
 }

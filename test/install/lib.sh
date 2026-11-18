@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034 # used by the scripts that source this file
 # Shared helpers of the install tests. Sourced by prepare.sh, deps.sh, run.sh.
 
-# Base images of the tested systems (docs/08-decisions.md, R2-1).
+# Base images of the tested systems (docs/decisions.md, R2-1).
 declare -A BASE=(
 	[debian12]=debian:bookworm
 	[debian13]=debian:trixie

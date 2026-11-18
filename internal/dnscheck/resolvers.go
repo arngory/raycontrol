@@ -93,7 +93,7 @@ func (r Resolver) String() string {
 	return r.Name + " " + r.Addr.Addr().String()
 }
 
-// knownResolvers by name (docs/13-dns-resolvers.md).
+// knownResolvers by name (docs/research/dns-resolvers.md).
 var knownResolvers = []struct {
 	name     string
 	addrs    []string

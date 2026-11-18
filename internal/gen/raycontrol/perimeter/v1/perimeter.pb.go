@@ -1103,7 +1103,7 @@ type Egress struct {
 	// guard of the node's own addresses does not take them: rayd reaches the
 	// node itself.
 	Uids []uint32 `protobuf:"varint,3,rep,packed,name=uids,proto3" json:"uids,omitempty"`
-	// The node's own and local networks (docs/08-decisions.md, R4-38):
+	// The node's own and local networks (docs/decisions.md, R4-38):
 	// loopback, private, link-local, CGNAT, multicast, the metadata address.
 	// Absent (an older rayd): rayspa does not hold them back, as before.
 	Local         *Local `protobuf:"bytes,4,opt,name=local,proto3" json:"local,omitempty"`

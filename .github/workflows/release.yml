@@ -242,7 +242,7 @@ jobs:
 
   rayctl:
     # rayctl for macOS and FreeBSD: the remote administration and the probe
-    # from the administrator's own machine (docs/18, §2). Built here from
+    # from the administrator's own machine (docs/research/platforms-and-hosts.md, §2). Built here from
     # Linux, without cgo, as CI's rayctl job builds them in every run. Not
     # notarised by Apple and never run in this workflow.
     needs: tag

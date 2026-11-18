@@ -17,7 +17,7 @@ import (
 	"github.com/arngory/raycontrol/internal/store"
 )
 
-// REALITY keys rotate in epochs (docs/08-decisions.md, R4-7): the next set
+// REALITY keys rotate in epochs (docs/decisions.md, R4-7): the next set
 // (X25519 and ML-DSA-65 keys, the ML-KEM-768 seed of the second layer,
 // shortIds and, with the node's own site, the server name) goes into
 // subscriptions a lead time before the switch and replaces the current one

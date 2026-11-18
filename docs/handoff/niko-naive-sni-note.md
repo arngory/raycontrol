@@ -2,7 +2,7 @@
 
 Заметка для сессии клиента. С v0.29.0 нода меняет имя сервера naive (`sni`) эпохами и по команде оператора. Контракт
 не меняется: новое имя приходит в уже существующем `profiles[].next` — та же строка `naive+https://` с другим `sni`
-([subscription-v1](../spec/subscription-v1.md) §3, §4; разбор — [20-naive-sni-rotation.md](../20-naive-sni-rotation.md)).
+([subscription-v1](../spec/subscription-v1.md) §3, §4; разбор — [naive-sni-rotation.md](../research/naive-sni-rotation.md)).
 Клиенту ничего делать не нужно; ниже — что нода обещает и как получить такой `next` на стенде.
 
 ## 1. Что обещает нода

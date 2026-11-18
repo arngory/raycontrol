@@ -1,6 +1,6 @@
-# 04. Направления работ и этапы
+# Направления работ и этапы
 
-Статус: **принят** (редакция 3, по решениям из [08-decisions.md](08-decisions.md); ход работ — на 2026-11-03).
+Статус: **принят** (редакция 3, по решениям из [decisions.md](decisions.md); ход работ — на 2026-11-03).
 
 Работа идёт в двух местах:
 
@@ -12,7 +12,7 @@
 
 ## Направления raycontrol
 
-Находки аудита v0 (`L-xx`) — из [00-legacy-audit.md](00-legacy-audit.md).
+Находки аудита v0 (`L-xx`) — из [legacy-audit.md](research/legacy-audit.md).
 
 | WS | Направление | Что входит | Закрывает |
 |---|---|---|---|
@@ -127,7 +127,7 @@ systemd-юниты, хранение секретов через systemd credent
 
 - **Ротация учётных данных** пользователей с перекрытием через `next` подписки (R4-1).
 - **Удаление без следа** по журналу установки, проверено снимком системы на пяти дистрибутивах (R4-2).
-- **Журналы, отчёт для issue, обезличенные ID**, телеметрии нет (R4-3…R4-6, [09-observability.md](09-observability.md)).
+- **Журналы, отчёт для issue, обезличенные ID**, телеметрии нет (R4-3…R4-6, [observability.md](design/observability.md)).
 - **Ротация REALITY эпохами**: ключи, shortId и при self-steal имя (свой поддомен), `rayctl service rotate` (R4-7).
 - **Сайт-приманка без обслуживания**: пустой 404 по умолчанию, `403`/`silent`/`pages` по выбору (R4-8).
 - **Меньше ядра для чужих**: цепочка `early` до сборки фрагментов и conntrack, сетевой sysctl, предупреждения об
@@ -154,7 +154,7 @@ systemd-юниты, хранение секретов через systemd credent
 v0.26.0: пины ключа сертификата сайта в ссылках naive, `hy2-masq` и DoH ([spec/cert-pin-v1.md](spec/cert-pin-v1.md));
 честный connect у naive (`niko-ack`, [spec/naive-uot-v1.md](spec/naive-uot-v1.md) §4.1); обновление relay командой
 `rayctl update` на его хосте ([spec/node-update-v1.md](spec/node-update-v1.md) §5); `rayctl` для macOS и FreeBSD
-([18-platforms-and-hosts.md](18-platforms-and-hosts.md)).
+([platforms-and-hosts.md](research/platforms-and-hosts.md)).
 
 ~~Вторая волна — обновление relay по просьбе ноды.~~ **Сделано** (v0.28.0,
 [spec/relay-update-remote-v1.md](spec/relay-update-remote-v1.md), отличия от черновика — её §14): удавшееся обновление
@@ -166,7 +166,7 @@ v0.26.0: пины ключа сертификата сайта в ссылках
 контейнерах с systemd (её §12.2); на настоящем relay не запускалось.
 
 После второй волны — маршрутизация на ноде и наборы правил, по исследованию mihomo
-([19-mihomo-review.md](19-mihomo-review.md), решения владельца от 2026-11-14 — в его §10):
+([mihomo-review.md](research/mihomo-review.md), решения владельца от 2026-11-14 — в его §10):
 - наборы правил через ноду и правила администратора в подписке — черновик [spec/rules-v1.md](spec/rules-v1.md)
   (R4-44): репозиторий списков `arngory/niko-routes` с двумя ключами (списков — у человека, свежести — в CI),
   зеркало на ноде (какие наборы отдавать, выбирает администратор; по умолчанию выключено), поле `rules` с `enforce`
@@ -186,8 +186,8 @@ v0.26.0: пины ключа сертификата сайта в ссылках
   соединений (до работы — разрешить вопрос с D-12);
 - изучить, что и как можно сделать: выход на пользователя, одна DNS-политика ноды через `rayd`, пассивный триггер
   watchdog и замер keepalive на клиенте.
-- ~~ротация имени у naive по эпохам~~ — сделано, v0.29.0 ([08-decisions.md](08-decisions.md) R4-42,
-  [20-naive-sni-rotation.md](20-naive-sni-rotation.md) §8): по расписанию только при wildcard, вместе с REALITY того
+- ~~ротация имени у naive по эпохам~~ — сделано, v0.29.0 ([decisions.md](decisions.md) R4-42,
+  [naive-sni-rotation.md](research/naive-sni-rotation.md) §8): по расписанию только при wildcard, вместе с REALITY того
   же сайта, `rayctl service rotate <naive> [-now]`; REALITY без wildcard имени по расписанию больше не меняет. Дальше
   по §9 п. 5: hy2-masq тем же механизмом (только маршрут UDP);
 - дальше, если займёмся оркестрацией нод (ansible, в какой-то мере Kubernetes): служебная полоса между объединёнными
@@ -281,7 +281,7 @@ v0.26.0: пины ключа сертификата сайта в ссылках
 ## После проверки на VPS: кандидаты
 
 Решать по фактам с настоящей сети (VPS-CHECK, журналы, `rayctl metrics`, сводки). Разбор безопасности, качества и
-производительности — [12-review.md](12-review.md).
+производительности — [review.md](research/review.md).
 
 - **Авторизация запросов DNS-туннелей.** SPA по IP здесь невозможен: запросы приходят от резолверов, а не от клиентов,
   и у резолверов тысячи адресов, общих для всех.
@@ -318,7 +318,7 @@ v0.26.0: пины ключа сертификата сайта в ссылках
 
 ## Бэклог после первой установки на VPS (v0.11.0)
 
-По строке на задачу. Подробности — [10-quickstart-debian13.md](10-quickstart-debian13.md) §13 и `handoff/SYNC.md`.
+По строке на задачу. Подробности — [quickstart-debian13.md](guide/quickstart-debian13.md) §13 и `handoff/SYNC.md`.
 
 - [x] v0.11.1: install и apply открывают `/etc/resolv.conf` (и цель ссылки) до 0644, как `repairModes`.
 - [x] v0.11.1: `rayctl check` и здоровье rayd (`resolver`) — нечитаемый resolv.conf или без `nameserver`.
@@ -329,7 +329,7 @@ v0.26.0: пины ключа сертификата сайта в ссылках
 - [x] naive: адрес ноды в хосте ссылки и поддомен в `sni=`, как у hy2 и REALITY.
 - [x] dnstt, сервер: `obs[].dns` и `hints.dns` в сводке (probe-v1 §6.1, §6.2).
 - [ ] dnstt, клиент: перебор резолверов для сети на dnsprobe-v1, планировщик на 2–4 резолвера (Niko 1.33).
-- [x] Исследование резолверов по странам, несколько резолверов на сессию, поиск в сети клиента — [13-dns-resolvers.md](13-dns-resolvers.md).
+- [x] Исследование резолверов по странам, несколько резолверов на сессию, поиск в сети клиента — [dns-resolvers.md](research/dns-resolvers.md).
 - [x] dnsprobe-v1: фронт отвечает на проверку резолвера (niko-server v0.8.3, `dns_probe` в подписке).
 - [x] dnstt: EDNS меньше 1232 без `FORMERR` (MTU сессии по запросам), NODATA для типов не TXT (niko-server v0.8.3).
 - [x] SOA и NS у вершины зон dnstt: отвечает фронт (niko-server v0.9.0, `zones[].ns`; raycontrol v0.12.0).
@@ -476,12 +476,12 @@ dnsauth и смена ключа masterdns; R длиннее в mdseal пока 
   на стороне назначений во всех процессах (Xray `inner` и REALITY, Hysteria2 niko-server v0.15.0, naive), цикл
   `traffic` rayd раз в 15 с, период месяц с дня 1–28 или `none`; снятый — как просроченный, с разрывом соединений;
   подписка отдаёт `traffic` и `exhausted`. Выключен, пока ни у кого нет лимита. Осталось: замер цены счёта Xray на
-  стенде [14-capacity](14-capacity.md) (§5 спеки — оценка).
+  стенде [capacity](design/capacity.md) (§5 спеки — оценка).
 - ~~**Единая политика выхода** (BitTorrent, SMTP 25).~~ Сделано (v0.21.0): цепочка `egress` в ядре для UID data
   plane (и UID rayd на supervised-ноде), `rayctl egress block|allow bittorrent|smtp` только у root, у Xray больше нет
   сниффинга и своего правила BitTorrent; нода с сервисами Xray после обновления держит BitTorrent закрытым
   ([`spec/egress-policy-v1.md`](spec/egress-policy-v1.md)).
-- **Трассировка с ноды** для mtr из двух половин ([`15-traffic.md`](15-traffic.md) §4) — ждёт решения владельца.
+- **Трассировка с ноды** для mtr из двух половин ([`design/traffic.md`](design/traffic.md) §4) — ждёт решения владельца.
 - ~~**ICMP через naive**~~ (ping и mtr через туннель, одобрено владельцем). Сделано (v0.21.0,
   [`spec/icmp-v1.md`](spec/icmp-v1.md)): kind 4, частные хопы молчат, `icmp=on` по умолчанию выключено; клиент —
   «Ping через ноду» с Niko 1.43.0.
@@ -531,7 +531,7 @@ v0.11.1. Делать, если в целевых сетях появятся п
 
 ## Технические проверки
 
-Из [08-decisions.md](08-decisions.md), раздел «Следствия»:
+Из [decisions.md](decisions.md), раздел «Следствия»:
 
 | Проверка | Итог |
 |---|---|

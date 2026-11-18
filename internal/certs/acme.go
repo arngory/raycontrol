@@ -3,7 +3,7 @@
 // DNS-01 and a wildcard name, and no port opens (R4-10). Without one it uses
 // HTTP-01: all ports are closed, so every order opens a short window in the
 // perimeter, TCP 80 from any address to a responder that answers only the
-// order's challenges (docs/08-decisions.md, R2-11).
+// order's challenges (docs/decisions.md, R2-11).
 package certs
 
 import (

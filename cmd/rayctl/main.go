@@ -605,7 +605,7 @@ func (c *cli) user(ctx context.Context, sub string, args []string) error {
 		resetDay := fs.Int("reset-day", 0, "monthly: the day of the month the count starts again, 00:00 UTC, 1 to 28 (default 1)")
 		note := fs.String("note", "", "free text")
 		// Without a name the user gets an opaque handle: nothing personal
-		// on the node, in its logs or reports (docs/09-observability.md).
+		// on the node, in its logs or reports (docs/design/observability.md).
 		name := ""
 		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 			name, args = args[0], args[1:]

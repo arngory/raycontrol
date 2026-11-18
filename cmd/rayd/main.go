@@ -917,7 +917,7 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 				cm.Wake()
 			}
 		}
-		// A published naive name the front does not serve (docs/20 §8.4).
+		// A published naive name the front does not serve (docs/research/naive-sni-rotation.md §8.4).
 		if naive, err := naiveServed(ctx, st, frontConfig); naive || err != nil {
 			hb.Done(naiveNamesLoop, err)
 		}
@@ -1217,7 +1217,7 @@ func dnsZoneLoop(z dnscheck.Zone) string {
 // zone ("dns-zone <service>" in rayctl status), and a zone's failure to
 // the log when it changes. The checks send queries to the parent's servers
 // and to public resolvers from the node's address: no key, nothing about
-// users (docs/09-observability.md).
+// users (docs/design/observability.md).
 func dnsMonitor(ctx context.Context, st *store.Store, resolvers []dnscheck.Resolver, hb *health.Board, log *slog.Logger) *dnscheck.Monitor {
 	var mu sync.Mutex
 	logged := map[string]string{} // service: the failure last logged
@@ -1451,7 +1451,7 @@ func pruneAudit(ctx context.Context, st *store.Store, hb *health.Board, log *slo
 }
 
 // cmdSite serves the decoy site: TLS 1.3 with h2 on a unix socket, the
-// self-steal target of REALITY (docs/08-decisions.md, R2-12).
+// self-steal target of REALITY (docs/decisions.md, R2-12).
 func cmdSite(args []string) error {
 	fs := flag.NewFlagSet("site", flag.ExitOnError)
 	answer := fs.String("answer", site.Answer404, "what requests get: "+strings.Join(site.Answers, ", "))

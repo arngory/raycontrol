@@ -1,5 +1,5 @@
 // Package asn finds the autonomous system (and the country) of an address,
-// for the client summaries (docs/08-decisions.md, R4-21): the node keeps
+// for the client summaries (docs/decisions.md, R4-21): the node keeps
 // counts by AS and never the address. Sources, first match wins:
 //
 //   - a database the operator imported (MMDB, rayctl summary db);

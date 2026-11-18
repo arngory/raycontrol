@@ -13,7 +13,7 @@ import (
 	perimeterv1 "github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1"
 )
 
-// rayspaWatch is what rayd knows of rayspa (docs/08-decisions.md, R4-40):
+// rayspaWatch is what rayd knows of rayspa (docs/decisions.md, R4-40):
 // whether it follows the perimeter feed, and where its table stands as it
 // reports it (ReportGate). rayd cannot read the kernel's table (it has no
 // CAP_NET_ADMIN). A rayspa that does not follow may have left its table

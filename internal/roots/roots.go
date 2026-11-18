@@ -1,5 +1,5 @@
 // Package roots decides which certificate roots the node's own outbound
-// TLS trusts (docs/08-decisions.md, R4-41): ACME, the release downloads
+// TLS trusts (docs/decisions.md, R4-41): ACME, the release downloads
 // and the update check, the Cloudflare API, IPinfo, the client's releases
 // for the app mirror, the DoH upstreams. It is the only place that decides,
 // but for one connection left to the system store on purpose: the check

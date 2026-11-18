@@ -6,7 +6,7 @@ Niko после 1.40. Где код разошёлся с черновиком, 
 данных — v0.23.0 (§2.6).
 
 Зачем: `rayctl user add -limit 50G` только записывает лимит, байты пользователя не считает никто
-([15-traffic](../15-traffic.md) §5). Здесь нода считает байты каждого пользователя на всех профилях и снимает его, как
+([traffic](../design/traffic.md) §5). Здесь нода считает байты каждого пользователя на всех профилях и снимает его, как
 просроченного, когда лимит исчерпан. Клиент видит «N из M ГБ» и «лимит исчерпан» вместо молчаливых отказов.
 
 Пути без префикса — в этом репозитории; `xray:` — форк Xray `a4a3dff`, `niko:` — niko-server v0.14.0.
@@ -359,7 +359,7 @@ rayctl user reset-usage NAME      # обнулить текущий период
   (`live.go:154`). Один обрыв соединений этих профилей.
 - Xray: два счётчика на пользователя; на соединение — поиск счётчика под мьютексом, на MultiBuffer — один
   `atomic.AddInt64` (`xray:app/dispatcher/stats.go:14-16`). На фоне TLS и ML-KEM-шифрования VLESS — доли процента
-  CPU. Оценка, не замер: замерить на стенде [14-capacity](../14-capacity.md) до релиза.
+  CPU. Оценка, не замер: замерить на стенде [capacity](../design/capacity.md) до релиза.
 - niko-server и naive: счётчики всегда, та же цена; без лимитов их никто не читает.
 - Опрос раз в 15 с — `QueryStats` на процесс Xray и строка в сокет остальным; SQLite — транзакция раз в минуту.
 
@@ -373,7 +373,7 @@ rayctl user reset-usage NAME      # обнулить текущий период
 - В базе — только пользователи с лимитом и только текущий период, без истории; время — только `period_start` и
   `counted_from` (когда задан лимит), у процессов — время последнего опроса.
 - Журналы: Xray остаётся `warning`, `access none` (`render.go:1231`) и в окне отладки. niko-server и naive счётчики
-  не пишут. rayd пишет только переход через лимит, имя — непрозрачный номер ([09-observability](../09-observability.md)
+  не пишут. rayd пишет только переход через лимит, имя — непрозрачный номер ([observability](../design/observability.md)
   §1). Ошибка источника в `rayctl status` не повторяет его ответ (`boot` и прочее).
 - Метрики и `rayctl report` — только числа (с лимитом, снято), без пользователей.
 - Сокеты статистики — в каталогах группы сервиса и rayd, как у dnstt и Hysteria2 (`/run/niko/<сервис>/stats.sock`).
@@ -383,7 +383,7 @@ rayctl user reset-usage NAME      # обнулить текущий период
 
 - **raycontrol v0.22.0:** store (§2.5, `Active`, `SPADevices`); render (§2.1, users-файл naive); rayd — цикл
   `traffic`, `rayctl status`, опрос перед своими перезапусками; `rayd naive` (§2.3, §3.2); api и метрика (§3.6);
-  sub (§4); rayctl (§3.5); proto `StatsService`; доки — [15-traffic](../15-traffic.md) §5,
+  sub (§4); rayctl (§3.5); proto `StatsService`; доки — [traffic](../design/traffic.md) §5,
   [subscription-v1](subscription-v1.md) §3, [api-v1](api-v1.md).
 - **niko-server v0.15.0:** Hysteria2 — байты по пользователю и запрос `traffic` (§2.2), разрыв QUIC-соединений
   ушедших (правка sing-quic в `third_party`). Yggdrasil, DNS-бэкенды, фронт — без изменений. Затем пин в raycontrol:

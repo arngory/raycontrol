@@ -1,5 +1,5 @@
 // Package backup seals a snapshot of the node's database with a
-// passphrase (docs/08-decisions.md, R4-13): scrypt for the key,
+// passphrase (docs/decisions.md, R4-13): scrypt for the key,
 // XChaCha20-Poly1305 for the gzip of the snapshot. The file says nothing
 // about the node in the clear; its header is authenticated.
 package backup

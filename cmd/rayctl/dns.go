@@ -20,7 +20,7 @@ import (
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 )
 
-// dns manages the node's DNS provider (docs/08-decisions.md, R4-10).
+// dns manages the node's DNS provider (docs/decisions.md, R4-10).
 func (c *cli) dns(ctx context.Context, sub string, args []string) error {
 	switch sub {
 	case "", "status":
