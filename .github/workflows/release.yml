@@ -97,14 +97,20 @@ jobs:
         run: |
           set -euo pipefail
           runs="repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&event=push&branch=main&per_page=20"
+          # A tag made right after the merge can come before main's run is
+          # listed: five minutes for it to appear, then up to the job's
+          # timeout for it to finish.
+          none=0
           for _ in $(seq 1 220); do
-            states=$(gh api "$runs" --jq '[.workflow_runs[] | "\(.id) \(.status) \(.conclusion)"] | .[]') || states=
-            if grep -q ' completed success$' <<< "$states"; then
-              echo "green: $(grep ' completed success$' <<< "$states" | head -n 1)"
+            states=$(gh api "$runs" --jq '.workflow_runs[] | "\(.id) \(.status) \(.conclusion)"') || states=
+            if [ -z "$states" ]; then
+              none=$((none + 1))
+              [ "$none" -lt 10 ] || break
+            elif grep -q ' completed success$' <<< "$states"; then
+              echo "green: $(grep -m 1 ' completed success$' <<< "$states")"
               echo green=true >> "$GITHUB_OUTPUT"
               exit 0
-            fi
-            if ! grep -qv ' completed ' <<< "$states"; then
+            elif ! grep -qv ' completed ' <<< "$states"; then
               break
             fi
             sleep 30
@@ -112,10 +118,25 @@ jobs:
           echo "no green run of ci.yml on main for $GITHUB_SHA: ${states:-none}; job ci runs it"
           echo green=false >> "$GITHUB_OUTPUT"
 
+  # Also when ci-main itself failed: the fallback is the whole CI.
   ci:
-    needs: ci-main
-    if: needs.ci-main.outputs.green != 'true'
+    needs: [tag, ci-main]
+    if: ${{ !cancelled() && needs.tag.result == 'success' && needs.ci-main.outputs.green != 'true' }}
     uses: ./.github/workflows/ci.yml
+
+  # Known vulnerabilities on the day of the release, whichever CI run counts:
+  # main's green run can be days older than a vulnerability published since.
+  govulncheck:
+    needs: tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
   asn:
     # One download for both archives.
@@ -222,7 +243,7 @@ jobs:
   rayctl:
     # rayctl for macOS and FreeBSD: the remote administration and the probe
     # from the administrator's own machine (docs/18, §2). Built here from
-    # Linux, without cgo, as CI's rayctl job builds them on every commit. Not
+    # Linux, without cgo, as CI's rayctl job builds them in every run. Not
     # notarised by Apple and never run in this workflow.
     needs: tag
     runs-on: ubuntu-24.04
@@ -259,10 +280,11 @@ jobs:
           path: rayctl-*.tar.gz
 
   release:
-    needs: [ci-main, ci, build, rayctl]
+    needs: [ci-main, ci, govulncheck, build, rayctl]
     # CI green either way: main's run taken (ci skipped) or ci's own.
     if: >-
       ${{ !cancelled() && needs.build.result == 'success' && needs.rayctl.result == 'success' &&
+      needs.govulncheck.result == 'success' &&
       (needs.ci.result == 'success' || (needs.ci.result == 'skipped' && needs.ci-main.outputs.green == 'true')) }}
     runs-on: ubuntu-24.04
     # MINISIGN_SECRET_KEY lives in this environment: v* tags and main only,

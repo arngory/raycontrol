@@ -11,11 +11,10 @@ on:
   workflow_dispatch:
   workflow_call:
 
-# A newer push to a pull request cancels its run. Any other run is its
-# commit's alone and never waits or is cancelled: a release may take it.
-# Called by Release, github.workflow is Release's name.
+# A newer push to a pull request cancels its run. Any other run is a group
+# of its own and never waits or is cancelled: a release may take it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -25,7 +24,8 @@ jobs:
   # Known vulnerabilities reachable from our code, in the standard library of
   # the toolchain go.mod names and in the modules. v0.23.0 shipped on go1.26.0
   # with 37 of them reachable (HTTP/2 and TLS servers on public ports). The
-  # Release workflow runs this job too, so a release cannot ship with one.
+  # Release workflow runs it again on the day it releases, whichever CI run
+  # it takes, so a release cannot ship with one.
   govulncheck:
     runs-on: ubuntu-24.04
     steps:

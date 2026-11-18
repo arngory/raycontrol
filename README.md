@@ -28,7 +28,7 @@ All commands on one page: [docs/cheatsheet.md](docs/cheatsheet.md).
 
 ## Install
 
-Any current Linux with systemd; tested on every push by a full install on
+Any current Linux with systemd; every CI run tests a full install on
 Debian 12/13, Ubuntu 24.04 and Rocky Linux 9/10. As root, from an SSH session
 (its address becomes the emergency SSH access):
 
