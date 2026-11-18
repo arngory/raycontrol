@@ -1,0 +1,144 @@
+# raycontrol: статистика за окно (stats-v1)
+
+Статус: **сервер — в raycontrol v0.33.0**; формат общий с клиентом (кнопка «Статистика за час» рядом с экспортом
+журнала), поля клиента — его сторона. Решение владельца 2026-11-18: базовая статистика за последний час в удобном
+виде, с вычищенными данными, на клиенте и на сервере; склеивать их по run ID.
+
+Зачем: на тестовой ноде за час видно, что происходило (нагрузка, отказы, ошибки), без журналов с адресами и без
+доступа к ноде. Файл ноды и файл клиента с одним run ID кладутся рядом и читаются вместе.
+
+## 1. Общая обёртка
+
+JSON, время — UTC в RFC 3339. Поля обеих сторон:
+
+| Поле | Что |
+|---|---|
+| `v` | версия формата, `1` |
+| `kind` | `"niko-stats"` |
+| `side` | `"node"` или `"client"` |
+| `run` | run ID: `[A-Za-z0-9._-]{1,64}`, тот же, что у тест-прогона клиента (`RayTestRun`) и `rayctl report -id` |
+| `generated` | когда собран |
+| `from`, `to` | окно |
+| `partial`, `partial_why` | окно покрыто не целиком, и почему (строки для человека) |
+
+Ни адресов, ни ключей, ни доменов, ни имён (пользователей, устройств, сервисов, ноды), ни ID пользователей и
+устройств. Сторона, у которой поле есть, а сказать нечего, пишет пустой список, а не опускает поле.
+
+## 2. Нода: `rayctl stats`
+
+```
+rayctl stats                      # последний час, run ID новый, на экран
+rayctl stats -last 30m -id RUN    # окно 5m…2h, run ID тест-прогона клиента
+rayctl stats -id RUN -o FILE      # в файл (0600)
+rayctl -remote admin.json stats   # через удалённый API (без журнала и версий бинарников)
+```
+
+- rayd раз в минуту снимает то же, что отдаёт `rayctl metrics` (§2.4), и счётчики хоста, и держит в памяти два часа
+  снимков. После перезапуска rayd снимки начинаются заново: окно длиннее его жизни — `partial`.
+- Окно: от последнего снимка не позже «сейчас минус окно» до снимка, сделанного по запросу; `from` — время того
+  снимка, поэтому окно бывает на минуту длиннее.
+- На самой ноде под root `rayctl` добавляет версии niko-server и Xray и журнал (§2.5).
+
+### 2.1. `node`
+
+`raycontrol` (версия rayd), `niko_server`, `xray` (первые два слова их `version`, только на ноде), `os`, `arch`,
+`kernel`, `rayd_uptime_s`.
+
+### 2.2. `host`
+
+Весь хост, не только raycontrol:
+
+| Поле | Что |
+|---|---|
+| `uptime_s` | с загрузки, в конце окна |
+| `cpus` | CPU по `/proc/stat` |
+| `cpu_busy_pct` | `avg` — доля занятого времени всех CPU за окно; `min`, `max`, `end` — по минутам (шаг короче полуминуты — снимок отчёта сразу после минутного — входит только в `avg`) |
+| `load` | load average 1, 5, 15 минут в конце окна |
+| `mem_total_mb`, `mem_used_pct` | занято = всего − MemAvailable; `end`, `min`, `max` |
+| `disk_free_pct` | свободно на файловой системе состояния ноды (`/var/lib/raycontrol`) |
+| `net` | прирост за окно, все интерфейсы кроме `lo`: `rx_bytes`, `rx_packets`, `rx_errors`, `rx_drops`, `tx_bytes`, `tx_packets`, `tx_errors`, `tx_drops` |
+
+Перезагрузка хоста в окне: шаг, на котором счётчики пошли назад, не считается.
+
+### 2.3. `services`, `clients_seen`
+
+- `services[]`: `id` — `<вид>#<n>`, n — порядок создания среди сервисов этого вида (`naive#1`, `naive#2`); `kind`,
+  `enabled`, `cert_days` — дней до конца сертификата сервиса (нет — поля нет). Тем же `id` сервис назван в
+  счётчиках.
+- `clients_seen[]`: `product`, `version`, `devices` — устройства, чей клиент нода записала с `clients_since`
+  (client-min-v1 §5). Неизменившийся клиент нода записывает не чаще раза в час, поэтому `clients_since` — не позже
+  двух часов до конца окна. Продукт и версию называет само устройство, поэтому свободного текста в отчёте нет:
+  продукт — `niko`, `rayctl` или `other`; у версии от pre-release остаётся только слово `alpha`, `beta`, `rc` или
+  `pre`, иначе `other` (`1.59.0-pre.20261120.1` → `1.59.0-pre`), а версия больше 99.999.9999 — `other`. Так же —
+  метки `product` и `version` в счётчиках.
+
+### 2.4. `counters`, `gauges`
+
+Ряды `rayctl metrics` с теми же именами (`raycontrol_…`):
+
+- `counters[]` (имя на `_total`): `name`, `labels`, `delta` — прирост за окно, сложенный от снимка к снимку;
+  `reset: true` — счётчик шёл назад (перезапуск процесса; потерян прирост до одного снимка), `new: true` — ряда не было в
+  начале окна: он считается от своего первого чтения (счётчик ядра с загрузки, прочитанный позже, не приносит всё
+  накопленное).
+- `gauges[]`: `name`, `labels`, `end`, `min`, `max` по снимкам окна. `end` — из последнего снимка (из
+  предпоследнего, если пропущено только последнее чтение); уровень, пропавший раньше (сервис удалён), — `end: 0`.
+- В памяти rayd ряды хранятся как есть, с именами сервисов, зон и циклов; при сборке отчёта прирост считается по
+  каждому такому ряду, и только потом метки заменяются (ниже) и одинаковые складываются. Удалённый сайт или
+  сервис не «возвращает» свой счёт, сервис, удалённый в окне, становится `other`, номера `kind#n` — по нынешнему
+  списку сервисов.
+- Метки: `service` — `<вид>#<n>` (неизвестный — `other`), `zone` — `<вид>#<n>/zone<i>` (номер зоны в сервисе),
+  `loop` — первое слово имени цикла (`acme`, `traffic`), остальные — как в метриках: `kind`, `state`, `role`,
+  `enabled`, `product`, `version`, `reason`, `result`, `direction`, `outcome`. Метки, которых нет в этом списке,
+  отбрасываются, ряды с одинаковыми оставшимися метками складываются.
+- Не входят: `raycontrol_info` и всё на `_seconds` (моменты времени); счётчики nftables, которые `rayctl metrics`
+  добавляет только под root (ранний сброс, egress).
+- Новое в v0.33.0 и в `rayctl metrics`: `raycontrol_sub_requests_total{outcome}` — ответы подписки с запуска rayd:
+  `ok`, `client_refused` (client-min-v1 §4), `traffic_exhausted` (traffic-limit-v1 §4), `denied` (404).
+
+### 2.5. `journal`
+
+Только на ноде под root: записи `warning` и хуже из `rayd`, `rayspa`, `niko-*` за окно, по `unit` и `priority`
+(`emerg`…`warning`), `entries` — число. Текста записей нет. Юнит сервиса — его `id` (`naive#1`), постоянные юниты
+raycontrol — по имени (`niko-front`, `niko-reality`, `niko-inner`, `niko-dns`, `niko-edge-api`), прочее — `other`.
+Журнал не прочитан — `partial` с причиной без текста ошибки (её `rayctl` пишет в stderr). Запись о юните относится к
+нему и тогда, когда её пишет systemd (`UNIT`), другой процесс (`OBJECT_SYSTEMD_UNIT`) или дамп памяти
+(`COREDUMP_UNIT`). Версии бинарников — только когда `version` отработал без ошибки.
+
+## 3. Цена
+
+Снимок — сбор метрик (несколько запросов к базе и сокетам статистики, как `rayctl metrics`) раз в минуту; 122
+снимка по ключам, общим между снимками, — сотни килобайт памяти на ноде с десятками рядов. Запрос — один снимок
+сверх того.
+
+## 4. Клиент
+
+Поля клиента — его сторона (кнопка «Статистика за час» рядом с экспортом журнала), с той же обёрткой (§1) и
+`side: "client"`. Общее имя поля обеих сторон значит одно и то же. Подробно — `niko:docs/spec/stats-client.md`
+(arngory/niko#28); здесь — для чтения рядом с файлом ноды:
+
+| Поле | Что |
+|---|---|
+| `app` | `product` (`niko`), `version`, `version_code`, `android_api`, `abi`, `core` |
+| `state` | `service`, `mode` (`vpn` или `proxy`), `profile` — вид (`naive`, `hysteria2`, `vless`…), `from_node` |
+| `settings` | `auto_switch`, `brutal`, `reset_on_network_change`, `ipv6_mode`, `traffic_counted` |
+| `coverage` | `window_minutes`, `service_minutes` — сколько из окна служба работала |
+| `counters[]`, `gauges[]` | как у ноды (§2.4): `{name, labels, delta, reset, new}`, `{name, labels, end, min, max}` |
+| `timings[]` | только у клиента: `{name, labels, count, p50, p90, max}`, мс |
+
+Ряды клиента: `niko_service_start_total{mode,profile}`, `niko_service_fail_total{why,profile}` (`why`:
+`invalid_server`, `plugin_missing`, `core`, `process`, `other`), `niko_service_stop_total`,
+`niko_network_change_total`, `niko_network_back_total{to}` (`wifi`, `cellular`, `ethernet`, `vpn`, `other`),
+`niko_network_lost_total`, `niko_watchdog_total{action}` (`recover`, `switch`, `no_alternative`, `ygg_peers`,
+`credential`, `dns_resolvers`, `doh_token`, `connections_failing`), `niko_url_test_total{profile,outcome}`,
+`niko_traffic_bytes_total{dir}`, `niko_log_lines_total{level,process}`; уровень `niko_process_rss_mb{process}`;
+время `niko_url_test_ms{profile,outcome}`. Хоста (`cpu_busy_pct`, `net`) у клиента нет: телефон не даёт их без
+лишних прав.
+
+Как читать вместе: одинаковый `run`, окна `from`…`to` пересекаются. Например, `niko_service_fail_total{why=core}`
+у клиента против `raycontrol_sub_requests_total{outcome}` и `raycontrol_conn_limit_refused_total` у ноды за то же
+время.
+
+## 5. Совместимость
+
+- Новые поля добавляются без смены `v`; читатель пропускает незнакомые. Смена смысла поля — `v: 2`.
+- `GetStats` (node.v1) отдаёт тот же JSON; rayd без него отвечает `Unimplemented`, rayd без снимков — `Unavailable`.

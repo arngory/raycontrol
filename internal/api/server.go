@@ -33,6 +33,7 @@ import (
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/spa"
+	"github.com/arngory/raycontrol/internal/stats"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
 )
@@ -94,6 +95,13 @@ type Server struct {
 	// nil without udp=on, or an error when it cannot be read. nil: the
 	// metrics show none.
 	NaiveUDP func(ctx context.Context, service string) (*naive.UDPStats, error)
+	// SubRequests counts the subscription's answers (sub.Server.Requests);
+	// nil: the metrics show none.
+	SubRequests *sub.Requests
+	// Stats keeps the samples rayctl stats reports (spec/stats-v1.md);
+	// nil: GetStats is unavailable. Started is when rayd started.
+	Stats   *stats.Sampler
+	Started time.Time
 
 	// Wrong invite PINs, and the invites the last of them withdrew, since
 	// rayd started (rayctl metrics).

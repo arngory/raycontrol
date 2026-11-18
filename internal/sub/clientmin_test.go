@@ -24,7 +24,7 @@ import (
 func TestClientMinimum(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
-	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet(), Requests: &sub.Requests{}}
 	fetch := func(client string) (sub.Payload, string) {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet, sub.Path, nil)
@@ -111,6 +111,16 @@ func TestClientMinimum(t *testing.T) {
 	set(clientver.Policy{})
 	if p, raw := fetch(old); len(p.Profiles) != 1 || strings.Contains(raw, `"client"`) {
 		t.Fatalf("taken away:\n%s", raw)
+	}
+	// The answers by outcome (rayctl stats): the export is none of them;
+	// a wrong Authorization is denied.
+	req := httptest.NewRequest(http.MethodGet, sub.Path, nil)
+	req.Header.Set(sub.DeviceHeader, f.device.ID)
+	req.Header.Set("Authorization", "Bearer wrong")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if q := srv.Requests; rec.Code != http.StatusNotFound || q.OK.Load() != 7 || q.ClientRefused.Load() != 3 || q.Denied.Load() != 1 || q.TrafficExhausted.Load() != 0 {
+		t.Fatalf("counts: %d ok %d refused %d denied %d exhausted %d", rec.Code, q.OK.Load(), q.ClientRefused.Load(), q.Denied.Load(), q.TrafficExhausted.Load())
 	}
 }
 

@@ -221,6 +221,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   metrics [-o FILE]                           counts and times in the Prometheus text format; with
                                               -o for a collector's textfile directory
 
+  stats [-last 1h] [-id RUN] [-o FILE]        the last hour (5m to 2h) as JSON: counts, levels, the
+                                              host, clients by version; no names, addresses or keys,
+                                              made to be passed on with the client's (spec/stats-v1.md)
   report [-o FILE] [-logs warning|info|debug|none] [-since 24h] [-id ID]
       a redacted report for an issue: versions, system, checks, units,
       counts and warnings; nothing is sent anywhere
@@ -400,6 +403,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.restore(ctx, args[1:])
 	case "metrics":
 		return c.metrics(ctx, args[1:])
+	case "stats":
+		return c.stats(ctx, args[1:])
 	case "update":
 		return c.update(ctx, args[1:])
 	case "version":

@@ -244,8 +244,10 @@ func (s *Server) serveUDP(w http.ResponseWriter, r *http.Request) {
 	answerPadding(w, reply)
 	w.Header().Set(capsuleProtocol, "?1")
 	w.Header().Set(UDPHeader, udpVersion)
-	st := take()
+	// Counted before take writes the 200: whoever has the answer sees it
+	// counted (rayctl metrics; TestUDPPlaces read it a moment early).
 	s.udp.requests.Add(1)
+	st := take()
 	s.carryUDP(uctx, slot, a.traffic, conn, st)
 }
 

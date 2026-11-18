@@ -48,6 +48,7 @@ var places = map[string]place{
 	"app-mirror":   viaAPI,
 	"client":       viaAPI,
 	"metrics":      viaAPI,
+	"stats":        viaAPI, // GetStats; the journal and binaries' versions on the node as root
 	"debug":        viaAPI, // GetStatus and SetDebug; the window is root's on the node (rayd says so)
 
 	"remote":        viaAPI,

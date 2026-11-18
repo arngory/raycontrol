@@ -22,6 +22,7 @@ import (
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/provision"
+	"github.com/arngory/raycontrol/internal/stats"
 )
 
 // GetMetrics describes the node in the Prometheus text format (R4-14):
@@ -29,11 +30,11 @@ import (
 // Nothing is sent anywhere; rayctl writes the text where the operator's
 // collector reads it.
 func (s *Server) GetMetrics(ctx context.Context, _ *connect.Request[nodev1.GetMetricsRequest]) (*connect.Response[nodev1.GetMetricsResponse], error) {
-	text, err := s.metrics(ctx, time.Now())
+	m, err := s.collect(ctx, time.Now())
 	if err != nil {
 		return nil, toConnect(err)
 	}
-	return connect.NewResponse(&nodev1.GetMetricsResponse{Text: text}), nil
+	return connect.NewResponse(&nodev1.GetMetricsResponse{Text: m.String()}), nil
 }
 
 // Metrics collects samples in the text format, each family in one block
@@ -42,6 +43,7 @@ type Metrics struct {
 	names    []string
 	help     map[string]string
 	families map[string]*strings.Builder
+	points   []stats.Point // the same samples, for rayctl stats
 }
 
 // Add records one sample; labels go as name, value pairs. A name ending in
@@ -68,6 +70,7 @@ func (m *Metrics) Add(name, help string, value float64, labels ...string) {
 		b.WriteByte('}')
 	}
 	b.WriteString(" " + strconv.FormatFloat(value, 'f', -1, 64) + "\n")
+	m.points = append(m.points, stats.Point{Name: name, Labels: slices.Clone(labels), Value: value})
 }
 
 func (m *Metrics) String() string {
@@ -87,13 +90,14 @@ var labelEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
 // escapeLabel escapes a label value as the text format wants.
 func escapeLabel(v string) string { return labelEscaper.Replace(v) }
 
-func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
+// collect gathers the node's metrics (GetMetrics, StatsPoints).
+func (s *Server) collect(ctx context.Context, now time.Time) (*Metrics, error) {
 	var m Metrics
 	m.Add("raycontrol_info", "The node's version.", 1, "version", s.Version)
 
 	users, err := s.Store.ListUsers(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	// One state each, in this order: active is store.User.Active.
 	byState := map[string]int{"active": 0, "disabled": 0, "expired": 0, "over_limit": 0}
@@ -121,7 +125,7 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 
 	devices, err := s.Store.ListDevices(ctx, "")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	byDev := map[[2]string]int{{"user", "active"}: 0, {"admin", "active"}: 0}
 	for _, d := range devices {
@@ -145,7 +149,7 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 	// product and version, no device or user.
 	clients, err := s.Store.ClientCounts(ctx, now.Add(-ClientWindow))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	for _, c := range clients {
 		product, version, _ := strings.Cut(c.Client, "/")
@@ -156,7 +160,7 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 
 	services, err := s.Store.ListServices(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	byKind := map[[2]string]int{}
 	for _, svc := range services {
@@ -180,7 +184,7 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 		}
 		secrets, err := s.Store.ServiceSecrets(ctx, svc.ID)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		if notAfter, ok := certNotAfter(secrets); ok {
 			m.Add("raycontrol_certificate_not_after_seconds", "When the service's certificate expires (Unix time).",
@@ -235,7 +239,7 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 	// DNS: problems only, the records themselves are in "rayctl dns".
 	_, problems, err := provision.DNSRecords(ctx, s.Store)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	m.Add("raycontrol_dns_problems", "Problems with the DNS records the node needs.", float64(len(problems)))
 
@@ -245,7 +249,7 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 	// started; a run of them is someone trying PINs of an invite they hold.
 	invites, err := s.Store.ListInvites(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	byInvite := map[string]int{"active": 0, "expired": 0}
 	for _, inv := range invites {
@@ -339,10 +343,20 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 		}
 		addFrontStats(&m, front, owner)
 	}
+	// The subscription's answers since rayd started, by outcome.
+	if q := s.SubRequests; q != nil {
+		for _, o := range []struct {
+			outcome string
+			n       uint64
+		}{{"ok", q.OK.Load()}, {"client_refused", q.ClientRefused.Load()}, {"traffic_exhausted", q.TrafficExhausted.Load()}, {"denied", q.Denied.Load()}} {
+			m.Add("raycontrol_sub_requests_total", "Subscription requests since rayd started, by outcome: denied is a 404 (unknown or revoked device, wrong Authorization, user off).",
+				float64(o.n), "outcome", o.outcome)
+		}
+	}
 	if s.ConnLimit != nil {
 		addConnLimit(&m, s.ConnLimit.Snapshot())
 	}
-	return m.String(), nil
+	return &m, nil
 }
 
 // addConnLimit adds the connection limits, the table and the guard
