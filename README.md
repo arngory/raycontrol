@@ -1,5 +1,7 @@
 # raycontrol
 
+English | [Русский](README.ru.md)
+
 Control plane of a self-contained proxy node on one Linux host. The data plane is
 [niko-server](https://github.com/arngory/niko-server); raycontrol keeps users, devices and keys, renders the
 configs, runs the SPA-gated firewall, rotates keys, and serves the signed subscription and the API for the
@@ -50,12 +52,5 @@ go test ./...
 - [docs/README.md](docs/README.md): design, decisions and specifications (Russian).
 - [CONTRIBUTING.md](CONTRIBUTING.md): branches, checks and releases.
 - [docs/RELEASE.md](docs/RELEASE.md): how a release is made and verified.
-
----
-
-**По-русски.** raycontrol — управление самодостаточной прокси-нодой на одном Linux-хосте: пользователи, устройства
-и ключи, конфиги niko-server, файрвол со SPA, ротация, подписанная подписка и API для клиента Niko. Установка —
-три команды выше, пошагово — [docs/guide/quickstart-debian13.md](docs/guide/quickstart-debian13.md), все команды —
-[docs/guide/cheatsheet.md](docs/guide/cheatsheet.md), остальное — [docs/README.md](docs/README.md).
 
 License: GPL-3.0, see [LICENSE](LICENSE).
