@@ -53,4 +53,8 @@ go test ./...
 - [CONTRIBUTING.md](CONTRIBUTING.md): ветки, проверки и выпуски.
 - [docs/RELEASE.md](docs/RELEASE.md): как выходит и проверяется выпуск.
 
+raycontrol начинался как [n8nnme/raycontrol](https://github.com/n8nnme/raycontrol) — установщик `ray.sh` на bash (v0,
+2025). С v0.2.0 это новая программа на Go, без того кода; `bootstrap.sh -remove-v0` сначала убирает с хоста
+установку v0.
+
 Лицензия: GPL-3.0, см. [LICENSE](LICENSE).

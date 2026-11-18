@@ -53,4 +53,8 @@ go test ./...
 - [CONTRIBUTING.md](CONTRIBUTING.md): branches, checks and releases.
 - [docs/RELEASE.md](docs/RELEASE.md): how a release is made and verified.
 
+raycontrol began as [n8nnme/raycontrol](https://github.com/n8nnme/raycontrol), the bash installer `ray.sh` (v0,
+2025). From v0.2.0 it is a new program in Go with none of that code; `bootstrap.sh -remove-v0` takes a v0 install
+off a host first.
+
 License: GPL-3.0, see [LICENSE](LICENSE).
