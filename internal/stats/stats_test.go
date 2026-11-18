@@ -42,6 +42,17 @@ func findCounter(t *testing.T, r Report, name string) Counter {
 	return Counter{}
 }
 
+func findGaugeLabel(t *testing.T, r Report, name, label, value string) Gauge {
+	t.Helper()
+	for _, g := range r.Gauges {
+		if g.Name == name && g.Labels[label] == value {
+			return g
+		}
+	}
+	t.Fatalf("no gauge %s{%s=%s} in %+v", name, label, value, r.Gauges)
+	return Gauge{}
+}
+
 func findGauge(t *testing.T, r Report, name string) Gauge {
 	t.Helper()
 	for _, g := range r.Gauges {
@@ -325,6 +336,17 @@ func TestReportCleanSums(t *testing.T) {
 	}
 	if r.Partial {
 		t.Fatalf("partial: %q", r.Why)
+	}
+	// A level gone long before the end ends at 0, not at its last reading.
+	if g := findGauge(t, r, "fail"); g.End != 1 {
+		t.Fatalf("end: %+v", g)
+	}
+	r2, err := s.Report(ctx, time.Hour, keep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := findGaugeLabel(t, r2, "fail", "loop", "acme b"); g.End != 0 || g.Max != 1 {
+		t.Fatalf("gone level: %+v", g)
 	}
 	drop := func(name string, l []string) ([]string, bool) { return l, name != "fail" }
 	if r, _ := s.Report(ctx, time.Hour, drop); len(r.Gauges) != 0 {

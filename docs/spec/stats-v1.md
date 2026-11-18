@@ -69,7 +69,8 @@ rayctl -remote admin.json stats   # через удалённый API (без ж
   (client-min-v1 §5). Неизменившийся клиент нода записывает не чаще раза в час, поэтому `clients_since` — не позже
   двух часов до конца окна. Продукт и версию называет само устройство, поэтому свободного текста в отчёте нет:
   продукт — `niko`, `rayctl` или `other`; у версии от pre-release остаётся только слово `alpha`, `beta`, `rc` или
-  `pre`, иначе `other` (`1.59.0-pre.20261120.1` → `1.59.0-pre`). Так же — метки `product` и `version` в счётчиках.
+  `pre`, иначе `other` (`1.59.0-pre.20261120.1` → `1.59.0-pre`), а версия больше 99.999.9999 — `other`. Так же —
+  метки `product` и `version` в счётчиках.
 
 ### 2.4. `counters`, `gauges`
 
@@ -79,7 +80,8 @@ rayctl -remote admin.json stats   # через удалённый API (без ж
   `reset: true` — счётчик шёл назад (перезапуск процесса; потерян прирост до одного снимка), `new: true` — ряда не было в
   начале окна: он считается от своего первого чтения (счётчик ядра с загрузки, прочитанный позже, не приносит всё
   накопленное).
-- `gauges[]`: `name`, `labels`, `end`, `min`, `max` по снимкам окна.
+- `gauges[]`: `name`, `labels`, `end`, `min`, `max` по снимкам окна. `end` — из последнего снимка (из
+  предпоследнего, если пропущено только последнее чтение); уровень, пропавший раньше (сервис удалён), — `end: 0`.
 - В памяти rayd ряды хранятся как есть, с именами сервисов, зон и циклов; при сборке отчёта прирост считается по
   каждому такому ряду, и только потом метки заменяются (ниже) и одинаковые складываются. Удалённый сайт или
   сервис не «возвращает» свой счёт, сервис, удалённый в окне, становится `other`, номера `kind#n` — по нынешнему
@@ -111,7 +113,30 @@ raycontrol — по имени (`niko-front`, `niko-reality`, `niko-inner`, `nik
 ## 4. Клиент
 
 Поля клиента — его сторона (кнопка «Статистика за час» рядом с экспортом журнала), с той же обёрткой (§1) и
-`side: "client"`. Общее имя поля обеих сторон значит одно и то же.
+`side: "client"`. Общее имя поля обеих сторон значит одно и то же. Подробно — `niko:docs/spec/stats-client.md`
+(arngory/niko#28); здесь — для чтения рядом с файлом ноды:
+
+| Поле | Что |
+|---|---|
+| `app` | `product` (`niko`), `version`, `version_code`, `android_api`, `abi`, `core` |
+| `state` | `service`, `mode` (`vpn` или `proxy`), `profile` — вид (`naive`, `hysteria2`, `vless`…), `from_node` |
+| `settings` | `auto_switch`, `brutal`, `reset_on_network_change`, `ipv6_mode`, `traffic_counted` |
+| `coverage` | `window_minutes`, `service_minutes` — сколько из окна служба работала |
+| `counters[]`, `gauges[]` | как у ноды (§2.4): `{name, labels, delta, reset, new}`, `{name, labels, end, min, max}` |
+| `timings[]` | только у клиента: `{name, labels, count, p50, p90, max}`, мс |
+
+Ряды клиента: `niko_service_start_total{mode,profile}`, `niko_service_fail_total{why,profile}` (`why`:
+`invalid_server`, `plugin_missing`, `core`, `process`, `other`), `niko_service_stop_total`,
+`niko_network_change_total`, `niko_network_back_total{to}` (`wifi`, `cellular`, `ethernet`, `vpn`, `other`),
+`niko_network_lost_total`, `niko_watchdog_total{action}` (`recover`, `switch`, `no_alternative`, `ygg_peers`,
+`credential`, `dns_resolvers`, `doh_token`, `connections_failing`), `niko_url_test_total{profile,outcome}`,
+`niko_traffic_bytes_total{dir}`, `niko_log_lines_total{level,process}`; уровень `niko_process_rss_mb{process}`;
+время `niko_url_test_ms{profile,outcome}`. Хоста (`cpu_busy_pct`, `net`) у клиента нет: телефон не даёт их без
+лишних прав.
+
+Как читать вместе: одинаковый `run`, окна `from`…`to` пересекаются. Например, `niko_service_fail_total{why=core}`
+у клиента против `raycontrol_sub_requests_total{outcome}` и `raycontrol_conn_limit_refused_total` у ноды за то же
+время.
 
 ## 5. Совместимость
 

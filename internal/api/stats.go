@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,11 +100,22 @@ func clientProduct(p string) string {
 	return "other"
 }
 
-// clientVersion is a client's version without its pre-release's text,
-// which a device chooses: "1.59.0-pre.20261120.1" is "1.59.0-pre", one
-// whose pre-release is not alpha, beta, rc or pre "1.59.0-other".
+// clientVersion is a client's version without what a device could carry
+// in it: "1.59.0-pre.20261120.1" is "1.59.0-pre", a pre-release not alpha,
+// beta, rc or pre "-other", and a version past 99.999.9999 (digits to
+// spare for anything) "other".
 func clientVersion(v string) string {
 	core, pre, found := strings.Cut(v, "-")
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return "other"
+	}
+	for i, limit := range []uint64{99, 999, 9999} {
+		n, err := strconv.ParseUint(parts[i], 10, 64)
+		if err != nil || n > limit {
+			return "other"
+		}
+	}
 	if !found {
 		return core
 	}

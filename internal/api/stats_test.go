@@ -155,3 +155,19 @@ func TestGetStats(t *testing.T) {
 		}
 	}
 }
+
+func TestClientVersion(t *testing.T) {
+	for in, want := range map[string]string{
+		"1.59.0": "1.59.0", "1.59.0-pre.20261120.1": "1.59.0-pre", "1.60.0-rc.1": "1.60.0-rc", "1.0.0-alice": "1.0.0-other",
+		"79161234567.0.0": "other", "1.1000.0": "other", "1.0.10000": "other", "1.0": "other", "": "other", "99.999.9999": "99.999.9999",
+	} {
+		if got := clientVersion(in); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+	for in, want := range map[string]string{"niko": "niko", "rayctl": "rayctl", "-": "-", "alice": "other"} {
+		if got := clientProduct(in); got != want {
+			t.Errorf("product %q: %q, want %q", in, got, want)
+		}
+	}
+}

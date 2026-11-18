@@ -284,11 +284,14 @@ func (s *Sampler) Report(ctx context.Context, last time.Duration, clean Clean) (
 	}
 	// Gauges: summed by what they show as in each sample, then the last,
 	// least and most of those sums.
+	// The end is the last sample's, or the one before when only the last
+	// read missed it; a level gone before (its service deleted) ends at 0.
 	ranges := make(map[string]*Range, len(gaugeKeys))
+	lastAt := make(map[string]int, len(gaugeKeys))
 	for ck := range gaugeKeys {
 		ranges[ck] = &Range{Min: math.Inf(1), Max: math.Inf(-1)}
 	}
-	for _, sm := range window {
+	for i, sm := range window {
 		sums := map[string]float64{}
 		for k, v := range sm.Values {
 			if ck := cleanKey[k]; gaugeKeys[ck] {
@@ -298,6 +301,12 @@ func (s *Sampler) Report(ctx context.Context, last time.Duration, clean Clean) (
 		for ck, sum := range sums {
 			g := ranges[ck]
 			g.End, g.Min, g.Max = sum, min(g.Min, sum), max(g.Max, sum)
+			lastAt[ck] = i
+		}
+	}
+	for ck, g := range ranges {
+		if lastAt[ck] < len(window)-2 {
+			g.End = 0
 		}
 	}
 	for _, ck := range slices.Sorted(maps.Keys(gaugeKeys)) {
