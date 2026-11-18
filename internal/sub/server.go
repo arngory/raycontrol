@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/arngory/raycontrol/internal/appmirror"
+	"github.com/arngory/raycontrol/internal/clientver"
 	"github.com/arngory/raycontrol/internal/httpx"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/probe"
@@ -208,7 +209,16 @@ func (s *Server) handle(r *http.Request) (Envelope, error) {
 			s.Changed()
 		}
 	}
-	env, err := s.build(ctx, dev.UserName, dev.ID, key[:], addr, now)
+	// The client the request names (client-min-v1 §1, §5): kept on the
+	// device once its Authorization holds, product and version only.
+	cl := &requestClient{}
+	cl.Client, cl.known = clientver.Parse(r.Header.Get(clientver.Header))
+	if cl.known {
+		if err := s.Store.SetDeviceClient(ctx, dev.ID, cl.Product+"/"+cl.Version.String(), ClientSeenEvery); err != nil {
+			return Envelope{}, err
+		}
+	}
+	env, err := s.build(ctx, dev.UserName, dev.ID, key[:], addr, now, cl)
 	if err != nil {
 		return Envelope{}, err
 	}
@@ -240,12 +250,28 @@ func (s *Server) BuildFor(ctx context.Context, userName string, addr netip.Addr,
 // SPA key: its own links where they differ by device (Yggdrasil's key).
 // Its lan field is that of a device that does not show itself.
 func (s *Server) BuildForDevice(ctx context.Context, userName string, device []byte, addr netip.Addr, now time.Time) (Envelope, error) {
-	return s.build(ctx, userName, "", device, addr, now)
+	return s.build(ctx, userName, "", device, addr, now, nil)
+}
+
+// ClientSeenEvery is how often a device's client is written again when it
+// has not changed (store.SetDeviceClient).
+const ClientSeenEvery = time.Hour
+
+// RefusedExpiry is the longest a refused client's answer lives
+// (client-min-v1 §4): it asks again soon after its update.
+const RefusedExpiry = time.Hour
+
+// requestClient is the client a device's request named: known is false
+// for no header or one that does not parse.
+type requestClient struct {
+	clientver.Client
+	known bool
 }
 
 // build is the subscription of a user's device, given by its ID (for its
-// lan field) and its SPA key; neither for the user's own.
-func (s *Server) build(ctx context.Context, userName, deviceID string, device []byte, addr netip.Addr, now time.Time) (Envelope, error) {
+// lan field), its SPA key and the client its request named; none of them
+// for the user's own (rayctl user export), which no policy refuses.
+func (s *Server) build(ctx context.Context, userName, deviceID string, device []byte, addr netip.Addr, now time.Time, cl *requestClient) (Envelope, error) {
 	m, err := render.Collect(ctx, s.Store)
 	if err != nil {
 		return Envelope{}, err
@@ -272,8 +298,15 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 	if user == nil && !exhausted {
 		return Envelope{}, errors.New("user not active")
 	}
+	// Below the node's minimum (client-min-v1 §4): no profiles, no LAN, and
+	// what the client needs to update through the node (app, relays, spa).
+	policy, err := node.ClientPolicy(ctx, s.Store)
+	if err != nil {
+		return Envelope{}, err
+	}
+	refused := cl != nil && policy.Refuses(cl.Client, cl.known, now)
 	profiles := []Profile{}
-	if !exhausted {
+	if !exhausted && !refused {
 		profiles, err = DeviceProfiles(m, *user, device)
 	}
 	// Not the links of a DNS tunnel the front leaves out for its zones
@@ -315,6 +348,10 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 			p.Expires = ExhaustedExpiry(now, u.NextResetAt(now), mrand.N(ExhaustedJitter)).Unix() //nolint:gosec // G404: when to ask, no secret
 		}
 	}
+	p.Client = policy.Field(refused, now)
+	if refused {
+		p.Expires = min(p.Expires, now.Add(RefusedExpiry).Unix())
+	}
 	if s.TCPCarrier {
 		// In the order to try: the ClientHello before bare TCP, which a
 		// DPI box sees as odd.
@@ -351,8 +388,10 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 		p.DNSProbe = &DNSProbeHint{V: 1, Key: base64.RawURLEncoding.EncodeToString(m.DNSProbeKey)}
 	}
 	p.DNSAuth = dnsAuthVersions(m, profiles)
-	if p.LAN, err = s.lanHint(ctx, m, u, profiles, deviceID, name); err != nil {
-		return Envelope{}, err
+	if !refused {
+		if p.LAN, err = s.lanHint(ctx, m, u, profiles, deviceID, name); err != nil {
+			return Envelope{}, err
+		}
 	}
 	// Through a relay the address is the relay's: its network's hints are
 	// not the client's (relay-v1 §9.3).

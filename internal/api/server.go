@@ -802,7 +802,8 @@ func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.
 
 func devicePB(d store.Device) *nodev1.Device {
 	return &nodev1.Device{Id: d.ID, User: d.UserName, Name: d.Name, Role: d.Role,
-		CreatedAt: d.CreatedAt.Unix(), RevokedAt: unixOrZero(d.RevokedAt), Registered: d.CertPin != "", Lan: d.LAN}
+		CreatedAt: d.CreatedAt.Unix(), RevokedAt: unixOrZero(d.RevokedAt), Registered: d.CertPin != "", Lan: d.LAN,
+		Client: d.Client, ClientAt: unixOrZero(d.ClientAt)}
 }
 
 func invitePB(inv store.Invite) *nodev1.Invite {

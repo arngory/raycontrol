@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/arngory/raycontrol/internal/clientver"
 	"github.com/arngory/raycontrol/internal/spa"
 )
 
@@ -26,6 +27,9 @@ type Client struct {
 	DeviceKey [spa.KeySize]byte
 	NodeKeys  map[string]string
 	NodeID    string // hex; the payload must carry it
+	// Name is the client the requests name (client-min-v1 §1),
+	// "rayctl/0.31.3"; empty: none.
+	Name string
 }
 
 // ErrRefused is the endpoint's 404: unknown or revoked device, bad auth
@@ -65,6 +69,9 @@ func (c Client) HTTP() *http.Client {
 func (c Client) Authorize(req *http.Request) {
 	req.Header.Set(DeviceHeader, c.DeviceID)
 	req.Header.Set("Authorization", AuthToken(c.DeviceKey, time.Now().Unix()/60))
+	if c.Name != "" {
+		req.Header.Set(clientver.Header, c.Name)
+	}
 }
 
 // Fetch returns the verified payload.
@@ -77,6 +84,9 @@ func (c Client) Fetch(ctx context.Context, now time.Time) (Payload, error) {
 	}
 	req.Header.Set(DeviceHeader, c.DeviceID)
 	req.Header.Set("Authorization", AuthToken(c.DeviceKey, now.Unix()/60))
+	if c.Name != "" {
+		req.Header.Set(clientver.Header, c.Name)
+	}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return Payload{}, err

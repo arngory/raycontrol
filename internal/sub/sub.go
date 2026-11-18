@@ -21,6 +21,7 @@ import (
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 
 	"github.com/arngory/raycontrol/internal/appmirror"
+	"github.com/arngory/raycontrol/internal/clientver"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/render"
@@ -105,6 +106,9 @@ type Payload struct {
 	// for a user the administrator lets have it, with a Yggdrasil profile;
 	// its password and devices only for a device that shows itself.
 	LAN *LAN `json:"lan,omitempty"`
+	// Client: the node's minimum client version (spec/client-min-v1.md
+	// §3); refused for a device below it.
+	Client *clientver.Field `json:"client,omitempty"`
 }
 
 // TrafficHint is a user's traffic limit: Used bytes (up + down, as the

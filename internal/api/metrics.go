@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"crypto/x509"
 	"encoding/pem"
@@ -139,6 +140,17 @@ func (s *Server) metrics(ctx context.Context, now time.Time) (string, error) {
 	})
 	for _, k := range devKeys {
 		m.Add("raycontrol_devices", "Enrolled devices by role and state.", float64(byDev[k]), "role", k[0], "state", k[1])
+	}
+	// By the client they last named in the last 30 days (client-min-v1 §5):
+	// product and version, no device or user.
+	clients, err := s.Store.ClientCounts(ctx, time.Now().Add(-ClientWindow))
+	if err != nil {
+		return "", err
+	}
+	for _, c := range clients {
+		product, version, _ := strings.Cut(c.Client, "/")
+		m.Add("raycontrol_client_devices", "Devices not revoked by the client they last named (30 days); none: never named one.",
+			float64(c.Devices), "product", cmp.Or(product, "none"), "version", version)
 	}
 
 	services, err := s.Store.ListServices(ctx)

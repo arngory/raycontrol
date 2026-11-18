@@ -197,6 +197,7 @@ var apiSubs = map[string][]string{
 	"dns":        {"check", "cloudflare", "remove", "status", "sync"},
 	"summary":    {"api", "off", "on", "show"},
 	"app-mirror": {"off", "on", "show"},
+	"client":     {"min", "show"},
 	"debug":      {"off", "on", "show"},
 }
 
@@ -239,7 +240,7 @@ func TestRefusal(t *testing.T) {
 	node := []string{"install", "apply", "update", "uninstall", "backup", "restore", "report", "egress", "conn-limit", "roots",
 		"check", "legacy", "relay bundle", "service cert", "summary db"}
 	api := []string{"status", "node", "user", "service", "device", "audit", "relay", "admin", "ports", "dns", "summary",
-		"app-mirror", "metrics", "remote whoami", "remote rotate", "service rotate", "relay list", "summary show",
+		"app-mirror", "client", "metrics", "remote whoami", "remote rotate", "service rotate", "relay list", "summary show",
 		"device invite", "debug", "debug on"}
 	free := []string{"knock", "probe", "remote enroll", "version"}
 	for _, c := range runCommands(t) {
