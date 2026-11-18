@@ -189,21 +189,39 @@ type Policy struct {
 // ErrInvalid is a policy that does not hold together.
 var ErrInvalid = errors.New("invalid client policy")
 
-// Check returns the policy as kept, or why it cannot be.
+// MaxProducts and MaxVersionLen bound a policy: every subscription carries
+// it, and a version longer than this would not fit the header with its
+// product anyway.
+const (
+	MaxProducts   = 8
+	MaxVersionLen = 64
+)
+
+// ValidProduct reports whether s can name a product.
+func ValidProduct(s string) bool { return productRe.MatchString(s) }
+
+// Check returns the policy as kept, or why it cannot be. The error names
+// nothing from the policy: it may hold anything a caller sent.
 func (p Policy) Check() (Policy, error) {
+	if len(p.Min) > MaxProducts {
+		return Policy{}, fmt.Errorf("%w: %d products, at most %d", ErrInvalid, len(p.Min), MaxProducts)
+	}
 	for product, min := range p.Min {
 		if !productRe.MatchString(product) {
-			return p, fmt.Errorf("%w: product %q", ErrInvalid, product)
+			return Policy{}, fmt.Errorf("%w: a product is not [a-z][a-z0-9-]{0,15}", ErrInvalid)
+		}
+		if len(min) > MaxVersionLen {
+			return Policy{}, fmt.Errorf("%w: a version longer than %d bytes", ErrInvalid, MaxVersionLen)
 		}
 		if _, err := ParseVersion(min); err != nil {
-			return p, fmt.Errorf("%w: %w", ErrInvalid, err)
+			return Policy{}, fmt.Errorf("%w: %s: not a semver version X.Y.Z[-pre]", ErrInvalid, product)
 		}
 	}
 	if len(p.Min) == 0 {
 		return Policy{}, nil
 	}
 	if p.From < 0 {
-		return p, fmt.Errorf("%w: from %d", ErrInvalid, p.From)
+		return Policy{}, fmt.Errorf("%w: from %d", ErrInvalid, p.From)
 	}
 	return p, nil
 }

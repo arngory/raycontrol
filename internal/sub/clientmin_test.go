@@ -13,6 +13,8 @@ import (
 
 	"github.com/arngory/raycontrol/internal/clientver"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/render"
+	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
 )
 
@@ -109,5 +111,113 @@ func TestClientMinimum(t *testing.T) {
 	set(clientver.Policy{})
 	if p, raw := fetch(old); len(p.Profiles) != 1 || strings.Contains(raw, `"client"`) {
 		t.Fatalf("taken away:\n%s", raw)
+	}
+}
+
+// A refused device gets none of what lets it in: with LAN on and a
+// rotation in flight, no profile, no next, no LAN password. A request with
+// a bad token keeps nothing of its header.
+func TestClientRefusedCarriesNothing(t *testing.T) {
+	n := newLANNode(t)
+	ctx := n.ctx
+	n.user("alice", "ygg", "hy2")
+	phone := n.device("alice", "phone")
+	if _, err := n.st.SetUserLAN(ctx, "alice", true); err != nil {
+		t.Fatal(err)
+	}
+	fetch := func(client, auth string) (int, string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, sub.Path, nil)
+		req.Header.Set(sub.DeviceHeader, phone.ID)
+		req.Header.Set("Authorization", auth)
+		req.Header.Set(sub.LANHeader, "on")
+		req.Header.Set(clientver.Header, client)
+		rec := httptest.NewRecorder()
+		n.srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			return rec.Code, ""
+		}
+		var env sub.Envelope
+		if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := base64.RawURLEncoding.DecodeString(env.Payload)
+		return rec.Code, string(raw)
+	}
+	good := sub.AuthToken(phone.key, time.Now().Unix()/60)
+	fetch("niko/1.58.0", good) // the user's credentials are made on the first subscription
+	day := 24 * time.Hour
+	if c, err := n.st.RotateCredentials(ctx, time.Now().Add(28*day), store.Rotation{Period: 30 * day, Lead: 3 * day, Grace: 2 * day}, render.NewUUID); err != nil || c == 0 {
+		t.Fatalf("rotation: %d %v", c, err)
+	}
+	if _, raw := fetch("niko/1.58.0", good); !strings.Contains(raw, `"next"`) || !strings.Contains(raw, `"lan"`) {
+		t.Fatalf("before the policy, the fixture carries next and lan:\n%s", raw)
+	}
+	if _, err := node.SetClientPolicy(ctx, n.st, clientver.Policy{Min: map[string]string{"niko": "1.59.0"}}); err != nil {
+		t.Fatal(err)
+	}
+	_, raw := fetch("niko/1.58.0", good)
+	for _, leak := range []string{`"next"`, `"lan"`, `"password"`, `"link"`, `"dns_probe"`} {
+		if strings.Contains(raw, leak) {
+			t.Fatalf("refused, the answer carries %s:\n%s", leak, raw)
+		}
+	}
+	if !strings.Contains(raw, `"refused":true`) {
+		t.Fatalf("refused, no marker:\n%s", raw)
+	}
+	// A bad token: 404, and the device keeps the client it named before.
+	if code, _ := fetch("niko/9.9.9", "RC1 1.AAAA"); code != http.StatusNotFound {
+		t.Fatalf("bad token: %d", code)
+	}
+	devs, err := n.st.ListDevices(ctx, "alice")
+	if err != nil || devs[0].Client != "niko/1.58.0" {
+		t.Fatalf("after a bad token the device's client is %q (%v)", devs[0].Client, err)
+	}
+}
+
+// Refused and over the traffic limit: the earlier expiry, and refused a
+// date ahead: no later than that date.
+func TestClientRefusedExpiry(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet()}
+	fetch := func() sub.Payload {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, sub.Path, nil)
+		req.Header.Set(sub.DeviceHeader, f.device.ID)
+		req.Header.Set("Authorization", sub.AuthToken(f.key, time.Now().Unix()/60))
+		req.Header.Set(clientver.Header, "niko/1.58.0")
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		var env sub.Envelope
+		if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+			t.Fatal(err)
+		}
+		p, err := sub.Verify(env, f.keys.PublicJSON())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	from := time.Now().Add(5 * time.Hour).Unix()
+	if _, err := node.SetClientPolicy(ctx, f.st, clientver.Policy{Min: map[string]string{"niko": "1.59.0"}, From: from}); err != nil {
+		t.Fatal(err)
+	}
+	if p := fetch(); len(p.Profiles) != 1 || p.Expires < from || p.Expires > from+int64(sub.ExhaustedJitter/time.Second) {
+		t.Fatalf("refused from %d: expires %d, %d profiles", from, p.Expires, len(p.Profiles))
+	}
+	if _, err := node.SetClientPolicy(ctx, f.st, clientver.Policy{Min: map[string]string{"niko": "1.59.0"}}); err != nil {
+		t.Fatal(err)
+	}
+	limit := int64(10)
+	u, err := f.st.SetUserTraffic(ctx, "alice", store.TrafficChange{Limit: &limit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.WriteTraffic(ctx, store.TrafficWrite{Adds: []store.TrafficAdd{{UserID: u.ID, Start: u.TrafficStart, Up: 10}}}); err != nil {
+		t.Fatal(err)
+	}
+	if p := fetch(); !p.Client.Refused || p.Traffic == nil || !p.Traffic.Exhausted || p.Expires-p.Issued > int64(sub.RefusedExpiry/time.Second) {
+		t.Fatalf("refused and exhausted: %+v %+v, lives %d s", p.Client, p.Traffic, p.Expires-p.Issued)
 	}
 }

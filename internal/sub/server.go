@@ -214,8 +214,9 @@ func (s *Server) handle(r *http.Request) (Envelope, error) {
 	cl := &requestClient{}
 	cl.Client, cl.known = clientver.Parse(r.Header.Get(clientver.Header))
 	if cl.known {
+		// Bookkeeping only: the subscription goes out without it.
 		if err := s.Store.SetDeviceClient(ctx, dev.ID, cl.Product+"/"+cl.Version.String(), ClientSeenEvery); err != nil {
-			return Envelope{}, err
+			s.Log.Warn("subscription: the device's client not kept", "err", err)
 		}
 	}
 	env, err := s.build(ctx, dev.UserName, dev.ID, key[:], addr, now, cl)
@@ -302,7 +303,10 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 	// what the client needs to update through the node (app, relays, spa).
 	policy, err := node.ClientPolicy(ctx, s.Store)
 	if err != nil {
-		return Envelope{}, err
+		// Unreadable: none, rather than no subscription (and no next keys)
+		// for every device.
+		s.Log.Warn("subscription: client policy unreadable, taken as none", "err", err)
+		policy, err = clientver.Policy{}, nil
 	}
 	refused := cl != nil && policy.Refuses(cl.Client, cl.known, now)
 	profiles := []Profile{}
@@ -351,6 +355,10 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 	p.Client = policy.Field(refused, now)
 	if refused {
 		p.Expires = min(p.Expires, now.Add(RefusedExpiry).Unix())
+	} else if cl != nil && policy.From > now.Unix() && policy.Refuses(cl.Client, cl.known, time.Unix(policy.From, 0)) {
+		// Refused from a date ahead: the answer lives no longer than to
+		// it (and a little, so that such devices do not all ask at once).
+		p.Expires = min(p.Expires, policy.From+int64(mrand.N(ExhaustedJitter)/time.Second)) //nolint:gosec // G404: when to ask, no secret
 	}
 	if s.TCPCarrier {
 		// In the order to try: the ClientHello before bare TCP, which a

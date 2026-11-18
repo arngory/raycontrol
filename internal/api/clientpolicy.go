@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -39,14 +41,29 @@ func (s *Server) GetClientPolicy(ctx context.Context, _ *connect.Request[nodev1.
 func (s *Server) SetClientPolicy(ctx context.Context, req *connect.Request[nodev1.SetClientPolicyRequest]) (*connect.Response[nodev1.SetClientPolicyResponse], error) {
 	in := req.Msg.GetPolicy()
 	p, err := node.SetClientPolicy(ctx, s.Store, clientver.Policy{Min: in.GetMin(), From: in.GetFrom(), RefuseUnknown: in.GetRefuseUnknown()})
+	// The audit names only a policy as checked: an invalid one may hold
+	// anything the caller sent.
 	target := "none"
-	if len(p.Min) > 0 {
-		target = fmt.Sprintf("min %v from %d refuse_unknown %v", p.Min, p.From, p.RefuseUnknown)
+	switch {
+	case err != nil:
+		target = "invalid"
+	case len(p.Min) > 0:
+		target = fmt.Sprintf("min %s from %d refuse_unknown %v", minList(p.Min), p.From, p.RefuseUnknown)
 	}
 	if err := s.done(ctx, "client min", target, err); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.SetClientPolicyResponse{Policy: policyMsg(p)}), nil
+}
+
+// minList is a policy's minimums in a stable order: "niko 1.59.0, …".
+func minList(min map[string]string) string {
+	out := make([]string, 0, len(min))
+	for product, v := range min {
+		out = append(out, product+" "+v)
+	}
+	slices.Sort(out)
+	return strings.Join(out, ", ")
 }
 
 func policyMsg(p clientver.Policy) *nodev1.ClientPolicy {

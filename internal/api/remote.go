@@ -17,8 +17,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -442,16 +440,14 @@ func (r *Remote) RotateCertificate(ctx context.Context, req *connect.Request[dev
 func (r *Remote) clientAllowed(ctx context.Context, header string) error {
 	p, err := node.ClientPolicy(ctx, r.Server.Store)
 	if err != nil {
-		return connect.NewError(connect.CodeInternal, err)
+		// As the subscription does: an unreadable policy is none (rayd
+		// says so), not a refusal of every client.
+		r.Log.Warn("client policy unreadable, taken as none", "err", err)
+		return nil
 	}
 	c, known := clientver.Parse(header)
 	if !p.Refuses(c, known, r.clock()) {
 		return nil
 	}
-	var mins []string
-	for product, v := range p.Min {
-		mins = append(mins, product+" "+v)
-	}
-	slices.Sort(mins)
-	return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("client too old: min %s", strings.Join(mins, ", ")))
+	return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("client too old: min %s", minList(p.Min)))
 }

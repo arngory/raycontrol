@@ -167,7 +167,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   app-mirror [show] | on | off              the client's releases on the node for its devices
                                             (spec/app-update-v1.md; off by default)
   client [show]                             the minimum client version and the devices by client
-  client min PRODUCT VERSION|none [-from YYYY-MM-DD] [-unknown allow|refuse [-yes]]
+  client min PRODUCT VERSION|none [-from YYYY-MM-DD|now] [-unknown allow|refuse [-yes]]
                                             refuse clients below it (spec/client-min-v1.md)
   debug [show] | on [-for 30m] | off        the debug window: rayd, rayspa and niko-server log at debug
                                             level (client addresses too) until it closes by itself; root
