@@ -91,8 +91,11 @@ rayctl client min niko none                    # снять
 `SHA256SUMS`:
 
 ```json
-{"v": 1, "mandatory": true, "min_supported": "1.59.0", "min_android": 29, "message": {"en": "…", "ru": "…"}}
+{"v": 1, "mandatory": true, "min_supported": "1.59.0", "message": {"en": "…", "ru": "…"}}
+{"v": 1, "mandatory": false, "min_android": 29, "message": {"en": "…", "ru": "…"}}
 ```
+
+Вторая строка — выпуск, который ставится не на всех телефонах (ниже).
 
 - Подлинность — через `SHA256SUMS` и его подпись. Зеркало ноды держит все файлы из `SHA256SUMS` (app-update-v1 §3):
   ноде ничего менять не нужно.
