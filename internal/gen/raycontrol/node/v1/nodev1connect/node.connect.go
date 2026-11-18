@@ -198,7 +198,7 @@ type NodeServiceClient interface {
 	// call is audited. They work only from an address SPA has opened.
 	ExportUser(context.Context, *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error)
 	// RenewUser gives a user new credentials at once, as a revocation of one
-	// of the user's devices does (docs/08-decisions.md, R4-36): each a fresh
+	// of the user's devices does (docs/decisions.md, R4-36): each a fresh
 	// secret with no next and no previous one, and a new LAN password when
 	// the user has the LAN. The user's devices are cut until they fetch
 	// their subscription. Since v0.27.0; an older node answers unimplemented.
@@ -208,7 +208,7 @@ type NodeServiceClient interface {
 	SetServiceEnabled(context.Context, *connect.Request[v1.SetServiceEnabledRequest]) (*connect.Response[v1.SetServiceEnabledResponse], error)
 	DeleteService(context.Context, *connect.Request[v1.DeleteServiceRequest]) (*connect.Response[v1.DeleteServiceResponse], error)
 	// RotateService asks for the next key switch of a REALITY service
-	// (docs/08-decisions.md, R4-7): a lead time away, so that clients get the
+	// (docs/decisions.md, R4-7): a lead time away, so that clients get the
 	// next keys first, or at once (leaked keys, a blocked name). For a dnstt
 	// service it switches the seal key at once (spec/dnsseal-v1.md §8), for
 	// a masterdns one its service key (spec/masterdns-key-rotation.md §2):
@@ -264,7 +264,7 @@ type NodeServiceClient interface {
 	CreateInvite(context.Context, *connect.Request[v1.CreateInviteRequest]) (*connect.Response[v1.CreateInviteResponse], error)
 	ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error)
 	// Admin access: addresses (CIDR) that reach SSH without SPA (emergency
-	// access, docs/08-decisions.md D-6).
+	// access, docs/decisions.md D-6).
 	GetAdminAccess(context.Context, *connect.Request[v1.GetAdminAccessRequest]) (*connect.Response[v1.GetAdminAccessResponse], error)
 	SetAdminAccess(context.Context, *connect.Request[v1.SetAdminAccessRequest]) (*connect.Response[v1.SetAdminAccessResponse], error)
 	// Relays in front of the node (relay-v1): one address each, which
@@ -291,7 +291,7 @@ type NodeServiceClient interface {
 	// CheckDNSZones checks the DNS tunnel zones from the node: the
 	// delegation at the parent's own servers, the front and the backend on
 	// the node, and each zone through public resolvers with dnsprobe-v1
-	// (docs/09-observability.md). Without now it returns the last periodic
+	// (docs/design/observability.md). Without now it returns the last periodic
 	// check (rayd -dns-check). now checks at once, at most once per 30 s:
 	// a call within that gets the last check (limited), calls at the same
 	// time share one. The answer holds no secret.
@@ -324,7 +324,7 @@ type NodeServiceClient interface {
 	GetUpdateStatus(context.Context, *connect.Request[v1.GetUpdateStatusRequest]) (*connect.Response[v1.GetUpdateStatusResponse], error)
 	// SetDebug opens the debug window for a while or closes it: rayd, rayspa
 	// and niko-server log at debug level until it ends by itself
-	// (docs/09-observability.md §3). Root on the node only.
+	// (docs/design/observability.md §3). Root on the node only.
 	SetDebug(context.Context, *connect.Request[v1.SetDebugRequest]) (*connect.Response[v1.SetDebugResponse], error)
 	// SetNodeName names the node, or takes its name away with "": clients
 	// show it with the node's address (subscription-v1 §3, field name).
@@ -1043,7 +1043,7 @@ type NodeServiceHandler interface {
 	// call is audited. They work only from an address SPA has opened.
 	ExportUser(context.Context, *connect.Request[v1.ExportUserRequest]) (*connect.Response[v1.ExportUserResponse], error)
 	// RenewUser gives a user new credentials at once, as a revocation of one
-	// of the user's devices does (docs/08-decisions.md, R4-36): each a fresh
+	// of the user's devices does (docs/decisions.md, R4-36): each a fresh
 	// secret with no next and no previous one, and a new LAN password when
 	// the user has the LAN. The user's devices are cut until they fetch
 	// their subscription. Since v0.27.0; an older node answers unimplemented.
@@ -1053,7 +1053,7 @@ type NodeServiceHandler interface {
 	SetServiceEnabled(context.Context, *connect.Request[v1.SetServiceEnabledRequest]) (*connect.Response[v1.SetServiceEnabledResponse], error)
 	DeleteService(context.Context, *connect.Request[v1.DeleteServiceRequest]) (*connect.Response[v1.DeleteServiceResponse], error)
 	// RotateService asks for the next key switch of a REALITY service
-	// (docs/08-decisions.md, R4-7): a lead time away, so that clients get the
+	// (docs/decisions.md, R4-7): a lead time away, so that clients get the
 	// next keys first, or at once (leaked keys, a blocked name). For a dnstt
 	// service it switches the seal key at once (spec/dnsseal-v1.md §8), for
 	// a masterdns one its service key (spec/masterdns-key-rotation.md §2):
@@ -1109,7 +1109,7 @@ type NodeServiceHandler interface {
 	CreateInvite(context.Context, *connect.Request[v1.CreateInviteRequest]) (*connect.Response[v1.CreateInviteResponse], error)
 	ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error)
 	// Admin access: addresses (CIDR) that reach SSH without SPA (emergency
-	// access, docs/08-decisions.md D-6).
+	// access, docs/decisions.md D-6).
 	GetAdminAccess(context.Context, *connect.Request[v1.GetAdminAccessRequest]) (*connect.Response[v1.GetAdminAccessResponse], error)
 	SetAdminAccess(context.Context, *connect.Request[v1.SetAdminAccessRequest]) (*connect.Response[v1.SetAdminAccessResponse], error)
 	// Relays in front of the node (relay-v1): one address each, which
@@ -1136,7 +1136,7 @@ type NodeServiceHandler interface {
 	// CheckDNSZones checks the DNS tunnel zones from the node: the
 	// delegation at the parent's own servers, the front and the backend on
 	// the node, and each zone through public resolvers with dnsprobe-v1
-	// (docs/09-observability.md). Without now it returns the last periodic
+	// (docs/design/observability.md). Without now it returns the last periodic
 	// check (rayd -dns-check). now checks at once, at most once per 30 s:
 	// a call within that gets the last check (limited), calls at the same
 	// time share one. The answer holds no secret.
@@ -1169,7 +1169,7 @@ type NodeServiceHandler interface {
 	GetUpdateStatus(context.Context, *connect.Request[v1.GetUpdateStatusRequest]) (*connect.Response[v1.GetUpdateStatusResponse], error)
 	// SetDebug opens the debug window for a while or closes it: rayd, rayspa
 	// and niko-server log at debug level until it ends by itself
-	// (docs/09-observability.md §3). Root on the node only.
+	// (docs/design/observability.md §3). Root on the node only.
 	SetDebug(context.Context, *connect.Request[v1.SetDebugRequest]) (*connect.Response[v1.SetDebugResponse], error)
 	// SetNodeName names the node, or takes its name away with "": clients
 	// show it with the node's address (subscription-v1 §3, field name).

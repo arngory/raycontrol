@@ -31,7 +31,7 @@ import (
 	"github.com/arngory/raycontrol/internal/store"
 )
 
-// Remote serves the API to client devices (docs/08-decisions.md, R3-3):
+// Remote serves the API to client devices (docs/decisions.md, R3-3):
 // on its own TCP port behind SPA, which only admin devices and invites
 // pass; TLS 1.3 with X25519MLKEM768 only; a client certificate on every
 // connection. The device is its certificate's key: no CA, the node keeps

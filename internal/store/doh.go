@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// DoH's token is a device's (docs/08-decisions.md, R4-37): DoHDeviceToken
+// DoH's token is a device's (docs/decisions.md, R4-37): DoHDeviceToken
 // of the user's DoH secret, the credential of the user's that rotates
 // (R4-1), and the device's SPA key, which only the device and the node
 // hold. The secret itself is no token, but for DoHSharedWindow after the
@@ -58,7 +58,7 @@ func DoHDeviceToken(secret string, device []byte) string {
 // token for each secret of the user's the rotation accepts (current, next,
 // previous in its grace). In the shared window the user's secrets are
 // tokens too, unless a device of the user was revoked since the window
-// began: that device knew them (docs/08-decisions.md, R4-37).
+// began: that device knew them (docs/decisions.md, R4-37).
 //
 // One load reads the users of the service, then its credentials with the
 // devices not revoked of their users in one query, and makes only the

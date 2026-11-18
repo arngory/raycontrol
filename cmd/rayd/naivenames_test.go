@@ -13,7 +13,7 @@ import (
 	"github.com/arngory/raycontrol/internal/store"
 )
 
-// rayctl status's naive-names line (docs/20 §8.4): a published next name
+// rayctl status's naive-names line (docs/research/naive-sni-rotation.md §8.4): a published next name
 // that the rendered front does not route is reported; one it routes, and
 // a node without published names, are not; a node without naive has no
 // line at all.

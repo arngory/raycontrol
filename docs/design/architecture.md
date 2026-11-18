@@ -1,6 +1,6 @@
-# 01. Архитектура ноды
+# Архитектура ноды
 
-Статус: **принята** (редакция 2, по решениям из [08-decisions.md](08-decisions.md)).
+Статус: **принята** (редакция 2, по решениям из [decisions.md](../decisions.md)).
 Data plane описан в спецификации niko-server
 ([`arngory/niko`, `docs/server/SPEC.md`](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/SPEC.md)),
 изменения к ней — в 08, «Следствие 3».
@@ -57,7 +57,7 @@ Data plane описан в спецификации niko-server
 - Права на сокет бэкенда — только у UID фронта; бэкенд принимает соединения только от UID фронта (`SO_PEERCRED`).
 
 Цена разделения — лишняя копия UDP-датаграмм через фронт. Нагрузочный тест niko-server (SPEC §6.6) узкого места
-не показал (итог — в [04-roadmap.md](04-roadmap.md), «Технические проверки»); если копия окажется заметной на
+не показал (итог — в [roadmap.md](../roadmap.md), «Технические проверки»); если копия окажется заметной на
 настоящей ноде, для UDP рассматривается передача через `SO_REUSEPORT` + eBPF.
 
 ## Внутренняя ступень (`inner`)
@@ -132,7 +132,7 @@ settings        key, value                                           — вкл�
 - Локальный: unix socket, `SO_PEERCRED` — для `rayctl`.
 - **Подписка** (с первого этапа): HTTPS за SPA, ответ подписан ключом ноды; через неё клиент получает
   ротируемые учётные данные.
-- Удалённый API (R3, [spec/api-v1.md](spec/api-v1.md)): protobuf + ConnectRPC, отдельный порт за SPA + mTLS по ключу
+- Удалённый API (R3, [spec/api-v1.md](../spec/api-v1.md)): protobuf + ConnectRPC, отдельный порт за SPA + mTLS по ключу
   устройства, роли user и admin, регистрация устройства по одноразовому приглашению `rcinv1:` (строка или QR).
   TLS — только с `X25519MLKEM768`.
 

@@ -1,5 +1,5 @@
 // Package release fetches and verifies raycontrol releases for rayctl
-// update (docs/08-decisions.md, R4-12): the archive of an architecture,
+// update (docs/decisions.md, R4-12): the archive of an architecture,
 // SHA256SUMS and its minisign signature, checked with the same key as
 // install/bootstrap.sh. The version comes from the signed trusted comment,
 // so a mirror cannot pass an older release off as the latest one.

@@ -1,5 +1,5 @@
 // Package redact takes out of text what must not leave the node in a
-// report (docs/09-observability.md): addresses, the node's names, keys,
+// report (docs/design/observability.md): addresses, the node's names, keys,
 // UUIDs, links and bundles. Addresses become stable tokens within one
 // report, so lines about the same client still match, but not across
 // reports: every Redactor has its own salt.

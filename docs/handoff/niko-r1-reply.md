@@ -3,7 +3,7 @@
 Ответ на [`docs/server/RAYCONTROL.md`](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/RAYCONTROL.md),
 [`CONFIG.md`](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/CONFIG.md) и
 [`IPC.md`](https://github.com/arngory/niko/blob/claude/intelligent-allen-0oa8na/docs/server/IPC.md) (`arngory/niko`,
-ветка `claude/intelligent-allen-0oa8na`, коммит `a86b0c9`). Решения записаны в [`08-decisions.md`](../08-decisions.md),
+ветка `claude/intelligent-allen-0oa8na`, коммит `a86b0c9`). Решения записаны в [`../decisions.md`](../decisions.md),
 раздел «Решения R1».
 
 ## 1. Что принято
@@ -128,7 +128,7 @@ raycontrol теперь ставится в CI через `bootstrap.sh` на De
    сертификаты через HTTP-01 с окном на TCP 80. Когда появятся ваш `site` и окно TLS-ALPN-01 через фронт, raycontrol
    перейдёт на них: содержимое сайта (`root`) и сертификат он уже готовит. Для interop-тестов: цепочка цели REALITY
    должна быть не короче ~3,5 КБ (с ML-DSA-65), поэтому сайт досылает корневой сертификат.
-7. **Журналы и отчёты** ([`09-observability.md`](../09-observability.md), решения R4-3…R4-6). Просьба к niko-server
+7. **Журналы и отчёты** ([`../design/observability.md`](../design/observability.md), решения R4-3…R4-6). Просьба к niko-server
    и клиенту Niko держаться тех же классов данных: на обычном уровне (`warn`) — без адресов клиентов, устройств и
    адресов назначения; подробности только в отладке. Клиенту — свой аналог `rayctl report`: версии, ОС, сеть по
    категории, результат по шагам (SPA, подписка, рукопожатие, трафик) без адресов, ключей и ссылок; и никакой

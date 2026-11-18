@@ -40,7 +40,7 @@ type SlipstreamSettings struct {
 }
 
 // The limits of a slipstream service (spec/slipstream-v1.md §3): what one
-// server process carries (docs/14-capacity.md), and what a device needs —
+// server process carries (docs/design/capacity.md), and what a device needs —
 // its connection, and the one it left on another network until that one
 // is silent 30 s and gives way.
 const (

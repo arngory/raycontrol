@@ -12,8 +12,8 @@ import (
 	"github.com/arngory/raycontrol/internal/store"
 )
 
-// naive's server name changes in epochs (docs/08-decisions.md R4-42,
-// docs/20-naive-sni-rotation.md §8), with nothing new for clients: the
+// naive's server name changes in epochs (docs/decisions.md R4-42,
+// docs/research/naive-sni-rotation.md §8), with nothing new for clients: the
 // next name goes into the profile's next link a lead time before the
 // switch (subscription-v1 §3), and the client takes that line whole.
 //
@@ -89,7 +89,7 @@ const NaivePrevCap = 3
 const DefaultNaiveSNIPeriod = 90 * 24 * time.Hour
 
 // NaivePrevious is what a naive switch at a time does to the previous
-// names (the owner's answer 3 to docs/20 §9: the previous name is accepted
+// names (the owner's answer 3 to docs/research/naive-sni-rotation.md §9: the previous name is accepted
 // the whole epoch). Each name left at a switch stays routed until the first
 // switch a period or more after that one (-naive-sni-period; 90 days with
 // 0): a device that fetched nothing since knows only the link it had. At
@@ -197,7 +197,7 @@ func joinSlack(e RealityEpoch) int64 {
 // time, or a period after the last switch when a scheduled switch moves
 // the name (RenamesAt). A scheduled one moves to the next switch of a
 // REALITY of the same site within half a period of it (the owner's answer
-// 2 to docs/20 §9): REALITY's switch restarts the front when its name
+// 2 to docs/research/naive-sni-rotation.md §9): REALITY's switch restarts the front when its name
 // changes, and naive's too, and one restart carries both.
 func naiveSwitch(ctx context.Context, st *store.Store, all []store.Service, svc store.Service, state NaiveState, e RealityEpoch, now int64) naiveDue {
 	d := naiveDue{at: math.MaxInt64}

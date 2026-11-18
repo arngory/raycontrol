@@ -14,7 +14,7 @@
 #   sudo bash bootstrap.sh -host <public address> [-domain <domain>]
 #
 # Before it installs anything of raycontrol it checks the host (rayctl check,
-# docs/08-decisions.md, R4-24): what is required, what is advised. A host that
+# docs/decisions.md, R4-24): what is required, what is advised. A host that
 # cannot run a node is refused, and the packages this run installed are
 # removed again. -check, as the first argument, only checks and leaves the
 # host as it was:

@@ -11,7 +11,7 @@
 | raycontrol | `arngory/raycontrol`, ветка `claude/clever-feynman-w0e2v1`, коммит **`5e3c5ec`** |
 | niko-server | `arngory/niko-server`, релиз **[`v0.6.0`](https://github.com/arngory/niko-server/releases/tag/v0.6.0)** (коммит `492dd84`); raycontrol закрепляет именно его |
 | Xray | без изменений: `arngory/xray-core` `a4a3dff` (v26.10.31) |
-| Решения | `docs/08-decisions.md` в raycontrol: R2-15, R3-4, R3-5, R4-15, R4-16 |
+| Решения | `docs/decisions.md` в raycontrol: R2-15, R3-4, R3-5, R4-15, R4-16 |
 | Форматы | `docs/spec/subscription-v1.md`, `docs/spec/probe-v1.md` (новый), `docs/spec/api-v1.md` (не менялся) |
 
 Прочитай три заметки в `docs/handoff/` raycontrol в этом порядке:

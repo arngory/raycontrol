@@ -124,7 +124,7 @@ const revokedSinceCurrent = `(d.revoked_at > coalesce(c.rotated_at, c.created_at
 	OR d.revoked_at = c.rotated_at AND c.prev_secret IS NOT NULL)`
 
 // rotateForRevocation is what a revocation with overlap does to its user's
-// credentials (RevokeDeviceOverlap; docs/08-decisions.md, R4-43): an
+// credentials (RevokeDeviceOverlap; docs/decisions.md, R4-43): an
 // unscheduled rotation with the overlap of the scheduled one (R4-1).
 // Every credential of the user but DoH's (R4-37: no device holds the
 // user's DoH secret) gets a fresh next secret, accepted from now on and in

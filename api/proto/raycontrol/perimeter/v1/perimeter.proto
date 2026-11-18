@@ -14,7 +14,7 @@ service PerimeterService {
   // (spec/conn-limit-v1.md §6.3): at each switch and once a minute.
   rpc ReportGuard(ReportGuardRequest) returns (ReportGuardResponse);
   // ReportGate tells rayd where rayspa's own table stands
-  // (docs/08-decisions.md, R4-40): at each change and every 30 s. rayd
+  // (docs/decisions.md, R4-40): at each change and every 30 s. rayd
   // cannot read the kernel's table; a rayspa that follows the feed but
   // cannot put its table in leaves the host open. An older rayspa sends
   // none (rayd: unknown).
@@ -205,7 +205,7 @@ message Egress {
   // guard of the node's own addresses does not take them: rayd reaches the
   // node itself.
   repeated uint32 uids = 3;
-  // The node's own and local networks (docs/08-decisions.md, R4-38):
+  // The node's own and local networks (docs/decisions.md, R4-38):
   // loopback, private, link-local, CGNAT, multicast, the metadata address.
   // Absent (an older rayd): rayspa does not hold them back, as before.
   Local local = 4;

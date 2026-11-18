@@ -3,7 +3,7 @@
 Статус: **R3, первая версия.** Совместимые изменения — по правилам protobuf; несовместимые — только как
 `device.v2` / `node.v2`. Эталонная реализация: сервер — [`internal/api/remote.go`](../../internal/api/remote.go),
 клиент — [`cmd/rayctl/remote.go`](../../cmd/rayctl/remote.go) (`rayctl remote enroll`, `rayctl -remote`).
-Решение — R3-3 в [`08-decisions.md`](../08-decisions.md).
+Решение — R3-3 в [`../decisions.md`](../decisions.md).
 
 Удалённый API нужен для двух вещей:
 
@@ -270,7 +270,7 @@ A client that lost Register's answer (timeout, dropped connection) may send it a
 
 ## 5a. Отзыв устройства меняет учётные данные пользователя (raycontrol v0.27.0)
 
-Решение R4-36 ([08-decisions.md](../08-decisions.md)). `NodeService.RevokeDevice {id}` — с ноды (`rayctl device
+Решение R4-36 ([decisions.md](../decisions.md)). `NodeService.RevokeDevice {id}` — с ноды (`rayctl device
 revoke`) и с admin-устройства через удалённый API одно и то же.
 
 **Что меняется.** Ключи самого устройства закрываются, как раньше: SPA, сертификат для API, метка dnsauth, ключ

@@ -1,6 +1,6 @@
 // Package site makes and serves the node's decoy site: the target of
 // REALITY in self-steal mode, which anyone who is not a client sees
-// (docs/08-decisions.md, E-4, R2-12). Every install gets its own site from
+// (docs/decisions.md, E-4, R2-12). Every install gets its own site from
 // its own seed: a small studio site with a journal, plausible and dull.
 package site
 

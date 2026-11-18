@@ -19,7 +19,7 @@ import (
 	"github.com/arngory/raycontrol/internal/spa"
 )
 
-// ServiceKinds lists the services a node can run (docs/03-protocols.md).
+// ServiceKinds lists the services a node can run (docs/design/protocols.md).
 var ServiceKinds = []string{
 	"reality", "hy2-masq", "hy2-obfs", "naive", "doh", "yggdrasil",
 	"dnstt", "masterdns", "slipstream", "olcrtc", "openflux", "inner", "site",
@@ -819,7 +819,7 @@ type Revocation struct {
 }
 
 // RevokeDevice marks a device revoked. Revocation is permanent. In the same
-// transaction every credential of its user is new (docs/08-decisions.md,
+// transaction every credential of its user is new (docs/decisions.md,
 // R4-36): the credentials are the user's, shared by all the user's
 // devices, and the revoked one may have kept its lines. Each gets a fresh
 // secret with no next and no previous one, so nothing it knew is accepted
@@ -840,7 +840,7 @@ func (s *Store) RevokeDevice(ctx context.Context, id string) (Revocation, error)
 }
 
 // RevokeDeviceOverlap is RevokeDevice for a device given away or broken,
-// not stolen (rayctl device revoke -overlap; docs/08-decisions.md, R4-43):
+// not stolen (rayctl device revoke -overlap; docs/decisions.md, R4-43):
 // the user's credentials but DoH's rotate, unscheduled, with the overlap
 // of the scheduled rotation (R4-1), instead of being new at once. Each
 // gets a fresh next secret, which the user's other devices find in their

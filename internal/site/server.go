@@ -81,7 +81,7 @@ func TLSConfigFor(get func(*tls.ClientHelloInfo) (*tls.Certificate, error)) *tls
 
 // What the site answers to whoever REALITY hands it: a TLS handshake with
 // a real certificate always (REALITY needs it), then by default nothing a
-// prober can use (docs/08-decisions.md, R4-8).
+// prober can use (docs/decisions.md, R4-8).
 const (
 	Answer404    = "404"    // every request: 404, no body (the default)
 	Answer403    = "403"    // every request: 403, no body

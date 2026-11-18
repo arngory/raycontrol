@@ -1,5 +1,5 @@
 // Package cloudflare keeps the node's DNS records in a Cloudflare zone and
-// answers ACME DNS-01 challenges there (docs/08-decisions.md, R4-10): the
+// answers ACME DNS-01 challenges there (docs/decisions.md, R4-10): the
 // wildcard record every subdomain of the node resolves through, the NS
 // delegation of DNS tunnel zones, and the TXT records of certificate
 // orders. It changes only records it created, marked with Owner in their

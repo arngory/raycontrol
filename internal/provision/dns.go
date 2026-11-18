@@ -16,7 +16,7 @@ import (
 	"github.com/arngory/raycontrol/internal/store"
 )
 
-// The node's DNS provider (docs/08-decisions.md, R4-10). The token is a
+// The node's DNS provider (docs/decisions.md, R4-10). The token is a
 // secret (class P2) like the node's keys: it lives in the database only.
 const (
 	settingDNSProvider = "dns_provider"

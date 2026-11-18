@@ -13,7 +13,7 @@ import (
 )
 
 // JournalDir keeps what raycontrol changed on the host, so that rayctl
-// uninstall can put everything back (docs/08-decisions.md, R4-2). Root
+// uninstall can put everything back (docs/decisions.md, R4-2). Root
 // only; it lives apart from the state directory, which rayd owns.
 const JournalDir = "/var/lib/raycontrol-install"
 

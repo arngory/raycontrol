@@ -27,7 +27,7 @@ import (
 
 // check tells whether this host can run a node: what is required (the
 // install refuses without it), what is advised, what only a probe from
-// outside shows (docs/08-decisions.md, R4-24). It changes nothing and
+// outside shows (docs/decisions.md, R4-24). It changes nothing and
 // needs no rayd: the bootstrap runs it before it installs anything. When
 // rayd runs, its last check of the DNS zones comes too (Internet), which
 // never counts as a failure.

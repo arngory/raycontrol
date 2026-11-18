@@ -1,7 +1,7 @@
 # apply-plan-v1: план `rayctl apply` строит root
 
-Статус: **принят** (2026-11-08), решения — §6. Реализация — v0.21.0: шаги 1–7 §4.1 и решение 3, отличия — §7. Задача из [`04-roadmap.md`](../04-roadmap.md) «После v0.19.0»,
-[`12-review.md`](../12-review.md) S-7 и [`node-update-v1.md`](node-update-v1.md) §3 «Чего этот путь не меняет».
+Статус: **принят** (2026-11-08), решения — §6. Реализация — v0.21.0: шаги 1–7 §4.1 и решение 3, отличия — §7. Задача из [`../roadmap.md`](../roadmap.md) «После v0.19.0»,
+[`../research/review.md`](../research/review.md) S-7 и [`node-update-v1.md`](node-update-v1.md) §3 «Чего этот путь не меняет».
 
 Зачем: root ставит то, что ему отдал непривилегированный rayd (`User=rayd`). Взломанный rayd получает root при
 ближайшем `rayctl apply`, `rayctl install` поверх или `rayctl update`. С `remote on` или `auto patch` он ещё и выбирает
@@ -187,9 +187,9 @@ root (`relay.go:38`, `62`). Меняется одно: `Plan.Check` должен
 ### 4.3. Документы
 
 - `docs/spec/node-update-v1.md` §3, «Чего этот путь не меняет»: apply больше не ставит план rayd.
-- `docs/04-roadmap.md` «После v0.19.0», `docs/12-review.md` S-7: сделано, ссылка сюда.
-- `docs/08-decisions.md`: R1-9 («кто что пишет») — план строит root; новая строка решения про (C).
-- `docs/02-security-model.md`, «Zero trust между компонентами»: строка `rayd` → `rayctl apply`.
+- `docs/roadmap.md` «После v0.19.0», `docs/research/review.md` S-7: сделано, ссылка сюда.
+- `docs/decisions.md`: R1-9 («кто что пишет») — план строит root; новая строка решения про (C).
+- `docs/design/security-model.md`, «Zero trust между компонентами»: строка `rayd` → `rayctl apply`.
 - `docs/RELEASE.md`: `GetDeployment.units` — в замороженное (старый rayctl при `-no-handoff`).
 - Комментарий `nodeOnly` (`remote.go:209-210`) и `docs/spec/api-v1.md`: ключей в ответе `GetDeployment` нет
   (вывод: в `plan.Files` их нет), причину запрета уточнить.

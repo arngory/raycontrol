@@ -13,7 +13,7 @@ import (
 )
 
 // legacyCmd finds raycontrol v0 (legacy/ray.sh) and, with -remove, backs
-// it up and takes away what it installed (docs/08-decisions.md, R4-26).
+// it up and takes away what it installed (docs/decisions.md, R4-26).
 // No rayd is needed: the bootstrap runs it before the install.
 func (c *cli) legacyCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("legacy", flag.ContinueOnError)

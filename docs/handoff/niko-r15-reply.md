@@ -84,7 +84,7 @@ raycontrol v0.5.0 (после выхода — v0.5.1) и niko-server v0.7.0. SH
 **Предлагаемый порядок:**
 1. поднять закрепления (raycontrol v0.5.x, niko-server v0.7.0);
 2. добавить в interop `own`, замер через туннель, отчёт и `hints` (§3 выше);
-3. проверка на VPS по `docs/10-quickstart-debian13.md` с настоящим клиентом.
+3. проверка на VPS по `docs/guide/quickstart-debian13.md` с настоящим клиентом.
 
 ## 5. Что прислать в ответ
 

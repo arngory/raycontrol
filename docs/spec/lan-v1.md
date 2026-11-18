@@ -260,7 +260,7 @@ v0.16.0, плюс коммит форка yggdrasil-go. Клиент — Niko. �
   (`internal/render/yggdrasil.go:130-138`).
 - **Адрес пира в строках ядра** («Connected inbound …», `ygg:src/core/link.go:694`) — только на debug, как сейчас
   (`niko:nikoserver/yggdrasil.go:542-556`); это пир, не назначение.
-- **rayd** смену заголовка не пишет: это активность ([09-observability](../09-observability.md) §1 п. 3); состояние —
+- **rayd** смену заголовка не пишет: это активность ([observability](../design/observability.md) §1 п. 3); состояние —
   в `rayctl device list`. `rayctl user lan` — в аудите, как действие администратора.
 
 ### 4.4 Злоупотребления и пределы

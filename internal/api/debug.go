@@ -13,7 +13,7 @@ import (
 )
 
 // SetDebug opens the debug window for a while, or closes it
-// (docs/09-observability.md §3). The data plane is rendered again with its
+// (docs/design/observability.md §3). The data plane is rendered again with its
 // level (its processes restart), rayspa takes it from its next snapshot
 // and rayd from DebugChanged; the window ends by itself.
 func (s *Server) SetDebug(ctx context.Context, req *connect.Request[nodev1.SetDebugRequest]) (*connect.Response[nodev1.SetDebugResponse], error) {

@@ -24,7 +24,7 @@ type frontRoute struct {
 }
 
 // naiveServed checks that the front routes the published next name of
-// every enabled naive service (docs/20-naive-sni-rotation.md §8.4). A name
+// every enabled naive service (docs/research/naive-sni-rotation.md §8.4). A name
 // chosen an epoch ahead is routed from then, so one missing means that the
 // render left the service out (it waits for its site's certificate, or
 // fails), and its clients that move to it meet REALITY's site and go back

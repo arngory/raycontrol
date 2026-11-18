@@ -467,7 +467,7 @@ func (a *Accountant) Round(ctx context.Context, only string, force bool) {
 }
 
 // tell audits a crossing, actor rayd, and logs it by the user's number
-// only (docs/09-observability.md §1).
+// only (docs/design/observability.md §1).
 func (a *Accountant) tell(ctx context.Context, u store.User, what string) {
 	if err := a.Store.Audit(ctx, "rayd", "user.traffic="+what, u.Name, "ok"); err != nil {
 		a.log().Warn("audit", "err", err)

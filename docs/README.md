@@ -1,46 +1,59 @@
-# raycontrol v2: проектная документация
+# Документация raycontrol
 
-Нода — самодостаточный серверный стек на одном хосте. Data plane — niko-server (форк sing-box): фронт-мультиплексоры
-и отдельные процессы-бэкенды протоколов. Control plane — raycontrol: состояние, конфиги, ротация, SPA и файрвол, подписка,
-API для CLI и клиента Niko. Все порты закрыты до SPA v2, постквант обязателен везде, где его поддерживает протокол,
-ключи и доступы ротируются, у каждой установки свои случайные параметры, между компонентами — zero trust.
+Нода — самодостаточный стек на одном Linux-хосте. Data plane — [niko-server](https://github.com/arngory/niko-server):
+фронт на TCP 443, UDP 443 и UDP 53 и процессы-бэкенды протоколов. Control plane — raycontrol: состояние, конфиги,
+ротация ключей, SPA и файрвол, подписка, API для `rayctl` и клиента [Niko](https://github.com/arngory/niko).
+
+## Оператору ноды — `guide/`
 
 | Документ | О чём |
 |---|---|
-| [00-legacy-audit.md](00-legacy-audit.md) | Аудит текущей версии v0: находки с ID `L-xx`. |
-| [01-architecture.md](01-architecture.md) | Нода: niko-server (фронт + бэкенды) и raycontrol, внутренняя ступень `inner`, данные, ротация, API. |
-| [02-security-model.md](02-security-model.md) | Угрозы, полное закрытие портов, SPA v2, постквант, ротация, zero trust, аккаунты платформ. |
-| [03-protocols.md](03-protocols.md) | Состав протоколов v1, домены, порты, отличия от SPEC. |
-| [04-roadmap.md](04-roadmap.md) | Направления работ и этапы R0–R5, синхронизированные с SPEC niko-server. |
-| [05-transports-research.md](05-transports-research.md) | Транспорты для белых списков: qWDTT, CSQTT, olcRTC, OpenFlux, dnstt, Slipstream, MasterDnsVPN, S3 Bypass. |
-| [06-client-requirements.md](06-client-requirements.md) | Требования к клиенту для следующей фазы. |
-| [07-questions.md](07-questions.md) | Вопросы перед реализацией (история; все закрыты). |
-| [08-decisions.md](08-decisions.md) | **Принятые решения** — главнее остальных документов при расхождении. |
-| [09-observability.md](09-observability.md) | Логи, телеметрия (её нет), отчёт для issue, QA, обезличенные идентификаторы. |
-| [10-quickstart-debian13.md](10-quickstart-debian13.md) | Полное руководство по развёртыванию на Debian 13: требования, проверка релиза и хоста, установка, relay (второй вход перед нодой), сервисы (и свой пир Yggdrasil), что выключено по умолчанию, пользователи и приглашения, ping через VPN, эксплуатация (обновление, копии), неполадки, чек-лист. |
-| [11-asn-sources.md](11-asn-sources.md) | Источники IP → ASN для сводки клиентов: базы и API, их лицензии и условия. |
-| [15-traffic.md](15-traffic.md) | Какой трафик несёт каждый профиль (TCP, UDP, DNS, ICMP) и в каком виде; mtr через туннель. |
-| [16-cronet-build.md](16-cronet-build.md) | Своя сборка libcronet и naive: что собирается, замеры, раннер с пределами по потокам и памяти, диск, ccache. |
-| [17-naive-default.md](17-naive-default.md) | naive как профиль по умолчанию: разбор ноды и клиента, дефекты, UDP и не-TCP трафик, порядок работ, решения владельца. |
-| [18-platforms-and-hosts.md](18-platforms-and-hosts.md) | `rayctl` и нода вне Linux, LXC и OpenVZ, нода без публичного адреса, порты при установке, слой абстракции платформы: факты, варианты, цена. |
-| [20-naive-sni-rotation.md](20-naive-sni-rotation.md) | Смена имени naive: варианты, что видит цензор, решение (смена эпохами, R4-42) и как оно реализовано в v0.29.0. |
-| [cheatsheet.md](cheatsheet.md) | Все команды `rayctl` на одной странице. |
-| [spec/spa-v2.md](spec/spa-v2.md) | Формат SPA v2 и пакета регистрации устройства (заморожен). |
-| [spec/subscription-v1.md](spec/subscription-v1.md) | Подписка: запрос, подписи, ссылки с параметрами `niko-*` (заморожена). |
-| [spec/api-v1.md](spec/api-v1.md) | Удалённый API: приглашения `rcinv1:`, регистрация, mTLS по ключу устройства, роли. |
-| [spec/integrations-v1.md](spec/integrations-v1.md) | Внешние системы у ноды (боты, биллинг): роли `billing` и `support`, доступ по постоянным адресам, события webhook, OpenAPI (черновик, после v0.31.0). |
-| [RELEASE.md](RELEASE.md) | Ключ подписи и выпуск релизов. |
-| [handoff/niko-session.md](handoff/niko-session.md) | Что передать в сессию Niko: правки SPEC, контракт niko-server, доработки клиента. |
-| [handoff/niko-r1-reply.md](handoff/niko-r1-reply.md) | Ответ на документы R1 сессии Niko: TCP-носитель SPA, замечания к CONFIG и IPC. |
-| [handoff/niko-r4-note.md](handoff/niko-r4-note.md) | Что изменилось на сервере в R4 и что нужно от клиента: `next`, импорт пакета, требования к пакетам. |
-| [handoff/niko-r3-note.md](handoff/niko-r3-note.md) | Серверная часть R2/R3: профили Hysteria2, DoH, naive, регистрация по приглашению `rcinv1:`, что проверить в CI Niko. |
-| [handoff/niko-r3-reply.md](handoff/niko-r3-reply.md) | Ответ на RAYCONTROL.md §9–§10: DoH напрямую на ноду, ссылка `rcinv1:` как URI, перенос niko-server в `arngory/niko-server`. |
-| [handoff/niko-mux-note.md](handoff/niko-mux-note.md) | Фронт niko-server на 443: tcpmux и udpmux, Hysteria2 на sing-quic, naive-quic и DoH3, что поменять в CI Niko. |
-| [handoff/niko-ygg-note.md](handoff/niko-ygg-note.md) | Yggdrasil на ноде (R4-15): профиль `niko-ygg`, конфиг ядра клиента, ротация ключа вместе с UUID. |
-| [handoff/niko-probe-note.md](handoff/niko-probe-note.md) | Замер канала (R4-16, ответ на §13): TCP и эхо UDP на эндпоинте подписки, потолки Brutal, что дальше. |
-| [handoff/niko-naive-sni-note.md](handoff/niko-naive-sni-note.md) | Новое имя naive в `next` (R4-42, v0.29.0): что обещает нода, как получить опубликованный `next` на стенде interop. |
-| [handoff/niko-prompt-2026-11-03.md](handoff/niko-prompt-2026-11-03.md) | Промпт для сессии клиента: всё с прошлых закреплений (фронт, Yggdrasil, замер, Brutal), что сделать и что прислать. |
+| [guide/quickstart-debian13.md](guide/quickstart-debian13.md) | С голого сервера до пакета для клиента: требования, установка, сервисы, relay, пользователи, обновление, неполадки |
+| [guide/cheatsheet.md](guide/cheatsheet.md) | Все команды `rayctl` на одной странице |
 
-Статус: решения приняты (08), документы 01–04 переписаны под них. Data plane — [niko-server](https://github.com/arngory/niko-server) ([SPEC](https://github.com/arngory/niko-server/blob/main/docs/SPEC.md)), control plane — raycontrol; обе ведёт эта сессия.
-Код v0 перенесён в `legacy/`. Этапы R0 и R1 реализованы, установка проверяется в CI на Debian 12/13, Ubuntu 24.04 и
-Rocky Linux 9/10 (решение R2-1); niko-server живёт в [`arngory/niko-server`](https://github.com/arngory/niko-server) (релиз v0.8.0).
+## Как устроено — `design/`
+
+| Документ | О чём |
+|---|---|
+| [design/architecture.md](design/architecture.md) | Нода: niko-server (фронт и бэкенды) и raycontrol, внутренняя ступень, данные, ротация, API |
+| [design/security-model.md](design/security-model.md) | Угрозы, закрытые порты и SPA v2, постквант, ротация, zero trust |
+| [design/protocols.md](design/protocols.md) | Протоколы и транспорты, домены, порты |
+| [design/traffic.md](design/traffic.md) | Какой трафик (TCP, UDP, DNS, ICMP) несёт каждый профиль |
+| [design/observability.md](design/observability.md) | Журналы, метрики, отчёт для issue; телеметрии нет |
+| [design/capacity.md](design/capacity.md) | Сколько пользователей тянет нода и где пределы |
+
+## Контракт с клиентом — `spec/`
+
+Нормативные спецификации с версией в имени; клиент ссылается на них по этим путям. Главные:
+[spa-v2.md](spec/spa-v2.md) (стук, заморожен), [subscription-v1.md](spec/subscription-v1.md) (подписка),
+[api-v1.md](spec/api-v1.md) (удалённый API и приглашения), [probe-v1.md](spec/probe-v1.md) (замер канала),
+[app-update-v1.md](spec/app-update-v1.md) (зеркало релизов клиента). Черновики: client-min-v1, integrations-v1,
+app-attest-v1, rules-v1. Полный список — в каталоге [spec/](spec/).
+
+## Решения и план
+
+- [decisions.md](decisions.md) — принятые решения с ID (`R4-42`, `A-3`…); при расхождении главнее остальных документов.
+- [roadmap.md](roadmap.md) — направления работ и что впереди.
+- [RELEASE.md](RELEASE.md) — как выходит и проверяется выпуск, ключи и окружения.
+- [handoff/SYNC.md](handoff/SYNC.md) — общий файл состояния с клиентской сессией; остальное в `handoff/` — архив
+  ответов и заметок для клиента.
+
+## Исследования — `research/`
+
+Разборы и обзоры на свою дату; архив, по нему не работают. Актуальное из них перенесено в `design/`, `decisions.md` или
+спецификации.
+
+| Документ | О чём |
+|---|---|
+| [research/transports.md](research/transports.md) | Транспорты для режима белых списков |
+| [research/dns-resolvers.md](research/dns-resolvers.md) | Резолверы для DNS-туннелей |
+| [research/asn-sources.md](research/asn-sources.md) | Источники IP → ASN для сводки клиентов и их лицензии |
+| [research/cronet-build.md](research/cronet-build.md) | Своя сборка libcronet и naive |
+| [research/naive-default.md](research/naive-default.md) | naive как профиль по умолчанию |
+| [research/naive-sni-rotation.md](research/naive-sni-rotation.md) | Смена имени naive (реализовано в v0.29.0) |
+| [research/platforms-and-hosts.md](research/platforms-and-hosts.md) | `rayctl` и нода вне Linux, LXC и OpenVZ, нода без публичного адреса |
+| [research/mihomo-review.md](research/mihomo-review.md) | Что взять из mihomo для маршрутизации |
+| [research/review.md](research/review.md) | Разбор безопасности, качества и производительности (2026-11-04) |
+| [research/client-requirements.md](research/client-requirements.md) | Требования к клиенту до его первой версии |
+| [research/questions.md](research/questions.md) | Вопросы перед реализацией (все закрыты) |
+| [research/legacy-audit.md](research/legacy-audit.md) | Аудит bash-установщика v0 (`legacy/`) |

@@ -1,7 +1,7 @@
 // Package hostcheck tells whether a host can run a node, and how well:
 // what is required (without it the node does not work, and the install
 // refuses before it changes anything), what is advised (the node works,
-// worse), and what only a probe from outside shows (docs/08-decisions.md,
+// worse), and what only a probe from outside shows (docs/decisions.md,
 // R4-24).
 package hostcheck
 
@@ -153,7 +153,7 @@ func System() *Host {
 }
 
 // Thresholds. The node with every service takes about 240 MiB at rest
-// (docs/10-quickstart-debian13.md, §0), the system 150–250 MiB besides.
+// (docs/guide/quickstart-debian13.md, §0), the system 150–250 MiB besides.
 const (
 	MinMemoryMiB  = 400
 	GoodMemoryMiB = 900
@@ -163,7 +163,7 @@ const (
 	UDPBuffer = 16 << 20
 )
 
-// tested are the systems the install test runs on (docs/08-decisions.md,
+// tested are the systems the install test runs on (docs/decisions.md,
 // R2-1).
 var tested = map[string][]string{"debian": {"12", "13"}, "ubuntu": {"24.04"}, "rocky": {"9", "10"}}
 
@@ -600,7 +600,7 @@ type warning struct{ detail, fix string }
 // kernel installed but not booted, a reboot asked for, no automatic
 // security updates. Remote bugs in the network stack are fixed in the
 // kernel; the perimeter limits what reaches it, it does not replace the
-// fix (docs/08-decisions.md, R4-9).
+// fix (docs/decisions.md, R4-9).
 func updateWarnings(root, running string) []warning {
 	var out []warning
 	if entries, err := os.ReadDir(filepath.Join(root, "/lib/modules")); err == nil && running != "" {

@@ -19,7 +19,7 @@ import (
 )
 
 // The three parsers of what a client sends naive, before any of it goes
-// anywhere (docs/17-naive-default.md §3): the padded first frames of every
+// anywhere (docs/research/naive-default.md §3): the padded first frames of every
 // tunnel (paddedStream.Read), the request and packets of a UoT v2 stream
 // (readRequest, readPacketHead), and the echo frames of an ICMP stream
 // (readEcho). Each target checks more than "no panic": what a length field

@@ -1,5 +1,5 @@
 // Package dnscheck checks a node's DNS tunnel zones as a client's resolver
-// reaches them (docs/09-observability.md): the delegation at the parent,
+// reaches them (docs/design/observability.md): the delegation at the parent,
 // the front and the backend on the node itself, and the zone through
 // public resolvers with dnsprobe-v1 (docs/spec/dnsprobe-v1.md). It keeps
 // no state of the node: rayd gives it the zones (provision.DNSCheckTargets).

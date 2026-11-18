@@ -111,7 +111,7 @@ func (n *NFT) run(script string) error {
 }
 
 // DataPlaneUIDs are the UIDs of the front and the data-plane services
-// (render.FrontUID to store.LastServiceUID, docs/08-decisions.md, R1-6).
+// (render.FrontUID to store.LastServiceUID, docs/decisions.md, R1-6).
 const DataPlaneUIDs = "9100-9179"
 
 // Ruleset returns the table definition. It replaces any previous version of
@@ -234,7 +234,7 @@ table inet %[1]s {
 
 	# Before defragmentation and conntrack (priority -400 and -200): what the
 	# kernel never has to parse for anyone, packets to the node itself only
-	# (docs/08-decisions.md, R4-9). Fragments, IPv4 options and IPv6
+	# (docs/decisions.md, R4-9). Fragments, IPv4 options and IPv6
 	# extension headers are where remote bugs of IP stacks keep turning up;
 	# clients need none of them (SPA packets are small, QUIC sets DF, TCP
 	# does path MTU discovery). ICMP errors, packet-too-big included, pass.
@@ -384,7 +384,7 @@ table inet %[1]s {
 func (n *NFT) Setup() error { return n.SetupWith(TableContents{}) }
 
 // SetupWith installs the table with its contents in one transaction
-// (docs/08-decisions.md R4-40): the admin addresses, the public ports, the
+// (docs/decisions.md R4-40): the admin addresses, the public ports, the
 // slots and the grants are in from the table's first packet, or, refused,
 // nothing changes and an earlier table stays. Then it detects whether
 // "destroy element" works.
@@ -423,7 +423,7 @@ func (n *NFT) SetupScript(c TableContents) string {
 }
 
 // HoldForwardScript is the table a relay host has until its first snapshot
-// (docs/08-decisions.md R4-40): forwarding on (sysctl.d, at boot) and
+// (docs/decisions.md R4-40): forwarding on (sysctl.d, at boot) and
 // nothing forwarded, as relay_forward drops by default. It has no input
 // chain: it never shuts the administrator out. Setup replaces it, in one
 // transaction, as any table of the name.
@@ -749,7 +749,7 @@ func forwardScript(ports []Port) string {
 // relayMark is the conntrack mark bit of flows a relay opened (admit,
 // relay_check); other bits stay as they are. Rules elsewhere that set the
 // whole mark, or match it without a mask, see this bit too
-// (docs/08-decisions.md, R4-32).
+// (docs/decisions.md, R4-32).
 const relayMark = "0x00400000"
 
 // SetRelays replaces the relays' addresses (single ones) and the ports they

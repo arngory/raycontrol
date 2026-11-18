@@ -27,7 +27,7 @@ import (
 
 // report writes what an issue needs and nothing a user must keep: versions,
 // the system, the host checks, unit states, counts without names, and the
-// warnings of the last day, all redacted (docs/09-observability.md, R4-4).
+// warnings of the last day, all redacted (docs/design/observability.md, R4-4).
 // It runs locally and sends nothing anywhere; the operator reads it and
 // decides what to share.
 func (c *cli) report(ctx context.Context, args []string) error {

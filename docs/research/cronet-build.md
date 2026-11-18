@@ -360,7 +360,7 @@ Workflow выпуска на раннерах GitHub отличается тре
   «Mozilla» — список Mozilla, «системные» — не ставит), и naive доверяет тому же списку, что остальное ядро. При
   переходе на новую версию Chromium список расхождений пересчитывается и передаётся клиенту вместе с библиотекой.
   Нода для своих соединений встраивает пересечение `chrome.go` и `mozilla.go` ядра по ключу корня, 91 корень
-  (`internal/roots/roots.pem`, генератор `scripts/roots`; [08-decisions.md](08-decisions.md), R4-41).
+  (`internal/roots/roots.pem`, генератор `scripts/roots`; [decisions.md](../decisions.md), R4-41).
 - **Набор пинов «по списку центров» — это корни и промежуточные-якоря** (находка клиента, Niko 1.50.0: профиль naive
   к `www.gstatic.com` с пинами 92 корней получил `ERR_SSL_PINNED_KEY_NOT_IN_CERT_CHAIN`). В хранилище Chromium 158
   (версия 43) якорей TLS 114: 99 корней (`trust_anchors`, `root_store.certs`) и 15 промежуточных с

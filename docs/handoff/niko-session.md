@@ -7,13 +7,13 @@
 
 | Документ | Зачем читать |
 |---|---|
-| [`docs/08-decisions.md`](https://github.com/arngory/raycontrol/blob/claude/clever-feynman-w0e2v1/docs/08-decisions.md) | все принятые решения; главнее остальных документов |
+| [`docs/decisions.md`](https://github.com/arngory/raycontrol/blob/claude/clever-feynman-w0e2v1/docs/decisions.md) | все принятые решения; главнее остальных документов |
 | [`docs/spec/spa-v2.md`](https://github.com/arngory/raycontrol/blob/claude/clever-feynman-w0e2v1/docs/spec/spa-v2.md) | формат SPA v2 и пакета регистрации устройства (заморожен) |
 | [`internal/spa/testdata/vectors.json`](https://github.com/arngory/raycontrol/blob/claude/clever-feynman-w0e2v1/internal/spa/testdata/vectors.json) | тестовые векторы SPA v2 |
-| [`docs/01-architecture.md`](https://github.com/arngory/raycontrol/blob/claude/clever-feynman-w0e2v1/docs/01-architecture.md) | процессы ноды, фронт и бэкенды, `inner`, ротация |
-| [`docs/02-security-model.md`](https://github.com/arngory/raycontrol/blob/claude/clever-feynman-w0e2v1/docs/02-security-model.md) | периметр, постквант, zero trust |
-| [`docs/03-protocols.md`](https://github.com/arngory/raycontrol/blob/claude/clever-feynman-w0e2v1/docs/03-protocols.md) | состав v1, порты, отличия от SPEC |
-| [`docs/04-roadmap.md`](https://github.com/arngory/raycontrol/blob/claude/clever-feynman-w0e2v1/docs/04-roadmap.md) | этапы R0–R5 и что в каждом нужно от niko-server и клиента |
+| [`docs/design/architecture.md`](https://github.com/arngory/raycontrol/blob/claude/clever-feynman-w0e2v1/docs/design/architecture.md) | процессы ноды, фронт и бэкенды, `inner`, ротация |
+| [`docs/design/security-model.md`](https://github.com/arngory/raycontrol/blob/claude/clever-feynman-w0e2v1/docs/design/security-model.md) | периметр, постквант, zero trust |
+| [`docs/design/protocols.md`](https://github.com/arngory/raycontrol/blob/claude/clever-feynman-w0e2v1/docs/design/protocols.md) | состав v1, порты, отличия от SPEC |
+| [`docs/roadmap.md`](https://github.com/arngory/raycontrol/blob/claude/clever-feynman-w0e2v1/docs/roadmap.md) | этапы R0–R5 и что в каждом нужно от niko-server и клиента |
 
 ## 1. Что решено и касается Niko
 

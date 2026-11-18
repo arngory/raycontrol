@@ -26,7 +26,7 @@ func ParsePort(s string) (Port, error) {
 	return Port{proto, uint16(n)}, nil
 }
 
-// kindPorts are the ports each kind uses on the node (docs/03-protocols.md).
+// kindPorts are the ports each kind uses on the node (docs/design/protocols.md).
 // Public kinds are reachable without SPA; all others only after SPA.
 // Kinds with a process run as their own system user with a fixed UID.
 var kindPorts = map[string]struct {
@@ -52,7 +52,7 @@ var kindPorts = map[string]struct {
 	"site":         {process: true}, // decoy site, unix socket for REALITY
 }
 
-// UID range of data-plane service processes (docs/08-decisions.md, R1-6).
+// UID range of data-plane service processes (docs/decisions.md, R1-6).
 const (
 	FirstServiceUID = 9110
 	LastServiceUID  = 9179

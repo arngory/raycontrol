@@ -95,7 +95,7 @@ func NewGate(fw Firewall, log *slog.Logger) *Gate {
 }
 
 // SetupAtFirstSnapshot makes the gate take the table only with its first
-// snapshot (rayspa's start, docs/08-decisions.md R4-40): Update then makes
+// snapshot (rayspa's start, docs/decisions.md R4-40): Update then makes
 // the table and fills it in one go, and until then the gate leaves the
 // kernel as it is. A table an earlier rayspa left there (a restart) stays
 // in force, its admin addresses with it; with none (a boot without a saved
