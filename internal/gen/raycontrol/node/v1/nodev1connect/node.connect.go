@@ -131,6 +131,8 @@ const (
 	NodeServiceBackupProcedure = "/raycontrol.node.v1.NodeService/Backup"
 	// NodeServiceGetMetricsProcedure is the fully-qualified name of the NodeService's GetMetrics RPC.
 	NodeServiceGetMetricsProcedure = "/raycontrol.node.v1.NodeService/GetMetrics"
+	// NodeServiceGetStatsProcedure is the fully-qualified name of the NodeService's GetStats RPC.
+	NodeServiceGetStatsProcedure = "/raycontrol.node.v1.NodeService/GetStats"
 	// NodeServiceGetSummaryProcedure is the fully-qualified name of the NodeService's GetSummary RPC.
 	NodeServiceGetSummaryProcedure = "/raycontrol.node.v1.NodeService/GetSummary"
 	// NodeServiceSetSummaryProcedure is the fully-qualified name of the NodeService's SetSummary RPC.
@@ -309,6 +311,10 @@ type NodeServiceClient interface {
 	// GetMetrics returns aggregate metrics in the Prometheus text format, no
 	// names of users, devices or services (R4-14).
 	GetMetrics(context.Context, *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error)
+	// The node's statistics over a window, an hour by default, as JSON
+	// (spec/stats-v1.md): counts, levels and the host, no names, addresses,
+	// domains or keys.
+	GetStats(context.Context, *connect.Request[v1.GetStatsRequest]) (*connect.Response[v1.GetStatsResponse], error)
 	// GetSummary returns the state of the client summaries (R4-21): whether
 	// the node takes reports, the AS lookup, and the networks with at least
 	// k reports; smaller groups only as a total.
@@ -608,6 +614,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("GetMetrics")),
 			connect.WithClientOptions(opts...),
 		),
+		getStats: connect.NewClient[v1.GetStatsRequest, v1.GetStatsResponse](
+			httpClient,
+			baseURL+NodeServiceGetStatsProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetStats")),
+			connect.WithClientOptions(opts...),
+		),
 		getSummary: connect.NewClient[v1.GetSummaryRequest, v1.GetSummaryResponse](
 			httpClient,
 			baseURL+NodeServiceGetSummaryProcedure,
@@ -758,6 +770,7 @@ type nodeServiceClient struct {
 	checkDNSZones        *connect.Client[v1.CheckDNSZonesRequest, v1.CheckDNSZonesResponse]
 	backup               *connect.Client[v1.BackupRequest, v1.BackupResponse]
 	getMetrics           *connect.Client[v1.GetMetricsRequest, v1.GetMetricsResponse]
+	getStats             *connect.Client[v1.GetStatsRequest, v1.GetStatsResponse]
 	getSummary           *connect.Client[v1.GetSummaryRequest, v1.GetSummaryResponse]
 	setSummary           *connect.Client[v1.SetSummaryRequest, v1.SetSummaryResponse]
 	getAppMirror         *connect.Client[v1.GetAppMirrorRequest, v1.GetAppMirrorResponse]
@@ -961,6 +974,11 @@ func (c *nodeServiceClient) Backup(ctx context.Context, req *connect.Request[v1.
 // GetMetrics calls raycontrol.node.v1.NodeService.GetMetrics.
 func (c *nodeServiceClient) GetMetrics(ctx context.Context, req *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error) {
 	return c.getMetrics.CallUnary(ctx, req)
+}
+
+// GetStats calls raycontrol.node.v1.NodeService.GetStats.
+func (c *nodeServiceClient) GetStats(ctx context.Context, req *connect.Request[v1.GetStatsRequest]) (*connect.Response[v1.GetStatsResponse], error) {
+	return c.getStats.CallUnary(ctx, req)
 }
 
 // GetSummary calls raycontrol.node.v1.NodeService.GetSummary.
@@ -1184,6 +1202,10 @@ type NodeServiceHandler interface {
 	// GetMetrics returns aggregate metrics in the Prometheus text format, no
 	// names of users, devices or services (R4-14).
 	GetMetrics(context.Context, *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error)
+	// The node's statistics over a window, an hour by default, as JSON
+	// (spec/stats-v1.md): counts, levels and the host, no names, addresses,
+	// domains or keys.
+	GetStats(context.Context, *connect.Request[v1.GetStatsRequest]) (*connect.Response[v1.GetStatsResponse], error)
 	// GetSummary returns the state of the client summaries (R4-21): whether
 	// the node takes reports, the AS lookup, and the networks with at least
 	// k reports; smaller groups only as a total.
@@ -1479,6 +1501,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("GetMetrics")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceGetStatsHandler := connect.NewUnaryHandler(
+		NodeServiceGetStatsProcedure,
+		svc.GetStats,
+		connect.WithSchema(nodeServiceMethods.ByName("GetStats")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceGetSummaryHandler := connect.NewUnaryHandler(
 		NodeServiceGetSummaryProcedure,
 		svc.GetSummary,
@@ -1663,6 +1691,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceBackupHandler.ServeHTTP(w, r)
 		case NodeServiceGetMetricsProcedure:
 			nodeServiceGetMetricsHandler.ServeHTTP(w, r)
+		case NodeServiceGetStatsProcedure:
+			nodeServiceGetStatsHandler.ServeHTTP(w, r)
 		case NodeServiceGetSummaryProcedure:
 			nodeServiceGetSummaryHandler.ServeHTTP(w, r)
 		case NodeServiceSetSummaryProcedure:
@@ -1854,6 +1884,10 @@ func (UnimplementedNodeServiceHandler) Backup(context.Context, *connect.Request[
 
 func (UnimplementedNodeServiceHandler) GetMetrics(context.Context, *connect.Request[v1.GetMetricsRequest]) (*connect.Response[v1.GetMetricsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetMetrics is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetStats(context.Context, *connect.Request[v1.GetStatsRequest]) (*connect.Response[v1.GetStatsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetStats is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) GetSummary(context.Context, *connect.Request[v1.GetSummaryRequest]) (*connect.Response[v1.GetSummaryResponse], error) {

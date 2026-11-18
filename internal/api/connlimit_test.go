@@ -120,7 +120,7 @@ func TestConnLimitAPI(t *testing.T) {
 	if err != nil || r.Guard == nil || !r.Guard.On || r.Guard.Refused != 42 || r.Guard.SweptTcpIn != 7 || r.Guard.Since != 1_700_000_000 || r.Guard.Reported == 0 {
 		t.Fatalf("the guard: %+v %v", r.GetGuard(), err)
 	}
-	text, err := srv.metrics(ctx, time.Now())
+	text, err := srv.metricsText(ctx, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestConnLimitHysteriaXray(t *testing.T) {
 	if line != "at a limit in 15 min: u5 (ho: 3), u5 (r: 2), u9 (r: 4)" {
 		t.Fatalf("status %q", line)
 	}
-	text, err := srv.metrics(ctx, now)
+	text, err := srv.metricsText(ctx, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,4 +198,13 @@ func TestConnLimitHysteriaXray(t *testing.T) {
 	if strings.Contains(text, "u5") || strings.Contains(text, "u9") {
 		t.Error("a user in the metrics")
 	}
+}
+
+// metricsText is GetMetrics's text, for the tests.
+func (s *Server) metricsText(ctx context.Context, now time.Time) (string, error) {
+	m, err := s.collect(ctx, now)
+	if err != nil {
+		return "", err
+	}
+	return m.String(), nil
 }

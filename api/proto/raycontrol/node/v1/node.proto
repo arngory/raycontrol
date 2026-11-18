@@ -146,6 +146,10 @@ service NodeService {
   // GetMetrics returns aggregate metrics in the Prometheus text format, no
   // names of users, devices or services (R4-14).
   rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
+  // The node's statistics over a window, an hour by default, as JSON
+  // (spec/stats-v1.md): counts, levels and the host, no names, addresses,
+  // domains or keys.
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
 
   // GetSummary returns the state of the client summaries (R4-21): whether
   // the node takes reports, the AS lookup, and the networks with at least
@@ -333,6 +337,15 @@ message BackupResponse {
 message GetMetricsRequest {}
 message GetMetricsResponse {
   string text = 1;
+}
+
+message GetStatsRequest {
+  // The window in seconds, 300 to 7200; 0: an hour.
+  int64 last_seconds = 1;
+}
+message GetStatsResponse {
+  // The report (stats.Report) as JSON.
+  bytes json = 1;
 }
 
 message GetAdminAccessRequest {}

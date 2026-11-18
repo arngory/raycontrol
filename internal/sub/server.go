@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/appmirror"
@@ -87,7 +88,10 @@ type Server struct {
 	// renders: a device's LAN consent (lan-v1 §1.1), which the Yggdrasil
 	// users files carry. rayd wakes apply with it.
 	Changed func()
-	now     func() time.Time
+	// Requests, when set, counts the answers by outcome (rayctl metrics
+	// and stats).
+	Requests *Requests
+	now      func() time.Time
 
 	mu sync.Mutex // serialises seq
 }
@@ -153,12 +157,36 @@ func (s *Server) Serve(ctx context.Context, addr string, tlsCfg *tls.Config) err
 	return nil
 }
 
+// Requests counts the subscription's answers since rayd started, by
+// outcome: counts only, never who.
+type Requests struct {
+	// OK: profiles went out. ClientRefused: the device's client is below
+	// the node's minimum (client-min-v1 §4). TrafficExhausted: the user is
+	// over the traffic limit (traffic-limit-v1 §4). Denied: 404, no
+	// subscription (unknown or revoked device, a wrong Authorization, a
+	// user disabled or expired).
+	OK, ClientRefused, TrafficExhausted, Denied atomic.Uint64
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	env, err := s.handle(r)
+	env, out, err := s.handle(r)
 	if err != nil {
+		if s.Requests != nil {
+			s.Requests.Denied.Add(1)
+		}
 		s.Log.Debug("subscription refused", "remote", r.RemoteAddr, "err", err)
 		http.NotFound(w, r)
 		return
+	}
+	if q := s.Requests; q != nil {
+		switch {
+		case out.exhausted:
+			q.TrafficExhausted.Add(1)
+		case out.refused:
+			q.ClientRefused.Add(1)
+		default:
+			q.OK.Add(1)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -179,18 +207,20 @@ func (s *Server) Device(r *http.Request) (string, error) {
 	return id, nil
 }
 
-func (s *Server) handle(r *http.Request) (Envelope, error) {
+// handle answers a request: the envelope, and the client it named with
+// what the answer did to it (refused, exhausted).
+func (s *Server) handle(r *http.Request) (Envelope, *requestClient, error) {
 	if r.Method != http.MethodGet {
-		return Envelope{}, errors.New("method")
+		return Envelope{}, nil, errors.New("method")
 	}
 	ctx := r.Context()
 	dev, key, err := s.Store.ActiveDevice(ctx, r.Header.Get(DeviceHeader))
 	if err != nil {
-		return Envelope{}, err
+		return Envelope{}, nil, err
 	}
 	now := s.clock()
 	if !CheckAuth(r.Header.Get("Authorization"), key, now) {
-		return Envelope{}, errors.New("auth")
+		return Envelope{}, nil, errors.New("auth")
 	}
 	addr := netip.Addr{}
 	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
@@ -203,7 +233,7 @@ func (s *Server) handle(r *http.Request) (Envelope, error) {
 	if on, said := lanConsent(r.Header); said {
 		changed, err := s.Store.SetDeviceLAN(ctx, dev.ID, on, store.LANShowEvery)
 		if err != nil {
-			return Envelope{}, err
+			return Envelope{}, nil, err
 		}
 		if changed && s.Changed != nil {
 			s.Changed()
@@ -221,7 +251,7 @@ func (s *Server) handle(r *http.Request) (Envelope, error) {
 	}
 	env, err := s.build(ctx, dev.UserName, dev.ID, key[:], addr, now, cl)
 	if err != nil {
-		return Envelope{}, err
+		return Envelope{}, nil, err
 	}
 	// The device once more, after the last read of what the subscription
 	// carries: a revocation that commits after the check above gives the
@@ -231,9 +261,9 @@ func (s *Server) handle(r *http.Request) (Envelope, error) {
 	// (the store's one connection: each statement after the commits
 	// before it), and the device gets what a revoked one gets.
 	if _, _, err := s.Store.ActiveDevice(ctx, dev.ID); err != nil {
-		return Envelope{}, err
+		return Envelope{}, nil, err
 	}
-	return env, nil
+	return env, cl, nil
 }
 
 // Build returns the signed subscription of a user.
@@ -267,6 +297,9 @@ const RefusedExpiry = time.Hour
 type requestClient struct {
 	clientver.Client
 	known bool
+	// What build answered: below the node's minimum, or over the
+	// traffic limit.
+	refused, exhausted bool
 }
 
 // build is the subscription of a user's device, given by its ID (for its
@@ -309,6 +342,9 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 		policy, err = clientver.Policy{}, nil
 	}
 	refused := cl != nil && policy.Refuses(cl.Client, cl.known, now)
+	if cl != nil {
+		cl.refused, cl.exhausted = refused, exhausted
+	}
 	profiles := []Profile{}
 	if !exhausted && !refused {
 		profiles, err = DeviceProfiles(m, *user, device)

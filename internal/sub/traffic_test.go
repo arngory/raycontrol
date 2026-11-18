@@ -3,6 +3,8 @@ package sub_test
 import (
 	"context"
 	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"strings"
 	"testing"
@@ -104,5 +106,29 @@ func TestExhaustedExpiry(t *testing.T) {
 		if got := sub.ExhaustedExpiry(now, c.reset, c.jitter); !got.Equal(c.want) {
 			t.Errorf("reset %v jitter %v: %v, want %v", c.reset, c.jitter, got, c.want)
 		}
+	}
+}
+
+// A request over the limit counts as exhausted, not as served (rayctl
+// stats).
+func TestTrafficExhaustedCounted(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	srv := &sub.Server{Store: f.st, Keys: f.keys, Log: quiet(), Requests: &sub.Requests{}}
+	limit := int64(10)
+	u, err := f.st.SetUserTraffic(ctx, "alice", store.TrafficChange{Limit: &limit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.WriteTraffic(ctx, store.TrafficWrite{Adds: []store.TrafficAdd{{UserID: u.ID, Start: u.TrafficStart, Up: 10}}}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, sub.Path, nil)
+	req.Header.Set(sub.DeviceHeader, f.device.ID)
+	req.Header.Set("Authorization", sub.AuthToken(f.key, time.Now().Unix()/60))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if q := srv.Requests; rec.Code != http.StatusOK || q.TrafficExhausted.Load() != 1 || q.OK.Load() != 0 {
+		t.Fatalf("%d: exhausted %d ok %d", rec.Code, q.TrafficExhausted.Load(), q.OK.Load())
 	}
 }

@@ -58,6 +58,7 @@ import (
 	"github.com/arngory/raycontrol/internal/render"
 	"github.com/arngory/raycontrol/internal/roots"
 	"github.com/arngory/raycontrol/internal/site"
+	"github.com/arngory/raycontrol/internal/stats"
 	"github.com/arngory/raycontrol/internal/store"
 	"github.com/arngory/raycontrol/internal/sub"
 	"github.com/arngory/raycontrol/internal/summary"
@@ -319,6 +320,11 @@ func cmdServe(args []string) error {
 		r, err := traffic.ReadLine(ctx, paths.StatsSocket(service))
 		return r.UDP, err
 	}
+	// rayctl stats (spec/stats-v1.md): the metrics without names and the
+	// host, a sample a minute, two hours of them in memory.
+	srv.SubRequests, srv.Started = &sub.Requests{}, processStart
+	srv.Stats = &stats.Sampler{Collect: srv.StatsPoints, ReadHost: stats.HostReader(filepath.Dir(*db)), Log: log}
+	go srv.Stats.Run(ctx)
 	per := &api.PerimeterServer{Server: srv, RayspaUID: -1, DefaultTTL: *spaTTL, MaxTTL: *spaMaxTTL, TCPCarrier: *spaTCP, Refresh: time.Minute}
 	policy := api.PeerPolicy{Group: *group}
 	if u, err := user.Lookup(*rayspaUser); err == nil {
@@ -454,7 +460,7 @@ func cmdServe(args []string) error {
 	go pruneSummary(ctx, sum, log)
 	remote := &api.Remote{Server: srv, Log: log, Perimeter: per, RelayReport: sum.TakeVia}
 	go serveRemote(ctx, remote, srv.Changes)
-	if err := startSubscription(ctx, st, paths, log, sum, remote.RelayProbeUp, *probeDaily, *spaTCP, srv.AppMirror, srv.Notify); err != nil {
+	if err := startSubscription(ctx, st, paths, log, sum, remote.RelayProbeUp, *probeDaily, *spaTCP, srv.AppMirror, srv.Notify, srv.SubRequests); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
 	log.Info("serving", "socket", *socket, "node", fmt.Sprintf("%x", params.NodeID))
@@ -940,7 +946,7 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 // startSubscription serves the subscription endpoint on the port of the
 // subscription service, if it is enabled. changed wakes apply: a device's
 // LAN consent changed (lan-v1 §1.1).
-func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, sum *summary.Collector, relayProbe func(string) bool, probeDailyMiB int, tcpCarrier bool, app *appmirror.Mirror, changed func()) error {
+func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, sum *summary.Collector, relayProbe func(string) bool, probeDailyMiB int, tcpCarrier bool, app *appmirror.Mirror, changed func(), requests *sub.Requests) error {
 	svc, err := st.ServiceByName(ctx, provision.SubscriptionService)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !svc.Enabled) {
 		log.Info("subscription service disabled")
@@ -966,7 +972,8 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 		return err
 	}
 	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier, RelayProbe: relayProbe,
-		ClockSeqAfter: time.Now().Add(settleAfterStart), PinsSince: processStart, PinsAfter: time.Now().Add(pinSettle), App: app, Changed: changed}
+		ClockSeqAfter: time.Now().Add(settleAfterStart), PinsSince: processStart, PinsAfter: time.Now().Add(pinSettle), App: app, Changed: changed,
+		Requests: requests}
 	port := int(ports[0].Num)
 	addr := ":" + strconv.Itoa(port)
 	// Channel probes (R4-16) on the same endpoint, and their UDP echo on
