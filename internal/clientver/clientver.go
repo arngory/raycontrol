@@ -196,7 +196,7 @@ func (p Policy) Check() (Policy, error) {
 			return p, fmt.Errorf("%w: product %q", ErrInvalid, product)
 		}
 		if _, err := ParseVersion(min); err != nil {
-			return p, fmt.Errorf("%w: %v", ErrInvalid, err)
+			return p, fmt.Errorf("%w: %w", ErrInvalid, err)
 		}
 	}
 	if len(p.Min) == 0 {

@@ -29,7 +29,7 @@ func ClientPolicy(ctx context.Context, st *store.Store) (clientver.Policy, error
 func SetClientPolicy(ctx context.Context, st *store.Store, p clientver.Policy) (clientver.Policy, error) {
 	p, err := p.Check()
 	if err != nil {
-		return p, fmt.Errorf("%w: %v", store.ErrInvalid, err)
+		return p, fmt.Errorf("%w: %w", store.ErrInvalid, err)
 	}
 	b, err := p.Marshal()
 	if err != nil {
