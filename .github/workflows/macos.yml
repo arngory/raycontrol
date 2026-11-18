@@ -3,12 +3,19 @@ name: rayctl on macOS
 # rayctl started on a Mac, apart from CI: macOS runners are often not there
 # for this repository, and a job cancelled while it waits for one marked
 # every CI run red although nothing failed. CI builds, vets and compiles
-# rayctl's tests for macOS from Linux on every push (job rayctl); this one
+# rayctl's tests for macOS from Linux on every run (job rayctl); this one
 # runs them where they can run, when rayctl's code changes, weekly and by
 # hand. The Release workflow never waits for it.
 on:
   push:
-    branches: [main, "claude/**"]
+    branches: [main]
+    paths:
+      - "cmd/rayctl/**"
+      - "internal/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/macos.yml"
+  pull_request:
     paths:
       - "cmd/rayctl/**"
       - "internal/**"

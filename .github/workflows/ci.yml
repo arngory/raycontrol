@@ -1,11 +1,22 @@
 name: CI
 
+# One full run a commit (CONTRIBUTING.md): a pull request's head, and main's
+# commit once merged. A push to a branch runs nothing by itself: its pull
+# request does, or Run workflow by hand. The Release workflow takes main's
+# green run of the commit it releases and runs this itself only without one.
 on:
   push:
-    branches: [main, "claude/**"]
+    branches: [main]
   pull_request:
-  # The Release workflow runs all of it on the commit it releases.
+  workflow_dispatch:
   workflow_call:
+
+# A newer push to a pull request cancels its run. Any other run is its
+# commit's alone and never waits or is cancelled: a release may take it.
+# Called by Release, github.workflow is Release's name.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -483,3 +494,20 @@ jobs:
           tar -czf "raycontrol-linux-${GOARCH}.tar.gz" -C dist rayd rayspa rayctl xray niko-server slipstream-server VERSIONS
           tar -tzvf "raycontrol-linux-${GOARCH}.tar.gz"
           file dist/xray dist/niko-server dist/slipstream-server dist/rayd
+
+  # The one check the ruleset on main asks of CI: green when every job above
+  # passed, whatever the matrix becomes.
+  result:
+    name: CI result
+    if: always()
+    needs: [govulncheck, test, perimeter, xray, acme, bootstrap, install, upgrade, relay-host, supervise, rayctl, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in $RESULTS; do
+            case "$r" in success | skipped) ;; *) echo "a job ended $r: $RESULTS"; exit 1 ;; esac
+          done
+          echo "all jobs: $RESULTS"

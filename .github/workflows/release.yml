@@ -74,12 +74,47 @@ jobs:
             echo "::notice::the empty release $TAG of the Releases page deleted, the tag kept: this run publishes $TAG"
           fi
 
-  ci:
+  # The whole CI on the commit being released: nothing is published unless
+  # it is green. v0.16.0 went out from a green pull request while CI on
+  # main, run beside the release, was red. main's own run of ci.yml on this
+  # commit (a push, so the workflow is this commit's) counts: one still
+  # running is waited for, a green one is taken, and only without one does
+  # job ci run it all again. rayctl started on a Mac is a workflow of its own
+  # (macos.yml), not run here.
+  ci-main:
     needs: tag
-    # The whole CI on the commit being released: nothing is published unless
-    # it is green. v0.16.0 went out from a green pull request while CI on
-    # main, run beside the release, was red.
-    # rayctl started on a Mac is a workflow of its own (macos.yml), not run here.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      actions: read
+    outputs:
+      green: ${{ steps.run.outputs.green }}
+    steps:
+      - name: main's CI run of this commit
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          runs="repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&event=push&branch=main&per_page=20"
+          for _ in $(seq 1 220); do
+            states=$(gh api "$runs" --jq '[.workflow_runs[] | "\(.id) \(.status) \(.conclusion)"] | .[]') || states=
+            if grep -q ' completed success$' <<< "$states"; then
+              echo "green: $(grep ' completed success$' <<< "$states" | head -n 1)"
+              echo green=true >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if ! grep -qv ' completed ' <<< "$states"; then
+              break
+            fi
+            sleep 30
+          done
+          echo "no green run of ci.yml on main for $GITHUB_SHA: ${states:-none}; job ci runs it"
+          echo green=false >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: ci-main
+    if: needs.ci-main.outputs.green != 'true'
     uses: ./.github/workflows/ci.yml
 
   asn:
@@ -224,7 +259,11 @@ jobs:
           path: rayctl-*.tar.gz
 
   release:
-    needs: [ci, build, rayctl]
+    needs: [ci-main, ci, build, rayctl]
+    # CI green either way: main's run taken (ci skipped) or ci's own.
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success' && needs.rayctl.result == 'success' &&
+      (needs.ci.result == 'success' || (needs.ci.result == 'skipped' && needs.ci-main.outputs.green == 'true')) }}
     runs-on: ubuntu-24.04
     # MINISIGN_SECRET_KEY lives in this environment: v* tags and main only,
     # and the owner approves each run (docs/RELEASE.md). A repository secret
