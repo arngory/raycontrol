@@ -689,6 +689,10 @@ type Device struct {
 	// LAN: the device shows itself to the user's other devices, as its
 	// X-Raycontrol-LAN header last said (lan-v1 §1.1).
 	LAN bool
+	// Client is what its X-Raycontrol-Client last said, "niko/1.59.0", and
+	// when the node saw it (client-min-v1 §5); "" and nil: never.
+	Client   string
+	ClientAt *time.Time
 }
 
 // CreateDevice enrolls a device for a user and returns its fresh SPA key.
@@ -750,7 +754,8 @@ func (s *Store) ActiveDeviceSecrets(ctx context.Context) (map[int64][]DeviceSecr
 
 // ListDevices returns devices, optionally of one user.
 func (s *Store) ListDevices(ctx context.Context, userName string) ([]Device, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT d.id, u.name, d.name, d.role, d.created_at, d.revoked_at, coalesce(d.cert_pin, ''), d.lan
+	rows, err := s.db.QueryContext(ctx, `SELECT d.id, u.name, d.name, d.role, d.created_at, d.revoked_at, coalesce(d.cert_pin, ''), d.lan,
+		coalesce(d.client, ''), d.client_at
 		FROM devices d JOIN users u ON u.id = d.user_id
 		WHERE ? = '' OR u.name = ? ORDER BY u.name, d.name`, userName, userName)
 	if err != nil {
@@ -761,11 +766,11 @@ func (s *Store) ListDevices(ctx context.Context, userName string) ([]Device, err
 	for rows.Next() {
 		var d Device
 		var created int64
-		var revoked sql.NullInt64
-		if err := rows.Scan(&d.ID, &d.UserName, &d.Name, &d.Role, &created, &revoked, &d.CertPin, &d.LAN); err != nil {
+		var revoked, clientAt sql.NullInt64
+		if err := rows.Scan(&d.ID, &d.UserName, &d.Name, &d.Role, &created, &revoked, &d.CertPin, &d.LAN, &d.Client, &clientAt); err != nil {
 			return nil, err
 		}
-		d.CreatedAt, d.RevokedAt = time.Unix(created, 0), timePtr(revoked)
+		d.CreatedAt, d.RevokedAt, d.ClientAt = time.Unix(created, 0), timePtr(revoked), timePtr(clientAt)
 		out = append(out, d)
 	}
 	return out, rows.Err()

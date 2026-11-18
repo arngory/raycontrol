@@ -60,7 +60,7 @@ func knock(ctx context.Context, args []string) error {
 	var client *sub.Client
 	if b.Sub != nil {
 		client = &sub.Client{Addr: net.JoinHostPort(ip.String(), strconv.Itoa(int(b.Sub.Port))), Pin: b.Sub.Pin,
-			DeviceID: b.DeviceID, DeviceKey: key, NodeKeys: b.NodeKeys, NodeID: b.SPA.NodeID}
+			DeviceID: b.DeviceID, DeviceKey: key, NodeKeys: b.NodeKeys, NodeID: b.SPA.NodeID, Name: clientName()}
 	}
 	window := "the node's default time (10 min unless set otherwise)"
 	if *ttl > 0 {

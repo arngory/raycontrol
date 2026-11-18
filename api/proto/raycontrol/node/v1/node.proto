@@ -176,6 +176,12 @@ service NodeService {
   // SetNodeNote sets the node's note for its users, or takes it away with
   // "": clients show it with the node (subscription-v1 §3, field note).
   rpc SetNodeNote(SetNodeNoteRequest) returns (SetNodeNoteResponse);
+  // GetClientPolicy returns the node's minimum client version
+  // (spec/client-min-v1.md §2) and how many devices last named which
+  // client in the last 30 days (§5).
+  rpc GetClientPolicy(GetClientPolicyRequest) returns (GetClientPolicyResponse);
+  // SetClientPolicy sets it, or takes it away with no minimum.
+  rpc SetClientPolicy(SetClientPolicyRequest) returns (SetClientPolicyResponse);
   // GetEgress returns the node's egress policy (spec/egress-policy-v1.md):
   // what the data plane may not send, on every profile. On the node's
   // socket only.
@@ -604,6 +610,35 @@ message SetNodeNoteResponse {
   string note = 1; // as kept
 }
 
+// The node's minimum client version (spec/client-min-v1.md §2).
+message ClientPolicy {
+  // min: the lowest version taken by product, semver ("niko": "1.59.0");
+  // none: no policy.
+  map<string, string> min = 1;
+  // from: unix seconds when it starts; 0: it holds already.
+  int64 from = 2;
+  // refuse_unknown refuses clients that name no version too: released Niko
+  // up to 1.58 then deletes the node's profiles (client-min-v1 §9.1).
+  bool refuse_unknown = 3;
+}
+message ClientCount {
+  string client = 1; // "niko/1.59.0"; "" for devices that named none
+  uint32 devices = 2;
+}
+message GetClientPolicyRequest {}
+message GetClientPolicyResponse {
+  ClientPolicy policy = 1;
+  // The devices not revoked by the client they last named, of those seen
+  // in the last 30 days, and those never seen with one; most first.
+  repeated ClientCount clients = 2;
+}
+message SetClientPolicyRequest {
+  ClientPolicy policy = 1;
+}
+message SetClientPolicyResponse {
+  ClientPolicy policy = 1; // as kept
+}
+
 message LoopHealth {
   string name = 1;     // apply, acme <site>, dns, reality-rotation, ...
   int64 last_ok = 2;   // unix seconds, 0 = never
@@ -892,6 +927,11 @@ message Device {
   // header last said (docs/spec/lan-v1.md §1.1); it is in the LAN when its
   // user's lan is on too.
   bool lan = 8;
+  // The client its subscription requests last named, "niko/1.59.0", and
+  // when the node saw it, unix seconds (spec/client-min-v1.md §5); "", 0:
+  // never.
+  string client = 9;
+  int64 client_at = 10;
 }
 
 // Invite is an invite not yet used.

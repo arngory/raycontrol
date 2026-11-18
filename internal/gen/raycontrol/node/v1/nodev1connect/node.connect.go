@@ -152,6 +152,12 @@ const (
 	NodeServiceSetNodeNameProcedure = "/raycontrol.node.v1.NodeService/SetNodeName"
 	// NodeServiceSetNodeNoteProcedure is the fully-qualified name of the NodeService's SetNodeNote RPC.
 	NodeServiceSetNodeNoteProcedure = "/raycontrol.node.v1.NodeService/SetNodeNote"
+	// NodeServiceGetClientPolicyProcedure is the fully-qualified name of the NodeService's
+	// GetClientPolicy RPC.
+	NodeServiceGetClientPolicyProcedure = "/raycontrol.node.v1.NodeService/GetClientPolicy"
+	// NodeServiceSetClientPolicyProcedure is the fully-qualified name of the NodeService's
+	// SetClientPolicy RPC.
+	NodeServiceSetClientPolicyProcedure = "/raycontrol.node.v1.NodeService/SetClientPolicy"
 	// NodeServiceGetEgressProcedure is the fully-qualified name of the NodeService's GetEgress RPC.
 	NodeServiceGetEgressProcedure = "/raycontrol.node.v1.NodeService/GetEgress"
 	// NodeServiceSetEgressProcedure is the fully-qualified name of the NodeService's SetEgress RPC.
@@ -332,6 +338,12 @@ type NodeServiceClient interface {
 	// SetNodeNote sets the node's note for its users, or takes it away with
 	// "": clients show it with the node (subscription-v1 §3, field note).
 	SetNodeNote(context.Context, *connect.Request[v1.SetNodeNoteRequest]) (*connect.Response[v1.SetNodeNoteResponse], error)
+	// GetClientPolicy returns the node's minimum client version
+	// (spec/client-min-v1.md §2) and how many devices last named which
+	// client in the last 30 days (§5).
+	GetClientPolicy(context.Context, *connect.Request[v1.GetClientPolicyRequest]) (*connect.Response[v1.GetClientPolicyResponse], error)
+	// SetClientPolicy sets it, or takes it away with no minimum.
+	SetClientPolicy(context.Context, *connect.Request[v1.SetClientPolicyRequest]) (*connect.Response[v1.SetClientPolicyResponse], error)
 	// GetEgress returns the node's egress policy (spec/egress-policy-v1.md):
 	// what the data plane may not send, on every profile. On the node's
 	// socket only.
@@ -650,6 +662,18 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("SetNodeNote")),
 			connect.WithClientOptions(opts...),
 		),
+		getClientPolicy: connect.NewClient[v1.GetClientPolicyRequest, v1.GetClientPolicyResponse](
+			httpClient,
+			baseURL+NodeServiceGetClientPolicyProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetClientPolicy")),
+			connect.WithClientOptions(opts...),
+		),
+		setClientPolicy: connect.NewClient[v1.SetClientPolicyRequest, v1.SetClientPolicyResponse](
+			httpClient,
+			baseURL+NodeServiceSetClientPolicyProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetClientPolicy")),
+			connect.WithClientOptions(opts...),
+		),
 		getEgress: connect.NewClient[v1.GetEgressRequest, v1.GetEgressResponse](
 			httpClient,
 			baseURL+NodeServiceGetEgressProcedure,
@@ -743,6 +767,8 @@ type nodeServiceClient struct {
 	setDebug             *connect.Client[v1.SetDebugRequest, v1.SetDebugResponse]
 	setNodeName          *connect.Client[v1.SetNodeNameRequest, v1.SetNodeNameResponse]
 	setNodeNote          *connect.Client[v1.SetNodeNoteRequest, v1.SetNodeNoteResponse]
+	getClientPolicy      *connect.Client[v1.GetClientPolicyRequest, v1.GetClientPolicyResponse]
+	setClientPolicy      *connect.Client[v1.SetClientPolicyRequest, v1.SetClientPolicyResponse]
 	getEgress            *connect.Client[v1.GetEgressRequest, v1.GetEgressResponse]
 	setEgress            *connect.Client[v1.SetEgressRequest, v1.SetEgressResponse]
 	getConnLimit         *connect.Client[v1.GetConnLimitRequest, v1.GetConnLimitResponse]
@@ -982,6 +1008,16 @@ func (c *nodeServiceClient) SetNodeNote(ctx context.Context, req *connect.Reques
 	return c.setNodeNote.CallUnary(ctx, req)
 }
 
+// GetClientPolicy calls raycontrol.node.v1.NodeService.GetClientPolicy.
+func (c *nodeServiceClient) GetClientPolicy(ctx context.Context, req *connect.Request[v1.GetClientPolicyRequest]) (*connect.Response[v1.GetClientPolicyResponse], error) {
+	return c.getClientPolicy.CallUnary(ctx, req)
+}
+
+// SetClientPolicy calls raycontrol.node.v1.NodeService.SetClientPolicy.
+func (c *nodeServiceClient) SetClientPolicy(ctx context.Context, req *connect.Request[v1.SetClientPolicyRequest]) (*connect.Response[v1.SetClientPolicyResponse], error) {
+	return c.setClientPolicy.CallUnary(ctx, req)
+}
+
 // GetEgress calls raycontrol.node.v1.NodeService.GetEgress.
 func (c *nodeServiceClient) GetEgress(ctx context.Context, req *connect.Request[v1.GetEgressRequest]) (*connect.Response[v1.GetEgressResponse], error) {
 	return c.getEgress.CallUnary(ctx, req)
@@ -1177,6 +1213,12 @@ type NodeServiceHandler interface {
 	// SetNodeNote sets the node's note for its users, or takes it away with
 	// "": clients show it with the node (subscription-v1 §3, field note).
 	SetNodeNote(context.Context, *connect.Request[v1.SetNodeNoteRequest]) (*connect.Response[v1.SetNodeNoteResponse], error)
+	// GetClientPolicy returns the node's minimum client version
+	// (spec/client-min-v1.md §2) and how many devices last named which
+	// client in the last 30 days (§5).
+	GetClientPolicy(context.Context, *connect.Request[v1.GetClientPolicyRequest]) (*connect.Response[v1.GetClientPolicyResponse], error)
+	// SetClientPolicy sets it, or takes it away with no minimum.
+	SetClientPolicy(context.Context, *connect.Request[v1.SetClientPolicyRequest]) (*connect.Response[v1.SetClientPolicyResponse], error)
 	// GetEgress returns the node's egress policy (spec/egress-policy-v1.md):
 	// what the data plane may not send, on every profile. On the node's
 	// socket only.
@@ -1491,6 +1533,18 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("SetNodeNote")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceGetClientPolicyHandler := connect.NewUnaryHandler(
+		NodeServiceGetClientPolicyProcedure,
+		svc.GetClientPolicy,
+		connect.WithSchema(nodeServiceMethods.ByName("GetClientPolicy")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceSetClientPolicyHandler := connect.NewUnaryHandler(
+		NodeServiceSetClientPolicyProcedure,
+		svc.SetClientPolicy,
+		connect.WithSchema(nodeServiceMethods.ByName("SetClientPolicy")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceGetEgressHandler := connect.NewUnaryHandler(
 		NodeServiceGetEgressProcedure,
 		svc.GetEgress,
@@ -1627,6 +1681,10 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceSetNodeNameHandler.ServeHTTP(w, r)
 		case NodeServiceSetNodeNoteProcedure:
 			nodeServiceSetNodeNoteHandler.ServeHTTP(w, r)
+		case NodeServiceGetClientPolicyProcedure:
+			nodeServiceGetClientPolicyHandler.ServeHTTP(w, r)
+		case NodeServiceSetClientPolicyProcedure:
+			nodeServiceSetClientPolicyHandler.ServeHTTP(w, r)
 		case NodeServiceGetEgressProcedure:
 			nodeServiceGetEgressHandler.ServeHTTP(w, r)
 		case NodeServiceSetEgressProcedure:
@@ -1832,6 +1890,14 @@ func (UnimplementedNodeServiceHandler) SetNodeName(context.Context, *connect.Req
 
 func (UnimplementedNodeServiceHandler) SetNodeNote(context.Context, *connect.Request[v1.SetNodeNoteRequest]) (*connect.Response[v1.SetNodeNoteResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetNodeNote is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetClientPolicy(context.Context, *connect.Request[v1.GetClientPolicyRequest]) (*connect.Response[v1.GetClientPolicyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetClientPolicy is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetClientPolicy(context.Context, *connect.Request[v1.SetClientPolicyRequest]) (*connect.Response[v1.SetClientPolicyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetClientPolicy is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) GetEgress(context.Context, *connect.Request[v1.GetEgressRequest]) (*connect.Response[v1.GetEgressResponse], error) {

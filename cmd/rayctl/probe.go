@@ -84,7 +84,7 @@ func probe(ctx context.Context, args []string) error {
 	}
 	client := sub.Client{
 		Addr: net.JoinHostPort(ip.String(), strconv.Itoa(int(b.Sub.Port))), Pin: b.Sub.Pin,
-		DeviceID: b.DeviceID, DeviceKey: key, NodeKeys: b.NodeKeys, NodeID: b.SPA.NodeID,
+		DeviceID: b.DeviceID, DeviceKey: key, NodeKeys: b.NodeKeys, NodeID: b.SPA.NodeID, Name: clientName(),
 	}
 	printf := func(format string, a ...any) { fmt.Printf(format, a...) }
 	var red *redact.Redactor

@@ -22,6 +22,8 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/arngory/raycontrol/internal/clientver"
+
 	"github.com/arngory/raycontrol/internal/api"
 	devicev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1/devicev1connect"
@@ -258,7 +260,9 @@ func remoteEnroll(ctx context.Context, args []string) error {
 	if code != "" {
 		req.PinProof = api.InvitePinProof([spa.KeySize]byte(k), code)
 	}
-	r, err := dev.Register(ctx, connect.NewRequest(req))
+	rreq := connect.NewRequest(req)
+	rreq.Header().Set(clientver.MetadataKey, clientName()) // client-min-v1 §1
+	r, err := dev.Register(ctx, rreq)
 	if left, ok := pinTriesLeft(err); ok {
 		if left == 0 {
 			return errors.New("register: wrong PIN, and the invite is withdrawn: ask for a new one")

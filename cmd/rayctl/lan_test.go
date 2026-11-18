@@ -113,7 +113,7 @@ func TestLANCommands(t *testing.T) {
 	// The device's own consent, as its header last said.
 	out, err := run("device", "list", "alice")
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if err != nil || len(lines) != 2 || strings.Join(strings.Fields(lines[0]), " ") != "ID USER NAME ROLE CREATED REVOKED LAN API" ||
+	if err != nil || len(lines) != 2 || strings.Join(strings.Fields(lines[0]), " ") != "ID USER NAME ROLE CREATED REVOKED LAN API CLIENT" ||
 		strings.Fields(lines[1])[7] != "off" {
 		t.Fatalf("device list:\n%s %v", out, err)
 	}

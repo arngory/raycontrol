@@ -68,6 +68,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 |---|---|
 | `rayctl summary on\|off` | принимать отчёты клиентов о сетях (клиенты шлют только с согласия пользователя) и давать подсказки о порядке профилей |
 | `rayctl app-mirror on\|off` · `rayctl app-mirror` | обновления Niko через ноду (с v0.18, по умолчанию выключено): нода раз в ~6 ч берёт с GitHub последний релиз и pre-release, проверяет подпись minisign Niko и SHA-256 и отдаёт своим устройствам на порту подписки; там, где GitHub недоступен, клиент без VPN узнаёт о новой версии и скачивает её с ноды. `on` хочет 1 ГиБ свободного места; `off` удаляет скачанное. Без аргумента — что держит и когда проверяла ([`spec/app-update-v1.md`](../spec/app-update-v1.md)) |
+| `rayctl client min niko 1.59.0 [-from 2027-01-15]` · `rayctl client` | минимальная версия клиента (с v0.32): устройство ниже неё получает подписку без профилей и с причиной, обновиться через ноду может (`rayctl app-mirror on`); `-from` — с даты, до неё клиенты только предупреждены; `none` — снять. Клиенты без версии (Niko до 1.58) по умолчанию пропускаются; `-unknown refuse -yes` отказывает и им, но они тогда удаляют профили ноды. Без аргумента — политика и сколько устройств на каких версиях за 30 дней ([`spec/client-min-v1.md`](../spec/client-min-v1.md)) |
 | `rayctl summary [-days 7]` | сети, где не меньше 10 отчётов: что работает, потери UDP, скорость; остальное — одной суммой; базы AS и их даты |
 | `rayctl summary api ipinfo [-token-file F]` · `rayctl summary api none` | API ipinfo для адресов, которых нет в базах: спрашивает по сети /24 или /48, не по адресу |
 | `rayctl summary db F.mmdb` · `rayctl summary db -remove` | своя база AS (IPinfo Lite своим токеном, GeoLite2 ASN своим ключом) впереди базы из релиза; root, на ноде |
@@ -102,7 +103,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl service add api api` → `rayctl apply` | включить удалённый API: свой порт за SPA, mTLS |
 | `rayctl device invite admin laptop -role admin` | на ноде: приглашение для устройства администратора |
 | `rayctl remote enroll -o laptop.rcdev [-pin 123456] 'RCINV2:…'` | на своей машине: новый ключ, SPA, регистрация; файл устройства 0600. Берёт и `rcinv1:…`; PIN без `-pin` спрашивается без показа на экране |
-| `rayctl -remote laptop.rcdev status` | любая команда `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `ports`, `relay` (`list`, `ports`, `set`), `dns`, `summary`, `app-mirror`, `metrics`, `debug`, `version` через API |
+| `rayctl -remote laptop.rcdev status` | любая команда `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `ports`, `relay` (`list`, `ports`, `set`), `dns`, `summary`, `app-mirror`, `client`, `metrics`, `debug`, `version` через API |
 | `rayctl -remote laptop.rcdev remote rotate` | новый клиентский ключ, старый перестаёт работать |
 | `rayctl -remote laptop.rcdev remote whoami` | какое это устройство: ID, пользователь, имя, роль, нода |
 

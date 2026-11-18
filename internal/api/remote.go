@@ -22,11 +22,13 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/arngory/raycontrol/internal/clientver"
 	devicev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1/devicev1connect"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/perimeter/v1/perimeterv1connect"
 	"github.com/arngory/raycontrol/internal/httpx"
+	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -333,6 +335,11 @@ func (r *Remote) Register(ctx context.Context, req *connect.Request[devicev1.Reg
 			return nil, pinRefused(why, left)
 		}
 	}
+	// Below the node's minimum client (client-min-v1 §4): refused before
+	// the invite is used, so that the same invite works after an update.
+	if err := r.clientAllowed(ctx, req.Header().Get(clientver.Header)); err != nil {
+		return nil, err
+	}
 	d, devKey, err := s.Store.UseInvite(ctx, inv.ID, pin)
 	if errors.Is(err, store.ErrNotFound) {
 		// Used since ActiveInvite: by a duplicate of this request, which
@@ -425,4 +432,22 @@ func (r *Remote) RotateCertificate(ctx context.Context, req *connect.Request[dev
 		return nil, err
 	}
 	return connect.NewResponse(&devicev1.RotateCertificateResponse{}), nil
+}
+
+// clientAllowed is the node's minimum client for a Register
+// (client-min-v1 §4): FailedPrecondition, saying the minimum, for a client
+// it refuses.
+func (r *Remote) clientAllowed(ctx context.Context, header string) error {
+	p, err := node.ClientPolicy(ctx, r.Server.Store)
+	if err != nil {
+		// As the subscription does: an unreadable policy is none (rayd
+		// says so), not a refusal of every client.
+		r.Log.Warn("client policy unreadable, taken as none", "err", err)
+		return nil
+	}
+	c, known := clientver.Parse(header)
+	if !p.Refuses(c, known, r.clock()) {
+		return nil
+	}
+	return connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("client too old: min %s", minList(p.Min)))
 }

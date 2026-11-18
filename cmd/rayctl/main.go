@@ -166,6 +166,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   summary db FILE.mmdb | -remove            an AS database of your own before the release's (root)
   app-mirror [show] | on | off              the client's releases on the node for its devices
                                             (spec/app-update-v1.md; off by default)
+  client [show]                             the minimum client version and the devices by client
+  client min PRODUCT VERSION|none [-from YYYY-MM-DD|now] [-unknown allow|refuse [-yes]]
+                                            refuse clients below it (spec/client-min-v1.md)
   debug [show] | on [-for 30m] | off        the debug window: rayd, rayspa and niko-server log at debug
                                             level (client addresses too) until it closes by itself; root
   egress [show]                             the node's egress policy on every profile, whether it is in
@@ -379,6 +382,8 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.summaryCmd(ctx, sub, rest)
 	case "app-mirror":
 		return c.appMirror(ctx, sub)
+	case "client":
+		return c.clientCmd(ctx, sub, rest)
 	case "debug":
 		return c.debug(ctx, sub, rest)
 	case "egress":
@@ -1167,15 +1172,17 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 			return err
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
-			fmt.Fprintln(w, "ID\tUSER\tNAME\tROLE\tCREATED\tREVOKED\tLAN\tAPI")
+			fmt.Fprintln(w, "ID\tUSER\tNAME\tROLE\tCREATED\tREVOKED\tLAN\tAPI\tCLIENT")
 			for _, d := range r.Msg.Devices {
 				api := "-"
 				if d.Registered {
 					api = "registered"
 				}
+				// The client its requests last named (client-min-v1 §5).
+				client := cmp.Or(d.Client, "-")
 				// The device's own LAN consent (lan-v1 §1.1); it is in the
 				// LAN when its user's is on too (rayctl user lan).
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", d.Id, d.User, d.Name, d.Role, when(d.CreatedAt), when(d.RevokedAt), onOff(d.Lan), api)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", d.Id, d.User, d.Name, d.Role, when(d.CreatedAt), when(d.RevokedAt), onOff(d.Lan), api, client)
 			}
 			for _, inv := range r.Msg.Invites {
 				state := "invite until " + when(inv.ExpiresAt)
