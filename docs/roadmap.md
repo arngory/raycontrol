@@ -263,6 +263,10 @@ v0.26.0: пины ключа сертификата сайта в ссылках
 
 ## После v0.31.0: интеграции
 
+Порядок (решение владельца 2026-11-18, через клиента): integrations-v1, затем rules-v1 вместе с app-attest-v1;
+свои наборы ноды (`rayctl rules own`, rules-v1 §14 п. 4) — до MVP. Свой раннер на KVM — после переписи истории
+(«Перед MVP: чистая история»).
+
 Решение владельца 2026-11-16: спека — сейчас, реализация — после выпуска v0.31.0 (R4-47). Черновик —
 [spec/integrations-v1.md](spec/integrations-v1.md):
 - роли `billing` и `support` на mTLS-устройствах: таблица всех методов, служебные пользователи, пределы частоты,
@@ -495,7 +499,8 @@ dnsauth и смена ключа masterdns; R длиннее в mdseal пока 
   plane (и UID rayd на supervised-ноде), `rayctl egress block|allow bittorrent|smtp` только у root, у Xray больше нет
   сниффинга и своего правила BitTorrent; нода с сервисами Xray после обновления держит BitTorrent закрытым
   ([`spec/egress-policy-v1.md`](spec/egress-policy-v1.md)).
-- **Трассировка с ноды** для mtr из двух половин ([`design/traffic.md`](design/traffic.md) §4) — ждёт решения владельца.
+- **Трассировка с ноды** для mtr из двух половин ([`design/traffic.md`](design/traffic.md) §4) — не до MVP (решение
+  владельца 2026-11-18): для naive mtr за нодой уже даёт icmp-v1.
 - ~~**ICMP через naive**~~ (ping и mtr через туннель, одобрено владельцем). Сделано (v0.21.0,
   [`spec/icmp-v1.md`](spec/icmp-v1.md)): kind 4, частные хопы молчат, `icmp=on` по умолчанию выключено; клиент —
   «Ping через ноду» с Niko 1.43.0.
