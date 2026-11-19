@@ -98,7 +98,7 @@ func TestSupervisedNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provision.Init(ctx, st, provision.Options{Host: ip.String(), Domain: "example.test"}); err != nil {
+	if _, err := provision.Init(ctx, st, provision.Options{Host: ip.String(), Domain: "example.test", Ports: provision.PortChoice{Sub: subPort(t)}}); err != nil {
 		t.Fatal(err)
 	}
 	reality, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "reality", Enabled: true})
