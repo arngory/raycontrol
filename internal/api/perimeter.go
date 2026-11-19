@@ -166,6 +166,25 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 	for _, a := range admin {
 		snap.AdminPrefixes = append(snap.AdminPrefixes, a.String())
 	}
+	// Integrations' servers (integrations-v1 §3.2): the API's TCP port
+	// without a knock, under the per-address limit; rayd checks every
+	// call's address against the lists.
+	integ, err := p.Store.AllowPrefixes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(integ) > 0 {
+		for _, svc := range services {
+			if port, ok := integPort(svc, ssh); ok {
+				snap.IntegPorts = append(snap.IntegPorts, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
+			}
+		}
+		if len(snap.IntegPorts) > 0 {
+			for _, pr := range integ {
+				snap.IntegPrefixes = append(snap.IntegPrefixes, pr.String())
+			}
+		}
+	}
 	// Relays (relay-v1): their addresses reach the ports of every enabled
 	// service that is not SSH and not public anyway; never the admin ports.
 	relays, err := p.Store.ListRelays(ctx)

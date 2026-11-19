@@ -436,6 +436,8 @@ set inu48 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 chain admit {
 	...                                          # relay4, relay6, spa_tcp, acme, admin — как сейчас
 	meta l4proto . th dport @public jump in_limit
+	ip saddr @integ4 meta l4proto . th dport @integ_ports jump in_limit     # integrations-v1 §3.2 (v0.34)
+	ip6 saddr @integ6 meta l4proto . th dport @integ_ports jump in_limit
 	ip saddr . meta l4proto . th dport @allow4 jump in_limit
 	ip6 saddr . meta l4proto . th dport @allow6 jump in_limit
 }

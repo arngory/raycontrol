@@ -164,6 +164,12 @@ service NodeService {
   rpc CreateInvite(CreateInviteRequest) returns (CreateInviteResponse) {
     option (google.api.method_visibility).restriction = "ADMIN,BILLING";
   }
+  // SetDeviceAllow gives an integration's device (billing, support) the
+  // addresses it calls from, which reach the API without a knock
+  // (integrations-v1 §3.2), or takes them away: the device knocks again.
+  rpc SetDeviceAllow(SetDeviceAllowRequest) returns (SetDeviceAllowResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
 
   rpc ListAudit(ListAuditRequest) returns (ListAuditResponse) {
     option (google.api.method_visibility).restriction = "ADMIN";
@@ -381,6 +387,8 @@ message NodePort {
   // REALITY), "spa" (an address after its knock), "admin" (the admin
   // addresses, and after a knock a device allowed SSH), "acme" (TCP 80
   // while a certificate is issued without a DNS provider).
+  // "spa,static" for the API while an integration's device calls from its
+  // addresses without a knock (integrations-v1 §3.2).
   string access = 6;
   uint32 current = 7;      // a rotating range: the port of this slot (the slots on either side are open too)
   int64 current_until = 8; // unix seconds: when current changes
@@ -1188,6 +1196,12 @@ message Device {
   // never.
   string client = 9;
   int64 client_at = 10;
+  // An integration's device in the mode of addresses (integrations-v1
+  // §3.2): the prefixes it calls from, without a knock; empty: it knocks.
+  repeated string allow = 11 [(google.api.field_visibility).restriction = "ADMIN"];
+  // An integration's device: its last call through the remote API, unix
+  // seconds, kept to the hour; 0: none yet.
+  int64 last_call = 12 [(google.api.field_visibility).restriction = "ADMIN"];
 }
 
 // Invite is an invite not yet used.
@@ -1201,6 +1215,9 @@ message Invite {
   // pin_tries: the invite needs a PIN, with this many wrong ones left; 0:
   // no PIN.
   int32 pin_tries = 7;
+  // The addresses the device it becomes calls from (integrations-v1 §3.2);
+  // it registers from one of them.
+  repeated string allow = 8 [(google.api.field_visibility).restriction = "ADMIN"];
 }
 
 message ListDevicesRequest { string user = 1; }
@@ -1267,12 +1284,32 @@ message CreateInviteRequest {
   // pin: the invite also needs a PIN of 6 digits, told by another channel
   // (docs/spec/api-v1.md §3).
   bool pin = 5;
+  // allow: billing and support only, the addresses of the integration's
+  // server (integrations-v1 §3.2): the device registers from one of them
+  // and calls without a knock. A node before it does not read it.
+  repeated string allow = 6 [(google.api.field_visibility).restriction = "ADMIN"];
 }
 message CreateInviteResponse {
   Invite invite = 1;
   string invite_code = 2; // "rcinv1:..." (docs/spec/api-v1.md)
   string pin = 3; // the PIN, shown once; "" without
   string invite_code_short = 4; // the same invite as "RCINV2:..." (api-v1 §3a); "" if the host cannot go in it
+  // What the node took of allow but would point out: a private network,
+  // an admin address.
+  repeated string warnings = 5 [(google.api.field_visibility).restriction = "ADMIN"];
+}
+
+message SetDeviceAllowRequest {
+  string id = 1;
+  // Addresses or prefixes, IPv4 /28 to /32, IPv6 /64 to /128, at most 8
+  // (integrations-v1 §3.3); they replace the device's. Empty: back to SPA.
+  repeated string prefixes = 2;
+}
+message SetDeviceAllowResponse {
+  Device device = 1;
+  // What the node took but would point out: a private network, an admin
+  // address.
+  repeated string warnings = 2;
 }
 
 message AuditEntry {

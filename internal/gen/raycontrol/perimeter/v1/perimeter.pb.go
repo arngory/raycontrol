@@ -967,7 +967,12 @@ type Snapshot struct {
 	Egress *Egress `protobuf:"bytes,12,opt,name=egress,proto3" json:"egress,omitempty"`
 	// The per-address limit on new inbound connections is off (rayctl
 	// conn-limit off, spec/conn-limit-v1.md §8). Absent (an older rayd): on.
-	ConnLimitOff  bool `protobuf:"varint,13,opt,name=conn_limit_off,json=connLimitOff,proto3" json:"conn_limit_off,omitempty"`
+	ConnLimitOff bool `protobuf:"varint,13,opt,name=conn_limit_off,json=connLimitOff,proto3" json:"conn_limit_off,omitempty"`
+	// Integrations' servers (integrations-v1 §3.2): these prefixes reach
+	// integ_ports (the API's TCP port only) without SPA, under the
+	// per-address limit. Absent (an older rayd): none.
+	IntegPrefixes []string `protobuf:"bytes,14,rep,name=integ_prefixes,json=integPrefixes,proto3" json:"integ_prefixes,omitempty"`
+	IntegPorts    []*Port  `protobuf:"bytes,15,rep,name=integ_ports,json=integPorts,proto3" json:"integ_ports,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1091,6 +1096,20 @@ func (x *Snapshot) GetConnLimitOff() bool {
 		return x.ConnLimitOff
 	}
 	return false
+}
+
+func (x *Snapshot) GetIntegPrefixes() []string {
+	if x != nil {
+		return x.IntegPrefixes
+	}
+	return nil
+}
+
+func (x *Snapshot) GetIntegPorts() []*Port {
+	if x != nil {
+		return x.IntegPorts
+	}
+	return nil
 }
 
 // Egress is what the data plane may not send, whoever the user.
@@ -1790,7 +1809,7 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"unfinished\"\x17\n" +
 	"\x15WatchPerimeterRequest\"W\n" +
 	"\x16WatchPerimeterResponse\x12=\n" +
-	"\bsnapshot\x18\x01 \x01(\v2!.raycontrol.perimeter.v1.SnapshotR\bsnapshot\"\x9e\x05\n" +
+	"\bsnapshot\x18\x01 \x01(\v2!.raycontrol.perimeter.v1.SnapshotR\bsnapshot\"\x85\x06\n" +
 	"\bSnapshot\x12\x1a\n" +
 	"\brevision\x18\x01 \x01(\x04R\brevision\x124\n" +
 	"\x03spa\x18\x02 \x01(\v2\".raycontrol.perimeter.v1.SPAParamsR\x03spa\x129\n" +
@@ -1808,7 +1827,10 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"\vdebug_until\x18\v \x01(\x03R\n" +
 	"debugUntil\x127\n" +
 	"\x06egress\x18\f \x01(\v2\x1f.raycontrol.perimeter.v1.EgressR\x06egress\x12$\n" +
-	"\x0econn_limit_off\x18\r \x01(\bR\fconnLimitOff\"\x86\x01\n" +
+	"\x0econn_limit_off\x18\r \x01(\bR\fconnLimitOff\x12%\n" +
+	"\x0einteg_prefixes\x18\x0e \x03(\tR\rintegPrefixes\x12>\n" +
+	"\vinteg_ports\x18\x0f \x03(\v2\x1d.raycontrol.perimeter.v1.PortR\n" +
+	"integPorts\"\x86\x01\n" +
 	"\x06Egress\x12\x12\n" +
 	"\x04smtp\x18\x01 \x01(\bR\x04smtp\x12\x1e\n" +
 	"\n" +
@@ -1930,29 +1952,30 @@ var file_raycontrol_perimeter_v1_perimeter_proto_depIdxs = []int32{
 	20, // 11: raycontrol.perimeter.v1.Snapshot.acme:type_name -> raycontrol.perimeter.v1.AcmeWindow
 	25, // 12: raycontrol.perimeter.v1.Snapshot.relay_ports:type_name -> raycontrol.perimeter.v1.Port
 	17, // 13: raycontrol.perimeter.v1.Snapshot.egress:type_name -> raycontrol.perimeter.v1.Egress
-	18, // 14: raycontrol.perimeter.v1.Egress.local:type_name -> raycontrol.perimeter.v1.Local
-	25, // 15: raycontrol.perimeter.v1.Local.loopback:type_name -> raycontrol.perimeter.v1.Port
-	19, // 16: raycontrol.perimeter.v1.Local.exempt:type_name -> raycontrol.perimeter.v1.LocalExempt
-	25, // 17: raycontrol.perimeter.v1.LocalExempt.port:type_name -> raycontrol.perimeter.v1.Port
-	25, // 18: raycontrol.perimeter.v1.Service.ports:type_name -> raycontrol.perimeter.v1.Port
-	24, // 19: raycontrol.perimeter.v1.Service.rotation:type_name -> raycontrol.perimeter.v1.Rotation
-	14, // 20: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:input_type -> raycontrol.perimeter.v1.WatchPerimeterRequest
-	3,  // 21: raycontrol.perimeter.v1.PerimeterService.ReportGuard:input_type -> raycontrol.perimeter.v1.ReportGuardRequest
-	0,  // 22: raycontrol.perimeter.v1.PerimeterService.ReportGate:input_type -> raycontrol.perimeter.v1.ReportGateRequest
-	6,  // 23: raycontrol.perimeter.v1.RelayService.WatchRelay:input_type -> raycontrol.perimeter.v1.WatchRelayRequest
-	7,  // 24: raycontrol.perimeter.v1.RelayService.Report:input_type -> raycontrol.perimeter.v1.ReportRequest
-	11, // 25: raycontrol.perimeter.v1.RelayService.ReportUpdate:input_type -> raycontrol.perimeter.v1.ReportUpdateRequest
-	15, // 26: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:output_type -> raycontrol.perimeter.v1.WatchPerimeterResponse
-	4,  // 27: raycontrol.perimeter.v1.PerimeterService.ReportGuard:output_type -> raycontrol.perimeter.v1.ReportGuardResponse
-	1,  // 28: raycontrol.perimeter.v1.PerimeterService.ReportGate:output_type -> raycontrol.perimeter.v1.ReportGateResponse
-	9,  // 29: raycontrol.perimeter.v1.RelayService.WatchRelay:output_type -> raycontrol.perimeter.v1.WatchRelayResponse
-	8,  // 30: raycontrol.perimeter.v1.RelayService.Report:output_type -> raycontrol.perimeter.v1.ReportResponse
-	12, // 31: raycontrol.perimeter.v1.RelayService.ReportUpdate:output_type -> raycontrol.perimeter.v1.ReportUpdateResponse
-	26, // [26:32] is the sub-list for method output_type
-	20, // [20:26] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	25, // 14: raycontrol.perimeter.v1.Snapshot.integ_ports:type_name -> raycontrol.perimeter.v1.Port
+	18, // 15: raycontrol.perimeter.v1.Egress.local:type_name -> raycontrol.perimeter.v1.Local
+	25, // 16: raycontrol.perimeter.v1.Local.loopback:type_name -> raycontrol.perimeter.v1.Port
+	19, // 17: raycontrol.perimeter.v1.Local.exempt:type_name -> raycontrol.perimeter.v1.LocalExempt
+	25, // 18: raycontrol.perimeter.v1.LocalExempt.port:type_name -> raycontrol.perimeter.v1.Port
+	25, // 19: raycontrol.perimeter.v1.Service.ports:type_name -> raycontrol.perimeter.v1.Port
+	24, // 20: raycontrol.perimeter.v1.Service.rotation:type_name -> raycontrol.perimeter.v1.Rotation
+	14, // 21: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:input_type -> raycontrol.perimeter.v1.WatchPerimeterRequest
+	3,  // 22: raycontrol.perimeter.v1.PerimeterService.ReportGuard:input_type -> raycontrol.perimeter.v1.ReportGuardRequest
+	0,  // 23: raycontrol.perimeter.v1.PerimeterService.ReportGate:input_type -> raycontrol.perimeter.v1.ReportGateRequest
+	6,  // 24: raycontrol.perimeter.v1.RelayService.WatchRelay:input_type -> raycontrol.perimeter.v1.WatchRelayRequest
+	7,  // 25: raycontrol.perimeter.v1.RelayService.Report:input_type -> raycontrol.perimeter.v1.ReportRequest
+	11, // 26: raycontrol.perimeter.v1.RelayService.ReportUpdate:input_type -> raycontrol.perimeter.v1.ReportUpdateRequest
+	15, // 27: raycontrol.perimeter.v1.PerimeterService.WatchPerimeter:output_type -> raycontrol.perimeter.v1.WatchPerimeterResponse
+	4,  // 28: raycontrol.perimeter.v1.PerimeterService.ReportGuard:output_type -> raycontrol.perimeter.v1.ReportGuardResponse
+	1,  // 29: raycontrol.perimeter.v1.PerimeterService.ReportGate:output_type -> raycontrol.perimeter.v1.ReportGateResponse
+	9,  // 30: raycontrol.perimeter.v1.RelayService.WatchRelay:output_type -> raycontrol.perimeter.v1.WatchRelayResponse
+	8,  // 31: raycontrol.perimeter.v1.RelayService.Report:output_type -> raycontrol.perimeter.v1.ReportResponse
+	12, // 32: raycontrol.perimeter.v1.RelayService.ReportUpdate:output_type -> raycontrol.perimeter.v1.ReportUpdateResponse
+	27, // [27:33] is the sub-list for method output_type
+	21, // [21:27] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_raycontrol_perimeter_v1_perimeter_proto_init() }

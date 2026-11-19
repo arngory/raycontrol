@@ -194,6 +194,11 @@ message Snapshot {
   // The per-address limit on new inbound connections is off (rayctl
   // conn-limit off, spec/conn-limit-v1.md §8). Absent (an older rayd): on.
   bool conn_limit_off = 13;
+  // Integrations' servers (integrations-v1 §3.2): these prefixes reach
+  // integ_ports (the API's TCP port only) without SPA, under the
+  // per-address limit. Absent (an older rayd): none.
+  repeated string integ_prefixes = 14;
+  repeated Port integ_ports = 15;
 }
 
 // Egress is what the data plane may not send, whoever the user.

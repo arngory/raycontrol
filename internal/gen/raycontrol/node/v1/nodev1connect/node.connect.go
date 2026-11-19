@@ -108,6 +108,9 @@ const (
 	// NodeServiceCreateInviteProcedure is the fully-qualified name of the NodeService's CreateInvite
 	// RPC.
 	NodeServiceCreateInviteProcedure = "/raycontrol.node.v1.NodeService/CreateInvite"
+	// NodeServiceSetDeviceAllowProcedure is the fully-qualified name of the NodeService's
+	// SetDeviceAllow RPC.
+	NodeServiceSetDeviceAllowProcedure = "/raycontrol.node.v1.NodeService/SetDeviceAllow"
 	// NodeServiceListAuditProcedure is the fully-qualified name of the NodeService's ListAudit RPC.
 	NodeServiceListAuditProcedure = "/raycontrol.node.v1.NodeService/ListAudit"
 	// NodeServiceGetAdminAccessProcedure is the fully-qualified name of the NodeService's
@@ -295,6 +298,10 @@ type NodeServiceClient interface {
 	// CreateInvite returns a one-time invite ("rcinv1:..."): the client
 	// registers the device itself through the remote API (R3-3).
 	CreateInvite(context.Context, *connect.Request[v1.CreateInviteRequest]) (*connect.Response[v1.CreateInviteResponse], error)
+	// SetDeviceAllow gives an integration's device (billing, support) the
+	// addresses it calls from, which reach the API without a knock
+	// (integrations-v1 §3.2), or takes them away: the device knocks again.
+	SetDeviceAllow(context.Context, *connect.Request[v1.SetDeviceAllowRequest]) (*connect.Response[v1.SetDeviceAllowResponse], error)
 	ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error)
 	// Admin access: addresses (CIDR) that reach SSH without SPA (emergency
 	// access, docs/decisions.md D-6).
@@ -569,6 +576,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("CreateInvite")),
 			connect.WithClientOptions(opts...),
 		),
+		setDeviceAllow: connect.NewClient[v1.SetDeviceAllowRequest, v1.SetDeviceAllowResponse](
+			httpClient,
+			baseURL+NodeServiceSetDeviceAllowProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetDeviceAllow")),
+			connect.WithClientOptions(opts...),
+		),
 		listAudit: connect.NewClient[v1.ListAuditRequest, v1.ListAuditResponse](
 			httpClient,
 			baseURL+NodeServiceListAuditProcedure,
@@ -814,6 +827,7 @@ type nodeServiceClient struct {
 	createDevice           *connect.Client[v1.CreateDeviceRequest, v1.CreateDeviceResponse]
 	revokeDevice           *connect.Client[v1.RevokeDeviceRequest, v1.RevokeDeviceResponse]
 	createInvite           *connect.Client[v1.CreateInviteRequest, v1.CreateInviteResponse]
+	setDeviceAllow         *connect.Client[v1.SetDeviceAllowRequest, v1.SetDeviceAllowResponse]
 	listAudit              *connect.Client[v1.ListAuditRequest, v1.ListAuditResponse]
 	getAdminAccess         *connect.Client[v1.GetAdminAccessRequest, v1.GetAdminAccessResponse]
 	setAdminAccess         *connect.Client[v1.SetAdminAccessRequest, v1.SetAdminAccessResponse]
@@ -970,6 +984,11 @@ func (c *nodeServiceClient) RevokeDevice(ctx context.Context, req *connect.Reque
 // CreateInvite calls raycontrol.node.v1.NodeService.CreateInvite.
 func (c *nodeServiceClient) CreateInvite(ctx context.Context, req *connect.Request[v1.CreateInviteRequest]) (*connect.Response[v1.CreateInviteResponse], error) {
 	return c.createInvite.CallUnary(ctx, req)
+}
+
+// SetDeviceAllow calls raycontrol.node.v1.NodeService.SetDeviceAllow.
+func (c *nodeServiceClient) SetDeviceAllow(ctx context.Context, req *connect.Request[v1.SetDeviceAllowRequest]) (*connect.Response[v1.SetDeviceAllowResponse], error) {
+	return c.setDeviceAllow.CallUnary(ctx, req)
 }
 
 // ListAudit calls raycontrol.node.v1.NodeService.ListAudit.
@@ -1248,6 +1267,10 @@ type NodeServiceHandler interface {
 	// CreateInvite returns a one-time invite ("rcinv1:..."): the client
 	// registers the device itself through the remote API (R3-3).
 	CreateInvite(context.Context, *connect.Request[v1.CreateInviteRequest]) (*connect.Response[v1.CreateInviteResponse], error)
+	// SetDeviceAllow gives an integration's device (billing, support) the
+	// addresses it calls from, which reach the API without a knock
+	// (integrations-v1 §3.2), or takes them away: the device knocks again.
+	SetDeviceAllow(context.Context, *connect.Request[v1.SetDeviceAllowRequest]) (*connect.Response[v1.SetDeviceAllowResponse], error)
 	ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error)
 	// Admin access: addresses (CIDR) that reach SSH without SPA (emergency
 	// access, docs/decisions.md D-6).
@@ -1518,6 +1541,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("CreateInvite")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceSetDeviceAllowHandler := connect.NewUnaryHandler(
+		NodeServiceSetDeviceAllowProcedure,
+		svc.SetDeviceAllow,
+		connect.WithSchema(nodeServiceMethods.ByName("SetDeviceAllow")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceListAuditHandler := connect.NewUnaryHandler(
 		NodeServiceListAuditProcedure,
 		svc.ListAudit,
@@ -1784,6 +1813,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceRevokeDeviceHandler.ServeHTTP(w, r)
 		case NodeServiceCreateInviteProcedure:
 			nodeServiceCreateInviteHandler.ServeHTTP(w, r)
+		case NodeServiceSetDeviceAllowProcedure:
+			nodeServiceSetDeviceAllowHandler.ServeHTTP(w, r)
 		case NodeServiceListAuditProcedure:
 			nodeServiceListAuditHandler.ServeHTTP(w, r)
 		case NodeServiceGetAdminAccessProcedure:
@@ -1959,6 +1990,10 @@ func (UnimplementedNodeServiceHandler) RevokeDevice(context.Context, *connect.Re
 
 func (UnimplementedNodeServiceHandler) CreateInvite(context.Context, *connect.Request[v1.CreateInviteRequest]) (*connect.Response[v1.CreateInviteResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.CreateInvite is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetDeviceAllow(context.Context, *connect.Request[v1.SetDeviceAllowRequest]) (*connect.Response[v1.SetDeviceAllowResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetDeviceAllow is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) ListAudit(context.Context, *connect.Request[v1.ListAuditRequest]) (*connect.Response[v1.ListAuditResponse], error) {

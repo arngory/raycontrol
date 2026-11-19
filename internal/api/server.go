@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -98,6 +99,9 @@ type Server struct {
 	// SubRequests counts the subscription's answers (sub.Server.Requests);
 	// nil: the metrics show none.
 	SubRequests *sub.Requests
+	// LocalAddrs are the node's own addresses, which no integration's list
+	// may hold (integrations-v1 §3.3); nil: the host's interfaces.
+	LocalAddrs func() ([]netip.Addr, error)
 	// Stats keeps the samples rayctl stats reports (spec/stats-v1.md);
 	// nil: GetStats is unavailable. Started is when rayd started.
 	Stats   *stats.Sampler
@@ -873,12 +877,12 @@ func (s *Server) RotateService(ctx context.Context, req *connect.Request[nodev1.
 func devicePB(d store.Device) *nodev1.Device {
 	return &nodev1.Device{Id: d.ID, User: d.UserName, Name: d.Name, Role: d.Role,
 		CreatedAt: d.CreatedAt.Unix(), RevokedAt: unixOrZero(d.RevokedAt), Registered: d.CertPin != "", Lan: d.LAN,
-		Client: d.Client, ClientAt: unixOrZero(d.ClientAt)}
+		Client: d.Client, ClientAt: unixOrZero(d.ClientAt), Allow: prefixStrings(d.Allow), LastCall: unixOrZero(d.LastCall)}
 }
 
 func invitePB(inv store.Invite) *nodev1.Invite {
 	return &nodev1.Invite{Id: inv.ID, User: inv.UserName, Name: inv.Name, Role: inv.Role,
-		CreatedAt: inv.CreatedAt.Unix(), ExpiresAt: inv.ExpiresAt.Unix(), PinTries: int32(inv.PinTries)}
+		CreatedAt: inv.CreatedAt.Unix(), ExpiresAt: inv.ExpiresAt.Unix(), PinTries: int32(inv.PinTries), Allow: prefixStrings(inv.Allow)}
 }
 
 func (s *Server) ListDevices(ctx context.Context, req *connect.Request[nodev1.ListDevicesRequest]) (*connect.Response[nodev1.ListDevicesResponse], error) {
@@ -1067,22 +1071,41 @@ func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.C
 			withPIN = func(key [spa.KeySize]byte) []byte { return InvitePinProof(key, pin) }
 		}
 	}
+	// The addresses of the integration's server (integrations-v1 §3.2).
+	var allow []netip.Prefix
+	var warnings []string
+	if err == nil && len(req.Msg.Allow) > 0 {
+		// The role first: billing's invites are users', and the checks of
+		// the addresses would tell it the node's and the relays'.
+		if !store.IntegrationRole(role) {
+			err = fmt.Errorf("role %q: %w", role, store.ErrAllowRole)
+		} else {
+			allow, warnings, err = s.checkAllow(ctx, req.Msg.Allow)
+		}
+	}
 	var inv store.Invite
 	if err == nil {
 		var key [spa.KeySize]byte
-		inv, key, err = s.Store.CreateInvite(ctx, req.Msg.User, req.Msg.Name, role, ttl, withPIN)
+		inv, key, err = s.Store.CreateInviteAllow(ctx, req.Msg.User, req.Msg.Name, role, ttl, allow, withPIN)
 		if err == nil {
 			code, short, err = s.inviteCode(ctx, inv, key, api)
 		}
 	}
-	what := "invite.create:" + role
+	what, target := "invite.create:"+role, req.Msg.User+"/"+req.Msg.Name
 	if req.Msg.Pin {
 		what += ":pin"
 	}
-	if err := s.done(ctx, what, req.Msg.User+"/"+req.Msg.Name, err); err != nil {
+	if len(req.Msg.Allow) > 0 {
+		what += ":allow"
+		if err == nil {
+			target += ": " + strings.Join(prefixStrings(allow), ",")
+		}
+	}
+	if err := s.done(ctx, what, target, err); err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: invitePB(inv), InviteCode: code, Pin: pin, InviteCodeShort: short}), nil
+	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: invitePB(inv), InviteCode: code, Pin: pin, InviteCodeShort: short,
+		Warnings: warnings}), nil
 }
 
 // newPIN is a PIN of 6 digits, uniform.
