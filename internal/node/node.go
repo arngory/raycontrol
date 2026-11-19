@@ -26,6 +26,10 @@ const (
 	// AdminAccessSetting is where the admin addresses are kept: a rollback
 	// of the database keeps them as they are now (store.CarryRevocations).
 	AdminAccessSetting = settingAdmin
+	// DNSNameSetting is where the node's own name under its domain is kept
+	// (spec/names-v1.md §2, provision.NodeDNSName). A rollback keeps it as
+	// it is now, as it does the admin addresses: devices hold the name.
+	DNSNameSetting = "node_dns_name"
 
 	// BundlePrefix marks an encoded device bundle.
 	BundlePrefix = "rcdev1:"
@@ -132,6 +136,17 @@ func LoadParams(ctx context.Context, st *store.Store) (spa.Params, error) {
 	return j.Params()
 }
 
+// Addrs are the node's addresses as clients get them for a fallback
+// (spec/names-v1.md §2): the host when it is an address, none when it is
+// a name.
+func Addrs(host string) []string {
+	a, err := netip.ParseAddr(host)
+	if err != nil {
+		return nil
+	}
+	return []string{a.Unmap().WithZone("").String()}
+}
+
 // Host returns the public address clients use, or "" if unset.
 func Host(ctx context.Context, st *store.Store) (string, error) {
 	b, err := st.GetSetting(ctx, settingHost)
@@ -155,8 +170,14 @@ type BundleService struct {
 // Bundle is everything a client needs to pass SPA for one device. It holds
 // the device key, so it is shown once and must travel over a trusted channel.
 type Bundle struct {
-	Version   int       `json:"v"`
-	Host      string    `json:"host"`
+	Version int    `json:"v"`
+	Host    string `json:"host"`
+	// DNSName is the node's own name, which a client resolves first to
+	// knock, fetch the subscription and reach the API; Addrs are the
+	// node's addresses, its fallback when the name does not resolve
+	// (spec/names-v1.md §3). Host stays as it was for clients before them.
+	DNSName   string    `json:"dns_name,omitempty"`
+	Addrs     []string  `json:"addrs,omitempty"`
 	SPA       SPAParams `json:"spa"`
 	DeviceID  string    `json:"device_id"`
 	DeviceKey string    `json:"device_key"`

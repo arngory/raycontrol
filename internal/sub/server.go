@@ -243,6 +243,7 @@ func (s *Server) handle(r *http.Request) (Envelope, *requestClient, error) {
 	// device once its Authorization holds, product and version only.
 	cl := &requestClient{}
 	cl.Client, cl.known = clientver.Parse(r.Header.Get(clientver.Header))
+	cl.names = clientver.HasFeature(r.Header.Get(clientver.FeaturesHeader), clientver.FeatureNames)
 	if cl.known {
 		// Bookkeeping only: the subscription goes out without it.
 		if err := s.Store.SetDeviceClient(ctx, dev.ID, cl.Product+"/"+cl.Version.String(), ClientSeenEvery); err != nil {
@@ -297,6 +298,9 @@ const RefusedExpiry = time.Hour
 type requestClient struct {
 	clientver.Client
 	known bool
+	// names: the client resolves names (spec/names-v1.md §4), so its
+	// links carry them.
+	names bool
 	// What build answered: below the node's minimum, or over the
 	// traffic limit.
 	refused, exhausted bool
@@ -311,6 +315,7 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 		return Envelope{}, err
 	}
 	m.Now = now // what depends on the time (a pin of an hour) follows the subscription's
+	m.ByName = cl != nil && cl.names
 	m.PinsSince, m.PinsAfter = s.PinsSince, s.PinsAfter
 	if m.PinsAfter.IsZero() {
 		m.PinsAfter = s.ClockSeqAfter
@@ -379,7 +384,8 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 	p := Payload{
 		V: 1, NodeID: m.NodeID, Name: name, Note: note, Seq: seq, Time: now.Unix(), Issued: now.Unix(),
 		Expires: now.Add(Lifetime).Unix(), Profiles: profiles,
-		SPA: &SPAHint{Carriers: []string{"udp"}},
+		SPA:     &SPAHint{Carriers: []string{"udp"}},
+		DNSName: m.DNSName, Addrs: node.Addrs(m.Host),
 	}
 	if u.Limited() {
 		p.Traffic = &TrafficHint{V: 1, Used: u.Used(now), Limit: *u.TrafficLimit, Since: u.PeriodStart(now).Unix(),

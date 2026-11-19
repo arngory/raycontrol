@@ -98,6 +98,33 @@ func TestEnrollAndPassSPA(t *testing.T) {
 	if b.Host != "n.example.com" || b.DeviceID != dev.Msg.Device.Id || len(b.Services) != 3 {
 		t.Fatalf("bundle = %+v", b)
 	}
+	// The host a name: no name of the node's nor addresses (names-v1 §2),
+	// the client goes by the host as before.
+	if b.DNSName != "" || len(b.Addrs) != 0 {
+		t.Fatalf("bundle name %q, addrs %v", b.DNSName, b.Addrs)
+	}
+	// The host an address: the node's own name and the address (§3).
+	if _, err := provision.Init(ctx, srv.Store, provision.Options{Host: "203.0.113.7"}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := srv.Store.DeviceByID(ctx, b.DeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := srv.bundle(ctx, d, [spa.KeySize]byte{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, err := node.DecodeBundle(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want, _ := provision.NodeDNSName(ctx, srv.Store); want == "" || b2.DNSName != want || len(b2.Addrs) != 1 || b2.Addrs[0] != "203.0.113.7" {
+		t.Fatalf("bundle name %q (want %q), addrs %v", b2.DNSName, want, b2.Addrs)
+	}
+	if _, err := provision.Init(ctx, srv.Store, provision.Options{Host: "n.example.com"}); err != nil {
+		t.Fatal(err)
+	}
 	for _, s := range b.Services {
 		rotates := len(s.PortKey) == 64 && s.PortRange >= 1024
 		if rotates != (s.Kind == "hy2-masq") {

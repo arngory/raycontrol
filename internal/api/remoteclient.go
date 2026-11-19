@@ -139,7 +139,17 @@ func remoteHTTP(pin string, cert tls.Certificate) *http.Client { return RemoteHT
 // NewRemoteClients returns the node and device API clients for the remote
 // API at addr (host:port).
 func NewRemoteClients(addr, pin string, cert tls.Certificate) (nodev1connect.NodeServiceClient, devicev1connect.DeviceServiceClient) {
+	return NewRemoteClientsNamed(addr, "", pin, cert)
+}
+
+// NewRemoteClientsNamed is NewRemoteClients with an SNI: the node's name
+// when the client resolved it (spec/names-v1.md §5). The pin is checked
+// all the same; the name is not.
+func NewRemoteClientsNamed(addr, serverName, pin string, cert tls.Certificate) (nodev1connect.NodeServiceClient, devicev1connect.DeviceServiceClient) {
 	hc := remoteHTTP(pin, cert)
+	if t, ok := hc.Transport.(*http.Transport); ok && serverName != "" {
+		t.TLSClientConfig.ServerName = serverName
+	}
 	base := "https://" + addr
 	return nodev1connect.NewNodeServiceClient(hc, base), devicev1connect.NewDeviceServiceClient(hc, base)
 }

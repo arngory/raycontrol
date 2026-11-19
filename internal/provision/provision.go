@@ -1266,6 +1266,125 @@ func ACMEPort(ctx context.Context, st *store.Store) (uint16, error) {
 	return 0, errors.New("no free port for the ACME responder")
 }
 
+// settingNodeDNSName holds the node's own name under its domain
+// (names-v1 §2).
+const settingNodeDNSName = node.DNSNameSetting
+
+// NodeDNSName is the node's own name under its domain (spec/names-v1.md
+// §2): what clients resolve to knock, fetch the subscription, reach the
+// API and the services that have no name of their own. Made on first use
+// when the node has a domain and its host is an address, and kept: devices
+// hold it. A domain changed since gets a new one under it. "" without a
+// domain; without an address of the node (a host given as a name: clients
+// go by that name as before, there is no address to fall back to nor to
+// tell a forged answer by, §5); and when no label is free (the node's
+// names go to services first). Callers do not hold settingsMu.
+func NodeDNSName(ctx context.Context, st *store.Store) (string, error) {
+	domain, err := Domain(ctx, st)
+	if err != nil || domain == "" {
+		return "", err
+	}
+	host, err := node.Host(ctx, st)
+	if err != nil || len(node.Addrs(host)) == 0 {
+		return "", err
+	}
+	// Names as clients resolve and niko-server compares them: a domain
+	// stored before Init canonicalized it may have capitals or a final dot.
+	domain = canonicalZone(domain)
+	stored, err := st.GetSetting(ctx, settingNodeDNSName)
+	switch {
+	case err == nil && oneLabelUnder(string(stored), domain):
+		return string(stored), nil
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		return "", err
+	}
+	// A zone stored at or above the domain, as v0.13 took, clashes with
+	// every name under it: none, at once and without the lock, on every
+	// render and fetch.
+	all, err := st.ListServices(ctx)
+	if err != nil {
+		return "", err
+	}
+	if zoneHoldsDomain(all, domain) {
+		return "", nil
+	}
+	// Made under the lock that service zones are chosen under: the two
+	// cannot take one label, and two callers after a domain change cannot
+	// each store their own name.
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
+	stored, err = st.GetSetting(ctx, settingNodeDNSName)
+	switch {
+	case err == nil && oneLabelUnder(string(stored), domain):
+		return string(stored), nil
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		return "", err
+	}
+	if all, err = st.ListServices(ctx); err != nil {
+		return "", err
+	}
+	if zoneHoldsDomain(all, domain) {
+		return "", nil
+	}
+	name, err := newZone(ctx, st, all)
+	if errors.Is(err, store.ErrInvalid) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	name = canonicalZone(name)
+	if stored != nil {
+		// Under a domain the node no longer has, or not one label under
+		// it (a parent domain now): the record *.<domain> does not
+		// cover it. Replaced.
+		return name, st.SetSetting(ctx, settingNodeDNSName, []byte(name))
+	}
+	// settingsMu is this process's: should another one on the same
+	// database have made it meanwhile, the first stored stays.
+	first, err := st.InitSetting(ctx, settingNodeDNSName, []byte(name))
+	return string(first), err
+}
+
+// zoneFree reports whether the canonical name zone is free for newZone:
+// not the name the zones are delegated to (ns) nor the node's own name
+// (own), clashing with no zone of all nor any of taken, named in no
+// service's settings. Each compared canonically: names stored before Init
+// canonicalized the domain may have capitals or a final dot.
+func zoneFree(zone, ns, own string, all []store.Service, taken []string) bool {
+	return zone != canonicalZone(ns) && zone != canonicalZone(own) && zoneConflict(zone, all) == "" &&
+		!slices.ContainsFunc(taken, func(t string) bool { return zonesClash(zone, canonicalZone(t)) }) &&
+		!slices.ContainsFunc(all, func(s store.Service) bool { return namesIn(s.Settings, zone) })
+}
+
+// namesIn reports whether settings hold the canonical name zone as a
+// string, as stored then or before Init canonicalized the domain (capitals,
+// a final dot).
+func namesIn(settings, zone string) bool {
+	l := strings.ToLower(settings)
+	return strings.Contains(l, `"`+zone+`"`) || strings.Contains(l, `"`+zone+`."`)
+}
+
+// zoneHoldsDomain reports whether a zone of all is the canonical domain
+// or above it.
+func zoneHoldsDomain(all []store.Service, domain string) bool {
+	for _, svc := range all {
+		for _, z := range Zones(svc) {
+			if z = canonicalZone(z); z == domain || strings.HasSuffix(domain, "."+z) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// oneLabelUnder reports whether name is one label under domain, what the
+// record *.<domain> resolves.
+func oneLabelUnder(name, domain string) bool {
+	label, ok := strings.CutSuffix(name, "."+domain)
+	return ok && label != "" && !strings.Contains(label, ".")
+}
+
 // newZone returns "<label>.<domain>" with a random label not used yet, by
 // all nor among taken (zones chosen in the same change).
 func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ...string) (string, error) {
@@ -1276,8 +1395,13 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ..
 	if domain == "" {
 		return "", fmt.Errorf("%w: this service needs the node domain (rayd init -domain)", store.ErrInvalid)
 	}
-	// Nor the name DNS tunnel zones are delegated to.
+	// As zones are kept and compared: a domain stored before Init
+	// canonicalized it may have capitals or a final dot.
+	domain = canonicalZone(domain)
+	// Nor the name DNS tunnel zones are delegated to, nor the node's own
+	// name (names-v1 §2).
 	ns, _ := st.GetSetting(ctx, settingNSName)
+	own, _ := st.GetSetting(ctx, settingNodeDNSName)
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 	// Bounded (review 13): a zone stored at or above the domain, as v0.13
 	// took, clashes with every name under it, and the search went on
@@ -1291,9 +1415,7 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ..
 			}
 			label[i] = alphabet[n]
 		}
-		zone := string(label) + "." + domain
-		if zone != string(ns) && zoneConflict(zone, all) == "" && !slices.ContainsFunc(taken, func(t string) bool { return zonesClash(zone, t) }) &&
-			!slices.ContainsFunc(all, func(s store.Service) bool { return strings.Contains(s.Settings, `"`+zone+`"`) }) {
+		if zone := string(label) + "." + domain; zoneFree(zone, string(ns), string(own), all, taken) {
 			return zone, nil
 		}
 	}
@@ -1311,9 +1433,11 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ..
 // nodeNameClash says which of the node's own names a DNS tunnel zone would
 // take from it, "" when none: the node's domain (a zone at or above it
 // would delegate every name of the node away), the name the zones are
-// delegated to (delegating it breaks every tunnel's delegation), a
-// service's server name (the site and the services under it would go
-// with it). A zone under such a name takes nothing.
+// delegated to (delegating it breaks every tunnel's delegation), the
+// node's own name and a service's server name (the site and the services
+// under it would go with it). Under the domain a zone takes nothing, nor
+// under the name the zones are delegated to (it has records of its own);
+// under a name clients resolve through *.<domain> it does (resolvedOver).
 func nodeNameClash(ctx context.Context, st *store.Store, all []store.Service, zone string) (string, error) {
 	domain, err := Domain(ctx, st)
 	if err != nil {
@@ -1331,23 +1455,81 @@ func nodeNameClash(ctx context.Context, st *store.Store, all []store.Service, zo
 	if ns, err := st.GetSetting(ctx, settingNSName); err == nil && holds(string(ns)) {
 		return "the name the zones are delegated to, " + string(ns), nil
 	}
+	if own, err := st.GetSetting(ctx, settingNodeDNSName); err == nil && holds(string(own)) {
+		return "the node's own name, " + string(own), nil
+	}
 	for _, svc := range all {
-		// The previous names too: the front routes them until a switch
-		// after (REALITY, naive; naive's older ones, NaivePrevious).
-		var names struct {
-			SNI      string         `json:"sni"`
-			SNINext  string         `json:"sni_next"`
-			SNIPrev  string         `json:"sni_prev"`
-			SNIOlder []NaiveRetired `json:"sni_older"`
+		for _, n := range serverNames(svc).all {
+			if holds(n) {
+				return "the server name of " + svc.Name + ", " + n, nil
+			}
 		}
-		_ = json.Unmarshal([]byte(svc.Settings), &names)
-		for _, n := range append([]string{names.SNI, names.SNINext, names.SNIPrev}, retiredNames(names.SNIOlder)...) {
-			if holds(canonicalZone(n)) {
+	}
+	// A disabled service's names too: it may be enabled again.
+	return resolvedOver(ctx, st, all, zone, domain, false)
+}
+
+// resolvedOver says which name clients resolve through *.<domain>
+// (names-v1 §2) zone lies under, "" when none: the node's own name, and
+// the server names of its services one label under the domain. A
+// delegation under such a name makes it a node of the zone with no records
+// of its own, which the wildcard no longer answers for (RFC 4592 §2.2.2):
+// clients resolving it get no address. enabledOnly leaves out the names of
+// disabled services, which no client is given.
+func resolvedOver(ctx context.Context, st *store.Store, all []store.Service, zone, domain string, enabledOnly bool) (string, error) {
+	domain, zone = canonicalZone(domain), canonicalZone(zone)
+	if domain == "" {
+		return "", nil
+	}
+	under := func(name string) bool {
+		name = canonicalZone(name)
+		return oneLabelUnder(name, domain) && strings.HasSuffix(zone, "."+name)
+	}
+	own, err := st.GetSetting(ctx, settingNodeDNSName)
+	switch {
+	case err == nil && under(string(own)):
+		return "the node's own name, " + string(own), nil
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		return "", err
+	}
+	for _, svc := range all {
+		if enabledOnly && !svc.Enabled {
+			continue
+		}
+		for _, n := range serverNames(svc).resolved {
+			if under(n) {
 				return "the server name of " + svc.Name + ", " + n, nil
 			}
 		}
 	}
 	return "", nil
+}
+
+// serverNames are the names a service's clients send as SNI: all of them,
+// the previous ones too (the front routes them until a switch after:
+// REALITY, naive; naive's older ones, NaivePrevious), and those clients
+// resolve to reach it (names-v1 §4): not a REALITY target's, someone
+// else's, but its previous ones, which subscriptions not yet fetched again
+// still name.
+func serverNames(svc store.Service) (n struct{ all, resolved []string }) {
+	var names struct {
+		Site     string         `json:"site"`
+		SNI      string         `json:"sni"`
+		SNINext  string         `json:"sni_next"`
+		SNIPrev  string         `json:"sni_prev"`
+		SNIOlder []NaiveRetired `json:"sni_older"`
+	}
+	_ = json.Unmarshal([]byte(svc.Settings), &names)
+	for _, name := range append([]string{names.SNI, names.SNINext, names.SNIPrev}, retiredNames(names.SNIOlder)...) {
+		if name == "" {
+			continue
+		}
+		n.all = append(n.all, name)
+		if svc.Kind != "reality" || names.Site != "" {
+			n.resolved = append(n.resolved, name)
+		}
+	}
+	return n
 }
 
 // zoneConflict names the DNS tunnel service among all one of whose zones
@@ -1427,8 +1609,9 @@ func Zones(svc store.Service) []string {
 // "none"), a number of zones made up in the node's domain as a main zone
 // is (those it has stay, the first ones), or the operator's own, comma
 // separated. Each must be a DNS name, none twice, none clashing with the
-// service's main zone, another service's zones or the name the zones are
-// delegated to.
+// service's main zone or another service's zones, none at or above the
+// name the zones are delegated to nor taking another name of the node's
+// (nodeNameClash).
 func spareZones(ctx context.Context, st *store.Store, svc store.Service, all []store.Service, value string) ([]string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" || value == "0" || value == "none" {
@@ -1441,7 +1624,10 @@ func spareZones(ctx context.Context, st *store.Store, svc store.Service, all []s
 			others = append(others, o)
 		}
 	}
-	ns, _ := st.GetSetting(ctx, settingNSName)
+	// The name the zones are delegated to: nodeNameClash below refuses a
+	// zone at or above it, as for the main zone; one under it takes
+	// nothing (it has a record of its own, and the front refuses only a
+	// zone that holds it).
 	if n, err := strconv.Atoi(value); err == nil {
 		if n < 0 || n > MaxSpareZones {
 			return nil, fmt.Errorf("%w spare_zones=%d: 0 to %d", store.ErrInvalid, n, MaxSpareZones)
@@ -1467,8 +1653,6 @@ func spareZones(ctx context.Context, st *store.Store, svc store.Service, all []s
 			return nil, fmt.Errorf("%w spare zone %q: a DNS name of two labels or more", store.ErrInvalid, raw)
 		case zonesClash(z, main) || slices.ContainsFunc(out, func(o string) bool { return zonesClash(z, o) }):
 			return nil, fmt.Errorf("%w spare zone %s: the same as, or nested with, another zone of %s", store.ErrInvalid, z, svc.Name)
-		case len(ns) > 0 && zonesClash(z, string(ns)):
-			return nil, fmt.Errorf("%w spare zone %s: the name the zones are delegated to is %s", store.ErrInvalid, z, ns)
 		}
 		if other := zoneConflict(z, others); other != "" {
 			return nil, fmt.Errorf("%w spare zone %s: the same as, or nested with, a zone of %s", store.ErrInvalid, z, other)

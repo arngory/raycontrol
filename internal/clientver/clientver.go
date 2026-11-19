@@ -18,6 +18,28 @@ const Header = "X-Raycontrol-Client"
 // MetadataKey is the same in the remote API's metadata.
 const MetadataKey = "x-raycontrol-client"
 
+// FeaturesHeader lists what a client does beyond what its version tells
+// (spec/names-v1.md §4): words separated by commas; a node skips the ones
+// it does not know.
+const FeaturesHeader = "X-Raycontrol-Features"
+
+// FeatureNames: the client resolves the node's names and falls back to its
+// addresses (spec/names-v1.md §5).
+const FeatureNames = "names"
+
+// HasFeature reports whether a FeaturesHeader value lists f.
+func HasFeature(h, f string) bool {
+	if len(h) > 4*MaxLen {
+		return false
+	}
+	for _, w := range strings.Split(h, ",") {
+		if strings.TrimSpace(w) == f {
+			return true
+		}
+	}
+	return false
+}
+
 // MaxLen is the longest header taken, in bytes.
 const MaxLen = 128
 

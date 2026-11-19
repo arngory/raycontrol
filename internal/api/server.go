@@ -937,7 +937,13 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 	if err != nil {
 		return "", err
 	}
-	b := node.Bundle{Version: 1, Host: host, SPA: node.FromParams(s.Params), DeviceID: d.ID, DeviceKey: hex.EncodeToString(key[:])}
+	// The node's name first, its addresses as the fallback (names-v1 §3).
+	dnsName, err := provision.NodeDNSName(ctx, s.Store)
+	if err != nil {
+		return "", err
+	}
+	b := node.Bundle{Version: 1, Host: host, DNSName: dnsName, Addrs: node.Addrs(host), SPA: node.FromParams(s.Params),
+		DeviceID: d.ID, DeviceKey: hex.EncodeToString(key[:])}
 	if d.Role != "user" {
 		b.Role = d.Role
 	}

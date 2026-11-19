@@ -68,7 +68,12 @@ type Payload struct {
 	// Note is what the node's owner tells its users (rayctl node note): one
 	// line of plain text, at most 200 code points, checked by
 	// node.CleanNote. None: no field.
-	Note     string    `json:"note,omitempty"`
+	Note string `json:"note,omitempty"`
+	// DNSName and Addrs are the node's own name and its addresses
+	// (spec/names-v1.md §2, §4): signed, the addresses a client may knock
+	// at when it takes one from DNS (§5).
+	DNSName  string    `json:"dns_name,omitempty"`
+	Addrs    []string  `json:"addrs,omitempty"`
 	Seq      uint64    `json:"seq"`
 	Time     int64     `json:"time"`
 	Issued   int64     `json:"issued"`
@@ -535,8 +540,8 @@ func serviceProfile(m render.Model, u render.User, s render.Service, inner *rend
 // YggdrasilLink is a user's Yggdrasil profile (spec/subscription-v1.md §4):
 // VLESS with ML-KEM-768 to inner at the node's mesh address and exit port,
 // carried by Yggdrasil with one peer, the node itself, over a TLS link to
-// the node's address under the service's name (sni): the client knows the
-// node by its address (SPA goes there) and resolves no name, as for naive. niko-ygg is "<peer URI>;<the user's key>", the
+// the node under the service's name (sni), at the host linkHost gives (the
+// address, or for a client that resolves names the name). niko-ygg is "<peer URI>;<the user's key>", the
 // key (a 32-byte ed25519 seed, hex) derived from the same inner UUID; each
 // niko-ygg-via is a public peer of the node, when it has them.
 func YggdrasilLink(m render.Model, s, inner render.Service, uuid string, device []byte) (string, error) {
@@ -548,7 +553,7 @@ func YggdrasilLink(m render.Model, s, inner render.Service, uuid string, device 
 	if err != nil {
 		return "", err
 	}
-	peer := url.URL{Scheme: "tls", Host: net.JoinHostPort(m.Host, "443"),
+	peer := url.URL{Scheme: "tls", Host: net.JoinHostPort(linkHost(m, st.SNI), "443"),
 		RawQuery: url.Values{"sni": {st.SNI}, "key": {hex.EncodeToString(nodeKey)}}.Encode()}
 	q := url.Values{}
 	q.Set("type", "raw")
@@ -556,6 +561,8 @@ func YggdrasilLink(m render.Model, s, inner render.Service, uuid string, device 
 	q.Set("niko-node", m.NodeID)
 	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
 	q.Set("niko-ygg", peer.String()+";"+hex.EncodeToString(render.YggdrasilDeviceKey(uuid, device).Seed()))
+	// The peer's addresses, for a peer by name (names-v1 §4).
+	setAddrs(q, m)
 	// Public peers (R4-18): a fallback path through the mesh when the node
 	// cannot be reached directly.
 	for _, p := range st.Peers {
@@ -567,6 +574,39 @@ func YggdrasilLink(m render.Model, s, inner render.Service, uuid string, device 
 	}
 	host := net.JoinHostPort(render.YggdrasilAddress(nodeKey).String(), strconv.Itoa(st.ExitPort))
 	return "vless://" + uuid + "@" + host + "?" + q.Encode() + "#" + url.PathEscape(s.Name), nil
+}
+
+// linkHost is the host a link sends its client to (spec/names-v1.md §4).
+// For a client before names-v1, the node's host, as before. For one that
+// resolves names: name, the service's own name it sends as its server
+// name, when that is one label under the node's domain (the record
+// *.<domain> resolves it); else the node's own name (hy2-obfs, REALITY with
+// a foreign target: name ""); the host when the node has no name. The host
+// too, as before, when the host is a name: the node has no address for
+// the client to fall back to.
+func linkHost(m render.Model, name string) string {
+	if !m.ByName || len(node.Addrs(m.Host)) == 0 {
+		return m.Host
+	}
+	// As names compare: a domain stored before Init canonicalized it may
+	// have capitals or a final dot.
+	domain := provision.CanonicalZone(m.Domain)
+	if label, ok := strings.CutSuffix(provision.CanonicalZone(name), "."+domain); ok && domain != "" && label != "" && !strings.Contains(label, ".") {
+		return name
+	}
+	if m.DNSName != "" {
+		return m.DNSName
+	}
+	return m.Host
+}
+
+// setAddrs adds the node's addresses to the line of a client that resolves
+// names (spec/names-v1.md §4): where it goes when the name does not
+// resolve. None when the node's host is a name.
+func setAddrs(q url.Values, m render.Model) {
+	if a := node.Addrs(m.Host); m.ByName && len(a) > 0 {
+		q.Set("niko-ip", strings.Join(a, ","))
+	}
 }
 
 // setSitePins adds niko-pin to the line of a service that answers with its
@@ -620,14 +660,14 @@ func DoHLink(m render.Model, s render.Service, token string) string {
 	q.Set("niko-node", m.NodeID)
 	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
 	setSitePins(q, m, s)
+	setAddrs(q, m)
 	return "https://" + st.SNI + "/dns-query/" + url.PathEscape(token) + "?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
 
 // NaiveLink is the naive endpoint of a user (spec/subscription-v1.md §4):
-// naive+https://niko:<password>@<node address>:443?sni=<name> with the Niko
-// parameters, like hysteria2:// and vless://: the client needs no lookup of
-// the name in its network and finds the node by its address. The server
-// checks the password only.
+// naive+https://niko:<password>@<host>:443?sni=<name> with the Niko
+// parameters, like hysteria2:// and vless://; the host is linkHost's. The
+// server checks the password only.
 func NaiveLink(m render.Model, s render.Service, password string) string {
 	var st struct {
 		SNI string `json:"sni"`
@@ -661,7 +701,8 @@ func naiveLink(m render.Model, s render.Service, password, sni string) string {
 	// dial, with its outcome (spec/naive-uot-v1.md §4), as Hysteria2 does.
 	q.Set("niko-ack", "1")
 	setSitePins(q, m, s)
-	return "naive+https://" + url.UserPassword("niko", password).String() + "@" + net.JoinHostPort(m.Host, "443") + "?" + q.Encode() + "#" + url.PathEscape(s.Name)
+	setAddrs(q, m)
+	return "naive+https://" + url.UserPassword("niko", password).String() + "@" + net.JoinHostPort(linkHost(m, sni), "443") + "?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
 
 // HysteriaLink is the share link of a Hysteria2 service with a user's
@@ -708,7 +749,8 @@ func HysteriaLink(m render.Model, s render.Service, password string) string {
 	// SYN-ACK until then (subscription-v1 §4). TestNikoAckPin keeps the
 	// pinned niko-server at that version or later.
 	q.Set("niko-ack", "1")
-	host := net.JoinHostPort(m.Host, strconv.Itoa(port))
+	setAddrs(q, m)
+	host := net.JoinHostPort(linkHost(m, st.SNI), strconv.Itoa(port))
 	return "hysteria2://" + url.PathEscape(password) + "@" + host + "/?" + q.Encode() + "#" + url.PathEscape(s.Name)
 }
 
@@ -759,6 +801,13 @@ func realityLink(m render.Model, s render.Service, uuid string, userID int64) (s
 	q.Set("pqv", pqv)
 	q.Set("niko-node", m.NodeID)
 	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
-	host := net.JoinHostPort(m.Host, strconv.Itoa(port))
+	setAddrs(q, m)
+	// A foreign target's name is someone else's, even under the node's
+	// domain: the node's own name then.
+	own := rs.SNI
+	if rs.Site == "" {
+		own = ""
+	}
+	host := net.JoinHostPort(linkHost(m, own), strconv.Itoa(port))
 	return "vless://" + uuid + "@" + host + "?" + q.Encode() + "#" + url.PathEscape(s.Name), nil
 }

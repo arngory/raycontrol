@@ -137,8 +137,16 @@ func DNSRecords(ctx context.Context, st *store.Store) (records []cloudflare.Reco
 	slices.Sort(zones)
 	for _, z := range zones {
 		records = append(records, cloudflare.Record{Type: "NS", Name: z, Content: ns})
+		// A zone stored before v0.34.0 refused it (nodeNameClash).
+		name, err := resolvedOver(ctx, st, all, z, domain, true)
+		if err != nil {
+			return nil, nil, err
+		}
+		if name != "" {
+			warnings = append(warnings, fmt.Sprintf("the DNS tunnel zone %s lies under %s: the record *.%s no longer answers for that name, and clients that resolve it fall back to the node's address (give the tunnel another zone)", z, name, domain))
+		}
 	}
-	return records, nil, nil
+	return records, warnings, nil
 }
 
 // NSName is the name DNS tunnel zones are delegated to, as DNSRecords
@@ -295,6 +303,14 @@ func SyncDNS(ctx context.Context, st *store.Store) (changes, problems []string, 
 	records, problems, err := DNSRecords(ctx, st)
 	if err != nil {
 		return nil, problems, err
+	}
+	// The node's host a name: DNSRecords has nothing to point at it, and a
+	// sync to nothing would delete the node's records (the wildcard every
+	// client resolves, names-v1 §2). The zone stays as it is.
+	if host, err := node.Host(ctx, st); err != nil {
+		return nil, problems, err
+	} else if _, err := netip.ParseAddr(host); err != nil {
+		return nil, problems, nil
 	}
 	changes, conflicts, err := cloudflare.Sync(ctx, c, zone.ID, records)
 	return changes, append(problems, conflicts...), err

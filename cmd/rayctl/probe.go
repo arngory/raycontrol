@@ -72,9 +72,18 @@ func probe(ctx context.Context, args []string) error {
 	if *addr != "" {
 		host = *addr
 	}
+	var red *redact.Redactor
+	if *redacted {
+		red = redact.New(host, domainOf(host), b.DNSName, domainOf(b.DNSName))
+	}
 	// One address for SPA and TLS: the grant is per source and destination
 	// family, so a domain with A and AAAA must not switch between them.
-	ip, err := resolve(ctx, host)
+	ip, serverName, err := nodeAddr(ctx, b, *addr, func(msg string) {
+		if red != nil {
+			msg = red.String(msg)
+		}
+		fmt.Fprint(os.Stderr, msg)
+	})
 	if err != nil {
 		return err
 	}
@@ -85,11 +94,10 @@ func probe(ctx context.Context, args []string) error {
 	client := sub.Client{
 		Addr: net.JoinHostPort(ip.String(), strconv.Itoa(int(b.Sub.Port))), Pin: b.Sub.Pin,
 		DeviceID: b.DeviceID, DeviceKey: key, NodeKeys: b.NodeKeys, NodeID: b.SPA.NodeID, Name: clientName(),
+		ServerName: serverName,
 	}
 	printf := func(format string, a ...any) { fmt.Printf(format, a...) }
-	var red *redact.Redactor
-	if *redacted {
-		red = redact.New(host, domainOf(host))
+	if red != nil {
 		printf = func(format string, a ...any) { fmt.Print(red.String(fmt.Sprintf(format, a...))) }
 		*links, *payload = false, false
 	}
@@ -103,7 +111,7 @@ func probe(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := sendSPA(c, netip.AddrPortFrom(ip, port), pkt); err != nil {
+		if err := sendSPA(c, netip.AddrPortFrom(ip, port), serverName, pkt); err != nil {
 			printf("SPA over %s to port %d: %v\n", c, port, err)
 			lastErr = err
 			continue
@@ -310,6 +318,49 @@ func argToken(text string) string {
 	return strings.TrimSpace(text)
 }
 
+// nodeAddr is where rayctl knocks and connects for a bundle, and the name
+// it sends as SNI there (spec/names-v1.md §5). override (-addr) first, as
+// it is. Else the node's name, resolved once: its address when it is one
+// of the node's (a knock sent to an address DNS alone gave could be
+// replayed at the node by whoever gave it, spa-v2 §9), the node's first
+// address when it is not or does not resolve. A bundle before names-v1,
+// or one with no address of the node (its host is a name): its host, as
+// before. warn tells the operator DNS gave another address; nil prints it
+// to stderr.
+func nodeAddr(ctx context.Context, b node.Bundle, override string, warn func(string)) (netip.Addr, string, error) {
+	if override != "" {
+		ip, err := resolve(ctx, override)
+		return ip, "", err
+	}
+	var known []netip.Addr
+	for _, a := range b.Addrs {
+		if ip, err := netip.ParseAddr(a); err == nil {
+			known = append(known, ip.Unmap())
+		}
+	}
+	if b.DNSName == "" || len(known) == 0 {
+		ip, err := resolve(ctx, b.Host)
+		return ip, "", err
+	}
+	rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupNetIP(rctx, "ip", b.DNSName)
+	for _, ip := range ips {
+		if slices.Contains(known, ip.Unmap()) {
+			return ip.Unmap(), b.DNSName, nil
+		}
+	}
+	if err == nil && len(ips) > 0 {
+		msg := fmt.Sprintf("rayctl: %s resolves to none of the node's addresses: going to %s\n", b.DNSName, known[0])
+		if warn == nil {
+			fmt.Fprint(os.Stderr, msg)
+		} else {
+			warn(msg)
+		}
+	}
+	return known[0], b.DNSName, nil
+}
+
 func resolve(ctx context.Context, host string) (netip.Addr, error) {
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return ip.Unmap(), nil
@@ -331,10 +382,10 @@ func carrierList(name string) []string {
 // sendSPA sends one packet: a UDP datagram, or the first data of a TCP
 // connection that is closed right after (spa-v2.md §10): bare (tcp) or as
 // a TLS ClientHello (tls, §10.1).
-func sendSPA(carrier string, to netip.AddrPort, pkt []byte) error {
+func sendSPA(carrier string, to netip.AddrPort, serverName string, pkt []byte) error {
 	network := carrier
 	if carrier == "tls" {
-		rec, err := spa.TLSCarrier(pkt)
+		rec, err := spa.TLSCarrierFor(pkt, serverName)
 		if err != nil {
 			return err
 		}

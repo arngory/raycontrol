@@ -72,6 +72,17 @@ func TestCloudflareDNS(t *testing.T) {
 	if changes, _, _ = SyncDNS(ctx, st); len(changes) != 2 {
 		t.Fatalf("after the tunnel: %v", changes)
 	}
+	// The host a name (as rayd init -host took before names-v1): nothing
+	// can point at it, and the zone stays as it is, the wildcard every
+	// client resolves included.
+	if _, err := Init(ctx, st, Options{Host: "node.example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	if changes, problems, err := SyncDNS(ctx, st); err != nil || len(changes) != 0 || len(problems) != 1 ||
+		!slices.Contains(api.List(), "A *.example.com 203.0.113.7 proxied=false ours=true") {
+		t.Fatalf("a host that is a name: %v %v %v\n%s", changes, problems, err, api.List())
+	}
+	Init(ctx, st, Options{Host: "203.0.113.7"})
 	removed, err := RemoveDNS(ctx, st, false)
 	if err != nil || len(removed) != 1 || len(api.List()) != 0 {
 		t.Fatalf("remove: %v %v %v", removed, err, api.List())

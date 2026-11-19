@@ -215,6 +215,50 @@ func TestLinksForStrictClient(t *testing.T) {
 			}
 		}
 	}
+	// Links by name (names-v1 §4), for a client that says it resolves
+	// names: the same lines, the next ones too, with a name in the host
+	// (the line's sni when it is one of the node's, else the node's own
+	// name) and the node's address in niko-ip. DNS tunnels name no host.
+	m.ByName = true
+	named, err := sub.DeviceProfiles(m, m.Users[0], testDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kindOf := map[string]string{}
+	for _, k := range kinds {
+		kindOf[k.name] = k.kind
+	}
+	for _, p := range named {
+		for _, link := range []string{p.Link, nextLink(p)} {
+			if link == "" {
+				continue
+			}
+			for _, problem := range strictProblems(kindOf[p.Name], link) {
+				t.Errorf("%s by name: %s\n  %s", p.Name, problem, link)
+			}
+			u, _ := url.Parse(link)
+			q := u.Query()
+			host := u.Hostname()
+			switch {
+			case u.Host == "inner:1":
+				continue
+			case kindOf[p.Name] == "yggdrasil":
+				peer, _ := url.Parse(strings.SplitN(q.Get("niko-ygg"), ";", 2)[0])
+				host = peer.Hostname()
+				q.Set("sni", peer.Query().Get("sni"))
+			case kindOf[p.Name] == "doh":
+				q.Set("sni", host)
+			}
+			want := q.Get("sni")
+			if !strings.HasSuffix(want, ".example.com") || strings.Count(want, ".") != 2 {
+				want = m.DNSName
+			}
+			if host != want || q.Get("niko-ip") != "203.0.113.7" {
+				t.Errorf("%s by name: host %q, want %q, niko-ip %q: %s", p.Name, host, want, q.Get("niko-ip"), link)
+			}
+		}
+	}
+
 }
 
 // The DNS parameters' rules catch what the client would drop.

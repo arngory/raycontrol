@@ -113,9 +113,15 @@ type User struct {
 
 // Model is everything the renderer needs.
 type Model struct {
-	NodeID   string
-	Host     string
-	Domain   string
+	NodeID string
+	Host   string
+	Domain string
+	// DNSName is the node's own name under Domain (spec/names-v1.md §2);
+	// ByName: the links are for a client that resolves names (its
+	// subscription request said so, names-v1 §4), so they carry names,
+	// the addresses as a fallback.
+	DNSName  string
+	ByName   bool
 	Services []Service // enabled only
 	Users    []User    // active: enabled, not expired, not over the traffic limit
 	// Traffic: some user has a traffic limit (traffic-limit-v1 §5), or the
@@ -231,6 +237,9 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 		return m, err
 	}
 	if m.Domain, err = provision.Domain(ctx, st); err != nil {
+		return m, err
+	}
+	if m.DNSName, err = provision.NodeDNSName(ctx, st); err != nil {
 		return m, err
 	}
 	// Settings and secrets as one read: a subscription built across a

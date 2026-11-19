@@ -132,7 +132,7 @@ func (id remoteIdentity) save(exclusive bool) error {
 
 // openPort sends SPA for the bundle's device and waits until the port
 // answers, over UDP and then TCP with carrier auto.
-func openPort(ctx context.Context, b node.Bundle, ip netip.Addr, port uint16, carrier string) error {
+func openPort(ctx context.Context, b node.Bundle, ip netip.Addr, serverName string, port uint16, carrier string) error {
 	params, err := b.SPA.Params()
 	if err != nil {
 		return err
@@ -153,7 +153,7 @@ func openPort(ctx context.Context, b node.Bundle, ip netip.Addr, port uint16, ca
 		if err != nil {
 			return err
 		}
-		if err := sendSPA(c, netip.AddrPortFrom(ip, params.Port(params.Slot(now))), pkt); err != nil {
+		if err := sendSPA(c, netip.AddrPortFrom(ip, params.Port(params.Slot(now))), serverName, pkt); err != nil {
 			lastErr = err
 			continue
 		}
@@ -172,18 +172,15 @@ func openPort(ctx context.Context, b node.Bundle, ip netip.Addr, port uint16, ca
 
 // connect passes SPA and returns the API clients of the device.
 func (id remoteIdentity) connect(ctx context.Context, addr, carrier string) (nodev1connect.NodeServiceClient, devicev1connect.DeviceServiceClient, error) {
-	host := id.bundle.Host
-	if addr != "" {
-		host = addr
-	}
-	ip, err := resolve(ctx, host)
+	ip, serverName, err := nodeAddr(ctx, id.bundle, addr, nil)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := openPort(ctx, id.bundle, ip, id.bundle.API.Port, carrier); err != nil {
+	if err := openPort(ctx, id.bundle, ip, serverName, id.bundle.API.Port, carrier); err != nil {
 		return nil, nil, err
 	}
-	n, d := api.NewRemoteClients(net.JoinHostPort(ip.String(), strconv.Itoa(int(id.bundle.API.Port))), id.bundle.API.Pin, id.cert)
+	n, d := api.NewRemoteClientsNamed(net.JoinHostPort(ip.String(), strconv.Itoa(int(id.bundle.API.Port))), serverName,
+		id.bundle.API.Pin, id.cert)
 	return n, d, nil
 }
 

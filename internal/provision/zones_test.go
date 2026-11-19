@@ -2,6 +2,7 @@ package provision
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -149,9 +150,9 @@ func TestSpareZones(t *testing.T) {
 }
 
 // Review 13: a zone may not take the node's own names (its domain, the
-// name the zones are delegated to, a service's server name); a zone stored
-// at the domain before (v0.13 took it) makes the search for a free name
-// fail, not spin.
+// name the zones are delegated to, its own name, a service's server name);
+// a zone stored at the domain before (v0.13 took it) makes the search for
+// a free name fail, not spin.
 func TestZonesAndNodeNames(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
@@ -183,10 +184,32 @@ func TestZonesAndNodeNames(t *testing.T) {
 			t.Errorf("spare zone %s: %v", bad, err)
 		}
 	}
-	// A zone under a server name takes nothing from it.
-	if _, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "under", Enabled: true,
-		Settings: `{"zone":"t.` + SiteName(site) + `"}`}); err != nil {
-		t.Fatalf("a zone under the site's name: %v", err)
+	// Nor a zone under a server name or the node's own name: clients
+	// resolve these through *.<domain> (names-v1 §2), and a delegation
+	// under one makes it a name the record no longer answers for
+	// (RFC 4592). A zone beside them under the domain takes nothing, nor
+	// one under the name the zones are delegated to (its own record), nor
+	// a REALITY target's name, even the domain's: clients do not resolve
+	// it.
+	own, err := NodeDNSName(ctx, st)
+	if err != nil || own == "" {
+		t.Fatalf("the node's name %q %v", own, err)
+	}
+	for i, bad := range []string{"t." + SiteName(site), "t." + own} {
+		if _, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "u" + string(rune('a'+i)), Enabled: true,
+			Settings: `{"zone":"` + bad + `"}`}); !errors.Is(err, store.ErrInvalid) {
+			t.Errorf("a zone under %s: %v", bad, err)
+		}
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "reality", Name: "apex", Enabled: true,
+		Settings: `{"target":"n.example.com:443"}`}); err != nil {
+		t.Fatal(err)
+	}
+	for i, good := range []string{"tun9.n.example.com", "t." + ns} {
+		if _, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "g" + string(rune('a'+i)), Enabled: true,
+			Settings: `{"zone":"` + good + `"}`}); err != nil {
+			t.Errorf("a zone %s: %v", good, err)
+		}
 	}
 	_ = dns
 
@@ -240,5 +263,148 @@ func TestCreateServiceZoneRace(t *testing.T) {
 	}
 	if ok != 1 {
 		t.Fatalf("%d creates took the zone", ok)
+	}
+}
+
+// A zone stored before v0.34.0 under a name clients resolve (a site's
+// name) stays, and DNSRecords names the problem: rayctl dns and the
+// metrics show it.
+func TestZoneUnderResolvedNameWarned(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	site, err := CreateService(ctx, st, store.Service{Kind: "site", Name: "site", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "fine", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, warnings, err := DNSRecords(ctx, st); err != nil || len(warnings) != 0 {
+		t.Fatalf("warnings %q %v", warnings, err)
+	}
+	old := "t." + SiteName(site)
+	if _, err := st.CreateService(ctx, store.Service{Kind: "masterdns", Name: "old", Enabled: true, Settings: `{"zone":"` + old + `"}`}); err != nil {
+		t.Fatal(err)
+	}
+	_, warnings, err := DNSRecords(ctx, st)
+	if err != nil || len(warnings) != 1 || !strings.Contains(warnings[0], old) || !strings.Contains(warnings[0], SiteName(site)+":") {
+		t.Fatalf("warnings %q %v", warnings, err)
+	}
+}
+
+// Review of names-v1, round 3: a zone may lie under a name clients do not
+// resolve through *.<domain> (a REALITY target's, even one label under the
+// domain; a server name deeper than one label), and a spare zone under the
+// name the zones are delegated to, as the main one may. A disabled
+// service's name gives no warning. newZone gives canonical names, and
+// finds a name taken however a domain stored before Init spelled it.
+func TestZoneRuleNames(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := Init(ctx, st, Options{Host: "203.0.113.7", Domain: "n.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	ns, err := NSName(ctx, st)
+	if err != nil || ns == "" {
+		t.Fatalf("ns %q %v", ns, err)
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "reality", Name: "fx", Enabled: true,
+		Settings: `{"target":"fx.n.example.com:443"}`}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateService(ctx, store.Service{Kind: "naive", Name: "deep", Enabled: true,
+		Settings: `{"sni":"deep.x.n.example.com"}`}); err != nil {
+		t.Fatal(err)
+	}
+	for i, good := range []string{"t.fx.n.example.com", "t.deep.x.n.example.com"} {
+		if _, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "g" + string(rune('a'+i)), Enabled: true,
+			Settings: `{"zone":"` + good + `"}`}); err != nil {
+			t.Errorf("a zone %s: %v", good, err)
+		}
+	}
+	if _, err := SetServiceOption(ctx, st, "dns", "spare_zones", "t."+ns); err != nil {
+		t.Errorf("a spare zone under %s: %v", ns, err)
+	}
+	// A disabled service's name: refused for a new zone, no warning for
+	// one made before.
+	hm, err := CreateService(ctx, st, store.Service{Kind: "hy2-masq", Name: "hm", Enabled: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hs struct {
+		SNI string `json:"sni"`
+	}
+	if err := json.Unmarshal([]byte(hm.Settings), &hs); err != nil || hs.SNI == "" {
+		t.Fatalf("hy2-masq sni %q %v", hs.SNI, err)
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "u", Enabled: true,
+		Settings: `{"zone":"t.` + hs.SNI + `"}`}); !errors.Is(err, store.ErrInvalid) {
+		t.Errorf("a zone under a disabled service's name: %v", err)
+	}
+	if _, err := st.CreateService(ctx, store.Service{Kind: "masterdns", Name: "old", Enabled: true, Settings: `{"zone":"t.` + hs.SNI + `"}`}); err != nil {
+		t.Fatal(err)
+	}
+	if _, warnings, err := DNSRecords(ctx, st); err != nil || len(warnings) != 0 {
+		t.Fatalf("warnings %q %v", warnings, err)
+	}
+
+	// A domain stored before Init canonicalized it.
+	if err := st.SetSetting(ctx, settingDomain, []byte("N.Example.COM.")); err != nil {
+		t.Fatal(err)
+	}
+	all, err := st.ListServices(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		z, err := newZone(ctx, st, all)
+		if err != nil || !oneLabelUnder(z, "n.example.com") {
+			t.Fatalf("a zone under N.Example.COM.: %q %v", z, err)
+		}
+	}
+	for _, raw := range []string{`{"sni":"abc.n.example.com"}`, `{"sni":"ABC.N.Example.COM."}`, `{"site":"x","sni":"abc.N.example.com"}`} {
+		if !namesIn(raw, "abc.n.example.com") {
+			t.Errorf("%s does not name abc.n.example.com", raw)
+		}
+	}
+	if namesIn(`{"sni":"xabc.n.example.com"}`, "abc.n.example.com") {
+		t.Error("xabc names abc")
+	}
+}
+
+// zoneFree takes the names it compares however they were stored: before
+// Init canonicalized the domain, with capitals or a final dot.
+func TestZoneFree(t *testing.T) {
+	all := []store.Service{{Kind: "naive", Name: "nv", Settings: `{"sni":"SNI.N.Example.COM."}`}}
+	for _, tc := range []struct {
+		zone       string
+		ns, own    string
+		taken      []string
+		free       bool
+		whyNotFree string
+	}{
+		{"abc.n.example.com", "", "", nil, true, ""},
+		{"abc.n.example.com", "ABC.N.Example.COM.", "", nil, false, "the name the zones are delegated to"},
+		{"abc.n.example.com", "", "ABC.N.Example.COM.", nil, false, "the node's own name"},
+		{"sni.n.example.com", "", "", nil, false, "a service's server name"},
+		{"abc.n.example.com", "", "", []string{"ABC.N.Example.COM."}, false, "a name taken in the same change"},
+	} {
+		if got := zoneFree(tc.zone, tc.ns, tc.own, all, tc.taken); got != tc.free {
+			t.Errorf("%s (%s): free %v", tc.zone, tc.whyNotFree, got)
+		}
 	}
 }
