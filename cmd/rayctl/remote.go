@@ -172,7 +172,7 @@ func openPort(ctx context.Context, b node.Bundle, ip netip.Addr, serverName stri
 
 // connect passes SPA and returns the API clients of the device.
 func (id remoteIdentity) connect(ctx context.Context, addr, carrier string) (nodev1connect.NodeServiceClient, devicev1connect.DeviceServiceClient, error) {
-	ip, serverName, err := nodeAddr(ctx, id.bundle, addr)
+	ip, serverName, err := nodeAddr(ctx, id.bundle, addr, nil)
 	if err != nil {
 		return nil, nil, err
 	}

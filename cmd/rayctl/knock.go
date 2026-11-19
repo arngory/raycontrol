@@ -46,7 +46,7 @@ func knock(ctx context.Context, args []string) error {
 		return errors.New("bad device key in the bundle")
 	}
 	key := [spa.KeySize]byte(k)
-	ip, serverName, err := nodeAddr(ctx, b, *addr)
+	ip, serverName, err := nodeAddr(ctx, b, *addr, nil)
 	if err != nil {
 		return err
 	}

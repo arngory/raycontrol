@@ -26,6 +26,11 @@ const (
 	// AdminAccessSetting is where the admin addresses are kept: a rollback
 	// of the database keeps them as they are now (store.CarryRevocations).
 	AdminAccessSetting = settingAdmin
+	// DNSNameSetting is where the node's own name under its domain is kept
+	// (spec/names-v1.md §2, provision.NodeDNSName). A rollback keeps it as
+	// it is now, as it does the admin addresses: devices hold the name, and
+	// an older rayd would not keep its label from its services.
+	DNSNameSetting = "node_dns_name"
 
 	// BundlePrefix marks an encoded device bundle.
 	BundlePrefix = "rcdev1:"

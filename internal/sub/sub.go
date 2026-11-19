@@ -577,17 +577,19 @@ func YggdrasilLink(m render.Model, s, inner render.Service, uuid string, device 
 }
 
 // linkHost is the host a link sends its client to (spec/names-v1.md §4).
-// For a client before names-v1, the node's address, as before. For one
-// that resolves names: the name it sends as its server name when that is
-// one label under the node's domain (the record *.<domain> resolves it),
-// else the node's own name (hy2-obfs, REALITY with a foreign target), and
-// the address when the node has no name.
-func linkHost(m render.Model, sni string) string {
-	if !m.ByName {
+// For a client before names-v1, the node's host, as before. For one that
+// resolves names: name, the service's own name it sends as its server
+// name, when that is one label under the node's domain (the record
+// *.<domain> resolves it); else the node's own name (hy2-obfs, REALITY with
+// a foreign target: name ""); the host when the node has no name. The host
+// too, as before, when the host is a name: the node has no address for
+// the client to fall back to.
+func linkHost(m render.Model, name string) string {
+	if !m.ByName || len(node.Addrs(m.Host)) == 0 {
 		return m.Host
 	}
-	if label, ok := strings.CutSuffix(sni, "."+m.Domain); ok && m.Domain != "" && label != "" && !strings.Contains(label, ".") {
-		return sni
+	if label, ok := strings.CutSuffix(name, "."+m.Domain); ok && m.Domain != "" && label != "" && !strings.Contains(label, ".") {
+		return name
 	}
 	if m.DNSName != "" {
 		return m.DNSName
@@ -797,6 +799,12 @@ func realityLink(m render.Model, s render.Service, uuid string, userID int64) (s
 	q.Set("niko-node", m.NodeID)
 	q.Set("niko-svc", strconv.FormatInt(s.ID, 10))
 	setAddrs(q, m)
-	host := net.JoinHostPort(linkHost(m, rs.SNI), strconv.Itoa(port))
+	// A foreign target's name is someone else's, even under the node's
+	// domain: the node's own name then.
+	own := rs.SNI
+	if rs.Site == "" {
+		own = ""
+	}
+	host := net.JoinHostPort(linkHost(m, own), strconv.Itoa(port))
 	return "vless://" + uuid + "@" + host + "?" + q.Encode() + "#" + url.PathEscape(s.Name), nil
 }

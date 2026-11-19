@@ -72,9 +72,18 @@ func probe(ctx context.Context, args []string) error {
 	if *addr != "" {
 		host = *addr
 	}
+	var red *redact.Redactor
+	if *redacted {
+		red = redact.New(host, domainOf(host), b.DNSName, domainOf(b.DNSName))
+	}
 	// One address for SPA and TLS: the grant is per source and destination
 	// family, so a domain with A and AAAA must not switch between them.
-	ip, serverName, err := nodeAddr(ctx, b, *addr)
+	ip, serverName, err := nodeAddr(ctx, b, *addr, func(msg string) {
+		if red != nil {
+			msg = red.String(msg)
+		}
+		fmt.Fprint(os.Stderr, msg)
+	})
 	if err != nil {
 		return err
 	}
@@ -88,9 +97,7 @@ func probe(ctx context.Context, args []string) error {
 		ServerName: serverName,
 	}
 	printf := func(format string, a ...any) { fmt.Printf(format, a...) }
-	var red *redact.Redactor
-	if *redacted {
-		red = redact.New(host, domainOf(host), b.DNSName, domainOf(b.DNSName))
+	if red != nil {
 		printf = func(format string, a ...any) { fmt.Print(red.String(fmt.Sprintf(format, a...))) }
 		*links, *payload = false, false
 	}
@@ -316,15 +323,13 @@ func argToken(text string) string {
 // it is. Else the node's name, resolved once: its address when it is one
 // of the node's (a knock sent to an address DNS alone gave could be
 // replayed at the node by whoever gave it, spa-v2 §9), the node's first
-// address when it is not or does not resolve. A bundle before names-v1:
-// its host, as before.
-func nodeAddr(ctx context.Context, b node.Bundle, override string) (netip.Addr, string, error) {
+// address when it is not or does not resolve. A bundle before names-v1,
+// or one with no address of the node (its host is a name): its host, as
+// before. warn tells the operator DNS gave another address; nil prints it
+// to stderr.
+func nodeAddr(ctx context.Context, b node.Bundle, override string, warn func(string)) (netip.Addr, string, error) {
 	if override != "" {
 		ip, err := resolve(ctx, override)
-		return ip, "", err
-	}
-	if b.DNSName == "" {
-		ip, err := resolve(ctx, b.Host)
 		return ip, "", err
 	}
 	var known []netip.Addr
@@ -332,6 +337,10 @@ func nodeAddr(ctx context.Context, b node.Bundle, override string) (netip.Addr, 
 		if ip, err := netip.ParseAddr(a); err == nil {
 			known = append(known, ip.Unmap())
 		}
+	}
+	if b.DNSName == "" || len(known) == 0 {
+		ip, err := resolve(ctx, b.Host)
+		return ip, "", err
 	}
 	rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -341,17 +350,15 @@ func nodeAddr(ctx context.Context, b node.Bundle, override string) (netip.Addr, 
 			return ip.Unmap(), b.DNSName, nil
 		}
 	}
-	switch {
-	case len(known) > 0 && err == nil && len(ips) > 0:
-		fmt.Fprintf(os.Stderr, "rayctl: %s resolves to none of the node's addresses: going to %s\n", b.DNSName, known[0])
-		return known[0], b.DNSName, nil
-	case len(known) > 0:
-		return known[0], b.DNSName, nil
-	case err != nil || len(ips) == 0:
-		return netip.Addr{}, "", fmt.Errorf("resolving %s: %w", b.DNSName, err)
+	if err == nil && len(ips) > 0 {
+		msg := fmt.Sprintf("rayctl: %s resolves to none of the node's addresses: going to %s\n", b.DNSName, known[0])
+		if warn == nil {
+			fmt.Fprint(os.Stderr, msg)
+		} else {
+			warn(msg)
+		}
 	}
-	// No addresses to hold it to (the node's host is a name): as before.
-	return ips[0].Unmap(), b.DNSName, nil
+	return known[0], b.DNSName, nil
 }
 
 func resolve(ctx context.Context, host string) (netip.Addr, error) {

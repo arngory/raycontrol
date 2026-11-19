@@ -149,9 +149,9 @@ func TestSpareZones(t *testing.T) {
 }
 
 // Review 13: a zone may not take the node's own names (its domain, the
-// name the zones are delegated to, a service's server name); a zone stored
-// at the domain before (v0.13 took it) makes the search for a free name
-// fail, not spin.
+// name the zones are delegated to, its own name, a service's server name);
+// a zone stored at the domain before (v0.13 took it) makes the search for
+// a free name fail, not spin.
 func TestZonesAndNodeNames(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
@@ -183,10 +183,23 @@ func TestZonesAndNodeNames(t *testing.T) {
 			t.Errorf("spare zone %s: %v", bad, err)
 		}
 	}
-	// A zone under a server name takes nothing from it.
-	if _, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "under", Enabled: true,
-		Settings: `{"zone":"t.` + SiteName(site) + `"}`}); err != nil {
-		t.Fatalf("a zone under the site's name: %v", err)
+	// Nor a zone under a server name or the node's own name: clients
+	// resolve these (names-v1 §2), and a delegation under one makes it a
+	// name the record *.<domain> no longer answers for (RFC 4592). A zone
+	// beside them, under the domain, takes nothing.
+	own, err := NodeDNSName(ctx, st)
+	if err != nil || own == "" {
+		t.Fatalf("the node's name %q %v", own, err)
+	}
+	for i, bad := range []string{"t." + SiteName(site), "t." + own, "t." + ns} {
+		if _, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "u" + string(rune('a'+i)), Enabled: true,
+			Settings: `{"zone":"` + bad + `"}`}); !errors.Is(err, store.ErrInvalid) {
+			t.Errorf("a zone under %s: %v", bad, err)
+		}
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "beside", Enabled: true,
+		Settings: `{"zone":"tun9.n.example.com"}`}); err != nil {
+		t.Fatalf("a zone under the domain: %v", err)
 	}
 	_ = dns
 

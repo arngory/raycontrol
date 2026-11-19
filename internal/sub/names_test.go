@@ -96,35 +96,51 @@ func TestLinksByName(t *testing.T) {
 	}
 }
 
-// A node whose host is a name gives no niko-ip, and a REALITY service with
-// a foreign target sends a client that resolves names to the node's own
-// name: its SNI is someone else's.
+// A node whose host is a name has no name of its own and gives links by
+// that host, as before, with no niko-ip: no address to fall back to. A
+// REALITY service with a foreign target sends a client that resolves names
+// to the node's own name, even when the target is under the node's domain:
+// its SNI is someone else's.
 func TestLinksByNameEdges(t *testing.T) {
 	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	provision.Init(ctx, st, provision.Options{Host: "node.example.net", Domain: "example.com"})
-	svc, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true, Settings: `{"target":"www.example.org:443"}`})
-	if err != nil {
-		t.Fatal(err)
-	}
-	st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
-	st.SetUserServices(ctx, "alice", []int64{svc.ID})
-	m, err := render.Collect(ctx, st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.ByName = true
-	p, err := sub.Profiles(m, m.Users[0])
-	if err != nil || len(p) != 1 {
-		t.Fatalf("profiles %v %v", p, err)
-	}
-	u, _ := url.Parse(p[0].Link)
-	if u.Hostname() != m.DNSName || u.Query().Get("sni") != "www.example.org" || u.Query().Has("niko-ip") {
-		t.Fatalf("link %s", p[0].Link)
+	for _, tc := range []struct{ host, target string }{
+		{"node.example.net", "www.example.org:443"},
+		{"203.0.113.7", "www.example.org:443"},
+		{"203.0.113.7", "www.example.com:443"},
+	} {
+		st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer st.Close()
+		provision.Init(ctx, st, provision.Options{Host: tc.host, Domain: "example.com"})
+		svc, err := provision.CreateService(ctx, st, store.Service{Kind: "reality", Name: "r", Enabled: true, Settings: `{"target":"` + tc.target + `"}`})
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
+		st.SetUserServices(ctx, "alice", []int64{svc.ID})
+		m, err := render.Collect(ctx, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.ByName = true
+		p, err := sub.Profiles(m, m.Users[0])
+		if err != nil || len(p) != 1 {
+			t.Fatalf("profiles %v %v", p, err)
+		}
+		u, _ := url.Parse(p[0].Link)
+		sni, _, _ := strings.Cut(tc.target, ":")
+		want, addr := m.DNSName, tc.host
+		if tc.host == "node.example.net" {
+			if m.DNSName != "" {
+				t.Errorf("%s: the node's name %q", tc.host, m.DNSName)
+			}
+			want, addr = tc.host, ""
+		}
+		if want == "" || u.Hostname() != want || u.Query().Get("sni") != sni || u.Query().Get("niko-ip") != addr {
+			t.Errorf("%s, target %s: want host %q, niko-ip %q: %s", tc.host, tc.target, want, addr, p[0].Link)
+		}
 	}
 }
 
