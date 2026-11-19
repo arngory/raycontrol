@@ -154,13 +154,16 @@ func TestDeviceFileOwner(t *testing.T) {
 // the file's name; a filesystem without modes has its advice too.
 func TestDeviceFileFixLine(t *testing.T) {
 	for path, want := range map[string]string{
-		"n.rcdev":                "n.rcdev",
-		"/home/a/node-d_1.rcdev": "/home/a/node-d_1.rcdev",
-		"a b/n.rcdev":            "'a b/n.rcdev'",
-		"it's.rcdev":             `'it'\''s.rcdev'`,
-		"-n.rcdev":               "./-n.rcdev",
-		"~/n.rcdev":              "'~/n.rcdev'",
-		"$HOME/`x`;*.rcdev":      "'$HOME/`x`;*.rcdev'",
+		"n.rcdev":                     "n.rcdev",
+		"/home/a/node-d_1.rcdev":      "/home/a/node-d_1.rcdev",
+		"a b/n.rcdev":                 "'a b/n.rcdev'",
+		"it's.rcdev":                  `'it'\''s.rcdev'`,
+		"-n.rcdev":                    "./-n.rcdev",
+		"~/n.rcdev":                   "'~/n.rcdev'",
+		"$HOME/`x`;*.rcdev":           "'$HOME/`x`;*.rcdev'",
+		"=ls":                         "'=ls'",
+		"https://[2001:db8::1]:443/x": "'https://[2001:db8::1]:443/x'",
+		"https://192.0.2.1:443/x":     "https://192.0.2.1:443/x",
 	} {
 		if got := shellWord(path); got != want {
 			t.Errorf("shellWord(%q) = %s, want %s", path, got, want)

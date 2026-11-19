@@ -471,6 +471,13 @@ func releaseArchives(t *testing.T) (names, docs []string) {
 			t.Errorf("release.yml lacks %q", want)
 		}
 	}
+	// The copy the checksums are of: the workflow's own mapping, the one
+	// checked above.
+	for _, want := range []string{`role=${d#openapi-}`, `cp "api/openapi/${role%.yaml}.openapi.yaml" "$d"`} {
+		if !strings.Contains(wf, want) {
+			t.Errorf("release.yml lacks %q", want)
+		}
+	}
 	for _, read := range []string{`read -ra archives <<< "$ARCHIVES"`, `read -ra docs <<< "$DOCS"`} {
 		if n := strings.Count(wf, read); n != 2 {
 			t.Errorf("release.yml has %q %d times, want 2 (the checksums, the upload)", read, n)

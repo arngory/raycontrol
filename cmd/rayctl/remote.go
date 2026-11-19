@@ -260,7 +260,7 @@ func remoteExport(args []string, out io.Writer) error {
 	fmt.Fprintf(out, "curl --http2 --tlsv1.3 --curves X25519MLKEM768 --cert %s --key %s -k --pinnedpubkey '%s' \\\n",
 		shellWord(curlCert(*pemOut)), shellWord(*pemOut), pin)
 	fmt.Fprintf(out, "  -H 'Content-Type: application/json' -H 'Connect-Protocol-Version: 1' --data '{}' \\\n")
-	fmt.Fprintf(out, "  %s/raycontrol.device.v1.DeviceService/GetSelf\n", url)
+	fmt.Fprintf(out, "  %s\n", shellWord(url+"/raycontrol.device.v1.DeviceService/GetSelf"))
 	return nil
 }
 

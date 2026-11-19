@@ -5,6 +5,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"google.golang.org/protobuf/reflect/protoreflect"
+
+	devicev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1"
+	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 )
 
 // openAPIDoc is what TestOpenAPIRoles reads of a generated document: its
@@ -85,17 +90,58 @@ func readOpenAPI(t *testing.T, file string) openAPIDoc {
 	return doc
 }
 
+// roleAnswers is every message the role may get in an answer, from the
+// outputs of the methods it may call through the fields it sees, with those
+// fields' names: an empty answer (DeleteUserResponse) too. support's notes
+// count, the document being of all support may be let see.
+func roleAnswers(role string) map[string][]string {
+	sees := func(fd protoreflect.FieldDescriptor) bool {
+		labels := fieldLabels(fd)
+		return labels == nil || slices.Contains(labels, role) || (role == labelSupport && slices.Contains(labels, labelNotes))
+	}
+	out := map[string][]string{}
+	var walk func(md protoreflect.MessageDescriptor)
+	walk = func(md protoreflect.MessageDescriptor) {
+		if _, ok := out[string(md.FullName())]; ok {
+			return
+		}
+		out[string(md.FullName())] = []string{}
+		for i := range md.Fields().Len() {
+			fd := md.Fields().Get(i)
+			if !sees(fd) {
+				continue
+			}
+			out[string(md.FullName())] = append(out[string(md.FullName())], string(fd.Name()))
+			if fd.IsMap() {
+				fd = fd.MapValue()
+			}
+			if fd.Message() != nil {
+				walk(fd.Message())
+			}
+		}
+	}
+	for _, fd := range []protoreflect.FileDescriptor{nodev1.File_raycontrol_node_v1_node_proto, devicev1.File_raycontrol_device_v1_device_proto} {
+		for i := range fd.Services().Len() {
+			svc := fd.Services().Get(i)
+			for j := range svc.Methods().Len() {
+				m := svc.Methods().Get(j)
+				if slices.Contains(methodRoles["/"+string(svc.FullName())+"/"+string(m.Name())], role) {
+					walk(m.Output())
+				}
+			}
+		}
+	}
+	return out
+}
+
 // TestOpenAPIRoles: the OpenAPI documents of the integrations' roles
 // in api/openapi (integrations-v1 §5.1) list the methods the gate lets the
-// role call, no more and no fewer, and each message of their answers has
-// the fields the role sees (testdata/integration-fields.txt), no more and
-// no fewer: both come from the same visibility rules, and a document made
-// from an older proto would differ.
+// role call, no more and no fewer, and each message the role may get in an
+// answer has the fields the role sees, no more and no fewer: both come from
+// the same visibility rules, and a document made from an older proto would
+// differ. What the role sees is reviewed in testdata/integration-fields.txt
+// (TestRoleFields).
 func TestOpenAPIRoles(t *testing.T) {
-	golden, err := os.ReadFile("testdata/integration-fields.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, tc := range []struct {
 		file, role string
 		labels     []string
@@ -116,18 +162,11 @@ func TestOpenAPIRoles(t *testing.T) {
 			t.Errorf("%s: the document has %q,\nthe gate lets the role call %q (scripts/gen.sh)", tc.file, doc.paths, gate)
 		}
 
-		// What the role sees of each message of its answers: support's notes
-		// too, the document being of all support may be let see.
-		sees := map[string][]string{}
-		for _, line := range strings.Split(strings.TrimSpace(string(golden)), "\n") {
-			role, field, _ := strings.Cut(strings.TrimSuffix(line, " (if the administrator allows)"), " ")
-			if role != tc.role {
-				continue
-			}
-			i := strings.LastIndex(field, ".")
-			sees[field[:i]] = append(sees[field[:i]], field[i+1:])
+		answers := roleAnswers(tc.role)
+		if len(answers) < 10 {
+			t.Fatalf("%s: %d messages in the role's answers", tc.file, len(answers))
 		}
-		for msg, want := range sees {
+		for msg, want := range answers {
 			got, ok := doc.fields[msg]
 			if !ok {
 				t.Errorf("%s: no schema of %s", tc.file, msg)
