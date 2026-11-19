@@ -137,8 +137,16 @@ func DNSRecords(ctx context.Context, st *store.Store) (records []cloudflare.Reco
 	slices.Sort(zones)
 	for _, z := range zones {
 		records = append(records, cloudflare.Record{Type: "NS", Name: z, Content: ns})
+		// A zone stored before v0.34.0 refused it (nodeNameClash).
+		name, err := resolvedOver(ctx, st, all, z, domain)
+		if err != nil {
+			return nil, nil, err
+		}
+		if name != "" {
+			warnings = append(warnings, fmt.Sprintf("the DNS tunnel zone %s lies under %s: the record *.%s no longer answers for that name, and clients that resolve it fall back to the node's address (give the tunnel another zone)", z, name, domain))
+		}
 	}
-	return records, nil, nil
+	return records, warnings, nil
 }
 
 // NSName is the name DNS tunnel zones are delegated to, as DNSRecords

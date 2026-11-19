@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -106,7 +107,18 @@ func TestNodeDNSNameEdges(t *testing.T) {
 	if _, err := st.CreateService(ctx, store.Service{Kind: "masterdns", Name: "old", Enabled: true, Settings: `{"zone":"example.org"}`}); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := NodeDNSName(ctx, st); err != nil || n != "" {
+	// At once: not waiting for the lock a rotation may hold.
+	settingsMu.Lock()
+	var n string
+	done := make(chan struct{})
+	go func() { n, err = NodeDNSName(ctx, st); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waited for settingsMu")
+	}
+	settingsMu.Unlock()
+	if err != nil || n != "" {
 		t.Fatalf("a zone holds the domain: %q %v", n, err)
 	}
 }

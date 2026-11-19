@@ -184,22 +184,31 @@ func TestZonesAndNodeNames(t *testing.T) {
 		}
 	}
 	// Nor a zone under a server name or the node's own name: clients
-	// resolve these (names-v1 §2), and a delegation under one makes it a
-	// name the record *.<domain> no longer answers for (RFC 4592). A zone
-	// beside them, under the domain, takes nothing.
+	// resolve these through *.<domain> (names-v1 §2), and a delegation
+	// under one makes it a name the record no longer answers for
+	// (RFC 4592). A zone beside them under the domain takes nothing, nor
+	// one under the name the zones are delegated to (its own record), nor
+	// a REALITY target's name, even the domain's: clients do not resolve
+	// it.
 	own, err := NodeDNSName(ctx, st)
 	if err != nil || own == "" {
 		t.Fatalf("the node's name %q %v", own, err)
 	}
-	for i, bad := range []string{"t." + SiteName(site), "t." + own, "t." + ns} {
+	for i, bad := range []string{"t." + SiteName(site), "t." + own} {
 		if _, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "u" + string(rune('a'+i)), Enabled: true,
 			Settings: `{"zone":"` + bad + `"}`}); !errors.Is(err, store.ErrInvalid) {
 			t.Errorf("a zone under %s: %v", bad, err)
 		}
 	}
-	if _, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "beside", Enabled: true,
-		Settings: `{"zone":"tun9.n.example.com"}`}); err != nil {
-		t.Fatalf("a zone under the domain: %v", err)
+	if _, err := CreateService(ctx, st, store.Service{Kind: "reality", Name: "apex", Enabled: true,
+		Settings: `{"target":"n.example.com:443"}`}); err != nil {
+		t.Fatal(err)
+	}
+	for i, good := range []string{"tun9.n.example.com", "t." + ns} {
+		if _, err := CreateService(ctx, st, store.Service{Kind: "masterdns", Name: "g" + string(rune('a'+i)), Enabled: true,
+			Settings: `{"zone":"` + good + `"}`}); err != nil {
+			t.Errorf("a zone %s: %v", good, err)
+		}
 	}
 	_ = dns
 
@@ -253,5 +262,38 @@ func TestCreateServiceZoneRace(t *testing.T) {
 	}
 	if ok != 1 {
 		t.Fatalf("%d creates took the zone", ok)
+	}
+}
+
+// A zone stored before v0.34.0 under a name clients resolve (a site's
+// name) stays, and DNSRecords names the problem: rayctl dns and the
+// metrics show it.
+func TestZoneUnderResolvedNameWarned(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := Init(ctx, st, Options{Host: "203.0.113.7", Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	site, err := CreateService(ctx, st, store.Service{Kind: "site", Name: "site", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "fine", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, warnings, err := DNSRecords(ctx, st); err != nil || len(warnings) != 0 {
+		t.Fatalf("warnings %q %v", warnings, err)
+	}
+	old := "t." + SiteName(site)
+	if _, err := st.CreateService(ctx, store.Service{Kind: "masterdns", Name: "old", Enabled: true, Settings: `{"zone":"` + old + `"}`}); err != nil {
+		t.Fatal(err)
+	}
+	_, warnings, err := DNSRecords(ctx, st)
+	if err != nil || len(warnings) != 1 || !strings.Contains(warnings[0], old) || !strings.Contains(warnings[0], SiteName(site)+":") {
+		t.Fatalf("warnings %q %v", warnings, err)
 	}
 }

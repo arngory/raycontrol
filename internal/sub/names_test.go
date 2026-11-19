@@ -118,28 +118,42 @@ func TestLinksByNameEdges(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// A service with a name of its own under the domain.
+		nv, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-masq", Name: "hm", Enabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
 		st.CreateUser(ctx, store.User{Name: "alice", Enabled: true})
-		st.SetUserServices(ctx, "alice", []int64{svc.ID})
+		st.SetUserServices(ctx, "alice", []int64{svc.ID, nv.ID})
 		m, err := render.Collect(ctx, st)
 		if err != nil {
 			t.Fatal(err)
 		}
 		m.ByName = true
 		p, err := sub.Profiles(m, m.Users[0])
-		if err != nil || len(p) != 1 {
+		if err != nil || len(p) != 2 {
 			t.Fatalf("profiles %v %v", p, err)
 		}
-		u, _ := url.Parse(p[0].Link)
-		sni, _, _ := strings.Cut(tc.target, ":")
-		want, addr := m.DNSName, tc.host
-		if tc.host == "node.example.net" {
-			if m.DNSName != "" {
-				t.Errorf("%s: the node's name %q", tc.host, m.DNSName)
-			}
-			want, addr = tc.host, ""
+		nameHost := tc.host == "node.example.net"
+		if nameHost && m.DNSName != "" {
+			t.Errorf("%s: the node's name %q", tc.host, m.DNSName)
 		}
-		if want == "" || u.Hostname() != want || u.Query().Get("sni") != sni || u.Query().Get("niko-ip") != addr {
-			t.Errorf("%s, target %s: want host %q, niko-ip %q: %s", tc.host, tc.target, want, addr, p[0].Link)
+		for _, pr := range p {
+			u, _ := url.Parse(pr.Link)
+			want, addr := u.Query().Get("sni"), tc.host
+			if pr.Name == "r" {
+				sni, _, _ := strings.Cut(tc.target, ":")
+				if u.Query().Get("sni") != sni {
+					t.Errorf("%s: sni %s", tc.host, pr.Link)
+				}
+				want = m.DNSName
+			}
+			if nameHost {
+				want, addr = tc.host, ""
+			}
+			if want == "" || u.Hostname() != want || u.Query().Get("niko-ip") != addr {
+				t.Errorf("%s, target %s, %s: want host %q, niko-ip %q: %s", tc.host, tc.target, pr.Name, want, addr, pr.Link)
+			}
 		}
 	}
 }

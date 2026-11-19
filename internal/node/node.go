@@ -28,8 +28,7 @@ const (
 	AdminAccessSetting = settingAdmin
 	// DNSNameSetting is where the node's own name under its domain is kept
 	// (spec/names-v1.md §2, provision.NodeDNSName). A rollback keeps it as
-	// it is now, as it does the admin addresses: devices hold the name, and
-	// an older rayd would not keep its label from its services.
+	// it is now, as it does the admin addresses: devices hold the name.
 	DNSNameSetting = "node_dns_name"
 
 	// BundlePrefix marks an encoded device bundle.

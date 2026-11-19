@@ -588,7 +588,10 @@ func linkHost(m render.Model, name string) string {
 	if !m.ByName || len(node.Addrs(m.Host)) == 0 {
 		return m.Host
 	}
-	if label, ok := strings.CutSuffix(name, "."+m.Domain); ok && m.Domain != "" && label != "" && !strings.Contains(label, ".") {
+	// As names compare: a domain stored before Init canonicalized it may
+	// have capitals or a final dot.
+	domain := provision.CanonicalZone(m.Domain)
+	if label, ok := strings.CutSuffix(provision.CanonicalZone(name), "."+domain); ok && domain != "" && label != "" && !strings.Contains(label, ".") {
 		return name
 	}
 	if m.DNSName != "" {
