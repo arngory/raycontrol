@@ -55,7 +55,7 @@ func TestMethodRoles(t *testing.T) {
 		"NodeService/GetAppMirror": admin, "NodeService/SetAppMirror": admin, "NodeService/StartUpdate": admin,
 		"NodeService/SetNodeName": admin, "NodeService/SetNodeNote": admin, "NodeService/GetClientPolicy": admin,
 		"NodeService/SetClientPolicy": admin, "NodeService/GetPorts": admin,
-		"NodeService/GetIntegrationSettings": admin, "NodeService/SetIntegrationSettings": admin,
+		"NodeService/GetIntegrationSettings": admin, "NodeService/SetIntegrationSettings": admin, "NodeService/SetDeviceAllow": admin,
 		"NodeService/SetCertificate": root, "NodeService/AddRelay": root, "NodeService/RemoveRelay": root,
 		"NodeService/IssueRelayBundle": root, "NodeService/Backup": root, "NodeService/SetDebug": root,
 		"NodeService/GetEgress": root, "NodeService/SetEgress": root, "NodeService/GetConnLimit": root,

@@ -85,7 +85,7 @@ func TestTrafficResetSupervised(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provision.Init(ctx, st, provision.Options{Host: ip.String(), Domain: "example.test"}); err != nil {
+	if _, err := provision.Init(ctx, st, provision.Options{Host: ip.String(), Domain: "example.test", Ports: provision.PortChoice{Sub: subPort(t)}}); err != nil {
 		t.Fatal(err)
 	}
 	masq, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-masq", Name: "hy2", Enabled: true})

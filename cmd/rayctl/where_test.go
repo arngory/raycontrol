@@ -192,7 +192,7 @@ var apiSubs = map[string][]string{
 	"node":        {"name", "note"},
 	"user":        {"add", "del", "disable", "enable", "expires", "export", "lan", "limit", "list", "renew", "reset-usage", "services", "usage"},
 	"service":     {"add", "del", "disable", "enable", "list", "peer-keys", "rotate", "set"},
-	"device":      {"add", "invite", "list", "revoke"},
+	"device":      {"add", "allow", "invite", "list", "revoke"},
 	"relay":       {"add", "list", "ports", "remove", "set"},
 	"dns":         {"check", "cloudflare", "remove", "status", "sync"},
 	"summary":     {"api", "off", "on", "show"},

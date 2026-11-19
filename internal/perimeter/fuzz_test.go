@@ -38,8 +38,10 @@ func (f *scriptFW) SetupWith(c TableContents) error {
 	f.ports = append(f.ports, c.AdminPorts...)
 	f.ports = append(f.ports, c.Forward...)
 	f.ports = append(f.ports, c.RelayPorts...)
+	f.ports = append(f.ports, c.IntegPorts...)
 	f.nets = append(f.nets, c.Admin...)
 	f.nets = append(f.nets, c.Relays...)
+	f.nets = append(f.nets, c.Integ...)
 	for _, g := range c.Grants {
 		f.ports, f.addrs = append(f.ports, g.Port), append(f.addrs, g.Addr)
 	}
@@ -58,6 +60,10 @@ func (f *scriptFW) SetPublic(ports []Port) error {
 func (f *scriptFW) SetAdmin(prefixes []netip.Prefix, ports []Port) error {
 	f.nets, f.ports = append(f.nets, prefixes...), append(f.ports, ports...)
 	return f.run(adminScript(prefixes, ports))
+}
+func (f *scriptFW) SetInteg(prefixes []netip.Prefix, ports []Port) error {
+	f.nets, f.ports = append(f.nets, prefixes...), append(f.ports, ports...)
+	return f.run(integScript(prefixes, ports))
 }
 func (f *scriptFW) SetForward(ports []Port) error {
 	f.ports = append(f.ports, ports...)
@@ -202,6 +208,8 @@ func fuzzSnapshot(now time.Time) *perimeterv1.Snapshot {
 	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 22}}
 	snap.RelayPrefixes = []string{"192.0.2.44/32", "2001:db8::44/128"}
 	snap.RelayPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 443}, {Proto: "udp", Port: 443}}
+	snap.IntegPrefixes = []string{"198.51.100.7/32", "2001:db8:7::/64", "::ffff:203.0.113.8/128"}
+	snap.IntegPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 8443}}
 	snap.Acme = &perimeterv1.AcmeWindow{Port: 9180, Until: now.Add(10 * time.Minute).Unix()}
 	snap.Egress = &perimeterv1.Egress{Smtp: true, Bittorrent: true, Uids: []uint32{4242}, Local: &perimeterv1.Local{
 		Loopback: []*perimeterv1.Port{{Proto: "tcp", Port: 8443}},
@@ -360,7 +368,7 @@ func FuzzGateUpdate(f *testing.F) {
 // bounds: ports and protocols, rotations, the ACME port, the prefixes.
 func checkTaken(t *testing.T, snap *perimeterv1.Snapshot) {
 	t.Helper()
-	ports := slices.Concat(snap.PublicPorts, snap.AdminPorts, snap.RelayPorts)
+	ports := slices.Concat(snap.PublicPorts, snap.AdminPorts, snap.RelayPorts, snap.IntegPorts)
 	for _, s := range snap.Services {
 		ports = append(ports, s.Ports...)
 		if r := s.Rotation; r != nil && (uint64(r.PortBase)+uint64(r.PortRange) > 65536 || r.TargetPort > 65535) {
@@ -386,9 +394,9 @@ func checkTaken(t *testing.T, snap *perimeterv1.Snapshot) {
 	if w := snap.GetAcme(); w != nil && w.Port > 65535 {
 		t.Fatalf("ACME port %d taken", w.Port)
 	}
-	for _, s := range snap.AdminPrefixes {
+	for _, s := range append(slices.Clone(snap.AdminPrefixes), snap.IntegPrefixes...) {
 		if _, err := netip.ParsePrefix(s); err != nil {
-			t.Fatalf("admin prefix %q taken", s)
+			t.Fatalf("admin or integration prefix %q taken", s)
 		}
 	}
 	for _, s := range snap.RelayPrefixes {

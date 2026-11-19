@@ -32,6 +32,7 @@ func (f *countingFW) Present() (bool, error)                                  { 
 func (f *countingFW) SetSPAPorts(_, _ []uint16) error                         { return nil }
 func (f *countingFW) SetPublic([]perimeter.Port) error                        { return nil }
 func (f *countingFW) SetAdmin(p []netip.Prefix, _ []perimeter.Port) error     { f.admin = p; return nil }
+func (f *countingFW) SetInteg([]netip.Prefix, []perimeter.Port) error         { return nil }
 func (f *countingFW) SetForward([]perimeter.Port) error                       { return nil }
 func (f *countingFW) SetRelays([]netip.Prefix, []perimeter.Port) error        { return nil }
 func (f *countingFW) SetRotation(map[uint16]uint16) error                     { return nil }

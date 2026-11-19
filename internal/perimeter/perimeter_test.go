@@ -29,6 +29,8 @@ type fakeFW struct {
 	public     []Port
 	admin      []netip.Prefix
 	adminPorts []Port
+	integ      []netip.Prefix
+	integPorts []Port
 	relays     []netip.Prefix
 	relayPorts []Port
 	forward    []Port
@@ -90,7 +92,7 @@ func (f *fakeFW) flush() {
 	defer f.mu.Unlock()
 	f.gone = true
 	f.udp, f.tcp, f.public, f.admin, f.adminPorts, f.rot, f.open = nil, nil, nil, nil, nil, nil, nil
-	f.relays, f.relayPorts, f.forward, f.egress = nil, nil, nil, nil
+	f.relays, f.relayPorts, f.forward, f.egress, f.integ, f.integPorts = nil, nil, nil, nil, nil, nil
 	f.acmePort, f.acmeTTL = 0, 0
 	f.inLimitOff, f.guard = false, false
 }
@@ -163,6 +165,14 @@ func (f *fakeFW) SetAdmin(p []netip.Prefix, ports []Port) error {
 		return errors.New("nft: busy")
 	}
 	f.admin, f.adminPorts = p, ports
+	return nil
+}
+func (f *fakeFW) SetInteg(p []netip.Prefix, ports []Port) error {
+	f.calls = append(f.calls, "SetInteg")
+	if f.fails("SetInteg") {
+		return errors.New("nft: busy")
+	}
+	f.integ, f.integPorts = p, ports
 	return nil
 }
 func (f *fakeFW) SetForward(ports []Port) error {
@@ -349,9 +359,15 @@ func TestGateRestoresTable(t *testing.T) {
 	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 22}}
 	snap.RelayPrefixes = []string{"192.0.2.44/32", "2001:db8::44/128"}
 	snap.RelayPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 443}, {Proto: "udp", Port: 443}}
+	snap.IntegPrefixes = []string{"198.51.100.7/32", "::ffff:198.51.100.8/128", "198.51.100.0/28"}
+	snap.IntegPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 8443}}
 	snap.Services[1].Rotation = &perimeterv1.Rotation{PortKey: key(0x55), PortBase: 20000, PortRange: 1000, TargetPort: 443}
 	if err := g.Update(snap); err != nil {
 		t.Fatal(err)
+	}
+	// Merged for the interval set; IPv4 in IPv6 as IPv4.
+	if !slices.Equal(fw.integ, []netip.Prefix{netip.MustParsePrefix("198.51.100.0/28")}) || len(fw.integPorts) != 1 {
+		t.Fatalf("integ %v %v", fw.integ, fw.integPorts)
 	}
 	if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), seal(t, snap, 0x11, now)); err != nil {
 		t.Fatal(err)
@@ -362,8 +378,10 @@ func TestGateRestoresTable(t *testing.T) {
 	if _, err := g.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if fw.setups != 1 || len(fw.public) != 1 || len(fw.admin) != 1 || len(fw.adminPorts) != 1 || len(fw.relays) != 2 || len(fw.relayPorts) != 2 {
-		t.Fatalf("setups=%d public=%v admin=%v %v relays=%v %v", fw.setups, fw.public, fw.admin, fw.adminPorts, fw.relays, fw.relayPorts)
+	if fw.setups != 1 || len(fw.public) != 1 || len(fw.admin) != 1 || len(fw.adminPorts) != 1 || len(fw.relays) != 2 || len(fw.relayPorts) != 2 ||
+		len(fw.integ) != 1 || len(fw.integPorts) != 1 {
+		t.Fatalf("setups=%d public=%v admin=%v %v relays=%v %v integ=%v %v", fw.setups, fw.public, fw.admin, fw.adminPorts, fw.relays, fw.relayPorts,
+			fw.integ, fw.integPorts)
 	}
 	if len(fw.udp) == 0 || len(fw.tcp) == 0 || len(fw.rot) == 0 {
 		t.Fatalf("slots not restored: udp=%v tcp=%v rot=%v", fw.udp, fw.tcp, fw.rot)

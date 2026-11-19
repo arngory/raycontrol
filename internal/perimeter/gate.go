@@ -55,6 +55,8 @@ type Gate struct {
 	public     []Port
 	admin      []netip.Prefix
 	adminPorts []Port
+	integ      []netip.Prefix // integrations' servers (integrations-v1 §3.2)
+	integPorts []Port
 	relays     []netip.Prefix
 	relayPorts []Port
 	relaysSet  bool              // SetRelays has run: relay_check is on
@@ -220,7 +222,7 @@ func paramsOf(p *perimeterv1.SPAParams) (spa.Params, error) {
 // be commands of its own, run by root. And a number past its 16 bits (a
 // port, a service, a scope), which would be cut to another.
 func checkPorts(snap *perimeterv1.Snapshot) error {
-	lists := [][]*perimeterv1.Port{snap.GetPublicPorts(), snap.GetAdminPorts(), snap.GetRelayPorts()}
+	lists := [][]*perimeterv1.Port{snap.GetPublicPorts(), snap.GetAdminPorts(), snap.GetRelayPorts(), snap.GetIntegPorts()}
 	for _, s := range snap.GetServices() {
 		lists = append(lists, s.GetPorts())
 	}
@@ -302,6 +304,22 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 	}
 	admin = mergePrefixes(admin)
 	adminPorts := portsOf(snap.AdminPorts)
+	var integ []netip.Prefix
+	for _, s := range snap.GetIntegPrefixes() {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return fmt.Errorf("perimeter: integration prefix %q: %w", s, err)
+		}
+		if a := p.Addr(); a.Is4In6() && p.Bits() >= 96 {
+			p = netip.PrefixFrom(a.Unmap(), p.Bits()-96)
+		}
+		integ = append(integ, p.Masked())
+	}
+	integ = mergePrefixes(integ)
+	integPorts := portsOf(snap.GetIntegPorts())
+	if len(integ) == 0 || len(integPorts) == 0 {
+		integ, integPorts = nil, nil
+	}
 	var relays []netip.Prefix
 	for _, a := range snap.RelayPrefixes {
 		p, err := netip.ParsePrefix(a)
@@ -315,6 +333,7 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 	u := &update{
 		params: params, devices: devices, allowed: allowed, services: services, forward: Forwarded(snap.Services), rotations: rotations,
 		public: public, admin: admin, adminPorts: adminPorts, relays: relays, relayPorts: relayPorts,
+		integ: integ, integPorts: integPorts,
 		defTTL: time.Duration(sp.DefaultTtlS) * time.Second, maxTTL: time.Duration(sp.MaxTtlS) * time.Second,
 		tcpCarrier: sp.TcpCarrier, acme: snap.GetAcme(), egress: egressOf(snap.GetEgress()),
 		connLimitOff: snap.GetConnLimitOff(),
@@ -367,6 +386,8 @@ type update struct {
 	public, adminPorts []Port
 	relayPorts         []Port
 	admin, relays      []netip.Prefix
+	integ              []netip.Prefix
+	integPorts         []Port
 	defTTL, maxTTL     time.Duration
 	tcpCarrier         bool
 	acme               *perimeterv1.AcmeWindow
@@ -436,6 +457,13 @@ func (g *Gate) applyLocked(u *update) error {
 			errs = append(errs, err)
 		} else {
 			g.admin, g.adminPorts = u.admin, u.adminPorts
+		}
+	}
+	if !slices.Equal(u.integ, g.integ) || !slices.Equal(u.integPorts, g.integPorts) {
+		if err := g.fw.SetInteg(u.integ, u.integPorts); err != nil {
+			errs = append(errs, err)
+		} else {
+			g.integ, g.integPorts = u.integ, u.integPorts
 		}
 	}
 	// Once at least, even with no relays: it also ends flows of relays
@@ -779,11 +807,13 @@ func (g *Gate) restoreLocked(u *update) error {
 	c := TableContents{
 		Public: g.public, Admin: g.admin, AdminPorts: g.adminPorts, Forward: g.forward,
 		Relays: g.relays, RelayPorts: g.relayPorts, Relayed: g.relaysSet, InLimitOff: g.inLimitOff,
+		Integ: g.integ, IntegPorts: g.integPorts,
 	}
 	acmePort, acmeUntil := g.acmePort, g.acmeUntil
 	if u != nil {
 		c.Public, c.Admin, c.AdminPorts, c.Forward = u.public, u.admin, u.adminPorts, u.forward
 		c.Relays, c.RelayPorts, c.Relayed = u.relays, u.relayPorts, true
+		c.Integ, c.IntegPorts = u.integ, u.integPorts
 		acmePort, acmeUntil = 0, time.Time{}
 		if w := u.acme; w != nil && w.Port != 0 && w.Until > now.Unix() {
 			acmePort, acmeUntil = uint16(w.Port), time.Unix(w.Until, 0)
@@ -811,6 +841,7 @@ func (g *Gate) restoreLocked(u *update) error {
 	}
 	g.public, g.admin, g.adminPorts, g.forward = c.Public, c.Admin, c.AdminPorts, c.Forward
 	g.relays, g.relayPorts, g.relaysSet = c.Relays, c.RelayPorts, c.Relayed
+	g.integ, g.integPorts = c.Integ, c.IntegPorts
 	g.acmePort, g.acmeUntil = acmePort, acmeUntil
 	g.inLimitTableOff = c.InLimitOff
 	g.rotMap, g.udpPorts, g.tcpPorts = nil, nil, nil
@@ -835,6 +866,9 @@ func (g *Gate) restoreLocked(u *update) error {
 type TableContents struct {
 	Public, AdminPorts, Forward, RelayPorts []Port
 	Admin, Relays                           []netip.Prefix
+	// Integ and IntegPorts: integrations' servers to the API (SetInteg).
+	Integ      []netip.Prefix
+	IntegPorts []Port
 	// Relayed turns relay_check on (SetRelays), with the grants in.
 	Relayed    bool
 	InLimitOff bool
@@ -871,6 +905,11 @@ func (g *Gate) restoreSteps(c TableContents) error {
 	}
 	if len(c.Admin) > 0 || len(c.AdminPorts) > 0 {
 		if err := g.fw.SetAdmin(c.Admin, c.AdminPorts); err != nil {
+			return err
+		}
+	}
+	if len(c.Integ) > 0 || len(c.IntegPorts) > 0 {
+		if err := g.fw.SetInteg(c.Integ, c.IntegPorts); err != nil {
 			return err
 		}
 	}

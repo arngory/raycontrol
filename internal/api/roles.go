@@ -212,6 +212,7 @@ func (r *Remote) roleGate() connect.UnaryInterceptorFunc {
 					return nil, toConnect(err)
 				}
 				defer release()
+				r.Server.touchLastCall(ctx, d, now)
 				set, err := r.Server.integrationSettings(ctx)
 				if err != nil {
 					return nil, toConnect(err)
@@ -283,6 +284,7 @@ func (r *Remote) deviceLimit() connect.UnaryInterceptorFunc {
 				return nil, toConnect(err)
 			}
 			defer release()
+			r.Server.touchLastCall(ctx, d, now)
 			resp, err := next(ctx, req)
 			r.Server.countCall(d.Role, codeOf(err))
 			return resp, err

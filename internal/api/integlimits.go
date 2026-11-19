@@ -141,6 +141,7 @@ type integDevice struct {
 	buckets          [3]bucket
 	inflight         uint32
 	last             time.Time
+	stored           time.Time // last written to the store (touchLastCall)
 	calls, denied    uint64
 	limited          uint64
 }
