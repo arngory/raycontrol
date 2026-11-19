@@ -252,7 +252,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
       measures the channel (TCP down and up, UDP echo; probe-v1); -dns checks
       the subscription's DNS tunnel zones from this machine.
 
-  From another machine, through the node's remote API (admin devices):
+  From another machine, with a device file and the node's remote API:
   remote enroll [-o FILE] [-carrier udp|tls|tcp|auto] [-addr A] [-pin PIN] INVITE|@FILE|-
       register a device from an invite (RCINV2:... or rcinv1:...): a new client
       key, SPA, then the API; writes the device file (bundle and key, mode 0600)
@@ -260,6 +260,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             list|ports|set, dns, metrics, summary, app-mirror, debug, version run
                                             against the node through its API
   -remote FILE remote whoami|rotate         the device; a new client key for it
+  remote export FILE -pem OUT               the device's certificate and key as PEM (a new file, 0600), and
+                                            the API's address and pin as curl takes them
+                                            (spec/integrations-v1.md §5.2)
 `
 
 // version is set at release build time (-X main.version).

@@ -1,0 +1,44 @@
+# What the generator does not fill in (integrations-v1 §5.1): the
+# description, the server and how a client proves itself. The paths and
+# schemas come from api/proto through scripts/gen.sh, one document a role.
+openapi: 3.1.0
+info:
+  title: raycontrol node API for integrations
+  version: v1
+  description: |
+    The remote API of a raycontrol node, as a device of role `billing` or
+    `support` may call it (docs/spec/integrations-v1.md). Connect protocol
+    over HTTP/2: `POST https://HOST:PORT/<package>.<service>/<method>` with
+    `Content-Type: application/json` and `Connect-Protocol-Version: 1`; the
+    body is the request as protojson, the answer the response as protojson.
+    Fields are lowerCamelCase (snake_case is taken too), 64-bit integers
+    are strings. An error is an HTTP status and `{"code": "...", "message":
+    "..."}`.
+
+    The client presents the device's certificate (mutual TLS, the device
+    file of `rayctl remote enroll`; `rayctl remote export F -pem OUT` writes
+    it as PEM). TLS 1.3 with the X25519MLKEM768 group only. The node's
+    certificate is self-signed: check its key against the pin of the device
+    file (`api.pin`, base64url SHA-256 of its SubjectPublicKeyInfo), not its
+    name. Before calling, knock (SPA, spa-v2) unless the device calls from
+    its addresses (integrations-v1 §3.2).
+
+    Fields a role does not see are not here, and the node leaves them empty
+    in its answers. Calls over the rate limits answer `resource_exhausted`;
+    billing's mass actions over the hour's limit `failed_precondition`
+    unless `confirmMass` (integrations-v1 §2.4, §2.6).
+servers:
+  - url: https://{host}:{port}
+    description: the node's remote API (host and api.port of the device file's bundle)
+    variables:
+      host:
+        default: node.example
+      port:
+        default: "443"
+components:
+  securitySchemes:
+    deviceCertificate:
+      type: mutualTLS
+      description: the device's client certificate; the node pins it at registration
+security:
+  - deviceCertificate: []

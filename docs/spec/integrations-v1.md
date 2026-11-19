@@ -1,12 +1,13 @@
 # integrations-v1: внешние системы у ноды (боты, биллинг)
 
-Статус: **этапы 1, 1b и 2 в коде, не выпущены** (2026-11-19): роли `billing` и `support` (§2.1–§2.3), аудит (§2.5),
-пределы частоты (§2.6), предохранитель массовых действий и учёт трафика (§2.4), заметки для `support` (§2.2),
+Статус: **этапы 1, 1b, 2 и 3 в коде, не выпущены** (2026-11-19): роли `billing` и `support` (§2.1–§2.3), аудит
+(§2.5), пределы частоты (§2.6), предохранитель массовых действий и учёт трафика (§2.4), заметки для `support` (§2.2),
 `GetUser`, `SetUserExpiry`, `GetIntegrationSettings`, `SetIntegrationSettings` (§10), `rayctl device invite -role
 billing|support`, `user expires`, `integration`, `traffic counting` (§11); этап 2 — статические адреса (§3.2–§3.4):
 `SetDeviceAllow`, `device invite -allow`, `device allow`, наборы `integ4`/`integ6`, проверка адреса на каждом
-вызове. Без событий: администратору о предохранителе пока только аудит `api.mass`, метрика и `rayctl integration
-status`. Дальше — события (§4), OpenAPI (§5).
+вызове; этап 3 — OpenAPI ролей (`api/openapi/billing.openapi.yaml`, `support.openapi.yaml`, §5.1) и `rayctl remote
+export -pem` (§5.2). Без событий: администратору о предохранителе пока только аудит `api.mass`, метрика и `rayctl
+integration status`. Дальше — события (§4).
 Решение владельца 2026-11-16 (цитата — §13; [decisions](../decisions.md) R4-47). Вопросы §14 владелец закрыл 2026-11-16: «в целом по рекомендации».
 Основа: удалённый API — [api-v1](api-v1.md) (R3-3), стук — [spa-v2](spa-v2.md), уведомления — webhook (K-2),
 журналы доступа выключены (D-12), лимиты — [traffic-limit-v1](traffic-limit-v1.md) и
@@ -636,8 +637,11 @@ rayctl webhook status [ID]                     # §11
   роняет тест, пока его не посмотрели и не переписали список.
 - **Генератор** — [`protoc-gen-connect-openapi`](https://github.com/connectrpc/protoc-gen-connect-openapi)
   (`connectrpc.com/protoc-gen-connect-openapi`, Apache-2.0, OpenAPI 3.1). Он понимает `allowed-visibilities` и метки
-  через запятую. Закрепляется версией в `tools/go.mod`, как остальные плагины; свой шаблон `buf.gen.openapi.yaml`,
-  основной `buf.gen.yaml` не меняется:
+  через запятую. Закреплён версией v0.30.0 в своём модуле `tools/openapi/go.mod`: в общем `tools/go.mod` его
+  зависимости подняли бы `protoc-gen-go`, а с ним и весь сгенерированный Go. Свой шаблон `buf.gen.openapi.yaml`,
+  основной `buf.gen.yaml` не меняется. На выходе — по одному файлу на роль (`path=`): `api/openapi/billing.openapi.yaml`
+  и `api/openapi/support.openapi.yaml`. Тест `TestOpenAPIRoles` сверяет методы каждого файла с таблицей ролей шлюза.
+  Набросок шаблона (точный — в репозитории):
 
 ```yaml
 version: v2
@@ -658,7 +662,9 @@ plugins:
   администратор не разрешил» (§2.2). Отдаёт его `support` нода по настройке `support-notes`, а не по разметке.
 - `base.yaml` — `info`, сервер-заглушка `https://{host}:{port}`, схема безопасности `mutualTLS` (есть в OpenAPI
   3.1), описание пина: пин сертификатом в OpenAPI не выразить.
-- Файлы лежат в репозитории и прикладываются к выпуску. CI пересобирает и сравнивает, как сгенерированный Go.
+- Файлы лежат в репозитории и прикладываются к выпуску как `openapi-billing.yaml` и `openapi-support.yaml`, в
+  подписанном `SHA256SUMS` рядом с архивами. CI пересобирает их (`scripts/gen.sh`) и сравнивает, как
+  сгенерированный Go.
 
 ### 5.2 Запрос
 
@@ -671,9 +677,9 @@ plugins:
 - **Повторы безопасны**: `CreateUser` второй раз — `already_exists`; `SetUserEnabled`, `SetUserTraffic`,
   `SetUserExpiry` (время абсолютное, поэтому повтор не удваивает продление) — то же состояние; `DeleteUser` —
   `not_found`; `CreateInvite` заменяет неиспользованное (api-v1 §3); `RevokeDevice` — `already` (api-v1 §5a).
-- `rayctl remote export billing.rcdev -pem billing.pem` (новое) пишет сертификат и ключ в PEM (0600) и печатает
-  адрес и пин в виде для curl. Своя реализация берёт `api.port` и `api.pin` из пакета `rcdev1` (первая строка файла
-  устройства).
+- `rayctl remote export billing.rcdev -pem billing.pem` (новое) пишет сертификат и ключ в PEM (новый файл, 0600) и
+  печатает адрес и пин в виде для curl и готовый вызов. После `remote rotate` PEM устарел: экспорт заново. Своя
+  реализация берёт `api.port` и `api.pin` из пакета `rcdev1` (первая строка файла устройства).
 
 ### 5.3 Пример curl
 
@@ -692,7 +698,10 @@ curl --http2 --tlsv1.3 --curves X25519MLKEM768 \
 
 - `-k` нужен: сертификат самоподписанный, имени в нём нет. Ключ проверяет `--pinnedpubkey`. Пин ноды — base64url без
   `=`, curl ждёт обычный base64, отсюда `tr` и `=`.
-- `--curves X25519MLKEM768` — curl с OpenSSL 3.5 или новее. Без этой группы нода рукопожатие не завершит.
+- `--curves X25519MLKEM768` — curl с OpenSSL 3.5 или новее, где эта группа есть и по умолчанию (флаг делает требование
+  явным). curl с OpenSSL старше 3.5 рукопожатие с нодой не завершит.
+- Путь с двоеточием в `--cert` curl читает как путь и пароль ключа: двоеточие там пишется `\:` (`remote export`
+  печатает так сам).
 - Ответ: `{"user":{"id":"5","name":"u-k3f9-x2qa","enabled":true,"trafficLimitBytes":"53687091200",…}}`. От
   `support` тот же запрос — `403` и `{"code":"permission_denied",…}`.
 
@@ -845,8 +854,9 @@ HTTPS, хоть статический хостинг: команды подпи
 
 ## 10. Совместимость
 
-- **proto — только добавления**, `buf breaking` (категория `FILE`, как в `buf.yaml`) должен проходить. Сейчас его нет
-  в CI: эта работа добавляет `buf breaking --against` прошлого выпуска. Добавляется:
+- **proto — только добавления**: CI проверяет `buf breaking` (категория `FILE`, как в `buf.yaml`) наших proto
+  (`api/proto`, без копии Xray) против выпуска, от которого идёт коммит; правила видимости на прежних методах его не нарушают (против v0.33.0 проходит, удалённое поле
+  ловит — проверено 2026-11-19). Добавляется:
   - `GetUser {name} → {User user}`; `SetUserExpiry {name; expires_at (0 — без срока; в прошлом — истечь сейчас)} →
     {User user}`;
   - `SetDeviceAllow {id; repeated string prefixes} → {Device device}`; у `Device` — `allow`, `last_call`;
@@ -994,17 +1004,19 @@ rayctl webhook add|list|set|verify|del|test|rotate|retry|status   # §4.6, ле�
 - **`protoc-gen-connect-openapi`**: последняя версия — v0.30.0 от 2026-11-06 (прокси модулей Go). Проект переехал в
   организацию `connectrpc`: модуль `connectrpc.com/protoc-gen-connect-openapi`, тот же коммит отдаётся и по старому
   пути `github.com/sudorandom/…`, но `go.mod` v0.30.0 называет новый. До 1.0, около 300 звёзд. Разбор
-  `allowed-visibilities` с метками через запятую — по исходнику (`internal/converter/visibility/visibility.go`). На
-  наших proto не запускал. Как инструменты читают `mutualTLS` и наш `base.yaml` — не проверял.
-- **curl**: `--pinnedpubkey` вместе с `-k`, `--curves X25519MLKEM768` с OpenSSL 3.5, чтение ключа и сертификата из
-  одного PEM — по документации, на ноде не запускал.
+  `allowed-visibilities` с метками через запятую — по исходнику (`internal/converter/visibility/visibility.go`).
+  На наших proto запущен (этап 3): методы обоих файлов совпали с таблицей ролей шлюза, скрытые поля в описания не
+  попали, `base.yaml` со схемой `mutualTLS` вошёл как есть. Как сторонние инструменты (генераторы клиентов, Swagger
+  UI) читают `mutualTLS`, не проверял.
+- **curl** проверен 2026-11-19 (curl 8.14.1, OpenSSL 3.5.7, Debian 13) на удалённом API rayd в тесте, без периметра:
+  пример `remote export` (`--curves X25519MLKEM768`, сертификат и ключ из одного PEM, `-k --pinnedpubkey`) — 200 по
+  HTTP/2 и JSON, чужой пин — отказ curl (код 90), метод не своей роли — 403 `permission_denied`. С OpenSSL 3.5 работает
+  и без `--curves`. Через стук на настоящей ноде не запускал.
 - **Поддержка `X25519MLKEM768` в HTTP-клиентах** других языков (Java, .NET, PHP, Python и Node, собранных не с OpenSSL
   3.5) — не проверял. Поэтому шлюз §5.4.
 - XChaCha20-Poly1305 в стандартных библиотеках Node и Java — нет (вывод), нужен libsodium.
 - Как Go-сервер с ALPN только `h2` отвечает клиенту без ALPN (HTTP/1.1 или отказ) — не проверял; спека требует
   `h2`.
-- `buf breaking` с правилами видимости на существующих методах — не запускал (вывод: опции методов категория
-  `FILE` не сравнивает).
 - Пределы Telegram — из его FAQ (сообщение в секунду в чат, около 30 в секунду всего) и раздела о ссылках (`start` до
   64 символов); на боте не проверял. Что Meta видит переписку WhatsApp Business Cloud API открытой — вывод, не
   проверял.

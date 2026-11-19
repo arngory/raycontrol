@@ -3,6 +3,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,7 +28,7 @@ func deviceFile(t *testing.T) remoteIdentity {
 	if id.raw, err = b.Encode(); err != nil {
 		t.Fatal(err)
 	}
-	if err := id.save(true); err != nil {
+	if err := id.save(false); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -152,13 +154,16 @@ func TestDeviceFileOwner(t *testing.T) {
 // the file's name; a filesystem without modes has its advice too.
 func TestDeviceFileFixLine(t *testing.T) {
 	for path, want := range map[string]string{
-		"n.rcdev":                "n.rcdev",
-		"/home/a/node-d_1.rcdev": "/home/a/node-d_1.rcdev",
-		"a b/n.rcdev":            "'a b/n.rcdev'",
-		"it's.rcdev":             `'it'\''s.rcdev'`,
-		"-n.rcdev":               "./-n.rcdev",
-		"~/n.rcdev":              "'~/n.rcdev'",
-		"$HOME/`x`;*.rcdev":      "'$HOME/`x`;*.rcdev'",
+		"n.rcdev":                     "n.rcdev",
+		"/home/a/node-d_1.rcdev":      "/home/a/node-d_1.rcdev",
+		"a b/n.rcdev":                 "'a b/n.rcdev'",
+		"it's.rcdev":                  `'it'\''s.rcdev'`,
+		"-n.rcdev":                    "./-n.rcdev",
+		"~/n.rcdev":                   "'~/n.rcdev'",
+		"$HOME/`x`;*.rcdev":           "'$HOME/`x`;*.rcdev'",
+		"=ls":                         "'=ls'",
+		"https://[2001:db8::1]:443/x": "'https://[2001:db8::1]:443/x'",
+		"https://192.0.2.1:443/x":     "https://192.0.2.1:443/x",
 	} {
 		if got := shellWord(path); got != want {
 			t.Errorf("shellWord(%q) = %s, want %s", path, got, want)
@@ -235,5 +240,74 @@ func TestDeviceFileOpened(t *testing.T) {
 	replace(0o600, string(want))
 	if _, err := readDeviceFile(id.path, g); err == nil || !strings.Contains(err.Error(), "is mode -rw-r--r--") {
 		t.Errorf("an open file, closed after the open: %v", err)
+	}
+}
+
+// remote export writes the device's certificate and key as a new PEM file,
+// closed to others, and says the pin as curl takes it.
+func TestRemoteExport(t *testing.T) {
+	id := deviceFile(t)
+	// A pin as the node gives it: a SHA-256 in base64url, no padding.
+	sum := sha256.Sum256([]byte("the node's key"))
+	id.bundle.API.Pin = base64.RawURLEncoding.EncodeToString(sum[:])
+	var err error
+	if id.raw, err = id.bundle.Encode(); err != nil {
+		t.Fatal(err)
+	}
+	if err := id.save(false); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "billing.pem")
+	var said strings.Builder
+	if err := remoteExport([]string{id.path, "-pem", out}, &said); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(out)
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("the PEM: %v %v", fi, err)
+	}
+	b, _ := os.ReadFile(out)
+	cert, err := api.DecodeClientCertificate(b)
+	if err != nil || !cert.Leaf.Equal(id.cert.Leaf) {
+		t.Fatalf("the PEM does not read back: %v", err)
+	}
+	if !strings.Contains(said.String(), "--pinnedpubkey 'sha256//"+base64.StdEncoding.EncodeToString(sum[:])+"'") ||
+		!strings.Contains(said.String(), "https://192.0.2.1:8443/raycontrol.device.v1.DeviceService/GetSelf") {
+		t.Fatalf("said:\n%s", said.String())
+	}
+	// Never over a file that is there.
+	if err := remoteExport([]string{id.path, "-pem", out}, &said); err == nil {
+		t.Fatal("wrote over an existing file")
+	}
+	if err := remoteExport([]string{id.path}, &said); err == nil {
+		t.Fatal("no -pem taken")
+	}
+
+	// A path the shell or curl reads apart is printed so that a copy of
+	// the line works: quoted, and curl's --cert with its colon escaped.
+	odd := filepath.Join(t.TempDir(), "my key:1.pem")
+	said.Reset()
+	if err := remoteExport([]string{id.path, "-pem", odd}, &said); err != nil {
+		t.Fatal(err)
+	}
+	if want := "--cert " + shellWord(strings.ReplaceAll(odd, ":", `\:`)) + " --key " + shellWord(odd) + " "; !strings.Contains(said.String(), want) ||
+		!strings.Contains(shellWord(odd), "'") {
+		t.Fatalf("said:\n%s\nwant %s", said.String(), want)
+	}
+
+	// A device file the command cannot read the pin of leaves no key file.
+	id.bundle.API.Pin = "not a pin"
+	if id.raw, err = id.bundle.Encode(); err != nil {
+		t.Fatal(err)
+	}
+	if err := id.save(false); err != nil {
+		t.Fatal(err)
+	}
+	none := filepath.Join(t.TempDir(), "none.pem")
+	if err := remoteExport([]string{id.path, "-pem", none}, &said); err == nil {
+		t.Fatal("a bad pin taken")
+	}
+	if _, err := os.Stat(none); !os.IsNotExist(err) {
+		t.Fatalf("a key file left behind: %v", err)
 	}
 }

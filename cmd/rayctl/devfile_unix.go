@@ -42,12 +42,13 @@ func deviceFileProblem(path string, mode os.FileMode, owner, me int) error {
 // shellWord is path as a word of a POSIX shell: as it is when nothing in
 // it is special, else in single quotes (a quote in it closes them, is
 // escaped with a backslash and opens them again); one that starts with
-// "-" gets "./" first, so that chmod does not take it for an option.
+// "-" gets "./" first, so that chmod does not take it for an option. A
+// word that starts with "=" is quoted too: zsh expands =name to a command.
 func shellWord(path string) string {
 	if strings.HasPrefix(path, "-") {
 		path = "./" + path
 	}
-	if path != "" && strings.Trim(path, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./+,:@%=-") == "" {
+	if path != "" && !strings.HasPrefix(path, "=") && strings.Trim(path, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./+,:@%=-") == "" {
 		return path
 	}
 	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"

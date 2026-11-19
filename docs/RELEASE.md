@@ -76,8 +76,9 @@ Checkout во всех workflow — без сохранённого токена
    красный, задача `ci` прогоняет весь CI заново. govulncheck идёт в день выпуска в любом случае: зелёный прогон
    `main` мог быть раньше, чем опубликована уязвимость. Workflow собирает `raycontrol-linux-{amd64,arm64}.tar.gz` (`rayd`,
    `rayspa`, `rayctl`, `xray`, `niko-server`, `slipstream-server`, `ipinfo_lite.mmdb`, `NOTICE`, `VERSIONS`) и, с
-   v0.26.0, три архива с одним `rayctl` для машины администратора (ниже), считает
-   `SHA256SUMS`, подписывает его (trusted comment `raycontrol vX.Y.Z` — по нему `rayctl update` узнаёт версию) и
+   v0.26.0, три архива с одним `rayctl` для машины администратора (ниже). С v0.34.0 к ним добавлены
+   `openapi-billing.yaml` и `openapi-support.yaml` — описания API для ролей интеграций из `api/openapi`
+   (integrations-v1 §5.1). Затем workflow считает `SHA256SUMS` по всем этим файлам, подписывает его (trusted comment `raycontrol vX.Y.Z` — по нему `rayctl update` узнаёт версию) и
    публикует релиз с этими файлами и `SHA256SUMS.minisig`. Пока CI не зелёный, ничего не публикуется: v0.16.0 вышел
    по зелёному прогону пулл-реквеста, а CI на `main`, шедший рядом с релизом, был красным.
 4. **«Latest» — только самый старший.** GitHub помечает каждый новый релиз последним (`make_latest` по умолчанию

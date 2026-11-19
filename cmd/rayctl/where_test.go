@@ -244,7 +244,7 @@ func TestRefusal(t *testing.T) {
 	api := []string{"status", "node", "user", "service", "device", "audit", "relay", "admin", "ports", "dns", "summary",
 		"app-mirror", "client", "integration", "traffic", "metrics", "stats", "remote whoami", "remote rotate", "service rotate", "relay list", "summary show",
 		"device invite", "debug", "debug on"}
-	free := []string{"knock", "probe", "remote enroll", "version"}
+	free := []string{"knock", "probe", "remote enroll", "remote export", "version"}
 	for _, c := range runCommands(t) {
 		if !slices.Contains(node, c) && !slices.Contains(api, c) && !slices.Contains(free, c) && c != "remote" {
 			t.Errorf("command %q is in none of this test's lists", c)

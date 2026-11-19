@@ -57,6 +57,7 @@ var places = map[string]place{
 	"remote whoami": viaAPI, // the device of -remote FILE
 	"remote rotate": viaAPI,
 	"remote enroll": anywhere,
+	"remote export": anywhere, // a local device file
 	"knock":         anywhere,
 	"probe":         anywhere,
 	"version":       anywhere, // and with -remote FILE, the node's too (useRemote)
