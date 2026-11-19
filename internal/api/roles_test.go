@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"flag"
 	"os"
 	"slices"
@@ -12,11 +14,13 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/arngory/raycontrol/internal/clientver"
 	visibility "github.com/arngory/raycontrol/internal/gen/google/api"
 	devicev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/health"
 	"github.com/arngory/raycontrol/internal/node"
+	"github.com/arngory/raycontrol/internal/spa"
 	"github.com/arngory/raycontrol/internal/store"
 )
 
@@ -246,7 +250,41 @@ func TestIntegrationRoles(t *testing.T) {
 	if _, err := c.CreateDevice(ctx, connect.NewRequest(&nodev1.CreateDeviceRequest{User: "integrations", Name: "bot", Role: "billing"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("a billing device without an invite: %v", err)
 	}
-	bill, reg := enroll("integrations", "billing", "billing")
+	// The app gets no integration's invite: refused with its role, the
+	// invite unused and no PIN try spent; rayctl's enroll takes it.
+	billInv, err := c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{User: "integrations", Name: "billing", Role: "billing", Pin: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := newRemoteDevice(t, addr, pin)
+	bi, err := node.DecodeInvite(billInv.Msg.InviteCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ik, _ := hex.DecodeString(bi.DeviceKey)
+	appReq := connect.NewRequest(&devicev1.RegisterRequest{InviteId: bi.DeviceID, Minute: now,
+		Mac: RegisterMAC([spa.KeySize]byte(ik), now, CertPin(app.cert.Leaf))})
+	appReq.Header().Set(clientver.Header, "niko/1.61.0 (android 14; arm64-v8a)")
+	_, err = app.dev.Register(ctx, appReq)
+	var cerr *connect.Error
+	role := ""
+	if errors.As(err, &cerr) {
+		for _, d := range cerr.Details() {
+			if v, derr := d.Value(); derr == nil {
+				if r, ok := v.(*devicev1.InviteRole); ok {
+					role = r.Role
+				}
+			}
+		}
+	}
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition || role != "billing" {
+		t.Fatalf("an integration's invite in the app: %v (role %q)", err, role)
+	}
+	bill := newRemoteDevice(t, addr, pin)
+	reg, err := bill.registerPIN(ctx, billInv.Msg.InviteCode, now, billInv.Msg.Pin)
+	if err != nil {
+		t.Fatalf("the invite after the app's try: %v", err)
+	}
 	sup, _ := enroll("integrations", "support", "support")
 	_, _ = enroll("ops", "laptop", "admin")
 	if _, err := c.SetUserServices(ctx, connect.NewRequest(&nodev1.SetUserServicesRequest{Name: "integrations", Services: []string{"r1"}})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
@@ -258,7 +296,7 @@ func TestIntegrationRoles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reg.Role != "billing" || b.API == nil || b.Sub != nil || len(b.Services) != 1 || b.Services[0].Kind != "api" {
+	if reg.Role != "billing" || b.Role != "billing" || b.API == nil || b.Sub != nil || len(b.Services) != 1 || b.Services[0].Kind != "api" {
 		t.Fatalf("billing's bundle: %+v", b)
 	}
 	devices, err := srv.Store.SPADevices(ctx)
@@ -440,7 +478,9 @@ func TestIntegrationRoles(t *testing.T) {
 		if e.Action == "user.expires=now" && e.Actor != "integrations/billing (billing)" {
 			t.Errorf("the expiry by %q", e.Actor)
 		}
-		if e.Action == "user.enable=true" && e.Target == "nobody" {
+		// Failed user.enable calls by billing, whatever their value: the
+		// first only, ops's, in ten minutes.
+		if e.Actor == "integrations/billing (billing)" && strings.HasPrefix(e.Action, "user.enable") && strings.HasPrefix(e.Result, "error") {
 			failed++
 		}
 	}

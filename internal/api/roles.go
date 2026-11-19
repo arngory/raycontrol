@@ -14,6 +14,7 @@ import (
 
 	visibility "github.com/arngory/raycontrol/internal/gen/google/api"
 	devicev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1"
+	"github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1/devicev1connect"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -199,7 +200,7 @@ func (r *Remote) roleGate() connect.UnaryInterceptorFunc {
 				}
 				return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not for a device of role %s", d.Role))
 			}
-			var labels []string
+			labels := []string{roleLabel(d.Role)}
 			if integration {
 				release, err := r.Server.admit(ctx, d, method, now)
 				if errors.Is(err, errLimited) {
@@ -215,7 +216,6 @@ func (r *Remote) roleGate() connect.UnaryInterceptorFunc {
 				if err != nil {
 					return nil, toConnect(err)
 				}
-				labels = []string{roleLabel(d.Role)}
 				if d.Role == "support" && set.SupportNotes {
 					labels = append(labels, labelNotes)
 				}
@@ -246,6 +246,39 @@ func (r *Remote) roleGate() connect.UnaryInterceptorFunc {
 					scrub(m.ProtoReflect(), func(l string) bool { return slices.Contains(labels, l) })
 				}
 			}
+			return resp, err
+		}
+	}
+}
+
+// deviceLimit puts an integration's DeviceService calls (GetSelf,
+// RotateCertificate) under its rate limits and counts them, as roleGate
+// does NodeService's. Register has no device yet; the handlers check the
+// rest as before.
+func (r *Remote) deviceLimit() connect.UnaryInterceptorFunc {
+	return func(next connect.UnaryFunc) connect.UnaryFunc {
+		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+			procedure := req.Spec().Procedure
+			if procedure == devicev1connect.DeviceServiceRegisterProcedure {
+				return next(ctx, req)
+			}
+			d, err := r.device(ctx)
+			if err != nil || !store.IntegrationRole(d.Role) {
+				return next(ctx, req)
+			}
+			method, now := methodName(procedure), r.clock()
+			release, err := r.Server.admit(ctx, d, method, now)
+			if errors.Is(err, errLimited) {
+				r.Server.auditQuietly(ctx, d, "api.limited", method, "refused", now)
+				r.Server.countCall(d.Role, connect.CodeResourceExhausted.String())
+				return nil, connect.NewError(connect.CodeResourceExhausted, err)
+			}
+			if err != nil {
+				return nil, toConnect(err)
+			}
+			defer release()
+			resp, err := next(ctx, req)
+			r.Server.countCall(d.Role, codeOf(err))
 			return resp, err
 		}
 	}

@@ -10,6 +10,7 @@ import (
 	"connectrpc.com/connect"
 	"golang.org/x/sys/unix"
 
+	devicev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
 )
@@ -126,6 +127,16 @@ func TestIntegrationLimits(t *testing.T) {
 			t.Fatalf("over the limit: %v", err)
 		}
 	}
+	// DeviceService's calls count too.
+	if _, err := sup.dev.GetSelf(ctx, connect.NewRequest(&devicev1.GetSelfRequest{})); connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("GetSelf over the limit: %v", err)
+	}
+	// Refusals by role, each counted, one audit line.
+	for range 3 {
+		if _, err := bill.node.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "naive", Name: "x"})); connect.CodeOf(err) != connect.CodePermissionDenied {
+			t.Fatalf("billing creates a service: %v", err)
+		}
+	}
 
 	// Support's sight of notes: off by default, the administrator's.
 	notes := func() string {
@@ -175,6 +186,16 @@ func TestIntegrationLimits(t *testing.T) {
 	if err := disable("u3", true); err != nil {
 		t.Fatalf("confirmed: %v", err)
 	}
+	// An expiry now is a disable by another name.
+	if _, err := bill.node.SetUserExpiry(ctx, connect.NewRequest(&nodev1.SetUserExpiryRequest{Name: "u1", ExpiresAt: 1})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("an expiry now over the mass limit: %v", err)
+	}
+	if _, err := bill.node.SetUserExpiry(ctx, connect.NewRequest(&nodev1.SetUserExpiryRequest{Name: "u1", ExpiresAt: 1, ConfirmMass: true})); err != nil {
+		t.Fatalf("an expiry now, confirmed: %v", err)
+	}
+	if _, err := bill.node.SetUserExpiry(ctx, connect.NewRequest(&nodev1.SetUserExpiryRequest{Name: "u1"})); err != nil {
+		t.Fatalf("never is no mass action: %v", err)
+	}
 	if _, err := c.DeleteUser(ctx, connect.NewRequest(&nodev1.DeleteUserRequest{Name: "u4"})); err != nil {
 		t.Fatalf("root's deletion is not billing's: %v", err)
 	}
@@ -204,18 +225,22 @@ func TestIntegrationLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !st.Msg.SupportNotes || st.Msg.MassLimit != 2 || st.Msg.MassActions != 3 || st.Msg.MassRefused != 2 || st.Msg.TrafficCounting != "on" {
+	if !st.Msg.SupportNotes || st.Msg.MassLimit != 2 || st.Msg.MassActions != 4 || st.Msg.MassRefused != 3 || st.Msg.TrafficCounting != "on" {
 		t.Errorf("settings: %+v", st.Msg)
 	}
-	limited := map[string]uint64{}
+	limited, denied := map[string]uint64{}, map[string]uint64{}
+	billID := ""
 	for _, d := range st.Msg.Devices {
-		limited[d.Role] = d.Limited
+		limited[d.Role], denied[d.Role] = d.Limited, d.Denied
+		if d.Role == "billing" {
+			billID = d.Id
+		}
 		if d.Calls == 0 || d.LastCall == 0 {
 			t.Errorf("device %s: %+v", d.Name, d)
 		}
 	}
-	if limited["support"] != 2 || limited["billing"] != 0 {
-		t.Errorf("limited: %v", limited)
+	if limited["support"] != 3 || limited["billing"] != 0 || denied["billing"] != 3 {
+		t.Errorf("limited %v, denied %v", limited, denied)
 	}
 	audit, err := srv.Store.ListAudit(ctx, 300)
 	if err != nil {
@@ -225,7 +250,7 @@ func TestIntegrationLimits(t *testing.T) {
 	for _, e := range audit {
 		count[e.Action]++
 	}
-	if count["api.limited"] != 1 || count["api.mass"] != 1 || count["user.enable=false confirm"] != 1 ||
+	if count["api.limited"] != 2 || count["api.mass"] != 2 || count["user.enable=false confirm"] != 1 || count["user.expires=now confirm"] != 1 || count["api.denied"] != 1 ||
 		count["integration.set mass-limit=2"] != 1 || count["traffic.counting=on"] != 1 || count["integration.set support-notes=on"] != 1 {
 		t.Errorf("audit: %v", count)
 	}
@@ -234,13 +259,69 @@ func TestIntegrationLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		`raycontrol_api_limited_total{role="support"} 2`,
-		`raycontrol_integration_mass_actions_total{result="refused"} 2`,
-		`raycontrol_integration_mass_actions_total{result="confirmed"} 1`,
-		`raycontrol_api_calls_total{role="support",code="resource_exhausted"} 2`,
+		`raycontrol_api_limited_total{role="support"} 3`,
+		`raycontrol_integration_mass_actions_total{result="refused"} 3`,
+		`raycontrol_integration_mass_actions_total{result="confirmed"} 2`,
+		`raycontrol_api_calls_total{role="support",code="resource_exhausted"} 3`,
 	} {
 		if !strings.Contains(m.Msg.Text, want) {
 			t.Errorf("metrics: no %s", want)
 		}
+	}
+
+	// A device's limits reset: its own go, its role's stay.
+	seven := &nodev1.IntegrationLimits{Read: &nodev1.Rate{Burst: 7, PerHour: 7}}
+	for _, req := range []*nodev1.SetIntegrationSettingsRequest{
+		{Limits: &nodev1.IntegrationLimitsFor{Role: "billing", Limits: seven}},
+		{Limits: &nodev1.IntegrationLimitsFor{DeviceId: billID, Limits: &nodev1.IntegrationLimits{Inflight: 3}}},
+		{Limits: &nodev1.IntegrationLimitsFor{DeviceId: billID}, ToDefault: true},
+	} {
+		if err := set(0, req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, err = srv.GetIntegrationSettings(as(1000), connect.NewRequest(&nodev1.GetIntegrationSettingsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range st.Msg.Limits {
+		if l.DeviceId != "" || l.Role == "billing" && (!l.Set || l.Limits.Read.GetBurst() != 7) {
+			t.Errorf("after the device's reset: %v", l)
+		}
+	}
+	// A request applies whole or not at all.
+	off := false
+	if err := set(0, &nodev1.SetIntegrationSettingsRequest{SupportNotes: &off, Limits: &nodev1.IntegrationLimitsFor{Role: "admin"}}); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("bad limits: %v", err)
+	}
+	if st, err := srv.GetIntegrationSettings(as(1000), connect.NewRequest(&nodev1.GetIntegrationSettingsRequest{})); err != nil || !st.Msg.SupportNotes {
+		t.Fatalf("half a request applied: %v", err)
+	}
+}
+
+// What an integration's metrics sum when its labels make series alike:
+// counters summed, levels by their highest, a last success by its lowest.
+func TestRelabel(t *testing.T) {
+	var m Metrics
+	for _, l := range []struct {
+		loop                string
+		runs, last, failing float64
+	}{{"acme a.example", 1, 100, 0}, {"acme b.example", 2, 50, 1}} {
+		m.Add("raycontrol_loop_runs_total", "", l.runs, "loop", l.loop)
+		m.Add("raycontrol_loop_last_success_seconds", "", l.last, "loop", l.loop)
+		m.Add("raycontrol_loop_failing", "", l.failing, "loop", l.loop)
+	}
+	text := m.relabel(integrationLabels(nil)).String()
+	for _, want := range []string{
+		`raycontrol_loop_runs_total{loop="acme"} 3`,
+		`raycontrol_loop_last_success_seconds{loop="acme"} 50`,
+		`raycontrol_loop_failing{loop="acme"} 1`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("no %s in\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "example") {
+		t.Errorf("a site in\n%s", text)
 	}
 }

@@ -912,6 +912,9 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 		return "", err
 	}
 	b := node.Bundle{Version: 1, Host: host, SPA: node.FromParams(s.Params), DeviceID: d.ID, DeviceKey: hex.EncodeToString(key[:])}
+	if d.Role != "user" {
+		b.Role = d.Role
+	}
 	// An integration's device gets the API alone: no subscription, no
 	// data service (integrations-v1 §2.1); its user has none.
 	integration := store.IntegrationRole(d.Role)

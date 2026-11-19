@@ -966,6 +966,9 @@ message SetUserExpiryRequest {
   string name = 1;
   // unix seconds; 0: never; a time not after now: expired now.
   int64 expires_at = 2;
+  // confirm_mass: as SetUserEnabledRequest's; billing's expiry now is a
+  // mass action like a disable (integrations-v1 §2.4).
+  bool confirm_mass = 3;
 }
 message SetUserExpiryResponse { User user = 1; }
 

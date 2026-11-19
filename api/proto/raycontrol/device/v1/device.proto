@@ -44,6 +44,14 @@ message RegisterRequest {
   bytes pin_proof = 4;
 }
 
+// InviteRole is the detail of FAILED_PRECONDITION from Register: the invite
+// is for an integration's device (role billing or support), and the client
+// named itself an app (X-Raycontrol-Client niko/…). The invite is not
+// used, and no PIN try is spent (integrations-v1 §2.1).
+message InviteRole {
+  string role = 1;
+}
+
 // PinTries is the detail of PERMISSION_DENIED from Register: the PIN was
 // missing or wrong; left is the tries the invite has still. A wrong PIN
 // with none left withdraws the invite.

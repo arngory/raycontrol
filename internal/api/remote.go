@@ -108,6 +108,16 @@ func InvitePinProof(inviteKey [spa.KeySize]byte, pin string) []byte {
 
 // pinRefused is Register's answer for a PIN missing or wrong: what the
 // client tells its user, with the tries the invite has still.
+// inviteForIntegration is FAILED_PRECONDITION with an InviteRole detail:
+// the invite is an integration's, not the app's.
+func inviteForIntegration(role string) error {
+	err := connect.NewError(connect.CodeFailedPrecondition, fmt.Errorf("the invite is for an integration (%s), not for an app", role))
+	if d, derr := connect.NewErrorDetail(&devicev1.InviteRole{Role: role}); derr == nil {
+		err.AddDetail(d)
+	}
+	return err
+}
+
 func pinRefused(why string, left int) error {
 	err := connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s: %d tries left", why, left))
 	if detail, derr := connect.NewErrorDetail(&devicev1.PinTries{Left: int32(left)}); derr == nil {
@@ -154,7 +164,7 @@ func RemoteTLSConfig(certDER, keyDER []byte) (*tls.Config, error) {
 func (r *Remote) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle(nodev1connect.NewNodeServiceHandler(r.Server, connect.WithInterceptors(r.roleGate()), readLimit()))
-	mux.Handle(devicev1connect.NewDeviceServiceHandler(r, readLimit()))
+	mux.Handle(devicev1connect.NewDeviceServiceHandler(r, connect.WithInterceptors(r.deviceLimit()), readLimit()))
 	if r.Perimeter != nil {
 		mux.Handle(perimeterv1connect.NewRelayServiceHandler(&relayFeed{r}, readLimit()))
 	}
@@ -244,6 +254,15 @@ func (r *Remote) Register(ctx context.Context, req *connect.Request[devicev1.Reg
 	}
 	if !r.registerProved(req.Msg, key, pin) {
 		return nil, errInvite
+	}
+	// An integration's invite pasted into the app: refused before it is
+	// used or a PIN try is spent, so that the integration still gets it
+	// (integrations-v1 §2.1). Only a client that names itself the app is
+	// refused: an integration's own Register names none or rayctl.
+	if store.IntegrationRole(inv.Role) {
+		if c, ok := clientver.Parse(req.Header().Get(clientver.Header)); ok && c.Product == "niko" {
+			return nil, inviteForIntegration(inv.Role)
+		}
 	}
 	ctx = context.WithValue(ctx, actorKey{}, "invite "+inv.ID)
 	// The PIN (api-v1 §4), only now the request has proved the invite:

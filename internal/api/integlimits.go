@@ -33,6 +33,9 @@ var callClasses = map[string]callClass{
 	"CreateUser": classWrite, "SetUserEnabled": classWrite, "SetUserServices": classWrite, "DeleteUser": classWrite,
 	"SetUserTraffic": classWrite, "SetUserExpiry": classWrite,
 	"CreateInvite": classHeavy, "RevokeDevice": classHeavy, "RenewUser": classHeavy,
+	// DeviceService: a device's own key counts as a read, so that support,
+	// which makes no changes, still changes its key.
+	"GetSelf": classRead, "RotateCertificate": classRead,
 }
 
 // limitRate is a token bucket's: burst calls at once, refilled at perHour.
@@ -147,6 +150,7 @@ type integDevice struct {
 // rate limits' buckets, billing's mass actions of the last hour, and the
 // audit's once-in-a-while lines.
 type integrations struct {
+	write    sync.Mutex // one setter at a time (changeIntegrationSettings)
 	mu       sync.Mutex
 	loaded   bool
 	settings integrationSettings
@@ -159,39 +163,61 @@ type integrations struct {
 	quiet    map[quietKey]quietMark
 }
 
-// integrationSettings reads the settings once; the setters keep them.
+// integrationSettings reads the settings once; the setters keep them. The
+// database is read outside in.mu: a long transaction elsewhere holds no
+// remote call up (countCall takes in.mu).
 func (s *Server) integrationSettings(ctx context.Context) (integrationSettings, error) {
 	in := &s.integ
 	in.mu.Lock()
-	defer in.mu.Unlock()
 	if in.loaded {
-		return in.settings, nil
+		set := in.settings
+		in.mu.Unlock()
+		return set, nil
 	}
-	b, err := s.Store.GetSetting(ctx, settingIntegrations)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-	case err != nil:
+	in.mu.Unlock()
+	set, err := s.readIntegrationSettings(ctx)
+	if err != nil {
 		return integrationSettings{}, err
-	default:
-		if err := json.Unmarshal(b, &in.settings); err != nil {
-			return integrationSettings{}, fmt.Errorf("the integrations' settings: %w", err)
-		}
 	}
-	in.loaded = true
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if !in.loaded { // a setter's, stored meanwhile, stands
+		in.settings, in.loaded = set, true
+	}
 	return in.settings, nil
 }
 
-// changeIntegrationSettings applies change to the settings and stores
-// them, as one under the lock.
-func (s *Server) changeIntegrationSettings(ctx context.Context, change func(*integrationSettings) error) error {
-	if _, err := s.integrationSettings(ctx); err != nil {
-		return err
+// readIntegrationSettings reads the stored settings, the defaults when
+// none are.
+func (s *Server) readIntegrationSettings(ctx context.Context) (integrationSettings, error) {
+	var set integrationSettings
+	b, err := s.Store.GetSetting(ctx, settingIntegrations)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return set, nil
+	case err != nil:
+		return set, err
 	}
+	if err := json.Unmarshal(b, &set); err != nil {
+		return integrationSettings{}, fmt.Errorf("the integrations' settings: %w", err)
+	}
+	return set, nil
+}
+
+// changeIntegrationSettings applies change to the settings and stores
+// them. Setters go one at a time (in.write), and the database is written
+// outside in.mu. Settings that do not read (a damaged value) are changed
+// from the defaults: a setter can always put right what is stored.
+func (s *Server) changeIntegrationSettings(ctx context.Context, change func(*integrationSettings) error) error {
 	in := &s.integ
-	in.mu.Lock()
-	defer in.mu.Unlock()
-	next := in.settings
-	next.Roles, next.Devices = maps.Clone(in.settings.Roles), maps.Clone(in.settings.Devices)
+	in.write.Lock()
+	defer in.write.Unlock()
+	cur, err := s.integrationSettings(ctx)
+	if err != nil {
+		cur = integrationSettings{} // unreadable: start again from the defaults
+	}
+	next := cur
+	next.Roles, next.Devices = maps.Clone(cur.Roles), maps.Clone(cur.Devices)
 	if err := change(&next); err != nil {
 		return err
 	}
@@ -202,7 +228,9 @@ func (s *Server) changeIntegrationSettings(ctx context.Context, change func(*int
 	if err := s.Store.SetSetting(ctx, settingIntegrations, b); err != nil {
 		return err
 	}
-	in.settings = next
+	in.mu.Lock()
+	in.settings, in.loaded = next, true
+	in.mu.Unlock()
 	return nil
 }
 
@@ -351,13 +379,21 @@ type quietMark struct {
 // even when the caller has gone.
 func (s *Server) auditQuietly(ctx context.Context, d store.Device, action, target, result string, now time.Time) {
 	in := &s.integ
-	k := quietKey{device: d.ID, action: action}
+	// By the action's verb ("user.expires", "user.services"), not its
+	// values: a broken caller that changes them each time is still one.
+	verb, _, _ := strings.Cut(action, "=")
+	verb, _, _ = strings.Cut(verb, " ")
+	verb, _, _ = strings.Cut(verb, ":")
+	k := quietKey{device: d.ID, action: verb}
 	if strings.HasPrefix(action, "api.") {
 		k.method = target
 	}
 	in.mu.Lock()
 	if in.quiet == nil {
 		in.quiet = map[quietKey]quietMark{}
+	}
+	if action == "api.denied" {
+		in.device(d).denied++ // every refusal, written or not
 	}
 	m, seen := in.quiet[k]
 	if seen && now.Sub(m.at) < quietEvery {
@@ -373,9 +409,6 @@ func (s *Server) auditQuietly(ctx context.Context, d store.Device, action, targe
 				delete(in.quiet, k)
 			}
 		}
-	}
-	if action == "api.denied" {
-		in.device(d).denied++
 	}
 	in.mu.Unlock()
 	if m.missed > 0 {

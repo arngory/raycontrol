@@ -161,7 +161,7 @@ func parseRate(s string) (*nodev1.Rate, error) {
 	}
 	mult := map[string]uint64{"s": 3600, "m": 60, "h": 1}[per]
 	if mult == 0 || count*mult > 1<<32-1 {
-		return nil, errors.New("a rate a second (s), minute (m) or hour (h), up to 10000/s")
+		return nil, errors.New("a rate a second (s), minute (m) or hour (h)")
 	}
 	return &nodev1.Rate{Burst: uint32(burst), PerHour: uint32(count * mult)}, nil //nolint:gosec // G115: checked above
 }

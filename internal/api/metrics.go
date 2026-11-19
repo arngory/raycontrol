@@ -71,8 +71,10 @@ func integrationLabels(services []store.Service) stats.Clean {
 	}
 }
 
-// relabel is m with each sample's labels as clean has them, the samples
-// that come out alike summed.
+// relabel is m with each sample's labels as clean has them. Samples that
+// come out alike are summed when they are counters (_total), the highest
+// kept when they are levels or times, and for a last success the lowest:
+// a stale loop among them still shows.
 func (m *Metrics) relabel(clean stats.Clean) *Metrics {
 	type series struct {
 		name   string
@@ -88,7 +90,14 @@ func (m *Metrics) relabel(clean stats.Clean) *Metrics {
 		}
 		key := stats.Point{Name: p.Name, Labels: labels}.Key()
 		if e, ok := sum[key]; ok {
-			e.value += p.Value
+			switch {
+			case strings.HasSuffix(p.Name, "_total"):
+				e.value += p.Value
+			case strings.Contains(p.Name, "last_success"):
+				e.value = min(e.value, p.Value)
+			default:
+				e.value = max(e.value, p.Value)
+			}
 			continue
 		}
 		sum[key] = &series{p.Name, labels, p.Value}

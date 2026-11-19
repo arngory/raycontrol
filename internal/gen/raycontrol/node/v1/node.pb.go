@@ -5991,7 +5991,10 @@ type SetUserExpiryRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// unix seconds; 0: never; a time not after now: expired now.
-	ExpiresAt     int64 `protobuf:"varint,2,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	ExpiresAt int64 `protobuf:"varint,2,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// confirm_mass: as SetUserEnabledRequest's; billing's expiry now is a
+	// mass action like a disable (integrations-v1 §2.4).
+	ConfirmMass   bool `protobuf:"varint,3,opt,name=confirm_mass,json=confirmMass,proto3" json:"confirm_mass,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6038,6 +6041,13 @@ func (x *SetUserExpiryRequest) GetExpiresAt() int64 {
 		return x.ExpiresAt
 	}
 	return 0
+}
+
+func (x *SetUserExpiryRequest) GetConfirmMass() bool {
+	if x != nil {
+		return x.ConfirmMass
+	}
+	return false
 }
 
 type SetUserExpiryResponse struct {
@@ -10267,11 +10277,12 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x0eGetUserRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"?\n" +
 	"\x0fGetUserResponse\x12,\n" +
-	"\x04user\x18\x01 \x01(\v2\x18.raycontrol.node.v1.UserR\x04user\"I\n" +
+	"\x04user\x18\x01 \x01(\v2\x18.raycontrol.node.v1.UserR\x04user\"l\n" +
 	"\x14SetUserExpiryRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
-	"expires_at\x18\x02 \x01(\x03R\texpiresAt\"E\n" +
+	"expires_at\x18\x02 \x01(\x03R\texpiresAt\x12!\n" +
+	"\fconfirm_mass\x18\x03 \x01(\bR\vconfirmMass\"E\n" +
 	"\x15SetUserExpiryResponse\x12,\n" +
 	"\x04user\x18\x01 \x01(\v2\x18.raycontrol.node.v1.UserR\x04user\"'\n" +
 	"\x11ExportUserRequest\x12\x12\n" +

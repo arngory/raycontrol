@@ -58,15 +58,23 @@ func (s *Server) SetUserExpiry(ctx context.Context, req *connect.Request[nodev1.
 	m := req.Msg
 	var at *time.Time
 	what := "never"
+	done, suffix := func(bool) {}, ""
 	if m.ExpiresAt != 0 {
 		t := time.Unix(m.ExpiresAt, 0).UTC()
 		at, what = &t, t.Format(time.RFC3339)
 		if !t.After(time.Now()) {
 			what = "now"
+			// billing's expiry now is a disable by another name: a mass
+			// action as SetUserEnabled{false} is (integrations-v1 §2.4).
+			var err error
+			if done, suffix, err = s.massGuard(ctx, "SetUserExpiry", m.ConfirmMass); err != nil {
+				return nil, toConnect(err)
+			}
 		}
 	}
 	u, err := s.Store.SetUserExpiry(ctx, m.Name, at)
-	if err := s.done(ctx, "user.expires="+what, m.Name, err); err != nil {
+	done(err == nil)
+	if err := s.done(ctx, "user.expires="+what+suffix, m.Name, err); err != nil {
 		return nil, err
 	}
 	pb, err := s.userPB(ctx, u)
@@ -216,6 +224,23 @@ func (s *Server) SetIntegrationSettings(ctx context.Context, req *connect.Reques
 	if m.TrafficCounting != nil && *m.TrafficCounting != "on" && *m.TrafficCounting != "auto" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("traffic counting: on or auto"))
 	}
+	// The limits checked before anything is set: a request applies whole
+	// or not at all, but for a store error between its parts.
+	if m.Limits != nil {
+		role, device, err := s.limitsTarget(ctx, m.Limits)
+		if err == nil {
+			set, rerr := s.integrationSettings(ctx)
+			if rerr != nil {
+				set = integrationSettings{}
+			}
+			// A trial on copies: the maps are the kept settings'.
+			set.Roles, set.Devices = maps.Clone(set.Roles), maps.Clone(set.Devices)
+			_, err = applyLimits(&set, role, device, m.Limits.Limits, m.ToDefault)
+		}
+		if err != nil {
+			return nil, toConnect(err)
+		}
+	}
 	if m.SupportNotes != nil {
 		state := "off"
 		if *m.SupportNotes {
@@ -256,54 +281,71 @@ func (s *Server) SetIntegrationSettings(ctx context.Context, req *connect.Reques
 // setIntegrationLimits sets a role's or a device's limits, or with reset
 // takes them back to the default (rayctl integration limits).
 func (s *Server) setIntegrationLimits(ctx context.Context, pb *nodev1.IntegrationLimitsFor, reset bool) error {
-	role, device := pb.Role, pb.DeviceId
-	switch {
-	case (role == "") == (device == ""):
-		return toConnect(fmt.Errorf("%w: limits for a role or a device", store.ErrInvalid))
-	case role != "" && !store.IntegrationRole(role):
-		return toConnect(fmt.Errorf("%w role %q: billing or support", store.ErrInvalid, role))
-	case device != "":
-		devices, err := s.Store.ListDevices(ctx, "")
-		if err != nil {
-			return toConnect(err)
-		}
-		i := slices.IndexFunc(devices, func(d store.Device) bool { return d.ID == device })
-		if i < 0 || !store.IntegrationRole(devices[i].Role) {
-			return toConnect(fmt.Errorf("integration device %q: %w", device, store.ErrNotFound))
-		}
-		role = devices[i].Role
+	role, device, err := s.limitsTarget(ctx, pb)
+	if err != nil {
+		return toConnect(err)
 	}
-	target := cmp.Or(device, role)
 	var text string
-	err := s.changeIntegrationSettings(ctx, func(set *integrationSettings) error {
-		if reset {
-			delete(set.Roles, role)
-			if device != "" {
-				delete(set.Devices, device)
-			}
-			text = "default"
-			return nil
-		}
-		l, err := mergeLimits(set.limits(device, role), pb.Limits)
-		if err != nil {
-			return err
-		}
-		if device != "" {
-			if set.Devices == nil {
-				set.Devices = map[string]limitSet{}
-			}
-			set.Devices[device] = l
-		} else {
-			if set.Roles == nil {
-				set.Roles = map[string]limitSet{}
-			}
-			set.Roles[role] = l
-		}
-		text = limitsText(l)
-		return nil
+	err = s.changeIntegrationSettings(ctx, func(set *integrationSettings) error {
+		var err error
+		text, err = applyLimits(set, role, device, pb.Limits, reset)
+		return err
 	})
 	if err == nil {
 		s.integ.refill()
 	}
-	return s.done(ctx, "integration.limits "+text, target, err)
+	return s.done(ctx, "integration.limits "+text, cmp.Or(device, role), err)
+}
+
+// limitsTarget is the role, and the device if one, that limits are set
+// for: a role of an integration, or a device of one.
+func (s *Server) limitsTarget(ctx context.Context, pb *nodev1.IntegrationLimitsFor) (role, device string, err error) {
+	role, device = pb.Role, pb.DeviceId
+	switch {
+	case (role == "") == (device == ""):
+		return "", "", fmt.Errorf("%w: limits for a role or a device", store.ErrInvalid)
+	case role != "" && !store.IntegrationRole(role):
+		return "", "", fmt.Errorf("%w role %q: billing or support", store.ErrInvalid, role)
+	case device != "":
+		devices, err := s.Store.ListDevices(ctx, "")
+		if err != nil {
+			return "", "", err
+		}
+		i := slices.IndexFunc(devices, func(d store.Device) bool { return d.ID == device })
+		if i < 0 || !store.IntegrationRole(devices[i].Role) {
+			return "", "", fmt.Errorf("integration device %q: %w", device, store.ErrNotFound)
+		}
+		role = devices[i].Role
+	}
+	return role, device, nil
+}
+
+// applyLimits sets a role's or a device's limits in set, or with reset
+// takes away its own: a device's reset leaves its role's as they are. It
+// returns the limits as the audit says them.
+func applyLimits(set *integrationSettings, role, device string, pb *nodev1.IntegrationLimits, reset bool) (string, error) {
+	if reset {
+		if device != "" {
+			delete(set.Devices, device)
+		} else {
+			delete(set.Roles, role)
+		}
+		return "default", nil
+	}
+	l, err := mergeLimits(set.limits(device, role), pb)
+	if err != nil {
+		return "", err
+	}
+	if device != "" {
+		if set.Devices == nil {
+			set.Devices = map[string]limitSet{}
+		}
+		set.Devices[device] = l
+	} else {
+		if set.Roles == nil {
+			set.Roles = map[string]limitSet{}
+		}
+		set.Roles[role] = l
+	}
+	return limitsText(l), nil
 }
