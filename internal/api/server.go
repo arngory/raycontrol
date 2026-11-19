@@ -368,8 +368,8 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 // takes for "the first try worked".
 // serviceIDs are the IDs of the services named; billing names data
 // services only (dataKinds, integrations-v1 §2.2).
-func (s *Server) serviceIDs(ctx context.Context, names []string) ([]int64, error) {
-	ids := make([]int64, 0, len(names))
+func (s *Server) serviceIDs(ctx context.Context, names []string) (ids []int64, enabled int, err error) {
+	ids = make([]int64, 0, len(names))
 	seen := make(map[string]bool, len(names))
 	for _, n := range names {
 		if seen[n] {
@@ -378,14 +378,17 @@ func (s *Server) serviceIDs(ctx context.Context, names []string) ([]int64, error
 		seen[n] = true
 		svc, err := s.Store.ServiceByName(ctx, n)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if callerRole(ctx) == "billing" && !dataKinds[svc.Kind] {
-			return nil, fmt.Errorf("%w: service %q is not a data service", errForRole, n)
+			return nil, 0, fmt.Errorf("%w: service %q is not a data service", errForRole, n)
 		}
 		ids = append(ids, svc.ID)
+		if svc.Enabled {
+			enabled++
+		}
 	}
-	return ids, nil
+	return ids, enabled, nil
 }
 
 func (s *Server) userPB(ctx context.Context, u store.User) (*nodev1.User, error) {
@@ -450,7 +453,7 @@ func (s *Server) CreateUser(ctx context.Context, req *connect.Request[nodev1.Cre
 	if m.TrafficPeriod != "" && store.CheckTrafficPeriod(m.TrafficPeriod, 1) != nil {
 		return nil, s.done(ctx, "user.create", m.Name, fmt.Errorf("%w traffic period: use monthly or none", store.ErrInvalid))
 	}
-	ids, err := s.serviceIDs(ctx, m.Services)
+	ids, _, err := s.serviceIDs(ctx, m.Services)
 	if err == nil {
 		// One write: a user without the services asked for would make
 		// the retry "already exists".
@@ -487,14 +490,15 @@ func (s *Server) SetUserEnabled(ctx context.Context, req *connect.Request[nodev1
 
 func (s *Server) SetUserServices(ctx context.Context, req *connect.Request[nodev1.SetUserServicesRequest]) (*connect.Response[nodev1.SetUserServicesResponse], error) {
 	done, suffix := func(bool) {}, ""
-	if len(req.Msg.Services) == 0 {
-		// billing's empty list is a disable by another name (integrations-v1 §2.4).
-		var err error
+	ids, enabled, err := s.serviceIDs(ctx, req.Msg.Services)
+	if err == nil && enabled == 0 {
+		// billing's list without an enabled service is a disable by
+		// another name (integrations-v1 §2.4); checked after the names,
+		// so that a call refused anyway is not counted.
 		if done, suffix, err = s.massGuard(ctx, "SetUserServices", req.Msg.ConfirmMass); err != nil {
 			return nil, toConnect(err)
 		}
 	}
-	ids, err := s.serviceIDs(ctx, req.Msg.Services)
 	if err == nil {
 		err = s.Store.SetUserServices(ctx, req.Msg.Name, ids)
 	}

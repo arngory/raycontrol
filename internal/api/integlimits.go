@@ -459,6 +459,6 @@ func (s *Server) integrationMetrics(m *Metrics) {
 		result string
 		n      uint64
 	}{{"done", in.massDone.done}, {"refused", in.massDone.refused}, {"confirmed", in.massDone.confirmed}} {
-		m.Add("raycontrol_integration_mass_actions_total", "billing's deletions and disables of users: within the hour's limit, refused over it, confirmed over it.", float64(r.n), "result", r.result)
+		m.Add("raycontrol_integration_mass_actions_total", "billing's deletions and disables of users, by any name: within the hour's limit, refused over it, confirmed over it.", float64(r.n), "result", r.result)
 	}
 }

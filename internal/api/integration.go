@@ -97,9 +97,10 @@ const expirySoon = 10 * time.Minute
 const tinyLimit = 1 << 20
 
 // limitCutsOff reports whether billing's traffic change cuts the user off,
-// a disable by another name (integrations-v1 §2.4): a limit at or under
-// what the user has used this period, or under tinyLimit. Others' changes
-// are not looked at.
+// a disable by another name (integrations-v1 §2.4): a limit under
+// tinyLimit, or one that leaves less than tinyLimit over what the user has
+// used this period (counted on while the call goes). Others' changes are
+// not looked at.
 func (s *Server) limitCutsOff(ctx context.Context, m *nodev1.SetUserTrafficRequest) (bool, error) {
 	if d, ok := caller(ctx); !ok || d.Role != "billing" || m.LimitBytes == nil || *m.LimitBytes <= 0 {
 		return false, nil
@@ -114,7 +115,7 @@ func (s *Server) limitCutsOff(ctx context.Context, m *nodev1.SetUserTrafficReque
 	if err != nil {
 		return false, err
 	}
-	return *m.LimitBytes <= u.Used(time.Now()), nil
+	return *m.LimitBytes-u.Used(time.Now()) < tinyLimit, nil
 }
 
 // massGuard puts billing's deletion or disable under the hour's limit of

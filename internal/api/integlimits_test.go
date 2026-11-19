@@ -13,6 +13,7 @@ import (
 	devicev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
 	"github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1/nodev1connect"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 // Every NodeService method an integration may call counts against one
@@ -223,6 +224,40 @@ func TestIntegrationLimits(t *testing.T) {
 	if _, err := bill.node.SetUserTraffic(ctx, connect.NewRequest(&nodev1.SetUserTrafficRequest{Name: "u1", LimitBytes: &limit})); err != nil {
 		t.Fatalf("billing's limit with the counting kept on: %v", err)
 	}
+	// A limit just over what u1 has used cuts it off at the next byte.
+	u1, err := srv.Store.UserByName(ctx, "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Store.WriteTraffic(ctx, store.TrafficWrite{Start: []int64{u1.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	if u1, err = srv.Store.UserByName(ctx, "u1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Store.WriteTraffic(ctx, store.TrafficWrite{Adds: []store.TrafficAdd{{UserID: u1.ID, Start: u1.TrafficStart, Up: 50 << 20}}}); err != nil {
+		t.Fatal(err)
+	}
+	justOver := int64(50<<20 + 1)
+	if _, err := bill.node.SetUserTraffic(ctx, connect.NewRequest(&nodev1.SetUserTrafficRequest{Name: "u1", LimitBytes: &justOver})); connect.CodeOf(err) != connect.CodeFailedPrecondition || !strings.Contains(err.Error(), "mass") {
+		t.Fatalf("a limit a byte over the use, over the mass limit: %v", err)
+	}
+	if _, err := bill.node.SetUserTraffic(ctx, connect.NewRequest(&nodev1.SetUserTrafficRequest{Name: "u1", LimitBytes: &limit})); err != nil {
+		t.Fatalf("a limit well over the use: %v", err)
+	}
+	// So does a list of disabled services alone.
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "n1", Enabled: false})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bill.node.SetUserServices(ctx, connect.NewRequest(&nodev1.SetUserServicesRequest{Name: "u2", Services: []string{"n1"}})); connect.CodeOf(err) != connect.CodeFailedPrecondition || !strings.Contains(err.Error(), "mass") {
+		t.Fatalf("disabled services only, over the mass limit: %v", err)
+	}
+	if _, err := bill.node.SetUserServices(ctx, connect.NewRequest(&nodev1.SetUserServicesRequest{Name: "u2", Services: []string{"nope"}})); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("an unknown service is its own error, not the guard's: %v", err)
+	}
+	if _, err := c.SetServiceEnabled(ctx, connect.NewRequest(&nodev1.SetServiceEnabledRequest{Name: "n1", Enabled: true})); err != nil {
+		t.Fatal(err)
+	}
 	none := int64(0)
 	if _, err := bill.node.SetUserTraffic(ctx, connect.NewRequest(&nodev1.SetUserTrafficRequest{Name: "u1", LimitBytes: &none})); err != nil {
 		t.Fatalf("billing's last limit off with the counting kept on: %v", err)
@@ -251,7 +286,7 @@ func TestIntegrationLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !st.Msg.SupportNotes || st.Msg.MassLimit != 2 || st.Msg.MassActions != 6 || st.Msg.MassRefused != 6 || st.Msg.TrafficCounting != "on" {
+	if !st.Msg.SupportNotes || st.Msg.MassLimit != 2 || st.Msg.MassActions != 6 || st.Msg.MassRefused != 8 || st.Msg.TrafficCounting != "on" {
 		t.Errorf("settings: %+v", st.Msg)
 	}
 	limited, denied := map[string]uint64{}, map[string]uint64{}
@@ -286,7 +321,7 @@ func TestIntegrationLimits(t *testing.T) {
 	}
 	for _, want := range []string{
 		`raycontrol_api_limited_total{role="support"} 3`,
-		`raycontrol_integration_mass_actions_total{result="refused"} 6`,
+		`raycontrol_integration_mass_actions_total{result="refused"} 8`,
 		`raycontrol_integration_mass_actions_total{result="confirmed"} 4`,
 		`raycontrol_api_calls_total{role="support",code="resource_exhausted"} 3`,
 	} {

@@ -928,9 +928,9 @@ message SetUserTrafficRequest {
   optional string period = 3;
   optional int32 reset_day = 4;
   bool reset_usage = 5;
-  // As SetUserEnabledRequest's: billing's limit at or under what the user
-  // has used this period cuts the user off, a mass action (integrations-v1
-  // §2.4).
+  // As SetUserEnabledRequest's: billing's limit under 1 MiB, or less than
+  // 1 MiB over what the user has used this period, cuts the user off, a
+  // mass action (integrations-v1 §2.4).
   bool confirm_mass = 6;
 }
 message SetUserTrafficResponse { User user = 1; }
@@ -954,8 +954,8 @@ message SetUserEnabledResponse {}
 message SetUserServicesRequest {
   string name = 1;
   repeated string services = 2;
-  // As SetUserEnabledRequest's: billing's empty list cuts the user off, a
-  // mass action (integrations-v1 §2.4).
+  // As SetUserEnabledRequest's: billing's list without an enabled service
+  // cuts the user off, a mass action (integrations-v1 §2.4).
   bool confirm_mass = 3;
 }
 message SetUserServicesResponse {}
@@ -973,8 +973,9 @@ message SetUserExpiryRequest {
   string name = 1;
   // unix seconds; 0: never; a time not after now: expired now.
   int64 expires_at = 2;
-  // confirm_mass: as SetUserEnabledRequest's; billing's expiry now is a
-  // mass action like a disable (integrations-v1 §2.4).
+  // confirm_mass: as SetUserEnabledRequest's; billing's expiry now, or in
+  // 10 minutes or less, is a mass action like a disable (integrations-v1
+  // §2.4).
   bool confirm_mass = 3;
 }
 message SetUserExpiryResponse { User user = 1; }

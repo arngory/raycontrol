@@ -5415,9 +5415,9 @@ type SetUserTrafficRequest struct {
 	Period     *string                `protobuf:"bytes,3,opt,name=period,proto3,oneof" json:"period,omitempty"`
 	ResetDay   *int32                 `protobuf:"varint,4,opt,name=reset_day,json=resetDay,proto3,oneof" json:"reset_day,omitempty"`
 	ResetUsage bool                   `protobuf:"varint,5,opt,name=reset_usage,json=resetUsage,proto3" json:"reset_usage,omitempty"`
-	// As SetUserEnabledRequest's: billing's limit at or under what the user
-	// has used this period cuts the user off, a mass action (integrations-v1
-	// §2.4).
+	// As SetUserEnabledRequest's: billing's limit under 1 MiB, or less than
+	// 1 MiB over what the user has used this period, cuts the user off, a
+	// mass action (integrations-v1 §2.4).
 	ConfirmMass   bool `protobuf:"varint,6,opt,name=confirm_mass,json=confirmMass,proto3" json:"confirm_mass,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5738,8 +5738,8 @@ type SetUserServicesRequest struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Name     string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Services []string               `protobuf:"bytes,2,rep,name=services,proto3" json:"services,omitempty"`
-	// As SetUserEnabledRequest's: billing's empty list cuts the user off, a
-	// mass action (integrations-v1 §2.4).
+	// As SetUserEnabledRequest's: billing's list without an enabled service
+	// cuts the user off, a mass action (integrations-v1 §2.4).
 	ConfirmMass   bool `protobuf:"varint,3,opt,name=confirm_mass,json=confirmMass,proto3" json:"confirm_mass,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -6013,8 +6013,9 @@ type SetUserExpiryRequest struct {
 	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// unix seconds; 0: never; a time not after now: expired now.
 	ExpiresAt int64 `protobuf:"varint,2,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
-	// confirm_mass: as SetUserEnabledRequest's; billing's expiry now is a
-	// mass action like a disable (integrations-v1 §2.4).
+	// confirm_mass: as SetUserEnabledRequest's; billing's expiry now, or in
+	// 10 minutes or less, is a mass action like a disable (integrations-v1
+	// §2.4).
 	ConfirmMass   bool `protobuf:"varint,3,opt,name=confirm_mass,json=confirmMass,proto3" json:"confirm_mass,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
