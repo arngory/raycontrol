@@ -12,6 +12,7 @@ addresses and times become their kind, a credential's name its user. A list's el
 shape, with the list's length. Links become their scheme and parameter
 names, with the parameters' values as for strings.
 """
+import ipaddress
 import json
 import os
 import re
@@ -38,12 +39,23 @@ def scalar(v):
     if isinstance(v, str):
         if "://" in v:
             return link(v)
+        if kinds := addrs(v):
+            return f"addr:{kinds}"
         if NAME.match(v):
             return "name:*." + v.split(".", 1)[1]
         if m := CRED.match(v):
             return f"credential:{m.group(1)}-*"
         return f"str:{v}" if ENUM.match(v) else ("str:" if v == "" else "str")
     return type(v).__name__
+
+
+def addrs(v):
+    """The families of an address or a comma-separated list of them
+    (niko-ip), or None: the node's address differs between the two."""
+    try:
+        return ",".join(f"v{ipaddress.ip_address(a).version}" for a in v.split(","))
+    except ValueError:
+        return None
 
 
 def link(v):
