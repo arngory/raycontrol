@@ -243,6 +243,8 @@ func toConnect(err error) error {
 		return nil
 	case errors.Is(err, store.ErrNotFound):
 		return connect.NewError(connect.CodeNotFound, err)
+	case errors.Is(err, errForRole):
+		return connect.NewError(connect.CodePermissionDenied, err)
 	case errors.Is(err, store.ErrInvalid):
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	case errors.Is(err, store.ErrPrecondition):
@@ -347,6 +349,8 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 // serviceIDs resolves service names to IDs, each once: a name given twice
 // would otherwise fail the one write as "already exists", which a retry
 // takes for "the first try worked".
+// serviceIDs are the IDs of the services named; billing names data
+// services only (dataKinds, integrations-v1 §2.2).
 func (s *Server) serviceIDs(ctx context.Context, names []string) ([]int64, error) {
 	ids := make([]int64, 0, len(names))
 	seen := make(map[string]bool, len(names))
@@ -358,6 +362,9 @@ func (s *Server) serviceIDs(ctx context.Context, names []string) ([]int64, error
 		svc, err := s.Store.ServiceByName(ctx, n)
 		if err != nil {
 			return nil, err
+		}
+		if callerRole(ctx) == "billing" && !dataKinds[svc.Kind] {
+			return nil, fmt.Errorf("%w: service %q is not a data service", errForRole, n)
 		}
 		ids = append(ids, svc.ID)
 	}
@@ -872,7 +879,13 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 		return "", err
 	}
 	b := node.Bundle{Version: 1, Host: host, SPA: node.FromParams(s.Params), DeviceID: d.ID, DeviceKey: hex.EncodeToString(key[:])}
+	// An integration's device gets the API alone: no subscription, no
+	// data service (integrations-v1 §2.1); its user has none.
+	integration := store.IntegrationRole(d.Role)
 	for _, svc := range services {
+		if integration {
+			continue
+		}
 		if svc.Kind == "subscription" && svc.Enabled {
 			ports, err := svc.Ports()
 			if err != nil || len(ports) == 0 {
@@ -905,7 +918,7 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 			b.Services = append(b.Services, bs)
 		}
 	}
-	if d.Role == "admin" && d.CertPin != "" {
+	if (d.Role == "admin" || integration) && d.CertPin != "" {
 		api, err := s.apiEndpoint(ctx)
 		if err != nil {
 			return "", err
@@ -980,7 +993,11 @@ func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.C
 		ttl = DefaultInviteTTL
 	}
 	var code, short, pin string
-	api, err := s.apiEndpoint(ctx)
+	err := billingInviteRole(ctx, role)
+	var api *apiService
+	if err == nil {
+		api, err = s.apiEndpoint(ctx)
+	}
 	if err == nil && api == nil {
 		err = fmt.Errorf("%w: no remote API on the node (rayctl service add api api, then rayctl apply)", store.ErrInvalid)
 	}

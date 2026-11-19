@@ -19,6 +19,8 @@
 - Адрес: `https://<host>:<api.port>/`. `host` — поле пакета или приглашения, `api` — `{"port": N, "pin": "…"}`.
 - Порт закрыт до SPA. Через SPA к нему проходят только:
   - устройства с ролью `admin`, зарегистрированные через API (у них есть клиентский сертификат);
+  - устройства интеграций, `billing` и `support` ([integrations-v1](integrations-v1.md) §2): только к API, без
+    подписки;
   - действующие приглашения: не использованные, не истёкшие, пользователь включён.
   Устройства с ролью `user` порт не открывают: им API нужен только один раз, для регистрации.
 - TLS 1.3, только `X25519MLKEM768`, ALPN `h2`. Сертификат сервера самоподписанный. Клиент проверяет его по пину
@@ -204,6 +206,10 @@ A client that lost Register's answer (timeout, dropped connection) may send it a
 |---|---|---|---|
 | `user` | нет (только `Register` по приглашению) | — | — |
 | `admin` (зарегистрирован через API) | да | `GetSelf`, `RotateCertificate` | всё, кроме `Backup`, `GetDeployment`, `GetDeployInputs` и `SetCertificate` |
+| `billing`, `support` (только по приглашению) | да, только API | `GetSelf`, `RotateCertificate` | свои методы и только обычные пользователи ([integrations-v1](integrations-v1.md) §2.3) |
+
+- Роли методов — в proto: у каждого метода `google.api.method_visibility` (integrations-v1 §5.1). Что недоступно
+  роли, отвечает `permission_denied`.
 
 - `Backup` — только root на самой ноде: в базе все закрытые ключи ноды (R4-13). `GetDeployment` и `GetDeployInputs` —
   тоже. Ключей в них нет (юниты и системные файлы, имена, UID и порты сервисов), но из них root строит план `apply`

@@ -1,7 +1,10 @@
 # integrations-v1: внешние системы у ноды (боты, биллинг)
 
-Статус: **черновик** (2026-11-16), ничего не сделано. В планах после v0.31.0: решение владельца 2026-11-16 (цитата —
-§13; [decisions](../decisions.md) R4-47). Вопросы §14 владелец закрыл 2026-11-16: «в целом по рекомендации».
+Статус: **этап 1 в коде, не выпущен** (2026-11-19): роли `billing` и `support` (§2.1–§2.3), аудит без пределов
+(§2.5), `GetUser` и `SetUserExpiry` (§10), `rayctl device invite -role billing|support` и `rayctl user expires`
+(§11). Выпуск — вместе с этапом 1b: пределы частоты (§2.6), предохранитель массовых действий и учёт трафика (§2.4),
+настройки интеграций и заметки для `support` (§2.2). Дальше — статические адреса (§3.2), события (§4), OpenAPI (§5).
+Решение владельца 2026-11-16 (цитата — §13; [decisions](../decisions.md) R4-47). Вопросы §14 владелец закрыл 2026-11-16: «в целом по рекомендации».
 Основа: удалённый API — [api-v1](api-v1.md) (R3-3), стук — [spa-v2](spa-v2.md), уведомления — webhook (K-2),
 журналы доступа выключены (D-12), лимиты — [traffic-limit-v1](traffic-limit-v1.md) и
 [conn-limit-v1](conn-limit-v1.md), что получает пользователь — [subscription-v1](subscription-v1.md). Пометка
@@ -72,7 +75,8 @@ rayctl remote enroll 'RCINV2:…' -o billing.rcdev   # файл устройст
 ### 2.2 Обычные и служебные пользователи
 
 **Служебный** пользователь — тот, у кого есть неотозванное устройство или неиспользованное приглашение роли `admin`,
-`billing` или `support`, или сервис вида `ssh` или `api`. Остальные — **обычные**.
+`billing` или `support`, или сервис вида `ssh` или `api`. Остальные — **обычные**. Неиспользованное приглашение
+считается и истёкшим, пока его не отозвали и не убрала чистка: так строже.
 
 `billing` и `support` видят только обычных (`support` только видит):
 - `ListUsers`, `ListDevices` служебных не показывают;
@@ -91,21 +95,21 @@ rayctl remote enroll 'RCINV2:…' -o billing.rcdev   # файл устройст
 
 ### 2.3 Методы по ролям
 
-Каждый метод `NodeService` (53 в v0.31.0). «да» — можно; «—» — нельзя (`permission_denied`); «только root» —
+Каждый метод `NodeService` (56 в v0.33.0). «да» — можно; «—» — нельзя (`permission_denied`); «только root» —
 только root на сокете ноды, не через API; «сокет» — root и группа `raycontrol` на ноде, не через API.
 
 | Метод | admin | billing | support | Почему так |
 |---|---|---|---|---|
 | `GetStatus` | да | да* | да* | *без `host`, `spa_ports`, `debug_until`, текстов `loops[].error` и `detail` |
 | `ListUsers` | да | да (обычные) | да* (обычные) | состояние и счётчики трафика; *`support` — без `note`, пока администратор не разрешил (§2.2) |
-| `CreateUser` | да | нет | — | сервисы — только данных (§2.2) |
+| `CreateUser` | да | да | — | сервисы — только данных (§2.2) |
 | `SetUserEnabled` | да | да* | — | *выключение — под предохранителем (§2.4) |
-| `SetUserServices` | да | нет | — | только сервисы данных |
+| `SetUserServices` | да | да | — | только сервисы данных |
 | `DeleteUser` | да | да* | — | *под предохранителем (§2.4) |
 | `SetUserTraffic` | да | да* | — | *не включает и не выключает учёт трафика на ноде (§2.4) |
 | `SetUserLAN` | да | — | — | согласие администратора (lan-v1 §1.1) |
 | `ExportUser` | да | — | — | ответ — учётные данные пользователя; без SPA устройства пользователя ссылки не работают (R4-17); пользователю — приглашение (§7, §14 п. 3) |
-| `RenewUser` | да | нет | — | «ключи утекли»: новые данные, секрета в ответе нет |
+| `RenewUser` | да | да | — | «ключи утекли»: новые данные, секрета в ответе нет |
 | `ListServices` | да | да* | да* | *только `id`, `kind`, `name`, `enabled`: нужно для `services` пользователя |
 | `CreateService`, `SetServiceEnabled`, `DeleteService`, `RotateService`, `SetServiceOption` | да | — | — | сервисы и ключи |
 | `GetYggdrasilPeerKeys` | да | — | — | ключи пира |
@@ -121,27 +125,29 @@ rayctl remote enroll 'RCINV2:…' -o billing.rcdev   # файл устройст
 | `SetDNSProvider`, `GetDNS`, `SyncDNS`, `RemoveDNS`, `CheckDNSZones` | да | — | — | токен провайдера, зоны |
 | `Backup` | только root | — | — | все ключи (R4-13) |
 | `GetMetrics` | да | — | да | только числа (R4-14) |
+| `GetStats` | да | — | да | только числа, без имён ([stats-v1](stats-v1.md)) |
 | `GetSummary`, `SetSummary` | да | — | — | сети клиентов, токен IPinfo |
 | `GetAppMirror`, `SetAppMirror` | да | — | — | настройка ноды |
 | `StartUpdate` | да (если root разрешил) | — | — | обновление |
-| `GetUpdateStatus` | да | — | да* | *без `by` (имена устройств администраторов) |
+| `GetUpdateStatus` | да | — | да* | *без `by` (имена устройств администраторов), текста `error` и `relays` (периметр) |
 | `SetDebug` | только root | — | — | адреса клиентов в журнале |
 | `SetNodeName`, `SetNodeNote` | да | — | — | настройка ноды |
+| `GetClientPolicy`, `SetClientPolicy` | да | — | — | минимальный клиент ([client-min-v1](client-min-v1.md)) |
 | `GetEgress`, `GetConnLimit` | сокет | — | — | |
 | `SetEgress`, `SetConnLimit` | только root | — | — | |
 | `GetDeployment`, `GetDeployInputs` | только root | — | — | план `apply` (R4-33) |
 | `GetPorts` | да | — | — | периметр |
 | **новые** (§10): `GetUser` | да | да (обычные) | да* (обычные) | один пользователь вместо всего списка; *как `ListUsers` |
-| `SetUserExpiry` | да | нет | — | срок: продлить, снять, истечь сейчас |
+| `SetUserExpiry` | да | да | — | срок: продлить, снять, истечь сейчас |
 | `SetDeviceAllow` | да | — | — | список адресов (§3.2) |
 | `ListWebhooks`, `AddWebhook`, `SetWebhook`, `DeleteWebhook`, `VerifyWebhook`, `TestWebhook`, `RotateWebhookKey`, `RetryWebhook` | да | — | — | `-allow-net` — только root (§4.7) |
-| `ListEvents` | да | нет | да | только своя лента: адрес вида `poll` с `-for` этого устройства (§4.9) |
+| `ListEvents` | да | да | да | только своя лента: адрес вида `poll` с `-for` этого устройства (§4.9) |
 | `GetIntegrationSettings`, `SetIntegrationSettings` | да* | — | — | *пределы частоты и предохранителя — только root на ноде; заметки для `support` — admin (§2.2, §2.4, §2.6) |
 
 `DeviceService`: `Register` — по приглашению, как сейчас; `GetSelf` и `RotateCertificate` — `admin`, `billing`,
 `support` (свой ключ интеграция меняет сама, §6). `RelayService` — только relay.
 
-Итого: `billing` — 12 нынешних методов и 3 новых, `support` — 6 нынешних и 2 новых (`GetUser`, `ListEvents`).
+Итого: `billing` — 12 нынешних методов и 3 новых, `support` — 7 нынешних и 2 новых (`GetUser`, `ListEvents`).
 
 Поля, скрытые от роли (*), нода очищает в ответе, а не только в описании: одна разметка proto задаёт и права, и
 OpenAPI (§5.1).
@@ -575,12 +581,15 @@ rayctl webhook status [ID]                     # §11
 
 - **Разметка.** У каждого метода `NodeService` и `DeviceService` — правило видимости
   `google.api.method_visibility`: `restriction` — роли через запятую (`"ADMIN,BILLING,SUPPORT"`), `"ADMIN"`, `"NODE"`
-  (только на сокете). У полей, скрытых от роли, — `google.api.field_visibility` (`"ADMIN"`). `visibility.proto` из
-  googleapis кладётся в `api/proto/google/api/` (Apache-2.0, файл маленький): генерация остаётся без сети, как
-  сейчас.
-- **Одна разметка для прав и описания.** rayd при старте строит таблицу «метод → роли» из дескрипторов
-  (`protoregistry`) и чистит в ответе поля, которых роли не видно. Тест: у каждого метода правило есть; метод без
-  правила — только `ADMIN`; таблица совпадает с §2.3.
+  (только на сокете); у `DeviceService` ещё `USER` (устройство пользователя: `Register`, `GetSelf`). У полей, скрытых
+  от роли, — `google.api.field_visibility` (`"ADMIN"`). `visibility.proto` из googleapis лежит в
+  `api/proto/google/api/` (Apache-2.0, файл маленький): генерация остаётся без сети, как сейчас. Изменён только
+  `go_package` — на сгенерированный пакет raycontrol, чтобы не тянуть модуль googleapis (и с ним gRPC).
+- **Одна разметка для прав и описания.** rayd при старте строит таблицу «метод → роли» из дескрипторов и чистит в
+  ответе поля, которых роли не видно. Тесты: у каждого метода правило есть, и таблица совпадает с §2.3; метод без
+  правила — только `ADMIN`; у каждого скрытого поля в правиле есть `ADMIN`; список полей, которые видят `billing` и
+  `support` во всех своих ответах, лежит в `internal/api/testdata/integration-fields.txt`. Новое поле в таком ответе
+  роняет тест, пока его не посмотрели и не переписали список.
 - **Генератор** — [`protoc-gen-connect-openapi`](https://github.com/connectrpc/protoc-gen-connect-openapi)
   (`connectrpc.com/protoc-gen-connect-openapi`, Apache-2.0, OpenAPI 3.1). Он понимает `allowed-visibilities` и метки
   через запятую. Закрепляется версией в `tools/go.mod`, как остальные плагины; свой шаблон `buf.gen.openapi.yaml`,
@@ -804,7 +813,7 @@ HTTPS, хоть статический хостинг: команды подпи
     предохранителя у неё нет;
   - значения `role`: `billing`, `support` (строка, поле прежнее);
   - правила видимости на методах и полях (§5.1).
-- **База** — миграция 0016 (номер — следующий свободный): `devices` и `invites` пересоздаются с ролями в `CHECK`
+- **База** — миграция 0017 (этап 1; дальше — следующие свободные номера): `devices` и `invites` пересоздаются с ролями в `CHECK`
   (SQLite не меняет ограничение на месте, как в 0014); `devices.allow`; таблицы `webhooks` (с видом `url` или
   `poll` и состоянием проверки), `webhook_keys`, `webhook_outbox`; отметки сроков (`user.expired`, `user.expiring` —
   один раз на значение). Настройки интеграций — ключи в `settings`.

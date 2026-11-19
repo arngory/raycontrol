@@ -58,8 +58,8 @@ func (s *Store) CreateInvite(ctx context.Context, userName, name, role string, t
 	if err := checkName("device", name); err != nil {
 		return Invite{}, key, err
 	}
-	if role != "user" && role != "admin" {
-		return Invite{}, key, fmt.Errorf("%w role %q: use user or admin", ErrInvalid, role)
+	if !validRole(role) {
+		return Invite{}, key, fmt.Errorf("%w role %q: use user, admin, billing or support", ErrInvalid, role)
 	}
 	if ttl <= 0 || ttl > MaxInviteTTL {
 		return Invite{}, key, fmt.Errorf("%w invite lifetime %v: up to %v", ErrInvalid, ttl, MaxInviteTTL)
@@ -81,6 +81,21 @@ func (s *Store) CreateInvite(ctx context.Context, userName, name, role string, t
 		inv.PinProof, inv.PinTries = pin[0](key), InvitePinTries
 	}
 	err = s.tx(ctx, func(tx *sql.Tx) error {
+		// The user once more, in the transaction: a caller of RegularOnly
+		// gives invites to regular users only, and a user with services
+		// gets no integration's invite (integrations-v1 §2.1).
+		var services bool
+		err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM user_services WHERE user_id = u.id) FROM users u
+			WHERE u.id = ? AND NOT (? AND u.id IN (`+serviceUserIDs+`))`, u.ID, regularOnly(ctx)).Scan(&services)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("user %q: %w", userName, ErrNotFound)
+		}
+		if err != nil {
+			return err
+		}
+		if services && IntegrationRole(role) {
+			return fmt.Errorf("user %q: %w", u.Name, ErrIntegrationUser)
+		}
 		var taken int
 		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM devices WHERE user_id = ? AND name = ? AND revoked_at IS NULL`, u.ID, name).Scan(&taken); err != nil {
 			return err
@@ -94,7 +109,7 @@ func (s *Store) CreateInvite(ctx context.Context, userName, name, role string, t
 		if _, err := tx.ExecContext(ctx, `DELETE FROM invites WHERE user_id = ? AND name = ? AND used_at IS NULL`, u.ID, name); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO invites (id, user_id, name, role, spa_key, created_at, expires_at, pin_proof, pin_tries)
+		_, err = tx.ExecContext(ctx, `INSERT INTO invites (id, user_id, name, role, spa_key, created_at, expires_at, pin_proof, pin_tries)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			inv.ID, u.ID, inv.Name, inv.Role, key[:], now.Unix(), inv.ExpiresAt.Unix(), inv.PinProof, inv.PinTries)
 		return err
@@ -126,10 +141,11 @@ func (s *Store) FailInvitePIN(ctx context.Context, id string) (left int, err err
 	return left, err
 }
 
-// ListInvites returns the invites not yet used, expired ones included.
+// ListInvites returns the invites not yet used, expired ones included;
+// to a caller of RegularOnly, those of regular users only.
 func (s *Store) ListInvites(ctx context.Context) ([]Invite, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT i.id, u.name, i.name, i.role, i.created_at, i.expires_at, i.pin_proof, i.pin_tries
-		FROM invites i JOIN users u ON u.id = i.user_id WHERE i.used_at IS NULL ORDER BY u.name, i.name`)
+		FROM invites i JOIN users u ON u.id = i.user_id WHERE i.used_at IS NULL AND NOT (? AND u.id IN (`+serviceUserIDs+`)) ORDER BY u.name, i.name`, regularOnly(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -147,9 +163,11 @@ func (s *Store) ListInvites(ctx context.Context) ([]Invite, error) {
 	return out, rows.Err()
 }
 
-// DeleteInvite withdraws an unused invite.
+// DeleteInvite withdraws an unused invite, of a regular user only for a
+// caller of RegularOnly.
 func (s *Store) DeleteInvite(ctx context.Context, id string) error {
-	return s.affectOne(ctx, "invite", id, `DELETE FROM invites WHERE id = ? AND used_at IS NULL`, id)
+	return s.affectOne(ctx, "invite", id, `DELETE FROM invites AS i WHERE i.id = ? AND i.used_at IS NULL
+		AND NOT (? AND i.user_id IN (`+serviceUserIDs+`))`, id, regularOnly(ctx))
 }
 
 // PruneInvites removes invites used or expired before the given time.

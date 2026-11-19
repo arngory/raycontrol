@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"sync"
 	"time"
 
@@ -38,7 +39,8 @@ import (
 // pass; TLS 1.3 with X25519MLKEM768 only; a client certificate on every
 // connection. The device is its certificate's key: no CA, the node keeps
 // the pin of each device, like clients keep the node's. DeviceService is
-// for any registered device and for invites; NodeService for admins.
+// for any registered device and for invites; NodeService for admins and
+// integrations, each method to the roles its proto names (roleGate).
 type Remote struct {
 	Server *Server
 	Log    *slog.Logger
@@ -56,6 +58,9 @@ type Remote struct {
 	relayProbes  map[string]int            // rayd relay's feeds open per relay
 	relayProbeAt map[string]time.Time      // when the last of them closed
 	started      time.Time                 // when Serve began
+
+	deniedMu  sync.Mutex
+	deniedLog map[deniedKey]deniedMark // api.denied lines by device and method
 }
 
 // relayProbeGrace keeps a relay's probe endpoint listed while its rayd relay
@@ -151,7 +156,7 @@ func RemoteTLSConfig(certDER, keyDER []byte) (*tls.Config, error) {
 // gets a plain 404.
 func (r *Remote) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle(nodev1connect.NewNodeServiceHandler(r.Server, connect.WithInterceptors(r.adminOnly()), readLimit()))
+	mux.Handle(nodev1connect.NewNodeServiceHandler(r.Server, connect.WithInterceptors(r.roleGate()), readLimit()))
 	mux.Handle(devicev1connect.NewDeviceServiceHandler(r, readLimit()))
 	if r.Perimeter != nil {
 		mux.Handle(perimeterv1connect.NewRelayServiceHandler(&relayFeed{r}, readLimit()))
@@ -208,87 +213,18 @@ func (r *Remote) device(ctx context.Context) (store.Device, error) {
 	return d, nil
 }
 
-// adminDevice is the caller's device if it is an admin's (api-v1 §5): a
-// user device reaches the API port only to repeat its Register, for the
-// invite's 15 minutes, and may then ask who it is, not change its key.
-func (r *Remote) adminDevice(ctx context.Context) (store.Device, error) {
-	d, err := r.device(ctx)
-	if err != nil {
-		return d, err
-	}
-	if d.Role != "admin" {
-		return d, connect.NewError(connect.CodePermissionDenied, errors.New("not an admin device"))
-	}
-	return d, nil
+// nodeOnly reports a call for root on the node itself (NODE in the
+// proto): never through the remote API.
+func nodeOnly(procedure string) bool {
+	return slices.Contains(methodRoles[procedure], labelNode)
 }
 
-// nodeOnly are the calls for root on the node itself.
-var nodeOnly = map[string]bool{
-	// What rayctl apply builds the deployment from, and rayd's own plan:
-	// no keys (units and system files, the services' names and ports), but
-	// changing the host is root's on the node (R3-3), and nothing off it
-	// needs them (spec/apply-plan-v1.md).
-	nodev1connect.NodeServiceGetDeploymentProcedure:   true,
-	nodev1connect.NodeServiceGetDeployInputsProcedure: true,
-	// The database holds every private key.
-	nodev1connect.NodeServiceBackupProcedure: true,
-	// A relay's bundle holds its private key.
-	nodev1connect.NodeServiceIssueRelayBundleProcedure: true,
-	// The site's private key stays off the network.
-	nodev1connect.NodeServiceSetCertificateProcedure: true,
-	// A relay opens the service ports to an address (relay-v1).
-	nodev1connect.NodeServiceAddRelayProcedure:    true,
-	nodev1connect.NodeServiceRemoveRelayProcedure: true,
-	// Client addresses go to the journal, which only root reads.
-	nodev1connect.NodeServiceSetDebugProcedure: true,
-	// The egress policy is root's on the node (spec/egress-policy-v1.md §9).
-	nodev1connect.NodeServiceGetEgressProcedure: true,
-	nodev1connect.NodeServiceSetEgressProcedure: true,
-	// So are the connection limits (spec/conn-limit-v1.md §8).
-	nodev1connect.NodeServiceGetConnLimitProcedure: true,
-	nodev1connect.NodeServiceSetConnLimitProcedure: true,
-	// Whether admins may update the node at all is root's (node-update-v1).
-}
-
-// secretAnswer are the calls open to admin devices whose answer carries a
+// secretAnswer are the calls open to devices whose answer carries a
 // secret: the user's credentials, or a key that lets a new device in.
 var secretAnswer = map[string]bool{
 	nodev1connect.NodeServiceExportUserProcedure:   true,
 	nodev1connect.NodeServiceCreateDeviceProcedure: true,
 	nodev1connect.NodeServiceCreateInviteProcedure: true,
-}
-
-// adminOnly lets admin devices call NodeService; the audit log names them.
-func (r *Remote) adminOnly() connect.UnaryInterceptorFunc {
-	return func(next connect.UnaryFunc) connect.UnaryFunc {
-		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			d, err := r.device(ctx)
-			if err != nil {
-				return nil, err
-			}
-			if d.Role != "admin" {
-				return nil, connect.NewError(connect.CodePermissionDenied, errors.New("admin devices only"))
-			}
-			if nodeOnly[req.Spec().Procedure] {
-				return nil, connect.NewError(connect.CodePermissionDenied, errors.New("on the node only (rayctl as root)"))
-			}
-			resp, err := next(context.WithValue(ctx, actorKey{}, d.UserName+"/"+d.Name+" (remote)"), req)
-			// The device once more after a call that answers with a secret:
-			// one revoked while the call ran must not take away what the
-			// call read or made after the revocation (its user's new
-			// credentials in an export, a new device's bundle, an invite).
-			// Whatever the call read after the revocation's commit, this
-			// read comes later and sees it. The other answers say nothing
-			// secret, and an admin may revoke the device it calls from or
-			// disable its own user.
-			if err == nil && secretAnswer[req.Spec().Procedure] {
-				if _, derr := r.device(ctx); derr != nil {
-					return nil, derr
-				}
-			}
-			return resp, err
-		}
-	}
 }
 
 // RegisterMAC is the proof of an invite for a client certificate.
@@ -405,9 +341,15 @@ func RotateMessage(oldPin, newPin string) []byte {
 }
 
 func (r *Remote) RotateCertificate(ctx context.Context, req *connect.Request[devicev1.RotateCertificateRequest]) (*connect.Response[devicev1.RotateCertificateResponse], error) {
-	d, err := r.adminDevice(ctx)
+	// An admin's or an integration's device changes its own key (api-v1
+	// §6, integrations-v1 §6); a user's device may ask who it is, not
+	// this.
+	d, err := r.device(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if !mayCall(req.Spec().Procedure, d.Role) {
+		return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not for a device of role %s", d.Role))
 	}
 	cert, err := x509.ParseCertificate(req.Msg.Certificate)
 	if err != nil {
@@ -426,7 +368,7 @@ func (r *Remote) RotateCertificate(ctx context.Context, req *connect.Request[dev
 	if !ok || newPin == oldPin {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("the new key did not sign the rotation"))
 	}
-	ctx = context.WithValue(ctx, actorKey{}, d.UserName+"/"+d.Name+" (remote)")
+	ctx = context.WithValue(ctx, actorKey{}, d.UserName+"/"+d.Name+actorSuffix(d.Role))
 	err = r.Server.Store.SetCertPin(ctx, d.ID, oldPin, newPin)
 	if err := r.Server.done(ctx, "device.rotate-certificate", d.ID, err); err != nil {
 		return nil, err

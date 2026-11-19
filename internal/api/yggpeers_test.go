@@ -179,7 +179,7 @@ func TestGetYggdrasilPeerKeys(t *testing.T) {
 	}
 
 	// The remote API: admin devices, not a user's.
-	if nodeOnly[nodev1connect.NodeServiceGetYggdrasilPeerKeysProcedure] {
+	if nodeOnly(nodev1connect.NodeServiceGetYggdrasilPeerKeysProcedure) {
 		t.Fatal("peer keys for root on the node only")
 	}
 	addr, pin := startRemote(t, srv)

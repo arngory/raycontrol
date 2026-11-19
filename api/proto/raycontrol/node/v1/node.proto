@@ -2,48 +2,96 @@ syntax = "proto3";
 
 // Node API of raycontrol: on the local unix socket for rayctl, and on the
 // remote API behind SPA and mTLS for admin devices (R3-3,
-// docs/spec/api-v1.md).
+// docs/spec/api-v1.md) and integrations (docs/spec/integrations-v1.md).
 // Compatibility follows protobuf rules; breaking changes go to node.v2.
+//
+// Who calls what through the remote API: each method's
+// google.api.method_visibility names the device roles, ADMIN, BILLING,
+// SUPPORT, or NODE (root on the node's socket only, never remote); rayd
+// builds its table from them, and a method without one is ADMIN's. A
+// field whose google.api.field_visibility leaves out a role is cleared in
+// that role's answers; NOTES is support's sight of a user's note, which
+// the administrator allows (integrations-v1 §2.2, §5.1).
 package raycontrol.node.v1;
+
+import "google/api/visibility.proto";
 
 option go_package = "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1;nodev1";
 
 service NodeService {
-  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING,SUPPORT";
+  }
 
-  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
-  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
-  rpc SetUserEnabled(SetUserEnabledRequest) returns (SetUserEnabledResponse);
-  rpc SetUserServices(SetUserServicesRequest) returns (SetUserServicesResponse);
-  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING,SUPPORT";
+  }
+  // GetUser is one user of ListUsers (integrations-v1 §10).
+  rpc GetUser(GetUserRequest) returns (GetUserResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING,SUPPORT";
+  }
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING";
+  }
+  rpc SetUserEnabled(SetUserEnabledRequest) returns (SetUserEnabledResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING";
+  }
+  rpc SetUserServices(SetUserServicesRequest) returns (SetUserServicesResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING";
+  }
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING";
+  }
+  // SetUserExpiry sets when the user expires: later, never (0), or now
+  // (a time not after now). The time is absolute, so a repeated call
+  // leaves the same state (integrations-v1 §5.2).
+  rpc SetUserExpiry(SetUserExpiryRequest) returns (SetUserExpiryResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING";
+  }
   // SetUserTraffic sets or removes a user's traffic limit, its period and
   // reset day, or zeroes the current period's count
   // (docs/spec/traffic-limit-v1.md §3.6). A user at or over the limit is
   // taken off every profile, as an expired one, until the period resets
   // or the limit is raised. A request that changes nothing is invalid.
-  rpc SetUserTraffic(SetUserTrafficRequest) returns (SetUserTrafficResponse);
+  rpc SetUserTraffic(SetUserTrafficRequest) returns (SetUserTrafficResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING";
+  }
   // SetUserLAN gives or takes back the administrator's consent to a user's
   // LAN (docs/spec/lan-v1.md §1.1): the user's devices see each other over
   // Yggdrasil, each that shows itself (X-Raycontrol-LAN in its subscription
   // request). On needs a Yggdrasil service of the user's, and gives the
   // user a new multicast password every time.
-  rpc SetUserLAN(SetUserLANRequest) returns (SetUserLANResponse);
+  rpc SetUserLAN(SetUserLANRequest) returns (SetUserLANResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // ExportUser returns a user's profiles: the links of their subscription
   // (docs/spec/subscription-v1.md §4), each with the next one while a
   // switch is pending (P-10). They hold the user's credentials, so the
   // call is audited. They work only from an address SPA has opened.
-  rpc ExportUser(ExportUserRequest) returns (ExportUserResponse);
+  rpc ExportUser(ExportUserRequest) returns (ExportUserResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // RenewUser gives a user new credentials at once, as a revocation of one
   // of the user's devices does (docs/decisions.md, R4-36): each a fresh
   // secret with no next and no previous one, and a new LAN password when
   // the user has the LAN. The user's devices are cut until they fetch
   // their subscription. Since v0.27.0; an older node answers unimplemented.
-  rpc RenewUser(RenewUserRequest) returns (RenewUserResponse);
+  rpc RenewUser(RenewUserRequest) returns (RenewUserResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING";
+  }
 
-  rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
-  rpc CreateService(CreateServiceRequest) returns (CreateServiceResponse);
-  rpc SetServiceEnabled(SetServiceEnabledRequest) returns (SetServiceEnabledResponse);
-  rpc DeleteService(DeleteServiceRequest) returns (DeleteServiceResponse);
+  rpc ListServices(ListServicesRequest) returns (ListServicesResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING,SUPPORT";
+  }
+  rpc CreateService(CreateServiceRequest) returns (CreateServiceResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
+  rpc SetServiceEnabled(SetServiceEnabledRequest) returns (SetServiceEnabledResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
+  rpc DeleteService(DeleteServiceRequest) returns (DeleteServiceResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // RotateService asks for the next key switch of a REALITY service
   // (docs/decisions.md, R4-7): a lead time away, so that clients get the
   // next keys first, or at once (leaked keys, a blocked name). For a dnstt
@@ -59,12 +107,16 @@ service NodeService {
   // switch of its server name (R4-42, raycontrol v0.29.0): a lead time
   // away, or at once with now to the next name the front already routes;
   // the previous name stays accepted until the switch after, now or not.
-  rpc RotateService(RotateServiceRequest) returns (RotateServiceResponse);
+  rpc RotateService(RotateServiceRequest) returns (RotateServiceResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // SetServiceOption changes one of the few settings that may change after
   // creation: a site's answer, whether REALITY moves its server name,
   // Hysteria2's Brutal ceilings, Yggdrasil's public peers and its ceiling
   // of LAN traffic through the node (lan_relay, docs/spec/lan-v1.md §4.4).
-  rpc SetServiceOption(SetServiceOptionRequest) returns (SetServiceOptionResponse);
+  rpc SetServiceOption(SetServiceOptionRequest) returns (SetServiceOptionResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // GetYggdrasilPeerKeys returns the public keys a Yggdrasil service lets
   // in, for a peer of the operator's own (yggdrasil-go's
   // AllowedPublicKeys, rayctl service peer-keys): the node's key in the
@@ -75,19 +127,27 @@ service NodeService {
   // label in that file; the users' and devices' names only when asked
   // (names). Who may list the devices may ask. Since v0.31.0; an older
   // node answers unimplemented.
-  rpc GetYggdrasilPeerKeys(GetYggdrasilPeerKeysRequest) returns (GetYggdrasilPeerKeysResponse);
+  rpc GetYggdrasilPeerKeys(GetYggdrasilPeerKeysRequest) returns (GetYggdrasilPeerKeysResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // SetCertificate puts the operator's own certificate on a site, in place
   // of one from ACME, for every service under it (REALITY self-steal,
   // hy2-masq, naive, DoH, Yggdrasil). With ACME on, rayd renews it when it
   // is due. Root on the node only: it carries the private key, and it
   // replaces the key clients pin. While it is on the site, the lines of
   // naive, hy2-masq and DoH carry no niko-pin (spec/cert-pin-v1.md §7).
-  rpc SetCertificate(SetCertificateRequest) returns (SetCertificateResponse);
+  rpc SetCertificate(SetCertificateRequest) returns (SetCertificateResponse) {
+    option (google.api.method_visibility).restriction = "NODE";
+  }
 
-  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING,SUPPORT";
+  }
   // CreateDevice returns the device bundle with the device key. The key is
   // not stored anywhere it can be read back through the API.
-  rpc CreateDevice(CreateDeviceRequest) returns (CreateDeviceResponse);
+  rpc CreateDevice(CreateDeviceRequest) returns (CreateDeviceResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // RevokeDevice revokes a device, or withdraws an unused invite. Revoking
   // a device changes every credential of its user at once but DoH's, whose
   // token is each device's (docs/spec/api-v1.md §5a): the user's other
@@ -96,40 +156,68 @@ service NodeService {
   // switch: the next ones published now, the switch after the lead, the
   // old ones accepted for the grace after it; for a device given away or
   // broken, not stolen.
-  rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
+  rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING";
+  }
   // CreateInvite returns a one-time invite ("rcinv1:..."): the client
   // registers the device itself through the remote API (R3-3).
-  rpc CreateInvite(CreateInviteRequest) returns (CreateInviteResponse);
+  rpc CreateInvite(CreateInviteRequest) returns (CreateInviteResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING";
+  }
 
-  rpc ListAudit(ListAuditRequest) returns (ListAuditResponse);
+  rpc ListAudit(ListAuditRequest) returns (ListAuditResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
 
   // Admin access: addresses (CIDR) that reach SSH without SPA (emergency
   // access, docs/decisions.md D-6).
-  rpc GetAdminAccess(GetAdminAccessRequest) returns (GetAdminAccessResponse);
-  rpc SetAdminAccess(SetAdminAccessRequest) returns (SetAdminAccessResponse);
+  rpc GetAdminAccess(GetAdminAccessRequest) returns (GetAdminAccessResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
+  rpc SetAdminAccess(SetAdminAccessRequest) returns (SetAdminAccessResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
 
   // Relays in front of the node (relay-v1): one address each, which
   // reaches the service ports without SPA. Adding and removing is for
   // root on the node only: a relay opens the perimeter. ListRelays gives
   // each relay's ports too (Relay.ports), for its host's firewall.
-  rpc AddRelay(AddRelayRequest) returns (AddRelayResponse);
-  rpc ListRelays(ListRelaysRequest) returns (ListRelaysResponse);
-  rpc RemoveRelay(RemoveRelayRequest) returns (RemoveRelayResponse);
+  rpc AddRelay(AddRelayRequest) returns (AddRelayResponse) {
+    option (google.api.method_visibility).restriction = "NODE";
+  }
+  rpc ListRelays(ListRelaysRequest) returns (ListRelaysResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
+  rpc RemoveRelay(RemoveRelayRequest) returns (RemoveRelayResponse) {
+    option (google.api.method_visibility).restriction = "NODE";
+  }
   // IssueRelayBundle makes the relay a new client certificate (the one
   // before stops working) and returns what its host needs (relay-v1 §3).
   // It holds the relay's private key: root on the node only.
-  rpc IssueRelayBundle(IssueRelayBundleRequest) returns (IssueRelayBundleResponse);
+  rpc IssueRelayBundle(IssueRelayBundleRequest) returns (IssueRelayBundleResponse) {
+    option (google.api.method_visibility).restriction = "NODE";
+  }
   // SetRelayAccess changes the relay host's SSH port and admin addresses
   // without a new bundle: its SPA and certificate stay.
-  rpc SetRelayAccess(SetRelayAccessRequest) returns (SetRelayAccessResponse);
+  rpc SetRelayAccess(SetRelayAccessRequest) returns (SetRelayAccessResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
 
   // The DNS provider (Cloudflare): the node's records in its zone and
   // certificates through DNS-01 with a wildcard name (R4-10). The token is
   // stored by rayd and never returned.
-  rpc SetDNSProvider(SetDNSProviderRequest) returns (SetDNSProviderResponse);
-  rpc GetDNS(GetDNSRequest) returns (GetDNSResponse);
-  rpc SyncDNS(SyncDNSRequest) returns (SyncDNSResponse);
-  rpc RemoveDNS(RemoveDNSRequest) returns (RemoveDNSResponse);
+  rpc SetDNSProvider(SetDNSProviderRequest) returns (SetDNSProviderResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
+  rpc GetDNS(GetDNSRequest) returns (GetDNSResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
+  rpc SyncDNS(SyncDNSRequest) returns (SyncDNSResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
+  rpc RemoveDNS(RemoveDNSRequest) returns (RemoveDNSResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // CheckDNSZones checks the DNS tunnel zones from the node: the
   // delegation at the parent's own servers, the front and the backend on
   // the node, and each zone through public resolvers with dnsprobe-v1
@@ -137,85 +225,129 @@ service NodeService {
   // check (rayd -dns-check). now checks at once, at most once per 30 s:
   // a call within that gets the last check (limited), calls at the same
   // time share one. The answer holds no secret.
-  rpc CheckDNSZones(CheckDNSZonesRequest) returns (CheckDNSZonesResponse);
+  rpc CheckDNSZones(CheckDNSZonesRequest) returns (CheckDNSZonesResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
 
   // Backup returns a consistent copy of the node's database. Root only: it
   // holds every key (R4-13); rayctl encrypts it with the operator's
   // passphrase, which never reaches rayd.
-  rpc Backup(BackupRequest) returns (BackupResponse);
+  rpc Backup(BackupRequest) returns (BackupResponse) {
+    option (google.api.method_visibility).restriction = "NODE";
+  }
   // GetMetrics returns aggregate metrics in the Prometheus text format, no
   // names of users, devices or services (R4-14).
-  rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
+  rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,SUPPORT";
+  }
   // The node's statistics over a window, an hour by default, as JSON
   // (spec/stats-v1.md): counts, levels and the host, no names, addresses,
   // domains or keys.
-  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,SUPPORT";
+  }
 
   // GetSummary returns the state of the client summaries (R4-21): whether
   // the node takes reports, the AS lookup, and the networks with at least
   // k reports; smaller groups only as a total.
-  rpc GetSummary(GetSummaryRequest) returns (GetSummaryResponse);
+  rpc GetSummary(GetSummaryRequest) returns (GetSummaryResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // SetSummary turns the reports on or off, and the online AS lookup. The
   // token is stored by rayd and never returned.
-  rpc SetSummary(SetSummaryRequest) returns (SetSummaryResponse);
+  rpc SetSummary(SetSummaryRequest) returns (SetSummaryResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // GetAppMirror reports the mirror of the client's releases
   // (spec/app-update-v1.md): on or off, what it holds, the last check.
-  rpc GetAppMirror(GetAppMirrorRequest) returns (GetAppMirrorResponse);
+  rpc GetAppMirror(GetAppMirrorRequest) returns (GetAppMirrorResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // SetAppMirror turns it on (with 1 GiB free for it) or off (its files
   // go).
-  rpc SetAppMirror(SetAppMirrorRequest) returns (SetAppMirrorResponse);
+  rpc SetAppMirror(SetAppMirrorRequest) returns (SetAppMirrorResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // The node's update by request (spec/node-update-v1.md): an admin asks
   // for a signed release, newer than the node, while root has turned
   // remote updates on (rayctl update remote on, a file of root's that rayd
   // only reads); a root unit runs it.
-  rpc StartUpdate(StartUpdateRequest) returns (StartUpdateResponse);
-  rpc GetUpdateStatus(GetUpdateStatusRequest) returns (GetUpdateStatusResponse);
+  rpc StartUpdate(StartUpdateRequest) returns (StartUpdateResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
+  rpc GetUpdateStatus(GetUpdateStatusRequest) returns (GetUpdateStatusResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,SUPPORT";
+  }
   // SetDebug opens the debug window for a while or closes it: rayd, rayspa
   // and niko-server log at debug level until it ends by itself
   // (docs/design/observability.md §3). Root on the node only.
-  rpc SetDebug(SetDebugRequest) returns (SetDebugResponse);
+  rpc SetDebug(SetDebugRequest) returns (SetDebugResponse) {
+    option (google.api.method_visibility).restriction = "NODE";
+  }
   // SetNodeName names the node, or takes its name away with "": clients
   // show it with the node's address (subscription-v1 §3, field name).
-  rpc SetNodeName(SetNodeNameRequest) returns (SetNodeNameResponse);
+  rpc SetNodeName(SetNodeNameRequest) returns (SetNodeNameResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // SetNodeNote sets the node's note for its users, or takes it away with
   // "": clients show it with the node (subscription-v1 §3, field note).
-  rpc SetNodeNote(SetNodeNoteRequest) returns (SetNodeNoteResponse);
+  rpc SetNodeNote(SetNodeNoteRequest) returns (SetNodeNoteResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // GetClientPolicy returns the node's minimum client version
   // (spec/client-min-v1.md §2) and how many devices last named which
   // client in the last 30 days (§5).
-  rpc GetClientPolicy(GetClientPolicyRequest) returns (GetClientPolicyResponse);
+  rpc GetClientPolicy(GetClientPolicyRequest) returns (GetClientPolicyResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // SetClientPolicy sets it, or takes it away with no minimum.
-  rpc SetClientPolicy(SetClientPolicyRequest) returns (SetClientPolicyResponse);
+  rpc SetClientPolicy(SetClientPolicyRequest) returns (SetClientPolicyResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // GetEgress returns the node's egress policy (spec/egress-policy-v1.md):
   // what the data plane may not send, on every profile. On the node's
   // socket only.
-  rpc GetEgress(GetEgressRequest) returns (GetEgressResponse);
+  rpc GetEgress(GetEgressRequest) returns (GetEgressResponse) {
+    option (google.api.method_visibility).restriction = "NODE";
+  }
   // SetEgress blocks or allows BitTorrent and SMTP (TCP 25); rayspa applies
   // it within a second or two. Root on the node only.
-  rpc SetEgress(SetEgressRequest) returns (SetEgressResponse);
+  rpc SetEgress(SetEgressRequest) returns (SetEgressResponse) {
+    option (google.api.method_visibility).restriction = "NODE";
+  }
   // GetConnLimit says whether the per-user connection limits and the
   // per-address limit on new inbound connections are on
   // (spec/conn-limit-v1.md §8), with the conntrack table, the guard and the
   // users at a limit in the last 15 minutes. On the node's socket only.
-  rpc GetConnLimit(GetConnLimitRequest) returns (GetConnLimitResponse);
+  rpc GetConnLimit(GetConnLimitRequest) returns (GetConnLimitResponse) {
+    option (google.api.method_visibility).restriction = "NODE";
+  }
   // SetConnLimit turns those limits on or off; the table's size, notrack and
   // the guard stay. Root on the node only.
-  rpc SetConnLimit(SetConnLimitRequest) returns (SetConnLimitResponse);
+  rpc SetConnLimit(SetConnLimitRequest) returns (SetConnLimitResponse) {
+    option (google.api.method_visibility).restriction = "NODE";
+  }
 
   // GetDeployment returns the deployment rayd builds for the current
   // services: system users, unit files and other files. rayctl before
   // v0.21.0 installs it as it is; rayctl since builds its own from
   // GetDeployInputs and takes nothing from here. Root on the node only.
-  rpc GetDeployment(GetDeploymentRequest) returns (GetDeploymentResponse);
+  rpc GetDeployment(GetDeploymentRequest) returns (GetDeploymentResponse) {
+    option (google.api.method_visibility).restriction = "NODE";
+  }
   // GetDeployInputs returns what root builds the deployment from
   // (docs/spec/apply-plan-v1.md §3.3): the services and the node's facts,
   // which rayctl apply checks before it builds anything. No keys, no file
   // contents. Root on the node only.
-  rpc GetDeployInputs(GetDeployInputsRequest) returns (GetDeployInputsResponse);
+  rpc GetDeployInputs(GetDeployInputsRequest) returns (GetDeployInputsResponse) {
+    option (google.api.method_visibility).restriction = "NODE";
+  }
   // GetPorts lists every port the node uses or admits, for a provider's
   // firewall or a NAT (rayctl ports): no keys, the current port of each
   // rotating range.
-  rpc GetPorts(GetPortsRequest) returns (GetPortsResponse);
+  rpc GetPorts(GetPortsRequest) returns (GetPortsResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
 }
 
 message GetPortsRequest {}
@@ -501,22 +633,22 @@ message GetStatusRequest {}
 message GetStatusResponse {
   string version = 1;
   string node_id = 2;
-  string host = 3;
+  string host = 3 [(google.api.field_visibility).restriction = "ADMIN"];
   uint32 users = 4;
   uint32 services = 5;
   uint32 active_devices = 6;
   // SPA ports open right now (previous, current and next slot).
-  repeated uint32 spa_ports = 7;
+  repeated uint32 spa_ports = 7 [(google.api.field_visibility).restriction = "ADMIN"];
   // rayd's loops: when each last succeeded and failed (O-2).
   repeated LoopHealth loops = 8;
   // The end of the debug window (rayctl debug), unix seconds; 0: none.
-  int64 debug_until = 9;
+  int64 debug_until = 9 [(google.api.field_visibility).restriction = "ADMIN"];
   // The node's name (rayctl node name); empty: none.
   string name = 10;
   string note = 11;
   // The node's egress policy (rayctl egress); on the node's socket only,
   // absent through the remote API.
-  Egress egress = 12;
+  Egress egress = 12 [(google.api.field_visibility).restriction = "ADMIN"];
 }
 
 // Egress is what the data plane may not send, whoever the user
@@ -656,11 +788,11 @@ message LoopHealth {
   string name = 1;     // apply, acme <site>, dns, reality-rotation, ...
   int64 last_ok = 2;   // unix seconds, 0 = never
   int64 last_error = 3; // unix seconds, 0 = never
-  string error = 4;    // the last error
+  string error = 4 [(google.api.field_visibility).restriction = "ADMIN"]; // the last error
   uint64 runs = 5;
   uint64 errors = 6;
   bool failing = 7;    // the last round failed (rayd after v0.10.0)
-  string detail = 8;   // what the last round found (dns-zone <service>: the zone's summary)
+  string detail = 8 [(google.api.field_visibility).restriction = "ADMIN"]; // what the last round found (dns-zone <service>: the zone's summary)
 }
 
 message User {
@@ -669,7 +801,9 @@ message User {
   bool enabled = 3;
   int64 expires_at = 4;          // unix seconds, 0 = never
   int64 traffic_limit_bytes = 5; // 0 = unlimited
-  string note = 6;
+  // Not support's unless the administrator allows it (integrations-v1
+  // §2.2): personal data goes there.
+  string note = 6 [(google.api.field_visibility).restriction = "ADMIN,BILLING,NOTES"];
   int64 created_at = 7;
   repeated string services = 8;  // service names
   // The traffic limit's count (docs/spec/traffic-limit-v1.md §3.6); all
@@ -739,6 +873,16 @@ message SetUserServicesResponse {}
 message DeleteUserRequest { string name = 1; }
 message DeleteUserResponse {}
 
+message GetUserRequest { string name = 1; }
+message GetUserResponse { User user = 1; }
+
+message SetUserExpiryRequest {
+  string name = 1;
+  // unix seconds; 0: never; a time not after now: expired now.
+  int64 expires_at = 2;
+}
+message SetUserExpiryResponse { User user = 1; }
+
 message ExportUserRequest { string name = 1; }
 
 message RenewUserRequest { string name = 1; }
@@ -763,6 +907,8 @@ message Profile {
   int64 next_from = 5;
 }
 
+// Service: an integration sees id, kind, name and enabled only
+// (integrations-v1 §2.3).
 message Service {
   uint32 id = 1; // also the SPA scope ID
   string kind = 2;
@@ -771,20 +917,20 @@ message Service {
   // The service's settings, without a next server name not yet published
   // (REALITY's sni_next waiting for its certificate, naive's chosen ahead;
   // raycontrol v0.29.0): no client has it, and nothing shows it.
-  string settings_json = 5;
-  int64 created_at = 6;
-  uint32 uid = 7; // system user of the service's process, 0 if none
+  string settings_json = 5 [(google.api.field_visibility).restriction = "ADMIN"];
+  int64 created_at = 6 [(google.api.field_visibility).restriction = "ADMIN"];
+  uint32 uid = 7 [(google.api.field_visibility).restriction = "ADMIN"]; // system user of the service's process, 0 if none
   // The server name in the service's links (settings' sni): REALITY,
   // naive, DoH, hy2-masq, hy2-obfs, Yggdrasil, a site; empty for the
   // others (raycontrol v0.29.0).
-  string sni = 8;
+  string sni = 8 [(google.api.field_visibility).restriction = "ADMIN"];
   // REALITY and naive: the server name in subscriptions from next_from on,
   // only once published (R4-7, R4-42); empty when no switch is published
   // or the published one keeps the name. A naive service has its next name
   // chosen and served earlier: it shows here once clients get it.
-  string sni_next = 9;
+  string sni_next = 9 [(google.api.field_visibility).restriction = "ADMIN"];
   // REALITY and naive: the published switch, unix seconds; 0: none.
-  int64 next_from = 10;
+  int64 next_from = 10 [(google.api.field_visibility).restriction = "ADMIN"];
 }
 
 message ListServicesRequest {}
@@ -932,7 +1078,7 @@ message Device {
   string id = 1;
   string user = 2;
   string name = 3;
-  string role = 4; // user | admin
+  string role = 4; // user | admin | billing | support
   int64 created_at = 5;
   int64 revoked_at = 6; // 0 = active
   bool registered = 7; // through the remote API, with a client certificate
@@ -1016,7 +1162,10 @@ message RevokeDeviceResponse {
 message CreateInviteRequest {
   string user = 1;
   string name = 2; // of the device
-  string role = 3; // user | admin
+  // user | admin | billing | support; billing and support only for a
+  // user without services (integrations-v1 §2.1); billing invites users
+  // only.
+  string role = 3;
   int64 ttl_seconds = 4; // 0: a day; at most a week
   // pin: the invite also needs a PIN of 6 digits, told by another channel
   // (docs/spec/api-v1.md §3).
@@ -1151,7 +1300,8 @@ message GetUpdateStatusResponse {
   string latest_patch = 9;
   // The relays in front of this node and their updates by the node's word
   // (spec/relay-update-remote-v1.md §8), by name. An older node sends none.
-  repeated RelayUpdateStatus relays = 10;
+  // Not support's: relays are the perimeter's.
+  repeated RelayUpdateStatus relays = 10 [(google.api.field_visibility).restriction = "ADMIN"];
 }
 // RelayUpdateStatus is a relay's update by the node's word: the relay's
 // last report and the node's offer as one. Times are the node's clock,
@@ -1186,9 +1336,10 @@ message UpdateStatus {
   string state = 2;
   string from = 3;
   string to = 4;    // the version asked for ("latest" until it runs), then installed
-  string by = 5;    // "alice/phone (remote)" or "auto"
+  string by = 5 [(google.api.field_visibility).restriction = "ADMIN"]; // "alice/phone (remote)" or "auto"
   string kind = 6;  // "remote" or "auto"
-  string error = 7;
+  // Not support's: an error's text, as a loop's (integrations-v1 §2.3).
+  string error = 7 [(google.api.field_visibility).restriction = "ADMIN"];
   int64 requested_at = 8; // unix seconds; 0: not yet
   int64 started_at = 9;
   int64 ended_at = 10;

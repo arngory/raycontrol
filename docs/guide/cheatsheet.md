@@ -91,6 +91,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl user export NAME [-o F]` | ссылки пользователя, как в подписке (и следующие, если ждёт смена), без DoH: его токен — у устройства; в них учётные данные, вызов попадает в аудит; работают только с адреса, который открыл SPA |
 | `rayctl user renew NAME` | с v0.27: новые учётные данные пользователя сразу, без перекрытия, и новый пароль LAN — как при отзыве устройства (R4-36); его устройства переподключаются после следующей подписки (Niko — на ближайшей проверке соединения, до ~10 минут); в аудите `user.renew`. После `device revoke -overlap` — чтобы всё-таки отрезать отозванное сразу. Обновление до v0.27.0 само делает это один раз для каждого, у кого есть устройство, отозванное раньше |
 | `rayctl user enable\|disable\|del NAME` | включить, отключить, удалить |
+| `rayctl user expires NAME 2026-12-31\|30d\|never\|now` | срок пользователя: позже, без срока или истечь сейчас (нода новее v0.33) |
 | `rayctl device add USER NAME [-role admin] [-o F]` | пакет устройства `rcdev1:…` — один раз, на экран или в файл 0600 |
 | `rayctl device list [USER]` | устройства; `LAN` — показало ли устройство себя в локальной сети пользователя (последний заголовок клиента; в сети оно, когда у пользователя `user lan on`) |
 | `rayctl device revoke ID` | отозвать: SPA, подписка и API для него закрываются; с v0.27 у пользователя сразу новые учётные данные (R4-36): то, что осталось в устройстве, не действует, остальные его устройства переподключаются после следующей подписки (Niko — на ближайшей проверке соединения, до ~10 минут); имя устройства снова свободно; неиспользованное приглашение — отозвать |
@@ -107,6 +108,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl -remote laptop.rcdev status` | любая команда `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `ports`, `relay` (`list`, `ports`, `set`), `dns`, `summary`, `app-mirror`, `client`, `metrics`, `debug`, `version` через API |
 | `rayctl -remote laptop.rcdev remote rotate` | новый клиентский ключ, старый перестаёт работать |
 | `rayctl -remote laptop.rcdev remote whoami` | какое это устройство: ID, пользователь, имя, роль, нода |
+| `rayctl user add integrations -services ""` → `rayctl device invite integrations billing -role billing` | устройство внешней системы (бот, биллинг; [integrations-v1](../spec/integrations-v1.md)): пользователь без сервисов, приглашение роли `billing` (заводит и ведёт обычных пользователей, приглашения только роли `user`) или `support` (только читает, без заметок). Служебных пользователей (с устройствами `admin`, `billing`, `support`, сервисами `ssh`, `api`) интеграция не видит. Выпуск — после пределов частоты (этап 1b) |
 
 `rayctl` для своей машины: Linux — из архива ноды; macOS и FreeBSD — архивы `rayctl-darwin-arm64`,
 `rayctl-darwin-amd64` и `rayctl-freebsd-amd64` (`.tar.gz`) с v0.26.0, под той же подписью

@@ -149,7 +149,7 @@ func (s *Store) SetUserTraffic(ctx context.Context, name string, c TrafficChange
 	}
 	now := s.now().Truncate(time.Second)
 	err := s.tx(ctx, func(tx *sql.Tx) error {
-		u, err := scanUser(tx.QueryRowContext(ctx, userSelect+` WHERE u.name = ?`, name))
+		u, err := scanUser(tx.QueryRowContext(ctx, userSelect+` WHERE u.name = ? AND NOT (? AND u.id IN (`+serviceUserIDs+`))`, name, regularOnly(ctx)))
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("user %q: %w", name, ErrNotFound)
 		}

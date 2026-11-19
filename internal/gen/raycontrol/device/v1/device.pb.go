@@ -9,10 +9,13 @@
 // the node's certificate pinned, and a client certificate: the device is
 // known by its key (base64url SHA-256 of the SubjectPublicKeyInfo).
 // Compatibility follows protobuf rules; breaking changes go to device.v2.
+// The roles of each method: google.api.method_visibility, as in node.v1;
+// USER is a user's device.
 
 package devicev1
 
 import (
+	_ "github.com/arngory/raycontrol/internal/gen/google/api"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -151,7 +154,7 @@ type RegisterResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Bundle        string                 `protobuf:"bytes,1,opt,name=bundle,proto3" json:"bundle,omitempty"` // "rcdev1:..." of the new device (docs/spec/spa-v2.md §8)
 	DeviceId      string                 `protobuf:"bytes,2,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
-	Role          string                 `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"` // user | admin
+	Role          string                 `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"` // user | admin | billing | support
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -406,7 +409,7 @@ var File_raycontrol_device_v1_device_proto protoreflect.FileDescriptor
 
 const file_raycontrol_device_v1_device_proto_rawDesc = "" +
 	"\n" +
-	"!raycontrol/device/v1/device.proto\x12\x14raycontrol.device.v1\"u\n" +
+	"!raycontrol/device/v1/device.proto\x12\x14raycontrol.device.v1\x1a\x1bgoogle/api/visibility.proto\"u\n" +
 	"\x0fRegisterRequest\x12\x1b\n" +
 	"\tinvite_id\x18\x01 \x01(\tR\binviteId\x12\x16\n" +
 	"\x06minute\x18\x02 \x01(\x03R\x06minute\x12\x10\n" +
@@ -427,11 +430,11 @@ const file_raycontrol_device_v1_device_proto_rawDesc = "" +
 	"\x18RotateCertificateRequest\x12 \n" +
 	"\vcertificate\x18\x01 \x01(\fR\vcertificate\x12\x1c\n" +
 	"\tsignature\x18\x02 \x01(\fR\tsignature\"\x1b\n" +
-	"\x19RotateCertificateResponse2\xb8\x02\n" +
-	"\rDeviceService\x12Y\n" +
-	"\bRegister\x12%.raycontrol.device.v1.RegisterRequest\x1a&.raycontrol.device.v1.RegisterResponse\x12V\n" +
-	"\aGetSelf\x12$.raycontrol.device.v1.GetSelfRequest\x1a%.raycontrol.device.v1.GetSelfResponse\x12t\n" +
-	"\x11RotateCertificate\x12..raycontrol.device.v1.RotateCertificateRequest\x1a/.raycontrol.device.v1.RotateCertificateResponseBJZHgithub.com/arngory/raycontrol/internal/gen/raycontrol/device/v1;devicev1b\x06proto3"
+	"\x19RotateCertificateResponse2\xa0\x03\n" +
+	"\rDeviceService\x12}\n" +
+	"\bRegister\x12%.raycontrol.device.v1.RegisterRequest\x1a&.raycontrol.device.v1.RegisterResponse\"\"\xfa\xd2\xe4\x93\x02\x1c\x12\x1aADMIN,BILLING,SUPPORT,USER\x12z\n" +
+	"\aGetSelf\x12$.raycontrol.device.v1.GetSelfRequest\x1a%.raycontrol.device.v1.GetSelfResponse\"\"\xfa\xd2\xe4\x93\x02\x1c\x12\x1aADMIN,BILLING,SUPPORT,USER\x12\x93\x01\n" +
+	"\x11RotateCertificate\x12..raycontrol.device.v1.RotateCertificateRequest\x1a/.raycontrol.device.v1.RotateCertificateResponse\"\x1d\xfa\xd2\xe4\x93\x02\x17\x12\x15ADMIN,BILLING,SUPPORTBJZHgithub.com/arngory/raycontrol/internal/gen/raycontrol/device/v1;devicev1b\x06proto3"
 
 var (
 	file_raycontrol_device_v1_device_proto_rawDescOnce sync.Once
