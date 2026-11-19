@@ -109,6 +109,7 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl -remote laptop.rcdev remote rotate` | новый клиентский ключ, старый перестаёт работать |
 | `rayctl -remote laptop.rcdev remote whoami` | какое это устройство: ID, пользователь, имя, роль, нода |
 | `rayctl user add integrations -services ""` → `rayctl device invite integrations billing -role billing` | устройство внешней системы (бот, биллинг; [integrations-v1](../spec/integrations-v1.md)): пользователь без сервисов, приглашение роли `billing` (заводит и ведёт обычных пользователей, приглашения только роли `user`) или `support` (только читает, без заметок). Служебных пользователей (с устройствами `admin`, `billing`, `support`, сервисами `ssh`, `api`) интеграция не видит (нода новее v0.33) |
+| `rayctl remote export billing.rcdev -pem billing.pem` | сертификат и ключ устройства интеграции в PEM (новый файл, 0600) и адрес с пином API в том виде, как их берёт curl; описание API для ролей — `openapi-billing.yaml` и `openapi-support.yaml` в выпуске ([integrations-v1](../spec/integrations-v1.md) §5) |
 | `rayctl integration [status]` | устройства интеграций: вызовы, отказы, превышения с запуска rayd; массовые действия за час; пределы |
 | `rayctl integration set support-notes on\|off` | `support` видит заметки пользователей (по умолчанию нет) |
 | `rayctl integration set mass-limit 50` | root: удалений и выключений от `billing` за час, сверх — только с `confirm_mass`; `0` — каждое с ним |

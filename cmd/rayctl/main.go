@@ -255,6 +255,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             list|ports|set, dns, metrics, summary, app-mirror, debug, version run
                                             against the node through its API
   -remote FILE remote whoami|rotate         the device; a new client key for it
+  remote export FILE -pem OUT               the device's certificate and key as PEM (a new file, 0600), and
+                                            the API's address and pin as curl takes them
+                                            (spec/integrations-v1.md §5.2)
 `
 
 // version is set at release build time (-X main.version).

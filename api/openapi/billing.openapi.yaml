@@ -1,0 +1,1527 @@
+openapi: 3.1.0
+info:
+  title: raycontrol node API for integrations
+  version: v1
+  description: |
+    The remote API of a raycontrol node, as a device of role `billing` or
+    `support` may call it (docs/spec/integrations-v1.md). Connect protocol
+    over HTTP/2: `POST https://HOST:PORT/<package>.<service>/<method>` with
+    `Content-Type: application/json` and `Connect-Protocol-Version: 1`; the
+    body is the request as protojson, the answer the response as protojson.
+    Fields are lowerCamelCase (snake_case is taken too), 64-bit integers
+    are strings. An error is an HTTP status and `{"code": "...", "message":
+    "..."}`.
+
+    The client presents the device's certificate (mutual TLS, the device
+    file of `rayctl remote enroll`; `rayctl remote export F -pem OUT` writes
+    it as PEM). TLS 1.3 with the X25519MLKEM768 group only. The node's
+    certificate is self-signed: check its key against the pin of the device
+    file (`api.pin`, base64url SHA-256 of its SubjectPublicKeyInfo), not its
+    name. Before calling, knock (SPA, spa-v2) unless the device calls from
+    its addresses (integrations-v1 §3.2).
+
+    Fields a role does not see are not here, and the node leaves them empty
+    in its answers. Calls over the rate limits answer `resource_exhausted`;
+    billing's mass actions over the hour's limit `failed_precondition`
+    unless `confirmMass` (integrations-v1 §2.4, §2.6).
+servers:
+  - url: https://{host}:{port}
+    description: the node's remote API (host and api.port of the device file's bundle)
+    variables:
+      host:
+        default: node.example
+      port:
+        default: "443"
+components:
+  securitySchemes:
+    deviceCertificate:
+      type: mutualTLS
+      description: the device's client certificate; the node pins it at registration
+  schemas:
+    connect-protocol-version:
+      type: number
+      examples:
+        - 1
+      title: Connect-Protocol-Version
+      description: Define the version of the Connect protocol
+      const: 1
+    connect-timeout-header:
+      type: number
+      examples:
+        - 1000
+      title: Connect-Timeout-Ms
+      description: Define the timeout, in ms
+    connect.error:
+      type: object
+      properties:
+        code:
+          type: string
+          examples:
+            - not_found
+          enum:
+            - canceled
+            - unknown
+            - invalid_argument
+            - deadline_exceeded
+            - not_found
+            - already_exists
+            - permission_denied
+            - resource_exhausted
+            - failed_precondition
+            - aborted
+            - out_of_range
+            - unimplemented
+            - internal
+            - unavailable
+            - data_loss
+            - unauthenticated
+          description: The status code, which should be an enum value of [google.rpc.Code][google.rpc.Code].
+        message:
+          type: string
+          description: A developer-facing error message, which should be in English. Any user-facing error message should be localized and sent in the [google.rpc.Status.details][google.rpc.Status.details] field, or localized by the client.
+        details:
+          type: array
+          items:
+            $ref: '#/components/schemas/connect.error_details.Any'
+          description: A list of messages that carry the error details. There is no limit on the number of messages.
+      title: Connect Error
+      additionalProperties: true
+      description: 'Error type returned by Connect: https://connectrpc.com/docs/go/errors/#http-representation'
+    connect.error_details.Any:
+      type: object
+      properties:
+        type:
+          type: string
+          description: 'A URL that acts as a globally unique identifier for the type of the serialized message. For example: `type.googleapis.com/google.rpc.ErrorInfo`.'
+        value:
+          type: string
+          format: byte
+          description: The Protobuf message, serialized as bytes and base64-encoded. The specific message type is identified by the `type` field.
+        debug:
+          type: object
+          title: Debug
+          additionalProperties: true
+          description: Deserialized error detail payload. The 'type' field indicates the schema. This field is for easier debugging and should not be relied upon for application logic.
+      additionalProperties: true
+      description: Contains an arbitrary serialized message along with a @type that describes the type of the serialized message, with an additional debug field for ConnectRPC error details.
+    raycontrol.device.v1.GetSelfRequest:
+      type: object
+      title: GetSelfRequest
+      additionalProperties: false
+    raycontrol.device.v1.GetSelfResponse:
+      type: object
+      properties:
+        deviceId:
+          type: string
+          title: device_id
+        user:
+          type: string
+          title: user
+        name:
+          type: string
+          title: name
+        role:
+          type: string
+          title: role
+      title: GetSelfResponse
+      additionalProperties: false
+    raycontrol.device.v1.RegisterRequest:
+      type: object
+      properties:
+        inviteId:
+          type: string
+          title: invite_id
+        minute:
+          type: string
+          title: minute
+          format: int64
+          description: floor(unix time / 60) on the client; ±2 accepted
+        mac:
+          type: string
+          title: mac
+          format: byte
+          description: |-
+            HMAC-SHA256(invite key, "raycontrol-register-v1" || BE64(minute) ||
+             the pin of this connection's client certificate, as ASCII).
+        pinProof:
+          type: string
+          title: pin_proof
+          format: byte
+          description: |-
+            For an invite with "pin": true (docs/spec/api-v1.md §3):
+             HMAC-SHA256(invite key, "raycontrol-invite-pin-v1" || the PIN, as
+             ASCII digits).
+      title: RegisterRequest
+      additionalProperties: false
+    raycontrol.device.v1.RegisterResponse:
+      type: object
+      properties:
+        bundle:
+          type: string
+          title: bundle
+          description: '"rcdev1:..." of the new device (docs/spec/spa-v2.md §8)'
+        deviceId:
+          type: string
+          title: device_id
+        role:
+          type: string
+          title: role
+          description: user | admin | billing | support
+      title: RegisterResponse
+      additionalProperties: false
+    raycontrol.device.v1.RotateCertificateRequest:
+      type: object
+      properties:
+        certificate:
+          type: string
+          title: certificate
+          format: byte
+          description: DER of the new client certificate (ECDSA P-256 or Ed25519 key)
+        signature:
+          type: string
+          title: signature
+          format: byte
+          description: |-
+            By the new key: ECDSA (ASN.1) over SHA-256 of the message, or Ed25519
+             over the message, the message being "raycontrol-rotate-v1" || old pin ||
+             new pin (ASCII).
+      title: RotateCertificateRequest
+      additionalProperties: false
+    raycontrol.device.v1.RotateCertificateResponse:
+      type: object
+      title: RotateCertificateResponse
+      additionalProperties: false
+    raycontrol.node.v1.CreateInviteRequest:
+      type: object
+      properties:
+        user:
+          type: string
+          title: user
+        name:
+          type: string
+          title: name
+          description: of the device
+        role:
+          type: string
+          title: role
+          description: |-
+            user | admin | billing | support; billing and support only for a
+             user without services (integrations-v1 §2.1); billing invites users
+             only.
+        ttlSeconds:
+          type: string
+          title: ttl_seconds
+          format: int64
+          description: '0: a day; at most a week'
+        pin:
+          type: boolean
+          title: pin
+          description: |-
+            pin: the invite also needs a PIN of 6 digits, told by another channel
+             (docs/spec/api-v1.md §3).
+      title: CreateInviteRequest
+      additionalProperties: false
+    raycontrol.node.v1.CreateInviteResponse:
+      type: object
+      properties:
+        invite:
+          title: invite
+          $ref: '#/components/schemas/raycontrol.node.v1.Invite'
+        inviteCode:
+          type: string
+          title: invite_code
+          description: '"rcinv1:..." (docs/spec/api-v1.md)'
+        pin:
+          type: string
+          title: pin
+          description: the PIN, shown once; "" without
+        inviteCodeShort:
+          type: string
+          title: invite_code_short
+          description: the same invite as "RCINV2:..." (api-v1 §3a); "" if the host cannot go in it
+      title: CreateInviteResponse
+      additionalProperties: false
+    raycontrol.node.v1.CreateUserRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          title: name
+        expiresAt:
+          type: string
+          title: expires_at
+          format: int64
+        trafficLimitBytes:
+          type: string
+          title: traffic_limit_bytes
+          format: int64
+        note:
+          type: string
+          title: note
+        services:
+          type: array
+          items:
+            type: string
+          title: services
+        trafficPeriod:
+          type: string
+          title: traffic_period
+          description: monthly (default) | none
+        trafficResetDay:
+          type: integer
+          title: traffic_reset_day
+          format: int32
+          description: 1..28, default 1
+      title: CreateUserRequest
+      additionalProperties: false
+    raycontrol.node.v1.CreateUserResponse:
+      type: object
+      properties:
+        user:
+          title: user
+          $ref: '#/components/schemas/raycontrol.node.v1.User'
+      title: CreateUserResponse
+      additionalProperties: false
+    raycontrol.node.v1.DeleteUserRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          title: name
+        confirmMass:
+          type: boolean
+          title: confirm_mass
+          description: as SetUserEnabledRequest's
+      title: DeleteUserRequest
+      additionalProperties: false
+    raycontrol.node.v1.DeleteUserResponse:
+      type: object
+      title: DeleteUserResponse
+      additionalProperties: false
+    raycontrol.node.v1.Device:
+      type: object
+      properties:
+        id:
+          type: string
+          title: id
+        user:
+          type: string
+          title: user
+        name:
+          type: string
+          title: name
+        role:
+          type: string
+          title: role
+          description: user | admin | billing | support
+        createdAt:
+          type: string
+          title: created_at
+          format: int64
+        revokedAt:
+          type: string
+          title: revoked_at
+          format: int64
+          description: 0 = active
+        registered:
+          type: boolean
+          title: registered
+          description: through the remote API, with a client certificate
+        lan:
+          type: boolean
+          title: lan
+          description: |-
+            The device shows itself in its user's LAN, as its X-Raycontrol-LAN
+             header last said (docs/spec/lan-v1.md §1.1); it is in the LAN when its
+             user's lan is on too.
+        client:
+          type: string
+          title: client
+          description: |-
+            The client its subscription requests last named, "niko/1.59.0", and
+             when the node saw it, unix seconds (spec/client-min-v1.md §5); "", 0:
+             never.
+        clientAt:
+          type: string
+          title: client_at
+          format: int64
+      title: Device
+      additionalProperties: false
+    raycontrol.node.v1.GetStatusRequest:
+      type: object
+      title: GetStatusRequest
+      additionalProperties: false
+    raycontrol.node.v1.GetStatusResponse:
+      type: object
+      properties:
+        version:
+          type: string
+          title: version
+        nodeId:
+          type: string
+          title: node_id
+        users:
+          type: integer
+          title: users
+        services:
+          type: integer
+          title: services
+        activeDevices:
+          type: integer
+          title: active_devices
+        loops:
+          type: array
+          items:
+            $ref: '#/components/schemas/raycontrol.node.v1.LoopHealth'
+          title: loops
+          description: 'rayd''s loops: when each last succeeded and failed (O-2).'
+        name:
+          type: string
+          title: name
+          description: 'The node''s name (rayctl node name); empty: none.'
+        note:
+          type: string
+          title: note
+      title: GetStatusResponse
+      additionalProperties: false
+    raycontrol.node.v1.GetUserRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          title: name
+      title: GetUserRequest
+      additionalProperties: false
+    raycontrol.node.v1.GetUserResponse:
+      type: object
+      properties:
+        user:
+          title: user
+          $ref: '#/components/schemas/raycontrol.node.v1.User'
+      title: GetUserResponse
+      additionalProperties: false
+    raycontrol.node.v1.Invite:
+      type: object
+      properties:
+        id:
+          type: string
+          title: id
+        user:
+          type: string
+          title: user
+        name:
+          type: string
+          title: name
+          description: of the device it becomes
+        role:
+          type: string
+          title: role
+        createdAt:
+          type: string
+          title: created_at
+          format: int64
+        expiresAt:
+          type: string
+          title: expires_at
+          format: int64
+        pinTries:
+          type: integer
+          title: pin_tries
+          format: int32
+          description: |-
+            pin_tries: the invite needs a PIN, with this many wrong ones left; 0:
+             no PIN.
+      title: Invite
+      additionalProperties: false
+      description: Invite is an invite not yet used.
+    raycontrol.node.v1.ListDevicesRequest:
+      type: object
+      properties:
+        user:
+          type: string
+          title: user
+      title: ListDevicesRequest
+      additionalProperties: false
+    raycontrol.node.v1.ListDevicesResponse:
+      type: object
+      properties:
+        devices:
+          type: array
+          items:
+            $ref: '#/components/schemas/raycontrol.node.v1.Device'
+          title: devices
+        invites:
+          type: array
+          items:
+            $ref: '#/components/schemas/raycontrol.node.v1.Invite'
+          title: invites
+      title: ListDevicesResponse
+      additionalProperties: false
+    raycontrol.node.v1.ListServicesRequest:
+      type: object
+      title: ListServicesRequest
+      additionalProperties: false
+    raycontrol.node.v1.ListServicesResponse:
+      type: object
+      properties:
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/raycontrol.node.v1.Service'
+          title: services
+        kinds:
+          type: array
+          items:
+            type: string
+          title: kinds
+          description: kinds this node can run
+      title: ListServicesResponse
+      additionalProperties: false
+    raycontrol.node.v1.ListUsersRequest:
+      type: object
+      title: ListUsersRequest
+      additionalProperties: false
+    raycontrol.node.v1.ListUsersResponse:
+      type: object
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/raycontrol.node.v1.User'
+          title: users
+      title: ListUsersResponse
+      additionalProperties: false
+    raycontrol.node.v1.LoopHealth:
+      type: object
+      properties:
+        name:
+          type: string
+          title: name
+          description: apply, acme <site>, dns, reality-rotation, ...
+        lastOk:
+          type: string
+          title: last_ok
+          format: int64
+          description: unix seconds, 0 = never
+        lastError:
+          type: string
+          title: last_error
+          format: int64
+          description: unix seconds, 0 = never
+        runs:
+          type: string
+          title: runs
+          format: int64
+        errors:
+          type: string
+          title: errors
+          format: int64
+        failing:
+          type: boolean
+          title: failing
+          description: the last round failed (rayd after v0.10.0)
+      title: LoopHealth
+      additionalProperties: false
+    raycontrol.node.v1.RenewUserRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          title: name
+      title: RenewUserRequest
+      additionalProperties: false
+    raycontrol.node.v1.RenewUserResponse:
+      type: object
+      properties:
+        name:
+          type: string
+          title: name
+        credentials:
+          type: integer
+          title: credentials
+          description: |-
+            credentials: how many of the user's credentials are new: one for
+             each service the user has or had a credential on, the inner one
+             behind the DNS tunnels and Yggdrasil included.
+      title: RenewUserResponse
+      additionalProperties: false
+    raycontrol.node.v1.RevokeDeviceRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          title: id
+        overlap:
+          type: boolean
+          title: overlap
+          description: |-
+            overlap: the user's credentials rotate with the overlap of a scheduled
+             switch instead of being new at once (v0.31.0, docs/spec/api-v1.md
+             §5a): the user's other devices move over without a cut, and what the
+             revoked device knew is accepted until the grace after the switch ends.
+             For a planned replacement, not a stolen device. A node before v0.31.0
+             does not read it and makes them new at once.
+      title: RevokeDeviceRequest
+      additionalProperties: false
+    raycontrol.node.v1.RevokeDeviceResponse:
+      type: object
+      properties:
+        invite:
+          type: boolean
+          title: invite
+          description: |-
+            invite: the ID was an unused invite, now withdrawn; nothing else
+             changed. A node before v0.27.0 answers with none of these fields.
+        already:
+          type: boolean
+          title: already
+          description: 'already: the device was revoked before; nothing changed this time.'
+        user:
+          type: string
+          title: user
+          description: 'user and device: whose device it is, and its name.'
+        device:
+          type: string
+          title: device
+        credentials:
+          type: integer
+          title: credentials
+          description: |-
+            credentials: how many of the user's credentials are new, as
+             RenewUserResponse counts them, not services, but without DoH's,
+             which a revocation keeps (v0.27.0); 0 for a user with none yet. With
+             overlap: how many rotate.
+        switchAt:
+          type: string
+          title: switch_at
+          format: int64
+          description: |-
+            switch_at and until, only for a revocation with overlap (v0.31.0):
+             when the user's devices switch to the next credentials it published
+             (unix seconds, the latest of them), and when the ones the revoked
+             device knew stop being accepted, switch_at plus the grace. rayd's
+             rotation runs every 10 minutes, so each comes up to 10 minutes later.
+             0 without overlap, with no credentials, or from an older node. For a
+             device revoked already (already), until alone: while the rotation its
+             revocation with overlap began has not switched, when what it knew
+             stops being accepted (v0.31.0); 0 otherwise.
+        until:
+          type: string
+          title: until
+          format: int64
+      title: RevokeDeviceResponse
+      additionalProperties: false
+    raycontrol.node.v1.Service:
+      type: object
+      properties:
+        id:
+          type: integer
+          title: id
+          description: also the SPA scope ID
+        kind:
+          type: string
+          title: kind
+        name:
+          type: string
+          title: name
+        enabled:
+          type: boolean
+          title: enabled
+      title: Service
+      additionalProperties: false
+      description: |-
+        Service: an integration sees id, kind, name and enabled only
+         (integrations-v1 §2.3).
+    raycontrol.node.v1.SetUserEnabledRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          title: name
+        enabled:
+          type: boolean
+          title: enabled
+        confirmMass:
+          type: boolean
+          title: confirm_mass
+          description: |-
+            confirm_mass: billing's disable over the hour's limit of mass actions
+             goes through (integrations-v1 §2.4). A node before it does not read
+             it, and has no such limit.
+      title: SetUserEnabledRequest
+      additionalProperties: false
+    raycontrol.node.v1.SetUserEnabledResponse:
+      type: object
+      title: SetUserEnabledResponse
+      additionalProperties: false
+    raycontrol.node.v1.SetUserExpiryRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          title: name
+        expiresAt:
+          type: string
+          title: expires_at
+          format: int64
+          description: 'unix seconds; 0: never; a time not after now: expired now.'
+        confirmMass:
+          type: boolean
+          title: confirm_mass
+          description: |-
+            confirm_mass: as SetUserEnabledRequest's; billing's expiry now, or in
+             10 minutes or less, is a mass action like a disable (integrations-v1
+             §2.4).
+      title: SetUserExpiryRequest
+      additionalProperties: false
+    raycontrol.node.v1.SetUserExpiryResponse:
+      type: object
+      properties:
+        user:
+          title: user
+          $ref: '#/components/schemas/raycontrol.node.v1.User'
+      title: SetUserExpiryResponse
+      additionalProperties: false
+    raycontrol.node.v1.SetUserServicesRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          title: name
+        services:
+          type: array
+          items:
+            type: string
+          title: services
+        confirmMass:
+          type: boolean
+          title: confirm_mass
+          description: |-
+            As SetUserEnabledRequest's: billing's list without an enabled service
+             cuts the user off, a mass action (integrations-v1 §2.4).
+      title: SetUserServicesRequest
+      additionalProperties: false
+    raycontrol.node.v1.SetUserServicesResponse:
+      type: object
+      title: SetUserServicesResponse
+      additionalProperties: false
+    raycontrol.node.v1.SetUserTrafficRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          title: name
+        limitBytes:
+          type:
+            - string
+            - "null"
+          title: limit_bytes
+          format: int64
+        period:
+          type:
+            - string
+            - "null"
+          title: period
+        resetDay:
+          type:
+            - integer
+            - "null"
+          title: reset_day
+          format: int32
+        resetUsage:
+          type: boolean
+          title: reset_usage
+        confirmMass:
+          type: boolean
+          title: confirm_mass
+          description: |-
+            As SetUserEnabledRequest's: billing's limit under 1 MiB, or less than
+             1 MiB over what the user has used this period, cuts the user off, a
+             mass action (integrations-v1 §2.4).
+      title: SetUserTrafficRequest
+      additionalProperties: false
+      description: |-
+        SetUserTrafficRequest changes what is set and leaves the rest:
+         limit_bytes 0 removes the limit (and its count); a first limit counts
+         from now. period and reset_day apply to the next periods: a change does
+         not zero the count. reset_usage zeroes the current period's count from
+         now.
+    raycontrol.node.v1.SetUserTrafficResponse:
+      type: object
+      properties:
+        user:
+          title: user
+          $ref: '#/components/schemas/raycontrol.node.v1.User'
+      title: SetUserTrafficResponse
+      additionalProperties: false
+    raycontrol.node.v1.User:
+      type: object
+      properties:
+        id:
+          type: string
+          title: id
+          format: int64
+        name:
+          type: string
+          title: name
+        enabled:
+          type: boolean
+          title: enabled
+        expiresAt:
+          type: string
+          title: expires_at
+          format: int64
+          description: unix seconds, 0 = never
+        trafficLimitBytes:
+          type: string
+          title: traffic_limit_bytes
+          format: int64
+          description: 0 = unlimited
+        note:
+          type: string
+          title: note
+          description: |-
+            Not support's unless the administrator allows it (integrations-v1
+             §2.2): personal data goes there.
+        createdAt:
+          type: string
+          title: created_at
+          format: int64
+        services:
+          type: array
+          items:
+            type: string
+          title: services
+          description: service names
+        trafficUsedBytes:
+          type: string
+          title: traffic_used_bytes
+          format: int64
+          description: |-
+            The traffic limit's count (docs/spec/traffic-limit-v1.md §3.6); all
+             zero without a limit. used is up + down of the current period, as the
+             node last wrote it (a minute behind at most).
+        trafficPeriodStart:
+          type: string
+          title: traffic_period_start
+          format: int64
+          description: unix seconds
+        trafficPeriod:
+          type: string
+          title: traffic_period
+          description: monthly | none
+        trafficResetDay:
+          type: integer
+          title: traffic_reset_day
+          format: int32
+          description: 1..28, monthly only
+        trafficNextReset:
+          type: string
+          title: traffic_next_reset
+          format: int64
+          description: unix seconds, 0 = none
+        trafficExhausted:
+          type: boolean
+          title: traffic_exhausted
+          description: |-
+            The node took the user off its profiles for the limit: an enabled,
+             unexpired user whose used reached it (as the subscription's
+             exhausted). The node decides, not a comparison of the two fields.
+        lan:
+          type: boolean
+          title: lan
+          description: |-
+            The administrator lets the user's devices see each other over
+             Yggdrasil (docs/spec/lan-v1.md §1.1); each device decides for itself
+             too (Device.lan).
+      title: User
+      additionalProperties: false
+security:
+  - deviceCertificate: []
+paths:
+  /raycontrol.device.v1.DeviceService/GetSelf:
+    post:
+      tags:
+        - raycontrol.device.v1.DeviceService
+      summary: GetSelf
+      description: GetSelf describes the calling device.
+      operationId: DeviceService_GetSelf
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.device.v1.GetSelfRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.device.v1.GetSelfResponse'
+  /raycontrol.device.v1.DeviceService/Register:
+    post:
+      tags:
+        - raycontrol.device.v1.DeviceService
+      summary: Register
+      description: |-
+        Register turns an invite into a device known by the client certificate
+         of this connection, once. Any failure is NOT_FOUND without details, but
+         for the PIN of an invite that needs one, once the request has proved
+         the invite (its mac): PERMISSION_DENIED with a PinTries detail.
+         Who holds an invite, of any role.
+      operationId: DeviceService_Register
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.device.v1.RegisterRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.device.v1.RegisterResponse'
+  /raycontrol.device.v1.DeviceService/RotateCertificate:
+    post:
+      tags:
+        - raycontrol.device.v1.DeviceService
+      summary: RotateCertificate
+      description: RotateCertificate moves the calling device to a new client key.
+      operationId: DeviceService_RotateCertificate
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.device.v1.RotateCertificateRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.device.v1.RotateCertificateResponse'
+  /raycontrol.node.v1.NodeService/CreateInvite:
+    post:
+      tags:
+        - raycontrol.node.v1.NodeService
+      summary: CreateInvite
+      description: |-
+        CreateInvite returns a one-time invite ("rcinv1:..."): the client
+         registers the device itself through the remote API (R3-3).
+      operationId: NodeService_CreateInvite
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.node.v1.CreateInviteRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.node.v1.CreateInviteResponse'
+  /raycontrol.node.v1.NodeService/CreateUser:
+    post:
+      tags:
+        - raycontrol.node.v1.NodeService
+      summary: CreateUser
+      operationId: NodeService_CreateUser
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.node.v1.CreateUserRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.node.v1.CreateUserResponse'
+  /raycontrol.node.v1.NodeService/DeleteUser:
+    post:
+      tags:
+        - raycontrol.node.v1.NodeService
+      summary: DeleteUser
+      operationId: NodeService_DeleteUser
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.node.v1.DeleteUserRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.node.v1.DeleteUserResponse'
+  /raycontrol.node.v1.NodeService/GetStatus:
+    post:
+      tags:
+        - raycontrol.node.v1.NodeService
+      summary: GetStatus
+      operationId: NodeService_GetStatus
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.node.v1.GetStatusRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.node.v1.GetStatusResponse'
+  /raycontrol.node.v1.NodeService/GetUser:
+    post:
+      tags:
+        - raycontrol.node.v1.NodeService
+      summary: GetUser
+      description: GetUser is one user of ListUsers (integrations-v1 §10).
+      operationId: NodeService_GetUser
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.node.v1.GetUserRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.node.v1.GetUserResponse'
+  /raycontrol.node.v1.NodeService/ListDevices:
+    post:
+      tags:
+        - raycontrol.node.v1.NodeService
+      summary: ListDevices
+      operationId: NodeService_ListDevices
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.node.v1.ListDevicesRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.node.v1.ListDevicesResponse'
+  /raycontrol.node.v1.NodeService/ListServices:
+    post:
+      tags:
+        - raycontrol.node.v1.NodeService
+      summary: ListServices
+      operationId: NodeService_ListServices
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.node.v1.ListServicesRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.node.v1.ListServicesResponse'
+  /raycontrol.node.v1.NodeService/ListUsers:
+    post:
+      tags:
+        - raycontrol.node.v1.NodeService
+      summary: ListUsers
+      operationId: NodeService_ListUsers
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.node.v1.ListUsersRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.node.v1.ListUsersResponse'
+  /raycontrol.node.v1.NodeService/RenewUser:
+    post:
+      tags:
+        - raycontrol.node.v1.NodeService
+      summary: RenewUser
+      description: |-
+        RenewUser gives a user new credentials at once, as a revocation of one
+         of the user's devices does (docs/decisions.md, R4-36): each a fresh
+         secret with no next and no previous one, and a new LAN password when
+         the user has the LAN. The user's devices are cut until they fetch
+         their subscription. Since v0.27.0; an older node answers unimplemented.
+      operationId: NodeService_RenewUser
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.node.v1.RenewUserRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.node.v1.RenewUserResponse'
+  /raycontrol.node.v1.NodeService/RevokeDevice:
+    post:
+      tags:
+        - raycontrol.node.v1.NodeService
+      summary: RevokeDevice
+      description: |-
+        RevokeDevice revokes a device, or withdraws an unused invite. Revoking
+         a device changes every credential of its user at once but DoH's, whose
+         token is each device's (docs/spec/api-v1.md §5a): the user's other
+         devices reconnect after their next subscription fetch. With overlap
+         (v0.31.0, R4-43) the credentials rotate instead, as at a scheduled
+         switch: the next ones published now, the switch after the lead, the
+         old ones accepted for the grace after it; for a device given away or
+         broken, not stolen.
+      operationId: NodeService_RevokeDevice
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.node.v1.RevokeDeviceRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.node.v1.RevokeDeviceResponse'
+  /raycontrol.node.v1.NodeService/SetUserEnabled:
+    post:
+      tags:
+        - raycontrol.node.v1.NodeService
+      summary: SetUserEnabled
+      operationId: NodeService_SetUserEnabled
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.node.v1.SetUserEnabledRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.node.v1.SetUserEnabledResponse'
+  /raycontrol.node.v1.NodeService/SetUserExpiry:
+    post:
+      tags:
+        - raycontrol.node.v1.NodeService
+      summary: SetUserExpiry
+      description: |-
+        SetUserExpiry sets when the user expires: later, never (0), or now
+         (a time not after now). The time is absolute, so a repeated call
+         leaves the same state (integrations-v1 §5.2).
+      operationId: NodeService_SetUserExpiry
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.node.v1.SetUserExpiryRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.node.v1.SetUserExpiryResponse'
+  /raycontrol.node.v1.NodeService/SetUserServices:
+    post:
+      tags:
+        - raycontrol.node.v1.NodeService
+      summary: SetUserServices
+      operationId: NodeService_SetUserServices
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.node.v1.SetUserServicesRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.node.v1.SetUserServicesResponse'
+  /raycontrol.node.v1.NodeService/SetUserTraffic:
+    post:
+      tags:
+        - raycontrol.node.v1.NodeService
+      summary: SetUserTraffic
+      description: |-
+        SetUserTraffic sets or removes a user's traffic limit, its period and
+         reset day, or zeroes the current period's count
+         (docs/spec/traffic-limit-v1.md §3.6). A user at or over the limit is
+         taken off every profile, as an expired one, until the period resets
+         or the limit is raised. A request that changes nothing is invalid.
+      operationId: NodeService_SetUserTraffic
+      parameters:
+        - name: Connect-Protocol-Version
+          in: header
+          description: Define the version of the Connect protocol
+          schema:
+            $ref: '#/components/schemas/connect-protocol-version'
+          example: 1
+        - name: Connect-Timeout-Ms
+          in: header
+          description: Define the timeout, in ms
+          schema:
+            $ref: '#/components/schemas/connect-timeout-header'
+          example: 1000
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/raycontrol.node.v1.SetUserTrafficRequest'
+        required: true
+      responses:
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/connect.error'
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/raycontrol.node.v1.SetUserTrafficResponse'
+tags:
+  - name: raycontrol.device.v1.DeviceService
+  - name: raycontrol.node.v1.NodeService

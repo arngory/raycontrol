@@ -307,6 +307,10 @@ jobs:
       ARCHIVES: >-
         raycontrol-linux-amd64.tar.gz raycontrol-linux-arm64.tar.gz
         rayctl-darwin-arm64.tar.gz rayctl-darwin-amd64.tar.gz rayctl-freebsd-amd64.tar.gz
+      # The OpenAPI of the integrations' roles (integrations-v1 §5.1), from
+      # api/openapi of the commit: in the signed SHA256SUMS beside the
+      # archives (the updater looks up its archive's line only).
+      DOCS: openapi-billing.yaml openapi-support.yaml
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -341,7 +345,12 @@ jobs:
           test -n "$MINISIGN_SECRET_KEY" || { echo "MINISIGN_SECRET_KEY is not set"; exit 1; }
           .github/scripts/apt-install.sh minisign
           read -ra archives <<< "$ARCHIVES"
-          sha256sum "${archives[@]}" > SHA256SUMS
+          read -ra docs <<< "$DOCS"
+          for d in "${docs[@]}"; do
+            role=${d#openapi-}
+            cp "api/openapi/${role%.yaml}.openapi.yaml" "$d"
+          done
+          sha256sum "${archives[@]}" "${docs[@]}" > SHA256SUMS
           cat SHA256SUMS
           umask 077
           key="$RUNNER_TEMP/minisign.key"
@@ -376,6 +385,7 @@ jobs:
         run: |
           set -euo pipefail
           read -ra archives <<< "$ARCHIVES"
+          read -ra docs <<< "$DOCS"
           # "Latest" only for the highest version: GitHub marks every new
           # release latest unless told otherwise, so a backport (v0.25.5
           # after v0.26.1) would point bootstrap.sh and the nodes' checks
@@ -390,4 +400,4 @@ jobs:
           echo "highest release ${highest}: ${TAG} published with ${latest}"
           gh release create "$TAG" --target "$GITHUB_SHA" --title "raycontrol ${TAG}" "$latest" \
             --notes-file ".github/release-notes/${TAG}.md" \
-            "${archives[@]}" SHA256SUMS SHA256SUMS.minisig
+            "${archives[@]}" "${docs[@]}" SHA256SUMS SHA256SUMS.minisig

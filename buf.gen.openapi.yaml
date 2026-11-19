@@ -1,0 +1,30 @@
+version: v2
+# OpenAPI 3.1 for the integrations' roles (integrations-v1 §5.1), from the
+# visibility rules of the proto: a method or field a role does not see is
+# not in its document. The generator is pinned in tools/openapi/go.mod; run
+# through scripts/gen.sh, which CI checks against the commit.
+plugins:
+  - local: protoc-gen-connect-openapi
+    out: api/openapi
+    strategy: all
+    opt:
+      - path=billing.openapi.yaml
+      - services=raycontrol.node.v1.NodeService
+      - services=raycontrol.device.v1.DeviceService
+      - allowed-visibilities=BILLING
+      - content-types=json
+      - trim-unused-types
+      - short-operation-ids
+      - base=api/openapi/base.yaml
+  - local: protoc-gen-connect-openapi
+    out: api/openapi
+    strategy: all
+    opt:
+      - path=support.openapi.yaml
+      - services=raycontrol.node.v1.NodeService
+      - services=raycontrol.device.v1.DeviceService
+      - allowed-visibilities=SUPPORT;NOTES
+      - content-types=json
+      - trim-unused-types
+      - short-operation-ids
+      - base=api/openapi/base.yaml

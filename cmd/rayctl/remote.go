@@ -1,11 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -190,6 +192,8 @@ func (c *cli) remoteCmd(ctx context.Context, sub string, args []string) error {
 	switch sub {
 	case "enroll":
 		return remoteEnroll(ctx, args)
+	case "export":
+		return remoteExport(args, os.Stdout)
 	case "whoami", "rotate":
 		if c.identity == nil {
 			return errors.New("rayctl -remote FILE remote " + sub)
@@ -205,6 +209,67 @@ func (c *cli) remoteCmd(ctx context.Context, sub string, args []string) error {
 		return c.remoteRotate(ctx)
 	}
 	return errUsage
+}
+
+// remoteExport writes a device file's certificate and key as PEM, for a
+// client of the API that is not rayctl (integrations-v1 §5.2: curl, an
+// integration's own code), and says where the API is and its pin in the
+// form curl takes. The PEM is a new file, mode 0600: never one that is
+// there.
+func remoteExport(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("remote export", flag.ContinueOnError)
+	pemOut := fs.String("pem", "", "the PEM file to write: the device's certificate and private key (mode 0600, a new file)")
+	if len(args) < 1 {
+		return errUsage
+	}
+	if err := fs.Parse(args[1:]); err != nil || fs.NArg() > 0 || *pemOut == "" {
+		return fmt.Errorf("%w: remote export DEVICE_FILE -pem OUT", errUsage)
+	}
+	id, err := loadIdentity(args[0])
+	if err != nil {
+		return err
+	}
+	b, err := api.EncodeClientCertificate(id.cert)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(*pemOut, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: the operator's file
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		os.Remove(*pemOut)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(*pemOut)
+		return err
+	}
+	pin, err := curlPin(id.bundle.API.Pin)
+	if err != nil {
+		return err
+	}
+	url := "https://" + net.JoinHostPort(id.bundle.Host, strconv.Itoa(int(id.bundle.API.Port)))
+	fmt.Fprintf(out, "%s: the certificate and key of device %s (%s), mode 0600: a secret like the device file\n",
+		*pemOut, id.bundle.DeviceID, cmp.Or(id.bundle.Role, "admin"))
+	fmt.Fprintf(out, "API %s, the node's key %s (its name is not checked: the certificate has none)\n\n", url, pin)
+	fmt.Fprintf(out, "rayctl knock @%s   # unless the device calls from its addresses (rayctl device allow)\n", args[0])
+	fmt.Fprintf(out, "curl --http2 --tlsv1.3 --curves X25519MLKEM768 --cert %s --key %s -k --pinnedpubkey '%s' \\\n", *pemOut, *pemOut, pin)
+	fmt.Fprintf(out, "  -H 'Content-Type: application/json' -H 'Connect-Protocol-Version: 1' --data '{}' \\\n")
+	fmt.Fprintf(out, "  %s/raycontrol.device.v1.DeviceService/GetSelf\n", url)
+	return nil
+}
+
+// curlPin is a pin as the node gives it (base64url of the SHA-256 of the
+// key, no padding) in the form curl's --pinnedpubkey takes: sha256// and
+// standard base64.
+func curlPin(pin string) (string, error) {
+	sum, err := base64.RawURLEncoding.DecodeString(pin)
+	if err != nil || len(sum) != sha256.Size {
+		return "", fmt.Errorf("the device file's API pin %q is not a SHA-256 in base64url", pin)
+	}
+	return "sha256//" + base64.StdEncoding.EncodeToString(sum), nil
 }
 
 // remoteEnroll registers a device from an invite and writes its file.

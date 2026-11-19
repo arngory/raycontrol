@@ -1,11 +1,12 @@
 # integrations-v1: внешние системы у ноды (боты, биллинг)
 
-Статус: **этапы 1 и 1b в коде, не выпущены** (2026-11-19): роли `billing` и `support` (§2.1–§2.3), аудит (§2.5),
+Статус: **этапы 1, 1b и 3 в коде, не выпущены** (2026-11-19): роли `billing` и `support` (§2.1–§2.3), аудит (§2.5),
 пределы частоты (§2.6), предохранитель массовых действий и учёт трафика (§2.4), заметки для `support` (§2.2),
 `GetUser`, `SetUserExpiry`, `GetIntegrationSettings`, `SetIntegrationSettings` (§10), `rayctl device invite -role
-billing|support`, `user expires`, `integration`, `traffic counting` (§11). Без событий: администратору о
-предохранителе пока только аудит `api.mass`, метрика и `rayctl integration status`. Дальше — статические адреса
-(§3.2), события (§4), OpenAPI (§5).
+billing|support`, `user expires`, `integration`, `traffic counting` (§11); этап 3 — OpenAPI ролей
+(`api/openapi/billing.openapi.yaml`, `support.openapi.yaml`, §5.1) и `rayctl remote export -pem` (§5.2). Без событий:
+администратору о предохранителе пока только аудит `api.mass`, метрика и `rayctl integration status`. Дальше —
+статические адреса (§3.2, отдельный PR), события (§4).
 Решение владельца 2026-11-16 (цитата — §13; [decisions](../decisions.md) R4-47). Вопросы §14 владелец закрыл 2026-11-16: «в целом по рекомендации».
 Основа: удалённый API — [api-v1](api-v1.md) (R3-3), стук — [spa-v2](spa-v2.md), уведомления — webhook (K-2),
 журналы доступа выключены (D-12), лимиты — [traffic-limit-v1](traffic-limit-v1.md) и
@@ -620,8 +621,11 @@ rayctl webhook status [ID]                     # §11
   роняет тест, пока его не посмотрели и не переписали список.
 - **Генератор** — [`protoc-gen-connect-openapi`](https://github.com/connectrpc/protoc-gen-connect-openapi)
   (`connectrpc.com/protoc-gen-connect-openapi`, Apache-2.0, OpenAPI 3.1). Он понимает `allowed-visibilities` и метки
-  через запятую. Закрепляется версией в `tools/go.mod`, как остальные плагины; свой шаблон `buf.gen.openapi.yaml`,
-  основной `buf.gen.yaml` не меняется:
+  через запятую. Закреплён версией v0.30.0 в своём модуле `tools/openapi/go.mod`: в общем `tools/go.mod` его
+  зависимости подняли бы `protoc-gen-go`, а с ним и весь сгенерированный Go. Свой шаблон `buf.gen.openapi.yaml`,
+  основной `buf.gen.yaml` не меняется. На выходе — по одному файлу на роль (`path=`): `api/openapi/billing.openapi.yaml`
+  и `api/openapi/support.openapi.yaml`. Тест `TestOpenAPIRoles` сверяет методы каждого файла с таблицей ролей шлюза.
+  Набросок шаблона (точный — в репозитории):
 
 ```yaml
 version: v2
@@ -642,7 +646,9 @@ plugins:
   администратор не разрешил» (§2.2). Отдаёт его `support` нода по настройке `support-notes`, а не по разметке.
 - `base.yaml` — `info`, сервер-заглушка `https://{host}:{port}`, схема безопасности `mutualTLS` (есть в OpenAPI
   3.1), описание пина: пин сертификатом в OpenAPI не выразить.
-- Файлы лежат в репозитории и прикладываются к выпуску. CI пересобирает и сравнивает, как сгенерированный Go.
+- Файлы лежат в репозитории и прикладываются к выпуску как `openapi-billing.yaml` и `openapi-support.yaml`, в
+  подписанном `SHA256SUMS` рядом с архивами. CI пересобирает их (`scripts/gen.sh`) и сравнивает, как
+  сгенерированный Go.
 
 ### 5.2 Запрос
 
@@ -978,8 +984,10 @@ rayctl webhook add|list|set|verify|del|test|rotate|retry|status   # §4.6, ле�
 - **`protoc-gen-connect-openapi`**: последняя версия — v0.30.0 от 2026-11-06 (прокси модулей Go). Проект переехал в
   организацию `connectrpc`: модуль `connectrpc.com/protoc-gen-connect-openapi`, тот же коммит отдаётся и по старому
   пути `github.com/sudorandom/…`, но `go.mod` v0.30.0 называет новый. До 1.0, около 300 звёзд. Разбор
-  `allowed-visibilities` с метками через запятую — по исходнику (`internal/converter/visibility/visibility.go`). На
-  наших proto не запускал. Как инструменты читают `mutualTLS` и наш `base.yaml` — не проверял.
+  `allowed-visibilities` с метками через запятую — по исходнику (`internal/converter/visibility/visibility.go`).
+  На наших proto запущен (этап 3): методы обоих файлов совпали с таблицей ролей шлюза, скрытые поля в описания не
+  попали, `base.yaml` со схемой `mutualTLS` вошёл как есть. Как сторонние инструменты (генераторы клиентов, Swagger
+  UI) читают `mutualTLS`, не проверял.
 - **curl**: `--pinnedpubkey` вместе с `-k`, `--curves X25519MLKEM768` с OpenSSL 3.5, чтение ключа и сертификата из
   одного PEM — по документации, на ноде не запускал.
 - **Поддержка `X25519MLKEM768` в HTTP-клиентах** других языков (Java, .NET, PHP, Python и Node, собранных не с OpenSSL

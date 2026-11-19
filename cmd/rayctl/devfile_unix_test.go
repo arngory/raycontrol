@@ -237,3 +237,43 @@ func TestDeviceFileOpened(t *testing.T) {
 		t.Errorf("an open file, closed after the open: %v", err)
 	}
 }
+
+// remote export writes the device's certificate and key as a new PEM file,
+// closed to others, and says the pin as curl takes it.
+func TestRemoteExport(t *testing.T) {
+	id := deviceFile(t)
+	// A real pin: base64url SHA-256, no padding.
+	id.bundle.API.Pin = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU"
+	var err error
+	if id.raw, err = id.bundle.Encode(); err != nil {
+		t.Fatal(err)
+	}
+	if err := id.save(false); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "billing.pem")
+	var said strings.Builder
+	if err := remoteExport([]string{id.path, "-pem", out}, &said); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(out)
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("the PEM: %v %v", fi, err)
+	}
+	b, _ := os.ReadFile(out)
+	cert, err := api.DecodeClientCertificate(b)
+	if err != nil || !cert.Leaf.Equal(id.cert.Leaf) {
+		t.Fatalf("the PEM does not read back: %v", err)
+	}
+	if !strings.Contains(said.String(), "--pinnedpubkey 'sha256//47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='") ||
+		!strings.Contains(said.String(), "https://192.0.2.1:8443/raycontrol.device.v1.DeviceService/GetSelf") {
+		t.Fatalf("said:\n%s", said.String())
+	}
+	// Never over a file that is there.
+	if err := remoteExport([]string{id.path, "-pem", out}, &said); err == nil {
+		t.Fatal("wrote over an existing file")
+	}
+	if err := remoteExport([]string{id.path}, &said); err == nil {
+		t.Fatal("no -pem taken")
+	}
+}
