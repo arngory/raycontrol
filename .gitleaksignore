@@ -1,0 +1,7 @@
+# False findings of gitleaks (checks.yml, job Secrets), a fingerprint a line: commit:path:rule:line. The check reads
+# this file as main has it (CONTRIBUTING.md), so an entry counts from the next pull request.
+
+# arngory/raycontrol#61, commit 335d440: generic-api-key on a test's pin (the SHA-256 of an empty input in base64url,
+# nobody's key) and on a comment ("api/openapi, integrations-v1"); the pull request's later commits drop both.
+335d44089277684998ff7eeff687b71c9e5e714c:cmd/rayctl/devfile_unix_test.go:generic-api-key:246
+335d44089277684998ff7eeff687b71c9e5e714c:internal/api/openapi_test.go:generic-api-key:12
