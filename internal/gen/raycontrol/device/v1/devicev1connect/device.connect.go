@@ -7,6 +7,8 @@
 // the node's certificate pinned, and a client certificate: the device is
 // known by its key (base64url SHA-256 of the SubjectPublicKeyInfo).
 // Compatibility follows protobuf rules; breaking changes go to device.v2.
+// The roles of each method: google.api.method_visibility, as in node.v1;
+// USER is a user's device.
 package devicev1connect
 
 import (
@@ -53,6 +55,7 @@ type DeviceServiceClient interface {
 	// of this connection, once. Any failure is NOT_FOUND without details, but
 	// for the PIN of an invite that needs one, once the request has proved
 	// the invite (its mac): PERMISSION_DENIED with a PinTries detail.
+	// Who holds an invite, of any role.
 	Register(context.Context, *connect.Request[v1.RegisterRequest]) (*connect.Response[v1.RegisterResponse], error)
 	// GetSelf describes the calling device.
 	GetSelf(context.Context, *connect.Request[v1.GetSelfRequest]) (*connect.Response[v1.GetSelfResponse], error)
@@ -120,6 +123,7 @@ type DeviceServiceHandler interface {
 	// of this connection, once. Any failure is NOT_FOUND without details, but
 	// for the PIN of an invite that needs one, once the request has proved
 	// the invite (its mac): PERMISSION_DENIED with a PinTries detail.
+	// Who holds an invite, of any role.
 	Register(context.Context, *connect.Request[v1.RegisterRequest]) (*connect.Response[v1.RegisterResponse], error)
 	// GetSelf describes the calling device.
 	GetSelf(context.Context, *connect.Request[v1.GetSelfRequest]) (*connect.Response[v1.GetSelfResponse], error)

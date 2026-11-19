@@ -1,0 +1,90 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// From googleapis (google/api/visibility.proto, as genproto
+// v0.0.0-20261118221215-c8830f628b3f carries it). Changed by raycontrol:
+// go_package names raycontrol's generated package, so that no Go module of
+// googleapis comes in with it; the descriptor is otherwise the same. Its
+// use here: docs/spec/integrations-v1.md §5.1.
+
+syntax = "proto3";
+
+package google.api;
+
+import "google/protobuf/descriptor.proto";
+
+option go_package = "github.com/arngory/raycontrol/internal/gen/google/api;visibility";
+option java_multiple_files = true;
+option java_outer_classname = "VisibilityProto";
+option java_package = "com.google.api";
+option objc_class_prefix = "GAPI";
+
+extend google.protobuf.EnumOptions {
+  // See `VisibilityRule`.
+  google.api.VisibilityRule enum_visibility = 72295727;
+}
+
+extend google.protobuf.EnumValueOptions {
+  // See `VisibilityRule`.
+  google.api.VisibilityRule value_visibility = 72295727;
+}
+
+extend google.protobuf.FieldOptions {
+  // See `VisibilityRule`.
+  google.api.VisibilityRule field_visibility = 72295727;
+}
+
+extend google.protobuf.MessageOptions {
+  // See `VisibilityRule`.
+  google.api.VisibilityRule message_visibility = 72295727;
+}
+
+extend google.protobuf.MethodOptions {
+  // See `VisibilityRule`.
+  google.api.VisibilityRule method_visibility = 72295727;
+}
+
+extend google.protobuf.ServiceOptions {
+  // See `VisibilityRule`.
+  google.api.VisibilityRule api_visibility = 72295727;
+}
+
+// `Visibility` restricts service consumer's access to service elements,
+// such as whether an application can call a visibility-restricted method.
+// The restriction is expressed by applying visibility labels on service
+// elements. The visibility labels are elsewhere linked to service consumers.
+//
+// A service can define multiple visibility labels, but a service consumer
+// should be granted at most one visibility label. Multiple visibility
+// labels for a single service consumer are not supported.
+//
+// If an element and all its parents have no visibility label, its visibility
+// is unconditionally granted.
+message Visibility {
+  // A list of visibility rules that apply to individual API elements.
+  //
+  // **NOTE:** All service configuration rules follow "last one wins" order.
+  repeated VisibilityRule rules = 1;
+}
+
+// A visibility rule provides visibility configuration for an individual API
+// element.
+message VisibilityRule {
+  // Selects methods, messages, fields, enums, etc. to which this rule applies.
+  string selector = 1;
+
+  // A comma-separated list of visibility labels that apply to the `selector`.
+  // Any of the listed labels can be used to grant the visibility.
+  string restriction = 2;
+}

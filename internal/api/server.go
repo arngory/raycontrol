@@ -123,6 +123,9 @@ type Server struct {
 
 	// The relays' updates by the node's word (relayupdate.go).
 	relayUpd relayUpdates
+
+	// The integrations' settings, rate limits and calls (limits.go).
+	integ integrations
 }
 
 // SetACMEWindow opens the perimeter window for an ACME order to port until
@@ -243,6 +246,8 @@ func toConnect(err error) error {
 		return nil
 	case errors.Is(err, store.ErrNotFound):
 		return connect.NewError(connect.CodeNotFound, err)
+	case errors.Is(err, errForRole):
+		return connect.NewError(connect.CodePermissionDenied, err)
 	case errors.Is(err, store.ErrInvalid):
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	case errors.Is(err, store.ErrPrecondition):
@@ -266,6 +271,12 @@ func (s *Server) done(ctx context.Context, action, target string, err error) err
 		result = "error: " + err.Error()
 	}
 	changed := err == nil
+	// An integration's failed call: once in a while (integrations-v1
+	// §2.5), so that a broken one does not fill the log.
+	if d, ok := caller(ctx); ok && err != nil && store.IntegrationRole(d.Role) {
+		s.auditQuietly(ctx, d, action, target, result, time.Now())
+		return toConnect(err)
+	}
 	if aerr := s.Store.Audit(ctx, actorFrom(ctx), action, target, result); aerr != nil && err == nil {
 		err = aerr
 	}
@@ -291,6 +302,9 @@ func unixOrZero(t *time.Time) int64 {
 }
 
 func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetStatusRequest]) (*connect.Response[nodev1.GetStatusResponse], error) {
+	// The counts are the node's, whoever asks: numbers only.
+	integration := store.IntegrationRole(callerRole(ctx))
+	ctx = store.AllUsers(ctx)
 	users, err := s.Store.ListUsers(ctx)
 	if err != nil {
 		return nil, toConnect(err)
@@ -330,6 +344,11 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 		resp.SpaPorts = append(resp.SpaPorts, uint32(p))
 	}
 	for _, l := range s.Health.Loops() {
+		// A loop's name may carry a site's or a zone's ("acme <site>",
+		// "dns-zone <service> <zone>"): an integration gets its kind.
+		if integration {
+			l.Name, _, _ = strings.Cut(l.Name, " ")
+		}
 		resp.Loops = append(resp.Loops, &nodev1.LoopHealth{Name: l.Name, LastOk: unixOf(l.LastOK), LastError: unixOf(l.LastErr),
 			Error: l.Err, Runs: l.Runs, Errors: l.Errors, Failing: l.Failing(), Detail: l.Detail})
 	}
@@ -347,8 +366,10 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 // serviceIDs resolves service names to IDs, each once: a name given twice
 // would otherwise fail the one write as "already exists", which a retry
 // takes for "the first try worked".
-func (s *Server) serviceIDs(ctx context.Context, names []string) ([]int64, error) {
-	ids := make([]int64, 0, len(names))
+// serviceIDs are the IDs of the services named; billing names data
+// services only (dataKinds, integrations-v1 §2.2).
+func (s *Server) serviceIDs(ctx context.Context, names []string) (ids []int64, enabled int, err error) {
+	ids = make([]int64, 0, len(names))
 	seen := make(map[string]bool, len(names))
 	for _, n := range names {
 		if seen[n] {
@@ -357,11 +378,17 @@ func (s *Server) serviceIDs(ctx context.Context, names []string) ([]int64, error
 		seen[n] = true
 		svc, err := s.Store.ServiceByName(ctx, n)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
+		}
+		if callerRole(ctx) == "billing" && !dataKinds[svc.Kind] {
+			return nil, 0, fmt.Errorf("%w: service %q is not a data service", errForRole, n)
 		}
 		ids = append(ids, svc.ID)
+		if svc.Enabled {
+			enabled++
+		}
 	}
-	return ids, nil
+	return ids, enabled, nil
 }
 
 func (s *Server) userPB(ctx context.Context, u store.User) (*nodev1.User, error) {
@@ -426,7 +453,7 @@ func (s *Server) CreateUser(ctx context.Context, req *connect.Request[nodev1.Cre
 	if m.TrafficPeriod != "" && store.CheckTrafficPeriod(m.TrafficPeriod, 1) != nil {
 		return nil, s.done(ctx, "user.create", m.Name, fmt.Errorf("%w traffic period: use monthly or none", store.ErrInvalid))
 	}
-	ids, err := s.serviceIDs(ctx, m.Services)
+	ids, _, err := s.serviceIDs(ctx, m.Services)
 	if err == nil {
 		// One write: a user without the services asked for would make
 		// the retry "already exists".
@@ -444,19 +471,39 @@ func (s *Server) CreateUser(ctx context.Context, req *connect.Request[nodev1.Cre
 }
 
 func (s *Server) SetUserEnabled(ctx context.Context, req *connect.Request[nodev1.SetUserEnabledRequest]) (*connect.Response[nodev1.SetUserEnabledResponse], error) {
-	err := s.Store.SetUserEnabled(ctx, req.Msg.Name, req.Msg.Enabled)
-	if err := s.done(ctx, "user.enable="+strconv.FormatBool(req.Msg.Enabled), req.Msg.Name, err); err != nil {
+	action := "user.enable=" + strconv.FormatBool(req.Msg.Enabled)
+	done, suffix := func(bool) {}, ""
+	var err error
+	if !req.Msg.Enabled {
+		// billing's disables are mass actions (integrations-v1 §2.4).
+		if done, suffix, err = s.massGuard(ctx, "SetUserEnabled", req.Msg.ConfirmMass); err != nil {
+			return nil, toConnect(err)
+		}
+	}
+	err = s.Store.SetUserEnabled(ctx, req.Msg.Name, req.Msg.Enabled)
+	done(err == nil)
+	if err := s.done(ctx, action+suffix, req.Msg.Name, err); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.SetUserEnabledResponse{}), nil
 }
 
 func (s *Server) SetUserServices(ctx context.Context, req *connect.Request[nodev1.SetUserServicesRequest]) (*connect.Response[nodev1.SetUserServicesResponse], error) {
-	ids, err := s.serviceIDs(ctx, req.Msg.Services)
+	done, suffix := func(bool) {}, ""
+	ids, enabled, err := s.serviceIDs(ctx, req.Msg.Services)
+	if err == nil && enabled == 0 {
+		// billing's list without an enabled service is a disable by
+		// another name (integrations-v1 §2.4); checked after the names,
+		// so that a call refused anyway is not counted.
+		if done, suffix, err = s.massGuard(ctx, "SetUserServices", req.Msg.ConfirmMass); err != nil {
+			return nil, toConnect(err)
+		}
+	}
 	if err == nil {
 		err = s.Store.SetUserServices(ctx, req.Msg.Name, ids)
 	}
-	if err := s.done(ctx, "user.services="+strings.Join(req.Msg.Services, ","), req.Msg.Name, err); err != nil {
+	done(err == nil)
+	if err := s.done(ctx, "user.services="+strings.Join(req.Msg.Services, ",")+suffix, req.Msg.Name, err); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.SetUserServicesResponse{}), nil
@@ -491,8 +538,17 @@ func (s *Server) SetUserTraffic(ctx context.Context, req *connect.Request[nodev1
 	if m.Period != nil && store.CheckTrafficPeriod(*m.Period, 1) != nil {
 		return nil, s.done(ctx, "user.traffic", m.Name, fmt.Errorf("%w traffic period: use monthly or none", store.ErrInvalid))
 	}
+	done, suffix := func(bool) {}, ""
+	if cuts, err := s.limitCutsOff(ctx, m); err != nil {
+		return nil, s.done(ctx, "user.traffic", m.Name, err)
+	} else if cuts {
+		if done, suffix, err = s.massGuard(ctx, "SetUserTraffic", m.ConfirmMass); err != nil {
+			return nil, toConnect(err)
+		}
+	}
 	u, err := s.Store.SetUserTraffic(ctx, m.Name, c)
-	if err := s.done(ctx, "user.traffic "+strings.Join(asked, " "), m.Name, err); err != nil {
+	done(err == nil)
+	if err := s.done(ctx, "user.traffic "+strings.Join(asked, " ")+suffix, m.Name, err); err != nil {
 		return nil, err
 	}
 	pb, err := s.userPB(ctx, u)
@@ -521,8 +577,14 @@ func (s *Server) SetUserLAN(ctx context.Context, req *connect.Request[nodev1.Set
 }
 
 func (s *Server) DeleteUser(ctx context.Context, req *connect.Request[nodev1.DeleteUserRequest]) (*connect.Response[nodev1.DeleteUserResponse], error) {
-	err := s.Store.DeleteUser(ctx, req.Msg.Name)
-	if err := s.done(ctx, "user.delete", req.Msg.Name, err); err != nil {
+	// billing's deletions are mass actions (integrations-v1 §2.4).
+	done, suffix, err := s.massGuard(ctx, "DeleteUser", req.Msg.ConfirmMass)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	err = s.Store.DeleteUser(ctx, req.Msg.Name)
+	done(err == nil)
+	if err := s.done(ctx, "user.delete"+suffix, req.Msg.Name, err); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.DeleteUserResponse{}), nil
@@ -872,7 +934,16 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 		return "", err
 	}
 	b := node.Bundle{Version: 1, Host: host, SPA: node.FromParams(s.Params), DeviceID: d.ID, DeviceKey: hex.EncodeToString(key[:])}
+	if d.Role != "user" {
+		b.Role = d.Role
+	}
+	// An integration's device gets the API alone: no subscription, no
+	// data service (integrations-v1 §2.1); its user has none.
+	integration := store.IntegrationRole(d.Role)
 	for _, svc := range services {
+		if integration {
+			continue
+		}
 		if svc.Kind == "subscription" && svc.Enabled {
 			ports, err := svc.Ports()
 			if err != nil || len(ports) == 0 {
@@ -890,7 +961,7 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 			continue
 		}
 		for _, id := range u.Services {
-			if svc.ID != id {
+			if svc.ID != id || d.ByIntegration && store.NotForIntegrationDevices(svc.Kind) {
 				continue
 			}
 			bs := node.BundleService{ID: uint16(svc.ID), Kind: svc.Kind, Name: svc.Name}
@@ -905,7 +976,7 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 			b.Services = append(b.Services, bs)
 		}
 	}
-	if d.Role == "admin" && d.CertPin != "" {
+	if (d.Role == "admin" || integration) && d.CertPin != "" {
 		api, err := s.apiEndpoint(ctx)
 		if err != nil {
 			return "", err
@@ -980,7 +1051,11 @@ func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.C
 		ttl = DefaultInviteTTL
 	}
 	var code, short, pin string
-	api, err := s.apiEndpoint(ctx)
+	err := billingInviteRole(ctx, role)
+	var api *apiService
+	if err == nil {
+		api, err = s.apiEndpoint(ctx)
+	}
 	if err == nil && api == nil {
 		err = fmt.Errorf("%w: no remote API on the node (rayctl service add api api, then rayctl apply)", store.ErrInvalid)
 	}

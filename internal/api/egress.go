@@ -14,7 +14,7 @@ import (
 
 // GetEgress returns the node's egress policy (spec/egress-policy-v1.md).
 // Root and the group see it on the node's socket; there is no remote
-// method (remote.go, nodeOnly).
+// method (NODE in node.proto).
 func (s *Server) GetEgress(ctx context.Context, _ *connect.Request[nodev1.GetEgressRequest]) (*connect.Response[nodev1.GetEgressResponse], error) {
 	if !isLocal(ctx) {
 		return nil, connect.NewError(connect.CodePermissionDenied, errors.New("the egress policy: on the node only"))

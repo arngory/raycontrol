@@ -4,8 +4,16 @@
 
 // Node API of raycontrol: on the local unix socket for rayctl, and on the
 // remote API behind SPA and mTLS for admin devices (R3-3,
-// docs/spec/api-v1.md).
+// docs/spec/api-v1.md) and integrations (docs/spec/integrations-v1.md).
 // Compatibility follows protobuf rules; breaking changes go to node.v2.
+//
+// Who calls what through the remote API: each method's
+// google.api.method_visibility names the device roles, ADMIN, BILLING,
+// SUPPORT, or NODE (root on the node's socket only, never remote); rayd
+// builds its table from them, and a method without one is ADMIN's. A
+// field whose google.api.field_visibility leaves out a role is cleared in
+// that role's answers; NOTES is support's sight of a user's note, which
+// the administrator allows (integrations-v1 §2.2, §5.1).
 package nodev1connect
 
 import (
@@ -41,6 +49,8 @@ const (
 	NodeServiceGetStatusProcedure = "/raycontrol.node.v1.NodeService/GetStatus"
 	// NodeServiceListUsersProcedure is the fully-qualified name of the NodeService's ListUsers RPC.
 	NodeServiceListUsersProcedure = "/raycontrol.node.v1.NodeService/ListUsers"
+	// NodeServiceGetUserProcedure is the fully-qualified name of the NodeService's GetUser RPC.
+	NodeServiceGetUserProcedure = "/raycontrol.node.v1.NodeService/GetUser"
 	// NodeServiceCreateUserProcedure is the fully-qualified name of the NodeService's CreateUser RPC.
 	NodeServiceCreateUserProcedure = "/raycontrol.node.v1.NodeService/CreateUser"
 	// NodeServiceSetUserEnabledProcedure is the fully-qualified name of the NodeService's
@@ -51,6 +61,9 @@ const (
 	NodeServiceSetUserServicesProcedure = "/raycontrol.node.v1.NodeService/SetUserServices"
 	// NodeServiceDeleteUserProcedure is the fully-qualified name of the NodeService's DeleteUser RPC.
 	NodeServiceDeleteUserProcedure = "/raycontrol.node.v1.NodeService/DeleteUser"
+	// NodeServiceSetUserExpiryProcedure is the fully-qualified name of the NodeService's SetUserExpiry
+	// RPC.
+	NodeServiceSetUserExpiryProcedure = "/raycontrol.node.v1.NodeService/SetUserExpiry"
 	// NodeServiceSetUserTrafficProcedure is the fully-qualified name of the NodeService's
 	// SetUserTraffic RPC.
 	NodeServiceSetUserTrafficProcedure = "/raycontrol.node.v1.NodeService/SetUserTraffic"
@@ -160,6 +173,12 @@ const (
 	// NodeServiceSetClientPolicyProcedure is the fully-qualified name of the NodeService's
 	// SetClientPolicy RPC.
 	NodeServiceSetClientPolicyProcedure = "/raycontrol.node.v1.NodeService/SetClientPolicy"
+	// NodeServiceGetIntegrationSettingsProcedure is the fully-qualified name of the NodeService's
+	// GetIntegrationSettings RPC.
+	NodeServiceGetIntegrationSettingsProcedure = "/raycontrol.node.v1.NodeService/GetIntegrationSettings"
+	// NodeServiceSetIntegrationSettingsProcedure is the fully-qualified name of the NodeService's
+	// SetIntegrationSettings RPC.
+	NodeServiceSetIntegrationSettingsProcedure = "/raycontrol.node.v1.NodeService/SetIntegrationSettings"
 	// NodeServiceGetEgressProcedure is the fully-qualified name of the NodeService's GetEgress RPC.
 	NodeServiceGetEgressProcedure = "/raycontrol.node.v1.NodeService/GetEgress"
 	// NodeServiceSetEgressProcedure is the fully-qualified name of the NodeService's SetEgress RPC.
@@ -184,10 +203,16 @@ const (
 type NodeServiceClient interface {
 	GetStatus(context.Context, *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error)
 	ListUsers(context.Context, *connect.Request[v1.ListUsersRequest]) (*connect.Response[v1.ListUsersResponse], error)
+	// GetUser is one user of ListUsers (integrations-v1 §10).
+	GetUser(context.Context, *connect.Request[v1.GetUserRequest]) (*connect.Response[v1.GetUserResponse], error)
 	CreateUser(context.Context, *connect.Request[v1.CreateUserRequest]) (*connect.Response[v1.CreateUserResponse], error)
 	SetUserEnabled(context.Context, *connect.Request[v1.SetUserEnabledRequest]) (*connect.Response[v1.SetUserEnabledResponse], error)
 	SetUserServices(context.Context, *connect.Request[v1.SetUserServicesRequest]) (*connect.Response[v1.SetUserServicesResponse], error)
 	DeleteUser(context.Context, *connect.Request[v1.DeleteUserRequest]) (*connect.Response[v1.DeleteUserResponse], error)
+	// SetUserExpiry sets when the user expires: later, never (0), or now
+	// (a time not after now). The time is absolute, so a repeated call
+	// leaves the same state (integrations-v1 §5.2).
+	SetUserExpiry(context.Context, *connect.Request[v1.SetUserExpiryRequest]) (*connect.Response[v1.SetUserExpiryResponse], error)
 	// SetUserTraffic sets or removes a user's traffic limit, its period and
 	// reset day, or zeroes the current period's count
 	// (docs/spec/traffic-limit-v1.md §3.6). A user at or over the limit is
@@ -350,6 +375,14 @@ type NodeServiceClient interface {
 	GetClientPolicy(context.Context, *connect.Request[v1.GetClientPolicyRequest]) (*connect.Response[v1.GetClientPolicyResponse], error)
 	// SetClientPolicy sets it, or takes it away with no minimum.
 	SetClientPolicy(context.Context, *connect.Request[v1.SetClientPolicyRequest]) (*connect.Response[v1.SetClientPolicyResponse], error)
+	// GetIntegrationSettings returns how the node treats its integrations'
+	// devices (docs/spec/integrations-v1.md §2.2, §2.4, §2.6) and their
+	// calls since rayd started (§11).
+	GetIntegrationSettings(context.Context, *connect.Request[v1.GetIntegrationSettingsRequest]) (*connect.Response[v1.GetIntegrationSettingsResponse], error)
+	// SetIntegrationSettings changes what is given: support's sight of
+	// notes and the traffic counting by an admin too; the rate limits and
+	// the mass actions' limit by root on the node only.
+	SetIntegrationSettings(context.Context, *connect.Request[v1.SetIntegrationSettingsRequest]) (*connect.Response[v1.SetIntegrationSettingsResponse], error)
 	// GetEgress returns the node's egress policy (spec/egress-policy-v1.md):
 	// what the data plane may not send, on every profile. On the node's
 	// socket only.
@@ -404,6 +437,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("ListUsers")),
 			connect.WithClientOptions(opts...),
 		),
+		getUser: connect.NewClient[v1.GetUserRequest, v1.GetUserResponse](
+			httpClient,
+			baseURL+NodeServiceGetUserProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetUser")),
+			connect.WithClientOptions(opts...),
+		),
 		createUser: connect.NewClient[v1.CreateUserRequest, v1.CreateUserResponse](
 			httpClient,
 			baseURL+NodeServiceCreateUserProcedure,
@@ -426,6 +465,12 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			httpClient,
 			baseURL+NodeServiceDeleteUserProcedure,
 			connect.WithSchema(nodeServiceMethods.ByName("DeleteUser")),
+			connect.WithClientOptions(opts...),
+		),
+		setUserExpiry: connect.NewClient[v1.SetUserExpiryRequest, v1.SetUserExpiryResponse](
+			httpClient,
+			baseURL+NodeServiceSetUserExpiryProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetUserExpiry")),
 			connect.WithClientOptions(opts...),
 		),
 		setUserTraffic: connect.NewClient[v1.SetUserTrafficRequest, v1.SetUserTrafficResponse](
@@ -686,6 +731,18 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 			connect.WithSchema(nodeServiceMethods.ByName("SetClientPolicy")),
 			connect.WithClientOptions(opts...),
 		),
+		getIntegrationSettings: connect.NewClient[v1.GetIntegrationSettingsRequest, v1.GetIntegrationSettingsResponse](
+			httpClient,
+			baseURL+NodeServiceGetIntegrationSettingsProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("GetIntegrationSettings")),
+			connect.WithClientOptions(opts...),
+		),
+		setIntegrationSettings: connect.NewClient[v1.SetIntegrationSettingsRequest, v1.SetIntegrationSettingsResponse](
+			httpClient,
+			baseURL+NodeServiceSetIntegrationSettingsProcedure,
+			connect.WithSchema(nodeServiceMethods.ByName("SetIntegrationSettings")),
+			connect.WithClientOptions(opts...),
+		),
 		getEgress: connect.NewClient[v1.GetEgressRequest, v1.GetEgressResponse](
 			httpClient,
 			baseURL+NodeServiceGetEgressProcedure,
@@ -733,62 +790,66 @@ func NewNodeServiceClient(httpClient connect.HTTPClient, baseURL string, opts ..
 
 // nodeServiceClient implements NodeServiceClient.
 type nodeServiceClient struct {
-	getStatus            *connect.Client[v1.GetStatusRequest, v1.GetStatusResponse]
-	listUsers            *connect.Client[v1.ListUsersRequest, v1.ListUsersResponse]
-	createUser           *connect.Client[v1.CreateUserRequest, v1.CreateUserResponse]
-	setUserEnabled       *connect.Client[v1.SetUserEnabledRequest, v1.SetUserEnabledResponse]
-	setUserServices      *connect.Client[v1.SetUserServicesRequest, v1.SetUserServicesResponse]
-	deleteUser           *connect.Client[v1.DeleteUserRequest, v1.DeleteUserResponse]
-	setUserTraffic       *connect.Client[v1.SetUserTrafficRequest, v1.SetUserTrafficResponse]
-	setUserLAN           *connect.Client[v1.SetUserLANRequest, v1.SetUserLANResponse]
-	exportUser           *connect.Client[v1.ExportUserRequest, v1.ExportUserResponse]
-	renewUser            *connect.Client[v1.RenewUserRequest, v1.RenewUserResponse]
-	listServices         *connect.Client[v1.ListServicesRequest, v1.ListServicesResponse]
-	createService        *connect.Client[v1.CreateServiceRequest, v1.CreateServiceResponse]
-	setServiceEnabled    *connect.Client[v1.SetServiceEnabledRequest, v1.SetServiceEnabledResponse]
-	deleteService        *connect.Client[v1.DeleteServiceRequest, v1.DeleteServiceResponse]
-	rotateService        *connect.Client[v1.RotateServiceRequest, v1.RotateServiceResponse]
-	setServiceOption     *connect.Client[v1.SetServiceOptionRequest, v1.SetServiceOptionResponse]
-	getYggdrasilPeerKeys *connect.Client[v1.GetYggdrasilPeerKeysRequest, v1.GetYggdrasilPeerKeysResponse]
-	setCertificate       *connect.Client[v1.SetCertificateRequest, v1.SetCertificateResponse]
-	listDevices          *connect.Client[v1.ListDevicesRequest, v1.ListDevicesResponse]
-	createDevice         *connect.Client[v1.CreateDeviceRequest, v1.CreateDeviceResponse]
-	revokeDevice         *connect.Client[v1.RevokeDeviceRequest, v1.RevokeDeviceResponse]
-	createInvite         *connect.Client[v1.CreateInviteRequest, v1.CreateInviteResponse]
-	listAudit            *connect.Client[v1.ListAuditRequest, v1.ListAuditResponse]
-	getAdminAccess       *connect.Client[v1.GetAdminAccessRequest, v1.GetAdminAccessResponse]
-	setAdminAccess       *connect.Client[v1.SetAdminAccessRequest, v1.SetAdminAccessResponse]
-	addRelay             *connect.Client[v1.AddRelayRequest, v1.AddRelayResponse]
-	listRelays           *connect.Client[v1.ListRelaysRequest, v1.ListRelaysResponse]
-	removeRelay          *connect.Client[v1.RemoveRelayRequest, v1.RemoveRelayResponse]
-	issueRelayBundle     *connect.Client[v1.IssueRelayBundleRequest, v1.IssueRelayBundleResponse]
-	setRelayAccess       *connect.Client[v1.SetRelayAccessRequest, v1.SetRelayAccessResponse]
-	setDNSProvider       *connect.Client[v1.SetDNSProviderRequest, v1.SetDNSProviderResponse]
-	getDNS               *connect.Client[v1.GetDNSRequest, v1.GetDNSResponse]
-	syncDNS              *connect.Client[v1.SyncDNSRequest, v1.SyncDNSResponse]
-	removeDNS            *connect.Client[v1.RemoveDNSRequest, v1.RemoveDNSResponse]
-	checkDNSZones        *connect.Client[v1.CheckDNSZonesRequest, v1.CheckDNSZonesResponse]
-	backup               *connect.Client[v1.BackupRequest, v1.BackupResponse]
-	getMetrics           *connect.Client[v1.GetMetricsRequest, v1.GetMetricsResponse]
-	getStats             *connect.Client[v1.GetStatsRequest, v1.GetStatsResponse]
-	getSummary           *connect.Client[v1.GetSummaryRequest, v1.GetSummaryResponse]
-	setSummary           *connect.Client[v1.SetSummaryRequest, v1.SetSummaryResponse]
-	getAppMirror         *connect.Client[v1.GetAppMirrorRequest, v1.GetAppMirrorResponse]
-	setAppMirror         *connect.Client[v1.SetAppMirrorRequest, v1.SetAppMirrorResponse]
-	startUpdate          *connect.Client[v1.StartUpdateRequest, v1.StartUpdateResponse]
-	getUpdateStatus      *connect.Client[v1.GetUpdateStatusRequest, v1.GetUpdateStatusResponse]
-	setDebug             *connect.Client[v1.SetDebugRequest, v1.SetDebugResponse]
-	setNodeName          *connect.Client[v1.SetNodeNameRequest, v1.SetNodeNameResponse]
-	setNodeNote          *connect.Client[v1.SetNodeNoteRequest, v1.SetNodeNoteResponse]
-	getClientPolicy      *connect.Client[v1.GetClientPolicyRequest, v1.GetClientPolicyResponse]
-	setClientPolicy      *connect.Client[v1.SetClientPolicyRequest, v1.SetClientPolicyResponse]
-	getEgress            *connect.Client[v1.GetEgressRequest, v1.GetEgressResponse]
-	setEgress            *connect.Client[v1.SetEgressRequest, v1.SetEgressResponse]
-	getConnLimit         *connect.Client[v1.GetConnLimitRequest, v1.GetConnLimitResponse]
-	setConnLimit         *connect.Client[v1.SetConnLimitRequest, v1.SetConnLimitResponse]
-	getDeployment        *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
-	getDeployInputs      *connect.Client[v1.GetDeployInputsRequest, v1.GetDeployInputsResponse]
-	getPorts             *connect.Client[v1.GetPortsRequest, v1.GetPortsResponse]
+	getStatus              *connect.Client[v1.GetStatusRequest, v1.GetStatusResponse]
+	listUsers              *connect.Client[v1.ListUsersRequest, v1.ListUsersResponse]
+	getUser                *connect.Client[v1.GetUserRequest, v1.GetUserResponse]
+	createUser             *connect.Client[v1.CreateUserRequest, v1.CreateUserResponse]
+	setUserEnabled         *connect.Client[v1.SetUserEnabledRequest, v1.SetUserEnabledResponse]
+	setUserServices        *connect.Client[v1.SetUserServicesRequest, v1.SetUserServicesResponse]
+	deleteUser             *connect.Client[v1.DeleteUserRequest, v1.DeleteUserResponse]
+	setUserExpiry          *connect.Client[v1.SetUserExpiryRequest, v1.SetUserExpiryResponse]
+	setUserTraffic         *connect.Client[v1.SetUserTrafficRequest, v1.SetUserTrafficResponse]
+	setUserLAN             *connect.Client[v1.SetUserLANRequest, v1.SetUserLANResponse]
+	exportUser             *connect.Client[v1.ExportUserRequest, v1.ExportUserResponse]
+	renewUser              *connect.Client[v1.RenewUserRequest, v1.RenewUserResponse]
+	listServices           *connect.Client[v1.ListServicesRequest, v1.ListServicesResponse]
+	createService          *connect.Client[v1.CreateServiceRequest, v1.CreateServiceResponse]
+	setServiceEnabled      *connect.Client[v1.SetServiceEnabledRequest, v1.SetServiceEnabledResponse]
+	deleteService          *connect.Client[v1.DeleteServiceRequest, v1.DeleteServiceResponse]
+	rotateService          *connect.Client[v1.RotateServiceRequest, v1.RotateServiceResponse]
+	setServiceOption       *connect.Client[v1.SetServiceOptionRequest, v1.SetServiceOptionResponse]
+	getYggdrasilPeerKeys   *connect.Client[v1.GetYggdrasilPeerKeysRequest, v1.GetYggdrasilPeerKeysResponse]
+	setCertificate         *connect.Client[v1.SetCertificateRequest, v1.SetCertificateResponse]
+	listDevices            *connect.Client[v1.ListDevicesRequest, v1.ListDevicesResponse]
+	createDevice           *connect.Client[v1.CreateDeviceRequest, v1.CreateDeviceResponse]
+	revokeDevice           *connect.Client[v1.RevokeDeviceRequest, v1.RevokeDeviceResponse]
+	createInvite           *connect.Client[v1.CreateInviteRequest, v1.CreateInviteResponse]
+	listAudit              *connect.Client[v1.ListAuditRequest, v1.ListAuditResponse]
+	getAdminAccess         *connect.Client[v1.GetAdminAccessRequest, v1.GetAdminAccessResponse]
+	setAdminAccess         *connect.Client[v1.SetAdminAccessRequest, v1.SetAdminAccessResponse]
+	addRelay               *connect.Client[v1.AddRelayRequest, v1.AddRelayResponse]
+	listRelays             *connect.Client[v1.ListRelaysRequest, v1.ListRelaysResponse]
+	removeRelay            *connect.Client[v1.RemoveRelayRequest, v1.RemoveRelayResponse]
+	issueRelayBundle       *connect.Client[v1.IssueRelayBundleRequest, v1.IssueRelayBundleResponse]
+	setRelayAccess         *connect.Client[v1.SetRelayAccessRequest, v1.SetRelayAccessResponse]
+	setDNSProvider         *connect.Client[v1.SetDNSProviderRequest, v1.SetDNSProviderResponse]
+	getDNS                 *connect.Client[v1.GetDNSRequest, v1.GetDNSResponse]
+	syncDNS                *connect.Client[v1.SyncDNSRequest, v1.SyncDNSResponse]
+	removeDNS              *connect.Client[v1.RemoveDNSRequest, v1.RemoveDNSResponse]
+	checkDNSZones          *connect.Client[v1.CheckDNSZonesRequest, v1.CheckDNSZonesResponse]
+	backup                 *connect.Client[v1.BackupRequest, v1.BackupResponse]
+	getMetrics             *connect.Client[v1.GetMetricsRequest, v1.GetMetricsResponse]
+	getStats               *connect.Client[v1.GetStatsRequest, v1.GetStatsResponse]
+	getSummary             *connect.Client[v1.GetSummaryRequest, v1.GetSummaryResponse]
+	setSummary             *connect.Client[v1.SetSummaryRequest, v1.SetSummaryResponse]
+	getAppMirror           *connect.Client[v1.GetAppMirrorRequest, v1.GetAppMirrorResponse]
+	setAppMirror           *connect.Client[v1.SetAppMirrorRequest, v1.SetAppMirrorResponse]
+	startUpdate            *connect.Client[v1.StartUpdateRequest, v1.StartUpdateResponse]
+	getUpdateStatus        *connect.Client[v1.GetUpdateStatusRequest, v1.GetUpdateStatusResponse]
+	setDebug               *connect.Client[v1.SetDebugRequest, v1.SetDebugResponse]
+	setNodeName            *connect.Client[v1.SetNodeNameRequest, v1.SetNodeNameResponse]
+	setNodeNote            *connect.Client[v1.SetNodeNoteRequest, v1.SetNodeNoteResponse]
+	getClientPolicy        *connect.Client[v1.GetClientPolicyRequest, v1.GetClientPolicyResponse]
+	setClientPolicy        *connect.Client[v1.SetClientPolicyRequest, v1.SetClientPolicyResponse]
+	getIntegrationSettings *connect.Client[v1.GetIntegrationSettingsRequest, v1.GetIntegrationSettingsResponse]
+	setIntegrationSettings *connect.Client[v1.SetIntegrationSettingsRequest, v1.SetIntegrationSettingsResponse]
+	getEgress              *connect.Client[v1.GetEgressRequest, v1.GetEgressResponse]
+	setEgress              *connect.Client[v1.SetEgressRequest, v1.SetEgressResponse]
+	getConnLimit           *connect.Client[v1.GetConnLimitRequest, v1.GetConnLimitResponse]
+	setConnLimit           *connect.Client[v1.SetConnLimitRequest, v1.SetConnLimitResponse]
+	getDeployment          *connect.Client[v1.GetDeploymentRequest, v1.GetDeploymentResponse]
+	getDeployInputs        *connect.Client[v1.GetDeployInputsRequest, v1.GetDeployInputsResponse]
+	getPorts               *connect.Client[v1.GetPortsRequest, v1.GetPortsResponse]
 }
 
 // GetStatus calls raycontrol.node.v1.NodeService.GetStatus.
@@ -799,6 +860,11 @@ func (c *nodeServiceClient) GetStatus(ctx context.Context, req *connect.Request[
 // ListUsers calls raycontrol.node.v1.NodeService.ListUsers.
 func (c *nodeServiceClient) ListUsers(ctx context.Context, req *connect.Request[v1.ListUsersRequest]) (*connect.Response[v1.ListUsersResponse], error) {
 	return c.listUsers.CallUnary(ctx, req)
+}
+
+// GetUser calls raycontrol.node.v1.NodeService.GetUser.
+func (c *nodeServiceClient) GetUser(ctx context.Context, req *connect.Request[v1.GetUserRequest]) (*connect.Response[v1.GetUserResponse], error) {
+	return c.getUser.CallUnary(ctx, req)
 }
 
 // CreateUser calls raycontrol.node.v1.NodeService.CreateUser.
@@ -819,6 +885,11 @@ func (c *nodeServiceClient) SetUserServices(ctx context.Context, req *connect.Re
 // DeleteUser calls raycontrol.node.v1.NodeService.DeleteUser.
 func (c *nodeServiceClient) DeleteUser(ctx context.Context, req *connect.Request[v1.DeleteUserRequest]) (*connect.Response[v1.DeleteUserResponse], error) {
 	return c.deleteUser.CallUnary(ctx, req)
+}
+
+// SetUserExpiry calls raycontrol.node.v1.NodeService.SetUserExpiry.
+func (c *nodeServiceClient) SetUserExpiry(ctx context.Context, req *connect.Request[v1.SetUserExpiryRequest]) (*connect.Response[v1.SetUserExpiryResponse], error) {
+	return c.setUserExpiry.CallUnary(ctx, req)
 }
 
 // SetUserTraffic calls raycontrol.node.v1.NodeService.SetUserTraffic.
@@ -1036,6 +1107,16 @@ func (c *nodeServiceClient) SetClientPolicy(ctx context.Context, req *connect.Re
 	return c.setClientPolicy.CallUnary(ctx, req)
 }
 
+// GetIntegrationSettings calls raycontrol.node.v1.NodeService.GetIntegrationSettings.
+func (c *nodeServiceClient) GetIntegrationSettings(ctx context.Context, req *connect.Request[v1.GetIntegrationSettingsRequest]) (*connect.Response[v1.GetIntegrationSettingsResponse], error) {
+	return c.getIntegrationSettings.CallUnary(ctx, req)
+}
+
+// SetIntegrationSettings calls raycontrol.node.v1.NodeService.SetIntegrationSettings.
+func (c *nodeServiceClient) SetIntegrationSettings(ctx context.Context, req *connect.Request[v1.SetIntegrationSettingsRequest]) (*connect.Response[v1.SetIntegrationSettingsResponse], error) {
+	return c.setIntegrationSettings.CallUnary(ctx, req)
+}
+
 // GetEgress calls raycontrol.node.v1.NodeService.GetEgress.
 func (c *nodeServiceClient) GetEgress(ctx context.Context, req *connect.Request[v1.GetEgressRequest]) (*connect.Response[v1.GetEgressResponse], error) {
 	return c.getEgress.CallUnary(ctx, req)
@@ -1075,10 +1156,16 @@ func (c *nodeServiceClient) GetPorts(ctx context.Context, req *connect.Request[v
 type NodeServiceHandler interface {
 	GetStatus(context.Context, *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error)
 	ListUsers(context.Context, *connect.Request[v1.ListUsersRequest]) (*connect.Response[v1.ListUsersResponse], error)
+	// GetUser is one user of ListUsers (integrations-v1 §10).
+	GetUser(context.Context, *connect.Request[v1.GetUserRequest]) (*connect.Response[v1.GetUserResponse], error)
 	CreateUser(context.Context, *connect.Request[v1.CreateUserRequest]) (*connect.Response[v1.CreateUserResponse], error)
 	SetUserEnabled(context.Context, *connect.Request[v1.SetUserEnabledRequest]) (*connect.Response[v1.SetUserEnabledResponse], error)
 	SetUserServices(context.Context, *connect.Request[v1.SetUserServicesRequest]) (*connect.Response[v1.SetUserServicesResponse], error)
 	DeleteUser(context.Context, *connect.Request[v1.DeleteUserRequest]) (*connect.Response[v1.DeleteUserResponse], error)
+	// SetUserExpiry sets when the user expires: later, never (0), or now
+	// (a time not after now). The time is absolute, so a repeated call
+	// leaves the same state (integrations-v1 §5.2).
+	SetUserExpiry(context.Context, *connect.Request[v1.SetUserExpiryRequest]) (*connect.Response[v1.SetUserExpiryResponse], error)
 	// SetUserTraffic sets or removes a user's traffic limit, its period and
 	// reset day, or zeroes the current period's count
 	// (docs/spec/traffic-limit-v1.md §3.6). A user at or over the limit is
@@ -1241,6 +1328,14 @@ type NodeServiceHandler interface {
 	GetClientPolicy(context.Context, *connect.Request[v1.GetClientPolicyRequest]) (*connect.Response[v1.GetClientPolicyResponse], error)
 	// SetClientPolicy sets it, or takes it away with no minimum.
 	SetClientPolicy(context.Context, *connect.Request[v1.SetClientPolicyRequest]) (*connect.Response[v1.SetClientPolicyResponse], error)
+	// GetIntegrationSettings returns how the node treats its integrations'
+	// devices (docs/spec/integrations-v1.md §2.2, §2.4, §2.6) and their
+	// calls since rayd started (§11).
+	GetIntegrationSettings(context.Context, *connect.Request[v1.GetIntegrationSettingsRequest]) (*connect.Response[v1.GetIntegrationSettingsResponse], error)
+	// SetIntegrationSettings changes what is given: support's sight of
+	// notes and the traffic counting by an admin too; the rate limits and
+	// the mass actions' limit by root on the node only.
+	SetIntegrationSettings(context.Context, *connect.Request[v1.SetIntegrationSettingsRequest]) (*connect.Response[v1.SetIntegrationSettingsResponse], error)
 	// GetEgress returns the node's egress policy (spec/egress-policy-v1.md):
 	// what the data plane may not send, on every profile. On the node's
 	// socket only.
@@ -1291,6 +1386,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("ListUsers")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceGetUserHandler := connect.NewUnaryHandler(
+		NodeServiceGetUserProcedure,
+		svc.GetUser,
+		connect.WithSchema(nodeServiceMethods.ByName("GetUser")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceCreateUserHandler := connect.NewUnaryHandler(
 		NodeServiceCreateUserProcedure,
 		svc.CreateUser,
@@ -1313,6 +1414,12 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		NodeServiceDeleteUserProcedure,
 		svc.DeleteUser,
 		connect.WithSchema(nodeServiceMethods.ByName("DeleteUser")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceSetUserExpiryHandler := connect.NewUnaryHandler(
+		NodeServiceSetUserExpiryProcedure,
+		svc.SetUserExpiry,
+		connect.WithSchema(nodeServiceMethods.ByName("SetUserExpiry")),
 		connect.WithHandlerOptions(opts...),
 	)
 	nodeServiceSetUserTrafficHandler := connect.NewUnaryHandler(
@@ -1573,6 +1680,18 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 		connect.WithSchema(nodeServiceMethods.ByName("SetClientPolicy")),
 		connect.WithHandlerOptions(opts...),
 	)
+	nodeServiceGetIntegrationSettingsHandler := connect.NewUnaryHandler(
+		NodeServiceGetIntegrationSettingsProcedure,
+		svc.GetIntegrationSettings,
+		connect.WithSchema(nodeServiceMethods.ByName("GetIntegrationSettings")),
+		connect.WithHandlerOptions(opts...),
+	)
+	nodeServiceSetIntegrationSettingsHandler := connect.NewUnaryHandler(
+		NodeServiceSetIntegrationSettingsProcedure,
+		svc.SetIntegrationSettings,
+		connect.WithSchema(nodeServiceMethods.ByName("SetIntegrationSettings")),
+		connect.WithHandlerOptions(opts...),
+	)
 	nodeServiceGetEgressHandler := connect.NewUnaryHandler(
 		NodeServiceGetEgressProcedure,
 		svc.GetEgress,
@@ -1621,6 +1740,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceGetStatusHandler.ServeHTTP(w, r)
 		case NodeServiceListUsersProcedure:
 			nodeServiceListUsersHandler.ServeHTTP(w, r)
+		case NodeServiceGetUserProcedure:
+			nodeServiceGetUserHandler.ServeHTTP(w, r)
 		case NodeServiceCreateUserProcedure:
 			nodeServiceCreateUserHandler.ServeHTTP(w, r)
 		case NodeServiceSetUserEnabledProcedure:
@@ -1629,6 +1750,8 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceSetUserServicesHandler.ServeHTTP(w, r)
 		case NodeServiceDeleteUserProcedure:
 			nodeServiceDeleteUserHandler.ServeHTTP(w, r)
+		case NodeServiceSetUserExpiryProcedure:
+			nodeServiceSetUserExpiryHandler.ServeHTTP(w, r)
 		case NodeServiceSetUserTrafficProcedure:
 			nodeServiceSetUserTrafficHandler.ServeHTTP(w, r)
 		case NodeServiceSetUserLANProcedure:
@@ -1715,6 +1838,10 @@ func NewNodeServiceHandler(svc NodeServiceHandler, opts ...connect.HandlerOption
 			nodeServiceGetClientPolicyHandler.ServeHTTP(w, r)
 		case NodeServiceSetClientPolicyProcedure:
 			nodeServiceSetClientPolicyHandler.ServeHTTP(w, r)
+		case NodeServiceGetIntegrationSettingsProcedure:
+			nodeServiceGetIntegrationSettingsHandler.ServeHTTP(w, r)
+		case NodeServiceSetIntegrationSettingsProcedure:
+			nodeServiceSetIntegrationSettingsHandler.ServeHTTP(w, r)
 		case NodeServiceGetEgressProcedure:
 			nodeServiceGetEgressHandler.ServeHTTP(w, r)
 		case NodeServiceSetEgressProcedure:
@@ -1746,6 +1873,10 @@ func (UnimplementedNodeServiceHandler) ListUsers(context.Context, *connect.Reque
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.ListUsers is not implemented"))
 }
 
+func (UnimplementedNodeServiceHandler) GetUser(context.Context, *connect.Request[v1.GetUserRequest]) (*connect.Response[v1.GetUserResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetUser is not implemented"))
+}
+
 func (UnimplementedNodeServiceHandler) CreateUser(context.Context, *connect.Request[v1.CreateUserRequest]) (*connect.Response[v1.CreateUserResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.CreateUser is not implemented"))
 }
@@ -1760,6 +1891,10 @@ func (UnimplementedNodeServiceHandler) SetUserServices(context.Context, *connect
 
 func (UnimplementedNodeServiceHandler) DeleteUser(context.Context, *connect.Request[v1.DeleteUserRequest]) (*connect.Response[v1.DeleteUserResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.DeleteUser is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetUserExpiry(context.Context, *connect.Request[v1.SetUserExpiryRequest]) (*connect.Response[v1.SetUserExpiryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetUserExpiry is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) SetUserTraffic(context.Context, *connect.Request[v1.SetUserTrafficRequest]) (*connect.Response[v1.SetUserTrafficResponse], error) {
@@ -1932,6 +2067,14 @@ func (UnimplementedNodeServiceHandler) GetClientPolicy(context.Context, *connect
 
 func (UnimplementedNodeServiceHandler) SetClientPolicy(context.Context, *connect.Request[v1.SetClientPolicyRequest]) (*connect.Response[v1.SetClientPolicyResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetClientPolicy is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) GetIntegrationSettings(context.Context, *connect.Request[v1.GetIntegrationSettingsRequest]) (*connect.Response[v1.GetIntegrationSettingsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.GetIntegrationSettings is not implemented"))
+}
+
+func (UnimplementedNodeServiceHandler) SetIntegrationSettings(context.Context, *connect.Request[v1.SetIntegrationSettingsRequest]) (*connect.Response[v1.SetIntegrationSettingsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("raycontrol.node.v1.NodeService.SetIntegrationSettings is not implemented"))
 }
 
 func (UnimplementedNodeServiceHandler) GetEgress(context.Context, *connect.Request[v1.GetEgressRequest]) (*connect.Response[v1.GetEgressResponse], error) {

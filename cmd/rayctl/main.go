@@ -51,6 +51,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   user add [NAME] [-services a,b] [-expires 2026-12-31|30d] [-limit 50G [-period monthly|none] [-reset-day 1]] [-note TEXT]
                                             without NAME: an opaque handle such as u-k3f9-x2qa
   user enable|disable|del NAME
+  user expires NAME 2026-12-31|30d|never|now  when the user expires: a later time, never, or at once
   user services NAME a,b
   user limit NAME 50G|off [-period monthly|none] [-reset-day N]
                                             the traffic limit, up + down a period (monthly from day N,
@@ -133,7 +134,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             published now, the switch after -cred-lead (3 days), the old
                                             ones, which the device knew, accepted -cred-grace (2 days)
                                             more; the other devices move over without a cut
-  device invite USER NAME [-role user|admin] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv2|rcinv1]
+  device invite USER NAME [-role user|admin|billing|support] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv2|rcinv1]
                                             a one-time invite: the client registers the device itself
                                             through the remote API (service add api api); rcinv2 is
                                             the short form (QR half the size, Niko 1.35 or later),
@@ -166,6 +167,15 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   summary db FILE.mmdb | -remove            an AS database of your own before the release's (root)
   app-mirror [show] | on | off              the client's releases on the node for its devices
                                             (spec/app-update-v1.md; off by default)
+  integration [status]                      outside systems' devices (billing, support): their calls,
+                                            the limits, the settings (spec/integrations-v1.md)
+  integration set support-notes on|off      support sees users' notes
+  integration set mass-limit N              billing's deletions and disables an hour before each needs
+                                            confirm_mass (root)
+  integration limits [billing|support|DEVICE_ID [read=100,10/s] [write=50,5/s] [heavy=20,60/h]
+                     [inflight=4] | -reset]   the rate limits of a role or one device (root)
+  traffic counting [on|auto]                on: Xray counts users' traffic with no limit set too, so
+                                            that no limit set or taken away restarts it (billing's)
   client [show]                             the minimum client version and the devices by client
   client min PRODUCT VERSION|none [-from YYYY-MM-DD|now] [-unknown allow|refuse [-yes]]
                                             refuse clients below it (spec/client-min-v1.md)
@@ -387,6 +397,10 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.appMirror(ctx, sub)
 	case "client":
 		return c.clientCmd(ctx, sub, rest)
+	case "integration":
+		return c.integrationCmd(ctx, sub, rest)
+	case "traffic":
+		return c.trafficCmd(ctx, sub, rest)
 	case "debug":
 		return c.debug(ctx, sub, rest)
 	case "egress":
@@ -681,6 +695,8 @@ func (c *cli) user(ctx context.Context, sub string, args []string) error {
 		return err
 	case "export":
 		return c.exportUser(ctx, args)
+	case "expires":
+		return c.userExpires(ctx, args)
 	case "renew":
 		if err := need(args, 1); err != nil {
 			return err
@@ -1202,7 +1218,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		})
 	case "invite":
 		fs := flag.NewFlagSet("device invite", flag.ContinueOnError)
-		role := fs.String("role", "user", "user or admin")
+		role := fs.String("role", "user", "user, admin, or billing or support for an integration (its user without services)")
 		ttl := fs.Duration("ttl", 24*time.Hour, "how long the invite works (up to a week)")
 		out := fs.String("o", "", "write the invite alone to this file (mode 0600) instead of the screen")
 		showQR := fs.Bool("qr", false, "draw the invite as a QR code on the screen for the phone to scan, instead of the text")
@@ -1514,6 +1530,42 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// userExpires sets when a user expires (rayctl user expires NAME WHEN,
+// integrations-v1 §11): a date, a time from now, never or now. "now" is
+// the node's: a time long past, which it takes for its own now.
+func (c *cli) userExpires(ctx context.Context, args []string) error {
+	if err := need(args, 2); err != nil {
+		return err
+	}
+	var at int64
+	switch args[1] {
+	case "never":
+	case "now":
+		at = 1
+	case "":
+		return errors.New("when: a date (2006-01-02), a time from now (30d, 12h), never or now")
+	default:
+		var err error
+		if at, err = parseExpiry(args[1], time.Now()); err != nil {
+			return err
+		}
+	}
+	r, err := c.c.SetUserExpiry(ctx, connect.NewRequest(&nodev1.SetUserExpiryRequest{Name: args[0], ExpiresAt: at}))
+	if connect.CodeOf(err) == connect.CodeUnimplemented {
+		return errors.New("the node is older than this rayctl: it sets an expiry only with the user (user add -expires)")
+	}
+	if err != nil {
+		return err
+	}
+	return c.print(r.Msg, func(w *tabwriter.Writer) {
+		if r.Msg.User.ExpiresAt == 0 {
+			fmt.Fprintf(w, "%s: expires never\n", r.Msg.User.Name)
+			return
+		}
+		fmt.Fprintf(w, "%s: expires %s\n", r.Msg.User.Name, when(r.Msg.User.ExpiresAt))
+	})
 }
 
 // parseExpiry accepts a date (2006-01-02, end of that day UTC) or a duration

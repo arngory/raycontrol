@@ -9,10 +9,13 @@
 // the node's certificate pinned, and a client certificate: the device is
 // known by its key (base64url SHA-256 of the SubjectPublicKeyInfo).
 // Compatibility follows protobuf rules; breaking changes go to device.v2.
+// The roles of each method: google.api.method_visibility, as in node.v1;
+// USER is a user's device.
 
 package devicev1
 
 import (
+	_ "github.com/arngory/raycontrol/internal/gen/google/api"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -100,6 +103,54 @@ func (x *RegisterRequest) GetPinProof() []byte {
 	return nil
 }
 
+// InviteRole is the detail of FAILED_PRECONDITION from Register: the invite
+// is for an integration's device (role billing or support), and the client
+// named itself an app (X-Raycontrol-Client niko/…). The invite is not
+// used, and no PIN try is spent (integrations-v1 §2.1).
+type InviteRole struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Role          string                 `protobuf:"bytes,1,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InviteRole) Reset() {
+	*x = InviteRole{}
+	mi := &file_raycontrol_device_v1_device_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InviteRole) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InviteRole) ProtoMessage() {}
+
+func (x *InviteRole) ProtoReflect() protoreflect.Message {
+	mi := &file_raycontrol_device_v1_device_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InviteRole.ProtoReflect.Descriptor instead.
+func (*InviteRole) Descriptor() ([]byte, []int) {
+	return file_raycontrol_device_v1_device_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *InviteRole) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
 // PinTries is the detail of PERMISSION_DENIED from Register: the PIN was
 // missing or wrong; left is the tries the invite has still. A wrong PIN
 // with none left withdraws the invite.
@@ -112,7 +163,7 @@ type PinTries struct {
 
 func (x *PinTries) Reset() {
 	*x = PinTries{}
-	mi := &file_raycontrol_device_v1_device_proto_msgTypes[1]
+	mi := &file_raycontrol_device_v1_device_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -124,7 +175,7 @@ func (x *PinTries) String() string {
 func (*PinTries) ProtoMessage() {}
 
 func (x *PinTries) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_device_v1_device_proto_msgTypes[1]
+	mi := &file_raycontrol_device_v1_device_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -137,7 +188,7 @@ func (x *PinTries) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PinTries.ProtoReflect.Descriptor instead.
 func (*PinTries) Descriptor() ([]byte, []int) {
-	return file_raycontrol_device_v1_device_proto_rawDescGZIP(), []int{1}
+	return file_raycontrol_device_v1_device_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *PinTries) GetLeft() int32 {
@@ -151,14 +202,14 @@ type RegisterResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Bundle        string                 `protobuf:"bytes,1,opt,name=bundle,proto3" json:"bundle,omitempty"` // "rcdev1:..." of the new device (docs/spec/spa-v2.md §8)
 	DeviceId      string                 `protobuf:"bytes,2,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
-	Role          string                 `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"` // user | admin
+	Role          string                 `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"` // user | admin | billing | support
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RegisterResponse) Reset() {
 	*x = RegisterResponse{}
-	mi := &file_raycontrol_device_v1_device_proto_msgTypes[2]
+	mi := &file_raycontrol_device_v1_device_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -170,7 +221,7 @@ func (x *RegisterResponse) String() string {
 func (*RegisterResponse) ProtoMessage() {}
 
 func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_device_v1_device_proto_msgTypes[2]
+	mi := &file_raycontrol_device_v1_device_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -183,7 +234,7 @@ func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterResponse.ProtoReflect.Descriptor instead.
 func (*RegisterResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_device_v1_device_proto_rawDescGZIP(), []int{2}
+	return file_raycontrol_device_v1_device_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *RegisterResponse) GetBundle() string {
@@ -215,7 +266,7 @@ type GetSelfRequest struct {
 
 func (x *GetSelfRequest) Reset() {
 	*x = GetSelfRequest{}
-	mi := &file_raycontrol_device_v1_device_proto_msgTypes[3]
+	mi := &file_raycontrol_device_v1_device_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -227,7 +278,7 @@ func (x *GetSelfRequest) String() string {
 func (*GetSelfRequest) ProtoMessage() {}
 
 func (x *GetSelfRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_device_v1_device_proto_msgTypes[3]
+	mi := &file_raycontrol_device_v1_device_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -240,7 +291,7 @@ func (x *GetSelfRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSelfRequest.ProtoReflect.Descriptor instead.
 func (*GetSelfRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_device_v1_device_proto_rawDescGZIP(), []int{3}
+	return file_raycontrol_device_v1_device_proto_rawDescGZIP(), []int{4}
 }
 
 type GetSelfResponse struct {
@@ -255,7 +306,7 @@ type GetSelfResponse struct {
 
 func (x *GetSelfResponse) Reset() {
 	*x = GetSelfResponse{}
-	mi := &file_raycontrol_device_v1_device_proto_msgTypes[4]
+	mi := &file_raycontrol_device_v1_device_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -267,7 +318,7 @@ func (x *GetSelfResponse) String() string {
 func (*GetSelfResponse) ProtoMessage() {}
 
 func (x *GetSelfResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_device_v1_device_proto_msgTypes[4]
+	mi := &file_raycontrol_device_v1_device_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -280,7 +331,7 @@ func (x *GetSelfResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSelfResponse.ProtoReflect.Descriptor instead.
 func (*GetSelfResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_device_v1_device_proto_rawDescGZIP(), []int{4}
+	return file_raycontrol_device_v1_device_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *GetSelfResponse) GetDeviceId() string {
@@ -324,7 +375,7 @@ type RotateCertificateRequest struct {
 
 func (x *RotateCertificateRequest) Reset() {
 	*x = RotateCertificateRequest{}
-	mi := &file_raycontrol_device_v1_device_proto_msgTypes[5]
+	mi := &file_raycontrol_device_v1_device_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -336,7 +387,7 @@ func (x *RotateCertificateRequest) String() string {
 func (*RotateCertificateRequest) ProtoMessage() {}
 
 func (x *RotateCertificateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_device_v1_device_proto_msgTypes[5]
+	mi := &file_raycontrol_device_v1_device_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -349,7 +400,7 @@ func (x *RotateCertificateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RotateCertificateRequest.ProtoReflect.Descriptor instead.
 func (*RotateCertificateRequest) Descriptor() ([]byte, []int) {
-	return file_raycontrol_device_v1_device_proto_rawDescGZIP(), []int{5}
+	return file_raycontrol_device_v1_device_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RotateCertificateRequest) GetCertificate() []byte {
@@ -374,7 +425,7 @@ type RotateCertificateResponse struct {
 
 func (x *RotateCertificateResponse) Reset() {
 	*x = RotateCertificateResponse{}
-	mi := &file_raycontrol_device_v1_device_proto_msgTypes[6]
+	mi := &file_raycontrol_device_v1_device_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -386,7 +437,7 @@ func (x *RotateCertificateResponse) String() string {
 func (*RotateCertificateResponse) ProtoMessage() {}
 
 func (x *RotateCertificateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raycontrol_device_v1_device_proto_msgTypes[6]
+	mi := &file_raycontrol_device_v1_device_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -399,19 +450,22 @@ func (x *RotateCertificateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RotateCertificateResponse.ProtoReflect.Descriptor instead.
 func (*RotateCertificateResponse) Descriptor() ([]byte, []int) {
-	return file_raycontrol_device_v1_device_proto_rawDescGZIP(), []int{6}
+	return file_raycontrol_device_v1_device_proto_rawDescGZIP(), []int{7}
 }
 
 var File_raycontrol_device_v1_device_proto protoreflect.FileDescriptor
 
 const file_raycontrol_device_v1_device_proto_rawDesc = "" +
 	"\n" +
-	"!raycontrol/device/v1/device.proto\x12\x14raycontrol.device.v1\"u\n" +
+	"!raycontrol/device/v1/device.proto\x12\x14raycontrol.device.v1\x1a\x1bgoogle/api/visibility.proto\"u\n" +
 	"\x0fRegisterRequest\x12\x1b\n" +
 	"\tinvite_id\x18\x01 \x01(\tR\binviteId\x12\x16\n" +
 	"\x06minute\x18\x02 \x01(\x03R\x06minute\x12\x10\n" +
 	"\x03mac\x18\x03 \x01(\fR\x03mac\x12\x1b\n" +
-	"\tpin_proof\x18\x04 \x01(\fR\bpinProof\"\x1e\n" +
+	"\tpin_proof\x18\x04 \x01(\fR\bpinProof\" \n" +
+	"\n" +
+	"InviteRole\x12\x12\n" +
+	"\x04role\x18\x01 \x01(\tR\x04role\"\x1e\n" +
 	"\bPinTries\x12\x12\n" +
 	"\x04left\x18\x01 \x01(\x05R\x04left\"[\n" +
 	"\x10RegisterResponse\x12\x16\n" +
@@ -427,11 +481,11 @@ const file_raycontrol_device_v1_device_proto_rawDesc = "" +
 	"\x18RotateCertificateRequest\x12 \n" +
 	"\vcertificate\x18\x01 \x01(\fR\vcertificate\x12\x1c\n" +
 	"\tsignature\x18\x02 \x01(\fR\tsignature\"\x1b\n" +
-	"\x19RotateCertificateResponse2\xb8\x02\n" +
-	"\rDeviceService\x12Y\n" +
-	"\bRegister\x12%.raycontrol.device.v1.RegisterRequest\x1a&.raycontrol.device.v1.RegisterResponse\x12V\n" +
-	"\aGetSelf\x12$.raycontrol.device.v1.GetSelfRequest\x1a%.raycontrol.device.v1.GetSelfResponse\x12t\n" +
-	"\x11RotateCertificate\x12..raycontrol.device.v1.RotateCertificateRequest\x1a/.raycontrol.device.v1.RotateCertificateResponseBJZHgithub.com/arngory/raycontrol/internal/gen/raycontrol/device/v1;devicev1b\x06proto3"
+	"\x19RotateCertificateResponse2\xa0\x03\n" +
+	"\rDeviceService\x12}\n" +
+	"\bRegister\x12%.raycontrol.device.v1.RegisterRequest\x1a&.raycontrol.device.v1.RegisterResponse\"\"\xfa\xd2\xe4\x93\x02\x1c\x12\x1aADMIN,BILLING,SUPPORT,USER\x12z\n" +
+	"\aGetSelf\x12$.raycontrol.device.v1.GetSelfRequest\x1a%.raycontrol.device.v1.GetSelfResponse\"\"\xfa\xd2\xe4\x93\x02\x1c\x12\x1aADMIN,BILLING,SUPPORT,USER\x12\x93\x01\n" +
+	"\x11RotateCertificate\x12..raycontrol.device.v1.RotateCertificateRequest\x1a/.raycontrol.device.v1.RotateCertificateResponse\"\x1d\xfa\xd2\xe4\x93\x02\x17\x12\x15ADMIN,BILLING,SUPPORTBJZHgithub.com/arngory/raycontrol/internal/gen/raycontrol/device/v1;devicev1b\x06proto3"
 
 var (
 	file_raycontrol_device_v1_device_proto_rawDescOnce sync.Once
@@ -445,23 +499,24 @@ func file_raycontrol_device_v1_device_proto_rawDescGZIP() []byte {
 	return file_raycontrol_device_v1_device_proto_rawDescData
 }
 
-var file_raycontrol_device_v1_device_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_raycontrol_device_v1_device_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_raycontrol_device_v1_device_proto_goTypes = []any{
 	(*RegisterRequest)(nil),           // 0: raycontrol.device.v1.RegisterRequest
-	(*PinTries)(nil),                  // 1: raycontrol.device.v1.PinTries
-	(*RegisterResponse)(nil),          // 2: raycontrol.device.v1.RegisterResponse
-	(*GetSelfRequest)(nil),            // 3: raycontrol.device.v1.GetSelfRequest
-	(*GetSelfResponse)(nil),           // 4: raycontrol.device.v1.GetSelfResponse
-	(*RotateCertificateRequest)(nil),  // 5: raycontrol.device.v1.RotateCertificateRequest
-	(*RotateCertificateResponse)(nil), // 6: raycontrol.device.v1.RotateCertificateResponse
+	(*InviteRole)(nil),                // 1: raycontrol.device.v1.InviteRole
+	(*PinTries)(nil),                  // 2: raycontrol.device.v1.PinTries
+	(*RegisterResponse)(nil),          // 3: raycontrol.device.v1.RegisterResponse
+	(*GetSelfRequest)(nil),            // 4: raycontrol.device.v1.GetSelfRequest
+	(*GetSelfResponse)(nil),           // 5: raycontrol.device.v1.GetSelfResponse
+	(*RotateCertificateRequest)(nil),  // 6: raycontrol.device.v1.RotateCertificateRequest
+	(*RotateCertificateResponse)(nil), // 7: raycontrol.device.v1.RotateCertificateResponse
 }
 var file_raycontrol_device_v1_device_proto_depIdxs = []int32{
 	0, // 0: raycontrol.device.v1.DeviceService.Register:input_type -> raycontrol.device.v1.RegisterRequest
-	3, // 1: raycontrol.device.v1.DeviceService.GetSelf:input_type -> raycontrol.device.v1.GetSelfRequest
-	5, // 2: raycontrol.device.v1.DeviceService.RotateCertificate:input_type -> raycontrol.device.v1.RotateCertificateRequest
-	2, // 3: raycontrol.device.v1.DeviceService.Register:output_type -> raycontrol.device.v1.RegisterResponse
-	4, // 4: raycontrol.device.v1.DeviceService.GetSelf:output_type -> raycontrol.device.v1.GetSelfResponse
-	6, // 5: raycontrol.device.v1.DeviceService.RotateCertificate:output_type -> raycontrol.device.v1.RotateCertificateResponse
+	4, // 1: raycontrol.device.v1.DeviceService.GetSelf:input_type -> raycontrol.device.v1.GetSelfRequest
+	6, // 2: raycontrol.device.v1.DeviceService.RotateCertificate:input_type -> raycontrol.device.v1.RotateCertificateRequest
+	3, // 3: raycontrol.device.v1.DeviceService.Register:output_type -> raycontrol.device.v1.RegisterResponse
+	5, // 4: raycontrol.device.v1.DeviceService.GetSelf:output_type -> raycontrol.device.v1.GetSelfResponse
+	7, // 5: raycontrol.device.v1.DeviceService.RotateCertificate:output_type -> raycontrol.device.v1.RotateCertificateResponse
 	3, // [3:6] is the sub-list for method output_type
 	0, // [0:3] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
@@ -480,7 +535,7 @@ func file_raycontrol_device_v1_device_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_raycontrol_device_v1_device_proto_rawDesc), len(file_raycontrol_device_v1_device_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

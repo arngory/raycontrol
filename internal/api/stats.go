@@ -152,7 +152,8 @@ func (s *Server) GetStats(ctx context.Context, req *connect.Request[nodev1.GetSt
 	if err != nil {
 		return nil, toConnect(err)
 	}
-	r, err := s.Stats.Report(ctx, last, statsClean(services))
+	// The node's numbers, whoever asks: the report's own sample too.
+	r, err := s.Stats.Report(store.AllUsers(ctx), last, statsClean(services))
 	if errors.Is(err, stats.ErrNoSamples) {
 		return nil, connect.NewError(connect.CodeUnavailable, errors.New("rayd has no sample yet: ask again in a minute"))
 	}

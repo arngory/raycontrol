@@ -23,6 +23,7 @@ import (
 	"github.com/arngory/raycontrol/internal/naive"
 	"github.com/arngory/raycontrol/internal/provision"
 	"github.com/arngory/raycontrol/internal/stats"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 // GetMetrics describes the node in the Prometheus text format (R4-14):
@@ -30,11 +31,84 @@ import (
 // Nothing is sent anywhere; rayctl writes the text where the operator's
 // collector reads it.
 func (s *Server) GetMetrics(ctx context.Context, _ *connect.Request[nodev1.GetMetricsRequest]) (*connect.Response[nodev1.GetMetricsResponse], error) {
-	m, err := s.collect(ctx, time.Now())
+	// The node's numbers, whoever asks.
+	m, err := s.collect(store.AllUsers(ctx), time.Now())
 	if err != nil {
 		return nil, toConnect(err)
 	}
+	if store.IntegrationRole(callerRole(ctx)) {
+		services, err := s.Store.ListServices(ctx)
+		if err != nil {
+			return nil, toConnect(err)
+		}
+		m = m.relabel(integrationLabels(services))
+	}
 	return connect.NewResponse(&nodev1.GetMetricsResponse{Text: m.String()}), nil
+}
+
+// integrationLabels hides from an integration's metrics what names a
+// zone or a site: a zone as its service's kind#n and its number, a loop by
+// its kind; the rest as it is (integrations-v1 §2.3).
+func integrationLabels(services []store.Service) stats.Clean {
+	ids := serviceIDs(services)
+	zones := map[string]string{}
+	for _, svc := range services {
+		for i, z := range provision.Zones(svc) {
+			zones[z] = fmt.Sprintf("%s/zone%d", ids[svc.Name], i+1)
+		}
+	}
+	return func(_ string, raw []string) ([]string, bool) {
+		labels := slices.Clone(raw)
+		for i := 0; i+1 < len(labels); i += 2 {
+			switch labels[i] {
+			case "zone":
+				labels[i+1] = cmp.Or(zones[labels[i+1]], "other")
+			case "loop":
+				labels[i+1], _, _ = strings.Cut(labels[i+1], " ")
+			}
+		}
+		return labels, true
+	}
+}
+
+// relabel is m with each sample's labels as clean has them. Samples that
+// come out alike are summed when they are counters (_total), the highest
+// kept when they are levels or times, and for a last success the lowest:
+// a stale loop among them still shows.
+func (m *Metrics) relabel(clean stats.Clean) *Metrics {
+	type series struct {
+		name   string
+		labels []string
+		value  float64
+	}
+	var order []string
+	sum := map[string]*series{}
+	for _, p := range m.points {
+		labels, ok := clean(p.Name, p.Labels)
+		if !ok {
+			continue
+		}
+		key := stats.Point{Name: p.Name, Labels: labels}.Key()
+		if e, ok := sum[key]; ok {
+			switch {
+			case strings.HasSuffix(p.Name, "_total"):
+				e.value += p.Value
+			case strings.Contains(p.Name, "last_success"):
+				e.value = min(e.value, p.Value)
+			default:
+				e.value = max(e.value, p.Value)
+			}
+			continue
+		}
+		sum[key] = &series{p.Name, labels, p.Value}
+		order = append(order, key)
+	}
+	var out Metrics
+	for _, k := range order {
+		e := sum[k]
+		out.Add(e.name, m.help[e.name], e.value, e.labels...)
+	}
+	return &out
 }
 
 // Metrics collects samples in the text format, each family in one block
@@ -264,6 +338,10 @@ func (s *Server) collect(ctx context.Context, now time.Time) (*Metrics, error) {
 	}
 	m.Add("raycontrol_invite_pin_wrong_total", "Wrong invite PINs since rayd started.", float64(s.pinWrong.Load()))
 	m.Add("raycontrol_invite_pin_withdrawn_total", "Invites withdrawn by their last wrong PIN since rayd started.", float64(s.pinWithdrawn.Load()))
+
+	// The remote API's calls by role and answer, and the integrations' rate
+	// limits and mass actions (integrations-v1 §11), since rayd started.
+	s.integrationMetrics(&m)
 
 	// The DNS path: each enabled dnstt service's counters, from its
 	// backend's stats socket (niko-server v0.11.0), and the DNS front's;

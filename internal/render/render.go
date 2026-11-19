@@ -118,8 +118,10 @@ type Model struct {
 	Domain   string
 	Services []Service // enabled only
 	Users    []User    // active: enabled, not expired, not over the traffic limit
-	// Traffic: some user has a traffic limit (traffic-limit-v1 §5): the
-	// Xray processes count each user's bytes and give them on their API.
+	// Traffic: some user has a traffic limit (traffic-limit-v1 §5), or the
+	// administrator keeps the counting on (rayctl traffic counting on,
+	// integrations-v1 §2.4): the Xray processes count each user's bytes
+	// and give them on their API.
 	// Without it, and with the connection limits off, their configs have
 	// no stats at all.
 	Traffic bool
@@ -289,6 +291,11 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 
 	users, err := st.ListUsers(ctx)
 	if err != nil {
+		return m, err
+	}
+	// Kept on by the administrator, or while some user has a limit
+	// (integrations-v1 §2.4).
+	if m.Traffic, err = st.TrafficCountingOn(ctx); err != nil {
 		return m, err
 	}
 	now := time.Now()

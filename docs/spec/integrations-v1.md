@@ -1,7 +1,12 @@
 # integrations-v1: внешние системы у ноды (боты, биллинг)
 
-Статус: **черновик** (2026-11-16), ничего не сделано. В планах после v0.31.0: решение владельца 2026-11-16 (цитата —
-§13; [decisions](../decisions.md) R4-47). Вопросы §14 владелец закрыл 2026-11-16: «в целом по рекомендации».
+Статус: **этапы 1 и 1b в коде, не выпущены** (2026-11-19): роли `billing` и `support` (§2.1–§2.3), аудит (§2.5),
+пределы частоты (§2.6), предохранитель массовых действий и учёт трафика (§2.4), заметки для `support` (§2.2),
+`GetUser`, `SetUserExpiry`, `GetIntegrationSettings`, `SetIntegrationSettings` (§10), `rayctl device invite -role
+billing|support`, `user expires`, `integration`, `traffic counting` (§11). Без событий: администратору о
+предохранителе пока только аудит `api.mass`, метрика и `rayctl integration status`. Дальше — статические адреса
+(§3.2), события (§4), OpenAPI (§5).
+Решение владельца 2026-11-16 (цитата — §13; [decisions](../decisions.md) R4-47). Вопросы §14 владелец закрыл 2026-11-16: «в целом по рекомендации».
 Основа: удалённый API — [api-v1](api-v1.md) (R3-3), стук — [spa-v2](spa-v2.md), уведомления — webhook (K-2),
 журналы доступа выключены (D-12), лимиты — [traffic-limit-v1](traffic-limit-v1.md) и
 [conn-limit-v1](conn-limit-v1.md), что получает пользователь — [subscription-v1](subscription-v1.md). Пометка
@@ -72,7 +77,18 @@ rayctl remote enroll 'RCINV2:…' -o billing.rcdev   # файл устройст
 ### 2.2 Обычные и служебные пользователи
 
 **Служебный** пользователь — тот, у кого есть неотозванное устройство или неиспользованное приглашение роли `admin`,
-`billing` или `support`, или сервис вида `ssh` или `api`. Остальные — **обычные**.
+`billing` или `support`, или сервис вида `ssh` или `api`. Остальные — **обычные**. Неиспользованное приглашение
+считается и истёкшим, пока его не отозвали и не убрала чистка: так строже.
+
+Приглашение роли `billing` или `support`, вставленное в приложение (Niko 1.59+ называет себя в `X-Raycontrol-Client`),
+нода не тратит: `Register` отвечает `failed_precondition` с деталью `InviteRole{role}` (api-v1 §4). В пакете
+`rcdev1` есть `role` (spa-v2 §8): приложение отказывает и готовому пакету интеграции.
+
+Приглашение, которое выдала интеграция, и устройство из него помечены (`by_integration`):
+- такое приглашение не регистрируется, если его пользователь с тех пор стал служебным (`not_found`);
+- такое устройство не получает `ssh`, `api` и `site` ни в scope SPA, ни в пакете, что бы потом ни дали его
+  пользователю. Иначе `billing` выдал бы приглашение обычному пользователю, зарегистрировал его сам и после
+  `ssh` у пользователя открыл бы себе SSH ноды.
 
 `billing` и `support` видят только обычных (`support` только видит):
 - `ListUsers`, `ListDevices` служебных не показывают;
@@ -86,26 +102,32 @@ rayctl remote enroll 'RCINV2:…' -o billing.rcdev   # файл устройст
 
 `billing` назначает только сервисы данных: `reality`, `hy2-masq`, `hy2-obfs`, `naive`, `doh`, `yggdrasil`, `dnstt`,
 `masterdns`, `slipstream`, `olcrtc`, `openflux`, `inner`. `ssh`, `api`, `subscription`, `site` — `permission_denied`.
+`SetUserServices` от `billing` меняет только сервисы данных: `site` и `subscription`, которые дал администратор,
+остаются.
+
+Числа в `GetStatus` (`users`, `active_devices`) и в `GetMetrics` — по всей ноде, для любой роли одинаковые: это
+числа, а не имена. Имена циклов интеграциям приходят только видом (`acme`, `dns-zone`): в полном имени бывают сайт
+и зона. В метриках `support` зона — `<вид>#<n>/zone<i>`, цикл — его вид.
 Сервис пользователя попадает в scope SPA его устройств (`store.SPADevices`), так что `ssh` у пользователя открыл бы
 порт SSH ноды.
 
 ### 2.3 Методы по ролям
 
-Каждый метод `NodeService` (53 в v0.31.0). «да» — можно; «—» — нельзя (`permission_denied`); «только root» —
+Каждый метод `NodeService` (56 в v0.33.0). «да» — можно; «—» — нельзя (`permission_denied`); «только root» —
 только root на сокете ноды, не через API; «сокет» — root и группа `raycontrol` на ноде, не через API.
 
 | Метод | admin | billing | support | Почему так |
 |---|---|---|---|---|
 | `GetStatus` | да | да* | да* | *без `host`, `spa_ports`, `debug_until`, текстов `loops[].error` и `detail` |
 | `ListUsers` | да | да (обычные) | да* (обычные) | состояние и счётчики трафика; *`support` — без `note`, пока администратор не разрешил (§2.2) |
-| `CreateUser` | да | нет | — | сервисы — только данных (§2.2) |
+| `CreateUser` | да | да | — | сервисы — только данных (§2.2) |
 | `SetUserEnabled` | да | да* | — | *выключение — под предохранителем (§2.4) |
-| `SetUserServices` | да | нет | — | только сервисы данных |
+| `SetUserServices` | да | да | — | только сервисы данных |
 | `DeleteUser` | да | да* | — | *под предохранителем (§2.4) |
 | `SetUserTraffic` | да | да* | — | *не включает и не выключает учёт трафика на ноде (§2.4) |
 | `SetUserLAN` | да | — | — | согласие администратора (lan-v1 §1.1) |
 | `ExportUser` | да | — | — | ответ — учётные данные пользователя; без SPA устройства пользователя ссылки не работают (R4-17); пользователю — приглашение (§7, §14 п. 3) |
-| `RenewUser` | да | нет | — | «ключи утекли»: новые данные, секрета в ответе нет |
+| `RenewUser` | да | да | — | «ключи утекли»: новые данные, секрета в ответе нет |
 | `ListServices` | да | да* | да* | *только `id`, `kind`, `name`, `enabled`: нужно для `services` пользователя |
 | `CreateService`, `SetServiceEnabled`, `DeleteService`, `RotateService`, `SetServiceOption` | да | — | — | сервисы и ключи |
 | `GetYggdrasilPeerKeys` | да | — | — | ключи пира |
@@ -121,27 +143,29 @@ rayctl remote enroll 'RCINV2:…' -o billing.rcdev   # файл устройст
 | `SetDNSProvider`, `GetDNS`, `SyncDNS`, `RemoveDNS`, `CheckDNSZones` | да | — | — | токен провайдера, зоны |
 | `Backup` | только root | — | — | все ключи (R4-13) |
 | `GetMetrics` | да | — | да | только числа (R4-14) |
+| `GetStats` | да | — | да | только числа, без имён ([stats-v1](stats-v1.md)) |
 | `GetSummary`, `SetSummary` | да | — | — | сети клиентов, токен IPinfo |
 | `GetAppMirror`, `SetAppMirror` | да | — | — | настройка ноды |
 | `StartUpdate` | да (если root разрешил) | — | — | обновление |
-| `GetUpdateStatus` | да | — | да* | *без `by` (имена устройств администраторов) |
+| `GetUpdateStatus` | да | — | да* | *без `by` (имена устройств администраторов), текста `error` и `relays` (периметр) |
 | `SetDebug` | только root | — | — | адреса клиентов в журнале |
 | `SetNodeName`, `SetNodeNote` | да | — | — | настройка ноды |
+| `GetClientPolicy`, `SetClientPolicy` | да | — | — | минимальный клиент ([client-min-v1](client-min-v1.md)) |
 | `GetEgress`, `GetConnLimit` | сокет | — | — | |
 | `SetEgress`, `SetConnLimit` | только root | — | — | |
 | `GetDeployment`, `GetDeployInputs` | только root | — | — | план `apply` (R4-33) |
 | `GetPorts` | да | — | — | периметр |
 | **новые** (§10): `GetUser` | да | да (обычные) | да* (обычные) | один пользователь вместо всего списка; *как `ListUsers` |
-| `SetUserExpiry` | да | нет | — | срок: продлить, снять, истечь сейчас |
+| `SetUserExpiry` | да | да | — | срок: продлить, снять, истечь сейчас |
 | `SetDeviceAllow` | да | — | — | список адресов (§3.2) |
 | `ListWebhooks`, `AddWebhook`, `SetWebhook`, `DeleteWebhook`, `VerifyWebhook`, `TestWebhook`, `RotateWebhookKey`, `RetryWebhook` | да | — | — | `-allow-net` — только root (§4.7) |
-| `ListEvents` | да | нет | да | только своя лента: адрес вида `poll` с `-for` этого устройства (§4.9) |
+| `ListEvents` | да | да | да | только своя лента: адрес вида `poll` с `-for` этого устройства (§4.9) |
 | `GetIntegrationSettings`, `SetIntegrationSettings` | да* | — | — | *пределы частоты и предохранителя — только root на ноде; заметки для `support` — admin (§2.2, §2.4, §2.6) |
 
 `DeviceService`: `Register` — по приглашению, как сейчас; `GetSelf` и `RotateCertificate` — `admin`, `billing`,
 `support` (свой ключ интеграция меняет сама, §6). `RelayService` — только relay.
 
-Итого: `billing` — 12 нынешних методов и 3 новых, `support` — 6 нынешних и 2 новых (`GetUser`, `ListEvents`).
+Итого: `billing` — 12 нынешних методов и 3 новых, `support` — 7 нынешних и 2 новых (`GetUser`, `ListEvents`).
 
 Поля, скрытые от роли (*), нода очищает в ответе, а не только в описании: одна разметка proto задаёт и права, и
 OpenAPI (§5.1).
@@ -160,11 +184,15 @@ OpenAPI (§5.1).
   `rayctl traffic counting on` (`auto` — как сейчас).
 - Где `billing` может навредить — массово выключить или удалить обычных пользователей, выдать себе приглашение `user`
   — это его роль. Ограничивают частота (§2.6), аудит (§2.5), события администратору (§4.3) и предохранитель ниже.
-- **Предохранитель массовых действий** (§14 п. 6). `DeleteUser` и `SetUserEnabled {enabled: false}` от всех устройств
-  `billing` вместе считаются за скользящий час. Сверх предела (по умолчанию 50 в час, удаления и выключения вместе)
-  вызов — `failed_precondition` («over the hourly limit of mass actions: confirm»), ничего не изменено, а администратору
+- **Предохранитель массовых действий** (§14 п. 6). `DeleteUser`, `SetUserEnabled {enabled: false}` и `SetUserExpiry`
+  «истечь сейчас» (это то же выключение; срок не позже чем через 10 минут — тоже: часы интеграции спешат или цикл
+  ошибся в периоде), а ещё выключения под другим именем — `SetUserServices` со списком без включённых сервисов (и
+  пустым) и `SetUserTraffic` с лимитом меньше 1 МиБ (байты вместо гигабайт) или меньше чем на 1 МиБ выше
+  израсходованного за период — от всех устройств `billing` вместе считаются за скользящий час. Сверх предела (по
+  умолчанию 50 в час, удаления и выключения вместе) вызов — `failed_precondition` («over the hourly limit of mass actions: confirm»), ничего не изменено, а администратору
   уходит событие `integration.mass_action` (§4.3) и строка в `rayctl status`. Выше предела проходит только вызов с
-  флагом подтверждения: новое поле `confirm_mass` в `DeleteUserRequest` и `SetUserEnabledRequest`. Такой вызов
+  флагом подтверждения: новое поле `confirm_mass` в `DeleteUserRequest`, `SetUserEnabledRequest`,
+  `SetUserExpiryRequest`, `SetUserServicesRequest` и `SetUserTrafficRequest`. Такой вызов
   выполняется, в аудите — с пометкой `confirm`, а событие администратору уходит всё равно (одно в час, с числом). Флаг
   ставит сам `billing`: предохранитель ловит сбой интеграции (цикл, неверная выборка), а не взлом; от взлома — событие и
   отзыв устройства (§6). Предел — настройка root на ноде: `rayctl integration set mass-limit 50` (`0` — каждое массовое
@@ -178,11 +206,13 @@ OpenAPI (§5.1).
 | `billing` | `<пользователь>/<устройство> (billing)` | каждое изменение, теми же действиями (`user.create`, `user.enable=false`, `user.traffic …`, `user.expires=<время>` — новое, `device.revoke`, `invite.create:user`; сверх предела массовых действий — с `confirm`); отказы по роли; превышения частоты; отказы предохранителя (`api.mass`) |
 | `support` | `<пользователь>/<устройство> (support)` | только отказы и превышения; чтения не пишутся |
 | нода | `rayd` | `user.expired` (новое, цикл сроков §4.3), смены состояния webhook |
+| приглашение | `invite <id>` | `invite.app`: приглашение интеграции открыли в приложении, отказано (§2.2); не чаще строки в 10 минут |
 | администратор | как сейчас | `device.allow` (§3.4), `integration.set` (заметки для `support`; предел массовых действий — только root), `integration.limits` (только root), `webhook.add`, `webhook.set`, `webhook.del`, `webhook.verify`, `webhook.rotate`, `webhook.test`, `webhook.retry`; `webhook.gone` и итог проверки адреса пишет `rayd` |
 
 - Отказ по роли — `api.denied`, цель `<метод>`; превышение — `api.limited`; отказ предохранителя — `api.mass`. Не
-  чаще строки в 10 минут на устройство и метод, с числом за это время. Иначе сломанная интеграция заполнит журнал
-  (D-11, 90 дней).
+  чаще строки в 10 минут на устройство и метод, с числом с прошлой строки. Неудачный вызов интеграции (не найден,
+  отказ аргументу по роли) — тоже не чаще строки в 10 минут на устройство и действие. Иначе сломанная интеграция
+  заполнит журнал (D-11, 90 дней). Число после последней строки ждёт следующего отказа.
 - Чтения не пишутся ни у кого, как сейчас (кроме `ExportUser`). Число вызовов и время последнего — в памяти rayd, в
   `rayctl integration status` (§11). Это сервер интеграции, а не человек: D-12 о нём не говорит.
 - В аудите нет ни секретов, ни адресов клиентов. Адреса из списка интеграции в `device.allow` есть: это серверы,
@@ -199,8 +229,12 @@ OpenAPI (§5.1).
 | `admin` | как сейчас, без предела | | | |
 
 - Сверх — `resource_exhausted`, вызов не выполнен. Повтор безопасен: методы `billing` повторяемы (§5.2).
-- Общий предел на все устройства интеграций — 20 вызовов в секунду: интеграции не забирают у rayd время цикла
-  `apply`.
+- Общий предел на все устройства интеграций — 20 вызовов в секунду с запасом 200 (запас чтений `billing` и
+  `support` вместе): интеграции не забирают у rayd время цикла `apply`.
+- Новые пределы действуют с полного запаса: корзины всех устройств начинаются заново. Сброс пределов устройства
+  убирает только его собственные, пределы роли остаются.
+- `DeviceService` интеграции (`GetSelf`, `RotateCertificate`) идёт под те же пределы как чтение: у `support` нет
+  изменений, а свой ключ он меняет сам.
 - Неизвестный сертификат — `unauthenticated`. Новые соединения с адреса считает предел входящих периметра
   (conn-limit-v1 §6.2). Адреса из списков интеграций от него не освобождены, в отличие от адресов администратора.
 - Числа таблицы — значения по умолчанию, в коде. root на ноде меняет их для роли или для одного устройства: `rayctl
@@ -575,12 +609,15 @@ rayctl webhook status [ID]                     # §11
 
 - **Разметка.** У каждого метода `NodeService` и `DeviceService` — правило видимости
   `google.api.method_visibility`: `restriction` — роли через запятую (`"ADMIN,BILLING,SUPPORT"`), `"ADMIN"`, `"NODE"`
-  (только на сокете). У полей, скрытых от роли, — `google.api.field_visibility` (`"ADMIN"`). `visibility.proto` из
-  googleapis кладётся в `api/proto/google/api/` (Apache-2.0, файл маленький): генерация остаётся без сети, как
-  сейчас.
-- **Одна разметка для прав и описания.** rayd при старте строит таблицу «метод → роли» из дескрипторов
-  (`protoregistry`) и чистит в ответе поля, которых роли не видно. Тест: у каждого метода правило есть; метод без
-  правила — только `ADMIN`; таблица совпадает с §2.3.
+  (только на сокете); у `DeviceService` ещё `USER` (устройство пользователя: `Register`, `GetSelf`). У полей, скрытых
+  от роли, — `google.api.field_visibility` (`"ADMIN"`). `visibility.proto` из googleapis лежит в
+  `api/proto/google/api/` (Apache-2.0, файл маленький): генерация остаётся без сети, как сейчас. Изменён только
+  `go_package` — на сгенерированный пакет raycontrol, чтобы не тянуть модуль googleapis (и с ним gRPC).
+- **Одна разметка для прав и описания.** rayd при старте строит таблицу «метод → роли» из дескрипторов и чистит в
+  ответе поля, которых роли не видно. Тесты: у каждого метода правило есть, и таблица совпадает с §2.3; метод без
+  правила — только `ADMIN`; у каждого скрытого поля в правиле есть `ADMIN`; список полей, которые видят `billing` и
+  `support` во всех своих ответах, лежит в `internal/api/testdata/integration-fields.txt`. Новое поле в таком ответе
+  роняет тест, пока его не посмотрели и не переписали список.
 - **Генератор** — [`protoc-gen-connect-openapi`](https://github.com/connectrpc/protoc-gen-connect-openapi)
   (`connectrpc.com/protoc-gen-connect-openapi`, Apache-2.0, OpenAPI 3.1). Он понимает `allowed-visibilities` и метки
   через запятую. Закрепляется версией в `tools/go.mod`, как остальные плагины; свой шаблон `buf.gen.openapi.yaml`,
@@ -798,13 +835,18 @@ HTTPS, хоть статический хостинг: команды подпи
     {User user}`;
   - `SetDeviceAllow {id; repeated string prefixes} → {Device device}`; у `Device` — `allow`, `last_call`;
   - методы webhook (§2.3) и их сообщения, `ListEvents` (§4.9);
-  - `GetIntegrationSettings`, `SetIntegrationSettings`: пределы частоты, предел массовых действий, заметки для
-    `support` (§2.2, §2.4, §2.6);
-  - `confirm_mass` в `DeleteUserRequest` и `SetUserEnabledRequest` (§2.4); нода до него поле не читает, и
-    предохранителя у неё нет;
-  - значения `role`: `billing`, `support` (строка, поле прежнее);
+  - `GetIntegrationSettings`, `SetIntegrationSettings`: пределы частоты (`Rate {burst; per_hour}`, `IntegrationLimits
+    {read; write; heavy; inflight}` для роли или устройства, `to_default` — назад к умолчанию), предел массовых
+    действий, заметки для `support`, учёт трафика `on`/`auto` (§2.2, §2.4, §2.6). В ответе ещё устройства
+    интеграций с их вызовами с запуска rayd и массовые действия за час (§11). Учёт трафика — тоже здесь: отдельного
+    метода для одной настройки не заводили;
+  - `confirm_mass` в `DeleteUserRequest`, `SetUserEnabledRequest`, `SetUserExpiryRequest`, `SetUserServicesRequest` и
+    `SetUserTrafficRequest` (§2.4); нода до него поле
+    не читает, и предохранителя у неё нет;
+  - значения `role`: `billing`, `support` (строка, поле прежнее); `role` в пакете `rcdev1` (кроме `user`);
+    `InviteRole` — деталь отказа `Register` приложению (api-v1 §4);
   - правила видимости на методах и полях (§5.1).
-- **База** — миграция 0016 (номер — следующий свободный): `devices` и `invites` пересоздаются с ролями в `CHECK`
+- **База** — миграция 0017 (этап 1; дальше — следующие свободные номера): `devices` и `invites` пересоздаются с ролями в `CHECK`
   (SQLite не меняет ограничение на месте, как в 0014); `devices.allow`; таблицы `webhooks` (с видом `url` или
   `poll` и состоянием проверки), `webhook_keys`, `webhook_outbox`; отметки сроков (`user.expired`, `user.expiring` —
   один раз на значение). Настройки интеграций — ключи в `settings`.
@@ -830,7 +872,7 @@ rayctl device list                               # ROLE, ACCESS, LAST CALL
 rayctl integration status                        # по устройствам интеграций: вызовы, отказы, превышения за сутки
 rayctl integration set support-notes on|off      # §2.2: admin
 rayctl integration set mass-limit 50             # §2.4: только root
-rayctl integration limits [ROLE|DEVICE_ID] [read=… write=… heavy=… inflight=…] [-reset]   # §2.6: только root
+rayctl integration limits [ROLE|DEVICE_ID] [read=100,10/s write=50,5/s heavy=20,60/h inflight=4] [-reset]   # §2.6: только root
 rayctl integration gateway -device F -listen …   # §5.4
 rayctl -remote F events [-follow] [-after SEQ]   # лента ListEvents, §4.9
 rayctl knock [-keep] [-ttl 10m] @F               # §3.1
@@ -866,7 +908,8 @@ rayctl webhook add|list|set|verify|del|test|rotate|retry|status   # §4.6, ле�
 - `raycontrol_webhook_dropped_total{endpoint}`, `raycontrol_webhook_undelivered_total{endpoint}`;
 - `raycontrol_webhook_last_success_timestamp_seconds{endpoint}`;
 - `raycontrol_webhook_verify_total{endpoint, result}`: `ok`, `mismatch`, `http`, `timeout`, `tls`, `refused`;
-- `raycontrol_api_calls_total{role, code}`, `raycontrol_api_limited_total{role}`;
+- `raycontrol_api_calls_total{role, code}` (вызовы зарегистрированных устройств всех ролей через удалённый API,
+  `admin` и `user` тоже; `Register` не считается: роли у вызывающего ещё нет), `raycontrol_api_limited_total{role}`;
 - `raycontrol_integration_mass_actions_total{result}`: `done`, `refused`, `confirmed`;
 - `raycontrol_devices{role, state}` — с ролями `billing` и `support`.
 

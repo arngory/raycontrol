@@ -155,12 +155,16 @@ type BundleService struct {
 // Bundle is everything a client needs to pass SPA for one device. It holds
 // the device key, so it is shown once and must travel over a trusted channel.
 type Bundle struct {
-	Version   int             `json:"v"`
-	Host      string          `json:"host"`
-	SPA       SPAParams       `json:"spa"`
-	DeviceID  string          `json:"device_id"`
-	DeviceKey string          `json:"device_key"`
-	Services  []BundleService `json:"services"`
+	Version   int       `json:"v"`
+	Host      string    `json:"host"`
+	SPA       SPAParams `json:"spa"`
+	DeviceID  string    `json:"device_id"`
+	DeviceKey string    `json:"device_key"`
+	// Role is the device's role but user's (admin, billing, support): an
+	// app refuses an integration's bundle (integrations-v1 §2.1). A user's
+	// bundle has none, as before.
+	Role     string          `json:"role,omitempty"`
+	Services []BundleService `json:"services"`
 	// NodeKeys verify subscription signatures: "ed25519" (hex) and
 	// "mldsa65" (base64url).
 	NodeKeys map[string]string `json:"node_keys,omitempty"`

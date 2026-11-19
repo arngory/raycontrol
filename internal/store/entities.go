@@ -86,6 +86,10 @@ func (s *Store) CreateUser(ctx context.Context, u User) (User, error) {
 	}
 	u.CreatedAt = s.now().Truncate(time.Second)
 	err := s.tx(ctx, func(tx *sql.Tx) error {
+		limited, err := limitedUsers(ctx, tx)
+		if err != nil {
+			return err
+		}
 		res, err := tx.ExecContext(ctx, `INSERT INTO users (name, enabled, expires_at, traffic_limit_bytes, note, created_at, traffic_period, traffic_reset_day)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			u.Name, u.Enabled, nullTime(u.ExpiresAt), u.TrafficLimit, u.Note, u.CreatedAt.Unix(), u.TrafficPeriod, u.TrafficResetDay)
@@ -102,10 +106,12 @@ func (s *Store) CreateUser(ctx context.Context, u User) (User, error) {
 		}
 		if u.TrafficLimit != nil {
 			u.TrafficStart, u.TrafficCountedFrom = u.CreatedAt, u.CreatedAt
-			_, err = tx.ExecContext(ctx, `INSERT INTO user_traffic (user_id, period_start, counted_from) VALUES (?, ?, ?)`,
-				u.ID, u.CreatedAt.Unix(), u.CreatedAt.Unix())
+			if _, err := tx.ExecContext(ctx, `INSERT INTO user_traffic (user_id, period_start, counted_from) VALUES (?, ?, ?)`,
+				u.ID, u.CreatedAt.Unix(), u.CreatedAt.Unix()); err != nil {
+				return err
+			}
 		}
-		return err
+		return checkCounting(ctx, tx, limited)
 	})
 	return u, err
 }
@@ -137,22 +143,46 @@ func scanUser(row interface{ Scan(...any) error }) (User, error) {
 	return u, nil
 }
 
-// UserByName returns a user with its allowed services.
+// querier is what reads take: the database or a transaction.
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// UserByName returns a user with its allowed services; a service user is
+// ErrNotFound to a caller of RegularOnly. One read: the user and its
+// services as of one moment, the filter's too.
 func (s *Store) UserByName(ctx context.Context, name string) (User, error) {
-	u, err := scanUser(s.db.QueryRowContext(ctx, userSelect+` WHERE u.name = ?`, name))
-	if errors.Is(err, sql.ErrNoRows) {
-		return u, fmt.Errorf("user %q: %w", name, ErrNotFound)
-	}
-	if err != nil {
-		return u, err
-	}
-	u.Services, err = s.userServices(ctx, u.ID)
+	var u User
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		var err error
+		u, err = scanUser(tx.QueryRowContext(ctx, userSelect+` WHERE u.name = ? AND NOT (? AND u.id IN (`+serviceUserIDs+`))`, name, regularOnly(ctx)))
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("user %q: %w", name, ErrNotFound)
+		}
+		if err != nil {
+			return err
+		}
+		u.Services, err = userServices(ctx, tx, u.ID)
+		return err
+	})
 	return u, err
 }
 
-// ListUsers returns all users ordered by name.
+// ListUsers returns all users ordered by name, the regular ones only to
+// a caller of RegularOnly; as UserByName, in one read.
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.db.QueryContext(ctx, userSelect+` ORDER BY u.name`)
+	var out []User
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		var err error
+		out, err = listUsers(ctx, tx)
+		return err
+	})
+	return out, err
+}
+
+func listUsers(ctx context.Context, q querier) ([]User, error) {
+	rows, err := q.QueryContext(ctx, userSelect+` WHERE NOT (? AND u.id IN (`+serviceUserIDs+`)) ORDER BY u.name`, regularOnly(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +205,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	for i := range out {
 		byID[out[i].ID] = i
 	}
-	rows, err = s.db.QueryContext(ctx, `SELECT user_id, service_id FROM user_services ORDER BY user_id, service_id`)
+	rows, err = q.QueryContext(ctx, `SELECT user_id, service_id FROM user_services ORDER BY user_id, service_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -200,8 +230,8 @@ func (s *Store) HasTrafficLimits(ctx context.Context) (bool, error) {
 	return any, err
 }
 
-func (s *Store) userServices(ctx context.Context, userID int64) ([]int64, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT service_id FROM user_services WHERE user_id = ? ORDER BY service_id`, userID)
+func userServices(ctx context.Context, q querier, userID int64) ([]int64, error) {
+	rows, err := q.QueryContext(ctx, `SELECT service_id FROM user_services WHERE user_id = ? ORDER BY service_id`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -219,27 +249,58 @@ func (s *Store) userServices(ctx context.Context, userID int64) ([]int64, error)
 
 // SetUserEnabled enables or disables a user.
 func (s *Store) SetUserEnabled(ctx context.Context, name string, enabled bool) error {
-	return s.affectOne(ctx, "user", name, `UPDATE users SET enabled = ? WHERE name = ?`, enabled, name)
+	return s.affectOne(ctx, "user", name, `UPDATE users AS u SET enabled = ? WHERE u.name = ? AND NOT (? AND u.id IN (`+serviceUserIDs+`))`,
+		enabled, name, regularOnly(ctx))
 }
 
 // DeleteUser removes a user and, by cascade, its devices.
 func (s *Store) DeleteUser(ctx context.Context, name string) error {
-	return s.affectOne(ctx, "user", name, `DELETE FROM users WHERE name = ?`, name)
-}
-
-// SetUserServices replaces the services a user may reach.
-func (s *Store) SetUserServices(ctx context.Context, name string, serviceIDs []int64) error {
-	u, err := s.UserByName(ctx, name)
-	if err != nil {
-		return err
-	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM user_services WHERE user_id = ?`, u.ID); err != nil {
+		limited, err := limitedUsers(ctx, tx)
+		if err != nil {
 			return err
 		}
-		for _, id := range serviceIDs {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO user_services (user_id, service_id) VALUES (?, ?)`, u.ID, id); err != nil {
-				return fmt.Errorf("service %d: %w", id, err)
+		res, err := tx.ExecContext(ctx, `DELETE FROM users AS u WHERE u.name = ? AND NOT (? AND u.id IN (`+serviceUserIDs+`))`, name, regularOnly(ctx))
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n == 0 {
+			return cmp.Or(err, fmt.Errorf("user %q: %w", name, ErrNotFound))
+		}
+		return checkCounting(ctx, tx, limited)
+	})
+}
+
+// SetUserServices replaces the services a user may reach; for a caller of
+// RegularOnly, the data services, the user's site and subscription kept.
+// The user of an integration's device or invite has none
+// (ErrIntegrationUser).
+func (s *Store) SetUserServices(ctx context.Context, name string, serviceIDs []int64) error {
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		var id int64
+		var integration bool
+		err := tx.QueryRowContext(ctx, `SELECT u.id FROM users u WHERE u.name = ? AND NOT (? AND u.id IN (`+serviceUserIDs+`))`, name, regularOnly(ctx)).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("user %q: %w", name, ErrNotFound)
+		}
+		if err != nil {
+			return err
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT `+hasIntegration, id).Scan(&integration); err != nil {
+			return err
+		}
+		if integration && len(serviceIDs) > 0 {
+			return fmt.Errorf("user %q: %w", name, ErrIntegrationUser)
+		}
+		// An integration names data services only: a site or the
+		// subscription the administrator gave stays (integrations-v1 §2.2).
+		if _, err := tx.ExecContext(ctx, `DELETE FROM user_services WHERE user_id = ?
+			AND NOT (? AND service_id IN (SELECT id FROM services WHERE kind IN ('site', 'subscription')))`, id, regularOnly(ctx)); err != nil {
+			return err
+		}
+		for _, svc := range serviceIDs {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO user_services (user_id, service_id) VALUES (?, ?)`, id, svc); err != nil {
+				return fmt.Errorf("service %d: %w", svc, err)
 			}
 		}
 		return nil
@@ -693,6 +754,9 @@ type Device struct {
 	// when the node saw it (client-min-v1 §5); "" and nil: never.
 	Client   string
 	ClientAt *time.Time
+	// ByIntegration: the device came of an integration's invite
+	// (Invite.ByIntegration): it reaches its user's data services only.
+	ByIntegration bool
 }
 
 // CreateDevice enrolls a device for a user and returns its fresh SPA key.
@@ -701,8 +765,11 @@ func (s *Store) CreateDevice(ctx context.Context, userName, name, role string) (
 	if err := checkName("device", name); err != nil {
 		return Device{}, key, err
 	}
+	// An integration's device comes by invite only: it gets into the API
+	// with its client certificate, which a device made here has not
+	// (integrations-v1 §2.1).
 	if role != "user" && role != "admin" {
-		return Device{}, key, fmt.Errorf("%w role %q: use user or admin", ErrInvalid, role)
+		return Device{}, key, fmt.Errorf("%w role %q: use user or admin (billing and support by invite)", ErrInvalid, role)
 	}
 	u, err := s.UserByName(ctx, userName)
 	if err != nil {
@@ -752,12 +819,13 @@ func (s *Store) ActiveDeviceSecrets(ctx context.Context) (map[int64][]DeviceSecr
 	return out, rows.Err()
 }
 
-// ListDevices returns devices, optionally of one user.
+// ListDevices returns devices, optionally of one user; to a caller of
+// RegularOnly, those of regular users only.
 func (s *Store) ListDevices(ctx context.Context, userName string) ([]Device, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT d.id, u.name, d.name, d.role, d.created_at, d.revoked_at, coalesce(d.cert_pin, ''), d.lan,
 		coalesce(d.client, ''), d.client_at
 		FROM devices d JOIN users u ON u.id = d.user_id
-		WHERE ? = '' OR u.name = ? ORDER BY u.name, d.name`, userName, userName)
+		WHERE (? = '' OR u.name = ?) AND NOT (? AND u.id IN (`+serviceUserIDs+`)) ORDER BY u.name, d.name`, userName, userName, regularOnly(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -783,10 +851,10 @@ func (s *Store) ActiveDevice(ctx context.Context, id string) (Device, [spa.KeySi
 	var key [spa.KeySize]byte
 	var raw []byte
 	var created int64
-	err := s.db.QueryRowContext(ctx, `SELECT d.id, u.name, d.name, d.role, d.spa_key, d.created_at
+	err := s.db.QueryRowContext(ctx, `SELECT d.id, u.name, d.name, d.role, d.spa_key, d.created_at, d.by_integration
 		FROM devices d JOIN users u ON u.id = d.user_id
 		WHERE d.id = ? AND d.revoked_at IS NULL AND u.enabled = 1 AND (u.expires_at IS NULL OR u.expires_at > ?)`,
-		id, s.now().Unix()).Scan(&d.ID, &d.UserName, &d.Name, &d.Role, &raw, &created)
+		id, s.now().Unix()).Scan(&d.ID, &d.UserName, &d.Name, &d.Role, &raw, &created, &d.ByIntegration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return d, key, fmt.Errorf("device %q: %w", id, ErrNotFound)
 	}
@@ -873,7 +941,7 @@ func (s *Store) revokeDevice(ctx context.Context, id string, overlap bool) (Revo
 		var user int64
 		var revoked sql.NullInt64
 		err := tx.QueryRowContext(ctx, `SELECT d.user_id, u.name, d.name, d.revoked_at FROM devices d JOIN users u ON u.id = d.user_id
-			WHERE d.id = ?`, id).Scan(&user, &r.User, &r.Device, &revoked)
+			WHERE d.id = ? AND NOT (? AND u.id IN (`+serviceUserIDs+`))`, id, regularOnly(ctx)).Scan(&user, &r.User, &r.Device, &revoked)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("device %q: %w", id, ErrNotFound)
 		}
@@ -968,7 +1036,7 @@ func (s *Store) RenewUser(ctx context.Context, name string) (int, error) {
 	var n int
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		var user int64
-		err := tx.QueryRowContext(ctx, `SELECT id FROM users WHERE name = ?`, name).Scan(&user)
+		err := tx.QueryRowContext(ctx, `SELECT u.id FROM users u WHERE u.name = ? AND NOT (? AND u.id IN (`+serviceUserIDs+`))`, name, regularOnly(ctx)).Scan(&user)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("user %q: %w", name, ErrNotFound)
 		}
@@ -1116,7 +1184,9 @@ func NewUUID() (string, error) {
 // devices registered through it (they have a client certificate), and the
 // user's enabled services while the user is Active: one over the traffic
 // limit keeps the subscription and the API, no data service
-// (traffic-limit-v1 §3.1). Active invites pass too, to the API only (R3-3),
+// (traffic-limit-v1 §3.1). An integration's device (billing, support)
+// reaches the API only, once registered (integrations-v1 §2.1). Active
+// invites pass too, to the API only (R3-3),
 // and so do invites used less than InviteReplayWindow ago while their
 // device is not revoked: a client that lost Register's answer asks again
 // with the invite (api-v1 §4.1).
@@ -1134,17 +1204,20 @@ func (s *Store) SPADevices(ctx context.Context) ([]spa.Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	// allowed is a device's scope, sorted.
-	allowed := func(u User, admin, invite bool) []uint16 {
+	// allowed is a device's scope, sorted: an invite's and an
+	// integration's device's the API only, without the subscription,
+	// which an integration has no use for (integrations-v1 §2.1).
+	allowed := func(u User, role string, registered, invite, byIntegration bool) []uint16 {
 		var ids []uint16
 		for _, svc := range services {
 			switch {
 			case !svc.Enabled:
-			case invite:
-				if svc.Kind == "api" {
+			case byIntegration && !invite && NotForIntegrationDevices(svc.Kind):
+			case invite || IntegrationRole(role):
+				if svc.Kind == "api" && (invite || registered) {
 					ids = append(ids, uint16(svc.ID)) //nolint:gosec // G115: service IDs fit (CHECK)
 				}
-			case svc.Kind == "subscription", svc.Kind == "api" && admin,
+			case svc.Kind == "subscription", svc.Kind == "api" && role == "admin" && registered,
 				u.Active(now) && slices.Contains(u.Services, svc.ID):
 				ids = append(ids, uint16(svc.ID)) //nolint:gosec // G115: service IDs fit (CHECK)
 			}
@@ -1152,18 +1225,20 @@ func (s *Store) SPADevices(ctx context.Context) ([]spa.Device, error) {
 		return ids
 	}
 	type row struct {
-		id     string
-		key    []byte
-		user   int64
-		admin  bool
-		invite bool
+		id         string
+		key        []byte
+		user       int64
+		role       string
+		registered bool // with a client certificate
+		invite     bool
+		byInteg    bool // an integration's invite made it
 	}
 	var list []row
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT d.id, d.spa_key, d.user_id, d.role = 'admin' AND d.cert_pin IS NOT NULL, 0
+		SELECT d.id, d.spa_key, d.user_id, d.role, d.cert_pin IS NOT NULL, 0, d.by_integration
 		FROM devices d WHERE d.revoked_at IS NULL
 		UNION ALL
-		SELECT i.id, i.spa_key, i.user_id, 0, 1
+		SELECT i.id, i.spa_key, i.user_id, i.role, 0, 1, i.by_integration
 		FROM invites i WHERE (i.used_at IS NULL AND i.expires_at > ?)
 			OR (i.used_at > ? AND EXISTS (SELECT 1 FROM devices d WHERE d.id = i.device_id AND d.revoked_at IS NULL))
 		ORDER BY 1`, now.Unix(), now.Add(-InviteReplayWindow).Unix())
@@ -1172,7 +1247,7 @@ func (s *Store) SPADevices(ctx context.Context) ([]spa.Device, error) {
 	}
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.id, &r.key, &r.user, &r.admin, &r.invite); err != nil {
+		if err := rows.Scan(&r.id, &r.key, &r.user, &r.role, &r.registered, &r.invite, &r.byInteg); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -1188,7 +1263,7 @@ func (s *Store) SPADevices(ctx context.Context) ([]spa.Device, error) {
 		if !ok || !u.Live(now) {
 			continue
 		}
-		ids := allowed(u, r.admin, r.invite)
+		ids := allowed(u, r.role, r.registered, r.invite, r.byInteg)
 		if len(ids) == 0 {
 			continue
 		}

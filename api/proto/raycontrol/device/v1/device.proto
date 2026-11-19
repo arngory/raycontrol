@@ -5,7 +5,11 @@ syntax = "proto3";
 // the node's certificate pinned, and a client certificate: the device is
 // known by its key (base64url SHA-256 of the SubjectPublicKeyInfo).
 // Compatibility follows protobuf rules; breaking changes go to device.v2.
+// The roles of each method: google.api.method_visibility, as in node.v1;
+// USER is a user's device.
 package raycontrol.device.v1;
+
+import "google/api/visibility.proto";
 
 option go_package = "github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1;devicev1";
 
@@ -14,11 +18,18 @@ service DeviceService {
   // of this connection, once. Any failure is NOT_FOUND without details, but
   // for the PIN of an invite that needs one, once the request has proved
   // the invite (its mac): PERMISSION_DENIED with a PinTries detail.
-  rpc Register(RegisterRequest) returns (RegisterResponse);
+  // Who holds an invite, of any role.
+  rpc Register(RegisterRequest) returns (RegisterResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING,SUPPORT,USER";
+  }
   // GetSelf describes the calling device.
-  rpc GetSelf(GetSelfRequest) returns (GetSelfResponse);
+  rpc GetSelf(GetSelfRequest) returns (GetSelfResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING,SUPPORT,USER";
+  }
   // RotateCertificate moves the calling device to a new client key.
-  rpc RotateCertificate(RotateCertificateRequest) returns (RotateCertificateResponse);
+  rpc RotateCertificate(RotateCertificateRequest) returns (RotateCertificateResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN,BILLING,SUPPORT";
+  }
 }
 
 message RegisterRequest {
@@ -33,6 +44,14 @@ message RegisterRequest {
   bytes pin_proof = 4;
 }
 
+// InviteRole is the detail of FAILED_PRECONDITION from Register: the invite
+// is for an integration's device (role billing or support), and the client
+// named itself an app (X-Raycontrol-Client niko/…). The invite is not
+// used, and no PIN try is spent (integrations-v1 §2.1).
+message InviteRole {
+  string role = 1;
+}
+
 // PinTries is the detail of PERMISSION_DENIED from Register: the PIN was
 // missing or wrong; left is the tries the invite has still. A wrong PIN
 // with none left withdraws the invite.
@@ -42,7 +61,7 @@ message PinTries {
 message RegisterResponse {
   string bundle = 1; // "rcdev1:..." of the new device (docs/spec/spa-v2.md §8)
   string device_id = 2;
-  string role = 3; // user | admin
+  string role = 3; // user | admin | billing | support
 }
 
 message GetSelfRequest {}

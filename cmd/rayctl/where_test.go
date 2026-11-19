@@ -189,16 +189,18 @@ func subCommands(t *testing.T) map[string][]string {
 // files named on their command line, on this machine), and so work where
 // their command does: places has no line for them.
 var apiSubs = map[string][]string{
-	"node":       {"name", "note"},
-	"user":       {"add", "del", "disable", "enable", "export", "lan", "limit", "list", "renew", "reset-usage", "services", "usage"},
-	"service":    {"add", "del", "disable", "enable", "list", "peer-keys", "rotate", "set"},
-	"device":     {"add", "invite", "list", "revoke"},
-	"relay":      {"add", "list", "ports", "remove", "set"},
-	"dns":        {"check", "cloudflare", "remove", "status", "sync"},
-	"summary":    {"api", "off", "on", "show"},
-	"app-mirror": {"off", "on", "show"},
-	"client":     {"min", "show"},
-	"debug":      {"off", "on", "show"},
+	"node":        {"name", "note"},
+	"user":        {"add", "del", "disable", "enable", "expires", "export", "lan", "limit", "list", "renew", "reset-usage", "services", "usage"},
+	"service":     {"add", "del", "disable", "enable", "list", "peer-keys", "rotate", "set"},
+	"device":      {"add", "invite", "list", "revoke"},
+	"relay":       {"add", "list", "ports", "remove", "set"},
+	"dns":         {"check", "cloudflare", "remove", "status", "sync"},
+	"summary":     {"api", "off", "on", "show"},
+	"app-mirror":  {"off", "on", "show"},
+	"client":      {"min", "show"},
+	"integration": {"limits", "set", "status"},
+	"traffic":     {"counting"},
+	"debug":       {"off", "on", "show"},
 }
 
 // Every subcommand says where it works too: a line of its own in places
@@ -240,7 +242,7 @@ func TestRefusal(t *testing.T) {
 	node := []string{"install", "apply", "update", "uninstall", "backup", "restore", "report", "egress", "conn-limit", "roots",
 		"check", "legacy", "relay bundle", "service cert", "summary db"}
 	api := []string{"status", "node", "user", "service", "device", "audit", "relay", "admin", "ports", "dns", "summary",
-		"app-mirror", "client", "metrics", "stats", "remote whoami", "remote rotate", "service rotate", "relay list", "summary show",
+		"app-mirror", "client", "integration", "traffic", "metrics", "stats", "remote whoami", "remote rotate", "service rotate", "relay list", "summary show",
 		"device invite", "debug", "debug on"}
 	free := []string{"knock", "probe", "remote enroll", "version"}
 	for _, c := range runCommands(t) {

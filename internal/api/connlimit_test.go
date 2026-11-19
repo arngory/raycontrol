@@ -102,7 +102,7 @@ func TestConnLimitAPI(t *testing.T) {
 			t.Errorf("%q not audited: %+v", want, entries)
 		}
 	}
-	if !nodeOnly[nodev1connect.NodeServiceGetConnLimitProcedure] || !nodeOnly[nodev1connect.NodeServiceSetConnLimitProcedure] {
+	if !nodeOnly(nodev1connect.NodeServiceGetConnLimitProcedure) || !nodeOnly(nodev1connect.NodeServiceSetConnLimitProcedure) {
 		t.Error("the remote API offers the connection limits")
 	}
 

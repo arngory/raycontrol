@@ -17,7 +17,7 @@ import (
 // GetConnLimit says whether the connection limits are on
 // (spec/conn-limit-v1.md §8), with the table, the guard and the users at a
 // limit. Root and the group see it on the node's socket; there is no
-// remote method (remote.go, nodeOnly).
+// remote method (NODE in node.proto).
 func (s *Server) GetConnLimit(ctx context.Context, _ *connect.Request[nodev1.GetConnLimitRequest]) (*connect.Response[nodev1.GetConnLimitResponse], error) {
 	if !isLocal(ctx) {
 		return nil, connect.NewError(connect.CodePermissionDenied, errors.New("the connection limits: on the node only"))

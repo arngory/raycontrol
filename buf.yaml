@@ -4,6 +4,9 @@ modules:
     lint:
       use:
         - STANDARD
+      # googleapis' own definition, kept as it is (spec/integrations-v1.md §5.1).
+      ignore:
+        - api/proto/google
     breaking:
       use:
         - FILE
