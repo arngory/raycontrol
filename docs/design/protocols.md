@@ -20,7 +20,8 @@
 | OpenFlux | движок из форка | rendezvous (сервисы документов) | входящих нет | через `inner` |
 | Внутренняя ступень `inner` | бэкенд niko-server или Xray (08, «Следствие 5») | unix socket | только от движков | ML-KEM-768 |
 
-Не в v1: XHTTP на сервере, TrustTunnel, qWDTT, S3 Bypass, TUIC, AmneziaWG, CSQTT, Trojan, VMess.
+Не в v1: XHTTP на сервере (позже — отдельным сервисом, предварительно v0.36.0, R4-50), TrustTunnel, qWDTT,
+S3 Bypass, TUIC, AmneziaWG, CSQTT, Trojan, VMess.
 
 ## Домены
 
