@@ -291,6 +291,12 @@ func (s *Store) SetDeviceAllow(ctx context.Context, id string, allow []netip.Pre
 	return s.deviceByID(ctx, id)
 }
 
+// DeviceByID is one device, revoked or not, as ListDevices has it (to a
+// caller of RegularOnly, of a regular user only).
+func (s *Store) DeviceByID(ctx context.Context, id string) (Device, error) {
+	return s.deviceByID(ctx, id)
+}
+
 // deviceByID is one device as ListDevices has it.
 func (s *Store) deviceByID(ctx context.Context, id string) (Device, error) {
 	if id == "" {

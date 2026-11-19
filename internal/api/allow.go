@@ -18,6 +18,18 @@ import (
 	"github.com/arngory/raycontrol/internal/store"
 )
 
+// integPort is the port integrations' servers reach without a knock
+// (integrations-v1 §3.2): the one rayd serves the API on, the api
+// service's first, when it is TCP and not SSH's (a service of an older
+// store sharing SSH's port opens no sshd, as provision.ServicePorts).
+func integPort(svc store.Service, ssh map[store.Port]bool) (store.Port, bool) {
+	ports, err := svc.Ports()
+	if svc.Kind != "api" || !svc.Enabled || err != nil || len(ports) == 0 || ports[0].Proto != "tcp" || ssh[ports[0]] {
+		return store.Port{}, false
+	}
+	return ports[0], true
+}
+
 // prefixStrings are prefixes as the API gives them.
 func prefixStrings(ps []netip.Prefix) []string {
 	if len(ps) == 0 {
@@ -105,7 +117,19 @@ func (s *Server) SetDeviceAllow(ctx context.Context, req *connect.Request[nodev1
 	var warnings []string
 	var err error
 	if len(req.Msg.Prefixes) > 0 {
-		allow, warnings, err = s.checkAllow(ctx, req.Msg.Prefixes)
+		// The device and its role first, then the addresses
+		// (integrations-v1 §3.3).
+		var d store.Device
+		if d, err = s.Store.DeviceByID(ctx, req.Msg.Id); err == nil && (d.RevokedAt != nil || !store.IntegrationRole(d.Role)) {
+			if d.RevokedAt != nil {
+				err = fmt.Errorf("device %q: %w", req.Msg.Id, store.ErrNotFound)
+			} else {
+				err = fmt.Errorf("device %q (%s): %w", req.Msg.Id, d.Role, store.ErrAllowRole)
+			}
+		}
+		if err == nil {
+			allow, warnings, err = s.checkAllow(ctx, req.Msg.Prefixes)
+		}
 	}
 	var d store.Device
 	if err == nil {

@@ -76,6 +76,13 @@ func TestDeviceAllow(t *testing.T) {
 	if _, err := set(opsID, "198.51.100.7"); connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Fatalf("an admin's device: %v", err)
 	}
+	// The device and its role before the addresses (§3.3).
+	if _, err := set(opsID, "203.0.113.5"); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("an admin's device with the node's address: %v", err)
+	}
+	if _, err := set("nope", "203.0.113.5"); connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("no such device: %v", err)
+	}
 	r, err := set(billID, "198.51.100.7", "10.0.0.7")
 	if err != nil || len(r.Device.Allow) != 2 || len(r.Warnings) != 1 || !strings.Contains(r.Warnings[0], "private") {
 		t.Fatalf("set: %+v %v", r, err)
@@ -244,5 +251,29 @@ func TestCheckSourceNoAddress(t *testing.T) {
 	}
 	if _, err := r.checkSource(ctx, "[fe80::1%eth0]:443", "", "/raycontrol.device.v1.DeviceService/GetSelf"); err != nil {
 		t.Fatalf("a zoned address in no list: %v", err)
+	}
+}
+
+// TestIntegPort: the port the snapshot opens to integrations' servers is
+// the one rayd serves the API on, never SSH's.
+func TestIntegPort(t *testing.T) {
+	ssh := map[store.Port]bool{{Proto: "tcp", Num: 22}: true}
+	for _, tc := range []struct {
+		svc  store.Service
+		want string
+	}{
+		{store.Service{Kind: "api", Enabled: true, Settings: `{"ports":["tcp/48213","tcp/9443"]}`}, "tcp/48213"},
+		{store.Service{Kind: "api", Enabled: true, Settings: `{"ports":["tcp/22","tcp/9443"]}`}, ""}, // an older store's
+		{store.Service{Kind: "api", Enabled: true, Settings: `{"ports":["udp/48213"]}`}, ""},
+		{store.Service{Kind: "api", Enabled: false, Settings: `{"ports":["tcp/48213"]}`}, ""},
+		{store.Service{Kind: "subscription", Enabled: true, Settings: `{"ports":["tcp/48214"]}`}, ""},
+	} {
+		got := ""
+		if p, ok := integPort(tc.svc, ssh); ok {
+			got = p.String()
+		}
+		if got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.svc.Settings, got, tc.want)
+		}
 	}
 }

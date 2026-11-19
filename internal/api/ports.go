@@ -71,8 +71,8 @@ func (s *Server) GetPorts(ctx context.Context, _ *connect.Request[nodev1.GetPort
 			case "api":
 				np.Name, np.Source = "api", source(chosen.API == n)
 				// Integrations' servers reach it without a knock
-				// (integrations-v1 §3.2), TCP only.
-				if slices.Contains(byProto[n], "tcp") && integ {
+				// (integrations-v1 §3.2): the port the snapshot opens.
+				if p, ok := integPort(svc, ssh); ok && integ && p.Num == n && slices.Contains(byProto[n], "tcp") {
 					np.Access = "spa,static"
 				}
 			}
