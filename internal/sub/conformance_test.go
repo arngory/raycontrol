@@ -25,6 +25,9 @@ import (
 // without a word, so a mismatch has to fail here, before a node release.
 // All kinds of services, the DNS tunnels with their modes and spare zones,
 // and the next links of a rotation, which a client switches to unattended.
+// The client's golden links (shared/golden/links, parsed by its Kotlin and
+// its Go) take their inputs from here: a change to a link's form or to
+// Niko's parameters goes to the client with its PR's number.
 func TestLinksForStrictClient(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
