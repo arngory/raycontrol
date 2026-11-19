@@ -148,6 +148,7 @@ func (s *Store) SetUserTraffic(ctx context.Context, name string, c TrafficChange
 		return User{}, fmt.Errorf("%w traffic limit %d: more than 0 bytes, or 0 for none", ErrInvalid, *c.Limit)
 	}
 	now := s.now().Truncate(time.Second)
+	var id int64 // the user's, for the read after the change
 	change := func(tx *sql.Tx) error {
 		u, err := scanUser(tx.QueryRowContext(ctx, userSelect+` WHERE u.name = ? AND NOT (? AND u.id IN (`+serviceUserIDs+`))`, name, regularOnly(ctx)))
 		if errors.Is(err, sql.ErrNoRows) {
@@ -156,6 +157,7 @@ func (s *Store) SetUserTraffic(ctx context.Context, name string, c TrafficChange
 		if err != nil {
 			return err
 		}
+		id = u.ID
 		hadRow := u.Limited() && !u.TrafficStart.IsZero()
 		// A reset due under the settings the count ran with.
 		if due, last := u.ResetDue(now); due && hadRow {
@@ -230,6 +232,7 @@ func (s *Store) SetUserTraffic(ctx context.Context, name string, c TrafficChange
 		}
 		return nil
 	}
+	var u User
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		limited, err := limitedUsers(ctx, tx)
 		if err != nil {
@@ -238,12 +241,21 @@ func (s *Store) SetUserTraffic(ctx context.Context, name string, c TrafficChange
 		if err := change(tx); err != nil {
 			return err
 		}
-		return checkCounting(ctx, tx, limited)
+		if err := checkCounting(ctx, tx, limited); err != nil {
+			return err
+		}
+		// The user as the change left it, in the same transaction: not a
+		// later read the caller's filter could turn away.
+		if u, err = scanUser(tx.QueryRowContext(ctx, userSelect+` WHERE u.id = ?`, id)); err != nil {
+			return err
+		}
+		u.Services, err = userServices(ctx, tx, id)
+		return err
 	})
 	if err != nil {
 		return User{}, err
 	}
-	return s.UserByName(ctx, name)
+	return u, nil
 }
 
 // maxTrafficName bounds a counter's name: u, an ID of up to 19 digits, a

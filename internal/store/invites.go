@@ -26,6 +26,10 @@ type Invite struct {
 	// (api-v1 §3), nil without one; PinTries the wrong PINs still allowed.
 	PinProof []byte
 	PinTries int
+	// ByIntegration: an integration made it (integrations-v1 §2.2). It
+	// does not register once its user is a service user, and its device
+	// reaches the user's data services only.
+	ByIntegration bool
 }
 
 // InvitePinTries is how many wrong PINs an invite takes: the last one
@@ -76,7 +80,7 @@ func (s *Store) CreateInvite(ctx context.Context, userName, name, role string, t
 		return Invite{}, key, err
 	}
 	now := s.now().Truncate(time.Second)
-	inv := Invite{ID: id, UserName: u.Name, Name: name, Role: role, CreatedAt: now, ExpiresAt: now.Add(ttl)}
+	inv := Invite{ID: id, UserName: u.Name, Name: name, Role: role, CreatedAt: now, ExpiresAt: now.Add(ttl), ByIntegration: regularOnly(ctx)}
 	if len(pin) > 0 && pin[0] != nil {
 		inv.PinProof, inv.PinTries = pin[0](key), InvitePinTries
 	}
@@ -109,9 +113,9 @@ func (s *Store) CreateInvite(ctx context.Context, userName, name, role string, t
 		if _, err := tx.ExecContext(ctx, `DELETE FROM invites WHERE user_id = ? AND name = ? AND used_at IS NULL`, u.ID, name); err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO invites (id, user_id, name, role, spa_key, created_at, expires_at, pin_proof, pin_tries)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			inv.ID, u.ID, inv.Name, inv.Role, key[:], now.Unix(), inv.ExpiresAt.Unix(), inv.PinProof, inv.PinTries)
+		_, err = tx.ExecContext(ctx, `INSERT INTO invites (id, user_id, name, role, spa_key, created_at, expires_at, pin_proof, pin_tries, by_integration)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			inv.ID, u.ID, inv.Name, inv.Role, key[:], now.Unix(), inv.ExpiresAt.Unix(), inv.PinProof, inv.PinTries, inv.ByIntegration)
 		return err
 	})
 	return inv, key, err
@@ -177,17 +181,19 @@ func (s *Store) PruneInvites(ctx context.Context, before time.Time) error {
 }
 
 // ActiveInvite returns an invite and its SPA key if it may still be used:
-// unused, unexpired, of an enabled and unexpired user.
+// unused, unexpired, of an enabled and unexpired user; an integration's,
+// of a user who is not a service user (integrations-v1 §2.2).
 func (s *Store) ActiveInvite(ctx context.Context, id string) (Invite, [spa.KeySize]byte, error) {
 	var inv Invite
 	var key [spa.KeySize]byte
 	var raw []byte
 	var created, expires int64
 	now := s.now().Unix()
-	err := s.db.QueryRowContext(ctx, `SELECT i.id, u.name, i.name, i.role, i.spa_key, i.created_at, i.expires_at, i.pin_proof, i.pin_tries
+	err := s.db.QueryRowContext(ctx, `SELECT i.id, u.name, i.name, i.role, i.spa_key, i.created_at, i.expires_at, i.pin_proof, i.pin_tries, i.by_integration
 		FROM invites i JOIN users u ON u.id = i.user_id
-		WHERE i.id = ? AND i.used_at IS NULL AND i.expires_at > ? AND u.enabled = 1 AND (u.expires_at IS NULL OR u.expires_at > ?)`,
-		id, now, now).Scan(&inv.ID, &inv.UserName, &inv.Name, &inv.Role, &raw, &created, &expires, &inv.PinProof, &inv.PinTries)
+		WHERE i.id = ? AND i.used_at IS NULL AND i.expires_at > ? AND u.enabled = 1 AND (u.expires_at IS NULL OR u.expires_at > ?)
+			AND NOT (i.by_integration AND i.user_id IN (`+serviceUserIDs+`))`,
+		id, now, now).Scan(&inv.ID, &inv.UserName, &inv.Name, &inv.Role, &raw, &created, &expires, &inv.PinProof, &inv.PinTries, &inv.ByIntegration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return inv, key, fmt.Errorf("invite %q: %w", id, ErrNotFound)
 	}
@@ -219,17 +225,20 @@ func (s *Store) UseInvite(ctx context.Context, id, certPin string) (Device, [spa
 		return d, key, err
 	}
 	now := s.now().Truncate(time.Second)
-	d = Device{ID: devID, UserName: inv.UserName, Name: inv.Name, Role: inv.Role, CreatedAt: now, CertPin: certPin}
+	d = Device{ID: devID, UserName: inv.UserName, Name: inv.Name, Role: inv.Role, CreatedAt: now, CertPin: certPin, ByIntegration: inv.ByIntegration}
 	err = s.tx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `UPDATE invites SET used_at = ?, device_id = ? WHERE id = ? AND used_at IS NULL`, now.Unix(), devID, id)
+		// An integration's invite once more: its user may have turned into
+		// a service user since ActiveInvite.
+		res, err := tx.ExecContext(ctx, `UPDATE invites AS i SET used_at = ?, device_id = ? WHERE i.id = ? AND i.used_at IS NULL
+			AND NOT (i.by_integration AND i.user_id IN (`+serviceUserIDs+`))`, now.Unix(), devID, id)
 		if err != nil {
 			return err
 		}
 		if n, err := res.RowsAffected(); err != nil || n != 1 {
 			return fmt.Errorf("invite %q: %w", id, ErrNotFound)
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO devices (id, user_id, name, role, spa_key, created_at, cert_pin)
-			SELECT ?, user_id, name, role, ?, ?, ? FROM invites WHERE id = ?`, devID, key[:], now.Unix(), certPin, id)
+		_, err = tx.ExecContext(ctx, `INSERT INTO devices (id, user_id, name, role, spa_key, created_at, cert_pin, by_integration)
+			SELECT ?, user_id, name, role, ?, ?, ?, by_integration FROM invites WHERE id = ?`, devID, key[:], now.Unix(), certPin, id)
 		return err
 	})
 	return d, key, err
@@ -258,7 +267,7 @@ func (s *Store) ReplayInvite(ctx context.Context, id, certPin string) (Invite, [
 	err := s.db.QueryRowContext(ctx, `SELECT i.id, u.name, i.name, i.role, i.spa_key, i.created_at, i.expires_at, i.used_at,
 			i.device_id, i.pin_proof, i.pin_tries
 		FROM invites i JOIN users u ON u.id = i.user_id JOIN devices d ON d.id = i.device_id
-		WHERE i.id = ? AND i.used_at > ? AND d.cert_pin = ?`,
+		WHERE i.id = ? AND i.used_at > ? AND d.cert_pin = ? AND NOT (i.by_integration AND i.user_id IN (`+serviceUserIDs+`))`,
 		id, s.now().Add(-InviteReplayWindow).Unix(), certPin).Scan(&inv.ID, &inv.UserName, &inv.Name, &inv.Role, &raw,
 		&created, &expires, &used, &inv.DeviceID, &inv.PinProof, &inv.PinTries)
 	if errors.Is(err, sql.ErrNoRows) {

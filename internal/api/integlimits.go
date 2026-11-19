@@ -344,10 +344,17 @@ type quietMark struct {
 }
 
 // auditQuietly writes an integration's refusal (api.denied, api.limited,
-// api.mass) to the audit once in quietEvery for its device and method.
-func (s *Server) auditQuietly(ctx context.Context, d store.Device, action, method string, now time.Time) {
+// api.mass, its target the method) or failed change (its target the
+// call's) to the audit once in quietEvery for its device and action, and
+// for a refusal its method, with the count since its last line. A count
+// after the last line waits for the next refusal; the line is written
+// even when the caller has gone.
+func (s *Server) auditQuietly(ctx context.Context, d store.Device, action, target, result string, now time.Time) {
 	in := &s.integ
-	k := quietKey{d.ID, action, method}
+	k := quietKey{device: d.ID, action: action}
+	if strings.HasPrefix(action, "api.") {
+		k.method = target
+	}
 	in.mu.Lock()
 	if in.quiet == nil {
 		in.quiet = map[quietKey]quietMark{}
@@ -371,12 +378,11 @@ func (s *Server) auditQuietly(ctx context.Context, d store.Device, action, metho
 		in.device(d).denied++
 	}
 	in.mu.Unlock()
-	result := "refused"
 	if m.missed > 0 {
-		result = fmt.Sprintf("refused; %d more since the last line", m.missed)
+		result += fmt.Sprintf("; %d more since the last line", m.missed)
 	}
 	// A refusal stands whether its line is written or not.
-	_ = s.Store.Audit(ctx, d.UserName+"/"+d.Name+actorSuffix(d.Role), action, method, result)
+	_ = s.Store.Audit(context.WithoutCancel(ctx), d.UserName+"/"+d.Name+actorSuffix(d.Role), action, target, result)
 }
 
 // methodName is a procedure's method, "/raycontrol.node.v1.NodeService/GetUser" → "GetUser".

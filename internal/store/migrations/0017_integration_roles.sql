@@ -2,6 +2,8 @@
 -- support, besides user and admin. SQLite cannot change a table's CHECK
 -- in place: both tables are made again with the same columns, rows and
 -- indexes, as 0014 did. Nothing refers to them by a foreign key.
+-- by_integration: the invite an integration made, and the device it
+-- became (§2.2): never past a regular user's data services.
 CREATE TABLE devices_new (
     id         TEXT PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -14,7 +16,8 @@ CREATE TABLE devices_new (
     lan        INTEGER NOT NULL DEFAULT 0,
     lan_at     INTEGER,
     client     TEXT,
-    client_at  INTEGER
+    client_at  INTEGER,
+    by_integration INTEGER NOT NULL DEFAULT 0
 );
 INSERT INTO devices_new (id, user_id, name, role, spa_key, created_at, revoked_at, cert_pin, lan, lan_at, client, client_at)
     SELECT id, user_id, name, role, spa_key, created_at, revoked_at, cert_pin, lan, lan_at, client, client_at FROM devices;
@@ -34,7 +37,8 @@ CREATE TABLE invites_new (
     used_at    INTEGER,
     device_id  TEXT,
     pin_proof  BLOB,
-    pin_tries  INTEGER NOT NULL DEFAULT 0
+    pin_tries  INTEGER NOT NULL DEFAULT 0,
+    by_integration INTEGER NOT NULL DEFAULT 0
 );
 INSERT INTO invites_new (id, user_id, name, role, spa_key, created_at, expires_at, used_at, device_id, pin_proof, pin_tries)
     SELECT id, user_id, name, role, spa_key, created_at, expires_at, used_at, device_id, pin_proof, pin_tries FROM invites;

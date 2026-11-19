@@ -15,6 +15,7 @@ import (
 	visibility "github.com/arngory/raycontrol/internal/gen/google/api"
 	devicev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/device/v1"
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/health"
 	"github.com/arngory/raycontrol/internal/node"
 	"github.com/arngory/raycontrol/internal/store"
 )
@@ -340,6 +341,12 @@ func TestIntegrationRoles(t *testing.T) {
 	if _, err := bill.node.SetUserEnabled(ctx, connect.NewRequest(&nodev1.SetUserEnabledRequest{Name: "carol"})); err != nil {
 		t.Fatal(err)
 	}
+	// A failed call of an integration: in the audit once in a while.
+	for range 3 {
+		if _, err := bill.node.SetUserEnabled(ctx, connect.NewRequest(&nodev1.SetUserEnabledRequest{Name: "nobody", Enabled: true})); connect.CodeOf(err) != connect.CodeNotFound {
+			t.Fatalf("an unknown user: %v", err)
+		}
+	}
 	for _, role := range []string{"admin", "billing", "support"} {
 		if _, err := bill.node.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{User: "alice", Name: "x", Role: role})); connect.CodeOf(err) != connect.CodePermissionDenied {
 			t.Errorf("billing invites %s: %v", role, err)
@@ -379,12 +386,22 @@ func TestIntegrationRoles(t *testing.T) {
 			t.Errorf("support sees of a service %v", s)
 		}
 	}
+	srv.Health = &health.Board{}
+	srv.Health.Done("acme secret-site.example.org", nil)
 	st, err := sup.node.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
 	if err != nil || st.Msg.Host != "" || len(st.Msg.SpaPorts) != 0 || st.Msg.Version == "" {
 		t.Fatalf("support's status: %v %v", st, err)
 	}
-	if _, err := sup.node.GetMetrics(ctx, connect.NewRequest(&nodev1.GetMetricsRequest{})); err != nil {
-		t.Errorf("support reads the metrics: %v", err)
+	if len(st.Msg.Loops) != 1 || st.Msg.Loops[0].Name != "acme" {
+		t.Errorf("support sees the loops %v", st.Msg.Loops)
+	}
+	all, err := c.GetStatus(ctx, connect.NewRequest(&nodev1.GetStatusRequest{}))
+	if err != nil || all.Msg.Users != st.Msg.Users || all.Msg.ActiveDevices != st.Msg.ActiveDevices {
+		t.Errorf("the counts differ: %v and %v (%v)", all.Msg, st.Msg, err)
+	}
+	m, err := sup.node.GetMetrics(ctx, connect.NewRequest(&nodev1.GetMetricsRequest{}))
+	if err != nil || strings.Contains(m.Msg.Text, "secret-site") || !strings.Contains(m.Msg.Text, `loop="acme"`) {
+		t.Errorf("support reads the metrics: %v\n%s", err, m.Msg.GetText())
 	}
 	if self, err := sup.dev.GetSelf(ctx, connect.NewRequest(&devicev1.GetSelfRequest{})); err != nil || self.Msg.Role != "support" {
 		t.Errorf("support's self: %v %v", self, err)
@@ -412,7 +429,7 @@ func TestIntegrationRoles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	denied, changes := 0, 0
+	denied, changes, failed := 0, 0, 0
 	for _, e := range audit {
 		switch {
 		case e.Action == "api.denied" && e.Actor == "integrations/billing (billing)" && e.Target == "CreateService":
@@ -423,8 +440,11 @@ func TestIntegrationRoles(t *testing.T) {
 		if e.Action == "user.expires=now" && e.Actor != "integrations/billing (billing)" {
 			t.Errorf("the expiry by %q", e.Actor)
 		}
+		if e.Action == "user.enable=true" && e.Target == "nobody" {
+			failed++
+		}
 	}
-	if denied != 1 || changes != 1 {
-		t.Errorf("audit: %d refusals of CreateService, %d changes by billing", denied, changes)
+	if denied != 1 || changes != 1 || failed != 1 {
+		t.Errorf("audit: %d refusals of CreateService, %d changes by billing, %d failures", denied, changes, failed)
 	}
 }

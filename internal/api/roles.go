@@ -191,7 +191,7 @@ func (r *Remote) roleGate() connect.UnaryInterceptorFunc {
 			now := r.clock()
 			if !mayCall(procedure, d.Role) {
 				if integration {
-					r.Server.auditQuietly(ctx, d, "api.denied", method, now)
+					r.Server.auditQuietly(ctx, d, "api.denied", method, "refused", now)
 				}
 				r.Server.countCall(d.Role, connect.CodePermissionDenied.String())
 				if d.Role == "admin" && slices.Contains(methodRoles[procedure], labelNode) {
@@ -203,7 +203,7 @@ func (r *Remote) roleGate() connect.UnaryInterceptorFunc {
 			if integration {
 				release, err := r.Server.admit(ctx, d, method, now)
 				if errors.Is(err, errLimited) {
-					r.Server.auditQuietly(ctx, d, "api.limited", method, now)
+					r.Server.auditQuietly(ctx, d, "api.limited", method, "refused", now)
 					r.Server.countCall(d.Role, connect.CodeResourceExhausted.String())
 					return nil, connect.NewError(connect.CodeResourceExhausted, err)
 				}

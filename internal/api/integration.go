@@ -88,7 +88,7 @@ func (s *Server) massGuard(ctx context.Context, method string, confirm bool) (do
 	now := time.Now()
 	done, confirmed, err := s.massAction(ctx, confirm, now)
 	if errors.Is(err, errMassLimit) {
-		s.auditQuietly(ctx, d, "api.mass", method, now)
+		s.auditQuietly(ctx, d, "api.mass", method, "refused", now)
 	}
 	if err != nil {
 		return nil, "", err

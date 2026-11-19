@@ -271,6 +271,12 @@ func (s *Server) done(ctx context.Context, action, target string, err error) err
 		result = "error: " + err.Error()
 	}
 	changed := err == nil
+	// An integration's failed call: once in a while (integrations-v1
+	// §2.5), so that a broken one does not fill the log.
+	if d, ok := caller(ctx); ok && err != nil && store.IntegrationRole(d.Role) {
+		s.auditQuietly(ctx, d, action, target, result, time.Now())
+		return toConnect(err)
+	}
 	if aerr := s.Store.Audit(ctx, actorFrom(ctx), action, target, result); aerr != nil && err == nil {
 		err = aerr
 	}
@@ -296,6 +302,9 @@ func unixOrZero(t *time.Time) int64 {
 }
 
 func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetStatusRequest]) (*connect.Response[nodev1.GetStatusResponse], error) {
+	// The counts are the node's, whoever asks: numbers only.
+	integration := store.IntegrationRole(callerRole(ctx))
+	ctx = store.AllUsers(ctx)
 	users, err := s.Store.ListUsers(ctx)
 	if err != nil {
 		return nil, toConnect(err)
@@ -335,6 +344,11 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 		resp.SpaPorts = append(resp.SpaPorts, uint32(p))
 	}
 	for _, l := range s.Health.Loops() {
+		// A loop's name may carry a site's or a zone's ("acme <site>",
+		// "dns-zone <service> <zone>"): an integration gets its kind.
+		if integration {
+			l.Name, _, _ = strings.Cut(l.Name, " ")
+		}
 		resp.Loops = append(resp.Loops, &nodev1.LoopHealth{Name: l.Name, LastOk: unixOf(l.LastOK), LastError: unixOf(l.LastErr),
 			Error: l.Err, Runs: l.Runs, Errors: l.Errors, Failing: l.Failing(), Detail: l.Detail})
 	}
@@ -922,7 +936,7 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 			continue
 		}
 		for _, id := range u.Services {
-			if svc.ID != id {
+			if svc.ID != id || d.ByIntegration && store.NotForIntegrationDevices(svc.Kind) {
 				continue
 			}
 			bs := node.BundleService{ID: uint16(svc.ID), Kind: svc.Kind, Name: svc.Name}

@@ -1532,10 +1532,9 @@ func splitList(s string) []string {
 	return out
 }
 
-// parseExpiry accepts a date (2006-01-02, end of that day UTC) or a duration
-// with an optional d suffix for days.
 // userExpires sets when a user expires (rayctl user expires NAME WHEN,
-// integrations-v1 §11): a date, a time from now, never or now.
+// integrations-v1 §11): a date, a time from now, never or now. "now" is
+// the node's: a time long past, which it takes for its own now.
 func (c *cli) userExpires(ctx context.Context, args []string) error {
 	if err := need(args, 2); err != nil {
 		return err
@@ -1544,7 +1543,9 @@ func (c *cli) userExpires(ctx context.Context, args []string) error {
 	switch args[1] {
 	case "never":
 	case "now":
-		at = time.Now().Unix()
+		at = 1
+	case "":
+		return errors.New("when: a date (2006-01-02), a time from now (30d, 12h), never or now")
 	default:
 		var err error
 		if at, err = parseExpiry(args[1], time.Now()); err != nil {
@@ -1567,6 +1568,8 @@ func (c *cli) userExpires(ctx context.Context, args []string) error {
 	})
 }
 
+// parseExpiry accepts a date (2006-01-02, end of that day UTC) or a duration
+// with an optional d suffix for days.
 func parseExpiry(s string, now time.Time) (int64, error) {
 	if s == "" {
 		return 0, nil

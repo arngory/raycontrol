@@ -12,6 +12,14 @@ import (
 // support (integrations-v1 §2.1).
 func IntegrationRole(role string) bool { return role == "billing" || role == "support" }
 
+// NotForIntegrationDevices reports a kind of service a device made of an
+// integration's invite never reaches, whatever its user has: an
+// integration gives data services only, and its user may turn into a
+// service user later (integrations-v1 §2.2).
+func NotForIntegrationDevices(kind string) bool {
+	return kind == "ssh" || kind == "api" || kind == "site"
+}
+
 // validRole is a device role the node knows.
 func validRole(role string) bool { return role == "user" || role == "admin" || IntegrationRole(role) }
 
@@ -27,6 +35,13 @@ type regularOnlyKey struct{}
 // is out of reach all the same.
 func RegularOnly(ctx context.Context) context.Context {
 	return context.WithValue(ctx, regularOnlyKey{}, true)
+}
+
+// AllUsers is ctx for a read of the whole node by a caller of RegularOnly:
+// the counts of the status and the metrics, numbers only, the same for
+// every role (integrations-v1 §2.2).
+func AllUsers(ctx context.Context) context.Context {
+	return context.WithValue(ctx, regularOnlyKey{}, false)
 }
 
 // regularOnly reports a caller of RegularOnly: the bool argument of the
@@ -88,14 +103,16 @@ func (s *Store) SetUserExpiry(ctx context.Context, name string, at *time.Time) (
 		if _, err := tx.ExecContext(ctx, `UPDATE users SET expires_at = ? WHERE id = ?`, value, id); err != nil {
 			return err
 		}
-		u, err = scanUser(tx.QueryRowContext(ctx, userSelect+` WHERE u.id = ?`, id))
+		if u, err = scanUser(tx.QueryRowContext(ctx, userSelect+` WHERE u.id = ?`, id)); err != nil {
+			return err
+		}
+		u.Services, err = userServices(ctx, tx, u.ID)
 		return err
 	})
 	if err != nil {
 		return User{}, err
 	}
-	u.Services, err = s.userServices(ctx, u.ID)
-	return u, err
+	return u, nil
 }
 
 // maxExpiry is the last second of the year 9999: an expiry later than any

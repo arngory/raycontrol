@@ -108,7 +108,12 @@ remote|auto`), `uninstall`, `backup`, `restore`, `debug on|off`, `egress block|a
 | `rayctl -remote laptop.rcdev status` | любая команда `status`, `node`, `user`, `service`, `device`, `audit`, `admin`, `ports`, `relay` (`list`, `ports`, `set`), `dns`, `summary`, `app-mirror`, `client`, `metrics`, `debug`, `version` через API |
 | `rayctl -remote laptop.rcdev remote rotate` | новый клиентский ключ, старый перестаёт работать |
 | `rayctl -remote laptop.rcdev remote whoami` | какое это устройство: ID, пользователь, имя, роль, нода |
-| `rayctl user add integrations -services ""` → `rayctl device invite integrations billing -role billing` | устройство внешней системы (бот, биллинг; [integrations-v1](../spec/integrations-v1.md)): пользователь без сервисов, приглашение роли `billing` (заводит и ведёт обычных пользователей, приглашения только роли `user`) или `support` (только читает, без заметок). Служебных пользователей (с устройствами `admin`, `billing`, `support`, сервисами `ssh`, `api`) интеграция не видит. Выпуск — после пределов частоты (этап 1b) |
+| `rayctl user add integrations -services ""` → `rayctl device invite integrations billing -role billing` | устройство внешней системы (бот, биллинг; [integrations-v1](../spec/integrations-v1.md)): пользователь без сервисов, приглашение роли `billing` (заводит и ведёт обычных пользователей, приглашения только роли `user`) или `support` (только читает, без заметок). Служебных пользователей (с устройствами `admin`, `billing`, `support`, сервисами `ssh`, `api`) интеграция не видит (нода новее v0.33) |
+| `rayctl integration [status]` | устройства интеграций: вызовы, отказы, превышения с запуска rayd; массовые действия за час; пределы |
+| `rayctl integration set support-notes on\|off` | `support` видит заметки пользователей (по умолчанию нет) |
+| `rayctl integration set mass-limit 50` | root: удалений и выключений от `billing` за час, сверх — только с `confirm_mass`; `0` — каждое с ним |
+| `rayctl integration limits billing read=100,10/s write=50,5/s heavy=20,60/h inflight=4` | root: пределы частоты роли или устройства (`DEVICE_ID`), `-reset` — по умолчанию; сверх — `resource_exhausted` |
+| `rayctl traffic counting on\|auto` | `on`: Xray считает трафик и без лимитов, и первый лимит или снятие последнего его не перезапускают; так `billing` может задавать лимиты (иначе — `failed_precondition`) |
 
 `rayctl` для своей машины: Linux — из архива ноды; macOS и FreeBSD — архивы `rayctl-darwin-arm64`,
 `rayctl-darwin-amd64` и `rayctl-freebsd-amd64` (`.tar.gz`) с v0.26.0, под той же подписью

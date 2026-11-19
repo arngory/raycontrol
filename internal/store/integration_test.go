@@ -180,8 +180,46 @@ func TestIntegrationUsers(t *testing.T) {
 		t.Fatalf("after 9999: %v", err)
 	}
 
+	// An integration's invite does not register once its user is a
+	// service user, and the device one made reaches data services only,
+	// whatever its user gets later (integrations-v1 §2.2).
+	user("carol", "reality")
+	user("dave", "reality")
+	late, _, err := s.CreateInvite(ictx, "carol", "phone", "user", time.Hour)
+	if err != nil || !late.ByIntegration {
+		t.Fatalf("an integration's invite: %+v %v", late, err)
+	}
+	early, _, err := s.CreateInvite(ictx, "dave", "phone", "user", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	daveDev, _, err := s.UseInvite(ctx, early.ID, "pin-dave")
+	if err != nil || !daveDev.ByIntegration {
+		t.Fatalf("an integration's invite used: %+v %v", daveDev, err)
+	}
+	for _, name := range []string{"carol", "dave"} {
+		if err := s.SetUserServices(ctx, name, []int64{svc["reality"].ID, svc["ssh"].ID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := s.ActiveInvite(ctx, late.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an integration's invite of a service user: %v", err)
+	}
+	if _, _, err := s.UseInvite(ctx, late.ID, "pin-carol"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an integration's invite of a service user used: %v", err)
+	}
+	// billing keeps what it does not give: the subscription stays.
+	user("erin", "reality", "subscription")
+	if err := s.SetUserServices(ictx, "erin", []int64{svc["reality"].ID}); err != nil {
+		t.Fatal(err)
+	}
+	if u, err := s.UserByName(ctx, "erin"); err != nil || len(u.Services) != 2 {
+		t.Fatalf("erin's services after billing's: %+v %v", u.Services, err)
+	}
+
 	// SPA: an integration's device to the API alone, without the
-	// subscription; an admin's with it.
+	// subscription; an admin's with it; a user's device that came of an
+	// integration's invite without ssh, whatever its user has.
 	spaDevices, err := s.SPADevices(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -189,6 +227,9 @@ func TestIntegrationUsers(t *testing.T) {
 	for _, d := range spaDevices {
 		if d.ID == dev.ID && !slices.Equal(d.Allowed, []uint16{uint16(svc["api"].ID)}) {
 			t.Errorf("billing's scope: %v", d.Allowed)
+		}
+		if d.ID == daveDev.ID && (slices.Contains(d.Allowed, uint16(svc["ssh"].ID)) || !slices.Contains(d.Allowed, uint16(svc["reality"].ID))) {
+			t.Errorf("the scope of a device of an integration's invite: %v", d.Allowed)
 		}
 	}
 }

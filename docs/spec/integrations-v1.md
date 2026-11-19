@@ -1,9 +1,11 @@
 # integrations-v1: внешние системы у ноды (боты, биллинг)
 
-Статус: **этап 1 в коде, не выпущен** (2026-11-19): роли `billing` и `support` (§2.1–§2.3), аудит без пределов
-(§2.5), `GetUser` и `SetUserExpiry` (§10), `rayctl device invite -role billing|support` и `rayctl user expires`
-(§11). Выпуск — вместе с этапом 1b: пределы частоты (§2.6), предохранитель массовых действий и учёт трафика (§2.4),
-настройки интеграций и заметки для `support` (§2.2). Дальше — статические адреса (§3.2), события (§4), OpenAPI (§5).
+Статус: **этапы 1 и 1b в коде, не выпущены** (2026-11-19): роли `billing` и `support` (§2.1–§2.3), аудит (§2.5),
+пределы частоты (§2.6), предохранитель массовых действий и учёт трафика (§2.4), заметки для `support` (§2.2),
+`GetUser`, `SetUserExpiry`, `GetIntegrationSettings`, `SetIntegrationSettings` (§10), `rayctl device invite -role
+billing|support`, `user expires`, `integration`, `traffic counting` (§11). Без событий: администратору о
+предохранителе пока только аудит `api.mass`, метрика и `rayctl integration status`. Дальше — статические адреса
+(§3.2), события (§4), OpenAPI (§5).
 Решение владельца 2026-11-16 (цитата — §13; [decisions](../decisions.md) R4-47). Вопросы §14 владелец закрыл 2026-11-16: «в целом по рекомендации».
 Основа: удалённый API — [api-v1](api-v1.md) (R3-3), стук — [spa-v2](spa-v2.md), уведомления — webhook (K-2),
 журналы доступа выключены (D-12), лимиты — [traffic-limit-v1](traffic-limit-v1.md) и
@@ -78,6 +80,12 @@ rayctl remote enroll 'RCINV2:…' -o billing.rcdev   # файл устройст
 `billing` или `support`, или сервис вида `ssh` или `api`. Остальные — **обычные**. Неиспользованное приглашение
 считается и истёкшим, пока его не отозвали и не убрала чистка: так строже.
 
+Приглашение, которое выдала интеграция, и устройство из него помечены (`by_integration`):
+- такое приглашение не регистрируется, если его пользователь с тех пор стал служебным (`not_found`);
+- такое устройство не получает `ssh`, `api` и `site` ни в scope SPA, ни в пакете, что бы потом ни дали его
+  пользователю. Иначе `billing` выдал бы приглашение обычному пользователю, зарегистрировал его сам и после
+  `ssh` у пользователя открыл бы себе SSH ноды.
+
 `billing` и `support` видят только обычных (`support` только видит):
 - `ListUsers`, `ListDevices` служебных не показывают;
 - метод по имени служебного отвечает `not_found`, как для неизвестного: ни выключить администратора, ни удалить его
@@ -90,6 +98,12 @@ rayctl remote enroll 'RCINV2:…' -o billing.rcdev   # файл устройст
 
 `billing` назначает только сервисы данных: `reality`, `hy2-masq`, `hy2-obfs`, `naive`, `doh`, `yggdrasil`, `dnstt`,
 `masterdns`, `slipstream`, `olcrtc`, `openflux`, `inner`. `ssh`, `api`, `subscription`, `site` — `permission_denied`.
+`SetUserServices` от `billing` меняет только сервисы данных: `site` и `subscription`, которые дал администратор,
+остаются.
+
+Числа в `GetStatus` (`users`, `active_devices`) и в `GetMetrics` — по всей ноде, для любой роли одинаковые: это
+числа, а не имена. Имена циклов интеграциям приходят только видом (`acme`, `dns-zone`): в полном имени бывают сайт
+и зона. В метриках `support` зона — `<вид>#<n>/zone<i>`, цикл — его вид.
 Сервис пользователя попадает в scope SPA его устройств (`store.SPADevices`), так что `ssh` у пользователя открыл бы
 порт SSH ноды.
 
@@ -187,8 +201,9 @@ OpenAPI (§5.1).
 | администратор | как сейчас | `device.allow` (§3.4), `integration.set` (заметки для `support`; предел массовых действий — только root), `integration.limits` (только root), `webhook.add`, `webhook.set`, `webhook.del`, `webhook.verify`, `webhook.rotate`, `webhook.test`, `webhook.retry`; `webhook.gone` и итог проверки адреса пишет `rayd` |
 
 - Отказ по роли — `api.denied`, цель `<метод>`; превышение — `api.limited`; отказ предохранителя — `api.mass`. Не
-  чаще строки в 10 минут на устройство и метод, с числом за это время. Иначе сломанная интеграция заполнит журнал
-  (D-11, 90 дней).
+  чаще строки в 10 минут на устройство и метод, с числом с прошлой строки. Неудачный вызов интеграции (не найден,
+  отказ аргументу по роли) — тоже не чаще строки в 10 минут на устройство и действие. Иначе сломанная интеграция
+  заполнит журнал (D-11, 90 дней). Число после последней строки ждёт следующего отказа.
 - Чтения не пишутся ни у кого, как сейчас (кроме `ExportUser`). Число вызовов и время последнего — в памяти rayd, в
   `rayctl integration status` (§11). Это сервер интеграции, а не человек: D-12 о нём не говорит.
 - В аудите нет ни секретов, ни адресов клиентов. Адреса из списка интеграции в `device.allow` есть: это серверы,
@@ -205,8 +220,9 @@ OpenAPI (§5.1).
 | `admin` | как сейчас, без предела | | | |
 
 - Сверх — `resource_exhausted`, вызов не выполнен. Повтор безопасен: методы `billing` повторяемы (§5.2).
-- Общий предел на все устройства интеграций — 20 вызовов в секунду: интеграции не забирают у rayd время цикла
-  `apply`.
+- Общий предел на все устройства интеграций — 20 вызовов в секунду с запасом 200 (запас чтений `billing` и
+  `support` вместе): интеграции не забирают у rayd время цикла `apply`.
+- Новые пределы действуют с полного запаса: корзины всех устройств начинаются заново.
 - Неизвестный сертификат — `unauthenticated`. Новые соединения с адреса считает предел входящих периметра
   (conn-limit-v1 §6.2). Адреса из списков интеграций от него не освобождены, в отличие от адресов администратора.
 - Числа таблицы — значения по умолчанию, в коде. root на ноде меняет их для роли или для одного устройства: `rayctl
@@ -807,8 +823,11 @@ HTTPS, хоть статический хостинг: команды подпи
     {User user}`;
   - `SetDeviceAllow {id; repeated string prefixes} → {Device device}`; у `Device` — `allow`, `last_call`;
   - методы webhook (§2.3) и их сообщения, `ListEvents` (§4.9);
-  - `GetIntegrationSettings`, `SetIntegrationSettings`: пределы частоты, предел массовых действий, заметки для
-    `support` (§2.2, §2.4, §2.6);
+  - `GetIntegrationSettings`, `SetIntegrationSettings`: пределы частоты (`Rate {burst; per_hour}`, `IntegrationLimits
+    {read; write; heavy; inflight}` для роли или устройства, `to_default` — назад к умолчанию), предел массовых
+    действий, заметки для `support`, учёт трафика `on`/`auto` (§2.2, §2.4, §2.6). В ответе ещё устройства
+    интеграций с их вызовами с запуска rayd и массовые действия за час (§11). Учёт трафика — тоже здесь: отдельного
+    метода для одной настройки не заводили;
   - `confirm_mass` в `DeleteUserRequest` и `SetUserEnabledRequest` (§2.4); нода до него поле не читает, и
     предохранителя у неё нет;
   - значения `role`: `billing`, `support` (строка, поле прежнее);
@@ -839,7 +858,7 @@ rayctl device list                               # ROLE, ACCESS, LAST CALL
 rayctl integration status                        # по устройствам интеграций: вызовы, отказы, превышения за сутки
 rayctl integration set support-notes on|off      # §2.2: admin
 rayctl integration set mass-limit 50             # §2.4: только root
-rayctl integration limits [ROLE|DEVICE_ID] [read=… write=… heavy=… inflight=…] [-reset]   # §2.6: только root
+rayctl integration limits [ROLE|DEVICE_ID] [read=100,10/s write=50,5/s heavy=20,60/h inflight=4] [-reset]   # §2.6: только root
 rayctl integration gateway -device F -listen …   # §5.4
 rayctl -remote F events [-follow] [-after SEQ]   # лента ListEvents, §4.9
 rayctl knock [-keep] [-ttl 10m] @F               # §3.1
@@ -875,7 +894,7 @@ rayctl webhook add|list|set|verify|del|test|rotate|retry|status   # §4.6, ле�
 - `raycontrol_webhook_dropped_total{endpoint}`, `raycontrol_webhook_undelivered_total{endpoint}`;
 - `raycontrol_webhook_last_success_timestamp_seconds{endpoint}`;
 - `raycontrol_webhook_verify_total{endpoint, result}`: `ok`, `mismatch`, `http`, `timeout`, `tls`, `refused`;
-- `raycontrol_api_calls_total{role, code}`, `raycontrol_api_limited_total{role}`;
+- `raycontrol_api_calls_total{role, code}` (все роли удалённого API, `admin` тоже), `raycontrol_api_limited_total{role}`;
 - `raycontrol_integration_mass_actions_total{result}`: `done`, `refused`, `confirmed`;
 - `raycontrol_devices{role, state}` — с ролями `billing` и `support`.
 
