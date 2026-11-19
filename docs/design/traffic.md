@@ -7,7 +7,7 @@
 
 | Профиль | TCP | UDP | DNS | ICMP (ping, mtr) |
 |---|---|---|---|---|
-| REALITY (VLESS Vision) | да | да, XUDP внутри TCP (mux) | любой: UDP/TCP 53, DoT, DoH | нет |
+| REALITY (VLESS Vision) | да | да: у Niko каждая UDP-сессия — своё соединение VLESS по TCP, без XUDP; клиент Xray может нести XUDP в mux | любой: UDP/TCP 53, DoT, DoH | нет |
 | Hysteria2 (masq, obfs) | да | да, **родные датаграммы QUIC** | любой | нет |
 | naive (HTTP/2, HTTP/3) | да | с v0.20.0 и `uot=2`: UDP over TCP v2 внутри потока | до v0.20.0 только по TCP (DoT, DoH); с UoT любой | с v0.21.0 и `icmp=1` (включает root): echo шлёт нода, §4 |
 | DoH (сервис ноды) | — | — | это и есть DNS | — |
@@ -58,7 +58,7 @@ UDP везде одного типа NAT: **port-restricted cone**.
 | | Как идёт | Потеря пакета | Годится |
 |---|---|---|---|
 | Hysteria2 | датаграммы QUIC, без повторов | теряется один пакет, как в UDP | лучше всего: звонки, игры, WireGuard/WARP, QUIC |
-| REALITY | XUDP в mux поверх TCP | TCP повторяет, следующие пакеты ждут (head-of-line) | работает; при потерях — рывки задержки |
+| REALITY | у Niko — своё соединение VLESS по TCP на UDP-сессию (`packet_encoding` пустой, conn-limit-v1 §11 п. 4); у клиента Xray — XUDP в mux | TCP повторяет, следующие пакеты ждут (head-of-line) | работает; при потерях — рывки задержки |
 | naive UoT | длина + пакет в потоке HTTP/2 или HTTP/3 | то же: поток надёжный | как REALITY |
 | DNS-туннели | XUDP через inner поверх KCP/QUIC-потока | то же, и канал узкий | мессенджеры, не звонки |
 
