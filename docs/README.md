@@ -54,6 +54,7 @@ app-attest-v1, rules-v1, [names-v1.md](spec/names-v1.md) (клиент ходи�
 | [research/naive-default.md](research/naive-default.md) | naive как профиль по умолчанию |
 | [research/naive-sni-rotation.md](research/naive-sni-rotation.md) | Смена имени naive (реализовано в v0.29.0) |
 | [research/platforms-and-hosts.md](research/platforms-and-hosts.md) | `rayctl` и нода вне Linux, LXC и OpenVZ, нода без публичного адреса |
+| [research/xhttp.md](research/xhttp.md) | XHTTP на ноде и relay, CDN как вид relay (к v0.36.0, R4-50) |
 | [research/mihomo-review.md](research/mihomo-review.md) | Что взять из mihomo для маршрутизации |
 | [research/review.md](research/review.md) | Разбор безопасности, качества и производительности (2026-11-04) |
 | [research/client-requirements.md](research/client-requirements.md) | Требования к клиенту до его первой версии |
