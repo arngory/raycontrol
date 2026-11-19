@@ -43,7 +43,7 @@ func TestProbeThroughXray(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	provision.Init(ctx, st, provision.Options{Host: "127.0.0.1", Domain: "example.com"})
+	provision.Init(ctx, st, provision.Options{Host: "127.0.0.1", Domain: "example.com", Ports: provision.PortChoice{Sub: subPort(t)}})
 	dns, err := provision.CreateService(ctx, st, store.Service{Kind: "dnstt", Name: "dns", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
