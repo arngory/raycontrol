@@ -86,7 +86,7 @@ func readOpenAPI(t *testing.T, file string) openAPIDoc {
 }
 
 // TestOpenAPIRoles: the OpenAPI documents of the integrations' roles
-// (api/openapi, integrations-v1 §5.1) list the methods the gate lets the
+// in api/openapi (integrations-v1 §5.1) list the methods the gate lets the
 // role call, no more and no fewer, and each message of their answers has
 // the fields the role sees (testdata/integration-fields.txt), no more and
 // no fewer: both come from the same visibility rules, and a document made

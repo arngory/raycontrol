@@ -3,6 +3,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -242,8 +244,9 @@ func TestDeviceFileOpened(t *testing.T) {
 // closed to others, and says the pin as curl takes it.
 func TestRemoteExport(t *testing.T) {
 	id := deviceFile(t)
-	// A real pin: base64url SHA-256, no padding.
-	id.bundle.API.Pin = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU"
+	// A pin as the node gives it: a SHA-256 in base64url, no padding.
+	sum := sha256.Sum256([]byte("the node's key"))
+	id.bundle.API.Pin = base64.RawURLEncoding.EncodeToString(sum[:])
 	var err error
 	if id.raw, err = id.bundle.Encode(); err != nil {
 		t.Fatal(err)
@@ -265,7 +268,7 @@ func TestRemoteExport(t *testing.T) {
 	if err != nil || !cert.Leaf.Equal(id.cert.Leaf) {
 		t.Fatalf("the PEM does not read back: %v", err)
 	}
-	if !strings.Contains(said.String(), "--pinnedpubkey 'sha256//47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='") ||
+	if !strings.Contains(said.String(), "--pinnedpubkey 'sha256//"+base64.StdEncoding.EncodeToString(sum[:])+"'") ||
 		!strings.Contains(said.String(), "https://192.0.2.1:8443/raycontrol.device.v1.DeviceService/GetSelf") {
 		t.Fatalf("said:\n%s", said.String())
 	}
