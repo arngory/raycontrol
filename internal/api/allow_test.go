@@ -95,9 +95,31 @@ func TestDeviceAllow(t *testing.T) {
 	if !slices.ContainsFunc(ports.Msg.Ports, func(np *nodev1.NodePort) bool { return np.Name == "api" && np.Access == "spa,static" }) {
 		t.Fatalf("ports: %v", ports.Msg.Ports)
 	}
-	// A relay inside an integration's addresses would lose its devices.
+	// A relay inside an integration's addresses would lose its devices,
+	// the integration's user disabled or not.
 	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "rl", Address: "198.51.100.7"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("a relay at an integration's address: %v", err)
+	}
+	if _, err := c.SetUserEnabled(ctx, connect.NewRequest(&nodev1.SetUserEnabledRequest{Name: "integrations", Enabled: false})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "rl", Address: "198.51.100.7"})); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("a relay at a disabled integration's address: %v", err)
+	}
+	if snap, _ := p.snapshot(ctx); len(snap.IntegPrefixes) != 0 {
+		t.Fatalf("a disabled user's device's addresses in the perimeter: %v", snap.IntegPrefixes)
+	}
+	if _, err := c.SetUserEnabled(ctx, connect.NewRequest(&nodev1.SetUserEnabledRequest{Name: "integrations", Enabled: true})); err != nil {
+		t.Fatal(err)
+	}
+	// Blank entries are no list; an invite of another role says so before
+	// the addresses are looked at (they would tell the node's and the
+	// relays').
+	if _, err := set(billID, " ", ""); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("blank entries: %v", err)
+	}
+	if _, err := c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{User: "alice", Name: "tab", Role: "user", Allow: []string{"203.0.113.5"}})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("a user's invite with the node's address: %v", err)
 	}
 
 	// Calling from elsewhere (127.0.0.1): refused, once in the audit; the
@@ -187,5 +209,40 @@ func TestDeviceAllow(t *testing.T) {
 		return e.Action == "device.allow" && e.Target == billID+" integrations/billing: cleared"
 	}) {
 		t.Fatal("no cleared line")
+	}
+}
+
+func TestProcedureName(t *testing.T) {
+	if got := procedureName("/raycontrol.node.v1.NodeService/ListUsers"); got != "ListUsers" {
+		t.Fatal(got)
+	}
+	for _, junk := range []string{"/x/evil\nfake-line", "/raycontrol.node.v1.NodeService/Nope", ""} {
+		if got := procedureName(junk); got != "other" {
+			t.Fatalf("%q: %q", junk, got)
+		}
+	}
+}
+
+// TestCheckSourceNoAddress: while lists exist, a call with no address to
+// check gets nowhere.
+func TestCheckSourceNoAddress(t *testing.T) {
+	srv, _, _ := startServer(t)
+	ctx := context.Background()
+	r := &Remote{Server: srv}
+	if _, err := r.checkSource(ctx, "pipe", "", "/raycontrol.device.v1.DeviceService/GetSelf"); err != nil {
+		t.Fatalf("no lists: %v", err)
+	}
+	if _, err := srv.Store.CreateUser(ctx, store.User{Name: "integrations", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := srv.Store.CreateInviteAllow(ctx, "integrations", "billing", "billing", time.Hour,
+		[]netip.Prefix{netip.MustParsePrefix("198.51.100.7/32")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.checkSource(ctx, "pipe", "", "/raycontrol.device.v1.DeviceService/GetSelf"); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("no address with lists: %v", err)
+	}
+	if _, err := r.checkSource(ctx, "[fe80::1%eth0]:443", "", "/raycontrol.device.v1.DeviceService/GetSelf"); err != nil {
+		t.Fatalf("a zoned address in no list: %v", err)
 	}
 }

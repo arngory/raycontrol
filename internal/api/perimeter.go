@@ -178,11 +178,9 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 			if !svc.Enabled || svc.Kind != "api" {
 				continue
 			}
-			ports, _ := provision.ServicePorts(svc, ssh)
-			for _, port := range ports {
-				if port.Proto == "tcp" {
-					snap.IntegPorts = append(snap.IntegPorts, &perimeterv1.Port{Proto: port.Proto, Port: uint32(port.Num)})
-				}
+			// The port rayd serves the API on (its first), TCP.
+			if ports, err := svc.Ports(); err == nil && len(ports) > 0 && ports[0].Proto == "tcp" {
+				snap.IntegPorts = append(snap.IntegPorts, &perimeterv1.Port{Proto: "tcp", Port: uint32(ports[0].Num)})
 			}
 		}
 		if len(snap.IntegPorts) > 0 {

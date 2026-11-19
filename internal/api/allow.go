@@ -36,8 +36,12 @@ func prefixStrings(ps []netip.Prefix) []string {
 // from it (§3.2).
 func (s *Server) checkAllow(ctx context.Context, list []string) ([]netip.Prefix, []string, error) {
 	allow, warnings, err := store.CheckAllow(list)
-	if err != nil || len(allow) == 0 {
-		return allow, warnings, err
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(allow) == 0 {
+		// Blank entries are no list: clearing one is asked for with none.
+		return nil, nil, fmt.Errorf("%w: no address in %q", store.ErrInvalid, list)
 	}
 	own, err := s.localAddrs()
 	if err != nil {
@@ -145,17 +149,21 @@ var errSource = errors.New("not from this address: it is an integration's, or no
 func (r *Remote) checkSource(ctx context.Context, remoteAddr, pin, path string) (context.Context, error) {
 	var src source
 	if ap, err := netip.ParseAddrPort(remoteAddr); err == nil {
-		src.addr = ap.Addr().Unmap()
+		src.addr = ap.Addr().Unmap().WithZone("")
 	}
 	lists, err := r.Server.Store.AllowLists(ctx)
 	if err != nil {
 		return ctx, connect.NewError(connect.CodeInternal, err)
 	}
+	if len(lists) > 0 && !src.addr.IsValid() {
+		// No address to check (not a TCP peer): nobody, while lists exist.
+		return ctx, connect.NewError(connect.CodePermissionDenied, errSource)
+	}
 	for _, e := range lists {
 		if e.DeviceID != "" && pin != "" && e.CertPin == pin {
-			if !src.addr.IsValid() || !store.AllowCovers(e.Allow, src.addr) {
+			if !store.AllowCovers(e.Allow, src.addr) {
 				d := store.Device{ID: e.DeviceID, UserName: e.UserName, Name: e.Name, Role: e.Role}
-				r.Server.auditQuietly(ctx, d, "api.address", methodName(path), "refused: not from its addresses", r.clock())
+				r.Server.auditQuietly(ctx, d, "api.address", procedureName(path), "refused: not from its addresses", r.clock())
 				r.Server.countCall(e.Role, connect.CodePermissionDenied.String())
 				return ctx, connect.NewError(connect.CodePermissionDenied, errSource)
 			}
@@ -169,6 +177,16 @@ func (r *Remote) checkSource(ctx context.Context, remoteAddr, pin, path string) 
 		return ctx, connect.NewError(connect.CodePermissionDenied, errSource)
 	}
 	return context.WithValue(ctx, sourceKey{}, src), nil
+}
+
+// procedureName is a request path's method for the audit, "other" for a
+// path that is no method of the API: the path is the caller's, and would
+// make each refusal a line of its own (or a line of its own text).
+func procedureName(path string) string {
+	if _, ok := methodRoles[path]; ok {
+		return methodName(path)
+	}
+	return "other"
 }
 
 // inviteSource lets an invite register from where it may (integrations-v1

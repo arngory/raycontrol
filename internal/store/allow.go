@@ -195,14 +195,16 @@ func (s *Store) AllowLists(ctx context.Context) ([]AllowEntry, error) {
 
 // AllowPrefixes are the prefixes the perimeter opens to the API without a
 // knock: of devices that may connect now and of invites that may still
-// register.
+// register (ActiveInvite's).
 func (s *Store) AllowPrefixes(ctx context.Context) ([]netip.Prefix, error) {
 	now := s.now().Unix()
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT d.allow FROM devices d JOIN users u ON u.id = d.user_id
 		WHERE d.allow IS NOT NULL AND d.revoked_at IS NULL AND u.enabled = 1 AND (u.expires_at IS NULL OR u.expires_at > ?)
 		UNION ALL
-		SELECT allow FROM invites WHERE allow IS NOT NULL AND used_at IS NULL AND expires_at > ?`, now, now)
+		SELECT i.allow FROM invites i JOIN users u ON u.id = i.user_id
+		WHERE i.allow IS NOT NULL AND i.used_at IS NULL AND i.expires_at > ? AND u.enabled = 1 AND (u.expires_at IS NULL OR u.expires_at > ?)
+			AND NOT (i.by_integration AND i.user_id IN (`+serviceUserIDs+`))`, now, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -256,6 +258,9 @@ var ErrAllowRole = fmt.Errorf("%w: addresses are for an integration's device (bi
 // not revoked (integrations-v1 §3.2); none puts it back to SPA. It returns
 // the device as ListDevices has it.
 func (s *Store) SetDeviceAllow(ctx context.Context, id string, allow []netip.Prefix) (Device, error) {
+	if len(allow) > MaxAllowPerDevice {
+		return Device{}, fmt.Errorf("%w: %d addresses, at most %d a device", ErrInvalid, len(allow), MaxAllowPerDevice)
+	}
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		var role string
 		err := tx.QueryRowContext(ctx, `SELECT role FROM devices WHERE id = ? AND revoked_at IS NULL`, id).Scan(&role)

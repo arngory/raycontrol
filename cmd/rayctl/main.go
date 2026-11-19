@@ -1272,7 +1272,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 					state += fmt.Sprintf(", PIN (%d tries)", inv.PinTries)
 				}
 				access := "-"
-				if len(inv.Allow) > 0 {
+				if inv.Role == "billing" || inv.Role == "support" {
 					access = accessOf(inv.Allow)
 				}
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t-\t-\t%s\t-\t%s\t-\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.CreatedAt), state, access)
@@ -1309,9 +1309,9 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		if *format != "rcinv1" && *format != "rcinv2" {
 			return fmt.Errorf("%w: -format rcinv1 or rcinv2", errUsage)
 		}
-		var allowList []string
-		if *allow != "" {
-			allowList = strings.Split(*allow, ",")
+		allowList := splitList(*allow)
+		if *allow != "" && len(allowList) == 0 {
+			return fmt.Errorf("%w: -allow with no address", errUsage)
 		}
 		r, err := c.c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{
 			User: args[0], Name: args[1], Role: *role, TtlSeconds: int64(ttl.Seconds()), Pin: *withPIN, Allow: allowList}))
@@ -1460,8 +1460,8 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		var list []string
 		switch {
 		case *off && fs.NArg() == 0:
-		case !*off && fs.NArg() == 1 && strings.TrimSpace(fs.Arg(0)) != "":
-			list = strings.Split(fs.Arg(0), ",")
+		case !*off && fs.NArg() == 1 && len(splitList(fs.Arg(0))) > 0:
+			list = splitList(fs.Arg(0))
 		default:
 			return fmt.Errorf("%w: device allow ID ADDR[,ADDR...] or device allow ID -clear", errUsage)
 		}

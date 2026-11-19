@@ -7,3 +7,6 @@
 ALTER TABLE devices ADD COLUMN allow TEXT;
 ALTER TABLE devices ADD COLUMN last_call INTEGER;
 ALTER TABLE invites ADD COLUMN allow TEXT;
+-- Every remote call reads the lists (AllowLists): only the rows that have one.
+CREATE INDEX devices_allow ON devices (id) WHERE allow IS NOT NULL AND revoked_at IS NULL;
+CREATE INDEX invites_allow ON invites (id) WHERE allow IS NOT NULL AND used_at IS NULL;

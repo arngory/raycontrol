@@ -1075,7 +1075,13 @@ func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.C
 	var allow []netip.Prefix
 	var warnings []string
 	if err == nil && len(req.Msg.Allow) > 0 {
-		allow, warnings, err = s.checkAllow(ctx, req.Msg.Allow)
+		// The role first: billing's invites are users', and the checks of
+		// the addresses would tell it the node's and the relays'.
+		if !store.IntegrationRole(role) {
+			err = fmt.Errorf("role %q: %w", role, store.ErrAllowRole)
+		} else {
+			allow, warnings, err = s.checkAllow(ctx, req.Msg.Allow)
+		}
 	}
 	var inv store.Invite
 	if err == nil {

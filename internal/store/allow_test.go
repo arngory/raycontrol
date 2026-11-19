@@ -121,6 +121,16 @@ func TestDeviceAllow(t *testing.T) {
 	if ps, _ := s.AllowPrefixes(ctx); !slices.Equal(ps, list("198.51.100.7/32")) {
 		t.Fatalf("prefixes: %v", ps)
 	}
+	// An invite its user could not register with now opens nothing.
+	if err := s.SetUserEnabled(ctx, "integrations", false); err != nil {
+		t.Fatal(err)
+	}
+	if ps, _ := s.AllowPrefixes(ctx); len(ps) != 0 {
+		t.Fatalf("a disabled user's invite: %v", ps)
+	}
+	if err := s.SetUserEnabled(ctx, "integrations", true); err != nil {
+		t.Fatal(err)
+	}
 
 	// Replaced, then cleared: it knocks again.
 	got, err := s.SetDeviceAllow(ctx, d.ID, list("198.51.100.0/28", "2001:db8:7::/64"))
@@ -136,6 +146,11 @@ func TestDeviceAllow(t *testing.T) {
 	}
 	if _, err := s.SetDeviceAllow(ctx, admin.ID, list("198.51.100.9/32")); !errors.Is(err, ErrAllowRole) || !errors.Is(err, ErrPrecondition) {
 		t.Fatalf("an admin's device: %v", err)
+	}
+	nine := list("198.51.100.1/32", "198.51.100.2/32", "198.51.100.3/32", "198.51.100.4/32", "198.51.100.5/32",
+		"198.51.100.6/32", "198.51.100.8/32", "198.51.100.9/32", "198.51.100.10/32")
+	if _, err := s.SetDeviceAllow(ctx, d.ID, nine); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nine addresses: %v", err)
 	}
 	if _, err := s.SetDeviceAllow(ctx, "nope", list("198.51.100.9/32")); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("no device: %v", err)
