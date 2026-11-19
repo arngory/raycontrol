@@ -1266,6 +1266,48 @@ func ACMEPort(ctx context.Context, st *store.Store) (uint16, error) {
 	return 0, errors.New("no free port for the ACME responder")
 }
 
+// settingNodeDNSName holds the node's own name under its domain
+// (names-v1 §2).
+const settingNodeDNSName = "node_dns_name"
+
+// NodeDNSName is the node's own name under its domain (spec/names-v1.md
+// §2): what clients resolve to knock, fetch the subscription, reach the
+// API and the services that have no name of their own. Made on first use
+// when the node has a domain, and kept: devices hold it. A domain changed
+// since gets a new one under it. "" without a domain, or when no label is
+// free (the node's names go to services first).
+func NodeDNSName(ctx context.Context, st *store.Store) (string, error) {
+	domain, err := Domain(ctx, st)
+	if err != nil || domain == "" {
+		return "", err
+	}
+	b, err := st.GetSetting(ctx, settingNodeDNSName)
+	switch {
+	case err == nil && strings.HasSuffix(string(b), "."+domain):
+		return string(b), nil
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		return "", err
+	}
+	all, err := st.ListServices(ctx)
+	if err != nil {
+		return "", err
+	}
+	name, err := newZone(ctx, st, all)
+	if errors.Is(err, store.ErrInvalid) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if b != nil {
+		// Under a domain the node no longer has: replaced.
+		return name, st.SetSetting(ctx, settingNodeDNSName, []byte(name))
+	}
+	// Two first readers at once both get the name stored first.
+	stored, err := st.InitSetting(ctx, settingNodeDNSName, []byte(name))
+	return string(stored), err
+}
+
 // newZone returns "<label>.<domain>" with a random label not used yet, by
 // all nor among taken (zones chosen in the same change).
 func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ...string) (string, error) {
@@ -1276,8 +1318,10 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ..
 	if domain == "" {
 		return "", fmt.Errorf("%w: this service needs the node domain (rayd init -domain)", store.ErrInvalid)
 	}
-	// Nor the name DNS tunnel zones are delegated to.
+	// Nor the name DNS tunnel zones are delegated to, nor the node's own
+	// name (names-v1 §2).
 	ns, _ := st.GetSetting(ctx, settingNSName)
+	own, _ := st.GetSetting(ctx, settingNodeDNSName)
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 	// Bounded (review 13): a zone stored at or above the domain, as v0.13
 	// took, clashes with every name under it, and the search went on
@@ -1292,7 +1336,7 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ..
 			label[i] = alphabet[n]
 		}
 		zone := string(label) + "." + domain
-		if zone != string(ns) && zoneConflict(zone, all) == "" && !slices.ContainsFunc(taken, func(t string) bool { return zonesClash(zone, t) }) &&
+		if zone != string(ns) && zone != string(own) && zoneConflict(zone, all) == "" && !slices.ContainsFunc(taken, func(t string) bool { return zonesClash(zone, t) }) &&
 			!slices.ContainsFunc(all, func(s store.Service) bool { return strings.Contains(s.Settings, `"`+zone+`"`) }) {
 			return zone, nil
 		}
@@ -1330,6 +1374,9 @@ func nodeNameClash(ctx context.Context, st *store.Store, all []store.Service, zo
 	}
 	if ns, err := st.GetSetting(ctx, settingNSName); err == nil && holds(string(ns)) {
 		return "the name the zones are delegated to, " + string(ns), nil
+	}
+	if own, err := st.GetSetting(ctx, settingNodeDNSName); err == nil && holds(string(own)) {
+		return "the node's own name, " + string(own), nil
 	}
 	for _, svc := range all {
 		// The previous names too: the front routes them until a switch

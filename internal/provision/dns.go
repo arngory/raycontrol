@@ -296,6 +296,14 @@ func SyncDNS(ctx context.Context, st *store.Store) (changes, problems []string, 
 	if err != nil {
 		return nil, problems, err
 	}
+	// The node's host a name: DNSRecords has nothing to point at it, and a
+	// sync to nothing would delete the node's records (the wildcard every
+	// client resolves, names-v1 §2). The zone stays as it is.
+	if host, err := node.Host(ctx, st); err != nil {
+		return nil, problems, err
+	} else if _, err := netip.ParseAddr(host); err != nil {
+		return nil, problems, nil
+	}
 	changes, conflicts, err := cloudflare.Sync(ctx, c, zone.ID, records)
 	return changes, append(problems, conflicts...), err
 }

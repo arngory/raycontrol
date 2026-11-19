@@ -98,6 +98,10 @@ func TestEnrollAndPassSPA(t *testing.T) {
 	if b.Host != "n.example.com" || b.DeviceID != dev.Msg.Device.Id || len(b.Services) != 3 {
 		t.Fatalf("bundle = %+v", b)
 	}
+	// The node's own name (names-v1 §3); no addresses: the host is a name.
+	if want, _ := provision.NodeDNSName(ctx, srv.Store); want == "" || b.DNSName != want || len(b.Addrs) != 0 {
+		t.Fatalf("bundle name %q (want %q), addrs %v", b.DNSName, want, b.Addrs)
+	}
 	for _, s := range b.Services {
 		rotates := len(s.PortKey) == 64 && s.PortRange >= 1024
 		if rotates != (s.Kind == "hy2-masq") {

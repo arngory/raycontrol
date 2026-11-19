@@ -30,6 +30,9 @@ type Client struct {
 	// Name is the client the requests name (client-min-v1 §1),
 	// "rayctl/0.31.3"; empty: none.
 	Name string
+	// ServerName is the SNI: the node's name when the client resolved it
+	// (spec/names-v1.md §5); empty: none, as to an address.
+	ServerName string
 }
 
 // ErrRefused is the endpoint's 404: unknown or revoked device, bad auth
@@ -60,6 +63,7 @@ func (c Client) HTTP() *http.Client {
 			// sessions, should a session cache ever be set.
 			InsecureSkipVerify: true, //nolint:gosec // G402: pinned in VerifyConnection
 			VerifyConnection:   pin,
+			ServerName:         c.ServerName,
 		},
 		ForceAttemptHTTP2: true,
 	}}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -49,6 +50,36 @@ func TestTLSCarrier(t *testing.T) {
 	for _, bad := range [][]byte{nil, {0x16, 3, 1}, {0x16, 3, 1, 0, 4, 1, 0, 0, 0}, make([]byte, 100)} {
 		if _, err := FromTLSCarrier(bad); err == nil {
 			t.Errorf("%x parsed", bad)
+		}
+	}
+	// With the node's name (names-v1 §5): crypto/tls sees it, the node
+	// reads the packet as before.
+	pkt0 := make([]byte, 120)
+	rand.Read(pkt0)
+	rec, err := TLSCarrierFor(pkt0, "abc.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := FromTLSCarrier(rec); err != nil || !bytes.Equal(got, pkt0) || len(rec) > TLSCarrierMax {
+		t.Fatalf("with a name: %v, %d bytes", err, len(rec))
+	}
+	cli, srv := net.Pipe()
+	hello := make(chan *tls.ClientHelloInfo, 1)
+	go func() {
+		conn := tls.Server(srv, &tls.Config{GetConfigForClient: func(h *tls.ClientHelloInfo) (*tls.Config, error) {
+			hello <- h
+			return nil, errors.New("stop")
+		}})
+		conn.Handshake()
+		srv.Close()
+	}()
+	go func() { cli.Write(rec); cli.Close() }()
+	if h := <-hello; h.ServerName != "abc.example.com" || !slices.Contains(h.SupportedCurves, tls.X25519MLKEM768) {
+		t.Fatalf("with a name: hello %+v", h)
+	}
+	for _, bad := range []string{"a b", "é.example", strings.Repeat("a", 254)} {
+		if _, err := TLSCarrierFor(pkt0, bad); err == nil {
+			t.Errorf("server name %q taken", bad)
 		}
 	}
 	// Two carriers of the same packet share nothing outside it.

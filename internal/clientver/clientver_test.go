@@ -134,3 +134,15 @@ func TestPolicyStored(t *testing.T) {
 		t.Errorf("empty policy kept %+v %v", q, err)
 	}
 }
+
+// The features a client names (spec/names-v1.md §4): whole words only.
+func TestHasFeature(t *testing.T) {
+	for h, want := range map[string]bool{
+		"names": true, "a,names": true, " names , b": true, "": false, "namesx": false, "name": false,
+		strings.Repeat("a,", 300) + "names": false,
+	} {
+		if got := HasFeature(h, FeatureNames); got != want {
+			t.Errorf("%q: %v", h, got)
+		}
+	}
+}

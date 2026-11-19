@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 
@@ -108,10 +109,19 @@ func newGREASE() grease {
 	return g
 }
 
-// TLSCarrier wraps a sealed SPA packet in a ClientHello record.
-func TLSCarrier(pkt []byte) ([]byte, error) {
+// TLSCarrier wraps a sealed SPA packet in a ClientHello record with no
+// server name, as Chrome sends one to an address.
+func TLSCarrier(pkt []byte) ([]byte, error) { return TLSCarrierFor(pkt, "") }
+
+// TLSCarrierFor is TLSCarrier with a server name: what a client that
+// resolved the node's name sends (spec/names-v1.md §5), as Chrome sends to
+// that name. The node reads the packet the same way.
+func TLSCarrierFor(pkt []byte, serverName string) ([]byte, error) {
 	if len(pkt) == 0 || len(pkt) > MaxPacketLen {
 		return nil, errors.New("spa: packet length out of range")
+	}
+	if len(serverName) > 253 || strings.ContainsFunc(serverName, func(r rune) bool { return r <= ' ' || r > '~' }) {
+		return nil, errors.New("spa: not a server name")
 	}
 	t, err := chromeHello()
 	if err != nil {
@@ -160,6 +170,23 @@ func TLSCarrier(pkt []byte) ([]byte, error) {
 			data = e.data
 		}
 		exts = append(exts, helloExt{typ, data})
+	}
+	if serverName != "" {
+		var sb cryptobyte.Builder
+		sb.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+			b.AddUint8(0) // host_name
+			b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes([]byte(serverName)) })
+		})
+		sni, err := sb.Bytes()
+		if err != nil {
+			return nil, err
+		}
+		// With the others that are shuffled: before the last GREASE one.
+		at := len(exts)
+		if at > 0 && isGREASE(exts[at-1].typ) {
+			at--
+		}
+		exts = slices.Insert(exts, at, helloExt{extServerName, sni})
 	}
 	// Chrome shuffles its extensions, the GREASE ones staying first and
 	// last: Fisher-Yates on seeds from the system's random source, as

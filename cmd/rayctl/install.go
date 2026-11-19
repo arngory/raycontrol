@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -265,6 +266,12 @@ func (c *cli) installWith(ctx context.Context, fs *flag.FlagSet, o installOption
 	}
 	if *host == "" {
 		return errors.New("-host is required")
+	}
+	// The wildcard record every client resolves points at -host
+	// (spec/names-v1.md §2): with the records the node's own, it must be an
+	// address.
+	if _, err := netip.ParseAddr(*host); err != nil && *cfToken != "" {
+		return fmt.Errorf("-host %q is a name: with -cloudflare-token-file it must be the node's address, which the record *.<domain> points to", *host)
 	}
 	// Checked before anything changes; set once rayd is up.
 	nodeName, err := node.CleanName(*name)

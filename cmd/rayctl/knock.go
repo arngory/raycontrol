@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -45,11 +46,7 @@ func knock(ctx context.Context, args []string) error {
 		return errors.New("bad device key in the bundle")
 	}
 	key := [spa.KeySize]byte(k)
-	host := b.Host
-	if *addr != "" {
-		host = *addr
-	}
-	ip, err := resolve(ctx, host)
+	ip, serverName, err := nodeAddr(ctx, b, *addr)
 	if err != nil {
 		return err
 	}
@@ -60,7 +57,8 @@ func knock(ctx context.Context, args []string) error {
 	var client *sub.Client
 	if b.Sub != nil {
 		client = &sub.Client{Addr: net.JoinHostPort(ip.String(), strconv.Itoa(int(b.Sub.Port))), Pin: b.Sub.Pin,
-			DeviceID: b.DeviceID, DeviceKey: key, NodeKeys: b.NodeKeys, NodeID: b.SPA.NodeID, Name: clientName()}
+			DeviceID: b.DeviceID, DeviceKey: key, NodeKeys: b.NodeKeys, NodeID: b.SPA.NodeID, Name: clientName(),
+			ServerName: serverName}
 	}
 	window := "the node's default time (10 min unless set otherwise)"
 	if *ttl > 0 {
@@ -74,7 +72,7 @@ func knock(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := sendSPA(c, netip.AddrPortFrom(ip, port), pkt); err != nil {
+		if err := sendSPA(c, netip.AddrPortFrom(ip, port), serverName, pkt); err != nil {
 			fmt.Printf("SPA over %s to port %d: %v\n", c, port, err)
 			lastErr = err
 			continue
@@ -94,7 +92,7 @@ func knock(ctx context.Context, args []string) error {
 			continue
 		}
 		fmt.Printf("open: %s lets this address reach device %s's services for %s; for SSH, connect now (ssh root@%s)\n",
-			host, b.DeviceID, window, ip)
+			cmp.Or(serverName, ip.String()), b.DeviceID, window, ip)
 		return nil
 	}
 	return fmt.Errorf("the node did not open: %w", lastErr)
