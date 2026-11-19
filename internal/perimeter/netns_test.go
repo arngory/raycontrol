@@ -341,6 +341,63 @@ func TestNetns(t *testing.T) {
 			t.Fatal("ssh open for a foreign admin prefix")
 		}
 	})
+	t.Run("an integration's address reaches the API without SPA, nothing else", func(t *testing.T) {
+		// integrations-v1 §3.2: the API's TCP port to the listed
+		// addresses; rayd checks each call's address against the device.
+		api, err := net.Listen("tcp", "127.0.0.1:18445")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer api.Close()
+		other, err := net.Listen("tcp", "127.0.0.1:18446")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer other.Close()
+		for _, l := range []net.Listener{api, other} {
+			go func() {
+				for {
+					c, err := l.Accept()
+					if err != nil {
+						return
+					}
+					c.Close()
+				}
+			}()
+		}
+		dial := func(port string) bool {
+			c, err := net.DialTimeout("tcp", "127.0.0.1:"+port, 700*time.Millisecond)
+			if err == nil {
+				c.Close()
+			}
+			return err == nil
+		}
+		if dial("18445") {
+			t.Fatal("the API open before the list")
+		}
+		snap.IntegPrefixes = []string{"127.0.0.0/28", "127.0.0.1/32"} // overlapping: merged
+		snap.IntegPorts = []*perimeterv1.Port{{Proto: "tcp", Port: 18445}}
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		if !dial("18445") {
+			t.Fatal("the integration's address cannot reach the API")
+		}
+		if dial("18446") {
+			t.Fatal("the integration's address reaches another port")
+		}
+		snap.IntegPrefixes = []string{"198.51.100.7/32"}
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		if dial("18445") {
+			t.Fatal("the API open to an address no longer listed")
+		}
+		snap.IntegPrefixes, snap.IntegPorts = nil, nil
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("a relay's address reaches the relay ports without SPA, not SSH", func(t *testing.T) {
 		// relay-v1 §3: devices knock at the relay; this node lets the
 		// relay's address in on the service ports only.

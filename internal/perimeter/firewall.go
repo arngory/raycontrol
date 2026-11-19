@@ -38,6 +38,10 @@ type Firewall interface {
 	// SetAdmin opens ports (SSH) to the given prefixes without SPA:
 	// emergency access when SPA itself fails.
 	SetAdmin(prefixes []netip.Prefix, ports []Port) error
+	// SetInteg opens ports (the API's) to integrations' servers without
+	// SPA, under the per-address limit (integrations-v1 §3.2): rayd checks
+	// every call's address against the device's list.
+	SetInteg(prefixes []netip.Prefix, ports []Port) error
 	// SetForward replaces the ports a relay forwards to its exit (no-op
 	// when the host is not a relay).
 	SetForward(ports []Port) error
@@ -196,6 +200,9 @@ table inet %[1]s {
 	set admin4 { type ipv4_addr; flags interval; }
 	set admin6 { type ipv6_addr; flags interval; }
 	set admin_ports { type inet_proto . inet_service; }
+	set integ4 { type ipv4_addr; flags interval; }
+	set integ6 { type ipv6_addr; flags interval; }
+	set integ_ports { type inet_proto . inet_service; }
 	set relay4 { type ipv4_addr; }
 	set relay6 { type ipv6_addr; }
 	set relay_ports { type inet_proto . inet_service; }
@@ -291,6 +298,8 @@ table inet %[1]s {
 		meta l4proto . th dport @public jump in_limit
 		ip saddr @admin4 meta l4proto . th dport @admin_ports accept
 		ip6 saddr @admin6 meta l4proto . th dport @admin_ports accept
+		ip saddr @integ4 meta l4proto . th dport @integ_ports jump in_limit
+		ip6 saddr @integ6 meta l4proto . th dport @integ_ports jump in_limit
 		ip saddr . meta l4proto . th dport @allow4 jump in_limit
 		ip6 saddr . meta l4proto . th dport @allow6 jump in_limit
 	}
@@ -407,6 +416,7 @@ func (n *NFT) SetupScript(c TableContents) string {
 	}
 	b.WriteString(publicScript(c.Public))
 	b.WriteString(adminScript(c.Admin, c.AdminPorts))
+	b.WriteString(integScript(c.Integ, c.IntegPorts))
 	if n.RelayTo.IsValid() {
 		b.WriteString(forwardScript(c.Forward))
 	}
@@ -708,6 +718,21 @@ func (n *NFT) SetAdmin(prefixes []netip.Prefix, ports []Port) error {
 }
 
 func adminScript(prefixes []netip.Prefix, ports []Port) string {
+	return prefixSetsScript("admin", prefixes, ports)
+}
+
+// SetInteg replaces the integrations' prefixes and ports in one
+// transaction (integrations-v1 §3.2).
+func (n *NFT) SetInteg(prefixes []netip.Prefix, ports []Port) error {
+	return n.run(integScript(prefixes, ports))
+}
+
+func integScript(prefixes []netip.Prefix, ports []Port) string {
+	return prefixSetsScript("integ", prefixes, ports)
+}
+
+// prefixSetsScript fills the sets <name>4, <name>6 and <name>_ports.
+func prefixSetsScript(name string, prefixes []netip.Prefix, ports []Port) string {
 	var v4, v6 []string
 	for _, p := range prefixes {
 		if p.Addr().Is4() {
@@ -720,7 +745,7 @@ func adminScript(prefixes []netip.Prefix, ports []Port) string {
 	for _, set := range []struct {
 		name  string
 		elems []string
-	}{{"admin4", v4}, {"admin6", v6}, {"admin_ports", portElems(ports)}} {
+	}{{name + "4", v4}, {name + "6", v6}, {name + "_ports", portElems(ports)}} {
 		fmt.Fprintf(&b, "flush set inet %s %s\n", Table, set.name)
 		if len(set.elems) > 0 {
 			fmt.Fprintf(&b, "add element inet %s %s { %s }\n", Table, set.name, strings.Join(set.elems, ", "))

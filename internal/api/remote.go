@@ -175,7 +175,12 @@ func (r *Remote) Handler() http.Handler {
 			return
 		}
 		pin := CertPin(req.TLS.PeerCertificates[0])
-		mux.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), certPinKey{}, pin)))
+		ctx, err := r.checkSource(req.Context(), req.RemoteAddr, pin, req.URL.Path)
+		if err != nil {
+			sourceRefused(w, req, err)
+			return
+		}
+		mux.ServeHTTP(w, req.WithContext(context.WithValue(ctx, certPinKey{}, pin)))
 	}))
 }
 
@@ -278,6 +283,10 @@ func (r *Remote) Register(ctx context.Context, req *connect.Request[devicev1.Reg
 				"refused: an integration's ("+inv.Role+")", r.clock())
 			return nil, inviteForIntegration(inv.Role)
 		}
+	}
+	// Where from (integrations-v1 §3.2): before a PIN try is spent.
+	if err := inviteSource(ctx, inv); err != nil {
+		return nil, err
 	}
 	ctx = context.WithValue(ctx, actorKey{}, "invite "+inv.ID)
 	// The PIN (api-v1 §4), only now the request has proved the invite:

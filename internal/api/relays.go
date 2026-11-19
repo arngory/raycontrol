@@ -38,6 +38,15 @@ func (s *Server) AddRelay(ctx context.Context, req *connect.Request[nodev1.AddRe
 			}
 		}
 	}
+	if err == nil {
+		// An integration's address lets in only its device
+		// (integrations-v1 §3.3): a relay there would lose every device
+		// behind it.
+		var integ []netip.Prefix
+		if integ, err = s.Store.AllowPrefixes(ctx); err == nil && store.AllowCovers(integ, addr) {
+			err = fmt.Errorf("%w relay address %s: inside an integration's addresses (rayctl device list)", store.ErrInvalid, addr)
+		}
+	}
 	var r store.Relay
 	if err == nil {
 		r, err = s.addRelay(ctx, req.Msg.Name, addr)

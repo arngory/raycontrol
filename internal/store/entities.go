@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/netip"
 	"regexp"
 	"slices"
 	"strconv"
@@ -757,6 +758,12 @@ type Device struct {
 	// ByIntegration: the device came of an integration's invite
 	// (Invite.ByIntegration): it reaches its user's data services only.
 	ByIntegration bool
+	// Allow: an integration's device in the mode of addresses
+	// (integrations-v1 §3.2) calls from these, without a knock; nil: it
+	// knocks. LastCall: its last call through the remote API, to the
+	// hour; nil: none.
+	Allow    []netip.Prefix
+	LastCall *time.Time
 }
 
 // CreateDevice enrolls a device for a user and returns its fresh SPA key.
@@ -822,10 +829,17 @@ func (s *Store) ActiveDeviceSecrets(ctx context.Context) (map[int64][]DeviceSecr
 // ListDevices returns devices, optionally of one user; to a caller of
 // RegularOnly, those of regular users only.
 func (s *Store) ListDevices(ctx context.Context, userName string) ([]Device, error) {
+	return s.listDevices(ctx, userName, "")
+}
+
+// listDevices returns the devices of userName and with id, each "" for
+// any, of regular users only to a caller of RegularOnly.
+func (s *Store) listDevices(ctx context.Context, userName, id string) ([]Device, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT d.id, u.name, d.name, d.role, d.created_at, d.revoked_at, coalesce(d.cert_pin, ''), d.lan,
-		coalesce(d.client, ''), d.client_at
+		coalesce(d.client, ''), d.client_at, d.by_integration, d.allow, d.last_call
 		FROM devices d JOIN users u ON u.id = d.user_id
-		WHERE (? = '' OR u.name = ?) AND NOT (? AND u.id IN (`+serviceUserIDs+`)) ORDER BY u.name, d.name`, userName, userName, regularOnly(ctx))
+		WHERE (? = '' OR u.name = ?) AND (? = '' OR d.id = ?) AND NOT (? AND u.id IN (`+serviceUserIDs+`)) ORDER BY u.name, d.name`,
+		userName, userName, id, id, regularOnly(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -834,11 +848,14 @@ func (s *Store) ListDevices(ctx context.Context, userName string) ([]Device, err
 	for rows.Next() {
 		var d Device
 		var created int64
-		var revoked, clientAt sql.NullInt64
-		if err := rows.Scan(&d.ID, &d.UserName, &d.Name, &d.Role, &created, &revoked, &d.CertPin, &d.LAN, &d.Client, &clientAt); err != nil {
+		var revoked, clientAt, lastCall sql.NullInt64
+		var allow sql.NullString
+		if err := rows.Scan(&d.ID, &d.UserName, &d.Name, &d.Role, &created, &revoked, &d.CertPin, &d.LAN, &d.Client, &clientAt,
+			&d.ByIntegration, &allow, &lastCall); err != nil {
 			return nil, err
 		}
-		d.CreatedAt, d.RevokedAt, d.ClientAt = time.Unix(created, 0), timePtr(revoked), timePtr(clientAt)
+		d.CreatedAt, d.RevokedAt, d.ClientAt, d.LastCall = time.Unix(created, 0), timePtr(revoked), timePtr(clientAt), timePtr(lastCall)
+		d.Allow = parseAllowText(allow)
 		out = append(out, d)
 	}
 	return out, rows.Err()
@@ -1185,7 +1202,8 @@ func NewUUID() (string, error) {
 // user's enabled services while the user is Active: one over the traffic
 // limit keeps the subscription and the API, no data service
 // (traffic-limit-v1 §3.1). An integration's device (billing, support)
-// reaches the API only, once registered (integrations-v1 §2.1). Active
+// reaches the API only, once registered (integrations-v1 §2.1); one with
+// addresses, or its invite, not by SPA at all (§3.2). Active
 // invites pass too, to the API only (R3-3),
 // and so do invites used less than InviteReplayWindow ago while their
 // device is not revoked: a client that lost Register's answer asks again
@@ -1236,11 +1254,11 @@ func (s *Store) SPADevices(ctx context.Context) ([]spa.Device, error) {
 	var list []row
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT d.id, d.spa_key, d.user_id, d.role, d.cert_pin IS NOT NULL, 0, d.by_integration
-		FROM devices d WHERE d.revoked_at IS NULL
+		FROM devices d WHERE d.revoked_at IS NULL AND d.allow IS NULL
 		UNION ALL
 		SELECT i.id, i.spa_key, i.user_id, i.role, 0, 1, i.by_integration
-		FROM invites i WHERE (i.used_at IS NULL AND i.expires_at > ?)
-			OR (i.used_at > ? AND EXISTS (SELECT 1 FROM devices d WHERE d.id = i.device_id AND d.revoked_at IS NULL))
+		FROM invites i WHERE i.allow IS NULL AND ((i.used_at IS NULL AND i.expires_at > ?)
+			OR (i.used_at > ? AND EXISTS (SELECT 1 FROM devices d WHERE d.id = i.device_id AND d.revoked_at IS NULL)))
 		ORDER BY 1`, now.Unix(), now.Add(-InviteReplayWindow).Unix())
 	if err != nil {
 		return nil, err

@@ -135,10 +135,15 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             ones, which the device knew, accepted -cred-grace (2 days)
                                             more; the other devices move over without a cut
   device invite USER NAME [-role user|admin|billing|support] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv2|rcinv1]
+                [-allow ADDR,...]
                                             a one-time invite: the client registers the device itself
                                             through the remote API (service add api api); rcinv2 is
                                             the short form (QR half the size, Niko 1.35 or later),
-                                            rcinv1 for older Niko
+                                            rcinv1 for older Niko. -allow, billing and support only:
+                                            the integration's server calls from these without a knock
+  device allow ID ADDR[,ADDR...] | -clear   an integration's device calls from these addresses (IPv4
+                                            /28-/32, IPv6 /64-/128, at most 8) without a knock, and
+                                            from nowhere else; -clear: back to SPA
   audit [-n 50]
   admin [ADDR|CIDR ...]                     show or replace addresses that reach SSH without SPA: IPv4
                                             and IPv6, networks to /16 and /48; the list is replaced
@@ -484,6 +489,14 @@ func (c *cli) status(ctx context.Context) error {
 			}
 		}
 	}
+	// Integrations' addresses no call came from for long (integrations-v1
+	// §3.4): the address may be someone else's now.
+	var stale []string
+	if !c.json {
+		if l, err := c.c.ListDevices(ctx, connect.NewRequest(&nodev1.ListDevicesRequest{})); err == nil {
+			stale = staleAllow(l.Msg.Devices, time.Now())
+		}
+	}
 	// sshd's ports against the perimeter's: root on the node only (sshd -T).
 	var ssh, per []hostcheck.Result
 	if !c.json && c.identity == nil && thisOS == nodeOS && os.Geteuid() == 0 {
@@ -519,7 +532,36 @@ func (c *cli) status(ctx context.Context) error {
 		for _, r := range per {
 			fmt.Fprintf(w, "perimeter table\t%s\n", perimeterLine(r))
 		}
+		for _, line := range stale {
+			fmt.Fprintf(w, "integration\tWARNING %s\n", line)
+		}
 	})
+}
+
+// staleAfter is how long an integration's addresses may go without a call
+// before status points them out.
+const staleAfter = 30 * 24 * time.Hour
+
+// staleAllow are the integrations' devices with addresses and no call
+// for staleAfter (none since they were made that long ago).
+func staleAllow(devices []*nodev1.Device, now time.Time) []string {
+	var out []string
+	for _, d := range devices {
+		if len(d.Allow) == 0 || d.RevokedAt != 0 {
+			continue
+		}
+		last := cmp.Or(d.LastCall, d.CreatedAt)
+		if now.Sub(time.Unix(last, 0)) < staleAfter {
+			continue
+		}
+		what := "no call for 30 days"
+		if d.LastCall == 0 {
+			what = "never called"
+		}
+		out = append(out, fmt.Sprintf("%s %s/%s (%s, %s): %s; the address may be someone else's now: rayctl device allow %s -clear, or device revoke %s",
+			d.Id, d.User, d.Name, d.Role, accessOf(d.Allow), what, d.Id, d.Id))
+	}
+	return out
 }
 
 // nodeCmd: rayctl node name [NAME]. Without NAME it shows the name; ""
@@ -1181,6 +1223,15 @@ func spareZones(s *nodev1.Service) string {
 	return ", spare zones " + strings.Join(st.Spare, " ")
 }
 
+// accessOf is how an integration's device reaches the API: "spa" (a
+// knock) or "static (N)", N addresses (integrations-v1 §3.4).
+func accessOf(allow []string) string {
+	if len(allow) == 0 {
+		return "spa"
+	}
+	return fmt.Sprintf("static (%d)", len(allow))
+}
+
 func (c *cli) device(ctx context.Context, sub string, args []string) error {
 	switch sub {
 	case "list":
@@ -1193,7 +1244,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 			return err
 		}
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
-			fmt.Fprintln(w, "ID\tUSER\tNAME\tROLE\tCREATED\tREVOKED\tLAN\tAPI\tCLIENT")
+			fmt.Fprintln(w, "ID\tUSER\tNAME\tROLE\tCREATED\tREVOKED\tLAN\tAPI\tCLIENT\tACCESS\tLAST CALL")
 			for _, d := range r.Msg.Devices {
 				api := "-"
 				if d.Registered {
@@ -1201,9 +1252,16 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 				}
 				// The client its requests last named (client-min-v1 §5).
 				client := cmp.Or(d.Client, "-")
+				// An integration's: how it reaches the API and when it
+				// last called (integrations-v1 §3.4).
+				access, last := "-", "-"
+				if d.Role == "billing" || d.Role == "support" {
+					access, last = accessOf(d.Allow), when(d.LastCall)
+				}
 				// The device's own LAN consent (lan-v1 §1.1); it is in the
 				// LAN when its user's is on too (rayctl user lan).
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", d.Id, d.User, d.Name, d.Role, when(d.CreatedAt), when(d.RevokedAt), onOff(d.Lan), api, client)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", d.Id, d.User, d.Name, d.Role, when(d.CreatedAt), when(d.RevokedAt), onOff(d.Lan), api, client,
+					access, last)
 			}
 			for _, inv := range r.Msg.Invites {
 				state := "invite until " + when(inv.ExpiresAt)
@@ -1213,7 +1271,11 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 				if inv.PinTries > 0 {
 					state += fmt.Sprintf(", PIN (%d tries)", inv.PinTries)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t-\t-\t%s\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.CreatedAt), state)
+				access := "-"
+				if len(inv.Allow) > 0 {
+					access = accessOf(inv.Allow)
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t-\t-\t%s\t-\t%s\t-\n", inv.Id, inv.User, inv.Name, inv.Role, when(inv.CreatedAt), state, access)
 			}
 		})
 	case "invite":
@@ -1223,6 +1285,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		out := fs.String("o", "", "write the invite alone to this file (mode 0600) instead of the screen")
 		showQR := fs.Bool("qr", false, "draw the invite as a QR code on the screen for the phone to scan, instead of the text")
 		withPIN := fs.Bool("pin", false, "the invite also needs a PIN of 6 digits, shown here once: tell it by another channel")
+		allow := fs.String("allow", "", "billing or support: the integration server's addresses, comma-separated (IPv4 /28-/32, IPv6 /64-/128): it registers and calls from them without a knock")
 		format := fs.String("format", "rcinv2", "rcinv2: the short form, a QR half the size (Niko 1.35 or later); rcinv1 for older Niko")
 		if err := need(args, 2); err != nil {
 			return err
@@ -1246,12 +1309,27 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		if *format != "rcinv1" && *format != "rcinv2" {
 			return fmt.Errorf("%w: -format rcinv1 or rcinv2", errUsage)
 		}
+		var allowList []string
+		if *allow != "" {
+			allowList = strings.Split(*allow, ",")
+		}
 		r, err := c.c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{
-			User: args[0], Name: args[1], Role: *role, TtlSeconds: int64(ttl.Seconds()), Pin: *withPIN}))
+			User: args[0], Name: args[1], Role: *role, TtlSeconds: int64(ttl.Seconds()), Pin: *withPIN, Allow: allowList}))
 		if err != nil {
 			return err
 		}
 		inv := r.Msg.Invite
+		if len(allowList) > 0 && len(inv.Allow) == 0 {
+			// A node before the addresses of integrations drops the field
+			// and makes an invite that knocks: withdrawn, as above.
+			if _, rerr := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: inv.Id})); rerr != nil {
+				return fmt.Errorf("the node made invite %s without the addresses (an older node), and it is not withdrawn: rayctl device revoke %s: %w", inv.Id, inv.Id, rerr)
+			}
+			return errors.New("the node made the invite without the addresses (an older node): withdrawn; update the node or invite without -allow")
+		}
+		for _, w := range r.Msg.Warnings {
+			fmt.Fprintln(os.Stderr, "rayctl: warning:", w)
+		}
 		if *withPIN && r.Msg.Pin == "" {
 			// A node from before v0.13 drops the field it does not know
 			// and makes an invite without a PIN: withdraw it rather than
@@ -1367,6 +1445,41 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		return c.print(r.Msg, func(w *tabwriter.Writer) {
 			fmt.Fprintf(w, "device %s (%s/%s) enrolled. Bundle, shown once — pass it to the client over a trusted channel:\n\n%s\n",
 				r.Msg.Device.Id, r.Msg.Device.User, r.Msg.Device.Name, r.Msg.Bundle)
+		})
+	case "allow":
+		// integrations-v1 §3.4: an integration's device calls from its
+		// addresses without a knock, or knocks again (-clear).
+		fs := flag.NewFlagSet("device allow", flag.ContinueOnError)
+		off := fs.Bool("clear", false, "take the addresses away: the device knocks again (SPA)")
+		if len(args) < 1 {
+			return errUsage
+		}
+		if err := fs.Parse(args[1:]); err != nil {
+			return errUsage
+		}
+		var list []string
+		switch {
+		case *off && fs.NArg() == 0:
+		case !*off && fs.NArg() == 1 && strings.TrimSpace(fs.Arg(0)) != "":
+			list = strings.Split(fs.Arg(0), ",")
+		default:
+			return fmt.Errorf("%w: device allow ID ADDR[,ADDR...] or device allow ID -clear", errUsage)
+		}
+		r, err := c.c.SetDeviceAllow(ctx, connect.NewRequest(&nodev1.SetDeviceAllowRequest{Id: args[0], Prefixes: list}))
+		if err != nil {
+			return err
+		}
+		for _, w := range r.Msg.Warnings {
+			fmt.Fprintln(os.Stderr, "rayctl: warning:", w)
+		}
+		return c.print(r.Msg, func(w *tabwriter.Writer) {
+			d := r.Msg.Device
+			if len(d.Allow) == 0 {
+				fmt.Fprintf(w, "%s %s/%s: back to SPA (it knocks); the perimeter follows in a second or two\n", d.Id, d.User, d.Name)
+				return
+			}
+			fmt.Fprintf(w, "%s %s/%s calls from %s without a knock; the perimeter follows in a second or two\n",
+				d.Id, d.User, d.Name, strings.Join(d.Allow, ", "))
 		})
 	case "revoke":
 		fs := flag.NewFlagSet("device revoke", flag.ContinueOnError)

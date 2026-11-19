@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/spa"
@@ -30,6 +31,9 @@ type Invite struct {
 	// does not register once its user is a service user, and its device
 	// reaches the user's data services only.
 	ByIntegration bool
+	// Allow: the addresses the device it becomes calls from
+	// (integrations-v1 §3.2); it registers from one of them.
+	Allow []netip.Prefix
 }
 
 // InvitePinTries is how many wrong PINs an invite takes: the last one
@@ -58,12 +62,29 @@ func newID() (string, error) {
 // With pin, the invite also needs a PIN (api-v1 §3): pin makes the proof
 // from the key, and the invite takes InvitePinTries wrong ones.
 func (s *Store) CreateInvite(ctx context.Context, userName, name, role string, ttl time.Duration, pin ...InvitePIN) (Invite, [spa.KeySize]byte, error) {
+	var p InvitePIN
+	if len(pin) > 0 {
+		p = pin[0]
+	}
+	return s.CreateInviteAllow(ctx, userName, name, role, ttl, nil, p)
+}
+
+// CreateInviteAllow is CreateInvite of an integration's device in the mode
+// of addresses (integrations-v1 §3.2): allow, checked with CheckAllow, goes
+// to the device; none is CreateInvite's.
+func (s *Store) CreateInviteAllow(ctx context.Context, userName, name, role string, ttl time.Duration, allow []netip.Prefix, pin InvitePIN) (Invite, [spa.KeySize]byte, error) {
 	var key [spa.KeySize]byte
 	if err := checkName("device", name); err != nil {
 		return Invite{}, key, err
 	}
 	if !validRole(role) {
 		return Invite{}, key, fmt.Errorf("%w role %q: use user, admin, billing or support", ErrInvalid, role)
+	}
+	if len(allow) > 0 && !IntegrationRole(role) {
+		return Invite{}, key, fmt.Errorf("role %q: %w", role, ErrAllowRole)
+	}
+	if len(allow) > MaxAllowPerDevice {
+		return Invite{}, key, fmt.Errorf("%w: %d addresses, at most %d a device", ErrInvalid, len(allow), MaxAllowPerDevice)
 	}
 	if ttl <= 0 || ttl > MaxInviteTTL {
 		return Invite{}, key, fmt.Errorf("%w invite lifetime %v: up to %v", ErrInvalid, ttl, MaxInviteTTL)
@@ -80,9 +101,10 @@ func (s *Store) CreateInvite(ctx context.Context, userName, name, role string, t
 		return Invite{}, key, err
 	}
 	now := s.now().Truncate(time.Second)
-	inv := Invite{ID: id, UserName: u.Name, Name: name, Role: role, CreatedAt: now, ExpiresAt: now.Add(ttl), ByIntegration: regularOnly(ctx)}
-	if len(pin) > 0 && pin[0] != nil {
-		inv.PinProof, inv.PinTries = pin[0](key), InvitePinTries
+	inv := Invite{ID: id, UserName: u.Name, Name: name, Role: role, CreatedAt: now, ExpiresAt: now.Add(ttl), ByIntegration: regularOnly(ctx),
+		Allow: allow}
+	if pin != nil {
+		inv.PinProof, inv.PinTries = pin(key), InvitePinTries
 	}
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		// The user once more, in the transaction: a caller of RegularOnly
@@ -113,9 +135,18 @@ func (s *Store) CreateInvite(ctx context.Context, userName, name, role string, t
 		if _, err := tx.ExecContext(ctx, `DELETE FROM invites WHERE user_id = ? AND name = ? AND used_at IS NULL`, u.ID, name); err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO invites (id, user_id, name, role, spa_key, created_at, expires_at, pin_proof, pin_tries, by_integration)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			inv.ID, u.ID, inv.Name, inv.Role, key[:], now.Unix(), inv.ExpiresAt.Unix(), inv.PinProof, inv.PinTries, inv.ByIntegration)
+		if len(allow) > 0 {
+			n, err := countAllow(ctx, tx, now, "")
+			if err != nil {
+				return err
+			}
+			if n+len(allow) > MaxAllowPerNode {
+				return errAllowFull(n, len(allow))
+			}
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO invites (id, user_id, name, role, spa_key, created_at, expires_at, pin_proof, pin_tries, by_integration, allow)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			inv.ID, u.ID, inv.Name, inv.Role, key[:], now.Unix(), inv.ExpiresAt.Unix(), inv.PinProof, inv.PinTries, inv.ByIntegration, allowText(allow))
 		return err
 	})
 	return inv, key, err
@@ -148,7 +179,7 @@ func (s *Store) FailInvitePIN(ctx context.Context, id string) (left int, err err
 // ListInvites returns the invites not yet used, expired ones included;
 // to a caller of RegularOnly, those of regular users only.
 func (s *Store) ListInvites(ctx context.Context) ([]Invite, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT i.id, u.name, i.name, i.role, i.created_at, i.expires_at, i.pin_proof, i.pin_tries
+	rows, err := s.db.QueryContext(ctx, `SELECT i.id, u.name, i.name, i.role, i.created_at, i.expires_at, i.pin_proof, i.pin_tries, i.allow
 		FROM invites i JOIN users u ON u.id = i.user_id WHERE i.used_at IS NULL AND NOT (? AND u.id IN (`+serviceUserIDs+`)) ORDER BY u.name, i.name`, regularOnly(ctx))
 	if err != nil {
 		return nil, err
@@ -158,10 +189,11 @@ func (s *Store) ListInvites(ctx context.Context) ([]Invite, error) {
 	for rows.Next() {
 		var inv Invite
 		var created, expires int64
-		if err := rows.Scan(&inv.ID, &inv.UserName, &inv.Name, &inv.Role, &created, &expires, &inv.PinProof, &inv.PinTries); err != nil {
+		var allow sql.NullString
+		if err := rows.Scan(&inv.ID, &inv.UserName, &inv.Name, &inv.Role, &created, &expires, &inv.PinProof, &inv.PinTries, &allow); err != nil {
 			return nil, err
 		}
-		inv.CreatedAt, inv.ExpiresAt = time.Unix(created, 0), time.Unix(expires, 0)
+		inv.CreatedAt, inv.ExpiresAt, inv.Allow = time.Unix(created, 0), time.Unix(expires, 0), parseAllowText(allow)
 		out = append(out, inv)
 	}
 	return out, rows.Err()
@@ -189,11 +221,13 @@ func (s *Store) ActiveInvite(ctx context.Context, id string) (Invite, [spa.KeySi
 	var raw []byte
 	var created, expires int64
 	now := s.now().Unix()
-	err := s.db.QueryRowContext(ctx, `SELECT i.id, u.name, i.name, i.role, i.spa_key, i.created_at, i.expires_at, i.pin_proof, i.pin_tries, i.by_integration
+	var allow sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT i.id, u.name, i.name, i.role, i.spa_key, i.created_at, i.expires_at, i.pin_proof, i.pin_tries, i.by_integration, i.allow
 		FROM invites i JOIN users u ON u.id = i.user_id
 		WHERE i.id = ? AND i.used_at IS NULL AND i.expires_at > ? AND u.enabled = 1 AND (u.expires_at IS NULL OR u.expires_at > ?)
 			AND NOT (i.by_integration AND i.user_id IN (`+serviceUserIDs+`))`,
-		id, now, now).Scan(&inv.ID, &inv.UserName, &inv.Name, &inv.Role, &raw, &created, &expires, &inv.PinProof, &inv.PinTries, &inv.ByIntegration)
+		id, now, now).Scan(&inv.ID, &inv.UserName, &inv.Name, &inv.Role, &raw, &created, &expires, &inv.PinProof, &inv.PinTries, &inv.ByIntegration, &allow)
+	inv.Allow = parseAllowText(allow)
 	if errors.Is(err, sql.ErrNoRows) {
 		return inv, key, fmt.Errorf("invite %q: %w", id, ErrNotFound)
 	}
@@ -225,7 +259,8 @@ func (s *Store) UseInvite(ctx context.Context, id, certPin string) (Device, [spa
 		return d, key, err
 	}
 	now := s.now().Truncate(time.Second)
-	d = Device{ID: devID, UserName: inv.UserName, Name: inv.Name, Role: inv.Role, CreatedAt: now, CertPin: certPin, ByIntegration: inv.ByIntegration}
+	d = Device{ID: devID, UserName: inv.UserName, Name: inv.Name, Role: inv.Role, CreatedAt: now, CertPin: certPin, ByIntegration: inv.ByIntegration,
+		Allow: inv.Allow}
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		// An integration's invite once more: its user may have turned into
 		// a service user since ActiveInvite.
@@ -237,8 +272,8 @@ func (s *Store) UseInvite(ctx context.Context, id, certPin string) (Device, [spa
 		if n, err := res.RowsAffected(); err != nil || n != 1 {
 			return fmt.Errorf("invite %q: %w", id, ErrNotFound)
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO devices (id, user_id, name, role, spa_key, created_at, cert_pin, by_integration)
-			SELECT ?, user_id, name, role, ?, ?, ?, by_integration FROM invites WHERE id = ?`, devID, key[:], now.Unix(), certPin, id)
+		_, err = tx.ExecContext(ctx, `INSERT INTO devices (id, user_id, name, role, spa_key, created_at, cert_pin, by_integration, allow)
+			SELECT ?, user_id, name, role, ?, ?, ?, by_integration, allow FROM invites WHERE id = ?`, devID, key[:], now.Unix(), certPin, id)
 		return err
 	})
 	return d, key, err

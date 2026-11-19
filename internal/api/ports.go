@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"connectrpc.com/connect"
@@ -38,6 +39,11 @@ func (s *Server) GetPorts(ctx context.Context, _ *connect.Request[nodev1.GetPort
 	out := []*nodev1.NodePort{spaPort}
 	ssh := provision.SSHPorts(services)
 	site := false
+	allow, err := s.Store.AllowPrefixes(ctx)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	integ := len(allow) > 0
 	for _, svc := range services {
 		if !svc.Enabled {
 			continue
@@ -64,6 +70,11 @@ func (s *Server) GetPorts(ctx context.Context, _ *connect.Request[nodev1.GetPort
 				np.Name, np.Source = "sub", source(chosen.Sub == n)
 			case "api":
 				np.Name, np.Source = "api", source(chosen.API == n)
+				// Integrations' servers reach it without a knock
+				// (integrations-v1 §3.2), TCP only.
+				if slices.Contains(byProto[n], "tcp") && integ {
+					np.Access = "spa,static"
+				}
 			}
 			if svc.Public() || realityOpen(svc) && n == 443 {
 				np.Access = "everyone"
