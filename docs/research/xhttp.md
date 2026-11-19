@@ -1,8 +1,9 @@
 # XHTTP на ноде и relay, CDN как вид relay
 
-Статус: **исследование** на 2026-11-19, для предварительного v0.36.0 (R4-50, E-6). Решений нет. Прочитан код: raycontrol
-`6e8f0e2` (v0.33.0-49); niko-server `01b59f0`; форк Xray `9f1cb15` (ветка `raycontrol/v26.11.9`). По файлам XHTTP, VLESS и
-`transport_method.go` он не отличается от пина `46b58d4` из `deploy/versions.env`. Только чтение, возможно, устарело:
+Статус: **исследование** на 2026-11-19, для предварительного v0.36.0 (R4-50, E-6). Решения владельца 2026-11-19 — в §8.3,
+остальное открыто. Прочитан код: raycontrol `6e8f0e2` (v0.33.0-49); niko-server `01b59f0`; форк Xray `9f1cb15` (ветка
+`raycontrol/v26.11.9`). По файлам XHTTP, VLESS и `transport_method.go` он отличается от пина `46b58d4` из
+`deploy/versions.env` только тестом `proxy/vless/inbound/userconns_transport_test.go` (короткий путь сокета). Только чтение, возможно, устарело:
 форк ядра клиента `arngory/sing-box` `34eaa8c` (2026-11-02) и Niko `bb322e1` (2026-11-06). Текущее ядро клиента новее
 (`688d100`, [names-v1](../spec/names-v1.md)), его возможности XHTTP спрашиваются отдельно (§8.4). **Ничего не
 запускалось**: ни Xray, ни замеров через CDN.
@@ -17,16 +18,17 @@
 
 | № | Что | Где | Размер | Когда |
 |---|---|---|---|---|
-| 1 | **Форма A: XHTTP поверх REALITY.** Свой сервис со своим именем за фронтом (PROXY v2), режим `stream-one`, XMUX у клиента. Это «REALITY с mux», и через relay он идёт как REALITY | нода, клиент | S–M | v0.36.0 |
-| 2 | **Форма B: XHTTP на своём имени с настоящим сертификатом.** TLS завершает новый `rayd xhttp`, как у naive и DoH. Секретный путь (лучше — токен устройства в пути) проксируется в Xray по unix-сокету (h2c). Остальным — ответ сайта | нода, клиент | M | v0.36.0 или v0.37.0 |
-| 3 | **CDN как вид relay.** Только для формы B. Без SPA и без замера. Источник для CDN — relay (адрес выхода CDN не видит) или выход. Доступ к источнику: подсети CDN, отдельный порт, секретный заголовок, где можно — mTLS. Режим по умолчанию — `packet-up` | нода, relay, клиент | L | после замеров, v0.37+ |
+| 1 | **Форма A: XHTTP поверх REALITY.** Свой сервис со своим именем за фронтом (PROXY v2), режим `stream-one`, XMUX у клиента. Это «REALITY с mux», и через relay он идёт как REALITY | нода, клиент | S–M | v0.36.0 (предварительно; владелец, 2026-11-19) |
+| 2 | **Форма B: XHTTP на своём имени с настоящим сертификатом.** TLS завершает новый `rayd xhttp`, как у naive и DoH. Секретный путь (лучше — токен устройства в пути) проксируется в Xray по unix-сокету (h2c). Остальным — ответ сайта | нода, клиент | M | v0.37.0 (владелец, 2026-11-19) |
+| 3 | **CDN как вид relay.** Только для формы B. Отдельный профиль для проверок (владелец, 2026-11-19). Без SPA и без замера. Источник для CDN — relay (адрес выхода CDN не видит) или выход. Доступ к источнику: подсети CDN, отдельный порт, секретный заголовок, где можно — mTLS. Режим по умолчанию — `packet-up` | нода, relay, клиент | L | после замеров (их владелец попробует устроить), не раньше v0.37.0 |
 | 4 | Подписка через CDN не ходит. Её берут напрямую, через relay или **внутри туннеля** (имя замера → эндпоинт подписки на loopback). Это уже работает | — | 0 | есть |
 
 Главное:
 - **Содержимое CDN не видит.** У ссылок VLESS Encryption с ML-KEM-768 (`sub.go:776-795`). Сервер делает рукопожатие
   шифрования до чтения заголовка VLESS (`xray:proxy/vless/inbound/inbound.go:288-292`). CDN, который завершает TLS,
   видит HTTP-запросы с шифротекстом: ни UUID, ни назначений, ни данных. Видит он метаданные (§5.3).
-- **CDN не лечит заморозку TCP после ~16 КБ, если CDN сам под ней.** Cloudflare резали с 2025-06-09
+- **CDN не лечит заморозку TCP, если CDN сам под ней.** В 2025 году её описывали как ~16 КБ, по замеру 2026-11 она
+  считает пакеты: ~25 дома, ~8 на мобильном (§5.6). Cloudflare резали с 2025-06-09
   ([блог Cloudflare](https://blog.cloudflare.com/russian-internet-users-are-unable-to-access-the-open-internet/)). В
   замере 2026-11-05/06 (один город) все 36 попыток к сайтам на Cloudflare прошли, дома и на мобильном
   ([Habr 1104904](https://habr.com/ru/articles/1104904/)). Счётчик пакетов идёт на соединение, а XMUX держит
@@ -36,8 +38,12 @@
   Пропускают ли их адреса белые списки, никто не мерил.
 - **Мешает в нашем коде** (§3.4, §5.2): сайт не стоит за фронтом напрямую (до него доходят только через REALITY); naive и DoH
   требуют `X25519MLKEM768`, а большинство CDN к источнику так не ходят; в периметре нет набора «подсети CDN на один
-  порт»; relay-v1 заморожен, и `relays[]` без `spa` старый клиент не поймёт; рендер строит процесс Xray на сервис; тесты
-  форка не покрывают XHTTP; у клиента нет `downloadSettings`.
+  порт»; relay-v1 заморожен, и `relays[]` без `spa` старый клиент не поймёт; рендер строит процесс Xray на сервис; учёт
+  трафика знает только `inner` и `reality` (§3.4); тесты форка не покрывают XHTTP; у клиента нет `downloadSettings`.
+- **Решения владельца 2026-11-19** (§8.3): форма A — предварительно v0.36.0, форма B — v0.37.0; CDN — отдельный профиль
+  для проверок, на его участках CDN допустим TLS без PQ, если VLESS Encryption с ML-KEM идёт из конца в конец и нет
+  лишних накладных расходов; замеры из российских сетей владелец попробует устроить; порядок профилей в подписке не
+  меняется (REALITY первым).
 
 ## 2. XHTTP в нашем форке Xray: что важно дальше
 
@@ -50,39 +56,49 @@
 - **Проверки в `ServeHTTP`:**
   - чужой `host` или путь — пустой `404` (`hub.go:97-107`);
   - неверный паддинг — `400` (`hub.go:145-151`); пустой паддинг неверен всегда (`xray:.../xpadding.go:307-310`);
-  - успешные ответы несут `Access-Control-Allow-Origin`, `X-Padding`, `X-Accel-Buffering: no`, `Cache-Control: no-store` и
-    `Content-Type: text/event-stream` (`xray:.../config.go:99-131`, `hub.go:110`, `:128`, `:355-371`).
+  - всякий ответ после проверки host и пути, и `400` тоже, несёт `Access-Control-Allow-Origin` (`*`, если в запросе нет
+    `Origin`, иначе его значение) и `X-Padding` (`xray:.../config.go:99-131`, `hub.go:110`, `:128`);
+  - поток вниз (GET, `stream-one`) ещё несёт `X-Accel-Buffering: no`, `Cache-Control: no-store` и, без `noSSEHeader`,
+    `Content-Type: text/event-stream` (`hub.go:352-370`).
 - **Режимы.** `stream-one` — один POST в обе стороны. `stream-up` — потоковый POST вверх и GET вниз. `packet-up` — GET
   вниз и POST-пакеты вверх с номером. Клиент в `auto` выбирает `packet-up`, под REALITY — `stream-one`, а под REALITY
   с `downloadSettings` — `stream-up` (`xray:.../dialer.go:332-340`). В
   [обсуждении 4113](https://github.com/XTLS/Xray-core/discussions/4113) написано, что TLS h2 в `auto` даёт `stream-up`.
   Код этой версии говорит иначе. Аплинк методом GET возможен только в `packet-up` (`xray:infra/conf/transport_method.go:389-390`),
-  с данными в заголовках или cookie. Это важно для CDN, где POST по умолчанию закрыт (§6).
+  с данными в заголовках или cookie. Это важно для отечественных CDN: у Yandex и VK POST по умолчанию закрыт и открывает
+  его поддержка, у Selectel — сам владелец ресурса (§6.1).
 - **Ресурсы до аутентификации.** Сессия XHTTP заводится по id из запроса (`hub.go:184-187`). Она живёт 30 с без GET
   (`hub.go:57-95`) и копит до `scMaxBufferedPosts` (30) пакетов по `scMaxEachPostBytes` (1 МБ) (`xray:.../config.go:140-168`).
-  Всё это до рукопожатия VLESS Encryption и до UUID. Пределы пользователя (conn-limit-v1) это не считают: у них ключ —
+  Это не предел памяти: тело POST читается в память до постановки в очередь (`hub.go:290-303`), а при полной очереди
+  запрос ждёт (`xray:.../upload_queue.go:40-52`). Сессия держит 30 МБ в очереди и ещё по 1 МБ на каждый ждущий запрос,
+  пока её не снимет таймер 30 с. Всё это до рукопожатия VLESS Encryption и до UUID. Пределы пользователя (conn-limit-v1) это не считают: у них ключ —
   пользователь после аутентификации. Кто знает путь, тот и тратит память (вывод из кода).
-- **Keepalive.** Только ответ на `stream-up` шлёт паддинг раз в `scStreamUpServerSecs` (20–80 с). И то лишь когда клиент
-  прислал паддинг в Referer или в режиме obfs (`hub.go:220-233`). Поток вниз (GET) пустых данных не шлёт. CDN с
-  тайм-аутом простоя рвёт простаивающий туннель (§5.5).
+- **Keepalive.** Только ответ на `stream-up` шлёт паддинг раз в `scStreamUpServerSecs` (20–80 с). И то лишь когда в
+  запросе есть любой непустой `Referer` (туда клиент кладёт паддинг) или принят паддинг obfs (`hub.go:220-233`). CDN,
+  который срезает `Referer`, без obfs выключает и его. Поток вниз (GET) пустых данных не шлёт. CDN с тайм-аутом простоя
+  рвёт простаивающий туннель (§5.5).
 - **XMUX** — только у клиента. Если в конфиге нет ни одного поля `xmux`, ставится `maxConnections` 3,
   `hMaxRequestTimes` 600–900, `hMaxReusableSecs` 1800–3000 (`transport_method.go:459-469`). Если задано хоть одно поле,
   остальные теряют умолчания ([4113](https://github.com/XTLS/Xray-core/discussions/4113); в коде — проверка
   `c.Xmux == (XmuxConfig{})`). Значит, рендер должен задавать все поля. В 4113 умолчание названо `maxConcurrency`
   16–32; код этой версии говорит иначе.
 - **Паддинг XHTTP.** По умолчанию 100–1000 байт (`xpadding.go:179-188`). Клиент кладёт его в query заголовка `Referer`
-  с ключом `x_padding` (`config.go:301-320`). Имена постоянные: это подпись, видимая CDN. CloudFront `Referer` удаляет
-  (§6). Режим `xPaddingObfsMode` задаёт свои место, ключ и заголовок.
-- **Vision.** Пользователя с `flow: xtls-rprx-vision` без flow не пускают (`inbound.go:619-623`). Значит, XHTTP нужен свой
-  inbound и свои клиенты без flow, а не клиенты REALITY. Но с VLESS Encryption Vision работает и поверх не-RAW
-  транспорта: соединение — `encryption.CommonConn`, splice выключен (`inbound.go:596-612`). Автор Xray для CDN
-  советует связку «VLESS Encryption + XTLS Vision + XHTTP XMUX» ([PR 5067](https://github.com/XTLS/Xray-core/pull/5067)).
-  Тезис вводных «XHTTP — без Vision» верен только без шифрования. У нас шифрование есть везде.
+  с ключом `x_padding` (`config.go:301-320`). Имена постоянные: это подпись, видимая CDN. CloudFront по умолчанию
+  `Referer` удаляет (§6.1). Без `Referer` сервер ищет `x_padding` в query самого URL (`xpadding.go:256-266`), но клиент по
+  умолчанию его туда не кладёт: ответ — `400`. Режим `xPaddingObfsMode` задаёт свои место, ключ и заголовок.
+- **Vision.** Пользователя с `flow: xtls-rprx-vision`, пришедшего без flow, не пускают с командой TCP и с Mux без XUDP;
+  команду UDP пускают (`inbound.go:619-623`). С VLESS Encryption Vision работает и поверх не-RAW транспорта: соединение —
+  `encryption.CommonConn`, splice выключен (`inbound.go:596-612`). Автор Xray для CDN советует связку «VLESS Encryption +
+  XTLS Vision + XHTTP XMUX» ([PR 5067](https://github.com/XTLS/Xray-core/pull/5067)). Тезис вводных «XHTTP — без Vision»
+  верен только без шифрования. У нас шифрование есть везде. Значит, у сервиса XHTTP два варианта клиентов: с Vision
+  поверх VLESS Encryption или без flow. Клиент: Vision поверх XHTTP с шифрованием — да по коду, подтвердит interop
+  (§8.4, п. 3). Свой inbound нужен в обоих случаях: у XHTTP другой транспорт.
 - **VLESS Encryption.** У нас `mlkem768x25519plus.native.600s.<seed>` на сервере и `...native.0rtt.<ключ>` в ссылке
   (`render.go:1392-1399`). По [PR 5067](https://github.com/XTLS/Xray-core/pull/5067):
   - `native` — не случайный вид, видны признаки открытого ключа и заголовок, похожий на запись TLS 1.3;
   - `xorpub` убирает признаки ключей, `random` даёт вид случайных байт;
-  - 0-RTT защищён от повтора: сервер помнит ключи 10 минут, билет живёт до перезапуска или 10 минут;
+  - 0-RTT защищён от повтора: сервер помнит ключи 10 минут. Билет живёт до перезапуска сервера или до срока из
+    конфига: при `600s` — случайно 300–600 с (`xray:proxy/vless/encryption/server.go:271-276`);
   - паддинг рукопожатия — только у 1-RTT.
 
 ## 3. Как устроены формы на ноде
@@ -97,11 +113,11 @@
 | | Что |
 |---|---|
 | Фронт | Своё имя → бэкенд `proxy-v2`, как у REALITY (`niko-server:nikoserver/tcpfront.go:160-161`, `:187-216`). Неизвестное имя по-прежнему уходит в первый REALITY (`render.go:998`) |
-| Xray | Новый вид сервиса (например, `xhttp-reality`), свой процесс: рендер строит процесс Xray на сервис (`xrayFile`, `render.go:1460-1467`). Второй inbound в процессе бывает только у REALITY в период перекрытия ключей (`render.go:1730-1732`). Inbound — как `realityInbound` (`render.go:1738-1764`), но `network: "xhttp"`, `xhttpSettings` с путём и `mode: "stream-one"`. Свои ключи REALITY, ML-DSA-65, зерно ML-KEM, shortId. Цель — сайт (self-steal), имя — под сертификатом сайта (R2-12, R4-7). Клиенты без flow (§2) |
+| Xray | Новый вид сервиса (например, `xhttp-reality`), свой процесс: рендер строит процесс Xray на сервис (`xrayFile`, `render.go:1460-1467`). Второй inbound в процессе бывает только у REALITY в период перекрытия ключей (`render.go:1730-1732`). Inbound — как `realityInbound` (`render.go:1738-1764`), но `network: "xhttp"`, `xhttpSettings` с путём и `mode: "stream-one"`. Свои ключи REALITY, ML-DSA-65, зерно ML-KEM, shortId. Цель — сайт (self-steal), имя — под сертификатом сайта (R2-12, R4-7). Клиенты — с Vision поверх VLESS Encryption или без flow (§2); клиент по коду умеет Vision, выбор — после interop (§8.4, п. 3) |
 | Режим | `stream-one` (так выбирает и `auto`). `downloadSettings` не нужен |
-| XMUX | В ссылке (`extra.xmux`) — все поля явно: `maxConnections` 1–2, `hMaxRequestTimes` и `hMaxReusableSecs` — диапазоны из случайных параметров установки (architecture.md, «Случайные параметры установки»), `hKeepAlivePeriod` 0 (Chrome, 45 с). Поток h2 у сервера ограничен 250 стримами (Go по умолчанию; у Xray — если не задан `h2Params`) |
+| XMUX | В ссылке (`extra.xmux`) — все поля явно: `maxConnections` 1–2, `hMaxRequestTimes` и `hMaxReusableSecs` — диапазоны из случайных параметров установки (architecture.md, «Случайные параметры установки»), `hKeepAlivePeriod` 0 (Chrome, 45 с; `dialer.go:248-249`, `xray:common/net/net.go:20`). Поток h2 у сервера ограничен 250 стримами (Go по умолчанию; у Xray — если не задан `h2Params`, `hub.go:559-576`) |
 | Паддинг | `xPaddingObfsMode` со случайными для установки заголовком и ключом. Паддинг VLESS Encryption — как сейчас |
-| UDP | VLESS UDP и XUDP через ту же сессию. Без flow команда UDP разрешена, с Vision — только через XUDP (`inbound.go:591-594`). Head-of-line, как у REALITY; совет из [traffic.md](../design/traffic.md) §2 (отклонять QUIC) в силе |
+| UDP | VLESS UDP и XUDP через ту же сессию. Без flow команда UDP разрешена, с Vision — только через XUDP (`inbound.go:589-594`). Клиент по умолчанию шлёт UDP поверх XHTTP обычным запросом VLESS, XUDP — только с `packetEncoding=xudp` в ссылке (§8.4): с Vision ссылка должна его нести (вывод). Head-of-line, как у REALITY; совет из [traffic.md](../design/traffic.md) §2 (отклонять QUIC) в силе |
 | Relay | L4: TCP 443 к выходу ([relay-v1](../spec/relay-v1.md) §2). Имя relay — в `serverNames` (names-v1 §7) |
 | Цена | Мала: тот же путь, что REALITY. Ротация ключей и имени по R4-7 — та же машина, но второй экземпляр |
 
@@ -118,7 +134,7 @@
 
 | | Что |
 |---|---|
-| Фронт | Имя → `fd`, как naive и DoH (`render.go:841-880`, `tcpfront.go:154-159`). QUIC — `packet`, как naive-quic |
+| Фронт | Имя → `fd`, как naive и DoH (`render.go:841-880`, `niko-server:nikoserver/tcpfront.go:154-159`). QUIC — `packet`, как naive-quic |
 | TLS и HTTP | Тот же код, что у сайта, naive и DoH: `site.HTTPServer` (одинаковые SETTINGS h2 для всех имён, `internal/site/http2.go:44-68`), сертификат сайта с перечитыванием. Для CDN — TLS как у сайта (TLS 1.2+, любая группа, `internal/site/server.go:74-80`): CDN почти везде ходит к источнику без ML-KEM. Исключение — Cloudflare: [он предлагает X25519MLKEM768, если источник умеет](https://blog.cloudflare.com/automatic-key-exchange-for-origins/). Постквант даёт VLESS Encryption |
 | Доступ | Секретный путь на сервис или, лучше, **токен устройства в пути**, как у DoH с v0.27.0 (R4-37): `rayd` проверяет токен, срезает его и шлёт запрос в один внутренний путь Xray. Утечка пути — отзыв одного устройства. До Xray доходят только держатели токена, а это и есть защита ресурсов до аутентификации (§2) (вывод) |
 | Прокси | `httputil.ReverseProxy` с `FlushInterval: -1`, к Xray по h2c на unix-сокете. Тело запроса не буферизуется. Ответы Xray `4xx` (`400` паддинга, `404` пути) заменяются ответом сайта: знающий путь зонд не отличит XHTTP по кодам (вывод) |
@@ -129,7 +145,8 @@
 | Relay | L4, как naive. Имя relay × сервис — по names-v1 §9 п. 2 |
 | Цена | Новый процесс `rayd xhttp` (или ветка в `rayd naive`), рендер, ссылки, тесты |
 
-Чем B хуже naive напрямую: у naive клиент — настоящий Chromium (cronet), у XHTTP — uTLS с отпечатком Chrome. Своя
+Чем B хуже naive напрямую: у naive клиент — настоящий Chromium (cronet), у XHTTP — свой клиент ядра. Клиент подтвердил
+uTLS только для REALITY; какой отпечаток TLS у XHTTP с обычным TLS — вопрос §8.4, п. 10 (вывод: не Chromium). Своя
 ценность B — **CDN**. Напрямую B нужен как запасной путь и для проверки источника без CDN.
 
 ### 3.3. Другие формы
@@ -145,7 +162,9 @@
 ### 3.4. Что меняется в нашем коде
 
 - **Рендер.** Новый вид в `XrayKinds` (`render.go:500`), ветки в `XrayUsers` и `XrayTags` (`render.go:521-531`,
-  `:1664-1672`), клиенты без flow (`xrayClients(m, s, "")`). `inbound` для формы A — на основе `realityInbound`, для B —
+  `:1664-1672`). Клиенты — без flow (`xrayClients(m, s, "")`) или с `RealityFlow`, если interop подтвердит Vision поверх
+  XHTTP (§2, §8.4 п. 3). Тот же выбор — в синхронизации пользователей: `flow` берётся по виду сервиса
+  (`internal/live/live.go:371-374`). `inbound` для формы A — на основе `realityInbound`, для B —
   на unix-сокете без TLS. Маршрут фронта: A — `proxy-v2`, B — `fd` и `packet`. Конфиг `rayd xhttp`: путь Xray, токены,
   ответ сайта.
 - **Ссылки** (`internal/sub`). `vless://…?type=xhttp&security=reality|tls&path=…&mode=…&extra=<JSON>`. Niko уже читает
@@ -155,12 +174,15 @@
   `xrayFile` (`render.go:1478-1485`).
 - **Пределы соединений.** Пользовательские пределы форка работают по пользователю внутри процесса. Реестр — один на
   процесс ([conn-limit-v1](../spec/conn-limit-v1.md) §3.3). Новый процесс — новый бюджет пользователя, как у пары
-  `inner` и REALITY сейчас. Каждая сессия XHTTP — своё соединение VLESS со своим токеном. XMUX уменьшает только
-  входящие TCP. Новое — ресурсы до аутентификации (§2): в B их держит токен `rayd`, в A — REALITY.
-- **Учёт трафика.** Без изменений по сути. Счётчики пользователя — в диспетчере, по полезной нагрузке, независимо от
+  `inner` и REALITY сейчас. Каждая сессия XHTTP — своё соединение VLESS, и пределы считают его, как соединение REALITY
+  (вывод). XMUX уменьшает только входящие TCP. Новое — ресурсы до аутентификации (§2): в B их держит токен `rayd`, в
+  A — REALITY.
+- **Учёт трафика.** В Xray без изменений: счётчики пользователя — в диспетчере, по полезной нагрузке, независимо от
   транспорта (`xray:app/dispatcher/default.go:163-208`). Заголовки, паддинг и кадры h2 в счёт не идут, как и сейчас
-  ([traffic.md](../design/traffic.md) §5). `rayd` читает новый процесс тем же циклом `traffic <сервис>`
-  (`internal/live/live.go:379`, `:468`).
+  ([traffic-limit-v1](../spec/traffic-limit-v1.md) §1). **В `rayd` — изменение:** источники счётчиков перечислены по видам
+  (`internal/traffic/traffic.go:83-97`, `Processes`): случаи `inner` и `reality`, ветки по умолчанию нет. Новый вид без
+  своего случая не читается вовсе, и лимит трафика (traffic-limit-v1 §2.1) на нём не действует. Нужен случай для
+  каждого нового вида, тест на это и строка в traffic-limit-v1 §2.1.
 - **Отзыв пользователя.** `RemoveUser` форка закрывает «сырое» соединение. Для XHTTP это сессия (`splitConn`):
   `UnwrapRawConn` её не разворачивает (`xray:proxy/proxy.go:691-720`). Сессия закрывается, а соединение h2 XMUX живёт до
   простоя, уже без потоков (вывод). Тесты форка (`userconns_transport_test.go`) XHTTP не покрывают, их нужно добавить.
@@ -183,7 +205,7 @@ h3 формы B. Свои имена relay — по names-v1 §9 п. 2 (v0.35.0)
 | Адрес ноды | виден | виден | виден | скрыт за CDN или relay |
 | Счётчик пакетов на соединение (§5.6) | мёрзнет | мёрзнет, и долгий XMUX хуже | мёрзнет | зависит от CDN |
 
-Общее для XHTTP: постоянные имена (`x_padding`, `X-Padding`, CORS `*`, `text/event-stream`) видны тому, кто снял TLS:
+Общее для XHTTP: постоянные имена (`x_padding`, `X-Padding`, CORS `*` на запрос без `Origin`, `text/event-stream`) видны тому, кто снял TLS:
 CDN или прокси владельца. Для CDN их убирает режим obfs. Сообщения на ntc.party о том, что XHTTP + REALITY разом
 перестал работать у всех провайдеров, есть по выдаче поиска, но страница из сессии не открылась (сайт закрыт сетью
 сессии). Это не свидетельство.
@@ -195,11 +217,12 @@ CDN или прокси владельца. Для CDN их убирает ре�
   образцу `TestRealitySelfStealWithXray` (`internal/xrayapi/xray_test.go:511`): настоящий фронт, сервер и клиент Xray.
   - A: `stream-one`; отказ без REALITY уходит сайту.
   - B: `packet-up`, `stream-up`, `stream-one`, h1 и h2, h3 через udpmux; неверный путь или токен — ответ сайта.
-  - Пользователь: добавлен, удалён (сессия закрыта), предел, счётчики трафика.
+  - Клиенты с Vision поверх VLESS Encryption и без flow (§2).
+  - Пользователь: добавлен, удалён (сессия закрыта), предел, счётчики трафика (новый вид в `traffic.Processes`, §3.4).
 - **Эмулятор CDN** в тесте: обратный прокси на Go, который ведёт себя как CDN:
   - h1 к источнику;
   - буферизует тело запроса целиком;
-  - срезает `Referer` и меняет `User-Agent`, как CloudFront;
+  - срезает `Referer` и меняет `User-Agent`, как CloudFront по умолчанию;
   - рвёт ответ после N с простоя;
   - добавляет секретный заголовок или клиентский сертификат.
 
@@ -248,6 +271,8 @@ CDN или прокси владельца. Для CDN их убирает ре�
 Варианты в подписке:
 1. **Отдельный профиль** со своей полной ссылкой (хост — имя на CDN, без `niko-pin`) и пометкой края для показа.
    Старый клиент видит обычную строку `type=xhttp`. Клиенту нужен только разбор XHTTP. Рекомендую начать так.
+   **Владелец 2026-11-19:** путь через CDN — отдельный профиль для проверок. Порядок профилей в подписке не меняется:
+   REALITY первым, XHTTP и край — после него.
 2. **Вид relay в подписке.** Новые записи (`edges[]` или `relays[]` с `kind: "cdn"`) и `profiles[].via`. Они идут только
    клиенту, который заявил `X-Raycontrol-Features: cdn`, по образцу names-v1 §4. Старый клиент, увидев `relays[]` без
    `spa`, начал бы стучаться в никуда (вывод). Это даёт детектору белых списков (relay-v1 §5) выбирать край как relay.
@@ -270,13 +295,14 @@ CDN или прокси владельца. Для CDN их убирает ре�
 | Вариант | Как | Плюсы | Минусы |
 |---|---|---|---|
 | Подсети CDN | Набор подсетей CDN, без SPA | просто; у CDN есть списки: Cloudflare, [управляемый список CloudFront для источников](https://aws.amazon.com/blogs/networking-and-content-delivery/limit-access-to-your-origins-using-the-aws-managed-prefix-list-for-amazon-cloudfront) (по выдаче поиска), метки служб Azure ([FAQ](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-faq)) | Подсети общие для всех клиентов CDN. Cloudflare прямо пишет, что общий сертификат AOP доказывает лишь «coming from the Cloudflare network» ([AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/)). Значит, порт открыт любому, у кого есть аккаунт этого CDN (вывод). Списки меняются |
-| + отдельный порт | Подсети CDN пускаются только на свой порт источника. На нём только `rayd xhttp` (B), а не 443 со всеми именами | Через CDN нельзя прощупать REALITY, naive и остальное | Порт задаётся в CDN: Cloudflare — Origin Rules, «Destination port», на всех тарифах ([Origin Rules](https://developers.cloudflare.com/rules/origin-rules/)); CloudFront — 443 или 1024–65535 ([Origin settings](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesOrigin.html)). Порт сам по себе — отпечаток (вывод) |
+| + отдельный порт | Подсети CDN пускаются только на свой порт источника. На нём только `rayd xhttp` (B), а не 443 со всеми именами | Через CDN нельзя прощупать REALITY, naive и остальное | Порт задаётся в CDN: Cloudflare — Origin Rules, «Destination port», на всех тарифах ([Origin Rules](https://developers.cloudflare.com/rules/origin-rules/)); CloudFront — 80, 443 или 1024–65535 ([Origin settings](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesOrigin.html)). gRPC Cloudflare требует источник на 443 ([gRPC](https://developers.cloudflare.com/network/grpc-connections/)): с отдельным портом gRPC отпадает (§7.1, п. 4). Порт сам по себе — отпечаток (вывод) |
 | + секретный заголовок | CDN добавляет заголовок, `rayd` сверяет его до всего остального | Есть почти везде: CloudFront — «Add custom header», Cloudflare — Transform Rules ([совет Cloudflare](https://developers.cloudflare.com/learning-paths/prevent-ddos-attacks/advanced/prevent-external-connections/)) | Секрет — в настройках CDN и на каждом запросе. Это ровно то, что CDN и так видит |
-| + mTLS от CDN | CDN предъявляет клиентский сертификат, `rayd` требует его на этом имени | Сильнее всего | Cloudflare: AOP per-hostname или zone со своим сертификатом. CloudFront не умеет: «If an origin requests a client-side certificate, CloudFront drops the request» ([поведение с источником](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/RequestAndResponseBehaviorCustomOrigin.html)). У остальных — нет данных |
+| + mTLS от CDN | CDN предъявляет клиентский сертификат, `rayd` требует его на этом имени | Сильнее всего | Cloudflare: AOP per-hostname или zone со своим сертификатом. CloudFront — с 2026-01: сертификат клиента импортируется в ACM, проверяет его источник ([origin mTLS](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/origin-mtls-authentication.html), [анонс](https://aws.amazon.com/about-aws/whats-new/2026/01/amazon-cloudfront-mutual-tls-for-origins)). Фраза «CloudFront drops the request» на [странице поведения](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/RequestAndResponseBehaviorCustomOrigin.html) — о случае без настроенного mTLS. У остальных — нет данных |
 | Туннель вендора (`cloudflared`) | Источник сам подключается к Cloudflare. Входящего порта нет | SPA не меняется | Чужой бинарник и аккаунт на выходе. Исходящие к Cloudflare видны сети выхода. AOP с туннелем несовместим. gRPC через туннель — только для частных подсетей, «Public hostname deployments are not currently supported» ([gRPC](https://developers.cloudflare.com/network/grpc-connections/)). Как туннель передаёт потоковое тело XHTTP — нет данных |
 | **Relay как источник** | Источник для CDN — адрес relay. Relay пускает подсети CDN на порт края и делает DNAT к выходу. Выход пускает relay, как сейчас (`relay4`, `relay_ports`, `internal/perimeter/firewall.go:206-208`, `:294-295`) | CDN не знает адреса выхода. TLS сквозной до выхода. Relay ключей не держит. Потерю relay лечит `rayctl relay remove` | Лишний хост и хоп. Адрес relay известен CDN. Нужен новый вид пересылки в снимке relay: публичный порт для подсетей, без SPA |
 
-Рекомендация: **relay как источник + отдельный порт + подсети CDN + секретный заголовок**. mTLS — где CDN умеет.
+Рекомендация: **relay как источник + отдельный порт + подсети CDN + секретный заголовок**. mTLS — где CDN умеет
+(Cloudflare, CloudFront). Цена отдельного порта у Cloudflare — без gRPC (§7.1, п. 4).
 `cloudflared` — только если владелец согласен на чужой бинарник на выходе.
 
 Что нужно в периметре (вывод):
@@ -320,14 +346,14 @@ CDN или прокси владельца. Для CDN их убирает ре�
 | Отказ | Что видит клиент | Что делать |
 |---|---|---|
 | CDN закрыл аккаунт или сервис (ToS) | край не отвечает | другой путь: напрямую, relay, другой край; несколько CDN |
-| Адреса CDN режут или морозят в стране клиента | рвётся после ~25 пакетов | детектор пути; край — не единственный путь |
+| Адреса CDN режут или морозят в стране клиента | соединение замирает (не рвётся) после ~25 пакетов, на мобильном ~8 (§5.6) | детектор пути; край — не единственный путь |
 | Простой потока вниз дольше тайм-аута CDN: GET без данных, keepalive в Xray нет (§2) | простаивающее соединение приложения рвётся | брать CDN с длинным тайм-аутом или договориться; keepalive внутри VLESS Encryption — вопрос к Xray (§8.5) |
 | CDN буферизует тело запроса | `stream-up` и `stream-one` висят | `packet-up` по умолчанию |
-| CDN срезает заголовки (CloudFront — `Referer`) | `400` паддинга | `xPaddingObfsMode` с заголовком, который CDN пропускает |
-| CDN кеширует GET (CloudFront кеширует GET и HEAD всегда) | ломаются сессии | политика без кеша; Xray и так шлёт `no-store` |
+| CDN срезает заголовки (CloudFront по умолчанию — `Referer`) | `400` паддинга; keepalive `stream-up` тоже выключен (§2) | переслать `Referer` политикой запроса к источнику, где CDN это умеет (CloudFront — да); иначе `xPaddingObfsMode` с заголовком, который CDN пропускает |
+| CDN кеширует GET (CloudFront кеширует GET и HEAD всегда, [поведение](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/RequestAndResponseBehaviorCustomOrigin.html)) | ломаются сессии (вывод) | политика без кеша; Xray и так шлёт `no-store` |
 | Подсети CDN к источнику сменились | край не открывается | обновлять список по расписанию, по образцу ротации |
 | Отказ relay-источника | край не открывается | несколько relay-источников в CDN (группа источников) |
-| Предел запроса CDN меньше `scMaxEachPostBytes` | `413` | меньший `scMaxEachPostBytes` у края |
+| Предел запроса CDN меньше `scMaxEachPostBytes` | `413` от CDN (вывод; пределы тела у CDN — §6.1) | меньший `scMaxEachPostBytes` у края |
 | h1 к источнику и много сессий | много TCP от одного адреса CDN, срабатывает предел на адрес | §5.2, свой предел для набора CDN |
 
 ### 5.6. Россия: заморозка и белые списки
@@ -357,10 +383,10 @@ CDN или прокси владельца. Для CDN их убирает ре�
 
 | CDN | HTTP/2 к источнику | Поток ответа | Тело запроса | Тайм-ауты | gRPC / WebSocket |
 |---|---|---|---|---|---|
-| **Cloudflare** | да, по умолчанию на всех тарифах; иначе h1 ([h2 to origin](https://developers.cloudflare.com/speed/optimization/protocol/http2-to-origin/)). X25519MLKEM768 к источнику, если он умеет ([блог](https://blog.cloudflare.com/automatic-key-exchange-for-origins/)) | по умолчанию поток; `response_body_buffering: none` ([2026-01-27](https://developers.cloudflare.com/changelog/2026-01-27-body-buffering-settings/)) | `request_body_buffering`: standard, full, none (там же); тарифы не указаны; предел размера — нет данных | Proxy Read Timeout 125 с, Enterprise до 6000 с ([524](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-524/)); простой ~100 с по опыту ([4113](https://github.com/XTLS/Xray-core/discussions/4113)); простой соединения h2 к источнику — 900 с | gRPC на всех тарифах: 443, TLS, h2, `application/grpc` ([gRPC](https://developers.cloudflare.com/network/grpc-connections/)); WS — есть (используется в [Habr 1021160](https://habr.com/ru/articles/1021160/), документация не открывалась) |
-| **Fastly** | только экспериментальный gRPC-бэкенд в Compute: «support for gRPC is under ongoing development» ([GrpcBackend](https://www.fastly.com/documentation/reference/compute/sdks/rust/fastly/experimental/trait.GrpcBackend/)); иначе нет данных | нет данных | нет данных | между байтами — по умолчанию 15 с, 0–600 с ([between_bytes](https://www.fastly.com/documentation/reference/vcl/variables/backend-connection/bereq-between-bytes-timeout/)); при щите — 60 с фиксированно (по выдаче поиска) | WS — продукт: выключен по умолчанию, оплата за минуты соединения, без щита и NGWAF, сертификат источника публичный ([WebSockets](https://docs.fastly.com/products/websockets)) |
+| **Cloudflare** | да, по умолчанию на всех тарифах; иначе h1 ([h2 to origin](https://developers.cloudflare.com/speed/optimization/protocol/http2-to-origin/)). X25519MLKEM768 к источнику, если он умеет ([блог](https://blog.cloudflare.com/automatic-key-exchange-for-origins/)) | `response_body_buffering`: standard (по умолчанию) или none ([2026-01-27](https://developers.cloudflare.com/changelog/2026-01-27-body-buffering-settings/)); пускает ли standard поток без задержки — не сказано | `request_body_buffering`: standard (по умолчанию), full, none (там же); тарифы не указаны; предел размера — нет данных | Proxy Read Timeout 125 с, Enterprise до 6000 с ([524](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-524/)); простой ~100 с по опыту ([4113](https://github.com/XTLS/Xray-core/discussions/4113)); простой соединения h2 к источнику — 900 с, Proxy Idle Timeout — 900 с ([пределы соединений](https://developers.cloudflare.com/fundamentals/reference/connection-limits/)) | gRPC на всех тарифах: источник на 443, TLS, h2 по ALPN, `application/grpc` ([gRPC](https://developers.cloudflare.com/network/grpc-connections/)); WS — есть (используется в [Habr 1021160](https://habr.com/ru/articles/1021160/), документация не открывалась) |
+| **Fastly** | только экспериментальный gRPC-бэкенд в Compute: «support for gRPC is under ongoing development» ([GrpcBackend](https://www.fastly.com/documentation/reference/compute/sdks/rust/fastly/experimental/trait.GrpcBackend/)); иначе нет данных | нет данных | нет данных | между байтами — по умолчанию 15 с, 0–600 с; между POP при щите — по настройкам каждого POP (там же, [between_bytes](https://www.fastly.com/documentation/reference/vcl/variables/backend-connection/bereq-between-bytes-timeout/)) | WS — продукт: выключен по умолчанию, оплата за минуты соединения, без щита и NGWAF, сертификат источника публичный ([WebSockets](https://docs.fastly.com/products/websockets)) |
 | **Akamai** | опция «HTTP/2 Edge to Origin» ([gRPC](https://techdocs.akamai.com/property-mgr/docs/google-rpc)) | двунаправленные потоки gRPC — по контракту (там же) | нет данных | простой — системные пределы, через аккаунт-менеджера (там же) | gRPC по контракту; WS есть, несовместим с gRPC (там же) |
-| **CloudFront** | нет: «forwards requests to your custom origin using HTTP/1.1»; gRPC — h2 из конца в конец ([поведение](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/RequestAndResponseBehaviorCustomOrigin.html), [gRPC](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/distribution-using-grpc.html)) | chunked — по мере прихода (поведение) | GET с телом — `403`; `Referer` удаляется, `User-Agent` заменяется (поведение) — ломает паддинг XHTTP по умолчанию | ответ и пауза между пакетами — 30 с по умолчанию, квота 1–120 с ([Origin settings](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesOrigin.html)); простой WS — 10 мин (по выдаче поиска) | gRPC: POST, HTTPS, мимо REC и Origin Shield (gRPC); WS — да (поведение: `Upgrade`) |
+| **CloudFront** | нет: «forwards requests to your custom origin using HTTP/1.1»; gRPC — h2 из конца в конец ([поведение](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/RequestAndResponseBehaviorCustomOrigin.html), [gRPC](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/distribution-using-grpc.html)) | chunked — по мере прихода (поведение) | GET с телом — `403`; если заголовок не переслать политикой, `Referer` удаляется, `User-Agent` заменяется на `Amazon CloudFront` (поведение) — по умолчанию ломает паддинг XHTTP | ответ и пауза между пакетами — 30 с по умолчанию, квота 1–120 с ([Origin settings](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesOrigin.html)); простой WS — 10 мин (по выдаче поиска) | gRPC: POST, HTTPS, мимо REC и Origin Shield (gRPC); WS — да (поведение: `Upgrade`) |
 | **Google Cloud CDN** (внешний ALB) | да: HTTP, HTTPS, HTTP/2 ([backend service](https://docs.cloud.google.com/load-balancing/docs/backend-service)) | до тайм-аута отдаются заголовки и сколько успело тела ([request distribution](https://docs.cloud.google.com/load-balancing/docs/https/request-distribution)) | нет данных | тайм-аут сервиса — **весь обмен**, по умолчанию 30 с, фактически до 86 400 с (там же) | WS: активный не ограничен тайм-аутом, но до 24 ч (там же); gRPC — нет данных |
 | **Azure Front Door** | нет, кроме gRPC (превью): «Routes without gRPC enabled use HTTP/1.1» ([FAQ](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-faq)) | нет данных | нет данных | keep-alive клиента 90 с, заголовки — 5 с (FAQ); ответ источника — нет данных | gRPC — превью (FAQ); WS — нет данных |
 | **Gcore** | нет данных | нет данных | нет данных | `proxy_read_timeout` — между чтениями, 1–30 с, выше — только Enterprise ([тайм-ауты](https://docs.gcore.com/cdn/cdn-resource-options/general/customize-connection-and-read-timeouts)) | WS — переключатель ресурса (по выдаче поиска, [WS](https://docs.gcore.com/cdn/cdn-resource-options/websockets-allow-permanent-connections-with-the-origin)) |
@@ -383,7 +409,7 @@ CDN или прокси владельца. Для CDN их убирает ре�
 | **Cloudflare** | подсети; AOP: общий, зоны, имени ([AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/)); заголовок; Tunnel; порт — Origin Rules | бесплатный тариф; ограничения KYC не нашёл | CDN не на Enterprise: за «a disproportionate percentage of pictures, audio files, or other large files» могут «disable or limit» ([Service-Specific Terms](https://www.cloudflare.com/service-specific-terms-application-services/)); про прокси пункта нет | с 2025-06-09 — первые 16 КБ ([блог](https://blog.cloudflare.com/russian-internet-users-are-unable-to-access-the-open-internet/)); 2026-11: 36 из 36 прошли ([Habr 1104904](https://habr.com/ru/articles/1104904/)); на мобильном под белыми списками — нет ([Habr 1021160](https://habr.com/ru/articles/1021160/)) | компания США; российское право — через блокировку провайдерами |
 | **Fastly** | нет данных | бесплатный аккаунт разработчика (2024: ~200 ГБ, 2 млн запросов), теперь нужна карта ([блог Fastly](https://quic.fastly.com/blog/its-free-instant-and-yours-fastlys-free-developer-accounts-are-here)) | нет данных | нет данных | США |
 | **Akamai** | нет данных | контракт через продажи (вывод) | нет данных | нет данных; фронтинг в 2023 был возможен ([relay-entry-v1](../spec/relay-entry-v1.md) §7.6) | США |
-| **CloudFront** | свои заголовки; список подсетей к источнику; VPC origins; **без mTLS** к источнику | аккаунт AWS; с 2022-03-08 новые регистрации из России и Беларуси закрыты ([TechCrunch](https://techcrunch.com/2022/03/10/amazon-microsoft-and-google-have-suspended-cloud-sales-in-russia)) | нет данных | нет данных | США |
+| **CloudFront** | свои заголовки; список подсетей к источнику; VPC origins; mTLS к источнику с 2026-01 ([origin mTLS](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/origin-mtls-authentication.html)) | аккаунт AWS; с 2022-03-08 новые регистрации из России и Беларуси закрыты ([TechCrunch](https://techcrunch.com/2022/03/10/amazon-microsoft-and-google-have-suspended-cloud-sales-in-russia)) | нет данных | нет данных | США |
 | **Google Cloud CDN** | нет данных | новых клиентов в России нет (TechCrunch) | нет данных | нет данных о CDN; адреса Google Cloud прошли замер 2026-11 ([Habr 1104904](https://habr.com/ru/articles/1104904/)) | США |
 | **Azure Front Door** | метка `AzureFrontDoor.Backend`; Private Link на Premium; фронтинг блокируется ([FAQ](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-faq)) | продажи в России приостановлены в 2022 (TechCrunch) | нет данных | нет данных | США |
 | **Gcore** | нет данных | нет данных | нет данных | нет данных | Люксембург (вывод, не проверялось) |
@@ -396,19 +422,20 @@ CDN или прокси владельца. Для CDN их убирает ре�
 
 ### 6.3. Что из этого следует
 
-- **Cloudflare** — единственный, где подтверждены все нужные XHTTP вещи:
-  - h2 к источнику, gRPC на любом тарифе (`stream-up`);
-  - управляемая буферизация;
+- **Cloudflare** — первый: у него подтверждено больше всего нужного XHTTP, а PQ к источнику — только у него. Есть:
+  - h2 к источнику; gRPC на любом тарифе (`stream-up`), но источник gRPC — только на 443 (§7.1, п. 4);
+  - управляемая буферизация тел;
   - mTLS к источнику со своим сертификатом, порт источника на любом тарифе, PQ к источнику;
   - бесплатный тариф.
 
   Против: достижимость из России меняется (2025 — режут, 2026-11 — проходит); под белыми списками не работает;
   ToS про «disproportionate» большие файлы.
-- **CloudFront** — второй международный. Плюсы: зрелый, свои заголовки, выбор порта, gRPC h2 из конца в конец. Минусы:
-  h1 к источнику вне gRPC, 30 с без данных по умолчанию, `Referer` срезается, mTLS к источнику нет, регистрация из
-  России закрыта.
+- **CloudFront** — второй международный, и разрыв меньше, чем казалось: mTLS к источнику у него тоже есть (с 2026-01),
+  так что «отдельный порт + mTLS» доступен у обоих. Плюсы: зрелый, свои заголовки, выбор порта, mTLS к источнику,
+  gRPC h2 из конца в конец. Минусы: h1 к источнику вне gRPC, 30 с без данных по умолчанию, `Referer` по умолчанию
+  срезается, PQ к источнику не найден, регистрация из России закрыта.
 - **Отечественный CDN** — единственная надежда на режим белых списков. Но:
-  - пропускают ли края белые списки — не мерил никто;
+  - пропускают ли края белые списки — не мерил никто; замеры владелец попробует устроить (2026-11-19);
   - POST и WS по умолчанию закрыты у Yandex и VK, а открывает их поддержка по описанию задачи. Selectel открывает POST
     сам. Без POST остаётся `packet-up` с GET-аплинком (§2);
   - у Yandex источник должен ответить за 5 с;
