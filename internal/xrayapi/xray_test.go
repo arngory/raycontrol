@@ -1052,7 +1052,8 @@ func TestHysteriaWithXray(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if _, err := provision.Init(ctx, st, provision.Options{Host: "127.0.0.1", Domain: "example.com"}); err != nil {
+	if _, err := provision.Init(ctx, st, provision.Options{Host: "127.0.0.1", Domain: "example.com",
+		Ports: provision.PortChoice{Sub: subPort(t)}}); err != nil {
 		t.Fatal(err)
 	}
 	masq, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-masq", Name: "hy2", Enabled: true})
