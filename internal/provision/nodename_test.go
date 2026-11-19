@@ -114,10 +114,12 @@ func TestNodeDNSNameEdges(t *testing.T) {
 	go func() { n, err = NodeDNSName(ctx, st); close(done) }()
 	select {
 	case <-done:
+		settingsMu.Unlock()
 	case <-time.After(5 * time.Second):
+		settingsMu.Unlock() // the tests after it take the lock too
+		<-done
 		t.Fatal("waited for settingsMu")
 	}
-	settingsMu.Unlock()
 	if err != nil || n != "" {
 		t.Fatalf("a zone holds the domain: %q %v", n, err)
 	}

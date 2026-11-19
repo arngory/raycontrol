@@ -94,6 +94,17 @@ func TestLinksByName(t *testing.T) {
 			t.Errorf("%s: by name differs beyond host and niko-ip:\n%s\n%s", byName[i].Name, byAddr[i].Link, byName[i].Link)
 		}
 	}
+	// A domain stored before Init canonicalized it: the same links.
+	m.Domain = "Example.COM."
+	raw, err := sub.Profiles(m, m.Users[0])
+	if err != nil || len(raw) != len(byName) {
+		t.Fatalf("profiles %v %v", raw, err)
+	}
+	for i := range raw {
+		if raw[i].Link != byName[i].Link {
+			t.Errorf("%s under Example.COM.:\n%s\n%s", raw[i].Name, raw[i].Link, byName[i].Link)
+		}
+	}
 }
 
 // A node whose host is a name has no name of its own and gives links by

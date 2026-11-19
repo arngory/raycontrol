@@ -1346,6 +1346,14 @@ func NodeDNSName(ctx context.Context, st *store.Store) (string, error) {
 	return string(first), err
 }
 
+// namesIn reports whether settings hold the canonical name zone as a
+// string, as stored then or before Init canonicalized the domain (capitals,
+// a final dot).
+func namesIn(settings, zone string) bool {
+	l := strings.ToLower(settings)
+	return strings.Contains(l, `"`+zone+`"`) || strings.Contains(l, `"`+zone+`."`)
+}
+
 // zoneHoldsDomain reports whether a zone of all is the canonical domain
 // or above it.
 func zoneHoldsDomain(all []store.Service, domain string) bool {
@@ -1397,8 +1405,9 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ..
 			label[i] = alphabet[n]
 		}
 		zone := string(label) + "." + domain
-		if zone != string(ns) && zone != string(own) && zoneConflict(zone, all) == "" && !slices.ContainsFunc(taken, func(t string) bool { return zonesClash(zone, t) }) &&
-			!slices.ContainsFunc(all, func(s store.Service) bool { return strings.Contains(s.Settings, `"`+zone+`"`) }) {
+		if zone != canonicalZone(string(ns)) && zone != canonicalZone(string(own)) && zoneConflict(zone, all) == "" &&
+			!slices.ContainsFunc(taken, func(t string) bool { return zonesClash(zone, t) }) &&
+			!slices.ContainsFunc(all, func(s store.Service) bool { return namesIn(s.Settings, zone) }) {
 			return zone, nil
 		}
 	}
@@ -1448,7 +1457,8 @@ func nodeNameClash(ctx context.Context, st *store.Store, all []store.Service, zo
 			}
 		}
 	}
-	return resolvedOver(ctx, st, all, zone, domain)
+	// A disabled service's names too: it may be enabled again.
+	return resolvedOver(ctx, st, all, zone, domain, false)
 }
 
 // resolvedOver says which name clients resolve through *.<domain>
@@ -1456,8 +1466,9 @@ func nodeNameClash(ctx context.Context, st *store.Store, all []store.Service, zo
 // the server names of its services one label under the domain. A
 // delegation under such a name makes it a node of the zone with no records
 // of its own, which the wildcard no longer answers for (RFC 4592 §2.2.2):
-// clients resolving it get no address.
-func resolvedOver(ctx context.Context, st *store.Store, all []store.Service, zone, domain string) (string, error) {
+// clients resolving it get no address. enabledOnly leaves out the names of
+// disabled services, which no client is given.
+func resolvedOver(ctx context.Context, st *store.Store, all []store.Service, zone, domain string, enabledOnly bool) (string, error) {
 	domain, zone = canonicalZone(domain), canonicalZone(zone)
 	if domain == "" {
 		return "", nil
@@ -1474,6 +1485,9 @@ func resolvedOver(ctx context.Context, st *store.Store, all []store.Service, zon
 		return "", err
 	}
 	for _, svc := range all {
+		if enabledOnly && !svc.Enabled {
+			continue
+		}
 		for _, n := range serverNames(svc).resolved {
 			if under(n) {
 				return "the server name of " + svc.Name + ", " + n, nil
@@ -1601,7 +1615,10 @@ func spareZones(ctx context.Context, st *store.Store, svc store.Service, all []s
 			others = append(others, o)
 		}
 	}
-	ns, _ := st.GetSetting(ctx, settingNSName)
+	// The name the zones are delegated to: nodeNameClash below refuses a
+	// zone at or above it, as for the main zone; one under it takes
+	// nothing (it has a record of its own, and the front refuses only a
+	// zone that holds it).
 	if n, err := strconv.Atoi(value); err == nil {
 		if n < 0 || n > MaxSpareZones {
 			return nil, fmt.Errorf("%w spare_zones=%d: 0 to %d", store.ErrInvalid, n, MaxSpareZones)
@@ -1627,8 +1644,6 @@ func spareZones(ctx context.Context, st *store.Store, svc store.Service, all []s
 			return nil, fmt.Errorf("%w spare zone %q: a DNS name of two labels or more", store.ErrInvalid, raw)
 		case zonesClash(z, main) || slices.ContainsFunc(out, func(o string) bool { return zonesClash(z, o) }):
 			return nil, fmt.Errorf("%w spare zone %s: the same as, or nested with, another zone of %s", store.ErrInvalid, z, svc.Name)
-		case len(ns) > 0 && zonesClash(z, string(ns)):
-			return nil, fmt.Errorf("%w spare zone %s: the name the zones are delegated to is %s", store.ErrInvalid, z, ns)
 		}
 		if other := zoneConflict(z, others); other != "" {
 			return nil, fmt.Errorf("%w spare zone %s: the same as, or nested with, a zone of %s", store.ErrInvalid, z, other)

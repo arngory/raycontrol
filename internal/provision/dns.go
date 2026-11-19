@@ -138,7 +138,7 @@ func DNSRecords(ctx context.Context, st *store.Store) (records []cloudflare.Reco
 	for _, z := range zones {
 		records = append(records, cloudflare.Record{Type: "NS", Name: z, Content: ns})
 		// A zone stored before v0.34.0 refused it (nodeNameClash).
-		name, err := resolvedOver(ctx, st, all, z, domain)
+		name, err := resolvedOver(ctx, st, all, z, domain, true)
 		if err != nil {
 			return nil, nil, err
 		}
