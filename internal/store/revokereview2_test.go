@@ -180,14 +180,19 @@ func TestRevokeOverlapSameSecondSwitchChain(t *testing.T) {
 func TestRevokeOverlapChainBoundary(t *testing.T) {
 	ctx := context.Background()
 	r := DefaultRotation
-	s, svcs, _ := revokeNode(t, r)
+	s, _, _ := revokeNode(t, r)
 	var devs []Device
 	for _, n := range []string{"a", "b", "c"} {
 		d, _, _ := s.CreateDevice(ctx, "alice", n, "user")
 		devs = append(devs, d)
 	}
-	rotated := time.Unix(credRowsOf(t, s.db)["alice"][svcs[0]].Rotated, 0)
-	ta := rotated.Add(time.Second)
+	// One second after the latest of alice's credentials became current:
+	// they are made one service after another, and may straddle a second.
+	var latest int64
+	for _, c := range credRowsOf(t, s.db)["alice"] {
+		latest = max(latest, c.Rotated)
+	}
+	ta := time.Unix(latest, 0).Add(time.Second)
 	s.SetClock(func() time.Time { return ta })
 	if _, err := s.RevokeDeviceOverlap(ctx, devs[0].ID); err != nil {
 		t.Fatal(err)
