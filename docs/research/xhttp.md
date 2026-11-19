@@ -135,7 +135,7 @@
 | | Что |
 |---|---|
 | Фронт | Имя → `fd`, как naive и DoH (`render.go:841-880`, `niko-server:nikoserver/tcpfront.go:154-159`). QUIC — `packet`, как naive-quic |
-| TLS и HTTP | Тот же код, что у сайта, naive и DoH: `site.HTTPServer` (одинаковые SETTINGS h2 для всех имён, `internal/site/http2.go:44-68`), сертификат сайта с перечитыванием. Для CDN — TLS как у сайта (TLS 1.2+, любая группа, `internal/site/server.go:74-80`): CDN почти везде ходит к источнику без ML-KEM. Исключение — Cloudflare: [он предлагает X25519MLKEM768, если источник умеет](https://blog.cloudflare.com/automatic-key-exchange-for-origins/). Постквант даёт VLESS Encryption |
+| TLS и HTTP | Тот же код, что у сайта, naive и DoH: `site.HTTPServer` (одинаковые SETTINGS h2 для всех имён, `internal/site/http2.go:44-68`), сертификат сайта с перечитыванием. Для CDN — TLS как у сайта (TLS 1.2+, любая группа, `internal/site/server.go:74-80`): CDN почти везде ходит к источнику без ML-KEM. Исключение — Cloudflare: [он предлагает X25519MLKEM768, если источник умеет](https://blog.cloudflare.com/automatic-key-exchange-for-origins/). Постквант даёт VLESS Encryption; TLS без PQ на участках CDN допустим только в профиле CDN (§8.3, Р1) |
 | Доступ | Секретный путь на сервис или, лучше, **токен устройства в пути**, как у DoH с v0.27.0 (R4-37): `rayd` проверяет токен, срезает его и шлёт запрос в один внутренний путь Xray. Утечка пути — отзыв одного устройства. До Xray доходят только держатели токена, а это и есть защита ресурсов до аутентификации (§2) (вывод) |
 | Прокси | `httputil.ReverseProxy` с `FlushInterval: -1`, к Xray по h2c на unix-сокете. Тело запроса не буферизуется. Ответы Xray `4xx` (`400` паддинга, `404` пути) заменяются ответом сайта: знающий путь зонд не отличит XHTTP по кодам (вывод) |
 | Xray | Свой процесс, inbound XHTTP без TLS на unix-сокете (`hub.go:530-583`), VLESS с `decryption`, клиенты без flow |
@@ -297,7 +297,7 @@ CDN или прокси владельца. Для CDN их убирает ре�
 | Подсети CDN | Набор подсетей CDN, без SPA | просто; у CDN есть списки: Cloudflare, [управляемый список CloudFront для источников](https://aws.amazon.com/blogs/networking-and-content-delivery/limit-access-to-your-origins-using-the-aws-managed-prefix-list-for-amazon-cloudfront) (по выдаче поиска), метки служб Azure ([FAQ](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-faq)) | Подсети общие для всех клиентов CDN. Cloudflare прямо пишет, что общий сертификат AOP доказывает лишь «coming from the Cloudflare network» ([AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/)). Значит, порт открыт любому, у кого есть аккаунт этого CDN (вывод). Списки меняются |
 | + отдельный порт | Подсети CDN пускаются только на свой порт источника. На нём только `rayd xhttp` (B), а не 443 со всеми именами | Через CDN нельзя прощупать REALITY, naive и остальное | Порт задаётся в CDN: Cloudflare — Origin Rules, «Destination port», на всех тарифах ([Origin Rules](https://developers.cloudflare.com/rules/origin-rules/)); CloudFront — 80, 443 или 1024–65535 ([Origin settings](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesOrigin.html)). gRPC Cloudflare требует источник на 443 ([gRPC](https://developers.cloudflare.com/network/grpc-connections/)): с отдельным портом gRPC отпадает (§7.1, п. 4). Порт сам по себе — отпечаток (вывод) |
 | + секретный заголовок | CDN добавляет заголовок, `rayd` сверяет его до всего остального | Есть почти везде: CloudFront — «Add custom header», Cloudflare — Transform Rules ([совет Cloudflare](https://developers.cloudflare.com/learning-paths/prevent-ddos-attacks/advanced/prevent-external-connections/)) | Секрет — в настройках CDN и на каждом запросе. Это ровно то, что CDN и так видит |
-| + mTLS от CDN | CDN предъявляет клиентский сертификат, `rayd` требует его на этом имени | Сильнее всего | Cloudflare: AOP per-hostname или zone со своим сертификатом. CloudFront — с 2026-01: сертификат клиента импортируется в ACM, проверяет его источник ([origin mTLS](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/origin-mtls-authentication.html), [анонс](https://aws.amazon.com/about-aws/whats-new/2026/01/amazon-cloudfront-mutual-tls-for-origins)). Фраза «CloudFront drops the request» на [странице поведения](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/RequestAndResponseBehaviorCustomOrigin.html) — о случае без настроенного mTLS. У остальных — нет данных |
+| + mTLS от CDN | CDN предъявляет клиентский сертификат, `rayd` требует его на этом имени | Сильнее всего | Cloudflare: AOP per-hostname или zone со своим сертификатом. CloudFront — с 2026-01: сертификат клиента импортируется в ACM, проверяет его источник ([origin mTLS](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/origin-mtls-authentication.html), [анонс](https://aws.amazon.com/about-aws/whats-new/2026/01/amazon-cloudfront-mutual-tls-for-origins), по выдаче поиска). Фраза «CloudFront drops the request» на [странице поведения](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/RequestAndResponseBehaviorCustomOrigin.html) — о случае без настроенного mTLS. У остальных — нет данных |
 | Туннель вендора (`cloudflared`) | Источник сам подключается к Cloudflare. Входящего порта нет | SPA не меняется | Чужой бинарник и аккаунт на выходе. Исходящие к Cloudflare видны сети выхода. AOP с туннелем несовместим. gRPC через туннель — только для частных подсетей, «Public hostname deployments are not currently supported» ([gRPC](https://developers.cloudflare.com/network/grpc-connections/)). Как туннель передаёт потоковое тело XHTTP — нет данных |
 | **Relay как источник** | Источник для CDN — адрес relay. Relay пускает подсети CDN на порт края и делает DNAT к выходу. Выход пускает relay, как сейчас (`relay4`, `relay_ports`, `internal/perimeter/firewall.go:206-208`, `:294-295`) | CDN не знает адреса выхода. TLS сквозной до выхода. Relay ключей не держит. Потерю relay лечит `rayctl relay remove` | Лишний хост и хоп. Адрес relay известен CDN. Нужен новый вид пересылки в снимке relay: публичный порт для подсетей, без SPA |
 
@@ -447,29 +447,47 @@ CDN или прокси владельца. Для CDN их убирает ре�
 
 ### 7.1. Рекомендация
 
-1. **XHTTP — двумя сервисами, по очереди.** Сначала форма A (mux для REALITY, R4-50), затем B (источник для CDN). Оба —
-   своим процессом Xray, со своими учётными данными (G-2), своим зерном ML-KEM, без flow. Vision поверх VLESS Encryption —
-   только если клиент подтвердит (§8.4).
-2. **CDN — после замеров, не в v0.36.0.** Порядок:
-   - замерить из российских сетей (дом, мобильный, белые списки) пробный край каждого кандидата;
-   - потом спецификация «края» (`edges[]` или вид relay) с клиентом.
+1. **XHTTP — двумя сервисами, по очереди.** Сначала форма A (mux для REALITY, R4-50), предварительно в v0.36.0; затем B
+   (источник для CDN) в v0.37.0 — решение владельца 2026-11-19. Оба — своим процессом Xray, со своими учётными данными
+   (G-2), своим зерном ML-KEM. Flow: клиент по коду умеет Vision поверх XHTTP с VLESS Encryption (§8.4, п. 3). Если
+   interop это подтвердит — клиенты с Vision (паддинг внутренних рукопожатий, §3.6), иначе без flow.
+2. **CDN — отдельным профилем для проверок, после замеров, не раньше v0.37.0** (вместе с формой B; владелец,
+   2026-11-19). Порядок:
+   - замерить из российских сетей (дом, мобильный, белые списки) пробный край каждого кандидата; замеры владелец
+     попробует устроить («сложно, но попробуем»);
+   - профиль края — отдельной строкой подписки (§5.1, вариант 1), после REALITY: порядок профилей не меняется. Вид relay
+     (`edges[]`) — позже и только с клиентом.
 
-   Первый кандидат — Cloudflare: он умеет всё нужное, и нода уже работает с его DNS (names-v1 §2). Но для CDN нужен
-   **отдельный домен**. Под доменом ноды запись `*.<домен>` без проксирования ведёт на ноду (names-v1 §2), и имя края
-   под тем же доменом связало бы край с адресом ноды (вывод).
-3. **Источник для CDN** — relay, отдельный порт, подсети CDN и секретный заголовок; mTLS там, где CDN умеет (§5.2).
+   Первый кандидат — Cloudflare: у него больше всего нужного (§6.3), и нода уже работает с его DNS (names-v1 §2). Но
+   для CDN нужен **отдельный домен**. Под доменом ноды запись `*.<домен>` без проксирования ведёт на ноду (names-v1 §2),
+   и имя края под тем же доменом связало бы край с адресом ноды (вывод).
+3. **Источник для CDN** — relay, отдельный порт, подсети CDN и секретный заголовок; mTLS там, где CDN умеет: Cloudflare
+   и CloudFront (§5.2).
 4. **Режим через CDN** — `packet-up`, `xPaddingObfsMode`, `scMaxEachPostBytes` под предел CDN. `stream-up` — только для
-   CDN, где замер показал потоковое тело (Cloudflare с gRPC или `request_body_buffering: none`).
+   CDN, где замер показал потоковое тело. У Cloudflare это выбор:
+   - **gRPC**: поток вверх есть, но источник gRPC — только на 443
+     ([gRPC](https://developers.cloudflare.com/network/grpc-connections/)). У relay-источника 443 — пересылка к фронту
+     выхода со всеми именами (relay-v1 §2), и CDN пришлось бы пускать туда: прощупать через CDN можно REALITY и прочее;
+   - **отдельный порт** без gRPC: `packet-up` всегда, `stream-up` — только если `request_body_buffering: none` на замере
+     даёт поток ([2026-01-27](https://developers.cloudflare.com/changelog/2026-01-27-body-buffering-settings/)).
+
+   Рекомендую отдельный порт: `packet-up` работает и без потока вверх, а закрытый 443 важнее (вывод).
+5. **TLS без PQ на участках CDN** — только в профиле CDN, по решению владельца 2026-11-19, на двух условиях:
+   - защита внутреннего трафика не слабее: VLESS Encryption с ML-KEM-768 из конца в конец, сервер удостоверяет ключ из
+     `encryption` ссылки (§5.3);
+   - реализация без лишних накладных расходов. В форме B лишнее — прокси `rayd xhttp` → Xray (ещё одна копия байтов
+     и кадры h2c на unix-сокете). Замерить в этапе 2. Если цена заметна — Xray сам завершает TLS для имени края
+     (§3.3), ценой токена в `rayd` и ответа сайта на чужой путь (вывод).
 
 ### 7.2. План (предварительно)
 
 | Этап | Что | Выпуск |
 |---|---|---|
-| 0 | Решения владельца (§8.3); ответы клиента (§8.4); пробные аккаунты 2–3 CDN и ручной замер через них. В форке: тесты `RemoveUser`, пределов и счётчиков на XHTTP; замер памяти до аутентификации | до v0.36.0 |
-| 1 | Форма A: вид сервиса, рендер, ротация как у REALITY, маршрут фронта, ссылка с `extra`, `ProbeTunnels`, `rayctl service add`. CI: задача `xray`, relay e2e, interop с Niko | **v0.36.0** |
-| 2 | Форма B: `rayd xhttp` (fd и packet от фронта), токен устройства в пути, ответ сайта, h3, `niko-pin`. CI: эмулятор CDN | v0.36.0, если хватит, иначе v0.37.0 |
-| 3 | CDN как вид relay: набор и порт в периметре, снимок relay с публичным портом для подсетей, список подсетей CDN к источнику, `rayctl` для края (провайдер, имя, источник, секрет), подписка (`edges[]` по `X-Raycontrol-Features`) | v0.37+ |
-| 4 | `downloadSettings` (вверх и вниз разными путями), если клиент добавит; `xorpub`/`random` для профиля края; keepalive вниз (Xray) | позже |
+| 0 | Открытые решения владельца (§8.3); ответы клиента (§8.4); пробные аккаунты 2–3 CDN и ручной замер через них из российских сетей (устроить попробует владелец). В форке: тесты `RemoveUser`, пределов и счётчиков на XHTTP; замер памяти до аутентификации | до v0.36.0 |
+| 1 | Форма A: вид сервиса, рендер, ротация как у REALITY, маршрут фронта, ссылка с `extra`, `ProbeTunnels`, случай в `traffic.Processes`, `rayctl service add`. CI: задача `xray`, relay e2e, interop с Niko (в том числе Vision поверх XHTTP) | **v0.36.0** (предварительно) |
+| 2 | Форма B: `rayd xhttp` (fd и packet от фронта), токен устройства в пути, ответ сайта, h3, `niko-pin`; замер накладных расходов прокси (§7.1, п. 5). CI: эмулятор CDN | **v0.37.0** (владелец, 2026-11-19) |
+| 3 | CDN — отдельный профиль для проверок: набор и порт в периметре, снимок relay с публичным портом для подсетей, список подсетей CDN к источнику, `rayctl` для края (провайдер, имя, источник, секрет), строка профиля края в подписке после REALITY (§5.1, вариант 1) | v0.37.0 или позже, после замеров |
+| 4 | Вид relay в подписке (`edges[]` по `X-Raycontrol-Features`, §5.1, вариант 2); `downloadSettings` (вверх и вниз разными путями), если клиент добавит; `xorpub`/`random` для профиля края; keepalive вниз (Xray) | позже |
 
 ### 7.3. Не проверено
 
@@ -479,12 +497,15 @@ CDN или прокси владельца. Для CDN их убирает ре�
 - Что умеет текущее ядро клиента `688d100`: у нас только `34eaa8c` от 2026-11-02.
 - Как Cloudflare Tunnel и CDN передают потоковое тело `stream-up` — нет данных.
 - Расход памяти XHTTP до аутентификации — оценка по коду.
+- Накладные расходы прокси `rayd xhttp` → Xray (условие §8.3, Р1) — не замерены.
+- Vision поверх XHTTP с VLESS Encryption у клиента — только по коду, interop не было.
 
 ## 8. Вопросы
 
 ### 8.1. Что предлагается решить
 
-См. §7.1. Решения владельца пойдут в decisions.md и roadmap.md, как у прочих исследований.
+См. §7.1. Решения владельца пойдут в decisions.md и roadmap.md, как у прочих исследований. Решения 2026-11-19 — в
+§8.3, они же в [decisions.md](../decisions.md) R4-50 и в [roadmap.md](../roadmap.md) («Мультиплексирование»).
 
 ### 8.2. Размеры
 
@@ -492,15 +513,31 @@ S — до двух дней, M — около недели, L — две–че
 
 ### 8.3. Вопросы владельцу
 
+**Решения владельца 2026-11-19:**
+- **Р1.** Путь через CDN — отдельный профиль для проверок (§5.1, вариант 1). На участках «клиент — CDN» и «CDN —
+  источник» этого профиля, и только его, допустим обычный TLS без PQ. Условия: защита внутреннего трафика не слабее
+  (VLESS Encryption с ML-KEM из конца в конец) и реализация без лишних накладных расходов; оптимизировать схему —
+  приветствуется (§7.1, п. 5).
+- **Р2.** Замеры CDN из российских сетей владелец попробует устроить: «сложно, но попробуем» (§7.1, п. 2).
+- **Р3.** Форма B — в v0.37.0, не в v0.36.0. Форма A — предварительно в v0.36.0 (§7.2).
+- **Р4.** Порядок профилей в подписке не меняется: REALITY первым; для XHTTP его не трогаем (§5.1).
+
+Ниже ответ отмечен там, где решения на вопрос отвечают; остальное открыто.
+
 1. Делаем обе формы (A — mux для REALITY, B — источник для CDN), или только одну? Если одну — какую?
+   **Отвечено Р3:** обе, A — первой.
 2. Форма B напрямую нужна, или только как источник CDN? Напрямую у нас уже есть naive с настоящим Chromium.
 3. CDN вообще делаем? Какие провайдеры первыми: только международные, или и отечественный для белых списков, с
-   правовым риском §6.2?
+   правовым риском §6.2? **Отвечено частично Р1 и Р2:** делаем отдельным профилем для проверок, после замеров.
+   Провайдеры — открыто.
 4. Чей аккаунт CDN: владельца, администратора ноды? Оплата и KYC связывают личность с ролью ноды.
 5. Отдельный домен для имён на CDN — согласны?
 6. Источник для CDN — relay, или допустим выход? `cloudflared` на выходе допустим?
-7. PQ в TLS обязателен (protocols.md:58). На участках «клиент — CDN» и «CDN — источник» его не обещает никто, кроме
-   Cloudflare. Постквант для содержимого даёт VLESS Encryption. Снимаем требование для этих участков?
+7. PQ в TLS обязателен (`docs/design/protocols.md:58`). На участке «клиент — CDN» гибридный PQ есть у Cloudflare,
+   CloudFront (с 2025-09-05, [анонс](https://aws.amazon.com/about-aws/whats-new/2025/09/amazon-cloudfront-TLS-policy-post-quantum-support), по выдаче поиска)
+   и Azure Front Door (политика обмена ключами, [FAQ](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-faq)).
+   На участке «CDN — источник» — только у Cloudflare (по найденному). Постквант для содержимого даёт VLESS Encryption.
+   Снимаем требование для этих участков? **Отвечено Р1:** да, только для профиля CDN и на условиях Р1.
 8. Путь — общий секрет сервиса или токен устройства (как DoH, R4-37)? Меняем по расписанию?
 9. Имя на CDN показывает настоящий сайт (`pages`) или пустой `404` (R4-8)?
 10. Ночной тест на настоящем CDN с секретами в CI — нужен?
@@ -518,8 +555,8 @@ S — до двух дней, M — около недели, L — две–че
 4. VLESS Encryption в режимах `xorpub` и `random` — умеете?
 5. `downloadSettings`: в `34eaa8c` его нет (`client.go:299-301`), Niko его выкидывает (`XHTTP.kt:102-105`). Планируете?
 6. Строгий разбор подписки (Niko 1.26): примет `type=xhttp` с `extra`, `path`, `mode`, `alpn`?
-7. Профиль края: отдельная строка или вид relay с `X-Raycontrol-Features: cdn` (§5.1)? Как его видит детектор белых
-   списков; значение `path: cdn` в отчёте?
+7. Профиль края: отдельная строка или вид relay с `X-Raycontrol-Features: cdn` (§5.1)? Владелец выбрал отдельную
+   строку после REALITY (§8.3, Р1 и Р4). Как её видит детектор белых списков; значение `path: cdn` в отчёте?
 8. Без `niko-pin` для профиля края — что проверяет клиент на участке до CDN: WebPKI системы или Chromium?
 9. Подписка через туннель (имя замера) для профиля XHTTP — включается сама, если сервис в `tunnel_svc`?
 10. Отпечаток TLS клиента XHTTP (uTLS, `fp`) — какой и меняется ли?
@@ -565,6 +602,7 @@ S — до двух дней, M — около недели, L — две–че
   - [AOP](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/);
   - [защита источника](https://developers.cloudflare.com/learning-paths/prevent-ddos-attacks/advanced/prevent-external-connections/);
   - [Origin Rules](https://developers.cloudflare.com/rules/origin-rules/);
+  - [пределы соединений](https://developers.cloudflare.com/fundamentals/reference/connection-limits/);
   - [буферизация тел, 2026-01-27](https://developers.cloudflare.com/changelog/2026-01-27-body-buffering-settings/);
   - [PQ к источнику, 2026-09-08](https://blog.cloudflare.com/automatic-key-exchange-for-origins/);
   - [Service-Specific Terms](https://www.cloudflare.com/service-specific-terms-application-services/).
@@ -575,7 +613,8 @@ S — до двух дней, M — около недели, L — две–че
 - Akamai: [gRPC](https://techdocs.akamai.com/property-mgr/docs/google-rpc).
 - AWS: [gRPC](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/distribution-using-grpc.html),
   [Origin settings](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesOrigin.html),
-  [поведение с источником](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/RequestAndResponseBehaviorCustomOrigin.html).
+  [поведение с источником](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/RequestAndResponseBehaviorCustomOrigin.html),
+  [origin mTLS](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/origin-mtls-authentication.html).
 - Google: [backend service](https://docs.cloud.google.com/load-balancing/docs/backend-service),
   [request distribution](https://docs.cloud.google.com/load-balancing/docs/https/request-distribution).
 - Azure: [FAQ Front Door](https://learn.microsoft.com/en-us/azure/frontdoor/front-door-faq).
@@ -590,6 +629,8 @@ S — до двух дней, M — около недели, L — две–че
 
 По выдаче поиска, страницы не открывались:
 - [список подсетей CloudFront для источников](https://aws.amazon.com/blogs/networking-and-content-delivery/limit-access-to-your-origins-using-the-aws-managed-prefix-list-for-amazon-cloudfront);
+- анонсы AWS: [mTLS к источникам, 2026-01](https://aws.amazon.com/about-aws/whats-new/2026/01/amazon-cloudfront-mutual-tls-for-origins),
+  [PQ к зрителям, 2025-09](https://aws.amazon.com/about-aws/whats-new/2025/09/amazon-cloudfront-TLS-policy-post-quantum-support);
 - [WS Gcore](https://docs.gcore.com/cdn/cdn-resource-options/websockets-allow-permanent-connections-with-the-origin);
 - [закрытие StackPath (DCD)](https://www.datacenterdynamics.com/en/news/stackpath-to-close-down-liquidate-assets/);
 - [issue russia-whitelist 20](https://github.com/kort0881/russia-whitelist/issues/20);
