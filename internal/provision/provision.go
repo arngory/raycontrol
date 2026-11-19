@@ -1346,6 +1346,17 @@ func NodeDNSName(ctx context.Context, st *store.Store) (string, error) {
 	return string(first), err
 }
 
+// zoneFree reports whether the canonical name zone is free for newZone:
+// not the name the zones are delegated to (ns) nor the node's own name
+// (own), clashing with no zone of all nor any of taken, named in no
+// service's settings. Each compared canonically: names stored before Init
+// canonicalized the domain may have capitals or a final dot.
+func zoneFree(zone, ns, own string, all []store.Service, taken []string) bool {
+	return zone != canonicalZone(ns) && zone != canonicalZone(own) && zoneConflict(zone, all) == "" &&
+		!slices.ContainsFunc(taken, func(t string) bool { return zonesClash(zone, canonicalZone(t)) }) &&
+		!slices.ContainsFunc(all, func(s store.Service) bool { return namesIn(s.Settings, zone) })
+}
+
 // namesIn reports whether settings hold the canonical name zone as a
 // string, as stored then or before Init canonicalized the domain (capitals,
 // a final dot).
@@ -1404,10 +1415,7 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ..
 			}
 			label[i] = alphabet[n]
 		}
-		zone := string(label) + "." + domain
-		if zone != canonicalZone(string(ns)) && zone != canonicalZone(string(own)) && zoneConflict(zone, all) == "" &&
-			!slices.ContainsFunc(taken, func(t string) bool { return zonesClash(zone, t) }) &&
-			!slices.ContainsFunc(all, func(s store.Service) bool { return namesIn(s.Settings, zone) }) {
+		if zone := string(label) + "." + domain; zoneFree(zone, string(ns), string(own), all, taken) {
 			return zone, nil
 		}
 	}
@@ -1601,8 +1609,9 @@ func Zones(svc store.Service) []string {
 // "none"), a number of zones made up in the node's domain as a main zone
 // is (those it has stay, the first ones), or the operator's own, comma
 // separated. Each must be a DNS name, none twice, none clashing with the
-// service's main zone, another service's zones or the name the zones are
-// delegated to.
+// service's main zone or another service's zones, none at or above the
+// name the zones are delegated to nor taking another name of the node's
+// (nodeNameClash).
 func spareZones(ctx context.Context, st *store.Store, svc store.Service, all []store.Service, value string) ([]string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" || value == "0" || value == "none" {

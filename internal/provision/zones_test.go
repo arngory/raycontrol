@@ -385,3 +385,26 @@ func TestZoneRuleNames(t *testing.T) {
 		t.Error("xabc names abc")
 	}
 }
+
+// zoneFree takes the names it compares however they were stored: before
+// Init canonicalized the domain, with capitals or a final dot.
+func TestZoneFree(t *testing.T) {
+	all := []store.Service{{Kind: "naive", Name: "nv", Settings: `{"sni":"SNI.N.Example.COM."}`}}
+	for _, tc := range []struct {
+		zone       string
+		ns, own    string
+		taken      []string
+		free       bool
+		whyNotFree string
+	}{
+		{"abc.n.example.com", "", "", nil, true, ""},
+		{"abc.n.example.com", "ABC.N.Example.COM.", "", nil, false, "the name the zones are delegated to"},
+		{"abc.n.example.com", "", "ABC.N.Example.COM.", nil, false, "the node's own name"},
+		{"sni.n.example.com", "", "", nil, false, "a service's server name"},
+		{"abc.n.example.com", "", "", []string{"ABC.N.Example.COM."}, false, "a name taken in the same change"},
+	} {
+		if got := zoneFree(tc.zone, tc.ns, tc.own, all, tc.taken); got != tc.free {
+			t.Errorf("%s (%s): free %v", tc.zone, tc.whyNotFree, got)
+		}
+	}
+}
