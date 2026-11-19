@@ -47,6 +47,8 @@ var places = map[string]place{
 	"summary db":   onNode, // a file put in rayd's directory
 	"app-mirror":   viaAPI,
 	"client":       viaAPI,
+	"integration":  viaAPI,
+	"traffic":      viaAPI,
 	"metrics":      viaAPI,
 	"stats":        viaAPI, // GetStats; the journal and binaries' versions on the node as root
 	"debug":        viaAPI, // GetStatus and SetDebug; the window is root's on the node (rayd says so)

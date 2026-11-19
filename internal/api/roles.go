@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"time"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
@@ -137,14 +136,29 @@ func scrub(m protoreflect.Message, has func(label string) bool) {
 	})
 }
 
-// callerRoleKey holds the role of the device calling through the remote
-// API; the node's socket has none.
-type callerRoleKey struct{}
+// callerKey holds the device calling through the remote API; the node's
+// socket has none.
+type callerKey struct{}
+
+// caller is the device calling through the remote API, false on the
+// node's socket.
+func caller(ctx context.Context) (store.Device, bool) {
+	d, ok := ctx.Value(callerKey{}).(store.Device)
+	return d, ok
+}
 
 // callerRole is the role of the calling device, "" on the node's socket.
 func callerRole(ctx context.Context) string {
-	r, _ := ctx.Value(callerRoleKey{}).(string)
-	return r
+	d, _ := caller(ctx)
+	return d.Role
+}
+
+// codeOf is an answer's code as the metrics name it: "ok" for none.
+func codeOf(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	return connect.CodeOf(err).String()
 }
 
 // actorSuffix is how the audit names a device's calls by its role: an
@@ -155,57 +169,6 @@ func actorSuffix(role string) string {
 		return " (" + role + ")"
 	}
 	return " (remote)"
-}
-
-// deniedEvery is how often the audit takes a refusal by role of one
-// device and method: the first, then one line a period at most with the
-// count since the last, so that a broken integration does not fill the
-// log (integrations-v1 §2.5).
-const deniedEvery = 10 * time.Minute
-
-type deniedKey struct{ device, procedure string }
-
-type deniedMark struct {
-	at     time.Time // of the last line
-	missed int       // refusals since, not written
-}
-
-// denied writes an integration's refusal by role to the audit as
-// api.denied, its target the method's name.
-func (r *Remote) denied(ctx context.Context, d store.Device, procedure string) {
-	if !store.IntegrationRole(d.Role) {
-		return // a user's device, or an admin's at root's: as before
-	}
-	now := r.clock()
-	k := deniedKey{d.ID, procedure}
-	r.deniedMu.Lock()
-	if r.deniedLog == nil {
-		r.deniedLog = map[deniedKey]deniedMark{}
-	}
-	m, seen := r.deniedLog[k]
-	if seen && now.Sub(m.at) < deniedEvery {
-		m.missed++
-		r.deniedLog[k] = m
-		r.deniedMu.Unlock()
-		return
-	}
-	r.deniedLog[k] = deniedMark{at: now}
-	if len(r.deniedLog) > 4096 {
-		for k, m := range r.deniedLog {
-			if now.Sub(m.at) >= deniedEvery {
-				delete(r.deniedLog, k)
-			}
-		}
-	}
-	r.deniedMu.Unlock()
-	result := "refused"
-	if m.missed > 0 {
-		result = fmt.Sprintf("refused; %d more since the last line", m.missed)
-	}
-	method := procedure[strings.LastIndexByte(procedure, '/')+1:]
-	if err := r.Server.Store.Audit(ctx, d.UserName+"/"+d.Name+actorSuffix(d.Role), "api.denied", method, result); err != nil {
-		r.Log.Debug("audit api.denied", "err", err)
-	}
 }
 
 // errNodeOnly refuses an admin device what root does on the node.
@@ -223,19 +186,48 @@ func (r *Remote) roleGate() connect.UnaryInterceptorFunc {
 				return nil, err
 			}
 			procedure := req.Spec().Procedure
+			method := methodName(procedure)
+			integration := store.IntegrationRole(d.Role)
+			now := r.clock()
 			if !mayCall(procedure, d.Role) {
-				r.denied(ctx, d, procedure)
+				if integration {
+					r.Server.auditQuietly(ctx, d, "api.denied", method, now)
+				}
+				r.Server.countCall(d.Role, connect.CodePermissionDenied.String())
 				if d.Role == "admin" && slices.Contains(methodRoles[procedure], labelNode) {
 					return nil, connect.NewError(connect.CodePermissionDenied, errNodeOnly)
 				}
 				return nil, connect.NewError(connect.CodePermissionDenied, fmt.Errorf("not for a device of role %s", d.Role))
 			}
-			ctx = context.WithValue(ctx, actorKey{}, d.UserName+"/"+d.Name+actorSuffix(d.Role))
-			ctx = context.WithValue(ctx, callerRoleKey{}, d.Role)
-			if store.IntegrationRole(d.Role) {
+			var labels []string
+			if integration {
+				release, err := r.Server.admit(ctx, d, method, now)
+				if errors.Is(err, errLimited) {
+					r.Server.auditQuietly(ctx, d, "api.limited", method, now)
+					r.Server.countCall(d.Role, connect.CodeResourceExhausted.String())
+					return nil, connect.NewError(connect.CodeResourceExhausted, err)
+				}
+				if err != nil {
+					return nil, toConnect(err)
+				}
+				defer release()
+				set, err := r.Server.integrationSettings(ctx)
+				if err != nil {
+					return nil, toConnect(err)
+				}
+				labels = []string{roleLabel(d.Role)}
+				if d.Role == "support" && set.SupportNotes {
+					labels = append(labels, labelNotes)
+				}
 				ctx = store.RegularOnly(ctx)
+				if d.Role == "billing" {
+					ctx = store.KeepCounting(ctx)
+				}
 			}
+			ctx = context.WithValue(ctx, actorKey{}, d.UserName+"/"+d.Name+actorSuffix(d.Role))
+			ctx = context.WithValue(ctx, callerKey{}, d)
 			resp, err := next(ctx, req)
+			r.Server.countCall(d.Role, codeOf(err))
 			// The device once more after a call that answers with a secret:
 			// one revoked while the call ran must not take away what the
 			// call read or made after the revocation (its user's new
@@ -251,8 +243,7 @@ func (r *Remote) roleGate() connect.UnaryInterceptorFunc {
 			}
 			if err == nil && d.Role != "admin" {
 				if m, ok := resp.Any().(proto.Message); ok {
-					label := roleLabel(d.Role)
-					scrub(m.ProtoReflect(), func(l string) bool { return l == label })
+					scrub(m.ProtoReflect(), func(l string) bool { return slices.Contains(labels, l) })
 				}
 			}
 			return resp, err

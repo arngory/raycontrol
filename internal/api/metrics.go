@@ -265,6 +265,10 @@ func (s *Server) collect(ctx context.Context, now time.Time) (*Metrics, error) {
 	m.Add("raycontrol_invite_pin_wrong_total", "Wrong invite PINs since rayd started.", float64(s.pinWrong.Load()))
 	m.Add("raycontrol_invite_pin_withdrawn_total", "Invites withdrawn by their last wrong PIN since rayd started.", float64(s.pinWithdrawn.Load()))
 
+	// The remote API's calls by role and answer, and the integrations' rate
+	// limits and mass actions (integrations-v1 §11), since rayd started.
+	s.integrationMetrics(&m)
+
 	// The DNS path: each enabled dnstt service's counters, from its
 	// backend's stats socket (niko-server v0.11.0), and the DNS front's;
 	// none from one that has none. Read at once: a stopped backend's

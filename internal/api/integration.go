@@ -1,14 +1,19 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
+	"strconv"
 	"time"
 
 	"connectrpc.com/connect"
 
 	nodev1 "github.com/arngory/raycontrol/internal/gen/raycontrol/node/v1"
+	"github.com/arngory/raycontrol/internal/store"
 )
 
 // errForRole refuses a call's argument to the caller's role: what
@@ -69,4 +74,236 @@ func (s *Server) SetUserExpiry(ctx context.Context, req *connect.Request[nodev1.
 		return nil, toConnect(err)
 	}
 	return connect.NewResponse(&nodev1.SetUserExpiryResponse{User: pb}), nil
+}
+
+// massGuard puts billing's deletion or disable under the hour's limit of
+// mass actions (integrations-v1 §2.4): refused over it without confirm,
+// audited as api.mass once in a while. Others' actions are not counted.
+// done says whether the action went through; suffix marks its audit line.
+func (s *Server) massGuard(ctx context.Context, method string, confirm bool) (done func(bool), suffix string, err error) {
+	d, ok := caller(ctx)
+	if !ok || d.Role != "billing" {
+		return func(bool) {}, "", nil
+	}
+	now := time.Now()
+	done, confirmed, err := s.massAction(ctx, confirm, now)
+	if errors.Is(err, errMassLimit) {
+		s.auditQuietly(ctx, d, "api.mass", method, now)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	if confirmed {
+		suffix = " confirm"
+	}
+	return done, suffix, nil
+}
+
+// integrationRates are a role's or a device's limits as the API gives them.
+func integrationRates(l limitSet) *nodev1.IntegrationLimits {
+	r := func(x limitRate) *nodev1.Rate {
+		if x.Burst == 0 {
+			return nil
+		}
+		return &nodev1.Rate{Burst: x.Burst, PerHour: x.PerHour}
+	}
+	return &nodev1.IntegrationLimits{Read: r(l.Read), Write: r(l.Write), Heavy: r(l.Heavy), Inflight: l.Inflight}
+}
+
+// GetIntegrationSettings returns the integrations' settings and their
+// devices' calls since rayd started (integrations-v1 §11).
+func (s *Server) GetIntegrationSettings(ctx context.Context, _ *connect.Request[nodev1.GetIntegrationSettingsRequest]) (*connect.Response[nodev1.GetIntegrationSettingsResponse], error) {
+	set, err := s.integrationSettings(ctx)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	counting, err := s.Store.TrafficCountingOn(ctx)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	resp := &nodev1.GetIntegrationSettingsResponse{SupportNotes: set.SupportNotes, MassLimit: uint32(set.massLimit()), TrafficCounting: "auto"} //nolint:gosec // G115: from a uint32
+	if counting {
+		resp.TrafficCounting = "on"
+	}
+	for _, role := range []string{"billing", "support"} {
+		_, own := set.Roles[role]
+		resp.Limits = append(resp.Limits, &nodev1.IntegrationLimitsFor{Role: role, Limits: integrationRates(set.limits("", role)), Set: own})
+	}
+	for _, id := range slices.Sorted(maps.Keys(set.Devices)) {
+		resp.Limits = append(resp.Limits, &nodev1.IntegrationLimitsFor{DeviceId: id, Limits: integrationRates(set.Devices[id]), Set: true})
+	}
+	devices, err := s.Store.ListDevices(ctx, "")
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	now := time.Now()
+	in := &s.integ
+	in.mu.Lock()
+	for _, d := range devices {
+		if !store.IntegrationRole(d.Role) || d.RevokedAt != nil {
+			continue
+		}
+		pb := &nodev1.IntegrationDevice{Id: d.ID, User: d.UserName, Name: d.Name, Role: d.Role}
+		if e, ok := in.devices[d.ID]; ok {
+			pb.LastCall, pb.Calls, pb.Denied, pb.Limited = unixOf(e.last), e.calls, e.denied, e.limited
+		}
+		resp.Devices = append(resp.Devices, pb)
+	}
+	hourAgo := now.Add(-time.Hour)
+	for _, t := range in.mass {
+		if t.After(hourAgo) {
+			resp.MassActions++
+		}
+	}
+	resp.MassRefused = in.massDone.refused
+	in.mu.Unlock()
+	return connect.NewResponse(resp), nil
+}
+
+// The bounds of a limit root sets: up to 10 000 calls a second, 64 at once.
+const (
+	maxBurst    = 100_000
+	maxPerHour  = 36_000_000
+	maxInflight = 64
+)
+
+// mergeLimits puts what a request gives over l: a rate given replaces
+// that class's, an inflight given (not 0) the calls at once.
+func mergeLimits(l limitSet, pb *nodev1.IntegrationLimits) (limitSet, error) {
+	if pb == nil {
+		return l, fmt.Errorf("%w: no limits given", store.ErrInvalid)
+	}
+	for _, x := range []struct {
+		to   *limitRate
+		from *nodev1.Rate
+	}{{&l.Read, pb.Read}, {&l.Write, pb.Write}, {&l.Heavy, pb.Heavy}} {
+		if x.from == nil {
+			continue
+		}
+		if x.from.Burst == 0 || x.from.Burst > maxBurst || x.from.PerHour == 0 || x.from.PerHour > maxPerHour {
+			return l, fmt.Errorf("%w rate %d,%d/h: a burst of 1 to %d, 1 to %d an hour", store.ErrInvalid, x.from.Burst, x.from.PerHour, maxBurst, maxPerHour)
+		}
+		*x.to = limitRate{Burst: x.from.Burst, PerHour: x.from.PerHour}
+	}
+	if pb.Inflight > maxInflight {
+		return l, fmt.Errorf("%w inflight %d: 1 to %d", store.ErrInvalid, pb.Inflight, maxInflight)
+	}
+	if pb.Inflight != 0 {
+		l.Inflight = pb.Inflight
+	}
+	return l, nil
+}
+
+// limitsText is a set of limits as rayctl takes them, for the audit.
+func limitsText(l limitSet) string {
+	r := func(x limitRate) string { return fmt.Sprintf("%d,%d/h", x.Burst, x.PerHour) }
+	return fmt.Sprintf("read=%s write=%s heavy=%s inflight=%d", r(l.Read), r(l.Write), r(l.Heavy), l.Inflight)
+}
+
+// errRootOnly refuses what root sets on the node alone.
+var errRootOnly = fmt.Errorf("%w: root on the node only", errForRole)
+
+// SetIntegrationSettings changes the integrations' settings
+// (integrations-v1 §2.2, §2.4, §2.6): support's sight of notes and the
+// traffic counting by an administrator too, the mass actions' limit and
+// the rate limits by root on the node only. Each change is audited.
+func (s *Server) SetIntegrationSettings(ctx context.Context, req *connect.Request[nodev1.SetIntegrationSettingsRequest]) (*connect.Response[nodev1.SetIntegrationSettingsResponse], error) {
+	m := req.Msg
+	root := isRoot(ctx)
+	if (m.MassLimit != nil || m.Limits != nil) && !root {
+		return nil, toConnect(errRootOnly)
+	}
+	if m.TrafficCounting != nil && *m.TrafficCounting != "on" && *m.TrafficCounting != "auto" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("traffic counting: on or auto"))
+	}
+	if m.SupportNotes != nil {
+		state := "off"
+		if *m.SupportNotes {
+			state = "on"
+		}
+		err := s.changeIntegrationSettings(ctx, func(set *integrationSettings) error {
+			set.SupportNotes = *m.SupportNotes
+			return nil
+		})
+		if err := s.done(ctx, "integration.set support-notes="+state, "", err); err != nil {
+			return nil, err
+		}
+	}
+	if m.MassLimit != nil {
+		limit := *m.MassLimit
+		err := s.changeIntegrationSettings(ctx, func(set *integrationSettings) error {
+			set.MassLimit = &limit
+			return nil
+		})
+		if err := s.done(ctx, "integration.set mass-limit="+strconv.FormatUint(uint64(limit), 10), "", err); err != nil {
+			return nil, err
+		}
+	}
+	if m.Limits != nil {
+		if err := s.setIntegrationLimits(ctx, m.Limits, m.ToDefault); err != nil {
+			return nil, err
+		}
+	}
+	if m.TrafficCounting != nil {
+		err := s.Store.SetTrafficCountingOn(ctx, *m.TrafficCounting == "on")
+		if err := s.done(ctx, "traffic.counting="+*m.TrafficCounting, "", err); err != nil {
+			return nil, err
+		}
+	}
+	return connect.NewResponse(&nodev1.SetIntegrationSettingsResponse{}), nil
+}
+
+// setIntegrationLimits sets a role's or a device's limits, or with reset
+// takes them back to the default (rayctl integration limits).
+func (s *Server) setIntegrationLimits(ctx context.Context, pb *nodev1.IntegrationLimitsFor, reset bool) error {
+	role, device := pb.Role, pb.DeviceId
+	switch {
+	case (role == "") == (device == ""):
+		return toConnect(fmt.Errorf("%w: limits for a role or a device", store.ErrInvalid))
+	case role != "" && !store.IntegrationRole(role):
+		return toConnect(fmt.Errorf("%w role %q: billing or support", store.ErrInvalid, role))
+	case device != "":
+		devices, err := s.Store.ListDevices(ctx, "")
+		if err != nil {
+			return toConnect(err)
+		}
+		i := slices.IndexFunc(devices, func(d store.Device) bool { return d.ID == device })
+		if i < 0 || !store.IntegrationRole(devices[i].Role) {
+			return toConnect(fmt.Errorf("integration device %q: %w", device, store.ErrNotFound))
+		}
+		role = devices[i].Role
+	}
+	target := cmp.Or(device, role)
+	var text string
+	err := s.changeIntegrationSettings(ctx, func(set *integrationSettings) error {
+		if reset {
+			delete(set.Roles, role)
+			if device != "" {
+				delete(set.Devices, device)
+			}
+			text = "default"
+			return nil
+		}
+		l, err := mergeLimits(set.limits(device, role), pb.Limits)
+		if err != nil {
+			return err
+		}
+		if device != "" {
+			if set.Devices == nil {
+				set.Devices = map[string]limitSet{}
+			}
+			set.Devices[device] = l
+		} else {
+			if set.Roles == nil {
+				set.Roles = map[string]limitSet{}
+			}
+			set.Roles[role] = l
+		}
+		text = limitsText(l)
+		return nil
+	})
+	if err == nil {
+		s.integ.refill()
+	}
+	return s.done(ctx, "integration.limits "+text, target, err)
 }

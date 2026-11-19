@@ -86,6 +86,10 @@ func (s *Store) CreateUser(ctx context.Context, u User) (User, error) {
 	}
 	u.CreatedAt = s.now().Truncate(time.Second)
 	err := s.tx(ctx, func(tx *sql.Tx) error {
+		limited, err := limitedUsers(ctx, tx)
+		if err != nil {
+			return err
+		}
 		res, err := tx.ExecContext(ctx, `INSERT INTO users (name, enabled, expires_at, traffic_limit_bytes, note, created_at, traffic_period, traffic_reset_day)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			u.Name, u.Enabled, nullTime(u.ExpiresAt), u.TrafficLimit, u.Note, u.CreatedAt.Unix(), u.TrafficPeriod, u.TrafficResetDay)
@@ -102,10 +106,12 @@ func (s *Store) CreateUser(ctx context.Context, u User) (User, error) {
 		}
 		if u.TrafficLimit != nil {
 			u.TrafficStart, u.TrafficCountedFrom = u.CreatedAt, u.CreatedAt
-			_, err = tx.ExecContext(ctx, `INSERT INTO user_traffic (user_id, period_start, counted_from) VALUES (?, ?, ?)`,
-				u.ID, u.CreatedAt.Unix(), u.CreatedAt.Unix())
+			if _, err := tx.ExecContext(ctx, `INSERT INTO user_traffic (user_id, period_start, counted_from) VALUES (?, ?, ?)`,
+				u.ID, u.CreatedAt.Unix(), u.CreatedAt.Unix()); err != nil {
+				return err
+			}
 		}
-		return err
+		return checkCounting(ctx, tx, limited)
 	})
 	return u, err
 }
@@ -227,7 +233,20 @@ func (s *Store) SetUserEnabled(ctx context.Context, name string, enabled bool) e
 
 // DeleteUser removes a user and, by cascade, its devices.
 func (s *Store) DeleteUser(ctx context.Context, name string) error {
-	return s.affectOne(ctx, "user", name, `DELETE FROM users AS u WHERE u.name = ? AND NOT (? AND u.id IN (`+serviceUserIDs+`))`, name, regularOnly(ctx))
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		limited, err := limitedUsers(ctx, tx)
+		if err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx, `DELETE FROM users AS u WHERE u.name = ? AND NOT (? AND u.id IN (`+serviceUserIDs+`))`, name, regularOnly(ctx))
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n == 0 {
+			return cmp.Or(err, fmt.Errorf("user %q: %w", name, ErrNotFound))
+		}
+		return checkCounting(ctx, tx, limited)
+	})
 }
 
 // SetUserServices replaces the services a user may reach. The user of an

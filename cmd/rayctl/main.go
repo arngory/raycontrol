@@ -167,6 +167,15 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
   summary db FILE.mmdb | -remove            an AS database of your own before the release's (root)
   app-mirror [show] | on | off              the client's releases on the node for its devices
                                             (spec/app-update-v1.md; off by default)
+  integration [status]                      outside systems' devices (billing, support): their calls,
+                                            the limits, the settings (spec/integrations-v1.md)
+  integration set support-notes on|off      support sees users' notes
+  integration set mass-limit N              billing's deletions and disables an hour before each needs
+                                            confirm_mass (root)
+  integration limits [billing|support|DEVICE_ID [read=100,10/s] [write=50,5/s] [heavy=20,60/h]
+                     [inflight=4] | -reset]   the rate limits of a role or one device (root)
+  traffic counting [on|auto]                on: Xray counts users' traffic with no limit set too, so
+                                            that no limit set or taken away restarts it (billing's)
   client [show]                             the minimum client version and the devices by client
   client min PRODUCT VERSION|none [-from YYYY-MM-DD|now] [-unknown allow|refuse [-yes]]
                                             refuse clients below it (spec/client-min-v1.md)
@@ -388,6 +397,10 @@ func (c *cli) run(ctx context.Context, args []string) error {
 		return c.appMirror(ctx, sub)
 	case "client":
 		return c.clientCmd(ctx, sub, rest)
+	case "integration":
+		return c.integrationCmd(ctx, sub, rest)
+	case "traffic":
+		return c.trafficCmd(ctx, sub, rest)
 	case "debug":
 		return c.debug(ctx, sub, rest)
 	case "egress":

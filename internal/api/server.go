@@ -123,6 +123,9 @@ type Server struct {
 
 	// The relays' updates by the node's word (relayupdate.go).
 	relayUpd relayUpdates
+
+	// The integrations' settings, rate limits and calls (limits.go).
+	integ integrations
 }
 
 // SetACMEWindow opens the perimeter window for an ACME order to port until
@@ -451,8 +454,18 @@ func (s *Server) CreateUser(ctx context.Context, req *connect.Request[nodev1.Cre
 }
 
 func (s *Server) SetUserEnabled(ctx context.Context, req *connect.Request[nodev1.SetUserEnabledRequest]) (*connect.Response[nodev1.SetUserEnabledResponse], error) {
-	err := s.Store.SetUserEnabled(ctx, req.Msg.Name, req.Msg.Enabled)
-	if err := s.done(ctx, "user.enable="+strconv.FormatBool(req.Msg.Enabled), req.Msg.Name, err); err != nil {
+	action := "user.enable=" + strconv.FormatBool(req.Msg.Enabled)
+	done, suffix := func(bool) {}, ""
+	var err error
+	if !req.Msg.Enabled {
+		// billing's disables are mass actions (integrations-v1 §2.4).
+		if done, suffix, err = s.massGuard(ctx, "SetUserEnabled", req.Msg.ConfirmMass); err != nil {
+			return nil, toConnect(err)
+		}
+	}
+	err = s.Store.SetUserEnabled(ctx, req.Msg.Name, req.Msg.Enabled)
+	done(err == nil)
+	if err := s.done(ctx, action+suffix, req.Msg.Name, err); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.SetUserEnabledResponse{}), nil
@@ -528,8 +541,14 @@ func (s *Server) SetUserLAN(ctx context.Context, req *connect.Request[nodev1.Set
 }
 
 func (s *Server) DeleteUser(ctx context.Context, req *connect.Request[nodev1.DeleteUserRequest]) (*connect.Response[nodev1.DeleteUserResponse], error) {
-	err := s.Store.DeleteUser(ctx, req.Msg.Name)
-	if err := s.done(ctx, "user.delete", req.Msg.Name, err); err != nil {
+	// billing's deletions are mass actions (integrations-v1 §2.4).
+	done, suffix, err := s.massGuard(ctx, "DeleteUser", req.Msg.ConfirmMass)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	err = s.Store.DeleteUser(ctx, req.Msg.Name)
+	done(err == nil)
+	if err := s.done(ctx, "user.delete"+suffix, req.Msg.Name, err); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.DeleteUserResponse{}), nil

@@ -117,6 +117,10 @@ func (c *cli) userUsage(ctx context.Context, args []string) error {
 // user has a limit, and restart once when that changes (§5). Asked before
 // the change, said after it went through ("" for nothing to say).
 func (c *cli) countingWarning(ctx context.Context, name string, setting bool) string {
+	// Kept on (rayctl traffic counting on): no limit turns it on or off.
+	if set, err := c.c.GetIntegrationSettings(ctx, connect.NewRequest(&nodev1.GetIntegrationSettingsRequest{})); err == nil && set.Msg.TrafficCounting == "on" {
+		return ""
+	}
 	r, err := c.c.ListUsers(ctx, connect.NewRequest(&nodev1.ListUsersRequest{}))
 	if err != nil {
 		return ""

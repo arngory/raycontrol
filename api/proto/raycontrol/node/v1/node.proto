@@ -304,6 +304,18 @@ service NodeService {
   rpc SetClientPolicy(SetClientPolicyRequest) returns (SetClientPolicyResponse) {
     option (google.api.method_visibility).restriction = "ADMIN";
   }
+  // GetIntegrationSettings returns how the node treats its integrations'
+  // devices (docs/spec/integrations-v1.md §2.2, §2.4, §2.6) and their
+  // calls since rayd started (§11).
+  rpc GetIntegrationSettings(GetIntegrationSettingsRequest) returns (GetIntegrationSettingsResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
+  // SetIntegrationSettings changes what is given: support's sight of
+  // notes and the traffic counting by an admin too; the rate limits and
+  // the mass actions' limit by root on the node only.
+  rpc SetIntegrationSettings(SetIntegrationSettingsRequest) returns (SetIntegrationSettingsResponse) {
+    option (google.api.method_visibility).restriction = "ADMIN";
+  }
   // GetEgress returns the node's egress policy (spec/egress-policy-v1.md):
   // what the data plane may not send, on every profile. On the node's
   // socket only.
@@ -770,6 +782,73 @@ message ClientCount {
   string client = 1; // "niko/1.59.0"; "" for devices that named none
   uint32 devices = 2;
 }
+// Rate is a token bucket (integrations-v1 §2.6): up to burst calls at
+// once, burst back at per_hour an hour.
+message Rate {
+  uint32 burst = 1;
+  uint32 per_hour = 2;
+}
+
+// IntegrationLimits are the rate limits of an integration's device: reads,
+// changes, and invites, revocations and renewals (heavy); calls under way
+// at once. A rate absent: the role makes no such call.
+message IntegrationLimits {
+  Rate read = 1;
+  Rate write = 2;
+  Rate heavy = 3;
+  uint32 inflight = 4;
+}
+
+// IntegrationLimitsFor are the limits of a role (billing, support), or of
+// one device of one, in place of its role's.
+message IntegrationLimitsFor {
+  string role = 1;
+  string device_id = 2;
+  IntegrationLimits limits = 3;
+  bool set = 4; // root's, not the default
+}
+
+// IntegrationDevice is an integration's device and its calls since rayd
+// started (integrations-v1 §11).
+message IntegrationDevice {
+  string id = 1;
+  string user = 2;
+  string name = 3;
+  string role = 4;
+  int64 last_call = 5; // unix seconds; 0: none
+  uint64 calls = 6;
+  uint64 denied = 7;  // by its role
+  uint64 limited = 8; // over its rate limits
+}
+
+message GetIntegrationSettingsRequest {}
+message GetIntegrationSettingsResponse {
+  // support sees users' notes (rayctl integration set support-notes on).
+  bool support_notes = 1;
+  // billing's deletions and disables together an hour, past which a call
+  // needs confirm_mass; 0: every one does.
+  uint32 mass_limit = 2;
+  // on: the node counts traffic with no limit set too, and no limit set or
+  // taken away restarts Xray; auto: only while some user has a limit.
+  string traffic_counting = 3;
+  // The limits in force: each role's, then each device's own.
+  repeated IntegrationLimitsFor limits = 4;
+  repeated IntegrationDevice devices = 5;
+  uint32 mass_actions = 6; // billing's in the last hour
+  uint64 mass_refused = 7; // refused for the limit since rayd started
+}
+
+message SetIntegrationSettingsRequest {
+  optional bool support_notes = 1;
+  optional uint32 mass_limit = 2;       // root on the node
+  optional string traffic_counting = 3; // on | auto
+  // limits: root on the node; for a role or a device, its limits, or with
+  // to_default its default back.
+  IntegrationLimitsFor limits = 4;
+  bool to_default = 5;
+}
+message SetIntegrationSettingsResponse {}
+
 message GetClientPolicyRequest {}
 message GetClientPolicyResponse {
   ClientPolicy policy = 1;
@@ -861,6 +940,10 @@ message SetUserLANResponse { User user = 1; }
 message SetUserEnabledRequest {
   string name = 1;
   bool enabled = 2;
+  // confirm_mass: billing's disable over the hour's limit of mass actions
+  // goes through (integrations-v1 §2.4). A node before it does not read
+  // it, and has no such limit.
+  bool confirm_mass = 3;
 }
 message SetUserEnabledResponse {}
 
@@ -870,7 +953,10 @@ message SetUserServicesRequest {
 }
 message SetUserServicesResponse {}
 
-message DeleteUserRequest { string name = 1; }
+message DeleteUserRequest {
+  string name = 1;
+  bool confirm_mass = 2; // as SetUserEnabledRequest's
+}
 message DeleteUserResponse {}
 
 message GetUserRequest { string name = 1; }

@@ -148,7 +148,7 @@ func (s *Store) SetUserTraffic(ctx context.Context, name string, c TrafficChange
 		return User{}, fmt.Errorf("%w traffic limit %d: more than 0 bytes, or 0 for none", ErrInvalid, *c.Limit)
 	}
 	now := s.now().Truncate(time.Second)
-	err := s.tx(ctx, func(tx *sql.Tx) error {
+	change := func(tx *sql.Tx) error {
 		u, err := scanUser(tx.QueryRowContext(ctx, userSelect+` WHERE u.name = ? AND NOT (? AND u.id IN (`+serviceUserIDs+`))`, name, regularOnly(ctx)))
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("user %q: %w", name, ErrNotFound)
@@ -229,6 +229,16 @@ func (s *Store) SetUserTraffic(ctx context.Context, name string, c TrafficChange
 			}
 		}
 		return nil
+	}
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		limited, err := limitedUsers(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if err := change(tx); err != nil {
+			return err
+		}
+		return checkCounting(ctx, tx, limited)
 	})
 	if err != nil {
 		return User{}, err

@@ -58,9 +58,6 @@ type Remote struct {
 	relayProbes  map[string]int            // rayd relay's feeds open per relay
 	relayProbeAt map[string]time.Time      // when the last of them closed
 	started      time.Time                 // when Serve began
-
-	deniedMu  sync.Mutex
-	deniedLog map[deniedKey]deniedMark // api.denied lines by device and method
 }
 
 // relayProbeGrace keeps a relay's probe endpoint listed while its rayd relay
