@@ -233,6 +233,12 @@ func remoteExport(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// All that can fail before the key is on disk: no key file left behind
+	// by an error.
+	pin, err := curlPin(id.bundle.API.Pin)
+	if err != nil {
+		return err
+	}
 	f, err := os.OpenFile(*pemOut, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: the operator's file
 	if err != nil {
 		return err
@@ -246,19 +252,22 @@ func remoteExport(args []string, out io.Writer) error {
 		os.Remove(*pemOut)
 		return err
 	}
-	pin, err := curlPin(id.bundle.API.Pin)
-	if err != nil {
-		return err
-	}
 	url := "https://" + net.JoinHostPort(id.bundle.Host, strconv.Itoa(int(id.bundle.API.Port)))
-	fmt.Fprintf(out, "%s: the certificate and key of device %s (%s), mode 0600: a secret like the device file\n",
-		*pemOut, id.bundle.DeviceID, cmp.Or(id.bundle.Role, "admin"))
+	fmt.Fprintf(out, "%s: the certificate and key of device %s (%s), mode 0600: a secret like the device file; "+
+		"remote rotate makes it stale\n", *pemOut, id.bundle.DeviceID, cmp.Or(id.bundle.Role, "admin"))
 	fmt.Fprintf(out, "API %s, the node's key %s (its name is not checked: the certificate has none)\n\n", url, pin)
-	fmt.Fprintf(out, "rayctl knock @%s   # unless the device calls from its addresses (rayctl device allow)\n", args[0])
-	fmt.Fprintf(out, "curl --http2 --tlsv1.3 --curves X25519MLKEM768 --cert %s --key %s -k --pinnedpubkey '%s' \\\n", *pemOut, *pemOut, pin)
+	fmt.Fprintf(out, "rayctl knock %s   # unless the device calls from its addresses (rayctl device allow)\n", shellWord("@"+args[0]))
+	fmt.Fprintf(out, "curl --http2 --tlsv1.3 --curves X25519MLKEM768 --cert %s --key %s -k --pinnedpubkey '%s' \\\n",
+		shellWord(curlCert(*pemOut)), shellWord(*pemOut), pin)
 	fmt.Fprintf(out, "  -H 'Content-Type: application/json' -H 'Connect-Protocol-Version: 1' --data '{}' \\\n")
 	fmt.Fprintf(out, "  %s/raycontrol.device.v1.DeviceService/GetSelf\n", url)
 	return nil
+}
+
+// curlCert is a path as curl's --cert takes it: a colon there would begin
+// the key's passphrase, so it and a backslash are escaped with one.
+func curlCert(path string) string {
+	return strings.NewReplacer(`\`, `\\`, `:`, `\:`).Replace(path)
 }
 
 // curlPin is a pin as the node gives it (base64url of the SHA-256 of the

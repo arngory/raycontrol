@@ -26,7 +26,7 @@ func deviceFile(t *testing.T) remoteIdentity {
 	if id.raw, err = b.Encode(); err != nil {
 		t.Fatal(err)
 	}
-	if err := id.save(true); err != nil {
+	if err := id.save(false); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -275,5 +275,33 @@ func TestRemoteExport(t *testing.T) {
 	}
 	if err := remoteExport([]string{id.path}, &said); err == nil {
 		t.Fatal("no -pem taken")
+	}
+
+	// A path the shell or curl reads apart is printed so that a copy of
+	// the line works: quoted, and curl's --cert with its colon escaped.
+	odd := filepath.Join(t.TempDir(), "my key:1.pem")
+	said.Reset()
+	if err := remoteExport([]string{id.path, "-pem", odd}, &said); err != nil {
+		t.Fatal(err)
+	}
+	if want := "--cert " + shellWord(strings.ReplaceAll(odd, ":", `\:`)) + " --key " + shellWord(odd) + " "; !strings.Contains(said.String(), want) ||
+		!strings.Contains(shellWord(odd), "'") {
+		t.Fatalf("said:\n%s\nwant %s", said.String(), want)
+	}
+
+	// A device file the command cannot read the pin of leaves no key file.
+	id.bundle.API.Pin = "not a pin"
+	if id.raw, err = id.bundle.Encode(); err != nil {
+		t.Fatal(err)
+	}
+	if err := id.save(false); err != nil {
+		t.Fatal(err)
+	}
+	none := filepath.Join(t.TempDir(), "none.pem")
+	if err := remoteExport([]string{id.path, "-pem", none}, &said); err == nil {
+		t.Fatal("a bad pin taken")
+	}
+	if _, err := os.Stat(none); !os.IsNotExist(err) {
+		t.Fatalf("a key file left behind: %v", err)
 	}
 }

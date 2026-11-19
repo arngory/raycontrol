@@ -430,32 +430,53 @@ func TestExtractFile(t *testing.T) {
 }
 
 // releaseArchives are the archives of a release as the Release workflow
-// names them (ARCHIVES), in the order of its SHA256SUMS.
-func releaseArchives(t *testing.T) []string {
+// names them (ARCHIVES), in the order of its SHA256SUMS, and the documents
+// listed after them (DOCS: the OpenAPI of the integrations' roles,
+// integrations-v1 §5.1).
+func releaseArchives(t *testing.T) (names, docs []string) {
 	t.Helper()
 	wf := readFile(t, "../../.github/workflows/release.yml")
 	_, rest, ok := strings.Cut(wf, "\n      ARCHIVES: >-\n")
 	if !ok {
 		t.Fatal("no ARCHIVES in release.yml")
 	}
-	var names []string
 	for _, line := range strings.Split(rest, "\n") {
 		if !strings.HasPrefix(line, "        ") {
 			break
 		}
 		names = append(names, strings.Fields(line)...)
 	}
-	// The checksums and the upload are of that list, not of a pattern that
+	_, rest, ok = strings.Cut(wf, "\n      DOCS: ")
+	if !ok {
+		t.Fatal("no DOCS in release.yml")
+	}
+	line, _, _ := strings.Cut(rest, "\n")
+	docs = strings.Fields(line)
+	// Each document is a copy of one in api/openapi: openapi-<role>.yaml of
+	// <role>.openapi.yaml.
+	for _, d := range docs {
+		role, ok := strings.CutPrefix(d, "openapi-")
+		if !ok || !strings.HasSuffix(role, ".yaml") {
+			t.Errorf("release.yml's DOCS has %s", d)
+			continue
+		}
+		if _, err := os.Stat(filepath.Join("../../api/openapi", strings.TrimSuffix(role, ".yaml")+".openapi.yaml")); err != nil {
+			t.Errorf("DOCS' %s: %v", d, err)
+		}
+	}
+	// The checksums and the upload are of those lists, not of a pattern that
 	// would leave one out or take one more.
-	for _, want := range []string{`sha256sum "${archives[@]}" > SHA256SUMS`, `"${archives[@]}" SHA256SUMS SHA256SUMS.minisig`} {
+	for _, want := range []string{`sha256sum "${archives[@]}" "${docs[@]}" > SHA256SUMS`, `"${archives[@]}" "${docs[@]}" SHA256SUMS SHA256SUMS.minisig`} {
 		if !strings.Contains(wf, want) {
 			t.Errorf("release.yml lacks %q", want)
 		}
 	}
-	if n := strings.Count(wf, `read -ra archives <<< "$ARCHIVES"`); n != 2 {
-		t.Errorf("release.yml reads ARCHIVES %d times, want 2 (the checksums, the upload)", n)
+	for _, read := range []string{`read -ra archives <<< "$ARCHIVES"`, `read -ra docs <<< "$DOCS"`} {
+		if n := strings.Count(wf, read); n != 2 {
+			t.Errorf("release.yml has %q %d times, want 2 (the checksums, the upload)", read, n)
+		}
 	}
-	return names
+	return names, docs
 }
 
 // A release lists more than a node takes: the other architecture's archive
@@ -466,7 +487,7 @@ func releaseArchives(t *testing.T) []string {
 // holds here holds for the rayctl of every release; bootstrap.sh's line is
 // test/install/minisig.sh's.
 func TestSumsOfOtherArchives(t *testing.T) {
-	names := releaseArchives(t)
+	names, docs := releaseArchives(t)
 	for _, want := range []string{Archive("amd64"), Archive("arm64"), "rayctl-darwin-arm64.tar.gz", "rayctl-darwin-amd64.tar.gz", "rayctl-freebsd-amd64.tar.gz"} {
 		if !slices.Contains(names, want) {
 			t.Errorf("release.yml's ARCHIVES lacks %s: %v", want, names)
@@ -482,6 +503,11 @@ func TestSumsOfOtherArchives(t *testing.T) {
 	for _, n := range names {
 		archives[n] = archive(t, map[string]string{"rayctl": n})
 	}
+	// The documents' lines come after the archives' (v0.34.0 on): nothing a
+	// node reads.
+	for _, d := range docs {
+		archives[d] = []byte("openapi: 3.1.0\n")
+	}
 	sums := func(order []string, mark string) []byte {
 		var b []byte
 		for _, n := range order {
@@ -490,6 +516,7 @@ func TestSumsOfOtherArchives(t *testing.T) {
 		}
 		return b
 	}
+	names = append(names, docs...)
 	local := func(sums []byte, arch string, files map[string][]byte) (Release, error) {
 		dir := t.TempDir()
 		for n, b := range files {
@@ -568,7 +595,7 @@ func TestSumsOfOtherArchives(t *testing.T) {
 			t.Fatalf("fetched, %s: %v %v", arch, r.Version, err)
 		}
 	}
-	if slices.ContainsFunc(fetched, func(n string) bool { return strings.HasPrefix(n, "rayctl-") }) {
-		t.Errorf("a node fetched rayctl's archives: %v", fetched)
+	if slices.ContainsFunc(fetched, func(n string) bool { return strings.HasPrefix(n, "rayctl-") || slices.Contains(docs, n) }) {
+		t.Errorf("a node fetched rayctl's archives or the documents: %v", fetched)
 	}
 }

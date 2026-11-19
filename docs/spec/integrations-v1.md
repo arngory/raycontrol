@@ -677,9 +677,9 @@ plugins:
 - **Повторы безопасны**: `CreateUser` второй раз — `already_exists`; `SetUserEnabled`, `SetUserTraffic`,
   `SetUserExpiry` (время абсолютное, поэтому повтор не удваивает продление) — то же состояние; `DeleteUser` —
   `not_found`; `CreateInvite` заменяет неиспользованное (api-v1 §3); `RevokeDevice` — `already` (api-v1 §5a).
-- `rayctl remote export billing.rcdev -pem billing.pem` (новое) пишет сертификат и ключ в PEM (0600) и печатает
-  адрес и пин в виде для curl. Своя реализация берёт `api.port` и `api.pin` из пакета `rcdev1` (первая строка файла
-  устройства).
+- `rayctl remote export billing.rcdev -pem billing.pem` (новое) пишет сертификат и ключ в PEM (новый файл, 0600) и
+  печатает адрес и пин в виде для curl и готовый вызов. После `remote rotate` PEM устарел: экспорт заново. Своя
+  реализация берёт `api.port` и `api.pin` из пакета `rcdev1` (первая строка файла устройства).
 
 ### 5.3 Пример curl
 
@@ -698,7 +698,10 @@ curl --http2 --tlsv1.3 --curves X25519MLKEM768 \
 
 - `-k` нужен: сертификат самоподписанный, имени в нём нет. Ключ проверяет `--pinnedpubkey`. Пин ноды — base64url без
   `=`, curl ждёт обычный base64, отсюда `tr` и `=`.
-- `--curves X25519MLKEM768` — curl с OpenSSL 3.5 или новее. Без этой группы нода рукопожатие не завершит.
+- `--curves X25519MLKEM768` — curl с OpenSSL 3.5 или новее, где эта группа есть и по умолчанию (флаг делает требование
+  явным). curl с OpenSSL старше 3.5 рукопожатие с нодой не завершит.
+- Путь с двоеточием в `--cert` curl читает как путь и пароль ключа: двоеточие там пишется `\:` (`remote export`
+  печатает так сам).
 - Ответ: `{"user":{"id":"5","name":"u-k3f9-x2qa","enabled":true,"trafficLimitBytes":"53687091200",…}}`. От
   `support` тот же запрос — `403` и `{"code":"permission_denied",…}`.
 

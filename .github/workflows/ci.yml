@@ -50,6 +50,8 @@ jobs:
         run: |
           ./scripts/gen.sh
           git diff --exit-code -- internal/gen api/openapi
+          # A file the generator writes and the commit lacks (a new or renamed one).
+          test -z "$(git status --porcelain -- internal/gen api/openapi)" || { git status --short -- internal/gen api/openapi; exit 1; }
       - name: The proto only grows since the latest release
         # Additions only (integrations-v1 §10): buf's FILE rules, buf.yaml.
         run: |
