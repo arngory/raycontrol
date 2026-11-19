@@ -486,11 +486,20 @@ func (s *Server) SetUserEnabled(ctx context.Context, req *connect.Request[nodev1
 }
 
 func (s *Server) SetUserServices(ctx context.Context, req *connect.Request[nodev1.SetUserServicesRequest]) (*connect.Response[nodev1.SetUserServicesResponse], error) {
+	done, suffix := func(bool) {}, ""
+	if len(req.Msg.Services) == 0 {
+		// billing's empty list is a disable by another name (integrations-v1 §2.4).
+		var err error
+		if done, suffix, err = s.massGuard(ctx, "SetUserServices", req.Msg.ConfirmMass); err != nil {
+			return nil, toConnect(err)
+		}
+	}
 	ids, err := s.serviceIDs(ctx, req.Msg.Services)
 	if err == nil {
 		err = s.Store.SetUserServices(ctx, req.Msg.Name, ids)
 	}
-	if err := s.done(ctx, "user.services="+strings.Join(req.Msg.Services, ","), req.Msg.Name, err); err != nil {
+	done(err == nil)
+	if err := s.done(ctx, "user.services="+strings.Join(req.Msg.Services, ",")+suffix, req.Msg.Name, err); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.SetUserServicesResponse{}), nil
@@ -525,8 +534,17 @@ func (s *Server) SetUserTraffic(ctx context.Context, req *connect.Request[nodev1
 	if m.Period != nil && store.CheckTrafficPeriod(*m.Period, 1) != nil {
 		return nil, s.done(ctx, "user.traffic", m.Name, fmt.Errorf("%w traffic period: use monthly or none", store.ErrInvalid))
 	}
+	done, suffix := func(bool) {}, ""
+	if cuts, err := s.limitCutsOff(ctx, m); err != nil {
+		return nil, s.done(ctx, "user.traffic", m.Name, err)
+	} else if cuts {
+		if done, suffix, err = s.massGuard(ctx, "SetUserTraffic", m.ConfirmMass); err != nil {
+			return nil, toConnect(err)
+		}
+	}
 	u, err := s.Store.SetUserTraffic(ctx, m.Name, c)
-	if err := s.done(ctx, "user.traffic "+strings.Join(asked, " "), m.Name, err); err != nil {
+	done(err == nil)
+	if err := s.done(ctx, "user.traffic "+strings.Join(asked, " ")+suffix, m.Name, err); err != nil {
 		return nil, err
 	}
 	pb, err := s.userPB(ctx, u)

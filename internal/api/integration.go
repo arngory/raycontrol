@@ -62,10 +62,15 @@ func (s *Server) SetUserExpiry(ctx context.Context, req *connect.Request[nodev1.
 	if m.ExpiresAt != 0 {
 		t := time.Unix(m.ExpiresAt, 0).UTC()
 		at, what = &t, t.Format(time.RFC3339)
-		if !t.After(time.Now()) {
+		now := time.Now()
+		if !t.After(now) {
 			what = "now"
+		}
+		if !t.After(now.Add(expirySoon)) {
 			// billing's expiry now is a disable by another name: a mass
 			// action as SetUserEnabled{false} is (integrations-v1 §2.4).
+			// So is one in a few minutes: a clock ahead, or a loop that
+			// got the period wrong.
 			var err error
 			if done, suffix, err = s.massGuard(ctx, "SetUserExpiry", m.ConfirmMass); err != nil {
 				return nil, toConnect(err)
@@ -82,6 +87,34 @@ func (s *Server) SetUserExpiry(ctx context.Context, req *connect.Request[nodev1.
 		return nil, toConnect(err)
 	}
 	return connect.NewResponse(&nodev1.SetUserExpiryResponse{User: pb}), nil
+}
+
+// expirySoon is how far ahead an expiry still counts as a mass action.
+const expirySoon = 10 * time.Minute
+
+// tinyLimit is a traffic limit no plan has: one under it is a mistake of
+// units (bytes for gigabytes) that cuts the user off at once.
+const tinyLimit = 1 << 20
+
+// limitCutsOff reports whether billing's traffic change cuts the user off,
+// a disable by another name (integrations-v1 §2.4): a limit at or under
+// what the user has used this period, or under tinyLimit. Others' changes
+// are not looked at.
+func (s *Server) limitCutsOff(ctx context.Context, m *nodev1.SetUserTrafficRequest) (bool, error) {
+	if d, ok := caller(ctx); !ok || d.Role != "billing" || m.LimitBytes == nil || *m.LimitBytes <= 0 {
+		return false, nil
+	}
+	if *m.LimitBytes < tinyLimit {
+		return true, nil
+	}
+	if m.ResetUsage {
+		return false, nil
+	}
+	u, err := s.Store.UserByName(ctx, m.Name)
+	if err != nil {
+		return false, err
+	}
+	return *m.LimitBytes <= u.Used(time.Now()), nil
 }
 
 // massGuard puts billing's deletion or disable under the hour's limit of

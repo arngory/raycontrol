@@ -106,8 +106,6 @@ func InvitePinProof(inviteKey [spa.KeySize]byte, pin string) []byte {
 	return m.Sum(nil)
 }
 
-// pinRefused is Register's answer for a PIN missing or wrong: what the
-// client tells its user, with the tries the invite has still.
 // inviteForIntegration is FAILED_PRECONDITION with an InviteRole detail:
 // the invite is an integration's, not the app's.
 func inviteForIntegration(role string) error {
@@ -118,6 +116,8 @@ func inviteForIntegration(role string) error {
 	return err
 }
 
+// pinRefused is Register's answer for a PIN missing or wrong: what the
+// client tells its user, with the tries the invite has still.
 func pinRefused(why string, left int) error {
 	err := connect.NewError(connect.CodePermissionDenied, fmt.Errorf("%s: %d tries left", why, left))
 	if detail, derr := connect.NewErrorDetail(&devicev1.PinTries{Left: int32(left)}); derr == nil {
@@ -208,7 +208,8 @@ func pinFrom(ctx context.Context) string {
 	return p
 }
 
-// device returns the registered, active device of the connection.
+// device returns the registered, active device of the connection, as the
+// store has it now.
 func (r *Remote) device(ctx context.Context) (store.Device, error) {
 	d, err := r.Server.Store.DeviceByCertPin(ctx, pinFrom(ctx))
 	if errors.Is(err, store.ErrNotFound) {
@@ -218,6 +219,16 @@ func (r *Remote) device(ctx context.Context) (store.Device, error) {
 		return d, connect.NewError(connect.CodeInternal, err)
 	}
 	return d, nil
+}
+
+// calling is the device deviceLimit looked up for this call, or the
+// store's: one lookup a call. A check after the call (secretAnswer) asks
+// the store again with device.
+func (r *Remote) calling(ctx context.Context) (store.Device, error) {
+	if d, ok := caller(ctx); ok {
+		return d, nil
+	}
+	return r.device(ctx)
 }
 
 // nodeOnly reports a call for root on the node itself (NODE in the
@@ -261,6 +272,10 @@ func (r *Remote) Register(ctx context.Context, req *connect.Request[devicev1.Reg
 	// refused: an integration's own Register names none or rayctl.
 	if store.IntegrationRole(inv.Role) {
 		if c, ok := clientver.Parse(req.Header().Get(clientver.Header)); ok && c.Product == "niko" {
+			// For the admin who wonders why the integration's server
+			// never registered: someone tried it in the app.
+			s.auditQuietlyAs(ctx, "invite "+inv.ID, "invite "+inv.ID, "invite.app", inv.UserName+"/"+inv.Name,
+				"refused: an integration's ("+inv.Role+")", r.clock())
 			return nil, inviteForIntegration(inv.Role)
 		}
 	}
@@ -344,7 +359,7 @@ func (r *Remote) replayRegister(ctx context.Context, msg *devicev1.RegisterReque
 }
 
 func (r *Remote) GetSelf(ctx context.Context, _ *connect.Request[devicev1.GetSelfRequest]) (*connect.Response[devicev1.GetSelfResponse], error) {
-	d, err := r.device(ctx)
+	d, err := r.calling(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +375,7 @@ func (r *Remote) RotateCertificate(ctx context.Context, req *connect.Request[dev
 	// An admin's or an integration's device changes its own key (api-v1
 	// §6, integrations-v1 §6); a user's device may ask who it is, not
 	// this.
-	d, err := r.device(ctx)
+	d, err := r.calling(ctx)
 	if err != nil {
 		return nil, err
 	}

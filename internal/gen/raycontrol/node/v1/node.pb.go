@@ -5409,12 +5409,16 @@ func (x *CreateUserResponse) GetUser() *User {
 // not zero the count. reset_usage zeroes the current period's count from
 // now.
 type SetUserTrafficRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	LimitBytes    *int64                 `protobuf:"varint,2,opt,name=limit_bytes,json=limitBytes,proto3,oneof" json:"limit_bytes,omitempty"`
-	Period        *string                `protobuf:"bytes,3,opt,name=period,proto3,oneof" json:"period,omitempty"`
-	ResetDay      *int32                 `protobuf:"varint,4,opt,name=reset_day,json=resetDay,proto3,oneof" json:"reset_day,omitempty"`
-	ResetUsage    bool                   `protobuf:"varint,5,opt,name=reset_usage,json=resetUsage,proto3" json:"reset_usage,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Name       string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	LimitBytes *int64                 `protobuf:"varint,2,opt,name=limit_bytes,json=limitBytes,proto3,oneof" json:"limit_bytes,omitempty"`
+	Period     *string                `protobuf:"bytes,3,opt,name=period,proto3,oneof" json:"period,omitempty"`
+	ResetDay   *int32                 `protobuf:"varint,4,opt,name=reset_day,json=resetDay,proto3,oneof" json:"reset_day,omitempty"`
+	ResetUsage bool                   `protobuf:"varint,5,opt,name=reset_usage,json=resetUsage,proto3" json:"reset_usage,omitempty"`
+	// As SetUserEnabledRequest's: billing's limit at or under what the user
+	// has used this period cuts the user off, a mass action (integrations-v1
+	// §2.4).
+	ConfirmMass   bool `protobuf:"varint,6,opt,name=confirm_mass,json=confirmMass,proto3" json:"confirm_mass,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5480,6 +5484,13 @@ func (x *SetUserTrafficRequest) GetResetDay() int32 {
 func (x *SetUserTrafficRequest) GetResetUsage() bool {
 	if x != nil {
 		return x.ResetUsage
+	}
+	return false
+}
+
+func (x *SetUserTrafficRequest) GetConfirmMass() bool {
+	if x != nil {
+		return x.ConfirmMass
 	}
 	return false
 }
@@ -5724,9 +5735,12 @@ func (*SetUserEnabledResponse) Descriptor() ([]byte, []int) {
 }
 
 type SetUserServicesRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Services      []string               `protobuf:"bytes,2,rep,name=services,proto3" json:"services,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Name     string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Services []string               `protobuf:"bytes,2,rep,name=services,proto3" json:"services,omitempty"`
+	// As SetUserEnabledRequest's: billing's empty list cuts the user off, a
+	// mass action (integrations-v1 §2.4).
+	ConfirmMass   bool `protobuf:"varint,3,opt,name=confirm_mass,json=confirmMass,proto3" json:"confirm_mass,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5773,6 +5787,13 @@ func (x *SetUserServicesRequest) GetServices() []string {
 		return x.Services
 	}
 	return nil
+}
+
+func (x *SetUserServicesRequest) GetConfirmMass() bool {
+	if x != nil {
+		return x.ConfirmMass
+	}
+	return false
 }
 
 type SetUserServicesResponse struct {
@@ -10241,7 +10262,7 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x0etraffic_period\x18\x06 \x01(\tR\rtrafficPeriod\x12*\n" +
 	"\x11traffic_reset_day\x18\a \x01(\x05R\x0ftrafficResetDay\"B\n" +
 	"\x12CreateUserResponse\x12,\n" +
-	"\x04user\x18\x01 \x01(\v2\x18.raycontrol.node.v1.UserR\x04user\"\xda\x01\n" +
+	"\x04user\x18\x01 \x01(\v2\x18.raycontrol.node.v1.UserR\x04user\"\xfd\x01\n" +
 	"\x15SetUserTrafficRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12$\n" +
 	"\vlimit_bytes\x18\x02 \x01(\x03H\x00R\n" +
@@ -10249,7 +10270,8 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x06period\x18\x03 \x01(\tH\x01R\x06period\x88\x01\x01\x12 \n" +
 	"\treset_day\x18\x04 \x01(\x05H\x02R\bresetDay\x88\x01\x01\x12\x1f\n" +
 	"\vreset_usage\x18\x05 \x01(\bR\n" +
-	"resetUsageB\x0e\n" +
+	"resetUsage\x12!\n" +
+	"\fconfirm_mass\x18\x06 \x01(\bR\vconfirmMassB\x0e\n" +
 	"\f_limit_bytesB\t\n" +
 	"\a_periodB\f\n" +
 	"\n" +
@@ -10265,10 +10287,11 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
 	"\aenabled\x18\x02 \x01(\bR\aenabled\x12!\n" +
 	"\fconfirm_mass\x18\x03 \x01(\bR\vconfirmMass\"\x18\n" +
-	"\x16SetUserEnabledResponse\"H\n" +
+	"\x16SetUserEnabledResponse\"k\n" +
 	"\x16SetUserServicesRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
-	"\bservices\x18\x02 \x03(\tR\bservices\"\x19\n" +
+	"\bservices\x18\x02 \x03(\tR\bservices\x12!\n" +
+	"\fconfirm_mass\x18\x03 \x01(\bR\vconfirmMass\"\x19\n" +
 	"\x17SetUserServicesResponse\"J\n" +
 	"\x11DeleteUserRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12!\n" +

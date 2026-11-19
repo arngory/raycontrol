@@ -185,11 +185,14 @@ OpenAPI (§5.1).
 - Где `billing` может навредить — массово выключить или удалить обычных пользователей, выдать себе приглашение `user`
   — это его роль. Ограничивают частота (§2.6), аудит (§2.5), события администратору (§4.3) и предохранитель ниже.
 - **Предохранитель массовых действий** (§14 п. 6). `DeleteUser`, `SetUserEnabled {enabled: false}` и `SetUserExpiry`
-  «истечь сейчас» (это то же выключение) от всех устройств `billing` вместе считаются за скользящий час. Сверх предела (по умолчанию 50 в час, удаления и выключения вместе)
+  «истечь сейчас» (это то же выключение; срок не позже чем через 10 минут — тоже: часы интеграции спешат или цикл
+  ошибся в периоде), а ещё выключения под другим именем — `SetUserServices` с пустым списком и `SetUserTraffic` с
+  лимитом не больше израсходованного за период или меньше 1 МиБ (байты вместо гигабайт) — от всех устройств
+  `billing` вместе считаются за скользящий час. Сверх предела (по умолчанию 50 в час, удаления и выключения вместе)
   вызов — `failed_precondition` («over the hourly limit of mass actions: confirm»), ничего не изменено, а администратору
   уходит событие `integration.mass_action` (§4.3) и строка в `rayctl status`. Выше предела проходит только вызов с
-  флагом подтверждения: новое поле `confirm_mass` в `DeleteUserRequest`, `SetUserEnabledRequest` и
-  `SetUserExpiryRequest`. Такой вызов
+  флагом подтверждения: новое поле `confirm_mass` в `DeleteUserRequest`, `SetUserEnabledRequest`,
+  `SetUserExpiryRequest`, `SetUserServicesRequest` и `SetUserTrafficRequest`. Такой вызов
   выполняется, в аудите — с пометкой `confirm`, а событие администратору уходит всё равно (одно в час, с числом). Флаг
   ставит сам `billing`: предохранитель ловит сбой интеграции (цикл, неверная выборка), а не взлом; от взлома — событие и
   отзыв устройства (§6). Предел — настройка root на ноде: `rayctl integration set mass-limit 50` (`0` — каждое массовое
@@ -203,6 +206,7 @@ OpenAPI (§5.1).
 | `billing` | `<пользователь>/<устройство> (billing)` | каждое изменение, теми же действиями (`user.create`, `user.enable=false`, `user.traffic …`, `user.expires=<время>` — новое, `device.revoke`, `invite.create:user`; сверх предела массовых действий — с `confirm`); отказы по роли; превышения частоты; отказы предохранителя (`api.mass`) |
 | `support` | `<пользователь>/<устройство> (support)` | только отказы и превышения; чтения не пишутся |
 | нода | `rayd` | `user.expired` (новое, цикл сроков §4.3), смены состояния webhook |
+| приглашение | `invite <id>` | `invite.app`: приглашение интеграции открыли в приложении, отказано (§2.2); не чаще строки в 10 минут |
 | администратор | как сейчас | `device.allow` (§3.4), `integration.set` (заметки для `support`; предел массовых действий — только root), `integration.limits` (только root), `webhook.add`, `webhook.set`, `webhook.del`, `webhook.verify`, `webhook.rotate`, `webhook.test`, `webhook.retry`; `webhook.gone` и итог проверки адреса пишет `rayd` |
 
 - Отказ по роли — `api.denied`, цель `<метод>`; превышение — `api.limited`; отказ предохранителя — `api.mass`. Не
@@ -836,7 +840,8 @@ HTTPS, хоть статический хостинг: команды подпи
     действий, заметки для `support`, учёт трафика `on`/`auto` (§2.2, §2.4, §2.6). В ответе ещё устройства
     интеграций с их вызовами с запуска rayd и массовые действия за час (§11). Учёт трафика — тоже здесь: отдельного
     метода для одной настройки не заводили;
-  - `confirm_mass` в `DeleteUserRequest`, `SetUserEnabledRequest` и `SetUserExpiryRequest` (§2.4); нода до него поле
+  - `confirm_mass` в `DeleteUserRequest`, `SetUserEnabledRequest`, `SetUserExpiryRequest`, `SetUserServicesRequest` и
+    `SetUserTrafficRequest` (§2.4); нода до него поле
     не читает, и предохранителя у неё нет;
   - значения `role`: `billing`, `support` (строка, поле прежнее); `role` в пакете `rcdev1` (кроме `user`);
     `InviteRole` — деталь отказа `Register` приложению (api-v1 §4);
@@ -903,7 +908,8 @@ rayctl webhook add|list|set|verify|del|test|rotate|retry|status   # §4.6, ле�
 - `raycontrol_webhook_dropped_total{endpoint}`, `raycontrol_webhook_undelivered_total{endpoint}`;
 - `raycontrol_webhook_last_success_timestamp_seconds{endpoint}`;
 - `raycontrol_webhook_verify_total{endpoint, result}`: `ok`, `mismatch`, `http`, `timeout`, `tls`, `refused`;
-- `raycontrol_api_calls_total{role, code}` (все роли удалённого API, `admin` тоже), `raycontrol_api_limited_total{role}`;
+- `raycontrol_api_calls_total{role, code}` (вызовы зарегистрированных устройств всех ролей через удалённый API,
+  `admin` и `user` тоже; `Register` не считается: роли у вызывающего ещё нет), `raycontrol_api_limited_total{role}`;
 - `raycontrol_integration_mass_actions_total{result}`: `done`, `refused`, `confirmed`;
 - `raycontrol_devices{role, state}` — с ролями `billing` и `support`.
 

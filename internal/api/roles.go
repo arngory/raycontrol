@@ -263,8 +263,14 @@ func (r *Remote) deviceLimit() connect.UnaryInterceptorFunc {
 				return next(ctx, req)
 			}
 			d, err := r.device(ctx)
-			if err != nil || !store.IntegrationRole(d.Role) {
+			if err != nil {
 				return next(ctx, req)
+			}
+			ctx = context.WithValue(ctx, callerKey{}, d) // the handler's r.calling
+			if !store.IntegrationRole(d.Role) {
+				resp, err := next(ctx, req)
+				r.Server.countCall(d.Role, codeOf(err))
+				return resp, err
 			}
 			method, now := methodName(procedure), r.clock()
 			release, err := r.Server.admit(ctx, d, method, now)

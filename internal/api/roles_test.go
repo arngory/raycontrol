@@ -280,6 +280,12 @@ func TestIntegrationRoles(t *testing.T) {
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition || role != "billing" {
 		t.Fatalf("an integration's invite in the app: %v (role %q)", err, role)
 	}
+	for range 2 { // one line for the admin, not one a try
+		_, _ = app.dev.Register(ctx, appReq)
+	}
+	if n := countAudit(t, srv, "invite.app"); n != 1 {
+		t.Fatalf("the app's tries audited %d times", n)
+	}
 	bill := newRemoteDevice(t, addr, pin)
 	reg, err := bill.registerPIN(ctx, billInv.Msg.InviteCode, now, billInv.Msg.Pin)
 	if err != nil {
@@ -487,4 +493,20 @@ func TestIntegrationRoles(t *testing.T) {
 	if denied != 1 || changes != 1 || failed != 1 {
 		t.Errorf("audit: %d refusals of CreateService, %d changes by billing, %d failures", denied, changes, failed)
 	}
+}
+
+// countAudit counts the audit lines of action.
+func countAudit(t *testing.T, srv *Server, action string) int {
+	t.Helper()
+	entries, err := srv.Store.ListAudit(context.Background(), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range entries {
+		if e.Action == action {
+			n++
+		}
+	}
+	return n
 }

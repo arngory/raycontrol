@@ -193,6 +193,14 @@ func TestIntegrationLimits(t *testing.T) {
 	if _, err := bill.node.SetUserExpiry(ctx, connect.NewRequest(&nodev1.SetUserExpiryRequest{Name: "u1", ExpiresAt: 1, ConfirmMass: true})); err != nil {
 		t.Fatalf("an expiry now, confirmed: %v", err)
 	}
+	// So is one in a few minutes (a clock ahead); not one in a day.
+	soon := time.Now().Add(2 * time.Minute).Unix()
+	if _, err := bill.node.SetUserExpiry(ctx, connect.NewRequest(&nodev1.SetUserExpiryRequest{Name: "u1", ExpiresAt: soon})); connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Fatalf("an expiry in two minutes over the mass limit: %v", err)
+	}
+	if _, err := bill.node.SetUserExpiry(ctx, connect.NewRequest(&nodev1.SetUserExpiryRequest{Name: "u1", ExpiresAt: time.Now().Add(24 * time.Hour).Unix()})); err != nil {
+		t.Fatalf("an expiry in a day: %v", err)
+	}
 	if _, err := bill.node.SetUserExpiry(ctx, connect.NewRequest(&nodev1.SetUserExpiryRequest{Name: "u1"})); err != nil {
 		t.Fatalf("never is no mass action: %v", err)
 	}
@@ -219,13 +227,31 @@ func TestIntegrationLimits(t *testing.T) {
 	if _, err := bill.node.SetUserTraffic(ctx, connect.NewRequest(&nodev1.SetUserTrafficRequest{Name: "u1", LimitBytes: &none})); err != nil {
 		t.Fatalf("billing's last limit off with the counting kept on: %v", err)
 	}
+	// Disables by other names: a limit that cuts off (bytes for
+	// gigabytes), no services at all.
+	tiny := int64(100)
+	if _, err := bill.node.SetUserTraffic(ctx, connect.NewRequest(&nodev1.SetUserTrafficRequest{Name: "u1", LimitBytes: &tiny})); connect.CodeOf(err) != connect.CodeFailedPrecondition || !strings.Contains(err.Error(), "mass") {
+		t.Fatalf("a limit of 100 bytes over the mass limit: %v", err)
+	}
+	if _, err := bill.node.SetUserTraffic(ctx, connect.NewRequest(&nodev1.SetUserTrafficRequest{Name: "u1", LimitBytes: &tiny, ConfirmMass: true})); err != nil {
+		t.Fatalf("a limit of 100 bytes, confirmed: %v", err)
+	}
+	if _, err := bill.node.SetUserServices(ctx, connect.NewRequest(&nodev1.SetUserServicesRequest{Name: "u1"})); connect.CodeOf(err) != connect.CodeFailedPrecondition || !strings.Contains(err.Error(), "mass") {
+		t.Fatalf("no services over the mass limit: %v", err)
+	}
+	if _, err := bill.node.SetUserServices(ctx, connect.NewRequest(&nodev1.SetUserServicesRequest{Name: "u1", ConfirmMass: true})); err != nil {
+		t.Fatalf("no services, confirmed: %v", err)
+	}
+	if _, err := bill.node.SetUserTraffic(ctx, connect.NewRequest(&nodev1.SetUserTrafficRequest{Name: "u1", LimitBytes: &none})); err != nil {
+		t.Fatal(err)
+	}
 
 	// What the node says of it all.
 	st, err := srv.GetIntegrationSettings(as(1000), connect.NewRequest(&nodev1.GetIntegrationSettingsRequest{}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !st.Msg.SupportNotes || st.Msg.MassLimit != 2 || st.Msg.MassActions != 4 || st.Msg.MassRefused != 3 || st.Msg.TrafficCounting != "on" {
+	if !st.Msg.SupportNotes || st.Msg.MassLimit != 2 || st.Msg.MassActions != 6 || st.Msg.MassRefused != 6 || st.Msg.TrafficCounting != "on" {
 		t.Errorf("settings: %+v", st.Msg)
 	}
 	limited, denied := map[string]uint64{}, map[string]uint64{}
@@ -250,7 +276,7 @@ func TestIntegrationLimits(t *testing.T) {
 	for _, e := range audit {
 		count[e.Action]++
 	}
-	if count["api.limited"] != 2 || count["api.mass"] != 2 || count["user.enable=false confirm"] != 1 || count["user.expires=now confirm"] != 1 || count["api.denied"] != 1 ||
+	if count["api.limited"] != 2 || count["api.mass"] != 4 || count["user.enable=false confirm"] != 1 || count["user.expires=now confirm"] != 1 || count["api.denied"] != 1 ||
 		count["integration.set mass-limit=2"] != 1 || count["traffic.counting=on"] != 1 || count["integration.set support-notes=on"] != 1 {
 		t.Errorf("audit: %v", count)
 	}
@@ -260,8 +286,8 @@ func TestIntegrationLimits(t *testing.T) {
 	}
 	for _, want := range []string{
 		`raycontrol_api_limited_total{role="support"} 3`,
-		`raycontrol_integration_mass_actions_total{result="refused"} 3`,
-		`raycontrol_integration_mass_actions_total{result="confirmed"} 2`,
+		`raycontrol_integration_mass_actions_total{result="refused"} 6`,
+		`raycontrol_integration_mass_actions_total{result="confirmed"} 4`,
 		`raycontrol_api_calls_total{role="support",code="resource_exhausted"} 3`,
 	} {
 		if !strings.Contains(m.Msg.Text, want) {

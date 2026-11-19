@@ -199,10 +199,15 @@ func (s *Server) readIntegrationSettings(ctx context.Context) (integrationSettin
 		return set, err
 	}
 	if err := json.Unmarshal(b, &set); err != nil {
-		return integrationSettings{}, fmt.Errorf("the integrations' settings: %w", err)
+		return integrationSettings{}, fmt.Errorf("%w: %w", errSettingsDamaged, err)
 	}
 	return set, nil
 }
+
+// errSettingsDamaged is a stored value that does not read: only then do
+// the setters start again from the defaults. Any other failure to read
+// (I/O) refuses the change, so that root's limits are not lost by it.
+var errSettingsDamaged = errors.New("the integrations' settings are damaged")
 
 // changeIntegrationSettings applies change to the settings and stores
 // them. Setters go one at a time (in.write), and the database is written
@@ -213,8 +218,11 @@ func (s *Server) changeIntegrationSettings(ctx context.Context, change func(*int
 	in.write.Lock()
 	defer in.write.Unlock()
 	cur, err := s.integrationSettings(ctx)
-	if err != nil {
-		cur = integrationSettings{} // unreadable: start again from the defaults
+	switch {
+	case errors.Is(err, errSettingsDamaged):
+		cur = integrationSettings{} // start again from the defaults
+	case err != nil:
+		return err
 	}
 	next := cur
 	next.Roles, next.Devices = maps.Clone(cur.Roles), maps.Clone(cur.Devices)
@@ -379,21 +387,30 @@ type quietMark struct {
 // even when the caller has gone.
 func (s *Server) auditQuietly(ctx context.Context, d store.Device, action, target, result string, now time.Time) {
 	in := &s.integ
+	if action == "api.denied" {
+		in.mu.Lock()
+		in.device(d).denied++ // every refusal, written or not
+		in.mu.Unlock()
+	}
+	s.auditQuietlyAs(ctx, d.ID, d.UserName+"/"+d.Name+actorSuffix(d.Role), action, target, result, now)
+}
+
+// auditQuietlyAs is auditQuietly for an actor that is not a device yet (an
+// invite): id keys its lines.
+func (s *Server) auditQuietlyAs(ctx context.Context, id, actor, action, target, result string, now time.Time) {
+	in := &s.integ
 	// By the action's verb ("user.expires", "user.services"), not its
 	// values: a broken caller that changes them each time is still one.
 	verb, _, _ := strings.Cut(action, "=")
 	verb, _, _ = strings.Cut(verb, " ")
 	verb, _, _ = strings.Cut(verb, ":")
-	k := quietKey{device: d.ID, action: verb}
+	k := quietKey{device: id, action: verb}
 	if strings.HasPrefix(action, "api.") {
 		k.method = target
 	}
 	in.mu.Lock()
 	if in.quiet == nil {
 		in.quiet = map[quietKey]quietMark{}
-	}
-	if action == "api.denied" {
-		in.device(d).denied++ // every refusal, written or not
 	}
 	m, seen := in.quiet[k]
 	if seen && now.Sub(m.at) < quietEvery {
@@ -415,7 +432,7 @@ func (s *Server) auditQuietly(ctx context.Context, d store.Device, action, targe
 		result += fmt.Sprintf("; %d more since the last line", m.missed)
 	}
 	// A refusal stands whether its line is written or not.
-	_ = s.Store.Audit(context.WithoutCancel(ctx), d.UserName+"/"+d.Name+actorSuffix(d.Role), action, target, result)
+	_ = s.Store.Audit(context.WithoutCancel(ctx), actor, action, target, result)
 }
 
 // methodName is a procedure's method, "/raycontrol.node.v1.NodeService/GetUser" → "GetUser".
