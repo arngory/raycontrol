@@ -339,7 +339,7 @@ jobs:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           test -n "$MINISIGN_SECRET_KEY" || { echo "MINISIGN_SECRET_KEY is not set"; exit 1; }
-          sudo apt-get install -y -q minisign
+          .github/scripts/apt-install.sh minisign
           read -ra archives <<< "$ARCHIVES"
           sha256sum "${archives[@]}" > SHA256SUMS
           cat SHA256SUMS
