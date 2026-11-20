@@ -59,8 +59,8 @@ func TestNetns(t *testing.T) {
 	}
 
 	results := make(chan error, 16)
-	handle := func(src netip.Addr, pkt []byte) {
-		_, err := gate.Handle(src, pkt)
+	handle := func(src, dst netip.Addr, pkt []byte) {
+		_, err := gate.Handle(src, dst, pkt)
 		results <- err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -277,6 +277,51 @@ func TestNetns(t *testing.T) {
 		waitResult(nil)
 		if !reach() {
 			t.Fatal("service closed after TCP SPA")
+		}
+	})
+	t.Run("v3 opens at the address it came to, not at another", func(t *testing.T) {
+		// spa-v3 §4: NFLOG and the TCP carrier give the address the
+		// packet came to; a v3 packet naming another is refused.
+		snap.Devices = []*perimeterv1.Device{alice}
+		snap.OwnAddrs = nil
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		seal3 := func(dst string) []byte {
+			pkt, err := spa.SealRandom(params, [spa.KeySize]byte(key(0x11)), spa.Request{Time: time.Now(), Dst: netip.MustParseAddr(dst)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return pkt
+		}
+		sendUDP(seal3("198.51.100.9"))
+		waitResult(spa.ErrDst)
+		sendUDP(seal3("127.0.0.1"))
+		waitResult(nil)
+		c, err := net.Dial("tcp", "127.0.0.1:"+slotPort())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Write(seal3("198.51.100.9"))
+		c.Close()
+		waitResult(spa.ErrDst)
+		c, err = net.Dial("tcp", "127.0.0.1:"+slotPort())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Write(seal3("127.0.0.1"))
+		c.Close()
+		waitResult(nil)
+		// Behind 1:1 NAT: the public address of the snapshot.
+		snap.OwnAddrs = []string{"203.0.113.7"}
+		if err := gate.Update(snap); err != nil {
+			t.Fatal(err)
+		}
+		sendUDP(seal3("203.0.113.7"))
+		waitResult(nil)
+		snap.OwnAddrs = nil
+		if !reach() {
+			t.Fatal("service closed after v3")
 		}
 	})
 	t.Run("TCP carrier as a TLS ClientHello opens the service", func(t *testing.T) {

@@ -393,7 +393,11 @@ type WatchRelayRequest struct {
 	// (spec/relay-update-remote-v1.md §3.2): a rayd relay that knows them
 	// sets it, whatever the relay's policy. rayspa's feed and an older rayd
 	// relay's get none.
-	Updates       bool `protobuf:"varint,2,opt,name=updates,proto3" json:"updates,omitempty"`
+	Updates bool `protobuf:"varint,2,opt,name=updates,proto3" json:"updates,omitempty"`
+	// The SPA versions the relay's rayspa takes (spec/spa-v3.md §5): with 3
+	// the exit lists the relay's SPA with versions [2, 3]. rayd relay's feed
+	// and an older rayspa's send none.
+	SpaVersions   []uint32 `protobuf:"varint,3,rep,packed,name=spa_versions,json=spaVersions,proto3" json:"spa_versions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -440,6 +444,13 @@ func (x *WatchRelayRequest) GetUpdates() bool {
 		return x.Updates
 	}
 	return false
+}
+
+func (x *WatchRelayRequest) GetSpaVersions() []uint32 {
+	if x != nil {
+		return x.SpaVersions
+	}
+	return nil
 }
 
 type ReportRequest struct {
@@ -973,6 +984,11 @@ type Snapshot struct {
 	// per-address limit. Absent (an older rayd): none.
 	IntegPrefixes []string `protobuf:"bytes,14,rep,name=integ_prefixes,json=integPrefixes,proto3" json:"integ_prefixes,omitempty"`
 	IntegPorts    []*Port  `protobuf:"bytes,15,rep,name=integ_ports,json=integPorts,proto3" json:"integ_ports,omitempty"`
+	// The node's public addresses (a relay's: its own), IPv4 and IPv6, at
+	// most 16: a SPA v3 packet that names one of these, or the address it
+	// came to, is the node's (spec/spa-v3.md §4). Absent (an older rayd):
+	// only the address it came to.
+	OwnAddrs      []string `protobuf:"bytes,16,rep,name=own_addrs,json=ownAddrs,proto3" json:"own_addrs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1108,6 +1124,13 @@ func (x *Snapshot) GetIntegPrefixes() []string {
 func (x *Snapshot) GetIntegPorts() []*Port {
 	if x != nil {
 		return x.IntegPorts
+	}
+	return nil
+}
+
+func (x *Snapshot) GetOwnAddrs() []string {
+	if x != nil {
+		return x.OwnAddrs
 	}
 	return nil
 }
@@ -1776,10 +1799,11 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"\tswept_udp\x18\x06 \x01(\x04R\bsweptUdp\x12\"\n" +
 	"\rswept_tcp_out\x18\a \x01(\x04R\vsweptTcpOut\x12 \n" +
 	"\fswept_tcp_in\x18\b \x01(\x04R\n" +
-	"sweptTcpIn\"C\n" +
+	"sweptTcpIn\"f\n" +
 	"\x11WatchRelayRequest\x12\x14\n" +
 	"\x05probe\x18\x01 \x01(\bR\x05probe\x12\x18\n" +
-	"\aupdates\x18\x02 \x01(\bR\aupdates\"U\n" +
+	"\aupdates\x18\x02 \x01(\bR\aupdates\x12!\n" +
+	"\fspa_versions\x18\x03 \x03(\rR\vspaVersions\"U\n" +
 	"\rReportRequest\x12\x16\n" +
 	"\x06device\x18\x01 \x01(\tR\x06device\x12\x18\n" +
 	"\anetwork\x18\x02 \x01(\tR\anetwork\x12\x12\n" +
@@ -1809,7 +1833,7 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"unfinished\"\x17\n" +
 	"\x15WatchPerimeterRequest\"W\n" +
 	"\x16WatchPerimeterResponse\x12=\n" +
-	"\bsnapshot\x18\x01 \x01(\v2!.raycontrol.perimeter.v1.SnapshotR\bsnapshot\"\x85\x06\n" +
+	"\bsnapshot\x18\x01 \x01(\v2!.raycontrol.perimeter.v1.SnapshotR\bsnapshot\"\xa2\x06\n" +
 	"\bSnapshot\x12\x1a\n" +
 	"\brevision\x18\x01 \x01(\x04R\brevision\x124\n" +
 	"\x03spa\x18\x02 \x01(\v2\".raycontrol.perimeter.v1.SPAParamsR\x03spa\x129\n" +
@@ -1830,7 +1854,8 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"\x0econn_limit_off\x18\r \x01(\bR\fconnLimitOff\x12%\n" +
 	"\x0einteg_prefixes\x18\x0e \x03(\tR\rintegPrefixes\x12>\n" +
 	"\vinteg_ports\x18\x0f \x03(\v2\x1d.raycontrol.perimeter.v1.PortR\n" +
-	"integPorts\"\x86\x01\n" +
+	"integPorts\x12\x1b\n" +
+	"\town_addrs\x18\x10 \x03(\tR\bownAddrs\"\x86\x01\n" +
 	"\x06Egress\x12\x12\n" +
 	"\x04smtp\x18\x01 \x01(\bR\x04smtp\x12\x1e\n" +
 	"\n" +

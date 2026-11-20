@@ -78,6 +78,9 @@ type Server struct {
 	// RelayProbe, when set, says whether a relay's rayd relay is there:
 	// the subscription lists its probe endpoint only then (relay-v1 §9.2).
 	RelayProbe func(name string) bool
+	// RelaySPA, when set, gives the SPA versions a relay's rayspa takes
+	// (spa-v3 §5), nil when it has not said: relays[].spa.versions.
+	RelaySPA func(name string) []int
 	// App, when set, serves the client's releases on the same endpoint
 	// (spec/app-update-v1.md) and lists them in the subscription while
 	// the administrator has the mirror on (appmirror.Mirror).
@@ -384,7 +387,7 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 	p := Payload{
 		V: 1, NodeID: m.NodeID, Name: name, Note: note, Seq: seq, Time: now.Unix(), Issued: now.Unix(),
 		Expires: now.Add(Lifetime).Unix(), Profiles: profiles,
-		SPA:     &SPAHint{Carriers: []string{"udp"}},
+		SPA:     &SPAHint{Carriers: []string{"udp"}, Versions: slices.Clone(node.SPAVersions)},
 		DNSName: m.DNSName, Addrs: node.Addrs(m.Host),
 	}
 	if u.Limited() {
@@ -485,6 +488,11 @@ func (s *Server) addRelays(ctx context.Context, p *Payload, m render.Model) erro
 			return err
 		}
 		h := RelayHint{ID: r.Name, Host: r.Address.String(), SPA: node.FromParams(params)}
+		if s.RelaySPA != nil {
+			// What the relay's rayspa said it takes (spa-v3 §5): relays
+			// update apart from the exit.
+			h.SPA.Versions = s.RelaySPA(r.Name)
+		}
 		if r.ProbePort != 0 && r.ProbePin != "" && s.RelayProbe != nil && s.RelayProbe(r.Name) {
 			// The relay passes reports on to this node: it takes them when
 			// this node does.

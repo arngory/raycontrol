@@ -138,6 +138,9 @@ func TestEnrollAndPassSPA(t *testing.T) {
 	if err != nil || params != srv.Params {
 		t.Fatalf("bundle params differ: %v", err)
 	}
+	if !slices.Equal(b.SPA.Versions, []int{2, 3}) {
+		t.Fatalf("bundle SPA versions %v", b.SPA.Versions)
+	}
 
 	// The client side: seal with what the bundle carries.
 	var key [spa.KeySize]byte

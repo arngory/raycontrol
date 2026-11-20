@@ -2,6 +2,7 @@ package spa
 
 import (
 	"errors"
+	"net/netip"
 	"slices"
 	"sync"
 	"time"
@@ -20,6 +21,9 @@ type Grant struct {
 	DeviceID string
 	Scope    []uint16
 	TTL      time.Duration
+	// Dst is the address a v3 packet names (spa-v3 §3), unset for v2: the
+	// caller opens nothing unless OwnDst takes it.
+	Dst netip.Addr
 }
 
 var (
@@ -135,7 +139,36 @@ func (v *Verifier) accept(d Device, epoch uint64, req Request, nonce [NonceSize]
 		ttl = v.defaultTTL
 	}
 	ttl = min(ttl, v.maxTTL)
-	return Grant{DeviceID: d.ID, Scope: slices.Clone(scope), TTL: ttl}, nil
+	return Grant{DeviceID: d.ID, Scope: slices.Clone(scope), TTL: ttl, Dst: req.Dst}, nil
+}
+
+// nat64 is the well-known NAT64 prefix (RFC 6052): no one but a translator
+// on the client's own path is routed to it, unlike a prefix of a network's
+// own, which anyone may set up with any low bits.
+var nat64 = netip.MustParsePrefix("64:ff9b::/96")
+
+// OwnDst reports whether a v3 packet's destination is the node's (spa-v3
+// §4): the address the packet came to (wire, unset when unknown), one of
+// the node's public addresses (own), or one of these IPv4 addresses inside
+// the well-known NAT64 prefix.
+func OwnDst(dst, wire netip.Addr, own []netip.Addr) bool {
+	if !dst.IsValid() {
+		return false
+	}
+	dst = dst.Unmap()
+	if nat64.Contains(dst) {
+		a := dst.As16()
+		dst = netip.AddrFrom4([4]byte(a[12:]))
+	}
+	if wire.IsValid() && dst == wire.Unmap().WithZone("") {
+		return true
+	}
+	for _, a := range own {
+		if dst == a.Unmap().WithZone("") {
+			return true
+		}
+	}
+	return false
 }
 
 // remember stores the nonce for as long as a packet carrying it could still

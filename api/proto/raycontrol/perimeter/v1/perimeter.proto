@@ -100,6 +100,10 @@ message WatchRelayRequest {
   // sets it, whatever the relay's policy. rayspa's feed and an older rayd
   // relay's get none.
   bool updates = 2;
+  // The SPA versions the relay's rayspa takes (spec/spa-v3.md §5): with 3
+  // the exit lists the relay's SPA with versions [2, 3]. rayd relay's feed
+  // and an older rayspa's send none.
+  repeated uint32 spa_versions = 3;
 }
 
 message ReportRequest {
@@ -199,6 +203,11 @@ message Snapshot {
   // per-address limit. Absent (an older rayd): none.
   repeated string integ_prefixes = 14;
   repeated Port integ_ports = 15;
+  // The node's public addresses (a relay's: its own), IPv4 and IPv6, at
+  // most 16: a SPA v3 packet that names one of these, or the address it
+  // came to, is the node's (spec/spa-v3.md §4). Absent (an older rayd):
+  // only the address it came to.
+  repeated string own_addrs = 16;
 }
 
 // Egress is what the data plane may not send, whoever the user.

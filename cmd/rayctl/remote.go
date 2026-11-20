@@ -149,7 +149,7 @@ func openPort(ctx context.Context, b node.Bundle, ip netip.Addr, serverName stri
 	var lastErr error
 	for _, c := range carriers {
 		now := time.Now()
-		pkt, err := spa.SealRandom(params, [spa.KeySize]byte(k), spa.Request{Time: now})
+		pkt, err := spa.SealRandom(params, [spa.KeySize]byte(k), knockFor(b, ip, now, 0))
 		if err != nil {
 			return err
 		}

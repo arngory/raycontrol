@@ -33,6 +33,7 @@ type PerimeterServer struct {
 	Refresh time.Duration
 
 	watch rayspaWatch // whether rayspa follows the feed (MonitorRayspa)
+	own   ownAddrs    // the node's public addresses (spa-v3 §4)
 }
 
 var _ perimeterv1connect.PerimeterServiceHandler = (*PerimeterServer)(nil)
@@ -233,6 +234,12 @@ func (p *PerimeterServer) snapshot(ctx context.Context) (*perimeterv1.Snapshot, 
 	if snap.ConnLimitOff, err = p.Store.ConnLimitOff(ctx); err != nil {
 		return nil, err
 	}
+	// The addresses a v3 packet may name (spa-v3 §4).
+	host, err := node.Host(ctx, p.Store)
+	if err != nil {
+		return nil, err
+	}
+	snap.OwnAddrs = p.own.get(ctx, host, time.Now())
 	return snap, nil
 }
 
@@ -304,6 +311,8 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 		snap.Devices = append(snap.Devices, &perimeterv1.Device{Id: d.ID, Key: k[:], Allowed: allowed})
 	}
 	snap.AdminPrefixes = slices.Clone(relay.Admin)
+	// The relay's own address, which a v3 packet to it names (spa-v3 §4).
+	snap.OwnAddrs = []string{relay.Address.Unmap().String()}
 	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: uint32(relay.SSHPort)}}
 	// The per-address limit holds on the node's relays too (conn-limit-v1
 	// §6.2, §8): one switch for both.

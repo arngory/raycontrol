@@ -242,6 +242,10 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 	// One relay runs one rayspa and one rayd relay: a new stream of one
 	// ends the old (admitRelayStream).
 	probe := req.Msg.Probe
+	if !probe {
+		// rayspa's feed: the SPA versions it takes (none from an older one).
+		f.r.setRelaySPA(relay.Name, req.Msg.GetSpaVersions())
+	}
 	ctx, end := context.WithCancel(ctx)
 	defer end()
 	own := &relayStream{probe: probe, updates: req.Msg.Updates, end: end}

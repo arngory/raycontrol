@@ -268,7 +268,7 @@ func TestGate(t *testing.T) {
 	g := NewGate(fw, quiet)
 	g.now = func() time.Time { return now }
 
-	if _, err := g.Handle(netip.MustParseAddr("192.0.2.1"), []byte("x")); !errors.Is(err, ErrNotReady) {
+	if _, err := g.Handle(netip.MustParseAddr("192.0.2.1"), netip.Addr{}, []byte("x")); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("before snapshot: %v", err)
 	}
 
@@ -286,14 +286,14 @@ func TestGate(t *testing.T) {
 	}
 
 	nat := netip.MustParseAddr("203.0.113.9")
-	if _, err := g.Handle(nat, seal(t, snap, 0x11, now, 2, 3)); err != nil {
+	if _, err := g.Handle(nat, netip.Addr{}, seal(t, snap, 0x11, now, 2, 3)); err != nil {
 		t.Fatal(err)
 	}
 	if !fw.isOpen("203.0.113.9 udp/443") || !fw.isOpen("203.0.113.9 tcp/443") || fw.isOpen("203.0.113.9 tcp/22") {
 		t.Fatalf("after alice: %v", fw.open)
 	}
 	// Bob behind the same NAT also holds tcp/443.
-	if _, err := g.Handle(nat, seal(t, snap, 0x12, now)); err != nil {
+	if _, err := g.Handle(nat, netip.Addr{}, seal(t, snap, 0x12, now)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -336,7 +336,7 @@ func TestGateForgetsExpired(t *testing.T) {
 	if err := g.Update(snap); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.Handle(netip.MustParseAddr("192.0.2.7"), seal(t, snap, 0x11, now)); err != nil {
+	if _, err := g.Handle(netip.MustParseAddr("192.0.2.7"), netip.Addr{}, seal(t, snap, 0x11, now)); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(11 * time.Minute)
@@ -369,7 +369,7 @@ func TestGateRestoresTable(t *testing.T) {
 	if !slices.Equal(fw.integ, []netip.Prefix{netip.MustParsePrefix("198.51.100.0/28")}) || len(fw.integPorts) != 1 {
 		t.Fatalf("integ %v %v", fw.integ, fw.integPorts)
 	}
-	if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), seal(t, snap, 0x11, now)); err != nil {
+	if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), netip.Addr{}, seal(t, snap, 0x11, now)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -567,35 +567,45 @@ func TestGateACME(t *testing.T) {
 }
 
 func udpPacket(src netip.Addr, payload []byte) []byte {
+	dst := netip.MustParseAddr("203.0.113.1")
+	if !src.Is4() {
+		dst = netip.MustParseAddr("2001:db8::1")
+	}
+	return udpPacketTo(src, dst, payload)
+}
+
+func udpPacketTo(src, dst netip.Addr, payload []byte) []byte {
 	udp := make([]byte, 8+len(payload))
 	binary.BigEndian.PutUint16(udp[4:6], uint16(len(udp)))
 	copy(udp[8:], payload)
 	if src.Is4() {
 		ip := make([]byte, 20)
 		ip[0], ip[9] = 0x45, 17
-		a := src.As4()
+		a, b := src.As4(), dst.As4()
 		copy(ip[12:16], a[:])
+		copy(ip[16:20], b[:])
 		return append(ip, udp...)
 	}
 	ip := make([]byte, 40)
 	ip[0], ip[6] = 0x60, 17
-	a := src.As16()
+	a, b := src.As16(), dst.As16()
 	copy(ip[8:24], a[:])
+	copy(ip[24:40], b[:])
 	return append(ip, udp...)
 }
 
 func TestParseUDP(t *testing.T) {
-	for _, s := range []string{"198.51.100.4", "2001:db8::7"} {
-		src := netip.MustParseAddr(s)
-		got, payload, ok := parseUDP(udpPacket(src, []byte("hello")))
-		if !ok || got != src || string(payload) != "hello" {
-			t.Fatalf("%s: %v %q %v", s, got, payload, ok)
+	for _, s := range [][2]string{{"198.51.100.4", "203.0.113.7"}, {"2001:db8::7", "2001:db8::1"}} {
+		src, dst := netip.MustParseAddr(s[0]), netip.MustParseAddr(s[1])
+		got, to, payload, ok := parseUDP(udpPacketTo(src, dst, []byte("hello")))
+		if !ok || got != src || to != dst || string(payload) != "hello" {
+			t.Fatalf("%s: %v %v %q %v", s, got, to, payload, ok)
 		}
 	}
 	tcp := udpPacket(netip.MustParseAddr("198.51.100.4"), []byte("x"))
 	tcp[9] = 6
 	for _, bad := range [][]byte{nil, {0x45}, tcp, udpPacket(netip.MustParseAddr("198.51.100.4"), nil)[:25]} {
-		if _, _, ok := parseUDP(bad); ok {
+		if _, _, _, ok := parseUDP(bad); ok {
 			t.Fatalf("accepted %x", bad)
 		}
 	}
@@ -604,7 +614,7 @@ func TestParseUDP(t *testing.T) {
 func TestTCPCarrier(t *testing.T) {
 	got := make(chan []byte, 4)
 	c := &TCPCarrier{
-		Handler:     func(_ netip.Addr, pkt []byte) { got <- pkt },
+		Handler:     func(_, _ netip.Addr, pkt []byte) { got <- pkt },
 		LenMax:      func() int { return 160 },
 		Log:         quiet,
 		ReadTimeout: time.Second,
@@ -870,7 +880,7 @@ func TestGateRevocations(t *testing.T) {
 	}
 	knock := func() {
 		t.Helper()
-		if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), seal(t, snap, 0x11, now)); err != nil {
+		if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), netip.Addr{}, seal(t, snap, 0x11, now)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1024,7 +1034,7 @@ func TestGateSharedAddress(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), pkt); err != nil {
+		if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), netip.Addr{}, pkt); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1085,7 +1095,7 @@ func TestGateSharedAddressMore(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = g.Handle(netip.MustParseAddr("203.0.113.9"), pkt)
+		_, err = g.Handle(netip.MustParseAddr("203.0.113.9"), netip.Addr{}, pkt)
 		return err
 	}
 	const udp, tcp = "203.0.113.9 udp/443", "203.0.113.9 tcp/443"
@@ -1161,7 +1171,7 @@ func TestGateExpiredNotDenied(t *testing.T) {
 	if err := g.Update(snap); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), seal(t, snap, 0x11, now)); err != nil {
+	if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), netip.Addr{}, seal(t, snap, 0x11, now)); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Hour)
@@ -1192,7 +1202,7 @@ func TestGateRevokeWhileRestoring(t *testing.T) {
 	if _, err := g.Tick(); err == nil {
 		t.Fatal("a failed restore said nothing")
 	}
-	if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), seal(t, snap, 0x11, now)); err != nil {
+	if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), netip.Addr{}, seal(t, snap, 0x11, now)); err != nil {
 		t.Fatal(err)
 	}
 	fw.failing = map[string]int{"Setup": 100}
@@ -1218,7 +1228,7 @@ func TestGateRevokeWhileRestoring(t *testing.T) {
 	p, _ := paramsOf(snap.Spa)
 	for k, ttl := range map[byte]time.Duration{0x11: time.Hour, 0x22: 10 * time.Second} {
 		pkt, _ := spa.SealRandom(p, [spa.KeySize]byte(key(k)), spa.Request{Time: now, TTL: ttl})
-		if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), pkt); err != nil {
+		if _, err := g.Handle(netip.MustParseAddr("203.0.113.9"), netip.Addr{}, pkt); err != nil {
 			t.Fatal(err)
 		}
 	}

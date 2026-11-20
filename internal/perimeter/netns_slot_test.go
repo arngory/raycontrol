@@ -112,11 +112,11 @@ func TestNetnsSlotChange(t *testing.T) {
 	nflogDone := make(chan struct{})
 	go func() {
 		defer close(nflogDone)
-		err := ReadNFLOG(ctx, group, func(src netip.Addr, pkt []byte) {
+		err := ReadNFLOG(ctx, group, func(src, dst netip.Addr, pkt []byte) {
 			if src != client {
 				return
 			}
-			_, err := gate.Handle(src, pkt)
+			_, err := gate.Handle(src, dst, pkt)
 			select {
 			case granted <- err:
 			default:

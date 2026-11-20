@@ -460,7 +460,7 @@ func cmdServe(args []string) error {
 	go pruneSummary(ctx, sum, log)
 	remote := &api.Remote{Server: srv, Log: log, Perimeter: per, RelayReport: sum.TakeVia}
 	go serveRemote(ctx, remote, srv.Changes)
-	if err := startSubscription(ctx, st, paths, log, sum, remote.RelayProbeUp, *probeDaily, *spaTCP, srv.AppMirror, srv.Notify, srv.SubRequests); err != nil {
+	if err := startSubscription(ctx, st, paths, log, sum, remote.RelayProbeUp, remote.RelaySPA, *probeDaily, *spaTCP, srv.AppMirror, srv.Notify, srv.SubRequests); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
 	log.Info("serving", "socket", *socket, "node", fmt.Sprintf("%x", params.NodeID))
@@ -946,7 +946,7 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 // startSubscription serves the subscription endpoint on the port of the
 // subscription service, if it is enabled. changed wakes apply: a device's
 // LAN consent changed (lan-v1 §1.1).
-func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, sum *summary.Collector, relayProbe func(string) bool, probeDailyMiB int, tcpCarrier bool, app *appmirror.Mirror, changed func(), requests *sub.Requests) error {
+func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, sum *summary.Collector, relayProbe func(string) bool, relaySPA func(string) []int, probeDailyMiB int, tcpCarrier bool, app *appmirror.Mirror, changed func(), requests *sub.Requests) error {
 	svc, err := st.ServiceByName(ctx, provision.SubscriptionService)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !svc.Enabled) {
 		log.Info("subscription service disabled")
@@ -971,7 +971,7 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 	if err != nil {
 		return err
 	}
-	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier, RelayProbe: relayProbe,
+	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier, RelayProbe: relayProbe, RelaySPA: relaySPA,
 		ClockSeqAfter: time.Now().Add(settleAfterStart), PinsSince: processStart, PinsAfter: time.Now().Add(pinSettle), App: app, Changed: changed,
 		Requests: requests}
 	port := int(ports[0].Num)

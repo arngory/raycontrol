@@ -107,7 +107,7 @@ func probe(ctx context.Context, args []string) error {
 	for _, c := range carriers {
 		start := time.Now()
 		port := params.Port(params.Slot(start))
-		pkt, err := spa.SealRandom(params, key, spa.Request{Time: start})
+		pkt, err := spa.SealRandom(params, key, knockFor(b, ip, start, 0))
 		if err != nil {
 			return err
 		}
@@ -320,13 +320,14 @@ func argToken(text string) string {
 
 // nodeAddr is where rayctl knocks and connects for a bundle, and the name
 // it sends as SNI there (spec/names-v1.md §5). override (-addr) first, as
-// it is. Else the node's name, resolved once: its address when it is one
-// of the node's (a knock sent to an address DNS alone gave could be
-// replayed at the node by whoever gave it, spa-v2 §9), the node's first
-// address when it is not or does not resolve. A bundle before names-v1,
-// or one with no address of the node (its host is a name): its host, as
-// before. warn tells the operator DNS gave another address; nil prints it
-// to stderr.
+// it is. Else the node's name, resolved once. With SPA v2 only, its
+// address when it is one of the node's (a knock sent to an address DNS
+// alone gave could be replayed at the node by whoever gave it, spa-v2
+// §9), the node's first address when it is not or does not resolve. With
+// v3 (spa-v3 §6), whatever DNS gave first: a v3 packet names the address
+// and opens nothing elsewhere. A bundle before names-v1, or one with no
+// address of the node (its host is a name): its host, as before. warn
+// tells the operator DNS gave another address; nil prints it to stderr.
 func nodeAddr(ctx context.Context, b node.Bundle, override string, warn func(string)) (netip.Addr, string, error) {
 	if override != "" {
 		ip, err := resolve(ctx, override)
@@ -345,6 +346,9 @@ func nodeAddr(ctx context.Context, b node.Bundle, override string, warn func(str
 	rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	ips, err := net.DefaultResolver.LookupNetIP(rctx, "ip", b.DNSName)
+	if spaV3(b) && len(ips) > 0 {
+		return ips[0].Unmap().WithZone(""), b.DNSName, nil
+	}
 	for _, ip := range ips {
 		if slices.Contains(known, ip.Unmap()) {
 			return ip.Unmap(), b.DNSName, nil
@@ -359,6 +363,36 @@ func nodeAddr(ctx context.Context, b node.Bundle, override string, warn func(str
 		}
 	}
 	return known[0], b.DNSName, nil
+}
+
+// spaV3 reports whether the bundle's node takes SPA v3 (spa-v3 §5).
+func spaV3(b node.Bundle) bool { return slices.Contains(b.SPA.Versions, 3) }
+
+// knockFor is the SPA request for a knock sent to ip at t: v3, naming ip,
+// when the node takes it.
+func knockFor(b node.Bundle, ip netip.Addr, t time.Time, ttl time.Duration) spa.Request {
+	req := spa.Request{Time: t, TTL: ttl}
+	if spaV3(b) {
+		req.Dst = ip
+	}
+	return req
+}
+
+// knownAddr reports whether ip is an address of the node the bundle
+// names, not one DNS alone gave: a v2 knock may go there (spa-v3 §6).
+func knownAddr(b node.Bundle, ip netip.Addr, override string) bool {
+	if override != "" {
+		return true // the operator's own word
+	}
+	if h, err := netip.ParseAddr(b.Host); err == nil && h.Unmap() == ip {
+		return true
+	}
+	for _, a := range b.Addrs {
+		if k, err := netip.ParseAddr(a); err == nil && k.Unmap() == ip {
+			return true
+		}
+	}
+	return false
 }
 
 func resolve(ctx context.Context, host string) (netip.Addr, error) {
