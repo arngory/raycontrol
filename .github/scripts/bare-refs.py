@@ -1,8 +1,8 @@
-"""Bare issue references in the commits a change brings (CONTRIBUTING.md, «Сообщения коммитов»).
+"""Bare issue references in the commits a change brings (CONTRIBUTING.md, "Commit messages").
 
 GitHub links a bare #N in a commit message to an issue, and in a fork with its issues off to the parent's: Niko's
 commits on its task 148 showed up in MatsuriDayo/NekoBoxForAndroid's issue 148. owner/repo#N links where it says,
-and «задача N» links nowhere.
+and "task N" links nowhere.
 
 Usage: bare-refs.py [--first-parent] BASE HEAD (the commits of BASE..HEAD), the pull request's title and description
 in PR_TITLE and PR_BODY if set (a squash merge makes its commit of them). --first-parent takes the commits of the
@@ -53,7 +53,7 @@ def main():
     for line in found:
         print(line)
     if found:
-        print("bare references: write owner/repo#N, or «задача N» (CONTRIBUTING.md)", file=sys.stderr)
+        print("bare references: write owner/repo#N, or task N (CONTRIBUTING.md)", file=sys.stderr)
         sys.exit(1)
 
 
