@@ -53,13 +53,16 @@ func TestInvite3Vectors(t *testing.T) {
 func TestInvite3Refused(t *testing.T) {
 	b := invite2Bundle("node.example.com", false)
 	b.DNSName = "k3f.example.com"
-	if _, err := b.EncodeInvite3(); err == nil {
-		t.Fatal("a name with a host that is a name encoded")
+	if s, err := b.EncodeInvite3(); err == nil || s != "" {
+		t.Fatalf("a name with a host that is a name encoded: %q (%v)", s, err)
 	}
 	b = invite2Bundle("203.0.113.7", false)
-	b.DNSName = "bad name"
-	if _, err := b.EncodeInvite3(); err == nil {
-		t.Fatal("a bad name encoded")
+	// A name that is no name, or one a client would take for an address.
+	for _, name := range []string{"bad name", "198.51.100.99", "k3f.example.123", "1234"} {
+		b.DNSName = name
+		if s, err := b.EncodeInvite3(); err == nil || s != "" {
+			t.Errorf("name %q encoded: %q (%v)", name, s, err)
+		}
 	}
 	b.DNSName = "k3f.example.com"
 	good, err := b.EncodeInvite3()
@@ -77,6 +80,15 @@ func TestInvite3Refused(t *testing.T) {
 	bad["version 2 under RCINV3"] = b2
 	bad["byte left over"] = append(append([]byte(nil), raw...), 0)
 	bad["cut short"] = raw[:len(raw)-1]
+	// the name k3f.example.com (after the version, the flags, the 4 bytes of
+	// the host and the name's length) as a name of the same length that
+	// looks like an address
+	b3 := append([]byte(nil), raw...)
+	if string(raw[2+4+1:2+4+1+15]) != "k3f.example.com" {
+		t.Fatalf("the name is not where the layout puts it: %q", raw[2+4+1:2+4+1+15])
+	}
+	copy(b3[2+4+1:], "198.51.100.9999")
+	bad["a name like an address"] = b3
 	for what, r := range bad {
 		if _, err := DecodeInvite(enc(r)); err == nil {
 			t.Errorf("%s: taken", what)

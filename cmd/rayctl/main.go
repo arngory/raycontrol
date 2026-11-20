@@ -139,7 +139,8 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             a one-time invite: the client registers the device itself
                                             through the remote API (service add api api); rcinv2 is
                                             the short form (QR half the size, Niko 1.35 or later),
-                                            rcinv1 for older Niko. -allow, billing and support only:
+                                            rcinv3 the same by the node's name, with SPA v3 (Niko 1.63
+                                            or later), rcinv1 for older Niko. -allow, billing and support only:
                                             the integration's server calls from these without a knock
   device allow ID ADDR[,ADDR...] | -clear   an integration's device calls from these addresses (IPv4
                                             /28-/32, IPv6 /64-/128, at most 8) without a knock, and
@@ -1289,7 +1290,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		showQR := fs.Bool("qr", false, "draw the invite as a QR code on the screen for the phone to scan, instead of the text")
 		withPIN := fs.Bool("pin", false, "the invite also needs a PIN of 6 digits, shown here once: tell it by another channel")
 		allow := fs.String("allow", "", "billing or support: the integration server's addresses, comma-separated (IPv4 /28-/32, IPv6 /64-/128): it registers and calls from them without a knock")
-		format := fs.String("format", "rcinv2", "rcinv3: by the node's name, with SPA v3 (Niko 1.62 or later); rcinv2: the short form, a QR half the size (Niko 1.35 or later); rcinv1 for older Niko")
+		format := fs.String("format", "rcinv2", "rcinv3: by the node's name, with SPA v3 (Niko 1.63 or later); rcinv2: the short form, a QR half the size (Niko 1.35 or later); rcinv1 for older Niko")
 		if err := need(args, 2); err != nil {
 			return err
 		}
