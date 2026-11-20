@@ -322,24 +322,196 @@ func TestManagerOneBrokenRelay(t *testing.T) {
 	}
 }
 
-// At most maxOrders orders a site a check, whatever fails: three broken
-// relays, then the next ones.
-func TestManagerRelayOrdersBounded(t *testing.T) {
-	ctx, _, m, _ := relayManager(t, func() []RelayName {
-		return orderable("aaa.example.com", "bbb.example.com", "ccc.example.com", "ddd.example.com")
-	}, nil)
-	orders := 0
-	inner := failsFor("aaa.example.com", "bbb.example.com", "ccc.example.com")
+// clocked has the manager's orders fail for the names among bad (as
+// failsFor), and the certificates it stores stamped with *clock, 90 days
+// long; it returns the orders made, failed ones marked "FAILED" first.
+func clocked(m *Manager, clock *time.Time, bad ...string) *[][]string {
+	issued := &[][]string{}
+	fail := failsFor(bad...)
 	m.Issue = func(_ context.Context, names []string, key crypto.Signer) ([][]byte, error) {
-		orders++
-		if err := inner(names); err != nil {
+		if err := fail(names); err != nil {
+			*issued = append(*issued, append([]string{"FAILED"}, names...))
 			return nil, err
 		}
-		return nil, errors.New("no more")
+		*issued = append(*issued, names)
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: names, NotBefore: clock.Add(-time.Hour), NotAfter: clock.Add(90 * day)}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
+		return [][]byte{der}, err
 	}
-	m.Once(ctx, time.Now())
-	if orders != maxOrders {
-		t.Fatalf("%d orders in one check", orders)
+	return issued
+}
+
+// At most maxOrders orders a site a check, whatever fails, and the last
+// is the site's names in use alone: three broken relays and a good one, the
+// site gets its certificate.
+func TestManagerRelayOrdersBounded(t *testing.T) {
+	ctx, st, m, _ := relayManager(t, func() []RelayName {
+		return orderable("aaa.example.com", "bbb.example.com", "ccc.example.com", "ddd.example.com")
+	}, nil)
+	now := time.Now()
+	issued := clocked(m, &now, "aaa.example.com", "bbb.example.com", "ccc.example.com")
+	site, _ := st.ServiceByName(ctx, "site")
+	if n := m.Once(ctx, now); n != 1 || len(*issued) != maxOrders || !slices.Equal((*issued)[maxOrders-1], []string{provision.SiteName(site)}) ||
+		m.fails["site"] != 0 {
+		t.Fatalf("stored %d, orders %v, site fails %d", n, *issued, m.fails["site"])
+	}
+}
+
+// Review: three relays whose validation fails (port 80 closed at their
+// provider, feeds open, names resolving) took every order of each check,
+// one relay found an order; the site's names in use were never ordered
+// alone, the relays' failures counted as the site's, and the certificate
+// expired. Now the last order of a due check is the names in use alone.
+func TestManagerThreeBrokenRelays(t *testing.T) {
+	var relay []string
+	bad := []string{"aaa.example.com", "bbb.example.com", "ccc.example.com"}
+	ctx, st, m, _ := relayManager(t, func() []RelayName { return orderable(relay...) }, nil)
+	start := time.Now()
+	clock := start
+	issued := clocked(m, &clock, bad...)
+	if n := m.Once(ctx, clock); n != 1 {
+		t.Fatalf("first: %v", *issued)
+	}
+	relay = bad
+	site, _ := st.ServiceByName(ctx, "site")
+	own := provision.SiteName(site)
+	renewed := false
+	for clock.Before(start.Add(95 * day)) {
+		clock = clock.Add(m.wait(time.Hour, clock))
+		m.Once(ctx, clock)
+		if last := (*issued)[len(*issued)-1]; len(*issued) > 1 && slices.Equal(last, []string{own}) {
+			renewed = true
+			break
+		}
+	}
+	if !renewed || m.fails["site"] != 0 {
+		t.Errorf("the site's certificate not renewed in 95 days: %d orders, last %v, site fails %d, relay fails %v",
+			len(*issued), (*issued)[len(*issued)-1], m.fails["site"], m.relayFails)
+	}
+}
+
+// Review: one broken relay and a next name the CA refuses: before the
+// relays' names the renewal fell back to the names in use, and with them
+// it did not. Now it does, in the check's last order.
+func TestManagerBrokenRelayAndNextName(t *testing.T) {
+	var relay []string
+	nextName := "nxt.example.com"
+	ctx, st, m, _ := relayManager(t, func() []RelayName { return orderable(relay...) }, nil)
+	start := time.Now()
+	clock := start
+	issued := clocked(m, &clock, "aaa.example.com", nextName)
+	if n := m.Once(ctx, clock); n != 1 {
+		t.Fatalf("first: %v", *issued)
+	}
+	r, _ := st.ServiceByName(ctx, "r")
+	if err := st.UpdateService(ctx, r.ID, store.ServiceUpdate{Settings: strings.Replace(r.Settings, "{", `{"sni_next":"`+nextName+`",`, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	site, _ := st.ServiceByName(ctx, "site")
+	all, _ := st.ListServices(ctx)
+	names, next := provision.SiteNames(site, all)
+	if !slices.Contains(next, nextName) {
+		t.Fatalf("next %v", next)
+	}
+	relay = []string{"aaa.example.com", "bbb.example.com"}
+	before := len(*issued)
+	clock = start.Add(61 * day) // due for renewal
+	if n := m.Once(ctx, clock); n != 1 || len(*issued)-before != maxOrders || !slices.Equal((*issued)[len(*issued)-1], names) {
+		t.Fatalf("the renewal: stored %d, orders %v", n, (*issued)[before:])
+	}
+	if m.fails["site"] != 0 {
+		t.Fatalf("site fails %d", m.fails["site"])
+	}
+}
+
+// Review: a relay that never comes back does not hold a renewal past the
+// hold: the certificate is renewed without its name.
+func TestManagerHoldEnds(t *testing.T) {
+	back := true
+	ctx, _, m, issued := relayManager(t, func() []RelayName {
+		names := orderable("abc.example.com")
+		names[0].Orderable = back
+		return names
+	}, func([]string) error { return nil })
+	now := time.Now()
+	m.Once(ctx, now)
+	back = false
+	renew := now.Add(70 * day)
+	m.RelayHoldUntil = renew.Add(2 * time.Minute)
+	if n := m.Once(ctx, renew); n != 0 {
+		t.Fatalf("held: %d", n)
+	}
+	if n := m.Once(ctx, renew.Add(2*time.Minute)); n != 1 || slices.Contains((*issued)[len(*issued)-1], "abc.example.com") {
+		t.Fatalf("after the hold, the relay gone: stored %d, issued %v", n, *issued)
+	}
+}
+
+// Three broken relays and a good one whose name the certificate has, over
+// a hundred days: the site never expires nor fails; when a renewal's last
+// order drops the good relay's name, the next check or the one after
+// orders it again (it is in no back-off); the orders stay bounded, at
+// most maxOrders a check.
+func TestManagerBrokenRelaysKeepGoodOne(t *testing.T) {
+	good := "ggg.example.com"
+	bad := []string{"aaa.example.com", "bbb.example.com", "ccc.example.com"}
+	relay := []string{good}
+	ctx, st, m, _ := relayManager(t, func() []RelayName { return orderable(relay...) }, nil)
+	start := time.Now()
+	clock := start
+	issued := clocked(m, &clock, bad...)
+	if n := m.Once(ctx, clock); n != 1 {
+		t.Fatalf("first: %v", *issued)
+	}
+	relay = append([]string{good}, bad...)
+	site, _ := st.ServiceByName(ctx, "site")
+	leaf := func() *x509.Certificate {
+		secrets, _ := st.ServiceSecrets(ctx, site.ID)
+		return leafOf(secrets[provision.SecretTLSChain])
+	}
+	checks, missing, dropped := 0, 0, 0
+	for clock.Before(start.Add(100 * day)) {
+		clock = clock.Add(m.wait(time.Hour, clock))
+		// The renewal comes with the broken relays out of their back-off
+		// (it may as well): they take the first orders, and the last is
+		// the names in use alone.
+		if !clock.Before(RenewAt(leaf())) {
+			clear(m.relayNext)
+		}
+		before := len(*issued)
+		m.Once(ctx, clock)
+		checks++
+		if n := len(*issued) - before; n > maxOrders {
+			t.Fatalf("%v: %d orders in one check", clock.Sub(start), n)
+		}
+		l := leaf()
+		if !clock.Before(l.NotAfter) {
+			t.Fatalf("%v: the certificate expired", clock.Sub(start))
+		}
+		if l.VerifyHostname(good) != nil {
+			if missing == 0 {
+				dropped++
+			}
+			missing++
+			if missing > 2 {
+				t.Fatalf("%v: the good relay's name out of the certificate for %d checks", clock.Sub(start), missing)
+			}
+		} else {
+			missing = 0
+		}
+	}
+	if m.fails["site"] != 0 || m.relayFails["r-ggg"] != 0 {
+		t.Fatalf("site fails %d, relay fails %v", m.fails["site"], m.relayFails)
+	}
+	// The renewal with the broken relays out of their back-off dropped it,
+	// and the check after took it back.
+	if dropped == 0 {
+		t.Fatal("no renewal dropped the good relay's name: the case is not tested")
+	}
+	t.Logf("%d orders in %d checks, the good relay's name dropped %d times", len(*issued), checks, dropped)
+	// About three failed orders a day once the broken relays wait a day,
+	// besides the renewals.
+	if len(*issued) > 4*100 {
+		t.Fatalf("%d orders in %d checks over 100 days", len(*issued), checks)
 	}
 }
 

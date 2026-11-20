@@ -183,3 +183,105 @@ func TestRelayACMEPortNoCertificates(t *testing.T) {
 		t.Fatalf("TCP 80 on a node without certificates: %v", r.Ports)
 	}
 }
+
+// Review: the count of a relay's open feeds across a reconnect (a new
+// rayspa feed ends the old one), and a downgrade to a rayspa that says no.
+// Right before this round too: it guards the count.
+func TestRelayACMEFeedCount(t *testing.T) {
+	srv, sock, _ := startServerWith(t, func(s *Server) []func() (string, http.Handler) {
+		s.Certificates = true
+		return nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := provision.Init(ctx, srv.Store, provision.Options{Host: "203.0.113.7"}); err != nil {
+		t.Fatal(err)
+	}
+	c := NewUnixClient(sock)
+	for _, s := range []*nodev1.CreateServiceRequest{{Kind: "api", Name: "api"}, {Kind: "reality", Name: "reality"}} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(s)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r1", Address: "198.51.100.20"})); err != nil {
+		t.Fatal(err)
+	}
+	r, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.2.7"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := node.DecodeRelayBundle(r.Bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := DecodeClientCertificate([]byte(bundle.Cert))
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr, _ := serveRemoteFrom(t, srv, "198.51.100.20:40000")
+	open := func(said bool) *connect.ServerStreamForClient[perimeterv1.WatchRelayResponse] {
+		feed := perimeterv1connect.NewRelayServiceClient(remoteHTTP(bundle.API.Pin, cert), "https://"+addr)
+		s, err := feed.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{AcmeForward: said}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !s.Receive() {
+			t.Fatal(s.Err())
+		}
+		return s
+	}
+	settle := func(wantSaid, wantOpen bool, what string) {
+		t.Helper()
+		for end := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			said, o := srv.RelayACMEForward("r1")
+			if said == wantSaid && o == wantOpen {
+				srv.mu.Lock()
+				t.Logf("%s: %+v", what, srv.relayACME["r1"])
+				srv.mu.Unlock()
+				return
+			}
+			if time.Now().After(end) {
+				t.Fatalf("%s: said %v open %v, want %v %v", what, said, o, wantSaid, wantOpen)
+			}
+		}
+	}
+	a := open(true)
+	settle(true, true, "one feed")
+	b := open(true) // ends a
+	time.Sleep(300 * time.Millisecond)
+	settle(true, true, "reconnected, the old one ended")
+	a.Close()
+	time.Sleep(200 * time.Millisecond)
+	settle(true, true, "the old one closed by its client too")
+	b.Close()
+	settle(true, false, "all closed")
+	// A downgrade: the new rayspa says nothing while the old feed is open.
+	a = open(true)
+	settle(true, true, "again")
+	d := open(false)
+	time.Sleep(300 * time.Millisecond)
+	settle(false, false, "an older rayspa now")
+	d.Close()
+	a.Close()
+	settle(false, false, "closed")
+}
+
+// A downgrade's overlap (review 2): the older rayspa's feed says no while
+// the newer one's has not ended yet. The relay forwards TCP 80 no more from
+// that word on, not once the newer feed ends.
+func TestRelayACMEDowngradeOverlap(t *testing.T) {
+	srv := &Server{}
+	newer := srv.relayACMEFeed("r1", true)
+	if said, open := srv.RelayACMEForward("r1"); !said || !open {
+		t.Fatalf("the newer rayspa: %v %v", said, open)
+	}
+	older := srv.relayACMEFeed("r1", false)
+	if said, open := srv.RelayACMEForward("r1"); said || open {
+		t.Fatalf("the older rayspa's word, the newer feed still open: said %v, forwards %v", said, open)
+	}
+	newer()
+	older()
+	if said, open := srv.RelayACMEForward("r1"); said || open {
+		t.Fatalf("both feeds ended: %v %v", said, open)
+	}
+}

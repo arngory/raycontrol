@@ -325,49 +325,11 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 				"until", m.RelayHoldUntil)
 			continue
 		}
-		order := func(relay []string) []string {
-			want := append(slices.Clone(own), relay...)
-			if wildcard != "" && provision.UnderWildcard(want, wildcard) {
-				return []string{"*." + wildcard}
-			}
-			return want
-		}
-		// At most maxOrders a site a check: with the relays' names, again
-		// without those of the relays that failed (the others kept), and
-		// without any relay's or without the next names.
-		orders := 1
-		err = m.issue(ctx, svc, order(relay), now)
-		for len(relay) > 0 && err != nil && !errors.Is(err, provision.ErrSiteChanged) && orders < maxOrders {
-			failed := m.relaysFailed(svc.Name, candidates, relay, err, now)
-			kept := slices.DeleteFunc(slices.Clone(relay), func(n string) bool { return slices.Contains(failed, n) })
-			if len(failed) == 0 {
-				kept = nil // no relay's fault: the site's own names alone
-			}
-			m.log().Warn("certificate with the relays' names not issued, ordering again without them", "service", svc.Name,
-				"relay_names", len(relay), "left_out", len(relay)-len(kept), "err", logErr(err, relay))
-			relay = kept
-			// What the site has does for what is left: no order.
-			if !due(chain, append(slices.Clone(own), relay...), now) && !rotate {
-				err, orders = nil, 0
-				break
-			}
-			err = m.issue(ctx, svc, order(relay), now)
-			orders++
-		}
-		if len(relay) > 0 && err != nil && !errors.Is(err, provision.ErrSiteChanged) {
-			m.relaysFailed(svc.Name, candidates, relay, err, now)
-		}
-		if orders == 0 {
-			continue // the relays' names failed; the site's certificate does
-		}
-		if err == nil && len(relay) > 0 {
-			m.relaysIn(svc.Name, candidates, relay)
-		}
-		wild := wildcard != "" && provision.UnderWildcard(own, wildcard)
-		if err != nil && !errors.Is(err, provision.ErrSiteChanged) && len(next) > 0 && len(relay) == 0 && orders < maxOrders &&
-			!wild && (rotate || due(chain, names, now)) {
-			m.log().Warn("certificate with the next name not issued, renewing without it", "service", svc.Name, "err", err)
-			err = m.issue(ctx, svc, names, now)
+		plan := sitePlan{names: names, next: next, relay: relay, wildcard: wildcard, chain: chain, rotate: rotate,
+			renew: rotate || due(chain, names, now)}
+		ordered, err := m.orderSite(svc.Name, candidates, plan, func(names []string) error { return m.issue(ctx, svc, names, now) }, now)
+		if err == nil && !ordered {
+			continue // only the relays' names failed, and the site's certificate does
 		}
 		if errors.Is(err, provision.ErrSiteChanged) {
 			// The operator's certificate came during the order: theirs
@@ -377,15 +339,17 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 			m.Wake()
 			continue
 		}
+		// The site's own failure only (orderSite): the relays' wait out
+		// their own back-off.
 		if m.Report != nil {
-			m.Report(svc.Name, logErr(err, relay))
+			m.Report(svc.Name, err)
 		}
 		if err != nil {
 			m.fails[svc.Name]++
 			wait := backoff(m.fails[svc.Name])
 			m.next[svc.Name] = now.Add(wait)
 			m.last[svc.Name] = now
-			m.log().Warn("certificate not issued, retrying later", "service", svc.Name, "in", wait, "err", logErr(err, relay))
+			m.log().Warn("certificate not issued, retrying later", "service", svc.Name, "in", wait, "err", err)
 			continue
 		}
 		delete(m.fails, svc.Name)
@@ -411,6 +375,84 @@ const MaxNames = 100
 // ErrTooManyNames is the report of a relay's name left out of an order
 // for MaxNames.
 var ErrTooManyNames = fmt.Errorf("the site's certificate has room for %d names, the site's own first", MaxNames)
+
+// sitePlan is what a site's orders of one check may take: the names in
+// use, those it moves to (next), the relays' names (relay), the domain of
+// a wildcard ("" none), its certificate (chain), and whether the names in
+// use are to be ordered whatever the rest does (renew: they are due, or
+// the operator asked for another key).
+type sitePlan struct {
+	names, next, relay []string
+	wildcard           string
+	chain              []byte
+	rotate, renew      bool
+}
+
+// orderSite makes a site's orders of one check, maxOrders at most, through
+// issue, and reports whether one stored a certificate (ordered) and the
+// failure that is the site's: nil when one stored, or when only relays'
+// names failed (NamesError) and what the site has does for the rest.
+//
+// The first order takes every name; after a failure, the next order goes
+// without the relays whose names the CA or the DNS check refused (each in
+// its back-off, the other relays' names kept), else without the next
+// names when the order had them (their failure is the site's, as before
+// the relays' names), else without any relay's name. When renew, the last
+// order the bound allows takes the names in use alone: whatever the
+// relays' names and the next ones do, the site renews. A good relay's
+// name dropped so is in no back-off: the next check, the certificate
+// without it, orders it again.
+func (m *Manager) orderSite(site string, candidates []RelayName, p sitePlan, issue func([]string) error,
+	now time.Time) (ordered bool, err error) {
+	useNext, relay := len(p.next) > 0, p.relay
+	var last []string
+	for i := 1; i <= maxOrders; i++ {
+		want, inOrder := slices.Clone(p.names), relay
+		if i == maxOrders && p.renew {
+			inOrder = nil // the last order: the names in use alone
+		} else if useNext {
+			want = append(want, p.next...)
+		}
+		want = append(want, inOrder...)
+		// What the site has does for what is left: no order.
+		if i > 1 && !p.rotate && !due(p.chain, want, now) {
+			break
+		}
+		if p.wildcard != "" && provision.UnderWildcard(want, p.wildcard) {
+			want = []string{"*." + p.wildcard}
+		}
+		if slices.Equal(want, last) {
+			break // the same order again
+		}
+		last = want
+		switch e := issue(want); {
+		case e == nil:
+			if len(inOrder) > 0 {
+				m.relaysIn(site, candidates, inOrder)
+			}
+			return true, nil
+		case errors.Is(e, provision.ErrSiteChanged):
+			return false, e
+		default:
+			if failed := m.relaysFailed(site, candidates, inOrder, e, now); len(failed) > 0 {
+				relay = slices.DeleteFunc(slices.Clone(relay), func(n string) bool { return slices.Contains(failed, n) })
+				m.log().Warn("certificate with the relays' names not issued, ordering again without those that failed", "service", site,
+					"relay_names", len(inOrder), "left_out", len(failed), "err", logErr(e, inOrder))
+				continue
+			}
+			err = e // not a relay's: the site's, unless an order after it stores
+			switch {
+			case useNext && i < maxOrders:
+				useNext = false
+				m.log().Warn("certificate with the next name not issued, renewing without it", "service", site, "err", e)
+			case len(relay) > 0 && i < maxOrders:
+				relay = nil
+				m.log().Warn("certificate not issued, ordering again without the relays' names", "service", site, "err", e)
+			}
+		}
+	}
+	return false, err
+}
 
 // RelayName is a relay's name for a site's certificate (Manager.RelayNames).
 // Orderable: it may go into an order now, its relay forwarding TCP 80 to

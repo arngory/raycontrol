@@ -209,20 +209,25 @@ func (s *Server) setRelayACME(name string, change func(*relayACMEState)) {
 	change(&st)
 	s.relayACME[name] = st
 	s.mu.Unlock()
-	if st.said != was.said || (st.open > 0) != (was.open > 0) {
+	if st.said != was.said || st.forwards() != was.forwards() {
 		s.notify()
 	}
 }
 
+// forwards: a feed that said yes is open, and the last word is yes. A
+// rayspa put back to an older one says nothing while the newer one's feed
+// still ends: from its word on, none forwards.
+func (st relayACMEState) forwards() bool { return st.said && st.open > 0 }
+
 // RelayACMEForward reports what a relay's rayspa said of TCP 80 for the
 // ACME windows when its last feed opened since this node started (said),
-// and whether a feed of it that said yes is open now (open): the relay
-// forwards TCP 80 for a window only then (relay-names-v1 §6).
+// and whether it forwards it now (open): a feed of it that said yes is
+// open and the last word is yes (relay-names-v1 §6).
 func (s *Server) RelayACMEForward(name string) (said, open bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.relayACME[name]
-	return st.said, st.open > 0
+	return st.said, st.forwards()
 }
 
 func (s *Server) acmeWindow() (uint16, time.Time) {

@@ -89,7 +89,13 @@ func TestRelayNamesFor(t *testing.T) {
 	if why := reason(); !strings.Contains(why, "no feed open") || orderable("site") != nil {
 		t.Fatalf("a feed gone: %q, to order %v", why, orderable("site"))
 	}
-	open = true
+	// A downgrade's overlap: the older rayspa said no, the newer one's
+	// feed not ended yet. Not orderable.
+	said, open = false, true
+	if got := orderable("site"); got != nil {
+		t.Fatalf("an open feed under an older rayspa's word: to order %v", got)
+	}
+	said = true
 	if why := reason(); !strings.Contains(why, "waiting for the certificate of site") || woken != 1 {
 		t.Fatalf("waiting: %q, woken %d", why, woken)
 	}

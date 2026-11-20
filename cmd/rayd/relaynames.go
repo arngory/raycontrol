@@ -134,11 +134,13 @@ func (c *relayNameCheck) RelayNamesFor(ctx context.Context, site string) []certs
 		if i < 0 || provision.SiteOf(all[i]) != site {
 			continue
 		}
-		_, open := c.forwards(rn.Relay)
+		// Both: during a downgrade's overlap the older rayspa has said no
+		// while the newer one's feed is still open.
+		said, open := c.forwards(rn.Relay)
 		c.mu.Lock()
 		resolves := c.state[rn.Name].resolves
 		c.mu.Unlock()
-		out = append(out, certs.RelayName{Relay: rn.Relay, Name: rn.Name, Orderable: open && resolves})
+		out = append(out, certs.RelayName{Relay: rn.Relay, Name: rn.Name, Orderable: said && open && resolves})
 	}
 	return out
 }
