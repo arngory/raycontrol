@@ -202,6 +202,7 @@ var relayPortAccess = map[string]string{
 	"spa":      "after the knock",
 	"admin":    "the relay's admin addresses; after the knock for SSH devices",
 	"acme":     "everyone, while the exit orders a certificate with the relay's names (up to 3 minutes)",
+	"acme-old": "not forwarded yet: the relay's rayspa has not said it forwards it (before v0.35.0, or not connected since the exit started)",
 }
 
 // printRelayPorts is a relay's ports as rayctl ports has the node's: what

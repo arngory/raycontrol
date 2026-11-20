@@ -28,8 +28,8 @@ func (f *fakeResolver) lookup(_ context.Context, network, host string) ([]netip.
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.asked++
-	if network != "ip4" {
-		return nil, errors.New("not ip4")
+	if network != "ip" {
+		return nil, errors.New("not both families")
 	}
 	a, ok := f.answers[host]
 	if !ok {
@@ -125,6 +125,12 @@ func TestRelayNamesReady(t *testing.T) {
 	check()
 	if c.Ready(naive) {
 		t.Fatal("naive's name with the exit's address beside the relay's")
+	}
+	// A stray AAAA (the wildcard's, of an exit with IPv6): not ready.
+	res.set(naive, "198.51.100.20", "2001:db8::7")
+	check()
+	if ready, why := c.Status(naive); ready || !strings.Contains(why, "2001:db8::7") {
+		t.Fatalf("naive's name with an AAAA beside the relay's address: %v %q", ready, why)
 	}
 	res.set(naive, "198.51.100.20")
 	check()

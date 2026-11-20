@@ -24,22 +24,29 @@ const relayNamesEvery = 5 * time.Minute
 // relayNameLookup bounds one name's lookup.
 const relayNameLookup = 10 * time.Second
 
+// relayFeedsBack is how long after rayd's start the relays' rayspa feeds
+// have to come back (certs.Manager.RelayHoldUntil): rayspa tries again
+// within 30 seconds at most (its back-off), and a relay's names resolve at
+// the check that runs at the start. A certificate expiring within certs.RelayHoldMargin does not wait.
+const relayFeedsBack = 2 * time.Minute
+
 // relayNameCheck keeps which relays' names clients may be given
 // (spec/relay-names-v1.md §4, §5): those that resolve to the relay's
 // address alone and the certificate of the service's site covers. Before
 // its record answers, the wildcard gives a name the exit's address, and a
 // client would knock at the exit with the relay's key, in vain. Without a
 // DNS provider it also says which names the site's next certificate takes
-// (ToOrder, §6), and why one is not in it yet.
+// (RelayNamesFor, §6), and why one is not in it yet.
 type relayNameCheck struct {
 	st *store.Store
-	// lookup resolves a name ("ip4": relays are IPv4): the system's
-	// resolver, a test's own.
+	// lookup resolves a name ("ip": both families, the relay's IPv4
+	// alone): the system's resolver, a test's own.
 	lookup func(ctx context.Context, network, host string) ([]netip.Addr, error)
 	wake   chan struct{}
-	// acmeForward reports a relay whose rayspa forwards TCP 80 for the
-	// ACME windows (api.Server.RelayACMEForward); nil: none does.
-	acmeForward func(relay string) bool
+	// acmeForward says of a relay whether its rayspa said it forwards TCP
+	// 80 for the ACME windows, and whether a feed of it that said so is
+	// open now (api.Server.RelayACMEForward); nil: none does.
+	acmeForward func(relay string) (said, open bool)
 	// ordering: rayd orders the sites' certificates (-acme-directory).
 	// resolved, if set, runs when a name the certificate does not cover
 	// yet comes to resolve to its relay: the manager may order it now.
@@ -103,11 +110,13 @@ func (c *relayNameCheck) Ordered(_ string, names []string, err error) {
 	}
 }
 
-// ToOrder are the relays' names a site's next certificate takes
-// (certs.Manager.RelayNames, §5, §6): without a DNS provider, those of
-// relays whose rayspa forwards TCP 80 for the window and that resolved to
-// their relay alone at the last check; by relay, then service.
-func (c *relayNameCheck) ToOrder(ctx context.Context, site string) []string {
+// RelayNamesFor are the relays' names of a site's services, for its
+// certificate's orders (certs.Manager.RelayNames, §5, §6), by relay, then
+// service; none with a DNS provider, whose wildcard covers them. One is
+// orderable while its relay's rayspa has a feed open that said it forwards
+// TCP 80 for the window, and it resolved to its relay alone at the last
+// check: through a relay whose feed is gone the window would not reach it.
+func (c *relayNameCheck) RelayNamesFor(ctx context.Context, site string) []certs.RelayName {
 	if cf, _, err := provision.Cloudflare(ctx, c.st); err != nil || cf != nil {
 		return nil
 	}
@@ -119,20 +128,27 @@ func (c *relayNameCheck) ToOrder(ctx context.Context, site string) []string {
 	if err != nil {
 		return nil
 	}
-	var out []string
+	var out []certs.RelayName
 	for _, rn := range names {
 		i := slices.IndexFunc(all, func(s store.Service) bool { return s.ID == rn.Service })
-		if i < 0 || provision.SiteOf(all[i]) != site || c.acmeForward == nil || !c.acmeForward(rn.Relay) {
+		if i < 0 || provision.SiteOf(all[i]) != site {
 			continue
 		}
+		_, open := c.forwards(rn.Relay)
 		c.mu.Lock()
 		resolves := c.state[rn.Name].resolves
 		c.mu.Unlock()
-		if resolves {
-			out = append(out, rn.Name)
-		}
+		out = append(out, certs.RelayName{Relay: rn.Relay, Name: rn.Name, Orderable: open && resolves})
 	}
 	return out
+}
+
+// forwards is acmeForward, false and false when unset.
+func (c *relayNameCheck) forwards(relay string) (said, open bool) {
+	if c.acmeForward == nil {
+		return false, false
+	}
+	return c.acmeForward(relay)
 }
 
 // run checks the names at its start, after each change and every
@@ -211,6 +227,7 @@ func (c *relayNameCheck) one(ctx context.Context, rn provision.RelayName, all []
 	c.mu.Lock()
 	order, ordered := c.orders[rn.Name]
 	c.mu.Unlock()
+	said, open := c.forwards(rn.Relay)
 	var problem string
 	switch {
 	case cf:
@@ -222,9 +239,12 @@ func (c *relayNameCheck) one(ctx context.Context, rn provision.RelayName, all []
 	case !c.ordering:
 		problem = "the certificate of " + site + " does not cover it, and this node orders none (-acme-directory is empty): " +
 			"import one that does (rayctl service cert)"
-	case c.acmeForward == nil || !c.acmeForward(rn.Relay):
+	case !said:
 		problem = "the relay's rayspa does not forward TCP 80 for the certificate's order (a relay before v0.35.0, or its feed not " +
 			"open since this node started): update the relay (rayctl update here takes the relays along)"
+	case !open:
+		problem = "the relay's rayspa has no feed open to this node now (down, or it cannot reach the node's API): the certificate " +
+			"takes the name once it is back"
 	case ordered && errors.Is(order, certs.ErrTooManyNames):
 		problem = "left out of the certificate of " + site + ": " + order.Error()
 	case ordered && order != nil:
@@ -236,16 +256,18 @@ func (c *relayNameCheck) one(ctx context.Context, rn provision.RelayName, all []
 }
 
 // resolves says why a name does not resolve to its relay alone, "" when
-// it does.
+// it does: every answer of both families its relay's address, as the CA
+// checks it (certs.Issuer.CheckDNS). A stray AAAA, the wildcard's of an
+// exit with IPv6, sends some clients and the CA past the relay.
 func (c *relayNameCheck) resolves(ctx context.Context, rn provision.RelayName) string {
 	lctx, cancel := context.WithTimeout(ctx, relayNameLookup)
 	defer cancel()
-	addrs, err := c.lookup(lctx, "ip4", rn.Name)
+	addrs, err := c.lookup(lctx, "ip", rn.Name)
 	if err != nil {
 		return "does not resolve: " + err.Error()
 	}
 	if len(addrs) == 0 {
-		return "resolves to no IPv4 address"
+		return "resolves to no address"
 	}
 	var got []string
 	alone := true

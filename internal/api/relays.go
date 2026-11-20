@@ -63,7 +63,7 @@ func (s *Server) AddRelay(ctx context.Context, req *connect.Request[nodev1.AddRe
 	// As stored, its SSH port's default with it.
 	if stored, err := s.Store.RelayByName(ctx, r.Name); err == nil {
 		if services, err := s.Store.ListServices(ctx); err == nil {
-			pb.Ports = relayPorts(stored, services, false) // no bundle yet, no names
+			pb.Ports = relayPorts(stored, services, "") // no bundle yet, no names
 		}
 	}
 	return connect.NewResponse(&nodev1.AddRelayResponse{Relay: pb}), nil
@@ -89,7 +89,7 @@ func (s *Server) ListRelays(ctx context.Context, _ *connect.Request[nodev1.ListR
 	resp := &nodev1.ListRelaysResponse{}
 	for _, r := range rs {
 		pb := relayPB(r)
-		pb.Ports = relayPorts(r, services, !cf && len(names[r.Name]) > 0)
+		pb.Ports = relayPorts(r, services, s.acme80(r.Name, cf, len(names[r.Name]) > 0))
 		pb.Names = names[r.Name]
 		resp.Relays = append(resp.Relays, pb)
 	}
@@ -104,15 +104,30 @@ func (s *Server) hasDNSProvider(ctx context.Context) (bool, error) {
 	return c != nil, err
 }
 
-// acmePort80 reports whether a relay host takes TCP 80 for this node's
-// ACME windows (relay-names-v1 §6): the node has no DNS provider and the
-// relay has names, which its sites' certificates take under HTTP-01.
-func (s *Server) acmePort80(ctx context.Context, relay string) (bool, error) {
-	if cf, err := s.hasDNSProvider(ctx); err != nil || cf {
-		return false, err
+// acmePort80 is acme80 of a relay, its names and the DNS provider read.
+func (s *Server) acmePort80(ctx context.Context, relay string) (string, error) {
+	cf, err := s.hasDNSProvider(ctx)
+	if err != nil {
+		return "", err
 	}
 	names, err := provision.RelayNames(ctx, s.Store)
-	return slices.ContainsFunc(names, func(rn provision.RelayName) bool { return rn.Relay == relay }), err
+	return s.acme80(relay, cf, slices.ContainsFunc(names, func(rn provision.RelayName) bool { return rn.Relay == relay })), err
+}
+
+// acme80 says whether a relay host takes TCP 80 for this node's ACME
+// windows (relay-names-v1 §6), as RelayPort.access says it: "acme" when
+// the node orders its sites' certificates (Certificates), has no DNS
+// provider (a wildcard needs no window) and the relay has names, which
+// those certificates take under HTTP-01; "acme-old" then for a relay
+// whose rayspa has not said it forwards it; "" otherwise.
+func (s *Server) acme80(relay string, cf, named bool) string {
+	if !s.Certificates || cf || !named {
+		return ""
+	}
+	if said, _ := s.RelayACMEForward(relay); !said {
+		return "acme-old"
+	}
+	return "acme"
 }
 
 // relayNames are the relays' names (relay-names-v1 §3), by relay, with
@@ -145,9 +160,10 @@ func (s *Server) relayNames(ctx context.Context, services []store.Service) (map[
 // the subscription has it, sub.addRelays): the SPA parameters a relay may
 // have before (SetRelayAccess draws them to check its SSH port) are
 // replaced by the bundle's, and a firewall opened for them would be
-// opened for the wrong range. acme80: TCP 80 too, which the relay forwards
-// to the exit while it orders the relay's names (acmePort80).
-func relayPorts(relay store.Relay, services []store.Service, acme80 bool) []*nodev1.RelayPort {
+// opened for the wrong range. acme80, when not empty: TCP 80 too, which
+// the relay forwards to the exit while it orders the relay's names, with
+// that access (Server.acme80).
+func relayPorts(relay store.Relay, services []store.Service, acme80 string) []*nodev1.RelayPort {
 	out := []*nodev1.RelayPort{{Name: "ssh", Protos: []string{"tcp"}, From: uint32(relay.SSHPort), To: uint32(relay.SSHPort), Access: "admin"}}
 	bundled := relay.CertPin != ""
 	if bundled && len(relay.SPA) > 0 {
@@ -195,10 +211,10 @@ func relayPorts(relay store.Relay, services []store.Service, acme80 bool) []*nod
 			}
 		}
 	}
-	if acme80 {
+	if acme80 != "" {
 		// From any address, but only while an order is under way: the
 		// relay's table forwards it for the window alone.
-		out = append(out, &nodev1.RelayPort{Name: "acme", Protos: []string{"tcp"}, From: 80, To: 80, Forwarded: true, Access: "acme"})
+		out = append(out, &nodev1.RelayPort{Name: "acme", Protos: []string{"tcp"}, From: 80, To: 80, Forwarded: true, Access: acme80})
 	}
 	return out
 }

@@ -16,12 +16,13 @@ import (
 )
 
 // relay-names-v1 §5, §6, without a DNS provider: a name that resolves to
-// its relay goes into its site's next order once the relay's rayspa
-// forwards TCP 80, and the manager is woken for it; until the certificate
-// covers it, the reason says why: the relay too old, waiting, the order
-// failed or left it out, the operator's certificate, no certificates at
-// all. With a DNS provider none is ordered (the wildcard covers them).
-func TestRelayNamesToOrder(t *testing.T) {
+// its relay is orderable for its site's next certificate while the relay's
+// rayspa has a feed open that said it forwards TCP 80, and the manager is
+// woken for it; until the certificate covers it, the reason says why: the
+// relay too old, its feed not open now, waiting, the order failed or left
+// it out, the operator's certificate, no certificates at all. With a DNS
+// provider none is asked for (the wildcard covers them).
+func TestRelayNamesFor(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
 	if err != nil {
@@ -47,8 +48,20 @@ func TestRelayNamesToOrder(t *testing.T) {
 	name := names[0].Name
 	res := &fakeResolver{answers: map[string][]netip.Addr{}}
 	c := newRelayNameCheck(st, res.lookup)
-	forwards := false
-	c.acmeForward = func(relay string) bool { return relay == "r1" && forwards }
+	said, open := false, false
+	c.acmeForward = func(relay string) (bool, bool) { return relay == "r1" && said, relay == "r1" && open }
+	orderable := func(site string) []string {
+		var out []string
+		for _, rn := range c.RelayNamesFor(ctx, site) {
+			if rn.Relay != "r1" || rn.Name != name {
+				t.Errorf("for %s: %+v", site, rn)
+			}
+			if rn.Orderable {
+				out = append(out, rn.Name)
+			}
+		}
+		return out
+	}
 	c.ordering = true
 	woken := 0
 	c.resolved = func() { woken++ }
@@ -63,18 +76,24 @@ func TestRelayNamesToOrder(t *testing.T) {
 		}
 		return why
 	}
-	if why := reason(); !strings.Contains(why, "does not resolve") || c.ToOrder(ctx, "site") != nil || woken != 0 {
-		t.Fatalf("not resolving: %q, to order %v, woken %d", why, c.ToOrder(ctx, "site"), woken)
+	if why := reason(); !strings.Contains(why, "does not resolve") || orderable("site") != nil || woken != 0 {
+		t.Fatalf("not resolving: %q, to order %v, woken %d", why, orderable("site"), woken)
 	}
 	res.set(name, "198.51.100.20")
-	if why := reason(); !strings.Contains(why, "does not forward TCP 80") || c.ToOrder(ctx, "site") != nil || woken != 1 {
-		t.Fatalf("an older relay: %q, to order %v, woken %d", why, c.ToOrder(ctx, "site"), woken)
+	if why := reason(); !strings.Contains(why, "does not forward TCP 80") || orderable("site") != nil || woken != 1 {
+		t.Fatalf("an older relay: %q, to order %v, woken %d", why, orderable("site"), woken)
 	}
-	forwards = true
+	// It said so, but its feed is gone: not orderable, the window would
+	// not reach it.
+	said = true
+	if why := reason(); !strings.Contains(why, "no feed open") || orderable("site") != nil {
+		t.Fatalf("a feed gone: %q, to order %v", why, orderable("site"))
+	}
+	open = true
 	if why := reason(); !strings.Contains(why, "waiting for the certificate of site") || woken != 1 {
 		t.Fatalf("waiting: %q, woken %d", why, woken)
 	}
-	if got := c.ToOrder(ctx, "site"); len(got) != 1 || got[0] != name || c.ToOrder(ctx, "other") != nil {
+	if got := orderable("site"); len(got) != 1 || got[0] != name || c.RelayNamesFor(ctx, "other") != nil {
 		t.Fatalf("to order %v", got)
 	}
 	c.Ordered("site", []string{name}, errors.New("acme validation: connection refused"))
@@ -109,7 +128,7 @@ func TestRelayNamesToOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if why := reason(); !strings.Contains(why, "wildcard") || c.ToOrder(ctx, "site") != nil {
-		t.Fatalf("with a DNS provider: %q, to order %v", why, c.ToOrder(ctx, "site"))
+	if why := reason(); !strings.Contains(why, "wildcard") || c.RelayNamesFor(ctx, "site") != nil {
+		t.Fatalf("with a DNS provider: %q, asked for %v", why, c.RelayNamesFor(ctx, "site"))
 	}
 }

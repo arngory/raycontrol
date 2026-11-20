@@ -549,7 +549,10 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 		},
 		// Without a DNS provider, the relays' names that resolve to their
 		// relay, through relays that forward TCP 80 (relay-names-v1 §6).
-		RelayNames: relayNames.ToOrder, RelayReport: relayNames.Ordered}
+		// The relays' feeds come back within relayFeedsBack of a start:
+		// until then a certificate with their names is not renewed
+		// without them.
+		RelayNames: relayNames.RelayNamesFor, RelayReport: relayNames.Ordered, RelayHoldUntil: processStart.Add(relayFeedsBack)}
 	// The operator's DNS change may be the fix of a failure: try now.
 	srv.DNSChanged = m.Retry
 	srv.SiteKeyAsked = m.RetrySite

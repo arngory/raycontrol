@@ -97,4 +97,10 @@ func TestRelayPortsACME(t *testing.T) {
 	if len(lines) < 3 || !slices.Equal(fields(lines[2]), want) {
 		t.Fatalf("relay ports:\n%s", out)
 	}
+	// A relay whose rayspa has not said it forwards it.
+	msk.Ports[1].Access = "acme-old"
+	out, err = captureStdout(t, func() error { return (&cli{c: fake}).relay(context.Background(), "ports", []string{"msk"}) })
+	if err != nil || !strings.Contains(out, "not forwarded yet: the relay's rayspa has not said it forwards it") {
+		t.Fatalf("relay ports of an older relay: %v\n%s", err, out)
+	}
 }

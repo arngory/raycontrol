@@ -546,7 +546,9 @@ message RelayPort {
   // the relay), "admin" (the relay's admin addresses, and after a knock a
   // device allowed SSH), "acme" (any address while the exit orders a
   // certificate with the relay's names, up to 3 minutes: TCP 80, since
-  // v0.35.0, relay-names-v1 §6).
+  // v0.35.0, relay-names-v1 §6), "acme-old" (the same port, which the
+  // relay's rayspa has not said it forwards: before v0.35.0, or not
+  // connected since the exit started).
   string access = 6;
 }
 message AddRelayRequest {

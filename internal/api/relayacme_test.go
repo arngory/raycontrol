@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"slices"
 	"testing"
 	"time"
@@ -17,13 +18,18 @@ import (
 )
 
 // relay-names-v1 §6 on the exit: a relay's rayspa says in its feed that it
-// forwards TCP 80 (kept, its change news); while the node's ACME window is
-// open for an order with the relay's names, the relay's snapshot carries
-// the window's end, and the feed sends it at once, and its close; another
-// relay's snapshot and an order without the relay's names have none. The
-// relay's ports list TCP 80 while the node has no DNS provider.
+// forwards TCP 80, open while the feed is, the word kept after it, a
+// change news; while the node's ACME window is open for an order with the
+// relay's names, the relay's snapshot carries the window's end, and the
+// feed sends it at once, and its close; another relay's snapshot and an
+// order without the relay's names have none. The relay's ports list TCP 80
+// while the node orders certificates and has no DNS provider, as a port
+// the relay does not forward yet until its rayspa said so.
 func TestRelayACMEForward(t *testing.T) {
-	srv, sock, _ := startServer(t)
+	srv, sock, _ := startServerWith(t, func(s *Server) []func() (string, http.Handler) {
+		s.Certificates = true
+		return nil
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if _, err := provision.Init(ctx, srv.Store, provision.Options{Host: "203.0.113.7"}); err != nil {
@@ -49,8 +55,8 @@ func TestRelayACMEForward(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if !slices.ContainsFunc(r.Ports, func(p *nodev1.RelayPort) bool { return p.Name == "acme" && p.From == 80 && p.Access == "acme" }) {
-			t.Errorf("%s: bundle's ports without TCP 80 for the window: %v", name, r.Ports)
+		if !slices.ContainsFunc(r.Ports, func(p *nodev1.RelayPort) bool { return p.Name == "acme" && p.From == 80 && p.Access == "acme-old" }) {
+			t.Errorf("%s: bundle's ports without TCP 80 not forwarded yet: %v", name, r.Ports)
 		}
 	}
 	names, err := provision.RelayNames(ctx, srv.Store)
@@ -62,7 +68,7 @@ func TestRelayACMEForward(t *testing.T) {
 		nameOf[rn.Relay] = rn.Name
 	}
 
-	if srv.RelayACMEForward("r1") {
+	if said, open := srv.RelayACMEForward("r1"); said || open {
 		t.Fatal("r1 forwards before it said so")
 	}
 	addr, _ := serveRemoteFrom(t, srv, "198.51.100.20:40000")
@@ -80,11 +86,16 @@ func TestRelayACMEForward(t *testing.T) {
 	if !s.Receive() || s.Msg().Snapshot.AcmeForwardUntil != 0 {
 		t.Fatalf("first snapshot: %v %v", s.Msg(), s.Err())
 	}
-	if again, _ := srv.changes(); !srv.RelayACMEForward("r1") || again == rev {
-		t.Fatalf("r1 said it forwards: kept %v, news %v", srv.RelayACMEForward("r1"), again != rev)
+	if said, open := srv.RelayACMEForward("r1"); !said || !open {
+		t.Fatalf("r1 said it forwards, its feed open: %v %v", said, open)
 	}
+	if again, _ := srv.changes(); again == rev {
+		t.Fatal("r1's word is not news")
+	}
+	// A second feed of the same word (one ending, a new one): no news.
 	rev, _ = srv.changes()
-	srv.setRelayACME("r1", true)
+	done := srv.relayACMEFeed("r1", true)
+	done()
 	if again, _ := srv.changes(); again != rev {
 		t.Fatal("the same word again is news")
 	}
@@ -123,8 +134,18 @@ func TestRelayACMEForward(t *testing.T) {
 		return r.Msg.Relays[0].Ports
 	}
 	acme := func(p *nodev1.RelayPort) bool { return p.Name == "acme" }
-	if !slices.ContainsFunc(ports(), acme) {
+	if !slices.ContainsFunc(ports(), func(p *nodev1.RelayPort) bool { return acme(p) && p.Access == "acme" }) {
 		t.Fatal("ListRelays without TCP 80 for the window")
+	}
+	// The feed gone: the word stays, nothing open.
+	s.Close()
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if said, open := srv.RelayACMEForward("r1"); said && !open {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("r1's feed still open after it closed")
+		}
 	}
 	for k, v := range map[string]string{"dns_provider": "cloudflare", "cloudflare_token": "t", "cloudflare_zone": `{"id":"z1","name":"example.com"}`} {
 		if err := srv.Store.SetSetting(ctx, k, []byte(v)); err != nil {
@@ -133,5 +154,32 @@ func TestRelayACMEForward(t *testing.T) {
 	}
 	if slices.ContainsFunc(ports(), acme) {
 		t.Fatal("TCP 80 for the window with a DNS provider")
+	}
+}
+
+// No TCP 80 for a relay of a node that orders no certificates
+// (-acme-directory empty): no window ever opens.
+func TestRelayACMEPortNoCertificates(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := provision.Init(ctx, srv.Store, provision.Options{Host: "203.0.113.7"}); err != nil {
+		t.Fatal(err)
+	}
+	c := NewUnixClient(sock)
+	for _, s := range []*nodev1.CreateServiceRequest{{Kind: "api", Name: "api"}, {Kind: "reality", Name: "reality"}} {
+		if _, err := c.CreateService(ctx, connect.NewRequest(s)); err != nil {
+			t.Fatal(s.Name, err)
+		}
+	}
+	if _, err := c.AddRelay(ctx, connect.NewRequest(&nodev1.AddRelayRequest{Name: "r1", Address: "198.51.100.20"})); err != nil {
+		t.Fatal(err)
+	}
+	r, err := srv.issueRelayBundle(ctx, &nodev1.IssueRelayBundleRequest{Name: "r1", ExitAddress: "203.0.113.7", Admin: []string{"192.0.2.7"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(r.Ports, func(p *nodev1.RelayPort) bool { return p.Name == "acme" }) {
+		t.Fatalf("TCP 80 on a node without certificates: %v", r.Ports)
 	}
 }

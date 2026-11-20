@@ -80,8 +80,24 @@ func (is *Issuer) log() *slog.Logger {
 	return slog.Default()
 }
 
-// CheckDNS reports a name that does not resolve to the node, or a relay's
-// name (RelayAddrs) that does not resolve to its relay alone.
+// NamesError is an order refused for some of its names, before it was
+// placed (CheckDNS: a relay's name that does not resolve to its relay
+// alone) or by the CA (the validation of the name's authorization failed).
+// The manager orders again without the relays' names among them
+// (relay-names-v1 §5). Err has the detail, addresses in it: for root's
+// output (rayctl relay list), not the log, which takes Reason.
+type NamesError struct {
+	Names  []string
+	Reason string
+	Err    error
+}
+
+func (e *NamesError) Error() string { return e.Err.Error() }
+func (e *NamesError) Unwrap() error { return e.Err }
+
+// CheckDNS reports a name that does not resolve to the node, or relays'
+// names (RelayAddrs) that do not resolve to their relay alone, all of
+// those in one NamesError.
 func (is *Issuer) CheckDNS(ctx context.Context, names []string) error {
 	resolve := is.Resolve
 	if resolve == nil {
@@ -94,21 +110,40 @@ func (is *Issuer) CheckDNS(ctx context.Context, names []string) error {
 		return err
 	}
 	var own []string
+	bad := &NamesError{Reason: "does not resolve to its relay alone"}
+	var errs []error
 	for _, name := range names {
-		relay, ok := relays[strings.ToLower(strings.TrimSuffix(name, "."))]
+		relay, ok := relays[canonical(name)]
 		if !ok {
 			own = append(own, name)
 			continue
 		}
 		addrs, err := resolve(ctx, name)
-		if err != nil {
-			return fmt.Errorf("%s does not resolve (add the record of the relay's name, rayctl dns): %w", name, err)
+		switch {
+		case err != nil:
+			err = fmt.Errorf("%s does not resolve (add the record of the relay's name, rayctl dns): %w", name, err)
+		case len(addrs) == 0 || slices.ContainsFunc(addrs, func(a netip.Addr) bool { return a.Unmap() != relay }):
+			err = fmt.Errorf("%s resolves to %v, not to its relay %s alone", name, addrs, relay)
 		}
-		if len(addrs) == 0 || slices.ContainsFunc(addrs, func(a netip.Addr) bool { return a.Unmap() != relay }) {
-			return fmt.Errorf("%s resolves to %v, not to its relay %s alone", name, addrs, relay)
+		if err != nil {
+			bad.Names, errs = append(bad.Names, name), append(errs, err)
 		}
 	}
-	names = own
+	if err := is.checkOwn(ctx, resolve, own); err != nil {
+		return err
+	}
+	if len(errs) > 0 {
+		bad.Err = errors.Join(errs...)
+		return bad
+	}
+	return nil
+}
+
+// canonical is a name as RelayAddrs keys it: lower case, no final dot.
+func canonical(name string) string { return strings.ToLower(strings.TrimSuffix(name, ".")) }
+
+// checkOwn is CheckDNS of the node's own names.
+func (is *Issuer) checkOwn(ctx context.Context, resolve func(context.Context, string) ([]netip.Addr, error), names []string) error {
 	if len(names) == 0 {
 		return nil
 	}
@@ -224,7 +259,7 @@ func (is *Issuer) Issue(ctx context.Context, names []string, key crypto.Signer) 
 			if err != nil {
 				return nil, err
 			}
-			if slices.ContainsFunc(names, func(n string) bool { _, ok := relays[strings.ToLower(n)]; return ok }) {
+			if slices.ContainsFunc(names, func(n string) bool { _, ok := relays[canonical(n)]; return ok }) {
 				select {
 				case <-ctx.Done():
 					return nil, ctx.Err()
@@ -273,6 +308,14 @@ func (is *Issuer) Issue(ctx context.Context, names []string, key crypto.Signer) 
 			continue
 		}
 		if err := answer(ctx, client, z); err != nil {
+			// The CA did not validate the name: a relay's port 80 closed
+			// at its provider, say. The manager orders again without it
+			// when it is a relay's. Not for an error of the exchange
+			// itself (a limit, the network), which is no name's.
+			var ae *acme.AuthorizationError
+			if errors.As(err, &ae) {
+				return nil, &NamesError{Names: []string{z.Identifier.Value}, Reason: "not validated by the CA", Err: err}
+			}
 			return nil, err
 		}
 	}
