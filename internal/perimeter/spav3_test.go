@@ -82,7 +82,7 @@ func TestGateV3(t *testing.T) {
 	}
 	// What is no address of a node is left out, the rest kept: the
 	// snapshot itself goes in (it carries revocations too).
-	snap.OwnAddrs = []string{"10.0.0.0/8", "fe80::1%eth0", "0.0.0.0", "224.0.0.1", "203.0.113.7"}
+	snap.OwnAddrs = []string{"10.0.0.0/8", "fe80::1%eth0", "0.0.0.0", "::ffff:0.0.0.0", "224.0.0.1", "255.255.255.255", "203.0.113.7"}
 	if err := g.Update(snap); err != nil {
 		t.Fatal(err)
 	}
