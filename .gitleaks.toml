@@ -12,3 +12,9 @@ title = "raycontrol"
 
 [extend]
 useDefault = true
+
+# SPA test vectors (spa-v2 §5, spa-v3 §9): their device keys are fill bytes (0x11…, 0x55…) and every other key is
+# derived from those for the vectors, nobody's key; clients check their code against them.
+[[allowlists]]
+description = "SPA test vectors: keys of fill bytes and derived from them"
+paths = ['''^internal/spa/testdata/vectors(-v3)?\.json$''']
