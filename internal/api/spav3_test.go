@@ -118,7 +118,55 @@ func TestSnapshotOwnAddrs(t *testing.T) {
 		t.Fatalf("relay: %v %v", snap.GetOwnAddrs(), err)
 	}
 	// The bundle offers v3.
-	if sp := nodeSPA(srv.Params); !slices.Equal(sp.Versions, []int{2, 3}) {
+	if sp := srv.nodeSPA(ctx); !slices.Equal(sp.Versions, []int{2, 3}) {
 		t.Fatalf("bundle versions %v", sp.Versions)
+	}
+}
+
+// TestSPAVersionsOffered: v3 only where a v3 packet to the node's public
+// address can pass (spa-v3 §5).
+func TestSPAVersionsOffered(t *testing.T) {
+	srv, _, _ := startServer(t)
+	ctx := context.Background()
+	old := ownLookup
+	t.Cleanup(func() { ownLookup = old })
+	answers := map[string][]netip.Addr{
+		"public.example.com": {netip.MustParseAddr("10.0.0.5"), netip.MustParseAddr("203.0.113.7")},
+		"split.example.com":  {netip.MustParseAddr("10.0.0.5"), netip.MustParseAddr("fd00::5"), netip.MustParseAddr("100.64.1.2")},
+	}
+	ownLookup = func(_ context.Context, host string) ([]netip.Addr, error) {
+		if a, ok := answers[host]; ok {
+			return a, nil
+		}
+		return nil, errors.New("no answer")
+	}
+	for _, c := range []struct {
+		host string
+		v3   bool
+	}{
+		{"203.0.113.7", true},
+		{"2001:db8::7", true},
+		{"public.example.com", true},
+		{"split.example.com", false}, // behind 1:1 NAT, split-horizon: no public address known
+		{"nothing.example.com", false},
+		{"0.0.0.0", false},
+		{"10.0.0.5", false}, // a private -host: no public address either
+	} {
+		if _, err := node.Init(ctx, srv.Store, c.host); err != nil {
+			t.Fatal(err)
+		}
+		got := srv.SPAVersions(ctx)
+		if c.v3 != slices.Equal(got, []int{2, 3}) || !c.v3 && got != nil {
+			t.Errorf("%s: %v", c.host, got)
+		}
+	}
+	// The snapshot keeps private own addresses (they are where packets
+	// come to behind NAT) but drops an unspecified one.
+	if _, err := node.Init(ctx, srv.Store, "0.0.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	p := &PerimeterServer{Server: srv, DefaultTTL: 10 * time.Minute, MaxTTL: time.Hour}
+	if snap, err := p.snapshot(ctx); err != nil || snap.OwnAddrs != nil {
+		t.Fatalf("0.0.0.0 → %v %v", snap.GetOwnAddrs(), err)
 	}
 }

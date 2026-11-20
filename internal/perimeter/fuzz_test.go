@@ -321,6 +321,15 @@ func FuzzGateUpdate(f *testing.F) {
 				_, _ = g.Handle(netip.MustParseAddr("192.0.2.9"), netip.Addr{}, pkt)
 				_, _ = g.Handle(netip.MustParseAddr("2001:db8::9"), netip.Addr{}, pkt) // a replay
 			}
+			// v3 (spa-v3 §4): to an address that is neither the snapshot's
+			// nor the one it came to, it opens nothing.
+			wire := netip.MustParseAddr("10.0.0.5")
+			pkt3, err := spa.SealRandom(p, [spa.KeySize]byte(d[0].Key), spa.Request{Time: now, Scope: scope, Dst: netip.MustParseAddr("198.51.100.99")})
+			if err == nil {
+				if _, err := g.Handle(netip.MustParseAddr("192.0.2.10"), wire, pkt3); err == nil && !slices.Contains(g.own, netip.MustParseAddr("198.51.100.99")) {
+					t.Fatalf("a v3 packet for another address opened, own %v", g.own)
+				}
+			}
 			snap.Devices = snap.Devices[1:]
 			_ = g.Update(snap)
 		}

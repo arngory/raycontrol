@@ -64,32 +64,12 @@ func knock(ctx context.Context, args []string) error {
 	if *ttl > 0 {
 		window = ttl.String() + " (or the node's -spa-max-ttl, if shorter)"
 	}
-	// v3 first when the node takes it; v2 after it only at an address of
-	// the node's own (spa-v3 §6), for a node rolled back before v3.
-	versions := []bool{spaV3(b)}
-	if spaV3(b) && knownAddr(b, ip, *addr) {
-		versions = append(versions, false)
-	}
-	type attempt struct {
-		carrier string
-		v3      bool
-	}
-	var attempts []attempt
-	for _, v3 := range versions {
-		for _, c := range carriers {
-			attempts = append(attempts, attempt{c, v3})
-		}
-	}
 	var lastErr error
-	for _, a := range attempts {
-		c := a.carrier
+	for _, k := range knocks(b, ip, *addr, carriers) {
+		c := k.carrier
 		start := time.Now()
 		port := params.Port(params.Slot(start))
-		req := knockFor(b, ip, start, *ttl)
-		if !a.v3 {
-			req.Dst = netip.Addr{}
-		}
-		pkt, err := spa.SealRandom(params, key, req)
+		pkt, err := spa.SealRandom(params, key, k.request(ip, start, *ttl))
 		if err != nil {
 			return err
 		}
