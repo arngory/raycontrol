@@ -80,11 +80,22 @@ func TestGateV3(t *testing.T) {
 	if _, err := g.Handle(src, wire, seal3(t, snap, 0x11, now, "10.0.0.5")); err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range [][]string{{"10.0.0.0/8"}, {"fe80::1%eth0"}, {"0.0.0.0"}, make([]string, maxOwnAddrs+1)} {
-		snap.OwnAddrs = bad
-		if err := g.Update(snap); err == nil {
-			t.Fatalf("own %v taken", bad)
-		}
+	// What is no address of a node is left out, the rest kept: the
+	// snapshot itself goes in (it carries revocations too).
+	snap.OwnAddrs = []string{"10.0.0.0/8", "fe80::1%eth0", "0.0.0.0", "224.0.0.1", "203.0.113.7"}
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.own) != 1 || g.own[0] != netip.MustParseAddr("203.0.113.7") {
+		t.Fatalf("own %v", g.own)
+	}
+	many := make([]string, maxOwnAddrs+4)
+	for i := range many {
+		many[i] = netip.AddrFrom4([4]byte{198, 51, 100, byte(i + 1)}).String()
+	}
+	snap.OwnAddrs = many
+	if err := g.Update(snap); err != nil || len(g.own) != maxOwnAddrs {
+		t.Fatalf("own %d, %v", len(g.own), err)
 	}
 }
 

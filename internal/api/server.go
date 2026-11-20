@@ -117,6 +117,10 @@ type Server struct {
 	// through this server.
 	sshMu sync.Mutex
 
+	// The node's own addresses (spa-v3 §4), for the perimeter's snapshot
+	// and for the SPA versions the node offers.
+	own ownAddrs
+
 	mu    sync.Mutex
 	rev   uint64
 	wake  chan struct{} // closed on the next change
@@ -942,7 +946,7 @@ func (s *Server) bundle(ctx context.Context, d store.Device, key [spa.KeySize]by
 	if err != nil {
 		return "", err
 	}
-	b := node.Bundle{Version: 1, Host: host, DNSName: dnsName, Addrs: node.Addrs(host), SPA: nodeSPA(s.Params),
+	b := node.Bundle{Version: 1, Host: host, DNSName: dnsName, Addrs: node.Addrs(host), SPA: s.nodeSPA(ctx),
 		DeviceID: d.ID, DeviceKey: hex.EncodeToString(key[:])}
 	if d.Role != "user" {
 		b.Role = d.Role

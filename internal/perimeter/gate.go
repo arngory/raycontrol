@@ -332,10 +332,7 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		relays = append(relays, p)
 	}
 	relayPorts := portsOf(snap.RelayPorts)
-	own, err := ownAddrsOf(snap.GetOwnAddrs())
-	if err != nil {
-		return err
-	}
+	own := ownAddrsOf(snap.GetOwnAddrs())
 	sp := snap.Spa
 	u := &update{
 		params: params, devices: devices, allowed: allowed, services: services, forward: Forwarded(snap.Services), rotations: rotations,
@@ -367,20 +364,20 @@ var SPAVersions = []uint32{2, 3}
 // every v3 packet is checked against them.
 const maxOwnAddrs = 16
 
-// ownAddrsOf parses the node's public addresses of a snapshot.
-func ownAddrsOf(addrs []string) ([]netip.Addr, error) {
-	if len(addrs) > maxOwnAddrs {
-		return nil, fmt.Errorf("perimeter: %d own addresses, at most %d", len(addrs), maxOwnAddrs)
-	}
-	own := make([]netip.Addr, 0, len(addrs))
+// ownAddrsOf parses the node's public addresses of a snapshot, the first
+// maxOwnAddrs. One that is no address of a node is left out, not the
+// snapshot refused: a refused snapshot would hold back revocations too.
+// Leaving one out only takes fewer v3 packets.
+func ownAddrsOf(addrs []string) []netip.Addr {
+	own := make([]netip.Addr, 0, min(len(addrs), maxOwnAddrs))
 	for _, s := range addrs {
 		a, err := netip.ParseAddr(s)
-		if err != nil || a.Zone() != "" || a.IsUnspecified() {
-			return nil, fmt.Errorf("perimeter: own address %q: one address, no zone", s)
+		if err != nil || a.Zone() != "" || a.IsUnspecified() || a.IsMulticast() || len(own) == maxOwnAddrs {
+			continue
 		}
 		own = append(own, a.Unmap())
 	}
-	return own, nil
+	return own
 }
 
 // mergePrefixes leaves out prefixes inside others, and repeats: an interval

@@ -9,15 +9,53 @@ import (
 	"time"
 
 	"github.com/arngory/raycontrol/internal/node"
-	"github.com/arngory/raycontrol/internal/spa"
 )
 
 // nodeSPA is the node's SPA parameters as a bundle hands them out, with
 // the versions it takes (spa-v3 §5).
-func nodeSPA(p spa.Params) node.SPAParams {
-	sp := node.FromParams(p)
-	sp.Versions = slices.Clone(node.SPAVersions)
+func (s *Server) nodeSPA(ctx context.Context) node.SPAParams {
+	sp := node.FromParams(s.Params)
+	sp.Versions = s.SPAVersions(ctx)
 	return sp
+}
+
+// SPAVersions are the SPA versions the node offers its clients (spa-v3
+// §5): v3 only where a v3 packet to the node's public address can pass,
+// that is with -host an address, or a name the node's resolver gives a
+// public address for. Behind 1:1 NAT with split-horizon DNS (a cloud's own
+// names resolve to the private address inside it) the node knows no public
+// address, a v3 packet to it would be refused, and a client given only a
+// name has no address to fall back to with v2: no v3 then, as before it.
+// nil means [2].
+func (s *Server) SPAVersions(ctx context.Context) []int {
+	host, err := node.Host(ctx, s.Store)
+	if err != nil {
+		return nil
+	}
+	for _, a := range s.own.get(ctx, host, time.Now()) {
+		if ip, err := netip.ParseAddr(a); err == nil && publicAddr(ip) {
+			return slices.Clone(node.SPAVersions)
+		}
+	}
+	return nil
+}
+
+// cgnat is the shared address space of carriers (RFC 6598): private too.
+var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+
+// publicAddr reports whether a is a public unicast address.
+func publicAddr(a netip.Addr) bool {
+	a = a.Unmap()
+	return a.IsGlobalUnicast() && !a.IsPrivate() && !cgnat.Contains(a)
+}
+
+// usableOwn reports whether a may be an own address at all: none a client
+// could be sent to that the node would take (loopback, as a hostname in
+// /etc/hosts gives; link-local; multicast; unspecified).
+func usableOwn(a netip.Addr) bool {
+	a = a.Unmap()
+	return a.IsValid() && !a.IsUnspecified() && !a.IsLoopback() && !a.IsLinkLocalUnicast() && !a.IsMulticast() &&
+		!a.IsLinkLocalMulticast() && !a.IsInterfaceLocalMulticast()
 }
 
 // Own addresses of the node (spa-v3 §4): a v3 packet that names one of
@@ -49,7 +87,10 @@ var ownLookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
 // every ownAddrsTTL; a lookup that fails keeps what the last one gave.
 func (o *ownAddrs) get(ctx context.Context, host string, now time.Time) []string {
 	if a, err := netip.ParseAddr(host); err == nil {
-		return []string{a.Unmap().WithZone("").String()}
+		if a = a.Unmap().WithZone(""); !usableOwn(a) {
+			return nil // rayd init -host 0.0.0.0: no address of the node at all
+		}
+		return []string{a.String()}
 	}
 	if host == "" {
 		return nil
@@ -87,10 +128,7 @@ func (o *ownAddrs) resolve(ctx context.Context, host string, now time.Time) {
 	got, err := ownLookup(ctx, host)
 	var addrs []string
 	for _, a := range got {
-		a = a.Unmap().WithZone("")
-		// Nothing a client could be lured to that the node would take:
-		// loopback (a hostname in /etc/hosts), link-local, multicast.
-		if !a.IsValid() || a.IsUnspecified() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsLinkLocalMulticast() {
+		if a = a.Unmap().WithZone(""); !usableOwn(a) {
 			continue
 		}
 		if s := a.String(); !slices.Contains(addrs, s) && len(addrs) < ownAddrsMax {
