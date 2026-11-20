@@ -168,6 +168,17 @@ func TestRemotePIN(t *testing.T) {
 		if len(resp.Msg.InviteCodeShort) > len(resp.Msg.InviteCode)/2 {
 			t.Fatalf("rcinv2 of %d characters, rcinv1 of %d", len(resp.Msg.InviteCodeShort), len(resp.Msg.InviteCode))
 		}
+		// By name (api-v1 §3b): the same, with the node's name and SPA
+		// versions (this node's host is a name: no name of its own).
+		v3, err := node.DecodeInvite(resp.Msg.InviteCodeV3)
+		if err != nil || !strings.HasPrefix(resp.Msg.InviteCodeV3, node.InvitePrefix3) || !slices.Equal(v3.SPA.Versions, []int{2, 3}) {
+			t.Fatalf("rcinv3 %q: %+v %v", resp.Msg.InviteCodeV3, v3, err)
+		}
+		v3.SPA.Versions = nil
+		v3.Services[0].Name, v3.Services[0].Kind = inv.Services[0].Name, inv.Services[0].Kind
+		if !reflect.DeepEqual(v3, inv) {
+			t.Fatalf("rcinv3 %+v, rcinv1 %+v", v3, inv)
+		}
 		return resp.Msg.InviteCode, resp.Msg.Pin
 	}
 	wrong := func(right string) string { return fmt.Sprintf("%06d", (mustAtoi(t, right)+1)%1_000_000) }

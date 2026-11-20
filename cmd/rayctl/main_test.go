@@ -279,12 +279,13 @@ func TestKeyStateReality(t *testing.T) {
 type inviteNode struct {
 	nodev1connect.NodeServiceClient
 	short   string
+	v3      string
 	revoked []string
 }
 
 func (n *inviteNode) CreateInvite(context.Context, *connect.Request[nodev1.CreateInviteRequest]) (*connect.Response[nodev1.CreateInviteResponse], error) {
 	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: &nodev1.Invite{Id: "inv1", User: "alice", Name: "phone", Role: "user"},
-		InviteCode: "rcinv1:long", InviteCodeShort: n.short}), nil
+		InviteCode: "rcinv1:long", InviteCodeShort: n.short, InviteCodeV3: n.v3}), nil
 }
 
 func (n *inviteNode) RevokeDevice(_ context.Context, req *connect.Request[nodev1.RevokeDeviceRequest]) (*connect.Response[nodev1.RevokeDeviceResponse], error) {
@@ -297,18 +298,20 @@ func (n *inviteNode) RevokeDevice(_ context.Context, req *connect.Request[nodev1
 // in it) rcinv1 by default; with -format rcinv2 the invite is withdrawn.
 func TestInviteFormat(t *testing.T) {
 	for _, c := range []struct {
-		short string
-		args  []string
-		want  string // the invite written; "": none, withdrawn
+		short, v3 string
+		args      []string
+		want      string // the invite written; "": none, withdrawn
 	}{
-		{"RCINV2:SHORT", nil, "RCINV2:SHORT"},
-		{"RCINV2:SHORT", []string{"-format", "rcinv2"}, "RCINV2:SHORT"},
-		{"RCINV2:SHORT", []string{"-format", "rcinv1"}, "rcinv1:long"},
-		{"", nil, "rcinv1:long"},
-		{"", []string{"-format", "rcinv1"}, "rcinv1:long"},
-		{"", []string{"-format", "rcinv2"}, ""},
+		{"RCINV2:SHORT", "RCINV3:NAME", nil, "RCINV2:SHORT"},
+		{"RCINV2:SHORT", "RCINV3:NAME", []string{"-format", "rcinv2"}, "RCINV2:SHORT"},
+		{"RCINV2:SHORT", "RCINV3:NAME", []string{"-format", "rcinv3"}, "RCINV3:NAME"},
+		{"RCINV2:SHORT", "RCINV3:NAME", []string{"-format", "rcinv1"}, "rcinv1:long"},
+		{"RCINV2:SHORT", "", []string{"-format", "rcinv3"}, ""}, // a node before v0.35
+		{"", "", nil, "rcinv1:long"},
+		{"", "", []string{"-format", "rcinv1"}, "rcinv1:long"},
+		{"", "", []string{"-format", "rcinv2"}, ""},
 	} {
-		n := &inviteNode{short: c.short}
+		n := &inviteNode{short: c.short, v3: c.v3}
 		out := filepath.Join(t.TempDir(), "invite")
 		err := (&cli{c: n}).device(context.Background(), "invite", append([]string{"alice", "phone", "-o", out}, c.args...))
 		got, _ := os.ReadFile(out)
@@ -317,15 +320,15 @@ func TestInviteFormat(t *testing.T) {
 			t.Errorf("short %q, %v: %v, wrote %q, withdrew %v", c.short, c.args, err, got, n.revoked)
 		}
 	}
-	if err := (&cli{c: &inviteNode{}}).device(context.Background(), "invite", []string{"alice", "phone", "-format", "rcinv3"}); !errors.Is(err, errUsage) {
-		t.Errorf("-format rcinv3: %v", err)
+	if err := (&cli{c: &inviteNode{}}).device(context.Background(), "invite", []string{"alice", "phone", "-format", "rcinv4"}); !errors.Is(err, errUsage) {
+		t.Errorf("-format rcinv4: %v", err)
 	}
 }
 
 // remote enroll @FILE finds the invite in the text around it, as rayctl
 // device invite prints it, whichever the form.
 func TestReadArgInvite(t *testing.T) {
-	for _, code := range []string{"RCINV2:AIA4WADRA4AACAQD", "rcinv2:aia4wadra4aacaqd", "rcinv1:eyJ2IjoxfQ"} {
+	for _, code := range []string{"RCINV3:AMM4WADRA4HWWM3G", "RCINV2:AIA4WADRA4AACAQD", "rcinv2:aia4wadra4aacaqd", "rcinv1:eyJ2IjoxfQ"} {
 		f := filepath.Join(t.TempDir(), "invite.txt")
 		text := "invite 3f2a for alice/phone (user), once, until 2026-11-07 10:00. The client registers with it through the API:\n\n" + code + "\n"
 		if err := os.WriteFile(f, []byte(text), 0o600); err != nil {

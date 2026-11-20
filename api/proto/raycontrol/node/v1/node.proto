@@ -1297,6 +1297,10 @@ message CreateInviteResponse {
   // What the node took of allow but would point out: a private network,
   // an admin address.
   repeated string warnings = 5 [(google.api.field_visibility).restriction = "ADMIN"];
+  // The same invite by name, "RCINV3:..." (api-v1 §3b): with the node's
+  // name (when it has one) and its SPA versions; "" if the host cannot go
+  // in it. A node before v0.35.0 sends none.
+  string invite_code_v3 = 6;
 }
 
 message SetDeviceAllowRequest {

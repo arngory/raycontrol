@@ -24,6 +24,14 @@ func FuzzDecodeInvite(f *testing.F) {
 		if s, err := b.EncodeInvite(); err == nil {
 			f.Add(s)
 		}
+		b.SPA.Versions = []int{2, 3}
+		if a, err := netip.ParseAddr(b.Host); err == nil {
+			b.DNSName, b.Addrs = "k3f.example.com", []string{a.String()}
+		}
+		if s, err := b.EncodeInvite3(); err == nil {
+			f.Add(s)
+			f.Add(s[:len(s)-3])
+		}
 	}
 	f.Add(InvitePrefix + base64.RawURLEncoding.EncodeToString([]byte(`{"v":1,"api":{"port":1},"expires":-1,"spa":{"node_id":"x"}}`)))
 	f.Add("RCINV2:AIA4WADRA4AACAQDAQCQMBYIBEFAWDANBYHQAAEGJQAAABSUEAQSEIZEEUTCOKBJFIVSYLJOF4YDCMRTGQ2TMNZYHE5DWPB5HY7VLEYLRMAIQAGOUCQ2FI5EUWTKOQCBIJBUIRKGI5EESSSLJRGU4T2QKFJFGVCVKZLVQWK2LNOF2XS7AAD3YVLAMFRGGZDFMZTWQ2LKNNWG23TPOBYXE43UOV3HO6DZPJ5XY7L6P5UVOCUA")
@@ -36,9 +44,13 @@ func FuzzDecodeInvite(f *testing.F) {
 		if b.Version != 1 || b.API == nil || b.Expires == 0 {
 			t.Fatalf("%q taken as %+v", s, b)
 		}
-		short := strings.HasPrefix(strings.ToUpper(strings.TrimSpace(s)), InvitePrefix2)
-		if !short {
+		up := strings.ToUpper(strings.TrimSpace(s))
+		v3 := strings.HasPrefix(up, InvitePrefix3)
+		if !strings.HasPrefix(up, InvitePrefix2) && !v3 {
 			return
+		}
+		if b.DNSName != "" && (!v3 || !hostName(b.DNSName) || len(b.Addrs) != 1) {
+			t.Fatalf("%q: name %q, addresses %v", s, b.DNSName, b.Addrs)
 		}
 		if a, err := netip.ParseAddr(b.Host); err != nil && !hostName(b.Host) || err == nil && a.Zone() != "" {
 			t.Fatalf("%q: host %q", s, b.Host)
@@ -46,7 +58,11 @@ func FuzzDecodeInvite(f *testing.F) {
 		if _, err := b.SPA.Params(); err != nil {
 			return // refused where it is used (rayctl remote enroll)
 		}
-		again, err := b.EncodeInvite2()
+		encode := b.EncodeInvite2
+		if v3 {
+			encode = b.EncodeInvite3
+		}
+		again, err := encode()
 		if err != nil {
 			t.Fatalf("%q taken as %+v, not written again: %v", s, b, err)
 		}

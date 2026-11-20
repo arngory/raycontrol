@@ -284,7 +284,7 @@ func probeDNSZones(p *sub.Payload, host string, ip netip.Addr, deviceKey [spa.Ke
 // readArg reads the bundle from the argument, a file (@FILE) or stdin
 // (-); in a file or on stdin the rcdev1 token is found in whatever text
 // surrounds it (the output of rayctl device add, a message); an invite,
-// RCINV2 or rcinv1, is found the same way.
+// RCINV3, RCINV2 or rcinv1, is found the same way.
 func readArg(s string) (string, error) {
 	var text string
 	switch {
@@ -311,7 +311,7 @@ func argToken(text string) string {
 	n := len(node.InvitePrefix2)
 	for _, f := range strings.Fields(text) {
 		if strings.HasPrefix(f, node.BundlePrefix) || strings.HasPrefix(f, node.InvitePrefix) ||
-			len(f) > n && strings.EqualFold(f[:n], node.InvitePrefix2) {
+			len(f) > n && (strings.EqualFold(f[:n], node.InvitePrefix2) || strings.EqualFold(f[:n], node.InvitePrefix3)) {
 			return f
 		}
 	}

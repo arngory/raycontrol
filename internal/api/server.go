@@ -1060,7 +1060,7 @@ func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.C
 	if ttl == 0 {
 		ttl = DefaultInviteTTL
 	}
-	var code, short, pin string
+	var code, short, v3, pin string
 	err := billingInviteRole(ctx, role)
 	var api *apiService
 	if err == nil {
@@ -1094,7 +1094,7 @@ func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.C
 		var key [spa.KeySize]byte
 		inv, key, err = s.Store.CreateInviteAllow(ctx, req.Msg.User, req.Msg.Name, role, ttl, allow, withPIN)
 		if err == nil {
-			code, short, err = s.inviteCode(ctx, inv, key, api)
+			code, short, v3, err = s.inviteCode(ctx, inv, key, api)
 		}
 	}
 	what, target := "invite.create:"+role, req.Msg.User+"/"+req.Msg.Name
@@ -1111,7 +1111,7 @@ func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.C
 		return nil, err
 	}
 	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: invitePB(inv), InviteCode: code, Pin: pin, InviteCodeShort: short,
-		Warnings: warnings}), nil
+		InviteCodeV3: v3, Warnings: warnings}), nil
 }
 
 // newPIN is a PIN of 6 digits, uniform.
@@ -1157,25 +1157,31 @@ type apiService struct {
 }
 
 // inviteCode encodes an invite: what SPA needs, with the invite's key and
-// the API as its only service, and where the API is; as rcinv1 and in the
-// short form rcinv2 (api-v1 §3a), "" when the host cannot go in it.
-func (s *Server) inviteCode(ctx context.Context, inv store.Invite, key [spa.KeySize]byte, api *apiService) (string, string, error) {
+// the API as its only service, and where the API is; as rcinv1, in the
+// short form rcinv2 (api-v1 §3a) and by name, rcinv3 (§3b), the short
+// ones "" when the host cannot go in them.
+func (s *Server) inviteCode(ctx context.Context, inv store.Invite, key [spa.KeySize]byte, api *apiService) (code, short, v3 string, err error) {
 	host, err := node.Host(ctx, s.Store)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
+	}
+	dnsName, err := provision.NodeDNSName(ctx, s.Store)
+	if err != nil {
+		return "", "", "", err
 	}
 	ep := api.endpoint
-	// No SPA versions: an invite knocks at host (names-v1 §9 п. 3), and
-	// rcinv2 has no room for them; the bundle it registers for has them.
+	// rcinv1 and rcinv2 as before: the host alone, no SPA versions (they
+	// knock at the host, names-v1 §9 п. 3); rcinv3 by name, with them.
 	b := node.Bundle{Version: 1, Host: host, SPA: node.FromParams(s.Params), DeviceID: inv.ID,
 		DeviceKey: hex.EncodeToString(key[:]), API: &ep, Expires: inv.ExpiresAt.Unix(), PIN: inv.PinProof != nil,
 		Services: []node.BundleService{{ID: uint16(api.svc.ID), Kind: api.svc.Kind, Name: api.svc.Name}}}
-	code, err := b.EncodeInvite()
-	if err != nil {
-		return "", "", err
+	if code, err = b.EncodeInvite(); err != nil {
+		return "", "", "", err
 	}
-	short, _ := b.EncodeInvite2()
-	return code, short, nil
+	short, _ = b.EncodeInvite2()
+	b.DNSName, b.Addrs, b.SPA = dnsName, node.Addrs(host), nodeSPA(s.Params)
+	v3, _ = b.EncodeInvite3()
+	return code, short, v3, nil
 }
 
 func (s *Server) ListAudit(ctx context.Context, req *connect.Request[nodev1.ListAuditRequest]) (*connect.Response[nodev1.ListAuditResponse], error) {

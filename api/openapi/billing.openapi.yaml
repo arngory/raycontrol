@@ -239,6 +239,13 @@ components:
           type: string
           title: invite_code_short
           description: the same invite as "RCINV2:..." (api-v1 §3a); "" if the host cannot go in it
+        inviteCodeV3:
+          type: string
+          title: invite_code_v3
+          description: |-
+            The same invite by name, "RCINV3:..." (api-v1 §3b): with the node's
+             name (when it has one) and its SPA versions; "" if the host cannot go
+             in it. A node before v0.35.0 sends none.
       title: CreateInviteResponse
       additionalProperties: false
     raycontrol.node.v1.CreateUserRequest:
