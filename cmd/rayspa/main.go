@@ -145,8 +145,8 @@ func run(args []string) error {
 		gate.EnableGuard(&perimeter.Guard{Sweep: (&perimeter.Sweeper{}).Sweep, Refused: fw.GuardRefused,
 			Report: guardReporter(ctx, *socket, log), Log: log})
 	}
-	handle := func(src netip.Addr, pkt []byte) {
-		g, err := gate.Handle(src, pkt)
+	handle := func(src, dst netip.Addr, pkt []byte) {
+		g, err := gate.Handle(src, dst, pkt)
 		if err != nil {
 			log.Debug("spa rejected", "src", src, "err", err)
 			return
@@ -531,7 +531,7 @@ func relayFeed(b node.RelayBundle) (openFeed, error) {
 	base := "https://" + netip.AddrPortFrom(b.Exit, b.API.Port).String()
 	client := perimeterv1connect.NewRelayServiceClient(hc, base)
 	return func(ctx context.Context) (snapshots, error) {
-		s, err := client.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{}))
+		s, err := client.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{SpaVersions: perimeter.SPAVersions}))
 		if err != nil {
 			return nil, err
 		}

@@ -3,6 +3,7 @@ package spa
 import (
 	"encoding/binary"
 	"errors"
+	"net/netip"
 	"slices"
 	"testing"
 	"time"
@@ -46,6 +47,15 @@ func FuzzVerify(f *testing.F) {
 		{append([]byte{1}, plain(now, 0, 0)[1:]...), 0},
 		{func() []byte { b := plain(now, 0, 0); b[12] = MaxScope + 1; return b }(), 1},
 		{plain(now, 0, 0)[:headerSize], 0},
+		// v3: the address after the header, scope after it.
+		{func() []byte { b := plain(now, 0, 0); b[0] = Version3; b[headerSize+15] = 7; return b }(), 0},
+		{func() []byte {
+			b := plain(now, 0, 0)
+			b[0], b[12] = Version3, 2
+			b[headerSize+DstSize+1], b[headerSize+DstSize+3] = 1, 2
+			return b
+		}(), 0},
+		{func() []byte { b := plain(now, 0, 0)[:headerSize+DstSize-1]; b[0] = Version3; return b }(), 0},
 	} {
 		f.Add([]byte(nil), s.pt, nonce, s.shift, true)
 	}
@@ -55,6 +65,11 @@ func FuzzVerify(f *testing.F) {
 	}
 	f.Add(pkt, []byte(nil), []byte(nil), int8(0), false)
 	f.Add(pkt[:95], []byte(nil), []byte(nil), int8(0), false)
+	pkt3, err := Seal(p, fill32(0x11), Request{Time: now, Scope: []uint16{1}, Dst: netip.MustParseAddr("203.0.113.7")}, nonce, 120)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(pkt3, []byte(nil), []byte(nil), int8(0), false)
 	f.Add(make([]byte, 160), []byte(nil), []byte(nil), int8(0), false)
 
 	devices := map[string]Device{"a": device("a", 0x11, 1, 2), "b": device("b", 0x12, 3)}
@@ -101,10 +116,19 @@ func FuzzVerify(f *testing.F) {
 		}
 		if sealed {
 			at := time.Unix(int64(binary.BigEndian.Uint64(pt[1:9])), 0) //nolint:gosec // G115: as the verifier reads it
-			if g.DeviceID != "a" || pt[0] != Version || pt[11] != 0 || p.Epoch(at) != epoch || at.Sub(now).Abs() > MaxSkew {
+			if g.DeviceID != "a" || (pt[0] != Version && pt[0] != Version3) || pt[11] != 0 || p.Epoch(at) != epoch || at.Sub(now).Abs() > MaxSkew {
 				t.Fatalf("plaintext %x of epoch %d taken: %+v", pt, epoch, g)
 			}
-			if n := int(pt[12]); n > MaxScope || headerSize+2*n > len(pt) {
+			ids := headerSize
+			if pt[0] == Version3 {
+				ids += DstSize
+				if want := netip.AddrFrom16([16]byte(pt[headerSize:ids])).Unmap(); g.Dst != want {
+					t.Fatalf("plaintext %x: destination %v, want %v", pt, g.Dst, want)
+				}
+			} else if g.Dst.IsValid() {
+				t.Fatalf("a v2 plaintext %x with destination %v", pt, g.Dst)
+			}
+			if n := int(pt[12]); n > MaxScope || ids+2*n > len(pt) {
 				t.Fatalf("plaintext %x of %d services taken", pt, n)
 			}
 		}

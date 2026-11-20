@@ -198,7 +198,7 @@ func TestEndpoint(t *testing.T) {
 		// The report fields beyond the first ones of v1 (Niko §20).
 		!slices.Equal(p.Probe.Report, []string{"udp_mtu", "path", "dns", "dns_tcp", "dns_zone"}) ||
 		// The SPA carriers: UDP only without -spa-tcp.
-		p.SPA == nil || !slices.Equal(p.SPA.Carriers, []string{"udp"}) ||
+		p.SPA == nil || !slices.Equal(p.SPA.Carriers, []string{"udp"}) || !slices.Equal(p.SPA.Versions, []int{2, 3}) ||
 		// The user has a dnstt profile: the dnsprobe-v1 key.
 		p.DNSProbe == nil || p.DNSProbe.V != 1 || len(p.DNSProbe.Key) != 43 {
 		t.Fatalf("payload %+v", p)
@@ -715,9 +715,20 @@ func TestRelaysInSubscription(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(p.Relays) != 1 || p.Relays[0].ID != "r1" || p.Relays[0].Host != "198.51.100.20" || p.Relays[0].SPA != node.FromParams(params) {
+	if len(p.Relays) != 1 || p.Relays[0].ID != "r1" || p.Relays[0].Host != "198.51.100.20" || !reflect.DeepEqual(p.Relays[0].SPA, node.FromParams(params)) {
 		t.Fatalf("relays %+v", p.Relays)
 	}
+	// Once the relay's rayspa said it takes v3 (spa-v3 §5).
+	srv.RelaySPA = func(name string) []int {
+		if name == "r1" {
+			return []int{2, 3}
+		}
+		return nil
+	}
+	if p := build(); len(p.Relays) != 1 || !slices.Equal(p.Relays[0].SPA.Versions, []int{2, 3}) {
+		t.Fatalf("relay versions %+v", p.Relays)
+	}
+	srv.RelaySPA = nil
 	kinds := map[uint16]string{uint16(dns.ID): "dnstt", uint16(reality.ID): "reality"}
 	if len(p.Profiles) != 2 {
 		t.Fatalf("profiles %+v", p.Profiles)

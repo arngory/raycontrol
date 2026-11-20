@@ -49,7 +49,14 @@ type SPAParams struct {
 	PortRange uint16 `json:"port_range"`
 	LenMin    int    `json:"len_min"`
 	LenMax    int    `json:"len_max"`
+	// Versions are the SPA versions the node (or a relay) takes, for a
+	// client to pick from (spa-v3 §5): absent means [2]. Not stored with
+	// the parameters: whoever hands them out sets it.
+	Versions []int `json:"versions,omitempty"`
 }
+
+// SPAVersions are the SPA versions this node takes (spa-v3 §5).
+var SPAVersions = []int{2, 3}
 
 // FromParams converts spa.Params to their JSON form.
 func FromParams(p spa.Params) SPAParams {

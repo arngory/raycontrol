@@ -318,8 +318,17 @@ func FuzzGateUpdate(f *testing.F) {
 			}
 			pkt, err := spa.Seal(p, [spa.KeySize]byte(d[0].Key), spa.Request{Time: now, Scope: scope}, bytes.Repeat([]byte{7}, spa.NonceSize), p.LenMin)
 			if err == nil {
-				_, _ = g.Handle(netip.MustParseAddr("192.0.2.9"), pkt)
-				_, _ = g.Handle(netip.MustParseAddr("2001:db8::9"), pkt) // a replay
+				_, _ = g.Handle(netip.MustParseAddr("192.0.2.9"), netip.Addr{}, pkt)
+				_, _ = g.Handle(netip.MustParseAddr("2001:db8::9"), netip.Addr{}, pkt) // a replay
+			}
+			// v3 (spa-v3 §4): to an address that is neither the snapshot's
+			// nor the one it came to, it opens nothing.
+			wire := netip.MustParseAddr("10.0.0.5")
+			pkt3, err := spa.SealRandom(p, [spa.KeySize]byte(d[0].Key), spa.Request{Time: now, Scope: scope, Dst: netip.MustParseAddr("198.51.100.99")})
+			if err == nil {
+				if _, err := g.Handle(netip.MustParseAddr("192.0.2.10"), wire, pkt3); err == nil && !slices.Contains(g.own, netip.MustParseAddr("198.51.100.99")) {
+					t.Fatalf("a v3 packet for another address opened, own %v", g.own)
+				}
 			}
 			snap.Devices = snap.Devices[1:]
 			_ = g.Update(snap)
@@ -421,7 +430,7 @@ func FuzzParseUDP(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, pkt []byte) {
-		src, payload, ok := parseUDP(pkt)
+		src, dst, payload, ok := parseUDP(pkt)
 		if !ok {
 			return
 		}
@@ -429,13 +438,13 @@ func FuzzParseUDP(f *testing.F) {
 		switch pkt[0] >> 4 {
 		case 4:
 			hdr = int(pkt[0]&0x0f) * 4
-			if src != netip.AddrFrom4([4]byte(pkt[12:16])) || pkt[9] != 17 {
-				t.Fatalf("v4 source %v", src)
+			if src != netip.AddrFrom4([4]byte(pkt[12:16])) || dst != netip.AddrFrom4([4]byte(pkt[16:20])) || pkt[9] != 17 {
+				t.Fatalf("v4 source %v, destination %v", src, dst)
 			}
 		case 6:
 			hdr = 40
-			if src != netip.AddrFrom16([16]byte(pkt[8:24])) || pkt[6] != 17 {
-				t.Fatalf("v6 source %v", src)
+			if src != netip.AddrFrom16([16]byte(pkt[8:24])) || dst != netip.AddrFrom16([16]byte(pkt[24:40])) || pkt[6] != 17 {
+				t.Fatalf("v6 source %v, destination %v", src, dst)
 			}
 		default:
 			t.Fatalf("version %d parsed", pkt[0]>>4)

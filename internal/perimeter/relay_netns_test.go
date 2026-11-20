@@ -44,7 +44,7 @@ func TestRelayRole(t *testing.T) {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 		defer stop()
-		go ReadNFLOG(ctx, 8, func(src netip.Addr, pkt []byte) { gate.Handle(src, pkt) }, quiet)
+		go ReadNFLOG(ctx, 8, func(src, dst netip.Addr, pkt []byte) { gate.Handle(src, dst, pkt) }, quiet)
 		fmt.Println("relay ready")
 		for ctx.Err() == nil {
 			gate.Tick()

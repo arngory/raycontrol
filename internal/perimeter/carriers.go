@@ -16,40 +16,40 @@ import (
 	nflog "github.com/florianl/go-nflog/v2"
 )
 
-// Handler checks one SPA packet from src.
-type Handler func(src netip.Addr, pkt []byte)
+// Handler checks one SPA packet from src, which came to dst: the node's
+// address it was sent to (spa-v3 §4).
+type Handler func(src, dst netip.Addr, pkt []byte)
 
-// parseUDP extracts the source address and the UDP payload from an IPv4 or
-// IPv6 packet as NFLOG delivers it. IPv6 extension headers are not followed:
-// a SPA packet never carries them.
-func parseUDP(pkt []byte) (netip.Addr, []byte, bool) {
+// parseUDP extracts the source and destination addresses and the UDP
+// payload from an IPv4 or IPv6 packet as NFLOG delivers it. IPv6 extension
+// headers are not followed: a SPA packet never carries them.
+func parseUDP(pkt []byte) (src, dst netip.Addr, payload []byte, ok bool) {
 	if len(pkt) < 1 {
-		return netip.Addr{}, nil, false
+		return src, dst, nil, false
 	}
-	var src netip.Addr
 	var rest []byte
 	switch pkt[0] >> 4 {
 	case 4:
 		ihl := int(pkt[0]&0x0f) * 4
 		if ihl < 20 || len(pkt) < ihl+8 || pkt[9] != 17 {
-			return src, nil, false
+			return src, dst, nil, false
 		}
-		src = netip.AddrFrom4([4]byte(pkt[12:16]))
+		src, dst = netip.AddrFrom4([4]byte(pkt[12:16])), netip.AddrFrom4([4]byte(pkt[16:20]))
 		rest = pkt[ihl:]
 	case 6:
 		if len(pkt) < 40+8 || pkt[6] != 17 {
-			return src, nil, false
+			return src, dst, nil, false
 		}
-		src = netip.AddrFrom16([16]byte(pkt[8:24]))
+		src, dst = netip.AddrFrom16([16]byte(pkt[8:24])), netip.AddrFrom16([16]byte(pkt[24:40]))
 		rest = pkt[40:]
 	default:
-		return src, nil, false
+		return src, dst, nil, false
 	}
 	ulen := int(binary.BigEndian.Uint16(rest[4:6]))
 	if ulen < 8 || ulen > len(rest) {
-		return src, nil, false
+		return src, dst, nil, false
 	}
-	return src, rest[8:ulen], true
+	return src, dst, rest[8:ulen], true
 }
 
 // ReadNFLOG delivers SPA packets logged by the firewall to group until ctx
@@ -67,8 +67,8 @@ func ReadNFLOG(ctx context.Context, group uint16, h Handler, log *slog.Logger) e
 		if a.Payload == nil {
 			return 0
 		}
-		if src, payload, ok := parseUDP(*a.Payload); ok {
-			h(src, payload)
+		if src, dst, payload, ok := parseUDP(*a.Payload); ok {
+			h(src, dst, payload)
 		}
 		return 0
 	}, func(err error) int {
@@ -194,6 +194,11 @@ func (c *TCPCarrier) handle(conn net.Conn) {
 	if err != nil {
 		return
 	}
+	// The node's address the connection came to; unset if unknown.
+	var to netip.Addr
+	if local, err := netip.ParseAddrPort(conn.LocalAddr().String()); err == nil {
+		to = local.Addr().Unmap().WithZone("")
+	}
 	var hdr [5]byte
 	n, err := io.ReadFull(conn, hdr[:])
 	if n == 0 {
@@ -214,7 +219,7 @@ func (c *TCPCarrier) handle(conn net.Conn) {
 			return
 		}
 		if data, err = spa.FromTLSCarrier(data); err == nil {
-			c.Handler(addr.Addr().Unmap(), data)
+			c.Handler(addr.Addr().Unmap(), to, data)
 		}
 		return
 	}
@@ -229,7 +234,7 @@ func (c *TCPCarrier) handle(conn net.Conn) {
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) && !isTimeout(err) {
 		return
 	}
-	c.Handler(addr.Addr().Unmap(), data)
+	c.Handler(addr.Addr().Unmap(), to, data)
 }
 
 func isTimeout(err error) bool {

@@ -198,9 +198,11 @@ func RelayKinds(kind string) bool {
 	return !slices.Contains([]string{"dnstt", "masterdns", "slipstream", "yggdrasil", "ssh", "subscription", "api"}, kind)
 }
 
-// SPAHint: "udp", "tcp" (bare, §10), "tls" (ClientHello, §10.1).
+// SPAHint: "udp", "tcp" (bare, §10), "tls" (ClientHello, §10.1); the SPA
+// versions the node takes (spa-v3 §5), absent before v0.35.0.
 type SPAHint struct {
 	Carriers []string `json:"carriers"`
+	Versions []int    `json:"versions,omitempty"`
 }
 
 // ProbeHint: probe-v1 on the subscription endpoint; UDP: the echo on the

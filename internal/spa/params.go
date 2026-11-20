@@ -1,8 +1,10 @@
-// Package spa implements raycontrol SPA v2: single packet authorization with
-// per-epoch device keys and a time-rotated listening port.
+// Package spa implements raycontrol SPA v2 and v3: single packet
+// authorization with per-epoch device keys and a time-rotated listening
+// port; v3 packets also name the address they are sent to.
 //
-// The wire format is specified in docs/spec/spa-v2.md. Test vectors shared
-// with clients live in testdata/vectors.json.
+// The wire format is specified in docs/spec/spa-v2.md and spa-v3.md. Test
+// vectors shared with clients live in testdata/vectors.json (v2) and
+// testdata/vectors-v3.json.
 package spa
 
 import (
@@ -18,6 +20,12 @@ import (
 const (
 	// Version is the plaintext version byte of SPA v2 packets.
 	Version = 0x02
+	// Version3 is that of SPA v3 packets: DstSize bytes of the destination
+	// address follow the header (spa-v3 §2).
+	Version3 = 0x03
+	// DstSize is the destination address of a v3 packet: IPv6, or IPv4
+	// as ::ffff:a.b.c.d.
+	DstSize = 16
 
 	NonceSize  = 24
 	TagSize    = 16

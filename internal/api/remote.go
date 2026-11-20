@@ -57,6 +57,7 @@ type Remote struct {
 	relayReports map[string]int            // Report calls under way per relay
 	relayProbes  map[string]int            // rayd relay's feeds open per relay
 	relayProbeAt map[string]time.Time      // when the last of them closed
+	relaySPA     map[string][]int          // SPA versions each relay's rayspa takes (spa-v3 §5)
 	started      time.Time                 // when Serve began
 }
 

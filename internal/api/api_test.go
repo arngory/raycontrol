@@ -138,6 +138,11 @@ func TestEnrollAndPassSPA(t *testing.T) {
 	if err != nil || params != srv.Params {
 		t.Fatalf("bundle params differ: %v", err)
 	}
+	// SPA v3 with the host an address; with a name nothing resolves (the
+	// tests' resolver), no public address is known: v2 alone (spa-v3 §5).
+	if !slices.Equal(b2.SPA.Versions, []int{2, 3}) || b.SPA.Versions != nil {
+		t.Fatalf("bundle SPA versions %v by address, %v by name", b2.SPA.Versions, b.SPA.Versions)
+	}
 
 	// The client side: seal with what the bundle carries.
 	var key [spa.KeySize]byte

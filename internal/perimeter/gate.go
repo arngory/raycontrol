@@ -87,6 +87,9 @@ type Gate struct {
 	// §6.2): off as the last snapshot says (inLimitOff), and as the table
 	// has it (inLimitTableOff; a new table has it on).
 	inLimitOff, inLimitTableOff bool
+	// own are the node's public addresses (spa-v3 §4): a v3 packet names
+	// one of them or the address it came to.
+	own []netip.Addr
 	// guard is the conntrack table's guard (§6.3); nil: none (a relay).
 	guard *Guard
 }
@@ -329,6 +332,7 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		relays = append(relays, p)
 	}
 	relayPorts := portsOf(snap.RelayPorts)
+	own := ownAddrsOf(snap.GetOwnAddrs())
 	sp := snap.Spa
 	u := &update{
 		params: params, devices: devices, allowed: allowed, services: services, forward: Forwarded(snap.Services), rotations: rotations,
@@ -336,7 +340,7 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		integ: integ, integPorts: integPorts,
 		defTTL: time.Duration(sp.DefaultTtlS) * time.Second, maxTTL: time.Duration(sp.MaxTtlS) * time.Second,
 		tcpCarrier: sp.TcpCarrier, acme: snap.GetAcme(), egress: egressOf(snap.GetEgress()),
-		connLimitOff: snap.GetConnLimitOff(),
+		connLimitOff: snap.GetConnLimitOff(), own: own,
 	}
 
 	g.mu.Lock()
@@ -350,6 +354,33 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		return fmt.Errorf("%w: %w", ErrPending, err)
 	}
 	return nil
+}
+
+// SPAVersions are the SPA versions this gate takes (spa-v3 §5). A
+// relay's rayspa tells the exit, which lists them for the relay.
+var SPAVersions = []uint32{2, 3}
+
+// maxOwnAddrs bounds own_addrs: a node has a few public addresses, and
+// every v3 packet is checked against them.
+const maxOwnAddrs = 16
+
+// ownAddrsOf parses the node's public addresses of a snapshot, the first
+// maxOwnAddrs. One that is no address of a node is left out, not the
+// snapshot refused: a refused snapshot would hold back revocations too.
+// Leaving one out only takes fewer v3 packets.
+func ownAddrsOf(addrs []string) []netip.Addr {
+	own := make([]netip.Addr, 0, min(len(addrs), maxOwnAddrs))
+	for _, s := range addrs {
+		a, err := netip.ParseAddr(s)
+		if err != nil || a.Zone() != "" || len(own) == maxOwnAddrs {
+			continue
+		}
+		if a = a.Unmap(); a.IsUnspecified() || a.IsMulticast() || a == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
+			continue
+		}
+		own = append(own, a)
+	}
+	return own
 }
 
 // mergePrefixes leaves out prefixes inside others, and repeats: an interval
@@ -393,6 +424,7 @@ type update struct {
 	acme               *perimeterv1.AcmeWindow
 	egress             Egress
 	connLimitOff       bool
+	own                []netip.Addr
 }
 
 // catchUpLocked finishes a restore of the table, then applies the snapshot
@@ -526,6 +558,7 @@ func (g *Gate) adoptLocked(u *update) {
 	g.defaultTTL, g.maxTTL = u.defTTL, u.maxTTL
 	g.services, g.allowed, g.rotations = u.services, u.allowed, u.rotations
 	g.inLimitOff = u.connLimitOff
+	g.own = u.own
 	if !g.egressSeen || !u.egress.Equal(g.egress) {
 		// A new policy goes in at once, whatever the backoff of the old.
 		g.egress, g.egressSeen, g.egressOn = u.egress, true, false
@@ -681,8 +714,11 @@ func (g *Gate) portsFor(ids []uint16) []Port {
 	return out
 }
 
-// Handle checks one SPA packet from src and opens the granted ports.
-func (g *Gate) Handle(src netip.Addr, pkt []byte) (spa.Grant, error) {
+// Handle checks one SPA packet from src, which came to dst (unset when not
+// known), and opens the granted ports. A v3 packet must name one of the
+// node's addresses (spa-v3 §4): one caught at another address and sent
+// on from there opens nothing.
+func (g *Gate) Handle(src, dst netip.Addr, pkt []byte) (spa.Grant, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.verifier == nil {
@@ -691,6 +727,9 @@ func (g *Gate) Handle(src netip.Addr, pkt []byte) (spa.Grant, error) {
 	grant, err := g.verifier.Verify(pkt)
 	if err != nil {
 		return grant, err
+	}
+	if grant.Dst.IsValid() && !spa.OwnDst(grant.Dst, dst, g.own) {
+		return grant, spa.ErrDst
 	}
 	ports := g.portsFor(grant.Scope)
 	now := g.now()

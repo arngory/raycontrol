@@ -47,7 +47,7 @@ func (l *logged) levels(msg string) []slog.Level {
 // is said again.
 func TestTCPCarrierListenFails(t *testing.T) {
 	log := &logged{}
-	c := &TCPCarrier{Handler: func(netip.Addr, []byte) {}, LenMax: func() int { return 160 }, Log: slog.New(log)}
+	c := &TCPCarrier{Handler: func(netip.Addr, netip.Addr, []byte) {}, LenMax: func() int { return 160 }, Log: slog.New(log)}
 	defer c.Close()
 	hold, err := net.Listen("tcp", ":0")
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/node"
@@ -64,22 +65,49 @@ func knock(ctx context.Context, args []string) error {
 	if *ttl > 0 {
 		window = ttl.String() + " (or the node's -spa-max-ttl, if shorter)"
 	}
+	if client == nil {
+		// Nothing to confirm a knock with: one packet of each version the
+		// attempts hold, the first carrier that sends it, so that a node
+		// rolled back before v3 opens too (spa-v3 §6).
+		var sent []string
+		var lastErr error
+		for _, v3 := range knockVersions(b, ip, *addr) {
+			for _, c := range carriers {
+				k := attempt{c, v3}
+				start := time.Now()
+				port := params.Port(params.Slot(start))
+				pkt, err := spa.SealRandom(params, key, k.request(ip, start, *ttl))
+				if err != nil {
+					return err
+				}
+				if err := sendSPA(c, netip.AddrPortFrom(ip, port), serverName, pkt); err != nil {
+					fmt.Printf("%s over %s to port %d: %v\n", k.version(), c, port, err)
+					lastErr = err
+					continue
+				}
+				sent = append(sent, fmt.Sprintf("%s over %s to port %d", k.version(), c, port))
+				break
+			}
+		}
+		if len(sent) == 0 {
+			return fmt.Errorf("no SPA sent: %w", lastErr)
+		}
+		fmt.Printf("%s to %s; the bundle has no subscription to confirm it with\n", strings.Join(sent, ", then "), ip)
+		return nil
+	}
 	var lastErr error
-	for _, c := range carriers {
+	for _, k := range knocks(b, ip, *addr, carriers) {
+		c := k.carrier
 		start := time.Now()
 		port := params.Port(params.Slot(start))
-		pkt, err := spa.SealRandom(params, key, spa.Request{Time: start, TTL: *ttl})
+		pkt, err := spa.SealRandom(params, key, k.request(ip, start, *ttl))
 		if err != nil {
 			return err
 		}
 		if err := sendSPA(c, netip.AddrPortFrom(ip, port), serverName, pkt); err != nil {
-			fmt.Printf("SPA over %s to port %d: %v\n", c, port, err)
+			fmt.Printf("%s over %s to port %d: %v\n", k.version(), c, port, err)
 			lastErr = err
 			continue
-		}
-		if client == nil {
-			fmt.Printf("SPA sent over %s to %s port %d; the bundle has no subscription to confirm it with\n", c, ip, port)
-			return nil
 		}
 		// spa-v2.md §7: connect 150-400 ms after the packet.
 		time.Sleep(300 * time.Millisecond)
@@ -87,7 +115,7 @@ func knock(ctx context.Context, args []string) error {
 		_, err = client.Fetch(fctx, time.Now())
 		cancel()
 		if err != nil {
-			fmt.Printf("SPA over %s to port %d, then the subscription: %v\n", c, port, err)
+			fmt.Printf("%s over %s to port %d, then the subscription: %v\n", k.version(), c, port, err)
 			lastErr = err
 			continue
 		}
