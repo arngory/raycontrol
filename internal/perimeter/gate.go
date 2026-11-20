@@ -372,10 +372,13 @@ func ownAddrsOf(addrs []string) []netip.Addr {
 	own := make([]netip.Addr, 0, min(len(addrs), maxOwnAddrs))
 	for _, s := range addrs {
 		a, err := netip.ParseAddr(s)
-		if err != nil || a.Zone() != "" || a.IsUnspecified() || a.IsMulticast() || len(own) == maxOwnAddrs {
+		if err != nil || a.Zone() != "" || len(own) == maxOwnAddrs {
 			continue
 		}
-		own = append(own, a.Unmap())
+		if a = a.Unmap(); a.IsUnspecified() || a.IsMulticast() || a == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
+			continue
+		}
+		own = append(own, a)
 	}
 	return own
 }

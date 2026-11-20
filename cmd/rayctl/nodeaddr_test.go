@@ -94,4 +94,13 @@ func TestKnockVersions(t *testing.T) {
 	if req := ks[2].request(a("192.0.2.1"), now, 0); req.Dst.IsValid() {
 		t.Fatalf("v2 request %+v", req)
 	}
+	// -addr with a zone: the operator's word, and the packet names the
+	// address without it, as the node compares it.
+	zoned := a("fe80::1%eth0")
+	if got := knockVersions(b, zoned, "fe80::1%eth0"); !slices.Equal(got, []bool{true, false}) {
+		t.Fatalf("zoned -addr: %v", got)
+	}
+	if req := (attempt{"udp", true}).request(zoned, now, 0); req.Dst != a("fe80::1") {
+		t.Fatalf("zoned request %+v", req)
+	}
 }
