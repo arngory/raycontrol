@@ -30,6 +30,11 @@ const (
 	// (spec/names-v1.md §2, provision.NodeDNSName). A rollback keeps it as
 	// it is now, as it does the admin addresses: devices hold the name.
 	DNSNameSetting = "node_dns_name"
+	// RelayNamesSetting is where the relays' names are kept
+	// (spec/relay-names-v1.md §3, provision.RelayNames). A rollback keeps
+	// them as they are now, as it does the node's own name: clients are
+	// given them.
+	RelayNamesSetting = "relay_names"
 
 	// BundlePrefix marks an encoded device bundle.
 	BundlePrefix = "rcdev1:"

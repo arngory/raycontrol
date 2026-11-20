@@ -46,7 +46,7 @@ const settingSPAParams = "spa_params"
 //     removed, and a relay's certificate, SPA, SSH access and probe
 //     endpoint stay as now;
 //   - the settings named in keep (the admin addresses, the node's own
-//     name) take current's value.
+//     name, the relays' names) take current's value.
 //
 // And credentials do not go back: every credential saved and current both
 // have, of the same user and the same service, takes current's values

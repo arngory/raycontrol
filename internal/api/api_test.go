@@ -394,14 +394,14 @@ func TestPerimeterFeed(t *testing.T) {
 	}
 
 	// An ACME order opens the window in the feed, its end closes it.
-	srv.SetACMEWindow(18080, time.Now().Add(time.Minute))
+	srv.SetACMEWindow(18080, time.Now().Add(time.Minute), nil)
 	if !stream.Receive() {
 		t.Fatal(stream.Err())
 	}
 	if w := stream.Msg().Snapshot.Acme; w.GetPort() != 18080 || w.GetUntil() <= time.Now().Unix() {
 		t.Fatalf("acme window %v", w)
 	}
-	srv.SetACMEWindow(0, time.Time{})
+	srv.SetACMEWindow(0, time.Time{}, nil)
 	if !stream.Receive() {
 		t.Fatal(stream.Err())
 	}

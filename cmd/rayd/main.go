@@ -17,6 +17,7 @@ import (
 	mrand "math/rand/v2"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"os/user"
@@ -386,15 +387,25 @@ func cmdServe(args []string) error {
 	if err := startCredentialRotation(ctx, st, r, func() { srv.Notify() }, hb, log); err != nil {
 		return err
 	}
+	// The relays' names clients may be given (relay-names-v1 §4, §5),
+	// checked again as soon as the DNS sync changed records; without a DNS
+	// provider, those the sites' certificates take (§6).
+	relayNames := newRelayNameCheck(st, net.DefaultResolver.LookupNetIP)
+	relayNames.acmeForward = srv.RelayACMEForward
+	srv.RelayNameStatus = relayNames.Status
 	var cm *certs.Manager
 	var is *certs.Issuer
 	if *acmeDir != "" {
-		if cm, is, err = startCertificates(ctx, st, srv, *acmeDir, siteKeys, hb, log); err != nil {
+		if cm, is, err = startCertificates(ctx, st, srv, *acmeDir, siteKeys, relayNames, hb, log); err != nil {
 			log.Error("certificates not managed", "err", err)
 		}
 	}
+	if cm != nil {
+		relayNames.ordering, relayNames.resolved = true, cm.Wake
+	}
 	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, paths.FrontConfig(), hb, log)
-	go syncDNS(ctx, st, srv.Changes, hb, log)
+	go relayNames.run(ctx, srv.Changes, log)
+	go syncDNS(ctx, st, srv.Changes, relayNames.Wake, hb, log)
 	go checkRealityTargets(ctx, st, srv.Changes, hb, log)
 	if *dnsCheck > 0 {
 		go checkDNSZones(ctx, srv.DNSCheck, st, srv.Changes, *dnsCheck, hb, log)
@@ -460,7 +471,7 @@ func cmdServe(args []string) error {
 	go pruneSummary(ctx, sum, log)
 	remote := &api.Remote{Server: srv, Log: log, Perimeter: per, RelayReport: sum.TakeVia}
 	go serveRemote(ctx, remote, srv.Changes)
-	if err := startSubscription(ctx, st, paths, log, sum, remote.RelayProbeUp, remote.RelaySPA, srv.SPAVersions, *probeDaily, *spaTCP, srv.AppMirror, srv.Notify, srv.SubRequests); err != nil {
+	if err := startSubscription(ctx, st, paths, log, sum, remote.RelayProbeUp, remote.RelaySPA, srv.SPAVersions, relayNames.Ready, *probeDaily, *spaTCP, srv.AppMirror, srv.Notify, srv.SubRequests); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
 	log.Info("serving", "socket", *socket, "node", fmt.Sprintf("%x", params.NodeID))
@@ -499,7 +510,7 @@ func supervisor(paths render.Paths, bins deploy.Binaries, st *store.Store, log *
 // keeps its key from one certificate to the next and changes it by keys or
 // when root asks (spec/cert-pin-v1.md §4, §5).
 func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, directory string, keys provision.SiteKeyPolicy,
-	hb *health.Board, log *slog.Logger) (*certs.Manager, *certs.Issuer, error) {
+	relayNames *relayNameCheck, hb *health.Board, log *slog.Logger) (*certs.Manager, *certs.Issuer, error) {
 	key, err := certs.AccountKey(ctx, st)
 	if err != nil {
 		return nil, nil, err
@@ -513,7 +524,7 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 		return nil, nil, err
 	}
 	is := &certs.Issuer{Directory: directory, AccountKey: key, Window: srv.SetACMEWindow, NodeHost: host, Log: log,
-		Listen: ":" + strconv.Itoa(int(port))}
+		Listen: ":" + strconv.Itoa(int(port)), RelayAddrs: relayAddrs(st)}
 	// With Cloudflare: DNS-01 and one wildcard certificate, no window on
 	// TCP 80 (R4-10).
 	is.DNS = func(ctx context.Context) (certs.DNSSolver, error) {
@@ -535,7 +546,13 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 			}
 			d, _ := provision.Domain(ctx, st)
 			return d
-		}}
+		},
+		// Without a DNS provider, the relays' names that resolve to their
+		// relay, through relays that forward TCP 80 (relay-names-v1 §6).
+		// The relays' feeds come back within relayFeedsBack of a start:
+		// until then a certificate with their names is not renewed
+		// without them.
+		RelayNames: relayNames.RelayNamesFor, RelayReport: relayNames.Ordered, RelayHoldUntil: processStart.Add(relayFeedsBack)}
 	// The operator's DNS change may be the fix of a failure: try now.
 	srv.DNSChanged = m.Retry
 	srv.SiteKeyAsked = m.RetrySite
@@ -555,6 +572,23 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 		}
 	}()
 	return m, is, nil
+}
+
+// relayAddrs gives the relays' names and their relays' addresses
+// (certs.Issuer.RelayAddrs): those names resolve to the relay, not the
+// node, and their challenges come through it (relay-names-v1 §6).
+func relayAddrs(st *store.Store) func(ctx context.Context) (map[string]netip.Addr, error) {
+	return func(ctx context.Context) (map[string]netip.Addr, error) {
+		names, err := provision.RelayNames(ctx, st)
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[string]netip.Addr, len(names))
+		for _, rn := range names {
+			out[rn.Name] = rn.Address
+		}
+		return out, nil
+	}
 }
 
 // dohListener is a running DoH endpoint and the certificate it serves.
@@ -862,8 +896,8 @@ func dohHandler(st *store.Store, service int64, answer http.Handler, log *slog.L
 
 // syncDNS keeps the node's records in its DNS provider's zone: when the
 // records it needs change (a DNS tunnel added or removed) and every hour
-// against drift (R4-10).
-func syncDNS(ctx context.Context, st *store.Store, changes func() <-chan struct{}, hb *health.Board, log *slog.Logger) {
+// against drift (R4-10). synced is called after a sync that changed some.
+func syncDNS(ctx context.Context, st *store.Store, changes func() <-chan struct{}, synced func(), hb *health.Board, log *slog.Logger) {
 	last := ""
 	next := time.Time{}
 	for {
@@ -884,6 +918,7 @@ func syncDNS(ctx context.Context, st *store.Store, changes func() <-chan struct{
 				last, next = key, time.Now().Add(time.Hour)
 				if len(done) > 0 {
 					log.Info("DNS records synced", "changes", len(done))
+					synced()
 				}
 				for _, p := range problems {
 					log.Warn("DNS record", "problem", p)
@@ -946,7 +981,7 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 // startSubscription serves the subscription endpoint on the port of the
 // subscription service, if it is enabled. changed wakes apply: a device's
 // LAN consent changed (lan-v1 §1.1).
-func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, sum *summary.Collector, relayProbe func(string) bool, relaySPA func(string) []int, spaVersions func(context.Context) []int, probeDailyMiB int, tcpCarrier bool, app *appmirror.Mirror, changed func(), requests *sub.Requests) error {
+func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, sum *summary.Collector, relayProbe func(string) bool, relaySPA func(string) []int, spaVersions func(context.Context) []int, relayNameReady func(string) bool, probeDailyMiB int, tcpCarrier bool, app *appmirror.Mirror, changed func(), requests *sub.Requests) error {
 	svc, err := st.ServiceByName(ctx, provision.SubscriptionService)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !svc.Enabled) {
 		log.Info("subscription service disabled")
@@ -973,7 +1008,7 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 	}
 	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier, RelayProbe: relayProbe, RelaySPA: relaySPA, SPAVersions: spaVersions,
 		ClockSeqAfter: time.Now().Add(settleAfterStart), PinsSince: processStart, PinsAfter: time.Now().Add(pinSettle), App: app, Changed: changed,
-		Requests: requests}
+		Requests: requests, RelayNameReady: relayNameReady}
 	port := int(ports[0].Num)
 	addr := ":" + strconv.Itoa(port)
 	// Channel probes (R4-16) on the same endpoint, and their UDP echo on

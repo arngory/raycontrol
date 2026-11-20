@@ -82,6 +82,10 @@ type Server struct {
 	// DNSCheck checks the DNS tunnel zones from the node (CheckDNSZones);
 	// nil: the call is unavailable.
 	DNSCheck *dnscheck.Monitor
+	// RelayNameStatus says whether clients may be given a relay's name,
+	// and if not why (spec/relay-names-v1.md §4, §5: rayd's check), for
+	// ListRelays; nil: none is ready, none checked.
+	RelayNameStatus func(name string) (ready bool, problem string)
 	// AppMirror keeps the client's releases (spec/app-update-v1.md); nil:
 	// the setting alone (tests).
 	AppMirror *appmirror.Mirror
@@ -125,9 +129,17 @@ type Server struct {
 	rev   uint64
 	wake  chan struct{} // closed on the next change
 	after []func()      // AfterChange
-	// ACME window (certs.Issuer): rayspa points TCP 80 to acmePort.
+	// ACME window (certs.Issuer): rayspa points TCP 80 to acmePort; the
+	// order's names, for the relays whose names are among them
+	// (relay-names-v1 §6).
 	acmePort  uint16
 	acmeUntil time.Time
+	acmeNames []string
+	// relayACME: what each relay's rayspa said of TCP 80 for the ACME
+	// windows when its feed opened (relay-names-v1 §6), the last word kept
+	// after the feed closed, and its feeds open now that said yes. Under
+	// mu.
+	relayACME map[string]relayACMEState
 
 	// The relays' updates by the node's word (relayupdate.go).
 	relayUpd relayUpdates
@@ -136,13 +148,86 @@ type Server struct {
 	integ integrations
 }
 
-// SetACMEWindow opens the perimeter window for an ACME order to port until
-// the given time, or closes it when until is zero.
-func (s *Server) SetACMEWindow(port uint16, until time.Time) {
+// SetACMEWindow opens the perimeter window for an ACME order of names to
+// port until the given time, or closes it when until is zero. A relay
+// with one of its names among them forwards TCP 80 to the node meanwhile
+// (RelaySnapshot).
+func (s *Server) SetACMEWindow(port uint16, until time.Time, names []string) {
 	s.mu.Lock()
-	s.acmePort, s.acmeUntil = port, until
+	s.acmePort, s.acmeUntil, s.acmeNames = port, until, slices.Clone(names)
+	if until.IsZero() {
+		s.acmeNames = nil
+	}
 	s.mu.Unlock()
 	s.notify()
+}
+
+// acmeOrder is the window's deadline and the names of its order, while
+// one is open.
+func (s *Server) acmeOrder(now time.Time) (time.Time, []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.acmePort == 0 || !s.acmeUntil.After(now) {
+		return time.Time{}, nil
+	}
+	return s.acmeUntil, slices.Clone(s.acmeNames)
+}
+
+// relayACMEState is what a relay's rayspa said of TCP 80 (relayACME).
+type relayACMEState struct {
+	said bool // at its last feed's opening; an older rayspa says nothing: false
+	open int  // its feeds open now that said yes
+}
+
+// relayACMEFeed records what a relay's rayspa said of TCP 80 for the ACME
+// windows as its feed opened, the feed open until done. Its names go into
+// an order only while such a feed is open: through a relay whose feed is
+// gone the window would not reach it, and the CA's challenges would not
+// reach the node. A change is news: the certificates may order the
+// relay's names now, or no more.
+func (s *Server) relayACMEFeed(name string, said bool) (done func()) {
+	s.setRelayACME(name, func(st *relayACMEState) {
+		st.said = said
+		if said {
+			st.open++
+		}
+	})
+	return func() {
+		if said {
+			s.setRelayACME(name, func(st *relayACMEState) { st.open-- })
+		}
+	}
+}
+
+func (s *Server) setRelayACME(name string, change func(*relayACMEState)) {
+	s.mu.Lock()
+	if s.relayACME == nil {
+		s.relayACME = map[string]relayACMEState{}
+	}
+	was := s.relayACME[name]
+	st := was
+	change(&st)
+	s.relayACME[name] = st
+	s.mu.Unlock()
+	if st.said != was.said || st.forwards() != was.forwards() {
+		s.notify()
+	}
+}
+
+// forwards: a feed that said yes is open, and the last word is yes. A
+// rayspa put back to an older one says nothing while the newer one's feed
+// still ends: from its word on, none forwards.
+func (st relayACMEState) forwards() bool { return st.said && st.open > 0 }
+
+// RelayACMEForward reports what a relay's rayspa said of TCP 80 for the
+// ACME windows when its last feed opened since this node started (said),
+// and whether it forwards it now (open): a feed of it that said yes is
+// open and the last word is yes (relay-names-v1 §6).
+func (s *Server) RelayACMEForward(name string) (said, open bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.relayACME[name]
+	return st.said, st.forwards()
 }
 
 func (s *Server) acmeWindow() (uint16, time.Time) {

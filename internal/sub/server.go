@@ -84,6 +84,11 @@ type Server struct {
 	// RelaySPA, when set, gives the SPA versions a relay's rayspa takes
 	// (spa-v3 §5), nil when it has not said: relays[].spa.versions.
 	RelaySPA func(name string) []int
+	// RelayNameReady, when set, says whether clients may be given a
+	// relay's name (spec/relay-names-v1.md §4, §5): the certificate covers
+	// it and it resolves to the relay. profiles[].via_links has those only
+	// (§8); nil: none.
+	RelayNameReady func(name string) bool
 	// App, when set, serves the client's releases on the same endpoint
 	// (spec/app-update-v1.md) and lists them in the subscription while
 	// the administrator has the mirror on (appmirror.Mirror).
@@ -428,6 +433,13 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 	}
 	if err := s.addRelays(ctx, &p, m); err != nil {
 		return Envelope{}, err
+	}
+	// The links through the relays by their names (relay-names-v1 §8),
+	// where a name is ready. Without one a profile goes by via, as before.
+	if user != nil && len(p.Profiles) > 0 {
+		if err := ViaLinks(m, *user, device, p.Profiles, s.RelayNameReady); err != nil {
+			s.Log.Warn("subscription: links through relays left out", "user", u.ID, "err", err)
+		}
 	}
 	if s.App != nil {
 		p.App = s.App.Hint(ctx)

@@ -37,6 +37,7 @@ func (f *countingFW) SetForward([]perimeter.Port) error                       { 
 func (f *countingFW) SetRelays([]netip.Prefix, []perimeter.Port) error        { return nil }
 func (f *countingFW) SetRotation(map[uint16]uint16) error                     { return nil }
 func (f *countingFW) SetACME(uint16, time.Duration) error                     { return nil }
+func (f *countingFW) SetACMEForward(time.Duration) error                      { return nil }
 func (f *countingFW) SetEgress(perimeter.Egress) error                        { return nil }
 func (f *countingFW) SetInLimit(bool) error                                   { return nil }
 func (f *countingFW) SetGuard(bool) error                                     { return nil }

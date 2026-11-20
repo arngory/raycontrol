@@ -63,7 +63,7 @@ func (s *Server) AddRelay(ctx context.Context, req *connect.Request[nodev1.AddRe
 	// As stored, its SSH port's default with it.
 	if stored, err := s.Store.RelayByName(ctx, r.Name); err == nil {
 		if services, err := s.Store.ListServices(ctx); err == nil {
-			pb.Ports = relayPorts(stored, services)
+			pb.Ports = relayPorts(stored, services, "") // no bundle yet, no names
 		}
 	}
 	return connect.NewResponse(&nodev1.AddRelayResponse{Relay: pb}), nil
@@ -78,13 +78,77 @@ func (s *Server) ListRelays(ctx context.Context, _ *connect.Request[nodev1.ListR
 	if err != nil {
 		return nil, toConnect(err)
 	}
+	names, err := s.relayNames(ctx, services)
+	if err != nil {
+		return nil, toConnect(err)
+	}
+	cf, err := s.hasDNSProvider(ctx)
+	if err != nil {
+		return nil, toConnect(err)
+	}
 	resp := &nodev1.ListRelaysResponse{}
 	for _, r := range rs {
 		pb := relayPB(r)
-		pb.Ports = relayPorts(r, services)
+		pb.Ports = relayPorts(r, services, s.acme80(r.Name, cf, len(names[r.Name]) > 0))
+		pb.Names = names[r.Name]
 		resp.Relays = append(resp.Relays, pb)
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// hasDNSProvider reports whether the node has Cloudflare: its sites'
+// certificates are wildcards then, and its relays forward no TCP 80 for
+// them (relay-names-v1 §5, §6).
+func (s *Server) hasDNSProvider(ctx context.Context) (bool, error) {
+	c, _, err := provision.Cloudflare(ctx, s.Store)
+	return c != nil, err
+}
+
+// acmePort80 is acme80 of a relay, its names and the DNS provider read.
+func (s *Server) acmePort80(ctx context.Context, relay string) (string, error) {
+	cf, err := s.hasDNSProvider(ctx)
+	if err != nil {
+		return "", err
+	}
+	names, err := provision.RelayNames(ctx, s.Store)
+	return s.acme80(relay, cf, slices.ContainsFunc(names, func(rn provision.RelayName) bool { return rn.Relay == relay })), err
+}
+
+// acme80 says whether a relay host takes TCP 80 for this node's ACME
+// windows (relay-names-v1 §6), as RelayPort.access says it: "acme" when
+// the node orders its sites' certificates (Certificates), has no DNS
+// provider (a wildcard needs no window) and the relay has names, which
+// those certificates take under HTTP-01; "acme-old" then for a relay
+// whose rayspa has not said it forwards it; "" otherwise.
+func (s *Server) acme80(relay string, cf, named bool) string {
+	if !s.Certificates || cf || !named {
+		return ""
+	}
+	if said, _ := s.RelayACMEForward(relay); !said {
+		return "acme-old"
+	}
+	return "acme"
+}
+
+// relayNames are the relays' names (relay-names-v1 §3), by relay, with
+// whether clients may be given each as rayd's check last found it.
+func (s *Server) relayNames(ctx context.Context, services []store.Service) (map[string][]*nodev1.RelayName, error) {
+	names, err := provision.RelayNames(ctx, s.Store)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]*nodev1.RelayName{}
+	for _, rn := range names {
+		pb := &nodev1.RelayName{Name: rn.Name, Problem: "not checked yet"}
+		if i := slices.IndexFunc(services, func(svc store.Service) bool { return svc.ID == rn.Service }); i >= 0 {
+			pb.Service = services[i].Name
+		}
+		if s.RelayNameStatus != nil {
+			pb.Ready, pb.Problem = s.RelayNameStatus(rn.Name)
+		}
+		out[rn.Relay] = append(out[rn.Relay], pb)
+	}
+	return out, nil
 }
 
 // relayPorts are the ports a relay host takes from outside, for a
@@ -96,8 +160,10 @@ func (s *Server) ListRelays(ctx context.Context, _ *connect.Request[nodev1.ListR
 // the subscription has it, sub.addRelays): the SPA parameters a relay may
 // have before (SetRelayAccess draws them to check its SSH port) are
 // replaced by the bundle's, and a firewall opened for them would be
-// opened for the wrong range.
-func relayPorts(relay store.Relay, services []store.Service) []*nodev1.RelayPort {
+// opened for the wrong range. acme80, when not empty: TCP 80 too, which
+// the relay forwards to the exit while it orders the relay's names, with
+// that access (Server.acme80).
+func relayPorts(relay store.Relay, services []store.Service, acme80 string) []*nodev1.RelayPort {
 	out := []*nodev1.RelayPort{{Name: "ssh", Protos: []string{"tcp"}, From: uint32(relay.SSHPort), To: uint32(relay.SSHPort), Access: "admin"}}
 	bundled := relay.CertPin != ""
 	if bundled && len(relay.SPA) > 0 {
@@ -145,6 +211,11 @@ func relayPorts(relay store.Relay, services []store.Service) []*nodev1.RelayPort
 			}
 		}
 	}
+	if acme80 != "" {
+		// From any address, but only while an order is under way: the
+		// relay's table forwards it for the window alone.
+		out = append(out, &nodev1.RelayPort{Name: "acme", Protos: []string{"tcp"}, From: 80, To: 80, Forwarded: true, Access: acme80})
+	}
 	return out
 }
 
@@ -170,6 +241,9 @@ func (s *Server) addRelay(ctx context.Context, name string, addr netip.Addr) (st
 	}
 	_ = s.Store.DeleteSetting(ctx, relayUpdateKey+r.Name)
 	s.relayUpd.forget(r.Name)
+	// Nor the names of a relay of its name before (relay-names-v1 §3),
+	// should its removal have left them.
+	_ = provision.ForgetRelayNames(ctx, s.Store, r.Name)
 	return r, nil
 }
 
@@ -189,6 +263,7 @@ func (s *Server) removeRelay(ctx context.Context, name string) error {
 	}
 	s.relayUpd.forget(name)
 	_ = s.Store.DeleteSetting(ctx, relayUpdateKey+name)
+	_ = provision.ForgetRelayNames(ctx, s.Store, name)
 	return nil
 }
 
@@ -292,8 +367,12 @@ func (s *Server) issueRelayBundle(ctx context.Context, req *nodev1.IssueRelayBun
 	}
 	// The relay as the bundle makes it: its ports for its host's firewall.
 	relay.SPA, relay.SSHPort, relay.Admin, relay.ProbePort, relay.CertPin = spaJSON, sshPort, admin, probePort, certPin
+	acme80, err := s.acmePort80(ctx, relay.Name)
+	if err != nil {
+		return nil, err
+	}
 	return &nodev1.IssueRelayBundleResponse{Bundle: bundle, SshPort: uint32(sshPort), Admin: admin, AdminKept: kept, ProbePort: uint32(probePort),
-		Ports: relayPorts(relay, services)}, nil
+		Ports: relayPorts(relay, services, acme80)}, nil
 }
 
 // relayAccess checks the relay host's SSH port and admin list asked for,

@@ -899,7 +899,7 @@ func (c *cli) rollback(ctx context.Context, why string, restoreDB bool, carry ca
 		if carry != carrySkip {
 			current, done, err := rootCopy(localNode.db)
 			if err == nil {
-				err = store.CarryRevocations(ctx, saved, current, node.AdminAccessSetting, node.DNSNameSetting)
+				err = store.CarryRevocations(ctx, saved, current, node.AdminAccessSetting, node.DNSNameSetting, node.RelayNamesSetting)
 				done()
 			}
 			switch {
