@@ -48,7 +48,7 @@ func TestRenderRelayNames(t *testing.T) {
 	}
 	byName := map[string][]string{}
 	for _, s := range m.Services {
-		byName[s.Name] = m.RelayNames[s.ID]
+		byName[s.Name] = m.RelayNamesOf(s.ID)
 	}
 	for _, name := range []string{"r", "nv", "dh", "hm"} {
 		if len(byName[name]) != 1 {

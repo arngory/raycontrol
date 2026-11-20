@@ -193,11 +193,22 @@ type Model struct {
 	// restart; the Xray configs lose their limits, and the processes
 	// restart.
 	ConnLimitOff bool
-	// RelayNames are the names relays have for a service, by its ID
-	// (spec/relay-names-v1.md §3, provision.RelayNames): clients through a
-	// relay send them as SNI, the front routes them to the service, and a
-	// REALITY takes them as its own.
-	RelayNames map[int64][]string
+	// RelayNames are the relays' names for the services, by relay, then
+	// service (spec/relay-names-v1.md §3, provision.RelayNames): clients
+	// through a relay send them as SNI, the front routes them to the
+	// service, and a REALITY takes them as its own.
+	RelayNames []provision.RelayName
+}
+
+// RelayNamesOf are the names relays have for a service, by relay.
+func (m Model) RelayNamesOf(service int64) []string {
+	var out []string
+	for _, rn := range m.RelayNames {
+		if rn.Service == service {
+			out = append(out, rn.Name)
+		}
+	}
+	return out
 }
 
 // nikoLevel is niko-server's log level for the model.
@@ -247,15 +258,8 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 	if m.DNSName, err = provision.NodeDNSName(ctx, st); err != nil {
 		return m, err
 	}
-	relayNames, err := provision.RelayNames(ctx, st)
-	if err != nil {
+	if m.RelayNames, err = provision.RelayNames(ctx, st); err != nil {
 		return m, err
-	}
-	for _, rn := range relayNames {
-		if m.RelayNames == nil {
-			m.RelayNames = map[int64][]string{}
-		}
-		m.RelayNames[rn.Service] = append(m.RelayNames[rn.Service], rn.Name)
 	}
 	// Settings and secrets as one read: a subscription built across a
 	// change of both (the operator's certificate replacing the node's)
@@ -799,7 +803,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				}
 				// Its names at the relays (relay-names-v1 §7), the
 				// default's too: a route says where they go.
-				own = append(own, m.RelayNames[s.ID]...)
+				own = append(own, m.RelayNamesOf(s.ID)...)
 				names, err := claim(tcpNames, s.Name, own...)
 				if err != nil {
 					return err
@@ -842,7 +846,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				}
 				_ = json.Unmarshal([]byte(s.Settings), &st)
 				// Its names at the relays too (relay-names-v1 §7).
-				names, err := claim(udpNames, s.Name, append([]string{strings.ToLower(st.SNI)}, m.RelayNames[s.ID]...)...)
+				names, err := claim(udpNames, s.Name, append([]string{strings.ToLower(st.SNI)}, m.RelayNamesOf(s.ID)...)...)
 				if err != nil {
 					return err
 				}
@@ -901,7 +905,7 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 			}
 			// And its names at the relays (relay-names-v1 §7): naive and
 			// DoH take any name the front passes them.
-			own = append(own, m.RelayNames[s.ID]...)
+			own = append(own, m.RelayNamesOf(s.ID)...)
 			names, err := claim(tcpNames, s.Name, own...)
 			if err != nil {
 				return err
@@ -1715,7 +1719,7 @@ func realityConfig(s Service, m Model, p Paths) (File, error) {
 	clients := xrayClients(m, s, RealityFlow)
 	// The service's names at the relays (relay-names-v1 §7) go in each
 	// inbound: a client through a relay sends one, on the previous keys too.
-	relayNames := m.RelayNames[s.ID]
+	relayNames := m.RelayNamesOf(s.ID)
 	// During the grace period after a switch (R4-19) the previous keys get an
 	// inbound of their own on a socket of this process: the current inbound
 	// hands it what it does not recognise, and it hands the site (or the
