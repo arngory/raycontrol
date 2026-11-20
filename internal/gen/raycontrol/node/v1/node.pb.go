@@ -8382,7 +8382,8 @@ type CreateInviteResponse struct {
 	Warnings []string `protobuf:"bytes,5,rep,name=warnings,proto3" json:"warnings,omitempty"`
 	// The same invite by name, "RCINV3:..." (api-v1 §3b): with the node's
 	// name (when it has one) and its SPA versions; "" if the host cannot go
-	// in it. A node before v0.35.0 sends none.
+	// in it or the node's name cannot be read. A node before v0.35.0 sends
+	// none.
 	InviteCodeV3  string `protobuf:"bytes,6,opt,name=invite_code_v3,json=inviteCodeV3,proto3" json:"invite_code_v3,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
