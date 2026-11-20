@@ -243,8 +243,10 @@ func (f *relayFeed) WatchRelay(ctx context.Context, req *connect.Request[perimet
 	// ends the old (admitRelayStream).
 	probe := req.Msg.Probe
 	if !probe {
-		// rayspa's feed: the SPA versions it takes (none from an older one).
+		// rayspa's feed: the SPA versions it takes (none from an older
+		// one), and whether it forwards TCP 80 for the ACME windows.
 		f.r.setRelaySPA(relay.Name, req.Msg.GetSpaVersions())
+		defer s.relayACMEFeed(relay.Name, req.Msg.GetAcmeForward())()
 	}
 	ctx, end := context.WithCancel(ctx)
 	defer end()

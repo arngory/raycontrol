@@ -54,6 +54,11 @@ type Firewall interface {
 	// SetACME opens the ACME window: TCP 80 from anyone to port, for ttl.
 	// The elements expire by themselves; ttl 0 closes the window now.
 	SetACME(port uint16, ttl time.Duration) error
+	// SetACMEForward lets TCP 80 from anyone through a relay to its exit's
+	// port 80 for ttl, without a grant (relay-names-v1 §6): the exit's
+	// ACME window of an order with the relay's names. The element expires
+	// by itself; ttl 0 closes it now. No-op when the host is not a relay.
+	SetACMEForward(ttl time.Duration) error
 	// SetEgress replaces the node's egress policy (spec/egress-policy-v1.md)
 	// in one transaction (no-op when the host is a relay).
 	SetEgress(e Egress) error
@@ -164,14 +169,21 @@ func (n *NFT) Ruleset() string {
 	# A relay (relay-v1 §3.1): the forwarded ports go to the exit, in the
 	# kernel; only from an address with an SPA grant for the port.
 	set relay_fwd { type inet_proto . inet_service; }
+	# The exit's ACME window for the relay's names (relay-names-v1 §6):
+	# while its one element (80) lasts, TCP 80 from any address goes to
+	# the exit's port 80, the CA's HTTP-01 challenges with it, no grant
+	# needed. It expires by itself, if rayspa is gone too.
+	set relay_acme { type inet_service; flags timeout; }
 	chain relay_dnat {
 		type nat hook prerouting priority dstnat - 1; policy accept;
 		meta nfproto %[5]s fib daddr type local meta l4proto . th dport @relay_fwd dnat %[1]s to %[2]s
+		meta nfproto %[5]s fib daddr type local tcp dport @relay_acme dnat %[1]s to %[2]s
 	}
 	chain relay_forward {
 		type filter hook forward priority 0; policy drop;
 		ct state established,related accept
 		ct status dnat %[1]s daddr %[2]s %[3]s . meta l4proto . th dport %[4]s jump in_limit_fwd
+		ct status dnat %[1]s daddr %[2]s tcp dport @relay_acme jump in_limit_fwd
 		ct status dnat %[1]s daddr %[2]s counter drop comment "relay-no-grant"
 		counter comment "relay-not-forwarded"
 	}
@@ -422,6 +434,9 @@ func (n *NFT) SetupScript(c TableContents) string {
 	}
 	if c.ACMEPort != 0 {
 		b.WriteString(acmeScript(c.ACMEPort, c.ACMETTL))
+	}
+	if n.RelayTo.IsValid() && c.ACMEForwardTTL > 0 {
+		b.WriteString(acmeForwardScript(c.ACMEForwardTTL))
 	}
 	b.WriteString(grantsScript(c.Grants))
 	if c.Relayed {
@@ -843,6 +858,24 @@ func acmeScript(port uint16, ttl time.Duration) string {
 		secs := int((ttl + time.Second - 1) / time.Second)
 		fmt.Fprintf(&b, "add element inet %s acme_redirect { 80 timeout %ds : %d }\n", Table, secs, port)
 		fmt.Fprintf(&b, "add element inet %s acme_in { %d timeout %ds }\n", Table, port, secs)
+	}
+	return b.String()
+}
+
+// SetACMEForward replaces the relay's ACME forward in one transaction.
+func (n *NFT) SetACMEForward(ttl time.Duration) error {
+	if !n.RelayTo.IsValid() {
+		return nil
+	}
+	return n.run(acmeForwardScript(ttl))
+}
+
+func acmeForwardScript(ttl time.Duration) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "flush set inet %s relay_acme\n", Table)
+	if ttl > 0 {
+		secs := int((ttl + time.Second - 1) / time.Second)
+		fmt.Fprintf(&b, "add element inet %s relay_acme { 80 timeout %ds }\n", Table, secs)
 	}
 	return b.String()
 }

@@ -40,6 +40,8 @@ type fakeFW struct {
 	setups     int
 	acmePort   uint16
 	acmeTTL    time.Duration
+	acmeFwd    time.Duration  // a relay's forward of TCP 80 (SetACMEForward)
+	acmeFwds   int            // SetACMEForward calls
 	relaysSets int            // SetRelays calls
 	adminFails int            // SetAdmin calls still to fail
 	spaFails   int            // SetSPAPorts calls still to fail
@@ -53,6 +55,17 @@ type fakeFW struct {
 	egress     *Egress        // the egress policy in force; nil: none, as in a new table
 	inLimitOff bool           // the per-address limit is off (a new table has it on)
 	guard      bool           // the guard refuses (a new table: not)
+}
+
+func (f *fakeFW) SetACMEForward(ttl time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fails("SetACMEForward") {
+		return errors.New("nft: busy")
+	}
+	f.acmeFwd = ttl
+	f.acmeFwds++
+	return nil
 }
 
 func (f *fakeFW) SetACME(port uint16, ttl time.Duration) error {
@@ -77,7 +90,7 @@ func (f *fakeFW) Setup() error {
 	// A new table: nothing of the old one, grants included.
 	f.udp, f.tcp, f.public, f.admin, f.adminPorts, f.rot, f.open = nil, nil, nil, nil, nil, nil, nil
 	f.relays, f.relayPorts, f.forward, f.egress = nil, nil, nil, nil
-	f.inLimitOff, f.guard = false, false
+	f.inLimitOff, f.guard, f.acmeFwd = false, false, 0
 	return nil
 }
 func (f *fakeFW) Present() (bool, error) {
@@ -93,7 +106,7 @@ func (f *fakeFW) flush() {
 	f.gone = true
 	f.udp, f.tcp, f.public, f.admin, f.adminPorts, f.rot, f.open = nil, nil, nil, nil, nil, nil, nil
 	f.relays, f.relayPorts, f.forward, f.egress, f.integ, f.integPorts = nil, nil, nil, nil, nil, nil
-	f.acmePort, f.acmeTTL = 0, 0
+	f.acmePort, f.acmeTTL, f.acmeFwd = 0, 0, 0
 	f.inLimitOff, f.guard = false, false
 }
 func (f *fakeFW) Teardown() error { return nil }
@@ -563,6 +576,61 @@ func TestGateACME(t *testing.T) {
 	snap.Acme = &perimeterv1.AcmeWindow{Port: 18080, Until: now.Add(-time.Second).Unix()}
 	if err := g.Update(snap); err != nil || fw.acmePort != 0 {
 		t.Fatalf("past window: %d %v", fw.acmePort, err)
+	}
+}
+
+// A relay's forward of TCP 80 to its exit (relay-names-v1 §6): open for
+// the time the snapshot gives, at most maxACMEForward; the same deadline
+// again changes nothing; back with the table, for what it has left;
+// closed when the snapshot has none, and never opened for a past one.
+func TestGateACMEForward(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	fw := &fakeFW{}
+	g := NewGate(fw, quiet)
+	g.now = func() time.Time { return now }
+	snap := testSnapshot()
+	if err := g.Update(snap); err != nil || fw.acmeFwds != 0 {
+		t.Fatalf("no window: %d calls %v", fw.acmeFwds, err)
+	}
+	snap.AcmeForwardUntil = now.Add(3 * time.Minute).Unix()
+	if err := g.Update(snap); err != nil || fw.acmeFwd != 3*time.Minute {
+		t.Fatalf("open: %v %v", fw.acmeFwd, err)
+	}
+	calls := fw.acmeFwds
+	now = now.Add(10 * time.Second)
+	if err := g.Update(snap); err != nil || fw.acmeFwds != calls {
+		t.Fatalf("the same window again: %d calls, then %d %v", calls, fw.acmeFwds, err)
+	}
+	fw.flush()
+	now = now.Add(20 * time.Second)
+	if _, err := g.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if fw.acmeFwd != 150*time.Second {
+		t.Fatalf("restored with the table: %v", fw.acmeFwd)
+	}
+	snap.AcmeForwardUntil = 0
+	if err := g.Update(snap); err != nil || fw.acmeFwd != 0 {
+		t.Fatalf("closed: %v %v", fw.acmeFwd, err)
+	}
+	calls = fw.acmeFwds
+	snap.AcmeForwardUntil = now.Add(-time.Second).Unix()
+	if err := g.Update(snap); err != nil || fw.acmeFwds != calls {
+		t.Fatalf("a past window: %d calls, then %d %v", calls, fw.acmeFwds, err)
+	}
+	snap.AcmeForwardUntil = now.Add(240 * time.Hour).Unix()
+	if err := g.Update(snap); err != nil || fw.acmeFwd != maxACMEForward {
+		t.Fatalf("ten days ahead: %v %v", fw.acmeFwd, err)
+	}
+	// Refused by the firewall: tried again with the snapshot's rest.
+	snap.AcmeForwardUntil = 0
+	fw.failing = map[string]int{"SetACMEForward": 1}
+	if err := g.Update(snap); !errors.Is(err, ErrPending) || fw.acmeFwd == 0 {
+		t.Fatalf("refused: %v %v", fw.acmeFwd, err)
+	}
+	now = now.Add(2 * time.Second) // past the retry's back-off
+	if _, err := g.Tick(); err != nil || fw.acmeFwd != 0 {
+		t.Fatalf("after the refusal: %v %v", fw.acmeFwd, err)
 	}
 }
 

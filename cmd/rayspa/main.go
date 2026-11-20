@@ -531,7 +531,10 @@ func relayFeed(b node.RelayBundle) (openFeed, error) {
 	base := "https://" + netip.AddrPortFrom(b.Exit, b.API.Port).String()
 	client := perimeterv1connect.NewRelayServiceClient(hc, base)
 	return func(ctx context.Context) (snapshots, error) {
-		s, err := client.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{SpaVersions: perimeter.SPAVersions}))
+		// AcmeForward: this rayspa forwards TCP 80 to the exit for its
+		// ACME windows (Snapshot.acme_forward_until, relay-names-v1 §6).
+		s, err := client.WatchRelay(ctx, connect.NewRequest(&perimeterv1.WatchRelayRequest{SpaVersions: perimeter.SPAVersions,
+			AcmeForward: true}))
 		if err != nil {
 			return nil, err
 		}

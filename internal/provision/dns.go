@@ -89,8 +89,10 @@ func SetCloudflare(ctx context.Context, st *store.Store, token string) (cloudfla
 
 // DNSRecords are the records the node needs in its zone: the wildcard every
 // subdomain resolves through (the decoy site and REALITY's names, those it
-// moves to included), and for DNS tunnels a name server name and the NS
-// delegation of each tunnel zone to it. warnings say what cannot be made.
+// moves to included), the name of each relay for each service it forwards
+// (relay-names-v1 §4) to the relay's address, and for DNS tunnels a name
+// server name and the NS delegation of each tunnel zone to it. warnings
+// say what cannot be made.
 func DNSRecords(ctx context.Context, st *store.Store) (records []cloudflare.Record, warnings []string, err error) {
 	domain, err := Domain(ctx, st)
 	if err != nil || domain == "" {
@@ -109,6 +111,20 @@ func DNSRecords(ctx context.Context, st *store.Store) (records []cloudflare.Reco
 		typ = "AAAA"
 	}
 	records = append(records, cloudflare.Record{Type: typ, Name: "*." + domain, Content: addr.Unmap().String()})
+	// A record of its own over the wildcard, as the name server name has:
+	// the relay's address (IPv4, as AddRelay takes it). The wildcard no
+	// longer answers for the name, AAAA included (RFC 4592).
+	relayNames, err := RelayNames(ctx, st)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, rn := range relayNames {
+		t := "A"
+		if rn.Address.Is6() {
+			t = "AAAA"
+		}
+		records = append(records, cloudflare.Record{Type: t, Name: rn.Name, Content: rn.Address.String()})
+	}
 
 	all, err := st.ListServices(ctx)
 	if err != nil {
@@ -129,7 +145,7 @@ func DNSRecords(ctx context.Context, st *store.Store) (records []cloudflare.Reco
 	if len(zones) == 0 {
 		return records, nil, nil
 	}
-	ns, err := nsName(ctx, st, all)
+	ns, err := nsName(ctx, st)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -176,7 +192,7 @@ func NSName(ctx context.Context, st *store.Store) (string, error) {
 	}) {
 		return "", nil
 	}
-	return nsName(ctx, st, all)
+	return nsName(ctx, st)
 }
 
 // DNSCheckDevice names the node's own line in the dnsauth-v1 keys of a
@@ -276,10 +292,23 @@ func DNSCheckTargets(ctx context.Context, st *store.Store) ([]dnscheck.Zone, err
 
 // nsName is the name DNS tunnel zones are delegated to: a random label of
 // the node's domain, chosen once.
-func nsName(ctx context.Context, st *store.Store, all []store.Service) (string, error) {
+func nsName(ctx context.Context, st *store.Store) (string, error) {
 	if b, err := st.GetSetting(ctx, settingNSName); err == nil {
 		return string(b), nil
 	} else if !errors.Is(err, store.ErrNotFound) {
+		return "", err
+	}
+	// Chosen under the lock the other names are chosen under: a service's
+	// or a relay's name made meanwhile cannot take its label.
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
+	if b, err := st.GetSetting(ctx, settingNSName); err == nil {
+		return string(b), nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return "", err
+	}
+	all, err := st.ListServices(ctx)
+	if err != nil {
 		return "", err
 	}
 	name, err := newZone(ctx, st, all)

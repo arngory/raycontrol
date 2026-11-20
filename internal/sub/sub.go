@@ -50,12 +50,19 @@ type Profile struct {
 	// Via names the relays the profile also goes through (relay-v1 §4): the
 	// same link with the relay's host, knocked at the relay with K_relay.
 	Via []string `json:"via,omitempty"`
+	// ViaLinks is the link through a relay of Via by the relay's name
+	// (spec/relay-names-v1.md §8), by relay: only where the name is ready.
+	// A relay of Via without one: the link with the relay's host, as
+	// before.
+	ViaLinks map[string]string `json:"via_links,omitempty"`
 }
 
 // Next is the credential that replaces Link from a given time (R4).
 type Next struct {
 	Link string `json:"link"`
 	From int64  `json:"from"`
+	// ViaLinks is Profile.ViaLinks from From on.
+	ViaLinks map[string]string `json:"via_links,omitempty"`
 }
 
 // Payload is the signed content.
@@ -362,6 +369,85 @@ func DeviceProfiles(m render.Model, u render.User, device []byte) ([]Profile, er
 		}
 	}
 	return out, errors.Join(errs...)
+}
+
+// ViaLinks gives the profiles their links through the relays of their Via
+// by the relays' names (spec/relay-names-v1.md §8): for each relay with a
+// name for the service that ready says clients may be given, the
+// profile's link, its next one too, with that name as the host and the
+// server name and the relay's address as niko-ip; the rest as the profile
+// has it. Through serviceProfile, which builds the profile's own: the two
+// cannot part. A kind whose server name is not the node's has no relay
+// name (provision.RelayNamed), and so no such link.
+func ViaLinks(m render.Model, u render.User, device []byte, profiles []Profile, ready func(name string) bool) error {
+	if ready == nil || len(m.RelayNames) == 0 {
+		return nil
+	}
+	var inner *render.Service
+	for i := range m.Services {
+		if m.Services[i].Kind == "inner" {
+			inner = &m.Services[i]
+		}
+	}
+	var errs []error
+	for i := range profiles {
+		p := &profiles[i]
+		j := slices.IndexFunc(m.Services, func(s render.Service) bool { return uint16(s.ID) == p.Svc })
+		if j < 0 {
+			continue
+		}
+		for _, rn := range m.RelayNames {
+			if rn.Service != m.Services[j].ID || !slices.Contains(p.Via, rn.Relay) || !ready(rn.Name) {
+				continue
+			}
+			vm, vs, err := throughRelay(m, m.Services[j], rn)
+			var vp *Profile
+			if err == nil {
+				vp, err = serviceProfile(vm, u, vs, inner, device)
+			}
+			if err != nil {
+				errs = append(errs, fmt.Errorf("service %s through relay %s: %w", vs.Name, rn.Relay, err))
+				continue
+			}
+			if vp == nil {
+				continue
+			}
+			if p.ViaLinks == nil {
+				p.ViaLinks = map[string]string{}
+			}
+			p.ViaLinks[rn.Relay] = vp.Link
+			// The same switch: the relay's name stays across it, so the
+			// next line moves when the profile's does, for the same
+			// credential or keys.
+			if p.Next != nil && vp.Next != nil && vp.Next.From == p.Next.From {
+				if p.Next.ViaLinks == nil {
+					p.Next.ViaLinks = map[string]string{}
+				}
+				p.Next.ViaLinks[rn.Relay] = vp.Next.Link
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// throughRelay is the model and the service as a link through a relay by
+// its name has them: a client that resolves names, the relay's address
+// where the node's goes (niko-ip, linkHost), the relay's name as the
+// service's server name, and as the one it moves to, if it moves (the
+// relay's name stays across a switch).
+func throughRelay(m render.Model, s render.Service, rn provision.RelayName) (render.Model, render.Service, error) {
+	m.Host, m.ByName = rn.Address.String(), true
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(s.Settings), &settings); err != nil {
+		return m, s, err
+	}
+	settings["sni"] = rn.Name
+	if next, _ := settings["sni_next"].(string); next != "" {
+		settings["sni_next"] = rn.Name
+	}
+	b, err := json.Marshal(settings)
+	s.Settings = string(b)
+	return m, s, err
 }
 
 // serviceProfile is a user's profile of one service, nil when the user has

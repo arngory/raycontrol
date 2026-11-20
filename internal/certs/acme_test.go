@@ -97,7 +97,7 @@ func TestIssuerRoots(t *testing.T) {
 	defer srv.Close()
 	account, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	is := &Issuer{Directory: srv.URL + "/dir", AccountKey: account, Window: func(uint16, time.Time) {}, Listen: "127.0.0.1:0"}
+	is := &Issuer{Directory: srv.URL + "/dir", AccountKey: account, Window: func(uint16, time.Time, []string) {}, Listen: "127.0.0.1:0"}
 	tr := rootstest.Use(t, roots.Settings{}, srv.Certificate())
 	_, err := is.Issue(context.Background(), []string{"site.example.test"}, key)
 	if err == nil || !roots.Verification(err) || tr.Status().Refused == 0 {
@@ -129,7 +129,7 @@ func TestIssueWithPebble(t *testing.T) {
 		Directory:  dir,
 		AccountKey: account,
 		Listen:     "127.0.0.1:5002",
-		Window:     func(port uint16, _ time.Time) { windows = append(windows, port) },
+		Window:     func(port uint16, _ time.Time, _ []string) { windows = append(windows, port) },
 	}
 	names := []string{"site.raycontrol.test"}
 	chain, err := is.Issue(context.Background(), names, key)
@@ -216,7 +216,7 @@ func TestIssueWildcardWithPebble(t *testing.T) {
 	is := &Issuer{
 		Directory:  dir,
 		AccountKey: account,
-		Window:     func(uint16, time.Time) { windows++ },
+		Window:     func(uint16, time.Time, []string) { windows++ },
 		DNS:        func(context.Context) (DNSSolver, error) { return challtestsrv(mgmt), nil },
 	}
 	names := []string{"*.raycontrol.test"}

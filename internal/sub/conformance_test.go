@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/pem"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"regexp"
@@ -108,6 +109,14 @@ func TestLinksForStrictClient(t *testing.T) {
 		}
 	}
 	if _, err := provision.RotateReality(ctx, st, now.Add(26*day), epoch, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A relay with its bundle: names for the services whose server name is
+	// the node's (relay-names-v1 §3), for the links through it below.
+	if _, err := st.CreateRelay(ctx, "r1", netip.MustParseAddr("198.51.100.20")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetRelayCertPin(ctx, "r1", "pin"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -259,6 +268,72 @@ func TestLinksForStrictClient(t *testing.T) {
 		}
 	}
 
+	// Through the relay by its name (relay-names-v1 §8): for the kinds
+	// whose server name is the node's, the line by name with the relay's
+	// name as host and sni (DoH: the URL's host) and the relay's address
+	// as niko-ip, the next line too, for the same switch; the rest as the
+	// line by name. None for the others, nor for a name not ready.
+	relayName := map[string]string{}
+	for _, rn := range m.RelayNames {
+		for _, s := range m.Services {
+			if s.ID == rn.Service && rn.Relay == "r1" {
+				relayName[s.Name] = rn.Name
+			}
+		}
+	}
+	withVia := map[string]bool{"reality": true, "hy2": true, "naive": true, "naive-icmp": true, "naive-udp": true, "naive-udp-tcp": true, "doh": true}
+	if len(relayName) != len(withVia) {
+		t.Fatalf("relay names %v", relayName)
+	}
+	for i := range named {
+		named[i].Via = []string{"r1"} // as addRelays has it
+	}
+	if err := sub.ViaLinks(m, m.Users[0], testDevice, named, func(string) bool { return false }); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range named {
+		if p.ViaLinks != nil {
+			t.Errorf("%s: links through a relay whose name is not ready: %v", p.Name, p.ViaLinks)
+		}
+	}
+	if err := sub.ViaLinks(m, m.Users[0], testDevice, named, func(string) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range named {
+		if !withVia[p.Name] {
+			if p.ViaLinks != nil || p.Next != nil && p.Next.ViaLinks != nil {
+				t.Errorf("%s: links through the relay by a name it has not: %v", p.Name, p.ViaLinks)
+			}
+			continue
+		}
+		if p.Next == nil || len(p.ViaLinks) != 1 || len(p.Next.ViaLinks) != 1 {
+			t.Errorf("%s: links through the relay %v, next %+v", p.Name, p.ViaLinks, p.Next)
+			continue
+		}
+		for own, via := range map[string]string{p.Link: p.ViaLinks["r1"], p.Next.Link: p.Next.ViaLinks["r1"]} {
+			for _, problem := range strictProblems(kindOf[p.Name], via) {
+				t.Errorf("%s through the relay: %s\n  %s", p.Name, problem, via)
+			}
+			o, _ := url.Parse(own)
+			v, _ := url.Parse(via)
+			oq, vq := o.Query(), v.Query()
+			sni := vq.Get("sni")
+			if kindOf[p.Name] == "doh" {
+				sni = v.Hostname()
+			}
+			if v.Hostname() != relayName[p.Name] || sni != relayName[p.Name] || vq.Get("niko-ip") != "198.51.100.20" {
+				t.Errorf("%s through the relay: host %s, sni %s, niko-ip %s, want %s: %s", p.Name, v.Hostname(), sni, vq.Get("niko-ip"), relayName[p.Name], via)
+			}
+			for _, k := range []string{"sni", "niko-ip"} {
+				oq.Del(k)
+				vq.Del(k)
+			}
+			if o.Scheme != v.Scheme || o.User.String() != v.User.String() || o.Port() != v.Port() || o.Fragment != v.Fragment ||
+				o.Path != v.Path || oq.Encode() != vq.Encode() {
+				t.Errorf("%s through the relay is not its line by name but for the host:\n  %s\n  %s", p.Name, own, via)
+			}
+		}
+	}
 }
 
 // The DNS parameters' rules catch what the client would drop.

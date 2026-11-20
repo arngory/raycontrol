@@ -1386,7 +1386,8 @@ func oneLabelUnder(name, domain string) bool {
 }
 
 // newZone returns "<label>.<domain>" with a random label not used yet, by
-// all nor among taken (zones chosen in the same change).
+// all nor among taken (zones chosen in the same change), nor by the node's
+// other names.
 func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ...string) (string, error) {
 	domain, err := Domain(ctx, st)
 	if err != nil {
@@ -1399,9 +1400,12 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ..
 	// canonicalized it may have capitals or a final dot.
 	domain = canonicalZone(domain)
 	// Nor the name DNS tunnel zones are delegated to, nor the node's own
-	// name (names-v1 §2).
+	// name (names-v1 §2), nor a relay's (relay-names-v1 §3).
 	ns, _ := st.GetSetting(ctx, settingNSName)
 	own, _ := st.GetSetting(ctx, settingNodeDNSName)
+	if _, relayNames, _ := relayNameList(ctx, st); len(relayNames) > 0 {
+		taken = append(slices.Clone(taken), relayNames...)
+	}
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 	// Bounded (review 13): a zone stored at or above the domain, as v0.13
 	// took, clashes with every name under it, and the search went on
@@ -1435,9 +1439,13 @@ func newZone(ctx context.Context, st *store.Store, all []store.Service, taken ..
 // would delegate every name of the node away), the name the zones are
 // delegated to (delegating it breaks every tunnel's delegation), the
 // node's own name and a service's server name (the site and the services
-// under it would go with it). Under the domain a zone takes nothing, nor
-// under the name the zones are delegated to (it has records of its own);
-// under a name clients resolve through *.<domain> it does (resolvedOver).
+// under it would go with it), and a relay's name, the zone at, above or
+// under it (relay-names-v1 §4: the name has a record of its own, but
+// without a DNS provider only once the operator makes it, and until then
+// it resolves through *.<domain> as the names of resolvedOver). Under the
+// domain a zone takes nothing, nor under the name the zones are delegated
+// to (it has records of its own); under a name clients resolve through
+// *.<domain> it does (resolvedOver).
 func nodeNameClash(ctx context.Context, st *store.Store, all []store.Service, zone string) (string, error) {
 	domain, err := Domain(ctx, st)
 	if err != nil {
@@ -1457,6 +1465,16 @@ func nodeNameClash(ctx context.Context, st *store.Store, all []store.Service, zo
 	}
 	if own, err := st.GetSetting(ctx, settingNodeDNSName); err == nil && holds(string(own)) {
 		return "the node's own name, " + string(own), nil
+	}
+	// Any relay's, its service enabled or not, as below.
+	relays, relayNames, err := relayNameList(ctx, st)
+	if err != nil {
+		return "", err
+	}
+	for i, n := range relayNames {
+		if zonesClash(zone, n) {
+			return "the name of relay " + relays[i] + ", " + n, nil
+		}
 	}
 	for _, svc := range all {
 		for _, n := range serverNames(svc).all {

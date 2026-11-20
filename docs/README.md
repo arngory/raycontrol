@@ -25,7 +25,7 @@
 ## Контракт с клиентом — `spec/`
 
 Нормативные спецификации с версией в имени; клиент ссылается на них по этим путям. Главные:
-[spa-v2.md](spec/spa-v2.md) (стук, заморожен), [spa-v3.md](spec/spa-v3.md) (стук с адресом ноды), [subscription-v1.md](spec/subscription-v1.md) (подписка),
+[spa-v2.md](spec/spa-v2.md) (стук, заморожен), [spa-v3.md](spec/spa-v3.md) (стук с адресом ноды), [relay-names-v1.md](spec/relay-names-v1.md) (имена relay), [subscription-v1.md](spec/subscription-v1.md) (подписка),
 [api-v1.md](spec/api-v1.md) (удалённый API и приглашения), [probe-v1.md](spec/probe-v1.md) (замер канала),
 [app-update-v1.md](spec/app-update-v1.md) (зеркало релизов клиента), [stats-v1.md](spec/stats-v1.md) (статистика за
 окно, общий с клиентом формат). Черновики: client-min-v1, integrations-v1,

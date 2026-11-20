@@ -75,6 +75,9 @@ type Gate struct {
 	// ACME window as last applied.
 	acmePort  uint16
 	acmeUntil time.Time
+	// A relay's forward of TCP 80 to its exit (relay-names-v1 §6), as last
+	// applied: zero when closed.
+	acmeFwdUntil time.Time
 	// The egress policy of the last snapshot (egressSeen: there was one),
 	// whether the table has it (egressOn), and its own backoff: a policy
 	// the kernel refuses holds back neither a snapshot nor a restore.
@@ -342,6 +345,9 @@ func (g *Gate) Update(snap *perimeterv1.Snapshot) error {
 		tcpCarrier: sp.TcpCarrier, acme: snap.GetAcme(), egress: egressOf(snap.GetEgress()),
 		connLimitOff: snap.GetConnLimitOff(), own: own,
 	}
+	if until := snap.GetAcmeForwardUntil(); until > 0 {
+		u.acmeForward = time.Unix(until, 0)
+	}
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -422,6 +428,7 @@ type update struct {
 	defTTL, maxTTL     time.Duration
 	tcpCarrier         bool
 	acme               *perimeterv1.AcmeWindow
+	acmeForward        time.Time // a relay's: TCP 80 to the exit until then
 	egress             Egress
 	connLimitOff       bool
 	own                []netip.Addr
@@ -525,7 +532,7 @@ func (g *Gate) applyLocked(u *update) error {
 			g.forward = forward
 		}
 	}
-	errs = append(errs, g.acmeLocked(u.acme), g.inLimitLocked(), g.slotsLocked())
+	errs = append(errs, g.acmeLocked(u.acme), g.acmeForwardLocked(u.acmeForward), g.inLimitLocked(), g.slotsLocked())
 	return errors.Join(errs...)
 }
 
@@ -701,6 +708,47 @@ func (g *Gate) acmeLocked(w *perimeterv1.AcmeWindow) error {
 	return nil
 }
 
+// maxACMEForward bounds a relay's forward of TCP 80: an exit's ACME
+// window lasts 3 minutes (certs.WindowLen), and a forward set years ahead
+// would leave the exit's port 80 open to everyone through the relay.
+const maxACMEForward = 10 * time.Minute
+
+// acmeForwardFor is how long a relay forwards TCP 80 from now for a
+// snapshot's deadline: 0 when it is past, at most maxACMEForward.
+func acmeForwardFor(until, now time.Time) time.Duration {
+	if !until.After(now) {
+		return 0
+	}
+	return min(until.Sub(now), maxACMEForward)
+}
+
+// acmeForwardLocked opens, moves or closes a relay's forward of TCP 80 to
+// its exit (relay-names-v1 §6).
+func (g *Gate) acmeForwardLocked(until time.Time) error {
+	now := g.now()
+	ttl := acmeForwardFor(until, now)
+	open := g.acmeFwdUntil.After(now)
+	switch {
+	case ttl == 0 && !open:
+		// Closed, or its element gone by itself.
+		g.acmeFwdUntil = time.Time{}
+		return nil
+	case ttl > 0 && open && now.Add(ttl).Sub(g.acmeFwdUntil).Abs() < time.Second:
+		return nil // the same window again
+	}
+	if err := g.fw.SetACMEForward(ttl); err != nil {
+		return err
+	}
+	g.acmeFwdUntil = time.Time{}
+	if ttl > 0 {
+		g.acmeFwdUntil = now.Add(ttl)
+		g.log.Info("acme forward to the exit open", "until", g.acmeFwdUntil)
+	} else {
+		g.log.Info("acme forward to the exit closed")
+	}
+	return nil
+}
+
 // portsFor returns the ports of the given services.
 func (g *Gate) portsFor(ids []uint16) []Port {
 	var out []Port
@@ -849,7 +897,9 @@ func (g *Gate) restoreLocked(u *update) error {
 		Integ: g.integ, IntegPorts: g.integPorts,
 	}
 	acmePort, acmeUntil := g.acmePort, g.acmeUntil
+	acmeFwd := g.acmeFwdUntil
 	if u != nil {
+		acmeFwd = u.acmeForward
 		c.Public, c.Admin, c.AdminPorts, c.Forward = u.public, u.admin, u.adminPorts, u.forward
 		c.Relays, c.RelayPorts, c.Relayed = u.relays, u.relayPorts, true
 		c.Integ, c.IntegPorts = u.integ, u.integPorts
@@ -862,6 +912,11 @@ func (g *Gate) restoreLocked(u *update) error {
 		c.ACMEPort, c.ACMETTL = acmePort, acmeUntil.Sub(now)
 	} else {
 		acmePort, acmeUntil = 0, time.Time{}
+	}
+	if c.ACMEForwardTTL = acmeForwardFor(acmeFwd, now); c.ACMEForwardTTL > 0 {
+		acmeFwd = now.Add(c.ACMEForwardTTL)
+	} else {
+		acmeFwd = time.Time{}
 	}
 	for key, devs := range g.holders {
 		if ttl := longest(devs).Sub(now); ttl > 0 {
@@ -882,6 +937,7 @@ func (g *Gate) restoreLocked(u *update) error {
 	g.relays, g.relayPorts, g.relaysSet = c.Relays, c.RelayPorts, c.Relayed
 	g.integ, g.integPorts = c.Integ, c.IntegPorts
 	g.acmePort, g.acmeUntil = acmePort, acmeUntil
+	g.acmeFwdUntil = acmeFwd
 	g.inLimitTableOff = c.InLimitOff
 	g.rotMap, g.udpPorts, g.tcpPorts = nil, nil, nil
 	if g.verifier != nil {
@@ -917,6 +973,9 @@ type TableContents struct {
 	Rotation   map[uint16]uint16
 	SPAUDP     []uint16
 	SPATCP     []uint16
+	// ACMEForwardTTL: a relay forwards TCP 80 to its exit so long
+	// (SetACMEForward).
+	ACMEForwardTTL time.Duration
 }
 
 // TableSetup is a firewall that makes the table with its contents in one
@@ -959,6 +1018,11 @@ func (g *Gate) restoreSteps(c TableContents) error {
 	}
 	if c.ACMEPort != 0 {
 		if err := g.fw.SetACME(c.ACMEPort, c.ACMETTL); err != nil {
+			return err
+		}
+	}
+	if c.ACMEForwardTTL > 0 {
+		if err := g.fw.SetACMEForward(c.ACMEForwardTTL); err != nil {
 			return err
 		}
 	}

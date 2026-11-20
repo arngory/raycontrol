@@ -193,6 +193,22 @@ type Model struct {
 	// restart; the Xray configs lose their limits, and the processes
 	// restart.
 	ConnLimitOff bool
+	// RelayNames are the relays' names for the services, by relay, then
+	// service (spec/relay-names-v1.md §3, provision.RelayNames): clients
+	// through a relay send them as SNI, the front routes them to the
+	// service, and a REALITY takes them as its own.
+	RelayNames []provision.RelayName
+}
+
+// RelayNamesOf are the names relays have for a service, by relay.
+func (m Model) RelayNamesOf(service int64) []string {
+	var out []string
+	for _, rn := range m.RelayNames {
+		if rn.Service == service {
+			out = append(out, rn.Name)
+		}
+	}
+	return out
 }
 
 // nikoLevel is niko-server's log level for the model.
@@ -240,6 +256,9 @@ func Collect(ctx context.Context, st *store.Store) (Model, error) {
 		return m, err
 	}
 	if m.DNSName, err = provision.NodeDNSName(ctx, st); err != nil {
+		return m, err
+	}
+	if m.RelayNames, err = provision.RelayNames(ctx, st); err != nil {
 		return m, err
 	}
 	// Settings and secrets as one read: a subscription built across a
@@ -782,6 +801,9 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				if tcpDefault != "" {
 					own = append(own, provision.ParseRealityState(s.Service).SNIPrev)
 				}
+				// Its names at the relays (relay-names-v1 §7), the
+				// default's too: a route says where they go.
+				own = append(own, m.RelayNamesOf(s.ID)...)
 				names, err := claim(tcpNames, s.Name, own...)
 				if err != nil {
 					return err
@@ -823,7 +845,8 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 					SNI string `json:"sni"`
 				}
 				_ = json.Unmarshal([]byte(s.Settings), &st)
-				names, err := claim(udpNames, s.Name, strings.ToLower(st.SNI))
+				// Its names at the relays too (relay-names-v1 §7).
+				names, err := claim(udpNames, s.Name, append([]string{strings.ToLower(st.SNI)}, m.RelayNamesOf(s.ID)...)...)
 				if err != nil {
 					return err
 				}
@@ -880,6 +903,9 @@ func Render(m Model, p Paths) ([]File, []string, error) {
 				}
 				own = append(own, strings.ToLower(ns.SNINext))
 			}
+			// And its names at the relays (relay-names-v1 §7): naive and
+			// DoH take any name the front passes them.
+			own = append(own, m.RelayNamesOf(s.ID)...)
 			names, err := claim(tcpNames, s.Name, own...)
 			if err != nil {
 				return err
@@ -1691,6 +1717,9 @@ func realityConfig(s Service, m Model, p Paths) (File, error) {
 		rs.Target = p.SiteSocket(rs.Site)
 	}
 	clients := xrayClients(m, s, RealityFlow)
+	// The service's names at the relays (relay-names-v1 §7) go in each
+	// inbound: a client through a relay sends one, on the previous keys too.
+	relayNames := m.RelayNamesOf(s.ID)
 	// During the grace period after a switch (R4-19) the previous keys get an
 	// inbound of their own on a socket of this process: the current inbound
 	// hands it what it does not recognise, and it hands the site (or the
@@ -1701,14 +1730,14 @@ func realityConfig(s Service, m Model, p Paths) (File, error) {
 	if prev, ok := PrevReality(s); ok {
 		var ps RealitySettings
 		_ = json.Unmarshal([]byte(prev.Settings), &ps)
-		in, err := realityInbound(prev, RealityPrevTag, ps.SNI, rs.Target, clients)
+		in, err := realityInbound(prev, RealityPrevTag, append([]string{ps.SNI}, relayNames...), rs.Target, clients)
 		if err != nil {
 			return File{}, err
 		}
 		in["listen"] = p.socket(s.Name, RealityPrevTag) + ",0600"
 		prevInbound, target = in, p.socket(s.Name, RealityPrevTag)
 	}
-	inbound, err := realityInbound(s, RealityTag, rs.SNI, target, clients)
+	inbound, err := realityInbound(s, RealityTag, append([]string{rs.SNI}, relayNames...), target, clients)
 	if err != nil {
 		return File{}, err
 	}
@@ -1733,9 +1762,9 @@ func realityConfig(s Service, m Model, p Paths) (File, error) {
 	return xrayFile(s, m, p, inbound)
 }
 
-// realityInbound is a REALITY inbound with the keys of s under a server
-// name; what it does not recognise goes to target.
-func realityInbound(s Service, tag, sni, target string, clients []map[string]string) (map[string]any, error) {
+// realityInbound is a REALITY inbound with the keys of s under its server
+// names; what it does not recognise goes to target.
+func realityInbound(s Service, tag string, names []string, target string, clients []map[string]string) (map[string]any, error) {
 	decryption, _, err := VLESSEncryption(s.Secrets[provision.SecretMLKEMSeed])
 	if err != nil {
 		return nil, fmt.Errorf("reality %s: %w", s.Name, err)
@@ -1751,7 +1780,7 @@ func realityInbound(s Service, tag, sni, target string, clients []map[string]str
 			"realitySettings": map[string]any{
 				"target":      target,
 				"xver":        0,
-				"serverNames": []string{sni},
+				"serverNames": names,
 				"privateKey":  enc.EncodeToString(s.Secrets[provision.SecretRealityKey]),
 				"mldsa65Seed": enc.EncodeToString(s.Secrets[provision.SecretRealityMLDSA]),
 				"shortIds":    ShortIDs(s),

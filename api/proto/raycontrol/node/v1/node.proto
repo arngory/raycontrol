@@ -517,6 +517,20 @@ message Relay {
   // them), and the exit's ports it forwards, as its perimeter has them
   // now. Since v0.31.0; empty from a node before.
   repeated RelayPort ports = 5;
+  // The relay's names (relay-names-v1 §3): one for each service it
+  // forwards whose SNI is the node's, resolving to the relay's address.
+  // Since v0.35.0; empty from a node before.
+  repeated RelayName names = 6;
+}
+// RelayName is a relay's name for one service of the node.
+message RelayName {
+  string service = 1; // the service's name
+  string name = 2;    // one label under the node's domain
+  // Clients may be given it: the certificate of the service's site covers
+  // it and it resolves to the relay's address alone, as the node last
+  // checked (relay-names-v1 §4, §5).
+  bool ready = 3;
+  string problem = 4; // why it is not ready
 }
 // RelayPort is a port, or a range of them, a relay host takes.
 message RelayPort {
@@ -530,7 +544,11 @@ message RelayPort {
   bool forwarded = 5;         // to the exit, on the same port; else the relay host answers itself
   // Who reaches it: "everyone" (SPA), "spa" (an address after its knock at
   // the relay), "admin" (the relay's admin addresses, and after a knock a
-  // device allowed SSH).
+  // device allowed SSH), "acme" (any address while the exit orders a
+  // certificate with the relay's names, up to 3 minutes: TCP 80, since
+  // v0.35.0, relay-names-v1 §6), "acme-old" (the same port, which the
+  // relay's rayspa has not said it forwards: before v0.35.0, or not
+  // connected since the exit started).
   string access = 6;
 }
 message AddRelayRequest {
@@ -1299,7 +1317,8 @@ message CreateInviteResponse {
   repeated string warnings = 5 [(google.api.field_visibility).restriction = "ADMIN"];
   // The same invite by name, "RCINV3:..." (api-v1 §3b): with the node's
   // name (when it has one) and its SPA versions; "" if the host cannot go
-  // in it. A node before v0.35.0 sends none.
+  // in it or the node's name cannot be read. A node before v0.35.0 sends
+  // none.
   string invite_code_v3 = 6;
 }
 
