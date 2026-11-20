@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/arngory/raycontrol/internal/node"
@@ -64,43 +65,49 @@ func knock(ctx context.Context, args []string) error {
 	if *ttl > 0 {
 		window = ttl.String() + " (or the node's -spa-max-ttl, if shorter)"
 	}
-	// v3 first when the node takes it; v2 after it only at an address of
-	// the node's own (spa-v3 §6), for a node rolled back before v3.
-	versions := []bool{spaV3(b)}
-	if spaV3(b) && knownAddr(b, ip, *addr) {
-		versions = append(versions, false)
-	}
-	type attempt struct {
-		carrier string
-		v3      bool
-	}
-	var attempts []attempt
-	for _, v3 := range versions {
-		for _, c := range carriers {
-			attempts = append(attempts, attempt{c, v3})
+	if client == nil {
+		// Nothing to confirm a knock with: one packet of each version the
+		// attempts hold, the first carrier that sends it, so that a node
+		// rolled back before v3 opens too (spa-v3 §6).
+		var sent []string
+		var lastErr error
+		for _, v3 := range knockVersions(b, ip, *addr) {
+			for _, c := range carriers {
+				k := attempt{c, v3}
+				start := time.Now()
+				port := params.Port(params.Slot(start))
+				pkt, err := spa.SealRandom(params, key, k.request(ip, start, *ttl))
+				if err != nil {
+					return err
+				}
+				if err := sendSPA(c, netip.AddrPortFrom(ip, port), serverName, pkt); err != nil {
+					fmt.Printf("%s over %s to port %d: %v\n", k.version(), c, port, err)
+					lastErr = err
+					continue
+				}
+				sent = append(sent, fmt.Sprintf("%s over %s to port %d", k.version(), c, port))
+				break
+			}
 		}
+		if len(sent) == 0 {
+			return fmt.Errorf("no SPA sent: %w", lastErr)
+		}
+		fmt.Printf("%s to %s; the bundle has no subscription to confirm it with\n", strings.Join(sent, ", then "), ip)
+		return nil
 	}
 	var lastErr error
-	for _, a := range attempts {
-		c := a.carrier
+	for _, k := range knocks(b, ip, *addr, carriers) {
+		c := k.carrier
 		start := time.Now()
 		port := params.Port(params.Slot(start))
-		req := knockFor(b, ip, start, *ttl)
-		if !a.v3 {
-			req.Dst = netip.Addr{}
-		}
-		pkt, err := spa.SealRandom(params, key, req)
+		pkt, err := spa.SealRandom(params, key, k.request(ip, start, *ttl))
 		if err != nil {
 			return err
 		}
 		if err := sendSPA(c, netip.AddrPortFrom(ip, port), serverName, pkt); err != nil {
-			fmt.Printf("SPA over %s to port %d: %v\n", c, port, err)
+			fmt.Printf("%s over %s to port %d: %v\n", k.version(), c, port, err)
 			lastErr = err
 			continue
-		}
-		if client == nil {
-			fmt.Printf("SPA sent over %s to %s port %d; the bundle has no subscription to confirm it with\n", c, ip, port)
-			return nil
 		}
 		// spa-v2.md §7: connect 150-400 ms after the packet.
 		time.Sleep(300 * time.Millisecond)
@@ -108,7 +115,7 @@ func knock(ctx context.Context, args []string) error {
 		_, err = client.Fetch(fctx, time.Now())
 		cancel()
 		if err != nil {
-			fmt.Printf("SPA over %s to port %d, then the subscription: %v\n", c, port, err)
+			fmt.Printf("%s over %s to port %d, then the subscription: %v\n", k.version(), c, port, err)
 			lastErr = err
 			continue
 		}

@@ -147,6 +147,8 @@ func (v *Verifier) accept(d Device, epoch uint64, req Request, nonce [NonceSize]
 // own, which anyone may set up with any low bits.
 var nat64 = netip.MustParsePrefix("64:ff9b::/96")
 
+var broadcast4 = netip.AddrFrom4([4]byte{255, 255, 255, 255})
+
 // OwnDst reports whether a v3 packet's destination is the node's (spa-v3
 // §4): the address the packet came to (wire, unset when unknown), one of
 // the node's public addresses (own), or one of these IPv4 addresses inside
@@ -160,7 +162,9 @@ func OwnDst(dst, wire netip.Addr, own []netip.Addr) bool {
 		a := dst.As16()
 		dst = netip.AddrFrom4([4]byte(a[12:]))
 	}
-	if wire.IsValid() && dst == wire.Unmap().WithZone("") {
+	// A packet to a multicast or broadcast address came to no one address
+	// of the node's.
+	if wire = wire.Unmap().WithZone(""); wire.IsValid() && !wire.IsMulticast() && wire != broadcast4 && dst == wire {
 		return true
 	}
 	for _, a := range own {

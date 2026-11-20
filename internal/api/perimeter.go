@@ -33,7 +33,6 @@ type PerimeterServer struct {
 	Refresh time.Duration
 
 	watch rayspaWatch // whether rayspa follows the feed (MonitorRayspa)
-	own   ownAddrs    // the node's public addresses (spa-v3 §4)
 }
 
 var _ perimeterv1connect.PerimeterServiceHandler = (*PerimeterServer)(nil)

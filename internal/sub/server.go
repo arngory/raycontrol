@@ -78,6 +78,9 @@ type Server struct {
 	// RelayProbe, when set, says whether a relay's rayd relay is there:
 	// the subscription lists its probe endpoint only then (relay-v1 §9.2).
 	RelayProbe func(name string) bool
+	// SPAVersions, when set, gives the SPA versions the node offers
+	// (spa-v3 §5, api.Server.SPAVersions); unset: all this build takes.
+	SPAVersions func(ctx context.Context) []int
 	// RelaySPA, when set, gives the SPA versions a relay's rayspa takes
 	// (spa-v3 §5), nil when it has not said: relays[].spa.versions.
 	RelaySPA func(name string) []int
@@ -392,7 +395,7 @@ func (s *Server) build(ctx context.Context, userName, deviceID string, device []
 	p := Payload{
 		V: 1, NodeID: m.NodeID, Name: name, Note: note, Seq: seq, Time: now.Unix(), Issued: now.Unix(),
 		Expires: now.Add(Lifetime).Unix(), Profiles: profiles,
-		SPA:     &SPAHint{Carriers: []string{"udp"}, Versions: slices.Clone(node.SPAVersions)},
+		SPA:     &SPAHint{Carriers: []string{"udp"}, Versions: s.spaVersions(ctx)},
 		DNSName: m.DNSName, Addrs: node.Addrs(m.Host),
 	}
 	if u.Limited() {
@@ -613,4 +616,12 @@ func dnsAuthVersions(m render.Model, profiles []Profile) *DNSAuthVersions {
 		d.V = append(d.V, 2)
 	}
 	return d
+}
+
+// spaVersions are the SPA versions the subscription offers.
+func (s *Server) spaVersions(ctx context.Context) []int {
+	if s.SPAVersions != nil {
+		return s.SPAVersions(ctx)
+	}
+	return slices.Clone(node.SPAVersions)
 }
