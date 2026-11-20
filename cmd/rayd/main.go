@@ -394,7 +394,12 @@ func cmdServe(args []string) error {
 		}
 	}
 	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, paths.FrontConfig(), hb, log)
-	go syncDNS(ctx, st, srv.Changes, hb, log)
+	// The relays' names clients may be given (relay-names-v1 §4, §5),
+	// checked again as soon as the DNS sync changed records.
+	relayNames := newRelayNameCheck(st, net.DefaultResolver.LookupNetIP)
+	srv.RelayNameStatus = relayNames.Status
+	go relayNames.run(ctx, srv.Changes, log)
+	go syncDNS(ctx, st, srv.Changes, relayNames.Wake, hb, log)
 	go checkRealityTargets(ctx, st, srv.Changes, hb, log)
 	if *dnsCheck > 0 {
 		go checkDNSZones(ctx, srv.DNSCheck, st, srv.Changes, *dnsCheck, hb, log)
@@ -460,7 +465,7 @@ func cmdServe(args []string) error {
 	go pruneSummary(ctx, sum, log)
 	remote := &api.Remote{Server: srv, Log: log, Perimeter: per, RelayReport: sum.TakeVia}
 	go serveRemote(ctx, remote, srv.Changes)
-	if err := startSubscription(ctx, st, paths, log, sum, remote.RelayProbeUp, remote.RelaySPA, *probeDaily, *spaTCP, srv.AppMirror, srv.Notify, srv.SubRequests); err != nil {
+	if err := startSubscription(ctx, st, paths, log, sum, remote.RelayProbeUp, remote.RelaySPA, relayNames.Ready, *probeDaily, *spaTCP, srv.AppMirror, srv.Notify, srv.SubRequests); err != nil {
 		log.Error("subscription endpoint not started", "err", err)
 	}
 	log.Info("serving", "socket", *socket, "node", fmt.Sprintf("%x", params.NodeID))
@@ -862,8 +867,8 @@ func dohHandler(st *store.Store, service int64, answer http.Handler, log *slog.L
 
 // syncDNS keeps the node's records in its DNS provider's zone: when the
 // records it needs change (a DNS tunnel added or removed) and every hour
-// against drift (R4-10).
-func syncDNS(ctx context.Context, st *store.Store, changes func() <-chan struct{}, hb *health.Board, log *slog.Logger) {
+// against drift (R4-10). synced is called after a sync that changed some.
+func syncDNS(ctx context.Context, st *store.Store, changes func() <-chan struct{}, synced func(), hb *health.Board, log *slog.Logger) {
 	last := ""
 	next := time.Time{}
 	for {
@@ -884,6 +889,7 @@ func syncDNS(ctx context.Context, st *store.Store, changes func() <-chan struct{
 				last, next = key, time.Now().Add(time.Hour)
 				if len(done) > 0 {
 					log.Info("DNS records synced", "changes", len(done))
+					synced()
 				}
 				for _, p := range problems {
 					log.Warn("DNS record", "problem", p)
@@ -946,7 +952,7 @@ func rotateReality(ctx context.Context, st *store.Store, e provision.RealityEpoc
 // startSubscription serves the subscription endpoint on the port of the
 // subscription service, if it is enabled. changed wakes apply: a device's
 // LAN consent changed (lan-v1 §1.1).
-func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, sum *summary.Collector, relayProbe func(string) bool, relaySPA func(string) []int, probeDailyMiB int, tcpCarrier bool, app *appmirror.Mirror, changed func(), requests *sub.Requests) error {
+func startSubscription(ctx context.Context, st *store.Store, paths render.Paths, log *slog.Logger, sum *summary.Collector, relayProbe func(string) bool, relaySPA func(string) []int, relayNameReady func(string) bool, probeDailyMiB int, tcpCarrier bool, app *appmirror.Mirror, changed func(), requests *sub.Requests) error {
 	svc, err := st.ServiceByName(ctx, provision.SubscriptionService)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !svc.Enabled) {
 		log.Info("subscription service disabled")
@@ -971,7 +977,7 @@ func startSubscription(ctx context.Context, st *store.Store, paths render.Paths,
 	if err != nil {
 		return err
 	}
-	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier, RelayProbe: relayProbe, RelaySPA: relaySPA,
+	s := &sub.Server{Store: st, Keys: keys, Log: log, TCPCarrier: tcpCarrier, RelayProbe: relayProbe, RelaySPA: relaySPA, RelayNameReady: relayNameReady,
 		ClockSeqAfter: time.Now().Add(settleAfterStart), PinsSince: processStart, PinsAfter: time.Now().Add(pinSettle), App: app, Changed: changed,
 		Requests: requests}
 	port := int(ports[0].Num)

@@ -517,6 +517,20 @@ message Relay {
   // them), and the exit's ports it forwards, as its perimeter has them
   // now. Since v0.31.0; empty from a node before.
   repeated RelayPort ports = 5;
+  // The relay's names (relay-names-v1 §3): one for each service it
+  // forwards whose SNI is the node's, resolving to the relay's address.
+  // Since v0.35.0; empty from a node before.
+  repeated RelayName names = 6;
+}
+// RelayName is a relay's name for one service of the node.
+message RelayName {
+  string service = 1; // the service's name
+  string name = 2;    // one label under the node's domain
+  // Clients may be given it: the certificate of the service's site covers
+  // it and it resolves to the relay's address alone, as the node last
+  // checked (relay-names-v1 §4, §5).
+  bool ready = 3;
+  string problem = 4; // why it is not ready
 }
 // RelayPort is a port, or a range of them, a relay host takes.
 message RelayPort {

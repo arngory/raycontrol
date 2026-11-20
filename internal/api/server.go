@@ -82,6 +82,10 @@ type Server struct {
 	// DNSCheck checks the DNS tunnel zones from the node (CheckDNSZones);
 	// nil: the call is unavailable.
 	DNSCheck *dnscheck.Monitor
+	// RelayNameStatus says whether clients may be given a relay's name,
+	// and if not why (spec/relay-names-v1.md §4, §5: rayd's check), for
+	// ListRelays; nil: none is ready, none checked.
+	RelayNameStatus func(name string) (ready bool, problem string)
 	// AppMirror keeps the client's releases (spec/app-update-v1.md); nil:
 	// the setting alone (tests).
 	AppMirror *appmirror.Mirror

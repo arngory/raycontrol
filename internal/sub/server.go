@@ -81,6 +81,11 @@ type Server struct {
 	// RelaySPA, when set, gives the SPA versions a relay's rayspa takes
 	// (spa-v3 §5), nil when it has not said: relays[].spa.versions.
 	RelaySPA func(name string) []int
+	// RelayNameReady, when set, says whether clients may be given a
+	// relay's name (spec/relay-names-v1.md §4, §5): the certificate covers
+	// it and it resolves to the relay. Not in the subscription yet: its
+	// form waits for the client (§8).
+	RelayNameReady func(name string) bool
 	// App, when set, serves the client's releases on the same endpoint
 	// (spec/app-update-v1.md) and lists them in the subscription while
 	// the administrator has the mirror on (appmirror.Mirror).

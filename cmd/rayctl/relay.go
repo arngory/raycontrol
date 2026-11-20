@@ -49,6 +49,7 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 				}
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.Name, r.Address, probe, time.Unix(r.CreatedAt, 0).UTC().Format(time.DateOnly))
 			}
+			printRelayNames(w, r.Msg.Relays)
 		})
 	case "bundle":
 		fs := flag.NewFlagSet("relay bundle", flag.ContinueOnError)
@@ -174,6 +175,25 @@ func (c *cli) relay(ctx context.Context, sub string, args []string) error {
 		return nil
 	}
 	return errUsage
+}
+
+// printRelayNames is a table of the relays' names (relay-names-v1 §3), a
+// line each, with whether clients may be given it and if not why; nothing
+// when no relay has one (a node before v0.35.0 has none).
+func printRelayNames(w *tabwriter.Writer, relays []*nodev1.Relay) {
+	if !slices.ContainsFunc(relays, func(r *nodev1.Relay) bool { return len(r.Names) > 0 }) {
+		return
+	}
+	fmt.Fprintln(w, "\nRELAY\tSERVICE\tNAME\tREADY")
+	for _, r := range relays {
+		for _, n := range r.Names {
+			ready := "yes"
+			if !n.Ready {
+				ready = "no: " + n.Problem
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.Name, n.Service, n.Name, ready)
+		}
+	}
 }
 
 // relayPortAccess is what RelayPort's access means, for a person.

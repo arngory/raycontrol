@@ -78,13 +78,39 @@ func (s *Server) ListRelays(ctx context.Context, _ *connect.Request[nodev1.ListR
 	if err != nil {
 		return nil, toConnect(err)
 	}
+	names, err := s.relayNames(ctx, services)
+	if err != nil {
+		return nil, toConnect(err)
+	}
 	resp := &nodev1.ListRelaysResponse{}
 	for _, r := range rs {
 		pb := relayPB(r)
 		pb.Ports = relayPorts(r, services)
+		pb.Names = names[r.Name]
 		resp.Relays = append(resp.Relays, pb)
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// relayNames are the relays' names (relay-names-v1 §3), by relay, with
+// whether clients may be given each as rayd's check last found it.
+func (s *Server) relayNames(ctx context.Context, services []store.Service) (map[string][]*nodev1.RelayName, error) {
+	names, err := provision.RelayNames(ctx, s.Store)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]*nodev1.RelayName{}
+	for _, rn := range names {
+		pb := &nodev1.RelayName{Name: rn.Name, Problem: "not checked yet"}
+		if i := slices.IndexFunc(services, func(svc store.Service) bool { return svc.ID == rn.Service }); i >= 0 {
+			pb.Service = services[i].Name
+		}
+		if s.RelayNameStatus != nil {
+			pb.Ready, pb.Problem = s.RelayNameStatus(rn.Name)
+		}
+		out[rn.Relay] = append(out[rn.Relay], pb)
+	}
+	return out, nil
 }
 
 // relayPorts are the ports a relay host takes from outside, for a
@@ -170,6 +196,9 @@ func (s *Server) addRelay(ctx context.Context, name string, addr netip.Addr) (st
 	}
 	_ = s.Store.DeleteSetting(ctx, relayUpdateKey+r.Name)
 	s.relayUpd.forget(r.Name)
+	// Nor the names of a relay of its name before (relay-names-v1 §3),
+	// should its removal have left them.
+	_ = provision.ForgetRelayNames(ctx, s.Store, r.Name)
 	return r, nil
 }
 
@@ -189,6 +218,7 @@ func (s *Server) removeRelay(ctx context.Context, name string) error {
 	}
 	s.relayUpd.forget(name)
 	_ = s.Store.DeleteSetting(ctx, relayUpdateKey+name)
+	_ = provision.ForgetRelayNames(ctx, s.Store, name)
 	return nil
 }
 
