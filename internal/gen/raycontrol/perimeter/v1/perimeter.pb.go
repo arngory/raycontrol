@@ -397,7 +397,13 @@ type WatchRelayRequest struct {
 	// The SPA versions the relay's rayspa takes (spec/spa-v3.md §5): with 3
 	// the exit lists the relay's SPA with versions [2, 3]. rayd relay's feed
 	// and an older rayspa's send none.
-	SpaVersions   []uint32 `protobuf:"varint,3,rep,packed,name=spa_versions,json=spaVersions,proto3" json:"spa_versions,omitempty"`
+	SpaVersions []uint32 `protobuf:"varint,3,rep,packed,name=spa_versions,json=spaVersions,proto3" json:"spa_versions,omitempty"`
+	// The relay's rayspa forwards TCP 80 to the exit while the snapshot's
+	// acme_forward_until is ahead (spec/relay-names-v1.md §6): only then
+	// does an exit without a DNS provider order the relay's names under
+	// HTTP-01, whose challenges come to the relay's address. rayd relay's
+	// feed and an older rayspa's do not set it.
+	AcmeForward   bool `protobuf:"varint,4,opt,name=acme_forward,json=acmeForward,proto3" json:"acme_forward,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -451,6 +457,13 @@ func (x *WatchRelayRequest) GetSpaVersions() []uint32 {
 		return x.SpaVersions
 	}
 	return nil
+}
+
+func (x *WatchRelayRequest) GetAcmeForward() bool {
+	if x != nil {
+		return x.AcmeForward
+	}
+	return false
 }
 
 type ReportRequest struct {
@@ -988,9 +1001,15 @@ type Snapshot struct {
 	// most 16: a SPA v3 packet that names one of these, or the address it
 	// came to, is the node's (spec/spa-v3.md §4). Absent (an older rayd):
 	// only the address it came to.
-	OwnAddrs      []string `protobuf:"bytes,16,rep,name=own_addrs,json=ownAddrs,proto3" json:"own_addrs,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	OwnAddrs []string `protobuf:"bytes,16,rep,name=own_addrs,json=ownAddrs,proto3" json:"own_addrs,omitempty"`
+	// A relay's snapshot only (spec/relay-names-v1.md §6): until then, unix
+	// seconds, the relay forwards TCP 80 from any address to the exit's port
+	// 80, without a grant, for the exit's ACME window of an order with the
+	// relay's names. Not Snapshot.acme, which points TCP 80 to a port of
+	// the host itself. 0 or past (an older exit): nothing forwarded.
+	AcmeForwardUntil int64 `protobuf:"varint,17,opt,name=acme_forward_until,json=acmeForwardUntil,proto3" json:"acme_forward_until,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Snapshot) Reset() {
@@ -1133,6 +1152,13 @@ func (x *Snapshot) GetOwnAddrs() []string {
 		return x.OwnAddrs
 	}
 	return nil
+}
+
+func (x *Snapshot) GetAcmeForwardUntil() int64 {
+	if x != nil {
+		return x.AcmeForwardUntil
+	}
+	return 0
 }
 
 // Egress is what the data plane may not send, whoever the user.
@@ -1799,11 +1825,12 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"\tswept_udp\x18\x06 \x01(\x04R\bsweptUdp\x12\"\n" +
 	"\rswept_tcp_out\x18\a \x01(\x04R\vsweptTcpOut\x12 \n" +
 	"\fswept_tcp_in\x18\b \x01(\x04R\n" +
-	"sweptTcpIn\"f\n" +
+	"sweptTcpIn\"\x89\x01\n" +
 	"\x11WatchRelayRequest\x12\x14\n" +
 	"\x05probe\x18\x01 \x01(\bR\x05probe\x12\x18\n" +
 	"\aupdates\x18\x02 \x01(\bR\aupdates\x12!\n" +
-	"\fspa_versions\x18\x03 \x03(\rR\vspaVersions\"U\n" +
+	"\fspa_versions\x18\x03 \x03(\rR\vspaVersions\x12!\n" +
+	"\facme_forward\x18\x04 \x01(\bR\vacmeForward\"U\n" +
 	"\rReportRequest\x12\x16\n" +
 	"\x06device\x18\x01 \x01(\tR\x06device\x12\x18\n" +
 	"\anetwork\x18\x02 \x01(\tR\anetwork\x12\x12\n" +
@@ -1833,7 +1860,7 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"unfinished\"\x17\n" +
 	"\x15WatchPerimeterRequest\"W\n" +
 	"\x16WatchPerimeterResponse\x12=\n" +
-	"\bsnapshot\x18\x01 \x01(\v2!.raycontrol.perimeter.v1.SnapshotR\bsnapshot\"\xa2\x06\n" +
+	"\bsnapshot\x18\x01 \x01(\v2!.raycontrol.perimeter.v1.SnapshotR\bsnapshot\"\xd0\x06\n" +
 	"\bSnapshot\x12\x1a\n" +
 	"\brevision\x18\x01 \x01(\x04R\brevision\x124\n" +
 	"\x03spa\x18\x02 \x01(\v2\".raycontrol.perimeter.v1.SPAParamsR\x03spa\x129\n" +
@@ -1855,7 +1882,8 @@ const file_raycontrol_perimeter_v1_perimeter_proto_rawDesc = "" +
 	"\x0einteg_prefixes\x18\x0e \x03(\tR\rintegPrefixes\x12>\n" +
 	"\vinteg_ports\x18\x0f \x03(\v2\x1d.raycontrol.perimeter.v1.PortR\n" +
 	"integPorts\x12\x1b\n" +
-	"\town_addrs\x18\x10 \x03(\tR\bownAddrs\"\x86\x01\n" +
+	"\town_addrs\x18\x10 \x03(\tR\bownAddrs\x12,\n" +
+	"\x12acme_forward_until\x18\x11 \x01(\x03R\x10acmeForwardUntil\"\x86\x01\n" +
 	"\x06Egress\x12\x12\n" +
 	"\x04smtp\x18\x01 \x01(\bR\x04smtp\x12\x1e\n" +
 	"\n" +

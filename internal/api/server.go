@@ -129,9 +129,16 @@ type Server struct {
 	rev   uint64
 	wake  chan struct{} // closed on the next change
 	after []func()      // AfterChange
-	// ACME window (certs.Issuer): rayspa points TCP 80 to acmePort.
+	// ACME window (certs.Issuer): rayspa points TCP 80 to acmePort; the
+	// order's names, for the relays whose names are among them
+	// (relay-names-v1 §6).
 	acmePort  uint16
 	acmeUntil time.Time
+	acmeNames []string
+	// relayACME: what each relay's rayspa said when its feed opened, that
+	// it forwards TCP 80 for the ACME windows (relay-names-v1 §6); the
+	// last word stays after the feed closed. Under mu.
+	relayACME map[string]bool
 
 	// The relays' updates by the node's word (relayupdate.go).
 	relayUpd relayUpdates
@@ -140,13 +147,54 @@ type Server struct {
 	integ integrations
 }
 
-// SetACMEWindow opens the perimeter window for an ACME order to port until
-// the given time, or closes it when until is zero.
-func (s *Server) SetACMEWindow(port uint16, until time.Time) {
+// SetACMEWindow opens the perimeter window for an ACME order of names to
+// port until the given time, or closes it when until is zero. A relay
+// with one of its names among them forwards TCP 80 to the node meanwhile
+// (RelaySnapshot).
+func (s *Server) SetACMEWindow(port uint16, until time.Time, names []string) {
 	s.mu.Lock()
-	s.acmePort, s.acmeUntil = port, until
+	s.acmePort, s.acmeUntil, s.acmeNames = port, until, slices.Clone(names)
+	if until.IsZero() {
+		s.acmeNames = nil
+	}
 	s.mu.Unlock()
 	s.notify()
+}
+
+// acmeOrder is the window's deadline and the names of its order, while
+// one is open.
+func (s *Server) acmeOrder(now time.Time) (time.Time, []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.acmePort == 0 || !s.acmeUntil.After(now) {
+		return time.Time{}, nil
+	}
+	return s.acmeUntil, slices.Clone(s.acmeNames)
+}
+
+// setRelayACME records whether a relay's rayspa forwards TCP 80 for the
+// ACME windows, as its feed said when it opened (an older one says
+// nothing: false). A change is news: the certificates may order the
+// relay's names now, or no more, and its ports list port 80 or not.
+func (s *Server) setRelayACME(name string, on bool) {
+	s.mu.Lock()
+	was := s.relayACME[name] // unknown: false, as an older relay says
+	if s.relayACME == nil {
+		s.relayACME = map[string]bool{}
+	}
+	s.relayACME[name] = on
+	s.mu.Unlock()
+	if was != on {
+		s.notify()
+	}
+}
+
+// RelayACMEForward reports whether a relay's rayspa said it forwards TCP
+// 80 for the ACME windows (relay-names-v1 §6), since this node started.
+func (s *Server) RelayACMEForward(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.relayACME[name]
 }
 
 func (s *Server) acmeWindow() (uint16, time.Time) {

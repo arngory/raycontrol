@@ -201,6 +201,7 @@ var relayPortAccess = map[string]string{
 	"everyone": "everyone",
 	"spa":      "after the knock",
 	"admin":    "the relay's admin addresses; after the knock for SSH devices",
+	"acme":     "everyone, while the exit orders a certificate with the relay's names (up to 3 minutes)",
 }
 
 // printRelayPorts is a relay's ports as rayctl ports has the node's: what

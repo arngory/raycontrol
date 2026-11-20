@@ -313,6 +313,18 @@ func (p *PerimeterServer) RelaySnapshot(ctx context.Context, name string) (*peri
 	// The relay's own address, which a v3 packet to it names (spa-v3 §4).
 	snap.OwnAddrs = []string{relay.Address.Unmap().String()}
 	snap.AdminPorts = []*perimeterv1.Port{{Proto: "tcp", Port: uint32(relay.SSHPort)}}
+	// The node's ACME window for an order with this relay's names
+	// (relay-names-v1 §6): the CA's challenges for them come to the
+	// relay's address, and the relay forwards them here until it closes.
+	if until, order := p.acmeOrder(time.Now()); len(order) > 0 {
+		names, err := provision.RelayNames(ctx, p.Store)
+		if err != nil {
+			return nil, err
+		}
+		if slices.ContainsFunc(names, func(rn provision.RelayName) bool { return rn.Relay == name && slices.Contains(order, rn.Name) }) {
+			snap.AcmeForwardUntil = until.Unix()
+		}
+	}
 	// The per-address limit holds on the node's relays too (conn-limit-v1
 	// §6.2, §8): one switch for both.
 	if snap.ConnLimitOff, err = p.Store.ConnLimitOff(ctx); err != nil {

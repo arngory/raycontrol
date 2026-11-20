@@ -52,15 +52,20 @@ type Issuer struct {
 	// Listen is the HTTP-01 responder address; "" picks a free port, which
 	// the perimeter window points TCP 80 to.
 	Listen string
-	// Window opens the perimeter window to port until the given time, or
-	// closes it when until is zero.
-	Window func(port uint16, until time.Time)
+	// Window opens the perimeter window for an order of names to port
+	// until the given time, or closes it when until is zero.
+	Window func(port uint16, until time.Time, names []string)
 	// Expect are the node's addresses; every name must resolve to one of
 	// them before an order is placed. NodeHost, if Expect is empty, gives
 	// them: an address or a name to resolve. Both empty skip the check.
 	Expect   []netip.Addr
 	NodeHost string
 	Resolve  func(ctx context.Context, name string) ([]netip.Addr, error)
+	// RelayAddrs, if set, gives the relays' names and the address each
+	// resolves to instead of the node's (relay-names-v1 §6): such a name
+	// passes CheckDNS when it resolves to its relay alone, and its
+	// challenge comes to the node through the relay.
+	RelayAddrs func(ctx context.Context) (map[string]netip.Addr, error)
 	// DNS returns the DNS-01 solver when the node has a DNS provider (nil
 	// solver otherwise): orders then need no perimeter window, and
 	// wildcard names become possible (R4-10).
@@ -75,13 +80,37 @@ func (is *Issuer) log() *slog.Logger {
 	return slog.Default()
 }
 
-// CheckDNS reports a name that does not resolve to the node.
+// CheckDNS reports a name that does not resolve to the node, or a relay's
+// name (RelayAddrs) that does not resolve to its relay alone.
 func (is *Issuer) CheckDNS(ctx context.Context, names []string) error {
 	resolve := is.Resolve
 	if resolve == nil {
 		resolve = func(ctx context.Context, name string) ([]netip.Addr, error) {
 			return net.DefaultResolver.LookupNetIP(ctx, "ip", name)
 		}
+	}
+	relays, err := is.relayAddrs(ctx)
+	if err != nil {
+		return err
+	}
+	var own []string
+	for _, name := range names {
+		relay, ok := relays[strings.ToLower(strings.TrimSuffix(name, "."))]
+		if !ok {
+			own = append(own, name)
+			continue
+		}
+		addrs, err := resolve(ctx, name)
+		if err != nil {
+			return fmt.Errorf("%s does not resolve (add the record of the relay's name, rayctl dns): %w", name, err)
+		}
+		if len(addrs) == 0 || slices.ContainsFunc(addrs, func(a netip.Addr) bool { return a.Unmap() != relay }) {
+			return fmt.Errorf("%s resolves to %v, not to its relay %s alone", name, addrs, relay)
+		}
+	}
+	names = own
+	if len(names) == 0 {
+		return nil
 	}
 	expect := is.Expect
 	if len(expect) == 0 && is.NodeHost != "" {
@@ -115,6 +144,20 @@ func (is *Issuer) CheckDNS(ctx context.Context, names []string) error {
 	}
 	return nil
 }
+
+// relayAddrs is RelayAddrs, none when unset.
+func (is *Issuer) relayAddrs(ctx context.Context) (map[string]netip.Addr, error) {
+	if is.RelayAddrs == nil {
+		return nil, nil
+	}
+	return is.RelayAddrs(ctx)
+}
+
+// RelaySettle is how long an order with a relay's name waits after the
+// window opened before its challenges are answered: the relay takes the
+// window with its next snapshot, a round trip away, and the CA's first
+// try must find it forwarding.
+var RelaySettle = 2 * time.Second
 
 // Issue gets a certificate for names with key and returns the chain (DER,
 // leaf first): through DNS-01 when the node has a DNS provider, otherwise
@@ -175,8 +218,19 @@ func (is *Issuer) Issue(ctx context.Context, names []string, key crypto.Signer) 
 		defer func() { _ = srv.Close() }()
 		if is.Window != nil {
 			port := uint16(ln.Addr().(*net.TCPAddr).Port)
-			is.Window(port, time.Now().Add(WindowLen))
-			defer is.Window(0, time.Time{})
+			is.Window(port, time.Now().Add(WindowLen), names)
+			defer is.Window(0, time.Time{}, nil)
+			relays, err := is.relayAddrs(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if slices.ContainsFunc(names, func(n string) bool { _, ok := relays[strings.ToLower(n)]; return ok }) {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(RelaySettle):
+				}
+			}
 		}
 		answer = func(ctx context.Context, client *acme.Client, z *acme.Authorization) error {
 			chal := challenge(z, "http-01")

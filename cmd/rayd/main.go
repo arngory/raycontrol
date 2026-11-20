@@ -17,6 +17,7 @@ import (
 	mrand "math/rand/v2"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"os/user"
@@ -386,18 +387,23 @@ func cmdServe(args []string) error {
 	if err := startCredentialRotation(ctx, st, r, func() { srv.Notify() }, hb, log); err != nil {
 		return err
 	}
+	// The relays' names clients may be given (relay-names-v1 §4, §5),
+	// checked again as soon as the DNS sync changed records; without a DNS
+	// provider, those the sites' certificates take (§6).
+	relayNames := newRelayNameCheck(st, net.DefaultResolver.LookupNetIP)
+	relayNames.acmeForward = srv.RelayACMEForward
+	srv.RelayNameStatus = relayNames.Status
 	var cm *certs.Manager
 	var is *certs.Issuer
 	if *acmeDir != "" {
-		if cm, is, err = startCertificates(ctx, st, srv, *acmeDir, siteKeys, hb, log); err != nil {
+		if cm, is, err = startCertificates(ctx, st, srv, *acmeDir, siteKeys, relayNames, hb, log); err != nil {
 			log.Error("certificates not managed", "err", err)
 		}
 	}
+	if cm != nil {
+		relayNames.ordering, relayNames.resolved = true, cm.Wake
+	}
 	go rotateReality(ctx, st, epoch, is, cm, rotateNow, func() { srv.Notify() }, paths.FrontConfig(), hb, log)
-	// The relays' names clients may be given (relay-names-v1 §4, §5),
-	// checked again as soon as the DNS sync changed records.
-	relayNames := newRelayNameCheck(st, net.DefaultResolver.LookupNetIP)
-	srv.RelayNameStatus = relayNames.Status
 	go relayNames.run(ctx, srv.Changes, log)
 	go syncDNS(ctx, st, srv.Changes, relayNames.Wake, hb, log)
 	go checkRealityTargets(ctx, st, srv.Changes, hb, log)
@@ -504,7 +510,7 @@ func supervisor(paths render.Paths, bins deploy.Binaries, st *store.Store, log *
 // keeps its key from one certificate to the next and changes it by keys or
 // when root asks (spec/cert-pin-v1.md §4, §5).
 func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, directory string, keys provision.SiteKeyPolicy,
-	hb *health.Board, log *slog.Logger) (*certs.Manager, *certs.Issuer, error) {
+	relayNames *relayNameCheck, hb *health.Board, log *slog.Logger) (*certs.Manager, *certs.Issuer, error) {
 	key, err := certs.AccountKey(ctx, st)
 	if err != nil {
 		return nil, nil, err
@@ -518,7 +524,7 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 		return nil, nil, err
 	}
 	is := &certs.Issuer{Directory: directory, AccountKey: key, Window: srv.SetACMEWindow, NodeHost: host, Log: log,
-		Listen: ":" + strconv.Itoa(int(port))}
+		Listen: ":" + strconv.Itoa(int(port)), RelayAddrs: relayAddrs(st)}
 	// With Cloudflare: DNS-01 and one wildcard certificate, no window on
 	// TCP 80 (R4-10).
 	is.DNS = func(ctx context.Context) (certs.DNSSolver, error) {
@@ -540,7 +546,10 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 			}
 			d, _ := provision.Domain(ctx, st)
 			return d
-		}}
+		},
+		// Without a DNS provider, the relays' names that resolve to their
+		// relay, through relays that forward TCP 80 (relay-names-v1 §6).
+		RelayNames: relayNames.ToOrder, RelayReport: relayNames.Ordered}
 	// The operator's DNS change may be the fix of a failure: try now.
 	srv.DNSChanged = m.Retry
 	srv.SiteKeyAsked = m.RetrySite
@@ -560,6 +569,23 @@ func startCertificates(ctx context.Context, st *store.Store, srv *api.Server, di
 		}
 	}()
 	return m, is, nil
+}
+
+// relayAddrs gives the relays' names and their relays' addresses
+// (certs.Issuer.RelayAddrs): those names resolve to the relay, not the
+// node, and their challenges come through it (relay-names-v1 §6).
+func relayAddrs(st *store.Store) func(ctx context.Context) (map[string]netip.Addr, error) {
+	return func(ctx context.Context) (map[string]netip.Addr, error) {
+		names, err := provision.RelayNames(ctx, st)
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[string]netip.Addr, len(names))
+		for _, rn := range names {
+			out[rn.Name] = rn.Address
+		}
+		return out, nil
+	}
 }
 
 // dohListener is a running DoH endpoint and the certificate it serves.

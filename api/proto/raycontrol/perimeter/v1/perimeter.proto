@@ -104,6 +104,12 @@ message WatchRelayRequest {
   // the exit lists the relay's SPA with versions [2, 3]. rayd relay's feed
   // and an older rayspa's send none.
   repeated uint32 spa_versions = 3;
+  // The relay's rayspa forwards TCP 80 to the exit while the snapshot's
+  // acme_forward_until is ahead (spec/relay-names-v1.md §6): only then
+  // does an exit without a DNS provider order the relay's names under
+  // HTTP-01, whose challenges come to the relay's address. rayd relay's
+  // feed and an older rayspa's do not set it.
+  bool acme_forward = 4;
 }
 
 message ReportRequest {
@@ -208,6 +214,12 @@ message Snapshot {
   // came to, is the node's (spec/spa-v3.md §4). Absent (an older rayd):
   // only the address it came to.
   repeated string own_addrs = 16;
+  // A relay's snapshot only (spec/relay-names-v1.md §6): until then, unix
+  // seconds, the relay forwards TCP 80 from any address to the exit's port
+  // 80, without a grant, for the exit's ACME window of an order with the
+  // relay's names. Not Snapshot.acme, which points TCP 80 to a port of
+  // the host itself. 0 or past (an older exit): nothing forwarded.
+  int64 acme_forward_until = 17;
 }
 
 // Egress is what the data plane may not send, whoever the user.

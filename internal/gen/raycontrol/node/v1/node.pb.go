@@ -1767,7 +1767,9 @@ type RelayPort struct {
 	Forwarded bool     `protobuf:"varint,5,opt,name=forwarded,proto3" json:"forwarded,omitempty"` // to the exit, on the same port; else the relay host answers itself
 	// Who reaches it: "everyone" (SPA), "spa" (an address after its knock at
 	// the relay), "admin" (the relay's admin addresses, and after a knock a
-	// device allowed SSH).
+	// device allowed SSH), "acme" (any address while the exit orders a
+	// certificate with the relay's names, up to 3 minutes: TCP 80, since
+	// v0.35.0, relay-names-v1 §6).
 	Access        string `protobuf:"bytes,6,opt,name=access,proto3" json:"access,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

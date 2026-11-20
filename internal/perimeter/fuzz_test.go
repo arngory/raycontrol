@@ -81,6 +81,12 @@ func (f *scriptFW) SetRotation(udp map[uint16]uint16) error {
 	return f.run(rotationScript(udp))
 }
 func (f *scriptFW) SetACME(port uint16, ttl time.Duration) error { return f.run(acmeScript(port, ttl)) }
+func (f *scriptFW) SetACMEForward(ttl time.Duration) error {
+	if !f.n.RelayTo.IsValid() {
+		return nil
+	}
+	return f.run(acmeForwardScript(ttl))
+}
 func (f *scriptFW) SetEgress(e Egress) error {
 	if f.n.RelayTo.IsValid() {
 		return nil

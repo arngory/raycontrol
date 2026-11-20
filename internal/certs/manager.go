@@ -86,6 +86,21 @@ type Manager struct {
 	// (DNS-01): one *.domain then covers every name of a site, those REALITY
 	// moves to included, and no name of the node shows in CT logs (R4-10).
 	Wildcard func(ctx context.Context) string
+	// RelayNames, if set, gives the relays' names to order with a site's
+	// own, under HTTP-01 (spec/relay-names-v1.md §5, §6): rayd gives those
+	// of the relays that forward TCP 80 to the node for the window and
+	// resolve to their relay. None with a wildcard, which covers them, nor
+	// while the site has the operator's certificate: it is not asked to
+	// cover them (§5), and the next order the site's own names make takes
+	// them. After the site's names, as many as the CA takes (MaxNames).
+	// An order with them that fails is made at once without them, and
+	// they wait out a back-off of their own: they never hold back the
+	// site's certificate.
+	RelayNames func(ctx context.Context, site string) []string
+	// RelayReport, if set, gets the outcome for the relays' names of each
+	// order that had them (nil: they are in the certificate), and those
+	// left out for MaxNames (ErrTooManyNames).
+	RelayReport func(site string, names []string, err error)
 
 	once  sync.Once
 	fails map[string]int
@@ -94,6 +109,13 @@ type Manager struct {
 	asked map[string]askedSwitch // the operator's switch that got its try past the back-off
 	wake  chan struct{}
 	retry atomic.Bool
+
+	// The relays' names of a site whose order failed (RelayNames): how
+	// many times in a row, when they go into an order again, and when
+	// they last failed.
+	relayFails map[string]int
+	relayNext  map[string]time.Time
+	relayLast  map[string]time.Time
 
 	mu    sync.Mutex
 	again map[string]bool // RetrySite's sites, for the next Once
@@ -213,6 +235,11 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 			m.next[name] = soon
 		}
 	}
+	for name, next := range m.relayNext {
+		if soon := m.relayLast[name].Add(RetryGap); (all || again[name]) && soon.Before(next) {
+			m.relayNext[name] = soon
+		}
+	}
 	services, err := m.Store.ListServices(ctx)
 	if err != nil {
 		m.log().Error("certificates", "err", err)
@@ -255,7 +282,9 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 			continue
 		}
 		chain := secrets[provision.SecretTLSChain]
-		want := append(slices.Clone(names), next...)
+		own := append(slices.Clone(names), next...)
+		relay := m.relayNames(ctx, svc, len(own), now)
+		want := append(slices.Clone(own), relay...)
 		// Due, or the operator asked for another key: the switch is an
 		// issuance with it.
 		if !due(chain, want, now) && !rotate {
@@ -268,6 +297,19 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 			}
 		}
 		err = m.issue(ctx, svc, order, now)
+		if len(relay) > 0 && !errors.Is(err, provision.ErrSiteChanged) {
+			m.relayOutcome(svc.Name, relay, err, now)
+			if err != nil {
+				m.log().Warn("certificate with the relays' names not issued, ordering without them", "service", svc.Name,
+					"relay_names", len(relay), "err", err)
+				want, order = own, own
+				// What the site has does for its own names: no order.
+				if !due(chain, want, now) && !rotate {
+					continue
+				}
+				err = m.issue(ctx, svc, order, now)
+			}
+		}
 		if err != nil && !errors.Is(err, provision.ErrSiteChanged) && len(next) > 0 && len(order) == len(want) && (rotate || due(chain, names, now)) {
 			m.log().Warn("certificate with the next name not issued, renewing without it", "service", svc.Name, "err", err)
 			err = m.issue(ctx, svc, names, now)
@@ -304,6 +346,56 @@ func (m *Manager) Once(ctx context.Context, now time.Time) int {
 		}
 	}
 	return stored
+}
+
+// MaxNames is how many names one certificate takes (Let's Encrypt's
+// limit): the relays' names beyond it, after the site's own, are left out
+// of the order (RelayNames) and reported (ErrTooManyNames).
+const MaxNames = 100
+
+// ErrTooManyNames is the report of a relay's name left out of an order
+// for MaxNames.
+var ErrTooManyNames = fmt.Errorf("the site's certificate has room for %d names, the site's own first", MaxNames)
+
+// relayNames are the relays' names to order with a site's own (have of
+// them): none while they wait out a failure, with a wildcard, or with the
+// operator's certificate on the site.
+func (m *Manager) relayNames(ctx context.Context, svc store.Service, have int, now time.Time) []string {
+	if m.RelayNames == nil || now.Before(m.relayNext[svc.Name]) || provision.ParseSiteKeyState(svc).Imported {
+		return nil
+	}
+	if m.Wildcard != nil && m.Wildcard(ctx) != "" {
+		return nil
+	}
+	names := m.RelayNames(ctx, svc.Name)
+	if room := max(MaxNames-have, 0); len(names) > room {
+		m.log().Warn("relays' names left out of the site's certificate: the CA takes no more names", "service", svc.Name,
+			"left_out", len(names)-room, "max", MaxNames)
+		if m.RelayReport != nil {
+			m.RelayReport(svc.Name, slices.Clone(names[room:]), ErrTooManyNames)
+		}
+		names = names[:room]
+	}
+	return names
+}
+
+// relayOutcome keeps the back-off of a site's relays' names after an order
+// that had them, and reports it.
+func (m *Manager) relayOutcome(site string, names []string, err error, now time.Time) {
+	if m.relayFails == nil {
+		m.relayFails, m.relayNext, m.relayLast = map[string]int{}, map[string]time.Time{}, map[string]time.Time{}
+	}
+	if err != nil {
+		m.relayFails[site]++
+		m.relayNext[site], m.relayLast[site] = now.Add(backoff(m.relayFails[site])), now
+	} else {
+		delete(m.relayFails, site)
+		delete(m.relayNext, site)
+		delete(m.relayLast, site)
+	}
+	if m.RelayReport != nil {
+		m.RelayReport(site, slices.Clone(names), err)
+	}
 }
 
 // due reports whether a chain is missing, lacks one of the names, or is

@@ -79,3 +79,22 @@ func TestRollbackKeepsRelayNames(t *testing.T) {
 		}
 	}
 }
+
+// rayctl relay ports names TCP 80 of an exit without a DNS provider as
+// open to everyone for the certificate's orders only (relay-names-v1 §6).
+func TestRelayPortsACME(t *testing.T) {
+	msk := &nodev1.Relay{Name: "msk", Address: "198.51.100.20", Ports: []*nodev1.RelayPort{
+		{Name: "ssh", Protos: []string{"tcp"}, From: 22, To: 22, Access: "admin"},
+		{Name: "acme", Protos: []string{"tcp"}, From: 80, To: 80, Forwarded: true, Access: "acme"},
+	}}
+	fake := relaysNode{relays: []*nodev1.Relay{msk}}
+	out, err := captureStdout(t, func() error { return (&cli{c: fake}).relay(context.Background(), "ports", []string{"msk"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	want := []string{"tcp", "80", "acme", "the exit", "everyone, while the exit orders a certificate with the relay's names (up to 3 minutes)"}
+	if len(lines) < 3 || !slices.Equal(fields(lines[2]), want) {
+		t.Fatalf("relay ports:\n%s", out)
+	}
+}
