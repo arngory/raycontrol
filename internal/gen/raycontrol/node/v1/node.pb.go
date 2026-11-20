@@ -8294,7 +8294,11 @@ type CreateInviteResponse struct {
 	InviteCodeShort string                 `protobuf:"bytes,4,opt,name=invite_code_short,json=inviteCodeShort,proto3" json:"invite_code_short,omitempty"` // the same invite as "RCINV2:..." (api-v1 §3a); "" if the host cannot go in it
 	// What the node took of allow but would point out: a private network,
 	// an admin address.
-	Warnings      []string `protobuf:"bytes,5,rep,name=warnings,proto3" json:"warnings,omitempty"`
+	Warnings []string `protobuf:"bytes,5,rep,name=warnings,proto3" json:"warnings,omitempty"`
+	// The same invite by name, "RCINV3:..." (api-v1 §3b): with the node's
+	// name (when it has one) and its SPA versions; "" if the host cannot go
+	// in it. A node before v0.35.0 sends none.
+	InviteCodeV3  string `protobuf:"bytes,6,opt,name=invite_code_v3,json=inviteCodeV3,proto3" json:"invite_code_v3,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -8362,6 +8366,13 @@ func (x *CreateInviteResponse) GetWarnings() []string {
 		return x.Warnings
 	}
 	return nil
+}
+
+func (x *CreateInviteResponse) GetInviteCodeV3() string {
+	if x != nil {
+		return x.InviteCodeV3
+	}
+	return ""
 }
 
 type SetDeviceAllowRequest struct {
@@ -10629,14 +10640,15 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\vttl_seconds\x18\x04 \x01(\x03R\n" +
 	"ttlSeconds\x12\x10\n" +
 	"\x03pin\x18\x05 \x01(\bR\x03pin\x12#\n" +
-	"\x05allow\x18\x06 \x03(\tB\r\xfa\xd2\xe4\x93\x02\a\x12\x05ADMINR\x05allow\"\xd4\x01\n" +
+	"\x05allow\x18\x06 \x03(\tB\r\xfa\xd2\xe4\x93\x02\a\x12\x05ADMINR\x05allow\"\xfa\x01\n" +
 	"\x14CreateInviteResponse\x122\n" +
 	"\x06invite\x18\x01 \x01(\v2\x1a.raycontrol.node.v1.InviteR\x06invite\x12\x1f\n" +
 	"\vinvite_code\x18\x02 \x01(\tR\n" +
 	"inviteCode\x12\x10\n" +
 	"\x03pin\x18\x03 \x01(\tR\x03pin\x12*\n" +
 	"\x11invite_code_short\x18\x04 \x01(\tR\x0finviteCodeShort\x12)\n" +
-	"\bwarnings\x18\x05 \x03(\tB\r\xfa\xd2\xe4\x93\x02\a\x12\x05ADMINR\bwarnings\"C\n" +
+	"\bwarnings\x18\x05 \x03(\tB\r\xfa\xd2\xe4\x93\x02\a\x12\x05ADMINR\bwarnings\x12$\n" +
+	"\x0einvite_code_v3\x18\x06 \x01(\tR\finviteCodeV3\"C\n" +
 	"\x15SetDeviceAllowRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprefixes\x18\x02 \x03(\tR\bprefixes\"h\n" +

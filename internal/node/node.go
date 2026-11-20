@@ -231,11 +231,15 @@ func (b Bundle) encode(prefix string) (string, error) {
 // DecodeBundle parses an encoded bundle.
 func DecodeBundle(s string) (Bundle, error) { return decode(s, BundlePrefix) }
 
-// DecodeInvite parses an encoded invite, rcinv1 or the short rcinv2.
+// DecodeInvite parses an encoded invite: rcinv1, the short rcinv2 or
+// rcinv3, by the node's name.
 func DecodeInvite(s string) (Bundle, error) {
 	s = strings.TrimSpace(s)
 	if len(s) >= len(InvitePrefix2) && strings.EqualFold(s[:len(InvitePrefix2)], InvitePrefix2) {
-		return decodeInvite2(s[len(InvitePrefix2):])
+		return decodeShort(s[len(InvitePrefix2):], invite2Version)
+	}
+	if len(s) >= len(InvitePrefix3) && strings.EqualFold(s[:len(InvitePrefix3)], InvitePrefix3) {
+		return decodeShort(s[len(InvitePrefix3):], invite3Version)
 	}
 	b, err := decode(s, InvitePrefix)
 	if err == nil && (b.API == nil || b.Expires == 0) {

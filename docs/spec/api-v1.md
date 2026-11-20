@@ -144,6 +144,58 @@ RCINV2:<base32 RFC 4648, верхний регистр, без '='>
 Нода, у которой хост — не адрес и не ASCII-имя, rcinv2 не делает (`invite_code_short` пустой), а `rayctl` с
 `-format rcinv2` тогда отзывает приглашение и просит `-format rcinv1`.
 
+## 3b. Приглашение по имени `RCINV3:` (raycontrol v0.35.0, черновик)
+
+Решение владельца — names-v1 §9 п. 3. Это раскладка rcinv2 с двумя добавками: имя ноды и флаг стука v3. Ноде
+не нужно, чтобы первое обращение шло по `host`: клиент стучится и регистрируется по имени, как с пакетом устройства
+(names-v1 §5). Регистрация (§4) не меняется. `rayctl device invite … -format rcinv3`. По умолчанию — `rcinv2`, пока
+не выйдет Niko 1.63: он читает rcinv3 вместе со стуком spa-v3 (согласовано с клиентом 2026-11-20).
+
+```
+RCINV3:<base32 RFC 4648, верхний регистр, без '='>
+```
+
+Отличия от §3a:
+
+| Поле | Байт | Что |
+|---|---|---|
+| версия | 1 | `3` |
+| флаги | 1 | биты 0–2 — как у rcinv2; бит 3 — есть имя ноды; бит 4 — нода принимает SPA v3 (`spa.versions` = `[2, 3]`, [spa-v3](spa-v3.md) §5); остальные — 0 |
+| хост | 4, 16 или 1 + n | как у rcinv2 |
+| имя ноды | 1 + n, если бит 3 | `dns_name` (names-v1 §2): длина (1 байт) и ASCII по правилам имени хоста, последняя метка не из одних цифр (имя не похоже на адрес); только когда хост — адрес |
+| дальше | | как у rcinv2, от `spa.node_id` до `expires` |
+
+С IPv4 и именем из 15 символов — 166 байт (273 символа): QR версии 10 с коррекцией M (у rcinv2 — до 9).
+
+Читатель rcinv3:
+
+- отказывает в тех же случаях, что читатель rcinv2;
+- отказывает, если бит 3 стоит при хосте-имени;
+- отказывает на имени не по правилам, в том числе на имени, последняя метка которого — одни цифры (`198.51.100.99`).
+
+С битом 3 у пакета `dns_name` = имя, а `addrs` = [хост]: адрес и есть запасной путь (names-v1 §3). С битом 4
+`spa.versions` = `[2, 3]`. Читатель rcinv2 rcinv3 не берёт: у него версия `3`. Клиент без поддержки rcinv3 отказывает
+уже на префиксе `RCINV3:` и не пробует читать строку как rcinv2.
+
+Клиент с rcinv3 стучится и регистрируется по `dns_name`, как с пакетом устройства (names-v1 §5–§6). С битом 4 — стуком
+v3 на любой адрес из DNS ([spa-v3](spa-v3.md) §6). Без бита 4 — правило известного адреса (names-v1 §5 п. 5). Без имени
+— по `host`, как с rcinv2. TLS к API — с SNI = `dns_name`, проверка пином, как и раньше.
+
+`CreateInviteResponse.invite_code_v3` — то же приглашение как rcinv3. Пусто, если хост в раскладку не помещается или
+нода старше v0.35.0. rcinv1 и rcinv2 не меняются: в них нет ни имени, ни версий.
+
+Векторы — тест `TestInvite3Vectors` (`internal/node/invite3_test.go`). Они посчитаны отдельно от кода (Python, по
+раскладке), с теми же полями, что у векторов §3a, и с именем `k3f.example.com`:
+
+- `203.0.113.7`, имя, PIN, v3:
+  `RCINV3:AMM4WADRA4HWWM3GFZSXQYLNOBWGKLTDN5WQAAICAMCAKBQHBAEQUCYMBUHA6AAAQZGAAAAGKQQCCIRDEQSSMJZIFEVCWLBNFYXTAMJSGM2DKNRXHA4TUOZ4HU7D6VMTBOFQBCAAZ2QKDIVDUSS2NJ2AIFBEGRCFIZDUQSKKJNGE2TSPKBIVEU2UKVLFOWCZLJNVYXK6L4AAPPCVMBQWEY3EMVTGO2DJNJVWY3LON5YHC4TTOR2XM53YPF5HW7D5PZ7WSVYKQA`;
+- `2001:db8::7`, имя, без PIN, v3:
+  `RCINV3:AMNCAAINXAAAAAAAAAAAAAAAAAAAOD3LGNTC4ZLYMFWXA3DFFZRW63IAAEBAGBAFAYDQQCIKBMGA2DQPAAAIMTAAAADFIIBBEIRSIJJGE4UCSKRLFQWS4LZQGEZDGNBVGY3TQOJ2HM6D2PR7KWJQXCYARAAM5IFBUKR2JJNGU5AECQSDIRCUMR2IJFFEWTCNJZHVAUKSKNKFKVSXLBMVUW24LVPF6AAHXRKWAYLCMNSGKZTHNBUWU23MNVXG64DROJZXI5LWO54HS6T3PR6X473JK4FIA`;
+- хост `node.example.com`, без имени, v3:
+  `RCINV3:AMKBA3TPMRSS4ZLYMFWXA3DFFZRW63IAAEBAGBAFAYDQQCIKBMGA2DQPAAAIMTAAAADFIIBBEIRSIJJGE4UCSKRLFQWS4LZQGEZDGNBVGY3TQOJ2HM6D2PR7KWJQXCYARAAM5IFBUKR2JJNGU5AECQSDIRCUMR2IJFFEWTCNJZHVAUKSKNKFKVSXLBMVUW24LVPF6AAHXRKWAYLCMNSGKZTHNBUWU23MNVXG64DROJZXI5LWO54HS6T3PR6X473JK4FIA`;
+- `203.0.113.7`, без имени, без PIN, без v3:
+  `RCINV3:AMAMWADRA4AACAQDAQCQMBYIBEFAWDANBYHQAAEGJQAAABSUEAQSEIZEEUTCOKBJFIVSYLJOF4YDCMRTGQ2TMNZYHE5DWPB5HY7VLEYLRMAIQAGOUCQ2FI5EUWTKOQCBIJBUIRKGI5EESSSLJRGU4T2QKFJFGVCVKZLVQWK2LNOF2XS7AAD3YVLAMFRGGZDFMZTWQ2LKNNWG23TPOBYXE43UOV3HO6DZPJ5XY7L6P5UVOCUA`.
+
 ## 4. Регистрация
 
 1. Разобрать приглашение и проверить `expires` по своим часам.

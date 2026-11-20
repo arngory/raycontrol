@@ -8,6 +8,7 @@ BILLING raycontrol.device.v1.RegisterResponse.role
 BILLING raycontrol.node.v1.CreateInviteResponse.invite
 BILLING raycontrol.node.v1.CreateInviteResponse.invite_code
 BILLING raycontrol.node.v1.CreateInviteResponse.invite_code_short
+BILLING raycontrol.node.v1.CreateInviteResponse.invite_code_v3
 BILLING raycontrol.node.v1.CreateInviteResponse.pin
 BILLING raycontrol.node.v1.CreateUserResponse.user
 BILLING raycontrol.node.v1.Device.client

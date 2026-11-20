@@ -168,6 +168,19 @@ func TestRemotePIN(t *testing.T) {
 		if len(resp.Msg.InviteCodeShort) > len(resp.Msg.InviteCode)/2 {
 			t.Fatalf("rcinv2 of %d characters, rcinv1 of %d", len(resp.Msg.InviteCodeShort), len(resp.Msg.InviteCode))
 		}
+		// By name (api-v1 §3b): the same, with the node's name and SPA
+		// versions. This node's host is a name nothing resolves in the
+		// tests: no name of its own, no public address known, so no v3
+		// (spa-v3 §5).
+		v3, err := node.DecodeInvite(resp.Msg.InviteCodeV3)
+		if err != nil || !strings.HasPrefix(resp.Msg.InviteCodeV3, node.InvitePrefix3) || v3.SPA.Versions != nil {
+			t.Fatalf("rcinv3 %q: %+v %v", resp.Msg.InviteCodeV3, v3, err)
+		}
+		v3.SPA.Versions = nil
+		v3.Services[0].Name, v3.Services[0].Kind = inv.Services[0].Name, inv.Services[0].Kind
+		if !reflect.DeepEqual(v3, inv) {
+			t.Fatalf("rcinv3 %+v, rcinv1 %+v", v3, inv)
+		}
 		return resp.Msg.InviteCode, resp.Msg.Pin
 	}
 	wrong := func(right string) string { return fmt.Sprintf("%06d", (mustAtoi(t, right)+1)%1_000_000) }
@@ -499,5 +512,36 @@ func TestRemoteAPI(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("a connection without a client certificate was served")
+	}
+}
+
+// A host the short layouts cannot carry (a trailing dot, an underscore, a
+// zone): rcinv2 and rcinv3 are "", not a bare prefix, and rcinv1 still
+// holds the invite (api-v1 §3a, §3b).
+func TestInviteHostNoShortForm(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "api", Name: "api"})); err != nil {
+		t.Fatal(err)
+	}
+	startRemote(t, srv)
+	for i, host := range []string{"node.example.com.", "my_node.example.com", "fe80::1%eth0"} {
+		if err := srv.Store.SetSetting(ctx, "public_host", []byte(host)); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{User: "alice", Name: fmt.Sprint("d", i)}))
+		if err != nil {
+			t.Fatalf("%s: %v", host, err)
+		}
+		if resp.Msg.InviteCodeShort != "" || resp.Msg.InviteCodeV3 != "" {
+			t.Errorf("%s: rcinv2 %q, rcinv3 %q", host, resp.Msg.InviteCodeShort, resp.Msg.InviteCodeV3)
+		}
+		if inv, err := node.DecodeInvite(resp.Msg.InviteCode); err != nil || inv.Host != host {
+			t.Errorf("%s: rcinv1 %+v %v", host, inv, err)
+		}
 	}
 }

@@ -134,12 +134,13 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             published now, the switch after -cred-lead (3 days), the old
                                             ones, which the device knew, accepted -cred-grace (2 days)
                                             more; the other devices move over without a cut
-  device invite USER NAME [-role user|admin|billing|support] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv2|rcinv1]
+  device invite USER NAME [-role user|admin|billing|support] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv2|rcinv3|rcinv1]
                 [-allow ADDR,...]
                                             a one-time invite: the client registers the device itself
                                             through the remote API (service add api api); rcinv2 is
                                             the short form (QR half the size, Niko 1.35 or later),
-                                            rcinv1 for older Niko. -allow, billing and support only:
+                                            rcinv3 the same by the node's name, with SPA v3 (Niko 1.63
+                                            or later), rcinv1 for older Niko. -allow, billing and support only:
                                             the integration's server calls from these without a knock
   device allow ID ADDR[,ADDR...] | -clear   an integration's device calls from these addresses (IPv4
                                             /28-/32, IPv6 /64-/128, at most 8) without a knock, and
@@ -254,7 +255,7 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
 
   From another machine, with a device file and the node's remote API:
   remote enroll [-o FILE] [-carrier udp|tls|tcp|auto] [-addr A] [-pin PIN] INVITE|@FILE|-
-      register a device from an invite (RCINV2:... or rcinv1:...): a new client
+      register a device from an invite (RCINV3:..., RCINV2:... or rcinv1:...): a new client
       key, SPA, then the API; writes the device file (bundle and key, mode 0600)
   -remote FILE <command>                    status, node, user, service, device, audit, admin, ports, relay
                                             list|ports|set, dns, metrics, summary, app-mirror, debug, version run
@@ -1289,7 +1290,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		showQR := fs.Bool("qr", false, "draw the invite as a QR code on the screen for the phone to scan, instead of the text")
 		withPIN := fs.Bool("pin", false, "the invite also needs a PIN of 6 digits, shown here once: tell it by another channel")
 		allow := fs.String("allow", "", "billing or support: the integration server's addresses, comma-separated (IPv4 /28-/32, IPv6 /64-/128): it registers and calls from them without a knock")
-		format := fs.String("format", "rcinv2", "rcinv2: the short form, a QR half the size (Niko 1.35 or later); rcinv1 for older Niko")
+		format := fs.String("format", "rcinv2", "rcinv3: by the node's name, with SPA v3 (Niko 1.63 or later); rcinv2: the short form, a QR half the size (Niko 1.35 or later); rcinv1 for older Niko")
 		if err := need(args, 2); err != nil {
 			return err
 		}
@@ -1309,8 +1310,8 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		if *showQR && *withPIN && (!terminal(os.Stdin) || !terminal(os.Stdout)) {
 			return fmt.Errorf("%w: -qr with -pin needs a terminal (ssh -t), or -o to write the invite to a file", errUsage)
 		}
-		if *format != "rcinv1" && *format != "rcinv2" {
-			return fmt.Errorf("%w: -format rcinv1 or rcinv2", errUsage)
+		if *format != "rcinv1" && *format != "rcinv2" && *format != "rcinv3" {
+			return fmt.Errorf("%w: -format rcinv1, rcinv2 or rcinv3", errUsage)
 		}
 		allowList := splitList(*allow)
 		if *allow != "" && len(allowList) == 0 {
@@ -1342,6 +1343,20 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 				return fmt.Errorf("the node made invite %s without a PIN (raycontrol v0.13 has them), and it is not withdrawn: rayctl device revoke %s: %w", inv.Id, inv.Id, rerr)
 			}
 			return fmt.Errorf("the node made the invite without a PIN (raycontrol v0.13 has them): withdrawn; update the node or invite without -pin")
+		}
+		if *format == "rcinv3" {
+			switch {
+			case r.Msg.InviteCodeV3 != "":
+				r.Msg.InviteCode = r.Msg.InviteCodeV3
+			default:
+				// Asked for: withdraw rather than hand out another form,
+				// which the phone would take by the node's host.
+				_, rerr := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: inv.Id}))
+				if rerr != nil {
+					return fmt.Errorf("the node made invite %s, but not as rcinv3 (raycontrol v0.35 has it), and it is not withdrawn: rayctl device revoke %s: %w", inv.Id, inv.Id, rerr)
+				}
+				return errors.New("the node made the invite, but not as rcinv3 (raycontrol v0.35 has it, and the node's host must be an address or an ASCII name): withdrawn; invite with -format rcinv2")
+			}
 		}
 		if *format == "rcinv2" {
 			switch {
