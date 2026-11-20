@@ -50,7 +50,7 @@ func TestOwnAddrs(t *testing.T) {
 	if got := o.get(ctx, "n.example.com", later); !slices.Equal(got, want) {
 		t.Fatalf("stale: %v", got)
 	}
-	waitFor(t, func() bool { o.mu.Lock(); defer o.mu.Unlock(); return !o.running })
+	waitFor(t, func() bool { o.mu.Lock(); defer o.mu.Unlock(); return o.done == nil })
 	if calls.Load() != 2 || !slices.Equal(o.get(ctx, "n.example.com", later.Add(time.Second)), want) {
 		t.Fatalf("after a failure: %d lookups", calls.Load())
 	}
@@ -118,7 +118,93 @@ func TestSnapshotOwnAddrs(t *testing.T) {
 		t.Fatalf("relay: %v %v", snap.GetOwnAddrs(), err)
 	}
 	// The bundle offers v3.
-	if sp := nodeSPA(srv.Params); !slices.Equal(sp.Versions, []int{2, 3}) {
+	if sp := srv.nodeSPA(ctx); !slices.Equal(sp.Versions, []int{2, 3}) {
 		t.Fatalf("bundle versions %v", sp.Versions)
+	}
+}
+
+// TestSPAVersionsOffered: v3 only where a v3 packet to the node's public
+// address can pass (spa-v3 §5).
+func TestSPAVersionsOffered(t *testing.T) {
+	srv, _, _ := startServer(t)
+	ctx := context.Background()
+	old := ownLookup
+	t.Cleanup(func() { ownLookup = old })
+	answers := map[string][]netip.Addr{
+		"public.example.com": {netip.MustParseAddr("10.0.0.5"), netip.MustParseAddr("203.0.113.7")},
+		"split.example.com":  {netip.MustParseAddr("10.0.0.5"), netip.MustParseAddr("fd00::5"), netip.MustParseAddr("100.64.1.2")},
+		"mixed.example.com":  {netip.MustParseAddr("10.0.0.5"), netip.MustParseAddr("2001:db8::5")},
+		"dual.example.com":   {netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("2001:db8::7")},
+	}
+	ownLookup = func(_ context.Context, host string) ([]netip.Addr, error) {
+		if a, ok := answers[host]; ok {
+			return a, nil
+		}
+		return nil, errors.New("no answer")
+	}
+	for _, c := range []struct {
+		host string
+		v3   bool
+	}{
+		{"203.0.113.7", true},
+		{"2001:db8::7", true},
+		{"public.example.com", true},
+		{"split.example.com", false}, // behind 1:1 NAT, split-horizon: no public address known
+		{"nothing.example.com", false},
+		{"0.0.0.0", false},
+		{"10.0.0.5", true},           // a private -host (LAN, Tailscale): the client has it, and v3 passes on it
+		{"mixed.example.com", false}, // a private A and a public AAAA: an IPv4 client would be refused
+		{"dual.example.com", true},
+	} {
+		if _, err := node.Init(ctx, srv.Store, c.host); err != nil {
+			t.Fatal(err)
+		}
+		got := srv.SPAVersions(ctx)
+		if c.v3 != slices.Equal(got, []int{2, 3}) || !c.v3 && got != nil {
+			t.Errorf("%s: %v", c.host, got)
+		}
+	}
+	// The snapshot keeps private own addresses (they are where packets
+	// come to behind NAT) but drops an unspecified one.
+	if _, err := node.Init(ctx, srv.Store, "0.0.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	p := &PerimeterServer{Server: srv, DefaultTTL: 10 * time.Minute, MaxTTL: time.Hour}
+	if snap, err := p.snapshot(ctx); err != nil || snap.OwnAddrs != nil {
+		t.Fatalf("0.0.0.0 → %v %v", snap.GetOwnAddrs(), err)
+	}
+}
+
+// TestOwnAddrsFirstWait: callers that come while the first lookup runs
+// wait for it, and a caller that goes away does not cancel it.
+func TestOwnAddrsFirstWait(t *testing.T) {
+	old := ownLookup
+	t.Cleanup(func() { ownLookup = old })
+	release := make(chan struct{})
+	ownLookup = func(ctx context.Context, _ string) ([]netip.Addr, error) {
+		select {
+		case <-release:
+			return []netip.Addr{netip.MustParseAddr("203.0.113.7")}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	var o ownAddrs
+	now := time.Unix(1767225600, 0)
+	gone, cancel := context.WithCancel(context.Background())
+	cancel() // the first caller's request is already gone
+	if got := o.get(gone, "n.example.com", now); got != nil {
+		t.Fatalf("gone caller: %v", got)
+	}
+	results := make(chan []string, 2)
+	for range 2 {
+		go func() { results <- o.get(context.Background(), "n.example.com", now) }()
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	for range 2 {
+		if got := <-results; !slices.Equal(got, []string{"203.0.113.7"}) {
+			t.Fatalf("waiting caller: %v", got)
+		}
 	}
 }

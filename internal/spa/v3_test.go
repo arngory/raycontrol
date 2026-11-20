@@ -239,4 +239,9 @@ func TestOwnDst(t *testing.T) {
 	if OwnDst(netip.Addr{}, a("10.0.0.5"), own) {
 		t.Error("unset destination taken")
 	}
+	for _, w := range []string{"255.255.255.255", "224.0.0.1", "ff02::1"} {
+		if OwnDst(a(w), a(w), nil) {
+			t.Errorf("came to %s: taken", w)
+		}
+	}
 }
