@@ -1221,10 +1221,9 @@ func (s *Server) inviteCode(ctx context.Context, inv store.Invite, key [spa.KeyS
 	if err != nil {
 		return "", "", "", err
 	}
-	dnsName, err := provision.NodeDNSName(ctx, s.Store)
-	if err != nil {
-		return "", "", "", err
-	}
+	// rcinv3 alone needs the name: if it cannot be read, the invite goes
+	// without rcinv3, and the call does not fail for rcinv1 and rcinv2.
+	dnsName, nameErr := provision.NodeDNSName(ctx, s.Store)
 	ep := api.endpoint
 	// rcinv1 and rcinv2 as before: the host alone, no SPA versions (they
 	// knock at the host, names-v1 §9 п. 3); rcinv3 by name, with them.
@@ -1235,8 +1234,10 @@ func (s *Server) inviteCode(ctx context.Context, inv store.Invite, key [spa.KeyS
 		return "", "", "", err
 	}
 	short, _ = b.EncodeInvite2()
-	b.DNSName, b.Addrs, b.SPA = dnsName, node.Addrs(host), s.nodeSPA(ctx)
-	v3, _ = b.EncodeInvite3()
+	if nameErr == nil {
+		b.DNSName, b.Addrs, b.SPA = dnsName, node.Addrs(host), s.nodeSPA(ctx)
+		v3, _ = b.EncodeInvite3()
+	}
 	return code, short, v3, nil
 }
 

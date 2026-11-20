@@ -1,91 +1,100 @@
-# Как вносить изменения
+# Contributing
 
-Коротко: короткая ветка от `main` → pull request → зелёная проверка «CI result» → слияние (squash). Релиз выпускает
-владелец своим тегом. Эти правила общие для клиента и сервера: в репозиториях узла (raycontrol, niko-server и форках)
-действует тот же текст, кроме раздела «В этом репозитории».
+In Russian: [CONTRIBUTING.ru.md](CONTRIBUTING.ru.md). This text is the reference one; where the two differ, this one
+holds.
 
-## Ветки и pull request
+In short: a short branch off `main` → a pull request → a green "CI result" check → a merge (squash). The owner releases
+with a tag of their own. These rules are shared by the client and the server: the node's repositories (raycontrol,
+niko-server and the forks) carry the same text, apart from the section "In this repository".
 
-- `main` защищён: в него попадают только через pull request с зелёными проверками «CI result» (`ci.yml`),
-  «Commit messages» и «Secrets» (`checks.yml`); без force-push и удаления. Обойти правило может только владелец.
-- Задача — своя короткая ветка от свежего `main`: `<область>/<кратко>`, например `app/keepalive-obfs`,
-  `ci/commit-checks`, `docs/structure`. Ветка живёт дни, не недели; после слияния удаляется.
-- Pull request открывается сразу, при необходимости черновиком (draft): проверки идут по нему, а не по push в ветку.
-- Слияние — **squash**: заголовок и описание pull request становятся сообщением коммита в `main`, поэтому к ним те
-  же требования, что к сообщению коммита (ниже). GitHub дописывает к заголовку « (#N)» — в окне слияния замените
-  его на « (arngory/raycontrol#N)». Несколько независимых изменений — несколько pull request; rebase вместо squash —
-  только если коммиты внутри осмысленны по отдельности.
-- Сливает автор, когда проверки зелёные. Владелец видит каждый pull request и может остановить или откатить его.
-- Шаблон описания — `.github/pull_request_template.md`: что и зачем, как проверено, что меняется для другой стороны.
+## Branches and pull requests
 
-## Сообщения коммитов
+- `main` is protected: changes reach it only through a pull request with the checks "CI result" (`ci.yml`), "Commit
+  messages" and "Secrets" (`checks.yml`) green; no force-push, no deletion. Only the owner can bypass the rule.
+- A task gets a short branch of its own off a fresh `main`: `<area>/<short>`, for example `app/keepalive-obfs`,
+  `ci/commit-checks`, `docs/structure`. A branch lives days, not weeks, and is deleted after the merge.
+- The pull request is opened at once, as a draft if need be: the checks run on it, not on a push to the branch.
+- The merge is a **squash**: the pull request's title and description become the commit message in `main`, so they
+  follow the rules of a commit message (below). GitHub adds " (#N)" to the title: in the merge dialog, replace it with
+  " (arngory/raycontrol#N)". Several independent changes are several pull requests; rebase instead of squash only when
+  the commits inside make sense one by one.
+- The author merges once the checks are green. The owner sees every pull request and may stop or revert it.
+- The description template is `.github/pull_request_template.md`: what and why, how it was checked, what changes for
+  the other side.
+
+## Commit messages
 
 ```
-<что изменилось, по-английски, в настоящем времени, до 72 символов>
+<what changed, in English, present tense, up to 72 characters>
 
-<зачем и как, строки до ~110 символов; спецификации по имени: lan-v1 §3, api-v1.md §2>
+<why and how, lines up to ~110 characters; specifications by name: lan-v1 §3, api-v1.md §2>
 ```
 
-- **Без голых `#N`.** В форке GitHub связывает `#N` с issue родительского репозитория: так коммиты Niko попали в
-  чужие issues MatsuriDayo/NekoBoxForAndroid. Пишите полную форму `arngory/<репозиторий>#N` или «задача N».
-  Проверяет «Commit messages» (`.github/scripts/bare-refs.py`) по коммитам, заголовку и описанию pull request,
-  заново при каждой их правке.
-- Закрывающие слова (`fixes`, `closes`) — только с полной формой и только там, где включены Issues.
-- Без трейлеров `Co-Authored-By` и `Claude-Session` (решение владельца 2026-11-18): кто писал коммит, видно по его
-  автору. В коммитах до этого дня они остаются до чистки истории перед MVP.
-- Ссылки на сессию нет и в описании pull request; строка «Generated with Claude Code» там остаётся (решение
-  владельца 2026-11-18).
-- Коротко: одно-два предложения на пункт. Подробности — в спецификации или в коде, не в сообщении.
+- **No bare `#N`.** In a fork GitHub links `#N` to an issue of the parent repository: that is how Niko's commits ended
+  up in other people's issues in MatsuriDayo/NekoBoxForAndroid. Write the full form `arngory/<repository>#N`, or
+  "task N". "Commit messages" (`.github/scripts/bare-refs.py`) checks the commits, the title and the description of the
+  pull request, again at each edit of them.
+- Closing words (`fixes`, `closes`) only with the full form, and only where Issues are on.
+- No `Co-Authored-By` and `Claude-Session` trailers (the owner's decision of 2026-11-18): who wrote a commit shows in
+  its author. In the commits from before that day they stay until the history is cleaned before the MVP.
+- No session link in the pull request's description either; the line "Generated with Claude Code" stays there (the
+  owner's decision of 2026-11-18).
+- Keep it short: a sentence or two a point. The details go in the specification or the code, not in the message.
 
-## Секреты и данные
+## Secrets and data
 
-- Ключи, пароли, токены и адреса реальных узлов в репозиторий не попадают никогда. «Secrets» прогоняет gitleaks по
-  коммитам pull request. Ложное срабатывание (одноразовый ключ теста) — в allowlist `.gitleaks.toml` (там пример) с
-  комментарием, откуда ключ, отдельным pull request: проверка берёт `.gitleaks.toml` и `.gitleaksignore` из `main`,
-  так что исключение действует со следующего pull request. Комментарии `gitleaks:allow` не учитываются.
-- Скрипт «Commit messages», правила и исключения «Secrets» берутся из `main`, версия Go для gitleaks закреплена в
-  `checks.yml`. Сами workflow идут в том виде, в каком лежат в pull request: pull request, который меняет
-  `.github/workflows/`, меняет и свои проверки. Такой pull request другого участника сливает владелец.
-- Ключ подписи выпусков (minisign) — только в окружении GitHub `release`, токен IPinfo — в `release-data`
-  (`docs/RELEASE.md`); открытый ключ закреплён в `internal/release/release.go`. `docs/local/` — в `.gitignore`.
-- Адреса в тестах и примерах — только документационные: `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`,
-  `2001:db8::/32`, домены `*.example`, `*.test`. Захваченные с узлов данные — только с одноразовых узлов CI.
-- Приватные ссылки (сессии, холсты, рабочие пространства) в репозиторий не кладём.
+- Keys, passwords, tokens and the addresses of real nodes never get into the repository. "Secrets" runs gitleaks over
+  the commits of a pull request. A false finding (a test's throwaway key) goes into the allowlist of `.gitleaks.toml`
+  (there is an example there), with a comment on where the key comes from, in a pull request of its own: the check
+  takes `.gitleaks.toml` and `.gitleaksignore` from `main`, so the exception counts from the next pull request.
+  `gitleaks:allow` comments are not taken.
+- The "Commit messages" script and the rules and exceptions of "Secrets" are taken from `main`, and the Go that builds
+  gitleaks is pinned in `checks.yml`. The workflows themselves run as they are in the pull request: a pull request that
+  changes `.github/workflows/` changes its own checks too. The owner merges such a pull request of another contributor.
+- The release signing key (minisign) lives only in the GitHub environment `release`, the IPinfo token in
+  `release-data` (`docs/RELEASE.md`); the public key is pinned in `internal/release/release.go`. `docs/local/` is in
+  `.gitignore`.
+- Addresses in tests and examples are documentation ones only: `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`,
+  `2001:db8::/32`, the domains `*.example`, `*.test`. Data captured on nodes comes only from throwaway CI nodes.
+- Private links (sessions, canvases, workspaces) do not go into the repository.
 
-## Закрепления
+## Pins
 
-Всё, что берётся из другого репозитория, закреплено точной версией: коммит, тег, псевдоверсия Go или SHA-256 файла.
+Everything taken from another repository is pinned to an exact version: a commit, a tag, a Go pseudo-version or the
+SHA-256 of a file.
 
-- Закрепление меняется отдельным pull request с заголовком вида `Pin raycontrol v0.31.2 (…)`: что, на что и зачем.
-- Закрепляем только тег или коммит постоянной ветки (`main`, `niko` в форках), не временную ветку: её могут удалить.
-- Перед закреплением серверного выпуска — interop CI против него (ручной запуск с новым значением или pull request
-  с ним).
+- A pin changes in a pull request of its own titled like `Pin raycontrol v0.31.2 (…)`: what, to what, and why.
+- Pin only a tag or a commit of a lasting branch (`main`, `niko` in the forks), not of a temporary branch: it may be
+  deleted.
+- Before pinning a server release, run the interop CI against it (a manual run with the new value, or a pull request
+  with it).
 
-## Выпуск
+## Release
 
-1. `.github/release-notes/vX.Y.Z.md`: по-английски, затем по-русски, без голых `#N`.
-2. Владелец ставит тег `vX.Y.Z` на коммит `main` (страница Releases или git; тег `v*` может создать только он) и
-   одобряет окружение `release`. Workflow берёт зелёный CI этого коммита на `main`, а если его нет — прогоняет CI
-   сам; govulncheck — в день выпуска в любом случае. Потом собирает архивы, подписывает `SHA256SUMS` и публикует
-   выпуск. Подробно — `docs/RELEASE.md`.
+1. `.github/release-notes/vX.Y.Z.md`: in English, then in Russian, no bare `#N`.
+2. The owner puts the tag `vX.Y.Z` on a commit of `main` (the Releases page or git; only the owner can create a `v*`
+   tag) and approves the environment `release`. The workflow takes the green CI of that commit on `main`, and runs the
+   CI itself if there is none; govulncheck runs on the day of the release in any case. Then it builds the archives,
+   signs `SHA256SUMS` and publishes the release. In detail: `docs/RELEASE.md`.
 
-## В этом репозитории
+## In this repository
 
-| Что | Где |
+| What | Where |
 |---|---|
-| узел: демон, периметр, CLI | `cmd/rayd`, `cmd/rayspa`, `cmd/rayctl`; код — `internal/` |
-| API и спецификации | `api/` (proto, код — `scripts/gen.sh`); контракт с клиентом — `docs/spec/` |
-| установка и закрепления | `install/`, `deploy/` (`versions.env`: Xray, niko-server, slipstream-server) |
-| тесты | `go test ./...`; полный прогон — `.github/workflows/ci.yml` (netns, контейнеры install, upgrade, relay) |
-| выпуск | `.github/workflows/release.yml`, `docs/RELEASE.md` |
-| состояние с клиентом | `docs/handoff/SYNC.md` |
+| the node: daemon, perimeter, CLI | `cmd/rayd`, `cmd/rayspa`, `cmd/rayctl`; the code is in `internal/` |
+| API and specifications | `api/` (proto, code from `scripts/gen.sh`); the contract with the client is `docs/spec/` |
+| install and pins | `install/`, `deploy/` (`versions.env`: Xray, niko-server, slipstream-server) |
+| tests | `go test ./...`; the full run is `.github/workflows/ci.yml` (netns, install containers, upgrade, relay) |
+| release | `.github/workflows/release.yml`, `docs/RELEASE.md` |
+| state with the client | `docs/handoff/SYNC.md` |
 
-Отличия от общих правил:
-- Сессия сервера работает в постоянной ветке `claude/clever-feynman-w0e2v1` (так задана её среда), а не в короткой
-  ветке на задачу. Push в ветку сам CI не запускает: pull request (хоть черновиком) открыт, пока в ветке есть работа.
-- Слияние — merge-коммит, не squash: SYNC и заметки выпусков ссылаются на коммиты ветки, и они должны остаться в
-  `main`. Заголовок слияния — `Merge arngory/raycontrol#N: <заголовок pull request>`, без голого `#N`, который
-  GitHub ставит по умолчанию.
+Differences from the shared rules:
+- The server's session works on the lasting branch `claude/clever-feynman-w0e2v1` and branches named after it (its
+  environment sets this), not on a short branch per task. A push to a branch does not start the CI by itself: a pull
+  request (even a draft) is open while the branch has work in it.
+- The merge is a merge commit, not a squash: SYNC and the release notes refer to the branch's commits, and they must
+  stay in `main`. The merge title is `Merge arngory/raycontrol#N: <the pull request's title>`, without the bare `#N`
+  GitHub puts by default.
 
-Кто закрепляет raycontrol: клиент (`.github/raycontrol.env`: тег и коммит) и interop CI клиента против
-`rayd -supervise`. niko-server закрепляется здесь, в `deploy/versions.env`.
+Who pins raycontrol: the client (`.github/raycontrol.env`: tag and commit) and the client's interop CI against
+`rayd -supervise`. niko-server is pinned here, in `deploy/versions.env`.

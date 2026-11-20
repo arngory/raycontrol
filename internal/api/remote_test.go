@@ -514,3 +514,34 @@ func TestRemoteAPI(t *testing.T) {
 		t.Fatal("a connection without a client certificate was served")
 	}
 }
+
+// A host the short layouts cannot carry (a trailing dot, an underscore, a
+// zone): rcinv2 and rcinv3 are "", not a bare prefix, and rcinv1 still
+// holds the invite (api-v1 §3a, §3b).
+func TestInviteHostNoShortForm(t *testing.T) {
+	srv, sock, _ := startServer(t)
+	ctx := context.Background()
+	c := NewUnixClient(sock)
+	if _, err := c.CreateUser(ctx, connect.NewRequest(&nodev1.CreateUserRequest{Name: "alice"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateService(ctx, connect.NewRequest(&nodev1.CreateServiceRequest{Kind: "api", Name: "api"})); err != nil {
+		t.Fatal(err)
+	}
+	startRemote(t, srv)
+	for i, host := range []string{"node.example.com.", "my_node.example.com", "fe80::1%eth0"} {
+		if err := srv.Store.SetSetting(ctx, "public_host", []byte(host)); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := c.CreateInvite(ctx, connect.NewRequest(&nodev1.CreateInviteRequest{User: "alice", Name: fmt.Sprint("d", i)}))
+		if err != nil {
+			t.Fatalf("%s: %v", host, err)
+		}
+		if resp.Msg.InviteCodeShort != "" || resp.Msg.InviteCodeV3 != "" {
+			t.Errorf("%s: rcinv2 %q, rcinv3 %q", host, resp.Msg.InviteCodeShort, resp.Msg.InviteCodeV3)
+		}
+		if inv, err := node.DecodeInvite(resp.Msg.InviteCode); err != nil || inv.Host != host {
+			t.Errorf("%s: rcinv1 %+v %v", host, inv, err)
+		}
+	}
+}

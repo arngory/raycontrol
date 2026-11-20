@@ -124,8 +124,8 @@ func TestInvite2Refused(t *testing.T) {
 		"short key": func() Bundle { b := invite2Bundle("203.0.113.7", false); b.DeviceKey = "abcd"; return b }(),
 		"zone":      invite2Bundle("fe80::1%eth0", false),
 	} {
-		if s, err := b.EncodeInvite2(); err == nil {
-			t.Errorf("%s: encoded %s", what, s)
+		if s, err := b.EncodeInvite2(); err == nil || s != "" {
+			t.Errorf("%s: encoded %q (%v)", what, s, err)
 		}
 	}
 }

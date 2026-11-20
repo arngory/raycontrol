@@ -40,14 +40,20 @@ var invite2Base32 = base32.StdEncoding.WithPadding(base32.NoPadding)
 // the node's name and SPA versions: those go in rcinv3.
 func (b Bundle) EncodeInvite2() (string, error) {
 	s, err := b.encodeShort(invite2Version)
-	return InvitePrefix2 + s, err
+	if err != nil {
+		return "", err
+	}
+	return InvitePrefix2 + s, nil
 }
 
 // EncodeInvite3 returns the bundle of an invite by name (api-v1 §3b): the
 // node's name when it has one, and whether it takes SPA v3.
 func (b Bundle) EncodeInvite3() (string, error) {
 	s, err := b.encodeShort(invite3Version)
-	return InvitePrefix3 + s, err
+	if err != nil {
+		return "", err
+	}
+	return InvitePrefix3 + s, nil
 }
 
 func (b Bundle) encodeShort(version byte) (string, error) {
@@ -66,8 +72,8 @@ func (b Bundle) encodeShort(version byte) (string, error) {
 		if a, err := netip.ParseAddr(b.Host); err != nil || a.Zone() != "" {
 			return "", fmt.Errorf("%s: the node's name %q with a host %q that is no address", tag, b.DNSName, b.Host)
 		}
-		if !hostName(b.DNSName) {
-			return "", fmt.Errorf("%s: name %q is no ASCII name", tag, b.DNSName)
+		if !nodeName(b.DNSName) {
+			return "", fmt.Errorf("%s: name %q is no ASCII name, or looks like an address", tag, b.DNSName)
 		}
 		out[1] |= invite3Name
 	}
@@ -183,7 +189,7 @@ func decodeShort(text string, version byte) (Bundle, error) {
 			return Bundle{}, fmt.Errorf("%s: the node's name with a host that is a name", tag)
 		}
 		b.DNSName = string(r.bytes(int(r.byte())))
-		if r.err == nil && !hostName(b.DNSName) {
+		if r.err == nil && !nodeName(b.DNSName) {
 			return Bundle{}, fmt.Errorf("%s: name %q", tag, b.DNSName)
 		}
 		b.Addrs = Addrs(b.Host)
@@ -237,6 +243,17 @@ func (r *invite2Reader) bytes(n int) []byte {
 func (r *invite2Reader) byte() byte  { return r.bytes(1)[0] }
 func (r *invite2Reader) u16() uint16 { return binary.BigEndian.Uint16(r.bytes(2)) }
 func (r *invite2Reader) u32() uint32 { return binary.BigEndian.Uint32(r.bytes(4)) }
+
+// nodeName reports whether s is a name rcinv3 carries as the node's: a
+// host name whose last label is not all digits, so that no client takes
+// it for an address (198.51.100.99).
+func nodeName(s string) bool {
+	if !hostName(s) {
+		return false
+	}
+	last := s[strings.LastIndexByte(s, '.')+1:]
+	return strings.Trim(last, "0123456789") != ""
+}
 
 // hostName reports whether s is a host name an invite carries: ASCII
 // letters, digits, hyphens and dots, labels of 1 to 63, 253 at most.

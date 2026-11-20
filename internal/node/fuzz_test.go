@@ -10,7 +10,7 @@ import (
 )
 
 // FuzzDecodeInvite: an invite is text a person pastes (rcinv1, or the
-// short rcinv2 of a QR code): whatever it holds, it parses or is refused,
+// short rcinv2 or rcinv3 of a QR code): whatever it holds, it parses or is refused,
 // no panic; one taken has an API endpoint and an expiry, and a short one
 // whose SPA parameters hold is the same bundle once written again, its
 // host the same address or a name of an invite's letters.
