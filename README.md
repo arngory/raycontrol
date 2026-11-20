@@ -50,7 +50,7 @@ go test ./...
 ## More
 
 - [docs/README.md](docs/README.md): design, decisions and specifications (Russian).
-- [CONTRIBUTING.md](CONTRIBUTING.md): branches, checks and releases.
+- [CONTRIBUTING.md](CONTRIBUTING.md): branches, checks and releases ([по-русски](CONTRIBUTING.ru.md)).
 - [docs/RELEASE.md](docs/RELEASE.md): how a release is made and verified.
 
 raycontrol began as [n8nnme/raycontrol](https://github.com/n8nnme/raycontrol), the bash installer `ray.sh` (v0,
