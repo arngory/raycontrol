@@ -193,18 +193,22 @@ type uotStream struct {
 // first packet was QUIC's (spec/naive-udp-v1.md §4.4, the QUIC rule); UoT
 // marks none.
 type pairTimes struct {
-	sent, any int64
-	answered  bool
-	quic      bool
+	first, sent, any int64
+	answered         bool
+	quic             bool
 }
 
 // end is when conntrack lets the pair go: 30 s after the last packet sent
-// while unanswered, 120 s after the last either way once answered.
+// while unanswered; once answered, 30 s after the last packet either way,
+// 120 s if that one came past 2 s from the first.
 func (p pairTimes) end() int64 {
-	if p.answered {
+	if !p.answered {
+		return p.sent + int64(pairUnanswered)
+	}
+	if p.any > p.first+int64(pairStreamAt) {
 		return p.any + int64(pairAnswered)
 	}
-	return p.sent + int64(pairUnanswered)
+	return p.any + int64(pairUnanswered)
 }
 
 // age drops the pairs whose time ran out, once a second at most, and says
@@ -320,7 +324,7 @@ func (u *uotStream) reach(ap netip.AddrPort, quic bool) bool {
 		return false
 	}
 	u.mu.Lock()
-	u.peers[ap] = pairTimes{sent: m, any: m, quic: quic}
+	u.peers[ap] = pairTimes{first: m, sent: m, any: m, quic: quic}
 	u.mu.Unlock()
 	return true
 }
