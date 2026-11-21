@@ -120,7 +120,7 @@ rayctl remote enroll -o billing.rcdev 'RCINV3:…'   # файл устройст
 
 | Метод | admin | billing | support | Почему так |
 |---|---|---|---|---|
-| `GetStatus` | да | да* | да* | *без `host`, `spa_ports`, `debug_until`, текстов `loops[].error` и `detail` |
+| `GetStatus` | да | да* | да* | *без `host`, `spa_ports`, `debug_until`, `egress`, `warnings`, текстов `loops[].error` и `detail` |
 | `ListUsers` | да | да (обычные) | да* (обычные) | состояние и счётчики трафика; *`support` — без `note`, пока администратор не разрешил (§2.2) |
 | `CreateUser` | да | да | — | сервисы — только данных (§2.2) |
 | `SetUserEnabled` | да | да* | — | *выключение — под предохранителем (§2.4) |

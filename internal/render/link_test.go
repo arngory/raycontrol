@@ -50,18 +50,25 @@ wg0	00000000	00000000	0201	0	0	0	00000000	0	0	0
 	}
 }
 
-// The speed the kernel reports, 0 for -1 and for an interface without one.
+// The speed the kernel reports, 0 for -1, for an interface without one,
+// and for one with no device under it (a bridge, veth, tun: 10000 of their
+// own).
 func TestLinkSpeed(t *testing.T) {
 	sys := t.TempDir()
-	for iface, speed := range map[string]string{"eth0": "1000\n", "ens3": "-1\n", "br0": "x"} {
+	for iface, speed := range map[string]string{"eth0": "1000\n", "ens3": "-1\n", "br0": "x", "veth0": "10000\n", "eno1": "x"} {
 		if err := os.MkdirAll(filepath.Join(sys, iface), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(sys, iface, "speed"), []byte(speed), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		if iface != "veth0" {
+			if err := os.Symlink("../../devices/pci0000:00/0000:00:03.0", filepath.Join(sys, iface, "device")); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
-	for iface, want := range map[string]int{"eth0": 1000, "ens3": 0, "br0": 0, "wg0": 0} {
+	for iface, want := range map[string]int{"eth0": 1000, "ens3": 0, "br0": 0, "veth0": 0, "eno1": 0, "wg0": 0} {
 		if got := linkSpeed(sys, iface); got != want {
 			t.Errorf("%s: %d, want %d", iface, got, want)
 		}
@@ -86,6 +93,9 @@ func TestBrutalCeiling(t *testing.T) {
 		{`{"up_mbps":"500"}`, 1000, 1000, "link"},
 		{`{"up_mbps":500.5}`, 0, 0, ""},
 		{`{"up_mbps":-1}`, 1000, 1000, "link"},
+		{`{"up_mbps":100001}`, 1000, 1000, "link"},      // past MbpsMax
+		{`{"UP_MBPS":0}`, 1000, 1000, "link"},           // not its name
+		{`{"up_mbps":100000}`, 1000, 100000, "up_mbps"}, // MbpsMax
 	} {
 		if up, from := BrutalCeiling(c.settings, c.link); up != c.up || from != c.from {
 			t.Errorf("%s, link %d: %d %q", c.settings, c.link, up, from)

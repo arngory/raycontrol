@@ -9,6 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/arngory/raycontrol/internal/provision"
 )
 
 // LinkTrusted is the lowest link speed, Mbit/s, taken as Brutal's
@@ -16,33 +19,36 @@ import (
 // tells 100 whatever the channel), and the status asks for up_mbps.
 const LinkTrusted = 1000
 
-// hostLink is the first speed HostLink read that was known: kept until
-// rayd restarts, as a change of it restarts Hysteria2 and cuts its
-// sessions (a bond losing a port, a bridge's speed following its ports).
+// hostLink is the first speed HostLink read from LinkTrusted on: kept
+// until rayd restarts, as a change of it restarts Hysteria2 and cuts its
+// sessions (a bond losing a port). Any other reading is read again, at
+// most once a minute (each apply and each status asks).
 var hostLink struct {
 	sync.Mutex
 	mbps  int
 	iface string
+	at    time.Time // of a reading not kept
 }
 
 // HostLink is the speed, Mbit/s, of the interface the default route goes
 // out of (IPv4's, else IPv6's), as the kernel knows it, and the
 // interface's name. 0 when it does not know (most virtual NICs report no
-// speed) or there is no default route; the name may be there all the same.
-// Once known it stays as first read (hostLink).
+// speed), when the interface is virtual (a bridge, veth or tun tells a
+// number of its own: 10000), or there is no default route; the name may be
+// there all the same. Once trusted it stays as first read (hostLink).
 func HostLink() (mbps int, iface string) {
 	hostLink.Lock()
 	defer hostLink.Unlock()
-	if hostLink.mbps > 0 {
+	if hostLink.mbps >= LinkTrusted || time.Since(hostLink.at) < time.Minute {
 		return hostLink.mbps, hostLink.iface
 	}
 	iface = defaultIface("/proc/net/route", "/proc/net/ipv6_route")
-	if iface == "" {
-		return 0, ""
+	if iface != "" {
+		mbps = linkSpeed("/sys/class/net", iface)
 	}
-	mbps = linkSpeed("/sys/class/net", iface)
-	if mbps > 0 {
-		hostLink.mbps, hostLink.iface = mbps, iface
+	hostLink.mbps, hostLink.iface = mbps, iface
+	if mbps < LinkTrusted {
+		hostLink.at = time.Now()
 	}
 	return mbps, iface
 }
@@ -124,8 +130,14 @@ func ifaceName(s string) bool {
 }
 
 // linkSpeed is /sys/class/net/<iface>/speed, Mbit/s; 0 when unknown (-1,
-// or an error such as EINVAL of a link that is down or virtual).
+// or an error such as EINVAL of a link that is down), and for an
+// interface with no device under it: a bridge, veth, tun or tap tells a
+// speed of its own (10000), not the channel's (second review of the
+// protocol review's change).
 func linkSpeed(sys, iface string) int {
+	if _, err := os.Lstat(filepath.Join(sys, iface, "device")); err != nil {
+		return 0
+	}
 	b, err := os.ReadFile(filepath.Join(sys, iface, "speed")) //nolint:gosec // G304: sysfs; iface has no path in it (ifaceName)
 	if err != nil {
 		return 0
@@ -145,11 +157,9 @@ func linkSpeed(sys, iface string) int {
 // may ask for more than the port. An up_mbps that is no whole number
 // (written by hand: service add -settings) counts as not set.
 func BrutalCeiling(settings string, linkMbps int) (mbps int, from string) {
-	var s struct {
-		Up json.RawMessage `json:"up_mbps"`
-	}
+	var s map[string]json.RawMessage // by its exact name: json matches fields in any case
 	_ = json.Unmarshal([]byte(settings), &s)
-	if n, err := strconv.Atoi(string(s.Up)); err == nil && n >= 0 {
+	if n, ok := provision.MbpsSetting(s["up_mbps"]); ok {
 		return n, "up_mbps"
 	}
 	if linkMbps >= LinkTrusted {

@@ -545,7 +545,7 @@ func (c *cli) status(ctx context.Context) error {
 			fmt.Fprintf(w, "integration\tWARNING %s\n", line)
 		}
 		for _, line := range m.Warnings {
-			fmt.Fprintf(w, "warning\t%s\n", line)
+			fmt.Fprintf(w, "node\tWARNING %s\n", line)
 		}
 	})
 }

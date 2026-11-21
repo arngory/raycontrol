@@ -460,11 +460,12 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 }
 
 // brutalWarnings are the enabled Hysteria2 services whose Brutal has no
-// ceiling (render.BrutalCeiling, protocol review 2026-11, M1): the speed
-// of the node's link unknown, or too low to trust (an emulated NIC tells
-// its own whatever the channel). The server sends each client as fast as
-// the client asks. link is asked only when some service has no up_mbps of
-// its own.
+// ceiling of the operator's (render.BrutalCeiling, protocol review
+// 2026-11, M1): the speed of the node's link taken in its place, or none,
+// the speed unknown or too low to trust (an emulated NIC tells its own
+// whatever the channel). The server sends each client as fast as the
+// client asks. link is asked only when some service has no up_mbps of its
+// own.
 func brutalWarnings(services []store.Service, link func() (int, string)) []string {
 	var out []string
 	mbps, iface, asked := 0, "", false
@@ -476,10 +477,18 @@ func brutalWarnings(services []store.Service, link func() (int, string)) []strin
 			mbps, iface = link()
 			asked = true
 		}
-		if _, from := render.BrutalCeiling(svc.Settings, mbps); from != "" {
+		up, from := render.BrutalCeiling(svc.Settings, mbps)
+		set := fmt.Sprintf("rayctl service set %s up_mbps=N, N the channel's Mbit/s (0: no ceiling)", svc.Name)
+		switch from {
+		case "up_mbps":
+			continue
+		case "link":
+			// Taken, and said: the port's speed is no channel's, and the
+			// operator alone knows the channel (second review).
+			out = append(out, fmt.Sprintf("%s %s: Brutal up to %d Mbit/s, the speed %s tells, which may be more than the channel; %s",
+				svc.Kind, svc.Name, up, iface, set))
 			continue
 		}
-		set := fmt.Sprintf("rayctl service set %s up_mbps=N, N the channel's Mbit/s (0: no ceiling)", svc.Name)
 		if mbps > 0 {
 			out = append(out, fmt.Sprintf("%s %s: Brutal has no ceiling: %s tells %d Mbit/s, which an emulated NIC tells whatever the channel, so it is not taken; %s",
 				svc.Kind, svc.Name, iface, mbps, set))

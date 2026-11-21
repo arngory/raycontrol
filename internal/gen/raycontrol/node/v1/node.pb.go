@@ -3098,8 +3098,8 @@ type GetStatusResponse struct {
 	// absent through the remote API.
 	Egress *Egress `protobuf:"bytes,12,opt,name=egress,proto3" json:"egress,omitempty"`
 	// What the operator should see to: a Hysteria2 whose Brutal has no
-	// ceiling, the speed of the node's link unknown or too low to trust
-	// (protocol review 2026-11, M1). Each line is whole.
+	// ceiling of the operator's, the speed of the node's link taken in its
+	// place or none at all (protocol review 2026-11, M1). Each line is whole.
 	Warnings      []string `protobuf:"bytes,13,rep,name=warnings,proto3" json:"warnings,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

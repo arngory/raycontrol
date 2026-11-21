@@ -323,9 +323,13 @@ func TestInvitePINDefault(t *testing.T) {
 	// A node before v0.13 makes the admin's invite without its PIN: it is
 	// withdrawn, and the error says how to go without one.
 	old := &inviteNode{noPIN: true}
-	err := (&cli{c: old}).device(context.Background(), "invite", []string{"alice", "phone", "-role", "admin", "-o", filepath.Join(t.TempDir(), "i")})
+	file := filepath.Join(t.TempDir(), "i")
+	err := (&cli{c: old}).device(context.Background(), "invite", []string{"alice", "phone", "-role", "admin", "-o", file})
 	if err == nil || !strings.Contains(err.Error(), "-pin=false") || !slices.Equal(old.revoked, []string{"inv1"}) {
 		t.Errorf("an old node, an admin's invite: %v, withdrew %v", err, old.revoked)
+	}
+	if _, serr := os.Stat(file); !errors.Is(serr, os.ErrNotExist) {
+		t.Errorf("the invite withdrawn, yet written: %v", serr)
 	}
 	// Through ssh without -t: the QR and a PIN by default do not go
 	// together, and the error says how to go without it.

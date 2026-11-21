@@ -430,6 +430,15 @@ func TestBrutalCeilings(t *testing.T) {
 	if _, err := provision.SetServiceOption(ctx, st, "hy2o", "down_mbps", "auto"); err == nil {
 		t.Fatal("down_mbps=auto taken")
 	}
+	// Settings by hand at creation: the ceilings as service set takes them.
+	for i, settings := range []string{`{"up_mbps":"500"}`, `{"up_mbps":500.5}`, `{"down_mbps":-1}`, `{"up_mbps":100001}`} {
+		if _, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-obfs", Name: fmt.Sprintf("bad%d", i), Settings: settings}); err == nil {
+			t.Errorf("created with %s", settings)
+		}
+	}
+	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-obfs", Name: "good", Settings: `{"up_mbps":100000,"down_mbps":0}`}); err != nil {
+		t.Errorf("created with whole ceilings: %v", err)
+	}
 	if _, err := provision.SetServiceOption(ctx, st, "hy2o", "up_mbps", "-1"); err == nil {
 		t.Fatal("a negative ceiling")
 	}
