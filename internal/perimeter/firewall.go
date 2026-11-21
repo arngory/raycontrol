@@ -132,12 +132,12 @@ func (n *NFT) Ruleset() string {
 	}
 	limit := fmt.Sprintf("limit rate over %d/second burst %d packets", rate, 2*rate)
 	// SPA packets: per IPv4 address and IPv6 /64 (an attacker has a whole
-	// /64), more per /48, and a ceiling for all at once before NFLOG, which
-	// also holds when a set is full: an update that finds no room does not
-	// match, and the packet went on to be checked (S-8). The ceiling is
-	// what one core checks against hundreds of devices.
+	// /64), more per /48 (S-8). What passes when a set is full, an update
+	// with no room not matching, the gate bounds: its budget of checks
+	// (Gate.Handle), past which a source without a grant is not checked.
+	// No ceiling here: one for all would refuse the clients too, and SYNs
+	// from spoofed sources would fill it at no cost.
 	limit48 := fmt.Sprintf("limit rate over %d/second burst %d packets", 4*rate, 8*rate)
-	limitAll := fmt.Sprintf("limit rate over %d/second burst %d packets", 50*rate, 100*rate)
 	lo := `iif "lo" accept`
 	// Local traffic skips prerouting; tests in a namespace need the same
 	// redirect on output.
@@ -301,13 +301,11 @@ table inet %[1]s {
 		udp dport @spa_udp update @rate4 { ip saddr %[2]s } counter drop comment "spa-rate"
 		udp dport @spa_udp update @rate6 { ip6 saddr & ffff:ffff:ffff:ffff:: %[2]s } counter drop comment "spa-rate"
 		udp dport @spa_udp update @rate48 { ip6 saddr & ffff:ffff:ffff:: %[16]s } counter drop comment "spa-rate"
-		udp dport @spa_udp %[17]s counter drop comment "spa-ceiling"
 		udp dport @spa_udp log group %[3]d drop
 
 		tcp dport @spa_tcp tcp flags syn update @rate4 { ip saddr %[2]s } counter drop comment "spa-syn-rate"
 		tcp dport @spa_tcp tcp flags syn update @rate6 { ip6 saddr & ffff:ffff:ffff:ffff:: %[2]s } counter drop comment "spa-syn-rate"
 		tcp dport @spa_tcp tcp flags syn update @rate48 { ip6 saddr & ffff:ffff:ffff:: %[16]s } counter drop comment "spa-syn-rate"
-		tcp dport @spa_tcp tcp flags syn %[17]s counter drop comment "spa-syn-ceiling"
 		jump admit
 	}
 
@@ -410,7 +408,7 @@ table inet %[1]s {
 	}%[8]s
 }
 `, Table, limit, n.NflogGroup, lo, loNAT, lo, guard, relay, relayMark, inRateRules(true, "\t\t", "", n.inDiv), frontUID, guardRules, local4, local6,
-		resolverElems(false, true), limit48, limitAll)
+		resolverElems(false, true), limit48)
 }
 
 // Setup installs the table and detects whether "destroy element" works.

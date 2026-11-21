@@ -373,14 +373,15 @@ func TestActivePorts(t *testing.T) {
 	}
 }
 
-// One device's knocks fill no more than its quota of the replay cache: past
-// it that device is refused, others pass, and its quota frees as its nonces
-// expire. Knocks refused for their scope count as well.
+// One device's knocks count against its quota for a minute: past it that
+// device is refused, others pass, and its quota frees as its knocks age.
+// Knocks refused for their scope count as well.
 func TestDeviceQuota(t *testing.T) {
 	now := time.Unix(1767225600, 0)
-	clock := now
+	clock, mono := now, time.Duration(0)
 	v := NewVerifier(testParams(), 10*time.Minute, time.Hour, 100000)
 	v.now = func() time.Time { return clock }
+	v.since = func() time.Duration { return mono }
 	v.SetDevices([]Device{device("a", 0x11, 1), device("b", 0x22, 1)})
 	for i := range DeviceNonces {
 		// Half of them for a service the device may not open.
@@ -398,18 +399,18 @@ func TestDeviceQuota(t *testing.T) {
 	if _, err := v.Verify(seal(t, 0x22, Request{Time: clock})); err != nil {
 		t.Fatalf("another device: %v", err)
 	}
-	clock = now.Add(2 * MaxSkew)
+	clock, mono = now.Add(2*MaxSkew), 2*MaxSkew
 	if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
-		t.Fatalf("after its nonces expired: %v", err)
+		t.Fatalf("after its knocks aged: %v", err)
 	}
-	// b's knock came at the same time: gone with a's.
+	// b's knock came at the same time: gone with a's, nonces and counts.
 	if _, ok := v.perDevice["b"]; len(v.seen) != 1 || v.perDevice["a"] != 1 || ok {
 		t.Fatalf("cache: %d nonces, a %d, b %d", len(v.seen), v.perDevice["a"], v.perDevice["b"])
 	}
 }
 
-// The cache forgets expired nonces in the order they came, and a replay is
-// refused while its nonce is in it.
+// The cache forgets each nonce when its packet can no longer pass the skew
+// check, and refuses a replay before then.
 func TestReplayCacheOrder(t *testing.T) {
 	now := time.Unix(1767225600, 0)
 	clock := now
@@ -432,7 +433,7 @@ func TestReplayCacheOrder(t *testing.T) {
 	if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); !errors.Is(err, ErrBusy) {
 		t.Fatalf("cache full: err = %v", err)
 	}
-	// The first nonce expires: one place frees, the others stay.
+	// The first one's time passes: one place frees, the others stay.
 	clock = now.Add(2 * MaxSkew)
 	if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
 		t.Fatalf("after the first expired: %v", err)
@@ -442,26 +443,37 @@ func TestReplayCacheOrder(t *testing.T) {
 	}
 }
 
-// A clock that steps back an hour: the nonces taken before do not hold the
-// devices' quotas, nor the ones after them, until it catches up.
+// The wall clock steps back an hour: a packet taken before is still a
+// replay when the clock comes back to its time, and the devices' quotas,
+// on the monotonic clock, go on as ever (protocol review 2026-11).
 func TestReplayCacheClockBack(t *testing.T) {
 	now := time.Unix(1767225600, 0)
-	clock := now
+	clock, mono := now, time.Duration(0)
 	v := NewVerifier(testParams(), 10*time.Minute, time.Hour, 100000)
 	v.now = func() time.Time { return clock }
+	v.since = func() time.Duration { return mono }
 	v.SetDevices([]Device{device("a", 0x11, 1)})
-	for range DeviceNonces {
+	first := seal(t, 0x11, Request{Time: clock})
+	if _, err := v.Verify(first); err != nil {
+		t.Fatal(err)
+	}
+	for range DeviceNonces - 1 {
 		if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
 			t.Fatal(err)
 		}
 	}
 	clock = now.Add(-time.Hour)
-	for i := range 3 * DeviceNonces {
+	for i := range 2 * DeviceNonces {
 		if i%DeviceNonces == 0 {
-			clock = clock.Add(2 * MaxSkew) // a minute later, a quota again
+			clock, mono = clock.Add(2*MaxSkew), mono+2*MaxSkew // a minute later, a quota again
 		}
 		if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
 			t.Fatalf("knock %d after the step back: %v", i, err)
 		}
+	}
+	// Back near the first packet's time: within the skew, and a replay.
+	clock, mono = now.Add(-20*time.Second), mono+time.Hour
+	if _, err := v.Verify(first); !errors.Is(err, ErrReplay) {
+		t.Fatalf("the first packet again: err = %v", err)
 	}
 }
