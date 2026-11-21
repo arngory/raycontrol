@@ -109,7 +109,7 @@ func TestMetrics(t *testing.T) {
 		}
 	}
 	serveStats(t, srv.Paths.FrontStats(), `{"started":1700000000,"queries":{"`+zoneOf(t, c, "dns")+`":11,"z.example.net":2},"refused":3,`+
-		`"probes":4,"probes_over_rate":1,"forwarded":9,"answers":8,"truncated":2,"unmatched":1,"backend_away":0}`+"\n")
+		`"probes":4,"probes_over_rate":1,"probes_over_label":3,"forwarded":9,"answers":8,"truncated":2,"unmatched":1,"backend_away":0}`+"\n")
 	serveStats(t, srv.Paths.StatsSocket("dns"), `{"queries":5,"memo_hits":6,"sessions":1,"handshakes":0,"sessions_admitted":7,`+
 		`"starts_refused_device":2,"auth_refused":3,"seal_opened":4,"unknown":9,"zones":{"z1.example.com":3}}`+"\n")
 	resp, err := c.GetMetrics(ctx, connect.NewRequest(&nodev1.GetMetricsRequest{}))
@@ -148,6 +148,7 @@ func TestMetrics(t *testing.T) {
 		"raycontrol_dns_front_refused_total 3\n",
 		`raycontrol_dns_front_probes_total{result="answered"} 4`,
 		`raycontrol_dns_front_probes_total{result="over_rate"} 1`,
+		`raycontrol_dns_front_probes_total{result="over_label"} 3`,
 		"raycontrol_dns_front_forwarded_total 9\n",
 		"raycontrol_dns_front_answers_total 8\n",
 		"raycontrol_dns_front_truncated_total 2\n",

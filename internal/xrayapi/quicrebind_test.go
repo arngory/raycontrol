@@ -148,7 +148,7 @@ func (n *naiveUDPNode) datagramBack(ctx context.Context, rs *http3.RequestStream
 // UDP, twice over. Rendered for the pin (no labels in the front), the
 // connection is lost at the new port, as it was before. CI runs it with
 // the pinned niko-server (v0.18.0 since raycontrol v0.31.0, v0.18.3 since
-// v0.31.3).
+// v0.31.3, v0.18.4 since v0.35.1).
 func TestQUICRebindWithNikoServer(t *testing.T) {
 	niko := os.Getenv("NIKO_SERVER_BIN")
 	if niko == "" {
