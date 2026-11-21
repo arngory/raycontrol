@@ -18,15 +18,15 @@ func TestHandleKnockWarnings(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	warn := everyMinute()
 	src := netip.MustParseAddr("198.51.100.77")
-	for _, err := range []error{spa.ErrQuota, perimeter.ErrChanges, spa.ErrClockBack, spa.ErrBusy, perimeter.ErrFlood, spa.ErrAuth} {
+	for _, err := range []error{spa.ErrQuota, perimeter.ErrChanges, spa.ErrClockBack, perimeter.ErrRefused, spa.ErrBusy, perimeter.ErrFlood, spa.ErrAuth} {
 		check := func(netip.Addr, netip.Addr, []byte) (spa.Grant, error) { return spa.Grant{DeviceID: "d7"}, err }
 		for range 3 {
 			handleKnock(log, warn, check, src, netip.Addr{}, nil)
 		}
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("%d warnings, want one of each of five kinds:\n%s", len(lines), out.String())
+	if len(lines) != 6 {
+		t.Fatalf("%d warnings, want one of each of six kinds:\n%s", len(lines), out.String())
 	}
 	if strings.Contains(out.String(), src.String()) {
 		t.Fatalf("the source's address in the journal:\n%s", out.String())

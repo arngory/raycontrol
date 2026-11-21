@@ -489,3 +489,53 @@ func TestFlushBackoff(t *testing.T) {
 			fw.isOpen(addr(0).String()+" tcp/443"), len(g.revoking), g.flushFailures, g.flushRetryAt)
 	}
 }
+
+// TestFlushBackoffKnocks: refused evicting knocks count one refusal of a
+// streak a try, not one each (sixth review: six in 0.6 s put the next try
+// 30 s off); and a streak ends once nothing waits, whoever wrote it.
+func TestFlushBackoffKnocks(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	fw := &fakeFW{}
+	g := NewGate(fw, quiet)
+	g.now = func() time.Time { return now }
+	snap := testSnapshot(&perimeterv1.Device{Id: "alice", Key: key(0x11), Allowed: []uint32{1}})
+	if err := g.Update(snap); err != nil {
+		t.Fatal(err)
+	}
+	addr := func(i int) netip.Addr { return netip.AddrFrom4([4]byte{198, 51, 100, byte(i)}) }
+	for i := range DeviceAddrs {
+		if _, err := g.Handle(addr(i), netip.Addr{}, seal(t, snap, 0x11, now)); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Second)
+	}
+	now = now.Add(time.Minute) // the changes' budget again
+	fw.denyFails = 1000
+	for i := range 6 {
+		if _, err := g.Handle(addr(DeviceAddrs+i), netip.Addr{}, seal(t, snap, 0x11, now)); err != nil {
+			t.Fatalf("evicting knock %d: %v", i, err)
+		}
+		now = now.Add(100 * time.Millisecond)
+	}
+	if g.flushFailures != 1 {
+		t.Fatalf("%d refusals counted for six knocks in 0.6 s", g.flushFailures)
+	}
+	fw.denyFails = 0
+	now = now.Add(time.Second)
+	if _, err := g.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 6 {
+		if fw.isOpen(addr(i).String() + " tcp/443") {
+			t.Fatalf("evicted address %d still open a second after the firewall came back", i)
+		}
+	}
+	// Nothing waits, yet the streak was left: the next tick ends it.
+	g.flushFailures, g.flushRetryAt = 3, now.Add(30*time.Second)
+	if _, err := g.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if g.flushFailures != 0 || !g.flushRetryAt.IsZero() {
+		t.Fatalf("a streak kept with nothing to do: %d, %v", g.flushFailures, g.flushRetryAt)
+	}
+}

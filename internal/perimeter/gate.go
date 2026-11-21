@@ -38,6 +38,10 @@ var ErrFlood = errors.New("perimeter: SPA packets over what the node checks: a f
 // that leaves the table as it is takes none (handle).
 var ErrChanges = errors.New("perimeter: the device's knocks change its grants too often")
 
+// ErrRefused: the firewall refused a knock's grants (nft's error with
+// it, the addresses redacted).
+var ErrRefused = errors.New("perimeter: the firewall refused the knock's grants")
+
 // DeviceChanges bounds the knocks a device changes the table with: as
 // many a minute, as many at once (ErrChanges).
 const DeviceChanges = 32
@@ -775,7 +779,13 @@ func (g *Gate) flushItemsLocked(keys []grantKey, now time.Time) (allow []Grant, 
 // less often while the firewall refuses (1 s doubling to 30 s); the first
 // refusal of a streak is a warning, the rest go to debug.
 func (g *Gate) flushLaterLocked(now time.Time) {
-	if len(g.revoking)+len(g.regrant) == 0 || now.Before(g.flushRetryAt) {
+	if len(g.revoking)+len(g.regrant) == 0 {
+		// Knocks wrote what was pending meanwhile: the streak is over
+		// (sixth review: its count stayed, and the next went to debug).
+		g.flushFailures, g.flushRetryAt = 0, time.Time{}
+		return
+	}
+	if now.Before(g.flushRetryAt) {
 		return
 	}
 	if err := g.flushLocked(); err != nil {
@@ -1020,13 +1030,19 @@ func (g *Gate) grantLocked(grant spa.Grant, src netip.Addr, now time.Time) error
 			delete(g.revoking, key)
 		}
 	} else if len(allow)+len(deny) == 0 {
-		return err
+		return fmt.Errorf("%w: %w", ErrRefused, err)
 	} else {
 		// The knock's own grants alone; what the eviction asks for stays
-		// to do, a refusal of the streak (flushLaterLocked).
-		g.flushRefusedLocked(now, err)
+		// to do. A refusal of the streak only when a try is due: knocks
+		// in between do not put the next off (sixth review), nor does a
+		// table being restored, which says so itself.
+		if !now.Before(g.flushRetryAt) && !g.restoring {
+			g.flushRefusedLocked(now, err)
+		} else {
+			g.log.Debug("grants to close or shorten: the firewall refused again", "failures", g.flushFailures, "err", err)
+		}
 		if err := g.fw.SetGrants(writes, nil); err != nil {
-			return err
+			return fmt.Errorf("%w: %w", ErrRefused, err)
 		}
 	}
 	// Held as soon as open: a revocation must find what is open.

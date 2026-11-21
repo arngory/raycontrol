@@ -241,8 +241,15 @@ func (f *fakeFW) SetGrants(allow []Grant, deny []Elem) error {
 	for _, e := range deny {
 		delete(f.open, e.Addr.Unmap().String()+" "+e.Port.String())
 	}
+	opened := map[string]bool{}
 	for _, gr := range allow {
-		f.open[gr.Addr.Unmap().String()+" "+gr.Port.String()] = gr.TTL
+		k := gr.Addr.Unmap().String() + " " + gr.Port.String()
+		if opened[k] {
+			f.open[k] = max(f.open[k], gr.TTL) // as NFT: one opened twice gets the longer
+			continue
+		}
+		opened[k] = true
+		f.open[k] = gr.TTL
 	}
 	if len(allow) > 0 {
 		f.calls = append(f.calls, "Allow")

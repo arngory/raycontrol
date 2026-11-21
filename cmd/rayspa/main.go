@@ -658,6 +658,10 @@ func handleKnock(log *slog.Logger, warn func(string) bool, check func(src, dst n
 			if warn("clock") {
 				log.Warn("spa: knocks refused as replays: dated before what the replay cache forgot. Did the node's clock step back? They pass again once it catches up")
 			}
+		case errors.Is(err, perimeter.ErrRefused):
+			if warn("refused") {
+				log.Warn("spa: the firewall refused a knock's grants; the knock opened nothing", "err", err)
+			}
 		case errors.Is(err, spa.ErrBusy):
 			if warn("busy") {
 				log.Warn("spa: the replay cache is full: every knock refused until it empties (many devices at their quota?)")

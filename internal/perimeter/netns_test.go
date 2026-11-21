@@ -752,7 +752,7 @@ func TestNetns(t *testing.T) {
 		}
 	})
 	t.Run("grants without destroy element", func(t *testing.T) {
-		// nft before 1.0.8 and kernels before 6.3: what is absent cannot
+		// nft before 1.0.7 and kernels before 6.3: what is absent cannot
 		// fail a delete, and what fails is said.
 		was := fw.destroy
 		fw.destroy = false

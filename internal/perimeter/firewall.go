@@ -1021,7 +1021,7 @@ func addGrants(b *strings.Builder, grants []Grant) {
 }
 
 // forget is the part of a transaction that removes elements, there or not.
-// Without "destroy element" (nft before 1.0.8, kernels before 6.3), adding
+// Without "destroy element" (nft before 1.0.7, kernels before 6.3), adding
 // first makes the delete unable to fail for an absent element, so that the
 // transaction fails only for real.
 func (n *NFT) forget(b *strings.Builder, elems []Elem) {
