@@ -67,12 +67,15 @@ type Front struct {
 	Apex           uint64            `json:"apex"`
 	Probes         uint64            `json:"probes"`
 	ProbesOverRate uint64            `json:"probes_over_rate"`
-	Forwarded      uint64            `json:"forwarded"`
-	BackendAway    uint64            `json:"backend_away"`
-	Answers        uint64            `json:"answers"`
-	Unmatched      uint64            `json:"unmatched"`
-	Truncated      uint64            `json:"truncated"`
-	Dropped        uint64            `json:"dropped"` // the backends' messages not sent on
+	// Probes past their label's answers (niko-server v0.18.4, dnsprobe-v1
+	// §5): copies of a client's label, or a resolver's many retries.
+	ProbesOverLabel uint64 `json:"probes_over_label"`
+	Forwarded       uint64 `json:"forwarded"`
+	BackendAway     uint64 `json:"backend_away"`
+	Answers         uint64 `json:"answers"`
+	Unmatched       uint64 `json:"unmatched"`
+	Truncated       uint64 `json:"truncated"`
+	Dropped         uint64 `json:"dropped"` // the backends' messages not sent on
 	// The tagged zones (slipstream, niko-server v0.13.0): queries without
 	// a device's tag, copies of a passed one, and generations of the
 	// memory of passed fields started early (a load past ~870 a second).
@@ -164,7 +167,7 @@ func wentDown(now, before []*uint64) bool {
 }
 
 func (f *Front) counters() []*uint64 {
-	return []*uint64{&f.Malformed, &f.Refused, &f.Apex, &f.Probes, &f.ProbesOverRate, &f.Forwarded, &f.BackendAway,
+	return []*uint64{&f.Malformed, &f.Refused, &f.Apex, &f.Probes, &f.ProbesOverRate, &f.ProbesOverLabel, &f.Forwarded, &f.BackendAway,
 		&f.Answers, &f.Unmatched, &f.Truncated, &f.Dropped, &f.Untagged, &f.Replayed, &f.ReplayTurns}
 }
 
@@ -345,6 +348,7 @@ func FrontSummary(d Front, span time.Duration, ok bool) string {
 		{d.Apex, "apex answer", "apex answers"},
 		{d.Probes, "probe answered", "probes answered"},
 		{d.ProbesOverRate, "probe over the rate", "probes over the rate"},
+		{d.ProbesOverLabel, "probe past its label's answers", "probes past their label's answers"},
 		{d.BackendAway, "not passed on (backend away or busy)", "not passed on (backend away or busy)"},
 		{d.Unmatched, "answer no query waited for", "answers no query waited for"},
 		{d.Truncated, "answer truncated", "answers truncated"},
