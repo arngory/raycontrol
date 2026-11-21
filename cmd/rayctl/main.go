@@ -134,13 +134,13 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             published now, the switch after -cred-lead (3 days), the old
                                             ones, which the device knew, accepted -cred-grace (2 days)
                                             more; the other devices move over without a cut
-  device invite USER NAME [-role user|admin|billing|support] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv2|rcinv3|rcinv1]
+  device invite USER NAME [-role user|admin|billing|support] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv3|rcinv2|rcinv1]
                 [-allow ADDR,...]
                                             a one-time invite: the client registers the device itself
-                                            through the remote API (service add api api); rcinv2 is
-                                            the short form (QR half the size, Niko 1.35 or later),
-                                            rcinv3 the same by the node's name, with SPA v3 (Niko 1.63
-                                            or later), rcinv1 for older Niko. -allow, billing and support only:
+                                            through the remote API (service add api api); by default
+                                            rcinv3, with the node's name and SPA v3 when it has them
+                                            (Niko 1.63 or later); rcinv2 the short form by the host
+                                            (Niko 1.35 or later), rcinv1 for older Niko. -allow, billing and support only:
                                             the integration's server calls from these without a knock
   device allow ID ADDR[,ADDR...] | -clear   an integration's device calls from these addresses (IPv4
                                             /28-/32, IPv6 /64-/128, at most 8) without a knock, and
@@ -1290,15 +1290,15 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		showQR := fs.Bool("qr", false, "draw the invite as a QR code on the screen for the phone to scan, instead of the text")
 		withPIN := fs.Bool("pin", false, "the invite also needs a PIN of 6 digits, shown here once: tell it by another channel")
 		allow := fs.String("allow", "", "billing or support: the integration server's addresses, comma-separated (IPv4 /28-/32, IPv6 /64-/128): it registers and calls from them without a knock")
-		format := fs.String("format", "rcinv2", "rcinv3: by the node's name, with SPA v3 (Niko 1.63 or later); rcinv2: the short form, a QR half the size (Niko 1.35 or later); rcinv1 for older Niko")
+		format := fs.String("format", "rcinv3", "rcinv3, the default: with the node's name and SPA v3 when it has them (Niko 1.63 or later); rcinv2: the short form, a QR half the size (Niko 1.35 or later); rcinv1 for older Niko")
 		if err := need(args, 2); err != nil {
 			return err
 		}
 		if err := fs.Parse(args[2:]); err != nil {
 			return errUsage
 		}
-		// -format given: that format or none; without it rcinv1 where the
-		// node makes no rcinv2.
+		// -format given: that form or none; without it the first form the
+		// node makes of rcinv3, rcinv2 and rcinv1.
 		asked := false
 		fs.Visit(func(f *flag.Flag) { asked = asked || f.Name == "format" })
 		if *showQR && (*out != "" || c.json) {
@@ -1344,37 +1344,20 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 			}
 			return fmt.Errorf("the node made the invite without a PIN (raycontrol v0.13 has them): withdrawn; update the node or invite without -pin")
 		}
-		if *format == "rcinv3" {
-			switch {
-			case r.Msg.InviteCodeV3 != "":
-				r.Msg.InviteCode = r.Msg.InviteCodeV3
-			default:
-				// Asked for: withdraw rather than hand out another form,
-				// which the phone would take by the node's host.
-				_, rerr := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: inv.Id}))
-				if rerr != nil {
-					return fmt.Errorf("the node made invite %s, but not as rcinv3 (raycontrol v0.35 has it), and it is not withdrawn: rayctl device revoke %s: %w", inv.Id, inv.Id, rerr)
-				}
-				return errors.New("the node made the invite, but not as rcinv3 (raycontrol v0.35 has it, and the node's host must be an address or an ASCII name): withdrawn; invite with -format rcinv2")
+		code, next, err := inviteForm(r.Msg, *format, asked)
+		if err != nil {
+			// Asked for a form the node does not make: withdraw rather than
+			// hand out another, which an older phone could not read or a
+			// newer one would take by the node's host.
+			if _, rerr := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: inv.Id})); rerr != nil {
+				return fmt.Errorf("the node made invite %s, but %w, and it is not withdrawn: rayctl device revoke %s: %w", inv.Id, err, inv.Id, rerr)
 			}
-		}
-		if *format == "rcinv2" {
-			switch {
-			case r.Msg.InviteCodeShort != "":
-				r.Msg.InviteCode = r.Msg.InviteCodeShort
-			case !asked:
-				// A node from before v0.13, or a host that is no address
-				// and no ASCII name: rcinv1, which every Niko reads.
-				fmt.Fprintln(os.Stderr, "rayctl: the invite is rcinv1: the node makes no rcinv2 (raycontrol v0.13 has it, and the node's host must be an address or an ASCII name)")
-			default:
-				// Asked for: withdraw rather than hand out rcinv1.
-				_, rerr := c.c.RevokeDevice(ctx, connect.NewRequest(&nodev1.RevokeDeviceRequest{Id: inv.Id}))
-				if rerr != nil {
-					return fmt.Errorf("the node made invite %s, but not as rcinv2 (raycontrol v0.13 has it), and it is not withdrawn: rayctl device revoke %s: %w", inv.Id, inv.Id, rerr)
-				}
-				return errors.New("the node made the invite, but not as rcinv2 (raycontrol v0.13 has it, and the node's host must be an address or an ASCII name): withdrawn; invite with -format rcinv1")
+			if next != "" {
+				return fmt.Errorf("the node made the invite, but %w: withdrawn; invite with -format %s", err, next)
 			}
+			return fmt.Errorf("the node made the invite, but %w: withdrawn", err)
 		}
+		r.Msg.InviteCode = code
 		// The PIN goes to the screen, never into the invite's file: it
 		// travels apart from the invite.
 		pinLine := func() {
@@ -1764,4 +1747,52 @@ func userHandle() string {
 	_, _ = rand.Read(b)
 	h := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b))
 	return "u-" + h[:4] + "-" + h[4:]
+}
+
+// inviteForms are the forms of an invite, newest first: which raycontrol
+// makes it and which Niko reads it.
+var inviteForms = []struct{ name, node, niko string }{
+	{"rcinv3", "raycontrol v0.35", "Niko 1.63"},
+	{"rcinv2", "raycontrol v0.13", "Niko 1.35"},
+	{"rcinv1", "", "every Niko"},
+}
+
+// inviteForm picks the invite's text from what the node made (api-v1 §3a,
+// §3b). Asked for a form, that one, or an error and the next form the node
+// made; by default the first the node made from the one named on, with a
+// note on stderr when it is not that one. A short form is "" when the node
+// is older or its host or name cannot go in it; rcinv1 is always there.
+func inviteForm(m *nodev1.CreateInviteResponse, format string, asked bool) (code, next string, err error) {
+	codes := map[string]string{"rcinv3": m.InviteCodeV3, "rcinv2": m.InviteCodeShort, "rcinv1": m.InviteCode}
+	start := slices.IndexFunc(inviteForms, func(f struct{ name, node, niko string }) bool { return f.name == format })
+	if start < 0 {
+		return "", "", fmt.Errorf("no invite form %q", format)
+	}
+	if codes[format] != "" {
+		return codes[format], "", nil
+	}
+	made := start + 1
+	for made < len(inviteForms) && codes[inviteForms[made].name] == "" {
+		made++
+	}
+	if made == len(inviteForms) {
+		return "", "", errors.New("no invite in the node's answer")
+	}
+	// rcinv2 and rcinv3 carry the host alike: with rcinv2 and no rcinv3 the
+	// node is older or could not read its name; with neither, older still
+	// or its host fits in no short form.
+	var missing []string
+	for _, f := range inviteForms[start:made] {
+		missing = append(missing, f.name)
+	}
+	why := "raycontrol v0.35 has it, or the node could not read its name"
+	if codes["rcinv2"] == "" {
+		why = "raycontrol v0.13 has the short forms, and the node's host must be an address or an ASCII name"
+	}
+	if asked {
+		return "", inviteForms[made].name, fmt.Errorf("not as %s (%s)", format, why)
+	}
+	fmt.Fprintf(os.Stderr, "rayctl: the invite is %s, which %s reads: the node makes no %s (%s)\n",
+		inviteForms[made].name, inviteForms[made].niko, strings.Join(missing, " and no "), why)
+	return codes[inviteForms[made].name], "", nil
 }

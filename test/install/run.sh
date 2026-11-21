@@ -528,7 +528,10 @@ done
 x grep -q StatsService /var/lib/raycontrol/rendered/inner/xray.json || fail "inner's Xray does not count"
 x rayctl user limit alice off >/dev/null 2>&1 || fail "rayctl user limit off"
 [[ $(x rayctl user usage) == *"no user has a traffic limit"* ]] || fail "a limit left after off"
-invite="$(x rayctl device invite alice console -role admin | grep -o 'RCINV2:[A-Z2-7]*')" || fail "no invite"
+# By default rcinv3: by the node's name (-domain), with SPA v3 (the host is
+# an address); the name resolves nowhere here, and rayctl goes to the
+# node's address with the name as SNI (names-v1 §6).
+invite="$(x rayctl device invite alice console -role admin | grep -o 'RCINV3:[A-Z2-7]*')" || fail "no rcinv3 invite"
 # From the client's container: register a device from the invite, then
 # administer the node through the API with it, and give it a new key.
 # shellcheck disable=SC2016 # expands in the client container
@@ -541,7 +544,7 @@ docker run --rm --network "$net" -v "$bin:/opt/rc:ro" "$image" sh -ec '
 	/opt/rc/rayctl -remote /root/console.rcdev ports | grep -Eq "^tcp\+udp +[0-9]+-[0-9]+ +spa +random +everyone "
 	if /opt/rc/rayctl -remote /root/console.rcdev backup; then exit 1; fi
 	if /opt/rc/rayctl remote enroll -o /root/again.rcdev "$1"; then echo "an invite worked twice"; exit 1; fi
-' _ "$invite" | sed -E 's/rc(dev|inv)1:[A-Za-z0-9_-]+/rc\11:<redacted>/g; s/RCINV2:[A-Z2-7]+/RCINV2:<redacted>/g' || fail "remote API from the client"
+' _ "$invite" | sed -E 's/rc(dev|inv)1:[A-Za-z0-9_-]+/rc\11:<redacted>/g; s/(RCINV[23]):[A-Z2-7]+/\1:<redacted>/g' || fail "remote API from the client"
 [[ $(x rayctl user list) == *carol* ]] || fail "the user made through the remote API is missing"
 [[ $(x rayctl audit) == *"alice/console (remote)"* ]] || fail "the remote admin is not in the audit log"
 [[ $(x rayctl device list alice) == *registered* ]] || fail "the remote device is not listed as registered"
@@ -675,7 +678,7 @@ report="$(x cat /root/report.txt)"
 for section in "== versions" "== system" "== node" "== units" "checks"; do
 	[[ $report == *"$section"* ]] || fail "report lacks $section"
 done
-for leak in "$ip" example.test rcdev1: rcinv1: RCINV2: "$phone_id"; do
+for leak in "$ip" example.test rcdev1: rcinv1: RCINV2: RCINV3: "$phone_id"; do
 	if [[ $report == *"$leak"* ]]; then
 		fail "report leaks $leak"
 	fi

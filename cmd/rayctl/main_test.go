@@ -293,16 +293,18 @@ func (n *inviteNode) RevokeDevice(_ context.Context, req *connect.Request[nodev1
 	return connect.NewResponse(&nodev1.RevokeDeviceResponse{}), nil
 }
 
-// rayctl device invite: rcinv2 by default (Niko 1.35), rcinv1 when asked.
-// From a node that makes no rcinv2 (before v0.13, or a host that cannot go
-// in it) rcinv1 by default; with -format rcinv2 the invite is withdrawn.
+// rayctl device invite: rcinv3 by default (Niko 1.63), the others when
+// asked. From a node that makes no rcinv3 (before v0.35, or a host or name
+// that cannot go in it) rcinv2 by default, then rcinv1; a form asked for
+// that the node does not make withdraws the invite.
 func TestInviteFormat(t *testing.T) {
 	for _, c := range []struct {
 		short, v3 string
 		args      []string
 		want      string // the invite written; "": none, withdrawn
 	}{
-		{"RCINV2:SHORT", "RCINV3:NAME", nil, "RCINV2:SHORT"},
+		{"RCINV2:SHORT", "RCINV3:NAME", nil, "RCINV3:NAME"},
+		{"RCINV2:SHORT", "", nil, "RCINV2:SHORT"}, // a node before v0.35
 		{"RCINV2:SHORT", "RCINV3:NAME", []string{"-format", "rcinv2"}, "RCINV2:SHORT"},
 		{"RCINV2:SHORT", "RCINV3:NAME", []string{"-format", "rcinv3"}, "RCINV3:NAME"},
 		{"RCINV2:SHORT", "RCINV3:NAME", []string{"-format", "rcinv1"}, "rcinv1:long"},
@@ -310,6 +312,8 @@ func TestInviteFormat(t *testing.T) {
 		{"", "", nil, "rcinv1:long"},
 		{"", "", []string{"-format", "rcinv1"}, "rcinv1:long"},
 		{"", "", []string{"-format", "rcinv2"}, ""},
+		{"", "", []string{"-format", "rcinv3"}, ""},
+		{"", "RCINV3:NAME", []string{"-format", "rcinv2"}, ""}, // asked for: no other form
 	} {
 		n := &inviteNode{short: c.short, v3: c.v3}
 		out := filepath.Join(t.TempDir(), "invite")
@@ -317,11 +321,34 @@ func TestInviteFormat(t *testing.T) {
 		got, _ := os.ReadFile(out)
 		if c.want == "" && (err == nil || got != nil || !slices.Equal(n.revoked, []string{"inv1"})) ||
 			c.want != "" && (err != nil || string(got) != c.want+"\n" || n.revoked != nil) {
-			t.Errorf("short %q, %v: %v, wrote %q, withdrew %v", c.short, c.args, err, got, n.revoked)
+			t.Errorf("short %q, v3 %q, %v: %v, wrote %q, withdrew %v", c.short, c.v3, c.args, err, got, n.revoked)
 		}
 	}
 	if err := (&cli{c: &inviteNode{}}).device(context.Background(), "invite", []string{"alice", "phone", "-format", "rcinv4"}); !errors.Is(err, errUsage) {
 		t.Errorf("-format rcinv4: %v", err)
+	}
+}
+
+// Asked for a form the node did not make: the next form named is one it
+// did make (review of arngory/raycontrol#75: a node before v0.13 makes no
+// rcinv2 either).
+func TestInviteFormNext(t *testing.T) {
+	for _, c := range []struct {
+		short, v3, format, next string
+	}{
+		{"RCINV2:SHORT", "", "rcinv3", "rcinv2"},
+		{"", "", "rcinv3", "rcinv1"},
+		{"", "", "rcinv2", "rcinv1"},
+		{"", "RCINV3:NAME", "rcinv2", "rcinv1"},
+	} {
+		m := &nodev1.CreateInviteResponse{InviteCode: "rcinv1:long", InviteCodeShort: c.short, InviteCodeV3: c.v3}
+		code, next, err := inviteForm(m, c.format, true)
+		if err == nil || code != "" || next != c.next {
+			t.Errorf("short %q, v3 %q, -format %s: %q, next %q, %v", c.short, c.v3, c.format, code, next, err)
+		}
+	}
+	if _, _, err := inviteForm(&nodev1.CreateInviteResponse{}, "rcinv3", false); err == nil {
+		t.Error("no invite at all: no error")
 	}
 }
 
