@@ -36,12 +36,16 @@ const (
 	// one silent both ways this long.
 	quietAfter = 10 * time.Second
 
-	// Pairs (local port, destination) of UDP as conntrack keeps them: 30 s
-	// after the last packet sent without an answer, 120 s after the last
-	// packet either way with one; in a live stream and after it.
+	// Pairs (local port, destination) of UDP as conntrack keeps them
+	// (linux:nf_conntrack_proto_udp.c, nf_conntrack_udp_packet): 30 s
+	// after the last packet, and 120 s once answered and still live past
+	// 2 s from the first, a stream; in a live stream and after it. A lookup
+	// (a query, its answer) is 30 s: counted 120, a user's pairs ran out at
+	// some 8 lookups a second.
 	pairsPerUser   = 1024
 	pairAnswered   = 120 * time.Second
 	pairUnanswered = 30 * time.Second
+	pairStreamAt   = 2 * time.Second
 	// ageEvery: a user's pairs are aged this often at most.
 	ageEvery = time.Second
 	// The process's ceiling of pairs: a quarter of nf_conntrack_max, read

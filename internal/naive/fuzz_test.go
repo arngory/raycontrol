@@ -388,7 +388,7 @@ func (x *uotUpstream) run(in []byte) error {
 	if connect {
 		conn, to = x.sink, x.to
 		m := monoAt(time.Now())
-		u.peers[to] = pairTimes{sent: m, any: m}
+		u.peers[to] = pairTimes{first: m, sent: m, any: m}
 	}
 	return u.upstream(x.r, conn, to)
 }

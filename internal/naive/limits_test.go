@@ -248,6 +248,28 @@ func refillDest(s *Server, user string) {
 	}
 }
 
+// A browser's lookups, 30 a second, each from its own port (its own
+// stream), for five minutes, get through: a lookup is a pair 30 s after
+// its answer, as conntrack keeps it, and 1024 pairs hold 34 a second.
+// Counted 120 s, they ran out at some 8 a second.
+func TestLimitsLookupRate(t *testing.T) {
+	s := &Server{}
+	c := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	s.lim.now, s.lim.sleep = c.now, c.sleep
+	s.lim.ctMax = func() (uint64, error) { return 1 << 20, nil }
+	resolver := netip.AddrPortFrom(netip.AddrFrom4([4]byte{198, 18, 0, 53}), 53)
+	for i := range 30 * 300 {
+		c.t = c.t.Add(time.Second / 30)
+		slot, u := slotWith(t, s, "u5")
+		if !u.mayReach(resolver) {
+			t.Fatalf("lookup %d refused: %v", i, s.lim.Refused()["u5"])
+		}
+		c.t = c.t.Add(20 * time.Millisecond)
+		u.heard(resolver)
+		s.lim.uotPut(slot)
+	}
+}
+
 // The journal of pairs: a pair without an answer counts 30 s after the
 // last packet sent, one with an answer 120 s after the last packet either
 // way; in a live stream and after its end. A long-lived stream whose old
@@ -271,12 +293,13 @@ func TestLimitsPairJournal(t *testing.T) {
 	if got := s.lim.Refused()["u5"][refusedLive]; got != 1 {
 		t.Fatalf("refused live: %d", got)
 	}
-	// Half of them answered.
+	// Half of them answered, 3 s on: streams (past 2 s from the first).
+	c.t = c.t.Add(3 * time.Second)
 	for i := 0; i < pairsPerUser; i += 2 {
 		u.heard(dest(i))
 	}
 	// 31 s on: the unanswered ones are gone, in the live stream too.
-	c.t = c.t.Add(31 * time.Second)
+	c.t = c.t.Add(28 * time.Second)
 	refillDest(s, "u5")
 	if !u.mayReach(dest(5000)) {
 		t.Fatal("unanswered pairs still held after 30 s")
@@ -293,7 +316,7 @@ func TestLimitsPairJournal(t *testing.T) {
 	// The stream ends: its pairs live out their time in the journal.
 	s.lim.uotPut(slot)
 	slot2, v := slotWith(t, s, "u5")
-	c.t = c.t.Add(30 * time.Second) // 130 s: the answered ones of 0 s are gone (120 s), 5000 too (unanswered, sent at 31 s), dest(0) not (100 s)
+	c.t = c.t.Add(30 * time.Second) // 130 s: the answered ones of 3 s are gone (123 s), 5000 too (unanswered, sent at 31 s), dest(0) not (100 s)
 	refillDest(s, "u5")
 	if !v.mayReach(dest(7000)) {
 		t.Fatal("refused with the old pairs gone")
