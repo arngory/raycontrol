@@ -329,6 +329,29 @@ func TestInviteFormat(t *testing.T) {
 	}
 }
 
+// Asked for a form the node did not make: the next form named is one it
+// did make (review of arngory/raycontrol#75: a node before v0.13 makes no
+// rcinv2 either).
+func TestInviteFormNext(t *testing.T) {
+	for _, c := range []struct {
+		short, v3, format, next string
+	}{
+		{"RCINV2:SHORT", "", "rcinv3", "rcinv2"},
+		{"", "", "rcinv3", "rcinv1"},
+		{"", "", "rcinv2", "rcinv1"},
+		{"", "RCINV3:NAME", "rcinv2", "rcinv1"},
+	} {
+		m := &nodev1.CreateInviteResponse{InviteCode: "rcinv1:long", InviteCodeShort: c.short, InviteCodeV3: c.v3}
+		code, next, err := inviteForm(m, c.format, true)
+		if err == nil || code != "" || next != c.next {
+			t.Errorf("short %q, v3 %q, -format %s: %q, next %q, %v", c.short, c.v3, c.format, code, next, err)
+		}
+	}
+	if _, _, err := inviteForm(&nodev1.CreateInviteResponse{}, "rcinv3", false); err == nil {
+		t.Error("no invite at all: no error")
+	}
+}
+
 // remote enroll @FILE finds the invite in the text around it, as rayctl
 // device invite prints it, whichever the form.
 func TestReadArgInvite(t *testing.T) {
