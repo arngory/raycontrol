@@ -134,13 +134,15 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             published now, the switch after -cred-lead (3 days), the old
                                             ones, which the device knew, accepted -cred-grace (2 days)
                                             more; the other devices move over without a cut
-  device invite USER NAME [-role user|admin|billing|support] [-ttl 24h] [-o FILE | -qr] [-pin] [-format rcinv3|rcinv2|rcinv1]
+  device invite USER NAME [-role user|admin|billing|support] [-ttl 24h] [-o FILE | -qr] [-pin[=false]] [-format rcinv3|rcinv2|rcinv1]
                 [-allow ADDR,...]
                                             a one-time invite: the client registers the device itself
                                             through the remote API (service add api api); by default
                                             rcinv3, with the node's name and SPA v3 when it has them
                                             (Niko 1.63 or later); rcinv2 the short form by the host
-                                            (Niko 1.35 or later), rcinv1 for older Niko. -allow, billing and support only:
+                                            (Niko 1.35 or later), rcinv1 for older Niko. -pin: a PIN
+                                            too, told by another channel; on for admin and billing
+                                            unless -pin=false. -allow, billing and support only:
                                             the integration's server calls from these without a knock
   device allow ID ADDR[,ADDR...] | -clear   an integration's device calls from these addresses (IPv4
                                             /28-/32, IPv6 /64-/128, at most 8) without a knock, and
@@ -1288,7 +1290,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		ttl := fs.Duration("ttl", 24*time.Hour, "how long the invite works (up to a week)")
 		out := fs.String("o", "", "write the invite alone to this file (mode 0600) instead of the screen")
 		showQR := fs.Bool("qr", false, "draw the invite as a QR code on the screen for the phone to scan, instead of the text")
-		withPIN := fs.Bool("pin", false, "the invite also needs a PIN of 6 digits, shown here once: tell it by another channel")
+		withPIN := fs.Bool("pin", false, "the invite also needs a PIN of 6 digits, shown here once: tell it by another channel; on unless -pin=false for -role admin and billing")
 		allow := fs.String("allow", "", "billing or support: the integration server's addresses, comma-separated (IPv4 /28-/32, IPv6 /64-/128): it registers and calls from them without a knock")
 		format := fs.String("format", "rcinv3", "rcinv3, the default: with the node's name and SPA v3 when it has them (Niko 1.63 or later); rcinv2: the short form, a QR half the size (Niko 1.35 or later); rcinv1 for older Niko")
 		if err := need(args, 2); err != nil {
@@ -1298,9 +1300,16 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 			return errUsage
 		}
 		// -format given: that form or none; without it the first form the
-		// node makes of rcinv3, rcinv2 and rcinv1.
-		asked := false
-		fs.Visit(func(f *flag.Flag) { asked = asked || f.Name == "format" })
+		// node makes of rcinv3, rcinv2 and rcinv1. -pin not given: a PIN
+		// for admin and billing (api-v1 §3).
+		asked, pinGiven := false, false
+		fs.Visit(func(f *flag.Flag) {
+			asked = asked || f.Name == "format"
+			pinGiven = pinGiven || f.Name == "pin"
+		})
+		if !pinGiven {
+			*withPIN = api.InvitePINByDefault(*role)
+		}
 		if *showQR && (*out != "" || c.json) {
 			return fmt.Errorf("%w: -qr draws on the screen: not with -o or -json", errUsage)
 		}
@@ -1308,6 +1317,9 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 		// read Enter from and draw on (review 9: on stderr it still landed
 		// under the QR through ssh without -t, | tee or </dev/null).
 		if *showQR && *withPIN && (!terminal(os.Stdin) || !terminal(os.Stdout)) {
+			if !pinGiven {
+				return fmt.Errorf("%w: -qr with a PIN (-role %s has one unless -pin=false) needs a terminal (ssh -t), or -o to write the invite to a file", errUsage, *role)
+			}
 			return fmt.Errorf("%w: -qr with -pin needs a terminal (ssh -t), or -o to write the invite to a file", errUsage)
 		}
 		if *format != "rcinv1" && *format != "rcinv2" && *format != "rcinv3" {
@@ -1342,7 +1354,7 @@ func (c *cli) device(ctx context.Context, sub string, args []string) error {
 			if rerr != nil {
 				return fmt.Errorf("the node made invite %s without a PIN (raycontrol v0.13 has them), and it is not withdrawn: rayctl device revoke %s: %w", inv.Id, inv.Id, rerr)
 			}
-			return fmt.Errorf("the node made the invite without a PIN (raycontrol v0.13 has them): withdrawn; update the node or invite without -pin")
+			return fmt.Errorf("the node made the invite without a PIN (raycontrol v0.13 has them): withdrawn; update the node or invite with -pin=false")
 		}
 		code, next, err := inviteForm(r.Msg, *format, asked)
 		if err != nil {

@@ -281,11 +281,50 @@ type inviteNode struct {
 	short   string
 	v3      string
 	revoked []string
+	asked   *nodev1.CreateInviteRequest
 }
 
-func (n *inviteNode) CreateInvite(context.Context, *connect.Request[nodev1.CreateInviteRequest]) (*connect.Response[nodev1.CreateInviteResponse], error) {
-	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: &nodev1.Invite{Id: "inv1", User: "alice", Name: "phone", Role: "user"},
-		InviteCode: "rcinv1:long", InviteCodeShort: n.short, InviteCodeV3: n.v3}), nil
+func (n *inviteNode) CreateInvite(_ context.Context, req *connect.Request[nodev1.CreateInviteRequest]) (*connect.Response[nodev1.CreateInviteResponse], error) {
+	n.asked = req.Msg
+	pin := ""
+	if req.Msg.Pin {
+		pin = "123456"
+	}
+	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: &nodev1.Invite{Id: "inv1", User: "alice", Name: "phone", Role: req.Msg.Role},
+		InviteCode: "rcinv1:long", InviteCodeShort: n.short, InviteCodeV3: n.v3, Pin: pin}), nil
+}
+
+// A PIN unless -pin=false for admin and billing, as asked for the others
+// (protocol review 2026-11, L4).
+func TestInvitePINDefault(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		pin  bool
+	}{
+		{nil, false},
+		{[]string{"-role", "admin"}, true},
+		{[]string{"-role", "billing"}, true},
+		{[]string{"-role", "support"}, false},
+		{[]string{"-role", "admin", "-pin=false"}, false},
+		{[]string{"-role", "billing", "-pin=false"}, false},
+		{[]string{"-pin"}, true},
+		{[]string{"-role", "support", "-pin"}, true},
+	} {
+		n := &inviteNode{v3: "RCINV3:NAME"}
+		out := filepath.Join(t.TempDir(), "invite")
+		if err := (&cli{c: n}).device(context.Background(), "invite", append([]string{"alice", "phone", "-o", out}, c.args...)); err != nil {
+			t.Fatalf("%v: %v", c.args, err)
+		}
+		if n.asked.Pin != c.pin {
+			t.Errorf("%v: asked for a PIN %v, want %v", c.args, n.asked.Pin, c.pin)
+		}
+	}
+	// Through ssh without -t: the QR and a PIN by default do not go
+	// together, and the error says how to go without it.
+	err := (&cli{c: &inviteNode{}}).device(context.Background(), "invite", []string{"alice", "phone", "-role", "admin", "-qr"})
+	if !errors.Is(err, errUsage) || !strings.Contains(err.Error(), "-pin=false") {
+		t.Errorf("-role admin -qr without a terminal: %v", err)
+	}
 }
 
 func (n *inviteNode) RevokeDevice(_ context.Context, req *connect.Request[nodev1.RevokeDeviceRequest]) (*connect.Response[nodev1.RevokeDeviceResponse], error) {

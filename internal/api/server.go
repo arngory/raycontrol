@@ -1199,6 +1199,9 @@ func (s *Server) CreateInvite(ctx context.Context, req *connect.Request[nodev1.C
 	if err := s.done(ctx, what, target, err); err != nil {
 		return nil, err
 	}
+	if !req.Msg.Pin && InvitePINByDefault(role) {
+		warnings = append(warnings, fmt.Sprintf("the invite of role %s has no PIN: whoever registers with it first gets the API as %s", role, role))
+	}
 	return connect.NewResponse(&nodev1.CreateInviteResponse{Invite: invitePB(inv), InviteCode: code, Pin: pin, InviteCodeShort: short,
 		InviteCodeV3: v3, Warnings: warnings}), nil
 }

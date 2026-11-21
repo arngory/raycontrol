@@ -2736,7 +2736,7 @@ AllowedPublicKeys: [
 | **Пиры Yggdrasil** (публичные или свой) | запасной путь к ноде через сеть Yggdrasil | нет | группа или admin-устройство; `apply` — root | `rayctl service set ygg peers=…`, затем `rayctl apply` (§8, «Свой пир») | `rayctl -json service list` — у `ygg` есть `peers` | нода видна в сети Yggdrasil; обход лимитов изменённым клиентом |
 | **TCP 443 без SPA** | REALITY отвечает всем: молчащий на 443 хост заметнее | за SPA | группа или admin-устройство | `rayctl service set reality open=true` | `rayctl -json service list` — у reality `open` | активное зондирование 443 становится возможным и для naive, DoH и Yggdrasil |
 | **Потолки Hysteria2** | ограничить скорость одного соединения | нет | группа или admin-устройство | `rayctl service set hy2-masq up_mbps=500` | в выводе команды | — |
-| **PIN у приглашения** | QR без PIN бесполезен | без PIN | тот, кто делает приглашение | `rayctl device invite … -pin` (§10) | `rayctl device list`: `PIN (5 tries)` | PIN надо сообщить другим каналом |
+| **PIN у приглашения** | QR без PIN бесполезен | без PIN; у `-role admin` и `billing` — с PIN (с v0.35.1) | тот, кто делает приглашение | `rayctl device invite … -pin`, без него — `-pin=false` (§10) | `rayctl device list`: `PIN (5 tries)` | PIN надо сообщить другим каналом |
 | **Имя и описание ноды** | текст, который клиенты показывают пользователям | нет | группа или admin-устройство | `rayctl node name "…"`, `rayctl node note "…"` | `rayctl node name`, `rayctl node note` без аргументов | — |
 | **Метрики для Prometheus** | счётчики ноды в файл для node_exporter | не пишутся | группа; полный набор — root | `rayctl metrics -o ФАЙЛ` по своему таймеру | содержимое файла | только числа, без имён и адресов |
 
