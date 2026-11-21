@@ -3096,7 +3096,11 @@ type GetStatusResponse struct {
 	Note string `protobuf:"bytes,11,opt,name=note,proto3" json:"note,omitempty"`
 	// The node's egress policy (rayctl egress); on the node's socket only,
 	// absent through the remote API.
-	Egress        *Egress `protobuf:"bytes,12,opt,name=egress,proto3" json:"egress,omitempty"`
+	Egress *Egress `protobuf:"bytes,12,opt,name=egress,proto3" json:"egress,omitempty"`
+	// What the operator should see to: a Hysteria2 whose Brutal has no
+	// ceiling, or one only as high as an interface that may not tell the
+	// channel's speed (protocol review 2026-11, M1). Each line is whole.
+	Warnings      []string `protobuf:"bytes,13,rep,name=warnings,proto3" json:"warnings,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3211,6 +3215,13 @@ func (x *GetStatusResponse) GetNote() string {
 func (x *GetStatusResponse) GetEgress() *Egress {
 	if x != nil {
 		return x.Egress
+	}
+	return nil
+}
+
+func (x *GetStatusResponse) GetWarnings() []string {
+	if x != nil {
+		return x.Warnings
 	}
 	return nil
 }
@@ -10343,7 +10354,7 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x0fmax_connections\x18\x04 \x01(\rR\x0emaxConnections\x12-\n" +
 	"\x12device_connections\x18\x05 \x01(\rR\x11deviceConnections\x12\x14\n" +
 	"\x05error\x18\x06 \x01(\tR\x05error\"\x12\n" +
-	"\x10GetStatusRequest\"\xbf\x03\n" +
+	"\x10GetStatusRequest\"\xea\x03\n" +
 	"\x11GetStatusResponse\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x12!\n" +
@@ -10358,7 +10369,8 @@ const file_raycontrol_node_v1_node_proto_rawDesc = "" +
 	"\x04name\x18\n" +
 	" \x01(\tR\x04name\x12\x12\n" +
 	"\x04note\x18\v \x01(\tR\x04note\x12A\n" +
-	"\x06egress\x18\f \x01(\v2\x1a.raycontrol.node.v1.EgressB\r\xfa\xd2\xe4\x93\x02\a\x12\x05ADMINR\x06egress\"R\n" +
+	"\x06egress\x18\f \x01(\v2\x1a.raycontrol.node.v1.EgressB\r\xfa\xd2\xe4\x93\x02\a\x12\x05ADMINR\x06egress\x12)\n" +
+	"\bwarnings\x18\r \x03(\tB\r\xfa\xd2\xe4\x93\x02\a\x12\x05ADMINR\bwarnings\"R\n" +
 	"\x06Egress\x12\x1e\n" +
 	"\n" +
 	"bittorrent\x18\x01 \x01(\bR\n" +

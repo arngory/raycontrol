@@ -453,7 +453,43 @@ func (s *Server) GetStatus(ctx context.Context, _ *connect.Request[nodev1.GetSta
 		}
 		resp.Egress = egressPB(e)
 	}
+	if !integration {
+		resp.Warnings = brutalWarnings(services, render.HostLink)
+	}
 	return connect.NewResponse(resp), nil
+}
+
+// brutalLow is a link speed below which the kernel's word is doubtful: an
+// emulated NIC (rtl8139, 100 Mbit/s) tells its own whatever the channel.
+const brutalLow = 1000
+
+// brutalWarnings are the enabled Hysteria2 services whose Brutal has no
+// ceiling, or the link's of below brutalLow (render.BrutalCeiling,
+// protocol review 2026-11, M1): the server sends each client as fast as
+// the client asks, and one may take the whole channel. link is asked only
+// when some service has no up_mbps of its own.
+func brutalWarnings(services []store.Service, link func() (int, string)) []string {
+	var out []string
+	mbps, iface, asked := 0, "", false
+	for _, svc := range services {
+		if !svc.Enabled || (svc.Kind != "hy2-masq" && svc.Kind != "hy2-obfs") {
+			continue
+		}
+		if _, from := render.BrutalCeiling(svc.Settings, 0); from == "" && !asked {
+			mbps, iface = link()
+			asked = true
+		}
+		set := fmt.Sprintf("rayctl service set %s up_mbps=N, N the channel's Mbit/s (0: no ceiling)", svc.Name)
+		switch up, from := render.BrutalCeiling(svc.Settings, mbps); {
+		case from == "":
+			out = append(out, fmt.Sprintf("%s %s: Brutal has no ceiling, the speed of the node's link unknown: it sends each client as fast as the client asks, and one may take the whole channel; %s",
+				svc.Kind, svc.Name, set))
+		case from == "link" && up < brutalLow:
+			out = append(out, fmt.Sprintf("%s %s: Brutal up to %d Mbit/s, the speed %s tells, which an emulated NIC tells whatever the channel; %s",
+				svc.Kind, svc.Name, up, iface, set))
+		}
+	}
+	return out
 }
 
 // serviceIDs resolves service names to IDs, each once: a name given twice

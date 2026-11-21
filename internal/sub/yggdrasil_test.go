@@ -368,7 +368,8 @@ func TestYggdrasilDeviceKeys(t *testing.T) {
 }
 
 // The Brutal ceilings of Hysteria2 (R4-16): service options rendered into
-// the backend's options; 0 removes them.
+// the backend's options; 0 removes them. up_mbps unset, the speed of the
+// node's link, when known (protocol review 2026-11, M1).
 func TestBrutalCeilings(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "rayd.db"))
@@ -380,8 +381,11 @@ func TestBrutalCeilings(t *testing.T) {
 	if _, err := provision.CreateService(ctx, st, store.Service{Kind: "hy2-obfs", Name: "hy2o", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	options := func() map[string]any {
+	options := func(link ...int) map[string]any {
 		m, _ := render.Collect(ctx, st)
+		if len(link) > 0 {
+			m.LinkMbps = link[0]
+		}
 		files, _, err := render.Render(m, render.Paths{Rendered: "/r", Run: "/run/niko"})
 		if err != nil {
 			t.Fatal(err)
@@ -399,19 +403,32 @@ func TestBrutalCeilings(t *testing.T) {
 	if o := options(); o["up_mbps"] != nil || o["down_mbps"] != nil {
 		t.Fatalf("ceilings by default: %v", o)
 	}
+	if o := options(1000); o["up_mbps"] != float64(1000) || o["down_mbps"] != nil {
+		t.Fatalf("ceilings by default on a link of 1000 Mbit/s: %v", o)
+	}
 	for _, kv := range [][2]string{{"up_mbps", "500"}, {"down_mbps", "50"}} {
 		if _, err := provision.SetServiceOption(ctx, st, "hy2o", kv[0], kv[1]); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if o := options(); o["up_mbps"] != float64(500) || o["down_mbps"] != float64(50) {
+	if o := options(1000); o["up_mbps"] != float64(500) || o["down_mbps"] != float64(50) {
 		t.Fatalf("ceilings: %v", o)
 	}
 	if _, err := provision.SetServiceOption(ctx, st, "hy2o", "up_mbps", "0"); err != nil {
 		t.Fatal(err)
 	}
-	if o := options(); o["up_mbps"] != nil || o["down_mbps"] != float64(50) {
+	if o := options(1000); o["up_mbps"] != nil || o["down_mbps"] != float64(50) {
 		t.Fatalf("up removed: %v", o)
+	}
+	// auto: the default again, the link's speed.
+	if _, err := provision.SetServiceOption(ctx, st, "hy2o", "up_mbps", "auto"); err != nil {
+		t.Fatal(err)
+	}
+	if o := options(1000); o["up_mbps"] != float64(1000) {
+		t.Fatalf("up_mbps=auto: %v", o)
+	}
+	if _, err := provision.SetServiceOption(ctx, st, "hy2o", "down_mbps", "auto"); err == nil {
+		t.Fatal("down_mbps=auto taken")
 	}
 	if _, err := provision.SetServiceOption(ctx, st, "hy2o", "up_mbps", "-1"); err == nil {
 		t.Fatal("a negative ceiling")

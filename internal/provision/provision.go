@@ -955,15 +955,27 @@ func SetServiceOption(ctx context.Context, st *store.Store, name, key, value str
 			return svc, err
 		}
 		v = value
+	case (svc.Kind == "hy2-masq" || svc.Kind == "hy2-obfs") && key == "up_mbps" && value == "auto":
+		// Back to the default: the speed of the node's link where the
+		// kernel knows it (render.BrutalCeiling).
+		v = 0
 	case (svc.Kind == "hy2-masq" || svc.Kind == "hy2-obfs") && (key == "up_mbps" || key == "down_mbps"):
 		// The ceilings of the server's Brutal per connection (R4-16): up is
 		// what the node sends a client at most (the node's channel or its
-		// tariff), down what a client may send it; 0 removes the ceiling.
+		// tariff), down what the node tells clients to send it at most.
+		// down 0 removes it; up 0 is kept, none instead of the default
+		// (protocol review 2026-11, M1).
 		n, err := strconv.Atoi(value)
 		if err != nil || n < 0 || n > 100000 {
+			if key == "up_mbps" {
+				return svc, fmt.Errorf("%w up_mbps: Mbit/s, 0 to 100000 (0: none; auto: the speed of the node's link, the default)", store.ErrInvalid)
+			}
 			return svc, fmt.Errorf("%w %s: Mbit/s, 0 to 100000 (0: none)", store.ErrInvalid, key)
 		}
 		v = n
+		if key == "up_mbps" && n == 0 {
+			v = json.Number("0")
+		}
 	case svc.Kind == "yggdrasil" && key == "peers":
 		// Public peers (P-14, R4-18): off unless set; none removes them.
 		v = 0

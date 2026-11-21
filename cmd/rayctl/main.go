@@ -79,7 +79,9 @@ const usageText = `usage: rayctl [-socket PATH | -remote FILE] [-json] <command>
                                             certificate, one you ask for always),
                                             target=HOST:PORT (who answers non-clients, checked as at
                                             creation; keys, shortIds and server name stay);
-                                            hy2-*: up_mbps=N, down_mbps=N (Brutal ceilings, 0: none);
+                                            hy2-*: up_mbps=N|0|auto (Brutal's ceiling; 0: none; auto,
+                                            the default: the speed of the node's link, where the kernel
+                                            knows it), down_mbps=N (told to clients, 0: none);
                                             naive: icmp=on|off (ping and traceroute through it, then
                                             rayctl apply), udp=on|off (UDP as HTTP/3 datagrams,
                                             naive-udp-v1; off by default; then rayctl apply),
@@ -540,6 +542,9 @@ func (c *cli) status(ctx context.Context) error {
 		}
 		for _, line := range stale {
 			fmt.Fprintf(w, "integration\tWARNING %s\n", line)
+		}
+		for _, line := range m.Warnings {
+			fmt.Fprintf(w, "warning\t%s\n", line)
 		}
 	})
 }
