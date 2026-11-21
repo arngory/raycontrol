@@ -649,9 +649,17 @@ func handleKnock(log *slog.Logger, warn func(string) bool, check func(src, dst n
 			if warn("quota " + g.DeviceID) {
 				log.Warn("spa: a device's knocks refused over its quota (a leaked invite? rayctl device revoke)", "device", g.DeviceID)
 			}
+		case errors.Is(err, perimeter.ErrAddrs):
+			if warn("addrs " + g.DeviceID) {
+				log.Warn("spa: a device's knocks refused: from new addresses too often (forwarded? a leaked invite? rayctl device revoke)", "device", g.DeviceID)
+			}
+		case errors.Is(err, spa.ErrBusy):
+			if warn("busy") {
+				log.Warn("spa: the replay cache is full: every knock refused until it empties (many devices at their quota?)")
+			}
 		case errors.Is(err, perimeter.ErrFlood):
 			if warn("flood") {
-				log.Warn("spa: more packets than the node checks: a flood? Sources with grants and the TCP carrier keep their own share")
+				log.Warn("spa: more packets than the node checks: a flood? Sources with grants are tried against their own devices apart")
 			}
 		}
 		return

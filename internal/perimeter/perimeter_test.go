@@ -955,7 +955,7 @@ func TestGateRevocations(t *testing.T) {
 	const grant = "203.0.113.9 udp/443"
 	knock()
 	alice.Allowed = nil
-	fw.denyFails = 2 // both of alice's ports
+	fw.denyFails = 1 // both of alice's ports, one transaction
 	if err := g.Update(snap); !errors.Is(err, ErrPending) || !fw.isOpen(grant) {
 		t.Fatalf("a refused revocation: open %v, %v", fw.isOpen(grant), err)
 	}
@@ -1186,7 +1186,7 @@ func TestGateSharedAddressMore(t *testing.T) {
 	knock(0x11, time.Hour)
 	knock(0x22, 2*time.Second)
 	alice.Allowed = nil
-	fw.allowFails = 4 // two ports, twice: bob expires and goes between the tries
+	fw.allowFails = 2 // two ports in one transaction, twice: bob expires and goes between the tries
 	if err := g.Update(snap); !errors.Is(err, ErrPending) {
 		t.Fatal(err)
 	}
@@ -1326,5 +1326,23 @@ func TestGateRevokeWhileRestoring(t *testing.T) {
 	fw.failing = map[string]int{"SetPublic": 100}
 	if err := g.Update(snap); !errors.Is(err, ErrPending) || len(fw.relays) != 0 || len(fw.relayPorts) != 1 {
 		t.Fatalf("a relay removed while its port waits: relays %v ports %v %v", fw.relays, fw.relayPorts, err)
+	}
+}
+
+// nft echoes the command it refused, a client's address in it: the error
+// that goes to the journal holds none (third review of the protocol
+// review's change, R4-3).
+func TestNFTErrorNoAddrs(t *testing.T) {
+	stderr := "/dev/stdin:1:1-63: Error: Could not process rule: No such file or directory\n" +
+		"destroy element inet raycontrol allow4 { 198.51.100.7 . tcp . 443 }\n" +
+		"destroy element inet raycontrol allow6 { 2001:db8:7:7::1 . udp . 443 }"
+	got := noAddrs(stderr)
+	for _, a := range []string{"198.51.100.7", "2001:db8:7:7::1"} {
+		if strings.Contains(got, a) {
+			t.Fatalf("%s kept: %s", a, got)
+		}
+	}
+	if !strings.Contains(got, "No such file or directory") || !strings.Contains(got, "allow4") {
+		t.Fatalf("the rest lost: %s", got)
 	}
 }

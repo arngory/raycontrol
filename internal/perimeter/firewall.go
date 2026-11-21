@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/arngory/raycontrol/internal/redact"
 )
 
 // Port is a transport port on the node.
@@ -114,9 +116,16 @@ func (n *NFT) run(script string) error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("nft: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("nft: %w: %s", err, noAddrs(strings.TrimSpace(stderr.String())))
 	}
 	return nil
+}
+
+// noAddrs takes the addresses out of nft's words: it echoes the command it
+// refused, a client's address in its elements, and the error goes to the
+// journal (R4-3: logs hold no user's address).
+func noAddrs(s string) string {
+	return redact.New().String(s)
 }
 
 // DataPlaneUIDs are the UIDs of the front and the data-plane services
@@ -132,11 +141,13 @@ func (n *NFT) Ruleset() string {
 	}
 	limit := fmt.Sprintf("limit rate over %d/second burst %d packets", rate, 2*rate)
 	// SPA packets: per IPv4 address and IPv6 /64 (an attacker has a whole
-	// /64, S-8). What passes when a set is full, an update with no room
-	// not matching, the gate bounds with its budgets of checks
-	// (Gate.Handle). No limit for all here, nor per /48: spoofed packets
-	// would fill one at no cost, and refuse the clients of the network, or
-	// of every network, with them.
+	// /64, S-8), and the carrier's SYNs in sets of their own: a UDP flood
+	// that fills rate4 or rate6 leaves the SYNs' limit as it was. What
+	// passes when a set is full (some 1100 sources a minute keep one full;
+	// a /48 holds 65536 /64s), an update with no room not matching, the
+	// gate bounds with its budgets of checks (Gate.Handle). No limit for
+	// all here, nor per /48: spoofed packets would fill one at no cost, and
+	// refuse the clients of the network, or of every network, with them.
 	lo := `iif "lo" accept`
 	// Local traffic skips prerouting; tests in a namespace need the same
 	// redirect on output.
@@ -229,6 +240,8 @@ table inet %[1]s {
 	set acme_in { type inet_service; flags timeout; }
 	set rate4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set rate6 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
+	set syn4 { type ipv4_addr; flags dynamic, timeout; timeout 1m; size 65536; }
+	set syn6 { type ipv6_addr; flags dynamic, timeout; timeout 1m; size 65536; }
 	set egress_uid { type uid; }
 	# The node's own and local networks (R4-38, LocalNets).
 	set local4 { type ipv4_addr; flags interval; elements = { %[13]s }; }
@@ -300,8 +313,8 @@ table inet %[1]s {
 		udp dport @spa_udp update @rate6 { ip6 saddr & ffff:ffff:ffff:ffff:: %[2]s } counter drop comment "spa-rate"
 		udp dport @spa_udp log group %[3]d drop
 
-		tcp dport @spa_tcp tcp flags syn update @rate4 { ip saddr %[2]s } counter drop comment "spa-syn-rate"
-		tcp dport @spa_tcp tcp flags syn update @rate6 { ip6 saddr & ffff:ffff:ffff:ffff:: %[2]s } counter drop comment "spa-syn-rate"
+		tcp dport @spa_tcp tcp flags syn update @syn4 { ip saddr %[2]s } counter drop comment "spa-syn-rate"
+		tcp dport @spa_tcp tcp flags syn update @syn6 { ip6 saddr & ffff:ffff:ffff:ffff:: %[2]s } counter drop comment "spa-syn-rate"
 		jump admit
 	}
 

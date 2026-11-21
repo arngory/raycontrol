@@ -23,10 +23,17 @@ var ErrNotReady = errors.New("perimeter: no snapshot yet")
 // in part; Tick applies the rest. It is worth saving all the same.
 var ErrPending = errors.New("perimeter: snapshot applied in part, the rest follows")
 
-// ErrFlood: the SPA ports get more packets from sources without a grant
-// than the gate checks (verifyShare); a source that holds a grant is still
-// checked.
+// ErrFlood: the SPA ports get more packets than the gate checks
+// (verifyShare): from sources without a grant, or over the TCP carrier. A
+// source that holds a grant is tried first against its own devices, apart
+// from both (knownShare).
 var ErrFlood = errors.New("perimeter: SPA packets over what the node checks: a flood?")
+
+// ErrAddrs: a device brings more new source addresses than DeviceAddrs a
+// minute, past the DeviceAddrs it holds: each would close one of its grants
+// (an nft transaction of its own), and a device that moves this often is
+// no phone changing networks but its packets forwarded, or a leaked invite.
+var ErrAddrs = errors.New("perimeter: the device's knocks come from new addresses too often")
 
 // DeviceAddrs bounds the source addresses one device holds grants from at
 // once: a grant from one more closes the one that ends first. Without it
@@ -37,21 +44,41 @@ var ErrFlood = errors.New("perimeter: SPA packets over what the node checks: a f
 // not shut the device out.
 const DeviceAddrs = 32
 
-// The budget of SPA checks: half a core, at what a packet costs that opens
-// for none of the devices (three epochs each), within bounds. Three such
-// budgets: packets from sources without a grant, from those with one, and
-// over the TCP carrier, which no one sends from an address not their own.
-// A flood past one costs no check, and is past that one only: the clients
-// that hold grants renew them, and the carrier is open to new ones.
+// The budgets of SPA checks, at what a packet costs that opens for none of
+// the devices (three epochs each, 1.5 µs a device on a 2.1 GHz Xeon).
+// Every check runs under the gate's lock, and the UDP ones on the one
+// goroutine that reads NFLOG: together they leave the core more than half
+// of its time (third review of the protocol review's change).
+//   - verifyShare each: packets from sources without a grant (UDP), and
+//     packets of the TCP carrier. A flood past one costs no check.
+//   - knownShare: a packet from a source with a grant (an IPv4 address, an
+//     IPv6 /64), tried against the devices that hold it, at most knownTry
+//     of them, and knownSourceRate a second of one source: one spoofing a
+//     client's source drains that source alone. A packet none of them
+//     opens goes on to the budget of its kind.
 const (
-	verifyShare     = 500 * time.Millisecond
+	verifyShare     = 150 * time.Millisecond
+	knownShare      = 100 * time.Millisecond
 	verifyPerDevice = 1500 * time.Nanosecond
-	verifyRateMin   = 200
-	verifyRateMax   = 200000
+	verifyRateMin   = 10
+	verifyRateMax   = 100000
+	knownTry        = 8
+	knownSourceRate = 8
 )
 
 func verifyRate(devices int) float64 {
 	return min(max(float64(verifyShare)/float64(max(devices, 1)*int(verifyPerDevice)), verifyRateMin), verifyRateMax)
+}
+
+// knownRate is the known sources' budget: knownShare at knownTry devices a
+// packet.
+var knownRate = float64(knownShare) / float64(knownTry*int(verifyPerDevice))
+
+// knownSource is a source with a grant: the devices that hold one from its
+// addresses, how many addresses each, and its own budget.
+type knownSource struct {
+	devices map[string]int
+	b       bucket
 }
 
 // rotation is a UDP port schedule: spa.Params reused with the service's key
@@ -104,14 +131,17 @@ type Gate struct {
 	// addrs are the addresses each device holds grants from, until when
 	// (DeviceAddrs).
 	addrs map[string]map[netip.Addr]time.Time
-	// known counts, by source (an IPv4 address, an IPv6 /64), the
-	// addresses of addrs in it: a source with a grant, whose packets are
-	// checked on knownBudget.
-	known                             map[netip.Prefix]int
+	// known are the sources (an IPv4 address, an IPv6 /64) with addresses
+	// of addrs in them: a packet from one is tried first against their
+	// devices (knownShare).
+	known                             map[netip.Prefix]*knownSource
 	budget, knownBudget, streamBudget bucket
 	budgetRate                        float64
-	udpPorts                          []uint16
-	tcpPorts                          []uint16
+	// moves are the devices' budgets of new addresses past DeviceAddrs
+	// (ErrAddrs).
+	moves    map[string]*moveBudget
+	udpPorts []uint16
+	tcpPorts []uint16
 	// ACME window as last applied.
 	acmePort  uint16
 	acmeUntil time.Time
@@ -140,7 +170,8 @@ type Gate struct {
 // NewGate returns a gate that drives fw.
 func NewGate(fw Firewall, log *slog.Logger) *Gate {
 	return &Gate{fw: fw, log: log, now: time.Now, holders: map[grantKey]map[string]time.Time{},
-		addrs: map[string]map[netip.Addr]time.Time{}, known: map[netip.Prefix]int{}, budgetRate: verifyRateMin}
+		addrs: map[string]map[netip.Addr]time.Time{}, known: map[netip.Prefix]*knownSource{}, moves: map[string]*moveBudget{},
+		budgetRate: verifyRateMin}
 }
 
 // SetupAtFirstSnapshot makes the gate take the table only with its first
@@ -606,14 +637,9 @@ func (g *Gate) adoptLocked(u *update) {
 	g.params, g.tcpCarrier = u.params, u.tcpCarrier
 	g.defaultTTL, g.maxTTL = u.defTTL, u.maxTTL
 	g.services, g.allowed, g.rotations = u.services, u.allowed, u.rotations
-	// A device gone, or left with nothing to open, holds no addresses: its
-	// grants close below, and its sources are no longer known.
-	for dev, addrs := range g.addrs {
-		if len(g.portsFor(g.allowed[dev])) > 0 {
-			continue
-		}
-		for a := range addrs {
-			g.dropAddrLocked(dev, a)
+	for dev := range g.moves {
+		if _, ok := g.allowed[dev]; !ok {
+			delete(g.moves, dev)
 		}
 	}
 	g.inLimitOff = u.connLimitOff
@@ -624,6 +650,7 @@ func (g *Gate) adoptLocked(u *update) {
 		g.egressFailures, g.egressRetryAt = 0, time.Time{}
 	}
 	now := g.now()
+	defer g.addrsLocked(now)
 	for key, devs := range g.holders {
 		revoked := false
 		for dev, until := range devs {
@@ -665,10 +692,16 @@ func longest(devs map[string]time.Time) time.Time {
 }
 
 // regrantLocked sets grants that lost a holder to their longest holder
-// left; those the firewall refuses stay to do.
+// left, one transaction an address and time; those the firewall refuses
+// stay to do.
 func (g *Gate) regrantLocked() error {
 	var errs []error
 	now := g.now()
+	type addrTTL struct {
+		addr netip.Addr
+		ttl  time.Duration
+	}
+	byAddr := map[addrTTL][]Port{}
 	for key := range g.regrant {
 		ttl := longest(g.holders[key]).Sub(now)
 		if ttl <= 0 {
@@ -678,11 +711,19 @@ func (g *Gate) regrantLocked() error {
 			g.revokeLater(key)
 			continue
 		}
-		if err := g.fw.Allow(key.addr, []Port{key.port}, ttl); err != nil {
-			errs = append(errs, fmt.Errorf("shortening a grant on %v: %w", key.port, err))
+		// Whole seconds up, as the firewall takes them: never 0, which
+		// would be no timeout at all.
+		at := addrTTL{key.addr, (ttl + time.Second - 1).Truncate(time.Second)}
+		byAddr[at] = append(byAddr[at], key.port)
+	}
+	for at, ports := range byAddr {
+		if err := g.fw.Allow(at.addr, ports, at.ttl); err != nil {
+			errs = append(errs, fmt.Errorf("shortening grants on %v: %w", ports, err))
 			continue
 		}
-		delete(g.regrant, key)
+		for _, p := range ports {
+			delete(g.regrant, grantKey{at.addr, p})
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -695,17 +736,24 @@ func (g *Gate) revokeLater(key grantKey) {
 	g.revoking[key] = true
 }
 
-// denyLocked closes the revoked grants; those the firewall refuses stay to
-// do, and the snapshot with them.
+// denyLocked closes the revoked grants, one transaction an address (a
+// removal waits for the kernel: 17 ms each, third review); those the
+// firewall refuses stay to do, and the snapshot with them.
 func (g *Gate) denyLocked() error {
 	var errs []error
+	byAddr := map[netip.Addr][]Port{}
 	for key := range g.revoking {
-		if err := g.fw.Deny(key.addr, []Port{key.port}); err != nil {
-			errs = append(errs, fmt.Errorf("closing a revoked grant on %v: %w", key.port, err))
+		byAddr[key.addr] = append(byAddr[key.addr], key.port)
+	}
+	for addr, ports := range byAddr {
+		if err := g.fw.Deny(addr, ports); err != nil {
+			errs = append(errs, fmt.Errorf("closing revoked grants on %v: %w", ports, err))
 			continue
 		}
-		delete(g.revoking, key)
-		g.log.Debug("revoked", "addr", key.addr, "port", key.port)
+		for _, p := range ports {
+			delete(g.revoking, grantKey{addr, p})
+		}
+		g.log.Debug("revoked", "addr", addr, "ports", ports)
 	}
 	return errors.Join(errs...)
 }
@@ -839,22 +887,37 @@ func (g *Gate) handle(src, dst netip.Addr, pkt []byte, stream bool) (spa.Grant, 
 		return spa.Grant{}, err
 	}
 	now := g.now()
-	budget := &g.budget
-	switch {
-	case stream:
-		budget = &g.streamBudget
-	case g.known[knockSource(src)] > 0:
-		budget = &g.knownBudget
+	grant, err := spa.Grant{}, spa.ErrAuth
+	// A source with a grant: its own devices first, apart from the flood
+	// of the others, UDP and TCP alike.
+	if ks := g.known[knockSource(src)]; ks != nil && ks.b.take(knownSourceRate, now) && g.knownBudget.take(knownRate, now) {
+		ids := make([]string, 0, min(len(ks.devices), knownTry))
+		for dev := range ks.devices {
+			if len(ids) == knownTry {
+				break
+			}
+			ids = append(ids, dev)
+		}
+		grant, err = g.verifier.VerifyDevices(pkt, ids)
 	}
-	if !budget.take(g.budgetRate, now) {
-		return spa.Grant{}, ErrFlood
+	if errors.Is(err, spa.ErrAuth) {
+		budget := &g.budget
+		if stream {
+			budget = &g.streamBudget
+		}
+		if !budget.take(g.budgetRate, now) {
+			return spa.Grant{}, ErrFlood
+		}
+		grant, err = g.verifier.Verify(pkt)
 	}
-	grant, err := g.verifier.Verify(pkt)
 	if err != nil {
 		return grant, err
 	}
 	if grant.Dst.IsValid() && !spa.OwnDst(grant.Dst, dst, g.own) {
 		return grant, spa.ErrDst
+	}
+	if !g.mayMoveLocked(grant.DeviceID, src.Unmap(), now) {
+		return grant, ErrAddrs
 	}
 	ports := g.portsFor(grant.Scope)
 	until := now.Add(grant.TTL)
@@ -890,7 +953,7 @@ func (g *Gate) handle(src, dst netip.Addr, pkt []byte, stream bool) (spa.Grant, 
 	return grant, nil
 }
 
-// knockSource is what the budget knows a source by: an IPv4 address, an
+// knockSource is what the budgets know a source by: an IPv4 address, an
 // IPv6 /64.
 func knockSource(src netip.Addr) netip.Prefix {
 	src = src.Unmap()
@@ -912,7 +975,7 @@ func (b *bucket) take(rate float64, now time.Time) bool {
 	if b.last.IsZero() {
 		b.tokens = rate
 	} else {
-		b.tokens = min(rate, b.tokens+now.Sub(b.last).Seconds()*rate)
+		b.tokens = min(rate, b.tokens+max(now.Sub(b.last).Seconds(), 0)*rate)
 	}
 	b.last = now
 	if b.tokens < 1 {
@@ -922,9 +985,48 @@ func (b *bucket) take(rate float64, now time.Time) bool {
 	return true
 }
 
+// moveBudget is a device's budget of new addresses past DeviceAddrs:
+// DeviceAddrs a minute, as many at once.
+type moveBudget struct {
+	tokens float64
+	last   time.Time
+}
+
+// mayMoveLocked reports whether device may hold a grant from src: one it
+// holds already, a place left of DeviceAddrs, or a move left in its budget
+// (ErrAddrs), which it takes.
+func (g *Gate) mayMoveLocked(device string, src netip.Addr, now time.Time) bool {
+	addrs := g.addrs[device]
+	if _, ok := addrs[src]; ok {
+		return true
+	}
+	live := 0
+	for _, u := range addrs {
+		if now.Before(u) {
+			live++
+		}
+	}
+	if live < DeviceAddrs {
+		return true
+	}
+	m := g.moves[device]
+	if m == nil {
+		m = &moveBudget{tokens: DeviceAddrs, last: now}
+		g.moves[device] = m
+	}
+	m.tokens = min(DeviceAddrs, m.tokens+max(now.Sub(m.last).Minutes(), 0)*DeviceAddrs)
+	m.last = now
+	if m.tokens < 1 {
+		return false
+	}
+	m.tokens--
+	return true
+}
+
 // holdAddrLocked counts src among the addresses device holds grants from,
-// until until; past DeviceAddrs the one whose grants end first closes them
-// (those another device holds stay, as long as it holds them).
+// until its grants from there end; past DeviceAddrs the one whose grants
+// end first closes them (those another device holds stay, as long as it
+// holds them).
 func (g *Gate) holdAddrLocked(device string, src netip.Addr, now, until time.Time) {
 	addrs := g.addrs[device]
 	if addrs == nil {
@@ -932,11 +1034,9 @@ func (g *Gate) holdAddrLocked(device string, src netip.Addr, now, until time.Tim
 		g.addrs[device] = addrs
 	}
 	if _, ok := addrs[src]; !ok {
-		g.known[knockSource(src)]++
+		g.knowLocked(device, src)
 	}
-	if until.After(addrs[src]) {
-		addrs[src] = until
-	}
+	addrs[src] = g.heldUntilLocked(device, src, until)
 	if len(addrs) <= DeviceAddrs {
 		return
 	}
@@ -959,6 +1059,46 @@ func (g *Gate) holdAddrLocked(device string, src netip.Addr, now, until time.Tim
 	_ = g.denyLocked()
 }
 
+// heldUntilLocked is when device's grants from addr end: the latest of
+// its holds of addr's ports (a shorter knock cuts its own grant short,
+// handle), at least floor.
+func (g *Gate) heldUntilLocked(device string, addr netip.Addr, floor time.Time) time.Time {
+	end := floor
+	for _, p := range g.portsFor(g.allowed[device]) {
+		if u, ok := g.holders[grantKey{addr, p}][device]; ok && u.After(end) {
+			end = u
+		}
+	}
+	return end
+}
+
+// addrsLocked brings addrs to the holders after a snapshot: an address of
+// a device that holds none of its ports any more (revoked, its scope
+// narrowed, expired) is no longer its, nor its source known for it.
+func (g *Gate) addrsLocked(now time.Time) {
+	for dev, addrs := range g.addrs {
+		for a := range addrs {
+			end := g.heldUntilLocked(dev, a, time.Time{})
+			if !now.Before(end) {
+				g.dropAddrLocked(dev, a)
+				continue
+			}
+			addrs[a] = end
+		}
+	}
+}
+
+// knowLocked counts addr of device in its source's known devices.
+func (g *Gate) knowLocked(device string, addr netip.Addr) {
+	src := knockSource(addr)
+	ks := g.known[src]
+	if ks == nil {
+		ks = &knownSource{devices: map[string]int{}}
+		g.known[src] = ks
+	}
+	ks.devices[device]++
+}
+
 // dropAddrLocked takes addr off device's addresses, and its source off the
 // known when no address of a device is in it.
 func (g *Gate) dropAddrLocked(device string, addr netip.Addr) {
@@ -971,7 +1111,14 @@ func (g *Gate) dropAddrLocked(device string, addr netip.Addr) {
 		delete(g.addrs, device)
 	}
 	src := knockSource(addr)
-	if g.known[src]--; g.known[src] <= 0 {
+	ks := g.known[src]
+	if ks == nil {
+		return
+	}
+	if ks.devices[device]--; ks.devices[device] <= 0 {
+		delete(ks.devices, device)
+	}
+	if len(ks.devices) == 0 {
 		delete(g.known, src)
 	}
 }

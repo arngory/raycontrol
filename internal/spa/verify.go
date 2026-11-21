@@ -57,6 +57,7 @@ type Verifier struct {
 
 	mu      sync.Mutex
 	devices []Device
+	index   map[string]int             // device ID -> its place in devices
 	keys    map[uint64][][KeySize]byte // epoch -> key per device, same order as devices
 	// seen holds each nonce until a packet with it can no longer pass the
 	// skew check: until a minute has passed on a monotonic clock (since)
@@ -74,6 +75,11 @@ type Verifier struct {
 	expiry    nonceHeap
 	perDevice map[string]int
 	since     func() time.Duration
+	// forgotten is the latest end of a nonce forgotten: a packet whose own
+	// would be no later could be its copy, which a wall clock stepped back
+	// past it lets through the skew check again. Refused (ErrReplay):
+	// with a clock that does not step back, none ever is.
+	forgotten time.Time
 }
 
 // knockWindow is how long, on the monotonic clock, a knock counts against
@@ -136,11 +142,29 @@ func (v *Verifier) SetDevices(devices []Device) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.devices = slices.Clone(devices)
+	v.index = make(map[string]int, len(devices))
+	for i, d := range v.devices {
+		v.index[d.ID] = i
+	}
 	clear(v.keys)
 }
 
 // Verify authenticates pkt and returns what to open for its sender.
 func (v *Verifier) Verify(pkt []byte) (Grant, error) {
+	return v.verify(pkt, nil)
+}
+
+// VerifyDevices is Verify that tries only the devices named, those not
+// enrolled skipped: ErrAuth when the packet is none of theirs. Its cost is
+// theirs, not every device's.
+func (v *Verifier) VerifyDevices(pkt []byte, ids []string) (Grant, error) {
+	if len(ids) == 0 {
+		return Grant{}, ErrAuth
+	}
+	return v.verify(pkt, ids)
+}
+
+func (v *Verifier) verify(pkt []byte, ids []string) (Grant, error) {
 	if len(pkt) < v.params.LenMin || len(pkt) > v.params.LenMax {
 		return Grant{}, ErrLength
 	}
@@ -155,17 +179,42 @@ func (v *Verifier) Verify(pkt []byte) (Grant, error) {
 		return Grant{}, ErrReplay
 	}
 
+	var only []int
+	for _, id := range ids {
+		if i, ok := v.index[id]; ok {
+			only = append(only, i)
+		}
+	}
+	if ids != nil && only == nil {
+		return Grant{}, ErrAuth
+	}
 	cur := v.params.Epoch(now)
 	for _, e := range []uint64{cur, cur - 1, cur + 1} {
-		for i, key := range v.epochKeys(e) {
-			req, err := open(v.params, key, pkt)
+		keys := v.epochKeys(e)
+		// try opens pkt with device i's key; done once one does.
+		try := func(i int) (g Grant, done bool, err error) {
+			req, err := open(v.params, keys[i], pkt)
 			if errors.Is(err, ErrAuth) {
-				continue
+				return Grant{}, false, nil
 			}
 			if err != nil {
-				return Grant{}, err
+				return Grant{}, true, err
 			}
-			return v.accept(v.devices[i], e, req, nonce, now)
+			g, err = v.accept(v.devices[i], e, req, nonce, now)
+			return g, true, err
+		}
+		if only != nil {
+			for _, i := range only {
+				if g, done, err := try(i); done {
+					return g, err
+				}
+			}
+			continue
+		}
+		for i := range keys {
+			if g, done, err := try(i); done {
+				return g, err
+			}
 		}
 	}
 	return Grant{}, ErrAuth
@@ -177,6 +226,9 @@ func (v *Verifier) accept(d Device, epoch uint64, req Request, nonce [NonceSize]
 	}
 	if skew := now.Sub(req.Time); skew > MaxSkew || skew < -MaxSkew {
 		return Grant{}, ErrStale
+	}
+	if !req.Time.Round(0).Add(MaxSkew + time.Second).After(v.forgotten) {
+		return Grant{}, ErrReplay
 	}
 	if err := v.remember(nonce, d.ID, req.Time, now); err != nil {
 		// Over its quota: whose, for the operator; nothing to open.
@@ -294,6 +346,7 @@ func (v *Verifier) forget(now time.Time) {
 		case !v.seen[k.nonce].Equal(k.until):
 		case k.until.Before(wall):
 			delete(v.seen, k.nonce)
+			v.forgotten = maxTime(v.forgotten, k.until)
 		default:
 			heap.Push(&v.expiry, nonceExpiry{until: k.until, nonce: k.nonce})
 		}
@@ -307,8 +360,16 @@ func (v *Verifier) forget(now time.Time) {
 		e := heap.Pop(&v.expiry).(nonceExpiry)
 		if v.seen[e.nonce].Equal(e.until) {
 			delete(v.seen, e.nonce)
+			v.forgotten = maxTime(v.forgotten, e.until)
 		}
 	}
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 // epochKeys returns the per-device keys of an epoch, deriving them once.

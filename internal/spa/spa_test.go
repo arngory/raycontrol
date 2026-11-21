@@ -525,3 +525,61 @@ func TestReplayCacheClockForwardBack(t *testing.T) {
 		t.Fatalf("both passed: err = %v", err)
 	}
 }
+
+// The wall clock steps back after a nonce is forgotten (third review of
+// the protocol review's change): its packet is within the skew again, and
+// refused as a replay all the same, as is any as old.
+func TestReplayAfterForgottenStepBack(t *testing.T) {
+	truth := time.Unix(1767225600, 0)
+	clock, mono := truth.Add(2*time.Minute), time.Duration(0) // the node's clock fast
+	v := NewVerifier(testParams(), 10*time.Minute, time.Hour, 100000)
+	v.now = func() time.Time { return clock }
+	v.since = func() time.Duration { return mono }
+	v.SetDevices([]Device{device("a", 0x11, 1), device("b", 0x22, 1)})
+	first := seal(t, 0x11, Request{Time: clock}) // a client as fast
+	if _, err := v.Verify(first); err != nil {
+		t.Fatal(err)
+	}
+	// Both clocks past it: another knock forgets it.
+	clock, mono = clock.Add(62*time.Second), 62*time.Second
+	if _, err := v.Verify(seal(t, 0x22, Request{Time: clock})); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Precheck(first); err != nil {
+		t.Fatalf("not forgotten: %v", err)
+	}
+	// NTP steps the clock back to the truth; the packet's time is within
+	// the skew again.
+	clock, mono = truth.Add(2*time.Minute+10*time.Second), 70*time.Second
+	if _, err := v.Verify(first); !errors.Is(err, ErrReplay) {
+		t.Fatalf("its packet after the step back: err = %v", err)
+	}
+	// A new packet of a time after every one forgotten passes.
+	if _, err := v.Verify(seal(t, 0x22, Request{Time: clock.Add(20 * time.Second)})); err != nil {
+		t.Fatalf("a new packet: %v", err)
+	}
+}
+
+// VerifyDevices tries only the devices named: another's packet is no
+// one's, a name not enrolled is skipped, and a packet of one named passes.
+func TestVerifyDevices(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	v := newTestVerifier(now, device("a", 0x11, 1), device("b", 0x22, 1))
+	pa := seal(t, 0x11, Request{Time: now})
+	if _, err := v.VerifyDevices(pa, []string{"b"}); !errors.Is(err, ErrAuth) {
+		t.Fatalf("a's packet, b tried: %v", err)
+	}
+	if _, err := v.VerifyDevices(pa, []string{"gone"}); !errors.Is(err, ErrAuth) {
+		t.Fatalf("a's packet, no one enrolled tried: %v", err)
+	}
+	if _, err := v.VerifyDevices(pa, nil); !errors.Is(err, ErrAuth) {
+		t.Fatalf("a's packet, no one tried: %v", err)
+	}
+	g, err := v.VerifyDevices(pa, []string{"gone", "a"})
+	if err != nil || g.DeviceID != "a" {
+		t.Fatalf("a's packet, a tried: %+v %v", g, err)
+	}
+	if _, err := v.VerifyDevices(pa, []string{"a"}); !errors.Is(err, ErrReplay) {
+		t.Fatalf("again: %v", err)
+	}
+}
