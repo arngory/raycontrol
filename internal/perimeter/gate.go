@@ -23,6 +23,17 @@ var ErrNotReady = errors.New("perimeter: no snapshot yet")
 // in part; Tick applies the rest. It is worth saving all the same.
 var ErrPending = errors.New("perimeter: snapshot applied in part, the rest follows")
 
+// ErrAddrs: the device holds grants from DeviceAddrs addresses already; a
+// knock from another waits until one of them expires.
+var ErrAddrs = errors.New("perimeter: the device holds grants from too many addresses")
+
+// DeviceAddrs bounds the source addresses one device holds grants from at
+// once. Without it one device, or a leaked invite, knocking from the
+// addresses of an IPv6 /64 filled the allow sets of every device's
+// grants (protocol review 2026-11); a phone that moves between networks
+// within a grant's TTL has a few.
+const DeviceAddrs = 32
+
 // rotation is a UDP port schedule: spa.Params reused with the service's key
 // and range (spa-v2.md §11).
 type rotation struct {
@@ -69,7 +80,10 @@ type Gate struct {
 	forward    []Port            // every service port: what a relay forwards
 	// holders tracks which devices opened an address and port and until
 	// when, so that a revocation closes only what nobody else still holds.
-	holders  map[grantKey]map[string]time.Time
+	holders map[grantKey]map[string]time.Time
+	// addrs are the addresses each device holds grants from, until when
+	// (DeviceAddrs).
+	addrs    map[string]map[netip.Addr]time.Time
 	udpPorts []uint16
 	tcpPorts []uint16
 	// ACME window as last applied.
@@ -99,7 +113,7 @@ type Gate struct {
 
 // NewGate returns a gate that drives fw.
 func NewGate(fw Firewall, log *slog.Logger) *Gate {
-	return &Gate{fw: fw, log: log, now: time.Now, holders: map[grantKey]map[string]time.Time{}}
+	return &Gate{fw: fw, log: log, now: time.Now, holders: map[grantKey]map[string]time.Time{}, addrs: map[string]map[netip.Addr]time.Time{}}
 }
 
 // SetupAtFirstSnapshot makes the gate take the table only with its first
@@ -561,6 +575,11 @@ func (g *Gate) adoptLocked(u *update) {
 		g.verifier.SetClock(g.now)
 	}
 	g.verifier.SetDevices(u.devices)
+	for dev := range g.addrs {
+		if !slices.ContainsFunc(u.devices, func(d spa.Device) bool { return d.ID == dev }) {
+			delete(g.addrs, dev)
+		}
+	}
 	g.params, g.tcpCarrier = u.params, u.tcpCarrier
 	g.defaultTTL, g.maxTTL = u.defTTL, u.maxTTL
 	g.services, g.allowed, g.rotations = u.services, u.allowed, u.rotations
@@ -782,6 +801,9 @@ func (g *Gate) Handle(src, dst netip.Addr, pkt []byte) (spa.Grant, error) {
 	ports := g.portsFor(grant.Scope)
 	now := g.now()
 	until := now.Add(grant.TTL)
+	if err := g.holdAddrLocked(grant.DeviceID, src.Unmap(), now, until); err != nil {
+		return grant, err
+	}
 	// A grant lasts as long as its longest holder: a shorter knock from
 	// the same address (CGNAT) does not cut another device's grant short.
 	byTTL := map[time.Duration][]Port{}
@@ -811,6 +833,30 @@ func (g *Gate) Handle(src, dst netip.Addr, pkt []byte) (spa.Grant, error) {
 		}
 	}
 	return grant, nil
+}
+
+// holdAddrLocked counts src among the addresses device holds grants from,
+// until until, or refuses it: DeviceAddrs others are held, none expired.
+func (g *Gate) holdAddrLocked(device string, src netip.Addr, now, until time.Time) error {
+	addrs := g.addrs[device]
+	if addrs == nil {
+		addrs = map[netip.Addr]time.Time{}
+		g.addrs[device] = addrs
+	}
+	if _, ok := addrs[src]; !ok && len(addrs) >= DeviceAddrs {
+		for a, u := range addrs {
+			if !now.Before(u) {
+				delete(addrs, a)
+			}
+		}
+		if len(addrs) >= DeviceAddrs {
+			return ErrAddrs
+		}
+	}
+	if until.After(addrs[src]) {
+		addrs[src] = until
+	}
+	return nil
 }
 
 // Tick restores the table if something removed it, moves the SPA ports to
@@ -864,6 +910,16 @@ func (g *Gate) Tick() ([]uint16, error) {
 		}
 		if len(devs) == 0 {
 			delete(g.holders, key)
+		}
+	}
+	for dev, addrs := range g.addrs {
+		for a, until := range addrs {
+			if !now.Before(until) {
+				delete(addrs, a)
+			}
+		}
+		if len(addrs) == 0 {
+			delete(g.addrs, dev)
 		}
 	}
 	if err := g.slotsLocked(); err != nil {

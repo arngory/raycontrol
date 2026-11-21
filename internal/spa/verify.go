@@ -31,7 +31,18 @@ var (
 	ErrReplay = errors.New("spa: nonce already used")
 	ErrScope  = errors.New("spa: nothing in the requested scope is allowed")
 	ErrBusy   = errors.New("spa: replay cache full")
+	// ErrQuota: the device sent more knocks than DeviceNonces in the
+	// window; the others' still pass.
+	ErrQuota = errors.New("spa: the device's knocks are over its quota")
 )
+
+// DeviceNonces bounds the nonces one device has in the replay cache: the
+// knocks it sent in the last 2*MaxSkew, which pass or not (a scope or a
+// destination refused counts too). Without it one device, or a leaked
+// invite, filled the cache, and the node refused every knock until it
+// emptied (protocol review 2026-11). 256 a minute is far above a client's
+// knocks; the cache holds the quotas of hundreds of devices at once.
+const DeviceNonces = 256
 
 // Verifier checks packets against the enrolled devices. It is safe for
 // concurrent use. Rate limiting per source address happens before it, in the
@@ -47,6 +58,19 @@ type Verifier struct {
 	devices []Device
 	keys    map[uint64][][KeySize]byte // epoch -> key per device, same order as devices
 	seen    map[[NonceSize]byte]time.Time
+	// The nonces of seen in the order they came, which with one expiry for
+	// all is the order they expire in: forgotten from the front, without
+	// a walk over the cache.
+	order []seenNonce
+	head  int
+	// perDevice counts each device's nonces in seen.
+	perDevice map[string]int
+}
+
+type seenNonce struct {
+	nonce  [NonceSize]byte
+	until  time.Time
+	device string
 }
 
 // NewVerifier returns a verifier with the given TTL policy. maxSeen bounds the
@@ -61,6 +85,7 @@ func NewVerifier(p Params, defaultTTL, maxTTL time.Duration, maxSeen int) *Verif
 		now:        time.Now,
 		keys:       map[uint64][][KeySize]byte{},
 		seen:       map[[NonceSize]byte]time.Time{},
+		perDevice:  map[string]int{},
 	}
 }
 
@@ -117,8 +142,9 @@ func (v *Verifier) accept(d Device, epoch uint64, req Request, nonce [NonceSize]
 	if skew := now.Sub(req.Time); skew > MaxSkew || skew < -MaxSkew {
 		return Grant{}, ErrStale
 	}
-	if err := v.remember(nonce, now); err != nil {
-		return Grant{}, err
+	if err := v.remember(nonce, d.ID, now); err != nil {
+		// Over its quota: whose, for the operator; nothing to open.
+		return Grant{DeviceID: d.ID}, err
 	}
 
 	scope := d.Allowed
@@ -176,20 +202,45 @@ func OwnDst(dst, wire netip.Addr, own []netip.Addr) bool {
 }
 
 // remember stores the nonce for as long as a packet carrying it could still
-// pass the skew check.
-func (v *Verifier) remember(nonce [NonceSize]byte, now time.Time) error {
+// pass the skew check, under the device's quota.
+func (v *Verifier) remember(nonce [NonceSize]byte, device string, now time.Time) error {
+	v.forget(now)
+	if v.perDevice[device] >= DeviceNonces {
+		return ErrQuota
+	}
 	if len(v.seen) >= v.maxSeen {
-		for n, exp := range v.seen {
-			if !now.Before(exp) {
-				delete(v.seen, n)
-			}
+		return ErrBusy
+	}
+	until := now.Add(2 * MaxSkew)
+	v.seen[nonce] = until
+	v.order = append(v.order, seenNonce{nonce: nonce, until: until, device: device})
+	v.perDevice[device]++
+	return nil
+}
+
+// forget drops the nonces that can no longer pass the skew check: those
+// expired, and those from a clock that has since stepped back by more than
+// 2*MaxSkew (taken more than that ahead of now, their packets' time is past
+// the skew). Without the second, entries from before such a step held the
+// ones after them, and the devices' quotas, until the clock caught up. A
+// smaller step keeps some a little longer.
+func (v *Verifier) forget(now time.Time) {
+	ahead := now.Add(4 * MaxSkew)
+	for v.head < len(v.order) && (!now.Before(v.order[v.head].until) || v.order[v.head].until.After(ahead)) {
+		n := v.order[v.head]
+		v.order[v.head] = seenNonce{}
+		v.head++
+		if v.seen[n.nonce].Equal(n.until) {
+			delete(v.seen, n.nonce)
 		}
-		if len(v.seen) >= v.maxSeen {
-			return ErrBusy
+		if v.perDevice[n.device]--; v.perDevice[n.device] <= 0 {
+			delete(v.perDevice, n.device)
 		}
 	}
-	v.seen[nonce] = now.Add(2 * MaxSkew)
-	return nil
+	if v.head > 0 && v.head*2 >= len(v.order) {
+		v.order = append(v.order[:0], v.order[v.head:]...)
+		v.head = 0
+	}
 }
 
 // epochKeys returns the per-device keys of an epoch, deriving them once.

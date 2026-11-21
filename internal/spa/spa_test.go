@@ -372,3 +372,96 @@ func TestActivePorts(t *testing.T) {
 		t.Fatalf("ports %v miss a neighbour slot", ports)
 	}
 }
+
+// One device's knocks fill no more than its quota of the replay cache: past
+// it that device is refused, others pass, and its quota frees as its nonces
+// expire. Knocks refused for their scope count as well.
+func TestDeviceQuota(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	clock := now
+	v := NewVerifier(testParams(), 10*time.Minute, time.Hour, 100000)
+	v.now = func() time.Time { return clock }
+	v.SetDevices([]Device{device("a", 0x11, 1), device("b", 0x22, 1)})
+	for i := range DeviceNonces {
+		// Half of them for a service the device may not open.
+		req := Request{Time: clock}
+		if i%2 == 1 {
+			req.Scope = []uint16{9}
+		}
+		if _, err := v.Verify(seal(t, 0x11, req)); err != nil && !errors.Is(err, ErrScope) {
+			t.Fatalf("knock %d: %v", i, err)
+		}
+	}
+	if g, err := v.Verify(seal(t, 0x11, Request{Time: clock})); !errors.Is(err, ErrQuota) || g.DeviceID != "a" || g.Scope != nil {
+		t.Fatalf("over the quota: %+v, err = %v", g, err)
+	}
+	if _, err := v.Verify(seal(t, 0x22, Request{Time: clock})); err != nil {
+		t.Fatalf("another device: %v", err)
+	}
+	clock = now.Add(2 * MaxSkew)
+	if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
+		t.Fatalf("after its nonces expired: %v", err)
+	}
+	// b's knock came at the same time: gone with a's.
+	if _, ok := v.perDevice["b"]; len(v.seen) != 1 || v.perDevice["a"] != 1 || ok {
+		t.Fatalf("cache: %d nonces, a %d, b %d", len(v.seen), v.perDevice["a"], v.perDevice["b"])
+	}
+}
+
+// The cache forgets expired nonces in the order they came, and a replay is
+// refused while its nonce is in it.
+func TestReplayCacheOrder(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	clock := now
+	v := NewVerifier(testParams(), 10*time.Minute, time.Hour, 3)
+	v.now = func() time.Time { return clock }
+	v.SetDevices([]Device{device("a", 0x11, 1)})
+	first := seal(t, 0x11, Request{Time: clock})
+	if _, err := v.Verify(first); err != nil {
+		t.Fatal(err)
+	}
+	clock = now.Add(MaxSkew)
+	for range 2 {
+		if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := v.Verify(first); !errors.Is(err, ErrReplay) {
+		t.Fatalf("replay: err = %v", err)
+	}
+	if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); !errors.Is(err, ErrBusy) {
+		t.Fatalf("cache full: err = %v", err)
+	}
+	// The first nonce expires: one place frees, the others stay.
+	clock = now.Add(2 * MaxSkew)
+	if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
+		t.Fatalf("after the first expired: %v", err)
+	}
+	if len(v.seen) != 3 {
+		t.Fatalf("cache: %d nonces", len(v.seen))
+	}
+}
+
+// A clock that steps back an hour: the nonces taken before do not hold the
+// devices' quotas, nor the ones after them, until it catches up.
+func TestReplayCacheClockBack(t *testing.T) {
+	now := time.Unix(1767225600, 0)
+	clock := now
+	v := NewVerifier(testParams(), 10*time.Minute, time.Hour, 100000)
+	v.now = func() time.Time { return clock }
+	v.SetDevices([]Device{device("a", 0x11, 1)})
+	for range DeviceNonces {
+		if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clock = now.Add(-time.Hour)
+	for i := range 3 * DeviceNonces {
+		if i%DeviceNonces == 0 {
+			clock = clock.Add(2 * MaxSkew) // a minute later, a quota again
+		}
+		if _, err := v.Verify(seal(t, 0x11, Request{Time: clock})); err != nil {
+			t.Fatalf("knock %d after the step back: %v", i, err)
+		}
+	}
+}
