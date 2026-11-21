@@ -589,6 +589,7 @@ func addFrontStats(m *Metrics, f dnsstats.Front, owner map[string]string) {
 		{"raycontrol_dns_front_apex_total", "Queries the front answered at a zone's apex (SOA, NS).", f.Apex, nil},
 		{"raycontrol_dns_front_probes_total", "dnsprobe-v1 probes, by result.", f.Probes, []string{"result", "answered"}},
 		{"raycontrol_dns_front_probes_total", "dnsprobe-v1 probes, by result.", f.ProbesOverRate, []string{"result", "over_rate"}},
+		{"raycontrol_dns_front_probes_total", "dnsprobe-v1 probes, by result.", f.ProbesOverLabel, []string{"result", "over_label"}},
 		{"raycontrol_dns_front_forwarded_total", "Queries passed to a tunnel's backend.", f.Forwarded, nil},
 		{"raycontrol_dns_front_backend_away_total", "Queries not passed on: the backend away or its queue full.", f.BackendAway, nil},
 		{"raycontrol_dns_front_answers_total", "Backends' answers sent on, truncated ones included.", f.Answers, nil},
